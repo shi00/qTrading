@@ -2161,6 +2161,78 @@ def check_canonical_routing() -> list[str]:
     return errors
 
 
+# 含『路由（必读 / 条件触发 / 完成判定）』三段式或『完成判定』章节的 canonical 反例断言（不匹配即报错）：
+# 主题正本须承载『完成判定』，否则 AI 交付『做没做完』只能自行推断，交付质量随任务类型随机波动（F-03）。
+# 与 check_canonical_routing()（workflow 条件路由）同一思路，实现成本低。
+def _completion_section(content: str) -> str | None:
+    """「完成判定」章节的正文块：截取首个含「完成判定」标题之后、下一个同级或更高级标题之前的行。"""
+    lines = content.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"^(#{1,6})\s+(.+)$", line)
+        if m and "完成判定" in m.group(2):
+            level = len(m.group(1))
+            block: list[str] = []
+            for j in range(i + 1, len(lines)):
+                mm = re.match(r"^(#{1,6})\s+", lines[j])
+                if mm and len(mm.group(1)) <= level:
+                    break
+                block.append(lines[j])
+            return "\n".join(block)
+    return None
+
+
+def check_canonical_completion_criteria() -> list[str]:
+    """检查项：canonical 入口文档必须承载「完成判定」判据（F-03）。
+
+    canonical-topics.yml 登记为任务入口（canonical）的文档须承载「完成判定」可打勾判据
+    与最小验证命令，否则 AI 完成质量随任务类型随机波动（CLAUDE.md §1.5/§1.9 的落地依赖
+    入口文档给出判据）。除断言 heading 含「完成判定」外，还校验该章节正文含「最小验证命令」
+    字样与至少一条 `- ` 判据，防只挂空标题不写判据（内容门禁）。
+    遍历每个 distinct canonical 文档，跳过 fallback 元条目（指向 CLAUDE.md §3/§4 兜底，
+    非具体任务正本，DOC-04 方向 2 / F-11 豁免）。
+    """
+    errors: list[str] = []
+    topics = _load_canonical_topics()
+    if topics is None:
+        errors.append("canonical-topics.yml 无法解析或无 topics 列表，跳过完成判定校验")
+        return errors
+
+    seen_canonical: set[str] = set()
+    for idx, topic in enumerate(topics, 1):
+        if topic.get("id") in _DECISION_TREE_META_IDS:
+            continue  # fallback 元条目（CLAUDE.md），非具体任务正本，豁免
+        canonical = topic.get("canonical")
+        if not isinstance(canonical, str):
+            continue
+        norm = canonical.removeprefix("./")
+        if norm in seen_canonical:
+            continue  # 共享 canonical 只校验一次
+        seen_canonical.add(norm)
+        canonical_path = ROOT / norm
+        if not canonical_path.exists():
+            # 路径有效性已由 check_canonical_topics_consistency() 承担，此处不重复报
+            continue
+        content = canonical_path.read_text(encoding="utf-8")
+        block = _completion_section(content)
+        if block is None:
+            errors.append(
+                f"topics[{idx}] (id={topic.get('id')}) canonical '{norm}' 缺「完成判定」章节"
+                f"（F-03：canonical 入口须承载可打勾完成判定 + 最小验证命令）"
+            )
+            continue
+        if "最小验证命令" not in block:
+            errors.append(
+                f"topics[{idx}] (id={topic.get('id')}) canonical '{norm}' 的「完成判定」章节"
+                f"缺「最小验证命令」段（F-03：对接 CONTRIBUTING 变更类型 → 最小验证子集）"
+            )
+        if not any(re.match(r"^\s*-\s+", ln) for ln in block.splitlines()):
+            errors.append(
+                f"topics[{idx}] (id={topic.get('id')}) canonical '{norm}' 的「完成判定」章节"
+                f"无可打勾判据列表（至少一条 `- ` 项）"
+            )
+    return errors
+
+
 # --- DOC-07/DOC-11: 文档索引全覆盖（CONTRIBUTING.md 或 docs/README.md 目录级引用覆盖 docs/**/*.md）---
 # 职责单一：断言 `docs/**/*.md` 中每个文件都能被索引源引用，目录级引用视为覆盖其下全部文件。
 # 固定双索引源（CONTRIBUTING_PATH / DOCS_README_PATH），不依赖手动维护的清单。
@@ -2902,6 +2974,7 @@ def main() -> int:
     all_errors.extend(check_ruleset_changelog_version())
     all_errors.extend(check_decision_tree_mapping())
     all_errors.extend(check_canonical_routing())
+    all_errors.extend(check_canonical_completion_criteria())
     all_errors.extend(check_docs_index_completeness())
     all_errors.extend(check_reviews_index_completeness())
     all_errors.extend(check_adr_index_completeness())
@@ -2943,7 +3016,7 @@ def main() -> int:
         "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
         "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
         "Flet 入口完整性 / AGENTS.md 生成区块一致性 / 规则集元数据一致性 / "
-        "决策树映射一致性 / canonical 路由一致性 / 文档索引全覆盖 / 检视方法论文档登记 / "
+        "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / 检视方法论文档登记 / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
         "规则集变更日志版本一致 / ADR 索引完整性 / 策略描述动态一致性 / "
         "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫 / "

@@ -51,3 +51,12 @@ AStockScreener 项目文档在 Phase 2 渐进式披露拆分前存在以下漂�
 - **单文件巨结构（保持 Phase 2 前状态）**：拒绝。CLAUDE.md 行数膨胀导致 AI 上下文成本不可控；CONTRIBUTING.md 1358+ 行违反渐进式披露；docs/ 被 gitignore 排除导致正式文档无处安放。
 - **三层架构（取消 man/）**：拒绝。man/ 下其他专题（database-account-separation / table-partitioning-strategy）仍在使用，强行合并到 docs/ 会破坏历史引用；改为保留 man/ 但 flet-best-practices.md 退化为 stub 指向 docs/flet/。
 - **两层架构（CLAUDE.md + docs/，取消 CONTRIBUTING.md 入口索引）**：拒绝。CONTRIBUTING.md 是 GitHub 默认入口，新贡献者第一站；取消会破坏发现性。
+
+---
+
+## 完成判定（canonical 入口）
+
+- 文档分层遵循主题正本制，同一主题只保留一个 canonical 入口，未新建第二正本
+- 新增治理文档/规则已同步 canonical-topics.yml 与 CLAUDE.md §1.8 决策树（门禁强制双向一致）
+
+_最小验证命令：_ `python scripts/check_docs_consistency.py` + 对应文档契约测试（`tests/unit/test_docs_consistency.py`）。

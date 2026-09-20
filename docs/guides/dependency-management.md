@@ -16,3 +16,12 @@
 - `flet_charts` 是 V1 新增的独立模块，遗漏会导致打包产物 `import flet_charts` 报 ImportError
 - `flet_core` / `flet_desktop` 在 V1 已合并入 `flet`，但保守保留 `flet_desktop` 以兼容桌面打包路径
 - 新增 flet 相关 import 时，同步检查 spec 文件的 `hiddenimports` 是否覆盖
+
+---
+
+## 完成判定（canonical 入口）
+
+- PyInstaller 打包按「PyInstaller 打包」章节执行，产物在目标平台启动验证通过
+- 依赖增删已同步 `requirements*.txt`（pre-commit 自动）并通过依赖审计
+
+_最小验证命令：_ 依赖变更 → 编辑 `pyproject.toml` → pre-commit 自动同步；打包 → 构建后运行 `main.py` 产物自检。

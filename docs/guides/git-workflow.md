@@ -192,3 +192,12 @@ Feature 分支存活建议 ≤ 7 天。超期需评估：
 | Merge Queue + Squash | 「合并策略」 | 本节规定的合并方式 |
 | CODEOWNERS | 「代码审查与合并」 | 关键路径强制审查 |
 | pre-commit | 「代码风格基础」 | 提交前质量门禁 |
+
+---
+
+## 完成判定（canonical 入口）
+
+- 分支命名规范符合；开发在 worktree 内隔离（R18），未在主工作区 `git checkout -b`
+- 提交为原子提交，走提交信息规范；PR 创建使用 `--template` 显式加载模板（AI 助手强制）
+
+_最小验证命令：_ 提交前 `pre-commit run --all-files` + 对应最小测试子集 + `python scripts/check_docs_consistency.py`。

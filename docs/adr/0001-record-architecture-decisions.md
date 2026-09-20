@@ -44,3 +44,12 @@ AStockScreener 项目随演进积累了一系列架构决策（文档体系分�
 > 2026-07-23 补充
 
 ADR-0001 与 ADR-0003 同日决策（2026-07-17），ADR-0003 推翻 CONTRIBUTING.md 历史「3b 不做」决策。ADR-0001 作为 ADR 机制首条记录，与 ADR-0003 同批次编排落地。
+
+---
+
+## 完成判定（canonical 入口）
+
+- 满足 ADR-0001 触发条件（架构/公共契约/跨层范式）时已新增 ADR，未悄悄改代码
+- ADR 按模板填写 Context/Decision/Consequences/Alternatives，link 与 supersede 链完整
+
+_最小验证命令：_ 架构决策改动伴随实现 → 运行对应层最小验证子集 + `python scripts/check_docs_consistency.py`。

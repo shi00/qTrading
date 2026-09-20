@@ -112,3 +112,13 @@ def __init__(self, *, config=None, clock=None):
 - **`_token_invalid` 全局熔断标志**：跨同步路径（`set_token()`/`set_token_async()` 重置）与异步路径（`_handle_api_call` 触发熔断）读写，经 `_get_token_invalid_lock()` 提供的 loop-local `asyncio.Lock` 串行化（async 路径不能持 `threading.Lock`，R11 合规）。
 - **Token 脱敏**：所有日志与异常消息中 token 必须经 `DataSanitizer` 脱敏（R9 红线），由 `scripts/check_redlines.py` 的 `check_R_tushare_token_log` 静态守护。
 
+---
+
+## 完成判定（canonical 入口）
+
+- 新增单例走「单例注册清单」登记，生命周期（创建/释放）符合本文件模板
+- 按需实例化、依赖注入、无全局共享状态者按非单例处理（对照判定标准，未误登单例）
+- 涉及 `ThreadPoolManager` 提交边界（CLAUDE.md §3.2）与 R15 注册已核对
+
+_最小验证命令：_ 单例/资源生命周期改动 → ruff + pyright + 相关 `tests/unit/` 用例；
+        文档改动 → `python scripts/check_docs_consistency.py`。

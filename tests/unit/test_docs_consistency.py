@@ -3687,6 +3687,143 @@ class TestCanonicalRouting:
         assert any("未路由到" in e and "how-to.md" in e for e in errors), f"应检出纯文本提及未路由, got: {errors}"
 
 
+class TestCanonicalCompletionCriteria:
+    """canonical 入口必须含「完成判定」标题（F-03）：否则 AI 交付「做没做完」只能自行推断."""
+
+    def test_completion_pass_on_current_repo(self):
+        """真实 canonical-topics.yml 的每个非元 canonical 均含「完成判定」标题（无错误）."""
+        from check_docs_consistency import check_canonical_completion_criteria
+
+        assert check_canonical_completion_criteria() == []
+
+    def test_detects_missing_completion_criteria(self, tmp_path, monkeypatch):
+        """canonical 文档缺「完成判定」标题 → 报错."""
+        import yaml
+
+        from check_docs_consistency import check_canonical_completion_criteria
+
+        root = tmp_path
+        doc = root / "docs" / "patterns" / "mvvm.md"
+        doc.parent.mkdir(parents=True)
+        doc.write_text("## MVVM 表现层\n\n正文内容，缺完成判定\n", encoding="utf-8")
+        yml = root / "docs" / "governance" / "canonical-topics.yml"
+        yml.parent.mkdir(parents=True)
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {
+                            "id": "viewmodel",
+                            "title": "新增/修改 ViewModel",
+                            "canonical": "docs/patterns/mvvm.md",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.ROOT", root)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_canonical_completion_criteria()
+        assert any("缺「完成判定」" in e and "mvvm.md" in e for e in errors), (
+            f"应检出 canonical 缺完成判定, got: {errors}"
+        )
+
+    def test_meta_fallback_exempted(self, tmp_path, monkeypatch):
+        """fallback 元条目（指向 CLAUDE.md）不强制「完成判定」."""
+        import yaml
+
+        from check_docs_consistency import check_canonical_completion_criteria
+
+        root = tmp_path
+        claude = root / "CLAUDE.md"
+        claude.write_text("# CLAUDE\n\n宪法正文，无完成判定\n", encoding="utf-8")
+        yml = root / "docs" / "governance" / "canonical-topics.yml"
+        yml.parent.mkdir(parents=True)
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {
+                            "id": "fallback",
+                            "title": "未列出的任务类型",
+                            "canonical": "CLAUDE.md",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.ROOT", root)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_canonical_completion_criteria()
+        assert errors == [], f"fallback 元条目应豁免完成判定, got: {errors}"
+
+    def test_passes_when_heading_present(self, tmp_path, monkeypatch):
+        """canonical 文档含「完成判定」标题 → 不报错（共享 canonical 一次校验通过）."""
+        import yaml
+
+        from check_docs_consistency import check_canonical_completion_criteria
+
+        root = tmp_path
+        doc = root / "docs" / "patterns" / "dao-pattern.md"
+        doc.parent.mkdir(parents=True)
+        doc.write_text("## 完成判定\n\n- 可打勾判据\n- 最小验证命令：对应最小验证子集\n", encoding="utf-8")
+        yml = root / "docs" / "governance" / "canonical-topics.yml"
+        yml.parent.mkdir(parents=True)
+        # 两个主题共享同一 canonical，应只校验一次（避免对共享入口重复强制）
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {"id": "dao", "title": "DAO", "canonical": "docs/patterns/dao-pattern.md"},
+                        {"id": "dao2", "title": "DAO2", "canonical": "docs/patterns/dao-pattern.md"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.ROOT", root)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_canonical_completion_criteria()
+        assert errors == [], f"含完成判定标题不应报错, got: {errors}"
+
+    def test_detects_heading_without_criteria(self, tmp_path, monkeypatch):
+        """canonical 有「完成判定」标题但缺判据/最小验证命令 → 报错."""
+        import yaml
+
+        from check_docs_consistency import check_canonical_completion_criteria
+
+        root = tmp_path
+        doc = root / "docs" / "patterns" / "mvvm.md"
+        doc.parent.mkdir(parents=True)
+        doc.write_text("## 完成判定\n\n（空正文，未写判据与最小验证命令）\n", encoding="utf-8")
+        yml = root / "docs" / "governance" / "canonical-topics.yml"
+        yml.parent.mkdir(parents=True)
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {
+                            "id": "viewmodel",
+                            "title": "新增/修改 ViewModel",
+                            "canonical": "docs/patterns/mvvm.md",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.ROOT", root)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_canonical_completion_criteria()
+        assert any("可打勾判据" in e or "最小验证命令" in e for e in errors), f"应检出空完成判定正文, got: {errors}"
+
+
 class TestDocsIndexCompleteness:
     """文档索引全覆盖（DOC-07 / DOC-11）：docs/**/*.md 均被 CONTRIBUTING 或 docs/README 引用."""
 

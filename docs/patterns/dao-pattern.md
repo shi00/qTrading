@@ -44,3 +44,4 @@
 - DAO：继承 `BaseDao`、在 `_DAO_REGISTRY` 登记、`CacheManager.__init__` 实例化、`sync_engines()` 同步 engine
 - 单测：`tests/unit/` 下使用 mock engine 隔离 DB
 - 门禁：`redline-check`（R12 / R13）、`pyright`、相关单测通过
+- 最小验证命令：对照 [CONTRIBUTING.md](../../CONTRIBUTING.md)「变更类型 → 最小验证子集」该改动范围对应最小子集
