@@ -110,6 +110,7 @@ e2e_reports.zip
 temp_pr*.txt
 .COMMIT_MSG*
 *.COMMIT_MSG*
+*COMMIT_MSG*.txt
 .pr-body*
 *.pr-body*
 # CI/E2E 调试临时产物（f1_* 来自 gh run view，main_e2e_* 来自 E2E 调试，ruff_diff 来自格式化预览）
