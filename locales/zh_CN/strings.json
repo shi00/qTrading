@@ -220,6 +220,7 @@
     "strategy_param_auto_adjusted": "涨幅区间参数冲突：下限 {min} ≥ 上限，已自动将上限调整为 {adjusted_max}",
     "screener_ai_failed_banner": "本次选股中 {count} 只股票的 AI 分析未能完成，结果仅反映数学筛选",
     "strategy_ai_candidate_truncated": "候选股票 {total} 只超出 AI 分析上限 {analyzed} 只，仅对前 {analyzed} 只进行分析",
+    "strategy_ai_risk_check_skipped": "AI 分析不可用，本策略的 AI 定性风险检查（假高息/价值陷阱/资金链等）已跳过，本次结果仅含量化筛选",
     "strategy_northbound_holding_name": "北向持股",
     "strategy_northbound_holding_desc": "标准：北向资金持股比例 > 设定值 (外资重仓股，关注长期持仓)",
     "strategy_northbound_flow_name": "北向流入择时(大盘股)",
