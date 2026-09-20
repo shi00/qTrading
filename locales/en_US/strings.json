@@ -1546,6 +1546,8 @@
     "col_app_version": "App Version",
     "col_executed_at": "Executed At",
     "col_duration_ms": "Duration (ms)",
+    "col_quality_json": "Data Quality Snapshot",
+    "col_config_json": "Config Snapshot",
     "col_t1_pct": "T1 Pct",
     "col_t1_price": "T1 Price",
     "col_t5_pct": "T5 Pct",

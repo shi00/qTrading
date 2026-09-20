@@ -67,6 +67,11 @@ class BacktestDAO(BaseDao):
         config = result.get("config")
         metrics = result.get("metrics", {})
 
+        # BT-03: 完整配置与可信度元数据快照，JSONB 列。含 date/datetime 对象，
+        # 经 _serialize_jsonb_value 递归转 ISO 字符串后在写入 df。
+        config_json = _serialize_jsonb_value(result.get("config_json"))
+        quality_json = _serialize_jsonb_value(result.get("quality_json"))
+
         profit_factor = metrics.get("profit_factor")
         if profit_factor is not None and not isinstance(profit_factor, (int, float)):
             profit_factor = None
@@ -104,6 +109,8 @@ class BacktestDAO(BaseDao):
                     "slippage_model": result.get("slippage_model"),
                     "app_version": result.get("app_version"),
                     "duration_ms": result.get("duration_ms"),
+                    "config_json": config_json,
+                    "quality_json": quality_json,
                 }
             ]
         )
@@ -158,6 +165,7 @@ class BacktestDAO(BaseDao):
             BacktestResultModel.sharpe_ratio,
             BacktestResultModel.max_drawdown,
             BacktestResultModel.executed_at,
+            BacktestResultModel.quality_json,
         )
         if strategy_name:
             stmt = stmt.where(BacktestResultModel.strategy_name == strategy_name)
@@ -175,6 +183,12 @@ class BacktestDAO(BaseDao):
                 "sharpe_ratio": r["sharpe_ratio"],
                 "max_drawdown": r["max_drawdown"],
                 "executed_at": r["executed_at"],
+                # BT-03: 可信度标记。quality_json 为 NULL（存量记录）或 quality 信号为空 → 无警告。
+                # 覆盖 data_warnings（数据质量告警）与 failed_signal_dates（策略运行失败日）。
+                "has_warnings": bool(
+                    r.get("quality_json")
+                    and (r["quality_json"].get("data_warnings") or r["quality_json"].get("failed_signal_dates"))
+                ),
             }
             for r in results.to_dict("records")
         ]
