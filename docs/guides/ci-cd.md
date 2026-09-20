@@ -47,3 +47,13 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 1. 确保创建了新的 Alembic 迁移
 2. 迁移必须可逆（实现 `upgrade` 和 `downgrade`）
 3. CI 会验证 `upgrade → check → downgrade base → upgrade head` 链
+
+---
+
+## 完成判定（canonical 入口）
+
+- CI Job / pre-commit hook 增删已回填本文件与 `.pre-commit-config.yaml` / workflow 清单，名称级一致（避免枚举漂移）
+- 版本发布流程按「版本发布流程与 Release 管理」执行，release 产物验证通过
+
+_最小验证命令：_ CI/依赖变更 → 编辑 `pyproject.toml`（pre-commit 自动同步 requirements）或 workflow → 由 CI 验证；
+        文档改动 → `python scripts/check_docs_consistency.py`。

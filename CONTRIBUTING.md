@@ -701,3 +701,12 @@ except Exception as e:
 ---
 
 再次感谢你的贡献！
+
+---
+
+## 完成判定（canonical 入口）
+
+- 异常已按「错误处理标准模式」分类处理，未在边界吞掉关键失败信息
+- 涉及异常治理文档/例外注册表改动已同步 redlines.yml / exceptions.yml（见三处同步门禁）
+
+_最小验证命令：_ 仅文档/异常治理改动 → `python scripts/check_docs_consistency.py` + 对应治理契约测试（`tests/unit/test_docs_consistency.py`）。

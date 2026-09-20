@@ -41,7 +41,9 @@
 - `utils/prompt_guard.py` 为**正则黑名单式**防御，能力有限：能拦截已知指令形态，**挡不住新闻正文等外部文本中的植入指令**（review06 的 F12，见 [reviews/README.md](../reviews/README.md)）。
 - **黑名单不是完整防御**：不要把 `prompt_guard` 当作充分防护；任何 AI 功能还须叠加 ADR-0008 的执行权边界（即使注入成功后果也被限制在错误建议范围）+ 输出侧结构化校验。新增 AI 功能在设计文档中须明确其输出仅用于展示，并通过测试验证无执行路径。
 
-## 完成判定
+## 完成判定（canonical 入口）
+
+_最小验证命令：_ 按改动实际触及的层运行 CONTRIBUTING「变更类型 → 最小验证子集」对应最小子集；AI 服务逻辑改动后须 `redline-check` + 相关单测 + `python scripts/check_docs_consistency.py`。
 
 - 缺失语义全链路用 `None`/哨兵，无 `0`/`50` 回填；
 - 成本/配额改动对齐 `pricing`（分）/`token_budget`（token）/`usage_tracker`（分）单位与 P3-AI03 债目标；

@@ -42,7 +42,9 @@
 
 完整落地流程（新增/修改应用服务如何接线到启动、调度）：见 [docs/guides/how-to.md](../guides/how-to.md) 相关章节与 [data-sync.md](./data-sync.md)。
 
-## 完成判定
+## 完成判定（canonical 入口）
+
+_最小验证命令：_ 按改动实际触及的层运行 CONTRIBUTING「变更类型 → 最小验证子集」对应最小子集；服务层逻辑改动后须 `redline-check` + 相关服务单测 + `python scripts/check_docs_consistency.py`。
 
 - 新增服务已按「单例 vs 非单例」判据选型，单例注册同步更新 `singleton-lifecycle.md` / §1.8 所需登记；
 - 轮询/长生命周期停止按 EX-0017 豁免语义，未误报停轮询吞没行为；

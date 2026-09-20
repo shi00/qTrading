@@ -66,3 +66,14 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 - **UI 提示映射**：连接失败/`EngineDisposedError` 应映射为可操作用户提示（如"数据库连接已断开，点击重新连接"），而非通用错误——该映射属错误反馈路径（报告 05 范围）。
 
 > **操作指引**：新增/修改数据同步源的完整步骤见 [docs/guides/how-to.md](../guides/how-to.md)「5. 新增一个外部数据源」与「5.1 Tushare 集成工作流（简述）」；新增同步表前须更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS`，并遵循本节 CLAUDE.md §3.1 R2（取消传播）与 §3.2（质量门控）约束。
+
+---
+
+## 完成判定（canonical 入口）
+
+- 同步任务遵循 Tushare Syncer 设计模式，数据流向符合本文件「数据流向」
+- 限流与重试（C5）、质量门控（C15）、错误处理（C16）、取消传播（C18）均已落实
+- 数据库连接走统一生命周期契约（review03-C13），未重复开关连接
+
+_最小验证命令：_ 改动 `data/` → ruff + pyright + `tests/unit/` 对应用例；涉 DB 查询再运行 `tests/integration/`（需 DB）。
+        文档改动 → `python scripts/check_docs_consistency.py`。

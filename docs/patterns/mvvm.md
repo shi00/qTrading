@@ -152,3 +152,14 @@ UI 层实际并存四种状态机制，本表是"什么状态放哪里"的正本
 ### 存量技术债
 
 [ui/viewmodels/](../../ui/viewmodels/) 下所有 ViewModel 必须满足 [`_ViewModelProtocol`](../../ui/hooks.py)（`state` / `subscribe` / `dispose` 三方法）+ state snapshot + commands + `use_viewmodel` 目标范式。新代码必须沿用此范式，不得使用 `on_update`/`on_log` 回调注入。
+
+---
+
+## 完成判定（canonical 入口）
+
+- ViewModel 已落实三层职责（状态、交互命令、数据拉取），未在 View 层直接塞业务
+- 桥接 hook 契约为本层推荐路径；`use_viewmodel` 等签名与代码实际一致
+- 复杂 ViewModel 按「状态归属决策表」拆分；命中 Mixin 组合（C3 / UIX-07）时已复用而非堆叠
+
+_最小验证命令：_ 改动 `ui/` → ruff + pyright + `tests/unit/ui/`；
+        文档改动 → `python scripts/check_docs_consistency.py`。

@@ -112,3 +112,14 @@ PR 评审按以下顺序逐项检查：
 - 新增 `docs/flet/*.md` 时必须在本文件「文档职责清单」登记，否则会被 `check_flet_hub_completeness()` 门禁拦截。
 - 删除或改名专题文档时必须同步更新本文件及对应一致性测试。
 - 通用 Flet v1 教程（路由、Services、存储、构建打包、响应式布局、控件清单等）直接查阅 [Flet 官方文档](https://docs.flet.dev/)，本目录不再复制，避免与上游漂移。
+
+---
+
+## 完成判定（canonical 入口）
+
+- UI 视图/布局/i18n 改动符合 Flet V1 API 约束，未使用弃用属性
+- 新增视图已遵守 ViewModel 桥接与 i18n key 规范（locales/ 补齐文案）
+- 无法用现有控件实现之处已按升级路径评估（见 upgrade-checklist）
+
+_最小验证命令：_ 改动 `ui/` → ruff + pyright + `tests/unit/ui/`；涉交互再运行对应 E2E。
+        文档改动 → `python scripts/check_docs_consistency.py`。

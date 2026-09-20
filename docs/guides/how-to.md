@@ -258,3 +258,12 @@ CI 通过 `.github/workflows/ci_cd.yml` 的 `embedded-tests` job 自动运行（
 - 作为 main 分支必需检查阻塞 merge（需手动配置 branch protection）
 
 > sidecar binary 的 stable release 由独立的 `.github/workflows/sidecar.yml` release job 发布（推送 `sidecar-v*` tag 触发），用于 `build-windows` job 的 release installer 打包。`embedded-tests` job 用源码编译确保测试最新代码，与 release 流程职责分离。
+
+---
+
+## 完成判定（canonical 入口）
+
+- 改动类型对应本文件某章的完整执行（如「7. 新增回测配置」），产物可运行
+- 内置 PG 维护（第 9 章）等操作已按章节步骤完成并校验结果
+
+_最小验证命令：_ 按操作实际触达的层（`data/`/`ui/`/`services/` 等）运行 CONTRIBUTING「变更类型 → 最小验证子集」对应最小子集；文档改动 → `python scripts/check_docs_consistency.py`。

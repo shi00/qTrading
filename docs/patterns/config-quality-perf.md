@@ -42,3 +42,14 @@
 资金以万元计）产生量纲偏差，违反 R20（见 CLAUDE.md §3.1）。
 
 > **操作指引**：修改配置项或调整性能相关阈值，入口见 [CLAUDE.md §1.8 决策树](../../CLAUDE.md#18-任务类型--必读文件-决策树)（「修改配置项 / 性能优化 / 阈值调整」均路由到本节）；完整新增策略/DAO 的落地流程见 [docs/guides/how-to.md](../guides/how-to.md)。
+
+---
+
+## 完成判定（canonical 入口）
+
+- 性能阈值/配置项改动已同步 `data/constants.py` 单位事实源与本文档描述（含 R20 量纲比较指针）
+- 新增配置项已评估质量门控影响，未绕开 `@require_quality` 等既有门控
+- 性能监控装饰器与线程池任务类型判据（CON-16）已对照
+
+_最小验证命令：_ 改动 `data/`/`strategies/` → ruff + pyright + `tests/unit/` 对应用例；
+        文档改动 → `python scripts/check_docs_consistency.py`。

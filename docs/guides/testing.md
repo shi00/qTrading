@@ -182,3 +182,14 @@ def test_market_trend_filter_selects_in_range():
 ```
 
 要点：先断言 `required_quality_tier` 类属性（质量门控依赖声明，对应 §3.2 强制要求）；用 `pd.DataFrame` → `pl.from_pandas().lazy()` 构造向量化输入，断言 `_filter_logic` 结果。对应 [how-to.md 第 3 条流程第 7 步](../../docs/guides/how-to.md#3-新增一个策略)。
+
+---
+
+## 完成判定（canonical 入口）
+
+- 新测试已按对应「测试编写模板」落地（DAO / ViewModel / 异步取消 / 策略），未发明未对齐的非标准写法
+- 覆盖率达标（整体 ≥ 85%，单文件 ≥ 80%，分层阈值为 advisory）
+- E2E 用例按要求串行/网络隔离（Windows skipif 等既有约定）依从
+
+_最小验证命令：_ `ruff` + `pyright` + 对应 `tests/unit/`/`tests/integration/`；
+        E2E → `python -m pytest tests/e2e/`；文档改动 → `python scripts/check_docs_consistency.py`。

@@ -55,3 +55,4 @@ class MyStrategy(BaseStrategy):
 - i18n：`locales/` 补齐 `strategy_xxx` / `strategy_xxx_desc` 等 key
 - 单测：`tests/unit/` 下覆盖
 - 门禁：`redline-check`（R14）、`pyright`、相关单测通过
+- 最小验证命令：对照 [CONTRIBUTING.md](../../CONTRIBUTING.md)「变更类型 → 最小验证子集」该改动范围对应最小子集
