@@ -230,9 +230,8 @@ python -m pytest tests/ --cov --cov-report=term-missing --cov-fail-under=85
 class OversoldStrategy(BaseStrategy, AIStrategyMixin):
     required_context_keys: tuple[str, ...] = ("screening_data",)
 
-    @require_quality(QualityTier.SILVER)   # 数据质量不达标自动规避
-    async def filter(self, context: StrategyContext):
-        ...
+    @require_quality(QualityTier.SILVER)  # 数据质量不达标自动规避
+    async def filter(self, context: StrategyContext): ...
 ```
 
 ### 多供应商 LLM 网关
@@ -252,8 +251,11 @@ from strategies.backtest.engine import VectorBacktestEngine
 from strategies.backtest.config import BacktestConfig
 
 config = BacktestConfig(
-    start_date="2023-01-01", end_date="2024-01-01",
-    initial_capital=1_000_000, commission_rate=0.0003, slippage=0.001,
+    start_date="2023-01-01",
+    end_date="2024-01-01",
+    initial_capital=1_000_000,
+    commission_rate=0.0003,
+    slippage=0.001,
 )
 result = await VectorBacktestEngine(config).run(strategy, data_provider)
 print(f"Sharpe: {result.metrics.sharpe_ratio:.2f}")
