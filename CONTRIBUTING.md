@@ -423,6 +423,10 @@ docs/             ← 架构设计、ADR 决策、操作指南与治理文档
 requirements/     ← 业务需求说明与规范
 resources/        ← 应用静态资源与打包物料
 sidecars/         ← 跨进程/跨语言独立辅助进程与服务
+.github/          ← GitHub 平台配置（workflows/、issue/PR 模板、CODEOWNERS、dependabot.yml、renovate.json）
+.security/        ← 供应链安全材料（audit-allowlist.yml 依赖审计白名单）
+assets/           ← 顶层静态资产（模板/图标等非打包资源）
+hooks/            ← 本地 Git/工具钩子脚本
 ```
 
 **同层内文件合并原则**：在不违反分层架构的前提下，同一职责的多个小函数可合并到一个文件，不为单次使用的辅助函数创建独立模块。但跨层合并禁止（如 `data/` 与 `ui/` 不可合并）。
