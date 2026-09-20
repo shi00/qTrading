@@ -498,7 +498,9 @@ class AIStreamMixin:
                     0.05,
                     Message("task_loading_data"),
                 )
-                context = await dp.get_strategy_data()
+                # DS-02: ST 排除开关经 VM 状态透传（读 _state.exclude_st，缺失回退 True 安全默认）
+                _exclude_st = getattr(self._state, "exclude_st", True)
+                context = await dp.get_strategy_data(exclude_st=_exclude_st)
                 if not context:
                     TaskManager().update_progress(
                         task_id,
@@ -506,7 +508,7 @@ class AIStreamMixin:
                         Message("task_cache_empty_init"),
                     )
                     await dp.init_data()
-                    context = await dp.get_strategy_data()
+                    context = await dp.get_strategy_data(exclude_st=_exclude_st)
 
                 if not context or "screening_data" not in context or context["screening_data"].empty:
                     raise RuntimeError("No valid screening data available")

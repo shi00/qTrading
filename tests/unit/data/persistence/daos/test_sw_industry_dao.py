@@ -2,6 +2,7 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 
 import asyncio
+import datetime
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -443,3 +444,58 @@ class TestGetNameAsOf:
             result = await dao.get_name_as_of("000001.SZ", "2021-01-01")
         assert result is None
         mock_sanitizer.sanitize_error.assert_called_once_with(original_error)
+
+
+class TestGetNameRanges:
+    """get_name_ranges：批量区间读取（P3/DS-02），升序 + $1 参数化 + 异常分层（R4/R2/R5）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_ts_code_returns_empty_list_without_query(self):
+        dao = _make_name_history_dao()
+        assert await dao.get_name_ranges("") == []
+        dao._read_db.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_returns_sorted_ranges(self):
+        dao = _make_name_history_dao()
+        d1, d2 = datetime.date(2020, 1, 1), datetime.date(2021, 6, 1)
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "start_date": [d1, d2],
+                    "end_date": [datetime.date(2021, 5, 31), None],
+                    "name": ["ST平安", "平安银行"],
+                }
+            )
+        )
+        result = await dao.get_name_ranges("000001.SZ")
+        assert result == [
+            (d1, datetime.date(2021, 5, 31), "ST平安"),
+            (d2, None, "平安银行"),
+        ]
+        sql_arg = dao._read_db.call_args.args[0]
+        # R4：占位符必须是 $1 而非 %s；区间按 start_date 升序
+        assert "$1" in sql_arg
+        assert "%s" not in sql_arg
+        assert "ORDER BY start_date" in sql_arg
+        assert dao._read_db.call_args.args[1] == ("000001.SZ",)
+
+    @pytest.mark.asyncio
+    async def test_empty_df_returns_empty_list(self):
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        assert await dao.get_name_ranges("000001.SZ") == []
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await dao.get_name_ranges("000001.SZ")
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_propagates(self):
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_name_ranges("000001.SZ")

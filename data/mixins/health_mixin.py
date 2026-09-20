@@ -802,6 +802,39 @@ class HealthCheckMixin:
                 DataSanitizer.sanitize_error(e),
             )
 
+        # --- stock_name_history (DS-02 P4: ST 时点还原链路健康) ---
+        # 只告警不硬降级（与 DAT-13 维度表口径一致）。空表告警指向 namechange 接口
+        # 可能的积分权限问题；ST as-is 判定将回退当前名称。
+        try:
+            cov = await self.cache.stock_name_history_dao.get_name_history_coverage_summary()
+            total_rows = cov.get("total_rows", 0) if cov else 0
+            if total_rows == 0:
+                logger.warning(
+                    "[DataProcessor] Health | ⚠️ stock_name_history 为空表；"
+                    "namechange 接口可能有积分权限问题，ST as-is 判定将回退当前名称"
+                )
+                reasons.append(
+                    "stock_name_history is empty; namechange API may lack permission, "
+                    "ST as-of tag falls back to current name"
+                )
+            else:
+                st_rows = cov.get("st_rows", 0)
+                if st_rows == 0:
+                    logger.warning(
+                        "[DataProcessor] Health | ⚠️ stock_name_history 有 %d 行但无任何 ST/*ST 记录，ST 识别可能不完整",
+                        total_rows,
+                    )
+                    reasons.append(f"stock_name_history has {total_rows} rows but no ST/*ST records")
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.debug(
+                "[DataProcessor] Health | stock_name_history check skipped: %s",
+                DataSanitizer.sanitize_error(e),
+            )
+
     @log_async_operation(
         operation_name="run_quality_scan",
         threshold_ms=PerfThreshold.DB_BULK_IO,

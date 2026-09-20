@@ -1583,7 +1583,14 @@ def _build_screener_control_card(
         on_change=safe_on_change(handlers["on_stock_filter_change"]),
         on_submit=safe_on_change(handlers["on_run_click_sync"]),
     )
-    filter_row = ft.Row([stock_filter_field, ft.Container(expand=True)], spacing=10)
+    # DS-02: 风险警示股（ST/*ST）排除开关，经 on_exclude_st_change → vm.set_exclude_st 透传数据层行过滤
+    exclude_st_switch = ft.Switch(
+        label=I18n.get("screener_exclude_st"),
+        value=state.exclude_st,
+        on_change=safe_on_change(handlers["on_exclude_st_change"]),
+        active_color=AppColors.PRIMARY,
+    )
+    filter_row = ft.Row([stock_filter_field, exclude_st_switch, ft.Container(expand=True)], spacing=10)
 
     realtime_controls = ft.Column(
         [
@@ -2098,6 +2105,10 @@ def ScreenerView(
         UILogger.log_action("ScreenerView", "Input", "stock_filter")
         vm.set_stock_filter(get_control_value(e.control, ft.TextField) or "")
 
+    def _on_exclude_st_change(e: ft.ControlEvent) -> None:
+        UILogger.log_action("ScreenerView", "Toggle", "exclude_st")
+        vm.set_exclude_st(bool(get_control_value(e.control, ft.Switch)))
+
     def _on_page_size_change(e: ft.ControlEvent) -> None:
         _handle_page_size_change(vm, e)
 
@@ -2210,6 +2221,7 @@ def ScreenerView(
             "on_mode_change": _on_mode_change,
             "on_strategy_change": _on_strategy_change,
             "on_stock_filter_change": _on_stock_filter_change,
+            "on_exclude_st_change": _on_exclude_st_change,
             "on_run_click_sync": _on_run_click_sync,
             "on_cancel_click_sync": lambda _: vm.cancel_strategy(),
             "on_slider_value_change": _on_slider_value_change,

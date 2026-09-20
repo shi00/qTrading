@@ -254,6 +254,8 @@ class ScreenerState:
     is_retrying: bool = False
     # UX-04 (P2-01): 股票代码过滤 (ts_code 子串匹配, 空串=不过滤; 深链/手动输入两来源)
     stock_filter: str = ""
+    # DS-02: 是否排除风险警示股 (ST/*ST)，默认开启；经 get_strategy_data 透传数据层行过滤。
+    exclude_st: bool = True
     # AI-03(完整版): 上次选股实际消耗的 LLM 调用次数、token 总量与成本(元)。
     # None 表示当次未执行 AI 分析（本轮没有可展示的消耗）；View 据此决定是否渲染汇总行。
     ai_usage_summary: tuple[int, int, float] | None = None

@@ -759,6 +759,61 @@ class TestScreenerDaoSwIndustryJoin:
             assert "AND out_date IS NULL" not in lateral, f"行业 LATERAL 不得退回裸当前快照:\n{lateral}"
 
 
+class TestScreenerDaoStockNameHistory:
+    """DS-02（ST 时点还原链路）：name-history LATERAL JOIN + is_st 派生列。
+
+    - name 列经 COALESCE(nh.name, b.name) 按 as-of 时点还原历史名称，无历史回退当前名称；
+    - is_st 派生列（UPPER(name) LIKE '%ST%'，覆盖 *ST/S*ST）供数据层行过滤/as-of 涨跌停判定；
+    - ST 排除不做在 DAO 层（SQL 无 WHERE 过滤，留存完整数据供回测 data_provider 直读）。
+    """
+
+    def test_daily_sql_uses_stock_name_history(self):
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql()
+        assert "stock_name_history" in sql
+        assert "COALESCE(nh.name, b.name) AS name" in sql
+        assert "AS is_st" in sql
+        assert "UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%'" in sql
+
+    def test_daily_name_lateral_asof_uses_param5(self):
+        """单日版 name-history LATERAL 以 $5 为 as-of，且先于 suspend_d JOIN。"""
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql()
+        assert "start_date <= $5" in sql
+        assert "(end_date IS NULL OR end_date > $5)" in sql
+        assert sql.index("LEFT JOIN LATERAL (") < sql.index("LEFT JOIN suspend_d s")
+
+    def test_range_sql_uses_stock_name_history(self):
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql_range()
+        assert "stock_name_history" in sql
+        assert "COALESCE(nh.name, b.name) AS name" in sql
+        assert "AS is_st" in sql
+        assert "UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%'" in sql
+
+    def test_range_name_lateral_asof_uses_cal_date(self):
+        """区间版 name-history LATERAL 按 cal.cal_date 逐交易日 as-of，先于 suspend_d JOIN。"""
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql_range()
+        assert "start_date <= cal.cal_date" in sql
+        assert "(end_date IS NULL OR end_date > cal.cal_date)" in sql
+        assert sql.index("LEFT JOIN LATERAL (") < sql.index("LEFT JOIN suspend_d s")
+
+    def test_st_exclude_not_in_sql(self):
+        """DS-02: ST 排除在数据层行过滤而非 SQL WHERE，两份模板不留 ST 过滤条件。"""
+        dao = ScreenerDao(MagicMock())
+        for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
+            assert "WHERE is_st" not in sql
+            assert "__CLOSE_COND__" not in sql  # 模板占位符已被替换
+
+    def test_parameter_count_unchanged(self):
+        """DS-02: 两份模板参数位不变（单日仍 $1-$6，区间仍 $1-$2）。"""
+        daily_sql = ScreenerDao(MagicMock())._build_screening_sql()
+        range_sql = ScreenerDao(MagicMock())._build_screening_sql_range()
+        assert daily_sql.count("$1") and max(int(x) for x in re.findall(r"\$(\d)", daily_sql)) == 6
+        assert max(int(x) for x in re.findall(r"\$(\d)", range_sql)) == 2
+
+
 class TestScreenerDaoGetLatestClosedTradeDate:
     @pytest.mark.asyncio
     async def test_returns_date_string(self):

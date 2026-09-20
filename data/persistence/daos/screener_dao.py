@@ -32,9 +32,15 @@ REVIEW_STATS_WINDOW_DAYS = 180
 # 为唯一可变点，分别由 _build_screening_sql/_build_screening_sql_range 按 require_close
 # 布尔与 PIT 时点（DAT-01）替换为模块受控片段（无用户输入），避免 f-string 拼 SQL 模式。
 # __STOCK_ALIVE_CONDITION__ 必须经 stock_alive_condition() 渲染（唯一正本），禁止内联复制。
+# DS-02（ST 时点还原链路）：name 列经 name-history LATERAL JOIN 按 as-of 时点还原历史名称
+# （无历史记录时 COALESCE 回退当前名称 stock_basic.name，防空表把全市场误判为非 ST）；
+# 新增派生列 is_st（UPPER(name) LIKE '%ST%'，覆盖 *ST/S*ST，与 _get_limit_pct 语义一致），
+# 供数据层行过滤排除风险警示股（P2）与 as-of 名称涨跌停判定。as-of 参数复用既有 $5
+# （单日版，恒等于 trade_date）与 cal.cal_date（区间版），不新增参数位。
 _SCREENING_SQL_TEMPLATE = """
               SELECT b.ts_code,
-                     b.name,
+                     COALESCE(nh.name, b.name) AS name,
+                     CASE WHEN UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%' THEN TRUE ELSE FALSE END AS is_st,
                      m.l2_name AS industry_sw_l2,
                      b.industry AS industry_tushare,
                      b.list_date,
@@ -90,6 +96,15 @@ _SCREENING_SQL_TEMPLATE = """
                             ORDER BY l2_code  -- DATA-04 L2: 按 as-of 时点（$5）过滤，取该时点有效行的最小 l2_code，防 LIMIT 1 随执行计划漂移
                             LIMIT 1
                         ) m ON TRUE
+                        LEFT JOIN LATERAL (
+                            SELECT name
+                            FROM stock_name_history
+                            WHERE ts_code = b.ts_code
+                              AND start_date <= $5
+                              AND (end_date IS NULL OR end_date > $5)
+                            ORDER BY start_date DESC
+                            LIMIT 1
+                        ) nh ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = $6
                WHERE __CLOSE_COND__b.list_date <= $4
                  AND __STOCK_ALIVE_CONDITION__
@@ -98,7 +113,8 @@ _SCREENING_SQL_TEMPLATE = """
 
 _SCREENING_SQL_RANGE_TEMPLATE = """
               SELECT b.ts_code,
-                     b.name,
+                     COALESCE(nh.name, b.name) AS name,
+                     CASE WHEN UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%' THEN TRUE ELSE FALSE END AS is_st,
                      m.l2_name AS industry_sw_l2,
                      b.industry AS industry_tushare,
                      b.list_date,
@@ -154,6 +170,15 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                             ORDER BY l2_code  -- DATA-04 L2: 按 as-of 时点（cal.cal_date）过滤，取该时点有效行的最小 l2_code，防 LIMIT 1 随执行计划漂移
                             LIMIT 1
                         ) m ON TRUE
+                        LEFT JOIN LATERAL (
+                            SELECT name
+                            FROM stock_name_history
+                            WHERE ts_code = b.ts_code
+                              AND start_date <= cal.cal_date
+                              AND (end_date IS NULL OR end_date > cal.cal_date)
+                            ORDER BY start_date DESC
+                            LIMIT 1
+                        ) nh ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = cal.cal_date
                WHERE __CLOSE_COND__b.list_date <= cal.cal_date
                  AND __STOCK_ALIVE_CONDITION__

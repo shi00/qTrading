@@ -1120,8 +1120,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             end_date=end,
         )
 
-    async def get_strategy_data(self, trade_date=None):
-        return await self.prepare_screening_context(trade_date=trade_date)
+    async def get_strategy_data(self, trade_date=None, *, exclude_st: bool = True):
+        return await self.prepare_screening_context(trade_date=trade_date, exclude_st=exclude_st)
 
     @staticmethod
     def _normalize_context_trade_date(value):
@@ -1164,8 +1164,16 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         operation_name="prepare_screening_context",
         threshold_ms=PerfThreshold.DB_BULK_IO,
     )
-    async def prepare_screening_context(self, trade_date=None):
-        """Prepare context for screening execution."""
+    async def prepare_screening_context(self, trade_date=None, *, exclude_st: bool = True):
+        """Prepare context for screening execution.
+
+        ``exclude_st``（默认 True）：在 is_tradable 行过滤之后、screening_data 定稿前，
+        依据 SQL 派生列 is_st（as-of 名称含 ST/*ST）剔除风险警示股。ST 排除为何须在数据层
+        行过滤而非 SQL WHERE：get_screening_data / get_fundamental_screening_data 透传方法
+        保持签名与行为不变（回测 data_provider 直接调用它们，必须拿到含 ST 的完整数据），
+        排除仅作用于选股上下文。fundamental_screening_data 不受本参数影响（由
+        requires_fundamental_coverage 守卫消费，DS-04 单独处理）。
+        """
 
         if self._quality_tier is None:
             await self._assign_basic_tier()
@@ -1209,6 +1217,23 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         elif screening_data is not None and not screening_data.empty and "is_tradable" not in screening_data.columns:
             logger.warning(
                 "[DataProcessor] is_tradable column missing from screening_data; suspended stocks will NOT be filtered"
+            )
+
+        # DS-02: ST 风险警示股排除（数据层行过滤，默认开启）。is_st 为 SQL 派生列
+        # （as-of 名称 UPPER LIKE '%ST%'）；无该列（结构缺失/空表）时跳过并告警，保底回退不剔除。
+        if exclude_st and screening_data is not None and not screening_data.empty and "is_st" in screening_data.columns:
+            st_count = int(screening_data["is_st"].sum())
+            if st_count > 0:
+                screening_data = screening_data[~screening_data["is_st"]].copy()
+                diagnostics["st_excluded"] = st_count
+        elif (
+            exclude_st
+            and screening_data is not None
+            and not screening_data.empty
+            and "is_st" not in screening_data.columns
+        ):
+            logger.warning(
+                "[DataProcessor] is_st column missing from screening_data; risk-warning stocks will NOT be excluded"
             )
 
         context["screening_data"] = screening_data

@@ -161,6 +161,13 @@ class ScreenerViewModel(
             changes = {**changes, "strategy_params": MappingProxyType(dict(changes["strategy_params"]))}
         super()._set_state(**changes)
 
+    def set_exclude_st(self, value: bool) -> None:
+        """DS-02: 设置是否排除风险警示股（ST/*ST），经 get_strategy_data 透传数据层行过滤。"""
+        value = bool(value)
+        if value == self._state.exclude_st:
+            return  # 幂等: 相同值不触发重渲染
+        self._set_state(exclude_st=value)
+
     def init(self):
         """Initialize resources"""
         pass

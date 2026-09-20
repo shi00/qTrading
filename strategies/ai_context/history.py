@@ -14,10 +14,35 @@ from utils.technical_analysis import TechnicalAnalysis
 logger = logging.getLogger(__name__)
 
 
+def _resolve_name_as_of(name_ranges: list[tuple] | None, as_of) -> str | None:
+    """在 ``(start_date, end_date, name)`` 升序区间列表中解析 as_of 当日生效名称（无则 None）。
+
+    DS-02 P3：单股名称区间一次性批量载入内存后逐日解析「某日名称」（含 ST/*ST 前缀），
+    供涨跌停判定（``_get_limit_pct``）使用 as-of 名称而非当前名称，消除前视偏差。
+    区间不重叠（每股每生效区间唯一）；升序遍历时最后一个 ``start <= as_of < end`` 即当日名称。
+    """
+    if not name_ranges or as_of is None:
+        return None
+    import datetime
+
+    if isinstance(as_of, datetime.datetime):
+        as_of = as_of.date()
+    if not isinstance(as_of, datetime.date):
+        return None  # 非日期无法解析，回退调用方当前名称
+    resolved = None
+    for start, end, name in name_ranges:
+        if start is None or start > as_of:
+            break
+        if end is None or end > as_of:
+            resolved = name
+    return resolved
+
+
 def _build_history_text(
     history_df: pd.DataFrame,
     ts_code: str = "",
     stock_name: str = "",
+    name_ranges: list[tuple] | None = None,
     vol_ratio_threshold: float = 1.7,
     labels_out: list[str] | None = None,
 ) -> str:
@@ -30,6 +55,10 @@ def _build_history_text(
 
     Args:
         labels_out: 输出参数，收集成功注入的标签 key；哨兵/异常时不注册
+        name_ranges: DS-02 P3 — 该股 ``(start_date, end_date, name)`` 生效区间列表
+            （start_date 升序，由 StockNameHistoryDao.get_name_ranges 一次性批量读取）。
+            给每个历史交易日解析 as-of 名称以判定 ST 涨跌停；None 时空之（回退当前
+            ``stock_name``），不引入逐日 DB 查询。
     """
     if history_df is None or history_df.empty:
         return I18n.get("ai_history_insufficient")
@@ -138,8 +167,6 @@ def _build_history_text(
                 ratio=f"{vol_ratio_5d:.2f}",
             )
 
-        limit_pct = _get_limit_pct(ts_code, stock_name)
-
         lines = [
             I18n.get(
                 "ai_macro_cycle_header", title=I18n.get("ai_macro_cycle"), baseline=I18n.get("ai_config_baseline")
@@ -177,11 +204,13 @@ def _build_history_text(
             v_val = r.get("vol", 0)
             v = f"{v_val:.0f}" if (has_vol and not pd.isna(v_val)) else "N/A"
 
+            # DS-02 P3: 逐交易日解析 as-of 生效名称判定涨跌停幅度（ST=5%），无历史区间回退当前名称
+            day_limit = _get_limit_pct(ts_code, _resolve_name_as_of(name_ranges, r.get("trade_date")) or stock_name)
             limit_tag = ""
             if not pd.isna(p_val):
-                if p_val >= limit_pct - 0.5:
+                if p_val >= day_limit - 0.5:
                     limit_tag = f" 🔴{I18n.get('ai_limit_up')}"
-                elif p_val <= -(limit_pct - 0.5):
+                elif p_val <= -(day_limit - 0.5):
                     limit_tag = f" 🟢{I18n.get('ai_limit_down')}"
 
             lines.append(f"{d} | {c} | {p}{limit_tag} | {v}")

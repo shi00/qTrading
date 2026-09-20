@@ -148,6 +148,7 @@
     "screener_per_page": "/ page",
     "screener_page_size": "Page Size",
     "screener_filter_stock": "Filter by stock code",
+    "screener_exclude_st": "Exclude risk-warning stocks",
     "tab_stock_basic": "Stock List",
     "tab_alembic_version": "DB Version",
     "tab_daily_quotes": "Daily Quotes",
