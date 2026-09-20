@@ -12,3 +12,24 @@
 |-----------------|----------|---------|
 | 1.7.0 | 2026-09-17 | R20 第一阶段报告模式落地：check_redlines.py 新增 check_R20（warning 输出 stderr 不阻断），redlines.yml R20 登记 checks/enforcement，automation_coverage none→partial（语义仍以人工评审为准，误报率达标后评估升级为拦截） |
 | 1.6.0 | 2026-09-14 | 初版快照登记（ruleset-changelog.md 引入时所在版本；历史 1.3.1→1.6.0 的变更未回溯，自本版本起记录） |
+
+## 治理 ID 存量 WARNING 清零期限
+
+`scripts/check_docs_consistency.py::check_governance_id_glossary()`（检查项 19）对 `scripts/` 与 `tests/`
+的 `.py` 注释中**未登记治理 ID** 输出 WARNING（渐进部署、不阻断），脚本注释与文档均声明「存量清零后翻转
+ERROR」，但此前无清零期限或责任人，存在「无期限渐进部署永久停留 WARNING」的反模式（文档体系检视 F-11）。
+现记录如下约束：
+
+- **期限**：2026-12-31（Q4 末）。
+- **责任人**：架构维护者。
+- **翻转触发**：届期若存量未清零，须将对应 WARNING 升级为 ERROR（阻断门禁）并作为独立检视项复核；若存量
+  提前清零则立即翻转。
+- **现状基准**：2026-09-20 检视实录约 68 条（`scripts/` 与 `tests/` 的 `.py` 注释），检查脚本注释基线预估约 100 条。
+
+## 规则集复核状态
+
+`ruleset_version` 元数据块中 `review_triggers` 写明「检视报告发布时」复核，但本变更日志此前仅登记版本递增、
+无复核状态（文档体系检视 F-11）。截至 2026-09-20：`docs/reviews/README.md` 轮次表有 review03 / review06 /
+文档体系·AI 可执行性 三轮处于 `进行中`，`last_reviewed` 停在 2026-09-17，二者未闭环。本批文档体系检视
+（F-01~F-13）整改全部落地后，应同步复核规则集是否需随治理变更递增 `ruleset_version`，并更新三方
+（CLAUDE.md / CONTRIBUTING.md / AGENTS.md）`last_reviewed`（须不早于本文件顶行变更日期，DS-05）。
