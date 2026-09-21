@@ -86,7 +86,7 @@ class TestRunReviewE2E(unittest.TestCase):
                 "pct_chg": [1.0, 5.0],
             }
         )
-        index_df = pd.DataFrame({"pct_chg": [1.0]})
+        index_df = pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})  # RV-01: 含 close 列（窗口收益=0，alpha=t5_pct）
         manager = self._make_manager(pending_df, quotes_df, index_df)
 
         asyncio.run(manager.run_review())
@@ -118,7 +118,7 @@ class TestRunReviewE2E(unittest.TestCase):
                 "pct_chg": [1.0, 5.0, -1.9, 4.85, 1.85, 1.82],
             }
         )
-        index_df = pd.DataFrame({"pct_chg": [1.0]})
+        index_df = pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})  # RV-01: 含 close 列（窗口收益=0，alpha=t5_pct）
         manager = self._make_manager(pending_df, quotes_df, index_df)
 
         asyncio.run(manager.run_review())
@@ -167,7 +167,7 @@ class TestRunReviewE2E(unittest.TestCase):
                 "pct_chg": [0.0, 5.0],
             }
         )
-        index_df = pd.DataFrame({"pct_chg": [1.0]})
+        index_df = pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})  # RV-01: 含 close 列（窗口收益=0，alpha=t5_pct）
         manager = self._make_manager(pending_df, quotes_df, index_df)
 
         asyncio.run(manager.run_review())
@@ -186,7 +186,7 @@ class TestRunReviewE2E(unittest.TestCase):
                 "pct_chg": [1.0, float("nan")],
             }
         )
-        index_df = pd.DataFrame({"pct_chg": [1.0]})
+        index_df = pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})  # RV-01: 含 close 列（窗口收益=0，alpha=t5_pct）
         manager = self._make_manager(pending_df, quotes_df, index_df)
 
         asyncio.run(manager.run_review())

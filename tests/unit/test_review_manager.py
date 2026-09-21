@@ -991,7 +991,9 @@ class TestReviewManagerT1RowBoundary:
                 }
             )
         )
-        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+        )
         rm._update_result = AsyncMock()
         await rm.run_review()
         assert not rm._update_result.called
@@ -1104,7 +1106,9 @@ class TestReviewManagerRunReviewT5Calculation:
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
-        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+        )
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
@@ -1141,7 +1145,9 @@ class TestReviewManagerRunReviewTimestampDate:
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
-        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+        )
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
@@ -1180,7 +1186,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
         )
         mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=None)
         mock_api = MagicMock()
-        mock_api.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.5]}))
+        mock_api.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.5]}))
         rm.api = mock_api
         rm._update_result = AsyncMock()
         await rm.run_review()
@@ -1385,7 +1391,9 @@ class TestReviewManagerRunReviewLossLabel:
                 }
             )
         )
-        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+        )
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
@@ -1423,13 +1431,168 @@ class TestReviewManagerRunReviewLossLabel:
                 }
             )
         )
-        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+        )
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
         call_args = rm._update_result.call_args
         label = call_args[0][2]
         assert label == "DRAW"
+
+
+class TestReviewManagerRv01WindowMatches:
+    """RV-01（Critical）：基准侧必须与个股侧同窗口（T0→T+5 累计），而非 T+5 当日单日涨跌。
+
+    判据用例（检视报告唯一判据）：指数 5 日窗口 +6% 但其 T+5 当日仅 +0.1%，
+    个股 5 日 +2%。正确 Alpha = 2 - 6 = -4；修复前错误实现（单日 pct_chg）
+    会得到 2 - 0.1 = +1.9 并错误打成 WIN。
+    """
+
+    @staticmethod
+    def _index_quote_by_date(close_map: dict[str, float]):
+        """构造 quote_dao.get_index_daily 的 side_effect：按 trade_date 返回对应 close 的单行 df。"""
+        import datetime as _dt
+
+        async def _get(ts_code=None, trade_date=None, **kwargs):
+            if isinstance(trade_date, _dt.datetime):
+                day = trade_date.strftime("%Y%m%d")
+            else:
+                day = str(trade_date).replace("-", "")
+            close = close_map.get(day)
+            if close is None:
+                return pd.DataFrame()  # 无该日指数数据 → 兜底路径（本用例不触发）
+            return pd.DataFrame({"close": [close], "pct_chg": [0.1]})
+
+        return _get
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_alpha_uses_index_window_return_not_single_day_pct(self, mock_cm, mock_tc):
+        """个股 T0=10 → T+5=10.2（+2%）；指数 T0=100 → T+5=106（+6%），T+5 当日 pct_chg=+0.1%。
+        断言 alpha==-4（LOSS）而非 +1.9（WIN）。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 6,
+                "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.2],  # 个股 5 日累计 +2%
+                "pct_chg": [1.0, 2.0, 0.0, 0.0, 0.0, 2.0],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        # 指数：T0=100、T+5=106（窗口 +6%）；T+5 当日 pct_chg 仅 +0.1%（旧实现会误用此值）
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            side_effect=self._index_quote_by_date({"20240615": 100.0, "20240620": 106.0})
+        )
+        rm._update_result = AsyncMock()
+        await rm.run_review()
+        rm._update_result.assert_called_once()
+        call_args = rm._update_result.call_args
+        assert call_args.kwargs["t5_pct"] == pytest.approx(2.0)
+        assert call_args.kwargs["index_pct"] == pytest.approx(6.0)
+        assert call_args.kwargs["alpha"] == pytest.approx(-4.0)
+        assert call_args.kwargs["alpha"] != pytest.approx(1.9)  # 旧单日口径会得 +1.9（2.0 - 0.1）
+        label = call_args[0][2]
+        assert label == "LOSS"
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_alpha_missing_endpoint_close_skips_not_crash(self, mock_cm, mock_tc):
+        """对抗检视 Blocking-1：T0 close 可得但 T+5 close 缺失 → index_pct 须为 None 并跳过，
+        不得抛 TypeError（旧实现仅守卫 t0、终点缺失会 None 除法崩溃）。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 6,
+                "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.2],
+                "pct_chg": [1.0, 2.0, 0.0, 0.0, 0.0, 2.0],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        # T0=100 可得；T+5（20240620）本地缺失且 API 兜底也返回空 → 终点 close 不可得
+        mock_cache.quote_dao.get_index_daily = AsyncMock(side_effect=self._index_quote_by_date({"20240615": 100.0}))
+        rm._update_result = AsyncMock()
+        await rm.run_review()
+        # 不得崩溃；终点缺失 → 整条跳过（标签污染防护），不写更新
+        rm._update_result.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_alpha_t1_compat_horizon_uses_label_date(self, mock_cm, mock_tc):
+        """兼容 t1 口径（label_horizon="t1"）时窗口终点用 T+1 而非硬编码 T+5（对抗检视 Blocking-1）。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager(label_horizon="t1", alpha_win_threshold=3.0, alpha_loss_threshold=3.0)
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        # 仅到 T+1（20240616）：T+5（20240620）尚未成熟，但 t1 口径应能以 T+1 定稿。
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 2,
+                "trade_date": ["20240615", "20240616"],
+                "close": [10.0, 10.5],  # 个股 1 日 +5%
+                "pct_chg": [1.0, 5.0],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        # 指数 T0=100 → T+1=104（1 日窗口 +4%）：alpha = 5 - 4 = +1 → DRAW
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            side_effect=self._index_quote_by_date({"20240615": 100.0, "20240616": 104.0})
+        )
+        rm._update_result = AsyncMock()
+        await rm.run_review()
+        rm._update_result.assert_called_once()
+        call_args = rm._update_result.call_args
+        assert call_args.kwargs["t1_price"] == pytest.approx(10.5)
+        # T+5 未成熟 → t5_pct 留 None；标签按 t1 窗口 alpha=1 → DRAW
+        assert call_args.kwargs["t5_pct"] is None
+        assert call_args.kwargs["index_pct"] == pytest.approx(4.0)
+        assert call_args.kwargs["alpha"] == pytest.approx(1.0)
+        assert call_args[0][2] == "DRAW"
 
 
 class TestReviewManagerCustomThresholds:
@@ -1464,7 +1627,9 @@ class TestReviewManagerCustomThresholds:
                 }
             )
         )
-        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+        )
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
@@ -1504,7 +1669,9 @@ class TestReviewManagerCustomThresholds:
                 }
             )
         )
-        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+        )
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
@@ -1543,7 +1710,9 @@ class TestReviewManagerCustomThresholds:
                 }
             )
         )
-        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.6]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.6]})
+        )
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
@@ -2017,7 +2186,7 @@ class TestReviewManagerR9Sanitization:
                 {
                     "ts_code": ["000001.SZ"] * 6,
                     "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
-                    # D4-M4: T+5 窗口成熟后才会解析基准指数，触发内层 _resolve_index_pct 的 safe_error 路径
+                    # D4-M4: T+5 窗口成熟后才会解析基准指数，触发内层 _resolve_index_close 的 safe_error 路径
                     "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
                     "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
@@ -2148,7 +2317,9 @@ class TestReviewManagerQfqAdjustedReturn:
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
-        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+        )
         rm._update_result = AsyncMock()
         await rm.run_review()
         rm._update_result.assert_called_once()
@@ -2249,7 +2420,9 @@ class TestReviewManagerSuspendProtection:
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
-        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+        )
         rm._update_result = AsyncMock()
         await rm.run_review()
         # T+1（20240611）停牌缺行 → t1_pct=None → 无标签 → 不更新
@@ -2268,7 +2441,12 @@ class TestReviewManagerBackfill:
         # D4-M4: backfill_horizon_returns 现在解析基准指数以定稿 T+5 标签。
         # 统一 stub 索引预取与单日解析，否则真实 _prefetch/_resolve 依赖 DB/API mock。
         rm._prefetch_index_cache = AsyncMock(return_value={})
-        rm._resolve_index_pct = AsyncMock(return_value=2.0)
+        # RV-01: 基准侧取窗口累计收益，需按日期解析 close（指数点位）。
+        # 本组用例 t0=20240610 → 100.0、T+5=20240617 → 102.0，窗口 +2%，
+        # 与旧断言 index_pct/alpha 数值保持逐位一致。
+        rm._resolve_index_close = AsyncMock(
+            side_effect=lambda _idx, d: 102.0 if str(d).replace("-", "") == "20240617" else 100.0
+        )
         rm._batch_backfill_t5 = AsyncMock()
         return rm, mock_cache
 
@@ -2330,7 +2508,8 @@ class TestReviewManagerBackfill:
         assert updates[0]["t5_price"] == 9.8
         # D4-M4: T+5 回填同步定稿标签（alpha = t5_pct - index = -2.0 - 2.0 = -4.0 → LOSS）
         assert updates[0]["label"] == "LOSS"
-        assert updates[0]["index_pct"] == 2.0
+        # RV-01: index_pct 为窗口累计收益（窗口 +2%，浮点计算 (102/100-1)*100 → 2.0000...），近似断言
+        assert updates[0]["index_pct"] == pytest.approx(2.0)
         assert updates[0]["alpha"] == round(-4.0, 4)
         assert updates[0]["benchmark_code"] is not None
 
@@ -2650,7 +2829,7 @@ class TestReviewManagerT1Backfill:
             return_value=index_bulk if index_bulk is not None else pd.DataFrame()
         )
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            return_value=index_daily if index_daily is not None else pd.DataFrame({"pct_chg": [2.0]})
+            return_value=index_daily if index_daily is not None else pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
         )
         rm = ReviewManager()
         rm.cache = mock_cache
@@ -2880,18 +3059,20 @@ class TestReviewManagerT1Backfill:
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
     async def test_prefetch_index_cache_parses_mixed_dates(self, mock_cm, mock_tc):
-        """bulk 预取：trade_date 为 date/str 混合格式均解析为 YYYYMMDD，None pct 存 None。"""
+        """bulk 预取：trade_date 为 date/str 混合格式均解析为 YYYYMMDD；缺失 close 不写 key
+        （RV-01:由调用方逐日探测补，避免缓存 None 短路 API 兜底，对抗检视 Major-1）。"""
         rm, mock_cache = self._make_rm(mock_cm, [], pd.DataFrame())
         mock_cache.get_index_daily_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "trade_date": [datetime.date(2024, 6, 10), "20240611", "2024-06-12"],
-                    "pct_chg": [1.0, None, 3.0],
+                    "close": [3100.0, None, 3150.0],
                 }
             )
         )
         cache = await rm._prefetch_index_cache("000300.SH", datetime.date(2024, 6, 1), datetime.date(2024, 6, 30))
-        assert cache == {"20240610": 1.0, "20240611": None, "20240612": 3.0}
+        assert cache == {"20240610": 3100.0, "20240612": 3150.0}
+        assert "20240611" not in cache  # RV-01: 缺失 close 不缓存，交探测逻辑兜底
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -2973,7 +3154,9 @@ class TestReviewManagerMarketCalendar:
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
-        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+        )
         rm._batch_update_results = AsyncMock()
         # 全市场日历含 6/10, 6/11, 6/12；个股行情缺 6/11 → T+1 锚定 6/11 但无行情行
         cal = [
@@ -3009,9 +3192,12 @@ class TestReviewManagerMarketCalendar:
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
         rm = ReviewManager()
         rm.cache = mock_cache
-        # D4-M4: backfill_horizon_returns 现在解析基准指数来定稿 T+5 标签，此处 stub 索引
+        # D4-M4: backfill_horizon_returns 现在解析基准指数来定稿 T+5 标签，此处 stub 索引。
+        # RV-01: 基准侧取窗口累计收益，stub 按日期解析 close（t0=0610→100.0，T+5=0617→102.0，窗口 +2%）。
         rm._prefetch_index_cache = AsyncMock(return_value={})
-        rm._resolve_index_pct = AsyncMock(return_value=2.0)
+        rm._resolve_index_close = AsyncMock(
+            side_effect=lambda _idx, d: 102.0 if str(d).replace("-", "") == "20240617" else 100.0
+        )
         rm._batch_backfill_t5 = AsyncMock()
         # 全市场日历为 6 个交易日；t0=6/10 → T+5 = 日历第 5 个交易日 6/17
         cal = [
@@ -3050,7 +3236,9 @@ class TestReviewManagerMarketCalendar:
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
-        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+        )
         rm = ReviewManager()
         rm.cache = mock_cache
 
