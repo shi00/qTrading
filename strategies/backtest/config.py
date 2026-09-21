@@ -258,7 +258,9 @@ class BacktestResult:
             "allow_limit_up_buy": self.config.allow_limit_up_buy,
             "allow_limit_down_sell": self.config.allow_limit_down_sell,
             "slippage_model": self.config.slippage_model,
-            "on_empty_signal": self.config.on_empty_signal,
+            # BT-09: 不再平铺 on_empty_signal 等无落库列的配置字段（历史死代码）——
+            # 完整配置由下方 config_json（asdict 快照）承载，避免「看起来可追溯实则未落库」
+            # 的误导性信号。平铺列仅保留有实际 DB 索引/查询意义的字段（execution_price 等）。
             # BT-03: 完整回测配置快照（dataclasses.asdict），含 date 对象，DAO 侧递归序列化。
             # 作为完整配置的唯一来源，平铺的 execution_price 等列保留做索引用。
             "config_json": asdict(self.config),

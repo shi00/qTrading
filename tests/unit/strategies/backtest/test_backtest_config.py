@@ -332,3 +332,16 @@ class TestBacktestResultToPersistDict:
         )
         d = result.to_persist_dict()
         assert d["quality_json"]["skipped_order_count"] == 1
+
+    def test_to_persist_dict_excludes_no_persist_column_flatten_fields(self) -> None:
+        """BT-09: to_persist_dict 不得含无落库列的平铺配置字段（历史死代码 on_empty_signal）。
+
+        on_empty_signal 等配置已由 config_json（asdict 完整快照）承载；平铺键若保留，
+        读代码者会误判「无信号处理方式可追溯」——实际 _save_upsert 按 ORM 列取列，
+        多余键被静默忽略。此处断言无落库列名的平铺字段不存在，与 DAO/模型列一致。
+        """
+        result = _make_result()
+        d = result.to_persist_dict()
+        assert "on_empty_signal" not in d
+        # config_json 仍承载完整配置（含 on_empty_signal），保证可复现性不被破坏
+        assert d["config_json"]["on_empty_signal"] == result.config.on_empty_signal
