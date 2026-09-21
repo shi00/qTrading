@@ -1656,7 +1656,7 @@ class TestCLSCircuitBreaker:
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
         mock_tpm.return_value = mock_manager
 
-        base_time = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0))
+        base_time = datetime.datetime(2024, 6, 14, 10, 0, 0).replace(tzinfo=CST_TZ)
         with patch("data.external.news_fetcher.get_now", return_value=base_time):
             for _ in range(3):
                 res = await NewsFetcher.get_latest_global_news()
@@ -1670,13 +1670,13 @@ class TestCLSCircuitBreaker:
     async def test_circuit_fast_fails_when_open(self, mock_get, mock_tpm):
         """熔断开启期间直接返回空列表，不发起网络调用。"""
         nf_mod._CLS_CONSECUTIVE_FAILURES = 3
-        nf_mod._CLS_CIRCUIT_OPENED_AT = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0)).timestamp()
+        nf_mod._CLS_CIRCUIT_OPENED_AT = datetime.datetime(2024, 6, 14, 10, 0, 0).replace(tzinfo=CST_TZ).timestamp()
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
         mock_tpm.return_value = mock_manager
 
-        now = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 30))
+        now = datetime.datetime(2024, 6, 14, 10, 0, 30).replace(tzinfo=CST_TZ)
         with patch("data.external.news_fetcher.get_now", return_value=now):
             res = await NewsFetcher.get_latest_global_news()
             assert res == []
@@ -1688,7 +1688,7 @@ class TestCLSCircuitBreaker:
     async def test_circuit_half_open_recovery(self, mock_get, mock_tpm):
         """冷却期过后半开探活成功，熔断器关闭恢复。"""
         nf_mod._CLS_CONSECUTIVE_FAILURES = 3
-        base_time = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0))
+        base_time = datetime.datetime(2024, 6, 14, 10, 0, 0).replace(tzinfo=CST_TZ)
         nf_mod._CLS_CIRCUIT_OPENED_AT = base_time.timestamp()
 
         mock_resp = MagicMock()
@@ -1717,7 +1717,7 @@ class TestCLSCircuitBreaker:
     async def test_circuit_half_open_failure_resets_cooldown(self, mock_get, mock_tpm):
         """半开探活失败时重置冷却计时器，下一个 60s 窗口重新计时。"""
         nf_mod._CLS_CONSECUTIVE_FAILURES = 3
-        base_time = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0))
+        base_time = datetime.datetime(2024, 6, 14, 10, 0, 0).replace(tzinfo=CST_TZ)
         nf_mod._CLS_CIRCUIT_OPENED_AT = base_time.timestamp()
 
         _wire_http_get(mock_get, MagicMock())

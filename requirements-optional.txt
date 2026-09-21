@@ -188,9 +188,7 @@ markupsafe==3.0.3
     #   jinja2
     #   mako
 matplotlib==3.11.2
-    # via
-    #   astockscreener (pyproject.toml)
-    #   mplfinance
+    # via astockscreener (pyproject.toml)
 mdurl==0.1.2
     # via markdown-it-py
 mini-racer==0.14.1 ; sys_platform != 'linux'
@@ -199,8 +197,6 @@ more-itertools==11.1.0
     # via
     #   jaraco-classes
     #   jaraco-functools
-mplfinance==0.12.10b0
-    # via astockscreener (pyproject.toml)
 msgpack==1.2.2
     # via flet
 multidict==6.7.1
@@ -232,7 +228,6 @@ pandas==3.0.5
     #   astockscreener (pyproject.toml)
     #   akshare
     #   exchange-calendars
-    #   mplfinance
     #   pandas-market-calendars
     #   tushare
 pandas-market-calendars==5.4.0
@@ -287,8 +282,6 @@ python-dotenv==1.2.3
     #   astockscreener (pyproject.toml)
     #   litellm
     #   pydantic-settings
-pytz==2026.3.post1
-    # via astockscreener (pyproject.toml)
 pywin32-ctypes==0.2.3 ; sys_platform == 'win32'
     # via keyring
 pyyaml==6.0.3

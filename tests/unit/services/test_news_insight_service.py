@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
-import pytz
 from unittest.mock import AsyncMock, MagicMock
 
 import services.news_insight_service as module
@@ -31,7 +31,7 @@ from utils.config_handler import ConfigHandler
 
 pytestmark = pytest.mark.unit
 
-CST = pytz.timezone("Asia/Shanghai")
+CST = ZoneInfo("Asia/Shanghai")
 
 
 def _make_dao() -> MagicMock:
@@ -84,7 +84,7 @@ def _validating_log_classified(*args, **kwargs):
 
 class TestWindow:
     def test_window_shape_and_bounds(self, monkeypatch):
-        fixed = CST.localize(datetime.datetime(2026, 9, 16, 12, 30, 0))
+        fixed = datetime.datetime(2026, 9, 16, 12, 30, 0).replace(tzinfo=CST)
         monkeypatch.setattr(module, "get_now", lambda: fixed)
         start_utc, end_utc, start_date, end_date = NewsInsightService._window()
         assert isinstance(start_utc, datetime.datetime)
@@ -95,7 +95,7 @@ class TestWindow:
         assert (end_date - start_date).days == _WINDOW_DAYS - 1
 
     def test_window_start_is_midnight_prev_day_utc(self, monkeypatch):
-        fixed = CST.localize(datetime.datetime(2026, 9, 16, 12, 30, 0))
+        fixed = datetime.datetime(2026, 9, 16, 12, 30, 0).replace(tzinfo=CST)
         monkeypatch.setattr(module, "get_now", lambda: fixed)
         start_utc, _end_utc, start_date, end_date = NewsInsightService._window()
         assert start_date == datetime.date(2026, 8, 18)
@@ -104,7 +104,7 @@ class TestWindow:
         assert start_utc == datetime.datetime(2026, 8, 17, 16, 0, 0)
 
     def test_window_end_is_235959_cst(self, monkeypatch):
-        fixed = CST.localize(datetime.datetime(2026, 9, 16, 12, 30, 0))
+        fixed = datetime.datetime(2026, 9, 16, 12, 30, 0).replace(tzinfo=CST)
         monkeypatch.setattr(module, "get_now", lambda: fixed)
         _start_utc, end_utc, _sd, _ed = NewsInsightService._window()
         # 23:59:59 CST = 15:59:59 UTC naive
@@ -652,7 +652,7 @@ class TestPreview:
         assert isinstance(coverage, dict)
 
     def test_window_label(self, monkeypatch):
-        fixed = CST.localize(datetime.datetime(2026, 9, 16, 12, 30, 0))
+        fixed = datetime.datetime(2026, 9, 16, 12, 30, 0).replace(tzinfo=CST)
         monkeypatch.setattr(module, "get_now", lambda: fixed)
         svc = NewsInsightService(market_dao=_make_dao(), ai_service=_make_ai())
         assert svc.analysis_window_label() == "2026-08-18 ~ 2026-09-16"

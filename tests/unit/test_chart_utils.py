@@ -6,8 +6,7 @@
 import pandas as pd
 import pytest
 
-from matplotlib.figure import Figure
-from ui.components.chart_utils import KlineChartData, generate_kline_chart_data, generate_kline_figure
+from ui.components.chart_utils import KlineChartData, generate_kline_chart_data
 from ui.theme import AppColors
 
 pytestmark = pytest.mark.unit
@@ -26,54 +25,6 @@ def _make_ohlcv_df(n=30):
         },
     )
     return df
-
-
-class TestGenerateKlineFigure:
-    def test_returns_valid_figure(self):
-        df = _make_ohlcv_df()
-        result = generate_kline_figure(df, title="Test")
-        assert isinstance(result, Figure)
-
-    def test_empty_df_raises(self):
-        with pytest.raises(ValueError, match="Empty"):
-            generate_kline_figure(pd.DataFrame(), title="Empty")
-
-    def test_none_df_raises(self):
-        with pytest.raises(ValueError, match="Empty"):
-            generate_kline_figure(None, title="None")
-
-    def test_no_volume_column(self):
-        df = _make_ohlcv_df()
-        df = df.drop(columns=["vol"])
-        result = generate_kline_figure(df, title="NoVol")
-        assert isinstance(result, Figure)
-
-
-class TestKlineFigureAsyncViaThreadPool:
-    @pytest.mark.asyncio
-    async def test_generate_kline_figure_via_thread_pool(self):
-        from utils.thread_pool import ThreadPoolManager, TaskType
-
-        df = _make_ohlcv_df()
-        result = await ThreadPoolManager().run_async(
-            TaskType.CPU,
-            generate_kline_figure,
-            df,
-            title="AsyncTest",
-        )
-        assert isinstance(result, Figure)
-
-
-class TestFigureNoGcfLeak:
-    """Regression: generate_kline_figure must detach figure from Gcf.figs to prevent leak."""
-
-    def test_no_gcf_accumulation_after_multiple_calls(self):
-        from matplotlib._pylab_helpers import Gcf
-
-        df = _make_ohlcv_df()
-        for _ in range(5):
-            generate_kline_figure(df, title="LeakTest")
-        assert len(Gcf.figs) == 0, f"Gcf.figs leaked {len(Gcf.figs)} figures"
 
 
 class TestGenerateKlineChartData:
@@ -207,6 +158,15 @@ class TestGenerateKlineChartData:
         result = generate_kline_chart_data(df)
         assert len(result.volume_groups) == 0
         assert result.max_volume == 0.0
+
+    def test_all_zero_volume_treated_as_no_volume(self):
+        """vol 列存在但全 0 → has_volume=False（Volume.sum()>0 判定）。"""
+        df = _make_ohlcv_df()
+        df["vol"] = 0
+        result = generate_kline_chart_data(df)
+        assert len(result.volume_groups) == 0
+        assert result.max_volume == 0.0
+        assert "Vol:" not in str(result.spots[0].tooltip)
 
     def test_date_labels_generated(self):
         df = _make_ohlcv_df(n=30)
