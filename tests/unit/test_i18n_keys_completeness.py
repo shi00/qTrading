@@ -10,6 +10,77 @@ pytestmark = pytest.mark.unit
 
 _CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
+# OSS-04：动态引用键白名单（精确枚举，非前缀豁免）。
+# 这些键在生产/测试代码中以 f-string 动态拼接引用，AST 静态扫描无法检出其字面引用，
+# 但运行时真实使用——必须存在于 locale（受 test_no_new_unreferenced_i18n_keys 断言守护），
+# 且不得登记进死键 baseline（互斥断言）。新增动态键时在此显式追加。
+_DYNAMIC_KEY_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        # data/data_processor.py: report_step(1..6) → I18n.get(f"init_step_{step_num}")
+        "init_step_1",
+        "init_step_2",
+        "init_step_3",
+        "init_step_4",
+        "init_step_5",
+        "init_step_6",
+        # ui/views/settings_tabs/tier_api_panel.py + ui/components/config_panels/tushare_config_panel.py:
+        # TUSHARE_POINT_TIERS → I18n.get(f"sys_tier_{tier}_label")
+        "sys_tier_points_120_label",
+        "sys_tier_points_2000_label",
+        "sys_tier_points_5000_label",
+        "sys_tier_points_10000_label",
+        "sys_tier_points_15000_label",
+        # services/ai_service/news_classifier.py: I18n.get(f"news_l1_{l1_code}", l1_code)
+        # 枚举源 utils/config_models.py NEWS_CATEGORY_MAP 全集 5 L1
+        "news_l1_finance",
+        "news_l1_industry",
+        "news_l1_macro_economy",
+        "news_l1_geopolitics",
+        "news_l1_other",
+        # services/ai_service/news_classifier.py: I18n.get(f"news_l2_{l2_code}", l2_code)
+        # 枚举源 NEWS_CATEGORY_MAP 全集 17 L2
+        "news_l2_a_stock",
+        "news_l2_hk_us",
+        "news_l2_intl_macro",
+        "news_l2_fiscal_policy",
+        "news_l2_futures",
+        "news_l2_forex",
+        "news_l2_consumer",
+        "news_l2_energy",
+        "news_l2_energy_sector",
+        "news_l2_financial_sector",
+        "news_l2_entertainment",
+        "news_l2_livelihood",
+        "news_l2_conflict",
+        "news_l2_precious_metals",
+        "news_l2_macro_policy",
+        "news_l2_macro_data",
+        "news_l2_tech",
+        # ui/components/config_panels/llm_config_panel.py: I18n.get(f"llm_provider_{provider_id}")
+        # 枚举源同文件 provider_id 硬编码清单（deepseek..minimax / openai..mistral）
+        "llm_provider_openai",
+        "llm_provider_anthropic",
+        "llm_provider_azure",
+        "llm_provider_google",
+        "llm_provider_mistral",
+        "llm_provider_qwen",
+        "llm_provider_moonshot",
+        "llm_provider_minimax",
+        "llm_provider_deepseek",
+        "llm_provider_zhipu",
+        # ui/views/settings_tabs/data_source_tab.py: I18n.get(f"quality_tier_{result.quality_tier}")
+        # 枚举源 quality_tier 取值域 0-3
+        "quality_tier_0",
+        "quality_tier_1",
+        "quality_tier_2",
+        "quality_tier_3",
+    }
+)
+
+# OSS-04：baseline 死键数上限（棘轮天花板）。清理死键递减后须手动下调；
+# 防止向 baseline 塞键 + count 同步 +1 静默放宽棘轮（对抗检视 D-2 加固）。
+_BASELINE_CEILING = 216
+
 
 class TestI18nKeysCompleteness(unittest.TestCase):
     LOCALES_DIR = Path(__file__).parent.parent.parent / "locales"
@@ -256,13 +327,22 @@ class TestI18nKeysCompleteness(unittest.TestCase):
         """UIX-16: Ratchet baseline gate for dead / unreferenced i18n keys.
 
         Every key defined in locales/zh_CN/strings.json must appear in Python AST string constants
-        across the project, or be registered in tests/i18n_dead_keys_baseline.json.
-        New unreferenced keys are forbidden. The total unreferenced key count is ratcheted:
-        it may only stay equal or decrease over time.
+        across the project, be covered by a dynamic-key allowlist / prefix, or be registered in
+        tests/i18n_dead_keys_baseline.json. New unreferenced keys are forbidden; the total
+        unreferenced key count is ratcheted (may only stay equal or decrease).
 
         OSS-01：``col_`` / ``tab_`` 等前缀为动态拼接键（``column_i18n_key`` / 表 alias 在
         运行时按 ``col_<列名>`` / ``tab_<表名>`` 拼接），AST 静态扫描无法检出它们的字面引用，
         属系统性假阳性，予以豁免（检视报告 §5 同款前缀白名单思路）。
+
+        OSS-04 增强（a-e 五断言，堵检视报告 §5 复核发现的危害链）：
+        1. 新增死键禁止 + 总数棘轮（原 UIX-16）
+        2. allowlist ⊆ zh_keys：动态引用键误删 locale 定义时 FAIL（此前零拦截、运行时回退裸键名）
+        3. baseline keys ⊆ zh_keys：死键清理须在同一提交原子完成「删 zh 键 + 删 en 键 +
+           摘 baseline 键 + 减 count」四处修改（任一中间态提交都会被本组断言拦截）
+        4. len(baseline keys) == count：baseline JSON 自洽，防 count 虚高静默放宽棘轮
+        5. baseline 与 allowlist 互斥：动态活键不得登记进死键 baseline（语义分离）
+        6. count ≤ _BASELINE_CEILING：棘轮天花板，防「塞键 + count 同步递增」绕过棘轮
         """
         project_root = Path(__file__).parent.parent.parent
         baseline_path = project_root / "tests" / "i18n_dead_keys_baseline.json"
@@ -274,6 +354,40 @@ class TestI18nKeysCompleteness(unittest.TestCase):
             baseline_count = baseline_data.get("count", len(baseline_keys))
 
         zh_keys = self._load_keys("zh_CN")
+
+        # OSS-04 断言 c：baseline JSON 自洽（keys 与 count 漂移须先核对再改）
+        self.assertEqual(
+            len(baseline_keys),
+            baseline_count,
+            "i18n_dead_keys_baseline.json 的 count 与 keys 数量不一致，请核对后同步",
+        )
+        # OSS-04 断言 e：棘轮天花板，防塞键 + count 同步递增绕过
+        self.assertLessEqual(
+            baseline_count,
+            _BASELINE_CEILING,
+            f"baseline count ({baseline_count}) 超过棘轮天花板 {_BASELINE_CEILING}；"
+            f"死键只减不增，清理后须下调 _BASELINE_CEILING 而非上调",
+        )
+        # OSS-04 断言 d：动态活键与死键登记互斥
+        overlap = baseline_keys & _DYNAMIC_KEY_ALLOWLIST
+        self.assertFalse(
+            overlap,
+            f"以下动态引用活键被误登记进死键 baseline（应移入 _DYNAMIC_KEY_ALLOWLIST）: {sorted(overlap)}",
+        )
+        # OSS-04 断言 a：动态引用键必须在 locale 定义（误删会导致运行时回退裸键名）
+        missing_dynamic = _DYNAMIC_KEY_ALLOWLIST - zh_keys
+        self.assertFalse(
+            missing_dynamic,
+            f"动态引用键从 strings.json 丢失（运行时将回退裸键名）: {sorted(missing_dynamic)}；"
+            f"若为有意下线，须先删除代码中的动态引用点并同步收缩 _DYNAMIC_KEY_ALLOWLIST",
+        )
+        # OSS-04 断言 b：baseline 死键须仍在 locale（清理须原子完成四处同步修改）
+        vanished = baseline_keys - zh_keys
+        self.assertFalse(
+            vanished,
+            f"baseline 登记的死键已从 strings.json 消失: {sorted(vanished)[:20]}；"
+            f"清理死键须在同一提交完成：删 zh 键 + 删 en 键 + 摘 baseline 条目 + 减 count",
+        )
 
         used_strings: set[str] = set()
         scanned_dirs = ["ui", "core", "data", "services", "strategies", "utils", "app", "tests"]
@@ -287,12 +401,17 @@ class TestI18nKeysCompleteness(unittest.TestCase):
                     for node in ast.walk(tree):
                         if isinstance(node, ast.Constant) and isinstance(node.value, str):
                             used_strings.add(node.value)
+                # NOTE(lazy): 扫描失败静默跳过. ceiling: 语法错误文件. upgrade: 引入扫描失败计数告警.
+                # fail-safe 方向：used_strings 缺失只会放大 unreferenced_keys（假阳性 FAIL），不会漏检。
                 except Exception:
                     pass
 
-        # 动态拼接前缀（运行时拼键，静态不可检查）：col_/tab_ 由派生逻辑按约定拼接
+        # 动态拼接前缀（运行时拼键，静态不可检查）：col_/tab_ 由派生逻辑按约定拼接；
+        # _DYNAMIC_KEY_ALLOWLIST 为精确枚举的动态引用键（见模块级注释）
         dynamic_prefixes = ("col_", "tab_", "strategy_", "err_")
-        unreferenced_keys = {k for k in zh_keys - used_strings if not k.startswith(dynamic_prefixes)}
+        unreferenced_keys = {
+            k for k in zh_keys - used_strings if not k.startswith(dynamic_prefixes)
+        } - _DYNAMIC_KEY_ALLOWLIST
         new_unreferenced = unreferenced_keys - baseline_keys
 
         self.assertFalse(
