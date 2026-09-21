@@ -4207,6 +4207,48 @@ class TestUnpricedUsageGuards:
         assert cluster["unpriced_calls"] == 1
         assert cluster["unpriced_tokens"] == 5
 
+    def test_accumulate_usage_unpriced_by_model_detail(self):
+        """Mi2（review-pr1073）：不可计价调用携带 model 键时聚合 model→calls 明细。"""
+        cluster = {
+            "calls": 0,
+            "tokens": 0,
+            "cost_cny": 0.0,
+            "unpriced_calls": 0,
+            "unpriced_tokens": 0,
+            "unpriced_by_model": {},
+        }
+        ConcreteStrategy._accumulate_usage(
+            cluster,
+            {"usage": {"total_tokens": 30}, "cost": None, "model": "zhipu/glm-4-plus"},
+        )
+        ConcreteStrategy._accumulate_usage(
+            cluster,
+            {"usage": {"total_tokens": 10}, "cost": None, "model": "zhipu/glm-4-plus"},
+        )
+        ConcreteStrategy._accumulate_usage(
+            cluster,
+            {"usage": {"total_tokens": 20}, "cost": None, "model": "custom/private-llm"},
+        )
+        assert cluster["unpriced_calls"] == 3
+        assert cluster["unpriced_by_model"] == {
+            "zhipu/glm-4-plus": 2,
+            "custom/private-llm": 1,
+        }
+
+    def test_accumulate_usage_by_model_missing_or_invalid(self):
+        """Mi2：model 键缺失/非字符串时明细计数跳过，不阻断聚合（向后兼容）。"""
+        cluster = {
+            "calls": 0,
+            "tokens": 0,
+            "cost_cny": 0.0,
+            "unpriced_calls": 0,
+            "unpriced_tokens": 0,
+            "unpriced_by_model": {},
+        }
+        ConcreteStrategy._accumulate_usage(cluster, {"usage": {"total_tokens": 5}, "cost": None})
+        assert cluster["unpriced_calls"] == 1
+        assert cluster["unpriced_by_model"] == {}
+
     # --- _should_prompt_unpriced ---
 
     @pytest.mark.asyncio

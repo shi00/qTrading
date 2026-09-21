@@ -24,6 +24,10 @@ from __future__ import annotations
 
 from datetime import date
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # 价格变动时更新此日期，便于审计价格时效性。
 PRICING_UPDATED = date(2026, 9, 14)
 
@@ -93,9 +97,15 @@ def estimate_cost(
             prompt_tokens=input_tokens,
             completion_tokens=output_tokens,
         )
-    except Exception:
+    except Exception as e:
         # 模型不在 litellm 价格表 → 抛异常。控制流分支：返回 None，由上层按「不可计价」
         # 计数（R21：不把「不可计量」伪装成「零成本」）。
+        # Mi1（review-pr1073）：debug 级记录具体模型与异常类型，供诊断"哪些模型无法计价"。
+        logger.debug(
+            "[pricing] estimate_cost unpriced model=%s exception_type=%s",
+            effective_model,
+            type(e).__name__,
+        )
         return None
 
     cost = (in_usd + out_usd) * _get_usd_to_cny_rate()

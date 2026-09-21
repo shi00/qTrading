@@ -285,6 +285,9 @@ failover 前缀判定（`model.split("/")[0]`）。
    保守提示漏触发。）
 5. 批次末（L964-971）：`_ai_usage_summary` 增加 `unpriced_calls`/`unpriced_tokens`；
    `_track_cost` 同时持久化成本与不可计价量。
+6. **不可计价明细（review-pr1073 Mi2）**：`litellm_client` 的 result 携带 `model` 键（流式/非流式
+   两路径）；`_accumulate_usage` 在 cost 为 None 时顺带聚合 `unpriced_by_model`（model→calls 轻量
+   map，`.get` 防御向后兼容），供诊断"哪些模型无法计价"，不改变持久化契约。
 
 ### 3.3 持久化侧：_track_cost 改造
 

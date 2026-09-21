@@ -426,6 +426,8 @@ class LiteLLMClient:
                     response_content = reasoning_content
 
                 result = {"content": response_content}
+                # Mi2（review-pr1073）：携带生效模型 id，供上层 unpriced 明细（model→calls）聚合。
+                result["model"] = effective_model
                 if reasoning_content:
                     result["reasoning_content"] = reasoning_content
                 if usage:
@@ -441,6 +443,8 @@ class LiteLLMClient:
                 response = await _ai.acompletion(**request_params)
                 content = response.choices[0].message.content  # type: ignore[union-attr]
                 result = {"content": content}
+                # Mi2（review-pr1073）：非流式路径亦携带生效模型 id（明细聚合用）。
+                result["model"] = effective_model
 
                 if hasattr(response, "usage") and response.usage:  # type: ignore[union-attr]
                     result["usage"] = {

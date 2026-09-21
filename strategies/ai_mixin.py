@@ -800,6 +800,8 @@ class AIStrategyMixin:
             "cost_cny": 0.0,
             "unpriced_calls": 0,
             "unpriced_tokens": 0,
+            # Mi2（review-pr1073）：不可计价明细 model→calls map，供诊断"哪些模型无法计价"。
+            "unpriced_by_model": {},
         }
         on_stream_start = context.get("on_stream_start") if stream_enabled else None
         on_card_start = context.get("on_card_start") if not stream_enabled else None
@@ -1127,7 +1129,15 @@ class AIStrategyMixin:
             # D4-M2: 重试成功同样计入月度成本与不可计价量
             # （与 run_ai_analysis 收尾 _track_cost 同口径）。failed 路径不产生有效调用，不计费。
             if isinstance(res, dict) and res.get("ai_status") != "failed":
-                cluster = {"calls": 0, "tokens": 0, "cost_cny": 0.0, "unpriced_calls": 0, "unpriced_tokens": 0}
+                cluster = {
+                    "calls": 0,
+                    "tokens": 0,
+                    "cost_cny": 0.0,
+                    "unpriced_calls": 0,
+                    "unpriced_tokens": 0,
+                    # Mi2（review-pr1073）：重试路径同样维护不可计价明细 map。
+                    "unpriced_by_model": {},
+                }
                 self._accumulate_usage(cluster, res)
                 if cluster["calls"] > 0 or cluster["unpriced_calls"] > 0:
                     try:
@@ -1275,7 +1285,8 @@ class AIStrategyMixin:
         - ``cost`` 为 int/float（含 0.0，即 ``cost is not None``）→ 计入 ``cost_cny``；
           免费模型 cost==0.0 属已计价，走成本记账归零，不误计 unpriced（对齐 litellm 语义）；
         - ``cost`` 为 None（不可计量，R21）→ 计入 ``unpriced_calls``/``unpriced_tokens``，
-          避免「不可计量」被呈现为「零成本」。
+          避免「不可计量」被呈现为「零成本」；同时经 ``res["model"]``（litellm_client 携带）
+          聚合 ``unpriced_by_model`` 明细（Mi2，供诊断"哪些模型无法计价"）。
         """
         usage = res.get("usage")
         if not usage or not isinstance(usage, dict):
@@ -1289,6 +1300,12 @@ class AIStrategyMixin:
             # SEC/R21: 不可计价（cost None / 非数值）必须计数，否则「不可计量」被呈现为「零成本」。
             ai_usage_cluster["unpriced_calls"] += 1
             ai_usage_cluster["unpriced_tokens"] += int(usage.get("total_tokens", 0) or 0)
+            # Mi2（review-pr1073）：model→calls 明细计数（litellm_client result 带 model 键）。
+            model = res.get("model")
+            if isinstance(model, str) and model:
+                by_model = ai_usage_cluster.get("unpriced_by_model")
+                if isinstance(by_model, dict):
+                    by_model[model] = by_model.get(model, 0) + 1
 
     async def _track_cost(
         self,
