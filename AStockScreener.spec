@@ -46,7 +46,6 @@ hiddenimports = [
     "keyring",
     "cryptography",
     "matplotlib",
-    "mplfinance",
     "requests",
     "httpx",
     "numpy",

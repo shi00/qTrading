@@ -3286,20 +3286,6 @@
       "source_line": "            mock_engine_cls.assert_called_once()"
     },
     {
-      "file": "unit/ui/test_chart_utils.py",
-      "line": 50,
-      "type": "weak_is_not_none_ratio",
-      "detail": "is not None 断言占比过高 (1/2 = 50.0%) > 40% in test_generate_kline_figure_with_trade_date_column",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/ui/test_chart_utils.py",
-      "line": 169,
-      "type": "weak_called_flag",
-      "detail": "assert m.called 裸布尔标志（不验证调用参数）",
-      "source_line": "        assert mock_plot.called"
-    },
-    {
       "file": "unit/ui/test_data_explorer_view_model.py",
       "line": 158,
       "type": "weak_mock",
