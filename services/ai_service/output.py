@@ -49,9 +49,12 @@ def validate_ai_analysis_response(response: dict) -> dict:
         try:
             score = float(score)
             if not (0 <= score <= 100):
+                # R21：越界评分是模型失控信号，不是"极端看好/看空"。钳位会把违规输出
+                # 变成最强买入/否决信号，与不可解析分支同样置 None 交由下游按"未打分"处理。
                 logger.warning("[AIService] Output validation: score out of range [0,100]: %s", score)
-                score = max(0, min(100, score))
-            response["score"] = score
+                response["score"] = None
+            else:
+                response["score"] = score
         except (ValueError, TypeError):
             # R21：不可解析的分数不是"0 分否决"，置 None 让下游按"未打分"处理。
             logger.warning("[AIService] Output validation: invalid score type: %s", score)
@@ -65,8 +68,10 @@ def validate_ai_analysis_response(response: dict) -> dict:
     if recommendation is not None:
         rec_lower = str(recommendation).lower().strip()
         if rec_lower not in VALID_RECOMMENDATIONS:
+            # R21：不认识的推荐值是模型失控/新词，不是"中性"结论。置 None 交由
+            # 下游按"未给出建议"处理，不把"模型说了句听不懂的话"伪装成业务结论。
             logger.warning("[AIService] Output validation: unexpected recommendation: %s", recommendation)
-            response["recommendation"] = "neutral"
+            response["recommendation"] = None
         else:
             response["recommendation"] = rec_lower
 
