@@ -989,10 +989,14 @@ class AIConceptFailure(Base):
 
 
 class Watchlist(Base):
-    """关注列表（FR-UX-004, Task 4.2）。
+    """关注列表（FR-UX-004, Task 4.2 / RV-05）。
 
     用户从选股结果/详情对话框加入关注的股票，按 ts_code 唯一去重（upsert）。
     note 字段存用户备注（R17: note 非 SQL 保留字，安全）。
+    added_trade_date/added_price 为加入时的观察起点（RV-05）：加入关注时一次性
+    写入（IS NULL 守卫，之后只读），让「关注以来收益」成为确定计算；复权口径
+    close/adj_factor（与 review_manager._qfq_return_pct 同口径），adj 缺失时
+    price 为 NULL（R21 不伪造，避免与未来复权价不可比）。
     """
 
     __tablename__ = "watchlist"
@@ -1001,6 +1005,8 @@ class Watchlist(Base):
     stock_name = Column(String)
     added_at = Column(DateTime(timezone=False), server_default=text("now()"))
     note = Column(String)
+    added_trade_date = Column(Date)
+    added_price = Column(Numeric(12, 6))
 
 
 def get_model_columns(model_class: type, exclude: set[str] | None = None) -> list[str]:

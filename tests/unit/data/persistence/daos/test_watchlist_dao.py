@@ -1,11 +1,15 @@
-"""WatchlistDao 单元测试 (FR-UX-004, Task 4.2).
+"""WatchlistDao 单元测试 (FR-UX-004, Task 4.2 / RV-05).
 
 覆盖 add/remove/get/is_in 四个核心方法，验证：
 - R4: asyncpg 原生查询用 $1 占位符（非 %s）
 - R8: 批量写入用 _save_upsert
 - R12/R13: 表与 DAO 已注册（由 pre-commit check_redlines.py 守护，本测试覆盖行为）
+- RV-05: add 时固化观察起点（最近交易日 + 复权收盘价 close/adj_factor），
+  IS NULL 守卫只写一次；行情缺失保持 NULL（R21 不伪造）
 """
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
+
+import datetime
 
 import pandas as pd
 import pytest
@@ -24,6 +28,11 @@ def _make_dao() -> WatchlistDao:
     dao._write_db = AsyncMock(return_value=1)
     dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
     return dao
+
+
+def _quote_df(trade_date: datetime.date, close: float, adj: float | None) -> pd.DataFrame:
+    """构造 _latest_quote 查询的返回 df（单行最近行情）。"""
+    return pd.DataFrame({"trade_date": [trade_date], "close": [close], "adj_factor": [adj]})
 
 
 class TestAddToWatchlist:
@@ -56,6 +65,71 @@ class TestAddToWatchlist:
         await dao.add_to_watchlist("600000.SH", "浦发银行")
         df_passed = dao._save_upsert.call_args.args[0]
         assert df_passed.iloc[0]["note"] is None
+
+
+class TestAddToWatchlistObservationOrigin:
+    """RV-05: add 时固化观察起点（只写一次守卫 + 复权口径 + R21 不伪造）。"""
+
+    @pytest.mark.asyncio
+    async def test_add_pins_origin_when_quote_available(self):
+        """行情可得：固化 (最近交易日, close/adj_factor 复权价)，UPDATE 带 IS NULL 守卫。"""
+        dao = _make_dao()
+        dao._read_db_select.return_value = _quote_df(datetime.date(2026, 9, 19), 10.0, 2.0)
+        result = await dao.add_to_watchlist("000001.SZ", "平安银行")
+        assert result == 1
+        assert dao._write_db.await_count == 1
+        sql = dao._write_db.call_args.args[0]
+        assert "added_trade_date IS NULL" in sql  # 只写一次守卫（已固化不覆盖）
+        assert "$1" in sql and "$2" in sql and "$3" in sql  # R4 参数化
+        params = dao._write_db.call_args.args[1]
+        assert params[0] == "000001.SZ"
+        assert params[1] == datetime.date(2026, 9, 19)
+        assert params[2] == pytest.approx(5.0)  # 10.0 / 2.0（复权口径同 _qfq_return_pct）
+
+    @pytest.mark.asyncio
+    async def test_add_with_missing_adj_factor_pins_date_only(self):
+        """adj_factor 缺失：交易日仍固化，价格 NULL（未复权价与未来复权口径不可比，R21）。"""
+        dao = _make_dao()
+        dao._read_db_select.return_value = _quote_df(datetime.date(2026, 9, 19), 10.0, None)
+        await dao.add_to_watchlist("000001.SZ", "平安银行")
+        assert dao._write_db.await_count == 1
+        params = dao._write_db.call_args.args[1]
+        assert params[1] == datetime.date(2026, 9, 19)
+        assert params[2] is None
+
+    @pytest.mark.asyncio
+    async def test_add_with_zero_adj_factor_pins_date_only(self):
+        """adj_factor 为 0（脏数据）：除零防御，价格 NULL。"""
+        dao = _make_dao()
+        dao._read_db_select.return_value = _quote_df(datetime.date(2026, 9, 19), 10.0, 0.0)
+        await dao.add_to_watchlist("000001.SZ", "平安银行")
+        params = dao._write_db.call_args.args[1]
+        assert params[2] is None
+
+    @pytest.mark.asyncio
+    async def test_add_without_quote_skips_pin(self):
+        """无行情记录（新上市未同步/已退市）：不执行固化 UPDATE，起点保持 NULL（R21）。"""
+        dao = _make_dao()
+        dao._read_db_select.return_value = pd.DataFrame()
+        await dao.add_to_watchlist("301999.SZ", "新股")
+        assert dao._write_db.await_count == 0
+        dao._save_upsert.assert_awaited_once()  # 基础三列 upsert 语义不变
+
+    @pytest.mark.asyncio
+    async def test_add_quote_returns_first_row_as_latest(self):
+        """_latest_quote 取查询结果首行（SQL 已按 trade_date desc limit 1，此处验证取行语义）。"""
+        dao = _make_dao()
+        dao._read_db_select.return_value = pd.DataFrame(
+            {
+                "trade_date": [datetime.date(2026, 9, 19), datetime.date(2026, 9, 18)],
+                "close": [10.0, 9.0],
+                "adj_factor": [2.0, 1.9],
+            }
+        )
+        await dao.add_to_watchlist("000001.SZ", "平安银行")
+        params = dao._write_db.call_args.args[1]
+        assert params[1] == datetime.date(2026, 9, 19)
+        assert params[2] == pytest.approx(5.0)
 
 
 class TestRemoveFromWatchlist:
