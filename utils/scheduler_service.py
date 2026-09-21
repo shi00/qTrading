@@ -175,18 +175,10 @@ class SchedulerService:
             await set_app_state_max(engine, db_key, value or "")
         self._persist_run_date(config_key, value)
 
-    def _mark_daily_update_done(self, today_str: str):
-        self._last_update_date = today_str
-        self._persist_run_date(_CFG_LAST_DAILY_UPDATE, today_str)
-
     async def _mark_daily_update_done_db(self, today_str: str):
         # REVIEW-06 TO-02: 内存侧同样单调（与 DB GREATEST 语义一致），防止并发下水位倒退。
         self._last_update_date = max(self._last_update_date or "", today_str)
         await self._persist_run_date_db(_DB_KEY_DAILY_UPDATE, _CFG_LAST_DAILY_UPDATE, today_str)
-
-    def _mark_nightly_prediction_done(self, today_str: str):
-        self._last_pred_date = today_str
-        self._persist_run_date(_CFG_LAST_NIGHTLY_PREDICTION, today_str)
 
     async def _mark_nightly_prediction_done_db(self, today_str: str):
         # REVIEW-06 TO-02: 内存侧单调（同 _mark_daily_update_done_db）。

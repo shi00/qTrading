@@ -55,24 +55,6 @@ class TestSchedulerServiceInit:
         assert svc._last_update_date == "20240614"
 
 
-class TestSchedulerServiceMarkDone:
-    @patch("utils.scheduler_service.ConfigHandler")
-    def test_mark_daily_update_done(self, mock_ch):
-        mock_ch.get_setting.return_value = None
-        mock_ch.save_config = MagicMock()
-        svc = SchedulerService()
-        svc._mark_daily_update_done("20240615")
-        assert svc._last_update_date == "20240615"
-
-    @patch("utils.scheduler_service.ConfigHandler")
-    def test_mark_nightly_prediction_done(self, mock_ch):
-        mock_ch.get_setting.return_value = None
-        mock_ch.save_config = MagicMock()
-        svc = SchedulerService()
-        svc._mark_nightly_prediction_done("20240615")
-        assert svc._last_pred_date == "20240615"
-
-
 class TestSchedulerServicePersistRunDate:
     @patch("utils.scheduler_service.ConfigHandler")
     def test_persist(self, mock_ch):

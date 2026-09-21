@@ -365,8 +365,12 @@ def test_scheduler_marks_run_dates_and_persists(monkeypatch):
     )
 
     service = sched_mod.SchedulerService()
-    service._mark_daily_update_done("20260428")
-    service._mark_nightly_prediction_done("20260428")
+    # REVIEW-06 TO-05: config-only 标记方法（_mark_*_done）已随 C-P1-6 迁移移除（DB 为真相源），
+    # 此处直接用保留的 _persist_run_date 表达 config 持久化语义。
+    service._last_update_date = "20260428"
+    service._persist_run_date("scheduler_last_daily_update", "20260428")
+    service._last_pred_date = "20260428"
+    service._persist_run_date("scheduler_last_nightly_prediction", "20260428")
 
     assert service._last_update_date == "20260428"
     assert service._last_pred_date == "20260428"
