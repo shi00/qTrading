@@ -633,7 +633,6 @@ class TestCacheManagerCheckComprehensiveHealth:
                     "daily_quotes": {
                         "type": "stock",
                         "quality_config": {"monitor": True, "frequency": "daily"},
-                        "columns": {"ts_code": {}},
                         "sync_config": {"keys": ["ts_code"], "date_col": "trade_date"},
                     },
                 },
@@ -662,7 +661,6 @@ class TestCacheManagerCheckComprehensiveHealth:
                     "daily_quotes": {
                         "type": "stock",
                         "quality_config": {"monitor": True},
-                        "columns": {"ts_code": {}},
                         "sync_config": {"keys": ["ts_code"], "date_col": "trade_date"},
                     },
                 },
@@ -690,7 +688,6 @@ class TestCacheManagerCheckComprehensiveHealth:
                     "macro_economy": {
                         "type": "global",
                         "quality_config": {"monitor": True},
-                        "columns": {},
                         "sync_config": {},
                     },
                 },
@@ -722,7 +719,6 @@ class TestCacheManagerCheckComprehensiveHealth:
                     "test_table": {
                         "type": "stock",
                         "quality_config": {"monitor": True},
-                        "columns": {"ts_code": {}},
                         "sync_config": {"keys": ["ts_code"]},
                     },
                 },
@@ -751,7 +747,6 @@ class TestCacheManagerCheckComprehensiveHealth:
                     "daily_quotes": {
                         "type": "stock",
                         "quality_config": {"monitor": True},
-                        "columns": {"ts_code": {}},
                         "sync_config": {"keys": ["ts_code"]},
                     },
                 },
@@ -814,7 +809,6 @@ class TestCacheManagerCheckComprehensiveHealth:
                     "daily_quotes": {
                         "type": "stock",
                         "quality_config": {"monitor": True},
-                        "columns": {"ts_code": {}},
                         "sync_config": {"keys": ["ts_code"]},
                     },
                 },
@@ -851,7 +845,6 @@ class TestCacheManagerCheckComprehensiveHealth:
                     "daily_quotes": {
                         "type": "stock",
                         "quality_config": {"monitor": True},
-                        "columns": {"ts_code": {}},
                         "sync_config": {"keys": ["ts_code"]},
                     },
                 },
@@ -892,7 +885,6 @@ class TestCacheManagerCheckComprehensiveHealth:
                     "daily_quotes": {
                         "type": "stock",
                         "quality_config": {"monitor": True},
-                        "columns": {"ts_code": {}},
                         "sync_config": {"keys": ["ts_code"]},
                     },
                 },
@@ -941,13 +933,11 @@ class TestCacheManagerCheckComprehensiveHealth:
                     "daily_quotes": {
                         "type": "stock",
                         "quality_config": {"monitor": True},
-                        "columns": {"ts_code": {}},
                         "sync_config": {"keys": ["ts_code"], "date_col": "trade_date"},
                     },
                     "stock_basic": {
                         "type": "stock",
                         "quality_config": {"monitor": True},
-                        "columns": {"ts_code": {}},
                         "sync_config": {"keys": ["ts_code"]},
                     },
                 },
@@ -991,7 +981,6 @@ class TestCacheManagerCheckComprehensiveHealth:
                     "daily_quotes": {
                         "type": "stock",
                         "quality_config": {"monitor": True},
-                        "columns": {"ts_code": {}},
                         "sync_config": {"keys": ["ts_code"], "date_col": "trade_date"},
                     },
                 },

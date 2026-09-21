@@ -80,6 +80,30 @@ class TestI18nKeysCompleteness(unittest.TestCase):
             f"Missing column i18n keys in en_US: {missing_cols_en[:10]}",
         )
 
+    def test_common_columns_i18n_keys_exist(self):
+        """OSS-01B: COMMON_COLUMNS 全量兜底键必须在 zh/en locale 中定义。
+
+        列级 i18n key 经 column_i18n_key 从 ORM 列派生，不属于任何 ORM 列的
+        COMMON_COLUMNS 条目（如 rsi_6 / volume 等动态列）不会被
+        test_data_dictionary_i18n_keys_exist 遍历到，须在此独立守护双语存在性。
+        """
+        from data.data_dictionary import COMMON_COLUMNS
+
+        zh_keys = self._load_keys("zh_CN")
+        en_keys = self._load_keys("en_US")
+
+        missing_zh = sorted({k for k in COMMON_COLUMNS.values() if k not in zh_keys})
+        missing_en = sorted({k for k in COMMON_COLUMNS.values() if k not in en_keys})
+
+        self.assertFalse(
+            missing_zh,
+            f"Missing COMMON_COLUMNS i18n keys in zh_CN: {missing_zh}",
+        )
+        self.assertFalse(
+            missing_en,
+            f"Missing COMMON_COLUMNS i18n keys in en_US: {missing_en}",
+        )
+
     def test_no_empty_values(self):
         for locale in ["zh_CN", "en_US"]:
             path = self.LOCALES_DIR / locale / "strings.json"
