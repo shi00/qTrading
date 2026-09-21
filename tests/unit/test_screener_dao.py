@@ -10,7 +10,7 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 import pandas as pd
 
-from data.persistence.daos.screener_dao import ScreenerDao
+from data.persistence.daos.screener_dao import ScreenerDao, _derive_screening_from_fundamental
 from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.stock_dao import stock_alive_condition
 from data.constants import REVIEW_STATUS_COMPLETED, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE
@@ -1485,3 +1485,49 @@ class TestScreenerDaoGetAiAttributionStats:
         assert "loss_cnt" in sql
         assert "group by" in sql.lower()
         dao._read_db_select.assert_awaited_once()
+
+
+class TestScreenerDaoScreeningDerivation:
+    """DS-05: screening_data 由 fundamental_screening_data 派生（同模板唯差 close 条件）。
+
+    语义：SQL ``q.close IS NOT NULL`` ↔ pandas ``close.notna()``；缺 close 列/None/空表
+    原样返回（防御路径，真实模板恒含 close 列）。
+    """
+
+    def _fund_df(self, closes):
+        return pd.DataFrame(
+            {
+                "ts_code": [f"{i:06d}.SZ" for i in range(1, len(closes) + 1)],
+                "close": list(closes),
+            }
+        )
+
+    def test_all_close_non_null_returns_all(self):
+        """close 全非 NULL → 派生结果与输入行集相同。"""
+        fund = self._fund_df([10.0, 20.0, 30.0])
+        out = _derive_screening_from_fundamental(fund)
+        assert len(out) == 3
+        assert list(out["ts_code"]) == ["000001.SZ", "000002.SZ", "000003.SZ"]
+
+    def test_null_close_rows_removed_and_index_reset(self):
+        """部分 close 为 NULL（无报价/停牌）→ 剔除该行且 index 连续。"""
+        fund = self._fund_df([10.0, None, 30.0])
+        out = _derive_screening_from_fundamental(fund)
+        assert list(out["ts_code"]) == ["000001.SZ", "000003.SZ"]
+        assert list(out.index) == [0, 1]  # reset_index(drop=True)
+
+    def test_all_null_close_returns_empty(self):
+        fund = self._fund_df([None, None])
+        out = _derive_screening_from_fundamental(fund)
+        assert out.empty
+
+    def test_missing_close_column_returns_original(self):
+        """缺 close 列（防御路径）→ 原样返回，不做不可预期裁剪。"""
+        fund = pd.DataFrame({"ts_code": ["000001.SZ"]})
+        out = _derive_screening_from_fundamental(fund)
+        assert out is fund
+
+    def test_none_and_empty_passthrough(self):
+        assert _derive_screening_from_fundamental(None) is None
+        empty = pd.DataFrame()
+        assert _derive_screening_from_fundamental(empty) is empty

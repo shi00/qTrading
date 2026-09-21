@@ -15,6 +15,8 @@ from data.constants import (
     HEALTH_CHECK_TABLES,
     HEALTH_REPORT_ORDER,
     MAJOR_INDICES,
+    SENTIMENT_INDEX_NAMES,
+    SENTIMENT_INDICES,
     REVIEW_STATUS_PENDING,
     REVIEW_STATUS_T1_DONE,
     REVIEW_STATUS_COMPLETED,
@@ -195,6 +197,17 @@ class TestConstantsValues:
     def test_default_benchmark_single_source(self):
         """D2-5：单一基准正本统一为 000300.SH（沪深 300，已在同步列表且积分门槛低）。"""
         assert DEFAULT_BENCHMARK_INDEX == "000300.SH"
+
+    def test_sentiment_indices_are_major_subset(self):
+        """SC-06: oversold 大盘环境指数必须是 MAJOR_INDICES 子集（否则不同步→静默缺失）。"""
+        assert set(SENTIMENT_INDICES) <= set(MAJOR_INDICES)
+        assert len(SENTIMENT_INDICES) == 3
+
+    def test_sentiment_index_names_aligned(self):
+        """SC-06: 情绪指数中文名与代码一一对应（防列表变更两处同改遗漏）。"""
+        assert set(SENTIMENT_INDEX_NAMES) == set(SENTIMENT_INDICES)
+        for name in SENTIMENT_INDEX_NAMES.values():
+            assert isinstance(name, str) and name
 
     def test_default_benchmark_in_sync_target(self):
         """DS-01：配置的默认基准必然出现在 index_daily 同步目标集合中（CI 防同类错配）。

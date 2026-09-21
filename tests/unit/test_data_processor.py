@@ -975,7 +975,8 @@ class TestDataProcessorPrepareScreeningContext:
     async def test_with_suspended_stocks(self):
         dp = _make_dp()
         dp._quality_tier = 3
-        dp.cache.screener_dao.get_screening_data = AsyncMock(
+        # DS-05: screening_data 由 fundamental_screening_data 派生，mock 源统一在 fundamental。
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -984,7 +985,6 @@ class TestDataProcessorPrepareScreeningContext:
                 }
             )
         )
-        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=None)
         dp.cache.quote_dao.get_northbound = AsyncMock(return_value=None)
         dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
         dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=None)
@@ -1021,7 +1021,8 @@ class TestDataProcessorPrepareScreeningContext:
         """DS-02: exclude_st=True 时按 is_st 列剔除风险警示股，并记录 st_excluded 诊断。"""
         dp = _make_dp()
         dp._quality_tier = 3
-        dp.cache.screener_dao.get_screening_data = AsyncMock(
+        # DS-05: screening_data 由 fundamental_screening_data 派生，mock 源统一在 fundamental。
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
@@ -1031,7 +1032,6 @@ class TestDataProcessorPrepareScreeningContext:
                 }
             )
         )
-        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=None)
         dp.cache.quote_dao.get_northbound = AsyncMock(return_value=None)
         dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
         dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=None)
@@ -1054,8 +1054,8 @@ class TestDataProcessorPrepareScreeningContext:
                 "is_st": [False, True],
             }
         )
-        dp.cache.screener_dao.get_screening_data = AsyncMock(return_value=df)
-        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=None)
+        # DS-05: screening_data 由 fundamental_screening_data 派生，mock 源统一在 fundamental。
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=df)
         dp.cache.quote_dao.get_northbound = AsyncMock(return_value=None)
         dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
         dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=None)
@@ -1069,10 +1069,10 @@ class TestDataProcessorPrepareScreeningContext:
         """DS-02: 无 is_st 列时 ST 排除静默跳过（保底不剔除），不崩溃。"""
         dp = _make_dp()
         dp._quality_tier = 3
-        dp.cache.screener_dao.get_screening_data = AsyncMock(
+        # DS-05: screening_data 由 fundamental_screening_data 派生，mock 源统一在 fundamental。
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "is_tradable": [True]})
         )
-        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=None)
         dp.cache.quote_dao.get_northbound = AsyncMock(return_value=None)
         dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
         dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=None)

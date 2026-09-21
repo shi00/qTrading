@@ -182,15 +182,20 @@ class TechnicalAnalysis:
     @staticmethod
     def calculate_rsi_pandas(close: pd.Series, period: int = 14) -> pd.Series:
         """
-        使用 Pandas 计算 RSI 序列（EMA 平滑方式，与 Polars 版本一致）。
+        使用 Polars 计算 RSI 序列并转回 Pandas（SC-05 合一：唯一正本为 Polars get_rsi_expr）。
 
         与 get_rsi() 不同，此方法返回完整的 RSI 序列，用于后续分析：
         - 连续超卖天数
         - 恐慌速跌偏离度
         - 超卖钝化检测
 
+        SC-05: 合一前本方法为独立 Pandas 实现（min_periods=period），与 Polars 版
+        （min_samples=0）口径不一致导致 EWM 种子污染与两套边界处理漂移。
+        现改为调用 get_rsi_expr 计算后转回，预热期语义（前 period 根为 NaN/null）与
+        边界语义（无涨有跌→0、无跌有涨→100、无涨无跌→50）由 Polars 唯一实现承载。
+
         Args:
-            close: 收盘价序列
+            close: 收盘价序列（需按时间升序排列）
             period: RSI 周期（默认 14）
 
         Returns:
@@ -199,22 +204,21 @@ class TechnicalAnalysis:
         if close is None or len(close) < period + 1:
             return pd.Series(dtype=float)
 
-        delta = close.diff()
-        gain, loss = TechnicalAnalysis._split_delta(delta)
+        import polars as pl
 
-        avg_gain = gain.ewm(com=period - 1, min_periods=period, adjust=False).mean()
-        avg_loss = loss.ewm(com=period - 1, min_periods=period, adjust=False).mean()
-
-        # avg_loss == 0 是有业务含义的边界（区间内无下跌），不是计算失败：
-        #   有上涨 → RSI = 100（极度超买）；无涨无跌 → RSI = 50（中性）
-        # 原实现用 fillna(50) 把这两种情况都填成中性，掩盖了超买信号。
-        rsi = np.where(
-            avg_loss == 0,
-            np.where(avg_gain > 0, 100.0, 50.0),
-            100.0 - 100.0 / (1.0 + avg_gain / avg_loss),
+        df = pd.DataFrame({"close": close})
+        rsi = (
+            pl.from_pandas(df)
+            .lazy()
+            .with_columns(TechnicalAnalysis.get_rsi_expr("close", period=period, alias="rsi"))
+            .select("rsi")
+            .collect()
+            .to_series()
+            .to_pandas()
         )
-
-        return pd.Series(rsi, index=close.index)
+        # SC-05: Polars to_pandas 产生 RangeIndex，重赋原 close 的 index 保持调用方语义
+        rsi.index = close.index
+        return rsi
 
     @staticmethod
     def analyze_rsi_oversold_features(close: pd.Series, period: int = 14) -> dict:
@@ -305,6 +309,11 @@ class TechnicalAnalysis:
         """
         Returns a Polars Expression for RSI calculation.
         Use with .over('ts_code') for grouped calculation.
+
+        SC-05: min_samples=period 与 Pandas 版 calculate_rsi_pandas 的 min_periods=period
+        对齐，消除 EWM 种子污染（新上市/次新股前 period 根不产出值）。
+        预热期内的 null 是真实的「未知」，不 fill_null 伪装（R21）——下游
+        `.filter(rsi < threshold)` 对 null 返回 null 自然丢弃该行。
         """
         import polars as pl
 
@@ -315,8 +324,8 @@ class TechnicalAnalysis:
         up = delta.clip(lower_bound=0)
         down = delta.clip(upper_bound=0).abs()
 
-        roll_up = up.ewm_mean(com=period - 1, adjust=False, min_samples=0)
-        roll_down = down.ewm_mean(com=period - 1, adjust=False, min_samples=0)
+        roll_up = up.ewm_mean(com=period - 1, adjust=False, min_samples=period)
+        roll_down = down.ewm_mean(com=period - 1, adjust=False, min_samples=period)
 
         rs = roll_up / roll_down
         rsi = 100.0 - (100.0 / (1.0 + rs))
@@ -324,9 +333,10 @@ class TechnicalAnalysis:
         # Handle division by zero (inf) -> 100?
         # Polars handles inf arithmetic usually?
         # If roll_down is 0, rs is inf. 100/(1+inf) is 0. 100-0 = 100. Correct.
-        # But if both are 0? Nan.
+        # But if both are 0? Nan -> fill_nan(50) 归中（无涨无跌=横盘=中性）。
+        # SC-05: 仅 fill_nan（inf 算术产生的 NaN 边界），不 fill_null（预热期真实未知，R21）。
 
-        return rsi.fill_nan(50.0).fill_null(50.0).alias(alias)
+        return rsi.fill_nan(50.0).alias(alias)
 
     @staticmethod
     def get_macd_expr(col_name="close", fast=12, slow=26, sign=9):

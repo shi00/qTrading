@@ -455,7 +455,8 @@ class TestBacktestQualityProxy:
         """验证 preload_range 成功读取数据并在 build_context 中进行内存切片。"""
         cache = MagicMock()
         cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
-        cache.screener_dao.get_screening_data_range = AsyncMock(
+        # DS-05: screening_data 由 fundamental_screening_data 派生（同模板唯差 close 条件），mock 源统一在 fundamental。
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -465,7 +466,6 @@ class TestBacktestQualityProxy:
                 }
             )
         )
-        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
@@ -492,8 +492,7 @@ class TestBacktestQualityProxy:
         cache = MagicMock()
         # 范围查询抛出异常
         cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
-        cache.screener_dao.get_screening_data_range = AsyncMock(side_effect=Exception("DB Error"))
-        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(side_effect=Exception("DB Error"))
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
@@ -538,8 +537,7 @@ class TestBacktestQualityProxy:
         cache = MagicMock()
         # 模拟其中一个方法抛出 CancelledError
         cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
-        cache.screener_dao.get_screening_data_range = AsyncMock(side_effect=asyncio.CancelledError())
-        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(side_effect=asyncio.CancelledError())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
@@ -576,7 +574,8 @@ class TestBacktestQualityProxy:
         """验证自定义 preload_max_days=730 允许超过 366 但小于 730 天的范围预加载。"""
         cache = MagicMock()
         cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
-        cache.screener_dao.get_screening_data_range = AsyncMock(
+        # DS-05: 范围查询收敛为一条 fundamental 查询（screening 由此派生）。
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -586,7 +585,6 @@ class TestBacktestQualityProxy:
                 }
             )
         )
-        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
@@ -602,7 +600,9 @@ class TestBacktestQualityProxy:
         assert provider._preloaded is not None
         # 范围查询应被调用（验证归一化后的日期参数 + 自适应护栏 max_rows）
         # count_expected_rows=100 → guard=min(max(1_500_000, 100*1.5), 5_000_000)=1_500_000（兜底常量）
-        cache.screener_dao.get_screening_data_range.assert_called_once_with("20240101", "20250515", max_rows=1_500_000)
+        cache.screener_dao.get_fundamental_screening_data_range.assert_called_once_with(
+            "20240101", "20250515", max_rows=1_500_000
+        )
 
     @pytest.mark.asyncio
     async def test_preload_range_custom_limit_skips_when_exceeded(self) -> None:
@@ -625,7 +625,7 @@ class TestBacktestQualityProxy:
         import numpy as np
 
         # 返回含有 None/NaT 的非法数据
-        cache.screener_dao.get_screening_data_range = AsyncMock(
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
@@ -635,7 +635,6 @@ class TestBacktestQualityProxy:
                 }
             )
         )
-        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
@@ -658,7 +657,6 @@ class TestBacktestQualityProxy:
         """D3-M4: 行数护栏随 count_expected_rows 真实规模自适应放大，避免固定护栏过早静默降级。"""
         cache = MagicMock()
         cache.stock_dao.count_expected_rows = AsyncMock(return_value=3_000_000)
-        cache.screener_dao.get_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
@@ -670,7 +668,7 @@ class TestBacktestQualityProxy:
         await provider.preload_range(date(2024, 1, 1), date(2025, 5, 15))
 
         # expected=3M ×1.5=4.5M，介于兜底常量与绝对上限之间 → max_rows=4_500_000
-        cache.screener_dao.get_screening_data_range.assert_called_once_with("20240101", "20250515", max_rows=4_500_000)
+        # DS-05: 范围查询收敛为一条 fundamental 查询（screening 由此派生），护栏随之应用其上。
         cache.screener_dao.get_fundamental_screening_data_range.assert_called_once_with(
             "20240101", "20250515", max_rows=4_500_000
         )
@@ -680,7 +678,6 @@ class TestBacktestQualityProxy:
         """D3-M4: 畸形区间（join 爆炸/参数错误）时护栏封顶于绝对上限，防随错误规模无限膨胀。"""
         cache = MagicMock()
         cache.stock_dao.count_expected_rows = AsyncMock(return_value=9_000_000)
-        cache.screener_dao.get_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
@@ -692,14 +689,16 @@ class TestBacktestQualityProxy:
         await provider.preload_range(date(2024, 1, 1), date(2024, 12, 31))
 
         # expected=9M ×1.5=13.5M → min(13.5M, 5M)=5_000_000（绝对上限封顶）
-        cache.screener_dao.get_screening_data_range.assert_called_once_with("20240101", "20241231", max_rows=5_000_000)
+        cache.screener_dao.get_fundamental_screening_data_range.assert_called_once_with(
+            "20240101", "20241231", max_rows=5_000_000
+        )
 
     @pytest.mark.asyncio
     async def test_preload_range_guard_falls_back_constant_when_count_fails(self) -> None:
         """D3-M4: count_expected_rows 失败时护栏退化回固定兜底常量，行为与现状一致且安全。"""
         cache = MagicMock()
         cache.stock_dao.count_expected_rows = AsyncMock(side_effect=Exception("estimate boom"))
-        cache.screener_dao.get_screening_data_range = AsyncMock(
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -709,7 +708,6 @@ class TestBacktestQualityProxy:
                 }
             )
         )
-        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
@@ -720,9 +718,11 @@ class TestBacktestQualityProxy:
         await provider.preload_range(date(2024, 1, 1), date(2024, 3, 1))
 
         # count 失败 → expected_rows=1 → guard=min(max(1_500_000, 1*1.5), 5M)=1_500_000
-        cache.screener_dao.get_screening_data_range.assert_called_once_with("20240101", "20240301", max_rows=1_500_000)
+        cache.screener_dao.get_fundamental_screening_data_range.assert_called_once_with(
+            "20240101", "20240301", max_rows=1_500_000
+        )
         # count 失败仅属护栏计算兜底，预加载本身未被破坏，不应产生降级警告
-        assert cache.screener_dao.get_screening_data_range.await_count == 1
+        assert cache.screener_dao.get_fundamental_screening_data_range.await_count == 1
         assert provider.range_preload_warnings == []
 
     @pytest.mark.asyncio
@@ -743,8 +743,7 @@ class TestBacktestQualityProxy:
         """D3-M4: 单表范围预载失败（含护栏超限抛 ValueError）时降级可见。"""
         cache = MagicMock()
         cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
-        cache.screener_dao.get_screening_data_range = AsyncMock(side_effect=ValueError("MAX_ROWS exceeded"))
-        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(side_effect=ValueError("MAX_ROWS exceeded"))
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
@@ -770,7 +769,7 @@ class TestBacktestQualityProxy:
 
         # 第二次：正常预载（screening_data 覆盖全交易日 → 无缺口 → 无 warnings 累积）
         cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
-        cache.screener_dao.get_screening_data_range = AsyncMock(
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -780,7 +779,6 @@ class TestBacktestQualityProxy:
                 }
             )
         )
-        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
@@ -804,7 +802,7 @@ class TestBacktestQualityProxy:
         from data.persistence.quality_gate import QualityTier
 
         cache = MagicMock()
-        cache.screener_dao.get_screening_data_range = AsyncMock(
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -814,7 +812,6 @@ class TestBacktestQualityProxy:
                 }
             )
         )
-        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
@@ -839,7 +836,7 @@ class TestBacktestQualityProxy:
         from data.persistence.quality_gate import QualityTier
 
         cache = MagicMock()
-        cache.screener_dao.get_screening_data_range = AsyncMock(
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -849,7 +846,6 @@ class TestBacktestQualityProxy:
                 }
             )
         )
-        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
@@ -872,7 +868,7 @@ class TestBacktestQualityProxy:
         _autouse_mock_trade_calendar.side_effect = RuntimeError("calendar boom")
 
         cache = MagicMock()
-        cache.screener_dao.get_screening_data_range = AsyncMock(
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
@@ -882,7 +878,6 @@ class TestBacktestQualityProxy:
                 }
             )
         )
-        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
@@ -909,7 +904,6 @@ class TestBacktestQualityProxy:
         from data.persistence.quality_gate import QualityTier
 
         cache = MagicMock()
-        cache.screener_dao.get_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
@@ -935,7 +929,7 @@ class TestBacktestQualityProxy:
         不污染整段区间其它交易日的信号生成。
         """
         cache = MagicMock()
-        cache.screener_dao.get_screening_data_range = AsyncMock(
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000002.SZ"],
@@ -945,7 +939,6 @@ class TestBacktestQualityProxy:
                 }
             )
         )
-        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
         cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
         cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())

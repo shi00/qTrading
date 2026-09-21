@@ -1208,7 +1208,15 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 cache_date = await self.cache.quote_dao.get_latest_trade_date()
                 if cache_date is not None:
                     context_trade_date = self._normalize_context_trade_date(cache_date)
-        screening_data = await self.get_screening_data(context_trade_date)
+        # DS-05: screening_data ⊂ fundamental_screening_data（同模板唯差 close 条件），
+        # 单查全集并在内存派生 screening，消除两遍几乎相同的全市场 JOIN。
+        # SQL 层 q.close IS NOT NULL 与 pandas close.notna() 判定等价，派生严格等价。
+        # 查询用 context_trade_date（与下方 resolve 一致；mismatch 时 resolve 负责抛错）。
+        fundamental_data = await self.get_fundamental_screening_data(context_trade_date)
+        if fundamental_data is not None and not fundamental_data.empty and "close" in fundamental_data.columns:
+            screening_data = fundamental_data[fundamental_data["close"].notna()].copy()
+        else:
+            screening_data = fundamental_data
         resolved_trade_date = self._resolve_screening_trade_date(context_trade_date, screening_data)
 
         if screening_data is not None and not screening_data.empty and "is_tradable" in screening_data.columns:
@@ -1245,7 +1253,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         base_complete = screening_data is not None and not screening_data.empty
         diagnostics["base_complete"] = base_complete
 
-        fundamental_data = await self.get_fundamental_screening_data(resolved_trade_date)
+        # DS-05: fundamental_data 已在 prepare 开头随单查询获取（供 screening 派生），
+        # 此处直接消费；is_tradable 过滤与 ST 纳入语义不变（fundamental 不受 exclude_st 影响，DS-02 docstring）。
         if fundamental_data is not None and not fundamental_data.empty:
             if "is_tradable" in fundamental_data.columns:
                 fundamental_data = fundamental_data[fundamental_data["is_tradable"]].copy()
