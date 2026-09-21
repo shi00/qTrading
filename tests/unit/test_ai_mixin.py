@@ -1892,13 +1892,15 @@ class TestAIStrategyMixinBuildResultRowD36:
         assert row["ai_status"] == "failed"
         assert row["ai_score"] is None
 
-    def test_analyzed_score_clamped_to_range(self):
+    def test_analyzed_score_out_of_range_is_failed(self):
+        """R21（纵深防御）：越界 score（绕过 validate 直接进 _build_result_row）置 None
+        按"未打分"处理（failed），不钳位成满分/否决——与 validate 语义对齐。"""
         row = AIStrategyMixin._build_result_row(
             {"ts_code": "000001.SZ", "name": "平安银行"},
             {"score": 150, "summary": "", "thinking": "", "uncertainty_factors": []},
         )
-        assert row["ai_status"] == "analyzed"
-        assert row["ai_score"] == 100
+        assert row["ai_status"] == "failed"
+        assert row["ai_score"] is None
 
     def test_missing_confidence_kept_none(self):
         """AI-02: LLM 未返回 confidence 时不伪造为 50，保留 None（R21 缺失用 None）。"""

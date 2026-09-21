@@ -1420,7 +1420,17 @@ class AIStrategyMixin:
             row_dict["thinking"] = str(res.get("thinking", "") or "")  # type: ignore[union-attr]
             row_dict["confidence"] = None
             return row_dict
-        score_int = round(min(100, max(0, float(score_val))), 1)
+        score_float = float(score_val)
+        if not (0 <= score_float <= 100):
+            # R21（纵深防御）：越界评分是模型失控信号，正常链路已由 validate_ai_analysis_response
+            # 置 None；此处兜底同语义——置 None 按"未打分"处理，不把违规输出钳位成满分/否决。
+            row_dict["ai_status"] = "failed"
+            row_dict["ai_score"] = None
+            row_dict["ai_reason"] = summary or I18n.get("ai_card_no_score")
+            row_dict["thinking"] = str(res.get("thinking", "") or "")  # type: ignore[union-attr]
+            row_dict["confidence"] = None
+            return row_dict
+        score_int = round(score_float, 1)
         row_dict["ai_status"] = "rejected" if score_val == 0 else "analyzed"
         row_dict["ai_score"] = score_int
         row_dict["ai_reason"] = summary

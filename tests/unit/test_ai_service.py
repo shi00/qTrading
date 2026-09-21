@@ -360,13 +360,15 @@ class TestValidateAiAnalysisResponseContinued:
         assert result["score"] == 75
         assert result["recommendation"] == "buy"
 
-    def test_score_clamp_high(self):
+    def test_score_out_of_range_high_is_none(self):
         result = validate_ai_analysis_response({"score": 150, "recommendation": "hold"})
-        assert result["score"] == 100
+        # R21: 越界评分是模型失控信号，置 None（"未打分"），钳位会把违规输出变成最强买入信号
+        assert result["score"] is None
 
-    def test_score_clamp_low(self):
+    def test_score_out_of_range_low_is_none(self):
         result = validate_ai_analysis_response({"score": -10, "recommendation": "hold"})
-        assert result["score"] == 0
+        # R21: 越界评分置 None，不把"模型乱输出"伪装成"明确否决"
+        assert result["score"] is None
 
     def test_invalid_score_type(self):
         result = validate_ai_analysis_response({"score": "abc", "recommendation": "hold"})
@@ -375,7 +377,8 @@ class TestValidateAiAnalysisResponseContinued:
 
     def test_invalid_recommendation(self):
         result = validate_ai_analysis_response({"score": 50, "recommendation": "unknown"})
-        assert result["recommendation"] == "neutral"
+        # R21: 不认识的推荐值置 None（"未给出建议"），不伪装成"中性"业务结论
+        assert result["recommendation"] is None
 
     def test_recommendation_case_insensitive(self):
         result = validate_ai_analysis_response({"score": 50, "recommendation": "BUY"})
