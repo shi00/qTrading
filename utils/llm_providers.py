@@ -52,6 +52,9 @@ LLM_PROVIDERS = {
         "key_prefix": "sk-",
         "litellm_prefix": "openai",
         "litellm_catalog_key": "dashscope",
+        # dakscope 目录含第三方托管模型（deepseek/glm/kimi 等，探针实证），
+        # 投影到 qwen 供应商时按品牌前缀过滤，避免"通义组混入他牌模型"（review-pr1073 D1）。
+        "catalog_brand_prefixes": ("qwen",),
     },
     "zhipu": {
         "name": "智谱 AI",
@@ -277,11 +280,18 @@ def get_litellm_models_by_provider() -> dict[str, list[dict]]:
         if not isinstance(raw_ids, (set, list)):
             raw_ids = set()
 
+        # review-pr1073 D1：litellm 目录可能含跨品牌托管模型（如 dashscope 目录含
+        # deepseek/glm/kimi），投影到项目供应商时按品牌前缀过滤（仅配置了
+        # catalog_brand_prefixes 的 provider 启用；未配置即全部投影）。
+        brand_prefixes = provider_conf.get("catalog_brand_prefixes") or ()
+
         seen: set[str] = set()
         entries: list[dict] = []
         for raw_id in raw_ids:
             norm = _normalize_model_id(raw_id)
             if not norm or norm in seen:
+                continue
+            if brand_prefixes and not any(norm.startswith(p) for p in brand_prefixes):
                 continue
             seen.add(norm)
             cost_entry = model_cost.get(raw_id, {}) if isinstance(model_cost, dict) else {}

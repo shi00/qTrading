@@ -54,7 +54,8 @@ def fake_litellm(monkeypatch):
     fake = types.ModuleType("litellm")
     fake.models_by_provider = {
         "deepseek": {"deepseek-chat", "deepseek/v2", "deepseek-v3"},
-        "dashscope": {"qwen-plus", "qwen/qwen-max"},
+        # review-pr1073 D1：dashscope 目录含第三方托管模型（deepseek/glm/kimi），投影须品牌过滤
+        "dashscope": {"qwen-plus", "qwen/qwen-max", "deepseek-v4-flash", "glm-5.1", "kimi-k2.7-code"},
         "zai": {"glm-4.6", "zai/glm-5", "glm-5-flash"},
         "openai": {"gpt-4o", "gpt-4o-mini"},
     }
@@ -64,6 +65,9 @@ def fake_litellm(monkeypatch):
         "deepseek-v3": {"max_output_tokens": 16000},
         "qwen-plus": {"max_input_tokens": 131072},
         "qwen/qwen-max": {},
+        "deepseek-v4-flash": {"max_input_tokens": 131072},
+        "glm-5.1": {"max_input_tokens": 131072},
+        "kimi-k2.7-code": {"max_input_tokens": 131072},
         "glm-4.6": {"max_input_tokens": 200000},
         "zai/glm-5": {"max_input_tokens": 128000},
         "glm-5-flash": {"max_tokens": 64000},
@@ -229,6 +233,17 @@ class TestGetLitellmModelsByProvider:
         ids = [m["id"] for m in result["qwen"]]
         assert "qwen-plus" in ids
         assert "qwen-max" in ids  # qwen/qwen-max → qwen-max
+
+    def test_qwen_projection_filters_cross_brand_models(self, fake_litellm):
+        """review-pr1073 D1：dashscope 目录含跨品牌模型，投影到 qwen 组必须品牌过滤。
+
+        用户不应在"通义(qwen)"组看到 DeepSeek/GLM/Kimi 模型（跨牌混配会误导误选）。
+        """
+        result = get_litellm_models_by_provider()
+        ids = [m["id"] for m in result["qwen"]]
+        assert "deepseek-v4-flash" not in ids
+        assert "glm-5.1" not in ids
+        assert "kimi-k2.7-code" not in ids
 
     def test_zhipu_uses_zai_catalog_key(self, fake_litellm):
         """review-pr1073 A1/M1：zhipu → litellm 目录键 zai，投影出 GLM 模型（归一去重 + context）。"""

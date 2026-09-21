@@ -110,9 +110,13 @@ gpt-5.4-mini / claude-sonnet-4-6 / gemini-2.0-flash 均可计价）。
 交互形态 = **搜索(一键定供应商+模型) + 分组浏览 + 回记置顶** 组合。
 
 **关键事实（已对锁定版本 litellm 实测，2026-09-21）**：
-- litellm 官方目录（`models_by_provider` 各 key 含模型数）：`openai`=231、`gemini`=94、
-  `mistral`=94、`dashscope`(通义)=47、`qwen_ai_platform`=47、`qwencloud`=45、`moonshot`=24、
-  `anthropic`=28、`minimax`=10、`deepseek`=16、`azure`=（部署制，无型号目录）。
+- litellm 官方目录（`models_by_provider` 各 key 含模型数，1.100.1 实机）：`openai`=231、`gemini`=94、
+  `mistral`=94、`dashscope`(通义)=47、`moonshot`=24、`zai`(智谱 Z.ai)=16、`anthropic`=28、
+  `minimax`=10、`deepseek`=16、`azure`=（部署制，无型号目录）。
+  （review-pr1073 A2 修正：早期文档的 `qwen_ai_platform`=47 / `qwencloud`=45 为不存在之 key——该版本
+  litellm 的 `models_by_provider` 无此二键，仅 `dashscope` 承载 qwen 模型；相关去重表述已删除）
+- **dashscope 目录含第三方托管模型**（`deepseek-v4-flash`/`glm-5.1`/`kimi-k2.7-code` 等，探针实证）。
+  投影到 qwen 供应商须按**品牌前缀过滤**（`catalog_brand_prefixes=("qwen",)`），避免跨牌混配（review-pr1073 D1）。
 - **运行时路由（`litellm_client._build_litellm_params`）用 `litellm_prefix` 拼 `<prefix>/<model>`**；
   qwen / zhipu / moonshot / minimax 的 `litellm_prefix` 均为 `"openai"`（走 OpenAI 兼容端点）。
   因此**「UI 按 `litellm_prefix` 枚举投影」是错误设计**——会把这几家全挤进 openai 目录、混入
@@ -149,11 +153,15 @@ failover 前缀判定（`model.split("/")[0]`）。
      **只投影项目支持的供应商**，不把 litellm 全部 98 个供应商全量塞入。
    - 每模型 `{id, context}`；context 取 `litellm.model_cost.get(id, {})` 的
      `max_input_tokens`/`max_tokens`/`max_output_tokens`（首非零），全缺退 `0`（`dict.get` 防御）。
-   - 同一 catalog_key 被多个项目 provider 复用（如 zhipu 无独立 key 而 qwen 系三个 key）时按
-     model id 去重；模型 id 可能是 `provider/model` 形态，按 `/` 右侧 id 归一。
+   - 同一 catalog_key 被多个项目 provider 复用时按 model id 去重；模型 id 可能是
+     `provider/model` 形态，按 `/` 右侧 id 归一。（review-pr1073 A2 修正：「qwen 系三个 key」
+     去重意图已落空——`qwen_ai_platform`/`qwencloud` 在 1.100.1 不存在，qwen 组=dashscope；
+     附加**品牌前缀过滤**避免跨牌混配，见上文 D1）
    - **模块级缓存**投影结果（避免每次渲染/搜索重投影 98 供应商）；缓存键含 litellm 版本号，
      升级后失效重算。
    - 升级韧性：`dict.get`/try-except 防御 key 增减，某 key 缺失只令该 provider 空列表，不崩 UI。
+   - 品牌过滤（review-pr1073 D1）：provider 配置 `catalog_brand_prefixes` 时，仅投影以任一
+     前缀开头的模型 id（对去重后 id 判定）；未配置即全部投影（默认供应商目录同品牌无需过滤）。
 2. `search_models(keyword) -> list[dict]`：在投影结果上按「provider 名 + provider_id + model id +
    key_prefix」做大小写不敏感子串匹配；返回拍平列表，每项含
    `{provider_id, provider_name, icon, model_id, context}`；排序按（PROVIDER_CATEGORIES 分类顺序,
