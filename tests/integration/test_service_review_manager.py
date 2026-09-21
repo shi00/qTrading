@@ -25,6 +25,24 @@ import pytest
 pytestmark = [pytest.mark.integration, pytest.mark.no_db]
 
 
+def _index_daily_close_side_effect(t0_close: float, t5_close: float):
+    """RV-01: 构造 quote_dao.get_index_daily 的 side_effect——按 trade_date 返回对应收盘点位。
+
+    旧 mock 固定返回单日 ``pct_chg``；修复后基准侧取窗口累计收益，需要
+    窗口首尾两点（T0 与 T+5）的 close。本 helper 区分两日返回，窗口收益 =
+    (t5_close/t0_close - 1) * 100。
+    """
+
+    async def _side_effect(ts_code=None, trade_date=None, **kwargs):
+        if trade_date is None:
+            return pd.DataFrame()
+        d = trade_date.strftime("%Y%m%d") if hasattr(trade_date, "strftime") else str(trade_date).replace("-", "")
+        close = t0_close if d in {"20240315", "20240310"} else t5_close
+        return pd.DataFrame({"close": [close], "pct_chg": [1.0]})
+
+    return _side_effect
+
+
 def _make_trade_cal_mock():
     """返回模拟真实 stock_dao.get_trade_cal 的 AsyncMock。
 
@@ -171,9 +189,11 @@ class TestReviewManagerIndexDailyType(unittest.TestCase):
                 }
             )
         )
-        mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+        )
         mock_cache.get_index_daily_range = AsyncMock(return_value=None)
-        mock_api.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_api.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
         manager = ReviewManager()
         manager.cache = mock_cache
         manager.api = mock_api
@@ -550,11 +570,14 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        # RV-01: 指数窗口 T0=100.0、T+5=101.0 → 窗口 +1%（个股 T+5 +5% → alpha=4.0 → WIN）
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
+            side_effect=_index_daily_close_side_effect(100.0, 101.0)
+        )
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -581,7 +604,10 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        # RV-01: 指数窗口 T0=100.0、T+5=102.0 → 窗口 +2%（个股 T+5 -5% → alpha=-7.0 → LOSS）
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
+            side_effect=_index_daily_close_side_effect(100.0, 102.0)
+        )
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
@@ -612,7 +638,10 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [0.8]}))
+        # RV-01: 指数窗口 T0=100.0、T+5=100.8 → 窗口 +0.8%（个股 T+5 +1% → alpha=0.2 → DRAW）
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
+            side_effect=_index_daily_close_side_effect(100.0, 100.8)
+        )
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
@@ -650,11 +679,13 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
+            side_effect=_index_daily_close_side_effect(100.0, 101.0)
+        )
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -663,7 +694,8 @@ class TestReviewPredictionsCore(unittest.TestCase):
             kwargs = mock_cache_instance.screener_dao.update_prediction_result.call_args.kwargs
             self.assertAlmostEqual(kwargs["t5_pct"], 10.0)
             self.assertEqual(kwargs["t5_price"], 11.0)
-            self.assertEqual(kwargs["index_pct"], 1.0)
+            # RV-01: index_pct 为窗口累计收益（T0=100 → T+5=101，窗口 +1%）
+            self.assertAlmostEqual(kwargs["index_pct"], 1.0)
             # D4-M4: alpha = t5_pct - index_pct = 10.0 - 1.0 = 9.0（T+5 窗口）。
             self.assertAlmostEqual(kwargs["alpha"], 9.0)
 
@@ -683,11 +715,13 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+        )
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -775,11 +809,13 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+        )
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -810,11 +846,13 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+        )
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -847,10 +885,12 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+        )
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -887,10 +927,12 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+        )
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -916,19 +958,22 @@ class TestReviewPredictionsCore(unittest.TestCase):
             )
         )
         mock_cache_instance.get_index_daily_range = AsyncMock(side_effect=RuntimeError("bulk fetch failed"))
-        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
+            side_effect=_index_daily_close_side_effect(100.0, 101.0)
+        )
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
         async def run_test():
             await manager.run_review()
-            # D4-M4: 降级逐日查询在 T+5 成熟分支发生，trade_date 为 T+5 锚点。
-            mock_cache_instance.quote_dao.get_index_daily.assert_called_once_with(
-                ts_code=DEFAULT_BENCHMARK_INDEX, trade_date=datetime.date(2024, 3, 22)
-            )
+            # RV-01: 降级逐日查询在 T+5 成熟分支发生，但需要 T0 与 T+5 两点 close（两次调用）。
+            calls = mock_cache_instance.quote_dao.get_index_daily.call_args_list
+            assert len(calls) == 2
+            assert calls[0].kwargs["trade_date"] == datetime.date(2024, 3, 15)
+            assert calls[1].kwargs["trade_date"] == datetime.date(2024, 3, 22)
             mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()
 
         asyncio.run(run_test())
@@ -958,11 +1003,13 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+        )
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -991,7 +1038,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 "pct_chg": [1.0, 10.0, 9.1],
             }
         )
-        index_df = pd.DataFrame({"pct_chg": [1.0]})
+        index_df = pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
         candidate = [{"id": 1, "ts_code": "000001.SZ", "trade_date": datetime.date(2024, 3, 15)}]
 
         # ① run_review：T+1=20240318（+10.0%）、T+5=20240322（+20.0%）
@@ -1071,7 +1118,9 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 }
             )
         )
-        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+        )
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
         mock_cache_instance.stock_dao.get_trade_cal = _make_trade_cal_mock()
         mock_cache_instance.screener_dao.get_unfilled_t1_predictions = AsyncMock(
@@ -1080,7 +1129,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.screener_dao.update_prediction_result = AsyncMock()
         mock_cache_instance.engine = _make_engine()
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 

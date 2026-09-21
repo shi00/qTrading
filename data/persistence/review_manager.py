@@ -48,6 +48,17 @@ def _qfq_return_pct(
     return (tn_close / basis_close) - 1.0
 
 
+# RV-01: 基准侧窗口累计收益（百分比）。个股侧 _qfq_return_pct 返回分数、调用方 ×100，
+# 此处直接返回百分比以便与 t5_pct 同为百分数相减算 alpha。指数点位已含分红除权调整、
+# 无 adj_factor（index_daily 无复权因子），无需复权，直接用窗口首尾收盘价比值。
+# 窗口两端任一 close 缺失/0 均视为窗口无意义，返回 None 由调用方跳过避免标签污染
+# （对抗检视 Blocking-1：仅守卫 t0 会让终点缺失时产生 None 除法 TypeError）。
+def _index_window_return_pct(idx_close_t0: float, idx_close_tn: float) -> float | None:
+    if not idx_close_t0 or not idx_close_tn:
+        return None
+    return (idx_close_tn / idx_close_t0 - 1.0) * 100.0
+
+
 class ReviewManager:
     """
     Manages the 'Verification' and 'Correction' phases of the AI loop.
@@ -131,6 +142,8 @@ class ReviewManager:
 
         index_code = ConfigHandler.get_config("benchmark_index", DEFAULT_BENCHMARK_INDEX)
         index_cache = await self._prefetch_index_cache(index_code, min_pred_date, max_quote_date)
+        # RV-01: 已完整探测（本地库+API 均无数据）的日期集合，避免对同一缺失日期逐股票重复探测。
+        index_missing: set[str] = set()
 
         for _, row in pending_df.iterrows():
             ts_code = row["ts_code"]
@@ -239,16 +252,32 @@ class ReviewManager:
                         )
                         continue
 
+                    # RV-01: 基准侧必须与个股侧同窗口——取 T0 至 label（T+5）的指数
+                    # 累计收益，而非 label 当日的单日涨跌幅（旧口径把标签变成对市场方向的押注）。
+                    # 指数点位无需复权（index_daily 无 adj_factor），用首尾收盘价比值。
+                    # 窗口终点取 label_date（t5 口径为 T+5，兼容 t1 口径为 T+1），保证同窗口同口径。
+                    # index_missing 记录「已完整探测（本地库+API）仍无数据」的日期，避免
+                    # 同一缺失日期对每只股票重复打 API（对抗检视 Minor-1：缓存 None 无法
+                    # 区分未探测与已探无，把去重移到独立集合保持「每次探测一次」语义）。
+                    t0_date_str = t0_date.strftime("%Y%m%d")
                     label_date_str = label_date.strftime("%Y%m%d")
-                    if label_date_str not in index_cache:
-                        index_cache[label_date_str] = await self._resolve_index_pct(index_code, label_date)
+                    for _d_str, _d in ((t0_date_str, t0_date), (label_date_str, label_date)):
+                        # RV-01 修复点：缓存存 None（本地库该日无数据）时也须
+                        # 尝试 API 兜底，仅凭 key 存在会短路兜底路径（对抗检视 Major-1）。
+                        if _d_str not in index_cache and _d_str not in index_missing:
+                            _d_close = await self._resolve_index_close(index_code, _d)
+                            if _d_close is None:
+                                index_missing.add(_d_str)
+                            else:
+                                index_cache[_d_str] = _d_close
 
-                    index_pct = index_cache.get(label_date_str)
+                    index_pct = _index_window_return_pct(index_cache.get(t0_date_str), index_cache.get(label_date_str))
 
                     if index_pct is None:
                         logger.warning(
-                            "[Review] %s: Index return unavailable for %s, skipping to avoid label pollution",
+                            "[Review] %s: Index return unavailable for [%s, %s], skipping to avoid label pollution",
                             ts_code,
+                            t0_date_str,
                             label_date_str,
                         )
                         continue
@@ -334,6 +363,8 @@ class ReviewManager:
         # D4-M4: T+5 backfill 需定稿 T+5 标签，故须解析基准指数（与 run_review 同口径）。
         index_code = ConfigHandler.get_config("benchmark_index", DEFAULT_BENCHMARK_INDEX)
         index_cache = await self._prefetch_index_cache(index_code, min_t0, max_quote_date)
+        # RV-01: 已完整探测（本地库+API 均无数据）的日期集合，避免对同一缺失日期逐记录重复探测。
+        index_missing: set[str] = set()
 
         updates: list[dict] = []
         for cand in candidates:
@@ -372,14 +403,26 @@ class ReviewManager:
             # D4-M4: T+5 成熟回填时同步定稿 T+5 窗口标签。run_review 在 T+5
             # 未成熟时仅打 DRAW 占位（status=T1_DONE），此处补齐 T+5 数值并
             # 以 T+5 超额定稿 WIN/LOSS/DRAW（与 run_review 共用 _classify_alpha）。
+            # RV-01: 基准侧取 T0→T+5 指数累计收益（与个股 t5_pct 同窗口同口径），
+            # 而非 T+5 当日单日涨跌幅。窗口端点缺任一（含本地库+API 均不可得）均视为不可标。
+            t0_date_str = t0_date.strftime("%Y%m%d")
             t5_date_str = t5_date.strftime("%Y%m%d")
-            if t5_date_str not in index_cache:
-                index_cache[t5_date_str] = await self._resolve_index_pct(index_code, t5_date)
-            index_pct = index_cache.get(t5_date_str)
+            for _d_str, _d in ((t0_date_str, t0_date), (t5_date_str, t5_date)):
+                # RV-01 修复点：仅对未缓存且未标记缺失的日期探测（本地库 → API 兜底），
+                # 避免缓存 None 短路兜底（Major-1）同时也避免逐记录重复探测（Minor-1）。
+                if _d_str not in index_cache and _d_str not in index_missing:
+                    _d_close = await self._resolve_index_close(index_code, _d)
+                    if _d_close is None:
+                        index_missing.add(_d_str)
+                    else:
+                        index_cache[_d_str] = _d_close
+
+            index_pct = _index_window_return_pct(index_cache.get(t0_date_str), index_cache.get(t5_date_str))
             if index_pct is None:
                 logger.warning(
-                    "[Review] T+5 backfill: %s: Index return unavailable for %s, skipping to avoid label pollution",
+                    "[Review] T+5 backfill: %s: Index return unavailable for [%s, %s], skipping to avoid label pollution",
                     code,
+                    t0_date_str,
                     t5_date_str,
                 )
                 continue
@@ -907,18 +950,21 @@ class ReviewManager:
         index_code: str | None,
         start_date: datetime.date,
         end_date: datetime.date,
-    ) -> dict[str, float | None]:
-        """BIZ-03: 批量预取基准指数涨跌幅到 {YYYYMMDD: pct_chg} 缓存。
+    ) -> dict[str, float]:
+        """RV-01: 批量预取基准指数收盘点位到 {YYYYMMDD: close} 缓存。
 
-        run_review 与 backfill_t1_returns 共用，避免两处各自实现同一预取逻辑。
-        与 run_review 原内联逻辑一致：预取失败仅告警（非 system 级），
-        由调用方的单条兜底（_resolve_index_pct）补缺失日期。
+        run_review 与 backfill_horizon_returns 共用，避免两处各自实现同一预取逻辑。
+        RV-01 起缓存的是 ``close``（收盘点位）而非 ``pct_chg``（单日涨跌幅）——
+        Alpha 的基准侧须为窗口累计收益，由调用方对窗口首尾两点 close 经
+        ``_index_window_return_pct`` 换算，与个股 T+5 累计收益同窗口同口径。
+        与旧逻辑一致：预取失败仅告警（非 system 级），
+        由调用方的单条兜底（_resolve_index_close）补缺失日期。
 
         D3-m2: 日期参数全程使用 date 对象（与 DAT-26「DAO 边界显式转 date」方向
         统一），不再经 str(date) 隐式转换后再由 DAO 转回，避免 "2024-01-05" 与
         "20240105" 两种日期格式在库内并存造成的摩擦。
         """
-        index_cache: dict[str, float | None] = {}
+        index_cache: dict[str, float] = {}
         try:
             df_index_bulk = await self.cache.get_index_daily_range(
                 ts_code_list=[index_code],
@@ -932,10 +978,14 @@ class ReviewManager:
                         dt_str = dt_val.strftime("%Y%m%d")
                     else:
                         dt_str = str(dt_val).replace("-", "")[:8]
-                    raw_pct = i_row.get("pct_chg")
-                    index_cache[dt_str] = float(raw_pct) if raw_pct is not None and pd.notna(raw_pct) is True else None
+                    raw_close = i_row.get("close")
+                    # RV-01: 仅缓存有效 close；本地库缺失日期不写 key，保证调用方
+                    # 的逐日探测（本地库 → API 兜底）得以触发（旧实现对 None 日期
+                    # 写 key 会让后续 `key not in cache` 短路 API 兜底）。
+                    if raw_close is not None and pd.notna(raw_close) is True:
+                        index_cache[dt_str] = float(raw_close)
                 logger.info(
-                    "[Review] Bulk loaded %d days of index data for %s.",
+                    "[Review] Bulk loaded %d days of index close for %s.",
                     len(df_index_bulk),
                     index_code,
                 )
@@ -956,15 +1006,16 @@ class ReviewManager:
         return index_cache
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def _resolve_index_pct(
+    async def _resolve_index_close(
         self,
         index_code: str | None,
         trade_date: datetime.date,
     ) -> float | None:
-        """BIZ-03: 单条兜底解析指定交易日的基准指数涨跌幅（%），失败返回 None。
+        """RV-01: 单条兜底解析指定交易日的基准指数收盘点位（close），失败返回 None。
 
-        run_review 与 backfill_t1_returns 共用，口径一致：先查缓存（本地库），
+        run_review 与 backfill_horizon_returns 共用，口径一致：先查缓存（本地库），
         缺失再降级 Tushare API；API 不可得 / 数据缺失返回 None，由调用方决定跳过。
+        RV-01 起取 close（收盘点位）供窗口累计收益换算，不再取单日 pct_chg。
         """
         trade_date_str = trade_date.strftime("%Y%m%d")
         try:
@@ -973,8 +1024,8 @@ class ReviewManager:
                 trade_date=trade_date,
             )
             if df_idx is not None and not df_idx.empty:
-                raw_pct = df_idx.iloc[0]["pct_chg"]
-                return float(raw_pct) if pd.notna(raw_pct) is True else None
+                raw_close = df_idx.iloc[0]["close"]
+                return float(raw_close) if pd.notna(raw_close) is True else None
             try:
                 df_idx_api = await self.api.get_index_daily(
                     ts_code=index_code,
@@ -982,8 +1033,8 @@ class ReviewManager:
                     end_date=trade_date_str,
                 )
                 if df_idx_api is not None and not df_idx_api.empty:
-                    raw_pct = df_idx_api.iloc[0]["pct_chg"]
-                    return float(raw_pct) if pd.notna(raw_pct) is True else None
+                    raw_close = df_idx_api.iloc[0]["close"]
+                    return float(raw_close) if pd.notna(raw_close) is True else None
                 return None
             except (ValueError, TypeError, KeyError):
                 return None
