@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.constants import get_health_depth_full_trade_days
-from data.data_dictionary import TABLE_DEFINITIONS
+from data.data_dictionary import TABLE_DEFINITIONS, columns_of
 from data.persistence import engine_provider
 
 # DAOs（__init__ 显式实例化以满足 R13 静态检查；注册清单见 DaoRegistry）
@@ -597,7 +597,8 @@ class CacheManager:
                         ratio = 1.0 if cnt > 0 else 0.0
                         fresh_ratio = ratio
                     else:
-                        cols = meta.get("columns", {})
+                        # OSS-01：列集合从 ORM 派生（纯结构，不触发 I18n）
+                        cols = columns_of(table)
                         keys = meta.get("sync_config", {}).get("keys", [])
                         code_col = "con_code" if "con_code" in cols or "con_code" in keys else "ts_code"
 

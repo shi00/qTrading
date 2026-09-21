@@ -16,7 +16,7 @@
 - `name_change.py` — 证券更名历史同步
 - `errors.py` — 同步异常定义 (`InitSyncError`)
 
-所有同步通过 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 注册表驱动，包含表结构、同步配置、质量监控配置。
+所有同步通过 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 注册表驱动，包含表级同步配置与质量监控配置；表级元数据（alias/quality_config/sync_config）仍登记于此，列级结构（列集合、i18n 标签）自 OSS-01 起从 ORM（`models.py`）派生，不再双写。
 
 ## Tushare Syncer 设计模式
 

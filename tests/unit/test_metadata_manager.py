@@ -1,7 +1,7 @@
 from unittest.mock import patch
 
 from data.persistence.metadata_manager import MetaDataManager
-from data.data_dictionary import TABLE_DEFINITIONS
+from data.data_dictionary import TABLE_DEFINITIONS, columns_of
 import pytest
 
 
@@ -41,8 +41,8 @@ class TestGetColumnAlias:
     @patch("core.i18n.I18n")
     def test_column_with_table_specific(self, mock_i18n):
         mock_i18n.get.return_value = "股票代码"
-        for table_name, table_def in TABLE_DEFINITIONS.items():
-            cols = table_def.get("columns", {})
+        for table_name in TABLE_DEFINITIONS:
+            cols = columns_of(table_name)
             if cols:
                 col_name = next(iter(cols))
                 result = MetaDataManager.get_column_alias(table_name, col_name)
@@ -57,11 +57,13 @@ class TestGetColumnAlias:
 
     @patch("core.i18n.I18n")
     def test_column_rsi_dynamic(self, mock_i18n):
+        mock_i18n.has.return_value = False  # col_rsi_14 未定义，派生 key 不命中
         result = MetaDataManager.get_column_alias(None, "rsi_14")
         assert result == "RSI(14)"
 
     @patch("core.i18n.I18n")
     def test_column_no_match(self, mock_i18n):
+        mock_i18n.has.return_value = False  # col_unknown_column_xyz 未定义
         result = MetaDataManager.get_column_alias(None, "unknown_column_xyz")
         assert result == "unknown_column_xyz"
 
@@ -76,8 +78,8 @@ class TestGetRawAlias:
     @patch("core.i18n.I18n")
     def test_with_context_table(self, mock_i18n):
         mock_i18n.get.return_value = "翻译"
-        for table_name, table_def in TABLE_DEFINITIONS.items():
-            cols = table_def.get("columns", {})
+        for table_name in TABLE_DEFINITIONS:
+            cols = columns_of(table_name)
             if cols:
                 col_name = next(iter(cols))
                 result = MetaDataManager.get_raw_alias(col_name, context_table=table_name)
@@ -92,6 +94,7 @@ class TestGetRawAlias:
 
     @patch("core.i18n.I18n")
     def test_no_match(self, mock_i18n):
+        mock_i18n.has.return_value = False  # col_unknown_term_xyz 未定义
         result = MetaDataManager.get_raw_alias("unknown_term_xyz")
         assert result == "unknown_term_xyz"
 

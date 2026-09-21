@@ -17,7 +17,6 @@ from pathlib import Path
 
 import pytest
 
-from data.data_dictionary import TABLE_DEFINITIONS
 from data.external.tushare_client import TushareClient
 from data.persistence.models import LimitList
 
@@ -57,10 +56,12 @@ class TestLimitListDeadColumnsRemoved:
         )
 
     def test_data_dictionary_limit_list_no_dead_cols(self) -> None:
-        """data_dictionary 不得保留死列映射，否则与 ORM 不一致。"""
-        dict_cols = set(TABLE_DEFINITIONS["limit_list"]["columns"].keys())
+        """data_dictionary（OSS-01 派生自 ORM）不得保留死列，否则与 ORM 不一致。"""
+        from data.data_dictionary import columns_of
+
+        dict_cols = columns_of("limit_list")
         leaked = DEAD_COLUMNS & dict_cols
-        assert not leaked, f"data_dictionary['limit_list']['columns'] 仍含死列映射 {leaked}，应与 ORM 同步清除"
+        assert not leaked, f"columns_of('limit_list') 仍含死列 {leaked}，应与 ORM 同步清除"
 
     @pytest.mark.parametrize("locale_folder", ["zh_CN", "en_US"])
     def test_locale_no_dead_col_keys(self, locale_folder: str) -> None:

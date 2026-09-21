@@ -160,7 +160,7 @@ class TopList(Base):
     reason = Column(String, primary_key=True)
     name = Column(String)
     close = Column(Numeric(12, 4))
-    pct_change = Column(Numeric(8, 4))
+    pct_change = Column(Numeric(8, 4), info={"i18n": "col_pct_change"})  # 表内覆盖 COMMON 的 col_pct_chg（OSS-01）
     turnover_rate = Column(Numeric(12, 4))
     amount = Column(Numeric(20, 4))
     l_sell = Column(Numeric(20, 4))
@@ -499,7 +499,7 @@ class SuspendD(Base):
     ts_code = Column(String, primary_key=True)
     trade_date = Column(Date, primary_key=True, index=True)
     suspend_timing = Column(String)
-    suspend_type = Column(String)
+    suspend_type = Column(String, info={"i18n": "col_suspend_type_name"})  # 非 col_<列名> 例外（OSS-01）
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
@@ -639,7 +639,9 @@ class SwIndustryClassify(Base):
     # R17：原列名 level 为 SQL 保留字；迁移 0015 后属性名 sw_level 与列名一致。
     __tablename__ = "sw_industry_classify"
     index_code = Column(String, primary_key=True)
-    sw_level = Column(String(2), primary_key=True, index=True)
+    sw_level = Column(
+        String(2), primary_key=True, index=True, info={"i18n": "col_level"}
+    )  # 非 col_<列名> 例外（OSS-01）
     index_name = Column(String)
     industry_code = Column(String, index=True)
     industry_name = Column(String)
@@ -756,7 +758,7 @@ class FinaAudit(Base):
 
 class MacroEconomy(Base):
     __tablename__ = "macro_economy"
-    period = Column(Date, primary_key=True)
+    period = Column(Date, primary_key=True, info={"i18n": "col_end_date"})  # 非 col_<列名> 例外（OSS-01）
     publish_date = Column(Date, index=True)
     m2 = Column(Numeric(20, 4))
     m2_yoy = Column(Numeric(12, 4))
@@ -782,15 +784,15 @@ class MacroEconomy(Base):
 class ShiborDaily(Base):
     # R17：原列名 date/on 为 SQL 保留字，1w-1y 数字开头；迁移 0015 后属性名与列名一致。
     __tablename__ = "shibor_daily"
-    record_date = Column(Date, primary_key=True)
-    on_rate = Column(Numeric(12, 4))
-    week_1 = Column(Numeric(12, 4))
-    week_2 = Column(Numeric(12, 4))
-    month_1 = Column(Numeric(12, 4))
-    month_3 = Column(Numeric(12, 4))
-    month_6 = Column(Numeric(12, 4))
-    month_9 = Column(Numeric(12, 4))
-    year_1 = Column(Numeric(12, 4))
+    record_date = Column(Date, primary_key=True, info={"i18n": "col_trade_date"})  # 非 col_<列名> 例外（OSS-01）
+    on_rate = Column(Numeric(12, 4), info={"i18n": "col_on"})  # 非 col_<列名> 例外（OSS-01）
+    week_1 = Column(Numeric(12, 4), info={"i18n": "col_1w"})  # 非 col_<列名> 例外（OSS-01）
+    week_2 = Column(Numeric(12, 4), info={"i18n": "col_2w"})  # 非 col_<列名> 例外（OSS-01）
+    month_1 = Column(Numeric(12, 4), info={"i18n": "col_1m"})  # 非 col_<列名> 例外（OSS-01）
+    month_3 = Column(Numeric(12, 4), info={"i18n": "col_3m"})  # 非 col_<列名> 例外（OSS-01）
+    month_6 = Column(Numeric(12, 4), info={"i18n": "col_6m"})  # 非 col_<列名> 例外（OSS-01）
+    month_9 = Column(Numeric(12, 4), info={"i18n": "col_9m"})  # 非 col_<列名> 例外（OSS-01）
+    year_1 = Column(Numeric(12, 4), info={"i18n": "col_1y"})  # 非 col_<列名> 例外（OSS-01）
     # Phase 3G §4.3.4：LPR 数据（shibor_lpr API 返回，与 shibor 同表按 record_date 合并）
     lpr_1y = Column(Numeric(12, 4))
     lpr_5y = Column(Numeric(12, 4))
@@ -854,7 +856,7 @@ class Top10Holders(Base):
 class IndexWeight(Base):
     __tablename__ = "index_weight"
     index_code = Column(String, primary_key=True)
-    con_code = Column(String, primary_key=True)
+    con_code = Column(String, primary_key=True, info={"i18n": "col_ts_code"})  # 非 col_<列名> 例外（OSS-01）
     trade_date = Column(Date, primary_key=True, index=True)
     weight = Column(Numeric(12, 4))
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
@@ -866,8 +868,8 @@ class MoneyflowHsgt(Base):
     trade_date = Column(Date, primary_key=True)
     ggt_ss = Column(Numeric(20, 4))
     ggt_sz = Column(Numeric(20, 4))
-    hgt = Column(Numeric(20, 4))
-    sgt = Column(Numeric(20, 4))
+    hgt = Column(Numeric(20, 4), info={"i18n": "col_hgt_north_money"})  # 非 col_<列名> 例外（OSS-01）
+    sgt = Column(Numeric(20, 4), info={"i18n": "col_sgt_north_money"})  # 非 col_<列名> 例外（OSS-01）
     north_money = Column(Numeric(20, 4))
     south_money = Column(Numeric(20, 4))
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
@@ -908,8 +910,8 @@ class AppState(Base):
     # R17：原列名 key/value 为 SQL 保留字；迁移 0015 后属性名与列名一致。
     __tablename__ = "app_state"
 
-    config_key = Column(String, primary_key=True)
-    config_value = Column(String, nullable=False)
+    config_key = Column(String, primary_key=True, info={"i18n": "col_key"})  # 非 col_<列名> 例外（OSS-01）
+    config_value = Column(String, nullable=False, info={"i18n": "col_value"})  # 非 col_<列名> 例外（OSS-01）
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"), onupdate=text("now()"))
 
 

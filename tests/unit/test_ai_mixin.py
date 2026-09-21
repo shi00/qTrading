@@ -1558,6 +1558,78 @@ class TestRunAiAnalysisUsageSummary:
         assert "_ai_usage_summary" not in context
 
     @pytest.mark.asyncio
+    async def test_budget_exhausted_mid_batch_marks_remaining(self):
+        """AI-05：批内周期性预算复查——首部分析后累计成本超限，剩余候选标记
+        budget_exceeded（保留行供 UI），已分析行保留且仅其耗用落账。"""
+        s = ConcreteStrategy()
+        dp = _make_mock_dp()
+        candidates = pd.DataFrame(
+            {
+                "ts_code": [f"00000{i}.SZ" for i in range(1, 25)],
+                "name": [f"stock{i}" for i in range(1, 25)],
+                "close": [10.0] * 24,
+            }
+        )
+        context = {"data_processor": dp}
+
+        analyze_calls = []
+
+        async def mock_analyze(stock_info, *args, **kwargs):
+            analyze_calls.append(stock_info.get("ts_code"))
+            return {
+                "score": 50,
+                "summary": "ok",
+                "usage": {"total_tokens": 100},
+                "cost": 0.01,
+                "ai_status": "analyzed",
+            }
+
+        # 第 1 次调用（入口 guard）False → 放行；
+        # 第 2 次调用（首批落账后复查）True → 软停剩余。
+        budget_results = iter([False, True, False])
+
+        async def fake_budget_exhausted():
+            return next(budget_results)
+
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_tracker_cls,
+            patch(
+                "strategies.ai_mixin.NewsFetcher.get_us_major_moves",
+                new=AsyncMock(return_value=""),
+            ),
+            patch.object(
+                s,
+                "_ai_budget_exhausted",
+                side_effect=fake_budget_exhausted,
+            ),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = mock_analyze
+            mock_ai.return_value = mock_ai_instance
+            mock_tracker = MagicMock()
+            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker_cls.return_value = mock_tracker
+
+            result = await s.run_ai_analysis(candidates, context)
+
+        # 首批 20 股分析完，复查超限 → 剩余 4 股标记 budget_exceeded，共 24 行
+        assert len(result) == 24
+        assert len(analyze_calls) == 20
+        budget_rows = result[result["ai_status"] == "budget_exceeded"]
+        assert len(budget_rows) == 4
+        assert budget_rows["ai_score"].isna().all()
+        # 已分析行正常排序在前
+        assert result.iloc[0]["ai_status"] == "analyzed"
+        # 仅已分析 20 股耗用落账（0.01*20=0.2 元 → 20 分），且只落账一次
+        mock_tracker.add_cost_cny.assert_awaited_once_with(20)
+        assert context["_ai_usage_summary"]["calls"] == 20
+        # 批内软停标记同步设置（供 UI/夜间任务区分"预算超限"与"无候选"）
+        assert context["_ai_budget_exceeded"] is True
+
+    @pytest.mark.asyncio
     async def test_run_ai_analysis_unpriced_reject_sets_context_flag(self):
         """B1（review-pr1073）：run_ai_analysis 的 unpriced 保守拒绝须写
         ``context[\"_ai_unpriced_prompt\"]`` 标志，夜间 _prediction_logic 据此区分"无候选"。"""
