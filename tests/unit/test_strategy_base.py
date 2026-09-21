@@ -48,6 +48,7 @@ def strategies_ctx():
             "pb": [1.0, 5.0, 0.8],
             "dv_ttm": [3.0, 0.5, 4.5],
             "pct_chg": [3.0, 8.0, -4.0],
+            "close": [10.0, 20.0, 15.0],
             "turnover_rate": [5.0, 1.0, 2.0],
             "total_mv": [6000000, 100000, 200000],
             "or_yoy": [25.0, 10.0, 5.0],
@@ -225,8 +226,10 @@ async def test_institutional(strategies_ctx):
 
 
 async def test_block_trade(strategies_ctx):
+    # SC-04: amount≈price×vol（万元=元×万股）自洽构造：1200万=10元×120万股；
+    # base close=10.0（000001.SZ）→ VWAP=10 元，折价率 0%，未超默认 10% 剔除线 → 入选
     block_data_pass = pd.DataFrame(
-        {"ts_code": ["000001.SZ"], "amount": [1200], "vol": [10], "price": [10]},
+        {"ts_code": ["000001.SZ"], "amount": [1200], "vol": [120], "price": [10]},
     )
     ctx = {
         "block_trade": block_data_pass,

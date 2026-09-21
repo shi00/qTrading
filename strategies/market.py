@@ -394,12 +394,25 @@ class BlockTradeStrategy(PolarsBaseStrategy):
                 "default": 1000,
                 "step": 200,
             },
+            {
+                "name": "block_discount_max_pct",
+                "label_key": "param_block_discount_max_pct",
+                "unit": "pct",
+                "type": "slider",
+                "min": 0,
+                "max": 20,
+                "default": 10,
+                "step": 1,
+            },
         ]
 
     def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
         block = context.get("block_trade")
         p = context.get("params", {})
         target_amount = p.get("block_amount_min", 1000)
+        # SC-04: 剔除折价超过 block_discount_max_pct% 的深折价大宗（折价率=(block_vwap-close)/close×100，
+        # 深折价通常意味着卖方急于出货）；折价率缺失（close 缺失）放行，不伪造（R21）。
+        discount_max_pct = p.get("block_discount_max_pct", 10)
 
         if block is None or block.empty:
             return lf.head(0)
@@ -416,6 +429,9 @@ class BlockTradeStrategy(PolarsBaseStrategy):
             amount_threshold = threshold_in_data_unit(
                 block, "amount", BLOCK_TRADE_AMOUNT_UNIT, target_amount, "wan_cny"
             )
+            # SC-04: VWAP 用成交量（vol）作权重——Σamount/Σvol 等价于 Σ(price×vol)/Σvol
+            # （Tushare block_trade: amount≈price×vol，单位万元/万股=元），消除用金额作权重的
+            # 系统性偏高（柯西不等式）。列名 price→block_vwap 消除与市场价的命名歧义。
             return (
                 block_lf.filter(pl.col("amount") > amount_threshold)
                 .group_by("ts_code")
@@ -423,11 +439,18 @@ class BlockTradeStrategy(PolarsBaseStrategy):
                     [
                         pl.col("amount").sum(),
                         pl.col("vol").sum(),
-                        ((pl.col("price") * pl.col("amount")).sum() / pl.col("amount").sum()).alias("price"),
+                        (pl.col("amount").sum() / pl.col("vol").sum()).alias("block_vwap"),
                     ],
                 )
                 .join(lf, on="ts_code", how="inner", suffix="_base")
-                .sort("amount", descending=True)
+                .with_columns(
+                    ((pl.col("block_vwap") - pl.col("close")) / pl.col("close") * 100).alias("block_discount_pct")
+                )
+                .filter(
+                    (pl.col("block_discount_pct").is_null())
+                    | (pl.col("block_discount_pct") >= -float(discount_max_pct))
+                )
+                .sort(["block_discount_pct", "amount"], descending=[False, True])
             )
         # NOTE(lazy): Polars 算子兜底（单次策略执行失败返回空 DataFrame 不阻塞选股流程）.
         #   ceiling: 单次策略执行 Polars 算子异常，返回 lf.head(0) 降级.

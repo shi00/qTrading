@@ -248,7 +248,8 @@ _MONEY_PARAM_BOUNDARY_CASES = [
     (
         BlockTradeStrategy,
         {"block_amount_min": 1000},
-        pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"]}),
+        # SC-04: 折价率计算依赖 close 列；close=10 与 price=10/vol=1e6 股自洽 → VWAP≈10 折价率≈0 不剔除
+        pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "close": [10.0, 10.0]}),
         (
             "block_trade",
             attach_column_units(
@@ -256,7 +257,7 @@ _MONEY_PARAM_BOUNDARY_CASES = [
                     {
                         "ts_code": ["000001.SZ", "000002.SZ"],
                         "amount": [9_999_999, 10_000_001],
-                        "vol": [100, 100],
+                        "vol": [1_000_000, 1_000_000],
                         "price": [10.0, 10.0],
                     }
                 ),

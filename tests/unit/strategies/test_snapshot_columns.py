@@ -106,13 +106,15 @@ def _make_right_df(key: str) -> pd.DataFrame:
         )
         df.attrs["column_units"] = {"net_amount": "yuan"}
         return df
-    # block_trade
+    # block_trade（vol 单位=万股，amount 万元≈price×vol 自洽）：
+    # 000001.SZ 两笔 VWAP=(2000+1500)/(160+119)=12.54 元 → 折价率 0.36% 未超 10% 剔除线，聚合 3500 > 1000 入选；
+    # 000002.SZ 单笔 amount=500 < 1000 剔除
     return pd.DataFrame(
         {
             "ts_code": ["000001.SZ", "000001.SZ", "000002.SZ"],
             "price": [12.5, 12.6, 8.2],
-            "vol": [80000.0, 90000.0, 30000.0],
-            "amount": [2000.0, 1500.0, 500.0],  # 万: 000001 聚合 3500 > 1000; 000002 单笔 < 1000 剔除
+            "vol": [160.0, 119.0, 61.0],
+            "amount": [2000.0, 1500.0, 500.0],
         }
     )
 
