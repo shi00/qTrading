@@ -908,6 +908,9 @@ class AIStrategyMixin:
 
         # Batch task creation to avoid unbounded coroutine explosion
         _BATCH_SIZE = 20
+        # AI-05: 批内周期性预算复查 + 增量落账节奏（与批次粒度一致，20 股一次）。
+        # 预算复查必须在每批累计落账之后进行——落账使累计成本单调更新，复查读到最新值。
+        # 增量落账将「崩溃丢账」损失从整批收敛到至多一批（20 股）成本。
         all_records = candidates_df.to_dict("records")
         results: list = []
 
@@ -916,13 +919,78 @@ class AIStrategyMixin:
         # 在 CancelledError 时直接 raise，若无 try/finally，下方 for 循环与
         # _cancel_orphan_news_tasks 调用将不会执行（成为死代码）。
         try:
-            for batch_start in range(0, len(all_records), _BATCH_SIZE):
+            budget_hit_early = False
+            for batch_count, batch_start in enumerate(range(0, len(all_records), _BATCH_SIZE), start=1):
                 if dp and dp.is_cancelled():
                     break
+                # AI-05: 批开始前快照 usage 四量，批结束 diff 得本批增量（落账差量）。
+                usage_snapshot = (
+                    ai_usage_cluster["calls"],
+                    ai_usage_cluster["tokens"],
+                    ai_usage_cluster["cost_cny"],
+                    ai_usage_cluster["unpriced_calls"],
+                    ai_usage_cluster["unpriced_tokens"],
+                )
                 batch = all_records[batch_start : batch_start + _BATCH_SIZE]
                 batch_tasks = [asyncio.create_task(analyze_one(row_data)) for row_data in batch]
                 batch_results = await gather_return_exceptions_propagating_cancel(*batch_tasks)
                 results.extend(batch_results)
+
+                # AI-05: 批量落账差量（本批新耗用）。批内所有成本为正单调累加（R22），
+                # 负差仅可能因模型切换/计价口径变化，记录 debug 供诊断。
+                diff_cost = ai_usage_cluster["cost_cny"] - usage_snapshot[2]
+                if diff_cost < 0:
+                    logger.debug(
+                        "[AIStrategyMixin] cost diff negative (model changed): %s",
+                        diff_cost,
+                    )
+                if ai_usage_cluster["calls"] > usage_snapshot[0]:
+                    try:
+                        await self._track_cost(
+                            diff_cost,
+                            unpriced_calls=ai_usage_cluster["unpriced_calls"] - usage_snapshot[3],
+                            unpriced_tokens=ai_usage_cluster["unpriced_tokens"] - usage_snapshot[4],
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        # 增量落账失败不阻断批次（与批次末落账同语义），下批 diff 仍会重试累加
+                        log_classified(
+                            logger,
+                            e,
+                            "general",
+                            "[AIStrategyMixin] Failed to persist batch AI cost delta: %s",
+                        )
+
+                # AI-05: 批内周期性预算复查——落账后累计单调更新，超限则软停剩余批次。
+                if await self._ai_budget_exhausted():
+                    logger.warning(
+                        "[AIStrategyMixin] Monthly AI cost budget exhausted mid-batch (after %d batches) — stopping remaining candidates",
+                        batch_count,
+                    )
+                    budget_hit_early = True
+                    # 与入口 guard 语义一致：软停标记供 UI/夜间任务区分"预算超限"与"无候选"。
+                    context["_ai_budget_exceeded"] = True
+                    break
+
+            if budget_hit_early:
+                # 与入口 guard 语义一致：剩余候选标记 budget_exceeded，保留行供 UI 呈现。
+                processed = batch_start + (len(batch) if "batch" in locals() else 0)
+                remaining = all_records[processed:]
+                if remaining:
+                    logger.info(
+                        "[AIStrategyMixin] Marking %d remaining candidates budget_exceeded",
+                        len(remaining),
+                    )
+                    for row_data in remaining:
+                        row = self._build_result_row(
+                            row_data,
+                            None,
+                            error_reason=I18n.get("ai_budget_exceeded"),
+                        )
+                        row["ai_status"] = "budget_exceeded"
+                        row["ai_score"] = None
+                        results.append(row)
 
             for res in results:
                 # F4-ST-001: 防御性 — CancelledError 继承 BaseException 而非 Exception,
@@ -972,16 +1040,18 @@ class AIStrategyMixin:
                 total_tasks,
             )
 
-        # 排序规则：analyzed → rejected → failed，同 ai_status 内按 ai_score 降序。
+        # 排序规则：analyzed → rejected → failed → budget_exceeded，
+        # 同 ai_status 内按 ai_score 降序。
         # ai_status 为字符串，"analyzed/failed/rejected" 的字典序与目标顺序不一致（f<r），
         # 故用显式次序映射；ai_score=None (failed) 在 pandas 中始终排最后。
-        _AI_STATUS_ORDER = {"analyzed": 0, "rejected": 1, "failed": 2}
+        _AI_STATUS_ORDER = {"analyzed": 0, "rejected": 1, "failed": 2, "budget_exceeded": 3}
         order_series = result_df["ai_status"].map(_AI_STATUS_ORDER)
 
         # AI-03(完整版): 本次选股实际消耗的 LLM 调用次数、token 总量与货币成本回写 context,
         # 供 UI ViewModel 在策略完成后读取并展示。仅当确有成功调用才回写,
         # 避免「一次未发起调用」被 UI 误读为「消耗 0 次」。
-        # cost 为浮点元, 转分为整数后按月累计持久化（AIUsageTracker）。
+        # cost 为浮点元；持久化落账已在每批完成后以增量方式执行（AI-05 增量落账），
+        # 此处仅展示回写、不再重复调 _track_cost（避免重复记账）。
         if ai_usage_cluster["calls"] > 0:
             context["_ai_usage_summary"] = {
                 "calls": ai_usage_cluster["calls"],
@@ -990,22 +1060,6 @@ class AIStrategyMixin:
                 "unpriced_calls": ai_usage_cluster["unpriced_calls"],
                 "unpriced_tokens": ai_usage_cluster["unpriced_tokens"],
             }
-            try:
-                await self._track_cost(
-                    ai_usage_cluster["cost_cny"],
-                    unpriced_calls=ai_usage_cluster["unpriced_calls"],
-                    unpriced_tokens=ai_usage_cluster["unpriced_tokens"],
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                # 成本持久化失败不阻断结果交付（仅记录）
-                log_classified(
-                    logger,
-                    e,
-                    "general",
-                    "[AIStrategyMixin] Failed to persist AI cost to tracker: %s",
-                )
 
         return (
             result_df.assign(_ai_order=order_series)
