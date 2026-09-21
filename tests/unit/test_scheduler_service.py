@@ -102,6 +102,51 @@ class TestSchedulerServicePersistRunDateDb:
         )
 
     @pytest.mark.asyncio
+    async def test_concurrent_catchup_and_daily_update_keeps_max(self):
+        """TO-02/R22: 补偿（daily_sync_catchup）与日更（daily_sync）并发写同一水位键——
+        后完成者（补偿写 missed[-1] 旧值）不倒退水位，内存与 DB 侧均取两者最大值。
+
+        时序构造（确定性，不依赖竞态）：gather 中日更（写 today=20260920）在前、补偿（写
+        missed[-1]=20260919）在后——单线程事件循环 FIFO 下后启动者的内存赋值后执行；
+        DB 替身在 set_app_state_max 的 await 点 sleep(0) 强制让出控制权，使两 task 真正
+        交织，模拟 last-writer-wins 倒退风险场景。
+        config 缓存为 last-writer-wins 启动缓存（DB 才是 SoT，C-P1-6），故只断言写入次数。
+        """
+        svc = _make_svc()
+        svc._last_update_date = None
+        svc._persist_run_date = MagicMock()
+        mock_engine = MagicMock()
+        db_state: dict[str, str] = {}
+
+        async def _fake_set_app_state_max(engine, key, value):
+            # PG INSERT..ON CONFLICT..WHERE config_value < EXCLUDED 的 GREATEST 语义替身
+            # （真实 where 语义由 test_app_state_service 结构断言独立守护）
+            await asyncio.sleep(0)  # 确定性交织：让出控制权，另一 task 得以插入执行
+            if value > db_state.get(key, ""):
+                db_state[key] = value
+
+        with (
+            patch("data.persistence.engine_provider.get_engine", return_value=mock_engine),
+            patch("data.persistence.engine_provider.is_disposed", return_value=False),
+            patch(
+                "data.persistence.app_state_service.set_app_state_max",
+                new_callable=AsyncMock,
+                side_effect=_fake_set_app_state_max,
+            ) as mock_max,
+        ):
+            await asyncio.gather(
+                svc._mark_daily_update_done_db("20260920"),  # 日更（daily_sync）写 today
+                svc._mark_daily_update_done_db("20260919"),  # 补偿（daily_sync_catchup）写 missed[-1]
+            )
+
+        # a) 内存水位取两者最大值：后完成者写旧值不倒退
+        assert svc._last_update_date == "20260920"
+        # b) 两次 DB 单调写均提交；DB 侧（GREATEST 语义）最终水位同为最大值
+        assert mock_max.await_count == 2
+        assert db_state["sched_last_daily_update"] == "20260920"
+        assert svc._persist_run_date.call_count == 2
+
+    @pytest.mark.asyncio
     async def test_nightly_prediction_monotonic(self):
         """TO-02: nightly 预测幂等键内存侧同样单调。"""
         svc = _make_svc()
