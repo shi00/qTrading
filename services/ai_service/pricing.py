@@ -47,8 +47,10 @@ def _get_usd_to_cny_rate() -> float:
         rate = ConfigHandler.get_setting(_USD_TO_CNY_RATE_KEY)
         if isinstance(rate, (int, float)) and rate > 0:
             return float(rate)
-    except Exception:
-        pass
+    except Exception as e:
+        # 配置读取/校验失败回退默认汇率（降级不阻断成本估算）；日志记录异常类型（R2 AST
+        # 扫描要求 except 非空——此处捕获的是同步配置 IO 的通用异常，非 CancelledError 路径）。
+        logger.debug("[pricing] fallback to default usd rate, exception_type=%s", type(e).__name__)
     return _USD_TO_CNY_RATE
 
 
