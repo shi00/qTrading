@@ -66,7 +66,7 @@ class FakeScreenerState:
     # UX-03: 空结果时可操作原因横幅 Message (镜像 ScreenerState.empty_message)
     empty_message: Message | None = None
     stock_filter: str = ""
-    # SC-01: 排除 ST/风险警示股开关 (镜像 ScreenerState.exclude_st, View 过滤栏渲染期读取)
+    # DS-02/SC-01: 排除风险警示股 (ST/*ST) 开关，默认开启 (镜像 ScreenerState.exclude_st, View 过滤栏渲染期只读)
     exclude_st: bool = True
     # C2b: 当前页 locale-neutral 原始行 (View 只读 state 快照)
     current_page_rows: tuple = ()

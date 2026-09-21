@@ -1017,7 +1017,7 @@ class TestScreenerViewModelRunStrategyExecution:
 
         call_count = 0
 
-        async def _get_data():
+        async def _get_data(*, exclude_st: bool = True):
             nonlocal call_count
             call_count += 1
             if call_count == 1:

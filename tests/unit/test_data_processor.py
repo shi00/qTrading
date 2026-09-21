@@ -1016,6 +1016,92 @@ class TestDataProcessorPrepareScreeningContext:
         await dp.prepare_screening_context(trade_date="20240614")
         dp._assign_basic_tier.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_exclude_st_true_filters_st_rows(self):
+        """DS-02: exclude_st=True 时按 is_st 列剔除风险警示股，并记录 st_excluded 诊断。"""
+        dp = _make_dp()
+        dp._quality_tier = 3
+        dp.cache.screener_dao.get_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                    "trade_date": ["20240614", "20240614", "20240614"],
+                    "is_tradable": [True, True, True],
+                    "is_st": [False, True, False],
+                }
+            )
+        )
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=None)
+        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_block_trade = AsyncMock(return_value=None)
+        result = await dp.prepare_screening_context(trade_date="20240614", exclude_st=True)
+        assert len(result["screening_data"]) == 2
+        assert result["_diagnostics"].get("st_excluded") == 1
+
+    @pytest.mark.asyncio
+    async def test_exclude_st_false_keeps_st_rows(self):
+        """DS-02: exclude_st=False 时保留 ST 行（用户关闭排除）。"""
+        dp = _make_dp()
+        dp._quality_tier = 3
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": ["20240614", "20240614"],
+                "is_tradable": [True, True],
+                "is_st": [False, True],
+            }
+        )
+        dp.cache.screener_dao.get_screening_data = AsyncMock(return_value=df)
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=None)
+        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_block_trade = AsyncMock(return_value=None)
+        result = await dp.prepare_screening_context(trade_date="20240614", exclude_st=False)
+        assert len(result["screening_data"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_exclude_st_default_true_without_is_st_column(self):
+        """DS-02: 无 is_st 列时 ST 排除静默跳过（保底不剔除），不崩溃。"""
+        dp = _make_dp()
+        dp._quality_tier = 3
+        dp.cache.screener_dao.get_screening_data = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "is_tradable": [True]})
+        )
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=None)
+        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_block_trade = AsyncMock(return_value=None)
+        result = await dp.prepare_screening_context(trade_date="20240614")
+        assert len(result["screening_data"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_get_strategy_data_passes_exclude_st(self):
+        """DS-02: get_strategy_data 透传 exclude_st 关键字到 prepare_screening_context。"""
+        dp = _make_dp()
+        dp.prepare_screening_context = AsyncMock(return_value={})
+        await dp.get_strategy_data(trade_date="20240614", exclude_st=False)
+        dp.prepare_screening_context.assert_awaited_once_with(trade_date="20240614", exclude_st=False)
+        await dp.get_strategy_data(trade_date="20240614")
+        dp.prepare_screening_context.assert_awaited_with(trade_date="20240614", exclude_st=True)
+
+    @pytest.mark.asyncio
+    async def test_get_screening_data_signature_unchanged(self):
+        """DS-02: get_screening_data 透传方法不加参、不过滤 is_st（回测需完整含 ST 数据）。"""
+        dp = _make_dp()
+        dp.cache.screener_dao.get_screening_data = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "is_st": [True]})
+        )
+        result = await dp.get_screening_data("20240614")
+        dp.cache.screener_dao.get_screening_data.assert_called_once_with("20240614")
+        assert len(result) == 1  # 含 ST 行，未被过滤
+
 
 class TestDataProcessorInitializeSystem:
     @pytest.mark.asyncio

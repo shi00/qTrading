@@ -38,6 +38,29 @@ def vm():
         return vm
 
 
+class TestExcludeStToggle:
+    """DS-02 P2: set_exclude_st 命令更新 ScreenerState.exclude_st（默认 True 且幂等）。"""
+
+    def test_default_true(self, vm):
+        assert vm.state.exclude_st is True
+
+    def test_set_false(self, vm):
+        vm.set_exclude_st(False)
+        assert vm.state.exclude_st is False
+
+    def test_set_true(self, vm):
+        vm.set_exclude_st(False)
+        vm.set_exclude_st(True)
+        assert vm.state.exclude_st is True
+
+    def test_idempotent_same_value(self, vm):
+        before = vm.state
+        vm.set_exclude_st(False)
+        vm.set_exclude_st(False)
+        assert vm.state.exclude_st is False
+        assert vm.state is not before  # _set_state 产生新快照
+
+
 # --- StreamCard dataclass ---
 
 

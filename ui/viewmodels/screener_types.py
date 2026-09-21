@@ -254,8 +254,8 @@ class ScreenerState:
     is_retrying: bool = False
     # UX-04 (P2-01): 股票代码过滤 (ts_code 子串匹配, 空串=不过滤; 深链/手动输入两来源)
     stock_filter: str = ""
-    # SC-01: 排除 ST/*ST 风险警示股（全局筛选设置，默认开启；被排除数量经 warnings 透传可见）。
-    # 运行时经 context["exclude_st"] 注入策略基类，由 PolarsBaseStrategy 统一过滤。
+    # DS-02: 是否排除风险警示股 (ST/*ST)，默认开启；经 get_strategy_data 透传数据层行过滤。
+    # SC-01: 被排除数量经 warnings 透传可见；运行时另经 context["exclude_st"] 注入策略基类统一过滤。
     exclude_st: bool = True
     # AI-03(完整版): 上次选股实际消耗的 LLM 调用次数、token 总量与成本(元)。
     # None 表示当次未执行 AI 分析（本轮没有可展示的消耗）；View 据此决定是否渲染汇总行。

@@ -1042,7 +1042,10 @@ class TestDataProcessor(unittest.TestCase):
         context = await self.processor.get_strategy_data(trade_date="20230105")
 
         self.assertEqual(context["trade_date"], "20230105")
-        self.processor.prepare_screening_context.assert_awaited_once_with(trade_date="20230105")
+        self.processor.prepare_screening_context.assert_awaited_once_with(
+            trade_date="20230105",
+            exclude_st=True,
+        )
 
     def test_get_strategy_data_passes_trade_date_through(self):
         asyncio.run(self.async_test_get_strategy_data_passes_trade_date_through())

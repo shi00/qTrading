@@ -1748,6 +1748,45 @@ class TestAIStrategyMixinAnalyzeSingle:
         result = await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched)
         assert result is not None
 
+    @pytest.mark.asyncio
+    async def test_analyze_name_ranges_failure_falls_back(self, mock_strategy, mock_dp, mock_ai_client):
+        """DS-02 P3：get_name_ranges 抛异常时降级为当前名称 ST 判定，不阻断分析。
+
+        覆盖 ai_mixin 中 name_ranges 拉取的 except Exception 分支。
+        """
+        mock_dp.cache.stock_name_history_dao.get_name_ranges = AsyncMock(side_effect=RuntimeError("name ranges boom"))
+        history_df = pd.DataFrame(
+            {
+                "trade_date": [f"202403{str(i).zfill(2)}" for i in range(1, 61)],
+                "open": [10.0 + i * 0.1 for i in range(60)],
+                "high": [10.5 + i * 0.1 for i in range(60)],
+                "low": [9.5 + i * 0.1 for i in range(60)],
+                "close": [10.0 + i * 0.1 for i in range(60)],
+                "vol": [1000000 + i * 10000 for i in range(60)],
+                "pct_chg": [1.0] * 60,
+                "adj_factor": [1.0] * 60,
+            }
+        )
+        row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 15.0}
+        prefetched = PreFetchedContext()
+        result = await mock_strategy._mixin_analyze_single(
+            row, mock_dp, mock_ai_client, prefetched, history_df=history_df
+        )
+        assert result is not None
+        assert result["score"] == 75
+        mock_dp.cache.stock_name_history_dao.get_name_ranges.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_analyze_name_ranges_cancelled_propagates(self, mock_strategy, mock_dp, mock_ai_client):
+        """DS-02 P3：get_name_ranges 抛 asyncio.CancelledError 必须传播（R2），不降级吞没。"""
+        mock_dp.cache.stock_name_history_dao.get_name_ranges = AsyncMock(side_effect=asyncio.CancelledError())
+        row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 15.0}
+        prefetched = PreFetchedContext()
+        with pytest.raises(asyncio.CancelledError):
+            await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched)
+        # 强断言：异常确实来自 name_ranges 拉取，而非被降级吞没
+        mock_dp.cache.stock_name_history_dao.get_name_ranges.assert_awaited_once()
+
 
 class TestAIStrategyMixinBuildResultRowD36:
     """D3-6: _build_result_row 不再以 score==0 丢弃行，并携带 ai_status 状态。

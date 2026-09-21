@@ -32,9 +32,15 @@ REVIEW_STATS_WINDOW_DAYS = 180
 # 为唯一可变点，分别由 _build_screening_sql/_build_screening_sql_range 按 require_close
 # 布尔与 PIT 时点（DAT-01）替换为模块受控片段（无用户输入），避免 f-string 拼 SQL 模式。
 # __STOCK_ALIVE_CONDITION__ 必须经 stock_alive_condition() 渲染（唯一正本），禁止内联复制。
+# DS-02（ST 时点还原链路）：name 列经 name-history LATERAL JOIN 按 as-of 时点还原历史名称
+# （无历史记录时 COALESCE 回退当前名称 stock_basic.name，防空表把全市场误判为非 ST）；
+# 新增派生列 is_st（UPPER(name) LIKE '%ST%'，覆盖 *ST/S*ST，与 _get_limit_pct 语义一致），
+# 供数据层行过滤排除风险警示股（P2）与 as-of 名称涨跌停判定。as-of 参数复用既有 $5
+# （单日版，恒等于 trade_date）与 cal.cal_date（区间版），不新增参数位。
 _SCREENING_SQL_TEMPLATE = """
               SELECT b.ts_code,
                      COALESCE(nh.name, b.name) AS name,
+                     CASE WHEN UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%' THEN TRUE ELSE FALSE END AS is_st,
                      m.l2_name AS industry_sw_l2,
                      b.industry AS industry_tushare,
                      b.list_date,
@@ -56,8 +62,7 @@ _SCREENING_SQL_TEMPLATE = """
                      f.debt_to_assets,
                      f.or_yoy,
                      f.netprofit_yoy,
-                     CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable,
-                     COALESCE(nh.name LIKE '%ST%', b.name LIKE '%ST%') AS is_st
+                     CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable
                FROM stock_basic b
                         LEFT JOIN daily_quotes q ON b.ts_code = q.ts_code AND q.trade_date = $1
                         LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = $2
@@ -95,9 +100,9 @@ _SCREENING_SQL_TEMPLATE = """
                             SELECT name
                             FROM stock_name_history
                             WHERE ts_code = b.ts_code
-                              AND start_date <= $1
-                              AND (end_date IS NULL OR end_date > $1)
-                            ORDER BY start_date DESC  -- SC-01: as-of 名称还原（DATA-04 L3），消除当前名称快照的前视偏差
+                              AND start_date <= $5
+                              AND (end_date IS NULL OR end_date > $5)
+                            ORDER BY start_date DESC
                             LIMIT 1
                         ) nh ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = $6
@@ -109,6 +114,7 @@ _SCREENING_SQL_TEMPLATE = """
 _SCREENING_SQL_RANGE_TEMPLATE = """
               SELECT b.ts_code,
                      COALESCE(nh.name, b.name) AS name,
+                     CASE WHEN UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%' THEN TRUE ELSE FALSE END AS is_st,
                      m.l2_name AS industry_sw_l2,
                      b.industry AS industry_tushare,
                      b.list_date,
@@ -130,8 +136,7 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                      f.debt_to_assets,
                      f.or_yoy,
                      f.netprofit_yoy,
-                     CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable,
-                     COALESCE(nh.name LIKE '%ST%', b.name LIKE '%ST%') AS is_st
+                     CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable
                FROM (
                    SELECT cal_date
                    FROM trade_cal

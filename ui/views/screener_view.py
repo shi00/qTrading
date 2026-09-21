@@ -1584,7 +1584,14 @@ def _build_screener_control_card(
         on_change=safe_on_change(handlers["on_stock_filter_change"]),
         on_submit=safe_on_change(handlers["on_run_click_sync"]),
     )
-    filter_row = ft.Row([stock_filter_field, ft.Container(expand=True)], spacing=10)
+    # DS-02: 风险警示股（ST/*ST）排除开关，经 on_exclude_st_change → vm.set_exclude_st 透传数据层行过滤
+    exclude_st_switch = ft.Switch(
+        label=I18n.get("screener_exclude_st"),
+        value=state.exclude_st,
+        on_change=safe_on_change(handlers["on_exclude_st_change"]),
+        active_color=AppColors.PRIMARY,
+    )
+    filter_row = ft.Row([stock_filter_field, exclude_st_switch, ft.Container(expand=True)], spacing=10)
 
     realtime_controls = ft.Column(
         [

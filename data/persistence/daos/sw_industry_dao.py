@@ -203,3 +203,65 @@ class StockNameHistoryDao(BaseDao):
         if df is None or df.empty:
             return None
         return str(df["name"].iloc[0])
+
+    async def get_name_ranges(self, ts_code: str) -> list[tuple]:
+        """返回该股全部名称生效区间 ``(start_date, end_date, name)`` 列表（start_date 升序）。
+
+        P3/DS-02：供单只股票的内存映射逐日解析「某日是否 ST」（as-of 名称涨跌停判定）。
+        一次性批量读取整股区间，避免逐交易日 DB 查询。无记录/空 ts_code 时返回 ``[]``。
+        """
+        if not ts_code:
+            return []
+        try:
+            df = await self._read_db(
+                """
+                SELECT start_date, end_date, name
+                FROM stock_name_history
+                WHERE ts_code = $1
+                ORDER BY start_date
+                """,
+                (ts_code,),
+            )
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "[StockNameHistoryDao] Failed to get name ranges: %s",
+                DataSanitizer.sanitize_error(e),
+            )
+            return []
+
+        if df is None or df.empty:
+            return []
+        return list(df.itertuples(index=False, name=None))
+
+    async def get_name_history_coverage_summary(self) -> dict:
+        """返回 ``stock_name_history`` 覆盖度汇总 ``{total_rows, st_rows}``（P4/DS-02 健康检查）。"""
+        try:
+            df = await self._read_db(
+                """
+                SELECT COUNT(*) AS total_rows,
+                       COUNT(*) FILTER (WHERE UPPER(name) LIKE '%ST%') AS st_rows
+                FROM stock_name_history
+                """
+            )
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "[StockNameHistoryDao] Failed to get name history coverage: %s",
+                DataSanitizer.sanitize_error(e),
+            )
+            return {"total_rows": 0, "st_rows": 0}
+
+        if df is None or df.empty:
+            return {"total_rows": 0, "st_rows": 0}
+        row = df.iloc[0]
+        return {
+            "total_rows": int(row.get("total_rows") or 0),
+            "st_rows": int(row.get("st_rows") or 0),
+        }

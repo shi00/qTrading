@@ -2,6 +2,7 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 
 import asyncio
+import datetime
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -442,4 +443,140 @@ class TestGetNameAsOf:
             mock_sanitizer.sanitize_error = MagicMock(return_value="sanitized")
             result = await dao.get_name_as_of("000001.SZ", "2021-01-01")
         assert result is None
+        mock_sanitizer.sanitize_error.assert_called_once_with(original_error)
+
+
+class TestGetNameRanges:
+    """get_name_ranges：批量区间读取（P3/DS-02），升序 + $1 参数化 + 异常分层（R4/R2/R5）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_ts_code_returns_empty_list_without_query(self):
+        dao = _make_name_history_dao()
+        assert await dao.get_name_ranges("") == []
+        dao._read_db.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_returns_sorted_ranges(self):
+        dao = _make_name_history_dao()
+        d1, d2 = datetime.date(2020, 1, 1), datetime.date(2021, 6, 1)
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "start_date": [d1, d2],
+                    "end_date": [datetime.date(2021, 5, 31), None],
+                    "name": ["ST平安", "平安银行"],
+                }
+            )
+        )
+        result = await dao.get_name_ranges("000001.SZ")
+        assert result == [
+            (d1, datetime.date(2021, 5, 31), "ST平安"),
+            (d2, None, "平安银行"),
+        ]
+        sql_arg = dao._read_db.call_args.args[0]
+        # R4：占位符必须是 $1 而非 %s；区间按 start_date 升序
+        assert "$1" in sql_arg
+        assert "%s" not in sql_arg
+        assert "ORDER BY start_date" in sql_arg
+        assert dao._read_db.call_args.args[1] == ("000001.SZ",)
+
+    @pytest.mark.asyncio
+    async def test_empty_df_returns_empty_list(self):
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        assert await dao.get_name_ranges("000001.SZ") == []
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await dao.get_name_ranges("000001.SZ")
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_propagates(self):
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_name_ranges("000001.SZ")
+
+    @pytest.mark.asyncio
+    async def test_other_exception_returns_empty_list(self):
+        """非 Cancelled/EngineDisposed 异常 sanitize 后返回空 list。"""
+        dao = _make_name_history_dao()
+        original_error = RuntimeError("db error with sensitive: token=secret")
+        dao._read_db = AsyncMock(side_effect=original_error)
+        with patch("data.persistence.daos.sw_industry_dao.DataSanitizer") as mock_sanitizer:
+            mock_sanitizer.sanitize_error = MagicMock(return_value="sanitized")
+            result = await dao.get_name_ranges("000001.SZ")
+        assert result == []
+        mock_sanitizer.sanitize_error.assert_called_once_with(original_error)
+
+
+class TestGetNameHistoryCoverageSummary:
+    """get_name_history_coverage_summary：覆盖度汇总 + 空/None + 异常分层（R4/R2/R5）。"""
+
+    @pytest.mark.asyncio
+    async def test_returns_coverage_dict(self):
+        """非空 df 时返回 {total_rows, st_rows}，无参数化占位符（R4）。"""
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"total_rows": [120], "st_rows": [8]}))
+        result = await dao.get_name_history_coverage_summary()
+        assert result == {"total_rows": 120, "st_rows": 8}
+        dao._read_db.assert_awaited_once()
+        sql_arg = dao._read_db.call_args.args[0]
+        assert "%s" not in sql_arg
+        assert "total_rows" in sql_arg
+        assert "st_rows" in sql_arg
+        assert len(dao._read_db.call_args.args) == 1
+
+    @pytest.mark.asyncio
+    async def test_none_df_returns_zero_dict(self):
+        """_read_db 返回 None 时返回全 0 覆盖度。"""
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(return_value=None)
+        assert await dao.get_name_history_coverage_summary() == {"total_rows": 0, "st_rows": 0}
+
+    @pytest.mark.asyncio
+    async def test_empty_df_returns_zero_dict(self):
+        """_read_db 返回空 DataFrame 时返回全 0 覆盖度。"""
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        assert await dao.get_name_history_coverage_summary() == {"total_rows": 0, "st_rows": 0}
+
+    @pytest.mark.asyncio
+    async def test_none_values_coerced_to_zero(self):
+        """df 中存在 None 值时以 0 兜底（'或 0' 分支）。"""
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"total_rows": [None], "st_rows": [None]}))
+        assert await dao.get_name_history_coverage_summary() == {"total_rows": 0, "st_rows": 0}
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        """asyncio.CancelledError 必须传播（R2），不返回 0 dict。"""
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await dao.get_name_history_coverage_summary()
+        dao._read_db.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_propagates(self):
+        """EngineDisposedError 必须传播（R5），不返回 0 dict。"""
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_name_history_coverage_summary()
+        dao._read_db.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_other_exception_returns_zero_dict(self):
+        """非 Cancelled/EngineDisposed 异常 sanitize 后返回全 0 覆盖度。"""
+        dao = _make_name_history_dao()
+        original_error = RuntimeError("db error with sensitive: password=456")
+        dao._read_db = AsyncMock(side_effect=original_error)
+        with patch("data.persistence.daos.sw_industry_dao.DataSanitizer") as mock_sanitizer:
+            mock_sanitizer.sanitize_error = MagicMock(return_value="sanitized")
+            result = await dao.get_name_history_coverage_summary()
+        assert result == {"total_rows": 0, "st_rows": 0}
         mock_sanitizer.sanitize_error.assert_called_once_with(original_error)

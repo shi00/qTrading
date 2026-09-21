@@ -1446,10 +1446,22 @@ class AIStrategyMixin:
 
             # 7d. History Feature Summary (Level-3: Factor Extraction + Summarization)
             history_labels: list[str] = []
+            # DS-02 P3: 一次性批量拉取该股名称生效区间（非逐日查询），供历史 K 线涨跌停 as-of 判定
+            name_ranges = None
+            try:
+                name_ranges = await dp.cache.stock_name_history_dao.get_name_ranges(ts_code)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "[ai_mixin] get_name_ranges failed, fallback to current-name ST tag: %s",
+                    DataSanitizer.sanitize_error(e),
+                )
             history_text = _build_history_text(
                 history_df,  # type: ignore[arg-type]
                 ts_code=ts_code,
                 stock_name=row.get("name", ""),
+                name_ranges=name_ranges,
                 vol_ratio_threshold=vol_ratio_threshold,
                 labels_out=history_labels,
             )
