@@ -17,6 +17,7 @@ from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date, to_date
+from utils.prompt_guard import neutralize_external_text
 
 logger = logging.getLogger(__name__)
 
@@ -655,17 +656,18 @@ class ReviewManager:
             )
             if df_wins is not None and not df_wins.empty:
                 for _, row in df_wins.iterrows():
+                    # SEC-001：ai_reason 与 name 均为第三方/模型自由文本，入 Prompt 前中和
+                    # （AI-03：剥离零宽字符、转义尖括号、PII 脱敏），避免 few-shot 回灌注入通道。
+                    reason_raw = str(row["ai_reason"]) if row["ai_reason"] else ""  # type: ignore[union-attr]
                     wins.append(
                         {
                             "code": row["ts_code"],
-                            "name": row["name"],
+                            "name": neutralize_external_text(str(row.get("name") or "")),
                             "alpha": row["alpha"],
                             "pct": row["t1_pct"],
                             "score": row["ai_score"],
                             "benchmark": row.get("benchmark_code"),
-                            "reason": str(row["ai_reason"])[:50]
-                            if row["ai_reason"]  # type: ignore[union-attr]
-                            else "",
+                            "reason": neutralize_external_text(reason_raw)[:50],
                         },
                     )
 
@@ -677,17 +679,17 @@ class ReviewManager:
             )
             if df_losses is not None and not df_losses.empty:
                 for _, row in df_losses.iterrows():
+                    # SEC-001：同上——wins/losses 两侧同一中性化处理。
+                    reason_raw = str(row["ai_reason"]) if row["ai_reason"] else ""  # type: ignore[union-attr]
                     losses.append(
                         {
                             "code": row["ts_code"],
-                            "name": row["name"],
+                            "name": neutralize_external_text(str(row.get("name") or "")),
                             "alpha": row["alpha"],
                             "pct": row["t1_pct"],
                             "score": row["ai_score"],
                             "benchmark": row.get("benchmark_code"),
-                            "reason": str(row["ai_reason"])[:50]
-                            if row["ai_reason"]  # type: ignore[union-attr]
-                            else "",
+                            "reason": neutralize_external_text(reason_raw)[:50],
                         },
                     )
 
