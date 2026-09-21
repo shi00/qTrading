@@ -4,7 +4,7 @@
 月度预算」的 UI 展示与超限软停。设计约定：
 
 - 存储：``AppState`` 表，key 形如 ``ai_cost:{YYYYMM}``，value 为本月累计成本的
-  **整数分**（pricing 计算的浮点元经 ``add_cost_cny`` 转分为整数后累计，避免浮点误差）。
+  **整数分**（pricing 计算的浮点元经 ``add_cost_cents`` 转分为整数后累计，避免浮点误差）。
 - 跨月轮换：key 含年月，进入新月自然落到新 key；旧月数据保留供历史参考。
 - 原子累加：并发写（多策略/多批次）用 ``on_conflict_do_update`` 在 SQL 侧
   ``cast(value as bigint) + delta`` 递增，杜绝「读-改-写」竞态丢数（对抗审查修正）。
@@ -110,7 +110,7 @@ class AIUsageTracker:
         return self._engine
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def get_month_cost_cny(self, when: date | None = None) -> int:
+    async def get_month_cost_cents(self, when: date | None = None) -> int:
         """读取某月累计成本（分）。engine 未注入或无记录时返回 0。"""
         engine = self._resolve_engine()
         if engine is None:
@@ -128,7 +128,7 @@ class AIUsageTracker:
             return 0
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def add_cost_cny(self, cents: int, when: date | None = None) -> None:
+    async def add_cost_cents(self, cents: int, when: date | None = None) -> None:
         """原子累加某月累计成本（分）。
 
         注入 engine 或较小时才写库；否则 no-op（不持久化，成本仅内存累计）。
@@ -189,7 +189,7 @@ class AIUsageTracker:
     async def add_unpriced(self, calls: int, tokens: int, when: date | None = None) -> None:
         """原子累加某月不可计价调用次数与 token 数。
 
-        AI-01：与 ``add_cost_cny`` 同款 ``cast(BigInteger) + delta`` 原子累加，
+        AI-01：与 ``add_cost_cents`` 同款 ``cast(BigInteger) + delta`` 原子累加，
         calls/tokens 各一个 key，同事务写入避免部分成功不一致。不可计价量为月度
         累计量，多批次/多策略并发必须累加而非覆盖。
         engine 未注入或调用/token 均非正时 no-op（不持久化）。

@@ -439,7 +439,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                 self._set_state(month_cost_cny=None)
                 return
             AIUsageTracker().configure(engine=engine)
-            month_cost_cents = await AIUsageTracker().get_month_cost_cny()
+            month_cost_cents = await AIUsageTracker().get_month_cost_cents()
             month_unpriced = await AIUsageTracker().get_month_unpriced()
             self._set_state(
                 month_cost_cny=month_cost_cents / 100,

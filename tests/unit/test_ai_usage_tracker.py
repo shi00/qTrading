@@ -41,7 +41,7 @@ class TestGetMonthCostCny:
     @pytest.mark.asyncio
     async def test_returns_zero_when_no_engine_injected(self):
         tracker = AIUsageTracker(engine=None)
-        result = await tracker.get_month_cost_cny()
+        result = await tracker.get_month_cost_cents()
         assert result == 0
 
     @pytest.mark.asyncio
@@ -53,7 +53,7 @@ class TestGetMonthCostCny:
         engine = _make_connect_engine(mock_conn)
 
         tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
-        result = await tracker.get_month_cost_cny()
+        result = await tracker.get_month_cost_cents()
 
         assert result == 12345
         mock_conn.execute.assert_awaited_once()
@@ -67,7 +67,7 @@ class TestGetMonthCostCny:
         engine = _make_connect_engine(mock_conn)
 
         tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
-        assert await tracker.get_month_cost_cny() == 0
+        assert await tracker.get_month_cost_cents() == 0
 
     @pytest.mark.asyncio
     async def test_returns_zero_on_exception(self):
@@ -76,7 +76,7 @@ class TestGetMonthCostCny:
         engine = _make_connect_engine(mock_conn)
 
         tracker = AIUsageTracker(engine=engine)
-        assert await tracker.get_month_cost_cny() == 0
+        assert await tracker.get_month_cost_cents() == 0
 
     @pytest.mark.asyncio
     async def test_uses_injected_clock_month(self):
@@ -87,7 +87,7 @@ class TestGetMonthCostCny:
         engine = _make_connect_engine(mock_conn)
 
         tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 10, 2))
-        result = await tracker.get_month_cost_cny()
+        result = await tracker.get_month_cost_cents()
 
         assert result == 50  # 使用注入时钟的月份读取
 
@@ -98,7 +98,7 @@ class TestGetMonthCostCny:
         engine = _make_begin_engine(mock_conn)
         tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
 
-        await tracker.add_cost_cny(250)
+        await tracker.add_cost_cents(250)
         stmt = mock_conn.execute.call_args[0][0]
         params = _extract_params(stmt)
         # 插入/冲突目标 key 应为月份 key "ai_cost:202609"
@@ -109,7 +109,7 @@ class TestAddCostCny:
     @pytest.mark.asyncio
     async def test_noop_when_no_engine_injected(self):
         tracker = AIUsageTracker(engine=None)
-        await tracker.add_cost_cny(100)
+        await tracker.add_cost_cents(100)
         assert tracker._engine is None
 
     @pytest.mark.asyncio
@@ -119,8 +119,8 @@ class TestAddCostCny:
         engine = _make_begin_engine(mock_conn)
         tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
 
-        await tracker.add_cost_cny(0)
-        await tracker.add_cost_cny(-5)
+        await tracker.add_cost_cents(0)
+        await tracker.add_cost_cents(-5)
 
         mock_conn.execute.assert_not_awaited()
 
@@ -131,7 +131,7 @@ class TestAddCostCny:
         engine = _make_begin_engine(mock_conn)
         tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
 
-        await tracker.add_cost_cny(250)
+        await tracker.add_cost_cents(250)
 
         # begin 上下文由 execute 被 await 隐式证明；语句对象经 compile 参数验证（见
         # test_writes_uses_month_key），此处仅确认 begin 曾进入并向 conn 提交 SQL。
@@ -147,7 +147,7 @@ class TestAddCostCny:
         engine = _make_begin_engine(mock_conn)
         tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
 
-        await tracker.add_cost_cny(250)
+        await tracker.add_cost_cents(250)
         from services.ai_service import usage_tracker as ut
 
         stmt = mock_conn.execute.call_args[0][0]
@@ -161,7 +161,7 @@ class TestAddCostCny:
         engine = _make_begin_engine(mock_conn)
         tracker = AIUsageTracker(engine=engine)
 
-        await tracker.add_cost_cny(100)
+        await tracker.add_cost_cents(100)
 
 
 def _extract_params(stmt):

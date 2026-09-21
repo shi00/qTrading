@@ -1438,7 +1438,7 @@ class TestRunAiAnalysisUsageSummary:
             mock_ai_instance.analyze_stock = mock_analyze
             mock_ai.return_value = mock_ai_instance
             mock_tracker = MagicMock()
-            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_cost_cents = AsyncMock()
             mock_tracker_cls.return_value = mock_tracker
 
             result = await s.run_ai_analysis(candidates, context)
@@ -1452,7 +1452,7 @@ class TestRunAiAnalysisUsageSummary:
             "unpriced_calls": 0,
             "unpriced_tokens": 0,
         }
-        mock_tracker.add_cost_cny.assert_awaited_once_with(5)
+        mock_tracker.add_cost_cents.assert_awaited_once_with(5)
 
     @pytest.mark.asyncio
     async def test_failed_results_not_counted(self):
@@ -1493,7 +1493,7 @@ class TestRunAiAnalysisUsageSummary:
             mock_ai_instance.analyze_stock = mock_analyze
             mock_ai.return_value = mock_ai_instance
             mock_tracker = MagicMock()
-            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_cost_cents = AsyncMock()
             mock_tracker_cls.return_value = mock_tracker
 
             result = await s.run_ai_analysis(candidates, context)
@@ -1507,7 +1507,7 @@ class TestRunAiAnalysisUsageSummary:
             "unpriced_calls": 0,
             "unpriced_tokens": 0,
         }
-        mock_tracker.add_cost_cny.assert_awaited_once_with(2)
+        mock_tracker.add_cost_cents.assert_awaited_once_with(2)
 
     @pytest.mark.asyncio
     async def test_no_key_when_no_success_call(self):
@@ -4161,13 +4161,13 @@ class TestRetrySingleGuardsAndCost:
             patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_tracker_cls,
         ):
             mock_tracker = MagicMock()
-            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_cost_cents = AsyncMock()
             mock_tracker_cls.return_value = mock_tracker
 
             await s.retry_single("平安银行", context)
 
         # 0.05 元 → 5 分
-        mock_tracker.add_cost_cny.assert_awaited_once_with(5)
+        mock_tracker.add_cost_cents.assert_awaited_once_with(5)
         result_row = on_result.call_args.args[0]
         assert result_row["ai_status"] == "analyzed"
         assert on_result.call_count == 1
@@ -4190,12 +4190,12 @@ class TestRetrySingleGuardsAndCost:
             patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_tracker_cls,
         ):
             mock_tracker = MagicMock()
-            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_cost_cents = AsyncMock()
             mock_tracker_cls.return_value = mock_tracker
 
             await s.retry_single("平安银行", context)
 
-        mock_tracker.add_cost_cny.assert_not_awaited()
+        mock_tracker.add_cost_cents.assert_not_awaited()
 
 
 class TestUnpricedUsageGuards:
@@ -4389,11 +4389,11 @@ class TestUnpricedUsageGuards:
         s = ConcreteStrategy()
         with patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_cls:
             mock_tracker = MagicMock()
-            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_cost_cents = AsyncMock()
             mock_tracker.add_unpriced = AsyncMock()
             mock_cls.return_value = mock_tracker
             await s._track_cost(0.05)
-        mock_tracker.add_cost_cny.assert_awaited_once_with(5)
+        mock_tracker.add_cost_cents.assert_awaited_once_with(5)
         mock_tracker.add_unpriced.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -4402,11 +4402,11 @@ class TestUnpricedUsageGuards:
         s = ConcreteStrategy()
         with patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_cls:
             mock_tracker = MagicMock()
-            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_cost_cents = AsyncMock()
             mock_tracker.add_unpriced = AsyncMock()
             mock_cls.return_value = mock_tracker
             await s._track_cost(None, unpriced_calls=3, unpriced_tokens=500)
-        mock_tracker.add_cost_cny.assert_not_awaited()
+        mock_tracker.add_cost_cents.assert_not_awaited()
         mock_tracker.add_unpriced.assert_awaited_once_with(3, 500)
 
     @pytest.mark.asyncio

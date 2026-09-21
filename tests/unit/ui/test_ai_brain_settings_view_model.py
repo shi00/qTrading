@@ -304,9 +304,9 @@ def _enter_cost_tracker(engine_value, is_disposed_value, get_result, get_side_ef
     tracker_cls = stack.enter_context(patch("services.ai_service.usage_tracker.AIUsageTracker"))
     instance = MagicMock()
     if get_side_effect is not None:
-        instance.get_month_cost_cny = AsyncMock(side_effect=get_side_effect)
+        instance.get_month_cost_cents = AsyncMock(side_effect=get_side_effect)
     else:
-        instance.get_month_cost_cny = AsyncMock(return_value=get_result)
+        instance.get_month_cost_cents = AsyncMock(return_value=get_result)
     instance.get_month_unpriced = AsyncMock(return_value=(0, 0))
     tracker_cls.return_value = instance
     return stack, instance
