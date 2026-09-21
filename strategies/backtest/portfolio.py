@@ -388,10 +388,19 @@ class PortfolioSimulator:
         exit_price = self._exec_price(quote)
         current_value = pos["volume"] * exit_price
         sell_value = max(current_value - target_value, 0.0)
-        volume = int(sell_value / exit_price / 100) * 100
 
-        # 减持量不超过阈值或超过现有持仓 → 复用 _sell_position 全额清仓（含记账）
-        if volume <= 0 or volume >= pos["volume"]:
+        # BT-08: A 股整手限制是单向的——买入必须 100 股整数倍，卖出允许零股。
+        # 原实现按 100 股向下取整，比真实规则保守（最多少卖 99 股），且 `volume <= 0`
+        # 会把「无需减持」与「减持量不足一手」两种语义合并 fallthrough 到全额清仓，
+        # 一笔本应减持 60 股的微调可能变成清仓全部持仓。修复后卖出取整取消、零股
+        # 可卖出；volume<=0（无需减持或减持不足 1 股市值）时直接跳过，不再误清仓。
+        volume = int(sell_value / exit_price)
+
+        if volume <= 0:
+            return  # 无需减持（sell_value<=0）或减持不足 1 股，不做任何动作
+
+        # 减持量达到/超过现有持仓 → 复用 _sell_position 全额清仓（含记账）
+        if volume >= pos["volume"]:
             self._sell_position(exec_date, ts_code, pos, quote)
             return
 
