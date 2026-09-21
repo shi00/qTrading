@@ -461,25 +461,6 @@ class ScreenerDao(BaseDao):
             return []
         return df.to_dict("records")
 
-    async def get_learning_examples(self, limit: int | None = 3):
-        t = ScreeningHistory.__table__
-        base = self._base_cols()
-        wins = await self._read_db_select(
-            sa.select(*base)
-            .select_from(t)
-            .where(t.c.prediction_result == "WIN", t.c.alpha.isnot(None))
-            .order_by(t.c.alpha.desc(), t.c.t1_pct.desc())
-            .limit(limit)
-        )
-        losses = await self._read_db_select(
-            sa.select(*base)
-            .select_from(t)
-            .where(t.c.prediction_result == "LOSS", t.c.alpha.isnot(None))
-            .order_by(t.c.alpha.asc(), t.c.t1_pct.asc())
-            .limit(limit)
-        )
-        return wins, losses
-
     # --- Data fetch for logic: 日期形参在 DAO 边界显式转为 date（DAT-26） ---
     # 调用方（data_processor/data_provider）以 8 位 YYYYMMDD 字符串作为 context key，
     # 不能改其格式；只在 DAO 边界经 BaseDao._to_db_date 显式转成 date 对象供 _read_db 绑定。
