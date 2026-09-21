@@ -76,6 +76,7 @@ COMMON_COLUMNS = {
     "debt_to_assets": "col_debt_to_assets",
     "or_yoy": "col_or_yoy",
     "netprofit_yoy": "col_netprofit_yoy",
+    "growth_quality_doubt": "col_growth_quality_doubt",
     "goodwill": "col_goodwill",
     # Money Flow
     "buy_sm_vol": "col_buy_sm_vol",

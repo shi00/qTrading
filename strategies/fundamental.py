@@ -181,12 +181,28 @@ class GrowthStrategy(PolarsBaseStrategy):
         rev = p.get("revenue_growth_min", 20)
         profit = p.get("profit_growth_min", 25)
         roe = p.get("roe_min", 15)
+        # SC-03: netprofit_yoy 基期（上年同期）亏损时无业务含义（Tushare 公式分母为 |上年同期净利|）。
+        # ① 绝对盈利下限 n_income > 0 兜底（null 缺失放行，不伪造，R21）；
+        # ② 增长质量存疑降权而非硬过滤：利润增速远超营收增速（> 2 倍）且毛利率未改善
+        # （<= 上一报告期）时标记 growth_quality_doubt=1 并置后排序，交 AI 二次审查。
         return (
             lf.drop_nulls(subset=["or_yoy", "netprofit_yoy", "roe"])
             .filter(pl.col("or_yoy") > rev)
             .filter(pl.col("netprofit_yoy") > profit)
+            .filter((pl.col("n_income").is_null()) | (pl.col("n_income") > 0))
             .filter(pl.col("roe") > roe)
-            .sort("roe", descending=True)
+            .with_columns(
+                (
+                    (pl.col("netprofit_yoy") > 2 * pl.col("or_yoy"))
+                    & pl.col("grossprofit_margin").is_not_null()
+                    & pl.col("gpm_prev").is_not_null()
+                    & (pl.col("grossprofit_margin") <= pl.col("gpm_prev"))
+                )
+                .cast(pl.Int8)
+                .fill_null(0)
+                .alias("growth_quality_doubt")
+            )
+            .sort(["growth_quality_doubt", "roe"], descending=[False, True])
         )
 
     attribution_enabled = True  # UX-04
@@ -198,13 +214,17 @@ class GrowthStrategy(PolarsBaseStrategy):
             p.get("profit_growth_min", 25),
             p.get("roe_min", 15),
         )
-        conditions = (
+        conditions = [
             FilterCondition("or_yoy", "gt", float(rev), fnum(row.get("or_yoy"))),
             FilterCondition("netprofit_yoy", "gt", float(profit), fnum(row.get("netprofit_yoy"))),
             FilterCondition("roe", "gt", float(roe), fnum(row.get("roe"))),
-        )
+        ]
+        # SC-03: 增长质量存疑仅在命中（doubt=1）时追加条件；doubt=0 不渲染，避免归因卡
+        # 出现"未命中的存疑条件"误导。列值由 _filter_logic 的 with_columns 注入筛选结果行。
+        if float(row.get("growth_quality_doubt") or 0) > 0:
+            conditions.append(FilterCondition("growth_quality_doubt", "gt", 0.0, 1.0))
         return FilterAttribution(
-            conditions=conditions,
+            conditions=tuple(conditions),
             rank=RankAttribution(field="roe", value=fnum(row.get("roe")), total=total_candidates),
         )
 
