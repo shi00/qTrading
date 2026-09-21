@@ -1373,6 +1373,47 @@ class TestDiffRebalance:
         assert len(sells) == 1
         assert sells[0]["volume"] == 1000
 
+    def test_sell_position_to_value_odd_lot_allowed(self) -> None:
+        """BT-08: 卖出允许零股——减持 60 股（非 100 整数倍）直接成交，不做 100 股向下取整。
+
+        场景：持仓 1000 股@10（成本 10000），目标市值 9400 → 减持 60 股（600/10），
+        修复前会被取整为 0 → 误清仓整个持仓。
+        """
+        sim, config = self._make_simulator(cash_reserve_pct=0.1)
+        sim.cash = 0.0
+        sim.positions["000001.SZ"] = {
+            "volume": 1000,
+            "cost_basis": 10000.0,
+            "entry_date": date(2024, 1, 1),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        quote = self._quote(date(2024, 1, 2), price=10.0)
+        sim._sell_position_to_value(date(2024, 1, 2), "000001.SZ", quote, target_value=9400.0)
+
+        sells = pl.DataFrame(sim.trades_list).filter(pl.col("action") == "sell") if sim.trades_list else pl.DataFrame()
+        assert len(sells) == 1
+        assert sells["volume"][0] == 60  # 零股可卖出，不再向下取整到 0
+        pos = sim.positions["000001.SZ"]
+        assert pos["volume"] == 940
+        # 平均成本摊销：成本按卖出比例摊销（60/1000）
+        assert pos["cost_basis"] == pytest.approx(10000.0 * 940 / 1000, abs=1e-6)
+
+    def test_sell_position_to_value_sub_one_share_skips_not_liquidates(self) -> None:
+        """BT-08: 减持量不足 1 股市值时跳过减持（不误全额清仓）。
+
+        场景：持仓 1000 股@10（成本 10000），目标市值 9999 → sell_value=1 元 → volume=0
+        → 跳过减持（保持持仓），而非旧实现的误清仓全部持仓。
+        """
+        sim, _config = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        q = self._quote(date(2024, 1, 8), price=10.0)
+        sim._sell_position_to_value(date(2024, 1, 8), "000001.SZ", q, target_value=9999.0)
+        assert "000001.SZ" in sim.positions  # 持仓保留，不清仓
+        assert sim.positions["000001.SZ"]["volume"] == 1000
+        sells = [t for t in sim.trades_list if t["action"] == "sell"]
+        assert sells == []  # 无卖出交易
+
     def test_buy_to_target_scales_when_exceeds_budget(self) -> None:
         """买入总额超预算时按比例缩减（覆盖 386-390）。"""
         sim, _config = self._make_simulator()
