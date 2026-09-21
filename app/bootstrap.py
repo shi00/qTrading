@@ -173,7 +173,11 @@ async def initialize_services(
                 "[Bootstrap] E2E_TESTING=true 在非 DEBUG 环境激活：确认这是显式测试运行，"
                 "否则该环境变量残留会使质量门控/日历服务后门静默生效。"
             )
-        logger.info("[Bootstrap] E2E testing mode detected, skipping background scheduler and data polling services.")
+        # DS-06: 启动横幅升级 warning——E2E 模式是测试态，必须显式可见
+        # （用户为排查临时设变量后遗忘 = 质量门控从此静默关闭的隐患）。
+        logger.warning(
+            "[Bootstrap] E2E testing mode detected, skipping background scheduler and data polling services."
+        )
         # (UX-06) 已删除旧 E2E 预热块：其调用 AIService() 以"触发 litellm import 约 18s+"
         # 预加载；但 litellm 已由 ai_service._ensure_litellm_loaded 双层惰性化，
         # __init__ 不再触发 litellm import → 预热为 no-op，删除（死代码）。

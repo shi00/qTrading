@@ -69,7 +69,9 @@ def _check_tier(
 ):
     """Shared logic to verify quality tier, optionally enforcing window integrity."""
     if is_e2e_mode():
-        logger.info("[QualityGate] E2E mode: bypassing quality check for %s", func_name)
+        # DS-06: E2E 绕过级别 info→warning——生产环境通常不记 info，级别太低会静默无痕。
+        # E2E_TESTING 只应在显式测试运行中出现，warning 让门控关闭在日志中可见可溯。
+        logger.warning("[QualityGate] E2E mode: bypassing quality check for %s", func_name)
         return
 
     if processor is None:
