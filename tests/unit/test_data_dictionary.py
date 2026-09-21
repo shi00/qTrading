@@ -15,22 +15,6 @@ pytestmark = pytest.mark.unit
 @patch.dict(os.environ, {"STRICT_SCHEMA_GATE": ""})
 class TestValidateSchemaDefinitionsExtended:
     @patch("data.persistence.models.Base")
-    def test_validate_with_orm_columns_missing_from_dict(self, mock_base, caplog: pytest.LogCaptureFixture):
-        mock_col = MagicMock()
-        mock_col.name = "orm_only_col"
-        mock_table = MagicMock()
-        mock_table.columns = [mock_col]
-        mock_metadata = MagicMock()
-        mock_metadata.tables = {"stock_basic": mock_table}
-        mock_base.metadata = mock_metadata
-        with caplog.at_level(logging.WARNING, logger="data.data_dictionary"):
-            validate_schema_definitions()
-        assert any(
-            r.levelno == logging.WARNING and "orm_only_col" in r.message and "missing from data dictionary" in r.message
-            for r in caplog.records
-        ), f"expected missing-column warning for orm_only_col, got: {[r.message for r in caplog.records]}"
-
-    @patch("data.persistence.models.Base")
     def test_validate_with_extra_defs_not_in_orm(self, mock_base, caplog: pytest.LogCaptureFixture):
         mock_metadata = MagicMock()
         mock_metadata.tables = {}
@@ -56,27 +40,6 @@ class TestValidateSchemaDefinitionsExtended:
         assert not any(r.levelno >= logging.WARNING and "alembic_version" in r.message for r in caplog.records), (
             f"alembic_version should be ignored, but appeared in: {[r.message for r in caplog.records]}"
         )
-
-    @patch("data.persistence.models.Base")
-    def test_validate_skips_updated_at_created_at(self, mock_base, caplog: pytest.LogCaptureFixture):
-        mock_col1 = MagicMock()
-        mock_col1.name = "updated_at"
-        mock_col2 = MagicMock()
-        mock_col2.name = "created_at"
-        mock_col3 = MagicMock()
-        mock_col3.name = "real_col"
-        mock_table = MagicMock()
-        mock_table.columns = [mock_col1, mock_col2, mock_col3]
-        mock_metadata = MagicMock()
-        mock_metadata.tables = {"stock_basic": mock_table}
-        mock_base.metadata = mock_metadata
-        with caplog.at_level(logging.WARNING, logger="data.data_dictionary"):
-            validate_schema_definitions()
-        # updated_at/created_at 被显式跳过，real_col 仍应触发 missing 警告
-        assert any(
-            r.levelno == logging.WARNING and "real_col" in r.message and "missing from data dictionary" in r.message
-            for r in caplog.records
-        ), f"expected missing-column warning for real_col, got: {[r.message for r in caplog.records]}"
 
     def test_validate_import_error(self, caplog: pytest.LogCaptureFixture):
         # 模拟 Base.metadata.tables.keys() 调用链抛 ImportError，验证 except Exception 分支记录 error 日志
@@ -165,21 +128,24 @@ class TestTableDefinitions:
         assert "alias" in TABLE_DEFINITIONS["stock_basic"]
 
     def test_no_empty_columns_fields(self):
-        """review03-C9 收缩：数据字典不得存在空 'columns' 字段（删除优于空壳）。"""
+        """OSS-01：列级声明已从 TABLE_DEFINITIONS 移除（派生于 ORM），不得再出现 'columns' 字段。"""
         for table_name, table_def in TABLE_DEFINITIONS.items():
-            columns = table_def.get("columns")
-            assert columns is None or (isinstance(columns, dict) and len(columns) > 0), (
-                f"Table '{table_name}' has empty 'columns' field — remove it (review03-C9)"
-            )
+            assert "columns" not in table_def, f"Table '{table_name}' still has 'columns' field — OSS-01 已移除列级声明"
 
     def test_all_tables_have_alias(self):
         for table_name, table_def in TABLE_DEFINITIONS.items():
             assert "alias" in table_def, f"Table '{table_name}' missing 'alias'"
 
     def test_all_columns_values_are_strings(self):
-        for table_name, table_def in TABLE_DEFINITIONS.items():
-            for col_name, alias_key in table_def.get("columns", {}).items():
-                assert isinstance(alias_key, str), f"Column alias_key in '{table_name}.{col_name}' is not str"
+        """OSS-01：派生后验证 ORM 全列经 column_i18n_key 解析出的 i18n key 均为 str/None。"""
+        from data.data_dictionary import columns_of, column_i18n_key
+
+        for table_name in TABLE_DEFINITIONS:
+            for col_name in columns_of(table_name):
+                alias_key = column_i18n_key(table_name, col_name)
+                assert alias_key is None or isinstance(alias_key, str), (
+                    f"Column i18n key for '{table_name}.{col_name}' is not str/None"
+                )
 
 
 class TestCommonColumns:
@@ -226,27 +192,15 @@ class TestValidateSchemaDefinitions:
         validate_schema_definitions()
 
     @patch("data.persistence.models.Base")
-    def test_validate_with_phantom_columns(self, mock_base):
+    def test_validate_requires_orm_tables_registered(self, mock_base):
+        """OSS-01：列级比对已由派生消除，表级注册校验仍是 validate_schema_definitions 的核心职责。"""
         mock_table = MagicMock()
-        mock_col = MagicMock()
-        mock_col.name = "real_col"
-        mock_table.columns = [mock_col]
-
+        mock_table.columns = []
         mock_metadata = MagicMock()
         mock_metadata.tables = {"stock_basic": mock_table}
         mock_base.metadata = mock_metadata
-
-        TABLE_DEFINITIONS.get("stock_basic", {}).get("columns", {})
-        TABLE_DEFINITIONS.setdefault("stock_basic", {}).setdefault("columns", {})["phantom_col"] = "test_phantom"
-        try:
-            validate_schema_definitions()
-        finally:
-            # 清理注入的 phantom 列；若 columns 因此变空则整体移除（review03-C9 收缩，避免空壳残留）
-            stock_def = TABLE_DEFINITIONS.get("stock_basic", {})
-            if "phantom_col" in stock_def.get("columns", {}):
-                del stock_def["columns"]["phantom_col"]
-            if stock_def.get("columns") == {}:
-                stock_def.pop("columns", None)
+        # stock_basic 已注册：不产生任何 missing/extra 警告
+        validate_schema_definitions()
 
 
 @patch.dict(os.environ, {"STRICT_SCHEMA_GATE": ""})
@@ -283,15 +237,15 @@ class TestValidateSchemaDefinitionsStrict:
 
     @patch("data.persistence.models.Base")
     @patch("data.data_dictionary.TABLE_DEFINITIONS", new_callable=dict)
-    def test_strict_raises_value_error_on_missing_cols(self, mock_table_defs, mock_base):
-        mock_table_defs["stock_basic"] = {"columns": {}}
+    def test_strict_raises_value_error_on_missing_table(self, mock_table_defs, mock_base):
+        mock_table_defs["stock_basic"] = {"alias": "tab_stock_basic"}
 
         mock_col = MagicMock()
         mock_col.name = "orm_only_col"
         mock_table = MagicMock()
         mock_table.columns = [mock_col]
         mock_metadata = MagicMock()
-        mock_metadata.tables = {"stock_basic": mock_table}
+        mock_metadata.tables = {"stock_basic": mock_table, "unregistered_table": mock_table}
         mock_base.metadata = mock_metadata
 
         import pytest
@@ -334,7 +288,12 @@ class TestDataDictionaryConstants:
             assert "alias" in table_def, f"Table {table_name} missing 'alias' key"
 
     def test_table_definitions_columns_values_are_i18n_keys(self):
-        for table_name, table_def in TABLE_DEFINITIONS.items():
-            columns = table_def.get("columns", {})
-            for col, key in columns.items():
-                assert isinstance(key, str), f"Table {table_name}, column {col} value should be string"
+        """OSS-01：列标签经 column_i18n_key 派生，解析结果必须是合法 key 或 None。"""
+        from data.data_dictionary import column_i18n_key, columns_of
+
+        for table_name in TABLE_DEFINITIONS:
+            for col in columns_of(table_name):
+                key = column_i18n_key(table_name, col)
+                assert key is None or isinstance(key, str), (
+                    f"Table {table_name}, column {col} i18n key should be str or None"
+                )

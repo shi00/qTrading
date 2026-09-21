@@ -1,6 +1,14 @@
 """
 Data Dictionary Definitions.
 Separates business metadata from UI translations.
+
+OSS-01（开源组件使用检视报告 §2）：列级 i18n 标签不再与 ORM 双写。
+- 列名集合由 ``columns_of`` 从 ORM ``Base.metadata`` 派生（纯结构查询，不触碰 I18n）。
+- 列 → 标签由 ``column_i18n_key`` 统一解析（唯一入口）：
+  非 ORM 表显式标签 → ``Column.info["i18n"]`` 覆盖 → ``COMMON_COLUMNS`` 兜底 →
+  ``col_<列名>`` 约定（仅当该 key 已定义）。返回 None 表示无标签。
+- ``TABLE_DEFINITIONS`` 仅保留表级元数据（alias/desc/quality_config/sync_config 等），
+  列级声明已从本文件移除。
 """
 
 # Common column definitions that apply across most tables
@@ -161,12 +169,6 @@ TABLE_DEFINITIONS = {
     "ai_concept_failures": {
         "alias": "tab_ai_concept_failures",
         "desc": "AI 概念打标错题本：失败股票重试队列，含 retry_count/next_retry_at 等字段",
-        "columns": {
-            "last_error": "col_last_error",
-            "retry_count": "col_retry_count",
-            "last_attempt_at": "col_last_attempt_at",
-            "next_retry_at": "col_next_retry_at",
-        },
     },
     "daily_quotes": {
         "alias": "tab_daily_quotes",
@@ -182,31 +184,6 @@ TABLE_DEFINITIONS = {
         "desc": "财务报表(主表,含版本维度,支持财报更正历史保留)",
         "sync_config": {"strategy": "specialized_financial"},
         "quality_config": {"tier": 3, "monitor": True, "critical": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "end_date": "col_end_date",
-            "ann_date": "col_ann_date",
-            "report_type": "col_report_type",
-            "total_revenue": "col_total_revenue",
-            "revenue": "col_revenue",
-            "n_income": "col_n_income",
-            "n_income_attr_p": "col_n_income_attr_p",
-            "total_assets": "col_total_assets",
-            "total_liab": "col_total_liab",
-            "total_hldr_eqy_exc_min_int": "col_total_hldr_eqy_exc_min_int",
-            "roe": "col_roe",
-            "roe_dt": "col_roe_dt",
-            "grossprofit_margin": "col_grossprofit_margin",
-            "netprofit_margin": "col_netprofit_margin",
-            "debt_to_assets": "col_debt_to_assets",
-            "or_yoy": "col_or_yoy",
-            "netprofit_yoy": "col_netprofit_yoy",
-            "goodwill": "col_goodwill",
-            "audit_result": "col_audit_result",
-            "n_cashflow_act": "col_n_cashflow_act",
-            "money_cap": "col_money_cap",
-            "accounts_receiv": "col_accounts_receiv",
-        },
     },
     "daily_indicators": {
         "alias": "tab_daily_indicators",
@@ -228,16 +205,6 @@ TABLE_DEFINITIONS = {
             "keys": ["ts_code", "end_date", "ann_date"],
         },
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "end_date": "col_end_date",
-            "ann_date": "col_ann_date",
-            "type": "col_type",
-            "p_change_min": "col_p_change_min",
-            "p_change_max": "col_p_change_max",
-            "net_profit_min": "col_net_profit_min",
-            "net_profit_max": "col_net_profit_max",
-        },
     },
     "fina_audit": {
         "alias": "tab_fina_audit",
@@ -249,15 +216,6 @@ TABLE_DEFINITIONS = {
             "keys": ["ts_code", "end_date"],
         },
         "quality_config": {"tier": 1, "monitor": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "end_date": "col_end_date",
-            "ann_date": "col_ann_date",
-            "audit_result": "col_audit_result",
-            "audit_sign": "col_audit_sign",
-            "audit_fees": "col_audit_fees",
-            "audit_agency": "col_audit_agency",
-        },
     },
     "fina_mainbz": {
         "alias": "tab_fina_mainbz",
@@ -269,17 +227,6 @@ TABLE_DEFINITIONS = {
             "keys": ["ts_code", "end_date"],
         },
         "quality_config": {"tier": 1, "monitor": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "end_date": "col_end_date",
-            "ann_date": "col_ann_date",
-            "bz_item": "col_bz_item",
-            "bz_sales": "col_bz_sales",
-            "bz_profit": "col_bz_profit",
-            "bz_cost": "col_bz_cost",
-            "curr_type": "col_curr_type",
-            "update_flag": "col_update_flag",
-        },
     },
     "dividend": {
         "alias": "tab_dividend",
@@ -291,40 +238,10 @@ TABLE_DEFINITIONS = {
             "keys": ["ts_code", "ann_date"],
         },
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "end_date": "col_end_date",
-            "ann_date": "col_ann_date",
-            "div_proc": "col_div_proc",
-            "stk_div": "col_stk_div",
-            "stk_bo_rate": "col_stk_bo_rate",
-            "stk_co_rate": "col_stk_co_rate",
-            "cash_div": "col_cash_div",
-            "cash_div_tax": "col_cash_div_tax",
-            "record_date": "col_record_date",
-            "ex_date": "col_ex_date",
-        },
     },
     "top_list": {
         "alias": "tab_top_list",
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
-        "columns": {
-            "trade_date": "col_trade_date",
-            "ts_code": "col_ts_code",
-            "name": "col_name",
-            "close": "col_close",
-            "pct_change": "col_pct_change",
-            "turnover_rate": "col_turnover_rate",
-            "amount": "col_amount",
-            "reason": "col_reason",
-            "l_sell": "col_l_sell",
-            "l_buy": "col_l_buy",
-            "l_amount": "col_l_amount",
-            "net_amount": "col_net_amount",
-            "net_rate": "col_net_rate",
-            "amount_rate": "col_amount_rate",
-            "float_values": "col_float_values",
-        },
     },
     "top_inst": {
         "alias": "tab_top_inst",
@@ -336,44 +253,15 @@ TABLE_DEFINITIONS = {
             "keys": ["ts_code", "trade_date", "exalter", "side", "reason"],
         },
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "trade_date": "col_trade_date",
-            "exalter": "col_exalter",
-            "side": "col_side",
-            "buy": "col_buy",
-            "buy_rate": "col_buy_rate",
-            "sell": "col_sell",
-            "sell_rate": "col_sell_rate",
-            "net_buy": "col_net_buy",
-            "reason": "col_reason",
-        },
     },
     "stk_limit": {
         "alias": "tab_stk_limit",
         "desc": "每日涨跌停价格（Phase 2G stk_limit 涨跌停价格，仅数据层，不注入 AI）",
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "trade_date": "col_trade_date",
-            "pre_close": "col_pre_close",
-            "up_limit": "col_up_limit",
-            "down_limit": "col_down_limit",
-            "limit_type": "col_limit_type",
-        },
     },
     "block_trade": {
         "alias": "tab_block_trade",
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "trade_date": "col_trade_date",
-            "price": "col_price",
-            "vol": "col_vol",
-            "amount": "col_amount",
-            "buyer": "col_buyer",
-            "seller": "col_seller",
-        },
     },
     "moneyflow_daily": {
         "alias": "tab_moneyflow_daily",
@@ -394,29 +282,12 @@ TABLE_DEFINITIONS = {
     "northbound_holding": {
         "alias": "tab_northbound_holding",
         "quality_config": {"tier": 2, "monitor": True, "sparse": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "trade_date": "col_trade_date",
-            "name": "col_name",
-            "vol": "col_vol",
-            "ratio": "col_ratio",
-            "exchange": "col_exchange",
-        },
     },
     "margin_daily": {
         "alias": "tab_margin_daily",
         "desc": "融资融券",
         "quality_config": {"tier": 1, "monitor": True},
         "type": "stock",
-        "columns": {
-            "ts_code": "col_ts_code",
-            "trade_date": "col_trade_date",
-            "rzye": "col_rzye",
-            "rqye": "col_rqye",
-            "rzmre": "col_rzmre",
-            "rqyl": "col_rqyl",
-            "rzrqye": "col_rzrqye",
-        },
     },
     "pledge_stat": {
         "alias": "tab_pledge_stat",
@@ -428,16 +299,6 @@ TABLE_DEFINITIONS = {
             "keys": ["ts_code", "end_date"],
         },
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "end_date": "col_end_date",
-            "ann_date": "col_ann_date",
-            "pledge_count": "col_pledge_count",
-            "unrest_pledge": "col_unrest_pledge",
-            "rest_pledge": "col_rest_pledge",
-            "total_share": "col_total_share",
-            "pledge_ratio": "col_pledge_ratio",
-        },
     },
     "pledge_detail": {
         "alias": "tab_pledge_detail",
@@ -449,22 +310,6 @@ TABLE_DEFINITIONS = {
             "keys": ["ts_code", "ann_date", "holder_name", "start_date", "pledge_amount"],
         },
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "ann_date": "col_ann_date",
-            "holder_name": "col_holder_name",
-            "pledge_amount": "col_pledge_amount",
-            "start_date": "col_start_date",
-            "end_date": "col_end_date",
-            "is_release": "col_is_release",
-            "release_date": "col_release_date",
-            "pledgor": "col_pledgor",
-            "holding_amount": "col_holding_amount",
-            "pledged_amount": "col_pledged_amount",
-            "p_total_ratio": "col_p_total_ratio",
-            "h_total_ratio": "col_h_total_ratio",
-            "is_buyback": "col_is_buyback",
-        },
     },
     "share_float": {
         "alias": "tab_share_float",
@@ -477,15 +322,6 @@ TABLE_DEFINITIONS = {
         },
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
         "type": "stock",
-        "columns": {
-            "ts_code": "col_ts_code",
-            "ann_date": "col_ann_date",
-            "float_date": "col_float_date",
-            "float_share": "col_float_share",
-            "float_ratio": "col_float_ratio",
-            "holder_name": "col_holder_name",
-            "share_type": "col_share_type",
-        },
     },
     "stk_holdertrade": {
         "alias": "tab_stk_holdertrade",
@@ -498,17 +334,6 @@ TABLE_DEFINITIONS = {
         },
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
         "type": "stock",
-        "columns": {
-            "ts_code": "col_ts_code",
-            "ann_date": "col_ann_date",
-            "holder_name": "col_holder_name",
-            "holder_type": "col_holder_type",
-            "in_de": "col_in_de",
-            "change_vol": "col_change_vol",
-            "change_ratio": "col_change_ratio",
-            "after_share": "col_after_share",
-            "after_ratio": "col_after_ratio",
-        },
     },
     "sw_industry_classify": {
         "alias": "tab_sw_industry_classify",
@@ -519,15 +344,6 @@ TABLE_DEFINITIONS = {
             "keys": ["index_code", "sw_level"],
         },
         "quality_config": {"tier": 1, "monitor": True, "sparse": False},
-        "columns": {
-            "index_code": "col_index_code",
-            "index_name": "col_index_name",
-            "sw_level": "col_level",
-            "industry_code": "col_industry_code",
-            "industry_name": "col_industry_name",
-            "parent_code": "col_parent_code",
-            "is_sw": "col_is_sw",
-        },
     },
     "sw_industry_member": {
         "alias": "tab_sw_industry_member",
@@ -538,19 +354,6 @@ TABLE_DEFINITIONS = {
             "keys": ["ts_code", "l3_code", "in_date"],
         },
         "quality_config": {"tier": 1, "monitor": True, "sparse": False},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "l1_code": "col_l1_code",
-            "l1_name": "col_l1_name",
-            "l2_code": "col_l2_code",
-            "l2_name": "col_l2_name",
-            "l3_code": "col_l3_code",
-            "l3_name": "col_l3_name",
-            "name": "col_name",
-            "in_date": "col_in_date",
-            "out_date": "col_out_date",
-            "is_new": "col_is_new",
-        },
     },
     "stock_name_history": {
         "alias": "tab_stock_name_history",
@@ -561,14 +364,6 @@ TABLE_DEFINITIONS = {
             "keys": ["ts_code", "start_date"],
         },
         "quality_config": {"tier": 1, "monitor": True, "sparse": False},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "start_date": "col_start_date",
-            "name": "col_name",
-            "end_date": "col_end_date",
-            "ann_date": "col_ann_date",
-            "change_reason": "col_change_reason",
-        },
     },
     "repurchase": {
         "alias": "tab_repurchase",
@@ -580,73 +375,20 @@ TABLE_DEFINITIONS = {
             "keys": ["ts_code", "ann_date"],
         },
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "ann_date": "col_ann_date",
-            "end_date": "col_end_date",
-            "proc": "col_proc",
-            "exp_date": "col_exp_date",
-            "vol": "col_vol",
-            "amount": "col_amount",
-            "high_limit": "col_high_limit",
-            "low_limit": "col_low_limit",
-        },
     },
     "limit_list": {
         "alias": "tab_limit_list",
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
-        "columns": {
-            "trade_date": "col_trade_date",
-            "ts_code": "col_ts_code",
-            "name": "col_name",
-            "close": "col_close",
-            "pct_chg": "col_pct_chg",
-            "fd_amount": "col_fd_amount",
-            "first_time": "col_first_time",
-            "last_time": "col_last_time",
-            "open_times": "col_open_times",
-            "limit_type": "col_limit_type",
-            "industry": "col_industry",
-            "amount": "col_amount",
-            "limit_amount": "col_limit_amount",
-            "float_mv": "col_float_mv",
-            "total_mv": "col_total_mv",
-            "turnover_ratio": "col_turnover_ratio",
-            "up_stat": "col_up_stat",
-            "limit_times": "col_limit_times",
-        },
     },
     "suspend_d": {
         "alias": "tab_suspend_d",
         "desc": "停复牌信息",
         "quality_config": {"tier": 1, "monitor": True},
         "type": "stock",
-        "columns": {
-            "ts_code": "col_ts_code",
-            "trade_date": "col_trade_date",
-            "suspend_timing": "col_suspend_timing",
-            "suspend_type": "col_suspend_type_name",
-        },
     },
     "market_news": {
         "alias": "tab_market_news",
         "desc": "市场新闻/快讯（新闻风险解读 Phase A 扩展字段）",
-        "columns": {
-            "id": "col_id",
-            "content": "col_content",
-            "content_hash": "col_content_hash",
-            "tags": "col_tags",
-            "publish_time": "col_publish_time",
-            "source": "col_source",
-            "ts_code": "col_ts_code",
-            "title": "col_title",
-            "url": "col_url",
-            "source_kind": "col_source_kind",
-            "category_l1": "col_category_l1",
-            "category_l2": "col_category_l2",
-            "sentiment": "col_sentiment",
-            "created_at": "col_created_at",
-        },
         "unique_constraints": [
             {"name": "uq_market_news_hash_time", "columns": ["content_hash", "publish_time"]},
         ],
@@ -659,24 +401,6 @@ TABLE_DEFINITIONS = {
     "news_risk_brief": {
         "alias": "tab_news_risk_brief",
         "desc": "新闻风险解读快照（设计方案 §7.2；复合主键 ts_code+input_hash）",
-        "columns": {
-            "ts_code": "col_ts_code",
-            "input_hash": "col_input_hash",
-            "window_start": "col_window_start",
-            "window_end": "col_window_end",
-            "analysis_status": "col_analysis_status",
-            "risk_level": "col_risk_level",
-            "confidence": "col_confidence",
-            "summary": "col_summary",
-            "events": "col_events",
-            "evidence_news_ids": "col_evidence_news_ids",
-            "coverage": "col_coverage",
-            "model_id": "col_model_id",
-            "analysis_profile": "col_analysis_profile",
-            "prompt_version": "col_prompt_version",
-            "created_at": "col_created_at",
-            "updated_at": "col_updated_at",
-        },
         "indexes": [
             "idx_news_risk_brief_ts_code_window_created",
         ],
@@ -690,16 +414,6 @@ TABLE_DEFINITIONS = {
     "screening_history": {
         "alias": "tab_screening_history",
         "desc": "选股/预测历史记录（LIFE-03 后唯一键为 trade_date+strategy_name+ts_code，覆盖语义）",
-        "columns": {
-            "id": "col_id",
-            "run_id": "col_run_id",
-            "trade_date": "col_trade_date",
-            "strategy_name": "col_strategy_name",
-            "ts_code": "col_ts_code",
-            "review_status": "col_review_status",
-            "ai_score": "col_ai_score",
-            "created_at": "col_created_at",
-        },
         "unique_constraints": [
             {"name": "uq_screening_history_dat_strategy_code", "columns": ["trade_date", "strategy_name", "ts_code"]},
         ],
@@ -707,32 +421,12 @@ TABLE_DEFINITIONS = {
     },
     "screening_thinking": {
         "alias": "tab_screening_thinking",
-        "columns": {
-            "id": "col_id",
-            "history_id": "col_history_id",
-            "thinking": "col_thinking",
-            "created_at": "col_created_at",
-        },
     },
     "sync_status": {
         "alias": "tab_sync_status",
-        "columns": {
-            "table_name": "col_table_name",
-            "last_sync_date": "col_last_sync_date",
-            "last_data_date": "col_last_data_date",
-            "record_count": "col_record_count",
-            "status": "col_status",
-            "last_result_status": "col_last_result_status",
-            "error_message": "col_error_message",
-            "error_count": "col_error_count",
-        },
     },
     "stock_sync_status": {
         "alias": "tab_stock_sync_status",
-        "columns": {
-            "step4_completed_at": "col_step4_completed_at",
-            "sync_version": "col_sync_version",
-        },
     },
     # --- Phase 3: Policy-Driven AI Architecture ---
     "macro_economy": {
@@ -741,27 +435,6 @@ TABLE_DEFINITIONS = {
         "sync_config": {"strategy": "macro", "type": "economic"},
         "quality_config": {"tier": 2, "monitor": True},
         "type": "global",
-        "columns": {
-            "period": "col_end_date",
-            "publish_date": "col_publish_date",
-            "m2": "col_m2",
-            "m2_yoy": "col_m2_yoy",
-            "m1": "col_m1",
-            "m1_yoy": "col_m1_yoy",
-            "m0": "col_m0",
-            "m0_yoy": "col_m0_yoy",
-            "cpi": "col_cpi",
-            "ppi": "col_ppi",
-            # Phase 2D §3.2.6：cn_gdp 全链路补全（8 个 GDP 字段）
-            "gdp": "col_gdp",
-            "gdp_yoy": "col_gdp_yoy",
-            "pi": "col_pi",
-            "pi_yoy": "col_pi_yoy",
-            "si": "col_si",
-            "si_yoy": "col_si_yoy",
-            "ti": "col_ti",
-            "ti_yoy": "col_ti_yoy",
-        },
     },
     "shibor_daily": {
         "alias": "tab_shibor_daily",
@@ -769,20 +442,6 @@ TABLE_DEFINITIONS = {
         "sync_config": {"strategy": "macro", "type": "shibor"},
         "quality_config": {"tier": 2, "monitor": True},
         "type": "global",
-        "columns": {
-            "record_date": "col_trade_date",
-            "on_rate": "col_on",
-            "week_1": "col_1w",
-            "week_2": "col_2w",
-            "month_1": "col_1m",
-            "month_3": "col_3m",
-            "month_6": "col_6m",
-            "month_9": "col_9m",
-            "year_1": "col_1y",
-            # Phase 3G §4.3.4：LPR 字段（shibor_lpr API 返回，与 shibor 同表）
-            "lpr_1y": "col_lpr_1y",
-            "lpr_5y": "col_lpr_5y",
-        },
     },
     # Phase 3G §4.3.4：业绩快报（express API，points_2000）
     "express": {
@@ -795,60 +454,22 @@ TABLE_DEFINITIONS = {
             "keys": ["ts_code", "end_date", "ann_date"],
         },
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "end_date": "col_end_date",
-            "ann_date": "col_ann_date",
-            "type": "col_type",
-            "revenue": "col_revenue",
-            "n_income": "col_n_income",
-            "total_profit": "col_total_profit",
-            "yoy_sales": "col_yoy_sales",
-            "yoy_profit": "col_yoy_profit",
-            "yoy_dedu_np": "col_yoy_dedu_np",
-            "deduct_profit": "col_deduct_profit",
-        },
     },
     "stk_holdernumber": {
         "alias": "tab_stk_holdernumber",
         "desc": "股东户数",
         "sync_config": {"strategy": "holder", "api": "get_stk_holdernumber"},
         "quality_config": {"tier": 1, "monitor": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "end_date": "col_end_date",
-            "ann_date": "col_ann_date",
-            "holder_num": "col_holder_num",
-            "holder_num_change": "col_holder_num_change",
-            "holder_num_ratio": "col_holder_num_ratio",
-        },
     },
     "top10_holders": {
         "alias": "tab_top10_holders",
         "desc": "前十大股东",
         "sync_config": {"strategy": "holder", "api": "get_top10_holders"},
         "quality_config": {"tier": 1, "monitor": True},
-        "columns": {
-            "ts_code": "col_ts_code",
-            "end_date": "col_end_date",
-            "ann_date": "col_ann_date",
-            "holder_name": "col_holder_name",
-            "hold_amount": "col_hold_amount",
-            "hold_ratio": "col_hold_ratio",
-            "hold_float_ratio": "col_hold_float_ratio",
-            "hold_change": "col_hold_change",
-            "holder_type": "col_holder_type",
-        },
     },
     "index_weight": {
         "alias": "tab_index_weight",
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},
-        "columns": {
-            "index_code": "col_index_code",
-            "con_code": "col_ts_code",
-            "trade_date": "col_trade_date",
-            "weight": "col_weight",
-        },
     },
     "moneyflow_hsgt": {
         "alias": "tab_moneyflow_hsgt",
@@ -856,107 +477,92 @@ TABLE_DEFINITIONS = {
         "sync_config": {"strategy": "historical", "api": "moneyflow_hsgt"},
         "quality_config": {"tier": 2, "monitor": True},
         "type": "global",
-        "columns": {
-            "trade_date": "col_trade_date",
-            "ggt_ss": "col_ggt_ss",
-            "ggt_sz": "col_ggt_sz",
-            "hgt": "col_hgt_north_money",
-            "sgt": "col_sgt_north_money",
-            "north_money": "col_north_money",
-            "south_money": "col_south_money",
-        },
     },
     "alembic_version": {
         "alias": "tab_alembic_version",
         "desc": "数据库版本",
-        "columns": {"version_num": "col_version_num"},
     },
     "task_history": {
         "alias": "tab_task_history",
         "desc": "系统任务执行历史日志",
-        "columns": {
-            "id": "col_id",
-            "name": "col_name",
-            "task_type": "col_task_type",
-            "status": "col_status",
-            "progress": "col_progress",
-            "description": "col_description",
-            "error": "col_error",
-            "result": "col_result",
-            "created_at": "col_created_at",
-            "started_at": "col_started_at",
-            "completed_at": "col_completed_at",
-            "persist_seq": "col_persist_seq",
-            "unique_key": "col_unique_key",
-            "factory_key": "col_factory_key",
-            "retry_kwargs": "col_retry_kwargs",
-        },
     },
     "app_state": {
         "alias": "tab_app_state",
         "desc": "应用全局状态键值存储",
-        "columns": {
-            "config_key": "col_key",
-            "config_value": "col_value",
-            "updated_at": "col_updated_at",
-        },
     },
     "backtest_results": {
         "alias": "tab_backtest_results",
         "desc": "回测结果存储",
-        "columns": {
-            "id": "col_id",
-            "run_id": "col_run_id",
-            "strategy_name": "col_strategy_name",
-            "params_snapshot": "col_params_snapshot",
-            "start_date": "col_start_date",
-            "end_date": "col_end_date",
-            "initial_capital": "col_initial_capital",
-            "total_return": "col_total_return",
-            "annualized_return": "col_annualized_return",
-            "sharpe_ratio": "col_sharpe_ratio",
-            "max_drawdown": "col_max_drawdown",
-            "calmar_ratio": "col_calmar_ratio",
-            "ic_mean": "col_ic_mean",
-            "ic_ir": "col_ic_ir",
-            "win_rate": "col_win_rate",
-            "profit_factor": "col_profit_factor",
-            "total_trades": "col_total_trades",
-            "volatility": "col_volatility",
-            "information_ratio": "col_information_ratio",
-            "tracking_error": "col_tracking_error",
-            "nav_curve_json": "col_nav_curve_json",
-            "trades_json": "col_trades_json",
-            "period_stats_json": "col_period_stats_json",
-            "execution_price": "col_execution_price",
-            "allow_limit_up_buy": "col_allow_limit_up_buy",
-            "allow_limit_down_sell": "col_allow_limit_down_sell",
-            "slippage_model": "col_slippage_model",
-            "app_version": "col_app_version",
-            "executed_at": "col_executed_at",
-            "duration_ms": "col_duration_ms",
-            "quality_json": "col_quality_json",
-            "config_json": "col_config_json",
-        },
     },
     "watchlist": {
         "alias": "tab_watchlist",
         "desc": "用户关注列表（FR-UX-004, Task 4.2）",
-        "columns": {
-            "ts_code": "col_ts_code",
-            "stock_name": "col_stock_name",
-            "added_at": "col_added_at",
-            "note": "col_note",
-        },
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# OSS-01：从 ORM 派生的列级解析入口（唯一正本）
+# ---------------------------------------------------------------------------
+
+# 非 ORM 表（Alembic 自建，不在 Base.metadata）的列 → 标签显式声明。
+_NON_ORM_COLUMN_LABELS: dict[str, dict[str, str]] = {
+    "alembic_version": {"version_num": "col_version_num"},
+}
+
+
+def columns_of(table_name: str) -> frozenset[str]:
+    """表的列名集合（纯结构查询，不触碰 I18n）。
+
+    ORM 表返回 ``Base.metadata`` 中的列名集合；非 ORM 表（如 alembic_version）
+    返回显式声明；未知表返回空集合。
+    """
+    from data.persistence.models import Base
+
+    table = Base.metadata.tables.get(table_name)
+    if table is None:
+        return frozenset(_NON_ORM_COLUMN_LABELS.get(table_name, {}))
+    return frozenset(c.name for c in table.columns)
+
+
+def column_i18n_key(table_name: str | None, col_name: str) -> str | None:
+    """列 → i18n key 的唯一入口。
+
+    解析顺序（OSS-01 实证：与重构前硬编码清单逐列一致，mismatch=0）：
+    1. 非 ORM 表显式标签（``_NON_ORM_COLUMN_LABELS``）
+    2. ``Column.info["i18n"]`` 覆盖（models.py 中列级例外，仅 18 条）
+    3. ``COMMON_COLUMNS`` 兜底（公共列，含 pct_change→col_pct_chg 等非机械映射）
+    4. ``col_<列名>`` 约定（仅当该 key 已定义；用 ``I18n.has`` 探测，避免污染
+       ``_missing_keys`` 并刷告警——ORM 比旧数据字典多出的列不派生标签）
+    返回 None 表示无标签，调用方回退到裸列名。
+    """
+    from core.i18n import I18n
+    from data.persistence.models import Base
+
+    if table_name:
+        explicit = _NON_ORM_COLUMN_LABELS.get(table_name, {}).get(col_name)
+        if explicit:
+            return explicit
+        table = Base.metadata.tables.get(table_name)
+        if table is not None and col_name in table.columns:
+            override = table.columns[col_name].info.get("i18n")
+            if override:
+                return override
+    common = COMMON_COLUMNS.get(col_name)
+    if common:
+        return common
+    derived = f"col_{col_name}"
+    if I18n.has(derived):
+        return derived
+    return None
 
 
 def validate_schema_definitions(strict: bool = False):
     """
     Validates that all SQLAlchemy ORM models have a corresponding entry in TABLE_DEFINITIONS.
     Logs warnings for any missing definitions to help maintain data dictionary consistency.
-    Also validates column-level consistency between ORM and data dictionary.
+    Column-level consistency is guaranteed structurally since OSS-01: column sets are
+    derived from ORM ``Base.metadata`` and no longer duplicated in this file.
 
     For Alembic migration ↔ ORM full-attribute consistency checks (column types,
     nullable, server_default, primary keys, foreign keys, indexes, unique constraints),
@@ -996,29 +602,6 @@ def validate_schema_definitions(strict: bool = False):
             msg = f"The following tables are in TABLE_DEFINITIONS but not in ORM: {extra_defs}"
             logger.warning("[DataDict] %s", msg)
             errors.append(msg)
-
-        for table_name in defined_tables - IGNORED_TABLES:
-            if table_name not in db_tables:
-                continue
-
-            orm_table = Base.metadata.tables[table_name]
-            orm_cols = set(c.name for c in orm_table.columns)
-
-            dd_def = TABLE_DEFINITIONS.get(table_name, {})
-            dd_table_cols = set(dd_def.get("columns", {}).keys())
-            dd_cols_with_common = dd_table_cols | set(COMMON_COLUMNS.keys())
-
-            missing_cols = orm_cols - dd_cols_with_common - {"updated_at", "created_at"}
-            if missing_cols:
-                msg = f"Table '{table_name}': ORM columns missing from data dictionary: {missing_cols}"
-                logger.warning("[DataDict] %s", msg)
-                errors.append(msg)
-
-            phantom_cols = dd_table_cols - orm_cols
-            if phantom_cols:
-                msg = f"Table '{table_name}': Data dictionary has phantom columns not in ORM: {phantom_cols}"
-                logger.warning("[DataDict] %s", msg)
-                errors.append(msg)
 
         logger.info(
             "[DataDict] Schema validation completed. %s tables verified.",

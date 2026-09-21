@@ -1,7 +1,7 @@
 import threading
 import typing
 
-from data.data_dictionary import COMMON_COLUMNS, TABLE_DEFINITIONS
+from data.data_dictionary import COMMON_COLUMNS, TABLE_DEFINITIONS, column_i18n_key, columns_of
 from utils.singleton_registry import register_singleton
 
 
@@ -25,11 +25,14 @@ class MetaDataManager:
     @classmethod
     def preload_aliases(cls):
         """B-P1-9: Preload all table and column aliases at startup to avoid
-        blocking the event loop during UI rendering."""
-        for table_name, table_def in TABLE_DEFINITIONS.items():
+        blocking the event loop during UI rendering.
+
+        OSS-01：列集合经 ``columns_of`` 从 ORM 派生，不再遍历硬编码 columns 段；
+        COMMON_COLUMNS 公共列仍须预载（table=None 的全局查询缓存）。
+        """
+        for table_name in TABLE_DEFINITIONS:
             cls.get_table_alias(table_name)
-            columns = table_def.get("columns", {})
-            for col_name in columns:
+            for col_name in columns_of(table_name):
                 cls.get_column_alias(table_name, col_name)
         for col_name in COMMON_COLUMNS:
             cls.get_column_alias(None, col_name)
@@ -70,12 +73,10 @@ class MetaDataManager:
         alias_key = None
 
         if table_name:
-            table_def = TABLE_DEFINITIONS.get(table_name)
-            if table_def and "columns" in table_def:
-                alias_key = table_def["columns"].get(col_name)
+            alias_key = column_i18n_key(table_name, col_name)
 
         if not alias_key:
-            alias_key = COMMON_COLUMNS.get(col_name)
+            alias_key = column_i18n_key(None, col_name)
 
         if alias_key:
             result = f"{col_name} ({I18n.get(alias_key)})"
@@ -112,13 +113,11 @@ class MetaDataManager:
                 return cached
 
         alias_key = None
-        if is_hashable and context_table:
-            table_def = TABLE_DEFINITIONS.get(context_table)
-            if table_def and "columns" in table_def:
-                alias_key = table_def["columns"].get(term)
+        if is_hashable and isinstance(term, str) and context_table:
+            alias_key = column_i18n_key(context_table, term)
 
-        if is_hashable and not alias_key:
-            alias_key = COMMON_COLUMNS.get(term)
+        if is_hashable and isinstance(term, str) and not alias_key:
+            alias_key = column_i18n_key(None, term)
 
         if alias_key:
             result = I18n.get(alias_key)

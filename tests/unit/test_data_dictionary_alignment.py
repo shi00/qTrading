@@ -7,9 +7,8 @@ and validates column-level consistency.
 Run: pytest tests/test_data_dictionary_alignment.py -v
 """
 
-from data.data_dictionary import COMMON_COLUMNS, TABLE_DEFINITIONS
+from data.data_dictionary import COMMON_COLUMNS, columns_of
 from data.persistence.models import (
-    Base,
     BlockTrade,
     DailyQuotes,
     Dividend,
@@ -30,13 +29,12 @@ pytestmark = pytest.mark.unit
 
 
 def get_data_dict_columns(table_name: str) -> set:
-    """Get all column names defined in data dictionary for a table."""
+    """Get all column names defined in data dictionary for a table.
+
+    OSS-01：列集合从 ORM 派生（columns_of），COMMON_COLUMNS 兜底公共列。
+    """
     columns = set(COMMON_COLUMNS.keys())
-
-    if table_name in TABLE_DEFINITIONS:
-        table_specific = TABLE_DEFINITIONS[table_name].get("columns", {})
-        columns.update(table_specific.keys())
-
+    columns.update(columns_of(table_name))
     return columns
 
 
@@ -101,42 +99,9 @@ class TestDataDictionaryAlignment:
 
 
 class TestDataDictionaryColumnValidation:
-    """Test that data dictionary column validation catches mismatches."""
-
-    def test_data_dict_phantom_columns_detection(self):
-        phantom_columns = {}
-
-        for table_name, table_obj in Base.metadata.tables.items():
-            orm_cols = {c.name for c in table_obj.columns}
-            dd_entry = TABLE_DEFINITIONS.get(table_name, {})
-            dd_cols = set(dd_entry.get("columns", {}).keys())
-
-            phantom = dd_cols - orm_cols - set(COMMON_COLUMNS.keys())
-            if phantom:
-                phantom_columns[table_name] = phantom
-
-        assert not phantom_columns, (
-            f"Data dictionary has phantom columns (defined but not in ORM): {phantom_columns}. "
-            f"These should be removed from data dictionary or added to ORM."
-        )
-
-    def test_orm_columns_in_data_dict(self):
-        missing_in_dd = {}
-
-        for table_name, table_obj in Base.metadata.tables.items():
-            if table_name in {"stock_sync_status", "alembic_version"}:
-                continue
-
-            orm_cols = {c.name for c in table_obj.columns}
-            dd_entry = TABLE_DEFINITIONS.get(table_name, {})
-            dd_cols = set(dd_entry.get("columns", {}).keys())
-            all_dd_cols = dd_cols | set(COMMON_COLUMNS.keys())
-
-            missing = orm_cols - all_dd_cols - {"updated_at", "created_at"}
-            if missing:
-                missing_in_dd[table_name] = missing
-
-        assert not missing_in_dd, f"ORM columns missing in data dictionary: {missing_in_dd}"
+    """OSS-01：列集合已从 ORM 派生，列级"幽灵列/缺失列"比对由派生保证物理不可能，
+    语义由 test_i18n_keys_completeness.TestI18nKeysCompleteness.test_data_dictionary_i18n_keys_exist
+    与 test_data_dictionary_derivation.py 的 LEGACY 快照等价断言接管（本类不再重复比对）。"""
 
 
 class TestTop10HoldersHoldChange:

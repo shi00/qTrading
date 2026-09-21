@@ -20,7 +20,6 @@ from pathlib import Path
 
 import pytest
 
-from data.data_dictionary import TABLE_DEFINITIONS
 from data.external.tushare_client import TushareClient
 from data.persistence.models import LimitList
 
@@ -111,15 +110,17 @@ class TestLimitListFullFields:
         )
 
     def test_data_dictionary_contains_all_18_fields(self) -> None:
-        """data_dictionary 必须包含 limit_list 表全部 18 个字段的映射。
+        """data_dictionary（OSS-01 派生自 ORM）必须包含 limit_list 表全部 18 个字段。
 
         缺失映射会导致 UI 展示时找不到对应 i18n 键，影响数据透明度。
         R17: data_dictionary 键使用数据库列名（limit_type），需将 API 字段名 limit 转换。
         """
-        dict_cols = set(TABLE_DEFINITIONS["limit_list"]["columns"].keys())
+        from data.data_dictionary import columns_of
+
+        dict_cols = columns_of("limit_list")
         expected_orm_cols = {API_TO_ORM_COLUMN_MAP.get(f, f) for f in EXPECTED_LIMIT_LIST_FIELDS}
         missing = expected_orm_cols - dict_cols
-        assert not missing, f"data_dictionary['limit_list']['columns'] 缺失字段映射 {missing}"
+        assert not missing, f"columns_of('limit_list') 缺失字段 {missing}"
 
     @pytest.mark.parametrize("locale_folder", ["zh_CN", "en_US"])
     def test_locale_contains_new_i18n_keys(self, locale_folder: str) -> None:
