@@ -1,10 +1,11 @@
-"""CacheManager DAO 注册表契约测试。
+"""CacheManager DAO 注册契约测试（OSS-03：注册表按类型发现后重写）。
 
-覆盖三个维度：
-1. R13 静态维度：_DAO_REGISTRY 必须覆盖 daos/ 下所有继承 BaseDao 的 DAO 类
-2. pyright 推断契约：__init__ 源码必须包含 _DAO_REGISTRY 中每个属性名的显式赋值
+覆盖维度：
+1. 遍历性覆盖：daos/ 下所有继承 BaseDao 的 DAO 类均在 CacheManager.__init__ 显式实例化
+2. pyright 推断契约：__init__ 源码包含每个 DAO 类的 self.xxx_dao = XxxDao(...) 显式赋值
    （避免循环 setattr 破坏类型推断，保留 IDE 自动补全）
-3. 数量一致性：_DAO_REGISTRY 条目数 == __init__ 中显式赋值的 DAO 数
+3. 数量一致性：daos/ 目录 DAO 类数 == __init__ 中显式赋值的 DAO 数
+4. sync_engines 行为：按类型发现（isinstance BaseDao）同步 engine；非 DAO 属性不受影响
 
 engine refresh / close cleanup 维度由 tests/integration/test_data_cache_manager.py
 的 mvd_data fixture 隐式覆盖（CacheManager() 真实实例化 → _create_engine 循环更新
@@ -12,6 +13,7 @@ engine refresh / close cleanup 维度由 tests/integration/test_data_cache_manag
 """
 
 import inspect
+import re
 import sys
 from pathlib import Path
 
@@ -24,54 +26,118 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from check_redlines import _extract_dao_classes  # noqa: E402 - sys.path 注入后导入
 from data.cache.cache_manager import CacheManager  # noqa: E402 - sys.path 注入后导入
-from data.cache.dao_registry import DaoRegistry  # noqa: E402 - review01-A4 Step2: 注册清单移入 DaoRegistry
+from data.cache.dao_registry import DaoRegistry  # noqa: E402 - review01-A4 Step2: 注册职责移入 DaoRegistry
+from data.persistence.daos.base_dao import BaseDao  # noqa: E402
+
+
+def _dao_attr_for_class(cls_name: str) -> str:
+    """DAO 类名 → 约定实例属性名。
+
+    支持驼峰多词：PledgeDetailDao → pledge_detail_dao；BacktestDAO → backtest_dao。
+    """
+    for suffix in ("DAO", "Dao"):
+        if cls_name.endswith(suffix):
+            base = cls_name[: -len(suffix)]
+            break
+    else:
+        base = cls_name
+    # 驼峰 → snake_case：连续大写/首字母大写处插入 '_'
+    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", base).lower()
+    return snake + "_dao"
 
 
 class TestCacheManagerDAORegistry:
-    """_DAO_REGISTRY 单一权威列表契约。
+    """DAO 注册契约：__init__ 显式实例化 + sync_engines 类型发现同步。"""
 
-    修订方案 C：保留 __init__ 17 行显式赋值（pyright 推断 + R13 静态检查兼容），
-    仅 _create_engine / close 由 _DAO_REGISTRY 驱动循环化。
-    review01-A4 Step2: _DAO_REGISTRY 移入 DaoRegistry，CacheManager 经 self._dao_registry 访问。
-    """
+    def test_all_dao_classes_instantiated_in_init(self):
+        """daos/ 下所有继承 BaseDao 的 DAO 类均应在 CacheManager.__init__ 显式实例化。
 
-    def test_dao_registry_covers_all_dao_files(self):
-        """_DAO_REGISTRY 必须覆盖 daos/ 下所有继承 BaseDao 的 DAO 类（R13 静态维度契约）。
-
-        新增 DAO 文件但未登记到 _DAO_REGISTRY 时，此测试失败，
-        提示在 _DAO_REGISTRY 中追加 ("attr_name", NewDao) 条目。
+        R13 静态维度：新增 DAO 文件未在 __init__ 实例化时，此测试失败。
         """
         daos_dir = ROOT / "data" / "persistence" / "daos"
         dao_class_names = set(_extract_dao_classes(daos_dir).keys())
-        registry_class_names = {cls.__name__ for _, cls in DaoRegistry._DAO_REGISTRY}
-        assert dao_class_names == registry_class_names, (
-            f"_DAO_REGISTRY 与 daos/ 目录不一致："
-            f"缺少 {dao_class_names - registry_class_names}，"
-            f"多余 {registry_class_names - dao_class_names}"
+        source = inspect.getsource(CacheManager.__init__)
+        instantiated = {cls_name for cls_name in dao_class_names if f"{cls_name}(" in source}
+        missing = dao_class_names - instantiated
+        assert not missing, (
+            f"CacheManager.__init__ 未实例化的 DAO 类：{missing}"
+            f"（应在 __init__ 中 self.<name>_dao = {next(iter(missing))}(self.engine)）"
         )
 
-    def test_init_assigns_all_registry_daos(self):
-        """__init__ 源码必须包含 _DAO_REGISTRY 中每个属性名的显式赋值。
+    def test_init_uses_explicit_assignments(self):
+        """__init__ 中所有 DAO 均为 self.xxx_dao = XxxDao(...) 显式赋值（pyright 契约）。
 
-        这保证 pyright 能从 self.xxx_dao = XxxDao(self.engine) 推断类型，
-        避免 _create_engine / close 循环中 getattr(self, attr_name) 破坏类型推断。
-        循环 setattr 会让 self.xxx_dao 推断为 Unknown，此测试守护显式赋值不被移除。
+        OSS-03 坚持显式实例化而非动态 setattr：循环 setattr 会让 self.xxx_dao
+        推断为 Unknown，IDE 自动补全与类型守卫失效。
         """
+        daos_dir = ROOT / "data" / "persistence" / "daos"
+        dao_class_names = set(_extract_dao_classes(daos_dir).keys())
         source = inspect.getsource(CacheManager.__init__)
-        for attr_name, _ in DaoRegistry._DAO_REGISTRY:
-            assert f"self.{attr_name} =" in source, (
-                f"__init__ 缺少 self.{attr_name} = 的显式赋值，pyright 无法推断类型，IDE 自动补全失效"
+        for cls_name in sorted(dao_class_names):
+            attr = _dao_attr_for_class(cls_name)
+            assert f"self.{attr} = {cls_name}(" in source, (
+                f"__init__ 缺少显式赋值 self.{attr} = {cls_name}(self.engine)，pyright 无法推断类型"
             )
 
-    def test_dao_registry_count_matches_init(self):
-        """_DAO_REGISTRY 条目数应等于 __init__ 中显式赋值的 DAO 数。
-
-        防止 _DAO_REGISTRY 与 __init__ 显式赋值出现数量漂移
-        （如加了 _DAO_REGISTRY 条目但忘记在 __init__ 中显式赋值，或反之）。
-        """
+    def test_dao_count_matches_init(self):
+        """daos/ 目录 DAO 类数 == __init__ 显式赋值数（防数量漂移）。"""
+        daos_dir = ROOT / "data" / "persistence" / "daos"
+        dao_class_names = set(_extract_dao_classes(daos_dir).keys())
         source = inspect.getsource(CacheManager.__init__)
         init_assign_count = sum(1 for line in source.splitlines() if "_dao = " in line and "self." in line)
-        assert init_assign_count == len(DaoRegistry._DAO_REGISTRY), (
-            f"__init__ 显式赋值 {init_assign_count} 个 DAO，"
-            f"_DAO_REGISTRY 有 {len(DaoRegistry._DAO_REGISTRY)} 个，不一致"
+        assert init_assign_count == len(dao_class_names), (
+            f"__init__ 显式赋值 {init_assign_count} 个 DAO，daos/ 目录有 {len(dao_class_names)} 个，不一致"
         )
+
+
+class TestSyncEnginesTypeDiscovery:
+    """sync_engines 按类型发现（OSS-03）：isinstance(BaseDao) 过滤，非 DAO 属性不受影响。"""
+
+    class _FakeDao(BaseDao):
+        pass
+
+    class _FakeNonDao:
+        def __init__(self) -> None:
+            self.engine = None
+
+    class _Holder:
+        """最小宿主：可挂载任意属性，模拟 CacheManager 的 DAO 组合根。"""
+
+        def __init__(self) -> None:
+            self.dao_a: TestSyncEnginesTypeDiscovery._FakeDao | None = None
+            self.dao_b: TestSyncEnginesTypeDiscovery._FakeDao | None = None
+            self.other: TestSyncEnginesTypeDiscovery._FakeNonDao | None = None
+            self.engine = None
+            self._disposed = False
+
+    def test_syncs_all_base_dao_instances(self):
+        holder = self._Holder()
+        dao = self._FakeDao(None)
+        dao2 = self._FakeDao(None)
+        non_dao = self._FakeNonDao()
+        holder.dao_a = dao
+        holder.dao_b = dao2
+        holder.other = non_dao
+
+        engine = object()
+        DaoRegistry().sync_engines(holder, engine)
+
+        assert dao.engine is engine
+        assert dao2.engine is engine
+        assert non_dao.engine is None  # 非 BaseDao 不受影响
+
+    def test_sync_engines_none_clears(self):
+        holder = self._Holder()
+        dao = self._FakeDao(object())
+        holder.dao_a = dao
+
+        DaoRegistry().sync_engines(holder, None)
+
+        assert dao.engine is None
+
+    def test_sync_engines_ignores_non_dao_attrs(self):
+        holder = self._Holder()
+        holder.engine = None  # holder.engine 是 AsyncEngine 位置，非 BaseDao，不应被当 DAO
+        holder._disposed = True
+        DaoRegistry().sync_engines(holder, "new_engine")
+        assert holder.engine is None

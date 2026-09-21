@@ -32,7 +32,7 @@
 ### 条件触发
 
 - 新增或修改**数据表**：必读 [how-to.md](../guides/how-to.md#1-新增一张数据表)；涉及 schema 变更须生成 Alembic 迁移（`upgrade head` 验证）
-- 新增 **DAO**：必读 [how-to.md](../guides/how-to.md#2-新增一个-dao)；登记进 `data/cache/dao_registry.py` 的 `_DAO_REGISTRY`（R13）并在 `data/cache/cache_manager.py` 的 `CacheManager.__init__` 显式实例化，engine 由 `sync_engines()` 统一驱动
+- 新增 **DAO**：必读 [how-to.md](../guides/how-to.md#2-新增一个-dao)；在 `data/cache/cache_manager.py` 的 `CacheManager.__init__` 显式实例化（R13），engine 由 `sync_engines()` 按类型发现统一驱动
 - 新增表只改 `models.py` 忘记更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` → 触发 R12
 - 表名 / 列名用数字开头、含特殊字符或 SQL 保留字 → 触发 R17（必须用 ORM `name=` 映射，禁拼接该列名裸 SQL）
 - 批量写入 → 必须 `_save_upsert()`（R8，`_write_db` 不提供批量参数）
@@ -41,7 +41,7 @@
 ### 完成判定
 
 - 数据表：`models.py` 建模 + `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 注册 + 必要时 Alembic 迁移（`upgrade head` 与 `python -m alembic check` 通过）
-- DAO：继承 `BaseDao`、在 `_DAO_REGISTRY` 登记、`CacheManager.__init__` 实例化、`sync_engines()` 同步 engine
+- DAO：继承 `BaseDao`、`CacheManager.__init__` 显式实例化、`sync_engines()` 按类型发现同步 engine
 - 单测：`tests/unit/` 下使用 mock engine 隔离 DB
 - 门禁：`redline-check`（R12 / R13）、`pyright`、相关单测通过
 - 最小验证命令：对照 [CONTRIBUTING.md](../../CONTRIBUTING.md)「变更类型 → 最小验证子集」该改动范围对应最小子集

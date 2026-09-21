@@ -6,8 +6,8 @@
 > **对应版本**：0.10.1（产品版本，与 pyproject.toml 一致）<!-- x-release-please-version -->
 > **元数据**（P2-07 统一格式，规则集版本与产品版本分离）：
 > - owner: 架构维护者
-> - ruleset_version: 1.7.0（规则集版本，规则变更时递增）
-> - last_reviewed: 2026-09-17
+> - ruleset_version: 1.8.0（规则集版本，规则变更时递增）
+> - last_reviewed: 2026-09-21
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 红线（§3）、架构不变量（§4）、AI 行为准则
 > - supersedes: 无
@@ -192,7 +192,7 @@
 | R10 | **硬编码密钥** | 在代码或测试中硬编码 API Key / DB 密码 (必须从 `keyring` 或环境变量读取) | CI-test（gitleaks-action 独立 workflow 全量扫描） + 仅人工评审 |
 | R11 | **跨循环复用同步原语** | 直接将 `asyncio.Event/Lock` 作为类属性 (必须通过 `get_loop_local()` 获取以绑定当前循环) | CI-test（全量：AST 扫描 7 层类/实例属性构造点；缓存点与跨循环使用仍需人工评审） |
 | R12 | **未注册数据表** | 新增表只改 `models.py` 而不更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` | pre-commit（check_redlines.py） |
-| R13 | **未注册 DAO** | 新增 DAO 需同时登记进 `_DAO_REGISTRY` 并在 `CacheManager.__init__` 中实例化（engine 引用由 `_DAO_REGISTRY` + `sync_engines()` 驱动循环同步；**已登记的 DAO** 其 engine 同步不可漏改，登记本身仍需人工确保） | pre-commit（check_redlines.py，覆盖 `__init__` 注册维度）+ CI-test（`test_cache_manager_dao_registry.py` 反查 `_DAO_REGISTRY` 覆盖） |
+| R13 | **未注册 DAO** | 新增 DAO 需在 `CacheManager.__init__` 中显式实例化（`self.<name>_dao = <ClassName>(self.engine)`，engine 同步由 `sync_engines()` 按类型发现驱动循环同步；已实例化的 DAO 其 engine 同步不可漏改，实例化本身仍需人工确保） | pre-commit（check_redlines.py，覆盖 `__init__` 注册维度）+ CI-test（`test_cache_manager_dao_registry.py`：daos/ 全量类实例化 + 显式赋值静态契约 + sync_engines 行为测试） |
 | R14 | **未注册策略** | 新增策略不使用 `@register_strategy("key")` 装饰器 | pre-commit（check_redlines.py） |
 | R15 | **未注册单例** | 新增单例不使用 `@register_singleton` 装饰器、不实现 `_reset_singleton` | pre-commit（check_redlines.py） |
 | R16 | **UI 阻塞主循环** | 在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 `await ThreadPoolManager.run_async()` 提交)；`@ft.component` 渲染函数顶层不得执行 `logger/print` 副作用（UIX-10，须迁入 `use_effect` 或事件回调） | pre-commit（check_redlines.py，部分守护：VM `__init__` 构造已注册单例检测 + `@ft.component` 渲染副作用拦截；事件处理器内同步 IO 仍仅人工评审） |

@@ -1,67 +1,34 @@
-"""DAO 注册清单与 engine 引用同步（review01-A4 Step2 拆分）。
+"""DAO engine 引用同步（review01-A4 Step2 拆分；OSS-03 改为按类型发现）。
 
-从 ``CacheManager`` 拆出 DAO 注册职责：承载 ``_DAO_REGISTRY`` 权威清单与
-``sync_engines`` 遍历同步。DAO 实例化仍保留在 ``CacheManager.__init__``
-（R13 红线静态检查要求 `self.<x>_dao = <ClassName>(...)` 出现在 __init__）。
+从 ``CacheManager`` 拆出 DAO 引擎同步职责。DAO 实例化仍保留在
+``CacheManager.__init__``（R13 红线静态检查要求 `self.<x>_dao = <ClassName>(...)`
+出现在 __init__；check_R13 守护该维度）。
+
+OSS-03（开源组件使用检视报告 §4）：删除重复的 ``_DAO_REGISTRY`` 元组与逐行
+相同的 19 条 DAO import —— engine 同步改为按类型发现（``isinstance(BaseDao)``），
+新增 DAO 无需在本模块登记，结构上无法漏改。
+
+NOTE(lazy): sync_engines 按类型发现遍历 holder 实例属性，新增非 DAO 的 BaseDao
+子类实例会被一并同步；当前 CacheManager 上唯一的 BaseDao 实例即为 19 个 DAO。
+ceiling: 未来 holder 若有其它 BaseDao 子类实例需主动排除。
+upgrade: 出现该类实例时改为显式白名单或属性名约定。
 """
 
 from __future__ import annotations
 
-from data.persistence.daos.backtest_dao import BacktestDAO
 from data.persistence.daos.base_dao import BaseDao
-from data.persistence.daos.express_dao import ExpressDao
-from data.persistence.daos.financial_dao import FinancialDao
-from data.persistence.daos.holder_dao import HolderDao
-from data.persistence.daos.macro_dao import MacroDao
-from data.persistence.daos.market_dao import MarketDao
-from data.persistence.daos.pledge_detail_dao import PledgeDetailDao
-from data.persistence.daos.quote_dao import QuoteDao
-from data.persistence.daos.screener_dao import ScreenerDao
-from data.persistence.daos.share_float_dao import ShareFloatDao
-from data.persistence.daos.stk_holdertrade_dao import StkHoldertradeDao
-from data.persistence.daos.stock_dao import StockDao
-from data.persistence.daos.stk_limit_dao import StkLimitDao
-from data.persistence.daos.sw_industry_dao import (
-    StockNameHistoryDao,
-    SwIndustryClassifyDao,
-    SwIndustryMemberDao,
-)
-from data.persistence.daos.top_inst_dao import TopInstDao
-from data.persistence.daos.watchlist_dao import WatchlistDao
-from data.persistence.daos.sync_dao import SyncDao
 
 
 class DaoRegistry:
-    """DAO 注册清单（权威单一来源）与 engine 引用同步。
+    """DAO engine 引用同步（按类型发现，无显式注册清单）。
 
-    ``sync_engines(holder, engine)`` 遍历注册表，将 ``holder``（宿主对象，即
-    CacheManager 组合根）上各 DAO 实例的 ``.engine`` 置为给定引擎（或 None）。
-    消除 _create_engine/close 中逐 DAO 手写赋值的重复。
+    ``sync_engines(holder, engine)`` 遍历 ``holder``（宿主对象，即 CacheManager
+    组合根）实例属性，凡 ``BaseDao`` 实例的 ``.engine`` 置为给定引擎（或 None）。
+    消除 _create_engine/close 中逐 DAO 手写赋值的重复，且新增 DAO 无需登记。
     """
 
-    _DAO_REGISTRY: tuple[tuple[str, type[BaseDao]], ...] = (
-        ("stock_dao", StockDao),
-        ("quote_dao", QuoteDao),
-        ("financial_dao", FinancialDao),
-        ("sync_dao", SyncDao),
-        ("market_dao", MarketDao),
-        ("screener_dao", ScreenerDao),
-        ("macro_dao", MacroDao),
-        ("holder_dao", HolderDao),
-        ("backtest_dao", BacktestDAO),
-        ("top_inst_dao", TopInstDao),
-        ("stk_limit_dao", StkLimitDao),
-        ("pledge_detail_dao", PledgeDetailDao),
-        ("share_float_dao", ShareFloatDao),
-        ("stk_holdertrade_dao", StkHoldertradeDao),
-        ("sw_industry_classify_dao", SwIndustryClassifyDao),
-        ("sw_industry_member_dao", SwIndustryMemberDao),
-        ("stock_name_history_dao", StockNameHistoryDao),
-        ("express_dao", ExpressDao),
-        ("watchlist_dao", WatchlistDao),
-    )
-
     def sync_engines(self, holder: object, engine) -> None:
-        """遍历注册表同步 holder 上 DAO 实例的 ``.engine``（create/dispose 共用）。"""
-        for attr_name, _ in self._DAO_REGISTRY:
-            getattr(holder, attr_name).engine = engine
+        """按类型发现同步 holder 上所有 DAO 实例的 ``.engine``（create/dispose 共用）。"""
+        for dao in vars(holder).values():
+            if isinstance(dao, BaseDao):
+                dao.engine = engine
