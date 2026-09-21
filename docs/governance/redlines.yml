@@ -144,8 +144,8 @@ redlines:
 
   - id: R13
     title: 未注册 DAO
-    description: "新增 DAO 需同时登记进 _DAO_REGISTRY 并在 CacheManager.__init__ 中实例化（engine 引用由 _DAO_REGISTRY + sync_engines() 驱动循环同步；已登记的 DAO 其 engine 同步不可漏改，登记本身仍需人工确保）"
-    enforcement: "pre-commit（check_redlines.py，覆盖 __init__ 注册维度）+ CI-test（test_cache_manager_dao_registry.py 反查 _DAO_REGISTRY 覆盖）"
+    description: "新增 DAO 需在 CacheManager.__init__ 中显式实例化（self.<name>_dao = <ClassName>(self.engine)，engine 同步由 sync_engines() 按类型发现驱动循环同步；已实例化的 DAO 其 engine 同步不可漏改，实例化本身仍需人工确保）"
+    enforcement: "pre-commit（check_redlines.py，覆盖 __init__ 注册维度）+ CI-test（test_cache_manager_dao_registry.py：daos/ 全量类实例化 + 显式赋值静态契约 + sync_engines 行为测试）"
     checks:
       - check_R13
     automation_coverage: partial

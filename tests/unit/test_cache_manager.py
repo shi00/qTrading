@@ -75,12 +75,12 @@ def _make_mgr():
     mgr.sw_industry_classify_dao = MagicMock(spec=SwIndustryClassifyDao)
     mgr.sw_industry_member_dao = MagicMock(spec=SwIndustryMemberDao)
     mgr.sw_industry_member_dao.get_sw_l2_mapping = AsyncMock(return_value={})
-    # DATA-04 L3：股票名称变更历史 DAO（_create_engine 通过 _DAO_REGISTRY 同步 engine 引用）
+    # DATA-04 L3：股票名称变更历史 DAO（_create_engine 经 sync_engines 类型发现同步 engine 引用）
     mgr.stock_name_history_dao = MagicMock(spec=StockNameHistoryDao)
     # Phase 3G §4.3.4：express DAO（prefetch_auxiliary_data 引用 get_express_batch）
     mgr.express_dao = MagicMock(spec=ExpressDao)
     mgr.express_dao.get_express_batch = AsyncMock(return_value=pd.DataFrame())
-    # FR-UX-004, Task 4.2：watchlist DAO（_create_engine 通过 _DAO_REGISTRY 同步 engine 引用）
+    # FR-UX-004, Task 4.2：watchlist DAO（_create_engine 经 sync_engines 类型发现同步 engine 引用）
     mgr.watchlist_dao = MagicMock(spec=WatchlistDao)
     return mgr
 

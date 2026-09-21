@@ -493,8 +493,8 @@ def _extract_cache_manager_dao_instances(path: Path) -> set[str]:
 def check_R13() -> list[str]:
     """R13：对比 daos/ 下的 DAO 类与 CacheManager.__init__ 实例化清单。
 
-    仅检查 __init__ 实例化维度；_create_engine 的 .engine 引用更新由 _DAO_REGISTRY
-    驱动循环同步（cache_manager.py），结构上不可漏改（review07-G19 与宪法 R13 描述一致）。
+    仅检查 __init__ 实例化维度；_create_engine/close 的 .engine 引用更新由
+    sync_engines() 按类型发现驱动循环同步（OSS-03，结构上不可漏改）。
     """
     daos_dir = ROOT / "data" / "persistence" / "daos"
     cache_manager_path = ROOT / "data" / "cache" / "cache_manager.py"
@@ -509,8 +509,8 @@ def check_R13() -> list[str]:
             errors.append(
                 f"R13 未注册 DAO: {rel} 定义 DAO 类 '{cls_name}' "
                 f"但 CacheManager.__init__ 未实例化（应在 data/cache/cache_manager.py 中 "
-                f"self.<name>_dao = {cls_name}(self.engine) 并在 data/cache/dao_registry.py 的 "
-                f'_DAO_REGISTRY 中登记（"attr_name", {cls_name}）；engine 同步由 sync_engines() 驱动，不要手工赋值 .engine）'
+                f"self.<name>_dao = {cls_name}(self.engine)；engine 同步由 "
+                f"sync_engines() 按类型发现驱动，不要手工赋值 .engine）"
             )
     return errors
 

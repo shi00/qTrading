@@ -10,6 +10,7 @@
 
 | ruleset_version | 变更日期 | 变更摘要 |
 |-----------------|----------|---------|
+| 1.8.0 | 2026-09-21 | R13 语义简化（OSS-03）：删除 _DAO_REGISTRY 显式注册清单，改为 CacheManager.__init__ 显式实例化 + sync_engines() 按类型发现（isinstance BaseDao）；CLAUDE.md/redlines.yml R13 描述与 enforcement 同步（补回 CI-test 静态契约维度），how-to.md/dao-pattern.md 登记步骤同步删除 |
 | 1.7.0 | 2026-09-17 | R20 第一阶段报告模式落地：check_redlines.py 新增 check_R20（warning 输出 stderr 不阻断），redlines.yml R20 登记 checks/enforcement，automation_coverage none→partial（语义仍以人工评审为准，误报率达标后评估升级为拦截） |
 | 1.6.0 | 2026-09-14 | 初版快照登记（ruleset-changelog.md 引入时所在版本；历史 1.3.1→1.6.0 的变更未回溯，自本版本起记录） |
 

@@ -14,9 +14,8 @@
 
 1. 在 `data/persistence/daos/` 下创建 `xxx_dao.py`，继承 `BaseDao`。
 2. 实现读写方法，**只用** `_read_db_select` / `_save_upsert` / `chunked_in_query`，禁止裸 SQL 字符串拼接。
-3. 在 `data/cache/dao_registry.py` 的 `DaoRegistry._DAO_REGISTRY` 中登记新 DAO，追加 `("xxx_dao", XxxDao)` 条目。engine 引用同步由 `sync_engines()` 统一驱动，**不要**手工赋值 `.engine`。
-4. 在 `data/cache/cache_manager.py` 的 `CacheManager.__init__` 中显式实例化并赋值：`self.xxx_dao = XxxDao(self.engine)`（R13 pre-commit 只覆盖 `__init__` 实例化维度，pyright 也依赖此显式赋值推断类型）。
-5. 在 `tests/unit/` 下编写对应单测，使用 mock engine 隔离 DB（[测试编写模板：DAO 单测](../guides/testing.md#测试编写模板)）。
+3. 在 `data/cache/cache_manager.py` 的 `CacheManager.__init__` 中显式实例化并赋值：`self.xxx_dao = XxxDao(self.engine)`（R13 pre-commit 只覆盖 `__init__` 实例化维度，pyright 也依赖此显式赋值推断类型）。engine 引用同步由 `sync_engines()` 按类型发现统一驱动，**不要**手工赋值 `.engine`。
+4. 在 `tests/unit/` 下编写对应单测，使用 mock engine 隔离 DB（[测试编写模板：DAO 单测](../guides/testing.md#测试编写模板)）。
 
 ### 3. 新增一个策略
 
