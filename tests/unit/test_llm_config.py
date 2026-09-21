@@ -419,7 +419,14 @@ class TestAIServiceLiteLLM:
 
                 result = await service._chat_completion([{"role": "user", "content": "Hello"}], json_mode=True)
 
-                assert result == {"result": "Test response"}
+                # AI-01 计价链路（REVIEW-04 D1）：json_mode 返回已回填 litellm 元数据
+                # （model/usage/cost），内容与元数据一并断言，保证下游计价链路数据不丢。
+                assert result == {
+                    "result": "Test response",
+                    "model": "deepseek/deepseek-v4-flash",
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                    "cost": None,
+                }
 
     @pytest.mark.asyncio
     async def test_test_connection_missing_api_key(self, isolated_config):
