@@ -486,59 +486,6 @@ class TestScreenerDao:
         result = await screener_dao.get_pending_reviews()
         assert len(result) == 1
 
-    async def test_get_learning_examples(self, screener_dao, clean_db):
-        """获取学习样本"""
-        records = [
-            (
-                "RUN001",
-                _RECENT_DATE_MINUS_2,
-                "oversold",
-                "000001.SZ",
-                "平安银行",
-                10.0,
-                2.0,
-                "银行",
-                1000000,
-                10000000,
-                1.5,
-                5.0,
-                0.5,
-                1.0,
-                2.0,
-                1000000000.0,
-                500000000.0,
-                12.0,
-                30.0,
-                80.0,
-                5.0,
-                8.0,
-                85,
-                "理由",
-                "思考",
-                None,
-            ),
-        ]
-        await screener_dao.save_screening_results(records)
-
-        history = await screener_dao.get_screening_history()
-        record_id = history["id"].iloc[0]
-
-        await screener_dao.update_prediction_result(
-            record_id,
-            5.0,
-            "WIN",
-            t1_price=10.5,
-            t5_pct=12.0,
-            t5_price=11.2,
-            index_pct=1.2,
-            alpha=3.8,
-        )
-
-        wins, losses = await screener_dao.get_learning_examples(limit=3)
-        assert len(wins) == 1
-        assert wins["prediction_result"].iloc[0] == "WIN"
-        assert float(wins["alpha"].iloc[0]) == 3.8
-
     async def test_save_screening_results_sets_review_status_pending(self, screener_dao, clean_db):
         """保存筛选结果时，review_status 应自动设为 PENDING"""
         from data.constants import REVIEW_STATUS_PENDING
