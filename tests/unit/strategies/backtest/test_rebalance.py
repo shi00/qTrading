@@ -753,7 +753,7 @@ class TestICCalculationWithRebalanceFreq:
         F3-03: IC 计算需 >=3 只股票（Spearman 相关性要求），使用 3 只股票。
         daily 频率：next_rebalance_date = execution_date 的下一日。
         """
-        engine = self._make_engine(rebalance_freq="daily")
+        engine = self._make_engine(rebalance_freq="daily", min_ic_sample_size=3)
         trade_dates = [
             date(2024, 1, 2),
             date(2024, 1, 3),
@@ -779,7 +779,7 @@ class TestICCalculationWithRebalanceFreq:
                 "qfq_close": [10.0, 20.0, 30.0, 10.2, 20.4, 30.6, 10.8, 21.2, 31.5],
             }
         )
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         # 仅 signal_date=1/2 有信号 → 1 个 IC；signal_date=1/3 无信号 → 跳过
         assert len(ic_series) == 1
         assert not math.isnan(ic_series[0])
@@ -794,7 +794,7 @@ class TestICCalculationWithRebalanceFreq:
         - IC 应计算 01-09 open 到 01-15 open 的收益
         F3-03: 使用 3 只股票满足 IC 计算最低要求。
         """
-        engine = self._make_engine(rebalance_freq="weekly")
+        engine = self._make_engine(rebalance_freq="weekly", min_ic_sample_size=3)
         trade_dates = [
             date(2024, 1, 8),
             date(2024, 1, 9),
@@ -899,7 +899,7 @@ class TestICCalculationWithRebalanceFreq:
                 ],
             }
         )
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         # 仅 signal_date=1/8 有信号 → 1 个 IC
         assert len(ic_series) == 1
         assert not math.isnan(ic_series[0])
@@ -913,7 +913,7 @@ class TestICCalculationWithRebalanceFreq:
         - 下一次调仓日：2024-02-01（下月初）
         F3-03: 使用 3 只股票满足 IC 计算最低要求。
         """
-        engine = self._make_engine(rebalance_freq="monthly")
+        engine = self._make_engine(rebalance_freq="monthly", min_ic_sample_size=3)
         trade_dates = [
             date(2024, 1, 29),
             date(2024, 1, 30),
@@ -1005,7 +1005,7 @@ class TestICCalculationWithRebalanceFreq:
                 ],
             }
         )
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         # 仅 signal_date=1/29 有信号 → 1 个 IC
         assert len(ic_series) == 1
         assert not math.isnan(ic_series[0])
@@ -1032,7 +1032,7 @@ class TestICCalculationWithRebalanceFreq:
                 "qfq_close": [10.2, 10.7],
             }
         )
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert len(ic_series) == 0
 
 

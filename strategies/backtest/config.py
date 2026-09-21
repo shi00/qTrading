@@ -102,6 +102,18 @@ class BacktestConfig:
     min_rebalance_delta_pct: float = 0.01  # 权重变化小于该百分比不交易，避免噪声换手
     preload_max_days: int = 366
 
+    min_ic_sample_size: int = 10
+    """单日 IC 计算所需的最小候选样本数（BT-07）。
+
+    原硬编码 n>=3：n=3 的 Spearman 秩相关只能取 4 个离散值（3! 排列），
+    是纯噪声却被等权计入 ic_mean/ic_ir。对信号稀疏的策略，大部分交易日的 IC
+    都落在噪声区间，ic_mean 由噪声主导、ic_ir 因高方差被系统性低估。
+
+    默认 10（常见统计意义的保守下限，n>=20 更稳妥可自行调高）。样本数不足的
+    交易日被剔除（不产 IC），避免噪声伪装成「弱信号」；ic_mean 同时按样本数
+    加权（Σ(nᵢ·icᵢ)/Σ(nᵢ)），让样本更充分的日期权重更高。
+    """
+
     reallocate_unfilled: bool = False
     """单笔预算不足一手的标的，其释放预算是否在其余标的中补分配（BT-05）。
 
