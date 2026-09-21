@@ -105,6 +105,7 @@
     "review_stats_t5": "T+5 收益",
     "review_stats_ci": "95% CI",
     "review_stats_n_dates": "日序列 N",
+    "review_stats_n_eff": "有效样本",
     "review_stats_win_rate": "胜率",
     "review_stats_win_n": "胜率独立 N",
     "review_stats_avg_daily_count": "日均纳入股票数",

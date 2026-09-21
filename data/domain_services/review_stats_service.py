@@ -10,6 +10,9 @@
 - **重叠窗口指标（t5/alpha）的标准误用 Newey-West HAC 修正**（RV-08）：5 日窗口
   的相邻日序列点共享 4 天行情，朴素 ``std/sqrt(n)`` 低估标准误约 ``sqrt(5)``
   倍、系统性高估显著性，改为 Bartlett 核加权自协方差估计（lags=overlap-1）。
+- **样本量分级按有效样本量 n_eff = n/overlap 判定**（RV-09）：重叠窗口的名义
+  日序列 N 系统性高估独立样本量（180 自然日窗口上限约 120 交易日，有效仅约
+  24），分级按 n_eff 折算后判定，防止「样本充足」的虚假安全感。
 - **胜率用股票行 N 独立计算**（四审 M2），与均值 CI 的日序列 N **独立分级**。
 - **基准 NULL 组**（benchmark_code IS NULL）归入「基准未知」组：alpha 指标无有效
   样本（n=0），仅 T+1/T+5 独立均值/N 可见。
@@ -236,7 +239,11 @@ class SampleGrade(StrEnum):
 class MetricStat:
     """单指标日序列统计（样本单位=交易日）。
 
-    - n: 非 NULL 日序列长度（交易日数）
+    - n: 非 NULL 日序列长度（交易日数，名义 N）
+    - n_eff: 有效独立样本量 = n / overlap（重叠窗口折算，RV-09）。t5/alpha 为 5 日
+      窗口，n=120 个交易日的有效独立样本仅约 24——样本量分级按 n_eff 判定，
+      防止重叠日序列的名义 N 给出「样本充足」的虚假安全感；t1（overlap=1）时
+      n_eff == n，语义不变
     - mean / std: 日组合收益序列均值与标准差（std 于 n<3 或无效/NULL 时置 None；
       std 始终为朴素序列标准差，不受 overlap 影响）
     - ci_lower / ci_upper: t 分布 95% 置信区间（n<30 或 std 不可用/无效时置 None；
@@ -245,6 +252,7 @@ class MetricStat:
     """
 
     n: int
+    n_eff: float
     mean: float | None
     std: float | None
     ci_lower: float | None
@@ -287,12 +295,19 @@ class StrategyStatRow:
 
     @property
     def alpha_grade(self) -> SampleGrade:
-        """主指标 T+5 Alpha 的日序列 N 分级。"""
-        return grade_for(self.alpha.n)
+        """主指标 T+5 Alpha 的有效样本量分级（n_eff = n/overlap，RV-09）。
+
+        alpha 为 5 日重叠窗口，名义日序列 N 会系统性高估独立样本量（n=120 的
+        有效独立样本仅约 24），分级必须按 n_eff 判定，防止「样本充足」的虚假安全感。
+        """
+        return grade_for(self.alpha.n_eff)
 
     @property
     def win_grade(self) -> SampleGrade:
-        """胜率的股票行 N 分级（与 alpha 日序列 N 独立判定，四审 M2）。"""
+        """胜率的股票行 N 分级（与 alpha 日序列 N 独立判定，四审 M2）。
+
+        股票行 N 无时间重叠（逐股二项判定），不涉及 n_eff 折算（RV-09）。
+        """
         return grade_for(self.win_n)
 
 
@@ -303,8 +318,12 @@ def _t_crit(df: int) -> float:
     return _T_CRIT_0_975[df - 1]
 
 
-def grade_for(n: int) -> SampleGrade:
-    """按样本量分级（n<30 / 30-100 / >=100）。"""
+def grade_for(n: float) -> SampleGrade:
+    """按样本量分级（n<30 / 30-100 / >=100）。
+
+    n 可为有效样本量 n_eff（浮点，RV-09）或股票行 N（整数）；
+    浮点阈值比较天然正确（如 29.8 < 30）。
+    """
     if n < REVIEW_MIN_SAMPLE:
         return SampleGrade.INSUFFICIENT
     if n < REVIEW_ADEQUATE_SAMPLE:
@@ -348,8 +367,9 @@ def _metric_stat(series: pd.Series, *, overlap: int = T1_WINDOW_OVERLAP) -> Metr
     """
     values = series.dropna().astype("float64")
     n = int(values.size)
+    n_eff = n / overlap
     if n == 0:
-        return MetricStat(0, None, None, None, None)
+        return MetricStat(0, 0.0, None, None, None, None)
 
     mean = float(values.mean())
     std: float | None = None
@@ -372,7 +392,7 @@ def _metric_stat(series: pd.Series, *, overlap: int = T1_WINDOW_OVERLAP) -> Metr
             ci_lower = mean - half
             ci_upper = mean + half
 
-    return MetricStat(n, mean, std, ci_lower, ci_upper)
+    return MetricStat(n, n_eff, mean, std, ci_lower, ci_upper)
 
 
 def compute_strategy_review_stats(df: pd.DataFrame) -> tuple[StrategyStatRow, ...]:
@@ -454,7 +474,8 @@ class AiAttributionRow:
 
     @property
     def alpha_grade(self) -> SampleGrade:
-        return grade_for(self.alpha.n)
+        """有效样本量分级（n_eff = n/overlap，与 StrategyStatRow 同口径，RV-09）。"""
+        return grade_for(self.alpha.n_eff)
 
     @property
     def win_grade(self) -> SampleGrade:
