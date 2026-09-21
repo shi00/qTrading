@@ -17,6 +17,13 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
+# DS-04: 基本面策略「数据缺失」守卫阈值。与 data/constants.py 的
+# TIER_FUNDAMENTAL_LOW_THRESHOLD（0.3）同源，两处判定同一质量底线。
+# 因 R1（strategies 不得 import data 层）复制本常量，修改须两侧同步。
+FUNDAMENTAL_MIN_COVERAGE = 0.3
+# 财报关键列（经 LEFT JOIN 后仍可能全 NULL）：任一列非空即计该行有财务数据。
+_FUNDAMENTAL_KEY_COLS = ("roe", "or_yoy", "netprofit_yoy", "debt_to_assets")
+
 
 class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
     """
@@ -65,6 +72,12 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
                 self.name,
             )
 
+        # DS-04: 空结果原因通道（区分「无符合条件」与「数据缺失」）。
+        # 默认 no_match；基本面覆盖率守卫拦截时改为 fundamental_data_missing，
+        # VM 据此决定空态文案（不显示「无匹配可调条件」的误导提示）。
+        # 每次 filter 开头重置，避免同一 context 跨策略残留上一策略的原因。
+        context["_empty_reason"] = "no_match"
+
         dep_result = self.check_dependencies(context)
         if dep_result["status"] == "unready":
             logger.warning(
@@ -82,9 +95,30 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
         if self.requires_fundamental_coverage:
             df = context.get("fundamental_screening_data")
             if df is None or df.empty:
+                # DS-04: 真·缺失/空表。check_dependencies 已把 None 判 unready 早退，
+                # 此分支兜底 degraded（空表）路径；对用户可见地标记数据缺失原因。
+                context["_empty_reason"] = "fundamental_data_missing"
                 logger.warning(
                     "[Strategy] %s: fundamental_screening_data unavailable, cannot execute fundamental strategy without it",
                     self.name,
+                )
+                return pd.DataFrame()
+            # DS-04: 行数守卫失效的根因——fundamental_screening_data 以 stock_basic 为基表、
+            # 财报 LEFT JOIN，故财报表为空时仍有 ~5400 行全 NULL 行，df.empty=False。
+            # 改判关键财报列的有效覆盖率：任一关键列非空的行占比 < FUNDAMENTAL_MIN_COVERAGE
+            # ⇒ 实际无财务数据 ⇒ 「数据缺失」警告 + 空返回（R21：不把无数据伪装成无结果）。
+            # 显式赋新 list（而非 append/残留复用），保证每次 filter 的警告通道独立，
+            # 不混入同 context 前序策略执行残留。
+            key_cols = [c for c in _FUNDAMENTAL_KEY_COLS if c in df.columns]
+            coverage = float(df[key_cols].notna().any(axis=1).mean()) if key_cols else 0.0
+            if coverage < FUNDAMENTAL_MIN_COVERAGE:
+                context["_empty_reason"] = "fundamental_data_missing"
+                context["warnings"] = [Message("strategy_fundamental_data_missing", {"coverage": round(coverage, 3)})]
+                logger.warning(
+                    "[Strategy] %s: fundamental data coverage %.3f below minimum %.3f, refusing to run",
+                    self.name,
+                    coverage,
+                    FUNDAMENTAL_MIN_COVERAGE,
                 )
                 return pd.DataFrame()
         else:

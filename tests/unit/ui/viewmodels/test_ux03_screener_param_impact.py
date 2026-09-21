@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, patch
 import pandas as pd
 import pytest
 
+from core.i18n import Message
 from ui.viewmodels.screener_view_model import ScreenerViewModel
 
 pytestmark = pytest.mark.unit
@@ -164,6 +165,55 @@ class TestUX03EmptyReason:
 
         assert vm._full_results is not None
         assert vm._full_results.empty
+
+
+class TestUX03DataMissingEmptyReason:
+    """DS-04: 基本面数据缺失导致的空结果（守卫拦截）抑制「无匹配」空态提示。
+
+    策略在 fundamental 覆盖率不足时设 ``_empty_reason=fundamental_data_missing``
+    并产出 ``strategy_fundamental_data_missing`` 警告；VM 此时不得再叠加
+    「共考虑 N 只候选可调低条件」（指引与事实相反，实际缺财务数据）。
+    """
+
+    @staticmethod
+    def _wire_missing(vm, *, screening_count: int):
+        """Mock 策略模拟守卫拦截：设数据缺失原因 + 警告，返回空结果。"""
+        strategy = type("MockStrategy", (), {})()
+        strategy.name_key = "strategy_test"
+
+        def _filter(ctx):
+            ctx["_empty_reason"] = "fundamental_data_missing"
+            ctx["warnings"] = [Message("strategy_fundamental_data_missing", {"coverage": 0.0})]
+            return pd.DataFrame()
+
+        strategy.filter = _filter
+        vm.strategy_mgr.get_strategy.return_value = strategy
+        vm.data_processor.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(screening_count)]}),
+                "trade_date": dt.date(2026, 7, 29),
+            },
+        )
+        vm.review_mgr.save_results = AsyncMock(return_value=None)
+
+    @pytest.mark.asyncio
+    async def test_data_missing_suppresses_nomatch_even_with_candidates(self, vm):
+        """候选池非空(3 只)但数据缺失被守卫拦截 → 不设「无匹配」空态提示。"""
+        from services.task_manager import TaskManager
+
+        self._wire_missing(vm, screening_count=3)
+        holder, _sync_submit = _build_sync_submit_task_holder()
+        with (
+            patch.object(TaskManager, "submit_task", side_effect=_sync_submit),
+            patch.object(TaskManager, "update_progress"),
+        ):
+            await vm.run_strategy("test_strategy")
+            assert holder.task is not None
+            await holder.task
+
+        assert vm.state.empty_message is None
+        keys = [m.key for m in vm.state.warnings]
+        assert "strategy_fundamental_data_missing" in keys
 
 
 class TestUX03ModeSwitchContext:

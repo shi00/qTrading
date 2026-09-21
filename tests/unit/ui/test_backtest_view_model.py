@@ -748,6 +748,14 @@ class TestBacktestViewModelRunBacktest:
         ]
 
     @pytest.mark.asyncio
+    async def test_skipped_lot_size_indivisible_mapped_to_i18n(self):
+        """BT-05: lot_size_indivisible reason 映射到专用 i18n key（不落未知原因）。"""
+        skipped = pl.DataFrame({"reason": ["lot_size_indivisible", "lot_size_indivisible", "lot_size_indivisible"]})
+        vm = await self._exec_backtest(self._result_with(skipped_orders=skipped))
+
+        assert vm.state.skipped_reasons == (("backtest_skip_lot_size_indivisible", 3),)
+
+    @pytest.mark.asyncio
     async def test_skipped_unknown_reason_mapped_and_merged(self):
         """UX-01 细化: 未知 reason 归并到通用 key, 避免产生多个无归属条目。"""
         skipped = pl.DataFrame({"reason": ["foo_unknown", "bar_unknown"]})

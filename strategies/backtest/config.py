@@ -102,6 +102,17 @@ class BacktestConfig:
     min_rebalance_delta_pct: float = 0.01  # 权重变化小于该百分比不交易，避免噪声换手
     preload_max_days: int = 366
 
+    reallocate_unfilled: bool = False
+    """单笔预算不足一手的标的，其释放预算是否在其余标的中补分配（BT-05）。
+
+    默认 False：保持旧行为——`lot_size_indivisible` 标的被跳过、预算闲置，
+    数值与既有回测完全一致（向后兼容）。
+
+    True：按信号强度降序对高价位标的按原目标金额重新尝试买入，把整手取整
+    释放的预算重新投入组合。会改变收益数值（释放的闲置预算被用出），
+    与默认配置的结果不可比；开启时每次补分配都追加 data_warning 提示。
+    """
+
     def validate(self) -> list[str]:
         errors = []
         if self.start_date >= self.end_date:

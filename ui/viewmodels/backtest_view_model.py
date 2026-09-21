@@ -42,6 +42,8 @@ _SKIP_REASON_I18N = {
     "up_limit": "backtest_skip_up_limit",
     "insufficient_cash": "backtest_skip_insufficient_cash",
     "invalid_price": "backtest_skip_invalid_price",
+    # BT-05: 单笔预算不足一手（与现金余额无关），与 insufficient_cash 区分归因
+    "lot_size_indivisible": "backtest_skip_lot_size_indivisible",
 }
 _SKIP_REASON_UNKNOWN = "backtest_skip_unknown"
 

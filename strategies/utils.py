@@ -95,6 +95,9 @@ class StrategyContext(TypedDict, total=False):
     # Message(i18n key + params)，交由 base filter 初始化本次运行通道、VM 透传、
     # View 在结果区上方渲染。符合 §3.2 策略只产出 i18n key 约束。
     warnings: list[Message]
+    # DS-04: 空结果原因通道。默认 no_match；基本面覆盖率守卫拦截时改为
+    # fundamental_data_missing，VM 据此抑制「无匹配可调条件」空态提示。
+    _empty_reason: str
     # SC-01: 全局筛选设置（排除 ST/风险警示股，UI 开关运行时注入）。
     exclude_st: bool
 

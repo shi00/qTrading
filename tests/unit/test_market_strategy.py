@@ -457,8 +457,10 @@ class TestBlockTradeStrategy:
         result = strategy._filter_logic(lf, {"block_trade": pd.DataFrame(), "params": {}}).collect()
         assert result.height == 0
 
-    def test_aggregate_by_ts_code_and_sort_by_amount(self) -> None:
-        """block_trade 先按单笔 amount > target 过滤, 再 group_by ts_code 聚合, 按 amount 降序。"""
+    def test_aggregate_by_ts_code_and_sort_by_discount(self) -> None:
+        """SC-04: block_trade 按单笔 amount > target 过滤, 再 group_by 聚合。
+        VWAP=Σamount/Σvol 用 vol 作权重（修正 amount 权重系统性偏高），列名 block_vwap；
+        按折价率升序（深度折价在前），同折价率按 amount 降序。"""
         strategy = BlockTradeStrategy()
         base_df = pd.DataFrame(
             {
@@ -467,22 +469,87 @@ class TestBlockTradeStrategy:
                 "industry_sw_l2": ["x", "y"],
                 "pe_ttm": [10.0, 20.0],
                 "total_mv": [100.0, 200.0],
+                "close": [10.0, 15.0],
             }
         )
-        # 000001.SZ 两笔 amount=1200/1500 均 > 1000 入选, 聚合=2700;
+        # 000001.SZ 两笔 amount=1200/1500 均 > 1000 入选, 聚合 amount=2700, vol=300;
         # 000002.SZ amount=500 < 1000 被剔除 (单笔过滤, 非聚合后过滤)
+        # amount(万)=price(元)×vol(万股)：1200=12×100, 1500=7.5×200 → VWAP=2700/300=9.0
         block_df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ", "000001.SZ", "000002.SZ"],
                 "amount": [1200.0, 1500.0, 500.0],
                 "vol": [100.0, 200.0, 50.0],
-                "price": [10.0, 11.0, 20.0],
+                "price": [12.0, 7.5, 20.0],
             }
         )
         lf = pl.from_pandas(base_df).lazy()
         result = strategy._filter_logic(lf, {"block_trade": block_df, "params": {"block_amount_min": 1000}}).collect()
         assert result["ts_code"].to_list() == ["000001.SZ"]
         assert result["amount"].to_list() == [2700.0]
+        # VWAP = Σamount/Σvol = 2700/300 = 9.0（量加权，非 amount 权重口径 (12×1200+7.5×1500)/2700=9.5）
+        assert abs(result["block_vwap"].to_list()[0] - 9.0) < 1e-6
+        # 折价率 = (9.0 - 10)/10 × 100 = -10%，恰达默认 10% 剔除线（>= -10 保留）
+        assert "price" not in result.columns
+
+    def test_vwap_uses_vol_weight_and_discount_filter(self) -> None:
+        """SC-04: 同一股票两笔大宗 10元×100万股 + 12元×100万股 → VWAP=11.0（Σamount/Σvol），
+        而非 amount 权重口径 11.09（柯西不等式系统性偏高）。"""
+        strategy = BlockTradeStrategy()
+        base_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["A"],
+                "industry_sw_l2": ["x"],
+                "pe_ttm": [10.0],
+                "total_mv": [100.0],
+                "close": [12.0],  # 市场收盘价 12 元，两笔折价率均 > 10% → 剔除
+            }
+        )
+        # amount 万元 = price 元 × vol 万股（Tushare 单位）：10×100=1000, 12×100=1200
+        block_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "amount": [1000.0, 1200.0],
+                "vol": [100.0, 100.0],
+                "price": [10.0, 12.0],
+            }
+        )
+        lf = pl.from_pandas(base_df).lazy()
+        # block_amount_min=0 保证两笔都通过单笔过滤（默认 1000 会剔除 amount=1000 首笔）
+        result = strategy._filter_logic(lf, {"block_trade": block_df, "params": {"block_amount_min": 0}}).collect()
+        # VWAP=(1000+1200)/(100+100)=11.0，折价率=(11-12)/12×100≈-8.33%，未超 10% 剔除线
+        assert result.height == 1
+        assert abs(result["block_vwap"].to_list()[0] - 11.0) < 1e-6
+        assert abs(result["block_discount_pct"].to_list()[0] + 8.3333) < 0.01
+
+    def test_deep_discount_filtered_by_max_pct(self) -> None:
+        """SC-04: 折价率超过 block_discount_max_pct 的深折价剔除（深折价=卖方急于出货信号）。"""
+        strategy = BlockTradeStrategy()
+        base_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "name": ["A", "B"],
+                "industry_sw_l2": ["x", "y"],
+                "pe_ttm": [10.0, 20.0],
+                "total_mv": [100.0, 200.0],
+                "close": [10.0, 10.0],
+            }
+        )
+        block_df = pd.DataFrame(
+            {
+                # 000001.SZ: VWAP=9.0 → 折价率 -10% (参数 5 时剔除); 000002.SZ: VWAP=9.5 → 折价率 -5% (保留)
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "amount": [900.0, 950.0],
+                "vol": [100.0, 100.0],
+                "price": [9.0, 9.5],
+            }
+        )
+        lf = pl.from_pandas(base_df).lazy()
+        result = strategy._filter_logic(
+            lf, {"block_trade": block_df, "params": {"block_amount_min": 0, "block_discount_max_pct": 5}}
+        ).collect()
+        assert result["ts_code"].to_list() == ["000002.SZ"]
 
     def test_missing_amount_column_returns_empty(self) -> None:
         """边界: block_trade 缺少 amount 列时返回空 (early return lf.head(0))。"""
@@ -495,10 +562,10 @@ class TestBlockTradeStrategy:
         result = strategy._filter_logic(lf, {"block_trade": block_df, "params": {}}).collect()
         assert result.height == 0
 
-    def test_get_parameters_returns_one_param(self) -> None:
+    def test_get_parameters_returns_two_params(self) -> None:
         strategy = BlockTradeStrategy()
         params = strategy.get_parameters()
-        assert {p["name"] for p in params} == {"block_amount_min"}
+        assert {p["name"] for p in params} == {"block_amount_min", "block_discount_max_pct"}
 
     async def test_bronze_tier_logs_warning(self, caplog) -> None:
         """BRONZE 策略运行时输出警告日志。"""
