@@ -63,6 +63,9 @@ _ALLOWED_I18N_GET_FILES = frozenset(
         "services/ai_service/stock_analysis.py",
         "services/news_subscription_service.py",
         "services/scheduled_jobs/nightly_prediction.py",
+        # RV-04: review_backfill job 的任务名称/结果诊断经任务中心呈现给用户
+        # （nightly_prediction 同模式先例：job 名称与用户可见结果走 i18n）。
+        "services/scheduled_jobs/review_backfill.py",
         "services/task_manager.py",
         # --- strategies 层（含 LLM 上下文与回测报告生成）---
         "strategies/ai_context/auxiliary.py",

@@ -8,7 +8,7 @@ import uuid
 import pandas as pd
 
 from data.cache.cache_manager import CacheManager
-from data.constants import DEFAULT_BENCHMARK_INDEX
+from data.constants import DEFAULT_BENCHMARK_INDEX, MAJOR_INDICES, REVIEW_STATUS_T1_DONE
 from data.external.tushare_client import TushareClient
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.sync.base import safe_error
@@ -85,6 +85,9 @@ class ReviewManager:
         self.alpha_win_threshold = alpha_win_threshold
         self.alpha_loss_threshold = alpha_loss_threshold
         self.label_horizon = label_horizon
+        # RV-04: 本次实例运行期的基准诊断（降级/全缺失说明），None=基准正常；
+        # 供 review_backfill job 读取拼进任务结果（用户可见，nightly_prediction B1 先例）。
+        self._benchmark_diag: str | None = None
 
     def _classify_alpha(self, alpha: float) -> str:
         """按阈值将超额收益 alpha（百分点）分类为 WIN / LOSS / DRAW。
@@ -140,7 +143,9 @@ class ReviewManager:
 
         has_adj_factor = "adj_factor" in bulk_quotes.columns
 
-        index_code = ConfigHandler.get_config("benchmark_index", DEFAULT_BENCHMARK_INDEX)
+        # RV-04: 基准经降级链解析（配置基准不可得 → MAJOR_INDICES 首个可得），
+        # 实际基准记入 benchmark_code；诊断供 job 呈现。
+        index_code = await self._resolve_benchmark(min_pred_date)
         index_cache = await self._prefetch_index_cache(index_code, min_pred_date, max_quote_date)
         # RV-01: 已完整探测（本地库+API 均无数据）的日期集合，避免对同一缺失日期逐股票重复探测。
         index_missing: set[str] = set()
@@ -274,11 +279,30 @@ class ReviewManager:
                     index_pct = _index_window_return_pct(index_cache.get(t0_date_str), index_cache.get(label_date_str))
 
                     if index_pct is None:
+                        # RV-04: 基准缺失不再丢弃已算好的数值——数值/标签解耦落库：
+                        # t5_pct/t5_price 照写，label/alpha/index_pct 置 NULL 表示标签
+                        # 未定稿（R21 缺失值语义），status 显式 T1_DONE 留在补标签通道
+                        # （get_unlabeled_predictions），基准恢复后由 backfill 补定稿。
+                        # benchmark_code 传 None 保持已有值不覆盖（D2-5）。
                         logger.warning(
-                            "[Review] %s: Index return unavailable for [%s, %s], skipping to avoid label pollution",
+                            "[Review] %s: Index return unavailable for [%s, %s], staging numeric-only (label pending)",
                             ts_code,
                             t0_date_str,
                             label_date_str,
+                        )
+                        updates.append(
+                            {
+                                "record_id": row["id"],
+                                "pct": t1_pct,
+                                "label": None,
+                                "index_pct": None,
+                                "benchmark_code": None,
+                                "t1_price": t1_price,
+                                "t5_pct": t5_pct if self.label_horizon == "t5" else None,
+                                "t5_price": t5_price if self.label_horizon == "t5" else None,
+                                "alpha": None,
+                                "review_status": REVIEW_STATUS_T1_DONE,
+                            }
                         )
                         continue
 
@@ -325,14 +349,22 @@ class ReviewManager:
         其 T+5 不再被任何机制回访。本方法每日调度一次即可自然覆盖全部历史，
         返回回填条数供任务进度上报。
 
-        只处理 ``review_status='T1_DONE'`` 且 ``t5_pct IS NULL`` 的记录（已过 T+1、
-        缺远期收益）；未满 horizon / 停牌缺行 / 复权计算失败的记录保持 NULL，
-        次日重试。与 ``_qfq_return_pct`` 共享复权口径，避免预测当天与回填口径不一致。
+        只处理 ``review_status='T1_DONE'`` 的记录，分两类（RV-04）：A 类缺 ``t5_pct``
+        数值（全量计算）；B 类数值已齐但标签未定稿（``alpha IS NULL``，基准缺失时
+        数值-only 解耦写入的记录 + #1097 迁移重置的历史行）——仅补定稿标签。
+        未满 horizon / 停牌缺行 / 复权计算失败的记录保持 NULL，次日重试；基准
+        缺失时 A 类仍写数值（解耦），B 类留待重试。与 ``_qfq_return_pct`` 共享
+        复权口径，避免预测当天与回填口径不一致。
         """
         if horizon <= 0:
             raise ValueError("[Review] backfill horizon must be positive")
 
+        # RV-04: A 类（缺 t5_pct 数值）与 B 类（数值已齐、标签未定稿：基准缺失时
+        # 数值-only 解耦写入的记录 + #1097 迁移重置的历史行）分池取数、各自独立
+        # LIMIT 后合并处理——合并池会按 trade_date asc 让历史 B 类堆积排满单一
+        # LIMIT，饿死 A 类新记录（对抗检视）。B 类行带 t5_pct 非 None 标记。
         candidates = await self.cache.screener_dao.get_unfilled_horizon_predictions()
+        candidates += await self.cache.screener_dao.get_unlabeled_predictions()
         if not candidates:
             logger.info("[Review] No unfilled T+%d records to backfill.", horizon)
             return 0
@@ -361,44 +393,61 @@ class ReviewManager:
         has_adj_factor = "adj_factor" in bulk_quotes.columns
 
         # D4-M4: T+5 backfill 需定稿 T+5 标签，故须解析基准指数（与 run_review 同口径）。
-        index_code = ConfigHandler.get_config("benchmark_index", DEFAULT_BENCHMARK_INDEX)
+        # RV-04: 基准经降级链解析（配置基准不可得 → MAJOR_INDICES 首个可得）。
+        index_code = await self._resolve_benchmark(min_t0)
         index_cache = await self._prefetch_index_cache(index_code, min_t0, max_quote_date)
         # RV-01: 已完整探测（本地库+API 均无数据）的日期集合，避免对同一缺失日期逐记录重复探测。
         index_missing: set[str] = set()
 
         updates: list[dict] = []
+        # RV-04: B 类（数值已齐、标签待定稿）的补标签更新，走 _batch_finalize_labels。
+        label_updates: list[dict] = []
         for cand in candidates:
             code = cand["ts_code"]
             t0_date = self._normalize_trade_date(cand["trade_date"])
-            df_quotes = quotes_by_code.get(code)
-            if df_quotes is None or df_quotes.empty:
-                continue
-            stock_pos = {self._normalize_trade_date(d): int(i) for i, d in enumerate(df_quotes["trade_date"])}
-            t0_idx = stock_pos.get(t0_date)
-            if t0_idx is None:
-                continue  # t0 无收盘价 → 基准价未知，无法计算，留 NULL
-            t0_ser = df_quotes.iloc[t0_idx]
-            t0_close_raw = t0_ser.get("close")
-            t0_close = float(t0_close_raw) if bool(pd.notna(t0_close_raw)) else None
-            if t0_close is None or t0_close == 0:
-                continue
-            t0_adj_raw = t0_ser.get("adj_factor") if has_adj_factor else None
-            t0_adj = float(t0_adj_raw) if has_adj_factor and bool(pd.notna(t0_adj_raw)) else None
+            # RV-04: B 类行带 t5_pct（数值已落库，get_unlabeled_predictions 返回该列）
+            # → 跳过行情数值计算，仅推算 t5_date 供基准窗口探测；A 类行无该键
+            # （get_unfilled_horizon_predictions 不返回 t5_pct）→ 走既有全量计算。
+            staged_t5_pct = cand.get("t5_pct")
+            t5_price: float | None = None
+            if staged_t5_pct is not None:
+                t5_pct = float(staged_t5_pct)
+                # B 类 t0 必在 market_trade_dates 内（min_t0 取自全部候选的最小值）；
+                # t5 数值既已算出，窗口当年即已成熟，此处仅防御日历边界。
+                t0_mpos = market_pos.get(t0_date)
+                if t0_mpos is None or t0_mpos + horizon >= len(market_trade_dates):
+                    continue
+                t5_date = market_trade_dates[t0_mpos + horizon]
+            else:
+                df_quotes = quotes_by_code.get(code)
+                if df_quotes is None or df_quotes.empty:
+                    continue
+                stock_pos = {self._normalize_trade_date(d): int(i) for i, d in enumerate(df_quotes["trade_date"])}
+                t0_idx = stock_pos.get(t0_date)
+                if t0_idx is None:
+                    continue  # t0 无收盘价 → 基准价未知，无法计算，留 NULL
+                t0_ser = df_quotes.iloc[t0_idx]
+                t0_close_raw = t0_ser.get("close")
+                t0_close = float(t0_close_raw) if bool(pd.notna(t0_close_raw)) else None
+                if t0_close is None or t0_close == 0:
+                    continue
+                t0_adj_raw = t0_ser.get("adj_factor") if has_adj_factor else None
+                t0_adj = float(t0_adj_raw) if has_adj_factor and bool(pd.notna(t0_adj_raw)) else None
 
-            t0_mpos = market_pos.get(t0_date)
-            if t0_mpos is None or t0_mpos + horizon >= len(market_trade_dates):
-                continue  # T+horizon 尚未成熟，留 NULL 次日重试
-            t5_date = market_trade_dates[t0_mpos + horizon]
-            t5_idx = stock_pos.get(t5_date)
-            if t5_idx is None:
-                continue  # T+5 日停牌/缺行 → 数据不可得，不伪造
-            t5_row = df_quotes.iloc[t5_idx]
-            ret = _qfq_return_pct(t5_row, t0_close, t0_adj, has_adj_factor)
-            if ret is None:
-                continue
-            t5_close_raw = t5_row.get("close")
-            t5_price = float(t5_close_raw) if bool(pd.notna(t5_close_raw)) else None
-            t5_pct = round(ret * 100.0, 4)
+                t0_mpos = market_pos.get(t0_date)
+                if t0_mpos is None or t0_mpos + horizon >= len(market_trade_dates):
+                    continue  # T+horizon 尚未成熟，留 NULL 次日重试
+                t5_date = market_trade_dates[t0_mpos + horizon]
+                t5_idx = stock_pos.get(t5_date)
+                if t5_idx is None:
+                    continue  # T+5 日停牌/缺行 → 数据不可得，不伪造
+                t5_row = df_quotes.iloc[t5_idx]
+                ret = _qfq_return_pct(t5_row, t0_close, t0_adj, has_adj_factor)
+                if ret is None:
+                    continue
+                t5_close_raw = t5_row.get("close")
+                t5_price = float(t5_close_raw) if bool(pd.notna(t5_close_raw)) else None
+                t5_pct = round(ret * 100.0, 4)
 
             # D4-M4: T+5 成熟回填时同步定稿 T+5 窗口标签。run_review 在 T+5
             # 未成熟时仅打 DRAW 占位（status=T1_DONE），此处补齐 T+5 数值并
@@ -419,33 +468,76 @@ class ReviewManager:
 
             index_pct = _index_window_return_pct(index_cache.get(t0_date_str), index_cache.get(t5_date_str))
             if index_pct is None:
-                logger.warning(
-                    "[Review] T+5 backfill: %s: Index return unavailable for [%s, %s], skipping to avoid label pollution",
-                    code,
-                    t0_date_str,
-                    t5_date_str,
-                )
+                if staged_t5_pct is None:
+                    # RV-04: A 类基准缺失 → 数值-only 解耦落库（label=None →
+                    # backfill_t5_prediction 置 T1_DONE），次日起作为 B 类候选
+                    # 重访补标签；不再丢弃已算好的 t5_pct（数值/标签解耦）。
+                    logger.warning(
+                        "[Review] T+5 backfill: %s: Index return unavailable for [%s, %s], staging numeric-only (label pending)",
+                        code,
+                        t0_date_str,
+                        t5_date_str,
+                    )
+                    updates.append(
+                        {
+                            "record_id": cand["id"],
+                            "t5_pct": t5_pct,
+                            "t5_price": t5_price,
+                            "label": None,
+                            "index_pct": None,
+                            "benchmark_code": None,
+                            "alpha": None,
+                        }
+                    )
+                else:
+                    # B 类：数值已在库，仅标签待补 → 留待基准恢复后次日重试（无数据丢失）。
+                    logger.warning(
+                        "[Review] T+5 backfill: %s: Index return unavailable for [%s, %s], label still pending",
+                        code,
+                        t0_date_str,
+                        t5_date_str,
+                    )
                 continue
             alpha = round(t5_pct - index_pct, 4)
             label = self._classify_alpha(alpha)
 
-            updates.append(
-                {
-                    "record_id": cand["id"],
-                    "t5_pct": t5_pct,
-                    "t5_price": t5_price,
-                    "label": label,
-                    "index_pct": index_pct,
-                    "benchmark_code": index_code,
-                    "alpha": alpha,
-                }
-            )
+            if staged_t5_pct is not None:
+                # RV-04: B 类补定稿标签（数值不动，finalize WHERE alpha IS NULL 幂等）。
+                label_updates.append(
+                    {
+                        "record_id": cand["id"],
+                        "label": label,
+                        "index_pct": index_pct,
+                        "benchmark_code": index_code,
+                        "alpha": alpha,
+                    }
+                )
+            else:
+                updates.append(
+                    {
+                        "record_id": cand["id"],
+                        "t5_pct": t5_pct,
+                        "t5_price": t5_price,
+                        "label": label,
+                        "index_pct": index_pct,
+                        "benchmark_code": index_code,
+                        "alpha": alpha,
+                    }
+                )
 
         if updates:
             await self._batch_backfill_t5(updates)
+        if label_updates:
+            await self._batch_finalize_labels(label_updates)
 
-        logger.info("[Review] T+%d backfill completed: %s records updated.", horizon, len(updates))
-        return len(updates)
+        total = len(updates) + len(label_updates)
+        logger.info(
+            "[Review] T+%d backfill completed: %s records updated (%s labels finalized).",
+            horizon,
+            total,
+            len(label_updates),
+        )
+        return total
 
     @log_async_operation(operation_name="t1_backfill", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def backfill_t1_returns(self) -> int:
@@ -605,6 +697,52 @@ class ReviewManager:
                 except Exception as inner_e:
                     logger.error(
                         "[Review] Individual T+5 backfill also failed for record %s: %s",
+                        u["record_id"],
+                        safe_error(inner_e),
+                    )
+
+    async def _batch_finalize_labels(self, label_updates: list[dict]) -> None:
+        """RV-04: 单事务批量补定稿标签（对齐 _batch_backfill_t5 的事务与逐条降级语义）。"""
+        dao = self.cache.screener_dao
+        engine = self.cache.engine
+        if engine is None:
+            logger.error("[Review] Engine not available for label finalization.")
+            return
+
+        try:
+            async with engine.begin() as conn:
+                for u in label_updates:
+                    await dao.finalize_prediction_label(
+                        u["record_id"],
+                        label=u["label"],
+                        index_pct=u["index_pct"],
+                        benchmark_code=u["benchmark_code"],
+                        alpha=u["alpha"],
+                        conn=conn,
+                    )
+        except EngineDisposedError:
+            # R5 一致性：disposed 引擎不可恢复，主路径必须上抛避免被吞没.
+            raise
+        except Exception as e:
+            logger.error(
+                "[Review] Batch label finalization failed, falling back to individual updates: %s",
+                safe_error(e),
+            )
+            for u in label_updates:
+                try:
+                    await dao.finalize_prediction_label(
+                        u["record_id"],
+                        label=u["label"],
+                        index_pct=u["index_pct"],
+                        benchmark_code=u["benchmark_code"],
+                        alpha=u["alpha"],
+                    )
+                except EngineDisposedError:
+                    # R5 一致性：fallback 路径同样必须上抛（与主路径对齐）.
+                    raise
+                except Exception as inner_e:
+                    logger.error(
+                        "[Review] Individual label finalization also failed for record %s: %s",
                         u["record_id"],
                         safe_error(inner_e),
                     )
@@ -829,6 +967,7 @@ class ReviewManager:
                         index_pct=u["index_pct"],
                         benchmark_code=u.get("benchmark_code"),
                         alpha=u["alpha"],
+                        review_status=u.get("review_status"),
                         conn=conn,
                         guard_t1=guard_t1,
                     )
@@ -849,6 +988,7 @@ class ReviewManager:
                         t5_pct=u["t5_pct"],
                         t5_price=u["t5_price"],
                         alpha=u["alpha"],
+                        review_status=u.get("review_status"),
                         guard_t1=guard_t1,
                     )
                 except EngineDisposedError:
@@ -1052,6 +1192,58 @@ class ReviewManager:
             if severity == "system":
                 raise
             return None
+
+    async def _resolve_benchmark(self, probe_date: datetime.date) -> str:
+        """RV-04: 解析实际使用的基准指数，配置基准不可得时沿 MAJOR_INDICES 降级。
+
+        候选链 = [配置基准, *MAJOR_INDICES]（去重保序）。对每个候选探测
+        ``probe_date``（本批最老记录日）收盘点位可得性（本地库 → API 兜底，
+        与 ``_resolve_index_close`` 同链路），返回首个可得的候选并记入
+        ``benchmark_code``；全不可得时返回配置基准——数值照常落库
+        （RV-04 数值/标签解耦），标签停留待补，诊断供 job 呈现。
+
+        局限（有意近似）：以 probe_date 单日可得性为降级信号；历史窗口中段
+        缺失不触发降级，由 backfill_horizon_returns 的 B 类补标签通道按日重试兜底。
+        """
+        configured = ConfigHandler.get_config("benchmark_index", DEFAULT_BENCHMARK_INDEX)
+        if not isinstance(configured, str) or not configured:
+            configured = DEFAULT_BENCHMARK_INDEX
+        for candidate in dict.fromkeys([configured, *MAJOR_INDICES]):
+            # 探针异常（system 级已在 _resolve_index_close 内 critical 记录）视为
+            # 候选不可得、继续降级链——与行级「异常吞没、review 继续」语义一致；
+            # EngineDisposedError 上抛（R5：disposed 引擎上不再执行降级探测）。
+            try:
+                probe_close = await self._resolve_index_close(candidate, probe_date)
+            except EngineDisposedError:
+                raise
+            except Exception:
+                continue
+            if probe_close is not None:
+                if candidate != configured:
+                    self._benchmark_diag = I18n.get(
+                        "review_benchmark_degraded",
+                        configured=configured,
+                        fallback=candidate,
+                    )
+                    logger.warning(
+                        "[Review] Benchmark %s unavailable on %s, degraded to %s (RV-04 fallback chain)",
+                        configured,
+                        probe_date.strftime("%Y%m%d"),
+                        candidate,
+                    )
+                else:
+                    # 配置基准直接命中时清除过时诊断（同实例先降级后恢复的场景，
+                    # 防 job 拼接上一次运行的残留降级说明）。
+                    self._benchmark_diag = None
+                return candidate
+        self._benchmark_diag = I18n.get("review_benchmark_missing", benchmark=configured)
+        logger.warning(
+            "[Review] Benchmark %s and all MAJOR_INDICES unavailable on %s; "
+            "numeric-only staging, labels pending (RV-04)",
+            configured,
+            probe_date.strftime("%Y%m%d"),
+        )
+        return configured
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def save_results(

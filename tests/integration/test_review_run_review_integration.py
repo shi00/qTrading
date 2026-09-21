@@ -11,8 +11,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
+from data.constants import REVIEW_STATUS_T1_DONE
 
-pytestmark = pytest.mark.integration
+# no_db: 本文件全部测试为 MagicMock 风格（ReviewManager.__new__ + mock cache/api），
+# 不触达真实 DB，跳过 test_engine 创建与 schema 初始化（与 test_service_review_manager.py 同模式）。
+pytestmark = [pytest.mark.integration, pytest.mark.no_db]
 
 
 class TestRunReviewE2E(unittest.TestCase):
@@ -129,8 +132,10 @@ class TestRunReviewE2E(unittest.TestCase):
         assert abs(call_args.kwargs["t5_pct"] - 12.0) < 1e-6
 
     @patch("data.persistence.review_manager.ConfigHandler")
-    def test_index_unavailable_skips_and_stays_pending(self, mock_config):
-        """D4-M4: T+5 已成熟但基准指数不可得时，跳过不写以避免标签污染（保持 pending）。"""
+    def test_index_unavailable_stages_numeric_only(self, mock_config):
+        """RV-04: T+5 已成熟但基准不可得时不再整条丢弃——数值-only 写入
+        （t5_pct 照写，label/alpha/index_pct NULL、review_status=T1_DONE
+        留在补标签通道 get_unlabeled_predictions，基准恢复后由 backfill 定稿）。"""
         mock_config.get_config.return_value = "000001.SH"
         pending_df = self._pending_df("20240308")
         quotes_df = pd.DataFrame(
@@ -153,7 +158,13 @@ class TestRunReviewE2E(unittest.TestCase):
         manager.api.get_index_daily = AsyncMock(return_value=None)
 
         asyncio.run(manager.run_review())
-        manager.cache.screener_dao.update_prediction_result.assert_not_called()
+        assert manager.cache.screener_dao.update_prediction_result.await_count == 1
+        call_args = manager.cache.screener_dao.update_prediction_result.call_args
+        assert call_args[0][2] is None  # label 未定稿（R21 NULL 不伪造）
+        assert call_args.kwargs["t5_pct"] == pytest.approx(12.0)  # (11.2/10.0 - 1) × 100
+        assert call_args.kwargs["index_pct"] is None
+        assert call_args.kwargs["alpha"] is None
+        assert call_args.kwargs["review_status"] == REVIEW_STATUS_T1_DONE
 
     @patch("data.persistence.review_manager.ConfigHandler")
     def test_t0_close_zero_skips_and_stays_pending(self, mock_config):

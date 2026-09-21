@@ -486,6 +486,150 @@ class TestScreenerDaoUpdatePredictionResult:
         assert "benchmark_code" not in str(stmt)
 
 
+class TestScreenerDaoRv04LabelDecouple:
+    """RV-04: 数值/标签解耦的 DAO 侧契约——finalize 幂等守卫、backfill 状态语义、A/B 分池。"""
+
+    @staticmethod
+    def _make_dao_with_conn():
+        from contextlib import asynccontextmanager
+
+        mock_engine = MagicMock()
+        dao = ScreenerDao(mock_engine)
+        dao._check_engine = MagicMock()
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+        mock_conn = AsyncMock()
+
+        @asynccontextmanager
+        async def mock_guarded_begin(conn=None):
+            yield mock_conn
+
+        dao._guarded_begin = mock_guarded_begin
+        return dao, mock_conn
+
+    @pytest.mark.asyncio
+    async def test_finalize_prediction_label_has_alpha_null_guard(self):
+        """T3: finalize 的 UPDATE WHERE 带 alpha IS NULL 幂等守卫——已定稿标签不被覆盖。"""
+        dao, mock_conn = self._make_dao_with_conn()
+        await dao.finalize_prediction_label(
+            record_id=1, label="WIN", index_pct=1.0, benchmark_code="000300.SH", alpha=4.0
+        )
+        mock_conn.execute.assert_called_once()
+        sql = str(mock_conn.execute.call_args.args[0])
+        assert "alpha IS NULL" in sql
+
+    @pytest.mark.asyncio
+    async def test_finalize_prediction_label_writes_completed(self):
+        """T3: finalize 推进 review_status 为 COMPLETED，并写 label/index_pct/benchmark_code/alpha。"""
+        dao, mock_conn = self._make_dao_with_conn()
+        await dao.finalize_prediction_label(
+            record_id=1, label="WIN", index_pct=1.0, benchmark_code="000300.SH", alpha=4.0
+        )
+        compiled = mock_conn.execute.call_args.args[0].compile()
+        assert REVIEW_STATUS_COMPLETED in compiled.params.values()
+        assert "prediction_result" in str(mock_conn.execute.call_args.args[0])
+
+    @pytest.mark.asyncio
+    async def test_backfill_t5_label_none_keeps_t1_done(self):
+        """T5: 数值-only 回填（label=None，基准缺失解耦写入）status 停留 T1_DONE，
+        不误判 COMPLETED——否则记录脱离 pending 池与补标签池，标签永久无人定稿。"""
+        dao, mock_conn = self._make_dao_with_conn()
+        await dao.backfill_t5_prediction(record_id=1, t5_pct=5.0, t5_price=10.5, label=None)
+        mock_conn.execute.assert_called_once()
+        compiled = mock_conn.execute.call_args.args[0].compile()
+        assert REVIEW_STATUS_T1_DONE in compiled.params.values()
+        assert REVIEW_STATUS_COMPLETED not in compiled.params.values()
+        # label=None 不写 prediction_result（不在写入集，保持既有占位不覆盖）
+        assert "prediction_result" not in str(mock_conn.execute.call_args.args[0])
+
+    @pytest.mark.asyncio
+    async def test_backfill_t5_label_present_writes_completed(self):
+        """T5: label 非 None（同步定稿）→ status COMPLETED + prediction_result 写入。"""
+        dao, mock_conn = self._make_dao_with_conn()
+        await dao.backfill_t5_prediction(record_id=1, t5_pct=5.0, t5_price=10.5, label="WIN", index_pct=1.0, alpha=4.0)
+        mock_conn.execute.assert_called_once()
+        compiled = mock_conn.execute.call_args.args[0].compile()
+        assert REVIEW_STATUS_COMPLETED in compiled.params.values()
+        assert "prediction_result" in str(mock_conn.execute.call_args.args[0])
+
+    @pytest.mark.asyncio
+    async def test_unlabeled_predictions_sql_contract(self):
+        """T7: B 类池（数值已齐、标签未定稿）过滤契约——T1_DONE + t5_pct IS NOT NULL +
+        alpha IS NULL，独立 LIMIT 不与 A 类池挤占。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_unlabeled_predictions(limit=500)
+        stmt = dao._read_db_select.call_args[0][0]
+        sql = str(stmt)
+        assert "t5_pct IS NOT NULL" in sql
+        assert "alpha IS NULL" in sql
+        compiled = stmt.compile()
+        assert REVIEW_STATUS_T1_DONE in compiled.params.values()
+
+    @pytest.mark.asyncio
+    async def test_unfilled_horizon_predictions_sql_contract(self):
+        """T7: A 类池过滤契约——T1_DONE + t5_pct IS NULL，与 B 类池互补不重叠。"""
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_unfilled_horizon_predictions(limit=500)
+        stmt = dao._read_db_select.call_args[0][0]
+        sql = str(stmt)
+        assert "t5_pct IS NULL" in sql
+        compiled = stmt.compile()
+        assert REVIEW_STATUS_T1_DONE in compiled.params.values()
+
+    @pytest.mark.asyncio
+    async def test_finalize_prediction_label_with_conn_executes_on_conn(self):
+        """批量定稿路径（conn 由调用方事务持有）：语句直接在传入 conn 上执行，
+        不再自建事务（与 _batch_finalize_labels 的单事务语义配套）。"""
+        dao, mock_conn = self._make_dao_with_conn()
+        await dao.finalize_prediction_label(
+            record_id=7, label="WIN", index_pct=1.0, benchmark_code="000300.SH", alpha=4.0, conn=mock_conn
+        )
+        mock_conn.execute.assert_called_once()
+        sql = str(mock_conn.execute.call_args.args[0])
+        assert "alpha IS NULL" in sql
+
+    @pytest.mark.asyncio
+    async def test_finalize_prediction_label_tx_failure_logs_not_raises(self):
+        """自建事务失败（非 disposed）→ 记 warning 不上抛（补标签通道次日重试兜底）。"""
+        from contextlib import asynccontextmanager
+
+        dao, _ = self._make_dao_with_conn()
+
+        @asynccontextmanager
+        async def failing_begin(conn=None):
+            raise RuntimeError("tx failed")
+            yield
+
+        dao._guarded_begin = failing_begin
+        # 不抛：单条失败由次日 backfill job 兜底重试
+        await dao.finalize_prediction_label(
+            record_id=1, label="WIN", index_pct=1.0, benchmark_code="000300.SH", alpha=4.0
+        )
+
+    @pytest.mark.asyncio
+    async def test_finalize_prediction_label_disposed_raises(self):
+        """R5: 自建事务遇 EngineDisposedError 上抛（disposed 引擎上不再静默吞没）。"""
+        from contextlib import asynccontextmanager
+
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        dao, mock_conn = self._make_dao_with_conn()
+
+        @asynccontextmanager
+        async def disposed_begin(conn=None):
+            raise EngineDisposedError("engine disposed")
+            yield
+
+        dao._guarded_begin = disposed_begin
+        with pytest.raises(EngineDisposedError, match="engine disposed"):
+            await dao.finalize_prediction_label(
+                record_id=1, label="WIN", index_pct=1.0, benchmark_code="000300.SH", alpha=4.0
+            )
+        # disposed 引擎上 UPDATE 语句未执行
+        mock_conn.execute.assert_not_called()
+
+
 class TestScreenerDaoSaveScreeningResults:
     @pytest.mark.asyncio
     async def test_empty_records(self):
@@ -1338,7 +1482,7 @@ class TestScreenerDaoGetUnfilledT1Predictions:
 
 
 class TestScreenerDaoBackfillT5Prediction:
-    """D2-4: 幂等回填 —— WHERE 带 t5_pct IS NULL，且推进 review_status 为 COMPLETED。"""
+    """D2-4: 幂等回填 —— WHERE 带 t5_pct IS NULL；RV-04 起 status 按标签成熟度推进。"""
 
     @staticmethod
     def _make_dao_with_conn():
@@ -1367,7 +1511,9 @@ class TestScreenerDaoBackfillT5Prediction:
         assert "t5_price" in sql
         assert "t5_pct IS NULL" in sql
         compiled = stmt.compile()
-        assert compiled.params.get("review_status") == REVIEW_STATUS_COMPLETED
+        # RV-04: label=None（数值-only 解耦写入）→ 停留 T1_DONE 留在补标签通道，
+        # 不再无条件 COMPLETED（否则记录脱离补标签池，标签永久无人定稿）。
+        assert compiled.params.get("review_status") == REVIEW_STATUS_T1_DONE
         assert compiled.params.get("t5_pct") == 3.0
 
     @pytest.mark.asyncio
