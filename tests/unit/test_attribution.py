@@ -15,6 +15,7 @@ import json
 from typing import cast
 
 import pandas as pd
+import polars as pl
 import pytest
 
 from strategies.attribution import (
@@ -24,6 +25,7 @@ from strategies.attribution import (
     RankAttribution,
     attribution_from_json,
     attribution_to_json,
+    condition_to_expr,
     fnum,
 )
 from strategies.fundamental import DividendStrategy, GrowthStrategy, ValueStrategy
@@ -224,6 +226,76 @@ class TestStrategyBuildAttribution:
         assert attr is not None
         cond_pct2 = next(c for c in attr.conditions if c.column == "pct_chg")
         assert cond_pct2.threshold == (3.0, 5.0)
+
+
+# ============================================================================
+# SC-07 空集归因 — FilterCondition → Polars 表达式 / 基类逐条件回溯
+# ============================================================================
+
+
+class TestConditionToExpr:
+    def test_gt_geq_lt_leq(self):
+        import polars as pl
+
+        df = pl.DataFrame({"v": [1.0, 5.0, 10.0]})
+        assert df.filter(condition_to_expr(FilterCondition("v", "gt", 4.0))).height == 2
+        assert df.filter(condition_to_expr(FilterCondition("v", "geq", 5.0))).height == 2
+        assert df.filter(condition_to_expr(FilterCondition("v", "lt", 5.0))).height == 1
+        assert df.filter(condition_to_expr(FilterCondition("v", "leq", 5.0))).height == 2
+
+    def test_between(self):
+        df = pl.DataFrame({"v": [1.0, 5.0, 10.0]})
+        assert df.filter(condition_to_expr(FilterCondition("v", "between", (2.0, 8.0)))).height == 1
+
+
+class TestEmptyDiagnose:
+    """SC-07: 空集时基类逐条件回溯，定位把候选池砍到 0 的条件。"""
+
+    def test_growth_declared_conditions_reflect_params(self):
+        s = GrowthStrategy()
+        conds = s.declared_conditions({"params": {"revenue_growth_min": 100, "profit_growth_min": 200, "roe_min": 50}})
+        assert {c.column for c in conds} == {"or_yoy", "netprofit_yoy", "roe"}
+        assert conds[0].threshold == 100.0
+        assert conds[1].threshold == 200.0
+        assert conds[2].threshold == 50.0
+
+    def test_empty_batch_returns_excluding_condition_message(self):
+        """三滑块全拉满 → 候选池空，roe 条件最先砍到 0 → 只报告该条件。"""
+        s = GrowthStrategy()
+        df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "or_yoy": [30.0, 10.0],
+                "netprofit_yoy": [40.0, 5.0],
+                "roe": [25.0, 8.0],
+                # SC-03: _filter_logic 的 with_columns 引用毛利率列（增长质量存疑判据）
+                "grossprofit_margin": [35.0, 30.0],
+                "gpm_prev": [30.0, 32.0],
+                "n_income": [1000.0, 500.0],
+            }
+        )
+        base_lf = df.lazy()
+        result_lf = s._filter_logic(base_lf, {"params": {}})
+        # 默认参数（rev=20/profit=25/roe=15）下 roe=8 的 000002 被剔除，仍有 000001 → 非空
+        assert result_lf.collect().height == 1
+        # 拉满参数 → roe=50 全剔除 → 空集
+        result_lf_full = s._filter_logic(base_lf, {"params": {"roe_min": 50}})
+        assert result_lf_full.collect().height == 0
+        msgs = s._diagnose_empty_batch(base_lf, result_lf_full, {"params": {"roe_min": 50}})
+        assert len(msgs) == 1
+        assert msgs[0].key == "strategy_condition_excludes_all"
+        # 逐条件回溯：or_yoy>20 / netprofit_yoy>25 均剩 1 只（000001），roe>50 全剔除 → 报告 roe
+        assert msgs[0].params["column"] == "roe"
+        assert msgs[0].params["total"] == 2
+
+    def test_attribution_disabled_returns_empty(self):
+        """attribution_enabled=False 的策略不启用空集诊断（如 LargePE 未置 True）。"""
+        from strategies.fundamental import LargePEStrategy
+
+        s = LargePEStrategy()
+        df = pl.DataFrame({"total_mv": [1.0], "pe_ttm": [5.0]})
+        msgs = s._diagnose_empty_batch(df.lazy(), df.lazy(), {"params": {}})
+        assert msgs == []
 
 
 # ============================================================================

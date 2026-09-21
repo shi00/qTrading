@@ -374,6 +374,7 @@
     "screener_ai_failed_banner": "AI analysis could not complete for {count} stocks; results reflect math-based screening only",
     "strategy_ai_candidate_truncated": "{total} candidates exceed the AI analysis cap of {analyzed}; only the top {analyzed} are analyzed",
     "strategy_excluded_st": "Excluded {count} risk-warning stocks",
+    "strategy_condition_excludes_all": "Filter condition {column} ({threshold}) excluded all {total} stocks; consider relaxing this parameter",
     "strategy_ai_risk_check_skipped": "AI analysis is unavailable — this strategy's AI qualitative risk checks (fake high yield/value trap/cash-flow chain) are skipped; results include quant-based screening only",
     "strategy_northbound_holding_name": "Northbound Holdings",
     "strategy_northbound_holding_desc": "Criteria: Northbound Holding Ratio > threshold (Long-term foreign positions)",

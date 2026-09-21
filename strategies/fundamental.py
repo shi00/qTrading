@@ -207,6 +207,18 @@ class GrowthStrategy(PolarsBaseStrategy):
 
     attribution_enabled = True  # UX-04
 
+    def declared_conditions(self, context) -> tuple[FilterCondition, ...]:
+        """SC-07: 空集归因——三滑块拉满时定位元凶条件（or_yoy/netprofit_yoy/roe 之一）。"""
+        p = context.get("params", {})
+        rev = float(p.get("revenue_growth_min", 20))
+        profit = float(p.get("profit_growth_min", 25))
+        roe = float(p.get("roe_min", 15))
+        return (
+            FilterCondition("or_yoy", "gt", rev),
+            FilterCondition("netprofit_yoy", "gt", profit),
+            FilterCondition("roe", "gt", roe),
+        )
+
     def build_attribution(self, row: dict, total_candidates: int, context) -> FilterAttribution:
         p = context.get("params", {})
         rev, profit, roe = (

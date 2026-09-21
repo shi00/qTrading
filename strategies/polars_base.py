@@ -8,7 +8,12 @@ import polars as pl
 from core.errors import StrategyParamError
 from core.i18n import Message
 from data.persistence.quality_gate import QualityGateError, QualityTier, require_quality
-from strategies.attribution import ATTRIBUTION_COLUMN, attribution_to_json
+from strategies.attribution import (
+    ATTRIBUTION_COLUMN,
+    FilterCondition,
+    attribution_to_json,
+    condition_to_expr,
+)
 from strategies.ai_mixin import AIStrategyMixin
 from strategies.base_strategy import BaseStrategy
 from strategies.utils import StrategyContext
@@ -141,8 +146,14 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
             def _convert_and_filter(df_in, ctx):
                 lf = pl.from_pandas(df_in).lazy()
                 lf = self._apply_exclude_st(lf, ctx)
+                base_lf = lf
                 result_lf = self._filter_logic(lf, ctx)
-                return result_lf.collect().to_pandas()
+                result_df = result_lf.collect().to_pandas()
+                # SC-07: 空集归因——参数条件把候选池砍到 0 时，逐条件回溯找出
+                # 元凶并写入 warnings（用户据此知道该调参数而非市场无股）。
+                if result_df.empty:
+                    self._diagnose_empty(base_lf, result_lf, ctx)
+                return result_df
 
             candidates_df = await ThreadPoolManager().run_async(
                 TaskType.CPU,
@@ -208,6 +219,56 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
         :return: Filtered/Sorted LazyFrame
         """
         pass
+
+    def declared_conditions(self, context: StrategyContext) -> tuple[FilterCondition, ...]:
+        """SC-07: 声明全部筛选条件（供空集归因逐条件回溯）。
+
+        默认空元组：未覆写的策略不启用空集诊断（不破坏既有空集行为）。
+        ``_filter_logic`` 实际执行的硬条件（drop_nulls 等）无法用
+        FilterCondition 表达，需在子类覆写时按需包含可诊断的参数条件。
+        """
+        return ()
+
+    def _diagnose_empty_batch(
+        self, base_lf: pl.LazyFrame, result_lf: pl.LazyFrame, context: StrategyContext
+    ) -> list[Message]:
+        """SC-07: 空集时逐条件回溯，找出把候选池砍到 0 的条件（原检视报告建议②）。
+
+        复用 ``declared_conditions`` 声明的 FilterCondition（含 column/阈值），
+        在基础 lf 上逐条施加 filter 统计通过数；通过数为 0 的条件即为空集元凶。
+        R19 配套：仅当 attribution_enabled 且声明了条件时才参与诊断，避免误报。
+        """
+        messages: list[Message] = []
+        if not self.attribution_enabled:
+            return messages
+        total = base_lf.select(pl.len()).collect().item()
+        for cond in self.declared_conditions(context):
+            try:
+                n_pass = base_lf.filter(condition_to_expr(cond)).select(pl.len()).collect().item()
+            except Exception:
+                # 条件字段缺失（如测试数据降级）不应中断诊断
+                n_pass = total
+            if n_pass == 0:
+                threshold_text = (
+                    f"{cond.threshold[0]}~{cond.threshold[1]}"
+                    if isinstance(cond.threshold, tuple)
+                    else str(cond.threshold)
+                )
+                messages.append(
+                    Message(
+                        "strategy_condition_excludes_all",
+                        {"column": cond.column, "threshold": threshold_text, "total": total},
+                    )
+                )
+                break  # 只报告第一个砍到 0 的条件，避免刷屏
+        return messages
+
+    def _diagnose_empty(self, base_lf: pl.LazyFrame, result_lf: pl.LazyFrame, context: StrategyContext) -> None:
+        """SC-07 入口：在线程池内调用（R16），将空集归因消息写入 context warnings。"""
+        msgs = self._diagnose_empty_batch(base_lf, result_lf, context)
+        if msgs:
+            warnings = context.setdefault("warnings", [])
+            warnings.extend(msgs)
 
 
 def _build_attributions(strategy, df: pd.DataFrame, total: int, context: StrategyContext) -> pd.DataFrame:
