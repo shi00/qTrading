@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
+from core.i18n import Message
+
 from data.persistence.quality_gate import QualityTier
 from strategies.ai_mixin import AIStrategyMixin
 from strategies.all_strategies import StrategyManager
@@ -407,6 +409,122 @@ class TestAIIntegration(unittest.TestCase):
         self.assertIn("N/A", ctx)
 
 
+class TestFundamentalCoverageGate:
+    """DS-04: 基本面策略「数据缺失」覆盖率守卫（行数守卫因 LEFT JOIN 恒非空而失效）。
+
+    构造「stock_basic 基表有数据、财报关键列全 NULL」场景，断言：
+    - 覆盖率 < FUNDAMENTAL_MIN_COVERAGE → 空返回 + strategy_fundamental_data_missing 警告
+      + _empty_reason=fundamental_data_missing（供 VM 抑制「无匹配」空态提示）；
+    - 覆盖率足够 → 正常执行，不误拦。
+    """
+
+    @staticmethod
+    def _fundamental_df(rows: int, *, null_key_cols: bool = False) -> pd.DataFrame:
+        """构造 fundamental_screening_data：rows 行，可选财报关键列全 NULL。"""
+        data: dict = {"ts_code": [f"{i:06d}.SZ" for i in range(rows)]}
+        if null_key_cols:
+            data.update(
+                {c: [None] * rows for c in ("roe", "or_yoy", "netprofit_yoy", "debt_to_assets")},
+            )
+        else:
+            data.update(
+                {
+                    "pe_ttm": [10.0] * rows,
+                    "pb": [1.0] * rows,
+                    "dv_ttm": [5.0] * rows,
+                    "roe": [16.0] * rows,
+                    "or_yoy": [25.0] * rows,
+                    "netprofit_yoy": [30.0] * rows,
+                    "debt_to_assets": [40.0] * rows,
+                },
+            )
+        return pd.DataFrame(data)
+
+    @pytest.mark.asyncio
+    async def test_low_coverage_blocks_with_warning(self, strategies_ctx):
+        """财报关键列全 NULL（LEFT JOIN 行数守卫失效场景）→ 拦截 + 数据缺失警告。"""
+        ctx = strategies_ctx.context.copy()
+        ctx["fundamental_screening_data"] = self._fundamental_df(100, null_key_cols=True)
+        s = ValueStrategy()
+        res = await s.filter(ctx)
+        assert res.empty
+        assert ctx["_empty_reason"] == "fundamental_data_missing"
+        keys = [m.key for m in ctx["warnings"]]
+        assert keys == ["strategy_fundamental_data_missing"]
+        assert ctx["warnings"][0].params["coverage"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_missing_key_columns_blocks(self, strategies_ctx):
+        """数据框缺全部关键列（旧列集合/异常形状）→ 覆盖率按 0 处理 → 拦截。"""
+        ctx = strategies_ctx.context.copy()
+        ctx["fundamental_screening_data"] = pd.DataFrame(
+            {"ts_code": [f"{i:06d}.SZ" for i in range(50)], "pe_ttm": [1.0] * 50},
+        )
+        s = ValueStrategy()
+        res = await s.filter(ctx)
+        assert res.empty
+        assert ctx["_empty_reason"] == "fundamental_data_missing"
+
+    @pytest.mark.asyncio
+    async def test_empty_df_blocked(self, strategies_ctx):
+        """真·空表（degraded 路径）→ 拦截 + 数据缺失原因。"""
+        ctx = strategies_ctx.context.copy()
+        ctx["fundamental_screening_data"] = pd.DataFrame()
+        s = ValueStrategy()
+        res = await s.filter(ctx)
+        assert res.empty
+        assert ctx["_empty_reason"] == "fundamental_data_missing"
+
+    @pytest.mark.asyncio
+    async def test_sufficient_coverage_allows_execution(self, strategies_ctx):
+        """覆盖率足够（2/3 行有关键列）→ 正常执行（不误拦），空因保持默认。"""
+        ctx = strategies_ctx.context.copy()
+        fd = self._fundamental_df(3)
+        for c in ("roe", "or_yoy", "netprofit_yoy", "debt_to_assets"):
+            fd.loc[fd.index[0], c] = None
+        ctx["fundamental_screening_data"] = fd
+        s = ValueStrategy()
+        res = await s.filter(ctx)
+        assert not res.empty
+        assert "000001.SZ" in res["ts_code"].values
+        assert ctx["_empty_reason"] == "no_match"
+        assert all(m.key != "strategy_fundamental_data_missing" for m in ctx["warnings"])
+
+    @pytest.mark.asyncio
+    async def test_boundary_coverage_at_threshold_allows(self, strategies_ctx):
+        """覆盖率恰好等于阈值（0.3）→ 放行（>= 语义）。"""
+        ctx = strategies_ctx.context.copy()
+        fd = pd.DataFrame(
+            {
+                "ts_code": [f"{i:06d}.SZ" for i in range(100)],
+                "pe_ttm": [10.0] * 100,
+                "pb": [1.0] * 100,
+                "dv_ttm": [5.0] * 100,
+                "roe": [16.0] * 30 + [None] * 70,
+                "or_yoy": [25.0] * 30 + [None] * 70,
+                "netprofit_yoy": [30.0] * 30 + [None] * 70,
+                "debt_to_assets": [40.0] * 30 + [None] * 70,
+            },
+        )
+        ctx["fundamental_screening_data"] = fd
+        s = DividendStrategy()
+        res = await s.filter(ctx)
+        assert not res.empty
+        assert ctx["_empty_reason"] == "no_match"
+
+    @pytest.mark.asyncio
+    async def test_warnings_channel_reset_on_early_exit(self, strategies_ctx):
+        """守卫早退显式赋新 list：不残留同 context 前序策略警告（对抗检视 A1）。"""
+        ctx = strategies_ctx.context.copy()
+        ctx["warnings"] = [Message("strategy_param_auto_adjusted", {"min": 1, "adjusted_max": 2})]
+        ctx["fundamental_screening_data"] = self._fundamental_df(100, null_key_cols=True)
+        s = GrowthStrategy()
+        res = await s.filter(ctx)
+        assert res.empty
+        keys = [m.key for m in ctx["warnings"]]
+        assert keys == ["strategy_fundamental_data_missing"], f"应只含本策略警告, 实际 {keys}"
+
+
 async def test_phase2_bypassed_when_ai_not_configured():
     s = ValueStrategy()
     candidates = pd.DataFrame(
@@ -734,7 +852,18 @@ async def test_fundamental_coverage_unavailable():
 
 async def test_fundamental_coverage_available():
     s = _make_strategy(requires_fundamental_coverage=True)
-    data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+    # DS-04: 覆盖率守卫要求财报关键列存在且覆盖达标。原数据仅 ts_code/close 列
+    # （无关键列 ⇒ 覆盖率 0 拦截），补关键列以表达「财务数据可用」语义。
+    data = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "close": [10.0],
+            "roe": [16.0],
+            "or_yoy": [25.0],
+            "netprofit_yoy": [30.0],
+            "debt_to_assets": [40.0],
+        },
+    )
     dp = _make_dp()
     context = {"fundamental_screening_data": data, "data_processor": dp, "params": {}}
     with patch.object(

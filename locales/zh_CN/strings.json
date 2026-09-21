@@ -219,6 +219,7 @@
     "strategy_volume_breakout_desc": "标准：当日涨幅 2-7% | 换手率 > 3% (放量活跃)",
     "strategy_volume_breakout_desc_dynamic": "标准：当日涨幅 {pct_chg_min}-{pct_chg_max}% | 换手率 > {turnover_min}% (放量活跃)",
     "strategy_param_auto_adjusted": "涨幅区间参数冲突：下限 {min} ≥ 上限，已自动将上限调整为 {adjusted_max}",
+    "strategy_fundamental_data_missing": "财务数据缺失或覆盖率不足（{coverage}），无法执行基本面策略。请先同步财务数据后重试。",
     "screener_ai_failed_banner": "本次选股中 {count} 只股票的 AI 分析未能完成，结果仅反映数学筛选",
     "strategy_ai_candidate_truncated": "候选股票 {total} 只超出 AI 分析上限 {analyzed} 只，仅对前 {analyzed} 只进行分析",
     "strategy_excluded_st": "已排除 {count} 只风险警示股",
