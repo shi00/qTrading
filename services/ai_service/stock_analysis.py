@@ -323,13 +323,32 @@ class StockAnalysisService:
             labels.append("ai_label_news")
             _label_section["ai_label_news"] = "recent_news"
         if financials_content and "Data not available" not in financials_content:
-            sections.append(("financials", 1, True, f"<financials>\n{financials_content}\n</financials>", None, 0))
+            # SEC-001: financials 含股东名/业绩预告类型等上市公司公告第三方自由文本，中和后入 Prompt
+            # （AI-04：`<market_data>` 容器声明"系统生成、高可信"，第三方文本必须中性化才符实）
+            sections.append(
+                (
+                    "financials",
+                    1,
+                    True,
+                    f"<financials>\n{neutralize_external_text(financials_content)}\n</financials>",
+                    None,
+                    0,
+                )
+            )
             for lbl in financial_labels or []:
                 labels.append(lbl)
                 _label_section[lbl] = "financials"
         if capital_flow_content and "Data not available" not in capital_flow_content:
+            # SEC-001: capital_flow 含龙虎榜上榜原因等公告第三方自由文本，中和后入 Prompt（AI-04）
             sections.append(
-                ("capital_flow", 2, True, f"<capital_flow>\n{capital_flow_content}\n</capital_flow>", None, 0)
+                (
+                    "capital_flow",
+                    2,
+                    True,
+                    f"<capital_flow>\n{neutralize_external_text(capital_flow_content)}\n</capital_flow>",
+                    None,
+                    0,
+                )
             )
             for lbl in capital_labels or []:
                 labels.append(lbl)
