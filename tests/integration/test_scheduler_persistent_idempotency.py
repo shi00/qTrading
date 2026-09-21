@@ -68,8 +68,12 @@ class TestSchedulerPersistentIdempotency:
 
         sched_mod.SchedulerService._reset_singleton()
         service = sched_mod.SchedulerService()
-        service._mark_daily_update_done("20260429")
-        service._mark_nightly_prediction_done("20260429")
+        # REVIEW-06 TO-05: config-only 标记方法（_mark_*_done）已随 C-P1-6 迁移移除（DB 为真相源），
+        # 此处直接用保留的 _persist_run_date 表达 config 持久化语义。
+        service._last_update_date = "20260429"
+        service._persist_run_date(_CFG_LAST_DAILY_UPDATE, "20260429")
+        service._last_pred_date = "20260429"
+        service._persist_run_date(_CFG_LAST_NIGHTLY_PREDICTION, "20260429")
 
         cfg_mod.ConfigHandler._clear_cache()
         config = cfg_mod.ConfigHandler.load_config()

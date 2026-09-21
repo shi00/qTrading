@@ -55,24 +55,6 @@ class TestSchedulerServiceInit:
         assert svc._last_update_date == "20240614"
 
 
-class TestSchedulerServiceMarkDone:
-    @patch("utils.scheduler_service.ConfigHandler")
-    def test_mark_daily_update_done(self, mock_ch):
-        mock_ch.get_setting.return_value = None
-        mock_ch.save_config = MagicMock()
-        svc = SchedulerService()
-        svc._mark_daily_update_done("20240615")
-        assert svc._last_update_date == "20240615"
-
-    @patch("utils.scheduler_service.ConfigHandler")
-    def test_mark_nightly_prediction_done(self, mock_ch):
-        mock_ch.get_setting.return_value = None
-        mock_ch.save_config = MagicMock()
-        svc = SchedulerService()
-        svc._mark_nightly_prediction_done("20240615")
-        assert svc._last_pred_date == "20240615"
-
-
 class TestSchedulerServicePersistRunDate:
     @patch("utils.scheduler_service.ConfigHandler")
     def test_persist(self, mock_ch):
@@ -80,6 +62,85 @@ class TestSchedulerServicePersistRunDate:
         mock_ch.save_config = MagicMock()
         SchedulerService._persist_run_date("test_key", "20240615")
         mock_ch.save_config.assert_called_once()
+
+
+class TestSchedulerServicePersistRunDateDb:
+    """REVIEW-06 TO-02/TO-04: 幂等键 DB 写入——单调写（set_app_state_max）+ 引擎状态守卫（engine_provider）。"""
+
+    @pytest.mark.asyncio
+    async def test_engine_normal_uses_set_app_state_max(self):
+        """TO-02: 引擎可用时走 set_app_state_max 单调写（而非 set_app_state 无条件覆盖）。"""
+        svc = _make_svc()
+        mock_engine = MagicMock()
+        svc._persist_run_date = MagicMock()
+        with (
+            patch("data.persistence.engine_provider.get_engine", return_value=mock_engine),
+            patch("data.persistence.engine_provider.is_disposed", return_value=False),
+            patch("data.persistence.app_state_service.set_app_state_max", new_callable=AsyncMock) as mock_max,
+            patch("data.persistence.app_state_service.set_app_state", new_callable=AsyncMock),
+        ):
+            await svc._persist_run_date_db("sched_last_daily_update", "scheduler_last_daily_update", "20240620")
+            mock_max.assert_awaited_once_with(mock_engine, "sched_last_daily_update", "20240620")
+        # config 缓存始终写
+        svc._persist_run_date.assert_called_once_with("scheduler_last_daily_update", "20240620")
+
+    @pytest.mark.asyncio
+    async def test_monotonic_write_sequence_keeps_max(self):
+        """TO-02/R22: 乱序写入（先 20 后 19）——DB 层 GREATEST 由 set_app_state_max 保证，内存层 max 不倒退。"""
+        svc = _make_svc()
+        svc._last_update_date = None
+        svc._persist_run_date_db = AsyncMock()
+        await svc._mark_daily_update_done_db("20240620")
+        await svc._mark_daily_update_done_db("20240619")
+        assert svc._last_update_date == "20240620"
+        assert svc._persist_run_date_db.await_count == 2
+        # 传给 DB 层的均为各自当日值；内存 max 防倒退
+        assert svc._persist_run_date_db.await_args.args == (
+            "sched_last_daily_update",
+            "scheduler_last_daily_update",
+            "20240619",
+        )
+
+    @pytest.mark.asyncio
+    async def test_nightly_prediction_monotonic(self):
+        """TO-02: nightly 预测幂等键内存侧同样单调。"""
+        svc = _make_svc()
+        svc._last_pred_date = None
+        svc._persist_run_date_db = AsyncMock()
+        await svc._mark_nightly_prediction_done_db("20240620")
+        await svc._mark_nightly_prediction_done_db("20240619")
+        assert svc._last_pred_date == "20240620"
+
+    @pytest.mark.asyncio
+    async def test_engine_none_skips_db_keeps_config(self):
+        """TO-04: 引擎未就绪（None）→ 跳过 DB 写、仅写配置缓存（沉默降级，与 _load_db_state 一致）。"""
+        svc = _make_svc()
+        svc._persist_run_date = MagicMock()
+        with (
+            patch("data.persistence.engine_provider.get_engine", return_value=None),
+            patch("data.persistence.app_state_service.set_app_state_max", new_callable=AsyncMock) as mock_max,
+        ):
+            await svc._persist_run_date_db("sched_last_daily_update", "scheduler_last_daily_update", "20240620")
+            mock_max.assert_not_called()
+        svc._persist_run_date.assert_called_once_with("scheduler_last_daily_update", "20240620")
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_warns_and_skips_db(self):
+        """TO-04: 引擎已释放（disposed）→ warning 告警 + 跳过 DB 写（避免 EngineDisposedError 逃逸），仅写配置。"""
+        svc = _make_svc()
+        mock_engine = MagicMock()
+        svc._persist_run_date = MagicMock()
+        with (
+            patch("data.persistence.engine_provider.get_engine", return_value=mock_engine),
+            patch("data.persistence.engine_provider.is_disposed", return_value=True),
+            patch("data.persistence.app_state_service.set_app_state_max", new_callable=AsyncMock) as mock_max,
+            patch("utils.scheduler_service.logger.warning") as mock_warn,
+        ):
+            await svc._persist_run_date_db("sched_last_daily_update", "scheduler_last_daily_update", "20240620")
+            mock_max.assert_not_called()
+            warning_calls = [c for c in mock_warn.call_args_list]
+            assert any("引擎已释放" in str(c.args[0]) for c in warning_calls)
+        svc._persist_run_date.assert_called_once_with("scheduler_last_daily_update", "20240620")
 
 
 class TestSchedulerServiceStop:
@@ -724,6 +785,70 @@ class TestScheduleJobsInvalidTime:
         svc = SchedulerService()
         svc._schedule_jobs()
         assert svc.scheduler.get_job("review_backfill") is not None  # noqa: weak-assertion APScheduler job 注册存在性，trigger 配置由专项测试覆盖
+
+
+class TestSchedulerJobOrdering:
+    """REVIEW-06 TO-03: 依赖 job（回填/概念/预测）晚于日更的顺序校验。"""
+
+    def _run_schedule(self, auto_time, ai_concept_time, nightly_time, logger_mock):
+        svc = _make_svc()
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.logger.warning", logger_mock),
+        ):
+            mock_ch.get_setting.return_value = None
+            mock_ch.get_auto_update_time.return_value = auto_time
+            mock_ch.get_ai_concept_schedule_time.return_value = ai_concept_time
+            mock_ch.get_nightly_prediction_time.return_value = nightly_time
+            svc._schedule_jobs()
+        return svc
+
+    def _order_warnings(self, logger_mock):
+        return [c for c in logger_mock.call_args_list if "早于日更" in str(c.args[0])]
+
+    def test_default_order_no_warning(self):
+        """默认配置 16:30/17:00/18:00/20:30 → 依赖 job 均晚于日更，无顺序告警。"""
+        logger_mock = MagicMock()
+        self._run_schedule("16:30", "18:00", "20:30", logger_mock)
+        assert self._order_warnings(logger_mock) == []
+
+    def test_daily_late_warns_all_dependent(self):
+        """auto_update_time=21:00（晚于全部依赖 job）→ 三个依赖 job 均告警（消费 T-1 数据）。"""
+        logger_mock = MagicMock()
+        self._run_schedule("21:00", "18:00", "20:30", logger_mock)
+        warns = self._order_warnings(logger_mock)
+        # 断言消息（含格式化参数）包含三个依赖 job 名，且恰好三条告警
+        joined = " ".join(str(w) for w in warns)
+        assert "review_backfill" in joined
+        assert "ai_concept_daily_refresh" in joined
+        assert "nightly_prediction" in joined
+        assert len(warns) == 3
+
+    def test_daily_after_backfill_only_warns_backfill(self):
+        """auto_update_time=17:30 → 仅 review_backfill（17:00）违反；概念/预测仍晚于日更。"""
+        logger_mock = MagicMock()
+        self._run_schedule("17:30", "18:00", "20:30", logger_mock)
+        warns = self._order_warnings(logger_mock)
+        joined = " ".join(str(w) for w in warns)
+        assert "review_backfill" in joined
+        assert "ai_concept_daily_refresh" not in joined
+
+    def test_equal_time_warns(self):
+        """依赖 job 与日更同刻 → 视为顺序未保证，告警。"""
+        logger_mock = MagicMock()
+        self._run_schedule("20:30", "20:30", "20:30", logger_mock)
+        assert len(self._order_warnings(logger_mock)) == 3
+
+    def test_validate_job_ordering_equality_boundary(self):
+        """直接调用校验方法：相等时间（不晚于）即违反。"""
+        logger_mock = MagicMock()
+        with patch("utils.scheduler_service.logger.warning", logger_mock):
+            SchedulerService._validate_job_ordering((16, 30), (16, 30), (16, 31), (15, 0))
+        warns = self._order_warnings(logger_mock)
+        joined = " ".join(str(w) for w in warns)
+        assert "review_backfill" in joined
+        assert "ai_concept_daily_refresh" not in joined
+        assert "nightly_prediction" in joined
 
 
 class TestSchedulerServiceStatus:

@@ -152,30 +152,37 @@ class SchedulerService:
         ConfigHandler.save_config({config_key: value or ""})
 
     async def _persist_run_date_db(self, db_key: str, config_key: str, value: str | None):
-        from data.cache.cache_manager import (
-            CacheManager,
-        )  # lazy-import: 避免 SchedulerService 模块加载即拉起 data 全栈；运行时经单例获取引擎
-        from data.persistence.app_state_service import set_app_state  # lazy-import: 同上（DB idempotency 状态写入）
+        from data.persistence.app_state_service import (
+            set_app_state_max,
+        )  # lazy-import: 同上（DB idempotency 状态写入；GREATEST 单调写，R22）
+        from data.persistence.engine_provider import (
+            get_engine,
+            is_disposed,
+        )  # lazy-import: 同上（R5 引擎状态守卫，review03-C11 中立模块）
 
-        engine = CacheManager._instance.engine if CacheManager._instance else None
-        if engine is not None:
-            await set_app_state(engine, db_key, value or "")
+        engine = get_engine()
+        if engine is None:
+            # DB 尚未就绪（正常启动窗口）：仅写配置缓存，静默（与 _load_db_state 一致）
+            pass
+        elif is_disposed(engine):
+            # REVIEW-06 TO-04: 引擎已释放仍写 DB 会抛 EngineDisposedError 并逃逸到日更逻辑。
+            # 明确告警并降级为仅写配置缓存，避免下次启动整日重跑浪费配额。
+            logger.warning("[Scheduler] 引擎已释放，幂等键 %s 未持久化到 DB（仅写入配置缓存）", db_key)
+        else:
+            # REVIEW-06 TO-02: 幂等键为高水位语义（"已成功同步到的最大日期"，零填充 YYYYMMDD
+            # 字典序与时间序一致），必须单调写（set_app_state_max，SQL GREATEST 保护），
+            # 防止补偿任务与日更任务并发时 last-writer-wins 把水位写回旧日期。
+            await set_app_state_max(engine, db_key, value or "")
         self._persist_run_date(config_key, value)
 
-    def _mark_daily_update_done(self, today_str: str):
-        self._last_update_date = today_str
-        self._persist_run_date(_CFG_LAST_DAILY_UPDATE, today_str)
-
     async def _mark_daily_update_done_db(self, today_str: str):
-        self._last_update_date = today_str
+        # REVIEW-06 TO-02: 内存侧同样单调（与 DB GREATEST 语义一致），防止并发下水位倒退。
+        self._last_update_date = max(self._last_update_date or "", today_str)
         await self._persist_run_date_db(_DB_KEY_DAILY_UPDATE, _CFG_LAST_DAILY_UPDATE, today_str)
 
-    def _mark_nightly_prediction_done(self, today_str: str):
-        self._last_pred_date = today_str
-        self._persist_run_date(_CFG_LAST_NIGHTLY_PREDICTION, today_str)
-
     async def _mark_nightly_prediction_done_db(self, today_str: str):
-        self._last_pred_date = today_str
+        # REVIEW-06 TO-02: 内存侧单调（同 _mark_daily_update_done_db）。
+        self._last_pred_date = max(self._last_pred_date or "", today_str)
         await self._persist_run_date_db(_DB_KEY_NIGHTLY_PREDICTION, _CFG_LAST_NIGHTLY_PREDICTION, today_str)
 
     def start(self):
@@ -466,6 +473,34 @@ class SchedulerService:
             replace_existing=True,
         )
         logger.info("[Scheduler] Scheduled Review Backfill at 17:00")
+
+        # REVIEW-06 TO-03: 后三者（回填/概念/预测）都消费日更产出的当日行情，必须晚于日更
+        # 执行，否则会用 T-1 数据出选股结果且用户无感。review_backfill 硬编码 17:00 而
+        # auto_update_time 用户可调，顺序不变量需显式校验（方案 B，低风险短期落地）。
+        self._validate_job_ordering((hour, minute), (17, 0), (dh, dm), (n_hour, n_minute))
+
+    @staticmethod
+    def _validate_job_ordering(daily_hm: tuple[int, int], backfill_hm, concept_hm, pred_hm: tuple[int, int]) -> None:
+        """REVIEW-06 TO-03: 校验依赖 job 是否晚于日更，违反时 warning（消费 T-1 数据）。
+
+        日更（daily_update）产出当日行情，review_backfill / ai_concept_daily_refresh /
+        nightly_prediction 均以其为先决条件。任一依赖 job 此刻不晚于日更即顺序违反
+        （相等意味着同日同时段执行，顺序未保证，同样按违反处理）。
+        """
+        for name, hm in (
+            ("review_backfill", backfill_hm),
+            ("ai_concept_daily_refresh", concept_hm),
+            ("nightly_prediction", pred_hm),
+        ):
+            if hm <= daily_hm:
+                logger.warning(
+                    "[Scheduler] %s (%02d:%02d) 早于日更 (%02d:%02d)，将消费 T-1 数据（请将日更时间调早或该任务调晚）",
+                    name,
+                    hm[0],
+                    hm[1],
+                    daily_hm[0],
+                    daily_hm[1],
+                )
 
     async def _infer_baseline_from_db(self) -> str | None:
         """REVIEW-06 TO-01: 以本地已落库的最新交易日（daily_quotes.MAX(trade_date)）作为补偿下界自举。
@@ -768,7 +803,8 @@ class SchedulerService:
                 cancel_event=cancel_event,
                 manual_trigger=False,
             )
-            self._last_ai_concept_date = today_str
+            # REVIEW-06 TO-02: 内存侧单调（同 daily/nightly 标记方法）
+            self._last_ai_concept_date = max(self._last_ai_concept_date or "", today_str)
             await self._persist_run_date_db(_DB_KEY_AI_CONCEPT_REFRESH, _CFG_LAST_AI_CONCEPT_REFRESH, today_str)
             return Message("sched_ai_concept_done")
 
