@@ -15,9 +15,9 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
-import time
 from typing import TYPE_CHECKING, Any
 
+from cachetools import TTLCache
 import pandas as pd
 
 from data.constants import MARKET_CLOSE_HOUR
@@ -33,6 +33,9 @@ if TYPE_CHECKING:
     from data.external.tushare_client import TushareClient
 
 logger = logging.getLogger(__name__)
+
+# 最近交易日缓存的固定 key（TTLCache 单条目）
+_LATEST_TRADE_DATE_CACHE_KEY = "latest_trade_date"
 
 
 class TradeDateUnavailableError(RuntimeError):
@@ -148,10 +151,8 @@ class TradeCalendarService:
         self._api = tushare_client
         self._offline = OfflineCalendar
 
-        self._mem_cache: dict = {}
-        self._cache_ttl: int = 300
-
-        self._latest_trade_date_cache: dict = {"ts": 0, "val": None}
+        # 最近交易日内存缓存（TTL 300s，惰性过期；单条目，key 固定）
+        self._latest_trade_date_cache: TTLCache = TTLCache(maxsize=1, ttl=300)
 
     def _to_date(self, d) -> datetime.date | None:
         """
@@ -744,24 +745,19 @@ class TradeCalendarService:
             >>> await service.get_latest_trade_date()
             date(2024, 3, 21)  # 今天的数据已完整
         """
-        now_ts = time.time()
-        if (
-            self._latest_trade_date_cache["val"] is not None
-            and now_ts - self._latest_trade_date_cache["ts"] < self._cache_ttl
-        ):
-            return self._latest_trade_date_cache["val"]
+        cached = self._latest_trade_date_cache.get(_LATEST_TRADE_DATE_CACHE_KEY)
+        if cached is not None:
+            return cached
 
         # Use loop-local Lock to avoid cross-loop reuse issues
         def _lock_factory():
             return asyncio.Lock()
 
         async with get_loop_local("trade_calendar_cache_lock", _lock_factory):
-            now_ts = time.time()
-            if (
-                self._latest_trade_date_cache["val"] is not None
-                and now_ts - self._latest_trade_date_cache["ts"] < self._cache_ttl
-            ):
-                return self._latest_trade_date_cache["val"]
+            # 锁内复检（double-checked）：持锁期间其他协程可能已写入
+            cached = self._latest_trade_date_cache.get(_LATEST_TRADE_DATE_CACHE_KEY)
+            if cached is not None:
+                return cached
 
             now = get_now()
             if now.hour < MARKET_CLOSE_HOUR:
@@ -775,7 +771,7 @@ class TradeCalendarService:
                 dates = await self.get_trade_dates(start_dt, end_dt)
                 if dates:
                     result = dates[-1]
-                    self._latest_trade_date_cache = {"ts": now_ts, "val": result}
+                    self._latest_trade_date_cache[_LATEST_TRADE_DATE_CACHE_KEY] = result
                     return result
             except asyncio.CancelledError:
                 raise
@@ -852,8 +848,7 @@ class TradeCalendarService:
 
     def clear_cache(self):
         """清除内存缓存。"""
-        self._mem_cache.clear()
-        self._latest_trade_date_cache = {"ts": 0, "val": None}
+        self._latest_trade_date_cache.clear()
         logger.debug("[TradeCalendarService] Memory cache cleared")
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)

@@ -13,6 +13,7 @@ import pandas as pd
 
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
+from data.domain_services.trade_calendar_service import _LATEST_TRADE_DATE_CACHE_KEY
 from data.external.tushare_client import TushareClient
 from utils.time_utils import get_now
 import pytest
@@ -209,10 +210,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_get_latest_trade_date_weekday_pre_market(self):
         fixed_dt = datetime.datetime(2023, 10, 25, 10, 0, 0)  # Wed pre-market
         with patch("data.domain_services.trade_calendar_service.get_now", return_value=fixed_dt):
-            self.processor.trade_calendar._latest_trade_date_cache = {
-                "ts": 0,
-                "val": None,
-            }
+            self.processor.trade_calendar._latest_trade_date_cache.clear()
 
             self.mock_cache.stock_dao.get_trade_cal = AsyncMock(
                 return_value=pd.DataFrame(
@@ -248,10 +246,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_get_latest_trade_date_weekday_post_market(self):
         fixed_dt = datetime.datetime(2023, 10, 25, 17, 0, 0)  # Wed post-market
         with patch("data.domain_services.trade_calendar_service.get_now", return_value=fixed_dt):
-            self.processor.trade_calendar._latest_trade_date_cache = {
-                "ts": 0,
-                "val": None,
-            }
+            self.processor.trade_calendar._latest_trade_date_cache.clear()
 
             self.mock_cache.stock_dao.get_trade_cal = AsyncMock(
                 return_value=pd.DataFrame(
@@ -288,10 +283,7 @@ class TestDataProcessor(unittest.TestCase):
         """Test weekend -> should skip to Friday"""
         fixed_dt = datetime.datetime(2023, 10, 28, 12, 0, 0)  # Sat
         with patch("data.domain_services.trade_calendar_service.get_now", return_value=fixed_dt):
-            self.processor.trade_calendar._latest_trade_date_cache = {
-                "ts": 0,
-                "val": None,
-            }
+            self.processor.trade_calendar._latest_trade_date_cache.clear()
 
             self.mock_cache.stock_dao.get_trade_cal = AsyncMock(
                 return_value=pd.DataFrame(
@@ -322,12 +314,8 @@ class TestDataProcessor(unittest.TestCase):
 
     async def async_test_get_latest_trade_date_ttl_cache(self):
         """Test that TTL cache returns cached value within 5 min"""
-        import time
-
-        self.processor.trade_calendar._latest_trade_date_cache = {
-            "ts": time.time(),  # just now
-            "val": datetime.date(2023, 1, 1),
-        }
+        self.processor.trade_calendar._latest_trade_date_cache.clear()
+        self.processor.trade_calendar._latest_trade_date_cache[_LATEST_TRADE_DATE_CACHE_KEY] = datetime.date(2023, 1, 1)
         result = await self.processor.trade_calendar.get_latest_trade_date()
         self.assertEqual(result, datetime.date(2023, 1, 1))
         # No cache mock calls should have been made (cache hit)

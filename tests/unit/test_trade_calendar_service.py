@@ -3,12 +3,15 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
 import datetime
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
+
+from cachetools import TTLCache
 import pandas as pd
 
-from data.domain_services.trade_calendar_service import TradeCalendarService
+from data.domain_services.trade_calendar_service import TradeCalendarService, _LATEST_TRADE_DATE_CACHE_KEY
 
 pytestmark = pytest.mark.unit
 
@@ -479,12 +482,34 @@ class TestGetLatestTradeDate:
     @pytest.mark.asyncio
     async def test_from_cache_ttl(self):
         svc = _make_service()
-        svc._latest_trade_date_cache = {
-            "ts": 9999999999,
-            "val": datetime.date(2024, 6, 14),
-        }
+        svc._latest_trade_date_cache[_LATEST_TRADE_DATE_CACHE_KEY] = datetime.date(2024, 6, 14)
         result = await svc.get_latest_trade_date()
         assert result == datetime.date(2024, 6, 14)
+
+    @pytest.mark.asyncio
+    async def test_cache_ttl_expires(self):
+        """TTL 过期后缓存条目失效，get_latest_trade_date 重新走数据源并回填（OSS-06 子项2）。"""
+        df = pd.DataFrame(
+            {
+                "cal_date": [datetime.date(2024, 6, 13), datetime.date(2024, 6, 14)],
+                "is_open": [1, 1],
+            }
+        )
+        svc = _make_service(cache_return=df)
+        # 注入小 ttl 实例（ttl=0.05s）；sleep 取 4 倍余量避免贴边 flaky
+        svc._latest_trade_date_cache = TTLCache(maxsize=1, ttl=0.05)
+        with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14, 16, 0)
+            first = await svc.get_latest_trade_date()
+            assert first == datetime.date(2024, 6, 14)
+            assert svc._latest_trade_date_cache.get(_LATEST_TRADE_DATE_CACHE_KEY) == datetime.date(2024, 6, 14)
+            await asyncio.sleep(0.2)
+            # 惰性过期：get 触发过期判定，条目失效
+            assert svc._latest_trade_date_cache.get(_LATEST_TRADE_DATE_CACHE_KEY) is None
+            # 过期后重新计算并回填
+            second = await svc.get_latest_trade_date()
+            assert second == datetime.date(2024, 6, 14)
+            assert svc._latest_trade_date_cache.get(_LATEST_TRADE_DATE_CACHE_KEY) == datetime.date(2024, 6, 14)
 
     @pytest.mark.asyncio
     async def test_from_db(self):
@@ -641,10 +666,10 @@ class TestGetTradeDatesBatch:
 class TestClearCache:
     def test_clear(self):
         svc = _make_service()
-        svc._mem_cache = {"key": "value"}
+        svc._latest_trade_date_cache[_LATEST_TRADE_DATE_CACHE_KEY] = datetime.date(2024, 6, 14)
         svc.clear_cache()
-        assert svc._mem_cache == {}
-        assert svc._latest_trade_date_cache["val"] is None
+        assert len(svc._latest_trade_date_cache) == 0
+        assert svc._latest_trade_date_cache.get(_LATEST_TRADE_DATE_CACHE_KEY) is None
 
 
 class TestGetEffectiveTradeDate:

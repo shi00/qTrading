@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 
-from data.domain_services.trade_calendar_service import TradeCalendarService
+from data.domain_services.trade_calendar_service import TradeCalendarService, _LATEST_TRADE_DATE_CACHE_KEY
 from tests.integration.test_infra_base import TestDatabaseBase
 import pytest
 
@@ -256,16 +256,12 @@ class TestTradeCalendarService(TestDatabaseBase):
 
     async def test_clear_cache(self):
         """Test clear_cache resets internal caches."""
-        self.service._latest_trade_date_cache = {
-            "ts": 1234567890,
-            "val": datetime.date(2024, 3, 21),
-        }
-        self.service._mem_cache = {"test_key": "test_value"}
+        self.service._latest_trade_date_cache[_LATEST_TRADE_DATE_CACHE_KEY] = datetime.date(2024, 3, 21)
 
         self.service.clear_cache()
 
-        self.assertEqual(self.service._latest_trade_date_cache, {"ts": 0, "val": None})
-        self.assertEqual(self.service._mem_cache, {})
+        self.assertEqual(len(self.service._latest_trade_date_cache), 0)
+        self.assertIsNone(self.service._latest_trade_date_cache.get(_LATEST_TRADE_DATE_CACHE_KEY))
 
 
 class TestTradeCalendarServiceEdgeCases(TestDatabaseBase):
@@ -652,7 +648,10 @@ class TestTradeCalendarServiceConcurrency(TestDatabaseBase):
             await self.service.get_latest_trade_date()
             await self.service.get_latest_trade_date()
 
-            self.assertEqual(self.service._latest_trade_date_cache["val"], datetime.date(2024, 3, 21))
+            self.assertEqual(
+                self.service._latest_trade_date_cache.get(_LATEST_TRADE_DATE_CACHE_KEY),
+                datetime.date(2024, 3, 21),
+            )
 
 
 class TestTradeCalendarServiceBatch(TestDatabaseBase):
