@@ -1147,18 +1147,23 @@ class TestTestConnectionBoundaryConditions:
 
 class TestReasoningModelFallbackList:
     def test_fallback_list_contains_current_models(self):
+        """AI-01 §3.1c: LLM_PROVIDERS fallback 已移除，不可判定一律保守 False。
+
+        旧语义（静态 tags 精确匹配）随静态 models 删除而废除；supports_reasoning
+        异常时不再回退标签表，统一视为不支持（§3.1c-review #2）。
+        """
         with patch("services.ai_service.LITELLM_AVAILABLE", True):
             with patch(
                 "services.ai_service.litellm.utils.supports_reasoning",
                 side_effect=Exception("test"),
             ):
-                assert _check_reasoning_support("deepseek-v4-pro") is True
-                assert _check_reasoning_support("o3-pro") is True
-                assert _check_reasoning_support("o4-mini") is True
-                assert _check_reasoning_support("claude-opus-4-7") is True
-                assert _check_reasoning_support("magistral-medium-latest") is True
-                assert _check_reasoning_support("qwen3.6-max-preview") is True
-                assert _check_reasoning_support("glm-5") is True
+                assert _check_reasoning_support("deepseek-v4-pro") is False
+                assert _check_reasoning_support("o3-pro") is False
+                assert _check_reasoning_support("o4-mini") is False
+                assert _check_reasoning_support("claude-opus-4-7") is False
+                assert _check_reasoning_support("magistral-medium-latest") is False
+                assert _check_reasoning_support("qwen3.6-max-preview") is False
+                assert _check_reasoning_support("glm-5") is False
 
     def test_fallback_list_excludes_non_reasoning(self):
         with patch("services.ai_service.LITELLM_AVAILABLE", True):
@@ -1232,15 +1237,19 @@ class TestReasoningModelExactMatch:
                 assert _check_reasoning_support("glm") is False
 
     def test_exact_match_is_case_insensitive(self):
-        """Exact match should be case-insensitive."""
+        """AI-01 §3.1c: fallback 已移除，异常时保守 False（大小写无关）。
+
+        旧语义（LLM_PROVIDERS tags 精确匹配、大小写不敏感）随静态 models 删除而废除；
+        新行为不可判定即不支持，与模型名写法无关。
+        """
         with patch("services.ai_service.LITELLM_AVAILABLE", True):
             with patch(
                 "services.ai_service.litellm.utils.supports_reasoning",
                 side_effect=Exception("test"),
             ):
-                assert _check_reasoning_support("DeepSeek-V4-Pro") is True
-                assert _check_reasoning_support("O3-PRO") is True
-                assert _check_reasoning_support("GLM-5") is True
+                assert _check_reasoning_support("DeepSeek-V4-Pro") is False
+                assert _check_reasoning_support("O3-PRO") is False
+                assert _check_reasoning_support("GLM-5") is False
 
     def test_o1_does_not_match_o1_mini(self):
         """ "o1" should NOT match any reasoning model (no o1-mini in providers, but
@@ -2153,14 +2162,15 @@ class TestAIServiceChatCompletionLitellmNonStream:
         with (
             patch("services.ai_service.acompletion", AsyncMock(return_value=mock_response)),
             patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+            patch("litellm.cost_per_token", return_value=(0.00001, 0.00002)),
         ):
             result = await svc._chat_completion_litellm(
                 messages=[{"role": "user", "content": "hello"}],
             )
             assert result["content"] == '{"score": 90}'
             assert result["usage"]["total_tokens"] == 30
-            # AI-03 完整版: usage 存在时计算 cost（deepseek-v4-flash: in 1.0 out 2.0 元/百万）
-            assert result["cost"] == pytest.approx(round((10 / 1_000_000) * 1.0 + (20 / 1_000_000) * 2.0, 4))
+            # AI-01 litellm 化: usage 存在时按 litellm.cost_per_token(美元) * 汇率换算成本（元）
+            assert result["cost"] == pytest.approx(round((0.00001 + 0.00002) * 7.2, 4))
 
     @pytest.mark.asyncio
     async def test_warns_on_large_prompt(self):

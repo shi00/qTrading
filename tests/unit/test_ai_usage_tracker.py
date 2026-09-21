@@ -169,3 +169,118 @@ def _extract_params(stmt):
         return stmt.compile().params.values()
     except Exception:
         return []
+
+
+class TestGetMonthUnpriced:
+    """AI-01: 不可计价调用计数读取（R21 诚实呈现，不把不可计量伪装为零成本）。"""
+
+    @pytest.mark.asyncio
+    async def test_returns_zero_zero_when_no_engine_injected(self):
+        tracker = AIUsageTracker(engine=None)
+        assert await tracker.get_month_unpriced() == (0, 0)
+
+    @pytest.mark.asyncio
+    async def test_returns_values_when_rows_exist(self):
+        mock_conn = MagicMock()
+        calls_result = MagicMock()
+        calls_result.fetchone.return_value = ("3",)
+        tokens_result = MagicMock()
+        tokens_result.fetchone.return_value = ("500",)
+        mock_conn.execute = AsyncMock(side_effect=[calls_result, tokens_result])
+        engine = _make_connect_engine(mock_conn)
+
+        tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
+        result = await tracker.get_month_unpriced()
+
+        assert result == (3, 500)
+        assert mock_conn.execute.await_count == 2  # calls + tokens 各一次查询
+
+    @pytest.mark.asyncio
+    async def test_returns_zero_zero_when_rows_missing(self):
+        mock_conn = MagicMock()
+        empty = MagicMock()
+        empty.fetchone.return_value = None
+        mock_conn.execute = AsyncMock(return_value=empty)
+        engine = _make_connect_engine(mock_conn)
+
+        tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
+        assert await tracker.get_month_unpriced() == (0, 0)
+
+    @pytest.mark.asyncio
+    async def test_returns_zero_zero_on_exception(self):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=RuntimeError("db down"))
+        engine = _make_connect_engine(mock_conn)
+
+        tracker = AIUsageTracker(engine=engine)
+        assert await tracker.get_month_unpriced() == (0, 0)
+
+    @pytest.mark.asyncio
+    async def test_uses_injected_clock_month(self):
+        mock_conn = MagicMock()
+        result = MagicMock()
+        result.fetchone.return_value = ("1",)
+        mock_conn.execute = AsyncMock(return_value=result)
+        engine = _make_connect_engine(mock_conn)
+
+        tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 10, 2))
+        assert await tracker.get_month_unpriced() == (1, 1)
+
+
+class TestAddUnpriced:
+    """AI-01: 不可计价调用原子累加（R22 单调；同事务两 key 一致写入）。"""
+
+    @pytest.mark.asyncio
+    async def test_noop_when_no_engine_injected(self):
+        tracker = AIUsageTracker(engine=None)
+        await tracker.add_unpriced(3, 500)
+
+    @pytest.mark.asyncio
+    async def test_ignores_non_positive(self):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock()
+        engine = _make_begin_engine(mock_conn)
+        tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
+
+        await tracker.add_unpriced(0, 0)
+        await tracker.add_unpriced(0, -1)
+
+        mock_conn.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_accumulates_deltas(self):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock()
+        engine = _make_begin_engine(mock_conn)
+        tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
+
+        await tracker.add_unpriced(3, 500)
+
+        # 两 key（calls + tokens）各一次 upsert，同事务写入
+        assert mock_conn.execute.await_count == 2
+        for call in mock_conn.execute.await_args_list:
+            assert hasattr(call.args[0], "compile")
+
+    @pytest.mark.asyncio
+    async def test_writes_uses_month_keys(self):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock()
+        engine = _make_begin_engine(mock_conn)
+        tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
+
+        await tracker.add_unpriced(3, 500)
+
+        params: list = []
+        for call in mock_conn.execute.await_args_list:
+            params.extend(_extract_params(call.args[0]))
+        assert any("ai_unpriced_calls:202609" in str(v) for v in params)
+        assert any("ai_unpriced_tokens:202609" in str(v) for v in params)
+
+    @pytest.mark.asyncio
+    async def test_handles_exception_gracefully(self):
+        mock_conn = MagicMock()
+        mock_conn.execute = AsyncMock(side_effect=RuntimeError("write failed"))
+        engine = _make_begin_engine(mock_conn)
+        tracker = AIUsageTracker(engine=engine)
+
+        await tracker.add_unpriced(3, 500)

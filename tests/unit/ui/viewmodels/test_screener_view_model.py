@@ -1002,6 +1002,17 @@ class TestBuildAiFailedBannerMessage:
     def test_none_input_no_message(self):
         assert _build_ai_failed_banner_message(None) is None
 
+    def test_guard_blocked_statuses_no_failed_banner(self):
+        """M2（review-pr1073）：护栏拒绝状态（unpriced/budget/policy）不得触发
+        "AI 分析失败"横幅——它们不是分析失败，是"AI 有效但被护栏保守拒绝"。
+
+        若误报为 failed 横幅，用户会把预算护栏/未确认误读为 AI 全挂。
+        """
+        large = pd.DataFrame({"ai_status": ["budget_unpriced_prompt"] * 10})
+        assert _build_ai_failed_banner_message(large) is None
+        assert _build_ai_failed_banner_message(pd.DataFrame({"ai_status": ["budget_exceeded"] * 10})) is None
+        assert _build_ai_failed_banner_message(pd.DataFrame({"ai_status": ["policy_not_acknowledged"] * 10})) is None
+
 
 class TestEgressAckBridge:
     """SEC-01 gap3：VM 侧运行时外发确认桥接（_request_egress_ack / resolve_ai_egress_ack）。

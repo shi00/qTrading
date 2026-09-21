@@ -165,6 +165,10 @@ class AIStrategyMixin:
     _HISTORY_CACHE_MAX_BYTES = 128 * 1024 * 1024  # 128MB
     _HISTORY_CACHE_TTL = 120
 
+    # AI-01: 预算护栏「不可计价调用」保守提示的进程级一次确认标记。
+    # 用户确认后置 True，本进程内后续批次/重试不再重复弹提示；重启应用后重置。
+    _ai_unpriced_acknowledged = False
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._context_builders: dict[str, ContextBuilder] = {}
@@ -479,6 +483,21 @@ class AIStrategyMixin:
                 ai_status="budget_exceeded",
             )
 
+        # --- Guard: 本次不可计价调用保守提示 (AI-01 / R21) ---
+        # 预算已设但本月存在不可计价调用（cost 为 None）时，即便未超限也应先向用户确认，
+        # 否则不可计量调用可绕过预算护栏。与 retry_single 共用 _confirm_unpriced，语义一致。
+        if await self._should_prompt_unpriced():
+            if not await self._confirm_unpriced(context):
+                # B1（review-pr1073）：拒绝原因写 context 标志，夜间 _prediction_logic 据此
+                # 返回专门消息（"因 unpriced 保守拒绝"），与"无候选"可区分，避免静默失败+每日重试刷日志。
+                context["_ai_unpriced_prompt"] = True
+                if on_progress:
+                    on_progress(0, 0, Message("ai_budget_unpriced_prompt"))
+                return candidates_df.assign(
+                    ai_score=None,
+                    ai_status="budget_unpriced_prompt",
+                )
+
         # --- Guard: Empty Input ---
         if candidates_df is None or candidates_df.empty:
             return pd.DataFrame()
@@ -775,7 +794,15 @@ class AIStrategyMixin:
         # 成本取自 res["cost"]（litellm_client 基于 estimate_cost 计算, 未知模型为 None）。
         # 循环结束后若确有消耗, 回写 context["_ai_usage_summary"] 供 UI 展示,
         # 并累计到 AIUsageTracker 按月持久化。
-        ai_usage_cluster = {"calls": 0, "tokens": 0, "cost_cny": 0.0}
+        ai_usage_cluster = {
+            "calls": 0,
+            "tokens": 0,
+            "cost_cny": 0.0,
+            "unpriced_calls": 0,
+            "unpriced_tokens": 0,
+            # Mi2（review-pr1073）：不可计价明细 model→calls map，供诊断"哪些模型无法计价"。
+            "unpriced_by_model": {},
+        }
         on_stream_start = context.get("on_stream_start") if stream_enabled else None
         on_card_start = context.get("on_card_start") if not stream_enabled else None
 
@@ -850,13 +877,7 @@ class AIStrategyMixin:
                     # AI-03(完整版): 累计本次消耗。仅统计成功分析（res 为 dict、
                     # 非失败且携带 usage），避免把失败调用计入用户可见的消耗量。
                     if isinstance(res, dict) and res.get("ai_status") != "failed":
-                        usage = res.get("usage")
-                        if usage and isinstance(usage, dict):
-                            ai_usage_cluster["calls"] += 1
-                            ai_usage_cluster["tokens"] += int(usage.get("total_tokens", 0) or 0)
-                            cost = res.get("cost")
-                            if isinstance(cost, (int, float)) and cost > 0:
-                                ai_usage_cluster["cost_cny"] += float(cost)
+                        self._accumulate_usage(ai_usage_cluster, res)
                     if on_result:
                         on_result(row)
                     return row
@@ -966,9 +987,15 @@ class AIStrategyMixin:
                 "calls": ai_usage_cluster["calls"],
                 "tokens": ai_usage_cluster["tokens"],
                 "cost_cny": round(ai_usage_cluster["cost_cny"], 4),
+                "unpriced_calls": ai_usage_cluster["unpriced_calls"],
+                "unpriced_tokens": ai_usage_cluster["unpriced_tokens"],
             }
             try:
-                await self._track_cost(ai_usage_cluster["cost_cny"])
+                await self._track_cost(
+                    ai_usage_cluster["cost_cny"],
+                    unpriced_calls=ai_usage_cluster["unpriced_calls"],
+                    unpriced_tokens=ai_usage_cluster["unpriced_tokens"],
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -1099,13 +1126,26 @@ class AIStrategyMixin:
                     on_card_error(name_str, I18n.get("ai_card_analysis_failed"))
                 return
             result_row = self._build_result_row(row_data, res)
-            # D4-M2: 重试成功同样计入月度成本（与 run_ai_analysis 收尾 _track_cost 同口径）。
-            # failed 路径不产生有效调用，不计费。
+            # D4-M2: 重试成功同样计入月度成本与不可计价量
+            # （与 run_ai_analysis 收尾 _track_cost 同口径）。failed 路径不产生有效调用，不计费。
             if isinstance(res, dict) and res.get("ai_status") != "failed":
-                cost = res.get("cost")
-                if isinstance(cost, (int, float)) and cost > 0:
+                cluster = {
+                    "calls": 0,
+                    "tokens": 0,
+                    "cost_cny": 0.0,
+                    "unpriced_calls": 0,
+                    "unpriced_tokens": 0,
+                    # Mi2（review-pr1073）：重试路径同样维护不可计价明细 map。
+                    "unpriced_by_model": {},
+                }
+                self._accumulate_usage(cluster, res)
+                if cluster["calls"] > 0 or cluster["unpriced_calls"] > 0:
                     try:
-                        await self._track_cost(float(cost))
+                        await self._track_cost(
+                            cluster["cost_cny"],
+                            unpriced_calls=cluster["unpriced_calls"],
+                            unpriced_tokens=cluster["unpriced_tokens"],
+                        )
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
@@ -1150,6 +1190,15 @@ class AIStrategyMixin:
         await self._ensure_cost_tracker_engine()
         if await self._ai_budget_exhausted():
             return "ai_budget_exceeded"
+        if await self._should_prompt_unpriced():
+            # 保守提示：预算已设且本月存在不可计价调用 → 先向用户确认（进程级一次）。
+            # 有确认能力（UI 注入 on_ai_unpriced_ack_request）→ 用户确认后放行并置进程级标记；
+            # 无法确认（夜间任务 / 无 UI）→ 保守拒绝，不静默放行不可计量调用（R21）。
+            if await self._confirm_unpriced(context):
+                return None
+            # B1（review-pr1073）：拒绝原因写 context 标志，夜间 _prediction_logic 据此可诊断。
+            context["_ai_unpriced_prompt"] = True
+            return "ai_budget_unpriced_prompt"
         return None
 
     async def _ensure_cost_tracker_engine(self) -> None:
@@ -1180,13 +1229,105 @@ class AIStrategyMixin:
         month_cost_cny = await AIUsageTracker().get_month_cost_cny()
         return month_cost_cny >= round(limit_cny * 100)
 
-    async def _track_cost(self, cost_cny: float) -> None:
-        """将本次耗用的成本（元）转分后计入 AIUsageTracker 本月累计。"""
+    async def _should_prompt_unpriced(self) -> bool:
+        """是否应弹出「本月存在不可计价调用」保守确认提示。
+
+        语义（用户拍板「保守 —— 提示确认」）：预算已设置（``ai_cost_limit_cny>0``）且
+        本月存在不可计价调用时，即便未超限也要先向用户确认（不可计价量可能绕过预算护栏）。
+        确认动作由 UI 层触发；确认标记 ``_ai_unpriced_acknowledged`` 为进程级一次
+        （重启后重置，每月至少校验/提示一次）。
+        """
+        if self._ai_unpriced_acknowledged:
+            return False
+        limit_cny = ConfigHandler.get_setting("ai_cost_limit_cny")
+        if not limit_cny or limit_cny <= 0:
+            return False
         from services.ai_service.usage_tracker import AIUsageTracker  # lazy-import
 
-        if cost_cny <= 0:
+        month_unpriced_calls, _ = await AIUsageTracker().get_month_unpriced()
+        return month_unpriced_calls > 0
+
+    async def _confirm_unpriced(self, context: dict) -> bool:
+        """向用户确认「继续发起不可计价调用」（进程级一次确认）。
+
+        经 context 注入的 ``on_ai_unpriced_ack_request`` 协程（由 UI ViewModel 提供，
+        与 SEC-01 的 ``on_ai_egress_ack_request`` 桥接同构）挂起等待用户决策：
+        - 确认 ⇒ UI 置 ``_ai_unpriced_acknowledged = True`` 后返回 True（本进程不再弹）；
+        - 拒绝 ⇒ 返回 False；
+        - 无确认能力（夜间任务 / 未注入回调）⇒ 返回 False（保守拒绝，不静默放行，R21）。
+        R2：asyncio.CancelledError 直接传播，不被 except Exception 吞没。
+        """
+        ack_request = context.get("on_ai_unpriced_ack_request")
+        if ack_request is None:
+            return False
+        try:
+            confirmed = await ack_request()
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception as e:
+            # log_classified 自动填充前两个 %s（error code + 脱敏异常），勿额外传参。
+            log_classified(
+                logger,
+                e,
+                "llm",
+                "[AIStrategyMixin] Unpriced ack request failed (%s: %s) — conservatively refusing to proceed",
+            )
+            return False
+        if confirmed:
+            self._ai_unpriced_acknowledged = True
+        return confirmed
+
+    @staticmethod
+    def _accumulate_usage(ai_usage_cluster: dict, res: dict) -> None:
+        """把一次成功 LLM 调用的消耗统一累加进 usage 聚簇（批量 + 重试共用）。
+
+        - ``usage`` 存在 → 无条件计数 calls / tokens；
+        - ``cost`` 为 int/float（含 0.0，即 ``cost is not None``）→ 计入 ``cost_cny``；
+          免费模型 cost==0.0 属已计价，走成本记账归零，不误计 unpriced（对齐 litellm 语义）；
+        - ``cost`` 为 None（不可计量，R21）→ 计入 ``unpriced_calls``/``unpriced_tokens``，
+          避免「不可计量」被呈现为「零成本」；同时经 ``res["model"]``（litellm_client 携带）
+          聚合 ``unpriced_by_model`` 明细（Mi2，供诊断"哪些模型无法计价"）。
+        """
+        usage = res.get("usage")
+        if not usage or not isinstance(usage, dict):
             return
-        await AIUsageTracker().add_cost_cny(round(cost_cny * 100))
+        ai_usage_cluster["calls"] += 1
+        ai_usage_cluster["tokens"] += int(usage.get("total_tokens", 0) or 0)
+        cost = res.get("cost")
+        if cost is not None and isinstance(cost, (int, float)):
+            ai_usage_cluster["cost_cny"] += float(cost)
+        else:
+            # SEC/R21: 不可计价（cost None / 非数值）必须计数，否则「不可计量」被呈现为「零成本」。
+            ai_usage_cluster["unpriced_calls"] += 1
+            ai_usage_cluster["unpriced_tokens"] += int(usage.get("total_tokens", 0) or 0)
+            # Mi2（review-pr1073）：model→calls 明细计数（litellm_client result 带 model 键）。
+            model = res.get("model")
+            if isinstance(model, str) and model:
+                by_model = ai_usage_cluster.get("unpriced_by_model")
+                if isinstance(by_model, dict):
+                    by_model[model] = by_model.get(model, 0) + 1
+
+    async def _track_cost(
+        self,
+        cost_cny: float | None,
+        unpriced_calls: int = 0,
+        unpriced_tokens: int = 0,
+    ) -> None:
+        """将本次耗用的成本（元）与不可计价量计入 AIUsageTracker 本月累计。
+
+        - ``cost_cny`` 非 None（含 0.0 免费）→ 转分后累计；None（不可计量）不累计成本；
+        - ``unpriced_calls > 0`` → 累计不可计价调用量与 tokens（R21 诚实兜底，
+          修正原「0 元不写库」导致的不可计价记账缺失）。
+        """
+        from services.ai_service.usage_tracker import AIUsageTracker  # lazy-import
+
+        tracker = AIUsageTracker()
+        # N1（review-pr1073）：cost_cny > 0 才写成本账——cost_cny==0.0（免费模型）跳过分
+        # 转为 0 的记账写入（账目无意义写零），等价于"归零记账"，与成本语义不冲突。
+        if cost_cny is not None and cost_cny > 0:
+            await tracker.add_cost_cny(round(cost_cny * 100))
+        if unpriced_calls > 0:
+            await tracker.add_unpriced(unpriced_calls, unpriced_tokens)
 
     @staticmethod
     async def _cancel_orphan_news_tasks(prefetched: PreFetchedContext) -> None:

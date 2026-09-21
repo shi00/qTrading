@@ -912,6 +912,7 @@ class TestDoSaveAISettingsSaveFailedPhase:
                 "ai_max_concurrent_analysis": 3,
                 "ai_news_max_concurrent": 1,
                 "ai_cost_limit_cny": None,
+                "ai_usd_to_cny_rate": 7.2,
                 "ai_local_only_mode": False,
             }
         )

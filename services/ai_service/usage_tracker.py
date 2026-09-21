@@ -32,11 +32,25 @@ logger = logging.getLogger(__name__)
 
 # app_state key 前缀；month key = f"{_AI_COST_KEY_PREFIX}:{YYYYMM}"。
 _AI_COST_KEY_PREFIX = "ai_cost"
+# 不可计价调用计数 key 前缀（AI-01）：模型不在 litellm 价格表时无法计价，
+# 计数其 calls/tokens 以避免 "不可计量" 被呈现为 "零成本"（R21）。
+_AI_UNPRICED_CALLS = "ai_unpriced_calls"
+_AI_UNPRICED_TOKENS = "ai_unpriced_tokens"
 
 
 def month_key(when: date) -> str:
     """生成某年月的成本累计 key（含年月，天然实现跨月轮换）。"""
     return f"{_AI_COST_KEY_PREFIX}:{when:%Y%m}"
+
+
+def month_unpriced_calls_key(when: date) -> str:
+    """生成某年月的不可计价调用次数 key。"""
+    return f"{_AI_UNPRICED_CALLS}:{when:%Y%m}"
+
+
+def month_unpriced_tokens_key(when: date) -> str:
+    """生成某年月的不可计价 token 数 key。"""
+    return f"{_AI_UNPRICED_TOKENS}:{when:%Y%m}"
 
 
 @register_singleton
@@ -145,3 +159,67 @@ class AIUsageTracker:
                 await conn.execute(stmt)
         except Exception as e:  # noqa: BLE001 -- 写入失败不阻断核心流程，仅告警
             logger.warning("[AIUsageTracker] Failed to accumulate cost on key='%s': %s", key, e)
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def get_month_unpriced(self, when: date | None = None) -> tuple[int, int]:
+        """读取某月不可计价调用次数与 token 数 (calls, tokens)。
+
+        AI-01：不可计价调用（模型不在 litellm 价格表）须计数，否则「不可计量」被
+        呈现为「零成本」（R21）。engine 未注入或无记录时返回 (0, 0)。
+        """
+        engine = self._resolve_engine()
+        if engine is None:
+            return (0, 0)
+        base = when or self._clock()
+        calls_key = month_unpriced_calls_key(base)
+        tokens_key = month_unpriced_tokens_key(base)
+        values: dict[str, int] = {}
+        try:
+            async with engine.connect() as conn:
+                for k in (calls_key, tokens_key):
+                    result = await conn.execute(sa.select(AppState.config_value).where(AppState.config_key == k))
+                    row = result.fetchone()
+                    values[k] = int(row[0]) if row is not None and row[0] is not None else 0
+        except Exception as e:  # noqa: BLE001 -- 读取降级为 0，不阻断流程
+            logger.debug("[AIUsageTracker] Failed to read unpriced keys '%s'/'%s': %s", calls_key, tokens_key, e)
+            return (0, 0)
+        return (values.get(calls_key, 0), values.get(tokens_key, 0))
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def add_unpriced(self, calls: int, tokens: int, when: date | None = None) -> None:
+        """原子累加某月不可计价调用次数与 token 数。
+
+        AI-01：与 ``add_cost_cny`` 同款 ``cast(BigInteger) + delta`` 原子累加，
+        calls/tokens 各一个 key，同事务写入避免部分成功不一致。不可计价量为月度
+        累计量，多批次/多策略并发必须累加而非覆盖。
+        engine 未注入或调用/token 均非正时 no-op（不持久化）。
+        """
+        engine = self._resolve_engine()
+        if engine is None:
+            return
+        if calls <= 0 and tokens <= 0:
+            return
+        base = when or self._clock()
+        updates = [
+            (month_unpriced_calls_key(base), calls),
+            (month_unpriced_tokens_key(base), tokens),
+        ]
+        try:
+            async with engine.begin() as conn:  # 单事务，两 key 一致性
+                for key, delta in updates:
+                    if delta <= 0:
+                        continue
+                    stmt = pg_insert(AppState).values(config_key=key, config_value=str(delta))
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=["config_key"],
+                        set_={
+                            "config_value": sa.cast(
+                                sa.cast(AppState.config_value, sa.BigInteger) + delta,
+                                sa.String,
+                            ),
+                            "updated_at": sa.func.now(),
+                        },
+                    )
+                    await conn.execute(stmt)
+        except Exception as e:  # noqa: BLE001 -- 写入失败不阻断核心流程，仅告警
+            logger.warning("[AIUsageTracker] Failed to accumulate unpriced on key: %s", e)

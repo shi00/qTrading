@@ -77,7 +77,7 @@ class FakeScreenerState:
     # D3-4: 策略执行期业务警告 (镜像 ScreenerState.warnings)
     warnings: tuple = ()
     # AI-03: 本次选股 LLM 调用消耗 (镜像 ScreenerState.ai_usage_summary)
-    ai_usage_summary: tuple[int, int, float] | None = None
+    ai_usage_summary: tuple[int, int, float, int, int] | None = None
     # UX-05: 复盘聚合统计 (镜像 ScreenerState.strategy_stats, 默认空)
     strategy_stats: tuple = ()
     # BIZ-04: AI 结论快照回放归因统计 (镜像 ScreenerState.ai_attribution, 默认空)
@@ -85,6 +85,8 @@ class FakeScreenerState:
     # SEC-01 gap3: 运行时 AI 外发确认对话框内容 (镜像 ScreenerState.pending_egress_ack_*)
     pending_egress_ack_preview: str = ""
     pending_egress_ack_provider: str = ""
+    # AI-01: 运行时「本月存在不可计价调用」确认框待决标记 (镜像 ScreenerState.pending_unpriced_ack)
+    pending_unpriced_ack: bool = False
 
 
 class FakeScreenerViewModel:

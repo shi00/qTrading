@@ -230,6 +230,47 @@ class TestNightlyPredictionLogicClosure:
         assert svc.marked_dates == []
 
     @pytest.mark.asyncio
+    async def test_prediction_logic_saved_zero_unpriced_returns_specific_message(self):
+        """B1（review-pr1073）：unpriced 保守拒绝须与"无候选"可区分。
+
+        夜间任务无确认能力 → guard 拒绝并写 ``context[\"_ai_unpriced_prompt\"]`` → 落库 0 条
+        应返回专门 i18n 消息（而非与"无候选"同款），供 UI/日志诊断；仍不标记完成允许重试。
+        """
+        svc = _FakeSvc()
+        mock_tm = MagicMock()
+        result_df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["budget_unpriced_prompt"]})
+
+        async def _runner_unpriced_blocked(context):
+            context["_ai_unpriced_prompt"] = True
+            return result_df
+
+        mock_rm = MagicMock()
+        mock_rm.save_results = AsyncMock(return_value=0)
+        job = build_nightly_prediction_job(_runner_unpriced_blocked)
+        with (
+            patch("services.scheduled_jobs.nightly_prediction.ConfigHandler") as mock_ch,
+            patch("services.scheduled_jobs.nightly_prediction.DataProcessor") as mock_dp,
+            patch("services.scheduled_jobs.nightly_prediction.get_now") as mock_now,
+            patch("services.scheduled_jobs.nightly_prediction.TaskManager", return_value=mock_tm),
+            patch("services.scheduled_jobs.nightly_prediction.ReviewManager", return_value=mock_rm),
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            mock_dp_instance = MagicMock()
+            mock_dp_instance.trade_calendar = MagicMock()
+            mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+            mock_dp_instance.init_data = AsyncMock()
+            mock_dp_instance.prepare_market_data = AsyncMock()
+            mock_dp_instance.get_strategy_data = AsyncMock(return_value={"trade_date": "20240614"})
+            mock_dp.return_value = mock_dp_instance
+            mock_now.return_value = datetime(2024, 6, 14, 20, 30)
+            await job(svc)
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+            msg = await factory("test_task")
+
+        assert msg == I18n.get("sched_pred_done_unpriced_blocked")
+        assert svc.marked_dates == []  # 不标记完成，允许重试
+
+    @pytest.mark.asyncio
     async def test_scheduler_stores_i18n_key(self):
         """R.3.1: nightly_prediction 应存储 "strategy_ai_nightly_name" (i18n key) 而非 identifier。"""
         svc = _FakeSvc()

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import ui.viewmodels.llm_config_panel_view_model as llm_config_vm
 from ui.viewmodels import Message
 from ui.viewmodels.llm_config_panel_view_model import (
     LLMConfigPanelViewModel,
@@ -95,20 +96,22 @@ def vm(mock_test_connection, mock_config_handler) -> LLMConfigPanelViewModel:
 
 class TestLLMConfigPanelViewModelInit:
     def test_initial_state_values(self, mock_test_connection, mock_config_handler):
-        """默认配置加载后 state 字段正确（deepseek + 非已知 model 触发 custom 分支）。"""
+        """默认配置加载后 state 字段正确（deepseek：model 保留、custom 分支不触发）。
+
+        §3.1c：custom_model/show_custom_model_input 仅 provider==custom 时承载，
+        不再以「模型是否在新目录中」判定（模型统一经 <ModelPicker> 选择）。
+        """
         vm = _make_vm(mock_test_connection)
         assert vm.state.provider == "deepseek"
         assert vm.state.model == "deepseek-chat"
-        assert vm.state.custom_model == "deepseek-chat"  # 非已知 model → custom_model
+        assert vm.state.custom_model == ""  # 非 custom provider → 不进入 custom 输入
         assert vm.state.base_url == "https://api.deepseek.com"
         assert vm.state.api_key == "sk-test"
         assert vm.state.is_azure is False
         assert vm.state.base_url_read_only is True
-        assert vm.state.show_custom_model_input is True
-        assert vm.state.show_refresh_button is True
+        assert vm.state.show_custom_model_input is False
         assert vm.state.is_verifying is False
         assert vm.state.is_saving is False
-        assert vm.state.is_refreshing is False
         assert vm.state.api_key_modified is False
         assert vm.state.status_message is None
         assert vm.state.status_type == "info"
@@ -229,7 +232,6 @@ class TestLLMConfigPanelViewModelReload:
         assert vm.state.azure_deployment_name == "my-deployment"
         assert vm.state.azure_api_version == "2024-10-21"
         assert vm.state.base_url == ""
-        assert vm.state.show_refresh_button is False
 
     def test_reload_config_custom_provider(self, mock_test_connection, mock_config_handler):
         mock_config_handler.get_llm_config.return_value = {
@@ -389,16 +391,15 @@ class TestLLMConfigPanelViewModelUpdateAIExternalAcknowledged:
 
 class TestLLMConfigPanelViewModelUpdateProvider:
     @pytest.mark.asyncio
-    async def test_update_provider_to_deepseek_loads_recommended_model(
+    async def test_update_provider_to_deepseek_resets_model(
         self, mock_test_connection, mock_config_handler, mock_thread_pool
     ):
         vm = _make_vm(mock_test_connection)
         await vm.update_provider("deepseek")
         assert vm.state.provider == "deepseek"
-        assert vm.state.model == "deepseek-v4-flash"  # tag_recommend
+        assert vm.state.model == ""  # §3.1c: 切换供应商不自动推荐模型
         assert vm.state.is_azure is False
         assert vm.state.show_custom_model_input is False
-        assert vm.state.show_refresh_button is True
         assert vm.state.base_url == "https://api.deepseek.com"
 
     @pytest.mark.asyncio
@@ -410,7 +411,6 @@ class TestLLMConfigPanelViewModelUpdateProvider:
         assert vm.state.provider == "azure"
         assert vm.state.is_azure is True
         assert vm.state.base_url == ""
-        assert vm.state.show_refresh_button is False
         assert vm.state.show_custom_model_input is False
         assert vm.state.model == ""
 
@@ -435,7 +435,6 @@ class TestLLMConfigPanelViewModelUpdateProvider:
         assert vm.state.show_custom_model_input is True
         assert vm.state.base_url_read_only is False
         assert vm.state.base_url == "https://custom.base/v1"
-        assert vm.state.show_refresh_button is True
         assert vm.state.custom_model_options == ("m1", "m2")
         assert vm.state.model == ""
 
@@ -480,7 +479,6 @@ class TestLLMConfigPanelViewModelUpdateProvider:
         await vm.update_provider("unknown-provider")
         assert vm.state.provider == "unknown-provider"
         assert vm.state.model == ""
-        assert vm.state.show_refresh_button is False  # 不在 MODELS_API_COMPATIBLE
 
 
 # --- verify_connection (async) ---
@@ -734,160 +732,20 @@ class TestLLMConfigPanelViewModelSaveConfig:
 
     @pytest.mark.asyncio
     async def test_save_config_skips_custom_models_for_known_model(
-        self, mock_test_connection, mock_config_handler, mock_thread_pool
+        self, mock_test_connection, mock_config_handler, mock_thread_pool, monkeypatch
     ):
-        """provider 已知 model 不写入 custom_models 历史。"""
+        """目录中可选的 model 不写入 custom_models 历史（§3.1c-review #3）。"""
+        monkeypatch.setattr(
+            llm_config_vm,
+            "get_litellm_models_by_provider",
+            lambda: {"deepseek": [{"id": "deepseek-v4-flash", "context": 0}]},
+        )
         vm = _make_vm(mock_test_connection)
-        vm._set_state(model="deepseek-v4-flash")  # type: ignore[attr-defined]  # 已知 model
+        vm._set_state(model="deepseek-v4-flash")  # type: ignore[attr-defined]  # 目录中已知 model
         result = await vm.save_config()
         assert result is True
         call_kwargs = mock_config_handler.save_llm_config.call_args.kwargs
         assert "custom_models" not in call_kwargs
-
-
-# --- refresh_models (async) ---
-
-
-def _make_httpx_client(data: list | None = None, *, get_side_effect=None) -> MagicMock:
-    """构造 httpx.AsyncClient mock（async context manager，__aenter__ 返回自身）。
-
-    data 非 None 时 get 返回带该 data 的 response；get_side_effect 非 None 时 get 抛异常。
-    """
-    mock_client = MagicMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=None)
-    if get_side_effect is not None:
-        mock_client.get = AsyncMock(side_effect=get_side_effect)
-    else:
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.json.return_value = {"data": data if data is not None else []}
-        mock_client.get = AsyncMock(return_value=mock_response)
-    return mock_client
-
-
-class TestLLMConfigPanelViewModelRefreshModels:
-    @pytest.mark.asyncio
-    async def test_refresh_models_success(self, mock_test_connection, mock_config_handler):
-        vm = _make_vm(mock_test_connection)
-        mock_client = _make_httpx_client([{"id": "model-a"}, {"id": "model-b"}])
-        with (
-            patch("httpx.AsyncClient", return_value=mock_client),
-            patch(
-                "utils.proxy_manager.ProxyManager.get_httpx_proxy_config",
-                return_value={},
-            ),
-        ):
-            await vm.refresh_models()
-        assert vm.state.status_type == "success"
-        assert vm.state.status_message is not None
-        assert vm.state.status_message.key == "llm_refresh_success"
-        assert vm.state.status_message.params["count"] == 2
-        # 当前 model 不在列表 → 切到第一个
-        assert vm.state.model == "model-a"
-        assert vm.state.is_refreshing is False
-
-    @pytest.mark.asyncio
-    async def test_refresh_models_keeps_current_model_if_in_list(self, mock_test_connection, mock_config_handler):
-        vm = _make_vm(mock_test_connection)
-        vm._set_state(model="model-b")  # type: ignore[attr-defined]
-        mock_client = _make_httpx_client([{"id": "model-a"}, {"id": "model-b"}])
-        with (
-            patch("httpx.AsyncClient", return_value=mock_client),
-            patch(
-                "utils.proxy_manager.ProxyManager.get_httpx_proxy_config",
-                return_value={},
-            ),
-        ):
-            await vm.refresh_models()
-        assert vm.state.model == "model-b"  # 保留当前
-
-    @pytest.mark.asyncio
-    async def test_refresh_models_empty_api_key(self, mock_test_connection, mock_config_handler):
-        vm = _make_vm(mock_test_connection)
-        vm._set_state(api_key="")  # type: ignore[attr-defined]
-        await vm.refresh_models()
-        assert vm.state.status_type == "warning"
-        assert vm.state.status_message is not None
-        assert vm.state.status_message.key == "llm_refresh_need_key"
-
-    @pytest.mark.asyncio
-    async def test_refresh_models_empty_base_url(self, mock_test_connection, mock_config_handler):
-        vm = _make_vm(mock_test_connection)
-        vm._set_state(base_url="")  # type: ignore[attr-defined]
-        await vm.refresh_models()
-        assert vm.state.status_type == "warning"
-        assert vm.state.status_message is not None
-        assert vm.state.status_message.key == "llm_refresh_need_url"
-
-    @pytest.mark.asyncio
-    async def test_refresh_models_empty_response(self, mock_test_connection, mock_config_handler):
-        vm = _make_vm(mock_test_connection)
-        mock_client = _make_httpx_client([])
-        with (
-            patch("httpx.AsyncClient", return_value=mock_client),
-            patch(
-                "utils.proxy_manager.ProxyManager.get_httpx_proxy_config",
-                return_value={},
-            ),
-        ):
-            await vm.refresh_models()
-        assert vm.state.status_type == "warning"
-        assert vm.state.status_message is not None
-        assert vm.state.status_message.key == "llm_refresh_empty"
-
-    @pytest.mark.asyncio
-    async def test_refresh_models_http_failure(self, mock_test_connection, mock_config_handler):
-        vm = _make_vm(mock_test_connection)
-        mock_client = _make_httpx_client(get_side_effect=RuntimeError("HTTP error"))
-        with (
-            patch("httpx.AsyncClient", return_value=mock_client),
-            patch(
-                "utils.proxy_manager.ProxyManager.get_httpx_proxy_config",
-                return_value={},
-            ),
-        ):
-            await vm.refresh_models()
-        assert vm.state.status_type == "error"
-        assert vm.state.status_message is not None
-        # D5: VM 经 get_error_message_key 产出 Message(key) 而非 _raw_msg_ 动态文本
-        assert vm.state.status_message.key == "llm_err_unknown"
-        assert vm.state.is_refreshing is False
-
-    @pytest.mark.asyncio
-    async def test_refresh_models_triggers_on_loading_change(self, mock_test_connection, mock_config_handler):
-        on_loading_change = MagicMock()
-        vm = _make_vm(mock_test_connection, on_loading_change=on_loading_change)
-        mock_client = _make_httpx_client([{"id": "model-a"}])
-        with (
-            patch("httpx.AsyncClient", return_value=mock_client),
-            patch(
-                "utils.proxy_manager.ProxyManager.get_httpx_proxy_config",
-                return_value={},
-            ),
-        ):
-            await vm.refresh_models()
-        on_loading_change.assert_any_call(True)
-        on_loading_change.assert_any_call(False)
-
-    @pytest.mark.asyncio
-    async def test_refresh_models_uses_normalized_base_url(self, mock_test_connection, mock_config_handler):
-        """refresh_models 应对 base_url 做 normalize 后拼接 /models。"""
-        vm = _make_vm(mock_test_connection)
-        vm._set_state(base_url="https://api.deepseek.com/chat/completions")  # type: ignore[attr-defined]
-        mock_client = _make_httpx_client([{"id": "model-a"}])
-        with (
-            patch("httpx.AsyncClient", return_value=mock_client),
-            patch(
-                "utils.proxy_manager.ProxyManager.get_httpx_proxy_config",
-                return_value={},
-            ),
-        ):
-            await vm.refresh_models()
-        # /chat/completions 被 strip → /models 拼接到 https://api.deepseek.com
-        call_args = mock_client.get.call_args
-        assert call_args.args[0] == "https://api.deepseek.com/models"
-        assert call_args.kwargs["headers"]["Authorization"] == "Bearer sk-test"
 
 
 # --- static methods ---
@@ -928,8 +786,13 @@ class TestLLMConfigPanelViewModelStaticMethods:
     def test_build_custom_models_update_azure(self, mock_config_handler):
         assert LLMConfigPanelViewModel._build_custom_models_update("azure", "gpt-4", is_azure=True) is None
 
-    def test_build_custom_models_update_known_model(self, mock_config_handler):
-        """provider 已知 model 不写入 custom_models。"""
+    def test_build_custom_models_update_known_model(self, mock_config_handler, monkeypatch):
+        """目录中可选的 model 不写入 custom_models（§3.1c-review #3）。"""
+        monkeypatch.setattr(
+            llm_config_vm,
+            "get_litellm_models_by_provider",
+            lambda: {"deepseek": [{"id": "deepseek-v4-flash", "context": 0}]},
+        )
         assert LLMConfigPanelViewModel._build_custom_models_update("deepseek", "deepseek-v4-flash") is None
 
     def test_build_custom_models_update_appends_new_model(self, mock_config_handler):

@@ -137,17 +137,25 @@ class TestTokenEstimatorFallbackCJK:
 # _get_model_context_window
 # ---------------------------------------------------------------------------
 class TestGetModelContextWindow:
-    # 使用 LLM_PROVIDERS 中真实注册且 context 不同的模型（P2-1）
+    # AI-01 §3.1c: context 来自 litellm 官方目录投影（经 get_model_info），
+    # 单测以 patch 投影锁定各模型 context（pytest 环境 litellm 被 conftest mock）。
     def test_known_model_returns_context(self):
         llm_config = {"provider": "deepseek", "model": "deepseek-v4-flash"}
-        ctx = _get_model_context_window(llm_config)
-        # deepseek-v4-flash 在 LLM_PROVIDERS 中声明 context=1000000
+        with patch(
+            "utils.llm_providers.get_model_info",
+            return_value={"id": "deepseek-v4-flash", "name": "deepseek-v4-flash", "context": 1_000_000},
+        ):
+            ctx = _get_model_context_window(llm_config)
         assert ctx == 1_000_000
 
     def test_known_model_returns_context_different(self):
         """验证不同 context 的模型返回各自值（P2-1 核心）。"""
         llm_config = {"provider": "mistral", "model": "mistral-small-latest"}
-        assert _get_model_context_window(llm_config) == 131072
+        with patch(
+            "utils.llm_providers.get_model_info",
+            return_value={"id": "mistral-small-latest", "name": "mistral-small-latest", "context": 131072},
+        ):
+            assert _get_model_context_window(llm_config) == 131072
 
     def test_unknown_model_falls_back(self):
         llm_config = {"provider": "deepseek", "model": "does-not-exist-xyz"}
@@ -160,7 +168,11 @@ class TestGetModelContextWindow:
     def test_model_override_with_provider_prefix(self):
         """failover 生效模型形如 'provider/model'，应拆分后查 provider+model。"""
         llm_config = {"provider": "deepseek", "model": "deepseek-v4-flash"}
-        ctx = _get_model_context_window(llm_config, model_override="deepseek/deepseek-v4-flash")
+        with patch(
+            "utils.llm_providers.get_model_info",
+            return_value={"id": "deepseek-v4-flash", "name": "deepseek-v4-flash", "context": 1_000_000},
+        ):
+            ctx = _get_model_context_window(llm_config, model_override="deepseek/deepseek-v4-flash")
         assert ctx == 1_000_000
 
     def test_model_override_unknown_falls_back(self):
@@ -317,7 +329,13 @@ class TestComputeAnalysisBudget:
             "primary": "deepseek/deepseek-v4-flash",  # 1M
             "fallbacks": ["mistral/mistral-small-latest"],  # 131072（更小）
         }
-        with patch("services.ai_service.ConfigHandler.get_failover_config", return_value=failover):
+        with (
+            patch("services.ai_service.ConfigHandler.get_failover_config", return_value=failover),
+            patch(
+                "utils.llm_providers.get_model_info",
+                return_value={"id": "deepseek-v4-flash", "name": "deepseek-v4-flash", "context": 1_000_000},
+            ),
+        ):
             budget = svc._compute_analysis_budget()
         # 只取 primary=1M，忽略更小的 fallback
         assert budget == max(1, 1_000_000 - CONTEXT_RESERVE_TOKENS)
@@ -338,9 +356,15 @@ class TestComputeAnalysisBudget:
     def test_failover_read_error_falls_back_to_active_model(self):
         """failover 配置读取异常时，安全降级至当前生效模型预算（D5-3）。"""
         svc = self._make_svc()
-        with patch(
-            "services.ai_service.ConfigHandler.get_failover_config",
-            side_effect=Exception("config read failed"),
+        with (
+            patch(
+                "services.ai_service.ConfigHandler.get_failover_config",
+                side_effect=Exception("config read failed"),
+            ),
+            patch(
+                "utils.llm_providers.get_model_info",
+                return_value={"id": "deepseek-v4-flash", "name": "deepseek-v4-flash", "context": 1_000_000},
+            ),
         ):
             budget = svc._compute_analysis_budget()
         assert budget == max(1, 1_000_000 - CONTEXT_RESERVE_TOKENS)
@@ -359,9 +383,15 @@ class TestComputeAnalysisBudget:
     def test_empty_failover_uses_active_model_context(self):
         """未配置 failover 时，应以当前生效模型（1M）的 context 为基准，而非硬编码默认窗口（D5-3）。"""
         svc = self._make_svc()
-        with patch(
-            "services.ai_service.ConfigHandler.get_failover_config",
-            return_value={"primary": "", "fallbacks": []},
+        with (
+            patch(
+                "services.ai_service.ConfigHandler.get_failover_config",
+                return_value={"primary": "", "fallbacks": []},
+            ),
+            patch(
+                "utils.llm_providers.get_model_info",
+                return_value={"id": "deepseek-v4-flash", "name": "deepseek-v4-flash", "context": 1_000_000},
+            ),
         ):
             budget = svc._compute_analysis_budget()
         assert budget == max(1, 1_000_000 - CONTEXT_RESERVE_TOKENS)

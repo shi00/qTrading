@@ -227,6 +227,64 @@ class TestSaveAiSettingsCostLimit:
 
 
 # ============================================================================
+# review-pr1073 M3: ai_usd_to_cny_rate 估算汇率配置化
+# ============================================================================
+
+
+class TestUsdToCnyRateConfig:
+    def test_load_uses_configured_rate(self, make_vm, mock_config_handler):
+        """配置存在时的估算汇率加载到 state（字符串形态供输入框回显）。"""
+        mock_config_handler.get_setting.side_effect = lambda key, default=None: (
+            7.5 if key == "ai_usd_to_cny_rate" else default
+        )
+        vm = make_vm()
+        assert vm.state.usd_to_cny_rate_value == "7.5"
+
+    def test_load_falls_back_to_default_when_unset(self, make_vm, mock_config_handler):
+        """未配置（get_setting 返回 None）→ 回退默认 7.2 并回显。"""
+        vm = make_vm()
+        assert vm.state.usd_to_cny_rate_value == "7.2"
+
+    def test_load_ignores_invalid_rate(self, make_vm, mock_config_handler):
+        """配置非法（0/负）→ 回退默认 7.2。"""
+        mock_config_handler.get_setting.side_effect = lambda key, default=None: (
+            0 if key == "ai_usd_to_cny_rate" else default
+        )
+        vm = make_vm()
+        assert vm.state.usd_to_cny_rate_value == "7.2"
+
+    def test_validate_zero_rate_invalid(self, make_vm):
+        vm = make_vm()
+        vm.set_usd_to_cny_rate_value("0")
+        ok, err_key = vm._validate_all()
+        assert ok is False
+        assert err_key == "ai_snack_param_err"
+
+    def test_validate_non_numeric_rate_invalid(self, make_vm):
+        vm = make_vm()
+        vm.set_usd_to_cny_rate_value("abc")
+        ok, err_key = vm._validate_all()
+        assert ok is False
+        assert err_key == "ai_snack_param_err"
+
+    async def test_save_persists_configured_rate(self, make_vm, mock_config_handler):
+        vm = make_vm()
+        vm.set_usd_to_cny_rate_value("7.35")
+        with _patch_save_deps():
+            assert await vm.save_ai_settings() is True
+        call_data = mock_config_handler.save_config.call_args.args[0]
+        assert call_data["ai_usd_to_cny_rate"] == 7.35
+
+    async def test_save_empty_rate_uses_default(self, make_vm, mock_config_handler):
+        vm = make_vm()
+        vm.set_usd_to_cny_rate_value("")
+        with _patch_save_deps():
+            assert await vm.save_ai_settings() is True
+        call_data = mock_config_handler.save_config.call_args.args[0]
+        assert call_data["ai_usd_to_cny_rate"] == 7.2
+
+
+# ============================================================================
 # load_month_cost_cny: 本月累计成本加载
 # ============================================================================
 
@@ -235,6 +293,8 @@ def _enter_cost_tracker(engine_value, is_disposed_value, get_result, get_side_ef
     """Patch 引擎与成本追踪依赖, 返回 (ExitStack, AIUsageTracker instance)。
 
     测试使用方式: ``stack, instance = _enter_cost_tracker(...); with stack: await ...``。
+    get_month_unpriced 同步 mock 返回 (0, 0)：AI-01 引入的可计价外统计，
+    本 fixture 关注月份成本，非本项。
     """
     import contextlib
 
@@ -247,6 +307,7 @@ def _enter_cost_tracker(engine_value, is_disposed_value, get_result, get_side_ef
         instance.get_month_cost_cny = AsyncMock(side_effect=get_side_effect)
     else:
         instance.get_month_cost_cny = AsyncMock(return_value=get_result)
+    instance.get_month_unpriced = AsyncMock(return_value=(0, 0))
     tracker_cls.return_value = instance
     return stack, instance
 

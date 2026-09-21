@@ -2,13 +2,14 @@
 
 覆盖:
 1. 契约守护: 声明式范式合规性 + _render_message R9 守卫 (不含 api_key)
-2. 模块级纯函数: _get_provider_name / _build_provider_options / _build_model_options /
-   _build_links_row / _render_message
-3. 工厂函数: _on_test_click_factory / _on_save_click_factory / _on_refresh_click_factory /
+2. 模块级纯函数: _get_provider_name / _build_provider_options / _render_message
+3. 工厂函数: _on_test_click_factory / _on_save_click_factory /
    _on_provider_change_factory 的 page 可用/None/RuntimeError 守卫
-4. 组件运行时: compact / show_save_button / show_register_link / is_azure / show_custom_model_input
-5. provider 切换时 model_options 重算
-6. 验证 MODELS_API_COMPATIBLE 常量成员
+4. 组件运行时: compact / show_save_button / is_azure / show_custom_model_input
+5. provider 切换联动（custom_model / azure 字段）
+
+说明: 模型选择经 ModelPicker（litellm 目录搜索/浏览/回记）承载，不再有
+``llm_select_model`` Dropdown、refresh 按钮或注册链接行（AI-01 §3.1c）。
 
 test_config_panels.py 已覆盖基础契约 (@ft.component / 无 did_mount / 无 .update() 等),
 本文件聚焦运行时行为 + R9 守卫 + factory 函数 + 组件体渲染, 不重复基础契约检查。
@@ -32,19 +33,15 @@ from tests.unit.ui.component_renderer import (
 from ui.components.config_panels import llm_config_panel as panel_module
 from ui.components.config_panels.llm_config_panel import (
     LLMConfigPanel,
-    _build_links_row,
-    _build_model_options,
     _build_provider_options,
     _on_acknowledgment_change_factory,
     _on_provider_change_factory,
-    _on_refresh_click_factory,
     _on_save_click_factory,
     _on_test_click_factory,
     _render_message,
 )
 from ui.viewmodels import Message
 from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel, LLMConfigState
-from ui.viewmodels.llm_config_panel_view_model import MODELS_API_COMPATIBLE
 
 pytestmark = pytest.mark.unit
 
@@ -156,37 +153,25 @@ class TestLLMConfigPanelContractExtension:
         assert "RuntimeError" in source
 
     def test_factory_functions_defined(self) -> None:
-        """DoD: 4 个 factory 函数必须存在。"""
+        """DoD: 3 个事件 factory 函数必须存在。"""
         source = _read_source()
         assert "def _on_test_click_factory(" in source
         assert "def _on_save_click_factory(" in source
-        assert "def _on_refresh_click_factory(" in source
         assert "def _on_provider_change_factory(" in source
-
-    def test_models_api_compatible_constant_members(self) -> None:
-        """DoD: MODELS_API_COMPATIBLE 必须包含 8 个供应商 ID。"""
-        expected = {
-            "openai",
-            "deepseek",
-            "qwen",
-            "zhipu",
-            "moonshot",
-            "mistral",
-            "minimax",
-            "custom",
-        }
-        assert expected == MODELS_API_COMPATIBLE
+        assert "def _on_acknowledgment_change_factory(" in source
 
     def test_panel_signature_accepts_vm_and_flags(self) -> None:
-        """DoD: LLMConfigPanel 签名应接收 vm + show_save_button + compact + show_register_link。"""
+        """DoD: LLMConfigPanel 签名应接收 vm + show_save_button + compact。
+
+        模型选择经内部 ModelPicker 承载，无 show_register_link 参数（AI-01 §3.1c）。
+        """
         sig = inspect.signature(LLMConfigPanel)
         assert "vm" in sig.parameters
         assert "show_save_button" in sig.parameters
         assert sig.parameters["show_save_button"].default is True
         assert "compact" in sig.parameters
         assert sig.parameters["compact"].default is False
-        assert "show_register_link" in sig.parameters
-        assert sig.parameters["show_register_link"].default is True
+        assert "show_register_link" not in sig.parameters
 
 
 class TestRenderMessageR9Guard:
@@ -346,200 +331,6 @@ class TestBuildProviderOptions:
 
 
 # ============================================================================
-# 模块级纯函数: _build_model_options
-# ============================================================================
-
-
-class TestBuildModelOptions:
-    """_build_model_options: 构建指定供应商的模型下拉选项 (tag 需 i18n)。"""
-
-    def test_returns_options_for_known_provider(self) -> None:
-        """已知供应商返回 model 选项列表。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            options = _build_model_options("deepseek")
-        assert len(options) >= 1
-        assert all(isinstance(o, ft.dropdown.Option) for o in options)
-        keys = {o.key for o in options}
-        assert "deepseek-v4-pro" in keys
-        assert "deepseek-v4-flash" in keys
-
-    def test_returns_empty_for_unknown_provider(self) -> None:
-        """未知供应商返回空列表。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            options = _build_model_options("unknown-provider")
-        assert options == []
-
-    def test_returns_empty_for_custom_provider(self) -> None:
-        """custom 供应商无 models 列表, 返回空。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            options = _build_model_options("custom")
-        assert options == []
-
-    def test_returns_empty_for_azure_provider(self) -> None:
-        """azure 供应商 models 为空列表, 返回空。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            options = _build_model_options("azure")
-        assert options == []
-
-    def test_tag_translated_via_i18n(self) -> None:
-        """模型 tag 通过 I18n.get(get_display_tag(tag)) 翻译, label 含翻译后缀。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-
-            def fake_get(key, **kw):
-                if key == "tag_recommend":
-                    return "推荐"
-                if "default" in kw:
-                    return kw["default"]
-                return key
-
-            mock_i18n.get.side_effect = fake_get
-            options = _build_model_options("deepseek")
-        # deepseek-v4-flash 的 tag 是 "tag_recommend"
-        flash_opt = next(o for o in options if o.key == "deepseek-v4-flash")
-        assert flash_opt.text is not None
-        assert "推荐" in flash_opt.text
-
-    def test_empty_tag_no_parentheses(self) -> None:
-        """tag 为空字符串时 get_display_tag 返回空, label 不含括号。"""
-        fake_providers = {
-            "test_provider": {
-                "name": "Test",
-                "models": [{"id": "model-no-tag", "name": "Model No Tag", "tag": ""}],
-            }
-        }
-        with (
-            patch.object(panel_module, "I18n") as mock_i18n,
-            patch.object(panel_module, "LLM_PROVIDERS", fake_providers),
-        ):
-            # get_display_tag("") 返回 "", I18n.get("", default="") 返回 ""
-            mock_i18n.get.side_effect = lambda key, **kw: kw.get("default", key) if "default" in kw else ""
-            options = _build_model_options("test_provider")
-        assert len(options) == 1
-        assert options[0].text == "Model No Tag"  # 不应带括号
-
-    def test_model_missing_name_falls_back_to_id(self) -> None:
-        """model 缺失 name 字段时 text fallback 到 id。"""
-        fake_providers = {
-            "test_provider": {
-                "name": "Test",
-                "models": [{"id": "fallback-id", "tag": ""}],  # 缺 name
-            }
-        }
-        with (
-            patch.object(panel_module, "I18n") as mock_i18n,
-            patch.object(panel_module, "LLM_PROVIDERS", fake_providers),
-        ):
-            mock_i18n.get.side_effect = lambda key, **kw: kw.get("default", key) if "default" in kw else ""
-            options = _build_model_options("test_provider")
-        assert len(options) == 1
-        assert options[0].text == "fallback-id"
-
-    def test_list_tag_uses_first_non_internal_tag(self) -> None:
-        """tag 为 list 时, get_display_tag 返回首个非 internal tag (跳过 reasoning)。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            options = _build_model_options("openai")
-        # openai o4-mini 的 tag 是 ["tag_reasoning", "reasoning"]
-        # get_display_tag 跳过 "reasoning", 返回 "tag_reasoning"
-        o4_opt = next(o for o in options if o.key == "o4-mini")
-        assert o4_opt.text is not None
-        assert "tag_reasoning" in o4_opt.text
-
-
-# ============================================================================
-# 模块级纯函数: _build_links_row
-# ============================================================================
-
-
-class TestBuildLinksRow:
-    """_build_links_row: 构建供应商相关链接行 (console_url/pricing_url/models_url)。"""
-
-    def test_returns_row_with_all_three_links_for_deepseek(self) -> None:
-        """deepseek 有 console_url/pricing_url/models_url 三个链接。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            row = _build_links_row("deepseek", compact=False)
-        assert isinstance(row, ft.Row)
-        assert len(row.controls) == 3
-        for ctrl in row.controls:
-            assert isinstance(ctrl, ft.TextButton)
-            assert ctrl.url
-
-    def test_returns_empty_row_for_custom_provider(self) -> None:
-        """custom 供应商无任何 URL, 返回空 Row。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            row = _build_links_row("custom", compact=False)
-        assert isinstance(row, ft.Row)
-        assert len(row.controls) == 0
-
-    def test_returns_empty_row_for_unknown_provider(self) -> None:
-        """未知供应商返回空 Row。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            row = _build_links_row("unknown", compact=False)
-        assert isinstance(row, ft.Row)
-        assert len(row.controls) == 0
-
-    def test_partial_urls_only_includes_present_links(self) -> None:
-        """部分 URL 缺失时只包含存在的链接。"""
-        fake_providers = {
-            "test_provider": {
-                "name": "Test",
-                "console_url": "https://console.test/",
-                # pricing_url 和 models_url 缺失
-            }
-        }
-        with (
-            patch.object(panel_module, "I18n") as mock_i18n,
-            patch.object(panel_module, "LLM_PROVIDERS", fake_providers),
-        ):
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            row = _build_links_row("test_provider", compact=False)
-        assert len(row.controls) == 1
-        console_btn = cast(ft.TextButton, row.controls[0])
-        assert console_btn.url == "https://console.test/"
-
-    def test_compact_row_uses_center_alignment(self) -> None:
-        """compact=True 时 Row 使用 MainAxisAlignment.CENTER + wrap=False + spacing=8。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            row = _build_links_row("deepseek", compact=True)
-        assert row.alignment == ft.MainAxisAlignment.CENTER
-        assert row.wrap is False
-        assert row.spacing == 8
-
-    def test_non_compact_row_uses_start_alignment(self) -> None:
-        """compact=False 时 Row 使用 MainAxisAlignment.START + wrap=True + spacing=10。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            row = _build_links_row("deepseek", compact=False)
-        assert row.alignment == ft.MainAxisAlignment.START
-        assert row.wrap is True
-        assert row.spacing == 10
-
-    def test_compact_buttons_have_compact_style(self) -> None:
-        """compact=True 时按钮带 compact_btn_style (非 None)。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            row = _build_links_row("deepseek", compact=True)
-        for ctrl in row.controls:
-            assert isinstance(cast(ft.TextButton, ctrl).style, ft.ButtonStyle)
-
-    def test_non_compact_buttons_have_no_style(self) -> None:
-        """compact=False 时按钮 style=None。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            row = _build_links_row("deepseek", compact=False)
-        for ctrl in row.controls:
-            assert cast(ft.TextButton, ctrl).style is None
-
-
-# ============================================================================
 # 工厂函数: page 可用 → page.run_task
 # ============================================================================
 
@@ -577,16 +368,6 @@ class TestFactoryFunctionsPageAvailable:
             type(mock_ctx).page = property(lambda self: mock_page)
             _invoke(handler, _make_event())
         mock_page.run_task.assert_called_once_with(vm.save_config)
-
-    def test_on_refresh_click_factory_calls_run_task(self) -> None:
-        """_on_refresh_click_factory: page 可用 → page.run_task(vm.refresh_models)。"""
-        vm = MagicMock(spec=LLMConfigPanelViewModel)
-        handler = _on_refresh_click_factory(vm)
-        mock_page = MagicMock()
-        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: mock_page)
-            _invoke(handler, _make_event())
-        mock_page.run_task.assert_called_once_with(vm.refresh_models)
 
     def test_on_provider_change_factory_calls_run_task_with_provider_id(self) -> None:
         """_on_provider_change_factory: page 可用 → page.run_task(vm.update_provider, provider_id)。"""
@@ -636,16 +417,6 @@ class TestFactoryFunctionsPageNone:
             _invoke(handler, _make_event())
         mock_page.run_task.assert_not_called()
 
-    def test_on_refresh_click_factory_page_none_skips_run_task(self) -> None:
-        """_on_refresh_click_factory: page=None → 不调 run_task。"""
-        vm = MagicMock(spec=LLMConfigPanelViewModel)
-        handler = _on_refresh_click_factory(vm)
-        mock_page = MagicMock()
-        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: None)
-            _invoke(handler, _make_event())
-        mock_page.run_task.assert_not_called()
-
     def test_on_provider_change_factory_page_none_skips_run_task(self) -> None:
         """_on_provider_change_factory: page=None → 不调 run_task。"""
         vm = MagicMock(spec=LLMConfigPanelViewModel)
@@ -686,14 +457,6 @@ class TestFactoryFunctionsRuntimeError:
         """_on_save_click_factory: RuntimeError 静默处理。"""
         vm = MagicMock(spec=LLMConfigPanelViewModel)
         handler = _on_save_click_factory(vm)
-        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
-            _invoke(handler, _make_event())
-
-    def test_on_refresh_click_factory_runtime_error_swallowed(self) -> None:
-        """_on_refresh_click_factory: RuntimeError 静默处理。"""
-        vm = MagicMock(spec=LLMConfigPanelViewModel)
-        handler = _on_refresh_click_factory(vm)
         with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
             type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
             _invoke(handler, _make_event())
@@ -757,7 +520,6 @@ class _FakeLLMConfigPanelVM:
         # command 方法 (MagicMock, 便于断言调用)
         self.verify_connection = MagicMock()
         self.save_config = MagicMock()
-        self.refresh_models = MagicMock()
         self.update_provider = MagicMock()
         self.update_model = MagicMock()
         self.update_custom_model = MagicMock()
@@ -790,7 +552,6 @@ def _render_panel(
     *,
     show_save_button: bool = True,
     compact: bool = False,
-    show_register_link: bool = True,
     enable_enter_submit: bool = True,
     page: FakePage | None = None,
 ) -> tuple[_FakeLLMConfigPanelVM, FakePage, Any, Any]:
@@ -821,7 +582,6 @@ def _render_panel(
             vm=vm,
             show_save_button=show_save_button,
             compact=compact,
-            show_register_link=show_register_link,
             enable_enter_submit=enable_enter_submit,
         )
         run_mount_effects(component, page=page)
@@ -836,7 +596,7 @@ def _render_panel(
 
 
 class TestLLMConfigPanelLayout:
-    """LLMConfigPanel 布局测试 (compact / show_save_button / show_register_link)。"""
+    """LLMConfigPanel 布局测试 (compact / show_save_button)。"""
 
     def test_returns_column_when_not_compact(self, mock_i18n_state, mock_app_colors_state) -> None:
         """非 compact 模式返回 ft.Column。"""
@@ -891,25 +651,6 @@ class TestLLMConfigPanelLayout:
         save_btns = [c for c in ctrls if isinstance(c, ft.Button) and getattr(c, "icon", None) == ft.Icons.SAVE]
         assert len(save_btns) == 1
         assert save_btns[0].visible is False
-
-    def test_links_row_visible_when_show_register_true(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """show_register_link=True 时 links_row 可见。"""
-        _, _, result, _ = _render_panel(show_register_link=True)
-        ctrls = _walk_controls(result)
-        rows = [c for c in ctrls if isinstance(c, ft.Row)]
-        # 找含 TextButton 的 Row (links_row)
-        links_rows = [r for r in rows if any(isinstance(c, ft.TextButton) for c in r.controls)]
-        assert len(links_rows) >= 1
-        assert links_rows[0].visible is True
-
-    def test_links_row_hidden_when_show_register_false(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """show_register_link=False 时 links_row 不可见。"""
-        _, _, result, _ = _render_panel(show_register_link=False)
-        ctrls = _walk_controls(result)
-        rows = [c for c in ctrls if isinstance(c, ft.Row)]
-        links_rows = [r for r in rows if any(isinstance(c, ft.TextButton) for c in r.controls)]
-        assert len(links_rows) >= 1
-        assert links_rows[0].visible is False
 
 
 class TestLLMConfigPanelAzureFields:
@@ -1003,35 +744,7 @@ class TestLLMConfigPanelCustomModelInput:
 
 
 class TestLLMConfigPanelModelDropdown:
-    """LLMConfigPanel model_dropdown 可见性与 options 测试。"""
-
-    def test_model_dropdown_visible_when_not_azure_and_not_custom(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """is_azure=False 且 show_custom_model_input=False 时 model_dropdown 可见。"""
-        state = LLMConfigState(is_azure=False, show_custom_model_input=False, provider="deepseek")
-        _, _, result, _ = _render_panel(state=state)
-        model_dd = _find_dropdown(result, "llm_select_model")
-        assert model_dd.visible is True
-
-    def test_model_dropdown_hidden_when_azure(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """is_azure=True 时 model_dropdown 不可见。"""
-        state = LLMConfigState(is_azure=True, provider="azure")
-        _, _, result, _ = _render_panel(state=state)
-        model_dd = _find_dropdown(result, "llm_select_model")
-        assert model_dd.visible is False
-
-    def test_model_dropdown_hidden_when_custom_input_shown(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """show_custom_model_input=True 时 model_dropdown 不可见。"""
-        state = LLMConfigState(show_custom_model_input=True, provider="custom")
-        _, _, result, _ = _render_panel(state=state)
-        model_dd = _find_dropdown(result, "llm_select_model")
-        assert model_dd.visible is False
-
-    def test_model_dropdown_value_bound_to_state(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """model_dropdown.value 绑定到 state.model。"""
-        state = LLMConfigState(provider="deepseek", model="deepseek-v4-flash")
-        _, _, result, _ = _render_panel(state=state)
-        model_dd = _find_dropdown(result, "llm_select_model")
-        assert model_dd.value == "deepseek-v4-flash"
+    """provider 下拉 value 绑定测试（模型选择经 ModelPicker 承载，无 model Dropdown）。"""
 
     def test_provider_dropdown_value_bound_to_state(self, mock_i18n_state, mock_app_colors_state) -> None:
         """provider_dropdown.value 绑定到 state.provider。"""
@@ -1042,51 +755,13 @@ class TestLLMConfigPanelModelDropdown:
 
 
 # ============================================================================
-# provider 切换时 model_options 重算测试
+# provider 切换联动测试（custom_model_options / azure 字段）：
+# 模型清单经 ModelPicker（litellm 目录），不再随 provider 直接构建 options（AI-01 §3.1c）
 # ============================================================================
 
 
-class TestProviderSwitchModelOptionsRecompute:
-    """provider 切换时 model_options 重算测试。
-
-    验证 _build_model_options(state.provider) 在不同 provider 下产出不同 options。
-    """
-
-    def test_model_dropdown_options_for_deepseek(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """provider=deepseek 时 model_dropdown.options 含 deepseek 模型。"""
-        _, _, result, _ = _render_panel(state=LLMConfigState(provider="deepseek"))
-        model_dd = _find_dropdown(result, "llm_select_model")
-        keys = {o.key for o in model_dd.options}
-        assert "deepseek-v4-pro" in keys
-        assert "deepseek-v4-flash" in keys
-
-    def test_model_dropdown_options_for_qwen(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """provider=qwen 时 model_dropdown.options 含 qwen 模型。"""
-        _, _, result, _ = _render_panel(state=LLMConfigState(provider="qwen"))
-        model_dd = _find_dropdown(result, "llm_select_model")
-        keys = {o.key for o in model_dd.options}
-        assert "qwen3.6-max-preview" in keys
-        assert "qwen3.6-plus" in keys
-
-    def test_model_dropdown_options_for_openai(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """provider=openai 时 model_dropdown.options 含 openai 模型。"""
-        _, _, result, _ = _render_panel(state=LLMConfigState(provider="openai"))
-        model_dd = _find_dropdown(result, "llm_select_model")
-        keys = {o.key for o in model_dd.options}
-        assert "gpt-5.5" in keys
-        assert "gpt-5.4" in keys
-
-    def test_model_dropdown_options_for_azure_empty(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """provider=azure 时 model_dropdown.options 为空 (azure models 列表为空)。"""
-        _, _, result, _ = _render_panel(state=LLMConfigState(provider="azure"))
-        model_dd = _find_dropdown(result, "llm_select_model")
-        assert model_dd.options == []
-
-    def test_model_dropdown_options_for_custom_empty(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """provider=custom 时 model_dropdown.options 为空。"""
-        _, _, result, _ = _render_panel(state=LLMConfigState(provider="custom"))
-        model_dd = _find_dropdown(result, "llm_select_model")
-        assert model_dd.options == []
+class TestProviderSwitchLinkedFields:
+    """provider 切换时 custom_model / azure 字段联动测试。"""
 
     def test_custom_model_options_populated_from_state(self, mock_i18n_state, mock_app_colors_state) -> None:
         """custom_model_options 从 state 注入到 custom_model_input.options。"""
@@ -1154,22 +829,6 @@ class TestLLMConfigPanelEventHandlers:
         _invoke(test_btns[0].on_click, _make_event())
         run_task.assert_called_once_with(vm.verify_connection)
 
-    def test_refresh_click_calls_page_run_task_with_vm_refresh_models(
-        self, mock_i18n_state, mock_app_colors_state
-    ) -> None:
-        """refresh button on_click → page.run_task(vm.refresh_models)。"""
-        vm, page, result, _ = _render_panel()
-        ctrls = _walk_controls(result)
-        refresh_btns = [
-            c for c in ctrls if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.REFRESH
-        ]
-        assert len(refresh_btns) == 1
-
-        run_task = _page_run_task(page)
-        run_task.reset_mock()
-        _invoke(refresh_btns[0].on_click, _make_event())
-        run_task.assert_called_once_with(vm.refresh_models)
-
     def test_provider_change_calls_page_run_task_with_vm_update_provider(
         self, mock_i18n_state, mock_app_colors_state
     ) -> None:
@@ -1235,25 +894,9 @@ class TestLLMConfigPanelEventHandlers:
 class TestLLMConfigPanelSyncCommands:
     """LLMConfigPanel 同步命令测试 (on_change/on_select 直接调 vm 方法, 非 run_task)。
 
-    model_dropdown / custom_model_input / base_url_input / api_key_input / azure_*
+    custom_model_input / base_url_input / api_key_input / azure_*
     的 on_change/on_select 是 lambda, 直接调用 vm.update_* 方法 (同步命令)。
     """
-
-    def test_model_change_calls_vm_update_model(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """model dropdown on_select → vm.update_model(value)。"""
-        vm, _, result, _ = _render_panel(state=LLMConfigState(provider="deepseek"))
-        model_dd = _find_dropdown(result, "llm_select_model")
-
-        _invoke(model_dd.on_select, _make_event("deepseek-v4-pro"))
-        vm.update_model.assert_called_once_with("deepseek-v4-pro")
-
-    def test_model_change_empty_value_skips_update(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """model dropdown on_select value=None → 不调 vm.update_model。"""
-        vm, _, result, _ = _render_panel(state=LLMConfigState(provider="deepseek"))
-        model_dd = _find_dropdown(result, "llm_select_model")
-
-        _invoke(model_dd.on_select, _make_event(None))
-        vm.update_model.assert_not_called()
 
     def test_custom_model_change_calls_vm_update_custom_model(self, mock_i18n_state, mock_app_colors_state) -> None:
         """custom_model dropdown on_select → vm.update_custom_model(value)。"""
@@ -1400,39 +1043,6 @@ class TestLLMConfigPanelStatusDisplay:
         save_btns = [c for c in ctrls if isinstance(c, ft.Button) and getattr(c, "icon", None) == ft.Icons.SAVE]
         assert len(save_btns) == 1
         assert save_btns[0].disabled is True
-
-    def test_refresh_button_disabled_when_refreshing(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """is_refreshing=True 时 refresh button disabled。"""
-        state = LLMConfigState(is_refreshing=True)
-        _, _, result, _ = _render_panel(state=state)
-        ctrls = _walk_controls(result)
-        refresh_btns = [
-            c for c in ctrls if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.REFRESH
-        ]
-        assert len(refresh_btns) == 1
-        assert refresh_btns[0].disabled is True
-
-    def test_refresh_button_hidden_when_show_refresh_false(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """show_refresh_button=False 时 refresh button 不可见。"""
-        state = LLMConfigState(show_refresh_button=False)
-        _, _, result, _ = _render_panel(state=state)
-        ctrls = _walk_controls(result)
-        refresh_btns = [
-            c for c in ctrls if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.REFRESH
-        ]
-        assert len(refresh_btns) == 1
-        assert refresh_btns[0].visible is False
-
-    def test_refresh_button_visible_when_show_refresh_true(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """show_refresh_button=True 时 refresh button 可见。"""
-        state = LLMConfigState(show_refresh_button=True)
-        _, _, result, _ = _render_panel(state=state)
-        ctrls = _walk_controls(result)
-        refresh_btns = [
-            c for c in ctrls if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.REFRESH
-        ]
-        assert len(refresh_btns) == 1
-        assert refresh_btns[0].visible is True
 
 
 # ============================================================================
