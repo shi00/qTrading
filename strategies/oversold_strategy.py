@@ -91,7 +91,10 @@ def _compute_rsi_filter(
             ],
         )
         .filter(pl.col("trade_date") == end_date_value)
-        .filter(pl.col("day_count") >= rsi_period * 2)
+        # SC-05: day_count 门槛从 period*2 提到 period*5——EWM 种子残留权重约 ((1-1/period)^(n-1))，
+        # 降到 1% 以下需约 4.6×period 根 K 线，取 period*5 为工程惯例；配合 get_rsi_expr 预热期
+        # min_samples=period，消除新上市/次新股 RSI 被首根 K 线主导的系统性偏差。
+        .filter(pl.col("day_count") >= rsi_period * 5)
         .filter(pl.col(rsi_col_name) < rsi_threshold)
         .filter(pl.col("vol_ratio_5d") >= float(vol_ratio_threshold))
     )

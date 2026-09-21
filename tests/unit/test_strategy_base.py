@@ -142,11 +142,12 @@ async def test_oversold(strategies_ctx):
     dp_mock.trade_calendar = trade_calendar_mock
     cache_mock = MagicMock()
     cache_mock.get_latest_trade_date = AsyncMock(return_value="20230101")
-    dates = pd.date_range(end="20230101", periods=30).strftime("%Y%m%d").tolist()
-    c_prices = list(range(35, 5, -1))
+    # SC-05: day_count 门槛 rsi_period*5=70，30 天会被全过滤，扩到 75 天
+    dates = pd.date_range(end="20230101", periods=75).strftime("%Y%m%d").tolist()
+    c_prices = list(range(35, 35 - 75, -1))
     history_data = []
     for i, (d, p) in enumerate(zip(dates, c_prices, strict=True)):
-        vol = 3000 if i == 29 else 1000
+        vol = 3000 if i == 74 else 1000
         history_data.append(
             {
                 "ts_code": "000003.SZ",
@@ -176,9 +177,10 @@ async def test_oversold_volume_threshold_filters_candidates(strategies_ctx):
     trade_calendar_mock.get_start_date_by_trade_days = AsyncMock(return_value=datetime.date(2022, 8, 1))
     dp_mock.trade_calendar = trade_calendar_mock
 
-    dates = pd.date_range(end="2023-01-30", periods=30).strftime("%Y%m%d").tolist()
+    # SC-05: day_count 门槛 rsi_period*5=70，30 天会被全过滤，扩到 75 天
+    dates = pd.date_range(end="2023-01-30", periods=75).strftime("%Y%m%d").tolist()
     history_data = []
-    for d, p, vol in zip(dates, range(40, 10, -1), [100] * 29 + [160], strict=True):
+    for d, p, vol in zip(dates, range(80, 5, -1), [100] * 74 + [160], strict=True):
         history_data.append(
             {
                 "ts_code": "000003.SZ",
