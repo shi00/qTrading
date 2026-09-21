@@ -82,6 +82,85 @@ class TestSchedulerServicePersistRunDate:
         mock_ch.save_config.assert_called_once()
 
 
+class TestSchedulerServicePersistRunDateDb:
+    """REVIEW-06 TO-02/TO-04: 幂等键 DB 写入——单调写（set_app_state_max）+ 引擎状态守卫（engine_provider）。"""
+
+    @pytest.mark.asyncio
+    async def test_engine_normal_uses_set_app_state_max(self):
+        """TO-02: 引擎可用时走 set_app_state_max 单调写（而非 set_app_state 无条件覆盖）。"""
+        svc = _make_svc()
+        mock_engine = MagicMock()
+        svc._persist_run_date = MagicMock()
+        with (
+            patch("data.persistence.engine_provider.get_engine", return_value=mock_engine),
+            patch("data.persistence.engine_provider.is_disposed", return_value=False),
+            patch("data.persistence.app_state_service.set_app_state_max", new_callable=AsyncMock) as mock_max,
+            patch("data.persistence.app_state_service.set_app_state", new_callable=AsyncMock),
+        ):
+            await svc._persist_run_date_db("sched_last_daily_update", "scheduler_last_daily_update", "20240620")
+            mock_max.assert_awaited_once_with(mock_engine, "sched_last_daily_update", "20240620")
+        # config 缓存始终写
+        svc._persist_run_date.assert_called_once_with("scheduler_last_daily_update", "20240620")
+
+    @pytest.mark.asyncio
+    async def test_monotonic_write_sequence_keeps_max(self):
+        """TO-02/R22: 乱序写入（先 20 后 19）——DB 层 GREATEST 由 set_app_state_max 保证，内存层 max 不倒退。"""
+        svc = _make_svc()
+        svc._last_update_date = None
+        svc._persist_run_date_db = AsyncMock()
+        await svc._mark_daily_update_done_db("20240620")
+        await svc._mark_daily_update_done_db("20240619")
+        assert svc._last_update_date == "20240620"
+        assert svc._persist_run_date_db.await_count == 2
+        # 传给 DB 层的均为各自当日值；内存 max 防倒退
+        assert svc._persist_run_date_db.await_args.args == (
+            "sched_last_daily_update",
+            "scheduler_last_daily_update",
+            "20240619",
+        )
+
+    @pytest.mark.asyncio
+    async def test_nightly_prediction_monotonic(self):
+        """TO-02: nightly 预测幂等键内存侧同样单调。"""
+        svc = _make_svc()
+        svc._last_pred_date = None
+        svc._persist_run_date_db = AsyncMock()
+        await svc._mark_nightly_prediction_done_db("20240620")
+        await svc._mark_nightly_prediction_done_db("20240619")
+        assert svc._last_pred_date == "20240620"
+
+    @pytest.mark.asyncio
+    async def test_engine_none_skips_db_keeps_config(self):
+        """TO-04: 引擎未就绪（None）→ 跳过 DB 写、仅写配置缓存（沉默降级，与 _load_db_state 一致）。"""
+        svc = _make_svc()
+        svc._persist_run_date = MagicMock()
+        with (
+            patch("data.persistence.engine_provider.get_engine", return_value=None),
+            patch("data.persistence.app_state_service.set_app_state_max", new_callable=AsyncMock) as mock_max,
+        ):
+            await svc._persist_run_date_db("sched_last_daily_update", "scheduler_last_daily_update", "20240620")
+            mock_max.assert_not_called()
+        svc._persist_run_date.assert_called_once_with("scheduler_last_daily_update", "20240620")
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_warns_and_skips_db(self):
+        """TO-04: 引擎已释放（disposed）→ warning 告警 + 跳过 DB 写（避免 EngineDisposedError 逃逸），仅写配置。"""
+        svc = _make_svc()
+        mock_engine = MagicMock()
+        svc._persist_run_date = MagicMock()
+        with (
+            patch("data.persistence.engine_provider.get_engine", return_value=mock_engine),
+            patch("data.persistence.engine_provider.is_disposed", return_value=True),
+            patch("data.persistence.app_state_service.set_app_state_max", new_callable=AsyncMock) as mock_max,
+            patch("utils.scheduler_service.logger.warning") as mock_warn,
+        ):
+            await svc._persist_run_date_db("sched_last_daily_update", "scheduler_last_daily_update", "20240620")
+            mock_max.assert_not_called()
+            warning_calls = [c for c in mock_warn.call_args_list]
+            assert any("引擎已释放" in str(c.args[0]) for c in warning_calls)
+        svc._persist_run_date.assert_called_once_with("scheduler_last_daily_update", "20240620")
+
+
 class TestSchedulerServiceStop:
     @patch("utils.scheduler_service.ConfigHandler")
     def test_stop_running(self, mock_ch):

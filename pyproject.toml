@@ -252,6 +252,9 @@ ignore_imports = [
     "utils.scheduler_service -> data.data_processor",
     # EX-0006
     "utils.scheduler_service -> data.persistence.app_state_service",
+    # EX-0017 scheduler_service 幂等键写入经 engine_provider 查引擎状态（R5 守卫，review03-C11 中立模块；
+    # REVIEW-06 TO-04 修复：替代原 CacheManager._instance 直接访问；lazy-import 注释见 _persist_run_date_db）
+    "utils.scheduler_service -> data.persistence.engine_provider",
     # EX-0007
     "utils.scheduler_service -> services.task_manager",
     # EX-0008 shutdown 关机步骤按需加载，避免模块加载即拉起全栈（A2 标注 lazy-import，保留）
