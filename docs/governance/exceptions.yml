@@ -217,3 +217,13 @@ exceptions:
     removal_trigger: "R5 红线扩展到回测持久化路径时，或 BacktestService 重构时移除（与技术债条目 P3-M9-Backtest-EngineDisposed-Warning-Return 的 upgrade 触发条件一致）。"
     verification: "人工评审（R5 为 EXCEPTIONABLE，仅人工评审）。"
     validity_criteria: "`services/backtest_service.py` 的 `_persist_result` 仍以捕获持久化异常（如 `EngineDisposedError` 落入 `except Exception`）并返回带 `persist_failed` 警告的回测结果（不 raise）的方式处理持久化失败，且 R5 红线尚未扩展到回测持久化路径——二者任一成立即本条仍有效。"
+  # EX-0019: utils/scheduler_service.py -> data.persistence.engine_provider（R5 引擎状态守卫，REVIEW-06 TO-04）
+  - id: EX-0019
+    rule_id: R1
+    paths: ["utils/scheduler_service.py"]
+    reason: "scheduler_service 幂等键写入前经 engine_provider.get_engine()/is_disposed() 查询引擎状态（R5 守卫），替代原 CacheManager._instance 直接访问（review03-C11 中立模块）。与 EX-0004~EX-0007 同类：函数内 lazy import 带 # lazy-import: 注释，启动性能优化——模块加载不拉起 data 全栈。REVIEW-06 TO-04 修复。"
+    owner: 架构维护者
+    approved_by: 架构维护者（REVIEW-06 TO-04 修复）
+    removal_trigger: "同 EX-0004~EX-0007：DB idempotency 状态写入改为经 app 层显式依赖注入后与 EX-0004~EX-0007 一并移除。"
+    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0019）。"
+    validity_criteria: "`utils/scheduler_service.py` 的 `_persist_run_date_db` 仍含 `# lazy-import:` 标注的 `data.persistence.engine_provider` 函数内导入，且幂等键 DB 写入尚未经 app 层显式依赖注入。"
