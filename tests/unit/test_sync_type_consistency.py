@@ -15,7 +15,6 @@ Run: pytest tests/test_sync_type_consistency.py -v
 import inspect
 
 from data.constants import FINANCIAL_REPORT_SCHEMA_COLS
-from data.data_dictionary import COMMON_COLUMNS, TABLE_DEFINITIONS
 from data.persistence.daos.quote_dao import QuoteDao
 from data.sync.historical import HistoricalSyncStrategy
 from data.sync.financial import FinancialSyncStrategy
@@ -58,20 +57,6 @@ class TestSyncTypeConsistency:
         synced = set(HistoricalSyncStrategy.SYNCED_TABLES)
         missing = [t for t in critical_tables if t not in synced]
         assert not missing, f"HistoricalSyncStrategy.SYNCED_TABLES missing tables: {missing}"
-
-    def test_validate_schema_definitions_includes_common_columns(self):
-        from data.data_dictionary import columns_of
-        from data.persistence.models import Base
-
-        db_tables = set(Base.metadata.tables.keys())
-        for table_name in TABLE_DEFINITIONS:
-            if table_name not in db_tables:
-                continue
-            orm_cols = set(columns_of(table_name))
-            dd_cols_with_common = set(columns_of(table_name)) | set(COMMON_COLUMNS.keys())
-            assert not any(col in COMMON_COLUMNS and col not in dd_cols_with_common for col in orm_cols), (
-                "validate_schema_definitions should include COMMON_COLUMNS in dd_cols"
-            )
 
     def test_holder_sync_uses_get_now(self):
         import data.sync.holder as holder_mod
@@ -136,23 +121,6 @@ class TestSyncTypeConsistency:
         )
         sig = inspect.signature(HistoricalSyncStrategy._run_historical_sync)
         assert len(sig.parameters) >= 3, "_run_historical_sync should accept days, progress_callback, result"
-
-    def test_validate_schema_definitions_phantom_cols_excludes_common(self):
-        from data.data_dictionary import columns_of
-        from data.persistence.models import Base
-
-        db_tables = set(Base.metadata.tables.keys())
-        for table_name in TABLE_DEFINITIONS:
-            if table_name not in db_tables:
-                continue
-            orm_cols = set(columns_of(table_name))
-            dd_table_cols = set(columns_of(table_name))
-            phantom_cols = dd_table_cols - orm_cols
-            common_only_phantom = phantom_cols & set(COMMON_COLUMNS.keys())
-            assert not common_only_phantom, (
-                f"Table '{table_name}': COMMON_COLUMNS entries should not appear as phantom cols "
-                f"(they are implicitly available). Phantom common cols: {common_only_phantom}"
-            )
 
     def test_financial_sync_uses_trade_calendar_not_deprecated_api(self):
         import data.sync.financial as fin_mod
