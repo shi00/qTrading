@@ -117,10 +117,12 @@ gpt-5.4-mini / claude-sonnet-4-6 / gemini-2.0-flash 均可计价）。
   qwen / zhipu / moonshot / minimax 的 `litellm_prefix` 均为 `"openai"`（走 OpenAI 兼容端点）。
   因此**「UI 按 `litellm_prefix` 枚举投影」是错误设计**——会把这几家全挤进 openai 目录、混入
   GPT 模型。早期方案第 2 点已废弃。须为「UI 枚举」与「运行路由」**解耦**。
-- **zhipu（智谱）在 litellm 无任何独立目录 key**（查无 zhipu/bigmodel/glm）→ 智谱无法从 litellm
-  枚举官方模型，只能靠「自定义/自由文本模型」兜底（空列表 + 用户手输）。
+- **zhipu（智谱）在 litellm 的官方目录键为 `zai`**（智谱国际品牌 Z.ai，含 16 个 GLM 模型，均有计价；
+  国内 bigmodel 品牌键 zhipu/bigmodel 查无）→ 与 qwen→dashscope 同范式：`litellm_catalog_key: "zai"`
+  使 zhipu 可枚举官方模型且可计价（review-pr1073 A1 修正：早期「zhipu 无目录」断言为认知幻觉）。
 - **cloud 计价的 provider 键名 == 枚举目录键名**（deepseek/anthropic/gemini/mistral/openai/moonshot/
-  minimax），仅 dashscope 系（qwen）与路由前缀不一致 → 需新增 `litellm_catalog_key` 字段。
+  minimax），与路由前缀不一致的有 dashscope 系（qwen）与 zai（zhipu）、gemini（google）→ 统一
+  经 `litellm_catalog_key` 字段映射（review-pr1073 A4 补充：google 亦须映射，实现已覆盖）。
 
 **目标文件**：`utils/llm_providers.py`（数据+纯函数）+ 新共享组件
 `ui/components/model_picker.py` + 两处消费点（LLMConfigPanel / FailoverConfigPanel）。
@@ -134,7 +136,7 @@ gpt-5.4-mini / claude-sonnet-4-6 / gemini-2.0-flash 均可计价）。
   （**不得**回退 `litellm_prefix`——openai 撞车；见 §3.1c-review #9）。
   取值：deepseek→`deepseek`、openai→`openai`、anthropic→`anthropic`、google→`gemini`、
   mistral→`mistral`、moonshot→`moonshot`、minimax→`minimax`、qwen→`dashscope`、
-  zhipu→（无，空）、azure→（部署制，无目录）、custom→（自由文本，无目录）。
+  zhipu→`zai`（review-pr1073 A1）、azure→（部署制，无目录）、custom→（自由文本，无目录）。
 
 **B. 运行路由不受影响**：`_build_litellm_params` 仍读 `litellm_prefix`；模型清单只决定「可选的
 model id 字符串」，不改变路由、不改变存储 model 格式 → 无行为变更、无存量配置迁移、不影响
@@ -198,7 +200,8 @@ failover 前缀判定（`model.split("/")[0]`）。
   failover 相关测试、新增 ModelPicker VM 测试（R19）。
 
 **F. 风险与边界**：
-- **zhipu**：litellm 无目录 → 空模型列表 + 自定义输入兜底（诚实：不伪造、不商业推荐）。
+- **zhipu**：litellm 官方目录键 `zai`（review-pr1073 A1）→ 可枚举 16 个官方 GLM 模型并有计价；
+  若未来 litellm 升级致目录键调整，回落「无目录供应商自定义输入兜底」（§3.1c-F 通用条款）。
 - **azure**：部署制，不枚举 litellm 目录，保留原有部署名输入。
 - **custom**：自由文本，保留。
 - **provider 元数据函数**（`get_provider_icon*`/`get_provider_by_id`/`get_all_providers`/

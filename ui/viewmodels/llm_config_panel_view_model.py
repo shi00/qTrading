@@ -123,7 +123,14 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
             azure_version = llm_config.get("api_version", AZURE_DEFAULT_API_VERSION)
             base_url = ""
         else:
-            if provider == "custom":
+            provider_config = LLM_PROVIDERS.get(provider, {})
+            if provider == "custom" or (
+                "litellm_catalog_key" not in provider_config
+                and not provider_config.get("custom")
+                and not provider_config.get("azure_config")
+            ):
+                # §3.1c-F：custom 或「无 litellm 目录 key 的供应商」（zhipu 修复后不再命中；
+                # 兜底留住未来无目录供应商之手输通道，避免空目录 + 无手输死局）。
                 custom_model_options = self._load_custom_model_history_from_config(provider, llm_config)
                 show_custom = True
                 custom_model = model
@@ -133,7 +140,6 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
                 # 已存 model（含不在新目录中的历史值）原样保留，不回退、不误删。
                 model = model or ""
 
-            provider_config = LLM_PROVIDERS.get(provider, {})
             base_url = base_url or provider_config.get("base_url", "")
 
         self._state = replace(
@@ -239,7 +245,10 @@ class LLMConfigPanelViewModel(ConfigPanelViewModelBase[LLMConfigState]):
 
         if is_azure:
             base_url = ""
-        elif provider_id == "custom":
+        elif provider_id == "custom" or (
+            "litellm_catalog_key" not in provider and not provider.get("custom") and not provider.get("azure_config")
+        ):
+            # §3.1c-F：custom 或「无 litellm 目录 key 的供应商」→ 显示自定义输入兜底。
             show_custom = True
             base_url = stored_base_url
             base_url_read_only = False

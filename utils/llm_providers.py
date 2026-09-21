@@ -60,7 +60,9 @@ LLM_PROVIDERS = {
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "key_prefix": "",
         "litellm_prefix": "openai",
-        # zhipu 在 litellm 无独立目录键 → 留空，诚实降级到自定义输入
+        # zhipu（智谱国内）在 litellm 目录的官方键为 "zai"（智谱国际品牌 Z.ai），
+        # 与 qwen→dashscope 同一范式：UI 枚举与计价统一回溯 zai 目录。
+        "litellm_catalog_key": "zai",
     },
     "moonshot": {
         "name": "Moonshot (Kimi)",
@@ -244,11 +246,11 @@ def get_litellm_models_by_provider() -> dict[str, list[dict]]:
 
     只投影项目支持的供应商（LLM_PROVIDERS 内的 provider_id），不把 litellm 全部
     供应商全量塞入。每项 ``{"id", "context"}``；同一 catalog_key 被多个项目 provider
-    复用（如 qwen 系三个 key）时按归一模型 id 去重。
+    复用时按归一模型 id 去重。
 
     返回:
         ``{provider_id: [{"id": str, "context": int}, ...]}``。某 key 缺失时该 provider
-        为空列表，不崩 UI（升级韧性）。zhipu/azure/custom 无目录 → 空列表。
+        为空列表，不崩 UI（升级韧性）。azure（部署制）/custom（自由文本）无目录 → 空列表。
     """
     global _PROJECTION_CACHE, _PROJECTION_CACHE_LITELLM_VERSION
 

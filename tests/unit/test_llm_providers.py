@@ -55,6 +55,7 @@ def fake_litellm(monkeypatch):
     fake.models_by_provider = {
         "deepseek": {"deepseek-chat", "deepseek/v2", "deepseek-v3"},
         "dashscope": {"qwen-plus", "qwen/qwen-max"},
+        "zai": {"glm-4.6", "zai/glm-5", "glm-5-flash"},
         "openai": {"gpt-4o", "gpt-4o-mini"},
     }
     fake.model_cost = {
@@ -63,6 +64,9 @@ def fake_litellm(monkeypatch):
         "deepseek-v3": {"max_output_tokens": 16000},
         "qwen-plus": {"max_input_tokens": 131072},
         "qwen/qwen-max": {},
+        "glm-4.6": {"max_input_tokens": 200000},
+        "zai/glm-5": {"max_input_tokens": 128000},
+        "glm-5-flash": {"max_tokens": 64000},
         "gpt-4o": {"max_input_tokens": 128000},
         "gpt-4o-mini": {"max_tokens": 64000},
     }
@@ -183,8 +187,14 @@ class TestLLMProviderCatalogKeyDecoupling:
         assert LLM_PROVIDERS["openai"]["litellm_catalog_key"] == "openai"
 
     def test_provider_without_catalog_key_falls_back_to_own_id(self):
-        # zhipu 无独立 litellm 目录 → 回退自身 provider_id，而不是 openai。
-        assert "litellm_catalog_key" not in LLM_PROVIDERS["zhipu"]
+        # custom 显式配置空 catalog key（自由文本，无目录）→ 回退自身 provider_id。
+        # 注意：zhipu 已配置 zai 目录 key（与 qwen→dashscope 同范式），不再作为"无目录"样例。
+        assert LLM_PROVIDERS["custom"].get("litellm_catalog_key", "") == ""
+
+    def test_zhipu_catalog_key_is_zai(self):
+        # review-pr1073 A1：litellm 官方目录中智谱键为 "zai"（Z.ai 品牌），
+        # 与 qwen→dashscope 同范式，使 zhipu 可枚举官方模型且可计价。
+        assert LLM_PROVIDERS["zhipu"]["litellm_catalog_key"] == "zai"
 
 
 class TestLLMProviderName:
@@ -220,10 +230,19 @@ class TestGetLitellmModelsByProvider:
         assert "qwen-plus" in ids
         assert "qwen-max" in ids  # qwen/qwen-max → qwen-max
 
-    def test_missing_catalog_key_provider_returns_empty(self, fake_litellm):
-        """zhipu 无 catalog key，回退 'zhipu'（fake 中不存在）→ 空列表，不崩 UI。"""
+    def test_zhipu_uses_zai_catalog_key(self, fake_litellm):
+        """review-pr1073 A1/M1：zhipu → litellm 目录键 zai，投影出 GLM 模型（归一去重 + context）。"""
         result = get_litellm_models_by_provider()
-        assert result["zhipu"] == []
+        ids = [m["id"] for m in result["zhipu"]]
+        assert ids == ["glm-4.6", "glm-5", "glm-5-flash"]  # zai/glm-5 → glm-5（按 / 右侧归一）
+        by_id = {m["id"]: m["context"] for m in result["zhipu"]}
+        assert by_id["glm-4.6"] == 200000  # max_input_tokens
+
+    def test_missing_catalog_key_provider_returns_empty(self, fake_litellm):
+        """若某供应商目录 key 在 litellm 中不存在（升级韧性）→ 空列表，不崩 UI。"""
+        result = get_litellm_models_by_provider()
+        # fake 未提供 moonshot 目录 → 空列表兜底。
+        assert result["moonshot"] == []
 
     def test_azure_and_custom_always_empty(self, fake_litellm):
         result = get_litellm_models_by_provider()
@@ -397,11 +416,12 @@ class TestGetModelInfo:
 class TestLitellmHelperFunctions:
     def test_resolve_catalog_key_explicit(self):
         assert llm_providers._resolve_catalog_key("qwen") == "dashscope"
+        assert llm_providers._resolve_catalog_key("zhipu") == "zai"
         assert llm_providers._resolve_catalog_key("moonshot") == "moonshot"
 
     def test_resolve_catalog_key_falls_back_to_own_id(self):
-        # zhipu 无显式 catalog key → 回退自身 provider_id（不是 litellm_prefix="openai"）。
-        assert llm_providers._resolve_catalog_key("zhipu") == "zhipu"
+        # 未显式配置 catalog key 的 provider → 回退自身 provider_id（不是 litellm_prefix="openai"）。
+        assert llm_providers._resolve_catalog_key("custom") == "custom"
         assert llm_providers._resolve_catalog_key("openai") == "openai"
 
     def test_normalize_model_id(self):

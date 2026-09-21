@@ -35,12 +35,15 @@ def fake_litellm(monkeypatch):
     fake.models_by_provider = {
         "deepseek": {"deepseek-chat", "deepseek-v3"},
         "dashscope": {"qwen-plus"},
+        "zai": {"glm-4.6", "zai/glm-5"},
         "openai": {"gpt-4o"},
     }
     fake.model_cost = {
         "deepseek-chat": {"max_input_tokens": 65536},
         "deepseek-v3": {"max_output_tokens": 16000},
         "qwen-plus": {"max_input_tokens": 131072},
+        "glm-4.6": {"max_input_tokens": 200000},
+        "zai/glm-5": {"max_input_tokens": 128000},
         "gpt-4o": {"max_input_tokens": 128000},
     }
     monkeypatch.setitem(sys.modules, "litellm", fake)
@@ -221,7 +224,8 @@ class TestModelPickerCatalog:
         asyncio.run(vm.ensure_catalog_loaded())
         st = vm.state
         assert st.is_loading is False
-        assert {g.provider_id for g in st.groups} == {"deepseek", "qwen", "openai"}
+        # zhipu 走 zai 目录（review-pr1073 M1）→ 出现在分组内
+        assert {g.provider_id for g in st.groups} == {"deepseek", "qwen", "zhipu", "openai"}
 
     def test_ensure_catalog_loaded_failure_degrades(self, monkeypatch, mock_config_handler, mock_thread_pool):
         """目录加载失败：is_loading 复位，浏览态保持空（消费方经 status 呈现）。"""
@@ -246,8 +250,8 @@ class TestModelPickerBrowse:
         vm = ModelPickerViewModel()
         groups = vm._build_groups()
         provider_ids = {g.provider_id for g in groups}
-        # zhipu/azure/custom 无目录 → 不出现
-        assert provider_ids == {"deepseek", "qwen", "openai"}
+        # zhipu 走 zai 目录有模型 → 出现；azure/custom 无目录 → 不出现
+        assert provider_ids == {"deepseek", "qwen", "zhipu", "openai"}
 
     def test_build_groups_model_rows_sorted(self, fake_litellm, mock_config_handler):
         vm = ModelPickerViewModel()
