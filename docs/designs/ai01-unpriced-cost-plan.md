@@ -152,7 +152,9 @@ failover 前缀判定（`model.split("/")[0]`）。
    - 按每个 provider 的 `litellm_catalog_key`（回退 `litellm_prefix`）投影 `litellm.models_by_provider`，
      **只投影项目支持的供应商**，不把 litellm 全部 98 个供应商全量塞入。
    - 每模型 `{id, context}`；context 取 `litellm.model_cost.get(id, {})` 的
-     `max_input_tokens`/`max_tokens`/`max_output_tokens`（首非零），全缺退 `0`（`dict.get` 防御）。
+     `max_input_tokens`/`max_tokens`/`max_output_tokens`（首非零），全缺退 0 前先回退
+     `litellm.get_model_info(id)` 第二通道（review-pr1073 A3/C2：model_cost 的 max_* 对
+     openai 一批模型为 None，而 get_model_info 可补齐；无法补齐才 0，`dict.get` 防御）。
    - 同一 catalog_key 被多个项目 provider 复用时按 model id 去重；模型 id 可能是
      `provider/model` 形态，按 `/` 右侧 id 归一。（review-pr1073 A2 修正：「qwen 系三个 key」
      去重意图已落空——`qwen_ai_platform`/`qwencloud` 在 1.100.1 不存在，qwen 组=dashscope；

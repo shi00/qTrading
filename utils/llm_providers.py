@@ -234,6 +234,30 @@ def _extract_context(cost_entry: dict) -> int:
     return 0
 
 
+def _context_with_fallback(raw_id: str, cost_entry: dict, litellm_module) -> int:
+    """context 权威源：model_cost 首查，缺失回退 ``litellm.get_model_info``（review-pr1073 A3/C2）。
+
+    litellm 存在第二通道 ``get_model_info(model)`` 可补齐 ``model_cost`` 中 ``max_*`` 全为
+    None 的模型（实机验证 ``openai/gpt-4o``：``model_cost`` 的 max_* 全 None，而
+    ``get_model_info(...)[\"max_tokens\"]=16384`` 有值）。仅当 model_cost 无法计量时回退，
+    避免对全部模型重复查询。异常防御（升级韧性）：失败保持 0，R21 诚实呈现。
+    """
+    context = _extract_context(cost_entry)
+    if context:
+        return context
+    try:
+        info = litellm_module.get_model_info(raw_id)
+    except Exception:
+        return 0
+    if not isinstance(info, dict):
+        return 0
+    for key in ("max_input_tokens", "max_tokens", "max_output_tokens"):
+        value = info.get(key)
+        if isinstance(value, (int, float)) and value:
+            return int(value)
+    return 0
+
+
 def _normalize_model_id(model_id: str) -> str:
     """模型 id 可能是 ``provider/model`` 形态，按 `/` 右侧 id 归一（P2 去重键）。"""
     return model_id.split("/")[-1] if "/" in model_id else model_id
@@ -298,7 +322,7 @@ def get_litellm_models_by_provider() -> dict[str, list[dict]]:
             entries.append(
                 {
                     "id": norm,
-                    "context": _extract_context(cost_entry if isinstance(cost_entry, dict) else {}),
+                    "context": _context_with_fallback(raw_id, cost_entry, litellm),
                 }
             )
         # 稳定排序（防抖动）：按模型 id。

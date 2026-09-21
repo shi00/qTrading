@@ -57,7 +57,7 @@ def fake_litellm(monkeypatch):
         # review-pr1073 D1：dashscope 目录含第三方托管模型（deepseek/glm/kimi），投影须品牌过滤
         "dashscope": {"qwen-plus", "qwen/qwen-max", "deepseek-v4-flash", "glm-5.1", "kimi-k2.7-code"},
         "zai": {"glm-4.6", "zai/glm-5", "glm-5-flash"},
-        "openai": {"gpt-4o", "gpt-4o-mini"},
+        "openai": {"gpt-4o", "gpt-4o-mini", "gpt-5-fallback"},
     }
     fake.model_cost = {
         "deepseek-chat": {"max_input_tokens": 65536},
@@ -74,6 +74,11 @@ def fake_litellm(monkeypatch):
         "gpt-4o": {"max_input_tokens": 128000},
         "gpt-4o-mini": {"max_tokens": 64000},
     }
+
+    # review-pr1073 A3/C2：model_cost 缺 max_* 时经 get_model_info 第二通道补齐。
+    # gpt-4o（model_cost 有 max_input_tokens）不受影响；gpt-5-fallback（无条目）走第二通道。
+    fake.get_model_info = lambda model: {"max_tokens": 16384} if "gpt-5-fallback" in model else {}
+
     monkeypatch.setitem(sys.modules, "litellm", fake)
     monkeypatch.setattr(llm_providers, "_PROJECTION_CACHE", {})
     monkeypatch.setattr(llm_providers, "_PROJECTION_CACHE_LITELLM_VERSION", "")
@@ -263,6 +268,16 @@ class TestGetLitellmModelsByProvider:
         result = get_litellm_models_by_provider()
         assert result["azure"] == []
         assert result["custom"] == []
+
+    def test_context_fallback_to_get_model_info(self, fake_litellm):
+        """review-pr1073 A3/C2：model_cost 缺 max_* 时经 get_model_info 第二通道补齐。
+
+        实机 gpt-4o model_cost 的 max_* 全为 None，但 get_model_info().max_tokens 有值；
+        此处用 gpt-5-fallback（model_cost 无条目）验证回退路径。
+        """
+        result = get_litellm_models_by_provider()
+        by_id = {m["id"]: m["context"] for m in result["openai"]}
+        assert by_id["gpt-5-fallback"] == 16384  # 经 fake.get_model_info 补齐
 
     def test_cache_hit_isolates_from_fake_mutation(self, fake_litellm):
         """命中缓存后不应因 litellm 数据变化而重投影。"""
