@@ -53,6 +53,7 @@ from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelView
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
+from utils.app_env import is_e2e_mode
 
 logger = logging.getLogger(__name__)
 
@@ -174,12 +175,18 @@ def _build_health_summary_content(result: HealthResultRow) -> ft.Control:
             ft.Row(
                 [
                     ft.Icon(ft.Icons.VERIFIED, size=AppStyles.FONT_SIZE_LG, color=AppColors.PRIMARY),
+                    # DS-06: E2E 模式（测试态）质量门控被禁用（quality_gate 绕过），
+                    # 必须显式呈现而非显示一个"看似未检测"的等级——降级必须可见。
                     ft.Text(
-                        f"{I18n.get('ds_data_quality_tier')}: {I18n.get(f'quality_tier_{result.quality_tier}')}"
-                        if result.quality_tier is not None
-                        else f"{I18n.get('ds_data_quality_tier')}: {I18n.get('ds_not_checked')}",
+                        I18n.get("ds_e2e_gate_disabled")
+                        if is_e2e_mode()
+                        else (
+                            f"{I18n.get('ds_data_quality_tier')}: {I18n.get(f'quality_tier_{result.quality_tier}')}"
+                            if result.quality_tier is not None
+                            else f"{I18n.get('ds_data_quality_tier')}: {I18n.get('ds_not_checked')}"
+                        ),
                         size=AppStyles.FONT_SIZE_BODY_SM,
-                        color=AppColors.TEXT_PRIMARY,
+                        color=AppColors.WARNING if is_e2e_mode() else AppColors.TEXT_PRIMARY,
                     ),
                 ],
                 spacing=5,

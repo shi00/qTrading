@@ -1104,6 +1104,7 @@
     "ds_last_update": "最后更新",
     "ds_data_coverage": "数据覆盖",
     "ds_data_quality_tier": "当前质量等级",
+    "ds_e2e_gate_disabled": "质量门控已禁用（E2E 模式）",
     "ds_sys_health": "系统健康",
     "ds_storage_usage": "存储占用",
     "ds_status_checking": "检测中...",

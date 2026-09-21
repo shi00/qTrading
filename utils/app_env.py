@@ -7,11 +7,18 @@
 from __future__ import annotations
 
 import os
+import sys
 
 
 def is_e2e_mode() -> bool:
     """E2E 测试模式判定（单一事实来源，review03-C16）。
 
     所有层的 E2E 分支应统一调用本函数，而非直接读取 ``os.environ["E2E_TESTING"]``。
+
+    DS-06: 冻结产物（PyInstaller 分发版）恒返回 False——E2E_TESTING 是测试开关，
+    不应能被终端用户在打包分发版上通过环境变量静默打开（关闭质量门控等安全机制）。
+    E2E 测试以源码运行（CI ``pytest tests/e2e/``），``sys.frozen`` 不存在，不受影响。
     """
+    if getattr(sys, "frozen", False):
+        return False
     return os.environ.get("E2E_TESTING") == "true"

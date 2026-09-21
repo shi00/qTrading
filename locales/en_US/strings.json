@@ -1217,6 +1217,7 @@
     "ds_last_update": "Last Update",
     "ds_data_coverage": "Coverage",
     "ds_data_quality_tier": "Quality Tier",
+    "ds_e2e_gate_disabled": "Quality gate disabled (E2E mode)",
     "ds_sys_health": "System Health",
     "ds_storage_usage": "Storage",
     "ds_status_checking": "Checking...",
