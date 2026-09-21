@@ -322,6 +322,10 @@ failover 前缀判定（`model.split("/")[0]`）。
   `get_month_unpriced`），UI 设置页本月累计文案在存在不可计价量时追加说明。
 - `ui/views/settings_tabs/ai_brain_tab.py`：渲染不可计价说明。
 - i18n：新增英文/简体中文字符串（设置页 + 批次汇总 + 保守提示确认框）。
+- **护栏状态 UI 呈现（review-pr1073 M2）**：`budget_unpriced_prompt`/`budget_exceeded`/
+  `policy_not_acknowledged` 与 `failed` 同落 failed 分区（D7-3 零丢失契约），但
+  `_build_ai_failed_banner_message` 只统计 `ai_status=="failed"`，护栏状态**不会**触发
+  "AI 分析失败"顶端横幅——用户可区分"护栏拒绝"（+=on_progress 确认框消息）与"AI 全失败"。
 
 ## 四、测试（配套，R19）
 

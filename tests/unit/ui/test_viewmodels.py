@@ -596,6 +596,20 @@ class TestScreenerViewModelSplitPageByAiStatus:
         assert [r.values["ts_code"] for r in fail] == ["x2", "x3", "x5"]
         assert len(rec) + len(exc) + len(fail) == len(rows)
 
+    def test_guard_blocked_statuses_go_to_failed_zone(self, screener_vm):
+        """M2（review-pr1073）：护栏拒绝状态与"AI 分析失败"同落 failed 分区，行为须锁定。
+
+        budget_unpriced_prompt / budget_exceeded / policy_not_acknowledged 是"AI 有效但被护栏
+        拒绝"（非 analyzed/rejected）。它们与 failed 同区呈现（零丢失契约），**但不得**被
+        _build_ai_failed_banner_message 误报为"AI 分析失败"横幅（另见 test_screener_view_model）。
+        """
+        rows = self._rows(["budget_unpriced_prompt", "budget_exceeded", "policy_not_acknowledged", "analyzed"])
+        rec, exc, fail = ScreenerViewModel._split_page_rows_by_ai_status(rows)
+        assert [r.values["ts_code"] for r in rec] == ["x3"]
+        assert exc == ()
+        assert [r.values["ts_code"] for r in fail] == ["x0", "x1", "x2"]
+        assert len(rec) + len(exc) + len(fail) == len(rows)
+
     def test_empty_input(self, screener_vm):
         rec, exc, fail = ScreenerViewModel._split_page_rows_by_ai_status(())
         assert rec == () and exc == () and fail == ()
