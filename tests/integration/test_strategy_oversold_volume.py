@@ -31,9 +31,10 @@ def _build_quotes_df(ts_code, dates, close_start, vol_base, vol_spike_at=None):
 
 class TestOversoldVolumeThreshold:
     def test_vol_ratio_filter_reduces_candidates(self):
-        dates = [datetime.date(2026, 4, 1) + datetime.timedelta(days=i) for i in range(30)]
+        # SC-05: day_count 门槛 period*5=70，数据须 ≥ 70 天才有候选可筛
+        dates = [datetime.date(2026, 4, 1) + datetime.timedelta(days=i) for i in range(75)]
 
-        high_vol_df = _build_quotes_df("000001.SZ", dates, 10.0, 1000.0, vol_spike_at=25)
+        high_vol_df = _build_quotes_df("000001.SZ", dates, 10.0, 1000.0, vol_spike_at=70)
         low_vol_df = _build_quotes_df("000002.SZ", dates, 8.0, 100.0)
         df = pl.concat([high_vol_df, low_vol_df])
 
@@ -56,7 +57,7 @@ class TestOversoldVolumeThreshold:
                 ]
             )
             .filter(pl.col("trade_date") == dates[-1])
-            .filter(pl.col("day_count") >= 28)
+            .filter(pl.col("day_count") >= 70)  # SC-05: period=14 × 5（原 period*2=28）
             .filter(pl.col(rsi_col) < 30)
             .collect()
         )
@@ -70,7 +71,8 @@ class TestOversoldVolumeThreshold:
         )
 
     def test_extreme_threshold_excludes_all(self):
-        dates = [datetime.date(2026, 4, 1) + datetime.timedelta(days=i) for i in range(30)]
+        # SC-05: day_count 门槛 period*5=70，数据须 ≥ 70 天才有候选可筛
+        dates = [datetime.date(2026, 4, 1) + datetime.timedelta(days=i) for i in range(75)]
         df = _build_quotes_df("000004.SZ", dates, 6.0, 200.0)
 
         rsi_col = "rsi_14"
@@ -92,7 +94,7 @@ class TestOversoldVolumeThreshold:
                 ]
             )
             .filter(pl.col("trade_date") == dates[-1])
-            .filter(pl.col("day_count") >= 28)
+            .filter(pl.col("day_count") >= 70)  # SC-05: period=14 × 5（原 period*2=28）
             .filter(pl.col(rsi_col) < 30)
             .filter(pl.col("vol_ratio_5d") >= 999.0)
             .collect()
@@ -101,7 +103,8 @@ class TestOversoldVolumeThreshold:
         assert result.height == 0, "Extreme vol_ratio_threshold should exclude all stocks"
 
     def test_zero_threshold_includes_low_volume(self):
-        dates = [datetime.date(2026, 4, 1) + datetime.timedelta(days=i) for i in range(30)]
+        # SC-05: day_count 门槛 period*5=70，数据须 ≥ 70 天才有候选可筛
+        dates = [datetime.date(2026, 4, 1) + datetime.timedelta(days=i) for i in range(75)]
         df = _build_quotes_df("000003.SZ", dates, 5.0, 50.0)
 
         rsi_col = "rsi_14"
@@ -123,7 +126,7 @@ class TestOversoldVolumeThreshold:
                 ]
             )
             .filter(pl.col("trade_date") == dates[-1])
-            .filter(pl.col("day_count") >= 28)
+            .filter(pl.col("day_count") >= 70)  # SC-05: period=14 × 5（原 period*2=28）
             .filter(pl.col(rsi_col) < 30)
             .filter(pl.col("vol_ratio_5d") >= 0.0)
             .collect()

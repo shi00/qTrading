@@ -733,8 +733,15 @@ jobs:
           # (PR #357 CI run 30426103862 复现根因)。
           E2E_TIMEOUT_MULTIPLIER: "2.0"
         shell: bash
+        # -o addopts="" -p no:xdist 串行执行：清空 pyproject.toml 的 addopts="-n auto --dist=loadgroup"
+        # 并禁用 xdist，避免用例跨 worker 并发启动多个 Flet sidecar 进程，_free_port() 探测后的
+        # 释放-再绑定窗口内端口竞态导致 bind 失败（Linux errno 98，CI run 35553853143 复现）。
+        # 与 e2e-tests job (Windows) 的 e2e 串行策略一致。
         run: |
-          python -m pytest tests/e2e/test_onboarding_embedded_real.py -v --tb=short -p no:randomly --timeout=600 --timeout-method=thread
+          python -m pytest \
+            -o addopts="" -p no:xdist -p no:randomly \
+            tests/e2e/test_onboarding_embedded_real.py \
+            -v --tb=short --timeout=600 --timeout-method=thread
 
       - name: Run E2E smoke subset (Linux only, review07 G16)
         # review07 G16 平台盲区补充：Linux PR 此前仅跑 1 个 E2E 文件，44 个用例主路径
@@ -748,15 +755,18 @@ jobs:
           SIDECAR_SHA256: ${{ env.SIDECAR_SHA256 }}
           E2E_TIMEOUT_MULTIPLIER: "2.0"
         shell: bash
+        # 串行执行（同上方 Run E2E tests 步骤）：禁用 xdist 并发，避免多 sidecar 进程
+        # 并发启动时 _free_port() 释放-再绑定窗口内端口竞态（Linux errno 98）导致进程退出。
         run: |
           python -m pytest \
+            -o addopts="" -p no:xdist -p no:randomly \
             tests/e2e/test_smoke.py::test_app_boots_and_shows_nav \
             tests/e2e/test_navigation.py::test_switch_to_settings \
             tests/e2e/test_navigation.py::test_switch_to_screener \
             tests/e2e/test_home_flow.py::test_home_view_loads \
             tests/e2e/test_screener_anchor_smoke.py::test_screener_anchor_dom_present \
             tests/e2e/test_screener_anchor_smoke.py::test_screener_anchor_click_strategy_dropdown_opens \
-            -v --tb=short -p no:randomly --timeout=600 --timeout-method=thread
+            -v --tb=short --timeout=600 --timeout-method=thread
 
       - name: Upload test reports
         if: always()

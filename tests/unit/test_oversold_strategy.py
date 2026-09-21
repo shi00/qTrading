@@ -909,8 +909,11 @@ class TestOversoldGetAiContext(unittest.TestCase):
 
 
 def _make_history_pdf_for_rsi():
-    """Build 60-day descending-price history so RSI(14) < 30 is satisfied for one ts_code."""
-    n_days = 60
+    """Build 75-day descending-price history so RSI(14) < 30 is satisfied for one ts_code.
+
+    SC-05: day_count 门槛 period*5=70，60 天数据会被全过滤，故扩到 75 天。
+    """
+    n_days = 75
     dates = [datetime.date(2024, 6, 14) - datetime.timedelta(days=i) for i in range(n_days)]
     dates.reverse()
     return pd.DataFrame(
