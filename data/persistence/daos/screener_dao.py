@@ -56,6 +56,8 @@ _SCREENING_SQL_TEMPLATE = """
                      f.debt_to_assets,
                      f.or_yoy,
                      f.netprofit_yoy,
+                     f.n_income,
+                     f_prev.gpm_prev,
                      CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable
                FROM stock_basic b
                         LEFT JOIN daily_quotes q ON b.ts_code = q.ts_code AND q.trade_date = $1
@@ -65,13 +67,15 @@ _SCREENING_SQL_TEMPLATE = """
                                           f_inner.grossprofit_margin,
                                           f_inner.debt_to_assets,
                                           f_inner.or_yoy,
-                                          f_inner.netprofit_yoy
+                                          f_inner.netprofit_yoy,
+                                          f_inner.n_income
                                    FROM (SELECT ts_code,
                                                 roe,
                                                 grossprofit_margin,
                                                 debt_to_assets,
                                                 or_yoy,
                                                 netprofit_yoy,
+                                                n_income,
                                                 ROW_NUMBER() OVER (
                                                     PARTITION BY ts_code
                                                     ORDER BY end_date DESC, ann_date DESC  -- DAT-03: 最新一期财报口径 end_date DESC, ann_date DESC
@@ -80,6 +84,26 @@ _SCREENING_SQL_TEMPLATE = """
                                          WHERE ann_date IS NOT NULL AND ann_date <= $3) f_inner
                                    WHERE f_inner.rn = 1) f
                                   ON b.ts_code = f.ts_code
+                        LEFT JOIN (SELECT g.ts_code,
+                                          g.grossprofit_margin AS gpm_prev
+                                   FROM (SELECT f2.ts_code,
+                                                f2.grossprofit_margin,
+                                                ROW_NUMBER() OVER (
+                                                    PARTITION BY f2.ts_code
+                                                    ORDER BY f2.end_date DESC
+                                                ) AS pr
+                                         FROM (SELECT fr.ts_code,
+                                                      fr.grossprofit_margin,
+                                                      fr.end_date,
+                                                      ROW_NUMBER() OVER (
+                                                          PARTITION BY fr.ts_code, fr.end_date
+                                                          ORDER BY fr.ann_date DESC
+                                                      ) AS rn_period
+                                               FROM financial_reports fr
+                                               WHERE fr.ann_date IS NOT NULL AND fr.ann_date <= $3) f2
+                                         WHERE f2.rn_period = 1) g
+                                   WHERE g.pr = 2) f_prev
+                                  ON b.ts_code = f_prev.ts_code
                         LEFT JOIN LATERAL (
                             SELECT l2_name
                             FROM sw_industry_member
@@ -120,6 +144,8 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                      f.debt_to_assets,
                      f.or_yoy,
                      f.netprofit_yoy,
+                     f.n_income,
+                     f_prev.gpm_prev,
                      CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable
                FROM (
                    SELECT cal_date
@@ -136,7 +162,8 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                                    f_inner.grossprofit_margin,
                                    f_inner.debt_to_assets,
                                    f_inner.or_yoy,
-                                   f_inner.netprofit_yoy
+                                   f_inner.netprofit_yoy,
+                                   f_inner.n_income
                             FROM financial_reports f_inner
                             WHERE f_inner.ts_code = b.ts_code
                               AND f_inner.ann_date IS NOT NULL
@@ -144,6 +171,29 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                             ORDER BY f_inner.end_date DESC, f_inner.ann_date DESC  -- DAT-03: 最新一期财报口径 end_date DESC, ann_date DESC
                             LIMIT 1
                         ) f ON TRUE
+                        LEFT JOIN LATERAL (
+                            SELECT g.grossprofit_margin AS gpm_prev
+                            FROM (
+                                SELECT f2.grossprofit_margin,
+                                       ROW_NUMBER() OVER (
+                                           ORDER BY f2.end_date DESC
+                                       ) AS pr
+                                FROM (
+                                    SELECT fr.grossprofit_margin,
+                                           fr.end_date,
+                                           ROW_NUMBER() OVER (
+                                               PARTITION BY fr.end_date
+                                               ORDER BY fr.ann_date DESC
+                                           ) AS rn_period
+                                    FROM financial_reports fr
+                                    WHERE fr.ts_code = b.ts_code
+                                      AND fr.ann_date IS NOT NULL
+                                      AND fr.ann_date <= cal.cal_date
+                                ) f2
+                                WHERE f2.rn_period = 1
+                            ) g
+                            WHERE g.pr = 2
+                        ) f_prev ON TRUE
                         LEFT JOIN LATERAL (
                             SELECT l2_name
                             FROM sw_industry_member

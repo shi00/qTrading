@@ -52,6 +52,9 @@ def strategies_ctx():
             "netprofit_yoy": [30.0, 5.0, -10.0],
             "roe": [16.0, 8.0, 5.0],
             "debt_to_assets": [40.0, 80.0, 60.0],
+            "n_income": [5000.0, 2000.0, 1000.0],
+            "grossprofit_margin": [40.0, 35.0, 30.0],
+            "gpm_prev": [38.0, 33.0, 28.0],
         },
     )
 

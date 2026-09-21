@@ -162,6 +162,9 @@ class TestGrowthStrategy(unittest.TestCase):
                     "or_yoy": 30.0,
                     "netprofit_yoy": 40.0,
                     "roe": 20.0,
+                    "n_income": 5000.0,
+                    "grossprofit_margin": 40.0,
+                    "gpm_prev": 38.0,
                 },
                 {
                     "ts_code": "000002.SZ",
@@ -169,6 +172,9 @@ class TestGrowthStrategy(unittest.TestCase):
                     "or_yoy": 25.0,
                     "netprofit_yoy": 30.0,
                     "roe": 18.0,
+                    "n_income": 3000.0,
+                    "grossprofit_margin": 35.0,
+                    "gpm_prev": 36.0,
                 },
                 {
                     "ts_code": "000003.SZ",
@@ -176,6 +182,9 @@ class TestGrowthStrategy(unittest.TestCase):
                     "or_yoy": 15.0,
                     "netprofit_yoy": 20.0,
                     "roe": 10.0,
+                    "n_income": 1000.0,
+                    "grossprofit_margin": 30.0,
+                    "gpm_prev": 32.0,
                 },
                 {
                     "ts_code": "000004.SZ",
@@ -183,6 +192,9 @@ class TestGrowthStrategy(unittest.TestCase):
                     "or_yoy": -5.0,
                     "netprofit_yoy": -10.0,
                     "roe": 5.0,
+                    "n_income": -500.0,
+                    "grossprofit_margin": 20.0,
+                    "gpm_prev": 22.0,
                 },
             ]
         )
@@ -244,6 +256,125 @@ class TestGrowthStrategy(unittest.TestCase):
 
         roe_values = result["roe"].to_list()
         self.assertEqual(roe_values, sorted(roe_values, reverse=True))
+
+    def test_growth_strategy_base_loss_loss_narrowing_excluded(self):
+        """SC-03: 基期亏损"亏损收窄"（上年-1000万→本期-100万）netprofit_yoy=+90 无业务含义，
+        绝对盈利下限 n_income > 0 必须剔除仍在亏损的股票。"""
+        df = pd.DataFrame(
+            [
+                {
+                    "ts_code": "000009.SZ",
+                    "name": "亏损收窄",
+                    "or_yoy": 30.0,
+                    "netprofit_yoy": 90.0,
+                    "roe": 20.0,
+                    "n_income": -100.0,
+                    "grossprofit_margin": 40.0,
+                    "gpm_prev": 38.0,
+                }
+            ]
+        )
+        lf = pl.from_pandas(df).lazy()
+        context = {"params": {"revenue_growth_min": 0, "profit_growth_min": 25, "roe_min": 0}}
+        result = self.strategy._filter_logic(lf, context).collect()
+        self.assertEqual(result.height, 0)
+
+    def test_growth_strategy_loss_to_profit_passes(self):
+        """SC-03: 扭亏为盈（本期已盈利）n_income > 0 放行，netprofit_yoy 高位通过门槛。"""
+        df = pd.DataFrame(
+            [
+                {
+                    "ts_code": "000010.SZ",
+                    "name": "扭亏为盈",
+                    "or_yoy": 30.0,
+                    "netprofit_yoy": 300.0,
+                    "roe": 20.0,
+                    "n_income": 200.0,
+                    "grossprofit_margin": 40.0,
+                    "gpm_prev": 38.0,
+                }
+            ]
+        )
+        lf = pl.from_pandas(df).lazy()
+        context = {"params": {"revenue_growth_min": 0, "profit_growth_min": 25, "roe_min": 0}}
+        result = self.strategy._filter_logic(lf, context).collect()
+        self.assertEqual(result.height, 1)
+
+    def test_growth_strategy_null_net_income_passes(self):
+        """SC-03: n_income 缺失（null）放行不伪造（R21），交数据/AI 后续处理。"""
+        df = (
+            pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000011.SZ",
+                        "name": "数据缺失",
+                        "or_yoy": 30.0,
+                        "netprofit_yoy": 40.0,
+                        "roe": 20.0,
+                        "n_income": None,
+                        "grossprofit_margin": 40.0,
+                        "gpm_prev": 38.0,
+                    }
+                ]
+            )
+            # 全 None 列被 pandas 推断为 object，显式转 float64 模拟 SQL 数值列缺失（NaN→null）
+            .astype({"n_income": "float64"})
+        )
+        lf = pl.from_pandas(df).lazy()
+        context = {"params": {"revenue_growth_min": 0, "profit_growth_min": 25, "roe_min": 0}}
+        result = self.strategy._filter_logic(lf, context).collect()
+        self.assertEqual(result.height, 1)
+
+    def test_growth_strategy_growth_quality_doubt_downranks(self):
+        """SC-03: 增长质量存疑（净利增速 > 2 倍营收增速 且 毛利率未改善）降权置后，而非硬过滤。"""
+        df = pd.DataFrame(
+            [
+                {
+                    "ts_code": "000021.SZ",
+                    "name": "存疑高增长",
+                    "or_yoy": 20.0,
+                    "netprofit_yoy": 60.0,
+                    "roe": 22.0,
+                    "n_income": 5000.0,
+                    "grossprofit_margin": 35.0,
+                    "gpm_prev": 38.0,
+                },
+                {
+                    "ts_code": "000022.SZ",
+                    "name": "正常高增长",
+                    "or_yoy": 20.0,
+                    "netprofit_yoy": 30.0,
+                    "roe": 20.0,
+                    "n_income": 4000.0,
+                    "grossprofit_margin": 35.0,
+                    "gpm_prev": 30.0,
+                },
+            ]
+        )
+        lf = pl.from_pandas(df).lazy()
+        context = {"params": {"revenue_growth_min": 0, "profit_growth_min": 25, "roe_min": 0}}
+        result = self.strategy._filter_logic(lf, context).collect()
+        # 存疑行 netprofit_yoy=60 > 2*or_yoy=40 且 gpm(35) <= gpm_prev(38) → doubt=1，排后
+        self.assertEqual(result["ts_code"].to_list(), ["000022.SZ", "000021.SZ"])
+        doubts = dict(zip(result["ts_code"].to_list(), result["growth_quality_doubt"].to_list(), strict=True))
+        self.assertEqual(doubts["000021.SZ"], 1)
+        self.assertEqual(doubts["000022.SZ"], 0)
+
+    def test_growth_strategy_build_attribution_doubt_condition(self):
+        """SC-03: 归因仅对存疑行（doubt=1）追加 growth_quality_doubt 条件；正常行不渲染该条件。"""
+        s = self.strategy
+        attr_doubt = s.build_attribution(
+            {"or_yoy": 20.0, "netprofit_yoy": 60.0, "roe": 22.0, "growth_quality_doubt": 1},
+            total_candidates=10,
+            context={"params": {}},
+        )
+        self.assertTrue(any(c.column == "growth_quality_doubt" for c in attr_doubt.conditions))
+        attr_normal = s.build_attribution(
+            {"or_yoy": 20.0, "netprofit_yoy": 30.0, "roe": 20.0, "growth_quality_doubt": 0},
+            total_candidates=10,
+            context={"params": {}},
+        )
+        self.assertFalse(any(c.column == "growth_quality_doubt" for c in attr_normal.conditions))
 
 
 class TestDividendStrategy(unittest.TestCase):

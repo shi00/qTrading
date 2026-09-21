@@ -658,6 +658,16 @@ class TestScreenerDaoBuildScreeningSql:
         sql = dao._build_screening_sql()
         assert "ann_date IS NOT NULL AND ann_date <=" in sql
 
+    def test_build_sql_contains_sc03_columns(self):
+        """SC-03: 模板必须提供 n_income（绝对盈利下限）与 gpm_prev（上一报告期毛利率，增长质量判据）。"""
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql()
+        assert "n_income" in sql
+        assert "gpm_prev" in sql
+        sql_range = dao._build_screening_sql_range()
+        assert "n_income" in sql_range
+        assert "gpm_prev" in sql_range
+
 
 class TestScreenerDaoSwIndustryJoin:
     """DAT-08③：验证 screener_dao SQL 使用 LEFT JOIN sw_industry_member 拆分为两列。
