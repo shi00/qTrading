@@ -1610,7 +1610,7 @@ class TestRunAiAnalysisUsageSummary:
             mock_ai_instance.analyze_stock = mock_analyze
             mock_ai.return_value = mock_ai_instance
             mock_tracker = MagicMock()
-            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_cost_cents = AsyncMock()
             mock_tracker_cls.return_value = mock_tracker
 
             result = await s.run_ai_analysis(candidates, context)
@@ -1624,7 +1624,7 @@ class TestRunAiAnalysisUsageSummary:
         # 已分析行正常排序在前
         assert result.iloc[0]["ai_status"] == "analyzed"
         # 仅已分析 20 股耗用落账（0.01*20=0.2 元 → 20 分），且只落账一次
-        mock_tracker.add_cost_cny.assert_awaited_once_with(20)
+        mock_tracker.add_cost_cents.assert_awaited_once_with(20)
         assert context["_ai_usage_summary"]["calls"] == 20
         # 批内软停标记同步设置（供 UI/夜间任务区分"预算超限"与"无候选"）
         assert context["_ai_budget_exceeded"] is True
