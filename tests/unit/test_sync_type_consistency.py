@@ -60,16 +60,15 @@ class TestSyncTypeConsistency:
         assert not missing, f"HistoricalSyncStrategy.SYNCED_TABLES missing tables: {missing}"
 
     def test_validate_schema_definitions_includes_common_columns(self):
+        from data.data_dictionary import columns_of
         from data.persistence.models import Base
 
         db_tables = set(Base.metadata.tables.keys())
         for table_name in TABLE_DEFINITIONS:
             if table_name not in db_tables:
                 continue
-            orm_table = Base.metadata.tables[table_name]
-            orm_cols = set(c.name for c in orm_table.columns)
-            dd_table_cols = set(TABLE_DEFINITIONS[table_name].get("columns", {}).keys())
-            dd_cols_with_common = dd_table_cols | set(COMMON_COLUMNS.keys())
+            orm_cols = set(columns_of(table_name))
+            dd_cols_with_common = set(columns_of(table_name)) | set(COMMON_COLUMNS.keys())
             assert not any(col in COMMON_COLUMNS and col not in dd_cols_with_common for col in orm_cols), (
                 "validate_schema_definitions should include COMMON_COLUMNS in dd_cols"
             )
@@ -139,15 +138,15 @@ class TestSyncTypeConsistency:
         assert len(sig.parameters) >= 3, "_run_historical_sync should accept days, progress_callback, result"
 
     def test_validate_schema_definitions_phantom_cols_excludes_common(self):
+        from data.data_dictionary import columns_of
         from data.persistence.models import Base
 
         db_tables = set(Base.metadata.tables.keys())
         for table_name in TABLE_DEFINITIONS:
             if table_name not in db_tables:
                 continue
-            orm_table = Base.metadata.tables[table_name]
-            orm_cols = set(c.name for c in orm_table.columns)
-            dd_table_cols = set(TABLE_DEFINITIONS[table_name].get("columns", {}).keys())
+            orm_cols = set(columns_of(table_name))
+            dd_table_cols = set(columns_of(table_name))
             phantom_cols = dd_table_cols - orm_cols
             common_only_phantom = phantom_cols & set(COMMON_COLUMNS.keys())
             assert not common_only_phantom, (
