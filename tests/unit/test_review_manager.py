@@ -10,6 +10,7 @@ import pandas as pd
 import datetime
 
 from data.cache.cache_manager import CacheManager
+from data.constants import REVIEW_STATUS_T1_DONE
 from data.external.tushare_client import TushareClient
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.review_manager import ReviewManager
@@ -964,7 +965,10 @@ class TestReviewManagerIndexCacheNaN:
             call_kwargs = rm._update_result.call_args
             result_data = call_kwargs[1] if call_kwargs[1] else call_kwargs[0]
             if isinstance(result_data, dict) and "alpha" in result_data:
-                assert pd.notna(result_data["alpha"])
+                # RV-04: 基准缺失时数值-only 解耦写入，alpha=None（标签未定稿）合法；
+                # NaN 仍禁止（数据污染）。
+                alpha_val = result_data["alpha"]
+                assert alpha_val is None or pd.notna(alpha_val)
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -998,6 +1002,167 @@ class TestReviewManagerIndexCacheNaN:
         mock_cache.quote_dao.get_index_daily = AsyncMock(return_value=None)
         rm._update_result = AsyncMock()
         await rm.run_review()
+
+
+class TestReviewManagerRv04Decouple:
+    """RV-04: 基准缺失时数值/标签解耦——已算好的数值不再被 continue 丢弃，标签停留补标签通道。"""
+
+    @staticmethod
+    def _make_rm(mock_cm):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        # 全部基准候选（配置 + MAJOR_INDICES）探测不可得 → _resolve_benchmark 返回配置基准 + 诊断
+        rm._resolve_index_close = AsyncMock(return_value=None)
+        rm._prefetch_index_cache = AsyncMock(return_value={})
+        rm._batch_update_results = AsyncMock()
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240610"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 6,
+                    "trade_date": ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"],
+                    "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "pct_chg": [1.0, 0.5, 0.0, 0.0, 0.0, 5.0],
+                }
+            )
+        )
+        return rm, mock_cache
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_run_review_benchmark_missing_stages_numeric_only(self, mock_cm, mock_tc):
+        """T1: 基准缺失时 t5_pct 照常落库（修复前 continue 丢弃），标签字段 NULL +
+        review_status=T1_DONE 留在补标签通道（get_unlabeled_predictions）。"""
+        rm, _ = self._make_rm(mock_cm)
+        await rm.run_review()
+        assert rm._batch_update_results.await_count == 1  # 恰好一批数值-only 写入
+        updates = rm._batch_update_results.call_args.args[0]
+        assert len(updates) == 1
+        u = updates[0]
+        assert u["record_id"] == 1
+        assert u["t5_pct"] == pytest.approx(5.0)  # (10.5/10.0 - 1) × 100
+        assert u["t5_price"] == pytest.approx(10.5)
+        assert u["pct"] == pytest.approx(0.5)  # (10.05/10.0 - 1) × 100
+        assert u["label"] is None  # R21: 标签未定稿用 NULL，不伪造
+        assert u["alpha"] is None
+        assert u["index_pct"] is None
+        assert u["review_status"] == REVIEW_STATUS_T1_DONE
+        # 诊断已记录（供 job 呈现，不再只有日志 warning）
+        assert rm._benchmark_diag is not None
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_finalizes_label_for_numeric_only_records(self, mock_cm, mock_tc):
+        """T2: B 类候选（数值已齐、标签未定稿）基准恢复 → 仅补定稿标签，数值通道不触发。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        # 基准恢复：t0 → 100.0、T+5 → 101.0，窗口 +1%
+        rm._resolve_index_close = AsyncMock(
+            side_effect=lambda _idx, d: 101.0 if str(d).replace("-", "") == "20240617" else 100.0
+        )
+        rm._batch_backfill_t5 = AsyncMock()
+        rm._batch_finalize_labels = AsyncMock()
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(return_value=[])
+        mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610", "t5_pct": 5.0}]
+        )
+        count = await rm.backfill_horizon_returns()
+        assert count == 1
+        rm._batch_backfill_t5.assert_not_called()  # 数值已在库，不走数值通道
+        assert rm._batch_finalize_labels.await_count == 1  # 恰好一批补定稿
+        label_updates = rm._batch_finalize_labels.call_args.args[0]
+        assert len(label_updates) == 1
+        lu = label_updates[0]
+        assert lu["record_id"] == 1
+        assert lu["alpha"] == pytest.approx(4.0)  # 5.0 - 1.0
+        assert lu["label"] == "WIN"  # 4.0 > win_threshold(3.0)
+        assert lu["benchmark_code"]  # 记录实际使用的基准
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_b_class_missing_benchmark_stays_pending(self, mock_cm, mock_tc):
+        """B 类基准仍缺失 → 不写任何更新（数值已在库无丢失），次日重试。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        rm._batch_backfill_t5 = AsyncMock()
+        rm._batch_finalize_labels = AsyncMock()
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(return_value=[])
+        mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610", "t5_pct": 5.0}]
+        )
+        count = await rm.backfill_horizon_returns()
+        assert count == 0
+        rm._batch_backfill_t5.assert_not_called()
+        rm._batch_finalize_labels.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_resolve_benchmark_degrades_to_first_available(self, mock_cm, mock_tc):
+        """T4: 配置基准无数据 → 沿 MAJOR_INDICES 降级到首个可得候选，诊断含双方代码。"""
+        rm = ReviewManager()
+        rm._resolve_index_close = AsyncMock(side_effect=lambda idx, _d: None if idx == "000985.CSI" else 100.0)
+        with patch("data.persistence.review_manager.ConfigHandler.get_config", return_value="000985.CSI"):
+            resolved = await rm._resolve_benchmark(datetime.date(2024, 6, 10))
+        assert resolved == "000001.SH"  # MAJOR_INDICES 首个候选
+        assert rm._benchmark_diag is not None
+        assert "000985.CSI" in rm._benchmark_diag
+        assert "000001.SH" in rm._benchmark_diag
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_resolve_benchmark_resets_diag_on_recovery(self, mock_cm, mock_tc):
+        """同实例先降级后恢复：配置基准直接命中时须清除过时的降级诊断（防 job 拼接残留）。"""
+        rm = ReviewManager()
+        # 第一次解析：配置基准探针不可得 → 降级探测 000001.SH 可得；
+        # 第二次解析：配置基准探针直接可得。
+        probe_results = iter([None, 100.0, 100.0])
+        rm._resolve_index_close = AsyncMock(side_effect=lambda _idx, _d: next(probe_results))
+        with patch("data.persistence.review_manager.ConfigHandler.get_config", return_value="000852.SH"):
+            first = await rm._resolve_benchmark(datetime.date(2024, 6, 10))
+            assert rm._benchmark_diag is not None
+            second = await rm._resolve_benchmark(datetime.date(2024, 6, 11))
+        assert first == "000001.SH"
+        assert second == "000852.SH"
+        assert rm._benchmark_diag is None
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_resolve_benchmark_probe_error_skips_candidate(self, mock_cm, mock_tc):
+        """探针 system 级异常不传播（与行级「吞没、review 继续」语义一致），全候选失败
+        返回配置基准 + missing 诊断。"""
+        rm = ReviewManager()
+        rm._resolve_index_close = AsyncMock(side_effect=PermissionError("permission denied"))
+        with patch("data.persistence.review_manager.ConfigHandler.get_config", return_value="000985.CSI"):
+            resolved = await rm._resolve_benchmark(datetime.date(2024, 6, 10))
+        assert resolved == "000985.CSI"
+        assert rm._benchmark_diag is not None
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_resolve_benchmark_propagates_engine_disposed(self, mock_cm, mock_tc):
+        """R5: EngineDisposedError 上抛，不在降级链中被吞没。"""
+        rm = ReviewManager()
+        rm._resolve_index_close = AsyncMock(side_effect=EngineDisposedError("engine disposed"))
+        with patch("data.persistence.review_manager.ConfigHandler.get_config", return_value="000985.CSI"):
+            with pytest.raises(EngineDisposedError):
+                await rm._resolve_benchmark(datetime.date(2024, 6, 10))
 
 
 class TestReviewManagerT1RowBoundary:
@@ -1267,7 +1432,14 @@ class TestReviewManagerRunReviewIndexApiFallback:
         rm.api = mock_api
         rm._update_result = AsyncMock()
         await rm.run_review()
-        rm._update_result.assert_not_called()
+        # RV-04: 本地库+API 均无基准数据 → 不再整行丢弃，数值-only 解耦写入
+        # （label/alpha NULL、t5_pct 照写、status 停留 T1_DONE 待补标签通道）。
+        rm._update_result.assert_called_once()
+        kwargs = rm._update_result.call_args.kwargs
+        assert rm._update_result.call_args.args[2] is None  # label 为第 3 个位置参数
+        assert kwargs["alpha"] is None
+        assert kwargs["review_status"] == REVIEW_STATUS_T1_DONE
+        assert kwargs["t5_pct"] == pytest.approx(5.0)
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -1305,7 +1477,13 @@ class TestReviewManagerRunReviewIndexApiFallback:
         rm.api = mock_api
         rm._update_result = AsyncMock()
         await rm.run_review()
-        rm._update_result.assert_not_called()
+        # RV-04: API 异常（operational 级降级 None）→ 数值-only 解耦写入，不整行丢弃
+        rm._update_result.assert_called_once()
+        kwargs = rm._update_result.call_args.kwargs
+        assert rm._update_result.call_args.args[2] is None  # label 为第 3 个位置参数
+        assert kwargs["alpha"] is None
+        assert kwargs["review_status"] == REVIEW_STATUS_T1_DONE
+        assert kwargs["t5_pct"] == pytest.approx(5.0)
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -1340,7 +1518,13 @@ class TestReviewManagerRunReviewIndexApiFallback:
         mock_cache.quote_dao.get_index_daily = AsyncMock(side_effect=RuntimeError("cache error"))
         rm._update_result = AsyncMock()
         await rm.run_review()
-        rm._update_result.assert_not_called()
+        # RV-04: 缓存异常（operational 级降级 None）→ 数值-only 解耦写入，不整行丢弃
+        rm._update_result.assert_called_once()
+        kwargs = rm._update_result.call_args.kwargs
+        assert rm._update_result.call_args.args[2] is None  # label 为第 3 个位置参数
+        assert kwargs["alpha"] is None
+        assert kwargs["review_status"] == REVIEW_STATUS_T1_DONE
+        assert kwargs["t5_pct"] == pytest.approx(5.0)
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -1585,8 +1769,15 @@ class TestReviewManagerRv01WindowMatches:
         mock_cache.quote_dao.get_index_daily = AsyncMock(side_effect=self._index_quote_by_date({"20240615": 100.0}))
         rm._update_result = AsyncMock()
         await rm.run_review()
-        # 不得崩溃；终点缺失 → 整条跳过（标签污染防护），不写更新
-        rm._update_result.assert_not_called()
+        # 不得崩溃；终点缺失 → 标签污染防护（不写 alpha）。RV-04: 数值-only 解耦写入
+        # （t5_pct 照写、label/alpha NULL、status 停留 T1_DONE），不再整行丢弃。
+        rm._update_result.assert_called_once()
+        kwargs = rm._update_result.call_args.kwargs
+        assert rm._update_result.call_args.args[2] is None  # label 为第 3 个位置参数
+        assert kwargs["alpha"] is None
+        assert kwargs["index_pct"] is None
+        assert kwargs["review_status"] == REVIEW_STATUS_T1_DONE
+        assert kwargs["t5_pct"] == pytest.approx(2.0)  # (10.2/10.0 - 1) × 100
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -2487,6 +2678,9 @@ class TestReviewManagerBackfill:
             side_effect=lambda _idx, d: 102.0 if str(d).replace("-", "") == "20240617" else 100.0
         )
         rm._batch_backfill_t5 = AsyncMock()
+        # RV-04: B 类补标签候选通道（数值已齐、标签未定稿）——默认无候选，
+        # 需要 B 类用例的测试单独覆盖返回值。
+        mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(return_value=[])
         return rm, mock_cache
 
     @pytest.mark.asyncio
@@ -2755,6 +2949,8 @@ class TestReviewManagerBackfillSkipBranches:
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(return_value=candidates)
+        # RV-04: B 类补标签候选通道，本组用例默认无候选
+        mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(return_value=[])
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
         rm = ReviewManager()
         rm.cache = mock_cache
@@ -3220,6 +3416,8 @@ class TestReviewManagerMarketCalendar:
         mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
             return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
         )
+        # RV-04: B 类补标签候选通道，本组用例默认无候选
+        mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(return_value=[])
         quotes = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"] * 4,
@@ -3299,6 +3497,8 @@ class TestReviewManagerMarketCalendar:
         mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
             return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
         )
+        # RV-04: B 类补标签候选通道，本组用例默认无候选
+        mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(return_value=[])
         rm._batch_update_results = AsyncMock()
         rm._batch_backfill_t5 = AsyncMock()
 
@@ -3467,6 +3667,8 @@ class TestReviewManagerMarketCalendar:
         mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
             return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
         )
+        # RV-04: B 类补标签候选通道，本组用例默认无候选
+        mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(return_value=[])
         quotes = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"] * 2,

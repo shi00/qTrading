@@ -597,6 +597,79 @@ class ScreenerDao(BaseDao):
         df = await self._read_db_select(stmt)
         return df.to_dict("records") if df is not None and not df.empty else []
 
+    async def get_unlabeled_predictions(self, limit: int = 2000) -> list[dict]:
+        """RV-04: 返回「数值已齐、标签未定稿」的复盘记录（id, ts_code, trade_date, t5_pct）。
+
+        限定 ``review_status='T1_DONE'`` 且 ``t5_pct IS NOT NULL`` 且 ``alpha IS NULL``：
+        基准缺失时数值-only 解耦写入（RV-04）与 #1097 迁移重置的历史行均落入本通道，
+        由 ``ReviewManager.backfill_horizon_returns`` 补定稿标签。与
+        ``get_unfilled_horizon_predictions``（A 类缺数值）分池独立 LIMIT，
+        防止历史 B 类堆积挤占 A 类候选（对抗检视：合并池会按 trade_date asc
+        让老记录排满 LIMIT 饿死新记录）。
+        """
+        t = ScreeningHistory.__table__
+        stmt = (
+            sa.select(t.c.id, t.c.ts_code, t.c.trade_date, t.c.t5_pct)
+            .select_from(t)
+            .where(
+                t.c.review_status == REVIEW_STATUS_T1_DONE,
+                t.c.t5_pct.isnot(None),
+                t.c.alpha.is_(None),
+            )
+            .order_by(t.c.trade_date.asc())
+            .limit(limit)
+        )
+        df = await self._read_db_select(stmt)
+        return df.to_dict("records") if df is not None and not df.empty else []
+
+    @log_async_operation(
+        operation_name="ScreenerDao.finalize_prediction_label",
+        threshold_ms=PerfThreshold.DB_SINGLE_QUERY,
+    )
+    async def finalize_prediction_label(
+        self,
+        record_id: int,
+        *,
+        label: str,
+        index_pct: float,
+        benchmark_code: str,
+        alpha: float,
+        conn: typing.Any = None,
+    ):
+        """RV-04: 幂等定稿单条记录的复盘标签并推进 review_status 为 COMPLETED。
+
+        WHERE 带 ``alpha IS NULL`` 守卫 → 已定稿标签（含并发方先写）不会被覆盖；
+        数值列（t5_pct 等）不在写入集，与 backfill_t5_prediction 的数值通道互补：
+        数值回填（WHERE t5_pct IS NULL）与标签定稿（WHERE alpha IS NULL）各自幂等。
+        """
+        self._check_engine()
+        table = Base.metadata.tables.get("screening_history")
+        if table is None:
+            logger.error("[ScreenerDao] Table screening_history not found in SQLAlchemy metadata.")
+            return
+
+        values: dict[str, typing.Any] = {
+            "prediction_result": label,
+            "index_pct": index_pct,
+            "benchmark_code": benchmark_code,
+            "alpha": alpha,
+            "review_status": REVIEW_STATUS_COMPLETED,
+        }
+        stmt = sa.update(table).where(table.c.id == record_id, table.c.alpha.is_(None)).values(**values)
+
+        # DAT-01: 维护事件放行后复查引擎，防范 conn 路径 TOCTOU
+        await self._wait_maintenance_guard(context="finalize_prediction_label")
+        if conn is not None:
+            await conn.execute(stmt)
+        else:
+            try:
+                async with self._guarded_begin() as tx_conn:
+                    await tx_conn.execute(stmt)
+            except EngineDisposedError:
+                raise
+            except Exception as e:
+                logger.warning("[ScreenerDao] Failed to finalize label for record %s: %s", record_id, safe_error(e))
+
     @log_async_operation(
         operation_name="ScreenerDao.backfill_t5_prediction",
         threshold_ms=PerfThreshold.DB_SINGLE_QUERY,
@@ -613,13 +686,17 @@ class ScreenerDao(BaseDao):
         alpha: float | None = None,
         conn: typing.Any = None,
     ):
-        """D2-4: 幂等回填单条记录的 T+5 并推进 review_status 为 COMPLETED。
+        """D2-4: 幂等回填单条记录的 T+5 并按标签成熟度推进 review_status。
 
         WHERE 带 ``t5_pct IS NULL`` → 与 ``run_review`` 同批并行也不会重复/覆盖已填值。
 
         D4-M4: 新增可选 label/index_pct/benchmark_code/alpha，供 backfill_horizon_returns
         在 T+5 成熟回填时同步定稿 T+5 窗口标签（run_review 在 T+5 未成熟时仅打 DRAW 占位）。
         均为 None 时保持 D2-4 既有纯数值回填语义，不覆盖既有列。
+
+        RV-04: label 为 None（基准缺失的数值-only 解耦写入）时 status 停留 ``T1_DONE``
+        而非 COMPLETED——标签未定稿的记录须留在补标签通道（get_unlabeled_predictions）
+        的候选池内，且不进入学习/统计消费方（均要求 alpha IS NOT NULL）。
         """
         self._check_engine()
         table = Base.metadata.tables.get("screening_history")
@@ -630,7 +707,7 @@ class ScreenerDao(BaseDao):
         values_: dict[str, typing.Any] = {
             "t5_pct": t5_pct,
             "t5_price": t5_price,
-            "review_status": REVIEW_STATUS_COMPLETED,
+            "review_status": REVIEW_STATUS_COMPLETED if label is not None else REVIEW_STATUS_T1_DONE,
         }
         if label is not None:
             values_["prediction_result"] = label
@@ -762,7 +839,7 @@ class ScreenerDao(BaseDao):
         self,
         record_id: int,
         pct: float,
-        label: str,
+        label: str | None,
         *,
         t1_price: float | None = None,
         t5_pct: float | None = None,
@@ -781,6 +858,8 @@ class ScreenerDao(BaseDao):
         （run_review 窗内新写）把 stale T+1 回填已填/正在填的值重复覆盖。
         默认 False：run_review 会对 T1_DONE 记录二次调用以补 T+5，此时 t1_pct 已非 NULL，
         必须允许覆盖，故仅 stale T+1 回填路径（``ReviewManager.backfill_t1_returns``）启用守卫。
+        RV-04: ``label=None`` 表示标签未定稿（基准缺失的数值-only 解耦写入），
+        prediction_result 置 NULL（R21 缺失值语义），调用方须显式传 review_status。
         """
         self._check_engine()
         effective_status = review_status
