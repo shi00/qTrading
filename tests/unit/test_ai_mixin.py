@@ -1438,7 +1438,7 @@ class TestRunAiAnalysisUsageSummary:
             mock_ai_instance.analyze_stock = mock_analyze
             mock_ai.return_value = mock_ai_instance
             mock_tracker = MagicMock()
-            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_cost_cents = AsyncMock()
             mock_tracker_cls.return_value = mock_tracker
 
             result = await s.run_ai_analysis(candidates, context)
@@ -1452,7 +1452,7 @@ class TestRunAiAnalysisUsageSummary:
             "unpriced_calls": 0,
             "unpriced_tokens": 0,
         }
-        mock_tracker.add_cost_cny.assert_awaited_once_with(5)
+        mock_tracker.add_cost_cents.assert_awaited_once_with(5)
 
     @pytest.mark.asyncio
     async def test_failed_results_not_counted(self):
@@ -1493,7 +1493,7 @@ class TestRunAiAnalysisUsageSummary:
             mock_ai_instance.analyze_stock = mock_analyze
             mock_ai.return_value = mock_ai_instance
             mock_tracker = MagicMock()
-            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_cost_cents = AsyncMock()
             mock_tracker_cls.return_value = mock_tracker
 
             result = await s.run_ai_analysis(candidates, context)
@@ -1507,7 +1507,7 @@ class TestRunAiAnalysisUsageSummary:
             "unpriced_calls": 0,
             "unpriced_tokens": 0,
         }
-        mock_tracker.add_cost_cny.assert_awaited_once_with(2)
+        mock_tracker.add_cost_cents.assert_awaited_once_with(2)
 
     @pytest.mark.asyncio
     async def test_no_key_when_no_success_call(self):
@@ -1610,7 +1610,7 @@ class TestRunAiAnalysisUsageSummary:
             mock_ai_instance.analyze_stock = mock_analyze
             mock_ai.return_value = mock_ai_instance
             mock_tracker = MagicMock()
-            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_cost_cents = AsyncMock()
             mock_tracker_cls.return_value = mock_tracker
 
             result = await s.run_ai_analysis(candidates, context)
@@ -1624,7 +1624,7 @@ class TestRunAiAnalysisUsageSummary:
         # 已分析行正常排序在前
         assert result.iloc[0]["ai_status"] == "analyzed"
         # 仅已分析 20 股耗用落账（0.01*20=0.2 元 → 20 分），且只落账一次
-        mock_tracker.add_cost_cny.assert_awaited_once_with(20)
+        mock_tracker.add_cost_cents.assert_awaited_once_with(20)
         assert context["_ai_usage_summary"]["calls"] == 20
         # 批内软停标记同步设置（供 UI/夜间任务区分"预算超限"与"无候选"）
         assert context["_ai_budget_exceeded"] is True
@@ -4233,13 +4233,13 @@ class TestRetrySingleGuardsAndCost:
             patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_tracker_cls,
         ):
             mock_tracker = MagicMock()
-            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_cost_cents = AsyncMock()
             mock_tracker_cls.return_value = mock_tracker
 
             await s.retry_single("平安银行", context)
 
         # 0.05 元 → 5 分
-        mock_tracker.add_cost_cny.assert_awaited_once_with(5)
+        mock_tracker.add_cost_cents.assert_awaited_once_with(5)
         result_row = on_result.call_args.args[0]
         assert result_row["ai_status"] == "analyzed"
         assert on_result.call_count == 1
@@ -4262,12 +4262,12 @@ class TestRetrySingleGuardsAndCost:
             patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_tracker_cls,
         ):
             mock_tracker = MagicMock()
-            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_cost_cents = AsyncMock()
             mock_tracker_cls.return_value = mock_tracker
 
             await s.retry_single("平安银行", context)
 
-        mock_tracker.add_cost_cny.assert_not_awaited()
+        mock_tracker.add_cost_cents.assert_not_awaited()
 
 
 class TestUnpricedUsageGuards:
@@ -4461,11 +4461,11 @@ class TestUnpricedUsageGuards:
         s = ConcreteStrategy()
         with patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_cls:
             mock_tracker = MagicMock()
-            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_cost_cents = AsyncMock()
             mock_tracker.add_unpriced = AsyncMock()
             mock_cls.return_value = mock_tracker
             await s._track_cost(0.05)
-        mock_tracker.add_cost_cny.assert_awaited_once_with(5)
+        mock_tracker.add_cost_cents.assert_awaited_once_with(5)
         mock_tracker.add_unpriced.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -4474,11 +4474,11 @@ class TestUnpricedUsageGuards:
         s = ConcreteStrategy()
         with patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_cls:
             mock_tracker = MagicMock()
-            mock_tracker.add_cost_cny = AsyncMock()
+            mock_tracker.add_cost_cents = AsyncMock()
             mock_tracker.add_unpriced = AsyncMock()
             mock_cls.return_value = mock_tracker
             await s._track_cost(None, unpriced_calls=3, unpriced_tokens=500)
-        mock_tracker.add_cost_cny.assert_not_awaited()
+        mock_tracker.add_cost_cents.assert_not_awaited()
         mock_tracker.add_unpriced.assert_awaited_once_with(3, 500)
 
     @pytest.mark.asyncio

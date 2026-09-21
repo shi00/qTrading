@@ -1280,8 +1280,8 @@ class AIStrategyMixin:
         limit_cny = ConfigHandler.get_setting("ai_cost_limit_cny")
         if not limit_cny or limit_cny <= 0:
             return False
-        month_cost_cny = await AIUsageTracker().get_month_cost_cny()
-        return month_cost_cny >= round(limit_cny * 100)
+        month_cost_cents = await AIUsageTracker().get_month_cost_cents()
+        return month_cost_cents >= round(limit_cny * 100)
 
     async def _should_prompt_unpriced(self) -> bool:
         """是否应弹出「本月存在不可计价调用」保守确认提示。
@@ -1379,7 +1379,7 @@ class AIStrategyMixin:
         # N1（review-pr1073）：cost_cny > 0 才写成本账——cost_cny==0.0（免费模型）跳过分
         # 转为 0 的记账写入（账目无意义写零），等价于"归零记账"，与成本语义不冲突。
         if cost_cny is not None and cost_cny > 0:
-            await tracker.add_cost_cny(round(cost_cny * 100))
+            await tracker.add_cost_cents(round(cost_cny * 100))
         if unpriced_calls > 0:
             await tracker.add_unpriced(unpriced_calls, unpriced_tokens)
 
