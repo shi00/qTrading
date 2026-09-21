@@ -101,6 +101,7 @@
     "review_stats_t5": "T+5 Return",
     "review_stats_ci": "95% CI",
     "review_stats_n_dates": "Daily N",
+    "review_stats_n_eff": "Effective N",
     "review_stats_win_rate": "Win Rate",
     "review_stats_win_n": "Win-Rate N",
     "review_stats_avg_daily_count": "Avg Stocks/Day",

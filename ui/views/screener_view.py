@@ -918,7 +918,14 @@ def _build_review_stats_section(strategy_stats: tuple[StrategyStatRow, ...]) -> 
             ci_line = ""
             main_badge = None
 
-        main_lines = [hm_line, ci_line, f"{I18n.get('review_stats_n_dates')}: {alpha.n}"]
+        # RV-09: 名义 N 与有效样本量并排展示（120 个交易日 / 有效 24），让用户
+        # 看得见重叠窗口折算过程，而非只给已折算的黑箱分级。
+        main_lines = [
+            hm_line,
+            ci_line,
+            f"{I18n.get('review_stats_n_dates')}: {alpha.n}",
+            f"{I18n.get('review_stats_n_eff')}: {alpha.n_eff:.0f}",
+        ]
         subtitle_items = [ft.Text("  ·  ".join(x for x in main_lines if x), size=AppStyles.FONT_SIZE_CAPTION)]
         if main_badge is not None:
             subtitle_items.append(main_badge)
@@ -1010,7 +1017,14 @@ def _build_ai_attribution_section(ai_attribution: tuple[AiAttributionRow, ...]) 
             ci_line = ""
             main_badge = None
 
-        main_lines = [hm_line, ci_line, f"{I18n.get('review_stats_n_dates')}: {alpha.n}"]
+        # RV-09: 名义 N 与有效样本量并排展示（120 个交易日 / 有效 24），让用户
+        # 看得见重叠窗口折算过程，而非只给已折算的黑箱分级。
+        main_lines = [
+            hm_line,
+            ci_line,
+            f"{I18n.get('review_stats_n_dates')}: {alpha.n}",
+            f"{I18n.get('review_stats_n_eff')}: {alpha.n_eff:.0f}",
+        ]
         subtitle_items = [ft.Text("  ·  ".join(x for x in main_lines if x), size=AppStyles.FONT_SIZE_CAPTION)]
         if main_badge is not None:
             subtitle_items.append(main_badge)

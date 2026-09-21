@@ -4,6 +4,7 @@
 - t 分布固定内插表（df=1..179）与 30/100 边界精确值（四审 L2）
 - 置信区间（n<30 置 None、n<3 std 置 None、n>=30 且 std 有效时计算）
 - Newey-West HAC 修正（RV-08）：t5/alpha 重叠窗口标准误、overlap=1 零回归
+- 有效样本量分级（RV-09）：n_eff = n/overlap，alpha_grade 按 n_eff 判定不再用名义 N
 - 指标独立 N（t1/t5/alpha 各以非 NULL 日序列独立计算，四审 M4）
 - 胜率用股票行 N 独立于日序列 N、独立分级（四审 M2）
 - 基准 NULL 组（benchmark_code IS NULL）归「基准未知」组并排在有可比组之后（四审 L3）
@@ -123,6 +124,71 @@ class TestGrade:
         assert grade_for(REVIEW_MIN_SAMPLE) is SampleGrade.LIMITED
         assert grade_for(REVIEW_ADEQUATE_SAMPLE - 1) is SampleGrade.LIMITED
         assert grade_for(REVIEW_ADEQUATE_SAMPLE) is SampleGrade.ADEQUATE
+
+    def test_grade_accepts_float_n_eff(self) -> None:
+        """RV-09: grade_for 接受浮点 n_eff，浮点阈值比较天然正确（29.8 < 30）。"""
+        assert grade_for(29.8) is SampleGrade.INSUFFICIENT
+        assert grade_for(30.0) is SampleGrade.LIMITED
+        assert grade_for(99.9) is SampleGrade.LIMITED
+        assert grade_for(100.0) is SampleGrade.ADEQUATE
+
+
+class TestEffectiveSampleSize:
+    """RV-09: 样本量分级按有效样本量 n_eff = n/overlap 判定，不再用名义日序列 N。"""
+
+    def test_alpha_grade_uses_n_eff_not_nominal_n(self) -> None:
+        """n=120（≈180 自然日统计窗口上限）→ n_eff=24 → INSUFFICIENT。
+
+        旧逻辑按名义 N=120 判 ADEQUATE，而 5 日重叠窗口的有效独立样本仅约
+        24——「样本充足」是虚假安全感，RV-09 核心回归用例。
+        """
+        rows = [_metric_row(strat="sA", bm="sh000001", day=i, t1=float(i), alpha=float(i)) for i in range(120)]
+        (row,) = compute_strategy_review_stats(pd.DataFrame(rows))
+        assert row.alpha.n == 120
+        assert row.alpha.n_eff == pytest.approx(24.0)
+        assert row.alpha_grade is SampleGrade.INSUFFICIENT
+
+    def test_n_eff_grade_boundaries(self) -> None:
+        """n_eff 边界：n=150→n_eff=30→LIMITED；n=500→n_eff=100→ADEQUATE（IEEE754 精确除法）。"""
+        rows = [_metric_row(strat="sA", bm="sh000001", day=i, t1=float(i), alpha=float(i)) for i in range(150)]
+        (limited_row,) = compute_strategy_review_stats(pd.DataFrame(rows))
+        assert limited_row.alpha.n_eff == pytest.approx(30.0)
+        assert limited_row.alpha_grade is SampleGrade.LIMITED
+
+        rows = [_metric_row(strat="sA", bm="sh000001", day=i, t1=float(i), alpha=float(i)) for i in range(500)]
+        (adequate_row,) = compute_strategy_review_stats(pd.DataFrame(rows))
+        assert adequate_row.alpha.n_eff == pytest.approx(100.0)
+        assert adequate_row.alpha_grade is SampleGrade.ADEQUATE
+
+    def test_t1_n_eff_equals_n(self) -> None:
+        """overlap=1（t1）时 n_eff == n，分级语义不变（零回归）。"""
+        rows = [_metric_row(strat="sA", bm="sh000001", day=i, t1=float(i), alpha=None) for i in range(40)]
+        (row,) = compute_strategy_review_stats(pd.DataFrame(rows))
+        assert row.t1.n == 40
+        assert row.t1.n_eff == pytest.approx(40.0)
+
+    def test_t5_n_eff_uses_horizon_overlap(self) -> None:
+        """t5 与 alpha 同为 5 日窗口，n_eff 同口径折算。"""
+        rows = [_metric_row(strat="sA", bm="sh000001", day=i, t1=float(i), alpha=None, t5=float(i)) for i in range(35)]
+        (row,) = compute_strategy_review_stats(pd.DataFrame(rows))
+        assert row.t5.n == 35
+        assert row.t5.n_eff == pytest.approx(7.0)
+
+    def test_empty_series_n_eff_zero(self) -> None:
+        stat = _metric_stat(pd.Series([float("nan"), float("nan")]))
+        assert stat.n == 0
+        assert stat.n_eff == 0.0
+
+    def test_ai_attribution_alpha_grade_uses_n_eff(self) -> None:
+        """AiAttributionRow.alpha_grade 与 StrategyStatRow 同口径（n_eff 判定）。"""
+        rows = [
+            _ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=i, t1=float(i), alpha=float(i))
+            for i in range(120)
+        ]
+        (row,) = compute_ai_attribution_stats(pd.DataFrame(rows))
+        assert row.alpha.n == 120
+        assert row.alpha.n_eff == pytest.approx(24.0)
+        assert row.alpha_grade is SampleGrade.INSUFFICIENT
 
 
 class TestConfidenceInterval:
@@ -282,14 +348,16 @@ class TestMetricIndependentN:
 
 class TestWinRate:
     def test_win_rate_uses_stock_n_independent_of_daily_n(self) -> None:
-        """胜率股票行 N 与日序列 N 独立，独立分级（四审 M2）。"""
-        # 30 个交易日（日序列 N=30 → alpha LIMITED），但仅累计 1 胜（股票行 N=1 → INSUFFICIENT）
+        """胜率股票行 N 与日序列 N 独立，独立分级（四审 M2 + RV-09 n_eff）。"""
+        # 150 个交易日（RV-09 后 alpha 按有效样本 n_eff=30 → LIMITED），
+        # 但仅累计 1 胜（股票行 N=1 → INSUFFICIENT）——两级独立可不同档。
         rows: list[dict] = []
         rows.append(_metric_row(strat="sA", bm="sh000001", day=0, t1=0.0, alpha=0.0, win=1, loss=0))
-        for i in range(1, 30):
+        for i in range(1, 150):
             rows.append(_metric_row(strat="sA", bm="sh000001", day=i, t1=float(i), alpha=float(i)))
         (row,) = compute_strategy_review_stats(pd.DataFrame(rows))
-        assert row.alpha.n == 30
+        assert row.alpha.n == 150
+        assert row.alpha.n_eff == pytest.approx(30.0)
         assert row.win_n == 1
         assert row.win_rate == pytest.approx(1.0)
         assert row.alpha_grade is SampleGrade.LIMITED
@@ -425,13 +493,14 @@ class TestAiAttribution:
         assert row.win_grade is SampleGrade.INSUFFICIENT
 
     def test_grade_independent(self) -> None:
-        """日序列 N 与股票行 N 独立分级（复用四审 M2 口径）。"""
+        """日序列 N 与股票行 N 独立分级（复用四审 M2 口径，RV-09 后 alpha 按 n_eff 判定）。"""
         rows: list[dict] = []
         rows.append(_ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=0, t1=0.0, alpha=0.0, win=1))
-        for i in range(1, 30):
+        for i in range(1, 150):
             rows.append(_ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=i, t1=float(i), alpha=float(i)))
         (row,) = compute_ai_attribution_stats(pd.DataFrame(rows))
-        assert row.alpha.n == 30
+        assert row.alpha.n == 150
+        assert row.alpha.n_eff == pytest.approx(30.0)
         assert row.win_n == 1
         assert row.alpha_grade is SampleGrade.LIMITED
         assert row.win_grade is SampleGrade.INSUFFICIENT
