@@ -38,6 +38,8 @@ COMMON_COLUMNS = {
     "vol": "col_vol",
     "volume": "col_volume",
     "amount": "col_amount",
+    "block_vwap": "col_block_vwap",
+    "block_discount_pct": "col_block_discount_pct",
     "turnover_rate": "col_turnover_rate",
     "turnover_rate_f": "col_turnover_rate_f",
     "volume_ratio": "col_volume_ratio",

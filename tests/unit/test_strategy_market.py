@@ -470,6 +470,7 @@ class TestBlockTradeStrategy(unittest.TestCase):
                     "industry_sw_l2": "银行",
                     "pe_ttm": 6.5,
                     "total_mv": 1000000,
+                    "close": 15.0,
                 },
                 {
                     "ts_code": "000002.SZ",
@@ -477,9 +478,11 @@ class TestBlockTradeStrategy(unittest.TestCase):
                     "industry_sw_l2": "房地产",
                     "pe_ttm": 8.0,
                     "total_mv": 800000,
+                    "close": 8.0,
                 },
             ]
         )
+        # SC-04: vol=万股, amount(万元)=price(元)×vol 自洽：000001 VWAP=2300/150=15.33（close=15 → 折价率 2.2% 保留）
         self.block_df = pd.DataFrame(
             [
                 {"ts_code": "000001.SZ", "amount": 1500.0, "vol": 100, "price": 10.0},
@@ -557,10 +560,10 @@ class TestBlockTradeStrategy(unittest.TestCase):
         lf = pl.from_pandas(self.base_df).lazy()
         block_in_yuan = pd.DataFrame(
             [
-                # 500 万元 < 1000 万 → 应排除
-                {"ts_code": "000001.SZ", "amount": 5_000_000.0, "vol": 100, "price": 10.0},
-                # 1200 万元 > 1000 万 → 应保留
-                {"ts_code": "000002.SZ", "amount": 12_000_000.0, "vol": 50, "price": 8.0},
+                # 500 万元 < 1000 万 → 应排除（vol 配 price=10 股数，VWAP=10 折价率不过线不影响阈值判定）
+                {"ts_code": "000001.SZ", "amount": 5_000_000.0, "vol": 500_000, "price": 10.0},
+                # 1200 万元 > 1000 万 → 应保留（vol 配 price=8 股数，VWAP=8=close 折价率 0）
+                {"ts_code": "000002.SZ", "amount": 12_000_000.0, "vol": 1_500_000, "price": 8.0},
             ]
         )
         block_in_yuan.attrs["column_units"] = {"amount": "yuan"}
