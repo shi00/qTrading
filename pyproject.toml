@@ -48,7 +48,6 @@ dependencies = [
     "matplotlib>=3.11.2",
     "apscheduler>=3.11.3",
     "tzdata>=2026.4",
-    "pytz>=2026.3.post1",
     "python-dotenv>=1.2.3",
     "keyring>=25.7.0",
     "cryptography>=50.0.1",  # Security: CVE-2026-69247 (PKCS#7 Bleichenbacher oracle) fixed in 50.0.0 -> 50.0.1

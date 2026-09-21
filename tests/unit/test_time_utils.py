@@ -34,11 +34,11 @@ class TestGetNow:
 
     def test_is_cst_timezone(self):
         result = get_now()
-        assert result.tzinfo.zone == "Asia/Shanghai"
+        assert result.tzinfo.key == "Asia/Shanghai"
 
     def test_cst_tz_defined(self):
         assert CST_TZ is not None
-        assert CST_TZ.zone == "Asia/Shanghai"
+        assert CST_TZ.key == "Asia/Shanghai"
 
 
 class TestParseDate:
@@ -69,7 +69,7 @@ class TestParseDate:
         assert result.tzinfo is not None  # noqa: weak-assertion tzinfo 存在性是时区感知契约验证
 
     def test_parse_datetime_object_aware(self):
-        dt = CST_TZ.localize(datetime.datetime(2024, 6, 15, 10, 0))
+        dt = datetime.datetime(2024, 6, 15, 10, 0).replace(tzinfo=CST_TZ)
         result = parse_date(dt)
         assert result.tzinfo is not None  # noqa: weak-assertion tzinfo 存在性是时区感知契约验证
 
@@ -81,7 +81,7 @@ class TestGetTodayStr:
 
     @patch("utils.time_utils.get_now")
     def test_format_yyyymmdd(self, mock_get_now):
-        fixed_dt = CST_TZ.localize(datetime.datetime(2024, 6, 15, 10, 30, 0))
+        fixed_dt = datetime.datetime(2024, 6, 15, 10, 30, 0).replace(tzinfo=CST_TZ)
         mock_get_now.return_value = fixed_dt
         result = get_today_str()
         assert result == "20240615"
@@ -163,14 +163,14 @@ class TestToUtcForDb:
         assert result.hour == 0
 
     def test_aware_datetime(self):
-        dt = CST_TZ.localize(datetime.datetime(2024, 6, 15, 8, 0))
+        dt = datetime.datetime(2024, 6, 15, 8, 0).replace(tzinfo=CST_TZ)
         result = to_utc_for_db(dt)
         assert result.tzinfo is None
         assert result.hour == 0
 
     def test_aware_datetime_cst_to_utc(self):
         cst_time = dt_datetime(2024, 1, 15, 10, 30, 0)
-        cst_aware = CST_TZ.localize(cst_time)
+        cst_aware = cst_time.replace(tzinfo=CST_TZ)
         utc_time = to_utc_for_db(cst_aware)
         assert utc_time.tzinfo is None
         assert utc_time.hour == 2
@@ -200,10 +200,10 @@ class TestFromUtcToCst:
         utc_naive = dt_datetime(2024, 1, 15, 2, 30, 0)
         cst_time = from_utc_to_cst(utc_naive)
         assert cst_time.hour == 10
-        assert cst_time.tzinfo.zone == "Asia/Shanghai"
+        assert cst_time.tzinfo.key == "Asia/Shanghai"
 
     def test_roundtrip_preserves_time(self):
-        original = CST_TZ.localize(dt_datetime(2024, 6, 15, 14, 45, 30))
+        original = dt_datetime(2024, 6, 15, 14, 45, 30).replace(tzinfo=CST_TZ)
         utc_stored = to_utc_for_db(original)
         restored = from_utc_to_cst(utc_stored)
         assert original.hour == restored.hour

@@ -287,8 +287,6 @@ python-dotenv==1.2.3
     #   astockscreener (pyproject.toml)
     #   litellm
     #   pydantic-settings
-pytz==2026.3.post1
-    # via astockscreener (pyproject.toml)
 pywin32-ctypes==0.2.3 ; sys_platform == 'win32'
     # via keyring
 pyyaml==6.0.3

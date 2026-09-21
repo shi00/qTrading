@@ -50,7 +50,6 @@ hiddenimports = [
     "requests",
     "httpx",
     "numpy",
-    "pytz",
     "tzdata",
     "readerwriterlock",
     "apscheduler.schedulers.background",

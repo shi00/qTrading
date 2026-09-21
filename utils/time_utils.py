@@ -1,9 +1,8 @@
 import datetime
-
-import pytz
+from zoneinfo import ZoneInfo
 
 # Constants for China Standard Time (UTC+8)
-CST_TZ = pytz.timezone("Asia/Shanghai")
+CST_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def get_now() -> datetime.datetime:
@@ -22,16 +21,16 @@ def parse_date(date_input, fmt="%Y%m%d") -> datetime.datetime:
     """
     if isinstance(date_input, datetime.datetime):
         if date_input.tzinfo is None:
-            return CST_TZ.localize(date_input)
+            return date_input.replace(tzinfo=CST_TZ)
         return date_input.astimezone(CST_TZ)
     if isinstance(date_input, datetime.date):
-        return CST_TZ.localize(datetime.datetime.combine(date_input, datetime.time()))
+        return datetime.datetime.combine(date_input, datetime.time()).replace(tzinfo=CST_TZ)
     date_str = str(date_input)
     if len(date_str) == 19 and "-" in date_str:
         fmt = "%Y-%m-%d %H:%M:%S"
     elif len(date_str) == 10 and "-" in date_str:
         fmt = "%Y-%m-%d"
-    return CST_TZ.localize(datetime.datetime.strptime(date_str, fmt))
+    return datetime.datetime.strptime(date_str, fmt).replace(tzinfo=CST_TZ)
 
 
 def get_today_str() -> str:
@@ -90,7 +89,7 @@ def to_utc_for_db(dt: datetime.datetime | None) -> datetime.datetime | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = CST_TZ.localize(dt)
+        dt = dt.replace(tzinfo=CST_TZ)
     return dt.astimezone(datetime.UTC).replace(tzinfo=None)
 
 

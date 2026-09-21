@@ -460,8 +460,6 @@ python-multipart==0.0.32
     # via
     #   fastmcp-slim
     #   mcp
-pytz==2026.3.post1
-    # via astockscreener (pyproject.toml)
 pywin32==312 ; sys_platform == 'win32'
     # via mcp
 pywin32-ctypes==0.2.3 ; sys_platform == 'win32'
