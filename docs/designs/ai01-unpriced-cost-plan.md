@@ -152,7 +152,8 @@ failover 前缀判定（`model.split("/")[0]`）。
 登记 pyproject 契约 5 ignore_imports 白名单）**：
 1. `get_litellm_models_by_provider() -> dict[provider_id -> list[dict]]`：
    - 按每个 provider 的 `litellm_catalog_key`（回退 `litellm_prefix`）投影 `litellm.models_by_provider`，
-     **只投影项目支持的供应商**，不把 litellm 全部 98 个供应商全量塞入。
+     **只投影项目支持的供应商**，不把 litellm 全部供应商全量塞入
+     （review-pr1073 A5：1.100.1 实测 96 个 provider key，文档原「98 个」为版本演进出入）。
    - 每模型 `{id, context}`；context 取 `litellm.model_cost.get(id, {})` 的
      `max_input_tokens`/`max_tokens`/`max_output_tokens`（首非零），全缺退 0 前先回退
      `litellm.get_model_info(id)` 第二通道（review-pr1073 A3/C2：model_cost 的 max_* 对
@@ -243,6 +244,8 @@ failover 前缀判定（`model.split("/")[0]`）。
    `LLM_PROVIDERS[provider]["models"]` 的 tag 做 reasoning 兜底；删 models/tag 后该分支恒 False 且会
    静默丢失 reasoning 流。**删除该 LLM_PROVIDERS 兜底分支**（litellm 已加载时本就优先 `supports_*`），
    并确认调用方对不可判定 reasoning 的既有回退行为。E 节消费点清单补充该文件。
+   （review-pr1073 N2：`zai/glm-4.6` 起 `supports_reasoning=true`——若未来加 thinking 提示，
+   zhipu 用户应能获得该语义，litellm 目录 `supports_*` 为权威源。）
 3. **custom 历史判定改用选中态**：`llm_config_panel_view_model._build_custom_models_update` 现用
    `.models` 判定是否记入 custom 历史；删 models 后改为「该 model 是否来自 ModelPicker 已选清单」判定，
    避免目录模型被误记入 custom_model 历史。

@@ -1322,6 +1322,8 @@ class AIStrategyMixin:
         from services.ai_service.usage_tracker import AIUsageTracker  # lazy-import
 
         tracker = AIUsageTracker()
+        # N1（review-pr1073）：cost_cny > 0 才写成本账——cost_cny==0.0（免费模型）跳过分
+        # 转为 0 的记账写入（账目无意义写零），等价于"归零记账"，与成本语义不冲突。
         if cost_cny is not None and cost_cny > 0:
             await tracker.add_cost_cny(round(cost_cny * 100))
         if unpriced_calls > 0:
