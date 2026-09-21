@@ -82,6 +82,19 @@ MAJOR_INDICES = [
     "000688.SH",  # STAR 50
 ]
 
+# SC-06: oversold 策略大盘环境上下文所需指数（唯一正本）。
+# 必须是 MAJOR_INDICES 的子集：否则不会被同步，策略将静默缺失上下文
+# （DS-01 已演示指数列表错配的后果）。中文名仅供 AI prompt 展示（有意中文，
+# 不 i18n），与代码同源维护。
+SENTIMENT_INDICES: tuple[str, ...] = ("000001.SH", "399001.SZ", "399006.SZ")
+SENTIMENT_INDEX_NAMES: dict[str, str] = {
+    "000001.SH": "上证指数",
+    "399001.SZ": "深证成指",
+    "399006.SZ": "创业板指",
+}
+assert set(SENTIMENT_INDICES) <= set(MAJOR_INDICES), "情绪指数必须在同步列表 MAJOR_INDICES 内"
+assert set(SENTIMENT_INDEX_NAMES) == set(SENTIMENT_INDICES), "情绪指数中文名必须与代码一一对应"
+
 
 def indices_to_sync() -> list[str]:
     """index_daily 实际需同步的指数 = 监控列表 ∪ 当前配置的基准（DS-01 根因修复）。

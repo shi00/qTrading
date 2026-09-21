@@ -4,6 +4,7 @@ import logging
 import pandas as pd
 import polars as pl
 
+from data.constants import SENTIMENT_INDEX_NAMES, SENTIMENT_INDICES
 from data.persistence.quality_gate import QualityGateError, QualityTier, require_quality
 from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
 from strategies.base_strategy import BaseStrategy, register_strategy
@@ -467,9 +468,9 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                         start_date = trade_date - datetime.timedelta(days=50)  # type: ignore[operator]
                         context.setdefault("_metadata", {})["calendar_fallback"] = True
 
-                    indices = ["000001.SH", "399001.SZ", "399006.SZ"]
+                    indices = SENTIMENT_INDICES
                     idx_df = await dp.cache.get_index_daily_range(
-                        ts_code_list=indices,
+                        ts_code_list=list(indices),
                         start_date=start_date,
                         end_date=trade_date,
                     )
@@ -643,11 +644,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         if not market_data:
             return ("大盘环境: 数据暂不可用", False)
 
-        index_names = {
-            "000001.SH": "上证指数",
-            "399001.SZ": "深证成指",
-            "399006.SZ": "创业板指",
-        }
+        index_names = SENTIMENT_INDEX_NAMES
 
         parts = ["大盘环境"]
         for idx_code, data in market_data.items():
