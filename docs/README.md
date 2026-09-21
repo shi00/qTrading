@@ -1,4 +1,4 @@
-# Project Documentation Index
+﻿# Project Documentation Index
 
 本目录承载从 CONTRIBUTING.md 渐进式披露拆分出的专项深入文档。
 
@@ -13,7 +13,6 @@
 - [governance/](./governance/) — 治理类机器可读文件（如 redlines.yml / exceptions.yml / canonical-topics.yml）
 - [reviews/](./reviews/) — AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals 评测集）
 - [bug-fix/](./bug-fix/) — AI 问题修复指南（核心协议 + 专项 Profile + 附录，三层拆分）
-- [designs/](./designs/) — 特性/问题修复设计文档（每个 issue 的设计方案与检视结论）
 
 ## 文档层次
 
