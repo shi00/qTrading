@@ -349,11 +349,16 @@ class TestAIIntegration(unittest.TestCase):
                 tier = instance.required_quality_tier
                 self.assertIsInstance(tier, QualityTier)
                 if cls in (
-                    VolumeBreakoutStrategy,
                     ValueStrategy,
                     GrowthStrategy,
                     DividendStrategy,
                     CashFlowStrategy,
+                ):
+                    # DS-03: 四大基本面策略要求 GOLD（字段完整性/新鲜度达标才放行），
+                    # 避免基本面不足全局降级到 SILVER 恰等于旧默认要求而被放行。
+                    self.assertEqual(tier, QualityTier.GOLD)
+                elif cls in (
+                    VolumeBreakoutStrategy,
                     LargePEStrategy,
                 ):
                     self.assertEqual(tier, QualityTier.SILVER)

@@ -127,6 +127,42 @@ def _compute_tier(
     return 1
 
 
+def _classify_table_tier(
+    *,
+    lag_days: int | None = None,
+    fin_lag_days: int | None = None,
+    avg_fundamental: float | None = None,
+    is_financial: bool = False,
+) -> int:
+    """Per-table quality tier classification (DS-03).
+
+    Grads a single required table independently so fundamental strategies no longer
+    sneak through when the global tier degrades to SILVER (equalling their old default).
+
+    Rules:
+      - financial table: stale (> TIER_FINANCIAL_FRESHNESS_DAYS) → BRONZE(1);
+        avg_fundamental None → SILVER(2) (fast-path, GOLD unreachable);
+        avg_fundamental < LOW → BRONZE(1); avg_fundamental > HIGH → GOLD(3);
+        otherwise SILVER(2).
+      - non-financial table: stale (> TIER_QUOTE_FRESHNESS_DAYS) → BRONZE(1),
+        else GOLD(3) (a fresh required table is fully reliable for the strategy).
+        CRITICAL(0) is handled by callers (empty/missing critical).
+    """
+    if is_financial:
+        if fin_lag_days is not None and fin_lag_days > TIER_FINANCIAL_FRESHNESS_DAYS:
+            return 1
+        if avg_fundamental is None:
+            return 2
+        if avg_fundamental < TIER_FUNDAMENTAL_LOW_THRESHOLD:
+            return 1
+        if avg_fundamental > TIER_FUNDAMENTAL_HIGH_THRESHOLD:
+            return 3
+        return 2
+    if lag_days is not None and lag_days > TIER_QUOTE_FRESHNESS_DAYS:
+        return 1
+    return 3
+
+
 class HealthCheckMixin:
     """
     Mixin providing data health check and quality scanning capabilities.
@@ -142,6 +178,9 @@ class HealthCheckMixin:
     trade_calendar: TradeCalendarService
     cache: CacheManager
     _quality_tier: int | None
+    # DS-03: per-table quality tier for the per-table gate. Falls back to global
+    # `_quality_tier` for any required table without a dedicated entry.
+    _quality_tier_by_table: dict[str, int]
     _health_cache: dict
     # D2-9: 由 DataProcessor.__init__ 初始化的缺失交易日集合（采样代理证据）
     _scan_missing_dates: frozenset[str]
@@ -161,6 +200,9 @@ class HealthCheckMixin:
         """
         try:
             sync_records = await self.cache.sync_dao.get_sync_status()
+
+            # DS-03: 重置 per-table 门控表，避免复用上次运行残留的陈旧等级
+            self._quality_tier_by_table = {}
 
             # _read_db returns a pandas DataFrame
             if sync_records is None or not isinstance(sync_records, pd.DataFrame) or sync_records.empty:
@@ -284,6 +326,9 @@ class HealthCheckMixin:
 
                 if empty_critical:
                     self._quality_tier = 0
+                    # DS-03: 空表按 CRITICAL 显式登记，供 per-table 门控直接拦截
+                    for _t in empty_critical:
+                        self._quality_tier_by_table[_t] = 0
                     logger.warning(
                         "[DataProcessor] FastCheck | ⚠️ Critical tables with EMPTY data: %s. "
                         "Tier forced to CRITICAL (0)",
@@ -303,6 +348,22 @@ class HealthCheckMixin:
                     except (ValueError, TypeError):
                         pass
 
+                # DS-03: 逐表登记等级（financial 在 fast-path 无字段完整性 → 最高 SILVER）。
+                # 其余 critical 表按新鲜度归类；缺失/陈旧的 critical 表由上方列表驱动。
+                for _t in critical_tables:
+                    if _t in empty_critical:
+                        self._quality_tier_by_table[_t] = 0
+                    elif _t in stale_critical:
+                        self._quality_tier_by_table[_t] = 1
+                    else:
+                        self._quality_tier_by_table[_t] = 2
+                self._quality_tier_by_table["daily_quotes"] = _classify_table_tier(lag_days=days_lag)
+                self._quality_tier_by_table["financial_reports"] = _classify_table_tier(
+                    fin_lag_days=fin_lag_days,
+                    is_financial=True,
+                    avg_fundamental=None,
+                )
+
                 self._quality_tier = _compute_tier(
                     lag_days=days_lag,
                     fin_fresh_ratio=None,
@@ -310,6 +371,9 @@ class HealthCheckMixin:
                     fin_lag_days=fin_lag_days,
                 )
             else:
+                # DS-03: 报价陈旧 → 快速登记 per-table（financial 用已算出的 fin_lag_days）
+                self._quality_tier_by_table["daily_quotes"] = _classify_table_tier(lag_days=days_lag)
+                self._quality_tier_by_table["financial_reports"] = _classify_table_tier(is_financial=True)
                 self._quality_tier = _compute_tier(
                     lag_days=days_lag,
                     fin_fresh_ratio=None,
@@ -608,6 +672,17 @@ class HealthCheckMixin:
                 fin_fresh_ratio=fin_fresh_ratio,
                 missing_critical=bool(missing_critical),
                 fin_lag_days=fin_lag_days,
+                avg_fundamental=avg_fund,
+            )
+            # DS-03: 深扫时逐表登记等级。financial_reports 依据字段完整性可达 GOLD；
+            # 缺失的 critical 表显式 CRITICAL，其余回退全局等级。
+            self._quality_tier_by_table = {}
+            for _t in missing_critical:
+                self._quality_tier_by_table[_t] = 0
+            self._quality_tier_by_table["daily_quotes"] = _classify_table_tier(lag_days=lag_days)
+            self._quality_tier_by_table["financial_reports"] = _classify_table_tier(
+                fin_lag_days=fin_lag_days,
+                is_financial=True,
                 avg_fundamental=avg_fund,
             )
 

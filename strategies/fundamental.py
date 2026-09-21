@@ -12,7 +12,7 @@ from strategies.utils import fmt_val, threshold_in_data_unit
 
 @register_strategy("value")
 class ValueStrategy(PolarsBaseStrategy):
-    required_quality_tier = QualityTier.SILVER
+    required_quality_tier = QualityTier.GOLD
     requires_fundamental_coverage = True
     # SC-02: get_ai_context 承载定性风险检查（周期股/价值陷阱判定），AI 未运行须声明。
     ai_risk_check_in_prompt = True
@@ -120,7 +120,7 @@ class ValueStrategy(PolarsBaseStrategy):
 
 @register_strategy("growth")
 class GrowthStrategy(PolarsBaseStrategy):
-    required_quality_tier = QualityTier.SILVER
+    required_quality_tier = QualityTier.GOLD
     requires_fundamental_coverage = True
     # SC-02: get_ai_context 承载定性风险检查（非经常性损益质疑），AI 未运行须声明。
     ai_risk_check_in_prompt = True
@@ -231,7 +231,7 @@ class GrowthStrategy(PolarsBaseStrategy):
 
 @register_strategy("dividend")
 class DividendStrategy(PolarsBaseStrategy):
-    required_quality_tier = QualityTier.SILVER
+    required_quality_tier = QualityTier.GOLD
     requires_fundamental_coverage = True
     # SC-02: get_ai_context 承载假高息判定，AI 未运行须声明。
     ai_risk_check_in_prompt = True
@@ -309,7 +309,7 @@ class DividendStrategy(PolarsBaseStrategy):
 
 @register_strategy("cashflow")
 class CashFlowStrategy(PolarsBaseStrategy):
-    required_quality_tier = QualityTier.SILVER
+    required_quality_tier = QualityTier.GOLD
     requires_fundamental_coverage = True
     # SC-02: get_ai_context 承载资金链断裂风险判定，AI 未运行须声明。
     ai_risk_check_in_prompt = True
