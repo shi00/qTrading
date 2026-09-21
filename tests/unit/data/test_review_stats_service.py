@@ -3,6 +3,7 @@
 统计计算为纯函数（无 DB），覆盖：
 - t 分布固定内插表（df=1..179）与 30/100 边界精确值（四审 L2）
 - 置信区间（n<30 置 None、n<3 std 置 None、n>=30 且 std 有效时计算）
+- Newey-West HAC 修正（RV-08）：t5/alpha 重叠窗口标准误、overlap=1 零回归
 - 指标独立 N（t1/t5/alpha 各以非 NULL 日序列独立计算，四审 M4）
 - 胜率用股票行 N 独立于日序列 N、独立分级（四审 M2）
 - 基准 NULL 组（benchmark_code IS NULL）归「基准未知」组并排在有可比组之后（四审 L3）
@@ -10,17 +11,21 @@
 """
 
 import math
+import random
 from datetime import date, timedelta
 
 import pandas as pd
 import pytest
 
 from data.domain_services.review_stats_service import (
+    HORIZON_WINDOW_OVERLAP,
     REVIEW_ADEQUATE_SAMPLE,
     REVIEW_MIN_SAMPLE,
     SampleGrade,
+    T1_WINDOW_OVERLAP,
     _T_CRIT_0_975,
     _metric_stat,
+    _newey_west_se,
     _t_crit,
     compute_ai_attribution_stats,
     compute_strategy_review_stats,
@@ -122,16 +127,21 @@ class TestGrade:
 
 class TestConfidenceInterval:
     def test_ci_present_when_n_ge_min_sample(self) -> None:
-        """n=30（df=29）且 std 有效 → CI = mean ± t*std/sqrt(n)。"""
+        """n=30（df=29）且 std 有效 → t1 CI = mean ± t*std/sqrt(n)（overlap=1 朴素公式，RV-08 后不变）；
+        alpha（overlap=5）同序列改走 Newey-West，区间存在且宽于朴素公式。"""
         rows = [_metric_row(strat="sA", bm="sh000001", day=i, t1=float(i), alpha=float(i)) for i in range(30)]
         (row,) = compute_strategy_review_stats(pd.DataFrame(rows))
-        assert row.alpha.n == 30
-        assert row.alpha.mean == pytest.approx(14.5)
+        assert row.t1.n == 30
+        assert row.t1.mean == pytest.approx(14.5)
         expected_std = float(pd.Series(range(30)).std(ddof=1))
-        assert row.alpha.std == pytest.approx(expected_std)
+        assert row.t1.std == pytest.approx(expected_std)
         half = _t_crit(29) * expected_std / math.sqrt(30)
-        assert row.alpha.ci_lower == pytest.approx(14.5 - half)
-        assert row.alpha.ci_upper == pytest.approx(14.5 + half)
+        assert row.t1.ci_lower == pytest.approx(14.5 - half)
+        assert row.t1.ci_upper == pytest.approx(14.5 + half)
+        # RV-08：alpha 为 5 日重叠窗口，标准误经 NW 修正后区间必须宽于朴素公式
+        assert row.alpha.ci_lower is not None
+        assert row.alpha.ci_upper is not None
+        assert (row.alpha.ci_upper - row.alpha.ci_lower) > 2.0 * half
 
     def test_ci_absent_when_n_below_min_sample(self) -> None:
         """n=29 < 30 → CI 置 None，但 std（n>=3）仍给出，均值给出。"""
@@ -164,6 +174,85 @@ class TestConfidenceInterval:
         assert row.alpha.std is None
         assert row.alpha.ci_lower is None
         assert row.alpha.ci_upper is None
+
+
+class TestNeweyWest:
+    """RV-08：重叠窗口（t5/alpha，overlap=5）标准误的 Newey-West HAC 修正。"""
+
+    @staticmethod
+    def _rolling_sum_series(n_days: int, window: int, seed: int) -> pd.Series:
+        """构造滚动和序列（i.i.d. 日收益 e_t，x_t = Σ_{i=0..w-1} e_{t+i}）。
+
+        即 t5_pct 的真实统计结构：window=5 时相邻点共享 4 天行情。i.i.d. 假设下
+        NW/朴素 SE 比值的理论值为 sqrt(17/5) ≈ 1.844
+        （V_NW = γ0 + 2·Σ_{l=1..4}(1-l/5)(5-l)σ² = 17σ²，朴素 var = 5σ²）；
+        检视报告的 sqrt(5) 为 lag1-4 自相关全 1 的理想化上界。
+        """
+        rnd = random.Random(seed)
+        e = [rnd.gauss(0.0, 1.0) for _ in range(n_days + window)]
+        return pd.Series([sum(e[t : t + window]) for t in range(n_days)])
+
+    def test_nw_se_exceeds_naive_on_overlapping_series(self) -> None:
+        """判据用例（RV-08）：5 日重叠序列的 NW SE 显著大于朴素 SE，
+        比值接近理论值 sqrt(17/5)≈1.844（容忍采样噪声）。修复前无 NW 路径，该断言必失败。"""
+        values = self._rolling_sum_series(n_days=500, window=HORIZON_WINDOW_OVERLAP, seed=20260921)
+        n = int(values.size)
+        naive = float(values.std(ddof=1)) / math.sqrt(n)
+        nw = _newey_west_se(values, lags=HORIZON_WINDOW_OVERLAP - 1)
+        assert nw is not None
+        ratio = nw / naive
+        assert ratio > 1.5  # 修正生效：显著大于朴素
+        assert 1.69 < ratio < 2.0  # 量级符合理论值 sqrt(17/5)≈1.844
+
+    def test_overlap1_bitwise_identical_to_pre_fix_formula(self) -> None:
+        """overlap=1（默认与显式传参）与修复前朴素公式逐位一致（RV-08 必补回归测试）。"""
+        values = self._rolling_sum_series(n_days=60, window=1, seed=7)
+        default_stat = _metric_stat(values)
+        explicit_stat = _metric_stat(values, overlap=T1_WINDOW_OVERLAP)
+        assert default_stat == explicit_stat
+        # 与朴素公式手算逐位一致（表达式顺序与实现相同）
+        n = int(values.size)
+        std = float(values.std(ddof=1))
+        half = _t_crit(n - 1) * std / math.sqrt(n)
+        assert default_stat.ci_lower == float(values.mean()) - half
+        assert default_stat.ci_upper == float(values.mean()) + half
+
+    def test_t5_alpha_ci_wider_than_naive_via_compute(self) -> None:
+        """经 compute_strategy_review_stats 全链路：t5/alpha（overlap=5）CI 宽于同序列
+        朴素公式，t1 CI 与朴素公式一致（周期锯齿序列，lag1-4 强正自相关）。"""
+        rows = [
+            _metric_row(strat="sA", bm="sh000001", day=i, t1=float(i % 10), alpha=float(i % 10), t5=float(i % 10))
+            for i in range(40)
+        ]
+        (row,) = compute_strategy_review_stats(pd.DataFrame(rows))
+        s = pd.Series([float(i % 10) for i in range(40)])
+        n = int(s.size)
+        std = float(s.std(ddof=1))
+        naive_half = _t_crit(n - 1) * std / math.sqrt(n)
+        for stat in (row.t5, row.alpha):
+            assert stat.ci_lower is not None
+            assert stat.ci_upper is not None
+            assert (stat.ci_upper - stat.ci_lower) > 2.0 * naive_half
+        assert row.t1.ci_lower == pytest.approx(float(s.mean()) - naive_half)
+        assert row.t1.ci_upper == pytest.approx(float(s.mean()) + naive_half)
+
+    def test_ai_attribution_alpha_ci_uses_nw(self) -> None:
+        """compute_ai_attribution_stats 的 t5/alpha 同样走 NW 修正、t1 保持朴素（两处 compute 调用全覆盖）。"""
+        rows = [
+            _ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=i, t1=float(i), alpha=float(i), t5=float(i))
+            for i in range(40)
+        ]
+        (row,) = compute_ai_attribution_stats(pd.DataFrame(rows))
+        s = pd.Series([float(i) for i in range(40)])
+        n = int(s.size)
+        std = float(s.std(ddof=1))
+        naive_half = _t_crit(n - 1) * std / math.sqrt(n)
+        for stat in (row.t5, row.alpha):
+            assert stat.ci_lower is not None
+            assert stat.ci_upper is not None
+            assert (stat.ci_upper - stat.ci_lower) > 2.0 * naive_half
+        assert row.t1.ci_lower == pytest.approx(float(s.mean()) - naive_half)
+        assert row.t1.ci_upper == pytest.approx(float(s.mean()) + naive_half)
 
 
 class TestMetricIndependentN:

@@ -7,6 +7,9 @@
 - **置信区间用 t 分布**（``mean ± t_{0.975, n-1} * std / sqrt(n)``）。scipy 未入
   pyproject，采用固定内插表 ``_T_CRIT_0_975`` 覆盖 df=1..179（四审 L2），
   df>179 时钳制到表尾近似值。
+- **重叠窗口指标（t5/alpha）的标准误用 Newey-West HAC 修正**（RV-08）：5 日窗口
+  的相邻日序列点共享 4 天行情，朴素 ``std/sqrt(n)`` 低估标准误约 ``sqrt(5)``
+  倍、系统性高估显著性，改为 Bartlett 核加权自协方差估计（lags=overlap-1）。
 - **胜率用股票行 N 独立计算**（四审 M2），与均值 CI 的日序列 N **独立分级**。
 - **基准 NULL 组**（benchmark_code IS NULL）归入「基准未知」组：alpha 指标无有效
   样本（n=0），仅 T+1/T+5 独立均值/N 可见。
@@ -27,6 +30,13 @@ import pandas as pd
 # 均值/CI 与胜率共用同一阈值，但各自按独立 N 判定（四审 M2），由 UI 分行呈现。
 REVIEW_MIN_SAMPLE = 30
 REVIEW_ADEQUATE_SAMPLE = 100
+
+# 指标持有窗口长度（交易日，RV-08 overlap 真相源，n_eff 分级亦复用）：
+# t5/alpha 为 T+5 窗口，相邻日序列点共享 4 天行情（overlapping returns）；
+# t1 窗口首尾相接不重叠。alpha 两侧（个股 T+5 复权收益与指数 T0→T+5 窗口收益，
+# RV-01 修复后口径）同为 5 日窗口，继承同一重叠结构。
+T1_WINDOW_OVERLAP = 1
+HORIZON_WINDOW_OVERLAP = 5
 
 # t 分布双侧 0.975 分位临界值，df=1..179（索引 = df-1），5 位小数。
 # 生成自正则化不完全 Beta（Numerical Recipes betacf），参考文献值误差 <1e-9。
@@ -227,8 +237,11 @@ class MetricStat:
     """单指标日序列统计（样本单位=交易日）。
 
     - n: 非 NULL 日序列长度（交易日数）
-    - mean / std: 日组合收益序列均值与标准差（std 于 n<3 或无效/NULL 时置 None）
-    - ci_lower / ci_upper: t 分布 95% 置信区间（n<30 或 std 不可用/无效时置 None）
+    - mean / std: 日组合收益序列均值与标准差（std 于 n<3 或无效/NULL 时置 None；
+      std 始终为朴素序列标准差，不受 overlap 影响）
+    - ci_lower / ci_upper: t 分布 95% 置信区间（n<30 或 std 不可用/无效时置 None；
+      overlap>1 的指标（t5/alpha）标准误经 Newey-West HAC 修正，区间宽于朴素公式，
+      RV-08）
     """
 
     n: int
@@ -274,7 +287,7 @@ class StrategyStatRow:
 
     @property
     def alpha_grade(self) -> SampleGrade:
-        """主指标 T+1 Alpha 的日序列 N 分级。"""
+        """主指标 T+5 Alpha 的日序列 N 分级。"""
         return grade_for(self.alpha.n)
 
     @property
@@ -299,8 +312,40 @@ def grade_for(n: int) -> SampleGrade:
     return SampleGrade.ADEQUATE
 
 
-def _metric_stat(series: pd.Series) -> MetricStat:
-    """对单指标的非 NULL 日序列计算 N/均值/标准差/置信区间。"""
+def _newey_west_se(values: pd.Series, lags: int) -> float | None:
+    """Newey-West HAC 标准误（Bartlett 核，RV-08）。
+
+    重叠窗口（overlap>1）下相邻日序列点共享行情，朴素 ``std/sqrt(n)`` 低估标准误
+    约 ``sqrt(overlap)`` 倍。以 Bartlett 核加权的自协方差估计长期方差：
+    ``V = γ0 + 2·Σ_{l=1..L} (1 - l/(L+1))·γ_l``，``SE = sqrt(V/n)``。
+    纯 pandas 实现，不引 statsmodels（与自带 t 表的取舍一致）。
+    方差非正/非有限时返回 None（调用方 CI 置 None，不伪装有效区间，R21）。
+
+    已知近似（对抗检视）：dropna 后日序列可能存在缺口日期，lag 阶自协方差按
+    等间隔近似；与 overlap 修正本身同为近似量级，不做分段处理。
+    """
+    n = int(values.size)
+    # 逐元素乘法必须走 numpy：pandas Series 切片相乘会按索引标签对齐，
+    # c[lag:]*c[:-lag] 在交集区退化为 c_t*c_t 自乘而非滞后乘积 c_t*c_{t-lag}
+    # （该陷阱由判据测试 test_nw_se_exceeds_naive_on_overlapping_series 抓获）。
+    arr = (values - values.mean()).to_numpy()
+    var = float((arr * arr).sum()) / n
+    for lag in range(1, lags + 1):
+        cov = float((arr[lag:] * arr[:-lag]).sum()) / n
+        var += 2.0 * (1.0 - lag / (lags + 1)) * cov
+    if var <= 0.0 or not math.isfinite(var):
+        return None
+    return math.sqrt(var / n)
+
+
+def _metric_stat(series: pd.Series, *, overlap: int = T1_WINDOW_OVERLAP) -> MetricStat:
+    """对单指标的非 NULL 日序列计算 N/均值/标准差/置信区间。
+
+    overlap: 指标持有窗口长度（交易日，RV-08）。t1 传 1（窗口首尾相接不重叠，
+    朴素 ``t*std/sqrt(n)`` 逐字不变）；t5/alpha 传 5（相邻点共享 4 天行情，
+    标准误改用 Newey-West HAC 修正，lags=overlap-1）。std 字段始终为朴素序列
+    标准差（描述统计，供波动展示），CI 为推断统计，二者解耦。
+    """
     values = series.dropna().astype("float64")
     n = int(values.size)
     if n == 0:
@@ -316,9 +361,16 @@ def _metric_stat(series: pd.Series) -> MetricStat:
     ci_lower: float | None = None
     ci_upper: float | None = None
     if std is not None and n >= REVIEW_MIN_SAMPLE:
-        half = _t_crit(n - 1) * std / math.sqrt(n)
-        ci_lower = mean - half
-        ci_upper = mean + half
+        if overlap > 1:
+            se = _newey_west_se(values, lags=overlap - 1)
+            if se is not None:
+                half = _t_crit(n - 1) * se
+                ci_lower = mean - half
+                ci_upper = mean + half
+        else:
+            half = _t_crit(n - 1) * std / math.sqrt(n)
+            ci_lower = mean - half
+            ci_upper = mean + half
 
     return MetricStat(n, mean, std, ci_lower, ci_upper)
 
@@ -352,9 +404,9 @@ def compute_strategy_review_stats(df: pd.DataFrame) -> tuple[StrategyStatRow, ..
                 strategy_name=str(strategy_name),
                 benchmark_code=bm,
                 avg_daily_count=float(group["daily_cnt"].mean()),
-                t1=_metric_stat(group["t1_mean"]),
-                t5=_metric_stat(group["t5_mean"]),
-                alpha=_metric_stat(group["alpha_mean"]),
+                t1=_metric_stat(group["t1_mean"], overlap=T1_WINDOW_OVERLAP),
+                t5=_metric_stat(group["t5_mean"], overlap=HORIZON_WINDOW_OVERLAP),
+                alpha=_metric_stat(group["alpha_mean"], overlap=HORIZON_WINDOW_OVERLAP),
                 win_count=int(group["win_cnt"].sum()),
                 loss_count=int(group["loss_cnt"].sum()),
             )
@@ -439,9 +491,9 @@ def compute_ai_attribution_stats(df: pd.DataFrame) -> tuple[AiAttributionRow, ..
                 benchmark_code=bm,
                 has_ai=bool(has_ai),
                 avg_daily_count=float(group["daily_cnt"].mean()),
-                t1=_metric_stat(group["t1_mean"]),
-                t5=_metric_stat(group["t5_mean"]),
-                alpha=_metric_stat(group["alpha_mean"]),
+                t1=_metric_stat(group["t1_mean"], overlap=T1_WINDOW_OVERLAP),
+                t5=_metric_stat(group["t5_mean"], overlap=HORIZON_WINDOW_OVERLAP),
+                alpha=_metric_stat(group["alpha_mean"], overlap=HORIZON_WINDOW_OVERLAP),
                 win_count=int(group["win_cnt"].sum()),
                 loss_count=int(group["loss_cnt"].sum()),
             )
