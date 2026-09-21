@@ -53,7 +53,7 @@ def _icon_image(icon_path: str) -> ft.Control:
         src=icon_path,
         width=_ICON_IMG_WIDTH,
         height=_ICON_IMG_HEIGHT,
-        fit=ft.ImageFit.CONTAIN,
+        fit=ft.BoxFit.CONTAIN,
     )
 
 
