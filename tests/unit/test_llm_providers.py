@@ -405,6 +405,29 @@ class TestRecordSelection:
             "model": f"m{RECENT_SELECTIONS_LIMIT + 4}",
         }
 
+    def test_concurrent_threads_no_lost_tail(self, mock_config_handler):
+        """Mi3（review-pr1073）：多线程并发回记不丢尾部条目（读改写加锁原子性）。
+
+        两个 ModelPicker 实例（主配置面板 + failover 对话框）并发记录时，若不加锁，
+        读缓存→改→写非原子会丢失尾部 1-2 条；本测试并发记录不同 (provider, model)
+        后断言全部条目都在（顺序不要求，去重/上限之外不丢）。
+        """
+        import threading
+
+        def _record(idx: int) -> None:
+            record_selection(f"p{idx}", f"m{idx}")
+
+        threads = [threading.Thread(target=_record, args=(i,)) for i in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        entries = mock_config_handler["llm_recent_selections"]
+        keys = {(e["provider"], e["model"]) for e in entries}
+        assert len(keys) == 6
+        assert all((f"p{i}", f"m{i}") in keys for i in range(6))
+
 
 class TestGetModelInfo:
     def test_contract_shape_for_unknown_model(self, monkeypatch):

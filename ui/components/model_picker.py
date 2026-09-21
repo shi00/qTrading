@@ -26,7 +26,13 @@ from collections.abc import Callable
 
 import flet as ft
 
-from ui.components.flet_type_helpers import get_control_value, safe_on_change, safe_on_click, safe_controls
+from ui.components.flet_type_helpers import (
+    get_control_value,
+    safe_on_change,
+    safe_on_click,
+    safe_on_focus,
+    safe_controls,
+)
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -251,7 +257,7 @@ def ModelPicker(
         expand=True,
         width=text_field_width,
         on_change=safe_on_change(_on_search_change),
-        on_focus=safe_on_click(_on_focus),
+        on_focus=safe_on_focus(_on_focus),
         prefix_icon=ft.Icons.SEARCH if ft.Icons else None,
     )
 

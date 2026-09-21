@@ -13,6 +13,7 @@
 """
 
 import logging
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,9 @@ AZURE_API_VERSIONS = [
 
 # 最近选用记录上限（取最近选用的前 N 条置顶）
 RECENT_SELECTIONS_LIMIT = 8
+
+# Mi3（review-pr1073）：recent 回记读改写互斥锁（模块级，跨 ModelPicker 实例）。
+_RECENT_SELECTIONS_LOCK = threading.Lock()
 
 # 语义化配置的键（recent 回记忆复用现有 ConfigHandler JSON 持久化，最小实现）
 _LLM_RECENT_SELECTIONS_KEY = "llm_recent_selections"
@@ -441,19 +445,26 @@ def get_recent_selections() -> list[dict]:
 
 
 def record_selection(provider: str, model: str) -> None:
-    """记录一次选用（有序去重，上限 RECENT_SELECTIONS_LIMIT，新的在前）。"""
+    """记录一次选用（有序去重，上限 RECENT_SELECTIONS_LIMIT，新的在前）。
+
+    Mi3（review-pr1073）：读改写加模块级锁——多个 ModelPicker 实例（主配置面板 +
+    failover 对话框等）并发更新时，不加锁会丢尾部 1-2 条（读缓存→改→写非原子）。
+    ConfigHandler 同步 IO，由调用方（UI 事件处理器）经 ThreadPool offload 后调入，
+    此处锁保证同进程内并发写的读写原子性。
+    """
     if not provider or not model:
         return
     from utils.config_handler import ConfigHandler  # lazy-import: 避免模块顶层触发 IO
 
-    current = get_recent_selections()
-    current = [entry for entry in current if not (entry["provider"] == provider and entry["model"] == model)]
-    current.insert(0, {"provider": provider, "model": model})
-    current = current[:RECENT_SELECTIONS_LIMIT]
-    try:
-        ConfigHandler.save_config({_LLM_RECENT_SELECTIONS_KEY: current})
-    except Exception as ex:  # noqa: BLE001 -- 写失败仅降级丢回记，不阻断保存主流程
-        logger.debug("[llm_providers] record recent selection failed: %s", ex)
+    with _RECENT_SELECTIONS_LOCK:
+        current = get_recent_selections()
+        current = [entry for entry in current if not (entry["provider"] == provider and entry["model"] == model)]
+        current.insert(0, {"provider": provider, "model": model})
+        current = current[:RECENT_SELECTIONS_LIMIT]
+        try:
+            ConfigHandler.save_config({_LLM_RECENT_SELECTIONS_KEY: current})
+        except Exception as ex:  # noqa: BLE001 -- 写失败仅降级丢回记，不阻断保存主流程
+            logger.debug("[llm_providers] record recent selection failed: %s", ex)
 
 
 # ---------------------------------------------------------------------------

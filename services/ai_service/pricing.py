@@ -77,8 +77,6 @@ def estimate_cost(
     if input_tokens < 0 or output_tokens < 0:
         return None
 
-    import litellm  # type: ignore[import-untyped]  # 惰性加载，避免 UI 主循环 import 阻塞
-
     # AI-01 §3.1c-review #1：计价键回溯。effective_model 形如 ``<provider>/<model>``
     # （provider 为项目 provider_id），但对 qwen 等 provider，litellm ``cost_per_token``
     # 不认 ``qwen/`` 前缀（探针实测抛 BadRequestError）。以 ``litellm_catalog_key``
@@ -92,14 +90,18 @@ def estimate_cost(
             effective_model = f"{catalog_key}/{model_id}"
 
     try:
+        # Mi5（review-pr1073）：惰性 import 移入 try 内部——litellm 不可用时同样按
+        # 不可计价降级 None（与 cost_per_token 抛错同语义），不向上抛，保持 R21 兜底一致。
+        import litellm  # type: ignore[import-untyped]  # 惰性加载，避免 UI 主循环 import 阻塞（R16）
+
         in_usd, out_usd = litellm.cost_per_token(
             effective_model,
             prompt_tokens=input_tokens,
             completion_tokens=output_tokens,
         )
     except Exception as e:
-        # 模型不在 litellm 价格表 → 抛异常。控制流分支：返回 None，由上层按「不可计价」
-        # 计数（R21：不把「不可计量」伪装成「零成本」）。
+        # 模型不在 litellm 价格表 / litellm 不可用 → 抛异常。控制流分支：返回 None，
+        # 由上层按「不可计价」计数（R21：不把「不可计量」伪装成「零成本」）。
         # Mi1（review-pr1073）：debug 级记录具体模型与异常类型，供诊断"哪些模型无法计价"。
         logger.debug(
             "[pricing] estimate_cost unpriced model=%s exception_type=%s",
