@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 
-from data.constants import DEFAULT_BENCHMARK_INDEX
+from data.constants import DEFAULT_BENCHMARK_INDEX, REVIEW_STATUS_T1_DONE
 from data.persistence.review_manager import ReviewManager
 from utils.time_utils import to_date
 import pytest
@@ -748,8 +748,13 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    def test_review_index_data_failure_defaults_zero(self):
-        """D4-M4: T+5 成熟但基准指数不可得时跳过记录以避免标签污染。"""
+    def test_review_index_data_failure_stages_numeric_only(self):
+        """RV-04: T+5 成熟但基准指数不可得时数值-only 落库（不整条丢弃）。
+
+        t5_pct/t5_price/t1 数值照写，label/alpha/index_pct 置 NULL（R21 缺失值
+        语义），review_status=T1_DONE 留在补标签通道（get_unlabeled_predictions），
+        基准恢复后由 backfill 补定稿。
+        """
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
         mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
@@ -772,7 +777,16 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            mock_cache_instance.screener_dao.update_prediction_result.assert_not_called()
+            dao = mock_cache_instance.screener_dao
+            assert dao.update_prediction_result.await_count == 1
+            call_args = dao.update_prediction_result.call_args
+            assert call_args[0][2] is None  # label 未定稿（R21 NULL 不伪造）
+            assert call_args.kwargs["t5_pct"] == pytest.approx(3.0)  # (10.3/10.0 - 1) × 100
+            assert call_args.kwargs["t5_price"] == pytest.approx(10.3)
+            assert call_args.kwargs["index_pct"] is None
+            assert call_args.kwargs["alpha"] is None
+            assert call_args.kwargs["benchmark_code"] is None  # 保持已有基准不覆盖（D2-5）
+            assert call_args.kwargs["review_status"] == REVIEW_STATUS_T1_DONE
 
         asyncio.run(run_test())
 
@@ -905,7 +919,12 @@ class TestReviewPredictionsCore(unittest.TestCase):
         asyncio.run(run_test())
 
     def test_bulk_prefetch_avoids_per_day_index_queries(self):
-        """批量预获取成功后，循环内不应再调用 get_index_daily"""
+        """批量预获取成功后，循环内不应再逐日调用 get_index_daily。
+
+        RV-04 降级链的探针对批量最老记录日（probe_date=min_pred_date）做一次
+        本地探测命中配置基准——这是唯一的逐日查询；批量预取成功后循环内
+        （本例 T+5 未成熟，不进入窗口收益解析）不再有额外逐日查询。
+        """
         mock_cache_instance = MagicMock()
         self._setup_cache_with_pending(mock_cache_instance)
         mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(
@@ -938,7 +957,11 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            mock_cache_instance.quote_dao.get_index_daily.assert_not_called()
+            # 仅 RV-04 探针 1 次本地探测（probe_date=批量最老记录日），无 API 兜底、无循环内逐日查询。
+            mock_cache_instance.quote_dao.get_index_daily.assert_called_once_with(
+                ts_code=DEFAULT_BENCHMARK_INDEX,
+                trade_date=datetime.date(2024, 3, 15),
+            )
             mock_api_instance.get_index_daily.assert_not_called()
 
         asyncio.run(run_test())
@@ -969,12 +992,14 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            # RV-01: 降级逐日查询在 T+5 成熟分支发生，但需要 T0 与 T+5 两点 close（两次调用）。
+            # RV-04 探针（probe_date=批量最老记录日 20240315）+ RV-01 窗口首尾两点
+            # （T0 与 T+5）close = 共 3 次逐日查询；批量预取失败不产生额外调用。
             calls = mock_cache_instance.quote_dao.get_index_daily.call_args_list
-            assert len(calls) == 2
-            assert calls[0].kwargs["trade_date"] == datetime.date(2024, 3, 15)
-            assert calls[1].kwargs["trade_date"] == datetime.date(2024, 3, 22)
-            mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()
+            assert len(calls) == 3
+            assert calls[0].kwargs["trade_date"] == datetime.date(2024, 3, 15)  # RV-04 探针
+            assert calls[1].kwargs["trade_date"] == datetime.date(2024, 3, 15)  # 窗口 T0
+            assert calls[2].kwargs["trade_date"] == datetime.date(2024, 3, 22)  # 窗口 T+5
+            assert mock_cache_instance.screener_dao.update_prediction_result.await_count == 1
 
         asyncio.run(run_test())
 
@@ -1079,11 +1104,13 @@ class TestReviewPredictionsCore(unittest.TestCase):
         self.assertAlmostEqual(call_args[0][1], 10.0)
         self.assertEqual(call_args.kwargs["t1_price"], 11.0)
 
-        # ③ backfill_horizon_returns：同一 t0 → 相同 T+5 锚点（t5_price=12.0、t5_pct=20.0）
+        # ③ backfill_horizon_returns：同一 t0 → 相同 T+5 锚点（t5_price=12.0、t5_pct=20.0%）
         mock_cache_instance = MagicMock()
         mock_cache_instance.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
         mock_cache_instance.stock_dao.get_trade_cal = _make_trade_cal_mock()
         mock_cache_instance.screener_dao.get_unfilled_horizon_predictions = AsyncMock(return_value=candidate)
+        # RV-04: B 类池（数值已齐、标签未定稿）同批取数，空池 = 无补定稿记录。
+        mock_cache_instance.screener_dao.get_unlabeled_predictions = AsyncMock(return_value=[])
         mock_cache_instance.screener_dao.backfill_t5_prediction = AsyncMock()
         mock_cache_instance.engine = _make_engine()
         # D4-M4: backfill_horizon_returns 解析 T+5 基准指数以定稿标签。
