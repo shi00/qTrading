@@ -20,6 +20,20 @@ logger = logging.getLogger(__name__)
 # 超出后由 _read_db 抛 ValueError，BacktestDataProvider.preload_range 捕获并降级逐日查询。
 _MAX_SCREENING_RANGE_ROWS = 1_500_000
 
+
+def _derive_screening_from_fundamental(fund: pd.DataFrame | None) -> pd.DataFrame | None:
+    """DS-05: 由 require_close=False 全集派生 require_close=True 子集（screening ⊂ fundamental）。
+
+    get_screening_data*/get_fundamental_screening_data* 共享同一 SQL 模板，唯一差异是
+    ``q.close IS NOT NULL`` WHERE 条件。SQL 层该判定与 pandas ``close.notna()`` 等价，
+    故两遍几乎相同的全市场 JOIN 收敛为一遍 + 内存过滤。缺 close 列（防御路径，真实模板恒含）
+    时原样返回，避免对旧列形状/测试替身做出不可预期裁剪。
+    """
+    if fund is None or fund.empty or "close" not in fund.columns:
+        return fund
+    return fund[fund["close"].notna()].reset_index(drop=True)
+
+
 # UX-05: 复盘聚合统计的历史窗口（天）。get_history_tree 与 get_strategy_review_stats 共用，
 # 消除魔术字符串漂移（四审 L1/m1/m2）。值拼接进 SQL 的 INTERVAL，为受控模块常量、非用户输入，
 # 无注入面（review03-C7 约束的是用户输入可变点）。
@@ -491,16 +505,10 @@ class ScreenerDao(BaseDao):
         return sql.replace("__STOCK_ALIVE_CONDITION__", stock_alive_condition(alias="b.", as_of="$5"))
 
     async def get_screening_data(self, trade_date: str | datetime.date | None = None):
-        if not trade_date:
-            trade_date = await self._get_latest_closed_trade_date()
-        if not trade_date:
-            logger.warning("[ScreenerDao] No trade_date available for screening data query")
-            return pd.DataFrame()
-        sql = self._build_screening_sql(require_close=True)
-        # DAT-26: 边界显式转 date；suppress_errors=False 使查询失败显式传播，
-        # 与"无数据返回空表"可区分（上游 data_provider 有 try/except 承接）。
-        td = self._to_db_date(trade_date)
-        return await self._read_db(sql, (td,) * 6, suppress_errors=False)
+        # DS-05: screening ⊂ fundamental（同模板唯差 close 条件），由全集内存派生，
+        # 收敛两遍几乎相同的全市场 JOIN 为一遍。origin 的 suppression/错误传播语义
+        # 由 get_fundamental_screening_data 继承（suppress_errors=False 同源）。
+        return _derive_screening_from_fundamental(await self.get_fundamental_screening_data(trade_date))
 
     async def get_fundamental_screening_data(self, trade_date: str | datetime.date | None = None):
         if not trade_date:
@@ -524,15 +532,11 @@ class ScreenerDao(BaseDao):
         )
 
     async def get_screening_data_range(self, start_date: str, end_date: str, max_rows: int | None = None):
-        sql = self._build_screening_sql_range(require_close=True)
-        # DAT-10: 区间预载携带行数护栏，超限抛 ValueError 由上游降级逐日查询
-        # DAT-26: 边界显式转 date
-        # D3-M4: max_rows 由调用方按区间真实规模自适应传入（None 沿用常量兜底），
-        # 防止固定护栏与 A 股扩容后的真实行数过于接近而静默触发降级。
-        return await self._read_db(
-            sql,
-            (self._to_db_date(start_date), self._to_db_date(end_date)),
-            max_rows=max_rows if max_rows is not None else _MAX_SCREENING_RANGE_ROWS,
+        # DS-05: 同 get_screening_data，由区间全集派生，消除 preload_range 双份 150 万行
+        # 内存峰值与 DB 两遍 JOIN。护栏 max_rows 应用于全集查询（较松那份，行数更多），
+        # 超限仍由 _read_db 抛 ValueError 驱动降级逐日——护栏语义变化见 PR 说明。
+        return _derive_screening_from_fundamental(
+            await self.get_fundamental_screening_data_range(start_date, end_date, max_rows=max_rows)
         )
 
     async def get_fundamental_screening_data_range(self, start_date: str, end_date: str, max_rows: int | None = None):

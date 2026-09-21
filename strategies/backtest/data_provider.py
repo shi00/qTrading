@@ -215,7 +215,6 @@ class BacktestDataProvider:
                 )
             # 并行查询所有数据
             results = await asyncio.gather(
-                self.cache.screener_dao.get_screening_data_range(start_str, end_str, max_rows=screening_guard_rows),
                 self.cache.screener_dao.get_fundamental_screening_data_range(
                     start_str, end_str, max_rows=screening_guard_rows
                 ),
@@ -226,10 +225,23 @@ class BacktestDataProvider:
                 self.cache.quote_dao.get_block_trade_range(start_str, end_str),
                 return_exceptions=True,
             )
+            # DS-05: screening_data 由 fundamental_screening_data 派生（同模板唯差
+            # close 条件，SQL 层 close IS NOT NULL ↔ notna() 等价），不再单独跑第二遍
+            # 几乎相同的全市场 JOIN（原 gather 双份 150 万行上限 → 收敛为一份）。
+            # 派生在 result 异常时原样保留异常，由下方循环统一降级处理。
+            # 因 R1（strategies 不得 import data 层）内联同源逻辑，勿单独变更一侧。
+            fund_first = results[0]
+            if isinstance(fund_first, BaseException) or fund_first is None or fund_first.empty:
+                screening_res = fund_first
+            elif "close" in fund_first.columns:
+                screening_res = fund_first[fund_first["close"].notna()].reset_index(drop=True)
+            else:
+                screening_res = fund_first
+            results = [fund_first, screening_res, *results[1:]]
 
             keys = [
-                "screening_data",
                 "fundamental_screening_data",
+                "screening_data",
                 "northbound_data",
                 "northbound_flow_data",
                 "moneyflow_data",

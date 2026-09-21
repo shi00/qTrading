@@ -990,20 +990,13 @@ class TestDataProcessor(unittest.TestCase):
         self.processor._quality_tier = 3
         self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 5))
         self.mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20230106")
-        self.mock_cache.screener_dao.get_screening_data = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "ts_code": ["000001.SZ"],
-                    "trade_date": ["20230105"],
-                    "close": [10.0],
-                }
-            ),
-        )
+        # DS-05: screening_data 由 fundamental_screening_data 派生（close 非空行），mock 源统一在 fundamental。
         self.mock_cache.screener_dao.get_fundamental_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
                     "trade_date": ["20230105"],
+                    "close": [10.0],
                     "roe": [0.15],
                 }
             ),
@@ -1017,7 +1010,8 @@ class TestDataProcessor(unittest.TestCase):
         context = await self.processor.prepare_screening_context()
 
         self.assertEqual(context["trade_date"], "20230105")
-        self.mock_cache.screener_dao.get_screening_data.assert_awaited_once_with("20230105")
+        self.mock_cache.screener_dao.get_fundamental_screening_data.assert_awaited_once_with("20230105")
+        self.mock_cache.screener_dao.get_screening_data.assert_not_awaited()
         self.mock_cache.quote_dao.get_latest_trade_date.assert_not_awaited()
 
     def test_prepare_screening_context_prefers_latest_closed_trade_date(self):
@@ -1027,7 +1021,8 @@ class TestDataProcessor(unittest.TestCase):
         """缓存 trade_date 与 screening_data.trade_date 不一致时，应立即失败"""
         self.processor._quality_tier = 3
         self.mock_cache.quote_dao.get_latest_trade_date = AsyncMock(return_value="20230101")
-        self.mock_cache.screener_dao.get_screening_data = AsyncMock(
+        # DS-05: screening_data 由 fundamental_screening_data 派生（close 非空行），mock 源统一在 fundamental。
+        self.mock_cache.screener_dao.get_fundamental_screening_data = AsyncMock(
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"],
