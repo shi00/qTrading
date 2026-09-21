@@ -577,6 +577,58 @@ class TestScreenerDaoRv04LabelDecouple:
         compiled = stmt.compile()
         assert REVIEW_STATUS_T1_DONE in compiled.params.values()
 
+    @pytest.mark.asyncio
+    async def test_finalize_prediction_label_with_conn_executes_on_conn(self):
+        """批量定稿路径（conn 由调用方事务持有）：语句直接在传入 conn 上执行，
+        不再自建事务（与 _batch_finalize_labels 的单事务语义配套）。"""
+        dao, mock_conn = self._make_dao_with_conn()
+        await dao.finalize_prediction_label(
+            record_id=7, label="WIN", index_pct=1.0, benchmark_code="000300.SH", alpha=4.0, conn=mock_conn
+        )
+        mock_conn.execute.assert_called_once()
+        sql = str(mock_conn.execute.call_args.args[0])
+        assert "alpha IS NULL" in sql
+
+    @pytest.mark.asyncio
+    async def test_finalize_prediction_label_tx_failure_logs_not_raises(self):
+        """自建事务失败（非 disposed）→ 记 warning 不上抛（补标签通道次日重试兜底）。"""
+        from contextlib import asynccontextmanager
+
+        dao, _ = self._make_dao_with_conn()
+
+        @asynccontextmanager
+        async def failing_begin(conn=None):
+            raise RuntimeError("tx failed")
+            yield
+
+        dao._guarded_begin = failing_begin
+        # 不抛：单条失败由次日 backfill job 兜底重试
+        await dao.finalize_prediction_label(
+            record_id=1, label="WIN", index_pct=1.0, benchmark_code="000300.SH", alpha=4.0
+        )
+
+    @pytest.mark.asyncio
+    async def test_finalize_prediction_label_disposed_raises(self):
+        """R5: 自建事务遇 EngineDisposedError 上抛（disposed 引擎上不再静默吞没）。"""
+        from contextlib import asynccontextmanager
+
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        dao, mock_conn = self._make_dao_with_conn()
+
+        @asynccontextmanager
+        async def disposed_begin(conn=None):
+            raise EngineDisposedError("engine disposed")
+            yield
+
+        dao._guarded_begin = disposed_begin
+        with pytest.raises(EngineDisposedError, match="engine disposed"):
+            await dao.finalize_prediction_label(
+                record_id=1, label="WIN", index_pct=1.0, benchmark_code="000300.SH", alpha=4.0
+            )
+        # disposed 引擎上 UPDATE 语句未执行
+        mock_conn.execute.assert_not_called()
+
 
 class TestScreenerDaoSaveScreeningResults:
     @pytest.mark.asyncio

@@ -10,7 +10,7 @@ import pandas as pd
 import datetime
 
 from data.cache.cache_manager import CacheManager
-from data.constants import REVIEW_STATUS_T1_DONE
+from data.constants import DEFAULT_BENCHMARK_INDEX, REVIEW_STATUS_T1_DONE
 from data.external.tushare_client import TushareClient
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.review_manager import ReviewManager
@@ -1163,6 +1163,191 @@ class TestReviewManagerRv04Decouple:
         with patch("data.persistence.review_manager.ConfigHandler.get_config", return_value="000985.CSI"):
             with pytest.raises(EngineDisposedError):
                 await rm._resolve_benchmark(datetime.date(2024, 6, 10))
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_resolve_benchmark_invalid_config_falls_back_to_default(self, mock_cm, mock_tc):
+        """配置项非字符串（如 None）→ 回退 DEFAULT_BENCHMARK_INDEX 继续降级链，不异常退出。"""
+        rm = ReviewManager()
+        rm._resolve_index_close = AsyncMock(return_value=None)  # 全候选探测不可得
+        with patch("data.persistence.review_manager.ConfigHandler.get_config", return_value=None):
+            resolved = await rm._resolve_benchmark(datetime.date(2024, 6, 10))
+        assert resolved == DEFAULT_BENCHMARK_INDEX
+        assert rm._benchmark_diag is not None
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_a_class_missing_benchmark_stages_numeric_only(self, mock_cm, mock_tc):
+        """A 类（缺 t5_pct 数值）基准缺失 → 数值照算照写（解耦落库 label=None），
+        标签停留补标签通道次日重试——与 run_review 数值-only 语义对称。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        rm._batch_backfill_t5 = AsyncMock()
+        rm._batch_finalize_labels = AsyncMock()
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(return_value=[])
+        count = await rm.backfill_horizon_returns()
+        assert count == 1
+        assert rm._batch_backfill_t5.await_count == 1  # A 类数值-only 解耦写入
+        rm._batch_finalize_labels.assert_not_called()
+        (u,) = rm._batch_backfill_t5.call_args.args[0]
+        assert u["record_id"] == 1
+        assert u["t5_pct"] == pytest.approx(5.0)  # (10.5/10.0 - 1) × 100
+        assert u["t5_price"] == pytest.approx(10.5)
+        assert u["label"] is None  # R21: 标签未定稿用 NULL，不伪造
+        assert u["index_pct"] is None
+        assert u["benchmark_code"] is None
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_b_class_t0_outside_market_calendar_skipped(self, mock_cm, mock_tc):
+        """B 类 t0 不在市场日历 / 窗口越界 → 防御性跳过（数值已在库无丢失），次日重试。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        rm._batch_backfill_t5 = AsyncMock()
+        rm._batch_finalize_labels = AsyncMock()
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(return_value=[])
+        mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(
+            return_value=[
+                # t0=0609 不在 quotes 日历（0610-0617）→ market_pos.get(t0) is None
+                {"id": 1, "ts_code": "000001.SZ", "trade_date": "20240609", "t5_pct": 5.0},
+                # t0=0617 为日历末日 → 0617+5 越界
+                {"id": 2, "ts_code": "000001.SZ", "trade_date": "20240617", "t5_pct": 5.0},
+            ]
+        )
+        count = await rm.backfill_horizon_returns()
+        assert count == 0
+        rm._batch_backfill_t5.assert_not_called()
+        rm._batch_finalize_labels.assert_not_called()
+
+    @staticmethod
+    def _finalize_update(record_id: int, alpha: float = 4.0) -> dict:
+        return {
+            "record_id": record_id,
+            "label": "WIN",
+            "index_pct": 1.0,
+            "benchmark_code": "000300.SH",
+            "alpha": alpha,
+        }
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_finalize_labels_single_transaction(self, mock_cm, mock_tc):
+        """批量定稿在 engine.begin 单事务内逐条执行，全部共享同一 conn（原子提交）。"""
+        from contextlib import asynccontextmanager
+
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_conn = AsyncMock()
+
+        @asynccontextmanager
+        async def mock_begin():
+            yield mock_conn
+
+        mock_cache.engine.begin = mock_begin
+        mock_cache.screener_dao.finalize_prediction_label = AsyncMock()
+        await rm._batch_finalize_labels([self._finalize_update(1), self._finalize_update(2, alpha=-1.0)])
+        assert mock_cache.screener_dao.finalize_prediction_label.await_count == 2
+        first = mock_cache.screener_dao.finalize_prediction_label.await_args_list[0]
+        assert first.args[0] == 1
+        assert first.kwargs["alpha"] == 4.0
+        assert first.kwargs["conn"] is mock_conn
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_finalize_labels_no_engine_logs_and_returns(self, mock_cm, mock_tc):
+        """engine 不可用（None）→ 记 error 返回不抛（次日 job 重试兜底），不触碰 DAO。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        mock_cache.engine = None
+        mock_cache.screener_dao.finalize_prediction_label = AsyncMock()
+        await rm._batch_finalize_labels([self._finalize_update(1)])  # 不抛
+        mock_cache.screener_dao.finalize_prediction_label.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_finalize_labels_batch_failure_falls_back_to_individual(self, mock_cm, mock_tc):
+        """批量事务失败（非 disposed）→ 降级逐条自建事务（无 conn），逐条成功仍完成定稿。"""
+        from contextlib import asynccontextmanager
+
+        rm, mock_cache = self._make_rm(mock_cm)
+
+        @asynccontextmanager
+        async def failing_begin():
+            raise RuntimeError("batch tx failed")
+            yield
+
+        mock_cache.engine.begin = failing_begin
+        mock_cache.screener_dao.finalize_prediction_label = AsyncMock()
+        await rm._batch_finalize_labels([self._finalize_update(1), self._finalize_update(2)])
+        assert mock_cache.screener_dao.finalize_prediction_label.await_count == 2
+        first = mock_cache.screener_dao.finalize_prediction_label.await_args_list[0]
+        assert first.args[0] == 1
+        assert "conn" not in first.kwargs  # fallback 路径逐条自建事务
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_finalize_labels_engine_disposed_raises(self, mock_cm, mock_tc):
+        """R5: 批量事务遇 EngineDisposedError 直接上抛，不进 fallback（disposed 引擎不可恢复）。"""
+        from contextlib import asynccontextmanager
+
+        rm, mock_cache = self._make_rm(mock_cm)
+
+        @asynccontextmanager
+        async def disposed_begin():
+            raise EngineDisposedError("engine disposed")
+            yield
+
+        mock_cache.engine.begin = disposed_begin
+        mock_cache.screener_dao.finalize_prediction_label = AsyncMock()
+        with pytest.raises(EngineDisposedError):
+            await rm._batch_finalize_labels([self._finalize_update(1)])
+        mock_cache.screener_dao.finalize_prediction_label.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_finalize_labels_fallback_disposed_raises(self, mock_cm, mock_tc):
+        """R5: fallback 逐条路径遇 EngineDisposedError 同样上抛（与主路径一致，不吞没）。"""
+        from contextlib import asynccontextmanager
+
+        rm, mock_cache = self._make_rm(mock_cm)
+
+        @asynccontextmanager
+        async def failing_begin():
+            raise RuntimeError("batch tx failed")
+            yield
+
+        mock_cache.engine.begin = failing_begin
+        mock_cache.screener_dao.finalize_prediction_label = AsyncMock(
+            side_effect=EngineDisposedError("engine disposed")
+        )
+        with pytest.raises(EngineDisposedError):
+            await rm._batch_finalize_labels([self._finalize_update(1)])
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_finalize_labels_fallback_individual_failure_logged(self, mock_cm, mock_tc):
+        """fallback 逐条仍失败（非 disposed）→ 记 error 不抛（次日 backfill job 兜底重试）。"""
+        from contextlib import asynccontextmanager
+
+        rm, mock_cache = self._make_rm(mock_cm)
+
+        @asynccontextmanager
+        async def failing_begin():
+            raise RuntimeError("batch tx failed")
+            yield
+
+        mock_cache.engine.begin = failing_begin
+        mock_cache.screener_dao.finalize_prediction_label = AsyncMock(side_effect=RuntimeError("row failed"))
+        await rm._batch_finalize_labels([self._finalize_update(1), self._finalize_update(2)])  # 不抛
+        assert mock_cache.screener_dao.finalize_prediction_label.await_count == 2
 
 
 class TestReviewManagerT1RowBoundary:
