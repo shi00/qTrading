@@ -17,6 +17,8 @@ import json
 
 from dataclasses import asdict, dataclass, field
 
+import polars as pl
+
 # 结果 DataFrame 中承载归因的列名。
 ATTRIBUTION_COLUMN = "_filter_attribution"
 
@@ -54,6 +56,26 @@ class FilterCondition:
             raise ValueError("between 运算符必须提供 (lo, hi) 二元组阈值")
         if self.operator != "between" and isinstance(self.threshold, tuple):
             raise ValueError(f"{self.operator} 运算符必须提供单值阈值")
+
+
+def condition_to_expr(cond: FilterCondition) -> pl.Expr:
+    """FilterCondition → Polars 表达式（SC-07 空集回溯复用）。
+
+    空集归因（PolarsBaseStrategy._diagnose_empty）用同一批结构化条件
+    重新统计通过数，找出把候选池砍到 0 的条件，避免条件声明二次漂移。
+    """
+    col = pl.col(cond.column)
+    if cond.operator == "gt":
+        return col > cond.threshold  # type: ignore[operator]
+    if cond.operator == "geq":
+        return col >= cond.threshold  # type: ignore[operator]
+    if cond.operator == "lt":
+        return col < cond.threshold  # type: ignore[operator]
+    if cond.operator == "leq":
+        return col <= cond.threshold  # type: ignore[operator]
+    # between: (lo, hi) 二元组
+    lo, hi = cond.threshold  # type: ignore[misc]
+    return col.is_between(lo, hi)
 
 
 @dataclass(frozen=True)

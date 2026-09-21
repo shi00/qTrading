@@ -170,7 +170,9 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 "label_key": "param_rsi_threshold_oversold",
                 "type": "slider",
                 "group": "core_signal",
-                "min": 0,
+                # SC-07: RSI 取值域为 [0, 100]，阈值 0 使「RSI < 0」恒假（必然空集），
+                # 下限改 1 移除无解取值点。
+                "min": 1,
                 "max": 100,
                 "default": 30,
                 "step": 1,
