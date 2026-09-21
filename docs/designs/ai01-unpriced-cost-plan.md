@@ -63,8 +63,10 @@ gpt-5.4-mini / claude-sonnet-4-6 / gemini-2.0-flash 均可计价）。
 1. **删除** `MODEL_PRICING` 手写价格表与 `estimate_cost` 的手写公式。
 2. 新增汇率常量（`# NOTE(lazy)` 注明 ceiling 与 upgrade 触发条件）：
    ```python
-   _USD_TO_CNY_RATE = 7.2  # NOTE(lazy): 简化，固定汇率不实时拉取. ceiling: 波动<±10%. upgrade: 需精确对账或引入实时汇率时
+   _USD_TO_CNY_RATE = 7.2  # NOTE(lazy): 估算汇率默认值，不实时拉取. ceiling: 无（用户可经设置页 ai_usd_to_cny_rate 覆盖）. upgrade: 引入实时汇率时删除默认常量
    ```
+   （review-pr1073 M3：汇率升为设置页可配置项 `ai_usd_to_cny_rate`，UI 标注「估算汇率」；
+   `_get_usd_to_cny_rate()` 正数优先、非法/缺省回退默认 7.2。）
 3. `estimate_cost(effective_model, input_tokens, output_tokens)` 重构为：
    ```python
    if input_tokens < 0 or output_tokens < 0:

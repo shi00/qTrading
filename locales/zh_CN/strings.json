@@ -384,6 +384,8 @@
     "settings_sec_tuning": "AI 性能调优",
     "settings_ai_cost_limit": "成本上限(元)",
     "settings_hint_ai_cost_limit": "留空表示不限制；本月累计达到该预算后自动暂停 AI 分析",
+    "settings_ai_usd_rate": "美元汇率(估算)",
+    "settings_hint_ai_usd_rate": "估算汇率：用于把 litellm 美元计价换算为人民币展示，非实时汇率；留空回退 7.2",
     "settings_month_ai_cost": "本月已消耗 ¥{cost}",
     "settings_ai_local_only_title": "仅本地模式",
     "settings_ai_local_only_body": "禁用全部云端 LLM 调用，仅使用本地模型，数据不出本机。",

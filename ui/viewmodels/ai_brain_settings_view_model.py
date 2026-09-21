@@ -67,6 +67,8 @@ class AIBrainSettingsState:
     ai_configured: bool = False
     # AI-03 完整版 T7: 月度 AI 成本上限输入文本 (空串=不限制)
     ai_cost_limit_value: str = ""
+    # review-pr1073 M3: 美元→人民币估算汇率输入文本（成本展示用，非实时汇率）
+    usd_to_cny_rate_value: str = ""
     # AI-03 完整版 T7: 本月累计 AI 成本 (元, 供 UI 展示; 未加载为 None)
     month_cost_cny: float | None = None
     # AI-01/R21: 本月累计不可计价调用 (calls, tokens)；无不可计价调用时为 (0, 0)。
@@ -162,6 +164,9 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
         # AI-03 完整版 T7: ai_cost_limit_cny (元, None/0/负 视为不限制 → 空串)
         ai_cost_limit = ConfigHandler.get_setting("ai_cost_limit_cny")
         ai_cost_limit_value = "" if ai_cost_limit is None or ai_cost_limit <= 0 else str(ai_cost_limit)
+        # review-pr1073 M3: 估算汇率配置（缺省回退 7.2 并在 UI 标注"估算汇率"）
+        usd_rate = ConfigHandler.get_setting("ai_usd_to_cny_rate", 7.2)
+        usd_to_cny_rate_value = str(usd_rate) if isinstance(usd_rate, (int, float)) and usd_rate > 0 else str(7.2)
         # BIZ-02: 口径对齐 AIService.is_cloud_available 的静态部分（主 provider 有
         # api_key 且非仅本地模式）。AIService 实例内的 _is_cloud_configured（load 状态）
         # 此处不可静态感知，配置存在即视为已配置——UI 提示语义是「是否配置」，非「当前可用」。
@@ -178,6 +183,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             ai_local_only_mode=ConfigHandler.is_ai_local_only_mode(),
             ai_configured=ai_configured,
             ai_cost_limit_value=ai_cost_limit_value,
+            usd_to_cny_rate_value=usd_to_cny_rate_value,
         )
 
     # --- Update commands (View 通过 set_* 更新本地 state) ---
@@ -205,6 +211,9 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
 
     def set_ai_cost_limit_value(self, value: str) -> None:
         self._set_state(ai_cost_limit_value=value)
+
+    def set_usd_to_cny_rate_value(self, value: str) -> None:
+        self._set_state(usd_to_cny_rate_value=value)
 
     # --- 验证 (阶段 1) ---
 
@@ -246,6 +255,15 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             try:
                 ai_cost_limit = float(ai_cost_limit_str)
                 if ai_cost_limit < 0:
+                    return False, "ai_snack_param_err"
+            except (ValueError, TypeError):
+                return False, "ai_snack_param_err"
+
+        # review-pr1073 M3: 估算汇率必须为正数（成本展示换算，不可为 0/负）
+        usd_rate_str = (self._state.usd_to_cny_rate_value or "").strip()
+        if usd_rate_str:
+            try:
+                if float(usd_rate_str) <= 0:
                     return False, "ai_snack_param_err"
             except (ValueError, TypeError):
                 return False, "ai_snack_param_err"
@@ -297,6 +315,9 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             # AI-03 完整版 T7: 成本上限空串 → None (不限制); 否则 float 元
             ai_cost_limit_str = (self._state.ai_cost_limit_value or "").strip()
             ai_cost_limit_cny = None if not ai_cost_limit_str else float(ai_cost_limit_str)
+            # review-pr1073 M3: 估算汇率空串/非法回退默认 7.2（_validate_all 已保证非空时正数）
+            usd_rate_str = (self._state.usd_to_cny_rate_value or "").strip()
+            usd_to_cny_rate = float(usd_rate_str) if usd_rate_str else 7.2
 
             # local_vm.get_current_config() 返回 dict (复用 LocalModelConfigPanelViewModel)
             local_config = typing.cast(typing.Any, self._local_vm).get_current_config()
@@ -327,6 +348,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                         "ai_max_concurrent_analysis": concurrency,
                         "ai_news_max_concurrent": news_concurrency,
                         "ai_cost_limit_cny": ai_cost_limit_cny,
+                        "ai_usd_to_cny_rate": usd_to_cny_rate,
                         "ai_local_only_mode": self._state.ai_local_only_mode,
                     }
                 ):

@@ -27,8 +27,25 @@ from datetime import date
 # 价格变动时更新此日期，便于审计价格时效性。
 PRICING_UPDATED = date(2026, 9, 14)
 
-# 汇率：litellm 内置价格表为美元，换算为人民币展示。
-_USD_TO_CNY_RATE = 7.2  # NOTE(lazy): 简化，固定汇率不实时拉取. ceiling: 波动<±10%. upgrade: 需精确对账或引入实时汇率时
+# 汇率默认值：litellm 内置价格表为美元，换算为人民币展示。
+# 估算汇率，不实时拉取（review-pr1073 M3：升为可配置项，设置页可覆盖并标注"估算汇率"）。
+_USD_TO_CNY_RATE = 7.2  # NOTE(lazy): 估算汇率默认值，不实时拉取. ceiling: 无（用户可经设置页 ai_usd_to_cny_rate 覆盖）. upgrade: 引入实时汇率时删除默认常量
+
+# 设置页可配置的汇率 key（ConfigHandler 通用设置域，与 ai_cost_limit_cny 同款动态 key）。
+_USD_TO_CNY_RATE_KEY = "ai_usd_to_cny_rate"
+
+
+def _get_usd_to_cny_rate() -> float:
+    """读取换算汇率：设置页配置优先，缺省/非法回退默认 7.2（正数才采纳）。"""
+    try:
+        from utils.config_handler import ConfigHandler  # lazy-import: services 可依赖 utils
+
+        rate = ConfigHandler.get_setting(_USD_TO_CNY_RATE_KEY)
+        if isinstance(rate, (int, float)) and rate > 0:
+            return float(rate)
+    except Exception:
+        pass
+    return _USD_TO_CNY_RATE
 
 
 def estimate_cost(
@@ -81,5 +98,5 @@ def estimate_cost(
         # 计数（R21：不把「不可计量」伪装成「零成本」）。
         return None
 
-    cost = (in_usd + out_usd) * _USD_TO_CNY_RATE
+    cost = (in_usd + out_usd) * _get_usd_to_cny_rate()
     return round(cost, 4)

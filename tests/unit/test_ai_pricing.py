@@ -48,6 +48,39 @@ def test_negative_tokens_returns_none():
         m.assert_not_called()
 
 
+def test_configured_rate_takes_precedence():
+    """review-pr1073 M3：设置页配置的估算汇率优先于默认 7.2。"""
+    with (
+        patch("litellm.cost_per_token", return_value=(0.00001, 0.00002)),
+        patch("utils.config_handler.ConfigHandler.get_setting", return_value=7.5),
+    ):
+        cost = cast(float, estimate_cost("deepseek/deepseek-chat", 100, 100))
+    assert cost == round((0.00001 + 0.00002) * 7.5, 4)
+
+
+def test_invalid_configured_rate_falls_back():
+    """review-pr1073 M3：配置汇率非法（0/负/非数字）→ 回退默认 7.2（防展示失真）。"""
+    from utils.config_handler import ConfigHandler
+
+    for bad in (0, -1.0, "abc", None):
+        with (
+            patch("litellm.cost_per_token", return_value=(0.00001, 0.00002)),
+            patch.object(ConfigHandler, "get_setting", return_value=bad),
+        ):
+            cost = cast(float, estimate_cost("deepseek/deepseek-chat", 100, 100))
+        assert cost == round((0.00001 + 0.00002) * _USD_TO_CNY_RATE, 4)
+
+
+def test_configuration_error_still_falls_back():
+    """ConfigHandler 读取异常（如配置损坏）→ 回退默认，不阻断成本估算。"""
+    with (
+        patch("litellm.cost_per_token", return_value=(0.00001, 0.00002)),
+        patch("utils.config_handler.ConfigHandler.get_setting", side_effect=RuntimeError("config corrupt")),
+    ):
+        cost = cast(float, estimate_cost("deepseek/deepseek-chat", 100, 100))
+    assert cost == round((0.00001 + 0.00002) * _USD_TO_CNY_RATE, 4)
+
+
 def test_usd_rate_note_lazy_complete():
     """汇率常量为 `# NOTE(lazy)` 标记，三要素齐全（量化 threshold 常量须可升级）。"""
     import inspect

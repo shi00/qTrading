@@ -505,6 +505,8 @@
     "egress_session_indicator": "{count} egress this session",
     "egress_empty": "No egress records",
     "settings_hint_ai_cost_limit": "Leave empty for unlimited; AI analysis pauses once the monthly budget is reached",
+    "settings_ai_usd_rate": "USD exchange (est.)",
+    "settings_hint_ai_usd_rate": "Estimated rate to convert litellm USD pricing to CNY display; not live FX. Leave empty to fall back to 7.2",
     "settings_month_ai_cost": "This month: ¥{cost}",
     "settings_sec_history": "History Data",
     "settings_sec_tasks": "Scheduled Tasks",

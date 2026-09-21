@@ -366,6 +366,20 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         size=AppStyles.FONT_SIZE_BODY_SM,
         color=AppColors.TEXT_SECONDARY,
     )
+    # review-pr1073 M3: 美元→人民币估算汇率输入（成本展示换算用，标注"估算"以免与实时汇率混淆）
+    usd_rate_input = ft.TextField(
+        label=I18n.get("settings_ai_usd_rate"),
+        value=ai_settings_state.usd_to_cny_rate_value,
+        width=_INPUT_WIDTH_SMALL,
+        keyboard_type=ft.KeyboardType.NUMBER,
+        hint_text=I18n.get("settings_hint_ai_usd_rate"),
+        tooltip=I18n.get("settings_hint_ai_usd_rate"),
+        on_change=lambda e: ai_settings_vm.set_usd_to_cny_rate_value(e.control.value),
+        on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
+        bgcolor=AppColors.INPUT_BG,
+        color=AppColors.INPUT_TEXT,
+        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
+    )
     ai_prompt_input = ft.TextField(
         label=I18n.get("settings_ai_prompt"),
         value=ai_settings_state.ai_prompt_value,
@@ -587,6 +601,10 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                 ),
                 ft.Row(
                     [month_cost_display],
+                    spacing=5,
+                ),
+                ft.Row(
+                    [usd_rate_input],
                     spacing=5,
                 ),
             ],
