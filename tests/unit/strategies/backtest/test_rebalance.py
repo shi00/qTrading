@@ -1390,13 +1390,17 @@ class TestDiffRebalance:
         assert total_amount <= 4000.0 + 1e-6
 
     def test_buy_to_target_insufficient_cash_skips(self) -> None:
-        """买入所需现金不足 → 记 insufficient_cash 跳过（覆盖 478-489）。"""
+        """买入所需现金不足 → 记 insufficient_cash 跳过（覆盖 cash 边界分支）。
+
+        构造 volume>0 但 net_amount 超出 sim.cash 的场景（价格 10 元足够 100 股整手，
+        目标 10 万元 → volume=10000 股，成本 10 万 > cash 100 元）。
+        """
         sim, _config = self._make_simulator()
         sim.cash = 100.0
         targets = {"000001.SZ": 100000.0}
-        quotes_by_code = {"000001.SZ": self._quote(date(2024, 1, 8), 10000.0)}
+        quotes_by_code = {"000001.SZ": self._quote(date(2024, 1, 8), 10.0)}
         sim._buy_to_target(date(2024, 1, 8), targets, quotes_by_code, budget=100000.0)
-        # 10000 元/1000股 → target 100000 → net_amount 远超现金 → skipped
+        # 10 元/股 × 10000 股 → net_amount 远超现金 → skipped
         assert any(r["reason"] == "insufficient_cash" for r in sim.skipped_list)
         assert "000001.SZ" not in sim.positions
 
@@ -1410,6 +1414,120 @@ class TestDiffRebalance:
         sim._buy_to_target(date(2024, 1, 8), targets, quotes_by_code, budget=10000.0)
         assert sim.positions["000001.SZ"]["volume"] > 100
         assert sim.positions["000001.SZ"]["cost_basis"] > 1000.0
+
+    def test_buy_to_target_lot_size_indivisible_attribution(self) -> None:
+        """BT-05: 单笔预算不足一手 → 归因 lot_size_indivisible（非 insufficient_cash），
+        并带 target_value / min_lot_cost 供用户判断差多少。"""
+        sim, _config = self._make_simulator()
+        sim.cash = 500000.0
+        # 股价 10000 元/手=100 万，单笔目标 1.8 万不足一手
+        targets = {"000001.SZ": 18000.0}
+        quotes_by_code = {"000001.SZ": self._quote(date(2024, 1, 8), 10000.0)}
+        sim._buy_to_target(date(2024, 1, 8), targets, quotes_by_code, budget=18000.0)
+        assert len(sim.skipped_list) == 1
+        skip = sim.skipped_list[0]
+        assert skip["reason"] == "lot_size_indivisible"
+        assert skip["target_value"] == pytest.approx(18000.0)
+        assert skip["min_lot_cost"] == pytest.approx(10000.0 * 100)
+        assert "000001.SZ" not in sim.positions
+
+    def test_buy_to_target_insufficient_cash_keeps_attribution_for_real_cash_shortfall(self) -> None:
+        """BT-05: 真实现金不足（volume>0 但 net_amount>cash）仍归因 insufficient_cash，
+        与 lot_size_indivisible 区分开。"""
+        sim, _config = self._make_simulator()
+        sim.cash = 100.0
+        # 10000 元/股，目标 1000 万股 → volume>0，但 net_amount 远超现金
+        targets = {"000001.SZ": 100000.0}
+        quotes_by_code = {"000001.SZ": self._quote(date(2024, 1, 8), 10.0)}
+        sim._buy_to_target(date(2024, 1, 8), targets, quotes_by_code, budget=100000.0)
+        assert any(r["reason"] == "insufficient_cash" for r in sim.skipped_list)
+        assert not any(r["reason"] == "lot_size_indivisible" for r in sim.skipped_list)
+
+    def test_buy_to_target_reallocate_unfilled_closes_gap(self) -> None:
+        """BT-05: reallocate_unfilled=True 时，高价股释放的预算按信号强度降序补分配到
+        信号靠前但未满额的标的；默认 False 时行为不变（不产生补分配）。"""
+        sim, config = self._make_simulator(reallocate_unfilled=True)
+        sim.cash = 100000.0
+        # 高价股 A（信号 rank 2，较弱）买不起一手；低价股 B（信号 rank 1，较强）已部分买入。
+        # 设置 targets 使 A 释放预算，B 的缺口可被补足。
+        high_price = 500.0  # A 一手成本 5 万
+        low_price = 10.0  # B 一手成本 1 千
+        targets = {"000001.SZ": 30000.0, "000002.SZ": 30000.0}
+        q_high = self._quote(date(2024, 1, 8), high_price)
+        q_low = self._quote(date(2024, 1, 8), low_price).with_columns(pl.lit("000002.SZ").alias("ts_code"))
+        quotes_by_code = {"000001.SZ": q_high, "000002.SZ": q_low}
+        signal_order = ["000002.SZ", "000001.SZ"]  # B 信号强
+        sim._buy_to_target(
+            date(2024, 1, 8),
+            targets,
+            quotes_by_code,
+            budget=60000.0,
+            signal_order=signal_order,
+        )
+        # A 买不起一手 → lot_size_indivisible 跳过
+        a_skips = [r for r in sim.skipped_list if r["ts_code"] == "000001.SZ"]
+        assert len(a_skips) == 1
+        assert a_skips[0]["reason"] == "lot_size_indivisible"
+        # B 第一遍满额（3 万目标，10 元/股）→ A 释放的预算无处可补（无缺口），
+        # 但不会产生第二笔 B 买入（未超目标金额）
+        b_trades = [t for t in sim.trades_list if t["ts_code"] == "000002.SZ"]
+        assert len(b_trades) == 1
+        # 补分配在 B 有缺口时才执行——B 已满额，故无 reallocate warning
+        assert not any("reallocate_unfilled" in w for w in sim.warnings)
+
+    def test_buy_to_target_reallocate_unfilled_fills_insufficient_target(self) -> None:
+        """BT-05: 补分配的缺口续投——低价标的现金不足未满额、高价标释放预算时，
+        释放预算被续投到信号更强的标的（B），且不突破目标金额。"""
+        sim, _config = self._make_simulator(reallocate_unfilled=True)
+        # B 目标 5 万但现金仅 4.5 万（第一遍 B 现金不足被跳过，产生 5 万缺口）；
+        # A 高价（500 元/股）目标 3 万不足一手 → 释放 3 万预算。
+        sim.cash = 45000.0
+        low_price = 10.0
+        high_price = 500.0
+        targets = {"000001.SZ": 30000.0, "000002.SZ": 50000.0}
+        q_high = self._quote(date(2024, 1, 8), high_price)
+        q_low = self._quote(date(2024, 1, 8), low_price).with_columns(pl.lit("000002.SZ").alias("ts_code"))
+        quotes_by_code = {"000001.SZ": q_high, "000002.SZ": q_low}
+        signal_order = ["000002.SZ", "000001.SZ"]  # B 信号强
+        sim._buy_to_target(
+            date(2024, 1, 8),
+            targets,
+            quotes_by_code,
+            budget=80000.0,  # 不触发等比缩放（total_target 8 万 == budget）
+            signal_order=signal_order,
+        )
+        # A 高价股 lot_size_indivisible 跳过
+        assert any(s["ts_code"] == "000001.SZ" and s["reason"] == "lot_size_indivisible" for s in sim.skipped_list)
+        # 补分配把 A 释放的预算续投给 B（第一遍 B 现金不足被跳过，未满额）
+        b_trades = [t for t in sim.trades_list if t["ts_code"] == "000002.SZ"]
+        assert len(b_trades) == 1
+        b_spent_cash = sum(t["net_amount"] for t in b_trades)
+        assert b_spent_cash <= 50000.0 + 1e-6  # 不突破 B 的目标金额
+        assert sim.cash >= -1e-6
+        # 补分配确实发生（B 来自 reallocate）
+        assert any("reallocate_unfilled" in w for w in sim.warnings)
+
+    def test_buy_to_target_lot_indivisible_over_threshold_hints(self) -> None:
+        """BT-05: lot_size_indivisible 笔数超过候选 10% 时追加可执行建议（调参方向）。"""
+        sim, _config = self._make_simulator()
+        sim.cash = 1_000_000.0
+        high_price = 200.0  # 一手 2 万
+        targets = {"000001.SZ": 18000.0, "000002.SZ": 18000.0, "000003.SZ": 18000.0}
+        q1 = self._quote(date(2024, 1, 8), high_price)
+        q2 = self._quote(date(2024, 1, 8), high_price).with_columns(pl.lit("000002.SZ").alias("ts_code"))
+        q3 = self._quote(date(2024, 1, 8), 10.0).with_columns(pl.lit("000003.SZ").alias("ts_code"))
+        quotes_by_code = {"000001.SZ": q1, "000002.SZ": q2, "000003.SZ": q3}
+        sim._buy_to_target(
+            date(2024, 1, 8),
+            targets,
+            quotes_by_code,
+            budget=sum(targets.values()),
+        )
+        # 2/3 候选（>10%）被 lot_size_indivisible 跳过 → 触发可执行建议
+        assert any("candidates skipped (lot_size_indivisible)" in w for w in sim.warnings)
+        assert any("max_position_count" in w for w in sim.warnings)
+        # 提示不影响成交（低价股仍买入）
+        assert any(t["ts_code"] == "000003.SZ" for t in sim.trades_list)
 
     def test_rebalance_buy_budget_respects_cash_when_insufficient(self) -> None:
         """item1：买入预算受真实可用现金钳制（触发等比缩放分支）。

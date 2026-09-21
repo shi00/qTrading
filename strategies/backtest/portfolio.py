@@ -172,7 +172,18 @@ class PortfolioSimulator:
             # investable 已按总资产口径扣过 cash_reserve，故这里直接用 self.cash，
             # 避免二次扣减 reserve 造成过度缩仓；现金不足时触发等比缩放（确定性）。
             budget = min(investable, self.cash)
-            self._buy_to_target(exec_date, to_buy, quotes_by_code, budget)
+            # BT-05: 信号强度降序序列（signal_rank 大 = 信号强，D1-M3 语义），
+            # 供 _buy_to_target 补分配优先消费给信号强的标的；无 signal_rank 列时
+            # 退化为 weights_df 行序（sizer 已按 signals_sorted 传入，同为降序兜底）。
+            # 仅保留 to_buy 覆盖的 ts_code（order 必须与 buy_targets 键一致）。
+            if "signal_rank" in weights_df.columns:
+                order_full = [
+                    r["ts_code"] for r in weights_df.sort("signal_rank", descending=True).iter_rows(named=True)
+                ]
+            else:
+                order_full = [r["ts_code"] for r in weights_df.iter_rows(named=True)]
+            signal_order = [c for c in order_full if c in to_buy]
+            self._buy_to_target(exec_date, to_buy, quotes_by_code, budget, signal_order=signal_order)
 
     def _handle_empty_signal(
         self,
@@ -423,6 +434,7 @@ class PortfolioSimulator:
         buy_targets: dict[str, float],
         quotes_by_code: dict[str, pl.DataFrame],
         budget: float,
+        signal_order: list[str] | None = None,
     ) -> None:
         """对指定标的按目标买入金额建仓/加仓。
 
@@ -431,6 +443,20 @@ class PortfolioSimulator:
         与调用方传入的 dict 顺序无关（消除与策略无关的随机性）；
         各标的判定逻辑：无报价/停牌/涨停跳过、价格<=0 跳过、
         100 股取整、滑点、现金余额检查。
+
+        BT-05: 整手取整失败的归因与预算回收——
+        - `volume <= 0`（单笔预算不足一手）归因为 `lot_size_indivisible` 而非
+          `insufficient_cash`（与现金余额无关，避免误导用户调初始资金）；
+        - `reallocate_unfilled=True` 时把「买不起一手」释放的预算按信号强度降序
+          （`signal_order`，缺省按 ts_code 序保证确定性）补分配，消除闲置现金。
+
+        Args:
+            exec_date: 执行日。
+            buy_targets: {ts_code: 目标买入金额}。
+            quotes_by_code: {ts_code: 行情 DataFrame}。
+            budget: 买入总预算上限。
+            signal_order: 信号从强到弱的 ts_code 序列，供补分配按信号强度降序
+                消费释放预算；缺省 None 时按 ts_code 序（确定性兜底）。
         """
         if budget > 0:
             total_target = sum(buy_targets.values())
@@ -438,79 +464,69 @@ class PortfolioSimulator:
                 scale = budget / total_target
                 buy_targets = {code: v * scale for code, v in buy_targets.items()}
 
-        for ts_code, delta_value in sorted(buy_targets.items()):
+        order = signal_order if signal_order else sorted(buy_targets.keys())
+        # BT-05: 统计整手取整失败（买不起一手）释放的预算与笔数，供补分配/提示。
+        lot_indivisible_budget: float = 0.0
+        lot_indivisible_count: int = 0
+        # 第一遍实际为各标的完成的投入金额（补分配按缺口续投，不突破目标与 max_single_weight）。
+        spent_by_code: dict[str, float] = {code: 0.0 for code in buy_targets}
+
+        def _record_skip(
+            ts_code: str,
+            reason: str,
+            volume: float,
+            extra: dict | None = None,
+        ) -> None:
+            entry: dict = {
+                "trade_date": exec_date,
+                "ts_code": ts_code,
+                "direction": "buy",
+                "reason": reason,
+                "intended_volume": volume,
+            }
+            if extra:
+                entry.update(extra)
+            self.skipped_list.append(entry)
+            self.warnings.append(f"{exec_date}: {ts_code} buy skipped ({reason})")
+
+        for ts_code in order:
+            delta_value = buy_targets[ts_code]
             quote = quotes_by_code.get(ts_code)
             if quote is None or quote.is_empty():
-                self.skipped_list.append(
-                    {
-                        "trade_date": exec_date,
-                        "ts_code": ts_code,
-                        "direction": "buy",
-                        "reason": "no_quote",
-                        "intended_volume": 0,
-                    }
-                )
-                self.warnings.append(f"{exec_date}: {ts_code} buy skipped (no_quote)")
+                _record_skip(ts_code, "no_quote", 0)
                 continue
 
             is_tradable = quote.select("is_tradable").item() if "is_tradable" in quote.columns else True
             if is_tradable is False:
-                self.skipped_list.append(
-                    {
-                        "trade_date": exec_date,
-                        "ts_code": ts_code,
-                        "direction": "buy",
-                        "reason": "suspended",
-                        "intended_volume": 0,
-                    }
-                )
-                self.warnings.append(f"{exec_date}: {ts_code} buy skipped (suspended)")
+                _record_skip(ts_code, "suspended", 0)
                 continue
 
             up_price = quote.select("limit_up_price").item() if "limit_up_price" in quote.columns else None
             if up_price is not None and not self.config.allow_limit_up_buy:
                 if self._exec_nominal_price(quote) >= float(up_price) - 1e-6:
-                    self.skipped_list.append(
-                        {
-                            "trade_date": exec_date,
-                            "ts_code": ts_code,
-                            "direction": "buy",
-                            "reason": "up_limit",
-                            "intended_volume": 0,
-                        }
-                    )
-                    self.warnings.append(f"{exec_date}: {ts_code} buy skipped (up_limit)")
+                    _record_skip(ts_code, "up_limit", 0)
                     continue
 
             # D4-1: 差异化调仓买入同样统一使用 qfq 复权口径，避免除权交易日虚假损益。
             qfq_entry_price = self._exec_price(quote)
 
             if qfq_entry_price <= 0:
-                self.skipped_list.append(
-                    {
-                        "trade_date": exec_date,
-                        "ts_code": ts_code,
-                        "direction": "buy",
-                        "reason": "invalid_price",
-                        "intended_volume": 0,
-                    }
-                )
-                self.warnings.append(f"{exec_date}: {ts_code} buy skipped (invalid_price)")
+                _record_skip(ts_code, "invalid_price", 0)
                 continue
 
             target_value = delta_value
             volume = int(target_value / qfq_entry_price / 100) * 100
             if volume <= 0:
-                self.skipped_list.append(
-                    {
-                        "trade_date": exec_date,
-                        "ts_code": ts_code,
-                        "direction": "buy",
-                        "reason": "insufficient_cash",
-                        "intended_volume": 0,
-                    }
+                # BT-05: 归因改对——单笔预算不足一手，与现金余额无关。
+                # min_lot_cost 让用户一眼看出差多少（target_value / min_lot_cost 不足一手）。
+                _record_skip(
+                    ts_code,
+                    "lot_size_indivisible",
+                    0,
+                    {"target_value": target_value, "min_lot_cost": qfq_entry_price * 100},
                 )
-                self.warnings.append(f"{exec_date}: {ts_code} buy skipped (insufficient_cash)")
+                lot_indivisible_budget += target_value
+                lot_indivisible_count += 1
                 continue
 
             cost = self.cost_model.calculate(
@@ -523,50 +539,161 @@ class PortfolioSimulator:
             actual_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else qfq_entry_price
 
             if cost.net_amount > self.cash:
-                self.skipped_list.append(
-                    {
-                        "trade_date": exec_date,
-                        "ts_code": ts_code,
-                        "direction": "buy",
-                        "reason": "insufficient_cash",
-                        "intended_volume": volume,
-                    }
-                )
-                self.warnings.append(f"{exec_date}: {ts_code} buy skipped (insufficient_cash)")
+                _record_skip(ts_code, "insufficient_cash", volume)
                 continue
 
-            self.trades_list.append(
-                {
-                    "trade_date": exec_date,
-                    "ts_code": ts_code,
-                    "action": "buy",
-                    "exit_reason": None,
-                    "price": actual_price,
-                    "volume": volume,
-                    "gross_amount": cost.gross_amount,
-                    "total_cost": cost.total_cost,
-                    "net_amount": cost.net_amount,
-                    "realized_pnl": 0.0,
-                    "hold_days": 0,
-                }
+            self._apply_buy(
+                exec_date,
+                ts_code,
+                actual_price,
+                qfq_entry_price,
+                volume,
+                cost,
+            )
+            spent_by_code[ts_code] += cost.net_amount
+
+        # BT-05 建议3：整手取整失败超过候选 10% 时给出可执行建议（归因挽救的提示层）。
+        if len(buy_targets) > 0 and lot_indivisible_count / len(buy_targets) > 0.1:
+            per_candidate = sum(buy_targets.values()) / len(buy_targets)
+            self.warnings.append(
+                f"{exec_date}: {lot_indivisible_count}/{len(buy_targets)} candidates skipped "
+                f"(lot_size_indivisible): 单笔预算约 {per_candidate:.0f} 元，股价高于 "
+                f"{per_candidate / 100:.0f} 元的标的无法买入一手。建议降低 max_position_count "
+                f"或提高初始资金（辅助建议，不改变本次成交）。"
             )
 
-            existing = self.positions.get(ts_code)
-            if existing is None:
-                self.positions[ts_code] = {
-                    "volume": volume,
-                    "cost_basis": cost.net_amount,
-                    "entry_date": exec_date,
-                    "entry_price": actual_price,
-                    "qfq_entry_price": qfq_entry_price,
-                }
-            else:
-                existing["volume"] += volume
-                existing["cost_basis"] += cost.net_amount
-                existing["entry_price"] = actual_price
-                existing["qfq_entry_price"] = qfq_entry_price
+        # BT-05 建议2：预算回收——把「买不起一手」释放的预算按信号强度降序补分配。
+        # 仅当 reallocate_unfilled 开启且确实有释放预算与剩余现金时才执行（数值向后兼容）。
+        if self.config.reallocate_unfilled and lot_indivisible_budget > 0 and self.cash > 0:
+            self._reallocate_unfilled_budget(
+                exec_date,
+                buy_targets,
+                quotes_by_code,
+                order,
+                lot_indivisible_budget,
+                spent_by_code,
+            )
 
-            self.cash -= cost.net_amount
+    def _apply_buy(
+        self,
+        exec_date: date,
+        ts_code: str,
+        actual_price: float,
+        qfq_entry_price: float,
+        volume: float,
+        cost,
+    ) -> None:
+        """将一笔买入记入 trades_list 与 positions，并扣减现金（BT-05 抽取，供两遍分配复用）。
+
+        Args:
+            actual_price: 滑点调整后的执行价（trades 记录用）。
+            qfq_entry_price: qfq 复权买入价（持仓估值口径用，D4-1 与 BT-01 语义）。
+        """
+        self.trades_list.append(
+            {
+                "trade_date": exec_date,
+                "ts_code": ts_code,
+                "action": "buy",
+                "exit_reason": None,
+                "price": actual_price,
+                "volume": volume,
+                "gross_amount": cost.gross_amount,
+                "total_cost": cost.total_cost,
+                "net_amount": cost.net_amount,
+                "realized_pnl": 0.0,
+                "hold_days": 0,
+            }
+        )
+
+        existing = self.positions.get(ts_code)
+        if existing is None:
+            self.positions[ts_code] = {
+                "volume": volume,
+                "cost_basis": cost.net_amount,
+                "entry_date": exec_date,
+                "entry_price": actual_price,
+                "qfq_entry_price": qfq_entry_price,
+            }
+        else:
+            existing["volume"] += volume
+            existing["cost_basis"] += cost.net_amount
+            existing["entry_price"] = actual_price
+            existing["qfq_entry_price"] = qfq_entry_price
+
+        self.cash -= cost.net_amount
+
+    def _reallocate_unfilled_budget(
+        self,
+        exec_date: date,
+        buy_targets: dict[str, float],
+        quotes_by_code: dict[str, pl.DataFrame],
+        order: list[str],
+        released_budget: float,
+        spent_by_code: dict[str, float],
+    ) -> None:
+        """BT-05 建议2：把整手取整释放的预算按信号强度降序补分配。
+
+        对第一遍已部分成交/现金被占的候选，按缺口（target_value - 已投入）续投，
+        累计新增投入不超过 released_budget，且单标的投入不突破其目标金额
+        （目标金额 = investable × weight <= investable × max_single_weight，
+        因此补分配天然不突破 max_single_weight）。
+
+        补分配会改变收益数值（闲置预算被用出），与默认配置结果不可比，
+        故开启时在 warnings 明确提示，随 data_warnings 进入 UI unreliable 判定。
+        """
+        reallocated_count = 0
+        reallocated_amount = 0.0
+        remaining_budget = released_budget
+
+        for ts_code in order:
+            if remaining_budget <= 0 or self.cash <= 0:
+                break
+            quote = quotes_by_code.get(ts_code)
+            if quote is None or quote.is_empty():
+                continue
+            is_tradable = quote.select("is_tradable").item() if "is_tradable" in quote.columns else True
+            if is_tradable is False:
+                continue
+            up_price = quote.select("limit_up_price").item() if "limit_up_price" in quote.columns else None
+            if up_price is not None and not self.config.allow_limit_up_buy:
+                if self._exec_nominal_price(quote) >= float(up_price) - 1e-6:
+                    continue
+
+            qfq_entry_price = self._exec_price(quote)
+            if qfq_entry_price <= 0:
+                continue
+
+            # 缺口 = 目标金额 - 第一遍已投入；已满额标的跳过，避免二次超买。
+            gap = buy_targets[ts_code] - spent_by_code.get(ts_code, 0.0)
+            if gap <= 0:
+                continue
+            volume = int(min(gap, remaining_budget) / qfq_entry_price / 100) * 100
+            if volume <= 0:
+                continue
+
+            cost = self.cost_model.calculate(
+                price=qfq_entry_price,
+                volume=volume,
+                is_buy=True,
+                avg_daily_volume=self._get_avg_daily_volume(quote),
+                trade_date=exec_date,
+            )
+            actual_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else qfq_entry_price
+            if cost.net_amount > self.cash:
+                continue
+
+            self._apply_buy(exec_date, ts_code, actual_price, qfq_entry_price, volume, cost)
+            spent_by_code[ts_code] += cost.net_amount
+            remaining_budget -= cost.net_amount
+            reallocated_count += 1
+            reallocated_amount += cost.net_amount
+
+        if reallocated_count > 0:
+            self.warnings.append(
+                f"{exec_date}: reallocate_unfilled 补分配 {reallocated_count} 笔，"
+                f"释放预算 {released_budget:.0f} 元中实际投入 {reallocated_amount:.0f} 元，"
+                f"将整手取整闲置的现金重新配置到信号靠前的标的（本回测数值与默认配置不可比）。"
+            )
 
     def _is_delisted(self, ts_code: str, exec_date: date) -> bool:
         """BT-002: 判断标的在 exec_date 是否已退市。
