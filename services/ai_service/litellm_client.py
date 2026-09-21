@@ -341,8 +341,11 @@ class LiteLLMClient:
 
         with ProxyManager.litellm_env_context():
             if stream:
-                if supports_reasoning:
-                    request_params["stream_options"] = {"include_usage": True}
+                # AI-01 计价链路（REVIEW-04 复核 D2）：流式调用无条件请求 usage
+                # （末 chunk 携带），否则非 reasoning 模型的流式路径 usage 缺失 →
+                # 零记账（连 unpriced 都不计）。litellm drop_params=True 兜底不支持
+                # stream_options 的 provider（静默丢弃参数，行为退化为现状不报错）。
+                request_params["stream_options"] = {"include_usage": True}
 
                 response = await _ai.acompletion(stream=True, **request_params)
                 response_content = ""
@@ -369,10 +372,15 @@ class LiteLLMClient:
                     async for chunk in response:  # type: ignore[reportGeneralTypeIssues]  # LiteLLM stream response type mismatch
                         if not chunk.choices:
                             if hasattr(chunk, "usage") and chunk.usage:
+                                # `or 0`：litellm Usage 字段为 Optional，属性存在但值
+                                # 可为 None（getattr 默认值仅对属性缺失生效）；None 传入
+                                # estimate_cost 的 `input_tokens < 0` 会抛 TypeError，
+                                # 把一次成功的流式调用误判为失败（REVIEW-04 复核 D2
+                                # 无条件 include_usage 后暴露面覆盖所有流式调用）。
                                 usage = {
-                                    "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0),
-                                    "completion_tokens": getattr(chunk.usage, "completion_tokens", 0),
-                                    "total_tokens": getattr(chunk.usage, "total_tokens", 0),
+                                    "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0) or 0,
+                                    "completion_tokens": getattr(chunk.usage, "completion_tokens", 0) or 0,
+                                    "total_tokens": getattr(chunk.usage, "total_tokens", 0) or 0,
                                 }
                             continue
 
@@ -447,10 +455,12 @@ class LiteLLMClient:
                 result["model"] = effective_model
 
                 if hasattr(response, "usage") and response.usage:  # type: ignore[union-attr]
+                    # `or 0` 归一化同流式分支：litellm Usage 字段为 Optional，
+                    # 值可为 None，None 传入 estimate_cost 会抛 TypeError。
                     result["usage"] = {
-                        "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),  # type: ignore[union-attr]
-                        "completion_tokens": getattr(response.usage, "completion_tokens", 0),  # type: ignore[union-attr]
-                        "total_tokens": getattr(response.usage, "total_tokens", 0),  # type: ignore[union-attr]
+                        "prompt_tokens": getattr(response.usage, "prompt_tokens", 0) or 0,  # type: ignore[union-attr]
+                        "completion_tokens": getattr(response.usage, "completion_tokens", 0) or 0,  # type: ignore[union-attr]
+                        "total_tokens": getattr(response.usage, "total_tokens", 0) or 0,  # type: ignore[union-attr]
                     }
                     result["cost"] = estimate_cost(
                         effective_model,
@@ -493,6 +503,10 @@ class LiteLLMClient:
         response_content = ""
 
         # --- Local Provider ---
+        # AI-01 计价链路（REVIEW-04 复核 D1）：cloud 分支暂存 litellm 层元数据
+        # （model/usage/cost/reasoning_content，Mi2 引入），local 分支无计量保持空。
+        llm_metadata: dict = {}
+
         if provider == "local":
             await self._service._setup_local_model()
             manager = await LocalModelManager.get_instance()
@@ -559,12 +573,21 @@ class LiteLLMClient:
                     response_format={"type": "json_object"} if json_mode else None,
                 )
                 response_content = result["content"]
+                llm_metadata = {k: v for k, v in result.items() if k != "content"}
 
         # --- Post-Processing (JSON Parsing) ---
+        # AI-01 计价链路（REVIEW-04 复核 D1）：litellm 层已携带 model/usage/cost/
+        # reasoning_content 元数据（Mi2），JSON 解析后必须回填——下游 _accumulate_usage
+        # 在本层之后消费 usage/cost/model，丢弃即把真实云端消耗呈现为零（R21 回归，
+        # 预算软停/unpriced 确认全部空转）。
         if json_mode:
             try:
                 # 1. Cleaner: Try direct parse
-                return json.loads(response_content)
+                parsed = json.loads(response_content)
+                # 元数据键覆盖模型输出同名键（系统计量可信度高于模型输出，模型
+                # 幻觉输出的 usage/cost 键不可覆盖真实计量）；非 dict 解析结果
+                # （null/list 等）维持原语义返回，无从附加元数据。
+                return {**parsed, **llm_metadata} if isinstance(parsed, dict) else parsed
             except json.JSONDecodeError:
                 pass
 
@@ -576,7 +599,7 @@ class LiteLLMClient:
                         obj, idx = json.JSONDecoder().raw_decode(
                             response_content[start:],
                         )
-                        return obj
+                        return {**obj, **llm_metadata} if isinstance(obj, dict) else obj
                     except json.JSONDecodeError:
                         pass
             except Exception as e:
@@ -590,7 +613,7 @@ class LiteLLMClient:
 
             raise ValueError(f"Invalid JSON response: {_ai.DataSanitizer.sanitize_error(response_content[:100])}...")
 
-        return {"content": response_content}
+        return {**llm_metadata, "content": response_content}
 
     async def _record_cloud_egress(
         self,

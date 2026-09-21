@@ -309,6 +309,195 @@ class TestJsonParsingNoRfindFallback:
             assert result == {"content": "hello world"}
 
 
+class TestChatCompletionMetadataPassThrough:
+    """REVIEW-04 复核 D1：_chat_completion 各返回点必须回填 litellm 元数据。
+
+    断链回归防护：json_mode/非 json_mode 返回丢弃 usage/cost/model 会让 AI-01
+    修复的整条计价链路（_accumulate_usage → _track_cost → 预算软停/unpriced
+    确认）在真实云端分析路径空转（R21：真实消耗呈现为零）。
+    """
+
+    _META = {
+        "model": "deepseek/deepseek-v4-flash",
+        "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        "cost": 0.0005,
+    }
+
+    @pytest.mark.asyncio
+    async def test_json_mode_direct_parse_merges_metadata(self):
+        svc = _make_svc_with_cloud()
+        with patch.object(
+            svc,
+            "_chat_completion_litellm",
+            AsyncMock(return_value={"content": '{"score": 80}', **self._META}),
+        ):
+            result = await svc._chat_completion(
+                messages=[{"role": "user", "content": "t"}],
+                provider="cloud",
+                json_mode=True,
+            )
+            assert result["score"] == 80
+            assert result["usage"] == self._META["usage"]
+            assert result["cost"] == 0.0005
+            assert result["model"] == self._META["model"]
+
+    @pytest.mark.asyncio
+    async def test_json_mode_heuristic_extraction_merges_metadata(self):
+        svc = _make_svc_with_cloud()
+        with patch.object(
+            svc,
+            "_chat_completion_litellm",
+            AsyncMock(return_value={"content": 'garbage {"score": 60} trailing', **self._META}),
+        ):
+            result = await svc._chat_completion(
+                messages=[{"role": "user", "content": "t"}],
+                provider="cloud",
+                json_mode=True,
+            )
+            assert result["score"] == 60
+            assert result["usage"]["total_tokens"] == 150
+            assert result["model"] == self._META["model"]
+
+    @pytest.mark.asyncio
+    async def test_metadata_overrides_model_hallucinated_keys(self):
+        """模型幻觉输出的 usage/cost 键不可覆盖系统真实计量（系统 > 模型输出）。"""
+        svc = _make_svc_with_cloud()
+        with patch.object(
+            svc,
+            "_chat_completion_litellm",
+            AsyncMock(return_value={"content": '{"score": 80, "usage": "fake", "cost": 999}', **self._META}),
+        ):
+            result = await svc._chat_completion(
+                messages=[{"role": "user", "content": "t"}],
+                provider="cloud",
+                json_mode=True,
+            )
+            assert result["usage"] == self._META["usage"]
+            assert result["cost"] == 0.0005
+
+    @pytest.mark.asyncio
+    async def test_json_mode_non_dict_parse_returns_as_is(self):
+        """json.loads 产物非 dict（null/list）时维持原语义返回，不抛 TypeError。"""
+        svc = _make_svc_with_cloud()
+        with patch.object(
+            svc,
+            "_chat_completion_litellm",
+            AsyncMock(return_value={"content": "null", **self._META}),
+        ):
+            result = await svc._chat_completion(
+                messages=[{"role": "user", "content": "t"}],
+                provider="cloud",
+                json_mode=True,
+            )
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_non_json_mode_merges_metadata(self):
+        svc = _make_svc_with_cloud()
+        with patch.object(
+            svc,
+            "_chat_completion_litellm",
+            AsyncMock(return_value={"content": "hello world", **self._META}),
+        ):
+            result = await svc._chat_completion(
+                messages=[{"role": "user", "content": "t"}],
+                provider="cloud",
+                json_mode=False,
+            )
+            assert result["content"] == "hello world"
+            assert result["usage"] == self._META["usage"]
+            assert result["model"] == self._META["model"]
+
+
+class TestStreamUsageRequestAllModels:
+    """REVIEW-04 复核 D2：流式调用对所有模型（含非 reasoning）请求 include_usage。
+
+    非 reasoning 模型流式路径不请求 usage 会导致该路径零记账（连 unpriced 都
+    不计）——与 D1 同为 AI-01 计价链路的断点。
+    """
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service._check_reasoning_support", return_value=False)
+    @patch("services.ai_service.acompletion", new_callable=AsyncMock)
+    async def test_non_reasoning_stream_requests_usage(self, mock_acomp, _mock_reasoning):
+        svc = _make_svc_with_cloud()
+
+        class _Stream:
+            def __aiter__(self):
+                return self._gen()
+
+            async def _gen(self):
+                yield MagicMock(choices=[MagicMock(delta=MagicMock(content="Hi"))])
+
+        mock_acomp.return_value = _Stream()
+        result = await svc._chat_completion_litellm(
+            messages=[{"role": "user", "content": "hi"}],
+            on_chunk=lambda content, is_reasoning: None,
+        )
+        assert result["content"] == "Hi"
+        assert mock_acomp.call_args.kwargs["stream_options"] == {"include_usage": True}
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service._check_reasoning_support", return_value=False)
+    @patch("services.ai_service.acompletion", new_callable=AsyncMock)
+    async def test_non_reasoning_stream_usage_extracted_from_final_chunk(self, mock_acomp, _mock_reasoning):
+        """D2 第二半语义：请求参数之外，末帧 usage 必须实际进入 result。
+
+        防未来把 usage 提取逻辑挪回 supports_reasoning 分支的回归——那会让
+        请求了 include_usage 却不提取，非 reasoning 流式路径仍零记账。
+        """
+        svc = _make_svc_with_cloud()
+
+        class _Stream:
+            def __aiter__(self):
+                return self._gen()
+
+            async def _gen(self):
+                yield MagicMock(choices=[MagicMock(delta=MagicMock(content="Hi"))])
+                yield MagicMock(
+                    choices=[],
+                    usage=MagicMock(prompt_tokens=100, completion_tokens=50, total_tokens=150),
+                )
+
+        mock_acomp.return_value = _Stream()
+        result = await svc._chat_completion_litellm(
+            messages=[{"role": "user", "content": "hi"}],
+            on_chunk=lambda content, is_reasoning: None,
+        )
+        assert result["content"] == "Hi"
+        assert result["usage"] == {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service._check_reasoning_support", return_value=False)
+    @patch("services.ai_service.acompletion", new_callable=AsyncMock)
+    async def test_stream_usage_none_fields_normalized_to_zero(self, mock_acomp, _mock_reasoning):
+        """litellm Usage 字段为 Optional，值为 None 时必须归一化为 0 而非透传 None。
+
+        None 传入 estimate_cost 的 `input_tokens < 0` 会抛 TypeError，把一次
+        成功的流式调用误判为失败（无条件 include_usage 后暴露面覆盖所有流式调用）。
+        """
+        svc = _make_svc_with_cloud()
+
+        class _Stream:
+            def __aiter__(self):
+                return self._gen()
+
+            async def _gen(self):
+                yield MagicMock(choices=[MagicMock(delta=MagicMock(content="Hi"))])
+                yield MagicMock(
+                    choices=[],
+                    usage=MagicMock(prompt_tokens=None, completion_tokens=None, total_tokens=None),
+                )
+
+        mock_acomp.return_value = _Stream()
+        result = await svc._chat_completion_litellm(
+            messages=[{"role": "user", "content": "hi"}],
+            on_chunk=lambda content, is_reasoning: None,
+        )
+        assert result["content"] == "Hi"
+        assert result["usage"] == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
 class TestStreamInterruptPartialResult:
     @pytest.mark.asyncio
     @patch("services.ai_service.ConfigHandler")
