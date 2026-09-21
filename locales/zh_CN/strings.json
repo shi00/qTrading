@@ -64,6 +64,7 @@
     "sched_pred_saving": "保存选股结果...",
     "sched_pred_done_found": "AI 预测完成，筛选出 {count} 只标的",
     "sched_pred_done_empty": "AI 预测完成，未匹配到标的",
+    "sched_pred_done_unpriced_blocked": "AI 预测完成，但本月存在无法计价的 AI 调用且未经确认，已保守跳过（未匹配到标的）",
     "sched_task_prediction": "AI 夜间自动预测 ({date})",
     "sched_ai_concept_clear_history": "清空历史AI概念...",
     "sched_ai_concept_task_name": "AI概念周度重建",

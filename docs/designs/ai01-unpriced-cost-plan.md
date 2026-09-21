@@ -306,6 +306,11 @@ failover 前缀判定（`model.split("/")[0]`）。
 - 本地模型已确证不进入云路径（`run_ai_analysis`/`retry_single` 均先 `is_cloud_available()`），
   不会因「无法计价」误伤本地/免费模型；免费模型（cost==0.0）也因 3.2 的 `cost is not None`
   判定不进入 unpriced。
+- **夜间可诊断性（review-pr1073 B1）**：unpriced 保守拒绝时（无确认能力）在拒绝路径写
+  `context["_ai_unpriced_prompt"] = True`（`run_ai_analysis` 与 `_preflight_cloud_call` 两处）；
+  `nightly_prediction._prediction_logic` 对 `saved==0` 且该标志为真时返回专门 i18n 消息
+  `sched_pred_done_unpriced_blocked`，与"无候选"（`sched_pred_done_empty`）可区分，避免每日
+  静默失败+刷同款日志；仍不标记完成、允许重试。夜间"运行并标记待确认"为可后续评估的产品取舍。
 
 ### 3.5 UI 诚实展示
 

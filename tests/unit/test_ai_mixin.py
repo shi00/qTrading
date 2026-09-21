@@ -1557,6 +1557,47 @@ class TestRunAiAnalysisUsageSummary:
         # 软停路径不消耗、不落账
         assert "_ai_usage_summary" not in context
 
+    @pytest.mark.asyncio
+    async def test_run_ai_analysis_unpriced_reject_sets_context_flag(self):
+        """B1（review-pr1073）：run_ai_analysis 的 unpriced 保守拒绝须写
+        ``context[\"_ai_unpriced_prompt\"]`` 标志，夜间 _prediction_logic 据此区分"无候选"。"""
+        s = ConcreteStrategy()
+        dp = MagicMock()
+        candidates = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["平安银行"],
+                "close": [10.0],
+            }
+        )
+        context = {"data_processor": dp}
+
+        with (
+            patch(
+                "strategies.ai_mixin.AIStrategyMixin._should_prompt_unpriced",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "strategies.ai_mixin.AIStrategyMixin._confirm_unpriced",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "strategies.ai_mixin.AIStrategyMixin._ai_budget_exhausted",
+                new=AsyncMock(return_value=False),
+            ),
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.analyze_stock = AsyncMock()
+            mock_ai.return_value = mock_ai_instance
+
+            result = await s.run_ai_analysis(candidates, context)
+
+        mock_ai_instance.analyze_stock.assert_not_awaited()
+        assert context["_ai_unpriced_prompt"] is True
+        assert len(result) == 1
+        assert result.iloc[0]["ai_status"] == "budget_unpriced_prompt"
+
 
 class TestCancelOrphanNewsTasks:
     @pytest.mark.asyncio
@@ -4233,6 +4274,29 @@ class TestUnpricedUsageGuards:
         context = {"on_ai_unpriced_ack_request": AsyncMock(side_effect=RuntimeError("ui error"))}
         assert await s._confirm_unpriced(context) is False
         assert s._ai_unpriced_acknowledged is False
+
+    @pytest.mark.asyncio
+    async def test_preflight_unpriced_reject_sets_context_flag(self):
+        """B1（review-pr1073）：unpriced 保守拒绝时写 ``context[\"_ai_unpriced_prompt\"]`` 标志，
+        夜间 _prediction_logic 据此返回专门消息，与"无候选"可区分（retry_single 共用路径）。"""
+        s = ConcreteStrategy()
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
+            patch("strategies.ai_mixin.collect_cloud_ack_providers", return_value=["deepseek"]),
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
+            patch.object(s, "_ensure_cost_tracker_engine", AsyncMock()),
+            patch.object(s, "_ai_budget_exhausted", AsyncMock(return_value=False)),
+            patch.object(s, "_should_prompt_unpriced", AsyncMock(return_value=True)),
+            patch.object(s, "_confirm_unpriced", AsyncMock(return_value=False)),
+        ):
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available = MagicMock(return_value=True)
+            mock_ai.return_value = mock_ai_instance
+            context: dict = {}
+            reason = await s._preflight_cloud_call(context)
+        assert reason == "ai_budget_unpriced_prompt"
+        assert context.get("_ai_unpriced_prompt") is True
 
     # --- _track_cost ---
 

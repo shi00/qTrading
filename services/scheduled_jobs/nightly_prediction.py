@@ -116,6 +116,13 @@ async def _prediction_logic(
                     "[Scheduler] Nightly prediction persisted 0 records (AI cost budget exceeded), NOT marking done"
                 )
                 return I18n.get("ai_budget_exceeded")
+            if context.get("_ai_unpriced_prompt"):
+                # B1（review-pr1073）：unpriced 保守拒绝须与"无候选"可区分，否则夜间任务
+                # 每日静默失败+刷同款日志；返回专门消息供 UI/日志诊断（仍不标记完成，允许重试）。
+                logger.warning(
+                    "[Scheduler] Nightly prediction persisted 0 records (unpriced AI calls conservatively blocked), NOT marking done"
+                )
+                return I18n.get("sched_pred_done_unpriced_blocked")
             logger.warning("[Scheduler] Nightly prediction persisted 0 records, NOT marking done")
             return I18n.get("sched_pred_done_empty")
         await svc._mark_nightly_prediction_done_db(today_str)

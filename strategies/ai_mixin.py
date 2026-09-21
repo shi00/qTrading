@@ -488,6 +488,9 @@ class AIStrategyMixin:
         # 否则不可计量调用可绕过预算护栏。与 retry_single 共用 _confirm_unpriced，语义一致。
         if await self._should_prompt_unpriced():
             if not await self._confirm_unpriced(context):
+                # B1（review-pr1073）：拒绝原因写 context 标志，夜间 _prediction_logic 据此
+                # 返回专门消息（"因 unpriced 保守拒绝"），与"无候选"可区分，避免静默失败+每日重试刷日志。
+                context["_ai_unpriced_prompt"] = True
                 if on_progress:
                     on_progress(0, 0, Message("ai_budget_unpriced_prompt"))
                 return candidates_df.assign(
@@ -1183,6 +1186,8 @@ class AIStrategyMixin:
             # 无法确认（夜间任务 / 无 UI）→ 保守拒绝，不静默放行不可计量调用（R21）。
             if await self._confirm_unpriced(context):
                 return None
+            # B1（review-pr1073）：拒绝原因写 context 标志，夜间 _prediction_logic 据此可诊断。
+            context["_ai_unpriced_prompt"] = True
             return "ai_budget_unpriced_prompt"
         return None
 
