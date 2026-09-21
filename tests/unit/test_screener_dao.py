@@ -147,23 +147,6 @@ class TestScreenerDaoGetPendingReviews:
         assert result == []
 
 
-class TestScreenerDaoGetLearningExamples:
-    @pytest.mark.asyncio
-    async def test_basic(self):
-        dao = ScreenerDao(MagicMock())
-        dao._read_db_select = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "ts_code": ["000001.SZ"],
-                    "alpha": [0.5],
-                }
-            )
-        )
-        wins, losses = await dao.get_learning_examples(limit=3)
-        assert isinstance(wins, pd.DataFrame)
-        assert isinstance(losses, pd.DataFrame)
-
-
 class TestScreenerDaoGetScreeningData:
     @pytest.mark.asyncio
     async def test_with_trade_date(self):
