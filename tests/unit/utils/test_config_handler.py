@@ -2921,8 +2921,10 @@ class TestConfigHandlerAIExternalAcknowledged:
 class TestAIExternalAcknowledgementMigration:
     """AI-04 / SEC-01: 旧形态 ``ai_external_acknowledged`` 统一迁移为 ``dict[str, int]``。
 
-    迁移在两个层面：ensure_defaults（写锁，落盘）；load_config 读时在内存归一化，
-    避免 AppConfig.model_validate 因类型不匹配抛错回退默认配置。
+    迁移在三个层面：ensure_defaults（写锁，落盘）；load_config / load_config_with_validation
+    读时在内存归一化，避免 AppConfig.model_validate 因类型不匹配抛错回退默认配置；
+    save_config merge 路径 raw 读盘后同样归一化（缓存为空且磁盘为旧形态时，
+    保证 merge 保存与读时迁移落盘不因校验失败静默 return False）。
     """
 
     def test_normalize_legacy_bool_to_global_dict(self):
@@ -2985,6 +2987,34 @@ class TestAIExternalAcknowledgementMigration:
             assert result["ai_external_acknowledged"] == {AI_EXTERNAL_ACK_GLOBAL_KEY: AI_EGRESS_SCOPE_VERSION}
             # 读锁路径不落盘（避免死锁），validate 已通过
             mock_save.assert_not_called()
+
+    def test_save_config_merge_normalizes_legacy_bool_from_disk(self, tmp_path, monkeypatch):
+        """save_config merge 路径 raw 读盘后归一化旧 bool 形态（与 load_config 对称）。
+
+        缺陷场景：磁盘配置为旧 bool 形态且缓存为空时，merge 保存的
+        AppConfig.model_validate 失败 → 静默 return False → 读时迁移
+        （_persist_migration）永不落盘、每次启动重试。
+        """
+        import json
+
+        from utils.config_models import AI_EXTERNAL_ACK_GLOBAL_KEY, AI_EGRESS_SCOPE_VERSION
+
+        config_file = tmp_path / "user_settings.json"
+        config_file.write_text(
+            json.dumps({"ai_external_acknowledged": True, "llm_provider": "deepseek"}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(cfg_mod, "CONFIG_FILE", str(config_file))
+        cfg_mod.ConfigHandler._clear_cache()
+
+        result = cfg_mod.ConfigHandler.save_config({"llm_model": "deepseek-v4-flash"})
+
+        assert result is True
+        on_disk = json.loads(config_file.read_text(encoding="utf-8"))
+        assert on_disk["ai_external_acknowledged"] == {AI_EXTERNAL_ACK_GLOBAL_KEY: AI_EGRESS_SCOPE_VERSION}
+        assert on_disk["llm_model"] == "deepseek-v4-flash"
+        assert on_disk["llm_provider"] == "deepseek"
+        cfg_mod.ConfigHandler._clear_cache()
 
 
 class TestPurgeLegacyKeyIfSafe:

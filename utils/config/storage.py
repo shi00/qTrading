@@ -426,6 +426,10 @@ def save_config(config_data, replace=False):
                     try:
                         with _open_builtin()(cfg.CONFIG_FILE, encoding="utf-8") as f:
                             current_config = json.load(f)
+                            # AI-04/SEC-01: raw 读盘与 load_config 对称，先归一化旧 bool 形态，
+                            # 否则下方 model_validate 因类型不符抛 ValidationError → 静默 return
+                            # False，读时迁移（_persist_migration）将永不落盘。
+                            _normalize_ai_external_acknowledged(current_config)
                     except (json.JSONDecodeError, OSError):
                         pass
                 current_config.update(config_data)
