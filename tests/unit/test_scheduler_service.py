@@ -1211,26 +1211,113 @@ class TestCatchUpMissedUpdates:
     """D6-1: 补偿机制 — 检查遗漏交易日并提交补偿任务。"""
 
     @pytest.mark.asyncio
-    async def test_no_last_update_date_returns(self):
-        svc = _make_svc()
-        svc._last_update_date = None
-        with patch("data.data_processor.DataProcessor") as mock_dp:
-            await svc._catch_up_missed_updates()
-            mock_dp.assert_not_called()
+    async def test_empty_baseline_empty_db_warns_and_returns(self):
+        """REVIEW-06 TO-01: 基准为空（None/空串）+ daily_quotes 无数据 → 告警跳过且不提交（需先全量初始化）。"""
+        for baseline in (None, ""):
+            svc = _make_svc()
+            svc._last_update_date = baseline
+            mock_dp_instance = MagicMock()
+            mock_dao = MagicMock()
+            mock_dao.get_latest_trade_date = AsyncMock(return_value=None)
+            mock_dp_instance.cache.quote_dao = mock_dao
+            mock_tm_instance = MagicMock()
+            mock_tm_instance.submit_task = MagicMock()
+            with (
+                patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+                patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+                patch("utils.scheduler_service.logger.warning") as mock_warn,
+            ):
+                await svc._catch_up_missed_updates()
+                assert svc._last_update_date == baseline
+                mock_tm_instance.submit_task.assert_not_called()
+                warning_calls = [c for c in mock_warn.call_args_list]
+                assert any("无补偿基准" in str(c.args[0]) for c in warning_calls)
 
     @pytest.mark.asyncio
-    async def test_empty_last_update_date_returns(self):
-        """空串基准（_persist_run_date 以空串表示无值）直接跳过，避免 parse_date('') 抛 ValueError。"""
+    async def test_empty_baseline_bootstraps_from_db_and_submits(self):
+        """REVIEW-06 TO-01: 基准为空串 + daily_quotes 有数据 → 以最新交易日自举并提交补偿（而非静默早退）。"""
         svc = _make_svc()
         svc._last_update_date = ""
+        mock_dp_instance = MagicMock()
+        mock_dao = MagicMock()
+        mock_dao.get_latest_trade_date = AsyncMock(return_value=date(2024, 6, 10))
+        mock_dp_instance.cache.quote_dao = mock_dao
+        mock_dp_instance.trade_calendar = MagicMock()
+        mock_dp_instance.trade_calendar.get_trade_dates = AsyncMock(
+            return_value=[date(2024, 6, 10), date(2024, 6, 11), date(2024, 6, 12), date(2024, 6, 13)]
+        )
+        mock_tm_instance = MagicMock()
+        mock_now_val = MagicMock()
+        mock_now_val.date.return_value = date(2024, 6, 15)
         with (
-            patch("data.data_processor.DataProcessor") as mock_dp,
-            patch("services.task_manager.TaskManager") as mock_tm,
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("utils.scheduler_service.get_now", return_value=mock_now_val),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            patch("utils.scheduler_service.logger.info") as mock_info,
         ):
             await svc._catch_up_missed_updates()
-            mock_dp.assert_not_called()
-            mock_tm_instance = mock_tm.return_value
+            # 基准已自举为 daily_quotes 最新交易日
+            assert svc._last_update_date == "20240610"
+            # 自举日志已记录
+            info_calls = [c for c in mock_info.call_args_list]
+            assert any("自举" in str(c.args[0]) for c in info_calls)
+            # 补偿任务以基准+1 起的遗漏交易日提交
+            kwargs = mock_tm_instance.submit_task.call_args.kwargs
+            assert kwargs["missed_dates"] == [date(2024, 6, 11), date(2024, 6, 12), date(2024, 6, 13)]
+            assert kwargs["unique_key"] == "daily_sync_catchup"
+            assert kwargs["cancellable"] is True
+
+    @pytest.mark.asyncio
+    async def test_baseline_query_failure_warns_and_returns(self, caplog):
+        """REVIEW-06 TO-01: 自举查询抛出异常（DB 不可用）→ 告警降级、不提交，交由后续周期重试。"""
+        import logging
+
+        svc = _make_svc()
+        svc._last_update_date = None
+        mock_dp_instance = MagicMock()
+        mock_dao = MagicMock()
+        mock_dao.get_latest_trade_date = AsyncMock(side_effect=ConnectionError("db down"))
+        mock_dp_instance.cache.quote_dao = mock_dao
+        mock_tm_instance = MagicMock()
+        mock_tm_instance.submit_task = MagicMock()
+        with (
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            caplog.at_level(logging.WARNING, logger="utils.scheduler_service"),
+        ):
+            await svc._catch_up_missed_updates()
+            assert svc._last_update_date is None
             mock_tm_instance.submit_task.assert_not_called()
+            assert any("自举查询失败" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_baseline_database_datetime_form(self):
+        """REVIEW-06 TO-01: MAX(trade_date) 返回 str/datetime 时自举归一化为 YYYYMMDD。"""
+        for raw, expected in (
+            (date(2024, 6, 10), "20240610"),
+            (datetime(2024, 6, 10, 0, 0), "20240610"),
+            ("20240610", "20240610"),
+        ):
+            svc = _make_svc()
+            svc._last_update_date = None
+            mock_dp_instance = MagicMock()
+            mock_dao = MagicMock()
+            mock_dao.get_latest_trade_date = AsyncMock(return_value=raw)
+            mock_dp_instance.cache.quote_dao = mock_dao
+            mock_dp_instance.trade_calendar = MagicMock()
+            mock_dp_instance.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[date(2024, 6, 10), date(2024, 6, 11)]
+            )
+            mock_tm_instance = MagicMock()
+            mock_now_val = MagicMock()
+            mock_now_val.date.return_value = date(2024, 6, 15)
+            with (
+                patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+                patch("utils.scheduler_service.get_now", return_value=mock_now_val),
+                patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            ):
+                await svc._catch_up_missed_updates()
+                assert svc._last_update_date == expected
 
     @pytest.mark.asyncio
     async def test_up_to_date_no_submit(self):

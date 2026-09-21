@@ -21,7 +21,7 @@ from utils.config_handler import ConfigHandler
 from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
-from utils.time_utils import get_now, parse_date
+from utils.time_utils import get_now, parse_date, to_yyyymmdd_str
 
 logger = logging.getLogger(__name__)
 
@@ -467,6 +467,33 @@ class SchedulerService:
         )
         logger.info("[Scheduler] Scheduled Review Backfill at 17:00")
 
+    async def _infer_baseline_from_db(self) -> str | None:
+        """REVIEW-06 TO-01: 以本地已落库的最新交易日（daily_quotes.MAX(trade_date)）作为补偿下界自举。
+
+        这是"已经同步到哪天"的天然真相源，比调度器自身维护的影子状态更可信，且仅在基准
+        缺失时调用一次（成功后 _last_update_date 非空，后续走常规检查路径）。查询失败或
+        本地无行情数据时返回 None，由调用方告警跳过并交由后续周期重试（幂等）。
+        """
+        from data.data_processor import DataProcessor  # lazy-import: 启动性能——仅自举路径加载
+
+        try:
+            processor = DataProcessor()
+            latest = await processor.cache.quote_dao.get_latest_trade_date()
+        except asyncio.CancelledError:
+            raise  # R2: 配合优雅停机，不得吞没
+        except Exception as e:
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[Scheduler] 补偿基准自举查询失败 (%s): %s",
+                exc_info=True,
+            )
+            return None
+        if latest is None:
+            return None
+        return to_yyyymmdd_str(latest)
+
     async def _catch_up_missed_updates(self, include_today: bool = False) -> None:
         """D6-1 启动/周期/misfire 补偿：检查自 _last_update_date 以来是否有遗漏交易日并回补。
 
@@ -478,7 +505,19 @@ class SchedulerService:
         幂等由补偿任务独立 unique_key 去重 + 同步层 check_data_exists 缓存跳过共同保证。
         """
         if not self._last_update_date:
-            return  # 无基准（None 或空串，_persist_run_date 以空串表示无值），首次运行由全量初始化路径负责
+            # REVIEW-06 TO-01: 无基准（None 或空串，_persist_run_date 以空串表示无值）时不再静默
+            # 早退——注释原称"首次运行由全量初始化路径负责"，但该路径并不写调度幂等键（唯一写入
+            # 点在补偿/日更逻辑自身），形成闭环依赖：从未在 cron 时刻运行过的用户基准永远为空、
+            # 补偿静默失效（自动更新永久停止）。改为以本地已落库的最新交易日作为可信补偿下界自举，
+            # 该基准是"已经同步到哪天"的天然真相源，且仅在缺失时查询一次（幂等）。
+            baseline = await self._infer_baseline_from_db()
+            if baseline is None:
+                logger.warning(
+                    "[Scheduler] 无补偿基准且本地无行情数据（daily_quotes 为空），跳过补偿（需先完成全量初始化）"
+                )
+                return
+            logger.info("[Scheduler] 补偿基准缺失，以本地最新交易日 %s 自举", baseline)
+            self._last_update_date = baseline
         from data.data_processor import DataProcessor  # lazy-import: 启动性能——仅补偿检查时加载
         from services.task_manager import TaskManager  # lazy-import: 启动性能——仅提交补偿任务时加载
 
