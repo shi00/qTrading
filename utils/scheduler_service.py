@@ -482,6 +482,34 @@ class SchedulerService:
         )
         logger.info("[Scheduler] Scheduled Review Backfill at 17:00")
 
+        # REVIEW-06 TO-03: 后三者（回填/概念/预测）都消费日更产出的当日行情，必须晚于日更
+        # 执行，否则会用 T-1 数据出选股结果且用户无感。review_backfill 硬编码 17:00 而
+        # auto_update_time 用户可调，顺序不变量需显式校验（方案 B，低风险短期落地）。
+        self._validate_job_ordering((hour, minute), (17, 0), (dh, dm), (n_hour, n_minute))
+
+    @staticmethod
+    def _validate_job_ordering(daily_hm: tuple[int, int], backfill_hm, concept_hm, pred_hm: tuple[int, int]) -> None:
+        """REVIEW-06 TO-03: 校验依赖 job 是否晚于日更，违反时 warning（消费 T-1 数据）。
+
+        日更（daily_update）产出当日行情，review_backfill / ai_concept_daily_refresh /
+        nightly_prediction 均以其为先决条件。任一依赖 job 此刻不晚于日更即顺序违反
+        （相等意味着同日同时段执行，顺序未保证，同样按违反处理）。
+        """
+        for name, hm in (
+            ("review_backfill", backfill_hm),
+            ("ai_concept_daily_refresh", concept_hm),
+            ("nightly_prediction", pred_hm),
+        ):
+            if hm <= daily_hm:
+                logger.warning(
+                    "[Scheduler] %s (%02d:%02d) 早于日更 (%02d:%02d)，将消费 T-1 数据（请将日更时间调早或该任务调晚）",
+                    name,
+                    hm[0],
+                    hm[1],
+                    daily_hm[0],
+                    daily_hm[1],
+                )
+
     async def _infer_baseline_from_db(self) -> str | None:
         """REVIEW-06 TO-01: 以本地已落库的最新交易日（daily_quotes.MAX(trade_date)）作为补偿下界自举。
 
