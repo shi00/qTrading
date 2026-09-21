@@ -131,7 +131,7 @@ class VectorBacktestEngine:
         if progress_callback:
             progress_callback(0.8, Message("backtest_progress_calc_metrics"))
 
-        ic_series, ic_dates = self._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = self._calc_ic_series(signals, quotes_df, trade_dates)
 
         benchmark_returns, benchmark_warning = self._calc_benchmark_returns(benchmark_df, trade_dates)
 
@@ -142,6 +142,7 @@ class VectorBacktestEngine:
             trades,
             ic_series,
             self.config.risk_free_rate,
+            pl.Series(ic_sample_sizes, dtype=pl.Int64) if ic_sample_sizes else None,
         )
 
         # BT-03: 仓位可见性指标并入 metrics，让「信号稀疏 → 资金闲置」可见
@@ -680,7 +681,7 @@ class VectorBacktestEngine:
         signals: pl.DataFrame,
         quotes_df: pl.DataFrame,
         trade_dates: list[date],
-    ) -> tuple[pl.Series, list[date]]:
+    ) -> tuple[pl.Series, list[date], list[int]]:
         """
         计算 IC 序列（持有期对齐版本）。
 
@@ -689,12 +690,12 @@ class VectorBacktestEngine:
         2. forward_return = 执行价到下一次调仓执行价的收益
         3. 使用复权价格计算收益（qfq_close）
 
-        返回 ``(ic_values, ic_dates)``，``ic_dates[i]`` 为
+        返回 ``(ic_values, ic_dates, ic_sample_sizes)``，``ic_dates[i]`` 为
         ``ic_values[i]`` 对应的信号日期（即 ``trade_dates[i]``，非执行日期），
         供 IC 图横轴显示日期。
         """
         if signals.is_empty():
-            return pl.Series([], dtype=pl.Float64), []
+            return pl.Series([], dtype=pl.Float64), [], []
 
         # PERF-C2: Pre-group by date via partition_by to avoid O(N*M) loop filters.
         # Unpack tuple keys (k[0]) to plain date values for direct .get(date) lookup.
@@ -711,6 +712,7 @@ class VectorBacktestEngine:
 
         ic_values = []
         ic_dates = []
+        ic_sample_sizes = []
 
         for i, signal_date in enumerate(trade_dates[:-1]):
             execution_date = trade_dates[i + 1]
@@ -737,7 +739,9 @@ class VectorBacktestEngine:
                 next_rebalance_quotes, on="ts_code", how="inner", suffix="_exit"
             )
 
-            if signal_quotes.is_empty() or len(signal_quotes) < 3:
+            # BT-07: 单日候选数低于 min_ic_sample_size（默认 10）时该期 IC 无统计意义
+            # （Spearman 秩相关在 n<10 时只能取少量离散值，是纯噪声而非弱信号），剔除。
+            if signal_quotes.is_empty() or len(signal_quotes) < self.config.min_ic_sample_size:
                 continue
 
             # D1-m2: 入场价与出场价均按 execution_price 对称选择列，避免
@@ -760,9 +764,11 @@ class VectorBacktestEngine:
             )
             ic_values.append(ic)
             ic_dates.append(signal_date)  # 与 ic 同步记录信号日期（trade_dates[i]）
+            # BT-07: 记录该期候选样本数，供 ic_mean 按样本数加权与 ic_median_n 统计。
+            ic_sample_sizes.append(len(signal_quotes))
 
         assert len(ic_values) == len(ic_dates)
-        return pl.Series(ic_values, dtype=pl.Float64), ic_dates
+        return pl.Series(ic_values, dtype=pl.Float64), ic_dates, ic_sample_sizes
 
     def _get_next_rebalance_date(
         self,

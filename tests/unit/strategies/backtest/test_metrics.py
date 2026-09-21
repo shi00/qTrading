@@ -441,6 +441,70 @@ class TestBacktestMetrics:
         )
         assert metrics["ic_mean"] is None
 
+    def test_calc_all_metrics_ic_weighted_by_sample_sizes(
+        self,
+        sample_nav_curve: pl.Series,
+        sample_daily_returns: pl.Series,
+        sample_benchmark_returns: pl.Series,
+    ) -> None:
+        """BT-07: ic_mean 按样本数加权 Σ(nᵢ·icᵢ)/Σ(nᵢ)，样本更充分的日期权重更高。"""
+        trades = pl.DataFrame({"action": ["sell"], "exit_reason": ["REBALANCE"], "realized_pnl": [100.0]})
+        ic_series = pl.Series([0.1, 0.0])
+        ic_sample_sizes = pl.Series([100, 20])  # 第一天 100 样本（ic=0.1），第二天 20 样本（ic=0）
+        metrics = BacktestMetrics.calc_all_metrics(
+            sample_nav_curve,
+            sample_daily_returns,
+            sample_benchmark_returns,
+            trades,
+            ic_series,
+            risk_free_rate=0.02,
+            ic_sample_sizes=ic_sample_sizes,
+        )
+        # 权重均值 = (100*0.1 + 20*0.0) / 120 = 0.0833…，而非等权 0.05
+        assert metrics["ic_mean"] == pytest.approx(100 * 0.1 / 120, rel=1e-6)
+        assert metrics["ic_mean"] != pytest.approx(0.05, rel=1e-6)
+
+    def test_calc_all_metrics_ic_attached_stats(
+        self,
+        sample_nav_curve: pl.Series,
+        sample_daily_returns: pl.Series,
+        sample_benchmark_returns: pl.Series,
+    ) -> None:
+        """BT-07: 附带 ic_valid_days（实际参与计算天数）与 ic_median_n（每日样本数中位数）。"""
+        trades = pl.DataFrame({"action": ["sell"], "exit_reason": ["REBALANCE"], "realized_pnl": [100.0]})
+        ic_series = pl.Series([0.1, 0.2, 0.15])
+        ic_sample_sizes = pl.Series([100, 30, 30])
+        metrics = BacktestMetrics.calc_all_metrics(
+            sample_nav_curve,
+            sample_daily_returns,
+            sample_benchmark_returns,
+            trades,
+            ic_series,
+            risk_free_rate=0.02,
+            ic_sample_sizes=ic_sample_sizes,
+        )
+        assert metrics["ic_valid_days"] == 3
+        assert metrics["ic_median_n"] == pytest.approx(30.0)  # 中位数 [30,30,100]
+
+    def test_calc_all_metrics_ic_stats_empty_series(
+        self,
+        sample_nav_curve: pl.Series,
+        sample_daily_returns: pl.Series,
+        sample_benchmark_returns: pl.Series,
+    ) -> None:
+        """BT-07: 空 IC 序列时 ic_valid_days=0 且 ic_median_n=None。"""
+        trades = pl.DataFrame({"action": ["sell"], "exit_reason": ["REBALANCE"], "realized_pnl": [100.0]})
+        metrics = BacktestMetrics.calc_all_metrics(
+            sample_nav_curve,
+            sample_daily_returns,
+            sample_benchmark_returns,
+            trades,
+            pl.Series([], dtype=pl.Float64),
+            risk_free_rate=0.02,
+        )
+        assert metrics["ic_valid_days"] == 0
+        assert metrics["ic_median_n"] is None
+
     def test_calc_nav_curve_from_positions(self) -> None:
         positions = pl.DataFrame(
             {
