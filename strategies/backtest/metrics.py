@@ -365,6 +365,7 @@ class BacktestMetrics:
         trades: pl.DataFrame,
         ic_series: pl.Series,
         risk_free_rate: float = 0.02,
+        ic_sample_sizes: pl.Series | None = None,
     ) -> dict[str, float | None]:
         total_return = BacktestMetrics.calc_total_return(nav_curve)
         ann_return = BacktestMetrics.calc_annualized_return(total_return, len(nav_curve))
@@ -378,7 +379,28 @@ class BacktestMetrics:
         # R21: IC 序列中的 None（该期无法计算）剔除后取均值——否则样本不足的期数会把
         # 均值系统性拉向 0，伪装成「信号无效」。全为 None 或空序列时均值无定义 → None。
         _valid_ic = ic_series.drop_nulls()
-        _ic_mean_raw = _valid_ic.mean() if len(_valid_ic) > 0 else None
+        if len(_valid_ic) > 0:
+            # BT-07: ic_mean 按样本数加权（Σ nᵢ·icᵢ / Σ nᵢ），让候选更充分的日期
+            # 权重更高，噪声日（n 小）不再与 n 大的日子等权稀释结果。
+            # ic_sample_sizes 缺省（None，历史调用方）时退化为等权，保持数值兼容。
+            _ic_mean_raw: float | None
+            if ic_sample_sizes is not None and len(ic_sample_sizes) == len(ic_series):
+                _valid_n = ic_sample_sizes.filter(ic_series.is_not_null())
+                _n_sum = float(cast(float, _valid_n.sum())) if _valid_n.sum() is not None else None
+                _weighted_sum = float((_valid_ic * _valid_n).sum()) if _n_sum is not None else None
+                _ic_mean_raw = float(_weighted_sum / _n_sum) if _weighted_sum is not None and _n_sum else None
+            else:
+                _ic_mean_raw = float(cast(float, _valid_ic.mean()))
+            ic_valid_days = len(_valid_ic)
+            ic_median_n = (
+                float(_valid_n.median())
+                if ic_sample_sizes is not None and len(ic_sample_sizes) == len(ic_series) and len(_valid_n) > 0
+                else None
+            )
+        else:
+            _ic_mean_raw = None
+            ic_valid_days = 0
+            ic_median_n = None
         return {
             "total_return": total_return,
             "annualized_return": ann_return,
@@ -391,6 +413,8 @@ class BacktestMetrics:
             "total_trades": len(trades),
             "ic_mean": float(cast(float, _ic_mean_raw)) if _ic_mean_raw is not None else None,
             "ic_ir": BacktestMetrics.calc_ir(ic_series, num_days=len(nav_curve)),
+            "ic_valid_days": float(ic_valid_days),
+            "ic_median_n": ic_median_n,
             "information_ratio": information_ratio,
             "tracking_error": tracking_error,
         }

@@ -448,7 +448,14 @@ class PortfolioSimulator:
         - `volume <= 0`（单笔预算不足一手）归因为 `lot_size_indivisible` 而非
           `insufficient_cash`（与现金余额无关，避免误导用户调初始资金）；
         - `reallocate_unfilled=True` 时把「买不起一手」释放的预算按信号强度降序
-          （`signal_order`，缺省按 ts_code 序保证确定性）补分配，消除闲置现金。
+          （`signal_order`，缺省按目标金额降序保证确定性）补分配，消除闲置现金。
+
+        BT-06: 遍历顺序的去板块偏好——
+        - `signal_order`（信号强度降序）优先：现金不足时淘汰信号最弱的标的；
+        - 无 `signal_order` 时按「目标金额降序 + ts_code 升序」兜底（原 ts_code
+          字母序会让上海/科创板/北交所板块被系统性优先淘汰——A 股代码首位编码板块）。
+          金额排序仍是确定性排序（满足「消除与策略无关的随机性」），但淘汰落在
+          「目标金额最小」而非「代码靠后」的标的上。
 
         Args:
             exec_date: 执行日。
@@ -456,7 +463,7 @@ class PortfolioSimulator:
             quotes_by_code: {ts_code: 行情 DataFrame}。
             budget: 买入总预算上限。
             signal_order: 信号从强到弱的 ts_code 序列，供补分配按信号强度降序
-                消费释放预算；缺省 None 时按 ts_code 序（确定性兜底）。
+                消费释放预算；缺省 None 时按目标金额降序（确定性兜底）。
         """
         if budget > 0:
             total_target = sum(buy_targets.values())
@@ -464,7 +471,7 @@ class PortfolioSimulator:
                 scale = budget / total_target
                 buy_targets = {code: v * scale for code, v in buy_targets.items()}
 
-        order = signal_order if signal_order else sorted(buy_targets.keys())
+        order = signal_order if signal_order else sorted(buy_targets.keys(), key=lambda c: (-buy_targets[c], c))
         # BT-05: 统计整手取整失败（买不起一手）释放的预算与笔数，供补分配/提示。
         lot_indivisible_budget: float = 0.0
         lot_indivisible_count: int = 0

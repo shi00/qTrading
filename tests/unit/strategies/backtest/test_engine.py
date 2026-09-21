@@ -135,7 +135,7 @@ class TestCalcICSeries:
         )
         quotes_df = pl.DataFrame()
 
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert ic_series.len() == 0
 
     def test_missing_execution_quotes_skips_ic(self):
@@ -158,7 +158,7 @@ class TestCalcICSeries:
             }
         )
 
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert ic_series.len() == 0
 
     def test_missing_next_rebalance_quotes_skips_ic(self):
@@ -182,7 +182,7 @@ class TestCalcICSeries:
             }
         )
 
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert ic_series.len() == 0
 
     def test_insufficient_signal_quotes_skips_ic(self):
@@ -206,12 +206,12 @@ class TestCalcICSeries:
             }
         )
 
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert ic_series.len() == 0
 
     def test_valid_ic_calculation(self):
         """F3-03: 有效信号 (>=3 只股票) 产生非空 IC 序列。"""
-        engine = self._make_engine(rebalance_freq="daily")
+        engine = self._make_engine(rebalance_freq="daily", min_ic_sample_size=3)
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
         signals = pl.DataFrame(
             {
@@ -250,7 +250,7 @@ class TestCalcICSeries:
             }
         )
 
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         # i=0: signal_date=2024-1-2 有 3 只信号 → 计算 IC; i=1: signal_date=2024-1-3 无信号 → 跳过
         assert ic_series.len() == 1
         assert not math.isnan(ic_series[0])
@@ -280,8 +280,8 @@ class TestCalcICSeries:
             }
         )
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
-        engine = self._make_engine(execution_price="next_open")
-        ic_series, _ = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        engine = self._make_engine(execution_price="next_open", min_ic_sample_size=3)
+        ic_series, _, _ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert ic_series.len() == 1
         assert ic_series[0] == pytest.approx(1.0, abs=1e-6)
 
@@ -309,8 +309,8 @@ class TestCalcICSeries:
             }
         )
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
-        engine = self._make_engine(execution_price="next_close")
-        ic_series, _ = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        engine = self._make_engine(execution_price="next_close", min_ic_sample_size=3)
+        ic_series, _, _ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert ic_series.len() == 1
         assert ic_series[0] == pytest.approx(1.0, abs=1e-6)
 
@@ -1163,7 +1163,9 @@ class TestRunMergesRangePreloadWarnings:
         monkeypatch.setattr(
             engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), []))
         )
-        monkeypatch.setattr(engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [])))
+        monkeypatch.setattr(
+            engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [], []))
+        )
         monkeypatch.setattr(engine, "_calc_benchmark_returns", MagicMock(return_value=(pl.DataFrame(), None)))
         monkeypatch.setattr(engine, "_calc_period_stats", MagicMock(return_value={}))
         # stub 静态指标计算，避免依赖真实财务逻辑
@@ -1209,7 +1211,9 @@ class TestRunMergesRangePreloadWarnings:
         monkeypatch.setattr(
             engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), []))
         )
-        monkeypatch.setattr(engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [])))
+        monkeypatch.setattr(
+            engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [], []))
+        )
         monkeypatch.setattr(engine, "_calc_benchmark_returns", MagicMock(return_value=(pl.DataFrame(), None)))
         monkeypatch.setattr(engine, "_calc_period_stats", MagicMock(return_value={}))
         monkeypatch.setattr(
@@ -1262,7 +1266,9 @@ class TestRunPortfolioWipedOutWarning:
         monkeypatch.setattr(
             engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), []))
         )
-        monkeypatch.setattr(engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [])))
+        monkeypatch.setattr(
+            engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [], []))
+        )
         monkeypatch.setattr(engine, "_calc_benchmark_returns", MagicMock(return_value=(pl.DataFrame(), None)))
         monkeypatch.setattr(engine, "_calc_period_stats", MagicMock(return_value={}))
         monkeypatch.setattr(BacktestMetrics, "calc_nav_curve", MagicMock(return_value=nav_curve))
@@ -1839,7 +1845,7 @@ class TestVectorizationEquivalence:
     def test_calc_ic_series_multi_date_matches_expected(self):
         """_calc_ic_series with multiple signal dates produces valid IC values
         (>=3 stocks per date required for IC calculation)."""
-        engine = self._make_engine(rebalance_freq="daily")
+        engine = self._make_engine(rebalance_freq="daily", min_ic_sample_size=3)
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5)]
         signals = pl.DataFrame(
             {
@@ -1931,7 +1937,7 @@ class TestVectorizationEquivalence:
             }
         )
 
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
 
         # F3-03: 2 有效信号日 (2024-1-2, 2024-1-3) → 2 个 IC; 2024-1-4 无信号 → 跳过
         assert ic_series.len() == 2
@@ -1961,10 +1967,61 @@ class TestVectorizationEquivalence:
             }
         )
 
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
 
         # F3-03: 无信号日跳过，1 只股票 < 3 也跳过 → 空 IC 序列
         assert ic_series.len() == 0
+
+    def test_calc_ic_series_respects_min_sample_size_threshold(self) -> None:
+        """BT-07: 单日候选数低于 min_ic_sample_size（默认 10）时该期 IC 被剔除，
+        且 ic_sample_sizes 与 ic_values 等长记录每期样本数。"""
+        engine = self._make_engine(rebalance_freq="daily")  # 默认 min_ic_sample_size=10
+        codes = [f"{i:06d}.SZ" for i in range(1, 11)]  # 10 只（恰好达阈值）
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 2)] * 10,
+                "execution_date": [date(2024, 1, 3)] * 10,
+                "ts_code": codes,
+                "signal_rank": list(range(1, 11)),
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": codes + codes,
+                "trade_date": [date(2024, 1, 3)] * 10 + [date(2024, 1, 4)] * 10,
+                "qfq_open": [10.0] * 10 + [10.0 + i for i in range(1, 11)],
+                "qfq_close": [10.0] * 10 + [10.0 + i for i in range(1, 11)],
+            }
+        )
+        ic_series, _, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        assert ic_series.len() == 1  # 10 只达到阈值 → 1 个 IC
+        assert ic_sample_sizes == [10]
+
+    def test_calc_ic_series_drops_below_threshold_date(self) -> None:
+        """BT-07: 默认 min_ic_sample_size=10 下，单日 9 只候选被剔除（噪声日不入 IC 序列）。"""
+        engine = self._make_engine(rebalance_freq="daily")  # 默认 10
+        codes = [f"{i:06d}.SZ" for i in range(1, 10)]  # 仅 9 只
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 2)] * 9,
+                "execution_date": [date(2024, 1, 3)] * 9,
+                "ts_code": codes,
+                "signal_rank": list(range(1, 10)),
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": codes + codes,
+                "trade_date": [date(2024, 1, 3)] * 9 + [date(2024, 1, 4)] * 9,
+                "qfq_open": [10.0] * 9 + [10.0 + i for i in range(1, 10)],
+                "qfq_close": [10.0] * 9 + [10.0 + i for i in range(1, 10)],
+            }
+        )
+        ic_series, _, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        assert ic_series.len() == 0
+        assert ic_sample_sizes == []
 
     def test_partition_by_lookup_matches_filter_directly(self):
         """Directly verify partition_by dict lookup returns same DataFrame as filter."""

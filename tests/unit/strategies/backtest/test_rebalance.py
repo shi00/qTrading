@@ -753,7 +753,7 @@ class TestICCalculationWithRebalanceFreq:
         F3-03: IC 计算需 >=3 只股票（Spearman 相关性要求），使用 3 只股票。
         daily 频率：next_rebalance_date = execution_date 的下一日。
         """
-        engine = self._make_engine(rebalance_freq="daily")
+        engine = self._make_engine(rebalance_freq="daily", min_ic_sample_size=3)
         trade_dates = [
             date(2024, 1, 2),
             date(2024, 1, 3),
@@ -779,7 +779,7 @@ class TestICCalculationWithRebalanceFreq:
                 "qfq_close": [10.0, 20.0, 30.0, 10.2, 20.4, 30.6, 10.8, 21.2, 31.5],
             }
         )
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         # 仅 signal_date=1/2 有信号 → 1 个 IC；signal_date=1/3 无信号 → 跳过
         assert len(ic_series) == 1
         assert not math.isnan(ic_series[0])
@@ -794,7 +794,7 @@ class TestICCalculationWithRebalanceFreq:
         - IC 应计算 01-09 open 到 01-15 open 的收益
         F3-03: 使用 3 只股票满足 IC 计算最低要求。
         """
-        engine = self._make_engine(rebalance_freq="weekly")
+        engine = self._make_engine(rebalance_freq="weekly", min_ic_sample_size=3)
         trade_dates = [
             date(2024, 1, 8),
             date(2024, 1, 9),
@@ -899,7 +899,7 @@ class TestICCalculationWithRebalanceFreq:
                 ],
             }
         )
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         # 仅 signal_date=1/8 有信号 → 1 个 IC
         assert len(ic_series) == 1
         assert not math.isnan(ic_series[0])
@@ -913,7 +913,7 @@ class TestICCalculationWithRebalanceFreq:
         - 下一次调仓日：2024-02-01（下月初）
         F3-03: 使用 3 只股票满足 IC 计算最低要求。
         """
-        engine = self._make_engine(rebalance_freq="monthly")
+        engine = self._make_engine(rebalance_freq="monthly", min_ic_sample_size=3)
         trade_dates = [
             date(2024, 1, 29),
             date(2024, 1, 30),
@@ -1005,7 +1005,7 @@ class TestICCalculationWithRebalanceFreq:
                 ],
             }
         )
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         # 仅 signal_date=1/29 有信号 → 1 个 IC
         assert len(ic_series) == 1
         assert not math.isnan(ic_series[0])
@@ -1032,7 +1032,7 @@ class TestICCalculationWithRebalanceFreq:
                 "qfq_close": [10.2, 10.7],
             }
         )
-        ic_series, ic_dates = engine._calc_ic_series(signals, quotes_df, trade_dates)
+        ic_series, ic_dates, ic_sample_sizes = engine._calc_ic_series(signals, quotes_df, trade_dates)
         assert len(ic_series) == 0
 
 
@@ -1582,6 +1582,47 @@ class TestDiffRebalance:
         held_b, vols_b = run(b)
         assert held_a == held_b
         assert vols_a == vols_b
+
+    def test_buy_to_target_eliminates_low_target_when_cash_exhausted(self) -> None:
+        """BT-06: 兜底遍历按「目标金额降序」——现金耗尽时淘汰目标金额最小而非
+        ts_code 字母序靠后的标的（消除上海/科创板/北交所被系统性先淘汰的板块偏好）。
+
+        构造：高目标(5000)的 600000.SH（字母序靠后）先买，低目标(1000)的
+        000001.SZ（字母序靠前）在现金耗尽后成为被淘汰者。
+        若仍按旧 ts_code 序，被淘汰的将是 600000.SH（同额排序下字母序靠后者）。
+        """
+        sim, _config = self._make_simulator()
+        sim.cash = 5500.0  # 只够高目标（约 5k）整单买入
+        targets = {"000001.SZ": 1000.0, "600000.SH": 5000.0}
+        q_sz = self._quote(date(2024, 1, 8), 10.0)
+        q_sh = self._quote(date(2024, 1, 8), 10.0).with_columns(pl.lit("600000.SH").alias("ts_code"))
+        quotes_by_code = {"000001.SZ": q_sz, "600000.SH": q_sh}
+        sim._buy_to_target(date(2024, 1, 8), targets, quotes_by_code, budget=6000.0)
+
+        # 高目标优先成交（目标金额降序），低目标因现金不足被淘汰
+        held = {t["ts_code"] for t in sim.trades_list if t["action"] == "buy"}
+        assert held == {"600000.SH"}
+        skipped = [r for r in sim.skipped_list if r["direction"] == "buy"]
+        assert any(r["ts_code"] == "000001.SZ" and r["reason"] == "insufficient_cash" for r in skipped)
+        assert not any(r["ts_code"] == "600000.SH" and r["reason"] == "insufficient_cash" for r in skipped)
+
+    def test_buy_to_target_elimination_deterministic_across_dict_order(self) -> None:
+        """BT-06: 目标金额降序兜底仍是确定性排序——传入 dict 插入顺序不影响淘汰集合。"""
+        targets_a = {"000001.SZ": 1000.0, "600000.SH": 5000.0}
+        targets_b = dict(reversed(targets_a.items()))
+
+        outcome = []
+        for targets in (targets_a, targets_b):
+            sim, _config = self._make_simulator()
+            sim.cash = 5500.0
+            q_sz = self._quote(date(2024, 1, 8), 10.0)
+            q_sh = self._quote(date(2024, 1, 8), 10.0).with_columns(pl.lit("600000.SH").alias("ts_code"))
+            sim._buy_to_target(date(2024, 1, 8), targets, {"000001.SZ": q_sz, "600000.SH": q_sh}, budget=6000.0)
+            held = frozenset(t["ts_code"] for t in sim.trades_list if t["action"] == "buy")
+            skipped = frozenset(r["ts_code"] for r in sim.skipped_list if r["direction"] == "buy")
+            outcome.append((held, skipped))
+
+        assert outcome[0] == outcome[1]
 
     def test_rebalance_cash_ratio_respects_reserve_floor(self) -> None:
         """现金预留语义：先扣预留，再在可投资金内分配；实际现金比例 >= 预留比例（D4-10）。
