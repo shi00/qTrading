@@ -805,6 +805,70 @@ class TestScheduleJobsInvalidTime:
         assert svc.scheduler.get_job("review_backfill") is not None  # noqa: weak-assertion APScheduler job 注册存在性，trigger 配置由专项测试覆盖
 
 
+class TestSchedulerJobOrdering:
+    """REVIEW-06 TO-03: 依赖 job（回填/概念/预测）晚于日更的顺序校验。"""
+
+    def _run_schedule(self, auto_time, ai_concept_time, nightly_time, logger_mock):
+        svc = _make_svc()
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.logger.warning", logger_mock),
+        ):
+            mock_ch.get_setting.return_value = None
+            mock_ch.get_auto_update_time.return_value = auto_time
+            mock_ch.get_ai_concept_schedule_time.return_value = ai_concept_time
+            mock_ch.get_nightly_prediction_time.return_value = nightly_time
+            svc._schedule_jobs()
+        return svc
+
+    def _order_warnings(self, logger_mock):
+        return [c for c in logger_mock.call_args_list if "早于日更" in str(c.args[0])]
+
+    def test_default_order_no_warning(self):
+        """默认配置 16:30/17:00/18:00/20:30 → 依赖 job 均晚于日更，无顺序告警。"""
+        logger_mock = MagicMock()
+        self._run_schedule("16:30", "18:00", "20:30", logger_mock)
+        assert self._order_warnings(logger_mock) == []
+
+    def test_daily_late_warns_all_dependent(self):
+        """auto_update_time=21:00（晚于全部依赖 job）→ 三个依赖 job 均告警（消费 T-1 数据）。"""
+        logger_mock = MagicMock()
+        self._run_schedule("21:00", "18:00", "20:30", logger_mock)
+        warns = self._order_warnings(logger_mock)
+        # 断言消息（含格式化参数）包含三个依赖 job 名，且恰好三条告警
+        joined = " ".join(str(w) for w in warns)
+        assert "review_backfill" in joined
+        assert "ai_concept_daily_refresh" in joined
+        assert "nightly_prediction" in joined
+        assert len(warns) == 3
+
+    def test_daily_after_backfill_only_warns_backfill(self):
+        """auto_update_time=17:30 → 仅 review_backfill（17:00）违反；概念/预测仍晚于日更。"""
+        logger_mock = MagicMock()
+        self._run_schedule("17:30", "18:00", "20:30", logger_mock)
+        warns = self._order_warnings(logger_mock)
+        joined = " ".join(str(w) for w in warns)
+        assert "review_backfill" in joined
+        assert "ai_concept_daily_refresh" not in joined
+
+    def test_equal_time_warns(self):
+        """依赖 job 与日更同刻 → 视为顺序未保证，告警。"""
+        logger_mock = MagicMock()
+        self._run_schedule("20:30", "20:30", "20:30", logger_mock)
+        assert len(self._order_warnings(logger_mock)) == 3
+
+    def test_validate_job_ordering_equality_boundary(self):
+        """直接调用校验方法：相等时间（不晚于）即违反。"""
+        logger_mock = MagicMock()
+        with patch("utils.scheduler_service.logger.warning", logger_mock):
+            SchedulerService._validate_job_ordering((16, 30), (16, 30), (16, 31), (15, 0))
+        warns = self._order_warnings(logger_mock)
+        joined = " ".join(str(w) for w in warns)
+        assert "review_backfill" in joined
+        assert "ai_concept_daily_refresh" not in joined
+        assert "nightly_prediction" in joined
+
+
 class TestSchedulerServiceStatus:
     def test_get_status_returns_dict(self):
         with (
