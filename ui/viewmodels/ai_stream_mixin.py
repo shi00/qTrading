@@ -697,7 +697,16 @@ class AIStreamMixin:
                 # 区分于「无数据」(需先同步), 避免用户误判「这个参数没用 / 软件有 bug」。
                 sd = context.get("screening_data")
                 candidate_total = len(sd) if sd is not None else 0
-                empty_message = Message("screener_nomatch", {"total": candidate_total}) if candidate_total > 0 else None
+                # DS-04: 基本面策略因财务数据缺失/覆盖率不足被守卫拦截时（_empty_reason
+                # = fundamental_data_missing），不显示「无匹配可调条件」空态提示——那会
+                # 给出与事实相反的指引（实际缺财务数据）。仅保留上方
+                # strategy_fundamental_data_missing 警告横幅承载缺失原因。
+                if context.get("_empty_reason") == "fundamental_data_missing":
+                    empty_message = None
+                else:
+                    empty_message = (
+                        Message("screener_nomatch", {"total": candidate_total}) if candidate_total > 0 else None
+                    )
                 # C2b H1: 无结果退出路径经唯一 owner 单帧原子产出 (空切片 + loading=False + 提示),
                 # 避免分两帧触发重复通知 (第 3 轮对抗检视)
                 self._update_pagination(

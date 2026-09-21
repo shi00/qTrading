@@ -367,6 +367,7 @@
     "strategy_volume_breakout_desc": "Criteria: Daily Chg 2-7% | Turnover > 3% (Active Volume)",
     "strategy_volume_breakout_desc_dynamic": "Criteria: Daily Chg {pct_chg_min}-{pct_chg_max}% | Turnover > {turnover_min}% (Active Volume)",
     "strategy_param_auto_adjusted": "Conflicting range params: lower bound {min} >= upper bound, upper bound auto-adjusted to {adjusted_max}",
+    "strategy_fundamental_data_missing": "Fundamental data missing or coverage too low ({coverage}); cannot execute fundamental strategy. Please sync financial data and retry.",
     "screener_ai_failed_banner": "AI analysis could not complete for {count} stocks; results reflect math-based screening only",
     "strategy_ai_candidate_truncated": "{total} candidates exceed the AI analysis cap of {analyzed}; only the top {analyzed} are analyzed",
     "strategy_excluded_st": "Excluded {count} risk-warning stocks",
