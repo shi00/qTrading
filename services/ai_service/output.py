@@ -18,7 +18,12 @@ _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _sanitize_free_text(value: str, max_len: int | None = None) -> str:
-    """SEC-002: Strip ASCII control chars (except \\t\\n\\r) and truncate free-text LLM output.
+    """SEC-002: Strip ASCII control chars (except \\t\\n\\r), neutralize angle brackets,
+    and truncate free-text LLM output.
+
+    AI-03 写入侧纵深防御：与读取侧（neutralize_external_text）同款尖括号转义，让
+    ``<``/``>`` 标签不得入库存/入 UI。控制字符剥离与截断语义保持不变。仅转义尖括号、
+    不做 PII 脱敏——本清洗对象是展示给用户的自由文本，不引入 sanitize_pii 的显示语义变化。
 
     UX-2.2: max_len 可配置。None 时读 ConfigHandler.get_ai_free_text_max_len()。
     """
@@ -30,6 +35,7 @@ def _sanitize_free_text(value: str, max_len: int | None = None) -> str:
 
         max_len = ConfigHandler.get_ai_free_text_max_len()
     cleaned = _CONTROL_CHARS_RE.sub("", value)
+    cleaned = cleaned.replace("<", "‹").replace(">", "›")
     if len(cleaned) > max_len:
         logger.warning(
             "[AIService] Output validation: free-text field truncated from %d to %d chars",
