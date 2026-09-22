@@ -21,15 +21,9 @@
 
 ```python
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-
-@dataclass(frozen=True)
-class Message:
-    """带参数的 i18n 消息：VM 产出 (key, params)，View 按当前 locale 渲染。"""
-
-    key: str
-    params: dict[str, object] = field(default_factory=dict)
+from ui.viewmodels import Message  # 正本 core.i18n.Message（ui.viewmodels 再导出），勿在示例中重复定义
 
 
 @dataclass(frozen=True)
@@ -38,7 +32,7 @@ class Row:
 
     code: str
     name: str
-    score: float
+    score: float | None = None  # 缺失必须用 None 表示，禁止填 0（R21 缺失值伪装）
 
 
 @dataclass(frozen=True)
