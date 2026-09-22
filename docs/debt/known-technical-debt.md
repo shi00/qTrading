@@ -639,7 +639,7 @@ UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`s
 
 **期望的最终解法**
 
-**实现完整成本计量**：① 价格表 `services/ai_service/pricing.py`（`MODEL_PRICING` 每 1M tokens 价格 + `PRICING_UPDATED` + `estimate_cost`，未知模型返回 None 不猜价）；② `@register_singleton` 的 `AIUsageTracker`（实现 `_reset_singleton` 满足 R15/R7）按日/会话聚合，持久化到本地表；③ UI 三处呈现：选股前预估「本次约 N 次调用，预计 $X」、完成后实际消耗、设置页本月累计 + 可配置月度上限（超限暂停 AI 并提示）。upgrade 触发条件：AI 成本成为用户明确诉求或报告再次要求完整实现时。
+**实现完整成本计量**：① 成本估算 `services/ai_service/pricing.py` 的 `estimate_cost(effective_model, input_tokens, output_tokens) -> float | None`（全量依托 `litellm.cost_per_token`，**无自维护 `MODEL_PRICING` 手写价格表**；未知/不可计价模型返回 `None` 不猜价，免费模型返回 `0.0`，`PRICING_UPDATED` 记录价格表时效）；② `@register_singleton` 的 `AIUsageTracker`（实现 `_reset_singleton` 满足 R15/R7）按日/会话聚合，持久化到本地表；③ UI 三处呈现：选股前预估「本次约 N 次调用，预计 $X」、完成后实际消耗、设置页本月累计 + 可配置月度上限（超限暂停 AI 并提示）。upgrade 触发条件：AI 成本成为用户明确诉求或报告再次要求完整实现时。
 
 #### P3-AI05-SupportsAI-Metadata：策略是否启用 AI 缺少用户可见说明（review04 04-ai-credibillity.md AI-05）
 
