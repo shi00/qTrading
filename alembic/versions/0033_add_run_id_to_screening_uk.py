@@ -1,7 +1,7 @@
 """make screening_history record key append-only by adding run_id (RV-03)
 
-Revision ID: 0032 (RV-03)
-Revises: 0031
+Revision ID: 0033 (RV-03)
+Revises: 0032
 Create Date: 2026-09-22 00:00:00.000000
 
 RV-03: 研究记录本质是「某次运行的当时判断」，天然 append-only。当前唯一键
@@ -15,9 +15,8 @@ RV-03: 研究记录本质是「某次运行的当时判断」，天然 append-on
   重建 3 键约束会因重复值失败 → 先按 3 键去重（保留 id 最大者，对齐 0024 先例）
   再建约束；去重即丢弃旧 run 行（数据损失，注释明确）。
 
-注：迁移编号冲突（RV-02 亦建 0032）：若 RV-02 的 0032 先合入 main，本迁移
-须在合并时 rebase 为 0033（down_revision 对应改 0032）；若本 PR 先合入则
-RV-02 的 0032 改为 0033。实现时以合并顺序最终确定编号。
+编号说明：0032 已被 RV-02（reset_t0_close_basis_metrics）占用并合入 main，本
+迁移确认为 0033（down_revision=0032 链）。
 """
 
 from collections.abc import Sequence
@@ -25,8 +24,8 @@ from collections.abc import Sequence
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0032"
-down_revision: str | Sequence[str] | None = "0031"
+revision: str = "0033"
+down_revision: str | Sequence[str] | None = "0032"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
