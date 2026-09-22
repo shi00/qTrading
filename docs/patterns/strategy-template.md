@@ -62,6 +62,6 @@ class MyStrategy(BaseStrategy):
 - 策略经 `@register_strategy` 注册，并在 `strategies/all_strategies.py` 的 `_import_all_strategies()` 触发
 - 数据质量门控：普通策略挂 `@require_quality`；`PolarsBaseStrategy` 通过 `required_quality_tier` 属性覆盖默认等级（CLAUDE.md §3.2）
 - i18n：`locales/` 补齐 `strategy_xxx` / `strategy_xxx_desc` 等 key
-- 单测：`tests/unit/` 下覆盖
+- 单测：`tests/unit/` 下覆盖（按 [docs/guides/testing.md](../guides/testing.md#模板-4策略单测polars-夹具--依赖声明)「模板 4：策略单测」模板编写）
 - 门禁：`redline-check`（R14）、`pyright`、相关单测通过
 - 最小验证命令：对照 [CONTRIBUTING.md](../../CONTRIBUTING.md)「变更类型 → 最小验证子集」该改动范围对应最小子集

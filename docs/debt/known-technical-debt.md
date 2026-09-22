@@ -51,13 +51,13 @@
 | P3-DataExplorer-SyncEngine-Unification | DataExplorer 同步引擎游离于统一连接管理（举一反三登记，本期不实施） | P3 | ① DataExplorer 再次出现连接错口/引擎缓存跨模式复用问题；② 或统一连接管理重构时 |
 | P3-UX06-Startup-SLA-E2E-Gap | 冷启动到导航可交互的端到端 SLA 未实测（UX-06 以 proxy 构成基线替代，如实记录缺位） | P3 | ① 真实端到端测量 > 8s（SLA 超阈）时触发 visited\_tabs 顶层推广（`test_consumes_all_seven_subviews_in_stack` 改写 + #438 范式推广）；② 或启动流程重构时 |
 | P3-B12-Screener-Formatting-Logic-in-VM | #B12-2 review02 B12 第 2 步：格式化逻辑下沉 VM（`_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM） | P3 | report04 D9（AI 流式更新重建机制重构）合并时 / screener\_view 重构时 |
-| P3-BT05-QualityGate-Bypass | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计） | P3 | - |
+| P3-BT05-QualityGate-Bypass | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计） | P3 | review03 BT-05 第二步实施时（实现 `evaluate_historical_window()` 区间质量评估） |
 | P3-AI03-CostVisible-Full | AI 调用无货币成本计量与可见性（review04 04-ai-credibillity.md AI-03 完整版） | P3 | AI 成本成为用户明确诉求或报告再次要求完整实现时 |
 | P3-AI05-SupportsAI-Metadata | 策略是否启用 AI 缺少用户可见说明（review04 04-ai-credibillity.md AI-05） | P3 | UI 策略选择器重构或用户反馈策略 AI 标识缺失时 |
 | P3-UX05-ReviewStats-Significance | 复盘聚合统计展示缺失统计显著性提示（review05 05-explainabillity-ux.md UX-05） | P3 | 新增复盘聚合统计视图或复盘结果按批次/策略汇总展示时 |
-| P3-DAT07-Restatement | 回测不可复现：财报无修订历史，UPSERT 覆盖使历史回测结果随时间漂移（review03 DAT-07①） | P3 | - |
-| P3-DAT08-SnapshotLookahead | 回测前视：申万行业为当前快照，`sw_industry_member` 主键不含日期，跨分类调整期回测存在前视（review03 DAT-08②） | P3 | - |
-| P3-DAT08-IndustryPollution | 存量污染：`stock_basic.industry` 在 DAT-08③ 前被写时覆写为申万二级行业，拆列后 `industry_tushare` 输出仍含旧覆写值（review03 DAT-08③） | P3 | - |
+| P3-DAT07-Restatement | 回测不可复现：财报无修订历史，UPSERT 覆盖使历史回测结果随时间漂移（review03 DAT-07①） | P3 | 无计划升级（文档化决策，见「已接受的权衡」DAT-07条目） |
+| P3-DAT08-SnapshotLookahead | 回测前视：申万行业为当前快照，`sw_industry_member` 主键不含日期，跨分类调整期回测存在前视（review03 DAT-08②） | P3 | 无计划升级（文档化决策，见「已接受的权衡」DAT-08②条目） |
+| P3-DAT08-IndustryPollution | 存量污染：`stock_basic.industry` 在 DAT-08③ 前被写时覆写为申万二级行业，拆列后 `industry_tushare` 输出仍含旧覆写值（review03 DAT-08③） | P3 | 无计划升级（文档化决策，见「已接受的权衡」DAT-08③条目） |
 
 ## 技术债清单
 
@@ -615,7 +615,7 @@ UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`s
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-BT05-QualityGate-Bypass** | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计） | - |
+| **P3-BT05-QualityGate-Bypass** | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计） | review03 BT-05 第二步实施时（实现 `evaluate_historical_window()` 区间质量评估） |
 
 **产生背景与现状**
 

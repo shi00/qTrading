@@ -54,6 +54,8 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 ### 取消传播（C18）
 
 - `SyncContext.cancel_event` 作为依赖注入容器传递到 syncer，syncer 在分块循环中检查 `cancel_event.is_set()` 主动退出。
+
+  > **NOTE（R11 防类推）**：任务**取消**信号在 `SyncContext` 内以 `cancel_event` 注入，属 `SyncContext` 的 per-run 实例属性、非类属性；而 [task-manager.md](./task-manager.md) 的 `TaskManager` 任务取消用的是 **`threading.Event`**（见 `services/task_manager.py::_cancel_event`，事件驱动跨线程），非 `asyncio.Event`。两处同为"取消协程"，但产物类型不同。切勿因跨文档类推，把 `asyncio.Event`/`threading.Event` 直接写成 `@register_singleton` 类属性或模块级属性（触发 R11「跨循环复用同步原语」，须经 `get_loop_local()` 获取绑定当前循环）。
 - syncer 主动退出时必须 `raise asyncio.CancelledError`（或让其向上传播），由 `TaskManager` 统一处理任务状态转换。
 - `ThreadPoolManager.run_async()` 包装的同步阻塞段也需响应取消（通过 `cancel_event` 协作式取消，非强制 kill）。
 

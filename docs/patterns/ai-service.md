@@ -7,7 +7,7 @@
 ## 必读（改动前通读）
 
 1. **不给 AI 执行权**：[ADR-0008](../adr/0008-no-ai-execution.md)。AI 输出仅用于评分与文本展示，禁止触发交易/外部工具/代码执行/改核心配置；所有 AI 交互须经 `utils/prompt_guard.py` 的净化函数（`validate_prompt` / `sanitize_prompt` / `neutralize_external_text`，**无 `PromptGuard` 类**）与 `DataSanitizer`。调用示例见 `strategies/ai_mixin.py`。
-2. **缺失值伪装红线**：[project-profile.md 的 R21 自查段](../reviews/review-profiles/project-profile.md)。业务语义字段（`score`/`ai_score`/`confidence`）缺失必须用 `None`/哨兵（如 `suspend_data_absent`）表示，禁止填 `0`/`50` 等业务合法值；**已修复缺陷（DATA-03→`suspend_data_absent`）不得再判为伪装**。
+2. **缺失值伪装红线**：[project-profile.md 的 R21 自查段](../reviews/review-profiles/project-profile.md#r21-缺失值伪装)。业务语义字段（`score`/`ai_score`/`confidence`）缺失必须用 `None`/哨兵（如 `suspend_data_absent`）表示，禁止填 `0`/`50` 等业务合法值；**已修复缺陷（DATA-03→`suspend_data_absent`）不得再判为伪装**。
 3. **敏感信息脱敏与硬编码密钥**：CLAUDE.md §3.1 R9 / R10。日志与异常经 `DataSanitizer` 脱敏；API Key 从 keyring/环境变量读取，不硬编码。
 
 ## 条件触发（按改动类型定位）
