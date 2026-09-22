@@ -210,7 +210,7 @@ redlines:
   - id: R20
     title: 单位未核对的量纲比较
     description: "策略/回测中对已知金额、数量列（north_money / net_amount / amount / total_mv / circ_mv / vol）的裸数值比较，调用链上无显式单位换算即违规（必须经 threshold_in_data_unit() 统一入口换算后再比较）"
-    enforcement: "pre-commit 报告模式（check_redlines.py）+ 仅人工评审"
+    enforcement: "pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R20 报告模式升级期限」（2026-12-31）"
     checks:
       - check_R20
     automation_coverage: partial
