@@ -507,3 +507,68 @@ class TestAiAttribution:
 
     def test_empty_input_returns_empty(self) -> None:
         assert compute_ai_attribution_stats(pd.DataFrame()) == ()
+
+
+class TestRowN:
+    """RV-10: 每股有效样本数 row_n 接入 MetricStat 并随统计行返回。
+
+    覆盖场景：row_n 求和来自 DAO ``*_n`` 列；空序列 row_n 保留（缺失不伪装）；
+    策略与 AI 归因两入口同口径。
+    """
+
+    def test_metric_stat_row_n_accumulated(self) -> None:
+        """_metric_stat 返回 row_n 参数（跨日 *mer_n 求和由调用方传入）。"""
+        stat = _metric_stat(
+            pd.Series([1.0, 2.0, 3.0, 4.0]),
+            overlap=T1_WINDOW_OVERLAP,
+            row_n=120,
+        )
+        assert stat.row_n == 120
+        assert stat.n == 4
+        assert stat.n_eff == pytest.approx(4.0)
+
+    def test_metric_stat_row_n_default_zero(self) -> None:
+        """row_n 缺省为 0（纵深场景：旧调用不传亦不崩溃）。"""
+        stat = _metric_stat(pd.Series([1.0, 2.0]))
+        assert stat.row_n == 0
+
+    def test_metric_stat_empty_row_n_kept(self) -> None:
+        """空序列（n=0）时传入的 row_n 原样保留（横截面行数不因无日样本而丢）。"""
+        stat = _metric_stat(pd.Series([], dtype="float64"), row_n=7)
+        assert stat.n == 0
+        assert stat.mean is None
+        assert stat.row_n == 7
+
+    def test_strategy_row_n_summed_from_dao(self) -> None:
+        """compute_strategy_review_stats 将 DAO *_n 列跨日求和接入 MetricStat.row_n。"""
+        rows = [
+            _metric_row(strat="sA", bm="sh000001", day=0, t1=1.0, alpha=1.0, daily_cnt=3),
+            _metric_row(strat="sA", bm="sh000001", day=1, t1=2.0, alpha=2.0, daily_cnt=3),
+            _metric_row(strat="sA", bm="sh000001", day=2, t1=3.0, alpha=3.0, daily_cnt=3),
+        ]
+        (row,) = compute_strategy_review_stats(pd.DataFrame(rows))
+        assert row.alpha.row_n == 3  # 3 日 × 1（alpha_n 非 NULL）
+        assert row.t1.row_n == 3
+        assert row.alpha.n == 3
+
+    def test_strategy_row_n_partial_coverage(self) -> None:
+        """部分行 alpha 缺失（alpha_n=0）时 row_n < n（覆盖缺口可见）。"""
+        rows = [
+            _metric_row(strat="sA", bm="sh000001", day=0, t1=1.0, alpha=1.0),
+            _metric_row(strat="sA", bm="sh000001", day=1, t1=2.0, alpha=None),  # alpha_n=0
+            _metric_row(strat="sA", bm="sh000001", day=2, t1=3.0, alpha=3.0),
+        ]
+        (row,) = compute_strategy_review_stats(pd.DataFrame(rows))
+        assert row.alpha.n == 2  # 2 日有 alpha 均值
+        assert row.alpha.row_n == 2  # 2 日 × 1 有效行
+        assert row.t1.row_n == 3  # t1 全覆盖
+
+    def test_ai_row_n_same_semantics(self) -> None:
+        """AI 归因入口与策略入口同口径接入 row_n。"""
+        rows = [
+            _ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=0, t1=1.0, alpha=1.0, daily_cnt=5),
+            _ai_metric_row(strat="sA", bm="sh000001", has_ai=True, day=1, t1=2.0, alpha=2.0, daily_cnt=5),
+        ]
+        (row,) = compute_ai_attribution_stats(pd.DataFrame(rows))
+        assert row.alpha.row_n == 2
+        assert row.t1.row_n == 2

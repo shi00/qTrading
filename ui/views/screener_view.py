@@ -900,6 +900,58 @@ def _ci_text(lo: float | None, hi: float | None) -> str:
     return f"[{lo * 100:.2f}%, {hi * 100:.2f}%]"
 
 
+# RV-10: 覆盖缺口阈值——row_n / (avg_daily_count * n) 低于此值时即判定大量入选
+# 记录未参与该指标计算（基准缺失/未成熟等），均值存在幸存者偏差放大风险。
+_COVERAGE_GAP_RATIO = 0.8
+
+
+def _coverage_gap_pct(alpha: object, avg_daily_count: float) -> float | None:
+    """计算 Alpha 指标的实际参与率 (row_n / (avg_daily_count × n))。
+
+    理论参与股票行数 = avg_daily_count(日均纳入) × n(日序列长)；实际参与 =
+    alpha.row_n (窗口内 Σ alpha_n)。row_n 或 avg_daily_count*n 为 0 时无法
+    计算返回 None (R21: 缺失不伪装)。
+    返回值为参与率（0~1），调用方以 _COVERAGE_GAP_RATIO=0.8 判定缺口。
+
+    已知局限（对抗检视）：整日 alpha 全 NULL 时，分母乘以 n_alpha（alpha 有效
+    日数）与分子 row_n 同步折算，ratio 仍 ≈1，不告警——此类「整日缺口」由
+    日序列 N 缩水本身暴露（alpha.n < t1.n 用户可见），本比率专注「同日部分
+    股票缺失」的横截面缺口。
+    """
+    row_n = getattr(alpha, "row_n", None)
+    if row_n is None or row_n <= 0 or avg_daily_count <= 0:
+        return None
+    total = avg_daily_count * getattr(alpha, "n", 0)
+    if total <= 0:
+        return None
+    ratio = float(row_n) / total
+    return ratio
+
+
+def _coverage_gap_hint(alpha: object, avg_daily_count: float) -> ft.Control | None:
+    """覆盖缺口提示控件: 仅当实际参与率 < _COVERAGE_GAP_RATIO 时渲染 (RV-10)。
+
+    缺口说明大量入选记录（基准缺失/未成熟/被覆盖）未参与 Alpha 计算，日组合均值
+    存在幸存者偏差放大风险——让用户看得见「日均纳入 20 只」与「实际参与 12 只」
+    之间的缺口，而不是一个看似确定的均值。
+    """
+    ratio = _coverage_gap_pct(alpha, avg_daily_count)
+    if ratio is None or ratio >= _COVERAGE_GAP_RATIO:
+        return None
+    pct = max(0, int((1 - ratio) * 100))
+    return ft.Text(
+        I18n.get("review_stats_coverage_gap", pct=pct),
+        size=AppStyles.FONT_SIZE_CAPTION,
+        color=AppColors.WARNING,
+    )
+
+
+def _coverage_gap_controls(alpha: object, avg_daily_count: float) -> list[ft.Control]:
+    """覆盖缺口提示包装为列表（0 或 1 项），供列布局直接展开 (RV-10)。"""
+    hint = _coverage_gap_hint(alpha, avg_daily_count)
+    return [hint] if hint is not None else []
+
+
 def _build_review_stats_section(strategy_stats: tuple[StrategyStatRow, ...]) -> ft.Control:
     """history 侧栏「策略汇总」展开区 (UX-05, T4)。
 
@@ -950,6 +1002,9 @@ def _build_review_stats_section(strategy_stats: tuple[StrategyStatRow, ...]) -> 
                 size=AppStyles.FONT_SIZE_CAPTION,
             )
         )
+        # RV-10: 覆盖缺口条件提示——仅当 Alpha 实际参与率 < 0.8 时渲染
+        # （大量入选记录未参与该指标计算 → 幸存者偏差放大风险）。
+        details.extend(_coverage_gap_controls(row.alpha, row.avg_daily_count))
         details.append(
             ft.Text(
                 f"{I18n.get('review_stats_t5')}: {_format_pct(row.t5.mean)} "
@@ -1058,6 +1113,9 @@ def _build_ai_attribution_section(ai_attribution: tuple[AiAttributionRow, ...]) 
                                 f"{I18n.get('review_stats_avg_daily_count')}: {row.avg_daily_count:.1f}",
                                 size=AppStyles.FONT_SIZE_CAPTION,
                             ),
+                            # RV-10: 覆盖缺口条件提示（与策略汇总区同语义，AI 归因亦受
+                            # 幸存者偏差放大影响，见 ADR-0009 自选择偏差与代理口径局限）。
+                            *_coverage_gap_controls(row.alpha, row.avg_daily_count),
                             ft.Text(
                                 f"{I18n.get('review_stats_t5')}: {_format_pct(row.t5.mean)} "
                                 f"({I18n.get('review_stats_no_excess_benchmark')})",
