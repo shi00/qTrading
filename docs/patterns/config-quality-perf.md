@@ -12,6 +12,8 @@
 
 使用 `@require_quality(QualityTier.SILVER)` 确保只有数据质量达标才执行逻辑。质量分层: `CRITICAL(0)` → `BRONZE(1)` → `SILVER(2)` → `GOLD(3)`。`STRICT_QUALITY_GATE` 环境变量控制严格模式（默认开启，设为 `false` 关闭）。
 
+**区间完整性门控（`require_continuous_window=True`，D2-9）**：仅当策略声明逻辑需要**连续数据窗口**（如基于 MA/RSI 等滚动窗口指标、且窗口内任一天缺失都会使结果失真）时，在 `@require_quality` 上追加该参数。语义：等级达标后再做区间完整性检查——依据 `processor._scan_missing_dates`（`run_quality_scan` 采样的缺失交易日代理证据），若采样检测到任何缺失交易日，即便等级达标也抛 `QualityGateError` 拦截，防止「策略所需窗口恰好缺某天」仍放行。默认 `False`，不改变既有策略行为。定义见 `data/persistence/quality_gate.py`（`require_quality` 的 `require_continuous_window` 关键字参数）；真实引用点：`strategies/oversold_strategy.py` 的 `async def filter` 上 `@require_quality(QualityTier.SILVER, require_continuous_window=True)`（配合 `required_tables=("daily_quotes",)` 的 per-table 门控）。向量化 `PolarsBaseStrategy` 走 `required_quality_tier` 类属性，不适用本参数。
+
 **`data/sync/` 层豁免说明**：`data/sync/` 作为数据同步入口，负责从外部 API（Tushare / AKShare 等）拉取并写入原始数据，是质量门控的数据**来源**而非消费方；下游 `strategies/` 与 `services/` 强制通过 `@require_quality` / `required_quality_tier` 声明所需质量等级后再消费 `data/sync/` 产出的数据。因此 `data/sync/` 层不声明 `required_quality_tier`，避免数据生产者自我断言其产出质量造成职责混淆。
 
 ### 性能监控装饰器
