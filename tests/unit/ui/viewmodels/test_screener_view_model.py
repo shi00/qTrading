@@ -854,8 +854,11 @@ class TestLoadStrategyStats:
                 "benchmark_code": ["sh000001", "sh000001", None],
                 "daily_cnt": [3, 5, 2],
                 "t1_mean": [0.01, 0.02, 0.03],
+                "t1_n": [1, 1, 1],
                 "t5_mean": [0.02, 0.03, 0.04],
+                "t5_n": [1, 1, 1],
                 "alpha_mean": [0.005, 0.01, None],
+                "alpha_n": [1, 1, 0],
                 "win_cnt": [1, 2, 1],
                 "loss_cnt": [0, 1, 0],
             }
@@ -949,8 +952,11 @@ class TestLoadAiAttribution:
                 "has_ai": [True, False],
                 "daily_cnt": [3, 5],
                 "t1_mean": [0.01, 0.02],
+                "t1_n": [1, 1],
                 "t5_mean": [0.02, 0.03],
+                "t5_n": [1, 1],
                 "alpha_mean": [0.005, 0.01],
+                "alpha_n": [1, 1],
                 "win_cnt": [1, 2],
                 "loss_cnt": [0, 1],
             }
