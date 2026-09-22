@@ -676,18 +676,18 @@ class TestDocsConsistencyScriptExtensions:
         errors = check_flet_version_drift()
         assert errors == [], f"Should not flag document without version: {errors}"
 
-    def test_flet_version_drift_version_not_near_flet_keyword(self, tmp_path, monkeypatch):
-        """版本号不在 Flet 关键词附近（前后 50 字符内）时不报错。"""
+    def test_flet_version_drift_version_same_line_as_flet_keyword(self, tmp_path, monkeypatch):
+        """版本号与 Flet 关键词同一行即拦截（行内任意距离，GOV-08 整行全量拦截消除字距依赖）。"""
         from check_docs_consistency import check_flet_version_drift
 
         tmp_doc = tmp_path / "test_doc.md"
-        # 版本号与 Flet 关键词距离超过 50 字符
+        # 版本号与 Flet 关键词同行、相距超 50 字符仍应拦截（原窗口 50 字符启发式已废弃）
         content = "# Test\n\n" + "Flet 是一个框架。" + "x" * 60 + " 0.85.3 是某个版本。\n"
         tmp_doc.write_text(content, encoding="utf-8")
         monkeypatch.setattr("check_docs_consistency.FLET_VERSION_DOCS", [tmp_doc])
 
         errors = check_flet_version_drift()
-        assert errors == [], f"Should not flag version far from Flet keyword: {errors}"
+        assert any("0.85.3" in e for e in errors), f"Should flag version on same line: {errors}"
 
     def test_flet_version_drift_lowercase_flet_keyword(self, tmp_path, monkeypatch):
         """小写 'flet' 关键词附近的版本号也应被检测到。"""
@@ -3489,6 +3489,48 @@ class TestRulesetMetadataConsistency:
         assert any("AGENTS.md 缺少 last_reviewed" in e for e in errors), (
             f"应检出 AGENTS 缺 last_reviewed, got: {errors}"
         )
+
+
+class TestReviewsFindingsIndex:
+    """检视结论登记索引（GOV-04）契约测试。"""
+
+    def test_findings_index_passes_real_repo(self):
+        """真实仓库 findings 索引应通过（README 存在且被 reviews README 登记）。"""
+        from check_docs_consistency import check_reviews_findings_index, check_reviews_index_completeness
+
+        assert check_reviews_findings_index() == []
+        assert check_reviews_index_completeness() == []
+
+    def test_detects_unregistered_findings(self, tmp_path, monkeypatch):
+        """findings 下未登记结论文件 → check_reviews_findings_index() 报错。"""
+        from check_docs_consistency import check_reviews_findings_index
+
+        reviews_dir = tmp_path / "reviews"
+        findings_dir = reviews_dir / "findings"
+        findings_dir.mkdir(parents=True)
+        (findings_dir / "README.md").write_text(
+            "# Findings\n\n| 轮次 | 结论文件 | 状态 |\n|---|---|---|\n", encoding="utf-8"
+        )
+        (findings_dir / "review99.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_DOCS_DIR", reviews_dir)
+
+        errors = check_reviews_findings_index()
+        assert any("review99.json" in e and "未登记" in e for e in errors), f"应检出未登记结论文件, got: {errors}"
+
+    def test_detects_missing_findings_readme_registration(self, tmp_path, monkeypatch):
+        """reviews README 未登记 findings/README.md → check_reviews_index_completeness() 报错。"""
+        from check_docs_consistency import check_reviews_index_completeness
+
+        reviews_dir = tmp_path / "reviews"
+        findings_dir = reviews_dir / "findings"
+        findings_dir.mkdir(parents=True)
+        (findings_dir / "README.md").write_text("# Findings\n", encoding="utf-8")
+        (reviews_dir / "README.md").write_text("# Reviews\n\n没有登记 findings/README.md\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_DOCS_DIR", reviews_dir)
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_README_PATH", reviews_dir / "README.md")
+
+        errors = check_reviews_index_completeness()
+        assert any("findings/README.md" in e for e in errors), f"应检出 findings README 未登记, got: {errors}"
 
 
 class TestDecisionTreeMapping:

@@ -171,16 +171,17 @@ CHECKED_DOCS: list[Path] = sorted(
     if not any(d == e or e in d.parents for e in _DOC_EXCLUDES)
 )
 
-# Flet 版本漂移检查范围（治理文档）
-FLET_VERSION_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, *FLET_DOCS_PATHS]
+# Flet 版本漂移检查范围（治理文档；api-verification-template.md 为 API 核验历史快照，豁免 GDR-06）
+FLET_VERSION_DOCS: list[Path] = [
+    CLAUDE_PATH,
+    CONTRIBUTING_PATH,
+    *(p for p in FLET_DOCS_PATHS if p.name != "api-verification-template.md"),
+]
 
 # Flet 包名（用于从 pyproject.toml 提取锁定版本）
 # flet/flet-desktop/flet-charts/flet-code-editor 在 [project.dependencies]，
 # flet-mcp 在 [project.optional-dependencies].dev（开发期 MCP 包，与主包版本对齐，见 CLAUDE.md §1.10）
 _FLET_PACKAGES = ("flet", "flet-desktop", "flet-charts", "flet-code-editor", "flet-mcp")
-
-# Flet 关键词附近版本号扫描窗口（前后字符数，spec 要求 50）
-_FLET_KEYWORD_WINDOW = 50
 
 
 def github_anchor(heading_text: str) -> str:
@@ -567,9 +568,11 @@ def _get_flet_locked_versions() -> set[str]:
 def check_flet_version_drift() -> list[str]:
     """检查项 5：Flet 版本漂移检查（CLAUDE.md §3.2 文档 SHALL NOT 硬编码 Flet 补丁版本号）。
 
-    扫描治理文档中 Flet 关键词附近（前后 _FLET_KEYWORD_WINDOW 字符内）的 `\\d+.\\d+.\\d+` 版本号
-    （含可选 `v` 前缀变体，如 `v1.2.3`，对抗检视 GDR-06 P1）。
-    根据规范，任何在 Flet 上下文中出现的具体补丁版本号都应报错（不论是否与 pyproject.toml 锁定版本一致）。
+    扫描治理文档中「含 Flet 关键词的整行」内的 `\\d+.\\d+.\\d+` 版本号（含可选 `v` 前缀变体，
+    如 `v1.2.3`，对抗检视 GDR-06 P1）。
+    整行全量拦截消除字距依赖：同一行出现 Flet 关键词即视为 Flet 上下文，任何补丁版本号都报错
+    （GOV-08）。`docs/flet/api-verification-template.md` 为 API 核验历史快照（按定义需要
+    记录具体版本号），已从 FLET_VERSION_DOCS 范围排除（豁免 GDR-06）。
 
     报错格式：``{doc.name}:{line_no}: Flet 版本漂移：文档声明 {doc_ver}，pyproject.toml 锁定 {actual_ver}``
     """
@@ -586,16 +589,13 @@ def check_flet_version_drift() -> list[str]:
     for doc in FLET_VERSION_DOCS:
         content = doc.read_text(encoding="utf-8")
         for line_no, line in enumerate(content.splitlines(), 1):
+            if not flet_keyword_pattern.search(line):
+                continue
             for v_match in version_pattern.finditer(line):
                 doc_ver = v_match.group()
-                # 检查版本号前后 _FLET_KEYWORD_WINDOW 字符内是否有 Flet 关键词
-                start = max(0, v_match.start() - _FLET_KEYWORD_WINDOW)
-                end = min(len(line), v_match.end() + _FLET_KEYWORD_WINDOW)
-                window = line[start:end]
-                if flet_keyword_pattern.search(window):
-                    errors.append(
-                        f"{doc.name}:{line_no}: Flet 版本漂移：文档声明 {doc_ver}，pyproject.toml 锁定 {actual_ver}"
-                    )
+                errors.append(
+                    f"{doc.name}:{line_no}: Flet 版本漂移：文档声明 {doc_ver}，pyproject.toml 锁定 {actual_ver}"
+                )
     return errors
 
 
@@ -2584,6 +2584,44 @@ def check_reviews_index_completeness() -> list[str]:
     # 幽灵链接（README 引用不存在的 docs/reviews/ 内文档）
     for fname in sorted(referenced_files - actual_files):
         errors.append(f"检视方法论文档登记: docs/reviews/README.md 引用了不存在的文档 '{fname}'")
+
+    # GOV-04: 检视结论结构化登记索引（findings/README.md）须存在且被本 README 文件级登记
+    findings_readme = REVIEWS_DOCS_DIR / "findings" / "README.md"
+    if not findings_readme.exists():
+        errors.append("检视结论登记: docs/reviews/findings/README.md 不存在（GOV-04 结论结构化入库机制缺失）")
+    elif not any("./findings/README.md" in m.group(0) for m in _MD_LINK_PATTERN.finditer(readme_content)):
+        errors.append("检视方法论文档登记: docs/reviews/README.md 未登记 'findings/README.md'（GOV-04 结论索引）")
+    return errors
+
+
+def check_reviews_findings_index() -> list[str]:
+    """检查项：检视结论登记索引（GOV-04）。
+
+    docs/reviews/findings/ 下每个结论文件（*.json / *.md，排除 README.md 自身）必须被
+    findings/README.md 以文件级链接登记；README 引用不存在的结论文件即幽灵链接报错。
+    新增轮次结论未登记 → 新会话不可溯源，等同 GOV-04 结论丢失回归。
+    """
+    errors: list[str] = []
+    findings_dir = REVIEWS_DOCS_DIR / "findings"
+    readme = findings_dir / "README.md"
+    if not findings_dir.is_dir() or not readme.exists():
+        # 目录缺失由 check_reviews_index_completeness 报告
+        return errors
+    readme_content = readme.read_text(encoding="utf-8")
+
+    suffixes = (".json", ".md")
+    actual = {p.name for p in findings_dir.glob("*") if p.is_file() and p.suffix in suffixes and p.name != "README.md"}
+    referenced = {
+        m.group(2).strip().split("/")[-1]
+        for m in _MD_LINK_PATTERN.finditer(readme_content)
+        if m.group(2).strip().endswith(suffixes)
+        and m.group(2).strip().split("/")[-1] != "README.md"
+        and not m.group(2).strip().startswith("../")
+    }
+    for fname in sorted(actual - referenced):
+        errors.append(f"检视结论登记: docs/reviews/findings/README.md 未登记结论文件 '{fname}'")
+    for fname in sorted(referenced - actual):
+        errors.append(f"检视结论登记: docs/reviews/findings/README.md 引用了不存在的结论文件 '{fname}'")
     return errors
 
 
@@ -3241,6 +3279,7 @@ def main() -> int:
     all_errors.extend(check_canonical_docs_are_gated())
     all_errors.extend(check_docs_index_completeness())
     all_errors.extend(check_reviews_index_completeness())
+    all_errors.extend(check_reviews_findings_index())
     all_errors.extend(check_adr_index_completeness())
     all_errors.extend(check_scripts_index_completeness())
     all_errors.extend(check_governance_id_references())
@@ -3277,7 +3316,7 @@ def main() -> int:
         "pre-commit hook 数量 / hook 名称一致性 / workflow 枚举 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
         "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
         "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 规则集元数据一致性 / "
-        "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / "
+        "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / 检视结论登记索引（GOV-04） / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
         "规则集变更日志版本一致 / ADR 索引完整性 / 脚本索引完整性 / 策略描述动态一致性 / "
         "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫 / "

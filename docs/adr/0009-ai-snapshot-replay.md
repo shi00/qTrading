@@ -6,7 +6,7 @@
 
 ## Context
 
-检视报告 01（01-requirement-closure.md §2.4，BIZ-04）确认：AI 策略无法被回测验证 —— 回测默认
+检视报告 01（本地检视报告（gitignored）`reviews/09-11/01-requirement-closure.md` §2.4，BIZ-04——ID 登记见 [governance-ids.md](../governance/governance-ids.md)）确认：AI 策略无法被回测验证 —— 回测默认
 `disable_ai=True`，且即使强制打开，历史日期下新闻抓取直接返回空（`news_fetcher` 的 as-of 守卫），
 AI 结论与实盘不可比。UN-04「可信地验证」对 AI 路径完全落空：用户无法回答「AI 选股到底有没有用」，
 对 AI 的信任只能建立在 T+1/T+5 复盘的小样本上。
