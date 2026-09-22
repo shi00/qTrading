@@ -5,6 +5,9 @@
 > 宪法依据：CLAUDE.md §4.1（strategies 分层）、§3.1（R14 红线）、§3.2（强制要求）；实现模板见本节。
 
 ```python
+import pandas as pd
+
+from data.persistence.quality_gate import QualityTier, require_quality
 from strategies.base_strategy import BaseStrategy, register_strategy
 from strategies.utils import StrategyContext
 
@@ -18,10 +21,16 @@ class MyStrategy(BaseStrategy):
     def __init__(self):
         super().__init__(name_key="strategy_my", desc_key="strategy_my_desc")
 
-    async def filter(self, context: StrategyContext):
-        # 策略逻辑：返回过滤后的 DataFrame
-        ...
+    @require_quality(QualityTier.SILVER)
+    async def filter(self, context: StrategyContext) -> pd.DataFrame:
+        # 策略逻辑：返回过滤后的 DataFrame（完整真实示例见 strategies/oversold_strategy.py）
+        df = context.get("screening_data")
+        if df is None:
+            return pd.DataFrame()
+        return df[df["pct_chg"] > 5.0]
 ```
+
+> 注：数据质量门控默认挂 `@require_quality(QualityTier.SILVER)`（可叠加 `require_continuous_window=True` 做区间完整性门控，见 `oversold_strategy.py`）；**PolarsBaseStrategy 子类改用类属性 `required_quality_tier` 覆盖质量等级**，不在方法上挂装饰器（见 [polars-vectorized-strategy.md](./polars-vectorized-strategy.md)）。
 
 - **策略入口**: `strategies/all_strategies.py` 通过导入触发 `@register_strategy`，由 `_STRATEGY_REGISTRY` 统一暴露。
 - **策略 API**: 依赖声明 (`required_context_keys`/`required_tables`/`required_history_days`/`required_apis`)、动态参数 (`get_parameters()`)、动态描述 (`get_dynamic_description()`)、依赖检查 (`check_dependencies()`) — 详见 `strategies/base_strategy.py`。
