@@ -413,9 +413,12 @@ TABLE_DEFINITIONS = {
     },
     "screening_history": {
         "alias": "tab_screening_history",
-        "desc": "选股/预测历史记录（LIFE-03 后唯一键为 trade_date+strategy_name+ts_code，覆盖语义）",
+        "desc": "选股/预测历史记录（RV-03 后唯一键为 trade_date+strategy_name+ts_code+run_id，append-only 语义）",
         "unique_constraints": [
-            {"name": "uq_screening_history_dat_strategy_code", "columns": ["trade_date", "strategy_name", "ts_code"]},
+            {
+                "name": "uq_screening_history_dat_strategy_code_run",
+                "columns": ["trade_date", "strategy_name", "ts_code", "run_id"],
+            },
         ],
         "indexes": ["idx_sh_date_strategy", "idx_sh_date_code", "idx_sh_prediction_result", "idx_sh_pending"],
     },
