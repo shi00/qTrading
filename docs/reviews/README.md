@@ -43,9 +43,9 @@
 
 | 轮次 | 发现 ID | 状态 | 一句话摘要 | 正本链接 | 可验证判据 |
 |------|---------|------|-----------|---------|-----------|
-| review03 | C4 | 部分 | `_read_db`/`_read_db_select` 已提供 `max_rows` 安全阀，但多数全表扫描调用点未强制设置，数据增长后可能一次性载入全量 | `reviews/03-数据层与持久化.md`（本地） | 全部全表扫描调用点已显式指定 `max_rows` 且无兜底无限制读取，即视为关闭 |
-| review03 | C7 | 未修复 | `screener_dao` 仍有查询用 f-string 拼列名 / `ORDER BY`（`screening_history`），非注入风险，待迁移 SQLAlchemy Core | `reviews/03-数据层与持久化.md`（本地） | `data/` 内 `screening_history` 相关查询已迁 SQLAlchemy Core，无 f-string 拼列名/`ORDER BY` |
-| review03 | C9 | 未修复 | 数据字典半数表 `columns` 为空，列级一致性仅由 ORM 兜底，待「删 columns / 补全」产品决策 | `reviews/03-数据层与持久化.md`（本地） | 已作产品决策（删 `columns` 空表或全量补全）且执行完毕；或决策明确接受当期现状 |
+| review03 | C4 | 部分 | `_read_db`/`_read_db_select` 已提供 `max_rows` 安全阀，但多数全表扫描调用点未强制设置，数据增长后可能一次性载入全量 | 见轮次表 | 全部全表扫描调用点已显式指定 `max_rows` 且无兜底无限制读取，即视为关闭 |
+| review03 | C7 | 未修复 | `screener_dao` 仍有查询用 f-string 拼列名 / `ORDER BY`（`screening_history`），非注入风险，待迁移 SQLAlchemy Core | 见轮次表 | `data/` 内 `screening_history` 相关查询已迁 SQLAlchemy Core，无 f-string 拼列名/`ORDER BY` |
+| review03 | C9 | 未修复 | 数据字典半数表 `columns` 为空，列级一致性仅由 ORM 兜底，待「删 columns / 补全」产品决策 | 见轮次表 | 已作产品决策（删 `columns` 空表或全量补全）且执行完毕；或决策明确接受当期现状 |
 | review06 | F9 | 未修复 | 外部数据（Tushare/Akshare）入库前缺 schema 校验，脏数据可静默影响选股决策 | `reviews/06-安全与供应链.md`（本地） | 外部数据入库路径已挂 schema 校验（非法行拒绝/告警），无未校验直写路径 |
 | review06 | F12 | 未修复 | prompt 注入防御为正则黑名单，对新闻正文植入指令固有局限，需结构化边界 + 输出侧交叉校验 | `reviews/06-安全与供应链.md`（本地） | 已引入结构化边界（角色/数据分离）+ 输出侧交叉校验，不再单靠正则黑名单 |
 | review06 | F13 | 未修复 | LLM 输出影响选股排序，仅校验部分字段，缺完整输出 schema 校验与 AI 免责声明 | `reviews/06-安全与供应链.md`（本地） | LLM 输出已做完整 schema 校验，且 UI 对 AI 排序结果展示 AI 免责声明 |
