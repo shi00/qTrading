@@ -86,7 +86,7 @@ gh pr create --title "feat(strategy): add MACD crossover" \
   --template .github/PULL_REQUEST_TEMPLATE.md \
   --base main
 
-# 7. PR 通过 Merge Queue 合并后，清理 worktree（回主工作区执行）
+# 7. PR 经 Squash Merge 进入 main（若启用 Merge Queue 则经队列）后，清理 worktree（回主工作区执行）
 cd ../..  # 回主仓库根
 git worktree remove .worktrees/feature-strategy-macd
 git worktree prune
@@ -99,15 +99,27 @@ git branch -d feature/strategy-macd       # Squash Merge 后本地分支可删
 
 **强制要求**（AI 助手创建 PR 时必须遵守）：
 
-1. **必须使用 `--template` 参数加载 PR 模板**：
+1. **必须按模板预填 PR body**，可使用以下任一方式（按能否打开交互式编辑器二选一）：
 
-   ```bash
-   gh pr create --title "<conventional commit title>" \
-     --template .github/PULL_REQUEST_TEMPLATE.md \
-     --base main
-   ```
+   - **方式 A（本地人工、有 TTY）**：`--template` 打开编辑器加载模板，在模板基础上填写各章节，保留模板结构（标题、勾选项、注释提示）：
+     ```bash
+     gh pr create --title "<conventional commit title>" \
+       --template .github/PULL_REQUEST_TEMPLATE.md \
+       --base main
+     ```
+   - **方式 B（AI/CI、无 TTY 非交互）**：将模板内容预填到临时文件后再提交。`--template` 会打开交互式编辑器，在无 TTY 环境（CI、AI 助手）会挂起，因此 AI/CI 应先将模板各章节预填为最终 body 写入临时文件，再用 `--body-file` 提交：
+     ```bash
+     # 1) 依据 .github/PULL_REQUEST_TEMPLATE.md 九个 section 预填 body 至临时文件
+     # 2) 非交互创建（不打开编辑器）
+     gh pr create --title "<conventional commit title>" \
+       --body-file _pr_body.md \
+       --base main
+     # 3) 创建成功后删除临时 body 文件
+     rm _pr_body.md
+     ```
+     预填时必须保留模板全部章节（标题、勾选项、注释提示），不得手写精简 body；结算完勾选后删除临时文件。
 
-   此命令会打开编辑器加载模板内容，AI 助手应在模板基础上填写各章节，保留模板结构（标题、勾选项、注释提示）。
+   `--template` 仅适合本地人工操作；AI / CI 创建 PR 一律走方式 B 的 `--body-file` 非交互路径。
 
 2. **禁止手写简化 PR body**：不得用 `--body "简短描述"` 跳过模板。CONTRIBUTING.md「PR 描述模板」中"无需手动复制该模板"的说明仅适用于 GitHub Web UI，不适用于 `gh pr create`。
 

@@ -56,7 +56,7 @@
 
 | 工具 | 用途 | 入口 |
 |---|---|---|
-| flaky 处置 | 重复跑 pytest 对比多轮结果，定位 flaky nodeid | `python scripts/detect_flaky.py [--path tests/unit/ --runs 10 --parallel/--reruns/--lf]` |
+| flaky 处置 | 重复跑 pytest 对比多轮结果，定位 flaky nodeid | `python scripts/detect_flaky.py --path tests/unit/ --runs 10 --parallel 4 --reruns 2`；如需仅复跑上次失败用例追加 `--lf` |
 | 弱断言治理 | 扫描弱断言（裸布尔 / pass / Mock 弱断言等），baseline 增量阻断 | CI：`python scripts/scan_weak_assertions.py --base tests/weak_assertion_baseline.json`（baseline 条目数只降不升，`--update-baseline` 开发态覆盖）；pre-commit：`scripts/check_staged_weak_assertions.py`（仅阻断新增）；行内白名单 `# noqa: weak-assertion <reason>` |
 
 ### 测试编写规则
