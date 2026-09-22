@@ -46,8 +46,6 @@ from services.ai_service.litellm_client import (
     DEFAULT_VERIFY_TIMEOUT as DEFAULT_VERIFY_TIMEOUT,
     ERROR_MESSAGE_TRUNCATE_LEN as ERROR_MESSAGE_TRUNCATE_LEN,
     LITELLM_AVAILABLE as LITELLM_AVAILABLE,
-    LITELLM_MAX_RETRIES,
-    LITELLM_SET_TIMEOUT,
     LiteLLMClient,
     _check_reasoning_support,
     _ensure_litellm_loaded as _ensure_litellm_loaded,
@@ -221,8 +219,9 @@ class AIService:
 
         litellm.set_verbose = False  # type: ignore[reportPrivateImportUsage]  # LiteLLM private API usage for logging suppression
         litellm.drop_params = True
-        litellm.set_timeout = LITELLM_SET_TIMEOUT  # type: ignore[attr-defined]
-        litellm.max_retries = LITELLM_MAX_RETRIES  # type: ignore[attr-defined]
+        # OSS 检视 A1: 原 set_timeout/max_retries 模块级赋值对应属性不存在（死代码）。
+        # 重试改由 _build_litellm_params per-request num_retries 传递（见 litellm_client.py）；
+        # 超时由 request_params["timeout"] = httpx.Timeout(...) 逐请求兜底。
         litellm.success_callback = []
         litellm.failure_callback = []
         litellm.modify_params = True
