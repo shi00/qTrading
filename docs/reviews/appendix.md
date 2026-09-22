@@ -54,3 +54,131 @@
 - 状态迁移、判定表、边界值、属性测试和故障注入等测试技术。
 
 使用时应以组织采用的具体版本、法规和项目规则为准。
+
+---
+
+## C. 最小合法 review-result 示例
+
+> 对应 [ai-review.md](./ai-review.md) OUT-01 的「人类报告字段 ↔ schema 字段」对照；以下 JSON 为可通过 `review-result.schema.json` 校验的最小单发现结果（字段名/structure 与 schema `$defs` 对齐，`evidence` 等子结构从简）。
+
+```json
+{
+  "schemaVersion": "1.0",
+  "subject": {
+    "repositoryId": "qtrading",
+    "targetRevisionType": "commit",
+    "targetRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "mergeBaseRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "diffDigest": "0123456789abcdef0123456789abcdef",
+    "reviewedFiles": ["ui/viewmodels/screener_view_model.py"]
+  },
+  "provenance": {
+    "reviewedAt": "2026-09-22T10:00:00+08:00",
+    "engine": "trae-ai",
+    "engineVersion": "1.0.0",
+    "promptVersion": "ai-review-v1.8.0",
+    "toolVersions": {}
+  },
+  "review": {
+    "mode": "incremental",
+    "target": "fix/r21-score-none",
+    "baseline": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "baselineStatus": "verified",
+    "intent": "修复 score 缺失被回填 0 的 R21 违规",
+    "verdict": "fail",
+    "verdictReason": "发现 1 项未豁免阻断缺陷",
+    "scopeLimitations": []
+  },
+  "findings": [
+    {
+      "id": "F-1",
+      "fingerprint": "screener_vm:run:score-fill-0",
+      "title": "score 缺失被回填为 0（R21 缺失值伪装）",
+      "category": "defect",
+      "severity": "P1",
+      "confidence": "high",
+      "changeRelation": "introduced",
+      "dimension": "correctness",
+      "ruleId": "R21",
+      "disposition": "open",
+      "waiver": null,
+      "location": {
+        "path": "ui/viewmodels/screener_view_model.py",
+        "startLine": 42,
+        "endLine": 42
+      },
+      "locationReason": "状态构造处",
+      "trigger": "LLM 输出缺失 score 时",
+      "actualBehavior": "填充 0.0 进入 state",
+      "expectedBehavior": "使用 None 表示缺失",
+      "impact": "UI 将缺失渲染为 0 分，误导选股结论",
+      "evidence": [
+        {
+          "type": "runtime",
+          "source": "pytest -k r21",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "location": null,
+          "checkId": null,
+          "artifactDigest": null,
+          "summary": "test_score_none 断言失败：期望 None 实得 0.0",
+          "trust": "repository",
+          "redacted": false
+        }
+      ],
+      "recommendation": "改为 score: float | None = None",
+      "verification": "pytest tests/unit/ui/viewmodels/ -k r21"
+    }
+  ],
+  "checks": {
+    "executed": [
+      {
+        "id": "pytest-r21",
+        "redactedCommand": "pytest tests/unit/ui/viewmodels/ -k r21 -q",
+        "redactions": [],
+        "environment": "linux-x86_64",
+        "exitCode": 0,
+        "status": "passed",
+        "selectedCount": 1,
+        "executedCount": 1,
+        "skippedCount": 0,
+        "durationMs": 120,
+        "evidenceSummary": "1 passed",
+        "reportDigest": null,
+        "sideEffects": []
+      }
+    ],
+    "notExecuted": []
+  },
+  "coverage": {
+    "dimensions": ["correctness", "r21-missing-representation"],
+    "scenarios": ["LLM 缺失 score", "正常 score"],
+    "uncovered": [],
+    "totalFiles": 1,
+    "fileInventory": [
+      {
+        "path": "ui/viewmodels/screener_view_model.py",
+        "status": "read",
+        "highRisk": true,
+        "reason": null,
+        "authority": null
+      }
+    ]
+  },
+  "residualRisks": [],
+  "gate": {
+    "policyId": "ai-review-core",
+    "policyVersion": "1.0.0",
+    "evaluatorVersion": "1.0.0",
+    "verdict": "fail",
+    "decisions": [
+      {
+        "fingerprint": "screener_vm:run:score-fill-0",
+        "blocking": true,
+        "reason": "R21 缺失值伪装：缺失必须用 None 表示"
+      }
+    ]
+  }
+}
+```
+
+> 说明：`evidence` 为数组（`minItems: 1`）；`disposition: waived` 时 `waiver` 必须为对象；`gate.decisions[].fingerprint` 必须现存且唯一（OUT-02 语义校验器强制）。

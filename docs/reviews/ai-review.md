@@ -93,6 +93,9 @@
 
 - **[FIND-01]** 7 类发现：确定缺陷（违反需求/契约/不变量/安全规则）、场景遗漏（应处理未定义/未实现/未测试/不可运维）、测试缺口（高风险行为缺验证但无证据证明实现错误）、待确认问题（权威来源冲突或预期未定义）、待验证风险（风险路径合理但缺关键证据）、范围外风险（与当前目标无直接关系但影响重大）、非阻断建议（可选改善）。不得把测试缺口自动等同于功能缺陷，也不得将建议混入阻断发现。
 - **[FIND-02]** 区分与变更关系：本次引入（基线不存在，由当前变化直接产生）、本次触发或放大（问题既有但当前变化使其可达或扩大）、既存相关（虽非本次引入但阻碍当前目标）、既存无关（范围外风险单独报告）、无法判断（缺基线或历史证据）。
+- **[FIND-02 中→英映射]** 写入 `review-result.schema.json` 时按以下对照（避免混填导致门禁统计错乱）：
+  - `category`：确定缺陷=`defect`、场景遗漏=`scenario_gap`、测试缺口=`test_gap`、待确认问题=`question`、待验证风险=`risk`、范围外风险=`out_of_scope`、非阻断建议=`suggestion`；
+  - `changeRelation`：本次引入=`introduced`、本次触发或放大=`amplified`、既存相关=`preexisting_related`、既存无关（范围外风险）=`out_of_scope`、无法判断=`unknown`。
 
 ### 7.2 证据与置信度（EVID-01 ~ EVID-02）
 
@@ -102,11 +105,12 @@
 ### 7.3 严重度（SEV-01 ~ SEV-02）
 
 - **[SEV-01]** P0-P3 定义、阻断规则与 CI 退出码见 [review-policy.yaml](./review-policy.yaml)。P0 灾难性、P1 严重、P2 重要、P3 一般。
-- **[SEV-02]** 严重度依据实际影响，不依据修复工作量。优先级还应结合触发概率、可检测性、可恢复性、发布时间和临时控制，不能与严重度混用。
+- **[SEV-02]** 严重度依据实际影响，不依据修复工作量。优先级还应结合触发概率、可检测性、可恢复性、发布时间和临时控制，不能与严重度混用。**注意**：「优先级」是排期/处理顺序的**人类报告叙述字段**（如「评审重点提示」），`review-result.schema.json` 的 `finding` **无 `priority` 属性**；机器可读输出只承载 `severity`（P0~P3），不要为「优先级」造 schema 字段。
 
 ## 8. 输出要求（OUT-01 ~ OUT-04）
 
 - **[OUT-01]** 人类可读报告含：结论（模式/建议/发现统计/最高风险）、范围与意图、阻断与重要发现（按严重度）、其他发现（测试缺口/待确认/待验证/建议分组）、场景覆盖、验证证据（已运行/未运行）、变化关系与范围外风险、残余风险与门禁建议。单项发现格式含类别/位置/维度/置信度/触发条件/当前行为/预期行为/影响/证据/最小建议/验证方式。
+  - **人类报告字段 ↔ schema 字段对照**（OUT-01 未列出的机器必填字段须按 schema 补齐，否则校验失败判定无效）：类别=`category`、位置=`location`、维度=`dimension`、置信度=`confidence`、触发条件=`trigger`、当前行为=`actualBehavior`、预期行为=`expectedBehavior`、影响=`impact`、证据=`evidence`、最小建议=`recommendation`、验证方式=`verification`；schema 额外必填（人类报告无需逐项出现，但写结构化输出时必须提供）：`id` / `fingerprint` / `title` / `severity` / `changeRelation` / `ruleId` / `disposition` / `waiver` / `locationReason`。最小合法示例见 [appendix.md](./appendix.md)「C. 最小合法 review-result 示例」。
 - **[OUT-02]** 机器可读输出须符合 [review-result.schema.json](./review-result.schema.json)。schema 校验失败时结果无效，门禁必须 fail closed。JSON Schema 之外还必须运行 fail-closed 语义校验器（文件路径唯一、计数关系成立、gate decision 引用现存且唯一的 fingerprint）。
 - **[OUT-03]** 门禁由 [review-policy.yaml](./review-policy.yaml) 决定。受信 CI 必须使用固定版本的独立策略求值器重新计算 gate.decisions 和 gate.verdict，不得信任模型自行给出的阻断结论。存在未豁免的阻断决定时 verdict 必须为 fail；关键证据不足时为 indeterminate；conditional 默认视为非通过。
 - **[OUT-04]** 人类报告与结构化输出必须表达相同结论。无严重度的待确认问题或建议使用 null，不要伪造等级；location 无法定位时使用 null 并在 locationReason 说明，不得编造路径或行号。
