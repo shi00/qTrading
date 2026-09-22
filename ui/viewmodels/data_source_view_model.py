@@ -417,7 +417,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 # 查询 sync_status 表汇总 skipped_permission 表数 (降级提示, 非 fatal)
                 try:
                     sync_df = await self._cache.sync_dao.get_sync_status()
-                    if sync_df is not None and hasattr(sync_df, "shape") and sync_df.shape[0] > 0:
+                    if sync_df is not None and hasattr(sync_df, "shape") and sync_df.shape[0] > 0:  # type: ignore[reportAttributeAccessIssue]  # DAO 返回动态 DataFrame，stub 未声明 shape
                         perm_skipped = int((sync_df["status"] == "skipped_permission").sum())
                         if perm_skipped > 0:
                             self._emit_snack(

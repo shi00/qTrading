@@ -212,7 +212,7 @@ def BacktestView(active: bool = True) -> ft.Container:
         # isinstance 收窄为 str (prefill value 为 dict[str, object])
         if isinstance(strategy_key, str) and any(k == strategy_key for k, _ in state.available_strategies):
             vm.select_strategy(strategy_key)
-        _prefilled_params.current = prefill.get("params")
+        _prefilled_params.current = prefill.get("params")  # type: ignore[reportAttributeAccessIssue]  # use_ref(None) 推断 MutableRef[None]，实际承载 dict 参数
 
     ft.use_effect(_consume_prefill, dependencies=[])
 

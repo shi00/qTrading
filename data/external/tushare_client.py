@@ -964,7 +964,7 @@ class TushareClient:
             DataFrame，包含 ts_code/name/start_date/end_date/ann_date/change_reason。
         """
         return await self._handle_api_call(
-            self.pro.namechange,
+            self.pro.namechange,  # type: ignore[reportAttributeAccessIssue]  # tushare 动态 API：TushareProApi stub 未声明所有接口
             fields="ts_code,name,start_date,end_date,ann_date,change_reason",
         )
 
