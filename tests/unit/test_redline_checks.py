@@ -1005,11 +1005,11 @@ class TestR20IntegrationOnCurrentCodebase:
         assert "north_money" in out
 
     def test_check_R20_missing_dir_returns_silently(self, tmp_path, monkeypatch):
-        """strategies/ 目录不存在时静默返回（不抛错）。"""
+        """strategies/ 目录不存在时静默返回 0（不抛错、无 warning）。"""
         import check_redlines
 
         monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
-        assert check_redlines.check_R20() is None
+        assert check_redlines.check_R20() == 0
 
 
 class TestR22:
