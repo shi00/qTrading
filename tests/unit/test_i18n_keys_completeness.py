@@ -68,6 +68,9 @@ _DYNAMIC_KEY_ALLOWLIST: frozenset[str] = frozenset(
         "llm_provider_minimax",
         "llm_provider_deepseek",
         "llm_provider_zhipu",
+        "llm_provider_custom",
+        # ui/viewmodels/llm_config_panel_view_model.py: llm_switch_provider_hint 的
+        # provider_key → I18n.get(f"llm_provider_{provider_id}")，枚举源 LLM_PROVIDERS 全集（含 custom）
         # ui/views/settings_tabs/data_source_tab.py: I18n.get(f"quality_tier_{result.quality_tier}")
         # 枚举源 quality_tier 取值域 0-3
         "quality_tier_0",

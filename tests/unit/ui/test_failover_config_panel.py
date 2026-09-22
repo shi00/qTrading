@@ -141,6 +141,28 @@ class TestBuildProviderOptions:
             assert opt.text is not None
             assert isinstance(opt.text, str)
 
+    def test_current_provider_kept_when_not_enabled(self):
+        """当前编辑供应商目录为空也强制保留（与主面板 provider picker 口径一致）。"""
+        with patch("utils.llm_providers.get_enabled_provider_ids", lambda: ["deepseek"]):
+            options = _build_provider_options(is_edit=False, existing_providers=(), current="qwen")
+        keys = [opt.key for opt in options]
+        assert "qwen" in keys
+        assert "deepseek" in keys
+
+    def test_derives_from_enabled_provider_ids(self):
+        """目录推导清单（get_enabled_provider_ids）为唯一枚举源，过滤 custom/已有供应商。"""
+        with patch("utils.llm_providers.get_enabled_provider_ids", lambda: ["deepseek", "qwen", "custom"]):
+            options = _build_provider_options(is_edit=False, existing_providers=())
+        keys = [opt.key for opt in options]
+        assert set(keys) == {"deepseek", "qwen"}  # custom 始终排除
+
+    def test_derived_list_respects_existing_providers(self):
+        """目录推导清单基础上仍剔除 add 模式已存在供应商。"""
+        with patch("utils.llm_providers.get_enabled_provider_ids", lambda: ["deepseek", "qwen"]):
+            options = _build_provider_options(is_edit=False, existing_providers=("deepseek",))
+        keys = [opt.key for opt in options]
+        assert keys == ["qwen"]
+
 
 # --- 模块级纯函数：_run_task_factory / _run_task_no_args ---
 
@@ -353,6 +375,16 @@ class TestFailoverConfigPanelContract:
         """验证禁止用 use_ref 缓存命令式实例。"""
         content = self._read_panel_content()
         assert "use_ref" not in content
+
+    def test_provider_dropdown_derived_from_catalog(self) -> None:
+        """供应商下拉经 get_enabled_provider_ids 目录推导（联动改造）。"""
+        content = self._read_panel_content()
+        assert "get_enabled_provider_ids" in content
+
+    def test_model_picker_passes_provider_scope(self) -> None:
+        """ProviderCredentialDialog 的 ModelPicker 级联——传入 provider_scope=dialog_provider。"""
+        content = self._read_panel_content()
+        assert "provider_scope=state.dialog_provider" in content
 
     def test_module_exports_preserved(self) -> None:
         """验证模块导出 API：FailoverConfigPanel + ProviderCredentialDialog。"""
