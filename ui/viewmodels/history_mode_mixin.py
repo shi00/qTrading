@@ -37,14 +37,20 @@ from ui.viewmodels.screener_types import (
 logger = logging.getLogger(__name__)
 
 # UX-05: 复盘聚合统计 DAO 产出所需的列（缺列时安全降级为空, 不 raise）。
+# t1_n/t5_n/alpha_n 为 RV-10 每股有效样本数列（DAO SQL COUNT(*_pct) 恒产出，
+# 见 screener_dao.get_strategy_review_stats），compute_* 消费，缺列即无法证明
+# 覆盖率，按「已知不可信不伪装」降级为空（R21 变体）。
 _REVIEW_STATS_REQUIRED_COLUMNS = frozenset(
     {
         "strategy_name",
         "benchmark_code",
         "daily_cnt",
         "t1_mean",
+        "t1_n",
         "t5_mean",
+        "t5_n",
         "alpha_mean",
+        "alpha_n",
         "win_cnt",
         "loss_cnt",
     }
