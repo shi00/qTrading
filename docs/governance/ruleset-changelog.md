@@ -29,8 +29,8 @@ ERROR」，但此前无清零期限或责任人，存在「无期限渐进部署
 
 ## 规则集复核状态
 
-`ruleset_version` 元数据块中 `review_triggers` 写明「检视报告发布时」复核，但本变更日志此前仅登记版本递增、
-无复核状态（文档体系检视 F-11）。截至 2026-09-20：`docs/reviews/README.md` 轮次表有 review03 / review06 /
-文档体系·AI 可执行性 三轮处于 `进行中`，`last_reviewed` 停在 2026-09-17，二者未闭环。本批文档体系检视
-（F-01~F-13）整改全部落地后，应同步复核规则集是否需随治理变更递增 `ruleset_version`，并更新三方
-（CLAUDE.md / CONTRIBUTING.md / AGENTS.md）`last_reviewed`（须不早于本文件顶行变更日期，DS-05）。
+`ruleset_version` 元数据块中 `review_triggers` 写明「检视报告发布时」复核。复核流程（GOV-07，规则性约定，不写日期快照）：
+
+1. 检视报告发布后，由**架构维护者**对照 `docs/reviews/README.md` 轮次表的「进行中」轮次与未关闭发现摘要，评估治理变更是否需要递增 `ruleset_version`；
+2. 若递增：按本文件「记录规则」在变更记录表顶部登记，并同步三方（CLAUDE.md / CONTRIBUTING.md / AGENTS.md）`last_reviewed`（须不早于本文件顶行变更日期，DS-05）与 `ruleset_version`；
+3. 动态状态（轮次进度、`last_reviewed` 现值、未关闭发现）由 `docs/reviews/README.md` 轮次表与三份治理文档元数据块单一承载，本段落不复制。

@@ -678,6 +678,8 @@ except Exception as e:
 - [redlines.yml](./docs/governance/redlines.yml) — CLAUDE.md §3.1 红线表的机器可读镜像（R1~R23 编号/标题/说明/enforcement/human_review_required）
 - [exceptions.yml](./docs/governance/exceptions.yml) — 架构边界例外注册表（rule_id 维度，协议级例外的唯一登记入口）
 - [canonical-topics.yml](./docs/governance/canonical-topics.yml) — 主题→canonical 正本映射（决策树机器可读镜像）
+- [governance-ids.md](./docs/governance/governance-ids.md) — 治理 ID 对照表（ID → 一句话含义；溯源对照）
+- [ruleset-changelog.md](./docs/governance/ruleset-changelog.md) — 规则集版本变更日志（ruleset_version 递增还原）
 
 ### docs/reviews/ — AI 代码检视指南
 
