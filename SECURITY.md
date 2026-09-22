@@ -74,7 +74,7 @@ AStockScreener implements the following security measures:
 - All GitHub Actions are pinned to specific commit SHAs
 - CodeQL analysis for security vulnerabilities
 - Gitleaks scanning for secret detection
-- Dependency vulnerability scanning with pip-audit (dual source: PyPI + OSV)
+- Dependency vulnerability scanning with pip-audit (source: PyPI)
 - SLSA build provenance attestation for releases
 - SBOM (Software Bill of Materials) for each release
 

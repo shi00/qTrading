@@ -39,8 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sources",
         nargs="+",
-        default=["pypi", "osv"],
-        help="Vulnerability data sources (default: pypi osv)",
+        default=["pypi"],
+        help="Vulnerability data sources (default: pypi)",
     )
     return parser.parse_args()
 
