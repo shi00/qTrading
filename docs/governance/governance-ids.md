@@ -31,6 +31,7 @@
 | DOC-11 | 文档索引全覆盖（docs/** 无孤儿文档） | 文档体系·AI 可执行性专项（DOC 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | DOC-13 | 孤儿治理文件纳入元数据/索引/白名单（AGENTS.md 收编） | 文档体系·AI 可执行性专项（DOC 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) / [ADR-0006](../adr/0006-override-agents-pure-pointer.md) | 使用中 |
 | GOV-01 | 宪法不得引用未登记例外（EX 引用必须落在注册表） | 文档体系检视（GOV 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
+| GOV-04 | 检视结论结构化登记（docs/reviews/findings/）：报告正文 gitignored 导致结论系统性丢失，结论 id/判据入库可溯源 | 文档体系检视（GOV 系列） | [findings/README.md](../reviews/findings/README.md) / [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | UX-07 | 全系统 UI/UX 专项审视轮次 | UX 专项检视 | [docs/reviews/README.md](../reviews/README.md) | 历史 |
 | GDR-06 | 治理文档不得硬编码 Flet 补丁版本号（SHALL NOT `x.y.z` 形式） | 文档体系检视（GDR 系列，2026-09-08） | [CLAUDE.md](../../CLAUDE.md) §3.2 | 使用中 |
 | GDR-09 | 治理 ID 对新会话不可解析 → 建立对照表 + 体系入口声明 | 文档体系检视（GDR 系列，2026-09-08） | [governance-ids.md](./governance-ids.md) / [CLAUDE.md](../../CLAUDE.md) 头部 | 使用中 |
@@ -114,3 +115,4 @@
 | review07-G14 | 分层覆盖率达标率统计（不阻断，CI 观测分层门禁差距） | review07 治理与门禁审计 | [check_per_file_coverage.py](../../scripts/check_per_file_coverage.py) | 使用中 |
 | review07-G18 | R4 补充检测：业务层「SQL 关键字开头+%s」字面量 + f-string SQL 模板 | review07 治理与门禁审计 | [check_redlines.py](../../scripts/check_redlines.py) | 使用中 |
 | review07-G19 | 单例识别条件扩展（DAO 注册引擎同步不可漏改，与 R13 描述一致） | review07 治理与门禁审计 | [check_redlines.py](../../scripts/check_redlines.py) | 使用中 |
+| BIZ-04 | AI 策略无法被回测验证：回测默认 disable_ai，AI 结论与实盘不可比（评审报告 01-requirement-closure.md §2.4，本地 gitignored；ADR-0009 引用） | 本地检视报告（gitignored） | [0009-ai-snapshot-replay.md](../adr/0009-ai-snapshot-replay.md) | 使用中 |

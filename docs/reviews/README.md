@@ -3,8 +3,7 @@
 > **目的**：让既有检视方法论与轮次清单对新会话一跳可达（结论正文为本地 gitignored 产物，不入仓库，见「路径说明」），避免重复检视、重复给出已存在的结论（沿 [CLAUDE.md](../../CLAUDE.md) §1.8「AI 代码检视 / PR review」→ [ai-review.md](./ai-review.md) → 本文件）。
 >
 > **状态取值**：`进行中` / `已归档` / `已消化`（已消化 = 该轮发现已全部落入修复队列并关闭）。
->
-> **目录职责边界**：`docs/reviews/` 仅承载检视**方法论**（ai-review.md / appendix.md / quality-dimensions.md / review-profiles/ / evals/）；检视**报告产物**一律落根目录 `reviews/`（gitignored，不入 git）。报告正文 **SHALL NOT** 落 `docs/reviews/<slug>/`。正本见 ADR-0002 Errata。
+> **目录职责边界**：`docs/reviews/` 仅承载检视**方法论**（ai-review.md / appendix.md / quality-dimensions.md / scenario-completeness.md / review-profiles/ / evals/）与检视**结论结构化登记**（findings/，见 [findings/README.md](./findings/README.md)，GOV-04）；检视**报告产物**（正文+长证据）一律落根目录 `reviews/`（gitignored，不入 git）。报告正文 **SHALL NOT** 落 `docs/reviews/<slug>/`。正本见 ADR-0002 Errata。
 >
 > **路径说明**：报告正文落 `reviews/` 根的为**本地检视工作产物，已被 `.gitignore` 排除、不入 git**（见 [.gitignore](../../.gitignore) `/reviews/`），仅在新会话本地工作区可读；已丢失报告的轮次仅保留 ID 供追溯，不复原正文。
 
@@ -18,6 +17,7 @@
 - [scenario-completeness.md](./scenario-completeness.md) — Evals 场景完整性方法论
 - [review-policy.yaml](./review-policy.yaml) — 检视策略机器可读定义（字段语义与 ai-review.md 对齐）
 - [review-result.schema.json](./review-result.schema.json) — 检视结论机器可读 JSON Schema（见文末引用）
+- [findings/README.md](./findings/README.md) — 检视结论结构化登记索引（GOV-04：结论 id/disposition/判据入库可溯源，正文仍 gitignored）
 
 ## 轮次清单
 

@@ -2563,6 +2563,44 @@ def check_reviews_index_completeness() -> list[str]:
     # 幽灵链接（README 引用不存在的 docs/reviews/ 内文档）
     for fname in sorted(referenced_files - actual_files):
         errors.append(f"检视方法论文档登记: docs/reviews/README.md 引用了不存在的文档 '{fname}'")
+
+    # GOV-04: 检视结论结构化登记索引（findings/README.md）须存在且被本 README 文件级登记
+    findings_readme = REVIEWS_DOCS_DIR / "findings" / "README.md"
+    if not findings_readme.exists():
+        errors.append("检视结论登记: docs/reviews/findings/README.md 不存在（GOV-04 结论结构化入库机制缺失）")
+    elif not any("./findings/README.md" in m.group(0) for m in _MD_LINK_PATTERN.finditer(readme_content)):
+        errors.append("检视方法论文档登记: docs/reviews/README.md 未登记 'findings/README.md'（GOV-04 结论索引）")
+    return errors
+
+
+def check_reviews_findings_index() -> list[str]:
+    """检查项：检视结论登记索引（GOV-04）。
+
+    docs/reviews/findings/ 下每个结论文件（*.json / *.md，排除 README.md 自身）必须被
+    findings/README.md 以文件级链接登记；README 引用不存在的结论文件即幽灵链接报错。
+    新增轮次结论未登记 → 新会话不可溯源，等同 GOV-04 结论丢失回归。
+    """
+    errors: list[str] = []
+    findings_dir = REVIEWS_DOCS_DIR / "findings"
+    readme = findings_dir / "README.md"
+    if not findings_dir.is_dir() or not readme.exists():
+        # 目录缺失由 check_reviews_index_completeness 报告
+        return errors
+    readme_content = readme.read_text(encoding="utf-8")
+
+    suffixes = (".json", ".md")
+    actual = {p.name for p in findings_dir.glob("*") if p.is_file() and p.suffix in suffixes and p.name != "README.md"}
+    referenced = {
+        m.group(2).strip().split("/")[-1]
+        for m in _MD_LINK_PATTERN.finditer(readme_content)
+        if m.group(2).strip().endswith(suffixes)
+        and m.group(2).strip().split("/")[-1] != "README.md"
+        and not m.group(2).strip().startswith("../")
+    }
+    for fname in sorted(actual - referenced):
+        errors.append(f"检视结论登记: docs/reviews/findings/README.md 未登记结论文件 '{fname}'")
+    for fname in sorted(referenced - actual):
+        errors.append(f"检视结论登记: docs/reviews/findings/README.md 引用了不存在的结论文件 '{fname}'")
     return errors
 
 
@@ -3220,6 +3258,7 @@ def main() -> int:
     all_errors.extend(check_canonical_docs_are_gated())
     all_errors.extend(check_docs_index_completeness())
     all_errors.extend(check_reviews_index_completeness())
+    all_errors.extend(check_reviews_findings_index())
     all_errors.extend(check_adr_index_completeness())
     all_errors.extend(check_scripts_index_completeness())
     all_errors.extend(check_governance_id_references())
@@ -3260,7 +3299,7 @@ def main() -> int:
         "pre-commit hook 数量 / hook 名称一致性 / workflow 枚举 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
         "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
         "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 规则集元数据一致性 / "
-        "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / "
+        "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / 检视结论登记索引（GOV-04） / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
         "规则集变更日志版本一致 / ADR 索引完整性 / 脚本索引完整性 / 策略描述动态一致性 / "
         "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫 / "
