@@ -20,7 +20,7 @@
 
 ### 2. 成本与配额的单一事实源
 
-- `services/ai_service/pricing.py`：`MODEL_PRICING`（每 1M tokens 价格）+ `estimate_cost`。**未知模型返回 None 不猜价**；金额以**元**返回，由调用方换算为**整数分**。
+- `services/ai_service/pricing.py`：`estimate_cost(effective_model, input_tokens, output_tokens) -> float | None`。全部依托 `litellm.cost_per_token` 计价（**无自维护 `MODEL_PRICING` 手写价格表**）；**未知/不可计价模型返回 `None` 不猜价**，免费模型返回 `0.0`（以 `cost is not None` 区分「计量为 0」与「不可计量」）；金额以**元**返回，由调用方换算为**整数分**。
 - `services/ai_service/token_budget.py`：token 预算 / 上下文窗口裁剪（`DEFAULT_CONTEXT_WINDOW` / `CONTEXT_RESERVE_TOKENS` / `OUTPUT_RESERVE_TOKENS`），未知/自定义模型用保守回退值。
 - `services/ai_service/usage_tracker.py`：`AIUsageTracker` 单例按月（分）原子累加，跨月轮换；未注入 engine 时 no-op 降级不阻断流程。
 - **完整方案（未实施）**：P3-AI03-CostVisible-Full 目标为价格映射 + 累计持久化 + 三处 UI + 月度上限，见 [known-technical-debt.md](../debt/known-technical-debt.md) §P3-AI03。改动价格/成本前先对齐该债目标与 `token_budget`/`pricing` 的单位约定，避免重新设计一遍。
