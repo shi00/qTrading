@@ -19,7 +19,7 @@ AI 输出**仅用于评分和文本展示**，不赋予以下能力：
 3. 生成或执行可运行代码。
 4. 修改应用核心配置或数据。
 
-所有 AI 交互必须通过 `PromptGuard` 和 `DataSanitizer` 处理，确保外部文本净化与输出不包含可执行指令。新增 AI 功能时，需在设计文档中明确声明其输出仅用于展示，并通过测试验证无执行路径。
+所有 AI 交互必须通过 `utils/prompt_guard.py` 的净化函数（`validate_prompt` / `sanitize_prompt` / `neutralize_external_text`，无 `PromptGuard` 类）和 `DataSanitizer` 处理，确保外部文本净化与输出不包含可执行指令。新增 AI 功能时，需在设计文档中明确声明其输出仅用于展示，并通过测试验证无执行路径。
 
 ## Consequences
 
