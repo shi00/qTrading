@@ -75,6 +75,26 @@ class TestAIServiceBuildLiteLLMParams:
         assert "model" in params
         assert "messages" in params
 
+    def test_num_retries_propagated_per_request(self):
+        """OSS 检视 A1: litellm 重试必须经 per-request num_retries 传递。
+
+        原实现给 litellm 模块赋值 set_timeout/max_retries —— 这两个属性在 litellm 中
+        不存在（Python 允许任意赋值被静默接受），LITELLM_MAX_RETRIES=2 从未生效。
+        litellm completion 主路径只读取请求参数 num_retries/max_retries，因此重试
+        配置必须落实到 _build_litellm_params 返回的请求参数上。
+        """
+        llm_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "test-key",
+            "base_url": "https://api.deepseek.com",
+        }
+        params = AIService._build_litellm_params(
+            llm_config=llm_config,
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        assert params["num_retries"] == 2
+
 
 class TestAIServiceClassifyNews:
     @pytest.mark.asyncio
@@ -121,7 +141,6 @@ class TestLiteLLMLazyLoading:
         assert ai_service.acompletion is not None
         # 首次加载完成全局参数配置（原模块顶层 import 块的职责）
         assert ai_service.litellm.drop_params is True
-        assert ai_service.litellm.max_retries == 2
         assert ai_service.litellm.modify_params is True
 
     def test_ensure_is_idempotent_after_attempt(self, monkeypatch):

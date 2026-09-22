@@ -127,8 +127,6 @@ def _create_mock_litellm() -> MagicMock:
     mock_lt.suppress_debug_info = True
     mock_lt.set_verbose = False
     mock_lt.drop_params = True
-    mock_lt.set_timeout = 30.0
-    mock_lt.max_retries = 2
     mock_lt.success_callback = []
     mock_lt.failure_callback = []
     mock_lt.modify_params = True
