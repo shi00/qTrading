@@ -4116,6 +4116,8 @@ class TestReviewManagerRv02OpenBasis:
         assert u["t5_pct"] == pytest.approx(round((12.0 / 11.0 - 1.0) * 100.0, 4))
         # 排除性：误取 T0 收盘 10 会得到 20% 而非 9.09%
         assert u["t5_pct"] != pytest.approx(round((12.0 / 10.0 - 1.0) * 100.0, 4))
+
+
 class TestReviewManagerExpireStalePending:
     """RV-11: ReviewManager.expire_stale_pending 委托透传给 screener_dao（带 lookback 参数）。"""
 
