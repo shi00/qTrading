@@ -13,10 +13,10 @@ async def get_user_by_name(conn, name: str):
 
 - **类别**：确定缺陷
 - **严重度**：P0（违反 [CLAUDE.md R4](../../../../CLAUDE.md) 红线，安全相关）
-- **规则 ID**：
-  - 项目红线 R4（asyncpg 必须用 `$1, $2, ...`）
+- **规则 ID**（仅取值 ai-review.md 已定义 ID）：`ruleId: "FIND-01"`
   - [FIND-01](../../ai-review.md)（确定缺陷：违反安全规则）
   - [SEV-01](../../ai-review.md)（P0 灾难性）
+- **项目红线（projectRedlines）**：`["R4"]`（asyncpg 必须用 `$1, $2, ...`，见 [CLAUDE.md R4](../../../../CLAUDE.md)，不计入规则 ID 匹配）
 - **位置**：函数 `get_user_by_name`，`%s` 占位符行
 - **触发条件**：任意 name 输入
 - **当前行为**：asyncpg 会抛出语法错误或语义错误；若改用 f-string 拼接则存在 SQL 注入
@@ -28,8 +28,8 @@ async def get_user_by_name(conn, name: str):
 ## 评分要点
 
 - **召回率**：AI 必须报告此项为确定缺陷，不得降级为"建议"
-- **证据完整性**：必须引用 R4 并说明 `%s` 在 asyncpg 中无效
-- **规则遵从率**：必须引用 R4 + FIND-01 + SEV-01，不得引用不存在的 ID
+- **证据完整性**：必须引用项目红线 R4（projectRedlines）并说明 `%s` 在 asyncpg 中无效
+- **规则遵从率**：规则 ID 必须引用 FIND-01 + SEV-01，不得引用不存在的 ID；项目红线 R4 计入 projectRedlines 标注，不计入规则 ID 匹配
 
 ## 备注
 
