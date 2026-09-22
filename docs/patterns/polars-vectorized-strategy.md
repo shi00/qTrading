@@ -21,3 +21,11 @@ class MyPolarsStrategy(PolarsBaseStrategy):
 ```
 
 > 注：上述类属性模式适用于 `PolarsBaseStrategy` 子类。非 `PolarsBaseStrategy` 子类（如 `OversoldStrategy` 继承 `BaseStrategy` + `AIStrategyMixin`）可使用 `@require_quality` 装饰器。
+
+## 完成判定（canonical 入口）
+
+_最小验证命令：_ 按改动实际触及的层运行 CONTRIBUTING「变更类型 → 最小验证子集」；把模板落成临时 `.py` 文件跑 `ruff check` + `pyright`，确认可 import 且 `@register_strategy` 注册生效（R14）。
+
+- 模板含 `@register_strategy("...")` 装饰器与 `__init__` 调 `super().__init__(name_key, desc_key)`（可 import、不触发 R14）；
+- Polars 子类数据质量门控用类属性 `required_quality_tier` 覆盖默认等级（§3.2），不在方法上挂 `@require_quality`；
+- 门禁：`redline-check`（R14）、`ruff`、相关单测通过。

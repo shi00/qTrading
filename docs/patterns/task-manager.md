@@ -24,3 +24,12 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
 - 任务持久化到本地，重启后 `RUNNING` 状态会被回填为 `INTERRUPTED`
 
 > **操作指引**：TaskManager 后台任务的完整触发与编排方式见 [docs/guides/how-to.md](../guides/how-to.md) 与 [data-sync.md](./data-sync.md) 的落地路径；新增异步任务须遵循 CLAUDE.md §3.1 R2（取消传播）。
+
+## 完成判定（canonical 入口）
+
+_最小验证命令：_ 按改动实际触及的层运行 CONTRIBUTING「变更类型 → 最小验证子集」；TaskManager 逻辑改动后须 `redline-check`（R2/R11/R16）+ 相关单测。
+
+- 任务状态机（`QUEUED → RUNNING → COMPLETED/FAILED/CANCELLED`、重启 `RUNNING → INTERRUPTED` 回填）与 `submit_task()` 签名、`unique_key` 去重语义符合本文档；
+- 协程内同步阻塞经 `ThreadPoolManager.run_async()` 提交（R16）；取消信号用 `threading.Event`（非 `asyncio.Event` 类属性，R11）；
+- 编排边界正确：`TaskManager`（任务）/ `ThreadPoolManager`（同步阻塞）/ `SchedulerService`（定时）各司其职；
+- 门禁：`redline-check`、`ruff`、相关单测通过。
