@@ -3437,6 +3437,48 @@ class TestRulesetMetadataConsistency:
         )
 
 
+class TestReviewsFindingsIndex:
+    """检视结论登记索引（GOV-04）契约测试。"""
+
+    def test_findings_index_passes_real_repo(self):
+        """真实仓库 findings 索引应通过（README 存在且被 reviews README 登记）。"""
+        from check_docs_consistency import check_reviews_findings_index, check_reviews_index_completeness
+
+        assert check_reviews_findings_index() == []
+        assert check_reviews_index_completeness() == []
+
+    def test_detects_unregistered_findings(self, tmp_path, monkeypatch):
+        """findings 下未登记结论文件 → check_reviews_findings_index() 报错。"""
+        from check_docs_consistency import check_reviews_findings_index
+
+        reviews_dir = tmp_path / "reviews"
+        findings_dir = reviews_dir / "findings"
+        findings_dir.mkdir(parents=True)
+        (findings_dir / "README.md").write_text(
+            "# Findings\n\n| 轮次 | 结论文件 | 状态 |\n|---|---|---|\n", encoding="utf-8"
+        )
+        (findings_dir / "review99.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_DOCS_DIR", reviews_dir)
+
+        errors = check_reviews_findings_index()
+        assert any("review99.json" in e and "未登记" in e for e in errors), f"应检出未登记结论文件, got: {errors}"
+
+    def test_detects_missing_findings_readme_registration(self, tmp_path, monkeypatch):
+        """reviews README 未登记 findings/README.md → check_reviews_index_completeness() 报错。"""
+        from check_docs_consistency import check_reviews_index_completeness
+
+        reviews_dir = tmp_path / "reviews"
+        findings_dir = reviews_dir / "findings"
+        findings_dir.mkdir(parents=True)
+        (findings_dir / "README.md").write_text("# Findings\n", encoding="utf-8")
+        (reviews_dir / "README.md").write_text("# Reviews\n\n没有登记 findings/README.md\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_DOCS_DIR", reviews_dir)
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_README_PATH", reviews_dir / "README.md")
+
+        errors = check_reviews_index_completeness()
+        assert any("findings/README.md" in e for e in errors), f"应检出 findings README 未登记, got: {errors}"
+
+
 class TestDecisionTreeMapping:
     """决策树与其机器可读镜像双向一致（DOC-04）：CLAUDE.md §1.8 ↔ canonical-topics.yml."""
 
