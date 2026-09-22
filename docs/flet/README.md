@@ -24,7 +24,7 @@
 2. [v1-api-constraints.md](./v1-api-constraints.md)「V1 声明式 UI 开发规范」：声明式组件与 hooks 契约
 3. [accessibility-baseline.md](./accessibility-baseline.md)：无障碍可执行条款
 4. [docs/patterns/mvvm.md](../patterns/mvvm.md)：MVVM 表现层契约
-5. 对应 ViewModel 和 [ui/app_layout.py](../../ui/app_layout.py)
+5. 对应 ViewModel 和 [ui/app_layout.py](../../ui/app_layout.py)——ViewModel 统一置于 `ui/viewmodels/`（扁平目录、无子域），按 `ui/viewmodels/<name>_view_model.py` 命名（如 `home_view_model.py` / `screener_view_model.py`），对应的 View 与 VM 命名及目录约定见 [docs/patterns/mvvm.md](../patterns/mvvm.md)
 
 条件触发：
 
@@ -110,7 +110,7 @@ PR 评审按以下顺序逐项检查：
 
 - 一条规则只能有一个权威正文，本文件不复制任何专题规则。
 - 新增 `docs/flet/*.md` 时必须在本文件「文档职责清单」登记，否则会被 `check_flet_hub_completeness()` 门禁拦截。
-- 删除或改名专题文档时必须同步更新本文件及对应一致性测试。
+- 删除或改名专题文档时必须同步更新本文件及对应一致性测试（[tests/unit/test_docs_consistency.py](../../tests/unit/test_docs_consistency.py) 的 `TestFletHubCompleteness` 用例，其 `check_flet_hub_completeness` 校验本文件「文档职责清单」与 `docs/flet/*.md` 的完整一致性），并检查 [docs/governance/canonical-topics.yml](../governance/canonical-topics.yml) 中引用本文件的 `ui-view` / `ui-layout` / `i18n` 条目是否需要同步。
 - 通用 Flet v1 教程（路由、Services、存储、构建打包、响应式布局、控件清单等）直接查阅 [Flet 官方文档](https://docs.flet.dev/)，本目录不再复制，避免与上游漂移。
 
 ---
