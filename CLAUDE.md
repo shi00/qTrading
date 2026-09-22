@@ -202,7 +202,7 @@
 | R17 | **保留字作字段** | 禁止使用数字开头、包含特殊字符或 SQL 保留字作为表名或列名（必须使用 ORM `name=` 属性映射，禁止拼接该列名的裸 SQL） | 仅人工评审 |
 | R18 | **未隔离开发** | 新特性、重构、跨多文件修改任务未启用 git worktree 隔离即在主工作区开发（豁免：单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离） | 仅人工评审 |
 | R19 | **未配套测试的业务逻辑变更** | 新增或修改业务逻辑未同步新增/更新单测（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」与「变更类型 → 最小验证子集」；由 `scripts/check_diff_coverage.py` / `scripts/check_per_file_coverage.py` 强制） | CI-test（check_diff_coverage + check_per_file_coverage） |
-| R20 | **单位未核对的量纲比较** | 策略/回测中对已知金额、数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）的裸数值比较，调用链上无显式单位换算即违规（必须经 `threshold_in_data_unit()` 统一入口换算后再比较） | pre-commit 报告模式（check_redlines.py）+ 仅人工评审 |
+| R20 | **单位未核对的量纲比较** | 策略/回测中对已知金额、数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）的裸数值比较，调用链上无显式单位换算即违规（必须经 `threshold_in_data_unit()` 统一入口换算后再比较） | pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R20 报告模式升级期限」（2026-12-31） |
 | R21 | **缺失值伪装** | 业务语义字段（`score` / `ai_score` / `confidence` 等）缺失必须用 `None`/哨兵表示，禁止填充业务上合法的具体值（`0` 分、`50%` 置信度、空表视为「无限制」）；变体（BT-03）：「可信度元数据在持久化边界丢失」——`data_warnings` / `failed_signal_dates` / 配置快照等已知不可信信号落库后被丢弃、UI 渲染为「无问题」，等同把「已知不可信」伪装成「无信息」 | 仅人工评审 |
 | R22 | **水位线单调性** | checkpoint / 高水位语义的持久化状态（如 `set_app_state` 写入的断点续传水位），写入必须单调（优先 `*_max` 语义或 GREATEST 保护），且单测必须含乱序写入用例并断言最终值为最大值 | pre-commit（check_redlines.py）+ 仅人工评审 |
 | R23 | **裸 UI token** | UI 层裸 `ft.Colors` 色值引用与裸字号数值（如 `ft.Text(size=13)`）必须改用 AppStyles 定义的 token（`FONT_SIZE_*` 等） | pre-commit（check_redlines.py） |

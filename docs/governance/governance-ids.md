@@ -33,6 +33,7 @@
 | GOV-01 | 宪法不得引用未登记例外（EX 引用必须落在注册表） | 文档体系检视（GOV 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | GOV-04 | 检视结论结构化登记（docs/reviews/findings/）：报告正文 gitignored 导致结论系统性丢失，结论 id/判据入库可溯源 | 文档体系检视（GOV 系列） | [findings/README.md](../reviews/findings/README.md) / [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | GOV-07 | ruleset-changelog 规则集复核状态为规则性约定（不写日期快照），动态状态由轮次表与三份治理文档承载 | 文档体系检视（GOV 系列） | [ruleset-changelog.md](./ruleset-changelog.md) | 使用中 |
+| GOV-10 | R20 报告模式补齐升级期限四要素（误报率阈值 / 复核期限 / 责任人 / 翻转触发），消除「无期限渐进部署永久停留 WARNING」反模式 | 文档体系检视（GOV 系列） | [ruleset-changelog.md](./ruleset-changelog.md)「R20 报告模式升级期限」 | 使用中 |
 | UX-07 | 全系统 UI/UX 专项审视轮次 | UX 专项检视 | [docs/reviews/README.md](../reviews/README.md) | 历史 |
 | GDR-06 | 治理文档不得硬编码 Flet 补丁版本号（SHALL NOT `x.y.z` 形式） | 文档体系检视（GDR 系列，2026-09-08） | [CLAUDE.md](../../CLAUDE.md) §3.2 | 使用中 |
 | GDR-09 | 治理 ID 对新会话不可解析 → 建立对照表 + 体系入口声明 | 文档体系检视（GDR 系列，2026-09-08） | [governance-ids.md](./governance-ids.md) / [CLAUDE.md](../../CLAUDE.md) 头部 | 使用中 |
