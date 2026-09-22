@@ -35,12 +35,12 @@
 
 - **正本**：CONTRIBUTING.md「错误处理标准模式」——`classify_error` / `classify_severity`；`system` 级上抛，`recoverable` / `operational` 层内处理。
 - **止于服务层**：可恢复/操作级错误服务层内降级（`return` 兜底、`warning` 日志），不上抛 UI；
-- **上抛 UI**：`system` 级错误必须 `raise`（但 shutdown/降级/基础设施兜底场景豁免，见 CONTRIBUTING 优雅降级例外）；UI 经 `get_error_message` 翻译 `message_key`。
+- **上抛 UI 的两条路径**：① **ViewModel 路径**——VM 用 `utils/error_classifier.py` 的 `get_error_message_key()` 把 `classify_error` 的 `message_key` 产出为 `core.i18n.Message`（i18n key，不感知 locale，对应 MVVM 契约，见 [mvvm.md](./mvvm.md)）；② **View 路径**——View 侧才用 `I18n.get` / `get_error_message` 做翻译。AI 改 VM 不得直接用 `get_error_message`（产出字符串会污染 state 的 locale 无关性）。
 - 服务层异常分类决定是否影响用户界面，改动异常边界时按此判定，不回写 UI 错误展示逻辑。
 
 ### 5. 路由与工作流
 
-完整落地流程（新增/修改应用服务如何接线到启动、调度）：见 [docs/guides/how-to.md](../guides/how-to.md) 相关章节与 [data-sync.md](./data-sync.md)。
+完整落地流程（新增/修改应用服务如何接线到启动、调度）：见 [docs/guides/how-to.md](../guides/how-to.md)「11. 新增一个应用服务」与 [data-sync.md](./data-sync.md)。
 
 ## 完成判定（canonical 入口）
 
