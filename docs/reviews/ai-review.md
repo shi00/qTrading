@@ -15,7 +15,7 @@
 
 ## 1. 如何使用本指南
 
-- **简单变更**：执行 §3 安全边界 + §4 三轮检视 + §10 完成检查表。
+- **简单变更**：执行 §2 安全边界（SAFE-01~05）+ §4 三轮检视（ROUND1~3）+ §10 完成检查表（CHECK-01~15）；§3 输入契约（INPUT-01~03）与检视模式（MODE-01~05）经 §10 的 CHECK-01/02 完成条件覆盖。
 - **高风险变更**：按 §6 触发表加载对应 review-profiles/ + 引用 [review-policy.yaml](./review-policy.yaml) 定级。
 - **机器可读输出**：须符合 [review-result.schema.json](./review-result.schema.json)。
 - 通用质量维度见 [quality-dimensions.md](./quality-dimensions.md)；场景完整性方法见 [scenario-completeness.md](./scenario-completeness.md)。
