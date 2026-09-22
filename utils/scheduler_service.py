@@ -135,6 +135,9 @@ class SchedulerService:
             # review01-A2-1: 业务 job 注册表（services/scheduled_jobs/ 提供 build_<job>_job），
             # SchedulerService 仅调度注册的 callable，不感知具体业务类。
             self._registered_jobs: dict[str, Callable[[object], Awaitable[object]]] = {}
+            # F1 (OSS 检视): 持引用补偿任务，防止事件循环弱引用下任务被 GC 静默丢失
+            # （_on_job_missed 创建的 create_task 在无强引用时可能中途被回收）。
+            self._catchup_tasks: set[asyncio.Task] = set()
             self._initialized = True
             logger.info("[Scheduler] Initialized (APScheduler, Timezone: Asia/Shanghai)")
 
@@ -302,7 +305,11 @@ class SchedulerService:
             # 若仅补到昨天则"当天永久跳过"依旧存在。
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self._catch_up_missed_updates(include_today=True))
+                task = loop.create_task(self._catch_up_missed_updates(include_today=True))
+                # F1 (OSS 检视): 事件循环只持弱引用，create_task 返回值须保存强引用直至任务
+                # 完成，否则补偿任务可能在执行中途被 GC 静默丢弃（漏跑且无日志）。
+                self._catchup_tasks.add(task)
+                task.add_done_callback(self._catchup_tasks.discard)
             except RuntimeError:
                 logger.debug("[Scheduler] No running loop for catch-up on job missed, skipping")
 
