@@ -113,6 +113,7 @@
     "review_stats_insufficient": "Insufficient sample, no reference value",
     "review_stats_limited": "Limited sample, reference only",
     "review_stats_survivor_bias": "Stats based on stocks that passed screening; survivorship bias possible",
+    "review_stats_coverage_gap": "{pct}% of this strategy's selected records missing review; mean may suffer survivorship bias",
     "ai_attribution_title": "AI Effect Attribution",
     "ai_attribution_alpha": "T+1 Alpha",
     "ai_attribution_ai": "With AI",

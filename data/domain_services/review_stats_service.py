@@ -13,6 +13,11 @@
 - **样本量分级按有效样本量 n_eff = n/overlap 判定**（RV-09）：重叠窗口的名义
   日序列 N 系统性高估独立样本量（180 自然日窗口上限约 120 交易日，有效仅约
   24），分级按 n_eff 折算后判定，防止「样本充足」的虚假安全感。
+- **横截面覆盖缺口检测（RV-10）**：DAO 已按日计算各指标的非 NULL 股票行数
+  （``t1_n``/``t5_n``/``alpha_n``），``MetricStat.row_n`` 为其窗口累计。
+  ``row_n / (avg_daily_count * n)`` 显著低于 1 时（如 < 0.8），说明大量入选
+  记录未参与该指标计算（基准缺失/未成熟等），日组合均值存在幸存者偏差风险，
+  UI 须给出可见提示。
 - **胜率用股票行 N 独立计算**（四审 M2），与均值 CI 的日序列 N **独立分级**。
 - **基准 NULL 组**（benchmark_code IS NULL）归入「基准未知」组：alpha 指标无有效
   样本（n=0），仅 T+1/T+5 独立均值/N 可见。
@@ -249,6 +254,9 @@ class MetricStat:
     - ci_lower / ci_upper: t 分布 95% 置信区间（n<30 或 std 不可用/无效时置 None；
       overlap>1 的指标（t5/alpha）标准误经 Newey-West HAC 修正，区间宽于朴素公式，
       RV-08）
+    - row_n: 横截面维——窗口内参与该指标计算的股票行数（Σ DAO ``*_n`` 列，RV-10）。
+      与日序列 N 并列，供 UI 呈现「覆盖缺口」比率 row_n/(avg_daily_count*n)，
+      识别幸存者偏差风险（大量入选记录未参与该指标计算）。
     """
 
     n: int
@@ -257,6 +265,7 @@ class MetricStat:
     std: float | None
     ci_lower: float | None
     ci_upper: float | None
+    row_n: int  # RV-10: 横截面维——窗口内参与该指标计算的股票行数（Σ *_n）
 
 
 @dataclass(frozen=True)
@@ -357,19 +366,21 @@ def _newey_west_se(values: pd.Series, lags: int) -> float | None:
     return math.sqrt(var / n)
 
 
-def _metric_stat(series: pd.Series, *, overlap: int = T1_WINDOW_OVERLAP) -> MetricStat:
+def _metric_stat(series: pd.Series, *, overlap: int = T1_WINDOW_OVERLAP, row_n: int = 0) -> MetricStat:
     """对单指标的非 NULL 日序列计算 N/均值/标准差/置信区间。
 
     overlap: 指标持有窗口长度（交易日，RV-08）。t1 传 1（窗口首尾相接不重叠，
     朴素 ``t*std/sqrt(n)`` 逐字不变）；t5/alpha 传 5（相邻点共享 4 天行情，
     标准误改用 Newey-West HAC 修正，lags=overlap-1）。std 字段始终为朴素序列
     标准差（描述统计，供波动展示），CI 为推断统计，二者解耦。
+    row_n: 横截面维——窗口内参与该指标计算的股票行数（Σ DAO ``*_n`` 列，RV-10）。
+    与日序列 N 并列存入 MetricStat，供 UI 呈现「覆盖缺口」比率 row_n/(avg_daily_count*n)。
     """
     values = series.dropna().astype("float64")
     n = int(values.size)
     n_eff = n / overlap
     if n == 0:
-        return MetricStat(0, 0.0, None, None, None, None)
+        return MetricStat(0, 0.0, None, None, None, None, row_n)
 
     mean = float(values.mean())
     std: float | None = None
@@ -392,7 +403,7 @@ def _metric_stat(series: pd.Series, *, overlap: int = T1_WINDOW_OVERLAP) -> Metr
             ci_lower = mean - half
             ci_upper = mean + half
 
-    return MetricStat(n, n_eff, mean, std, ci_lower, ci_upper)
+    return MetricStat(n, n_eff, mean, std, ci_lower, ci_upper, row_n)
 
 
 def compute_strategy_review_stats(df: pd.DataFrame) -> tuple[StrategyStatRow, ...]:
@@ -424,9 +435,21 @@ def compute_strategy_review_stats(df: pd.DataFrame) -> tuple[StrategyStatRow, ..
                 strategy_name=str(strategy_name),
                 benchmark_code=bm,
                 avg_daily_count=float(group["daily_cnt"].mean()),
-                t1=_metric_stat(group["t1_mean"], overlap=T1_WINDOW_OVERLAP),
-                t5=_metric_stat(group["t5_mean"], overlap=HORIZON_WINDOW_OVERLAP),
-                alpha=_metric_stat(group["alpha_mean"], overlap=HORIZON_WINDOW_OVERLAP),
+                t1=_metric_stat(
+                    group["t1_mean"],
+                    overlap=T1_WINDOW_OVERLAP,
+                    row_n=int(group["t1_n"].sum()),
+                ),
+                t5=_metric_stat(
+                    group["t5_mean"],
+                    overlap=HORIZON_WINDOW_OVERLAP,
+                    row_n=int(group["t5_n"].sum()),
+                ),
+                alpha=_metric_stat(
+                    group["alpha_mean"],
+                    overlap=HORIZON_WINDOW_OVERLAP,
+                    row_n=int(group["alpha_n"].sum()),
+                ),
                 win_count=int(group["win_cnt"].sum()),
                 loss_count=int(group["loss_cnt"].sum()),
             )
@@ -512,9 +535,21 @@ def compute_ai_attribution_stats(df: pd.DataFrame) -> tuple[AiAttributionRow, ..
                 benchmark_code=bm,
                 has_ai=bool(has_ai),
                 avg_daily_count=float(group["daily_cnt"].mean()),
-                t1=_metric_stat(group["t1_mean"], overlap=T1_WINDOW_OVERLAP),
-                t5=_metric_stat(group["t5_mean"], overlap=HORIZON_WINDOW_OVERLAP),
-                alpha=_metric_stat(group["alpha_mean"], overlap=HORIZON_WINDOW_OVERLAP),
+                t1=_metric_stat(
+                    group["t1_mean"],
+                    overlap=T1_WINDOW_OVERLAP,
+                    row_n=int(group["t1_n"].sum()),
+                ),
+                t5=_metric_stat(
+                    group["t5_mean"],
+                    overlap=HORIZON_WINDOW_OVERLAP,
+                    row_n=int(group["t5_n"].sum()),
+                ),
+                alpha=_metric_stat(
+                    group["alpha_mean"],
+                    overlap=HORIZON_WINDOW_OVERLAP,
+                    row_n=int(group["alpha_n"].sum()),
+                ),
                 win_count=int(group["win_cnt"].sum()),
                 loss_count=int(group["loss_cnt"].sum()),
             )

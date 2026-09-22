@@ -21,10 +21,12 @@ import pytest
 from ui.viewmodels.screener_view_model import ScreenerRow, ScreenerViewModel, StrategyDepRow
 from ui.views.screener_view import (
     _COLUMN_WIDTHS,
+    _COVERAGE_GAP_RATIO,
     _HIDDEN_COLS,
     _build_page_size_options,
     _build_strategy_options,
     _build_table_data,
+    _coverage_gap_pct,
     _format_cell_value,
     _parse_num,
     _render_status_message,
@@ -529,3 +531,49 @@ class TestRenderStatusMessage:
         assert second_call.kwargs == {"name": "Value Strategy"}, (
             "locale 切换后 helper 必须用新 locale 重新翻译 name_key (R.2.3 核心目标)"
         )
+
+
+class _FakeAlpha:
+    """模拟 MetricStat（含 RV-10 row_n），供覆盖缺口纯函数测试。"""
+
+    def __init__(self, row_n: int, n: int):
+        self.row_n = row_n
+        self.n = n
+
+
+class TestCoverageGap:
+    """RV-10: 覆盖缺口比率 row_n/(avg_daily_count*n) 与阈值判定（UI 纯函数）。"""
+
+    def test_ratio_below_threshold(self):
+        """实际参与率低于 0.8 → 返回比率（触发提示）。"""
+        alpha = _FakeAlpha(row_n=12, n=20)
+        ratio = _coverage_gap_pct(alpha, avg_daily_count=1.0)
+        # noqa: weak-assertion 先显式缩窄 None（下一条强断言覆盖数值；None 时若通过即 TypeError）
+        assert ratio is not None  # noqa: weak-assertion 显式 None 缩窄后由下方强断言保证
+        assert ratio < _COVERAGE_GAP_RATIO
+        assert ratio == pytest.approx(12 / 20)
+
+    def test_ratio_above_threshold(self):
+        """实际参与率 >= 0.8 → 返回比率但不低于阈值。"""
+        alpha = _FakeAlpha(row_n=17, n=20)
+        ratio = _coverage_gap_pct(alpha, avg_daily_count=1.0)
+        # noqa: weak-assertion 显式 None 缩窄（下方数值比较需非 None）
+        assert ratio is not None  # noqa: weak-assertion None 缩窄供 >= 比较
+        assert ratio >= _COVERAGE_GAP_RATIO
+
+    def test_row_n_zero_returns_none(self):
+        """row_n=0（无任何有效记录）→ None（R21 缺失不伪装）。"""
+        alpha = _FakeAlpha(row_n=0, n=20)
+        assert _coverage_gap_pct(alpha, avg_daily_count=1.0) is None
+
+    def test_no_row_n_attribute_returns_none(self):
+        """纵深防御：row_n 属性缺失（旧对象）→ None。"""
+
+        class LegacyAlpha:
+            n = 20
+
+        assert _coverage_gap_pct(LegacyAlpha(), avg_daily_count=1.0) is None
+
+    def test_avg_daily_count_zero_returns_none(self):
+        alpha = _FakeAlpha(row_n=5, n=20)
+        assert _coverage_gap_pct(alpha, avg_daily_count=0.0) is None
