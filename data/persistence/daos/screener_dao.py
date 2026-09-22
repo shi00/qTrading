@@ -6,7 +6,12 @@ import typing
 import pandas as pd
 import sqlalchemy as sa
 
-from data.constants import REVIEW_STATUS_COMPLETED, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE
+from data.constants import (
+    REVIEW_STATUS_COMPLETED,
+    REVIEW_STATUS_EXPIRED,
+    REVIEW_STATUS_PENDING,
+    REVIEW_STATUS_T1_DONE,
+)
 from data.persistence.models import Base, ScreeningHistory, get_model_columns
 from data.sync.base import safe_error
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -547,6 +552,66 @@ class ScreenerDao(BaseDao):
         """
         df = await self._read_db(sql, (date_threshold, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE))
         return df if df is not None else pd.DataFrame()
+
+    async def expire_stale_pending(self, lookback_trade_days: int = 60) -> int:
+        """RV-11: 常驻过期清扫——把超窗且从未完成 T+1 的 PENDING/NULL 记录置 EXPIRED。
+
+        语义与迁移 0026 逐字对齐（防口径漂移）：以 ``trade_cal`` 锚定最近
+        ``lookback_trade_days`` 个交易日（OFFSET :lookback 取第 N 个交易日前的
+        日期），清理 ``review_status IN (PENDING, NULL)`` 且 ``t1_pct IS NULL``
+        且 ``trade_date`` 早于该锚点的记录。T1_DONE（已过 T+1）不动——T+5 回填
+        通道继续兜底。迁移 0026 负责存量的一次性清理，本方法负责迁移后的增量
+        清理，防止僵尸 PENDING 无限累积挤占 ``get_pending_reviews`` 的 LIMIT 500
+        配额。返回清理行数。
+
+        外部 DB 失败按说明日志记录并返回 0（幂等，次日重试）；引擎 disposed 由
+        ``_guarded_begin`` + EngineDisposedError 上抛（R5）。SQLAlchemy Core
+        参数化（R4，无字符串拼接）。
+        """
+        self._check_engine(context="write")
+        t = ScreeningHistory.__table__
+        tc = Base.metadata.tables["trade_cal"]  # RV-11: 复用元数据表对象（无 ORM 类，走 metadata）
+        # 60 个交易日前锚点：取最近第 lookback_trade_days 个交易日（含）之后的首个
+        # 更早日期。OFFSET lookback-1 表示跳过最近 lookback-1 个交易日，取第
+        # lookback 个交易日——与 0026 的 OFFSET $1 语义一致（历史上用常量 60-1=59）。
+        anchor_subq = (
+            sa.select(tc.c.cal_date)
+            .where(
+                tc.c.is_open == 1,
+                tc.c.cal_date <= sa.func.current_date(),
+            )
+            .order_by(tc.c.cal_date.desc())
+            .offset(lookback_trade_days - 1)
+            .limit(1)
+            .scalar_subquery()
+        )
+        stmt = (
+            sa.update(t)
+            .values(review_status=REVIEW_STATUS_EXPIRED)
+            .where(
+                sa.or_(t.c.review_status == REVIEW_STATUS_PENDING, t.c.review_status.is_(None)),
+                t.c.t1_pct.is_(None),
+                t.c.trade_date < anchor_subq,
+            )
+        )
+        try:
+            async with self._guarded_begin() as tx_conn:
+                result = await tx_conn.execute(stmt)
+                count = result.rowcount
+        except EngineDisposedError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[ScreenerDao] Stale pending expiry failed (%s), retry next run",
+                safe_error(exc),
+            )
+            return 0
+        if count:
+            logger.warning(
+                "[ScreenerDao] Expired %d stale pending review records (RV-11 stale cleanup).",
+                count,
+            )
+        return count
 
     async def get_unfilled_horizon_predictions(self, limit: int = 2000) -> list[dict]:
         """D2-4: 返回已过 T+1、但 T+5 仍未回填的复盘记录（id, ts_code, trade_date）。

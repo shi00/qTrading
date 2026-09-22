@@ -30,10 +30,17 @@ class _FakeSvc:
         self.job = job
 
 
-def _make_mock_rm(t1_count: int = 7, t5_count: int = 42, diag: str | None = None) -> MagicMock:
+def _make_mock_rm(
+    t1_count: int = 7,
+    t5_count: int = 42,
+    diag: str | None = None,
+    expired_count: int = 0,
+) -> MagicMock:
     mock_rm = MagicMock()
     mock_rm.backfill_t1_returns = AsyncMock(return_value=t1_count)
     mock_rm.backfill_horizon_returns = AsyncMock(return_value=t5_count)
+    # RV-11: 常驻过期清扫挂接 job，mock 其返回清理条数（默认 0 = 无僵尸）。
+    mock_rm.expire_stale_pending = AsyncMock(return_value=expired_count)
     mock_rm._benchmark_diag = diag
     return mock_rm
 
@@ -48,7 +55,8 @@ async def _submit_and_run(job, mock_tm_cls) -> str:
 class TestBuildReviewBackfillJob:
     @pytest.mark.asyncio
     async def test_job_calls_both_backfills_t1_first(self):
-        """BIZ-03 顺序约束：T+1 先于 T+5（T+1 把 PENDING 推进 T1_DONE 后 T+5 通道才能取到）。"""
+        """BIZ-03 顺序约束：T+1 先于 T+5（T+1 把 PENDING 推进 T1_DONE 后 T+5 通道才能取到）。
+        RV-11: 过期清扫在两次回填之后（backfill 先试补数据，expire 后清仍未填的超窗 PENDING）。"""
         job = build_review_backfill_job()
         with (
             patch("services.scheduled_jobs.review_backfill.ReviewManager") as mock_rm_cls,
@@ -61,10 +69,38 @@ class TestBuildReviewBackfillJob:
             [
                 call.backfill_t1_returns(),
                 call.backfill_horizon_returns(),
+                call.expire_stale_pending(),
             ]
         )
         assert "T+1 backfilled: 7" in result
         assert "T+5 backfilled: 42" in result
+
+    @pytest.mark.asyncio
+    async def test_job_result_includes_expired_count(self):
+        """RV-11: 清理了僵尸 PENDING 时拼接清理条数（用户可见，对齐 RV-04 可见诊断原则）。"""
+        job = build_review_backfill_job()
+        with (
+            patch("services.scheduled_jobs.review_backfill.ReviewManager") as mock_rm_cls,
+            patch("services.scheduled_jobs.review_backfill.TaskManager") as mock_tm_cls,
+        ):
+            mock_rm = _make_mock_rm(expired_count=12)
+            mock_rm_cls.return_value = mock_rm
+            result = await _submit_and_run(job, mock_tm_cls)
+        mock_rm.expire_stale_pending.assert_called_once_with()
+        assert "stale expired: 12" in result
+
+    @pytest.mark.asyncio
+    async def test_job_omits_expired_suffix_when_zero(self):
+        """RV-11: 无僵尸清理（count=0）时结果不含 "stale expired" 段，避免噪音。"""
+        job = build_review_backfill_job()
+        with (
+            patch("services.scheduled_jobs.review_backfill.ReviewManager") as mock_rm_cls,
+            patch("services.scheduled_jobs.review_backfill.TaskManager") as mock_tm_cls,
+        ):
+            mock_rm = _make_mock_rm(expired_count=0)
+            mock_rm_cls.return_value = mock_rm
+            result = await _submit_and_run(job, mock_tm_cls)
+        assert "stale expired" not in result
 
     @pytest.mark.asyncio
     async def test_job_calls_backfill_and_returns_count(self):
