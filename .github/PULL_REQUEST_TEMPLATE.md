@@ -27,7 +27,7 @@ Relates to #XXX
 ### 自动化测试
 - [ ] 单元测试：新增/更新用例，覆盖率达标
 - [ ] 集成测试：DAO/Service层链路验证
-- [ ] E2E测试(Playwright)：UI流程验证，无超时/断言失败
+- [ ] E2E（`tests/e2e/`，Flet + pytest；本地可用 `run_e2e_local.py`）：UI流程验证，无超时/断言失败
 - [ ] 静态检查：ruff + pyright 无报错
 - [ ] CI流水线全部通过（lint / test / build / windows e2e）
 
