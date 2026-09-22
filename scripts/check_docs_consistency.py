@@ -1594,6 +1594,27 @@ def check_exceptions_yaml_consistency() -> list[str]:
         elif paths is not None:
             errors.append(f"exceptions[{idx}] paths 应为 list, 实际 {type(paths).__name__}")
 
+    # GATE-02: R1 例外条目数 == pyproject.toml 契约 5 ignore_imports 条数（GDR-01 条数唯一事实源，
+    # 防 exceptions.yml 自己文件里的头注释漂移）。
+    try:
+        import tomllib
+
+        with open(PYPROJECT_PATH, "rb") as f:
+            proj = tomllib.load(f)
+        ignore_count: int | None = None
+        for contract in proj.get("tool", {}).get("importlinter", {}).get("contracts", []):
+            if str(contract.get("name", "")).startswith("R1: utils"):
+                ignores = contract.get("ignore_imports")
+                if isinstance(ignores, list):
+                    ignore_count = len(ignores)
+        r1_exceptions = sum(1 for e in exceptions if isinstance(e, dict) and e.get("rule_id") == "R1")
+        if ignore_count is not None and r1_exceptions != ignore_count:
+            errors.append(
+                f"exceptions.yml R1 例外条目数 {r1_exceptions} != pyproject.toml 契约 5 ignore_imports 条数 {ignore_count}"
+            )
+    except (OSError, tomllib.TOMLDecodeError):
+        pass  # pyproject 解析失败由其他检查报告
+
     return errors
 
 
@@ -3243,11 +3264,7 @@ def main() -> int:
     # 盲1：注册单例散文数量守卫 + 盲2：ADR supersede 双向链守卫（文档复检指标盲区治理）
     all_errors.extend(check_singleton_count_prose())  # 盲1：散文 N vs 表格行数
     all_errors.extend(check_adr_supersede_chain())  # 盲2：ADR supersede 双向链对称性
-    dual_meaning = check_governance_id_dual_meaning()  # H3：治理 ID 同名异义（渐进 WARNING 不阻断）
-    if dual_meaning:
-        print("::warning::治理 ID 对义（渐进部署，不阻断）存在未声明双义登记的治理 ID：")
-        for w in dual_meaning:
-            print(f"  - {w}")
+    all_errors.extend(check_governance_id_dual_meaning())  # GOV-06：治理 ID 同名异义（双义已清零，翻转 ERROR）
 
     if all_errors:
         print("[FAIL] 文档一致性检查失败：", file=sys.stderr)

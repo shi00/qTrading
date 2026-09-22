@@ -2657,6 +2657,44 @@ class TestExceptionsYamlConsistency:
         errors = check_exceptions_yaml_consistency()
         assert errors == [], "当前项目配置应通过 exceptions.yml 校验, 失败:\n  " + "\n  ".join(errors)
 
+    def test_gate02_detects_r1_count_mismatch(self, tmp_path, monkeypatch):
+        """exceptions.yml R1 条目数 ≠ pyproject 契约 5 ignore_imports 数 → 报错（GATE-02，GDR-01 计数唯一事实源）."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        exc_yaml = tmp_path / "exceptions.yml"
+        exc_yaml.write_text(
+            "exceptions:\n"
+            "  - id: EX-0001\n"
+            "    rule_id: R1\n"
+            '    paths: ["utils/config/db.py"]\n'
+            "    reason: r\n    owner: o\n    approved_by: a\n    removal_trigger: t\n"
+            "    verification: v\n    validity_criteria: c\n",
+            encoding="utf-8",
+        )
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(
+            "[[tool.importlinter.contracts]]\n"
+            'name = "R1: utils must not import business layers"\n'
+            'ignore_imports = ["a -> b"]\n',
+            encoding="utf-8",
+        )  # 契约 5 声明 1 条 ignore，yml 仅 1 条 R1 → 一致；再改 yml 为 2 条触发
+        # 构造不匹配：yml 2 条 R1 例外
+        exc_yaml.write_text(
+            exc_yaml.read_text(encoding="utf-8") + "  - id: EX-0002\n"
+            "    rule_id: R1\n"
+            '    paths: ["utils/config/db.py"]\n'
+            "    reason: r\n    owner: o\n    approved_by: a\n    removal_trigger: t\n"
+            "    verification: v\n    validity_criteria: c\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", exc_yaml)
+        monkeypatch.setattr("check_docs_consistency.PYPROJECT_PATH", pyproject)
+
+        errors = check_exceptions_yaml_consistency()
+        assert any("R1 例外条目数" in e and "ignore_imports 条数" in e for e in errors), (
+            f"应检出 R1 计数不匹配, got: {errors}"
+        )
+
     def test_detects_missing_required_field(self, tmp_path, monkeypatch):
         """缺少必填字段时应报错."""
         from check_docs_consistency import check_exceptions_yaml_consistency

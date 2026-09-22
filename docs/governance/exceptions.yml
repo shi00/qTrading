@@ -26,10 +26,11 @@
 #   - 禁止删除或复用已废弃例外编号 (append-only)
 #   - 例外到期或触发移除条件后, 必须从本文件移除并同步清理引用
 
-# GDR-01 修复：补录契约 5 ignore_imports 现存 16 条 R1 例外（EX-0001~EX-0016，EX-0016 为 D6-1/D6-2 日历降级），
-# 使「例外唯一注册入口」名副其实；pyproject.toml 契约 5 注释逐条回指 EX id。
+# GDR-01 修复：补录契约 5 ignore_imports 现存 17 条 R1 例外（EX-0001~EX-0016、EX-0019；EX-0016 为 D6-1/D6-2
+# 日历降级，EX-0019 由 REVIEW-06 TO-04 增补），使「例外唯一注册入口」名副其实；pyproject.toml 契约 5 注释逐条回指 EX id。
 # 方向性违规（scheduler_service → strategies/services）按 review01-A2/A6 夜间预测下沉消除；
 # 循环打破型（config.db ↔ db_config_service）随按域拆分迁移；关机/采集型 lazy import 保留但须带注释。
+# 条目数唯一事实源：exceptions.yml 中 rule_id=R1 的条目实计 + pyproject.toml 契约 5 ignore_imports 实计（两边一致）。
 exceptions:
   # EX-0001: utils/config/db.py -> data.persistence.db_config_service（循环打破）
   - id: EX-0001
@@ -195,25 +196,25 @@ exceptions:
     removal_trigger: "日历判定统一收口到 TradeCalendarService（DB→API→Offline 三级降级链）且 SchedulerService 不再直接访问 OfflineCalendar 时移除。"
     verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0016）。"
     validity_criteria: "`utils/scheduler_service.py` 仍含 `# lazy-import:` 标注的日历降级访问 `data.domain_services.offline_calendar` 的函数内导入（L614「契约 5 例外 EX-0016」），且日历判定尚未统一收口到日历服务（DB→API→Offline 三级降级链）。"
-  # EX-0017: services/news_subscription_service.py 应用服务层轮询循环优雅停止（R5，P1-04 方案1）
+  # EX-0017: services/news_subscription_service.py 应用服务层轮询循环优雅停止（R5，P1-06 方案1）
   # 技术债条目 P3-M9-NewsSubscription-EngineDisposed-Swallowed 登记于此（案文：#M9-010）。
   - id: EX-0017
     rule_id: R5
     paths: ["services/news_subscription_service.py"]
-    reason: "应用服务层轮询循环的优雅停止不在 R5 之内：_safe_fetch_task/_processing_loop/_fetch_and_notify 三处吞没 EngineDisposedError 以停止轮询（self._running = False / break），引擎释放后停止轮询是合理设计，非 DAO/维护流程的传播要求。技术债条目 P3-M9-NewsSubscription-EngineDisposed-Swallowed 登记于此（P1-04 方案1，R5 由 INVARIANT 降为 EXCEPTIONABLE）。"
+    reason: "应用服务层轮询循环的优雅停止不在 R5 之内：_safe_fetch_task/_processing_loop/_fetch_and_notify 三处吞没 EngineDisposedError 以停止轮询（self._running = False / break），引擎释放后停止轮询是合理设计，非 DAO/维护流程的传播要求。技术债条目 P3-M9-NewsSubscription-EngineDisposed-Swallowed 登记于此（P1-06 方案1，R5 由 INVARIANT 降为 EXCEPTIONABLE）。"
     owner: 架构维护者
-    approved_by: 架构维护者（P1-04 方案1，R5 分类修正）
+    approved_by: 架构维护者（P1-06 方案1，R5 分类修正）
     removal_trigger: "R5 红线扩展到应用服务层轮询循环时，或 NewsSubscriptionService 重构时移除（与技术债条目 P3-M9-NewsSubscription-EngineDisposed-Swallowed 的 upgrade 触发条件一致）。"
     verification: "人工评审（R5 为 EXCEPTIONABLE，仅人工评审）。"
     validity_criteria: "`services/news_subscription_service.py` 的 `_safe_fetch_task`/`_processing_loop`/`_fetch_and_notify` 仍以捕获 `EngineDisposedError` 置 `self._running=False`/break 的方式优雅停止轮询（未改为显式停止信号），且 R5 红线尚未扩展到应用服务层轮询循环——二者任一成立即本条仍有效。"
-  # EX-0018: services/backtest_service.py 回测持久化失败不阻塞结果返回（R5，P1-04 方案1）
+  # EX-0018: services/backtest_service.py 回测持久化失败不阻塞结果返回（R5，P1-06 方案1）
   # 技术债条目 P3-M9-Backtest-EngineDisposed-Warning-Return 登记于此（案文：#M9-011）。
   - id: EX-0018
     rule_id: R5
     paths: ["services/backtest_service.py"]
-    reason: "回测持久化失败不阻塞结果返回在 R5 之内属合理偏离：_persist_result 捕获 EngineDisposedError 返回带警告结果（回测已完成，持久化失败仅警告，与 task_manager 的 system 级 critical log 不 raise 模式一致）。技术债条目 P3-M9-Backtest-EngineDisposed-Warning-Return 登记于此（P1-04 方案1，R5 由 INVARIANT 降为 EXCEPTIONABLE）。"
+    reason: "回测持久化失败不阻塞结果返回在 R5 之内属合理偏离：_persist_result 捕获 EngineDisposedError 返回带警告结果（回测已完成，持久化失败仅警告，与 task_manager 的 system 级 critical log 不 raise 模式一致）。技术债条目 P3-M9-Backtest-EngineDisposed-Warning-Return 登记于此（P1-06 方案1，R5 由 INVARIANT 降为 EXCEPTIONABLE）。"
     owner: 架构维护者
-    approved_by: 架构维护者（P1-04 方案1，R5 分类修正）
+    approved_by: 架构维护者（P1-06 方案1，R5 分类修正）
     removal_trigger: "R5 红线扩展到回测持久化路径时，或 BacktestService 重构时移除（与技术债条目 P3-M9-Backtest-EngineDisposed-Warning-Return 的 upgrade 触发条件一致）。"
     verification: "人工评审（R5 为 EXCEPTIONABLE，仅人工评审）。"
     validity_criteria: "`services/backtest_service.py` 的 `_persist_result` 仍以捕获持久化异常（如 `EngineDisposedError` 落入 `except Exception`）并返回带 `persist_failed` 警告的回测结果（不 raise）的方式处理持久化失败，且 R5 红线尚未扩展到回测持久化路径——二者任一成立即本条仍有效。"
