@@ -199,6 +199,7 @@ class TestReviewManagerRunReview:
                     "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": ["20240615", "20240616"],
                     "close": [10.0, 10.5],
+                    "open": [10.0, 10.0],
                     "pct_chg": [1.0, 5.0],
                 }
             )
@@ -240,6 +241,7 @@ class TestReviewManagerRunReview:
                     "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": ["20240615", "20240616"],
                     "close": [10.0, 10.5],
+                    "open": [10.0, 10.0],
                     "pct_chg": [1.0, 5.0],
                 }
             )
@@ -953,6 +955,7 @@ class TestReviewManagerIndexCacheNaN:
                     "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
                     # D4-M4: T+5 窗口成熟后才会解析基准指数，验证 NaN index 不污染 alpha
                     "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
@@ -995,6 +998,7 @@ class TestReviewManagerIndexCacheNaN:
                     "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": ["20240615", "20240616"],
                     "close": [10.0, 10.5],
+                    "open": [10.0, 10.0],
                     "pct_chg": [1.0, 5.0],
                 }
             )
@@ -1014,7 +1018,7 @@ class TestReviewManagerRv04Decouple:
         rm = ReviewManager()
         rm.cache = mock_cache
         # 全部基准候选（配置 + MAJOR_INDICES）探测不可得 → _resolve_benchmark 返回配置基准 + 诊断
-        rm._resolve_index_close = AsyncMock(return_value=None)
+        rm._resolve_index_quote = AsyncMock(return_value=None)
         rm._prefetch_index_cache = AsyncMock(return_value={})
         rm._batch_update_results = AsyncMock()
         rm._get_pending_predictions = AsyncMock(
@@ -1034,6 +1038,7 @@ class TestReviewManagerRv04Decouple:
                     "ts_code": ["000001.SZ"] * 6,
                     "trade_date": ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"],
                     "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 0.5, 0.0, 0.0, 0.0, 5.0],
                 }
             )
@@ -1070,8 +1075,8 @@ class TestReviewManagerRv04Decouple:
         """T2: B 类候选（数值已齐、标签未定稿）基准恢复 → 仅补定稿标签，数值通道不触发。"""
         rm, mock_cache = self._make_rm(mock_cm)
         # 基准恢复：t0 → 100.0、T+5 → 101.0，窗口 +1%
-        rm._resolve_index_close = AsyncMock(
-            side_effect=lambda _idx, d: 101.0 if str(d).replace("-", "") == "20240617" else 100.0
+        rm._resolve_index_quote = AsyncMock(
+            side_effect=lambda _idx, d: (100.0, 101.0) if str(d).replace("-", "") == "20240617" else (100.0, 100.0)
         )
         rm._batch_backfill_t5 = AsyncMock()
         rm._batch_finalize_labels = AsyncMock()
@@ -1114,7 +1119,7 @@ class TestReviewManagerRv04Decouple:
     async def test_resolve_benchmark_degrades_to_first_available(self, mock_cm, mock_tc):
         """T4: 配置基准无数据 → 沿 MAJOR_INDICES 降级到首个可得候选，诊断含双方代码。"""
         rm = ReviewManager()
-        rm._resolve_index_close = AsyncMock(side_effect=lambda idx, _d: None if idx == "000985.CSI" else 100.0)
+        rm._resolve_index_quote = AsyncMock(side_effect=lambda idx, _d: None if idx == "000985.CSI" else (100.0, 100.0))
         with patch("data.persistence.review_manager.ConfigHandler.get_config", return_value="000985.CSI"):
             resolved = await rm._resolve_benchmark(datetime.date(2024, 6, 10))
         assert resolved == "000001.SH"  # MAJOR_INDICES 首个候选
@@ -1130,8 +1135,8 @@ class TestReviewManagerRv04Decouple:
         rm = ReviewManager()
         # 第一次解析：配置基准探针不可得 → 降级探测 000001.SH 可得；
         # 第二次解析：配置基准探针直接可得。
-        probe_results = iter([None, 100.0, 100.0])
-        rm._resolve_index_close = AsyncMock(side_effect=lambda _idx, _d: next(probe_results))
+        probe_results = iter([None, (100.0, 100.0), (100.0, 100.0)])
+        rm._resolve_index_quote = AsyncMock(side_effect=lambda _idx, _d: next(probe_results))
         with patch("data.persistence.review_manager.ConfigHandler.get_config", return_value="000852.SH"):
             first = await rm._resolve_benchmark(datetime.date(2024, 6, 10))
             assert rm._benchmark_diag is not None
@@ -1147,7 +1152,7 @@ class TestReviewManagerRv04Decouple:
         """探针 system 级异常不传播（与行级「吞没、review 继续」语义一致），全候选失败
         返回配置基准 + missing 诊断。"""
         rm = ReviewManager()
-        rm._resolve_index_close = AsyncMock(side_effect=PermissionError("permission denied"))
+        rm._resolve_index_quote = AsyncMock(side_effect=PermissionError("permission denied"))
         with patch("data.persistence.review_manager.ConfigHandler.get_config", return_value="000985.CSI"):
             resolved = await rm._resolve_benchmark(datetime.date(2024, 6, 10))
         assert resolved == "000985.CSI"
@@ -1159,7 +1164,7 @@ class TestReviewManagerRv04Decouple:
     async def test_resolve_benchmark_propagates_engine_disposed(self, mock_cm, mock_tc):
         """R5: EngineDisposedError 上抛，不在降级链中被吞没。"""
         rm = ReviewManager()
-        rm._resolve_index_close = AsyncMock(side_effect=EngineDisposedError("engine disposed"))
+        rm._resolve_index_quote = AsyncMock(side_effect=EngineDisposedError("engine disposed"))
         with patch("data.persistence.review_manager.ConfigHandler.get_config", return_value="000985.CSI"):
             with pytest.raises(EngineDisposedError):
                 await rm._resolve_benchmark(datetime.date(2024, 6, 10))
@@ -1170,7 +1175,7 @@ class TestReviewManagerRv04Decouple:
     async def test_resolve_benchmark_invalid_config_falls_back_to_default(self, mock_cm, mock_tc):
         """配置项非字符串（如 None）→ 回退 DEFAULT_BENCHMARK_INDEX 继续降级链，不异常退出。"""
         rm = ReviewManager()
-        rm._resolve_index_close = AsyncMock(return_value=None)  # 全候选探测不可得
+        rm._resolve_index_quote = AsyncMock(return_value=None)  # 全候选探测不可得
         with patch("data.persistence.review_manager.ConfigHandler.get_config", return_value=None):
             resolved = await rm._resolve_benchmark(datetime.date(2024, 6, 10))
         assert resolved == DEFAULT_BENCHMARK_INDEX
@@ -1381,7 +1386,7 @@ class TestReviewManagerT1RowBoundary:
             )
         )
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [102.0], "pct_chg": [2.0]})
         )
         rm._update_result = AsyncMock()
         await rm.run_review()
@@ -1449,6 +1454,7 @@ class TestReviewManagerRunReviewNoT0Row:
                     "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": ["20240615", "20240616"],
                     "close": [10.0, 10.5],
+                    "open": [10.0, 10.0],
                     "pct_chg": [1.0, 5.0],
                 }
             )
@@ -1491,12 +1497,13 @@ class TestReviewManagerRunReviewT5Calculation:
                     "20240618",
                 ],
                 "close": [10.0, 10.5, 11.0, 10.8, 10.2, 9.8, 9.5],
+                "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                 "pct_chg": [1.0, 5.0, 4.76, -1.82, -5.56, -3.92, -3.06],
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [102.0], "pct_chg": [2.0]})
         )
         rm._update_result = AsyncMock()
         await rm.run_review()
@@ -1530,12 +1537,13 @@ class TestReviewManagerRunReviewTimestampDate:
                 "ts_code": ["000001.SZ", "000001.SZ"],
                 "trade_date": [pd.Timestamp("2024-06-15"), pd.Timestamp("2024-06-16")],
                 "close": [10.0, 10.5],
+                "open": [10.0, 10.0],
                 "pct_chg": [1.0, 5.0],
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [102.0], "pct_chg": [2.0]})
         )
         rm._update_result = AsyncMock()
         await rm.run_review()
@@ -1569,6 +1577,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
                     "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
                     # D4-M4: T+5 窗口成熟后才会解析基准指数（fallback 场景移到 T+5 日）
                     "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
@@ -1607,6 +1616,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
                     "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
                     # D4-M4: T+5 窗口成熟后才会解析基准指数（fallback 场景移到 T+5 日）
                     "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
@@ -1652,6 +1662,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
                     "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
                     # D4-M4: T+5 窗口成熟后才会解析基准指数（fallback 场景移到 T+5 日）
                     "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
@@ -1696,6 +1707,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
                     "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
                     # D4-M4: T+5 窗口成熟后才会解析基准指数（fallback 场景移到 T+5 日）
                     "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
@@ -1747,6 +1759,7 @@ class TestReviewManagerRunReviewIndexApiFallback:
                     "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
                     # D4-M4: T+5 窗口成熟后才会解析基准指数（system 异常路径移到 T+5 日）
                     "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
@@ -1795,12 +1808,13 @@ class TestReviewManagerRunReviewLossLabel:
                     # D4-M4: 标签窗口取 T+5，alpha 以 T+5 超额计算；t5 日 close=9.0 → t5_pct=-10%，
                     # 减去指数 2% → alpha=-12% < -3% → LOSS（而非旧的 T+1 单日口径）
                     "close": [10.0, 10.05, 10.05, 10.05, 10.05, 9.0],
+                    "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                     "pct_chg": [1.0, -10.0, 0.0, 0.0, 0.0, -10.0],
                 }
             )
         )
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [102.0], "pct_chg": [2.0]})
         )
         rm._update_result = AsyncMock()
         await rm.run_review()
@@ -1835,12 +1849,13 @@ class TestReviewManagerRunReviewLossLabel:
                     "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
                     # D4-M4: T+5 窗口。t5 日 close=10.2 → t5_pct=2%，减去指数 2% → alpha=0 → DRAW
                     "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.2],
+                    "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 2.0, 0.0, 0.0, 0.0, 2.0],
                 }
             )
         )
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [102.0], "pct_chg": [2.0]})
         )
         rm._update_result = AsyncMock()
         await rm.run_review()
@@ -1859,8 +1874,11 @@ class TestReviewManagerRv01WindowMatches:
     """
 
     @staticmethod
-    def _index_quote_by_date(close_map: dict[str, float]):
-        """构造 quote_dao.get_index_daily 的 side_effect：按 trade_date 返回对应 close 的单行 df。"""
+    def _index_quote_by_date(quote_map: dict[str, tuple[float, float]]):
+        """构造 quote_dao.get_index_daily 的 side_effect：按 trade_date 返回对应 (open, close) 的单行 df。
+
+        RV-02: 基准窗口 = open[t1] → close[label]，故须同时提供 open 与 close 两点。
+        """
         import datetime as _dt
 
         async def _get(ts_code=None, trade_date=None, **kwargs):
@@ -1868,10 +1886,11 @@ class TestReviewManagerRv01WindowMatches:
                 day = trade_date.strftime("%Y%m%d")
             else:
                 day = str(trade_date).replace("-", "")
-            close = close_map.get(day)
-            if close is None:
-                return pd.DataFrame()  # 无该日指数数据 → 兜底路径（本用例不触发）
-            return pd.DataFrame({"close": [close], "pct_chg": [0.1]})
+            q = quote_map.get(day)
+            if q is None:
+                return pd.DataFrame()  # 无该日指数数据 → 兜底路径（本用例视场景不触发）
+            open_v, close_v = q
+            return pd.DataFrame({"open": [open_v], "close": [close_v], "pct_chg": [0.1]})
 
         return _get
 
@@ -1901,13 +1920,15 @@ class TestReviewManagerRv01WindowMatches:
                 "ts_code": ["000001.SZ"] * 6,
                 "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
                 "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.2],  # 个股 5 日累计 +2%
+                "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                 "pct_chg": [1.0, 2.0, 0.0, 0.0, 0.0, 2.0],
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
-        # 指数：T0=100、T+5=106（窗口 +6%）；T+5 当日 pct_chg 仅 +0.1%（旧实现会误用此值）
+        # 指数：T+1 开盘 100、T+5 收盘 106（窗口 +6%）；T+5 当日 pct_chg 仅 +0.1%（旧实现会误用此值）。
+        # RV-02: 窗口起点显式用 T+1(20240616) 开盘而非 T0，故 index map 落 T+1 而非 t0。
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            side_effect=self._index_quote_by_date({"20240615": 100.0, "20240620": 106.0})
+            side_effect=self._index_quote_by_date({"20240616": (100.0, 100.5), "20240620": (100.5, 106.0)})
         )
         rm._update_result = AsyncMock()
         await rm.run_review()
@@ -1946,12 +1967,15 @@ class TestReviewManagerRv01WindowMatches:
                 "ts_code": ["000001.SZ"] * 6,
                 "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
                 "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.2],
+                "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                 "pct_chg": [1.0, 2.0, 0.0, 0.0, 0.0, 2.0],
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
-        # T0=100 可得；T+5（20240620）本地缺失且 API 兜底也返回空 → 终点 close 不可得
-        mock_cache.quote_dao.get_index_daily = AsyncMock(side_effect=self._index_quote_by_date({"20240615": 100.0}))
+        # T+1(0616) 开盘可得；T+5(20240620) 本地缺失且 API 兜底也返回空 → 终点 close 不可得
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            side_effect=self._index_quote_by_date({"20240616": (100.0, 100.5)})
+        )
         rm._update_result = AsyncMock()
         await rm.run_review()
         # 不得崩溃；终点缺失 → 标签污染防护（不写 alpha）。RV-04: 数值-only 解耦写入
@@ -1990,13 +2014,15 @@ class TestReviewManagerRv01WindowMatches:
                 "ts_code": ["000001.SZ"] * 2,
                 "trade_date": ["20240615", "20240616"],
                 "close": [10.0, 10.5],  # 个股 1 日 +5%
+                "open": [10.0, 10.0],
                 "pct_chg": [1.0, 5.0],
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
-        # 指数 T0=100 → T+1=104（1 日窗口 +4%）：alpha = 5 - 4 = +1 → DRAW
+        # 指数 T+1（20240616）开盘 100 → 收盘 104（1 日窗口 +4%）：alpha = 5 - 4 = +1 → DRAW
+        # RV-02: t1 口径窗口起终点均落 T+1（open=100, close=104）。
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            side_effect=self._index_quote_by_date({"20240615": 100.0, "20240616": 104.0})
+            side_effect=self._index_quote_by_date({"20240616": (100.0, 104.0)})
         )
         rm._update_result = AsyncMock()
         await rm.run_review()
@@ -2038,12 +2064,13 @@ class TestReviewManagerCustomThresholds:
                     "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
                     # t5 日 close=10.5 → t5_pct=5%，指数 2% → alpha=3.0 < 5.0 → DRAW
                     "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
         )
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [102.0], "pct_chg": [2.0]})
         )
         rm._update_result = AsyncMock()
         await rm.run_review()
@@ -2080,12 +2107,13 @@ class TestReviewManagerCustomThresholds:
                     # D2-3：无 adj_factor 时 T+5 用 close 比率（t5=-6%），指数 2% → alpha=-8 → DRAW
                     # （与 pct_chg -6 一致，避免 mock 内部不一致）。
                     "close": [10.0, 10.05, 10.05, 10.05, 10.05, 9.4],
+                    "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                     "pct_chg": [1.0, -6.0, 0.0, 0.0, 0.0, -6.0],
                 }
             )
         )
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [102.0], "pct_chg": [2.0]})
         )
         rm._update_result = AsyncMock()
         await rm.run_review()
@@ -2121,12 +2149,13 @@ class TestReviewManagerCustomThresholds:
                     "ts_code": ["000001.SZ"] * 6,
                     "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
                     "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.4],
+                    "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 2.0, 0.0, 0.0, 0.0, 2.0],
                 }
             )
         )
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.6]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [101.6], "pct_chg": [1.6]})
         )
         rm._update_result = AsyncMock()
         await rm.run_review()
@@ -2162,6 +2191,7 @@ class TestReviewManagerRunReviewExceptionInRow:
                     "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": ["20240615", "20240616"],
                     "close": [10.0, 10.5],
+                    "open": [10.0, 10.0],
                     "pct_chg": [1.0, 5.0],
                 }
             )
@@ -2603,6 +2633,7 @@ class TestReviewManagerR9Sanitization:
                     "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
                     # D4-M4: T+5 窗口成熟后才会解析基准指数，触发内层 _resolve_index_close 的 safe_error 路径
                     "close": [10.0, 10.05, 10.05, 10.05, 10.05, 10.5],
+                    "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 5.0, 0.0, 0.0, 0.0, 5.0],
                 }
             )
@@ -2663,6 +2694,7 @@ class TestReviewManagerR9Sanitization:
                     "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": ["20240615", "20240616"],
                     "close": [10.0, 10.5],
+                    "open": [10.0, 10.0],
                     "pct_chg": [1.0, 5.0],
                 }
             )
@@ -2727,13 +2759,14 @@ class TestReviewManagerQfqAdjustedReturn:
                 "ts_code": ["000001.SZ"] * 6,
                 "trade_date": ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"],
                 "close": [10.0, 10.5, 5.25, 5.3, 5.35, 5.4],
+                "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                 "pct_chg": [1.0, 5.0, -50.0, 0.95, 0.94, 0.93],
                 "adj_factor": [1.0, 1.0, 0.5, 0.5, 0.5, 0.5],
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [102.0], "pct_chg": [2.0]})
         )
         rm._update_result = AsyncMock()
         await rm.run_review()
@@ -2772,6 +2805,7 @@ class TestReviewManagerQfqAdjustedReturn:
                 "ts_code": ["000001.SZ", "000001.SZ"],
                 "trade_date": ["20240610", "20240611"],
                 "close": [10.0, 5.0],
+                "open": [10.0, 5.0],
                 "pct_chg": [1.0, -50.0],
                 "adj_factor": [1.0, 0.5],
             }
@@ -2836,7 +2870,7 @@ class TestReviewManagerSuspendProtection:
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [102.0], "pct_chg": [2.0]})
         )
         rm._update_result = AsyncMock()
         await rm.run_review()
@@ -2856,11 +2890,11 @@ class TestReviewManagerBackfill:
         # D4-M4: backfill_horizon_returns 现在解析基准指数以定稿 T+5 标签。
         # 统一 stub 索引预取与单日解析，否则真实 _prefetch/_resolve 依赖 DB/API mock。
         rm._prefetch_index_cache = AsyncMock(return_value={})
-        # RV-01: 基准侧取窗口累计收益，需按日期解析 close（指数点位）。
-        # 本组用例 t0=20240610 → 100.0、T+5=20240617 → 102.0，窗口 +2%，
+        # RV-01/RV-02: 基准侧取窗口累计收益，需按日期解析 (open, close) 两点。
+        # 本组用例 T+1(20240611) 开盘 → 100.0、T+5=20240617 → 102.0，窗口 +2%，
         # 与旧断言 index_pct/alpha 数值保持逐位一致。
-        rm._resolve_index_close = AsyncMock(
-            side_effect=lambda _idx, d: 102.0 if str(d).replace("-", "") == "20240617" else 100.0
+        rm._resolve_index_quote = AsyncMock(
+            side_effect=lambda _idx, d: (100.0, 102.0) if str(d).replace("-", "") == "20240617" else (100.0, 100.0)
         )
         rm._batch_backfill_t5 = AsyncMock()
         # RV-04: B 类补标签候选通道（数值已齐、标签未定稿）——默认无候选，
@@ -2912,6 +2946,7 @@ class TestReviewManagerBackfill:
                 "ts_code": ["000001.SZ"] * 6,
                 "trade_date": ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"],
                 "close": [10.0, 10.5, 11.0, 10.8, 10.2, 9.8],
+                "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                 "adj_factor": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
             }
         )
@@ -2945,6 +2980,7 @@ class TestReviewManagerBackfill:
                 "ts_code": ["000001.SZ"] * 6,
                 "trade_date": ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"],
                 "close": [10.0, 10.5, 11.0, 10.8, 10.2, 9.8],
+                "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                 "adj_factor": [1.0] * 6,
             }
         )
@@ -2996,6 +3032,7 @@ class TestReviewManagerBackfill:
                     "20240617",
                 ],
                 "close": [10.0, 10.5, 11.0, 10.8, 10.2, 20.0, 21.0, 22.0, 21.5, 20.8, 19.4],
+                "open": [10.0, 10.0, 10.0, 10.0, 10.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0],
                 "adj_factor": [1.0] * 11,
             }
         )
@@ -3021,6 +3058,7 @@ class TestReviewManagerBackfill:
                 "ts_code": ["000001.SZ"] * 6,
                 "trade_date": ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"],
                 "close": [10.0, 10.5, 11.0, 10.8, 10.2, 9.8],
+                "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
@@ -3292,6 +3330,7 @@ class TestReviewManagerT1Backfill:
                     "ts_code": ["000001.SZ"] * 3,
                     "trade_date": ["20240610", "20240611", "20240612"],
                     "close": [10.0, 10.5, 11.0],
+                    "open": [10.0, 10.0, 10.0],
                     "adj_factor": [1.0, 1.0, 1.0],
                 }
             ),
@@ -3328,6 +3367,7 @@ class TestReviewManagerT1Backfill:
                     "ts_code": ["000001.SZ"] * 3,
                     "trade_date": ["20240610", "20240611", "20240612"],
                     "close": [10.0, 10.5, 11.0],
+                    "open": [10.0, 10.0, 10.0],
                     "adj_factor": [1.0, 1.0, 1.0],
                 }
             ),
@@ -3366,6 +3406,7 @@ class TestReviewManagerT1Backfill:
                         "20240612",
                     ],
                     "close": [10.0, 11.0, 20.0, 20.5, 21.0],
+                    "open": [10.0, 10.0, 20.0, 20.0, 20.0],
                     "adj_factor": [1.0, 1.0, 1.0, 1.0, 1.0],
                 }
             ),
@@ -3393,6 +3434,7 @@ class TestReviewManagerT1Backfill:
                     "ts_code": ["000001.SZ"] * 3,
                     "trade_date": ["20240610", "20240611", "20240612"],
                     "close": [10.0, 10.5, 11.0],
+                    "open": [10.0, 10.0, 10.0],
                     "adj_factor": [1.0, 1.0, 1.0],
                     "pct_chg": [1.0, float("nan"), 1.0],
                 }
@@ -3416,6 +3458,7 @@ class TestReviewManagerT1Backfill:
                     "ts_code": ["000001.SZ"] * 3,
                     "trade_date": ["20240610", "20240611", "20240612"],
                     "close": [10.0, 10.5, 11.0],
+                    "open": [10.0, 10.0, 10.0],
                     "adj_factor": [1.0, 1.0, 1.0],
                 }
             ),
@@ -3442,6 +3485,7 @@ class TestReviewManagerT1Backfill:
                     "ts_code": ["000001.SZ"] * 3,
                     "trade_date": ["20240610", "20240611", "20240612"],
                     "close": [10.0, 10.5, 11.0],
+                    "open": [10.0, 10.0, 10.0],
                     "adj_factor": [1.0, 1.0, 1.0],
                 }
             ),
@@ -3463,6 +3507,7 @@ class TestReviewManagerT1Backfill:
                 "ts_code": ["000001.SZ"] * 3,
                 "trade_date": ["20240610", "20240611", "20240612"],
                 "close": [10.0, 10.5, 11.0],
+                "open": [10.0, 10.0, 10.0],
             }
         )
         rm, mock_cache = self._make_rm(
@@ -3486,12 +3531,14 @@ class TestReviewManagerT1Backfill:
             return_value=pd.DataFrame(
                 {
                     "trade_date": [datetime.date(2024, 6, 10), "20240611", "2024-06-12"],
+                    "open": [3000.0, None, 3200.0],
                     "close": [3100.0, None, 3150.0],
                 }
             )
         )
         cache = await rm._prefetch_index_cache("000300.SH", datetime.date(2024, 6, 1), datetime.date(2024, 6, 30))
-        assert cache == {"20240610": 3100.0, "20240612": 3150.0}
+        # RV-02: 缓存结构改为 {YYYYMMDD: (open, close)}，且 open/close 均有效才写 key。
+        assert cache == {"20240610": (3000.0, 3100.0), "20240612": (3200.0, 3150.0)}
         assert "20240611" not in cache  # RV-01: 缺失 close 不缓存，交探测逻辑兜底
 
     @pytest.mark.asyncio
@@ -3575,7 +3622,7 @@ class TestReviewManagerMarketCalendar:
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [102.0], "pct_chg": [2.0]})
         )
         rm._batch_update_results = AsyncMock()
         # 全市场日历含 6/10, 6/11, 6/12；个股行情缺 6/11 → T+1 锚定 6/11 但无行情行
@@ -3605,20 +3652,21 @@ class TestReviewManagerMarketCalendar:
         mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(return_value=[])
         quotes = pd.DataFrame(
             {
-                "ts_code": ["000001.SZ"] * 4,
-                "trade_date": ["20240610", "20240613", "20240614", "20240617"],
-                "close": [10.0, 10.5, 10.8, 9.8],
-                "adj_factor": [1.0] * 4,
+                "ts_code": ["000001.SZ"] * 5,
+                "trade_date": ["20240610", "20240611", "20240613", "20240614", "20240617"],
+                "close": [10.0, 10.05, 10.5, 10.8, 9.8],
+                "open": [10.0, 10.0, 10.0, 10.0, 10.0],
+                "adj_factor": [1.0] * 5,
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
         rm = ReviewManager()
         rm.cache = mock_cache
         # D4-M4: backfill_horizon_returns 现在解析基准指数来定稿 T+5 标签，此处 stub 索引。
-        # RV-01: 基准侧取窗口累计收益，stub 按日期解析 close（t0=0610→100.0，T+5=0617→102.0，窗口 +2%）。
+        # RV-02: 窗口起点改 T+1 开盘，stub 按日期解析 (open, close)（T+1=0611→open 100.0，T+5=0617→close 102.0，窗口 +2%）。
         rm._prefetch_index_cache = AsyncMock(return_value={})
-        rm._resolve_index_close = AsyncMock(
-            side_effect=lambda _idx, d: 102.0 if str(d).replace("-", "") == "20240617" else 100.0
+        rm._resolve_index_quote = AsyncMock(
+            side_effect=lambda _idx, d: (100.0, 102.0) if str(d).replace("-", "") == "20240617" else (100.0, 100.0)
         )
         rm._batch_backfill_t5 = AsyncMock()
         # 全市场日历为 6 个交易日；t0=6/10 → T+5 = 日历第 5 个交易日 6/17
@@ -3659,7 +3707,7 @@ class TestReviewManagerMarketCalendar:
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [2.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [102.0], "pct_chg": [2.0]})
         )
         rm = ReviewManager()
         rm.cache = mock_cache
@@ -3911,3 +3959,160 @@ class TestReviewManagerMarketCalendar:
                 count = await rm.backfill_t1_returns()
         assert count == 0
         rm._batch_update_results.assert_not_called()
+
+
+class TestReviewManagerRv02OpenBasis:
+    """RV-02: 买入基准由 T0 收盘改为 T+1 开盘复权价（对齐回测默认 next_open）。
+
+    判据覆盖：
+    - 个股侧 t5_pct 以 T+1 开盘为基准（排除取 T0 收盘 / T+1 收盘的错误实现）；
+    - 指数侧以 T+1 开盘→T+5 收盘为同窗口（排除 T0 起点）；
+    - T+1 开盘缺失 → 整记录跳过；T+5 缺行 → t5 留 NULL（T+1 仍推进）。
+    """
+
+    @staticmethod
+    def _quotes(*, with_t5: bool = True, t1_open: float | None = 11.0) -> pd.DataFrame:
+        """RV-02 标准行情：T0 收盘 10、T+1 跳空开盘 11 / 收盘 11.5、T+5 收盘 12。
+
+        open≠close（T+1 开盘 11 ≠ 收盘 11.5）以便判据能区分开盘基准与收盘基准。
+        """
+        if with_t5:
+            trade_dates = ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"]
+            close = [10.0, 11.5, 11.6, 11.7, 11.8, 12.0]
+            open_ = [10.0, t1_open, 11.0, 11.0, 11.0, 11.0]
+        else:
+            # 只到 T+4：T+5(20240617) 缺行 → t5 留 NULL
+            trade_dates = ["20240610", "20240611", "20240612", "20240613", "20240614"]
+            close = [10.0, 11.5, 11.6, 11.7, 11.8]
+            open_ = [10.0, t1_open, 11.0, 11.0, 11.0]
+        return pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * len(trade_dates),
+                "trade_date": trade_dates,
+                "open": open_,
+                "close": close,
+                "adj_factor": [1.0] * len(trade_dates),
+                "pct_chg": [1.0] * len(trade_dates),
+            }
+        )
+
+    def _pending(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "id": [1],
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240610"],
+                "ai_score": [80],
+                "ai_reason": ["test"],
+            }
+        )
+
+    def _make_run_review_rm(self, mock_cm, quotes):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(return_value=self._pending())
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        # 基准探针（_resolve_benchmark / 单日兜底）：返回有效 (open, close) 即可，无须命中具体指数。
+        rm._resolve_index_quote = AsyncMock(return_value=(100.0, 100.0))
+        rm._prefetch_index_cache = AsyncMock(return_value={})
+        rm._batch_update_results = AsyncMock()
+        return rm
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_criterion_a_stock_t5_basis_uses_t1_open(self, mock_cm, mock_tc):
+        """判据 A（个股侧）：T0 收盘 10 → T+1 跳空开盘 11、T+5 收盘 12。
+
+        t5_pct 必须以 T+1 开盘（11）为买入基准：round((12/11-1)*100,4)≈9.0909。
+        排除错误实现——取 T0 收盘 10 得 20%、取 T+1 收盘 11.5 得 ≈4.3478。
+        """
+        rm = self._make_run_review_rm(mock_cm, self._quotes())
+        await rm.run_review()
+        rm._batch_update_results.assert_called_once()  # noqa: weak-assertion 哨兵防未调用；下一行解包 + 数值断言为强验证
+        (u,) = rm._batch_update_results.call_args.args[0]
+        expected = round((12.0 / 11.0 - 1.0) * 100.0, 4)
+        assert u["t5_pct"] == pytest.approx(expected)
+        # 排除性：误取 T0 收盘（10）会得到 20%，误取 T+1 收盘（11.5）会得到 ≈4.35%，均不等于 9.09%。
+        assert u["t5_pct"] != pytest.approx(round((12.0 / 10.0 - 1.0) * 100.0, 4))
+        assert u["t5_pct"] != pytest.approx(round((12.0 / 11.5 - 1.0) * 100.0, 4))
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_criterion_b_index_window_uses_t1_open_to_label_close(self, mock_cm, mock_tc):
+        """判据 B（指数侧同窗口）：T+1 开盘 3000 → T+5 收盘 3180，窗口 +6%。
+
+        index_pct 必须 = close(label)/open(t1)-1 = 3180/3000-1 ≈ 6.0，
+        排除误把 T0 收盘（2950，另存于缓存仅作反证）当窗口起点的实现。
+        """
+        rm = self._make_run_review_rm(mock_cm, self._quotes())
+        # 缓存显式给出：T0(0610) 收盘 2950（证明起点不是 T0）、T+1(0611) 开盘 3000、
+        # T+5(0617) 收盘 3180。窗口 = open(0611)[0] 与 close(0617)[1]。
+        rm._prefetch_index_cache = AsyncMock(
+            return_value={
+                "20240610": (2900.0, 2950.0),
+                "20240611": (3000.0, 3050.0),
+                "20240617": (3160.0, 3180.0),
+            }
+        )
+        # _resolve_benchmark 探针只需有非 None 的 (open, close)；真正窗口取自 prefetch 缓存。
+        rm._resolve_index_quote = AsyncMock(return_value=(3000.0, 2950.0))
+        await rm.run_review()
+        rm._batch_update_results.assert_called_once()  # noqa: weak-assertion 哨兵；下方 call_args 解包 + index_pct/alpha 数值断言强验证
+        (u,) = rm._batch_update_results.call_args.args[0]
+        assert u["index_pct"] == pytest.approx((3180.0 / 3000.0 - 1.0) * 100.0)  # ≈6.0
+        # 排除性：若误以 T0 收盘 2950 为起点，会得到 ≈7.80% 而非 6%。
+        assert u["index_pct"] != pytest.approx((3180.0 / 2950.0 - 1.0) * 100.0)
+        # alpha 以同一窗口收益相减：t5_pct - 6.0
+        t5_pct = round((12.0 / 11.0 - 1.0) * 100.0, 4)
+        assert u["alpha"] == pytest.approx(round(t5_pct - (3180.0 / 3000.0 - 1.0) * 100.0, 4))
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_t1_open_missing_skips_record(self, mock_cm, mock_tc):
+        """T+1 行存在但开盘为 0（缺失）→ 买入基准不可得，整记录跳过（不更新）。"""
+        rm = self._make_run_review_rm(mock_cm, self._quotes(t1_open=0.0))
+        await rm.run_review()
+        rm._batch_update_results.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_t5_missing_keeps_t5_null_but_t1_staged(self, mock_cm, mock_tc):
+        """T+1 开盘可得、但 T+5 缺行 → t5_pct 留 NULL，仍以 T+1 数值推进（DRAW 占位）。"""
+        rm = self._make_run_review_rm(mock_cm, self._quotes(with_t5=False))
+        await rm.run_review()
+        rm._batch_update_results.assert_called_once()  # noqa: weak-assertion 哨兵；下方解包断言 t5_pct None + T+1 数值强验证
+        (u,) = rm._batch_update_results.call_args.args[0]
+        assert u["t5_pct"] is None
+        assert u["pct"] == pytest.approx(round((11.5 / 11.0 - 1.0) * 100.0, 4))  # (11.5/11-1)*100
+        assert u["label"] == "DRAW"
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_criterion_backfill_horizon_uses_t1_open(self, mock_cm, mock_tc):
+        """backfill_horizon_returns（A 类 T1_DONE）与 run_review 同一 T+1 开盘基准。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(return_value=[])
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=self._quotes())
+        rm._resolve_index_quote = AsyncMock(return_value=(100.0, 100.0))
+        rm._prefetch_index_cache = AsyncMock(return_value={})
+        rm._batch_backfill_t5 = AsyncMock()
+        count = await rm.backfill_horizon_returns()
+        assert count == 1
+        rm._batch_backfill_t5.assert_called_once()  # noqa: weak-assertion 哨兵；下方解包 + t5_pct 数值断言强验证
+        (u,) = rm._batch_backfill_t5.call_args.args[0]
+        assert u["t5_pct"] == pytest.approx(round((12.0 / 11.0 - 1.0) * 100.0, 4))
+        # 排除性：误取 T0 收盘 10 会得到 20% 而非 9.09%
+        assert u["t5_pct"] != pytest.approx(round((12.0 / 10.0 - 1.0) * 100.0, 4))

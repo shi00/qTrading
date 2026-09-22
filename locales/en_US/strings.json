@@ -1532,6 +1532,7 @@
     "prediction_win": "Win",
     "prediction_loss": "Loss",
     "review_section_title": "Review",
+    "review_basis_label": "Returns measured from T+1 open execution",
     "filter_attribution_title": "Filter Attribution",
     "filter_attribution_note": "Stocks below passed screening; showing their pass conditions",
     "filter_attribution_rank": "Rank: {position} / {total} (by {field}, {order})",

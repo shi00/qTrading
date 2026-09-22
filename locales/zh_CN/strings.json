@@ -1523,6 +1523,7 @@
     "prediction_win": "胜",
     "prediction_loss": "负",
     "review_section_title": "复盘",
+    "review_basis_label": "收益以 T+1 开盘成交基准计",
     "filter_attribution_title": "筛选条件归因",
     "filter_attribution_note": "本列表为已通过筛选的股票，以下为其通过条件",
     "filter_attribution_rank": "排名：{position} / {total}（按{field}，{order}）",
