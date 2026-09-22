@@ -11,9 +11,15 @@ from unittest.mock import MagicMock, AsyncMock, patch
 import pandas as pd
 
 from data.persistence.daos.screener_dao import ScreenerDao, _derive_screening_from_fundamental
+from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.stock_dao import stock_alive_condition
-from data.constants import REVIEW_STATUS_COMPLETED, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE
+from data.constants import (
+    REVIEW_STATUS_COMPLETED,
+    REVIEW_STATUS_EXPIRED,
+    REVIEW_STATUS_PENDING,
+    REVIEW_STATUS_T1_DONE,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
 
@@ -1677,3 +1683,72 @@ class TestScreenerDaoScreeningDerivation:
         assert _derive_screening_from_fundamental(None) is None
         empty = pd.DataFrame()
         assert _derive_screening_from_fundamental(empty) is empty
+
+
+class TestExpireStalePending:
+    """RV-11: 常驻过期清扫 expire_stale_pending（DAO 层）。"""
+
+    @pytest.mark.asyncio
+    async def test_returns_rowcount(self):
+        """execute 返回 rowcount，方法原样透传清理条数。"""
+        from contextlib import asynccontextmanager
+
+        mock_engine = MagicMock()
+        dao = ScreenerDao(mock_engine)
+        dao._check_engine = MagicMock()
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+        mock_conn = AsyncMock()
+        mock_conn.execute.return_value.rowcount = 5
+
+        @asynccontextmanager
+        async def mock_guarded_begin(conn=None):
+            yield mock_conn
+
+        dao._guarded_begin = mock_guarded_begin
+        count = await dao.expire_stale_pending()
+        assert count == 5
+        mock_conn.execute.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_sql_updates_status_and_anchors_lookback(self):
+        """UPDATE 置 EXPIRED；WHERE 含 PENDING/NULL、t1_pct IS NULL、trade_date < 交易日锚。"""
+        from contextlib import asynccontextmanager
+
+        mock_engine = MagicMock()
+        dao = ScreenerDao(mock_engine)
+        dao._check_engine = MagicMock()
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+        mock_conn = AsyncMock()
+
+        @asynccontextmanager
+        async def mock_guarded_begin(conn=None):
+            yield mock_conn
+
+        dao._guarded_begin = mock_guarded_begin
+        await dao.expire_stale_pending(lookback_trade_days=60)
+        stmt = mock_conn.execute.call_args.args[0]
+        sql = str(stmt)
+        compiled = stmt.compile()
+        # 语义对齐迁移 0026：置 EXPIRED、只动 PENDING/NULL、t1_pct IS NULL、
+        # trade_date < 最近 lookback 个交易日的锚点（trade_cal 子查询，OFFSET 参数化）。
+        assert "screening_history" in sql
+        assert "trade_cal" in sql
+        assert "t1_pct IS NULL" in sql
+        assert any(v == REVIEW_STATUS_EXPIRED for v in compiled.params.values())
+        assert any(v == REVIEW_STATUS_PENDING for v in compiled.params.values())
+        # 参数化：OFFSET 绑定参数（值=lookback-1=59，非字符串拼接，R4）
+        assert any(v == 59 for v in compiled.params.values())
+        assert "OFFSET" in sql
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_raises(self):
+        """R5: disposed 引擎上 expire 必须上抛 EngineDisposedError（不吞没）。"""
+        mock_engine = MagicMock()
+        dao = ScreenerDao(mock_engine)
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+        # R5 守卫路径：_check_engine 检测到 disposed 引擎即上抛（与既有 DAO 行为一致）
+        dao._check_engine = MagicMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError, match="disposed") as exc_info:
+            await dao.expire_stale_pending()
+        # 强断言：异常类型 + message 均验证（weak-assertion 要求 raises 后须有断言）
+        assert isinstance(exc_info.value, EngineDisposedError)
