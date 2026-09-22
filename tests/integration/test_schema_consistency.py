@@ -217,9 +217,10 @@ class TestMetadataVsAlembicConsistency:
 
         # 关键索引/唯一约束断言
         # DAT-15: idx_sh_run_id 已被删除（冗余）。
-        # LIFE-03: 唯一约束由 uq_screening_history_run_code(run_id, ts_code) 改为
-        # uq_screening_history_dat_strategy_code(trade_date, strategy_name, ts_code)，run_id 降级为普通列。
-        key_indexes = {"idx_sh_date_strategy", "idx_sh_date_code", "uq_screening_history_dat_strategy_code"}
+        # RV-03: 唯一约束由 uq_screening_history_dat_strategy_code(trade_date, strategy_name, ts_code)
+        # 改为 uq_screening_history_dat_strategy_code_run(trade_date, strategy_name, ts_code, run_id)，
+        # 研究记录 append-only（同天多次运行各自成行）。
+        key_indexes = {"idx_sh_date_strategy", "idx_sh_date_code", "uq_screening_history_dat_strategy_code_run"}
         for idx in key_indexes:
             assert idx in meta_indexes, f"Metadata missing index: {idx}"
             assert idx in alembic_indexes, f"Alembic missing index: {idx}"
