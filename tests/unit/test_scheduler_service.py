@@ -221,6 +221,40 @@ class TestSchedulerServiceOnJobEvents:
         event.scheduled_run_time = "2024-01-01"
         svc._on_job_missed(event)
 
+    @pytest.mark.asyncio
+    @patch("utils.scheduler_service.ConfigHandler")
+    async def test_on_job_missed_retains_catchup_task(self, mock_ch):
+        """F1 (OSS 检视): misfire 补偿 create_task 保存在实例集合并随完成自动移除。
+
+        事件循环仅持弱引用，无强引用时补偿任务可能在执行中途被 GC 静默丢失
+        （漏跑且无日志）。本用例验证：可补偿 job misfire 时 task 被持有，
+        且 add_done_callback(discard) 在完成后释放引用。
+        """
+        mock_ch.get_setting.return_value = None
+        svc = SchedulerService()
+        event = MagicMock()
+        event.job_id = "daily_update"
+        event.scheduled_run_time = "2026-09-22"
+        with patch.object(svc, "_catch_up_missed_updates", new=AsyncMock()) as mock_catchup:
+            svc._on_job_missed(event)
+            assert len(svc._catchup_tasks) == 1, "补偿任务必须被实例集合持引用"
+            task = next(iter(svc._catchup_tasks))
+            await task
+            assert len(svc._catchup_tasks) == 0, "任务完成后应从集合移除（discard）"
+            mock_catchup.assert_awaited_once_with(include_today=True)
+
+    @pytest.mark.asyncio
+    @patch("utils.scheduler_service.ConfigHandler")
+    async def test_on_job_missed_ignores_irrelevant_job(self, mock_ch):
+        """F1 配套: 不可补偿的 job（白名单外）不创建补偿任务。"""
+        mock_ch.get_setting.return_value = None
+        svc = SchedulerService()
+        event = MagicMock()
+        event.job_id = "test_job"
+        event.scheduled_run_time = "2026-09-22"
+        svc._on_job_missed(event)
+        assert len(svc._catchup_tasks) == 0
+
     @patch("utils.scheduler_service.ConfigHandler")
     def test_on_job_error_cancelled(self, mock_ch):
         import asyncio
