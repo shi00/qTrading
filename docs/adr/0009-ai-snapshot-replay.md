@@ -24,7 +24,8 @@ BIZ-04 第一层（能力边界声明，PR #933）已消除「回测证明了 AI
 
 1. **第一层（本次落地）：统计归因视图**。`screener_dao.get_ai_attribution_stats()` 按
    `(strategy_name, benchmark_code, has_ai, trade_date)` 日级聚合（复用 UX-05 复盘统计口径：
-   DISTINCT ON 覆盖语义 + 180 天窗口），`review_stats_service.compute_ai_attribution_stats()`
+   DISTINCT ON 取最近一次运行（RV-03 append-only 后为显式真逻辑）+ 180 天窗口），
+   `review_stats_service.compute_ai_attribution_stats()`
    纯函数换算为归因行（复用 `_metric_stat`/`MetricStat`/`SampleGrade` 基础设施），
    history 侧栏新增「AI 效果归因」展开区，同策略 AI 组/无 AI 组并排展示。
 2. **第二层（后续增强，本次不实现）：回测快照信号源**。把历史 AI 记录作为回测引擎的信号源，
@@ -36,7 +37,7 @@ BIZ-04 第一层（能力边界声明，PR #933）已消除「回测证明了 AI
 **正向**
 - 为「AI 有没有用」提供诚实、可追溯的归因路径：数据是历史上真实发生的 AI 判断与其真实后市表现，
   无 LLM 重放成本、无前视偏差、无「AI 有效」误读。
-- 完全复用 UX-05 复盘统计基础设施（覆盖语义、日序列 N、t 分布 CI、样本分级），口径一致、无重复造轮子。
+- 完全复用 UX-05 复盘统计基础设施（同日同股取最近一次运行、日序列 N、t 分布 CI、样本分级），口径一致、无重复造轮子。
 
 **负向与局限（须在 UI 文案与本文档明示）**
 - **代理口径**：`ai_score IS NOT NULL` 近似「真实 AI 判断」，但无 AI 组可能混入「AI 启用但失败/未确认」

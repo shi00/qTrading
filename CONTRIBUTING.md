@@ -668,9 +668,10 @@ except Exception as e:
 - [0004-redlines-yaml-format.md](./docs/adr/0004-redlines-yaml-format.md) — redlines.yml 格式决策
 - [0005-enforcement-mapping-check.md](./docs/adr/0005-enforcement-mapping-check.md) — enforcement 字段映射不变量
 - [0006-override-agents-pure-pointer.md](./docs/adr/0006-override-agents-pure-pointer.md) — AGENTS.md 从纯指针改为最小安全集 + 指针
-- [0007-screening-history-override-pk.md](./docs/adr/0007-screening-history-override-pk.md) — screening_history 唯一键改覆盖语义
+- [0007-screening-history-override-pk.md](./docs/adr/0007-screening-history-override-pk.md) — screening_history 唯一键改覆盖语义（已被 ADR-0010 反转）
 - [0008-no-ai-execution.md](./docs/adr/0008-no-ai-execution.md) — 不给 AI 执行权，仅输出评分和文本
 - [0009-ai-snapshot-replay.md](./docs/adr/0009-ai-snapshot-replay.md) — AI 结论快照回放（统计归因视图落地，回测快照信号源为后续增强）
+- [0010-screening-history-append-only.md](./docs/adr/0010-screening-history-append-only.md) — screening_history 唯一键改回 append-only（含 run_id，反转 ADR-0007）
 
 ### docs/governance/ — 治理类机器可读文件
 

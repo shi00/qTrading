@@ -1,8 +1,12 @@
 # ADR-0007: screening_history 唯一键改覆盖语义
 
-> Status: Accepted
+> Status: Superseded by [ADR-0010](./0010-screening-history-append-only.md)
 > Date: 2026-09-12
 > Owner: 架构维护者
+
+> 2026-09-22 修订：RV-03（REVIEW-05）反转本决策——唯一键改回 append-only
+> `(trade_date, strategy_name, ts_code, run_id)`，原因与权衡见 ADR-0010。本文保留
+> 作为覆盖语义时期的决策溯源。
 
 ## Context
 
