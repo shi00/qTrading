@@ -110,7 +110,7 @@ def _on_acknowledgment_change_factory(vm: LLMConfigPanelViewModel) -> Callable[[
     """
 
     def _on_acknowledgment_change(e: ft.ControlEvent) -> None:
-        checked = bool(e.control.value) if e.control else False
+        checked = bool(e.control.value) if e.control else False  # type: ignore[reportAttributeAccessIssue]  # Flet ControlEvent.control 为动态控件基类，value 属性未在 stub 声明
         try:
             page = ft.context.page
             if page is not None:

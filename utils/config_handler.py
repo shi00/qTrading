@@ -4,7 +4,7 @@ import contextvars
 import json
 import logging
 import os
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from readerwriterlock import rwlock
 
@@ -49,7 +49,7 @@ class ConfigHandler:
     调用点归零后应删除本 facade 或将其降级为最小 re-export。
     """
 
-    _config_cache = None
+    _config_cache: dict[str, Any] | None = None
     _lock = rwlock.RWLockFair()
     _io_workers_cap_warned: bool = False
     # P3-M4-DbUrlOverride-Mock-In-Prod: async-safe thread-local override for

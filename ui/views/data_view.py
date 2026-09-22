@@ -664,7 +664,7 @@ def TableViewerTab(
                             msg,
                             "success",
                             action_text=I18n.get("data_export_open_folder"),
-                            on_action=lambda: page.run_task(open_export_folder, filepath),
+                            on_action=lambda: page.run_task(open_export_folder, filepath),  # type: ignore[reportOptionalMemberAccess]  # 外层 if page is not None 已守卫；lambda 闭包捕获使 pyright 丢失窄化
                         )
                         # Phase 6.3 (FR-UX-006): 截断警告 toast (导出全部且达到上限)
                         if not current_page and len(df) >= MAX_EXPORT_ROWS:

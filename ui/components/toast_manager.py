@@ -424,7 +424,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
                 logger.debug("[ToastManager] Auto-dismiss failed: %s", DataSanitizer.sanitize_error(exc), exc_info=True)
 
         task = page.run_task(_run_timer)
-        task_ref.current = task
+        task_ref.current = task  # type: ignore[reportAttributeAccessIssue]  # use_ref(None) 推断 MutableRef[None]，实际承载 asyncio.Task（沿用既有 hovered/expanded ref 模式）
         _register_task(task)
 
     async def cleanup() -> None:

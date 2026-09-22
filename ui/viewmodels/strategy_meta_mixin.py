@@ -251,7 +251,7 @@ class StrategyMetaMixin:
                     key=key,
                     name_key=name_key,
                     missing_apis=tuple(info.get("missing_apis", [])),
-                    supports_ai=bool(strategy_obj.supports_ai),
+                    supports_ai=bool(strategy_obj.supports_ai),  # type: ignore[reportOptionalMemberAccess]  # get_strategy 可能返回 None，supports_ai 属性在 DynamicStrategy 基类定义
                 )
             )
         return tuple(rows)

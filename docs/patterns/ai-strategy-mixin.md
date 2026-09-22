@@ -30,13 +30,13 @@ class MyAIStrategy(BaseStrategy, AIStrategyMixin):
     required_tables: tuple[str, ...] = ("daily_quotes",)
 
     # 类属性（与 strategies/ai_mixin.py 中 AIStrategyMixin 定义保持一致）
-    enable_ai_analysis: bool = True           # False 跳过 Phase 2 AI 分析
-    ai_risk_check_in_prompt: bool = False     # True 时承载定性风险检查职责
+    enable_ai_analysis: bool = True  # False 跳过 Phase 2 AI 分析
+    ai_risk_check_in_prompt: bool = False  # True 时承载定性风险检查职责
 
     @require_quality(QualityTier.SILVER, require_continuous_window=True)
     async def filter(self, context: StrategyContext) -> pd.DataFrame:
         # Phase 1: 数学筛选出候选集 candidates_df
-        candidates_df = self._math_filter(context)   # 策略自身的数学筛选
+        candidates_df = self._math_filter(context)  # 策略自身的数学筛选
         if candidates_df.empty:
             return pd.DataFrame()
         # Phase 2: AI 增强（真实完整示例见 strategies/oversold_strategy.py::OversoldStrategy）

@@ -651,6 +651,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     nonlocal abort_sync, processed_count
                     if self._shutdown_event.is_set() or abort_sync:
                         return
+                    date = to_date(date)  # E3: 归一化 datetime.date（与 sync_one_day:516 一致，str 无 strftime）
                     async with sem:
                         # SYNC-05: 熔断检查与主批次路径一致。重试阶段若失败率已触发熔断，
                         # 立即中止重试（否则会老实把 MAX_RETRIES 轮全部跑完，无谓消耗 API 配额）。

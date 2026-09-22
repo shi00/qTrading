@@ -25,12 +25,24 @@
   "reportUnknownParameterType": "none",
   "reportMissingParameterType": "none",
   "reportMissingTypeArgument": "none",
-  "reportOptionalMemberAccess": "warning",
+  "reportOptionalMemberAccess": "error",
   "reportArgumentType": "warning",
-  "reportAttributeAccessIssue": "warning",
+  "reportAttributeAccessIssue": "error",
   "reportOptionalSubscript": "warning",
   "reportCallIssue": "error",
   "reportOptionalOperand": "error",
   "reportOptionalIterable": "error",
-  "reportGeneralTypeIssues": "error"
+  "reportGeneralTypeIssues": "error",
+  "executionEnvironments": [
+    {
+      "root": "tests",
+      "reportOptionalMemberAccess": "warning",
+      "reportAttributeAccessIssue": "warning"
+    },
+    {
+      "root": "scripts",
+      "reportOptionalMemberAccess": "warning",
+      "reportAttributeAccessIssue": "warning"
+    }
+  ]
 }

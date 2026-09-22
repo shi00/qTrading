@@ -68,14 +68,14 @@ def _unprotect_win32_blob(blob: bytes) -> bytes:  # pragma: no cover -- win-only
     in_blob.cbData = wintypes.DWORD(len(blob))
     in_blob.pbData = ctypes.cast(ctypes.create_string_buffer(blob), ctypes.POINTER(ctypes.c_char))
     out_blob = DATA_BLOB()
-    crypt32 = ctypes.windll.crypt32
+    crypt32 = ctypes.windll.crypt32  # type: ignore[reportAttributeAccessIssue]  # Windows-only：ctypes.windll 在 Linux 平台不存在
     ok = crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob))
     if not ok:
-        raise OSError(ctypes.get_last_error() or "CryptUnprotectData failed")
+        raise OSError(ctypes.get_last_error() or "CryptUnprotectData failed")  # type: ignore[reportAttributeAccessIssue]  # Windows-only：ctypes.get_last_error 在 Linux 平台不存在
     try:
         return ctypes.string_at(out_blob.pbData, out_blob.cbData)
     finally:
-        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+        ctypes.windll.kernel32.LocalFree(out_blob.pbData)  # type: ignore[reportAttributeAccessIssue]  # Windows-only：ctypes.windll 在 Linux 平台不存在
 
 
 def _read_embedded_password(password_file: Path, svc_logger: logging.Logger) -> str:

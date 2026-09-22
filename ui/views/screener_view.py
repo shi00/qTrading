@@ -683,7 +683,7 @@ def build_params_panel(
             )
             if ctrl is None:
                 continue
-            ctrl.col = _PARAM_COL_TEXTAREA if p.get("type") == "textarea" else _PARAM_COL
+            ctrl.col = _PARAM_COL_TEXTAREA if p.get("type") == "textarea" else _PARAM_COL  # type: ignore[reportAttributeAccessIssue]  # Flet Control.col 期望 ResponsiveNumber；dict[str,int] 字面量推断与 stub 声明不符，运行时合法
             controls.append(ctrl)
         return controls
 
