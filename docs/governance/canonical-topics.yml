@@ -28,6 +28,14 @@ topics:
     canonical: docs/patterns/strategy-template.md
     workflow: docs/guides/how-to.md
 
+  - id: polars-strategy
+    title: 新增向量化策略（Polars）
+    canonical: docs/patterns/polars-vectorized-strategy.md
+
+  - id: ai-strategy-mixin
+    title: 新增 AI 策略混入
+    canonical: docs/patterns/ai-strategy-mixin.md
+
   - id: dao
     title: 新增/修改 DAO 或数据表
     canonical: docs/patterns/dao-pattern.md
@@ -41,6 +49,10 @@ topics:
     title: 新增/修改应用服务
     canonical: docs/patterns/application-service.md
     note: 应用服务层以引用为主的汇编正本（单例判定 / R5 轮询豁免 EX-0017 / 编排边界 / 错误分类与降级）
+
+  - id: task-manager
+    title: 修改任务生命周期 / TaskManager
+    canonical: docs/patterns/task-manager.md
 
   - id: ui-view
     title: 新增/修改 UI 视图
