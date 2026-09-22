@@ -165,13 +165,10 @@ class ReviewManager:
 
                 t0_label = t0_match.index[0]
                 t0_date = self._normalize_trade_date(df_quotes.loc[t0_label, "trade_date"])
-                t0_ser = df_quotes.loc[t0_label]
-                t0_close_raw = t0_ser.get("close")
-                t0_close = float(t0_close_raw) if bool(pd.notna(t0_close_raw)) else None
-                if t0_close is None or t0_close == 0:
-                    continue
-                t0_adj_raw = t0_ser.get("adj_factor") if has_adj_factor else None
-                t0_adj = float(t0_adj_raw) if has_adj_factor and bool(pd.notna(t0_adj_raw)) else None
+                # RV-02: 买入基准改 T+1 开盘复权价（对齐回测默认 next_open）——不再以
+                # T0 收盘为基准（T0 收盘→T+1 开盘的隔夜跳空对用户不可得，计入收益会
+                # 系统性高估高开策略）。t1 行在此块之后解析（依赖 market 日历锚定），
+                # t1 停牌/开盘缺失由下方守卫跳过留待自愈。
 
                 # D2-3 停牌防护：个股交易日→原始行序查表。停牌个股在真实 T+N 日缺行，
                 # 以跨股票并集日历（market_trade_dates）锚定真实 T+N 再查个股价格，避免行位置漂移。
@@ -189,33 +186,42 @@ class ReviewManager:
                     else None
                 )
 
-                t1_row = None
+                # RV-02: T+1 为实际可成交日（回测默认 next_open），买入基准取 T+1 开盘复权价。
+                # T+1 停牌/缺行/开盘缺失 → 基准不可得（隔夜跳空对用户不可得，收益须从可成交点起算），
+                # 该记录整体跳过（T+5 亦依赖同一基准），留待行情补齐后 backfill 自愈。
+                if t1_date is None or (t1_idx := stock_pos.get(t1_date)) is None:
+                    continue
+                t1_row = df_quotes.iloc[t1_idx]
+                # D2-3 数据完整性门控：行存在但涨跌幅缺失（停牌保留行/脏数据）→ 悬空不标。
+                if "pct_chg" in t1_row.index and bool(pd.notna(t1_row["pct_chg"])) is False:
+                    continue
+                basis_open_raw = t1_row.get("open")
+                basis_open = float(basis_open_raw) if bool(pd.notna(basis_open_raw)) else None
+                if basis_open is None or basis_open == 0:
+                    continue  # T+1 开盘不可得 → 买入基准未知，无法计算，留 NULL 待自愈
+                basis_adj_raw = t1_row.get("adj_factor") if has_adj_factor else None
+                basis_adj = float(basis_adj_raw) if has_adj_factor and bool(pd.notna(basis_adj_raw)) else None
+
                 t1_pct: float | None = None
                 t1_price: float | None = None
                 t5_pct: float | None = None
                 t5_price: float | None = None
 
-                # T+1（真实交易日 +1）
-                if t1_date is not None and (t1_idx := stock_pos.get(t1_date)) is not None:
-                    t1_row = df_quotes.iloc[t1_idx]
-                    # D2-3 数据完整性门控：行存在但涨跌幅缺失（停牌保留行/脏数据）→ 悬空不标，
-                    # 与"停牌缺行不标"同语义，避免把数据不完整的 T+1 误标为 0% 收益。
-                    if "pct_chg" in t1_row.index and bool(pd.notna(t1_row["pct_chg"])) is False:
-                        continue
-                    t1_ret = _qfq_return_pct(t1_row, t0_close, t0_adj, has_adj_factor)
-                    t1_pct = round(t1_ret * 100.0, 4) if t1_ret is not None else None
-                    if "close" in t1_row.index and bool(pd.notna(t1_row["close"])):
-                        t1_price = float(t1_row["close"])
+                # T+1（真实交易日 +1）持有收益：T+1 开盘 → T+1 收盘
+                t1_ret = _qfq_return_pct(t1_row, basis_open, basis_adj, has_adj_factor)
+                t1_pct = round(t1_ret * 100.0, 4) if t1_ret is not None else None
+                if "close" in t1_row.index and bool(pd.notna(t1_row["close"])):
+                    t1_price = float(t1_row["close"])
 
-                # T+5（真实交易日 +5）
+                # T+5（真实交易日 +5）持有收益：T+1 开盘 → T+5 收盘
                 if t5_date is not None and (t5_idx := stock_pos.get(t5_date)) is not None:
                     t5_row = df_quotes.iloc[t5_idx]
-                    t5_ret = _qfq_return_pct(t5_row, t0_close, t0_adj, has_adj_factor)
+                    t5_ret = _qfq_return_pct(t5_row, basis_open, basis_adj, has_adj_factor)
                     t5_pct = round(t5_ret * 100.0, 4) if t5_ret is not None else None
                     if "close" in t5_row.index and bool(pd.notna(t5_row["close"])):
                         t5_price = float(t5_row["close"])
 
-                if t1_pct is not None and t1_row is not None:
+                if t1_pct is not None:
                     t1_date_val = t1_row["trade_date"]
                     if hasattr(t1_date_val, "date") and callable(t1_date_val.date):
                         t1_date_obj: datetime.date = typing.cast(datetime.date, t1_date_val.date())
@@ -257,26 +263,36 @@ class ReviewManager:
                         )
                         continue
 
-                    # RV-01: 基准侧必须与个股侧同窗口——取 T0 至 label（T+5）的指数
-                    # 累计收益，而非 label 当日的单日涨跌幅（旧口径把标签变成对市场方向的押注）。
-                    # 指数点位无需复权（index_daily 无 adj_factor），用首尾收盘价比值。
+                    # RV-01/RV-02: 基准侧必须与个股侧同窗口。RV-01 起为「T0→label」窗口累计；
+                    # RV-02 起窗口起点改为 T+1 开盘（与回测默认 next_open、个股「T+1 开盘→
+                    # T+N 收盘」同口径），即 index_pct = close[label] / open[t1] − 1。
+                    # 指数点位无需复权（index_daily 无 adj_factor），取 T+1 开盘与 label 收盘两点。
                     # 窗口终点取 label_date（t5 口径为 T+5，兼容 t1 口径为 T+1），保证同窗口同口径。
                     # index_missing 记录「已完整探测（本地库+API）仍无数据」的日期，避免
                     # 同一缺失日期对每只股票重复打 API（对抗检视 Minor-1：缓存 None 无法
                     # 区分未探测与已探无，把去重移到独立集合保持「每次探测一次」语义）。
-                    t0_date_str = t0_date.strftime("%Y%m%d")
+                    # RV-02（对抗检视 Major-2 闭合）：探测循环起点显式用 t1_date，杜绝
+                    # 取到 idx_open(T0) 的 off-by-one。
+                    t1_date_str = t1_date.strftime("%Y%m%d")
                     label_date_str = label_date.strftime("%Y%m%d")
-                    for _d_str, _d in ((t0_date_str, t0_date), (label_date_str, label_date)):
+                    for _d_str, _d in ((t1_date_str, t1_date), (label_date_str, label_date)):
                         # RV-01 修复点：缓存存 None（本地库该日无数据）时也须
                         # 尝试 API 兜底，仅凭 key 存在会短路兜底路径（对抗检视 Major-1）。
                         if _d_str not in index_cache and _d_str not in index_missing:
-                            _d_close = await self._resolve_index_close(index_code, _d)
-                            if _d_close is None:
+                            _d_quote = await self._resolve_index_quote(index_code, _d)
+                            if _d_quote is None:
                                 index_missing.add(_d_str)
                             else:
-                                index_cache[_d_str] = _d_close
+                                index_cache[_d_str] = _d_quote
 
-                    index_pct = _index_window_return_pct(index_cache.get(t0_date_str), index_cache.get(label_date_str))
+                    _t1_quote = index_cache.get(t1_date_str)
+                    _label_quote = index_cache.get(label_date_str)
+                    # RV-02: 窗口起点取 T+1 开盘、终点取 label 收盘（同源口径）。
+                    index_pct = (
+                        _index_window_return_pct(_t1_quote[0], _label_quote[1])
+                        if _t1_quote is not None and _label_quote is not None
+                        else None
+                    )
 
                     if index_pct is None:
                         # RV-04: 基准缺失不再丢弃已算好的数值——数值/标签解耦落库：
@@ -287,7 +303,7 @@ class ReviewManager:
                         logger.warning(
                             "[Review] %s: Index return unavailable for [%s, %s], staging numeric-only (label pending)",
                             ts_code,
-                            t0_date_str,
+                            t1_date_str,
                             label_date_str,
                         )
                         updates.append(
@@ -405,6 +421,15 @@ class ReviewManager:
         for cand in candidates:
             code = cand["ts_code"]
             t0_date = self._normalize_trade_date(cand["trade_date"])
+            t0_mpos = market_pos.get(t0_date)
+            # RV-02: 买入基准统一为 T+1 开盘，须先锚定 t1 真实交易日（全市场日历）。
+            # T+1 未成熟（日历边界）→ A 类留 NULL 次日重试；B 类（数值已落库）
+            # 由 RV-04 通道携带已定稿数值，本处仅推算 t5_date 与索引窗口终点。
+            t1_date = (
+                market_trade_dates[t0_mpos + 1]
+                if t0_mpos is not None and t0_mpos + 1 < len(market_trade_dates)
+                else None
+            )
             # RV-04: B 类行带 t5_pct（数值已落库，get_unlabeled_predictions 返回该列）
             # → 跳过行情数值计算，仅推算 t5_date 供基准窗口探测；A 类行无该键
             # （get_unfilled_horizon_predictions 不返回 t5_pct）→ 走既有全量计算。
@@ -414,7 +439,6 @@ class ReviewManager:
                 t5_pct = float(staged_t5_pct)
                 # B 类 t0 必在 market_trade_dates 内（min_t0 取自全部候选的最小值）；
                 # t5 数值既已算出，窗口当年即已成熟，此处仅防御日历边界。
-                t0_mpos = market_pos.get(t0_date)
                 if t0_mpos is None or t0_mpos + horizon >= len(market_trade_dates):
                     continue
                 t5_date = market_trade_dates[t0_mpos + horizon]
@@ -422,19 +446,28 @@ class ReviewManager:
                 df_quotes = quotes_by_code.get(code)
                 if df_quotes is None or df_quotes.empty:
                     continue
+                if t1_date is None:
+                    continue  # T+1 尚未成熟，留 NULL 次日重试
                 stock_pos = {self._normalize_trade_date(d): int(i) for i, d in enumerate(df_quotes["trade_date"])}
                 t0_idx = stock_pos.get(t0_date)
                 if t0_idx is None:
-                    continue  # t0 无收盘价 → 基准价未知，无法计算，留 NULL
-                t0_ser = df_quotes.iloc[t0_idx]
-                t0_close_raw = t0_ser.get("close")
-                t0_close = float(t0_close_raw) if bool(pd.notna(t0_close_raw)) else None
-                if t0_close is None or t0_close == 0:
+                    continue  # t0 无行情行 → 无法按日历定位 T+1，留 NULL
+                # RV-02: T+1 为实际可成交日，买入基准取 T+1 开盘复权价。
+                # T+1 停牌/缺行/开盘缺失 → 基准不可得，整记录跳过留待自愈（方案风险 1）。
+                t1_idx = stock_pos.get(t1_date)
+                if t1_idx is None:
                     continue
-                t0_adj_raw = t0_ser.get("adj_factor") if has_adj_factor else None
-                t0_adj = float(t0_adj_raw) if has_adj_factor and bool(pd.notna(t0_adj_raw)) else None
+                t1_row = df_quotes.iloc[t1_idx]
+                # D2-3 数据完整性门控：行存在但涨跌幅缺失（停牌保留行/脏数据）→ 悬空不标。
+                if "pct_chg" in t1_row.index and bool(pd.notna(t1_row["pct_chg"])) is False:
+                    continue
+                basis_open_raw = t1_row.get("open")
+                basis_open = float(basis_open_raw) if bool(pd.notna(basis_open_raw)) else None
+                if basis_open is None or basis_open == 0:
+                    continue  # T+1 开盘不可得 → 买入基准未知，无法计算，留 NULL
+                basis_adj_raw = t1_row.get("adj_factor") if has_adj_factor else None
+                basis_adj = float(basis_adj_raw) if has_adj_factor and bool(pd.notna(basis_adj_raw)) else None
 
-                t0_mpos = market_pos.get(t0_date)
                 if t0_mpos is None or t0_mpos + horizon >= len(market_trade_dates):
                     continue  # T+horizon 尚未成熟，留 NULL 次日重试
                 t5_date = market_trade_dates[t0_mpos + horizon]
@@ -442,7 +475,7 @@ class ReviewManager:
                 if t5_idx is None:
                     continue  # T+5 日停牌/缺行 → 数据不可得，不伪造
                 t5_row = df_quotes.iloc[t5_idx]
-                ret = _qfq_return_pct(t5_row, t0_close, t0_adj, has_adj_factor)
+                ret = _qfq_return_pct(t5_row, basis_open, basis_adj, has_adj_factor)
                 if ret is None:
                     continue
                 t5_close_raw = t5_row.get("close")
@@ -452,21 +485,34 @@ class ReviewManager:
             # D4-M4: T+5 成熟回填时同步定稿 T+5 窗口标签。run_review 在 T+5
             # 未成熟时仅打 DRAW 占位（status=T1_DONE），此处补齐 T+5 数值并
             # 以 T+5 超额定稿 WIN/LOSS/DRAW（与 run_review 共用 _classify_alpha）。
-            # RV-01: 基准侧取 T0→T+5 指数累计收益（与个股 t5_pct 同窗口同口径），
-            # 而非 T+5 当日单日涨跌幅。窗口端点缺任一（含本地库+API 均不可得）均视为不可标。
-            t0_date_str = t0_date.strftime("%Y%m%d")
+            # RV-01/RV-02: 基准侧取 T+1 开盘→T+5 收盘的指数窗口累计收益（与个股
+            # t5_pct 同窗口同口径），而非 T+5 当日单日涨跌幅。窗口端点缺任一
+            # （含本地库+API 均不可得）均视为不可标。
+            if t1_date is None:
+                # B 类数值已落库但在日历边界（极端防御）：无 t1 无法定稿窗口
+                if staged_t5_pct is not None:
+                    continue
+                continue
+            t1_date_str = t1_date.strftime("%Y%m%d")
             t5_date_str = t5_date.strftime("%Y%m%d")
-            for _d_str, _d in ((t0_date_str, t0_date), (t5_date_str, t5_date)):
+            for _d_str, _d in ((t1_date_str, t1_date), (t5_date_str, t5_date)):
                 # RV-01 修复点：仅对未缓存且未标记缺失的日期探测（本地库 → API 兜底），
                 # 避免缓存 None 短路兜底（Major-1）同时也避免逐记录重复探测（Minor-1）。
                 if _d_str not in index_cache and _d_str not in index_missing:
-                    _d_close = await self._resolve_index_close(index_code, _d)
-                    if _d_close is None:
+                    _d_quote = await self._resolve_index_quote(index_code, _d)
+                    if _d_quote is None:
                         index_missing.add(_d_str)
                     else:
-                        index_cache[_d_str] = _d_close
+                        index_cache[_d_str] = _d_quote
 
-            index_pct = _index_window_return_pct(index_cache.get(t0_date_str), index_cache.get(t5_date_str))
+            _t1_quote = index_cache.get(t1_date_str)
+            _t5_quote = index_cache.get(t5_date_str)
+            # RV-02: 窗口起点取 T+1 开盘、终点取 T+5 收盘（与个股同源口径）。
+            index_pct = (
+                _index_window_return_pct(_t1_quote[0], _t5_quote[1])
+                if _t1_quote is not None and _t5_quote is not None
+                else None
+            )
             if index_pct is None:
                 if staged_t5_pct is None:
                     # RV-04: A 类基准缺失 → 数值-only 解耦落库（label=None →
@@ -475,7 +521,7 @@ class ReviewManager:
                     logger.warning(
                         "[Review] T+5 backfill: %s: Index return unavailable for [%s, %s], staging numeric-only (label pending)",
                         code,
-                        t0_date_str,
+                        t1_date_str,
                         t5_date_str,
                     )
                     updates.append(
@@ -494,7 +540,7 @@ class ReviewManager:
                     logger.warning(
                         "[Review] T+5 backfill: %s: Index return unavailable for [%s, %s], label still pending",
                         code,
-                        t0_date_str,
+                        t1_date_str,
                         t5_date_str,
                     )
                 continue
@@ -601,19 +647,14 @@ class ReviewManager:
             stock_pos = {self._normalize_trade_date(d): int(i) for i, d in enumerate(df_quotes["trade_date"])}
             t0_idx = stock_pos.get(t0_date)
             if t0_idx is None:
-                continue  # t0 无收盘价 → 基准价未知，无法计算，留 NULL
-            t0_ser = df_quotes.iloc[t0_idx]
-            t0_close_raw = t0_ser.get("close")
-            t0_close = float(t0_close_raw) if bool(pd.notna(t0_close_raw)) else None
-            if t0_close is None or t0_close == 0:
-                continue
-            t0_adj_raw = t0_ser.get("adj_factor") if has_adj_factor else None
-            t0_adj = float(t0_adj_raw) if has_adj_factor and bool(pd.notna(t0_adj_raw)) else None
+                continue  # t0 无行情行 → 无法按日历定位 T+1，留 NULL
 
             t0_mpos = market_pos.get(t0_date)
             if t0_mpos is None or t0_mpos + 1 >= len(market_trade_dates):
                 continue  # T+1 尚未成熟，留 NULL 次日重试
             t1_date = market_trade_dates[t0_mpos + 1]
+            # RV-02: T+1 为实际可成交日（回测默认 next_open），买入基准取 T+1 开盘复权价。
+            # T+1 停牌/缺行/开盘缺失 → 基准不可得，整记录跳过留待自愈（方案风险 1）。
             t1_idx = stock_pos.get(t1_date)
             if t1_idx is None:
                 continue  # T+1 日停牌/缺行 → 数据不可得，不伪造
@@ -621,7 +662,15 @@ class ReviewManager:
             # D2-3 数据完整性门控：行存在但涨跌幅缺失（停牌保留行/脏数据）→ 悬空不标。
             if "pct_chg" in t1_row.index and bool(pd.notna(t1_row["pct_chg"])) is False:
                 continue
-            ret = _qfq_return_pct(t1_row, t0_close, t0_adj, has_adj_factor)
+            basis_open_raw = t1_row.get("open")
+            basis_open = float(basis_open_raw) if bool(pd.notna(basis_open_raw)) else None
+            if basis_open is None or basis_open == 0:
+                continue  # T+1 开盘不可得 → 买入基准未知，无法计算，留 NULL
+            basis_adj_raw = t1_row.get("adj_factor") if has_adj_factor else None
+            basis_adj = float(basis_adj_raw) if has_adj_factor and bool(pd.notna(basis_adj_raw)) else None
+            # RV-02: T+1 当日持有收益 = T+1 开盘 → T+1 收盘（不复用 T0 收盘基准，
+            # 否则隔夜跳空被计入用户本就不可得的收益段）。
+            ret = _qfq_return_pct(t1_row, basis_open, basis_adj, has_adj_factor)
             if ret is None:
                 continue
             t1_pct = round(ret * 100.0, 4)
@@ -1084,27 +1133,27 @@ class ReviewManager:
             )
         return dates
 
-    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _prefetch_index_cache(
         self,
         index_code: str | None,
         start_date: datetime.date,
         end_date: datetime.date,
-    ) -> dict[str, float]:
-        """RV-01: 批量预取基准指数收盘点位到 {YYYYMMDD: close} 缓存。
+    ) -> dict[str, tuple[float, float]]:
+        """RV-01/RV-02: 批量预取基准指数开收盘点位到 {YYYYMMDD: (open, close)} 缓存。
 
         run_review 与 backfill_horizon_returns 共用，避免两处各自实现同一预取逻辑。
-        RV-01 起缓存的是 ``close``（收盘点位）而非 ``pct_chg``（单日涨跌幅）——
-        Alpha 的基准侧须为窗口累计收益，由调用方对窗口首尾两点 close 经
-        ``_index_window_return_pct`` 换算，与个股 T+5 累计收益同窗口同口径。
+        RV-01 起缓存 ``close``（收盘点位）供窗口累计收益换算，RV-02 起同时缓存
+        ``open``（开盘点位）——基准窗口起点由 T0 收盘改为 T+1 开盘（与回测默认
+        next_open 对齐），需窗口起点 open 与终点 close 两点。
         与旧逻辑一致：预取失败仅告警（非 system 级），
-        由调用方的单条兜底（_resolve_index_close）补缺失日期。
+        由调用方的单条兜底（_resolve_index_quote）补缺失日期。
 
         D3-m2: 日期参数全程使用 date 对象（与 DAT-26「DAO 边界显式转 date」方向
         统一），不再经 str(date) 隐式转换后再由 DAO 转回，避免 "2024-01-05" 与
         "20240105" 两种日期格式在库内并存造成的摩擦。
         """
-        index_cache: dict[str, float] = {}
+        index_cache: dict[str, tuple[float, float]] = {}
         try:
             df_index_bulk = await self.cache.get_index_daily_range(
                 ts_code_list=[index_code],
@@ -1118,14 +1167,17 @@ class ReviewManager:
                         dt_str = dt_val.strftime("%Y%m%d")
                     else:
                         dt_str = str(dt_val).replace("-", "")[:8]
+                    raw_open = i_row.get("open")
                     raw_close = i_row.get("close")
-                    # RV-01: 仅缓存有效 close；本地库缺失日期不写 key，保证调用方
-                    # 的逐日探测（本地库 → API 兜底）得以触发（旧实现对 None 日期
-                    # 写 key 会让后续 `key not in cache` 短路 API 兜底）。
-                    if raw_close is not None and pd.notna(raw_close) is True:
-                        index_cache[dt_str] = float(raw_close)
+                    # RV-01/RV-02: 仅缓存 open/close 均有效的日期；缺失日期不写 key，
+                    # 保证调用方逐日探测（本地库 → API 兜底）得以触发（旧实现对缺失
+                    # 日期写 key 会让后续 `key not in cache` 短路 API 兜底）。
+                    open_ok = raw_open is not None and pd.notna(raw_open) is True
+                    close_ok = raw_close is not None and pd.notna(raw_close) is True
+                    if open_ok and close_ok:
+                        index_cache[dt_str] = (float(raw_open), float(raw_close))
                 logger.info(
-                    "[Review] Bulk loaded %d days of index close for %s.",
+                    "[Review] Bulk loaded %d days of index open/close for %s.",
                     len(df_index_bulk),
                     index_code,
                 )
@@ -1146,16 +1198,18 @@ class ReviewManager:
         return index_cache
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def _resolve_index_close(
+    async def _resolve_index_quote(
         self,
         index_code: str | None,
         trade_date: datetime.date,
-    ) -> float | None:
-        """RV-01: 单条兜底解析指定交易日的基准指数收盘点位（close），失败返回 None。
+    ) -> tuple[float, float] | None:
+        """RV-01/RV-02: 单条兜底解析指定交易日的基准指数 (open, close)，失败返回 None。
 
         run_review 与 backfill_horizon_returns 共用，口径一致：先查缓存（本地库），
         缺失再降级 Tushare API；API 不可得 / 数据缺失返回 None，由调用方决定跳过。
-        RV-01 起取 close（收盘点位）供窗口累计收益换算，不再取单日 pct_chg。
+        RV-01 起取 close（收盘点位）供窗口累计收益换算，RV-02 起同时取 open——
+        窗口起点为 T+1 开盘，open 或 close 任一侧缺失即整点 None（窗口无意义，
+        对抗检视：避免以 (None, close) 进窗口导致 TypeError）。
         """
         trade_date_str = trade_date.strftime("%Y%m%d")
         try:
@@ -1164,8 +1218,13 @@ class ReviewManager:
                 trade_date=trade_date,
             )
             if df_idx is not None and not df_idx.empty:
+                raw_open = df_idx.iloc[0].get("open")
                 raw_close = df_idx.iloc[0]["close"]
-                return float(raw_close) if pd.notna(raw_close) is True else None
+                open_ok = raw_open is not None and pd.notna(raw_open) is True
+                close_ok = raw_close is not None and pd.notna(raw_close) is True
+                if open_ok and close_ok:
+                    return (float(raw_open), float(raw_close))
+                return None
             try:
                 df_idx_api = await self.api.get_index_daily(
                     ts_code=index_code,
@@ -1173,8 +1232,12 @@ class ReviewManager:
                     end_date=trade_date_str,
                 )
                 if df_idx_api is not None and not df_idx_api.empty:
+                    raw_open = df_idx_api.iloc[0].get("open")
                     raw_close = df_idx_api.iloc[0]["close"]
-                    return float(raw_close) if pd.notna(raw_close) is True else None
+                    open_ok = raw_open is not None and pd.notna(raw_open) is True
+                    close_ok = raw_close is not None and pd.notna(raw_close) is True
+                    if open_ok and close_ok:
+                        return (float(raw_open), float(raw_close))
                 return None
             except (ValueError, TypeError, KeyError):
                 return None
@@ -1197,8 +1260,8 @@ class ReviewManager:
         """RV-04: 解析实际使用的基准指数，配置基准不可得时沿 MAJOR_INDICES 降级。
 
         候选链 = [配置基准, *MAJOR_INDICES]（去重保序）。对每个候选探测
-        ``probe_date``（本批最老记录日）收盘点位可得性（本地库 → API 兜底，
-        与 ``_resolve_index_close`` 同链路），返回首个可得的候选并记入
+        ``probe_date``（本批最老记录日）开收盘点位可得性（本地库 → API 兜底，
+        与 ``_resolve_index_quote`` 同链路），返回首个可得的候选并记入
         ``benchmark_code``；全不可得时返回配置基准——数值照常落库
         （RV-04 数值/标签解耦），标签停留待补，诊断供 job 呈现。
 
@@ -1209,16 +1272,16 @@ class ReviewManager:
         if not isinstance(configured, str) or not configured:
             configured = DEFAULT_BENCHMARK_INDEX
         for candidate in dict.fromkeys([configured, *MAJOR_INDICES]):
-            # 探针异常（system 级已在 _resolve_index_close 内 critical 记录）视为
+            # 探针异常（system 级已在 _resolve_index_quote 内 critical 记录）视为
             # 候选不可得、继续降级链——与行级「异常吞没、review 继续」语义一致；
             # EngineDisposedError 上抛（R5：disposed 引擎上不再执行降级探测）。
             try:
-                probe_close = await self._resolve_index_close(candidate, probe_date)
+                probe_quote = await self._resolve_index_quote(candidate, probe_date)
             except EngineDisposedError:
                 raise
             except Exception:
                 continue
-            if probe_close is not None:
+            if probe_quote is not None:
                 if candidate != configured:
                     self._benchmark_diag = I18n.get(
                         "review_benchmark_degraded",

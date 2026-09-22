@@ -299,6 +299,11 @@ def _build_review_section(stock_data: dict) -> ft.Control:
                 weight=ft.FontWeight.BOLD,
                 color=AppColors.PRIMARY,
             ),
+            ft.Text(
+                I18n.get("review_basis_label"),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_SECONDARY,
+            ),
             ft.Divider(height=5, color=AppColors.DIVIDER),
             ft.Row(
                 [

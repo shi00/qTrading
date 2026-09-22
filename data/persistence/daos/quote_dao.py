@@ -491,7 +491,9 @@ class QuoteDao(BaseDao):
         if not ts_code_list:
             return await self._read_db("SELECT * FROM index_daily WHERE 1=0", [])
 
-        sql = "SELECT ts_code, trade_date, close, pct_chg, vol, amount FROM index_daily WHERE 1=1"
+        # RV-02: 批量查询需含 open 列——复盘基准窗口起点为 T+1 开盘（与回测
+        # next_open 对齐），index_daily.open 已存在（models.IndexDaily.open）。
+        sql = "SELECT ts_code, trade_date, open, close, pct_chg, vol, amount FROM index_daily WHERE 1=1"
         params = []
         idx = 1
 
