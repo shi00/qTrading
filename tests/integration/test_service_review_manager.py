@@ -26,19 +26,21 @@ pytestmark = [pytest.mark.integration, pytest.mark.no_db]
 
 
 def _index_daily_close_side_effect(t0_close: float, t5_close: float):
-    """RV-01: 构造 quote_dao.get_index_daily 的 side_effect——按 trade_date 返回对应收盘点位。
+    """RV-01/RV-02: 构造 quote_dao.get_index_daily 的 side_effect——按 trade_date 返回 (open, close)。
 
-    旧 mock 固定返回单日 ``pct_chg``；修复后基准侧取窗口累计收益，需要
-    窗口首尾两点（T0 与 T+5）的 close。本 helper 区分两日返回，窗口收益 =
-    (t5_close/t0_close - 1) * 100。
+    修复后基准侧取窗口累计收益，需要窗口首尾两点：RV-02 起起点为 T+1 开盘
+    （open[t1]），终点为 label 收盘（close[t5]）。本 helper 以 t0_close 作为
+    T+1 窗口起点开盘（与原断言口径一致），窗口收益 = (t5_close/t1_open - 1) * 100。
     """
 
     async def _side_effect(ts_code=None, trade_date=None, **kwargs):
         if trade_date is None:
             return pd.DataFrame()
         d = trade_date.strftime("%Y%m%d") if hasattr(trade_date, "strftime") else str(trade_date).replace("-", "")
-        close = t0_close if d in {"20240315", "20240310"} else t5_close
-        return pd.DataFrame({"close": [close], "pct_chg": [1.0]})
+        # t0(0315)、t1(0318) 均作窗口起点（open），其余（T+5/0322）作终点 close。
+        is_start = d in {"20240315", "20240310", "20240318"}
+        close = t0_close if is_start else t5_close
+        return pd.DataFrame({"open": [t0_close], "close": [close], "pct_chg": [1.0]})
 
     return _side_effect
 
@@ -185,15 +187,18 @@ class TestReviewManagerIndexDailyType(unittest.TestCase):
                         datetime.date(2024, 3, 22),
                     ],
                     "close": [10.0, 10.3, 10.3],
+                    "open": [10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 3.0, 3.0],
                 }
             )
         )
         mock_cache.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
         )
         mock_cache.get_index_daily_range = AsyncMock(return_value=None)
-        mock_api.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
+        mock_api.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
+        )
         manager = ReviewManager()
         manager.cache = mock_cache
         manager.api = mock_api
@@ -566,6 +571,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                     "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
                     "trade_date": ["20240315", "20240318", "20240322"],
                     "close": [10.0, 10.5, 10.5],
+                    "open": [10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 5.0, 5.0],
                 }
             )
@@ -577,7 +583,9 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
+        )
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -600,6 +608,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                     "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
                     "trade_date": ["20240315", "20240318", "20240322"],
                     "close": [10.0, 9.8, 9.5],
+                    "open": [10.0, 10.0, 10.0],
                     "pct_chg": [1.0, -2.0, -5.0],
                 }
             )
@@ -634,6 +643,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                     "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
                     "trade_date": ["20240315", "20240318", "20240322"],
                     "close": [10.0, 10.1, 10.1],
+                    "open": [10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 1.0, 1.0],
                 }
             )
@@ -675,6 +685,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                         "20240322",
                     ],
                     "close": [10.0, 10.5, 10.7, 10.8, 10.9, 11.0],
+                    "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 5.0, 1.9, 0.9, 0.9, 0.9],
                 }
             )
@@ -685,7 +696,9 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
+        )
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -716,12 +729,14 @@ class TestReviewPredictionsCore(unittest.TestCase):
             )
         )
         mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
         )
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
+        )
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -763,6 +778,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                     "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
                     "trade_date": ["20240315", "20240318", "20240322"],
                     "close": [10.0, 10.3, 10.3],
+                    "open": [10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 3.0, 3.0],
                 }
             )
@@ -824,12 +840,14 @@ class TestReviewPredictionsCore(unittest.TestCase):
             )
         )
         mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
         )
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
+        )
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -856,17 +874,20 @@ class TestReviewPredictionsCore(unittest.TestCase):
                     "ts_code": ["000001.SZ", "000001.SZ", "000002.SZ", "000002.SZ"],
                     "trade_date": ["20240315", "20240318", "20240315", "20240318"],
                     "close": [10.0, 10.5, 20.0, 21.0],
+                    "open": [10.0, 10.0, 20.0, 20.0],
                     "pct_chg": [1.0, 5.0, 1.0, 5.0],
                 }
             )
         )
         mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
         )
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
+        )
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -886,6 +907,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                     "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": ["20240315", "20240318"],
                     "close": [10.0, 10.5],
+                    "open": [10.0, 10.0],
                     "pct_chg": [1.0, 5.0],
                 }
             )
@@ -900,11 +922,13 @@ class TestReviewPredictionsCore(unittest.TestCase):
             )
         )
         mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
         )
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
+        )
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -933,6 +957,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                     "ts_code": ["000001.SZ", "000001.SZ"],
                     "trade_date": ["20240315", "20240318"],
                     "close": [10.0, 10.5],
+                    "open": [10.0, 10.0],
                     "pct_chg": [1.0, 5.0],
                 }
             )
@@ -947,11 +972,13 @@ class TestReviewPredictionsCore(unittest.TestCase):
             )
         )
         mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
         )
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
+        )
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -976,6 +1003,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                     "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
                     "trade_date": ["20240315", "20240318", "20240322"],
                     "close": [10.0, 10.5, 10.5],
+                    "open": [10.0, 10.0, 10.0],
                     "pct_chg": [1.0, 5.0, 5.0],
                 }
             )
@@ -986,7 +1014,9 @@ class TestReviewPredictionsCore(unittest.TestCase):
         )
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
+        )
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -997,8 +1027,8 @@ class TestReviewPredictionsCore(unittest.TestCase):
             calls = mock_cache_instance.quote_dao.get_index_daily.call_args_list
             assert len(calls) == 3
             assert calls[0].kwargs["trade_date"] == datetime.date(2024, 3, 15)  # RV-04 探针
-            assert calls[1].kwargs["trade_date"] == datetime.date(2024, 3, 15)  # 窗口 T0
-            assert calls[2].kwargs["trade_date"] == datetime.date(2024, 3, 22)  # 窗口 T+5
+            assert calls[1].kwargs["trade_date"] == datetime.date(2024, 3, 18)  # 窗口 T+1 起点
+            assert calls[2].kwargs["trade_date"] == datetime.date(2024, 3, 22)  # 窗口 T+5 终点
             assert mock_cache_instance.screener_dao.update_prediction_result.await_count == 1
 
         asyncio.run(run_test())
@@ -1029,12 +1059,14 @@ class TestReviewPredictionsCore(unittest.TestCase):
             )
         )
         mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
         )
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
 
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
+        )
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
@@ -1060,6 +1092,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
                 "ts_code": ["000001.SZ"] * 3,
                 "trade_date": ["20240315", "20240318", "20240322"],
                 "close": [10.0, 11.0, 12.0],
+                "open": [10.0, 10.0, 10.0],
                 "pct_chg": [1.0, 10.0, 9.1],
             }
         )
@@ -1146,7 +1179,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
             )
         )
         mock_cache_instance.quote_dao.get_index_daily = AsyncMock(
-            return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]})
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
         )
         mock_cache_instance.get_index_daily_range = AsyncMock(return_value=None)
         mock_cache_instance.stock_dao.get_trade_cal = _make_trade_cal_mock()
@@ -1156,7 +1189,9 @@ class TestReviewPredictionsCore(unittest.TestCase):
         mock_cache_instance.screener_dao.update_prediction_result = AsyncMock()
         mock_cache_instance.engine = _make_engine()
         mock_api_instance = MagicMock()
-        mock_api_instance.get_index_daily = AsyncMock(return_value=pd.DataFrame({"close": [100.0], "pct_chg": [1.0]}))
+        mock_api_instance.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [1.0]})
+        )
 
         manager = self._make_manager(mock_cache_instance, mock_api_instance)
 
