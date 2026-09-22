@@ -60,6 +60,8 @@ class _FakeModelPickerVM:
         self.update_model_query = MagicMock()
         self.select_model = MagicMock()
         self.toggle_group = MagicMock()
+        self.set_provider_scope = MagicMock()
+        self.set_provider_only = MagicMock()
         self.ensure_catalog_loaded = MagicMock()
 
     @property
@@ -114,15 +116,26 @@ def _render(
     *,
     on_select: Any = None,
     text_field_width: float | None = None,
+    provider_scope: str | None = None,
+    provider_only: bool = False,
 ) -> tuple[_FakeModelPickerVM, FakePage, Any, Any]:
     """渲染 ModelPicker，返回 (vm, page, result, component)。
 
-    挂载 effect 经 FakePage.run_task（动态注入 MagicMock）触发 vm.ensure_catalog_loaded。
+    挂载 effect 经 FakePage.run_task（动态注入 MagicMock）触发 vm.ensure_catalog_loaded；
+    级联过滤 effect（deps=[provider_scope]）同步 vm.set_provider_scope；
+    provider-only effect（deps=[provider_only]）同步 vm.set_provider_only。
     """
     vm = _FakeModelPickerVM(state=state)
     page = FakePage()
     page.run_task = MagicMock()  # type: ignore[reportAttributeAccessIssue]  # reason: FakePage 不定义 run_task 属性, 测试动态注入 MagicMock
-    component = make_component(ModelPicker, vm=vm, on_select=on_select, text_field_width=text_field_width)
+    component = make_component(
+        ModelPicker,
+        vm=vm,
+        on_select=on_select,
+        text_field_width=text_field_width,
+        provider_scope=provider_scope,
+        provider_only=provider_only,
+    )
     run_mount_effects(component, page=page)
     result = render_once(component)
     return vm, page, result, component
@@ -363,6 +376,98 @@ class TestModelPickerRender:
     def test_text_field_width_applied(self, mock_i18n_state) -> None:
         _, _, result, _ = _render(text_field_width=320)
         assert result.controls[0].width == 320
+
+
+# ============================================================================
+# provider_scope 级联过滤（AI-01 §3.1c 联动改造）
+# ============================================================================
+
+
+class TestModelPickerProviderScope:
+    """provider_scope prop：挂载 effect 同步 VM scope + 作用域浏览渲染。"""
+
+    def test_mount_syncs_scope_to_vm(self, mock_i18n_state) -> None:
+        vm, _, _, _ = _render(provider_scope="deepseek")
+        vm.set_provider_scope.assert_called_once_with("deepseek")
+
+    def test_mount_without_scope_syncs_empty(self, mock_i18n_state) -> None:
+        vm, _, _, _ = _render(provider_scope=None)
+        vm.set_provider_scope.assert_called_once_with("")
+
+    def test_scoped_browse_renders_single_group_rows(self, mock_i18n_state) -> None:
+        """作用域浏览：单一供应商分组自动预展开 → 模型行直接可见（级联过滤列表）。"""
+        state = ModelPickerState(
+            recent=(),
+            groups=(_group(provider_id="deepseek", provider_name="DeepSeek"),),
+            expanded=frozenset({"deepseek"}),
+            provider_scope="deepseek",
+        )
+        _, _, result, _ = _render(state=state, provider_scope="deepseek")
+        assert result.controls[1].visible is True
+        assert len(_find_select_rows(result)) == 2  # 展开的 deepseek 两模型行
+
+
+class TestModelPickerProviderOnly:
+    """provider_only prop（供应商选择器）：模式 effect 同步 + 供应商行浏览/搜索渲染。"""
+
+    def test_mount_syncs_provider_only_true(self, mock_i18n_state) -> None:
+        vm, _, _, _ = _render(provider_only=True)
+        vm.set_provider_only.assert_called_once_with(True)
+
+    def test_mount_syncs_provider_only_false(self, mock_i18n_state) -> None:
+        vm, _, _, _ = _render(provider_only=False)
+        vm.set_provider_only.assert_called_once_with(False)
+
+    def test_provider_only_selected_displays_provider_name(self, mock_i18n_state) -> None:
+        """provider-only 已选供应商→搜索框回显供应商名（修复回显丢失回归）。"""
+        state = ModelPickerState(provider_only=True, selected_provider="deepseek")
+        _, _, result, _ = _render(state=state, provider_only=True)
+        assert result.controls[0].value == "DeepSeek"
+
+    def test_browse_renders_provider_rows(self, mock_i18n_state) -> None:
+        """provider-only 浏览：直接渲染供应商行（无分组头/最近使用）。"""
+        state = ModelPickerState(
+            provider_only=True,
+            provider_options=(
+                _row(provider_id="deepseek", provider_name="DeepSeek", model_id=""),
+                _row(provider_id="qwen", provider_name="通义千问", model_id=""),
+            ),
+        )
+        _, _, result, _ = _render(state=state, provider_only=True)
+        assert result.controls[1].visible is True
+        rows = _find_select_rows(result)
+        assert len(rows) == 2
+        # 供应商行主文本 = 供应商名（highlight_model=False 语义）
+        texts = [t.value for t in _walk_controls(rows[0]) if isinstance(t, ft.Text)]
+        assert texts[0] == "DeepSeek"
+
+    def test_browse_provider_only_empty_shows_hint(self, mock_i18n_state) -> None:
+        state = ModelPickerState(provider_only=True, provider_options=())
+        _, _, result, _ = _render(state=state, provider_only=True)
+        assert "model_picker_browse_empty" in _text_values(result)
+
+    def test_search_renders_provider_rows(self, mock_i18n_state) -> None:
+        """provider-only 搜索：结果行为供应商行（model_id 空）。"""
+        state = ModelPickerState(
+            provider_only=True,
+            query="deep",
+            search_results=(_row(provider_id="deepseek", provider_name="DeepSeek", model_id=""),),
+        )
+        _, _, result, _ = _render(state=state, provider_only=True)
+        assert len(_find_select_rows(result)) == 1
+
+    def test_provider_row_click_notifies_consumer_with_empty_model(self, mock_i18n_state) -> None:
+        on_select = MagicMock()
+        state = ModelPickerState(
+            provider_only=True,
+            query="deep",
+            search_results=(_row(provider_id="deepseek", provider_name="DeepSeek", model_id=""),),
+        )
+        vm, _, result, _ = _render(state=state, provider_only=True, on_select=on_select)
+        rows = _find_select_rows(result)
+        _invoke(rows[0].on_click, MagicMock())
+        vm.select_model.assert_called_once_with(_row(provider_id="deepseek", provider_name="DeepSeek", model_id=""))
+        on_select.assert_called_once_with("deepseek", "")
 
 
 # ============================================================================

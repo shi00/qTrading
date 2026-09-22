@@ -206,6 +206,49 @@ def get_provider_icon(provider_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def get_enabled_provider_ids() -> list[str]:
+    """返回供应商下拉应展示的 provider_id（litellm 目录推导，按分类顺序）。
+
+    规则（AI-01 §3.1c 联动改造）：
+    - azure（部署制）/ custom（自由文本）无目录但保留配置通道 → 始终包含；
+    - 其余供应商仅当 litellm 投影目录非空时保留（目录为空 → 下拉隐藏，
+      避免出现「可选但连不上」项；与 ModelPicker 分组口径一致）；
+    - **目录投影尚未加载（首帧）/litellm 不可用**：回退 LLM_PROVIDERS 全量
+      （只读缓存判断，不触发 litellm 惰性 import，R16）。
+
+    调用方（View）额外保证：当前已配置 provider 即使目录为空也强制保留，
+    避免存量配置回显被吞。
+    """
+    projection = get_cached_litellm_projection()
+    result: list[str] = []
+    for category in PROVIDER_CATEGORIES.values():
+        for provider_id in category:
+            conf = LLM_PROVIDERS.get(provider_id)
+            if conf is None:
+                continue
+            if conf.get("azure_config") or conf.get("custom"):
+                result.append(provider_id)
+                continue
+            if projection is not None and not projection.get(provider_id):
+                # 目录已加载但该供应商无模型 → 隐藏（避免静态清单与目录漂移）。
+                continue
+            result.append(provider_id)
+    return result
+
+
+def get_cached_litellm_projection() -> dict[str, list[dict]] | None:
+    """返回已加载的投影缓存（纯内存判断，不触发 litellm 惰性 import，R16）。
+
+    目录加载由 ModelPicker 挂载 effect 经 ThreadPoolManager offload；此处仅在
+    缓存已就绪（版本匹配）时返回，否则 None（调用方按「未加载」降级处理）。
+    供 get_enabled_provider_ids（供应商下拉推导）与 ModelPickerViewModel
+    （级联过滤的浏览重建）在 UI 线程安全复用。
+    """
+    if _PROJECTION_CACHE and _get_litellm_version() == _PROJECTION_CACHE_LITELLM_VERSION:
+        return _PROJECTION_CACHE
+    return None
+
+
 def _get_litellm_version() -> str:
     """读取锁定的 litellm 版本号（缓存键，升级后失效重算）。"""
     from importlib.metadata import version  # type: ignore[import-untyped]  # stdlib
@@ -333,8 +376,17 @@ def get_litellm_models_by_provider() -> dict[str, list[dict]]:
         entries.sort(key=lambda e: e["id"])
         result[provider_id] = entries
 
-    _PROJECTION_CACHE = result
-    _PROJECTION_CACHE_LITELLM_VERSION = litellm_version
+    # 仅在目录数据可信时缓存：litellm 为 MagicMock / 目录缺失（测试会话全局 mock、
+    # 依赖退化）时 models_by_provider 非 dict 或空，投影出的全空清单若入缓存会以
+    # 真实版本号污染 get_cached_litellm_projection / get_enabled_provider_ids
+    # （「全部供应商无模型」假象，导致供应商下拉被清空）。
+    # 权衡（review-fix R3）：真实 litellm 的 models_by_provider 恰为空 dict 时同样不缓存——
+    # ① 首次 import（耗时主因）已由 ensure_catalog_loaded offload，空投影重建极廉价；
+    # ② 不缓存空投影正是防止 get_enabled_provider_ids 读到「全部供应商无模型」而
+    #    把清单误清空的有意防护，不可为「省一次轻量重建」而放宽。
+    if isinstance(models_by_provider, dict) and models_by_provider:
+        _PROJECTION_CACHE = result
+        _PROJECTION_CACHE_LITELLM_VERSION = litellm_version
     return result
 
 
@@ -344,6 +396,40 @@ def _provider_order(provider_id: str) -> int:
         if provider_id in category:
             return idx
     return len(PROVIDER_CATEGORIES)
+
+
+def search_providers(keyword: str) -> list[dict]:
+    """按关键字过滤**启用供应商**（provider-only 选择器搜索，与模型条目同构）。
+
+    供应商清单以 ``get_enabled_provider_ids`` 目录推导为准；匹配 provider_id /
+    name / name_en / key_prefix（大小写不敏感），按分类顺序稳定排序（与
+    ``search_models`` 的排序键一致）。返回拍平列表：
+    ``[{provider_id, provider_name, icon}]``。空/空白关键字返回空列表
+    （UI 据此转浏览模式）。
+    """
+    if not keyword:
+        return []
+    needle = keyword.lower().strip()
+    if not needle:
+        return []
+
+    result: list[dict] = []
+    for provider_id in get_enabled_provider_ids():
+        conf = LLM_PROVIDERS.get(provider_id, {})
+        if (
+            needle in provider_id.lower()
+            or needle in str(conf.get("name", "")).lower()
+            or needle in str(conf.get("name_en", "")).lower()
+            or needle in str(conf.get("key_prefix", "")).lower()
+        ):
+            result.append(
+                {
+                    "provider_id": provider_id,
+                    "provider_name": str(conf.get("name", provider_id)),
+                    "icon": str(conf.get("icon", "custom.png")),
+                }
+            )
+    return result
 
 
 def search_models(keyword: str) -> list[dict]:

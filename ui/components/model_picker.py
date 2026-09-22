@@ -149,7 +149,22 @@ def _build_browse_panel(
     on_select: Callable[[ModelRow], None],
     on_toggle: Callable[[str], None],
 ) -> list[ft.Control]:
-    """浏览模式（空 query）：最近使用置顶 + 供应商分组折叠。"""
+    """浏览模式（空 query）：
+    - 模型模式：最近使用置顶 + 供应商分组折叠；
+    - provider-only 模式：仅供应商行列表（选中即设定供应商）。
+    """
+    if state.provider_only:
+        if not state.provider_options:
+            return [
+                ft.Text(
+                    I18n.get("model_picker_browse_empty"),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_HINT,
+                    italic=True,
+                )
+            ]
+        return [_build_select_row(row, on_select, highlight_model=False) for row in state.provider_options]
+
     controls: list[ft.Control] = []
 
     if state.recent:
@@ -200,19 +215,39 @@ def ModelPicker(
     *,
     on_select: Callable[[str, str], None] | None = None,
     text_field_width: float | None = None,
+    provider_scope: str | None = None,
+    provider_only: bool = False,
 ) -> ft.Control:
-    """共享模型选择组件（搜索 + 分组浏览 + 最近回记）。
+    """共享模型选择组件（搜索 + 分组浏览 + 最近回记 + 级联过滤 + provider-only）。
 
     Args:
         vm: 由消费方实例化的 ModelPickerViewModel（外部 VM 模式）。
-        on_select: 选中一行模型时回调 ``(provider_id, model_id)``，消费方写回自身状态。
+        on_select: 选中一行时回调 ``(provider_id, model_id)``，消费方写回自身状态。
+            provider-only 模式下 model_id 恒为空串，消费方按「纯供应商选择」处理。
         text_field_width: 顶部 TextField 宽度（None 用 Panel 默认宽度）。
+        provider_scope: 级联过滤作用域（非 None = 浏览模式仅展示该供应商模型分组，
+            经 use_effect 同步到 ``vm.set_provider_scope``；搜索仍跨供应商，
+            命中其他供应商模型时经 on_select 通知消费方同步供应商下拉——双向联动）。
+        provider_only: provider-only 模式（与模型选择共用组件，仅行粒度不同：
+            浏览为供应商列表、搜索按供应商名匹配，选中回 ``(provider_id, "")``）。
     """
     # --- Subscribe to VM state changes (外部 VM 模式) ---
     state, _ = use_viewmodel(vm=vm)
 
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
     ft.use_state(get_observable_state)
+
+    # --- 级联过滤：外部 scope 变化 → VM 同步（只读 prop→VM 单向流） ---
+    def _sync_scope() -> None:
+        vm.set_provider_scope(provider_scope or "")
+
+    ft.use_effect(_sync_scope, dependencies=[provider_scope])
+
+    # --- provider-only：模式变化 → VM 同步（与模型选择共用同一组件） ---
+    def _sync_provider_only() -> None:
+        vm.set_provider_only(provider_only)
+
+    ft.use_effect(_sync_provider_only, dependencies=[provider_only])
 
     # --- 挂载时预载 litellm 目录（R16：惰性 import 十秒级，必须 offload） ---
     def _load_catalog() -> None:
@@ -244,9 +279,12 @@ def ModelPicker(
         if on_select is not None:
             on_select(row.provider_id, row.model_id)
 
-    # --- Selected display text (only when query empty & a model is selected) ---
-    if state.selected_model and not state.query:
-        display = f"{selected_provider_name} / {state.selected_model}"
+    # --- Selected display text (only when query empty & a selection exists) ---
+    # provider-only 模式无模型粒度：以供应商名回显（否则供应商选择器恒空白）。
+    if not state.query and (state.selected_model or (state.provider_only and state.selected_provider)):
+        display = (
+            f"{selected_provider_name} / {state.selected_model}" if state.selected_model else selected_provider_name
+        )
     else:
         display = state.query
 
@@ -275,7 +313,10 @@ def ModelPicker(
         result_visible = True
     else:
         result_controls = _build_browse_panel(state, _handle_select, vm.toggle_group)
-        result_visible = bool(state.recent) or bool(state.groups)
+        # provider-only 浏览以供应商行列表判定可见（无 recent/groups）
+        result_visible = (
+            bool(state.recent) or bool(state.groups) or (state.provider_only and bool(state.provider_options))
+        )
 
     result_panel = ft.Container(
         content=ft.Column(safe_controls(result_controls), scroll=ft.ScrollMode.AUTO, spacing=2),
