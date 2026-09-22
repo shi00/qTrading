@@ -87,7 +87,7 @@
 
 > [!NOTE]
 > 覆盖率阈值的单一事实源位于 `pyproject.toml`。
-> - **整体覆盖率**：具体数值见 `pyproject.toml` 中的 `fail_under`（目前为 ≥ 85%）
+> - **整体覆盖率**：具体数值见 `pyproject.toml` 中的 `fail_under`（目前为 ≥ 85%）。**CI 不强制整体 85%**——`ci_cd.yml` 的 pytest 未传 `--cov-fail-under`，`fail_under=85` 仅在本地命令生效；CI 强制的是下方单文件 ≥80% 与 diff coverage ≥80%
 > - **单文件覆盖率**：具体数值见 `pyproject.toml` 中的 `per_file_minimum`（目前为 ≥ 80%，由 `scripts/check_per_file_coverage.py` 强制检查）
 > - **分层单文件覆盖率**：`services/`、`strategies/`、`data/` 单文件阈值 ≥ 90%，`ui/` ≥ 85%（`pyproject.toml` `per_file_minimum_by_path`，最长前缀匹配，未匹配目录仍按默认 ≥ 80%）；当前 `enforce_layered=false` 为 advisory 报告模式（`scripts/check_per_file_coverage.py --report` 输出，CI「Report Layered Coverage」step），不阻断；补齐分层覆盖率后翻转强制
 > - **覆盖率源**：`core`, `app`, `data`, `services`, `strategies`, `utils`, `ui`, `config`, `main`（排除 `tests/`, `scripts/`, `data/tiktoken_cache/`）
@@ -237,7 +237,7 @@ def test_market_trend_filter_selects_in_range():
 ## 完成判定（canonical 入口）
 
 - 新测试已按对应「测试编写模板」落地（DAO / ViewModel / 异步取消 / 策略），未发明未对齐的非标准写法
-- 覆盖率达标（整体 ≥ 85%，单文件 ≥ 80%，分层阈值为 advisory）
+- 覆盖率达标（单文件 ≥ 80% 与 diff coverage ≥80% 为 CI 强制；整体 ≥ 85% 为本地目标；分层阈值为 advisory）
 - E2E 用例按要求串行/网络隔离（Windows skipif 等既有约定）依从
 
 _最小验证命令：_ `ruff` + `pyright` + 对应 `tests/unit/`/`tests/integration/`；
