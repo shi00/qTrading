@@ -32,6 +32,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     _check_R4_fstring_in_tree,
     _check_R4_in_tree,
     _check_R4_literal_assignments_in_tree,
+    _check_R4_string_concat_in_tree,
     _check_R4_text_fstring_in_tree,
     _check_R_no_bare_ft_colors_in_tree,
     _check_R_no_bare_font_size_in_tree,
@@ -229,6 +230,57 @@ class TestR4FstringFunction:
         """普通字符串（非 f-string）不进入 f-string 检测。"""
         code = 'sql = "SELECT * FROM t"\n'
         warnings = self._warn(code)
+        assert warnings == []
+
+
+class TestR4StringConcatFunction:
+    """R4 补充检测（OSS E2）：BinOp `+` 拼接 SQL 模板（绕过路径 2b），WARNING 语义。
+
+    背景：ruff S608 能识别 17 条硬编码 SQL 表达式拼接，而项目自研 check_R4_fstring_sql
+    仅覆盖 f-string 形态，对普通字符串 ``+`` 拼接（如 ``"INSERT INTO ..." + col_str + ...``，
+    见 stock_dao.py:288）存在盲区。本检测补齐同语义 WARNING。
+    """
+
+    def _warn(self, code: str) -> list[str]:
+        tree = ast.parse(code)
+        fake_path = ROOT / "data" / "fake_module.py"
+        return _check_R4_string_concat_in_tree(tree, fake_path)
+
+    def _warn_on_disk(self, code: str) -> list[str]:
+        """写临时文件后检测（noqa 豁免需真实行内容，对齐 literal 测试模式）。"""
+        tree = ast.parse(code)
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "fake_module.py"
+            p.write_text(code, encoding="utf-8")
+            return _check_R4_string_concat_in_tree(tree, p)
+
+    def test_sql_concat_with_string_left_warns(self):
+        """以 SQL 关键字开头的字符串字面量参与 `+` 拼接应产生 WARNING。"""
+        code = (
+            "async def f():\n"
+            '    sql_insert = "INSERT INTO stock_concepts (" + col_str + ") VALUES (" + placeholders + ")"\n'
+        )
+        warnings = self._warn(code)
+        assert len(warnings) == 1
+        assert "R4" in warnings[0]
+        assert "INSERT" in warnings[0]
+
+    def test_fstring_left_operand_not_flagged(self):
+        """左操作数为 f-string 的 BinOp 应交给 f-string 检测而非此处（避免重复报）。"""
+        code = 'async def f():\n    sql = f"SELECT {cols}" + " FROM t"\n'
+        warnings = self._warn(code)
+        assert warnings == []
+
+    def test_non_sql_string_left_not_warned(self):
+        """非 SQL 关键字开头的字符串左操作数不应产生 WARNING。"""
+        code = 'msg = "prefix" + name\n'
+        warnings = self._warn(code)
+        assert warnings == []
+
+    def test_noqa_exempts_line(self):
+        """行尾 # noqa: R4 豁免合法字符串拼接模板。"""
+        code = 'async def f():\n    sql = "INSERT INTO t (" + cols + ")"  # noqa: R4 - 列名来自 ORM 元数据\n'
+        warnings = self._warn_on_disk(code)
         assert warnings == []
 
 

@@ -257,8 +257,40 @@ def _check_R4_fstring_in_tree(tree: ast.Module, source_path: Path) -> list[str]:
     return warnings
 
 
+def _check_R4_string_concat_in_tree(tree: ast.Module, source_path: Path) -> list[str]:
+    """纯函数：检查"以 SQL 关键字开头的字符串字面量参与 BinOp `+` 拼接"（绕过路径 2b）。
+
+    OSS 检视 E2 补充：ruff S608 能识别硬编码 SQL 表达式拼接（17 条），但项目自研
+    check_R4_fstring_sql 仅覆盖 f-string 形态，对普通字符串 `+` 拼接（如
+    ``sql_insert = "INSERT INTO ..." + col_str + ...``，stock_dao.py:288）存在盲区。
+    此处补同语义 WARNING 对齐：DAO 层存在合法占位符拼接（列名来自 ORM 元数据 /
+    确定性整数编号），故不阻断，仅提示人工确认拼接值非用户输入。
+    """
+    warnings: list[str] = []
+    try:
+        rel = source_path.relative_to(ROOT)
+    except ValueError:
+        rel = source_path
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Add):
+            continue
+        left = node.left
+        # 仅检测左操作数为以 SQL 关键字开头的字符串字面量（见 stock_dao INSERT 拼接）
+        if not (isinstance(left, ast.Constant) and isinstance(left.value, str)):
+            continue
+        if not _SQL_KEYWORD_LEAD_RE.search(left.value):
+            continue
+        if _line_has_noqa_marker(source_path, node.lineno, _R4_NOQA_MARKER):
+            continue
+        warnings.append(
+            f"{rel}:{node.lineno}: R4 字符串拼接以 SQL 关键字开头（OSS E2 盲区补齐）— "
+            f"合法占位符拼接可忽略；若拼接外部输入须参数化 (asyncpg $1, $2, ...): {left.value[:60]!r}"
+        )
+    return warnings
+
+
 def check_R4_fstring_sql() -> int:
-    """R4 补充（review07-G18）：f-string SQL 模板检测，WARNING 输出到 stderr（不阻断）。
+    """R4 补充（review07-G18）：f-string 与字符串拼接 SQL 模板检测，WARNING 输出到 stderr（不阻断）。
 
     返回 WARNING 条数，供 main() 汇总显示（GATE-05：[PASS] 输出须明示 WARNING 计数，
     避免只看 [PASS] 误以为零违规）。
@@ -273,8 +305,10 @@ def check_R4_fstring_sql() -> int:
             if tree is None:
                 continue
             warnings.extend(_check_R4_fstring_in_tree(tree, p))
+            # OSS E2: 补齐 BinOp `+` 拼接形态（stock_dao 类，ruff S608 与自研检查的盲区）
+            warnings.extend(_check_R4_string_concat_in_tree(tree, p))
     if warnings:
-        print("[WARN] R4 f-string SQL 模板（合法用法可忽略，拼接外部输入须参数化）：", file=sys.stderr)
+        print("[WARN] R4 f-string/字符串拼接 SQL 模板（合法用法可忽略，拼接外部输入须参数化）：", file=sys.stderr)
         for w in warnings:
             print(f"  - {w}", file=sys.stderr)
     return len(warnings)
