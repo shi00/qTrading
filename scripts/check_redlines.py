@@ -289,8 +289,12 @@ def _check_R4_string_concat_in_tree(tree: ast.Module, source_path: Path) -> list
     return warnings
 
 
-def check_R4_fstring_sql() -> None:
-    """R4 补充（review07-G18）：f-string 与字符串拼接 SQL 模板检测，WARNING 输出到 stderr（不阻断）。"""
+def check_R4_fstring_sql() -> int:
+    """R4 补充（review07-G18）：f-string 与字符串拼接 SQL 模板检测，WARNING 输出到 stderr（不阻断）。
+
+    返回 WARNING 条数，供 main() 汇总显示（GATE-05：[PASS] 输出须明示 WARNING 计数，
+    避免只看 [PASS] 误以为零违规）。
+    """
     warnings: list[str] = []
     for dir_name in ("data", "services", "strategies", "app", "core", "utils", "ui"):
         target_dir = ROOT / dir_name
@@ -307,6 +311,7 @@ def check_R4_fstring_sql() -> None:
         print("[WARN] R4 f-string/字符串拼接 SQL 模板（合法用法可忽略，拼接外部输入须参数化）：", file=sys.stderr)
         for w in warnings:
             print(f"  - {w}", file=sys.stderr)
+    return len(warnings)
 
 
 # DAT-08: text(f"...") / sa.text(f"...") 形态检测（ERROR）
@@ -1622,17 +1627,18 @@ def _check_R20_in_tree(tree: ast.Module, source_path: Path) -> list[str]:
     return warnings
 
 
-def check_R20() -> None:
+def check_R20() -> int:
     """R20（报告模式，warning 不阻断）：扫描 strategies/ 下已知单位列裸数值比较。
 
     第一阶段为报告模式：warning 输出到 stderr、不阻断 exit code，全库实测误报率，
     达标后评估升级为硬拦截（第二阶段）。语义与扫描范围见 docs/governance/redlines.yml
     R20（NEW_CODE，仅人工评审；统一入口 threshold_in_data_unit()）。
+    返回 WARNING 条数，供 main() 汇总显示（GATE-05）。
     """
     warnings: list[str] = []
     target_dir = ROOT / "strategies"
     if not target_dir.exists():
-        return
+        return 0
     for p in _iter_py_files(target_dir):
         tree = _parse_module(p)
         if tree is None:
@@ -1645,6 +1651,7 @@ def check_R20() -> None:
         )
         for w in warnings:
             print(f"  - {w}", file=sys.stderr)
+    return len(warnings)
 
 
 # ============================================================================
@@ -1671,10 +1678,9 @@ def main() -> int:
         ("UI 渲染期副作用 (UIX-10)", check_no_component_render_side_effects()),
         ("R22 水位线单调性 (D3-m1)", check_R22()),
     ]
-    # R4 f-string SQL 模板为 WARNING（不阻断），输出到 stderr
-    check_R4_fstring_sql()
+    # R4 f-string SQL 模板为 WARNING（不阻断），输出到 stderr；返回计数供 [PASS] 汇总（GATE-05）
     # R20 单位核对为 WARNING（报告模式，不阻断），输出到 stderr
-    check_R20()
+    warn_count = check_R4_fstring_sql() + check_R20()
     all_errors: list[str] = []
     for _, errs in checks:
         all_errors.extend(errs)
@@ -1687,6 +1693,7 @@ def main() -> int:
 
     print(
         "[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15/R16 + R_no_bare_ft_colors_in_ui + R_no_bare_font_size_in_ui + R_tushare_token_log + R_lazy_import_whitelist + R4 text(f) DAT-08 + UIX-10 渲染副作用 + R22 水位线单调性）"
+        + (f"；含 {warn_count} 条 WARNING（R4 f-string SQL / R20 单位核对，不阻断但请人工复核）" if warn_count else "")
     )
     return 0
 
