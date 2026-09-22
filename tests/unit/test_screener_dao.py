@@ -56,20 +56,21 @@ class TestScreenerDaoGetHistoryTree:
         assert len(result) == 1
 
     @pytest.mark.asyncio
-    async def test_groups_by_trade_date_and_strategy(self):
-        """LIFE-03: 历史树按 (trade_date, strategy_name) 聚合，run_id 取最新代表值。"""
+    async def test_groups_by_trade_date_strategy_and_run(self):
+        """RV-03: 历史树按 (trade_date, strategy_name, run_id) 聚合——同 (date, strategy)
+        的多次运行分别成行（「今天跑了 3 次」分别可见），cnt 为该 run 股票数。"""
         dao = ScreenerDao(MagicMock())
         df = pd.DataFrame(
             {
-                "trade_date": ["20240615", "20240615"],
-                "strategy_name": ["strat_a", "strat_b"],
-                "cnt": [3, 7],
-                "run_id": ["r1", "r2"],
+                "trade_date": ["20240615", "20240615", "20240615"],
+                "strategy_name": ["strat_a", "strat_a", "strat_b"],
+                "cnt": [3, 5, 7],
+                "run_id": ["r1", "r2", "r3"],
             }
         )
         dao._read_db = AsyncMock(return_value=df)
         result = await dao.get_history_tree(offset=0, limit=30)
-        assert len(result) == 2
+        assert len(result) == 3  # strat_a 两个 run 分别成行
         assert set(result["strategy_name"]) == {"strat_a", "strat_b"}
 
     @pytest.mark.asyncio
@@ -351,6 +352,22 @@ class TestScreenerDaoGetLearningContext:
         assert "strategy_name =" not in sql and not any(
             isinstance(v, str) and "strategy" in str(v).lower() for v in compiled.params.values()
         )
+
+    @pytest.mark.asyncio
+    async def test_latest_run_dedup_distinct_on_id_desc(self):
+        """RV-03: 学习样本按 (trade_date, strategy_name, ts_code) 去重取最近运行（id DESC），
+        避免 append-only 下同日同股多 run 重复取样挤占 few-shot 多样性。"""
+        from sqlalchemy.dialects import postgresql
+
+        dao = ScreenerDao(MagicMock())
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_learning_context(limit=3, is_win=True)
+        stmt = dao._read_db_select.call_args[0][0]
+        sql = str(stmt.compile(dialect=postgresql.dialect()))
+        # 子查询（latest_learning）含 DISTINCT ON + id DESC（最近一次运行去重）
+        assert "DISTINCT ON" in sql
+        assert "screening_history.id DESC" in sql
+        assert "screening_history.run_id DESC" not in sql
 
     @pytest.mark.asyncio
     async def test_learning_context_stats_aggregates(self):
@@ -679,7 +696,7 @@ class TestScreenerDaoSaveScreeningResults:
 
     @pytest.mark.asyncio
     async def test_uses_three_field_pk_columns(self):
-        """LIFE-03: save_screening_results 应以 (trade_date, strategy_name, ts_code) 为主键传参。"""
+        """RV-03: save_screening_results 应以 (trade_date, strategy_name, ts_code, run_id) 为主键传参。"""
         dao = ScreenerDao(MagicMock())
         dao._save_upsert = AsyncMock(return_value=1)
         records = [
@@ -694,11 +711,12 @@ class TestScreenerDaoSaveScreeningResults:
         await dao.save_screening_results(records)
         dao._save_upsert.assert_called_once()
         call_kwargs = dao._save_upsert.call_args.kwargs
-        assert call_kwargs["pk_columns"] == ["trade_date", "strategy_name", "ts_code"]
+        assert call_kwargs["pk_columns"] == ["trade_date", "strategy_name", "ts_code", "run_id"]
 
     @pytest.mark.asyncio
     async def test_batch_internal_duplicate_overwrite_keeps_last(self):
-        """LIFE-03: 批内同 (trade_date, strategy_name, ts_code) 预去重，保留最新（keep=last）。"""
+        """RV-03: append-only——批内同 (date,strategy,code,run_id) 预去重保留最新；
+        不同 run_id 各自保留（不再覆盖）。"""
         dao = ScreenerDao(MagicMock())
         dao._save_upsert = AsyncMock(return_value=1)
         records = [
@@ -716,13 +734,21 @@ class TestScreenerDaoSaveScreeningResults:
                 "trade_date": "20240615",
                 "name": "Latest",
             },
+            # 同 (4 键) 重复行：预去重保留最新
+            {
+                "run_id": "r2",
+                "strategy_name": "strategy_ai_active_name",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "Latest2",
+            },
         ]
         await dao.save_screening_results(records)
         df = dao._save_upsert.call_args.kwargs["df"]
-        assert len(df) == 1
-        row = df.iloc[0]
-        assert row["run_id"] == "r2"
-        assert row["name"] == "Latest"
+        # 不同 run_id 独立保留（2 行），同 4 键去重（r2 保留 Latest2）
+        assert len(df) == 2
+        by_run = {row.run_id: row.name for row in df.itertuples()}
+        assert by_run == {"r1": "First", "r2": "Latest2"}
 
 
 class TestScreenerDaoBuildScreeningSql:
@@ -1592,11 +1618,12 @@ class TestScreenerDaoGetStrategyReviewStats:
         from sqlalchemy.dialects import postgresql
 
         sql = str(stmt.compile(dialect=postgresql.dialect()))
-        # DISTINCT ON 三列 = 覆盖语义唯一键 (trade_date, strategy_name, ts_code)
+        # RV-03: DISTINCT ON 三列（(trade_date, strategy_name, ts_code) 最新运行口径）
         assert "DISTINCT ON" in sql
         assert ("screening_history.trade_date, screening_history.strategy_name, screening_history.ts_code") in sql
-        # 快照确定性：ORDER BY 尾部 run_id DESC
-        assert "screening_history.run_id DESC" in sql
+        # RV-03: 快照确定性改按 id DESC（id 单调 = 最近一次运行；run_id 随机 hex 非时间序）
+        assert "screening_history.id DESC" in sql
+        assert "screening_history.run_id DESC" not in sql
 
     @pytest.mark.asyncio
     async def test_windows_days_bindparam_and_grouping(self):
@@ -1677,3 +1704,57 @@ class TestScreenerDaoScreeningDerivation:
         assert _derive_screening_from_fundamental(None) is None
         empty = pd.DataFrame()
         assert _derive_screening_from_fundamental(empty) is empty
+
+
+class TestRv03AppendOnlySemantics:
+    """RV-03: 研究记录 append-only 语义——同日多次运行互不覆盖、统计取最新运行。"""
+
+    @pytest.mark.asyncio
+    async def test_same_day_two_runs_both_kept(self):
+        """同日不同 run_id 的两批写入各自落库（不再互斥覆盖）。"""
+        dao = ScreenerDao(MagicMock())
+        dao._save_upsert = AsyncMock(return_value=1)
+        records = [
+            {
+                "run_id": "run_a",
+                "strategy_name": "strat",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "params_snapshot": {"pe": 20},
+                "name": "A",
+            },
+            {
+                "run_id": "run_b",
+                "strategy_name": "strat",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "params_snapshot": {"pe": 15},
+                "name": "B",
+            },
+        ]
+        await dao.save_screening_results(records)
+        df = dao._save_upsert.call_args.kwargs["df"]
+        pk = dao._save_upsert.call_args.kwargs["pk_columns"]
+        # 两 run 各自独立成行（append-only）
+        assert len(df) == 2
+        assert set(df["run_id"]) == {"run_a", "run_b"}
+        # 唯一键含 run_id
+        assert pk == ["trade_date", "strategy_name", "ts_code", "run_id"]
+
+    @pytest.mark.asyncio
+    async def test_thread_pending_labels_not_reset(self):
+        """append-only：不再为覆盖语义显式重置既有行——review_status 仅对新行置 PENDING。"""
+        dao = ScreenerDao(MagicMock())
+        dao._save_upsert = AsyncMock(return_value=1)
+        records = [
+            {
+                "run_id": "run_c",
+                "strategy_name": "strat",
+                "ts_code": "000001.SZ",
+                "trade_date": "20240615",
+                "name": "C",
+            }
+        ]
+        await dao.save_screening_results(records)
+        df = dao._save_upsert.call_args.kwargs["df"]
+        assert (df["review_status"] == REVIEW_STATUS_PENDING).all()  # 新行置 PENDING 正常

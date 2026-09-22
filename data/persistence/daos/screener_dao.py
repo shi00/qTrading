@@ -287,16 +287,17 @@ class ScreenerDao(BaseDao):
 
     async def get_history_tree(self, offset: int = 0, limit: int | None = 30):
         effective_limit = limit or 30
-        # LIFE-03: 覆盖语义下同 (trade_date, strategy_name, ts_code) 仅保留最新快照，
-        # 历史树按 (trade_date, strategy_name) 聚合该日该策略当前股票集（COUNT(*) = 股票数）。
-        # run_id 取组内字典序最大值的 uuid 作为展示代表值（非严格"最新"，仅作就地展示；
-        # 点击按 trade_date+strategy_name 载入，不依赖 run_id 过滤）。
+        # RV-03: append-only 语义下同 (trade_date, strategy_name) 可含多次运行（不同 run_id），
+        # 历史树按 (trade_date, strategy_name, run_id) 聚合——「今天跑了 3 次」分别可见可开。
+        # COUNT(*) 为该 run 的股票数；展示代表值取 MAX(id)（id 单调递增 = 最近一次命中，
+        # run_id 为随机 hex 字典序不能代表时间序，对抗检视 Major-1）。
+        # 点击按 trade_date+strategy_name+id 载入（load_history_records 已支持 run_id 过滤）。
         sql = f"""
-            SELECT trade_date, strategy_name, COUNT(*) as cnt, MAX(run_id) as run_id
+            SELECT trade_date, strategy_name, run_id, COUNT(*) as cnt, MAX(id) as latest_id
             FROM screening_history
             WHERE trade_date >= CURRENT_DATE - INTERVAL '{REVIEW_STATS_WINDOW_DAYS} days'
-            GROUP BY trade_date, strategy_name
-            ORDER BY trade_date DESC, COUNT(*) ASC, MIN(created_at) DESC
+            GROUP BY trade_date, strategy_name, run_id
+            ORDER BY trade_date DESC, latest_id DESC
             LIMIT $1 OFFSET $2
         """
         return await self._read_db(
@@ -328,9 +329,12 @@ class ScreenerDao(BaseDao):
     async def get_strategy_review_stats(self) -> pd.DataFrame:
         """按 (strategy_name, benchmark_code, trade_date) 返回复盘日组合聚合统计（UX-05）。
 
-        口径（设计 v5）：
-        - 覆盖语义：同 (trade_date, strategy_name, ts_code) 仅保留最新快照
-          （DISTINCT ON ... ORDER BY run_id DESC，四审 L1），消除被淘汰股票行/多运行日加权残留。
+        口径（设计 v5 + RV-03）：
+        - **最新运行口径（RV-03 显式决策）**：同 (trade_date, strategy_name, ts_code) 取
+          **最近一次运行**（DISTINCT ON 3 键 ORDER BY ... id DESC，id 单调递增 = 最近；
+          run_id 为随机 hex 字典序不能代表时间序，故弃用 run_id DESC）。append-only
+          语义下每 4 键组（含 run_id）是一行，DISTINCT 从死逻辑变真逻辑，消除被淘汰
+          股票行/多次运行加权残留。
         - 指标独立 N：t1_pct / t5_pct / alpha 各以非 NULL 股票独立聚类求日组合均值与有效
           样本数（AVG/COUNT 自动忽略 NULL，四审 M4）。
         - 胜率：prediction_result 为 WIN/LOSS 的逐股计数（样例单位=股票行，跨日由消费端累计，
@@ -342,6 +346,7 @@ class ScreenerDao(BaseDao):
         sh = ScreeningHistory.__table__
         latest = (
             sa.select(
+                sh.c.id,
                 sh.c.trade_date,
                 sh.c.strategy_name,
                 sh.c.ts_code,
@@ -355,9 +360,10 @@ class ScreenerDao(BaseDao):
                 sh.c.trade_date
                 >= sa.func.current_date() - sa.bindparam("window_days", REVIEW_STATS_WINDOW_DAYS, type_=sa.INTEGER)
             )
-            # DISTINCT ON (trade_date, strategy_name, ts_code) ORDER BY ... run_id DESC
+            # RV-03: DISTINCT ON (trade_date, strategy_name, ts_code) ORDER BY ... id DESC
+            # （id 单调 = 最近一次运行；DISTINCT ON 要求 ORDER BY 列在 select list，故含 id）
             .distinct(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code)
-            .order_by(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code, sh.c.run_id.desc())
+            .order_by(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code, sh.c.id.desc())
             .subquery("latest_review_stats")
         )
         stmt = (
@@ -384,9 +390,9 @@ class ScreenerDao(BaseDao):
     async def get_ai_attribution_stats(self) -> pd.DataFrame:
         """按 (strategy_name, benchmark_code, has_ai, trade_date) 返回 AI 归因日组合聚合（BIZ-04 第二层）。
 
-        口径与 ``get_strategy_review_stats`` 对齐（设计 v5）：
-        - 覆盖语义：同 (trade_date, strategy_name, ts_code) 仅保留最新快照
-          （DISTINCT ON ... ORDER BY run_id DESC），消除被淘汰股票行/多运行日加权残留。
+        口径与 ``get_strategy_review_stats`` 对齐（设计 v5 + RV-03）：
+        - **最新运行口径（RV-03）**：同 (trade_date, strategy_name, ts_code) 取最近一次
+          运行（DISTINCT ON ... ORDER BY ... id DESC，id 单调 = 最近；弃用 run_id DESC）。
         - has_ai 分组：``ai_score IS NOT NULL`` 视为「历史上真实发生的 AI 判断」组
           （AI 启用且产生结论），NULL 为无 AI 组。代理口径局限见 ADR-0009（无 AI 组可能
           混入「AI 启用但失败/未确认」记录；组间差异含自选择偏差，相关非因果）。
@@ -399,6 +405,7 @@ class ScreenerDao(BaseDao):
         sh = ScreeningHistory.__table__
         latest = (
             sa.select(
+                sh.c.id,
                 sh.c.trade_date,
                 sh.c.strategy_name,
                 sh.c.ts_code,
@@ -413,9 +420,10 @@ class ScreenerDao(BaseDao):
                 sh.c.trade_date
                 >= sa.func.current_date() - sa.bindparam("window_days", REVIEW_STATS_WINDOW_DAYS, type_=sa.INTEGER)
             )
-            # DISTINCT ON (trade_date, strategy_name, ts_code) ORDER BY ... run_id DESC
+            # RV-03: DISTINCT ON ... ORDER BY ... id DESC（id 单调 = 最近一次运行；
+            # DISTINCT ON 要求 ORDER BY 列在 select list，故含 id）
             .distinct(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code)
-            .order_by(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code, sh.c.run_id.desc())
+            .order_by(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code, sh.c.id.desc())
             .subquery("latest_ai_attribution")
         )
         has_ai = latest.c.ai_score.isnot(None).label("has_ai")
@@ -756,31 +764,53 @@ class ScreenerDao(BaseDao):
         label = "WIN" if is_win else "LOSS"
         t = Base.metadata.tables["screening_history"]
         order_dir = sa.desc if is_win else sa.asc
+        # RV-03: append-only 下同日同股多 run 会重复取样——先按 (trade_date, strategy_name,
+        # ts_code) 去重取**最近一次运行**（DISTINCT ON ... ORDER BY id DESC，与统计口径一致），
+        # 再取极值样本，避免同名样本重复挤占 few-shot 多样性（对抗检视 Major-2 闭合）。
+        latest = (
+            sa.select(
+                t.c.id,
+                t.c.ts_code,
+                t.c.name,
+                t.c.alpha,
+                t.c.t1_pct,
+                t.c.t5_pct,
+                t.c.ai_score,
+                t.c.ai_reason,
+                t.c.benchmark_code,
+                t.c.trade_date,
+                t.c.strategy_name,
+            )
+            .where(
+                t.c.prediction_result == label,
+                t.c.alpha.isnot(None),
+                t.c.t5_pct.isnot(None),
+                t.c.review_status == REVIEW_STATUS_COMPLETED,
+                # BIZ-01: 学习样例仅含 AI 评分过的记录（纯数学策略记录同样满足
+                # prediction_result+alpha 过滤，但无 ai_score，须显式排除避免污染 few-shot）。
+                t.c.ai_score.isnot(None),
+            )
+            .distinct(t.c.trade_date, t.c.strategy_name, t.c.ts_code)
+            .order_by(t.c.trade_date, t.c.strategy_name, t.c.ts_code, t.c.id.desc())
+            .subquery("latest_learning")
+        )
         stmt = sa.select(
-            t.c.ts_code,
-            t.c.name,
-            t.c.alpha,
-            t.c.t1_pct,
-            t.c.t5_pct,
-            t.c.ai_score,
-            t.c.ai_reason,
-            t.c.benchmark_code,
-        ).where(
-            t.c.prediction_result == label,
-            t.c.alpha.isnot(None),
-            t.c.t5_pct.isnot(None),
-            t.c.review_status == REVIEW_STATUS_COMPLETED,
-            # BIZ-01: 学习样例仅含 AI 评分过的记录（纯数学策略记录同样满足
-            # prediction_result+alpha 过滤，但无 ai_score，须显式排除避免污染 few-shot）。
-            t.c.ai_score.isnot(None),
+            latest.c.ts_code,
+            latest.c.name,
+            latest.c.alpha,
+            latest.c.t1_pct,
+            latest.c.t5_pct,
+            latest.c.ai_score,
+            latest.c.ai_reason,
+            latest.c.benchmark_code,
         )
         if strategy_name is not None:
-            stmt = stmt.where(t.c.strategy_name == strategy_name)
+            stmt = stmt.where(latest.c.strategy_name == strategy_name)
         if as_of is not None:
             if isinstance(as_of, datetime.datetime):
                 as_of = as_of.date()
-            stmt = stmt.where(t.c.trade_date < as_of)
-        stmt = stmt.order_by(order_dir(t.c.alpha), order_dir(t.c.t1_pct)).limit(limit)
+            stmt = stmt.where(latest.c.trade_date < as_of)
+        stmt = stmt.order_by(order_dir(latest.c.alpha), order_dir(latest.c.t1_pct)).limit(limit)
         df = await self._read_db_select(stmt)
         return df if df is not None else pd.DataFrame()
 
@@ -924,10 +954,10 @@ class ScreenerDao(BaseDao):
             else:
                 row = dict(zip(all_cols, r, strict=False))
             thinking_text = row.pop("thinking", "")
-            # LIFE-03: 覆盖语义——同 (trade_date, strategy_name, ts_code) 会覆盖历史行。
-            # 显式置 PENDING：若被覆盖行此前已复盘（COMPLETED），其 prediction_result/alpha 等
-            # computed 列因不在本次写入列而保留，但 review_status 重置为 PENDING 重新进入待复盘，
-            # 保证复盘统计基于当日最新快照（覆盖即需重复盘）。此为覆盖语义的既定权衡。
+            # RV-03: append-only 语义——新写入成为独立研究记录（唯一键含 run_id）。
+            # 与 LIFE-03 覆盖语义不同：不再显式重置 PENDING 覆盖既有行的复盘状态。
+            # run_id 每次运行唯一，同一 (trade_date, strategy_name, ts_code, run_id)
+            # 的重复写入（重试）经 4 键 upsert 幂等；不同 run 各自独立成行。
             row["review_status"] = REVIEW_STATUS_PENDING
             enriched_records.append(tuple(row.get(c) for c in all_cols))
             if thinking_text:
@@ -937,10 +967,10 @@ class ScreenerDao(BaseDao):
 
         df = pd.DataFrame(enriched_records, columns=all_cols)
 
-        # LIFE-03: 覆盖语义唯一键 (trade_date, strategy_name, ts_code)。
-        # 批内按新主键预去重（keep="last" 保留最新），避免批内同 key 触发重复告警；
+        # RV-03: append-only 唯一键 (trade_date, strategy_name, ts_code, run_id)。
+        # 批内按 4 主键预去重（keep="last" 保留最新），避免批内同 key 触发重复告警；
         # 跨批/并发冲突交由 ON CONFLICT DO UPDATE 串行化处理。
-        _pk = ["trade_date", "strategy_name", "ts_code"]
+        _pk = ["trade_date", "strategy_name", "ts_code", "run_id"]
         df = df.drop_duplicates(subset=_pk, keep="last")
 
         await self._save_upsert(

@@ -805,8 +805,9 @@ def build_history_tree(
             ]
             for s in strategies:
                 strategy_display = translate_strategy_name(s.strategy_name)
-                # LIFE-03: run_id 已降级为聚合展示（该策略当日最新运行代表值，可能为 None 或非空 uuid），
-                # 点击按 (trade_date, strategy_name) 载入覆盖后快照，避免按单一 run_id 过滤漏掉同组跨 run 记录。
+                # RV-03: append-only 语义下历史树按 (trade_date, strategy_name, run_id) 分组，
+                # 每条策略行对应当次运行（run_id 精确标识），点击按该 run_id 载入该次运行的
+                # 精确股票集（多 run 快照分别可开，不再被覆盖语义合并）。
                 run_suffix = f" [{s.run_id[:8]}]" if len(strategies) > 1 and s.run_id else ""
                 subtiles.append(
                     ft.ListTile(
@@ -814,7 +815,7 @@ def build_history_tree(
                             ft.Icons.TRENDING_UP, size=AppStyles.FONT_SIZE_TITLE, color=AppColors.TEXT_SECONDARY
                         ),
                         title=ft.Text(f"{strategy_display}{run_suffix} ({s.cnt})", size=AppStyles.FONT_SIZE_BODY),
-                        on_click=lambda e, d=d_key, sn=s.strategy_name: on_item_click(d, sn, None),
+                        on_click=lambda e, d=d_key, sn=s.strategy_name, rid=s.run_id: on_item_click(d, sn, rid),
                         dense=True,
                     )
                 )

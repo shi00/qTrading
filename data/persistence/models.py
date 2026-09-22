@@ -274,14 +274,16 @@ class ScreeningHistory(Base):
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
     __table_args__ = (
-        # LIFE-03: 唯一键由 (run_id, ts_code) 改为 (trade_date, strategy_name, ts_code)，
-        # 让同一天同一策略对同一股票的多次运行以覆盖语义落库（保留最新快照），
-        # 修复复盘统计（UN-04）将重复运行样本重复计入的问题。run_id 降级为普通列。
+        # RV-03: 研究记录本质是「某次运行的当时判断」，天然 append-only——唯一键改
+        # (trade_date, strategy_name, ts_code, run_id)（由 LIFE-03 的 3 键覆盖语义演进）。
+        # 同一天多次参数运行各自独立成行（params_snapshot/ai_reason/thinking 不互相覆盖），
+        # 统计口径取最近一次运行（DISTINCT ON ... ORDER BY id DESC，见 screener_dao）。
         UniqueConstraint(
             "trade_date",
             "strategy_name",
             "ts_code",
-            name="uq_screening_history_dat_strategy_code",
+            "run_id",
+            name="uq_screening_history_dat_strategy_code_run",
         ),
         Index("idx_sh_date_strategy", "trade_date", "strategy_name"),
         Index("idx_sh_date_code", "trade_date", "ts_code"),
