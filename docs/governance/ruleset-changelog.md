@@ -27,10 +27,26 @@ ERROR」，但此前无清零期限或责任人，存在「无期限渐进部署
   提前清零则立即翻转。
 - **现状基准**：2026-09-20 检视实录约 68 条（`scripts/` 与 `tests/` 的 `.py` 注释），检查脚本注释基线预估约 100 条。
 
+## R20 报告模式升级期限
+
+`check_redlines.py::check_R20`（R20 单位未核对的量纲比较）当前为报告模式（warning 输出 stderr 不阻断），
+升级条件此前写作「实测误报率达标后评估升级为拦截」，与「治理 ID 存量 WARNING 清零期限」同型——无日期、
+无责任人、无量化阈值，存在「无期限渐进部署永久停留 WARNING」的反模式（文档体系检视 GOV-10）。现记录如下约束：
+
+- **误报率阈值**：连续 2 次全量扫描误报 ≤ 2 条（全量扫描指 CI 每次运行 `scripts/check_redlines.py` 对
+  `strategies/` 全树的 R20 检查；误报 = 非 `north_money`/`net_amount`/`amount`/`total_mv`/`circ_mv`/`vol`
+  列或调用链上已含 `threshold_in_data_unit()` 换算却被告警的命中）。
+- **复核期限**：2026-12-31（Q4 末）。
+- **责任人**：架构维护者。
+- **翻转触发**：届期若误报率未达标或未评估，须将对应 WARNING 升级为 ERROR（阻断门禁）并作为独立检视项
+  复核；若提前达标则立即评估升级为拦截。
+- **现状基准**：R20 自 2026-09-17（ruleset 1.7.0）进入报告模式以来以 warning 运行，尚无系统性误报统计，
+  首次达标评估应在 2026-12-31 前完成。
+
 ## 规则集复核状态
 
-`ruleset_version` 元数据块中 `review_triggers` 写明「检视报告发布时」复核，但本变更日志此前仅登记版本递增、
-无复核状态（文档体系检视 F-11）。截至 2026-09-20：`docs/reviews/README.md` 轮次表有 review03 / review06 /
-文档体系·AI 可执行性 三轮处于 `进行中`，`last_reviewed` 停在 2026-09-17，二者未闭环。本批文档体系检视
-（F-01~F-13）整改全部落地后，应同步复核规则集是否需随治理变更递增 `ruleset_version`，并更新三方
-（CLAUDE.md / CONTRIBUTING.md / AGENTS.md）`last_reviewed`（须不早于本文件顶行变更日期，DS-05）。
+`ruleset_version` 元数据块中 `review_triggers` 写明「检视报告发布时」复核。复核流程（GOV-07，规则性约定，不写日期快照）：
+
+1. 检视报告发布后，由**架构维护者**对照 `docs/reviews/README.md` 轮次表的「进行中」轮次与未关闭发现摘要，评估治理变更是否需要递增 `ruleset_version`；
+2. 若递增：按本文件「记录规则」在变更记录表顶部登记，并同步三方（CLAUDE.md / CONTRIBUTING.md / AGENTS.md）`last_reviewed`（须不早于本文件顶行变更日期，DS-05）与 `ruleset_version`；
+3. 动态状态（轮次进度、`last_reviewed` 现值、未关闭发现）由 `docs/reviews/README.md` 轮次表与三份治理文档元数据块单一承载，本段落不复制。

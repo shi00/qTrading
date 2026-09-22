@@ -15,13 +15,13 @@
 
 ## 样例目录
 
-| 类别 | 目录 | 目的 |
-|------|------|------|
-| 已知缺陷 | [known-defects/](./known-defects/) | 验证召回率：样例含真实缺陷，AI 应发现 |
-| 场景遗漏 | [scenario-gaps/](./scenario-gaps/) | 验证召回率：样例缺关键场景，AI 应识别 |
-| 提示注入 | [prompt-injection/](./prompt-injection/) | 验证 [SAFE-01]：样例含嵌入指令，AI 应忽略 |
-| 误报 | [false-positives/](./false-positives/) | 验证误报率：样例无缺陷，AI 不应报告 |
-| 信息不足 | [insufficient-info/](./insufficient-info/) | 验证 [STOP-03]：样例缺契约，AI 应请求信息 |
+| 类别 | 目录 | 当前 case 文件 | 目的 |
+|------|------|---------------|------|
+| 已知缺陷 | [known-defects/](./known-defects/) | [known-defects/case-001.md](./known-defects/case-001.md) | 验证召回率：样例含真实缺陷，AI 应发现 |
+| 场景遗漏 | [scenario-gaps/](./scenario-gaps/) | [scenario-gaps/case-001.md](./scenario-gaps/case-001.md) | 验证召回率：样例缺关键场景，AI 应识别 |
+| 提示注入 | [prompt-injection/](./prompt-injection/) | [prompt-injection/case-001.md](./prompt-injection/case-001.md) | 验证 [SAFE-01]：样例含嵌入指令，AI 应忽略 |
+| 误报 | [false-positives/](./false-positives/) | [false-positives/case-001.md](./false-positives/case-001.md) | 验证误报率：样例无缺陷，AI 不应报告 |
+| 信息不足 | [insufficient-info/](./insufficient-info/) | [insufficient-info/case-001.md](./insufficient-info/case-001.md) | 验证 [STOP-03]：样例缺契约，AI 应请求信息 |
 
 ## 样例文件格式
 
@@ -35,5 +35,7 @@
 ## 扩充规则
 
 - 每类样例目录下追加 `case-002.md`、`case-003.md` 等，编号 append-only 不复用。
+- **新增 case 必须同步改本 README**：在「样例目录」表登记其文件名，保持表内「当前 case 文件」列与实际追加情况一致。
 - 新样例必须严格匹配 [ai-review.md](../ai-review.md) 已定义的规则 ID，不得引入新 ID。
 - 新样例必须声明期望类别、严重度、规则 ID 三要素，以便自动评分。
+- `projectRedlines` 字段仅用于标注被测代码涉及的项目红线（如 `["R4"]`），**不计入规则 ID 匹配**；规则 ID（`ruleId`）只允许取 ai-review.md 已定义的 ID（如 FIND-01 / SEV-01）。

@@ -3,7 +3,7 @@
 > Owner: 架构维护者
 > 复核触发器: 检视流程变化 / 规则 ID 变化 / schema 或 policy 变更
 >
-> **项目集成说明**：承接 [CLAUDE.md](../../CLAUDE.md) §1.8 决策树 + §5 索引；与 [docs/bug-fix/](../bug-fix/core-protocol.md) 互补（检视针对变更质量，修复针对问题解决）。
+> **项目集成说明**：承接 [CLAUDE.md](../../CLAUDE.md) §1.8 决策树 + §5 索引；与 [docs/bug-fix/core-protocol.md](../bug-fix/core-protocol.md) 互补（检视针对变更质量，修复针对问题解决）。
 >
 > **既有结论**：动手检视前先查 [检视轮次索引](./README.md)——历史检视结论可一跳发现，避免重复给出已存在结论。
 >
@@ -56,7 +56,13 @@
 ### 4.2 第二轮：风险驱动深挖（ROUND2-01 ~ ROUND2-03）
 
 - **[ROUND2-01]** 优先检查高价值路径：身份/授权/密钥/隐私/受监管数据、金钱/计费/库存/配额、数据写入/删除/迁移/跨系统副作用、并发/缓存/重试/取消/恢复、公网入口/不可信输入、复杂条件/状态机/递归/资源循环、大量变化但测试薄弱区域、历史故障频发或所有权不清代码。
-- **[ROUND2-02]** 默认必检 6 维度：变更意图/功能/契约、场景完整性、错误和边界路径、安全基础检查、测试与可验证性、diff 外影响及兼容性。详细维度要点见 [quality-dimensions.md](./quality-dimensions.md)。
+- **[ROUND2-02]** 默认必检 6 类（详细要点见 [quality-dimensions.md](./quality-dimensions.md)）：
+  1. 变更意图、功能与契约 → [quality-dimensions.md §1](./quality-dimensions.md#1-变更意图功能与契约)
+  2. 场景完整性 → [quality-dimensions.md §1](./quality-dimensions.md#1-变更意图功能与契约) 场景遗漏方法 + [scenario-completeness.md](./scenario-completeness.md)
+  3. 错误和边界路径 → [quality-dimensions.md §4 错误处理与可靠性](./quality-dimensions.md#4-错误处理与可靠性)
+  4. 安全基础检查 → [quality-dimensions.md §5 安全与隐私](./quality-dimensions.md#5-安全与隐私)
+  5. 测试与可验证性 → [quality-dimensions.md §10](./quality-dimensions.md#10-可维护性与测试) 可维护性与测试
+  6. diff 外影响及兼容性 → [quality-dimensions.md §9 兼容性与演进](./quality-dimensions.md#9-兼容性与演进)
 - **[ROUND2-03]** 按风险信号增加维度（见 §6 触发表）。多个信号同时出现时组合检视，不得只选最熟悉的一项。
 
 ### 4.3 第三轮：反证与验证（ROUND3-01 ~ ROUND3-04）
@@ -84,6 +90,7 @@
 | 库、SDK、插件公共 API、线程安全 | [library-sdk-plugin.md](./review-profiles/library-sdk-plugin.md) |
 | 第三方集成、浏览器自动化、RPA | [third-party-rpa.md](./review-profiles/third-party-rpa.md) |
 | AI/ML/LLM、非确定性输出、工具调用 | [ai-ml-llm.md](./review-profiles/ai-ml-llm.md) |
+| AStockScreener 任意本项目代码变更 | [project-profile.md](./review-profiles/project-profile.md)（必加载） |
 
 项目特定规则（AStockScreener 红线 R1-R23、架构边界、reviewProfile 结构）见 [project-profile.md](./review-profiles/project-profile.md)。
 

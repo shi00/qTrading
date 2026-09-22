@@ -18,7 +18,12 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
       coroutine_factory=lambda task_id: do_daily_sync(task_id),
       unique_key="daily_sync",
   )
+  # submit_task 返回 str | None：unique_key 冲突（重复提交已被同步拦截）或无事件循环时返回 None
+  if task_id is None:
+      logger.info("[daily_sync] skipped: duplicate unique_key or no event loop")
+      return
   ```
+- `unique_key` 冲突时 `submit_task` 返回 `None`（见 `services/task_manager.py::submit_task`），调用方必须判空，避免对 `None` 继续 `update_progress` / 挂回调。
 - 使用 `update_progress(progress)` 报告进度 (0.0-1.0)，内置节流避免 UI 风暴
 - 工作协程内部使用 `is_cancelled()` 检测取消信号 (用户主动取消 / 应用退出)
 - 任务持久化到本地，重启后 `RUNNING` 状态会被回填为 `INTERRUPTED`

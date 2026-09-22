@@ -32,6 +32,8 @@
 | DOC-13 | 孤儿治理文件纳入元数据/索引/白名单（AGENTS.md 收编） | 文档体系·AI 可执行性专项（DOC 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) / [ADR-0006](../adr/0006-override-agents-pure-pointer.md) | 使用中 |
 | GOV-01 | 宪法不得引用未登记例外（EX 引用必须落在注册表） | 文档体系检视（GOV 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | GOV-04 | 检视结论结构化登记（docs/reviews/findings/）：报告正文 gitignored 导致结论系统性丢失，结论 id/判据入库可溯源 | 文档体系检视（GOV 系列） | [findings/README.md](../reviews/findings/README.md) / [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
+| GOV-07 | ruleset-changelog 规则集复核状态为规则性约定（不写日期快照），动态状态由轮次表与三份治理文档承载 | 文档体系检视（GOV 系列） | [ruleset-changelog.md](./ruleset-changelog.md) | 使用中 |
+| GOV-10 | R20 报告模式补齐升级期限四要素（误报率阈值 / 复核期限 / 责任人 / 翻转触发），消除「无期限渐进部署永久停留 WARNING」反模式 | 文档体系检视（GOV 系列） | [ruleset-changelog.md](./ruleset-changelog.md)「R20 报告模式升级期限」 | 使用中 |
 | UX-07 | 全系统 UI/UX 专项审视轮次 | UX 专项检视 | [docs/reviews/README.md](../reviews/README.md) | 历史 |
 | GDR-06 | 治理文档不得硬编码 Flet 补丁版本号（SHALL NOT `x.y.z` 形式） | 文档体系检视（GDR 系列，2026-09-08） | [CLAUDE.md](../../CLAUDE.md) §3.2 | 使用中 |
 | GDR-09 | 治理 ID 对新会话不可解析 → 建立对照表 + 体系入口声明 | 文档体系检视（GDR 系列，2026-09-08） | [governance-ids.md](./governance-ids.md) / [CLAUDE.md](../../CLAUDE.md) 头部 | 使用中 |
@@ -49,7 +51,7 @@
 | P0-1 | 单文件巨石结构违反渐进式披露原则，需分层治理 | 文档体系检视（P0 系列） | [0002-document-layering.md](../adr/0002-document-layering.md) | 使用中 |
 | P1-1 | 同 P0-1：单文件巨石结构问题 | 文档体系检视（P1 系列） | [0002-document-layering.md](../adr/0002-document-layering.md) | 使用中 |
 | P1-04 | UX-06 冷启动验证（生产模式全页构造 proxy 成本基线） | UX 专项检视 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
-| P1-04 | 另义（同名异义双义登记）：R5 由 INVARIANT 降为 EXCEPTIONABLE 分类修正（P1-04 方案1；[exceptions.yml](./exceptions.yml) EX-0017/EX-0018 引用；与上一行「UX-06 冷启动验证」为同一编号两处语义，来源轮次不可考） | 本地检视报告（gitignored） | [exceptions.yml](./exceptions.yml) EX-0017/EX-0018 | 使用中 |
+| P1-06 | R5 由 INVARIANT 降为 EXCEPTIONABLE 分类修正（方案1；[exceptions.yml](./exceptions.yml) EX-0017/EX-0018 引用。注：原与「UX-06 冷启动验证」共用 P1-04 编号（同名异义双义登记），2026-09-22 GOV-06 拆分为独立编号 P1-06，P1-04 不再复用） | 本地检视报告（gitignored） | [exceptions.yml](./exceptions.yml) EX-0017/EX-0018 | 使用中 |
 | P1-05 | 文档权威按主题确定正本，而非按目录层级全局覆盖 | 文档体系检视（P1 系列） | [CLAUDE.md](../../CLAUDE.md) §1 / [flet/v1-api-constraints](../flet/v1-api-constraints.md) | 使用中 |
 | P1-2 | CI 自动化专项迭代（红线机器可读映射落地触发条件） | 文档体系检视（P1 系列） | [0003-overturn-3b-3c-deferral.md](../adr/0003-overturn-3b-3c-deferral.md) | 使用中 |
 | P1-3 | Flet 绝对化表述分层（「新代码禁止/契约守护」规则例外集中登记） | 文档体系检视（P1 系列） | [flet/v1-api-constraints.md](../flet/v1-api-constraints.md) | 使用中 |

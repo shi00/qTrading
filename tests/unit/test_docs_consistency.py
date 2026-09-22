@@ -2308,6 +2308,33 @@ class TestEnforcementReverseCoverage:
         errors = check_enforcement_reverse_coverage()
         assert errors == [], f"enforcement 文本提及应视为已登记, got: {errors}"
 
+    def test_second_direction_orphan_fails(self, tmp_path, monkeypatch):
+        """yml checks 登记但脚本未实现/未调用 → 第二方向报错（GATE-03/GOV-11，无孤儿登记）。"""
+        from check_docs_consistency import check_enforcement_reverse_coverage
+
+        check_src = tmp_path / "check_redlines.py"
+        check_src.write_text("def main():\n    checks = [('x', check_R4())]\n    return 0\n", encoding="utf-8")
+        fake_yml = tmp_path / "redlines.yml"
+        fake_yml.write_text(
+            "redlines:\n"
+            "  - id: R4\n"
+            "    title: SQL 注入\n"
+            "    description: d\n"
+            "    enforcement: pre-commit（check_redlines.py）\n"
+            "    checks:\n"
+            "      - check_R4\n"
+            "      - check_planned_orphan\n"
+            "    automation_coverage: partial\n"
+            "    human_review_required: true\n"
+            "    rule_type: INVARIANT\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", fake_yml)
+        monkeypatch.setattr("check_docs_consistency.CHECK_REDLINES_SCRIPT_PATH", check_src)
+
+        errors = check_enforcement_reverse_coverage()
+        assert any("check_planned_orphan" in e for e in errors), f"应检出孤儿登记, got: {errors}"
+
 
 class TestFletHubCompleteness:
     """Flet 入口完整性检查（spec §11.1 + §11.2 + §11.3 + §11.4）。
@@ -2656,6 +2683,68 @@ class TestExceptionsYamlConsistency:
 
         errors = check_exceptions_yaml_consistency()
         assert errors == [], "当前项目配置应通过 exceptions.yml 校验, 失败:\n  " + "\n  ".join(errors)
+
+    def test_gate02_detects_r1_count_mismatch(self, tmp_path, monkeypatch):
+        """exceptions.yml R1 条目数 ≠ pyproject 契约 5 ignore_imports 数 → 报错（GATE-02，GDR-01 计数唯一事实源）."""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        exc_yaml = tmp_path / "exceptions.yml"
+        exc_yaml.write_text(
+            "exceptions:\n"
+            "  - id: EX-0001\n"
+            "    rule_id: R1\n"
+            '    paths: ["utils/config/db.py"]\n'
+            "    reason: r\n    owner: o\n    approved_by: a\n    removal_trigger: t\n"
+            "    verification: v\n    validity_criteria: c\n",
+            encoding="utf-8",
+        )
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(
+            "[[tool.importlinter.contracts]]\n"
+            'name = "R1: utils must not import business layers"\n'
+            'ignore_imports = ["a -> b"]\n',
+            encoding="utf-8",
+        )  # 契约 5 声明 1 条 ignore，yml 仅 1 条 R1 → 一致；再改 yml 为 2 条触发
+        # 构造不匹配：yml 2 条 R1 例外
+        exc_yaml.write_text(
+            exc_yaml.read_text(encoding="utf-8") + "  - id: EX-0002\n"
+            "    rule_id: R1\n"
+            '    paths: ["utils/config/db.py"]\n'
+            "    reason: r\n    owner: o\n    approved_by: a\n    removal_trigger: t\n"
+            "    verification: v\n    validity_criteria: c\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", exc_yaml)
+        monkeypatch.setattr("check_docs_consistency.PYPROJECT_PATH", pyproject)
+
+        errors = check_exceptions_yaml_consistency()
+        assert any("R1 例外条目数" in e and "ignore_imports 条数" in e for e in errors), (
+            f"应检出 R1 计数不匹配, got: {errors}"
+        )
+
+    def test_gate04_detects_ex_reference_mismatch(self, tmp_path, monkeypatch):
+        """pyproject EX 回指与 yml R1 例外不一致 → 报错（GATE-04，GDR-01 双向回指）。"""
+        from check_docs_consistency import check_exceptions_yaml_consistency
+
+        exc_yaml = tmp_path / "exceptions.yml"
+        exc_yaml.write_text(
+            "exceptions:\n"
+            "  - id: EX-0001\n"
+            "    rule_id: R1\n"
+            '    paths: ["p"]\n'
+            "    reason: r\n    owner: o\n    approved_by: a\n    removal_trigger: t\n"
+            "    verification: v\n    validity_criteria: c\n",
+            encoding="utf-8",
+        )
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text("# EX-0001 回指\n# EX-0099 不存在于 yml\n", encoding="utf-8")
+        (tmp_path / "p").write_text("", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.EXCEPTIONS_YAML_PATH", exc_yaml)
+        monkeypatch.setattr("check_docs_consistency.PYPROJECT_PATH", pyproject)
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+
+        errors = check_exceptions_yaml_consistency()
+        assert any("EX-0099" in e and "不一致" in e for e in errors), f"应检出 EX 回指不一致, got: {errors}"
 
     def test_detects_missing_required_field(self, tmp_path, monkeypatch):
         """缺少必填字段时应报错."""

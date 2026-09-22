@@ -41,7 +41,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # === LiteLLM 全局配置 ===
-LITELLM_SET_TIMEOUT = 30.0
 LITELLM_MAX_RETRIES = 2
 # HTTP 客户端
 DEFAULT_CLOUD_TIMEOUT = 30.0
@@ -117,8 +116,10 @@ def _ensure_litellm_loaded() -> bool:
         _lt.suppress_debug_info = True
         _lt.set_verbose = False  # type: ignore[reportPrivateImportUsage]  # LiteLLM private API usage for logging suppression
         _lt.drop_params = True
-        _lt.set_timeout = LITELLM_SET_TIMEOUT  # type: ignore[attr-defined]
-        _lt.max_retries = LITELLM_MAX_RETRIES  # type: ignore[attr-defined]
+        # OSS 检视 A1: litellm 无模块级 set_timeout/max_retries（Python 允许任意赋值
+        # 导致死代码静默空转）。重试经 _build_litellm_params 以 per-request num_retries
+        # 传递（completion 主路径仅读取请求参数；模块级 num_retries 不参与）。
+        # 超时经 request_params["timeout"] = httpx.Timeout(...) 逐请求兜底。
         _lt.success_callback = []
         _lt.failure_callback = []
         _lt.modify_params = True
@@ -280,6 +281,12 @@ class LiteLLMClient:
 
         timeout_val = kwargs.get("timeout", DEFAULT_CLOUD_TIMEOUT)
         request_params["timeout"] = httpx.Timeout(timeout_val, connect=CONNECT_TIMEOUT)
+
+        # OSS 检视 A1: litellm 重试经 per-request num_retries 生效——completion 主路径
+        # 只读取请求参数（num_retries 或 max_retries），模块级赋值不参与。同一供应商的
+        # 瞬时错误（429/503/timeout）先在原地重试 num_retries+1 次，再交由 failover 切供应商
+        # （A2 语义分层：瞬时重试由 litellm 承担，自研 failover 循环只负责跨供应商切换）。
+        request_params["num_retries"] = LITELLM_MAX_RETRIES
 
         return request_params
 

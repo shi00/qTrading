@@ -606,8 +606,9 @@ def check_flet_badge_version() -> list[str]:
     锁定的 flet 升级到 1.0 后徽章仍写 `Flet 0.86.3`（补丁号，主版本 0）不落检。
     规则：提取 `Flet` 之后的版本 token（URL 编码，如 `Flet%200.86.3` / `Flet%20%3E%3D1.0`），
     解码后若是补丁版本 `<major.minor.patch>`（取 major）或主版本 `>=<major>`，其 major 均须等于
-    pyproject 锁定 flet 的 major；缺失/不可解析则报错。API 验证记录等历史快照不在此范围，
-    由 check_flet_version_drift 对治理文档另行守护。
+    pyproject 锁定 flet 的 major；**README 当前无 Flet 徽章（无 `Flet`+版本 token 行）时静默通过**
+    （GOV-09：该检查只在徽章存在时校验，缺失由人工维护，不误报——docstring 与此行为对齐）。
+    API 验证记录等历史快照不在此范围，由 check_flet_version_drift 对治理文档另行守护。
     """
     errors: list[str] = []
     locked = _get_flet_locked_versions()
@@ -1449,6 +1450,9 @@ def check_enforcement_reverse_coverage() -> list[str]:
     - 红线条目新增的 `checks:` 可选字段（list[str]）
     - 红线条目 `enforcement` 文本中的 check_* 函数名（R4/R16/R23 已内联提及）
 
+    第二方向（GATE-03/GOV-11）：`checks:` 字段登记的 check_*（仅此集合，不含 enforcement 文本提取）
+    必须实际存在于 check_redlines.py 且被 main() 调用——yml 声称有守护但函数被删/未执行即孤儿登记报错。
+
     基于模块级路径常量 REDLINES_YAML_PATH / CHECK_REDLINES_SCRIPT_PATH 读取，便于测试 monkeypatch。
     解析失败时返回精确错误列表（不抛异常）。
     """
@@ -1465,6 +1469,7 @@ def check_enforcement_reverse_coverage() -> list[str]:
         return errors
 
     registered: set[str] = set()
+    checks_names: set[str] = set()
     if not REDLINES_YAML_PATH.exists():
         errors.append(f"redlines.yml 不存在: {REDLINES_YAML_PATH}")
         return errors
@@ -1484,6 +1489,7 @@ def check_enforcement_reverse_coverage() -> list[str]:
             if isinstance(checks_field, list):
                 for c in checks_field:
                     if isinstance(c, str):
+                        checks_names.add(c.strip())
                         registered.add(c.strip())
             enforcement = entry.get("enforcement")
             if isinstance(enforcement, str):
@@ -1495,6 +1501,14 @@ def check_enforcement_reverse_coverage() -> list[str]:
             "check_redlines.py 实际执行但未在 redlines.yml 登记的检查: "
             + ", ".join(missing)
             + "（需在某条红线的 checks: 字段补登记，DS-11 反向不变量）"
+        )
+    # GATE-03/GOV-11 第二方向：yml checks 登记的 check_* 必须存在于脚本且被 main() 调用（无孤儿登记）
+    orphan = sorted(checks_names - call_names)
+    if orphan:
+        errors.append(
+            "redlines.yml checks 登记但 check_redlines.py main() 未执行的检查: "
+            + ", ".join(orphan)
+            + "（需补齐实现；确属『计划中』的守护函数须显式声明，不得只登记不实现）"
         )
     return errors
 
@@ -1593,6 +1607,43 @@ def check_exceptions_yaml_consistency() -> list[str]:
                     errors.append(f"exceptions[{idx}] 路径不存在: {p}")
         elif paths is not None:
             errors.append(f"exceptions[{idx}] paths 应为 list, 实际 {type(paths).__name__}")
+
+    # GATE-02: R1 例外条目数 == pyproject.toml 契约 5 ignore_imports 条数（GDR-01 条数唯一事实源，
+    # 防 exceptions.yml 自己文件里的头注释漂移）。
+    try:
+        import tomllib
+
+        with open(PYPROJECT_PATH, "rb") as f:
+            proj = tomllib.load(f)
+        ignore_count: int | None = None
+        for contract in proj.get("tool", {}).get("importlinter", {}).get("contracts", []):
+            if str(contract.get("name", "")).startswith("R1: utils"):
+                ignores = contract.get("ignore_imports")
+                if isinstance(ignores, list):
+                    ignore_count = len(ignores)
+        r1_exceptions = sum(1 for e in exceptions if isinstance(e, dict) and e.get("rule_id") == "R1")
+        if ignore_count is not None and r1_exceptions != ignore_count:
+            errors.append(
+                f"exceptions.yml R1 例外条目数 {r1_exceptions} != pyproject.toml 契约 5 ignore_imports 条数 {ignore_count}"
+            )
+    except (OSError, tomllib.TOMLDecodeError):
+        pass  # pyproject 解析失败由其他检查报告
+
+    # GATE-04: 契约 5 ignore_imports ↔ exceptions.yml EX 交叉回指（GDR-01）
+    # pyproject.toml 中 `# EX-XXXX` 注释回指的 EX 集合必须与 exceptions.yml 的 R1 例外 id 集合一致
+    # （防 GATE-01 型漂移：yml 自建注释与 pyproject 回指分叉时自动拦截）。
+    try:
+        pyproject_text = PYPROJECT_PATH.read_text(encoding="utf-8")
+        referenced_ex = set(re.findall(r"EX-\d{4}", pyproject_text))
+        r1_ids = {str(e.get("id")) for e in exceptions if isinstance(e, dict) and e.get("rule_id") == "R1"}
+        if referenced_ex and referenced_ex != r1_ids:
+            errors.append(
+                "pyproject.toml 契约 5 EX 回指与 exceptions.yml R1 例外不一致："
+                f"pyproject 引用但 yml 缺失 {sorted(referenced_ex - r1_ids)}；"
+                f"yml 有但 pyproject 未回指 {sorted(r1_ids - referenced_ex)}"
+            )
+    except OSError:
+        pass  # pyproject 读取失败由其他检查报告
 
     return errors
 
@@ -3282,11 +3333,7 @@ def main() -> int:
     # 盲1：注册单例散文数量守卫 + 盲2：ADR supersede 双向链守卫（文档复检指标盲区治理）
     all_errors.extend(check_singleton_count_prose())  # 盲1：散文 N vs 表格行数
     all_errors.extend(check_adr_supersede_chain())  # 盲2：ADR supersede 双向链对称性
-    dual_meaning = check_governance_id_dual_meaning()  # H3：治理 ID 同名异义（渐进 WARNING 不阻断）
-    if dual_meaning:
-        print("::warning::治理 ID 对义（渐进部署，不阻断）存在未声明双义登记的治理 ID：")
-        for w in dual_meaning:
-            print(f"  - {w}")
+    all_errors.extend(check_governance_id_dual_meaning())  # GOV-06：治理 ID 同名异义（双义已清零，翻转 ERROR）
 
     if all_errors:
         print("[FAIL] 文档一致性检查失败：", file=sys.stderr)

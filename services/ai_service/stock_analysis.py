@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -45,6 +46,16 @@ STRATEGY_CONTEXT_MAX_LEN = 1600
 # analyze_stock 中新闻/概念列表截断长度
 NEWS_LIST_LIMIT = 5
 CONCEPTS_LIMIT = 8
+
+
+def _write_prompt_dump(dump_file: str, content: str) -> None:
+    """同步写 prompt dump 文件（经 asyncio.to_thread 调用，F2/OSS 检视）。
+
+    单独提取为模块级函数供线程池执行——同步文件 IO 在事件循环线程上会阻塞 UI
+    （R16），该分支由 ai_prompt_dump_enabled 门控（默认关闭）故此前未暴露。
+    """
+    with open(dump_file, "w", encoding="utf-8") as f:
+        f.write(content)
 
 
 class StockAnalysisService:
@@ -550,10 +561,15 @@ class StockAnalysisService:
                     flags=re.DOTALL,
                 )
 
-                with open(dump_file, "w", encoding="utf-8") as f:
-                    f.write(f"# Universal Rules (System)\n```text\n{_UNIVERSAL_RULES}\n```\n\n")
-                    f.write(f"# Strategy Prompt (System)\n```text\n{base_prompt}\n```\n\n")
-                    f.write(f"# User Prompt\n```xml\n{dump_user_content}\n```\n")
+                # F2 (OSS 检视): async 函数内同步 open() 会阻塞事件循环线程（R16）。
+                # 该分支由 ai_prompt_dump_enabled 门控（默认关闭，调试功能），但人工评审最易
+                # 放过默认关闭的阻塞点，故仍按项目惯例经 asyncio.to_thread 提交到线程池。
+                dump_content = (
+                    f"# Universal Rules (System)\n```text\n{_UNIVERSAL_RULES}\n```\n\n"
+                    f"# Strategy Prompt (System)\n```text\n{base_prompt}\n```\n\n"
+                    f"# User Prompt\n```xml\n{dump_user_content}\n```\n"
+                )
+                await asyncio.to_thread(_write_prompt_dump, dump_file, dump_content)
 
                 logger.debug(
                     "[AIService] Analyze | Prepared LLM Context. Full payload saved to: %s",
