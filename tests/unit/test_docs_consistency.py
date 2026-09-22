@@ -676,18 +676,18 @@ class TestDocsConsistencyScriptExtensions:
         errors = check_flet_version_drift()
         assert errors == [], f"Should not flag document without version: {errors}"
 
-    def test_flet_version_drift_version_not_near_flet_keyword(self, tmp_path, monkeypatch):
-        """版本号不在 Flet 关键词附近（前后 50 字符内）时不报错。"""
+    def test_flet_version_drift_version_same_line_as_flet_keyword(self, tmp_path, monkeypatch):
+        """版本号与 Flet 关键词同一行即拦截（行内任意距离，GOV-08 整行全量拦截消除字距依赖）。"""
         from check_docs_consistency import check_flet_version_drift
 
         tmp_doc = tmp_path / "test_doc.md"
-        # 版本号与 Flet 关键词距离超过 50 字符
+        # 版本号与 Flet 关键词同行、相距超 50 字符仍应拦截（原窗口 50 字符启发式已废弃）
         content = "# Test\n\n" + "Flet 是一个框架。" + "x" * 60 + " 0.85.3 是某个版本。\n"
         tmp_doc.write_text(content, encoding="utf-8")
         monkeypatch.setattr("check_docs_consistency.FLET_VERSION_DOCS", [tmp_doc])
 
         errors = check_flet_version_drift()
-        assert errors == [], f"Should not flag version far from Flet keyword: {errors}"
+        assert any("0.85.3" in e for e in errors), f"Should flag version on same line: {errors}"
 
     def test_flet_version_drift_lowercase_flet_keyword(self, tmp_path, monkeypatch):
         """小写 'flet' 关键词附近的版本号也应被检测到。"""

@@ -171,16 +171,17 @@ CHECKED_DOCS: list[Path] = sorted(
     if not any(d == e or e in d.parents for e in _DOC_EXCLUDES)
 )
 
-# Flet 版本漂移检查范围（治理文档）
-FLET_VERSION_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, *FLET_DOCS_PATHS]
+# Flet 版本漂移检查范围（治理文档；api-verification-template.md 为 API 核验历史快照，豁免 GDR-06）
+FLET_VERSION_DOCS: list[Path] = [
+    CLAUDE_PATH,
+    CONTRIBUTING_PATH,
+    *(p for p in FLET_DOCS_PATHS if p.name != "api-verification-template.md"),
+]
 
 # Flet 包名（用于从 pyproject.toml 提取锁定版本）
 # flet/flet-desktop/flet-charts/flet-code-editor 在 [project.dependencies]，
 # flet-mcp 在 [project.optional-dependencies].dev（开发期 MCP 包，与主包版本对齐，见 CLAUDE.md §1.10）
 _FLET_PACKAGES = ("flet", "flet-desktop", "flet-charts", "flet-code-editor", "flet-mcp")
-
-# Flet 关键词附近版本号扫描窗口（前后字符数，spec 要求 50）
-_FLET_KEYWORD_WINDOW = 50
 
 
 def github_anchor(heading_text: str) -> str:
@@ -567,9 +568,11 @@ def _get_flet_locked_versions() -> set[str]:
 def check_flet_version_drift() -> list[str]:
     """检查项 5：Flet 版本漂移检查（CLAUDE.md §3.2 文档 SHALL NOT 硬编码 Flet 补丁版本号）。
 
-    扫描治理文档中 Flet 关键词附近（前后 _FLET_KEYWORD_WINDOW 字符内）的 `\\d+.\\d+.\\d+` 版本号
-    （含可选 `v` 前缀变体，如 `v1.2.3`，对抗检视 GDR-06 P1）。
-    根据规范，任何在 Flet 上下文中出现的具体补丁版本号都应报错（不论是否与 pyproject.toml 锁定版本一致）。
+    扫描治理文档中「含 Flet 关键词的整行」内的 `\\d+.\\d+.\\d+` 版本号（含可选 `v` 前缀变体，
+    如 `v1.2.3`，对抗检视 GDR-06 P1）。
+    整行全量拦截消除字距依赖：同一行出现 Flet 关键词即视为 Flet 上下文，任何补丁版本号都报错
+    （GOV-08）。`docs/flet/api-verification-template.md` 为 API 核验历史快照（按定义需要
+    记录具体版本号），已从 FLET_VERSION_DOCS 范围排除（豁免 GDR-06）。
 
     报错格式：``{doc.name}:{line_no}: Flet 版本漂移：文档声明 {doc_ver}，pyproject.toml 锁定 {actual_ver}``
     """
@@ -586,16 +589,13 @@ def check_flet_version_drift() -> list[str]:
     for doc in FLET_VERSION_DOCS:
         content = doc.read_text(encoding="utf-8")
         for line_no, line in enumerate(content.splitlines(), 1):
+            if not flet_keyword_pattern.search(line):
+                continue
             for v_match in version_pattern.finditer(line):
                 doc_ver = v_match.group()
-                # 检查版本号前后 _FLET_KEYWORD_WINDOW 字符内是否有 Flet 关键词
-                start = max(0, v_match.start() - _FLET_KEYWORD_WINDOW)
-                end = min(len(line), v_match.end() + _FLET_KEYWORD_WINDOW)
-                window = line[start:end]
-                if flet_keyword_pattern.search(window):
-                    errors.append(
-                        f"{doc.name}:{line_no}: Flet 版本漂移：文档声明 {doc_ver}，pyproject.toml 锁定 {actual_ver}"
-                    )
+                errors.append(
+                    f"{doc.name}:{line_no}: Flet 版本漂移：文档声明 {doc_ver}，pyproject.toml 锁定 {actual_ver}"
+                )
     return errors
 
 
