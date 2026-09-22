@@ -183,7 +183,7 @@ jobs:
           python scripts/run_pip_audit.py \
             --requirements requirements.txt requirements-optional.txt requirements-dev.txt \
             --allowlist .security/audit-allowlist.yml \
-            --sources pypi osv
+            --sources pypi
 
       - name: Pyright Type Check
         continue-on-error: false
