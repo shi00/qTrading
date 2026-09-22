@@ -1752,3 +1752,49 @@ class TestExpireStalePending:
             await dao.expire_stale_pending()
         # 强断言：异常类型 + message 均验证（weak-assertion 要求 raises 后须有断言）
         assert isinstance(exc_info.value, EngineDisposedError)
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_inside_try_raises(self):
+        """R5: 事务内（_guarded_begin/execute）抛 EngineDisposedError 也要重新上抛，不降级为 0。"""
+        from contextlib import asynccontextmanager
+
+        mock_engine = MagicMock()
+        dao = ScreenerDao(mock_engine)
+        dao._check_engine = MagicMock()
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+        mock_conn = AsyncMock()
+        mock_conn.execute.side_effect = EngineDisposedError("disposed mid-write")
+
+        @asynccontextmanager
+        async def mock_guarded_begin(conn=None):
+            yield mock_conn
+
+        dao._guarded_begin = mock_guarded_begin
+        with pytest.raises(EngineDisposedError, match="disposed mid-write") as exc_info:
+            await dao.expire_stale_pending()
+        # 强断言：异常类型 + message 均验证（weak-assertion 要求 raises 后须有断言）
+        assert isinstance(exc_info.value, EngineDisposedError)
+        assert "disposed mid-write" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_db_exception_returns_zero_warns(self, caplog):
+        """外部 DB 异常 → 记 WARNING 返回 0（幂等，次日重试），不向上抛（RV-11 容错语义）。"""
+        from contextlib import asynccontextmanager
+        import logging
+
+        mock_engine = MagicMock()
+        dao = ScreenerDao(mock_engine)
+        dao._check_engine = MagicMock()
+        dao._get_maintenance_event = MagicMock(return_value=MagicMock(wait=AsyncMock()))
+        mock_conn = AsyncMock()
+        mock_conn.execute.side_effect = RuntimeError("db down")
+
+        @asynccontextmanager
+        async def mock_guarded_begin(conn=None):
+            yield mock_conn
+
+        dao._guarded_begin = mock_guarded_begin
+        with caplog.at_level(logging.WARNING, logger="data.persistence.daos.screener_dao"):
+            count = await dao.expire_stale_pending()
+        assert count == 0
+        assert any("Stale pending expiry failed" in r.message for r in caplog.records)

@@ -4116,3 +4116,43 @@ class TestReviewManagerRv02OpenBasis:
         assert u["t5_pct"] == pytest.approx(round((12.0 / 11.0 - 1.0) * 100.0, 4))
         # 排除性：误取 T0 收盘 10 会得到 20% 而非 9.09%
         assert u["t5_pct"] != pytest.approx(round((12.0 / 10.0 - 1.0) * 100.0, 4))
+class TestReviewManagerExpireStalePending:
+    """RV-11: ReviewManager.expire_stale_pending 委托透传给 screener_dao（带 lookback 参数）。"""
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_delegates_to_screener_dao_default_lookback(self, mock_cm, mock_tc):
+        """默认 lookback=60 透传，返回 DAO 清理条数原样上抛给调用方。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.expire_stale_pending = AsyncMock(return_value=8)
+        mock_cache.screener_dao = mock_screener_dao
+
+        rm = ReviewManager()
+        rm.cache = mock_cache
+
+        count = await rm.expire_stale_pending()
+
+        mock_screener_dao.expire_stale_pending.assert_called_once_with(lookback_trade_days=60)
+        assert count == 8
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_custom_lookback_passed_through(self, mock_cm, mock_tc):
+        """调用方自定义 lookback 原样透传（窗口可调，口径仍与迁移 0026 对齐）。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.expire_stale_pending = AsyncMock(return_value=0)
+        mock_cache.screener_dao = mock_screener_dao
+
+        rm = ReviewManager()
+        rm.cache = mock_cache
+
+        count = await rm.expire_stale_pending(lookback_trade_days=30)
+
+        mock_screener_dao.expire_stale_pending.assert_called_once_with(lookback_trade_days=30)
+        assert count == 0
