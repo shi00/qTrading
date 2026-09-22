@@ -47,7 +47,7 @@ redlines:
   - id: R2
     title: 异常吞没
     description: "吞没 asyncio.CancelledError (必须 raise 以配合优雅停机)"
-    enforcement: "CI-test（部分覆盖：AST 扫描 core/data/services/strategies/utils，排除 app/ui/tests）"
+    enforcement: "CI-test（部分覆盖）"
     automation_coverage: partial
     human_review_required: true
     rule_type: INVARIANT
@@ -63,7 +63,7 @@ redlines:
   - id: R4
     title: SQL 注入
     description: "在 asyncpg 原生查询中使用 %s 占位符（必须用 $1, $2, ...）；亦禁止 SQL 字面量赋值、f-string 拼接 SQL、text(f...) f-string 形态及测试文件内同类写法（SQL 必须参数化，或经 text() 常量承载）"
-    enforcement: "pre-commit（check_redlines.py：%s 占位符、SQL 字面量赋值、f-string 拼 SQL、text(f...) f-string、测试内同类 5 维度拦截）"
+    enforcement: "pre-commit（check_redlines.py）"
     checks:
       - check_R4
       - check_R4_literal_assignments
@@ -93,7 +93,7 @@ redlines:
   - id: R7
     title: 测试状态污染
     description: "单例未隔离 (单元测试由 tests/unit/conftest.py 的 _reset_all_singletons autouse fixture 自动重置注册单例；需精细控制单例初始化状态时使用 tests/conftest.py 的 singleton_state 上下文管理器)"
-    enforcement: "CI-test（全量，conftest.py autouse fixture）"
+    enforcement: "CI-test（全量）"
     automation_coverage: partial
     human_review_required: true
     rule_type: INVARIANT
@@ -101,7 +101,7 @@ redlines:
   - id: R8
     title: 废弃 API
     description: "批量写入必须使用 _save_upsert；_write_db 不提供批量参数"
-    enforcement: "CI-test（结构性签名强制 + filterwarnings error::DeprecationWarning 通用辅助门禁）"
+    enforcement: "CI-test"
     automation_coverage: full
     human_review_required: false
     rule_type: NEW_CODE
@@ -119,7 +119,7 @@ redlines:
   - id: R10
     title: 硬编码密钥
     description: "在代码或测试中硬编码 API Key / DB 密码 (必须从 keyring 或环境变量读取)"
-    enforcement: "CI-test（gitleaks-action 独立 workflow 全量扫描） + 仅人工评审"
+    enforcement: "CI-test（gitleaks-action）+ 仅人工评审"
     automation_coverage: partial
     human_review_required: true
     rule_type: INVARIANT
@@ -127,7 +127,7 @@ redlines:
   - id: R11
     title: 跨循环复用同步原语
     description: "直接将 asyncio.Event/Lock 作为类属性 (必须通过 get_loop_local() 获取以绑定当前循环)"
-    enforcement: "CI-test（全量：AST 扫描 7 层类/实例属性构造点；缓存点与跨循环使用仍需人工评审）"
+    enforcement: "CI-test（全量） + 仅人工评审"
     automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE
@@ -145,7 +145,7 @@ redlines:
   - id: R13
     title: 未注册 DAO
     description: "新增 DAO 需在 CacheManager.__init__ 中显式实例化（self.<name>_dao = <ClassName>(self.engine)，engine 同步由 sync_engines() 按类型发现驱动循环同步；已实例化的 DAO 其 engine 同步不可漏改，实例化本身仍需人工确保）"
-    enforcement: "pre-commit（check_redlines.py，覆盖 __init__ 注册维度）+ CI-test（test_cache_manager_dao_registry.py：daos/ 全量类实例化 + 显式赋值静态契约 + sync_engines 行为测试）"
+    enforcement: "pre-commit（check_redlines.py）+ CI-test"
     checks:
       - check_R13
     automation_coverage: partial
@@ -175,7 +175,7 @@ redlines:
   - id: R16
     title: UI 阻塞主循环
     description: "在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 await ThreadPoolManager.run_async() 提交)；@ft.component 渲染函数顶层不得执行 logger/print 副作用（UIX-10，须迁入 use_effect 或事件回调）"
-    enforcement: "pre-commit（check_redlines.py，部分守护：VM __init__ 构造已注册单例检测 + @ft.component 渲染副作用拦截；事件处理器内同步 IO 仍仅人工评审）"
+    enforcement: "pre-commit（check_redlines.py） + 仅人工评审"
     checks:
       - check_R16_vm_init_singleton_construction
       - check_no_component_render_side_effects
@@ -202,7 +202,7 @@ redlines:
   - id: R19
     title: 未配套测试的业务逻辑变更
     description: "新增或修改业务逻辑未同步新增/更新单测（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」与「变更类型 → 最小验证子集」；由 scripts/check_diff_coverage.py / scripts/check_per_file_coverage.py 强制）"
-    enforcement: "CI-test（scripts/check_diff_coverage.py --strict --threshold 80 + scripts/check_per_file_coverage.py）"
+    enforcement: "CI-test（check_diff_coverage + check_per_file_coverage）"
     automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE
@@ -210,7 +210,7 @@ redlines:
   - id: R20
     title: 单位未核对的量纲比较
     description: "策略/回测中对已知金额、数量列（north_money / net_amount / amount / total_mv / circ_mv / vol）的裸数值比较，调用链上无显式单位换算即违规（必须经 threshold_in_data_unit() 统一入口换算后再比较）"
-    enforcement: "pre-commit 报告模式（check_redlines.py check_R20：warning 输出 stderr 不阻断，实测误报率达标后评估升级为拦截）+ 统一入口 threshold_in_data_unit() 架构惯例 + AST 可行性原型 scripts/prototype_business_redlines.py 供复核 + 人工评审对照基准（单位声明与换算入口见 docs/patterns/strategy-template.md「条件触发」与 docs/patterns/config-quality-perf.md「金额/数量列阈值比较（R20）」）+ 仅人工评审（R20 语义以人工评审为准）"
+    enforcement: "pre-commit 报告模式（check_redlines.py）+ 仅人工评审"
     checks:
       - check_R20
     automation_coverage: partial
@@ -220,7 +220,7 @@ redlines:
   - id: R21
     title: 缺失值伪装
     description: "业务语义字段（score / ai_score / confidence 等）缺失必须用 None/哨兵表示，禁止填充业务上合法的具体值（0 分、50% 置信度、空表视为「无限制」）；变体（BT-03）：「可信度元数据在持久化边界丢失」——data_warnings / failed_signal_dates / 配置快照等已知不可信信号落库后被丢弃、UI 渲染为「无问题」，等同把「已知不可信」伪装成「无信息」"
-    enforcement: "仅人工评审（AST 可行性原型 scripts/prototype_business_redlines.py 的 MissingMaskingVisitor 检测 fillna/fill/赋值 0·50 形态供复核；持久化边界丢失变体对照 backtest_results.quality_json/config_json 落库链路自查；存量缺陷修复前不设自动拦截）"
+    enforcement: "仅人工评审"
     automation_coverage: none
     human_review_required: true
     rule_type: NEW_CODE
@@ -228,7 +228,7 @@ redlines:
   - id: R22
     title: 水位线单调性
     description: "checkpoint / 高水位语义的持久化状态（如 set_app_state 写入的断点续传水位），写入必须单调（优先 *_max 语义或 GREATEST 保护），且单测必须含乱序写入用例并断言最终值为最大值"
-    enforcement: "pre-commit（check_redlines.py：check_R22 静态检测对 WATERMARK_KEY_PREFIXES 白名单前缀的 set_app_state 非单调写入；动态/插值 key 无法静态判定，保持人工评审）"
+    enforcement: "pre-commit（check_redlines.py）+ 仅人工评审"
     checks:
       - check_R22
     automation_coverage: partial
@@ -238,7 +238,7 @@ redlines:
   - id: R23
     title: 裸 UI token
     description: "UI 层裸 ft.Colors 色值引用与裸字号数值（如 ft.Text(size=13)）必须改用 AppStyles 定义的 token（FONT_SIZE_* 等）"
-    enforcement: "pre-commit（check_redlines.py：check_R_no_bare_ft_colors_in_ui + check_R_no_bare_font_size_in_ui）"
+    enforcement: "pre-commit（check_redlines.py）"
     checks:
       - check_R_no_bare_ft_colors_in_ui
       - check_R_no_bare_font_size_in_ui
