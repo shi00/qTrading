@@ -22,7 +22,12 @@ from pathlib import Path
 
 import yaml
 
-from utils.time_utils import get_now
+# 以 `python scripts/run_pip_audit.py` 方式运行时 sys.path[0] 指向 scripts/，
+# utils 包位于仓库根目录，需显式补齐（同 check_theme_contrast.py 等脚本惯例）
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+
+from utils.time_utils import get_now  # noqa: E402 - sys.path 注入后导入
 
 
 def parse_args() -> argparse.Namespace:
