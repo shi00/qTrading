@@ -10,7 +10,8 @@
 - i18n 通过 ``ft.use_state(get_observable_state)`` 订阅自动重渲染
 - 移除命令式生命周期回调、手动 update、手动 locale 刷新等命令式模式
 - page 访问改用 ``ft.context.page``（try/except 守卫 RuntimeError）
-- provider/model options 由 View 从 LLM_PROVIDERS + 当前 locale 构建（tag 需 i18n）
+- provider 选择经 ModelPicker（provider-only 模式，litellm 目录推导 + 搜索）；
+- 模型选择经 ModelPicker（litellm 目录搜索/分组/回记 + provider_scope 级联过滤）。
 """
 
 import logging
@@ -19,10 +20,8 @@ from collections.abc import Callable
 import flet as ft
 
 from ui.components.flet_type_helpers import (
-    get_control_value,
     safe_on_change,
     safe_on_click,
-    safe_on_select,
 )
 from ui.components.model_picker import ModelPicker
 from ui.components.settings_widgets import SectionHeader
@@ -35,7 +34,6 @@ from ui.viewmodels.model_picker_view_model import ModelPickerViewModel
 from utils.llm_providers import (
     AZURE_API_VERSIONS,
     AZURE_DEFAULT_API_VERSION,
-    LLM_PROVIDERS,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,54 +72,6 @@ def _render_message(msg: Message | None) -> str:
     return I18n.get(msg.key, **params)
 
 
-def _build_provider_options() -> list[ft.dropdown.Option]:
-    """构建供应商下拉选项（分组：国内/国际/自定义）。"""
-    options: list[ft.dropdown.Option] = []
-
-    domestic = ft.dropdown.Option(I18n.get("llm_provider_domestic"))
-    domestic.disabled = True
-    options.append(domestic)
-
-    for provider_id in ["deepseek", "qwen", "zhipu", "moonshot", "minimax"]:
-        provider = LLM_PROVIDERS.get(provider_id)
-        if provider:
-            options.append(
-                ft.dropdown.Option(
-                    key=provider_id,
-                    # D8: 显示名走 i18n key（llm_provider_{id}），View 按当前 locale 渲染
-                    text=I18n.get(f"llm_provider_{provider_id}"),
-                )
-            )
-
-    international = ft.dropdown.Option(I18n.get("llm_provider_international"))
-    international.disabled = True
-    options.append(international)
-
-    for provider_id in ["openai", "azure", "anthropic", "google", "mistral"]:
-        provider = LLM_PROVIDERS.get(provider_id)
-        if provider:
-            options.append(
-                ft.dropdown.Option(
-                    key=provider_id,
-                    # D8: 显示名走 i18n key（llm_provider_{id}），View 按当前 locale 渲染
-                    text=I18n.get(f"llm_provider_{provider_id}"),
-                )
-            )
-
-    custom = ft.dropdown.Option(I18n.get("llm_provider_custom_group"))
-    custom.disabled = True
-    options.append(custom)
-
-    options.append(
-        ft.dropdown.Option(
-            key="custom",
-            text=I18n.get("llm_provider_custom"),
-        )
-    )
-
-    return options
-
-
 def _on_test_click_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
     """Create on_click handler for test button — submits vm.verify_connection via page.run_task.
 
@@ -151,23 +101,6 @@ def _on_save_click_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.ControlE
             logger.debug("[LLMConfigPanel] page not available for save_config")
 
     return _on_save_click
-
-
-def _on_provider_change_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
-    """Create on_select handler for provider dropdown — submits vm.update_provider via page.run_task."""
-
-    def _on_provider_change(e: ft.ControlEvent) -> None:
-        provider_id = get_control_value(e.control, ft.Dropdown)
-        if not provider_id:
-            return
-        try:
-            page = ft.context.page
-            if page is not None:
-                page.run_task(vm.update_provider, provider_id)
-        except RuntimeError:
-            logger.debug("[LLMConfigPanel] page not available for update_provider")
-
-    return _on_provider_change
 
 
 def _on_acknowledgment_change_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
@@ -223,12 +156,31 @@ def LLMConfigPanel(
     # --- Build form controls (driven by state) ---
     input_width = 360
 
-    provider_dropdown = ft.Dropdown(
-        label=I18n.get("llm_select_provider"),
-        options=_build_provider_options(),
-        value=state.provider,
-        on_select=safe_on_select(_on_provider_change_factory(vm)),
-        width=input_width,
+    # 供应商选择：与模型选择共用 ModelPicker（provider-only 模式，支持搜索）。
+    # 选中供应商 → vm.update_provider（异步重置 model / 派生字段），模型框经
+    # provider_scope 级联联动（双向）。
+    _provider_pick_state, provider_pick_vm = use_viewmodel(factory=ModelPickerViewModel)
+
+    def _on_provider_selected(provider_id: str, _model_id: str) -> None:
+        if not provider_id or provider_id == state.provider:
+            return
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.update_provider, provider_id)
+        except RuntimeError:
+            logger.debug("[LLMConfigPanel] page not available for update_provider")
+
+    def _sync_provider_picker_selection() -> None:
+        provider_pick_vm.set_selection(state.provider, "")
+
+    ft.use_effect(_sync_provider_picker_selection, dependencies=[state.provider])
+
+    provider_picker = ModelPicker(
+        provider_pick_vm,
+        on_select=_on_provider_selected,
+        text_field_width=input_width,
+        provider_only=True,
     )
 
     # ModelPicker 内部 VM（内部模式，卸载自动 dispose）。选中模型 → 回写 vm.model。
@@ -241,7 +193,11 @@ def LLMConfigPanel(
             # 避免保存时 provider/model 错配（如 openai 前缀发往 kimi 端点）。
             async def _switch_and_set() -> None:
                 await vm.update_provider(provider_id)
-                vm.update_model(model_id)
+                # review-fix R1：update_provider 为 async（内部 ThreadPool IO），期间用户可能
+                # 已切到其他供应商（另一条异步路径在跑）；仅当「发起的切换仍是当前供应商」
+                # 才回写 model，丢弃陈旧回写，消除 provider=A/model=C 错配窗口。
+                if vm.state.provider == provider_id:
+                    vm.update_model(model_id)
 
             try:
                 page = ft.context.page
@@ -264,6 +220,8 @@ def LLMConfigPanel(
                 picker_vm,
                 on_select=_on_model_selected,
                 text_field_width=input_width,
+                # 级联过滤：浏览模式仅展示当前供应商模型（双向联动）
+                provider_scope=state.provider,
             ),
         ],
         visible=not state.is_azure and not state.show_custom_model_input,
@@ -427,10 +385,7 @@ def LLMConfigPanel(
         content_controls.append(section_header)
     content_controls.extend(
         [
-            ft.Row(
-                [provider_dropdown],
-                alignment=ft.MainAxisAlignment.START,
-            ),
+            provider_picker,
             model_row,
             base_url_input,
             api_key_input,

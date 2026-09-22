@@ -250,7 +250,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: always()
-        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4  # v7.1.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
@@ -387,7 +387,7 @@ jobs:
           toolchain: 1.97.1
 
       - name: Cache Cargo registry & target
-        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: e2e-tests-windows-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
@@ -662,7 +662,7 @@ jobs:
           toolchain: 1.97.1
 
       - name: Cache Cargo registry & target
-        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: embedded-tests-${{ matrix.os }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
@@ -897,7 +897,7 @@ jobs:
 
       - name: Cache Cargo registry & target (real-sidecar group only)
         if: matrix.needs_rust == 'true'
-        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: windows-skip-revalidation-real-sidecar-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
@@ -1120,7 +1120,7 @@ jobs:
           toolchain: 1.97.1
 
       - name: Cache Cargo registry & target
-        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: e2e-sidecar-real-smoke-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}

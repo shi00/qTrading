@@ -35,19 +35,30 @@ logger = logging.getLogger(__name__)
 
 
 async def _review_backfill_logic(svc: SchedulerService, task_id: str, **kwargs) -> str:
-    """回填逻辑：先 T+1（打标签依据），再 T+5（远期收益），返回结果描述供任务中心展示。"""
+    """回填逻辑：先 T+1（打标签依据），再 T+5（远期收益），最后常驻过期清扫（RV-11）。
+
+    后置过期清扫理由：backfill 先尝试补数据（行情晚到可回填），expire 再清理
+    仍未填的超窗 PENDING——次序不可颠倒（先 expire 会误伤本可回填的行）。
+    返回结果描述供任务中心展示。
+    """
     try:
         rm = ReviewManager()
         t1_count = await rm.backfill_t1_returns()
         t5_count = await rm.backfill_horizon_returns()
+        expired_count = await rm.expire_stale_pending()
         result = f"T+1 backfilled: {t1_count}, T+5 backfilled: {t5_count}"
+        # RV-11: 清理了僵尸 PENDING 时拼一句用户可见说明（对齐 RV-04 可见诊断原则），
+        # 避免「复盘悄然消失而不自知」。
+        if expired_count:
+            result = f"{result}, stale expired: {expired_count}"
         # RV-04: 基准降级/缺失诊断拼进任务结果（用户可见），不再只有日志 warning。
         if rm._benchmark_diag:
             result = f"{result} — {rm._benchmark_diag}"
         logger.info(
-            "[Scheduler] Review backfill completed: T+1=%s, T+5=%s records updated.",
+            "[Scheduler] Review backfill completed: T+1=%s, T+5=%s records updated, stale expired=%s.",
             t1_count,
             t5_count,
+            expired_count,
         )
         return result
     except Exception as e:

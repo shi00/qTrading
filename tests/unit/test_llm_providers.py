@@ -15,7 +15,7 @@ litellm 惰性加载，测试用伪造模块注册进 sys.modules，不触真实
 import sys
 import types
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -27,6 +27,8 @@ from utils.llm_providers import (
     PROVIDER_CATEGORIES,
     RECENT_SELECTIONS_LIMIT,
     get_all_providers,
+    get_cached_litellm_projection,
+    get_enabled_provider_ids,
     get_litellm_models_by_provider,
     get_model_info,
     get_provider_by_id,
@@ -36,6 +38,7 @@ from utils.llm_providers import (
     get_recent_selections,
     record_selection,
     search_models,
+    search_providers,
 )
 
 pytestmark = pytest.mark.unit
@@ -293,6 +296,89 @@ class TestGetLitellmModelsByProvider:
         monkeypatch.setattr(llm_providers, "_get_litellm_version", lambda: "v2-test")
         result = get_litellm_models_by_provider()
         assert [m["id"] for m in result["deepseek"]] == ["brand-new"]
+
+
+class TestGetEnabledProviderIds:
+    """get_enabled_provider_ids: 供应商下拉清单的 litellm 目录推导（联动改造）。
+
+    规则：azure/custom 无目录但特殊保留；目录型供应商仅当投影目录非空时保留；
+    目录投影未加载（首帧）时回退 LLM_PROVIDERS 全量（R16 不触发惰性 import）。
+    """
+
+    def test_cache_unloaded_returns_all_providers(self, fake_litellm):
+        """目录投影未加载（缓存为空）→ 回退全量（避免 UI 首帧触发 litellm 惰性 import）。"""
+        result = get_enabled_provider_ids()
+        assert set(result) == set(LLM_PROVIDERS.keys())
+        assert result[0] == "deepseek"  # 按 PROVIDER_CATEGORIES 分类顺序
+
+    def test_loaded_cache_filters_empty_catalog_providers(self, fake_litellm):
+        """目录已加载 → 仅保留目录非空目录型供应商 + azure/custom（moonshot 等空目录隐藏）。"""
+        get_litellm_models_by_provider()  # 触发投影并填充模块级缓存
+        result = get_enabled_provider_ids()
+        assert set(result) == {"deepseek", "qwen", "zhipu", "openai", "azure", "custom"}
+
+    def test_loaded_cache_keeps_azure_and_custom(self, fake_litellm):
+        """azure（部署制）/custom（自由文本）无目录但始终保留配置通道。"""
+        get_litellm_models_by_provider()
+        result = get_enabled_provider_ids()
+        assert "azure" in result
+        assert "custom" in result
+        # 目标目录型供应商若目录为空 → 不出现
+        assert "moonshot" not in result
+
+    def test_untrusted_catalog_not_cached(self, monkeypatch):
+        """目录不可信（litellm 为 MagicMock，测试会话全局 mock 场景）→ 全空投影不入缓存。
+
+        原缺陷：全空投影以真实版本号入缓存，get_enabled_provider_ids 读到
+        「全部供应商无模型」假象 → 下拉被清空。本测试固化「不入缓存 + 回退全量」。
+        """
+        fake = types.ModuleType("litellm")
+        fake.models_by_provider = MagicMock()  # 会话级 mock：属性访问返回 MagicMock
+        monkeypatch.setitem(sys.modules, "litellm", fake)
+        monkeypatch.setattr(llm_providers, "_PROJECTION_CACHE", {})
+        monkeypatch.setattr(llm_providers, "_PROJECTION_CACHE_LITELLM_VERSION", "")
+        monkeypatch.setattr(llm_providers, "_get_litellm_version", lambda: "1.100.1")
+
+        result = get_litellm_models_by_provider()
+        assert set(result) == set(LLM_PROVIDERS.keys())  # 全空覆盖不崩调用方
+        assert llm_providers._PROJECTION_CACHE == {}  # 未写入缓存
+        assert get_cached_litellm_projection() is None
+        # 缓存读取方不受污染：供应商下拉回退全量
+        assert set(get_enabled_provider_ids()) == set(LLM_PROVIDERS.keys())
+
+
+class TestSearchProviders:
+    """search_providers: provider-only 选择器搜索（目录推导清单 + 名称子串过滤）。"""
+
+    def test_empty_keyword_returns_empty(self):
+        assert search_providers("") == []
+        assert search_providers("   ") == []
+
+    def test_matches_provider_id_substring(self):
+        result = search_providers("deep")
+        assert [r["provider_id"] for r in result] == ["deepseek"]
+
+    def test_matches_chinese_display_name(self):
+        """命中 name（如「通义千问」）也能检索到 qwen。"""
+        assert any(r["provider_id"] == "qwen" for r in search_providers("通义"))
+
+    def test_matches_name_en(self):
+        assert any(r["provider_id"] == "moonshot" for r in search_providers("kimi"))
+
+    def test_no_match_returns_empty(self):
+        assert search_providers("zzz-no-such-provider") == []
+
+    def test_result_stable_category_order(self):
+        """按分类顺序（国内在前）稳定排序，与 get_enabled_provider_ids 一致。"""
+        result = search_providers("a")  # 命中多个（deepseek/anthropic/mistral/google...）
+        orders = [llm_providers._provider_order(r["provider_id"]) for r in result]
+        assert orders == sorted(orders)
+        assert len(result) >= 2
+
+    def test_empty_catalog_fallback_still_lists_all(self):
+        """目录未加载（缓存空）→ 回退全量清单，搜索照常工作（R16 不触发惰性 import）。"""
+        result = search_providers("deep")
+        assert result == [{"provider_id": "deepseek", "provider_name": "DeepSeek", "icon": "deepseek.png"}]
 
 
 class TestSearchModels:

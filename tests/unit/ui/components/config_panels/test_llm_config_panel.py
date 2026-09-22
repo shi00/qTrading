@@ -2,24 +2,27 @@
 
 覆盖:
 1. 契约守护: 声明式范式合规性 + _render_message R9 守卫 (不含 api_key)
-2. 模块级纯函数: _get_provider_name / _build_provider_options / _render_message
+2. 模块级纯函数: _render_message / 事件 factory 函数
 3. 工厂函数: _on_test_click_factory / _on_save_click_factory /
-   _on_provider_change_factory 的 page 可用/None/RuntimeError 守卫
+   _on_acknowledgment_change_factory 的 page 可用/None/RuntimeError 守卫
 4. 组件运行时: compact / show_save_button / is_azure / show_custom_model_input
-5. provider 切换联动（custom_model / azure 字段）
+5. provider 切换联动（provider-only ModelPicker 选择器 + custom_model / azure 字段）
 
-说明: 模型选择经 ModelPicker（litellm 目录搜索/浏览/回记）承载，不再有
-``llm_select_model`` Dropdown、refresh 按钮或注册链接行（AI-01 §3.1c）。
+说明: 模型选择经 ModelPicker（litellm 目录搜索/浏览/回记）承载，供应商选择经
+provider-only ModelPicker（目录推导 + 搜索），不再有 ``llm_select_provider`` Dropdown
+与 ``llm_select_model`` Dropdown（AI-01 §3.1c）。
 
 test_config_panels.py 已覆盖基础契约 (@ft.component / 无 did_mount / 无 .update() 等),
 本文件聚焦运行时行为 + R9 守卫 + factory 函数 + 组件体渲染, 不重复基础契约检查。
 """
 
+import asyncio
 import contextlib
 import inspect
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
 import pytest
@@ -33,9 +36,7 @@ from tests.unit.ui.component_renderer import (
 from ui.components.config_panels import llm_config_panel as panel_module
 from ui.components.config_panels.llm_config_panel import (
     LLMConfigPanel,
-    _build_provider_options,
     _on_acknowledgment_change_factory,
-    _on_provider_change_factory,
     _on_save_click_factory,
     _on_test_click_factory,
     _render_message,
@@ -153,11 +154,10 @@ class TestLLMConfigPanelContractExtension:
         assert "RuntimeError" in source
 
     def test_factory_functions_defined(self) -> None:
-        """DoD: 3 个事件 factory 函数必须存在。"""
+        """DoD: 事件 factory 函数必须存在（供应商选择经 provider-only ModelPicker，无 factory）。"""
         source = _read_source()
         assert "def _on_test_click_factory(" in source
         assert "def _on_save_click_factory(" in source
-        assert "def _on_provider_change_factory(" in source
         assert "def _on_acknowledgment_change_factory(" in source
 
     def test_panel_signature_accepts_vm_and_flags(self) -> None:
@@ -172,6 +172,32 @@ class TestLLMConfigPanelContractExtension:
         assert "compact" in sig.parameters
         assert sig.parameters["compact"].default is False
         assert "show_register_link" not in sig.parameters
+
+    def test_provider_picker_uses_provider_only_mode(self) -> None:
+        """DoD: 供应商选择经 provider-only ModelPicker（与模型选择共用组件，支持搜索）。"""
+        source = _read_source()
+        assert "provider_only=True" in source
+        assert "provider_pick_vm" in source
+
+    def test_provider_picker_routes_to_update_provider(self) -> None:
+        """DoD: 供应商选中 → vm.update_provider（经 run_task 异步联动）。"""
+        source = _read_source()
+        assert "page.run_task(vm.update_provider, provider_id)" in source
+
+    def test_switch_and_set_staleness_guard(self) -> None:
+        """DoD(R1): 跨供应商模型回写前校验供应商未中途变更（陈旧丢弃防错配）。"""
+        source = _read_source()
+        assert "vm.state.provider == provider_id" in source
+
+    def test_provider_picker_selection_synced_from_state(self) -> None:
+        """DoD: 已选供应商（state.provider）变化 → 供应商 picker 回显同步。"""
+        source = _read_source()
+        assert 'provider_pick_vm.set_selection(state.provider, "")' in source
+
+    def test_model_picker_passes_provider_scope(self) -> None:
+        """DoD: ModelPicker 级联——传入 provider_scope=state.provider（双向联动）。"""
+        source = _read_source()
+        assert "provider_scope=state.provider" in source
 
 
 class TestRenderMessageR9Guard:
@@ -238,99 +264,6 @@ class TestRenderMessageR9Guard:
 
 
 # ============================================================================
-# 模块级纯函数: _build_provider_options
-# ============================================================================
-
-
-class TestBuildProviderOptions:
-    """_build_provider_options: 构建供应商下拉选项 (国内/国际/自定义分组)。"""
-
-    def test_returns_dropdown_option_list(self) -> None:
-        """返回 ft.dropdown.Option 列表。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            mock_i18n.current_locale.return_value = "zh_CN"
-            options = _build_provider_options()
-        assert isinstance(options, list)
-        assert all(isinstance(o, ft.dropdown.Option) for o in options)
-
-    def test_domestic_group_header_disabled(self) -> None:
-        """国内分组标题 disabled=True。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            mock_i18n.current_locale.return_value = "zh_CN"
-            options = _build_provider_options()
-        # 第一个 option 是国内分组标题
-        assert options[0].disabled is True
-        assert options[0].key == "llm_provider_domestic"
-
-    def test_international_group_header_disabled(self) -> None:
-        """国际分组标题 disabled=True。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            mock_i18n.current_locale.return_value = "zh_CN"
-            options = _build_provider_options()
-        intl_header = next(o for o in options if o.key == "llm_provider_international")
-        assert intl_header.disabled is True
-
-    def test_custom_group_header_disabled(self) -> None:
-        """自定义分组标题 disabled=True。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            mock_i18n.current_locale.return_value = "zh_CN"
-            options = _build_provider_options()
-        custom_header = next(o for o in options if o.key == "llm_provider_custom_group")
-        assert custom_header.disabled is True
-
-    def test_includes_all_domestic_providers(self) -> None:
-        """国内分组包含 deepseek/qwen/zhipu/moonshot/minimax。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            mock_i18n.current_locale.return_value = "zh_CN"
-            options = _build_provider_options()
-        keys = {o.key for o in options}
-        assert {"deepseek", "qwen", "zhipu", "moonshot", "minimax"} <= keys
-
-    def test_includes_all_international_providers(self) -> None:
-        """国际分组包含 openai/azure/anthropic/google/mistral。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            mock_i18n.current_locale.return_value = "zh_CN"
-            options = _build_provider_options()
-        keys = {o.key for o in options}
-        assert {"openai", "azure", "anthropic", "google", "mistral"} <= keys
-
-    def test_includes_custom_provider(self) -> None:
-        """自定义分组包含 custom。"""
-        with patch.object(panel_module, "I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            mock_i18n.current_locale.return_value = "zh_CN"
-            options = _build_provider_options()
-        keys = {o.key for o in options}
-        assert "custom" in keys
-
-    def test_skips_missing_domestic_provider(self) -> None:
-        """缺失的 domestic provider_id (LLM_PROVIDERS 中不存在) 应被跳过。"""
-        fake_providers = {
-            "deepseek": {"name": "DeepSeek", "name_en": "DeepSeek"},
-            "custom": {"name": "自定义", "name_en": "Custom"},
-        }
-        with (
-            patch.object(panel_module, "I18n") as mock_i18n,
-            patch.object(panel_module, "LLM_PROVIDERS", fake_providers),
-        ):
-            mock_i18n.get.side_effect = lambda key, **kw: key
-            mock_i18n.current_locale.return_value = "zh_CN"
-            options = _build_provider_options()
-        keys = {o.key for o in options}
-        assert "deepseek" in keys
-        assert "custom" in keys
-        # qwen/openai 在 LLM_PROVIDERS 中被移除, 应被跳过
-        assert "qwen" not in keys
-        assert "openai" not in keys
-
-
-# ============================================================================
 # 工厂函数: page 可用 → page.run_task
 # ============================================================================
 
@@ -368,16 +301,6 @@ class TestFactoryFunctionsPageAvailable:
             type(mock_ctx).page = property(lambda self: mock_page)
             _invoke(handler, _make_event())
         mock_page.run_task.assert_called_once_with(vm.save_config)
-
-    def test_on_provider_change_factory_calls_run_task_with_provider_id(self) -> None:
-        """_on_provider_change_factory: page 可用 → page.run_task(vm.update_provider, provider_id)。"""
-        vm = MagicMock(spec=LLMConfigPanelViewModel)
-        handler = _on_provider_change_factory(vm)
-        mock_page = MagicMock()
-        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: mock_page)
-            _invoke(handler, _make_event("qwen"))
-        mock_page.run_task.assert_called_once_with(vm.update_provider, "qwen")
 
     def test_on_acknowledgment_change_factory_calls_run_task_with_checked_value(self) -> None:
         """_on_acknowledgment_change_factory: page 可用 → page.run_task(vm.update_ai_external_acknowledged, checked)。
@@ -417,16 +340,6 @@ class TestFactoryFunctionsPageNone:
             _invoke(handler, _make_event())
         mock_page.run_task.assert_not_called()
 
-    def test_on_provider_change_factory_page_none_skips_run_task(self) -> None:
-        """_on_provider_change_factory: page=None → 不调 run_task。"""
-        vm = MagicMock(spec=LLMConfigPanelViewModel)
-        handler = _on_provider_change_factory(vm)
-        mock_page = MagicMock()
-        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: None)
-            _invoke(handler, _make_event("qwen"))
-        mock_page.run_task.assert_not_called()
-
     def test_on_acknowledgment_change_factory_page_none_skips_run_task(self) -> None:
         """_on_acknowledgment_change_factory: page=None → 不调 run_task (覆盖 L269-272)。"""
         vm = MagicMock(spec=LLMConfigPanelViewModel)
@@ -461,14 +374,6 @@ class TestFactoryFunctionsRuntimeError:
             type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
             _invoke(handler, _make_event())
 
-    def test_on_provider_change_factory_runtime_error_swallowed(self) -> None:
-        """_on_provider_change_factory: RuntimeError 静默处理。"""
-        vm = MagicMock(spec=LLMConfigPanelViewModel)
-        handler = _on_provider_change_factory(vm)
-        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
-            _invoke(handler, _make_event("qwen"))
-
     def test_on_acknowledgment_change_factory_runtime_error_swallowed(self) -> None:
         """_on_acknowledgment_change_factory: RuntimeError 静默处理 (覆盖 L274-275)。"""
         vm = MagicMock(spec=LLMConfigPanelViewModel)
@@ -477,30 +382,6 @@ class TestFactoryFunctionsRuntimeError:
             type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
             # 不应抛异常 (RuntimeError 被 except 捕获并 logger.debug)
             _invoke(handler, _make_event(True))
-
-
-class TestOnProviderChangeFactoryEdgeCases:
-    """_on_provider_change_factory 边界: provider_id=None/空 早返回。"""
-
-    def test_provider_id_none_returns_early(self) -> None:
-        """provider_id=None → 早返回, 不调 run_task。"""
-        vm = MagicMock(spec=LLMConfigPanelViewModel)
-        handler = _on_provider_change_factory(vm)
-        mock_page = MagicMock()
-        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: mock_page)
-            _invoke(handler, _make_event(None))
-        mock_page.run_task.assert_not_called()
-
-    def test_provider_id_empty_string_returns_early(self) -> None:
-        """provider_id='' → 早返回, 不调 run_task。"""
-        vm = MagicMock(spec=LLMConfigPanelViewModel)
-        handler = _on_provider_change_factory(vm)
-        mock_page = MagicMock()
-        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: mock_page)
-            _invoke(handler, _make_event(""))
-        mock_page.run_task.assert_not_called()
 
 
 # ============================================================================
@@ -588,6 +469,21 @@ def _render_panel(
         result = render_once(component)
 
     return vm, page, result, component
+
+
+def _pick_pickers(result: Any) -> tuple[ft.Component, ft.Component]:
+    """从渲染结果中提取 (provider_picker, model_picker) 嵌套组件。
+
+    布局约定（非 compact，见 TestLLMConfigPanelProviderPicker）：
+    ``result.controls = [section_header, provider_picker, model_row, ...]``，
+    ``model_row.controls[0]`` 为承载模型选择器的 Column。返回的组件为 frozen
+    Component，其 ``kwargs["on_select"]`` 即面板层 provider/模型联动回调闭包。
+    """
+    provider_picker = result.controls[1]
+    model_picker = result.controls[2].controls[0].controls[0]
+    assert isinstance(provider_picker, ft.Component)
+    assert isinstance(model_picker, ft.Component)
+    return provider_picker, model_picker
 
 
 # ============================================================================
@@ -743,15 +639,156 @@ class TestLLMConfigPanelCustomModelInput:
         assert base_url.visible is False
 
 
-class TestLLMConfigPanelModelDropdown:
-    """provider 下拉 value 绑定测试（模型选择经 ModelPicker 承载，无 model Dropdown）。"""
+class TestLLMConfigPanelProviderPicker:
+    """供应商选择（provider-only ModelPicker）渲染与联动契约。
 
-    def test_provider_dropdown_value_bound_to_state(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """provider_dropdown.value 绑定到 state.provider。"""
-        state = LLMConfigState(provider="qwen")
-        _, _, result, _ = _render_panel(state=state)
-        provider_dd = _find_dropdown(result, "llm_select_provider")
-        assert provider_dd.value == "qwen"
+    说明：ModelPicker 为嵌套组件（ft.Component），__walk_controls 不下钻其内部
+    控件；面板层的交互链路（provider-only 行选择 → on_select → vm.update_provider）
+    已由 test_model_picker.py（组件层）+ test_model_picker_view_model.py（VM 层）
+    覆盖，本类做源级契约 + 渲染级存在性断言。
+    """
+
+    def test_provider_picker_rendered_before_model_picker(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """非 compact 布局：供应商选择器（独立嵌套组件）位于模型行之前。"""
+        _, _, result, _ = _render_panel(compact=False)
+        assert len(result.controls) >= 3
+        provider_ctrl = result.controls[1]
+        assert isinstance(provider_ctrl, ft.Component)  # provider-only ModelPicker
+        # 模型行为后续 Column（内部亦为嵌套组件，契约由 provider_scope=state.provider 源断言守护）
+        assert isinstance(result.controls[2], ft.Column)
+
+
+class TestLLMConfigPanelPickerCallbacks:
+    """面板层 picker on_select 回调行为测试。
+
+    AI-01 §3.1c：供应商/模型选择经嵌套 ModelPicker 组件承载；本类直接提取组件
+    frozen kwargs 中的 on_select 闭包（= 面板层 _on_provider_selected /
+    _on_model_selected），验证 page.run_task 异步联动、早返回守卫与陈旧回写
+    丢弃守护（review-fix R1）。
+    """
+
+    # --- provider picker: _on_provider_selected ---
+
+    def test_provider_select_different_provider_routes_to_run_task(
+        self, mock_i18n_state, mock_app_colors_state
+    ) -> None:
+        """跨供应商选择：page.run_task(vm.update_provider, provider_id)。"""
+        vm, page, result, _ = _render_panel(state=LLMConfigState(provider="deepseek"))
+        provider_picker, _ = _pick_pickers(result)
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+        _invoke(provider_picker.kwargs["on_select"], "qwen", "")
+        run_task.assert_called_once_with(vm.update_provider, "qwen")
+
+    def test_provider_select_same_provider_skips_run_task(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """选中当前供应商 → 早返回，不调 run_task。"""
+        _, page, result, _ = _render_panel(state=LLMConfigState(provider="qwen"))
+        provider_picker, _ = _pick_pickers(result)
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+        _invoke(provider_picker.kwargs["on_select"], "qwen", "")
+        run_task.assert_not_called()
+
+    def test_provider_select_empty_provider_skips_run_task(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """provider_id 为空 → 早返回，不调 run_task。"""
+        _, page, result, _ = _render_panel(state=LLMConfigState(provider="deepseek"))
+        provider_picker, _ = _pick_pickers(result)
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+        _invoke(provider_picker.kwargs["on_select"], "", "")
+        run_task.assert_not_called()
+
+    def test_provider_select_page_none_skips_run_task(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """ft.context.page 为 None → 不调 run_task（不抛异常）。"""
+        _, page, result, _ = _render_panel(state=LLMConfigState(provider="deepseek"))
+        provider_picker, _ = _pick_pickers(result)
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: None)
+            _invoke(provider_picker.kwargs["on_select"], "qwen", "")
+        run_task.assert_not_called()
+
+    def test_provider_select_runtime_error_swallowed(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """ft.context.page 抛 RuntimeError → 静默处理（logger.debug，不抛异常）。"""
+        _, page, result, _ = _render_panel(state=LLMConfigState(provider="deepseek"))
+        provider_picker, _ = _pick_pickers(result)
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
+            _invoke(provider_picker.kwargs["on_select"], "qwen", "")
+        run_task.assert_not_called()
+
+    # --- model picker: _on_model_selected ---
+
+    def test_model_select_same_provider_updates_model_directly(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """同供应商模型选择：vm.update_model(model_id) 直接回写，不走 run_task。"""
+        vm, page, result, _ = _render_panel(state=LLMConfigState(provider="deepseek"))
+        _, model_picker = _pick_pickers(result)
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+        _invoke(model_picker.kwargs["on_select"], "deepseek", "deepseek-chat")
+        vm.update_model.assert_called_once_with("deepseek-chat")
+        run_task.assert_not_called()
+
+    def test_model_select_cross_provider_fresh_write_back(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """跨供应商模型选择：切换完成且仍为发起供应商 → 回写 model（guard 通过）。"""
+        vm, page, result, _ = _render_panel(state=LLMConfigState(provider="deepseek"))
+        _, model_picker = _pick_pickers(result)
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+
+        def _apply_switch(provider_id: str) -> None:
+            vm._state = replace(vm._state, provider=provider_id)
+
+        vm.update_provider = AsyncMock(side_effect=_apply_switch)  # type: ignore[method-assign]
+        _invoke(model_picker.kwargs["on_select"], "qwen", "qwen-turbo")
+        assert run_task.call_count == 1
+        # 真实 page.run_task 会调用传入的 async 函数生成协程并调度；测试用 MagicMock 捕获函数本体，
+        # 需先调用再 asyncio.run 执行其内部逻辑（await update_provider + 陈旧回写守卫）。
+        asyncio.run(run_task.call_args.args[0]())
+        vm.update_model.assert_called_once_with("qwen-turbo")
+
+    def test_model_select_cross_provider_stale_write_back_discarded(
+        self, mock_i18n_state, mock_app_colors_state
+    ) -> None:
+        """跨供应商模型选择：切换期间用户已切走 → 陈旧回写丢弃（update_model 不被调用)。
+
+        review-fix R1：仅当发起切换的 provider 仍是当前 state.provider 才回写 model。
+        """
+        vm, page, result, _ = _render_panel(state=LLMConfigState(provider="deepseek"))
+        _, model_picker = _pick_pickers(result)
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+
+        vm.update_provider = AsyncMock()  # type: ignore[method-assign]  # 不改变 state → guard False
+        _invoke(model_picker.kwargs["on_select"], "qwen", "qwen-turbo")
+        assert run_task.call_count == 1
+        asyncio.run(run_task.call_args.args[0]())
+        vm.update_model.assert_not_called()
+
+    def test_model_select_cross_provider_page_none_skips(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """跨供应商 + ft.context.page 为 None → 不调 run_task（不抛异常）。"""
+        _, page, result, _ = _render_panel(state=LLMConfigState(provider="deepseek"))
+        _, model_picker = _pick_pickers(result)
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: None)
+            _invoke(model_picker.kwargs["on_select"], "qwen", "qwen-turbo")
+        run_task.assert_not_called()
+
+    def test_model_select_cross_provider_runtime_error_swallowed(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """跨供应商 + ft.context.page 抛 RuntimeError → 静默处理（logger.debug，不抛异常）。"""
+        _, page, result, _ = _render_panel(state=LLMConfigState(provider="deepseek"))
+        _, model_picker = _pick_pickers(result)
+        run_task = _page_run_task(page)
+        run_task.reset_mock()
+        with patch("ui.components.config_panels.llm_config_panel.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
+            _invoke(model_picker.kwargs["on_select"], "qwen", "qwen-turbo")
+        run_task.assert_not_called()
 
 
 # ============================================================================
@@ -828,38 +865,6 @@ class TestLLMConfigPanelEventHandlers:
         run_task.reset_mock()
         _invoke(test_btns[0].on_click, _make_event())
         run_task.assert_called_once_with(vm.verify_connection)
-
-    def test_provider_change_calls_page_run_task_with_vm_update_provider(
-        self, mock_i18n_state, mock_app_colors_state
-    ) -> None:
-        """provider dropdown on_select → page.run_task(vm.update_provider, provider_id)。"""
-        vm, page, result, _ = _render_panel()
-        provider_dd = _find_dropdown(result, "llm_select_provider")
-
-        run_task = _page_run_task(page)
-        run_task.reset_mock()
-        _invoke(provider_dd.on_select, _make_event("qwen"))
-        run_task.assert_called_once_with(vm.update_provider, "qwen")
-
-    def test_provider_change_empty_value_skips_run_task(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """provider dropdown on_select value=None → 不调 run_task。"""
-        _, page, result, _ = _render_panel()
-        provider_dd = _find_dropdown(result, "llm_select_provider")
-
-        run_task = _page_run_task(page)
-        run_task.reset_mock()
-        _invoke(provider_dd.on_select, _make_event(None))
-        run_task.assert_not_called()
-
-    def test_provider_change_empty_string_skips_run_task(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """provider dropdown on_select value='' → 不调 run_task。"""
-        _, page, result, _ = _render_panel()
-        provider_dd = _find_dropdown(result, "llm_select_provider")
-
-        run_task = _page_run_task(page)
-        run_task.reset_mock()
-        _invoke(provider_dd.on_select, _make_event(""))
-        run_task.assert_not_called()
 
     def test_acknowledgment_label_click_calls_run_task(self, mock_i18n_state, mock_app_colors_state) -> None:
         """acknowledgment label GestureDetector on_tap → page.run_task(vm.update_ai_external_acknowledged, True)。
@@ -1102,11 +1107,12 @@ class TestLLMConfigPanelIsolation:
 
         # 两个 VM 应是独立实例
         assert vm1 is not vm2
-        # 两个 result 应反映各自 state
-        provider_dd1 = _find_dropdown(result1, "llm_select_provider")
-        provider_dd2 = _find_dropdown(result2, "llm_select_provider")
-        assert provider_dd1.value == "deepseek"
-        assert provider_dd2.value == "qwen"
+        # 两个 result 应反映各自 state：供应商选择器为独立嵌套组件（实例互不共享）
+        provider_ctrl1 = result1.controls[1]
+        provider_ctrl2 = result2.controls[1]
+        assert isinstance(provider_ctrl1, ft.Component)
+        assert isinstance(provider_ctrl2, ft.Component)
+        assert provider_ctrl1 is not provider_ctrl2
 
 
 # ============================================================================

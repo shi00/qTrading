@@ -21,6 +21,7 @@ import pytest
 
 import ui.viewmodels.model_picker_view_model as model_picker_vm
 from ui.viewmodels.model_picker_view_model import ModelPickerViewModel, ModelRow
+from utils.llm_providers import LLM_PROVIDERS
 
 pytestmark = pytest.mark.unit
 
@@ -87,6 +88,19 @@ def mock_thread_pool(monkeypatch):
     return fake
 
 
+@pytest.fixture
+def cached_projection(fake_litellm):
+    """填充投影缓存（set_provider_scope 的 R16 分支依赖缓存就绪后才重建浏览态）。
+
+    fake_litellm 已把 _get_litellm_version 固定为 "v1-test"；本夹具触发投影填充
+    模块级缓存，使 get_cached_litellm_projection() 返回非 None。
+    """
+    from utils.llm_providers import get_litellm_models_by_provider
+
+    get_litellm_models_by_provider()
+    return None
+
+
 def _row(provider_id="deepseek", model_id="deepseek-chat", context=65536) -> ModelRow:
     return ModelRow(
         provider_id=provider_id,
@@ -111,6 +125,9 @@ class TestModelPickerViewModelInit:
         assert st.recent == ()
         assert st.groups == ()
         assert st.expanded == frozenset()
+        assert st.provider_scope == ""
+        assert st.provider_only is False
+        assert st.provider_options == ()
         assert st.selected_provider == ""
         assert st.selected_model == ""
 
@@ -215,6 +232,122 @@ class TestModelPickerToggleGroup:
         assert vm.state.expanded == frozenset()
 
 
+class TestModelPickerProviderScope:
+    """级联过滤（AI-01 §3.1c 联动改造）：set_provider_scope 限定浏览分组。"""
+
+    def test_scope_filters_groups_to_single_provider(self, cached_projection, mock_config_handler):
+        vm = ModelPickerViewModel()
+        vm.set_provider_scope("qwen")
+        groups = vm.state.groups
+        assert [g.provider_id for g in groups] == ["qwen"]
+        assert vm.state.expanded == frozenset({"qwen"})  # 单供应商分组自动预展开
+
+    def test_scope_with_group_auto_expanded(self, cached_projection, mock_config_handler):
+        vm = ModelPickerViewModel()
+        vm.set_provider_scope("deepseek")
+        st = vm.state
+        assert [g.provider_id for g in st.groups] == ["deepseek"]
+        assert st.expanded == frozenset({"deepseek"})
+        ds = st.groups[0]
+        assert ds.model_count == 2  # deepseek-chat / deepseek-v3
+
+    def test_empty_scope_resets_to_all_groups(self, cached_projection, mock_config_handler):
+        vm = ModelPickerViewModel()
+        vm.set_provider_scope("qwen")
+        assert [g.provider_id for g in vm.state.groups] == ["qwen"]
+        vm.set_provider_scope("")
+        providers = {g.provider_id for g in vm.state.groups}
+        assert {"deepseek", "qwen", "openai"} <= providers
+        assert vm.state.expanded == frozenset()  # 无 scope → 全折叠
+
+    def test_same_scope_is_noop(self, cached_projection, mock_config_handler):
+        vm = ModelPickerViewModel()
+        vm.set_provider_scope("deepseek")
+        groups_before = vm.state.groups
+        vm.set_provider_scope("deepseek")
+        assert vm.state.groups == groups_before  # 不重复重建浏览态
+
+    def test_scope_without_catalog_provider_yields_empty_groups(self, cached_projection, mock_config_handler):
+        """scope 指向无目录供应商（azure/custom）→ 浏览无分组（不崩 UI）。"""
+        vm = ModelPickerViewModel()
+        vm.set_provider_scope("azure")
+        assert vm.state.groups == ()
+
+    def test_scope_before_catalog_loaded_skips_rebuild(self, fake_litellm, mock_config_handler):
+        """R16：目录未加载（首帧）→ 只设 scope 不重建浏览态（避免 UI 线程触发 litellm import）。"""
+        vm = ModelPickerViewModel()
+        vm.set_provider_scope("qwen")
+        st = vm.state
+        assert st.provider_scope == "qwen"
+        assert st.expanded == frozenset({"qwen"})
+        assert st.groups == ()  # 浏览态待 ensure_catalog_loaded 重建
+
+
+class TestModelPickerProviderOnly:
+    """provider-only 模式（供应商选择器，与模型选择共用组件）。"""
+
+    def test_set_provider_only_builds_provider_rows(self, mock_config_handler):
+        """切换 provider-only 后浏览为供应商行列表（目录未加载回退全量），无分组/回记。"""
+        vm = ModelPickerViewModel()
+        vm.set_provider_only(True)
+        st = vm.state
+        assert st.provider_only is True
+        assert st.groups == ()
+        assert st.recent == ()
+        providers = {r.provider_id for r in st.provider_options}
+        # 目录推导清单（覆盖核心供应商 + azure/custom 特殊保留）；目录加载态不同
+        # （全量回退 vs 投影过滤）可能导致子集差异，故用子集 + 边界断言。
+        assert {"deepseek", "qwen", "zhipu", "openai", "azure", "custom"} <= providers
+        assert providers <= set(LLM_PROVIDERS.keys())
+        # 行使 provider 名语义（model_id 空）
+        row = next(r for r in st.provider_options if r.provider_id == "deepseek")
+        assert row.model_id == ""
+        assert row.provider_name == "DeepSeek"
+        assert row.context == 0
+
+    def test_set_provider_only_back_to_model_mode(self, cached_projection, mock_config_handler):
+        """关闭 provider-only → 恢复模型浏览（供应商分组）。"""
+        vm = ModelPickerViewModel()
+        vm.set_provider_only(True)
+        assert {"deepseek", "azure"} <= {r.provider_id for r in vm.state.provider_options}
+        vm.set_provider_only(False)
+        st = vm.state
+        assert st.provider_only is False
+        assert {g.provider_id for g in st.groups} == {"deepseek", "qwen", "zhipu", "openai"}
+
+    def test_same_provider_only_is_noop(self, mock_config_handler):
+        vm = ModelPickerViewModel()
+        vm.set_provider_only(True)
+        rows_before = vm.state.provider_options
+        vm.set_provider_only(True)
+        assert vm.state.provider_options == rows_before
+
+    def test_provider_only_search_matches_providers(self, mock_config_handler):
+        """provider-only 搜索按供应商名匹配，行无模型粒度。"""
+        vm = ModelPickerViewModel()
+        vm.set_provider_only(True)
+        vm.update_model_query("deep")
+        st = vm.state
+        assert st.searching is False
+        assert [r.provider_id for r in st.search_results] == ["deepseek"]
+        assert st.search_results[0].model_id == ""
+        assert st.search_results[0].context == 0
+
+    def test_provider_only_search_no_match_empty(self, mock_config_handler):
+        vm = ModelPickerViewModel()
+        vm.set_provider_only(True)
+        vm.update_model_query("zzz")
+        assert vm.state.search_results == ()
+
+    def test_current_provider_forced_into_provider_rows(self, mock_config_handler):
+        """当前已选供应商即使不在启用清单也强制保留（存量配置回显不被吞）。"""
+        vm = ModelPickerViewModel()
+        vm.set_selection("ghost-provider", "")
+        vm.set_provider_only(True)
+        ids = {r.provider_id for r in vm.state.provider_options}
+        assert "ghost-provider" in ids
+
+
 # --- Catalog Loading (async, R16 offload) ---
 
 
@@ -264,7 +397,7 @@ class TestModelPickerBrowse:
             {"provider": "deepseek", "model": "deepseek-chat"},
         ]
         vm = ModelPickerViewModel()
-        rows = vm._build_recent_rows()
+        rows = vm._load_recent_rows()
         assert len(rows) == 1
         row = rows[0]
         assert row.provider_id == "deepseek"
@@ -277,11 +410,40 @@ class TestModelPickerBrowse:
             {"provider": "nope", "model": "x"},
         ]
         vm = ModelPickerViewModel()
-        rows = vm._build_recent_rows()
+        rows = vm._load_recent_rows()
         assert len(rows) == 1
         assert rows[0].provider_id == "nope"
         assert rows[0].provider_name == "nope"  # 不在 LLM_PROVIDERS → 名回退 provider_id
         assert rows[0].context == 0  # 目录无此模型 → 0（R21 诚实呈现）
+
+    def test_ensure_catalog_loaded_preloads_recent_cache(self, fake_litellm, mock_config_handler, mock_thread_pool):
+        """R2：目录加载时 offload 预载 recent 缓存，事件线程浏览重建只读缓存。"""
+        mock_config_handler["llm_recent_selections"] = [
+            {"provider": "deepseek", "model": "deepseek-chat"},
+        ]
+        vm = ModelPickerViewModel()
+        asyncio.run(vm.ensure_catalog_loaded())
+        assert len(vm._recent_rows) == 1
+        assert len(vm.state.recent) == 1  # 浏览态消费缓存
+        assert vm.state.recent[0].provider_id == "deepseek"
+
+    def test_build_recent_rows_reads_cache_without_file_io(self, fake_litellm, mock_config_handler, monkeypatch):
+        """R2：_build_recent_rows 读内存缓存，不再触发 ConfigHandler 文件 IO。"""
+        calls: list = []
+        monkeypatch.setattr(model_picker_vm, "get_recent_selections", lambda: calls.append(1) or [])
+        vm = ModelPickerViewModel()
+        assert vm._build_recent_rows() == ()
+        assert calls == []  # 缓存路径零文件 IO
+        vm._load_recent_rows()
+        assert len(calls) == 1  # 文件 IO 仅存在于 offload 的加载路径
+
+    def test_set_selection_after_provider_only_backfills_rows(self, mock_config_handler):
+        """R4：provider-only 模式下 selected 变化 → 补齐浏览行（构建时机早于 set_selection 不漏项）。"""
+        vm = ModelPickerViewModel()
+        vm.set_provider_only(True)
+        assert "ghost-provider" not in {r.provider_id for r in vm.state.provider_options}
+        vm.set_selection("ghost-provider", "")
+        assert "ghost-provider" in {r.provider_id for r in vm.state.provider_options}
 
     def test_build_recent_rows_read_failure_returns_empty(self, fake_litellm, monkeypatch):
         def raise_load():
@@ -289,7 +451,7 @@ class TestModelPickerBrowse:
 
         monkeypatch.setattr("utils.config_handler.ConfigHandler.load_config", raise_load)
         vm = ModelPickerViewModel()
-        assert vm._build_recent_rows() == ()
+        assert vm._load_recent_rows() == ()
 
 
 # --- External queries ---

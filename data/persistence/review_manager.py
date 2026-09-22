@@ -702,6 +702,20 @@ class ReviewManager:
         logger.info("[Review] T+1 backfill completed: %s records updated.", len(updates))
         return len(updates)
 
+    @log_async_operation(operation_name="expire_stale", threshold_ms=PerfThreshold.DB_BULK_IO)
+    async def expire_stale_pending(self, lookback_trade_days: int = 60) -> int:
+        """RV-11: 常驻过期清扫——清理超窗且从未完成 T+1 的僵尸 PENDING 记录。
+
+        迁移 0026 只做了一次性存量清理，本方法负责迁移后的增量：把
+        ``review_status IN (PENDING, NULL)`` 且 ``t1_pct IS NULL`` 且
+        ``trade_date`` 早于最近 ``lookback_trade_days`` 个交易日的记录置
+        ``EXPIRED`` 终态，防止僵尸 PENDING 无限累积挤占
+        ``get_pending_reviews`` 的 LIMIT 500 配额（积累到上限后复盘池
+        被完全堵死）。语义与迁移 0026 逐字对齐，常量复用默认值避免口径漂移。
+        返回清理条数（0 = 无僵尸，正常）。
+        """
+        return await self.cache.screener_dao.expire_stale_pending(lookback_trade_days=lookback_trade_days)
+
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _batch_backfill_t5(self, updates: list[dict]) -> None:
         """单事务批量回填 T+5（对齐 _batch_update_results 的事务与逐条降级语义）。"""

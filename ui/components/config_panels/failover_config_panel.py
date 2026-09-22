@@ -73,11 +73,23 @@ def _render_message(msg: Message | None) -> str:
 def _build_provider_options(
     is_edit: bool,
     existing_providers: tuple[str, ...],
+    current: str | None = None,
 ) -> list[ft.dropdown.Option]:
-    """构建供应商下拉选项（排除 custom + 已存在供应商）。"""
+    """构建供应商下拉选项（litellm 目录推导，排除 custom + 已存在供应商）。
+
+    ``current``（当前编辑的供应商）目录为空也强制保留，与主面板 provider picker
+    口径一致，避免存量配置无法回显/编辑（联动改造）。
+    """
+    from utils.llm_providers import get_enabled_provider_ids
+
+    enabled = list(get_enabled_provider_ids())
+    if current and current not in enabled and current in LLM_PROVIDERS:
+        enabled.append(current)
+
     options: list[ft.dropdown.Option] = []
-    for pid, pinfo in LLM_PROVIDERS.items():
-        if pid == "custom":
+    for pid in enabled:
+        pinfo = LLM_PROVIDERS.get(pid, {})
+        if pid == "custom" or not pinfo:
             continue
         if not is_edit and pid in existing_providers:
             continue
@@ -133,7 +145,9 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
     ft.use_state(get_observable_state)
 
     # --- Dialog form controls (driven by state) ---
-    provider_options = _build_provider_options(state.dialog_is_edit, state.dialog_existing_providers)
+    provider_options = _build_provider_options(
+        state.dialog_is_edit, state.dialog_existing_providers, current=state.dialog_provider
+    )
 
     provider_dropdown = ft.Dropdown(
         label=I18n.get("failover_select_provider"),
@@ -161,7 +175,15 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
     ft.use_effect(_sync_picker_selection, dependencies=[state.dialog_provider, state.dialog_model])
 
     model_picker = ft.Column(
-        [ModelPicker(picker_vm, on_select=_on_dialog_model_selected, text_field_width=AppStyles.CONTROL_WIDTH_LG)],
+        [
+            ModelPicker(
+                picker_vm,
+                on_select=_on_dialog_model_selected,
+                text_field_width=AppStyles.CONTROL_WIDTH_LG,
+                # 级联过滤：浏览模式仅展示当前对话框供应商模型（双向联动）
+                provider_scope=state.dialog_provider or None,
+            ),
+        ],
         visible=not state.dialog_custom_model,
     )
 
