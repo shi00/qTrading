@@ -1,4 +1,4 @@
-﻿# qTrading
+# qTrading
 
 > 极速、隐私优先的本地化 A 股 AI 量化选股与深度分析平台
 
@@ -79,7 +79,7 @@ qTrading/
 ├── services/       # 服务层：AI 网关、任务调度、本地模型、新闻洞察、内置 PG 维护
 ├── ui/             # 表现层 (MVVM)：7 标签页（市场/选股/回测/数据/任务/设置/自选股）、组件、视图模型
 ├── utils/          # 工具层：配置/安全/线程池/限流/优雅退出
-├── tests/          # 测试层：单元 (373) + 集成 (67)
+├── tests/          # 测试层：单元 + 集成测试（资产索引见 docs/guides/testing.md）
 ├── alembic/        # 数据库迁移（0001~0028）
 ├── locales/        # 国际化资源（中/英）
 ├── assets/         # 静态资源
@@ -200,7 +200,7 @@ python main.py
 
 ## 🧪 测试
 
-双层测试金字塔：**373 个单元测试 + 67 个集成测试**，CI 强制 **≥85% 代码覆盖率**。
+双层测试金字塔：单元测试 + 集成测试（数量随开发演进，统计见 [docs/guides/testing.md](docs/guides/testing.md) 或用 `pytest --collect-only -q`）。CI 强制 **单文件 ≥80% + diff coverage ≥80%**；**整体 ≥85% 为本地目标**（`pyproject.toml` 的 `fail_under = 85` 未在 CI 路径启用）。
 
 ```bash
 # 全部 / 单元 / 集成
@@ -212,15 +212,15 @@ python -m pytest tests/integration/ -v
 python -m pytest tests/ --cov --cov-report=term-missing --cov-fail-under=85
 ```
 
-| 层级 | 目录 | 数量 | 覆盖内容 |
-|------|------|------|----------|
-| **Unit** | `tests/unit/` | 373 | 纯逻辑：AI 服务、策略、DAO、配置、工具类、边界条件、回测模块 |
-| **Integration** | `tests/integration/` | 67 | 组件协作：数据同步、迁移、回顾系统、任务调度、回测全流程 |
+| 层级 | 目录 | 覆盖内容 |
+|------|------|----------|
+| **Unit** | `tests/unit/` | 纯逻辑：AI 服务、策略、DAO、配置、工具类、边界条件、回测模块 |
+| **Integration** | `tests/integration/` | 组件协作：数据同步、迁移、回顾系统、任务调度、回测全流程 |
 
 | 覆盖维度 | 说明 |
 |----------|------|
 | **覆盖目标** | `core/` `app/` `data/` `services/` `strategies/` `utils/` `ui/` `config/` `main/` 9 个核心模块 |
-| **门禁阈值** | **85%** — 低于此值 CI 流水线失败 |
+| **门禁阈值** | **单文件 ≥80%**（CI 强制，`check_per_file_coverage.py`）+ **diff coverage ≥80%**（CI 强制）；**整体 ≥85%** 为本地目标（CI 未启用 `fail_under`） |
 | **排除项** | tiktoken 缓存、离线日历数据、辅助脚本 |
 
 ---

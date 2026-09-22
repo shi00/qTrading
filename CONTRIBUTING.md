@@ -93,7 +93,7 @@
 ### 提交前自检
 
 1. 确保所有测试通过（单元、集成、E2E 视变更范围）
-2. 确保代码覆盖率达标（整体 ≥ 85%，单文件 ≥ 80%；分层单文件阈值与 advisory 状态见 [testing.md](./docs/guides/testing.md)）
+2. 确保代码覆盖率达标（整体 ≥ 85% 为本地目标，单文件 ≥ 80% 与 diff coverage ≥80% 为 CI 强制；分层单文件阈值与 advisory 状态见 [testing.md](./docs/guides/testing.md)）
 3. 运行 `pre-commit run --all-files`
 4. 更新相关文档（README / CLAUDE.md / CONTRIBUTING.md / SECURITY.md 视变更范围）
 
@@ -592,7 +592,7 @@ except Exception as e:
 
 > 本节已迁移到 [docs/guides/testing.md](./docs/guides/testing.md)。
 >
-> 覆盖率源（事实源 [`pyproject.toml`](./pyproject.toml) `[tool.coverage.run] source`）：`core`, `app`, `data`, `services`, `strategies`, `utils`, `ui`, `config`, `main`（排除 `tests/`, `scripts/`, `data/tiktoken_cache/`）。整体覆盖率 ≥ 85%，单文件 ≥ 80%（由 `scripts/check_per_file_coverage.py` 强制检查）。
+> 覆盖率源（事实源 [`pyproject.toml`](./pyproject.toml) `[tool.coverage.run] source`）：`core`, `app`, `data`, `services`, `strategies`, `utils`, `ui`, `config`, `main`（排除 `tests/`, `scripts/`, `data/tiktoken_cache/`）。整体覆盖率 ≥ 85% 为本地目标（`fail_under`，CI 未启用）；单文件 ≥ 80% 由 `scripts/check_per_file_coverage.py` 强制检查；diff coverage ≥80% 由 CI `scripts/check_diff_coverage.py` 强制。
 
 ## CI/CD 流水线与门禁
 
