@@ -72,7 +72,7 @@ class DataExplorerQueryClient:
             if cls._shared_engine is not None:
                 try:
                     cls._shared_engine.dispose()
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     logger.warning("[DataExplorerQueryClient] close_all() failed: %s", safe_error(e))
                 cls._shared_engine = None
 

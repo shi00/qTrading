@@ -603,7 +603,7 @@ class LiteLLMClient:
                 start = response_content.find("{")
                 if start != -1:
                     try:
-                        obj, idx = json.JSONDecoder().raw_decode(
+                        obj, _idx = json.JSONDecoder().raw_decode(  # 保留剩余位置信息供调试，实际仅用 obj
                             response_content[start:],
                         )
                         return {**obj, **llm_metadata} if isinstance(obj, dict) else obj
@@ -652,7 +652,7 @@ class LiteLLMClient:
             )
         except asyncio.CancelledError:
             raise  # R2: 必须传播
-        except Exception:  # noqa: BLE001 -- 审计降级不阻断 AI 主流程
+        except Exception:
             pass
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
@@ -695,7 +695,7 @@ class LiteLLMClient:
         primary = failover_config.get("primary", "")
         fallbacks = failover_config.get("fallbacks", [])
 
-        models_to_try = [primary] + fallbacks
+        models_to_try = [primary, *fallbacks]
         last_error: Exception | None = None
 
         for i, model in enumerate(models_to_try):

@@ -1183,7 +1183,9 @@ async def _execute_screener_export(
     if is_web:
         try:
             # R16: df.to_csv/to_excel 是 CPU 密集操作, 通过 VM 方法 offload 到 CPU 线程池
-            src_bytes, error = await vm.export_results_bytes(format_)
+            src_bytes, _err = await vm.export_results_bytes(
+                format_
+            )  # _err 意图性未用（下划线命名豁免 RUF059），错误经 vm.state 呈现
             if src_bytes is None:
                 if page is not None:
                     _safe_show_toast(page, I18n.get("data_export_fail"), "error")
@@ -1217,9 +1219,9 @@ async def _execute_screener_export(
         return
     try:
         if format_ == "csv":
-            path, error = await vm.export_results(filepath)
+            path, _error = await vm.export_results(filepath)
         else:
-            path, error = await vm.export_results_excel(filepath)
+            path, _error = await vm.export_results_excel(filepath)  # 错误经 vm.state 呈现，返回值仅需 path
         if path:
             filename = os.path.basename(filepath)
             if page is not None:
@@ -2225,7 +2227,7 @@ def ScreenerView(
         selected = get_control_attr(e.control, ft.SegmentedButton, "selected") if e and e.control else []
         if not selected:
             return
-        new_mode = list(selected)[0]
+        new_mode = next(iter(selected))  # RUF015: 已判空，直接用 next(iter()) 取首元素
         UILogger.log_action("ScreenerView", "Toggle", f"mode={new_mode}")
         if new_mode == state.mode:
             return

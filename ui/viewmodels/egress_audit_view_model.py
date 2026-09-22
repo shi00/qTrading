@@ -65,7 +65,7 @@ class EgressAuditViewModel(ObservableViewModelMixin[EgressAuditState]):
             session_count = _EgressAudit().get_session_egress_count()
         except asyncio.CancelledError:
             raise  # R2: 必须传播
-        except Exception as ex:  # noqa: BLE001 -- 聚合读取失败降级为空态, 不阻断 UI
+        except Exception as ex:
             logger.debug("[EgressAuditVM] Failed to load egress aggregates: %s", ex)
             self._set_state(
                 today_rows=[],

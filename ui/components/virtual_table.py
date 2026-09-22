@@ -119,7 +119,7 @@ class _ColWidthsCache:
     - last_time 用于 Python 级节流兜底
     """
 
-    __slots__ = ("widths", "active_col", "last_time")
+    __slots__ = ("active_col", "last_time", "widths")
 
     def __init__(self) -> None:
         self.widths: dict[str, int] = {}

@@ -551,10 +551,9 @@ def validate_failover_credentials() -> list[str]:
             # 用默认的 fallback_to_global=True 会把无凭证的供应商在全局 key 存在时
             # 误判为已配置，使本校验在最需要它的场景下失效。
             cred = cfg.ConfigHandler.get_provider_credential(provider, fallback_to_global=False)
-            if not cred.get("api_key"):  # noqa: SIM114
-                missing.append(provider)
-                seen.add(provider)
-            elif model_id and (not cred.get("models") or model_id not in cred["models"]):
+            if not cred.get("api_key") or (
+                model_id and (not cred.get("models") or model_id not in cred["models"])
+            ):  # RUF021: 显式括号澄清 and/or 优先级
                 missing.append(provider)
                 seen.add(provider)
 

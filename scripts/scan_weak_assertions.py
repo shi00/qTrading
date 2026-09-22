@@ -41,6 +41,8 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from utils.time_utils import get_now
+
 
 # Mock 弱断言方法名（不验证调用参数）
 WEAK_MOCK_METHODS = frozenset(
@@ -637,7 +639,7 @@ def check_baseline_kpi(baseline_path: Path, current_total: int, now: date | None
     except (json.JSONDecodeError, OSError, ValueError, TypeError):
         return []
 
-    today = now or date.today()
+    today = now or get_now().date()
     total_span = (target - created).days
     if total_span <= 0:
         # 目标日期已过期：直接按目标值判定

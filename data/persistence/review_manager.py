@@ -228,7 +228,7 @@ class ReviewManager:
                     elif hasattr(t1_date_val, "year"):
                         t1_date_obj = t1_date_val
                     else:
-                        t1_date_obj = datetime.datetime.strptime(str(t1_date_val).replace("-", "")[:8], "%Y%m%d").date()
+                        t1_date_obj = datetime.datetime.strptime(str(t1_date_val).replace("-", "")[:8], "%Y%m%d").date()  # noqa: DTZ007  归一化后的 YYYYMMDD 业务日期字符串无时区语义
 
                     # D4-M4: 标签窗口取 T+5。get_learning_context 只读
                     # ``t5_pct IS NOT NULL + review_status=COMPLETED`` 记录，故标签必须反映

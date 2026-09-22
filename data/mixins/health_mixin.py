@@ -475,7 +475,7 @@ class HealthCheckMixin:
                     api_latest_date = parse_date(api_latest_official).date()
                     local_latest_str = str(official_dates[-1]) if official_dates else ""
                     if local_latest_str and api_latest_official > local_latest_str:
-                        gold_standard_dates = official_dates + [api_latest_date]
+                        gold_standard_dates = [*official_dates, api_latest_date]
                         logger.info(
                             "[DataProcessor] Health | P1-7: API extends official dates from %s to %s",
                             local_latest_str,

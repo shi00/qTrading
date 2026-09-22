@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import datetime
 import logging
 import time
 import uuid
@@ -16,6 +15,7 @@ import polars as pl
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.qfq import qfq_ratio_expr
 from utils.sanitizers import DataSanitizer
+from utils.time_utils import get_now
 from core.i18n import Message
 from data.domain_services.trade_calendar_service import TradeCalendarService
 from data.domain_services.transaction_cost import TransactionCostModel
@@ -211,7 +211,7 @@ class VectorBacktestEngine:
             ic_dates=pl.Series(ic_dates, dtype=pl.Date),
             period_stats=period_stats,
             run_id=run_id,
-            executed_at=datetime.datetime.now(),
+            executed_at=get_now(),
             duration_ms=duration_ms,
             data_warnings=tuple(all_warnings),
             failed_signal_dates=tuple(failed_signal_dates),

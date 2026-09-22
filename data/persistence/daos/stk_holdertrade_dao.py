@@ -8,6 +8,7 @@ import logging
 
 import pandas as pd
 
+from utils.time_utils import get_now
 from data.persistence.models import StkHoldertrade, get_model_columns, get_model_pk_columns
 
 from .base_dao import BaseDao
@@ -54,9 +55,9 @@ class StkHoldertradeDao(BaseDao):
 
         def sql_fn(as_of):
             if as_of is None:
-                end_date = datetime.date.today()
+                end_date = get_now().date()
             elif isinstance(as_of, str):
-                end_date = datetime.datetime.strptime(as_of, "%Y%m%d").date()
+                end_date = datetime.datetime.strptime(as_of, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
             elif isinstance(as_of, datetime.datetime):
                 end_date = as_of.date()
             else:

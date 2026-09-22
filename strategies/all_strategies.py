@@ -36,11 +36,6 @@ def _import_all_strategies():
         return
     _strategies_imported = True
 
-    import strategies.ai_strategy  # noqa: E402
-    import strategies.fundamental  # noqa: E402
-    import strategies.market  # noqa: E402
-    import strategies.oversold_strategy  # noqa: E402, F401
-
     # 仅首次导入时缓存真实策略快照，之后不再更新（恢复目标固定为真实策略集合）。
     # 守卫保证快照只捕获一次：即使某测试在注入 mock 后触发真实导入，也不会把
     # mock 吸入全局快照，避免持久污染后续测试的恢复目标。

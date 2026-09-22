@@ -278,7 +278,7 @@ class AIStrategyMixin:
         end_date = get_now().date()
         if ctx_td:
             try:
-                end_date = _dt.datetime.strptime(ctx_td, "%Y%m%d").date()
+                end_date = _dt.datetime.strptime(ctx_td, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
             except (ValueError, TypeError):
                 if is_backtest:
                     raise ValueError(
@@ -1533,7 +1533,7 @@ class AIStrategyMixin:
 
             # 2. Technical Indicators (pointwise)
             trend_signal, _, _ = TechnicalAnalysis.get_macd(history_df)
-            kdj_signal, k, d, j = TechnicalAnalysis.get_kdj(history_df)
+            kdj_signal, k, _d, j = TechnicalAnalysis.get_kdj(history_df)  # D 指标未用于上下文
 
             tech_context = {
                 "macd_signal": trend_signal,

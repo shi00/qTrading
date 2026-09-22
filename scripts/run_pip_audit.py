@@ -22,6 +22,8 @@ from pathlib import Path
 
 import yaml
 
+from utils.time_utils import get_now
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run pip-audit with structured allowlist")
@@ -56,7 +58,7 @@ def load_allowlist(allowlist_path: Path) -> dict:
 
 def check_expired_vulnerabilities(allowlist: dict) -> list[str]:
     expired = []
-    today = date.today()
+    today = get_now().date()
 
     vulns = allowlist.get("ignored_vulnerabilities", [])
     for vuln in vulns:
@@ -71,7 +73,7 @@ def check_expired_vulnerabilities(allowlist: dict) -> list[str]:
             if isinstance(reevaluate_at_str, date):
                 reevaluate_at = reevaluate_at_str
             else:
-                reevaluate_at = datetime.strptime(reevaluate_at_str, "%Y-%m-%d").date()
+                reevaluate_at = datetime.strptime(reevaluate_at_str, "%Y-%m-%d").date()  # noqa: DTZ007  # 人工填写的 YYYY-MM-DD 业务日期字符串无时区语义
         except ValueError:
             print(f"ERROR: Invalid date format for {vuln_id}: {reevaluate_at_str}")
             sys.exit(1)

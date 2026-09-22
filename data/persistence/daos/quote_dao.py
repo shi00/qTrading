@@ -7,6 +7,7 @@ import typing
 import pandas as pd
 import sqlalchemy as sa
 
+from utils.time_utils import get_now
 from data.constants import (
     MAJOR_INDICES,
     attach_daily_quotes_column_units,
@@ -137,7 +138,7 @@ def _normalize_trade_date(val: typing.Any) -> typing.Any:
         return val.date()
     if isinstance(val, str):
         try:
-            return datetime.datetime.strptime(val, "%Y%m%d").date()
+            return datetime.datetime.strptime(val, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
         except ValueError:
             return val
     return val
@@ -998,7 +999,7 @@ class QuoteDao(BaseDao):
                     attempted_str = attempted_upto.get(table)
                     if attempted_str:
                         try:
-                            attempted_date = datetime.datetime.strptime(attempted_str, "%Y%m%d").date()
+                            attempted_date = datetime.datetime.strptime(attempted_str, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
                         except ValueError:
                             attempted_date = None
                         if attempted_date is not None and trade_date <= attempted_date:
@@ -1152,7 +1153,7 @@ class QuoteDao(BaseDao):
             }
         """
         if isinstance(trade_date, str):
-            normalized = datetime.datetime.strptime(trade_date, "%Y%m%d").date()
+            normalized = datetime.datetime.strptime(trade_date, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
         else:
             normalized = trade_date
 
@@ -1180,7 +1181,7 @@ class QuoteDao(BaseDao):
 
         NOT EXISTS 等价集合差；stock_basic.ts_code 为主键非 NULL，无 NULL 语义陷阱。
         """
-        cutoff = self._to_db_date(datetime.date.today() - datetime.timedelta(days=window_days))
+        cutoff = self._to_db_date(get_now().date() - datetime.timedelta(days=window_days))
         return await self._count_in_window(
             """
             SELECT COUNT(*) AS cnt
@@ -1196,7 +1197,7 @@ class QuoteDao(BaseDao):
 
     async def count_price_range_violations(self, window_days: int = _CROSS_VALIDATION_WINDOW_DAYS) -> int:
         """DAT-12: 行情脏数据——high < low 或 close 越界 [low, high] 的行数（近期窗口）。"""
-        cutoff = self._to_db_date(datetime.date.today() - datetime.timedelta(days=window_days))
+        cutoff = self._to_db_date(get_now().date() - datetime.timedelta(days=window_days))
         return await self._count_in_window(
             """
             SELECT COUNT(*) AS cnt
@@ -1212,7 +1213,7 @@ class QuoteDao(BaseDao):
 
         net_mf_amount = Σbuy − Σsell；容差 _MONEYFLOW_NET_TOLERANCE（万元）容忍分项舍入。
         """
-        cutoff = self._to_db_date(datetime.date.today() - datetime.timedelta(days=window_days))
+        cutoff = self._to_db_date(get_now().date() - datetime.timedelta(days=window_days))
         return await self._count_in_window(
             """
             SELECT COUNT(*) AS cnt
@@ -1231,7 +1232,7 @@ class QuoteDao(BaseDao):
 
         窗口函数 LAG 按 (ts_code, trade_date) 排序取前值；仅统计近期窗口以控制成本。
         """
-        cutoff = self._to_db_date(datetime.date.today() - datetime.timedelta(days=window_days))
+        cutoff = self._to_db_date(get_now().date() - datetime.timedelta(days=window_days))
         return await self._count_in_window(
             """
             SELECT COUNT(*) AS cnt

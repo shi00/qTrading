@@ -87,7 +87,7 @@ def SliderInput(
     ft.use_effect(lambda: set_draft(formatter(value)), [value])
 
     if divisions is None:
-        divisions = int(round((max_val - min_val) / step)) if step > 0 else None
+        divisions = round((max_val - min_val) / step) if step > 0 else None  # RUF046: round 已返回 int，无需再 int()
 
     def _on_slider_change(e: ft.ControlEvent) -> None:
         raw = get_control_value(e.control, ft.Slider) if e and e.control else value

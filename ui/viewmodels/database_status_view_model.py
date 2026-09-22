@@ -191,7 +191,7 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
             logger.warning("[DatabaseStatusVM] unsupported platform for opening dir: %s", system)
             return
         try:
-            subprocess.Popen(cmd_args + [path])
+            subprocess.Popen([*cmd_args, path])
         except OSError as exc:
             logger.error(
                 "[DatabaseStatusVM] failed to open file manager for %s: %s",

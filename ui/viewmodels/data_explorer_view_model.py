@@ -18,6 +18,7 @@ from utils.error_classifier import (
 )
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.thread_pool import TaskType, ThreadPoolManager
+from utils.time_utils import get_now
 
 from data.persistence.data_explorer_query_client import DataExplorerQueryClient
 from data.sync.base import safe_error  # F5-P3: R9 异常脱敏
@@ -249,17 +250,17 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             # trade_date stored as YYYYMMDD string (8 digits) or int
             date_str = str(raw)
             if len(date_str) == 8 and date_str.isdigit():
-                latest = datetime.datetime.strptime(date_str, "%Y%m%d").date()
+                latest = datetime.datetime.strptime(date_str, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
                 formatted = latest.strftime("%Y-%m-%d")
             else:
                 # Already YYYY-MM-DD or other format — use as-is
                 formatted = date_str
                 try:
-                    latest = datetime.datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+                    latest = datetime.datetime.strptime(date_str[:10], "%Y-%m-%d").date()  # noqa: DTZ007  YYYY-MM-DD 业务日期字符串无时区语义
                 except ValueError:
                     self._set_state(data_latest_date=date_str, data_lag_days=0)
                     return
-            today = datetime.date.today()
+            today = get_now().date()
             lag = max(0, (today - latest).days)
             self._set_state(data_latest_date=formatted, data_lag_days=lag)
         except asyncio.CancelledError:

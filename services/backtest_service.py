@@ -130,7 +130,7 @@ class BacktestService:
                 "[BacktestService] Failed to persist backtest result (%s): %s",
                 exc_info=True,
             )
-            new_warnings = list(result.data_warnings) + [f"persist_failed: {sanitized}"]
+            new_warnings = [*list(result.data_warnings), f"persist_failed: {sanitized}"]
             return result.with_warnings(new_warnings)
 
     def _create_engine(self, config: BacktestConfig) -> Any:

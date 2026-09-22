@@ -314,7 +314,7 @@ class EmbeddedPostgresService:
 
         self._svc_logger.info("starting sidecar: %s", self._sidecar_binary)
         # 文件句柄需保留到 stop_sync() 关闭，不能用 with；SIM115 不适用
-        self._stderr_file = open(  # noqa: SIM115
+        self._stderr_file = open(  # noqa: SIM115  句柄生命周期跨方法（stop_sync 关闭），不能用 with
             self._log_dir / "sidecar.stderr.log", "a", encoding="utf-8"
         )
 
@@ -440,9 +440,7 @@ class EmbeddedPostgresService:
         def _reader() -> None:
             try:
                 # 文件句柄需保留到线程结束，不能用 with；SIM115 不适用
-                with open(  # noqa: SIM115
-                    stdout_log_path, "a", encoding="utf-8"
-                ) as log_file:
+                with open(stdout_log_path, "a", encoding="utf-8") as log_file:
                     while True:
                         line = stdout.readline()
                         if not line:

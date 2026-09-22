@@ -484,7 +484,7 @@ class StockAnalysisService:
             )
             return {"error": str(e), "score": None, "ai_status": "failed"}
         budget_res = _apply_context_budget(sections, budget_tokens)
-        user_prompt, surviving_names = budget_res
+        _user_prompt, surviving_names = budget_res  # 解构仅需 surviving_names（user_prompt 由下游 section_map 重派生）
         section_map = budget_res.section_map
 
         # 预算后按存活 section 重派生 labels/available_data（R-A3/R-B3）：

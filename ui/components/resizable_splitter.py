@@ -30,7 +30,7 @@ class _DragCache:
     ``use_ref(lambda: None)`` 推断为 ``MutableRef[None]`` 无法持 int, 故用容器类。
     """
 
-    __slots__ = ("width", "last_time")
+    __slots__ = ("last_time", "width")
 
     def __init__(self) -> None:
         self.width: int | None = None
@@ -80,7 +80,7 @@ def ResizableSplitter(
     """
     width, set_width = ft.use_state(default_width)
     hovered, set_hovered = ft.use_state(False)
-    is_collapsed, set_is_collapsed = ft.use_state(collapsed)
+    is_collapsed, _set_is_collapsed = ft.use_state(collapsed)  # setter 未直接使用（展开/收起经 state.callbacks 触发）
     # use_ref 缓存拖拽中的即时宽度 + 节流时间戳 (缓存数值非命令式实例, 符合声明式红线)
     drag = ft.use_ref(_DragCache)
     # use_ref.current 类型为 T | None (MutableRef 构造允许 None), 但 factory 在

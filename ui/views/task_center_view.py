@@ -357,17 +357,17 @@ def TaskCenterView(active: bool = True) -> ft.Container:
         UILogger.log_action("TaskCenterView", "Click", f"btn_details | task_id={task_id}")
         set_details_task_id(task_id)  # pragma: no cover - 详情对话框交互仅集成测试覆盖
 
-    def _on_close_details(e: ft.ControlEvent) -> None:  # noqa: ARG001
+    def _on_close_details(e: ft.ControlEvent) -> None:
         set_details_task_id(None)  # pragma: no cover - 关闭对话框交互仅集成测试覆盖
 
-    def _on_clear(e: ft.ControlEvent) -> None:  # noqa: ARG001
+    def _on_clear(e: ft.ControlEvent) -> None:
         UILogger.log_action("TaskCenterView", "Click", "btn_clear_finished")
         vm.clear_finished()
 
-    def _on_prev(e: ft.ControlEvent) -> None:  # noqa: ARG001
+    def _on_prev(e: ft.ControlEvent) -> None:
         vm.go_prev()
 
-    def _on_next(e: ft.ControlEvent) -> None:  # noqa: ARG001
+    def _on_next(e: ft.ControlEvent) -> None:
         vm.go_next()
 
     # --- Pagination slice ---

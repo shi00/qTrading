@@ -13,4 +13,4 @@ from data.external.tushare.api_wrapper import TushareApiWrapper
 from data.external.tushare.capability_probe import CapabilityProbeService
 from data.external.tushare.rate_limiter import TushareRateLimiter
 
-__all__ = ["TushareRateLimiter", "CapabilityProbeService", "TushareApiWrapper"]
+__all__ = ["CapabilityProbeService", "TushareApiWrapper", "TushareRateLimiter"]

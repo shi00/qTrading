@@ -118,7 +118,7 @@ class AIStreamMixin:
         card = StreamCard(name=name, is_analyzing=is_analyzing)
         # Task 8.4: 检测截断 — 新增卡片导致超出 _MAX_LOG_CARDS 时标记 truncated
         truncated = len(self._state.stream_cards) + 1 > _MAX_LOG_CARDS
-        new_cards = (self._state.stream_cards + (card,))[-_MAX_LOG_CARDS:]
+        new_cards = ((*self._state.stream_cards, card))[-_MAX_LOG_CARDS:]
         self._set_state(
             stream_cards=new_cards,
             stream_cards_truncated=self._state.stream_cards_truncated or truncated,
@@ -375,7 +375,7 @@ class AIStreamMixin:
         score = row_data.get("ai_score", 0)
         thinking = str(row_data.get("thinking", ""))
         entry = LogEntry(name=name, score=score, thinking=thinking)
-        new_logs = self._state.logs + (entry,)
+        new_logs = (*self._state.logs, entry)
 
         # Task 3.1: 终结并发模式占位卡 (concurrency>1, is_analyzing=True).
         # _on_card_start_adapter 在并发模式创建 is_analyzing=True 占位卡; 结果到达时
@@ -662,13 +662,14 @@ class AIStreamMixin:
                     sd = context.get("screening_data")
                     candidate_total = len(sd) if sd is not None else 0
                     if candidate_total > len(result_df):
-                        strategy_warnings = strategy_warnings + (
+                        strategy_warnings = (
+                            *strategy_warnings,
                             Message("screener_param_impact", {"before": candidate_total, "after": len(result_df)}),
                         )
                     # UX-02: 整批 AI 分析失败占比超阈值时, 向既有 D3-4 警告通道追加
                     # 横幅 Message (View 零改动, 复用结果区上方横幅渲染)。
                     if (ai_failed_msg := _build_ai_failed_banner_message(result_df)) is not None:
-                        strategy_warnings = strategy_warnings + (ai_failed_msg,)
+                        strategy_warnings = (*strategy_warnings, ai_failed_msg)
                     # 成功路径显式清空态原因 (防上一轮「无匹配」残留污染本轮),
                     # 本轮有结果由表格承载, 空态原因仅空结果时设置 (下方分支)。
                     self._update_pagination(page_no=1, warnings=strategy_warnings, empty_message=None)

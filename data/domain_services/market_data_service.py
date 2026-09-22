@@ -46,7 +46,7 @@ class MarketDataService:
 
     # 刷新间隔（秒）
     # 指数配置：代码 -> I18n Key
-    INDICES_CONFIG = [
+    INDICES_CONFIG: typing.ClassVar[list] = [
         ("000001.SH", "home_index_sh"),
         ("399001.SZ", "home_index_sz"),
         ("399006.SZ", "home_index_cyb"),

@@ -19,7 +19,6 @@ Task 7.1: 恢复入口改为 FilePicker 选文件; 未选文件时显示「查�
 """
 
 import logging
-from datetime import datetime
 from pathlib import Path
 
 import flet as ft
@@ -33,6 +32,7 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.backup_restore_view_model import BackupRestoreViewModel
 from utils.sanitizers import DataSanitizer
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def _generate_default_backup_path() -> Path:
     避免 CWD 不可预测导致备份文件丢失。备份目录不存在时尝试创建；
     创建失败时 fall back 到 ``Path.cwd()`` 并记 warning（不阻塞用户操作）。
     """
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = get_now().strftime("%Y%m%d-%H%M%S")
     backups_dir = Path(platformdirs.user_data_dir("qTrading")) / "backups"
     try:
         backups_dir.mkdir(parents=True, exist_ok=True)
@@ -68,7 +68,7 @@ def _render_message(msg: Message | None) -> str:
 def _on_backup_click_factory(vm: BackupRestoreViewModel) -> ft.ControlEventHandler | None:
     """Create on_click handler for backup button — submits vm.start_backup."""
 
-    def _on_backup_click(e: ft.ControlEvent) -> None:  # noqa: ARG001
+    def _on_backup_click(e: ft.ControlEvent) -> None:
         try:
             page = ft.context.page
             if page is not None:
@@ -131,7 +131,7 @@ def _on_restore_wizard_click_factory(
 def _on_confirm_restore_click_factory(vm: BackupRestoreViewModel) -> ft.ControlEventHandler | None:
     """Create on_click handler for confirm restore button — submits vm.confirm_restore."""
 
-    def _on_confirm_restore_click(e: ft.ControlEvent) -> None:  # noqa: ARG001
+    def _on_confirm_restore_click(e: ft.ControlEvent) -> None:
         try:
             page = ft.context.page
             if page is not None:
@@ -145,7 +145,7 @@ def _on_confirm_restore_click_factory(vm: BackupRestoreViewModel) -> ft.ControlE
 def _on_cancel_restore_click_factory(vm: BackupRestoreViewModel) -> ft.ControlEventHandler | None:
     """Create on_click handler for cancel restore button — calls vm.cancel_restore (sync)."""
 
-    def _on_cancel_restore_click(e: ft.ControlEvent) -> None:  # noqa: ARG001
+    def _on_cancel_restore_click(e: ft.ControlEvent) -> None:
         vm.cancel_restore()
 
     return safe_on_click(_on_cancel_restore_click)
@@ -154,7 +154,7 @@ def _on_cancel_restore_click_factory(vm: BackupRestoreViewModel) -> ft.ControlEv
 def _on_dismiss_offline_guidance_click_factory(vm: BackupRestoreViewModel) -> ft.ControlEventHandler | None:
     """Create on_click handler for dismiss offline guidance button — calls vm.dismiss_offline_guidance (sync)."""
 
-    def _on_dismiss_offline_guidance_click(e: ft.ControlEvent) -> None:  # noqa: ARG001
+    def _on_dismiss_offline_guidance_click(e: ft.ControlEvent) -> None:
         vm.dismiss_offline_guidance()
 
     return safe_on_click(_on_dismiss_offline_guidance_click)

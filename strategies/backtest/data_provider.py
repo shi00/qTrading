@@ -131,7 +131,7 @@ class BacktestDataProvider:
                 return d
             if isinstance(d, str):
                 clean_d = d.replace("-", "").strip()
-                return datetime.strptime(clean_d, "%Y%m%d").date()
+                return datetime.strptime(clean_d, "%Y%m%d").date()  # noqa: DTZ007  归一化后的 YYYYMMDD 业务日期字符串无时区语义
             return d
 
         try:

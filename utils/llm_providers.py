@@ -504,7 +504,7 @@ def get_recent_selections() -> list[dict]:
 
     try:
         config = ConfigHandler.load_config()
-    except Exception as ex:  # noqa: BLE001 -- 读取失败降级为空列表，不阻断 UI
+    except Exception as ex:
         logger.debug("[llm_providers] read recent selections failed: %s", ex)
         return []
     # config 为用户可编辑文件（trust boundary）：损坏/非字典降级为空列表，不崩 UI。
@@ -549,7 +549,7 @@ def record_selection(provider: str, model: str) -> None:
         current = current[:RECENT_SELECTIONS_LIMIT]
         try:
             ConfigHandler.save_config({_LLM_RECENT_SELECTIONS_KEY: current})
-        except Exception as ex:  # noqa: BLE001 -- 写失败仅降级丢回记，不阻断保存主流程
+        except Exception as ex:
             logger.debug("[llm_providers] record recent selection failed: %s", ex)
 
 
@@ -577,7 +577,7 @@ def get_model_info(provider_id: str, model_id: str) -> dict:
             if model["id"] == model_id:
                 context = int(model.get("context", 0))
                 break
-    except Exception as ex:  # noqa: BLE001 -- litellm 不可用时走配置覆盖/0，不崩调用方
+    except Exception as ex:
         logger.debug("[llm_providers] get_model_info litellm lookup failed: %s", ex)
 
     if context == 0:
@@ -589,7 +589,7 @@ def get_model_info(provider_id: str, model_id: str) -> dict:
             cmc = llm_config.get("custom_model_contexts", {})
             if isinstance(cmc, dict) and model_id in cmc.get(provider_id, {}):
                 context = int(cmc[provider_id][model_id] or 0)
-        except Exception as ex:  # noqa: BLE001 -- 配置读取失败保持 0（R21 诚实呈现），不崩调用方
+        except Exception as ex:
             logger.debug("[llm_providers] get_model_info config lookup failed: %s", ex)
 
     return {"id": model_id, "name": model_id, "context": context}

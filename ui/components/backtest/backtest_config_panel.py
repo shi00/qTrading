@@ -36,6 +36,7 @@ from ui.components.flet_type_helpers import (
 )
 from ui.components.slider_input import SliderInput
 from ui.i18n import I18n, get_observable_state
+from utils.time_utils import get_now
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
@@ -183,7 +184,7 @@ def BacktestConfigPanel(
     ft.use_state(get_observable_state)
 
     # --- UI state (pure UI state, no VM) ---
-    today = date.today()
+    today = get_now().date()
     one_year_ago = today - timedelta(days=365)
 
     start_date, set_start_date = ft.use_state(one_year_ago)

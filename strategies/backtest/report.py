@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
 from core.i18n import I18n
 from strategies.backtest.config import BacktestResult
 from strategies.backtest.metrics import PROFIT_THRESHOLD
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ class BacktestReport:
         return "\n".join(lines)
 
     def to_markdown(self, result: BacktestResult) -> str:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = get_now().strftime("%Y-%m-%d %H:%M:%S")
         sections = [
             f"# {I18n.get('report_title', strategy_name=result.strategy_name)}",
             f"> {I18n.get('report_generated_at', time=now, run_id=result.run_id)}",

@@ -114,7 +114,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 else:
                     result.added += count
                     if not self._cancelled:
-                        qe_date = datetime.datetime.strptime(qe, "%Y%m%d").date()
+                        qe_date = datetime.datetime.strptime(qe, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
                         await self.context.cache.sync_dao.update_sync_status(
                             "stk_holdernumber",
                             qe_date,
@@ -130,7 +130,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 else:
                     result.added += count
                     if not self._cancelled:
-                        qe_date = datetime.datetime.strptime(qe, "%Y%m%d").date()
+                        qe_date = datetime.datetime.strptime(qe, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
                         await self.context.cache.sync_dao.update_sync_status(
                             "top10_holders",
                             qe_date,
@@ -255,7 +255,7 @@ class HolderSyncStrategy(ISyncStrategy):
             logger.warning(
                 "[HolderSync] ⛔ Permission denied for stk_holdernumber",
             )
-            qe_date = datetime.datetime.strptime(enddate, "%Y%m%d").date()
+            qe_date = datetime.datetime.strptime(enddate, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
             await self.context.cache.sync_dao.update_sync_status(
                 "stk_holdernumber",
                 qe_date,
@@ -588,7 +588,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 table_name,
             )
             if end_date:
-                qe_date = datetime.datetime.strptime(end_date, "%Y%m%d").date()
+                qe_date = datetime.datetime.strptime(end_date, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
                 await self.context.cache.sync_dao.update_sync_status(
                     table_name,
                     qe_date,

@@ -89,7 +89,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
     Strategy for syncing historical market data (Quotes, Indicators, MoneyFlow, etc.)
     """
 
-    SYNCED_TABLES = [
+    SYNCED_TABLES: typing.ClassVar[list] = [
         "daily_quotes",
         "daily_indicators",
         "moneyflow_daily",
@@ -345,7 +345,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     return d
                 if isinstance(d, str):
                     try:
-                        return datetime.datetime.strptime(d, "%Y%m%d").date()
+                        return datetime.datetime.strptime(d, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
                     except ValueError:
                         return d
                 return d

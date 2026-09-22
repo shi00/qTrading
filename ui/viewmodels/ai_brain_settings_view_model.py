@@ -447,7 +447,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             )
         except asyncio.CancelledError:
             raise  # R2: 必须传播
-        except Exception as ex:  # noqa: BLE001 -- 读取失败降级为 None, 不阻断 UI
+        except Exception as ex:
             logger.debug(
                 "[AIBrainSettingsVM] Failed to load month AI cost: %s",
                 ex,

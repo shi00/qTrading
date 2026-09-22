@@ -184,11 +184,13 @@ class EmbeddedPgMaintenanceService:
         """
         argv = await asyncio.to_thread(self._build_dump_argv, output_path)
         # CON-04: dump 是可安全中断的备份类命令，注册句柄供 request_cancel() 停机终止
-        exit_code, stdout, stderr = await self._run_sidecar(argv, cancel_allowed=True)
+        exit_code, _stdout, stderr = await self._run_sidecar(
+            argv, cancel_allowed=True
+        )  # 仅需 exit_code/stderr 判定失败，stdout 忽略（_stdout 下划线已豁免 RUF059）
         if exit_code != 0:
             self._raise_for_exit_code(exit_code, stderr, "dump")
         path = Path(output_path)
-        file_size = path.stat().st_size if path.exists() else 0
+        file_size = path.stat().st_size if path.exists() else 0  # noqa: ASYNC240  # dump 完成后一次性 stat/exists 探测（非交互热路径）
         return DumpResult(output_path=str(output_path), file_size=file_size, exit_code=exit_code)
 
     @log_async_operation(

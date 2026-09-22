@@ -36,12 +36,13 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import config
 from utils.error_classifier import log_classified
 from utils.singleton_registry import register_singleton
+from utils.time_utils import get_now
 
 if TYPE_CHECKING:
     pass
@@ -166,7 +167,7 @@ class EgressAudit:
     ) -> None:
         """记录一次 LLM 云端外发元数据。审计失败不阻断 AI 主流程。"""
         rec = EgressRecord(
-            timestamp=datetime.now(),
+            timestamp=get_now(),
             destination=destination,
             category=category,
             payload_size_bytes=int(payload_size_bytes),
@@ -187,7 +188,7 @@ class EgressAudit:
             for cb in listeners_snapshot:
                 try:
                     cb(notified_count)
-                except Exception:  # noqa: BLE001 -- 监听回调隔离, 不阻断审计/落盘
+                except Exception:
                     logger.debug("[EgressAudit] listener callback failed", exc_info=True)
 
         from utils.thread_pool import TaskType, ThreadPoolManager
@@ -197,7 +198,7 @@ class EgressAudit:
             await ThreadPoolManager().run_async(TaskType.IO, self._append_jsonl, rec)
         except asyncio.CancelledError:
             raise  # R2: 必须传播
-        except Exception as exc:  # noqa: BLE001 -- 审计降级不阻断 AI 主流程
+        except Exception as exc:
             log_classified(
                 logger,
                 exc,
@@ -252,8 +253,8 @@ class EgressAudit:
 
     def _scan_aggregates(self) -> tuple[dict[str, tuple[int, int]], dict[str, tuple[int, int]]]:
         """同步扫描 JSONL 文件聚合今日/本月（在 IO 线程池执行）。"""
-        today_prefix = date.today().isoformat()  # "2026-09-14"
-        month_prefix = date.today().strftime("%Y-%m")
+        today_prefix = get_now().date().isoformat()  # "2026-09-14"
+        month_prefix = get_now().strftime("%Y-%m")
         today_map: dict[str, tuple[int, int]] = {}
         month_map: dict[str, tuple[int, int]] = {}
         path = self._file_path()

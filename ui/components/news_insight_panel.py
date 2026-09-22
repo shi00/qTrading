@@ -161,7 +161,7 @@ def _build_event_card(event: RiskEvent, is_expanded: bool, on_toggle) -> ft.Cont
             ]
             sections.append(
                 ft.Column(
-                    [ft.Text(I18n.get("news_insight_event_quotes"), size=AppStyles.FONT_SIZE_BODY_SM)] + quote_rows,
+                    [ft.Text(I18n.get("news_insight_event_quotes"), size=AppStyles.FONT_SIZE_BODY_SM), *quote_rows],
                     spacing=2,
                 )
             )

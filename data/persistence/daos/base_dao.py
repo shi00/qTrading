@@ -564,11 +564,9 @@ class BaseDao:
         self._check_engine(context="write")
 
         if params:
-            params = (
-                tuple(self._convert_param_for_asyncpg(p) for p in params)
-                if not isinstance(params, tuple)
-                else tuple(self._convert_param_for_asyncpg(p) for p in params)
-            )
+            params = tuple(
+                self._convert_param_for_asyncpg(p) for p in params
+            )  # RUF034/SIM: 参数恒为 tuple 或 list，统一转换
 
         await self._wait_maintenance_guard(context="write")
 

@@ -10,7 +10,7 @@ from collections.abc import Callable
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 
 from core.i18n import Message
@@ -111,9 +111,9 @@ class AppTask:
     """
 
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:12])
-    name: Message | str = Message("task_name_unknown")
-    task_type: Message | str = Message("task_type_system")
-    description: Message | str = Message("task_status_queued")
+    name: Message | str = field(default_factory=lambda: Message("task_name_unknown"))
+    task_type: Message | str = field(default_factory=lambda: Message("task_type_system"))
+    description: Message | str = field(default_factory=lambda: Message("task_status_queued"))
     status: TaskStatus = TaskStatus.QUEUED
     progress: float = 0.0  # 0.0 to 1.0
     cancellable: bool = False
@@ -168,7 +168,7 @@ class TaskManager:
     # 类属性而非模块级 dict，便于 _reset_singleton 清理以满足 R7 测试隔离。
     # 模块在 import 时自注册（见 services/task_rebuild.py），确保 init_db 反序列化
     # 前 inventory 已就绪。未注册的任务维持现状（不显示重试按钮，语义不变）。
-    _RETRYABLE_FACTORIES: dict[str, Callable] = {}
+    _RETRYABLE_FACTORIES: ClassVar[dict[str, Callable]] = {}
 
     @classmethod
     def register_retryable_factory(cls, key: str, factory: Callable) -> None:
@@ -749,7 +749,7 @@ class TaskManager:
         task = self._tasks.get(task_id)
         if task is None or task.status not in TERMINAL_STATUSES:
             return
-        completed_time = task.completed_at or datetime.datetime.min
+        completed_time = task.completed_at or datetime.datetime.min  # noqa: DTZ901  # 哨兵边界（None 用 min），仅作有序历史排序键，未参与 tz-aware 算术
         self._finished_order[task_id] = completed_time
         self._finished_order.move_to_end(task_id)
         while len(self._finished_order) > self._MAX_FINISHED_HISTORY:

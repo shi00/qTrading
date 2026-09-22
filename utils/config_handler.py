@@ -1,4 +1,4 @@
-# ruff: noqa: F401  # re-export facade: 多个模块级名字仅供领域模块（cfg.<name>）与单测 mock 读取，此处定义即"用"
+# re-export facade: 多个模块级名字仅供领域模块（cfg.<name>）与单测 mock 读取，此处定义即"用"
 import contextlib
 import contextvars
 import json
@@ -582,10 +582,9 @@ class ConfigHandler:
         return app_prefs.set_market_data_poll_interval(seconds)
 
 
-# noqa: E402 — 领域模块在模块级 ``cfg.ConfigHandler.DEFAULT_CONFIG`` 上求值，
 # 必须在本 facade 的 ``ConfigHandler`` 定义之后再导入，以避免循环导入
 # （domain → utils.config_handler；见 utils/config/*.py 顶部 docstring）。
-from utils.config import app_prefs, db, llm, secrets, storage, sync  # noqa: E402
+from utils.config import app_prefs, db, llm, secrets, storage, sync
 
 
 def __getattr__(name: str):
