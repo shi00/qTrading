@@ -1772,6 +1772,9 @@ def _render_agents_invariant_lines() -> list[str]:
     """从 redlines.yml 渲染 AGENTS.md 最小安全集生成区块内容（不含包裹标记）。
 
     取 `rule_type: INVARIANT` 的红线（按 yml 顺序）+ 追加 R18（WORKFLOW，影响工作区整洁）。
+    行格式 `- R<id>：<title> — <description>`：把判定条件并入跨工具入口，使不自动加载
+    CLAUDE.md 的工具也能拿到可执行的最小安全集（GOV-01）。INVARIANT 与 R18 条目在
+    redlines.yml 均有 description 字段（缺字段即刻 KeyError 暴露，不做静默回退）。
     """
     import yaml  # 延迟 import: PyYAML 是 transitive 依赖, 避免未安装时影响其他检查
 
@@ -1782,11 +1785,11 @@ def _render_agents_invariant_lines() -> list[str]:
         rule_type = entry.get("rule_type")
         if rule_type != "INVARIANT":
             continue
-        lines.append(f"- {entry['id']}：{entry['title']}")
+        lines.append(f"- {entry['id']}：{entry['title']} — {entry['description']}")
     # R18 为 WORKFLOW 但影响工作区整洁，显式追加为区块末项
     for entry in redlines:
         if entry.get("id") == "R18":
-            lines.append(f"- R18：{entry['title']}")
+            lines.append(f"- {entry['id']}：{entry['title']} — {entry['description']}")
             break
     return lines
 

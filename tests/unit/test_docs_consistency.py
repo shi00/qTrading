@@ -3174,6 +3174,22 @@ class TestAgentsMdSync:
         ids = [line.removeprefix("- R").split("：")[0] for line in lines]
         assert ids == ["2", "3", "4", "7", "9", "10", "18"], f"红线集合漂移, got: {ids}"
 
+    def test_render_invariant_lines_include_description(self):
+        """渲染行含 redlines.yml 判定条件（GOV-01：不加载 CLAUDE.md 的工具也能得到可执行最小安全集)."""
+        from check_docs_consistency import _render_agents_invariant_lines
+
+        lines = _render_agents_invariant_lines()
+        assert len(lines) == 7, f"应为 7 行, got: {len(lines)}"
+        # R4 描述含「禁 %s / 必须 $1」判定条件
+        r4 = next(ln for ln in lines if ln.startswith("- R4："))
+        assert "%s" in r4 and "$1, $2" in r4, f"R4 行应含判定条件, got: {r4}"
+        # R18 描述含 worktree 隔离要点
+        r18 = next(ln for ln in lines if ln.startswith("- R18："))
+        assert "worktree" in r18, f"R18 行应含判定条件, got: {r18}"
+        # 每行格式统一为 `- R<id>：<title> — <description>`
+        for ln in lines:
+            assert " — " in ln, f"渲染行应含 ' — ' 分隔 description, got: {ln}"
+
     def test_check_agents_md_sync_passes(self):
         """真实 AGENTS.md 生成区块应与 redlines.yml 渲染一致 (无错误)."""
         from check_docs_consistency import check_agents_md_sync
