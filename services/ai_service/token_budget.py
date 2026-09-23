@@ -1,7 +1,8 @@
 """AIService Token 预算子模块（review01-A5b-1）。
 
 自 ``services/ai_service.py`` 移出的 token 估算 / 模型上下文窗口解析 / 全局预算裁剪，
-承载 tiktoken 模块级缓存（R7 测试隔离经 ``_reset_token_estimator``）。
+优先经 ``litellm.token_counter(model=...)`` 按当前模型挑选对应 tokenizer 精确计数（oss-A3/C2），
+模块级失败标志（R7 测试隔离经 ``_reset_token_estimator``）。
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ DEFAULT_CONTEXT_WINDOW = 128_000
 CONTEXT_RESERVE_TOKENS = 8000
 # 输出预留 token：为模型生成分析报告 JSON 结论预留基础空间（D5-4）。
 OUTPUT_RESERVE_TOKENS = 4000
-# 回退估算分母：tiktoken 不可用/离线时分段估算（CJK 1:1，非 CJK 4:1，Issue D5-8）。
+# 回退估算分母：litellm.token_counter 不可用/离线时分段估算（CJK 1:1，非 CJK 4:1，Issue D5-8）。
 CHAR_FALLBACK_NON_CJK_DIV = 4
 
 # CJK 字符集区间定义（含基本汉字、扩展区、CJK标点与全角字符）
@@ -41,9 +42,9 @@ _CJK_RANGES = (
 
 
 def _estimate_tokens_fallback(text: str) -> int:
-    """tiktoken 不可用时的分段保守估算（Issue D5-8）。
+    """token 计数不可用时的分段保守估算（Issue D5-8，oss-A3 保留作离线兜底）。
 
-    cl100k_base 实测：
+    cl100k_base 实测（启发式分母来源，用于不可用时的保守估算）：
     - CJK 字符（含汉字与全角标点）：约 1 字符/token（高估约 1.08 倍，保守安全）。
     - 非 CJK（拉丁英文、数字、ASCII 符号）：约 4 字符/token。
     历史实现采用单一分母(=1)对纯英文高估 5.56 倍，导致 token 预算被过度裁剪。
@@ -60,42 +61,40 @@ def _estimate_tokens_fallback(text: str) -> int:
     return cjk_count + non_cjk_tokens
 
 
-_tiktoken_enc = None
-_tiktoken_enc_error = False
+_litellm_token_counter_error = False
 
 
 def _reset_token_estimator() -> None:
-    """清除 tiktoken 模块缓存（测试隔离用，R7 合规）。"""
-    global _tiktoken_enc, _tiktoken_enc_error
-    _tiktoken_enc = None
-    _tiktoken_enc_error = False
+    """清除 token 计数失败标志（测试隔离用，R7 合规）。"""
+    global _litellm_token_counter_error
+    _litellm_token_counter_error = False
 
 
-def _estimate_tokens(text) -> int:
-    """估算文本 token 数（Issue #70, D5-8）。
+def _estimate_tokens(text, model: str | None = None) -> int:
+    """估算文本 token 数（Issue #70, D5-8, oss-A3/C2）。
 
     - None/空文本 → 0
     - 非 str（多模态 list content parts）递归求和其中 str 的 text 部分
-    - 惰性初始化 tiktoken cl100k_base；异常/离线回退 _estimate_tokens_fallback
+    - 优先经 ``litellm.token_counter(model=...)`` 按当前模型挑选对应 tokenizer（A3，替代
+      cl100k_base 硬编码使 C2 消解）；不可用（litellm 未加载/离线/抛异常等）回退
+      ``_estimate_tokens_fallback``（CJK 启发式）
     """
-    global _tiktoken_enc, _tiktoken_enc_error
+    global _litellm_token_counter_error
     if text is None:
         return 0
     if isinstance(text, list):
-        return sum(_estimate_tokens(part.get("text")) for part in text if isinstance(part, dict))
+        return sum(_estimate_tokens(part.get("text"), model) for part in text if isinstance(part, dict))
     if not isinstance(text, str):
         return 0
     if not text:
         return 0
-    if not _tiktoken_enc_error:
+    if not _litellm_token_counter_error:
         try:
-            if _tiktoken_enc is None:
-                import tiktoken
+            import litellm  # type: ignore[import-untyped]  # litellm 无类型存根，惰性加载
 
-                _tiktoken_enc = tiktoken.get_encoding("cl100k_base")
-            return len(_tiktoken_enc.encode(text))
+            return int(litellm.token_counter(model=model or "", text=text))
         except Exception:
-            _tiktoken_enc_error = True
+            _litellm_token_counter_error = True
     return _estimate_tokens_fallback(text)
 
 
@@ -148,7 +147,7 @@ class BudgetResult(tuple):
         return obj
 
 
-def _apply_context_budget(sections: list[tuple], budget_tokens: int) -> BudgetResult:
+def _apply_context_budget(sections: list[tuple], budget_tokens: int, model: str | None = None) -> BudgetResult:
     """全局 Token 预算分配（Issue #70）。
 
     sections: (name, priority, is_truncatable, text, max_chars, min_chars)
@@ -168,7 +167,7 @@ def _apply_context_budget(sections: list[tuple], budget_tokens: int) -> BudgetRe
         cur.append([name, priority, truncatable, text, min_chars])
 
     def _total(secs: list[list]) -> int:
-        return sum(_estimate_tokens(s[3]) for s in secs)
+        return sum(_estimate_tokens(s[3], model) for s in secs)
 
     if _total(cur) <= budget_tokens:
         return BudgetResult(
@@ -187,7 +186,7 @@ def _apply_context_budget(sections: list[tuple], budget_tokens: int) -> BudgetRe
                 _total(cur),
             )
             break
-        target = max(reducible, key=lambda s: (s[1], _estimate_tokens(s[3])))
+        target = max(reducible, key=lambda s: (s[1], _estimate_tokens(s[3], model)))
         new_len = max(target[4], round(len(target[3]) * 0.5))
         target[3] = target[3][:new_len]
         if _total(cur) <= budget_tokens:
@@ -250,13 +249,15 @@ class TokenBudgetService:
             return max(1, primary_context - CONTEXT_RESERVE_TOKENS)
 
         # D5-4：精准扣除 system 消息与不可裁剪固定块
+        # oss-A3：按生效模型（failover primary 优先，否则当前配置模型）选 tokenizer 精确计数。
+        model = primary_override or (llm_config.get("model") if isinstance(llm_config.get("model"), str) else "")
         system_tokens = sum(
-            _estimate_tokens(m.get("content", "")) for m in (system_messages or []) if isinstance(m, dict)
+            _estimate_tokens(m.get("content", ""), model) for m in (system_messages or []) if isinstance(m, dict)
         )
         if isinstance(fixed_blocks, list):
-            fixed_tokens = sum(_estimate_tokens(b) for b in fixed_blocks if b)
+            fixed_tokens = sum(_estimate_tokens(b, model) for b in fixed_blocks if b)
         elif isinstance(fixed_blocks, str):
-            fixed_tokens = _estimate_tokens(fixed_blocks)
+            fixed_tokens = _estimate_tokens(fixed_blocks, model)
         else:
             fixed_tokens = 0
 

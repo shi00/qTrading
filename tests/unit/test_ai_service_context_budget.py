@@ -28,7 +28,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(autouse=True)
 def _reset_estimator():
-    """每个用例重置 tiktoken 模块缓存，避免跨用例污染（R7 测试隔离）。"""
+    """每个用例重置 token 计数失败标志，避免跨用例污染（R7 测试隔离）。"""
     _reset_token_estimator()
     yield
     _reset_token_estimator()
@@ -58,46 +58,47 @@ class TestEstimateTokens:
         total = _estimate_tokens(parts)
         assert total == _estimate_tokens("hello") + _estimate_tokens("world")
 
-    def test_tiktoken_path_used(self):
+    def test_estimate_returns_positive_and_idempotent(self):
         text = "hello world"
         assert _estimate_tokens(text) > 0
         assert _estimate_tokens(text) == _estimate_tokens(text)
 
-    def test_fallback_path_on_tiktoken_error_not_underestimate_cjk(self):
-        """tiktoken 加载失败时回退 len(text)//1，CJK 字符不得被低估（每字至少 1 token）。"""
-        with (
-            patch.object(token_budget, "_tiktoken_enc_error", False),
-            patch(
-                "builtins.__import__",
-                side_effect=ImportError("tiktoken unavailable"),
-            ),
-        ):
+    def test_model_path_uses_litellm_token_counter(self):
+        """oss-A3：正常模型优先走 litellm.token_counter，且透传 model/text。"""
+        with patch("litellm.token_counter", return_value=42) as mock_tc:
+            _reset_token_estimator()
+            assert _estimate_tokens("你好世界", model="deepseek-chat") == 42
+        mock_tc.assert_called_once_with(model="deepseek-chat", text="你好世界")
+
+    def test_fallback_on_token_counter_error_not_underestimate_cjk(self):
+        """token_counter 抛异常时回退启发式，CJK 字符不得被低估（每字至少 1 token）。"""
+        with patch("litellm.token_counter", side_effect=RuntimeError("tokenizer unavailable")):
             _reset_token_estimator()
             cjk = "平安银行股份有限公司"  # 9 个 CJK 字符
-            assert _estimate_tokens(cjk) >= len(cjk)
+            assert _estimate_tokens(cjk, model="deepseek-chat") >= len(cjk)
 
     def test_fallback_caches_error(self):
-        """首次 tiktoken 失败后置 error 标志，后续走回退不再重复尝试。"""
-        with patch("builtins.__import__", side_effect=ImportError("offline")):
+        """首次 token_counter 失败后置 error 标志，后续走回退不再重复尝试。"""
+        with patch("litellm.token_counter", side_effect=RuntimeError("offline")):
             _reset_token_estimator()
-            _estimate_tokens("abc")
-            assert token_budget._tiktoken_enc_error is True
-            # 第二次：即使 import 恢复，仍走回退（error 已缓存，不再触发 import）
-            with patch("builtins.__import__") as mock_imp:
-                assert _estimate_tokens("abc") == 1
-                assert mock_imp.call_count == 0  # error 已缓存，不再 import tiktoken
+            _estimate_tokens("abc", model="m")
+            assert token_budget._litellm_token_counter_error is True
+            # 第二次：即使 token_counter 恢复，仍走回退（error 已缓存，不再调用）
+            with patch("litellm.token_counter") as mock_tc:
+                assert _estimate_tokens("abc", model="m") == 1  # heuristic: (3+3)//4=1
+                mock_tc.assert_not_called()
 
     def test_reset_clears_error_flag(self):
-        with patch("builtins.__import__", side_effect=ImportError("offline")):
+        with patch("litellm.token_counter", side_effect=RuntimeError("offline")):
             _reset_token_estimator()
-            _estimate_tokens("abc")
-            assert token_budget._tiktoken_enc_error is True
+            _estimate_tokens("abc", model="m")
+            assert token_budget._litellm_token_counter_error is True
         _reset_token_estimator()
-        assert token_budget._tiktoken_enc_error is False
+        assert token_budget._litellm_token_counter_error is False
 
 
 class TestTokenEstimatorFallbackCJK:
-    """Issue D5-8: tiktoken 不可用时的分段估算（CJK 1:1，非 CJK 4:1）。"""
+    """Issue D5-8: token 计数回退时的分段估算（CJK 1:1，非 CJK 4:1）。"""
 
     def test_pure_cjk_fallback(self):
         """纯中文文本回退估算按 1 字符 = 1 token 计量。"""
@@ -500,7 +501,12 @@ class TestComputeAnalysisBudgetDeductFixed:
         assert budget == 32000 - expected_deduct
 
     def test_overflow_fixed_blocks_raises(self):
-        """当固定提示词 + 预留输出超过模型上下文上限时，显式抛 AIBudgetError（D5-4）。"""
+        """当固定提示词 + 预留输出超过模型上下文上限时，显式抛 AIBudgetError（D5-4）。
+
+        pytest 环境 litellm 被 conftest mock 成 MagicMock（token_counter 经 int() 得 1），
+        无法直接得到真实的大 token 数；故用副作用模拟真实 tokenizer（≈len//3），
+        使超大提示词必然产生 >8000 的估算 token 数来验证溢出抛错路径。
+        """
         from core.errors import AIBudgetError
 
         svc = self._make_svc(model="model-8k", context=8000)
@@ -509,7 +515,13 @@ class TestComputeAnalysisBudgetDeductFixed:
         # 超大 system prompt（>8000 tokens，必然溢出 8k 窗口）
         sys_msgs = [{"role": "system", "content": "SuperLongPrompt " * 4000}]
 
-        with patch("services.ai_service.ConfigHandler.get_failover_config", return_value=failover):
+        with (
+            patch("services.ai_service.ConfigHandler.get_failover_config", return_value=failover),
+            patch(
+                "litellm.token_counter",
+                side_effect=lambda model, text: len(text) // 3 + 1,
+            ),
+        ):
             with pytest.raises(AIBudgetError) as excinfo:
                 svc._compute_analysis_budget(
                     system_messages=sys_msgs,
