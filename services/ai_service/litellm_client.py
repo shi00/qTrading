@@ -191,6 +191,84 @@ def _check_response_schema_support(model: str) -> bool:
     return False
 
 
+def build_router_model_list(
+    failover_config: dict,
+    failover_credentials: dict[str, dict] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """primary + fallbacks → litellm.Router.model_list（L4，构造期 D8-1 校验）。
+
+    复用 ``LiteLLMClient._build_litellm_params`` 的跨供应商凭据隔离逻辑作为单点解析
+    （零漂移）：每个候选模型以 model_override 形式送入，取回 model/api_key/api_base。
+
+    D8-1 迁移（R9 凭证跨域泄露防护）：
+    - 跨供应商 fallback 缺专属 key 时该调用抛 ``AIConfigError``，此处捕获后**排除该项**，
+      记入返回的 ``excluded`` 清单（绝不静默以全局 key 回退，也不连坐 primary —
+      primary 永不因 fallback 配置缺陷中断）。
+    - primary 构造失败（缺 model / 无 key）向上传播：云端口已由 ``is_cloud_available``
+      前置把关，primary 缺失属程序错误，不可静默丢弃。
+
+    Returns:
+        (model_list, excluded):
+        - model_list: ``[{"model_name": str, "litellm_params": {...}}]``，
+          每项 litellm_params 含 model/api_key/api_base（Azure 含 api_version）。
+        - excluded: 因缺专属 key 被排除的 "provider/model" 字符串列表（供调用方 warning）。
+    """
+    if failover_credentials is None:
+        failover_credentials = {}
+
+    primary = failover_config.get("primary", "")
+    fallbacks = failover_config.get("fallbacks", []) or []
+    primary_config = failover_config.get("primary_config") or {}
+
+    model_list: list[dict] = []
+    excluded: list[str] = []
+
+    def _resolve(candidate: str, *, is_primary: bool) -> dict:
+        """单个候选模型 → litellm_params（经 _build_litellm_params 单点解析）。"""
+        # 空 messages：_build_litellm_params 只解析 provider/model/凭据，不消耗消息内容
+        return LiteLLMClient._build_litellm_params(
+            primary_config,
+            messages=[],
+            model_override=candidate if not is_primary else None,
+            failover_credentials=failover_credentials,
+        )
+
+    if primary:
+        params = _resolve(primary, is_primary=True)
+        model_list.append(
+            {
+                "model_name": primary,
+                "litellm_params": {
+                    "model": params.get("model"),
+                    "api_key": params.get("api_key"),
+                    "api_base": params.get("api_base"),
+                },
+            }
+        )
+
+    for fb in fallbacks:
+        if not fb:
+            continue
+        try:
+            params = _resolve(fb, is_primary=False)
+        except AIConfigError:
+            # D8-1：缺专属 key → 排除该项，不静默回退全局 key；不阻断 primary 与其他 fallback
+            excluded.append(fb)
+            continue
+        model_list.append(
+            {
+                "model_name": fb,
+                "litellm_params": {
+                    "model": params.get("model"),
+                    "api_key": params.get("api_key"),
+                    "api_base": params.get("api_base"),
+                },
+            }
+        )
+
+    return model_list, excluded
+
+
 class LiteLLMClient:
     """LiteLLM 云端 LLM 调用子模块（review01-A5b-2）。
 

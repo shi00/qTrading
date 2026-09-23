@@ -729,6 +729,92 @@ class TestUnifiedFailoverErrorClassification:
                 assert call_count == 2, "空字符串 httpx.ConnectError 应切卡"
 
 
+class TestBuildRouterModelList:
+    """L4: build_router_model_list 纯函数 — primary+fallbacks → Router.model_list。
+
+    构造期执行 D8-1 凭据跨域校验：跨供应商 fallback 缺专属 key 时**排除该项**并返回
+    excluded 清单（不静默继续、不连坐 primary —— primary 永不因 fallback 配置缺陷中断）。
+    """
+
+    def _primary_cfg(self, provider="deepseek", model="deepseek-v4-flash"):
+        return {
+            "provider": provider,
+            "model": model,
+            "api_key": "sk-primary-key",
+            "base_url": "https://api.deepseek.com",
+        }
+
+    def test_primary_only_when_no_fallbacks(self):
+        from services.ai_service.litellm_client import build_router_model_list
+
+        failover = {"primary": "deepseek/deepseek-v4-flash", "fallbacks": [], "primary_config": self._primary_cfg()}
+        model_list, excluded = build_router_model_list(failover)
+        assert excluded == []
+        assert len(model_list) == 1
+        item = model_list[0]
+        assert item["model_name"] == "deepseek/deepseek-v4-flash"
+        assert item["litellm_params"]["model"] == "deepseek/deepseek-v4-flash"
+        assert item["litellm_params"]["api_key"] == "sk-primary-key"
+        assert item["litellm_params"]["api_base"] == "https://api.deepseek.com"
+
+    def test_same_provider_fallback_uses_primary_key(self):
+        from services.ai_service.litellm_client import build_router_model_list
+
+        failover = {
+            "primary": "deepseek/deepseek-v4-flash",
+            "fallbacks": ["deepseek/deepseek-v4-pro"],
+            "primary_config": self._primary_cfg(),
+        }
+        model_list, excluded = build_router_model_list(failover, failover_credentials={})
+        assert excluded == []
+        assert len(model_list) == 2
+        assert model_list[1]["model_name"] == "deepseek/deepseek-v4-pro"
+        # 同供应商 fallback 复用主配置 key（与 _build_litellm_params 语义一致）
+        assert model_list[1]["litellm_params"]["api_key"] == "sk-primary-key"
+
+    def test_cross_provider_fallback_uses_dedicated_key(self):
+        from services.ai_service.litellm_client import build_router_model_list
+
+        failover = {
+            "primary": "deepseek/deepseek-v4-flash",
+            "fallbacks": ["qwen/qwen-max"],
+            "primary_config": self._primary_cfg(),
+        }
+        creds = {"qwen": {"api_key": "sk-qwen-key", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"}}
+        model_list, excluded = build_router_model_list(failover, failover_credentials=creds)
+        assert excluded == []
+        assert len(model_list) == 2
+        fb = model_list[1]
+        assert fb["litellm_params"]["api_key"] == "sk-qwen-key"
+        assert fb["litellm_params"]["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    def test_cross_provider_missing_key_excluded_not_raise(self):
+        """D8-1 迁移：跨供应商 fallback 缺专属 key 时排除该项，不抛错、不连坐 primary。"""
+        from services.ai_service.litellm_client import build_router_model_list
+
+        failover = {
+            "primary": "deepseek/deepseek-v4-flash",
+            "fallbacks": ["qwen/qwen-max", "openai/gpt-4o"],
+            "primary_config": self._primary_cfg(),
+        }
+        creds = {"qwen": {"api_key": "sk-qwen-key", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"}}
+        model_list, excluded = build_router_model_list(failover, failover_credentials=creds)
+        # qwen 有 key 保留、openai 缺 key 被排除
+        assert len(model_list) == 2
+        assert [m["model_name"] for m in model_list] == ["deepseek/deepseek-v4-flash", "qwen/qwen-max"]
+        assert excluded == ["openai/gpt-4o"]
+
+    def test_primary_string_without_provider_prefix(self):
+        from services.ai_service.litellm_client import build_router_model_list
+
+        # primary 无 provider 前缀时，复用 _build_litellm_params 的 litellm_prefix 补全
+        # （与 test_no_override_uses_primary_config 行为一致：model = "deepseek/deepseek-v4-flash"）
+        failover = {"primary": "deepseek-v4-flash", "fallbacks": [], "primary_config": self._primary_cfg()}
+        model_list, excluded = build_router_model_list(failover)
+        assert excluded == []
+        assert model_list[0]["litellm_params"]["model"] == "deepseek/deepseek-v4-flash"
+
+
 class TestCrossProviderFailoverLogWording:
     """Issue D5-9: 跨供应商 failover 无专属 key 时的警告日志与实际参数行为。"""
 
