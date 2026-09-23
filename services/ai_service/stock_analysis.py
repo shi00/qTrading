@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -46,6 +47,18 @@ STRATEGY_CONTEXT_MAX_LEN = 1600
 # analyze_stock 中新闻/概念列表截断长度
 NEWS_LIST_LIMIT = 5
 CONCEPTS_LIMIT = 8
+
+
+def _news_date_label(item: dict) -> str:
+    """新闻日期标签（LLM prompt 用）：UTC naive datetime → YYYY-MM-DD；其余原样截取或空串。
+
+    review08-D1：get_stock_news 的 publish_time 已统一为 UTC tz-naive datetime；
+    保留字符串兜底兼容测试 mock 与历史调用方传字符串的情况（None 时输出空串，不崩溃）。
+    """
+    pt = item.get("publish_time")
+    if isinstance(pt, datetime.datetime):
+        return pt.strftime("%Y-%m-%d")
+    return str(pt)[:10] if pt else ""
 
 
 def _write_prompt_dump(dump_file: str, content: str) -> None:
@@ -124,7 +137,7 @@ class StockAnalysisService:
         # Format news
         news_text = "\n".join(
             [
-                f"- [{n.get('source', '')}] {n.get('publish_time', '')[:10]} {n.get('title', '')}"
+                f"- [{n.get('source', '')}] {_news_date_label(n)} {n.get('title', '')}"
                 for n in news_list[:NEWS_LIST_LIMIT]
             ],
         )

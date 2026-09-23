@@ -1,4 +1,4 @@
-﻿# Project Documentation Index
+# Project Documentation Index
 
 本目录承载从 CONTRIBUTING.md 渐进式披露拆分出的专项深入文档。
 
@@ -12,6 +12,7 @@
 - [adr/](./adr/) — 架构决策记录（ADR）
 - [governance/](./governance/) — 治理类机器可读文件（如 redlines.yml / exceptions.yml / canonical-topics.yml）
 - [reviews/](./reviews/) — AI 代码检视指南（核心协议 + 稳定规则 ID + 专项 Profile + schema/policy 分离 + evals 评测集）
+- [plans/](./plans/) — 检视修复方案文档（按问题 ID 命名，如 review08-d1-fix.md）
 - [bug-fix/](./bug-fix/) — AI 问题修复指南（核心协议 + 专项 Profile + 附录，三层拆分）
 
 ## 文档层次

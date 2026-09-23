@@ -17,7 +17,7 @@ from data.external.news_fetcher import (
     _SINA_CONSECUTIVE_FAILURES,
     _SINA_EMPTY_THRESHOLD,
 )
-from utils.time_utils import CST_TZ
+from utils.time_utils import CST_TZ, to_utc_for_db
 import requests
 
 
@@ -1208,6 +1208,9 @@ class TestGetStockNewsDirectExecution:
         assert isinstance(result, list)
         assert len(result) >= 1
         assert result[0]["source"] == "巨潮公告"
+        # review08-D1：时间口径统一为 UTC naive datetime（公告 "2024-08-30" CST → 前日 16:00 UTC naive）
+        assert result[0]["publish_time"] == to_utc_for_db(datetime.datetime(2024, 8, 30, 0, 0, 0))
+        assert result[0]["publish_time"].tzinfo is None
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ak")
@@ -1305,6 +1308,63 @@ class TestGetStockNewsDirectExecution:
             result = await NewsFetcher.get_stock_news("000001.SZ", limit=5)
         assert isinstance(result, list)
         assert result[0]["title"] == "详细内容作为标题"
+        # review08-D1：EM 时间统一为 UTC naive datetime（CST 10:00 → UTC 02:00）
+        assert result[0]["publish_time"] == to_utc_for_db(datetime.datetime(2024, 6, 14, 10, 0, 0))
+        assert result[0]["publish_time"].tzinfo is None
+
+
+class TestNewsTimeCaliberConsistency:
+    """review08-D1：同一源数据下两个公开方法产出同一时间口径（UTC naive datetime），消除 8h 偏差隐患。"""
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_same_source_same_time_caliber(self, mock_tpm):
+        today = datetime.date.today()
+        ann_date = today - datetime.timedelta(days=1)
+        cninfo = pd.DataFrame(
+            {
+                "代码": ["000001"],
+                "简称": ["平安银行"],
+                "公告标题": ["2024年半年度报告"],
+                "公告时间": [ann_date.strftime("%Y-%m-%d")],
+                "公告链接": ["http://cninfo/1"],
+            }
+        )
+        em = pd.DataFrame(
+            {
+                "新闻标题": ["银行股上涨"],
+                "新闻内容": ["x"],
+                "新闻时间": [today.strftime("%Y-%m-%d 10:00:00")],
+                "新闻链接": ["http://em/1"],
+                "文章来源": ["东财"],
+            }
+        )
+        expected_ann = to_utc_for_db(datetime.datetime.combine(ann_date, datetime.time()))
+        expected_news = to_utc_for_db(datetime.datetime.combine(today, datetime.time(10, 0, 0)))
+
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+        with patch("data.external.news_fetcher.ak") as mock_ak:
+            mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = cninfo
+            mock_ak.stock_news_em.return_value = em
+
+            news = await NewsFetcher.get_stock_news("000001.SZ", limit=5)
+            documents = await NewsFetcher.get_stock_news_documents("000001.SZ", window_days=30, limit=50)
+
+        # get_stock_news：公告优先 → 公告文档；publish_time 与 documents 同为 UTC naive datetime
+        assert news[0]["source"] == "巨潮公告"
+        assert news[0]["publish_time"] == expected_ann
+        assert news[0]["publish_time"].tzinfo is None
+
+        # documents：两源合并，各自 publish_time 与 get_stock_news 同口径等值
+        ann_doc = next(d for d in documents["docs"] if d["source_kind"] == "announcement")
+        news_doc = next(d for d in documents["docs"] if d["source_kind"] == "news")
+        assert ann_doc["publish_time"] == expected_ann
+        assert news_doc["publish_time"] == expected_news
+        assert ann_doc["publish_time"].tzinfo is None
+        assert news_doc["publish_time"].tzinfo is None
 
 
 class TestGetLatestGlobalNewsDirectExecution:
