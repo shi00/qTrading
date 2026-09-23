@@ -603,7 +603,7 @@ class TestAIServiceErrorSanitization:
         svc._supports_reasoning = False
         svc._initialized = True
         sensitive_path = "D:\\workspace\\secret\\api_key_sk-abc123.py"
-        svc._chat_completion = AsyncMock(side_effect=RuntimeError(sensitive_path))
+        svc._chat_completion_with_failover = AsyncMock(side_effect=RuntimeError(sensitive_path))
         svc._get_prompt_dump_dir = lambda: "/tmp"
 
         with patch("services.ai_service.ConfigHandler") as mock_cfg:
@@ -641,7 +641,7 @@ class TestAIServiceErrorSanitization:
         svc._supports_reasoning = False
         svc._initialized = True
         sensitive_token = "Bearer sk-proj-LEAKED-KEY-12345"
-        svc._chat_completion = AsyncMock(side_effect=RuntimeError(sensitive_token))
+        svc._chat_completion_with_failover = AsyncMock(side_effect=RuntimeError(sensitive_token))
         svc._get_prompt_dump_dir = lambda: "/tmp"
 
         with patch("services.ai_service.ConfigHandler") as mock_cfg:
@@ -671,7 +671,7 @@ class TestAIServiceErrorSanitization:
         svc._supports_reasoning = False
         svc._initialized = True
         sensitive_data = "api_key=sk-LEAKED123&token=secret_value"
-        svc._chat_completion = AsyncMock(side_effect=RuntimeError(sensitive_data))
+        svc._chat_completion_with_failover = AsyncMock(side_effect=RuntimeError(sensitive_data))
         svc._get_prompt_dump_dir = lambda: "/tmp"
 
         with patch("services.ai_service.ConfigHandler") as mock_cfg:
@@ -714,7 +714,7 @@ class TestAIServiceErrorSanitization:
         svc._supports_reasoning = False
         svc._initialized = True
         sensitive = "api_key=sk-LEAKED123&token=secret_value"
-        svc._chat_completion = AsyncMock(side_effect=RuntimeError(sensitive))
+        svc._chat_completion_with_failover = AsyncMock(side_effect=RuntimeError(sensitive))
         svc._get_prompt_dump_dir = lambda: "/tmp"
 
         with patch("services.ai_service.ConfigHandler") as mock_cfg:
@@ -750,7 +750,7 @@ class TestExcInfoDowngrade:
         svc._local_model_loaded = False
         svc._supports_reasoning = False
         svc._initialized = True
-        svc._chat_completion = AsyncMock(
+        svc._chat_completion_with_failover = AsyncMock(
             side_effect=AIServiceUnavailableError("All LLM providers failed. Tried: [test-model]")
         )
         svc._get_prompt_dump_dir = lambda: "/tmp"
