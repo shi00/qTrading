@@ -328,9 +328,11 @@ class Message:
 # 中文界面策略名显示英文问题（Plans.md E 线）：历史库值（英文标识符 / zh/en 翻译字符串）
 # 经本表映射为 ``strategy_*_name`` key 后由 ``I18n.get`` 翻译。本表是**唯一数据源**：
 # - ``translate_strategy_name``（本模块）对非 ``strategy_`` 前缀输入查此表兜底；
-# - ``scripts/migrate_strategy_name_to_i18n_key.py`` 迁移脚本 import 此表（消除双源漂移）；
-# - 值必须全部为 ``strategy_`` 前缀（E4 校验），否则 ``translate_strategy_name`` 前缀
-#   检查会原样返回、兜底失效。
+# - 迁移脚本 ``scripts/migrate_strategy_name_to_i18n_key.py`` 于 E2 切换为
+#   ``from core.i18n import STRATEGY_NAME_FALLBACK_MAP``（消除双源漂移；切换前脚本
+#   保留手工同步副本，见 E 线分批计划）；
+# - 值必须全部为 ``strategy_`` 前缀（E4 校验），否则 ``I18n.get(mapped_key)`` 缺 key
+#   返回 key 原文、兜底失效。
 # 注意：core 层仅承载 i18n 数据与翻译函数（无 flet / 业务层依赖），strategies 层
 # （backtest report.py）与 ui 层均可引用（R1 合规）。
 STRATEGY_NAME_FALLBACK_MAP: dict[str, str] = {
@@ -386,7 +388,10 @@ def translate_strategy_name(name: str | None) -> str | None:
     """
     if not name:
         return name
-    if name.startswith("strategy_"):
+    # 前缀分支经 I18n.has 前置探测（对抗检视 A-3）：自定义策略名恰以 "strategy_" 开头
+    # 且 key 缺失时，避免 I18n.get 触发 missing-key warning / 污染 _missing_keys——
+    # 缺失 key 落入兜底映射/原样路径，语义与 R.3.3 一致（合法 name_key 行为不变）。
+    if name.startswith("strategy_") and I18n.has(name):
         return I18n.get(name)
     mapped_key = STRATEGY_NAME_FALLBACK_MAP.get(name)
     if mapped_key:

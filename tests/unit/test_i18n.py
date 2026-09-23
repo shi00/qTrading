@@ -602,6 +602,18 @@ class TestTranslateStrategyName:
         result = translate_strategy_name("UnknownStrategy")
         assert result == "UnknownStrategy"
 
+    def test_translate_strategy_prefix_missing_key_no_warning(self, caplog):
+        """A-3 回归防护: 自定义策略名恰以 strategy_ 开头且 key 缺失 → 原样返回、不触发
+        missing-key warning（I18n.has 前置探测）。"""
+        import logging
+
+        from ui.i18n import translate_strategy_name
+
+        with caplog.at_level(logging.WARNING):
+            result = translate_strategy_name("strategy_my_custom_name")
+        assert result == "strategy_my_custom_name"
+        assert "missing" not in caplog.text.lower()
+
     def test_translate_empty_string(self):
         """Test translating empty string."""
         from ui.i18n import translate_strategy_name
