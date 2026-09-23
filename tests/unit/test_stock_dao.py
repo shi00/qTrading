@@ -84,6 +84,23 @@ class TestGetTsCodeMap:
         )
         assert await dao.get_ts_code_map() == {"600000": "600000.SH"}
 
+    @pytest.mark.asyncio
+    async def test_db_error_propagates(self):
+        """review08-D2 复核：DB 读取失败必须传播，不可吞成空映射。
+
+        默认 ``_read_db_select(suppress_errors=True)`` 会把 DB 故障吞成空映射，
+        概念同步将全部代码误标为 "not in stock_basic" 并误报 SUCCESS（R21 缺失值
+        伪装）。显式 ``suppress_errors=False`` 后异常必须传播到调用方。
+        """
+        from data.persistence.daos.base_dao import DatabaseQueryError
+
+        dao = _make_dao()
+        dao._read_db_select = AsyncMock(side_effect=DatabaseQueryError("db down"))
+        with pytest.raises(DatabaseQueryError, match="db down"):
+            await dao.get_ts_code_map()
+        # 精确断言：必须以 suppress_errors=False 调用，防回归为默认吞错
+        assert dao._read_db_select.call_args.kwargs["suppress_errors"] is False
+
 
 class TestGetActiveStockCount:
     @pytest.mark.asyncio

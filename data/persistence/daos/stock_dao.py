@@ -71,9 +71,14 @@ class StockDao(BaseDao):
         交易所猜测（review08 D2）。返回全表（含已退市），避免因 list_status 过滤
         漏掉仍在概念板块中出现的成分股。未知/非法代码由调用方经 None 显式标记
         （R21 缺失值精神，不填充业务合法的猜测值）。
+
+        显式传 ``suppress_errors=False``（review08-D2 复核）：DB 读取失败必须传播
+        而非吞成空映射——否则概念同步会把「DB 故障」静默降级为「全部代码不在
+        stock_basic」并误报 SUCCESS（R21：缺失值伪装）。interrupted 仍按
+        ``_read_db_select`` 既有语义抛 ``EngineDisposedError``（R5 传播保持）。
         """
         stmt = sa.select(StockBasic.symbol, StockBasic.ts_code)
-        df = await self._read_db_select(stmt)
+        df = await self._read_db_select(stmt, suppress_errors=False)
         if df is None or df.empty:
             return {}
         return {
