@@ -46,7 +46,9 @@ class TokenBucket:
 
         self.min_rate = float(min_rate) if min_rate else max(0.5, self.rate * 0.1)
 
-        self.tokens = float(start_tokens)
+        # tokens 上限归一化：起始余额不得超过容量，维持不变式 0 <= tokens <= capacity
+        # （E5 属性测试发现：start_tokens > capacity 时构造后余额越界）
+        self.tokens = min(float(start_tokens), self.capacity)
 
         self.last_update = time.monotonic()
         self.lock = threading.Lock()

@@ -25,7 +25,7 @@ pytestmark = pytest.mark.unit
 # 输入域假设（均为合法正缩放参数，排除 NaN/Inf）：
 # - capacity: >=1（构造器会把 <=0 归一化为 1.0，此处避免歧义）
 # - rate: >=1（rate>0 才保证 wait 计算无除零；构造器会把 <=0 归一化为 1.0）
-# - start: [0, capacity] 内任意初始余额
+# - start: 任意非负初始余额（构造器按 min(start, capacity) 统一封顶，覆盖越界输入）
 # - elapsed: 相邻两次调用间的流逝时间
 # - request: 每次请求令牌数，必须 <= capacity（否则触发 ValueError guard，属另一独立用例）
 _N_TOKENS = 100
@@ -38,8 +38,9 @@ def test_consume_reserve_balance_invariants(data: st.DataObject) -> None:
     vclock = VirtualClock()
     capacity = data.draw(st.floats(min_value=1.0, max_value=1_000_000.0, allow_nan=False, allow_infinity=False))
     rate = data.draw(st.floats(min_value=1.0, max_value=100_000.0, allow_nan=False, allow_infinity=False))
-    # 输入域假设：起始余额不超过容量（TokenBucket 语义前提；若超容量构造器未归一化，属生产缺陷，见回复）。
-    start = data.draw(st.floats(min_value=0.0, max_value=capacity, allow_nan=False, allow_infinity=False))
+    # 起始余额可超容量（0..capacity*2 覆盖越界输入）：构造器按 min(start, capacity)
+    # 封顶归一化（TokenBucket 构造器修复后），不变量仍须成立。
+    start = data.draw(st.floats(min_value=0.0, max_value=capacity * 2, allow_nan=False, allow_infinity=False))
 
     with (
         patch("utils.rate_limiter.time.monotonic", vclock.now),
@@ -83,8 +84,9 @@ def test_consume_rejects_request_above_capacity(data: st.DataObject) -> None:
     vclock = VirtualClock()
     capacity = data.draw(st.floats(min_value=1.0, max_value=1_000_000.0, allow_nan=False, allow_infinity=False))
     rate = data.draw(st.floats(min_value=1.0, max_value=100_000.0, allow_nan=False, allow_infinity=False))
-    # 输入域假设：起始余额不超过容量（TokenBucket 语义前提；若超容量构造器未归一化，属生产缺陷，见回复）。
-    start = data.draw(st.floats(min_value=0.0, max_value=capacity, allow_nan=False, allow_infinity=False))
+    # 起始余额可超容量（0..capacity*2 覆盖越界输入）：构造器按 min(start, capacity)
+    # 封顶归一化（TokenBucket 构造器修复后），不变量仍须成立。
+    start = data.draw(st.floats(min_value=0.0, max_value=capacity * 2, allow_nan=False, allow_infinity=False))
 
     with (
         patch("utils.rate_limiter.time.monotonic", vclock.now),
