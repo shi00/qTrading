@@ -13,6 +13,22 @@ from utils.time_utils import to_utc_for_db
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
 
 
+@pytest.fixture(autouse=True)
+def _mock_akshare_shared_limiter():
+    """review08-B4：mock 共享限速器（与 test_news_fetcher.py 一致）。
+
+    既有测试用 ThreadPoolManager side_effect 在事件循环线程直接执行 _fetch，
+    而 TokenBucket.consume() 检测到 running loop 会抛 RuntimeError（生产环境
+    _fetch_stock_news_core 在 IO 线程池线程执行、无 running loop，不会触发）。
+    统一 mock 掉共享限速器使既有测试不受影响；限速行为由 TestSharedRateLimiter
+    单独断言。
+    """
+    mock_limiter = MagicMock()
+    mock_limiter.consume = MagicMock()
+    with patch("data.external.news_fetcher.get_akshare_rate_limiter", return_value=mock_limiter):
+        yield
+
+
 # ---------- _parse_news_time 时间口径 ----------
 class TestParseNewsTime:
     def test_full_datetime_cst_to_utc_naive(self):
