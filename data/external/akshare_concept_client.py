@@ -108,12 +108,54 @@ class AkshareConceptClient:
 
         return ak
 
+    @staticmethod
+    def _clear_concept_list_cache() -> None:
+        """Clear AKShare's process-level lru_cache on the East-Money concept list.
+
+        AKShare's ``stock_board_concept_name_em()`` returns
+        ``__stock_board_concept_name_em().copy()`` where the inner loader is
+        ``@lru_cache``-decorated with no TTL and a single cache slot. That cache
+        outlives the whole process (no ``cache_clear`` call anywhere in the
+        module), so a second call in a long-lived run would otherwise return the
+        first-call snapshot instead of hitting the network — silently freezing
+        the concept list (review08-B1, P0).
+
+        We therefore clear it right before each fetch so scheduler / nightly
+        jobs always see fresh data. Depending on AKShare's private function name
+        is intentional and differs from the review08-B3 anti-pattern: B3 coupled
+        four layers of internals and degraded *silently* to the (correct-by-luck)
+        value it wanted; here we depend on a single internal symbol, and
+        ``pyproject.toml`` pins ``akshare==1.18.97``. A structure change only
+        breaks the cache-clear (logged at WARNING), never silently corrupts the
+        fetched data.
+        """
+        try:
+            import akshare.stock.stock_board_concept_em as _em
+
+            # 必须经 getattr 取 "__stock_board_concept_name_em"：在类方法内直接写
+            # ``_em.__stock_board_concept_name_em`` 会被 Python name-mangle 成
+            # ``_em._AkshareConceptClient__stock_board_concept_name_em``，永远
+            # AttributeError，导致缓存清理静默失效。字符串字面量不做 mangle。
+            getattr(_em, "__stock_board_concept_name_em").cache_clear()
+        except (ImportError, AttributeError) as exc:
+            # AKShare 内部实现变化/被裁剪时降级：仅记录，不让同步流程崩溃。
+            logger.warning(
+                "[AkshareConceptClient] 无法清理概念列表缓存（akshare 结构变更?），本次可能返回陈旧列表: %s",
+                exc,
+            )
+
     @log_async_operation(
         operation_name="akshare_get_concept_list",
         threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
     )
     async def get_concept_list(self) -> pd.DataFrame:
         """Fetch the list of East-Money concept boards (东财概念板块列表).
+
+        AKShare's ``stock_board_concept_name_em()`` wraps a module-level
+        ``@lru_cache``-decorated loader with no TTL and a single cache slot (see
+        ``_clear_concept_list_cache``). This client clears that internal cache
+        before each fetch so long-lived processes (scheduler + nightly jobs)
+        always get fresh data instead of the first-call snapshot.
 
         Returns:
             DataFrame with concept board metadata (板块名称, 板块代码, ...).
@@ -126,6 +168,7 @@ class AkshareConceptClient:
 
         def _fetch() -> pd.DataFrame:
             ak = self._get_akshare()
+            self._clear_concept_list_cache()
             return ak.stock_board_concept_name_em()
 
         return await ThreadPoolManager().run_async(TaskType.IO, _fetch)

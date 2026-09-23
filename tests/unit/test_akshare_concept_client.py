@@ -7,6 +7,8 @@ Covers:
 - CancelledError propagates (R2)
 """
 
+import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -109,6 +111,81 @@ class TestGetConceptList:
 
         args, _ = mock_tpm.run_async.call_args
         assert args[0] is TaskType.IO
+
+
+class TestConceptListCacheInvalidation:
+    """B1: AKShare 概念列表 lru_cache 进程级缓存必须在每次 fetch 前清理.
+
+    复刻 akshare ``stock_board_concept_em.py`` 的真实缓存语义：内部
+    ``__stock_board_concept_name_em`` 持有单个缓存 DataFrame，直到
+    ``cache_clear`` 才被重置；每次真实取数返回不同内容，用于观察缓存是否被清理。
+    """
+
+    def _install_fake_em_module(self, monkeypatch: pytest.MonkeyPatch, em: object) -> None:
+        """让 ``_clear_concept_list_cache`` 的 ``import ... as _em`` 命中 fake.
+
+        ``import akshare.stock.stock_board_concept_em as _em`` 绑定的是父包
+        ``akshare.stock`` 的 ``stock_board_concept_em`` 属性（而非 sys.modules 键），
+        因此须替换该属性；sys.modules 叶子键一并覆盖保持一致。测试后自动还原。
+        """
+        import akshare.stock as _stock_mod
+
+        monkeypatch.setattr(_stock_mod, "stock_board_concept_em", em)
+        monkeypatch.setitem(sys.modules, "akshare.stock.stock_board_concept_em", em)
+
+    @pytest.mark.asyncio
+    async def test_second_call_refetches_after_cache_clear(self, client_with_mocks, monkeypatch):
+        """连续两次调用在数据源变化后能拿到新数据（缓存被清理则底层会重新取数）。"""
+        client, mock_tpm, mock_bucket, mock_ak = client_with_mocks
+
+        state = {"cached": None, "fetches": 0, "clears": 0}
+
+        def _source() -> pd.DataFrame:
+            state["fetches"] += 1
+            return pd.DataFrame({"板块名称": [f"概念{state['fetches']}"], "板块代码": [f"BK{state['fetches']:04d}"]})
+
+        def _em_internal():
+            if state["cached"] is None:
+                state["cached"] = _source()
+            return state["cached"]
+
+        def _em_cache_clear():
+            state["clears"] += 1
+            state["cached"] = None
+
+        _em_internal.cache_clear = _em_cache_clear  # type: ignore[attr-defined]  # 注入 fakes 属性
+
+        def _em_public():
+            return _em_internal().copy()
+
+        fake_em = SimpleNamespace(
+            __stock_board_concept_name_em=_em_internal,
+            stock_board_concept_name_em=_em_public,
+        )
+        self._install_fake_em_module(monkeypatch, fake_em)
+        mock_ak.stock_board_concept_name_em = _em_public  # type: ignore[attr-defined]  # mock 注入
+
+        df1 = await client.get_concept_list()
+        df2 = await client.get_concept_list()
+
+        assert df1["板块名称"].iloc[0] == "概念1"
+        assert df2["板块名称"].iloc[0] == "概念2"
+        assert df1["板块名称"].iloc[0] != df2["板块名称"].iloc[0]
+        # 清理确实在每次 fetch 前发生，底层真实取数未被缓存跳过
+        assert state["clears"] == 2
+        assert state["fetches"] == 2
+
+    @pytest.mark.asyncio
+    async def test_cache_clear_degrades_safely_when_internal_missing(self, client_with_mocks, monkeypatch):
+        """降级路径：akshare 内部函数缺失时不影响 fetch（仅告警），不抛异常。"""
+        client, mock_tpm, mock_bucket, mock_ak = client_with_mocks
+        # fake 模块只含公共入口、缺失 __stock_board_concept_name_em → AttributeError 被吞
+        fake_em = SimpleNamespace(stock_board_concept_name_em=mock_ak.stock_board_concept_name_em)
+        self._install_fake_em_module(monkeypatch, fake_em)
+
+        df = await client.get_concept_list()
+        assert isinstance(df, pd.DataFrame)
+        mock_ak.stock_board_concept_name_em.assert_called_once_with()
 
 
 class TestGetConceptConstituents:
