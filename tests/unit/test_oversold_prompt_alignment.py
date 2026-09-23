@@ -28,12 +28,12 @@ def _build_test_ai_service():
 
     service._is_cloud_configured = True
     service._litellm_config = {"api_key": "test-key"}
-    service._chat_completion = AsyncMock(return_value={"score": 88})
+    service._chat_completion_with_failover = AsyncMock(return_value={"score": 88})
     return service
 
 
 def _get_user_prompt(service):
-    messages = service._chat_completion.await_args.args[0]
+    messages = service._chat_completion_with_failover.await_args.args[0]
     return next(m["content"] for m in messages if m["role"] == "user")
 
 

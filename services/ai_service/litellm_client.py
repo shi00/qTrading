@@ -69,6 +69,13 @@ acompletion: Any = None
 # 独立 import 重试哨兵：避免以 litellm=False 作哨兵与 `litellm is not None` 判空冲突。
 _litellm_import_attempted = False
 
+# L4：litellm.Router 惰性加载全局。_litellm_router 缓存单例 Router 实例（跨请求复用
+# 内部的鲁棒性健康检查/重试/fallback 状态），_router_import_attempted 为构造哨兵，
+# 语义与 _litellm_import_attempted 一致。配置变更（reload_config）失效两全局，
+# 下次调用重建。
+_litellm_router: Any = None
+_router_import_attempted = False
+
 
 class AIServiceUnavailableError(Exception):
     """P1-12: 所有 LLM 供应商都不可用时抛出"""
@@ -189,6 +196,171 @@ def _check_response_schema_support(model: str) -> bool:
                 exc_info=True,
             )
     return False
+
+
+def build_router_model_list(
+    failover_config: dict,
+    failover_credentials: dict[str, dict] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """primary + fallbacks → litellm.Router.model_list（L4，构造期 D8-1 校验）。
+
+    复用 ``LiteLLMClient._build_litellm_params`` 的跨供应商凭据隔离逻辑作为单点解析
+    （零漂移）：每个候选模型以 model_override 形式送入，取回 model/api_key/api_base。
+
+    D8-1 迁移（R9 凭证跨域泄露防护）：
+    - 跨供应商 fallback 缺专属 key 时该调用抛 ``AIConfigError``，此处捕获后**排除该项**，
+      记入返回的 ``excluded`` 清单（绝不静默以全局 key 回退，也不连坐 primary —
+      primary 永不因 fallback 配置缺陷中断）。
+    - primary 构造失败（缺 model / 无 key）向上传播：云端口已由 ``is_cloud_available``
+      前置把关，primary 缺失属程序错误，不可静默丢弃。
+
+    Returns:
+        (model_list, excluded):
+        - model_list: ``[{"model_name": str, "litellm_params": {...}}]``，
+          每项 litellm_params 含 model/api_key/api_base（Azure 含 api_version）。
+        - excluded: 因缺专属 key 被排除的 "provider/model" 字符串列表（供调用方 warning）。
+    """
+    if failover_credentials is None:
+        failover_credentials = {}
+
+    primary = failover_config.get("primary", "")
+    fallbacks = failover_config.get("fallbacks", []) or []
+    primary_config = failover_config.get("primary_config") or {}
+
+    model_list: list[dict] = []
+    excluded: list[str] = []
+
+    def _resolve(candidate: str, *, is_primary: bool) -> dict:
+        """单个候选模型 → litellm_params（经 _build_litellm_params 单点解析）。"""
+        # 空 messages：_build_litellm_params 只解析 provider/model/凭据，不消耗消息内容
+        return LiteLLMClient._build_litellm_params(
+            primary_config,
+            messages=[],
+            model_override=candidate if not is_primary else None,
+            failover_credentials=failover_credentials,
+        )
+
+    if primary:
+        params = _resolve(primary, is_primary=True)
+        model_list.append(
+            {
+                "model_name": primary,
+                "litellm_params": {
+                    "model": params.get("model"),
+                    "api_key": params.get("api_key"),
+                    "api_base": params.get("api_base"),
+                },
+            }
+        )
+
+    for fb in fallbacks:
+        if not fb:
+            continue
+        try:
+            params = _resolve(fb, is_primary=False)
+        except AIConfigError:
+            # D8-1：缺专属 key → 排除该项，不静默回退全局 key；不阻断 primary 与其他 fallback
+            excluded.append(fb)
+            continue
+        model_list.append(
+            {
+                "model_name": fb,
+                "litellm_params": {
+                    "model": params.get("model"),
+                    "api_key": params.get("api_key"),
+                    "api_base": params.get("api_base"),
+                },
+            }
+        )
+
+    return model_list, excluded
+
+
+def _ensure_router_loaded(failover_credentials: dict[str, dict] | None = None) -> bool:
+    """惰性构造 litellm.Router 并返回是否可用（L4）。
+
+    与 ``_ensure_litellm_loaded`` 同一范式（构造哨兵 + 失败优雅降级）：
+    - model_list 经 ``build_router_model_list`` 从最新 failover 配置单点构造——
+      跨供应商缺专属 key 的 fallback 已排除（D8-1），排除项记 warning 不连坐 primary。
+    - ``failover_credentials`` 复用 AIService._setup_client 预加载的跨供应商凭据缓存
+      （_router_failover 传入），避免构造期在 hot path 触发同步 keyring 调用
+      （检视 MINOR-3 修复）。
+    - fallback 映射表（Router.fallbacks，{model_name: [fallback names]}）只登记
+      model_list 中实际存在的 model_name：excluded 项不可引用，否则 Router 构造校验
+      失败（引用未注册 model_name）。
+    - 重试/冷却/fallback 表在 Router 构造级配置（retry_policy / context_window 等
+      精调见 M3）。
+
+    返回 False 含义：litellm 未加载 / failover 配置缺 primary / 构造异常。调用方
+    （``_router_failover``）收敛为 AIServiceUnavailableError，不静默回退任何
+    非 Router 路径。
+    """
+    # Any 标注：sys.modules 返回 ModuleType（与 _ensure_litellm_loaded 同风格）。
+    _ai: Any = sys.modules["services.ai_service"]
+
+    if _ai._router_import_attempted:
+        return _ai._litellm_router is not None
+    _ai._router_import_attempted = True
+
+    # Router 是 litellm 子模块，须先完成 litellm 加载（_ensure_litellm_loaded 幂等）。
+    if not _ai._ensure_litellm_loaded():
+        return False
+
+    from utils.config_handler import ConfigHandler
+
+    try:
+        failover_config = ConfigHandler.get_failover_config()
+        model_list, excluded = build_router_model_list(failover_config, failover_credentials=failover_credentials)
+        if excluded:
+            logger.warning(
+                "[AIService] Failover | %d fallback(s) excluded from Router (missing dedicated API key): %s",
+                len(excluded),
+                ", ".join(excluded),
+            )
+
+        primary = failover_config.get("primary", "")
+        fallbacks = failover_config.get("fallbacks", []) or []
+        available_names = {item["model_name"] for item in model_list}
+        accessible_fallbacks = [fb for fb in fallbacks if fb in available_names]
+        # litellm 1.102.1 校验 fallbacks/context_window_fallbacks 为 list-of-dicts
+        # 形式 [{model_name: [fallback model_names]}]（validate_fallbacks 逐项要求 dict）。
+        cross_model_fallbacks = [{primary: accessible_fallbacks}] if (primary and accessible_fallbacks) else []
+
+        # 参数语义（M3，经 litellm 1.102.1 源码 + 构造验证）：
+        # - num_retries：同供应商瞬时错误（429/5xx/超时）原地重试次数，与旧手写循环的
+        #   LITELLM_MAX_RETRIES（per-request num_retries）对齐（A2 语义：瞬时可自动重试
+        #   的错误交由 litellm 承担，Router 负责跨供应商切换）。
+        # - retry_policy AuthenticationErrorRetries=0：401 认证错误契约保险——源码默认
+        #   行为已在 should_retry_this_error 中因部署数=1 直接 raise（不重试不 fallback），
+        #   显式置 0 防 litellm 版本演进悄悄改变该语义；其余字段留 None 走默认
+        #   _should_retry(status_code) 判定（401→raise，429/5xx→重试）。
+        # - context_window_fallbacks：超长请求（ContextWindowExceededError）专属 fallback
+        #   表，与客户端超长预检（_router_failover 内 _estimate_tokens 标尺）构成双层防线。
+        # - fallbacks：普通可重试错误（429/5xx/超时）的跨模型切换表（按序尝试；受
+        #   max_fallbacks=5 与业务 fallback 数量自然双限）。
+        # - cooldown_time：供应商连续失败后的冷却秒数（健康路由避免请求打到刚失败的供应商）。
+        # - ContentPolicyViolationError 未配置专属 content_policy_fallbacks：Router 默认
+        #   会尝试普通 fallback（行为增强，旧循环直抛语义不再保留——落在文档/ADR 中说明）。
+        _ai._litellm_router = _ai.litellm.Router(
+            model_list=model_list,
+            num_retries=LITELLM_MAX_RETRIES,
+            retry_policy=_ai.litellm.RetryPolicy(AuthenticationErrorRetries=0),
+            fallbacks=cross_model_fallbacks,
+            context_window_fallbacks=cross_model_fallbacks,
+            cooldown_time=30.0,
+        )
+        return True
+    except Exception as exc:
+        # 兼容不同 litellm 版本 / 构造参数校验失败：Router 不可用即降级（不向上抛，
+        # 避免把配置缺陷升级为全局崩溃；失败由 _router_failover 的
+        # AIServiceUnavailableError 承载）。except Exception 不误捕
+        # asyncio.CancelledError / KeyboardInterrupt（R2）。
+        _ai._litellm_router = None
+        logger.warning(
+            "[AIService] Failover | Router construction failed, cloud failover disabled: %s",
+            _ai.DataSanitizer.sanitize_error(exc),
+        )
+        return False
 
 
 class LiteLLMClient:
@@ -705,25 +877,35 @@ class LiteLLMClient:
             pass
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
-    async def _chat_completion_with_failover(
+    async def _router_failover(
         self,
         messages: list,
         timeout: float = DEFAULT_ANALYSIS_TIMEOUT,
         json_mode: bool = True,
         on_chunk=None,
+        purpose: str = "analysis",
     ) -> dict:
         """
-        P1-12: 带多供应商 fallback 的云端分析
+        L4: 基于 litellm.Router 的带多供应商 fallback 的云端分析
 
-        当主供应商失败时，自动切换到备用供应商。
-        仅对可恢复错误（RateLimitError, ServiceUnavailableError, Timeout）进行 fallback。
-        永久错误（AuthenticationError, ContentPolicyViolationError）直接抛出。
+        替换原手写 failover 循环（126 行）：同供应商瞬时错误重试 / 跨供应商切换 /
+        冷却等语义交由 litellm.Router 承担，本层只负责入口门控、SEC-03 审计、
+        流式解析与错误收敛。
+
+        - SEC-01：failover 是独立云端出口通道，须先通过外发知情确认门控
+          （purpose="news" 且未确认时抛 AIPolicyNotAcknowledgedError，调用方降级）。
+        - SEC-03 双层审计：入口按 primary 意图记录一次；响应后若实际生效模型与
+          primary 不一致（Router 已跨供应商 fallback），补记实际目的地一次。
+        - 错误收敛：非瞬态错误（Auth / ContentPolicy 等）Router 不重试不 fallback
+          直接抛出，保持原语义上抛原异常；瞬态错误经 Router 内部重试 + fallback
+          仍失败 → AIServiceUnavailableError（Tried 从 model_list 构造）。
 
         Args:
             messages: 消息列表
             timeout: 超时时间
             json_mode: 是否启用 JSON 模式
             on_chunk: 流式回调
+            purpose: 云端出口类别（SEC-01/SEC-03 审计用，默认 "analysis"）
 
         Returns:
             dict: 解析后的响应
@@ -731,105 +913,317 @@ class LiteLLMClient:
         Raises:
             AIServiceUnavailableError: 所有供应商都失败时抛出
         """
-        # 注意：failover 配置须经真实 ConfigHandler 局部导入读取（与 HEAD 一致）。
-        # 既有测试 patch 目标为 ``utils.config_handler.ConfigHandler.get_failover_config``，
-        # 且 analyze_stock 测试在 mock ``services.ai_service.ConfigHandler`` 时依赖真实
-        # 单例返回非空 primary（若经组合根模块访问会被 MagicMock 吞掉导致 "Tried: []"）。
-        # 仅错误日志路径的 DataSanitizer 经组合根模块属性访问。
+        # 注意：failover 配置须经真实 ConfigHandler 局部导入读取（与旧循环一致，
+        # 既有测试 patch 目标 ``utils.config_handler.ConfigHandler.get_failover_config``
+        # 保持不变）。仅错误日志路径的 DataSanitizer 经组合根模块属性访问。
         from utils.config_handler import ConfigHandler
 
         import services.ai_service as _ai
 
+        # SEC-01：与 _chat_completion 保持同一外发知情确认门控——news 通道未确认
+        # 绝不外发（非交互降级为默认分类）。
+        if purpose == "news" and not is_egress_acknowledged():
+            logger.warning(
+                "[AIService] Cloud | News egress policy not acknowledged — skipping cloud "
+                "classification (no external requests initiated)",
+            )
+            raise AIPolicyNotAcknowledgedError(
+                Message("ai_external_acknowledgment_prompt"),
+                detail="News cloud egress requires user acknowledgment (SEC-01); no external request was initiated.",
+            )
+
         failover_config = ConfigHandler.get_failover_config()
         primary = failover_config.get("primary", "")
-        fallbacks = failover_config.get("fallbacks", [])
+        fallbacks = failover_config.get("fallbacks", []) or []
 
-        models_to_try = [primary, *fallbacks]
-        last_error: Exception | None = None
+        # 入口门控链：cloud 可用性 → primary 存在 → litellm 加载 → Router 构造可用。
+        # 任一不满足即显式失败（绝不静默回退到任何非 Router 路径）。
+        if not self._service.is_cloud_available():
+            raise ValueError("Cloud LLM not configured. Please set up API Key.")
+        if not primary:
+            raise AIServiceUnavailableError("No primary LLM provider configured for failover")
+        if not _ai._ensure_litellm_loaded():
+            raise AIServiceUnavailableError("LiteLLM not installed, cloud LLM features disabled")
+        # 复用 AIService._setup_client 预加载的跨供应商凭据缓存，避免构造期 hot path
+        # 触发同步 keyring 调用（检视 MINOR-3 修复）。
+        if not _ai._ensure_router_loaded(self._service._failover_credentials):
+            raise AIServiceUnavailableError("Failover router unavailable, cloud LLM features disabled")
 
-        for i, model in enumerate(models_to_try):
-            if not model:
-                continue
+        router = _ai._litellm_router
+        llm_config = self._service._litellm_config
+        sem = self._service._get_news_semaphore() if purpose == "news" else self._service._get_analysis_semaphore()
+
+        async with sem:
+            logger.debug(
+                "[AIService] Failover | Router invoking via '%s' (%d messages, stream=%s)",
+                primary,
+                len(messages),
+                on_chunk is not None,
+            )
+
+            # 客户端超长预检（方案 v2）：context_window_fallbacks 的兜底防线——请求前先按
+            # 主模型上下文窗口估算 token，超长即 warning（语义与 _chat_completion_litellm
+            # 的预检一致；真实拦截交由用户配置/供应商侧 ContextWindowExceededError 经
+            # context_window_fallbacks 切换更大窗口模型）。预检不阻断请求（与既有语义一致）。
+            # 窗口按 primary（override）查取：跨供应商 primary 时取该模型的窗口而非主配置
+            # 模型（检视 MINOR-5 修复，与 _chat_completion_litellm 的 override 语义对齐）。
+            token_model = primary.split("/")[-1] if "/" in primary else (llm_config.get("model") or "")
+            total_tokens = sum(_estimate_tokens(m.get("content"), token_model) for m in messages)
+            context_window = _get_model_context_window(llm_config, primary)
+            if total_tokens > context_window:
+                logger.warning(
+                    "[AIService] Cloud | Prompt may exceed context window: ~%d tokens (window %d)",
+                    total_tokens,
+                    context_window,
+                )
+
+            # SEC-03 入口审计：记 primary 意图（一次）。审计失败不阻断 AI 主流程
+            # （_record_cloud_egress 内部已吞异常，R2 CancelledError 除外）。
+            await self._record_cloud_egress(messages, model=primary, category=purpose)
+
+            stream = on_chunk is not None
+            # Router 以池内 model_name 定位模型（build_router_model_list 的
+            # model_name=primary）；timeout/temperature/response_format 与
+            # _chat_completion_litellm 对齐（temperature=0.3 为分析默认，检视
+            # MAJOR-2 修复——缺失会让 Router 走供应商默认采样温度，输出随机性回归）。
+            router_params: dict = {
+                "model": primary,
+                "messages": messages,
+                "stream": stream,
+                "temperature": 0.3,
+                "timeout": httpx.Timeout(timeout, connect=CONNECT_TIMEOUT),
+            }
+            if json_mode:
+                router_params["response_format"] = {"type": "json_object"}
 
             try:
-                logger.debug(
-                    "[AIService] Failover | Attempt %d/%d: %s",
-                    i + 1,
-                    len(models_to_try),
-                    model,
-                )
+                if stream:
+                    # AI-01 计价链路（与 _chat_completion_litellm 同源）：流式无条件
+                    # include_usage（末 chunk 携带），否则非 reasoning 模型流式路径
+                    # usage 缺失 → 零记账。drop_params=True 兜底不支持 stream_options
+                    # 的 provider（静默丢弃，行为退化为现状）。
+                    router_params["stream_options"] = {"include_usage": True}
+                    result = await self._consume_router_stream(router, router_params, on_chunk, primary)
+                else:
+                    response = await router.acompletion(**router_params)
+                    content = response.choices[0].message.content  # type: ignore[union-attr]
+                    result = {"content": content}
+                    # 非流式 response.model 为实际调用模型（Router fallback 后为备选模型）
+                    result["model"] = getattr(response, "model", None) or primary
 
-                # 经组合根 (self._service) 调用：保证测试对 AIService 实例属性
-                # （如 `svc._chat_completion = AsyncMock(...)`）的 monkeypatch 生效。
-                result = await self._service._chat_completion(
-                    messages,
-                    provider="cloud",
-                    model=model,
-                    timeout=timeout,
-                    json_mode=json_mode,
-                    on_chunk=on_chunk,
-                    purpose="analysis",
-                )
+                    if hasattr(response, "usage") and response.usage:  # type: ignore[union-attr]
+                        # `or 0`：litellm Usage 字段为 Optional，值可为 None（与
+                        # _chat_completion_litellm 同源处理）。
+                        result["usage"] = {
+                            "prompt_tokens": getattr(response.usage, "prompt_tokens", 0) or 0,  # type: ignore[union-attr]
+                            "completion_tokens": getattr(response.usage, "completion_tokens", 0) or 0,  # type: ignore[union-attr]
+                            "total_tokens": getattr(response.usage, "total_tokens", 0) or 0,  # type: ignore[union-attr]
+                        }
+                        result["cost"] = estimate_cost(
+                            result["model"],
+                            result["usage"]["prompt_tokens"],
+                            result["usage"]["completion_tokens"],
+                        )
 
-                if i > 0:
+                # SEC-03 补记：实际生效模型与 primary 不一致 → Router 已跨供应商
+                # fallback，补记真实目的地（双层审计落地）。
+                actual_model = result.get("model") or primary
+                if actual_model != primary:
+                    await self._record_cloud_egress(messages, model=actual_model, category=purpose)
                     logger.info(
                         "[AIService] Failover | ✅ Succeeded on fallback model: %s",
-                        model,
+                        actual_model,
                     )
 
-                return result
+                # --- JSON 解析（与 _chat_completion 同源语义，AI-01 计量元数据回填） ---
+                # litellm 层元数据（model/usage/cost/reasoning_content）随 result 携带，
+                # 解析后必须回填——下游 _accumulate_usage 在本层之后消费 usage/cost/model，
+                # 丢弃即把真实云端消耗呈现为零（R21 回归）。
+                llm_metadata = {k: v for k, v in result.items() if k != "content"}
+                response_content = result["content"]
+                if json_mode:
+                    try:
+                        parsed = json.loads(response_content)
+                        # 元数据键覆盖模型输出同名键（系统计量可信度高于模型输出，模型
+                        # 幻觉输出的 usage/cost 键不可覆盖真实计量）；非 dict 解析结果
+                        # （null/list 等）维持原语义返回，无从附加元数据。
+                        return {**parsed, **llm_metadata} if isinstance(parsed, dict) else parsed
+                    except json.JSONDecodeError:
+                        pass
+                    # Heuristic Extraction（与 _chat_completion 同源：容忍包络文本）
+                    try:
+                        start = response_content.find("{")
+                        if start != -1:
+                            try:
+                                obj, _idx = json.JSONDecoder().raw_decode(
+                                    response_content[start:],
+                                )
+                                return {**obj, **llm_metadata} if isinstance(obj, dict) else obj
+                            except json.JSONDecodeError:
+                                pass
+                    except Exception as e:
+                        log_classified(
+                            logger,
+                            e,
+                            "general",
+                            "[AIService] JSON heuristic extraction failed (%s): %s",
+                            exc_info=True,
+                        )
+                    raise ValueError(
+                        f"Invalid JSON response: {_ai.DataSanitizer.sanitize_error(response_content[:100])}..."
+                    )
+                return {**llm_metadata, "content": response_content}
 
             except asyncio.CancelledError:
-                logger.debug("[AIService] Failover | Cancelled during attempt %d/%d", i + 1, len(models_to_try))
+                logger.debug("[AIService] Failover | Cancelled during Router invocation")
+                raise
+            except LocalInferenceTimeoutError:
+                # 本地模型超时不属于云端 failover 范畴，直接抛出
+                # （analyze_stock 的 except LocalInferenceTimeoutError 返回本地超时提示）
                 raise
             except Exception as e:
-                last_error = e
-                error_type = type(e).__name__
-
-                # LocalInferenceTimeoutError 是本地模型超时，不属于云端 failover 范畴，直接抛出
-                # 由 analyze_stock 的 except LocalInferenceTimeoutError 捕获并返回 {"error": "Local model timeout"}
-                if isinstance(e, LocalInferenceTimeoutError):
-                    raise
-
                 error_info = classify_error(e, context="llm")
                 severity = classify_severity(e, context="llm")
-
+                log_classified(
+                    logger,
+                    e,
+                    "llm",
+                    "[AIService] Failover | Router invocation failed (%s): %s",
+                    exc_info=True,
+                )
                 # System-level errors (MemoryError, etc.) must propagate at CRITICAL
                 if severity == "system":
-                    logger.critical(
-                        "[AIService] Failover | SYSTEM-LEVEL failure for %s: %s",
-                        model,
-                        _ai.DataSanitizer.sanitize_error(e),
-                        exc_info=True,
-                    )
                     raise
+                # 非瞬态错误（认证/内容策略等）：Router 不重试不 fallback 直接抛出，
+                # 保持旧循环"永久错误直接抛出"语义，由调用方按具体错误呈现。
+                if not bool(error_info.get("should_retry", False)):
+                    raise
+                # 瞬态错误经 Router 内部重试+fallback 仍失败 → 所有供应商失败。
+                # Router 日志已记录逐供应商失败过程，此处收敛为统一异常。
+                # Tried 从 Router.model_list 实际注册的模型构造（不包含 D8-1 排除项，
+                # 检视 MINOR-4 修复——excluded 项未实际尝试不应出现在错误消息）。
+                available_models = [item["model_name"] for item in getattr(router, "model_list", [])]
+                all_models_tried = ", ".join(m for m in (available_models or [primary, *fallbacks]) if m)
+                raise AIServiceUnavailableError(f"All LLM providers failed. Tried: [{all_models_tried}]") from e
 
-                is_transient = bool(error_info.get("should_retry", False))
+    async def _consume_router_stream(
+        self,
+        router: Any,
+        router_params: dict,
+        on_chunk,
+        primary: str,
+    ) -> dict:
+        """消费 Router 流式响应，返回与 _chat_completion_litellm 同构的 result dict（L4）。
 
-                if is_transient:
-                    # Truncate before sanitizing to avoid breaking sanitization markers
-                    raw_msg = str(e)
-                    truncated_raw = (
-                        raw_msg[:ERROR_MESSAGE_TRUNCATE_LEN] if len(raw_msg) > ERROR_MESSAGE_TRUNCATE_LEN else raw_msg
-                    )
-                    logger.warning(
-                        "[AIService] Failover | ⚠️ %s failed (%s: %s)",
-                        model,
-                        error_type,
-                        _ai.DataSanitizer.sanitize_error(truncated_raw),
-                    )
+        与 _chat_completion_litellm 的流式处理同源同构（chunk 缓冲 flush / usage 采集 /
+        流中断降级 / reasoning 回填），差异点：
+        - reasoning_content 采用**动态字段检测**（每次 getattr），不依赖入口静态
+          supports_reasoning 探测——fallback 模型与 primary 的推理支持可能不同，
+          静态探测会错误跳过 fallback 模型的 reasoning 内容。
+        - 实际生效模型经 chunk.model 动态收集（Router fallback 后的真实目的地），
+          供 SEC-03 补记审计与计价使用；流 chunk 不含 model 时退化为 primary。
+        """
+        import services.ai_service as _ai
+
+        response = await router.acompletion(**router_params)
+        response_content = ""
+        reasoning_content = ""
+        usage = None
+        actual_model = primary
+
+        _CHUNK_BUFFER_CHARS = 50
+        _content_buf: list[str] = []
+        _reasoning_buf: list[str] = []
+
+        def _flush_content_buf():
+            nonlocal _content_buf
+            if _content_buf and on_chunk:
+                on_chunk("".join(_content_buf), False)
+            _content_buf = []
+
+        def _flush_reasoning_buf():
+            nonlocal _reasoning_buf
+            if _reasoning_buf and on_chunk:
+                on_chunk("".join(_reasoning_buf), True)
+            _reasoning_buf = []
+
+        try:
+            async for chunk in response:  # type: ignore[reportGeneralTypeIssues]  # LiteLLM stream response type mismatch
+                if not chunk.choices:
+                    if hasattr(chunk, "usage") and chunk.usage:
+                        # `or 0`：litellm Usage 字段为 Optional，属性存在但值可为 None
+                        # （与 _chat_completion_litellm 同源处理）。
+                        usage = {
+                            "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0) or 0,
+                            "completion_tokens": getattr(chunk.usage, "completion_tokens", 0) or 0,
+                            "total_tokens": getattr(chunk.usage, "total_tokens", 0) or 0,
+                        }
                     continue
-                else:
-                    logger.error(
-                        "[AIService] Failover | ❌ Non-transient error (%s) for %s: %s",
-                        error_info.get("code", "unknown"),
-                        model,
-                        error_type,
-                    )
-                    raise
 
-        all_models_tried = ", ".join(m for m in models_to_try if m)
-        raise AIServiceUnavailableError(f"All LLM providers failed. Tried: [{all_models_tried}]") from last_error
+                actual_model = getattr(chunk, "model", None) or actual_model
+                delta = chunk.choices[0].delta
+
+                # 动态字段检测（方案 v2）：不依赖入口静态 supports_reasoning 探测，
+                # fallback 模型与 primary 推理能力不同时仍能正确收 reasoning_content。
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    reasoning_content += reasoning
+                    if on_chunk:
+                        _reasoning_buf.append(reasoning)
+                        if sum(len(s) for s in _reasoning_buf) >= _CHUNK_BUFFER_CHARS:
+                            _flush_reasoning_buf()
+
+                if delta.content:
+                    response_content += delta.content
+                    if on_chunk:
+                        _content_buf.append(delta.content)
+                        if sum(len(s) for s in _content_buf) >= _CHUNK_BUFFER_CHARS:
+                            _flush_content_buf()
+        except (
+            httpx.ReadTimeout,
+            httpx.ConnectTimeout,
+            httpx.ReadError,
+            httpx.ConnectError,
+            ConnectionError,
+            ConnectionResetError,
+            BrokenPipeError,
+            OSError,
+            TimeoutError,
+        ) as stream_err:
+            logger.warning(
+                "[AIService] Stream interrupted after %d chars: %s. Returning partial result.",
+                len(response_content),
+                _ai.DataSanitizer.sanitize_error(stream_err),
+            )
+
+        try:
+            _flush_content_buf()
+            _flush_reasoning_buf()
+        except Exception as flush_err:
+            log_classified(
+                logger,
+                flush_err,
+                "general",
+                "[AIService] Failed to flush chunk buffer after stream (%s): %s",
+                exc_info=True,
+            )
+
+        if not response_content and reasoning_content:
+            response_content = reasoning_content
+
+        result = {"content": response_content}
+        # Mi2 语义同源：携带生效模型 id，供上层 unpriced 明细（model→calls）聚合。
+        result["model"] = actual_model
+        if reasoning_content:
+            result["reasoning_content"] = reasoning_content
+        if usage:
+            result["usage"] = usage
+            result["cost"] = estimate_cost(
+                actual_model,
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+            )
+        return result
 
     @log_async_operation(
         operation_name="AIService.verify_connection",

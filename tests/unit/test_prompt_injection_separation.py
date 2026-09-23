@@ -42,7 +42,7 @@ def _make_mock_service():
             "summary": "test",
         }
 
-    svc._chat_completion = mock_chat_completion
+    svc._chat_completion_with_failover = mock_chat_completion
     svc._get_prompt_dump_dir = lambda: "/tmp"
     return svc, captured_messages
 

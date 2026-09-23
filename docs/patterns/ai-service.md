@@ -35,6 +35,16 @@
 - `utils/egress_audit.py`：`EgressAudit` 单例记录 LLM 云端外发的**元数据**（调用次数/状态），**不记录 prompt 内容本身**，避免二次泄露；审计文件 `USER_DATA_ROOT/logs/egress_audit.jsonl`。
 - 映射：`egress_audit` 支撑 UN-07「可控的 AI 使用范围」与 ADR-0008；R9 脱敏适用于审计日志内容（不留明文密钥）。
 - **新增 AI 外发调用点时**：复用 `await EgressAudit().record(...)`（`record` 为 **`async def`，须在 async 方法内调用并 await**，否则得到未 await 的 coroutine、审计静默失效），不得绕过审计单例直接外发。
+- **failover 双层审计（L4/ADR-0011）**：`_router_failover` 入口按 primary 意图记录一次；响应后按 `result["model"]`（流式经 chunk.model 动态收集）与 primary 不一致时**补记真实目的地**——Router 内部 fallback 后的实际生效供应商对审计可见（SEC-03 语义）。
+
+### 4a. 多供应商 failover（litellm.Router）
+
+- **正本**：[ADR-0011](../adr/0011-litellm-router-failover.md)。
+- `_router_failover`（services/ai_service/litellm_client.py）以 `litellm.Router` 承担同供应商瞬时重试（`num_retries=2`）、失败冷却（`cooldown_time=30s`）、健康路由与跨供应商切换；本层只保留入口门控、SEC-01/03 审计、流式解析与错误收敛。
+- **门控链**：cloud 可用性 → primary 存在 → `_ensure_litellm_loaded` → `_ensure_router_loaded`（Router 惰性构造，失败降级为 `AIServiceUnavailableError`，绝不静默回退非 Router 路径）。
+- **错误收敛**：非瞬态（Auth/ContentPolicy 等）直抛原异常（保持旧语义）；瞬态经 Router 重试+fallback 仍失败 → `AIServiceUnavailableError`（Tried 从配置构造）。
+- **配置热生效**：`reload_config` 失效已构造 Router，下次调用重建。
+- **已知行为增强**：ContentPolicyViolationError 未配置专属 content_policy_fallbacks 时 Router 默认会尝试普通 fallback（旧循环直抛语义不再保留），见 ADR-0011 Consequences。
 
 ### 5. Prompt 注入防御分层
 

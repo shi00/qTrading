@@ -33,7 +33,7 @@ async def test_analyze_stock_does_not_dump_prompt_when_feature_disabled(monkeypa
     monkeypatch.setattr(service, "is_cloud_available", lambda: True)
     monkeypatch.setattr(
         service,
-        "_chat_completion",
+        "_chat_completion_with_failover",
         AsyncMock(return_value={"score": 88, "reason": "ok"}),
     )
     monkeypatch.setattr(ai_mod, "validate_ai_analysis_response", lambda res: res)
@@ -75,7 +75,7 @@ async def test_prompt_dump_cleanup_outside_hot_path(monkeypatch, tmp_path):
     monkeypatch.setattr(service, "is_cloud_available", lambda: True)
     monkeypatch.setattr(
         service,
-        "_chat_completion",
+        "_chat_completion_with_failover",
         AsyncMock(return_value={"score": 90, "reason": "ok"}),
     )
     monkeypatch.setattr(ai_mod, "validate_ai_analysis_response", lambda res: res)
@@ -117,7 +117,7 @@ def _setup_dump_enabled(monkeypatch, tmp_path, service):
     monkeypatch.setattr(service, "is_cloud_available", lambda: True)
     monkeypatch.setattr(
         service,
-        "_chat_completion",
+        "_chat_completion_with_failover",
         AsyncMock(return_value={"score": 90, "reason": "ok"}),
     )
     monkeypatch.setattr(ai_mod, "validate_ai_analysis_response", lambda res: res)
