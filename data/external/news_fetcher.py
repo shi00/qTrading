@@ -158,23 +158,7 @@ class NewsFetcher:
         # Extract symbol without suffix suffix for standard AKShare calls
         symbol = ts_code.split(".")[0]
 
-        # dynamic market key resolution:
-        # Instead of guessing "上交所"/"深交所"/"北交所" and hitting KeyErrors in akshare,
-        # akshare actually consolidates all of them under a single key in its column_map.
-        # We dynamically fetch the exact default string from its signature definition
-        # to perfectly bypass any GBK/UTF-8 mojibake issues on Windows.
-        market = ""
-        try:
-            import akshare.stock_feature.stock_disclosure_cninfo as mod
-
-            market = mod.stock_zh_a_disclosure_report_cninfo.__defaults__[1]  # type: ignore[misc]
-        except (ImportError, AttributeError, IndexError, TypeError) as exc:
-            _log_with_severity(
-                exc,
-                "[NewsFetcher] Failed to read akshare default market: %s",
-                DataSanitizer.sanitize_error(exc),
-            )
-            market = "沪深京"  # Fallback to standard standard UTF-8 key
+        market = "沪深京"
 
         # Run the IO bound akshare calls in the thread pool
         def _fetch():
@@ -328,19 +312,7 @@ class NewsFetcher:
 
         symbol = ts_code.split(".")[0]
 
-        # 复用现有 CNINFO market 动态解析（与 get_stock_news 同法，避免 GBK/UTF-8 乱码）
-        market = ""
-        try:
-            import akshare.stock_feature.stock_disclosure_cninfo as mod
-
-            market = mod.stock_zh_a_disclosure_report_cninfo.__defaults__[1]  # type: ignore[misc]
-        except (ImportError, AttributeError, IndexError, TypeError) as exc:
-            _log_with_severity(
-                exc,
-                "[NewsFetcher] Failed to read akshare default market: %s",
-                DataSanitizer.sanitize_error(exc),
-            )
-            market = "沪深京"
+        market = "沪深京"
 
         def _fetch():
             docs: list[dict] = []
