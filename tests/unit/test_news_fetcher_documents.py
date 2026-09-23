@@ -92,8 +92,11 @@ class TestGetStockNewsDocuments:
         assert ann["url"] == "http://cninfo/a"
         assert ann["content"] == ""
         assert ann["publish_time"].tzinfo is None
+        # review08-D1：公告仅日期（CST）→ 补 00:00:00 后转 UTC naive（前日 16:00），与 get_stock_news 同口径
+        assert ann["publish_time"] == to_utc_for_db(datetime.datetime.combine(today - diff, datetime.time()))
         assert nws["url"] == "http://em/1"
         assert nws["content"] == "详细内容"
+        assert nws["publish_time"] == to_utc_for_db(datetime.datetime.combine(today, datetime.time(10, 0, 0)))
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")

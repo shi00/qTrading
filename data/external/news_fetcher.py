@@ -128,6 +128,107 @@ def _parse_news_time(raw: str | None, *, day_only: bool = False) -> datetime.dat
     return to_utc_for_db(parsed)
 
 
+def _fetch_stock_news_core(
+    symbol: str,
+    ts_code: str,
+    *,
+    log_prefix: str = "",
+) -> tuple[list[dict], list[dict], dict[str, str]]:
+    """一次抓取并归一化 CNINFO 公告 + EM 新闻（review08-D1 共享内核）。
+
+    返回 ``(announcement_docs, news_docs, coverage)``：
+    - 内部 doc 结构：``{"title", "publish_time"(UTC tz-naive datetime|None), "url", "content", "source_label"}``；
+    - 不做 limit / 窗口过滤 / 空 title 过滤（由公开方法整形决定）；
+    - 单层失败返回该层空列表 + coverage 对应 ``"fail"``；日志文本经 ``log_prefix``
+      区分两个公开方法（``get_stock_news`` 传 ``""``，``get_stock_news_documents`` 传 ``"documents "``，
+      与各自历史日志逐字一致）。
+    """
+    announcement_docs: list[dict] = []
+    news_docs: list[dict] = []
+    coverage = {"announcement": "fail", "news": "fail"}
+
+    # B3：巨潮公告接口当前仅支持固定 market 值"沪深京"
+    market = "沪深京"
+
+    # Layer 1: 巨潮公告（announcement）
+    try:
+        # Get last 6 months to ensure we find *something* (e.g. quarterly reports)
+        end_date = get_now().strftime("%Y%m%d")
+        start_date = (get_now() - timedelta(days=180)).strftime("%Y%m%d")
+
+        df_cninfo = _ensure_dataframe(
+            ak.stock_zh_a_disclosure_report_cninfo(
+                symbol=symbol,
+                market=market,
+                start_date=start_date,
+                end_date=end_date,
+            ),
+            source="stock_zh_a_disclosure_report_cninfo",
+        )
+
+        if df_cninfo is not None and not df_cninfo.empty:
+            # Column names may vary by akshare version or encoding.
+            # Known structure: [代码, 简称, 公告标题, 公告时间, 公告链接]
+            # We use name-based lookup with positional fallback.
+            cols = list(df_cninfo.columns)
+            title_col = "公告标题" if "公告标题" in cols else (cols[2] if len(cols) > 2 else None)
+            time_col = "公告时间" if "公告时间" in cols else (cols[3] if len(cols) > 3 else None)
+            url_col = "公告链接" if "公告链接" in cols else None
+            if title_col:
+                for _, row in df_cninfo.iterrows():
+                    title = str(row.get(title_col, "") or "").strip()
+                    raw_date = str(row.get(time_col, "")) if time_col else ""
+                    announcement_docs.append(
+                        {
+                            "title": title,
+                            # 仅日期 → 补 00:00:00（CST）后转 UTC naive（统一时间口径，review08-D1）
+                            "publish_time": _parse_news_time(raw_date, day_only=True),
+                            "url": str(row.get(url_col, "")) if url_col else "",
+                            "content": "",
+                            "source_label": "巨潮公告",
+                        }
+                    )
+                coverage["announcement"] = "ok"
+    except Exception as e:
+        _log_with_severity(
+            e,
+            f"[News] {log_prefix}CNINFO disclosure failed for %s: %s",
+            ts_code,
+            DataSanitizer.sanitize_error(e),
+        )
+
+    # Layer 2: 东财新闻搜索（news）
+    try:
+        df_em = _ensure_dataframe(ak.stock_news_em(symbol=symbol), source="stock_news_em")
+
+        if df_em is not None and not df_em.empty:
+            # EastMoney returns '新闻内容' as title, '新闻链接', '新闻时间', etc.
+            for _, row in df_em.iterrows():
+                title = str(row.get("新闻标题", row.get("新闻内容", "")) or "").strip()
+                raw_time = row.get("新闻时间", row.get("发布时间", ""))
+                url = str(row.get("新闻链接", "") or "") if "新闻链接" in df_em.columns else ""
+                content = str(row.get("新闻内容", "") or "").strip()
+                news_docs.append(
+                    {
+                        "title": title,
+                        "publish_time": _parse_news_time(str(raw_time)),
+                        "url": url,
+                        "content": content,
+                        "source_label": str(row.get("文章来源", "东财新闻")),
+                    }
+                )
+            coverage["news"] = "ok"
+    except Exception as e:
+        _log_with_severity(
+            e,
+            f"[News] {log_prefix}EM search failed for %s: %s",
+            ts_code,
+            DataSanitizer.sanitize_error(e),
+        )
+
+    return announcement_docs, news_docs, coverage
+
+
 class NewsFetcher:
     """
     Fetches news data using AKShare and direct robust Sina/THS clients.
@@ -159,100 +260,19 @@ class NewsFetcher:
         # Extract symbol without suffix suffix for standard AKShare calls
         symbol = ts_code.split(".")[0]
 
-        market = "沪深京"
-
         # Run the IO bound akshare calls in the thread pool
         def _fetch():
-            def _fetch_locked():
-                # -------------------------------------------------------------
-                # Layer 1: 巨潮资讯公告 (CNINFO Official Filings)
-                # -------------------------------------------------------------
-                try:
-                    # Get last 6 months to ensure we find *something* (e.g. quarterly reports)
-                    end_date = get_now().strftime("%Y%m%d")
-                    start_date = (get_now() - timedelta(days=180)).strftime("%Y%m%d")
-
-                    df_cninfo = _ensure_dataframe(
-                        ak.stock_zh_a_disclosure_report_cninfo(
-                            symbol=symbol,
-                            market=market,
-                            start_date=start_date,
-                            end_date=end_date,
-                        ),
-                        source="stock_zh_a_disclosure_report_cninfo",
-                    )
-
-                    if df_cninfo is not None and not df_cninfo.empty:
-                        # Column names may vary by akshare version or encoding.
-                        # Known structure: [代码, 简称, 公告标题, 公告时间, 公告链接]
-                        # We use name-based lookup with positional fallback.
-                        cols = list(df_cninfo.columns)
-                        title_col = "公告标题" if "公告标题" in cols else (cols[2] if len(cols) > 2 else None)
-                        time_col = "公告时间" if "公告时间" in cols else (cols[3] if len(cols) > 3 else None)
-
-                        if title_col:
-                            news_list = []
-                            for _, row in df_cninfo.head(limit if limit is not None else len(df_cninfo)).iterrows():
-                                title = str(row.get(title_col, "")).strip()
-                                pub_date = str(row.get(time_col, "")) if time_col else ""
-                                pub_time = f"{pub_date} 00:00:00" if pub_date else ""
-
-                                news_list.append(
-                                    {
-                                        "title": title,
-                                        "publish_time": pub_time,
-                                        "source": "巨潮公告",
-                                    },
-                                )
-
-                            if news_list:
-                                return news_list
-                except Exception as e:
-                    _log_with_severity(
-                        e,
-                        "[News] CNINFO disclosure failed for %s: %s",
-                        ts_code,
-                        DataSanitizer.sanitize_error(e),
-                    )
-
-                # -------------------------------------------------------------
-                # Layer 2: 东财新闻搜索 (EastMoney News Search) - Fallback
-                # -------------------------------------------------------------
-                try:
-                    df_em = _ensure_dataframe(ak.stock_news_em(symbol=symbol), source="stock_news_em")
-
-                    if df_em is not None and not df_em.empty:
-                        news_list = []
-                        # EastMoney returns '新闻内容' as title, '新闻链接', '新闻时间', etc.
-                        for _, row in df_em.head(limit if limit is not None else len(df_em)).iterrows():
-                            title = row.get("新闻标题", row.get("新闻内容", ""))
-                            pub_time = row.get("新闻时间", row.get("发布时间", ""))
-                            source = row.get("文章来源", "东财新闻")
-
-                            # Clean up title: 東方财富 often adds "[XXX]" prefixes or suffixes
-                            title_str = str(title).strip()
-
-                            news_list.append(
-                                {
-                                    "title": title_str,
-                                    "publish_time": str(pub_time),
-                                    "source": str(source),
-                                },
-                            )
-
-                        return news_list
-                except Exception as e:
-                    _log_with_severity(
-                        e,
-                        "[News] EM search failed for %s: %s",
-                        ts_code,
-                        DataSanitizer.sanitize_error(e),
-                    )
-
-                return []
+            def _shape(doc: dict) -> dict:
+                return {
+                    "title": doc["title"],
+                    "publish_time": doc["publish_time"],
+                    "source": doc["source_label"],
+                }
 
             try:
-                return _run_with_python_string_storage(_fetch_locked)
+                announcement_docs, news_docs, _coverage = _run_with_python_string_storage(
+                    lambda: _fetch_stock_news_core(symbol, ts_code)
+                )
             except Exception as outer_e:
                 _log_with_severity(
                     outer_e,
@@ -261,6 +281,10 @@ class NewsFetcher:
                     DataSanitizer.sanitize_error(outer_e),
                 )
                 return []
+
+            # 公告优先，EM 回退（与重构前一致：公告层有行即返回，否则用 EM）
+            source_docs = announcement_docs if announcement_docs else news_docs
+            return [_shape(d) for d in source_docs[:limit]]
 
         try:
             # We use the IO Thread Pool with a 15-second timeout via asyncio.wait_for
@@ -313,92 +337,14 @@ class NewsFetcher:
 
         symbol = ts_code.split(".")[0]
 
-        market = "沪深京"
-
         def _fetch():
             docs: list[dict] = []
             coverage = {"announcement": "fail", "news": "fail"}
 
-            def _fetch_locked():
-                # Layer 1: 巨潮公告（announcement）
-                try:
-                    end_date = get_now().strftime("%Y%m%d")
-                    start_date = (get_now() - timedelta(days=180)).strftime("%Y%m%d")
-                    df_cninfo = _ensure_dataframe(
-                        ak.stock_zh_a_disclosure_report_cninfo(
-                            symbol=symbol,
-                            market=market,
-                            start_date=start_date,
-                            end_date=end_date,
-                        ),
-                        source="stock_zh_a_disclosure_report_cninfo",
-                    )
-                    if df_cninfo is not None and not df_cninfo.empty:
-                        cls = list(df_cninfo.columns)
-                        title_col = "公告标题" if "公告标题" in cls else (cls[2] if len(cls) > 2 else None)
-                        time_col = "公告时间" if "公告时间" in cls else (cls[3] if len(cls) > 3 else None)
-                        url_col = "公告链接" if "公告链接" in cls else None
-                        if title_col:
-                            for _, row in df_cninfo.iterrows():
-                                title = str(row.get(title_col, "") or "").strip()
-                                if not title:
-                                    continue
-                                raw_date = str(row.get(time_col, "")) if time_col else ""
-                                publish_time = _parse_news_time(raw_date, day_only=True)
-                                url = str(row.get(url_col, "")) if url_col else ""
-                                docs.append(
-                                    {
-                                        "ts_code": ts_code,
-                                        "source_kind": "announcement",
-                                        "title": title,
-                                        "publish_time": publish_time,
-                                        "url": url or None,
-                                        "content": "",
-                                    }
-                                )
-                            coverage["announcement"] = "ok"
-                except Exception as e:
-                    _log_with_severity(
-                        e,
-                        "[News] documents CNINFO disclosure failed for %s: %s",
-                        ts_code,
-                        DataSanitizer.sanitize_error(e),
-                    )
-
-                # Layer 2: 东财新闻（news）
-                try:
-                    df_em = _ensure_dataframe(ak.stock_news_em(symbol=symbol), source="stock_news_em")
-                    if df_em is not None and not df_em.empty:
-                        for _, row in df_em.iterrows():
-                            title = str(row.get("新闻标题", row.get("新闻内容", "")) or "").strip()
-                            if not title:
-                                continue
-                            raw_time = row.get("新闻时间", row.get("发布时间", ""))
-                            publish_time = _parse_news_time(str(raw_time))
-                            url = str(row.get("新闻链接", "") or "") if "新闻链接" in df_em.columns else ""
-                            content = str(row.get("新闻内容", "") or "").strip()
-                            docs.append(
-                                {
-                                    "ts_code": ts_code,
-                                    "source_kind": "news",
-                                    "title": title,
-                                    "publish_time": publish_time,
-                                    "url": url or None,
-                                    "content": content,
-                                }
-                            )
-                        coverage["news"] = "ok"
-                except Exception as e:
-                    _log_with_severity(
-                        e,
-                        "[News] documents EM search failed for %s: %s",
-                        ts_code,
-                        DataSanitizer.sanitize_error(e),
-                    )
-                return docs, coverage
-
             try:
-                docs, coverage = _run_with_python_string_storage(_fetch_locked)
+                announcement_docs, news_docs, coverage = _run_with_python_string_storage(
+                    lambda: _fetch_stock_news_core(symbol, ts_code, log_prefix="documents ")
+                )
             except Exception as outer_e:
                 _log_with_severity(
                     outer_e,
@@ -406,7 +352,25 @@ class NewsFetcher:
                     ts_code,
                     DataSanitizer.sanitize_error(outer_e),
                 )
-                # docs/coverage 闭包保留已部分收集的结果
+                # 外层异常（如 string_storage 锁超时）降级为空结果，与重构前闭包初始值一致
+                announcement_docs, news_docs = [], []
+
+            # 合并两源（公告在前、新闻在后，排序稳定性与重构前一致）；空 title 文档剔除（documents 口径）
+            for src_kind, layer_docs in (("announcement", announcement_docs), ("news", news_docs)):
+                for d in layer_docs:
+                    title = d["title"]
+                    if not title:
+                        continue
+                    docs.append(
+                        {
+                            "ts_code": ts_code,
+                            "source_kind": src_kind,
+                            "title": title,
+                            "publish_time": d["publish_time"],
+                            "url": d["url"] or None,
+                            "content": d["content"],
+                        }
+                    )
 
             # 收集两源 → 时间降序 → 窗口过滤 → 限量
             docs.sort(key=lambda d: d["publish_time"] or datetime.datetime.min, reverse=True)  # noqa: DTZ901  # 哨兵边界（None 置尾），排序键不参与时区运算，与 naive publish_time 同口径

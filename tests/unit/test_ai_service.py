@@ -3,6 +3,7 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import datetime
 import pytest
 import httpx
 from unittest.mock import patch, AsyncMock, MagicMock
@@ -45,6 +46,28 @@ def _make_svc_with_cloud():
         }
         svc = AIService()
     return svc
+
+
+class TestNewsDateLabel:
+    """review08-D1：_news_date_label 渲染 LLM prompt 的新闻日期标签（兼容 datetime/字符串/缺失）。"""
+
+    @staticmethod
+    def _label(item):
+        from services.ai_service.stock_analysis import _news_date_label
+
+        return _news_date_label(item)
+
+    def test_datetime_returns_date_str(self):
+        # 公告 CST 2024-08-30 00:00 → UTC naive 2024-08-29 16:00 → 标签取 UTC 日期
+        dt = datetime.datetime(2024, 8, 29, 16, 0, 0)
+        assert self._label({"publish_time": dt}) == "2024-08-29"
+
+    def test_string_fallback_truncates_to_date(self):
+        assert self._label({"publish_time": "2024-08-30 00:00:00"}) == "2024-08-30"
+
+    def test_missing_or_none_returns_empty(self):
+        assert self._label({}) == ""
+        assert self._label({"publish_time": None}) == ""
 
 
 class TestAIServiceInit:
