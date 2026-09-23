@@ -18,6 +18,7 @@ from data.external.news_fetcher import (
     _SINA_EMPTY_THRESHOLD,
 )
 from utils.time_utils import CST_TZ, to_utc_for_db
+import httpx
 import requests
 
 
@@ -33,6 +34,35 @@ def _wire_http_get(mock_client, mock_response):
     instance.__aexit__ = AsyncMock(return_value=False)
     instance.get = AsyncMock(return_value=mock_response)
     return mock_response
+
+
+def _concept_jsonp_text(rows: list[tuple[str, str]]) -> str:
+    """构造新浪 newFLJK.php 概念板块 JSONP 响应文本（B2 直连 HTTPS 后的解析输入）。
+
+    rows: [(板块, 涨跌幅字符串), ...]。每行按新浪 13 列结构拼装：
+    label,板块,公司家数,平均价格,涨跌额,涨跌幅,总成交量,总成交额,股票代码,
+    个股-涨跌幅,个股-当前价,个股-涨跌额,股票名称。
+    注意：与真实响应一致，JSONP 尾部无分号（json.loads(text[find("{") :]) 直接解析）。
+    """
+    items = []
+    for i, (name, change) in enumerate(rows):
+        fields = [
+            f"gn_{i}",
+            name,
+            "50",
+            "10.0",
+            "0.1",
+            change,
+            "1000000",
+            "5000000",
+            "000001",
+            "1.0",
+            "10.0",
+            "0.1",
+            "股票A",
+        ]
+        items.append(f'"gn_{i}":"{",".join(fields)}"')
+    return "var arr={" + ",".join(items) + "}"
 
 
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
@@ -769,78 +799,86 @@ class TestGetUsMajorMoves:
 
 class TestGetHotConcepts:
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_success(self, mock_ak, mock_run, mock_tpm):
-        df = pd.DataFrame(
-            {
-                "板块": ["人工智能", "芯片", "新能源"],
-                "涨跌幅": [5.2, 3.1, -2.5],
-            }
-        )
-        mock_ak.stock_sector_spot.return_value = df
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=df)
+    @patch("httpx.AsyncClient")
+    async def test_success_sorted_and_colored(self, mock_client):
+        """成功解析（13 列 JSONP）：涨跌幅降序 + 红/绿颜色映射 + 限量。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp_text([("新能源", "3.1"), ("人工智能", "5.2"), ("芯片", "-2.5")])
+        _wire_http_get(mock_client, mock_resp)
 
         result = await NewsFetcher.get_hot_concepts(limit=3)
         assert isinstance(result, list)
         assert len(result) == 3
         assert result[0]["name"] == "人工智能"
+        assert result[0]["change"] == "5.20%"
         assert result[0]["color"] == "red"
+        assert result[1]["name"] == "新能源"
+        assert result[1]["color"] == "red"
+        assert result[2]["name"] == "芯片"
         assert result[2]["color"] == "green"
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_empty_df(self, mock_ak, mock_run, mock_tpm):
-        mock_ak.stock_sector_spot.return_value = pd.DataFrame()
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=pd.DataFrame())
+    @patch("httpx.AsyncClient")
+    async def test_limit_truncates_top_n(self, mock_client):
+        """limit 限量取涨跌幅 top-N。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp_text([(f"概念{i}", str(i)) for i in range(5, 0, -1)])
+        _wire_http_get(mock_client, mock_resp)
+
+        result = await NewsFetcher.get_hot_concepts(limit=3)
+        assert len(result) == 3
+        assert result[0]["name"] == "概念5"
+        assert result[2]["name"] == "概念3"
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_empty_jsonp_returns_empty(self, mock_client):
+        """空 JSON 对象 → 空数据语义（empty 计数递增，返回 []）。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = "var arr={}"
+        _wire_http_get(mock_client, mock_resp)
 
         result = await NewsFetcher.get_hot_concepts()
         assert result == []
+        assert _SINA_CONSECUTIVE_EMPTY["concept"] == 1
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_none_df_returns_empty(self, mock_tpm):
-        """df is None means data source failure — returns []."""
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=None)
+    @patch("httpx.AsyncClient")
+    async def test_none_json_returns_empty(self, mock_client):
+        """json.loads 返回 None（响应异常）→ 数据源故障语义（failures 递增，返回 []）。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp_text([("概念1", "1.0")])
+        _wire_http_get(mock_client, mock_resp)
+        with patch("data.external.news_fetcher.json.loads", return_value=None):
+            result = await NewsFetcher.get_hot_concepts()
+        assert result == []
+        assert _SINA_CONSECUTIVE_FAILURES["concept"] == 1
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_json_decode_error_returns_empty(self, mock_client):
+        """响应无 '{' 前缀 / JSON 解析失败 → failures 递增，返回 []。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = "not a jsonp response"
+        _wire_http_get(mock_client, mock_resp)
 
         result = await NewsFetcher.get_hot_concepts()
         assert result == []
+        assert _SINA_CONSECUTIVE_FAILURES["concept"] == 1
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_nan_change(self, mock_ak, mock_run, mock_tpm):
-        import numpy as np
-
-        df = pd.DataFrame(
-            {
-                "板块": ["概念1"],
-                "涨跌幅": [np.nan],
-            }
-        )
-        mock_ak.stock_sector_spot.return_value = df
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=df)
+    @patch("httpx.AsyncClient")
+    async def test_nan_change_is_grey(self, mock_client):
+        """NaN 涨跌幅 → 0.00% / grey。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp_text([("概念1", "nan")])
+        _wire_http_get(mock_client, mock_resp)
 
         result = await NewsFetcher.get_hot_concepts(limit=1)
         assert len(result) == 1
@@ -848,137 +886,115 @@ class TestGetHotConcepts:
         assert result[0]["color"] == "grey"
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_zero_change(self, mock_ak, mock_run, mock_tpm):
-        df = pd.DataFrame(
-            {
-                "板块": ["概念1"],
-                "涨跌幅": [0.0],
-            }
-        )
-        mock_ak.stock_sector_spot.return_value = df
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=df)
-
-        result = await NewsFetcher.get_hot_concepts(limit=1)
-        assert result[0]["color"] == "grey"
-
-    @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_invalid_change_value(self, mock_ak, mock_run, mock_tpm):
-        df = pd.DataFrame(
-            {
-                "板块": ["概念1"],
-                "涨跌幅": ["invalid"],
-            }
-        )
-        mock_ak.stock_sector_spot.return_value = df
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=df)
+    @patch("httpx.AsyncClient")
+    async def test_zero_change_is_grey(self, mock_client):
+        """0.0 涨跌幅 → grey。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp_text([("概念1", "0.0")])
+        _wire_http_get(mock_client, mock_resp)
 
         result = await NewsFetcher.get_hot_concepts(limit=1)
         assert result[0]["change"] == "0.00%"
+        assert result[0]["color"] == "grey"
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_no_name_column(self, mock_ak, mock_run, mock_tpm):
-        df = pd.DataFrame(
-            {
-                "板块": ["", "概念2"],
-                "涨跌幅": [1.0, 2.0],
-            }
-        )
-        mock_ak.stock_sector_spot.return_value = df
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=df)
+    @patch("httpx.AsyncClient")
+    async def test_invalid_change_value(self, mock_client):
+        """非法涨跌幅字符串 → 0.00%。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp_text([("概念1", "invalid")])
+        _wire_http_get(mock_client, mock_resp)
+
+        result = await NewsFetcher.get_hot_concepts(limit=1)
+        assert result[0]["change"] == "0.00%"
+        assert result[0]["color"] == "grey"
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_empty_name_skipped(self, mock_client):
+        """板块名为空时跳过该行。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp_text([("", "1.0"), ("概念2", "2.0")])
+        _wire_http_get(mock_client, mock_resp)
 
         result = await NewsFetcher.get_hot_concepts(limit=3)
         assert len(result) == 1
         assert result[0]["name"] == "概念2"
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_sina_exception_returns_empty(self, mock_ak, mock_run, mock_tpm):
-        mock_ak.stock_sector_spot.side_effect = Exception("sina error")
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("sina error"))
+    @patch("httpx.AsyncClient")
+    async def test_short_fields_row_skipped(self, mock_client):
+        """列数不足（新浪列序漂移防御）→ 跳过该行，返回 []（empty 计数递增）。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = 'var arr={"gn_0":"gn_0,测试板块,50,10.0,0.1"}'
+        _wire_http_get(mock_client, mock_resp)
+
+        result = await NewsFetcher.get_hot_concepts(limit=8)
+        assert result == []
+        assert _SINA_CONSECUTIVE_EMPTY["concept"] == 1
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_sina_exception_returns_empty(self, mock_client):
+        """httpx 网络异常 → failures 递增，返回 []。"""
+        _wire_http_get(mock_client, MagicMock())
+        mock_client.return_value.get.side_effect = httpx.ConnectError("sina error")
 
         result = await NewsFetcher.get_hot_concepts()
         assert result == []
+        assert _SINA_CONSECUTIVE_FAILURES["concept"] == 1
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_general_exception_returns_empty(self, mock_ak, mock_run, mock_tpm):
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("general error"))
+    @patch("httpx.AsyncClient")
+    async def test_httpx_timeout_returns_empty(self, mock_client):
+        """httpx 超时（TimeoutException）→ failures 递增，返回 []。"""
+        _wire_http_get(mock_client, MagicMock())
+        mock_client.return_value.get.side_effect = httpx.TimeoutException("timeout")
 
         result = await NewsFetcher.get_hot_concepts()
         assert result == []
+        assert _SINA_CONSECUTIVE_FAILURES["concept"] == 1
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_timeout_returns_empty(self, mock_tpm):
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(side_effect=TimeoutError())
+    @patch("httpx.AsyncClient")
+    async def test_general_exception_returns_empty(self, mock_client):
+        """任意异常 → failures 递增，返回 []。"""
+        _wire_http_get(mock_client, MagicMock())
+        mock_client.return_value.get.side_effect = RuntimeError("general error")
 
         result = await NewsFetcher.get_hot_concepts()
         assert result == []
+        assert _SINA_CONSECUTIVE_FAILURES["concept"] == 1
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_cancelled_error_propagates(self, mock_tpm):
+    @patch("httpx.AsyncClient")
+    async def test_http_error_returns_empty(self, mock_client):
+        """HTTP 4xx/5xx → failures 递增，返回 []。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "403 Forbidden",
+            request=MagicMock(),
+            response=MagicMock(),
+        )
+        _wire_http_get(mock_client, mock_resp)
+
+        result = await NewsFetcher.get_hot_concepts()
+        assert result == []
+        assert _SINA_CONSECUTIVE_FAILURES["concept"] == 1
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_cancelled_error_propagates(self, mock_client):
         """CancelledError must always propagate (R2: graceful shutdown)."""
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        # Simulate wait_for raising CancelledError (which it does when the inner task is cancelled)
-        with patch("asyncio.wait_for", side_effect=asyncio.CancelledError()):
-            with pytest.raises(asyncio.CancelledError):
-                await NewsFetcher.get_hot_concepts()
+        _wire_http_get(mock_client, MagicMock())
+        mock_client.return_value.get.side_effect = asyncio.CancelledError()
 
-    @pytest.mark.asyncio
-    async def test_akshare_returns_list(self):
-        """When akshare returns list instead of DataFrame, _ensure_dataframe normalizes it."""
-        fetcher = NewsFetcher()
-        list_data = [
-            {"板块": "AI", "涨跌幅": 3.5},
-            {"板块": "芯片", "涨跌幅": 2.1},
-        ]
-        with patch("data.external.news_fetcher.ak") as mock_ak:
-            mock_ak.stock_sector_spot.return_value = list_data
-            result = await fetcher.get_hot_concepts()
-            # Should not raise AttributeError
-            assert isinstance(result, list)
+        with pytest.raises(asyncio.CancelledError):
+            await NewsFetcher.get_hot_concepts()
 
 
 class TestNewsFetcherGetLatestGlobalNews:
@@ -1078,29 +1094,38 @@ class TestUsMajorMovesLookAheadGuard:
 
 class TestGetHotConceptsTimeout:
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher._run_with_python_string_storage")
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_timeout_returns_empty(self, mock_tpm, mock_run):
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(side_effect=TimeoutError())
+    @patch("httpx.AsyncClient")
+    async def test_httpx_timeout_returns_empty(self, mock_client):
+        """httpx 超时（TimeoutException）→ 返回空列表。"""
+        _wire_http_get(mock_client, MagicMock())
+        mock_client.return_value.get.side_effect = httpx.TimeoutException("timeout")
 
         result = await NewsFetcher.get_hot_concepts(limit=3)
         assert result == []
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher._run_with_python_string_storage")
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_within_timeout_succeeds(self, mock_tpm, mock_run):
-        df = pd.DataFrame(
-            {
-                "板块": ["AI", "芯片"],
-                "涨跌幅": [3.0, -1.5],
-            }
-        )
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=df)
+    @patch("httpx.AsyncClient")
+    async def test_wait_for_timeout_returns_empty(self, mock_client):
+        """外层 asyncio.wait_for 超时（内置 TimeoutError）→ 返回空列表 + failures 递增。"""
+        _wire_http_get(mock_client, MagicMock())
+        with patch(
+            "data.external.news_fetcher.asyncio.wait_for",
+            side_effect=lambda coro, *a, **kw: [
+                coro.close(),
+                (_ for _ in ()).throw(TimeoutError("timeout")),
+            ][1],
+        ):
+            result = await NewsFetcher.get_hot_concepts(limit=3)
+        assert result == []
+        assert _SINA_CONSECUTIVE_FAILURES["concept"] == 1
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_within_timeout_succeeds(self, mock_client):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp_text([("AI", "3.0"), ("芯片", "-1.5")])
+        _wire_http_get(mock_client, mock_resp)
 
         result = await NewsFetcher.get_hot_concepts(limit=3)
         assert isinstance(result, list)
@@ -1109,45 +1134,16 @@ class TestGetHotConceptsTimeout:
         assert result[1]["color"] == "green"
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher._run_with_python_string_storage")
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_zero_change_is_grey(self, mock_tpm, mock_run):
-        df = pd.DataFrame(
-            {
-                "板块": ["平盘板块"],
-                "涨跌幅": [0.0],
-            }
-        )
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=df)
+    @patch("httpx.AsyncClient")
+    async def test_zero_change_is_grey(self, mock_client):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp_text([("平盘板块", "0.0")])
+        _wire_http_get(mock_client, mock_resp)
 
         result = await NewsFetcher.get_hot_concepts(limit=3)
         assert len(result) == 1
         assert result[0]["color"] == "grey"
-
-    @pytest.mark.asyncio
-    @patch("data.external.news_fetcher._run_with_python_string_storage")
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_timeout_logs_thread_leak_warning(self, mock_tpm, mock_run, caplog):
-        """data-P1-1a: timeout 触发时必须记录 'uncancelable' 关键字的警告日志。
-
-        根因：asyncio.wait_for 超时仅取消 asyncio.Future 的 await，底层
-        ThreadPoolManager IO 线程中的 _fetch 无法被强制取消，会持续占用
-        IO 池槽位直至自然返回。
-        """
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(side_effect=TimeoutError())
-
-        with caplog.at_level(logging.WARNING, logger="data.external.news_fetcher"):
-            result = await NewsFetcher.get_hot_concepts(limit=3)
-
-        assert result == []
-        thread_leak_logs = [
-            r for r in caplog.records if "uncancelable" in r.getMessage() and r.levelno == logging.WARNING
-        ]
-        assert len(thread_leak_logs) == 1, f"应记录 1 条线程泄漏警告，实际: {len(thread_leak_logs)}"
 
 
 class TestSinaConsecutiveEmptyAlert:
@@ -1155,31 +1151,32 @@ class TestSinaConsecutiveEmptyAlert:
         assert _SINA_EMPTY_THRESHOLD >= 2
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher._run_with_python_string_storage")
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_concept_empty_increments_counter(self, mock_tpm, mock_run):
-        """Empty DataFrame (not None) should increment empty counter and return []."""
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=pd.DataFrame())
+    @patch("httpx.AsyncClient")
+    async def test_concept_empty_increments_counter(self, mock_client):
+        """空数据（空 JSON 对象）应递增 empty 计数并返回 []。"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = "var arr={}"
+        _wire_http_get(mock_client, mock_resp)
 
         result = await NewsFetcher.get_hot_concepts(limit=3)
         assert result == []
         assert _SINA_CONSECUTIVE_EMPTY["concept"] == 1
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher._run_with_python_string_storage")
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_concept_success_resets_counter(self, mock_tpm, mock_run):
+    @patch("httpx.AsyncClient")
+    async def test_concept_success_resets_counter(self, mock_client):
         _SINA_CONSECUTIVE_EMPTY["concept"] = 5
-        df = pd.DataFrame({"板块": ["AI"], "涨跌幅": [3.0]})
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=df)
+        _SINA_CONSECUTIVE_FAILURES["concept"] = 2
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp_text([("AI", "3.0")])
+        _wire_http_get(mock_client, mock_resp)
 
         result = await NewsFetcher.get_hot_concepts(limit=3)
         assert len(result) == 1
         assert _SINA_CONSECUTIVE_EMPTY["concept"] == 0
+        assert _SINA_CONSECUTIVE_FAILURES["concept"] == 0
 
 
 class TestGetStockNewsDirectExecution:
@@ -1587,47 +1584,41 @@ class TestGetUsMajorMovesDirectExecution:
 
 class TestGetHotConceptsDirectExecution:
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ak")
-    async def test_sina_concept_exception_returns_empty(self, mock_ak):
-        mock_ak.stock_sector_spot.side_effect = Exception("sina error")
+    @patch("httpx.AsyncClient")
+    async def test_sina_concept_exception_returns_empty(self, mock_client):
+        """httpx 网络异常 → failures 递增，返回 []。"""
+        _wire_http_get(mock_client, MagicMock())
+        mock_client.return_value.get.side_effect = httpx.ConnectError("sina error")
 
-        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
-            mock_tpm_instance = MagicMock()
-            mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
-
-            result = await NewsFetcher.get_hot_concepts(limit=3)
-            assert result == []
+        result = await NewsFetcher.get_hot_concepts(limit=3)
+        assert result == []
+        assert _SINA_CONSECUTIVE_FAILURES["concept"] == 1
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ak")
-    async def test_concept_consecutive_empty_threshold(self, mock_ak):
+    @patch("httpx.AsyncClient")
+    async def test_concept_consecutive_empty_threshold(self, mock_client):
         _SINA_CONSECUTIVE_EMPTY["concept"] = _SINA_EMPTY_THRESHOLD - 1
-        mock_ak.stock_sector_spot.return_value = pd.DataFrame()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = "var arr={}"
+        _wire_http_get(mock_client, mock_resp)
 
-        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
-            mock_tpm_instance = MagicMock()
-            mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
-
-            result = await NewsFetcher.get_hot_concepts(limit=3)
+        result = await NewsFetcher.get_hot_concepts(limit=3)
         assert result == []
         assert _SINA_CONSECUTIVE_EMPTY["concept"] >= _SINA_EMPTY_THRESHOLD
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ak")
-    async def test_concept_consecutive_empty_threshold_logs_warning(self, mock_ak, caplog):
+    @patch("httpx.AsyncClient")
+    async def test_concept_consecutive_empty_threshold_logs_warning(self, mock_client, caplog):
         """Empty-data degradation threshold must log WARNING, not ERROR (CLAUDE.md §5.4)."""
         _SINA_CONSECUTIVE_EMPTY["concept"] = _SINA_EMPTY_THRESHOLD - 1
-        mock_ak.stock_sector_spot.return_value = pd.DataFrame()
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = "var arr={}"
+        _wire_http_get(mock_client, mock_resp)
 
-        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
-            mock_tpm_instance = MagicMock()
-            mock_tpm.return_value = mock_tpm_instance
-            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
-
-            with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
-                result = await NewsFetcher.get_hot_concepts(limit=3)
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_hot_concepts(limit=3)
         assert result == []
         assert _SINA_CONSECUTIVE_EMPTY["concept"] >= _SINA_EMPTY_THRESHOLD
         degraded_records = [
@@ -2092,32 +2083,29 @@ class TestClassifyErrorIntegration:
         assert code_records, "Expected [code=...] in US moves fetching error log"
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_hot_concepts_timeout_logs_code(self, mock_tpm, caplog):
+    @patch("httpx.AsyncClient")
+    async def test_hot_concepts_timeout_logs_code(self, mock_client, caplog):
         """路径 14: get_hot_concepts except TimeoutError — 超时日志含 [code=]。"""
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(side_effect=TimeoutError("timeout"))
-
-        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
-            result = await NewsFetcher.get_hot_concepts()
+        _wire_http_get(mock_client, MagicMock())
+        with patch(
+            "data.external.news_fetcher.asyncio.wait_for",
+            side_effect=lambda coro, *a, **kw: [
+                coro.close(),
+                (_ for _ in ()).throw(TimeoutError("timeout")),
+            ][1],
+        ):
+            with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+                result = await NewsFetcher.get_hot_concepts()
         assert result == []
         code_records = [r for r in caplog.records if "[code=" in r.getMessage() and "timed out" in r.getMessage()]
         assert code_records, "Expected [code=...] in hot concepts timeout log"
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_hot_concepts_exception_logs_code(self, mock_ak, mock_run, mock_tpm, caplog):
+    @patch("httpx.AsyncClient")
+    async def test_hot_concepts_exception_logs_code(self, mock_client, caplog):
         """路径 15: get_hot_concepts except Exception — 失败日志含 [code=]。"""
-        mock_ak.stock_sector_spot.side_effect = Exception("concept error")
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("concept error"))
+        _wire_http_get(mock_client, MagicMock())
+        mock_client.return_value.get.side_effect = httpx.ConnectError("concept error")
 
         with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
             result = await NewsFetcher.get_hot_concepts()
