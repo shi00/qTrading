@@ -483,7 +483,12 @@ class StockAnalysisService:
                 "[AIService] Token budget unavailable (%s: %s)",
             )
             return {"error": str(e), "score": None, "ai_status": "failed"}
-        budget_res = _apply_context_budget(sections, budget_tokens)
+        _model = (getattr(self._service, "_litellm_config", None) or {}).get("model")
+        budget_res = _apply_context_budget(
+            sections,
+            budget_tokens,
+            model=_model if isinstance(_model, str) else None,
+        )
         _user_prompt, surviving_names = budget_res  # 解构仅需 surviving_names（user_prompt 由下游 section_map 重派生）
         section_map = budget_res.section_map
 

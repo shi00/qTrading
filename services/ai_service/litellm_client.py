@@ -319,7 +319,8 @@ class LiteLLMClient:
             **kwargs,
         )
 
-        total_tokens = sum(_estimate_tokens(m.get("content")) for m in messages)
+        token_model = model_override or (llm_config.get("model") if isinstance(llm_config.get("model"), str) else "")
+        total_tokens = sum(_estimate_tokens(m.get("content"), token_model) for m in messages)
         context_window = _get_model_context_window(llm_config, model_override)
         if total_tokens > context_window:
             logger.warning(
