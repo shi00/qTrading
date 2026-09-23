@@ -46,8 +46,13 @@ class TechnicalAnalysis:
 
     @staticmethod
     def get_macd(df, fast=12, slow=26, sign=9):
-        """
-        Calculate MACD, Signal, Hist (using QFQ).
+        """Calculate MACD, Signal, Hist (using QFQ).
+
+        OSS-05 收敛：唯一正本为 Polars get_macd_expr。收敛前本方法为独立 Pandas
+        实现，柱状图口径为 ``hist = dif - dea``（未 ×2），与策略层
+        ``macd = (dif - dea) × 2`` 差 2 倍（D3）。现委托 Polars 正本计算并
+        返回末值，第三位返回值变为 ×2 的 macd 柱（B2 收敛方向，国内行情软件
+        通行口径）。
         """
         if df is None or len(df) < slow + 2:
             return "UNKNOWN", 0, 0
@@ -55,33 +60,43 @@ class TechnicalAnalysis:
         # Use Adjusted Prices
         df_calc = TechnicalAnalysis._get_qfq_df(df)
 
-        # Standard MACD
-        exp1 = df_calc["close"].ewm(span=fast, adjust=False).mean()  # type: ignore[optional-subscript]
-        exp2 = df_calc["close"].ewm(span=slow, adjust=False).mean()  # type: ignore[optional-subscript]
-        macd = exp1 - exp2
-        signal = macd.ewm(span=sign, adjust=False).mean()
-        hist = macd - signal
+        import polars as pl
 
-        # Latest values
-        curr_hist = hist.iloc[-1]
-        prev_hist = hist.iloc[-2]
+        result = (
+            pl.from_pandas(df_calc[["close"]])
+            .lazy()
+            .select(TechnicalAnalysis.get_macd_expr(fast=fast, slow=slow, sign=sign))
+            .unnest("macd_struct")
+            .collect()
+        )
+        curr_macd = result["macd"][-1]
+        curr_dif = result["dif"][-1]
+        # 预热期 null 是真实「未知」（R21），显式返回 None 而非填充业务合法值
+        if curr_macd is None or curr_dif is None:
+            return "UNKNOWN", None, None
+        prev_macd = result["macd"][-2]
 
         status = "NEUTRAL"
-        if prev_hist < 0 and curr_hist > 0:
+        if prev_macd is not None and prev_macd < 0 and curr_macd > 0:
             status = "GOLDEN_CROSS"
-        elif prev_hist > 0 and curr_hist < 0:
+        elif prev_macd is not None and prev_macd > 0 and curr_macd < 0:
             status = "DEATH_CROSS"
-        elif curr_hist > 0:
+        elif curr_macd > 0:
             status = "BULLISH"
         else:
             status = "BEARISH"
 
-        return status, macd.iloc[-1], hist.iloc[-1]
+        return status, float(curr_dif), float(curr_macd)
 
     @staticmethod
     def get_kdj(df, n=9, m1=3, m2=3):
-        """
-        Calculate KDJ (using QFQ).
+        """Calculate KDJ (using QFQ)。
+
+        OSS-05 收敛：唯一正本为 Polars get_kdj_expr。收敛前本方法为独立 Pandas
+        实现，一字板/全横盘（hhv==llv → rsv=0/0）时 k/d/j 为 NaN，经 ai_mixin
+        以 "k: nan" 注入 AI prompt（D1），且 NaN 比较全为 False 导致静默判为
+        NEUTRAL。现委托 Polars 正本计算后取末值，由 Polars 侧 fill_nan(50)
+        统一承载边界语义（R21：预热期 null 仍以 None 显式缺省，不伪造）。
         """
         if df is None or len(df) < n:
             return "UNKNOWN", 0, 0, 0
@@ -89,20 +104,19 @@ class TechnicalAnalysis:
         # Use Adjusted Prices
         df_calc = TechnicalAnalysis._get_qfq_df(df)
 
-        low_list = df_calc["low"].rolling(window=n, min_periods=n).min()  # type: ignore[optional-subscript]
-        low_list = low_list.fillna(value=df_calc["low"].expanding().min())  # type: ignore[optional-subscript]
-        high_list = df_calc["high"].rolling(window=n, min_periods=n).max()  # type: ignore[optional-subscript]
-        high_list = high_list.fillna(value=df_calc["high"].expanding().max())  # type: ignore[optional-subscript]
+        import polars as pl
 
-        rsv = (df_calc["close"] - low_list) / (high_list - low_list) * 100  # type: ignore[optional-subscript]
-
-        k = rsv.ewm(com=m1 - 1, adjust=False).mean()
-        d = k.ewm(com=m2 - 1, adjust=False).mean()
-        j = 3 * k - 2 * d
-
-        curr_k = k.iloc[-1]
-        curr_d = d.iloc[-1]
-        curr_j = j.iloc[-1]
+        result = (
+            pl.from_pandas(df_calc[["high", "low", "close"]])
+            .lazy()
+            .select(TechnicalAnalysis.get_kdj_expr(n=n, m1=m1, m2=m2))
+            .unnest("kdj_struct")
+            .collect()
+        )
+        curr_k, curr_d, curr_j = (result[c][-1] for c in ("k", "d", "j"))
+        # R21：预热期 null 是真实「未知」，显式返回 None，不填充数值
+        if curr_k is None or curr_d is None or curr_j is None:
+            return "UNKNOWN", None, None, None
 
         status = "NEUTRAL"
         if curr_k > 80:
@@ -110,7 +124,7 @@ class TechnicalAnalysis:
         elif curr_k < 20:
             status = "OVERSOLD"
 
-        return status, curr_k, curr_d, curr_j
+        return status, float(curr_k), float(curr_d), float(curr_j)
 
     @staticmethod
     def analyze_trend(df):
@@ -340,21 +354,25 @@ class TechnicalAnalysis:
 
     @staticmethod
     def get_macd_expr(col_name="close", fast=12, slow=26, sign=9):
+        """Returns a Polars Expression (struct) for MACD.
+
+        预热期 null 是真实的「未知」，不 fill_null 伪装（R21，与 get_rsi_expr 一致）——
+        下游 ``.filter(pl.col("macd") > 0)`` 对 null 返回 null 自然丢弃该行。
+        macd 柱取 (dif-dea)×2，为国内行情软件通行口径（OSS-05 B2 正本）。
+        min_samples 取窗口长度，消除 EWM 种子污染（新上市/次新股前 slow 根不产出
+        值），与 get_rsi_expr 的 min_samples=period 对齐。
+        """
         import polars as pl
 
         # EMA
-        ema_fast = pl.col(col_name).ewm_mean(span=fast, adjust=False, min_samples=0)
-        ema_slow = pl.col(col_name).ewm_mean(span=slow, adjust=False, min_samples=0)
+        ema_fast = pl.col(col_name).ewm_mean(span=fast, adjust=False, min_samples=slow)
+        ema_slow = pl.col(col_name).ewm_mean(span=slow, adjust=False, min_samples=slow)
         dif = ema_fast - ema_slow
-        dea = dif.ewm_mean(span=sign, adjust=False, min_samples=0)
+        dea = dif.ewm_mean(span=sign, adjust=False, min_samples=sign)
         macd = (dif - dea) * 2  # Typical MACD histogram
 
         return pl.struct(
-            [
-                dif.fill_null(0.0).alias("dif"),
-                dea.fill_null(0.0).alias("dea"),
-                macd.fill_null(0.0).alias("macd"),
-            ],
+            [dif.alias("dif"), dea.alias("dea"), macd.alias("macd")],
         ).alias("macd_struct")
 
     @staticmethod
@@ -371,8 +389,10 @@ class TechnicalAnalysis:
         hhv = pl.col(high).rolling_max(window_size=n, min_samples=1)
 
         rsv = (pl.col(close) - llv) / (hhv - llv) * 100
-        # Check div by zero
-        rsv = rsv.fill_nan(50).fill_null(50)
+        # fill_nan: 一字板/全横盘时 hhv==llv → 0/0，RSV 在业务上确实无定义，
+        # 取中性 50 有依据（与 get_rsi_expr 同法）。
+        # 不 fill_null: 预热期为真实未知，伪装成 50 属 R21 违规。
+        rsv = rsv.fill_nan(50)
 
         # K, D, J via EWM
         # Pandas KDJ uses .ewm(com=m1-1). Polars same.
