@@ -314,7 +314,7 @@ class TestKDJ:
             }
         )
         status, k, d, j = TechnicalAnalysis.get_kdj(df)
-        assert k > 80
+        assert k is not None and k > 80
         assert status == "OVERBOUGHT"
 
     def test_kdj_oversold(self):
@@ -326,7 +326,7 @@ class TestKDJ:
             }
         )
         status, k, d, j = TechnicalAnalysis.get_kdj(df)
-        assert k < 20
+        assert k is not None and k < 20
         assert status == "OVERSOLD"
 
     def test_kdj_insufficient_data(self):
@@ -499,22 +499,26 @@ class TestStrongNumericAssertionsD38:
 
     # ---------- MACD ----------
     def test_macd_real_series_exact_value(self):
-        """固定序列 → 精确 macd/hist 与状态。"""
+        """固定序列 → 精确 macd/dif 与 ×2 macd 柱及状态。
+
+        D1+D2+D3 收敛后 get_macd 委托 Polars 正本，第三返回值为 ×2 macd 柱
+        （B2 收敛方向），故 hist 期望值从 0.793880 变为 1.495123。
+        """
         df = self._real_ohlc()
         status, macd, hist = TechnicalAnalysis.get_macd(df)
         assert status == "BULLISH"
         assert macd == pytest.approx(12.959179, abs=1e-4)
-        assert hist == pytest.approx(0.793880, abs=1e-4)
+        assert hist == pytest.approx(1.495123, abs=1e-4)
 
     def test_macd_direction_exact_hist(self):
-        """单调上涨/下跌 → hist 精确为 ±0.272172，状态 BULLISH/BEARISH。"""
+        """单调上涨/下跌 → ×2 macd 柱精确为 ±0.485680，状态 BULLISH/BEARISH。"""
         # get_macd 仅使用 close，high/low 仅供 get_kdj 使用，此处保持一致以避免混淆。
         up = pd.DataFrame({"close": np.arange(100.0, 140.0)})
         status, _, hist = TechnicalAnalysis.get_macd(up)
-        assert status == "BULLISH" and hist == pytest.approx(0.272172, abs=1e-4)
+        assert status == "BULLISH" and hist == pytest.approx(0.485680, abs=1e-4)
         down = pd.DataFrame({"close": np.arange(140.0, 100.0, -1.0)})
         status2, _, hist2 = TechnicalAnalysis.get_macd(down)
-        assert status2 == "BEARISH" and hist2 == pytest.approx(-0.272172, abs=1e-4)
+        assert status2 == "BEARISH" and hist2 == pytest.approx(-0.485680, abs=1e-4)
 
     # ---------- KDJ ----------
     def test_kdj_real_series_exact_value(self):

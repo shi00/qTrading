@@ -1532,15 +1532,20 @@ class AIStrategyMixin:
                 history_df = await dp.get_stock_history(ts_code, days=req_days, end_date=history_end_date)
 
             # 2. Technical Indicators (pointwise)
+            # D1/D3 (OSS-05 收敛)：get_macd/get_kdj 委托 Polars 正本后第三返回值
+            # 变为 ×2 macd 柱，且预热期/一字板场景可能显式返回 None（R21）。
+            # 缺失时省略对应字段，而非注入 "k: nan" 或伪造中性值。
             trend_signal, _, _ = TechnicalAnalysis.get_macd(history_df)
             kdj_signal, k, _d, j = TechnicalAnalysis.get_kdj(history_df)  # D 指标未用于上下文
 
             tech_context = {
                 "macd_signal": trend_signal,
                 "kdj_signal": kdj_signal,
-                "k": round(k, 1),
-                "j": round(j, 1),
             }
+            if k is not None:
+                tech_context["k"] = round(k, 1)
+            if j is not None:
+                tech_context["j"] = round(j, 1)
 
             # 2b. Technical Structure (MA alignment + volume trend from history_df)
             tech_structure = _compute_technical_structure(history_df, vol_ratio_threshold=vol_ratio_threshold)
