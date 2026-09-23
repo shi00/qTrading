@@ -945,6 +945,90 @@ class TestTableViewerTabComponentBody:
         assert len(vm._subscribers) == 0
 
 
+class TestTableRowsMemo:
+    """OSS B1: rows_data use_memo — deps=[table_rows, table_columns].
+
+    无关重渲染 (locale/loading/error/filter 草稿) 命中跳过 _table_rows_to_paginated_rows
+    重建; table_rows 真变 → 重算; locale 不参与 deps (行格式化纯值, 与列名翻译解耦)。
+    """
+
+    @pytest.fixture
+    def rows_memo_env(self, mock_i18n_state, mock_app_colors_state, mock_metadata, monkeypatch):
+        """挂载 TableViewerTab (含 1 行数据), 安装 _table_rows_to_paginated_rows 计数包裹.
+
+        首次渲染用真实函数建立 memo; 之后重渲染经计数包裹判定命中/失效。
+        """
+        from ui.views import data_view as mod
+        from ui.views.data_view import TableViewerTab
+
+        rows = (TableRow(values=("000001.SZ", "平安银行", "20260922")),)
+        vm = _FakeDataExplorerViewModel(
+            state=_FakeDataExplorerState(
+                table_rows=rows,
+                table_columns=("ts_code", "name", "trade_date"),
+                total_rows=1,
+                tables_loaded=True,
+            )
+        )
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        real_fn = mod._table_rows_to_paginated_rows
+        calls = {"n": 0}
+
+        def _counting(rows_, columns_):
+            calls["n"] += 1
+            return real_fn(rows_, columns_)
+
+        monkeypatch.setattr(mod, "_table_rows_to_paginated_rows", _counting)
+        return {"mod": mod, "component": component, "vm": vm, "calls": calls}
+
+    @staticmethod
+    def _rerender(env: dict, state: Any | None = None) -> None:
+        if state is not None:
+            env["component"].kwargs["state"] = state
+        render_once(env["component"])
+
+    def test_unrelated_rerender_hits_memo(self, rows_memo_env) -> None:
+        """table_rows/table_columns 引用未变 → 命中 memo, 不再调用格式化函数."""
+        env = rows_memo_env
+        self._rerender(env)
+        assert env["calls"]["n"] == 0, "同 state 重渲染应命中 rows_data memo"
+
+        self._rerender(env)
+        assert env["calls"]["n"] == 0, "再次同 state 重渲染仍应命中"
+
+    def test_table_rows_change_invalidates(self, rows_memo_env) -> None:
+        """table_rows 内容真变 (新引用) → 重算 rows_data."""
+        env = rows_memo_env
+        self._rerender(env)
+        assert env["calls"]["n"] == 0
+
+        new_rows = (TableRow(values=("000003.SZ", "中国平安", "20260923")),)
+        env["vm"]._set_state(table_rows=new_rows)
+        self._rerender(env, state=env["vm"].state)
+        assert env["calls"]["n"] == 1, "table_rows 真变应重算"
+
+        # 再次同 state 重渲染命中新 memo
+        self._rerender(env, state=env["vm"].state)
+        assert env["calls"]["n"] == 1
+
+    def test_locale_change_does_not_invalidate(self, rows_memo_env) -> None:
+        """locale 不在 deps 中 (行格式化纯值) → locale 切换不触发 rows_data 重算.
+
+        与 screener 三分区 (格式化含 I18n.get) 形成对照: data_view 列名翻译由
+        未 memo 的 columns_spec 全量构建覆盖, 行格式化与 locale 解耦。
+        """
+        env = rows_memo_env
+        self._rerender(env)
+        assert env["calls"]["n"] == 0
+
+        env["mod"].get_observable_state().locale = "en_US"
+        self._rerender(env)
+        assert env["calls"]["n"] == 0, "locale 切换不应重算 rows_data (格式化与 locale 解耦)"
+
+
 # ============================================================================
 # 组件体测试: SQLConsoleTab
 # ============================================================================

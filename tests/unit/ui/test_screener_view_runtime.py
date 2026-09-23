@@ -3006,6 +3006,87 @@ class TestTableDataMemo:
         assert counting_build["n"] == 1
 
 
+class TestSectionFormattedMemo:
+    """OSS B1: 三分区 section_formatted use_memo — deps=[ai_*_rows, _visible_cols, locale].
+
+    命中 → 跳过三分区行格式化重建; ai_*_rows 真变 / locale 切换 → 重算 (防陈旧内容/旧 locale 残留)。
+    """
+
+    @pytest.fixture
+    def counting_format_rows(self, screener_view_env, monkeypatch):
+        """包裹 _format_rows 计数, 区分主表 (current_page_rows) 与三分区 (ai_*_rows) 调用."""
+        mod = screener_view_env["mod"]
+        vm = screener_view_env["fake_vm"]
+        real_format = mod._format_rows
+        calls = {"main": 0, "sections": 0}
+
+        def _counting(rows, visible_cols):
+            if rows is vm.state.current_page_rows:
+                calls["main"] += 1
+            else:
+                calls["sections"] += 1
+            return real_format(rows, visible_cols)
+
+        monkeypatch.setattr(mod, "_format_rows", _counting)
+        return calls
+
+    def test_unrelated_rerender_hits_memo(self, screener_view_env, counting_format_rows) -> None:
+        """deps (ai_*_rows 引用 / _visible_cols 内容 / locale) 均未变 → 三分区与主表都命中."""
+        env = screener_view_env
+        # 初始 render 已构建 memo
+        _rerender(env)
+        assert counting_format_rows["sections"] == 0, "无关重渲染应命中三分区 memo"
+        assert counting_format_rows["main"] == 0, "主表 memo (引用+locale) 也应命中"
+
+        _rerender(env)
+        assert counting_format_rows["sections"] == 0, "再次无关重渲染仍应命中三分区 memo"
+        assert counting_format_rows["main"] == 0
+
+    def test_ai_rows_change_invalidates(self, screener_view_env, counting_format_rows) -> None:
+        """ai_*_rows 内容真变 (新引用) → 三分区重算 (recommended/excluded/failed 各 1 次)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        _rerender(env)
+        assert counting_format_rows["sections"] == 0
+
+        # 新内容新引用 (含 ai_status 列, 三分区非空拆分)
+        fake_vm._set_current_page_rows(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "name": ["平安银行", "万科A"],
+                    "close": [10.5, 9.8],
+                    "ai_status": ["analyzed", "rejected"],
+                }
+            )
+        )
+        _rerender(env)
+        assert counting_format_rows["sections"] == 3, "数据真变应重算三分区 (recommended/excluded/failed)"
+        assert counting_format_rows["main"] == 1, "主表也应重算 (新 current_page_rows 引用)"
+
+        # 再次同 deps 重渲染命中新 memo
+        _rerender(env)
+        assert counting_format_rows["sections"] == 3
+
+    def test_locale_change_invalidates(self, screener_view_env, counting_format_rows) -> None:
+        """locale 切换 → 三分区重算 (unit_yi/unit_wan/prediction 文案随 locale), 防旧 locale 残留."""
+        env = screener_view_env
+        state = env["mod"].get_observable_state()
+
+        _rerender(env)
+        assert counting_format_rows["sections"] == 0
+
+        state.locale = "en_US"
+        _rerender(env)
+        assert counting_format_rows["sections"] == 3, "locale 变化应重算三分区"
+        assert counting_format_rows["main"] == 1, "主表 memo (locale 为 key) 也应重算"
+
+        # 同 locale 再次重渲染命中新 memo
+        _rerender(env)
+        assert counting_format_rows["sections"] == 3
+
+
 # ============================================================================
 # 分页控件测试
 # ============================================================================
