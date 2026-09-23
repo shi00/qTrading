@@ -16,6 +16,7 @@ from services.ai_service import (
     _FREE_TEXT_MAX_LEN,
     validate_ai_analysis_response,
 )
+from services.ai_service.news_risk import RiskOutput
 
 pytestmark = pytest.mark.unit
 
@@ -3054,3 +3055,132 @@ class TestAnalyzeStockBacktestNameFilter:
         assert len(user_msgs) == 1
         user_content = user_msgs[0]["content"]
         assert "name: ST Example" in user_content
+
+
+class TestAIServiceResponseSchema:
+    """OSS 检视 A4: response_schema 结构化输出下传 + 解析回归.
+
+    - supported: supports_response_schema True → pydantic 契约作为 response_format 下传
+    - unsupported: 不支持 → 保持 json_object
+    - 解析: schema 下传后返回合法 JSON → 直接解析正常
+    - 兜底: schema 下仍不可解析 → 启发式兜底路径保持可达成（既有逻辑不回归）
+    """
+
+    @pytest.mark.asyncio
+    async def test_supported_model_passes_pydantic_as_response_format(self):
+        """supports_response_schema=True 时把 pydantic 契约作为 response_format 下传。"""
+        svc = _make_svc_with_cloud()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '{"summary":"ok","events":[]}'
+        mock_response.usage = None
+        captured: dict = {}
+
+        async def _fake_acompletion(**kwargs):
+            captured.update(kwargs)
+            return mock_response
+
+        with (
+            patch("services.ai_service.acompletion", side_effect=_fake_acompletion),
+            patch("services.ai_service._check_response_schema_support", return_value=True),
+            patch("services.ai_service._check_reasoning_support", return_value=False),
+            patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+        ):
+            await svc._chat_completion_litellm(
+                messages=[{"role": "user", "content": "hello"}],
+                response_format={"type": "json_object"},
+                response_schema=RiskOutput,
+            )
+        assert captured["response_format"] is RiskOutput
+
+    @pytest.mark.asyncio
+    async def test_unsupported_model_falls_back_json_object(self):
+        """supports_response_schema=False → 保持既有 json_object。"""
+        svc = _make_svc_with_cloud()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '{"summary":"ok","events":[]}'
+        mock_response.usage = None
+        captured: dict = {}
+
+        async def _fake_acompletion(**kwargs):
+            captured.update(kwargs)
+            return mock_response
+
+        with (
+            patch("services.ai_service.acompletion", side_effect=_fake_acompletion),
+            patch("services.ai_service._check_response_schema_support", return_value=False),
+            patch("services.ai_service._check_reasoning_support", return_value=False),
+            patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+        ):
+            await svc._chat_completion_litellm(
+                messages=[{"role": "user", "content": "hello"}],
+                response_format={"type": "json_object"},
+                response_schema=RiskOutput,
+            )
+        assert captured["response_format"] == {"type": "json_object"}
+
+    @pytest.mark.asyncio
+    async def test_no_response_schema_param_keeps_json_object(self):
+        """未提供 response_schema（仅 json_mode）→ 保持 json_object（向后兼容默认调用方）。"""
+        svc = _make_svc_with_cloud()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '{"score": 80}'
+        mock_response.usage = None
+        captured: dict = {}
+
+        async def _fake_acompletion(**kwargs):
+            captured.update(kwargs)
+            return mock_response
+
+        with (
+            patch("services.ai_service.acompletion", side_effect=_fake_acompletion),
+            patch("services.ai_service._check_response_schema_support", return_value=True),
+            patch("services.ai_service._check_reasoning_support", return_value=False),
+            patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+        ):
+            await svc._chat_completion_litellm(
+                messages=[{"role": "user", "content": "hello"}],
+                response_format={"type": "json_object"},
+            )
+        assert captured["response_format"] == {"type": "json_object"}
+
+    @pytest.mark.asyncio
+    async def test_schema_mode_direct_parse_normal(self):
+        """schema 下传后返回合法 JSON → 直接解析正常（不回归）；response_schema 透传到 litellm 层。"""
+        svc = _make_svc_with_cloud()
+        with patch.object(
+            svc,
+            "_chat_completion_litellm",
+            AsyncMock(return_value={"content": '{"summary":"ok","events":[]}'}),
+        ) as mock_clm:
+            result = await svc._chat_completion(
+                messages=[{"role": "user", "content": "t"}],
+                provider="cloud",
+                json_mode=True,
+                response_schema=RiskOutput,
+            )
+            assert result["summary"] == "ok"
+            assert result["events"] == []
+            # pydantic 契约可正常校验（缺失/默认字段不填充业务合法值，R21 语义一致）
+            assert RiskOutput.model_validate(result) is not None
+            assert mock_clm.await_args.kwargs["response_schema"] is RiskOutput
+
+    @pytest.mark.asyncio
+    async def test_schema_mode_heuristic_fallback_still_reachable(self):
+        """schema + json_mode 下响应含杂讯前缀 → 启发式兜底仍可解析（两段式解析不回归）。"""
+        svc = _make_svc_with_cloud()
+        with patch.object(
+            svc,
+            "_chat_completion_litellm",
+            AsyncMock(return_value={"content": 'prefix noise {"summary":"ok","events":[]}'}),
+        ):
+            result = await svc._chat_completion(
+                messages=[{"role": "user", "content": "t"}],
+                provider="cloud",
+                json_mode=True,
+                response_schema=RiskOutput,
+            )
+            assert result["summary"] == "ok"
+            assert result["events"] == []

@@ -36,6 +36,8 @@ from utils.error_classifier import classify_error, classify_severity, log_classi
 from utils.log_decorators import PerfThreshold, log_async_operation
 
 if TYPE_CHECKING:
+    from pydantic import BaseModel
+
     from services.ai_service import AIService
 
 logger = logging.getLogger(__name__)
@@ -153,6 +155,31 @@ def _check_reasoning_support(model: str) -> bool:
                 exc,
                 "general",
                 "[AIService] supports_reasoning check failed (%s) for %s: %s, treating as not reasoning",
+                model,
+                exc_info=True,
+            )
+    return False
+
+
+def _check_response_schema_support(model: str) -> bool:
+    """检查模型是否支持 'response_schema' 结构化输出（OSS 检视 A4）。
+
+    与 ``_check_reasoning_support`` 同一范式：litellm 惰性加载后才能用
+    ``litellm.utils.supports_response_schema`` 精确判定；未加载或调用异常时
+    保守返回 ``False``（不可判定即视为不支持，见 §3.1c-review #2），调用方
+    保持既有 ``json_object`` 路径，行为退化为现状（不回归）。
+    """
+    import services.ai_service as _ai
+
+    if _ai.litellm is not None:
+        try:
+            return _ai.litellm.utils.supports_response_schema(model=model)
+        except Exception as exc:
+            log_classified(
+                logger,
+                exc,
+                "general",
+                "[AIService] supports_response_schema check failed (%s) for %s: %s, treating as unsupported",
                 model,
                 exc_info=True,
             )
@@ -344,6 +371,16 @@ class LiteLLMClient:
         effective_model = _resolve_effective_model(llm_config, model_override)
         supports_reasoning = _ai._check_reasoning_support(effective_model)
 
+        # OSS 检视 A4: 对 supports_response_schema 的模型，直接下传 pydantic 输出契约
+        # （response_schema 由调用方提供）作为 response_format —— litellm 内部经
+        # get_optional_params 的 get_json_schema_from_pydantic_object 转为 json_schema 交给
+        # 供应商侧保证 schema 合规。此时 request_params["response_format"] 由
+        # _build_litellm_params 从 json_object 兜底 dict 覆盖为 pydantic model；不支持或
+        # 未提供契约的模型保持既有 {"type":"json_object"} 路径（启发式解析退化为纯兜底）。
+        schema_override: type[BaseModel] | None = kwargs.get("response_schema")
+        if schema_override is not None and _ai._check_response_schema_support(effective_model):
+            request_params["response_format"] = schema_override
+
         stream = kwargs.get("stream", False) or on_chunk is not None
 
         with ProxyManager.litellm_env_context():
@@ -489,6 +526,7 @@ class LiteLLMClient:
         on_chunk=None,
         purpose: str = "analysis",
         local_max_tokens: int = DEFAULT_LOCAL_MAX_TOKENS,
+        response_schema: type[BaseModel] | None = None,
     ) -> dict:
         """
         Unified helper for Chat Completions (Cloud or Local).
@@ -500,6 +538,10 @@ class LiteLLMClient:
             timeout: timeout in seconds
             json_mode: whether to enforce JSON return
             local_max_tokens: max tokens for local model inference (default 256 for news classification)
+            response_schema: pydantic 输出契约（OSS 检视 A4）。cloud + json_mode 下若
+                模型 supports_response_schema，则以 pydantic model 作为 response_format
+                下传（litellm 内部转 json_schema，供应商侧保证 schema 合规）；
+                模型不支持或非 cloud 时忽略（走既有 json_object / 纯文本路径）。
         Returns:
             dict: Parsed JSON content (or raw dict if non-json)
         Raises:
@@ -578,6 +620,7 @@ class LiteLLMClient:
                     temperature=temperature,
                     timeout=timeout,
                     response_format={"type": "json_object"} if json_mode else None,
+                    response_schema=response_schema if (json_mode and response_schema is not None) else None,
                 )
                 response_content = result["content"]
                 llm_metadata = {k: v for k, v in result.items() if k != "content"}

@@ -28,6 +28,8 @@ import os
 import threading
 import time
 
+from pydantic import BaseModel
+
 from services.ai_service.labels import (
     AVAILABLE_DATA_LABELS as AVAILABLE_DATA_LABELS,
     build_available_data_block as build_available_data_block,
@@ -48,6 +50,7 @@ from services.ai_service.litellm_client import (
     LITELLM_AVAILABLE as LITELLM_AVAILABLE,
     LiteLLMClient,
     _check_reasoning_support,
+    _check_response_schema_support as _check_response_schema_support,
     _ensure_litellm_loaded as _ensure_litellm_loaded,
     _litellm_import_attempted as _litellm_import_attempted,
     acompletion as acompletion,
@@ -400,6 +403,7 @@ class AIService:
         on_chunk=None,
         purpose: str = "analysis",
         local_max_tokens: int = DEFAULT_LOCAL_MAX_TOKENS,
+        response_schema: type[BaseModel] | None = None,
     ) -> dict:
         """委托 LiteLLMClient._chat_completion（保留显式签名）。"""
         self._ensure_subservices()
@@ -413,6 +417,7 @@ class AIService:
             on_chunk=on_chunk,
             purpose=purpose,
             local_max_tokens=local_max_tokens,
+            response_schema=response_schema,
         )
 
     async def _chat_completion_with_failover(
