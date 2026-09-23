@@ -1,7 +1,7 @@
 import datetime
 from unittest.mock import patch, MagicMock
 
-from data.domain_services.offline_calendar import OfflineCalendar
+from data.domain_services.offline_calendar import OfflineCalendar, _OFFLINE_TRUSTED_UNTIL
 import pytest
 
 
@@ -65,3 +65,14 @@ class TestOfflineCalendarIsTradingDayFallback:
         with patch.object(OfflineCalendar, "get_instance", return_value=mock_cal):
             result = OfflineCalendar.is_trading_day("2024-06-14")
             assert result is True
+
+
+class TestOfflineCalendarTrustedUntil:
+    def test_trusted_until_within_six_months(self):
+        # review08-C2：可信区间常量由人工每年维护（国务院新年放假通知发布后前移至次年 12-31）。
+        # 距今不足 6 个月（183 天近似半年，略保守）即失败告警，防止忘记更新
+        # 导致 is_trading_day 对超出区间日期静默返回 None（全链路降级）。
+        today = datetime.date.today()
+        assert today + datetime.timedelta(days=183) <= _OFFLINE_TRUSTED_UNTIL, (
+            "可信区间不足 6 个月：请更新 _OFFLINE_TRUSTED_UNTIL 至次年 12-31，并核对相关守卫生效时间"
+        )
