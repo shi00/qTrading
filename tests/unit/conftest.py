@@ -190,6 +190,11 @@ def _reset_logging_state():
         logging.getLogger(name).setLevel(level)
     for name in saved_named_disabled:
         logging.getLogger(name).disabled = False
+    # OSS G1：回收日志 QueueListener 后台线程与 QueueHandler，避免跨测试残留
+    # listener 线程/队列任务（CLAUDE.md R7 测试隔离）。
+    from utils.logger import stop_logging
+
+    stop_logging()
 
 
 @pytest.fixture(autouse=True)

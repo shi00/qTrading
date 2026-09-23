@@ -5,11 +5,30 @@ import unittest
 from unittest.mock import patch
 from logging.handlers import RotatingFileHandler
 
-from utils.logger import get_logger, setup_logging, update_log_level
+from utils.logger import flush_logging, get_logger, setup_logging, update_log_level
 import pytest
 
 
 pytestmark = pytest.mark.unit
+
+
+def _listener_file_handlers():
+    """返回 QueueListener 后台承载的文件 handler 列表（文件写盘已迁至后台线程）。
+
+    需经模块引用动态读取 _LISTENER（其为模块级可变全局，import 值绑定会读到旧值）。
+    """
+    import utils.logger as _ul
+
+    return list(_ul._LISTENER.handlers) if _ul._LISTENER is not None else []
+
+
+def _flush_and_get_logger_files(log_dir: str):
+    """记录写入后刷新队列，返回 (listener文件handlers, app.log内容)。"""
+    flush_logging()
+    app_log = os.path.join(log_dir, "app.log")
+    with open(app_log, encoding="utf-8") as _f:
+        content = _f.read()
+    return _listener_file_handlers(), content
 
 
 class TestLogger(unittest.TestCase):
@@ -26,12 +45,21 @@ class TestLogger(unittest.TestCase):
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
 
+        # 回收上一个用例遗留的 listener 线程，再重置 handlers（R7 隔离）
+        from utils.logger import stop_logging
+
+        stop_logging()
+
         # Reset logger handlers to avoid interference
         self.root_logger = logging.getLogger()
         self.original_handlers = self.root_logger.handlers[:]
         self.root_logger.handlers = []
 
     def tearDown(self):
+        # 先停 listener（排空队列并 join 后台线程），再恢复/清理，避免线程写已删目录
+        from utils.logger import stop_logging
+
+        stop_logging()
         # Restore handlers
         self.root_logger.handlers = self.original_handlers
         self.patcher.stop()
@@ -49,12 +77,14 @@ class TestLogger(unittest.TestCase):
         ):
             logger = setup_logging("test_logger")
 
-            # Check handlers
-            self.assertEqual(len(logger.handlers), 4)  # Console, App File, Error File, Latest File
+            # 文件 handler 已迁至 QueueListener 后台；root 上为 console + QueueHandler
+            self.assertEqual(len(logger.handlers), 2)  # Console + QueueHandler
 
-            # Check file handlers properties
+            # Check file handlers properties (now on the listener)
             file_handler = [
-                h for h in logger.handlers if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
+                h
+                for h in _listener_file_handlers()
+                if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
             ][0]
             self.assertEqual(file_handler.maxBytes, 5 * 1024 * 1024)
             self.assertEqual(file_handler.backupCount, 5)
@@ -68,10 +98,12 @@ class TestLogger(unittest.TestCase):
                 return_value=2,
             ),
         ):
-            logger = setup_logging()
+            setup_logging()
 
             file_handler = [
-                h for h in logger.handlers if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
+                h
+                for h in _listener_file_handlers()
+                if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
             ][0]
             self.assertEqual(file_handler.maxBytes, 1 * 1024 * 1024)
             self.assertEqual(file_handler.backupCount, 2)
@@ -84,13 +116,9 @@ class TestLogger(unittest.TestCase):
         message = "Test log message unique string"
         logger.info(message)
 
-        # Verify log file content
-        log_file = os.path.join(self.log_dir, "app.log")
-        self.assertTrue(os.path.exists(log_file))
-
-        with open(log_file, encoding="utf-8") as f:
-            content = f.read()
-            self.assertIn(message, content)
+        # Verify log file content (drain queue so listener has written to disk)
+        _, content = _flush_and_get_logger_files(self.log_dir)
+        self.assertIn(message, content)
 
     def test_get_logger_name(self):
         """Test get_logger with name"""
@@ -213,9 +241,9 @@ class TestSetupLoggingDegradation:
                 side_effect=OSError("unreadable"),
             ),
         ):
-            logger = setup_logging("rotation_fallback_test")
+            setup_logging("rotation_fallback_test")
         file_handlers = [
-            h for h in logger.handlers if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
+            h for h in _listener_file_handlers() if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
         ]
         assert len(file_handlers) == 1
         assert file_handlers[0].maxBytes == 5 * 1024 * 1024
@@ -236,6 +264,7 @@ class TestSetupLoggingDegradation:
             ),
         ):
             setup_logging("no_rollover_test")
+        flush_logging()
 
         # 验证 app.log.1 不应被创建 (即没有发生 rollover)
         assert not (log_dir / "app.log.1").exists()
@@ -387,10 +416,10 @@ class TestLogFormatSelection:
                 return_value=5,
             ),
         ):
-            logger = setup_logging("json_format_test")
+            setup_logging("json_format_test")
 
         file_handlers = [
-            h for h in logger.handlers if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
+            h for h in _listener_file_handlers() if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
         ]
         assert len(file_handlers) == 1
         assert isinstance(file_handlers[0].formatter, JSONFormatter)
@@ -409,10 +438,10 @@ class TestLogFormatSelection:
                 return_value=5,
             ),
         ):
-            logger = setup_logging("text_format_test")
+            setup_logging("text_format_test")
 
         file_handlers = [
-            h for h in logger.handlers if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
+            h for h in _listener_file_handlers() if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
         ]
         assert len(file_handlers) == 1
         assert not isinstance(file_handlers[0].formatter, JSONFormatter)
@@ -446,6 +475,7 @@ class TestLatestLog:
             ),
         ):
             setup_logging("latest_overwrite_test")
+        flush_logging()
 
         # 验证原 latest.log 内容被清空，只包含本次启动的日志
         content = latest_log.read_text(encoding="utf-8")
@@ -469,6 +499,7 @@ class TestLatestLog:
             setup_logging("latest_write_test")
             logger = get_logger()
             logger.info("unique_latest_log_marker_12345")
+        flush_logging()
 
         latest_content = (log_dir / "latest.log").read_text(encoding="utf-8")
         app_content = (log_dir / "app.log").read_text(encoding="utf-8")
@@ -492,7 +523,7 @@ class TestLatestLog:
             setup_logging("latest_level_update_test")
             latest_handler = [
                 h
-                for h in logging.getLogger().handlers
+                for h in _listener_file_handlers()
                 if type(h) is logging.FileHandler and "latest.log" in h.baseFilename
             ][0]
             assert latest_handler.level == logging.INFO
@@ -518,6 +549,7 @@ class TestLatestLog:
             setup_logging("reinit_first")
             logger = get_logger()
             logger.info("first_session_marker")
+            flush_logging()
             first_content = latest_log.read_text(encoding="utf-8")
             assert "first_session_marker" in first_content
 
@@ -525,12 +557,13 @@ class TestLatestLog:
             setup_logging("reinit_second")
             latest_handlers = [
                 h
-                for h in logging.getLogger().handlers
+                for h in _listener_file_handlers()
                 if type(h) is logging.FileHandler and "latest.log" in h.baseFilename
             ]
             assert len(latest_handlers) == 1  # 唯一性：未重复添加
 
             logger.info("second_session_marker")
+            flush_logging()
             second_content = latest_log.read_text(encoding="utf-8")
             # 第一次的内容必须保留（证明未二次截断）
             assert "first_session_marker" in second_content
@@ -561,3 +594,154 @@ class TestLatestLog:
         captured = capsys.readouterr()
         assert "Failed to setup latest file logging" in captured.err
         assert "permission denied" in captured.err
+
+
+class TestFileHandlingMovedToListenerThread:
+    """OSS G1：文件写盘已迁至 QueueListener 后台线程（R16 事件循环不阻塞）。"""
+
+    def _setup(self, tmp_path):
+        log_dir = str(tmp_path / "test_logs")
+        with (
+            patch("utils.logger.LOG_DIR", log_dir),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
+        ):
+            setup_logging("queue_structure_test")
+        return log_dir
+
+    def test_file_handlers_not_on_calling_thread(self, tmp_path):
+        """结构断言：RotatingFileHandler 不在 root（调用线程）上，写盘经 QueueHandler 委托后台线程。"""
+        import threading
+
+        from logging.handlers import QueueHandler
+
+        import utils.logger as _ul
+
+        self._setup(tmp_path)
+        try:
+            root_handlers = logging.getLogger().handlers
+            assert not any(isinstance(h, RotatingFileHandler) for h in root_handlers)
+            assert any(isinstance(h, QueueHandler) for h in root_handlers)
+            assert len(_listener_file_handlers()) == 3  # app / error / latest 均挂在 listener
+            assert _ul._LISTENER is not None
+            assert _ul._LISTENER._thread is not threading.current_thread()
+        finally:
+            from utils.logger import stop_logging
+
+            stop_logging()
+        assert _ul._LISTENER is None  # 收尾后无残留 listener 线程
+
+    def test_large_volume_non_blocking_and_flushed(self, tmp_path):
+        """调用线程只 put 队列：大批量日志快速返回，flush 后全部落盘。"""
+        self._setup(tmp_path)
+        try:
+            logger = get_logger()
+            for i in range(400):
+                logger.info("bulk_line_%d", i)
+            flush_logging()
+            content = (tmp_path / "test_logs" / "app.log").read_text(encoding="utf-8")
+            for i in range(400):
+                assert f"bulk_line_{i}" in content
+        finally:
+            from utils.logger import stop_logging
+
+            stop_logging()
+
+
+class TestQueueSanitization:
+    """OSS G1：经 QueueHandler 链路写盘后脱敏仍生效（R9）。"""
+
+    def test_queue_path_sanitizes_exception(self, tmp_path):
+        import json
+
+        log_dir = str(tmp_path / "test_logs")
+        with (
+            patch("utils.logger.LOG_DIR", log_dir),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_format", return_value="json"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
+        ):
+            setup_logging("queue_sanitize_test")
+            logger = get_logger()
+            try:
+                raise ValueError("secret_value_boom")
+            except ValueError:
+                logger.exception("boom_message")
+        flush_logging()
+
+        content = (tmp_path / "test_logs" / "app.log").read_text(encoding="utf-8")
+        line = next((sl for sl in content.splitlines() if "boom_message" in sl), None)
+        assert line is not None
+        data = json.loads(line)
+        assert data["message"] == "boom_message"
+        # 异常内容被保留
+        assert "secret_value_boom" in data["exception"]
+        # 脱敏生效：traceback 中的绝对路径已被替换为 <PATH>
+        assert "<PATH>" in data["exception"]
+        # 真实绝对路径不应以原始形态暴露
+        assert os.path.dirname(os.path.abspath(__file__)) not in content
+
+    def test_stop_drains_queued_records(self, tmp_path):
+        """stop_logging 时队列中遗留记录被排空写盘，不残留队列任务（R7）。"""
+        log_dir = str(tmp_path / "test_logs")
+        with (
+            patch("utils.logger.LOG_DIR", log_dir),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
+        ):
+            setup_logging("drain_test")
+            logger = get_logger()
+            logger.info("drain_marker_888")
+            # 不 flush，直接 stop：stop 内部经 sentinel 排空队列
+            from utils.logger import stop_logging
+
+            stop_logging()
+
+        content = (tmp_path / "test_logs" / "app.log").read_text(encoding="utf-8")
+        assert "drain_marker_888" in content
+        assert not _listener_file_handlers()  # listener 已回收，QueueHandler 已从 root 移除
+
+
+class TestLoggingListenerLifecycle:
+    """OSS G1：listener 线程生命周期正确，多次 configure + stop 无线程泄漏（R7）。"""
+
+    def test_repeated_setup_stop_no_thread_leak(self, tmp_path):
+        from logging.handlers import QueueHandler
+
+        import utils.logger as _ul
+        from utils.logger import stop_logging
+
+        for i in range(5):
+            log_dir = str(tmp_path / f"run{i}")
+            with (
+                patch("utils.logger.LOG_DIR", log_dir),
+                patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+                patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+                patch(
+                    "utils.config_handler.ConfigHandler.get_log_backup_count",
+                    return_value=5,
+                ),
+            ):
+                setup_logging(f"lifecycle_{i}")
+            assert _ul._LISTENER is not None
+            thread = _ul._LISTENER._thread
+            assert thread is not None and thread.is_alive()
+
+            get_logger().info(f"cycle_{i}_marker")
+            stop_logging()
+
+            assert not thread.is_alive()  # 线程已 join，无悬挂监听线程
+            assert _ul._LISTENER is None
+            assert not any(isinstance(h, QueueHandler) for h in logging.getLogger().handlers)
