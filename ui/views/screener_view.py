@@ -2295,11 +2295,25 @@ def ScreenerView(
     # D7-3: 当前页三分区行 (recommended/excluded/failed) 复用同一可见列集格式化。
     # VM 已按 ai_status 拆分 (零丢失兜底), View 仅据此渲染, 不引入额外状态机 (§3.2)。
     _visible_cols = [c["id"] for c in vt_columns]
-    section_formatted = {
-        "recommended": _format_rows(state.ai_recommended_rows, _visible_cols),
-        "excluded": _format_rows(state.ai_excluded_rows, _visible_cols),
-        "failed": _format_rows(state.ai_failed_rows, _visible_cols),
-    }
+    # OSS B1: 三分区行格式化与无关 state 变更（mode/loading 等）解耦 —— ai_*_rows 为
+    # frozen 元组、_visible_cols 由 vt_columns 派生（经 table_memo_ref 已稳化），
+    # 数据未变时 use_memo 跳过重建。deps 含 locale：_format_cell_value 经 I18n.get
+    # 渲染 prediction_result 文案与成交量单位（unit_yi/unit_wan），与主表
+    # _resolve_table_data 的 locale 纬度保持一致，防三分区与主表跨 locale 不一致。
+    section_formatted = ft.use_memo(
+        lambda: {
+            "recommended": _format_rows(state.ai_recommended_rows, _visible_cols),
+            "excluded": _format_rows(state.ai_excluded_rows, _visible_cols),
+            "failed": _format_rows(state.ai_failed_rows, _visible_cols),
+        },
+        dependencies=[
+            state.ai_recommended_rows,
+            state.ai_excluded_rows,
+            state.ai_failed_rows,
+            _visible_cols,
+            get_observable_state().locale,
+        ],
+    )
 
     progress_visible = state.loading
     run_disabled = state.loading or state.is_retrying or not state.selected_strategy
