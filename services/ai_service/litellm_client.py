@@ -128,12 +128,17 @@ def _ensure_litellm_loaded() -> bool:
         _ai.litellm, _ai.acompletion = _lt, _ac
         _ai.LITELLM_AVAILABLE = True
         return True
-    except Exception:
+    except Exception as exc:
         # 兼容不同 litellm 版本：import 或全局参数配置（如某版本缺失某属性抛
         # AttributeError）失败均视为"不可用"，优雅降级而非向上传播。
         # 注意 except Exception 不捕获 asyncio.CancelledError / KeyboardInterrupt (R2)。
+        # 记录真实异常（R9：经 DataSanitizer 脱敏），避免 P0 类故障（如 tiktoken
+        # 编码文件离线下载失败）在降级路径上无迹可循。
         _ai.LITELLM_AVAILABLE = False
-        logger.warning("[AIService] LiteLLM not available, cloud LLM features disabled")
+        logger.warning(
+            "[AIService] LiteLLM not available, cloud LLM features disabled: %s",
+            _ai.DataSanitizer.sanitize_error(exc),
+        )
         return False
 
 

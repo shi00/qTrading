@@ -46,6 +46,7 @@ class TestConfigModule:
 
     def test_tiktoken_cache_dir_set_when_exists(self, monkeypatch, tmp_path):
         monkeypatch.delenv("TIKTOKEN_CACHE_DIR", raising=False)
+        monkeypatch.delenv("CUSTOM_TIKTOKEN_CACHE_DIR", raising=False)
         tiktoken_cache = tmp_path / "data" / "tiktoken_cache"
         tiktoken_cache.mkdir(parents=True, exist_ok=True)
         with patch("os.path.isdir", return_value=True):
@@ -55,15 +56,35 @@ class TestConfigModule:
 
                 importlib.reload(config)
                 assert os.environ.get("TIKTOKEN_CACHE_DIR") == str(tiktoken_cache)
+                # litellm >=1.101.0 只认 CUSTOM_ 前缀，缺失即离线能力失效
+                assert os.environ.get("CUSTOM_TIKTOKEN_CACHE_DIR") == str(tiktoken_cache)
 
     def test_tiktoken_cache_dir_not_set_when_not_exists(self, monkeypatch):
         monkeypatch.delenv("TIKTOKEN_CACHE_DIR", raising=False)
+        monkeypatch.delenv("CUSTOM_TIKTOKEN_CACHE_DIR", raising=False)
         with patch("os.path.isdir", return_value=False):
             import importlib
             import config
 
             importlib.reload(config)
             assert os.environ.get("TIKTOKEN_CACHE_DIR") is None
+            assert os.environ.get("CUSTOM_TIKTOKEN_CACHE_DIR") is None
+
+    def test_bundled_cache_contains_cl100k_base(self):
+        """捆绑缓存必须含 cl100k_base（L1 回归）。
+
+        litellm>=1.101.0 在 import 期无条件覆盖 TIKTOKEN_CACHE_DIR，只认
+        CUSTOM_TIKTOKEN_CACHE_DIR；其自带 tokenizers 目录是否含 cl100k_base
+        随版本不定，故离线保障（国内/MITM 无法下载）应锁定项目捆绑缓存入口，
+        不依赖 litellm 包内文件齐全性。此用例锁定前置不变量：缓存文件存在。
+        """
+        import hashlib
+
+        import config
+
+        blob = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+        name = hashlib.sha1(blob.encode()).hexdigest()  # noqa: S324 -- tiktoken 缓存命名规则，非安全用途
+        assert (Path(config.RESOURCE_ROOT) / "data" / "tiktoken_cache" / name).is_file()
 
     def test_db_url_sync_strips_asyncpg(self, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://user:pass@host:5432/db")
