@@ -72,11 +72,20 @@
   Router 默认会尝试普通 fallback（旧循环直抛语义不再保留）——内容策略违规是
   提示词级问题，重试/切换无意义且浪费配额，但 Router 默认行为如此；如需恢复
   直抛须显式 `content_policy_fallbacks` 为空表或构造期拦截（登记为后续观察项）。
+- **审计粒度变化**（对抗检视确认）：旧手写循环**每次尝试**（含失败的中间
+  fallback）各记一条外发审计；Router 化后为**双层审计**——入口 primary 意图 +
+  最终实际目的地（Router 内部中间供应商的失败尝试不再逐条可见）。外发计数
+  语义从「尝试次数」变为「实际生效目的地」，SEC-03 面板展示按实际消费收敛
+  （Router 内部失败尝试的真实外发是否发生由 litellm 决定，本层不可见）。
 - **依赖面变化**：`_router_failover` 依赖 litellm.Router 构造参数契约
   （list-of-dicts fallbacks 等），litellm 升级时由 `_ensure_router_loaded` 的
   降级路径兜底（构造失败 → AIServiceUnavailableError，不崩溃）。
 - 单测无法覆盖 Router 内部行为（conftest 以 MagicMock 替换 sys.modules["litellm"]），
   语义正确性由真实构造验证 + 源码契约测试保证。
+- **观察项**：非流式 `response.model` / 流式 `chunk.model` 的返回格式（litellm
+  Router 是否保留池内 model_name 完整前缀）依赖 litellm 实现，未经真实调用
+  验证；若返回缺前缀的供应商名，补记审计 destination 格式可能漂移（SEC-03
+  单点格式），登记为 litellm 升级回归观察项。
 
 ## Alternatives
 

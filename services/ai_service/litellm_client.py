@@ -276,12 +276,15 @@ def build_router_model_list(
     return model_list, excluded
 
 
-def _ensure_router_loaded() -> bool:
+def _ensure_router_loaded(failover_credentials: dict[str, dict] | None = None) -> bool:
     """惰性构造 litellm.Router 并返回是否可用（L4）。
 
     与 ``_ensure_litellm_loaded`` 同一范式（构造哨兵 + 失败优雅降级）：
     - model_list 经 ``build_router_model_list`` 从最新 failover 配置单点构造——
       跨供应商缺专属 key 的 fallback 已排除（D8-1），排除项记 warning 不连坐 primary。
+    - ``failover_credentials`` 复用 AIService._setup_client 预加载的跨供应商凭据缓存
+      （_router_failover 传入），避免构造期在 hot path 触发同步 keyring 调用
+      （检视 MINOR-3 修复）。
     - fallback 映射表（Router.fallbacks，{model_name: [fallback names]}）只登记
       model_list 中实际存在的 model_name：excluded 项不可引用，否则 Router 构造校验
       失败（引用未注册 model_name）。
@@ -307,7 +310,7 @@ def _ensure_router_loaded() -> bool:
 
     try:
         failover_config = ConfigHandler.get_failover_config()
-        model_list, excluded = build_router_model_list(failover_config)
+        model_list, excluded = build_router_model_list(failover_config, failover_credentials=failover_credentials)
         if excluded:
             logger.warning(
                 "[AIService] Failover | %d fallback(s) excluded from Router (missing dedicated API key): %s",
@@ -941,7 +944,9 @@ class LiteLLMClient:
             raise AIServiceUnavailableError("No primary LLM provider configured for failover")
         if not _ai._ensure_litellm_loaded():
             raise AIServiceUnavailableError("LiteLLM not installed, cloud LLM features disabled")
-        if not _ai._ensure_router_loaded():
+        # 复用 AIService._setup_client 预加载的跨供应商凭据缓存，避免构造期 hot path
+        # 触发同步 keyring 调用（检视 MINOR-3 修复）。
+        if not _ai._ensure_router_loaded(self._service._failover_credentials):
             raise AIServiceUnavailableError("Failover router unavailable, cloud LLM features disabled")
 
         router = _ai._litellm_router
@@ -960,9 +965,11 @@ class LiteLLMClient:
             # 主模型上下文窗口估算 token，超长即 warning（语义与 _chat_completion_litellm
             # 的预检一致；真实拦截交由用户配置/供应商侧 ContextWindowExceededError 经
             # context_window_fallbacks 切换更大窗口模型）。预检不阻断请求（与既有语义一致）。
+            # 窗口按 primary（override）查取：跨供应商 primary 时取该模型的窗口而非主配置
+            # 模型（检视 MINOR-5 修复，与 _chat_completion_litellm 的 override 语义对齐）。
             token_model = primary.split("/")[-1] if "/" in primary else (llm_config.get("model") or "")
             total_tokens = sum(_estimate_tokens(m.get("content"), token_model) for m in messages)
-            context_window = _get_model_context_window(llm_config, None)
+            context_window = _get_model_context_window(llm_config, primary)
             if total_tokens > context_window:
                 logger.warning(
                     "[AIService] Cloud | Prompt may exceed context window: ~%d tokens (window %d)",
@@ -976,11 +983,14 @@ class LiteLLMClient:
 
             stream = on_chunk is not None
             # Router 以池内 model_name 定位模型（build_router_model_list 的
-            # model_name=primary）；timeout/response_format 与 _chat_completion_litellm 同构。
+            # model_name=primary）；timeout/temperature/response_format 与
+            # _chat_completion_litellm 对齐（temperature=0.3 为分析默认，检视
+            # MAJOR-2 修复——缺失会让 Router 走供应商默认采样温度，输出随机性回归）。
             router_params: dict = {
                 "model": primary,
                 "messages": messages,
                 "stream": stream,
+                "temperature": 0.3,
                 "timeout": httpx.Timeout(timeout, connect=CONNECT_TIMEOUT),
             }
             if json_mode:
@@ -1090,7 +1100,10 @@ class LiteLLMClient:
                     raise
                 # 瞬态错误经 Router 内部重试+fallback 仍失败 → 所有供应商失败。
                 # Router 日志已记录逐供应商失败过程，此处收敛为统一异常。
-                all_models_tried = ", ".join(m for m in (primary, *fallbacks) if m)
+                # Tried 从 Router.model_list 实际注册的模型构造（不包含 D8-1 排除项，
+                # 检视 MINOR-4 修复——excluded 项未实际尝试不应出现在错误消息）。
+                available_models = [item["model_name"] for item in getattr(router, "model_list", [])]
+                all_models_tried = ", ".join(m for m in (available_models or [primary, *fallbacks]) if m)
                 raise AIServiceUnavailableError(f"All LLM providers failed. Tried: [{all_models_tried}]") from e
 
     async def _consume_router_stream(

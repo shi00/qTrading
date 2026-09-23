@@ -360,8 +360,13 @@ class AIService:
 
         # L4：配置变更后失效已构造的 Router，下次调用经 _ensure_router_loaded 重建
         # （model_list 由最新 failover 配置构造，避免陈旧 primary/fallbacks 生效）。
-        self._litellm_router = None
-        self._router_import_attempted = False
+        # 注意：_litellm_router/_router_import_attempted 是**模块级全局**（litellm_client
+        # 经 sys.modules["services.ai_service"] 读写），必须改模块级而非实例属性，
+        # 否则失效不生效（检视 MAJOR-1 修复）。
+        import services.ai_service as _ai
+
+        _ai._litellm_router = None
+        _ai._router_import_attempted = False
         del_loop_local("ai_analysis_semaphore")
         del_loop_local("ai_news_semaphore")
 
