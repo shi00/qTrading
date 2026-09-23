@@ -1,7 +1,3 @@
-import matplotlib
-
-matplotlib.use("Agg")  # Non-interactive backend for unit tests (production uses flet_charts backend)
-
 import pytest
 
 

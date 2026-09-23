@@ -45,7 +45,6 @@ hiddenimports = [
     "apscheduler",
     "keyring",
     "cryptography",
-    "matplotlib",
     "requests",
     "httpx",
     "numpy",

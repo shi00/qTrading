@@ -149,7 +149,7 @@ def HomeView(
         # E2E 模式下跳过外部依赖初始化（bootstrap.py 已跳过 SchedulerService/
         # NewsSubscriptionService/MarketDataService.start）。vm.init() 会实例化
         # NewsSubscriptionService → AIService → MarketDataService 等（同步阻塞
-        # MainThread，含 Matplotlib 字体缓存构建；litellm 已惰性化不再阻塞），
+        # MainThread；litellm 已惰性化不再阻塞），
         # vm.init_data() 调用 Tushare API（E2E 环境 token 无效必失败），_load_data()
         # 等待 MarketDataService 缓存（E2E 未启动，5×0.5s=2.5s 空等）。这些操作
         # 阻塞 Flet patch 下发，导致 E2E 浏览器在 600s 内未检测到 NavigationRail
@@ -201,7 +201,7 @@ def HomeView(
         空操作, 随后 setup 中 init() 重新注册 listener)。
         E2E 早返: 对称 _init_and_load 顶部守卫。E2E 下未早返时将实例化
         NewsSubscriptionService → AIService → MarketDataService 等 (同步阻塞
-        MainThread, 含 Matplotlib 字体缓存构建; litellm 已惰性化不再阻塞),
+        MainThread; litellm 已惰性化不再阻塞),
         造成 E2E 回归。
         """
         if is_e2e_mode():
