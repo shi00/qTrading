@@ -33,17 +33,26 @@ def qfq_ratio_expr(
     return ratio.alias("qfq_ratio")
 
 
-def qfq_ratio_series(series: pd.Series) -> pd.Series | None:
+def qfq_ratio_series(
+    series: pd.Series,
+    ref: Literal["last", "first"] = "last",
+) -> pd.Series | None:
     """
     Calculate Point-in-Time Forward Adjusted Price (QFQ) ratio series in Pandas.
-    Normalizes adjustment factors to the LATEST available date (base="latest").
 
-    If factor values are missing, they are forward filled first to carry forward existing factors.
-    Then backward fill is applied to handle any remaining leading nulls.
+    ``ref`` semantics match ``qfq_ratio_expr``:
+    - ``"last"`` (default): base = latest available value -> live/display and technical analysis.
+    - ``"first"``: base = first available value -> backtest Point-in-Time, so the absolute
+      price level does NOT depend on future ex-right information (reproducible backtests).
+      Calling a pandas-path consumer that needs PIT without ``ref="first"`` would silently
+      degrade to ``"last"`` and introduce lookahead bias (the D4 defect this fixes).
+
+    If factor values are missing, they are forward filled first to carry forward existing
+    factors. Then backward fill is applied to handle any remaining leading nulls.
 
     Returns:
         pd.Series: The adjustment ratio series.
-        None: If no adjustment is needed (e.g. all factors are identical, series is empty, etc.).
+        None: If no adjustment is needed (empty, all-null, base zero-or-null, all-identical).
     """
     if series is None or series.empty:
         return None
@@ -55,14 +64,14 @@ def qfq_ratio_series(series: pd.Series) -> pd.Series | None:
     if filled.isna().all():
         return None
 
-    latest_factor = filled.iloc[-1]
+    base = filled.iloc[0] if ref == "first" else filled.iloc[-1]
 
-    # If latest factor is 0 or null, return None (no adjustment).
-    if latest_factor == 0 or pd.isna(latest_factor):
+    # If base is 0 or null, return None (no adjustment).
+    if base == 0 or pd.isna(base):
         return None
 
-    # For optimization, return None if all factors are identical to latest_factor.
-    if (filled == latest_factor).all():
+    # For optimization, return None if all factors are identical to base.
+    if (filled == base).all():
         return None
 
-    return filled / latest_factor
+    return filled / base
