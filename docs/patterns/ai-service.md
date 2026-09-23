@@ -23,7 +23,7 @@
 - `services/ai_service/pricing.py`：`estimate_cost(effective_model, input_tokens, output_tokens) -> float | None`。全部依托 `litellm.cost_per_token` 计价（**无自维护 `MODEL_PRICING` 手写价格表**）；**未知/不可计价模型返回 `None` 不猜价**，免费模型返回 `0.0`（以 `cost is not None` 区分「计量为 0」与「不可计量」）；金额以**元**返回，由调用方换算为**整数分**。
 - `services/ai_service/token_budget.py`：token 预算 / 上下文窗口裁剪（`DEFAULT_CONTEXT_WINDOW` / `CONTEXT_RESERVE_TOKENS` / `OUTPUT_RESERVE_TOKENS`），未知/自定义模型用保守回退值。
 - `services/ai_service/usage_tracker.py`：`AIUsageTracker` 单例按月（分）原子累加，跨月轮换；未注入 engine 时 no-op 降级不阻断流程。
-- **完整方案（未实施）**：P3-AI03-CostVisible-Full 目标为价格映射 + 累计持久化 + 三处 UI + 月度上限，见 [known-technical-debt.md](../debt/known-technical-debt.md) §P3-AI03。改动价格/成本前先对齐该债目标与 `token_budget`/`pricing` 的单位约定，避免重新设计一遍。
+- `services/ai_service/pricing.py` 与 `usage_tracker.py` 即为 AI-03「完整成本计量」的现行实现（对应原 P3-AI03 债目，已闭环删除）；改动价格/成本前先按 `pricing`（元）/`usage_tracker`（分）的单位约定对齐，避免单位错配。
 
 ### 3. 输出契约与校验边界
 
@@ -46,7 +46,7 @@
 _最小验证命令：_ 按改动实际触及的层运行 CONTRIBUTING「变更类型 → 最小验证子集」对应最小子集；AI 服务逻辑改动后须 `redline-check` + 相关单测 + `python scripts/check_docs_consistency.py`。
 
 - 缺失语义全链路用 `None`/哨兵，无 `0`/`50` 回填；
-- 成本/配额改动对齐 `pricing`（分）/`token_budget`（token）/`usage_tracker`（分）单位与 P3-AI03 债目标；
+- 成本/配额改动对齐 `pricing`（元→分）/`token_budget`（token）/`usage_tracker`（分）单位约定；
 - 输出经完整 schema/边界校验，模型输出按不可信输入处理（F13 缺口不扩散）；
 - 外发必经 `EgressAudit` 审计，日志经 `DataSanitizer` 脱敏，无明文密钥；
 - prompt 注入依赖明确分层（guard 只是第一层），新功能声明仅用于展示并经测试验证无执行路径；
