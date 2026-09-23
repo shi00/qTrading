@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import json
 import logging
+import math
 import threading
 from datetime import date, timedelta
 
@@ -792,6 +793,10 @@ class NewsFetcher:
         """
         Get top performing concept boards.
         Uses Sina Finance (verified working, not blocked).
+        B2: 直连 HTTPS 端点（httpx async-native），消除 akshare 内部明文 HTTP 与无 timeout
+        问题（SEC-006：HTTPS 防 MITM 篡改，概念热度进入 AI 上下文）。解析与 akshare
+        stock_sector_spot 内部一致：JSONP → dict → 逐条 value.split(",")，仅消费「板块」/
+        「涨跌幅」两列；列序漂移由本项目独立承担（新浪端点结构变更时需同步跟进）。
 
         Returns:
             list[dict] on success. Empty list on failure or when source returns
@@ -799,20 +804,51 @@ class NewsFetcher:
             Only asyncio.CancelledError is propagated for graceful shutdown.
         """
 
-        def _fetch():
-            # Sina Finance - Concept Boards
-            # ProxyManager already whitelists domestic domains via NO_PROXY at startup
-            return _ensure_dataframe(
-                _run_with_python_string_storage(lambda: ak.stock_sector_spot(indicator="概念")),
-                source="stock_sector_spot",
-            )
+        async def _fetch() -> list[tuple[str, float]]:
+            # B16/B2: httpx async-native IO（可被外层 wait_for 取消）；HTTPS 防 MITM
+            from utils.proxy_manager import ProxyManager
+
+            proxy_cfg = ProxyManager.get_httpx_proxy_config()
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            }
+            async with httpx.AsyncClient(timeout=_HOT_CONCEPTS_TIMEOUT_SECONDS, **proxy_cfg) as client:
+                resp = await client.get(
+                    "https://money.finance.sina.com.cn/q/view/newFLJK.php",
+                    params={"param": "class"},
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                text = resp.text
+
+            start = text.find("{")
+            if start == -1:
+                raise ValueError("[News] Hot concepts JSONP response missing '{' prefix")
+            json_data = json.loads(text[start:])
+            if not isinstance(json_data, dict):
+                # 响应结构异常（含 JSON null / 非对象）视为数据源故障
+                raise ValueError("[News] Hot concepts response is not a JSON object")
+            rows: list[tuple[str, float]] = []
+            for value in json_data.values():
+                fields = value.split(",")
+                # 列序: label,板块,公司家数,平均价格,涨跌额,涨跌幅,总成交量,总成交额,
+                # 股票代码,个股-涨跌幅,个股-当前价,个股-涨跌额,股票名称
+                if len(fields) < 6:
+                    continue  # 新浪列序漂移防御：列数不足时跳过，不产出错误数据
+                name = fields[1].strip()
+                if not name:
+                    continue
+                try:
+                    change_val = float(fields[5])
+                except (ValueError, TypeError):
+                    change_val = 0.0
+                if math.isnan(change_val):
+                    change_val = 0.0
+                rows.append((name, change_val))
+            return rows
 
         try:
-            # Use Global IO Pool with timeout to prevent hanging on unresponsive API
-            df = await asyncio.wait_for(
-                ThreadPoolManager().run_async(TaskType.IO, _fetch),
-                timeout=_HOT_CONCEPTS_TIMEOUT_SECONDS,
-            )
+            rows = await asyncio.wait_for(_fetch(), timeout=_HOT_CONCEPTS_TIMEOUT_SECONDS)
         except asyncio.CancelledError:
             logger.warning("[News] Hot concepts fetch cancelled during shutdown.")
             raise
@@ -835,15 +871,6 @@ class NewsFetcher:
                     _HOT_CONCEPTS_TIMEOUT_SECONDS,
                     count,
                 )
-            # 监控告警：asyncio.wait_for 超时仅取消 asyncio.Future 的 await，
-            # 底层 ThreadPoolManager IO 线程中的 _fetch（含 akshare 调用）无法
-            # 被强制取消，会持续占用 IO 池槽位直至 _fetch 自然返回。多次超时
-            # 累积可能耗尽 IO 线程池 max_workers，需关注线程池占用。
-            logger.warning(
-                "[News] Hot concepts background IO task may still be running "
-                "after %.0fs timeout (uncancelable in Python thread pool).",
-                _HOT_CONCEPTS_TIMEOUT_SECONDS,
-            )
             return []
         except Exception as e:
             # F5-P1: read-modify-write 同临界区，logger 移出锁外
@@ -866,24 +893,8 @@ class NewsFetcher:
                 )
             return []
 
-        if df is None:
-            # None means the underlying call returned nothing usable — treat as failure
-            # F5-P1: read-modify-write 同临界区，logger 移出锁外
-            with _SINA_STATE_LOCK:
-                _SINA_CONSECUTIVE_FAILURES["concept"] += 1
-                count = _SINA_CONSECUTIVE_FAILURES["concept"]
-            logger.warning(
-                "[News] Hot concepts fetch returned None. Consecutive failures: %d.",
-                count,
-            )
-            if count % _SINA_FAILURE_ERROR_INTERVAL == 0:
-                logger.error(
-                    "[News] Hot concepts fetch returned None %d consecutive times. Data source may be degraded.",
-                    count,
-                )
-            return []
-
-        if df.empty:
+        if not rows:
+            # 解析成功但无有效条目 — treat as empty (与既有 df.empty 语义一致)
             # F5-P1: empty 递增 + failures 重置需同临界区（避免 failures 未重置时 empty 计数已递增）
             with _SINA_STATE_LOCK:
                 _SINA_CONSECUTIVE_EMPTY["concept"] += 1
@@ -901,27 +912,12 @@ class NewsFetcher:
             _SINA_CONSECUTIVE_EMPTY["concept"] = 0
             _SINA_CONSECUTIVE_FAILURES["concept"] = 0
 
-        # Sina returns: 板块, 涨跌幅
-        if "涨跌幅" in df.columns:
-            df = df.sort_values("涨跌幅", ascending=False)
+        # 涨跌幅降序取 top-N（与既有 pandas sort_values(ascending=False) 语义一致）
+        rows.sort(key=lambda item: item[1], reverse=True)
 
         results = []
-        for _, row in df.head(limit if limit is not None else len(df)).iterrows():
-            name = row.get("板块", "")
-            if not name:
-                continue
-
-            try:
-                raw_val = row.get("涨跌幅", 0)
-                # Handle NaN from pandas
-                if pd.isna(raw_val):  # type: ignore[union-attr]
-                    change_val = 0.0
-                else:
-                    change_val = float(raw_val)  # type: ignore[arg-type]
-                change_str = f"{change_val:.2f}%"
-            except (ValueError, TypeError):
-                change_str = "0.00%"
-                change_val = 0.0
+        for name, change_val in rows[: limit if limit is not None else len(rows)]:
+            change_str = f"{change_val:.2f}%"
 
             # Color: red=up, green=down, gray=flat
             if change_val > 0:
