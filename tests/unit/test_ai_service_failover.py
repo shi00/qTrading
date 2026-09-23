@@ -212,6 +212,57 @@ class TestChatCompletionWithFailover:
         assert result["content"] == "plain text"
         assert result["model"] == "deepseek/deepseek-v4-flash"
 
+    @pytest.mark.asyncio
+    async def test_non_stream_usage_and_cost_attached(self):
+        """非流式响应带 usage 时回填 usage/cost（AI-01 计量链路，R21 防零记账）。"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+        usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+        router.acompletion = AsyncMock(
+            return_value=_ok_resp('{"score": 80}', model="deepseek/deepseek-v4-flash", usage=usage)
+        )
+        with _router_failover_env(service, router):
+            result = await service._chat_completion_with_failover(
+                messages=[{"role": "user", "content": "test"}],
+            )
+        assert result["score"] == 80
+        assert result["usage"] == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        # 计量语义（ai-service.md）：不可计价模型 cost 为 None 不猜价，usage 必须回填
+        assert result["model"] == "deepseek/deepseek-v4-flash"
+
+    @pytest.mark.asyncio
+    async def test_json_heuristic_extraction_handles_enveloped_json(self):
+        """json_mode 下 content 含包络文本（前缀 + JSON 对象）→ 启发式 raw_decode 提取。"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+        enveloped = 'Sure! Here is the analysis: {"score": 77, "recommendation": "hold"} 祝好运'
+        router.acompletion = AsyncMock(return_value=_ok_resp(enveloped, model="deepseek/deepseek-v4-flash"))
+        with _router_failover_env(service, router):
+            result = await service._chat_completion_with_failover(
+                messages=[{"role": "user", "content": "test"}],
+            )
+        assert result["score"] == 77
+        assert result["recommendation"] == "hold"
+
+    @pytest.mark.asyncio
+    async def test_prompt_exceeding_context_window_logs_warning(self, caplog):
+        """客户端超长预检：token 估算超窗口 → warning（与 _chat_completion_litellm 同语义）。"""
+        import logging
+
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock(return_value=_ok_resp('{"score": 50}', model="deepseek/deepseek-v4-flash"))
+        with (
+            caplog.at_level(logging.WARNING),
+            _router_failover_env(service, router),
+            patch("services.ai_service.litellm_client._estimate_tokens", return_value=999_999),
+            patch("services.ai_service.litellm_client._get_model_context_window", return_value=128_000),
+        ):
+            await service._chat_completion_with_failover(
+                messages=[{"role": "user", "content": "test"}],
+            )
+        assert "may exceed context window" in caplog.text
+
 
 class TestRouterFailoverEntryGates:
     """测试 _router_failover 入口门控链（cloud 可用性 / primary / Router 可用）"""
@@ -267,6 +318,24 @@ class TestRouterFailoverEntryGates:
                 await service._chat_completion_with_failover(
                     messages=[{"role": "user", "content": "test"}],
                 )
+
+    @pytest.mark.asyncio
+    async def test_litellm_not_loaded_raises(self):
+        """litellm 未加载 → AIServiceUnavailableError（不静默回退非 Router 路径）。"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock()
+        with (
+            patch("utils.config_handler.ConfigHandler.is_ai_local_only_mode", return_value=False),
+            patch("services.ai_service._ensure_litellm_loaded", return_value=False),
+            patch("services.ai_service._ensure_router_loaded", return_value=True),
+            patch("services.ai_service._litellm_router", router),
+        ):
+            with pytest.raises(AIServiceUnavailableError, match="LiteLLM not installed"):
+                await service._chat_completion_with_failover(
+                    messages=[{"role": "user", "content": "test"}],
+                )
+        router.acompletion.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_news_purpose_unacknowledged_raises_policy_error(self):
@@ -984,6 +1053,8 @@ class TestEnsureRouterLoaded:
 
     def test_constructor_failure_degrades_to_false(self, caplog):
         """Router 构造异常 → 返回 False 且记录 warning（不向上抛）。"""
+        import logging
+
         from services.ai_service.litellm_client import _ensure_router_loaded
 
         failover_config = {
@@ -999,8 +1070,6 @@ class TestEnsureRouterLoaded:
 
         def router_ctor(**kwargs):
             raise ValueError("invalid deployment")
-
-        import logging
 
         litellm_mock = MagicMock()
         litellm_mock.Router.side_effect = router_ctor
@@ -1018,6 +1087,40 @@ class TestEnsureRouterLoaded:
             assert _ai._litellm_router is None
 
         assert "Router construction failed" in caplog.text
+
+    def test_excluded_fallback_logs_warning(self, caplog):
+        """D8-1 排除项（缺专属 key）在 _ensure_router_loaded 记 warning 且不连坐 primary。"""
+        import logging
+
+        from services.ai_service.litellm_client import _ensure_router_loaded
+
+        # 跨供应商 fallback 缺专属 key → build_router_model_list 排除该项
+        failover_config = {
+            "primary": "deepseek/deepseek-v4-flash",
+            "fallbacks": ["openai/gpt-4o"],
+            "primary_config": {
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "api_key": "sk-primary-key",
+                "base_url": "https://api.deepseek.com",
+            },
+        }
+        # failover_credentials 空：openai 无专属 key → excluded
+        litellm_mock = MagicMock()
+        litellm_mock.Router.return_value = "ROUTER_OK"
+        with caplog.at_level(logging.WARNING), ExitStack() as stack:
+            for p in self._base_env():
+                stack.enter_context(p)
+            stack.enter_context(
+                patch("utils.config_handler.ConfigHandler.get_failover_config", return_value=failover_config)
+            )
+            stack.enter_context(patch("services.ai_service.litellm", litellm_mock))
+
+            assert _ensure_router_loaded() is True
+
+        assert "1 fallback(s) excluded from Router" in caplog.text
+        # excluded 项不进入 fallback 映射表（构造参数不含 openai）
+        assert litellm_mock.Router.call_args.kwargs["fallbacks"] == []
 
     def test_litellm_not_loaded_returns_false(self):
         """litellm 未加载 → Router 不可构造，返回 False。"""
