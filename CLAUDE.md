@@ -183,7 +183,7 @@
 
 | # | 红线 | 说明 | 强制状态 |
 |---|------|------|---------|
-| R1 | **架构越界** | `core/` 导入任何其他层模块；`data/` 导入 `services/strategies/ui/`；`services/` 导入 `strategies/ui/`；`strategies/` 导入 `ui/` | pre-commit（import-linter 6 条契约） |
+| R1 | **架构越界** | `core/` 导入任何其他层模块；`data/` 导入 `services/strategies/ui/`；`services/` 导入 `strategies/ui/`；`strategies/` 导入 `ui/` | pre-commit（import-linter 3 条契约） |
 | R2 | **异常吞没** | 吞没 `asyncio.CancelledError` (必须 `raise` 以配合优雅停机) | CI-test（部分覆盖） |
 | R3 | **模糊压制** | 使用 `# type: ignore` 时不带 `[error-code]`（人类理由写在方括号外，格式 `# type: ignore[错误码]`  `# 原因`；pre-commit 强制拦截） | pre-commit |
 | R4 | **SQL 注入** | 在 asyncpg 原生查询中使用 `%s` 占位符（必须用 `$1, $2, ...`）；亦禁止 SQL 字面量赋值、f-string 拼接 SQL、`text(f...)` f-string 形态及测试文件内同类写法（SQL 必须参数化，或经 `text()` 常量承载） | pre-commit（check_redlines.py） |
@@ -268,9 +268,9 @@
 **绝对禁止反向依赖：** `core` 导入 `data`/`services`/`strategies`/`ui`/`utils`/`app` 中的任何模块；`data` 导入 `ui`/`services`/`strategies`；`services` 导入 `ui`；`strategies` 导入 `ui`。
 
 **架构守护范围（P2-03）：**
-- **import-linter（pre-commit）** 守护 R1 表内方向：`core` 禁入 `data/services/strategies/ui/utils/app`；`data` 禁入 `services/strategies/ui`；`services` 禁入 `strategies/ui`；`strategies` 禁入 `ui`；`utils`（横切叶子）禁入 `data/services/strategies/ui/app`（契约 5，含函数体内 import）；`ui` 禁入 `app`（契约 6，`ui.startup_views` 契约级例外已消除，契约 6 当前无例外）。
-- **AST 静态测试（`tests/unit/test_architecture_boundaries.py`）** 在 import-linter 基础上额外守护：`data/services/strategies` 禁入 `app`；`ui` 禁入 `app`；`utils` 禁入 `ui/strategies/services/app/data`（模块级 import 视角，与契约 5 互补）。
-- **豁免范围**：`if TYPE_CHECKING:` 块内导入（仅类型检查，非运行时依赖）被 import-linter 与 AST 测试双重豁免；函数体内 lazy import 不视为 AST 测试违规，但 **import-linter 契约 5/6 仍会分析函数体内 import**——`utils` 层的函数内跨层 import 须带 `# lazy-import: <原因>` 注释并经契约级 ignore_imports 白名单登记（见 `pyproject.toml` 契约 5 注释）。
+- **import-linter（pre-commit）** 守护 R1 表内方向。由 1 条 `layers` 契约（层序从高到低：`app → ui → strategies → services → data → core`）一次覆盖全部层级禁止方向：`core` 禁入 `data/services/strategies/ui/app`；`data` 禁入 `services/strategies/ui/app`；`services` 禁入 `strategies/ui/app`；`strategies` 禁入 `ui/app`；`ui` 禁入 `app`（`app` 为最高编排层、可依赖所有层、仅被 main.py 调用）。`utils` 无法纳入单向线性层序，故另由 2 条 `forbidden` 契约守护：`utils`（横切叶子）禁入 `data/services/strategies/ui/app`（契约 3，含函数体内 import，见下）；`core` 禁入 `utils`（契约 2）。合计 3 条契约。
+- **AST 静态测试（`tests/unit/test_architecture_boundaries.py`）** 已随 E4 退役——所有方向被上述 3 条 import-linter 契约覆盖（layers 契约含函数体内 import，语义不减）；文件仅保留例外注册表路径存在性校验（详见测试内 docstring）。<del>在 import-linter 基础上额外守护：`data/services/strategies` 禁入 `app`；`ui` 禁入 `app`；`utils` 禁入 `ui/strategies/services/app/data`（模块级 import 视角，与契约 5 互补）。</del>
+- **豁免范围**：`if TYPE_CHECKING:` 块内导入（仅类型检查，非运行时依赖）被 import-linter 豁免（`exclude_type_checking_imports = true`）；函数体内 lazy import **import-linter layers/forbidden 契约仍会分析**——涉及 `utils` 层的函数内跨层 import 须带 `# lazy-import: <原因>` 注释并经契约级 ignore_imports 白名单登记（见 `pyproject.toml` 契约 3 注释）。
 - **例外唯一注册入口**：架构边界例外统一登记于 [docs/governance/exceptions.yml](./docs/governance/exceptions.yml)（rule_id=R1），测试仅从注册表读取，不各自维护。
 
 > **同层内文件合并原则**：在不违反分层架构的前提下，同一职责的多个小函数可合并到一个文件，不为单次使用的辅助函数创建独立模块。但跨层合并禁止（如 `data/` 与 `ui/` 不可合并）。

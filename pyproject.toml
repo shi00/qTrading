@@ -206,35 +206,35 @@ root_packages = [
 # services/backtest_service.py 合法地在 TYPE_CHECKING 块中导入 strategies 层仅用于类型注解。
 exclude_type_checking_imports = true
 
-# 契约 1: R1 — core 不可导入任何其他层 (§3.1 R1 / §4.2)
+# E4 (OSS 检视): 6 条手工 forbidden 契约重构为 1 条 layers + 2 条必要 forbidden。
+# layers 一次声明完整单向分层顺序（从高到低）：app(编排层) → ui → strategies → services → data → core(最内层)。
+# 一个 layers 契约自动覆盖全部方向组合，新增层自动生效、不再逐个枚举，且语义不减：
+#   - core 不可导入 data/services/strategies/ui/app（原契约 1 的层级部分 + §4.2）
+#   - data 不可导入 services/strategies/ui/app（原契约 2 + AST 守护的 data→app 上提至 import-linter）
+#   - services 不可导入 strategies/ui/app（原契约 3 + AST 守护的 services→app 上提）
+#   - strategies 不可导入 ui/app（原契约 4 + AST 守护的 strategies→app 上提）
+#   - ui 不可导入 app（原契约 6）
+#   - app 可依赖所有层（编排层，仅被 main.py 调用）
+# utils 与 app 为无法放入单向线性层序的两个特例（§4.1），故单独保留 forbidden：
+#   - core 禁入 utils（下列"core 必须不导入 utils"契约；utils 可被除 core 外任意层引用，无法线性定位）
+#   - utils 禁入 data/services/strategies/ui/app（下方契约5，横切叶子，含 ignore_imports 白名单）
+# （注：utils 作为横切叶子本可进层序最低端，但 core 禁入 utils 与「utils 仅禁业务层、可被任意层引用」
+#   的双向约束无法在同一线性序中同时表达，故拆出 forbidden。）
+
+# 契约 1: R1 — 单向分层（core → data → services → strategies → ui → app，从高到低的层序）
 [[tool.importlinter.contracts]]
-name = "R1: core must not import any other layer"
+name = "R1: layered dependencies (core→data→services→strategies→ui→app)"
+type = "layers"
+layers = ["app", "ui", "strategies", "services", "data", "core"]
+
+# 契约 2: R1 — core 作为最内层不得反向导入 utils 横切叶子 (§4.2，utils 不在层序中故单独声明)
+[[tool.importlinter.contracts]]
+name = "R1: core must not import utils"
 type = "forbidden"
 source_modules = ["core"]
-forbidden_modules = ["data", "services", "strategies", "ui", "utils", "app"]
+forbidden_modules = ["utils"]
 
-# 契约 2: R1 — data 不可导入 services/strategies/ui (§3.1 R1 / §4.1)
-[[tool.importlinter.contracts]]
-name = "R1: data must not import services/strategies/ui"
-type = "forbidden"
-source_modules = ["data"]
-forbidden_modules = ["services", "strategies", "ui"]
-
-# 契约 3: R1 — services 不可导入 strategies/ui (§3.1 R1 / §4.1)
-[[tool.importlinter.contracts]]
-name = "R1: services must not import strategies/ui"
-type = "forbidden"
-source_modules = ["services"]
-forbidden_modules = ["strategies", "ui"]
-
-# 契约 4: R1 — strategies 不可导入 ui (§3.1 R1 / §4.1)
-[[tool.importlinter.contracts]]
-name = "R1: strategies must not import ui"
-type = "forbidden"
-source_modules = ["strategies"]
-forbidden_modules = ["ui"]
-
-# 契约 5: R1 — utils 为横切叶子层，不得反向依赖任何业务层 (§3.1 R1 / §4.1)
+# 契约 3: R1 — utils 为横切叶子层，不得反向依赖任何业务层 (§3.1 R1 / §4.1)
 # review01-A1：将 test_architecture_boundaries.py 中 utils 方向检查提升为 pre-commit 契约，
 # 使 utils 反向依赖在提交阶段即被拦截（此前仅在 CI 全量测试阶段暴露）。
 # ignore_imports 登记存量函数内 lazy import（review01-A1 取证：lint-imports 会分析函数体内
@@ -288,15 +288,6 @@ ignore_imports = [
     # 启动补偿 + except 降级两处函数内 lazy import，见 docs/governance/exceptions.yml）
     "utils.scheduler_service -> data.domain_services.offline_calendar",
 ]
-
-# 契约 6: R1 — ui 不得导入 app（编排层单向，app 仅被 main.py 调用）(§3.1 R1 / §4.1)
-# review01-A3：ui/startup_views.py 已消除对 app 层的运行时导入（纯类型下沉 core + Protocol 解耦），
-# 契约 6 无 ignore 例外；其余 ui → app 导入一律拦截。
-[[tool.importlinter.contracts]]
-name = "R1: ui must not import app"
-type = "forbidden"
-source_modules = ["ui"]
-forbidden_modules = ["app"]
 
 # qTrading embedded PostgreSQL sidecar 配置 (pg_plan §15.5 AI-12)
 # 由 scripts/verify_versions.py 校验与 sidecars/qtrading-pg-sidecar/Cargo.toml 一致
