@@ -230,7 +230,6 @@ def setup_logging(name="astock_screener"):
         "asyncio",
         "flet",
         "apscheduler",
-        "matplotlib",
         "PIL",
         "websockets",
         "litellm",
