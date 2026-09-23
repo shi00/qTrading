@@ -44,6 +44,8 @@ def _make_ctx(**overrides):
     ctx.config.get_ai_concept_search_engine = MagicMock(return_value="search_std")
     # P0-2 fix: LimitListSyncStrategy 现在调用 overwrite_limit_concepts（事务原子性）
     ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
+    # review08 D2: AKShareConceptSyncStrategy 预载 code→ts_code 映射（此处仅需非 None）
+    ctx.cache.stock_dao.get_ts_code_map = AsyncMock(return_value={})
     for key, value in overrides.items():
         setattr(ctx, key, value)
     return ctx

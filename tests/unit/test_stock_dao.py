@@ -56,6 +56,35 @@ class TestGetStockBasic:
         assert len(result) == 1
 
 
+class TestGetTsCodeMap:
+    """review08 D2: 构建 symbol → ts_code 权威映射，供概念同步取代前缀猜测。"""
+
+    @pytest.mark.asyncio
+    async def test_with_data(self):
+        dao = _make_dao()
+        dao._read_db_select = AsyncMock(
+            return_value=pd.DataFrame({"symbol": ["000001", "600000"], "ts_code": ["000001.SZ", "600000.SH"]}),
+        )
+        assert await dao.get_ts_code_map() == {"000001": "000001.SZ", "600000": "600000.SH"}
+
+    @pytest.mark.asyncio
+    async def test_empty(self):
+        dao = _make_dao()
+        dao._read_db_select = AsyncMock(return_value=None)
+        assert await dao.get_ts_code_map() == {}
+
+    @pytest.mark.asyncio
+    async def test_skips_missing_symbol(self):
+        dao = _make_dao()
+        # symbol 为 None/空的行应被跳过，不产出 key
+        dao._read_db_select = AsyncMock(
+            return_value=pd.DataFrame(
+                {"symbol": [None, "600000"], "ts_code": ["000001.SZ", "600000.SH"]},
+            ),
+        )
+        assert await dao.get_ts_code_map() == {"600000": "600000.SH"}
+
+
 class TestGetActiveStockCount:
     @pytest.mark.asyncio
     async def test_with_data(self):

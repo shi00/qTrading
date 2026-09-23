@@ -16,6 +16,7 @@ import json
 import logging
 import time
 import typing
+from collections.abc import Mapping
 
 from data.external.akshare_concept_client import AkshareConceptClient
 from data.external.tushare_client import TushareAPIPermissionError
@@ -50,24 +51,20 @@ _AI_TAG_DEFAULT_BATCH = 50
 _AI_TAG_CANCEL_POLL_INTERVAL = 2.0
 
 
-def _to_ts_code(code: str) -> str:
-    """Convert a 6-digit AKShare code to Tushare ts_code format.
+def _to_ts_code(code: str, code_map: Mapping[str, str]) -> str | None:
+    """Convert an AKShare 6-digit code to the authoritative Tushare ts_code.
 
-    Rules (simplified, covers A-share main boards):
-    - 60/68/90 prefix → .SH (Shanghai)
-    - 00/30/20 prefix → .SZ (Shenzhen)
-    - 43/83/87/92 prefix → .BJ (Beijing)
-    - fallback → .SZ
+    经 stocks 表权威映射（code_map: symbol -> ts_code）解析，取代基于前缀的
+    交易所猜测（review08 D2）。前缀猜测在遇未来新代码段时会静默产生错误
+    ts_code 污染概念表，与 R21「缺失值伪装」精神相悖。
+
+    - 合法 6 位数字代码且映射命中 → 返回权威 ts_code
+    - 非法输入（空/长度不符/含非数字）或映射未知 → 返回 None（调用方跳过并
+      计入 warnings，显式标记而非猜测 fallback）
     """
     if not code or len(code) != 6 or not code.isdigit():
-        return code
-    if code.startswith(("60", "68", "90")):
-        return f"{code}.SH"
-    if code.startswith(("00", "30", "20")):
-        return f"{code}.SZ"
-    if code.startswith(("43", "83", "87", "92")):
-        return f"{code}.BJ"
-    return f"{code}.SZ"
+        return None
+    return code_map.get(code)
 
 
 async def _guarded[T](
@@ -157,9 +154,17 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
             if self._check_cancelled(result):
                 return result
 
+            # review08 D2: 预载 stocks 表权威 code→ts_code 映射，成分股循环直接查
+            # 内存 dict，避免每次循环 N 次 DB 往返。这是"快照语义"——映射固化在
+            # 本次同步启动时刻；概念同步与 stock_basic 批量更新天然低时并发，
+            # 可接受。映射预载失败直接走外层 except（FAILED / R5 传播），不降级为
+            # 空映射静默空跑（那会伪装成"无可疑"）。
+            code_map = await self.context.cache.stock_dao.get_ts_code_map()
+
             semaphore = asyncio.Semaphore(_AKSHARE_CONCURRENCY)
             records: list[dict] = []
             failed_boards: list[str] = []
+            unresolved: set[str] = set()
 
             async def sync_one_board(board_name: str, board_code: str) -> None:
                 if self._cancelled:
@@ -173,9 +178,14 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                             if df_cons is not None and not df_cons.empty:
                                 concept_id = f"{StockDao.EM_CONCEPT_PREFIX}{board_code}"
                                 for code in df_cons["代码"].astype(str):
+                                    ts_code = _to_ts_code(code, code_map)
+                                    if ts_code is None:
+                                        # R21: 未知/非法代码显式标记并跳过，不猜测交易所后缀
+                                        unresolved.add(code)
+                                        continue
                                     records.append(
                                         {
-                                            "ts_code": _to_ts_code(code),
+                                            "ts_code": ts_code,
                                             "concept_id": concept_id,
                                             "concept_name": board_name,
                                         }
@@ -236,6 +246,20 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
 
             if self._check_cancelled(result):
                 return result
+
+            if unresolved:
+                # R21: 显式标记未知/非法代码的跳过（聚合为一条，避免 warnings 膨胀）。
+                _unresolved_list = sorted(unresolved)
+                result.warnings.append(
+                    f"[AKShareConceptSync] skipped {len(_unresolved_list)} unknown/invalid stock code(s) "
+                    f"not in stock_basic: {_unresolved_list[:5]}"
+                )
+                logger.warning(
+                    "[AKShareConceptSync] %d unknown code(s) skipped: %s",
+                    len(_unresolved_list),
+                    _unresolved_list[:5],
+                )
+                result.skipped += len(_unresolved_list)
 
             if records:
                 saved = await self.context.cache.stock_dao.upsert_em_concepts(records)
