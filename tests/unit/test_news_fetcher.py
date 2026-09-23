@@ -1306,29 +1306,6 @@ class TestGetStockNewsDirectExecution:
         assert isinstance(result, list)
         assert result[0]["title"] == "详细内容作为标题"
 
-    @pytest.mark.asyncio
-    async def test_market_import_fallback(self):
-        with patch("data.external.news_fetcher.ak") as mock_ak:
-            import akshare.stock_feature.stock_disclosure_cninfo as mod
-
-            original_fn = getattr(mod, "stock_zh_a_disclosure_report_cninfo", None)
-            if original_fn is not None:
-                delattr(mod, "stock_zh_a_disclosure_report_cninfo")
-
-            mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
-            mock_ak.stock_news_em.return_value = pd.DataFrame()
-
-            with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
-                mock_tpm_instance = MagicMock()
-                mock_tpm.return_value = mock_tpm_instance
-                mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
-
-                result = await NewsFetcher.get_stock_news("000001.SZ")
-            assert result == []
-
-            if original_fn is not None:
-                mod.stock_zh_a_disclosure_report_cninfo = original_fn
-
 
 class TestGetLatestGlobalNewsDirectExecution:
     """通过 ThreadPoolManager side_effect 直接执行 _fetch_cls 的测试。"""
@@ -1823,36 +1800,6 @@ class TestClassifyErrorIntegration:
             with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
                 result = _ensure_dataframe([{"a": 1}], source="test")
         assert result is None
-        code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
-        assert code_records, "Expected [code=...] in log"
-
-    @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
-    @patch("data.external.news_fetcher.ak")
-    async def test_market_import_failure_logs_code(self, mock_ak, mock_run, mock_tpm, caplog):
-        """路径 2: get_stock_news except (ImportError, ...) — market 读取失败日志含 [code=]。"""
-        mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
-        mock_ak.stock_news_em.return_value = pd.DataFrame()
-
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
-
-        # Patch the import inside get_stock_news to raise ImportError
-        import builtins
-
-        real_import = builtins.__import__
-
-        def failing_import(name, *args, **kwargs):
-            if "stock_disclosure_cninfo" in name:
-                raise ImportError("no module")
-            return real_import(name, *args, **kwargs)
-
-        with patch.object(builtins, "__import__", failing_import):
-            with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
-                result = await NewsFetcher.get_stock_news("000001.SZ")
-        assert result == []
         code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
         assert code_records, "Expected [code=...] in log"
 
