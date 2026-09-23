@@ -52,7 +52,10 @@ from services.ai_service.litellm_client import (
     _check_reasoning_support,
     _check_response_schema_support as _check_response_schema_support,
     _ensure_litellm_loaded as _ensure_litellm_loaded,
+    _ensure_router_loaded as _ensure_router_loaded,
     _litellm_import_attempted as _litellm_import_attempted,
+    _litellm_router as _litellm_router,
+    _router_import_attempted as _router_import_attempted,
     acompletion as acompletion,
     litellm,
 )
@@ -355,6 +358,10 @@ class AIService:
         # M-4: _cleanup_prompt_dumps moved out of hot path; only runs at init
         from utils.loop_local import del_loop_local
 
+        # L4：配置变更后失效已构造的 Router，下次调用经 _ensure_router_loaded 重建
+        # （model_list 由最新 failover 配置构造，避免陈旧 primary/fallbacks 生效）。
+        self._litellm_router = None
+        self._router_import_attempted = False
         del_loop_local("ai_analysis_semaphore")
         del_loop_local("ai_news_semaphore")
 
@@ -427,11 +434,12 @@ class AIService:
         json_mode: bool = True,
         on_chunk=None,
     ) -> dict:
-        """委托 LiteLLMClient._chat_completion_with_failover（保留显式签名）。"""
+        """委托 LiteLLMClient._router_failover（L4：手写 failover 循环 → litellm.Router）。
+
+        保留原签名以维持调用面（stock_analysis）与测试 patch 目标零改动。
+        """
         self._ensure_subservices()
-        return await self._litellm._chat_completion_with_failover(
-            messages, timeout=timeout, json_mode=json_mode, on_chunk=on_chunk
-        )
+        return await self._litellm._router_failover(messages, timeout=timeout, json_mode=json_mode, on_chunk=on_chunk)
 
     async def verify_connection(self) -> bool:
         """委托 LiteLLMClient.verify_connection。"""

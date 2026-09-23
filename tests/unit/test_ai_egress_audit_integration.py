@@ -26,6 +26,7 @@ import asyncio
 import json
 
 import pytest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from services.ai_service import AIService
@@ -163,21 +164,30 @@ class TestCloudCallRecordsEgress:
 class TestFailoverRecordsEachAttempt:
     @pytest.mark.asyncio
     async def test_failover_primary_fallback_each_recorded(self, _tmp_egress_path, monkeypatch) -> None:
-        """主供应商超时切 fallback：primary + fallback 各一条审计，目的地不混淆。"""
+        """Router 实际 fallback 到备选模型：入口 primary 意图 + 实际目的地补记各一条。"""
         svc = _make_cloud_service(monkeypatch)
         monkeypatch.setattr(
             "utils.config_handler.ConfigHandler.get_failover_config",
             staticmethod(lambda: {"primary": "deepseek/deepseek-v4-flash", "fallbacks": ["qwen/qwen-max"]}),
         )
-        # 第一次（primary）超时 → 触发 fallback；第二次（qwen）成功
-        svc._chat_completion_litellm = AsyncMock(
-            side_effect=[TimeoutError("primary timeout"), {"content": '{"score": 88}'}],
+        router = MagicMock()
+        # Router 内部已 fallback：响应 model 为备选供应商（真实目的地经补记审计捕获）
+        router.acompletion = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='{"score": 88}'))],
+                model="qwen/qwen-max",
+                usage=None,
+            )
         )
-
-        result = await svc._chat_completion_with_failover(
-            messages=[{"role": "user", "content": "x"}],
-            json_mode=True,
-        )
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service._ensure_router_loaded", return_value=True),
+            patch("services.ai_service._litellm_router", router),
+        ):
+            result = await svc._chat_completion_with_failover(
+                messages=[{"role": "user", "content": "x"}],
+                json_mode=True,
+            )
 
         assert result["score"] == 88
         records = _read_records(_tmp_egress_path)
@@ -187,18 +197,29 @@ class TestFailoverRecordsEachAttempt:
 
     @pytest.mark.asyncio
     async def test_failover_primary_success_single_record(self, _tmp_egress_path, monkeypatch) -> None:
-        """主供应商直接成功：仅一条审计，不因 failover 循环产生多余记录。"""
+        """主供应商直接成功：仅一条审计（无重复补记）。"""
         svc = _make_cloud_service(monkeypatch)
         monkeypatch.setattr(
             "utils.config_handler.ConfigHandler.get_failover_config",
             staticmethod(lambda: {"primary": "deepseek/deepseek-v4-flash", "fallbacks": ["qwen/qwen-max"]}),
         )
-        svc._chat_completion_litellm = AsyncMock(return_value={"content": '{"score": 88}'})
-
-        await svc._chat_completion_with_failover(
-            messages=[{"role": "user", "content": "x"}],
-            json_mode=True,
+        router = MagicMock()
+        router.acompletion = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='{"score": 88}'))],
+                model="deepseek/deepseek-v4-flash",
+                usage=None,
+            )
         )
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service._ensure_router_loaded", return_value=True),
+            patch("services.ai_service._litellm_router", router),
+        ):
+            await svc._chat_completion_with_failover(
+                messages=[{"role": "user", "content": "x"}],
+                json_mode=True,
+            )
 
         records = _read_records(_tmp_egress_path)
         assert len(records) == 1

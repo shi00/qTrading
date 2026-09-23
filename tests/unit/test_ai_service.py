@@ -1505,12 +1505,22 @@ class TestAIServiceAnalyzeTimeoutHandling:
             "fallbacks": [],
         }
         svc = AIService()
-        svc._chat_completion = AsyncMock(side_effect=TimeoutError("read timeout"))
-        result = await svc.analyze_stock(
-            stock_info={"ts_code": "000001.SZ", "name": "test"},
-            tech_info={},
-            news_list=[],
-        )
+        router = MagicMock()
+        router.acompletion = AsyncMock(side_effect=TimeoutError("read timeout"))
+        with (
+            patch(
+                "utils.config_handler.ConfigHandler.get_failover_config",
+                return_value={"primary": "deepseek/deepseek-v4-flash", "fallbacks": []},
+            ),
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service._ensure_router_loaded", return_value=True),
+            patch("services.ai_service._litellm_router", router),
+        ):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ", "name": "test"},
+                tech_info={},
+                news_list=[],
+            )
         assert result["error"] == "All LLM providers unavailable"
         assert result["score"] is None
         assert result["ai_status"] == "failed"
@@ -1585,12 +1595,22 @@ class TestAIServiceBuildLiteLLMParamsZhipuBoundary:
             "fallbacks": [],
         }
         svc = AIService()
-        svc._chat_completion = AsyncMock(side_effect=httpx.TimeoutException("connect timeout"))
-        result = await svc.analyze_stock(
-            stock_info={"ts_code": "000001.SZ", "name": "test"},
-            tech_info={},
-            news_list=[],
-        )
+        router = MagicMock()
+        router.acompletion = AsyncMock(side_effect=httpx.TimeoutException("connect timeout"))
+        with (
+            patch(
+                "utils.config_handler.ConfigHandler.get_failover_config",
+                return_value={"primary": "deepseek/deepseek-v4-flash", "fallbacks": []},
+            ),
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service._ensure_router_loaded", return_value=True),
+            patch("services.ai_service._litellm_router", router),
+        ):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ", "name": "test"},
+                tech_info={},
+                news_list=[],
+            )
         assert result["error"] == "All LLM providers unavailable"
         assert result["score"] is None
         assert result["ai_status"] == "failed"
@@ -1611,7 +1631,7 @@ class TestAIServiceBuildLiteLLMParamsZhipuBoundary:
         mock_ch.get_ai_base_url.return_value = "http://localhost"
         mock_ch.get_setting.return_value = False
         svc = AIService()
-        svc._chat_completion = AsyncMock(side_effect=LocalInferenceTimeoutError("local timeout 90s"))
+        svc._chat_completion_with_failover = AsyncMock(side_effect=LocalInferenceTimeoutError("local timeout 90s"))
         result = await svc.analyze_stock(
             stock_info={"ts_code": "000001.SZ", "name": "test"},
             tech_info={},
@@ -1640,7 +1660,7 @@ class TestUniversalRulesSeparateSystemMessage:
         mock_ch.get_setting.return_value = False
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
-        svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
         with patch("core.prompt_base.get_base_prompt", return_value="Strategy prompt"):
             await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ", "name": "test"},
@@ -1648,7 +1668,7 @@ class TestUniversalRulesSeparateSystemMessage:
                 news_list=[],
                 strategy_key="oversold",
             )
-        messages = svc._chat_completion.await_args.args[0]
+        messages = svc._chat_completion_with_failover.await_args.args[0]
         system_msgs = [m for m in messages if m["role"] == "system"]
         assert len(system_msgs) == 2
         assert _UNIVERSAL_RULES in system_msgs[0]["content"]
@@ -1671,7 +1691,7 @@ class TestUniversalRulesSeparateSystemMessage:
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
         svc = AIService()
-        svc._chat_completion = AsyncMock(return_value={"score": 60, "recommendation": "neutral"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 60, "recommendation": "neutral"})
         with (
             patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
             patch("utils.prompt_guard.sanitize_prompt", return_value="safe custom prompt"),
@@ -1682,7 +1702,7 @@ class TestUniversalRulesSeparateSystemMessage:
                 news_list=[],
                 ui_prompt_override="Custom analysis prompt",
             )
-        messages = svc._chat_completion.await_args.args[0]
+        messages = svc._chat_completion_with_failover.await_args.args[0]
         system_msgs = [m for m in messages if m["role"] == "system"]
         assert len(system_msgs) == 2
         assert _UNIVERSAL_RULES in system_msgs[0]["content"]
@@ -1708,7 +1728,7 @@ class TestUniversalRulesSeparateSystemMessage:
         mock_ch.get_setting.return_value = False
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
-        svc._chat_completion = AsyncMock(return_value={"score": 40, "recommendation": "sell"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 40, "recommendation": "sell"})
         with (
             patch(
                 "utils.prompt_guard.validate_prompt",
@@ -1723,7 +1743,7 @@ class TestUniversalRulesSeparateSystemMessage:
                 ui_prompt_override="<script>evil</script>",
                 strategy_key="oversold",
             )
-        messages = svc._chat_completion.await_args.args[0]
+        messages = svc._chat_completion_with_failover.await_args.args[0]
         system_msgs = [m for m in messages if m["role"] == "system"]
         assert len(system_msgs) == 2
         assert _UNIVERSAL_RULES in system_msgs[0]["content"]
@@ -1769,7 +1789,9 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_setting.return_value = False
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
-        svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy", "reason": "Good stock"})
+        svc._chat_completion_with_failover = AsyncMock(
+            return_value={"score": 80, "recommendation": "buy", "reason": "Good stock"}
+        )
         with (
             patch("core.prompt_base.get_base_prompt") as mock_resolve,
             patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
@@ -1808,7 +1830,7 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_setting.return_value = False
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
         with patch("core.prompt_base.get_base_prompt") as mock_resolve:
             mock_resolve.return_value = "Strategy prompt"
             result = await svc.analyze_stock(
@@ -1834,7 +1856,7 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_setting.return_value = False
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
         with patch("core.prompt_base.get_base_prompt") as mock_resolve:
             mock_resolve.return_value = "Strategy prompt"
             result = await svc.analyze_stock(
@@ -1859,7 +1881,7 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_ai_base_url.return_value = "http://api.test.com"
         mock_ch.get_setting.return_value = False
         svc = AIService()
-        svc._chat_completion = AsyncMock(return_value={"score": 60, "recommendation": "neutral"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 60, "recommendation": "neutral"})
         with (
             patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
             patch("utils.prompt_guard.sanitize_prompt", return_value="safe"),
@@ -1887,7 +1909,7 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_setting.return_value = False
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
-        svc._chat_completion = AsyncMock(return_value={"score": 40, "recommendation": "sell"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 40, "recommendation": "sell"})
         with (
             patch(
                 "utils.prompt_guard.validate_prompt",
@@ -1920,7 +1942,7 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_setting.return_value = False
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
-        svc._chat_completion = AsyncMock(side_effect=RuntimeError("API error"))
+        svc._chat_completion_with_failover = AsyncMock(side_effect=RuntimeError("API error"))
         result = await svc.analyze_stock(
             stock_info={"ts_code": "000001.SZ"},
             tech_info={},
@@ -2203,12 +2225,22 @@ class TestAIServiceBuildLiteLLMParamsZhipu:
             "fallbacks": [],
         }
         svc = AIService()
-        svc._chat_completion = AsyncMock(side_effect=TimeoutError())
-        result = await svc.analyze_stock(
-            stock_info={"ts_code": "000001.SZ", "name": "test"},
-            tech_info={},
-            news_list=[],
-        )
+        router = MagicMock()
+        router.acompletion = AsyncMock(side_effect=TimeoutError())
+        with (
+            patch(
+                "utils.config_handler.ConfigHandler.get_failover_config",
+                return_value={"primary": "deepseek/deepseek-v4-flash", "fallbacks": []},
+            ),
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service._ensure_router_loaded", return_value=True),
+            patch("services.ai_service._litellm_router", router),
+        ):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ", "name": "test"},
+                tech_info={},
+                news_list=[],
+            )
         assert result["error"] == "All LLM providers unavailable"
         assert result["score"] is None
         assert result["ai_status"] == "failed"
@@ -2233,12 +2265,22 @@ class TestAIServiceBuildLiteLLMParamsZhipu:
             "fallbacks": [],
         }
         svc = AIService()
-        svc._chat_completion = AsyncMock(side_effect=httpx.ReadTimeout("read timeout"))
-        result = await svc.analyze_stock(
-            stock_info={"ts_code": "000001.SZ", "name": "test"},
-            tech_info={},
-            news_list=[],
-        )
+        router = MagicMock()
+        router.acompletion = AsyncMock(side_effect=httpx.ReadTimeout("read timeout"))
+        with (
+            patch(
+                "utils.config_handler.ConfigHandler.get_failover_config",
+                return_value={"primary": "deepseek/deepseek-v4-flash", "fallbacks": []},
+            ),
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service._ensure_router_loaded", return_value=True),
+            patch("services.ai_service._litellm_router", router),
+        ):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ", "name": "test"},
+                tech_info={},
+                news_list=[],
+            )
         assert result["error"] == "All LLM providers unavailable"
         assert result["score"] is None
         assert result["ai_status"] == "failed"
@@ -2263,12 +2305,22 @@ class TestAIServiceBuildLiteLLMParamsZhipu:
             "fallbacks": [],
         }
         svc = AIService()
-        svc._chat_completion = AsyncMock(side_effect=httpx.ConnectTimeout("connect timeout"))
-        result = await svc.analyze_stock(
-            stock_info={"ts_code": "000001.SZ", "name": "test"},
-            tech_info={},
-            news_list=[],
-        )
+        router = MagicMock()
+        router.acompletion = AsyncMock(side_effect=httpx.ConnectTimeout("connect timeout"))
+        with (
+            patch(
+                "utils.config_handler.ConfigHandler.get_failover_config",
+                return_value={"primary": "deepseek/deepseek-v4-flash", "fallbacks": []},
+            ),
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service._ensure_router_loaded", return_value=True),
+            patch("services.ai_service._litellm_router", router),
+        ):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ", "name": "test"},
+                tech_info={},
+                news_list=[],
+            )
         assert result["error"] == "All LLM providers unavailable"
         assert result["score"] is None
         assert result["ai_status"] == "failed"
@@ -2509,7 +2561,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
     async def test_concepts_exception_fallback(self):
         """concepts.get raising Exception is caught; concepts key removed."""
         svc = _make_svc_with_cloud()
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
 
         class BadDict(dict):
             def get(self, key, default=None):
@@ -2530,7 +2582,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
     async def test_learning_context_fetch_failed(self):
         """ReviewManager raising Exception is caught; history_context falls back to empty."""
         svc = _make_svc_with_cloud()
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
         with (
             patch("core.prompt_base.get_base_prompt", return_value="prompt"),
             patch(
@@ -2551,7 +2603,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
     async def test_include_learning_context_false(self):
         """include_learning_context=False skips learning context fetch entirely."""
         svc = _make_svc_with_cloud()
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
         with patch("core.prompt_base.get_base_prompt", return_value="prompt"):
             result = await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ"},
@@ -2566,7 +2618,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
     async def test_fallback_learning_context_passes_non_none_as_of(self):
         """Live-mode fallback path passes non-None as_of to prevent lookahead bias."""
         svc = _make_svc_with_cloud()
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
 
         mock_rm = AsyncMock()
         mock_rm.get_learning_context = AsyncMock(return_value="<learning>test</learning>")
@@ -2593,7 +2645,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
         """AI-03：系统指令须为 <history_context> 声明信任级别（历史参考、非指令），
         与 recent_news/global_context 一致——补上 few-shot 段的可信度声明。"""
         svc = _make_svc_with_cloud()
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
         with (
             patch("core.prompt_base.get_base_prompt", return_value="prompt"),
             patch(
@@ -2608,7 +2660,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
                 strategy_key="oversold",
                 include_learning_context=True,
             )
-        messages = svc._chat_completion.await_args.args[0]
+        messages = svc._chat_completion_with_failover.await_args.args[0]
         system_msgs = [m for m in messages if m["role"] == "system"]
         first_system = system_msgs[0]["content"]
         assert "<history_context>" in first_system
@@ -2635,7 +2687,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
     async def test_analyze_stock_fallback_works_in_live_mode(self):
         """Live mode with history_context=None fetches learning context successfully."""
         svc = _make_svc_with_cloud()
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
         mock_rm = AsyncMock()
         mock_rm.get_learning_context = AsyncMock(return_value="<learning>test</learning>")
 
@@ -2658,7 +2710,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
     async def test_no_strategy_key_no_override(self):
         """No strategy_key and no ui_prompt_override uses ConfigHandler.get_ai_system_prompt."""
         svc = _make_svc_with_cloud()
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
         with patch("services.ai_service.ConfigHandler") as mock_ch:
             mock_ch.get_ai_system_prompt.return_value = "default prompt"
             mock_ch.get_setting.return_value = False
@@ -2693,7 +2745,7 @@ class TestAnalyzeStockExternalTextNeutralization:
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
 
         svc = AIService()
-        svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
 
         malicious_news = [
             {
@@ -2718,7 +2770,7 @@ class TestAnalyzeStockExternalTextNeutralization:
             include_learning_context=False,
         )
 
-        messages = svc._chat_completion.await_args.args[0]
+        messages = svc._chat_completion_with_failover.await_args.args[0]
         user_msgs = [m for m in messages if m["role"] == "user"]
         assert len(user_msgs) == 1
         user_content = user_msgs[0]["content"]
@@ -2763,7 +2815,7 @@ class TestAnalyzeStockExternalTextNeutralization:
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
 
         svc = AIService()
-        svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
 
         await svc.analyze_stock(
             stock_info={"ts_code": "000001.SZ", "name": "茅台\u200b酒"},
@@ -2774,7 +2826,7 @@ class TestAnalyzeStockExternalTextNeutralization:
             include_learning_context=False,
         )
 
-        messages = svc._chat_completion.await_args.args[0]
+        messages = svc._chat_completion_with_failover.await_args.args[0]
         user_content = [m for m in messages if m["role"] == "user"][0]["content"]
         assert "\u200b" not in user_content
 
@@ -2798,7 +2850,7 @@ class TestAnalyzeStockExternalTextNeutralization:
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
 
         svc = AIService()
-        svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
 
         await svc.analyze_stock(
             stock_info={"ts_code": "000001.SZ", "name": "test"},
@@ -2809,7 +2861,7 @@ class TestAnalyzeStockExternalTextNeutralization:
             include_learning_context=False,
         )
 
-        messages = svc._chat_completion.await_args.args[0]
+        messages = svc._chat_completion_with_failover.await_args.args[0]
         system_msgs = [m for m in messages if m["role"] == "system"]
         first_system = system_msgs[0]["content"]
         assert "<recent_news>" in first_system
@@ -2950,7 +3002,7 @@ class TestStockAnalysisFilterLabelsGenericException:
         import logging
 
         svc = _make_svc_with_cloud()
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
         with (
             patch(
                 "services.ai_service.stock_analysis.filter_available_labels",
@@ -2985,7 +3037,7 @@ class TestStockAnalysisPromptDumpFailure:
         import logging
 
         svc = _make_svc_with_cloud()
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
         svc._get_prompt_dump_dir = MagicMock(side_effect=OSError("cannot write prompt dump"))
 
         def fake_get_setting(k, d=False):
@@ -3024,7 +3076,7 @@ class TestAnalyzeStockBacktestNameFilter:
     @pytest.mark.asyncio
     async def test_backtest_mode_removes_name_from_prompt(self):
         svc = _make_svc_with_cloud()
-        svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
         await svc.analyze_stock(
             stock_info={"ts_code": "000001.SZ", "name": "ST Example"},
             tech_info={},
@@ -3032,7 +3084,7 @@ class TestAnalyzeStockBacktestNameFilter:
             is_backtest=True,
             include_learning_context=False,
         )
-        messages = svc._chat_completion.await_args.args[0]
+        messages = svc._chat_completion_with_failover.await_args.args[0]
         user_msgs = [m for m in messages if m["role"] == "user"]
         assert len(user_msgs) == 1
         user_content = user_msgs[0]["content"]
@@ -3043,7 +3095,7 @@ class TestAnalyzeStockBacktestNameFilter:
     @pytest.mark.asyncio
     async def test_live_mode_keeps_name_in_prompt(self):
         svc = _make_svc_with_cloud()
-        svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
         await svc.analyze_stock(
             stock_info={"ts_code": "000001.SZ", "name": "ST Example"},
             tech_info={},
@@ -3051,7 +3103,7 @@ class TestAnalyzeStockBacktestNameFilter:
             is_backtest=False,
             include_learning_context=False,
         )
-        messages = svc._chat_completion.await_args.args[0]
+        messages = svc._chat_completion_with_failover.await_args.args[0]
         user_msgs = [m for m in messages if m["role"] == "user"]
         assert len(user_msgs) == 1
         user_content = user_msgs[0]["content"]

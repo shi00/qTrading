@@ -1,15 +1,71 @@
 """
-P1-12: 测试 AI 服务多供应商 fallback 功能
+P1-12: 测试 AI 服务多供应商 fallback 功能（L4: 手写 failover 循环 → litellm.Router）
 """
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from contextlib import ExitStack, contextmanager
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
 from core.errors import AIConfigError
 from services.ai_service import AIService, AIServiceUnavailableError
+from services.ai_service.litellm_client import LiteLLMClient
 
 pytestmark = pytest.mark.unit
+
+FAKE_FAILOVER_CONFIG = {
+    "primary": "deepseek/deepseek-v4-flash",
+    "fallbacks": ["qwen/qwen-max"],
+}
+
+FAKE_LLM_CONFIG = {
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "api_key": "sk-primary-key",
+    "base_url": "https://api.deepseek.com",
+}
+
+
+def _cloud_ready_service() -> AIService:
+    """构造云端可用状态的 AIService（单例由 conftest 自动重置隔离）。"""
+    service = AIService()
+    service._is_cloud_configured = True
+    service._litellm_config = dict(FAKE_LLM_CONFIG)
+    return service
+
+
+@contextmanager
+def _router_failover_env(service: AIService, router: Any):
+    """为 _router_failover 测试搭建环境：门控链全部放行，注入假 Router。
+
+    with 块内 yield egress audit mock；块结束时自动恢复全部 patch。
+    """
+    egress = AsyncMock()
+    with ExitStack() as stack:
+        stack.enter_context(patch("utils.config_handler.ConfigHandler.is_ai_local_only_mode", return_value=False))
+        stack.enter_context(
+            patch(
+                "utils.config_handler.ConfigHandler.get_failover_config",
+                return_value=dict(FAKE_FAILOVER_CONFIG),
+            )
+        )
+        stack.enter_context(patch("services.ai_service._ensure_litellm_loaded", return_value=True))
+        stack.enter_context(patch("services.ai_service._ensure_router_loaded", return_value=True))
+        stack.enter_context(patch("services.ai_service._litellm_router", router))
+        # _record_cloud_egress 是 LiteLLMClient 的方法（self 为 client 实例），patch 类方法
+        stack.enter_context(patch.object(LiteLLMClient, "_record_cloud_egress", egress))
+        yield egress
+
+
+def _ok_resp(content: str, model: str | None = None, usage=None):
+    """构造 Router.acompletion 的非流式成功响应（ModelResponse 同构）。"""
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+        model=model,
+        usage=usage,
+    )
 
 
 class TestFailoverConfig:
@@ -66,112 +122,175 @@ class TestFailoverConfig:
 
 
 class TestChatCompletionWithFailover:
-    """测试带 fallback 的聊天完成"""
+    """测试 _router_failover（L4 Router 语义）"""
 
     @pytest.mark.asyncio
     async def test_primary_success_no_fallback(self):
-        """主供应商成功时不使用 fallback"""
-        service = AIService()
+        """primary 成功时正常返回，Router 收到 model_name=primary"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock(
+            return_value=_ok_resp(
+                '{"score": 85, "recommendation": "buy"}',
+                model="deepseek/deepseek-v4-flash",
+            )
+        )
+        with _router_failover_env(service, router) as egress:
+            result = await service._chat_completion_with_failover(
+                messages=[{"role": "user", "content": "test"}],
+            )
 
-        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_completion:
-            mock_completion.return_value = {"score": 85, "recommendation": "buy"}
+        assert result["score"] == 85
+        router.acompletion.assert_awaited_once()
+        assert router.acompletion.call_args.kwargs["model"] == "deepseek/deepseek-v4-flash"
+        # primary 实际生效：仅入口审计一次（不补记）
+        egress.assert_awaited_once()
+        assert egress.await_args.kwargs["model"] == "deepseek/deepseek-v4-flash"
 
-            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
-                mock_config.return_value = {
-                    "primary": "deepseek/deepseek-v4-flash",
-                    "fallbacks": ["qwen/qwen-max"],
-                }
+    @pytest.mark.asyncio
+    async def test_router_fallback_destination_audited(self):
+        """Router 实际 fallback 到备选模型时，补记真实目的地并返回其 model"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock(
+            return_value=_ok_resp(
+                '{"score": 75, "recommendation": "sell"}',
+                model="qwen/qwen-max",
+            )
+        )
+        with _router_failover_env(service, router) as egress:
+            result = await service._chat_completion_with_failover(
+                messages=[{"role": "user", "content": "test"}],
+            )
 
-                result = await service._chat_completion_with_failover(
+        assert result["score"] == 75
+        assert result["model"] == "qwen/qwen-max"
+        # 双层审计：入口 primary 意图 + 实际目的地补记
+        assert egress.await_count == 2
+        models_audited = [call.kwargs["model"] for call in egress.await_args_list]
+        assert models_audited == ["deepseek/deepseek-v4-flash", "qwen/qwen-max"]
+
+    @pytest.mark.asyncio
+    async def test_all_transient_failures_raise_unavailable(self):
+        """瞬态错误经 Router 重试/fallback 仍失败 → 收敛为 AIServiceUnavailableError"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock(side_effect=httpx.ConnectError("all providers down"))
+        with _router_failover_env(service, router):
+            with pytest.raises(AIServiceUnavailableError) as exc_info:
+                await service._chat_completion_with_failover(
                     messages=[{"role": "user", "content": "test"}],
                 )
 
-                assert result["score"] == 85
-                mock_completion.assert_called_once()
+        assert "All LLM providers failed" in str(exc_info.value)
+        assert "deepseek/deepseek-v4-flash" in str(exc_info.value)
+        assert "qwen/qwen-max" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_fallback_on_timeout(self):
-        """TimeoutError 时触发 fallback"""
-        service = AIService()
-
-        call_count = 0
-
-        async def mock_completion(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise TimeoutError("Request timed out")
-            return {"score": 75, "recommendation": "sell"}
-
-        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_completion_patch:
-            mock_completion_patch.side_effect = mock_completion
-
-            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
-                mock_config.return_value = {
-                    "primary": "deepseek/deepseek-v4-flash",
-                    "fallbacks": ["qwen/qwen-max"],
-                }
-
-                result = await service._chat_completion_with_failover(
+    async def test_invalid_json_raises_value_error(self):
+        """json_mode 下非法 JSON → ValueError（与 _chat_completion 同源语义）"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock(return_value=_ok_resp("not a json", model="deepseek/deepseek-v4-flash"))
+        with _router_failover_env(service, router):
+            with pytest.raises(ValueError, match="Invalid JSON response"):
+                await service._chat_completion_with_failover(
                     messages=[{"role": "user", "content": "test"}],
                 )
 
-                assert result["score"] == 75
-                assert call_count == 2
+    @pytest.mark.asyncio
+    async def test_non_json_mode_returns_raw_content(self):
+        """json_mode=False 时返回原始内容字典（content+元数据）"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock(return_value=_ok_resp("plain text", model="deepseek/deepseek-v4-flash"))
+        with _router_failover_env(service, router):
+            result = await service._chat_completion_with_failover(
+                messages=[{"role": "user", "content": "test"}],
+                json_mode=False,
+            )
+        assert result["content"] == "plain text"
+        assert result["model"] == "deepseek/deepseek-v4-flash"
+
+
+class TestRouterFailoverEntryGates:
+    """测试 _router_failover 入口门控链（cloud 可用性 / primary / Router 可用）"""
 
     @pytest.mark.asyncio
-    async def test_fallback_on_httpx_error(self):
-        """httpx 连接错误时触发 fallback"""
+    async def test_cloud_not_configured_raises(self):
+        """云端未配置（is_cloud_available False）→ ValueError"""
         service = AIService()
-
-        call_count = 0
-
-        async def mock_completion(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise httpx.ConnectError("Connection failed")
-            return {"score": 80, "recommendation": "hold"}
-
-        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_completion_patch:
-            mock_completion_patch.side_effect = mock_completion
-
-            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
-                mock_config.return_value = {
-                    "primary": "deepseek/deepseek-v4-flash",
-                    "fallbacks": ["qwen/qwen-max"],
-                }
-
-                result = await service._chat_completion_with_failover(
+        service._is_cloud_configured = False
+        with _router_failover_env(service, MagicMock()):
+            with pytest.raises(ValueError, match="Cloud LLM not configured"):
+                await service._chat_completion_with_failover(
                     messages=[{"role": "user", "content": "test"}],
                 )
 
-                assert result["score"] == 80
-                assert call_count == 2
+    @pytest.mark.asyncio
+    async def test_missing_primary_raises_unavailable(self):
+        """failover 配置缺 primary → AIServiceUnavailableError"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock()
+        with ExitStack() as stack:
+            stack.enter_context(patch("utils.config_handler.ConfigHandler.is_ai_local_only_mode", return_value=False))
+            stack.enter_context(
+                patch(
+                    "utils.config_handler.ConfigHandler.get_failover_config",
+                    return_value={"primary": "", "fallbacks": ["qwen/qwen-max"]},
+                )
+            )
+            stack.enter_context(patch("services.ai_service._ensure_router_loaded", return_value=True))
+            stack.enter_context(patch("services.ai_service._litellm_router", router))
+            with pytest.raises(AIServiceUnavailableError, match="No primary LLM provider"):
+                await service._chat_completion_with_failover(
+                    messages=[{"role": "user", "content": "test"}],
+                )
+        router.acompletion.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_all_providers_failed_raises_error(self):
-        """所有供应商都失败时抛出 AIServiceUnavailableError"""
-        service = AIService()
+    async def test_router_unavailable_raises(self):
+        """Router 构造失败 → AIServiceUnavailableError"""
+        service = _cloud_ready_service()
+        with ExitStack() as stack:
+            stack.enter_context(patch("utils.config_handler.ConfigHandler.is_ai_local_only_mode", return_value=False))
+            stack.enter_context(
+                patch(
+                    "utils.config_handler.ConfigHandler.get_failover_config",
+                    return_value=dict(FAKE_FAILOVER_CONFIG),
+                )
+            )
+            stack.enter_context(patch("services.ai_service._ensure_litellm_loaded", return_value=True))
+            stack.enter_context(patch("services.ai_service._ensure_router_loaded", return_value=False))
+            with pytest.raises(AIServiceUnavailableError, match="Failover router unavailable"):
+                await service._chat_completion_with_failover(
+                    messages=[{"role": "user", "content": "test"}],
+                )
 
-        async def mock_completion(*args, **kwargs):
-            raise TimeoutError("Request timed out")
+    @pytest.mark.asyncio
+    async def test_news_purpose_unacknowledged_raises_policy_error(self):
+        """SEC-01 门控：purpose=news 且未外发知情确认 → AIPolicyNotAcknowledgedError"""
+        from core.errors import AIPolicyNotAcknowledgedError
 
-        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_completion_patch:
-            mock_completion_patch.side_effect = mock_completion
-
-            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
-                mock_config.return_value = {
-                    "primary": "deepseek/deepseek-v4-flash",
-                    "fallbacks": ["qwen/qwen-max"],
-                }
-
-                with pytest.raises(AIServiceUnavailableError) as exc_info:
-                    await service._chat_completion_with_failover(
-                        messages=[{"role": "user", "content": "test"}],
-                    )
-
-                assert "All LLM providers failed" in str(exc_info.value)
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock()
+        client = LiteLLMClient(service)
+        with (
+            patch("utils.config_handler.ConfigHandler.is_ai_local_only_mode", return_value=False),
+            patch("services.ai_service._ensure_router_loaded", return_value=True),
+            patch("services.ai_service._litellm_router", router),
+            patch("utils.egress_ack.is_egress_acknowledged", return_value=False),
+        ):
+            with pytest.raises(AIPolicyNotAcknowledgedError) as exc_info:
+                await client._router_failover(
+                    messages=[{"role": "user", "content": "test"}],
+                    purpose="news",
+                )
+            # 非交互降级语义：policy 阻断异常承载 i18n 提示 key（SEC-01）
+            assert exc_info.value.to_error_info()["message_key"] == "ai_external_acknowledgment_prompt"
+        router.acompletion.assert_not_awaited()
 
 
 class TestAIServiceUnavailableError:
@@ -192,60 +311,34 @@ class TestAIServiceUnavailableError:
 
 
 class TestFailoverModelPropagation:
-    """测试 failover 时 model 参数正确传递到 _chat_completion"""
+    """测试 _router_failover 中 model 参数正确传递到 Router（L4 语义）"""
 
     @pytest.mark.asyncio
-    async def test_primary_model_passed_to_chat_completion(self):
-        """主供应商的 model 应传递给 _chat_completion"""
-        service = AIService()
+    async def test_primary_model_passed_to_router(self):
+        """primary 作为 Router 池内 model_name 传递"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock(return_value=_ok_resp('{"score": 85}', model="deepseek/deepseek-v4-flash"))
+        with _router_failover_env(service, router):
+            await service._chat_completion_with_failover(
+                messages=[{"role": "user", "content": "test"}],
+            )
 
-        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_completion:
-            mock_completion.return_value = {"score": 85}
-
-            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
-                mock_config.return_value = {
-                    "primary": "deepseek/deepseek-v4-flash",
-                    "fallbacks": ["qwen/qwen-max"],
-                }
-
-                await service._chat_completion_with_failover(
-                    messages=[{"role": "user", "content": "test"}],
-                )
-
-                mock_completion.assert_called_once()
-                call_kwargs = mock_completion.call_args
-                assert call_kwargs.kwargs.get("model") == "deepseek/deepseek-v4-flash" or (
-                    len(call_kwargs.args) > 1 and "deepseek" in str(call_kwargs)
-                )
+        router.acompletion.assert_awaited_once()
+        assert router.acompletion.call_args.kwargs["model"] == "deepseek/deepseek-v4-flash"
 
     @pytest.mark.asyncio
-    async def test_fallback_model_passed_on_primary_failure(self):
-        """主供应商失败时，fallback model 应传递给 _chat_completion"""
-        service = AIService()
+    async def test_actual_fallback_model_in_result(self):
+        """Router 响应携带 fallback model 时，result['model'] 为实际生效模型"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock(return_value=_ok_resp('{"score": 75}', model="qwen/qwen-max"))
+        with _router_failover_env(service, router):
+            result = await service._chat_completion_with_failover(
+                messages=[{"role": "user", "content": "test"}],
+            )
 
-        call_models = []
-
-        async def mock_completion(*args, **kwargs):
-            call_models.append(kwargs.get("model"))
-            if len(call_models) == 1:
-                raise TimeoutError("Primary timed out")
-            return {"score": 75}
-
-        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_completion_patch:
-            mock_completion_patch.side_effect = mock_completion
-
-            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
-                mock_config.return_value = {
-                    "primary": "deepseek/deepseek-v4-flash",
-                    "fallbacks": ["qwen/qwen-max"],
-                }
-
-                result = await service._chat_completion_with_failover(
-                    messages=[{"role": "user", "content": "test"}],
-                )
-
-                assert result["score"] == 75
-                assert call_models == ["deepseek/deepseek-v4-flash", "qwen/qwen-max"]
+        assert result["model"] == "qwen/qwen-max"
 
     @pytest.mark.asyncio
     async def test_model_override_propagates_to_litellm(self):
@@ -299,33 +392,22 @@ class TestFailoverModelPropagation:
 
 
 class TestFailoverCancelledError:
-    """测试 _chat_completion_with_failover 正确传播 CancelledError"""
+    """测试 _router_failover 正确传播 CancelledError"""
 
     @pytest.mark.asyncio
     async def test_cancelled_error_propagates_not_swallowed(self):
-        """CancelledError 应被立即 re-raise，不触发 fallback"""
+        """CancelledError 应被立即 re-raise（R2），不收敛为 AIServiceUnavailableError"""
         import asyncio
 
-        service = AIService()
-
-        async def mock_completion(*args, **kwargs):
-            raise asyncio.CancelledError()
-
-        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_completion_patch:
-            mock_completion_patch.side_effect = mock_completion
-
-            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
-                mock_config.return_value = {
-                    "primary": "deepseek/deepseek-v4-flash",
-                    "fallbacks": ["qwen/qwen-max"],
-                }
-
-                with pytest.raises(asyncio.CancelledError):
-                    await service._chat_completion_with_failover(
-                        messages=[{"role": "user", "content": "test"}],
-                    )
-
-                mock_completion_patch.assert_called_once()
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock(side_effect=asyncio.CancelledError())
+        with _router_failover_env(service, router):
+            with pytest.raises(asyncio.CancelledError):
+                await service._chat_completion_with_failover(
+                    messages=[{"role": "user", "content": "test"}],
+                )
+        router.acompletion.assert_awaited_once()
 
 
 class TestReasoningCheckWithModelOverride:
@@ -640,93 +722,49 @@ class TestCrossProviderBaseUrlFallback:
 
 
 class TestUnifiedFailoverErrorClassification:
-    """测试统一 classify_error 判定后的 Failover 切卡与重试行为"""
+    """测试 _router_failover 的错误收敛：非瞬态直抛、瞬态转 AIServiceUnavailableError"""
 
     @pytest.mark.asyncio
     async def test_permanent_auth_error_raises_immediately(self):
-        """AuthenticationError (401) 不触发 failover 切卡，立即抛出"""
-        service = AIService()
-
-        call_count = 0
-
-        async def mock_completion(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            raise Exception("401 unauthorized: Invalid API key")
-
-        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_patch:
-            mock_patch.side_effect = mock_completion
-            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
-                mock_config.return_value = {
-                    "primary": "deepseek/deepseek-v4-flash",
-                    "fallbacks": ["qwen/qwen-max"],
-                }
-
-                with pytest.raises(Exception) as exc_info:
-                    await service._chat_completion_with_failover(
-                        messages=[{"role": "user", "content": "test"}],
-                    )
-
-                assert "401 unauthorized" in str(exc_info.value)
-                assert call_count == 1, "永久错误不应触发切卡重试"
-
-    @pytest.mark.asyncio
-    async def test_transient_rate_limit_triggers_fallback(self):
-        """RateLimitError (429) 识别为瞬态错误并成功切卡"""
-        service = AIService()
-
-        call_count = 0
-
-        async def mock_completion(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise Exception("429 too many requests")
-            return {"content": "ok"}
-
-        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_patch:
-            mock_patch.side_effect = mock_completion
-            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
-                mock_config.return_value = {
-                    "primary": "deepseek/deepseek-v4-flash",
-                    "fallbacks": ["qwen/qwen-max"],
-                }
-
-                result = await service._chat_completion_with_failover(
+        """AuthenticationError (401) 保持原语义：直接上抛，不收敛为"所有供应商失败"。
+        （Router 配置 AuthenticationErrorRetries=0 且同组部署数=1，401 不会触发 fallback。）"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock(side_effect=Exception("401 unauthorized: Invalid API key"))
+        with _router_failover_env(service, router):
+            with pytest.raises(Exception) as exc_info:
+                await service._chat_completion_with_failover(
                     messages=[{"role": "user", "content": "test"}],
                 )
-
-                assert result == {"content": "ok"}
-                assert call_count == 2, "429 瞬态错误应成功切卡"
+        assert "401 unauthorized" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_empty_string_connect_error_triggers_fallback(self):
-        """httpx.ConnectError("") (空字符串) 经 classify_error 精确类型匹配识别为瞬态错误并切卡"""
-        service = AIService()
-
-        call_count = 0
-
-        async def mock_completion(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise httpx.ConnectError("")
-            return {"content": "ok"}
-
-        with patch.object(service, "_chat_completion", new_callable=AsyncMock) as mock_patch:
-            mock_patch.side_effect = mock_completion
-            with patch("utils.config_handler.ConfigHandler.get_failover_config") as mock_config:
-                mock_config.return_value = {
-                    "primary": "deepseek/deepseek-v4-flash",
-                    "fallbacks": ["qwen/qwen-max"],
-                }
-
-                result = await service._chat_completion_with_failover(
+    async def test_transient_failure_converges_to_unavailable(self):
+        """瞬态速率限制（429）经 Router 重试/fallback 仍失败 → AIServiceUnavailableError，
+        Tried 列出 primary 与全部 fallback。"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock(side_effect=Exception("429 too many requests"))
+        with _router_failover_env(service, router):
+            with pytest.raises(AIServiceUnavailableError) as exc_info:
+                await service._chat_completion_with_failover(
                     messages=[{"role": "user", "content": "test"}],
                 )
+        message = str(exc_info.value)
+        assert "deepseek/deepseek-v4-flash" in message
+        assert "qwen/qwen-max" in message
 
-                assert result == {"content": "ok"}
-                assert call_count == 2, "空字符串 httpx.ConnectError 应切卡"
+    @pytest.mark.asyncio
+    async def test_empty_string_connect_error_converges_to_unavailable(self):
+        """httpx.ConnectError("")（空字符串）经 classify_error 判定为瞬态 → 收敛"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+        router.acompletion = AsyncMock(side_effect=httpx.ConnectError(""))
+        with _router_failover_env(service, router):
+            with pytest.raises(AIServiceUnavailableError, match="All LLM providers failed"):
+                await service._chat_completion_with_failover(
+                    messages=[{"role": "user", "content": "test"}],
+                )
 
 
 class TestBuildRouterModelList:
@@ -888,3 +926,202 @@ class TestCrossProviderFailoverLogWording:
         assert params.get("api_key") == "sk-dedicated-openai-key"
         assert params["model"] == "openai/gpt-4o"
         assert "has no dedicated API key" not in caplog.text
+
+
+class TestEnsureRouterLoaded:
+    """L4: _ensure_router_loaded 惰性构造 litellm.Router（哨兵 + 失败降级）。"""
+
+    def _base_env(self):
+        return [
+            patch("services.ai_service._router_import_attempted", False),
+            patch("services.ai_service._litellm_router", None),
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+        ]
+
+    def test_constructs_router_with_fallback_maps(self):
+        """Model_list/fallbacks/context_window_fallbacks 按 list-of-dicts 形式传给 Router 构造。"""
+        from services.ai_service.litellm_client import _ensure_router_loaded
+
+        captured = {}
+
+        def router_ctor(**kwargs):
+            captured.update(kwargs)
+            return "ROUTER_INSTANCE"
+
+        failover_config = {
+            "primary": "deepseek/deepseek-v4-flash",
+            "fallbacks": ["deepseek/deepseek-v4-pro"],
+            "primary_config": {
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "api_key": "sk-primary-key",
+                "base_url": "https://api.deepseek.com",
+            },
+        }
+        litellm_mock = MagicMock()
+        litellm_mock.Router.side_effect = router_ctor
+        # 模块级副作用断言须在 patch 作用域内进行（退出 ExitStack 后 patch 恢复原值）
+        import services.ai_service as _ai
+
+        with ExitStack() as stack:
+            for p in self._base_env():
+                stack.enter_context(p)
+            stack.enter_context(
+                patch("utils.config_handler.ConfigHandler.get_failover_config", return_value=failover_config)
+            )
+            stack.enter_context(patch("services.ai_service.litellm", litellm_mock))
+
+            assert _ensure_router_loaded() is True
+            # 成功构造后缓存实例，供 _router_failover 复用
+            assert _ai._litellm_router == "ROUTER_INSTANCE"
+
+        # 构造参数契约
+        assert captured["num_retries"] == 2
+        assert captured["fallbacks"] == [{"deepseek/deepseek-v4-flash": ["deepseek/deepseek-v4-pro"]}]
+        assert captured["context_window_fallbacks"] == [{"deepseek/deepseek-v4-flash": ["deepseek/deepseek-v4-pro"]}]
+        assert captured["cooldown_time"] == 30.0
+        assert captured["retry_policy"] is not None
+
+    def test_constructor_failure_degrades_to_false(self, caplog):
+        """Router 构造异常 → 返回 False 且记录 warning（不向上抛）。"""
+        from services.ai_service.litellm_client import _ensure_router_loaded
+
+        failover_config = {
+            "primary": "deepseek/deepseek-v4-flash",
+            "fallbacks": [],
+            "primary_config": {
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "api_key": "sk-primary-key",
+                "base_url": "https://api.deepseek.com",
+            },
+        }
+
+        def router_ctor(**kwargs):
+            raise ValueError("invalid deployment")
+
+        import logging
+
+        litellm_mock = MagicMock()
+        litellm_mock.Router.side_effect = router_ctor
+        with caplog.at_level(logging.WARNING), ExitStack() as stack:
+            for p in self._base_env():
+                stack.enter_context(p)
+            stack.enter_context(
+                patch("utils.config_handler.ConfigHandler.get_failover_config", return_value=failover_config)
+            )
+            stack.enter_context(patch("services.ai_service.litellm", litellm_mock))
+
+            assert _ensure_router_loaded() is False
+            import services.ai_service as _ai
+
+            assert _ai._litellm_router is None
+
+        assert "Router construction failed" in caplog.text
+
+    def test_litellm_not_loaded_returns_false(self):
+        """litellm 未加载 → Router 不可构造，返回 False。"""
+        from services.ai_service.litellm_client import _ensure_router_loaded
+
+        with ExitStack() as stack:
+            stack.enter_context(patch("services.ai_service._router_import_attempted", False))
+            stack.enter_context(patch("services.ai_service._ensure_litellm_loaded", return_value=False))
+            assert _ensure_router_loaded() is False
+
+    def test_sentinel_skips_rebuild_when_loaded(self):
+        """已构造（哨兵置位 + 实例非 None）→ 直接复用，不重建 Router。"""
+        from services.ai_service.litellm_client import _ensure_router_loaded
+
+        with ExitStack() as stack:
+            stack.enter_context(patch("services.ai_service._router_import_attempted", True))
+            stack.enter_context(patch("services.ai_service._litellm_router", "ALREADY_READY"))
+            stack.enter_context(patch("services.ai_service.litellm", MagicMock()))
+
+            assert _ensure_router_loaded() is True
+
+
+class TestRouterFailoverStream:
+    """L4: _router_failover 流式路径（动态 reasoning 检测 / usage 采集 / 流中断降级）。"""
+
+    @staticmethod
+    def _chunk(content=None, reasoning=None, usage=None, model=None):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content=content, reasoning_content=reasoning))],
+            usage=usage,
+            model=model,
+        )
+
+    @pytest.mark.asyncio
+    async def test_stream_collects_dynamic_reasoning_and_usage(self):
+        """流式解析动态检测 reasoning_content + 采集 usage + chunk.model 生效模型。"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+
+        async def stream():
+            yield self._chunk(content="part1", reasoning="thinking...", model="qwen/qwen-max")
+            yield self._chunk(content="part2", model="qwen/qwen-max")
+            yield SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                model=None,
+            )
+
+        router.acompletion = AsyncMock(return_value=stream())
+        chunks = []
+
+        def on_chunk(text, is_reasoning):
+            chunks.append((text, is_reasoning))
+
+        with _router_failover_env(service, router) as egress:
+            result = await service._chat_completion_with_failover(
+                messages=[{"role": "user", "content": "test"}],
+                on_chunk=on_chunk,
+                json_mode=False,
+            )
+
+        assert result["content"] == "part1part2"
+        assert result["reasoning_content"] == "thinking..."
+        assert result["usage"] == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        # chunk.model 动态收集到 fallback 生效模型 → SEC-03 补记审计触发
+        assert result["model"] == "qwen/qwen-max"
+        assert egress.await_count == 2
+        assert on_chunk is not None and chunks
+        # 缓冲 flush 语义：内容分块回调（与 _chat_completion_litellm 同构）
+        assert any(is_reasoning for _text, is_reasoning in chunks)
+
+    @pytest.mark.asyncio
+    async def test_stream_interruption_returns_partial(self):
+        """流中途网络中断 → 返回部分结果而非抛错（与 _chat_completion_litellm 同源降级）。"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+
+        async def stream():
+            yield self._chunk(content="partial")
+            raise httpx.ReadTimeout("stream cut")
+
+        router.acompletion = AsyncMock(return_value=stream())
+        with _router_failover_env(service, router):
+            result = await service._chat_completion_with_failover(
+                messages=[{"role": "user", "content": "test"}],
+                on_chunk=lambda text, is_reasoning: None,
+                json_mode=False,
+            )
+        assert result["content"] == "partial"
+
+    @pytest.mark.asyncio
+    async def test_stream_reasoning_only_content_fills_content(self):
+        """仅有 reasoning 且无 content 时，content 回填 reasoning（同 _chat_completion_litellm 语义）。"""
+        service = _cloud_ready_service()
+        router = MagicMock()
+
+        async def stream():
+            yield self._chunk(content=None, reasoning="only reasoning text")
+
+        router.acompletion = AsyncMock(return_value=stream())
+        with _router_failover_env(service, router):
+            result = await service._chat_completion_with_failover(
+                messages=[{"role": "user", "content": "test"}],
+                on_chunk=lambda text, is_reasoning: None,
+                json_mode=False,
+            )
+        assert result["content"] == "only reasoning text"

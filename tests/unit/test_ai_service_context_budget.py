@@ -548,7 +548,7 @@ class TestAnalyzeStockBudgetIntegration:
     async def test_user_custom_instructions_survive_tiny_budget(self):
         """<user_custom_instructions> 置于预算外，tiny budget 下仍存活。"""
         svc = AIService.__new__(AIService)
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
 
         with (
             patch.object(AIService, "_compute_analysis_budget", return_value=1),
@@ -566,7 +566,7 @@ class TestAnalyzeStockBudgetIntegration:
                 news_list=[],
                 ui_prompt_override="custom",
             )
-        messages = svc._chat_completion.await_args.args[0]
+        messages = svc._chat_completion_with_failover.await_args.args[0]
         user_msgs = [m for m in messages if m["role"] == "user"]
         assert any("<user_custom_instructions>" in m["content"] for m in user_msgs)
 
@@ -574,7 +574,7 @@ class TestAnalyzeStockBudgetIntegration:
     async def test_available_data_matches_surviving_sections(self):
         """预算后 available_data 只声明仍存活的 section（被裁段不出现）。"""
         svc = AIService.__new__(AIService)
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
 
         # spy：记录每次 build_available_data_block 收到的 labels，验证重派生
         calls: list[list] = []
@@ -602,7 +602,7 @@ class TestAnalyzeStockBudgetIntegration:
                 include_learning_context=False,
             )
 
-        messages = svc._chat_completion.await_args.args[0]
+        messages = svc._chat_completion_with_failover.await_args.args[0]
         user_content = [m for m in messages if m["role"] == "user"][0]["content"]
         # news 是可截断低优先级，tiny budget 下被裁掉，其 section 不应出现
         assert "<recent_news>" not in user_content
@@ -617,7 +617,7 @@ class TestAnalyzeStockBudgetIntegration:
     async def test_analyze_stock_passes_system_and_fixed_blocks_to_budget(self):
         """analyze_stock 必须向 _compute_analysis_budget 传入 system_messages 与 fixed_blocks（D5-4）。"""
         svc = AIService.__new__(AIService)
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
 
         with (
             patch.object(AIService, "_compute_analysis_budget", return_value=50000) as mock_budget,
@@ -653,7 +653,7 @@ class TestAnalyzeStockBudgetIntegration:
         from core.errors import AIBudgetError
 
         svc = AIService.__new__(AIService)
-        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
 
         with (
             patch.object(
