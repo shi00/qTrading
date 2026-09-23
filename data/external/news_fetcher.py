@@ -11,6 +11,7 @@ import pandas as pd
 import httpx
 from cachetools import TTLCache
 
+from data.external.akshare_rate_limiter import get_akshare_rate_limiter
 from utils.sanitizers import DataSanitizer
 from utils.log_decorators import log_async_operation, PerfThreshold
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -152,6 +153,9 @@ def _fetch_stock_news_core(
 
     # Layer 1: 巨潮公告（announcement）
     try:
+        # review08-B4: 所有 akshare 出站调用经模块级共享限速器（1 QPS / burst 2）。
+        # 本内核在 IO 线程池线程执行，consume() 同步阻塞不阻塞事件循环（R16）。
+        get_akshare_rate_limiter().consume(1)
         # Get last 6 months to ensure we find *something* (e.g. quarterly reports)
         end_date = get_now().strftime("%Y%m%d")
         start_date = (get_now() - timedelta(days=180)).strftime("%Y%m%d")
@@ -199,6 +203,8 @@ def _fetch_stock_news_core(
 
     # Layer 2: 东财新闻搜索（news）
     try:
+        # review08-B4: 每层各消耗 1 token；单次抓取 burst=2（与共享桶容量一致）。
+        get_akshare_rate_limiter().consume(1)
         df_em = _ensure_dataframe(ak.stock_news_em(symbol=symbol), source="stock_news_em")
 
         if df_em is not None and not df_em.empty:
