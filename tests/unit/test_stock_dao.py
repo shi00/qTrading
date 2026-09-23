@@ -328,6 +328,51 @@ class TestGetConcepts:
         result = await dao.get_concepts()
         assert "000001.SZ" in result
         assert len(result["000001.SZ"]) == 2
+        # review08-D3：全表分支必须带 NOT LIKE 过滤 LIMIT_ 前缀（R4 参数化）
+        sql_arg = dao._read_db.call_args.args[0]
+        assert "concept_id NOT LIKE $1" in sql_arg
+        assert dao._read_db.call_args.args[1] == [f"{StockDao.LIMIT_CONCEPT_PREFIX}%"]
+
+    @pytest.mark.asyncio
+    async def test_filters_limit_concepts_sql(self):
+        """review08-D3：单码分支 SQL 带 NOT LIKE 排除 LIMIT_ 前缀（R4 参数化）。
+
+        前缀过滤在 DB 层执行（SQL 层），此处验证 SQL 与参数正确下发。
+        """
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "concept_name": ["银行"],  # 仅返回真实概念（模拟 DB 过滤后结果）
+                }
+            )
+        )
+        result = await dao.get_concepts(ts_codes=["000001.SZ"])
+        assert "000001.SZ" in result
+        # 单码分支 SQL 带 NOT LIKE $2
+        sql_arg = dao._read_db.call_args.args[0]
+        assert "concept_id NOT LIKE $2" in sql_arg
+        assert dao._read_db.call_args.args[1] == ["000001.SZ", f"{StockDao.LIMIT_CONCEPT_PREFIX}%"]
+
+    @pytest.mark.asyncio
+    async def test_keeps_real_concepts(self):
+        """review08-D3：单码分支过滤 LIMIT_ 后，真实概念名仍保留。"""
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "concept_name": [
+                        "银行",
+                        "深圳本地股",
+                    ],  # 真实概念名（EM_/AI_LLM_ 前缀在 concept_id，查询只返回 name）
+                }
+            )
+        )
+        result = await dao.get_concepts(ts_codes=["000001.SZ"])
+        assert "000001.SZ" in result
+        assert result["000001.SZ"] == ["银行", "深圳本地股"]
 
     @pytest.mark.asyncio
     async def test_filters_placeholder_concept(self):

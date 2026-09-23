@@ -217,15 +217,15 @@ class TestUpsertLimitConcepts:
         dao._save_upsert.assert_not_called()
 
 
-class TestClearTodayLimitConcepts:
-    """Task 1.3: clear_today_limit_concepts 清空 LIMIT_% 概念"""
+class TestClearAllLimitConcepts:
+    """review08-D3: clear_all_limit_concepts 清空全部 LIMIT_% 概念（原名 clear_today_limit_concepts 无日期条件，重命名）"""
 
     @pytest.mark.asyncio
-    async def test_clear_today_limit_concepts_deletes_limit_prefix(self):
+    async def test_clear_all_limit_concepts_deletes_limit_prefix(self):
         """验证 SQL 含 WHERE concept_id LIKE $1 参数化（R4）"""
         dao = _make_dao()
         dao._write_db = AsyncMock(return_value=1)
-        result = await dao.clear_today_limit_concepts()
+        result = await dao.clear_all_limit_concepts()
         assert result == 1
         dao._write_db.assert_called_once()
         sql_arg = dao._write_db.call_args.args[0]
@@ -592,7 +592,7 @@ class TestDeleteExpiredFailures:
 class TestOverwriteLimitConcepts:
     """P0-2: overwrite_limit_concepts 事务原子性测试。
 
-    验证 clear_today_limit_concepts + upsert_limit_concepts 在同一事务（同一 conn）内执行，
+    验证 clear_all_limit_concepts + upsert_limit_concepts 在同一事务（同一 conn）内执行，
     避免 clear 成功 upsert 失败导致当日数据丢失。
     """
 
@@ -605,7 +605,7 @@ class TestOverwriteLimitConcepts:
         dao._guarded_begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
         dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        # 真实调用 clear_today_limit_concepts / upsert_limit_concepts，验证 conn 透传
+        # 真实调用 clear_all_limit_concepts / upsert_limit_concepts，验证 conn 透传
         dao._write_db = AsyncMock(return_value=3)
         dao._save_upsert = AsyncMock(return_value=5)
 
@@ -615,7 +615,7 @@ class TestOverwriteLimitConcepts:
         result = await dao.overwrite_limit_concepts(records)
 
         assert result == 5
-        # clear_today_limit_concepts 传入 conn=mock_conn
+        # clear_all_limit_concepts 传入 conn=mock_conn
         dao._write_db.assert_called_once()
         assert dao._write_db.call_args.kwargs.get("conn") is mock_conn
         # upsert_limit_concepts 传入 conn=mock_conn
@@ -624,7 +624,7 @@ class TestOverwriteLimitConcepts:
 
     @pytest.mark.asyncio
     async def test_empty_records_only_clears_no_upsert(self):
-        """空记录时只 clear 不 upsert，返回 0（保留 clear 以重置当日 LIMIT_ 数据）"""
+        """空记录时只 clear 不 upsert，返回 0（保留 clear 以重置全部 LIMIT_ 数据）"""
         dao = _make_dao()
         mock_conn = AsyncMock()
         dao._guarded_begin = MagicMock()

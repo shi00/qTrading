@@ -89,6 +89,7 @@
 | GDR-07 | `_GITIGNORED_ARTIFACT_DIRS` 仅含真实 gitignored 目录；EX 引用语料豁免目录 | 文档体系检视（GDR 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | GDR-08 | release/packaging 主题存在，决策树映射与合并白名单正确绑定 | 文档体系检视（GDR 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | GDR-11 | 校验 CLAUDE.md §4.2 声明的 core/ 模块清单与实际 core/*.py 文件一致 | 文档体系检视（GDR 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
+| review08-D3 | LIMIT_ 概念管线把股票名当概念名写入并泄漏给所有概念消费方；修正语义：get_concepts 前缀过滤 + 停写 + clear_all_limit_concepts 重命名 | review08 AKShare 开源组件复用专项检视 | [stock_dao.py](../../data/persistence/daos/stock_dao.py) / [concept_sync.py](../../data/sync/concept_sync.py) | 使用中 |
 | review01-A4 | 引擎生命周期与 DAO 注册清单自 CacheManager 拆分为 EngineManager / DaoRegistry 组合对象 | review01 架构分层与依赖治理 | [engine_manager.py](../../data/cache/engine_manager.py) | 使用中 |
 | review01-A7 | 应用会话入口自 main.py 迁移至 app/application.py（main.py 瘦身收敛） | review01 架构分层与依赖治理 | [application.py](../../app/application.py) | 使用中 |
 | review01-A8 | 启动编排提取为 ApplicationSession 上下文，分阶段 partial_state 供调用方决定回滚粒度 | review01 架构分层与依赖治理 | [application.py](../../app/application.py) | 使用中 |

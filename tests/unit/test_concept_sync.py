@@ -40,6 +40,8 @@ def _make_ctx(**overrides):
     ctx.cache.stock_dao.delete_expired_failures = AsyncMock(return_value=0)
     # P0-2 fix: LimitListSyncStrategy 现在调用 overwrite_limit_concepts（事务原子性）
     ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
+    # review08-D3: LimitListSyncStrategy 停写后调用 clear_all_limit_concepts（清空存量）
+    ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(return_value=0)
     # review08 D2: AKShareConceptSyncStrategy 现在预载 code→ts_code 权威映射。
     # 默认映射覆盖 _make_constituents_df 的代码，保证既有 AKShare 用例语义不变。
     ctx.cache.stock_dao.get_ts_code_map = AsyncMock(return_value={"000001": "000001.SZ", "600000": "600000.SH"})
@@ -378,27 +380,32 @@ class TestAKShareConceptSync:
 
 
 class TestLimitListSync:
+    """review08-D3 停写语义：不再构造 LIMIT_ 股票名概念、不再调用 overwrite_limit_concepts。
+
+    任何路径（fetch 成功 / 权限不足 / 空数据）统一调用 clear_all_limit_concepts
+    清空存量 + warning；CancelledError / EngineDisposedError 传播（R2/R5）。
+    """
+
     @pytest.mark.asyncio
-    async def test_success(self):
+    async def test_success_stops_and_clears(self):
+        """fetch 成功但停写：不再构造 records，清空存量 + warning。"""
         ctx = _make_ctx()
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=2)
+        ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(return_value=3)
         ctx.api.get_limit_list = AsyncMock(return_value=_make_limit_list_df())
 
         strategy = LimitListSyncStrategy(ctx)
         result = await strategy.run(trade_date="20240614")
 
         assert result.status == SyncStatus.SUCCESS.value
-        assert result.added > 0
-        assert ctx.cache.stock_dao.overwrite_limit_concepts.call_count == 1
-        upsert_args = ctx.cache.stock_dao.overwrite_limit_concepts.call_args.args[0]
-        assert len(upsert_args) == 2
-        assert upsert_args[0]["ts_code"] == "000001.SZ"
-        assert upsert_args[1]["ts_code"] == "600000.SH"
+        assert result.added == 0
+        ctx.cache.stock_dao.clear_all_limit_concepts.assert_awaited_once()
+        ctx.cache.stock_dao.overwrite_limit_concepts.assert_not_called()
+        assert any("LIMIT_" in w or "停写" in w for w in result.warnings)
 
     @pytest.mark.asyncio
     async def test_cancel_returns_cancelled(self):
         ctx = _make_ctx()
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(return_value=0)
         ctx.api.get_limit_list = AsyncMock(return_value=_make_limit_list_df())
 
         strategy = LimitListSyncStrategy(ctx)
@@ -406,11 +413,13 @@ class TestLimitListSync:
         result = await strategy.run(trade_date="20240614")
 
         assert result.status == SyncStatus.CANCELLED.value
+        ctx.cache.stock_dao.clear_all_limit_concepts.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_permission_denied_degrades_to_success_with_warning(self):
+    async def test_permission_denied_clears_and_warns(self):
+        """权限不足：同样清空存量（P0 修订，避免旧污染残留）+ warning。"""
         ctx = _make_ctx()
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(return_value=2)
         ctx.api.get_limit_list = AsyncMock(
             side_effect=TushareAPIPermissionError("limit_list", "积分不足"),
         )
@@ -420,12 +429,14 @@ class TestLimitListSync:
 
         assert result.status == SyncStatus.SUCCESS.value
         assert len(result.warnings) > 0
+        ctx.cache.stock_dao.clear_all_limit_concepts.assert_awaited_once()
         ctx.cache.stock_dao.overwrite_limit_concepts.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_empty_limit_list(self):
+    async def test_empty_limit_list_clears_and_warns(self):
+        """空数据：清空 + warning（旧数据不再保留）。"""
         ctx = _make_ctx()
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(return_value=0)
         ctx.api.get_limit_list = AsyncMock(return_value=pd.DataFrame())
 
         strategy = LimitListSyncStrategy(ctx)
@@ -433,12 +444,13 @@ class TestLimitListSync:
 
         assert result.status == SyncStatus.SUCCESS.value
         assert result.added == 0
+        ctx.cache.stock_dao.clear_all_limit_concepts.assert_awaited_once()
         ctx.cache.stock_dao.overwrite_limit_concepts.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_general_exception_returns_failed(self):
         ctx = _make_ctx()
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(return_value=0)
         ctx.api.get_limit_list = AsyncMock(side_effect=RuntimeError("unexpected"))
 
         strategy = LimitListSyncStrategy(ctx)
@@ -446,67 +458,16 @@ class TestLimitListSync:
 
         assert result.status == SyncStatus.FAILED.value
         assert len(result.errors) > 0
+        # review08-D3：fetch 失败前清空已执行，warning 说明存量已清除
+        assert any("cleared before fetch failure" in w for w in result.warnings)
 
     @pytest.mark.asyncio
-    async def test_cancel_after_limit_list_fetch(self):
-        """覆盖 concept_sync.py:236-237：limit_list 拉取完成后、overwrite 前触发取消。
-
-        验证：第三次 _check_cancelled 命中 → 返回 CANCELLED，不调用 overwrite_limit_concepts。
-        """
-        ctx = _make_ctx()
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
-        strategy = LimitListSyncStrategy(ctx)
-
-        async def _cancel_after_fetch(*args, **kwargs):
-            strategy.cancel()
-            return _make_limit_list_df()
-
-        ctx.api.get_limit_list = AsyncMock(side_effect=_cancel_after_fetch)
-
-        result = await strategy.run(trade_date="20240614")
-
-        assert result.status == SyncStatus.CANCELLED.value
-        ctx.cache.stock_dao.overwrite_limit_concepts.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_skip_rows_without_ts_code(self):
-        """覆盖 concept_sync.py:225-226：limit_list 中 ts_code 缺失的行应被跳过。
-
-        验证：ts_code 为空字符串的行不进入 records，只 overwrite 有效行。
-        注意：pandas 会把 None 转为 nan（truthy），源码用 `if not ts_code` 过滤，
-        所以只有空字符串/None（非 pandas 列场景）触发 skip；此处用空字符串覆盖。
-        """
-        ctx = _make_ctx()
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=1)
-        # 混合有效行和无效行（ts_code 为空字符串触发 skip）
-        df = pd.DataFrame(
-            {
-                "ts_code": ["000001.SZ", "", ""],
-                "trade_date": ["20240614", "20240614", "20240614"],
-                "name": ["平安银行", "无效1", "无效2"],
-            }
-        )
-        ctx.api.get_limit_list = AsyncMock(return_value=df)
-
-        strategy = LimitListSyncStrategy(ctx)
-        result = await strategy.run(trade_date="20240614")
-
-        assert result.status == SyncStatus.SUCCESS.value
-        # 验证只有 1 条有效记录被 overwrite（2 条空 ts_code 行被跳过）
-        upsert_args = ctx.cache.stock_dao.overwrite_limit_concepts.call_args.args[0]
-        assert len(upsert_args) == 1
-        assert upsert_args[0]["ts_code"] == "000001.SZ"
-
-    @pytest.mark.asyncio
-    async def test_outer_cancelled_error_propagates(self):
-        """覆盖 concept_sync.py:248-250：外层 except asyncio.CancelledError 必须设置 CANCELLED 状态并 raise（R2）。
-
-        验证：overwrite_limit_concepts 抛 CancelledError → 外层捕获 → 状态设为 CANCELLED → raise。
-        """
+    async def test_cancelled_error_propagates(self):
+        """覆盖 concept_sync.py 外层 except asyncio.CancelledError：状态设为 CANCELLED 并 raise（R2）。"""
         import asyncio as _asyncio
 
         ctx = _make_ctx()
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(side_effect=_asyncio.CancelledError())
+        ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(side_effect=_asyncio.CancelledError())
         ctx.api.get_limit_list = AsyncMock(return_value=_make_limit_list_df())
 
         strategy = LimitListSyncStrategy(ctx)
@@ -516,12 +477,9 @@ class TestLimitListSync:
 
     @pytest.mark.asyncio
     async def test_system_level_error_propagates(self):
-        """覆盖 concept_sync.py:259-261：system 级别异常（PermissionError）必须 raise，不可降级为 FAILED。
-
-        验证 classify_severity 返回 "system" 时，logger.critical 后 raise。
-        """
+        """覆盖 concept_sync.py：system 级别异常（PermissionError）必须 raise，不可降级为 FAILED。"""
         ctx = _make_ctx()
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(return_value=0)
         # PermissionError 是 system 级别异常
         ctx.api.get_limit_list = AsyncMock(side_effect=PermissionError("denied"))
 
@@ -530,55 +488,11 @@ class TestLimitListSync:
             await strategy.run(trade_date="20240614")
         assert isinstance(exc_info.value, PermissionError)
 
-
-class TestLimitListSyncAtomicity:
-    """S11 fix + P0-2: 验证 fetch→overwrite 顺序，确保 fetch 失败/取消/空数据时旧数据保留。
-
-    覆盖 concept_sync.py LimitListSyncStrategy._run_impl 的原子性契约：
-    - 权限不足 → SUCCESS + warning，overwrite 未调用，旧数据保留
-    - 空数据 → SUCCESS，overwrite 未调用，旧数据保留
-    - 取消信号 → CANCELLED，overwrite 未调用，旧数据保留
-    - fetch 成功 → overwrite 被调用（clear+upsert 在 DAO 层同一事务内完成）
-    """
-
     @pytest.mark.asyncio
-    async def test_fetch_permission_error_preserves_old_data(self):
-        """权限不足时 overwrite_limit_concepts 不应被调用，旧数据保留。"""
+    async def test_cancel_before_fetch_no_clear(self):
+        """fetch 之前触发取消信号时 clear_all_limit_concepts 不应被调用（取消优先）。"""
         ctx = _make_ctx()
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
-        ctx.api.get_limit_list = AsyncMock(
-            side_effect=TushareAPIPermissionError("limit_list", "积分不足"),
-        )
-
-        strategy = LimitListSyncStrategy(ctx)
-        result = await strategy.run(trade_date="20240614")
-
-        assert result.status == SyncStatus.SUCCESS.value
-        assert len(result.warnings) > 0
-        ctx.cache.stock_dao.overwrite_limit_concepts.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_fetch_empty_preserves_old_data(self):
-        """fetch 返回空 DataFrame 时 overwrite_limit_concepts 不应被调用，旧数据保留。"""
-        ctx = _make_ctx()
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
-        ctx.api.get_limit_list = AsyncMock(return_value=pd.DataFrame())
-
-        strategy = LimitListSyncStrategy(ctx)
-        result = await strategy.run(trade_date="20240614")
-
-        assert result.status == SyncStatus.SUCCESS.value
-        assert result.added == 0
-        ctx.cache.stock_dao.overwrite_limit_concepts.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_cancel_before_fetch_preserves_old_data(self):
-        """fetch 之前触发取消信号时 overwrite_limit_concepts 不应被调用，旧数据保留。
-
-        覆盖第一次 _check_cancelled 命中场景。
-        """
-        ctx = _make_ctx()
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(return_value=0)
         ctx.api.get_limit_list = AsyncMock(return_value=_make_limit_list_df())
 
         strategy = LimitListSyncStrategy(ctx)
@@ -587,24 +501,23 @@ class TestLimitListSyncAtomicity:
 
         assert result.status == SyncStatus.CANCELLED.value
         ctx.api.get_limit_list.assert_not_called()
-        ctx.cache.stock_dao.overwrite_limit_concepts.assert_not_called()
+        ctx.cache.stock_dao.clear_all_limit_concepts.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_fetch_success_calls_overwrite_limit_concepts(self):
-        """fetch 成功后 overwrite_limit_concepts 被调用一次（clear+upsert 在 DAO 层事务内完成）。"""
+    async def test_fetch_success_never_writes_records(self):
+        """fetch 成功但停写：clear 被调用、不写入任何 LIMIT_ 记录。"""
         ctx = _make_ctx()
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=2)
+        ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(return_value=2)
         ctx.api.get_limit_list = AsyncMock(return_value=_make_limit_list_df())
 
         strategy = LimitListSyncStrategy(ctx)
         result = await strategy.run(trade_date="20240614")
 
         assert result.status == SyncStatus.SUCCESS.value
-        assert result.added == 2
-        assert ctx.cache.stock_dao.overwrite_limit_concepts.call_count == 1
-        # 验证传入的 records 数量正确
-        records_arg = ctx.cache.stock_dao.overwrite_limit_concepts.call_args.args[0]
-        assert len(records_arg) == 2
+        assert result.added == 0
+        ctx.cache.stock_dao.clear_all_limit_concepts.assert_awaited_once()
+        ctx.cache.stock_dao.overwrite_limit_concepts.assert_not_called()
+        ctx.cache.stock_dao.upsert_limit_concepts.assert_not_called()
 
 
 # --- AIConceptTagSyncStrategy ---
@@ -1811,7 +1724,8 @@ class TestEngineDisposedPropagation:
         from data.persistence.daos.base_dao import EngineDisposedError
 
         ctx = _make_ctx()
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(
+        # review08-D3 停写：清空路径抛 EngineDisposedError 必须传播（R5）
+        ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(
             side_effect=EngineDisposedError(),
         )
         ctx.api.get_limit_list = AsyncMock(return_value=_make_limit_list_df())
