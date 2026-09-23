@@ -322,3 +322,78 @@ class Message:
 
     key: str
     params: dict[str, Any] = field(default_factory=dict)
+
+
+# === 策略名历史值 → i18n key 映射（单源，E3 兜底） ===
+# 中文界面策略名显示英文问题（Plans.md E 线）：历史库值（英文标识符 / zh/en 翻译字符串）
+# 经本表映射为 ``strategy_*_name`` key 后由 ``I18n.get`` 翻译。本表是**唯一数据源**：
+# - ``translate_strategy_name``（本模块）对非 ``strategy_`` 前缀输入查此表兜底；
+# - 迁移脚本 ``scripts/migrate_strategy_name_to_i18n_key.py`` 于 E2 切换为
+#   ``from core.i18n import STRATEGY_NAME_FALLBACK_MAP``（消除双源漂移；切换前脚本
+#   保留手工同步副本，见 E 线分批计划）；
+# - 值必须全部为 ``strategy_`` 前缀（E4 校验），否则 ``I18n.get(mapped_key)`` 缺 key
+#   返回 key 原文、兜底失效。
+# 注意：core 层仅承载 i18n 数据与翻译函数（无 flet / 业务层依赖），strategies 层
+# （backtest report.py）与 ui 层均可引用（R1 合规）。
+STRATEGY_NAME_FALLBACK_MAP: dict[str, str] = {
+    "AI_Auto_Nightly": "strategy_ai_nightly_name",
+    "AI 自动夜间选股": "strategy_ai_nightly_name",
+    "AI Auto Nightly Screening": "strategy_ai_nightly_name",
+    "AI 深度精选 (Beta)": "strategy_ai_active_name",
+    "AI Deep Dive (Beta)": "strategy_ai_active_name",
+    "价值投资": "strategy_value_name",
+    "Value Investing": "strategy_value_name",
+    "高成长策略": "strategy_growth_name",
+    "High Growth": "strategy_growth_name",
+    "高股息策略": "strategy_dividend_name",
+    "High Dividend": "strategy_dividend_name",
+    "放量突破": "strategy_volume_breakout_name",
+    "Volume Breakout": "strategy_volume_breakout_name",
+    "北向持股": "strategy_northbound_holding_name",
+    "Northbound Holdings": "strategy_northbound_holding_name",
+    "北向净流入": "strategy_northbound_flow_name",
+    "Northbound Net Inflow": "strategy_northbound_flow_name",
+    "超跌反弹": "strategy_oversold_name",
+    "Oversold Rebound": "strategy_oversold_name",
+    "龙虎榜机构": "strategy_institutional_name",
+    "Institutional Hits": "strategy_institutional_name",
+    "筹码集中 (暂不可用)": "strategy_chips_name",
+    "Chip Concentration (N/A)": "strategy_chips_name",
+    "大宗交易": "strategy_block_trade_name",
+    "Block Trades": "strategy_block_trade_name",
+    "现金流优质": "strategy_cashflow_name",
+    "Quality Cashflow": "strategy_cashflow_name",
+    "大盘低估": "strategy_large_pe_name",
+    "Large Cap Low PE": "strategy_large_pe_name",
+}
+
+
+def translate_strategy_name(name: str | None) -> str | None:
+    """Translate strategy name to localized version（E3 三级逻辑，core 单源）。
+
+    R.3.3/E3：i18n key 直接翻译 + 历史值（identifier/zh/en 翻译字符串）经
+    ``STRATEGY_NAME_FALLBACK_MAP`` 兜底翻译 + 未知值原样返回。
+
+    层级：
+    1. ``strategy_`` 前缀（i18n key）→ ``I18n.get(name)``；
+    2. 命中 ``STRATEGY_NAME_FALLBACK_MAP``（历史英文标识符/翻译字符串）→
+       ``I18n.get(mapped_key)``；
+    3. 未命中（自定义策略名等）→ 原样返回。
+
+    Args:
+        name: i18n key（如 "strategy_value_name"）或历史值/自定义名。
+
+    Returns:
+        本地化策略名；未知值原样返回。
+    """
+    if not name:
+        return name
+    # 前缀分支经 I18n.has 前置探测（对抗检视 A-3）：自定义策略名恰以 "strategy_" 开头
+    # 且 key 缺失时，避免 I18n.get 触发 missing-key warning / 污染 _missing_keys——
+    # 缺失 key 落入兜底映射/原样路径，语义与 R.3.3 一致（合法 name_key 行为不变）。
+    if name.startswith("strategy_") and I18n.has(name):
+        return I18n.get(name)
+    mapped_key = STRATEGY_NAME_FALLBACK_MAP.get(name)
+    if mapped_key:
+        return I18n.get(mapped_key)
+    return name

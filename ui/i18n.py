@@ -21,7 +21,15 @@ from dataclasses import dataclass
 
 import flet as ft
 
-from core.i18n import I18n, LOCALE_MAP, LOCALE_NAMES, SUPPORTED_LOCALES, DEFAULT_LOCALE  # noqa: F401  # facade re-export：外部经 ui.i18n 访问
+from core.i18n import (
+    I18n,
+    LOCALE_MAP,  # noqa: F401  # facade re-export：外部经 ui.i18n 访问
+    LOCALE_NAMES,  # noqa: F401  # facade re-export：外部经 ui.i18n 访问
+    SUPPORTED_LOCALES,  # noqa: F401  # facade re-export：外部经 ui.i18n 访问
+    DEFAULT_LOCALE,
+    STRATEGY_NAME_FALLBACK_MAP,  # noqa: F401  # E3 单源映射 re-export（迁移脚本等经 core 引用）
+    translate_strategy_name,  # noqa: F401  # E3 迁移至 core 单源：本模块薄委托，保留既有导入路径
+)  # facade re-export：外部经 ui.i18n 访问
 
 from utils.error_classifier import classify_error, get_error_message  # noqa: F401  # facade re-export
 
@@ -86,20 +94,6 @@ def _sync_i18n_state() -> None:
 I18n.subscribe(_sync_i18n_state)
 
 
-def translate_strategy_name(name: str | None) -> str | None:
-    """
-    Translate strategy name to localized version.
-
-    R.3.3: 简化为 i18n key 直接翻译 + 非 i18n key 兜底原样返回。
-    历史数据 (identifier/zh/en 翻译字符串) 已由 scripts/migrate_strategy_name_to_i18n_key.py
-    迁移为 i18n key, 未迁移值原样返回 (兜底兼容)。
-
-    Args:
-        name: i18n key (如 "strategy_value_name") 或非 i18n key 字符串 (兜底原样返回)
-
-    Returns:
-        本地化策略名; 非 i18n key 原样返回
-    """
-    if name and name.startswith("strategy_"):
-        return I18n.get(name)
-    return name
+# translate_strategy_name 已迁至 core/i18n.py 单源（E3）：
+# 本模块顶部从 core.i18n re-export，保留既有 `from ui.i18n import translate_strategy_name`
+# 导入路径零改动（策略名兜底逻辑见 core 层实现）。

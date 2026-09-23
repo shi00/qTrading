@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from core.i18n import I18n
+from core.i18n import I18n, translate_strategy_name
 from strategies.backtest.config import BacktestResult
 from strategies.backtest.metrics import PROFIT_THRESHOLD
 from utils.time_utils import get_now
@@ -15,7 +15,8 @@ class BacktestReport:
         m = result.metrics
         config = result.config
         lines = [
-            f"{I18n.get('report_strategy')}: {result.strategy_name}",
+            # E1：报告导出接入策略名翻译（strategies 层经 core 引用，R1 合规）
+            f"{I18n.get('report_strategy')}: {translate_strategy_name(result.strategy_name)}",
             f"{I18n.get('report_run_id')}: {result.run_id}",
             f"{I18n.get('report_backtest_range')}: {config.start_date} ~ {config.end_date}",
             f"{I18n.get('report_initial_capital')}: {config.initial_capital:,.2f}",
@@ -100,7 +101,8 @@ class BacktestReport:
     def to_markdown(self, result: BacktestResult) -> str:
         now = get_now().strftime("%Y-%m-%d %H:%M:%S")
         sections = [
-            f"# {I18n.get('report_title', strategy_name=result.strategy_name)}",
+            # E1：报告标题策略名同样接入翻译（对抗检视 A-5）
+            f"# {I18n.get('report_title', strategy_name=translate_strategy_name(result.strategy_name))}",
             f"> {I18n.get('report_generated_at', time=now, run_id=result.run_id)}",
             "",
             f"## {I18n.get('report_section_summary')}",
