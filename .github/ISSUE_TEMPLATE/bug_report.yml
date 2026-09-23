@@ -131,7 +131,7 @@ body:
         - Polars 版本
         - PostgreSQL 版本
       placeholder: |
-        Flet: 1.0.0
+        Flet: 1.0.1
         Polars: x.x.x
         PostgreSQL: 16.x
     validations:

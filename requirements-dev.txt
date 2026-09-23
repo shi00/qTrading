@@ -134,19 +134,19 @@ filelock==3.29.7
     # via
     #   cachecontrol
     #   huggingface-hub
-flet==1.0.0
+flet==1.0.1
     # via
     #   astockscreener (pyproject.toml)
     #   flet-charts
     #   flet-code-editor
     #   flet-desktop
-flet-charts==1.0.0
+flet-charts==1.0.1
     # via astockscreener (pyproject.toml)
-flet-code-editor==1.0.0
+flet-code-editor==1.0.1
     # via astockscreener (pyproject.toml)
-flet-desktop==1.0.0
+flet-desktop==1.0.1
     # via astockscreener (pyproject.toml)
-flet-mcp==1.0.0
+flet-mcp==1.0.1
     # via astockscreener (pyproject.toml)
 frozenlist==1.8.0
     # via
