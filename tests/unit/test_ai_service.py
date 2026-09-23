@@ -11,6 +11,7 @@ from services.ai_service import (
     AIService,
     LITELLM_AVAILABLE,
     _check_reasoning_support,
+    _check_response_schema_support,
     STRATEGY_CONTEXT_MAX_LEN,
     VALID_RECOMMENDATIONS,
     _FREE_TEXT_MAX_LEN,
@@ -3184,3 +3185,50 @@ class TestAIServiceResponseSchema:
             )
             assert result["summary"] == "ok"
             assert result["events"] == []
+
+    # ------------------------------------------------------------------
+    # _check_response_schema_support 自身路径（避免仅 mock 调用点导致新函数零覆盖，
+    # 与 TestReasoningModelFallbackList 对 supports_reasoning 的真实路径测试同范式）
+    # ------------------------------------------------------------------
+
+    def test_support_check_true_when_model_supported(self):
+        """litellm 已加载且 supports_response_schema=True → 返回 True（启用结构化输出）。"""
+        with patch(
+            "services.ai_service.litellm.utils.supports_response_schema",
+            return_value=True,
+        ):
+            assert _check_response_schema_support("deepseek-v4-pro") is True
+
+    def test_support_check_false_when_model_unsupported(self):
+        """supports_response_schema=False → 保守返回 False（保持既有 json_object 路径）。"""
+        with patch(
+            "services.ai_service.litellm.utils.supports_response_schema",
+            return_value=False,
+        ):
+            assert _check_response_schema_support("deepseek-v4-pro") is False
+
+    def test_support_check_false_and_logs_on_exception(self):
+        """supports_response_schema 调用异常 → log_classified 记录且返回 False（不可判定即不支持）。"""
+        with (
+            patch(
+                "services.ai_service.litellm.utils.supports_response_schema",
+                side_effect=Exception("boom"),
+            ),
+            patch("services.ai_service.litellm_client.log_classified") as mock_log,
+        ):
+            assert _check_response_schema_support("deepseek-v4-pro") is False
+        log_call = mock_log.call_args
+        assert log_call is not None
+        log_args = log_call.args
+        assert log_args[1].args == ("boom",)  # 被记录的原异常
+        assert log_args[2] == "general"  # 分类类别
+        assert "supports_response_schema" in log_args[3]  # 日志消息模板
+        assert log_args[4] == "deepseek-v4-pro"  # 失败时评估的模型名
+        assert log_call.kwargs.get("exc_info") is True
+
+    def test_support_check_false_when_litellm_not_loaded(self, monkeypatch):
+        """litellm 未加载（None）→ 不触发属性访问，保守返回 False（无回归）。"""
+        import services.ai_service as ai_service
+
+        monkeypatch.setattr(ai_service, "litellm", None)
+        assert _check_response_schema_support("deepseek-v4-pro") is False
