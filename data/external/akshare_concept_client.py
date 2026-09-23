@@ -19,6 +19,11 @@ from typing import Any
 
 import pandas as pd
 
+from data.external.akshare_rate_limiter import (
+    AKSHARE_RATE_LIMIT_CAPACITY,
+    AKSHARE_RATE_LIMIT_PER_SEC,
+    get_akshare_rate_limiter,
+)
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.rate_limiter import TokenBucket
 from utils.singleton_registry import register_singleton
@@ -35,16 +40,14 @@ class AkshareConceptClient:
     concept boards) and ``ak.stock_board_concept_cons_em(symbol=...)`` (constituents
     of a concept board).
 
-    Rate limiting: 1 QPS with burst capacity of 2 (东财公开接口反爬较松，仍需限速).
+    Rate limiting: module-level shared TokenBucket (1 QPS with burst capacity of 2,
+    review08-B4) — NewsFetcher's sync akshare kernel consumes the same bucket, so
+    all akshare outbound calls share one limiter (东财公开接口反爬较松，仍需限速).
     """
 
     _instance: "AkshareConceptClient | None" = None
     _initialized: bool = False
     _lock = threading.Lock()
-
-    # 1 QPS, capacity 2 — keeps well under 东财 concept endpoint soft limits.
-    _RATE_LIMIT_PER_SEC: float = 1.0
-    _RATE_LIMIT_CAPACITY: float = 2.0
 
     def __new__(cls, *args: Any, **kwargs: Any) -> "AkshareConceptClient":
         with cls._lock:
@@ -79,22 +82,19 @@ class AkshareConceptClient:
             self._rate_limiter: TokenBucket = self._build_rate_limiter()
             self.__class__._initialized = True
             logger.info(
-                "[AkshareConceptClient] initialized: rate=%.1f QPS, capacity=%.0f",
-                self._RATE_LIMIT_PER_SEC,
-                self._RATE_LIMIT_CAPACITY,
+                "[AkshareConceptClient] initialized: rate=%.1f QPS, capacity=%.0f (module-level shared)",
+                AKSHARE_RATE_LIMIT_PER_SEC,
+                AKSHARE_RATE_LIMIT_CAPACITY,
             )
 
     def _build_rate_limiter(self) -> TokenBucket:
-        """Build the TokenBucket used to throttle AKShare calls.
+        """Return the module-level shared TokenBucket (review08-B4).
 
-        Separated as a method so tests can patch the limiter without re-implementing
-        ``__init__``.
+        All akshare outbound calls (concept client + NewsFetcher sync kernel)
+        consume the same bucket. Kept as a method so tests can patch the limiter
+        without re-implementing ``__init__``.
         """
-        return TokenBucket(
-            start_tokens=self._RATE_LIMIT_CAPACITY,
-            capacity=self._RATE_LIMIT_CAPACITY,
-            rate=self._RATE_LIMIT_PER_SEC,
-        )
+        return get_akshare_rate_limiter()
 
     @staticmethod
     def _get_akshare() -> Any:

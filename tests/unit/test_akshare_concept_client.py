@@ -222,6 +222,16 @@ class TestRateLimiterConfig:
         assert bucket.capacity == 2.0
 
 
+class TestSharedRateLimiterIntegration:
+    """review08-B4：概念客户端使用模块级共享限速器（与 NewsFetcher 共用一桶）。"""
+
+    def test_client_uses_module_shared_limiter(self):
+        from data.external.akshare_rate_limiter import get_akshare_rate_limiter
+
+        client = AkshareConceptClient()
+        assert client._rate_limiter is get_akshare_rate_limiter()
+
+
 class TestCancelledErrorPropagation:
     @pytest.mark.asyncio
     async def test_cancelled_error_propagates_from_consume_async(self, client_with_mocks):

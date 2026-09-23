@@ -88,6 +88,22 @@ def clean_global_caches():
     nf_mod._CLS_CIRCUIT_OPENED_AT = 0.0
 
 
+@pytest.fixture(autouse=True)
+def _mock_akshare_shared_limiter():
+    """review08-B4：mock 共享限速器。
+
+    既有测试用 ThreadPoolManager side_effect 在事件循环线程直接执行 _fetch，
+    而 TokenBucket.consume() 检测到 running loop 会抛 RuntimeError（生产环境
+    _fetch_stock_news_core 在 IO 线程池线程执行、无 running loop，不会触发）。
+    统一 mock 掉共享限速器使既有测试不受影响；限速行为由 TestSharedRateLimiter
+    单独断言。
+    """
+    mock_limiter = MagicMock()
+    mock_limiter.consume = MagicMock()
+    with patch("data.external.news_fetcher.get_akshare_rate_limiter", return_value=mock_limiter):
+        yield
+
+
 class TestRunWithPythonStringStorage:
     def test_returns_fetcher_result(self):
         assert _run_with_python_string_storage(lambda: 42) == 42
@@ -1308,6 +1324,47 @@ class TestGetStockNewsDirectExecution:
         # review08-D1：EM 时间统一为 UTC naive datetime（CST 10:00 → UTC 02:00）
         assert result[0]["publish_time"] == to_utc_for_db(datetime.datetime(2024, 6, 14, 10, 0, 0))
         assert result[0]["publish_time"].tzinfo is None
+
+
+class TestSharedRateLimiter:
+    """review08-B4：NewsFetcher 的 akshare 调用经模块级共享限速器。
+
+    显式替换 autouse mock（_mock_akshare_shared_limiter），断言 consume 调用；
+    单次抓取 2 个调用点（cninfo + EM）各消耗 1 token。
+    """
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ak")
+    async def test_stock_news_core_consumes_limiter_for_both_layers(self, mock_ak):
+        mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame(
+            {
+                "代码": ["000001"],
+                "简称": ["平安银行"],
+                "公告标题": ["2024年半年度报告"],
+                "公告时间": ["2024-08-30"],
+                "公告链接": ["http://example.com"],
+            }
+        )
+        mock_ak.stock_news_em.return_value = pd.DataFrame()
+
+        mock_limiter = MagicMock()
+        mock_limiter.consume = MagicMock()
+
+        with (
+            patch("data.external.news_fetcher.get_akshare_rate_limiter", return_value=mock_limiter),
+            patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            result = await NewsFetcher.get_stock_news("000001.SZ", limit=5)
+
+        assert isinstance(result, list)
+        assert len(result) >= 1
+        # cninfo 层 + EM 层各消耗 1 token（单次抓取 burst=2，与共享桶容量一致）
+        assert mock_limiter.consume.call_count == 2
+        mock_limiter.consume.assert_any_call(1)
 
 
 class TestNewsTimeCaliberConsistency:
