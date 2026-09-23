@@ -253,6 +253,18 @@ class TestBacktestReport:
         md = report.to_markdown(result_with_warning)
         assert f"## {I18n.get('report_section_data_warnings')}" in md
 
+    def test_report_translates_historical_strategy_name(self, backtest_result: BacktestResult) -> None:
+        """E1: 报告导出（summary + markdown）历史英文旧值经兜底翻译，不再原样透传。"""
+        result = dataclasses.replace(backtest_result, strategy_name="Value Investing")
+        report = BacktestReport()
+        summary = report.format_summary(result)
+        md = report.to_markdown(result)
+        # 摘要与标题均渲染翻译后策略名（zh_CN 下 "价值投资"）
+        assert f"{I18n.get('report_strategy')}: 价值投资" in summary
+        assert I18n.get("report_title", strategy_name="价值投资") in md
+        assert "Value Investing" not in summary
+        assert "Value Investing" not in md
+
 
 class TestBacktestDelistSummary:
     """BT-02: 退市清算分项统计在导出报告 summary 的呈现。

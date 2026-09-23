@@ -609,6 +609,26 @@ class TestBacktestChartContext:
         # DAT-08②: 摘要末尾显式标注行业分类为当前快照（快照前视 tradeoff）
         assert I18n.get("backtest_chart_summary_industry_note") in text.value
 
+    def test_chart_summary_translates_historical_strategy_name(self) -> None:
+        """E1: 历史英文旧值经 translate_strategy_name 兜底翻译（不再原样透传）。"""
+        from ui.i18n import translate_strategy_name
+
+        I18n.set_locale("zh_CN")
+        text = _build_chart_summary(
+            "Value Investing",  # 历史英文旧值（库内未迁移数据）
+            "000300.SH",
+            ("2024-01-02", "2024-01-31"),
+            (100.0, 110.0),
+            {"total_return": 0.1, "max_drawdown": 0.05},
+        )
+        # 渲染策略名为翻译后值（"价值投资"），非原始英文
+        translated = translate_strategy_name("Value Investing")
+        assert translated == "价值投资"
+        assert I18n.get("backtest_chart_summary_source", strategy=translated, benchmark="000300.SH") in text.value
+        # 英文旧值不再原样透传进摘要文本（整段 text 应无该英文策略名）
+        assert "Value Investing" not in text.value
+        I18n.set_locale("zh_CN")
+
 
 class TestBuildMonthlyTable:
     """_build_monthly_table 纯函数单测。"""

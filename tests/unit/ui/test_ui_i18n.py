@@ -61,18 +61,18 @@ class TestTranslateStrategyName:
         mock_get.assert_called_once_with("strategy_ai_nightly_name")
 
     def test_translate_non_i18n_key_returns_original(self):
-        """R.3.3: 非 i18n key (identifier/zh/en 翻译字符串/自定义) 原样返回."""
+        """E3: 历史值命中兜底映射 → 经 I18n.get 翻译；自定义策略名未命中 → 原样返回."""
         with patch("ui.i18n.I18n.get") as mock_get:
-            mock_get.return_value = "Should Not Be Called"
-            # 旧 identifier (未迁移)
-            assert translate_strategy_name("AI_Auto_Nightly") == "AI_Auto_Nightly"
-            # 旧 zh 翻译字符串 (未迁移)
-            assert translate_strategy_name("价值投资") == "价值投资"
-            # 旧 en 翻译字符串 (未迁移)
-            assert translate_strategy_name("Value Investing") == "Value Investing"
-            # 自定义策略名
+            mock_get.return_value = "Translated Strategy"
+            # 旧 identifier / zh / en 翻译字符串命中 STRATEGY_NAME_FALLBACK_MAP → 调 I18n.get
+            assert translate_strategy_name("AI_Auto_Nightly") == "Translated Strategy"
+            assert translate_strategy_name("价值投资") == "Translated Strategy"
+            assert translate_strategy_name("Value Investing") == "Translated Strategy"
+            # 自定义策略名（未命中）原样返回，不调 I18n.get
             assert translate_strategy_name("自定义策略") == "自定义策略"
-        mock_get.assert_not_called()
+        # 3 个历史值命中兜底 → 各调用一次 I18n.get（映射 key 参数）
+        assert mock_get.call_count == 3
+        assert mock_get.call_args_list[0].args[0] == "strategy_ai_nightly_name"
 
     def test_translate_unknown_strategy_returns_original(self):
         """Test translating unknown strategy returns original."""

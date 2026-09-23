@@ -560,17 +560,40 @@ class TestTranslateStrategyName:
         I18n.set_locale("zh_CN")
 
     def test_translate_non_i18n_key_returns_original(self):
-        """R.3.3: 非 i18n key 字符串应原样返回 (兜底兼容未迁移数据)."""
+        """E3: 历史值（identifier/zh/en 翻译字符串）经兜底映射翻译；自定义策略名原样返回."""
         from ui.i18n import translate_strategy_name
 
-        # 未迁移的翻译字符串 (兜底原样返回)
+        I18n.set_locale("zh_CN")
+        # 历史翻译字符串/identifier 命中 STRATEGY_NAME_FALLBACK_MAP → 翻译为当前 locale
         assert translate_strategy_name("价值投资") == "价值投资"
-        assert translate_strategy_name("Value Investing") == "Value Investing"
-        # 未迁移的 identifier
-        assert translate_strategy_name("AI_Auto_Nightly") == "AI_Auto_Nightly"
-        # 自定义策略名
+        assert translate_strategy_name("Value Investing") == "价值投资"
+        assert translate_strategy_name("AI_Auto_Nightly") == "AI 自动夜间选股"
+        # 自定义策略名（未命中兜底映射）原样返回
         assert translate_strategy_name("自定义策略") == "自定义策略"
         assert translate_strategy_name("Custom Strategy") == "Custom Strategy"
+
+    def test_translate_fallback_map_en_locale(self):
+        """E3: 历史值兜底翻译随 locale 切换（en_US 下映射 key 翻译为英文名）."""
+        from ui.i18n import translate_strategy_name
+
+        I18n.set_locale("en_US")
+        assert translate_strategy_name("价值投资") == "Value Investing"
+        assert translate_strategy_name("AI_Auto_Nightly") == "AI Auto Nightly Screening"
+        I18n.set_locale("zh_CN")
+
+    def test_translate_core_entrypoint_for_non_ui_layers(self):
+        """E3: core 单源入口（strategies 等非 UI 层经 core 引用，R1 合规）行为一致。"""
+        from core.i18n import STRATEGY_NAME_FALLBACK_MAP, translate_strategy_name as core_translate
+
+        I18n.set_locale("zh_CN")
+        assert core_translate("strategy_value_name") == "价值投资"
+        # 兜底映射命中（历史英文旧值 → 翻译）
+        assert core_translate("Value Investing") == "价值投资"
+        # 未知值原样
+        assert core_translate("Custom Strategy") == "Custom Strategy"
+        # E4 单源：映射值全部为 strategy_ 前缀（保证前缀检查路径可翻译）
+        assert all(v.startswith("strategy_") for v in STRATEGY_NAME_FALLBACK_MAP.values())
+        I18n.set_locale("zh_CN")
 
     def test_translate_unknown_name_returns_original(self):
         """Test that unknown names are returned as-is."""

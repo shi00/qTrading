@@ -28,7 +28,7 @@ import flet as ft
 import flet_charts as fch
 
 from ui.components.flet_type_helpers import safe_controls
-from ui.i18n import I18n, get_observable_state
+from ui.i18n import I18n, get_observable_state, translate_strategy_name
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.backtest_view_model import TradeRow
 
@@ -643,7 +643,9 @@ def _build_chart_summary(
     lines = [
         I18n.get(
             "backtest_chart_summary_source",
-            strategy=strategy_name or "-",
+            # E1：策略名接入翻译入口（历史库值英文/裸 key 经 core 兜底映射翻译，
+            # 新数据 name_key 直接翻译），与筛选结果表走同一 translate_strategy_name。
+            strategy=translate_strategy_name(strategy_name) or "-",
             benchmark=benchmark_name or "-",
         )
     ]
