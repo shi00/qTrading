@@ -343,70 +343,6 @@ class TestKDJ:
         assert k == 0
 
 
-class TestRSI:
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        np.random.seed(42)
-        n = 30
-        self.df = pd.DataFrame(
-            {
-                "trade_date": pd.date_range("2024-01-01", periods=n),
-                "close": 10 + np.cumsum(np.random.randn(n) * 0.3),
-            }
-        )
-
-    def test_rsi_calculation(self):
-        rsi = TechnicalAnalysis.get_rsi(self.df, period=6)
-        assert isinstance(rsi, float)
-        assert 0 <= rsi <= 100
-
-    def test_rsi_overbought(self):
-        df = pd.DataFrame({"close": [10.0 + i * 0.5 for i in range(20)]})
-        rsi = TechnicalAnalysis.get_rsi(df, period=6)
-        assert rsi > 70
-
-    def test_rsi_oversold(self):
-        df = pd.DataFrame({"close": [20.0 - i * 0.5 for i in range(20)]})
-        rsi = TechnicalAnalysis.get_rsi(df, period=6)
-        assert rsi < 30
-
-    def test_rsi_insufficient_data(self):
-        df = pd.DataFrame({"close": [10.0, 11.0]})
-        rsi = TechnicalAnalysis.get_rsi(df, period=6)
-        assert rsi == 50.0
-
-    def test_rsi_none_input(self):
-        rsi = TechnicalAnalysis.get_rsi(None, period=6)
-        assert rsi == 50.0
-
-    def test_rsi_different_periods(self):
-        rsi_6 = TechnicalAnalysis.get_rsi(self.df, period=6)
-        rsi_14 = TechnicalAnalysis.get_rsi(self.df, period=14)
-        assert isinstance(rsi_6, float)
-        assert isinstance(rsi_14, float)
-
-
-class TestTrendAnalysis:
-    def test_trend_up(self):
-        df = pd.DataFrame({"close": [10.0 + i * 0.5 for i in range(30)]})
-        trend = TechnicalAnalysis.analyze_trend(df)
-        assert trend == "UP"
-
-    def test_trend_down(self):
-        df = pd.DataFrame({"close": [20.0 - i * 0.5 for i in range(30)]})
-        trend = TechnicalAnalysis.analyze_trend(df)
-        assert trend == "DOWN"
-
-    def test_trend_insufficient_data(self):
-        df = pd.DataFrame({"close": [10.0, 11.0, 12.0]})
-        trend = TechnicalAnalysis.analyze_trend(df)
-        assert trend == "UNKNOWN"
-
-    def test_trend_none_input(self):
-        trend = TechnicalAnalysis.analyze_trend(None)
-        assert trend == "UNKNOWN"
-
-
 class TestRSIPandas:
     def test_rsi_series_calculation(self):
         close = pd.Series([10.0 + i * 0.3 for i in range(30)])
@@ -432,8 +368,9 @@ class TestRSIPandas:
     def test_rsi_pandas_matches_polars(self):
         """跨实现一致性（D3-2 防漂移门禁）。
 
-        get_rsi / get_rsi_expr / calculate_rsi_pandas 三套实现对同一输入
-        必须给出相同的末值。D3-1 的漂移正是由于三份独立分解实现无法同步演进，
+        get_rsi_expr 与薄委托入口 calculate_rsi_pandas 对同一输入必须给出
+        相同的末值（D7 已删除独立的 pandas 末值实现 get_rsi）。
+        D3-1 的漂移正是由于多份独立分解实现无法同步演进，
         本测试确保未来任何一份再被改动时立即被捕获。
         """
         import polars as pl
@@ -450,10 +387,8 @@ class TestRSIPandas:
             .collect()["rsi"]
             .to_list()[-1]
         )
-        pandas_point = TechnicalAnalysis.get_rsi(df, period=period)
         pandas_series = TechnicalAnalysis.calculate_rsi_pandas(close, period=period).iloc[-1]
 
-        assert polars_last == pytest.approx(pandas_point, rel=1e-6)
         assert polars_last == pytest.approx(pandas_series, rel=1e-6)
 
     def test_rsi_series_insufficient_data(self):
@@ -482,15 +417,18 @@ class TestStrongNumericAssertionsD38:
 
     # ---------- RSI ----------
     def test_rsi_boundaries_known_input(self):
-        """单调上涨→100、单调下跌→0、横盘→50（固定精确期望）。"""
+        """单调上涨→100、单调下跌→0、横盘→50（固定精确期望）。
+
+        D7 已删除独立 pandas 末值实现 get_rsi：上涨/下跌边界由
+        test_rsi_direction_is_correct 覆盖（calculate_rsi_pandas），
+        此处保留横盘归中（50）种子污染防护断言。
+        """
         up = pd.Series(np.arange(100.0, 130.0))
         down = pd.Series(np.arange(130.0, 100.0, -1.0))
         flat = pd.Series(np.full(30, 100.0))
+        assert TechnicalAnalysis.calculate_rsi_pandas(up, 14).iloc[-1] == pytest.approx(100.0)
+        assert TechnicalAnalysis.calculate_rsi_pandas(down, 14).iloc[-1] == pytest.approx(0.0)
         assert TechnicalAnalysis.calculate_rsi_pandas(flat, 14).iloc[-1] == pytest.approx(50.0)
-        # get_rsi 点值三边界（flat→100 为 D3-8 修复前惰性错误，修复后应归中性）
-        assert TechnicalAnalysis.get_rsi(pd.DataFrame({"close": up}), period=6) == pytest.approx(100.0)
-        assert TechnicalAnalysis.get_rsi(pd.DataFrame({"close": down}), period=6) == pytest.approx(0.0)
-        assert TechnicalAnalysis.get_rsi(pd.DataFrame({"close": flat}), period=6) == pytest.approx(50.0)
 
     def test_rsi_real_series_exact_value(self):
         """固定序列 → 精确 RSI 末值（D3-1 回归 + D3-8 强断言）。"""

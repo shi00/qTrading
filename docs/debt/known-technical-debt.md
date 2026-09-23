@@ -621,9 +621,9 @@ UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`s
 
 OSS-05 双实现等价性研究结论（pandas 入口 vs Polars 表达式工厂的等价域与分叉面）目前只固化在 `tests/unit/test_technical_analysis_equivalence.py` 的 docstring 与断言中，**未登记进本技术债表**。`reviews/` 目录经 `.gitignore` 忽略（本地产物），当时的原始报告《开源组件使用检视报告.md》已随检视周期删除，若上述测试文件将来被重构或拆分，全部决策依据将无迹可循。
 
-已固化的核心结论（现状截至 2026-09-23，D1-D3 收敛后）：
+已固化的核心结论（现状截至 2026-09-23，D1-D3 收敛 + D7 死代码删除后）：
 - **收敛方向**：Polars 表达式为唯一语义正本，pandas 入口为薄委托层（`get_macd`/`get_kdj` 已委托 `get_macd_expr`/`get_kdj_expr`，`calculate_rsi_pandas` 委托 `get_rsi_expr`）；
-- **B1 RSI 预热期**（保留固化）：pd `fillna(50)` 全序列 vs pl `min_samples=period` 前 period 根 null（真实「未知」）。`get_rsi` 为独立 pandas 末值实现且零生产调用方，未纳入收敛；
+- **B1 RSI 预热期**（保留固化）：测试内 pandas 教科书公式 `fillna(50)` 全序列 vs pl `min_samples=period` 前 period 根 null（真实「未知」）。独立 pandas 末值实现 `get_rsi`（含 `_split_delta`）已随 D7 删除，生产 pandas 路径预热期语义与 pl 一致；
 - **B2 MACD hist 倍率**（已收敛）：pd 侧改 ×2 委托，与 pl 侧 `macd=(dif-dea)×2` 一致；断言从「固化 2 倍差」改为「断言一致」；
 - **B3 KDJ 全横盘**（已收敛）：pd 侧委托后经 `fill_nan(50)` 取中性 50，不再返回 NaN 注入 `"k: nan"` 至 AI prompt；
 - **B4 KDJ 连续一字板**（已收敛）：pd 头部 NaN 注入历史统一由 `fill_nan(50)` 承载，断言改为接口与 expr 末值一致。
@@ -631,7 +631,7 @@ OSS-05 双实现等价性研究结论（pandas 入口 vs Polars 表达式工厂�
 衍生任务状态：
 1. qfq 双实现（`qfq_ratio_series` vs `qfq_ratio_expr`）交叉等价性测试 → 由 `tests/unit/test_qfq_equivalence.py` 承接（D4）；
 2. KDJ flat NaN 经 ai_mixin 注入 AI prompt `"k: nan"` → 已修复（D1，ai_mixin 消费侧对 None 省略字段）；
-3. `get_rsi` 零产品调用方，评估删除 → 未处理（D7 仅报告不删，按 CLAUDE.md §1.4 该独立任务延后）；
+3. `get_rsi` 零产品调用方，评估删除 → 已删除（D7：`get_rsi`/`analyze_trend`/`_split_delta` 生产零引用，连同相关测试断言一并清理）；
 4. KDJ 连续一字板分叉收敛 → 已收敛（D1，B4 断言改为一致）。
 
 指针：`tests/unit/test_technical_analysis_equivalence.py`（组 A/B/C，docstring 为缩略现状）、`docs/patterns/polars-vectorized-strategy.md`（指标语义单一事实源约定）。

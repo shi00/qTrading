@@ -1,9 +1,11 @@
 """OSS-05：技术指标 pandas/Polars 双实现等价性固化测试。
 
 背景（reviews/开源组件使用检视报告.md §6）：RSI/MACD/KDJ 各有两份实现——
-pandas 侧 ``get_rsi``/``get_macd``/``get_kdj``（末值快速路径）与 Polars 侧
-``get_rsi_expr``/``get_macd_expr``/``get_kdj_expr``（表达式工厂）。本测试将
-两侧的等价域与分叉面固化为显式断言，防止未声明的口径漂移。
+pandas 侧（`get_macd`/`get_kdj` 末值快速路径，RSI 经薄委托
+``calculate_rsi_pandas``）与 Polars 侧 ``get_rsi_expr``/``get_macd_expr``/
+``get_kdj_expr``（表达式工厂）。本测试将两侧的等价域与分叉面固化为
+显式断言，防止未声明的口径漂移。独立 pandas 末值实现 ``get_rsi`` 与
+``analyze_trend`` 已随 D7 删除（生产零引用、第三套 RSI 实现）。
 
 核心结论（诊断探针实证，全部在 allclose(rtol=1e-9, atol=1e-12) 内等价）：
 - MACD dif/dea 全场景等价（含短序列 n=8，实测 max|Δ|≤3e-13 量级）；
@@ -23,24 +25,24 @@ pandas 侧 ``get_rsi``/``get_macd``/``get_kdj``（末值快速路径）与 Polar
   衰减收敛行为）；峰值在 k[9]。B4b 尾部单点注入不衰减，末值真分叉。
 
 消费面事实（收敛指引）：
-- ``get_macd``/``get_kdj`` 唯一产品调用方 strategies/ai_mixin.py:1535-1536
-  （60 根历史窗口）；KDJ flat 时 NaN 以 "k: nan" 注入 AI prompt（ai_mixin.py:1541）。
-- ``get_rsi`` 零产品调用方；``get_kdj_expr`` 零生产消费方（仅测试引用）。
+- ``get_macd``/``get_kdj`` 唯一产品调用方 strategies/ai_mixin.py:1538-1539
+  （60 根历史窗口）；KDJ flat 时 NaN 注入 "k: nan" 已修复（D1）。
+- ``get_kdj_expr`` 收敛前零生产消费方（仅测试引用），收敛后由 ``get_kdj`` 委托消费。
 - 收敛（统一到 Polars 正本）时须同步更新：B1/B2/B3/B4 全部断言与组 C 对照。
 
-衍生任务登记（本测试范围外，独立处理）：
-1. qfq 双实现（qfq_ratio_series vs qfq_ratio_expr）交叉等价性零覆盖，需独立测试。
-2. KDJ flat NaN 经 ai_mixin 注入 AI prompt "k: nan" 的 prompt 质量缺陷。
-3. get_rsi 零产品调用方，评估删除。
-4. KDJ 连续一字板分叉收敛（pd NaN-跳过 vs pl 50-填充）。
+衍生任务状态（本测试范围外，独立处理）：
+1. qfq 双实现（qfq_ratio_series vs qfq_ratio_expr）交叉等价性 → 由 test_qfq_equivalence.py 承接（D4）。
+2. KDJ flat NaN 经 ai_mixin 注入 AI prompt "k: nan" → 已修复（D1）。
+3. get_rsi 零产品调用方，评估删除 → 已随 D7 删除（连同 analyze_trend / _split_delta）。
+4. KDJ 连续一字板分叉收敛（pd NaN-跳过 vs pl 50-填充）→ 已收敛（D1，B4 断言一致化）。
 
 适用域说明：
 - 无 NaN 输入、无 adj_factor（QFQ 路径不触发，pd 侧 ``_get_qfq_df`` 原样返回）。
-- pandas 侧为算法重建序列：``get_*`` 不暴露序列仅返回末值，序列级断言只能
-  重建镜像；重建 helper 逐行镜像 get_* 内部算法，get_* 算法变更时须同步更新
+- pandas 侧为算法重建序列：``get_macd``/``get_kdj`` 不暴露序列仅返回末值，序列级
+  断言只能重建镜像；重建 helper 逐行镜像接口内部算法，算法变更时须同步更新
   （此为固化契约的一部分）。
 - 组 A 末值采用三源互证（接口末值 vs 重建末值 vs expr 末值，allclose），
-  绝对值不 pin（跨平台浮点稳健）；仅分叉契约处（B4/C1'）pin 绝对值
+  绝对值不 pin（跨平台浮点稳健）；仅分叉契约处（B4）pin 绝对值
   （pytest.approx rel=1e-9）。
 - B4a 分叉区超 rtol 点数为种子/平台依赖值（实测 k=50/51、d/j=51/51），
   断言用下限阈值（≥49/51），非稳定契约。
@@ -133,7 +135,9 @@ def _make_limit_tail(n=60, n_limit=9, seed=52):
 
 def _rsi_pd_series(close, period):
     delta = close.diff()
-    up, down = TechnicalAnalysis._split_delta(delta)
+    # D7：_split_delta 随 get_rsi 一并删除（生产零引用），此处内联涨跌分解
+    up = delta.clip(lower=0)
+    down = (-delta).clip(lower=0)
     ma_up = up.ewm(com=period - 1, adjust=False).mean()
     ma_down = down.ewm(com=period - 1, adjust=False).mean()
     rs = np.where(ma_down == 0, np.where(ma_up == 0, np.nan, np.inf), ma_up / ma_down)
@@ -307,8 +311,13 @@ class TestSeriesEquivalence:
         df = _make_random(200, 42)
 
         pd_rsi, plr = _rsi_pd_series(df["close"], RSI_PERIOD), _pl_rsi(df)
-        assert TechnicalAnalysis.get_rsi(df, period=RSI_PERIOD) == pytest.approx(plr.iloc[-1], rel=RTOL)
-        assert TechnicalAnalysis.get_rsi(df, period=RSI_PERIOD) == pytest.approx(pd_rsi.iloc[-1], rel=RTOL)
+        # D7：get_rsi 已删除，RSI 末值互证改以 calculate_rsi_pandas（薄委托）为接口第三方
+        assert TechnicalAnalysis.calculate_rsi_pandas(df["close"], RSI_PERIOD).iloc[-1] == pytest.approx(
+            plr.iloc[-1], rel=RTOL
+        )
+        assert TechnicalAnalysis.calculate_rsi_pandas(df["close"], RSI_PERIOD).iloc[-1] == pytest.approx(
+            pd_rsi.iloc[-1], rel=RTOL
+        )
 
         m_pd, mpl = _macd_pd_series(df["close"], MACD_FAST, MACD_SLOW, MACD_SIGN), _pl_macd(df)
         _, macd_last, macd_hist = TechnicalAnalysis.get_macd(df)
@@ -335,9 +344,10 @@ class TestSeriesEquivalence:
 
 class TestBoundaryDivergenceSolidified:
     def test_b1_rsi_warmup_fillna50_vs_null(self):
-        """B1 RSI 预热期：pd fillna(50) 全序列（含 ewm 种子污染值）vs pl 前
-        period 根 null（真实「未知」）。get_rsi 未纳入 D1+D2+D3 收敛范围
-        （零生产调用方、独立 pandas 实现），本分叉保留固化。"""
+        """B1 RSI 预热期：pandas 教科书公式 fillna(50) 全序列（含 ewm 种子污染值）
+        vs pl 前 period 根 null（真实「未知」）。D7 已删独立 pandas 末值实现
+        get_rsi，生产 pandas 路径（calculate_rsi_pandas 薄委托）预热期亦为 null；
+        此处 pd 侧为测试内教科书参照，固化 pl 预热期 null 语义（R21）。"""
         df = _make_random(200, 42)
         pd_rsi, plr = _rsi_pd_series(df["close"], RSI_PERIOD), _pl_rsi(df)
         assert plr.iloc[:RSI_PERIOD].isna().all()
@@ -429,19 +439,13 @@ class TestBoundaryDivergenceSolidified:
 
 
 class TestCrossImplSentinelFace:
-    def test_c1_rsi_n_equals_period_sentinel_vs_all_null(self):
-        """C1 n=6(=period)：pd 接口 len<period+1 → 哨兵 50.0 vs pl expr
-        min_samples=period（仅 5 个非 null delta）→ 全 null。"""
+    def test_c1_rsi_n_equals_period_all_null(self):
+        """C1 n=6(=period)：pl expr ``min_samples=period``（仅 5 个非 null delta）
+        → 全 null（真实「未知」，R21）；pandas 薄委托 calculate_rsi_pandas
+        数据不足返回空 Series（显式缺省，非 50.0 哨兵——D7 已删 get_rsi）。"""
         df = _make_random(6, 46)
-        assert TechnicalAnalysis.get_rsi(df, period=RSI_PERIOD) == 50.0
         assert _pl_rsi(df).isna().all()
-
-    def test_c1_prime_rsi_short_boundary_real_value(self):
-        """C1' n=8 边界：len=8 > period+1=7 → get_rsi 返回真实值（非哨兵）。
-        注：哨兵 50.0 与真实 50.0 不可区分是 R21 已知问题（缺失值伪装），
-        本例 pin 的是固定种子下的确定性真实值。"""
-        df = _make_random(8, 45)
-        assert TechnicalAnalysis.get_rsi(df, period=RSI_PERIOD) == pytest.approx(57.531187188849444, rel=RTOL)
+        assert TechnicalAnalysis.calculate_rsi_pandas(df["close"], RSI_PERIOD).empty
 
     def test_c2_macd_short_sentinel_vs_expr_output(self):
         """C2 n=8：pd 接口 len<slow+2=28 → ("UNKNOWN", 0, 0) vs pl expr

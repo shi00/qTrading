@@ -127,78 +127,11 @@ class TechnicalAnalysis:
         return status, float(curr_k), float(curr_d), float(curr_j)
 
     @staticmethod
-    def analyze_trend(df):
-        """
-        Simple MA trend analysis (using QFQ).
-        """
-        if df is None or len(df) < 20:
-            return "UNKNOWN"
-
-        # Use Adjusted Prices
-        df_calc = TechnicalAnalysis._get_qfq_df(df)
-
-        ma5 = df_calc["close"].rolling(window=5).mean().iloc[-1]  # type: ignore[optional-subscript]
-        ma20 = df_calc["close"].rolling(window=20).mean().iloc[-1]  # type: ignore[optional-subscript]
-
-        if ma5 > ma20:
-            return "UP"
-        return "DOWN"
-
-    @staticmethod
-    def get_rsi(df, period=6):
-        """
-        Calculate RSI (using QFQ).
-        :param df: DataFrame with 'close' (and 'adj_factor' for QFQ)
-        :param period: RSI period (default 6)
-        :return: Last RSI value (float) or 50 if insufficient data
-        """
-        if df is None or len(df) < period + 1:
-            return 50.0
-
-        # Use Adjusted Prices
-        df_calc = TechnicalAnalysis._get_qfq_df(df)
-
-        # Calculate price changes
-        delta = df_calc["close"].diff()  # type: ignore[optional-subscript]
-
-        up, down = TechnicalAnalysis._split_delta(delta)
-
-        # Use Wilder's Smoothing (alpha = 1/period)
-        ma_up = up.ewm(com=period - 1, adjust=False).mean()
-        ma_down = down.ewm(com=period - 1, adjust=False).mean()
-
-        # Avoid division by zero: when ma_down=0, RSI=100。
-        # 与 calculate_rsi_pandas 语义一致（D3-2 祛漂）：无涨有跌→RSI=0，
-        # 无跌有涨→RSI=100，无涨无跌(横盘)→RSI=50（中性），
-        # 后者由 np.nan → rsi 为 NaN → 末尾 fillna(50) 归中。
-        rs = np.where(
-            (ma_down == 0),
-            np.where(ma_up == 0, np.nan, np.inf),
-            ma_up / ma_down,
-        )
-        rsi = 100 - (100 / (1 + rs))
-
-        # Handle nan (e.g. initial window)
-        rsi = pd.Series(rsi).fillna(50)
-
-        return float(rsi.iloc[-1])
-
-    @staticmethod
-    def _split_delta(delta):
-        """
-        涨跌分解的唯一实现（D3-2 收敛）：gain / loss 均为非负。
-
-        get_rsi 与 calculate_rsi_pandas 这两个 Pandas 路径共用本方法，
-        避免同一指标多份分解实现漂移（D3-1 正是漂移的实证）。
-        """
-        return delta.clip(lower=0), (-delta).clip(lower=0)
-
-    @staticmethod
     def calculate_rsi_pandas(close: pd.Series, period: int = 14) -> pd.Series:
         """
         使用 Polars 计算 RSI 序列并转回 Pandas（SC-05 合一：唯一正本为 Polars get_rsi_expr）。
 
-        与 get_rsi() 不同，此方法返回完整的 RSI 序列，用于后续分析：
+        此方法返回完整的 RSI 序列，用于后续分析：
         - 连续超卖天数
         - 恐慌速跌偏离度
         - 超卖钝化检测
@@ -207,6 +140,7 @@ class TechnicalAnalysis:
         （min_samples=0）口径不一致导致 EWM 种子污染与两套边界处理漂移。
         现改为调用 get_rsi_expr 计算后转回，预热期语义（前 period 根为 NaN/null）与
         边界语义（无涨有跌→0、无跌有涨→100、无涨无跌→50）由 Polars 唯一实现承载。
+        （D7：独立 pandas 末值实现 get_rsi 已删除，本方法是 pandas 侧 RSI 的唯一入口。）
 
         Args:
             close: 收盘价序列（需按时间升序排列）
