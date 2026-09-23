@@ -47,6 +47,26 @@
 
 ## 历史核验记录
 
+### Flet 1.0.1 patch 升级核验 @ 1.0 系列 (2026-09-23)
+
+- **API**: V1 声明式 API + 私有 API + flet_charts API + flet-mcp（同版本锁定）
+- **锁定版本**: Flet 1.0.1（pyproject.toml 实际锁定；flet/flet-desktop/flet-charts/flet-code-editor/flet-mcp 同版本升级，flet-web CI pin 同步）
+- **核验来源**:
+  - 官方 CHANGELOG: 1.0.1 为 patch 升级（python-build/serious_python 更新 + macOS 科学导入崩溃修复 + Service `init()` 注册修复 + ListTile 无限宽布局修复 + RawImage Windows stall 修复），无破坏性 API 变更
+  - 项目单元测试（Flet 1.0.1 实跑，全绿）: `tests/unit/ui/` 全目录 4769 passed；Flet 契约专项 166 passed（test_flet_0_86_v1_api_compat / private_api_compat / charts_compat / test_mock_flet_contract / test_hooks / test_anchor）
+  - 项目运行期验证（flet-mcp 1.0.1）: `mcp.name == flet-mcp`，server 可加载
+  - E2E 资源验证: 升级前后 engineRevision 一致（`0cd610717bde95fd88343c64f81c11ba4e5c0010`），CanvasKit mock 资源无需更新；字体缓存 `sync_e2e_fonts.py` `[OK] 缓存完整`（116 文件）；canvaskit chromium/experimental_webparagraph/rive 目录结构与 1.0.1 一致
+- **项目结论**: 继续使用
+  - 理由: 1.0.1 为 patch 升级且变更均为 bug fix/内嵌运行时更新，项目切入点（声明式 API、use_viewmodel、锚点语义树）无漂移；全量 UI 单测 + Flet 契约专项全部通过；E2E 资源无变化。1.0.0 核验结论（2026-09-19）在 1.0.1 下保持成立。
+- **需更新文件**:
+  - [x] pyproject.toml (flet 五包 1.0.0 → 1.0.1)
+  - [x] .github/workflows/ci_cd.yml / flet-nightly.yml (flet-web==1.0.1 pin ×5)
+  - [x] .github/renovate.json / .github/ISSUE_TEMPLATE/bug_report.yml (版本描述同步)
+  - [x] requirements*.txt (pip-compile 再生成)
+  - [x] docs/flet/api-verification-template.md (本核验记录)
+  - [x] docs/flet/project-differences.md (最后验证日期 → 2026-09-23)
+- **核验人**: AI 助手 (Flet 1.0.1 升级批次)
+
 ### Flet 1.0 升级核验 @ 1.0 系列 (2026-09-19)
 
 - **API**: 全量 V1 声明式 API + 私有 API + flet_charts API + TextField error 属性

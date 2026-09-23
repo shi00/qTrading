@@ -37,7 +37,7 @@
       "enabled": false
     },
     {
-      "description": "Pin flet, flet-desktop, flet-charts and flet-code-editor to 1.0.0 - UI framework stability critical",
+      "description": "Pin flet, flet-desktop, flet-charts and flet-code-editor to 1.0.1 - UI framework stability critical",
       "matchPackageNames": ["flet", "flet-desktop", "flet-charts", "flet-code-editor"],
       "enabled": false
     },
