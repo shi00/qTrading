@@ -774,7 +774,15 @@ def TableViewerTab(
         else None
     )
     columns_spec = _build_table_columns_spec(state.current_table, state.table_columns, vm)
-    rows_data = _table_rows_to_paginated_rows(state.table_rows, state.table_columns)
+    # OSS B1: 行数据格式化（含 ~100 行 dict 全量重建）与 state 无关变更（loading/error/
+    # filter 草稿/翻页状态）解耦 —— VM 用 replace 浅拷贝，table_rows/table_columns 引用
+    # 在数据未变时稳定，use_memo 依赖 shallow_compare 命中缓存跳过重建。
+    # 不依赖 locale：行格式化（_format_cell_value）为纯值格式化；列名翻译由未 memo 的
+    # columns_spec 全量构建覆盖（避免 MetaDataManager 单例外部态陈旧）。
+    rows_data = ft.use_memo(
+        lambda: _table_rows_to_paginated_rows(state.table_rows, state.table_columns),
+        dependencies=[state.table_rows, state.table_columns],
+    )
 
     # --- 构建 UI ---
     table_label = I18n.get("data_select_table")
