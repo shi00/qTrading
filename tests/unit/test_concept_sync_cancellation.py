@@ -44,6 +44,8 @@ def _make_ctx(**overrides):
     ctx.config.get_ai_concept_search_engine = MagicMock(return_value="search_std")
     # P0-2 fix: LimitListSyncStrategy 现在调用 overwrite_limit_concepts（事务原子性）
     ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
+    # review08-D3: LimitListSyncStrategy 停写后调用 clear_all_limit_concepts（清空存量）
+    ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(return_value=0)
     # review08 D2: AKShareConceptSyncStrategy 预载 code→ts_code 映射（此处仅需非 None）
     ctx.cache.stock_dao.get_ts_code_map = AsyncMock(return_value={})
     for key, value in overrides.items():
@@ -226,60 +228,63 @@ class TestAKShareLoopCancellation:
             mock_gather.assert_not_called()
 
 
-class TestLimitListLoopCancellation:
-    """Phase 2F: LimitListSyncStrategy 循环体每 200 条检查 _check_cancelled。
+class TestLimitListStoppedCancellation:
+    """review08-D3 停写后 LimitListSyncStrategy 的取消语义。
 
-    S11 修复后顺序为 fetch→clear+upsert，_check_cancelled 调用顺序：
-    1. _run_impl 入口
-    2. 循环内 i=200（Phase 2F 新增）
-    3. 循环结束后（仅当循环内未取消）
+    停写路径不再构造 records、不再有循环内 _check_cancelled 检查点；
+    取消检查点为：入口 _check_cancelled + 外层 CancelledError 传播（R2）。
     """
 
     @pytest.mark.asyncio
-    async def test_loop_cancel_at_200(self):
-        """201 条 limit_list，第 2 次 _check_cancelled（循环内 i=200）返回 True。
-
-        验证：返回 CANCELLED，overwrite_limit_concepts 未被调用。
-        """
+    async def test_cancel_at_entry_no_fetch_no_clear(self):
+        """入口取消：不 fetch、不 clear（取消优先）。"""
         ctx = _make_ctx()
         strategy = LimitListSyncStrategy(ctx)
-        limit_df = _make_limit_list_df(201)
+        limit_df = _make_limit_list_df(5)
 
         ctx.api.get_limit_list = AsyncMock(return_value=limit_df)
+        ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(return_value=0)
 
-        call_count = 0
+        # 模拟基类 _check_cancelled：命中取消时设置 result.status（与 base.py 行为一致）
+        def _check_cancelled(result):
+            result.status = "cancelled"
+            return True
 
-        def check_side_effect(result):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 2:
-                result.status = "cancelled"
-                return True
-            return False
-
-        with patch.object(strategy, "_check_cancelled", side_effect=check_side_effect):
+        with patch.object(strategy, "_check_cancelled", side_effect=_check_cancelled):
             result = await strategy.run()
 
             assert result.status == "cancelled"
-            assert call_count == 2
-            ctx.cache.stock_dao.overwrite_limit_concepts.assert_not_called()
+            ctx.api.get_limit_list.assert_not_called()
+            ctx.cache.stock_dao.clear_all_limit_concepts.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_loop_no_cancel_under_200(self):
-        """2 条记录，循环内不触发取消（i % 200 != 0）。
+    async def test_cancel_during_fetch_propagates(self):
+        """fetch 阶段取消：CancelledError 传播（R2），状态 CANCELLED。"""
+        import asyncio as _asyncio
 
-        验证：正常完成，_check_cancelled 调用 2 次（入口 + 循环后），
-        循环内检查点不触发。
-        """
         ctx = _make_ctx()
         strategy = LimitListSyncStrategy(ctx)
-        limit_df = _make_limit_list_df(2)
+        ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(return_value=0)
+        ctx.api.get_limit_list = AsyncMock(side_effect=_asyncio.CancelledError())
 
-        ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=2)
+        with pytest.raises(_asyncio.CancelledError) as exc_info:
+            await strategy.run()
+        assert isinstance(exc_info.value, _asyncio.CancelledError)
+
+    @pytest.mark.asyncio
+    async def test_no_cancel_success(self):
+        """正常路径：入口检查一次后 fetch，成功返回，清空被调用。"""
+        ctx = _make_ctx()
+        strategy = LimitListSyncStrategy(ctx)
+        limit_df = _make_limit_list_df(5)
+
+        ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(return_value=3)
         ctx.api.get_limit_list = AsyncMock(return_value=limit_df)
 
         with patch.object(strategy, "_check_cancelled", return_value=False) as mock_check:
             result = await strategy.run()
 
             assert result.status == "success"
-            assert mock_check.call_count == 2
+            assert mock_check.call_count == 1  # 仅入口检查点（停写后无循环检查点）
+            ctx.cache.stock_dao.clear_all_limit_concepts.assert_awaited_once()
+            ctx.cache.stock_dao.overwrite_limit_concepts.assert_not_called()
