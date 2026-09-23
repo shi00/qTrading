@@ -64,6 +64,24 @@ class StockDao(BaseDao):
     async def get_stock_basic(self):
         return await self._read_db("SELECT * FROM stock_basic")
 
+    async def get_ts_code_map(self) -> dict[str, str]:
+        """构建 6 位代码(symbol) → ts_code 权威映射（源自 Tushare stock_basic 落库数据）。
+
+        供概念同步把 AKShare 成分股的 6 位代码解析为权威 ts_code，取代基于前缀的
+        交易所猜测（review08 D2）。返回全表（含已退市），避免因 list_status 过滤
+        漏掉仍在概念板块中出现的成分股。未知/非法代码由调用方经 None 显式标记
+        （R21 缺失值精神，不填充业务合法的猜测值）。
+        """
+        stmt = sa.select(StockBasic.symbol, StockBasic.ts_code)
+        df = await self._read_db_select(stmt)
+        if df is None or df.empty:
+            return {}
+        return {
+            str(symbol): str(ts_code)
+            for symbol, ts_code in df.itertuples(index=False, name=None)
+            if isinstance(symbol, str) and symbol.strip()
+        }
+
     async def get_active_stock_count(self):
         """Count stocks with list_status='L'"""
         df = await self._read_db(

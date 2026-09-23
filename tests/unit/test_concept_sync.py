@@ -40,6 +40,9 @@ def _make_ctx(**overrides):
     ctx.cache.stock_dao.delete_expired_failures = AsyncMock(return_value=0)
     # P0-2 fix: LimitListSyncStrategy 现在调用 overwrite_limit_concepts（事务原子性）
     ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
+    # review08 D2: AKShareConceptSyncStrategy 现在预载 code→ts_code 权威映射。
+    # 默认映射覆盖 _make_constituents_df 的代码，保证既有 AKShare 用例语义不变。
+    ctx.cache.stock_dao.get_ts_code_map = AsyncMock(return_value={"000001": "000001.SZ", "600000": "600000.SH"})
     # 策略-L1: 显式设置 search_engine 默认值，避免 MagicMock 自动生成非字符串对象
     ctx.config.get_ai_concept_search_engine = MagicMock(return_value="search_std")
     for key, value in overrides.items():
@@ -77,41 +80,42 @@ def _make_limit_list_df():
 
 # --- _to_ts_code helper ---
 
+# 权威映射样例（symbol -> ts_code），覆盖沪深京三交易所
+_SAMPLE_CODE_MAP = {
+    "000001": "000001.SZ",
+    "600000": "600000.SH",
+    "688001": "688001.SH",
+    "300001": "300001.SZ",
+    "430001": "430001.BJ",
+}
+
 
 class TestToTsCode:
-    """_to_ts_code 纯函数测试：AKShare 6 位代码 → Tushare ts_code 转换。
+    """_to_ts_code 查表函数测试：AKShare 6 位代码 → 权威 Tushare ts_code。
 
-    覆盖 concept_sync.py:52-60 的所有分支：
-    - SH 交易所（60/68/90 前缀）
-    - SZ 交易所（00/30/20 前缀）
-    - BJ 交易所（43/83/87/92 前缀，lines 58-59）
-    - 未知前缀 fallback → .SZ（line 60）
-    - 非法输入原样返回（line 52-53）
+    review08 D2 后改为经 stocks 表权威映射解析，取代前缀猜测：
+    - 映射命中（沪/深/京）→ 返回权威 ts_code
+    - 未知代码（不在映射）或非法输入 → 返回 None（调用方跳过并记 warnings）
     """
 
     @pytest.mark.parametrize(
         "code,expected",
         [
-            # SH exchange
+            # 映射命中
+            ("000001", "000001.SZ"),
             ("600000", "600000.SH"),
             ("688001", "688001.SH"),
-            ("900001", "900001.SH"),
-            # SZ exchange
-            ("000001", "000001.SZ"),
             ("300001", "300001.SZ"),
-            ("200001", "200001.SZ"),
-            # BJ exchange (lines 58-59)
             ("430001", "430001.BJ"),
-            ("830001", "830001.BJ"),
-            ("870001", "870001.BJ"),
-            ("920001", "920001.BJ"),
-            # Unknown prefix → .SZ fallback (line 60)
-            ("999999", "999999.SZ"),
-            ("123456", "123456.SZ"),
         ],
     )
-    def test_valid_6_digit_codes(self, code, expected):
-        assert _to_ts_code(code) == expected
+    def test_known_code_returns_authoritative_ts_code(self, code, expected):
+        assert _to_ts_code(code, _SAMPLE_CODE_MAP) == expected
+
+    def test_unknown_code_returns_none(self):
+        """未知代码（不在映射中，如未来新代码段）→ None，不猜测 fallback。"""
+        assert _to_ts_code("999999", _SAMPLE_CODE_MAP) is None
+        assert _to_ts_code("123456", _SAMPLE_CODE_MAP) is None
 
     @pytest.mark.parametrize(
         "invalid_code",
@@ -123,9 +127,11 @@ class TestToTsCode:
             "abcdef",  # 全字母
         ],
     )
-    def test_invalid_input_returns_input_unchanged(self, invalid_code):
-        # line 52-53: 非法输入（空/长度不符/含非数字）原样返回
-        assert _to_ts_code(invalid_code) == invalid_code
+    def test_invalid_input_returns_none(self, invalid_code):
+        assert _to_ts_code(invalid_code, _SAMPLE_CODE_MAP) is None
+
+    def test_empty_map_returns_none(self):
+        assert _to_ts_code("000001", {}) is None
 
 
 # --- AKShareConceptSyncStrategy ---
@@ -149,6 +155,34 @@ class TestAKShareConceptSync:
         assert ctx.cache.stock_dao.upsert_em_concepts.call_count == 1
         records = ctx.cache.stock_dao.upsert_em_concepts.call_args.args[0]
         assert len(records) == 4  # 2 板块 × 2 成分股
+
+    @pytest.mark.asyncio
+    async def test_unknown_code_skipped_with_warning(self):
+        """review08 D2: 成分股代码在 stocks 表权威映射中缺失时，跳过该记录并记 warning，
+        不再用交易所前缀猜测 fallback .SZ。"""
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=1)
+        # 默认映射含 000001/600000；999999 未知
+        df_cons = pd.DataFrame(
+            {
+                "代码": ["000001", "999999"],
+                "名称": ["平安银行", "未知代码"],
+            }
+        )
+
+        client = AkshareConceptClient()
+        client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
+        client.get_concept_constituents = AsyncMock(return_value=df_cons)
+
+        strategy = AKShareConceptSyncStrategy(ctx)
+        result = await strategy.run()
+
+        assert result.status == SyncStatus.SUCCESS.value
+        assert result.added == 1  # 仅 000001 入库
+        assert result.skipped == 1
+        assert any("999999" in w for w in result.warnings)
+        records = ctx.cache.stock_dao.upsert_em_concepts.call_args.args[0]
+        assert all("999999.SZ" not in r["ts_code"] for r in records)  # 无 fallback 猜测
 
     @pytest.mark.asyncio
     async def test_cancel_returns_cancelled(self):
