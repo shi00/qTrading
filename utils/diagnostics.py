@@ -20,6 +20,7 @@ from typing import Any
 import config
 from utils.config_handler import ConfigHandler
 from utils.sanitizers import DataSanitizer
+from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ class SystemDiagnosticsCollector:
             sanitized_env = DataSanitizer.sanitize_dict(env_vars)
 
             system_info = {
-                "timestamp": datetime.datetime.now().isoformat(),
+                "timestamp": get_now().isoformat(),
                 "os": platform.system(),
                 "os_release": platform.release(),
                 "os_version": platform.version(),
@@ -164,12 +165,12 @@ class SystemDiagnosticsCollector:
             # 6. 计算 ZIP 归档输出路径
             import uuid
 
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = get_now().strftime("%Y%m%d_%H%M%S")
             rand_id = uuid.uuid4().hex[:8]
             log_dir = os.path.join(config.USER_DATA_ROOT, "logs")
             os.makedirs(log_dir, exist_ok=True)
             zip_filename = f"diagnostics_{timestamp}_{rand_id}.zip"
-            zip_path = os.path.abspath(os.path.join(log_dir, zip_filename))
+            zip_path = os.path.abspath(os.path.join(log_dir, zip_filename))  # noqa: ASYNC240  # 低危纯路径字符串计算，无文件 IO 阻塞
 
             # 定义 JSON 序列化辅助函数
             def json_serial(obj):

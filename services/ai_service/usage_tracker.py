@@ -123,7 +123,7 @@ class AIUsageTracker:
                 if row is None or row[0] is None:
                     return 0
                 return int(row[0])
-        except Exception as e:  # noqa: BLE001 -- 读取降级为 0，不阻断流程
+        except Exception as e:
             logger.debug("[AIUsageTracker] Failed to read key='%s': %s", key, e)
             return 0
 
@@ -157,7 +157,7 @@ class AIUsageTracker:
                     },
                 )
                 await conn.execute(stmt)
-        except Exception as e:  # noqa: BLE001 -- 写入失败不阻断核心流程，仅告警
+        except Exception as e:
             logger.warning("[AIUsageTracker] Failed to accumulate cost on key='%s': %s", key, e)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -180,7 +180,7 @@ class AIUsageTracker:
                     result = await conn.execute(sa.select(AppState.config_value).where(AppState.config_key == k))
                     row = result.fetchone()
                     values[k] = int(row[0]) if row is not None and row[0] is not None else 0
-        except Exception as e:  # noqa: BLE001 -- 读取降级为 0，不阻断流程
+        except Exception as e:
             logger.debug("[AIUsageTracker] Failed to read unpriced keys '%s'/'%s': %s", calls_key, tokens_key, e)
             return (0, 0)
         return (values.get(calls_key, 0), values.get(tokens_key, 0))
@@ -221,5 +221,5 @@ class AIUsageTracker:
                         },
                     )
                     await conn.execute(stmt)
-        except Exception as e:  # noqa: BLE001 -- 写入失败不阻断核心流程，仅告警
+        except Exception as e:
             logger.warning("[AIUsageTracker] Failed to accumulate unpriced on key: %s", e)

@@ -72,7 +72,7 @@ def to_date(value) -> datetime.date:
     if not yyyymmdd:
         raise ValueError(f"Unsupported date value: {value!r}")
     try:
-        return datetime.datetime.strptime(yyyymmdd[:8], "%Y%m%d").date()
+        return datetime.datetime.strptime(yyyymmdd[:8], "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
     except ValueError:
         try:
             return parse_date(str(value)).date()

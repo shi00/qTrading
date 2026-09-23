@@ -168,8 +168,8 @@ async def open_export_folder(filepath: str) -> None:
     """
     if platform.system() != "Windows":
         return
-    folder = os.path.dirname(os.path.abspath(filepath))
-    if not folder or not os.path.isdir(folder):
+    folder = os.path.dirname(os.path.abspath(filepath))  # noqa: ASYNC240  # 低危纯路径字符串计算
+    if not folder or not os.path.isdir(folder):  # noqa: ASYNC240  # 一次性目录存在性检查（µs 级）
         return
     await asyncio.to_thread(os.startfile, folder)  # type: ignore[attr-defined]  # [reason: os.startfile 仅 Windows 存在, 已有 platform 守卫, 类型存根跨平台缺失]
 

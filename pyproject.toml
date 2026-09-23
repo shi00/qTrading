@@ -91,10 +91,23 @@ indent-width = 4
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["F", "E", "W", "UP", "B", "SIM", "BLE"]
-ignore = ["E501", "E402", "SIM102", "SIM105", "SIM108", "SIM117", "BLE001"]
+select = ["F", "E", "W", "UP", "B", "SIM", "BLE", "ASYNC", "DTZ", "RUF"]
+# OSS E1: select 增 ASYNC/DTZ/RUF 三族（RUF001-003 中文项目歧义 Unicode 误报过多；
+# ASYNC109 与项目"显式超时参数"约定冲突，报告建议直接 ignore；
+# RUF102 误伤 check_redlines.py 的项目自定义红线 noqa 协议（# noqa: R16 等，供自研检查器精确匹配））
+ignore = ["E501", "E402", "SIM102", "SIM105", "SIM108", "SIM117", "BLE001", "RUF001", "RUF002", "RUF003", "ASYNC109", "RUF102"]
 fixable = ["ALL"]
 unfixable = []
+
+[tool.ruff.lint.per-file-ignores]
+# OSS E1: tests/ 中属于"测试常态"的存量（naive datetime 构造 fixture、解构未用变量、
+# 死 noqa、集合拼接、测试内 create_task 等）按报告建议分批消化，不阻塞本次三族启用；
+# 生产代码保持三族严格全开（0 命中）。
+"tests/**" = ["DTZ001", "DTZ005", "DTZ007", "DTZ011", "DTZ901", "RUF059", "RUF100", "RUF012", "RUF006", "RUF005", "RUF015", "RUF009", "RUF013", "RUF022", "RUF023", "RUF046", "RUF043", "RUF007", "RUF010", "RUF034", "F401", "ASYNC110", "ASYNC230", "ASYNC240", "ASYNC251", "SIM114", "SIM115"]
+"scripts/**" = ["DTZ001", "DTZ005", "DTZ011", "DTZ901", "RUF059", "RUF100", "RUF012"]
+# utils/config_handler.py 是组合根 facade（re-export 供 cfg.ConfigHandler 域模块访问），
+# 未使用 import 属预期模式；其余 F401 已逐一核验为测试 patch 保留 / side-effect import。
+"utils/config_handler.py" = ["F401", "E402"]
 
 [tool.ruff.format]
 quote-style = "double"

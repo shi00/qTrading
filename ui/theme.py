@@ -13,7 +13,7 @@ import logging
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import ClassVar, TypedDict
 
 import flet as ft
 
@@ -528,11 +528,11 @@ class AppStyles:
     EMPTY_STATE_PADDING = 40
 
     # --- Responsive Column Configs (标准栅格配置，消除各视图重复硬编码 col={...}) ---
-    COL_FULL = {"xs": 12}
-    COL_HALF = {"xs": 12, "sm": 6}
-    COL_THIRD = {"xs": 12, "sm": 6, "md": 4}
-    COL_QUARTER = {"xs": 6, "sm": 4, "md": 3, "lg": 2}
-    COL_TWO_THIRDS = {"xs": 12, "sm": 6, "md": 8}
+    COL_FULL: ClassVar[dict] = {"xs": 12}
+    COL_HALF: ClassVar[dict] = {"xs": 12, "sm": 6}
+    COL_THIRD: ClassVar[dict] = {"xs": 12, "sm": 6, "md": 4}
+    COL_QUARTER: ClassVar[dict] = {"xs": 6, "sm": 4, "md": 3, "lg": 2}
+    COL_TWO_THIRDS: ClassVar[dict] = {"xs": 12, "sm": 6, "md": 8}
 
     # --- Dropdown 自适应宽度估算参数 (消除魔术数字) ---
     # 基于 FONT_SIZE_LG(14) 下中文字符约 2 倍半角宽、半角约 9.5px 的经验估算。

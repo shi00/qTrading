@@ -118,7 +118,7 @@ def _parse_news_time(raw: str | None, *, day_only: bool = False) -> datetime.dat
     text = f"{raw_text} 00:00:00" if day_only else raw_text
     try:
         if len(text) >= 19 and len(text) <= 23:
-            parsed = datetime.datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            parsed = datetime.datetime.strptime(text, "%Y-%m-%d %H:%M:%S")  # noqa: DTZ007  东财/巨潮发布时间为 CST 本地时间文本，无时区字面量；下方 to_utc_for_db 按 CST 归属
         else:
             return None
     except ValueError:
@@ -436,7 +436,7 @@ class NewsFetcher:
                 # docs/coverage 闭包保留已部分收集的结果
 
             # 收集两源 → 时间降序 → 窗口过滤 → 限量
-            docs.sort(key=lambda d: d["publish_time"] or datetime.datetime.min, reverse=True)
+            docs.sort(key=lambda d: d["publish_time"] or datetime.datetime.min, reverse=True)  # noqa: DTZ901  # 哨兵边界（None 置尾），排序键不参与时区运算，与 naive publish_time 同口径
             now_utc = get_now().astimezone(datetime.UTC).replace(tzinfo=None)
             cutoff = now_utc - timedelta(days=window_days)
             windowed = [d for d in docs if d["publish_time"] is None or d["publish_time"] >= cutoff]

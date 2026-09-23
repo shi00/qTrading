@@ -198,7 +198,7 @@ class SyncResult:
                 return key
             if isinstance(key, str):
                 try:
-                    return datetime.datetime.strptime(key, "%Y%m%d").date()
+                    return datetime.datetime.strptime(key, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
                 except ValueError:
                     return key
             return key

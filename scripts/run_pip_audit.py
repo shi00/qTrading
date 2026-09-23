@@ -22,6 +22,13 @@ from pathlib import Path
 
 import yaml
 
+# 以 `python scripts/run_pip_audit.py` 方式运行时 sys.path[0] 指向 scripts/，
+# utils 包位于仓库根目录，需显式补齐（同 check_theme_contrast.py 等脚本惯例）
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+
+from utils.time_utils import get_now  # noqa: E402 - sys.path 注入后导入
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run pip-audit with structured allowlist")
@@ -56,7 +63,7 @@ def load_allowlist(allowlist_path: Path) -> dict:
 
 def check_expired_vulnerabilities(allowlist: dict) -> list[str]:
     expired = []
-    today = date.today()
+    today = get_now().date()
 
     vulns = allowlist.get("ignored_vulnerabilities", [])
     for vuln in vulns:
@@ -71,7 +78,7 @@ def check_expired_vulnerabilities(allowlist: dict) -> list[str]:
             if isinstance(reevaluate_at_str, date):
                 reevaluate_at = reevaluate_at_str
             else:
-                reevaluate_at = datetime.strptime(reevaluate_at_str, "%Y-%m-%d").date()
+                reevaluate_at = datetime.strptime(reevaluate_at_str, "%Y-%m-%d").date()  # noqa: DTZ007  # 人工填写的 YYYY-MM-DD 业务日期字符串无时区语义
         except ValueError:
             print(f"ERROR: Invalid date format for {vuln_id}: {reevaluate_at_str}")
             sys.exit(1)

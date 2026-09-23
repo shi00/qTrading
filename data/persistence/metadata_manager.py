@@ -8,7 +8,7 @@ from utils.singleton_registry import register_singleton
 @register_singleton
 class MetaDataManager:
     _instance = None
-    _alias_cache: dict[tuple, str] = {}
+    _alias_cache: typing.ClassVar[dict[tuple, str]] = {}
     _lock = threading.Lock()
 
     @classmethod

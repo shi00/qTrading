@@ -3,7 +3,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +43,8 @@ class I18n:
     _locale: str = DEFAULT_LOCALE
     _listeners: list | None = None
     _initialized: bool = False
-    _strings_cache: dict = {}
-    _missing_keys: set = set()
+    _strings_cache: ClassVar[dict] = {}
+    _missing_keys: ClassVar[set] = set()
     _locales_dir: Path | None = None
 
     @classmethod

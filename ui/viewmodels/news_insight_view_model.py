@@ -57,7 +57,7 @@ def _fmt_time(dt) -> str:
 
         cst = from_utc_to_cst(dt)
         return cst.strftime("%Y-%m-%d %H:%M") if cst else ""
-    except Exception as e:  # noqa: BLE001 - 展示降级为空串
+    except Exception as e:
         logger.debug("[NewsInsightVM] format time failed: %s", DataSanitizer.sanitize_error(e))
         return ""
 
@@ -316,7 +316,7 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
         """分析窗口标签（CST 自然日）。"""
         try:
             return self._service.analysis_window_label()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("[NewsInsightVM] window label failed: %s", DataSanitizer.sanitize_error(e))
             return "unknown"
 
@@ -326,7 +326,7 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
             from utils.time_utils import get_now
 
             return _fmt_time(get_now())
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.debug("[NewsInsightVM] now failed: %s", DataSanitizer.sanitize_error(e))
             return ""
 

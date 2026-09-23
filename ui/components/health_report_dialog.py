@@ -338,15 +338,12 @@ def _create_coverage_row(table_key: str, stats: dict) -> ft.Container:
                                     color=AppColors.TEXT_PRIMARY,
                                 ),
                                 ft.Text(
-                                    I18n.get(
-                                        "health_freshness",
-                                        ratio=f"{fresh_ratio * 100:.0f}%",
-                                    ),
+                                    I18n.get("health_freshness", ratio=f"{fresh_ratio * 100:.0f}%"),
                                     size=AppStyles.FONT_SIZE_CAPTION,
                                     color=AppColors.TEXT_HINT,
                                 ),
-                            ]
-                            + _build_depth_breadth_items(stats),
+                                *_build_depth_breadth_items(stats),
+                            ],
                         ),
                         spacing=0,
                         alignment=ft.MainAxisAlignment.CENTER,

@@ -1,7 +1,7 @@
 import logging
 import threading
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, ClassVar
 
 from core.i18n import I18n, Message
 from strategies.utils import StrategyContext
@@ -59,7 +59,7 @@ class BaseStrategy(ABC):
     required_tables: tuple[str, ...] = ()
     required_apis: tuple[str, ...] = ()
 
-    CONTEXT_KEY_TABLE_MAP: dict[str, str] = {
+    CONTEXT_KEY_TABLE_MAP: ClassVar[dict[str, str]] = {
         "northbound_data": "northbound_holding",
         "northbound_flow_data": "moneyflow_hsgt",
         "moneyflow_data": "moneyflow_daily",

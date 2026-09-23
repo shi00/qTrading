@@ -30,16 +30,25 @@ def _import_all_strategies():
 
     This is called lazily by StrategyManager.__init__ to avoid
     import-time side effects.
+
+    ⚠ 注意：下方 4 个 import 为副作用导入（触发各模块 @register_strategy 注册），
+    生产链路中除本函数外不存在其它导入点。lint 清理容易误判为"未使用"而删除，
+    配套回归测试 tests/unit/test_strategy_manager_reset.py::TestImportAllStrategiesSideEffects
+    守护其完整性，严禁删减。
     """
     global _strategies_imported, _real_strategy_snapshot
     if _strategies_imported:
         return
     _strategies_imported = True
 
-    import strategies.ai_strategy  # noqa: E402
-    import strategies.fundamental  # noqa: E402
-    import strategies.market  # noqa: E402
-    import strategies.oversold_strategy  # noqa: E402, F401
+    # 副作用导入：触发各策略模块模块级的 @register_strategy 注册。无外部生产
+    # 路径会再次导入这些模块（无 strategies/__init__.py），删减将导致对应策略
+    # 在生产环境静默消失。同名包导入绑定共享，ruff 不报 F401，无需 noqa；
+    # 完整性由 tests/unit/test_strategy_manager_reset.py 静态守卫测试强制。
+    import strategies.ai_strategy  # 注册 ai_active
+    import strategies.fundamental  # 注册 value/growth/dividend/cashflow/large_pe
+    import strategies.market  # 注册 volume_breakout/northbound_holding/northbound_flow/institutional/block_trade
+    import strategies.oversold_strategy  # noqa: F401  # 注册 oversold（末尾同名绑定，ruff 判定未使用；属副作用导入）
 
     # 仅首次导入时缓存真实策略快照，之后不再更新（恢复目标固定为真实策略集合）。
     # 守卫保证快照只捕获一次：即使某测试在注入 mock 后触发真实导入，也不会把

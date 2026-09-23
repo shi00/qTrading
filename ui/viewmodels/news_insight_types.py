@@ -24,18 +24,18 @@ PHASE_DEGRADED = "degraded"
 PHASE_ERROR = "error"
 
 __all__ = [
-    "PHASE_IDLE",
-    "PHASE_LOADING_EVIDENCE",
-    "PHASE_EVIDENCE_READY",
     "PHASE_ANALYZING",
-    "PHASE_READY",
     "PHASE_DEGRADED",
     "PHASE_ERROR",
-    "RiskQuote",
-    "RiskEvent",
-    "SourceCoverage",
+    "PHASE_EVIDENCE_READY",
+    "PHASE_IDLE",
+    "PHASE_LOADING_EVIDENCE",
+    "PHASE_READY",
     "EvidenceItem",
     "NewsInsightState",
+    "RiskEvent",
+    "RiskQuote",
+    "SourceCoverage",
 ]
 
 

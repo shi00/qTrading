@@ -124,7 +124,7 @@ class DataQualityService:
         return {"lag_days": lag, "latest_data_date": latest}
 
     @staticmethod
-    def check_nulls(df: pd.DataFrame, columns: list[str] = None) -> dict[str, float]:  # type: ignore[untyped]
+    def check_nulls(df: pd.DataFrame, columns: list[str] | None = None) -> dict[str, float]:  # type: ignore[untyped]
         """
         Tier 2: Critical column null-rate analysis.
         If columns is None, checks all.

@@ -513,7 +513,7 @@ def _sort_pub(d: dict) -> datetime.datetime:
     """按发布时间排序的键；无发布时间的文档排最后。"""
     pub = d.get("publish_time")
     if pub is None:
-        return datetime.datetime.max
+        return datetime.datetime.max  # noqa: DTZ901  # 哨兵边界（None 置排序末尾），仅作排序键不参与时区运算
     return pub
 
 

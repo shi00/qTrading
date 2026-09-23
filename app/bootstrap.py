@@ -265,7 +265,7 @@ async def _stop_started_services(started: list[str]) -> None:
                 await NewsSubscriptionService().stop_async()
             elif name == "market_data":
                 await MarketDataService().stop_async()
-        except BaseException as e:  # noqa: BLE001  # [reason: 清理阶段防御性捕获全部异常（含取消）以保证后续服务仍被释放]
+        except BaseException as e:  # [reason: 清理阶段防御性捕获全部异常（含取消）以保证后续服务仍被释放]
             if isinstance(e, asyncio.CancelledError):
                 logger.warning(
                     "[Bootstrap] cancelled while stopping service %s during startup rollback, continuing with remaining services",
@@ -540,7 +540,7 @@ async def prepare_database_runtime() -> str | None:
         try:
             url_file = Path(url_file_path)
             url_file.parent.mkdir(parents=True, exist_ok=True)
-            url_file.write_text(info.url, encoding="utf-8")
+            url_file.write_text(info.url, encoding="utf-8")  # noqa: ASYNC240  # 启动期一次性字节级写入（Web 模式，纯路径已 resolve）
             # Skeptic-MAJOR-4 修复：用模块级 flag 保证 atexit 只注册一次，
             # 避免 Flet Web 模式下多个 main(page) 调用导致 handler 线性泄漏。
             # MINOR-6 修复：先注册 atexit 再 chmod，避免 chmod 失败导致 atexit 被跳过。

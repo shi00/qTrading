@@ -7,8 +7,8 @@ from .system_tab import SystemTab
 __all__ = [
     "AIBrainTab",
     "AutomationTab",
-    "DatabaseTab",
     "DataSourceTab",
+    "DatabaseTab",
     "NotificationsTab",
     "SystemTab",
 ]

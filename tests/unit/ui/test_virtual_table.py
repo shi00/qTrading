@@ -197,8 +197,8 @@ class TestAssertTablePositiveSize:
 
 class TestColWidthsCache:
     def test_slots_contract(self):
-        """_ColWidthsCache 必须用 __slots__ = (widths, active_col, last_time) (对齐 _DragCache)。"""
-        assert _ColWidthsCache.__slots__ == ("widths", "active_col", "last_time")
+        """_ColWidthsCache 必须用 __slots__ = (active_col, last_time, widths) (RUF022 字母序, 对齐 _DragCache)。"""
+        assert _ColWidthsCache.__slots__ == ("active_col", "last_time", "widths")
 
     def test_initial_state(self):
         cache = _ColWidthsCache()

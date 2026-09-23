@@ -335,7 +335,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             if isinstance(context_trade_date, str):
                 for fmt in ("%Y%m%d", "%Y-%m-%d"):
                     try:
-                        end_date_obj = datetime.datetime.strptime(context_trade_date, fmt).date()
+                        end_date_obj = datetime.datetime.strptime(context_trade_date, fmt).date()  # noqa: DTZ007  交易日字符串无时区语义，尝试多格式容错解析
                         break
                     except ValueError:
                         continue

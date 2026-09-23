@@ -296,7 +296,7 @@ def TushareConfigPanel(
             ft.Column(
                 [
                     SafeWrapRow(
-                        [token_input] + buttons,
+                        [token_input, *buttons],
                         alignment=ft.MainAxisAlignment.START,
                         spacing=10,
                     ),

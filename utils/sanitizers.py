@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from typing import TYPE_CHECKING, TypeGuard
+from typing import TYPE_CHECKING, ClassVar, TypeGuard
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -38,7 +38,7 @@ class DataSanitizer:
 
     # 已注册的 secret 值集合，用于 sanitize_error 中的精确替换。
     # 设有上限以避免内存泄漏（token 轮换/测试场景下重复注册不同值）。
-    _known_secrets: set[str] = set()
+    _known_secrets: ClassVar[set[str]] = set()
     _MAX_KNOWN_SECRETS = 50
     # 注册的最小长度阈值，过短的值易在 str.replace 时产生误替换。
     _MIN_SECRET_LEN = 8

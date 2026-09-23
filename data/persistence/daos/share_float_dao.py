@@ -8,6 +8,7 @@ import logging
 
 import pandas as pd
 
+from utils.time_utils import get_now
 from data.persistence.models import ShareFloat, get_model_columns, get_model_pk_columns
 
 from .base_dao import BaseDao
@@ -57,9 +58,9 @@ class ShareFloatDao(BaseDao):
 
         def sql_fn(as_of):
             if as_of is None:
-                start_date = datetime.date.today()
+                start_date = get_now().date()
             elif isinstance(as_of, str):
-                start_date = datetime.datetime.strptime(as_of, "%Y%m%d").date()
+                start_date = datetime.datetime.strptime(as_of, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
             elif isinstance(as_of, datetime.datetime):
                 start_date = as_of.date()
             else:

@@ -253,7 +253,7 @@ class ViewModelNotifier[T]:
             return
         try:
             cb(snap)
-        except Exception as e:  # noqa: BLE001  —  intentionally broad catch
+        except Exception as e:
             logger.error(
                 "[ViewModelNotifier] subscriber callback failed: %s",
                 DataSanitizer.sanitize_error(e),

@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import threading
+import typing
 from collections.abc import Generator
 from contextlib import contextmanager
 
@@ -28,7 +29,7 @@ class ProxyManager:
       so that reapply can correctly remove domains that were deleted from config.
     """
 
-    _no_proxy_domains: set[str] = set()
+    _no_proxy_domains: typing.ClassVar[set[str]] = set()
     _initialized: bool = False
     _original_no_proxy: set[str] | None = None
     _env_written: bool = False

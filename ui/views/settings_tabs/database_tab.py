@@ -93,7 +93,9 @@ def DatabaseTab(show_snack_callback: Callable) -> ft.Container:
         try:
             saved = database_config_vm.load_show_advanced()
             set_show_advanced(bool(saved))
-        except Exception:  # noqa: BLE001  # NOTE(lazy): 配置读取失败降级为默认 False. ceiling: 配置文件不可读. upgrade: 引入配置可读性预检.
+        except (
+            Exception
+        ):  # NOTE(lazy): 配置读取失败降级为默认 False. ceiling: 配置文件不可读. upgrade: 引入配置可读性预检.
             logger.debug("[DatabaseTab] Failed to load db_show_advanced, using default False")
 
     ft.use_effect(_load_advanced_state, dependencies=[])
@@ -104,7 +106,9 @@ def DatabaseTab(show_snack_callback: Callable) -> ft.Container:
             await database_config_vm.save_show_advanced(value)
         except asyncio.CancelledError:
             raise  # R2: 必须传播
-        except Exception:  # noqa: BLE001  # NOTE(lazy): 配置写入失败降级为内存态. ceiling: 配置文件不可写. upgrade: 引入配置可写性预检或重试.
+        except (
+            Exception
+        ):  # NOTE(lazy): 配置写入失败降级为内存态. ceiling: 配置文件不可写. upgrade: 引入配置可写性预检或重试.
             logger.debug("[DatabaseTab] Failed to persist db_show_advanced=%s", value)
 
     def _on_advanced_toggle(e: ft.ControlEvent) -> None:

@@ -41,6 +41,13 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+# 以 `python scripts/scan_weak_assertions.py` 方式运行时 sys.path[0] 指向 scripts/，
+# utils 包位于仓库根目录，需显式补齐（同 check_theme_contrast.py 等脚本惯例）
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+
+from utils.time_utils import get_now  # noqa: E402 - sys.path 注入后导入
+
 
 # Mock 弱断言方法名（不验证调用参数）
 WEAK_MOCK_METHODS = frozenset(
@@ -637,7 +644,7 @@ def check_baseline_kpi(baseline_path: Path, current_total: int, now: date | None
     except (json.JSONDecodeError, OSError, ValueError, TypeError):
         return []
 
-    today = now or date.today()
+    today = now or get_now().date()
     total_span = (target - created).days
     if total_span <= 0:
         # 目标日期已过期：直接按目标值判定

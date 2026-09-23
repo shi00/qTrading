@@ -15,17 +15,17 @@ from collections.abc import Callable, Sequence
 import flet as ft
 
 __all__ = [
-    "safe_on_click",
-    "safe_on_change",
-    "safe_on_select",
-    "safe_on_dismiss",
-    "safe_on_focus",
-    "safe_on_hover",
+    "get_control_attr",
+    "get_control_value",
     "safe_controls",
     "safe_icon",
     "safe_icon_str",
-    "get_control_value",
-    "get_control_attr",
+    "safe_on_change",
+    "safe_on_click",
+    "safe_on_dismiss",
+    "safe_on_focus",
+    "safe_on_hover",
+    "safe_on_select",
 ]
 
 

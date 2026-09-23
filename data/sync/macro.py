@@ -156,9 +156,9 @@ class MacroSyncStrategy(ISyncStrategy):
     Runs efficiently by checking the latest available data date.
     """
 
-    _M2_COLUMNS = ["period", "m2", "m2_yoy", "m1", "m1_yoy", "m0", "m0_yoy"]
+    _M2_COLUMNS: typing.ClassVar[list] = ["period", "m2", "m2_yoy", "m1", "m1_yoy", "m0", "m0_yoy"]
     # Phase 2D §3.2.6：cn_gdp 返回字段（quarter 已被 _COLUMN_RENAMES 重命名为 period）
-    _GDP_COLUMNS = ["period", "gdp", "gdp_yoy", "pi", "pi_yoy", "si", "si_yoy", "ti", "ti_yoy"]
+    _GDP_COLUMNS: typing.ClassVar[list] = ["period", "gdp", "gdp_yoy", "pi", "pi_yoy", "si", "si_yoy", "ti", "ti_yoy"]
 
     def __init__(self, context: typing.Any):
         super().__init__(context)

@@ -152,7 +152,7 @@ class TushareClient:
     # Phase 2B §3.2.5：probe 互斥标志（单线程 asyncio 同步段内原子，避免档位切换/手动按钮/启动自动并发）
     _probe_in_progress: bool = False
 
-    _COLUMN_RENAMES = {
+    _COLUMN_RENAMES: typing.ClassVar[dict] = {
         "cn_cpi": {"month": "period", "nt_val": "cpi"},
         "cn_ppi": {"month": "period", "ppi_yoy": "ppi"},
         "cn_m": {"month": "period"},
@@ -317,7 +317,7 @@ class TushareClient:
         }
     )
 
-    TABLE_TO_API_MAP: dict[str, str] = {
+    TABLE_TO_API_MAP: typing.ClassVar[dict[str, str]] = {
         "moneyflow_hsgt": "moneyflow_hsgt",
         "northbound_holding": "hk_hold",
         "moneyflow_daily": "moneyflow",
@@ -885,7 +885,7 @@ class TushareClient:
             logger.error("[API] Offline calendar check failed: %s", DataSanitizer.sanitize_error(ex))
             # Ultimate Fallback: Simple weekday check (Mon-Fri)
             try:
-                dt = datetime.datetime.strptime(date_str, "%Y%m%d")
+                dt = datetime.datetime.strptime(date_str, "%Y%m%d")  # noqa: DTZ007  交易日字符串无时区语义，仅取 weekday 判断
                 is_weekday = dt.weekday() < 5
                 if is_weekday:
                     logger.warning(
@@ -900,7 +900,7 @@ class TushareClient:
     # ========== Policy-Driven AI Extensions ==========
 
     # Whitelist of allowed macro API names to prevent arbitrary API injection
-    _MACRO_API_WHITELIST = {"cn_m", "cn_cpi", "cn_ppi", "cn_gdp"}
+    _MACRO_API_WHITELIST: typing.ClassVar[set] = {"cn_m", "cn_cpi", "cn_ppi", "cn_gdp"}
 
     async def get_trade_cal(
         self, start_date: str | None, end_date: str | None, exchange: str = "SSE", is_open: int | None = None

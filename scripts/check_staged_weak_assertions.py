@@ -20,8 +20,10 @@
 import sys
 from pathlib import Path
 
-# 复用 scan_weak_assertions 的函数（同目录脚本，sys.path 补齐后导入）
+# 复用 scan_weak_assertions 的函数。language: system hook 的 sys.path 不含仓库根，
+# 需同时补齐 scripts/（scan_weak_assertions 在本目录）与仓库根（其内部 import utils.*）。
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scan_weak_assertions import compute_new_issues, load_baseline, scan_file  # noqa: E402
 
 

@@ -13,6 +13,8 @@ These tests validate the contract documented in
 strategies/all_strategies.py:StrategyManager._reset_singleton docstring.
 """
 
+import ast
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -205,3 +207,67 @@ class TestStrategyManagerResetModuleState:
         with base_strategy._REGISTRY_LOCK:
             restored = dict(base_strategy._STRATEGY_REGISTRY)
         assert restored == all_strategies._real_strategy_snapshot, "注册表应恢复到真实快照"
+
+
+class TestImportAllStrategiesSideEffects:
+    """守卫 _import_all_strategies 的副作用导入完整性（OSS E1 回归）。
+
+    背景（PR #1149 检视 P1）：ruff RUF100 清理死 noqa 时误删了函数体内 4 个
+    策略模块的副作用导入；因生产链路仅此一处导入点（无 strategies/__init__.py），
+    删除导致 11/12 策略在生产环境静默消失，而单测因顶层直接 import 掩盖了缺口。
+    本测试用静态守卫 + 运行时契约双向防护，lint 自动清理再次删除时立即红灯。
+    """
+
+    # 与 strategies/all_strategies.py: _import_all_strategies 中副作用导入一一对应
+    _SIDE_EFFECT_MODULES = (
+        "strategies.ai_strategy",
+        "strategies.fundamental",
+        "strategies.market",
+        "strategies.oversold_strategy",
+    )
+    # 上述模块 @register_strategy 注册的策略 key（装饰器注册名，见各模块头部）
+    _EXPECTED_STRATEGY_KEYS = {
+        "ai_active",
+        "value",
+        "growth",
+        "dividend",
+        "cashflow",
+        "large_pe",
+        "volume_breakout",
+        "northbound_holding",
+        "northbound_flow",
+        "institutional",
+        "block_trade",
+        "oversold",
+    }
+
+    def _all_strategies_source(self) -> str:
+        """定位 all_strategies.py 源文件并返回文本（不依赖 cwd）。"""
+        source_path = Path(__file__).resolve().parents[2] / "strategies" / "all_strategies.py"
+        assert source_path.exists(), f"all_strategies.py 源文件不存在: {source_path}"
+        return source_path.read_text(encoding="utf-8")
+
+    def test_side_effect_imports_present_in_source(self):
+        """AST 守卫：_import_all_strategies 函数体必须保留全部副作用导入。
+
+        Import 存在性守卫：若 lint 自动清理再次删除这些 import（本次回归根因），
+        本测试直接红灯，不依赖测试进程是否已导入模块。
+        """
+        tree = ast.parse(self._all_strategies_source())
+        func = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_import_all_strategies")
+        imported = [n.names[0].name for n in ast.walk(func) if isinstance(n, ast.Import)]
+        for mod in self._SIDE_EFFECT_MODULES:
+            assert mod in imported, f"_import_all_strategies 缺少副作用导入 {mod}（生产策略将不注册）"
+
+    def test_registry_contains_all_production_strategies_after_import(self):
+        """运行时契约：真实导入后注册表必须包含全部生产策略 key（子集断言防 mock 干扰）。"""
+        from strategies import all_strategies, base_strategy
+        from strategies.all_strategies import StrategyManager
+
+        StrategyManager._reset_singleton()  # 复位导入标志，强制走一次真实导入
+        with patch.object(StrategyManager, "_validate_i18n"):
+            StrategyManager()
+        with base_strategy._REGISTRY_LOCK:
+            registered = set(base_strategy._STRATEGY_REGISTRY.keys())
+        missing = self._EXPECTED_STRATEGY_KEYS - registered
+        assert not missing, f"以下策略未注册（副作用导入缺失）：{sorted(missing)}"

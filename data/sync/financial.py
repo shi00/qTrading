@@ -489,7 +489,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             if isinstance(last_sync_str, datetime.datetime):
                 last_sync_dt = last_sync_str
             else:
-                last_sync_dt = datetime.datetime.strptime(
+                last_sync_dt = datetime.datetime.strptime(  # noqa: DTZ007  DB 落库时间戳为 UTC naive，读回仅做日期窗口计算，无时区归属需求
                     last_sync_str,
                     "%Y-%m-%d %H:%M:%S",
                 )
@@ -636,7 +636,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     total_mainbz_rows += r["mainbz"]  # type: ignore[index]
                     total_audit_rows += r["audit"]  # type: ignore[index]
 
-            day_date = datetime.datetime.strptime(day_str, "%Y%m%d").date()
+            day_date = datetime.datetime.strptime(day_str, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
             if day_has_error and day_saved == 0:
                 # 全部失败：标记 failed，不推进 last_sync_date 以便下次重试
                 await self.context.cache.sync_dao.update_sync_status(
@@ -738,7 +738,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                                 len(df),
                             )
 
-                    date_obj = datetime.datetime.strptime(date_str, "%Y%m%d").date()
+                    date_obj = datetime.datetime.strptime(date_str, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
                     await self.context.cache.sync_dao.update_sync_status(
                         table_name,
                         date_obj,
@@ -752,7 +752,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                         "[FinancialSync] BatchSync | ⛔ Permission Denied for %s",
                         table_name,
                     )
-                    date_obj = datetime.datetime.strptime(date_str, "%Y%m%d").date()
+                    date_obj = datetime.datetime.strptime(date_str, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
                     await self.context.cache.sync_dao.update_sync_status(
                         table_name,
                         date_obj,
