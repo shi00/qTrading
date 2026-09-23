@@ -2,12 +2,14 @@
 
 验证 pyproject.toml 中的 [tool.importlinter] 配置正确且 lint-imports 命令通过。
 
-与 test_architecture_boundaries.py 互补：
-- test_architecture_boundaries.py: AST 扫描模块级 import，覆盖 R1 + §4.2 全部方向（含 utils 隔离）
-- test_import_linter_config.py: 调用 lint-imports 检查完整导入图（含 lazy import），覆盖 R1 六个禁止方向（core/data/services/strategies + utils 叶子层 + ui→app）
+E4 (OSS 检视) 后与 test_architecture_boundaries.py 分工：
+- test_architecture_boundaries.py: AST 扫描模块级 import，仅保留例外注册表路径存在性校验
+  （R1 方向守护已全部上提至 import-linter，见下）
+- test_import_linter_config.py: 调用 lint-imports 检查完整导入图（含 lazy import），守护 R1 全部方向。
 
-import-linter 的优势：能捕获函数体内的延迟导入（lazy import，含 utils 层跨层 lazy import，契约 5），AST 扫描无法覆盖。
-AST 扫描的优势：能检测 §4.2 扩展方向（如 data/services/strategies 禁入 app），import-linter 契约 2/3 与契约 5/6 部分重叠、部分互补。
+import-linter 采用 1 条 layers 契约（层序 app→ui→strategies→services→data→core）覆盖全部
+层级禁止方向，另 2 条 forbidden 契约守护 utils 横切叶子层（契约3 含 ignore_imports 白名单）
+与 core 最内层禁 utils（契约2）。layers 契约分析函数体内 import，能捕获 lazy import。
 """
 
 from pathlib import Path
@@ -26,17 +28,26 @@ def test_importlinter_config_exists():
     assert "exclude_type_checking_imports" in content, "Missing exclude_type_checking_imports setting"
 
 
-def test_importlinter_contracts_configured():
-    """验证 4 个 R1 禁止方向契约均已配置。"""
+def test_importlinter_layers_contract_configured():
+    """验证导入分层 layers 契约已配置（1 条 layers 覆盖全部层级禁止方向）。"""
     content = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    expected_contracts = [
-        "R1: core must not import any other layer",
-        "R1: data must not import services/strategies/ui",
-        "R1: services must not import strategies/ui",
-        "R1: strategies must not import ui",
-    ]
-    for contract in expected_contracts:
-        assert contract in content, f"Missing import-linter contract: {contract}"
+    assert 'type = "layers"' in content, "Missing import-linter layers contract"
+    assert "R1: layered dependencies (core→data→services→strategies→ui→app)" in content, "Missing layer contract name"
+    layers = ["app", "ui", "strategies", "services", "data", "core"]
+    for layer in layers:
+        assert f'"{layer}"' in content, f"Missing layer in layers contract: {layer}"
+
+
+def test_importlinter_utils_forbidden_contract_configured():
+    """验证 utils 横切叶子 forbidden 契约已配置（含函数体内 ignore_imports 白名单）。"""
+    content = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "R1: utils must not import business layers" in content, "Missing utils forbidden contract name"
+
+
+def test_importlinter_core_utils_forbidden_contract_configured():
+    """验证 core 最内层禁 utils 的 forbidden 契约已配置。"""
+    content = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "R1: core must not import utils" in content, "Missing core→utils forbidden contract name"
 
 
 def test_lint_imports_passes():

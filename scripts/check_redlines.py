@@ -1289,8 +1289,8 @@ def check_R_lazy_import_whitelist() -> list[str]:
     ``# lazy-import: <原因>`` 注释（显式白名单登记），否则报错。
     ``if TYPE_CHECKING:`` 块内导入豁免（仅类型检查，非运行时依赖）。
 
-    补充：import-linter 契约 5/6 亦分析函数体内 import（ignore_imports 白名单），
-    二者双保险——本检查确保代码层面显式标注，契约确保新增违规被拦截。
+    补充：import-linter layers/forbidden 契约亦分析函数体内 import（contract ignore_imports
+    白名单），二者双保险——本检查确保代码层面显式标注，契约确保新增违规被拦截。
     """
     errors: list[str] = []
     for layer in _LAZY_IMPORT_SCAN_LAYERS:
