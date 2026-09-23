@@ -361,21 +361,33 @@ class StockDao(BaseDao):
         """
         Get concepts for given stock codes.
         Returns: Dict[ts_code, List[concept_name]]
+
+        前缀过滤（review08-D3）：排除 ``LIMIT_`` 伪概念前缀（涨停股股票名冒充概念名），
+        仅返回 ``EM_`` / ``AI_LLM_`` 真实概念；保持与 ``get_concepts_by_prefix``
+        一致的表级前缀隔离约定。
         """
         if ts_codes is None:
-            rows = await self._read_db("SELECT ts_code, concept_name FROM stock_concepts")
+            rows = await self._read_db(
+                "SELECT ts_code, concept_name FROM stock_concepts WHERE concept_id NOT LIKE $1",
+                [f"{self.LIMIT_CONCEPT_PREFIX}%"],
+            )
         elif len(ts_codes) == 0:
             return {}
         elif len(ts_codes) == 1:
             rows = await self._read_db(
-                "SELECT ts_code, concept_name FROM stock_concepts WHERE ts_code=$1",
-                [ts_codes[0]],
+                "SELECT ts_code, concept_name FROM stock_concepts WHERE ts_code=$1 AND concept_id NOT LIKE $2",
+                [ts_codes[0], f"{self.LIMIT_CONCEPT_PREFIX}%"],
             )
         else:
+            # callable 模板：占位符从 1 起编号，NOT LIKE 参数在 chunk 之后（编号 = n+1）
             rows = await self.chunked_in_query(
                 self._read_db,
-                "SELECT ts_code, concept_name FROM stock_concepts WHERE ts_code IN ({placeholders})",
+                lambda placeholders, n: (
+                    "SELECT ts_code, concept_name FROM stock_concepts "
+                    f"WHERE ts_code IN ({placeholders}) AND concept_id NOT LIKE ${n + 1}"
+                ),
                 ts_codes,
+                params_fn=lambda chunk: [f"{self.LIMIT_CONCEPT_PREFIX}%"],
             )
 
         result = {}
@@ -390,9 +402,12 @@ class StockDao(BaseDao):
         return result
 
     async def get_concept_count(self):
-        """Get total count of stock concept mappings."""
+        """Get total count of stock concept mappings (excluding LIMIT_ pseudo-concepts, review08-D3)."""
         try:
-            df = await self._read_db("SELECT COUNT(*) as cnt FROM stock_concepts")
+            df = await self._read_db(
+                "SELECT COUNT(*) as cnt FROM stock_concepts WHERE concept_id NOT LIKE $1",
+                [f"{self.LIMIT_CONCEPT_PREFIX}%"],
+            )
             if df is not None and not df.empty:
                 return df["cnt"].iloc[0] or 0
             return 0
@@ -479,6 +494,10 @@ class StockDao(BaseDao):
         """
         涨停原因概念入库接口。
         records: list of dict, e.g. [{"ts_code": "000001.SZ", "concept_id": "LIMIT_C1", "concept_name": "涨停原因1"}]
+
+        NOTE(review08-D3)：停写状态下暂无生产调用方（LimitListSyncStrategy 已改为清空 +
+        warning）。保留供涨停原因数据源接入后复用；数据源未接入前勿用股票名冒充
+        concept_name（会重新引入污染泄漏）。
         """
         if not records:
             return 0
@@ -495,8 +514,9 @@ class StockDao(BaseDao):
             conn=conn,
         )
 
-    async def clear_today_limit_concepts(self, conn: typing.Any = None) -> int:
-        """清空当日 LIMIT_ 前缀概念（涨停原因概念每日重建）。"""
+    async def clear_all_limit_concepts(self, conn: typing.Any = None) -> int:
+        """清空全部 LIMIT_ 前缀概念（review08-D3 重命名：原 clear_today_limit_concepts 无日期条件，
+        实际清空全部 LIMIT_ 记录而非"当日"；stock_concepts 表无 trade_date 列，不可能按日清理）。"""
         return await self._write_db(
             "DELETE FROM stock_concepts WHERE concept_id LIKE $1",
             [f"{self.LIMIT_CONCEPT_PREFIX}%"],
@@ -509,12 +529,14 @@ class StockDao(BaseDao):
     )
     async def overwrite_limit_concepts(self, records: list[dict]) -> int:
         """
-        P0-2: 事务性覆盖当日 LIMIT_ 前缀概念。
+        P0-2: 事务性覆盖全部 LIMIT_ 前缀概念。
         clear + upsert 在同一事务内完成，避免 clear 成功 upsert 失败导致当日数据丢失。
+
+        NOTE(review08-D3)：停写状态下暂无生产调用方；保留供涨停原因数据源接入后复用。
         """
         try:
             async with self._guarded_begin() as conn:
-                cleared = await self.clear_today_limit_concepts(conn=conn)
+                cleared = await self.clear_all_limit_concepts(conn=conn)
                 if records:
                     upserted = await self.upsert_limit_concepts(records, conn=conn)
                 else:

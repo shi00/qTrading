@@ -2,7 +2,7 @@
 
 Three strategies for syncing stock-concept mappings from different sources:
 1. AKShareConceptSyncStrategy — AKShare East-Money concept boards (3 concurrent, 3 retry).
-2. LimitListSyncStrategy — Tushare limit_list (涨跌停) daily rebuild.
+2. LimitListSyncStrategy — Tushare limit_list (涨跌停) sync; 停写状态（review08-D3，见类 docstring）。
 3. AIConceptTagSyncStrategy — LLM-driven concept tagging fallback (manual trigger only).
 
 All strategies inherit ISyncStrategy and obey the standard SyncContext/SyncResult
@@ -300,11 +300,15 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
 
 
 class LimitListSyncStrategy(ISyncStrategy):
-    """Sync Tushare limit_list (涨跌停统计) as daily limit-reason concepts.
+    """Tushare limit_list (涨跌停) 同步策略——review08-D3 后停写股票名概念。
 
-    Clears yesterday's LIMIT_ prefixed concepts, then fetches today's limit_list
-    and upserts via ``StockDao.upsert_limit_concepts``. TushareAPIPermissionError
-    degrades gracefully to SUCCESS + warning (积分不足降级).
+    review08-D3（P0）：原实现把「股票名」当作「概念名」写入
+    ``LIMIT_{ts_code}`` 伪概念，并经无前缀过滤的 ``get_concepts`` 泄漏给所有
+    概念消费方。本轮按产品决策「修正语义」**停写**：无论 fetch 成功 / 权限
+    不足 / 空数据，均清空既有 ``LIMIT_%`` 存量（幂等清理历史污染）并记录
+    warning。涨停原因聚合需新数据源（本轮范围外单独排期），数据源接入前
+    不再写入任何 LIMIT_ 概念。CancelledError / EngineDisposedError 传播
+    （R2/R5）；TushareAPIPermissionError 降级语义保留。
     """
 
     @log_async_operation(
@@ -323,56 +327,43 @@ class LimitListSyncStrategy(ISyncStrategy):
 
             stock_dao = self.context.cache.stock_dao
 
+            # review08-D3 停写：任何路径都不再构造 LIMIT_ 股票名概念，统一清空存量。
+            cleared = await stock_dao.clear_all_limit_concepts()
+
             try:
                 df = await self.context.api.get_limit_list(trade_date=trade_date)
             except TushareAPIPermissionError as e:
+                # 权限不足：清空后 warning（旧污染不残留，P0 修订）
                 logger.warning(
-                    "[LimitListSync] Permission denied for limit_list (积分不足), skipping: %s",
+                    "[LimitListSync] Permission denied for limit_list (积分不足), "
+                    "LIMIT_ concepts cleared (review08-D3): %s",
                     e.api_name,
                 )
                 result.warnings.append(
-                    f"Tushare limit_list permission denied ({e.api_name}), skipped",
+                    f"Tushare limit_list permission denied ({e.api_name}); "
+                    "LIMIT_ concepts stopped and cleared (review08-D3)",
                 )
+                result.skipped += 1
                 return result
 
             if df is None or df.empty:
-                logger.debug("[LimitListSync] Empty limit_list for trade_date=%s", trade_date)
-                return result
-
-            records: list[dict] = []
-            # M7.9: 转时间维度取消检查（每 2s），纯模式对齐。
-            # 循环 <1s（内存遍历 DataFrame 行），时间维度检查永不触发，纯一致性。
-            last_cancel_check = time.monotonic()
-            for _i, (_, row) in enumerate(df.iterrows()):
-                now = time.monotonic()
-                if now - last_cancel_check >= _AKSHARE_CANCEL_CHECK_INTERVAL:
-                    last_cancel_check = now
-                    if self._check_cancelled(result):
-                        return result
-                ts_code = row.get("ts_code")
-                if not ts_code:
-                    continue
-                name = str(row.get("name", "")) or ""
-                records.append(
-                    {
-                        "ts_code": str(ts_code),
-                        "concept_id": f"{StockDao.LIMIT_CONCEPT_PREFIX}{ts_code}",
-                        "concept_name": name,
-                    }
+                logger.debug(
+                    "[LimitListSync] Empty limit_list for trade_date=%s (LIMIT_ concepts stopped, cleared=%s)",
+                    trade_date,
+                    cleared,
                 )
-
-            if self._check_cancelled(result):
+                result.warnings.append(
+                    "Empty limit_list; LIMIT_ concepts stopped and cleared (review08-D3)",
+                )
                 return result
-
-            # P0-2: 用 overwrite_limit_concepts 替代 clear+upsert，确保事务原子性
-            # S11 fix: fetch 成功后再 clear+upsert，避免 clear 后 fetch 失败导致旧数据丢失
-            saved = await stock_dao.overwrite_limit_concepts(records)
-            result.added = saved or 0
 
             logger.info(
-                "[LimitListSync] Done | trade_date=%s, added=%d",
+                "[LimitListSync] LIMIT_ concept sync stopped (review08-D3); cleared %s stale record(s), trade_date=%s",
+                cleared,
                 trade_date,
-                result.added,
+            )
+            result.warnings.append(
+                "LIMIT_ concept sync stopped (review08-D3): 涨停原因聚合需新数据源，接入前不再写入",
             )
         except asyncio.CancelledError:
             result.status = SyncStatus.CANCELLED.value
@@ -395,6 +386,8 @@ class LimitListSyncStrategy(ISyncStrategy):
                 raise
             result.status = SyncStatus.FAILED.value
             result.errors.append(error_info["message_key"])
+            # review08-D3 停写语义：清空在 fetch 前已执行，即使后续失败，LIMIT_ 存量也已清除
+            result.warnings.append("LIMIT_ concepts were cleared before fetch failure (review08-D3)")
 
         return result
 
