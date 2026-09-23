@@ -86,6 +86,16 @@ class TestTokenBucketConstruction:
         assert tb.rate == 1.0
         assert tb.min_rate >= 0.5
 
+    def test_start_tokens_above_capacity_clamped(self):
+        """起始余额超过容量时按容量封顶（E5 属性测试发现的构造器越界缺陷）。"""
+        tb = TokenBucket(start_tokens=10.0, capacity=1.0, rate=1.0)
+        assert tb.tokens == 1.0  # min(start_tokens, capacity)
+
+    def test_start_tokens_within_capacity_unchanged(self):
+        """起始余额在容量内时保持原值。"""
+        tb = TokenBucket(start_tokens=3.0, capacity=10.0, rate=1.0)
+        assert tb.tokens == 3.0
+
 
 class TestConsumeContextGuard:
     """consume() 的同步/异步上下文守卫保持既有行为。"""
