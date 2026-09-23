@@ -52,9 +52,6 @@
 | P3-UX06-Startup-SLA-E2E-Gap | 冷启动到导航可交互的端到端 SLA 未实测（UX-06 以 proxy 构成基线替代，如实记录缺位） | P3 | ① 真实端到端测量 > 8s（SLA 超阈）时触发 visited\_tabs 顶层推广（`test_consumes_all_seven_subviews_in_stack` 改写 + #438 范式推广）；② 或启动流程重构时 |
 | P3-B12-Screener-Formatting-Logic-in-VM | #B12-2 review02 B12 第 2 步：格式化逻辑下沉 VM（`_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM） | P3 | report04 D9（AI 流式更新重建机制重构）合并时 / screener\_view 重构时 |
 | P3-BT05-QualityGate-Bypass | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计） | P3 | review03 BT-05 第二步实施时（实现 `evaluate_historical_window()` 区间质量评估） |
-| P3-AI03-CostVisible-Full | AI 调用无货币成本计量与可见性（review04 04-ai-credibillity.md AI-03 完整版） | P3 | AI 成本成为用户明确诉求或报告再次要求完整实现时 |
-| P3-AI05-SupportsAI-Metadata | 策略是否启用 AI 缺少用户可见说明（review04 04-ai-credibillity.md AI-05） | P3 | UI 策略选择器重构或用户反馈策略 AI 标识缺失时 |
-| P3-UX05-ReviewStats-Significance | 复盘聚合统计展示缺失统计显著性提示（review05 05-explainabillity-ux.md UX-05） | P3 | 新增复盘聚合统计视图或复盘结果按批次/策略汇总展示时 |
 | P3-DAT07-Restatement | 回测不可复现：财报无修订历史，UPSERT 覆盖使历史回测结果随时间漂移（review03 DAT-07①） | P3 | 无计划升级（文档化决策，见「已接受的权衡」DAT-07条目） |
 | P3-DAT08-SnapshotLookahead | 回测前视：申万行业为当前快照，`sw_industry_member` 主键不含日期，跨分类调整期回测存在前视（review03 DAT-08②） | P3 | 无计划升级（文档化决策，见「已接受的权衡」DAT-08②条目） |
 | P3-DAT08-IndustryPollution | 存量污染：`stock_basic.industry` 在 DAT-08③ 前被写时覆写为申万二级行业，拆列后 `industry_tushare` 输出仍含旧覆写值（review03 DAT-08③） | P3 | 无计划升级（文档化决策，见「已接受的权衡」DAT-08③条目） |
@@ -392,20 +389,6 @@ review02 B12 已实现第 1 步（data\_version memo 缓存，消除无谓重算
 
 将格式化逻辑迁移至 VM 层，View 仅做数据到控件的映射。验收标准：① `_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 迁至 VM，state 携带渲染就绪数据；② 现有 `test_screener_view_runtime.py` / `test_screener_view_model.py` 全过；③ screener\_view 渲染路径无重复格式化。upgrade 触发条件：report04 D9（AI 流式更新重建机制重构）合并时 / screener\_view 重构时。
 
-#### P3-UX05-ReviewStats-Significance：复盘聚合统计展示缺失统计显著性提示（review05 05-explainabillity-ux.md UX-05）
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-UX05-ReviewStats-Significance** | 复盘聚合统计展示缺失统计显著性提示（review05 05-explainabillity-ux.md UX-05） | 新增复盘聚合统计视图或复盘结果按批次/策略汇总展示时 |
-
-**产生背景与现状**
-
-检视报告 UX-05（Minor）：若复盘存在「平均 T+1/T+5 收益」等**聚合统计展示**，当样本量很小（如 15 条记录）时呈现的平均收益是噪声，界面若无提示会误导用户得出「策略有效」结论（UN-04「怎么知道是不是碰巧」）。本检视批次复核确认：当前 UI 无聚合统计视图，复盘仅以**单只股票维度**呈现（选股结果表格 `t1_pct`/`t5_pct`/`alpha` 列 + 详情弹窗复盘区），样本量提示无挂载目标；属**尚未实现的新增功能诉求**而非既有缺陷，登记为独立任务。相关文件：`ui/components/stock_detail_dialog.py`（`_build_review_section`）、`ui/views/screener_view.py`、`data/persistence/review_manager.py`、`services/scheduled_jobs/review_backfill.py`。
-
-**期望的最终解法**
-
-**未来实现复盘聚合统计展示时，须同步呈现样本量 N 与显著性提示**：N<30 标注「样本量不足，统计结果不具备参考意义」，30~100 标注「样本量有限，结论仅供参考」，并展示标准差/置信区间而非仅均值。upgrade 触发条件：新增复盘聚合统计视图或复盘结果按批次/策略汇总展示时。
-
 ### 数据库迁移与循环依赖
 
 #### P3-M4-DbMigrator-OrphanHeal-SingleChain-Assumption：`_heal_orphaned_revision` 假设严格线性单链迁移（已文档化设计限制）
@@ -625,36 +608,6 @@ UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`s
 **期望的最终解法**
 
 **实现区间质量评估 `evaluate_historical_window()`**：复用 `DataProcessor._scan_missing_dates`（`require_continuous_window` 在用）按回测区间 `[start, end]` 计算缺失交易日比例 → BRONZE/SILVER/GOLD；低于策略要求时**不拒绝执行**，改为回测结果产生 `DataWarning` 显式告知用户。相关文件：`strategies/backtest/data_provider.py`、`data/data_processor.py`。
-
-### AI 成本与可解释性
-
-#### P3-AI03-CostVisible-Full：AI 调用无货币成本计量与可见性（review04 04-ai-credibillity.md AI-03 完整版）
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-AI03-CostVisible-Full** | AI 调用无货币成本计量与可见性（review04 04-ai-credibillity.md AI-03 完整版） | AI 成本成为用户明确诉求或报告再次要求完整实现时 |
-
-**产生背景与现状**
-
-检视报告 AI-03（Major）指出：项目对 token 数量管控成熟（`services/ai_service/token_budget.py`），但云端 LLM 的**货币成本**无任何计量——无单次调用成本、无累计消耗、无预算上限、无超额告警，与 UN-07「掌控」/ UN-08「低成本」矛盾。本检视批次已实现「最小版本」（`AIStrategyMixin.run_ai_analysis` 累计本次成功调用的 N 次/约 M tokens，经 `context["_ai_usage_summary"]` 上抛，UI `screener_view.py` 展示本次消耗，见 AI-03 最小版 PR #899）。完整版（价格映射 + 累计持久化 + 三处 UI + 月度上限）因改动范围大、依赖 `@register_singleton` 的 `AIUsageTracker` 与本地持久化表，单列独立任务。相关文件：`services/ai_service/token_budget.py`、`services/ai_service/litellm_client.py`、`strategies/ai_mixin.py`、`ui/views/screener_view.py`。
-
-**期望的最终解法**
-
-**实现完整成本计量**：① 成本估算 `services/ai_service/pricing.py` 的 `estimate_cost(effective_model, input_tokens, output_tokens) -> float | None`（全量依托 `litellm.cost_per_token`，**无自维护 `MODEL_PRICING` 手写价格表**；未知/不可计价模型返回 `None` 不猜价，免费模型返回 `0.0`，`PRICING_UPDATED` 记录价格表时效）；② `@register_singleton` 的 `AIUsageTracker`（实现 `_reset_singleton` 满足 R15/R7）按日/会话聚合，持久化到本地表；③ UI 三处呈现：选股前预估「本次约 N 次调用，预计 $X」、完成后实际消耗、设置页本月累计 + 可配置月度上限（超限暂停 AI 并提示）。upgrade 触发条件：AI 成本成为用户明确诉求或报告再次要求完整实现时。
-
-#### P3-AI05-SupportsAI-Metadata：策略是否启用 AI 缺少用户可见说明（review04 04-ai-credibillity.md AI-05）
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-AI05-SupportsAI-Metadata** | 策略是否启用 AI 缺少用户可见说明（review04 04-ai-credibillity.md AI-05） | UI 策略选择器重构或用户反馈策略 AI 标识缺失时 |
-
-**产生背景与现状**
-
-检视报告 AI-05（Minor）：四个策略（`VolumeBreakoutStrategy`、`NorthboundHoldingStrategy`、`NorthboundFlowStrategy`、`BlockTradeStrategy`）硬编码 `enable_ai_analysis = False`，是合理设计（信号来自资金流/量价），但用户在 UI 无从得知某个策略是否会用 AI——配好 LLM、开启 AI，选到纯数学策略却困惑「为什么没有 AI 分析」。本检视批次未实施（改动涉及策略元数据契约 + UI 策略选择器徽章，低价值/高 UI 触面，登记独立任务）。相关文件：`strategies/`（四个 enable_ai_analysis=False 的策略）、UI 策略选择器。
-
-**期望的最终解法**
-
-**暴露 `supports_ai: bool` 策略元数据**，UI 策略选择器加「AI」徽章标识。upgrade 触发条件：UI 策略选择器重构或用户反馈策略 AI 标识缺失时。
 
 ### 技术指标双实现（OSS-05）
 
