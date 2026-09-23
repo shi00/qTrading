@@ -58,9 +58,16 @@ APP_ROOT = RESOURCE_ROOT
 # before import and has no programmatic API to set cache_dir.  Unlike
 # NO_PROXY (which affects all HTTP clients globally), TIKTOKEN_CACHE_DIR
 # is only read by tiktoken itself, so the scope of pollution is minimal.
+# CUSTOM_TIKTOKEN_CACHE_DIR is required in addition: litellm >=1.101.0
+# unconditionally overwrites TIKTOKEN_CACHE_DIR at import time with its own
+# bundled tokenizers dir (litellm_core_utils/tokenizers), and only honours
+# this var. Setting both to the same bundled cache keeps tiktoken (used by
+# litellm itself via default_encoding) offline-capable on first import,
+# independent of what files litellm happens to ship.
 _tiktoken_cache = os.path.join(RESOURCE_ROOT, "data", "tiktoken_cache")
 if os.path.isdir(_tiktoken_cache):
     os.environ.setdefault("TIKTOKEN_CACHE_DIR", _tiktoken_cache)
+    os.environ.setdefault("CUSTOM_TIKTOKEN_CACHE_DIR", _tiktoken_cache)
 
 # PostgreSQL connection URL (async driver for CacheManager / DAOs)
 # SECURITY: DATABASE_URL should be set via environment variable or .env file.
