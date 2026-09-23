@@ -27,10 +27,37 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 
 from data.external.news_fetcher import NewsFetcher, _run_with_python_string_storage
+import httpx
 import pytest
 
 
 pytestmark = pytest.mark.integration
+
+
+def _concept_jsonp(*rows: tuple[str, str]) -> str:
+    """构造新浪概念板块 JSONP 响应文本（13 列结构，B2 httpx 直连后解析输入）。
+
+    rows: [(板块, 涨跌幅字符串), ...]。
+    """
+    items = []
+    for i, (name, change) in enumerate(rows):
+        fields = [
+            f"gn_{i}",
+            name,
+            "50",
+            "10.0",
+            "0.1",
+            change,
+            "1000000",
+            "5000000",
+            "000001",
+            "1.0",
+            "10.0",
+            "0.1",
+            "股票A",
+        ]
+        items.append(f'"gn_{i}":"{",".join(fields)}"')
+    return "var arr={" + ",".join(items) + "}"
 
 
 class TestGetStockNews(unittest.TestCase):
@@ -298,21 +325,15 @@ class TestGetUSMajorMoves(unittest.TestCase):
 
 
 class TestGetHotConcepts(unittest.TestCase):
-    """测试热门概念获取"""
+    """测试热门概念获取（B2：httpx 直连 HTTPS 新浪端点）"""
 
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_get_hot_concepts_success(self, mock_pool):
+    @patch("httpx.AsyncClient")
+    def test_get_hot_concepts_success(self, mock_client):
         """成功获取热门概念"""
-        mock_df = pd.DataFrame(
-            {
-                "板块": ["人工智能", "新能源", "芯片"],
-                "涨跌幅": [3.5, 2.1, -1.5],
-            }
-        )
-
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(return_value=mock_df)
-        mock_pool.return_value = mock_manager
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp(("人工智能", "3.5"), ("新能源", "2.1"), ("芯片", "-1.5"))
+        _wire_http_get(mock_client, mock_resp)
 
         async def run_test():
             result = await NewsFetcher.get_hot_concepts(limit=8)
@@ -322,19 +343,13 @@ class TestGetHotConcepts(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_get_hot_concepts_with_green(self, mock_pool):
+    @patch("httpx.AsyncClient")
+    def test_get_hot_concepts_with_green(self, mock_client):
         """下跌概念显示绿色"""
-        mock_df = pd.DataFrame(
-            {
-                "板块": ["房地产", "银行"],
-                "涨跌幅": [-2.5, -0.5],
-            }
-        )
-
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(return_value=mock_df)
-        mock_pool.return_value = mock_manager
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp(("房地产", "-2.5"), ("银行", "-0.5"))
+        _wire_http_get(mock_client, mock_resp)
 
         async def run_test():
             result = await NewsFetcher.get_hot_concepts(limit=8)
@@ -342,12 +357,13 @@ class TestGetHotConcepts(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_get_hot_concepts_empty(self, mock_pool):
+    @patch("httpx.AsyncClient")
+    def test_get_hot_concepts_empty(self, mock_client):
         """空数据返回空列表"""
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(return_value=pd.DataFrame())
-        mock_pool.return_value = mock_manager
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = "var arr={}"
+        _wire_http_get(mock_client, mock_resp)
 
         async def run_test():
             result = await NewsFetcher.get_hot_concepts(limit=8)
@@ -355,12 +371,13 @@ class TestGetHotConcepts(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_get_hot_concepts_none(self, mock_pool):
-        """None 数据返回空列表"""
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(return_value=None)
-        mock_pool.return_value = mock_manager
+    @patch("httpx.AsyncClient")
+    def test_get_hot_concepts_none(self, mock_client):
+        """响应异常（非对象 JSON）返回空列表"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = "var arr=[];"
+        _wire_http_get(mock_client, mock_resp)
 
         async def run_test():
             result = await NewsFetcher.get_hot_concepts(limit=8)
@@ -368,12 +385,11 @@ class TestGetHotConcepts(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_get_hot_concepts_error(self, mock_pool):
-        """错误返回空列表"""
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(side_effect=Exception("API error"))
-        mock_pool.return_value = mock_manager
+    @patch("httpx.AsyncClient")
+    def test_get_hot_concepts_error(self, mock_client):
+        """网络错误返回空列表"""
+        _wire_http_get(mock_client, MagicMock())
+        mock_client.return_value.get.side_effect = httpx.ConnectError("API error")
 
         async def run_test():
             result = await NewsFetcher.get_hot_concepts(limit=8)
@@ -385,21 +401,13 @@ class TestGetHotConcepts(unittest.TestCase):
 class TestNewsFetcherEdgeCases(unittest.TestCase):
     """测试边界条件"""
 
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_concepts_with_nan_values(self, mock_pool):
+    @patch("httpx.AsyncClient")
+    def test_concepts_with_nan_values(self, mock_client):
         """NaN 涨跌幅处理"""
-        import numpy as np
-
-        mock_df = pd.DataFrame(
-            {
-                "板块": ["测试板块"],
-                "涨跌幅": [np.nan],
-            }
-        )
-
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(return_value=mock_df)
-        mock_pool.return_value = mock_manager
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = _concept_jsonp(("测试板块", "nan"))
+        _wire_http_get(mock_client, mock_resp)
 
         async def run_test():
             result = await NewsFetcher.get_hot_concepts(limit=8)
@@ -408,22 +416,17 @@ class TestNewsFetcherEdgeCases(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_concepts_missing_column(self, mock_pool):
-        """缺少涨跌幅列"""
-        mock_df = pd.DataFrame(
-            {
-                "板块": ["测试板块"],
-            }
-        )
-
-        mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(return_value=mock_df)
-        mock_pool.return_value = mock_manager
+    @patch("httpx.AsyncClient")
+    def test_concepts_missing_column(self, mock_client):
+        """列数不足（新浪列序漂移防御）：跳过该行，返回空列表"""
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(return_value=None)
+        mock_resp.text = 'var arr={"gn_0":"gn_0,测试板块,50,10.0,0.1"}'
+        _wire_http_get(mock_client, mock_resp)
 
         async def run_test():
             result = await NewsFetcher.get_hot_concepts(limit=8)
-            self.assertEqual(len(result), 1)
+            self.assertEqual(result, [])
 
         asyncio.run(run_test())
 
