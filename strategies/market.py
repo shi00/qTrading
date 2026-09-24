@@ -450,7 +450,10 @@ class BlockTradeStrategy(PolarsBaseStrategy):
                     (pl.col("block_discount_pct").is_null())
                     | (pl.col("block_discount_pct") >= -float(discount_max_pct))
                 )
-                .sort(["block_discount_pct", "amount"], descending=[False, True])
+                # SC-04: 排序方向须与过滤方向一致——block_discount_pct 为带符号溢价率
+                # (溢价>0/折价<0)，降序即溢价/浅折价优先、深折价(负面信号)置末；null
+                # (close 缺失)默认排末尾，不伪造方向(R21)。同折价率按 amount 降序。
+                .sort(["block_discount_pct", "amount"], descending=[True, True])
             )
         # NOTE(lazy): Polars 算子兜底（单次策略执行失败返回空 DataFrame 不阻塞选股流程）.
         #   ceiling: 单次策略执行 Polars 算子异常，返回 lf.head(0) 降级.
