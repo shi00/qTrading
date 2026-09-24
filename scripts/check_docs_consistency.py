@@ -69,7 +69,7 @@
 
 第二阶段扩展：
 - 3a NOTE(lazy) 三要素检查（已实现：check_note_lazy_format()）。
-- 3b 红线 R1~R23 编号 append-only 检查（已实现：check_redlines_yaml_consistency()，见 ADR-0003）。
+- 3b 红线 R1~R24 编号 append-only 检查（已实现：check_redlines_yaml_consistency()，见 ADR-0003）。
 - 3c enforcement 字段与实际 hook / CI job 映射检查（已实现：check_enforcement_mapping()，见 ADR-0005）。
 - Flet 入口完整性检查（已实现：check_flet_hub_completeness()）。
 - exceptions.yml 例外注册表一致性检查（已实现：check_exceptions_yaml_consistency()，P1-01）。
@@ -1020,7 +1020,7 @@ def check_redlines_yaml_consistency() -> list[str]:
     return errors
 
 
-# 红线总数散文模式：R1 至 Rn，容忍 ~ / - / – / − 分隔符（如 R1~R23 / R1-R23）
+# 红线总数散文模式：R1 至 Rn，容忍 ~ / - / – / − 分隔符（如 R1~R24 / R1-R24）
 REDLINE_RANGE_PATTERN = re.compile(r"R1\s*[~\-–−]\s*R(\d+)")
 
 
@@ -2277,7 +2277,6 @@ _DECISION_TREE_MERGED_IDS: dict[str, set[str]] = {
     "docs/flet/README.md": {"ui-view", "ui-layout", "i18n"},
     "docs/patterns/config-quality-perf.md": {"performance", "config"},
     "docs/guides/testing.md": {"testing", "e2e-testing"},
-    "docs/guides/how-to.md": {"backtest", "embedded-pg"},
     "docs/guides/ci-cd.md": {"ci-deps", "release"},
 }
 
@@ -2429,8 +2428,8 @@ def check_canonical_routing() -> list[str]:
     主题（yml 中声明了 `workflow` 字段）做可执行断言：其 canonical 文档中必须存在指向该
     workflow 文档的真实 markdown 链接（纯文本/反引号提及不算真路由）。
 
-    说明：backtest / embedded-pg 两主题的 canonical 直接就是 how-to.md 本身，无需 workflow
-    字段，故不在校验范围（它们天然承担操作步骤承载）。
+    说明：embedded-pg 主题的 canonical 直接就是 how-to.md 本身，无需 workflow 字段，故不在校验
+    范围（它天然承担操作步骤承载）。
     """
     errors: list[str] = []
     topics = _load_canonical_topics()

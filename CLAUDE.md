@@ -6,8 +6,8 @@
 > **对应版本**：0.10.1（产品版本，与 pyproject.toml 一致）<!-- x-release-please-version -->
 > **元数据**（P2-07 统一格式，规则集版本与产品版本分离）：
 > - owner: 架构维护者
-> - ruleset_version: 1.8.0（规则集版本，规则变更时递增）
-> - last_reviewed: 2026-09-21
+> - ruleset_version: 1.9.0（规则集版本，规则变更时递增）
+> - last_reviewed: 2026-09-24
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 红线（§3）、架构不变量（§4）、AI 行为准则
 > - supersedes: 无
@@ -138,7 +138,7 @@
 | 调整 CI / 依赖 | [docs/guides/ci-cd.md](./docs/guides/ci-cd.md) |
 | 版本发布 / Release 管理 | [docs/guides/ci-cd.md](./docs/guides/ci-cd.md) |
 | 打包分发 / PyInstaller 构建 | [docs/guides/dependency-management.md](./docs/guides/dependency-management.md) |
-| 新增/修改回测 | [docs/guides/how-to.md「7. 新增回测配置」](./docs/guides/how-to.md#7-新增回测配置) |
+| 新增/修改回测 | [docs/patterns/backtest-correctness.md](./docs/patterns/backtest-correctness.md)（回测正确性正本；含回测配置流程与结论可信度边界路由） |
 | 修改配置项 | [docs/patterns/config-quality-perf.md](./docs/patterns/config-quality-perf.md) |
 | 新增测试 / E2E 测试 | [docs/guides/testing.md](./docs/guides/testing.md) |
 | Git 操作 / worktree / 创建 PR / 创建 Issue | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md)（PR/Issue 必须用模板，禁止手写简化 body） |
@@ -164,7 +164,7 @@
 
 - **禁止臆造 API**：使用任何库 API 前，若不确定其存在/签名/语义，必须先读源码或官方文档验证，禁止凭记忆编造（Flet/Polars/SQLAlchemy 等版本演进快，尤须核实）。**Flet API 优先通过 `flet-mcp` 的 `get_api` 工具验证**（项目 MCP 配置方案见 [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) §3.1；启动命令 `python -c "from flet_mcp import mcp; mcp.run()"`；IDE 本地 MCP 配置不入版本控制需用户手动创建），"not found" 结果在 api.json 完整收录前提下具有权威性（前提：flet-mcp 版本与 flet 主包版本对齐，项目用 `==` 锁定二者同步升级；若 flet-mcp 滞后发布见 [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) §5；版本见 `pyproject.toml`）。
 - **禁止臆断行号/符号**：引用代码位置时以符号名（函数/类/常量）为准；不得声称"第 N 行是 X"而未实际读取该行。
-- **禁止臆造红线编号**：引用 R1~R23 前确认其存在与含义；红线编号 append-only，不复用废弃编号。
+- **禁止臆造红线编号**：引用 R1~R24 前确认其存在与含义；红线编号 append-only，不复用废弃编号。
 - **不确定即验证**：判断"某 API 在当前版本是否可用/是否已删除"时，必须以 `pyproject.toml` 锁定版本对应的实际行为为准。
 
 ---
@@ -206,6 +206,7 @@
 | R21 | **缺失值伪装** | 业务语义字段（`score` / `ai_score` / `confidence` 等）缺失必须用 `None`/哨兵表示，禁止填充业务上合法的具体值（`0` 分、`50%` 置信度、空表视为「无限制」）；变体（BT-03）：「可信度元数据在持久化边界丢失」——`data_warnings` / `failed_signal_dates` / 配置快照等已知不可信信号落库后被丢弃、UI 渲染为「无问题」，等同把「已知不可信」伪装成「无信息」 | 仅人工评审 |
 | R22 | **水位线单调性** | checkpoint / 高水位语义的持久化状态（如 `set_app_state` 写入的断点续传水位），写入必须单调（优先 `*_max` 语义或 GREATEST 保护），且单测必须含乱序写入用例并断言最终值为最大值 | pre-commit（check_redlines.py）+ 仅人工评审 |
 | R23 | **裸 UI token** | UI 层裸 `ft.Colors` 色值引用与裸字号数值（如 `ft.Text(size=13)`）必须改用 AppStyles 定义的 token（`FONT_SIZE_*` 等） | pre-commit（check_redlines.py） |
+| R24 | **时点正确性** | 任何进入策略或回测的数据，其取数时点不得晚于被决策的交易日；使用「当前快照」类维度（行业分类、指数成分、股票池、财报最新值）参与历史区间计算即违规，必须改用带生效日期的维度表，或显式声明为「当期近似」并在结果中标注 | pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R24 报告模式升级期限」（2026-12-31） |
 
 > **红线自动化现状**：各红线的守护函数与覆盖维度见 [docs/governance/redlines.yml](./docs/governance/redlines.yml) 的 `enforcement` / `checks` / `automation_coverage` 字段；无自动化的红线（标注 `仅人工评审`）尤须 AI 自查；R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。
 
@@ -306,6 +307,7 @@
 | 常用开发与测试命令 / 交付前 DoD / 变更类型→最小验证子集 | 「常用开发与测试命令」 |
 | 完整技术栈表 / 完整目录结构 / 同层合并原则 | 「AI 助手方法论与项目概览」 |
 | 已知架构技术债 | [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) |
+| 回测/选股正确性（时点正确性 / 幸存者偏差 / 复权口径 / 财报修订 / 结论可信度边界） | [docs/patterns/backtest-correctness.md](./docs/patterns/backtest-correctness.md) |
 | Flet UI 开发、设计、API、无障碍、项目差异、升级与 CanvasKit E2E 避坑 | [docs/flet/README.md](./docs/flet/README.md) |
 | Flet MCP 使用规范（AI 验证 Flet API 的操作指南，对应 §1.10 反幻觉红线） | [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) |
 | 测试规范 | [docs/guides/testing.md](./docs/guides/testing.md) |

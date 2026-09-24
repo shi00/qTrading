@@ -6,7 +6,7 @@
 
 项目特定规则优先于 [ai-review.md](../ai-review.md) 通用建议。冲突时以 [CLAUDE.md](../../../CLAUDE.md) §3 红线 / §4 架构边界为准。
 
-## 红线映射（R1-R23）
+## 红线映射（R1-R24）
 
 检视时必须检查以下红线违反（完整定义见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止) 与 [docs/governance/redlines.yml](../../governance/redlines.yml)）：
 
@@ -35,10 +35,15 @@
 | R21 缺失值伪装 | 业务语义字段缺失被填充合法具体值（`score`/`ai_score` 填 `0` 分、`confidence` 填 `50%`、空表视为「无限制」）。已修复缺陷（DATA-03→`suspend_data_absent`）不得再判为伪装 |
 | R22 水位线单调性 | checkpoint/高水位持久化写入非单调（`set_app_state` 非 `*_max` 写水位；须优先 `*_max`/GREATEST 保护 + 乱序写入单测） |
 | R23 裸 UI token | UI 层裸 `ft.Colors` 色值与裸字号数值（如 `ft.Text(size=13)`）未用 AppStyles token（须用 `FONT_SIZE_*` 等） |
+| R24 时点正确性 | 进入策略/回测的数据取数时点晚于被决策交易日；用当前快照维度（行业分类/指数成分/股票池/财报最新值）参与历史区间计算未带生效日期或未声明「当期近似」（正本见 [backtest-correctness.md](../../patterns/backtest-correctness.md)） |
+
+## 必检维度（本项目）
+
+除 [ai-review.md](../ai-review.md) 的通用必检维度外，本项目将 [quality-dimensions.md](../quality-dimensions.md) 第 11 维「量化结论可信度」列为**必检**：检视策略 / 回测 / 选股结论类变更时，必须回答「取数时点是否前视」「票池是否含幸存者偏差」「复权口径是否一致」「结论是否受财报修订 / 质量缺口影响」（正本见 [backtest-correctness.md](../../patterns/backtest-correctness.md)）。
 
 ## 红线自查步骤
 
-对 `automation_coverage: none` 的 4 条红线（R5 / R17 / R18 / R21）与 `partial` 自动门禁的 R20 / R22（R20 由 check_R20 报告模式提示 warning、不阻断退出码；R22 由 check_R22 水位线静态检测、pre-commit 拦截）以及高风险的 `partial` 维度（R16 事件处理器维度 / R11 缓存点与跨循环使用维度）给出可执行自查入口：每条给出**搜索式**（明确 grep/模式）或**调用链追溯**（明确入口与定义符号）。上述红线无完整自动门禁或自动检测未覆盖全部场景，检视时须主动按此追查。完整语义见 [redlines.yml](../../governance/redlines.yml)，正常本见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止)。
+对 `automation_coverage: none` 的 4 条红线（R5 / R17 / R18 / R21）与 `partial` 自动门禁的 R20 / R22 / R24（R20 / R24 由 check_R20 / check_R24 报告模式提示 warning、不阻断退出码；R22 由 check_R22 水位线静态检测、pre-commit 拦截）以及高风险的 `partial` 维度（R16 事件处理器维度 / R11 缓存点与跨循环使用维度）给出可执行自查入口：每条给出**搜索式**（明确 grep/模式）或**调用链追溯**（明确入口与定义符号）。上述红线无完整自动门禁或自动检测未覆盖全部场景，检视时须主动按此追查。完整语义见 [redlines.yml](../../governance/redlines.yml)，正常本见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止)。
 
 ### R5 僵尸引擎操作
 1. 调用链追溯：对改动新增/触及的 DAO 或维护方法，从方法入口追到首次碰 `self.engine` 的读/写点，确认其先经 `BaseDao._check_engine()`（`data/persistence/daos/base_dao.py:116`）检查——该方法调 `engine_provider.is_disposed()`（`data/persistence/engine_provider.py:70`）判定，disposed 时抛 `EngineDisposedError`（`base_dao.py:29`）。
@@ -79,6 +84,11 @@
 1. checkpoint/高水位持久化写入必须单调：优先 `set_app_state_max()`（`data/persistence/app_state_service.py:43`，SQL 层 GREATEST 保护）；禁止用无条件 `set_app_state()`（`app_state_service.py:27`，最后写入者获胜）写水位 key（含 `attempted`/`watermark`/`checkpoint`/`upto`/`last_sync`/`resume` 语义）。
 2. 运行 AST 原型：`python scripts/prototype_business_redlines.py`。`WatermarkVisitor` 检测非 `*_max` 的 `set_app_state` 写水位 key，输出 `R22` 命中（`watermark_unmonotone`，SYNC-01 同类）。
 3. 调用链追溯：对命中点追读侧消费者 —— 高水位/断点续传读侧若依赖「读到的值即已处理到的最大位置」且写入侧有乱序覆盖即违规；并核对是否配套乱序写入单测（断言最终值取最大值），缺失则该单测为整改必补项。
+
+### R24 时点正确性
+1. 运行 AST 原型复核：`python scripts/check_redlines.py`（报告模式），查看 `R24` 命中——扫 `strategies/` 下对无生效日期维度表（`sw_industry_member` / `sw_industry_classify` / `index_member_all`）、其 ORM 类、派生列键（`industry_sw_l2` / `sw_industry`）的引用；命中为候选，逐条确认是否参与跨期历史区间计算。
+2. 调用链追溯：对回测/选股结论涉及的维度数据（行业分类、指数成分、股票池、财报最新值），确认其取数时点不晚于被决策交易日——快照类维度须带生效日期，或显式声明「当期近似」并在结果中标注。
+3. 人工补查范围（自动检测未覆盖）：`data/` 层已知的跨期前视点（`screener_dao` 行业 `LATERAL` 子查询，属 DAT-08② 已文档化的「已知限制」）与结论可信度边界，正本见 [backtest-correctness.md](../../patterns/backtest-correctness.md)。
 
 ## reviewProfile 结构
 

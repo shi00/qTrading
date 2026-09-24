@@ -11,6 +11,8 @@
 ## 技术债索引
 
 > 本索引用于「先扫索引再选读」：每行对应用一条完整债目（见下方分节三级标题）。级别均为 P3；upgrade 触发条件摘录自该条目的「期望的最终解法」。
+>
+> **结论可信度边界类条目不占本索引**：`DAT-07` / `DAT-08`（回测不可复现 / 回测前视 / 存量污染）为「无计划升级（文档化决策）」的已接受权衡，产品含义已迁入 [backtest-correctness.md](../patterns/backtest-correctness.md)「已知限制」，决策记录见本文件「已接受的权衡」章节；回测路径 `BT-05` 亦在该正本「已知限制」登记（其代码欠债条目仍在本索引，见 `P3-BT05-QualityGate-Bypass`）。
 
 | ID | 一句话 | 级别 | upgrade 触发条件 |
 |----|--------|------|------------------|
@@ -52,9 +54,6 @@
 | P3-UX06-Startup-SLA-E2E-Gap | 冷启动到导航可交互的端到端 SLA 未实测（UX-06 以 proxy 构成基线替代，如实记录缺位） | P3 | ① 真实端到端测量 > 8s（SLA 超阈）时触发 visited\_tabs 顶层推广（`test_consumes_all_seven_subviews_in_stack` 改写 + #438 范式推广）；② 或启动流程重构时 |
 | P3-B12-Screener-Formatting-Logic-in-VM | #B12-2 review02 B12 第 2 步：格式化逻辑下沉 VM（`_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM） | P3 | report04 D9（AI 流式更新重建机制重构）合并时 / screener\_view 重构时 |
 | P3-BT05-QualityGate-Bypass | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计） | P3 | review03 BT-05 第二步实施时（实现 `evaluate_historical_window()` 区间质量评估） |
-| P3-DAT07-Restatement | 回测不可复现：财报无修订历史，UPSERT 覆盖使历史回测结果随时间漂移（review03 DAT-07①） | P3 | 无计划升级（文档化决策，见「已接受的权衡」DAT-07条目） |
-| P3-DAT08-SnapshotLookahead | 回测前视：申万行业为当前快照，`sw_industry_member` 主键不含日期，跨分类调整期回测存在前视（review03 DAT-08②） | P3 | 无计划升级（文档化决策，见「已接受的权衡」DAT-08②条目） |
-| P3-DAT08-IndustryPollution | 存量污染：`stock_basic.industry` 在 DAT-08③ 前被写时覆写为申万二级行业，拆列后 `industry_tushare` 输出仍含旧覆写值（review03 DAT-08③） | P3 | 无计划升级（文档化决策，见「已接受的权衡」DAT-08③条目） |
 | P3-TA-OSS05-DualImpl | 技术指标（RSI/MACD/KDJ）双实现分叉的 OSS-05 结论仅存于测试 docstring，未登记技术债（原著 reviews/ 已丢失） | P3 | 技术指标测试文件重构/拆分、双实现再次扩散、或指标语义变更时 |
 
 ## 技术债清单
@@ -642,7 +641,7 @@ OSS-05 双实现等价性研究结论（pandas 入口 vs Polars 表达式工厂�
 
 ## 已接受的权衡（Accepted Tradeoffs）
 
-> 与技术债不同，此处记录**有意识地接受现状**的权衡决策：问题真实存在，但当前选择不修（成本/收益、YAGNI 或产品决策），通过 UI 标注、文档声明等方式显式告知用户。来源：review03 DAT-07① 与 DAT-08② 的「决策：不修」类结论（详见各条目）。
+> 与技术债不同，此处记录**有意识地接受现状**的权衡决策：问题真实存在，但当前选择不修（成本/收益、YAGNI 或产品决策），通过 UI 标注、文档声明等方式显式告知用户。来源：review03 DAT-07① 与 DAT-08② 的「决策：不修」类结论（详见各条目）。本节条目属结论可信度边界、**不占「技术债索引」**；产品含义（哪些指标在什么条件下不可信）见 [backtest-correctness.md](../patterns/backtest-correctness.md)「已知限制」。
 
 #### P3-DAT07-Restatement：回测不可复现：财报无修订历史，UPSERT 覆盖使历史回测结果随时间漂移（review03 DAT-07①）
 
