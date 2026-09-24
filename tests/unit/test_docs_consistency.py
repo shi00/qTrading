@@ -5333,6 +5333,110 @@ class TestGuillemetReferences:
         )
         assert check() == []
 
+    def _setup_bare(self, tmp_path, monkeypatch, claude_text: str):
+        """构造临时仓库（受检文档 CLAUDE.md；裸名引用目标由各用例自行放置于 docs/ 等）。"""
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(claude_text, encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
+        from check_docs_consistency import check_guillemet_references
+
+        return check_guillemet_references
+
+    def test_accepts_bare_filename_resolved_in_docs(self, tmp_path, monkeypatch):
+        """H1: 裸文件名（无目录前缀）回落到 docs/ 下同名文档且标题命中 → 通过。"""
+        guides = tmp_path / "docs" / "guides"
+        guides.mkdir(parents=True)
+        (guides / "testing.md").write_text("# 测试资产地图\n", encoding="utf-8")
+        check = self._setup_bare(tmp_path, monkeypatch, "见 testing.md「测试资产地图」\n")
+        assert check() == []
+
+    def test_bare_filename_multiple_candidates_any_heading_passes(self, tmp_path, monkeypatch):
+        """H1: 裸文件名多候选（如同名 README.md），任一候选含同名标题即视为有效引用。"""
+        for sub, heading in (("guides", "# 其他章节"), ("patterns", "# 事件总线")):
+            d = tmp_path / "docs" / sub
+            d.mkdir(parents=True)
+            (d / "README.md").write_text(heading + "\n", encoding="utf-8")
+        check = self._setup_bare(tmp_path, monkeypatch, "见 README.md「事件总线」\n")
+        assert check() == []
+
+    def test_bare_filename_single_candidate_without_heading_reports(self, tmp_path, monkeypatch):
+        """H1: 裸文件名解析到唯一候选但无同名标题 → 报「无同名标题」（不静默放过）。"""
+        guides = tmp_path / "docs" / "guides"
+        guides.mkdir(parents=True)
+        (guides / "testing.md").write_text("# 数据库设置\n", encoding="utf-8")
+        check = self._setup_bare(tmp_path, monkeypatch, "见 testing.md「测试资产地图」\n")
+        errors = check()
+        assert len(errors) == 1
+        assert "无同名标题" in errors[0]
+
+    def test_bare_filename_multiple_candidates_without_heading_reports(self, tmp_path, monkeypatch):
+        """H1: 裸文件名多候选且均无同名标题 → 报错（含候选数，供读者定位）。"""
+        for sub in ("guides", "patterns"):
+            d = tmp_path / "docs" / sub
+            d.mkdir(parents=True)
+            (d / "README.md").write_text("# 其他章节\n", encoding="utf-8")
+        check = self._setup_bare(tmp_path, monkeypatch, "见 README.md「事件总线」\n")
+        errors = check()
+        assert len(errors) == 1
+        assert "均无该标题" in errors[0]
+
+    def test_bare_filename_unresolved_reports_missing_doc(self, tmp_path, monkeypatch):
+        """H1: 裸文件名在根目录与 docs/man/requirements 均无候选 → 仍报「不存在」。"""
+        check = self._setup_bare(tmp_path, monkeypatch, "见 missing-guide.md「任意标题」\n")
+        errors = check()
+        assert len(errors) == 1
+        assert "不存在" in errors[0]
+
+
+class TestCheckedDocsExclusions:
+    """H1: 本地会话计划文件与 gitignored 产物目录不进入受检集（CHECKED_DOCS）。"""
+
+    def test_plans_md_excluded_from_checked_docs(self, tmp_path, monkeypatch):
+        """Plans.md（.gitignore 排除的本地会话计划）不入受检集；同目录 CLAUDE.md 正常受检。"""
+        (tmp_path / "Plans.md").write_text("# 会话计划\n", encoding="utf-8")
+        (tmp_path / "CLAUDE.md").write_text("# 宪法\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        from check_docs_consistency import _collect_checked_docs
+
+        docs = _collect_checked_docs()
+        assert tmp_path / "CLAUDE.md" in docs
+        assert not any(p.name == "Plans.md" for p in docs)
+
+    def test_plans_tech_debt_md_excluded_from_checked_docs(self, tmp_path, monkeypatch):
+        """Plans-tech-debt.md（历史计划归档）同样不入受检集。"""
+        (tmp_path / "Plans-tech-debt.md").write_text("# 历史归档\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        from check_docs_consistency import _collect_checked_docs
+
+        assert not any(p.name == "Plans-tech-debt.md" for p in _collect_checked_docs())
+
+    def test_gitignored_artifact_dir_excluded_from_checked_docs(self, tmp_path, monkeypatch):
+        """gitignored 产物目录（docs/audit 等）下 md 不入受检集；docs/ 其他文档正常受检。"""
+        audit = tmp_path / "docs" / "audit"
+        audit.mkdir(parents=True)
+        (audit / "audit-note.md").write_text("# 归档\n", encoding="utf-8")
+        (tmp_path / "docs" / "guide.md").write_text("# 指南\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency._GITIGNORED_ARTIFACT_DIRS", (audit,))
+        from check_docs_consistency import _collect_checked_docs
+
+        docs = _collect_checked_docs()
+        assert tmp_path / "docs" / "guide.md" in docs
+        assert not any(p.parent == audit for p in docs)
+
+    def test_plans_md_bare_reference_does_not_fail_guillemet_check(self, tmp_path, monkeypatch):
+        """H1 回归：Plans.md 内裸文件名引用既不进受检集、也不产生假 FAIL。"""
+        (tmp_path / "Plans.md").write_text("见 testing.md「测试资产地图」\n", encoding="utf-8")
+        guides = tmp_path / "docs" / "guides"
+        guides.mkdir(parents=True)
+        (guides / "testing.md").write_text("# 测试资产地图\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        import check_docs_consistency as c
+
+        monkeypatch.setattr(c, "CHECKED_DOCS", c._collect_checked_docs())
+        assert c.check_guillemet_references() == []
+
 
 def _make_exceptions_yaml(count: int) -> str:
     """构造含 `count` 个 EX 条目的精简 exceptions.yml（供 L1 数量守卫测试复用）。"""
