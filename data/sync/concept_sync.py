@@ -386,8 +386,9 @@ class LimitListSyncStrategy(ISyncStrategy):
                 raise
             result.status = SyncStatus.FAILED.value
             result.errors.append(error_info["message_key"])
-            # review08-D3 停写语义：清空在 fetch 前已执行，即使后续失败，LIMIT_ 存量也已清除
-            result.warnings.append("LIMIT_ concepts were cleared before fetch failure (review08-D3)")
+            # review08-D3 停写语义：清空与 fetch 同在外层 try，清空自身失败也会落到此处，
+            # 此时存量未必已清除，故只声明"不再写入"而不声称清除状态（避免文案失实）。
+            result.warnings.append("LIMIT_ concepts are no longer written (review08-D3); cleanup status uncertain")
 
         return result
 

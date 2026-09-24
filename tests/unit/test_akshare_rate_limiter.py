@@ -52,10 +52,20 @@ class TestSharedLimiterSameInstanceAcrossClients:
     """report 核心意图：NewsFetcher 与概念客户端共用同一令牌桶。"""
 
     def test_concept_client_uses_shared_limiter(self):
+        """概念客户端与 NewsFetcher 共用同一令牌桶。
+
+        review08-B4-FIND-04 后客户端不再缓存桶实例，改为每次调用动态解析
+        ``get_akshare_rate_limiter()``，故这里断言模块引用同一 getter，并确认
+        实例上不再残留旧的桶缓存（缓存会导致 reset 后仍用旧桶）。
+        """
+        import data.external.akshare_concept_client as cc_mod
+        import data.external.akshare_rate_limiter as arl_mod
         from data.external.akshare_concept_client import AkshareConceptClient
 
-        client = AkshareConceptClient()
-        assert client._rate_limiter is get_akshare_rate_limiter()
+        AkshareConceptClient()  # 触发 __init__
+        assert not hasattr(AkshareConceptClient(), "_rate_limiter")
+        assert cc_mod.get_akshare_rate_limiter is arl_mod.get_akshare_rate_limiter
+        assert cc_mod.get_akshare_rate_limiter() is get_akshare_rate_limiter()
 
     def test_news_fetcher_imports_same_getter(self):
         """news_fetcher 与概念客户端从同一模块 import 同一 getter（同实例）。"""

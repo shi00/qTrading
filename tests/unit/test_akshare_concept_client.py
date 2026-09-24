@@ -7,6 +7,7 @@ Covers:
 - CancelledError propagates (R2)
 """
 
+import logging
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -40,7 +41,9 @@ def client_with_mocks():
 
     with (
         patch.object(AkshareConceptClient, "_get_akshare", return_value=mock_ak),
-        patch.object(AkshareConceptClient, "_build_rate_limiter", return_value=mock_bucket),
+        # review08-B4-FIND-04: 客户端不再缓存实例桶，改为调用时动态解析模块级
+        # getter，故此处 patch 模块内的 get_akshare_rate_limiter。
+        patch("data.external.akshare_concept_client.get_akshare_rate_limiter", return_value=mock_bucket),
         patch("data.external.akshare_concept_client.ThreadPoolManager", return_value=mock_tpm),
     ):
         client = AkshareConceptClient()
@@ -176,16 +179,19 @@ class TestConceptListCacheInvalidation:
         assert state["fetches"] == 2
 
     @pytest.mark.asyncio
-    async def test_cache_clear_degrades_safely_when_internal_missing(self, client_with_mocks, monkeypatch):
+    async def test_cache_clear_degrades_safely_when_internal_missing(self, client_with_mocks, monkeypatch, caplog):
         """降级路径：akshare 内部函数缺失时不影响 fetch（仅告警），不抛异常。"""
         client, mock_tpm, mock_bucket, mock_ak = client_with_mocks
         # fake 模块只含公共入口、缺失 __stock_board_concept_name_em → AttributeError 被吞
         fake_em = SimpleNamespace(stock_board_concept_name_em=mock_ak.stock_board_concept_name_em)
         self._install_fake_em_module(monkeypatch, fake_em)
 
-        df = await client.get_concept_list()
+        with caplog.at_level(logging.WARNING, logger="data.external.akshare_concept_client"):
+            df = await client.get_concept_list()
         assert isinstance(df, pd.DataFrame)
         mock_ak.stock_board_concept_name_em.assert_called_once_with()
+        # 降级必须真的发出 WARNING：否则缓存清理失效会被静默吞没（B1 的失败模式）
+        assert any("无法清理概念列表缓存" in rec.getMessage() for rec in caplog.records)
 
 
 class TestGetConceptConstituents:
@@ -211,25 +217,45 @@ class TestGetConceptConstituents:
 
 
 class TestRateLimiterConfig:
-    def test_rate_limiter_uses_1_qps_capacity_2(self):
-        """TokenBucket must be configured for 1 QPS with capacity 2 (burst absorption)."""
+    def test_module_limiter_uses_1_qps_capacity_2(self):
+        """共享 TokenBucket 必须配置为 1 QPS / capacity 2（突发吸收）。"""
+        from data.external.akshare_rate_limiter import get_akshare_rate_limiter
         from utils.rate_limiter import TokenBucket
 
-        client = AkshareConceptClient()
-        bucket = client._rate_limiter
+        bucket = get_akshare_rate_limiter()
         assert isinstance(bucket, TokenBucket)
         assert bucket.original_rate == 1.0
         assert bucket.capacity == 2.0
 
 
 class TestSharedRateLimiterIntegration:
-    """review08-B4：概念客户端使用模块级共享限速器（与 NewsFetcher 共用一桶）。"""
+    """review08-B4-FIND-04：客户端不缓存限速器实例，每次调用动态解析模块级共享桶，
+    故 reset_akshare_rate_limiter() 重绑全局后已初始化的 client 立即使用新桶。"""
 
-    def test_client_uses_module_shared_limiter(self):
-        from data.external.akshare_rate_limiter import get_akshare_rate_limiter
+    @pytest.mark.asyncio
+    async def test_client_resolves_limiter_at_call_time(self):
+        """单例初始化后再替换模块级 getter，client 必须使用新桶（无实例缓存）。"""
+        from data.external import akshare_concept_client as cc_mod
 
-        client = AkshareConceptClient()
-        assert client._rate_limiter is get_akshare_rate_limiter()
+        AkshareConceptClient()  # 触发 __init__；方案 A 后不再持有实例桶
+        assert not hasattr(AkshareConceptClient(), "_rate_limiter")
+
+        new_bucket = MagicMock()
+        new_bucket.consume_async = AsyncMock()
+        mock_ak = MagicMock()
+        mock_ak.stock_board_concept_name_em.return_value = pd.DataFrame({"板块名称": ["锂电池"]})
+        mock_tpm = MagicMock()
+        mock_tpm.run_async = AsyncMock(side_effect=lambda task_type, func, *args, **kwargs: func())
+
+        with (
+            patch.object(AkshareConceptClient, "_get_akshare", return_value=mock_ak),
+            patch.object(AkshareConceptClient, "_clear_concept_list_cache"),
+            patch("data.external.akshare_concept_client.ThreadPoolManager", return_value=mock_tpm),
+            patch.object(cc_mod, "get_akshare_rate_limiter", return_value=new_bucket),
+        ):
+            await AkshareConceptClient().get_concept_list()
+
+        new_bucket.consume_async.assert_awaited_once_with(1)
 
 
 class TestCancelledErrorPropagation:
