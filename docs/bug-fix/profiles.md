@@ -36,7 +36,7 @@
   - R2 禁止吞没 `asyncio.CancelledError`（必须 `raise`）
   - R11 禁止跨循环复用 `asyncio.Event/Lock`（必须通过 `get_loop_local()` 获取）
   - R16 禁止在 Flet 事件处理器中同步执行 IO/CPU 密集任务
-- 涉及异步/并发问题时，必须考虑事件循环归属、线程归属、取消传播三个维度（CLAUDE.md §1.7）。
+- 涉及异步/并发问题时，必须考虑事件循环归属、线程归属、取消传播三个维度（见 CONTRIBUTING.md「AI 助手方法论与项目概览」→「调试与问题排查」）。
 
 ## 5. 数据与迁移
 

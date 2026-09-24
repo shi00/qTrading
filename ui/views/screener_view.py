@@ -363,7 +363,7 @@ def _render_strategy_desc(msg: Message | None) -> str:
 #   - build_stream_card    流式/AI 占位卡 (state.stream_cards 逐卡渲染)
 #   - build_params_panel   策略参数面板 (含 build_param_control 单控件)
 #   - build_history_tree   历史树侧栏 (state.history_tree 派生)
-# 仅作机械搬移 + props 化, 不引入新抽象层 (宪法 §1.3 禁推测性设计).
+# 仅作机械搬移 + props 化, 不引入新抽象层 (宪法 §1.2 禁推测性设计).
 # =============================================================================
 
 
