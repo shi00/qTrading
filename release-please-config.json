@@ -36,6 +36,10 @@
         {
           "type": "generic",
           "path": "AGENTS.md"
+        },
+        {
+          "type": "generic",
+          "path": "CONTRIBUTING.md"
         }
       ]
     }
