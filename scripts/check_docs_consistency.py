@@ -377,8 +377,6 @@ def check_precommit_hook_count() -> list[str]:
 # 本地 pre-commit hook id：形如反引号包裹的纯小写 kebab（`ruff-check`），
 # 排除 `.pre-commit-config.yaml`（含点）、`ci_cd`（含下划线）、`IsolatedAsyncioTestCase`（首字母大写）等非 hook token。
 _HOOK_ID_SPAN = re.compile(r"`([a-z][a-z0-9]*(?:-[a-z0-9]+)+)`")
-# workflow 文件名引用（`.github/workflows/*.yml` 的 base，如 `docs-ci.yml`）
-_WORKFLOW_FILE_REF = re.compile(r"([a-z][a-z0-9_-]*\.yml)\b")
 
 
 def _local_hook_ids() -> set[str]:
@@ -416,12 +414,17 @@ def check_precommit_hook_names() -> list[str]:
 
 
 def check_workflow_enum() -> list[str]:
-    """检查项 28：workflow 枚举无遗漏（F-09）。
+    r"""检查项 28：workflow 枚举无遗漏（F-09）。
 
     断言 .github/workflows/*.yml 每一文件 base（如 `docs-ci.yml`）都在 ci-cd.md 中出现，
     守护 docs-ci / flet-nightly / sidecar 等流水线因仅在文件系统中存在而未被文档登记
     （CI 前端存在性漂移）。仅做「配置 ⊆ 文档」单向：ci-cd.md 还会引用 audit-allowlist.yml
     等非 workflow 的 .yml，故不做幽灵方向。
+
+    逐文件按文件名断言（F-09 复核修正）：原实现的条件是「文档中存在任意 .yml 引用」，
+    未使用循环变量 `wf`，只要 ci-cd.md 提及任一 `.yml` 即对全部 workflow 放行，实为空操作。
+    现改为按文件名匹配，并以 `(?<![\w.-])` / `(?![\w.-])` 边界防止 `sidecar.yml` 被
+    `pg-sidecar.yml` 之类的长名误命中。
     """
     errors: list[str] = []
     if not WORKFLOWS_DIR.is_dir():
@@ -430,7 +433,7 @@ def check_workflow_enum() -> list[str]:
         return [f"ci-cd.md 不存在: {CI_CD_PATH}"]
     content = CI_CD_PATH.read_text(encoding="utf-8")
     for wf in sorted(p.name for p in WORKFLOWS_DIR.glob("*.yml") if p.is_file()):
-        if not _WORKFLOW_FILE_REF.search(content):
+        if not re.search(rf"(?<![\w.-]){re.escape(wf)}(?![\w.-])", content):
             errors.append(f"workflow 枚举无遗漏: .github/workflows/{wf} 未在 ci-cd.md 登记（F-09）")
     return errors
 
