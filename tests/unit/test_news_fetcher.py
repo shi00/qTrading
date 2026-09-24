@@ -1327,15 +1327,15 @@ class TestGetStockNewsDirectExecution:
 
 
 class TestSharedRateLimiter:
-    """review08-B4：NewsFetcher 的 akshare 调用经模块级共享限速器。
+    """review08-B4/-FIND-03：NewsFetcher 的 akshare 调用经模块级共享限速器。
 
     显式替换 autouse mock（_mock_akshare_shared_limiter），断言 consume 调用；
-    单次抓取 2 个调用点（cninfo + EM）各消耗 1 token。
+    令牌由公开方法在 pandas 全局锁外一次性预留（两层各 1，共 2）。
     """
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ak")
-    async def test_stock_news_core_consumes_limiter_for_both_layers(self, mock_ak):
+    async def test_stock_news_reserves_limiter_for_both_layers(self, mock_ak):
         mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame(
             {
                 "代码": ["000001"],
@@ -1362,9 +1362,30 @@ class TestSharedRateLimiter:
 
         assert isinstance(result, list)
         assert len(result) >= 1
-        # cninfo 层 + EM 层各消耗 1 token（单次抓取 burst=2，与共享桶容量一致）
-        assert mock_limiter.consume.call_count == 2
-        mock_limiter.consume.assert_any_call(1)
+        # review08-B4-FIND-03：两层令牌（各 1，共 2）在进入 pandas 全局锁前一次性预留
+        mock_limiter.consume.assert_called_once_with(2)
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ak")
+    async def test_documents_reserves_limiter_for_both_layers(self, mock_ak):
+        mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
+        mock_ak.stock_news_em.return_value = pd.DataFrame()
+
+        mock_limiter = MagicMock()
+        mock_limiter.consume = MagicMock()
+
+        with (
+            patch("data.external.news_fetcher.get_akshare_rate_limiter", return_value=mock_limiter),
+            patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            await NewsFetcher.get_stock_news_documents("000001.SZ", window_days=30, limit=50)
+
+        # 与 get_stock_news 对称：进入 pandas 全局锁前一次性预留两层令牌
+        mock_limiter.consume.assert_called_once_with(2)
 
 
 class TestNewsTimeCaliberConsistency:
