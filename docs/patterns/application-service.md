@@ -23,6 +23,8 @@
 - **正本**：[exceptions.yml 的 EX-0017](../governance/exceptions.yml)（`R5` 豁免）——`news_subscription_service.py` 的 `_safe_fetch_task` / `_processing_loop` / `_fetch_and_notify` 三处吞没 `EngineDisposedError` 以停止轮询是**合理设计**（引擎释放后停止轮询），非 DAO/维护流程的传播要求。
 - **含义**：应用服务层的轮询循环优雅停止不在 R5 之内，**不必**在停机路径传播 `EngineDisposedError`；但非轮询的 DAO/维护流程仍须传播。新增轮询服务时复用此豁免语义，**不要**对既有停轮询吞没行为报违规或"好心"修复。
 - 关联技术债：`P3-M9-NewsSubscription-EngineDisposed-Swallowed`（见 [known-technical-debt.md](../debt/known-technical-debt.md)）。
+- **回测持久化例外**：[exceptions.yml 的 EX-0018](../governance/exceptions.yml)（`R5` 豁免）——`backtest_service.py` 的 `_persist_result` 捕获持久化失败（含 `EngineDisposedError`）后在 `data_warnings` 追加 `persist_failed: ...` 并返回结果（**不 raise**）是**合理设计**（回测已完成，持久化失败仅告警）；**不要**将其报为 R5 违规或改为 raise。
+- 关联技术债：`P3-M9-Backtest-EngineDisposed-Warning-Return`（见 [known-technical-debt.md](../debt/known-technical-debt.md)）。
 
 ### 3. TaskManager / SchedulerService / ThreadPoolManager 编排边界
 
@@ -47,7 +49,7 @@
 _最小验证命令：_ 按改动实际触及的层运行 CONTRIBUTING「变更类型 → 最小验证子集」对应最小子集；服务层逻辑改动后须 `redline-check` + 相关服务单测 + `python scripts/check_docs_consistency.py`。
 
 - 新增服务已按「单例 vs 非单例」判据选型，单例注册同步更新 `singleton-lifecycle.md` / §1.8 所需登记；
-- 轮询/长生命周期停止按 EX-0017 豁免语义，未误报停轮询吞没行为；
+- 轮询停止 / 回测持久化失败按 EX-0017 / EX-0018 豁免语义处理，未误报停轮询吞没或回测持久化不 raise 行为；
 - 编排边界正确：`TaskManager`（任务）/ `ThreadPoolManager`（同步阻塞）/ `SchedulerService`（定时）各司其职，协程内同步阻塞经 `run_async()`；
 - 异常分类遵循「错误处理标准模式」：system 上抛、可恢复/操作级层内降级；
 - 门禁：`redline-check`（R1/R2/R5/R15）、`ruff`、相关单测通过。
