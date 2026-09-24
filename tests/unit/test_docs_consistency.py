@@ -4959,6 +4959,79 @@ class TestGovernanceIdGlossary:
         assert warnings == [], f"不应产生未登记警告, got: {warnings}"
 
 
+class TestGovernanceIdGenericForm:
+    """H6-c：治理 ID 通用形态（大写前缀 + 短横 + 数字）+ 豁免清单 + 入口/非入口分级。"""
+
+    def test_generic_form_detects_business_domain_id(self, tmp_path, monkeypatch):
+        """通用形态：入口文档出现未登记业务域 ID（如 BT-99）→ 报错（原白名单漏检业务域命名空间）."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| BT-03 | R21 变体 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("引用 BT-99（未登记）\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
+
+        errors, _ = check_governance_id_glossary()
+        assert any("BT-99" in e and "未在 governance-ids.md 登记" in e for e in errors), (
+            f"通用形态应检出业务域 ID, got: {errors}"
+        )
+
+    def test_exempt_prefixes_and_report_forms_not_reported(self, tmp_path, monkeypatch):
+        """豁免不误报：外部编号体系（ADR/EX/CVE/UTF/SHA）+ 检视协议 ID（CHECK）+ 报告发现编号（M9-010/F-09/L111-134）."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            "见 ADR-0002 / EX-0001 / CVE-2025 / UTF-8 / SHA-256 / CHECK-01 / M9-010 / F-09 / L111-134\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
+
+        errors, warnings = check_governance_id_glossary()
+        assert errors == [], f"豁免项不应误报, got: {errors}"
+        assert warnings == [], f"豁免项不应进入 WARNING, got: {warnings}"
+
+    def test_non_entry_doc_unregistered_id_is_warning_not_error(self, tmp_path, monkeypatch):
+        """分级：非入口文档（docs/patterns/*.md）未登记 ID 为 WARNING（渐进部署），不阻断."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        patterns_dir = tmp_path / "docs" / "patterns"
+        patterns_dir.mkdir(parents=True)
+        doc = patterns_dir / "sample.md"
+        doc.write_text("引用 BT-99（未登记）\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
+
+        errors, warnings = check_governance_id_glossary()
+        assert errors == [], f"非入口文档不应报 error, got: {errors}"
+        assert any("BT-99" in w for w in warnings), f"非入口文档应报 WARNING, got: {warnings}"
+
+
 class TestAdrIndexCompleteness:
     """GDR-12: ADR 决策文档文件级索引完整性（CONTRIBUTING.md 登记全部 docs/adr/*.md）."""
 

@@ -120,3 +120,13 @@
 | review07-G18 | R4 补充检测：业务层「SQL 关键字开头+%s」字面量 + f-string SQL 模板 | review07 治理与门禁审计 | [check_redlines.py](../../scripts/check_redlines.py) | 使用中 |
 | review07-G19 | 单例识别条件扩展（DAO 注册引擎同步不可漏改，与 R13 描述一致） | review07 治理与门禁审计 | [check_redlines.py](../../scripts/check_redlines.py) | 使用中 |
 | BIZ-04 | AI 策略无法被回测验证：回测默认 disable_ai，AI 结论与实盘不可比（评审报告 01-requirement-closure.md §2.4，本地 gitignored；ADR-0009 引用） | 本地检视报告（gitignored） | [0009-ai-snapshot-replay.md](../adr/0009-ai-snapshot-replay.md) | 使用中 |
+| BT-03 | R21 变体：可信度元数据在持久化边界丢失（`data_warnings` / `failed_signal_dates` / 配置快照等已知不可信信号落库后被丢弃，UI 渲染为「无问题」） | review03 业务语义与可信度 | [CLAUDE.md](../../CLAUDE.md) R21 / [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
+| AI-02 | 业务语义字段（`score` / `ai_score` / `confidence` 等）的缺失表示：必须用 `None`/哨兵，禁止填充业务上合法的具体值（检视报告 04 AI-02，缺陷根因见 R21） | 本地检视报告（gitignored） | [CONTRIBUTING.md](../../CONTRIBUTING.md)「业务语义字段的缺失表示」 | 使用中 |
+| E4 | OSS 检视：import-linter 6 条手工 forbidden 契约重构为 1 条 layers + 2 条 forbidden（AST 静态测试随之退役，例外注册表路径校验保留） | OSS 检视（E 系列） | [pyproject.toml](../../pyproject.toml) / [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
+| DAT-07 | 回测不可复现：财报无修订历史，UPSERT 覆盖使历史回测结果随时间漂移（属结论可信度边界，非代码欠债） | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
+| DAT-08 | 回测前视：申万行业为当前快照，`sw_industry_member` 主键不含日期，跨分类调整期回测存在前视（含存量污染 `industry_tushare`） | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
+| BT-05 | 回测路径 `_BacktestQualityProxy` 硬编码 GOLD 绕过数据质量门控（第一步显式化，第二步待设计） | review03 业务语义与可信度 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
+| CON-04 | subprocess 不可取消长任务停机交互：terminate 仅终止 sidecar 包装 / dump 中断残留不自动清理 / restore 拒绝取消 | review02 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
+| DATA-01 | 已知金额列裸比较未做单位换算（北向资金 `north_money` 错 100 倍）——催生 R20 统一换算入口 | business-review-2026-09-11（业务检视） | [redlines.yml](./redlines.yml) R20 / [prototype_business_redlines.py](../../scripts/prototype_business_redlines.py) | 使用中 |
+| DATA-02 | 同 DATA-01（龙虎榜 `net_amount` 错 10000 倍等），统一经 `threshold_in_data_unit()` 换算后再比较 | business-review-2026-09-11（业务检视） | [redlines.yml](./redlines.yml) R20 | 使用中 |
+| SYNC-01 | 水位线（checkpoint）写入非单调，断点续传水位可能回退——催生 R22 单调性红线 | business-review-2026-09-11（业务检视） | [redlines.yml](./redlines.yml) R22 | 使用中 |
