@@ -5491,3 +5491,41 @@ class TestPrecommitHookAndWorkflowEnum:
         assert any("nightly-probe.yml" in e and "未在 ci-cd.md 登记" in e for e in errors), (
             f"应报未登记 workflow, got: {errors}"
         )
+
+    def test_workflow_enum_detects_unregistered_amid_other_yml_refs(self, tmp_path, monkeypatch):
+        """文档已引用其他 .yml，但缺目标 workflow → 仍须报未登记（F-09 复核）。
+
+        原实现条件为「文档中存在任意 .yml 引用」，未使用循环变量 wf，只要 ci-cd.md 提及
+        任一 `.yml` 即对全部 workflow 放行，实为空操作；本用例覆盖该回归。
+        """
+        from check_docs_consistency import check_workflow_enum
+
+        wf_dir = tmp_path / "workflows"
+        wf_dir.mkdir()
+        (wf_dir / "ci_cd.yml").write_text("name: ci\n", encoding="utf-8")
+        (wf_dir / "flet-nightly.yml").write_text("name: nightly\n", encoding="utf-8")
+        doc = tmp_path / "ci-cd.md"
+        doc.write_text("主矩阵见 `.github/workflows/ci_cd.yml`。\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.WORKFLOWS_DIR", wf_dir)
+        monkeypatch.setattr("check_docs_consistency.CI_CD_PATH", doc)
+        errors = check_workflow_enum()
+        assert any("flet-nightly.yml" in e and "未在 ci-cd.md 登记" in e for e in errors), (
+            f"已引用其他 .yml 时仍应报未登记的 flet-nightly.yml, got: {errors}"
+        )
+        assert not any("ci_cd.yml" in e for e in errors), f"已登记的 ci_cd.yml 不应报错, got: {errors}"
+
+    def test_workflow_enum_filename_boundary(self, tmp_path, monkeypatch):
+        """文件名按边界匹配：`qtrading-pg-sidecar.yml` 不得视为已登记 `sidecar.yml`。"""
+        from check_docs_consistency import check_workflow_enum
+
+        wf_dir = tmp_path / "workflows"
+        wf_dir.mkdir()
+        (wf_dir / "sidecar.yml").write_text("name: sidecar\n", encoding="utf-8")
+        doc = tmp_path / "ci-cd.md"
+        doc.write_text("相关产物见 `qtrading-pg-sidecar.yml`。\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.WORKFLOWS_DIR", wf_dir)
+        monkeypatch.setattr("check_docs_consistency.CI_CD_PATH", doc)
+        errors = check_workflow_enum()
+        assert any("sidecar.yml" in e and "未在 ci-cd.md 登记" in e for e in errors), (
+            f"长名不应视为已登记 sidecar.yml, got: {errors}"
+        )
