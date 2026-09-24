@@ -82,6 +82,7 @@ _SCREENING_SQL_TEMPLATE = """
                      f.or_yoy,
                      f.netprofit_yoy,
                      f.n_income,
+                     f.fin_end_date,
                      f_prev.gpm_prev,
                      CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable
                FROM stock_basic b
@@ -93,7 +94,8 @@ _SCREENING_SQL_TEMPLATE = """
                                           f_inner.debt_to_assets,
                                           f_inner.or_yoy,
                                           f_inner.netprofit_yoy,
-                                          f_inner.n_income
+                                          f_inner.n_income,
+                                          f_inner.end_date AS fin_end_date  -- CRIT-01: 最新报告期透出，供累计口径年化与期间可见性
                                    FROM (SELECT ts_code,
                                                 roe,
                                                 grossprofit_margin,
@@ -101,6 +103,7 @@ _SCREENING_SQL_TEMPLATE = """
                                                 or_yoy,
                                                 netprofit_yoy,
                                                 n_income,
+                                                end_date,
                                                 ROW_NUMBER() OVER (
                                                     PARTITION BY ts_code
                                                     ORDER BY end_date DESC, ann_date DESC  -- DAT-03: 最新一期财报口径 end_date DESC, ann_date DESC
@@ -180,6 +183,7 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                      f.or_yoy,
                      f.netprofit_yoy,
                      f.n_income,
+                     f.fin_end_date,
                      f_prev.gpm_prev,
                      CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable
                FROM (
@@ -198,7 +202,8 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                                    f_inner.debt_to_assets,
                                    f_inner.or_yoy,
                                    f_inner.netprofit_yoy,
-                                   f_inner.n_income
+                                   f_inner.n_income,
+                                   f_inner.end_date AS fin_end_date  -- CRIT-01: 最新报告期透出，供累计口径年化与期间可见性
                             FROM financial_reports f_inner
                             WHERE f_inner.ts_code = b.ts_code
                               AND f_inner.ann_date IS NOT NULL

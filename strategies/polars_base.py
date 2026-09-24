@@ -146,6 +146,9 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
             def _convert_and_filter(df_in, ctx):
                 lf = pl.from_pandas(df_in).lazy()
                 lf = self._apply_exclude_st(lf, ctx)
+                # CRIT-01: 派生列注入（默认 no-op）。须在 base_lf 定稿前执行，
+                # 使注入列对 _filter_logic 与空集诊断（在 base_lf 上回溯）同列可求值。
+                lf = self._preprocess_lf(lf, ctx)
                 base_lf = lf
                 result_lf = self._filter_logic(lf, ctx)
                 result_df = result_lf.collect().to_pandas()
@@ -209,6 +212,16 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
         if excluded:
             ctx.setdefault("warnings", []).append(Message("strategy_excluded_st", {"count": excluded}))
         return lf.filter(pl.col("is_st").fill_null(False).not_())
+
+    def _preprocess_lf(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
+        """可选钩子：过滤前注入派生列（默认 no-op，CRIT-01）。
+
+        在 ``_apply_exclude_st`` 之后、``base_lf`` 定稿前调用，注入的派生列
+        对 ``_filter_logic`` 与 SC-07 空集诊断（在 base_lf 上逐条件回溯）同时可见。
+        重写者须保证 ``declared_conditions`` 声明条件与实际过滤条件同列同义，
+        否则诊断会因列缺失静默跳过或误报。
+        """
+        return lf
 
     @abstractmethod
     def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
