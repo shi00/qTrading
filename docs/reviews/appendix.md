@@ -90,7 +90,7 @@
       "confidence": "high",
       "changeRelation": "introduced",
       "dimension": "correctness",
-      "ruleId": "R21",
+      "ruleId": "FIND-01",
       "disposition": "open",
       "waiver": null,
       "location": {
@@ -127,13 +127,13 @@
         "redactedCommand": "pytest tests/unit/ui/viewmodels/ -k r21 -q",
         "redactions": [],
         "environment": "linux-x86_64",
-        "exitCode": 0,
-        "status": "passed",
+        "exitCode": 1,
+        "status": "failed",
         "selectedCount": 1,
         "executedCount": 1,
         "skippedCount": 0,
         "durationMs": 120,
-        "evidenceSummary": "1 passed",
+        "evidenceSummary": "1 failed（test_score_none 断言失败：期望 None 实得 0.0）",
         "reportDigest": null,
         "sideEffects": []
       }
@@ -157,9 +157,9 @@
   },
   "residualRisks": [],
   "gate": {
-    "policyId": "ai-review-core",
-    "policyVersion": "1.0.0",
-    "evaluatorVersion": "1.0.0",
+    "policyId": "qtrading-ai-review-policy",
+    "policyVersion": "1.0",
+    "evaluatorVersion": "1.0",
     "verdict": "fail",
     "decisions": [
       {
@@ -172,4 +172,4 @@
 }
 ```
 
-> 说明：`evidence` 为数组（`minItems: 1`）；`disposition: waived` 时 `waiver` 必须为对象；`gate.decisions[].fingerprint` 必须现存且唯一（OUT-02 语义校验器强制）。
+> 说明：`evidence` 为数组（`minItems: 1`）；`disposition: waived` 时 `waiver` 必须为对象；`gate.decisions[].fingerprint` 必须现存且唯一（OUT-02 语义要求，当前由检视者人工核对）。`ruleId` 只取 ai-review.md 已定义的 ID（本例为 `FIND-01`）；`review-result.schema.json` 无承载项目红线（如 R21）的字段，项目红线写入 `title` / `gate.decisions[].reason` 等文本字段。

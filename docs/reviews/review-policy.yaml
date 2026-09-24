@@ -1,7 +1,8 @@
 # AI 代码检视门禁策略
 # 由 [ai-review.md §7.3 SEV-01 / §8 OUT-03](./ai-review.md) 引用。
-# 受信 CI 必须使用固定版本的独立策略求值器重新计算 gate.decisions 和 gate.verdict，
-# 不得信任模型自行给出的阻断结论。
+# 目标契约：若接入受信 CI 自动门禁，由固定版本的独立策略求值器重新计算
+# gate.decisions 和 gate.verdict，不得信任模型自行给出的阻断结论
+# （当前未接入自动求值器，gate 由检视者依本策略人工判定）。
 
 policyId: qtrading-ai-review-policy
 policyVersion: "1.0"
