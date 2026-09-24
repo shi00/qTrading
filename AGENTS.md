@@ -8,7 +8,7 @@
 > - review_triggers: 红线新增/变更、Flet 升级、检视报告发布时
 > - canonical_for: 跨工具红线最小安全集（导出镜像，非语义正本）
 
-本文件为跨工具自动加载的规则入口（P3-03）。**修改任何代码前必须先完整阅读 [CLAUDE.md](./CLAUDE.md)（项目宪法，红线/架构边界/AI 行为准则的正本）；未读取前只做只读调查。**
+本文件为跨工具自动加载的规则入口（P3-03）。**修改任何代码前先读 [CLAUDE.md](./CLAUDE.md)（项目宪法）§3 红线与 §1.8 任务路由，再按该路由展开必读文件；未读取前只做只读调查。**
 
 - **语言约定**：始终使用简体中文回复。
 - **只读默认**：回答/诊断默认只读，文件或外部状态修改须用户明确授权（对应 CLAUDE.md §1.0 / §1.1）。
@@ -30,3 +30,14 @@
 任务类型 → 必读正本的完整路由见 [docs/governance/canonical-topics.yml](./docs/governance/canonical-topics.yml)（机器可读，每类任务一个 canonical 入口）。
 
 实现规范、代码模板与工作流步骤见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+
+## 最小验证命令
+
+命令正本为 [CONTRIBUTING.md](./CONTRIBUTING.md)「常用开发与测试命令」（本区块为生成镜像，勿手工修改）：
+
+<!-- generated:min-verify-commands -->
+- **变更相关门禁**（提交/PR 前，顺序与 `.github/workflows/ci_cd.yml` 一致）：`ruff check .` → `ruff format --check .` → `pre-commit run --all-files` → `pyright` → `python -m pytest tests/unit/ -v --tb=short`
+- **最小验证子集**（按变更范围裁剪，勿全量跑）：见 [CONTRIBUTING.md](./CONTRIBUTING.md#变更类型--最小验证子集)
+- **仅 Markdown / 治理文档改动**：`python scripts/check_docs_consistency.py` + `python -m pytest tests/unit/test_docs_consistency.py`
+- **不得声称未运行项已通过**；无法运行的验证需说明原因
+<!-- /generated -->
