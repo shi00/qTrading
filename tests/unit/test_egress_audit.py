@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date
 
 import pytest
 
 from utils.egress_audit import EgressAudit, EgressRecord
+from utils.time_utils import get_now
 
 pytestmark = pytest.mark.unit
 
@@ -110,7 +110,7 @@ class TestAggregatesNoDoubleCount:
 
     async def test_aggregates_ignore_corrupt_lines(self, _tmp_egress_path) -> None:
         path = _tmp_egress_path / "egress_audit.jsonl"
-        ts = date.today().isoformat()  # 时间戳须为今天, 才计入 today 聚合 (date.today() 前缀过滤)
+        ts = get_now().date().isoformat()  # 须为今天 (CST get_now, 与生产 today 前缀一致)
         path.write_text(
             f'{{"timestamp": "{ts}T00:00:00", "destination": "llm:ok/ok"}}\nnot-json-line\n', encoding="utf-8"
         )

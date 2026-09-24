@@ -26,6 +26,7 @@ from ui.viewmodels.data_explorer_view_model import (
     _sql_result_to_state_fields,
 )
 from utils.thread_pool import TaskType, ThreadPoolManager
+from utils.time_utils import get_now
 
 pytestmark = pytest.mark.unit
 
@@ -968,7 +969,7 @@ class TestLoadDataFreshness:
         import datetime as _dt
 
         latest_fixed = _dt.date(2025, 7, 28)
-        expected_lag = max(0, (_dt.date.today() - latest_fixed).days)
+        expected_lag = max(0, (get_now().date() - latest_fixed).days)
 
         mock_db.get_latest_trade_date.return_value = "20250728"
         await vm.load_data_freshness()
@@ -980,7 +981,7 @@ class TestLoadDataFreshness:
         import datetime as _dt
 
         latest_fixed = _dt.date(2025, 7, 28)
-        expected_lag = max(0, (_dt.date.today() - latest_fixed).days)
+        expected_lag = max(0, (get_now().date() - latest_fixed).days)
 
         mock_db.get_latest_trade_date.return_value = "2025-07-28"
         await vm.load_data_freshness()

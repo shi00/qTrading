@@ -39,6 +39,7 @@ from ui.components.backtest.backtest_config_panel import (
     BacktestConfigPanel,
     _make_date_picker,
 )
+from utils.time_utils import get_now
 
 pytestmark = pytest.mark.unit
 
@@ -498,7 +499,7 @@ class TestOnRunClick:
         run_btn = _find_run_button(result)
         _invoke(run_btn.on_click, _make_event())
         config = on_run.call_args.args[0]
-        today = date.today()
+        today = get_now().date()
         one_year_ago = today - timedelta(days=365)
         assert config["start_date"] == one_year_ago
         assert config["end_date"] == today
@@ -1081,7 +1082,7 @@ class TestValidationUX05:
         assert len(date_pickers) >= 1
         picker = date_pickers[0]
         # 选中今天 = 默认 end (start==end → 严格小于规则非法)
-        _invoke(picker.on_change, _make_event(date.today()))
+        _invoke(picker.on_change, _make_event(get_now().date()))
         new_result = _rerender(component)
         run_btn = _find_run_button(new_result)
         assert run_btn.disabled is True, "start==end (同日区间) 应禁用运行按钮"
@@ -1096,14 +1097,14 @@ class TestValidationUX05:
         _invoke(date_btns[0].on_click, _make_event())
         _rerender(component)
         start_picker = [c for c in page._dialogs.controls if isinstance(c, ft.DatePicker)][0]
-        _invoke(start_picker.on_change, _make_event(date.today()))
+        _invoke(start_picker.on_change, _make_event(get_now().date()))
         blocked_result = _rerender(component)
         assert _find_run_button(blocked_result).disabled is True
         # 第二次: start 改回一年前 → start<end → 恢复可用
         _invoke(date_btns[0].on_click, _make_event())
         _rerender(component)
         start_picker = [c for c in page._dialogs.controls if isinstance(c, ft.DatePicker)][0]
-        _invoke(start_picker.on_change, _make_event(date.today() - timedelta(days=365)))
+        _invoke(start_picker.on_change, _make_event(get_now().date() - timedelta(days=365)))
         fixed_result = _rerender(component)
         run_btn = _find_run_button(fixed_result)
         assert run_btn.disabled is False, "日期修正后运行按钮应恢复可用"
