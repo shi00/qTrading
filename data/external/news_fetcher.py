@@ -1,3 +1,18 @@
+"""个股新闻 / 公告 / 全球财经快讯 / 美股行情 / 概念热度抓取（NewsFetcher）。
+
+数据源取舍（review08-A1 固化，勿视为遗漏）：
+- CLS 财联社电报（``get_latest_global_news``）与新浪美股行情（``get_us_major_moves``）
+  由本模块手写 httpx 客户端直连，而非改用 akshare 同源接口（``stock_info_global_cls`` /
+  ``stock_us_spot_em``）：akshare 为同步 requests 实现，提交线程池后无法被
+  ``asyncio.wait_for`` 取消，会持续占用 IO 池槽位直至自然返回（B16 迁移动机）。
+  代价：接口漂移与反爬策略由本项目自维护。
+- akshare 出站调用（``stock_news_em`` / ``stock_zh_a_disclosure_report_cninfo``）统一经
+  模块级共享限速器（``data/external/akshare_rate_limiter``）限速后提交线程池执行；
+  新增 akshare 调用须同样接入（review08-B4）。
+- 概念热度（``get_hot_concepts``）走 httpx 直连新浪 HTTPS 端点，不走 akshare
+  ``stock_sector_spot``（其内部明文 HTTP 且无 timeout，review08-B2）。
+"""
+
 import asyncio
 import datetime
 import json
