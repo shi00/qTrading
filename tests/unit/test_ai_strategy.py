@@ -45,10 +45,11 @@ class TestAISelectionStrategyQualityGate:
 
 class TestAISelectionStrategyInit:
     @patch("strategies.ai_strategy.ConfigHandler")
-    def test_init(self, mock_ch):
+    def test_init_does_not_cache_limit(self, mock_ch):
+        """MAJOR-04: 候选上限不得缓存在实例上——设置页改动须立即生效、无需重启。"""
         mock_ch.get_ai_max_candidates.return_value = 10
         s = AISelectionStrategy()
-        assert s.limit == 10
+        assert not hasattr(s, "limit")
 
     @patch("strategies.ai_strategy.ConfigHandler")
     def test_required_history_days(self, mock_ch):
@@ -78,6 +79,36 @@ class TestAISelectionStrategyFilter:
         context = {"data_processor": _make_dp()}
         result = await s.filter(context)
         assert result.empty
+
+    @pytest.mark.asyncio
+    @patch("strategies.ai_mixin.AIService")
+    @patch("strategies.ai_strategy.ConfigHandler")
+    async def test_prefilter_reads_limit_fresh_after_config_change(self, mock_ch, mock_ai_cls):
+        """MAJOR-04: 构造后配置 10→80，前置粗筛立即用 80（旧实现的实例快照会给出 10）。"""
+        mock_ch.get_ai_max_candidates.return_value = 10
+        mock_ch.get_strategy_min_turnover.return_value = 1.0
+        s = AISelectionStrategy()  # 构造时配置为 10（旧实现在此固化）
+        mock_ch.get_ai_max_candidates.return_value = 80  # 用户在设置页改动（未重启）
+
+        captured: dict = {}
+
+        async def _fake_run_ai_analysis(candidates, context):
+            captured["n"] = len(candidates)
+            return candidates
+
+        s.run_ai_analysis = _fake_run_ai_analysis  # type: ignore[method-assign]  # 直接观测粗筛输出行数
+        df = pd.DataFrame(
+            {
+                "ts_code": [f"{i:06d}.SZ" for i in range(100)],
+                "pe_ttm": [15.0] * 100,
+                "turnover_rate": [float(i) for i in range(100)],
+                "list_status": ["L"] * 100,
+            }
+        )
+        context = {"screening_data": df, "fundamental_screening_data": df, "data_processor": _make_dp()}
+        result = await s.filter(context)
+        assert captured["n"] == 80, "前置粗筛应使用最新配置上限（旧实现会给出 10）"
+        assert len(result) == 80
 
     @pytest.mark.asyncio
     @patch("strategies.ai_mixin.AIService")

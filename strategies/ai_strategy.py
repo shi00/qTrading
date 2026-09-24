@@ -23,7 +23,6 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
 
     def __init__(self):
         super().__init__("strategy_ai_active_name", "strategy_ai_active_desc")
-        self.limit = ConfigHandler.get_ai_max_candidates()
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
     @require_quality(QualityTier.SILVER)
@@ -64,8 +63,11 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
         candidates = df[mask].copy()
 
         # Sort by turnover_rate desc (Most active), cap at limit
+        # MAJOR-04: 现读配置而非实例缓存——策略实例由 StrategyManager 单例长期持有，
+        # __init__ 快照会让设置页改动「不重启不生效」（与 ai_mixin.run_ai_analysis 现读一致）。
+        limit = ConfigHandler.get_ai_max_candidates()
         candidates = candidates.sort_values(by="turnover_rate", ascending=False).head(  # type: ignore[call-arg]
-            self.limit,
+            limit,
         )
 
         if candidates.empty:

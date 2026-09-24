@@ -29,7 +29,7 @@
 | `tests/e2e/`（+`fixtures/fake_sidecar.py`） | Flet UI 端到端 / embedded 启动 / onboarding 流程 | `tests/e2e/*.py` | 端到端真实运行（标记 `e2e`），依赖 E2E 环境（见下） |
 
 **治理 / 文档门禁测试**（`tests/unit/` 顶层，与施工门禁强相关）：
-`test_docs_consistency.py`（文档一致性）· `test_redline_checks.py`（红线检查）· `test_architecture_boundaries.py`（R1 分层）· `test_import_linter_config.py`（import-linter 契约）· `test_no_cancelled_error_swallow.py`（R2）· `test_no_class_attr_asyncio_primitives.py`（R11）· `test_check_diff_coverage.py` · `test_check_per_file_coverage.py` · `test_check_staged_weak_assertions.py` · `test_scan_weak_assertions.py` · `test_run_pyright_changed.py`。新增/修改门禁或工程脚本规范时，配套测试一律放入 `tests/unit/` 顶层。
+`test_docs_consistency.py`（文档一致性）· `test_docs_template_symbols.py`（文档代码块符号可落地性）· `test_redline_checks.py`（红线检查）· `test_architecture_boundaries.py`（R1 分层）· `test_import_linter_config.py`（import-linter 契约）· `test_no_cancelled_error_swallow.py`（R2）· `test_no_class_attr_asyncio_primitives.py`（R11）· `test_check_diff_coverage.py` · `test_check_per_file_coverage.py` · `test_check_staged_weak_assertions.py` · `test_scan_weak_assertions.py` · `test_run_pyright_changed.py`。新增/修改门禁或工程脚本规范时，配套测试一律放入 `tests/unit/` 顶层。
 
 #### conftest 层级与 autouse fixture
 

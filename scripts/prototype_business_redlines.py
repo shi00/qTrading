@@ -19,7 +19,10 @@ R22 水位单调）最终 enforcement 形态。
 - 每条红线一个 ast.NodeVisitor 子类；每个命中记录 `{file, lineno, kind, detail,
   defect_id}`，`defect_id` 由本地缺陷位置映射表回填，用于统计误报率。
 - 输出 JSON 报告（stdout）与人类可读摘要（stderr）。
-- 本脚本为原型，不接入 pre-commit / redlines.yml / AGENTS.md 生成区块。
+- 本脚本仍为原型：不接入 pre-commit / AGENTS.md 生成区块。其中 R21 检测器
+  （MissingMaskingVisitor）已被 scripts/check_redlines.py::check_R21 复用为**报告模式**
+  （warning 不阻断）并经 docs/governance/redlines.yml R21 登记；R20 / R22 的接入各自
+  在 check_redlines.py 中以独立窄规则实现，本原型的对应 visitor 仅作可行性基准。
 
 用法
 ----

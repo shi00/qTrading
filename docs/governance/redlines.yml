@@ -26,6 +26,12 @@
 #   checks: 守护该红线的 check_redlines.py 检查函数名（可选字段，list[str]）。
 #     DS-11 反向不变量：check_redlines.py main() 中实际执行的 check_* 必须在本栏（或
 #     enforcement 文本中按名提及）登记，否则 check_enforcement_reverse_coverage() 报错。
+#   self_check: 可执行自查判据（可选字段，非空 list[str]，H2）。
+#     需人工评审的红线（automation_coverage != full，含 none 与仅报告模式的 partial）此前只有
+#     「尤须 AI 自查」这一态度式要求——让被约束者自评且无可勾选判据等于无约束。本栏把自查变成
+#     **可勾选、可在交付报告中逐条回答**的清单：每项为一条可执行判据（含搜索式 grep 命令或调用链追溯入口）。
+#     该字段由 CLAUDE.md「人工评审红线可执行自查清单」生成区块渲染（check_claude_self_check_sync()），
+#     声明时须为非空字符串列表（不得用空判据做形式合规）。
 #
 # 修改规则:
 #   - 新增 R20+ 时必须同步 CLAUDE.md §3.1 表格, 否则 check_redlines_yaml_consistency() 报错
@@ -81,6 +87,10 @@ redlines:
     automation_coverage: none
     human_review_required: true
     rule_type: EXCEPTIONABLE
+    self_check:
+      - "本次变更是否新增了 DAO 方法或维护流程分支？若是，逐个确认入口处存在 `_check_engine`（或等价的 `EngineDisposedError` 传播路径）"
+      - '搜索式：`grep -n "self\.engine\.\|is_disposed\|_check_engine" <改动文件>`；绕过保护方法的直达 `self.engine.*` 即违规'
+      - "豁免：应用服务层轮询循环的优雅停止须已登记 docs/governance/exceptions.yml，评到该类代码先查是否已登记"
 
   - id: R6
     title: 过时类型注解
@@ -190,6 +200,10 @@ redlines:
     automation_coverage: none
     human_review_required: true
     rule_type: NEW_CODE
+    self_check:
+      - "本次变更是否新增表名/列名？若是，逐个核对是否数字开头、含特殊字符（`.`/`-`/空格）或 PostgreSQL 保留字（`order`/`group`/`select`/`desc`/`from`/`where`）"
+      - "保留字清单来源：PostgreSQL 官方文档 Appendix C. SQL Key Words（https://www.postgresql.org/docs/current/sql-keywords-appendix.html）"
+      - "确认未在裸 SQL 中拼接该列名（保留字列名只能经 ORM `name=` 属性映射，不得出现在裸 SQL 字面量）"
 
   - id: R18
     title: 未隔离开发
@@ -220,10 +234,15 @@ redlines:
   - id: R21
     title: 缺失值伪装
     description: "业务语义字段（score / ai_score / confidence 等）缺失必须用 None/哨兵表示，禁止填充业务上合法的具体值（0 分、50% 置信度、空表视为「无限制」）；变体（BT-03）：「可信度元数据在持久化边界丢失」——data_warnings / failed_signal_dates / 配置快照等已知不可信信号落库后被丢弃、UI 渲染为「无问题」，等同把「已知不可信」伪装成「无信息」"
-    enforcement: "仅人工评审"
-    automation_coverage: none
+    enforcement: "pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R21 报告模式升级期限」（2026-12-31）"
+    checks:
+      - check_R21
+    automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE
+    self_check:
+      - "本次变更是否对业务语义字段（`score`/`ai_score`/`confidence` 等）赋常量或 `fillna`/`fill`？若是，缺失必须用 `None`/哨兵表示，禁止填 `0`/`50` 等业务合法值"
+      - "运行 `python scripts/check_redlines.py`，逐条人工确认 R21 报告模式 warning（warning 不阻断，未逐条确认即视为未自查）"
 
   - id: R22
     title: 水位线单调性

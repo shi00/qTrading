@@ -81,6 +81,7 @@ COMMON_COLUMNS = {
     # Financial Ratios
     "roe": "col_roe",
     "roe_dt": "col_roe_dt",
+    "roe_annualized": "col_roe_annualized",
     "grossprofit_margin": "col_grossprofit_margin",
     "netprofit_margin": "col_netprofit_margin",
     "debt_to_assets": "col_debt_to_assets",

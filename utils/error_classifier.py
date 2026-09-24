@@ -20,6 +20,7 @@ can be retried.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from core.errors import AppError
@@ -203,6 +204,19 @@ def _note_message_fallback(e: Exception, context: str) -> None:
     logger.debug("[Classify] fell back to message matching for %s (context=%s)", type(e).__name__, context)
 
 
+def _has_status_code(error_str: str, *codes: str) -> bool:
+    """匹配 HTTP 状态码，要求其前后不是 ASCII 字母/数字。
+
+    裸子串匹配（如 ``"404" in error_str``）会把 provider 返回的 request_id UUID
+    （如 ``85d7a8c7-d075-404e-9f5c-...`` 含 "404" 子串）、URL、端口中的数字误判为
+    HTTP 状态码，导致认证失败被误分类为 not_found（"404e" 不应命中 "404"）。
+
+    边界用 ASCII 字母数字字符类而非 ``\\b``：``\\b`` 是 Unicode 词边界，中文属 ``\\w``，
+    会让 "接口返回404错误" 这类紧邻中文的状态码失配（旧行为可命中，不应收窄）。
+    """
+    return any(re.search(rf"(?<![0-9A-Za-z]){code}(?![0-9A-Za-z])", error_str) is not None for code in codes)
+
+
 def classify_error(e: Exception, context: str = "general") -> dict:
     # review05-E3: AppError 携带结构化信息，语义无需事后推断，直接返回。
     if isinstance(e, AppError):
@@ -217,8 +231,6 @@ def classify_error(e: Exception, context: str = "general") -> dict:
             kw in error_str
             for kw in (
                 "token",
-                "401",
-                "403",
                 "unauthorized",
                 "forbidden",
                 "权限不足",
@@ -228,9 +240,11 @@ def classify_error(e: Exception, context: str = "general") -> dict:
                 "非法token",
                 "无效token",
             )
-        ):
+        ) or _has_status_code(error_str, "401", "403"):
             return {"code": "invalid", "message_key": "wizard_err_token_invalid"}
-        if any(kw in error_str for kw in ("quota", "402", "insufficient_quota", "积分不足", "积分", "credit")):
+        if _has_status_code(error_str, "402") or any(
+            kw in error_str for kw in ("quota", "insufficient_quota", "积分不足", "积分", "credit")
+        ):
             return {"code": "insufficient_quota", "message_key": "llm_err_insufficient_quota"}
         if any(kw in error_str for kw in ("asyncpg", "postgres", "database", "sqlite", "数据库")) or (
             (_apg_general := _load_asyncpg()) is not None and isinstance(e, getattr(_apg_general, "PostgresError", ()))
@@ -249,7 +263,7 @@ def classify_error(e: Exception, context: str = "general") -> dict:
         if "token" in error_str and ("invalid" in error_str or "not set" in error_str):
             return {"code": "invalid", "message_key": "wizard_err_token_invalid"}
         # HTTP auth failure status codes (Tushare returns 403 for bad token)
-        if "401" in error_str or "403" in error_str:
+        if _has_status_code(error_str, "401", "403"):
             return {"code": "invalid", "message_key": "wizard_err_token_invalid"}
         # Common Tushare Chinese auth error messages
         if any(kw in error_str for kw in ("权限不足", "鉴权失败", "认证失败", "未授权", "非法token", "无效token")):
@@ -296,19 +310,19 @@ def classify_error(e: Exception, context: str = "general") -> dict:
             return {"code": "network", "message_key": "llm_err_network", "should_retry": True}
 
         _note_message_fallback(e, context)
-        if "insufficient_quota" in error_str or "quota" in error_str or "402" in error_str:
+        if "insufficient_quota" in error_str or "quota" in error_str or _has_status_code(error_str, "402"):
             return {"code": "insufficient_quota", "message_key": "llm_err_insufficient_quota", "should_retry": False}
         if "content policy" in error_str or "content violation" in error_str:
             return {"code": "content_policy", "message_key": "llm_err_content_policy", "should_retry": False}
-        if "401" in error_str or "unauthorized" in error_str or "invalid api key" in error_str:
+        if _has_status_code(error_str, "401") or "unauthorized" in error_str or "invalid api key" in error_str:
             return {"code": "auth_failed", "message_key": "llm_err_auth_failed", "should_retry": False}
-        if "403" in error_str or "forbidden" in error_str:
+        if _has_status_code(error_str, "403") or "forbidden" in error_str:
             return {"code": "forbidden", "message_key": "llm_err_forbidden", "should_retry": False}
-        if "404" in error_str or "not found" in error_str:
+        if _has_status_code(error_str, "404") or "not found" in error_str:
             return {"code": "not_found", "message_key": "llm_err_not_found", "should_retry": False}
-        if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+        if _has_status_code(error_str, "429") or "rate limit" in error_str or "too many requests" in error_str:
             return {"code": "rate_limit", "message_key": "llm_err_rate_limit", "should_retry": True}
-        if "500" in error_str or "502" in error_str or "503" in error_str or "504" in error_str:
+        if _has_status_code(error_str, "500", "502", "503", "504"):
             return {"code": "server_error", "message_key": "llm_err_server", "should_retry": True}
         if "timeout" in error_str or "timed out" in error_str:
             return {"code": "timeout", "message_key": "llm_err_timeout", "should_retry": True}
@@ -463,7 +477,7 @@ def classify_error(e: Exception, context: str = "general") -> dict:
         return {"code": "timeout", "message_key": "common_err_timeout"}
     if "connection" in error_str or "network" in error_str or "connect" in error_str:
         return {"code": "network", "message_key": "common_err_network"}
-    if "500" in error_str or "502" in error_str or "503" in error_str:
+    if _has_status_code(error_str, "500", "502", "503"):
         return {"code": "server", "message_key": "common_err_server"}
 
     return {"code": "unknown", "message_key": "common_err_unknown"}

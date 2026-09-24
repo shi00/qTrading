@@ -18,6 +18,8 @@
 - R24 时点正确性（报告模式，warning 不阻断）：扫描 strategies/ 下「当前快照」维度（无生效日期
   的行业/指数/股票池维度表、ORM 类、派生列键）的使用，提示人工确认取数时点（正本见
   docs/patterns/backtest-correctness.md）
+- R21 缺失值伪装（报告模式，warning 不阻断）：扫描 services/strategies 下业务语义字段被填充 0 / 50
+  （复用 scripts/prototype_business_redlines.py 的 MissingMaskingVisitor，单一实现避免双实现漂移）
 
 退出码：0 通过，1 失败。供 pre-commit `redline-check` hook 与 pytest 契约测试调用。
 
@@ -36,6 +38,12 @@ import typing
 from collections.abc import Iterator
 from io import TextIOWrapper
 from pathlib import Path
+
+try:  # 同目录兄弟脚本: 经 `python scripts/check_redlines.py` 运行时 scripts/ 已在 sys.path[0]
+    from prototype_business_redlines import MissingMaskingVisitor
+except ImportError:  # 以 scripts.check_redlines 模块形式导入（scripts/ 不在 sys.path）时兜底
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from prototype_business_redlines import MissingMaskingVisitor
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -1738,6 +1746,52 @@ def check_R24() -> int:
 
 
 # ============================================================================
+# R21 缺失值伪装（报告模式，warning 不阻断）：业务语义字段被填充 0 / 50 等合法具体值
+# ============================================================================
+
+# R21 扫描域与可行性原型 PrototypeScanner.SCAN_DIRS["R21"] 一致
+# （score/ai_score/confidence 的填充点集中在策略层与服务层）
+_R21_SCAN_DIRS = ("services", "strategies")
+
+
+def check_R21() -> int:
+    """R21（报告模式，warning 不阻断）：扫描业务语义字段被填充 0 / 50 的伪装赋值。
+
+    检测逻辑复用可行性原型 scripts/prototype_business_redlines.py 的 MissingMaskingVisitor
+    （单一实现，避免双实现漂移），覆盖 masking_assign（score / ai_score / confidence 被赋
+    0 / 50，含三元 else 分支）与 masking_fillna_lowconf（fillna / fill 0 / 50）。
+
+    第一阶段为报告模式：warning 输出到 stderr、不阻断 exit code，全库实测误报率，达标后
+    评估升级为硬拦截；升级期限与翻转触发见 docs/governance/ruleset-changelog.md
+    「R21 报告模式升级期限」。返回 WARNING 条数，供 main() 汇总显示（GATE-05）。
+    """
+    warnings: list[str] = []
+    for sub in _R21_SCAN_DIRS:
+        target_dir = ROOT / sub
+        if not target_dir.exists():
+            continue
+        for p in _iter_py_files(target_dir):
+            tree = _parse_module(p)
+            if tree is None:
+                continue
+            visitor = MissingMaskingVisitor()
+            visitor.cur_file = p.relative_to(ROOT).as_posix()
+            visitor.visit(tree)
+            for hit in visitor.hits:
+                defect_id = hit.get("defect_id")
+                tag = f" [{defect_id}]" if defect_id else ""
+                warnings.append(f"R21 缺失值伪装: {hit['file']}:{hit['lineno']} {hit['detail']}{tag}")
+    if warnings:
+        print(
+            f"[WARN] R21 缺失值伪装 {len(warnings)} 处（报告模式，请人工复核；误报率达标后升级为拦截）：",
+            file=sys.stderr,
+        )
+        for w in warnings:
+            print(f"  - {w}", file=sys.stderr)
+    return len(warnings)
+
+
+# ============================================================================
 # CLI 入口
 # ============================================================================
 
@@ -1762,9 +1816,8 @@ def main() -> int:
         ("R22 水位线单调性 (D3-m1)", check_R22()),
     ]
     # R4 f-string SQL 模板为 WARNING（不阻断），输出到 stderr；返回计数供 [PASS] 汇总（GATE-05）
-    # R20 单位核对为 WARNING（报告模式，不阻断），输出到 stderr
-    # R24 时点正确性为 WARNING（报告模式，不阻断），输出到 stderr
-    warn_count = check_R4_fstring_sql() + check_R20() + check_R24()
+    # R20 单位核对 / R21 缺失值伪装 / R24 时点正确性为 WARNING（报告模式，不阻断），输出到 stderr
+    warn_count = check_R4_fstring_sql() + check_R20() + check_R21() + check_R24()
     all_errors: list[str] = []
     for _, errs in checks:
         all_errors.extend(errs)
@@ -1778,7 +1831,7 @@ def main() -> int:
     print(
         "[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15/R16 + R_no_bare_ft_colors_in_ui + R_no_bare_font_size_in_ui + R_tushare_token_log + R_lazy_import_whitelist + R4 text(f) DAT-08 + UIX-10 渲染副作用 + R22 水位线单调性）"
         + (
-            f"；含 {warn_count} 条 WARNING（R4 f-string SQL / R20 单位核对 / R24 时点正确性，不阻断但请人工复核）"
+            f"；含 {warn_count} 条 WARNING（R4 f-string SQL / R20 单位核对 / R21 缺失值伪装 / R24 时点正确性，不阻断但请人工复核）"
             if warn_count
             else ""
         )

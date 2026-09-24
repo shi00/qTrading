@@ -1,12 +1,14 @@
 # Harness v4 Configuration
 # Edit this file, then run `harness sync` to generate CC plugin files.
 #
-# プロジェクト憲法は CLAUDE.md (v0.9.0) が唯一権威。本ファイルは Harness
+# プロジェクト憲法は CLAUDE.md が唯一権威。本ファイルは Harness
 # ツール連携用の設定であり、CLAUDE.md の紅線・アーキテクチャ境界に優先しない。
+# 規約の正本ではない（AI ツール実行時権限・サンドボックス設定）。バージョンは
+# 製品版に同期（release-please extra-files が自動 bump、verify-versions が門番）。
 
 [project]
 name = "AStockScreener"
-version = "0.9.0"
+version = "0.10.1"  # x-release-please-version
 description = "智能 A 股 AI 量化交易员"
 
 [env]
@@ -124,7 +126,11 @@ adopt_triangulation = "guide-only"
 adopt_fake_implementation = false
 
 [tdd.enforce]
-# Local trial safe default: no behavior changes until explicitly enabled.
+# TDD の red-first 証跡フックは本プロジェクトでは無効（local trial safe default）。
+# 本プロジェクトの試験要件は CLAUDE.md §1.5（懶コード必須検証）と R19（業務ロジック
+# 変更は単測を伴う）で定まり、red-first 証跡の強制ではないため enabled=false を維持する。
+# これに伴い [worker.self_review].default_rules の tdd-red-evidence-attached を削除し、
+# 「TDD 強制 OFF ⇔ self-review が red 証跡を要求」の相互矛盾を解消する。
 enabled = false
 level = "off"
 hook_enabled = false
@@ -138,7 +144,6 @@ default_rules = [
   "all-declared-symbols-called",
   "dod-items-verified-with-evidence",
   "no-existing-test-regression",
-  "tdd-red-evidence-attached",
 ]
 extra_rules = []
 max_retries_before_escalate = 2

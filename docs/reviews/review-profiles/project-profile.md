@@ -16,7 +16,11 @@
 
 ## 红线自查步骤
 
-对 `automation_coverage: none` 的 4 条红线（R5 / R17 / R18 / R21）与 `partial` 自动门禁的 R20 / R22 / R24（R20 / R24 由 check_R20 / check_R24 报告模式提示 warning、不阻断退出码；R22 由 check_R22 水位线静态检测、pre-commit 拦截）以及高风险的 `partial` 维度（R16 事件处理器维度 / R11 缓存点与跨循环使用维度）给出可执行自查入口：每条给出**搜索式**（明确 grep/模式）、**调用链追溯**（明确入口与定义符号）或**声明核对**（无工作区访问权时的等价入口，如 R18 的 PR 描述声明）。上述红线无完整自动门禁或自动检测未覆盖全部场景，检视时须主动按此追查。完整语义见 [redlines.yml](../../governance/redlines.yml)，正常本见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止)。
+对 `automation_coverage: none` 的 3 条红线（R5 / R17 / R18）与 `partial` 自动门禁的 R20 / R21 / R22 / R24（R20 / R21 / R24 由 `check_R20` / `check_R21` / `check_R24` 报告模式提示 warning、不阻断退出码；R22 由 `check_R22` 水位线静态检测、pre-commit 拦截）以及高风险的 `partial` 维度（R16 事件处理器维度 / R11 缓存点与跨循环使用维度）给出可执行自查入口：每条给出**搜索式**（明确 grep/模式）、**调用链追溯**（明确入口与定义符号）或**声明核对**（无工作区访问权时的等价入口，如 R18 的 PR 描述声明）。R5 / R17 / R21 的判据正本同时以 `redlines.yml` 的 `self_check` 字段承载，并渲染进 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止) 的「人工评审红线可执行自查清单」生成区块（交付时逐条回答）。上述红线无完整自动门禁或自动检测未覆盖全部场景，检视时须主动按此追查。完整语义见 [redlines.yml](../../governance/redlines.yml)，正常本见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止)。
+
+### 独立会话复核（无自动拦截且影响产品结论的红线）
+
+**无自动拦截**（`automation_coverage: none`，或自动化仅报告模式 warning、不阻断退出码）**且影响产品结论**的红线（R21、R24（R24 见 [ruleset-changelog.md](../../governance/ruleset-changelog.md)，由并行单元新增）），除按上述判据自查外，**须经独立会话复核**：新开一个上下文，只提供 diff 与判据（`redlines.yml` 的 `self_check` / 上方追查步骤），**不提供实现理由与自评结论**，由该会话独立判定是否命中。这是 AI 工作流中唯一近似「第二双眼睛」的可行机制（被约束者自评等于无约束），规则正本与体例见 [ai-review.md](../ai-review.md) 的 ROUND3-05。
 
 ### R5 僵尸引擎操作
 1. 调用链追溯：对改动新增/触及的 DAO 或维护方法，从方法入口追到首次碰 `self.engine` 的读/写点，确认其先经 `BaseDao._check_engine()`（`data/persistence/daos/base_dao.py:116`）检查——该方法调 `engine_provider.is_disposed()`（`data/persistence/engine_provider.py:70`）判定，disposed 时抛 `EngineDisposedError`（`base_dao.py:29`）。
@@ -50,8 +54,8 @@
 
 ### R21 缺失值伪装
 1. 业务语义字段（`score` / `ai_score` / `confidence`）缺失必须用 `None`/哨兵（如 `suspend_data_absent`）表示，禁止填 `0` / `50` 等业务合法值。改动中对其赋常量或 `fillna(0)` / `fill(0)` 即违规。
-2. 运行 AST 原型：`python scripts/prototype_business_redlines.py`。`MissingMaskingVisitor` 检测 `masking_assign`（赋值 0/50）与 `masking_fillna_lowconf`（fillna/fill 0/50），输出 `R21` 命中；`score=0`、`confidence=50`、空表当「无限制」均为候选。
-3. 误报排除：合法 `score==0` 语义（AI-01 已修默认 `None`）与 `suspend_data_absent`（DATA-03 已修）不在伪装之列；原型 `defect_id` 标 `clean` 的命中（对已修复缺陷不再报警）无需整改，确认命中的真实缺陷才处理。
+2. 运行自动检测（报告模式）：`python scripts/check_redlines.py`，`check_R21` 复用 `scripts/prototype_business_redlines.py` 的 `MissingMaskingVisitor` 检测 `masking_assign`（赋值 0/50）与 `masking_fillna_lowconf`（fillna/fill 0/50），以 warning 输出 `R21 缺失值伪装`（不阻断退出码，须逐条人工确认）；`score=0`、`confidence=50`、空表当「无限制」均为候选。可行性原型 `python scripts/prototype_business_redlines.py` 仍可运行以查看同源命中的 `defect_id` 标注。
+3. 误报排除：合法 `score==0` 语义（AI-01 已修默认 `None`）与 `suspend_data_absent`（DATA-03 已修）不在伪装之列；原型 `defect_id` 标 `clean` 的命中（对已修复缺陷不再报警）无需整改，确认命中的真实缺陷才处理。影响产品结论的变更还须按上方「独立会话复核」执行。
 
 ### R22 水位线单调性
 1. checkpoint/高水位持久化写入必须单调：优先 `set_app_state_max()`（`data/persistence/app_state_service.py:43`，SQL 层 GREATEST 保护）；禁止用无条件 `set_app_state()`（`app_state_service.py:27`，最后写入者获胜）写水位 key（含 `attempted`/`watermark`/`checkpoint`/`upto`/`last_sync`/`resume` 语义）。

@@ -64,6 +64,9 @@
    守护"只能数数量、不能核名字"的枚举漂移（数量门禁可被指针式写法绕过）。
 29. workflow 枚举无遗漏检查（F-09）：断言 .github/workflows/*.yml 每一文件都在 ci-cd.md 出现，
    守护 CI 前端流水线（docs-ci / flet-nightly / sidecar 等）因仅存在于文件而被文档漏登记。
+30. 人工评审红线自查清单一致性检查（H2）：CLAUDE.md「人工评审红线可执行自查清单」生成区块须等于
+   redlines.yml `self_check` 字段渲染结果，且该字段声明时须为非空字符串列表——把需人工评审红线的
+   「尤须 AI 自查」（态度式要求）变为可勾选判据（见 check_claude_self_check_sync()）。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -150,26 +153,63 @@ FLET_DOCS_PATHS: list[Path] = sorted(FLET_DOCS_DIR.glob("*.md"))
 # 受检 markdown 文件清单（锚点死链 + 相对链接死链 + pre-commit hook 数量校验范围）
 # P2-06 修复：改为递归发现全部受跟踪 Markdown，再用显式排除清单处理生成物和归档。
 # 递归发现范围：根目录 *.md、docs/ 与 man/ 全部 *.md、requirements/ 全部 *.md、PR 模板；
-# 排除项必须带原因（_DOC_EXCLUDES）。
+# 排除项必须带原因（_build_doc_excludes）。
 # Flet 入口完整性：FLET_DOCS_PATHS 动态发现 docs/flet/*.md，新增专题自动纳入门禁。
-_DOC_EXCLUDES: dict[Path, str] = {
-    # 示例：ROOT / "docs" / "xxx" / "generated.md": "生成物，非人工维护",
-    ROOT / "docs" / "superpowers": "本地 skill 计划目录（.gitignore 排除），非交付物，不参与文档一致性校验",
-    # 历史技术债计划归档：标题引用当时的红线范围（R1-R18），非当前状态
-    ROOT / "Plans-tech-debt.md": "历史技术债计划归档，标题引用当时红线范围，不参与一致性门禁",
-}
-CHECKED_DOCS: list[Path] = sorted(
-    d
-    for d in {
-        *ROOT.glob("*.md"),
-        *(ROOT / "docs").rglob("*.md"),
-        *(ROOT / "man").rglob("*.md"),
-        *(ROOT / "requirements").rglob("*.md"),
-        ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md",
-    }
-    # 排除支持精确文件与目录前缀（目录下全部子文档一并排除）
-    if not any(d == e or e in d.parents for e in _DOC_EXCLUDES)
+
+# 真实 gitignored 的本地产物 / 归档目录（受 .gitignore 保护，不入版本控制，GDR-07）。
+# 统一供两处消费：受检集排除（_build_doc_excludes）与索引完整性扫描豁免
+# （check_docs_index_completeness）。本集合严格限定为真实 gitignored 目录。
+_GITIGNORED_ARTIFACT_DIRS: tuple[Path, ...] = (
+    ROOT / "docs" / "plans" / "archive",
+    ROOT / "docs" / "audit",
+    ROOT / "docs" / "superpowers",
 )
+
+# 兼容别名：保留 _LOCAL_ARTIFACT_DIRS 供外部或现有测试引用
+_LOCAL_ARTIFACT_DIRS: tuple[Path, ...] = _GITIGNORED_ARTIFACT_DIRS
+
+# 本地会话计划文件（.gitignore 排除、内容随会话变化或固化历史状态，不入版本控制）：
+# 与 _GITIGNORED_ARTIFACT_DIRS 同属 gitignored 本地产物但为根级文件。统一在此登记，
+# 受检集构建与治理 ID 扫描共用同一来源（H1：此前 Plans.md 仅在治理 ID 扫描处按名排除，
+# 受检集漏排，导致本地 pre-commit 持续假 FAIL）。
+_LOCAL_PLAN_FILE_RELS: tuple[str, ...] = ("Plans.md", "Plans-tech-debt.md")
+
+
+def _build_doc_excludes() -> dict[Path, str]:
+    """构建受检集排除清单：gitignored 产物目录 + 本地会话计划文件（逐项带排除原因）。
+
+    按当前 ROOT 动态计算（导入期由 _collect_checked_docs 调用；测试可先 monkeypatch
+    ROOT 再调用 _collect_checked_docs 重算，无需真实本地文件在场）。
+    """
+    excludes: dict[Path, str] = {
+        d: "本地 gitignored 产物 / 归档目录（GDR-07），非交付物，不参与文档一致性校验"
+        for d in _GITIGNORED_ARTIFACT_DIRS
+    }
+    excludes.update(
+        (ROOT / rel, "本地会话计划文件（.gitignore 排除，内容随会话变化或固化历史状态），不参与一致性门禁")
+        for rel in _LOCAL_PLAN_FILE_RELS
+    )
+    return excludes
+
+
+def _collect_checked_docs() -> list[Path]:
+    """构建受检文档集（导入期执行；测试经 monkeypatch ROOT 后重算以注入临时仓库）。"""
+    excludes = _build_doc_excludes()
+    return sorted(
+        d
+        for d in {
+            *ROOT.glob("*.md"),
+            *(ROOT / "docs").rglob("*.md"),
+            *(ROOT / "man").rglob("*.md"),
+            *(ROOT / "requirements").rglob("*.md"),
+            ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md",
+        }
+        # 排除支持精确文件与目录前缀（目录下全部子文档一并排除）
+        if not any(d == e or e in d.parents for e in excludes)
+    )
+
+
+CHECKED_DOCS: list[Path] = _collect_checked_docs()
 
 # Flet 版本漂移检查范围（治理文档；api-verification-template.md 为 API 核验历史快照，豁免 GDR-06）
 FLET_VERSION_DOCS: list[Path] = [
@@ -1034,7 +1074,7 @@ def check_redline_range_consistency() -> list[str]:
     规则：
     - Rmax 取自 redlines.yml 实际最大红线号（其 id 已由 check_redlines_yaml_consistency 保证连续）。
     - 遍历 CHECKED_DOCS，跳过 docs/adr/ 下文档（ADR 为决策时点历史快照，其中 R1~R18 是当时范围，
-      由 ADR-0002 Errata 声明以 redlines.yml 为准；其余快照文档经 _DOC_EXCLUDES 排除，不在 CHECKED_DOCS）。
+      由 ADR-0002 Errata 声明以 redlines.yml 为准；其余快照文档经 _build_doc_excludes 排除，不在 CHECKED_DOCS）。
     :return: 错误信息列表。
     """
     errors: list[str] = []
@@ -2076,6 +2116,94 @@ def check_claude_executive_sync() -> list[str]:
     )
 
 
+# H2（AI 文档操作系统检视）：需人工评审的红线（automation_coverage != full）此前只有「尤须 AI 自查」
+# 这一态度式要求——让被约束者自评、且无可勾选判据，等于无约束。redlines.yml 新增 `self_check` 字段承载
+# **可执行自查判据**，下列渲染器把带判据的红线渲染为 CLAUDE.md §3.1 生成区块（自查清单），复用既有
+# _generated_block_sync 机制（与 AGENTS.md 最小安全集、CLAUDE.md 顶部摘要同源），不引入新范式。
+# 清单口径为「已声明 self_check 的红线」（当前 R5 / R17 / R21，含 none 与仅报告模式的 partial），
+# 不按 automation_coverage 分类过滤——避免 R21 由 none 升为 partial 时清单与口径失配。
+_SELF_CHECK_START_TAG = "<!-- generated:redlines-self-check -->"
+
+
+def _render_claude_self_check_lines() -> list[str]:
+    """从 redlines.yml 渲染 CLAUDE.md「人工评审红线可执行自查清单」生成区块行（H2）。
+
+    取声明 `self_check`（非空 list[str]）的红线，按 yml 顺序每条红线一行：
+    `> - **R<id> <title>**：<判据1>；<判据2>`，判据以「；」连接，逐条可在交付报告中勾选回答。
+    未声明 self_check 的红线不入清单（R18 有独立执行决策树），首行显式说明其去向，避免
+    「清单不完整」的误读。字段缺失即刻跳过而非静默补空（缺字段由本检查的形态校验守护）。
+    """
+    import yaml  # 延迟 import: PyYAML 是 transitive 依赖, 与 _render_agents_invariant_lines 一致
+
+    data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    lines: list[str] = []
+    ids: list[str] = []
+    for entry in data["redlines"]:
+        criteria = entry.get("self_check")
+        if not isinstance(criteria, list) or not criteria:
+            continue
+        ids.append(str(entry["id"]))
+        lines.append(f"> - **{entry['id']} {entry['title']}**：{'；'.join(criteria)}")
+    header = (
+        "> **人工评审红线可执行自查清单**（判据正本为 `redlines.yml` 的 `self_check` 字段："
+        f"{' / '.join(ids)}；逐条回答后再交付；R18 有独立执行决策树，见下方）："
+    )
+    return [header, *lines]
+
+
+def _check_self_check_field_shape() -> list[str]:
+    """校验 redlines.yml 各条 `self_check` 字段的形态：声明即须为非空字符串列表。
+
+    防止用空判据「登记了但不可执行」把自查清单变成形式合规（H2 的根因是判据不可勾选）。
+    """
+    import yaml  # 延迟 import: 与 _render_claude_self_check_lines 一致
+
+    errors: list[str] = []
+    if not REDLINES_YAML_PATH.exists():
+        return [f"redlines.yml 不存在: {REDLINES_YAML_PATH}"]
+    try:
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        return [f"redlines.yml YAML 解析失败: {e}"]
+    if not isinstance(data, dict) or not isinstance(data.get("redlines"), list):
+        return ["redlines.yml 顶层应为 dict 且含 'redlines' 列表（self_check 形态校验前置条件）"]
+    for entry in data["redlines"]:
+        if not isinstance(entry, dict) or "self_check" not in entry:
+            continue
+        rid = str(entry.get("id", "?"))
+        value = entry["self_check"]
+        if not isinstance(value, list) or not value:
+            errors.append(f"{rid}: self_check 须为非空列表（可执行自查判据），实际 {value!r}")
+            continue
+        if not all(isinstance(c, str) and c.strip() for c in value):
+            errors.append(f"{rid}: self_check 每项须为非空字符串（可执行自查判据），实际 {value!r}")
+    return errors
+
+
+def check_claude_self_check_sync() -> list[str]:
+    """校验 CLAUDE.md「人工评审红线可执行自查清单」生成区块与 redlines.yml 一致（H2）。
+
+    1. `self_check` 字段形态校验（见 _check_self_check_field_shape）——先做，redlines.yml
+       缺失/不可解析时在此 fail-closed 返回，避免随后渲染抛出未捕获异常；
+    2. 区块内容须等于 _render_claude_self_check_lines() 渲染结果（防手工改块与漂移）。
+    """
+    errors = _check_self_check_field_shape()
+    if errors:
+        return errors
+    content = CLAUDE_PATH.read_text(encoding="utf-8")
+    errors.extend(
+        _generated_block_sync(
+            content,
+            _SELF_CHECK_START_TAG,
+            _render_claude_self_check_lines(),
+            "CLAUDE.md 人工评审红线自查清单区块与 redlines.yml 渲染结果不一致。"
+            "请改正本 redlines.yml 的 self_check 字段后同步生成区块，勿手工修改。",
+            f"CLAUDE.md 缺少人工评审红线自查清单生成区块标记（{_SELF_CHECK_START_TAG} / {_GENERATED_END_TAG}）",
+        )
+    )
+    return errors
+
+
 # --- DOC-01: 规则集元数据一致性（CLAUDES 与 CONTRIBUTING 的 ruleset_version/last_reviewed 同步）---
 # 元数据格式（P2-07 统一格式）：
 #   `> - ruleset_version: 1.3.0（...）`  与  `> - last_reviewed: 2026-09-03`
@@ -2865,18 +2993,6 @@ def check_scripts_index_completeness() -> list[str]:
 # 消费语料 = CLAUDE.md + CONTRIBUTING.md + docs/**/*.md（exceptions.yml 自身是注册表非消费者）。
 _EX_ID_PATTERN = re.compile(r"\bEX-\d{4}\b")
 
-# 真实 gitignored 的本地产物 / 归档目录（受 .gitignore 保护，不入版本控制，GDR-07）。
-# 用于 check_docs_index_completeness() 扫描豁免。`Path.rglob` 不识别 .gitignore，
-# 会扫到本地临时产物并误报「未进索引」。本集合严格限定为真实 gitignored 目录。
-_GITIGNORED_ARTIFACT_DIRS: tuple[Path, ...] = (
-    ROOT / "docs" / "plans" / "archive",
-    ROOT / "docs" / "audit",
-    ROOT / "docs" / "superpowers",
-)
-
-# 兼容别名：保留 _LOCAL_ARTIFACT_DIRS 供外部或现有测试引用
-_LOCAL_ARTIFACT_DIRS: tuple[Path, ...] = _GITIGNORED_ARTIFACT_DIRS
-
 # EX 引用语料豁免目录（用于 check_governance_id_references()，GDR-07）：
 # 包含全部 gitignored 目录，另加受跟踪但属评测用例/注入测试语料的目录（evals/），
 # 防止评测负例中的历史/演示 EX 编号充当活引用掩盖孤儿判定。
@@ -3301,7 +3417,8 @@ def check_governance_id_glossary() -> tuple[list[str], list[str]]:
         errors.append("治理 ID 对照表: governance-ids.md 不存在或无法解析，跳过登记校验")
         return errors, warnings
     # 扩展扫描范围到受检治理文档：CHANGELOG.md（release-please 自动生成，含历史提交标题
-    # 里的治理 ID 噪声）与 Plans.md（本地任务计划文件）不属于治理溯源目标，显式排除；
+    # 里的治理 ID 噪声）不属于治理溯源目标，显式排除；本地会话计划文件（Plans*.md）已由
+    # 受检集构建（_build_doc_excludes）统一排除；
     # 登记正本 governance-ids.md 自身同样排除——其文本除登记行外还含说明文字（别名/夹具
     # 示例如 P1-4、DOC-99，以及嵌入式非治理编号如 Q-P2-7），这些不是「引用需登记」对象。
     # 其余 CHECKED_DOCS 全部纳入。另补扫 docs/governance/ 下的机器可读治理文件
@@ -3311,11 +3428,14 @@ def check_governance_id_glossary() -> tuple[list[str], list[str]]:
     ]
     # 需求正本（requirements/*.md）整体排除：其内容使用需求编号（FR-UX-xxx，通用形态会命中
     # 其 UX-xxx 片段）与阶段工作码（P3-7~P3-20），属非治理 ID 噪声，登记会污染治理对照表；
-    # 与 CHANGELOG.md / Plans.md 的同类噪声排除同源（GDR-09 仅治理溯源目标）。
+    # 与 CHANGELOG.md 的同类噪声排除同源（GDR-09 仅治理溯源目标）。
     scan_paths = [
         p
         for p in CHECKED_DOCS
-        if p.name not in ("CHANGELOG.md", "Plans.md", "governance-ids.md") and ROOT / "requirements" not in p.parents
+        # 本地会话计划文件（_LOCAL_PLAN_FILE_RELS）已由受检集统一排除；此处按名排除 CHANGELOG.md
+        # （release-please 自动生成，含历史提交标题里的治理 ID 噪声）与登记正本 governance-ids.md
+        # 自身（其文本含别名/夹具示例等非「引用需登记」对象）。requirements/*.md 整体排除同下。
+        if p.name not in ("CHANGELOG.md", "governance-ids.md") and ROOT / "requirements" not in p.parents
     ] + governance_yml
     warn_refs: set[str] = set()
     for path in scan_paths:
@@ -3368,6 +3488,32 @@ def _strip_english_suffix(heading: str) -> str:
     return re.sub(r"\s*\([^)]*[A-Za-z][^)]*\)$", "", heading)
 
 
+# 书名号引用目标为裸文件名（无目录前缀）时的回落搜索范围（H1）：引用者常省略目录前缀
+# （如 `testing.md「测试资产地图」`），仅按仓库根相对解析会把正确引用误报为
+# 「目标文档不存在」。搜索根按当前 ROOT 动态派生（与 CHECKED_DOCS 递归发现范围一致；
+# 根目录文件本身由 `ROOT / raw_path` 首查覆盖，无需重复列出）。
+
+
+def _has_guillemet_heading(target: Path, section: str) -> bool:
+    """目标文档是否存在与章节引用同名的标题（含「：」前缀修饰与英文括注归一化）。"""
+    headings = _extract_heading_texts(target.read_text(encoding="utf-8"))
+    if any(h == section or h.endswith(f"：{section}") for h in headings):
+        return True
+    normalized = {_strip_english_suffix(h) for h in headings}
+    return any(h == section or h.endswith(f"：{section}") for h in normalized)
+
+
+def _resolve_bare_doc_name(raw_path: str) -> list[Path]:
+    """把无目录前缀的裸文件名解析为 docs/、man/、requirements/ 下的同名文档候选。
+
+    仅处理不含目录分隔符的路径；返回全部同名候选（可能为空，或多个——如同名 README.md）。
+    """
+    if "/" in raw_path or "\\" in raw_path:
+        return []
+    roots = (ROOT / "docs", ROOT / "man", ROOT / "requirements")
+    return sorted(p for base in roots for p in base.rglob(raw_path) if p.is_file())
+
+
 def check_guillemet_references() -> list[str]:
     """检查项 20：书名号式章节引用一致性（GDR-13）。
 
@@ -3375,6 +3521,8 @@ def check_guillemet_references() -> list[str]:
     匹配规则：目标标题等于章节名，或目标标题以「：」+ 章节名 结尾（容忍「第三部分：实现规范手册」
     这类「第 N 部分」前缀修饰）。markdown 链接 `[text「章节」](./path#anchor)` 内的书名号
     由锚点门禁 check_anchor_dead_links 覆盖，本检查跳过（避免重复报警与「链接文本 ≠ 标题」误报）。
+    目标解析：先按仓库根相对解析；裸文件名（无目录前缀）解析不到时回落到 docs/、man/、
+    requirements/ 内同名候选，多候选时任一候选含同名标题即视为有效引用（H1）。
     """
     errors: list[str] = []
     for doc in CHECKED_DOCS:
@@ -3386,17 +3534,23 @@ def check_guillemet_references() -> list[str]:
         for m in _GUILLEMET_REF_PATTERN.finditer(text):
             raw_path, section = m.group(1), m.group(2).strip()
             target = ROOT / raw_path
-            if not target.exists():
+            candidates = [target] if target.exists() else _resolve_bare_doc_name(raw_path)
+            if not candidates:
                 errors.append(f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，目标文档 {raw_path} 不存在")
                 continue
-            headings = _extract_heading_texts(target.read_text(encoding="utf-8"))
-            if not any(h == section or h.endswith(f"：{section}") for h in headings):
-                normalized = {_strip_english_suffix(h) for h in headings}
-                if not any(h == section or h.endswith(f"：{section}") for h in normalized):
-                    errors.append(
-                        f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，目标文档无同名标题"
-                        f"（现有标题示例: {sorted(headings)[:6]}）"
-                    )
+            if any(_has_guillemet_heading(candidate, section) for candidate in candidates):
+                continue
+            if len(candidates) == 1:
+                headings = _extract_heading_texts(candidates[0].read_text(encoding="utf-8"))
+                errors.append(
+                    f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，目标文档无同名标题"
+                    f"（现有标题示例: {sorted(headings)[:6]}）"
+                )
+            else:
+                errors.append(
+                    f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，"
+                    f"docs/、man/、requirements/ 下存在 {len(candidates)} 个同名文档但均无该标题"
+                )
     return errors
 
 
@@ -3475,6 +3629,8 @@ def main() -> int:
     all_errors.extend(check_agents_md_min_verify_commands())
     # CLAUDE.md 顶部摘要生成区块与 redlines.yml 一致性：守护自动加载文档第一屏 (F-04)
     all_errors.extend(check_claude_executive_sync())
+    # CLAUDE.md 人工评审红线可执行自查清单生成区块（H2）：把「尤须 AI 自查」变成可勾选判据
+    all_errors.extend(check_claude_self_check_sync())
 
     # 分支E 机制补全（DOC-01/04/05/07/09/11）：规则集元数据、决策树镜像、canonical 路由、
     # docs 索引全覆盖、治理 id（EX-\d{4}）双向引用。补齐「字段存在」之外的「语义正确」守卫。
@@ -3524,7 +3680,7 @@ def main() -> int:
         "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
         "pre-commit hook 数量 / hook 名称一致性 / workflow 枚举 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
         "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
-        "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 规则集元数据一致性 / "
+        "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 人工评审红线自查清单生成区块一致性 / 规则集元数据一致性 / "
         "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / 检视结论登记索引（GOV-04） / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
         "规则集变更日志版本一致 / ADR 索引完整性 / 脚本索引完整性 / 策略描述动态一致性 / "

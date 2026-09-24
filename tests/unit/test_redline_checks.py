@@ -55,6 +55,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     check_R15,
     check_R16_vm_init_singleton_construction,
     check_R20,
+    check_R21,
     check_R22,
     check_R24,
     check_R4,
@@ -1067,6 +1068,111 @@ class TestR20IntegrationOnCurrentCodebase:
 
         monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
         assert check_redlines.check_R20() == 0
+
+
+# ============================================================================
+# R21 报告模式测试（H2：启用原型 MissingMaskingVisitor 的检出/误报边界与不阻断语义）
+# ============================================================================
+
+
+def _run_r21_on_files(tmp_path, monkeypatch, files: dict[str, str]) -> tuple[int, str]:
+    """在临时 ROOT 下写入文件并运行 check_R21，返回 (warning 条数, stderr 文本)。"""
+    import check_redlines
+
+    for rel, src in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src, encoding="utf-8")
+    monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        count = check_redlines.check_R21()
+    return count, buf.getvalue()
+
+
+class TestR21PureDetection:
+    """R21 报告模式检出与误报抑制边界（判定逻辑复用原型 MissingMaskingVisitor）。"""
+
+    def test_masking_assign_confidence_hit(self, tmp_path, monkeypatch):
+        """confidence 填 50（Subscript 目标）应命中 R21。"""
+        src = "def f(row):\n    row['confidence'] = 50\n"
+        count, out = _run_r21_on_files(tmp_path, monkeypatch, {"strategies/fake_ai.py": src})
+        assert count == 1, out
+        assert "R21 缺失值伪装" in out
+        assert "confidence" in out
+
+    def test_masking_assign_score_zero_hit(self, tmp_path, monkeypatch):
+        """ai_score 填 0（Name 目标）应命中 R21。"""
+        src = "def f():\n    ai_score = 0\n"
+        count, out = _run_r21_on_files(tmp_path, monkeypatch, {"services/fake_job.py": src})
+        assert count == 1, out
+        assert "ai_score" in out
+
+    def test_masking_ternary_else_hit(self, tmp_path, monkeypatch):
+        """三元表达式 else 分支填 0（缺失即 0 分）应命中 R21。"""
+        src = "def f(res):\n    score = int(res['score']) if res else 0\n"
+        count, out = _run_r21_on_files(tmp_path, monkeypatch, {"strategies/fake_ai.py": src})
+        assert count == 1, out
+        assert "score" in out
+
+    def test_masking_fillna_lowconf_hit(self, tmp_path, monkeypatch):
+        """fillna(0) 应命中 R21 低置信档（须人工复核）。"""
+        src = "def f(df):\n    return df['score'].fillna(0)\n"
+        count, out = _run_r21_on_files(tmp_path, monkeypatch, {"strategies/fake_ai.py": src})
+        assert count == 1, out
+        assert "fillna" in out
+
+    def test_none_sentinel_not_flagged(self, tmp_path, monkeypatch):
+        """缺失用 None 表示（正确姿势）不应命中。"""
+        src = (
+            "def f(row, res):\n"
+            "    row['ai_score'] = None\n"
+            "    row['confidence'] = None\n"
+            "    score = res.get('score')\n"
+            "    return score\n"
+        )
+        count, out = _run_r21_on_files(tmp_path, monkeypatch, {"strategies/fake_ai.py": src})
+        assert count == 0, out
+
+    def test_score_zero_comparison_not_flagged(self, tmp_path, monkeypatch):
+        """合法的 score == 0 语义比较（模型明确否决）不是伪装赋值，不应命中。"""
+        src = "def f(row):\n    if row['score'] == 0:\n        return 'rejected'\n    return 'analyzed'\n"
+        count, out = _run_r21_on_files(tmp_path, monkeypatch, {"strategies/fake_ai.py": src})
+        assert count == 0, out
+
+    def test_non_sentinel_field_not_flagged(self, tmp_path, monkeypatch):
+        """非业务语义字段（非 score/ai_score/confidence）填 0 不受 R21 约束。"""
+        src = "def f(row):\n    row['retry_count'] = 0\n"
+        count, out = _run_r21_on_files(tmp_path, monkeypatch, {"services/fake_job.py": src})
+        assert count == 0, out
+
+
+class TestR21IntegrationOnCurrentCodebase:
+    """R21 报告模式集成测试：当前代码库基线、目录缺失与不阻断语义。"""
+
+    def test_check_R21_runs_clean_on_codebase(self):
+        """当前 services/ 与 strategies/ 在 R21 判定下无报警（AI-01/AI-02 已修为 None 表示）。"""
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            check_R21()
+        assert "R21 缺失值伪装" not in buf.getvalue()
+
+    def test_check_R21_missing_dir_returns_silently(self, tmp_path, monkeypatch):
+        """services/ 与 strategies/ 均不存在时静默返回 0（不抛错、无 warning）。"""
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        assert check_redlines.check_R21() == 0
+
+    def test_check_R21_warning_not_blocking(self, tmp_path, monkeypatch):
+        """命中时仅输出 warning 到 stderr、不抛错（报告模式不阻断退出码）。"""
+        count, out = _run_r21_on_files(
+            tmp_path,
+            monkeypatch,
+            {"strategies/fake_ai.py": "def f(row):\n    row['confidence'] = 50\n"},
+        )
+        assert count == 1
+        assert "报告模式" in out and "confidence" in out
 
 
 class TestR22:

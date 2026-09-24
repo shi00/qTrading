@@ -115,6 +115,30 @@ async def _wait_for_any_text(e2e_page, texts: list[str], timeout_ms: int = 30000
     return ""
 
 
+# LLM 测试连接失败可能出现的错误 i18n key 全集（classify_error context="llm" 的
+# 各终态 key + 通用兜底 common_err_unknown）。
+# 期望列表须同时含 key 原文与翻译文本：AIService.test_connection 失败路径与 VM
+# 透传路径产出 key（Message(key)），View 经 _render_message → I18n.get 渲染翻译
+# 文本，两种形态都属有效错误反馈；只列其一会在渲染形态变化时漏检（见 CI 回归：
+# llm_err_not_found 仅列 key 未列翻译，实际渲染翻译文本导致断言失败）。
+_LLM_ERR_KEYS = [
+    "llm_err_network",
+    "llm_err_unknown",
+    "llm_err_timeout",
+    "llm_err_auth_failed",
+    "llm_err_forbidden",
+    "llm_err_server",
+    "llm_err_dns",
+    "llm_err_ssl",
+    "llm_err_rate_limit",
+    "llm_err_insufficient_quota",
+    "llm_err_model_not_found",
+    "llm_err_content_policy",
+    "llm_err_not_found",
+    "common_err_unknown",
+]
+
+
 @pytest.mark.network
 async def test_llm_config_save_and_validate(e2e_page):
     """LLM 配置测试连接流程 E2E.
@@ -127,8 +151,8 @@ async def test_llm_config_save_and_validate(e2e_page):
 
     mock 策略: AIService.test_connection 调用真实 LLM API (litellm acompletion),
     无效 key 触发异常 (网络离线/auth 失败), AIService 捕获后返回
-    {"success": False, "message": error_info["message_key"]} (i18n key 字符串本身).
-    VM 用 _raw_message 包装, View 渲染显示 key 本身 (源码 bug, 见 commit message).
+    {"success": False, "message": error_info["message_key"]} (i18n key).
+    VM 以 Message(key) 存入 state, View 经 _render_message → I18n.get 渲染翻译文本.
 
     PR-3: tab 切换迁移到 SettingsPage anchor 操作。
     """
@@ -148,32 +172,10 @@ async def test_llm_config_save_and_validate(e2e_page):
 
     await e2e_page.click_button(test_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
 
-    # AIService.test_connection 返回 error_info["message_key"] (i18n key 字符串本身),
-    # VM 用 _raw_message 包装, View 渲染显示 key 本身 (源码 bug).
-    # 同时包含翻译文本以兼容 VM exception 路径 (get_error_message 返回翻译文本).
-    possible_errors = [
-        # i18n key 字符串 (AIService.test_connection 返回路径, 当前实际行为)
-        "llm_err_network",
-        "llm_err_unknown",
-        "llm_err_timeout",
-        "llm_err_auth_failed",
-        "llm_err_forbidden",
-        "llm_err_server",
-        "llm_err_dns",
-        "llm_err_ssl",
-        "llm_err_rate_limit",
-        "llm_err_insufficient_quota",
-        "llm_err_model_not_found",
-        "llm_err_content_policy",
-        "llm_err_not_found",
-        "common_err_unknown",
-        # 翻译文本 (VM exception 路径, 防御性兼容)
-        I18n.get("llm_err_network"),
-        I18n.get("llm_err_unknown"),
-        I18n.get("llm_err_timeout"),
-        I18n.get("llm_err_auth_failed"),
-        I18n.get("common_err_unknown"),
-    ]
+    # AIService.test_connection 失败路径返回 error_info["message_key"]（i18n key）,
+    # VM 以 Message(key) 存入 state, View 经 _render_message → I18n.get 渲染翻译文本.
+    # 期望列表覆盖 key 原文与全部翻译文本, 渲染形态差异不影响检出.
+    possible_errors = _LLM_ERR_KEYS + [I18n.get(key) for key in _LLM_ERR_KEYS]
     hit = await _wait_for_any_text(e2e_page, possible_errors, timeout_ms=30000)
     assert hit, f"LLM 测试连接未显示错误 toast, 期望之一: {possible_errors}"
     logger.info("LLM 测试连接错误路径验证通过: %s", hit)
@@ -348,32 +350,10 @@ async def test_ai_brain_test_connection(e2e_page):
     await e2e_page.fill_textbox(api_key_label, "sk-invalid-ai-brain-test", timeout_ms=TIMEOUTS.INTERACTION)
     await e2e_page.click_button(test_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
 
-    # AIService.test_connection 返回 error_info["message_key"] (i18n key 字符串本身),
-    # VM 用 _raw_message 包装, View 渲染显示 key 本身 (源码 bug, 见 commit message).
-    # 同时包含翻译文本以兼容 VM exception 路径 (get_error_message 返回翻译文本).
-    possible_errors = [
-        # i18n key 字符串 (AIService.test_connection 返回路径, 当前实际行为)
-        "llm_err_network",
-        "llm_err_unknown",
-        "llm_err_timeout",
-        "llm_err_auth_failed",
-        "llm_err_forbidden",
-        "llm_err_server",
-        "llm_err_dns",
-        "llm_err_ssl",
-        "llm_err_rate_limit",
-        "llm_err_insufficient_quota",
-        "llm_err_model_not_found",
-        "llm_err_content_policy",
-        "llm_err_not_found",
-        "common_err_unknown",
-        # 翻译文本 (VM exception 路径, 防御性兼容)
-        I18n.get("llm_err_network"),
-        I18n.get("llm_err_unknown"),
-        I18n.get("llm_err_timeout"),
-        I18n.get("llm_err_auth_failed"),
-        I18n.get("common_err_unknown"),
-    ]
+    # AIService.test_connection 失败路径返回 error_info["message_key"]（i18n key）,
+    # VM 以 Message(key) 存入 state, View 经 _render_message → I18n.get 渲染翻译文本.
+    # 期望列表覆盖 key 原文与全部翻译文本, 渲染形态差异不影响检出.
+    possible_errors = _LLM_ERR_KEYS + [I18n.get(key) for key in _LLM_ERR_KEYS]
     hit = await _wait_for_any_text(e2e_page, possible_errors, timeout_ms=30000)
     assert hit, f"AI Brain 测试连接未显示错误 toast, 期望之一: {possible_errors}"
     logger.info("AI Brain 测试连接错误路径验证通过: %s", hit)

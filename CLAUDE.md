@@ -155,12 +155,19 @@
 | R18 | **未隔离开发** | 新特性、重构、跨多文件修改任务未启用 git worktree 隔离即在主工作区开发（豁免：单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离） | 仅人工评审 |
 | R19 | **未配套测试的业务逻辑变更** | 新增或修改业务逻辑未同步新增/更新单测（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」与「变更类型 → 最小验证子集」；由 `scripts/check_diff_coverage.py` / `scripts/check_per_file_coverage.py` 强制） | CI-test（check_diff_coverage + check_per_file_coverage） |
 | R20 | **单位未核对的量纲比较** | 策略/回测中对已知金额、数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）的裸数值比较，调用链上无显式单位换算即违规（必须经 `threshold_in_data_unit()` 统一入口换算后再比较） | pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R20 报告模式升级期限」（2026-12-31） |
-| R21 | **缺失值伪装** | 业务语义字段（`score` / `ai_score` / `confidence` 等）缺失必须用 `None`/哨兵表示，禁止填充业务上合法的具体值（`0` 分、`50%` 置信度、空表视为「无限制」）；变体（BT-03）：「可信度元数据在持久化边界丢失」——`data_warnings` / `failed_signal_dates` / 配置快照等已知不可信信号落库后被丢弃、UI 渲染为「无问题」，等同把「已知不可信」伪装成「无信息」 | 仅人工评审 |
+| R21 | **缺失值伪装** | 业务语义字段（`score` / `ai_score` / `confidence` 等）缺失必须用 `None`/哨兵表示，禁止填充业务上合法的具体值（`0` 分、`50%` 置信度、空表视为「无限制」）；变体（BT-03）：「可信度元数据在持久化边界丢失」——`data_warnings` / `failed_signal_dates` / 配置快照等已知不可信信号落库后被丢弃、UI 渲染为「无问题」，等同把「已知不可信」伪装成「无信息」 | pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R21 报告模式升级期限」（2026-12-31） |
 | R22 | **水位线单调性** | checkpoint / 高水位语义的持久化状态（如 `set_app_state` 写入的断点续传水位），写入必须单调（优先 `*_max` 语义或 GREATEST 保护），且单测必须含乱序写入用例并断言最终值为最大值 | pre-commit（check_redlines.py）+ 仅人工评审 |
 | R23 | **裸 UI token** | UI 层裸 `ft.Colors` 色值引用与裸字号数值（如 `ft.Text(size=13)`）必须改用 AppStyles 定义的 token（`FONT_SIZE_*` 等） | pre-commit（check_redlines.py） |
 | R24 | **时点正确性** | 任何进入策略或回测的数据，其取数时点不得晚于被决策的交易日；使用「当前快照」类维度（行业分类、指数成分、股票池、财报最新值）参与历史区间计算即违规，必须改用带生效日期的维度表，或显式声明为「当期近似」并在结果中标注 | pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R24 报告模式升级期限」（2026-12-31） |
 
-> **红线自动化现状**：各红线的守护函数与覆盖维度见 [docs/governance/redlines.yml](./docs/governance/redlines.yml) 的 `enforcement` / `checks` / `automation_coverage` 字段；无自动化的红线（标注 `仅人工评审`）尤须 AI 自查；R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。
+> **红线自动化现状**：各红线的守护函数与覆盖维度见 [docs/governance/redlines.yml](./docs/governance/redlines.yml) 的 `enforcement` / `checks` / `automation_coverage` 字段；无自动化的红线（标注 `仅人工评审`）**须逐条回答下方自查清单**（判据正本为 `redlines.yml` 的 `self_check` 字段，把「自查」从态度变为可勾选清单），**且无自动拦截（`automation_coverage: none` 或仅报告模式）且影响产品结论的红线（R21、R24）须经独立会话复核**（见 [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) 的 ROUND3-05）；R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。
+
+<!-- generated:redlines-self-check -->
+> **人工评审红线可执行自查清单**（判据正本为 `redlines.yml` 的 `self_check` 字段：R5 / R17 / R21；逐条回答后再交付；R18 有独立执行决策树，见下方）：
+> - **R5 僵尸引擎操作**：本次变更是否新增了 DAO 方法或维护流程分支？若是，逐个确认入口处存在 `_check_engine`（或等价的 `EngineDisposedError` 传播路径）；搜索式：`grep -n "self\.engine\.\|is_disposed\|_check_engine" <改动文件>`；绕过保护方法的直达 `self.engine.*` 即违规；豁免：应用服务层轮询循环的优雅停止须已登记 docs/governance/exceptions.yml，评到该类代码先查是否已登记
+> - **R17 保留字作字段**：本次变更是否新增表名/列名？若是，逐个核对是否数字开头、含特殊字符（`.`/`-`/空格）或 PostgreSQL 保留字（`order`/`group`/`select`/`desc`/`from`/`where`）；保留字清单来源：PostgreSQL 官方文档 Appendix C. SQL Key Words（https://www.postgresql.org/docs/current/sql-keywords-appendix.html）；确认未在裸 SQL 中拼接该列名（保留字列名只能经 ORM `name=` 属性映射，不得出现在裸 SQL 字面量）
+> - **R21 缺失值伪装**：本次变更是否对业务语义字段（`score`/`ai_score`/`confidence` 等）赋常量或 `fillna`/`fill`？若是，缺失必须用 `None`/哨兵表示，禁止填 `0`/`50` 等业务合法值；运行 `python scripts/check_redlines.py`，逐条人工确认 R21 报告模式 warning（warning 不阻断，未逐条确认即视为未自查）
+<!-- /generated -->
 
 > **规则类型（P2-11）**：每条红线在 [docs/governance/redlines.yml](./docs/governance/redlines.yml) 中标注 `rule_type`，决定其适用范围与豁免方式：
 > - `INVARIANT`：不可豁免的无条件安全不变量；
@@ -267,6 +274,7 @@
 | AI 问题修复指南（核心协议 / 专项 Profile / 附录） | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) |
 | man/ 专题深度文档（database-account-separation / table-partitioning-strategy / flet-best-practices stub） | [man/](./man/) 子文档 |
 | AGENTS.md 跨工具规则入口（最小安全集 + 指针 + 生成区块，见 ADR-0006） | [AGENTS.md](./AGENTS.md) |
+| AI 工具运行时配置（harness.toml：权限/沙箱白名单，非规则正本，产品版本经 verify-versions 守护） | [harness.toml](./harness.toml) |
 | 治理 ID 对照表（P2/DOC/GDR/review 系列 ID → 一句话含义） | [docs/governance/governance-ids.md](./docs/governance/governance-ids.md) |
 
 ---
