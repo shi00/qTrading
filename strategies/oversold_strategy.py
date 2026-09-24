@@ -96,6 +96,10 @@ def _compute_rsi_filter(
         # 降到 1% 以下需约 4.6×period 根 K 线，取 period*5 为工程惯例；配合 get_rsi_expr 预热期
         # min_samples=period，消除新上市/次新股 RSI 被首根 K 线主导的系统性偏差。
         .filter(pl.col("day_count") >= rsi_period * 5)
+        # R21: 无法计算 RSI 的标的（全平盘导致 0/0、历史不足）RSI 为 null——业务上
+        # 既不算超跌也不算中性，显式按缺失排除（不依赖 null 比较被隐式丢弃），
+        # 且不得在此填充 50 等业务合法值。
+        .filter(pl.col(rsi_col_name).is_not_null())
         .filter(pl.col(rsi_col_name) < rsi_threshold)
         .filter(pl.col("vol_ratio_5d") >= float(vol_ratio_threshold))
     )
