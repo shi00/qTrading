@@ -245,16 +245,13 @@ class TestSeriesEquivalence:
             assert np.allclose(k_pd[col], kpl[col], rtol=RTOL, atol=ATOL)
 
     def test_flat_scenario_rsi_macd_equivalent(self):
-        """flat：RSI 两侧恒 50（pd 全序列 / pl 预热期后）；MACD 两侧恒 0。
+        """flat：MACD 两侧恒 0（等价域保留）。
 
-        KDJ 在 flat 下无等价域（pd 全 NaN vs pl 全 50），由组 B B3 固化。
+        RSI 在 flat 下已无等价域——pl 正本因 rs = 0/0 全盘产出真实缺失 null
+        （R21，检视 09-24 §3.5），pd 教科书镜像仍沿用 fillna(50)；该分叉由组 B
+        B5 固化（与 KDJ flat 交组 B B3 同一约定）。
         """
         df = _make_flat(200)
-
-        pd_rsi, plr = _rsi_pd_series(df["close"], RSI_PERIOD), _pl_rsi(df)
-        assert bool((pd_rsi == 50).all())
-        assert plr.iloc[:RSI_PERIOD].isna().all()
-        assert bool((plr.iloc[RSI_PERIOD:] == 50).all())
 
         m_pd, mpl = _macd_pd_series(df["close"], MACD_FAST, MACD_SLOW, MACD_SIGN), _pl_macd(df)
         assert bool((m_pd["dif"].abs() < 1e-12).all())
@@ -273,12 +270,18 @@ class TestSeriesEquivalence:
         ids=["head", "tail"],
     )
     def test_limit_scenarios_rsi_macd_equivalent(self, df_maker):
-        """连续一字板场景：RSI 仅用 close（一字板段两侧均以 50 相遇）、MACD 不受
-        high/low 影响，均保持等价；KDJ 分叉由组 B B4 固化。"""
+        """连续一字板场景：RSI 仅用 close、MACD 不受 high/low 影响，均保持等价；
+        KDJ 分叉由组 B B4 固化。
+
+        RSI 仅在 pl 非缺失点等价：一字板段（价格恒定 → rs = 0/0）RSI 无定义，
+        pl 正本产出缺失 null（R21），pd 镜像仍填中性 50，该分叉由组 B B5 固化。
+        """
         df = df_maker()
 
         pd_rsi, plr = _rsi_pd_series(df["close"], RSI_PERIOD), _pl_rsi(df)
-        assert np.allclose(pd_rsi.iloc[RSI_PERIOD:], plr.iloc[RSI_PERIOD:], rtol=RTOL, atol=ATOL)
+        comparable = plr.notna()
+        assert bool(comparable.any())
+        assert np.allclose(pd_rsi[comparable], plr[comparable], rtol=RTOL, atol=ATOL)
 
         m_pd, mpl = _macd_pd_series(df["close"], MACD_FAST, MACD_SLOW, MACD_SIGN), _pl_macd(df)
         assert mpl["dif"].iloc[: MACD_SLOW - 1].isna().all()
@@ -430,6 +433,28 @@ class TestBoundaryDivergenceSolidified:
         assert kk == pytest.approx(pl_k_frozen, abs=1e-9)
         assert dd == pytest.approx(float(kpl["d"].iloc[59]), abs=1e-9)
         assert jj == pytest.approx(float(kpl["j"].iloc[59]), abs=1e-9)
+
+    def test_b5_rsi_undefined_null_not_fillna50(self):
+        """B5 RSI 无定义（全平盘/一字板段 rs = 0/0）边界固化（R21，检视 09-24 §3.5）：
+        pl 正本产出真实缺失 null，pd 教科书镜像沿用已废弃的 fillna(50) 中性填充；
+        生产 pandas 薄委托入口与 pl 同语义（缺失，不返回 50 哨兵）。"""
+        flat = _make_flat(200)
+        pd_rsi, plr = _rsi_pd_series(flat["close"], RSI_PERIOD), _pl_rsi(flat)
+        # 镜像侧：50 中性填充（历史语义，已被 R21 判定为「用合法值伪装缺失」）
+        assert bool((pd_rsi == 50).all())
+        # 正本侧：全序列（预热期 + 全平盘 0/0）均为缺失，无一处为 50
+        assert plr.isna().all()
+        # 生产 pandas 入口同语义：缺失而非 50 哨兵
+        prod_rsi = TechnicalAnalysis.calculate_rsi_pandas(flat["close"], RSI_PERIOD)
+        assert prod_rsi.isna().all()
+        assert not bool((prod_rsi == 50.0).any())
+
+        # 一字板（价格恒定）段同样产出缺失：分叉点恰为 pd 镜像的 50 填充点
+        head = _make_limit_head(60, 9, 51)
+        pd_head, pl_head = _rsi_pd_series(head["close"], RSI_PERIOD), _pl_rsi(head)
+        undefined = pl_head.isna() & (pl_head.index >= RSI_PERIOD)
+        assert bool(undefined.any())
+        assert bool((pd_head[undefined] == 50).all())
 
 
 # ---------------------------------------------------------------------------

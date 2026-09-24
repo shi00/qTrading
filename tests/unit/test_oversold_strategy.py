@@ -304,13 +304,16 @@ def test_vol_ratio_excludes_current_day_from_denominator():
     dates = [datetime.date(2024, 6, 14) - datetime.timedelta(days=i) for i in range(n_days)]
     dates.reverse()
     vols = [100.0] * (n_days - 1) + [300.0]
+    # R21: close 必须非恒定——全平盘时 RSI 无定义（rs = 0/0）会以缺失被显式排除，
+    # 无法靠 rsi_threshold=101「放行」；此处用缓变价格使 RSI 可计算，聚焦量比口径断言。
+    closes = [10.0 + (i % 7) * 0.1 for i in range(n_days)]
     history_data = {
         "ts_code": ["000001.SZ"] * n_days,
         "trade_date": [d.strftime("%Y%m%d") for d in dates],
         "open": [10.0] * n_days,
         "high": [10.5] * n_days,
         "low": [9.5] * n_days,
-        "close": [10.0] * n_days,
+        "close": closes,
         "vol": vols,
         "amount": [10000.0] * n_days,
         "pct_chg": [-0.5] * n_days,
@@ -322,6 +325,42 @@ def test_vol_ratio_excludes_current_day_from_denominator():
     assert not result.empty
     ratio = result.iloc[0]["vol_ratio_5d"]
     assert ratio == pytest.approx(3.0), f"vol_ratio_5d 应为 3.0（前5日均量不含当日），实际 {ratio}"
+
+
+def test_flat_close_rsi_missing_is_excluded_not_admitted_as_neutral():
+    """R21（检视 09-24 §3.5）: 全平盘 → RSI 无定义，按缺失显式排除而非填中性 50。
+
+    阈值取 101（> 50）构造「填中性 50 会被当作超跌放行」的场景：
+    修复前 fill_nan(50.0) 使全平盘标的以 RSI = 50 通过 `< 101` 被误选为超跌股；
+    修复后 RSI 为 null，经 _compute_rsi_filter 的显式 ``is_not_null()`` 过滤被排除——
+    无法计算 RSI 的标的既不算超跌也不算中性，不因阈值高低而放行。
+    """
+    n_days = 60
+    dates = [datetime.date(2024, 6, 14) - datetime.timedelta(days=i) for i in range(n_days)]
+    dates.reverse()
+    history_pdf = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"] * n_days,
+            "trade_date": [d.strftime("%Y%m%d") for d in dates],
+            "open": [10.0] * n_days,
+            "high": [10.0] * n_days,
+            "low": [10.0] * n_days,
+            "close": [10.0] * n_days,  # 全平盘：无涨无跌 → rs = 0/0 → RSI 无定义
+            "vol": [100.0] * n_days,
+            "amount": [10000.0] * n_days,
+            "pct_chg": [0.0] * n_days,
+        }
+    )
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [10.0]})
+
+    flat_result = _compute_rsi_filter(history_pdf, snapshot, datetime.date(2024, 6, 14), 2, 101, 0.5)
+    assert flat_result.empty
+
+    # 正对照：同参数下价格缓变（RSI 可计算）应选出该标的，证明空集源于 RSI 缺失
+    history_pdf["close"] = [10.0 + (i % 7) * 0.1 for i in range(n_days)]
+    control = _compute_rsi_filter(history_pdf, snapshot, datetime.date(2024, 6, 14), 2, 101, 0.5)
+    assert len(control) == 1
+    assert control.iloc[0]["ts_code"] == "000001.SZ"
 
 
 def _make_dp_for_prefetch():

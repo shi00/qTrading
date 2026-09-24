@@ -417,18 +417,21 @@ class TestStrongNumericAssertionsD38:
 
     # ---------- RSI ----------
     def test_rsi_boundaries_known_input(self):
-        """单调上涨→100、单调下跌→0、横盘→50（固定精确期望）。
+        """单调上涨→100、单调下跌→0（固定精确期望）；全平盘→缺失（非中性 50）。
 
-        D7 已删除独立 pandas 末值实现 get_rsi：上涨/下跌边界由
-        test_rsi_direction_is_correct 覆盖（calculate_rsi_pandas），
-        此处保留横盘归中（50）种子污染防护断言。
+        R21（检视 09-24 §3.5）：无涨无跌时 rs = 0/0，RSI 业务上无定义，必须以
+        缺失表示，不得填 50 等业务上合法的中性值。D7 已删独立 pandas 末值实现
+        get_rsi：上涨/下跌边界由 test_rsi_direction_is_correct 覆盖
+        （calculate_rsi_pandas）。
         """
         up = pd.Series(np.arange(100.0, 130.0))
         down = pd.Series(np.arange(130.0, 100.0, -1.0))
         flat = pd.Series(np.full(30, 100.0))
         assert TechnicalAnalysis.calculate_rsi_pandas(up, 14).iloc[-1] == pytest.approx(100.0)
         assert TechnicalAnalysis.calculate_rsi_pandas(down, 14).iloc[-1] == pytest.approx(0.0)
-        assert TechnicalAnalysis.calculate_rsi_pandas(flat, 14).iloc[-1] == pytest.approx(50.0)
+        flat_rsi = TechnicalAnalysis.calculate_rsi_pandas(flat, 14)
+        assert flat_rsi.isna().all()
+        assert not bool((flat_rsi == 50.0).any())
 
     def test_rsi_real_series_exact_value(self):
         """固定序列 → 精确 RSI 末值（D3-1 回归 + D3-8 强断言）。"""
@@ -519,6 +522,30 @@ class TestPolarsExpressions:
         assert "rsi" in result.columns
         rsi_values = result["rsi"].to_list()
         assert all(0 <= v <= 100 for v in rsi_values if not pd.isna(v))
+
+    def test_rsi_expr_flat_is_missing_not_neutral(self):
+        """R21 回归（检视 09-24 §3.5）: 全平盘 → RSI 缺失，不填中性 50。
+
+        阈值取 60（> 50）构造「填中性 50 会被当作超跌放行」的场景：修复前
+        fill_nan(50.0) 使全平盘标的以 RSI = 50 通过 `< 60` 被误选；修复后 RSI
+        为 null，经显式 is_not_null() 过滤被排除（与 oversold_strategy
+        _compute_rsi_filter 的下游语义一致）——既不算超跌也不算中性。
+        """
+        import polars as pl
+
+        flat = pd.DataFrame({"ts_code": ["000001.SZ"] * 30, "close": [10.0] * 30})
+        result = (
+            pl.from_pandas(flat)
+            .lazy()
+            .with_columns(TechnicalAnalysis.get_rsi_expr("close", period=6, alias="rsi").over("ts_code"))
+            .collect()
+        )
+        # 预热期（前 6 根 null）与全平盘段（rs = 0/0）全部为缺失，且无一处被填为 50
+        assert result["rsi"].is_null().all()
+        assert result["rsi"].to_list().count(50.0) == 0
+        # 下游显式缺失语义：无法计算 RSI 的标的不进入候选（即便阈值 60 > 50）
+        picked = result.filter(pl.col("rsi").is_not_null() & (pl.col("rsi") < 60.0))
+        assert picked.height == 0
 
     def test_macd_expr(self):
         import polars as pl

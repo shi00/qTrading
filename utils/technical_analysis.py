@@ -139,7 +139,8 @@ class TechnicalAnalysis:
         SC-05: 合一前本方法为独立 Pandas 实现（min_periods=period），与 Polars 版
         （min_samples=0）口径不一致导致 EWM 种子污染与两套边界处理漂移。
         现改为调用 get_rsi_expr 计算后转回，预热期语义（前 period 根为 NaN/null）与
-        边界语义（无涨有跌→0、无跌有涨→100、无涨无跌→50）由 Polars 唯一实现承载。
+        边界语义（无涨有跌→0、无跌有涨→100、无涨无跌→NaN 缺失）由 Polars 唯一实现承载；
+        R21：无涨无跌（全平盘）时 RSI 业务上无定义，以缺失而非中性 50 表示。
         （D7：独立 pandas 末值实现 get_rsi 已删除，本方法是 pandas 侧 RSI 的唯一入口。）
 
         Args:
@@ -260,8 +261,11 @@ class TechnicalAnalysis:
 
         SC-05: min_samples=period 与 Pandas 版 calculate_rsi_pandas 的 min_periods=period
         对齐，消除 EWM 种子污染（新上市/次新股前 period 根不产出值）。
-        预热期内的 null 是真实的「未知」，不 fill_null 伪装（R21）——下游
-        `.filter(rsi < threshold)` 对 null 返回 null 自然丢弃该行。
+        本表达式只在「业务上确实无法计算 RSI」时产出 null（预热期数据不足、
+        全平盘导致 0/0），是真实的「未知」，不 fill_null / fill_nan 伪装（R21）。
+        下游须显式处理缺失——见 strategies/oversold_strategy.py 的
+        ``.is_not_null()`` + 阈值过滤：无法计算 RSI 的标的既不算超跌也不算
+        中性，按缺失显式排除，而非隐式依赖 null 比较被丢弃。
         """
         import polars as pl
 
@@ -278,13 +282,14 @@ class TechnicalAnalysis:
         rs = roll_up / roll_down
         rsi = 100.0 - (100.0 / (1.0 + rs))
 
-        # Handle division by zero (inf) -> 100?
-        # Polars handles inf arithmetic usually?
-        # If roll_down is 0, rs is inf. 100/(1+inf) is 0. 100-0 = 100. Correct.
-        # But if both are 0? Nan -> fill_nan(50) 归中（无涨无跌=横盘=中性）。
-        # SC-05: 仅 fill_nan（inf 算术产生的 NaN 边界），不 fill_null（预热期真实未知，R21）。
+        # 分母为 0 的两种情形：
+        # - roll_up > 0 且 roll_down == 0（只涨不跌）→ rs = inf，100/(1+inf) = 0 → RSI = 100，正确；
+        # - roll_up == roll_down == 0（全平盘，无涨无跌）→ rs = 0/0 = NaN，RSI 业务上无定义。
+        # R21: 无定义归一为 null（与预热期同为真实「未知」），不填 50 等业务上合法的中性值
+        # （填 50 会让该标的落在「不超跌」的安全区而被静默排除，语义上是用合法值伪装缺失）。
+        # 下游须显式处理缺失（见 get_rsi_expr docstring），不得再填充中性值。
 
-        return rsi.fill_nan(50.0).alias(alias)
+        return rsi.fill_nan(None).alias(alias)
 
     @staticmethod
     def get_macd_expr(col_name="close", fast=12, slow=26, sign=9):
@@ -324,7 +329,7 @@ class TechnicalAnalysis:
 
         rsv = (pl.col(close) - llv) / (hhv - llv) * 100
         # fill_nan: 一字板/全横盘时 hhv==llv → 0/0，RSV 在业务上确实无定义，
-        # 取中性 50 有依据（与 get_rsi_expr 同法）。
+        # 取中性 50 有依据（KDJ 的既有边界语义，不在 RSI 的 R21 收敛范围内）。
         # 不 fill_null: 预热期为真实未知，伪装成 50 属 R21 违规。
         rsv = rsv.fill_nan(50)
 
