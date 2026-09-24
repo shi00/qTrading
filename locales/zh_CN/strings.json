@@ -231,6 +231,7 @@
     "strategy_excluded_st": "已排除 {count} 只风险警示股",
     "strategy_condition_excludes_all": "筛选条件 {column}（{threshold}）排除了全部 {total} 只股票，建议放宽该参数",
     "strategy_mixed_report_periods": "本次结果包含 {count} 个不同财报报告期（ROE 已按报告期年化后跨期可比，但跨期比较仍可能受季节性影响）",
+    "strategy_oversold_insufficient_history": "候选股票历史数据长度不足（最长 {max} 个交易日，RSI 周期 {period} 需 {required} 个），请降低 RSI 周期后重试",
     "strategy_ai_risk_check_skipped": "AI 分析不可用，本策略的 AI 定性风险检查（假高息/价值陷阱/资金链等）已跳过，本次结果仅含量化筛选",
     "strategy_northbound_holding_name": "北向持股",
     "strategy_northbound_holding_desc": "标准：北向资金持股比例 > 设定值 (外资重仓股，关注长期持仓)",
