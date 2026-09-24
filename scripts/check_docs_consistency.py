@@ -2483,7 +2483,7 @@ def check_canonical_completion_criteria() -> list[str]:
     """检查项：canonical 入口文档必须承载「完成判定」判据（F-03）。
 
     canonical-topics.yml 登记为任务入口（canonical）的文档须承载「完成判定」可打勾判据
-    与最小验证命令，否则 AI 完成质量随任务类型随机波动（CLAUDE.md §1.5/§1.9 的落地依赖
+    与最小验证命令，否则 AI 完成质量随任务类型随机波动（CLAUDE.md §1.2/§1.9 的落地依赖
     入口文档给出判据）。除断言 heading 含「完成判定」外，还校验该章节正文含「最小验证命令」
     字样与至少一条 `- ` 判据，防只挂空标题不写判据（内容门禁）。
     遍历每个 distinct canonical 文档，跳过 fallback 元条目（指向 CLAUDE.md §3/§4 兜底，
