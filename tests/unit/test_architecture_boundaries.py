@@ -8,7 +8,7 @@ AST 扫描更全面）：
 - data → services/strategies/ui/app、services → strategies/ui/app、
   strategies → ui/app、ui → app 由 layers 契约覆盖
 - core → utils 由 forbidden 契约覆盖
-- utils → data/services/strategies/ui/app 由 forbidden 契约（契约 3，含 ignore_imports
+- utils → data/services/strategies/ui/app 由 forbidden 契约（"R1: utils must not import business layers"，含 ignore_imports
   白名单）覆盖
 
 本文件保留例外注册表（docs/governance/exceptions.yml，rule_id=R1）路径存在性校验
@@ -35,7 +35,7 @@ def _load_known_exceptions() -> set[str]:
 
     例外治理集中化 (P1-01)：路径不再硬编码于测试文件，而是从 docs/governance/exceptions.yml
     读取，避免多源漂移。import-linter 契约级 ignore_imports 白名单为 R1 例外的另一守护
-    （见 pyproject.toml 契约 3 注释与 check_docs_consistency.py GATE-02/04）。
+    （见 pyproject.toml "R1: utils must not import business layers" 契约注释与 check_docs_consistency.py GATE-02/04）。
     """
     data = yaml.safe_load(EXCEPTIONS_YAML_PATH.read_text(encoding="utf-8"))
     paths: set[str] = set()

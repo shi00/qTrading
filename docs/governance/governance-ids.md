@@ -43,7 +43,7 @@
 | review08-D1 | 新闻抓取两公开方法去重：抽取 _fetch_stock_news_core 共享内核，publish_time 统一为 UTC tz-naive（消除 8h 口径偏差） | review08 数据层与外部依赖 | [news_fetcher.py](../../data/external/news_fetcher.py) | 使用中 |
 | D6-1 | utils/scheduler_service → data.domain_services.offline_calendar 日历降级例外（EX-0016） | 本地检视报告（gitignored） | [exceptions.yml](./exceptions.yml) EX-0016 | 使用中 |
 | D6-2 | 同 D6-1（D6-1/D6-2 日历降级修复） | 本地检视报告（gitignored） | [exceptions.yml](./exceptions.yml) EX-0016 | 使用中 |
-| GDR-01 | 补录 contract 5 ignore_imports 现存 17 条 R1 例外（EX-0001~EX-0016，含 D6-1/D6-2 日历降级 EX-0016；EX-0019 由 REVIEW-06 TO-04 增补） | 文档体系检视（GDR 系列） | [exceptions.yml](./exceptions.yml) | 使用中 |
+| GDR-01 | 补录 utils 横切叶子契约（"R1: utils must not import business layers"）ignore_imports 现存 17 条 R1 例外（EX-0001~EX-0016，含 D6-1/D6-2 日历降级 EX-0016；EX-0019 由 REVIEW-06 TO-04 增补） | 文档体系检视（GDR 系列） | [exceptions.yml](./exceptions.yml) | 使用中 |
 | TO-04 | utils/scheduler_service 幂等键写入经 engine_provider 查引擎状态（R5 守卫，R1 例外 EX-0019） | REVIEW-06 任务编排与运行时韧性 | [exceptions.yml](./exceptions.yml) EX-0019 | 使用中 |
 | GDR-10 | AGENTS.md 最小安全集排除非 INVARIANT 红线，R1/R16 已有独立自动化兜底故不收录 | 文档体系检视（GDR 系列，2026-09-08） | [0006-override-agents-pure-pointer.md](../adr/0006-override-agents-pure-pointer.md) | 使用中 |
 | GDR-12 | ADR 决策文档文件级索引完整性检查（CONTRIBUTING.md 登记全部 docs/adr/*.md） | 文档体系检视（GDR 系列，2026-09-08） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |

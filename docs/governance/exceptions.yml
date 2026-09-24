@@ -26,11 +26,11 @@
 #   - 禁止删除或复用已废弃例外编号 (append-only)
 #   - 例外到期或触发移除条件后, 必须从本文件移除并同步清理引用
 
-# GDR-01 修复：补录契约 5 ignore_imports 现存 17 条 R1 例外（EX-0001~EX-0016、EX-0019；EX-0016 为 D6-1/D6-2
-# 日历降级，EX-0019 由 REVIEW-06 TO-04 增补），使「例外唯一注册入口」名副其实；pyproject.toml 契约 5 注释逐条回指 EX id。
+# GDR-01 修复：补录 'R1: utils must not import business layers' 契约 ignore_imports 现存 17 条 R1 例外（EX-0001~EX-0016、EX-0019；EX-0016 为 D6-1/D6-2
+# 日历降级，EX-0019 由 REVIEW-06 TO-04 增补），使「例外唯一注册入口」名副其实；pyproject.toml 同名契约注释逐条回指 EX id。
 # 方向性违规（scheduler_service → strategies/services）按 review01-A2/A6 夜间预测下沉消除；
 # 循环打破型（config.db ↔ db_config_service）随按域拆分迁移；关机/采集型 lazy import 保留但须带注释。
-# 条目数唯一事实源：exceptions.yml 中 rule_id=R1 的条目实计 + pyproject.toml 契约 5 ignore_imports 实计（两边一致）。
+# 条目数唯一事实源：exceptions.yml 中 rule_id=R1 的条目实计 + pyproject.toml 同名契约 ignore_imports 实计（两边一致）。
 exceptions:
   # EX-0001: utils/config/db.py -> data.persistence.db_config_service（循环打破）
   - id: EX-0001
@@ -40,7 +40,7 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "随按域拆分完成 data 域归属迁移、utils/config/db.py 迁出 utils 层时移除（review05-E11 后续拆分计划锚点）。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0001）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0001）。"
     validity_criteria: "`utils/config/db.py` 仍含指向 `data.persistence.db_config_service` 的 `# lazy-import:` 函数内导入（L101/L125），且 `app` 层尚未提供等效依赖注入点以支持移除本条 ignore。"
   # EX-0002: utils/diagnostics.py -> data.data_processor（采集访问业务单例）
   - id: EX-0002
@@ -50,7 +50,7 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "diagnostics 采集逻辑下沉至 services/diagnostics 后移除（review01-A2 评估计划锚点）。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0002）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0002）。"
     validity_criteria: "`utils/diagnostics.py` 仍含 `# lazy-import:` 标注的指向 `data.data_processor` 的函数内导入（L122/L124），且采集逻辑尚未下沉至 `services/diagnostics`。"
   # EX-0003: utils/diagnostics.py -> services.task_manager（采集访问业务单例）
   - id: EX-0003
@@ -60,7 +60,7 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "diagnostics 采集逻辑下沉至 services/diagnostics 后移除（review01-A2 评估计划锚点）。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0003）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0003）。"
     validity_criteria: "`utils/diagnostics.py` 仍含 `# lazy-import:` 标注的指向 `services.task_manager` 的函数内导入，且采集逻辑尚未下沉至 `services/diagnostics`。"
   # EX-0004: utils/scheduler_service.py -> data.cache.cache_manager（启动性能优化）
   - id: EX-0004
@@ -70,7 +70,7 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "daily/ai_concept 提交与 DB idempotency 状态改为经 app 层显式依赖注入、scheduler_service 不再按需加载 data/services 后移除（review01-A2 夜间预测下沉已完成，本条目为剩余的启动性能 lazy import）。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0004）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0004）。"
     validity_criteria: "`utils/scheduler_service.py` 仍含 `# lazy-import:` 标注的指向 `data.cache.cache_manager`（L239）/`data.persistence.app_state_service`（L240）的函数内导入，且 `app` 层尚未对 idempotency 状态读写提供显式依赖注入。"
   # EX-0005: utils/scheduler_service.py -> data.data_processor（启动性能优化）
   - id: EX-0005
@@ -80,7 +80,7 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "同 EX-0004：daily/ai_concept 提交与 DB idempotency 状态改为经 app 层显式依赖注入后移除。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0005）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0005）。"
     validity_criteria: "`utils/scheduler_service.py` 仍含 `# lazy-import:` 标注的指向 `data.data_processor` 的函数内导入（L482/L530/L585/L636/L719），且 `app` 层尚未提供对应注入点。"
   # EX-0006: utils/scheduler_service.py -> data.persistence.app_state_service（启动性能优化）
   - id: EX-0006
@@ -90,7 +90,7 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "同 EX-0004：daily/ai_concept 提交与 DB idempotency 状态改为经 app 层显式依赖注入后移除。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0006）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0006）。"
     validity_criteria: "`utils/scheduler_service.py` 仍含 `# lazy-import:` 标注的指向 `data.persistence.app_state_service` 的函数内导入（L158/L240），且 `app` 层尚未对 idempotency 状态读写提供显式依赖注入。"
   # EX-0007: utils/scheduler_service.py -> services.task_manager（启动性能优化）
   - id: EX-0007
@@ -100,11 +100,11 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "同 EX-0004：daily/ai_concept 提交与 DB idempotency 状态改为经 app 层显式依赖注入后移除。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0007）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0007）。"
     validity_criteria: "`utils/scheduler_service.py` 仍含 `# lazy-import:` 标注的指向 `services.task_manager` 的函数内导入（L483/L529/L632/L714），且 `app` 层尚未提供对应注入点。"
   # EX-0008: utils/shutdown.py 关机步骤按需加载（聚合条目，覆盖 EX-0009~EX-0016 同因目标）
   # 合并说明（检视报告 F-09）：EX-0009~EX-0016 原为 7 条同因独立条目（reason/removal_trigger
-  # 均回指 EX-0008），仅 paths 指向的目标模块不同。import-linter 契约 5 ignore_imports 是精确
+  # 均回指 EX-0008），仅 paths 指向的目标模块不同。import-linter 'R1: utils must not import business layers' 契约 ignore_imports 是精确
   # source->target 对，无法无损合并（方向 3 强制 ignore 条数 == R1 例外数），故保留独立 id，
   # 仅在 EX-0008 汇聚被下拉模块清单，其余条目精简为指向本条的引用，消除冗余（GDR-01 append-only）。
   - id: EX-0008
@@ -114,7 +114,7 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "关机编排重构为显式依赖注入（关闭步骤经 app 层注入关闭处理器）后移除，本聚合条目与 EX-0009~EX-0015 一并移除。条件式 trigger 须随 review03-C11 关机重构推进周期性检查。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0008）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0008）。"
     validity_criteria: "`utils/shutdown.py` 仍含 `# lazy-import:` 标注的指向下方被下拉 data/services 模块（EX-0009~EX-0015）的函数内导入（L368/L404/L424/L483 等关机步骤），且关机编排尚未重构为经 `app` 层显式注入关闭处理器。"
   # EX-0009: utils/shutdown.py -> data.domain_services.market_data_service（关机按需加载）
   - id: EX-0009
@@ -124,7 +124,7 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "同 EX-0008（一并移除）。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0009）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0009）。"
     validity_criteria: "同 EX-0008：`utils/shutdown.py` 仍含 `# lazy-import:` 标注的指向 `data.domain_services.market_data_service` 的函数内导入，且关机编排仍未经 `app` 层注入。"
   # EX-0010: utils/shutdown.py -> data.persistence.data_explorer_query_client（关机按需加载）
   - id: EX-0010
@@ -134,7 +134,7 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "同 EX-0008（一并移除）。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0010）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0010）。"
     validity_criteria: "同 EX-0008：`utils/shutdown.py` 仍含 `# lazy-import:` 标注的指向 `data.persistence.data_explorer_query_client` 的函数内导入，且关机编排仍未经 `app` 层注入。"
   # EX-0011: utils/shutdown.py -> data.persistence.embedded_postgres.service（关机按需加载）
   - id: EX-0011
@@ -144,7 +144,7 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "同 EX-0008（一并移除）。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0011）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0011）。"
     validity_criteria: "同 EX-0008：`utils/shutdown.py` 仍含 `# lazy-import:` 标注的指向 `data.persistence.embedded_postgres.service` 的函数内导入，且关机编排仍未经 `app` 层注入。"
   # EX-0012: utils/shutdown.py -> services.embedded_pg_maintenance_service（关机按需加载）
   - id: EX-0012
@@ -154,7 +154,7 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "同 EX-0008（一并移除）。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0012）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0012）。"
     validity_criteria: "同 EX-0008：`utils/shutdown.py` 仍含 `# lazy-import:` 标注的指向 `services.embedded_pg_maintenance_service` 的函数内导入（L483），且关机编排仍未经 `app` 层注入。"
   # EX-0013: utils/shutdown.py -> services.local_model_manager（关机按需加载）
   - id: EX-0013
@@ -164,7 +164,7 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "同 EX-0008（一并移除）。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0013）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0013）。"
     validity_criteria: "同 EX-0008：`utils/shutdown.py` 仍含 `# lazy-import:` 标注的指向 `services.local_model_manager` 的函数内导入，且关机编排仍未经 `app` 层注入。"
   # EX-0014: utils/shutdown.py -> services.news_subscription_service（关机按需加载）
   - id: EX-0014
@@ -174,7 +174,7 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "同 EX-0008（一并移除）。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0014）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0014）。"
     validity_criteria: "同 EX-0008：`utils/shutdown.py` 仍含 `# lazy-import:` 标注的指向 `services.news_subscription_service` 的函数内导入（L382），且关机编排仍未经 `app` 层注入。"
   # EX-0015: utils/shutdown.py -> services.task_manager（关机按需加载）
   - id: EX-0015
@@ -184,7 +184,7 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
     removal_trigger: "同 EX-0008（一并移除）。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0015）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0015）。"
     validity_criteria: "同 EX-0008：`utils/shutdown.py` 仍含 `# lazy-import:` 标注的指向 `services.task_manager` 的函数内导入（L368/L404），且关机编排仍未经 `app` 层注入。"
   # EX-0016: utils/scheduler_service.py -> data.domain_services.offline_calendar（D6-1/D6-2 日历降级）
   - id: EX-0016
@@ -194,8 +194,8 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（D6-1/D6-2 修复）
     removal_trigger: "日历判定统一收口到 TradeCalendarService（DB→API→Offline 三级降级链）且 SchedulerService 不再直接访问 OfflineCalendar 时移除。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0016）。"
-    validity_criteria: "`utils/scheduler_service.py` 仍含 `# lazy-import:` 标注的日历降级访问 `data.domain_services.offline_calendar` 的函数内导入（L614「契约 5 例外 EX-0016」），且日历判定尚未统一收口到日历服务（DB→API→Offline 三级降级链）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0016）。"
+    validity_criteria: "`utils/scheduler_service.py` 仍含 `# lazy-import:` 标注的日历降级访问 `data.domain_services.offline_calendar` 的函数内导入（见该文件 'R1: utils must not import business layers' 契约例外 EX-0016 注释），且日历判定尚未统一收口到日历服务（DB→API→Offline 三级降级链）。"
   # EX-0017: services/news_subscription_service.py 应用服务层轮询循环优雅停止（R5，P1-06 方案1）
   # 技术债条目 P3-M9-NewsSubscription-EngineDisposed-Swallowed 登记于此（案文：#M9-010）。
   - id: EX-0017
@@ -226,5 +226,5 @@ exceptions:
     owner: 架构维护者
     approved_by: 架构维护者（REVIEW-06 TO-04 修复）
     removal_trigger: "同 EX-0004~EX-0007：DB idempotency 状态写入改为经 app 层显式依赖注入后与 EX-0004~EX-0007 一并移除。"
-    verification: "lint-imports 契约 5 ignore_imports 守护（pyproject.toml 契约 5 注释回指 EX-0019）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0019）。"
     validity_criteria: "`utils/scheduler_service.py` 的 `_persist_run_date_db` 仍含 `# lazy-import:` 标注的 `data.persistence.engine_provider` 函数内导入，且幂等键 DB 写入尚未经 app 层显式依赖注入。"

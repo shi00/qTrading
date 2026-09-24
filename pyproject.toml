@@ -216,24 +216,24 @@ exclude_type_checking_imports = true
 #   - app 可依赖所有层（编排层，仅被 main.py 调用）
 # utils 与 app 为无法放入单向线性层序的两个特例（§4.1），故单独保留 forbidden：
 #   - core 禁入 utils（下列"core 必须不导入 utils"契约；utils 可被除 core 外任意层引用，无法线性定位）
-#   - utils 禁入 data/services/strategies/ui/app（下方契约5，横切叶子，含 ignore_imports 白名单）
+#   - utils 禁入 data/services/strategies/ui/app（下方 "R1: utils must not import business layers" 契约，横切叶子，含 ignore_imports 白名单）
 # （注：utils 作为横切叶子本可进层序最低端，但 core 禁入 utils 与「utils 仅禁业务层、可被任意层引用」
 #   的双向约束无法在同一线性序中同时表达，故拆出 forbidden。）
 
-# 契约 1: R1 — 单向分层（core → data → services → strategies → ui → app，从高到低的层序）
+# R1: layered dependencies — 单向分层（core → data → services → strategies → ui → app，从高到低的层序）
 [[tool.importlinter.contracts]]
 name = "R1: layered dependencies (core→data→services→strategies→ui→app)"
 type = "layers"
 layers = ["app", "ui", "strategies", "services", "data", "core"]
 
-# 契约 2: R1 — core 作为最内层不得反向导入 utils 横切叶子 (§4.2，utils 不在层序中故单独声明)
+# R1: core must not import utils — core 作为最内层不得反向导入 utils 横切叶子 (§4.2，utils 不在层序中故单独声明)
 [[tool.importlinter.contracts]]
 name = "R1: core must not import utils"
 type = "forbidden"
 source_modules = ["core"]
 forbidden_modules = ["utils"]
 
-# 契约 3: R1 — utils 为横切叶子层，不得反向依赖任何业务层 (§3.1 R1 / §4.1)
+# R1: utils must not import business layers — utils 为横切叶子层，不得反向依赖任何业务层 (§3.1 R1 / §4.1)
 # review01-A1：将 test_architecture_boundaries.py 中 utils 方向检查提升为 pre-commit 契约，
 # 使 utils 反向依赖在提交阶段即被拦截（此前仅在 CI 全量测试阶段暴露）。
 # ignore_imports 登记存量函数内 lazy import（review01-A1 取证：lint-imports 会分析函数体内
@@ -283,7 +283,7 @@ ignore_imports = [
     "utils.shutdown -> services.news_subscription_service",
     # EX-0015
     "utils.shutdown -> services.task_manager",
-    # EX-0016 (D6-1/D6-2): scheduler_service 交易日历降级到离线日历（契约 5 例外，
+    # EX-0016 (D6-1/D6-2): scheduler_service 交易日历降级到离线日历（"R1: utils must not import business layers" 契约例外，
     # 启动补偿 + except 降级两处函数内 lazy import，见 docs/governance/exceptions.yml）
     "utils.scheduler_service -> data.domain_services.offline_calendar",
 ]

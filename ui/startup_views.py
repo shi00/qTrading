@@ -24,7 +24,7 @@ import flet as ft
 
 # review01-A3: StartupState/StartupContext/EmbeddedPgStartupScenario 为纯类型，已下沉到
 # core.startup_types；StartupController 经 StartupControllerProtocol 解耦——ui 层不再
-# import app 层（契约 6），消除 exceptions.yml EX-0001 例外。
+# import app 层（R1: layered dependencies 契约），消除 exceptions.yml EX-0001 例外。
 from core.startup_types import EmbeddedPgStartupScenario, StartupContext, StartupState
 from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.components.toast_manager import show as toast_show
