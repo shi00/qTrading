@@ -13,7 +13,7 @@
 按 [ai-review.md §2~§10](./ai-review.md) 的规则 ID 执行：
 - 安全边界：SAFE-01…SAFE-05；
 - 输入契约与检视模式：INPUT-01…03；MODE-01…05；
-- 三轮检视：ROUND1-01…03；ROUND2-01…03；ROUND3-01…04（ROUND2-02 默认必检 6 类见 [quality-dimensions.md](./quality-dimensions.md)）；
+- 三轮检视：ROUND1-01…03；ROUND2-01…03；ROUND3-01…05（ROUND2-02 默认必检 6 类见 [quality-dimensions.md](./quality-dimensions.md)）；
 - 停止条件：STOP-01…03；
 - 发现分类/证据/严重度：FIND-01…02；EVID-01…02；SEV-01…02；
 - 输出要求：OUT-01…04（机器可读须符合 review-result.schema.json）；

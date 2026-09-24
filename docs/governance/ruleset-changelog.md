@@ -10,6 +10,7 @@
 
 | ruleset_version | 变更日期 | 变更摘要 |
 |-----------------|----------|---------|
+| 1.9.0 | 2026-09-24 | R21 报告模式落地（H2）：check_redlines.py 新增 check_R21（warning 输出 stderr 不阻断，复用原型 MissingMaskingVisitor），redlines.yml R21 登记 checks/enforcement、automation_coverage none→partial；redlines.yml 新增 self_check 字段（R5/R17/R21 可执行自查判据），CLAUDE.md §3.1 新增「人工评审红线可执行自查清单」生成区块（check_claude_self_check_sync 守护）；检视协议新增 ROUND3-05 无自动拦截红线独立会话复核 |
 | 1.8.0 | 2026-09-21 | R13 语义简化（OSS-03）：删除 _DAO_REGISTRY 显式注册清单，改为 CacheManager.__init__ 显式实例化 + sync_engines() 按类型发现（isinstance BaseDao）；CLAUDE.md/redlines.yml R13 描述与 enforcement 同步（补回 CI-test 静态契约维度），how-to.md/dao-pattern.md 登记步骤同步删除 |
 | 1.7.0 | 2026-09-17 | R20 第一阶段报告模式落地：check_redlines.py 新增 check_R20（warning 输出 stderr 不阻断），redlines.yml R20 登记 checks/enforcement，automation_coverage none→partial（语义仍以人工评审为准，误报率达标后评估升级为拦截） |
 | 1.6.0 | 2026-09-14 | 初版快照登记（ruleset-changelog.md 引入时所在版本；历史 1.3.1→1.6.0 的变更未回溯，自本版本起记录） |
@@ -42,6 +43,24 @@ ERROR」，但此前无清零期限或责任人，存在「无期限渐进部署
   复核；若提前达标则立即评估升级为拦截。
 - **现状基准**：R20 自 2026-09-17（ruleset 1.7.0）进入报告模式以来以 warning 运行，尚无系统性误报统计，
   首次达标评估应在 2026-12-31 前完成。
+
+## R21 报告模式升级期限
+
+`check_redlines.py::check_R21`（R21 缺失值伪装）当前为报告模式（warning 输出 stderr 不阻断），其检测
+逻辑复用可行性原型 `scripts/prototype_business_redlines.py` 的 `MissingMaskingVisitor`（检出
+`masking_assign`：`score`/`ai_score`/`confidence` 被赋 `0`/`50` 含三元 else 分支；`masking_fillna_lowconf`：
+`fillna`/`fill` `0`/`50`）。与「治理 ID 存量 WARNING 清零期限」同型，须以同四要素约束，避免
+「无期限渐进部署永久停留 WARNING」（文档体系检视 H2）。现记录如下约束：
+
+- **误报率阈值**：连续 2 次全量扫描误报 ≤ 0 条（全量扫描指 CI 每次运行 `scripts/check_redlines.py` 对
+  `services/` 与 `strategies/` 两树的 R21 检查；误报 = 命中点实为业务合法语义却被告警的命中，如模型
+  明确否决的 `score == 0`（AI-01 修复后默认 `None`）与 `suspend_data_absent` 哨兵（DATA-03））。
+- **复核期限**：2026-12-31（Q4 末）。
+- **责任人**：架构维护者。
+- **翻转触发**：届期若误报率未达标或未评估，须将对应 WARNING 升级为 ERROR（阻断门禁）并作为独立
+  检视项复核；若提前达标则立即评估升级为拦截。
+- **现状基准**：R21 接入报告模式时全库扫描 0 命中（`strategies/ai_mixin.py` 的 AI-01/AI-02 缺陷均已修复
+  为 `None` 表示），首次达标评估应在 2026-12-31 前完成。
 
 ## 规则集复核状态
 

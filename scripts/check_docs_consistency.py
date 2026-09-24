@@ -64,6 +64,9 @@
    守护"只能数数量、不能核名字"的枚举漂移（数量门禁可被指针式写法绕过）。
 29. workflow 枚举无遗漏检查（F-09）：断言 .github/workflows/*.yml 每一文件都在 ci-cd.md 出现，
    守护 CI 前端流水线（docs-ci / flet-nightly / sidecar 等）因仅存在于文件而被文档漏登记。
+30. 人工评审红线自查清单一致性检查（H2）：CLAUDE.md「人工评审红线可执行自查清单」生成区块须等于
+   redlines.yml `self_check` 字段渲染结果，且该字段声明时须为非空字符串列表——把需人工评审红线的
+   「尤须 AI 自查」（态度式要求）变为可勾选判据（见 check_claude_self_check_sync()）。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -2076,6 +2079,94 @@ def check_claude_executive_sync() -> list[str]:
     )
 
 
+# H2（AI 文档操作系统检视）：需人工评审的红线（automation_coverage != full）此前只有「尤须 AI 自查」
+# 这一态度式要求——让被约束者自评、且无可勾选判据，等于无约束。redlines.yml 新增 `self_check` 字段承载
+# **可执行自查判据**，下列渲染器把带判据的红线渲染为 CLAUDE.md §3.1 生成区块（自查清单），复用既有
+# _generated_block_sync 机制（与 AGENTS.md 最小安全集、CLAUDE.md 顶部摘要同源），不引入新范式。
+# 清单口径为「已声明 self_check 的红线」（当前 R5 / R17 / R21，含 none 与仅报告模式的 partial），
+# 不按 automation_coverage 分类过滤——避免 R21 由 none 升为 partial 时清单与口径失配。
+_SELF_CHECK_START_TAG = "<!-- generated:redlines-self-check -->"
+
+
+def _render_claude_self_check_lines() -> list[str]:
+    """从 redlines.yml 渲染 CLAUDE.md「人工评审红线可执行自查清单」生成区块行（H2）。
+
+    取声明 `self_check`（非空 list[str]）的红线，按 yml 顺序每条红线一行：
+    `> - **R<id> <title>**：<判据1>；<判据2>`，判据以「；」连接，逐条可在交付报告中勾选回答。
+    未声明 self_check 的红线不入清单（R18 有独立执行决策树），首行显式说明其去向，避免
+    「清单不完整」的误读。字段缺失即刻跳过而非静默补空（缺字段由本检查的形态校验守护）。
+    """
+    import yaml  # 延迟 import: PyYAML 是 transitive 依赖, 与 _render_agents_invariant_lines 一致
+
+    data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    lines: list[str] = []
+    ids: list[str] = []
+    for entry in data["redlines"]:
+        criteria = entry.get("self_check")
+        if not isinstance(criteria, list) or not criteria:
+            continue
+        ids.append(str(entry["id"]))
+        lines.append(f"> - **{entry['id']} {entry['title']}**：{'；'.join(criteria)}")
+    header = (
+        "> **人工评审红线可执行自查清单**（判据正本为 `redlines.yml` 的 `self_check` 字段："
+        f"{' / '.join(ids)}；逐条回答后再交付；R18 有独立执行决策树，见下方）："
+    )
+    return [header, *lines]
+
+
+def _check_self_check_field_shape() -> list[str]:
+    """校验 redlines.yml 各条 `self_check` 字段的形态：声明即须为非空字符串列表。
+
+    防止用空判据「登记了但不可执行」把自查清单变成形式合规（H2 的根因是判据不可勾选）。
+    """
+    import yaml  # 延迟 import: 与 _render_claude_self_check_lines 一致
+
+    errors: list[str] = []
+    if not REDLINES_YAML_PATH.exists():
+        return [f"redlines.yml 不存在: {REDLINES_YAML_PATH}"]
+    try:
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        return [f"redlines.yml YAML 解析失败: {e}"]
+    if not isinstance(data, dict) or not isinstance(data.get("redlines"), list):
+        return ["redlines.yml 顶层应为 dict 且含 'redlines' 列表（self_check 形态校验前置条件）"]
+    for entry in data["redlines"]:
+        if not isinstance(entry, dict) or "self_check" not in entry:
+            continue
+        rid = str(entry.get("id", "?"))
+        value = entry["self_check"]
+        if not isinstance(value, list) or not value:
+            errors.append(f"{rid}: self_check 须为非空列表（可执行自查判据），实际 {value!r}")
+            continue
+        if not all(isinstance(c, str) and c.strip() for c in value):
+            errors.append(f"{rid}: self_check 每项须为非空字符串（可执行自查判据），实际 {value!r}")
+    return errors
+
+
+def check_claude_self_check_sync() -> list[str]:
+    """校验 CLAUDE.md「人工评审红线可执行自查清单」生成区块与 redlines.yml 一致（H2）。
+
+    1. `self_check` 字段形态校验（见 _check_self_check_field_shape）——先做，redlines.yml
+       缺失/不可解析时在此 fail-closed 返回，避免随后渲染抛出未捕获异常；
+    2. 区块内容须等于 _render_claude_self_check_lines() 渲染结果（防手工改块与漂移）。
+    """
+    errors = _check_self_check_field_shape()
+    if errors:
+        return errors
+    content = CLAUDE_PATH.read_text(encoding="utf-8")
+    errors.extend(
+        _generated_block_sync(
+            content,
+            _SELF_CHECK_START_TAG,
+            _render_claude_self_check_lines(),
+            "CLAUDE.md 人工评审红线自查清单区块与 redlines.yml 渲染结果不一致。"
+            "请改正本 redlines.yml 的 self_check 字段后同步生成区块，勿手工修改。",
+            f"CLAUDE.md 缺少人工评审红线自查清单生成区块标记（{_SELF_CHECK_START_TAG} / {_GENERATED_END_TAG}）",
+        )
+    )
+    return errors
+
+
 # --- DOC-01: 规则集元数据一致性（CLAUDES 与 CONTRIBUTING 的 ruleset_version/last_reviewed 同步）---
 # 元数据格式（P2-07 统一格式）：
 #   `> - ruleset_version: 1.3.0（...）`  与  `> - last_reviewed: 2026-09-03`
@@ -3476,6 +3567,8 @@ def main() -> int:
     all_errors.extend(check_agents_md_min_verify_commands())
     # CLAUDE.md 顶部摘要生成区块与 redlines.yml 一致性：守护自动加载文档第一屏 (F-04)
     all_errors.extend(check_claude_executive_sync())
+    # CLAUDE.md 人工评审红线可执行自查清单生成区块（H2）：把「尤须 AI 自查」变成可勾选判据
+    all_errors.extend(check_claude_self_check_sync())
 
     # 分支E 机制补全（DOC-01/04/05/07/09/11）：规则集元数据、决策树镜像、canonical 路由、
     # docs 索引全覆盖、治理 id（EX-\d{4}）双向引用。补齐「字段存在」之外的「语义正确」守卫。
@@ -3525,7 +3618,7 @@ def main() -> int:
         "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
         "pre-commit hook 数量 / hook 名称一致性 / workflow 枚举 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
         "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
-        "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 规则集元数据一致性 / "
+        "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 人工评审红线自查清单生成区块一致性 / 规则集元数据一致性 / "
         "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / 检视结论登记索引（GOV-04） / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
         "规则集变更日志版本一致 / ADR 索引完整性 / 脚本索引完整性 / 策略描述动态一致性 / "
