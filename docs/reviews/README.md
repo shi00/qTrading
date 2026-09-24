@@ -30,6 +30,7 @@
 | review05 | 2026-08-24 | 错误处理 / 配置 / 单例治理 / 可观测性 | `reviews/05-错误处理配置与可观测性.md`（本地） | 已归档 |
 | review06 | 2026-08-24 | 安全 / 外部集成 / 供应链（R9/R10） | `reviews/06-安全与供应链.md`（本地） | 进行中 |
 | review07 | 2026-08-24 | 测试体系 / CI 门禁 / 文档治理 | `reviews/07-测试体系与工程治理.md`（本地） | 已归档 |
+| review08 | 2026-09-23 | AKShare 开源组件复用专项（重复造轮子 / akshare 行为 / 未补位 / 项目自身重复，13 项发现） | `reviews/akshare检视.md`（本地） | 进行中 |
 | M3~M12 | 2026-08 | UI 基础设施 / 表现层模块专项检视 | 报告已丢失，ID 出现在 [known-technical-debt.md](../debt/known-technical-debt.md) | 已归档 |
 | UX-07 | 2026-08-06 | 全系统 UI/UX 专项审视 | `reviews/UX-reviews.md`（本地） | 已归档 |
 | 文档体系 | 2026-08-13 | CLAUDE.md 文档体系对抗性深度检视（GOV 系列） | `reviews/文档体系检视.md`（本地） | 已归档 |
@@ -53,4 +54,5 @@
 | review06 | F16 | 未修复 | 备份恢复路径仅做存在性检查，建议校验 pg_dump magic header 并展示元信息 | `reviews/06-安全与供应链.md`（本地） | 备份恢复前已校验 pg_dump 文件 magic header 并在 UI 展示版本/元信息 |
 | review06 | F18 | 未修复 | sidecar 路径可通过配置指向任意二进制，低优先级防误配置项 | `reviews/06-安全与供应链.md`（本地） | sidecar 路径已有配置校验/白名单或非管理员不可覆盖，防误指向任意二进制 |
 | review06 | F19 | 未修复 | 数据库备份文件未加密，建议 UI 提示勿放共享目录 + 可选加密备份 | `reviews/06-安全与供应链.md`（本地） | UI 已有存储位置提示，并提供可选加密备份能力（任一启用即视为关闭） |
+| review08 | C1 | 未修复 | Tushare 积分不足时直接 skip 功能，akshare 免费同类接口（涨跌停池/龙虎榜/两融/北向/个股资金流）闲置未用；报告已深化为「补足而非替换」，需 ADR 定夺 | [findings/review08.md](./findings/review08.md) | 已出 ADR 并完成试点（权限降级 → 切源 → 来源标注两侧可区分）；前置：F9（review06）关闭 + 候选接口联网可用性验证 + D3 结论 |
 | 文档体系·AI 可执行性 | （DOC 系列） | 关闭中 | 修复分批落地见各 PR；未关闭项按 DOC-14 在本索引维护，已落地 ID 见 [governance-ids.md](../governance/governance-ids.md)「使用中」 | docs/reviews/README.md / 各 PR | 对应 DOC ID 均已在 [governance-ids.md](../governance/governance-ids.md) 登记为落地，且对应 chip 校验通过 |
