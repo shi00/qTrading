@@ -1130,12 +1130,24 @@ class TestCacheManagerPrefetchAuxiliaryData:
 
     @pytest.mark.asyncio
     async def test_prefetch_uses_gather_not_sequential(self):
-        import time
+        """并发性判据：7 路慢查询同时在飞（max_active == 7）而非串行（max_active == 1）。
 
+        原实现以 wall-clock 阈值（elapsed < 0.5s）间接推断并发，且 mock 未接
+        ``as_of_date`` kwarg，7 路慢查询从未执行——度量到的只是异常路径的日志/脱敏
+        开销（Windows CI 覆盖率下实测 0.65s），负载一变即抖（2026-09-24 CI 失败）。
+        改为直接观测在飞路数：与机器负载无关，串行实现必然失败。
+        """
         mgr = _make_mgr()
 
-        async def slow_query(ts_codes):
-            await asyncio.sleep(0.1)
+        active = 0
+        max_active = 0
+
+        async def slow_query(ts_codes, **kwargs):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.05)
+            active -= 1
             return pd.DataFrame({"ts_code": ts_codes, "val": [1] * len(ts_codes)})
 
         mgr.financial_dao.get_fina_audit_batch = AsyncMock(side_effect=slow_query)
@@ -1146,11 +1158,11 @@ class TestCacheManagerPrefetchAuxiliaryData:
         mgr.financial_dao.get_financial_reports_history_batch = AsyncMock(side_effect=slow_query)
         mgr.holder_dao.get_stk_holdernumber_batch = AsyncMock(side_effect=slow_query)
 
-        start = time.perf_counter()
         result = await mgr.prefetch_auxiliary_data(["000001.SZ"])
-        elapsed = time.perf_counter() - start
-        assert elapsed < 0.5
+
+        assert max_active == 7, f"应 7 路并发（gather），实际最大在飞 {max_active} 路"
         assert "000001.SZ" in result
+        assert "audit" in result["000001.SZ"], "慢查询结果应被消费（mock 未被调用即签名漂移）"
 
     @pytest.mark.asyncio
     async def test_prefetch_auxiliary_data_partial_failure(self):

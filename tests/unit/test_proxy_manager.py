@@ -196,6 +196,40 @@ class TestProxyManagerGetHttpxProxyConfig:
         asyncio.run(client.aclose())  # httpx 0.28 AsyncClient 用 aclose
 
 
+class TestProxyManagerGetHttpxProxyKwargs:
+    """review08-B2 复核：httpx 0.28 显式 proxy 忽略 NO_PROXY → 按 host 判定直连。"""
+
+    def test_bypass_host_returns_direct_kwargs(self):
+        ProxyManager._reset_singleton()
+        ProxyManager._no_proxy_domains = {"money.finance.sina.com.cn"}
+        ProxyManager._initialized = True
+
+        with patch.dict(os.environ, {"HTTPS_PROXY": "http://proxy:8080"}, clear=True):
+            result = ProxyManager.get_httpx_proxy_kwargs("money.finance.sina.com.cn")
+
+        assert result == {"trust_env": False}
+
+    def test_non_bypass_host_returns_explicit_proxy(self):
+        ProxyManager._reset_singleton()
+        ProxyManager._no_proxy_domains = {"money.finance.sina.com.cn"}
+        ProxyManager._initialized = True
+
+        with patch.dict(os.environ, {"HTTPS_PROXY": "http://proxy:8080"}, clear=True):
+            result = ProxyManager.get_httpx_proxy_kwargs("www.cls.cn")
+
+        assert result == {"proxy": "http://proxy:8080"}
+
+    def test_non_bypass_host_without_proxy_env_returns_empty(self):
+        ProxyManager._reset_singleton()
+        ProxyManager._no_proxy_domains = set()
+        ProxyManager._initialized = True
+
+        with patch.dict(os.environ, {}, clear=True):
+            result = ProxyManager.get_httpx_proxy_kwargs("www.cls.cn")
+
+        assert result == {}
+
+
 class TestProxyManagerGetRequestsProxyConfig:
     def test_no_proxy_env_returns_none(self):
         ProxyManager._no_proxy_domains = set()
