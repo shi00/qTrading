@@ -191,9 +191,10 @@ class ProxyManager:
         返回 ``{"proxy": <url>}``（https 优先）或空 dict（无代理时，调用方依赖
         httpx ``trust_env=True`` 默认读环境代理）。
         # NOTE(lazy): httpx 0.28 显式 proxy 时不再应用 NO_PROXY 域（httpx 0.28
-        移除 Proxy.no_proxy 参数）. ceiling: 外部 API 请求（Sina/LLM）不依赖
-        no_proxy 域，走代理即可. upgrade: httpx 恢复显式 no_proxy 支持或项目出现
-        需绕代理的外部域时.
+        移除 Proxy.no_proxy 参数）. ceiling: 本方法只表达「有代理则用代理」，
+        依赖 NO_PROXY/直连域名配置的调用点须改用 get_httpx_proxy_kwargs(host)
+        （review08-B2 复核修复已接入 news_fetcher 三处）. upgrade: httpx 恢复显式
+        no_proxy 支持时把 host 判定收敛回本方法.
         """
         http_proxy, https_proxy = ProxyManager._resolve_proxy_env()
 
@@ -203,6 +204,23 @@ class ProxyManager:
         # httpx 0.28 单 URL proxy；https 优先（与 requests 版 proxies 语义对齐）
         url = https_proxy or http_proxy
         return {"proxy": url}
+
+    @staticmethod
+    def get_httpx_proxy_kwargs(hostname: str) -> dict:
+        """按 NO_PROXY 语义返回 httpx.AsyncClient 的代理 kwargs（review08-B2 复核修复）。
+
+        httpx 0.28 显式 ``proxy`` 时不再应用 NO_PROXY 域（见 ``get_httpx_proxy_config``
+        的 NOTE(lazy)），会让「直连域名配置」对显式传代理的调用点失效。此处按目标 host
+        显式判定：命中 NO_PROXY 白名单 → ``{"trust_env": False}`` 强制直连（同时不继承
+        环境代理；代价是不再发现 SSL_CERT_FILE 等 env 覆盖，直连公共域名场景可接受）；
+        未命中 → 沿用 ``get_httpx_proxy_config()``（有代理则走代理，与既有一致）。
+
+        Args:
+            hostname: 目标主机名（如 ``"www.cls.cn"``），须与请求 URL 同源。
+        """
+        if ProxyManager.should_bypass_proxy(hostname):
+            return {"trust_env": False}
+        return ProxyManager.get_httpx_proxy_config()
 
     @staticmethod
     def get_no_proxy_env_dict() -> dict[str, str]:

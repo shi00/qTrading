@@ -181,7 +181,8 @@ def _fetch_stock_news_core(
 
     ak = _get_akshare()  # review08-B5: 惰性导入（内核在 IO 线程池中执行，不在启动路径）
 
-    # B3：巨潮公告接口当前仅支持固定 market 值"沪深京"
+    # B3：本调用仅面向 A 股，固定传 "沪深京"（akshare market 另支持 港股/三板/基金/债券/监管/预披露，
+    # 非"仅支持该值"；本项目按业务范围固定 A 股口径）
     market = "沪深京"
 
     # Layer 1: 巨潮公告（announcement）
@@ -484,7 +485,11 @@ class NewsFetcher:
                 "Referer": "https://www.cls.cn/telegraph",
             }
             # B16: requests → httpx.AsyncClient（async-native IO，可被外层 wait_for 取消）
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            # B2 复核: 按 NO_PROXY 语义注入代理 kwargs（配了「直连域名」的国内域名需直连）
+            from utils.proxy_manager import ProxyManager
+
+            proxy_kwargs = ProxyManager.get_httpx_proxy_kwargs("www.cls.cn")
+            async with httpx.AsyncClient(timeout=5.0, **proxy_kwargs) as client:
                 resp = await client.get(url, headers=headers)
                 resp.raise_for_status()
                 return resp.json()
@@ -648,8 +653,8 @@ class NewsFetcher:
 
             from utils.proxy_manager import ProxyManager
 
-            # B16: httpx 使用 get_httpx_proxy_config（proxy 映射格式兼容）
-            proxy_cfg = ProxyManager.get_httpx_proxy_config()
+            # B16/B2 复核: 按 NO_PROXY 语义注入代理 kwargs（httpx 0.28 显式 proxy 时忽略 NO_PROXY）
+            proxy_cfg = ProxyManager.get_httpx_proxy_kwargs("stock.finance.sina.com.cn")
             async with httpx.AsyncClient(timeout=10, **proxy_cfg) as client:
                 resp = await client.get(url, params=params, headers=headers)
                 content = resp.text
@@ -813,9 +818,10 @@ class NewsFetcher:
 
         async def _fetch() -> list[tuple[str, float]]:
             # B16/B2: httpx async-native IO（可被外层 wait_for 取消）；HTTPS 防 MITM
+            # B2 复核: 按 NO_PROXY 语义注入代理 kwargs（httpx 0.28 显式 proxy 时忽略 NO_PROXY）
             from utils.proxy_manager import ProxyManager
 
-            proxy_cfg = ProxyManager.get_httpx_proxy_config()
+            proxy_cfg = ProxyManager.get_httpx_proxy_kwargs("money.finance.sina.com.cn")
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             }
@@ -885,9 +891,10 @@ class NewsFetcher:
                 _SINA_CONSECUTIVE_FAILURES["concept"] += 1
                 count = _SINA_CONSECUTIVE_FAILURES["concept"]
             if count % _SINA_FAILURE_ERROR_INTERVAL == 0:
+                # B2 复核: 升级分支文案与普通分支可区分（与 TimeoutError 分支同款降级后缀）
                 _log_with_severity(
                     e,
-                    "[News] Hot concepts fetch failed (%d consecutive). Error: %s",
+                    "[News] Hot concepts fetch failed (%d consecutive). Data source may be degraded. Error: %s",
                     count,
                     DataSanitizer.sanitize_error(e),
                 )

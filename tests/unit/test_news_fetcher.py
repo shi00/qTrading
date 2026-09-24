@@ -16,6 +16,7 @@ from data.external.news_fetcher import (
     _SINA_CONSECUTIVE_EMPTY,
     _SINA_CONSECUTIVE_FAILURES,
     _SINA_EMPTY_THRESHOLD,
+    _SINA_FAILURE_ERROR_INTERVAL,
 )
 from utils.time_utils import CST_TZ, to_utc_for_db
 import httpx
@@ -2206,6 +2207,102 @@ class TestClassifyErrorIntegration:
             r for r in caplog.records if "[code=" in r.getMessage() and "Hot concepts fetch failed" in r.getMessage()
         ]
         assert code_records, "Expected [code=...] in hot concepts failure log"
+
+
+class TestHttpxProxyKwargs:
+    """review08-B2 复核：三处 httpx 调用点按 NO_PROXY 语义注入 host-aware 代理 kwargs。"""
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_cls_uses_cls_host(self, mock_client):
+        """CLS 电报：host 判定用 www.cls.cn，且 kwargs 透传给 AsyncClient。"""
+        _wire_http_get(mock_client, MagicMock())
+        with patch(
+            "utils.proxy_manager.ProxyManager.get_httpx_proxy_kwargs",
+            return_value={"trust_env": False},
+        ) as mock_kwargs:
+            await NewsFetcher.get_latest_global_news()
+        mock_kwargs.assert_called_once_with("www.cls.cn")
+        assert mock_client.call_args.kwargs.get("trust_env") is False
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_us_moves_uses_sina_host(self, mock_client):
+        """新浪美股行情：host 判定用 stock.finance.sina.com.cn，kwargs 透传。"""
+        mock_resp = MagicMock()
+        mock_resp.text = "__cb([]);"
+        _wire_http_get(mock_client, mock_resp)
+        with patch(
+            "utils.proxy_manager.ProxyManager.get_httpx_proxy_kwargs",
+            return_value={"proxy": "http://proxy:8080"},
+        ) as mock_kwargs:
+            await NewsFetcher.get_us_major_moves()
+        mock_kwargs.assert_called_once_with("stock.finance.sina.com.cn")
+        assert mock_client.call_args.kwargs.get("proxy") == "http://proxy:8080"
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_hot_concepts_uses_sina_host(self, mock_client):
+        """概念热度：host 判定用 money.finance.sina.com.cn，kwargs 透传。"""
+        mock_resp = MagicMock()
+        mock_resp.text = _concept_jsonp_text([("锂电池", "3.5")])
+        _wire_http_get(mock_client, mock_resp)
+        with patch(
+            "utils.proxy_manager.ProxyManager.get_httpx_proxy_kwargs",
+            return_value={"trust_env": False},
+        ) as mock_kwargs:
+            await NewsFetcher.get_hot_concepts()
+        mock_kwargs.assert_called_once_with("money.finance.sina.com.cn")
+        assert mock_client.call_args.kwargs.get("trust_env") is False
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_hot_concepts_failure_escalation_message(self, mock_client, caplog):
+        """失败计数达告警间隔（_SINA_FAILURE_ERROR_INTERVAL 整数倍）→ 升级分支含降级提示。"""
+        _wire_http_get(mock_client, MagicMock())
+        mock_client.return_value.get.side_effect = httpx.ConnectError("concept error")
+        _SINA_CONSECUTIVE_FAILURES["concept"] = _SINA_FAILURE_ERROR_INTERVAL - 1
+
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_hot_concepts()
+
+        assert result == []
+        messages = [r.getMessage() for r in caplog.records if "Hot concepts fetch failed" in r.getMessage()]
+        assert messages, "应记录失败日志"
+        assert all("Data source may be degraded" in msg for msg in messages), "达间隔的失败日志应含降级提示后缀"
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_hot_concepts_failure_plain_message_not_escalated(self, mock_client, caplog):
+        """未达告警间隔 → 普通分支不含降级提示（证明升级分支确实被区分）。"""
+        _wire_http_get(mock_client, MagicMock())
+        mock_client.return_value.get.side_effect = httpx.ConnectError("concept error")
+        _SINA_CONSECUTIVE_FAILURES["concept"] = 0
+
+        with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+            result = await NewsFetcher.get_hot_concepts()
+
+        assert result == []
+        messages = [r.getMessage() for r in caplog.records if "Hot concepts fetch failed" in r.getMessage()]
+        assert messages, "应记录失败日志"
+        assert all("Data source may be degraded" not in msg for msg in messages), "未达间隔不应带降级提示后缀"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_cninfo_market_param_is_hushenjing(self, mock_get_ak, mock_tpm):
+        """review08-B3 复核：巨潮公告调用固定传 market="沪深京"。"""
+        mock_ak = mock_get_ak.return_value
+        mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
+        mock_ak.stock_news_em.return_value = pd.DataFrame()
+
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+        await NewsFetcher.get_stock_news("000001.SZ")
+
+        assert mock_ak.stock_zh_a_disclosure_report_cninfo.call_args.kwargs["market"] == "沪深京"
 
 
 class TestDegradationSemantics:
