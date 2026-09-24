@@ -11,6 +11,9 @@
   新增 akshare 调用须同样接入（review08-B4）。
 - 概念热度（``get_hot_concepts``）走 httpx 直连新浪 HTTPS 端点，不走 akshare
   ``stock_sector_spot``（其内部明文 HTTP 且无 timeout，review08-B2）。
+- akshare 经 ``_get_akshare()`` 惰性导入（review08-B5，勿改回顶层 import）：顶层导入会抵消
+  ``data/external/__init__.py`` 的惰性链；模块级 ``__getattr__`` 亦不可行（PEP 562 不服务于
+  本模块函数内的全局名查找，实测退化为 NameError 并静默降级）。
 """
 
 import asyncio
@@ -20,8 +23,8 @@ import logging
 import math
 import threading
 from datetime import date, timedelta
+from typing import Any
 
-import akshare as ak
 import pandas as pd
 import httpx
 from cachetools import TTLCache
@@ -34,6 +37,18 @@ from utils.time_utils import CST_TZ, get_now, to_utc_for_db
 from utils.error_classifier import classify_error, classify_severity
 
 logger = logging.getLogger(__name__)
+
+
+def _get_akshare() -> Any:
+    """惰性导入 akshare（review08-B5，风格同 ``AkshareConceptClient._get_akshare``）。
+
+    仅在真正发起抓取时导入，避免顶层 import 抵消 ``data/external/__init__.py`` 的惰性
+    收益（触达新闻即加载 akshare 全依赖树）；内核在 IO 线程池中执行，导入开销不进事件
+    循环。测试通过 ``patch("data.external.news_fetcher._get_akshare")`` 注入 mock 模块。
+    """
+    import akshare as ak  # local import: avoid startup-time hard dependency
+
+    return ak
 
 
 def _log_with_severity(
@@ -163,6 +178,8 @@ def _fetch_stock_news_core(
     announcement_docs: list[dict] = []
     news_docs: list[dict] = []
     coverage = {"announcement": "fail", "news": "fail"}
+
+    ak = _get_akshare()  # review08-B5: 惰性导入（内核在 IO 线程池中执行，不在启动路径）
 
     # B3：巨潮公告接口当前仅支持固定 market 值"沪深京"
     market = "沪深京"

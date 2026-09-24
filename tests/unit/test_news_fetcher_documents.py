@@ -69,8 +69,9 @@ class TestGetStockNewsDocuments:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
-    @patch("data.external.news_fetcher.ak")
-    async def test_merges_both_sources(self, mock_ak, mock_run, mock_tpm):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_merges_both_sources(self, mock_get_ak, mock_run, mock_tpm):
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         today = datetime.date.today()
         diff = datetime.timedelta(days=1)
         cninfo = pd.DataFrame(
@@ -122,9 +123,10 @@ class TestGetStockNewsDocuments:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
-    @patch("data.external.news_fetcher.ak")
-    async def test_limits_after_window_filter(self, mock_ak, mock_run, mock_tpm):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_limits_after_window_filter(self, mock_get_ak, mock_run, mock_tpm):
         """排序降序 + 窗口过滤后限量。"""
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         today = datetime.date.today()
         em = pd.DataFrame(
             {
@@ -155,8 +157,9 @@ class TestGetStockNewsDocuments:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
-    @patch("data.external.news_fetcher.ak")
-    async def test_cninfo_fail_still_returns_em_with_coverage(self, mock_ak, mock_run, mock_tpm):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_cninfo_fail_still_returns_em_with_coverage(self, mock_get_ak, mock_run, mock_tpm):
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo down")
         today = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         em = pd.DataFrame(
@@ -179,8 +182,8 @@ class TestGetStockNewsDocuments:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher.ak")
-    async def test_timeout_returns_empty(self, mock_ak, mock_tpm):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_timeout_returns_empty(self, mock_get_ak, mock_tpm):
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(return_value=MagicMock())
