@@ -694,6 +694,10 @@ class AIStreamMixin:
                                 trade_date=analysis_trade_date,
                                 run_id=run_id,
                                 params_snapshot=params or {},
+                                # CRITICAL-02 (R21/BT-03): 执行期 warnings 随结果落库，
+                                # 避免历史回看把「已知不可信」渲染成「无信息」。传原始
+                                # 通道（list 或 None），不传含 UI 派生横幅的 strategy_warnings。
+                                exec_warnings=context.get("warnings"),
                             )
                         except Exception as save_err:
                             # 必须捕获 Exception 而非 BaseException, 保留 CancelledError

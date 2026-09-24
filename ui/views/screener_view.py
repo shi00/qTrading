@@ -116,6 +116,10 @@ _HIDDEN_COLS = frozenset(
         "t5_price",
         "params_snapshot",
         "_filter_attribution",  # UX-04: 结构化筛选归因列 (仅详情弹窗展示, 不上表格)
+        # CRITICAL-02 (R21/BT-03): screening_history 落库的执行期可信度元数据
+        # （exec_warnings 经 warnings 横幅呈现；filter_attribution 供历史回看消费），不上表格。
+        "exec_warnings",
+        "filter_attribution",
     }
 )
 
