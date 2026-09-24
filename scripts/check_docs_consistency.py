@@ -1957,7 +1957,9 @@ def _generated_block_sync(
     AGENTS.md 最小安全集与 CLAUDE.md 顶部摘要两个生成区块共用此同一比对机制，避免分叉。
     """
     start = content.find(start_tag)
-    end = content.find(_GENERATED_END_TAG)
+    # 从 start_tag 之后查找结束标记：同一文档可含多个生成区块（如 AGENTS.md 的红线最小安全集
+    # 区块 + 最小验证命令区块，M2），取全文第一个结束标记会误判为「缺少标记」
+    end = content.find(_GENERATED_END_TAG, start + len(start_tag))
     if start == -1 or end == -1 or end <= start:
         return [missing_msg]
     block = content[start + len(start_tag) : end].strip().splitlines()
@@ -1989,6 +1991,70 @@ def check_agents_md_sync() -> list[str]:
         )
     )
     errors.extend(_check_agents_declaration(content))
+    return errors
+
+
+# M2（文档体系检视）：AGENTS.md 此前全文无任何命令——只加载它的工具链（Codex CLI 等）改完
+# 代码不知道跑什么验证，而「变更类型 → 最小验证子集」恰是 AI 交付质量的关键约束（CONTRIBUTING.md
+# canonical_for 含「最小命令入口」）。命令正本为 CONTRIBUTING.md「常用开发与测试命令」；
+# 渲染源为下列常量，check_agents_md_min_verify_commands() 同时断言 CONTRIBUTING.md 含每条命令，
+# 防「正本 ↔ 生成区块」双向漂移（与 redlines.yml → AGENTS.md 红线区块同机制）。
+_MIN_VERIFY_COMMANDS: tuple[str, ...] = (
+    "ruff check .",
+    "ruff format --check .",
+    "pre-commit run --all-files",
+    "pyright",
+    "python -m pytest tests/unit/ -v --tb=short",
+)
+_MIN_VERIFY_DOC_COMMANDS: tuple[str, ...] = (
+    "python scripts/check_docs_consistency.py",
+    "python -m pytest tests/unit/test_docs_consistency.py",
+)
+
+
+def _render_agents_min_verify_lines() -> list[str]:
+    """渲染 AGENTS.md「最小验证命令」生成区块内容（不含包裹标记，M2）。"""
+    chain = " → ".join(f"`{c}`" for c in _MIN_VERIFY_COMMANDS)
+    doc_chain = " + ".join(f"`{c}`" for c in _MIN_VERIFY_DOC_COMMANDS)
+    return [
+        f"- **变更相关门禁**（提交/PR 前，顺序与 `.github/workflows/ci_cd.yml` 一致）：{chain}",
+        "- **最小验证子集**（按变更范围裁剪，勿全量跑）：见 [CONTRIBUTING.md](./CONTRIBUTING.md#变更类型--最小验证子集)",
+        f"- **仅 Markdown / 治理文档改动**：{doc_chain}",
+        "- **不得声称未运行项已通过**；无法运行的验证需说明原因",
+    ]
+
+
+def check_agents_md_min_verify_commands() -> list[str]:
+    """校验 AGENTS.md「最小验证命令」生成区块与正本一致（M2）。
+
+    渲染 `<!-- generated:min-verify-commands -->` 区块并断言与 AGENTS.md 现状一致；
+    同时断言正本 CONTRIBUTING.md（最小命令入口 canonical）含每条命令，防双向漂移。
+    """
+    errors: list[str] = []
+    if not AGENTS_PATH.exists():
+        return [f"AGENTS.md 不存在: {AGENTS_PATH}"]
+    content = AGENTS_PATH.read_text(encoding="utf-8")
+    start_tag = "<!-- generated:min-verify-commands -->"
+    errors.extend(
+        _generated_block_sync(
+            content,
+            start_tag,
+            _render_agents_min_verify_lines(),
+            "AGENTS.md 最小验证命令区块与渲染结果不一致。请更新渲染源（_MIN_VERIFY_COMMANDS 常量）后同步 AGENTS.md，勿手工修改生成区块。",
+            f"AGENTS.md 缺少最小验证命令生成区块标记（{start_tag} / {_GENERATED_END_TAG}）",
+        )
+    )
+    try:
+        contributing = CONTRIBUTING_PATH.read_text(encoding="utf-8")
+    except OSError:
+        errors.append(f"CONTRIBUTING.md 不存在或不可读: {CONTRIBUTING_PATH}")
+        return errors
+    for cmd in (*_MIN_VERIFY_COMMANDS, *_MIN_VERIFY_DOC_COMMANDS):
+        if cmd not in contributing:
+            errors.append(
+                f"AGENTS.md 最小验证命令区块引用的命令 '{cmd}' 未出现在正本 CONTRIBUTING.md 中"
+                f"（M2：命令正本为最小命令入口 canonical，双向漂移防护）"
+            )
     return errors
 
 
@@ -3406,6 +3472,8 @@ def main() -> int:
     all_errors.extend(check_flet_hub_completeness())
     # AGENTS.md 生成区块与 redlines.yml 一致性：守护跨工具入口的最小安全集导出镜像 (DOC-08/DOC-13)
     all_errors.extend(check_agents_md_sync())
+    # AGENTS.md 最小验证命令生成区块（M2）：跨工具入口补齐「改完代码跑什么验证」
+    all_errors.extend(check_agents_md_min_verify_commands())
     # CLAUDE.md 顶部摘要生成区块与 redlines.yml 一致性：守护自动加载文档第一屏 (F-04)
     all_errors.extend(check_claude_executive_sync())
 

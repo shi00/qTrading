@@ -3324,6 +3324,47 @@ class TestAgentsMdSync:
         assert any("缺少生成区块标记" in e for e in errors), f"错误信息应提示标记缺失, got: {errors}"
 
 
+class TestAgentsMinVerifyCommands:
+    """M2：AGENTS.md「最小验证命令」生成区块与正本（CONTRIBUTING.md 命令入口）一致性。"""
+
+    def test_min_verify_commands_pass_on_current_repo(self):
+        """真实仓库：AGENTS.md 区块与渲染源一致，且每条命令都在 CONTRIBUTING.md 正本中."""
+        from check_docs_consistency import check_agents_md_min_verify_commands
+
+        errors = check_agents_md_min_verify_commands()
+        assert errors == [], f"最小验证命令区块应通过, got: {errors}"
+
+    def test_detects_missing_block_marker(self, tmp_path, monkeypatch):
+        """AGENTS.md 缺生成区块标记 → 报错（不静默通过）."""
+        from check_docs_consistency import check_agents_md_min_verify_commands
+
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text("# AGENTS.md\n\n无生成区块\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+
+        errors = check_agents_md_min_verify_commands()
+        assert any("缺少最小验证命令生成区块标记" in e for e in errors), f"应检出缺标记, got: {errors}"
+
+    def test_detects_command_missing_in_contributing(self, tmp_path, monkeypatch):
+        """正本 CONTRIBUTING.md 缺某条命令 → 报错（双向漂移防护）."""
+        from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
+
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(
+            "<!-- generated:min-verify-commands -->\n"
+            + "\n".join(_render_agents_min_verify_lines())
+            + "\n<!-- /generated -->\n",
+            encoding="utf-8",
+        )
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text("# CONTRIBUTING\n\n（无任何命令）\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert any("未出现在正本 CONTRIBUTING.md 中" in e for e in errors), f"应检出正本缺命令, got: {errors}"
+
+
 class TestClaudeExecutiveSync:
     """CLAUDE.md 顶部摘要生成区块与 redlines.yml 一致性契约测试 (F-04, 机制延续 DOC-08)."""
 
