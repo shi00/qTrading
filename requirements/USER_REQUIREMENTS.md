@@ -527,5 +527,6 @@ AI 要么因为不可信而被弃用，要么因表达流畅而获得过度信�
 - 每条需求具备稳定 id、优先级与证据强度标注；证据人群与目标人群距离已说明
 - 「不应被误写为用户需求」的内容已另行单列，未污染需求正本
 - 新增/变更需求同步修订冲突列表与既有假设交叉引用
+- 新增/变更 FR 的实现落点按 [how-to.md「0. 从需求到实现的落点判定」](../docs/guides/how-to.md#0-从需求到实现的落点判定) 判定，并在实现处留 `FR-XX-00N` 注释
 
 _最小验证命令：_ 仅 Markdown/需求正本改动 → 运行 `python scripts/check_docs_consistency.py` 与相关文档契约测试（`tests/unit/test_docs_consistency.py`）。
