@@ -162,6 +162,11 @@ class TestHiddenColsContract:
     def test_t5_price_still_hidden(self):
         assert "t5_price" in _HIDDEN_COLS
 
+    def test_exec_metadata_cols_hidden(self):
+        """CRITICAL-02: 落库的执行期可信度元数据不上表格（经 warnings 横幅呈现）。"""
+        assert "exec_warnings" in _HIDDEN_COLS
+        assert "filter_attribution" in _HIDDEN_COLS
+
 
 class TestBuildTableData:
     def _make_vm(self) -> MagicMock:
