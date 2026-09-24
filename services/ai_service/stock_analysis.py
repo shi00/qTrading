@@ -33,6 +33,7 @@ from services.ai_service.token_budget import _apply_context_budget
 from services.local_model_manager import LocalInferenceTimeoutError
 from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.time_utils import from_utc_to_cst
 
 if TYPE_CHECKING:
     from services.ai_service import AIService
@@ -50,14 +51,18 @@ CONCEPTS_LIMIT = 8
 
 
 def _news_date_label(item: dict) -> str:
-    """新闻日期标签（LLM prompt 用）：UTC naive datetime → YYYY-MM-DD；其余原样截取或空串。
+    """新闻日期标签（LLM prompt 用）：UTC naive datetime → CST 日期 YYYY-MM-DD；其余原样截取或空串。
 
-    review08-D1：get_stock_news 的 publish_time 已统一为 UTC tz-naive datetime；
-    保留字符串兜底兼容测试 mock 与历史调用方传字符串的情况（None 时输出空串，不崩溃）。
+    review08-D1 复核修复：publish_time 为 UTC tz-naive 存库格式（``_parse_news_time`` 产出），
+    展示前须先还原 CST 再取日期（与 ``news_insight_view_model._fmt_time`` 同范式）——直接对
+    UTC naive 取日期会把北京时间 00:00~07:59 的条目显示为前一天（公告仅日期恒早一天，且与
+    EM 新闻口径矛盾）。保留字符串兜底兼容测试 mock 与历史调用方传字符串的情况（None 时
+    输出空串，不崩溃）。
     """
     pt = item.get("publish_time")
     if isinstance(pt, datetime.datetime):
-        return pt.strftime("%Y-%m-%d")
+        cst = from_utc_to_cst(pt)
+        return cst.strftime("%Y-%m-%d") if cst else ""
     return str(pt)[:10] if pt else ""
 
 

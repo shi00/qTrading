@@ -57,10 +57,15 @@ class TestNewsDateLabel:
 
         return _news_date_label(item)
 
-    def test_datetime_returns_date_str(self):
-        # 公告 CST 2024-08-30 00:00 → UTC naive 2024-08-29 16:00 → 标签取 UTC 日期
+    def test_datetime_returns_cst_date_str(self):
+        # 公告 CST 2024-08-30 00:00 → UTC naive 2024-08-29 16:00 → 标签还原 CST 后取日期
         dt = datetime.datetime(2024, 8, 29, 16, 0, 0)
-        assert self._label({"publish_time": dt}) == "2024-08-29"
+        assert self._label({"publish_time": dt}) == "2024-08-30"
+
+    def test_datetime_cst_early_morning_keeps_same_date(self):
+        # CST 2024-08-30 07:00 → UTC naive 2024-08-29 23:00：UTC 日期跨日，还原 CST 后与原日期一致
+        dt = datetime.datetime(2024, 8, 29, 23, 0, 0)
+        assert self._label({"publish_time": dt}) == "2024-08-30"
 
     def test_string_fallback_truncates_to_date(self):
         assert self._label({"publish_time": "2024-08-30 00:00:00"}) == "2024-08-30"

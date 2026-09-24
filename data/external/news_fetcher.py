@@ -111,13 +111,14 @@ def _ensure_dataframe(result, source: str = "") -> pd.DataFrame | None:
 def _parse_news_time(raw: str | None, *, day_only: bool = False) -> datetime.datetime | None:
     """把公历时间字符串解析为存库格式：CST 本地化后转 UTC tz-naive（参考 CLS 时间戳/DB 存储口径）。
 
-    - day_only=True：仅日期（公告），统一补 00:00:00。
+    - day_only=True：仅日期（公告），统一补 00:00:00；已含时间的输入原样解析，不再追加
+      （review08-D1 复核护栏：防上游 pandas 格式化行为漂移导致长度校验失败、时间全丢）。
     - 解析失败返回 None（调用方按缺失时间处理，不影响其余文档）。
     """
     raw_text = (raw or "").strip()
     if not raw_text:
         return None
-    text = f"{raw_text} 00:00:00" if day_only else raw_text
+    text = f"{raw_text} 00:00:00" if day_only and len(raw_text) <= 10 else raw_text
     try:
         if len(text) >= 19 and len(text) <= 23:
             parsed = datetime.datetime.strptime(text, "%Y-%m-%d %H:%M:%S")  # noqa: DTZ007  东财/巨潮发布时间为 CST 本地时间文本，无时区字面量；下方 to_utc_for_db 按 CST 归属
@@ -208,10 +209,12 @@ def _fetch_stock_news_core(
         df_em = _ensure_dataframe(ak.stock_news_em(symbol=symbol), source="stock_news_em")
 
         if df_em is not None and not df_em.empty:
-            # EastMoney returns '新闻内容' as title, '新闻链接', '新闻时间', etc.
+            # EastMoney returns '新闻内容' as title, '新闻链接', '发布时间', etc.
             for _, row in df_em.iterrows():
                 title = str(row.get("新闻标题", row.get("新闻内容", "")) or "").strip()
-                raw_time = row.get("新闻时间", row.get("发布时间", ""))
+                # review08-D1 复核修复：真实列名为 '发布时间'（akshare 1.18.97 实测），
+                # 原主键 '新闻时间' 在生产返回中不存在、仅靠 fallback 侥幸生效。
+                raw_time = row.get("发布时间", "")
                 url = str(row.get("新闻链接", "") or "") if "新闻链接" in df_em.columns else ""
                 content = str(row.get("新闻内容", "") or "").strip()
                 news_docs.append(
