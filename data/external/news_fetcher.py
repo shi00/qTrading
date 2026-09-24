@@ -169,9 +169,6 @@ def _fetch_stock_news_core(
 
     # Layer 1: 巨潮公告（announcement）
     try:
-        # review08-B4: 所有 akshare 出站调用经模块级共享限速器（1 QPS / burst 2）。
-        # 本内核在 IO 线程池线程执行，consume() 同步阻塞不阻塞事件循环（R16）。
-        get_akshare_rate_limiter().consume(1)
         # Get last 6 months to ensure we find *something* (e.g. quarterly reports)
         end_date = get_now().strftime("%Y%m%d")
         start_date = (get_now() - timedelta(days=180)).strftime("%Y%m%d")
@@ -219,8 +216,6 @@ def _fetch_stock_news_core(
 
     # Layer 2: 东财新闻搜索（news）
     try:
-        # review08-B4: 每层各消耗 1 token；单次抓取 burst=2（与共享桶容量一致）。
-        get_akshare_rate_limiter().consume(1)
         df_em = _ensure_dataframe(ak.stock_news_em(symbol=symbol), source="stock_news_em")
 
         if df_em is not None and not df_em.empty:
@@ -294,6 +289,11 @@ class NewsFetcher:
                 }
 
             try:
+                # review08-B4-FIND-03: 令牌必须在 pandas 全局锁（_pd_options_lock）外一次性
+                # 预留（两层各 1，共 2 = burst 容量），避免限速 sleep 计入临界区、放大并发
+                # 批量抓取时的锁等待（等锁 >10s 即 TimeoutError → 静默降级）。consume() 在
+                # IO 线程池线程执行，同步阻塞不阻塞事件循环（R16）；新增数据层须同步调整预留数。
+                get_akshare_rate_limiter().consume(2)
                 announcement_docs, news_docs, _coverage = _run_with_python_string_storage(
                     lambda: _fetch_stock_news_core(symbol, ts_code)
                 )
@@ -366,6 +366,8 @@ class NewsFetcher:
             coverage = {"announcement": "fail", "news": "fail"}
 
             try:
+                # review08-B4-FIND-03: 同 get_stock_news，令牌在 pandas 全局锁外预留（两层共 2）。
+                get_akshare_rate_limiter().consume(2)
                 announcement_docs, news_docs, coverage = _run_with_python_string_storage(
                     lambda: _fetch_stock_news_core(symbol, ts_code, log_prefix="documents ")
                 )
