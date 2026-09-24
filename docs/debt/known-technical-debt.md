@@ -155,7 +155,7 @@ M9 services 模块检视发现：`services/task_manager.py:664` `cancel_all_runn
 
 **产生背景与现状**
 
-R1 由 import-linter 6 条契约守护；R4/R9（Tushare token 静态脱敏）/R12/R13/R14/R15 由 `scripts/check_redlines.py` 实现并接入 pre-commit `redline-check` hook（单元测试守护）；R20（报告模式，warning 不阻断）与 R22（水位线单调，部分自动化）亦由 `scripts/check_redlines.py` 落地自动检查。R16（UI 阻塞）部分落地：VM `__init__` 构造已注册单例检测已实现（review07-G20，捕获 B11 类问题）；事件处理器内同步 IO 维度因 AST 误报风险高暂缓，仍需人工评审（重点检查项见 `docs/reviews/ai-review.md`）。各红线 automation\_coverage 与 human\_review\_required 见 `docs/governance/redlines.yml`。
+R1 由 import-linter 3 条契约（1 条 layers + 2 条 forbidden）守护；R4/R9（Tushare token 静态脱敏）/R12/R13/R14/R15 由 `scripts/check_redlines.py` 实现并接入 pre-commit `redline-check` hook（单元测试守护）；R20（报告模式，warning 不阻断）与 R22（水位线单调，部分自动化）亦由 `scripts/check_redlines.py` 落地自动检查。R16（UI 阻塞）部分落地：VM `__init__` 构造已注册单例检测已实现（review07-G20，捕获 B11 类问题）；事件处理器内同步 IO 维度因 AST 误报风险高暂缓，仍需人工评审（重点检查项见 `docs/reviews/ai-review.md`）。各红线 automation\_coverage 与 human\_review\_required 见 `docs/governance/redlines.yml`。
 
 **期望的最终解法**
 

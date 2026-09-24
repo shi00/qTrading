@@ -6,6 +6,7 @@
 > Supersedes: ADR-0002「文档架构分层决策」中 AGENTS.md 的纯指针定位
 >
 > 注（2026-09-19 Errata）：下方正文所列红线编号与数量为决策时点（2026-09-03）快照——如 Context 的「18 条红线」与 Decision 第 1 点「INVARIANT 红线 R2/R3/R4/R5/R7/R9/R10，共 7 条」。R5 已由 INVARIANT 降为 EXCEPTIONABLE（见 docs/governance/exceptions.yml EX-0017/EX-0018），当前 AGENTS.md 生成区块为 R2/R3/R4/R7/R9/R10 + R18。当前红线范围与规则类型一律以 docs/governance/redlines.yml 机器可读正本为准。
+> 注（2026-09-24 Errata）：Consequences 段「R1 由 import-linter 6 条契约在 pre-commit 与 CI 双重拦截」为决策时点（2026-09-03）快照——该 6 条手工 forbidden 契约已由 OSS E4 重构为 3 条（1 条 layers + 2 条 forbidden，见 pyproject.toml），兜底机制（pre-commit + CI 双重拦截）不变，决策依据与结论不受影响；当前契约数量与内容一律以 pyproject.toml 机器可读正本为准。
 
 ## Context
 
