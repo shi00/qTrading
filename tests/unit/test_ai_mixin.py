@@ -331,6 +331,8 @@ class TestAIConcurrencyStreamFeedback:
             patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
             patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
             patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+            # 新闻预取 mock：单测不得依赖真实网络（CI 网络耗时不可控，曾致同类用例 flaky）
+            patch("strategies.ai_mixin.NewsFetcher.get_stock_news", new=AsyncMock(return_value=[])),
             patch("strategies.ai_mixin.AIService") as mock_ai,
         ):
             mock_ai_instance = MagicMock()
@@ -374,6 +376,8 @@ class TestAIConcurrencyStreamFeedback:
             patch("strategies.ai_mixin.ConfigHandler.is_ai_external_acknowledged", return_value=True),
             patch("strategies.ai_mixin.ConfigHandler.get_llm_provider", return_value="deepseek"),
             patch("strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="")),
+            # 新闻预取 mock：单测不得依赖真实网络（CI 网络耗时不可控，曾致同类用例 flaky）
+            patch("strategies.ai_mixin.NewsFetcher.get_stock_news", new=AsyncMock(return_value=[])),
             patch("strategies.ai_mixin.AIService") as mock_ai,
         ):
             mock_ai_instance = MagicMock()
