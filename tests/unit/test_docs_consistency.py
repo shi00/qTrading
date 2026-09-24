@@ -3413,6 +3413,87 @@ class TestClaudeExecutiveSync:
         assert any("不一致" in e for e in errors), f"错误信息应含『不一致』, got: {errors}"
 
 
+class TestClaudeSelfCheckSync:
+    """CLAUDE.md 人工评审红线可执行自查清单生成区块与 redlines.yml 一致性契约测试 (H2).
+
+    与 TestClaudeExecutiveSync 同机制：`self_check` 字段承载可执行自查判据，渲染进
+    CLAUDE.md §3.1 的 `<!-- generated:redlines-self-check -->` 区块（check_claude_self_check_sync
+    守护），把需人工评审红线的「尤须 AI 自查」从态度变为可勾选清单。
+    """
+
+    def test_claude_md_has_generated_self_check_block(self):
+        """CLAUDE.md §3.1 含自查清单生成区块包裹标记."""
+        from check_docs_consistency import CLAUDE_PATH
+
+        content = CLAUDE_PATH.read_text(encoding="utf-8")
+        assert "<!-- generated:redlines-self-check -->" in content, "缺少自查清单生成区块起始标记"
+        assert "<!-- /generated -->" in content, "缺少生成区块结束标记"
+
+    def test_render_self_check_covers_r5_r17_r21(self):
+        """渲染结果须覆盖 R5 / R17 / R21 三条已给判据的零自动化红线."""
+        from check_docs_consistency import _render_claude_self_check_lines
+
+        lines = _render_claude_self_check_lines()
+        joined = "\n".join(lines)
+        for rid in ("R5", "R17", "R21"):
+            assert f"**{rid} " in joined, f"自查清单应含 {rid}, got: {joined}"
+        assert "R5" in lines[0] and "R17" in lines[0] and "R21" in lines[0], f"首行应列出红线 ID, got: {lines[0]}"
+
+    def test_check_claude_self_check_sync_passes(self):
+        """真实 CLAUDE.md 自查清单应与 redlines.yml 渲染一致（无错误）."""
+        from check_docs_consistency import check_claude_self_check_sync
+
+        assert check_claude_self_check_sync() == []
+
+    def test_detects_self_check_drift(self, tmp_path, monkeypatch):
+        """篡改 CLAUDE.md 自查清单生成区块 → check_claude_self_check_sync() 报错."""
+        import check_docs_consistency as cdc
+        from check_docs_consistency import _render_claude_self_check_lines
+
+        lines = _render_claude_self_check_lines()
+        tampered = [lines[0]] + [lines[1].replace("R5", "R99")] + lines[2:]
+        tmp_claude = tmp_path / "CLAUDE.md"
+        tmp_claude.write_text(
+            "# CLAUDE.md\n\n## 正文\n\n> 引述\n>\n"
+            "<!-- generated:redlines-self-check -->\n" + "\n".join(tampered) + "\n<!-- /generated -->\n\n## 尾\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", tmp_claude)
+
+        errors = cdc.check_claude_self_check_sync()
+        assert len(errors) > 0, "应检出自查清单生成区块漂移, got no errors"
+        assert any("不一致" in e for e in errors), f"错误信息应含『不一致』, got: {errors}"
+
+    def test_empty_self_check_field_rejected(self, tmp_path, monkeypatch):
+        """self_check 声明为空列表 → 形态校验报错（不得用空判据做形式合规）."""
+        import yaml
+
+        import check_docs_consistency as cdc
+        from check_docs_consistency import REDLINES_YAML_PATH
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        for entry in data["redlines"]:
+            if entry["id"] == "R17":
+                entry["self_check"] = []
+        tmp_yml = tmp_path / "redlines_empty_self_check.yml"
+        tmp_yml.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", tmp_yml)
+
+        errors = cdc.check_claude_self_check_sync()
+        assert any("self_check" in e for e in errors), f"应报 self_check 形态错误, got: {errors}"
+
+    def test_malformed_redlines_yaml_fails_closed(self, tmp_path, monkeypatch):
+        """redlines.yml 缺 redlines 列表 → fail-closed 报错（不因渲染抛未捕获异常）."""
+        import check_docs_consistency as cdc
+
+        tmp_yml = tmp_path / "redlines_no_list.yml"
+        tmp_yml.write_text("not_redlines: 1\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", tmp_yml)
+
+        errors = cdc.check_claude_self_check_sync()
+        assert any("redlines" in e for e in errors), f"应 fail-closed 报缺少 redlines 列表, got: {errors}"
+
+
 class TestRulesetMetadataConsistency:
     """规则集元数据一致性（DOC-01）：CLAUDE.md 与 CONTRIBUTING.md 的 ruleset_version / last_reviewed 同步."""
 
