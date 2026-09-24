@@ -25,10 +25,14 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     _KNOWN_UNIT_COLUMNS_HIGH,
     _KNOWN_UNIT_COLUMNS_LOW,
     _R16_SINGLETON_CLASSES,
+    _R24_SNAPSHOT_CLASSES,
+    _R24_SNAPSHOT_FIELDS,
+    _R24_SNAPSHOT_TABLES,
     _base_class_names,
     _check_R16_in_tree,
     _check_R20_in_tree,
     _check_R22_in_tree,
+    _check_R24_in_tree,
     _check_R4_fstring_in_tree,
     _check_R4_in_tree,
     _check_R4_literal_assignments_in_tree,
@@ -53,6 +57,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     check_R20,
     check_R21,
     check_R22,
+    check_R24,
     check_R4,
     check_R4_in_tests,
     check_R4_literal_assignments,
@@ -1275,6 +1280,105 @@ class TestR22IntegrationOnCurrentCodebase:
     def test_check_R22_runs_clean_on_codebase(self):
         """全库扫描（排除 ui/app/tests 后）R22 无报警（合规基线契约）。"""
         assert check_R22() == []
+
+
+# ============================================================================
+# R24 时点正确性纯函数测试（AI 文档操作系统检视 H1）
+# ============================================================================
+
+
+def _r24_check(code: str) -> list[str]:
+    """对代码片段执行 R24 报告模式纯函数检查（fake 路径挂在 strategies/ 下）。"""
+    tree = ast.parse(code)
+    fake_path = ROOT / "strategies" / "fake_module.py"
+    return _check_R24_in_tree(tree, fake_path)
+
+
+class TestR24PureFunction:
+    """R24 报告模式纯函数测试：验证「当前快照」维度表/ORM 类/派生列键的检测与豁免边界。
+
+    覆盖窄规则（第一阶段）：无生效日期维度表（sw_industry_member 等）、ORM 类、
+    派生列键（industry_sw_l2 / sw_industry）字符串字面量命中；无关字符串不误报。
+    """
+
+    def test_snapshot_table_literal_warns(self):
+        """字符串字面量引用无生效日期快照表（sw_industry_member）应报警。"""
+        code = "def f():\n    return query('sw_industry_member')\n"
+        warnings = _r24_check(code)
+        assert len(warnings) == 1
+        assert "R24" in warnings[0]
+        assert "sw_industry_member" in warnings[0]
+
+    def test_snapshot_class_name_warns(self):
+        """引用快照维度 ORM 类名（SwIndustryMember）应报警。"""
+        code = "def f():\n    rows = await dao.fetch_all(SwIndustryMember)\n    return rows\n"
+        warnings = _r24_check(code)
+        assert len(warnings) == 1
+        assert "R24" in warnings[0]
+        assert "SwIndustryMember" in warnings[0]
+
+    def test_snapshot_field_literal_warns(self):
+        """引用当前快照行业维度列键（industry_sw_l2 / sw_industry）应报警。"""
+        code = "def f(df):\n    return df.groupby('industry_sw_l2')\n"
+        warnings = _r24_check(code)
+        assert len(warnings) == 1
+        assert "industry_sw_l2" in warnings[0]
+
+    def test_sw_industry_context_key_warns(self):
+        """AI 上下文字典键 'sw_industry'（快照表派生）应报警（提示确认取数时点）。"""
+        code = "def f(prefetched):\n    name = prefetched[ts_code]['sw_industry']\n    return name\n"
+        warnings = _r24_check(code)
+        assert len(warnings) == 1
+        assert "sw_industry" in warnings[0]
+
+    def test_unrelated_string_not_flagged(self):
+        """无关字符串（industry 常规列名/普通文案）不应误报。"""
+        code = (
+            "def f():\n"
+            "    industry = row.get('industry', '')\n"
+            "    msg = 'sw_industry_member table is a global snapshot'\n"
+            "    return industry, msg\n"
+        )
+        assert _r24_check(code) == []
+
+    def test_unrelated_class_name_not_flagged(self):
+        """无关类名（IndexWeight 带日期主键，非快照维度）不应误报。"""
+        code = "def f():\n    return IndexWeight\n"
+        assert _r24_check(code) == []
+
+    def test_known_snapshot_sets_cover_redline(self):
+        """快照表/类/字段清单与红线语义一致（防漂移快照）。"""
+        assert "sw_industry_member" in _R24_SNAPSHOT_TABLES
+        assert "SwIndustryMember" in _R24_SNAPSHOT_CLASSES
+        assert "industry_sw_l2" in _R24_SNAPSHOT_FIELDS
+        assert "sw_industry" in _R24_SNAPSHOT_FIELDS
+
+
+class TestR24IntegrationOnCurrentCodebase:
+    """R24 集成测试：报告模式机制验证（warning 输出 stderr、不阻断 exit code）。
+
+    test_check_R24_emits_baseline_not_blocking 为基线契约：当前 strategies/ 存在已知
+    「当前快照」维度引用（同日截面/prompt 上下文用途，非跨期前视），故按报告模式输出
+    warning 但**不阻断退出码**；基线命中数与 ruleset-changelog.md「R24 报告模式升级期限」
+    登记一致，供首次达标评估（2026-12-31 前）对比误报率。
+    """
+
+    def test_check_R24_emits_baseline_not_blocking(self):
+        """当前 strategies/ 基线：输出 R24 warning 且 main() 仍返回 0（报告模式不阻断）。"""
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            assert main() == 0
+        out = buf.getvalue()
+        assert "R24" in out, (
+            "R24 报告模式应输出 warning 基线（strategies/ 存在快照维度引用 industry_sw_l2 / sw_industry）"
+        )
+
+    def test_check_R24_missing_dir_returns_silently(self, tmp_path, monkeypatch):
+        """strategies/ 目录不存在时静默返回 0（不抛错、无 warning）。"""
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        assert check_redlines.check_R24() == 0
 
 
 # ============================================================================

@@ -729,7 +729,7 @@ class TestRedlinesYamlConsistency:
     校验 docs/governance/redlines.yml 与 CLAUDE.md §3.1 红线表一致:
     - YAML 解析成功 + 含 redlines key
     - 每条红线含 6 字段 (id/title/description/enforcement/automation_coverage/human_review_required)
-    - R 编号连续 append-only (R1~R23, 无缺号/重号/跳号)
+    - R 编号连续 append-only (R1~R24, 无缺号/重号/跳号)
     - CLAUDE.md §3.1 表格行数 = yml 条目数
     - automation_coverage 值合法 (full/partial/none) 且与 human_review_required 一致
     - CLAUDE.md §3.1 表格与 YAML 字段语义一致 (id/title/description/enforcement)
@@ -814,21 +814,21 @@ class TestRedlinesYamlConsistency:
         assert errors == [], "redlines.yml consistency check failed:\n  " + "\n  ".join(errors)
 
     def test_check_redline_range_consistency_passes(self):
-        """当前受检文档（非 ADR 快照）的红线总数散文为 R1~R23，应与 redlines.yml 一致。"""
+        """当前受检文档（非 ADR 快照）的红线总数散文为 R1~R24，应与 redlines.yml 一致。"""
         from check_docs_consistency import check_redline_range_consistency
 
         errors = check_redline_range_consistency()
         assert errors == [], "Redline range consistency failed:\n  " + "\n  ".join(errors)
 
     def test_redline_range_consistency_detects_stale_range(self, tmp_path, monkeypatch):
-        """非快照文档声明 R1~R18（滞后于实际 R23）时应报错（散文漏同步根因）。"""
+        """非快照文档声明 R1~R18（滞后于实际 R24）时应报错（散文漏同步根因）。"""
         from check_docs_consistency import check_redline_range_consistency
 
         doc = tmp_path / "stale_range.md"
         doc.write_text("红线 R1~R18 为项目宪法核心\n", encoding="utf-8")
         monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
         errors = check_redline_range_consistency()
-        assert any("R1~R18" in e and "R23" in e for e in errors), f"应报红线总数游标过期, got: {errors}"
+        assert any("R1~R18" in e and "R24" in e for e in errors), f"应报红线总数游标过期, got: {errors}"
 
     def test_redline_range_consistency_ignores_adr_snapshot(self, tmp_path, monkeypatch):
         """ADR 历史快照（R1~R18 为决策时点范围）不应被当前总数守卫误报。"""
