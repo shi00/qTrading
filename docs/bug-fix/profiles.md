@@ -45,9 +45,7 @@
 - 验证新旧应用与新旧 schema 共存；结果未知时先核对状态，禁止盲目重试写入。
 - **项目特定**：
   - schema 变更必须生成 Alembic 迁移，验证 `upgrade head` + `alembic check`（CI 验证 `downgrade base` → `upgrade head`）
-  - R8 批量写入必须用 `_save_upsert()`，`_write_db` 不提供批量参数
-  - R12 新增表必须更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS`
-  - R17 禁止 SQL 保留字作字段名，必须用 ORM `name=` 映射
+  - 项目红线：定义见 [CLAUDE.md §3.1](../../CLAUDE.md#31--绝对禁止)；本域高频红线 R8 / R12 / R17（非穷举），人工追查步骤见 [project-profile.md](../reviews/review-profiles/project-profile.md) 的「红线自查步骤」
 
 ## 6. 安全
 
@@ -55,10 +53,8 @@
 - 修复后验证原攻击路径、变体和正常业务路径；检查同类 CWE 或相同反模式。
 - 不在日志、测试、提交或报告中暴露密钥和真实敏感数据。
 - 需要时遵循漏洞披露、补丁和密钥轮换流程。
-- **项目特定红线**：
-  - R4 asyncpg 原生查询必须用 `$1, $2, ...` 占位符，禁止 `%s`
-  - R9 日志/异常必须经 `DataSanitizer` 脱敏
-  - R10 禁止硬编码 API Key / DB 密码，必须从 `keyring` 或环境变量读取
+- **项目特定**：
+  - 项目红线：定义见 [CLAUDE.md §3.1](../../CLAUDE.md#31--绝对禁止)；本域高频红线 R4 / R9 / R10（非穷举）
 
 ## 7. 外部服务与生产环境不可用
 

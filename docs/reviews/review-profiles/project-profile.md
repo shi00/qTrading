@@ -6,36 +6,9 @@
 
 项目特定规则优先于 [ai-review.md](../ai-review.md) 通用建议。冲突时以 [CLAUDE.md](../../../CLAUDE.md) §3 红线 / §4 架构边界为准。
 
-## 红线映射（R1-R24）
+## 红线索引（R1~R24）
 
-检视时必须检查以下红线违反（完整定义见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止) 与 [docs/governance/redlines.yml](../../governance/redlines.yml)）：
-
-| 红线 | 检视要点 |
-|------|---------|
-| R1 架构越界 | core 导入其他层；data 导入 services/strategies/ui；services 导入 strategies/ui；strategies 导入 ui |
-| R2 异常吞没 | 吞没 `asyncio.CancelledError`（必须 raise） |
-| R3 模糊压制 | `# type: ignore` 不带 `[error-code]` |
-| R4 SQL 注入 | asyncpg 原生查询用 `%s` 而非 `$1, $2, ...` |
-| R5 僵尸引擎操作 | 在 disposed 引擎上执行数据库操作 |
-| R6 过时类型注解 | 使用 `Union[X, Y]` / `Optional[X]` 而非 `X \| Y` |
-| R7 测试状态污染 | 单例未隔离 |
-| R8 废弃 API | 批量写入未用 `_save_upsert()` |
-| R9 敏感信息泄露 | 日志/异常直接打印明文 Token/API Key/密码 |
-| R10 硬编码密钥 | 代码或测试中硬编码 API Key/DB 密码 |
-| R11 跨循环复用同步原语 | 直接将 `asyncio.Event/Lock` 作为类/实例属性（AST 扫描构造点；缓存点与跨循环使用人工评审） |
-| R12 未注册数据表 | 新增表只改 models.py 不更新 data_dictionary.py |
-| R13 未注册 DAO | 新增 DAO 不在 CacheManager.__init__ 实例化 |
-| R14 未注册策略 | 新增策略不使用 `@register_strategy("key")` |
-| R15 未注册单例 | 新增单例不使用 `@register_singleton`、不实现 `_reset_singleton` |
-| R16 UI 阻塞主循环 | Flet 事件处理器中同步执行 IO/CPU 密集任务（CPU 密集仅限 Polars 等释放 GIL 库调用，纯 Python 计算须向量化） |
-| R17 保留字作字段 | SQL 保留字作表名或列名 |
-| R18 未隔离开发 | 新特性/重构未启用 git worktree 隔离 |
-| R19 未配套测试的业务逻辑变更 | 新增/修改业务逻辑未同步新增或更新单测（覆盖率门槛与最小验证子集见 CONTRIBUTING.md「测试规范」） |
-| R20 单位未核对的量纲比较 | 策略/回测对已知金额、数量列（`north_money`/`net_amount`/`amount`/`total_mv`/`circ_mv`/`vol`）的裸数值比较无显式单位换算（须经 `threshold_in_data_unit()`） |
-| R21 缺失值伪装 | 业务语义字段缺失被填充合法具体值（`score`/`ai_score` 填 `0` 分、`confidence` 填 `50%`、空表视为「无限制」）。已修复缺陷（DATA-03→`suspend_data_absent`）不得再判为伪装 |
-| R22 水位线单调性 | checkpoint/高水位持久化写入非单调（`set_app_state` 非 `*_max` 写水位；须优先 `*_max`/GREATEST 保护 + 乱序写入单测） |
-| R23 裸 UI token | UI 层裸 `ft.Colors` 色值与裸字号数值（如 `ft.Text(size=13)`）未用 AppStyles token（须用 `FONT_SIZE_*` 等） |
-| R24 时点正确性 | 进入策略/回测的数据取数时点晚于被决策交易日；用当前快照维度（行业分类/指数成分/股票池/财报最新值）参与历史区间计算未带生效日期或未声明「当期近似」（正本见 [backtest-correctness.md](../../patterns/backtest-correctness.md)） |
+检视时须对照正本逐条核对 R1~R24 的违反；全部 R1~R24 的编号、标题与定义以 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止) 为唯一正本（机器可读镜像见 [docs/governance/redlines.yml](../../governance/redlines.yml)）。本 profile **不复述**红线定义（避免与正本措辞分化），只补充正本未承载的增量：无完整自动门禁红线的人工追查步骤（见下节）。
 
 ## 必检维度（本项目）
 
@@ -43,7 +16,7 @@
 
 ## 红线自查步骤
 
-对 `automation_coverage: none` 的 4 条红线（R5 / R17 / R18 / R21）与 `partial` 自动门禁的 R20 / R22 / R24（R20 / R24 由 check_R20 / check_R24 报告模式提示 warning、不阻断退出码；R22 由 check_R22 水位线静态检测、pre-commit 拦截）以及高风险的 `partial` 维度（R16 事件处理器维度 / R11 缓存点与跨循环使用维度）给出可执行自查入口：每条给出**搜索式**（明确 grep/模式）或**调用链追溯**（明确入口与定义符号）。上述红线无完整自动门禁或自动检测未覆盖全部场景，检视时须主动按此追查。完整语义见 [redlines.yml](../../governance/redlines.yml)，正常本见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止)。
+对 `automation_coverage: none` 的 4 条红线（R5 / R17 / R18 / R21）与 `partial` 自动门禁的 R20 / R22 / R24（R20 / R24 由 check_R20 / check_R24 报告模式提示 warning、不阻断退出码；R22 由 check_R22 水位线静态检测、pre-commit 拦截）以及高风险的 `partial` 维度（R16 事件处理器维度 / R11 缓存点与跨循环使用维度）给出可执行自查入口：每条给出**搜索式**（明确 grep/模式）、**调用链追溯**（明确入口与定义符号）或**声明核对**（无工作区访问权时的等价入口，如 R18 的 PR 描述声明）。上述红线无完整自动门禁或自动检测未覆盖全部场景，检视时须主动按此追查。完整语义见 [redlines.yml](../../governance/redlines.yml)，正常本见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止)。
 
 ### R5 僵尸引擎操作
 1. 调用链追溯：对改动新增/触及的 DAO 或维护方法，从方法入口追到首次碰 `self.engine` 的读/写点，确认其先经 `BaseDao._check_engine()`（`data/persistence/daos/base_dao.py:116`）检查——该方法调 `engine_provider.is_disposed()`（`data/persistence/engine_provider.py:70`）判定，disposed 时抛 `EngineDisposedError`（`base_dao.py:29`）。
@@ -66,9 +39,9 @@
 3. 规避核查：`grep -rn "text(f" data/ services/`，确认没有对保留字列名的 f-string 拼接裸查询（该列名只能经 `name=` 映射，不得出现在裸 SQL 字面量）。
 
 ### R18 未隔离开发
-1. 任务开始前 `git worktree list`，确认新特性/重构/跨多文件修改在独立 worktree 进行、主工作区 `git status` 干净。
-2. 多文件改动时 `git status --porcelain` 检出主工作区未隔离源码改动即违规；命中豁免项（单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离）在评审结论注明豁免。
-3. 无法恢复版本控制（ZIP/只读挂载/IDE 映射目录）时被声明「无版本控制兜底」，交付时逐文件列改动清单取代隔离 —— 见 CLAUDE.md §3.1 R18 执行决策树。
+1. 检视侧（PR/diff 场景 AI 通常看不到作者工作区，无法执行 `git worktree list` / `git status --porcelain`）：核对 **PR 描述是否声明 worktree 隔离**（给出分支名或 `.worktrees/<name>` 路径）；改动跨多文件（新特性/重构）而未声明隔离即判 R18 候选，要求作者补充声明或说明豁免。
+2. 作者侧（AI 自身执行隔离时）：任务开始前 `git worktree list` 确认改动在独立 worktree 进行，`git status --porcelain` 确认主工作区干净、无未隔离源码改动。
+3. 命中豁免项（单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离）在评审结论注明豁免；无法恢复版本控制（ZIP/只读挂载/IDE 映射目录）时声明「无版本控制兜底」，交付时逐文件列改动清单 —— 见 CLAUDE.md §3.1 R18 执行决策树。
 
 ### R20 单位未核对的量纲比较
 1. 调用链追溯：对策略/回测改动涉及金额/数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）的数值比较，确认调用链先经 `threshold_in_data_unit()`（`strategies/utils.py:41`）或 `get_column_unit()` / `get_column_unit_source()` 显式取单位（单位声明见 `data/constants.py` 的 `HSGT_COLUMN_UNITS` / `TOP_LIST_COLUMN_UNITS`）。

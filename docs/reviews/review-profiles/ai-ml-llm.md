@@ -20,5 +20,4 @@
 ## 项目特定（AStockScreener）
 
 - AIService/LiteLLM 外部 IO 方法必须挂 `@log_async_operation` 或 `@track_performance()`
-- R9 日志/异常必须经 `DataSanitizer` 脱敏
-- R10 禁止硬编码 API Key，必须从 `keyring` 或环境变量读取
+- 项目红线：定义见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止)；本域高频红线 R9 / R10（非穷举）。

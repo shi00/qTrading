@@ -293,3 +293,14 @@ return ft.Column(
 **R16**：Flet 事件处理器中**同步阻塞段**（同步 HTTP、文件 IO、CPU 密集计算）必须 `await ThreadPoolManager.run_async()` 提交到线程池，禁止同步阻塞主循环。
 
 **澄清**：本条针对同步阻塞段。async-native IO（`httpx.AsyncClient`、SQLAlchemy async、asyncpg）按原生 `await` 模型执行，不额外包线程池。
+
+### 5.1 自动化覆盖范围与人工评审范围
+
+R16 的 pre-commit 自动化守护为**部分切面**，非全量，读者不得据此推断 R16 已被全量守护：
+
+| 切面 | 覆盖状态 | 说明 |
+|------|---------|------|
+| ViewModel `__init__` 同步构造已注册单例 | **已覆盖**（pre-commit 阻断） | `scripts/check_redlines.py::check_R16_vm_init_singleton_construction` 扫描 `ui/viewmodels`、`ui/components` 下 `__init__` 内对白名单单例类（`_R16_SINGLETON_CLASSES`）的同步构造；命中即阻断，存量持有引用须显式 `# noqa: R16` 豁免 |
+| Flet 事件处理器内同步 IO / CPU 密集段 | **未覆盖**（人工评审） | R16 定义的核心场景（同步 HTTP / 文件 IO / CPU 密集计算未经 `ThreadPoolManager.run_async()` 提交）；当前无自动化检测，pre-commit 不阻断，依赖代码评审与 `@log_async_operation` / `@track_performance` 慢操作告警发现 |
+
+实现回指：`scripts/check_redlines.py::check_R16_vm_init_singleton_construction`（其 docstring 自述「事件处理器内同步 IO 等其他 R16 场景仍为人工评审」）。

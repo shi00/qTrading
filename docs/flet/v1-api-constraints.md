@@ -12,11 +12,11 @@
 
 项目已从 Flet V0 升级到 V1（版本见 [`pyproject.toml`](../../pyproject.toml)）。**项目策略：全面拥抱 V1 声明式，新代码禁止命令式 UI 范式，不保留兼容垫片**。遵循以下原则：
 
-- **新代码禁止引入任何 V0 兼容垫片**（如 `hasattr(page, "open")` 双路径、`getattr(e, "delta_x", 0)` 兼容取值等）。当前代码库已无残留（受 `tests/unit/ui/*_contract.py` 契约测试守护）；若新增依赖必须引入兼容垫片，需在本文末「例外清单」登记。
+- **新代码禁止引入任何 V0 兼容垫片**（如 `hasattr(page, "open")` 双路径、`getattr(e, "delta_x", 0)` 兼容取值等）。**存量仍有受控垫片**：已在本文末「例外清单」登记 3 处 `hasattr`/`getattr` 双路径取值回退（另有 4 处同型守卫，见该节注记），且均**不在** 11 个 `tests/unit/ui/test_*_contract.py` 契约测试覆盖域内——契约测试校验视图/面板级 VM 契约，不覆盖 `ui/components/` 下拖拽增量与 toast 取值回退；若新增依赖必须引入兼容垫片，需在本文末「例外清单」登记并给出可判定的移除条件。
 - **全面采用 V1 原生机制**：通过挂载到 `page.controls` 后由 `parent` 链访问 `page`，而非 `PageRefMixin` 覆写
 - **全面使用 V1 API 形态**：`ft.Button` 而非 `ElevatedButton`；声明式组件内对话框统一用 `ft.use_dialog()`（V0→V1 迁移入口 `page.show_dialog()`/`page.pop_dialog()` 仅迁移旧代码参考，声明式组件内禁用，见 [V0→V1 迁移 API 表](#v0v1-迁移-api-表) 与 [声明式组件内 API 契约](#声明式组件内-api-契约)）
 - **历史命令式代码已重写为声明式**：所有 `class X(ft.Container)` + `did_mount`/`will_unmount` + `self.update()` + `PageRefMixin` + `on_update`/`on_log` 回调注入的代码，已重写为 `@ft.component` + `use_viewmodel` 声明式范式。新代码禁止新增命令式控件（当前受契约测试守护，覆盖 `tests/unit/ui/test_data_source_tab_contract.py`、`test_data_view_contract.py`、`test_onboarding_wizard_contract.py`、`test_task_center_view.py` 等通过 `_ViewModelProtocol` 校验 VM 契约）；例外清单见本文末。
-- **兼容垫片新代码禁止使用**：`PageRefMixin` 在依赖代码重写完成后已从生产代码删除，当前生产代码库无残留；`mock_flet` 测试桩仅保留在 `tests/unit/ui/mock_flet.py` 供 UI 单测使用，生产代码不得引入（见下文「兼容垫片使用规则」）；新代码禁止 reintroduce `PageRefMixin`，例外清单见本文末。
+- **兼容垫片新代码禁止使用**：`PageRefMixin` 在依赖代码重写完成后已从生产代码删除，该类垫片当前无残留（但 `hasattr`/`getattr` 双路径取值回退垫片仍有存量，见本文末「例外清单」）；`mock_flet` 测试桩仅保留在 `tests/unit/ui/mock_flet.py` 供 UI 单测使用，生产代码不得引入（见下文「兼容垫片使用规则」）；新代码禁止 reintroduce `PageRefMixin`，例外清单见本文末。
 
 ## V0→V1 迁移 API 表
 
@@ -66,7 +66,7 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 
 ## 兼容垫片使用规则
 
-V0→V1 兼容垫片（`PageRefMixin` / 旧 mock 全局桩）**新代码禁止使用**；当前代码库已无残留（受 `tests/unit/ui/*_contract.py` 契约测试守护）。测试侧改用 `conftest._v1_page_compat` fixture 兼容未挂载控件的 `update()`/`page` 访问。例外清单见本文末。
+V0→V1 兼容垫片（`PageRefMixin` / 旧 mock 全局桩）**新代码禁止使用**；`PageRefMixin` 与旧 mock 全局桩当前无残留，但 `hasattr`/`getattr` 双路径取值回退垫片仍有存量（3 处已在本文末「例外清单」登记，另有 4 处同型守卫见该节注记），均不在 11 个 `tests/unit/ui/test_*_contract.py` 契约测试覆盖域内。测试侧改用 `conftest._v1_page_compat` fixture 兼容未挂载控件的 `update()`/`page` 访问。例外清单见本文末。
 
 > **`refresh_dropdown_options()` 状态**：已在 Phase R.4.1 删除。声明式 UI 下 options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化，该函数不再需要。
 
@@ -260,7 +260,26 @@ def ScreenerView():
 
 > P1-3 绝对化表述分层：本节集中登记「新代码禁止 / 当前受契约测试守护」规则的例外情况。新增例外需在此登记并说明理由。
 
-当前无例外。若新增依赖或重构必须引入兼容垫片、命令式控件、V0 API 形态，需在此处登记：
+当前登记 3 处存量受控垫片（均为 `hasattr`/`getattr` 双路径取值回退；新代码禁止新增，新增须在此登记）：
+
+- 例外项: V0/V1 拖拽增量双路径取值 — `ui/components/virtual_table.py::_make_drag_update_handler`
+  - 理由: `ft.DragUpdateEvent` 的 `primary_delta` 在部分边界场景/测试桩下可能缺失，回退 `local_delta.x` 保证拖拽跟手（形态与「V0→V1 迁移 API 表」第 16 项一致）。
+  - 守护机制: 不在 `tests/unit/ui/test_*_contract.py` 契约覆盖域内；回退分支由 `tests/unit/ui/test_virtual_table_body.py::TestColumnDrag::test_drag_update_local_delta_fallback` 覆盖。
+  - 移除条件: 项目锁定 Flet 版本下 `primary_delta` 在全部拖拽场景恒有值（E2E 与手测边界场景均验证通过），且 `tests/unit/ui/mock_flet.py::MockDragUpdateEvent` 的 `local_delta` 字段与该回退用例一并删除。
+
+- 例外项: V0/V1 拖拽增量双路径取值 — `ui/components/resizable_splitter.py::_on_drag_update`
+  - 理由: 同上（源码注释记为「兼容 V0 mock 或边界场景」）。
+  - 守护机制: 不在 `tests/unit/ui/test_*_contract.py` 契约覆盖域内；回退分支由 `tests/unit/ui/test_resizable_splitter_body.py::TestDragHandlers::test_on_drag_update_local_delta_fallback`（及空值路径 `::test_on_drag_update_local_delta_none`）覆盖。
+  - 移除条件: 同上一项（`primary_delta` 恒有值，且 `MockDragUpdateEvent.local_delta` 与对应回退用例删除）。
+
+- 例外项: `page.show_toast` 动态挂载守卫 — `ui/components/_markdown_safe.py::_show_blocked_toast`
+  - 理由: `page.show_toast` 由 `main.py` 启动时动态挂载，`ft.Page` 存根未声明该属性；`hasattr` 守卫避免桩 page 上 `AttributeError`。
+  - 守护机制: 不在 `tests/unit/ui/test_*_contract.py` 契约覆盖域内；由 `tests/unit/ui/test_markdown_safe.py::TestSafeOpenUrlToast::test_non_whitelisted_url_shows_toast` 覆盖。
+  - 移除条件: `page.show_toast` → `ToastManager.show()` 迁移批次（见 [accessibility-baseline.md](./accessibility-baseline.md) §2.3 的「存量过渡」条目，M12 / UIX-13）完成，或 `show_toast` 纳入 `ft.Page` 声明、静态可判定时。
+
+> **同型守卫（未计入上述 3 项登记）**：生产代码另有 4 处 `hasattr(page, ...)` 双路径守卫——`ui/views/settings_view.py::_show_snack_impl`、`ui/views/onboarding_wizard.py::_show_snack`、`ui/components/config_panels/backup_restore_panel.py::_pick_and_restore`（均为 `show_toast` 守卫）与 `ui/components/_markdown_safe.py::safe_open_url`（`run_task` 守卫）。其形态与上条第 3 项同属「动态挂载属性存在性守卫」，是否随声明式收敛一并清理须逐处判定；`show_toast` 守卫应随 `page.show_toast` → `ToastManager.show()` 迁移批次统一清理（迁移方向见 [accessibility-baseline.md](./accessibility-baseline.md) §2.3 的「存量过渡」条目），故不在此单独登记以免与既有迁移跟踪机制重复。
+
+若新增依赖或重构必须引入兼容垫片、命令式控件、V0 API 形态，需在此处登记：
 
 - 例外项: `<项名>`
   - 理由: `<为何无法遵守默认规则>`
