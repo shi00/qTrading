@@ -25,7 +25,6 @@ from data.external.akshare_rate_limiter import (
     get_akshare_rate_limiter,
 )
 from utils.log_decorators import PerfThreshold, log_async_operation
-from utils.rate_limiter import TokenBucket
 from utils.singleton_registry import register_singleton
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -79,22 +78,12 @@ class AkshareConceptClient:
         with self._lock:
             if self._initialized:
                 return
-            self._rate_limiter: TokenBucket = self._build_rate_limiter()
             self.__class__._initialized = True
             logger.info(
                 "[AkshareConceptClient] initialized: rate=%.1f QPS, capacity=%.0f (module-level shared)",
                 AKSHARE_RATE_LIMIT_PER_SEC,
                 AKSHARE_RATE_LIMIT_CAPACITY,
             )
-
-    def _build_rate_limiter(self) -> TokenBucket:
-        """Return the module-level shared TokenBucket (review08-B4).
-
-        All akshare outbound calls (concept client + NewsFetcher sync kernel)
-        consume the same bucket. Kept as a method so tests can patch the limiter
-        without re-implementing ``__init__``.
-        """
-        return get_akshare_rate_limiter()
 
     @staticmethod
     def _get_akshare() -> Any:
@@ -114,11 +103,12 @@ class AkshareConceptClient:
 
         AKShare's ``stock_board_concept_name_em()`` returns
         ``__stock_board_concept_name_em().copy()`` where the inner loader is
-        ``@lru_cache``-decorated with no TTL and a single cache slot. That cache
-        outlives the whole process (no ``cache_clear`` call anywhere in the
-        module), so a second call in a long-lived run would otherwise return the
-        first-call snapshot instead of hitting the network — silently freezing
-        the concept list (review08-B1, P0).
+        ``@lru_cache``-decorated (default ``maxsize=128``) with no TTL; being a
+        zero-arg loader its single cache key makes it effectively a one-entry
+        cache. That cache outlives the whole process (no ``cache_clear`` call
+        anywhere in the module), so a second call in a long-lived run would
+        otherwise return the first-call snapshot instead of hitting the network
+        — silently freezing the concept list (review08-B1, P0).
 
         We therefore clear it right before each fetch so scheduler / nightly
         jobs always see fresh data. Depending on AKShare's private function name
@@ -152,7 +142,8 @@ class AkshareConceptClient:
         """Fetch the list of East-Money concept boards (东财概念板块列表).
 
         AKShare's ``stock_board_concept_name_em()`` wraps a module-level
-        ``@lru_cache``-decorated loader with no TTL and a single cache slot (see
+        ``@lru_cache``-decorated zero-arg loader with no TTL whose single cache
+        key makes it effectively a one-entry cache (see
         ``_clear_concept_list_cache``). This client clears that internal cache
         before each fetch so long-lived processes (scheduler + nightly jobs)
         always get fresh data instead of the first-call snapshot.
@@ -164,7 +155,9 @@ class AkshareConceptClient:
             Exception: Any AKShare/transport error propagates to the caller after
                 being logged by ``@log_async_operation``.
         """
-        await self._rate_limiter.consume_async(1)
+        # review08-B4-FIND-04: 不缓存实例桶，每次调用动态解析模块级共享桶，
+        # 使 reset_akshare_rate_limiter() 重绑全局后本客户端立即使用新桶。
+        await get_akshare_rate_limiter().consume_async(1)
 
         def _fetch() -> pd.DataFrame:
             ak = self._get_akshare()
@@ -190,7 +183,8 @@ class AkshareConceptClient:
             Exception: Any AKShare/transport error propagates to the caller after
                 being logged by ``@log_async_operation``.
         """
-        await self._rate_limiter.consume_async(1)
+        # review08-B4-FIND-04: 同 get_concept_list，动态解析共享桶，不缓存实例。
+        await get_akshare_rate_limiter().consume_async(1)
 
         def _fetch() -> pd.DataFrame:
             ak = self._get_akshare()

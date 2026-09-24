@@ -258,6 +258,32 @@ class TestAKShareConceptSync:
         assert len(result.errors) > 0
 
     @pytest.mark.asyncio
+    async def test_ts_code_map_failure_returns_failed_without_writing(self):
+        """review08 D2: 权威映射预载失败（DB 故障）→ 策略 status=FAILED 且不写 concepts。
+
+        映射预载失败必须显式失败（R21：不可降级为空映射静默空跑，否则全部成分股
+        被误判为“不在 stock_basic”并误报 SUCCESS）。DatabaseQueryError 经
+        _run_impl 外层 except Exception → classify_severity=operational → FAILED。
+        """
+        from data.persistence.daos.base_dao import DatabaseQueryError
+
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.get_ts_code_map = AsyncMock(side_effect=DatabaseQueryError("db down"))
+
+        client = AkshareConceptClient()
+        client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
+        client.get_concept_constituents = AsyncMock(return_value=_make_constituents_df())
+
+        strategy = AKShareConceptSyncStrategy(ctx)
+        result = await strategy.run()
+
+        assert result.status == SyncStatus.FAILED.value
+        assert len(result.errors) > 0
+        # 映射预载失败即中止，未写入任何概念
+        ctx.cache.stock_dao.upsert_em_concepts.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_cancel_after_concept_list_fetch(self):
         """覆盖 concept_sync.py:88-89：concept_list 拉取成功后、启动 constituents 并发前触发取消。
 
@@ -458,8 +484,8 @@ class TestLimitListSync:
 
         assert result.status == SyncStatus.FAILED.value
         assert len(result.errors) > 0
-        # review08-D3：fetch 失败前清空已执行，warning 说明存量已清除
-        assert any("cleared before fetch failure" in w for w in result.warnings)
+        # review08-D3：失败文案只声明"不再写入"，不声称存量已清除（清空自身失败也会落到此分支）
+        assert any("no longer written (review08-D3)" in w for w in result.warnings)
 
     @pytest.mark.asyncio
     async def test_cancelled_error_propagates(self):

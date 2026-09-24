@@ -4,6 +4,7 @@
 # 测试行为由测试用例本身验证。
 
 import datetime
+import re
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -445,10 +446,12 @@ class TestGetConcepts:
         dao = _make_dao()
         codes = [f"{i:06d}.SZ" for i in range(1, 1201)]
         call_count = 0
+        calls: list[tuple[str, list]] = []
 
         async def mock_read_db(sql, params=None, **kwargs):
             nonlocal call_count
             call_count += 1
+            calls.append((sql, params))
             n = len(params) if params else 10
             return pd.DataFrame(
                 {
@@ -460,6 +463,14 @@ class TestGetConcepts:
         dao._read_db = AsyncMock(side_effect=mock_read_db)
         await dao.get_concepts(ts_codes=codes)
         assert call_count == 3
+        # 分块路径唯一依赖隐式 $n+1 编号：NOT LIKE 过滤参数必须排在 chunk 参数之后，
+        # 其占位符编号 = len(chunk)+1；每块参数 = ts_code chunk + "LIMIT_%"（R4 参数化）
+        for sql, params in calls:
+            match = re.search(r"NOT LIKE \$(\d+)", sql)
+            assert match is not None, f"分块 SQL 缺少 NOT LIKE 过滤: {sql}"
+            assert params[-1] == "LIMIT_%"
+            assert int(match.group(1)) == len(params)
+            assert all(p.endswith(".SZ") for p in params[:-1])
 
 
 class TestGetConceptCount:
