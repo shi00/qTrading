@@ -4,6 +4,7 @@ Tests for fundamental strategies (Value, Growth, Dividend, CashFlow, LargePE).
 验证基本面策略筛选逻辑的正确性。
 """
 
+import datetime
 import unittest
 
 import pandas as pd
@@ -671,6 +672,101 @@ class TestLargePEStrategy(unittest.TestCase):
         """LargePEStrategy 显式声明 required_context_keys 与 required_tables"""
         self.assertEqual(self.strategy.required_context_keys, ("screening_data",))
         self.assertEqual(self.strategy.required_tables, ("daily_quotes",))
+
+
+class TestAnnualizedRoePeriodUniformity(unittest.TestCase):
+    """CRIT-01: 累计口径 ROE 年化——同一阈值在各披露期语义一致、跨期可比。
+
+    Tushare fina_indicator.roe 为报告期累计口径（一季报仅约全年 1/4 量级），
+    直接用固定阈值比较会随披露期切换筛出不同性质的公司。修复后按 fin_end_date
+    季度序号年化（Q1×4 / H1×2 / Q3×4/3 / 年报×1）后再比较。
+    """
+
+    @staticmethod
+    def _row(ts_code: str, roe: float, end_date: datetime.date) -> dict:
+        return {
+            "ts_code": ts_code,
+            "or_yoy": 30.0,
+            "netprofit_yoy": 40.0,
+            "roe": roe,
+            "n_income": 100.0,
+            "grossprofit_margin": 40.0,
+            "gpm_prev": 38.0,
+            "fin_end_date": end_date,
+        }
+
+    def test_growth_annualized_roe_cross_period_comparable(self):
+        """年报 16% 与一季报 4%（年化 16%）同门槛同判；一季报 3%（年化 12%）不通过。"""
+        df = pd.DataFrame(
+            [
+                self._row("A", 16.0, datetime.date(2025, 12, 31)),
+                self._row("B", 4.0, datetime.date(2026, 3, 31)),
+                self._row("C", 3.0, datetime.date(2026, 3, 31)),
+            ]
+        )
+        s = GrowthStrategy()
+        ctx = {"params": {"revenue_growth_min": 0, "profit_growth_min": 0, "roe_min": 15}}
+        base_lf = s._preprocess_lf(pl.from_pandas(df).lazy(), ctx)
+        result = s._filter_logic(base_lf, ctx).collect()
+
+        self.assertEqual(set(result["ts_code"].to_list()), {"A", "B"})
+        annualized = dict(zip(result["ts_code"].to_list(), result["roe_annualized"].to_list(), strict=True))
+        self.assertAlmostEqual(annualized["A"], 16.0)
+        self.assertAlmostEqual(annualized["B"], 16.0)  # 4.0 × 4（Q1 年化）
+        self.assertNotIn("C", annualized)
+
+    def test_fallback_without_period_column_keeps_legacy_behavior(self):
+        """降级：无 fin_end_date 列时注入 roe_annualized = roe 等价列，行为不变。"""
+        df = pd.DataFrame([self._row("X", 12.0, datetime.date(2025, 12, 31))]).drop(columns=["fin_end_date"])
+        s = GrowthStrategy()
+        ctx = {"params": {}}
+        out = s._preprocess_lf(pl.from_pandas(df).lazy(), ctx).collect()
+        self.assertEqual(out["roe_annualized"].to_list(), [12.0])
+        self.assertNotIn("strategy_mixed_report_periods", [getattr(m, "key", None) for m in ctx.get("warnings", [])])
+
+    def test_mixed_report_periods_warning_on_mixed_results(self):
+        """结果集跨 2 个报告期时写入 strategy_mixed_report_periods 警告。"""
+        df = pd.DataFrame(
+            [
+                self._row("A", 16.0, datetime.date(2025, 12, 31)),
+                self._row("B", 4.0, datetime.date(2026, 3, 31)),
+            ]
+        )
+        s = GrowthStrategy()
+        ctx = {"params": {"revenue_growth_min": 0, "profit_growth_min": 0, "roe_min": 15}}
+        base_lf = s._preprocess_lf(pl.from_pandas(df).lazy(), ctx)
+        s._filter_logic(base_lf, ctx).collect()
+        keys = [getattr(m, "key", None) for m in ctx.get("warnings", [])]
+        self.assertIn("strategy_mixed_report_periods", keys)
+
+    def test_single_report_period_no_warning(self):
+        """结果集仅单一报告期时不提示（避免常态刷屏，保留信号价值）。"""
+        df = pd.DataFrame(
+            [
+                self._row("A", 16.0, datetime.date(2025, 12, 31)),
+                self._row("D", 18.0, datetime.date(2025, 12, 31)),
+            ]
+        )
+        s = GrowthStrategy()
+        ctx = {"params": {"revenue_growth_min": 0, "profit_growth_min": 0, "roe_min": 15}}
+        base_lf = s._preprocess_lf(pl.from_pandas(df).lazy(), ctx)
+        s._filter_logic(base_lf, ctx).collect()
+        keys = [getattr(m, "key", None) for m in ctx.get("warnings", [])]
+        self.assertNotIn("strategy_mixed_report_periods", keys)
+
+    def test_cashflow_annualized_roe(self):
+        """CashFlowStrategy 同样按年化口径比较（一季报 4% 年化 16% 过 10% 门槛）。"""
+        df = pd.DataFrame(
+            [
+                {**self._row("E", 4.0, datetime.date(2026, 3, 31)), "debt_to_assets": 30.0},
+                {**self._row("F", 2.0, datetime.date(2026, 3, 31)), "debt_to_assets": 30.0},
+            ]
+        )
+        s = CashFlowStrategy()
+        ctx = {"params": {"debt_max": 50, "roe_min": 10}}
+        base_lf = s._preprocess_lf(pl.from_pandas(df).lazy(), ctx)
+        result = s._filter_logic(base_lf, ctx).collect()
+        self.assertEqual(result["ts_code"].to_list(), ["E"])  # F 年化 8% < 10%
 
 
 if __name__ == "__main__":

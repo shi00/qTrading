@@ -10,6 +10,55 @@ from strategies.polars_base import PolarsBaseStrategy
 from strategies.utils import fmt_val, threshold_in_data_unit
 
 
+def _ensure_annualized_roe(lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
+    """CRIT-01: 累计口径 ROE 年化——Q1×4 / H1×2 / Q3×4/3 / 年报×1，跨披露期可比。
+
+    Tushare ``fina_indicator.roe`` 为报告期累计口径（YTD）：一季报仅约全年的 1/4
+    量级，与固定阈值直接比较会随披露期切换筛出完全不同性质的公司（4 月披露切换
+    窗口内还会出现混期比较）。按 ``fin_end_date`` 的季度序号年化后，同一阈值在
+    各披露期语义一致（均为年化口径）。
+
+    - ``fin_end_date`` 列缺失或非日期类型（测试数据/旧数据源）：注入
+      ``roe_annualized = roe`` 等价列，保持既有行为不变（降级不改语义）；
+    - ``fin_end_date`` 为空的脏数据行：退回未年化原值（不伪造期间、不排除行）；
+    - 幂等：``_preprocess_lf`` 注入与 ``_filter_logic`` 内直调兜底共用 context 标记。
+    """
+    if context.get("_roe_annualized_injected"):
+        return lf
+    schema = lf.collect_schema()
+    end_dtype = schema["fin_end_date"] if "fin_end_date" in schema.names() else None
+    if end_dtype in (pl.Date, pl.Datetime):
+        quarter = (pl.col("fin_end_date").dt.month() - 1) // 3 + 1
+        expr = (
+            pl.when(quarter.is_null())
+            .then(pl.col("roe"))
+            .otherwise(pl.col("roe") * 4.0 / quarter)
+            .alias("roe_annualized")
+        )
+    else:
+        expr = pl.col("roe").alias("roe_annualized")
+    context["_roe_annualized_injected"] = True
+    return lf.with_columns(expr)
+
+
+def _warn_on_mixed_report_periods(result_lf: pl.LazyFrame, context: dict) -> None:
+    """CRIT-01 附加：结果集跨多个报告期时提示口径（年化后可比，不拦截）。
+
+    统计过滤后结果（而非全市场输入池）——结果跨期才说明「本次入选股票来自不同
+    披露期」，输入池恒含多期会让提示常态化而失去信号价值。
+    """
+    if "fin_end_date" not in result_lf.collect_schema().names():
+        return
+    try:
+        n_periods = result_lf.select(pl.col("fin_end_date").drop_nulls().n_unique()).collect().item()
+    except Exception:
+        # NOTE(lazy): except Exception 保留（诊断增强不阻断主流程）。ceiling: 结果集报告期统计。
+        # upgrade: 诊断/归因层统一错误处理时并入。
+        return
+    if n_periods and int(n_periods) > 1:
+        context.setdefault("warnings", []).append(Message("strategy_mixed_report_periods", {"count": int(n_periods)}))
+
+
 @register_strategy("value")
 class ValueStrategy(PolarsBaseStrategy):
     required_quality_tier = QualityTier.GOLD
@@ -165,32 +214,42 @@ class GrowthStrategy(PolarsBaseStrategy):
         fv = fmt_val
         or_yoy = fv(row.get("or_yoy"))
         np_yoy = fv(row.get("netprofit_yoy"))
-        roe = fv(row.get("roe"))
+        roe = fv(row.get("roe_annualized"))
         gpm = fv(row.get("grossprofit_margin"))
         pe = fv(row.get("pe_ttm"))
+        period = row.get("fin_end_date")
+        period_text = str(period) if period is not None and not pd.isnull(period) else "N/A"
         return (
             f"该股票由高成长策略筛选，满足高增长+高盈利条件。\n"
-            f"营收YOY={or_yoy}%, 净利润YOY={np_yoy}%, ROE={roe}%, 毛利率={gpm}%, PE(TTM)={pe}\n"
+            f"营收YOY={or_yoy}%, 净利润YOY={np_yoy}%, 年化ROE={roe}%(报告期={period_text}), "
+            f"毛利率={gpm}%, PE(TTM)={pe}\n"
             f"请严格比对营收YOY和净利润YOY：如果利润增速远高于营收增速，且毛利率并未显著提升，\n"
             f"强烈质疑其非经常性损益或降本增效带来的不可持续性增长。\n"
             f"如果此时 PE 极高(>60)，提示右侧杀跌的戴维斯双杀风险。"
         )
+
+    def _preprocess_lf(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
+        """CRIT-01: 注入年化 ROE 派生列，统一报告期口径（见 _ensure_annualized_roe）。"""
+        return _ensure_annualized_roe(lf, context)
 
     def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
         p = context.get("params", {})
         rev = p.get("revenue_growth_min", 20)
         profit = p.get("profit_growth_min", 25)
         roe = p.get("roe_min", 15)
+        # CRIT-01: 直调兜底（_preprocess_lf 已注入时为幂等空操作）。
+        lf = _ensure_annualized_roe(lf, context)
         # SC-03: netprofit_yoy 基期（上年同期）亏损时无业务含义（Tushare 公式分母为 |上年同期净利|）。
         # ① 绝对盈利下限 n_income > 0 兜底（null 缺失放行，不伪造，R21）；
         # ② 增长质量存疑降权而非硬过滤：利润增速远超营收增速（> 2 倍）且毛利率未改善
         # （<= 上一报告期）时标记 growth_quality_doubt=1 并置后排序，交 AI 二次审查。
-        return (
+        result_lf = (
             lf.drop_nulls(subset=["or_yoy", "netprofit_yoy", "roe"])
             .filter(pl.col("or_yoy") > rev)
             .filter(pl.col("netprofit_yoy") > profit)
             .filter((pl.col("n_income").is_null()) | (pl.col("n_income") > 0))
-            .filter(pl.col("roe") > roe)
+            # CRIT-01: 累计口径 ROE 年化后再比较（原值跨披露期不可比）
+            .filter(pl.col("roe_annualized") > roe)
             .with_columns(
                 (
                     (pl.col("netprofit_yoy") > 2 * pl.col("or_yoy"))
@@ -202,8 +261,10 @@ class GrowthStrategy(PolarsBaseStrategy):
                 .fill_null(0)
                 .alias("growth_quality_doubt")
             )
-            .sort(["growth_quality_doubt", "roe"], descending=[False, True])
+            .sort(["growth_quality_doubt", "roe_annualized"], descending=[False, True])
         )
+        _warn_on_mixed_report_periods(result_lf, context)
+        return result_lf
 
     attribution_enabled = True  # UX-04
 
@@ -216,7 +277,7 @@ class GrowthStrategy(PolarsBaseStrategy):
         return (
             FilterCondition("or_yoy", "gt", rev),
             FilterCondition("netprofit_yoy", "gt", profit),
-            FilterCondition("roe", "gt", roe),
+            FilterCondition("roe_annualized", "gt", roe),
         )
 
     def build_attribution(self, row: dict, total_candidates: int, context) -> FilterAttribution:
@@ -229,7 +290,7 @@ class GrowthStrategy(PolarsBaseStrategy):
         conditions = [
             FilterCondition("or_yoy", "gt", float(rev), fnum(row.get("or_yoy"))),
             FilterCondition("netprofit_yoy", "gt", float(profit), fnum(row.get("netprofit_yoy"))),
-            FilterCondition("roe", "gt", float(roe), fnum(row.get("roe"))),
+            FilterCondition("roe_annualized", "gt", float(roe), fnum(row.get("roe_annualized"))),
         ]
         # SC-03: 增长质量存疑仅在命中（doubt=1）时追加条件；doubt=0 不渲染，避免归因卡
         # 出现"未命中的存疑条件"误导。列值由 _filter_logic 的 with_columns 注入筛选结果行。
@@ -237,7 +298,7 @@ class GrowthStrategy(PolarsBaseStrategy):
             conditions.append(FilterCondition("growth_quality_doubt", "gt", 0.0, 1.0))
         return FilterAttribution(
             conditions=tuple(conditions),
-            rank=RankAttribution(field="roe", value=fnum(row.get("roe")), total=total_candidates),
+            rank=RankAttribution(field="roe_annualized", value=fnum(row.get("roe_annualized")), total=total_candidates),
         )
 
 
@@ -356,24 +417,35 @@ class CashFlowStrategy(PolarsBaseStrategy):
     def get_ai_context(self, row: dict) -> str:
         fv = fmt_val
         debt = fv(row.get("debt_to_assets"))
-        roe = fv(row.get("roe"))
+        roe = fv(row.get("roe_annualized"))
+        period = row.get("fin_end_date")
+        period_text = str(period) if period is not None and not pd.isnull(period) else "N/A"
         return (
             f"该股票由现金流优质策略筛选，满足低负债+高盈利条件。\n"
-            f"资产负债率={debt}%, ROE={roe}%\n"
+            f"资产负债率={debt}%, 年化ROE={roe}%(报告期={period_text})\n"
             f"请评估资产负债表的铁甲程度、产业链话语权、抗寒冬能力，\n"
             f"以及是否存在资金链断裂隐患。一旦发现资金链存在断裂风险，请直接 reject。"
         )
+
+    def _preprocess_lf(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
+        """CRIT-01: 注入年化 ROE 派生列，统一报告期口径（见 _ensure_annualized_roe）。"""
+        return _ensure_annualized_roe(lf, context)
 
     def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
         p = context.get("params", {})
         debt_max = p.get("debt_max", 50)
         roe_min = p.get("roe_min", 10)
-        return (
+        # CRIT-01: 直调兜底（_preprocess_lf 已注入时为幂等空操作）。
+        lf = _ensure_annualized_roe(lf, context)
+        result_lf = (
             lf.drop_nulls(subset=["debt_to_assets", "roe"])
             .filter(pl.col("debt_to_assets") < debt_max)
-            .filter(pl.col("roe") > roe_min)
-            .sort("roe", descending=True)
+            # CRIT-01: 累计口径 ROE 年化后再比较（原值跨披露期不可比）
+            .filter(pl.col("roe_annualized") > roe_min)
+            .sort("roe_annualized", descending=True)
         )
+        _warn_on_mixed_report_periods(result_lf, context)
+        return result_lf
 
     attribution_enabled = True  # UX-04
 
@@ -383,11 +455,11 @@ class CashFlowStrategy(PolarsBaseStrategy):
         roe_min = p.get("roe_min", 10)
         conditions = (
             FilterCondition("debt_to_assets", "lt", float(debt_max), fnum(row.get("debt_to_assets"))),
-            FilterCondition("roe", "gt", float(roe_min), fnum(row.get("roe"))),
+            FilterCondition("roe_annualized", "gt", float(roe_min), fnum(row.get("roe_annualized"))),
         )
         return FilterAttribution(
             conditions=conditions,
-            rank=RankAttribution(field="roe", value=fnum(row.get("roe")), total=total_candidates),
+            rank=RankAttribution(field="roe_annualized", value=fnum(row.get("roe_annualized")), total=total_candidates),
         )
 
 

@@ -827,6 +827,13 @@ class TestScreenerDaoBuildScreeningSql:
         assert "n_income" in sql_range
         assert "gpm_prev" in sql_range
 
+    def test_build_sql_contains_fin_end_date(self):
+        """CRIT-01: 两模板都必须透出最新报告期 fin_end_date（供累计口径 ROE 年化与期间提示）。"""
+        dao = ScreenerDao(MagicMock())
+        for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
+            assert "f_inner.end_date AS fin_end_date" in sql, f"缺少 fin_end_date 派生:\n{sql}"
+            assert "f.fin_end_date," in sql, f"缺少 fin_end_date 输出列:\n{sql}"
+
 
 class TestScreenerDaoSwIndustryJoin:
     """DAT-08③：验证 screener_dao SQL 使用 LEFT JOIN sw_industry_member 拆分为两列。
