@@ -1064,6 +1064,43 @@ def check_redline_range_consistency() -> list[str]:
     return errors
 
 
+def check_contract_count_prose() -> list[str]:
+    """检查项 7c：受检文档中 import-linter「N 条契约」散文与 pyproject.toml 实际契约数一致（H6-b）。
+
+    背景：N2（_check_enforcement_invariants）只校验 redlines.yml 的 enforcement 字段；
+    ADR-0006 / known-technical-debt.md 等文档中的同型「N 条契约」散文无守护，OSS E4
+    重构（6 条手工 forbidden 拆为 1 条 layers + 2 条 forbidden）后即发生数量漂移。
+
+    规则：
+    - 契约数取自 pyproject.toml 的 [[tool.importlinter.contracts]] 节数（与 N2 同源）。
+    - 遍历 CHECKED_DOCS，跳过 docs/adr/（决策时点历史快照，当前值以 pyproject.toml 为准，
+      由 Errata 声明，与 check_redline_range_consistency 的 ADR 豁免同源）与 CHANGELOG.md
+      （release-please 自动生成，历史提交标题含旧数量引文）。
+    :return: 错误信息列表。
+    """
+    errors: list[str] = []
+    try:
+        pyproject_content = PYPROJECT_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return [f"pyproject.toml 不存在或不可读: {PYPROJECT_PATH}"]
+    actual = len(IMPORT_LINTER_CONTRACT_SECTION_PATTERN.findall(pyproject_content))
+
+    for doc in CHECKED_DOCS:
+        if ADR_DOCS_DIR in doc.parents:
+            continue  # ADR 为决策时点历史快照，数量以 Errata + pyproject.toml 当前值裁决
+        if doc.name == "CHANGELOG.md":
+            continue  # release-please 自动生成，历史提交标题含当时数量引文
+        content = doc.read_text(encoding="utf-8")
+        for m in IMPORT_LINTER_CONTRACT_COUNT_PATTERN.finditer(content):
+            declared = int(m.group(1))
+            if declared != actual:
+                line_no = content[: m.start()].count("\n") + 1
+                errors.append(
+                    f"{doc.name}:{line_no}: 声明 import-linter {declared} 条契约，pyproject.toml 实际 {actual} 条"
+                )
+    return errors
+
+
 # =============================================================================
 # 3c: enforcement 字段与实际 hook/CI job 映射一致性检查（ADR-0005）
 #
@@ -3284,6 +3321,8 @@ def main() -> int:
     all_errors.extend(check_redlines_yaml_consistency())
     # 7b：红线总数散文（R1~Rxx）守卫，紧随表格式一致性之后，守护散文式自述漏同步（DS 根因）
     all_errors.extend(check_redline_range_consistency())
+    # 7c：import-linter 契约数量散文（「N 条契约」）守卫，与 7b 同族，守护 E4 重构后的数量漂移（H6-b）
+    all_errors.extend(check_contract_count_prose())
     # 3c 紧随 3b 之后：3b 守护 yml schema 完整性，3c 守护 enforcement 与实际配置一致
     # 3c 独立解析 yml，不依赖 3b 执行结果，顺序仅为可读性
     all_errors.extend(check_enforcement_mapping())

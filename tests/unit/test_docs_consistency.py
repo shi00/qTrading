@@ -5272,6 +5272,42 @@ class TestProseMetaGuards:
         assert warnings == [], f"缺失对照表应静默, got: {warnings}"
 
 
+class TestContractCountProse:
+    """H6-b：import-linter 契约数量散文（「N 条契约」）与 pyproject.toml 实际契约数一致性守卫。"""
+
+    def test_check_contract_count_prose_passes(self):
+        """当前受检文档的契约数量散文应与 pyproject.toml 实际契约数一致（无漂移）。"""
+        from check_docs_consistency import check_contract_count_prose
+
+        errors = check_contract_count_prose()
+        assert errors == [], "契约数量散文守卫失败:\n  " + "\n  ".join(errors)
+
+    def test_contract_count_prose_detects_stale_count(self, tmp_path, monkeypatch):
+        """受检文档声明「6 条契约」而 pyproject.toml 实际 3 条时应报错（E4 重构后的漂移根因）。"""
+        from check_docs_consistency import check_contract_count_prose
+
+        doc = tmp_path / "stale_contract_count.md"
+        doc.write_text("R1 由 import-linter 6 条契约守护\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
+        errors = check_contract_count_prose()
+        assert any("6 条契约" in e and "实际 3 条" in e for e in errors), f"应报契约数量漂移, got: {errors}"
+
+    def test_contract_count_prose_ignores_adr_snapshot_and_changelog(self, tmp_path, monkeypatch):
+        """ADR 历史快照与 CHANGELOG.md 中引用的旧契约数不应被误报（与 7b 的豁免口径一致）。"""
+        from check_docs_consistency import check_contract_count_prose
+
+        adr_dir = tmp_path / "adr"
+        adr_dir.mkdir()
+        adr_doc = adr_dir / "0006-history.md"
+        adr_doc.write_text("R1 由 import-linter 6 条契约在 pre-commit 与 CI 双重拦截\n", encoding="utf-8")
+        changelog = tmp_path / "CHANGELOG.md"
+        changelog.write_text("契约数自述从 6 条契约同步为 3 条契约\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [adr_doc, changelog])
+        monkeypatch.setattr("check_docs_consistency.ADR_DOCS_DIR", adr_dir)
+        errors = check_contract_count_prose()
+        assert errors == [], f"ADR/CHANGELOG 不应被误报, got: {errors}"
+
+
 class TestSingletonCountProse:
     """盲1：注册单例散文数量守卫（@register_singleton，N 个）vs 表格实计。
 
