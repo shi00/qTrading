@@ -10,6 +10,7 @@ from typing import cast
 from unittest.mock import patch
 
 from services.ai_service.pricing import PRICING_UPDATED, _USD_TO_CNY_RATE, estimate_cost
+from utils.time_utils import get_now
 
 
 def test_known_model_with_provider_prefix():
@@ -94,4 +95,4 @@ def test_usd_rate_note_lazy_complete():
 def test_pricing_updated_is_date():
     """价格时效性锚点是已过去的日期。"""
     assert isinstance(PRICING_UPDATED, date)
-    assert date.today() >= PRICING_UPDATED
+    assert get_now().date() >= PRICING_UPDATED
