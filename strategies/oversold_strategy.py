@@ -19,6 +19,10 @@ from utils.time_utils import to_date
 
 logger = logging.getLogger(__name__)
 
+# MAJOR-02: 取数窗口须与过滤门槛 day_count >= rsi_period * 5 保持一致，否则高周期档位
+# （rsi_period >= 25，滑块 max=30）恒返回空集。窗口 = max(基线下限, period*5 + 停牌缓冲)。
+_RSI_HISTORY_BUFFER_DAYS = 10
+
 
 def _compute_rsi_filter(
     history_pdf: pd.DataFrame,
@@ -27,12 +31,17 @@ def _compute_rsi_filter(
     rsi_period: int,
     rsi_threshold: float,
     vol_ratio_threshold: float,
+    *,
+    diagnostics: dict | None = None,
 ) -> pd.DataFrame:
     """Synchronous CPU-only RSI filter pipeline.
 
     Runs inside ThreadPoolManager CPU pool to avoid blocking the Flet event loop (R16).
     Combines pl.from_pandas / lazy graph build / collect / to_pandas / merge / sort_values
     into a single offloaded callable.
+
+    ``diagnostics``（可选）用于空集归因：结果为空时写入 ``max_day_count``（窗口内各标的
+    实际 K 线根数上限），供调用方判断 day_count 门槛是否单独把候选池砍到 0（MAJOR-02）。
     """
     history_pdf = history_pdf.copy()
 
@@ -83,15 +92,16 @@ def _compute_rsi_filter(
         .alias("vol_ratio_5d")
     )
 
+    base_lf = df_lazy.with_columns(
+        [
+            rsi_expr.over("ts_code"),
+            vol_ratio_expr,
+            pl.col("close").count().over("ts_code").alias("day_count"),
+        ],
+    ).filter(pl.col("trade_date") == end_date_value)
+
     result_lf = (
-        df_lazy.with_columns(
-            [
-                rsi_expr.over("ts_code"),
-                vol_ratio_expr,
-                pl.col("close").count().over("ts_code").alias("day_count"),
-            ],
-        )
-        .filter(pl.col("trade_date") == end_date_value)
+        base_lf
         # SC-05: day_count 门槛从 period*2 提到 period*5——EWM 种子残留权重约 ((1-1/period)^(n-1))，
         # 降到 1% 以下需约 4.6×period 根 K 线，取 period*5 为工程惯例；配合 get_rsi_expr 预热期
         # min_samples=period，消除新上市/次新股 RSI 被首根 K 线主导的系统性偏差。
@@ -103,6 +113,10 @@ def _compute_rsi_filter(
     result_df = result_lf.collect()
 
     if result_df.height == 0:
+        if diagnostics is not None:
+            # MAJOR-02: 空集归因——窗口内各标的实际 K 线根数上限，供调用方区分
+            # 「历史长度不足」与「RSI/量比不满足」两类空集（后者不应误报历史不足）。
+            diagnostics["max_day_count"] = base_lf.select(pl.col("day_count").max()).collect().item()
         return pd.DataFrame()
 
     # Join with snapshot
@@ -354,14 +368,18 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             )
             return pd.DataFrame()
 
-        # Use trading days instead of calendar days for accurate RSI calculation
-        start_date_obj = await dp.trade_calendar.get_start_date_by_trade_days(end_date_obj, 120)
+        # Use trading days instead of calendar days for accurate RSI calculation.
+        # MAJOR-02: 窗口随 rsi_period 驱动，保证 day_count 门槛（rsi_period * 5）对滑块
+        # 全档位（max=30 → 150）都可满足；缓冲吸收个股停牌缺 bar。基线下限取
+        # required_history_days（避免与属性定义两处独立演进而失去一致性约束）。
+        window_days = max(self.required_history_days, rsi_period * 5 + _RSI_HISTORY_BUFFER_DAYS)
+        start_date_obj = await dp.trade_calendar.get_start_date_by_trade_days(end_date_obj, window_days)
         if not start_date_obj:
             logger.warning(
                 "[OversoldStrategy] Failed to get start date by trade days, falling back to calendar days.",
             )
-            # Fallback: 120 trading days ≈ 200 calendar days (conservative buffer for holidays/weekends)
-            start_date_obj = end_date_obj - datetime.timedelta(days=200)
+            # Fallback: 交易日 → 日历日（原 120 → 200 日，含周末/节假日缓冲），随窗口线性放大
+            start_date_obj = end_date_obj - datetime.timedelta(days=window_days * 5 // 3)
             context.setdefault("_metadata", {})["calendar_fallback"] = True
 
         logger.info(
@@ -386,6 +404,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             # Offload CPU-intensive Polars pipeline (from_pandas + lazy graph + collect +
             # to_pandas + merge + sort_values) to the CPU thread pool as a single sync
             # callable to avoid blocking the Flet event loop (R16).
+            diagnostics: dict = {}
             final_df = await ThreadPoolManager().run_async(
                 TaskType.CPU,
                 _compute_rsi_filter,
@@ -395,9 +414,24 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 rsi_period,
                 rsi_threshold,
                 vol_ratio_threshold,
+                diagnostics=diagnostics,
             )
 
             if final_df.empty:
+                # MAJOR-02: day_count 门槛把候选池砍到 0 时给出明确归因，
+                # 避免与「市场确实无超跌股」不可区分（R21：不得静默伪装）。
+                max_day_count = diagnostics.get("max_day_count")
+                if max_day_count is not None and max_day_count < rsi_period * 5:
+                    context.setdefault("warnings", []).append(
+                        Message(
+                            "strategy_oversold_insufficient_history",
+                            {
+                                "period": rsi_period,
+                                "required": rsi_period * 5,
+                                "max": int(max_day_count),
+                            },
+                        )
+                    )
                 logger.info("[OversoldStrategy] No stocks found matching RSI criteria.")
                 return pd.DataFrame()
 
