@@ -12,6 +12,7 @@ import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.daos.stk_holdertrade_dao import StkHoldertradeDao
+from utils.time_utils import get_now
 
 pytestmark = pytest.mark.unit
 
@@ -121,7 +122,7 @@ class TestGetStkHoldertradeBatch:
         call_kwargs = dao.chunked_in_query.call_args.kwargs
         params_fn = call_kwargs["params_fn"]
         start_date, end_date = params_fn(["000001.SZ"])
-        today = datetime.date.today()
+        today = get_now().date()
         assert end_date == today
         assert start_date == today - datetime.timedelta(days=180)
 

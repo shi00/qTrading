@@ -12,6 +12,7 @@ import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.daos.share_float_dao import ShareFloatDao
+from utils.time_utils import get_now
 
 pytestmark = pytest.mark.unit
 
@@ -117,7 +118,7 @@ class TestGetShareFloatUpcomingBatch:
         call_kwargs = dao.chunked_in_query.call_args.kwargs
         params_fn = call_kwargs["params_fn"]
         start_date, end_date = params_fn(["000001.SZ"])
-        today = datetime.date.today()
+        today = get_now().date()
         assert start_date == today
         assert end_date == today + datetime.timedelta(days=90)
 
