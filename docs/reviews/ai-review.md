@@ -9,7 +9,7 @@
 >
 > **冲突优先级**：法律法规 > 已批准需求/契约 > 架构/API/数据契约 > 仓库规则/项目门禁 > 本协议。
 >
-> **加载方式**：AI 日常只加载本文件；按 §6 风险信号触发表加载 [review-profiles/](./review-profiles/)；schema/yaml 由程序验证，不要求模型记忆。
+> **加载方式**：AI 日常只加载本文件；按 §6 风险信号触发表加载 [review-profiles/](./review-profiles/)；schema/yaml 为机器可读契约（当前未接入自动校验，按需查阅），不要求模型记忆。
 >
 > **规则 ID 体系**：每条强制规则使用稳定 ID（如 SAFE-01、EVID-03），append-only，不复用废弃编号。
 
@@ -136,8 +136,8 @@
 
 - **[OUT-01]** 人类可读报告含：结论（模式/建议/发现统计/最高风险）、范围与意图、阻断与重要发现（按严重度）、其他发现（测试缺口/待确认/待验证/建议分组）、场景覆盖、验证证据（已运行/未运行）、变化关系与范围外风险、残余风险与门禁建议。单项发现格式含类别/位置/维度/置信度/触发条件/当前行为/预期行为/影响/证据/最小建议/验证方式。
   - **人类报告字段 ↔ schema 字段对照**（OUT-01 未列出的机器必填字段须按 schema 补齐，否则校验失败判定无效）：类别=`category`、位置=`location`、维度=`dimension`、置信度=`confidence`、触发条件=`trigger`、当前行为=`actualBehavior`、预期行为=`expectedBehavior`、影响=`impact`、证据=`evidence`、最小建议=`recommendation`、验证方式=`verification`；schema 额外必填（人类报告无需逐项出现，但写结构化输出时必须提供）：`id` / `fingerprint` / `title` / `severity` / `changeRelation` / `ruleId` / `disposition` / `waiver` / `locationReason`。最小合法示例见 [appendix.md](./appendix.md)「C. 最小合法 review-result 示例」。
-- **[OUT-02]** 机器可读输出须符合 [review-result.schema.json](./review-result.schema.json)。schema 校验失败时结果无效，门禁必须 fail closed。JSON Schema 之外还必须运行 fail-closed 语义校验器（文件路径唯一、计数关系成立、gate decision 引用现存且唯一的 fingerprint）。
-- **[OUT-03]** 门禁由 [review-policy.yaml](./review-policy.yaml) 决定。受信 CI 必须使用固定版本的独立策略求值器重新计算 gate.decisions 和 gate.verdict，不得信任模型自行给出的阻断结论。存在未豁免的阻断决定时 verdict 必须为 fail；关键证据不足时为 indeterminate；conditional 默认视为非通过。
+- **[OUT-02]** 机器可读输出须符合 [review-result.schema.json](./review-result.schema.json)。schema 校验失败时结果无效，门禁必须 fail closed。**若**接入自动校验（当前未接入），**则**在 JSON Schema 之外还须运行 fail-closed 语义校验器（文件路径唯一、计数关系成立、gate decision 引用现存且唯一的 fingerprint）；**当前无自动校验器**，上述语义由检视者人工核对。
+- **[OUT-03]** 门禁由 [review-policy.yaml](./review-policy.yaml) 决定。存在未豁免的阻断决定时 verdict 必须为 fail；关键证据不足时为 indeterminate；conditional 默认视为非通过。**若**接入受信 CI 自动门禁（当前未接入），**则**由固定版本的独立策略求值器重新计算 gate.decisions 与 gate.verdict，不得信任模型自行给出的阻断结论；**当前无自动求值器**，gate.decisions 与 gate.verdict 由检视者依 review-policy.yaml 人工判定。
 - **[OUT-04]** 人类报告与结构化输出必须表达相同结论。无严重度的待确认问题或建议使用 null，不要伪造等级；location 无法定位时使用 null 并在 locationReason 说明，不得编造路径或行号。
 
 ## 9. 防误报与防漏报

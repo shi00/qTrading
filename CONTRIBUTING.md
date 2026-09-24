@@ -726,7 +726,7 @@ except Exception as e:
 - [review-profiles/](./docs/reviews/review-profiles/) — 9 个专项 Profile（Web/API、前端/移动、消息/管道、数据库/迁移、CLI/IaC、库/SDK、第三方/RPA、AI/ML/LLM、项目 Profile）
 - [quality-dimensions.md](./docs/reviews/quality-dimensions.md) — 10 个通用质量维度详细要点
 - [scenario-completeness.md](./docs/reviews/scenario-completeness.md) — 场景完整性与遗漏方法
-- [review-result.schema.json](./docs/reviews/review-result.schema.json) — 机器可读输出 Schema（JSON Schema Draft 2020-12，由程序验证）
+- [review-result.schema.json](./docs/reviews/review-result.schema.json) — 机器可读输出 Schema（JSON Schema Draft 2020-12，供人工/后续自动校验）
 - [review-policy.yaml](./docs/reviews/review-policy.yaml) — 门禁策略（P0-P3 / 阻断规则 / 豁免 / CI 退出码，模型不决定最终门禁）
 - [appendix.md](./docs/reviews/appendix.md) — 附录（执行提示词 + 参考实践）
 - [evals/](./docs/reviews/evals/) — 评测集（已知缺陷 / 场景遗漏 / 提示注入 / 误报 / 信息不足样例）
