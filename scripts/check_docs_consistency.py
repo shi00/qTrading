@@ -150,26 +150,63 @@ FLET_DOCS_PATHS: list[Path] = sorted(FLET_DOCS_DIR.glob("*.md"))
 # 受检 markdown 文件清单（锚点死链 + 相对链接死链 + pre-commit hook 数量校验范围）
 # P2-06 修复：改为递归发现全部受跟踪 Markdown，再用显式排除清单处理生成物和归档。
 # 递归发现范围：根目录 *.md、docs/ 与 man/ 全部 *.md、requirements/ 全部 *.md、PR 模板；
-# 排除项必须带原因（_DOC_EXCLUDES）。
+# 排除项必须带原因（_build_doc_excludes）。
 # Flet 入口完整性：FLET_DOCS_PATHS 动态发现 docs/flet/*.md，新增专题自动纳入门禁。
-_DOC_EXCLUDES: dict[Path, str] = {
-    # 示例：ROOT / "docs" / "xxx" / "generated.md": "生成物，非人工维护",
-    ROOT / "docs" / "superpowers": "本地 skill 计划目录（.gitignore 排除），非交付物，不参与文档一致性校验",
-    # 历史技术债计划归档：标题引用当时的红线范围（R1-R18），非当前状态
-    ROOT / "Plans-tech-debt.md": "历史技术债计划归档，标题引用当时红线范围，不参与一致性门禁",
-}
-CHECKED_DOCS: list[Path] = sorted(
-    d
-    for d in {
-        *ROOT.glob("*.md"),
-        *(ROOT / "docs").rglob("*.md"),
-        *(ROOT / "man").rglob("*.md"),
-        *(ROOT / "requirements").rglob("*.md"),
-        ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md",
-    }
-    # 排除支持精确文件与目录前缀（目录下全部子文档一并排除）
-    if not any(d == e or e in d.parents for e in _DOC_EXCLUDES)
+
+# 真实 gitignored 的本地产物 / 归档目录（受 .gitignore 保护，不入版本控制，GDR-07）。
+# 统一供两处消费：受检集排除（_build_doc_excludes）与索引完整性扫描豁免
+# （check_docs_index_completeness）。本集合严格限定为真实 gitignored 目录。
+_GITIGNORED_ARTIFACT_DIRS: tuple[Path, ...] = (
+    ROOT / "docs" / "plans" / "archive",
+    ROOT / "docs" / "audit",
+    ROOT / "docs" / "superpowers",
 )
+
+# 兼容别名：保留 _LOCAL_ARTIFACT_DIRS 供外部或现有测试引用
+_LOCAL_ARTIFACT_DIRS: tuple[Path, ...] = _GITIGNORED_ARTIFACT_DIRS
+
+# 本地会话计划文件（.gitignore 排除、内容随会话变化或固化历史状态，不入版本控制）：
+# 与 _GITIGNORED_ARTIFACT_DIRS 同属 gitignored 本地产物但为根级文件。统一在此登记，
+# 受检集构建与治理 ID 扫描共用同一来源（H1：此前 Plans.md 仅在治理 ID 扫描处按名排除，
+# 受检集漏排，导致本地 pre-commit 持续假 FAIL）。
+_LOCAL_PLAN_FILE_RELS: tuple[str, ...] = ("Plans.md", "Plans-tech-debt.md")
+
+
+def _build_doc_excludes() -> dict[Path, str]:
+    """构建受检集排除清单：gitignored 产物目录 + 本地会话计划文件（逐项带排除原因）。
+
+    按当前 ROOT 动态计算（导入期由 _collect_checked_docs 调用；测试可先 monkeypatch
+    ROOT 再调用 _collect_checked_docs 重算，无需真实本地文件在场）。
+    """
+    excludes: dict[Path, str] = {
+        d: "本地 gitignored 产物 / 归档目录（GDR-07），非交付物，不参与文档一致性校验"
+        for d in _GITIGNORED_ARTIFACT_DIRS
+    }
+    excludes.update(
+        (ROOT / rel, "本地会话计划文件（.gitignore 排除，内容随会话变化或固化历史状态），不参与一致性门禁")
+        for rel in _LOCAL_PLAN_FILE_RELS
+    )
+    return excludes
+
+
+def _collect_checked_docs() -> list[Path]:
+    """构建受检文档集（导入期执行；测试经 monkeypatch ROOT 后重算以注入临时仓库）。"""
+    excludes = _build_doc_excludes()
+    return sorted(
+        d
+        for d in {
+            *ROOT.glob("*.md"),
+            *(ROOT / "docs").rglob("*.md"),
+            *(ROOT / "man").rglob("*.md"),
+            *(ROOT / "requirements").rglob("*.md"),
+            ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md",
+        }
+        # 排除支持精确文件与目录前缀（目录下全部子文档一并排除）
+        if not any(d == e or e in d.parents for e in excludes)
+    )
+
+
+CHECKED_DOCS: list[Path] = _collect_checked_docs()
 
 # Flet 版本漂移检查范围（治理文档；api-verification-template.md 为 API 核验历史快照，豁免 GDR-06）
 FLET_VERSION_DOCS: list[Path] = [
@@ -1034,7 +1071,7 @@ def check_redline_range_consistency() -> list[str]:
     规则：
     - Rmax 取自 redlines.yml 实际最大红线号（其 id 已由 check_redlines_yaml_consistency 保证连续）。
     - 遍历 CHECKED_DOCS，跳过 docs/adr/ 下文档（ADR 为决策时点历史快照，其中 R1~R18 是当时范围，
-      由 ADR-0002 Errata 声明以 redlines.yml 为准；其余快照文档经 _DOC_EXCLUDES 排除，不在 CHECKED_DOCS）。
+      由 ADR-0002 Errata 声明以 redlines.yml 为准；其余快照文档经 _build_doc_excludes 排除，不在 CHECKED_DOCS）。
     :return: 错误信息列表。
     """
     errors: list[str] = []
@@ -2866,18 +2903,6 @@ def check_scripts_index_completeness() -> list[str]:
 # 消费语料 = CLAUDE.md + CONTRIBUTING.md + docs/**/*.md（exceptions.yml 自身是注册表非消费者）。
 _EX_ID_PATTERN = re.compile(r"\bEX-\d{4}\b")
 
-# 真实 gitignored 的本地产物 / 归档目录（受 .gitignore 保护，不入版本控制，GDR-07）。
-# 用于 check_docs_index_completeness() 扫描豁免。`Path.rglob` 不识别 .gitignore，
-# 会扫到本地临时产物并误报「未进索引」。本集合严格限定为真实 gitignored 目录。
-_GITIGNORED_ARTIFACT_DIRS: tuple[Path, ...] = (
-    ROOT / "docs" / "plans" / "archive",
-    ROOT / "docs" / "audit",
-    ROOT / "docs" / "superpowers",
-)
-
-# 兼容别名：保留 _LOCAL_ARTIFACT_DIRS 供外部或现有测试引用
-_LOCAL_ARTIFACT_DIRS: tuple[Path, ...] = _GITIGNORED_ARTIFACT_DIRS
-
 # EX 引用语料豁免目录（用于 check_governance_id_references()，GDR-07）：
 # 包含全部 gitignored 目录，另加受跟踪但属评测用例/注入测试语料的目录（evals/），
 # 防止评测负例中的历史/演示 EX 编号充当活引用掩盖孤儿判定。
@@ -3302,7 +3327,8 @@ def check_governance_id_glossary() -> tuple[list[str], list[str]]:
         errors.append("治理 ID 对照表: governance-ids.md 不存在或无法解析，跳过登记校验")
         return errors, warnings
     # 扩展扫描范围到受检治理文档：CHANGELOG.md（release-please 自动生成，含历史提交标题
-    # 里的治理 ID 噪声）与 Plans.md（本地任务计划文件）不属于治理溯源目标，显式排除；
+    # 里的治理 ID 噪声）不属于治理溯源目标，显式排除；本地会话计划文件（Plans*.md）已由
+    # 受检集构建（_build_doc_excludes）统一排除；
     # 登记正本 governance-ids.md 自身同样排除——其文本除登记行外还含说明文字（别名/夹具
     # 示例如 P1-4、DOC-99，以及嵌入式非治理编号如 Q-P2-7），这些不是「引用需登记」对象。
     # 其余 CHECKED_DOCS 全部纳入。另补扫 docs/governance/ 下的机器可读治理文件
@@ -3312,11 +3338,14 @@ def check_governance_id_glossary() -> tuple[list[str], list[str]]:
     ]
     # 需求正本（requirements/*.md）整体排除：其内容使用需求编号（FR-UX-xxx，通用形态会命中
     # 其 UX-xxx 片段）与阶段工作码（P3-7~P3-20），属非治理 ID 噪声，登记会污染治理对照表；
-    # 与 CHANGELOG.md / Plans.md 的同类噪声排除同源（GDR-09 仅治理溯源目标）。
+    # 与 CHANGELOG.md 的同类噪声排除同源（GDR-09 仅治理溯源目标）。
     scan_paths = [
         p
         for p in CHECKED_DOCS
-        if p.name not in ("CHANGELOG.md", "Plans.md", "governance-ids.md") and ROOT / "requirements" not in p.parents
+        # 本地会话计划文件（_LOCAL_PLAN_FILE_RELS）已由受检集统一排除；此处按名排除 CHANGELOG.md
+        # （release-please 自动生成，含历史提交标题里的治理 ID 噪声）与登记正本 governance-ids.md
+        # 自身（其文本含别名/夹具示例等非「引用需登记」对象）。requirements/*.md 整体排除同下。
+        if p.name not in ("CHANGELOG.md", "governance-ids.md") and ROOT / "requirements" not in p.parents
     ] + governance_yml
     warn_refs: set[str] = set()
     for path in scan_paths:
@@ -3369,6 +3398,32 @@ def _strip_english_suffix(heading: str) -> str:
     return re.sub(r"\s*\([^)]*[A-Za-z][^)]*\)$", "", heading)
 
 
+# 书名号引用目标为裸文件名（无目录前缀）时的回落搜索范围（H1）：引用者常省略目录前缀
+# （如 `testing.md「测试资产地图」`），仅按仓库根相对解析会把正确引用误报为
+# 「目标文档不存在」。搜索根按当前 ROOT 动态派生（与 CHECKED_DOCS 递归发现范围一致；
+# 根目录文件本身由 `ROOT / raw_path` 首查覆盖，无需重复列出）。
+
+
+def _has_guillemet_heading(target: Path, section: str) -> bool:
+    """目标文档是否存在与章节引用同名的标题（含「：」前缀修饰与英文括注归一化）。"""
+    headings = _extract_heading_texts(target.read_text(encoding="utf-8"))
+    if any(h == section or h.endswith(f"：{section}") for h in headings):
+        return True
+    normalized = {_strip_english_suffix(h) for h in headings}
+    return any(h == section or h.endswith(f"：{section}") for h in normalized)
+
+
+def _resolve_bare_doc_name(raw_path: str) -> list[Path]:
+    """把无目录前缀的裸文件名解析为 docs/、man/、requirements/ 下的同名文档候选。
+
+    仅处理不含目录分隔符的路径；返回全部同名候选（可能为空，或多个——如同名 README.md）。
+    """
+    if "/" in raw_path or "\\" in raw_path:
+        return []
+    roots = (ROOT / "docs", ROOT / "man", ROOT / "requirements")
+    return sorted(p for base in roots for p in base.rglob(raw_path) if p.is_file())
+
+
 def check_guillemet_references() -> list[str]:
     """检查项 20：书名号式章节引用一致性（GDR-13）。
 
@@ -3376,6 +3431,8 @@ def check_guillemet_references() -> list[str]:
     匹配规则：目标标题等于章节名，或目标标题以「：」+ 章节名 结尾（容忍「第三部分：实现规范手册」
     这类「第 N 部分」前缀修饰）。markdown 链接 `[text「章节」](./path#anchor)` 内的书名号
     由锚点门禁 check_anchor_dead_links 覆盖，本检查跳过（避免重复报警与「链接文本 ≠ 标题」误报）。
+    目标解析：先按仓库根相对解析；裸文件名（无目录前缀）解析不到时回落到 docs/、man/、
+    requirements/ 内同名候选，多候选时任一候选含同名标题即视为有效引用（H1）。
     """
     errors: list[str] = []
     for doc in CHECKED_DOCS:
@@ -3387,17 +3444,23 @@ def check_guillemet_references() -> list[str]:
         for m in _GUILLEMET_REF_PATTERN.finditer(text):
             raw_path, section = m.group(1), m.group(2).strip()
             target = ROOT / raw_path
-            if not target.exists():
+            candidates = [target] if target.exists() else _resolve_bare_doc_name(raw_path)
+            if not candidates:
                 errors.append(f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，目标文档 {raw_path} 不存在")
                 continue
-            headings = _extract_heading_texts(target.read_text(encoding="utf-8"))
-            if not any(h == section or h.endswith(f"：{section}") for h in headings):
-                normalized = {_strip_english_suffix(h) for h in headings}
-                if not any(h == section or h.endswith(f"：{section}") for h in normalized):
-                    errors.append(
-                        f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，目标文档无同名标题"
-                        f"（现有标题示例: {sorted(headings)[:6]}）"
-                    )
+            if any(_has_guillemet_heading(candidate, section) for candidate in candidates):
+                continue
+            if len(candidates) == 1:
+                headings = _extract_heading_texts(candidates[0].read_text(encoding="utf-8"))
+                errors.append(
+                    f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，目标文档无同名标题"
+                    f"（现有标题示例: {sorted(headings)[:6]}）"
+                )
+            else:
+                errors.append(
+                    f"书名号引用: {doc.name} 引用 {raw_path}「{section}」，"
+                    f"docs/、man/、requirements/ 下存在 {len(candidates)} 个同名文档但均无该标题"
+                )
     return errors
 
 
