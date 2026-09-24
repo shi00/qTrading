@@ -8,8 +8,8 @@ E4 (OSS 检视) 后与 test_architecture_boundaries.py 分工：
 - test_import_linter_config.py: 调用 lint-imports 检查完整导入图（含 lazy import），守护 R1 全部方向。
 
 import-linter 采用 1 条 layers 契约（层序 app→ui→strategies→services→data→core）覆盖全部
-层级禁止方向，另 2 条 forbidden 契约守护 utils 横切叶子层（契约3 含 ignore_imports 白名单）
-与 core 最内层禁 utils（契约2）。layers 契约分析函数体内 import，能捕获 lazy import。
+层级禁止方向，另 2 条 forbidden 契约守护 utils 横切叶子层（"R1: utils must not import business layers" 含 ignore_imports 白名单）
+与 core 最内层禁 utils（"R1: core must not import utils"）。layers 契约分析函数体内 import，能捕获 lazy import。
 """
 
 from pathlib import Path

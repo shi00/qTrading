@@ -1841,7 +1841,7 @@ class TestLazyImportWhitelist:
         assert errors == []
 
     def test_module_level_cross_layer_import_not_flagged(self, tmp_path, monkeypatch):
-        """模块级跨层 import（非函数体内）→ 不报（import-linter 契约 5 已守护）。"""
+        """模块级跨层 import（非函数体内）→ 不报（import-linter "R1: utils must not import business layers" 契约已守护）。"""
         errors = self._mk(
             tmp_path,
             monkeypatch,

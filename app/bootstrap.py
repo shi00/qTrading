@@ -233,7 +233,7 @@ def _register_scheduler_jobs() -> None:
     """review01-A2-1: 注册定时业务 job（SchedulerService 依赖注入装配）。
 
     夜间预测等业务编排已下沉到 services/scheduled_jobs/。因 services 禁入 strategies
-    （契约 3 / R1），AI 策略执行器（AISelectionRunner）由本 app 层构造并注入——
+    （R1: layered dependencies 契约），AI 策略执行器（AISelectionRunner）由本 app 层构造并注入——
     app 层作为编排层可合法 import strategies + services，实现依赖倒置。
     """
     from strategies.ai_strategy import AISelectionStrategy

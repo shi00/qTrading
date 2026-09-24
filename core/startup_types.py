@@ -2,7 +2,7 @@
 
 ``StartupState`` / ``StartupContext`` / ``EmbeddedPgStartupScenario`` 为纯数据类型
 （Enum / dataclass），被 app 层（``StartupController``）与 ui 层（``startup_views``）
-共享。下沉到 core 层解除 ``ui → app`` 反向依赖（契约 6）：ui 层从 core 导入类型，
+共享。下沉到 core 层解除 ``ui → app`` 反向依赖（R1: layered dependencies 契约）：ui 层从 core 导入类型，
 app 层从 core 导入并保持导出（``app.bootstrap`` / ``app.startup_controller`` 兼容旧引用）。
 """
 

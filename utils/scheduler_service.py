@@ -692,7 +692,7 @@ class SchedulerService:
             # 消耗 API 配额并可能污染质量分。
             from data.domain_services.offline_calendar import (
                 OfflineCalendar,
-            )  # lazy-import: 日历降级（契约 5 例外 EX-0016）
+            )  # lazy-import: 日历降级（"R1: utils must not import business layers" 契约例外 EX-0016）
 
             offline_result = OfflineCalendar.is_trading_day(today)
             if offline_result is False:
@@ -833,7 +833,7 @@ class SchedulerService:
         夜间预测完整编排（交易日检查 + TaskManager 提交 + AI 选股 + 结果保存）已迁移至
         ``services/scheduled_jobs/nightly_prediction.py``。本方法仅调度注册的 job，
         不再感知 AISelectionStrategy/DataProcessor/ReviewManager/TaskManager 等业务类，
-        消除 ``utils → strategies`` 方向性违规（契约 5）与隐藏三角依赖（A6）。
+        消除 ``utils → strategies`` 方向性违规（"R1: utils must not import business layers" 契约）与隐藏三角依赖（A6）。
         """
         job_fn = self._registered_jobs.get("nightly_prediction")
         if job_fn is None:

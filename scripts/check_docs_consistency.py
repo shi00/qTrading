@@ -1648,7 +1648,7 @@ def check_exceptions_yaml_consistency() -> list[str]:
         elif paths is not None:
             errors.append(f"exceptions[{idx}] paths 应为 list, 实际 {type(paths).__name__}")
 
-    # GATE-02: R1 例外条目数 == pyproject.toml 契约 5 ignore_imports 条数（GDR-01 条数唯一事实源，
+    # GATE-02: R1 例外条目数 == pyproject.toml "R1: utils must not import business layers" 契约 ignore_imports 条数（GDR-01 条数唯一事实源，
     # 防 exceptions.yml 自己文件里的头注释漂移）。
     try:
         import tomllib
@@ -1664,12 +1664,12 @@ def check_exceptions_yaml_consistency() -> list[str]:
         r1_exceptions = sum(1 for e in exceptions if isinstance(e, dict) and e.get("rule_id") == "R1")
         if ignore_count is not None and r1_exceptions != ignore_count:
             errors.append(
-                f"exceptions.yml R1 例外条目数 {r1_exceptions} != pyproject.toml 契约 5 ignore_imports 条数 {ignore_count}"
+                f"exceptions.yml R1 例外条目数 {r1_exceptions} != pyproject.toml 'R1: utils must not import business layers' 契约 ignore_imports 条数 {ignore_count}"
             )
     except (OSError, tomllib.TOMLDecodeError):
         pass  # pyproject 解析失败由其他检查报告
 
-    # GATE-04: 契约 5 ignore_imports ↔ exceptions.yml EX 交叉回指（GDR-01）
+    # GATE-04: "R1: utils must not import business layers" 契约 ignore_imports ↔ exceptions.yml EX 交叉回指（GDR-01）
     # pyproject.toml 中 `# EX-XXXX` 注释回指的 EX 集合必须与 exceptions.yml 的 R1 例外 id 集合一致
     # （防 GATE-01 型漂移：yml 自建注释与 pyproject 回指分叉时自动拦截）。
     try:
@@ -1678,7 +1678,7 @@ def check_exceptions_yaml_consistency() -> list[str]:
         r1_ids = {str(e.get("id")) for e in exceptions if isinstance(e, dict) and e.get("rule_id") == "R1"}
         if referenced_ex and referenced_ex != r1_ids:
             errors.append(
-                "pyproject.toml 契约 5 EX 回指与 exceptions.yml R1 例外不一致："
+                "pyproject.toml 「R1: utils must not import business layers」契约 EX 回指与 exceptions.yml R1 例外不一致："
                 f"pyproject 引用但 yml 缺失 {sorted(referenced_ex - r1_ids)}；"
                 f"yml 有但 pyproject 未回指 {sorted(r1_ids - referenced_ex)}"
             )
@@ -2878,17 +2878,11 @@ def _load_r1_ignore_imports() -> tuple[list[str], list[str]] | None:
     return all_entries, duplicate_errors
 
 
-def _load_contract5_ignore_imports() -> list[str] | None:
-    """兼容别名：仅加载契约 5 的 ignore_imports 条目。"""
-    res = _load_r1_ignore_imports()
-    return res[0] if res is not None else None
-
-
 def _scan_exception_refs() -> set[str]:
     """扫描消费语料中出现的全部 EX-\\d{4} 引用 id（排除注册表自身与归档/记录/评测豁免目录）。
 
     consumer 为 CLAUDE.md + CONTRIBUTING.md + pyproject.toml + docs/**/*.md（活文档）；
-    pyproject.toml 契约 5 ignore_imports 注释回指 EX id（GDR-01），纳入消费语料后方向 2
+    pyproject.toml 「R1: utils must not import business layers」契约注释回指 EX id（GDR-01），纳入消费语料后方向 2
     「登记必须被消费」对真实登记的例外不再误报孤儿；归档/记录/评测目录由
     _EX_REF_EXCLUDED_DIRS 豁免，其引用不构成治理消费。
     """

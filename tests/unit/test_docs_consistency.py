@@ -2685,7 +2685,7 @@ class TestExceptionsYamlConsistency:
         assert errors == [], "当前项目配置应通过 exceptions.yml 校验, 失败:\n  " + "\n  ".join(errors)
 
     def test_gate02_detects_r1_count_mismatch(self, tmp_path, monkeypatch):
-        """exceptions.yml R1 条目数 ≠ pyproject 契约 5 ignore_imports 数 → 报错（GATE-02，GDR-01 计数唯一事实源）."""
+        """exceptions.yml R1 条目数 ≠ pyproject "R1: utils must not import business layers" 契约 ignore_imports 数 → 报错（GATE-02，GDR-01 计数唯一事实源）."""
         from check_docs_consistency import check_exceptions_yaml_consistency
 
         exc_yaml = tmp_path / "exceptions.yml"
@@ -2704,7 +2704,7 @@ class TestExceptionsYamlConsistency:
             'name = "R1: utils must not import business layers"\n'
             'ignore_imports = ["a -> b"]\n',
             encoding="utf-8",
-        )  # 契约 5 声明 1 条 ignore，yml 仅 1 条 R1 → 一致；再改 yml 为 2 条触发
+        )  # utils 契约声明 1 条 ignore，yml 仅 1 条 R1 → 一致；再改 yml 为 2 条触发
         # 构造不匹配：yml 2 条 R1 例外
         exc_yaml.write_text(
             exc_yaml.read_text(encoding="utf-8") + "  - id: EX-0002\n"
@@ -4315,7 +4315,7 @@ class TestGovernanceIdReferences:
     """治理 id 引用一致性（DOC-09）：EX-\\d{4} 双向——引用须已登记，登记须被消费."""
 
     def test_id_refs_pass_on_current_repo(self):
-        """真实 exceptions.yml（15 条 R1 例外）与消费文档（含 pyproject.toml 契约 5 回指）间应无悬空/孤儿引用（无错误）."""
+        """真实 exceptions.yml（15 条 R1 例外）与消费文档（含 pyproject.toml "R1: utils must not import business layers" 契约回指）间应无悬空/孤儿引用（无错误）."""
         from check_docs_consistency import check_governance_id_references
 
         assert check_governance_id_references() == []
@@ -4359,7 +4359,7 @@ class TestGovernanceIdReferences:
         contributing.write_text("# no EX reference\n", encoding="utf-8")
         claude = tmp_path / "CLAUDE.md"
         claude.write_text("# no EX reference\n", encoding="utf-8")
-        # 契约 5 mock 1 条 ignore，与 1 条 R1 登记数量一致，保证本用例只测孤儿方向
+        # utils 契约 mock 1 条 ignore，与 1 条 R1 登记数量一致，保证本用例只测孤儿方向
         tmp_proj = tmp_path / "pyproject.toml"
         tmp_proj.write_text(
             "[[tool.importlinter.contracts]]\n"
@@ -4380,8 +4380,8 @@ class TestGovernanceIdReferences:
         errors = check_governance_id_references()
         assert any("EX-0001" in e and "从未被任何消费文档引用" in e for e in errors), f"应检出孤儿登记, got: {errors}"
 
-    def test_detects_contract5_ignore_count_mismatch(self, tmp_path, monkeypatch):
-        """契约 5 ignore_imports 条目数 ≠ exceptions.yml 中 rule_id=R1 登记数 → 报错（GDR-01 数量闭环）."""
+    def test_detects_utils_contract_ignore_count_mismatch(self, tmp_path, monkeypatch):
+        """utils 契约 ignore_imports 条目数 ≠ exceptions.yml 中 rule_id=R1 登记数 → 报错（GDR-01 数量闭环）."""
         from check_docs_consistency import check_governance_id_references
 
         docs_dir = tmp_path / "docs" / "governance"
@@ -4471,7 +4471,7 @@ class TestGovernanceIdReferences:
         contributing.write_text("# no EX\n", encoding="utf-8")
         claude = tmp_path / "CLAUDE.md"
         claude.write_text("# no EX\n", encoding="utf-8")
-        # 契约 2 有 1 条 ignore (EX-0001)，契约 5 有 1 条 ignore (EX-0002)，总计 2 条，匹配 exceptions.yml 中 2 条 R1
+        # mock 两条 R1 契约各 1 条 ignore（EX-0001 / EX-0002），总计 2 条，匹配 exceptions.yml 中 2 条 R1
         tmp_proj = tmp_path / "pyproject.toml"
         tmp_proj.write_text(
             "[[tool.importlinter.contracts]]\n"
@@ -4519,7 +4519,7 @@ class TestGovernanceIdReferences:
         contributing.write_text("# no EX\n", encoding="utf-8")
         claude = tmp_path / "CLAUDE.md"
         claude.write_text("# no EX\n", encoding="utf-8")
-        # 契约 5 出现重复 ignore_imports 条目
+        # mock 契约出现重复 ignore_imports 条目
         tmp_proj = tmp_path / "pyproject.toml"
         tmp_proj.write_text(
             "[[tool.importlinter.contracts]]\n"

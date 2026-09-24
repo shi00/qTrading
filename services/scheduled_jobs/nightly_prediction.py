@@ -3,7 +3,7 @@
 SchedulerService 仅保留调度与 idempotency 状态；本模块承载夜间预测的完整业务编排：
 enabled/idempotency/交易日检查 → TaskManager 提交 → AI 选股 → 结果保存。
 
-分层约束：services 禁入 strategies（契约 3 / R1），故 AI 策略执行经 ``AISelectionRunner``
+分层约束：services 禁入 strategies（R1: layered dependencies 契约），故 AI 策略执行经 ``AISelectionRunner``
 协议由 app 层注入（app 层可合法 import strategies），实现依赖倒置——本模块不感知具体策略类，
 消除原 ``utils/scheduler_service.py -> strategies.ai_strategy`` 的方向性违规与隐藏三角依赖。
 """
@@ -186,7 +186,7 @@ def build_nightly_prediction_job(runner: AISelectionRunner) -> Callable[[Schedul
     """构造夜间预测 job，供 SchedulerService.register_job("nightly_prediction") 注册。
 
     Args:
-        runner: AI 选股执行器，由 app 层注入（services 禁入 strategies，契约 3 / R1）。
+        runner: AI 选股执行器，由 app 层注入（services 禁入 strategies，R1: layered dependencies 契约）。
     """
 
     async def _job(svc: SchedulerService) -> None:

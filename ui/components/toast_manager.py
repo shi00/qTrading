@@ -302,7 +302,7 @@ class ToastManager:
 
     本壳仅作 ``page.toast = ToastManager(page)`` 动态挂载的薄委托：``shutdown.py``
     （utils 层）经 ``getattr(page, "toast", None).stop_all()`` 访问到进程级停机能力，
-    避免 utils→ui 反向依赖（import-linter 契约 5）。首选用模块级无状态函数
+    避免 utils→ui 反向依赖（import-linter "R1: utils must not import business layers" 契约）。首选用模块级无状态函数
     ``show(page, ...)`` / ``stop_all()``（显式传 page）。
     """
 
