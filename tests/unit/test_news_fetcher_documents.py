@@ -45,6 +45,11 @@ class TestParseNewsTime:
         # 非 day_only 且只给日期（不含时间）→ 无法解析 → None
         assert _parse_news_time("2024-08-30") is None
 
+    def test_day_only_with_existing_time_not_appended(self):
+        # review08-D1 复核护栏：已含时间的输入原样解析，不再追加 00:00:00
+        dt = _parse_news_time("2024-08-30 09:00:00", day_only=True)
+        assert dt == to_utc_for_db(datetime.datetime(2024, 8, 30, 9, 0, 0))
+
     def test_empty_returns_none(self):
         assert _parse_news_time("") is None
         assert _parse_news_time(None, day_only=True) is None
@@ -81,7 +86,7 @@ class TestGetStockNewsDocuments:
             {
                 "新闻标题": ["银行股上涨"],
                 "新闻内容": ["详细内容"],
-                "新闻时间": [today.strftime("%Y-%m-%d 10:00:00")],
+                "发布时间": [today.strftime("%Y-%m-%d 10:00:00")],
                 "新闻链接": ["http://em/1"],
                 "文章来源": ["东财"],
             }
@@ -125,7 +130,7 @@ class TestGetStockNewsDocuments:
             {
                 "新闻标题": ["t1", "t2", "t3"],
                 "新闻内容": ["c1", "c2", "c3"],
-                "新闻时间": [
+                "发布时间": [
                     today.strftime("%Y-%m-%d 12:00:00"),
                     today.strftime("%Y-%m-%d 11:00:00"),
                     today.strftime("%Y-%m-%d 10:00:00"),
@@ -158,7 +163,7 @@ class TestGetStockNewsDocuments:
             {
                 "新闻标题": ["东财消息"],
                 "新闻内容": ["x"],
-                "新闻时间": [today],
+                "发布时间": [today],
                 "新闻链接": ["http://em/1"],
             }
         )
