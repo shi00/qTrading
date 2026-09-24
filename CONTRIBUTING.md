@@ -71,7 +71,7 @@
 
 ### 提出新功能
 
-欢迎提出新功能建议！请通过 [功能请求模板](https://github.com/shi00/qTrading/issues/new?template=feature_request.yml) 提交（模板位于 [`.github/ISSUE_TEMPLATE/feature_request.yml`](./.github/ISSUE_TEMPLATE/feature_request.yml)）。新功能需符合 [CLAUDE.md §1.3 极简设计](./CLAUDE.md#13-极简设计-simplicity-first)（YAGNI 优先）。提问与讨论请前往 [GitHub Issues](https://github.com/shi00/qTrading/issues)。
+欢迎提出新功能建议！请通过 [功能请求模板](https://github.com/shi00/qTrading/issues/new?template=feature_request.yml) 提交（模板位于 [`.github/ISSUE_TEMPLATE/feature_request.yml`](./.github/ISSUE_TEMPLATE/feature_request.yml)）。新功能需符合 [CLAUDE.md](./CLAUDE.md) §1.2「最小实现」硬规则与 CONTRIBUTING.md「极简设计方法论背景（Lazy Ladder）」的 6 步极简决策顺序（YAGNI 优先）。提问与讨论请前往 [GitHub Issues](https://github.com/shi00/qTrading/issues)。
 
 ### 代码复用与避免重复造轮子
 
@@ -230,6 +230,8 @@ pre-commit run --all-files
 python main.py
 ```
 
+**跨平台命令策略（P2-16）**：项目支持 Windows 与 Linux。文档只描述命令目的，不绑定具体 shell（如 `grep`/`source`）；命令以 POSIX 形式给出，Windows 用户按平台对应命令执行（如激活用 `.venv\Scripts\activate`），或改用 `python -m` 等价形式。AI 优先使用 IDE 搜索工具或跨平台 Python 脚本，而非机械执行 POSIX 命令；路径引用统一用仓库相对 POSIX 形式，执行时按当前 shell 转换。
+
 ## 交付前 DoD 自检清单
 
 每次提交前对照以下清单自检：
@@ -337,11 +339,20 @@ Closes #123
 
 ## AI 助手方法论与项目概览
 
-> 对应 [CLAUDE.md §1.3 / §1.5 / §2 / §4.1](./CLAUDE.md)。宪法中保留方法论核心原则与决策红线，本节承接被下沉的方法论背景、详细示例、完整技术栈表与完整目录树，供需要深入查阅时使用。
+> 对应 [CLAUDE.md §1.2 / §2 / §4.1](./CLAUDE.md)。宪法 §1 只保留硬规则与不可逾越项，本节承接被下沉的通用 AI 行为方法论背景（原 §1.3~§1.7）、详细示例、完整技术栈表与完整目录树，供需要深入查阅时使用。
 
 ### 极简设计方法论背景（Lazy Ladder）
 
-CLAUDE.md §1.3 的 6 步「极简决策顺序」是对 [Ponytail](https://github.com/DietrichGebert/ponytail) 的 Lazy Ladder 方法论的简化落地。原版 Ponytail 7 层中，「平台原生能力」与「已装第三方依赖」两步针对 Python 桌面应用合并为第 4 步以简化决策。
+CLAUDE.md §1.2 保留的「最小实现」硬规则，其完整方法论为 6 步「极简决策顺序」，是对 [Ponytail](https://github.com/DietrichGebert/ponytail) 的 Lazy Ladder 方法论的简化落地。原版 Ponytail 7 层中，「平台原生能力」与「已装第三方依赖」两步针对 Python 桌面应用合并为第 4 步以简化决策。
+
+**极简决策顺序**（命中即采用，不向下探索）：
+
+1. **YAGNI**：这件事真的需要做吗？推测性需求直接跳过。
+2. **项目内复用**：本代码库已有业务逻辑封装（服务/工具/混入/组件）可直接复用吗？（排除对第三方库的薄包装）
+3. **Python stdlib**：标准库已提供吗？（如 `functools.lru_cache` / `dataclasses` / `pathlib`）
+4. **已装依赖原生能力**：Flet / Polars / Pandas / SQLAlchemy 等已装依赖是否原生支持？若项目已有对该能力的薄包装，直接用原生 API。
+5. **一行代码**：能否用一行表达（逻辑一行、可读性不降、不违反编码规范）？
+6. **最小可工作代码**：写最少能工作的代码，但仍遵守本文件「实现规范手册」、强制模板、专项规范。
 
 **Lazy Ladder 运行规则详解**：
 
@@ -357,9 +368,32 @@ CLAUDE.md §1.3 的 6 步「极简决策顺序」是对 [Ponytail](https://githu
 - 单调用的层（仅被调用一次的抽象层）
 - 单次使用的辅助函数独立模块（应内联或归并到调用方）
 
+### 微创修改、编码交付与调试方法论
+
+宪法 §1 只保留上述硬规则，以下为原 §1.4~§1.7 下沉的通用准则（AI 交付时按需遵循）：
+
+**微创修改 (Surgical Changes)**：
+
+- 仅修改必须触及的代码，只清理自己的逻辑，绝不随意改变周边代码。
+- 禁止过度修饰/无益重构：不要顺手"优化"格式、命名、注释或无关逻辑，绝不重构没坏的代码。
+- 删除优于添加（限本次变更触及的代码）；重构时先问"能否删除"，再问"如何修改"。但"不可简化"清单（输入校验、错误处理、安全、专项规范要求）不可因删除而省略。
+- 严格融入现有风格（哪怕你认为不够优雅）；发现范围外的无关死代码只在回复中指出，绝不顺手删除。
+
+**编码与交付**：
+
+- 拒绝占位符：提供完整可运行代码，不用 `// ... 现有代码 ...` 或 `# TODO` 省略逻辑（除非明确要求）。
+- 输出代码前自查是否违反 CLAUDE.md §3 红线；复用优先见 CLAUDE.md §3.2。
+
+**调试与问题排查**：
+
+- 修复前先收集日志、分析错误栈、找到根本原因；说明"为什么报错"和"为什么这样能修复"。
+- 涉及异步/并发问题，必须考虑事件循环归属、线程归属、取消传播三个维度。
+- 举一反三（Systematic Remediation）：根因是一种错误范式时，全局搜索排查同类隐患并列出排查清单；根因优先于症状（共享函数加 guard 优于各调用点各加）；同类隐患 ≤ 3 个文件且紧密相关可本次一并处理（须配套测试），> 3 个文件或跨多层须记录为独立任务延后。
+- 详细修复执行协议见 docs/bug-fix/core-protocol.md。
+
 ### 目标驱动与测试驱动示例
 
-CLAUDE.md §1.5 保留「非平凡逻辑必须验证」与「交付收尾原则」，本节承接测试驱动思维示例与多步规划模板。
+宪法 §1.2 保留「非平凡逻辑必须验证」与「交付前按 §1.9 验证」，本节承接测试驱动思维示例与多步规划模板。
 
 **测试驱动思维**：将每个开发任务转换为可验证的目标：
 

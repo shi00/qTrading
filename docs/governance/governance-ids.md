@@ -19,7 +19,7 @@
 | P2-11 | 红线规则类型划分（INVARIANT/DEFAULT/NEW_CODE/MIGRATION_TARGET/WORKFLOW/EXCEPTIONABLE） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §3.1 | 使用中 |
 | P2-12 | 主题 → canonical 正本映射（任务决策树机器可读镜像） | 文档体系检视 P2 系列 | [canonical-topics.yml](./canonical-topics.yml) / [CLAUDE.md](../../CLAUDE.md) §1.8 | 使用中 |
 | P2-13 | R18 执行决策树（先识别对象再判定隔离） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §3.1 | 使用中 |
-| P2-16 | 跨平台命令策略（文档只描述命令目的，不绑定 shell） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §1.9 | 使用中 |
+| P2-16 | 跨平台命令策略（文档只描述命令目的，不绑定 shell） | 文档体系检视 P2 系列 | [CONTRIBUTING.md](../../CONTRIBUTING.md)「常用开发与测试命令」 | 使用中 |
 | P2-17 | 架构设计/公共契约任务路由（满足 ADR-0001 触发条件时新增 ADR） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §1.8 / [canonical-topics.yml](./canonical-topics.yml) | 使用中 |
 | P3-03 | AGENTS.md 定位为跨工具自动加载的规则入口 | 文档体系检视 P3 系列 | [AGENTS.md](../../AGENTS.md) | 使用中 |
 | DOC-01 | 规则集元数据一致性（ruleset_version / last_reviewed 三文档同步） | 文档体系·AI 可执行性专项（DOC 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |

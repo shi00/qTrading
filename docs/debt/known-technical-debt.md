@@ -72,7 +72,7 @@ strategies/ 层 except Exception 中 P0/P2 必修项已完成，剩余已合理�
 
 **期望的最终解法**
 
-策略层重构或新增策略时统一走 `classify_error` + `classify_severity`。upgrade 触发条件：策略层重构时。评审决策：保持现状（NOTE(lazy) 标记已记录 upgrade 条件），强行接入 classify\_error 会改变 system severity → raise 行为，违反 §1.4「不做无益重构」。
+策略层重构或新增策略时统一走 `classify_error` + `classify_severity`。upgrade 触发条件：策略层重构时。评审决策：保持现状（NOTE(lazy) 标记已记录 upgrade 条件），强行接入 classify\_error 会改变 system severity → raise 行为，违反「不做无益重构」（见 CONTRIBUTING.md「微创修改、编码交付与调试方法论」）。
 
 #### P3-ExcUtils-NoteLazy-Classify：utils/ 层 except Exception 已标记 NOTE(lazy)，待评估统一走 classify\_error
 
@@ -96,7 +96,7 @@ R3 场景遗漏检视发现：utils/ 层 except Exception（分布在 config\_ha
 
 **产生背景与现状**
 
-M4 模块化检视发现：`data/persistence/app_state_service.py:21,38` 共 2 处 `except Exception as e:` 吞没异常返回默认值。app state 是非关键路径（用户偏好/窗口位置等），吞没降级返回默认值是合理设计。但未接入 `classify_error`，与 #M4-002（review\_manager 已接入 classify\_error）一致性不符。本次 M4 未修复原因：① app state 非关键路径，容错优先；② 修复需引入 `classify_error` + `classify_severity` + system 级 raise 传播，改变现有降级语义，违反 §1.4「不做无益重构」。相关文件：`data/persistence/app_state_service.py:21,38`。
+M4 模块化检视发现：`data/persistence/app_state_service.py:21,38` 共 2 处 `except Exception as e:` 吞没异常返回默认值。app state 是非关键路径（用户偏好/窗口位置等），吞没降级返回默认值是合理设计。但未接入 `classify_error`，与 #M4-002（review\_manager 已接入 classify\_error）一致性不符。本次 M4 未修复原因：① app state 非关键路径，容错优先；② 修复需引入 `classify_error` + `classify_severity` + system 级 raise 传播，改变现有降级语义，违反「不做无益重构」（见 CONTRIBUTING.md「微创修改、编码交付与调试方法论」）。相关文件：`data/persistence/app_state_service.py:21,38`。
 
 **期望的最终解法**
 
@@ -110,7 +110,7 @@ M4 模块化检视发现：`data/persistence/app_state_service.py:21,38` 共 2 �
 
 **产生背景与现状**
 
-M9 services 模块检视发现：`services/news_subscription_service.py:334`（`_safe_fetch_task`）/ `:448`（`_processing_loop`）/ `:717`（`_fetch_and_notify`）共 3 处 `except EngineDisposedError: ... self._running = False / break` - 吞没 EngineDisposedError 以停止轮询。R5 红线："DAO/维护流程必须检查引擎状态；已释放时抛出或传播 EngineDisposedError"。NewsSubscriptionService 不是 DAO/维护流程，是应用服务层的轮询循环，引擎释放后停止轮询是合理设计。但严格按 R5 应传播。M9 未修复原因：设计合理（轮询循环不应因 EngineDisposed 崩溃，而应优雅停止），R5 主要针对 DAO/维护流程；修复需评估是否在 system 级 raise，改变现有降级语义，违反 §1.4「不做无益重构」。相关文件：`services/news_subscription_service.py:334/448/717`。（R5 豁免已登记例外 **EX-0017**，见 docs/governance/exceptions.yml；P1-04 方案1）
+M9 services 模块检视发现：`services/news_subscription_service.py:334`（`_safe_fetch_task`）/ `:448`（`_processing_loop`）/ `:717`（`_fetch_and_notify`）共 3 处 `except EngineDisposedError: ... self._running = False / break` - 吞没 EngineDisposedError 以停止轮询。R5 红线："DAO/维护流程必须检查引擎状态；已释放时抛出或传播 EngineDisposedError"。NewsSubscriptionService 不是 DAO/维护流程，是应用服务层的轮询循环，引擎释放后停止轮询是合理设计。但严格按 R5 应传播。M9 未修复原因：设计合理（轮询循环不应因 EngineDisposed 崩溃，而应优雅停止），R5 主要针对 DAO/维护流程；修复需评估是否在 system 级 raise，改变现有降级语义，违反「不做无益重构」（见 CONTRIBUTING.md「微创修改、编码交付与调试方法论」）。相关文件：`services/news_subscription_service.py:334/448/717`。（R5 豁免已登记例外 **EX-0017**，见 docs/governance/exceptions.yml；P1-04 方案1）
 
 **期望的最终解法**
 
@@ -124,7 +124,7 @@ M9 services 模块检视发现：`services/news_subscription_service.py:334`（`
 
 **产生背景与现状**
 
-M9 services 模块检视发现：`services/backtest_service.py:111-134`（`_persist_result`，`@log_async_operation` 装饰器位于 :111）的 `except Exception as e`（:124）捕获 EngineDisposedError → `DataSanitizer.sanitize_error(e)`（:125）+ `log_classified(..., "general", ..., exc_info=True)`（:126-132，无 `classify_severity`/`logger.critical`）后不 raise，返回 `result.with_warnings(new_warnings)`（:133-134）。这意味着数据库 disposed 后回测结果仍带警告返回，但后续操作也会失败。`_persist_result` 的语义是"持久化失败不阻塞回测结果返回"，从业务角度合理（回测已完成，持久化失败只是警告）。但 EngineDisposedError 意味着数据库不可用，与 task\_manager 的 system 级 critical log 不 raise 模式一致。M9 未修复原因：设计模式不一致但业务合理，修复需评估是否在 system 级 raise，改变现有降级语义，违反 §1.4「不做无益重构」。相关文件：`services/backtest_service.py:111-134`。（R5 豁免已登记例外 **EX-0018**，见 docs/governance/exceptions.yml；P1-04 方案1）
+M9 services 模块检视发现：`services/backtest_service.py:111-134`（`_persist_result`，`@log_async_operation` 装饰器位于 :111）的 `except Exception as e`（:124）捕获 EngineDisposedError → `DataSanitizer.sanitize_error(e)`（:125）+ `log_classified(..., "general", ..., exc_info=True)`（:126-132，无 `classify_severity`/`logger.critical`）后不 raise，返回 `result.with_warnings(new_warnings)`（:133-134）。这意味着数据库 disposed 后回测结果仍带警告返回，但后续操作也会失败。`_persist_result` 的语义是"持久化失败不阻塞回测结果返回"，从业务角度合理（回测已完成，持久化失败只是警告）。但 EngineDisposedError 意味着数据库不可用，与 task\_manager 的 system 级 critical log 不 raise 模式一致。M9 未修复原因：设计模式不一致但业务合理，修复需评估是否在 system 级 raise，改变现有降级语义，违反「不做无益重构」（见 CONTRIBUTING.md「微创修改、编码交付与调试方法论」）。相关文件：`services/backtest_service.py:111-134`。（R5 豁免已登记例外 **EX-0018**，见 docs/governance/exceptions.yml；P1-04 方案1）
 
 **期望的最终解法**
 
@@ -168,7 +168,7 @@ R1 由 import-linter 3 条契约（1 条 layers + 2 条 forbidden）守护；R4/
 
 **产生背景与现状**
 
-宪法 R3（INVARIANT）要求 `# type: ignore` 带 \[error-code]（已强制）；报告 G5 务实版要求 tests/ 中 attr-defined 之外的类型压制带 human reason（mock 替身场景的 attr-defined 免于说明）。2026-09-04 复核：tests/ 共 327 处 `# type: ignore[x]`，其中 attr-defined 69 处（豁免）、非 attr-defined 258 处、其中无 human reason 226 处（arg-type 41 / method-assign 73 / union-attr 29 / misc 24 / untyped 18 / assignment 27 / 其余 14）。`scripts/check_type_ignore_reason.py` 已实现分级检查（生产 ERROR + tests WARNING），存量 >5 处故先 WARNING 不阻断，避免为 226 处机械补注（宪法 §1.4）。
+宪法 R3（INVARIANT）要求 `# type: ignore` 带 \[error-code]（已强制）；报告 G5 务实版要求 tests/ 中 attr-defined 之外的类型压制带 human reason（mock 替身场景的 attr-defined 免于说明）。2026-09-04 复核：tests/ 共 327 处 `# type: ignore[x]`，其中 attr-defined 69 处（豁免）、非 attr-defined 258 处、其中无 human reason 226 处（arg-type 41 / method-assign 73 / union-attr 29 / misc 24 / untyped 18 / assignment 27 / 其余 14）。`scripts/check_type_ignore_reason.py` 已实现分级检查（生产 ERROR + tests WARNING），存量 >5 处故先 WARNING 不阻断，避免为 226 处机械补注（微创修改原则，见 CONTRIBUTING.md）。
 
 **期望的最终解法**
 
@@ -212,7 +212,7 @@ PR #291 方案 B 将 E2E Tests (Windows) 从外置 PostgreSQL 改为 embedded �
 
 **产生背景与现状**
 
-失败注入测试矩阵场景 #25：篡改测试表数据页后查询 → PostgreSQL 报 `invalid page in block` → sidecar stdout warning 事件上报 → UI 提示备份恢复。`failure_injection.rs` 现覆盖 10 场景（#3/#4/#8/#9/#23/#24/#26/#27/#28/#31），#25 缺失。根因分析（2026-07-23）：① **需协议扩展**——当前 sidecar stdout 协议仅 `ready.v1` / `event.warning.v1` / `event.exit.v1` / `status.v1` / `doctor.v1` / `version.v1` 六类 schema，运行期 PostgreSQL 日志监听 + warning 事件 emission 尚未实现（`run.rs` 的 `supervise` 循环无 postgres stderr/log 关键字扫描）；② **需运行期日志监控**——sidecar 需新增 daemon thread/task 持续读取 PostgreSQL `log_min_messages=warning` 输出，匹配 `invalid page in block` 关键字后经 `protocol::print_json_line(&EventJson::warning(...))` 上报 stdout；③ **需 UI 集成**——Python 侧 `_stdout_reader_task` 需解析 `event.warning` 事件并经 ViewModel state 通知 UI 显示"检测到数据页损坏，建议尽快备份并从最近备份恢复"。三端协同改造 scope 远超 P2 修复边界，母计划策略"对影响正确性的 P2 修复（如 #25/#28）"中 #25 归类为"需协议扩展的设计偏差"，按 §1.3 YAGNI 推迟。**注**：#28（restore 中断残留）已在本次 pg-plan-review 修复（doctor 新增 `scan_residuals` + `restore_residuals` / `dump_partials` 字段 + 集成测试 `test_inject_28_restore_interruption_residual`）。相关文件：`sidecars/qtrading-pg-sidecar/src/run.rs`（supervise 循环）、`src/protocol.rs`（EventJson::warning）、`src/maint.rs`（doctor scan\_residuals 已实现）、`data/persistence/embedded_postgres/service.py`（\_stdout\_reader\_task）。
+失败注入测试矩阵场景 #25：篡改测试表数据页后查询 → PostgreSQL 报 `invalid page in block` → sidecar stdout warning 事件上报 → UI 提示备份恢复。`failure_injection.rs` 现覆盖 10 场景（#3/#4/#8/#9/#23/#24/#26/#27/#28/#31），#25 缺失。根因分析（2026-07-23）：① **需协议扩展**——当前 sidecar stdout 协议仅 `ready.v1` / `event.warning.v1` / `event.exit.v1` / `status.v1` / `doctor.v1` / `version.v1` 六类 schema，运行期 PostgreSQL 日志监听 + warning 事件 emission 尚未实现（`run.rs` 的 `supervise` 循环无 postgres stderr/log 关键字扫描）；② **需运行期日志监控**——sidecar 需新增 daemon thread/task 持续读取 PostgreSQL `log_min_messages=warning` 输出，匹配 `invalid page in block` 关键字后经 `protocol::print_json_line(&EventJson::warning(...))` 上报 stdout；③ **需 UI 集成**——Python 侧 `_stdout_reader_task` 需解析 `event.warning` 事件并经 ViewModel state 通知 UI 显示"检测到数据页损坏，建议尽快备份并从最近备份恢复"。三端协同改造 scope 远超 P2 修复边界，母计划策略"对影响正确性的 P2 修复（如 #25/#28）"中 #25 归类为"需协议扩展的设计偏差"，按 §1.2 YAGNI 推迟。**注**：#28（restore 中断残留）已在本次 pg-plan-review 修复（doctor 新增 `scan_residuals` + `restore_residuals` / `dump_partials` 字段 + 集成测试 `test_inject_28_restore_interruption_residual`）。相关文件：`sidecars/qtrading-pg-sidecar/src/run.rs`（supervise 循环）、`src/protocol.rs`（EventJson::warning）、`src/maint.rs`（doctor scan\_residuals 已实现）、`data/persistence/embedded_postgres/service.py`（\_stdout\_reader\_task）。
 
 **期望的最终解法**
 
@@ -298,7 +298,7 @@ M3 模块化检视发现：`app/error_logging.py`（`log_exception_with_severity
 
 **产生背景与现状**
 
-M3 模块化检视发现：`app/bootstrap.py:123`（`MetaDataManager.preload_aliases()`）、L207（`_validate_failover_credentials()`）、L210（`_validate_strategy_tier_coverage()`）在 async `initialize_services` 中同步调用，阻塞事件循环。检视结论：① `preload_aliases` 是纯内存操作（遍历 TABLE\_DEFINITIONS + I18n.get 翻译），毫秒级；② `_validate_failover_credentials` 首次读配置文件（`config_handler.py:285-291` `open(CONFIG_FILE)`），后续走 `_config_cache`，毫秒级；③ `_validate_strategy_tier_coverage` 调用 `StrategyManager().strategies.keys()` + `validate_strategy_tier_coverage()`，纯内存操作。R16 红线聚焦"Flet 事件处理器中的同步阻塞场景"（如点击按钮后同步等待网络响应），启动期一次性同步操作（毫秒级内存/配置文件操作）不影响用户体验，不适用 R16。修复（用 ThreadPoolManager 包装）会增加复杂度且收益不显著，违反 §1.3「极简」。相关文件：`app/bootstrap.py:123,207,210`、`data/persistence/metadata_manager.py:14-23`、`utils/config_handler.py:279-291`。
+M3 模块化检视发现：`app/bootstrap.py:123`（`MetaDataManager.preload_aliases()`）、L207（`_validate_failover_credentials()`）、L210（`_validate_strategy_tier_coverage()`）在 async `initialize_services` 中同步调用，阻塞事件循环。检视结论：① `preload_aliases` 是纯内存操作（遍历 TABLE\_DEFINITIONS + I18n.get 翻译），毫秒级；② `_validate_failover_credentials` 首次读配置文件（`config_handler.py:285-291` `open(CONFIG_FILE)`），后续走 `_config_cache`，毫秒级；③ `_validate_strategy_tier_coverage` 调用 `StrategyManager().strategies.keys()` + `validate_strategy_tier_coverage()`，纯内存操作。R16 红线聚焦"Flet 事件处理器中的同步阻塞场景"（如点击按钮后同步等待网络响应），启动期一次性同步操作（毫秒级内存/配置文件操作）不影响用户体验，不适用 R16。修复（用 ThreadPoolManager 包装）会增加复杂度且收益不显著，违反 §1.2「极简」。相关文件：`app/bootstrap.py:123,207,210`、`data/persistence/metadata_manager.py:14-23`、`utils/config_handler.py:279-291`。
 
 **期望的最终解法**
 
@@ -340,7 +340,7 @@ M12 ui 表现层模块检视发现：`ui/components/stock_detail_dialog.py:511` 
 
 **产生背景与现状**
 
-PR #373 定位根因为"main 基线视口 6px 边缘状态 + 新增 backtest\_btn 增量压缩 → table\_card 视口 0px → Column 节点 text=''"（见 [docs/flet/project-differences.md §4.9](../flet/project-differences.md#49-增量变更触发边缘状态视口塌陷pr-373)）。按 CLAUDE.md §1.7「举一反三」需排查同类隐患：`Row(wrap=True)` + `expand=True` + 同级控件增长模式分布在 3 个文件（`ui/views/screener_view.py` / `ui/views/settings_tabs/data_source_tab.py` / `ui/components/config_panels/failover_config_panel.py`），跨 views + components 两层，按 §1.7「>3 文件或跨多层须记录为独立重构任务延后处理」登记为独立任务。当前未排查这些视图是否存在 main 基线视口边缘状态 + 增量变更触发塌陷的同类风险。相关文件：`ui/views/screener_view.py`、`ui/views/settings_tabs/data_source_tab.py`、`ui/components/config_panels/failover_config_panel.py`。
+PR #373 定位根因为"main 基线视口 6px 边缘状态 + 新增 backtest\_btn 增量压缩 → table\_card 视口 0px → Column 节点 text=''"（见 [docs/flet/project-differences.md §4.9](../flet/project-differences.md#49-增量变更触发边缘状态视口塌陷pr-373)）。按 CONTRIBUTING.md「微创修改、编码交付与调试方法论」的「举一反三」需排查同类隐患：`Row(wrap=True)` + `expand=True` + 同级控件增长模式分布在 3 个文件（`ui/views/screener_view.py` / `ui/views/settings_tabs/data_source_tab.py` / `ui/components/config_panels/failover_config_panel.py`），跨 views + components 两层，按「同类隐患 >3 文件或跨多层须记录为独立重构任务延后处理」登记为独立任务。当前未排查这些视图是否存在 main 基线视口边缘状态 + 增量变更触发塌陷的同类风险。相关文件：`ui/views/screener_view.py`、`ui/views/settings_tabs/data_source_tab.py`、`ui/components/config_panels/failover_config_panel.py`。
 
 **期望的最终解法**
 
@@ -412,7 +412,7 @@ M4 模块化检视发现：`data/persistence/db_migrator.py:149-153` 的 `_heal_
 
 **产生背景与现状**
 
-M6 模块化检视发现：`data/external/news_fetcher.py:669` 在 `get_us_major_moves` 内部 `from utils.proxy_manager import ProxyManager`，属函数内部 import。一般而言函数内部 import 是反模式，但此处合理：`utils/proxy_manager.py` 可能间接依赖 `data/external/`（通过配置或单例注册链），顶部 import 会形成循环依赖。M6 未修复原因：修复需重构 `proxy_manager.py` 的依赖方向或提取 proxy 配置为独立模块，跨 `utils/` + `data/external/` 两层，违反 §1.4「微创修改」。相关文件：`data/external/news_fetcher.py:669`、`utils/proxy_manager.py`。
+M6 模块化检视发现：`data/external/news_fetcher.py:669` 在 `get_us_major_moves` 内部 `from utils.proxy_manager import ProxyManager`，属函数内部 import。一般而言函数内部 import 是反模式，但此处合理：`utils/proxy_manager.py` 可能间接依赖 `data/external/`（通过配置或单例注册链），顶部 import 会形成循环依赖。M6 未修复原因：修复需重构 `proxy_manager.py` 的依赖方向或提取 proxy 配置为独立模块，跨 `utils/` + `data/external/` 两层，违反 CONTRIBUTING.md「微创修改、编码交付与调试方法论」的微创修改原则。相关文件：`data/external/news_fetcher.py:669`、`utils/proxy_manager.py`。
 
 **期望的最终解法**
 
@@ -444,7 +444,7 @@ PR #291 触发 Windows 单测 CI 超时调查发现：main 分支最近一次成
 
 **产生背景与现状**
 
-M11 ui 基础设施模块检视发现：`ui/startup_views.py:632` `_setup_news_alert` 中 `HomeViewModel.register_news_alert_listener(on_news_alert)`，`ui/startup_views.py:640` `_cleanup_news_alert` 中 `HomeViewModel.unregister_news_alert_listener(cb)`。View 直接 import 并调用 `HomeViewModel` 静态方法注册/注销 news alert listener。严格 MVVM 边界下，View 应通过自身消费的 ViewModel 实例命令转发。已有注释说明（startup\_views.py:610-612）"CLAUDE.md §3.2 MVVM: View 不直调 NewsSubscriptionService, 经 HomeViewModel 命令转发（合规范例 home\_view\_model.py:184）"。cleanup 完整（unregister + ref 置 None），无内存泄漏。M11 未修复原因：修复需引入 StartupViewModel 抽象，属过度设计，违反 §1.3「极简设计」。相关文件：`ui/startup_views.py:610-641`、`ui/viewmodels/home_view_model.py:184`。
+M11 ui 基础设施模块检视发现：`ui/startup_views.py:632` `_setup_news_alert` 中 `HomeViewModel.register_news_alert_listener(on_news_alert)`，`ui/startup_views.py:640` `_cleanup_news_alert` 中 `HomeViewModel.unregister_news_alert_listener(cb)`。View 直接 import 并调用 `HomeViewModel` 静态方法注册/注销 news alert listener。严格 MVVM 边界下，View 应通过自身消费的 ViewModel 实例命令转发。已有注释说明（startup\_views.py:610-612）"CLAUDE.md §3.2 MVVM: View 不直调 NewsSubscriptionService, 经 HomeViewModel 命令转发（合规范例 home\_view\_model.py:184）"。cleanup 完整（unregister + ref 置 None），无内存泄漏。M11 未修复原因：修复需引入 StartupViewModel 抽象，属过度设计，违反 §1.2「极简设计」。相关文件：`ui/startup_views.py:610-641`、`ui/viewmodels/home_view_model.py:184`。
 
 **期望的最终解法**
 
@@ -572,7 +572,7 @@ M12 ui 表现层模块检视发现：`ui/components/news_feed.py:289` `on_load_m
 
 **产生背景与现状**
 
-修复 DataExplorer embedded 连错端口(5432)的根因排查（2026-08-23，详见 `docs/superpowers/plans/2026-08-23-data-explorer-embedded-db-url-fix.md`「举一反三」）确认：全库运行时的 DB 建连接点中，唯一一套"第二套常驻连接"是 `data/persistence/data_explorer_query_client.py` 的 `_ensure_engine()` 自建 sync 引擎并缓存 `_shared_engine`，脱离 `CacheManager` 统一引擎管理、独立注册到 ShutdownCoordinator、在线程池线程建连。这使得 P0 ContextVar 在线程池线程失效时回退到残留 5432（P2）得以发生。本期采用最简症状层修复（`ConfigHandler` P1.5 模块级 embedded URL override + `DataExplorerViewModel.init_tables` 空表防护），P1.5 保证 URL 跨上下文恒定传导，不改动引擎形态，回归面最小。**归一化重构**（移除 `_shared_engine`、复用统一生命周期管理的引擎、处理 sync/async + 线程池语义）跨数据层引擎生命周期、触碰 ShutdownCoordinator/DAO 共享，按 CLAUDE.md §1.7「同类隐患跨多层/涉及公共契约，记录独立任务延后处理」登记。相关文件：`data/persistence/data_explorer_query_client.py`、`utils/config_handler.py`、`ui/viewmodels/data_explorer_view_model.py`。
+修复 DataExplorer embedded 连错端口(5432)的根因排查（2026-08-23，详见 `docs/superpowers/plans/2026-08-23-data-explorer-embedded-db-url-fix.md`「举一反三」）确认：全库运行时的 DB 建连接点中，唯一一套"第二套常驻连接"是 `data/persistence/data_explorer_query_client.py` 的 `_ensure_engine()` 自建 sync 引擎并缓存 `_shared_engine`，脱离 `CacheManager` 统一引擎管理、独立注册到 ShutdownCoordinator、在线程池线程建连。这使得 P0 ContextVar 在线程池线程失效时回退到残留 5432（P2）得以发生。本期采用最简症状层修复（`ConfigHandler` P1.5 模块级 embedded URL override + `DataExplorerViewModel.init_tables` 空表防护），P1.5 保证 URL 跨上下文恒定传导，不改动引擎形态，回归面最小。**归一化重构**（移除 `_shared_engine`、复用统一生命周期管理的引擎、处理 sync/async + 线程池语义）跨数据层引擎生命周期、触碰 ShutdownCoordinator/DAO 共享，按「同类隐患跨多层/涉及公共契约，记录独立任务延后处理」（见 CONTRIBUTING.md「微创修改、编码交付与调试方法论」）登记。相关文件：`data/persistence/data_explorer_query_client.py`、`utils/config_handler.py`、`ui/viewmodels/data_explorer_view_model.py`。
 
 **期望的最终解法**
 

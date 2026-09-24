@@ -147,5 +147,5 @@ body:
           required: true
         - label: 我已阅读 CLAUDE.md 红线与 CONTRIBUTING.md
           required: true
-        - label: 我已按 CLAUDE.md §1.7 调试规范尝试定位根本原因
+        - label: 我已按 CLAUDE.md §1.2 与 CONTRIBUTING.md 的调试准则尝试定位根本原因
           required: false
