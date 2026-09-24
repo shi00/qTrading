@@ -265,6 +265,7 @@
 | AI 问题修复指南（核心协议 / 专项 Profile / 附录） | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) |
 | man/ 专题深度文档（database-account-separation / table-partitioning-strategy / flet-best-practices stub） | [man/](./man/) 子文档 |
 | AGENTS.md 跨工具规则入口（最小安全集 + 指针 + 生成区块，见 ADR-0006） | [AGENTS.md](./AGENTS.md) |
+| AI 工具运行时配置（harness.toml：权限/沙箱白名单，非规则正本，产品版本经 verify-versions 守护） | [harness.toml](./harness.toml) |
 | 治理 ID 对照表（P2/DOC/GDR/review 系列 ID → 一句话含义） | [docs/governance/governance-ids.md](./docs/governance/governance-ids.md) |
 
 ---
