@@ -112,25 +112,25 @@ _SCREENING_SQL_TEMPLATE = """
                                          WHERE ann_date IS NOT NULL AND ann_date <= $3) f_inner
                                    WHERE f_inner.rn = 1) f
                                   ON b.ts_code = f.ts_code
-                        LEFT JOIN (SELECT g.ts_code,
-                                          g.grossprofit_margin AS gpm_prev
-                                   FROM (SELECT f2.ts_code,
-                                                f2.grossprofit_margin,
+                        LEFT JOIN (SELECT f2.ts_code,
+                                          f2.grossprofit_margin AS gpm_prev
+                                   FROM (SELECT fr.ts_code,
+                                                fr.grossprofit_margin,
+                                                fr.end_date,
+                                                MAX(fr.end_date) OVER (
+                                                    PARTITION BY fr.ts_code
+                                                ) AS latest_end_date,
                                                 ROW_NUMBER() OVER (
-                                                    PARTITION BY f2.ts_code
-                                                    ORDER BY f2.end_date DESC
-                                                ) AS pr
-                                         FROM (SELECT fr.ts_code,
-                                                      fr.grossprofit_margin,
-                                                      fr.end_date,
-                                                      ROW_NUMBER() OVER (
-                                                          PARTITION BY fr.ts_code, fr.end_date
-                                                          ORDER BY fr.ann_date DESC
-                                                      ) AS rn_period
-                                               FROM financial_reports fr
-                                               WHERE fr.ann_date IS NOT NULL AND fr.ann_date <= $3) f2
-                                         WHERE f2.rn_period = 1) g
-                                   WHERE g.pr = 2) f_prev
+                                                    PARTITION BY fr.ts_code, fr.end_date
+                                                    ORDER BY fr.ann_date DESC
+                                                ) AS rn_period
+                                         FROM financial_reports fr
+                                         WHERE fr.ann_date IS NOT NULL AND fr.ann_date <= $3) f2
+                                   -- SC-03: gpm_prev 取「上年同期」（end_date 月日相同、年份 -1），
+                                   -- 与最新期同口径可比；旧口径取 rn 次新期会在最新期为一季报时
+                                   -- 拿上年年报毛利率作比较（跨期不可比，DAT-09）。
+                                   WHERE f2.rn_period = 1
+                                     AND f2.end_date = (f2.latest_end_date - INTERVAL '1 year')::date) f_prev
                                   ON b.ts_code = f_prev.ts_code
                         LEFT JOIN LATERAL (
                             SELECT l2_name
@@ -215,9 +215,8 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                             SELECT g.grossprofit_margin AS gpm_prev
                             FROM (
                                 SELECT f2.grossprofit_margin,
-                                       ROW_NUMBER() OVER (
-                                           ORDER BY f2.end_date DESC
-                                       ) AS pr
+                                       f2.end_date,
+                                       MAX(f2.end_date) OVER () AS latest_end_date
                                 FROM (
                                     SELECT fr.grossprofit_margin,
                                            fr.end_date,
@@ -232,7 +231,8 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                                 ) f2
                                 WHERE f2.rn_period = 1
                             ) g
-                            WHERE g.pr = 2
+                            -- SC-03: 同单日模板，gpm_prev 取「上年同期」保证跨期可比（DAT-09）
+                            WHERE g.end_date = (g.latest_end_date - INTERVAL '1 year')::date
                         ) f_prev ON TRUE
                         LEFT JOIN LATERAL (
                             SELECT l2_name
