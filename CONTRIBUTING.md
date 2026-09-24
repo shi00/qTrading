@@ -625,6 +625,10 @@ except Exception as e:
 
 > 本节列出 docs/ 下全部子文档及需求正本，作为 CONTRIBUTING.md 入口索引的补充。完整目录结构见 [docs/README.md](./docs/README.md)。
 
+### 根目录 — AI 工具运行时配置
+
+- [harness.toml](./harness.toml) — AI 工具（Harness）运行时权限与沙箱配置（命令白名单 / deniedDomains / TDD 强制开关）；CLAUDE.md 为唯一规则正本，本文件不承载规则语义。伴生 `hooks/hooks.json` 为 hook 覆盖占位，当前为空（覆盖默认行为时填入）。
+
 ### requirements/ — 用户需求
 
 - [USER_REQUIREMENTS.md](./requirements/USER_REQUIREMENTS.md) — 个人投资者量化选股需求正本与问题定义

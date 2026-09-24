@@ -40,6 +40,10 @@
         {
           "type": "generic",
           "path": "CONTRIBUTING.md"
+        },
+        {
+          "type": "generic",
+          "path": "harness.toml"
         }
       ]
     }
