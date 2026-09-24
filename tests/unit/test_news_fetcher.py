@@ -141,8 +141,9 @@ class TestGetStockNews:
         "data.external.news_fetcher._run_with_python_string_storage",
         side_effect=lambda f: f(),
     )
-    @patch("data.external.news_fetcher.ak")
-    async def test_cninfo_success(self, mock_ak, mock_run, mock_tpm):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_cninfo_success(self, mock_get_ak, mock_run, mock_tpm):
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         df_cninfo = pd.DataFrame(
@@ -237,8 +238,9 @@ class TestGetStockNews:
         "data.external.news_fetcher._run_with_python_string_storage",
         side_effect=lambda f: f(),
     )
-    @patch("data.external.news_fetcher.ak")
-    async def test_cninfo_fails_em_fallback(self, mock_ak, mock_run, mock_tpm):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_cninfo_fails_em_fallback(self, mock_get_ak, mock_run, mock_tpm):
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo error")
         df_em = pd.DataFrame(
             {
@@ -273,8 +275,9 @@ class TestGetStockNews:
         "data.external.news_fetcher._run_with_python_string_storage",
         side_effect=lambda f: f(),
     )
-    @patch("data.external.news_fetcher.ak")
-    async def test_both_fail_returns_empty(self, mock_ak, mock_run, mock_tpm):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_both_fail_returns_empty(self, mock_get_ak, mock_run, mock_tpm):
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo error")
         mock_ak.stock_news_em.side_effect = Exception("em error")
 
@@ -1199,8 +1202,9 @@ class TestGetStockNewsDirectExecution:
     """Tests that exercise the _fetch/_fetch_locked inner functions directly."""
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ak")
-    async def test_cninfo_direct_success(self, mock_ak):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_cninfo_direct_success(self, mock_get_ak):
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         df_cninfo = pd.DataFrame(
             {
                 "代码": ["000001"],
@@ -1226,8 +1230,9 @@ class TestGetStockNewsDirectExecution:
         assert result[0]["publish_time"].tzinfo is None
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ak")
-    async def test_cninfo_empty_em_fallback_direct(self, mock_ak):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_cninfo_empty_em_fallback_direct(self, mock_get_ak):
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
         df_em = pd.DataFrame(
             {
@@ -1250,8 +1255,9 @@ class TestGetStockNewsDirectExecution:
         assert result[0]["source"] == "东财新闻"
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ak")
-    async def test_both_layers_fail_direct(self, mock_ak):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_both_layers_fail_direct(self, mock_get_ak):
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo error")
         mock_ak.stock_news_em.side_effect = Exception("em error")
 
@@ -1264,8 +1270,9 @@ class TestGetStockNewsDirectExecution:
         assert result == []
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ak")
-    async def test_cninfo_no_title_col_returns_empty(self, mock_ak):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_cninfo_no_title_col_returns_empty(self, mock_get_ak):
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         df_cninfo = pd.DataFrame({"col_a": [1], "col_b": [2]})
         mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = df_cninfo
         mock_ak.stock_news_em.return_value = pd.DataFrame()
@@ -1279,8 +1286,9 @@ class TestGetStockNewsDirectExecution:
         assert result == []
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ak")
-    async def test_cninfo_positional_fallback_columns(self, mock_ak):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_cninfo_positional_fallback_columns(self, mock_get_ak):
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         df_cninfo = pd.DataFrame(
             {
                 "代码": ["000001"],
@@ -1301,8 +1309,9 @@ class TestGetStockNewsDirectExecution:
         assert len(result) >= 1
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ak")
-    async def test_em_news_content_fallback(self, mock_ak):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_em_news_content_fallback(self, mock_get_ak):
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo error")
         df_em = pd.DataFrame(
             {
@@ -1334,8 +1343,9 @@ class TestSharedRateLimiter:
     """
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ak")
-    async def test_stock_news_reserves_limiter_for_both_layers(self, mock_ak):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_stock_news_reserves_limiter_for_both_layers(self, mock_get_ak):
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame(
             {
                 "代码": ["000001"],
@@ -1366,8 +1376,9 @@ class TestSharedRateLimiter:
         mock_limiter.consume.assert_called_once_with(2)
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ak")
-    async def test_documents_reserves_limiter_for_both_layers(self, mock_ak):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_documents_reserves_limiter_for_both_layers(self, mock_get_ak):
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
         mock_ak.stock_news_em.return_value = pd.DataFrame()
 
@@ -1421,7 +1432,8 @@ class TestNewsTimeCaliberConsistency:
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
 
-        with patch("data.external.news_fetcher.ak") as mock_ak:
+        with patch("data.external.news_fetcher._get_akshare") as mock_get_ak:
+            mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
             mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = cninfo
             mock_ak.stock_news_em.return_value = em
 
@@ -1935,9 +1947,10 @@ class TestClassifyErrorIntegration:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
-    @patch("data.external.news_fetcher.ak")
-    async def test_cninfo_failure_logs_code(self, mock_ak, mock_run, mock_tpm, caplog):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_cninfo_failure_logs_code(self, mock_get_ak, mock_run, mock_tpm, caplog):
         """路径 3: get_stock_news except Exception (CNINFO) — 失败日志含 [code=]。"""
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo connection error")
         mock_ak.stock_news_em.return_value = pd.DataFrame()
 
@@ -1954,9 +1967,10 @@ class TestClassifyErrorIntegration:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
-    @patch("data.external.news_fetcher.ak")
-    async def test_em_failure_logs_code(self, mock_ak, mock_run, mock_tpm, caplog):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_em_failure_logs_code(self, mock_get_ak, mock_run, mock_tpm, caplog):
         """路径 4: get_stock_news except Exception (EM) — 失败日志含 [code=]。"""
+        mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
         mock_ak.stock_news_em.side_effect = Exception("em error")
 

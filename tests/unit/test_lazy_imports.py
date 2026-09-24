@@ -1,3 +1,8 @@
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -97,6 +102,48 @@ class TestExternalInit:
 
         with pytest.raises(AttributeError, match="has no attribute"):
             _ = data.external.NonExistent
+
+
+class TestExternalLazyDependencies:
+    def test_news_fetcher_import_does_not_load_akshare(self):
+        """review08-B5: import data.external.news_fetcher 不加载 akshare（顶层 import 已改 _get_akshare() 惰性）。
+
+        子进程执行，避免当前测试进程（conftest autouse mock / 其他用例）已导入 akshare
+        造成干扰；并断言调用 ``_get_akshare()`` 能正确触发惰性导入。
+        """
+        subprocess_code = (
+            "import sys\n"
+            "import data.external.news_fetcher as nf\n"
+            "assert 'akshare' not in sys.modules, 'news_fetcher import 不应加载 akshare'\n"
+            "ak = nf._get_akshare()\n"
+            "assert 'akshare' in sys.modules, '调用 _get_akshare 应触发惰性导入'\n"
+            "assert ak is sys.modules['akshare']\n"
+            "print('OK: akshare not loaded at import time')\n"
+        )
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        # test_lazy_imports.py 位于 tests/unit/，上溯 2 级即仓库根，用作子进程 cwd，
+        # 保证子进程从仓库根解析 data.external.news_fetcher。
+        _repo_root = Path(__file__).resolve().parents[2]
+        result = subprocess.run(
+            [sys.executable, "-c", subprocess_code],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            cwd=str(_repo_root),
+        )
+        assert result.returncode == 0, f"子进程失败: {result.stderr or result.stdout}"
+        assert "OK: akshare not loaded at import time" in result.stdout
+
+    def test_get_akshare_returns_real_module(self):
+        """review08-B5: ``_get_akshare()`` 直接契约 —— 返回真实 akshare 模块（seam 单一入口）。"""
+        import akshare
+
+        import data.external.news_fetcher as nf
+
+        assert nf._get_akshare() is akshare
 
 
 class TestPersistenceInit:
