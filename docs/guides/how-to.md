@@ -2,6 +2,20 @@
 
 > 来源：从 CONTRIBUTING.md 迁移
 
+### 0. 从需求到实现的落点判定
+
+新增业务功能或需求澄清，先读 [USER_REQUIREMENTS.md](../../requirements/USER_REQUIREMENTS.md) 确认需求（UN/FR）与证据强度，再按下表把需求落到既有流程：
+
+| 需求形态 | 落点流程 |
+|---------|---------|
+| 新的选股 / 打分逻辑 | [3. 新增一个策略](#3-新增一个策略) |
+| 新的数据表 / 数据源 / 同步 | [1. 新增一张数据表](#1-新增一张数据表) / [2. 新增一个 DAO](#2-新增一个-dao) / [5. 新增一个外部数据源](#5-新增一个外部数据源) |
+| 新的后台编排 / 调度能力 | [11. 新增一个应用服务](#11-新增一个应用服务) |
+| 新的界面 / 交互 | [4. 新增一个 UI 视图](#4-新增一个-ui-视图) |
+| 仅澄清 / 修订需求（无实现落点） | 更新 [USER_REQUIREMENTS.md](../../requirements/USER_REQUIREMENTS.md) 及其「变更历史」，止于需求正本 |
+
+新增 FR 时在实现处留 `FR-XX-00N` 注释，并在 [USER_REQUIREMENTS.md](../../requirements/USER_REQUIREMENTS.md) 对应条目回填实现位置（参照既有 FR 条目在代码中的注释先例）。
+
 ### 1. 新增一张数据表
 
 1. 在 `data/persistence/models.py` 中添加 SQLAlchemy ORM 模型 (继承 `Base`)。
