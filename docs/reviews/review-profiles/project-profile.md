@@ -12,7 +12,7 @@
 
 ## 红线自查步骤
 
-对 `automation_coverage: none` 的 4 条红线（R5 / R17 / R18 / R21）与 `partial` 自动门禁的 R20 / R22（R20 由 check_R20 报告模式提示 warning、不阻断退出码；R22 由 check_R22 水位线静态检测、pre-commit 拦截）以及高风险的 `partial` 维度（R16 事件处理器维度 / R11 缓存点与跨循环使用维度）给出可执行自查入口：每条给出**搜索式**（明确 grep/模式）或**调用链追溯**（明确入口与定义符号）。上述红线无完整自动门禁或自动检测未覆盖全部场景，检视时须主动按此追查。完整语义见 [redlines.yml](../../governance/redlines.yml)，正常本见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止)。
+对 `automation_coverage: none` 的 4 条红线（R5 / R17 / R18 / R21）与 `partial` 自动门禁的 R20 / R22（R20 由 check_R20 报告模式提示 warning、不阻断退出码；R22 由 check_R22 水位线静态检测、pre-commit 拦截）以及高风险的 `partial` 维度（R16 事件处理器维度 / R11 缓存点与跨循环使用维度）给出可执行自查入口：每条给出**搜索式**（明确 grep/模式）、**调用链追溯**（明确入口与定义符号）或**声明核对**（无工作区访问权时的等价入口，如 R18 的 PR 描述声明）。上述红线无完整自动门禁或自动检测未覆盖全部场景，检视时须主动按此追查。完整语义见 [redlines.yml](../../governance/redlines.yml)，正常本见 [CLAUDE.md §3.1](../../../CLAUDE.md#31--绝对禁止)。
 
 ### R5 僵尸引擎操作
 1. 调用链追溯：对改动新增/触及的 DAO 或维护方法，从方法入口追到首次碰 `self.engine` 的读/写点，确认其先经 `BaseDao._check_engine()`（`data/persistence/daos/base_dao.py:116`）检查——该方法调 `engine_provider.is_disposed()`（`data/persistence/engine_provider.py:70`）判定，disposed 时抛 `EngineDisposedError`（`base_dao.py:29`）。
@@ -35,9 +35,9 @@
 3. 规避核查：`grep -rn "text(f" data/ services/`，确认没有对保留字列名的 f-string 拼接裸查询（该列名只能经 `name=` 映射，不得出现在裸 SQL 字面量）。
 
 ### R18 未隔离开发
-1. 任务开始前 `git worktree list`，确认新特性/重构/跨多文件修改在独立 worktree 进行、主工作区 `git status` 干净。
-2. 多文件改动时 `git status --porcelain` 检出主工作区未隔离源码改动即违规；命中豁免项（单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离）在评审结论注明豁免。
-3. 无法恢复版本控制（ZIP/只读挂载/IDE 映射目录）时被声明「无版本控制兜底」，交付时逐文件列改动清单取代隔离 —— 见 CLAUDE.md §3.1 R18 执行决策树。
+1. 检视侧（PR/diff 场景 AI 通常看不到作者工作区，无法执行 `git worktree list` / `git status --porcelain`）：核对 **PR 描述是否声明 worktree 隔离**（给出分支名或 `.worktrees/<name>` 路径）；改动跨多文件（新特性/重构）而未声明隔离即判 R18 候选，要求作者补充声明或说明豁免。
+2. 作者侧（AI 自身执行隔离时）：任务开始前 `git worktree list` 确认改动在独立 worktree 进行，`git status --porcelain` 确认主工作区干净、无未隔离源码改动。
+3. 命中豁免项（单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离）在评审结论注明豁免；无法恢复版本控制（ZIP/只读挂载/IDE 映射目录）时声明「无版本控制兜底」，交付时逐文件列改动清单 —— 见 CLAUDE.md §3.1 R18 执行决策树。
 
 ### R20 单位未核对的量纲比较
 1. 调用链追溯：对策略/回测改动涉及金额/数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）的数值比较，确认调用链先经 `threshold_in_data_unit()`（`strategies/utils.py:41`）或 `get_column_unit()` / `get_column_unit_source()` 显式取单位（单位声明见 `data/constants.py` 的 `HSGT_COLUMN_UNITS` / `TOP_LIST_COLUMN_UNITS`）。
