@@ -818,7 +818,7 @@ class TestScreenerDaoBuildScreeningSql:
         assert "ann_date IS NOT NULL AND ann_date <=" in sql
 
     def test_build_sql_contains_sc03_columns(self):
-        """SC-03: 模板必须提供 n_income（绝对盈利下限）与 gpm_prev（上一报告期毛利率，增长质量判据）。"""
+        """SC-03: 模板必须提供 n_income（绝对盈利下限）与 gpm_prev（上年同期毛利率，增长质量判据）。"""
         dao = ScreenerDao(MagicMock())
         sql = dao._build_screening_sql()
         assert "n_income" in sql
@@ -826,6 +826,17 @@ class TestScreenerDaoBuildScreeningSql:
         sql_range = dao._build_screening_sql_range()
         assert "n_income" in sql_range
         assert "gpm_prev" in sql_range
+
+    def test_gpm_prev_uses_year_on_year_baseline(self):
+        """MINOR-03: gpm_prev 必须锚定「上年同期」（INTERVAL '1 year'），不得回退为次新报告期。
+
+        旧口径 `pr = 2` 在最新期为一季报时取上年年报毛利率，跨期不可比；
+        本用例以模板结构守护回退。
+        """
+        dao = ScreenerDao(MagicMock())
+        for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
+            assert "INTERVAL '1 year'" in sql
+            assert "pr = 2" not in sql
 
     def test_build_sql_contains_fin_end_date(self):
         """CRIT-01: 两模板都必须透出最新报告期 fin_end_date（供累计口径 ROE 年化与期间提示）。"""

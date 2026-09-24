@@ -878,6 +878,51 @@ class TestScreenerDao:
         assert "000002.SZ" in ts_codes
         assert "is_tradable" in result.columns
 
+    async def test_get_screening_data_gpm_prev_is_year_on_year_baseline(
+        self, screener_dao, clean_db, test_engine: AsyncEngine
+    ):
+        """MINOR-03: gpm_prev 必须取「上年同期」（end_date 月日相同、年份 -1）。
+
+        造数：最新报告期为 2025-03-31（一季报，毛利率 35.0），次新期为 2024-12-31
+        （年报，毛利率 33.0），上年同期 2024-03-31 毛利率 41.0。旧口径（次新期）
+        会返回 33.0，新口径必须返回 41.0。
+        """
+        async with test_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO stock_basic (ts_code, symbol, name, industry, list_status, list_date) "
+                    "VALUES ('600519.SH', '600519', '贵州茅台', '白酒', 'L', '2020-01-01')"
+                )
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO daily_quotes (ts_code, trade_date, close, pct_chg, vol, amount) "
+                    "VALUES ('600519.SH', :d, 100.0, 1.0, 1000, 10000)"
+                ),
+                {"d": date(2025, 5, 6)},
+            )
+            for end_date, ann_date, gpm in (
+                (date(2024, 3, 31), date(2024, 4, 25), 41.0),
+                (date(2024, 6, 30), date(2024, 8, 25), 40.0),
+                (date(2024, 9, 30), date(2024, 10, 25), 39.0),
+                (date(2024, 12, 31), date(2025, 4, 25), 33.0),
+                (date(2025, 3, 31), date(2025, 4, 28), 35.0),
+            ):
+                await conn.execute(
+                    text(
+                        "INSERT INTO financial_reports "
+                        "(ts_code, end_date, ann_date, roe, grossprofit_margin, debt_to_assets) "
+                        "VALUES ('600519.SH', :end_date, :ann_date, 15.0, :gpm, 20.0)"
+                    ),
+                    {"end_date": end_date, "ann_date": ann_date, "gpm": gpm},
+                )
+
+        result = await screener_dao.get_screening_data(trade_date="20250506")
+        row = result[result["ts_code"] == "600519.SH"]
+        assert len(row) == 1
+        assert row["grossprofit_margin"].iloc[0] == 35.0
+        assert row["gpm_prev"].iloc[0] == 41.0
+
     async def test_get_field_completeness(self, quote_dao, clean_db, setup_stock_data):
         """字段级基本面完整度查询"""
         result = await quote_dao.get_field_completeness(trade_date=_RECENT_DATE)
