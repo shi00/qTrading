@@ -2,7 +2,7 @@
 
 > 来源：从 CONTRIBUTING.md 迁移
 
-> 宪法依据：CLAUDE.md §3.2（质量门控、`@log_async_operation` 强制）与 §1.5（目标驱动与验证）；实现细则见本节。
+> 宪法依据：CLAUDE.md §3.2（质量门控、`@log_async_operation` 强制）与 §1.2（最小实现与验证）；实现细则见本节。
 
 ### 配置管理
 

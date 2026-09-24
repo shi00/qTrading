@@ -19,7 +19,7 @@
 | P2-11 | 红线规则类型划分（INVARIANT/DEFAULT/NEW_CODE/MIGRATION_TARGET/WORKFLOW/EXCEPTIONABLE） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §3.1 | 使用中 |
 | P2-12 | 主题 → canonical 正本映射（任务决策树机器可读镜像） | 文档体系检视 P2 系列 | [canonical-topics.yml](./canonical-topics.yml) / [CLAUDE.md](../../CLAUDE.md) §1.8 | 使用中 |
 | P2-13 | R18 执行决策树（先识别对象再判定隔离） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §3.1 | 使用中 |
-| P2-16 | 跨平台命令策略（文档只描述命令目的，不绑定 shell） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §1.9 | 使用中 |
+| P2-16 | 跨平台命令策略（文档只描述命令目的，不绑定 shell） | 文档体系检视 P2 系列 | [CONTRIBUTING.md](../../CONTRIBUTING.md)「常用开发与测试命令」 | 使用中 |
 | P2-17 | 架构设计/公共契约任务路由（满足 ADR-0001 触发条件时新增 ADR） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §1.8 / [canonical-topics.yml](./canonical-topics.yml) | 使用中 |
 | P3-03 | AGENTS.md 定位为跨工具自动加载的规则入口 | 文档体系检视 P3 系列 | [AGENTS.md](../../AGENTS.md) | 使用中 |
 | DOC-01 | 规则集元数据一致性（ruleset_version / last_reviewed 三文档同步） | 文档体系·AI 可执行性专项（DOC 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
@@ -121,6 +121,7 @@
 | review07-G19 | 单例识别条件扩展（DAO 注册引擎同步不可漏改，与 R13 描述一致） | review07 治理与门禁审计 | [check_redlines.py](../../scripts/check_redlines.py) | 使用中 |
 | BIZ-04 | AI 策略无法被回测验证：回测默认 disable_ai，AI 结论与实盘不可比（评审报告 01-requirement-closure.md §2.4，本地 gitignored；ADR-0009 引用） | 本地检视报告（gitignored） | [0009-ai-snapshot-replay.md](../adr/0009-ai-snapshot-replay.md) | 使用中 |
 | BT-03 | R21 变体：可信度元数据在持久化边界丢失（`data_warnings` / `failed_signal_dates` / 配置快照等已知不可信信号落库后被丢弃，UI 渲染为「无问题」） | review03 业务语义与可信度 | [CLAUDE.md](../../CLAUDE.md) R21 / [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
+| AI-01 | 缺失/失败被伪装成合法具体值：AI 调用失败/无结论不得伪装成「AI 否决」（`score=0`），不可计价调用不得伪装为「零成本」——催生 R21 | business-review-2026-09-11（业务检视） | [CLAUDE.md](../../CLAUDE.md) R21 / [strategies/ai_mixin.py](../../strategies/ai_mixin.py) | 使用中 |
 | AI-02 | 业务语义字段（`score` / `ai_score` / `confidence` 等）的缺失表示：必须用 `None`/哨兵，禁止填充业务上合法的具体值（检视报告 04 AI-02，缺陷根因见 R21） | 本地检视报告（gitignored） | [CONTRIBUTING.md](../../CONTRIBUTING.md)「业务语义字段的缺失表示」 | 使用中 |
 | E4 | OSS 检视：import-linter 6 条手工 forbidden 契约重构为 1 条 layers + 2 条 forbidden（AST 静态测试随之退役，例外注册表路径校验保留） | OSS 检视（E 系列） | [pyproject.toml](../../pyproject.toml) / [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
 | DAT-07 | 回测不可复现：财报无修订历史，UPSERT 覆盖使历史回测结果随时间漂移（属结论可信度边界，非代码欠债） | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |

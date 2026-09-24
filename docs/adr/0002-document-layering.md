@@ -6,6 +6,7 @@
 > Supersedes: CONTRIBUTING.md 历史版本中「3b/3c 过度工程不做」决策的部分前提（3b 由 ADR-0003 单独推翻）
 > 注：3c 部分后续由 ADR-0005 推翻（详见 ADR-0005）；AGENTS.md 的纯指针定位后续由 ADR-0006 修改（详见 ADR-0006）；检视报告落盘位置由 2026-09-08 Errata 澄清（详见职责边界约束）。
 > 注（2026-09-16 Errata）：红线编号自本 ADR（记录为 R1~R18）后已扩展至 R23；下方决策正文中的红线编号为当时快照，当前红线范围一律以 docs/governance/redlines.yml 机器可读正本为准。
+> 注（2026-09-24 Errata）：检视**结论登记**允许每条发现附 ≤20 行关键证据片段（代码位置 + 最小复现），该片段属「结论登记」而非 SHALL NOT 所指的「报告正文」（长证据 / 大段代码），边界与理由见职责边界约束。
 
 ## Context
 
@@ -37,7 +38,7 @@ AStockScreener 项目文档在 Phase 2 渐进式披露拆分前存在以下漂�
 - man/ 不再承载 Flet 内容（改为 stub），其他 man/ 专题保留。
 - 文档权威按主题确定正本，而非按目录层级全局覆盖（P1-05 修订，见 CLAUDE.md §1「文档权威性（按主题正本）」）；冲突时先按主题确定正本，再以正本裁决。
 - 新增/修改任何 `docs/` 文档，必须同步登记到 `docs/README.md` 索引。
-- 检视报告分层落盘（Errata 2026-09-08，2026-09-22 补充）：过程性轮次报告正文统一落根目录 `reviews/`（受 `.gitignore` 保护，为本地工作区检视产物，不入版本控制）；仓库内由 `docs/reviews/README.md` 统一维护轮次清单与状态跟踪；确需沉淀入库的专项方法论资产统一落 `docs/reviews/` 并在该 README 中登记；检视**结论结构化登记**（id/ruleId/severity/location/summary/disposition/判据，不含正文长证据）由 `docs/reviews/findings/` 承载（GOV-04），避免结论系统性丢失——SHALL NOT 范围仍覆盖报告正文（长证据与代码片段），不含结论登记。
+- 检视报告分层落盘（Errata 2026-09-08，2026-09-22 补充，2026-09-24 补充）：过程性轮次报告正文统一落根目录 `reviews/`（受 `.gitignore` 保护，为本地工作区检视产物，不入版本控制）；仓库内由 `docs/reviews/README.md` 统一维护轮次清单与状态跟踪；确需沉淀入库的专项方法论资产统一落 `docs/reviews/` 并在该 README 中登记；检视**结论结构化登记**（id/ruleId/severity/location/summary/disposition/判据，不含正文长证据）由 `docs/reviews/findings/` 承载（GOV-04），避免结论系统性丢失——SHALL NOT 范围仍覆盖报告正文（长证据与大段代码），不含结论登记。2026-09-24 补充：结论登记允许每条发现附 **≤20 行**关键证据片段（代码位置 + 最小复现），以补足「纯摘要」信息密度缺口；该受限片段属结论登记、非 SHALL NOT 所指的报告正文。
 - 修改宪法（CLAUDE.md §3）红线表，必须同步更新 `docs/governance/redlines.yml` 机器可读镜像（由 `check_redlines_yaml_consistency` 门禁守护）。
 
 ## Consequences
