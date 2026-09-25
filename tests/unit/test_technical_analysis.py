@@ -342,6 +342,34 @@ class TestKDJ:
         assert status == "UNKNOWN"
         assert k == 0
 
+    def test_kdj_last_window_missing_price_returns_none(self):
+        """末窗含缺失价 → 末值为真实未知，接口返回 None（R21）。
+
+        机制：pandas NaN 经 ``pl.from_pandas``（默认 ``nan_to_null=True``）变为
+        null，``rolling_min/max(min_samples=n)`` 按**非 null 计数**，故末窗有效价
+        < n 时窗口统计为 null → RSV 为 null → 末值为 null，接口显式返回 ``None``，
+        不填充 ``0``/``50`` 等业务上合法的值。
+
+        本用例为**防御性（合成）用例**：``high``/``low`` 在 schema 上无 NOT NULL
+        约束、取数路径无显式 OHLC 非空过滤（机制可达），但真实数据中是否出现
+        末窗缺失未经验证，故不宣称其为生产常见输入。
+        """
+        n, rows = 9, 20
+        df = pd.DataFrame(
+            {
+                "high": [10.0 + i * 0.1 for i in range(rows)],
+                "low": [9.0 + i * 0.1 for i in range(rows)],
+                "close": [9.5 + i * 0.1 for i in range(rows)],
+            }
+        )
+        df.loc[rows - 1, "high"] = np.nan
+
+        status, k, d, j = TechnicalAnalysis.get_kdj(df, n=n)
+        assert status == "UNKNOWN"
+        assert k is None
+        assert d is None
+        assert j is None
+
 
 class TestRSIPandas:
     def test_rsi_series_calculation(self):
@@ -463,13 +491,17 @@ class TestStrongNumericAssertionsD38:
 
     # ---------- KDJ ----------
     def test_kdj_real_series_exact_value(self):
-        """固定序列 → 精确 k/d/j 与状态。"""
+        """固定序列 → 精确 k/d/j 与状态。
+
+        pin 随预热期语义修正更新（``get_kdj_expr`` 的 ``min_samples`` 由 1 改为 n，
+        头部不再以不完整窗口播种）。
+        """
         df = self._real_ohlc()
         status, k, d, j = TechnicalAnalysis.get_kdj(df)
         assert status == "OVERBOUGHT"
-        assert k == pytest.approx(85.203612, abs=1e-3)
-        assert d == pytest.approx(82.564299, abs=1e-3)
-        assert j == pytest.approx(90.482238, abs=1e-3)
+        assert k == pytest.approx(85.203647, abs=1e-3)
+        assert d == pytest.approx(82.564731, abs=1e-3)
+        assert j == pytest.approx(90.481479, abs=1e-3)
 
 
 class TestRSIOversoldFeatures:
