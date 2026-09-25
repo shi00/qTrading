@@ -229,6 +229,7 @@
     "screener_ai_failed_banner": "本次选股中 {count} 只股票的 AI 分析未能完成，结果仅反映数学筛选",
     "strategy_ai_candidate_truncated": "候选股票 {total} 只超出 AI 分析上限 {analyzed} 只，仅对前 {analyzed} 只进行分析",
     "strategy_excluded_st": "已排除 {count} 只风险警示股",
+    "strategy_excluded_delisting": "已排除 {count} 只退市整理期股票",
     "strategy_condition_excludes_all": "筛选条件 {column}（{threshold}）排除了全部 {total} 只股票，建议放宽该参数",
     "strategy_mixed_report_periods": "本次结果包含 {count} 个不同财报报告期（ROE 已按报告期年化后跨期可比，但跨期比较仍可能受季节性影响）",
     "strategy_oversold_insufficient_history": "候选股票历史数据长度不足（最长 {max} 个交易日，RSI 周期 {period} 需 {required} 个），请降低 RSI 周期后重试",

@@ -146,6 +146,7 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
             def _convert_and_filter(df_in, ctx):
                 lf = pl.from_pandas(df_in).lazy()
                 lf = self._apply_exclude_st(lf, ctx)
+                lf = self._apply_exclude_delisting(lf, ctx)
                 # CRIT-01: 派生列注入（默认 no-op）。须在 base_lf 定稿前执行，
                 # 使注入列对 _filter_logic 与空集诊断（在 base_lf 上回溯）同列可求值。
                 lf = self._preprocess_lf(lf, ctx)
@@ -212,6 +213,29 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
         if excluded:
             ctx.setdefault("warnings", []).append(Message("strategy_excluded_st", {"count": excluded}))
         return lf.filter(pl.col("is_st").fill_null(False).not_())
+
+    def _apply_exclude_delisting(self, lf: pl.LazyFrame, ctx: StrategyContext) -> pl.LazyFrame:
+        """F1（review09-24-dim01-major01）: 基类统一排除退市整理期股票（「XX退」）。
+
+        在 ``_apply_exclude_st`` 之后、``_filter_logic`` 之前施加。退市可推荐性是
+        正确性问题而非用户偏好，故**无条件排除**（不设 ctx 开关，区别于可选的
+        ``exclude_st``）。回测侧 ``data_provider`` 仅按 ``is_tradable`` 过滤、无对等
+        兜底，此前会选中「XX退」股，与实盘（data_processor 已按同名派生列过滤）口径
+        分裂；本方法同时覆盖实盘与回测，且对实盘幂等。
+        - 无 ``is_delisting`` 列（旧数据源/测试构造）时跳过，保持向后兼容；
+        - NULL 按「非退市」处理：不排除且不计数，避免 NULL 行被 ``~pl.col()``
+          过滤掉造成静默漏股；
+        - 排除数量经既有 D3-4 warnings 通道透传，避免变成一次静默过滤。
+        在线程池线程内执行：仅对 ctx list append（GIL 原子），主协程 await 完成后读取，无竞态。
+        """
+        if "is_delisting" not in lf.collect_schema().names():
+            return lf
+        excluded = (
+            lf.filter(pl.col("is_delisting").is_not_null() & pl.col("is_delisting")).select(pl.len()).collect().item()
+        )
+        if excluded:
+            ctx.setdefault("warnings", []).append(Message("strategy_excluded_delisting", {"count": excluded}))
+        return lf.filter(pl.col("is_delisting").fill_null(False).not_())
 
     def _preprocess_lf(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
         """可选钩子：过滤前注入派生列（默认 no-op，CRIT-01）。

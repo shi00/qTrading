@@ -1175,6 +1175,14 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         保持签名与行为不变（回测 data_provider 直接调用它们，必须拿到含 ST 的完整数据），
         排除仅作用于选股上下文。fundamental_screening_data 不受本参数影响（由
         requires_fundamental_coverage 守卫消费，DS-04 单独处理）。
+
+        退市整理期排除（review09-24-dim01-major01，无条件生效）：在 ST 过滤之后，依据 SQL
+        派生列 is_delisting（as-of 名称含「退」或 delist_date 落在 as-of 后 N 天窗口内）剔除
+        退市整理期股票。与 ST 同理须在数据层行过滤而非 SQL WHERE——DAO 透传方法须保留完整
+        数据供回测消费，排除仅作用于选股上下文（可推荐性）。为何不回写 stock_alive_condition：
+        该函数判定的是「数据可见性」（退市整理期内确有行情，可见），本过滤判定的是
+        「是否适合推荐」（可推荐），两者语义必须分离，混用会让回测丢失真实存在的行情。
+        fundamental_screening_data 同样不受该过滤影响（与 ST 保持一致）。
         """
 
         if self._quality_tier is None:
@@ -1244,6 +1252,20 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         ):
             logger.warning(
                 "[DataProcessor] is_st column missing from screening_data; risk-warning stocks will NOT be excluded"
+            )
+
+        # review09-24-dim01-major01: 退市整理期排除（数据层行过滤，无条件生效）。is_delisting
+        # 为 SQL 派生列（as-of 名称含「退」或 delist_date 落在 as-of 后 N 天窗口内）；无该列
+        # （结构缺失/空表）时跳过并告警，保底回退不剔除（R21：不得把「未知」当作「未退市」掩埋）。
+        if screening_data is not None and not screening_data.empty and "is_delisting" in screening_data.columns:
+            delisting_count = int(screening_data["is_delisting"].sum())
+            if delisting_count > 0:
+                screening_data = screening_data[~screening_data["is_delisting"]].copy()
+                diagnostics["delisting_excluded"] = delisting_count
+        elif screening_data is not None and not screening_data.empty and "is_delisting" not in screening_data.columns:
+            logger.warning(
+                "[DataProcessor] is_delisting column missing from screening_data; "
+                "delisting-period stocks will NOT be excluded"
             )
 
         context["screening_data"] = screening_data
