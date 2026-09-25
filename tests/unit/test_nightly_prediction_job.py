@@ -215,6 +215,25 @@ class TestNightlyPredictionLogicClosure:
         assert svc.marked_dates == ["20240614"]
 
     @pytest.mark.asyncio
+    async def test_prediction_logic_passes_exec_warnings(self):
+        """CRITICAL-02 (R21/BT-03): 夜间预测须把执行期 warnings 透传 save_results，
+        否则该路径产出的历史记录会被历史回看标为「未记录执行上下文」。"""
+        svc = _FakeSvc()
+        mock_tm = MagicMock()
+        result_df = pd.DataFrame({"ts_code": ["000001.SZ"], "score": [80]})
+        warning = Message("strategy_ai_risk_check_skipped")
+
+        async def runner(context):
+            context["warnings"] = [warning]
+            return result_df
+
+        mock_rm = MagicMock()
+        mock_rm.save_results = AsyncMock(return_value=1)
+        await self._execute_logic(svc, runner, mock_tm, mock_rm=mock_rm)
+
+        assert mock_rm.save_results.call_args.kwargs["exec_warnings"] == [warning]
+
+    @pytest.mark.asyncio
     async def test_prediction_logic_saved_zero_does_not_mark_done(self):
         """D4-C1: save_results 落库 0 条（预算超限/政策未确认/AI 全失败）→
         与"无候选"同等处理：不标记完成，允许重试。"""

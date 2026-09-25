@@ -821,6 +821,8 @@ class TestScreenerDao:
             "ai_reason",
             "review_status",
             "params_snapshot",
+            "exec_warnings",
+            "filter_attribution",
         ]
         assert all_cols == expected_order, f"Column order mismatch: {all_cols}"
 
@@ -850,6 +852,9 @@ class TestScreenerDao:
                 8.0,
                 85,
                 "AI推荐理由",
+                None,
+                None,
+                # CRITICAL-02: 未提供执行上下文 → 两列落库 SQL NULL（R21：缺失不伪装）
                 None,
                 None,
             ),
