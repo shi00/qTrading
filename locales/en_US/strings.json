@@ -387,6 +387,7 @@
     "screener_ai_failed_banner": "AI analysis could not complete for {count} stocks; results reflect math-based screening only",
     "strategy_ai_candidate_truncated": "{total} candidates exceed the AI analysis cap of {analyzed}; only the top {analyzed} are analyzed",
     "strategy_excluded_st": "Excluded {count} risk-warning stocks",
+    "strategy_excluded_delisting": "Excluded {count} delisting-period stocks",
     "strategy_condition_excludes_all": "Filter condition {column} ({threshold}) excluded all {total} stocks; consider relaxing this parameter",
     "strategy_mixed_report_periods": "Results span {count} different report periods (ROE annualized per period for comparability; cross-period comparison may still be affected by seasonality)",
     "strategy_oversold_insufficient_history": "Insufficient price history for candidates (max {max} trading days; RSI period {period} requires {required}); please lower the RSI period and retry",

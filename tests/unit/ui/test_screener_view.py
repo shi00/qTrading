@@ -167,6 +167,10 @@ class TestHiddenColsContract:
         assert "exec_warnings" in _HIDDEN_COLS
         assert "filter_attribution" in _HIDDEN_COLS
 
+    def test_is_delisting_hidden(self):
+        """G2: 内部退市过滤列（is_st 同组）不得渲染为结果表裸列。"""
+        assert "is_delisting" in _HIDDEN_COLS
+
 
 class TestBuildTableData:
     def _make_vm(self) -> MagicMock:

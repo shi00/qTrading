@@ -1246,6 +1246,65 @@ class TestOversoldExcludeSt:
         assert warnings[0].params == {"count": 1}
 
 
+# --- G1/G3: OversoldStrategy（pandas 路径）退市整理期排除接线（review09-24-dim01-major01） ---
+
+
+class TestOversoldExcludeDelisting:
+    """G1: 退市排除与 Polars 路径同源；G3: 端到端经 _math_filter 验证接线生效。"""
+
+    @staticmethod
+    def _make_context(dp, snapshot):
+        return _make_context_for_math_filter(dp, snapshot, datetime.date(2024, 6, 14))
+
+    async def test_math_filter_excludes_delisting_and_reports_warning(self):
+        """_math_filter 紧随 ST 排除后接线退市排除，排除数经 D3-4 warnings 上报。"""
+        s = OversoldStrategy()
+        dp = _make_dp_for_math_filter()
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+        snapshot = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "600999.SS"],
+                "name": ["平安银行", "万科A", "某某退"],
+                "close": [7.0, 8.0, 5.0],
+                "is_delisting": [False, False, True],
+            }
+        )
+        context = self._make_context(dp, snapshot)
+
+        with patch("strategies.oversold_strategy._compute_rsi_filter", side_effect=_fake_compute_rsi_filter):
+            result = await s._math_filter(context, 14, 30, 0.5)
+
+        assert "600999.SS" not in result["ts_code"].tolist(), "退市行必须经 _math_filter 接线被排除"
+        assert set(result["ts_code"].tolist()) == {"000001.SZ", "000002.SZ"}
+        warnings = context.get("warnings", [])
+        assert len(warnings) == 1
+        assert warnings[0].key == "strategy_excluded_delisting"
+        assert warnings[0].params == {"count": 1}
+
+    async def test_math_filter_delisting_excluded_even_when_st_disabled(self):
+        """退市排除无用户开关：exclude_st=False 仅保留 ST 行，退市行仍被排除。"""
+        s = OversoldStrategy()
+        dp = _make_dp_for_math_filter()
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+        snapshot = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "600001.SS", "600999.SS"],
+                "name": ["平安银行", "*ST 某某", "某某退"],
+                "close": [7.0, 6.0, 5.0],
+                "is_st": [False, True, False],
+                "is_delisting": [False, False, True],
+            }
+        )
+        context = self._make_context(dp, snapshot)
+        context["exclude_st"] = False
+
+        with patch("strategies.oversold_strategy._compute_rsi_filter", side_effect=_fake_compute_rsi_filter):
+            result = await s._math_filter(context, 14, 30, 0.5)
+
+        assert set(result["ts_code"].tolist()) == {"000001.SZ", "600001.SS"}
+        assert [m.key for m in context.get("warnings", [])] == ["strategy_excluded_delisting"]
+
+
 # --- MAJOR-02: 取数窗口随 RSI 周期驱动 + day_count 门槛空集诊断 ---
 
 

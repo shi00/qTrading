@@ -123,3 +123,31 @@ def filter_exclude_st(
     if not excluded:
         return df, 0
     return df[~is_st], excluded
+
+
+def filter_exclude_delisting(
+    df: pd.DataFrame,
+    context: StrategyContext,
+) -> tuple[pd.DataFrame, int]:
+    """G1（review09-24-dim01-major01）: 从 pandas 候选表排除退市整理期股票行（「XX退」）。
+
+    与 ``PolarsBaseStrategy._apply_exclude_delisting``（LazyFrame 形态）语义一致，
+    供 ``OversoldStrategy`` 等非 Polars 基类路径使用；两条路径口径必须同源，
+    否则回测（``data_provider`` 仅按 ``is_tradable`` 过滤）会选中实盘已被排除的退市股。
+    - 退市可推荐性是正确性问题而非用户偏好，故**无条件排除**（不设 ctx 开关，
+      区别于可选的 ``exclude_st``）；
+    - 无 ``is_delisting`` 列（旧数据源/测试构造）时原样返回，保持向后兼容；
+    - NULL is_delisting（stock_basic 派生异常）按「非退市」处理：不排除且不计数，
+      避免 NULL 行被 ``~`` 过滤掉造成静默漏股；
+    - 返回 (过滤后 df, 排除数量)；排除数量 > 0 时由本函数经既有 D3-4 warnings 通道
+      上报 ``Message("strategy_excluded_delisting", {"count": n})``（唯一 key，调用方
+      无需重复上报）。
+    """
+    if "is_delisting" not in df.columns:
+        return df, 0
+    is_delisting = df["is_delisting"].fillna(False).astype(bool)
+    excluded = int(is_delisting.sum())
+    if not excluded:
+        return df, 0
+    context.setdefault("warnings", []).append(Message("strategy_excluded_delisting", {"count": excluded}))
+    return df[~is_delisting], excluded

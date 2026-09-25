@@ -8,7 +8,7 @@ from data.constants import SENTIMENT_INDEX_NAMES, SENTIMENT_INDICES
 from data.persistence.quality_gate import QualityGateError, QualityTier, require_quality
 from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
 from strategies.base_strategy import BaseStrategy, register_strategy
-from strategies.utils import StrategyContext, filter_exclude_st
+from strategies.utils import StrategyContext, filter_exclude_delisting, filter_exclude_st
 from core.i18n import I18n, Message
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.qfq import qfq_ratio_expr, qfq_ratio_series
@@ -343,6 +343,10 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         snapshot_df, excluded_st = filter_exclude_st(snapshot_df, context, self.exclude_st)
         if excluded_st:
             context.setdefault("warnings", []).append(Message("strategy_excluded_st", {"count": excluded_st}))
+
+        # G1（review09-24-dim01-major01）: 与 PolarsBaseStrategy._apply_exclude_delisting 同源，
+        # 无条件排除退市整理期股票（正确性问题，无 UI 开关）；排除数由助手经 warnings 通道上报。
+        snapshot_df, _ = filter_exclude_delisting(snapshot_df, context)
 
         if dp is None:
             logger.error("[OversoldStrategy] DataProcessor not found in context.")

@@ -112,6 +112,7 @@ _HIDDEN_COLS = frozenset(
         "review_status",
         "created_at",
         "is_st",  # SC-01: 内部过滤列（排除后恒为 False），不进结果表
+        "is_delisting",  # G2: 内部过滤列（排除后恒为 False），不进结果表
         "t1_price",
         "t5_price",
         "params_snapshot",

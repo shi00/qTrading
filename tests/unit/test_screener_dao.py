@@ -1055,12 +1055,86 @@ class TestScreenerDaoExcludeSt:
     def test_is_st_upper_derived_column(self):
         """is_st 派生列采用 UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%'。
 
-        UPPER 覆盖 *ST/S*ST，与 _get_limit_pct 语义一致；COALESCE 双回退：有 as-of 记录
+        UPPER 覆盖 *ST/S*ST，与 utils.limit_status.get_limit_pct 语义一致；COALESCE 双回退：有 as-of 记录
         用历史名判定，无记录回退当前名称，空表不误判全市场非 ST。
         """
         dao = ScreenerDao(MagicMock())
         for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
             assert "CASE WHEN UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%' THEN TRUE ELSE FALSE END AS is_st" in sql
+
+
+class TestScreenerDaoDelistingFlag:
+    """review09-24-dim01-major01: is_delisting 派生列（退市整理期/已公告退市）。
+
+    - 单日/区间模板均输出 is_delisting，且表达式同时含名称项（LIKE '%退%'，PIT 安全兜底）
+      与 delist_date 窗口项；
+    - as-of 时点：单日版复用 $5（恒等于 trade_date），区间版为 cal.cal_date（逐交易日），
+      区间版不得以 $5 作为退市窗口时点（PIT 反例）。
+    """
+
+    def test_both_templates_output_is_delisting_column(self):
+        """两模板都必须在 is_st 之后输出 is_delisting 派生列（占位符已替换）。"""
+        dao = ScreenerDao(MagicMock())
+        for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
+            assert "AS is_delisting" in sql, f"缺少 is_delisting 派生列:\n{sql}"
+            assert "__DELISTING_FLAG__" not in sql, f"占位符未替换:\n{sql}"
+            assert sql.index("AS is_st") < sql.index("AS is_delisting")
+
+    def test_delisting_expr_has_name_and_delist_date_branches(self):
+        """表达式必须同时含名称项（LIKE '%退%'）与 delist_date 窗口项（双兜底）。"""
+        dao = ScreenerDao(MagicMock())
+        for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
+            assert "UPPER(COALESCE(nh.name, b.name)) LIKE '%退%'" in sql, f"缺少名称项:\n{sql}"
+            assert "b.delist_date IS NOT NULL" in sql, f"缺少 delist_date 非空判断:\n{sql}"
+            assert "b.delist_date > " in sql, f"缺少 delist_date 下界:\n{sql}"
+            assert "b.delist_date <= " in sql, f"缺少 delist_date 上界:\n{sql}"
+
+    def test_single_day_delisting_asof_uses_param5(self):
+        """单日版退市窗口 as-of 为 $5（恒等于 trade_date），窗口上界为其加 N 天。"""
+        sql = ScreenerDao(MagicMock())._build_screening_sql()
+        assert "b.delist_date > $5" in sql, f"单日版退市窗口下界应复用 $5:\n{sql}"
+        assert "b.delist_date <= $5 + INTERVAL '30 days'" in sql, f"单日版退市窗口上界错误:\n{sql}"
+
+    def test_range_delisting_asof_uses_cal_date(self):
+        """区间版退市窗口 as-of 为 cal.cal_date（逐交易日 PIT），不得复用单日版 $5。"""
+        sql = ScreenerDao(MagicMock())._build_screening_sql_range()
+        assert "b.delist_date > cal.cal_date" in sql, f"区间版退市窗口下界应为 cal.cal_date:\n{sql}"
+        assert "b.delist_date <= cal.cal_date + INTERVAL '30 days'" in sql, f"区间版退市窗口上界错误:\n{sql}"
+        # PIT 反例：区间模板不存在 $5 参数位，退市窗口不得以 $5 为时点（否则参数越界/前视）
+        assert "$5" not in sql, f"区间版不得出现 $5:\n{sql}"
+
+    def test_delisting_flag_rendered_only_in_select_list(self):
+        """占位符已全部替换；is_delisting 的 CASE 派生列文本落在 SELECT 列表，且不进入 WHERE。
+
+        鉴别力：断言渲染后的完整 CASE 片段（名称项 + delist_date 窗口 + 30 天 INTERVAL）
+        逐字出现在 SQL 中——表达式结构或窗口天数被改错、或把派生列挪进 WHERE 时会失败；
+        故不使用「SELECT 在 WHERE 之前」这类近乎恒真的位置断言。
+        退市排除落在数据层行过滤（见 data_processor），SQL 侧仅派生该列。
+        """
+        dao = ScreenerDao(MagicMock())
+        for sql, as_of in (
+            (dao._build_screening_sql(), "$5"),
+            (dao._build_screening_sql_range(), "cal.cal_date"),
+        ):
+            for placeholder in ("__CLOSE_COND__", "__STOCK_ALIVE_CONDITION__", "__DELISTING_FLAG__"):
+                assert placeholder not in sql, f"占位符 {placeholder} 未替换:\n{sql}"
+            expected = (
+                "CASE WHEN UPPER(COALESCE(nh.name, b.name)) LIKE '%退%'"
+                f" OR (b.delist_date IS NOT NULL AND b.delist_date > {as_of}"
+                f" AND b.delist_date <= {as_of} + INTERVAL '30 days')"
+                " THEN TRUE ELSE FALSE END AS is_delisting"
+            )
+            assert expected in sql, f"SELECT 列表缺少逐字 CASE 派生列（as-of={as_of}）:\n{sql}"
+            where_idx = sql.find("WHERE")
+            assert where_idx != -1, f"模板缺少 WHERE 子句:\n{sql}"
+            assert "is_delisting" not in sql[where_idx:], f"is_delisting 不应进入 WHERE 子句:\n{sql}"
+
+    def test_parameter_count_still_unchanged(self):
+        """新增 is_delisting 复用既有 as-of 参数位，不新增参数（单日 $1-$6，区间 $1-$2）。"""
+        daily_sql = ScreenerDao(MagicMock())._build_screening_sql()
+        range_sql = ScreenerDao(MagicMock())._build_screening_sql_range()
+        assert max(int(x) for x in re.findall(r"\$(\d)", daily_sql)) == 6
+        assert max(int(x) for x in re.findall(r"\$(\d)", range_sql)) == 2
 
 
 class TestScreenerDaoGetLatestClosedTradeDate:
