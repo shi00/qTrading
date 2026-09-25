@@ -20,7 +20,7 @@ from core.i18n import Message
 from data.domain_services.trade_calendar_service import TradeCalendarService
 from data.domain_services.transaction_cost import TransactionCostModel
 from strategies.backtest.adapter import BacktestStrategyAdapter
-from strategies.backtest.config import BacktestConfig, BacktestResult, DataWarning
+from strategies.backtest.config import BacktestConfig, BacktestResult, DataWarning, WarningCategory
 from strategies.backtest.data_provider import BacktestDataProvider
 from strategies.backtest.metrics import BacktestMetrics
 from strategies.backtest.portfolio import PortfolioSimulator
@@ -31,6 +31,25 @@ if TYPE_CHECKING:
     from strategies.base_strategy import BaseStrategy
 
 logger = logging.getLogger(__name__)
+
+
+def _range_preload_warning_meta(w: str) -> tuple[str, str]:
+    """MAJOR-01 决策③：将 range_preload_warnings 字符串映射为 (warning_type, category)。
+
+    - ``[range_quality_gaps]``（区间缺口）→ data_quality（unreliable）。
+    - 其余（preload_range_too_wide / range_preload_failed / range_preload_error，慢路径）
+      → performance_path（仅提示，不升级级别）。
+    """
+    if w.startswith("[range_quality_gaps]"):
+        return "range_quality_gaps", WarningCategory.DATA_QUALITY
+    if w.startswith("range_preload_failed"):
+        return "range_preload_failed", WarningCategory.PERFORMANCE_PATH
+    if w.startswith("range_preload_error"):
+        return "range_preload_error", WarningCategory.PERFORMANCE_PATH
+    if w.startswith("preload_range_too_wide:"):
+        return "preload_range_too_wide", WarningCategory.PERFORMANCE_PATH
+    # 未知前缀防御：归为慢路径，不以错误结论升级级别。
+    return "range_preload_failed", WarningCategory.PERFORMANCE_PATH
 
 
 class VectorBacktestEngine:
@@ -110,7 +129,7 @@ class VectorBacktestEngine:
             "delist_liquidation_count": 0,
             "delist_loss_amount": 0.0,
         }
-        trades, positions, skipped_orders, sim_warnings = self._simulate_trades(
+        trades, positions, skipped_orders, sim_warnings, empty_signal_days = self._simulate_trades(
             signals,
             quotes_df,
             trade_dates,
@@ -147,6 +166,9 @@ class VectorBacktestEngine:
 
         # BT-03: 仓位可见性指标并入 metrics，让「信号稀疏 → 资金闲置」可见
         metrics = {**metrics, **BacktestMetrics.calc_investment_metrics(positions)}
+        # MAJOR-01 决策⑦: empty_signal_days 作为计数指标注入 metrics（VM 只做次级提示，
+        # 不独立驱动 degraded 判定）。
+        metrics["empty_signal_days"] = empty_signal_days
 
         period_stats = self._calc_period_stats(
             nav_curve,
@@ -157,29 +179,55 @@ class VectorBacktestEngine:
 
         duration_ms = int((time.perf_counter() - start_time) * 1000)
 
-        all_warnings = [str(w) for w in quote_warnings] + list(sim_warnings)
+        # MAJOR-01: data_warnings 类型化组装（决策③）。
+        # 按来源显式归类，常规撮合事件已不在 sim_warnings 中（portfolio 层移除），
+        # 剩余 sim_warnings 为真实异常（stale-estimate）→ data_quality。
+        all_warnings: list[str | DataWarning] = list(quote_warnings)
+        for w in sim_warnings:
+            all_warnings.append(
+                DataWarning(
+                    warning_type="stale_estimate",
+                    start_date=str(trade_dates[0]),
+                    end_date=str(trade_dates[-1]),
+                    affected_stock_count=0,
+                    error_message=w,
+                    category=WarningCategory.DATA_QUALITY,
+                )
+            )
         # D1-M1: 基准缺失/部分缺失告警接入 all_warnings，自动进入
         # backtest_view_model 的 `unreliable` 判定，让相对指标降级在 UI 可见。
         if benchmark_warning is not None:
-            all_warnings.append(str(benchmark_warning))
-        # D3-M4: 区间预载降级（区间超限/范围预载失败/护栏超限→逐日慢路径）接入 all_warnings，
-        # 与其它 data_warnings 同通道进入 unreliable 判定，让「本次回测走了慢路径」首屏可见。
-        all_warnings.extend(self.data_provider.range_preload_warnings)
+            all_warnings.append(benchmark_warning)
+        # D3-M4 + MAJOR-01 决策③: 区间预载降级按前缀拆分——
+        # [range_quality_gaps]（区间缺口）→ data_quality（unreliable）；
+        # preload_range_too_wide/range_preload_failed/range_preload_error（慢路径）→
+        # performance_path（仅提示，不升级级别）。经 str(w) 落库时保留原 [type] 前缀。
+        for w in self.data_provider.range_preload_warnings:
+            wtype, category = _range_preload_warning_meta(w)
+            all_warnings.append(
+                DataWarning(
+                    warning_type=wtype,
+                    start_date=str(trade_dates[0]),
+                    end_date=str(trade_dates[-1]),
+                    affected_stock_count=0,
+                    error_message=w,
+                    category=category,
+                )
+            )
 
         # D5-M2: 净值归零（爆仓）检测——不是数值噪声，必须让爆仓在 UI 可见。
         # daily_returns 已把爆仓日转为 null（无定义）供 drop_nulls 剔除，此处显式追加
         # DataWarning 进入 unreliable 判定，避免波动率低估/夏普被高估被静默掩盖。
         if bool((nav_curve == 0).any()):
             all_warnings.append(
-                str(
-                    DataWarning(
-                        warning_type="portfolio_wiped_out",
-                        start_date=str(self.config.start_date),
-                        end_date=str(self.config.end_date),
-                        affected_stock_count=1,
-                        error_message="组合净值归零（爆仓）：爆仓日收益无定义被剔除，"
-                        "volatility/sharpe 已相应修正，请以 total_return/max_drawdown 的 -100% 为准。",
-                    )
+                DataWarning(
+                    warning_type="portfolio_wiped_out",
+                    start_date=str(self.config.start_date),
+                    end_date=str(self.config.end_date),
+                    affected_stock_count=1,
+                    error_message="组合净值归零（爆仓）：爆仓日收益无定义被剔除，"
+                    "volatility/sharpe 已相应修正，请以 total_return/max_drawdown 的 -100% 为准。",
+                    category=WarningCategory.TERMINATION,
                 )
             )
 
@@ -642,13 +690,14 @@ class VectorBacktestEngine:
         trade_dates: list[date],
         stock_meta: dict[str, dict] | None = None,
         delist_stats: dict[str, float | int] | None = None,
-    ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str]]:
+    ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str], int]:
         if signals.is_empty():
             return (
                 pl.DataFrame(),
                 pl.DataFrame(),
                 pl.DataFrame(),
                 [],
+                0,
             )
 
         simulator = PortfolioSimulator(self.config, self.cost_model, stock_meta=stock_meta)

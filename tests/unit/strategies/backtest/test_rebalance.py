@@ -53,7 +53,7 @@ class TestRebalanceLogic:
                 "is_tradable": [True, True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         buy_trades = trades.filter(pl.col("action") == "buy") if not trades.is_empty() else pl.DataFrame()
         sell_trades = trades.filter(pl.col("action") == "sell") if not trades.is_empty() else pl.DataFrame()
         assert len(buy_trades) == 1
@@ -80,7 +80,7 @@ class TestRebalanceLogic:
                 "is_tradable": [True, True, True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         buy_trades = trades.filter(pl.col("action") == "buy") if not trades.is_empty() else pl.DataFrame()
         sell_trades = trades.filter(pl.col("action") == "sell") if not trades.is_empty() else pl.DataFrame()
         assert len(buy_trades) == 1
@@ -122,7 +122,7 @@ class TestRebalanceLogic:
                 "is_tradable": [True, True, True, True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         buy_trades = trades.filter(pl.col("action") == "buy") if not trades.is_empty() else pl.DataFrame()
         sell_trades = trades.filter(pl.col("action") == "sell") if not trades.is_empty() else pl.DataFrame()
         assert len(buy_trades) == 1
@@ -158,7 +158,7 @@ class TestRebalanceLogic:
                 "is_tradable": [True, True, True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         buy_trades = trades.filter(pl.col("action") == "buy") if not trades.is_empty() else pl.DataFrame()
         sell_trades = trades.filter(pl.col("action") == "sell") if not trades.is_empty() else pl.DataFrame()
         assert len(buy_trades) == 1
@@ -185,7 +185,7 @@ class TestRebalanceLogic:
                 "is_tradable": [True, True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         assert trades.is_empty()
 
 
@@ -222,7 +222,7 @@ class TestNAVCalculation:
                 "is_tradable": [True, True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         assert not trades.is_empty()
         buy_trade = trades.filter(pl.col("action") == "buy")
         assert not buy_trade.is_empty()
@@ -255,7 +255,7 @@ class TestNAVCalculation:
                 "is_tradable": [True, True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         buy_trade = trades.filter(pl.col("action") == "buy")
         assert not buy_trade.is_empty()
         volume = buy_trade["volume"][0]
@@ -301,7 +301,7 @@ class TestNAVCalculation:
                 "is_tradable": [True, True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         buy_trade = trades.filter(pl.col("action") == "buy")
         assert not buy_trade.is_empty()
         volume = buy_trade["volume"][0]
@@ -347,7 +347,7 @@ class TestExecutionPrice:
                 "is_tradable": [True, True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         if not trades.is_empty():
             buy_trades = trades.filter(pl.col("action") == "buy")
             if not buy_trades.is_empty():
@@ -374,7 +374,7 @@ class TestExecutionPrice:
                 "is_tradable": [True, True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         if not trades.is_empty():
             buy_trades = trades.filter(pl.col("action") == "buy")
             if not buy_trades.is_empty():
@@ -415,7 +415,7 @@ class TestLimitControl:
                 "limit_up_price": [10.0],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         assert len(trades) == 0
         assert len(skipped) >= 1
 
@@ -441,7 +441,7 @@ class TestLimitControl:
                 "limit_up_price": [10.0],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         assert len(trades) >= 1
 
     def test_default_skip_limit_down_sell(self):
@@ -466,7 +466,7 @@ class TestLimitControl:
                 "limit_down_price": [None, 10.5, None],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         down_limit_skips = (
             skipped.filter(pl.col("reason") == "down_limit") if not skipped.is_empty() else pl.DataFrame()
         )
@@ -494,7 +494,7 @@ class TestLimitControl:
                 "limit_down_price": [None, 10.5],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         sell_trades = trades.filter(pl.col("action") == "sell") if not trades.is_empty() else pl.DataFrame()
         assert len(sell_trades) >= 1
 
@@ -532,7 +532,7 @@ class TestCashReserve:
                 "is_tradable": [True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         if not positions.is_empty():
             cash = positions["cash"][0]
             assert cash > 0
@@ -558,7 +558,7 @@ class TestCashReserve:
                 "is_tradable": [True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         if not positions.is_empty():
             buy_trades = trades.filter(pl.col("action") == "buy") if not trades.is_empty() else pl.DataFrame()
             if not buy_trades.is_empty():
@@ -660,7 +660,7 @@ class TestPnlAfterExDividend:
                 "is_tradable": [True, True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         day2_pos = positions.filter(pl.col("trade_date") == date(2024, 1, 3))
         assert not day2_pos.is_empty()
         pos_detail = day2_pos["positions"][0]
@@ -709,7 +709,7 @@ class TestPnlAfterExDividend:
                 "is_tradable": [True, True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         buy_trade = trades.filter(pl.col("action") == "buy")
         assert not buy_trade.is_empty()
@@ -1092,7 +1092,7 @@ class TestDiffRebalance:
                 "is_tradable": [True, True, True, True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         sells = trades.filter(pl.col("action") == "sell") if not trades.is_empty() else pl.DataFrame()
         assert len(sells) == 1
         assert sells["ts_code"][0] == "000001.SZ"
@@ -1128,7 +1128,7 @@ class TestDiffRebalance:
                 "is_tradable": [True, True, True, True],
             }
         )
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
         buys = trades.filter(pl.col("action") == "buy") if not trades.is_empty() else pl.DataFrame()
         assert len(buys) >= 1
         assert "000002.SZ" in set(buys["ts_code"].to_list())
@@ -1242,7 +1242,8 @@ class TestDiffRebalance:
         """D1-M5：on_empty_signal="hold"（默认）时空信号再平衡日保留持仓、不产生交易。
 
         场景：周度再平衡，1/8 建仓后，1/15 当日信号为空 → 保持现有持仓，
-        卖出表为空、持仓仍存在，warnings 记录「无信号 → hold」。
+        卖出表为空、持仓仍存在，空信号天数计入 empty_signal_days（MAJOR-01 起
+        不再写 data_warnings，避免「无信号→hold」被误报为数据质量问题）。
         """
         sim, _config = self._make_simulator(rebalance_freq="weekly", on_empty_signal="hold")
         self._add_pos(sim, "000001.SZ", 1000, 10.0)
@@ -1258,12 +1259,14 @@ class TestDiffRebalance:
 
         assert "000001.SZ" in sim.positions
         assert not [t for t in sim.trades_list if t["action"] == "sell"]
-        assert any("no signal → hold" in w for w in sim.warnings)
+        # MAJOR-01: 空信号不再写 data_warnings，改为 empty_signal_days 计数
+        assert sim.empty_signal_days == 1
 
     def test_empty_signal_liquidate_sells_all(self) -> None:
         """D1-M5：on_empty_signal="liquidate" 时空信号再平衡日全清仓。
 
-        语义：显式选择「全部清仓」时沿用旧行为——清空所有持仓并记录警告。
+        语义：显式选择「全部清仓」时沿用旧行为——清空所有持仓；空信号天数
+        同样计入 empty_signal_days（与 hold 分支共用 _handle_empty_signal）。
         """
         sim, _config = self._make_simulator(rebalance_freq="weekly", on_empty_signal="liquidate")
         self._add_pos(sim, "000001.SZ", 1000, 10.0)
@@ -1279,7 +1282,8 @@ class TestDiffRebalance:
 
         assert "000001.SZ" not in sim.positions
         assert [t for t in sim.trades_list if t["action"] == "sell"]
-        assert any("no signal → liquidate" in w for w in sim.warnings)
+        # MAJOR-01: 空信号不再写 data_warnings，改为 empty_signal_days 计数
+        assert sim.empty_signal_days == 1
 
     def test_config_validate_rejects_bad_on_empty_signal(self) -> None:
         """D1-M5：on_empty_signal 取值非法时 validate() 报错。"""
@@ -1321,7 +1325,9 @@ class TestDiffRebalance:
         sim._sell_position(date(2024, 1, 8), "000001.SZ", sim.positions["000001.SZ"], quote=None)
         assert any(r["reason"] == "no_quote" for r in sim.skipped_list)
         assert "000001.SZ" in sim.positions
-        assert any("sell skipped (no_quote)" in w for w in sim.warnings)
+        # MAJOR-01: 常规撮合 no_quote skip 仅进 skipped_list（上方已断言），
+        # 不再写 data_warnings（避免「卖出被跳过」被误报为数据质量问题）。
+        assert not any(w for w in sim.warnings)
 
     def test_sell_position_to_value_no_quote_and_not_delisted_skips(self) -> None:
         """减持时无报价且未退市 → 记 no_quote 跳过（覆盖 285-298）。"""
@@ -1513,8 +1519,9 @@ class TestDiffRebalance:
         # 但不会产生第二笔 B 买入（未超目标金额）
         b_trades = [t for t in sim.trades_list if t["ts_code"] == "000002.SZ"]
         assert len(b_trades) == 1
-        # 补分配在 B 有缺口时才执行——B 已满额，故无 reallocate warning
-        assert not any("reallocate_unfilled" in w for w in sim.warnings)
+        # 补分配在 B 有缺口时才执行——B 已满额，故无补分配成交；MAJOR-01 起
+        # reallocate 提示只落 engine 日志（配置侧补分配，非数据质量缺陷）。
+        assert sim.cash >= -1e-6
 
     def test_buy_to_target_reallocate_unfilled_fills_insufficient_target(self) -> None:
         """BT-05: 补分配的缺口续投——低价标的现金不足未满额、高价标释放预算时，
@@ -1545,8 +1552,10 @@ class TestDiffRebalance:
         b_spent_cash = sum(t["net_amount"] for t in b_trades)
         assert b_spent_cash <= 50000.0 + 1e-6  # 不突破 B 的目标金额
         assert sim.cash >= -1e-6
-        # 补分配确实发生（B 来自 reallocate）
-        assert any("reallocate_unfilled" in w for w in sim.warnings)
+        # 补分配确实发生——第一遍 B 因现金不足被跳过（留下 5 万缺口），A 释放预算后
+        # B 最终成 1 笔买入（该笔即来自 reallocate 补分配）。MAJOR-01 起该提示仅落
+        # engine 日志，此处以成交结构证明补分配已生效。
+        assert any(r["ts_code"] == "000002.SZ" and r["reason"] == "insufficient_cash" for r in sim.skipped_list)
 
     def test_buy_to_target_lot_indivisible_over_threshold_hints(self) -> None:
         """BT-05: lot_size_indivisible 笔数超过候选 10% 时追加可执行建议（调参方向）。"""
@@ -1564,9 +1573,11 @@ class TestDiffRebalance:
             quotes_by_code,
             budget=sum(targets.values()),
         )
-        # 2/3 候选（>10%）被 lot_size_indivisible 跳过 → 触发可执行建议
-        assert any("candidates skipped (lot_size_indivisible)" in w for w in sim.warnings)
-        assert any("max_position_count" in w for w in sim.warnings)
+        # 2/3 候选（>10%）被 lot_size_indivisible 跳过 → 落到结构化 skipped_list；
+        # MAJOR-01 起「candidates skipped」可执行建议仅落 engine 日志，不再写 data_warnings
+        lot_skips = [r for r in sim.skipped_list if r["reason"] == "lot_size_indivisible"]
+        assert len(lot_skips) == 2
+        assert {r["ts_code"] for r in lot_skips} == {"000001.SZ", "000002.SZ"}
         # 提示不影响成交（低价股仍买入）
         assert any(t["ts_code"] == "000003.SZ" for t in sim.trades_list)
 
@@ -1730,8 +1741,14 @@ class TestDiffRebalance:
         )
         sim._rebalance_diff(date(2024, 1, 8), signals, quotes)
 
-        assert any("sparse signals" in w for w in sim.warnings)
-        assert any("effective position ceiling" in w for w in sim.warnings)
+        # MAJOR-01: sparse-signal 提示仅落 engine 日志（信号稀疏是配置导致的特征，非数据
+        # 质量缺陷）。数据层面断言仓位上限生效：单票不超 max_single_weight（10%），且因
+        # 候选稀疏（3 < 1/0.1=10）现金大量留存（未满仓）。
+        total_invested = sum(p["volume"] * p["qfq_entry_price"] for p in sim.positions.values())
+        total_assets = sim.cash + total_invested
+        for p in sim.positions.values():
+            assert p["volume"] * p["qfq_entry_price"] <= 0.1 * total_assets + 1e-6
+        assert total_invested < 0.5 * total_assets
 
 
 class TestRebalanceValuationExecPrice:

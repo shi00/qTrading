@@ -203,7 +203,7 @@ class TestExRightNavNoJump:
             date(2024, 1, 4),
         ]
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         assert not positions.is_empty()
 
@@ -267,7 +267,7 @@ class TestExRightNavNoJump:
             date(2024, 1, 3),
         ]
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         nav_values = positions["total_value"].to_list()
 
@@ -516,7 +516,7 @@ class TestLastKnownPriceValuation:
             date(2024, 1, 4),
         ]
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         assert not positions.is_empty()
 

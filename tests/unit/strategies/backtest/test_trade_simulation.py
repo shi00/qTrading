@@ -61,7 +61,7 @@ class TestTradeSimulation:
 
         trade_dates = [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)]
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         assert len(trades) == 0
         assert len(skipped) == 1
@@ -107,7 +107,7 @@ class TestTradeSimulation:
             date(2024, 1, 4),
         ]
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         down_limit_skips = skipped.filter(pl.col("reason") == "down_limit")
         assert len(down_limit_skips) >= 1
@@ -145,7 +145,7 @@ class TestTradeSimulation:
 
         trade_dates = [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)]
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         assert len(trades) == 0
         suspended_skips = skipped.filter(pl.col("reason") == "suspended")
@@ -184,7 +184,7 @@ class TestTradeSimulation:
 
         trade_dates = [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)]
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         assert len(trades) == 0
         no_quote_skips = skipped.filter(pl.col("reason") == "no_quote")
@@ -224,12 +224,14 @@ class TestTradeSimulation:
 
         trade_dates = [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)]
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         assert len(trades) == 0
         invalid_price_skips = skipped.filter(pl.col("reason") == "invalid_price")
         assert len(invalid_price_skips) == 1
-        assert any("invalid_price" in w for w in warnings)
+        # MAJOR-01: 常规撮合 invalid-price skip 仅进 skipped_list（上方已断言），
+        # 不再写入 warnings（避免常规撮合事件被误报为数据质量问题）。
+        assert not any("invalid_price" in w for w in warnings)
 
     def test_normal_trade_without_limit_status(self, config: BacktestConfig) -> None:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
@@ -264,7 +266,7 @@ class TestTradeSimulation:
 
         trade_dates = [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)]
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         assert len(trades) >= 1
         buy_trades = trades.filter(pl.col("action") == "buy")
@@ -313,7 +315,7 @@ class TestLotSizeRounding:
 
         trade_dates = [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)]
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         buy_trades = trades.filter(pl.col("action") == "buy")
         assert not buy_trades.is_empty()
@@ -361,7 +363,7 @@ class TestLotSizeRounding:
 
         trade_dates = [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)]
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         buy_trades = trades.filter(pl.col("action") == "buy")
         assert not buy_trades.is_empty()
@@ -416,7 +418,7 @@ class TestRealizedPnl:
             date(2024, 1, 4),
         ]
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         buy_trades = trades.filter(pl.col("action") == "buy")
         assert not buy_trades.is_empty()
@@ -726,8 +728,9 @@ class TestDelistedLiquidation:
         assert simulator.delist_liquidation_count == 1
         assert simulator.delist_loss_amount == pytest.approx(10.5 * volume - expected_net)
 
-        # 断言：记录了 warning 日志
-        assert any("liquidated (delisted)" in w for w in simulator.warnings)
+        # 断言：退市清算以结构化通道记录（MAJOR-01 起常规撮合提示不写 warnings，
+        # 避免「退市清算」被误报为数据质量问题；以 exit_reason=DELISTED 的成交承载）
+        assert sell_trades["exit_reason"][0] == "DELISTED"
 
     def test_liquidation_applies_recovery_and_cost(self) -> None:
         """BT-02: 退市清算应用可配置回收率、计交易成本，并累计分项统计。"""

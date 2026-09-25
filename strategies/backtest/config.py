@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
-from typing import Literal
+from typing import ClassVar, Literal
 
 import polars as pl
 
@@ -18,6 +18,8 @@ class DataWarning:
     """回测数据警告（结构化）
 
     用于记录 enrichment 失败时的详细信息，便于用户理解数据质量问题。
+    自 MAJOR-01 起新增 ``category`` 维度，将原本混装的「撮合日志 / 性能提示」与
+    「真实数据质量 / 终止条件」分离，供 UI 可信度分级（``_assess_credibility``）使用。
     """
 
     warning_type: Literal[
@@ -28,17 +30,111 @@ class DataWarning:
         "benchmark_data_absent",
         "benchmark_data_partial",
         "portfolio_wiped_out",
+        # 由 portfolio/engine 历史字符串类型化的真实 type（MAJOR-01）。
+        "stale_estimate",
+        "range_quality_gaps",
+        "preload_range_too_wide",
+        "range_preload_failed",
+        "range_preload_error",
     ]
     start_date: str
     end_date: str
     affected_stock_count: int
     error_message: str
+    # MAJOR-01: 告警类型化维度（决策①）。
+    # - data_quality：enrich 失败 / 停牌·涨跌停数据缺失 / 基准缺失·部分缺失 /
+    #   区间缺口 range_quality_gaps / 长期旧价估值 stale-estimate → unreliable。
+    # - termination：portfolio_wiped_out（爆仓）→ unreliable。
+    # - performance_path：preload_range_too_wide / range_preload_failed /
+    #   range_preload_error（慢路径）→ 仅提示，不升级级别。
+    # 默认 None：经 ``__post_init__`` 从 ``WarningCategory._TYPE_TO_CATEGORY``
+    # 按 warning_type 解析（历史构造点无需逐一补参）；未知 warning_type 回退
+    # data_quality（fail-closed，避免把已知异常伪装成「无信息」，R21）。
+    category: Literal["data_quality", "termination", "performance_path"] | None = None
+
+    def __post_init__(self) -> None:
+        if self.category is None:
+            object.__setattr__(
+                self,
+                "category",
+                WarningCategory._TYPE_TO_CATEGORY.get(self.warning_type, WarningCategory.DATA_QUALITY),
+            )
 
     def __str__(self) -> str:
         return (
             f"[{self.warning_type}] {self.start_date}-{self.end_date}: "
             f"{self.affected_stock_count} stocks affected. {self.error_message}"
         )
+
+
+# MAJOR-01: 告警类型化助手——把「已有 warning_type 的结构化 DataWarning」或
+# 「历史上落库的无类型字符串」归一到 category，供 UI 分级 / 兼容解析。
+# 依赖方向：仅依赖本模块数据结构，供 ui 层引用（strategies → ui 被允许，R1 合规）。
+# 说明：DataWarning.category 缺省时经本类的 __post_init__ 查表解析；此处为常量命名空间 +
+# 判责助手，纯类属性/类方法，无实例字段，故不用 dataclass。
+class WarningCategory:
+    """DataWarning.category 三分类常量 + 判责助手（fail-closed 白名单）。"""
+
+    DATA_QUALITY = "data_quality"
+    TERMINATION = "termination"
+    PERFORMANCE_PATH = "performance_path"
+
+    # 结构化 warning_type → 默认 category 映射（若 DataWarning 已显式带 category，
+    # 以显式值为准，这里仅作解析兜底）。含由历史字符串类型化的新 type（MAJOR-01）。
+    _TYPE_TO_CATEGORY: ClassVar[dict[str, str]] = {
+        "suspend_enrich_failed": "data_quality",
+        "limit_enrich_failed": "data_quality",
+        "suspend_data_absent": "data_quality",
+        "limit_data_absent": "data_quality",
+        "benchmark_data_absent": "data_quality",
+        "benchmark_data_partial": "data_quality",
+        "portfolio_wiped_out": "termination",
+        "stale_estimate": "data_quality",
+        "range_quality_gaps": "data_quality",
+        "preload_range_too_wide": "performance_path",
+        "range_preload_failed": "performance_path",
+        "range_preload_error": "performance_path",
+    }
+    # fail-closed 历史异常关键词白名单：无 [type] 前缀的真实异常一定能兜底归类，
+    # 满足 R21 BT-03（不以「无前缀一律非 unreliable」为默认默认值）。
+    _FAIL_CLOSED_PHRASES: tuple[tuple[str, str], ...] = (
+        ("valued at last known price", "data_quality"),  # stale-estimate，D1-C1
+        ("suspension", "data_quality"),
+        # 历史无括号格式 "suspend_*/limit_*: ..."（真实数据问题，fail-closed 兜底）
+        ("suspend_data_absent", "data_quality"),
+        ("limit_data_absent", "data_quality"),
+        ("suspend_enrich_failed", "data_quality"),
+        ("limit_enrich_failed", "data_quality"),
+        # 基准缺失/部分缺失；preload 慢路径（性能，非正确性）
+        ("benchmark", "data_quality"),
+        ("preload_range_too_wide", "performance_path"),
+        ("range_preload_failed", "performance_path"),
+        ("range_preload_error", "performance_path"),
+    )
+
+    @classmethod
+    def category_of(cls, warning: str | DataWarning) -> str | None:
+        """把结构化或历史字符串告警归一为 category；命中失败返回 None（非 unreliable）。"""
+        if isinstance(warning, DataWarning):
+            return warning.category
+        return cls._category_of_str(warning)
+
+    @staticmethod
+    def _category_of_str(text: str) -> str | None:
+        # 1) [type] 前缀命中已知 warning_type 全集 → 映射 category。
+        if text.startswith("["):
+            closing = text.find("]")
+            if closing > 1:
+                wtype = text[1:closing]
+                if wtype in WarningCategory._TYPE_TO_CATEGORY:
+                    return WarningCategory._TYPE_TO_CATEGORY[wtype]
+                return None
+        # 2) fail-closed 历史异常关键词白名单（含 stale-estimate / 慢路径）。
+        for phrase, category in WarningCategory._FAIL_CLOSED_PHRASES:
+            if phrase in text:
+                return category
+        # 3) 其余无前缀旧字符串（旧撮合 skip 噪音）→ None（非 unreliable，仅 degraded/提示）。
+        return None
 
 
 @dataclass(frozen=True)
@@ -69,7 +165,8 @@ class BacktestConfig:
     策略失效/数据异常时会误清空已持仓。
 
     修复后：
-    - hold（默认）：保持现有持仓不动，仅向 warnings 告警；
+    - hold（默认）：保持现有持仓不动，仅累加 empty_signal_days 计数（供 UI 次级提示，
+      不写 data_warnings，不升级可信度级别）；
     - liquidate：保留下沉到「全清仓」语义（沿用旧行为，供显式选择）。
     """
 
@@ -181,7 +278,9 @@ class BacktestResult:
     metrics: dict[str, float | None]
     ic_series: pl.Series
     period_stats: pl.DataFrame
-    data_warnings: tuple[str, ...]
+    # MAJOR-01: 类型放宽 —— 引擎新路径尽量产出结构化 DataWarning（带 category），
+    # 历史/防御性字符串仅兼容保留；消费方经 WarningCategory 统一归一（决策③⑥）。
+    data_warnings: tuple[str | DataWarning, ...]
     failed_signal_dates: tuple[dict, ...]
 
     run_id: str
@@ -202,7 +301,7 @@ class BacktestResult:
     delist_liquidation_count: int = 0
     delist_loss_amount: float = 0.0
 
-    def with_warnings(self, warnings: list[str] | tuple[str, ...]) -> BacktestResult:
+    def with_warnings(self, warnings: list[str | DataWarning] | tuple[str | DataWarning, ...]) -> BacktestResult:
         warnings_tuple = tuple(warnings) if isinstance(warnings, list) else warnings
         return BacktestResult(
             config=self.config,
@@ -265,8 +364,10 @@ class BacktestResult:
             # 作为完整配置的唯一来源，平铺的 execution_price 等列保留做索引用。
             "config_json": asdict(self.config),
             # BT-03: 可信度元数据快照，供历史列表/详情页区分「干净」与「带警告」的回测。
+            # MAJOR-01 决策④：落库统一转字符串（DataWarning → str(w)），DAO
+            # _serialize_jsonb_value 不处理 DataWarning，直接落会静默失败；字符串向后兼容。
             "quality_json": {
-                "data_warnings": list(self.data_warnings),
+                "data_warnings": [str(w) if isinstance(w, DataWarning) else w for w in self.data_warnings],
                 "failed_signal_dates": list(self.failed_signal_dates),
                 "skipped_order_count": 0 if self.skipped_orders.is_empty() else len(self.skipped_orders),
                 "delist_liquidation_count": self.delist_liquidation_count,

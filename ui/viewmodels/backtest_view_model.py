@@ -20,7 +20,7 @@ from data.constants import DEFAULT_BENCHMARK_INDEX
 from data.cache.cache_manager import CacheManager
 from services.backtest_service import BacktestService
 from services.task_manager import TaskManager
-from strategies.backtest.config import BacktestConfig, BacktestResult
+from strategies.backtest.config import BacktestConfig, BacktestResult, WarningCategory
 from strategies.base_strategy import get_strategy_registry
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -172,22 +172,37 @@ def _assess_credibility(
     UX-01: 将回测引擎的三类可信度信号汇总为可渲染的告警状态，供 View 在结果区
     顶部展示。VM 只产出 i18n key (Message)，不感知 locale (CLAUDE.md §3.2 MVVM)。
 
-    严重性分级（对应真实数据结构）：
-    - data_warnings 非空 → unreliable：各 DataWarning（如 suspend/limit enrichment 失败、
-      基准缺失/部分缺失、组合爆仓 portfolio_wiped_out）均表明回测结果受数据质量或
-      终止条件影响，收益/风控指标可能失真（爆仓日收益无定义被剔除）。
+    严重性分级（MAJOR-01 决策⑤，对应真实数据结构按 category）：
+    - data_warnings 中任一 DataWarning 的 category 为 data_quality 或 termination →
+      unreliable（enrich 失败 / suspend|limit_data_absent / benchmark_data_absent|partial /
+      range_quality_gaps / stale-estimate / portfolio_wiped_out 爆仓）。
     - failed_signal_dates 非空 → unreliable：策略在某交易日执行失败，曲线存在平坦段。
-    - skipped_orders 非空 → degraded：有订单因涨跌停/停牌/资金不足被跳过。
+    - 仅 skipped_orders 非空（且无 data_quality/termination）→ degraded。
+    - performance_path / 无 category 的历史旧撮合噪音 → 不升级级别，仅统计入提示。
+    - empty_signal_days > 0 → 次级提示，不独立驱动 degraded（决策⑦）。
 
     Returns:
         (credibility_level, warnings, skipped_order_count, failed_date_count)。
     """
     msgs: list[Message] = []
     level: Literal["ok", "degraded", "unreliable"] = "ok"
+    cat_counts: dict[str, int] = {"data_quality": 0, "termination": 0, "performance_path": 0}
 
-    if result.data_warnings:
-        msgs.append(Message("backtest_warn_data_issues", {"count": len(result.data_warnings)}))
+    # 归一化：DataWarning 取 .category；str 经 WarningCategory.category_of 解析
+    # （含 fail-closed 白名单）；结果为 None（旧撮合噪音）视为非 unreliable。
+    for w in result.data_warnings:
+        cat = WarningCategory.category_of(w)
+        if cat is not None:
+            cat_counts[cat] += 1
+
+    if cat_counts["data_quality"]:
+        msgs.append(Message("backtest_warn_data_quality", {"count": cat_counts["data_quality"]}))
         level = "unreliable"
+    if cat_counts["termination"]:
+        msgs.append(Message("backtest_warn_termination", {"count": cat_counts["termination"]}))
+        level = "unreliable"
+    if cat_counts["performance_path"]:
+        msgs.append(Message("backtest_warn_perf_path", {"count": cat_counts["performance_path"]}))
 
     if result.failed_signal_dates:
         total = len(result.failed_signal_dates)
@@ -200,6 +215,11 @@ def _assess_credibility(
         msgs.append(Message("backtest_warn_skipped_orders", {"count": len(result.skipped_orders)}))
         if level == "ok":
             level = "degraded"
+
+    # MAJOR-01 决策⑦: empty_signal_days 计数指标 + 次级提示（不独立驱动 degraded，
+    # 亦不区分 liquidate/hold 两模式，模式差异由用户配置可见）。
+    if empty_days := (result.metrics.get("empty_signal_days") if result.metrics else 0):
+        msgs.append(Message("backtest_warn_empty_signal_days", {"count": int(empty_days)}))
 
     return level, tuple(msgs), len(result.skipped_orders), len(result.failed_signal_dates)
 
