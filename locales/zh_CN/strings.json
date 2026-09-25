@@ -1714,6 +1714,8 @@
     "ai_kline_header": "日期 | 收盘 | 涨跌幅 | 成交量",
     "ai_limit_up": "涨停",
     "ai_limit_down": "跌停",
+    "ai_limit_price_missing": "涨跌停价缺失，未判定涨跌停",
+    "ai_limit_price_approx": "涨跌停价缺失，涨跌停标签为按板块规则的近似判定",
     "ai_history_extract_error": "提取价格行为特征时出错。",
     "ai_roe_trend": "ROE趋势",
     "ai_gross_margin_trend": "毛利率趋势",

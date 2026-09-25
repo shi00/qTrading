@@ -1714,6 +1714,8 @@
     "ai_kline_header": "Date | Close | Change% | Volume",
     "ai_limit_up": "Limit Up",
     "ai_limit_down": "Limit Down",
+    "ai_limit_price_missing": "Limit price data missing; limit-up/down not determined.",
+    "ai_limit_price_approx": "Limit price data missing; limit-up/down tags are board-rule approximations.",
     "ai_history_extract_error": "Error extracting price action features.",
     "ai_roe_trend": "ROE Trend",
     "ai_gross_margin_trend": "Gross Margin Trend",
