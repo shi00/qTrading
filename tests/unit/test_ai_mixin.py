@@ -2035,6 +2035,120 @@ class TestBuildCapitalFlowText:
             result = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
         assert "龙虎榜" in result
 
+    def test_top_list_multiple_reasons_all_listed_in_sorted_order(self):
+        """MINOR-03：同一股票当日多条上榜记录须全部列出，并按规范化 reason 稳定排序（不依赖 DB 返回顺序）。"""
+        reasons = [
+            "连续三个交易日内涨幅偏离值累计达20%",
+            "日涨幅偏离值达7%",
+            "日振幅值达15%",
+            "日涨幅偏离值达7%",  # 与第 2 条重复，用于校验稳定排序
+        ]
+        tl_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 4,
+                "reason": reasons,
+                "net_amount": [5000.0, 12000.0, 800.0, 600.0],
+            }
+        )
+        with patch("strategies.ai_context.capital_flow.get_column_unit", return_value="wan_yuan"):
+            text = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
+
+        assert I18n.get("ai_top_list_yes") in text
+        # 四条记录的理由与净买入额全部出现
+        assert text.count(I18n.get("ai_reason")) == 4
+        for reason in set(reasons):
+            assert reason in text
+        assert "1.20亿元" in text  # 12000 万
+        assert "5000.00万元" in text
+        assert "800.00万元" in text
+        assert "600.00万元" in text
+        # 输出顺序与按（reason, 净买入额）排序一致
+        expected_order = sorted(set(reasons))
+        positions = [text.index(reason) for reason in expected_order]
+        assert positions == sorted(positions)
+        # 相同 reason 的两条按净买入额升序（600 万在前，12000 万在后）
+        assert text.index("600.00万元") < text.index("1.20亿元")
+
+    def test_top_list_same_reason_secondary_sort_is_row_order_independent(self):
+        """MINOR-03 收口：同 reason 时以净买入额为二级键排序，输出与 DB 返回行序无关。"""
+        rows = [
+            {"ts_code": "000001.SZ", "reason": "日涨幅偏离值达7%", "net_amount": 12000.0},
+            {"ts_code": "000001.SZ", "reason": "日涨幅偏离值达7%", "net_amount": 600.0},
+        ]
+        with patch("strategies.ai_context.capital_flow.get_column_unit", return_value="wan_yuan"):
+            text_forward = _build_capital_flow_text("000001.SZ", {"top_list_df": pd.DataFrame(rows)})
+            text_reversed = _build_capital_flow_text("000001.SZ", {"top_list_df": pd.DataFrame(list(reversed(rows)))})
+
+        assert text_forward == text_reversed
+        assert text_forward.index("600.00万元") < text_forward.index("1.20亿元")
+
+    def test_top_list_missing_net_amount_renders_na(self):
+        """MINOR-03 收口：净买入额缺失/非有限渲染 N/A，不得伪装成业务合法的 0 元（R21）。"""
+        tl_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 4,
+                "reason": ["理由一", "理由二", "理由三", "理由四"],
+                "net_amount": [None, float("nan"), float("inf"), 5000.0],
+            }
+        )
+        with patch("strategies.ai_context.capital_flow.get_column_unit", return_value="wan_yuan"):
+            text = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
+
+        assert text.count(f"{I18n.get('ai_net_buy')}: N/A") == 3
+        assert "0元" not in text
+        assert "5000.00万元" in text
+
+    def test_top_list_single_row_matches_legacy_format(self):
+        """单行上榜时输出须与既有格式逐字一致。"""
+        tl_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "reason": ["涨幅偏离"],
+                "net_amount": [5000.0],
+            }
+        )
+        with patch("strategies.ai_context.capital_flow.get_column_unit", return_value="wan_yuan"):
+            text = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
+
+        expected_line = (
+            f"{I18n.get('ai_top_list_yes')} ({I18n.get('ai_reason')}: 涨幅偏离, {I18n.get('ai_net_buy')}: 5000.00万元)"
+        )
+        tl_lines = [line for line in text.splitlines() if line.startswith(I18n.get("ai_top_list_yes"))]
+        assert tl_lines == [expected_line]
+
+    def test_top_list_no_stock_record_uses_sentinel(self):
+        """当日无该股龙虎榜记录时输出 ai_top_list_no 哨兵。"""
+        tl_df = pd.DataFrame(
+            {
+                "ts_code": ["000002.SZ"],
+                "reason": ["涨幅偏离"],
+                "net_amount": [5000.0],
+            }
+        )
+        text = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
+        assert I18n.get("ai_top_list_no") in text
+
+    def test_top_list_missing_or_empty_uses_na_sentinel(self):
+        """top_list_df 为 None 或空表时输出 ai_top_list_na 哨兵。"""
+        for tl_df in (None, pd.DataFrame()):
+            text = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
+            assert I18n.get("ai_top_list_na") in text
+
+    def test_top_list_blank_or_nan_reason_renders_na(self):
+        """reason 为 None / NaN / 空串时容错渲染为 N/A，且不抛错。"""
+        tl_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 3,
+                "reason": [None, float("nan"), ""],
+                "net_amount": [5000.0, 600.0, 800.0],
+            }
+        )
+        with patch("strategies.ai_context.capital_flow.get_column_unit", return_value="wan_yuan"):
+            text = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
+        assert I18n.get("ai_top_list_yes") in text
+        assert text.count(I18n.get("ai_reason")) == 3
+        assert text.count("N/A") == 3
+
     def test_northbound_with_data(self):
         nb_df = pd.DataFrame(
             {
