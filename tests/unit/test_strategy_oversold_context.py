@@ -20,9 +20,9 @@ import pandas as pd
 from strategies.ai_context import (
     PreFetchedContext,
     _build_history_text,
-    _get_limit_pct,
 )
 from strategies.oversold_strategy import OversoldStrategy
+from utils.limit_status import get_limit_pct
 import pytest
 
 
@@ -671,27 +671,32 @@ class TestVolumeThresholdConsistency(unittest.TestCase):
 
     def test_get_limit_pct_main_board(self):
         """主板涨跌停幅度为 10%"""
-        result = _get_limit_pct("000001.SZ", "主板股票")
+        result = get_limit_pct("000001.SZ", "主板股票")
         self.assertEqual(result, 10.0)
 
     def test_get_limit_pct_gem(self):
         """创业板涨跌停幅度为 20%"""
-        result = _get_limit_pct("300001.SZ", "创业板股票")
+        result = get_limit_pct("300001.SZ", "创业板股票")
         self.assertEqual(result, 20.0)
 
     def test_get_limit_pct_star(self):
         """科创板涨跌停幅度为 20%"""
-        result = _get_limit_pct("688001.SH", "科创板股票")
+        result = get_limit_pct("688001.SH", "科创板股票")
         self.assertEqual(result, 20.0)
 
     def test_get_limit_pct_st(self):
-        """ST 股涨跌停幅度为 5%"""
-        result = _get_limit_pct("000001.SZ", "ST某某")
+        """仅主板 ST 股涨跌停幅度为 5%"""
+        result = get_limit_pct("000001.SZ", "ST某某")
         self.assertEqual(result, 5.0)
+
+    def test_get_limit_pct_gem_st_still_20(self):
+        """创业板 ST 与板块一致为 20%（不适用主板 5%）"""
+        result = get_limit_pct("300001.SZ", "ST某某")
+        self.assertEqual(result, 20.0)
 
     def test_get_limit_pct_bse(self):
         """北交所涨跌停幅度为 30%"""
-        result = _get_limit_pct("830001.BJ", "北交所股票")
+        result = get_limit_pct("830001.BJ", "北交所股票")
         self.assertEqual(result, 30.0)
 
 

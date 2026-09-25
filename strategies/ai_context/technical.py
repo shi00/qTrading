@@ -128,22 +128,3 @@ def _compute_technical_structure(history_df, vol_ratio_threshold: float = 1.7) -
         result["price_trend_5d"] = I18n.get("ai_calc_error")
 
     return result
-
-
-def _get_limit_pct(ts_code: str, name: str = "") -> float:
-    """
-    根据股票代码和名称判断涨跌停幅度。
-
-    规则：
-    - ST/*ST 股：±5%
-    - 北交所 (8开头)：±30%
-    - 创业板 (3开头) / 科创板 (68开头)：±20%
-    - 主板 (其他)：±10%
-    """
-    if name and ("ST" in name.upper()):
-        return 5.0
-    if ts_code.startswith("8"):
-        return 30.0
-    if ts_code.startswith("3") or ts_code.startswith("68"):
-        return 20.0
-    return 10.0

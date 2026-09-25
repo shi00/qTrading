@@ -20,10 +20,10 @@ from strategies.ai_context import (
     _build_history_text,
     _build_multi_period_financials,
     _compute_technical_structure,
-    _get_limit_pct,
 )
 from strategies.ai_mixin import AIStrategyMixin
 from strategies.utils import safe_float
+from utils.limit_status import get_limit_pct
 
 pytestmark = pytest.mark.unit
 
@@ -627,26 +627,57 @@ class TestComputeTechnicalStructure:
 
 
 class TestGetLimitPct:
-    def test_st_stock(self):
-        assert _get_limit_pct("000001.SZ", "ST某某") == 5.0
+    """涨跌停幅度降级规则（正本迁至 utils.limit_status，MAJOR-02）。"""
 
-    def test_star_st_stock(self):
-        assert _get_limit_pct("000001.SZ", "*ST某某") == 5.0
+    def test_main_board_st_stock(self):
+        # ST 仅主板适用 5%
+        assert get_limit_pct("000001.SZ", "ST某某") == 5.0
 
-    def test_bse_stock(self):
-        assert _get_limit_pct("830001.BJ") == 30.0
+    def test_main_board_star_st_stock(self):
+        assert get_limit_pct("000001.SZ", "*ST某某") == 5.0
+
+    def test_main_board_sh_st(self):
+        assert get_limit_pct("600001.SH", "ST某某") == 5.0
+
+    def test_gem_st_still_20(self):
+        # 创业板 ST 与板块一致 20%（非主板 5%）
+        assert get_limit_pct("300001.SZ", "ST某某") == 20.0
+
+    def test_gem_301_no_st(self):
+        assert get_limit_pct("301001.SZ") == 20.0
+
+    def test_star_st_still_20(self):
+        # 科创板 ST 与板块一致 20%
+        assert get_limit_pct("688001.SH", "ST某某") == 20.0
+
+    def test_bse_8_prefix(self):
+        assert get_limit_pct("830001.BJ") == 30.0
+
+    def test_bse_4_prefix(self):
+        assert get_limit_pct("430001.BJ") == 30.0
+
+    def test_bse_920_prefix(self):
+        assert get_limit_pct("920001.BJ") == 30.0
+
+    def test_bse_st_still_30(self):
+        assert get_limit_pct("830001.BJ", "ST某某") == 30.0
 
     def test_gem_stock(self):
-        assert _get_limit_pct("300001.SZ") == 20.0
+        assert get_limit_pct("300001.SZ") == 20.0
 
     def test_star_stock(self):
-        assert _get_limit_pct("688001.SH") == 20.0
+        assert get_limit_pct("688001.SH") == 20.0
 
     def test_main_board_sz(self):
-        assert _get_limit_pct("000001.SZ") == 10.0
+        assert get_limit_pct("000001.SZ") == 10.0
 
     def test_main_board_sh(self):
-        assert _get_limit_pct("600001.SH") == 10.0
+        assert get_limit_pct("600001.SH") == 10.0
+
+    def test_unknown_returns_none(self):
+        # R21：无法判定不猜
+        assert get_limit_pct("") is None
+        assert get_limit_pct("000001") is None
 
 
 class TestBuildHistoryText:
@@ -897,6 +928,40 @@ class TestRunAiAnalysis:
             dp.cache.quote_dao.get_moneyflow.assert_awaited_once_with(trade_date="20240118")
             dp.cache.quote_dao.get_top_list.assert_awaited_once_with(trade_date="20240118")
             dp.cache.quote_dao.get_northbound.assert_awaited_once_with(trade_date="20240118")
+
+    @pytest.mark.asyncio
+    async def test_prefetches_stk_limit_once_for_near_window(self):
+        """MAJOR-02：整批仅一次 stk_limit 区间查询，窗口为候选近 3 个交易日。"""
+        s = ConcreteStrategy()
+        dp = MagicMock()
+        dp.is_cancelled = MagicMock(return_value=False)
+        dp.cache = MagicMock()
+        dp.cache.get_concepts = AsyncMock(return_value={})
+        history_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 4,
+                "trade_date": ["20240115", "20240116", "20240117", "20240118"],
+                "close": [10.0, 10.1, 10.2, 10.3],
+                "pct_chg": [0.0, 1.0, 1.0, 1.0],
+            }
+        )
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=history_df)
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.stk_limit_dao.get_stk_limit_range = AsyncMock(return_value=pd.DataFrame())
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"], "close": [10.3]})
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+            await s.run_ai_analysis(candidates, context)
+        dp.cache.stk_limit_dao.get_stk_limit_range.assert_awaited_once()
+        assert dp.cache.stk_limit_dao.get_stk_limit_range.await_args.args == ("2024-01-16", "2024-01-18")
 
     @pytest.mark.asyncio
     async def test_with_cancellation(self):
