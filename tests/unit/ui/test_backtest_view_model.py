@@ -692,10 +692,77 @@ class TestBacktestViewModelRunBacktest:
     @pytest.mark.asyncio
     async def test_data_warning_marks_unreliable(self):
         """UX-01: 数据质量告警(如缺停牌/涨跌停数据)标记 unreliable 并产出后果文案。"""
-        vm = await self._exec_backtest(self._result_with(data_warnings=("...", "...")))
+        # 无 [type] 前缀的历史字符串（fail-closed 白名单命中 data_quality）
+        vm = await self._exec_backtest(
+            self._result_with(data_warnings=("suspend_data_absent: 600001", "valued at last known price for 600002"))
+        )
 
         assert vm.state.credibility_level == "unreliable"
-        assert vm.state.warnings == (Message("backtest_warn_data_issues", {"count": 2}),)
+        assert vm.state.warnings == (Message("backtest_warn_data_quality", {"count": 2}),)
+
+    @pytest.mark.asyncio
+    async def test_data_warning_structured_type_marks_unreliable(self):
+        """MAJOR-01 决策⑤: [type] 前缀/结构化 DataWarning 的 data_quality 亦判 unreliable。"""
+        from strategies.backtest.config import WarningCategory
+
+        vm = await self._exec_backtest(self._result_with(data_warnings=("[suspend_enrich_failed] 2024-01-02: x",)))
+        assert vm.state.credibility_level == "unreliable"
+        assert WarningCategory.DATA_QUALITY  # 仅验证静态常量可用
+
+        vm2 = await self._exec_backtest(self._result_with(data_warnings=("[range_quality_gaps] 2024-01-02: x",)))
+        assert vm2.state.credibility_level == "unreliable"
+
+    @pytest.mark.asyncio
+    async def test_benchmark_absent_marks_unreliable(self):
+        """MAJOR-01 验证方式②: 基准缺失判 unreliable。
+
+        覆盖两条路径：结构化 `[benchmark_data_absent]` 前缀（category 映射）；
+        以及历史无前缀字符串经 fail-closed 白名单 `benchmark` 关键词兜底。
+        """
+        vm = await self._exec_backtest(self._result_with(data_warnings=("[benchmark_data_absent] 2024-01-02: 基准缺",)))
+        assert vm.state.credibility_level == "unreliable"
+
+        vm2 = await self._exec_backtest(self._result_with(data_warnings=("benchmark data missing for 000300.SH",)))
+        assert vm2.state.credibility_level == "unreliable"
+
+    @pytest.mark.asyncio
+    async def test_termination_warning_marks_unreliable(self):
+        """MAJOR-01 决策⑤: termination（portfolio_wiped_out 爆仓）判 unreliable。"""
+        vm = await self._exec_backtest(self._result_with(data_warnings=("[portfolio_wiped_out] 2024-01-02: wiped",)))
+        assert vm.state.credibility_level == "unreliable"
+        assert vm.state.warnings == (Message("backtest_warn_termination", {"count": 1}),)
+
+    @pytest.mark.asyncio
+    async def test_performance_path_warning_not_unreliable(self):
+        """MAJOR-01 决策⑤: 仅 performance_path（慢路径）不升级到 unreliable。"""
+        vm = await self._exec_backtest(self._result_with(data_warnings=("[preload_range_too_wide] 2024-01-02: slow",)))
+        assert vm.state.credibility_level == "ok"
+        assert vm.state.warnings == (Message("backtest_warn_perf_path", {"count": 1}),)
+
+    @pytest.mark.asyncio
+    async def test_performance_path_with_skipped_is_degraded(self):
+        """MAJOR-01 决策⑤: performance_path + 仅 skipped → degraded（不 unreliable）。"""
+        vm = await self._exec_backtest(
+            self._result_with(
+                data_warnings=("[range_preload_failed] 2024-01-02: slow",),
+                skipped_orders=pl.DataFrame({"a": [1]}),
+            )
+        )
+        assert vm.state.credibility_level == "degraded"
+
+    @pytest.mark.asyncio
+    async def test_legacy_noise_warning_not_unreliable(self):
+        """MAJOR-01 决策⑤: 旧撮合噪音（无前缀、无白名单关键词）不判 unreliable。"""
+        vm = await self._exec_backtest(self._result_with(data_warnings=("20240102: 600001 buy skipped(up_limit)",)))
+        assert vm.state.credibility_level == "ok"
+        assert vm.state.warnings == ()
+
+    @pytest.mark.asyncio
+    async def test_empty_signal_days_hint_only(self):
+        """MAJOR-01 决策⑦: empty_signal_days>0 仅追加次级提示，不独立驱动 degraded。"""
+        vm = await self._exec_backtest(self._result_with(metrics={"empty_signal_days": 3, "sharpe_ratio": 1.0}))
+        assert vm.state.credibility_level == "ok"
+        assert vm.state.warnings == (Message("backtest_warn_empty_signal_days", {"count": 3}),)
 
     @pytest.mark.asyncio
     async def test_failed_signal_dates_marks_unreliable(self):
