@@ -48,6 +48,34 @@ def _mock_ai_external_acknowledged_default_true():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _mock_news_fetcher_network():
+    """单测不得触发真实新闻抓取（消除跨用例的 pandas 全局选项竞态）。
+
+    ``strategies.ai_mixin`` 的新闻预取会把 ``NewsFetcher.get_stock_news`` 提交到真实
+    ``ThreadPoolManager`` IO 线程池；该函数内部的 ``_run_with_python_string_storage``
+    会改写进程级 pandas 全局选项 ``pd.options.mode.string_storage``。CI 网络慢时该 IO
+    线程可能存活到本用例之后（``wait_for`` 超时无法强杀底层线程），与
+    ``test_news_fetcher.py::TestRunWithPythonStringStorage`` 中断言该全局选项的用例
+    竞态，导致其偶发失败（``assert 'auto' == 'python'``）。``get_us_major_moves`` 同为
+    真实出网（httpx 直连），一并打桩以消除 CI 网络延迟带来的 flaky。
+
+    默认返回空值保持「无新闻/无美股上下文」语义（与既有显式打桩一致）；
+    需要新闻内容或断言 as_of 传参的用例仍可在用例内自行 patch（就近覆盖本 autouse 打桩）。
+    """
+    with (
+        patch(
+            "strategies.ai_mixin.NewsFetcher.get_stock_news",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "strategies.ai_mixin.NewsFetcher.get_us_major_moves",
+            new=AsyncMock(return_value=""),
+        ),
+    ):
+        yield
+
+
 @pytest.fixture
 def _mock_ai_not_acknowledged():
     """review07-G1: 未确认 AI 外发政策的具名 fixture（安全门控的未确认路径专项覆盖）。
@@ -66,6 +94,23 @@ def _mock_ai_not_acknowledged():
         ),
     ):
         yield
+
+
+class TestNewsFetchNetworkIsolation:
+    """回归护栏：本文件不得触发真实新闻网络抓取。
+
+    真实抓取会在 ``ThreadPoolManager`` IO 线程中经 ``_run_with_python_string_storage``
+    改写进程级 pandas 全局选项 ``pd.options.mode.string_storage``，且线程可能存活到
+    后续用例，污染同 worker 的 ``test_news_fetcher.py::TestRunWithPythonStringStorage``
+    （CI 偶发 ``assert 'auto' == 'python'``）。此处断言 autouse 打桩确实生效，
+    防止 fixture 被误删后重现该竞态（本地难以复现，仅 CI 可见）。
+    """
+
+    def test_news_fetcher_methods_are_mocked(self):
+        from strategies.ai_mixin import NewsFetcher
+
+        assert isinstance(NewsFetcher.get_stock_news, AsyncMock)
+        assert isinstance(NewsFetcher.get_us_major_moves, AsyncMock)
 
 
 class TestBuildResultRowFailureClassification:
