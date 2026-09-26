@@ -103,7 +103,7 @@
 | AI/ML/LLM、非确定性输出、工具调用 | [ai-ml-llm.md](./review-profiles/ai-ml-llm.md) |
 | AStockScreener 任意本项目代码变更 | [project-profile.md](./review-profiles/project-profile.md)（必加载） |
 
-项目特定规则（AStockScreener 红线 R1-R23、架构边界、reviewProfile 结构）见 [project-profile.md](./review-profiles/project-profile.md)。
+项目特定规则（AStockScreener 红线 R1-R24、架构边界、reviewProfile 结构）见 [project-profile.md](./review-profiles/project-profile.md)。
 
 ## 7. 发现分类、证据与定级
 

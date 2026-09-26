@@ -50,7 +50,10 @@ class VolumeBreakoutStrategy(PolarsBaseStrategy):
                 "label_key": "param_pct_chg_max",
                 "type": "slider",
                 "min": 3,
-                "max": 10,
+                # 检视 MAJOR-05: A 股存在三种涨跌停制度（主板 ±10%、创业板/科创板 ±20%、ST ±5%）。
+                # 原 max=10 按主板制度封顶，导致 20cm 品种当日涨幅 10%~20% 的区间无法配置，
+                # 创业板/科创板标的在强势日被整体排除。提至 20 覆盖全板块，默认 7 不变。
+                "max": 20,
                 "default": 7,
                 "step": 0.5,
             },

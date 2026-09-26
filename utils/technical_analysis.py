@@ -95,8 +95,12 @@ class TechnicalAnalysis:
         OSS-05 收敛：唯一正本为 Polars get_kdj_expr。收敛前本方法为独立 Pandas
         实现，一字板/全横盘（hhv==llv → rsv=0/0）时 k/d/j 为 NaN，经 ai_mixin
         以 "k: nan" 注入 AI prompt（D1），且 NaN 比较全为 False 导致静默判为
-        NEUTRAL。现委托 Polars 正本计算后取末值，由 Polars 侧 fill_nan(50)
-        统一承载边界语义（R21：预热期 null 仍以 None 显式缺省，不伪造）。
+        NEUTRAL。现委托 Polars 正本计算后取末值，边界语义（整窗同价取中性 50、
+        预热期前 n−1 根为 null）统一由 get_kdj_expr 承载。
+
+        本方法只取末值，故其 None 分支的真实可达路径是**末窗含缺失价**（末 n 窗内
+        high/low 的非空计数 < n → RSV 为 null → 末值为真实未知），而非「预热期」。
+        ``len(df) < n`` 时返回 ``("UNKNOWN", 0, 0, 0)`` 为既有哨兵语义，本次不改。
         """
         if df is None or len(df) < n:
             return "UNKNOWN", 0, 0, 0
@@ -114,7 +118,7 @@ class TechnicalAnalysis:
             .collect()
         )
         curr_k, curr_d, curr_j = (result[c][-1] for c in ("k", "d", "j"))
-        # R21：预热期 null 是真实「未知」，显式返回 None，不填充数值
+        # R21：末窗含缺失价 → 末值为真实「未知」，显式返回 None，不填充数值
         if curr_k is None or curr_d is None or curr_j is None:
             return "UNKNOWN", None, None, None
 
@@ -316,21 +320,30 @@ class TechnicalAnalysis:
 
     @staticmethod
     def get_kdj_expr(high="high", low="low", close="close", n=9, m1=3, m2=3):
+        """KDJ 表达式工厂（唯一正本）。
+
+        预热期语义：``min_samples=n`` 使前 n−1 根因不足整窗而 RSV 为 null；null 在
+        ``ewm_mean`` 中逐位置传播，故 k/d/j 前 n−1 根同步为 null（真实「未知」，
+        不填充业务合法值，R21）。
+
+        边界语义：整窗同价（一字板/全横盘）时 ``hhv==llv`` → RSV 为 0/0，该窗 RSV
+        在业务上无定义，取中性 50；``fill_nan`` 只作用于 NaN，不触碰预热期 null。
+
+        与行情软件的差异：行情软件以 K/D 初值 50 递推，本实现以「首根有效 RSV」
+        播种，差异按 ``(2/3)^t`` 衰减（m1=3），预热期后收敛。
+        """
         import polars as pl
 
         # RSV
-        llv = pl.col(low).rolling_min(
-            window_size=n,
-            min_samples=1,
-        )  # min_samples not fully supported in old polars?
-        # rolling_min in Polars usually requires window_size.
-        # Handle dynamic window? No, just standard rolling.
-        hhv = pl.col(high).rolling_max(window_size=n, min_samples=1)
+        llv = pl.col(low).rolling_min(window_size=n, min_samples=n)
+        hhv = pl.col(high).rolling_max(window_size=n, min_samples=n)
 
         rsv = (pl.col(close) - llv) / (hhv - llv) * 100
-        # fill_nan: 一字板/全横盘时 hhv==llv → 0/0，RSV 在业务上确实无定义，
-        # 取中性 50 有依据（KDJ 的既有边界语义，不在 RSI 的 R21 收敛范围内）。
-        # 不 fill_null: 预热期为真实未知，伪装成 50 属 R21 违规。
+        # fill_nan：整窗同价（hhv==llv → 0/0）时该窗 RSV 业务上无定义，取中性 50
+        # ——这是逐窗定义值，与「递归序列的种子初值」是两件事。不 fill_null：
+        # 预热期（前 n−1 根不足整窗）为真实未知，伪装成 50 属 R21 违规。
+        # 口径不一致（既有设计，保留不改）：RSI 对同类 0/0 取 null（真实未知），
+        # KDJ 取中性 50；详见 docs/debt/known-technical-debt.md 的 P3-TA-OSS05-DualImpl。
         rsv = rsv.fill_nan(50)
 
         # K, D, J via EWM

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 import pandas as pd
 
@@ -63,14 +64,24 @@ def _build_capital_flow_text(ts_code: str, prefetched: dict, labels_out: list[st
         if tl_df is not None and not tl_df.empty:
             stock_tl = tl_df[tl_df["ts_code"] == ts_code]
             if not stock_tl.empty:
-                row = stock_tl.iloc[0]
-                reason = row.get("reason")
-                reason = reason if reason else "N/A"
-                net_amt = sf(row.get("net_amount"))
+                # 同一股票当日可能因多个理由上榜，各行统计窗口不同、净买入额不可相加也不可任取其一，故列出全部记录。
+                # 排序键为（规范化 reason, 净买入额）：同理由按金额升序、缺失金额排在最后，使输出与 DB 返回行序无关；
+                # 键完全相同（金额亦缺失，渲染结果一致）时保持相对顺序，输出文本仍确定可复现。
                 net_amount_unit = get_column_unit(tl_df, "net_amount", TOP_LIST_NET_AMOUNT_UNIT)
-                parts.append(
-                    f"{I18n.get('ai_top_list_yes')} ({I18n.get('ai_reason')}: {reason}, {I18n.get('ai_net_buy')}: {format_amount(net_amt, net_amount_unit)})"  # type: ignore[arg-type]
+                entries: list[tuple[str, float | None]] = []
+                for _, row in stock_tl.iterrows():
+                    reason = "" if pd.isna(row.get("reason")) else str(row.get("reason"))
+                    # 缺失/非有限净买入额置 None 渲染 N/A，避免被 safe_float 的默认值伪装成业务合法的「0元」（R21）
+                    net_amt = sf(row.get("net_amount"), default=float("nan"))
+                    entries.append((reason, net_amt if math.isfinite(net_amt) else None))
+                detail = "; ".join(
+                    f"{I18n.get('ai_reason')}: {reason or 'N/A'}, {I18n.get('ai_net_buy')}: "
+                    f"{'N/A' if net_amt is None else format_amount(net_amt, net_amount_unit)}"  # type: ignore[arg-type]  # get_column_unit 返回 str | None，format_amount 需 str
+                    for reason, net_amt in sorted(
+                        entries, key=lambda item: (item[0], item[1] if item[1] is not None else float("inf"))
+                    )
                 )
+                parts.append(f"{I18n.get('ai_top_list_yes')} ({detail})")
                 if labels_out is not None:
                     labels_out.append("ai_label_top_list")
             else:

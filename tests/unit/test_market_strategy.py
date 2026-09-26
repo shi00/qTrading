@@ -273,6 +273,65 @@ class TestVolumeBreakoutStrategy:
 
 
 # ============================================================================
+# VolumeBreakoutStrategy — 涨幅上限滑块覆盖 20cm 标的（检视 MAJOR-05）
+# ============================================================================
+
+
+class TestVolumeBreakoutPctChgMaxSliderBound:
+    """检视 MAJOR-05：涨幅上限滑块上界由 10 提至 20，使创业板/科创板 20cm 标的可选。
+
+    与 ``TestVolumeBreakoutStrategy`` 分列，避免与并行 PR #1208 在同一测试类内合并冲突。
+    """
+
+    def _pct_chg_max_param(self) -> dict:
+        strategy = VolumeBreakoutStrategy()
+        params = {p["name"]: p for p in strategy.get_parameters()}
+        return params["pct_chg_max"]
+
+    def test_pct_chg_max_slider_bound_is_20(self) -> None:
+        """滑块上界为 20（覆盖创业板/科创板 20cm），min/default 保持不变。"""
+        param = self._pct_chg_max_param()
+        assert param["max"] == 20
+        assert param["default"] == 7
+        assert param["min"] == 3
+
+    def test_20cm_and_mainboard_rows_both_selectable_above_10pct(self) -> None:
+        """上限设为 20 时，14%（688xxx.SH，20cm）与 9%（600xxx.SH，主板）两行均被选出。"""
+        strategy = VolumeBreakoutStrategy()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["688001.SH", "600001.SH"],
+                "name": ["科创板放量", "主板放量"],
+                "pct_chg": [14.0, 9.0],
+                "turnover_rate": [5.0, 5.0],  # 均满足 turnover_min=3
+            }
+        )
+        lf = pl.from_pandas(df).lazy()
+        context = {"params": {"pct_chg_min": 2, "pct_chg_max": 20, "turnover_min": 3}}
+        result = strategy._filter_logic(lf, context).collect()
+        codes = set(result["ts_code"].to_list())
+        assert codes == {"688001.SH", "600001.SH"}
+
+    def test_default_cap_still_excludes_20cm_row(self) -> None:
+        """对照：默认上限 7 时 14% 行仍被排除，且区间内 5% 行正常入选（默认行为未变）。"""
+        strategy = VolumeBreakoutStrategy()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["688001.SH", "600001.SH"],
+                "name": ["科创板放量", "主板放量"],
+                "pct_chg": [14.0, 5.0],
+                "turnover_rate": [5.0, 5.0],
+            }
+        )
+        lf = pl.from_pandas(df).lazy()
+        context = {"params": {"pct_chg_min": 2, "pct_chg_max": 7, "turnover_min": 3}}
+        result = strategy._filter_logic(lf, context).collect()
+        codes = set(result["ts_code"].to_list())
+        assert codes == {"600001.SH"}
+        assert "688001.SH" not in codes
+
+
+# ============================================================================
 # NorthboundHoldingStrategy — 基础冒烟
 # ============================================================================
 

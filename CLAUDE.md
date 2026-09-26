@@ -83,7 +83,7 @@
 | 性能优化 / 阈值调整 / 修改配置项 | [docs/patterns/config-quality-perf.md](./docs/patterns/config-quality-perf.md) |
 | 调整 CI / 依赖 / 版本发布 | [docs/guides/ci-cd.md](./docs/guides/ci-cd.md) |
 | 打包分发 / PyInstaller 构建 | [docs/guides/dependency-management.md](./docs/guides/dependency-management.md) |
-| 新增/修改回测 | [docs/guides/how-to.md「7. 新增回测配置」](./docs/guides/how-to.md#7-新增回测配置) |
+| 新增/修改回测 | [docs/patterns/backtest-correctness.md](./docs/patterns/backtest-correctness.md)（回测正确性正本；含回测配置流程与结论可信度边界路由） |
 | 新增测试 / E2E 测试 | [docs/guides/testing.md](./docs/guides/testing.md) |
 | Git 操作 / worktree / 创建 PR / 创建 Issue | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md) |
 | 内置 PostgreSQL 离线维护 / 数据恢复 | [docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」](./docs/guides/how-to.md#9-内置-postgresql-离线维护) |
@@ -106,7 +106,7 @@
 
 - **禁止臆造 API**：使用任何库 API 前，若不确定其存在/签名/语义，必须先读源码或官方文档验证，禁止凭记忆编造（Flet/Polars/SQLAlchemy 等版本演进快，尤须核实）。Flet API 优先经 `flet-mcp` 的 `get_api` 工具验证（方案见 [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md)；"not found" 在 api.json 完整收录且 flet-mcp 与主包 `==` 锁步对齐时具权威性；版本见 `pyproject.toml`）。
 - **禁止臆断行号/符号**：引用代码位置以符号名（函数/类/常量）为准，不得声称"第 N 行是 X"而未实际读取。
-- **禁止臆造红线编号**：引用 R1~R23 前确认其存在与含义；编号 append-only，不复用废弃编号。
+- **禁止臆造红线编号**：引用 R1~R24 前确认其存在与含义；编号 append-only，不复用废弃编号。
 - **不确定即验证**：某 API 在当前版本是否可用/已删除，以 `pyproject.toml` 锁定版本的**实际行为**为准。
 
 ---
@@ -118,7 +118,7 @@
 **数据流**：Tushare/Akshare → `data/sync` 落库 → 数据质量门控分级（`QualityTier`：CRITICAL / BRONZE / SILVER / GOLD）→ `strategies` 向量化筛选（Polars）→ AI 复评（LiteLLM）→ UI 展示 / 回测归因。任一环的偏差都会让最终名单「看起来正常却系统性失真」。
 
 **什么叫「正确的结果」**：选股与回测结论的可信度取决于四项，缺一即失真——
-1. **取数时点**：进入策略/回测的数据不得晚于被决策的交易日；用当前快照（行业分类、指数成分、票池、财报最新值）参与历史计算即前视偏差（拟议红线 R24「时点正确性」，落地前以本节描述为准；回测正确性暂无 canonical 正本，属已知缺口）。
+1. **取数时点**：进入策略/回测的数据不得晚于被决策的交易日；用当前快照（行业分类、指数成分、票池、财报最新值）参与历史计算即前视偏差（R24「时点正确性」，报告模式；回测正确性 canonical 正本见 [docs/patterns/backtest-correctness.md](./docs/patterns/backtest-correctness.md)）。
 2. **单位**：已知金额/数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）禁止裸数值比较，须经 `threshold_in_data_unit()` 换算（R20）。
 3. **票池构造**：退市股是否在池内（幸存者偏差）与成分/行业归属的生效时点，决定回测是否可复现（同第 1 项）。
 4. **缺失值表示**：`score` / `ai_score` / `confidence` 等业务语义字段缺失必须用 `None`/哨兵，禁止填业务上合法的具体值（`0` 分、`50%` 置信度）——R21。
@@ -158,6 +158,7 @@
 | R21 | **缺失值伪装** | 业务语义字段（`score` / `ai_score` / `confidence` 等）缺失必须用 `None`/哨兵表示，禁止填充业务上合法的具体值（`0` 分、`50%` 置信度、空表视为「无限制」）；变体（BT-03）：「可信度元数据在持久化边界丢失」——`data_warnings` / `failed_signal_dates` / 配置快照等已知不可信信号落库后被丢弃、UI 渲染为「无问题」，等同把「已知不可信」伪装成「无信息」 | pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R21 报告模式升级期限」（2026-12-31） |
 | R22 | **水位线单调性** | checkpoint / 高水位语义的持久化状态（如 `set_app_state` 写入的断点续传水位），写入必须单调（优先 `*_max` 语义或 GREATEST 保护），且单测必须含乱序写入用例并断言最终值为最大值 | pre-commit（check_redlines.py）+ 仅人工评审 |
 | R23 | **裸 UI token** | UI 层裸 `ft.Colors` 色值引用与裸字号数值（如 `ft.Text(size=13)`）必须改用 AppStyles 定义的 token（`FONT_SIZE_*` 等） | pre-commit（check_redlines.py） |
+| R24 | **时点正确性** | 任何进入策略或回测的数据，其取数时点不得晚于被决策的交易日；使用「当前快照」类维度（行业分类、指数成分、股票池、财报最新值）参与历史区间计算即违规，必须改用带生效日期的维度表，或显式声明为「当期近似」并在结果中标注 | pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R24 报告模式升级期限」（2026-12-31） |
 
 > **红线自动化现状**：各红线的守护函数与覆盖维度见 [docs/governance/redlines.yml](./docs/governance/redlines.yml) 的 `enforcement` / `checks` / `automation_coverage` 字段；无自动化的红线（标注 `仅人工评审`）**须逐条回答下方自查清单**（判据正本为 `redlines.yml` 的 `self_check` 字段，把「自查」从态度变为可勾选清单），**且无自动拦截（`automation_coverage: none` 或仅报告模式）且影响产品结论的红线（R21、R24）须经独立会话复核**（见 [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) 的 ROUND3-05）；R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。
 
@@ -265,6 +266,7 @@
 | 常用开发与测试命令 / 交付前 DoD / 变更类型→最小验证子集 | 「常用开发与测试命令」 |
 | 完整技术栈表 / 完整目录结构 / 同层合并原则 | 「AI 助手方法论与项目概览」 |
 | 已知架构技术债 | [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) |
+| 回测/选股正确性（时点正确性 / 幸存者偏差 / 复权口径 / 财报修订 / 结论可信度边界） | [docs/patterns/backtest-correctness.md](./docs/patterns/backtest-correctness.md) |
 | Flet UI 开发、设计、API、无障碍、项目差异、升级与 CanvasKit E2E 避坑 | [docs/flet/README.md](./docs/flet/README.md) |
 | Flet MCP 使用规范（AI 验证 Flet API 的操作指南，对应 §1.10 反幻觉红线） | [docs/flet/mcp-usage.md](./docs/flet/mcp-usage.md) |
 | 测试规范 | [docs/guides/testing.md](./docs/guides/testing.md) |

@@ -15,6 +15,9 @@
 - R_tushare_token_log: 扫描 tushare_client.py 中 logger 调用是否直接打印 self.token / token 明文 (R9 红线)
 - R_lazy_import_whitelist: 扫描函数体内禁止方向的跨层 import 是否带 # lazy-import: <原因> 注释（review01-A2-2）
 - R20 单位核对（报告模式，warning 不阻断）：扫描 strategies/ 下已知金额/数量列的裸数值比较
+- R24 时点正确性（报告模式，warning 不阻断）：扫描 strategies/ 下「当前快照」维度（无生效日期
+  的行业/指数/股票池维度表、ORM 类、派生列键）的使用，提示人工确认取数时点（正本见
+  docs/patterns/backtest-correctness.md）
 - R21 缺失值伪装（报告模式，warning 不阻断）：扫描 services/strategies 下业务语义字段被填充 0 / 50
   （复用 scripts/prototype_business_redlines.py 的 MissingMaskingVisitor，单一实现避免双实现漂移）
 
@@ -1663,6 +1666,86 @@ def check_R20() -> int:
 
 
 # ============================================================================
+# R24 时点正确性（报告模式，warning 不阻断）：策略/回测中使用「当前快照」维度
+# ============================================================================
+
+# 「当前快照」维度 = 无生效日期（effective date）主键、只能表达「今天所知」的维度表，
+# 在历史区间回测/选股中直接使用即前视候选（正本语义见 docs/patterns/backtest-correctness.md，
+# 表结构证据见 data/persistence/models.py 与 review03 DAT-08②）。
+_R24_SNAPSHOT_TABLES = frozenset(
+    {
+        "sw_industry_member",  # 申万行业成员（全局快照，主键不含日期）
+        "sw_industry_classify",  # 申万行业分类（全局快照）
+        "index_member_all",  # 指数成分（全局快照）
+    }
+)
+# 上述维度表的 ORM 类名（策略层直接引用 ORM 类亦为候选）
+_R24_SNAPSHOT_CLASSES = frozenset({"SwIndustryMember", "SwIndustryClassify", "IndexMemberAll"})
+# 承载「当前快照」行业维度的列名/上下文字典键（由上述快照表派生，无生效日期）
+_R24_SNAPSHOT_FIELDS = frozenset({"industry_sw_l2", "sw_industry"})
+
+
+def _check_R24_in_tree(tree: ast.Module, source_path: Path) -> list[str]:
+    """纯函数：检查 AST 中「当前快照」维度表/ORM 类/维度列的使用（R24 报告模式）。
+
+    返回 warning 文本列表（R24 报告模式不阻断 exit code）。命中为「需要人工确认取数时点」的
+    候选，非确定违规：确认参与跨期历史区间计算即违规（应改用带生效日期的维度表，或显式声明
+    「当期近似」并在结果中标注）；确认仅在同日截面 / 已按 as_of 过滤的上下文中使用则放行。
+    """
+    warnings: list[str] = []
+    try:
+        rel = source_path.relative_to(ROOT)
+    except ValueError:
+        # 契约测试用临时文件构造 AST（不在 ROOT 下），fallback 到绝对路径显示
+        rel = source_path
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value in _R24_SNAPSHOT_TABLES:
+                warnings.append(
+                    f"R24 时点正确性: {rel}:{node.lineno} 引用无生效日期的快照维度表 {node.value!r}"
+                    f"（历史区间计算中直接使用即前视；须改用带生效日期的维度表或显式声明「当期近似」）"
+                )
+            elif node.value in _R24_SNAPSHOT_FIELDS:
+                warnings.append(
+                    f"R24 时点正确性: {rel}:{node.lineno} 引用当前快照行业维度 {node.value!r}"
+                    f"（确认是否参与跨期历史区间计算；是则须带生效日期或标注「当期近似」）"
+                )
+        elif isinstance(node, ast.Name) and node.id in _R24_SNAPSHOT_CLASSES:
+            warnings.append(
+                f"R24 时点正确性: {rel}:{node.lineno} 引用无生效日期的快照维度 ORM 类 {node.id}"
+                f"（历史区间计算中直接使用即前视；须改用带生效日期的维度表或显式声明「当期近似」）"
+            )
+    return warnings
+
+
+def check_R24() -> int:
+    """R24（报告模式，warning 不阻断）：扫描 strategies/ 下对「当前快照」维度的使用。
+
+    第一阶段为报告模式：warning 输出到 stderr、不阻断 exit code，全库实测误报率，
+    达标后评估升级为硬拦截（第二阶段）。语义见 docs/governance/redlines.yml R24
+    （NEW_CODE；统一判据：取数时点不得晚于被决策交易日，正本见
+    docs/patterns/backtest-correctness.md）。返回 WARNING 条数，供 main() 汇总（GATE-05）。
+    """
+    warnings: list[str] = []
+    target_dir = ROOT / "strategies"
+    if not target_dir.exists():
+        return 0
+    for p in _iter_py_files(target_dir):
+        tree = _parse_module(p)
+        if tree is None:
+            continue
+        warnings.extend(_check_R24_in_tree(tree, p))
+    if warnings:
+        print(
+            f"[WARN] R24 时点正确性 {len(warnings)} 处（报告模式，请人工复核取数时点；误报率达标后升级为拦截）：",
+            file=sys.stderr,
+        )
+        for w in warnings:
+            print(f"  - {w}", file=sys.stderr)
+    return len(warnings)
+
+
+# ============================================================================
 # R21 缺失值伪装（报告模式，warning 不阻断）：业务语义字段被填充 0 / 50 等合法具体值
 # ============================================================================
 
@@ -1733,8 +1816,8 @@ def main() -> int:
         ("R22 水位线单调性 (D3-m1)", check_R22()),
     ]
     # R4 f-string SQL 模板为 WARNING（不阻断），输出到 stderr；返回计数供 [PASS] 汇总（GATE-05）
-    # R20 单位核对 / R21 缺失值伪装为 WARNING（报告模式，不阻断），输出到 stderr
-    warn_count = check_R4_fstring_sql() + check_R20() + check_R21()
+    # R20 单位核对 / R21 缺失值伪装 / R24 时点正确性为 WARNING（报告模式，不阻断），输出到 stderr
+    warn_count = check_R4_fstring_sql() + check_R20() + check_R21() + check_R24()
     all_errors: list[str] = []
     for _, errs in checks:
         all_errors.extend(errs)
@@ -1748,7 +1831,7 @@ def main() -> int:
     print(
         "[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15/R16 + R_no_bare_ft_colors_in_ui + R_no_bare_font_size_in_ui + R_tushare_token_log + R_lazy_import_whitelist + R4 text(f) DAT-08 + UIX-10 渲染副作用 + R22 水位线单调性）"
         + (
-            f"；含 {warn_count} 条 WARNING（R4 f-string SQL / R20 单位核对 / R21 缺失值伪装，不阻断但请人工复核）"
+            f"；含 {warn_count} 条 WARNING（R4 f-string SQL / R20 单位核对 / R21 缺失值伪装 / R24 时点正确性，不阻断但请人工复核）"
             if warn_count
             else ""
         )

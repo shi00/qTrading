@@ -6,7 +6,7 @@
 # 契约测试: tests/unit/test_docs_consistency.py::TestRedlinesYamlConsistency
 #
 # 字段说明:
-#   id: 红线编号 (append-only, 不复用废弃编号, 连续 R1~R23)
+#   id: 红线编号 (append-only, 不复用废弃编号, 连续 R1~R24)
 #   title: 红线标题 (对应 CLAUDE.md §3.1 表格「红线」列)
 #   description: 红线说明 (对应 CLAUDE.md §3.1 表格「说明」列)
 #   enforcement: 强制状态 (对应 CLAUDE.md §3.1 表格「强制状态」列)
@@ -261,6 +261,16 @@ redlines:
     checks:
       - check_R_no_bare_ft_colors_in_ui
       - check_R_no_bare_font_size_in_ui
+    automation_coverage: partial
+    human_review_required: true
+    rule_type: NEW_CODE
+
+  - id: R24
+    title: 时点正确性
+    description: "任何进入策略或回测的数据，其取数时点不得晚于被决策的交易日；使用「当前快照」类维度（行业分类、指数成分、股票池、财报最新值）参与历史区间计算即违规，必须改用带生效日期的维度表，或显式声明为「当期近似」并在结果中标注"
+    enforcement: "pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R24 报告模式升级期限」（2026-12-31）"
+    checks:
+      - check_R24
     automation_coverage: partial
     human_review_required: true
     rule_type: NEW_CODE

@@ -46,20 +46,60 @@ REVIEW_STATS_WINDOW_DAYS = 180
 
 # _LEARNING_CONTEXT_BASE_SQL removed - refactored to SQLAlchemy Core
 
+# review09-24-dim01-major01: 退市整理期识别的自然日窗口。退市整理期约 15 个交易日
+# （约 21 自然日），留节假日余量故取 30；值拼接进 SQL 的 INTERVAL，为受控模块常量、
+# 非用户输入，无注入面（与 REVIEW_STATS_WINDOW_DAYS 同模式）。
+# NOTE(lazy): delist_date 窗口分支复用同步快照字段，未验证其回填时点. ceiling: 若 Tushare
+# 仅在 list_status='D' 时回填 delist_date，则退市整理期（状态仍为 L）该分支恒假，机制退化为
+# 纯名称匹配；本机无可用 PG，无法构造数据探针实测该口径. upgrade: 拿到可用 PG 后补数据探针，
+# 或经 Tushare 口径确认后调整（届时按结果决定收敛到名称项/改用公告日期维度表）.
+_DELISTING_LOOKAHEAD_DAYS = 30
 
-# review03-C7: 单日/区间选股 SQL 静态模板。__CLOSE_COND__ 与 __STOCK_ALIVE_CONDITION__
-# 为唯一可变点，分别由 _build_screening_sql/_build_screening_sql_range 按 require_close
-# 布尔与 PIT 时点（DAT-01）替换为模块受控片段（无用户输入），避免 f-string 拼 SQL 模式。
+
+def _delisting_flag_expr(as_of: str) -> str:
+    """退市整理期/已公告退市派生列表达式（唯一正本，单日与区间模板共用）。
+
+    - delist_date 项（结构化，优先依赖）：b.delist_date 非空且落在 (as_of, as_of + N 天]
+      窗口内 → 已公告退市（stock_alive_condition 已保证存活行满足 delist_date > as_of
+      或为 NULL）。
+    - 名称项（兜底近似）：as-of 生效名称含「退」→ 退市整理期标识。名称虽经 name-history
+      LATERAL JOIN 按 as-of 还原，但无历史覆盖行时 COALESCE 回退**当前**名称；因此区间
+      回放时，尚未进入整理期的历史日期可能因当前名称带「退」而被前视剔除。该行为受
+      name-history 覆盖度影响，属**已知近似（R24 报告模式）**，不得宣称无前视偏差。
+    - R21：delist_date 尚未回填时不得把「未知」当作「未退市」；两分支均为确定性
+      表达式（True/False），缺失信息优先由结构化 delist_date 承载，名称项兜底。
+
+    Args:
+        as_of: 时点参数占位符（"$5" / "cal.cal_date"）——必须为代码受控常量，
+               禁止传入任何用户输入（R4 纵深防御）。
+    """
+    return (
+        "CASE WHEN UPPER(COALESCE(nh.name, b.name)) LIKE '%退%'"
+        f" OR (b.delist_date IS NOT NULL AND b.delist_date > {as_of}"
+        f" AND b.delist_date <= {as_of} + INTERVAL '{_DELISTING_LOOKAHEAD_DAYS} days')"
+        " THEN TRUE ELSE FALSE END"
+    )
+
+
+# review03-C7: 单日/区间选股 SQL 静态模板。__CLOSE_COND__、__STOCK_ALIVE_CONDITION__
+# 与 __DELISTING_FLAG__ 为唯一可变点，分别由 _build_screening_sql/_build_screening_sql_range
+# 按 require_close 布尔与 PIT 时点（DAT-01）替换为模块受控片段（无用户输入），避免
+# f-string 拼 SQL 模式。
 # __STOCK_ALIVE_CONDITION__ 必须经 stock_alive_condition() 渲染（唯一正本），禁止内联复制。
+# __DELISTING_FLAG__ 必须经 _delisting_flag_expr() 渲染（唯一正本），禁止内联复制。
 # DS-02（ST 时点还原链路）：name 列经 name-history LATERAL JOIN 按 as-of 时点还原历史名称
 # （无历史记录时 COALESCE 回退当前名称 stock_basic.name，防空表把全市场误判为非 ST）；
-# 新增派生列 is_st（UPPER(name) LIKE '%ST%'，覆盖 *ST/S*ST，与 _get_limit_pct 语义一致），
-# 供数据层行过滤排除风险警示股（P2）与 as-of 名称涨跌停判定。as-of 参数复用既有 $5
-# （单日版，恒等于 trade_date）与 cal.cal_date（区间版），不新增参数位。
+# 新增派生列 is_st（UPPER(name) LIKE '%ST%'，覆盖 *ST/S*ST，与 utils.limit_status.get_limit_pct
+# 语义一致），供数据层行过滤排除风险警示股（P2）与 as-of 名称涨跌停判定。
+# 新增派生列 is_delisting（名称含「退」或 delist_date 落在 as-of 后 N 天窗口内），供数据层
+# 行过滤排除退市整理期股票（选股池可推荐性）；与 stock_alive_condition 的「数据可见性」
+# 判定分离——退市整理期内确有行情（可见），但不适合推荐（不可推荐），两语义不得混用。
+# as-of 参数复用既有 $5（单日版，恒等于 trade_date）与 cal.cal_date（区间版），不新增参数位。
 _SCREENING_SQL_TEMPLATE = """
               SELECT b.ts_code,
                      COALESCE(nh.name, b.name) AS name,
                      CASE WHEN UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%' THEN TRUE ELSE FALSE END AS is_st,
+                     __DELISTING_FLAG__ AS is_delisting,
                      m.l2_name AS industry_sw_l2,
                      b.industry AS industry_tushare,
                      b.list_date,
@@ -112,25 +152,25 @@ _SCREENING_SQL_TEMPLATE = """
                                          WHERE ann_date IS NOT NULL AND ann_date <= $3) f_inner
                                    WHERE f_inner.rn = 1) f
                                   ON b.ts_code = f.ts_code
-                        LEFT JOIN (SELECT g.ts_code,
-                                          g.grossprofit_margin AS gpm_prev
-                                   FROM (SELECT f2.ts_code,
-                                                f2.grossprofit_margin,
+                        LEFT JOIN (SELECT f2.ts_code,
+                                          f2.grossprofit_margin AS gpm_prev
+                                   FROM (SELECT fr.ts_code,
+                                                fr.grossprofit_margin,
+                                                fr.end_date,
+                                                MAX(fr.end_date) OVER (
+                                                    PARTITION BY fr.ts_code
+                                                ) AS latest_end_date,
                                                 ROW_NUMBER() OVER (
-                                                    PARTITION BY f2.ts_code
-                                                    ORDER BY f2.end_date DESC
-                                                ) AS pr
-                                         FROM (SELECT fr.ts_code,
-                                                      fr.grossprofit_margin,
-                                                      fr.end_date,
-                                                      ROW_NUMBER() OVER (
-                                                          PARTITION BY fr.ts_code, fr.end_date
-                                                          ORDER BY fr.ann_date DESC
-                                                      ) AS rn_period
-                                               FROM financial_reports fr
-                                               WHERE fr.ann_date IS NOT NULL AND fr.ann_date <= $3) f2
-                                         WHERE f2.rn_period = 1) g
-                                   WHERE g.pr = 2) f_prev
+                                                    PARTITION BY fr.ts_code, fr.end_date
+                                                    ORDER BY fr.ann_date DESC
+                                                ) AS rn_period
+                                         FROM financial_reports fr
+                                         WHERE fr.ann_date IS NOT NULL AND fr.ann_date <= $3) f2
+                                   -- SC-03: gpm_prev 取「上年同期」（end_date 月日相同、年份 -1），
+                                   -- 与最新期同口径可比；旧口径取 rn 次新期会在最新期为一季报时
+                                   -- 拿上年年报毛利率作比较（跨期不可比，DAT-09）。
+                                   WHERE f2.rn_period = 1
+                                     AND f2.end_date = (f2.latest_end_date - INTERVAL '1 year')::date) f_prev
                                   ON b.ts_code = f_prev.ts_code
                         LEFT JOIN LATERAL (
                             SELECT l2_name
@@ -161,6 +201,7 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
               SELECT b.ts_code,
                      COALESCE(nh.name, b.name) AS name,
                      CASE WHEN UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%' THEN TRUE ELSE FALSE END AS is_st,
+                     __DELISTING_FLAG__ AS is_delisting,
                      m.l2_name AS industry_sw_l2,
                      b.industry AS industry_tushare,
                      b.list_date,
@@ -215,9 +256,8 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                             SELECT g.grossprofit_margin AS gpm_prev
                             FROM (
                                 SELECT f2.grossprofit_margin,
-                                       ROW_NUMBER() OVER (
-                                           ORDER BY f2.end_date DESC
-                                       ) AS pr
+                                       f2.end_date,
+                                       MAX(f2.end_date) OVER () AS latest_end_date
                                 FROM (
                                     SELECT fr.grossprofit_margin,
                                            fr.end_date,
@@ -232,7 +272,8 @@ _SCREENING_SQL_RANGE_TEMPLATE = """
                                 ) f2
                                 WHERE f2.rn_period = 1
                             ) g
-                            WHERE g.pr = 2
+                            -- SC-03: 同单日模板，gpm_prev 取「上年同期」保证跨期可比（DAT-09）
+                            WHERE g.end_date = (g.latest_end_date - INTERVAL '1 year')::date
                         ) f_prev ON TRUE
                         LEFT JOIN LATERAL (
                             SELECT l2_name
@@ -501,7 +542,10 @@ class ScreenerDao(BaseDao):
         # DAT-01: __STOCK_ALIVE_CONDITION__ 由 stock_alive_condition() 唯一正本渲染。
         close_clause = "q.close IS NOT NULL\n                 AND " if require_close else ""
         sql = _SCREENING_SQL_TEMPLATE.replace("__CLOSE_COND__", close_clause)
-        return sql.replace("__STOCK_ALIVE_CONDITION__", stock_alive_condition(alias="b.", as_of="$5"))
+        sql = sql.replace("__STOCK_ALIVE_CONDITION__", stock_alive_condition(alias="b.", as_of="$5"))
+        # review09-24-dim01-major01: is_delisting 派生列经 _delisting_flag_expr 唯一正本渲染，
+        # as-of 复用既有 $5（恒等于 trade_date），不新增参数位。
+        return sql.replace("__DELISTING_FLAG__", _delisting_flag_expr("$5"))
 
     async def get_screening_data(self, trade_date: str | datetime.date | None = None):
         # DS-05: screening ⊂ fundamental（同模板唯差 close 条件），由全集内存派生，
@@ -525,10 +569,13 @@ class ScreenerDao(BaseDao):
         # DAT-01: __STOCK_ALIVE_CONDITION__ 由 stock_alive_condition() 唯一正本渲染。
         close_clause = "q.close IS NOT NULL AND " if require_close else ""
         sql = _SCREENING_SQL_RANGE_TEMPLATE.replace("__CLOSE_COND__", close_clause)
-        return sql.replace(
+        sql = sql.replace(
             "__STOCK_ALIVE_CONDITION__",
             stock_alive_condition(alias="b.", as_of="cal.cal_date"),
         )
+        # review09-24-dim01-major01: is_delisting 派生列 as-of 用 cal.cal_date（逐交易日 PIT），
+        # 与 name-history 财务等 LATERAL 子查询同模式，不得复用单日版 $5。
+        return sql.replace("__DELISTING_FLAG__", _delisting_flag_expr("cal.cal_date"))
 
     async def get_screening_data_range(self, start_date: str, end_date: str, max_rows: int | None = None):
         # DS-05: 同 get_screening_data，由区间全集派生，消除 preload_range 双份 150 万行

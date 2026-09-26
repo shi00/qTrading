@@ -146,6 +146,11 @@ COMMON_COLUMNS = {
     "benchmark_code": "col_benchmark_code",
     "run_id": "col_run_id",
     "params_snapshot": "col_params_snapshot",
+    # CRITICAL-02 (R21/BT-03)：screening_history 执行期可信度元数据列标签。
+    # OSS-01 后列级声明已从 TABLE_DEFINITIONS 移除（列集合由 ORM 派生），列标签的
+    # 唯一登记处即本表（与 params_snapshot 同惯例）。
+    "exec_warnings": "col_exec_warnings",
+    "filter_attribution": "col_filter_attribution",
     # Sync Status
     "table_name": "col_table_name",
     "last_sync_date": "col_last_sync_date",

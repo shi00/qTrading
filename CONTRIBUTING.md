@@ -689,6 +689,7 @@ except Exception as e:
 - [task-manager.md](./docs/patterns/task-manager.md) — TaskManager 任务生命周期
 - [config-quality-perf.md](./docs/patterns/config-quality-perf.md) — 配置管理、质量门控、性能监控
 - [mvvm.md](./docs/patterns/mvvm.md) — MVVM 表现层
+- [backtest-correctness.md](./docs/patterns/backtest-correctness.md) — 回测/选股正确性正本（时点正确性 / 幸存者偏差 / 复权口径 / 财报修订 / 结论可信度边界）
 
 ### docs/flet/ — Flet 开发专项
 
@@ -714,7 +715,7 @@ except Exception as e:
 
 ### docs/governance/ — 治理类机器可读文件
 
-- [redlines.yml](./docs/governance/redlines.yml) — CLAUDE.md §3.1 红线表的机器可读镜像（R1~R23 编号/标题/说明/enforcement/human_review_required）
+- [redlines.yml](./docs/governance/redlines.yml) — CLAUDE.md §3.1 红线表的机器可读镜像（R1~R24 编号/标题/说明/enforcement/human_review_required）
 - [exceptions.yml](./docs/governance/exceptions.yml) — 架构边界例外注册表（rule_id 维度，协议级例外的唯一登记入口）
 - [canonical-topics.yml](./docs/governance/canonical-topics.yml) — 主题→canonical 正本映射（决策树机器可读镜像）
 - [governance-ids.md](./docs/governance/governance-ids.md) — 治理 ID 对照表（ID → 一句话含义；溯源对照）
@@ -724,7 +725,7 @@ except Exception as e:
 
 - [ai-review.md](./docs/reviews/ai-review.md) — 核心协议（51 条稳定规则 ID：SAFE/INPUT/MODE/ROUND1-3/STOP/FIND/EVID/SEV/OUT/CHECK）
 - [review-profiles/](./docs/reviews/review-profiles/) — 9 个专项 Profile（Web/API、前端/移动、消息/管道、数据库/迁移、CLI/IaC、库/SDK、第三方/RPA、AI/ML/LLM、项目 Profile）
-- [quality-dimensions.md](./docs/reviews/quality-dimensions.md) — 10 个通用质量维度详细要点
+- [quality-dimensions.md](./docs/reviews/quality-dimensions.md) — 11 个通用质量维度详细要点
 - [scenario-completeness.md](./docs/reviews/scenario-completeness.md) — 场景完整性与遗漏方法
 - [review-result.schema.json](./docs/reviews/review-result.schema.json) — 机器可读输出 Schema（JSON Schema Draft 2020-12，供人工/后续自动校验）
 - [review-policy.yaml](./docs/reviews/review-policy.yaml) — 门禁策略（P0-P3 / 阻断规则 / 豁免 / CI 退出码，模型不决定最终门禁）

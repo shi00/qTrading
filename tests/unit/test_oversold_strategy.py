@@ -1246,5 +1246,171 @@ class TestOversoldExcludeSt:
         assert warnings[0].params == {"count": 1}
 
 
+# --- G1/G3: OversoldStrategy（pandas 路径）退市整理期排除接线（review09-24-dim01-major01） ---
+
+
+class TestOversoldExcludeDelisting:
+    """G1: 退市排除与 Polars 路径同源；G3: 端到端经 _math_filter 验证接线生效。"""
+
+    @staticmethod
+    def _make_context(dp, snapshot):
+        return _make_context_for_math_filter(dp, snapshot, datetime.date(2024, 6, 14))
+
+    async def test_math_filter_excludes_delisting_and_reports_warning(self):
+        """_math_filter 紧随 ST 排除后接线退市排除，排除数经 D3-4 warnings 上报。"""
+        s = OversoldStrategy()
+        dp = _make_dp_for_math_filter()
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+        snapshot = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "600999.SS"],
+                "name": ["平安银行", "万科A", "某某退"],
+                "close": [7.0, 8.0, 5.0],
+                "is_delisting": [False, False, True],
+            }
+        )
+        context = self._make_context(dp, snapshot)
+
+        with patch("strategies.oversold_strategy._compute_rsi_filter", side_effect=_fake_compute_rsi_filter):
+            result = await s._math_filter(context, 14, 30, 0.5)
+
+        assert "600999.SS" not in result["ts_code"].tolist(), "退市行必须经 _math_filter 接线被排除"
+        assert set(result["ts_code"].tolist()) == {"000001.SZ", "000002.SZ"}
+        warnings = context.get("warnings", [])
+        assert len(warnings) == 1
+        assert warnings[0].key == "strategy_excluded_delisting"
+        assert warnings[0].params == {"count": 1}
+
+    async def test_math_filter_delisting_excluded_even_when_st_disabled(self):
+        """退市排除无用户开关：exclude_st=False 仅保留 ST 行，退市行仍被排除。"""
+        s = OversoldStrategy()
+        dp = _make_dp_for_math_filter()
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+        snapshot = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "600001.SS", "600999.SS"],
+                "name": ["平安银行", "*ST 某某", "某某退"],
+                "close": [7.0, 6.0, 5.0],
+                "is_st": [False, True, False],
+                "is_delisting": [False, False, True],
+            }
+        )
+        context = self._make_context(dp, snapshot)
+        context["exclude_st"] = False
+
+        with patch("strategies.oversold_strategy._compute_rsi_filter", side_effect=_fake_compute_rsi_filter):
+            result = await s._math_filter(context, 14, 30, 0.5)
+
+        assert set(result["ts_code"].tolist()) == {"000001.SZ", "600001.SS"}
+        assert [m.key for m in context.get("warnings", [])] == ["strategy_excluded_delisting"]
+
+
+# --- MAJOR-02: 取数窗口随 RSI 周期驱动 + day_count 门槛空集诊断 ---
+
+
+def _make_long_history_pdf(n_days: int, end_date: datetime.date = datetime.date(2024, 6, 14)) -> pd.DataFrame:
+    """构造 n_days 根单调下跌日线（RSI 必然超跌），供窗口/门槛参数化测试复用。"""
+    dates = [end_date - datetime.timedelta(days=i) for i in range(n_days)]
+    dates.reverse()
+    return pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"] * n_days,
+            "trade_date": [d.strftime("%Y%m%d") for d in dates],
+            "open": [10.0] * n_days,
+            "high": [10.5] * n_days,
+            "low": [9.5] * n_days,
+            "close": [10.0 - i * 0.05 for i in range(n_days)],
+            "vol": [1000.0 + i * 50 for i in range(n_days)],
+            "amount": [10000.0 + i * 500 for i in range(n_days)],
+            "pct_chg": [-0.5] * n_days,
+        }
+    )
+
+
+@pytest.mark.parametrize("rsi_period", [14, 20, 24, 25, 30])
+async def test_math_filter_window_scales_with_rsi_period(rsi_period):
+    """MAJOR-02: 取数窗口随 rsi_period 扩张，滑块各档（含死档 25/30）均能选出必然超跌标的。
+
+    替身把日历窗口 [start, end] 真实施加到行情切片上，使 day_count 受窗口约束——
+    修复前窗口固定 120，period>=25 门槛 125+ 恒不可满足，本用例在 25/30 档失败。
+    """
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    end_date = datetime.date(2024, 6, 14)
+    history_pdf = _make_long_history_pdf(200, end_date)
+
+    dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(
+        side_effect=lambda end, n: end - datetime.timedelta(days=n)
+    )
+
+    def _slice_by_window(**kwargs):
+        start_s = kwargs["start_date"].strftime("%Y%m%d")
+        end_s = kwargs["end_date"].strftime("%Y%m%d")
+        mask = (history_pdf["trade_date"] >= start_s) & (history_pdf["trade_date"] <= end_s)
+        return history_pdf[mask].reset_index(drop=True)
+
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(side_effect=_slice_by_window)
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
+    context = _make_context_for_math_filter(dp, snapshot, end_date)
+
+    result = await s._math_filter(context, rsi_period, 30, 0.5)
+
+    assert not result.empty, f"period={rsi_period} 未能选出必然超跌标的"
+    assert result["ts_code"].tolist() == ["000001.SZ"]
+    window_arg = dp.trade_calendar.get_start_date_by_trade_days.call_args[0][1]
+    assert window_arg >= rsi_period * 5
+
+
+@pytest.mark.parametrize("rsi_period", [25, 30])
+async def test_math_filter_insufficient_history_diagnostic(rsi_period):
+    """MAJOR-02: 窗口内 K 线不足门槛时，空集须给出「历史长度不足」归因，不得静默（R21）。"""
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    end_date = datetime.date(2024, 6, 14)
+    history_pdf = _make_long_history_pdf(60, end_date)  # 60 < period*5
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=history_pdf)
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
+    context = _make_context_for_math_filter(dp, snapshot, end_date)
+
+    result = await s._math_filter(context, rsi_period, 30, 0.5)
+
+    assert result.empty
+    warnings = context.get("warnings", [])
+    assert len(warnings) == 1
+    assert warnings[0].key == "strategy_oversold_insufficient_history"
+    assert warnings[0].params == {"period": rsi_period, "required": rsi_period * 5, "max": 60}
+
+
+async def test_math_filter_no_history_warning_when_bars_sufficient():
+    """MAJOR-02: 窗口内 K 线充足、空集由 RSI/量比导致时，不应误报历史不足。"""
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    end_date = datetime.date(2024, 6, 14)
+    n_days = 200
+    dates = [end_date - datetime.timedelta(days=i) for i in range(n_days)]
+    dates.reverse()
+    history_pdf = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"] * n_days,
+            "trade_date": [d.strftime("%Y%m%d") for d in dates],
+            "open": [10.0] * n_days,
+            "high": [10.5] * n_days,
+            "low": [9.5] * n_days,
+            "close": [10.0 + i * 0.05 for i in range(n_days)],  # 单调上涨 → RSI 高
+            "vol": [1000.0] * n_days,
+            "amount": [10000.0] * n_days,
+            "pct_chg": [0.5] * n_days,
+        }
+    )
+    dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=history_pdf)
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [13.0]})
+    context = _make_context_for_math_filter(dp, snapshot, end_date)
+
+    result = await s._math_filter(context, 14, 30, 0.5)
+
+    assert result.empty
+    assert context.get("warnings") is None
+
+
 if __name__ == "__main__":
     unittest.main()

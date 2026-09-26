@@ -104,9 +104,8 @@ topics:
 
   - id: backtest
     title: 新增/修改回测
-    canonical: docs/guides/how-to.md
-    section: 7. 新增回测配置
-    note: 无独立回测正本，配置流程承载于 how-to
+    canonical: docs/patterns/backtest-correctness.md
+    note: 回测正确性正本（时点正确性 / 幸存者偏差 / 复权口径 / 财报修订 / 结论可信度边界）；配置流程见 how-to.md
 
   - id: config
     title: 修改配置项

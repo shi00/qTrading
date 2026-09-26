@@ -77,7 +77,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry & target
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: ${{ matrix.target }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
@@ -99,7 +99,7 @@ jobs:
 
       - name: Install cargo-llvm-cov (Linux only)
         if: matrix.os == 'linux'
-        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3  # v2.87.16
+        uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12  # v2.87.18
         with:
           tool: cargo-llvm-cov
 
@@ -170,7 +170,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry & target
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: release-${{ matrix.target }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
@@ -221,7 +221,7 @@ jobs:
           toolchain: 1.97.1
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3  # v2.87.16
+        uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12  # v2.87.18
         with:
           tool: cargo-audit
 
@@ -279,7 +279,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache Cargo registry & target
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: release-${{ matrix.target }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}

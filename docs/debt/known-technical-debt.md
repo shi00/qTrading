@@ -11,6 +11,8 @@
 ## 技术债索引
 
 > 本索引用于「先扫索引再选读」：每行对应用一条完整债目（见下方分节三级标题）。级别均为 P3；upgrade 触发条件摘录自该条目的「期望的最终解法」。
+>
+> **结论可信度边界类条目不占本索引**：`DAT-07` / `DAT-08`（回测不可复现 / 回测前视 / 存量污染）为「无计划升级（文档化决策）」的已接受权衡，产品含义已迁入 [backtest-correctness.md](../patterns/backtest-correctness.md)「已知限制」，决策记录见本文件「已接受的权衡」章节；回测路径 `BT-05` 亦在该正本「已知限制」登记（其代码欠债条目仍在本索引，见 `P3-BT05-QualityGate-Bypass`）。
 
 | ID | 一句话 | 级别 | upgrade 触发条件 |
 |----|--------|------|------------------|
@@ -52,9 +54,6 @@
 | P3-UX06-Startup-SLA-E2E-Gap | 冷启动到导航可交互的端到端 SLA 未实测（UX-06 以 proxy 构成基线替代，如实记录缺位） | P3 | ① 真实端到端测量 > 8s（SLA 超阈）时触发 visited\_tabs 顶层推广（`test_consumes_all_seven_subviews_in_stack` 改写 + #438 范式推广）；② 或启动流程重构时 |
 | P3-B12-Screener-Formatting-Logic-in-VM | #B12-2 review02 B12 第 2 步：格式化逻辑下沉 VM（`_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM） | P3 | report04 D9（AI 流式更新重建机制重构）合并时 / screener\_view 重构时 |
 | P3-BT05-QualityGate-Bypass | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计） | P3 | review03 BT-05 第二步实施时（实现 `evaluate_historical_window()` 区间质量评估） |
-| P3-DAT07-Restatement | 回测不可复现：财报无修订历史，UPSERT 覆盖使历史回测结果随时间漂移（review03 DAT-07①） | P3 | 无计划升级（文档化决策，见「已接受的权衡」DAT-07条目） |
-| P3-DAT08-SnapshotLookahead | 回测前视：申万行业为当前快照，`sw_industry_member` 主键不含日期，跨分类调整期回测存在前视（review03 DAT-08②） | P3 | 无计划升级（文档化决策，见「已接受的权衡」DAT-08②条目） |
-| P3-DAT08-IndustryPollution | 存量污染：`stock_basic.industry` 在 DAT-08③ 前被写时覆写为申万二级行业，拆列后 `industry_tushare` 输出仍含旧覆写值（review03 DAT-08③） | P3 | 无计划升级（文档化决策，见「已接受的权衡」DAT-08③条目） |
 | P3-TA-OSS05-DualImpl | 技术指标（RSI/MACD/KDJ）双实现分叉的 OSS-05 结论仅存于测试 docstring，未登记技术债（原著 reviews/ 已丢失） | P3 | 技术指标测试文件重构/拆分、双实现再次扩散、或指标语义变更时 |
 
 ## 技术债清单
@@ -621,12 +620,12 @@ UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`s
 
 OSS-05 双实现等价性研究结论（pandas 入口 vs Polars 表达式工厂的等价域与分叉面）目前只固化在 `tests/unit/test_technical_analysis_equivalence.py` 的 docstring 与断言中，**未登记进本技术债表**。`reviews/` 目录经 `.gitignore` 忽略（本地产物），当时的原始报告《开源组件使用检视报告.md》已随检视周期删除，若上述测试文件将来被重构或拆分，全部决策依据将无迹可循。
 
-已固化的核心结论（现状截至 2026-09-23，D1-D3 收敛 + D7 死代码删除后）：
+已固化的核心结论（现状截至 2026-09-25，D1-D3 收敛 + D7 死代码删除 + KDJ 预热期语义修正后）：
 - **收敛方向**：Polars 表达式为唯一语义正本，pandas 入口为薄委托层（`get_macd`/`get_kdj` 已委托 `get_macd_expr`/`get_kdj_expr`，`calculate_rsi_pandas` 委托 `get_rsi_expr`）；
 - **B1 RSI 预热期**（保留固化）：测试内 pandas 教科书公式 `fillna(50)` 全序列 vs pl `min_samples=period` 前 period 根 null（真实「未知」）。独立 pandas 末值实现 `get_rsi`（含 `_split_delta`）已随 D7 删除，生产 pandas 路径预热期语义与 pl 一致；
 - **B2 MACD hist 倍率**（已收敛）：pd 侧改 ×2 委托，与 pl 侧 `macd=(dif-dea)×2` 一致；断言从「固化 2 倍差」改为「断言一致」；
-- **B3 KDJ 全横盘**（已收敛）：pd 侧委托后经 `fill_nan(50)` 取中性 50，不再返回 NaN 注入 `"k: nan"` 至 AI prompt；
-- **B4 KDJ 连续一字板**（已收敛）：pd 头部 NaN 注入历史统一由 `fill_nan(50)` 承载，断言改为接口与 expr 末值一致。
+- **B3 KDJ 全横盘**（已收敛）：预热期前 n−1 根为 null（`min_samples=n`，真实「未知」），第 n 根起整窗同价 `rsv=0/0` 经 `fill_nan(50)` 取中性 50，不再返回 NaN 注入 `"k: nan"` 至 AI prompt。**既有口径不一致（保留，非「已收敛」掩盖）**：KDJ 对「无定义窗」取中性 50，而 RSI 对同类的 `0/0` 取 null（`min_samples=period`，真实「未知」）；该不一致属 KDJ 既有边界语义，本次不改，仅显式登记（`utils/technical_analysis.py::get_kdj_expr` 注释 + 本条目 + 测试 B3/B5 对照）。注意 `scripts/check_redlines.py` 的 R21 扫描域为 `services/`/`strategies/`，**不含 `utils/`**，故此处无自动守护，须在人工评审时留意；
+- **B4 KDJ 连续一字板**（已收敛）：预热期前 n−1 根为 null，头部 NaN 注入历史统一由 `fill_nan(50)` 承载（逐窗定义值取中性，非递归序列的种子初值），断言改为接口与 expr 末值一致。
 
 衍生任务状态：
 1. qfq 双实现（`qfq_ratio_series` vs `qfq_ratio_expr`）交叉等价性测试 → 由 `tests/unit/test_qfq_equivalence.py` 承接（D4）；
@@ -642,7 +641,7 @@ OSS-05 双实现等价性研究结论（pandas 入口 vs Polars 表达式工厂�
 
 ## 已接受的权衡（Accepted Tradeoffs）
 
-> 与技术债不同，此处记录**有意识地接受现状**的权衡决策：问题真实存在，但当前选择不修（成本/收益、YAGNI 或产品决策），通过 UI 标注、文档声明等方式显式告知用户。来源：review03 DAT-07① 与 DAT-08② 的「决策：不修」类结论（详见各条目）。
+> 与技术债不同，此处记录**有意识地接受现状**的权衡决策：问题真实存在，但当前选择不修（成本/收益、YAGNI 或产品决策），通过 UI 标注、文档声明等方式显式告知用户。来源：review03 DAT-07① 与 DAT-08② 的「决策：不修」类结论（详见各条目）。本节条目属结论可信度边界、**不占「技术债索引」**；产品含义（哪些指标在什么条件下不可信）见 [backtest-correctness.md](../patterns/backtest-correctness.md)「已知限制」。
 
 #### P3-DAT07-Restatement：回测不可复现：财报无修订历史，UPSERT 覆盖使历史回测结果随时间漂移（review03 DAT-07①）
 
