@@ -5,7 +5,12 @@ from datetime import date, datetime
 
 import polars as pl
 
-from strategies.backtest.config import BacktestConfig, BacktestResult
+from strategies.backtest.config import (
+    BacktestConfig,
+    BacktestResult,
+    DataWarning,
+    WarningCategory,
+)
 
 
 class TestBacktestConfigDefaults:
@@ -345,3 +350,59 @@ class TestBacktestResultToPersistDict:
         assert "on_empty_signal" not in d
         # config_json 仍承载完整配置（含 on_empty_signal），保证可复现性不被破坏
         assert d["config_json"]["on_empty_signal"] == result.config.on_empty_signal
+
+
+def _dw(warning_type: str, category: str | None = None) -> DataWarning:
+    """构造 DataWarning 辅助：默认不传 category，验证 __post_init__ 解析。"""
+    kwargs: dict[str, object] = {
+        "warning_type": warning_type,
+        "start_date": "2024-01-01",
+        "end_date": "2024-01-31",
+        "affected_stock_count": 1,
+        "error_message": "test",
+    }
+    if category is not None:
+        kwargs["category"] = category
+    return DataWarning(**kwargs)
+
+
+class TestWarningCategory:
+    """MAJOR-01: DataWarning.category 类型化 + WarningCategory.category_of 解析一正一邪。"""
+
+    def test_datawarning_omits_category_resolves_from_map(self) -> None:
+        """未显式传 category → __post_init__ 按 warning_type 解析（data_quality）。"""
+        w = _dw("suspend_data_absent")
+        assert w.category == "data_quality"
+
+    def test_datawarning_explicit_category_overrides_map(self) -> None:
+        """显式传 category → 以显式值为准（性能路径不升级级别）。"""
+        w = _dw("preload_range_too_wide", category=WarningCategory.PERFORMANCE_PATH)
+        assert w.category == "performance_path"
+
+    def test_datawarning_unknown_type_falls_back_fail_closed(self) -> None:
+        """未知 warning_type → 回退 data_quality（fail-closed，R21）。"""
+        w = _dw("some_future_type")
+        assert w.category == "data_quality"
+
+    def test_category_of_parses_legacy_bracket_prefix(self) -> None:
+        """历史落库字符串 '[range_quality_gaps] ...' → data_quality。"""
+        assert WarningCategory.category_of("[range_quality_gaps] 区间缺口") == "data_quality"
+        assert WarningCategory.category_of("[preload_range_too_wide] 超宽") == "performance_path"
+
+    def test_category_of_parses_fail_closed_phrase_and_unknown_none(self) -> None:
+        """无 [type] 前缀：真实异常关键词 fail-closed；旧撮合噪音 → None（非 unreliable）。"""
+        assert WarningCategory.category_of("suspend_data_absent: 600001") == "data_quality"
+        assert WarningCategory.category_of("600001 valued at last known price for 30 days") == "data_quality"
+        assert WarningCategory.category_of("some legacy skip noise") is None
+
+    def test_category_of_structual_uses_field(self) -> None:
+        """结构化 DataWarning → 直接用 .category 字段。"""
+        assert WarningCategory.category_of(_dw("portfolio_wiped_out", category="termination")) == "termination"
+
+    def test_to_persist_serializes_datawarning_as_str(self) -> None:
+        """to_persist_dict 对 DataWarning 统一按 str(w) 落库，保留 [type] 前缀。"""
+        result = _make_result(data_warnings=(_dw("suspend_data_absent"),))
+        d = result.to_persist_dict()
+        assert d["quality_json"]["data_warnings"] == [
+            "[suspend_data_absent] 2024-01-01-2024-01-31: 1 stocks affected. test"
+        ]
