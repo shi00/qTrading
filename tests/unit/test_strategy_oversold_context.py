@@ -564,7 +564,7 @@ class TestRSIPercentile(unittest.TestCase):
 
         close_prices = pd.Series([float("nan")] * 30)
 
-        result = TechnicalAnalysis.calculate_rsi_pandas(close_prices)
+        result = TechnicalAnalysis.calculate_rsi_pandas(close_prices, period=14)
 
         self.assertIsInstance(result, pd.Series)
         self.assertTrue(result.isna().all())
