@@ -701,6 +701,28 @@ class TestBacktestViewModelRunBacktest:
         assert vm.state.warnings == (Message("backtest_warn_data_quality", {"count": 2}),)
 
     @pytest.mark.asyncio
+    async def test_persist_failed_warning_visible_without_level_upgrade(self):
+        """D1: 持久化失败（services 追加的裸字符串）在 ok 级仍须产出提示文案。
+
+        结果正确性未受影响故不升级级别，但「结果未落库」必须对用户可见
+        （R21 BT-03：已知不可信信号不得静默）。
+        """
+        vm = await self._exec_backtest(self._result_with(data_warnings=("persist_failed: db down",)))
+
+        assert vm.state.credibility_level == "ok"
+        assert vm.state.warnings == (Message("backtest_warn_persist_failed", {"count": 1}),)
+
+    @pytest.mark.asyncio
+    async def test_persist_failed_with_dq_keyword_payload_not_unreliable(self):
+        """D1 对抗用例: 持久化失败 payload 含 benchmark/suspension 关键词时不得误判 unreliable。"""
+        vm = await self._exec_backtest(
+            self._result_with(data_warnings=("persist_failed: null value in column benchmark_code",))
+        )
+
+        assert vm.state.credibility_level == "ok"
+        assert vm.state.warnings == (Message("backtest_warn_persist_failed", {"count": 1}),)
+
+    @pytest.mark.asyncio
     async def test_data_warning_structured_type_marks_unreliable(self):
         """MAJOR-01 决策⑤: [type] 前缀/结构化 DataWarning 的 data_quality 亦判 unreliable。"""
         from strategies.backtest.config import WarningCategory

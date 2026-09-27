@@ -178,6 +178,8 @@ def _assess_credibility(
       range_quality_gaps / stale-estimate / portfolio_wiped_out 爆仓）。
     - failed_signal_dates 非空 → unreliable：策略在某交易日执行失败，曲线存在平坦段。
     - 仅 skipped_orders 非空（且无 data_quality/termination）→ degraded。
+    - system（如持久化失败）→ 不升级级别，仅产出提示（结果正确性未受影响，
+      但用户须知晓本次结果未落库）。
     - performance_path / 无 category 的历史旧撮合噪音 → 不升级级别，仅统计入提示。
     - empty_signal_days > 0 → 次级提示，不独立驱动 degraded（决策⑦）。
 
@@ -186,7 +188,7 @@ def _assess_credibility(
     """
     msgs: list[Message] = []
     level: Literal["ok", "degraded", "unreliable"] = "ok"
-    cat_counts: dict[str, int] = {"data_quality": 0, "termination": 0, "performance_path": 0}
+    cat_counts: dict[str, int] = {"data_quality": 0, "termination": 0, "performance_path": 0, "system": 0}
 
     # 归一化：DataWarning 取 .category；str 经 WarningCategory.category_of 解析
     # （含 fail-closed 白名单）；结果为 None（旧撮合噪音）视为非 unreliable。
@@ -201,6 +203,10 @@ def _assess_credibility(
     if cat_counts["termination"]:
         msgs.append(Message("backtest_warn_termination", {"count": cat_counts["termination"]}))
         level = "unreliable"
+    # 系统级告警（如持久化失败）：不影响结果正确性分级，但必须显式告知用户
+    # （R21 BT-03：已知信号不得静默 —— 结果未落库却渲染为「无问题」即违规）。
+    if cat_counts["system"]:
+        msgs.append(Message("backtest_warn_persist_failed", {"count": cat_counts["system"]}))
     if cat_counts["performance_path"]:
         msgs.append(Message("backtest_warn_perf_path", {"count": cat_counts["performance_path"]}))
 

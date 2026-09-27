@@ -1128,8 +1128,8 @@ class TestConsumePrefill:
 class TestBacktestWarningBanner:
     """UX-01: 结果区顶部可信度告警横幅.
 
-    覆盖 ``_build_backtest_warning_banner`` (ok → None / degraded/unreliable → ft.Container)
-    与 view 集成 (非 ok 状态 → right_content 置顶 banner): L60-65, L298-299.
+    覆盖 ``_build_backtest_warning_banner`` (ok 且无告警 → None;
+    degraded/unreliable/ok 带提示 → ft.Container) 与 view 集成: L60-65, L298-299.
     """
 
     @staticmethod
@@ -1138,7 +1138,7 @@ class TestBacktestWarningBanner:
         return [ctrl.value for ctrl in _walk_all_controls(root) if isinstance(ctrl, ft.Text) and ctrl.value]
 
     def test_ok_returns_none(self, backtest_view_env) -> None:
-        """L60-61: credibility_level == "ok" → 返回 None (默认状态不渲染横幅)."""
+        """L60-61: credibility_level == "ok" 且无告警 → 返回 None (默认状态不渲染横幅)."""
         mod = backtest_view_env["mod"]
         state = backtest_view_env["fake_vm"].state
         assert mod._build_backtest_warning_banner(state) is None
@@ -1158,6 +1158,26 @@ class TestBacktestWarningBanner:
         texts = self._collect_texts(banner)
         assert "i18n[backtest_credibility_degraded]" in texts
         assert "• i18n[w_backtest_data_degraded]" in texts
+
+    def test_ok_with_warnings_renders_notice_banner(self, backtest_view_env) -> None:
+        """D3: credibility_level="ok" 但携带提示类告警 → 仍渲染中性提示横幅.
+
+        VM 在 ok 级也会产出提示 Message (system 持久化失败 / performance_path /
+        empty_signal_days); 若按等级直接 return None 则这些 Message 永不渲染 (静默)。
+        """
+        from ui.viewmodels import Message
+
+        mod = backtest_view_env["mod"]
+        fake_vm = backtest_view_env["fake_vm"]
+        fake_vm._set_state(
+            credibility_level="ok",
+            warnings=(Message("backtest_warn_persist_failed", {"count": 1}),),
+        )
+        banner = mod._build_backtest_warning_banner(fake_vm.state)
+        assert isinstance(banner, ft.Container)
+        texts = self._collect_texts(banner)
+        assert "i18n[backtest_credibility_notice]" in texts
+        assert "• i18n[backtest_warn_persist_failed]" in texts
 
     def test_unreliable_banner_renders(self, backtest_view_env) -> None:
         """L62-65: credibility_level="unreliable" → ft.Container (ERROR 标题 i18n key)."""
