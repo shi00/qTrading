@@ -10,6 +10,8 @@ Tests for TechnicalAnalysis utility class.
 # 测试行为由测试用例本身验证。
 
 import datetime
+import inspect
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -427,6 +429,52 @@ class TestRSIPandas:
     def test_rsi_series_none_input(self):
         rsi = TechnicalAnalysis.calculate_rsi_pandas(None, period=14)  # type: ignore[arg-type]
         assert rsi.empty
+
+
+class TestRSIPeriodMustBeExplicit:
+    """MINOR-02 契约：同名 RSI 只有一个周期口径，三个入口均不得持隐式默认周期。
+
+    检视 09-24 §3.2：`get_rsi_expr` 曾隐式 period=6，而薄委托入口
+    `calculate_rsi_pandas` 与其上层 `analyze_rsi_oversold_features` 曾隐式 period=14
+    ——同一 RSI 语义的两个入口不显式传参时，同名 "RSI" 会得到两个不同周期的结果。
+
+    以行为断言为主：缺 period 必须在调用期直接 TypeError（`match="period"` 锁定失败
+    原因即「缺 period 参数」，而非实现内部自抛的其它 TypeError）——默认值回潮（含改为
+    period=None 后内部兜底）必然使该用例失败；对「period=None 且无兜底」这类实现，
+    行为断言可能先被内部运算的 TypeError 命中，此时由结构断言兜住，故两者互补：
+    结构断言锁定「无默认值」契约本体，行为断言锁定「缺参必须报错」的可观测后果。
+    """
+
+    def test_missing_period_raises_type_error(self):
+        close = pd.Series([10.0 + i * 0.3 for i in range(30)])
+        # 缺 period 的调用形态：以 dict 承载 kwargs，避免 pyright 编译期拦截
+        # （本用例正是要在运行期验证「缺参必须报错」，编译期拦截会看不到断言结果）。
+        only_close: dict[str, Any] = {"close": close}
+        only_col_name: dict[str, Any] = {"col_name": "close"}
+
+        with pytest.raises(TypeError, match="period"):
+            TechnicalAnalysis.calculate_rsi_pandas(**only_close)
+
+        with pytest.raises(TypeError, match="period"):
+            TechnicalAnalysis.analyze_rsi_oversold_features(**only_close)
+
+        with pytest.raises(TypeError, match="period"):
+            TechnicalAnalysis.get_rsi_expr(**only_col_name)
+
+    def test_period_has_no_default(self):
+        entries = (
+            TechnicalAnalysis.get_rsi_expr,
+            TechnicalAnalysis.calculate_rsi_pandas,
+            TechnicalAnalysis.analyze_rsi_oversold_features,
+        )
+        for entry in entries:
+            params = inspect.signature(entry).parameters
+            assert params["period"].default is inspect.Parameter.empty, entry.__name__
+
+        # 语法联动：无默认参数不能排在有默认参数之后，故去 period 默认值时
+        # get_rsi_expr 的 col_name 必须一并去默认值。
+        col_name_param = inspect.signature(TechnicalAnalysis.get_rsi_expr).parameters["col_name"]
+        assert col_name_param.default is inspect.Parameter.empty
 
 
 class TestStrongNumericAssertionsD38:

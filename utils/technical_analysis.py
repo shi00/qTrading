@@ -131,9 +131,13 @@ class TechnicalAnalysis:
         return status, float(curr_k), float(curr_d), float(curr_j)
 
     @staticmethod
-    def calculate_rsi_pandas(close: pd.Series, period: int = 14) -> pd.Series:
+    def calculate_rsi_pandas(close: pd.Series, period: int) -> pd.Series:
         """
         使用 Polars 计算 RSI 序列并转回 Pandas（SC-05 合一：唯一正本为 Polars get_rsi_expr）。
+
+        周期口径：同名 RSI 只有一个周期口径，``period`` 必须由调用方显式给定——
+        本入口与 ``get_rsi_expr`` 曾各自持有隐式默认（14 / 6），不显式传参时同名的
+        "RSI" 会得到两个不同周期的结果；现统一取消入口默认值，杜绝此歧义。
 
         此方法返回完整的 RSI 序列，用于后续分析：
         - 连续超卖天数
@@ -149,7 +153,7 @@ class TechnicalAnalysis:
 
         Args:
             close: 收盘价序列（需按时间升序排列）
-            period: RSI 周期（默认 14）
+            period: RSI 周期（必须显式给定，无隐式默认）
 
         Returns:
             RSI 序列（0-100），数据不足时返回空 Series
@@ -174,9 +178,13 @@ class TechnicalAnalysis:
         return rsi
 
     @staticmethod
-    def analyze_rsi_oversold_features(close: pd.Series, period: int = 14) -> dict:
+    def analyze_rsi_oversold_features(close: pd.Series, period: int) -> dict:
         """
         分析 RSI 超卖特征，用于判断"黄金坑" vs "价值陷阱"。
+
+        周期口径：同名 RSI 只有一个周期口径，``period`` 必须由调用方显式给定
+        （与 ``calculate_rsi_pandas`` / ``get_rsi_expr`` 统一无入口默认值），
+        避免隐式周期把「同名不同义」从下层挪到本层。
 
         返回三个关键特征：
         1. consecutive_oversold_days: 连续超卖天数（衡量跌势持续性）
@@ -185,7 +193,7 @@ class TechnicalAnalysis:
 
         Args:
             close: 收盘价序列（需按时间升序排列）
-            period: RSI 周期
+            period: RSI 周期（必须显式给定，无隐式默认）
 
         Returns:
             dict 包含特征值和描述文本
@@ -258,10 +266,16 @@ class TechnicalAnalysis:
     # Polars Expression Factories
     # ==========================
     @staticmethod
-    def get_rsi_expr(col_name="close", period=6, alias="rsi"):
+    def get_rsi_expr(col_name, period, alias="rsi"):
         """
         Returns a Polars Expression for RSI calculation.
         Use with .over('ts_code') for grouped calculation.
+
+        周期口径：同名 RSI 只有一个周期口径，``period`` 必须由调用方显式给定——
+        本工厂曾是隐式默认 6，而薄委托入口 calculate_rsi_pandas 曾是隐式默认 14，
+        不显式传参时同名 "RSI" 会得到两个不同周期的结果；现统一取消入口默认值
+        （``col_name`` 亦一并取消默认值：Python 语法不允许无默认参数排在有默认参数
+        之后），杜绝此歧义。
 
         SC-05: min_samples=period 与 Pandas 版 calculate_rsi_pandas 的 min_periods=period
         对齐，消除 EWM 种子污染（新上市/次新股前 period 根不产出值）。
