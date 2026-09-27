@@ -4,13 +4,17 @@
 """
 
 import asyncio
+from collections.abc import Callable
 from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
 from ui.viewmodels import Message
-from ui.viewmodels.ai_stream_mixin import _build_ai_failed_banner_message
+from ui.viewmodels.ai_stream_mixin import (
+    _build_ai_failed_banner_message,
+    _infer_unsaved_status_key,
+)
 from ui.viewmodels.screener_view_model import (
     ScreenerViewModel,
     StreamCard,
@@ -410,27 +414,12 @@ class TestSaveResultsFailState:
         vm.review_mgr.save_results = AsyncMock(side_effect=RuntimeError("DB connection lost"))
         return vm
 
-    @staticmethod
-    def _build_sync_submit_task_holder():
-        """submit_task 同步调度 coro_factory 并通过 holder 暴露 task 供后续 await."""
-        import asyncio
-
-        holder = type("Holder", (), {"task": None})()
-
-        def _sync_submit_task(*args, **kwargs):
-            coro_factory = kwargs["coroutine_factory"]
-            coro = coro_factory(task_id="test-task-id")
-            holder.task = asyncio.ensure_future(coro)
-            return "test-task-id"
-
-        return holder, _sync_submit_task
-
     @pytest.mark.asyncio
     async def test_save_results_fail_shows_unsaved_status(self, vm_with_strategy):
         """save_results raise 时状态为 screener_done_unsaved."""
         from services.task_manager import TaskManager
 
-        holder, _sync_submit = self._build_sync_submit_task_holder()
+        holder, _sync_submit = _build_sync_submit_task_holder()
         with (
             patch.object(TaskManager, "submit_task", side_effect=_sync_submit),
             patch.object(TaskManager, "update_progress"),
@@ -452,7 +441,7 @@ class TestSaveResultsFailState:
         """save_results 失败后 _full_results 保留 (照常上屏)."""
         from services.task_manager import TaskManager
 
-        holder, _sync_submit = self._build_sync_submit_task_holder()
+        holder, _sync_submit = _build_sync_submit_task_holder()
         with (
             patch.object(TaskManager, "submit_task", side_effect=_sync_submit),
             patch.object(TaskManager, "update_progress"),
@@ -488,7 +477,7 @@ class TestSaveResultsFailState:
         # save_results 成功
         vm.review_mgr.save_results = AsyncMock(return_value=None)
 
-        holder, _sync_submit = self._build_sync_submit_task_holder()
+        holder, _sync_submit = _build_sync_submit_task_holder()
         with (
             patch.object(TaskManager, "submit_task", side_effect=_sync_submit),
             patch.object(TaskManager, "update_progress"),
@@ -500,6 +489,227 @@ class TestSaveResultsFailState:
         state = vm.state
         assert state.status_message is not None
         assert state.status_message.key == "screener_done_saved"
+        assert state.status_color == "success"
+
+
+# --- CRITICAL-03: save_results 返回值消费与「未保存」归因 ---
+
+
+class _TaskHolder:
+    """承载 ``submit_task`` 同步调度出的 task，供测试显式 await（避免协程未等待告警）。"""
+
+    task: asyncio.Task | None = None
+
+
+def _build_sync_submit_task_holder() -> tuple[_TaskHolder, Callable[..., str]]:
+    """``submit_task`` 同步调度 coro_factory，并经 holder 暴露 task 供后续 await。"""
+    holder = _TaskHolder()
+
+    def _sync_submit_task(*args, **kwargs):
+        coro_factory = kwargs["coroutine_factory"]
+        holder.task = asyncio.ensure_future(coro_factory(task_id="test-task-id"))
+        return "test-task-id"
+
+    return holder, _sync_submit_task
+
+
+class _StubStrategy:
+    """满足 ``_execute_screening`` 契约的最小策略桩（固定返回给定结果表）。"""
+
+    def __init__(self, result_df: pd.DataFrame) -> None:
+        self.name_key = "strategy_test"
+        self.filter: Callable[[dict], pd.DataFrame] = lambda _ctx: result_df
+
+
+async def _run_strategy_with_result(
+    vm,
+    *,
+    result_df: pd.DataFrame,
+    save_return: int = 0,
+    save_results: bool = True,
+) -> None:
+    """驱动 ``run_strategy`` 走完 ``_execute_screening``（mock 策略 / TaskManager / save_results）。
+
+    仅用于断言 ``state``；不返回任务结果。
+    """
+    import datetime as dt
+    from unittest.mock import AsyncMock
+
+    from services.task_manager import TaskManager
+
+    vm.strategy_mgr.get_strategy.return_value = _StubStrategy(result_df)
+    vm.data_processor.get_strategy_data = AsyncMock(
+        return_value={
+            "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+            "trade_date": dt.date(2026, 7, 29),
+        },
+    )
+    vm.review_mgr.save_results = AsyncMock(return_value=save_return)
+
+    holder, _sync_submit = _build_sync_submit_task_holder()
+    with (
+        patch.object(TaskManager, "submit_task", side_effect=_sync_submit),
+        patch.object(TaskManager, "update_progress"),
+    ):
+        await vm.run_strategy("test_strategy", save_results=save_results)
+        assert holder.task is not None
+        await holder.task
+
+
+class TestInferUnsavedStatusKey:
+    """CRITICAL-03: ``_infer_unsaved_status_key`` 判据分支全覆盖（R19）。"""
+
+    def test_missing_ts_code_column_returns_generic(self):
+        df = pd.DataFrame({"ai_status": ["budget_exceeded"]})
+        assert _infer_unsaved_status_key(df) == "screener_done_not_saved"
+
+    def test_all_falsy_ts_code_returns_generic(self):
+        """ts_code 全为 ``""`` / ``None`` / ``NaN``（无有效代码）时不得归因到 AI。"""
+        df = pd.DataFrame({"ts_code": ["", None, float("nan")], "ai_status": ["failed"] * 3})
+        assert _infer_unsaved_status_key(df) == "screener_done_not_saved"
+
+    def test_nan_ts_code_does_not_mask_truthy_ts_code(self):
+        """混入 ``NaN`` 时真值判定仍须识别出有效 ts_code（不得误用 ``astype(bool)``）。"""
+        df = pd.DataFrame(
+            {"ts_code": ["", None, float("nan"), "000001.SZ"], "ai_status": ["failed"] * 4},
+        )
+        assert _infer_unsaved_status_key(df) == "screener_done_not_saved_failed"
+
+    def test_missing_ai_status_column_returns_generic(self):
+        df = pd.DataFrame({"ts_code": ["000001.SZ"]})
+        assert _infer_unsaved_status_key(df) == "screener_done_not_saved"
+
+    def test_ai_status_with_missing_value_returns_generic(self):
+        df = pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "ai_status": ["budget_exceeded", None]})
+        assert _infer_unsaved_status_key(df) == "screener_done_not_saved"
+
+    def test_budget_exceeded_returns_budget_key(self):
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["budget_exceeded"]})
+        assert _infer_unsaved_status_key(df) == "screener_done_not_saved_budget"
+
+    def test_policy_not_acknowledged_returns_policy_key(self):
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["policy_not_acknowledged"]})
+        assert _infer_unsaved_status_key(df) == "screener_done_not_saved_policy"
+
+    def test_failed_returns_failed_key(self):
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["failed"]})
+        assert _infer_unsaved_status_key(df) == "screener_done_not_saved_failed"
+
+    def test_rejected_returns_none(self):
+        """AI 将候选全部判为排除属业务正常（该状态按设计不入库），不得告警。"""
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["rejected"]})
+        assert _infer_unsaved_status_key(df) is None
+
+    def test_mixed_statuses_return_generic(self):
+        df = pd.DataFrame({"ts_code": ["000001.SZ", "000002.SZ"], "ai_status": ["rejected", "failed"]})
+        assert _infer_unsaved_status_key(df) == "screener_done_not_saved"
+
+    def test_budget_unpriced_prompt_returns_generic(self):
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["budget_unpriced_prompt"]})
+        assert _infer_unsaved_status_key(df) == "screener_done_not_saved"
+
+    def test_analyzed_returns_generic(self):
+        """analyzed 行本应落库；落 0 条说明原因不在 ai_status，须用通用 key。"""
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["analyzed"]})
+        assert _infer_unsaved_status_key(df) == "screener_done_not_saved"
+
+    def test_none_and_empty_return_generic(self):
+        assert _infer_unsaved_status_key(None) == "screener_done_not_saved"
+        assert _infer_unsaved_status_key(pd.DataFrame()) == "screener_done_not_saved"
+
+
+class TestSaveResultsZeroStatus:
+    """CRITICAL-03: save_results 落库 0 条时不得谎报「已保存」（D4-C1）。"""
+
+    @pytest.mark.asyncio
+    async def test_budget_exceeded_warns_and_not_saved_key(self, vm):
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["budget_exceeded"]})
+        await _run_strategy_with_result(vm, result_df=df, save_return=0)
+
+        state = vm.state
+        assert state.status_message is not None
+        assert state.status_message.key == "screener_done_not_saved_budget"
+        assert state.status_message.key != "screener_done_saved"
+        assert state.status_color == "warning"
+
+    @pytest.mark.asyncio
+    async def test_policy_not_acknowledged_warns(self, vm):
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["policy_not_acknowledged"]})
+        await _run_strategy_with_result(vm, result_df=df, save_return=0)
+
+        state = vm.state
+        assert state.status_message is not None
+        assert state.status_message.key == "screener_done_not_saved_policy"
+        assert state.status_color == "warning"
+
+    @pytest.mark.asyncio
+    async def test_failed_warns(self, vm):
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["failed"]})
+        await _run_strategy_with_result(vm, result_df=df, save_return=0)
+
+        state = vm.state
+        assert state.status_message is not None
+        assert state.status_message.key == "screener_done_not_saved_failed"
+        assert state.status_color == "warning"
+
+    @pytest.mark.asyncio
+    async def test_rejected_uses_neutral_message_without_warning(self, vm):
+        """AI 全部 reject 属业务正常：中立文案 + success，不告警。"""
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["rejected"]})
+        await _run_strategy_with_result(vm, result_df=df, save_return=0)
+
+        state = vm.state
+        assert state.status_message is not None
+        assert state.status_message.key == "screener_done"
+        assert state.status_color == "success"
+
+    @pytest.mark.asyncio
+    async def test_mixed_statuses_use_generic_warning(self, vm):
+        df = pd.DataFrame(
+            {"ts_code": ["000001.SZ", "000002.SZ"], "ai_status": ["rejected", "failed"]},
+        )
+        await _run_strategy_with_result(vm, result_df=df, save_return=0)
+
+        state = vm.state
+        assert state.status_message is not None
+        assert state.status_message.key == "screener_done_not_saved"
+        assert state.status_color == "warning"
+
+    @pytest.mark.asyncio
+    async def test_missing_ai_status_column_uses_generic_warning(self, vm):
+        df = pd.DataFrame({"ts_code": ["000001.SZ"]})
+        await _run_strategy_with_result(vm, result_df=df, save_return=0)
+
+        state = vm.state
+        assert state.status_message is not None
+        assert state.status_message.key == "screener_done_not_saved"
+        assert state.status_color == "warning"
+
+    @pytest.mark.asyncio
+    async def test_save_results_false_uses_neutral_message(self, vm):
+        """未请求落库 ≠ 落库失败：中立文案 + success，且不得落入「未保存」告警。"""
+        df = pd.DataFrame({"ts_code": ["000001.SZ"]})
+        await _run_strategy_with_result(vm, result_df=df, save_results=False)
+
+        state = vm.state
+        assert state.status_message is not None
+        assert state.status_message.key == "screener_done"
+        assert state.status_message.key != "screener_done_saved"
+        assert state.status_color == "success"
+
+    @pytest.mark.asyncio
+    async def test_nonzero_saved_reports_count_and_saved(self, vm):
+        """非 0 落库：如实同时给出总数与实际落库数（partial 亦不告警）。"""
+        df = pd.DataFrame(
+            {"ts_code": ["000001.SZ", "000002.SZ"], "ai_status": ["analyzed", "rejected"]},
+        )
+        await _run_strategy_with_result(vm, result_df=df, save_return=1)
+
+        state = vm.state
+        assert state.status_message is not None
+        assert state.status_message.key == "screener_done_saved"
+        assert state.status_message.params["count"] == 2
+        assert state.status_message.params["saved"] == 1
         assert state.status_color == "success"
 
 
