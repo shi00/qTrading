@@ -18,6 +18,16 @@ PROFIT_THRESHOLD: float = 0.0
 # 「< 80% 视为现金拖累」是量纲专用阈值（D5-m1），集中为命名常量避免裸数值。
 CASH_DRAG_THRESHOLD: float = 0.8
 
+# A 股每年交易日数口径（MINOR-01）：近年实际约 242~244 天（法定节假日调休导致逐年浮动），
+# 取中枢 243。此前沿用的 252 是美股惯例（每年约 252 个交易日）：以 243 个交易日构成的一年
+# 样本为例，252 口径把区间折算为 243/252 = 0.964 年，年化收益被系统性高估，波动率/夏普/
+# 跟踪误差的年化系数（√252 vs √243）偏大约 1.8%。凡「交易日数 → 年数」的换算一律走本常量，
+# 避免同一函数内出现两个口径（如 calc_ir 的 num_days 默认值与年化分母）。
+# NOTE(lazy): 年化一律取固定 A 股口径常量，未按回测区间实际交易日数动态推导.
+#   ceiling: 单年区间残差 ≤ ±0.4%（242~244 之差），多年区间残差相互抵消.
+#   upgrade: 需支持非 A 股市场，或年化需精确到区间实际交易日数时，改由 TradeCalendarService 推导并透传.
+TRADING_DAYS_PER_YEAR: int = 243
+
 
 class ExitReason(enum.StrEnum):
     """平仓原因（D4-6）。
@@ -40,8 +50,8 @@ class BacktestMetrics:
     """回测指标计算器"""
 
     # D1-M4: 年化外推的最短区间阈值（约一个季度）。低于此不做年化外推——
-    # 20 个交易日的回测 years≈0.079，指数高达 12.6，区间收益 ±8% 会被外推成
-    # +160% / −65%，高次方放大不可信。其余统计量（波动率/胜率/盈亏比等）均有
+    # 20 个交易日的回测 years≈0.082，指数高达 12.2，区间收益 ±8% 会被外推成
+    # +155% / −64%，高次方放大不可信。其余统计量（波动率/胜率/盈亏比等）均有
     # 样本量守卫，年化此前唯独缺失，此为对齐内部标准。
     _MIN_ANNUALIZE_DAYS = 60
 
@@ -96,7 +106,7 @@ class BacktestMetrics:
     def calc_annualized_return(
         total_return: float,
         num_days: int,
-        trading_days_per_year: int = 252,
+        trading_days_per_year: int = TRADING_DAYS_PER_YEAR,
     ) -> float | None:
         # D1-M4: 短区间不年化（返回 None，经 report/UI 渲染 N/A），避免高次方外推失真。
         # 与 calc_win_rate / calc_profit_factor 的 None 语义对齐（R21：无定义用 None 哨兵，
@@ -111,7 +121,7 @@ class BacktestMetrics:
     @staticmethod
     def calc_volatility(
         daily_returns: pl.Series,
-        trading_days_per_year: int = 252,
+        trading_days_per_year: int = TRADING_DAYS_PER_YEAR,
     ) -> float | None:
         """有效样本不足 2 时波动率无定义，返回 None（R21：不可返回 0.0——
         「零波动」是具体业务含义，且会低估爆仓后的真实波动）。"""
@@ -128,7 +138,7 @@ class BacktestMetrics:
     def calc_sharpe_ratio(
         daily_returns: pl.Series,
         risk_free_rate: float = 0.02,
-        trading_days_per_year: int = 252,
+        trading_days_per_year: int = TRADING_DAYS_PER_YEAR,
     ) -> float | None:
         """夏普比率：有效样本不足、或超额收益零波动/异常时无定义，返回 None
         （R21：不可返回 0.0——「风险调整后收益恰好等于无风险利率」是具体业务含义，
@@ -265,13 +275,16 @@ class BacktestMetrics:
     @staticmethod
     def calc_ir(
         ic_series: pl.Series,
-        num_days: int = 252,
-        trading_days_per_year: int = 252,
+        num_days: int = TRADING_DAYS_PER_YEAR,
+        trading_days_per_year: int = TRADING_DAYS_PER_YEAR,
     ) -> float | None:
         """计算 IC 信息比率 (IR)。
 
-        年化系数 = sqrt(ic_count / years)，其中 years = num_days / 252。
-        IC 序列按调仓频率计算（非日频），不能用固定 sqrt(252) 年化。
+        年化系数 = sqrt(ic_count / years)，其中 years = num_days / TRADING_DAYS_PER_YEAR。
+        IC 序列按调仓频率计算（非日频），不能机械套用日频年化系数 √(每年交易日数)，须按 IC 实际样本数折算。
+        `num_days` 为回测区间的交易日数，其默认值与 `trading_days_per_year` 同取 A 股口径
+        常量，含义是「默认假设区间约为一年」（years ≈ 1.0），两者必须同口径，否则默认调用
+        会把区间静默折算成非整数年。
         无定义（有效样本不足 / IC 零波动）时返回 None（R21）。"""
 
         # R21: 先剔除「该期无法计算」（None → null）的无效样本；有效样本不足 2 个时
@@ -299,7 +312,7 @@ class BacktestMetrics:
     def calc_information_ratio(
         daily_returns: pl.Series,
         benchmark_returns: pl.Series,
-        trading_days_per_year: int = 252,
+        trading_days_per_year: int = TRADING_DAYS_PER_YEAR,
     ) -> tuple[float | None, float | None]:
         # D1-M1: 两序列按共同有效样本对齐后相减。缺口（基准缺失日 / 净值爆仓日）
         #   不参与超额计算，避免 null 传播污染跟踪误差与信息比率，也防止"基准缺失被
