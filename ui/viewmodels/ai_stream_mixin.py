@@ -73,6 +73,77 @@ def _build_ai_failed_banner_message(result_df: pd.DataFrame | None) -> Message |
     return Message("screener_ai_failed_banner", {"count": failed})
 
 
+# CRITICAL-03: save_results 返回 0 时的定向归因表。仅收录「可由 ai_status 全体一致
+# 直接推出」的状态；未收录者一律回退通用 key（R21：不臆造未知原因）。
+_UNSAVED_STATUS_KEY_BY_AI_STATUS: dict[str, str] = {
+    "budget_exceeded": "screener_done_not_saved_budget",
+    "policy_not_acknowledged": "screener_done_not_saved_policy",
+    "failed": "screener_done_not_saved_failed",
+}
+
+_UNSAVED_STATUS_KEY_GENERIC = "screener_done_not_saved"
+
+
+def _column_has_truthy_value(series: pd.Series) -> bool:
+    """判断 ``series`` 中是否存在「非缺失且为真」的元素。
+
+    真值判定必须显式排除缺失值：``bool(float("nan"))`` 为 ``True``，故不得直接
+    对原列调用 ``astype(bool)``；缺失的股票代码本身即数据缺陷、不构成可落库结果，
+    故按「无有效值」保守处理（R21：不臆造具体原因）。``0`` / ``""`` 等 Python
+    假值同样视为「无有效值」，与 ``ReviewManager.save_results`` 的
+    ``if not ts_code: continue`` 语义一致。
+    """
+    for value in series.to_list():
+        if value is None or value is pd.NaT or value is pd.NA:
+            continue
+        if isinstance(value, float) and value != value:  # NaN
+            continue
+        if value:
+            return True
+    return False
+
+
+def _infer_unsaved_status_key(result_df: pd.DataFrame | None) -> str | None:
+    """CRITICAL-03: ``save_results`` 落库 0 条时推断「未保存」提示的 i18n key。
+
+    ``ReviewManager.save_results`` 仅持久化 ``ts_code`` 为真且
+    ``ai_status ∈ {None, "analyzed"}`` 的行（D4-C1）；因此结果表非空却落库 0 条，
+    意味着没有任何行满足该条件。本函数只在**可由 ``ai_status`` 全体一致直接推出**
+    时才返回定向 key，避免把未知原因误归因（R21）：
+
+    - ``ts_code`` 列缺失，或该列真值判定后无一为真 → 通用 key（落库被跳过与 AI
+      状态无关，归因到 AI 即误报）；
+    - 缺 ``ai_status`` 列，或列内含缺失值 → 通用 key；
+    - 去重后仅剩 ``{"rejected"}`` → ``None``（业务正常：AI 将候选全部判为排除，
+      该状态按设计本就不入库，非异常）；
+    - 去重后仅剩 ``{"budget_exceeded"}`` / ``{"policy_not_acknowledged"}`` /
+      ``{"failed"}`` → 对应定向 key；
+    - 其余（含 ``budget_unpriced_prompt``、混合状态、``{"analyzed"}`` 等）→ 通用 key。
+
+    Returns:
+        定向（或通用）i18n key；归因为「业务正常」时返回 ``None``，由调用方改用
+        中立文案而非告警。
+    """
+    if result_df is None or result_df.empty:
+        return _UNSAVED_STATUS_KEY_GENERIC
+    if "ts_code" not in result_df.columns:
+        return _UNSAVED_STATUS_KEY_GENERIC
+    if not _column_has_truthy_value(result_df["ts_code"]):
+        return _UNSAVED_STATUS_KEY_GENERIC
+    if "ai_status" not in result_df.columns:
+        return _UNSAVED_STATUS_KEY_GENERIC
+    statuses = result_df["ai_status"]
+    if statuses.isna().any():
+        return _UNSAVED_STATUS_KEY_GENERIC
+    distinct = set(statuses.to_list())
+    if len(distinct) != 1:
+        return _UNSAVED_STATUS_KEY_GENERIC
+    only_status = next(iter(distinct))
+    if only_status == "rejected":
+        return None
+    return _UNSAVED_STATUS_KEY_BY_AI_STATUS.get(only_status, _UNSAVED_STATUS_KEY_GENERIC)
+
+
 class AIStreamMixin:
     """AI 流式聚合职责（C3-4）。组合进 ``ScreenerViewModel``。"""
 
@@ -678,6 +749,9 @@ class AIStreamMixin:
                     # 结果已写入 _full_results 照常上屏, 状态栏提示「未保存：原因」.
                     # trade_date 缺失属于程序错误 (context 协议违规), 仍 raise.
                     save_failed_reason: str | None = None
+                    # CRITICAL-03: 预置 0，使 save_results=False 时不产生未绑定引用；
+                    # 该分支另有显式状态支，不依赖此预置值做「未保存」判定。
+                    saved = 0
                     if save_results:
                         analysis_trade_date = context.get("trade_date")
                         if not analysis_trade_date:
@@ -688,7 +762,7 @@ class AIStreamMixin:
 
                         run_id = _uuid.uuid4().hex[:16]
                         try:
-                            await self.review_mgr.save_results(
+                            saved = await self.review_mgr.save_results(
                                 strategy.name_key,
                                 result_df,
                                 trade_date=analysis_trade_date,
@@ -723,12 +797,41 @@ class AIStreamMixin:
                             status_action_key=None,
                             ai_usage_summary=ai_usage_summary,
                         )
+                    elif not save_results:
+                        # 未请求落库 ≠ 落库失败：用不含「已保存」的中立文案，不告警。
+                        self._set_state(
+                            loading=False,
+                            status_message=Message("screener_done", {"count": len(result_df)}),
+                            status_color="success",
+                            status_action_key=None,
+                            ai_usage_summary=ai_usage_summary,
+                        )
+                    elif saved == 0:
+                        # CRITICAL-03: save_results 落库 0 条必须视为非成功 (D4-C1)，
+                        # 不得谎报「已保存」。仅在可由 ai_status 全体一致直接推出原因时
+                        # 定向提示 (warning)；归因为「业务正常」(AI 全部 reject) 时改用
+                        # 中立文案且不告警 (R21：不臆造未知原因)。
+                        unsaved_key = _infer_unsaved_status_key(result_df)
+                        self._set_state(
+                            loading=False,
+                            status_message=Message(
+                                unsaved_key or "screener_done",
+                                {"count": len(result_df)},
+                            ),
+                            status_color="success" if unsaved_key is None else "warning",
+                            status_action_key=None,
+                            ai_usage_summary=ai_usage_summary,
+                        )
                     else:
+                        # 部分落库：rejected (AI 判 0 分) / 预算耗尽 / 分析失败等行按设计不入库，
+                        # 故 saved < count 属预期；如实同时给出总数与实际落库数即可让用户看到
+                        # 缺口 (finding 修改方案 3)，此处不叠加 warning —— 整批 failed 占比
+                        # > 30% 另有 _build_ai_failed_banner_message 横幅兜底。
                         self._set_state(
                             loading=False,
                             status_message=Message(
                                 "screener_done_saved",
-                                {"count": len(result_df)},
+                                {"count": len(result_df), "saved": saved},
                             ),
                             status_color="success",
                             status_action_key=None,
