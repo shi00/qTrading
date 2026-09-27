@@ -6,7 +6,7 @@ from datetime import date
 import polars as pl
 import pytest
 
-from strategies.backtest.metrics import BacktestMetrics
+from strategies.backtest.metrics import TRADING_DAYS_PER_YEAR, BacktestMetrics
 
 pytestmark = pytest.mark.unit
 
@@ -32,7 +32,7 @@ class TestBacktestMetrics:
         assert BacktestMetrics.calc_total_return(pl.Series([])) == 0.0
 
     def test_calc_annualized_return(self) -> None:
-        ann_return = BacktestMetrics.calc_annualized_return(0.10, 252)
+        ann_return = BacktestMetrics.calc_annualized_return(0.10, TRADING_DAYS_PER_YEAR)
         assert ann_return == pytest.approx(0.10, rel=0.01)
 
     def test_calc_annualized_return_zero_days(self) -> None:
@@ -49,6 +49,19 @@ class TestBacktestMetrics:
     def test_calc_annualized_return_zero_capital(self) -> None:
         # D1-M4: 本金归零（total_return == -1）返回 -1.0，而非高次方 NaN
         assert BacktestMetrics.calc_annualized_return(-1.0, 252) == -1.0
+
+    def test_calc_annualized_return_ashare_trading_days(self) -> None:
+        """MINOR-01 回归：年化分母取 A 股口径（243 天/年），而非美股 252。
+
+        252 个交易日在 A 股口径下是 252/243 = 1.037 年而非整一年，年化必然低于区间收益。
+        硬编码量级护栏（0.0963 ± 1e-4）进一步锁定分母确为 243——244 口径为 0.096677、
+        252 口径为 0.100000，均越界。
+        """
+        ann_return = BacktestMetrics.calc_annualized_return(0.10, 252)
+        assert ann_return is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，数值断言见下
+        assert ann_return < 0.10
+        assert ann_return == pytest.approx((1.10 ** (TRADING_DAYS_PER_YEAR / 252)) - 1, rel=1e-9)
+        assert ann_return == pytest.approx(0.0963, abs=1e-4)
 
     def test_calc_volatility(self, sample_daily_returns: pl.Series) -> None:
         vol = BacktestMetrics.calc_volatility(sample_daily_returns)
@@ -291,18 +304,34 @@ class TestBacktestMetrics:
     def test_calc_ir_annualization_factor(self) -> None:
         """F3-03: 动态年化系数 sqrt(ic_count / years) 验证。
 
-        相同 IC 序列，num_days=126 (years=0.5) 的 IR 应为 num_days=252 (years=1.0) 的 sqrt(2) 倍。
+        相同 IC 序列、区间交易日数翻倍（years 翻倍）时 IR 应为 2^0.5 倍。
+        years = num_days / TRADING_DAYS_PER_YEAR，本用例断言的是比值，故结论与年化
+        口径取值无关（A 股 243 或美股 252 均成立）。
         """
         ic_series = pl.Series([0.05, 0.03, 0.07, 0.02, 0.04])
         ir_252 = BacktestMetrics.calc_ir(ic_series, num_days=252)
         ir_126 = BacktestMetrics.calc_ir(ic_series, num_days=126)
-        # years=1.0 → factor=sqrt(5/1)=sqrt(5); years=0.5 → factor=sqrt(5/0.5)=sqrt(10)
-        # 比值 = sqrt(10)/sqrt(5) = sqrt(2) ≈ 1.4142
+        # num_days 减半 → years 减半（1.037 → 0.519）→ factor 由 sqrt(5/1.037) 增至
+        # sqrt(5/0.519)，比值恒为 sqrt(2) ≈ 1.4142
         assert ir_252 is not None
         assert ir_126 is not None
         assert ir_252 > 0
         assert ir_126 > 0
         assert abs(ir_126 / ir_252 - (2**0.5)) < 1e-6
+
+    def test_calc_ir_default_assumes_one_year(self) -> None:
+        """MINOR-01 回归：calc_ir 默认 num_days 与年化分母同口径 → 默认区间恰为 1 年。
+
+        全默认参数下 years = 243/243 = 1.0，年化系数 sqrt(5/1) ≈ 2.2361，IR ≈ 4.8824。
+        若 num_days 默认值与其分母脱节（如单独回退为 252 → years = 1.037），年化系数
+        降至 2.1958、IR ≈ 4.7944，本用例失败。
+        防护范围说明：本用例只挡「num_days 默认值与年化分母脱节」；两者同时回退为 252 时
+        years 仍为 1.0、IR 不变（4.8824），该场景由 test_calc_annualized_return_ashare_trading_days
+        的硬编码量级用例覆盖。
+        """
+        ir = BacktestMetrics.calc_ir(pl.Series([0.05, 0.03, 0.07, 0.02, 0.04]))
+        assert ir is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，数值断言见下
+        assert ir == pytest.approx(4.8824, rel=1e-3)
 
     def test_calc_ir_zero_std(self) -> None:
         # D5-C1: IC 零波动（信号无稳定性）时 IR 无定义，返回 None
@@ -358,6 +387,50 @@ class TestBacktestMetrics:
         assert ir == pytest.approx(ir_expected)
         assert te == pytest.approx(te_expected)
 
+    def test_annualization_factors_use_ashare_trading_days(
+        self,
+        sample_daily_returns: pl.Series,
+        sample_benchmark_returns: pl.Series,
+    ) -> None:
+        """MINOR-01 回归：年化系数为 √243（A 股口径），而非 √252。
+
+        断言「显式 252 口径结果 == 默认结果 × √(252/243)」，等价于锁定默认分母为
+        TRADING_DAYS_PER_YEAR：波动率/跟踪误差/信息比率严格满足该比例。夏普的日无风险
+        利率 = risk_free_rate / trading_days_per_year 也随口径变化，故夏普部分固定
+        risk_free_rate=0.0（此时严格按 √T 缩放）。
+
+        本用例为**自参照比例断言**（scale 由 TRADING_DAYS_PER_YEAR 自身推导），只验证
+        「默认参数 ≠ 显式 252」的缩放关系，不锁定常量取值本身；「常量必须为 243 而非
+        252」由 test_calc_annualized_return_ashare_trading_days 的硬编码量级与
+        test_calc_all_metrics_uses_ashare_annualization 的夏普绝对值用例锁定。
+        """
+        scale = math.sqrt(252 / TRADING_DAYS_PER_YEAR)
+
+        vol = BacktestMetrics.calc_volatility(sample_daily_returns)
+        vol_us = BacktestMetrics.calc_volatility(sample_daily_returns, trading_days_per_year=252)
+        assert vol is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，数值断言见下
+        assert vol_us is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，数值断言见下
+        assert vol_us == pytest.approx(vol * scale, rel=1e-9)
+
+        sharpe = BacktestMetrics.calc_sharpe_ratio(sample_daily_returns, risk_free_rate=0.0)
+        sharpe_us = BacktestMetrics.calc_sharpe_ratio(
+            sample_daily_returns, risk_free_rate=0.0, trading_days_per_year=252
+        )
+        assert sharpe is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，数值断言见下
+        assert sharpe_us is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，数值断言见下
+        assert sharpe_us == pytest.approx(sharpe * scale, rel=1e-9)
+
+        ir, te = BacktestMetrics.calc_information_ratio(sample_daily_returns, sample_benchmark_returns)
+        ir_us, te_us = BacktestMetrics.calc_information_ratio(
+            sample_daily_returns,
+            sample_benchmark_returns,
+            trading_days_per_year=252,
+        )
+        assert ir is not None and te is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，数值断言见下
+        assert ir_us is not None and te_us is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，数值断言见下
+        assert ir_us == pytest.approx(ir * scale, rel=1e-9)
+        assert te_us == pytest.approx(te * scale, rel=1e-9)
+
     def test_calc_all_metrics(
         self,
         sample_nav_curve: pl.Series,
@@ -399,6 +472,58 @@ class TestBacktestMetrics:
         assert metrics["total_return"] is not None and metrics["total_return"] > 0
         assert metrics["sharpe_ratio"] is not None and metrics["sharpe_ratio"] > 0
         assert metrics["max_drawdown"] is not None and metrics["max_drawdown"] >= 0
+
+    def test_calc_all_metrics_uses_ashare_annualization(
+        self,
+        sample_nav_curve: pl.Series,
+        sample_daily_returns: pl.Series,
+        sample_benchmark_returns: pl.Series,
+    ) -> None:
+        """MINOR-01 回归：生产链路 calc_all_metrics 走 A 股口径（未显式传美股 252）。
+
+        该函数对年化相关指标不显式传参、依赖默认值，故其输出必须等于「显式 252 口径
+        结果 ÷ √(252/243)」。此用例防的是另一种回归：日后有人在 calc_all_metrics 内
+        硬编码 252，此时默认值层面的用例（如上一条）察觉不到。
+        """
+        scale = math.sqrt(252 / TRADING_DAYS_PER_YEAR)
+        trades = pl.DataFrame({"action": ["sell"], "exit_reason": ["REBALANCE"], "realized_pnl": [10.0]})
+        metrics = BacktestMetrics.calc_all_metrics(
+            sample_nav_curve,
+            sample_daily_returns,
+            sample_benchmark_returns,
+            trades,
+            pl.Series([0.05, 0.03, 0.07]),
+        )
+        vol_us = BacktestMetrics.calc_volatility(sample_daily_returns, trading_days_per_year=252)
+        ir_us, te_us = BacktestMetrics.calc_information_ratio(
+            sample_daily_returns,
+            sample_benchmark_returns,
+            trading_days_per_year=252,
+        )
+        assert vol_us is not None and ir_us is not None and te_us is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，数值断言见下
+        assert metrics["volatility"] is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，数值断言见下
+        assert metrics["information_ratio"] is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，数值断言见下
+        assert metrics["tracking_error"] is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，数值断言见下
+        assert metrics["volatility"] == pytest.approx(vol_us / scale, rel=1e-9)
+        assert metrics["information_ratio"] == pytest.approx(ir_us / scale, rel=1e-9)
+        assert metrics["tracking_error"] == pytest.approx(te_us / scale, rel=1e-9)
+
+        # ic_ir 同样依赖 trading_days_per_year 默认口径（calc_all_metrics 显式传
+        # num_days=len(nav_curve)，年化分母仍取默认值），故亦按 √(252/243) 缩放——
+        # 若有人在 calc_all_metrics 内硬编码 252 传参，本断言即失败。
+        ic_ir_us = BacktestMetrics.calc_ir(
+            pl.Series([0.05, 0.03, 0.07]),
+            num_days=len(sample_nav_curve),
+            trading_days_per_year=252,
+        )
+        assert ic_ir_us is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，数值断言见下
+        assert metrics["ic_ir"] is not None  # noqa: weak-assertion 返回类型已放宽为 float|None，is not None 为类型收窄守卫，数值断言见下
+        assert metrics["ic_ir"] == pytest.approx(ic_ir_us / scale, rel=1e-9)
+
+        # 夏普走 rf=0.02 默认路径（calc_all_metrics 的默认无风险利率），不能按 √T 折算：
+        # daily_rf = risk_free_rate / trading_days_per_year 也随口径变化，实测「252 / 默认」
+        # = 1.0188（≠ 1.0184）。故用绝对量级锁定默认口径——252 口径为 7.3757，越界。
+        assert metrics["sharpe_ratio"] == pytest.approx(7.2396, rel=1e-4)
 
     def test_calc_all_metrics_ic_mean_skips_none(
         self,
