@@ -356,18 +356,6 @@ class DividendStrategy(PolarsBaseStrategy):
             .sort("dv_ttm", descending=True)
         )
 
-    def _sort_for_ai(self, df: pd.DataFrame) -> pd.DataFrame:
-        """SC-02: 极端高股息样本（多为股价暴跌被动高息）不优先送 AI 分析。
-
-        升序排列使候选截断（cap）优先保留股息率稳健的标的；AI 关闭时结果
-        保持 _filter_logic 的 dv_ttm 降序不变。
-        """
-        if df.empty:
-            return df
-        if "dv_ttm" in df.columns:
-            return df.sort_values("dv_ttm", ascending=True)
-        return df
-
     attribution_enabled = True  # UX-04
 
     def build_attribution(self, row: dict, total_candidates: int, context) -> FilterAttribution:
