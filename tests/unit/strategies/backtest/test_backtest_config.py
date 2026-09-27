@@ -395,6 +395,16 @@ class TestWarningCategory:
         assert WarningCategory.category_of("600001 valued at last known price for 30 days") == "data_quality"
         assert WarningCategory.category_of("some legacy skip noise") is None
 
+    def test_category_of_persist_failed_prefix_is_system(self) -> None:
+        """D1: services 层追加的裸字符串 'persist_failed: ...' → system（前缀锚定）。
+
+        payload 为任意异常文本，若含 benchmark / suspension 等 data_quality 关键词，
+        也绝不能落入子串白名单被误判为 unreliable（否则产生新的误报）。
+        """
+        assert WarningCategory.category_of("persist_failed: db down") == "system"
+        assert WarningCategory.category_of("persist_failed: null value in column benchmark_code") == "system"
+        assert WarningCategory.category_of("persist_failed: 600001 suspension data") == "system"
+
     def test_category_of_structual_uses_field(self) -> None:
         """结构化 DataWarning → 直接用 .category 字段。"""
         assert WarningCategory.category_of(_dw("portfolio_wiped_out", category="termination")) == "termination"

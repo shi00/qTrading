@@ -73,11 +73,20 @@ class DataWarning:
 # 说明：DataWarning.category 缺省时经本类的 __post_init__ 查表解析；此处为常量命名空间 +
 # 判责助手，纯类属性/类方法，无实例字段，故不用 dataclass。
 class WarningCategory:
-    """DataWarning.category 三分类常量 + 判责助手（fail-closed 白名单）。"""
+    """DataWarning.category 分类常量 + 判责助手（fail-closed 白名单）。"""
 
     DATA_QUALITY = "data_quality"
     TERMINATION = "termination"
     PERFORMANCE_PATH = "performance_path"
+    # 系统级告警：结果正确性未受影响，但用户必须知晓（如持久化失败）。
+    # 仅由 services 层以裸字符串追加（R1 禁止 services 运行时构造 DataWarning），
+    # 故 DataWarning.category 的 Literal 不包含本值。
+    SYSTEM = "system"
+
+    # 系统级告警的字符串前缀锚定（services 追加格式为 f"persist_failed: {sanitized}"）。
+    # 必须锚定在字符串开头：payload 是任意异常文本，可能含 benchmark / suspension
+    # 等 data_quality 关键词，若落入子串白名单会被误判为 unreliable。
+    _SYSTEM_PREFIXES: ClassVar[tuple[str, ...]] = ("persist_failed",)
 
     # 结构化 warning_type → 默认 category 映射（若 DataWarning 已显式带 category，
     # 以显式值为准，这里仅作解析兜底）。含由历史字符串类型化的新 type（MAJOR-01）。
@@ -129,11 +138,15 @@ class WarningCategory:
                 if wtype in WarningCategory._TYPE_TO_CATEGORY:
                     return WarningCategory._TYPE_TO_CATEGORY[wtype]
                 return None
-        # 2) fail-closed 历史异常关键词白名单（含 stale-estimate / 慢路径）。
+        # 2) 系统级前缀锚定（services 层追加的 "persist_failed: <sanitized>"）。
+        # 必须先于子串白名单：payload 为任意异常文本，可能误命中 data_quality 关键词。
+        if text.startswith(WarningCategory._SYSTEM_PREFIXES):
+            return WarningCategory.SYSTEM
+        # 3) fail-closed 历史异常关键词白名单（含 stale-estimate / 慢路径）。
         for phrase, category in WarningCategory._FAIL_CLOSED_PHRASES:
             if phrase in text:
                 return category
-        # 3) 其余无前缀旧字符串（旧撮合 skip 噪音）→ None（非 unreliable，仅 degraded/提示）。
+        # 4) 其余无前缀旧字符串（旧撮合 skip 噪音）→ None（非 unreliable，仅 degraded/提示）。
         return None
 
 

@@ -43,9 +43,24 @@ _STATUS_COLOR_MAP = {
 }
 
 # UX-01: 可信度等级 → 标题 i18n 全字面量 key (静态引用, 满足 i18n 键完整性静态扫描).
+# "ok" 亦有标题: ok 级仍可能携带提示类告警 (system / performance_path / empty_signal_days),
+# 此时渲染中性提示横幅而非直接不渲染 (D1/D3: 已知信号不得静默).
 _CREDIBILITY_TITLE_KEYS = {
+    "ok": "backtest_credibility_notice",
     "degraded": "backtest_credibility_degraded",
     "unreliable": "backtest_credibility_unreliable",
+}
+
+# 等级 → 强调色 / 图标 (三态; ok 为中性提示).
+_CREDIBILITY_ACCENT_MAP = {
+    "ok": AppColors.INFO,
+    "degraded": AppColors.WARNING,
+    "unreliable": AppColors.ERROR,
+}
+_CREDIBILITY_ICON_MAP = {
+    "ok": ft.Icons.INFO_OUTLINE,
+    "degraded": ft.Icons.WARNING_AMBER,
+    "unreliable": ft.Icons.ERROR_OUTLINE,
 }
 
 
@@ -81,19 +96,21 @@ def _build_backtest_warning_banner(state: BacktestState) -> ft.Control | None:
     渲染 ``BacktestState.credibility_level`` / ``warnings``，复用选股路径
     ``_build_screener_warning_banner`` 的「结果区上方 Message 通道」模式
     (D3-4 原则: 参数/数据异常必须显式告知用户, 否则结果被误归因)。
-    纯声明式: View 感知 locale, 逐条按当前 locale 翻译 i18n key；ok 时返回 None。
+    纯声明式: View 感知 locale, 逐条按当前 locale 翻译 i18n key。
+    仅当「等级为 ok **且** 无任何告警」时返回 None (D3: ok 级仍可能带提示类告警,
+    不可按等级直接吞掉, 否则 VM 已产出的 Message 永不渲染 —— R21 BT-03 静默违规)。
     """
-    if state.credibility_level == "ok":
+    if state.credibility_level == "ok" and not state.warnings:
         return None
-    is_unreliable = state.credibility_level == "unreliable"
-    accent = AppColors.ERROR if is_unreliable else AppColors.WARNING
-    title = I18n.get(_CREDIBILITY_TITLE_KEYS[state.credibility_level])
+    level = state.credibility_level
+    accent = _CREDIBILITY_ACCENT_MAP[level]
+    title = I18n.get(_CREDIBILITY_TITLE_KEYS[level])
     detail_controls = _build_warning_detail_controls(state)
     children: list[ft.Control] = [
         ft.Row(
             [
                 ft.Icon(
-                    ft.Icons.ERROR_OUTLINE if is_unreliable else ft.Icons.WARNING_AMBER,
+                    _CREDIBILITY_ICON_MAP[level],
                     color=accent,
                     size=AppStyles.FONT_SIZE_TITLE,
                 ),
