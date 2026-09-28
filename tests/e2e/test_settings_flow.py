@@ -106,7 +106,13 @@ async def test_settings_log_level_switch(e2e_page):
 
     await sp.click_tab("system", timeout_ms=8000)
 
-    # 等待日志级别 Dropdown label 出现
+    # MAJOR-08: 日志级别等技术参数已移入默认折叠的"高级（开发者）"分组，
+    # 需先展开分组，折叠态下 ExpansionTile 子控件不渲染。
+    advanced_title = I18n.get("sys_advanced_group_title")
+    await e2e_page.expect_text(advanced_title, timeout_ms=10000)
+    await e2e_page.click_text(advanced_title, timeout_ms=10000)
+
+    # 等待日志级别 Dropdown label 出现（展开高级分组后）
     log_level_label = I18n.get("settings_log_level")
     await e2e_page.expect_text(log_level_label, timeout_ms=10000)
 

@@ -18,6 +18,7 @@
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 
 from core.i18n import LOCALE_MAP, SUPPORTED_LOCALES
@@ -69,6 +70,13 @@ CPU_WORKERS_MAX = _CPU_WORKERS_MAX
 _VALID_THEMES = frozenset({"dark", "light", "navy", "dracula"})
 _VALID_LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR"})
 
+# --- MAJOR-08: on_submit/on_blur 去重时间窗 (秒) ---
+# Enter 提交会使 TextField 失焦, 同一值在毫秒级内先后触发 on_submit 与 on_blur。
+# 该窗口内相同签名只派发一次 (避免重复写入 / 重复线程池重载 / 伪 "保存失败" 吐司);
+# 窗口外的重复提交 (如保存失败后用户按 Enter 重试) 仍被放行。窗口远大于单次
+# 事件回调间隔 (同帧) 且远小于人工重试间隔, 无需精确取值。
+_SAVE_DEDUP_WINDOW_S = 1.0
+
 
 @dataclass(frozen=True)
 class SystemSettingsState:
@@ -116,6 +124,11 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
         # 通过 _load_config_to_state 同步初始化 state
         self._state = SystemSettingsState()
         self._init_mixin_fields()
+        # MAJOR-08: 记录最近一次已派发的保存 (签名 + 时刻)。Enter 提交会使
+        # TextField 失焦, 导致 on_submit 与 on_blur 对同一值在毫秒内连续派发保存;
+        # 用该记录在 _SAVE_DEDUP_WINDOW_S 窗口内去重, 避免重复写入 / 重复线程池
+        # 重载 / 伪 "保存失败" 吐司。空 dict 起步 (首次保存一律放行)。
+        self._last_save_signature: dict[str, tuple[str, float]] = {}
         self._load_config_to_state()
 
     # --- Config loading ---
@@ -189,17 +202,41 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
     # --- Update commands (View 通过 set_* 更新本地 state) ---
 
     @staticmethod
-    def _clamp_int(value: str, min_val: int, max_val: int) -> str:
-        """将字符串数字 clamp 到 [min_val, max_val] (P2-13).
+    def _field_signature(name: str, value: str) -> str:
+        """构造字段保存签名 (用于 MAJOR-08 重复提交去重)。"""
+        return f"{name}:{value}"
 
-        非数字/空字符串原样返回（保留中间输入态，如 '' 由 InputFilter 拦截数字外字符）；
-        有效数字超范围时 clamp 到边界值。save_* 仍保留范围检查作为兜底（场景遗漏 33a）。
+    def _is_duplicate_save(self, name: str, value: str) -> bool:
+        """判断当前值是否与最近窗口内已派发的保存相同 (去重 on_submit+on_blur 双触发)。"""
+        previous = self._last_save_signature.get(name)
+        if previous is None:
+            return False
+        signature, dispatched_at = previous
+        if signature != self._field_signature(name, value):
+            return False
+        return (time.monotonic() - dispatched_at) < _SAVE_DEDUP_WINDOW_S
+
+    def should_dispatch_save(self, name: str, value: str) -> bool:
+        """判断本次保存是否应派发 (MAJOR-08 去重入口)。
+
+        Enter 提交会使 TextField 失焦, 导致 on_submit 与 on_blur 对同一值在毫秒级
+        内先后派发保存。若与最近一次已派发的保存签名相同且仍在去重窗口内则返回
+        False (调用方跳过派发, 避免重复写入 / 重复线程池重载 / 伪 "保存失败" 吐司);
+        否则记录该签名与时刻并返回 True。窗口外的重复提交 (如保存失败后用户重试)
+        仍被放行。
         """
-        try:
-            val = int(value)
-        except (ValueError, TypeError):
-            return value
-        return str(max(min_val, min(max_val, val)))
+        if self._is_duplicate_save(name, value):
+            return False
+        self._mark_save_dispatched(name, value)
+        return True
+
+    def _mark_save_dispatched(self, name: str, value: str) -> None:
+        """记录最近一次已派发的保存签名与时刻。"""
+        self._last_save_signature[name] = (self._field_signature(name, value), time.monotonic())
+
+    def _reset_save_signature(self, name: str) -> None:
+        """清除指定字段的保存签名 (值被修改后, 再次失焦应重新保存)。"""
+        self._last_save_signature.pop(name, None)
 
     def set_language_value(self, value: str) -> None:
         self._set_state(language_value=value)
@@ -208,34 +245,57 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
         self._set_state(theme_value=value)
 
     def set_concurrency_value(self, value: str) -> None:
-        # P2-13: clamp 到 [CONCURRENCY_MIN, CONCURRENCY_MAX]
-        self._set_state(concurrency_value=self._clamp_int(value, _CONCURRENCY_MIN, _CONCURRENCY_MAX))
+        # MAJOR-08: 不再静默 clamp —— 原始字符串保留以支持 View 显示中间输入态,
+        # 校验/越界在 View 层失焦时提示 error, 不静默修正用户输入 (UIX 最佳实践)。
+        self._reset_save_signature("concurrency")
+        self._set_state(concurrency_value=value)
 
     def set_log_level_value(self, value: str) -> None:
         self._set_state(log_level_value=value)
 
     def set_pool_size_value(self, value: str) -> None:
-        # P2-13: clamp 到 [DB_POOL_MIN, DB_POOL_MAX]
-        self._set_state(pool_size_value=self._clamp_int(value, _DB_POOL_MIN, _DB_POOL_MAX))
+        self._reset_save_signature("db_pool")
+        self._set_state(pool_size_value=value)
 
     def set_db_overflow_value(self, value: str) -> None:
-        # P2-13: clamp 到 [DB_OVERFLOW_MIN, DB_OVERFLOW_MAX]
-        self._set_state(db_overflow_value=self._clamp_int(value, _DB_OVERFLOW_MIN, _DB_OVERFLOW_MAX))
+        self._reset_save_signature("db_pool")
+        self._set_state(db_overflow_value=value)
 
     def set_db_timeout_value(self, value: str) -> None:
-        # P2-13: clamp 到 [DB_TIMEOUT_MIN, DB_TIMEOUT_MAX]
-        self._set_state(db_timeout_value=self._clamp_int(value, _DB_TIMEOUT_MIN, _DB_TIMEOUT_MAX))
+        self._reset_save_signature("db_pool")
+        self._set_state(db_timeout_value=value)
 
     def set_io_workers_value(self, value: str) -> None:
-        # P2-13: clamp 到 [IO_WORKERS_MIN, IO_WORKERS_MAX]
-        self._set_state(io_workers_value=self._clamp_int(value, _IO_WORKERS_MIN, _IO_WORKERS_MAX))
+        self._reset_save_signature("thread_pool")
+        self._set_state(io_workers_value=value)
 
     def set_cpu_workers_value(self, value: str) -> None:
-        # P2-13: clamp 到 [CPU_WORKERS_MIN, CPU_WORKERS_MAX]
-        self._set_state(cpu_workers_value=self._clamp_int(value, _CPU_WORKERS_MIN, _CPU_WORKERS_MAX))
+        self._reset_save_signature("thread_pool")
+        self._set_state(cpu_workers_value=value)
 
     def set_no_proxy_value(self, value: str) -> None:
+        self._reset_save_signature("no_proxy")
         self._set_state(no_proxy_value=value)
+
+    # --- Query commands ---
+
+    def has_running_tasks(self) -> bool:
+        """是否存在运行中/排队中的后台任务 (保存线程池前的保护性检查, MAJOR-08)。
+
+        仅读 TaskManager 内存快照 (``get_all_tasks``), 无 IO/DB 访问。查询失败时
+        fail-open 返回 False (宁可漏一层保护也不阻塞用户保存), 并记录脱敏 debug 日志。
+        """
+        try:
+            from services.task_manager import TaskManager, TaskStatus
+
+            active = (TaskStatus.RUNNING, TaskStatus.QUEUED)
+            return any(task.status in active for task in TaskManager().get_all_tasks())
+        except Exception as ex:
+            logger.debug(
+                "[SystemSettingsVM] has_running_tasks check failed: %s",
+                DataSanitizer.sanitize_error(ex),
+            )
+            return False
 
     # --- Async save commands (R16: IO offload via ThreadPoolManager) ---
 

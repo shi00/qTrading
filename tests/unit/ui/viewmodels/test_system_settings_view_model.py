@@ -404,36 +404,7 @@ class TestThreadPoolOffloadContract:
         mock_thread_pool[0].reload_config.assert_called_once_with()
 
 
-# --- P2-13: _clamp_int 与 set_*_value clamp 行为 ---
-
-
-class TestClampInt:
-    """P2-13: SystemSettingsViewModel._clamp_int 静态方法边界行为。"""
-
-    def test_clamp_int_within_range_returns_unchanged(self):
-        assert SystemSettingsViewModel._clamp_int("10", 1, 32) == "10"
-
-    def test_clamp_int_above_max_returns_max(self):
-        assert SystemSettingsViewModel._clamp_int("99999", 1, 32) == "32"
-
-    def test_clamp_int_below_min_returns_min(self):
-        assert SystemSettingsViewModel._clamp_int("0", 1, 32) == "1"
-
-    def test_clamp_int_negative_returns_min(self):
-        assert SystemSettingsViewModel._clamp_int("-5", 1, 32) == "1"
-
-    def test_clamp_int_non_numeric_returns_unchanged(self):
-        """非数字原样返回 (InputFilter 已拦截字符, 此处防御保留中间输入态)。"""
-        assert SystemSettingsViewModel._clamp_int("abc", 1, 32) == "abc"
-
-    def test_clamp_int_empty_returns_unchanged(self):
-        assert SystemSettingsViewModel._clamp_int("", 1, 32) == ""
-
-    def test_clamp_int_at_min_boundary(self):
-        assert SystemSettingsViewModel._clamp_int("1", 1, 32) == "1"
-
-    def test_clamp_int_at_max_boundary(self):
-        assert SystemSettingsViewModel._clamp_int("32", 1, 32) == "32"
+# --- P2-13: VM 公开范围常量与私有常量一致 ---
 
 
 class TestPublicRangeConstants:
@@ -464,74 +435,140 @@ class TestPublicRangeConstants:
         assert m.CPU_WORKERS_MAX == m._CPU_WORKERS_MAX
 
 
-class TestSetValueClamp:
-    """P2-13: set_*_value 超范围输入 clamp 到边界。"""
+class TestSetValuePreservesRawInput:
+    """MAJOR-08: set_*_value 不再静默 clamp —— 原始字符串原样保留。
 
-    def test_set_concurrency_clamps_above_max(self, mock_config_handler):
+    越界校验由 View 层在失焦时展示字段 error (保留用户输入, 不静默修正)。
+    """
+
+    def test_set_concurrency_keeps_out_of_range_input(self, mock_config_handler):
         vm = _make_vm(mock_config_handler)
         vm.set_concurrency_value("99999")
-        assert vm.state.concurrency_value == "32"
+        assert vm.state.concurrency_value == "99999"
 
-    def test_set_concurrency_clamps_below_min(self, mock_config_handler):
+    def test_set_concurrency_keeps_zero(self, mock_config_handler):
         vm = _make_vm(mock_config_handler)
         vm.set_concurrency_value("0")
-        assert vm.state.concurrency_value == "1"
+        assert vm.state.concurrency_value == "0"
 
     def test_set_concurrency_keeps_valid_value(self, mock_config_handler):
         vm = _make_vm(mock_config_handler)
         vm.set_concurrency_value("16")
         assert vm.state.concurrency_value == "16"
 
-    def test_set_pool_size_clamps(self, mock_config_handler):
-        from ui.viewmodels import system_settings_view_model as m
-
+    def test_set_pool_size_keeps_raw(self, mock_config_handler):
         vm = _make_vm(mock_config_handler)
         vm.set_pool_size_value("99999")
-        assert vm.state.pool_size_value == str(m.DB_POOL_MAX)
-        vm.set_pool_size_value("0")
-        assert vm.state.pool_size_value == str(m.DB_POOL_MIN)
+        assert vm.state.pool_size_value == "99999"
 
-    def test_set_db_overflow_clamps(self, mock_config_handler):
-        from ui.viewmodels import system_settings_view_model as m
-
+    def test_set_db_overflow_keeps_raw(self, mock_config_handler):
         vm = _make_vm(mock_config_handler)
-        vm.set_db_overflow_value("99999")
-        assert vm.state.db_overflow_value == str(m.DB_OVERFLOW_MAX)
         vm.set_db_overflow_value("-1")
-        assert vm.state.db_overflow_value == str(m.DB_OVERFLOW_MIN)
+        assert vm.state.db_overflow_value == "-1"
 
-    def test_set_db_timeout_clamps(self, mock_config_handler):
-        from ui.viewmodels import system_settings_view_model as m
-
+    def test_set_db_timeout_keeps_raw(self, mock_config_handler):
         vm = _make_vm(mock_config_handler)
-        vm.set_db_timeout_value("99999")
-        assert vm.state.db_timeout_value == str(m.DB_TIMEOUT_MAX)
         vm.set_db_timeout_value("0")
-        assert vm.state.db_timeout_value == str(m.DB_TIMEOUT_MIN)
+        assert vm.state.db_timeout_value == "0"
 
-    def test_set_io_workers_clamps(self, mock_config_handler):
-        from ui.viewmodels import system_settings_view_model as m
-
+    def test_set_io_workers_keeps_raw(self, mock_config_handler):
         vm = _make_vm(mock_config_handler)
         vm.set_io_workers_value("99999")
-        assert vm.state.io_workers_value == str(m.IO_WORKERS_MAX)
-        vm.set_io_workers_value("0")
-        assert vm.state.io_workers_value == str(m.IO_WORKERS_MIN)
+        assert vm.state.io_workers_value == "99999"
 
-    def test_set_cpu_workers_clamps(self, mock_config_handler):
-        from ui.viewmodels import system_settings_view_model as m
-
+    def test_set_cpu_workers_keeps_raw(self, mock_config_handler):
         vm = _make_vm(mock_config_handler)
-        vm.set_cpu_workers_value("99999")
-        assert vm.state.cpu_workers_value == str(m.CPU_WORKERS_MAX)
         vm.set_cpu_workers_value("0")
-        assert vm.state.cpu_workers_value == str(m.CPU_WORKERS_MIN)
+        assert vm.state.cpu_workers_value == "0"
 
     def test_set_value_non_numeric_passthrough(self, mock_config_handler):
         """非数字输入原样保留 (中间输入态由 InputFilter 守护, VM 不破坏)。"""
         vm = _make_vm(mock_config_handler)
         vm.set_concurrency_value("")
         assert vm.state.concurrency_value == ""
+
+
+class TestShouldDispatchSave:
+    """MAJOR-08: on_submit/on_blur 同值双触发去重 (时间窗)。"""
+
+    def test_first_dispatch_returns_true(self, mock_config_handler):
+        vm = _make_vm(mock_config_handler)
+        assert vm.should_dispatch_save("concurrency", "4") is True
+
+    def test_same_value_within_window_deduplicated(self, mock_config_handler):
+        vm = _make_vm(mock_config_handler)
+        assert vm.should_dispatch_save("concurrency", "4") is True
+        assert vm.should_dispatch_save("concurrency", "4") is False
+
+    def test_different_value_dispatches(self, mock_config_handler):
+        vm = _make_vm(mock_config_handler)
+        assert vm.should_dispatch_save("concurrency", "4") is True
+        assert vm.should_dispatch_save("concurrency", "8") is True
+
+    def test_different_field_not_deduplicated(self, mock_config_handler):
+        vm = _make_vm(mock_config_handler)
+        assert vm.should_dispatch_save("concurrency", "4") is True
+        assert vm.should_dispatch_save("db_pool", "4") is True
+
+    def test_setter_resets_signature(self, mock_config_handler):
+        """值被修改后再次派发同值不再被去重 (签名重置)。"""
+        vm = _make_vm(mock_config_handler)
+        assert vm.should_dispatch_save("concurrency", "4") is True
+        vm.set_concurrency_value("8")
+        assert vm.should_dispatch_save("concurrency", "4") is True
+
+    def test_expired_window_allows_retry(self, mock_config_handler, monkeypatch):
+        """超出时间窗的重复提交仍被放行 (保存失败后重试场景)。"""
+        import ui.viewmodels.system_settings_view_model as m
+
+        vm = _make_vm(mock_config_handler)
+        assert vm.should_dispatch_save("concurrency", "4") is True
+        monkeypatch.setattr(m, "_SAVE_DEDUP_WINDOW_S", -1.0)
+        assert vm.should_dispatch_save("concurrency", "4") is True
+
+
+class TestHasRunningTasks:
+    """MAJOR-08: 保存线程池前的运行中任务检测。"""
+
+    def test_true_when_running_task(self, mock_config_handler):
+        from services.task_manager import AppTask, TaskManager, TaskStatus
+
+        vm = _make_vm(mock_config_handler)
+        with patch.object(TaskManager, "get_all_tasks", lambda self: [AppTask(status=TaskStatus.RUNNING)]):
+            assert vm.has_running_tasks() is True
+
+    def test_true_when_queued_task(self, mock_config_handler):
+        from services.task_manager import AppTask, TaskManager, TaskStatus
+
+        vm = _make_vm(mock_config_handler)
+        with patch.object(TaskManager, "get_all_tasks", lambda self: [AppTask(status=TaskStatus.QUEUED)]):
+            assert vm.has_running_tasks() is True
+
+    def test_false_when_only_terminal_tasks(self, mock_config_handler):
+        from services.task_manager import AppTask, TaskManager, TaskStatus
+
+        vm = _make_vm(mock_config_handler)
+        with patch.object(TaskManager, "get_all_tasks", lambda self: [AppTask(status=TaskStatus.COMPLETED)]):
+            assert vm.has_running_tasks() is False
+
+    def test_false_when_no_tasks(self, mock_config_handler):
+        from services.task_manager import TaskManager
+
+        vm = _make_vm(mock_config_handler)
+        with patch.object(TaskManager, "get_all_tasks", lambda self: []):
+            assert vm.has_running_tasks() is False
+
+    def test_fail_open_on_query_error(self, mock_config_handler):
+        """查询异常时 fail-open 返回 False (不阻塞用户保存)。"""
+        from services.task_manager import TaskManager
+
+        vm = _make_vm(mock_config_handler)
+
+        def _raise(self):
+            raise RuntimeError("boom")
+
+        with patch.object(TaskManager, "get_all_tasks", _raise):
+            assert vm.has_running_tasks() is False
 
 
 class TestUsingLegacyKey:
