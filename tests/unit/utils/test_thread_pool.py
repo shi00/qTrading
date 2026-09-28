@@ -1,7 +1,8 @@
+import asyncio
 import inspect
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
@@ -611,3 +612,163 @@ class TestThreadPoolManagerMaxWorkersSnapshot:
         tpm.shutdown(wait=False)
         assert tpm.io_pool_max_workers == 0
         assert tpm.cpu_pool_max_workers == 0
+
+
+class TestThreadPoolManagerReloadQueuedWork:
+    """D7-2: 热重载不取消在途排队工作；停机才取消（reviews/09-24/07.md §2 MAJOR-02）。
+
+    报告 §5-1 标注「取消传播」为纯推演，本类实测 asyncio 链接语义：
+    旧池若以 cancel_futures=True 关闭，排队中的 concurrent.futures.Future 被取消，
+    经 loop.run_in_executor 链接的 asyncio Future 同步取消 → 等待协程抛
+    CancelledError（R2 上抛）→ 运行中的同步/夜间预测被误判为「用户取消」。
+    """
+
+    @staticmethod
+    def _old_pool_shutdown_spy(old_pool, fired: threading.Event):
+        """包装 ThreadPoolExecutor.shutdown，在旧池 shutdown 完成后置位事件（确定性定序）。"""
+        real_shutdown = ThreadPoolExecutor.shutdown
+
+        def spy(self, *args, **kwargs):
+            try:
+                return real_shutdown(self, *args, **kwargs)
+            finally:
+                if self is old_pool:
+                    fired.set()
+
+        return spy
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_reload_config_keeps_queued_submit_task(self, mock_ch):
+        """核心实测：1 worker 下排队任务在 reload 后仍成功返回（修复前抛 CancelledError）。"""
+        mock_ch.get_max_io_workers.return_value = 1
+        mock_ch.get_max_cpu_workers.return_value = 1
+        tpm = ThreadPoolManager()
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_task():
+            started.set()
+            release.wait(timeout=10)
+            return "blocking-done"
+
+        def queued_task():
+            return "queued-done"
+
+        blocking_future = tpm.submit(TaskType.IO, blocking_task)
+        assert started.wait(timeout=10), "阻塞任务未在旧池启动"
+        queued_future = tpm.submit(TaskType.IO, queued_task)  # 单 worker 下必然排队
+        old_pool = tpm._io_pool
+
+        mock_ch.get_max_io_workers.return_value = 8
+        mock_ch.get_max_cpu_workers.return_value = 8
+        shutdown_done = threading.Event()
+        try:
+            with patch.object(ThreadPoolExecutor, "shutdown", self._old_pool_shutdown_spy(old_pool, shutdown_done)):
+                tpm.reload_config()
+                # 确定性定序：旧池 shutdown（含 cancel_futures 语义）在后台完成后才释放阻塞
+                # 任务。否则可能在后台 shutdown 执行前释放，让 worker 抢先取走排队任务而误判为绿。
+                assert shutdown_done.wait(timeout=5), "旧池 shutdown 未在后台执行"
+            release.set()
+            assert queued_future.result(timeout=10) == "queued-done"
+        finally:
+            release.set()
+        assert blocking_future.result(timeout=10) == "blocking-done"
+        assert old_pool is not tpm._io_pool, "reload 应已换用新池"
+
+    @pytest.mark.asyncio
+    @patch("utils.thread_pool.ConfigHandler")
+    async def test_reload_config_queued_run_async_not_cancelled(self, mock_ch):
+        """实测 asyncio 链接：排队中的 run_async 在 reload 后不抛 CancelledError。"""
+        mock_ch.get_max_io_workers.return_value = 1
+        mock_ch.get_max_cpu_workers.return_value = 1
+        tpm = ThreadPoolManager()
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_task():
+            started.set()
+            release.wait(timeout=10)
+            return "blocking-done"
+
+        def queued_task():
+            return "queued-done"
+
+        blocking_future = tpm.submit(TaskType.IO, blocking_task)
+        assert started.wait(timeout=10), "阻塞任务未在旧池启动"
+
+        queued_awaitable = asyncio.ensure_future(tpm.run_async(TaskType.IO, queued_task))
+        # 协作式让出一次：令 queued run_async 推进到 loop.run_in_executor 提交点（提交在首个
+        # await 之前同步发生），确保 reload 前该工作已在旧池队列中。非 wall-clock 抢跑。
+        await asyncio.sleep(0)
+        old_pool = tpm._io_pool
+
+        mock_ch.get_max_io_workers.return_value = 8
+        mock_ch.get_max_cpu_workers.return_value = 8
+        shutdown_done = threading.Event()
+        try:
+            with patch.object(ThreadPoolExecutor, "shutdown", self._old_pool_shutdown_spy(old_pool, shutdown_done)):
+                tpm.reload_config()
+                assert shutdown_done.wait(timeout=5), "旧池 shutdown 未在后台执行"
+            release.set()
+            assert await queued_awaitable == "queued-done"
+        finally:
+            release.set()
+        assert blocking_future.result(timeout=10) == "blocking-done"
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_shutdown_still_cancels_queued_tasks(self, mock_ch):
+        """停机路径（shutdown）仍为 cancel_futures=True：排队工作确实被取消。"""
+        mock_ch.get_max_io_workers.return_value = 1
+        mock_ch.get_max_cpu_workers.return_value = 1
+        tpm = ThreadPoolManager()
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_task():
+            started.set()
+            release.wait(timeout=10)
+            return "blocking-done"
+
+        def queued_task():
+            return "queued-done"
+
+        tpm.submit(TaskType.IO, blocking_task)
+        assert started.wait(timeout=10), "阻塞任务未在旧池启动"
+        queued_future = tpm.submit(TaskType.IO, queued_task)
+        try:
+            tpm.shutdown(wait=False)  # 停机：同步排空并取消排队工作
+            release.set()
+            with pytest.raises(CancelledError) as excinfo:
+                queued_future.result(timeout=10)
+            assert excinfo.type is CancelledError
+            assert queued_future.cancelled() is True
+        finally:
+            release.set()
+
+    @patch("utils.thread_pool.ConfigHandler")
+    def test_reload_config_shuts_old_pool_without_cancel_futures(self, mock_ch):
+        """锁定修复：热重载关闭旧池使用 cancel_futures=False（与停机路径分离）。"""
+        mock_ch.get_max_io_workers.return_value = 1
+        mock_ch.get_max_cpu_workers.return_value = 1
+        tpm = ThreadPoolManager()
+        mock_ch.get_max_io_workers.return_value = 8
+        mock_ch.get_max_cpu_workers.return_value = 8
+
+        calls: list[dict] = []
+        done = threading.Event()
+        real_shutdown = ThreadPoolExecutor.shutdown
+
+        def spy(self, *args, **kwargs):
+            calls.append(kwargs)
+            if len(calls) >= 2:  # reload 恰好关闭旧 IO + 旧 CPU 两个池
+                done.set()
+            return real_shutdown(self, *args, **kwargs)
+
+        with patch.object(ThreadPoolExecutor, "shutdown", spy):
+            tpm.reload_config()
+            assert done.wait(timeout=5), "旧池 shutdown 未在后台执行"
+
+        assert [c.get("cancel_futures") for c in calls] == [False, False]

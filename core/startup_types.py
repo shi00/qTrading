@@ -51,3 +51,7 @@ class StartupContext:
     # prepare_database_runtime 之前 detect 后注入，供 LoadingView 显示差异化文案。
     # None 表示 external 模式或未启用 embedded PG（显示原有 "Initializing..." 文案）。
     embedded_pg_scenario: EmbeddedPgStartupScenario | None = None
+    # MAJOR-02: embedded PG 日志目录提示（脱敏后由 StartupController 在
+    # UPGRADE_FAILED 时解析注入），供升级失败对话框「请查看日志」文案显示路径
+    # 与「打开日志目录」按钮使用。None 表示解析失败/不适用（按钮降级为禁用）。
+    log_dir_hint: str | None = None

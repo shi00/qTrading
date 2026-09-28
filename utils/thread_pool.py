@@ -168,21 +168,34 @@ class ThreadPoolManager:
 
         # 4. Graceful shutdown of old pools in background thread to avoid blocking reload
         def shutdown_old_pools():
+            # D7-2: 热重载关闭旧池用 cancel_futures=False —— 已排队、尚未启动的工作不被取消，
+            # 在旧池内自然执行完（新提交走新池）。根因：reload_config 由「保存线程池设置」触发，
+            # 用户可能在同步/夜间预测运行期间改线程数；若取消排队工作，会经 run_in_executor
+            # 链接把等待它的 asyncio Future 一并取消，协程抛 CancelledError（R2 要求上抛）→
+            # 任务被当作「用户取消」终止、夜间预测当晚不重试。
+            # 语义分离：停机路径（本类 shutdown() 与本方法 swap 前早退分支）仍用
+            # cancel_futures=True —— 那是真正的终止语义，应取消排队工作；仅热重载路径不取消。
+            # 权衡（D7-2）：旧池排空期间（在途任务全部完成前）线程总数偏高；反复热重载会累积
+            # 多个待排空的残池。回收时机：旧池队列尾部已补 None 哨兵，worker 依次退出，池内
+            # 无外部强引用，最后一个工作完成后由 GC 回收（shutdown_old_pools 返回后局部引用消
+            # 失、闭包亦不持有）。默认线程数有上限且热重载是低频用户操作，故短时偏高可接受；
+            # 不采用「有活动任务则推迟重载」——那需 utils 感知 services（违反 R1 架构边界）。
             # CON-05: shutdown 的 wait 参数只决定调用方是否阻塞等待，不终止运行中任务——
-            # wait=False 与 wait=True 下在途任务都自然完成（cancel_futures=True 仅取消排队
-            # 未启动任务），因此保持 wait=False 不改变「reload 不孤立在途任务」的语义。
+            # wait=False 与 wait=True 下在途任务都自然完成，因此保持 wait=False 不改变
+            # 「reload 不孤立在途任务」的语义。
             # 必须经后台线程执行（承重约束）：reload_config 经 run_async 在旧 IO 池 worker
             # 内被调用（system_settings_view_model.save_thread_pool），同步 shutdown(wait=True)
             # 会 join 自身 worker 死锁，故此处不可内联。
             # 进程退出时在途 dump/restore 被强杀的风险由 CON-04 的 request_cancel 停机集成
             # 覆盖（dump 类可取消；restore 类按 CON-04 设计拒绝取消、强杀为已接受权衡）。
             if old_io_pool:
-                old_io_pool.shutdown(wait=False, cancel_futures=True)
+                old_io_pool.shutdown(wait=False, cancel_futures=False)
             if old_cpu_pool:
-                old_cpu_pool.shutdown(wait=False, cancel_futures=True)
+                old_cpu_pool.shutdown(wait=False, cancel_futures=False)
             logger.warning(
-                "Old Thread Pools shut down (wait=False, cancel_futures=True); "
-                "running tasks continue to completion, queued tasks are cancelled; "
+                "Old Thread Pools shut down (wait=False, cancel_futures=False); "
+                "running AND queued tasks continue to completion in the old pools, "
+                "which are GC'd after draining; new submissions use the new pools; "
                 "in-flight task kill-on-process-exit is covered by CON-04 request_cancel."
             )
 

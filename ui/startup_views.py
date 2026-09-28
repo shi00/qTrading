@@ -80,6 +80,75 @@ def _get_localized_detail(detail: str) -> str:
     return detail
 
 
+# MAJOR-02: 升级失败中「重试无意义」的确定性错误码。
+# schema/版本不兼容 (orphaned_revision)、数据结构不兼容 (format)、认证/密码错误、
+# 目标库缺失、sidecar 校验失败等，重试只会得到同样结果，应展示处理指引而非「重试」。
+# 保守策略：无法分类或未列出的错误码一律视为可重试，避免误夺用户的重试入口。
+_NON_RETRYABLE_UPGRADE_CODES: frozenset[str] = frozenset(
+    {
+        "orphaned_revision",
+        "format",
+        "auth",
+        "password_error",
+        "not_found",
+        "sha256_mismatch",
+        "sidecar_not_found",
+        "sidecar_not_executable",
+    }
+)
+
+
+def _is_upgrade_error_retryable(detail: str | None) -> bool:
+    """判断 DB 升级失败是否值得重试。
+
+    经 ``classify_error(context="db")`` 分类；命中确定性错误码 (schema 不兼容等) 返回
+    ``False``。detail 为空、分类失败或错误码不在确定性集合内时保守返回 ``True``
+    (默认保留「重试升级」按钮)。
+    """
+    if not detail:
+        return True
+    try:
+        from utils.error_classifier import classify_error
+
+        info = classify_error(Exception(detail), context="db")
+        return info.get("code") not in _NON_RETRYABLE_UPGRADE_CODES
+    except Exception as e:
+        logger.debug(
+            "[StartupView] failed to classify upgrade error detail: %s",
+            DataSanitizer.sanitize_error(e),
+        )
+        return True
+
+
+async def _export_startup_diagnostics() -> None:
+    """导出诊断包 (复用 ``SystemDiagnosticsCollector``)，成功/失败经 toast 反馈。
+
+    R2: ``CancelledError`` 必须传播；R9: 失败日志中的异常经 ``DataSanitizer`` 脱敏。
+    """
+    try:
+        from utils.diagnostics import SystemDiagnosticsCollector
+
+        zip_path = await SystemDiagnosticsCollector.export()
+        page = _get_page()
+        if page is not None:
+            toast_show(
+                page,
+                I18n.get("settings_diagnostics_success").format(path=zip_path),
+                toast_type="success",
+            )
+    except asyncio.CancelledError:
+        raise  # R2: 必须传播
+    except Exception as e:
+        logger.error(
+            "[StartupView] diagnostics export failed: %s",
+            DataSanitizer.sanitize_error(e),
+            exc_info=True,
+        )
+        page = _get_page()
+        if page is not None:
+            toast_show(page, I18n.get("settings_diagnostics_failed"), toast_type="error")
+
+
 class _StartupBridge:
     """controller on_state_change → 声明式组件 set_state 的桥.
 
@@ -457,18 +526,80 @@ def _build_upgrade_success_dialog(on_ok: Callable[[ft.ControlEvent], None]) -> f
 def _build_upgrade_failed_dialog(
     on_exit: Callable[[ft.ControlEvent], None],
     on_retry: Callable[[ft.ControlEvent], None],
+    *,
+    detail: str | None = None,
+    log_dir_hint: str | None = None,
+    on_open_log_dir: Callable[[ft.ControlEvent], None] | None = None,
+    on_export_diagnostics: Callable[[ft.ControlEvent], None] | None = None,
 ) -> ft.AlertDialog:
-    """构造 DB 升级失败对话框."""
+    """构造 DB 升级失败对话框.
+
+    MAJOR-02:
+    - 展示脱敏后的 detail 摘要 (R9: 经 ``DataSanitizer`` 二次脱敏，禁止渲染未脱敏异常原文)
+    - 「请查看日志」文案附日志路径 (``log_dir_hint``)，并提供「打开日志目录」按钮
+      (路径缺失时按钮降级为禁用，不崩溃)
+    - 提供「导出诊断包」按钮 (复用 ``SystemDiagnosticsCollector``)
+    - 确定性错误 (schema 不兼容等不可重试) 以处理指引替代「重试升级」按钮
+    """
+    retryable = _is_upgrade_error_retryable(detail)
+
+    content_children: list[ft.Control] = [ft.Text(I18n.get("db_upgrade_error_content"))]
+
+    # 脱敏后的 detail 摘要 (截断，避免超长异常撑爆对话框)
+    localized_detail = _get_localized_detail(detail or "")
+    safe_detail = DataSanitizer.sanitize_error(localized_detail) if localized_detail else ""
+    if safe_detail:
+        content_children.append(ft.Text(safe_detail[:200], size=AppStyles.FONT_SIZE_BODY, color=AppColors.ERROR))
+
+    # 确定性错误 → 处理指引 (替代「重试」)
+    if not retryable:
+        content_children.append(
+            ft.Text(
+                I18n.get("db_upgrade_error_manual_hint"),
+                size=AppStyles.FONT_SIZE_BODY,
+                color=AppColors.TEXT_SECONDARY,
+            )
+        )
+
+    # 通用「请查看日志」文案须带日志路径
+    if log_dir_hint:
+        content_children.append(
+            ft.Text(
+                I18n.get("startup_embedded_pg_log_dir_hint").format(path=log_dir_hint),
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=AppColors.TEXT_SECONDARY,
+            )
+        )
+
+    actions: list[ft.Control] = [
+        ft.TextButton(I18n.get("exit_program"), on_click=safe_on_click(on_exit)),
+    ]
+    if on_open_log_dir is not None:
+        actions.append(
+            ft.TextButton(
+                I18n.get("db_status_open_log_dir"),
+                icon=ft.Icons.FOLDER_OPEN_OUTLINED,
+                on_click=safe_on_click(on_open_log_dir),
+                # 日志目录解析失败时为 None → 降级为禁用，避免打开无效路径
+                disabled=log_dir_hint is None,
+            )
+        )
+    if on_export_diagnostics is not None:
+        actions.append(
+            ft.TextButton(
+                I18n.get("settings_diagnostics_btn"),
+                icon=ft.Icons.DOWNLOAD,
+                on_click=safe_on_click(on_export_diagnostics),
+            )
+        )
+    if retryable:
+        actions.append(ft.Button(I18n.get("retry_upgrade"), on_click=safe_on_click(on_retry)))
+
     return ft.AlertDialog(
         modal=True,
         title=ft.Text(I18n.get("db_upgrade_error_title")),
-        content=ft.Text(I18n.get("db_upgrade_error_content")),
-        actions=safe_controls(
-            [
-                ft.TextButton(I18n.get("exit_program"), on_click=safe_on_click(on_exit)),
-                ft.Button(I18n.get("retry_upgrade"), on_click=safe_on_click(on_retry)),
-            ]
-        ),
+        content=ft.Column(content_children, spacing=10),
+        actions=safe_controls(actions),
         actions_alignment=ft.MainAxisAlignment.END,
     )
 
@@ -603,7 +734,26 @@ def StartupView(
         def _on_retry(e: ft.ControlEvent) -> None:
             run_task_fn(controller.upgrade_retry)
 
-        dialog = _build_upgrade_failed_dialog(_on_exit, _on_retry)
+        def _on_open_log_dir(e: ft.ControlEvent) -> None:
+            # MAJOR-02: 复用 DatabaseStatusViewModel 的跨平台目录打开能力 (subprocess.Popen 非阻塞)
+            if not context.log_dir_hint:
+                return
+            from ui.viewmodels.database_status_view_model import DatabaseStatusViewModel
+
+            DatabaseStatusViewModel.open_path_in_file_manager(context.log_dir_hint)
+
+        def _on_export_diagnostics(e: ft.ControlEvent) -> None:
+            # MAJOR-02: 复用 SystemDiagnosticsCollector.export() (异步，经 run_task_fn 调度)
+            run_task_fn(_export_startup_diagnostics)
+
+        dialog = _build_upgrade_failed_dialog(
+            _on_exit,
+            _on_retry,
+            detail=context.detail,
+            log_dir_hint=context.log_dir_hint,
+            on_open_log_dir=_on_open_log_dir,
+            on_export_diagnostics=_on_export_diagnostics,
+        )
 
     ft.use_dialog(dialog)
 

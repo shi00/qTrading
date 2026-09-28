@@ -40,6 +40,7 @@ from ui.components.slider_input import SliderInput
 from ui.components.state_views import EmptyState
 from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.toast_manager import open_export_folder
+from ui.components.unit_format import column_header_unit, format_metadata_cell
 from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, translate_strategy_name, get_observable_state
@@ -140,12 +141,7 @@ _COLUMN_WIDTHS = {
     "alpha": 80,
 }
 
-_VOLUME_COLS = frozenset({"vol", "volume", "amount"})
-
 _DATE_COLS = frozenset({"list_date", "trade_date"})
-
-# Task 4.3 (FR-UX-005): 复盘涨幅/超额收益列, 带符号格式化 (+1.23 / -1.23)
-_PCT_COLS = frozenset({"t1_pct", "t5_pct", "alpha"})
 
 # MINOR-09 item 3: PaginatedTable 列宽持久化键 (经 VM 读写 ConfigHandler, 对齐 splitter 模式)
 _VT_COL_WIDTHS_KEY = "ui_vt_screener_col_widths"
@@ -227,17 +223,12 @@ def _format_cell_value(col: str, val) -> str:
         if len(val_str) == 8 and val_str.isdigit():
             return f"{val_str[:4]}-{val_str[4:6]}-{val_str[6:]}"
         return str(val)
+    # CRITICAL-02: 布尔 / 单位换算 / 百分比列统一经「列 → 原始单位 → 展示单位」
+    # 元数据（ui/components/unit_format.py，与详情框共用同一单一数据源，杜绝两套口径）。
+    meta = format_metadata_cell(col, val)
+    if meta is not None:
+        return meta
     if isinstance(val, (float, int)) and col not in ("ts_code", "symbol"):
-        if col in _VOLUME_COLS:
-            if val > 1_000_000_000:
-                return f"{val / 1_000_000_000:.2f}{I18n.get('unit_yi')}"
-            if val > 10_000:
-                return f"{val / 10_000:.2f}{I18n.get('unit_wan')}"
-            return f"{val:,.0f}"
-        if col in _PCT_COLS:  # Task 4.3 (FR-UX-005): 带符号格式化
-            val_f = float(val)
-            sign = "+" if val_f > 0 else ""
-            return f"{sign}{val_f:.2f}"
         if isinstance(val, float):
             return f"{val:.2f}"
     return str(val)
@@ -254,6 +245,10 @@ def _build_table_data(current_page_rows: tuple[ScreenerRow, ...], vm: ScreenerVi
         visible_cols.append(col)
         width = _COLUMN_WIDTHS.get(col, 80)
         label = vm.get_column_alias("screening_history", col)
+        # CRITICAL-02: 有单位的列在表头标注展示单位（与单元格换算同源，避免口径漂移）。
+        unit = column_header_unit(col)
+        if unit is not None:
+            label = f"{label}{I18n.get('col_header_unit_suffix', unit=unit)}"
         vt_columns.append({"id": col, "label": label, "width": width})
 
     formatted_rows = _format_rows(current_page_rows, visible_cols)

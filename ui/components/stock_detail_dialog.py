@@ -25,6 +25,14 @@ import flet_charts as fch
 from ui.components._markdown_safe import safe_open_url
 from ui.components.chart_utils import generate_kline_chart_data
 from ui.components.news_insight_panel import NewsInsightPanel
+from ui.components.unit_format import (
+    TUSHARE_AMOUNT_UNIT,  # noqa: F401  # 公开常量 re-export（外部/测试经本模块引用）
+    TUSHARE_MV_UNIT,  # noqa: F401  # 公开常量 re-export（外部/测试经本模块引用）
+    format_amount,
+    format_mv,
+    format_vol,
+    is_valid_number,
+)
 from ui.i18n import I18n, get_observable_state
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS
@@ -35,58 +43,10 @@ from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
-# Tushare unit conversion constants
-TUSHARE_MV_UNIT = 10000  # Tushare returns market value in 万元, convert to 亿
-TUSHARE_AMOUNT_UNIT = 100000  # Tushare returns amount in 千元, convert to 亿
-
-
-def is_valid_number(val) -> bool:
-    """Check if val is a valid (non-NaN) number."""
-    if val is None:
-        return False
-    if isinstance(val, float):
-        return not math.isnan(val)
-    if isinstance(val, int):
-        return True
-    try:
-        float_val = float(val)
-        return not math.isnan(float_val)
-    except (TypeError, ValueError):
-        return False
-
-
-def format_mv(val) -> str:
-    """Format market value in 亿 (pure function)."""
-    if not is_valid_number(val):
-        return "-"
-    try:
-        return f"{float(val) / TUSHARE_MV_UNIT:.1f}{I18n.get('unit_yi')}"
-    except (ValueError, TypeError):
-        return "-"
-
-
-def format_vol(val) -> str:
-    """Format volume (pure function)."""
-    if not is_valid_number(val):
-        return "-"
-    try:
-        v = float(val)
-        if v >= 10000:
-            return f"{v / 10000:.1f}{I18n.get('unit_wanshou')}"
-        return f"{v:.0f}{I18n.get('unit_shou')}"
-    except (ValueError, TypeError):
-        return "-"
-
-
-def format_amount(val) -> str:
-    """Format amount in 亿 (pure function)."""
-    if not is_valid_number(val):
-        return "-"
-    try:
-        return f"{float(val) / TUSHARE_AMOUNT_UNIT:.2f}{I18n.get('unit_yi')}"
-    except (ValueError, TypeError):
-        return "-"
-
+# 单位换算与数值格式化统一由 ui/components/unit_format.py 承载（CRITICAL-02：
+# 结果表与详情框共用同一「列 → 原始单位 → 展示单位」元数据，杜绝两套口径）。
+# 本模块经上方 import 复用 format_mv/format_vol/format_amount/is_valid_number，
+# 并 re-export TUSHARE_MV_UNIT/TUSHARE_AMOUNT_UNIT 以兼容既有引用。
 
 # --- 模块级纯函数（由旧实例方法转换） ---
 

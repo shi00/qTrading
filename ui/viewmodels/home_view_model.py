@@ -30,6 +30,9 @@ class NewsRow:
     source: str = ""
     publish_time: str = ""
     is_ai_tagged: bool = False
+    # 入库 market_news.sentiment 原值（如 "Positive"/"Neutral"/"Negative"）；
+    # 缺失/不可解析时为 None，由 View 渲染为中性样式（R21：不靠本地关键词猜测填充）。
+    sentiment: str | None = None
 
 
 @dataclass(frozen=True)
@@ -420,10 +423,23 @@ def _detect_ai_tagged(tags: str, source: str) -> bool:
     return (source or "").upper() == "AI"
 
 
+def _coerce_sentiment(value: Any) -> str | None:
+    """将来源 sentiment 规整为 ``str | None``（R21：不伪装缺失）.
+
+    DB NULL 经 DataFrame 常表现为 ``NaN``（float），实时 item 可能无该键或为空串；
+    非字符串/空白一律归一为 ``None``，交由 View 渲染中性样式。
+    """
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    return None
+
+
 def _news_item_to_row(item: Any) -> NewsRow:
     """单个 news item (dict) → NewsRow.
 
-    复用 CacheManager.normalize_news_item 保证字段一致.
+    复用 CacheManager.normalize_news_item 保证字段一致
+    (normalize 会丢弃 sentiment，故从原始 item 直接读取).
     """
     from data.cache.cache_manager import CacheManager
 
@@ -436,6 +452,7 @@ def _news_item_to_row(item: Any) -> NewsRow:
         source=source,
         publish_time=str(normalized.get("publish_time", "") or ""),
         is_ai_tagged=_detect_ai_tagged(tags, source),
+        sentiment=_coerce_sentiment(item.get("sentiment")),
     )
 
 
@@ -450,6 +467,7 @@ def _df_to_news_rows(df: pd.DataFrame | None) -> tuple[NewsRow, ...]:
             source=str(row.get("source", "") or ""),
             publish_time=str(row.get("publish_time", "") or ""),
             is_ai_tagged=_detect_ai_tagged(str(row.get("tags", "") or ""), str(row.get("source", "") or "")),
+            sentiment=_coerce_sentiment(row.get("sentiment")),
         )
         for row in df.to_dict("records")
     )
