@@ -263,6 +263,33 @@ class TestHasIndexData:
         assert _has_index_data(MarketIndexRow(value="0.00")) is True
 
 
+class TestHasHsgtData:
+    """MINOR-12: _has_hsgt_data 判定 — 与指数卡同款占位符判定, 0 值不误判。"""
+
+    def test_has_data_true(self) -> None:
+        from ui.components.market_dashboard import _has_hsgt_data
+
+        assert _has_hsgt_data(HsgtRow(value="100亿")) is True
+
+    def test_has_data_false_single_dash(self) -> None:
+        """上游空数据占位符 '-' → 无数据."""
+        from ui.components.market_dashboard import _has_hsgt_data
+
+        assert _has_hsgt_data(HsgtRow(value="-")) is False
+
+    def test_has_data_false_default_double_dash(self) -> None:
+        """HsgtRow() 默认 '--' → 无数据."""
+        from ui.components.market_dashboard import _has_hsgt_data
+
+        assert _has_hsgt_data(HsgtRow()) is False
+
+    def test_has_data_true_real_zero_flow(self) -> None:
+        """真实零流向 (color='grey' 但 value 非占位) 视为有数据 (不被灰色误判)."""
+        from ui.components.market_dashboard import _has_hsgt_data
+
+        assert _has_hsgt_data(HsgtRow(value="0万", sub="流出", color="grey")) is True
+
+
 class TestBuildHsgtCard:
     """_build_hsgt_card 纯函数测试：验证北向资金卡片渲染。"""
 
@@ -286,15 +313,42 @@ class TestBuildHsgtCard:
         # value 的 color 解析为 UP
         assert col.controls[1].color == AppColors.UP_RED
 
-    def test_empty_info_falls_back_to_dash(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """空 info：value/sub 显示 '--'。"""
+    def test_empty_info_shows_placeholder(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """MINOR-12: 无数据 info → 渲染中性占位 (首页 '暂无数据'), 省略 sub 行 (2 控件)."""
         from ui.components.market_dashboard import _build_hsgt_card
+        from ui.i18n import I18n
+        from ui.theme import AppColors
 
         card = _build_hsgt_card(HsgtRow())
 
         col = card.content
-        assert col.controls[1].value == "--"
-        assert col.controls[2].value == "--"
+        assert col.controls[1].value == I18n.get("home_index_empty")
+        assert col.controls[1].color == AppColors.TEXT_SECONDARY
+        assert len(col.controls) == 2, "无数据卡仅标题+占位 (无 sub 行)"
+
+    def test_upstream_dash_value_shows_placeholder(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """上游空数据占位符 '-' → 占位文案 (非着色数值), 省略 sub."""
+        from ui.components.market_dashboard import _build_hsgt_card
+        from ui.i18n import I18n
+
+        card = _build_hsgt_card(HsgtRow(value="-", sub="-", color="grey"))
+
+        col = card.content
+        assert col.controls[1].value == I18n.get("home_index_empty")
+        assert len(col.controls) == 2
+
+    def test_real_zero_flow_renders_value_not_placeholder(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """真实零流向 (color='grey' 但 value 非占位) → 渲染数值+sub (非占位)."""
+        from ui.components.market_dashboard import _build_hsgt_card
+        from ui.theme import AppColors
+
+        card = _build_hsgt_card(HsgtRow(value="0万", sub="流出", color="grey"))
+
+        col = card.content
+        assert col.controls[1].value == "0万"
+        assert col.controls[1].color == AppColors.TEXT_SECONDARY  # grey → 中性
+        assert col.controls[2].value == "流出"
+        assert len(col.controls) == 3
 
 
 class TestBuildConceptCard:
@@ -321,8 +375,8 @@ class TestBuildConceptCard:
         assert text.value == "+3.5%"
         assert text.color == AppColors.UP_RED
 
-    def test_non_red_color_uses_down_and_trending_down_icon(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """color 不含 'red' → is_up=False, color=DOWN, icon=TRENDING_DOWN。"""
+    def test_green_color_uses_down_and_trending_down_icon(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """color 含 'green' → is_down=True, color=DOWN, icon=TRENDING_DOWN。"""
         from ui.components.market_dashboard import _build_concept_card
         from ui.theme import AppColors
 
@@ -335,8 +389,24 @@ class TestBuildConceptCard:
         assert icon.icon == ft.Icons.TRENDING_DOWN
         assert icon.color == AppColors.DOWN_GREEN
 
-    def test_missing_color_defaults_to_empty(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """item 无 color → color_str='' → is_up=False → DOWN。"""
+    def test_neutral_grey_color_uses_secondary_and_no_icon(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """MINOR-12: 上游 'grey' (涨跌幅 0) → 中性色, 不渲染趋势图标 (仅 Text)."""
+        from ui.components.market_dashboard import _build_concept_card
+        from ui.theme import AppColors
+
+        item = HotConceptRow(name="银行", change="0.00%", color="grey")
+        card = _build_concept_card(item)
+
+        col = card.content
+        row = col.controls[1]
+        assert len(row.controls) == 1, "中性档不渲染趋势图标"
+        text = row.controls[0]
+        assert isinstance(text, ft.Text)
+        assert text.value == "0.00%"
+        assert text.color == AppColors.TEXT_SECONDARY
+
+    def test_missing_color_is_neutral(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """MINOR-12: item 无 color ('') → 中性档 (不再默认判跌), 无图标。"""
         from ui.components.market_dashboard import _build_concept_card
         from ui.theme import AppColors
 
@@ -345,7 +415,19 @@ class TestBuildConceptCard:
 
         col = card.content
         row = col.controls[1]
-        assert row.controls[0].color == AppColors.DOWN_GREEN
+        assert len(row.controls) == 1
+        assert row.controls[0].color == AppColors.TEXT_SECONDARY
+
+    def test_unknown_color_is_neutral(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """MINOR-12: 未识别颜色 (如 'blue') → 中性档, 不误判为跌。"""
+        from ui.components.market_dashboard import _build_concept_card
+        from ui.theme import AppColors
+
+        card = _build_concept_card(HotConceptRow(name="x", change="+1%", color="blue"))
+
+        row = card.content.controls[1]
+        assert len(row.controls) == 1
+        assert row.controls[0].color == AppColors.TEXT_SECONDARY
 
     def test_missing_name_falls_back_to_dash(self, mock_i18n_state, mock_app_colors_state) -> None:
         """item 无 name → 显示 '--'。"""
@@ -357,14 +439,14 @@ class TestBuildConceptCard:
         assert col.controls[0].value == "--"
 
     def test_missing_change_falls_back_to_default(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """item 无 change → 显示 '0.00%'。"""
+        """item 无 change → 显示 '0.00%' (中性档仅 Text, 无图标)."""
         from ui.components.market_dashboard import _build_concept_card
 
         card = _build_concept_card(HotConceptRow(name="x"))
 
         col = card.content
         row = col.controls[1]
-        assert row.controls[1].value == "0.00%"
+        assert row.controls[0].value == "0.00%"
 
     def test_col_config_is_6_per_row_on_mobile(self, mock_i18n_state, mock_app_colors_state) -> None:
         """卡片 col 配置：xs=6, sm=4, md=3, lg=2。"""
@@ -449,6 +531,22 @@ class TestMarketDashboardBody:
         empty_text = empty_card.content
         assert empty_text.value == I18n.get("home_hot_concepts_empty")
 
+    def test_concept_card_zero_change_renders_neutral(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """MINOR-12: 涨跌幅 0 的概念卡 → 中性色, 不渲染趋势图标 (组件层回归)."""
+        from ui.components.market_dashboard import MarketDashboard
+        from ui.theme import AppColors
+
+        hot_concepts = (HotConceptRow(name="银行", change="0.00%", color="grey"),)
+        component = make_component(MarketDashboard, hot_concepts=hot_concepts)
+        run_mount_effects(component)
+        result = render_once(component)
+
+        concepts_row = result.controls[2].controls[1]
+        card = concepts_row.controls[0]
+        row = card.content.controls[1]
+        assert len(row.controls) == 1, "中性档无趋势图标"
+        assert row.controls[0].color == AppColors.TEXT_SECONDARY
+
     def test_partial_indices_fills_empty_cards(self, mock_i18n_state, mock_app_colors_state) -> None:
         """indices 不足 3 个：缺失部分用 MarketIndexRow() 填充（仍渲染 4 张卡片）。"""
         from ui.components.market_dashboard import MarketDashboard
@@ -501,19 +599,23 @@ class TestMarketDashboardBody:
         assert col.controls[1].value == "0.00"
         assert len(col.controls) == 3
 
-    def test_none_hsgt_renders_dash(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """hsgt=None → HsgtRow() 默认值，渲染 '--'。"""
+    def test_none_hsgt_renders_placeholder(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """MINOR-12: hsgt=None → HsgtRow() 默认无数据 → 渲染中性占位 (非着色数值)."""
         from ui.components.market_dashboard import MarketDashboard
+        from ui.i18n import I18n
+        from ui.theme import AppColors
 
         component = make_component(MarketDashboard, hsgt=None)
         run_mount_effects(component)
         result = render_once(component)
 
         indices_row = result.controls[0]
-        # hsgt 卡片渲染默认值 '--'
+        # hsgt 卡片渲染占位 (标题 + 占位, 无 sub 行)
         hsgt_card = indices_row.controls[3]
         col = hsgt_card.content
-        assert col.controls[1].value == "--"
+        assert col.controls[1].value == I18n.get("home_index_empty")
+        assert col.controls[1].color == AppColors.TEXT_SECONDARY
+        assert len(col.controls) == 2
 
     def test_empty_indices_renders_4_cards(self, mock_i18n_state, mock_app_colors_state) -> None:
         """indices=() → 3 张空 index 卡片 + 1 张 hsgt 卡片（共 4 张）。"""
