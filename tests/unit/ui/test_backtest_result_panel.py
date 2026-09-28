@@ -30,6 +30,7 @@ from ui.components.backtest.backtest_result_panel import (
     _build_nav_chart,
     _build_trades_table,
     _delist_warning,
+    _get_color_for_drawdown,
     _get_color_for_ic,
     _get_color_for_sharpe,
     _get_color_for_value,
@@ -40,6 +41,7 @@ from ui.components.backtest.backtest_result_panel import (
     _invested_warning,
     _metric_card,
     _profit_factor_card,
+    _sample_tick_indices,
 )
 from ui.i18n import I18n
 from ui.theme import AppColors
@@ -172,6 +174,48 @@ class TestColorHelpers:
 
     def test_get_color_for_ic_insignificant(self) -> None:
         assert _get_color_for_ic(0.03) == AppColors.TEXT_PRIMARY
+
+    def test_get_color_for_drawdown_zero_is_normal(self) -> None:
+        """MINOR-08: 0% 回撤（无回撤）→ 正常/中性色，不再误判为警告色。"""
+        assert _get_color_for_drawdown(0.0) == AppColors.TEXT_PRIMARY
+
+    def test_get_color_for_drawdown_tiny_is_normal(self) -> None:
+        """极小回撤（<= 5%）→ 正常/中性色。"""
+        assert _get_color_for_drawdown(0.03) == AppColors.TEXT_PRIMARY
+        assert _get_color_for_drawdown(0.05) == AppColors.TEXT_PRIMARY
+
+    def test_get_color_for_drawdown_moderate_is_warning(self) -> None:
+        """中等回撤（5% < dd <= 20%）→ 警告色。"""
+        assert _get_color_for_drawdown(0.1) == AppColors.WARNING
+        assert _get_color_for_drawdown(0.2) == AppColors.WARNING
+
+    def test_get_color_for_drawdown_severe_is_error(self) -> None:
+        """严重回撤（> 20%）→ 红色。"""
+        assert _get_color_for_drawdown(0.25) == AppColors.ERROR
+
+
+class TestSampleTickIndices:
+    """MINOR-08: 轴刻度抽样纯函数（避免逐日一标签密集不可读）。"""
+
+    def test_empty_returns_empty(self) -> None:
+        assert _sample_tick_indices(0) == ()
+
+    def test_negative_returns_empty(self) -> None:
+        assert _sample_tick_indices(-3) == ()
+
+    def test_under_max_returns_all(self) -> None:
+        assert _sample_tick_indices(3) == (0, 1, 2)
+
+    def test_equal_max_returns_all(self) -> None:
+        assert _sample_tick_indices(8) == tuple(range(8))
+
+    def test_over_max_is_bounded_inclusive_and_sorted(self) -> None:
+        """超过阈值 → 抽样至 6~10 个刻度，首尾必含且升序去重。"""
+        idx = _sample_tick_indices(100)
+        assert 6 <= len(idx) <= 10
+        assert idx[0] == 0
+        assert idx[-1] == 99
+        assert list(idx) == sorted(set(idx))
 
 
 class TestMetricCard:
@@ -574,11 +618,57 @@ class TestBacktestChartContext:
         assert chart.data_series[1].dash_pattern == [6, 4]
 
     def test_nav_chart_benchmark_len_mismatch_dropped(self) -> None:
-        """基准长度与净值不一致（数据异常）→ 不渲染基准，图例仅策略。"""
+        """基准长度与净值不一致（数据异常）→ 不渲染基准，图例仅策略。
+
+        MINOR-08: 显式提示条出现（不静默隐藏），LineChart 位于第 3 个控件（图例/提示/图）。
+        """
         container = _build_nav_chart((100.0, 110.0), ("a", "b"), (100.0,))
-        chart = container.content.controls[1]
+        chart = container.content.controls[2]
+        assert isinstance(chart, fch.LineChart)
         assert len(chart.data_series) == 1
         assert len(container.content.controls[0].controls) == 1
+
+    def test_nav_chart_benchmark_len_mismatch_shows_notice(self) -> None:
+        """MINOR-08: 基准长度不一致 → 显式提示条（i18n 同源），基准曲线不渲染。"""
+        container = _build_nav_chart((100.0, 110.0), ("a", "b"), (100.0,))
+        # controls: [图例行, 基准不完整提示, LineChart]
+        assert len(container.content.controls) == 3
+        notice = container.content.controls[1]
+        assert isinstance(notice, ft.Row)
+        notice_texts = [c for c in notice.controls if isinstance(c, ft.Text)]
+        assert [t.value for t in notice_texts] == [I18n.get("backtest_benchmark_incomplete")]
+        chart = container.content.controls[2]
+        assert isinstance(chart, fch.LineChart)
+        assert len(chart.data_series) == 1
+
+    def test_nav_chart_benchmark_empty_no_notice(self) -> None:
+        """MINOR-08: 基准为空（未配置基准）→ 无提示条，仅图例行 + LineChart。"""
+        container = _build_nav_chart((100.0, 110.0), ("a", "b"), ())
+        assert len(container.content.controls) == 2
+        assert isinstance(container.content.controls[1], fch.LineChart)
+
+    def test_nav_chart_axis_labels_sampled_when_many_dates(self) -> None:
+        """MINOR-08: 大量日期 → 横轴刻度抽样（<=8），首尾 label 正确。"""
+        dates = tuple(f"2024-01-{d:02d}" for d in range(1, 31))  # 30 个日期
+        container = _build_nav_chart(tuple(100.0 + i for i in range(30)), dates)
+        chart = container.content.controls[1]
+        assert isinstance(chart, fch.LineChart)
+        labels = chart.bottom_axis.labels
+        assert 6 <= len(labels) <= 10
+        assert labels[0].value == 0
+        assert labels[0].label == "2024-01-01"
+        assert labels[-1].value == 29
+        assert labels[-1].label == "2024-01-30"
+
+    def test_nav_chart_axis_labels_all_when_few_dates(self) -> None:
+        """MINOR-08: 少量日期（<=8）→ 全量标签，回归不变。"""
+        container = _build_nav_chart((100.0, 110.0), ("2024-01-02", "2024-01-03"))
+        chart = container.content.controls[1]
+        assert isinstance(chart, fch.LineChart)
+        labels = chart.bottom_axis.labels
+        assert len(labels) == 2
+        assert labels[0].label == "2024-01-02"
+        assert labels[1].label == "2024-01-03"
 
     def test_ic_chart_date_labels_and_tooltip(self) -> None:
         """IC 图底轴日期 labels、轴 title、rod hover 明细（真实 i18n 同源）。"""

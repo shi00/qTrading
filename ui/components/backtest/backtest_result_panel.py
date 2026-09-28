@@ -67,6 +67,42 @@ def _get_color_for_ic(ic: float) -> str:
     return AppColors.TEXT_PRIMARY
 
 
+# MINOR-08: 图表横轴最多刻度数——净值/IC 序列逐日一标签会密集不可读，
+# 超过该阈值即等间隔抽样（首尾必含），使刻度数落在 6~10 的可读区间。
+_MAX_AXIS_TICKS = 8
+# MINOR-08: 最大回撤颜色分档阈值（<= _DRAWDOWN_NORMAL_MAX 视为正常，含 0 无回撤）。
+_DRAWDOWN_NORMAL_MAX = 0.05
+_DRAWDOWN_WARNING_MAX = 0.2
+
+
+def _sample_tick_indices(total: int, max_ticks: int = _MAX_AXIS_TICKS) -> tuple[int, ...]:
+    """等间隔抽样轴刻度索引（首尾必含，最多 ``max_ticks`` 个）。
+
+    MINOR-08: 逐日一轴标签使横轴密集不可读；``total <= max_ticks`` 时全量返回，
+    否则等间隔抽样（首尾索引必含），返回升序去重后的索引元组。
+    """
+    if total <= 0:
+        return ()
+    if total <= max_ticks:
+        return tuple(range(total))
+    step = (total - 1) / (max_ticks - 1)
+    return tuple(sorted({round(i * step) for i in range(max_ticks)}))
+
+
+def _get_color_for_drawdown(drawdown: float) -> str:
+    """最大回撤颜色分档（MINOR-08）。
+
+    - ``<= _DRAWDOWN_NORMAL_MAX``：正常/中性色（含 0% 无回撤，不再误判为警告色）
+    - ``<= _DRAWDOWN_WARNING_MAX``：警告色
+    - 其余：严重（红色）
+    """
+    if drawdown <= _DRAWDOWN_NORMAL_MAX:
+        return AppColors.TEXT_PRIMARY
+    if drawdown <= _DRAWDOWN_WARNING_MAX:
+        return AppColors.WARNING
+    return AppColors.ERROR
+
+
 def _profit_factor_card(metrics: dict) -> ft.Container:
     """盈亏比卡片：无亏损交易时指标无定义（None），显示 N/A（D4-5）。"""
     pf = metrics.get("profit_factor")
@@ -235,7 +271,7 @@ def _build_metrics_section(
                     content=_metric_card(
                         I18n.get("backtest_metric_max_dd"),
                         f"{metrics.get('max_drawdown', 0) * 100:.2f}%",
-                        AppColors.ERROR if metrics.get("max_drawdown", 0) > 0.2 else AppColors.WARNING,
+                        _get_color_for_drawdown(metrics.get("max_drawdown", 0)),
                     ),
                     col=_COL_QUARTER,
                 ),
@@ -384,6 +420,25 @@ def _legend_item(color: str, label: str) -> ft.Row:
     )
 
 
+def _benchmark_incomplete_notice() -> ft.Row:
+    """MINOR-08: 基准数据不完整（长度与净值不一致）时的显式提示条。
+
+    R21: 已知不可信信号（基准缺失/错位）不得静默隐藏，须显式告知用户。
+    """
+    return ft.Row(
+        [
+            ft.Icon(ft.Icons.WARNING_AMBER, size=AppStyles.FONT_SIZE_TITLE, color=AppColors.WARNING),
+            ft.Text(
+                I18n.get("backtest_benchmark_incomplete"),
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=AppColors.WARNING,
+                expand=True,
+            ),
+        ],
+        spacing=8,
+    )
+
+
 def _build_nav_chart(
     nav_curve: tuple[float, ...],
     nav_dates: tuple[str, ...] = (),
@@ -391,10 +446,12 @@ def _build_nav_chart(
 ) -> ft.Container:
     """净值/基准对比折线图（回测图表语境增强）.
 
-    - 底轴: 日期自定义 labels（``nav_dates``）；空则回退序号自动标签。
+    - 底轴: 日期自定义 labels（``nav_dates``，按 ``_sample_tick_indices`` 抽样避免密集）；
+      空则回退序号自动标签。
     - 左轴: 净值单位标题。
     - 折线 hover 明细: 日期 + 系列名 + 千分位净值。
-    - 基准: ``benchmark_curve`` 非空且长度等于 ``nav_curve`` 时才渲染虚线段系列。
+    - 基准: ``benchmark_curve`` 非空且长度等于 ``nav_curve`` 时才渲染虚线段系列；
+      长度不一致时显式提示（``_benchmark_incomplete_notice``），不静默隐藏。
     - 顶部自绘图例（策略/基准色块 + 文本）。
     """
     if not nav_curve:
@@ -405,7 +462,7 @@ def _build_nav_chart(
         )
 
     has_dates = bool(nav_dates)
-    axis_labels = [fch.ChartAxisLabel(value=i, label=d) for i, d in enumerate(nav_dates)]
+    axis_labels = [fch.ChartAxisLabel(value=i, label=nav_dates[i]) for i in _sample_tick_indices(len(nav_dates))]
 
     strategy_legend = I18n.get("backtest_chart_legend_strategy")
     strategy_points = []
@@ -445,8 +502,13 @@ def _build_nav_chart(
     if len(chart_data) > 1:
         legend_items.append(_legend_item(AppColors.TEXT_SECONDARY, I18n.get("backtest_chart_legend_benchmark")))
 
-    chart_content: list[ft.Control] = [
-        ft.Row(controls=legend_items, spacing=16),
+    # MINOR-08: 基准非空但与净值长度不一致 → 不渲染基准系列（避免错位），并显式提示（不静默隐藏）
+    benchmark_incomplete = bool(benchmark_curve) and len(benchmark_curve) != len(nav_curve)
+
+    chart_content: list[ft.Control] = [ft.Row(controls=legend_items, spacing=16)]
+    if benchmark_incomplete:
+        chart_content.append(_benchmark_incomplete_notice())
+    chart_content.append(
         fch.LineChart(
             data_series=chart_data,
             border=ft.Border.all(1, AppColors.DIVIDER),
@@ -461,8 +523,8 @@ def _build_nav_chart(
             ),
             tooltip=fch.LineChartTooltip(),
             expand=True,
-        ),
-    ]
+        )
+    )
 
     container = ft.Container(
         content=ft.Column(
@@ -595,7 +657,7 @@ def _build_ic_chart(
             expand=True,
         )
 
-    axis_labels = [fch.ChartAxisLabel(value=i, label=d) for i, d in enumerate(ic_dates)]
+    axis_labels = [fch.ChartAxisLabel(value=i, label=ic_dates[i]) for i in _sample_tick_indices(len(ic_dates))]
     has_dates = bool(ic_dates)
 
     bars = []

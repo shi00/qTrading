@@ -174,7 +174,10 @@ def _mock_panel_deps(mock_i18n_state, mock_app_colors_state, monkeypatch):
     monkeypatch.setattr(panel_module, "AppColors", MagicMock())
 
 
-def _render_panel(on_run_backtest: Any = None) -> tuple[Any, FakePage, Any, Any]:
+def _render_panel(
+    on_run_backtest: Any = None,
+    is_running: bool = False,
+) -> tuple[Any, FakePage, Any, Any]:
     """渲染 BacktestConfigPanel, 返回 (on_run_backtest, page, result, component)。
 
     依赖 _mock_panel_deps autouse fixture 已 setup 的 mock。
@@ -182,7 +185,7 @@ def _render_panel(on_run_backtest: Any = None) -> tuple[Any, FakePage, Any, Any]
     if on_run_backtest is None:
         on_run_backtest = MagicMock()
     page = FakePage()
-    component = make_component(BacktestConfigPanel, on_run_backtest=on_run_backtest)
+    component = make_component(BacktestConfigPanel, on_run_backtest=on_run_backtest, is_running=is_running)
     run_mount_effects(component, page=page)
     result = render_once(component)
     return on_run_backtest, page, result, component
@@ -503,6 +506,31 @@ class TestOnRunClick:
         one_year_ago = today - timedelta(days=365)
         assert config["start_date"] == one_year_ago
         assert config["end_date"] == today
+
+
+class TestIsRunningDisablesRun:
+    """MINOR-08: is_running=True 时运行按钮禁用 + handler 直调不触发 on_run（防重入提交）。"""
+
+    def test_is_running_disables_run(self) -> None:
+        """is_running=True → 即使参数合法, run 按钮也禁用。"""
+        on_run, _, result, _ = _render_panel(is_running=True)
+        run_btn = _find_run_button(result)
+        assert run_btn.disabled is True, "回测运行中应禁用运行按钮"
+
+    def test_is_running_handler_short_circuits(self) -> None:
+        """is_running=True → 直调 on_click 也不触发 on_run_backtest（第二道防线）。"""
+        on_run, _, result, _ = _render_panel(is_running=True)
+        run_btn = _find_run_button(result)
+        _invoke(run_btn.on_click, _make_event())
+        assert not on_run.called, "运行中 on_run_backtest 不应被调用"
+
+    def test_not_running_run_enabled(self) -> None:
+        """is_running=False（默认）→ 合法参数下 run 按钮可用（回归保护）。"""
+        on_run, _, result, _ = _render_panel(is_running=False)
+        run_btn = _find_run_button(result)
+        assert run_btn.disabled is False, "非运行状态下运行按钮应可用"
+        _invoke(run_btn.on_click, _make_event())
+        on_run.assert_called_once()
 
 
 # ============================================================================
