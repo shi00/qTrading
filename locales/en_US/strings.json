@@ -192,6 +192,7 @@
     "db_upgrade_success_content": "Database has been successfully upgraded to the latest version.",
     "db_upgrade_error_title": "Upgrade Failed",
     "db_upgrade_error_content": "Database upgrade failed\n\nPlease check the log file or contact technical support.",
+    "db_upgrade_error_manual_hint": "This error cannot be resolved by retrying (e.g., incompatible database schema). Please check the logs to identify the cause, export a diagnostics package if needed, and contact technical support.",
     "exit_program": "Exit Program",
     "retry_upgrade": "Retry Upgrade",
     "db_upgrade_migration": "Performing database migration...",

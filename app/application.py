@@ -42,7 +42,7 @@ def _trace_log(msg: str) -> None:
 
 
 from app.error_logging import log_exception_with_severity
-from app.startup_controller import StartupController
+from app.startup_controller import StartupController, resolve_embedded_pg_log_dir_hint
 from app.window_lifecycle import (
     WindowDialogManager,
     build_locale_configuration,
@@ -387,7 +387,7 @@ async def _prepare_db_with_retry(
             error_info = classify_error(e, context="db")
             localized_error = get_error_message(error_info)
             error_message = DataSanitizer.sanitize_error(localized_error)
-            log_dir_hint = _resolve_embedded_pg_log_dir_hint()
+            log_dir_hint = resolve_embedded_pg_log_dir_hint()
             retry_event = threading.Event()
             exit_event = threading.Event()
 
@@ -443,32 +443,6 @@ async def _prepare_db_with_retry(
             if action == "event":
                 logger.info("[Main] User chose to exit during backoff wait")
                 sys.exit(0)
-
-
-def _resolve_embedded_pg_log_dir_hint() -> str | None:
-    """P2-1: 解析 embedded PG 日志目录路径，供 PreInitErrorView 诊断提示。
-
-    优先级：
-    1. ``AppConfig.embedded_pg_log_dir``（用户显式配置）
-    2. ``<platformdirs.user_data_dir>/postgres-logs``（embedded PG 默认日志目录）
-
-    解析失败时返回 ``None``（PreInitErrorView 不显示日志路径）。
-    """
-    try:
-        from pathlib import Path
-
-        from utils.config_handler import ConfigHandler
-        from utils.config_models import AppConfig
-
-        config = AppConfig.model_validate(ConfigHandler.load_config())
-        if config.embedded_pg_log_dir:
-            return config.embedded_pg_log_dir
-        import platformdirs
-
-        return str(Path(platformdirs.user_data_dir("qTrading")) / "postgres-logs")
-    except Exception as e:
-        logger.warning("[Main] failed to resolve embedded PG log dir hint: %s", e, exc_info=True)
-        return None
 
 
 def CloseConfirmDialog(
