@@ -5072,6 +5072,76 @@ class TestGovernanceIdGenericForm:
         assert errors == [], f"非入口文档不应报 error, got: {errors}"
         assert any("BT-99" in w for w in warnings), f"非入口文档应报 WARNING, got: {warnings}"
 
+    def test_review_series_id_detected_when_unregistered(self, tmp_path, monkeypatch):
+        """H6-c 复核缺陷 1：review 系列形态（小写前缀 + 轮次号）未登记时应被检出.
+
+        通用形态要求大写前缀（[A-Z][A-Z0-9]*），无法匹配 review01-A2 形态；旧白名单被替换为
+        通用形态时引入覆盖回退，登记侧与引用侧同时漏匹配（净零报错）。此处守护后备形态已生效。
+        """
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("见 review09-Z9（未登记）\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
+
+        errors, _ = check_governance_id_glossary()
+        assert any("review09-Z9" in e and "未在 governance-ids.md 登记" in e for e in errors), (
+            f"review 系列未登记 ID 应被检出, got: {errors}"
+        )
+
+    def test_review_series_id_registered_passes(self, tmp_path, monkeypatch):
+        """H6-c 复核缺陷 1：review 系列形态已登记 → 通过（登记侧与引用侧共用同一形态集合）."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| review09-Z9 | 某轮检视发现 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("见 review09-Z9\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
+
+        errors, _ = check_governance_id_glossary()
+        assert errors == [], f"review 系列已登记 ID 应通过, got: {errors}"
+
+    def test_py_scan_excludes_tests_dir(self, tmp_path, monkeypatch):
+        """H6-c 复核：tests/ 的 .py 不在 WARNING 扫描面（测试注释 ID 属溯源元数据）.
+
+        扫描面仅 scripts/（_GOVERNANCE_PY_SCAN_DIRS）；tests/ 中未登记 ID 不产出告警，避免
+        200+ 条永不登记的 WARNING 与「存量清零后翻转 ERROR」升级路径冲突（GOV-10 反模式）。
+        """
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "t.py").write_text("'''守护 BT-88（未登记）'''\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [])
+
+        errors, warnings = check_governance_id_glossary()
+        assert errors == [] and warnings == [], f"tests/ 不应进入扫描面, got: errors={errors}, warnings={warnings}"
+
 
 class TestAdrIndexCompleteness:
     """GDR-12: ADR 决策文档文件级索引完整性（CONTRIBUTING.md 登记全部 docs/adr/*.md）."""

@@ -3044,6 +3044,15 @@ def check_core_modules_completeness() -> list[str]:
 # 的门禁对它们不生效。改为通用形态（大写字母前缀 + 短横 + 数字）+ 显式豁免清单（外部编号体系
 # 与检视协议内部规则 ID，均为封闭集合，不随项目治理命名空间增长）。
 _GOVERNANCE_ID_PATTERN = re.compile(r"(?<![A-Za-z0-9])([A-Z][A-Z0-9]*-\d+)(?![A-Za-z0-9])")
+# review 系列形态（review01-A2 / review03-C11 / review05-E18）：小写 review 前缀 + 轮次号 + 短横 +
+# 字母数字后缀。通用形态要求大写前缀，无法匹配该形态——H6-c 复核发现其在「对照表登记」与「文档引用」
+# 两侧同时漏匹配（净零报错），review 系列 ID 实质失去门禁覆盖（旧白名单 `review\d+-[A-Za-z0-9]+`
+# 被通用形态替换时引入的覆盖回退）。独立补一条后备形态，登记侧与引用侧必须共用同一形态集合。
+_REVIEW_ID_PATTERN = re.compile(r"(?<![A-Za-z0-9])(review\d+-[A-Za-z0-9]+)(?![A-Za-z0-9])")
+_GOVERNANCE_ID_REFERENCE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    _GOVERNANCE_ID_PATTERN,
+    _REVIEW_ID_PATTERN,
+)
 # 豁免前缀（封闭集合，非本项目治理 ID 命名空间）：
 #   - ADR / EX / CVE：架构决策记录编号（check_adr_index_completeness 守护）、架构例外 ID
 #     （exceptions.yml + GDR-01 双向引用守护）、安全公告编号（SECURITY.md 引用）；
@@ -3086,15 +3095,34 @@ _GOVERNANCE_ID_EXEMPT_PREFIXES: frozenset[str] = frozenset(
 )
 # ERROR 级扫描范围（H6-c 分级）：「入口级」文档——AI 每次会话自动加载（CLAUDE.md / AGENTS.md）
 # 或进入项目的命令/流程入口（CONTRIBUTING.md）。这些文档中的未登记 ID 会让读者无从解析
-# （GDR-09 原始诉求），故为硬性 error；其余受检文档与 .py 扫描同为 WARNING（渐进部署，存量
+# （GDR-09 原始诉求），故为硬性 error；其余受检文档与门禁/红线脚本同为 WARNING（渐进部署，存量
 # 清零后翻转 ERROR，与 R20/R21 报告模式、DS-02 同范式）。按文件名判定，便于单测注入临时文档。
 _GOVERNANCE_ERROR_DOC_NAMES: frozenset[str] = frozenset({"CLAUDE.md", "AGENTS.md", "CONTRIBUTING.md"})
+# WARNING 级 .py 扫描面（DS-02 + H6-c 复核）：仅 scripts/。门禁/红线脚本自身编码治理规则，其注释中的
+# ID 引用（GATE-xx / GOV-xx / DS-xx 等）属治理机器可追溯面，应登记。tests/ 不纳入：测试注释中的 ID 是
+# 「这条断言为何存在」的溯源元数据（正本由 docs/reviews/findings/ 结论登记 GOV-04 承载），非治理消费面，
+# 纳入会引入 200+ 条永不登记的 WARNING（与「存量清零后翻转 ERROR」升级路径及清零期限冲突，GOV-10 反模式）。
+_GOVERNANCE_PY_SCAN_DIRS: tuple[str, ...] = ("scripts",)
 GOVERNANCE_IDS_PATH = ROOT / "docs" / "governance" / "governance-ids.md"
 
 
 def _collect_governance_ids(text: str) -> set[str]:
-    """从文本提取治理 ID 引用（通用形态），过滤豁免项（外部编号体系 / 检视协议 / 报告发现编号）。"""
-    return {m.group(1) for m in _GOVERNANCE_ID_PATTERN.finditer(text) if not _is_exempt_governance_id(m.group(1))}
+    """从文本提取治理 ID 引用（通用形态 + review 后备形态），过滤豁免项（外部编号体系 / 检视协议 / 报告发现编号）。"""
+    ids = {m.group(1) for pattern in _GOVERNANCE_ID_REFERENCE_PATTERNS for m in pattern.finditer(text)}
+    return {i for i in ids if not _is_exempt_governance_id(i)}
+
+
+def _match_governance_id(text: str) -> str | None:
+    """返回文本中首个治理 ID（通用形态优先，review 后备形态兜底）；无匹配返回 None。
+
+    供登记侧（_load_glossary_entries 解析对照表首列）使用，与引用侧 _collect_governance_ids 共用
+    同一形态集合，避免两侧漏匹配不对称导致「登记与引用同时漏检」的净零报错（H6-c 复核缺陷 1）。
+    """
+    for pattern in _GOVERNANCE_ID_REFERENCE_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return m.group(1)
+    return None
 
 
 # 检视报告发现编号形态（F-09 / M9-010 / D6-1 / L111-134 / C5-5 等）：前缀为单字母或
@@ -3133,9 +3161,9 @@ def _load_glossary_entries() -> dict[str, list[tuple[str, int]]] | None:
         cells = [c.strip() for c in line.strip("|").split("|")]
         if len(cells) < 2:
             continue
-        m = _GOVERNANCE_ID_PATTERN.search(cells[0])
-        if m:
-            entries.setdefault(m.group(1), []).append((cells[1], line_no))
+        gov_id = _match_governance_id(cells[0])
+        if gov_id:
+            entries.setdefault(gov_id, []).append((cells[1], line_no))
     return entries
 
 
@@ -3292,8 +3320,8 @@ def check_governance_id_glossary() -> tuple[list[str], list[str]]:
     返回 (errors, warnings)：
     - errors：入口级文档（_GOVERNANCE_ERROR_DOC_NAMES）中未登记的 ID（硬性，读者无从解析）；
     - warnings：其余受检文档（docs/**、SECURITY.md、man/**）、docs/governance/*.yml 与
-      scripts/、tests/ 的 .py 中未登记的 ID（渐进部署，存量清零后翻转 ERROR，
-      参照 check_redlines 的分级先例）。
+      scripts/ 的 .py 中未登记的 ID（渐进部署，存量清零后翻转 ERROR，参照 check_redlines 的分级先例）。
+      tests/*.py 不纳入扫描面（见 _GOVERNANCE_PY_SCAN_DIRS 注释）。
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -3303,8 +3331,8 @@ def check_governance_id_glossary() -> tuple[list[str], list[str]]:
         return errors, warnings
     # 扩展扫描范围到受检治理文档：CHANGELOG.md（release-please 自动生成，含历史提交标题
     # 里的治理 ID 噪声）与 Plans.md（本地任务计划文件）不属于治理溯源目标，显式排除；
-    # 登记正本 governance-ids.md 自身同样排除——其文本除登记行外还含说明文字（别名/夹具
-    # 示例如 P1-4、DOC-99，以及嵌入式非治理编号如 Q-P2-7），这些不是「引用需登记」对象。
+    # 登记正本 governance-ids.md 自身同样排除——其文本除登记行外还含说明文字（无前导零别名、
+    # 夹具后缀（-9X）与嵌入式非治理编号），这些不是「引用需登记」对象。
     # 其余 CHECKED_DOCS 全部纳入。另补扫 docs/governance/ 下的机器可读治理文件
     # （exceptions.yml / redlines.yml / canonical-topics.yml 等，非 markdown，不在 CHECKED_DOCS）。
     governance_yml = [
@@ -3329,10 +3357,10 @@ def check_governance_id_glossary() -> tuple[list[str], list[str]]:
         else:
             warn_refs.update(refs - registered)
 
-    # DS-02 + H6-c：scripts/ 与 tests/ 的 .py 亦为 WARNING 面。测试注释中的治理 ID 是「这个断言
-    # 为什么存在」的高价值线索（如 review03-C1 标注守护性断言的来源检视发现）；存量未登记 ID
-    # 先以 WARNING 落地（渐进部署，不阻断），存量清零后再翻转 ERROR。
-    for py_dir in ("scripts", "tests"):
+    # DS-02 + H6-c 复核：scripts/ 的 .py 亦为 WARNING 面——门禁/红线脚本自身编码治理规则，其注释中的
+    # ID 引用（GATE-xx / GOV-xx / DS-xx 等）属治理机器可追溯面，应登记。tests/ 不在扫描面内（见
+    # _GOVERNANCE_PY_SCAN_DIRS 注释：测试注释引用属 GOV-04 结论登记的溯源元数据，纳入将产生永久 WARNING）。
+    for py_dir in _GOVERNANCE_PY_SCAN_DIRS:
         for path in (ROOT / py_dir).rglob("*.py"):
             if path.is_file():
                 collected = _collect_governance_ids(path.read_text(encoding="utf-8", errors="replace"))
@@ -3493,7 +3521,8 @@ def main() -> int:
     all_errors.extend(check_governance_id_references())
     all_errors.extend(check_core_modules_completeness())
     # 治理 ID 对照表一致性：守护自动加载文档中的 ID 全部登记（GDR-09），紧随 EX 引用一致性之后。
-    # .py 扫描（scripts/ + tests/）的未登记 ID 暂为 WARNING，不阻断（DS-02 渐进部署）。
+    # .py 扫描（scripts/）的未登记 ID 暂为 WARNING，不阻断（DS-02 渐进部署，扫描面见
+    # _GOVERNANCE_PY_SCAN_DIRS 注释）。
     glossary_errors, glossary_warnings = check_governance_id_glossary()
     all_errors.extend(glossary_errors)
     if glossary_warnings:
