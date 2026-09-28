@@ -35,6 +35,8 @@
 - `TaskType.CPU`：**仅适用于释放 Python GIL 的密集计算**（如 Polars 表达式、NumPy 数组计算、C 扩展等）。
 - **纯 Python 密集循环**：纯 Python 循环在线程池内会产生严重 GIL 争抢，不仅无法利用多核，还会争抢事件循环线程导致 UI 卡顿。桌面应用模型下不引入多进程池（避免进程间序列化开销与打包复杂度）；**所有 CPU 密集型计算必须改用 Polars 向量化表达**。
 
+**热重载语义（D7-2）**：线程池配置热重载（`ThreadPoolManager.reload_config`）**不取消在途排队工作**——旧池以 `cancel_futures=False` 关闭，已排队、尚未启动的工作在旧池内自然执行完，新提交走新池；只有停机路径（`ThreadPoolManager.shutdown()` 与 reload 中「swap 前检测到停机」的早退分支）才用 `cancel_futures=True` 取消排队工作，两条路径语义必须分离。原因：取消排队工作会经 `loop.run_in_executor` 的 Future 链接把等待它的协程一并取消（`CancelledError`，R2 上抛），使运行中的同步任务 / 夜间预测被误判为「用户取消」终止（reviews/09-24/07.md §2 MAJOR-02）。
+
 ### 金额/数量列阈值比较（R20）
 
 调整或新增涉及金额、数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）的
