@@ -27,13 +27,17 @@ from tests.unit.ui.component_renderer import (
 )
 from tests.unit.ui.mock_flet import MockHoverEvent
 from ui.components.virtual_table import (
+    DETAIL_COL_ID,
+    DETAIL_COL_WIDTH,
     HEADER_HEIGHT,
     ROW_HEIGHT,
     PaginatedTable,
     TableRow,
     _build_cells,
+    _build_detail_cell,
     _build_header,
     _build_row,
+    _column_alignments,
 )
 from ui.theme import AppColors, AppStyles
 
@@ -76,8 +80,9 @@ def _make_component(
     sort_asc=True,
     on_sort=None,
     on_row_click=None,
+    **extra,
 ):
-    """构造一个 PaginatedTable Component 实例。"""
+    """构造一个 PaginatedTable Component 实例 (extra 透传新增可选参数)。"""
     if rows is None:
         rows = [_make_row_data()]
     if columns is None:
@@ -90,7 +95,16 @@ def _make_component(
         sort_asc=sort_asc,
         on_sort=on_sort,
         on_row_click=on_row_click,
+        **extra,
     )
+
+
+def _make_detail_columns() -> list[dict]:
+    """含列尾详情动作列的列定义 (MINOR-09 item 4)。"""
+    return [
+        *_make_columns(),
+        {"id": DETAIL_COL_ID, "label": "Details", "width": DETAIL_COL_WIDTH, "action": "detail"},
+    ]
 
 
 def _render(component):
@@ -491,6 +505,95 @@ class TestBuildCells:
         inner = cells[0].content
         assert inner.alignment == ft.Alignment.CENTER_LEFT
 
+    # --- MINOR-09 item 1: 超宽省略号 + tooltip ---
+
+    def test_text_cell_has_ellipsis_overflow(self):
+        """item 1: 单元格 no_wrap + overflow=ELLIPSIS (超宽显示省略号)。"""
+        cells = _build_cells(_make_row_data(), _make_columns())
+        assert cells[1].content.content.overflow == ft.TextOverflow.ELLIPSIS
+
+    def test_code_span_text_has_ellipsis_overflow(self):
+        """item 1: code 列 (TextSpan 分支) 同样加 ELLIPSIS。"""
+        cells = _build_cells(_make_row_data(), _make_columns())
+        assert cells[0].content.content.overflow == ft.TextOverflow.ELLIPSIS
+
+    def test_cell_container_has_tooltip_with_full_value(self):
+        """item 1: tooltip 展示完整值 (Text 无 tooltip, 挂外层 Container)。"""
+        cells = _build_cells(_make_row_data(), _make_columns())
+        assert cells[1].content.tooltip == "Test Stock"
+
+    def test_empty_cell_container_tooltip_is_none(self):
+        """item 1: 空值不挂 tooltip (避免空白气泡)。"""
+        cells = _build_cells({}, _make_columns())
+        assert cells[1].content.tooltip is None
+
+    # --- MINOR-09 item 2: 按列对齐覆盖逐格推断 ---
+
+    def test_alignments_override_per_cell_inference(self):
+        """item 2: 传入 alignments 时按列对齐 (数值列被强制左对齐)。"""
+        cols = [{"id": "price", "width": 100}]
+        row = {"price": "10.5"}
+        cells = _build_cells(row, cols, alignments={"price": ft.Alignment.CENTER_LEFT})
+        assert cells[0].content.alignment == ft.Alignment.CENTER_LEFT
+
+    def test_missing_dash_aligns_like_numeric_column(self):
+        """item 2 DoD: 缺失值 "-" 与同列数字对齐一致 (同用按列推断结果)。"""
+        cols = [{"id": "price", "width": 100}]
+        rows = [{"price": "10.5"}, {"price": "-"}]
+        alignments = _column_alignments(cols, rows)
+        numeric_cell = _build_cells(rows[0], cols, alignments=alignments)[0]
+        dash_cell = _build_cells(rows[1], cols, alignments=alignments)[0]
+        assert numeric_cell.content.alignment == ft.Alignment.CENTER_RIGHT
+        assert dash_cell.content.alignment == numeric_cell.content.alignment
+
+    def test_no_alignments_falls_back_to_per_cell_inference(self):
+        """向后兼容: alignments=None 时保留逐格数值性推断。"""
+        cols = [{"id": "price", "width": 100}]
+        cells = _build_cells({"price": "10.5"}, cols)
+        assert cells[0].content.alignment == ft.Alignment.CENTER_RIGHT
+
+
+# ---------------------------------------------------------------------------
+# _build_detail_cell / 详情动作列 (MINOR-09 item 4)
+# ---------------------------------------------------------------------------
+
+
+class TestDetailCell:
+    """详情动作列: 可聚焦 TextButton 承载键盘可达入口 (item 4)。"""
+
+    def _detail_col(self) -> dict:
+        return {"id": DETAIL_COL_ID, "label": "Details", "width": DETAIL_COL_WIDTH, "action": "detail"}
+
+    def test_none_callback_renders_empty_container(self):
+        cell = _build_detail_cell({}, self._detail_col(), None, None)
+        assert isinstance(cell, ft.Container)
+        assert cell.content is None
+        assert cell.width == DETAIL_COL_WIDTH
+
+    def test_renders_focusable_text_button(self):
+        """on_row_detail 非空时渲染 TextButton (ActionControl, 可 Tab 聚焦)。"""
+        cell = _build_detail_cell(_make_row_data(), self._detail_col(), None, MagicMock())
+        assert isinstance(cell.content, ft.TextButton)
+        assert callable(cell.content.on_click)
+        assert cell.alignment == ft.Alignment.CENTER
+
+    def test_button_click_invokes_callback_with_row_data(self):
+        on_detail = MagicMock()
+        data = _make_row_data()
+        cell = _build_detail_cell(data, self._detail_col(), None, on_detail)
+        cell.content.on_click(MagicMock())  # type: ignore[reportCallIssue, reason: Flet stub declares on_click as 0-arg, but runtime passes event]
+        on_detail.assert_called_once_with(data)
+
+    def test_width_follows_col_widths_override(self):
+        cell = _build_detail_cell({}, self._detail_col(), {DETAIL_COL_ID: 120}, MagicMock())
+        assert cell.width == 120
+
+    def test_cells_route_detail_column_to_button(self):
+        """_build_cells 遇到 action 列走 _build_detail_cell (item 4 路由)。"""
+        data = _make_row_data()
+        cells = _build_cells(data, _make_detail_columns(), None, None, MagicMock())
+        assert isinstance(cells[-1].content, ft.TextButton)
+
 
 # ---------------------------------------------------------------------------
 # _build_row
@@ -870,3 +973,133 @@ class TestColumnDrag:
         result2 = render_once(component)
         cell0 = _header_cell_of(result2, 0)
         assert cell0.width == 160  # 120 + 40
+
+
+# ---------------------------------------------------------------------------
+# PaginatedTable 详情动作列 (MINOR-09 item 4)
+# ---------------------------------------------------------------------------
+
+
+class TestPaginatedTableDetailColumn:
+    """on_row_detail 非空时追加列尾「详情」动作列 (item 4)。"""
+
+    def test_no_detail_column_without_callback(self, mock_i18n_state, mock_app_colors_state):
+        """未传 on_row_detail 时不追加动作列 (向后兼容)。"""
+        header = _structure(_render(_make_component())[1])[3]
+        assert len(header.content.controls) == 4
+
+    def test_appends_detail_column_with_callback(self, mock_i18n_state, mock_app_colors_state):
+        """传 on_row_detail 时列尾追加 1 列 (4 → 5)。"""
+        header = _structure(_render(_make_component(on_row_detail=MagicMock()))[1])[3]
+        assert len(header.content.controls) == 5
+
+    def test_detail_header_cell_has_no_drag_handle(self, mock_i18n_state, mock_app_colors_state):
+        """动作列不参与列宽拖拽 (无 Row[sort_area, handle] 结构)。"""
+        header = _structure(_render(_make_component(on_row_detail=MagicMock()))[1])[3]
+        detail_cell = header.content.controls[-1]
+        assert not isinstance(detail_cell.content, ft.Row)
+
+    def test_detail_header_cell_not_sortable(self, mock_i18n_state, mock_app_colors_state):
+        """动作列不参与排序 (不包裹 GestureDetector 排序手势)。"""
+        _, result = _render(_make_component(sort_col=None, on_sort=MagicMock(), on_row_detail=MagicMock()))
+        detail_cell = _structure(result)[3].content.controls[-1]
+        assert not isinstance(detail_cell.content, ft.GestureDetector)
+
+    def test_detail_header_label_uses_i18n(self, mock_i18n_state, mock_app_colors_state):
+        """动作列表头标签复用既有 i18n 键 col_details。"""
+        from ui.i18n import I18n
+
+        _, result = _render(_make_component(on_row_detail=MagicMock()))
+        detail_cell = _structure(result)[3].content.controls[-1]
+        text = detail_cell.content.content
+        assert isinstance(text, ft.Text)
+        assert text.value == I18n.get("col_details")
+
+    def test_detail_column_width_from_constant(self, mock_i18n_state, mock_app_colors_state):
+        """动作列使用 DETAIL_COL_WIDTH 默认宽度。"""
+        _, result = _render(_make_component(on_row_detail=MagicMock()))
+        detail_cell = _structure(result)[3].content.controls[-1]
+        assert detail_cell.width == DETAIL_COL_WIDTH
+
+
+# ---------------------------------------------------------------------------
+# PaginatedTable 列宽持久化 (MINOR-09 item 3)
+# ---------------------------------------------------------------------------
+
+
+class TestColumnWidthPersistence:
+    """列宽持久化: on_load_col_widths / on_persist_col_widths 回调 (item 3, R16 合规)。"""
+
+    def test_load_applies_persisted_widths_on_mount(self, mock_i18n_state, mock_app_colors_state):
+        """挂载时经 on_load_col_widths 加载持久化列宽并覆盖列定义默认值。"""
+        component = _make_component(
+            col_widths_key="vt_key",
+            on_load_col_widths=lambda: {"ts_code": 250},
+        )
+        _, result = _render(component)
+        assert _header_cell_of(result, 0).width == 250
+
+    def test_load_none_keeps_column_defaults(self, mock_i18n_state, mock_app_colors_state):
+        """on_load_col_widths 返回 None → 保持列定义默认宽度。"""
+        component = _make_component(
+            col_widths_key="vt_key",
+            on_load_col_widths=lambda: None,
+        )
+        _, result = _render(component)
+        assert _header_cell_of(result, 0).width == 120
+
+    def test_load_exception_falls_back_to_defaults(self, mock_i18n_state, mock_app_colors_state):
+        """on_load_col_widths 抛异常 → 静默回退列定义默认值, 不阻断渲染。"""
+
+        def _boom():
+            raise OSError("config unavailable")
+
+        component = _make_component(col_widths_key="vt_key", on_load_col_widths=_boom)
+        _, result = _render(component)
+        assert _header_cell_of(result, 0).width == 120
+
+    def test_persist_called_on_drag_end(self, mock_i18n_state, mock_app_colors_state):
+        """拖拽结束时经 on_persist_col_widths 上抛最终列宽。"""
+        persisted: dict = {}
+        component = _make_component(
+            col_widths_key="vt_key",
+            on_persist_col_widths=lambda w: persisted.update(w),
+        )
+        _, result = _render(component)
+        handle = _header_handle_of(result, 0)
+        _trigger_callback(handle.on_horizontal_drag_start, MagicMock())
+        e = MagicMock()
+        e.primary_delta = 50
+        _trigger_callback(handle.on_horizontal_drag_update, e)
+        _trigger_callback(handle.on_horizontal_drag_end, MagicMock())
+        assert persisted == {"ts_code": 170}
+
+    def test_no_persist_callback_drag_end_is_noop(self, mock_i18n_state, mock_app_colors_state):
+        """未接线 on_persist_col_widths 时拖拽结束不抛 (降级为实例级)。"""
+        component = _make_component()
+        _, result = _render(component)
+        handle = _header_handle_of(result, 0)
+        _trigger_callback(handle.on_horizontal_drag_start, MagicMock())
+        e = MagicMock()
+        e.primary_delta = 30
+        _trigger_callback(handle.on_horizontal_drag_update, e)
+        _trigger_callback(handle.on_horizontal_drag_end, MagicMock())
+        result2 = render_once(component)
+        assert _header_cell_of(result2, 0).width == 150
+
+    def test_widths_restored_on_remount_with_same_key(self, mock_i18n_state, mock_app_colors_state):
+        """DoD 切页后保持: 拖拽结果经持久化, 重新挂载 (切页/重建) 时按键加载恢复。"""
+        persisted: dict = {}
+        comp1 = _make_component(on_persist_col_widths=lambda w: persisted.update(w))
+        _, result1 = _render(comp1)
+        handle = _header_handle_of(result1, 0)
+        _trigger_callback(handle.on_horizontal_drag_start, MagicMock())
+        e = MagicMock()
+        e.primary_delta = 50
+        _trigger_callback(handle.on_horizontal_drag_update, e)
+        _trigger_callback(handle.on_horizontal_drag_end, MagicMock())
+        assert persisted == {"ts_code": 170}
+
+        comp2 = _make_component(col_widths_key="vt_key", on_load_col_widths=lambda: dict(persisted))
+        _, result2 = _render(comp2)
+        assert _header_cell_of(result2, 0).width == 170

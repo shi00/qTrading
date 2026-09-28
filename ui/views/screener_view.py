@@ -147,6 +147,9 @@ _DATE_COLS = frozenset({"list_date", "trade_date"})
 # Task 4.3 (FR-UX-005): 复盘涨幅/超额收益列, 带符号格式化 (+1.23 / -1.23)
 _PCT_COLS = frozenset({"t1_pct", "t5_pct", "alpha"})
 
+# MINOR-09 item 3: PaginatedTable 列宽持久化键 (经 VM 读写 ConfigHandler, 对齐 splitter 模式)
+_VT_COL_WIDTHS_KEY = "ui_vt_screener_col_widths"
+
 
 def _render_status_message(msg: Message | None) -> str:
     """渲染状态消息, 翻译 ``*_key`` 后缀 params 为当前 locale (§3.2 VM 不感知 locale).
@@ -1525,6 +1528,8 @@ def _build_screener_section_card(
     sort_asc: bool,
     on_virtual_sort: typing.Callable[[str, bool], None],
     on_row_click: typing.Callable[[dict], None],
+    on_load_col_widths: typing.Callable[[], dict[str, int] | None],
+    on_persist_col_widths: typing.Callable[[dict[str, int]], None],
 ) -> ft.Container:
     """构建单个 AI 分区卡片 (D7-3): 标题栏(图标+文案+计数) + 该分区表格/空态.
 
@@ -1559,6 +1564,10 @@ def _build_screener_section_card(
                     on_row_click=on_row_click,
                     col_anchor=EIDS.SCREENER.column_header,
                     row_anchor=lambda row: EIDS.SCREENER.result_row(row["ts_code"]) if row.get("ts_code") else None,
+                    on_row_detail=on_row_click,
+                    col_widths_key=_VT_COL_WIDTHS_KEY,
+                    on_load_col_widths=on_load_col_widths,
+                    on_persist_col_widths=on_persist_col_widths,
                 ),
             ],
             spacing=0,
@@ -1822,6 +1831,8 @@ def _build_screener_table_card(
     on_page_size_change: typing.Callable[[ft.ControlEvent], None],
     on_virtual_sort: typing.Callable[[str, bool], None],
     on_row_click: typing.Callable[[dict], None],
+    on_load_col_widths: typing.Callable[[], dict[str, int] | None],
+    on_persist_col_widths: typing.Callable[[dict[str, int]], None],
     is_realtime: bool,
 ) -> ft.Container:
     """构建表格卡片区 (D7-3: AI 三分区 + 统一分页栏/空态).
@@ -1913,6 +1924,8 @@ def _build_screener_table_card(
                     sort_asc=state.sort_ascending,
                     on_virtual_sort=on_virtual_sort,
                     on_row_click=on_row_click,
+                    on_load_col_widths=on_load_col_widths,
+                    on_persist_col_widths=on_persist_col_widths,
                 )
                 for meta in _SECTION_META
                 if (rows := section_formatted.get(meta[3], []))
@@ -1935,6 +1948,10 @@ def _build_screener_table_card(
                         row_anchor=(
                             lambda row: EIDS.SCREENER.result_row(row["ts_code"]) if row.get("ts_code") else None
                         ),
+                        on_row_detail=on_row_click,
+                        col_widths_key=_VT_COL_WIDTHS_KEY,
+                        on_load_col_widths=on_load_col_widths,
+                        on_persist_col_widths=on_persist_col_widths,
                     ),
                     expand=True,
                 )
@@ -2368,6 +2385,8 @@ def ScreenerView(
         on_page_size_change=_on_page_size_change,
         on_virtual_sort=_on_virtual_sort,
         on_row_click=_on_row_click,
+        on_load_col_widths=lambda: vm.get_col_widths(_VT_COL_WIDTHS_KEY),
+        on_persist_col_widths=lambda widths: vm.persist_col_widths(_VT_COL_WIDTHS_KEY, widths),
         is_realtime=is_realtime,
     )
 

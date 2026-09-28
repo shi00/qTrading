@@ -1008,6 +1008,135 @@ class TestExecuteScreeningSanitization:
         assert "***" in msg
 
 
+class TestColWidthsPersistence:
+    """表格列宽读书写委托测试 (MINOR-09 item 3: View 经 VM 读写 ConfigHandler, 对齐 splitter 模式)。
+
+    覆盖 get_col_widths/persist_col_widths 的代码路径, 含 R16 关键路径:
+    同步签名包裹异步写盘, 避免 Flet 事件处理器阻塞。
+    """
+
+    def test_get_col_widths_delegates_to_config_handler(self):
+        """get_col_widths 委托 ConfigHandler.get_typed 并归一化为 {str: int}。"""
+        with (
+            patch("ui.viewmodels.screener_view_model.DataProcessor"),
+            patch("ui.viewmodels.screener_view_model.StrategyManager"),
+            patch("ui.viewmodels.screener_view_model.ReviewManager"),
+        ):
+            vm = ScreenerViewModel()
+
+        with patch(
+            "utils.config_handler.ConfigHandler.get_typed",
+            return_value={"ts_code": 250, "price": 100},
+        ) as mock_get:
+            result = vm.get_col_widths("vt_key")
+
+        mock_get.assert_called_once_with("vt_key", dict, {})
+        assert result == {"ts_code": 250, "price": 100}
+
+    def test_get_col_widths_empty_returns_none(self):
+        """无持久化值 (空 dict) → None (组件回退列定义默认宽度)。"""
+        with (
+            patch("ui.viewmodels.screener_view_model.DataProcessor"),
+            patch("ui.viewmodels.screener_view_model.StrategyManager"),
+            patch("ui.viewmodels.screener_view_model.ReviewManager"),
+        ):
+            vm = ScreenerViewModel()
+
+        with patch("utils.config_handler.ConfigHandler.get_typed", return_value={}):
+            assert vm.get_col_widths("vt_key") is None
+
+    def test_get_col_widths_invalid_type_returns_none(self):
+        """持久化值类型非法 (非数值) → None, 不抛。"""
+        with (
+            patch("ui.viewmodels.screener_view_model.DataProcessor"),
+            patch("ui.viewmodels.screener_view_model.StrategyManager"),
+            patch("ui.viewmodels.screener_view_model.ReviewManager"),
+        ):
+            vm = ScreenerViewModel()
+
+        with patch("utils.config_handler.ConfigHandler.get_typed", return_value={"a": "not-a-number"}):
+            assert vm.get_col_widths("vt_key") is None
+
+    def test_persist_col_widths_no_running_loop_is_noop(self):
+        """无 running loop 时静默跳过 (不抛)。"""
+        with (
+            patch("ui.viewmodels.screener_view_model.DataProcessor"),
+            patch("ui.viewmodels.screener_view_model.StrategyManager"),
+            patch("ui.viewmodels.screener_view_model.ReviewManager"),
+        ):
+            vm = ScreenerViewModel()
+
+        with (
+            patch("utils.config_handler.ConfigHandler.set_typed") as mock_set,
+            patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm_cls,
+        ):
+            vm.persist_col_widths("vt_key", {"ts_code": 250})
+
+        mock_set.assert_not_called()
+        mock_tpm_cls.assert_not_called()
+        assert vm._background_tasks == set()
+
+    def test_persist_col_widths_creates_background_task_and_writes(self):
+        """有 running loop 时经 ThreadPoolManager 异步写盘 (R16 合规)。"""
+        from unittest.mock import AsyncMock, MagicMock
+
+        with (
+            patch("ui.viewmodels.screener_view_model.DataProcessor"),
+            patch("ui.viewmodels.screener_view_model.StrategyManager"),
+            patch("ui.viewmodels.screener_view_model.ReviewManager"),
+        ):
+            vm = ScreenerViewModel()
+
+        async def _run_test():
+            with (
+                patch("utils.config_handler.ConfigHandler.set_typed", return_value=True) as mock_set,
+                patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm_cls,
+            ):
+                mock_tpm = MagicMock()
+                mock_tpm.run_async = AsyncMock(return_value=None)
+                mock_tpm_cls.return_value = mock_tpm
+
+                vm.persist_col_widths("vt_key", {"ts_code": 250})
+                assert len(vm._background_tasks) == 1
+                task = next(iter(vm._background_tasks))
+                await task
+
+                from utils.thread_pool import TaskType
+
+                mock_tpm.run_async.assert_called_once_with(TaskType.IO, mock_set, "vt_key", {"ts_code": 250})
+
+            assert vm._background_tasks == set()
+
+        asyncio.run(_run_test())
+
+    def test_persist_col_widths_propagates_cancelled_error(self):
+        """CancelledError 应传播 (R2 红线), 不被通用 except 吞没。"""
+        from unittest.mock import AsyncMock, MagicMock
+
+        with (
+            patch("ui.viewmodels.screener_view_model.DataProcessor"),
+            patch("ui.viewmodels.screener_view_model.StrategyManager"),
+            patch("ui.viewmodels.screener_view_model.ReviewManager"),
+        ):
+            vm = ScreenerViewModel()
+
+        async def _run_test():
+            with (
+                patch("utils.config_handler.ConfigHandler.set_typed"),
+                patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm_cls,
+            ):
+                mock_tpm = MagicMock()
+                mock_tpm.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+                mock_tpm_cls.return_value = mock_tpm
+
+                vm.persist_col_widths("vt_key", {"ts_code": 250})
+                done, _ = await asyncio.wait(vm._background_tasks, return_when=asyncio.ALL_COMPLETED)
+                assert len(done) == 1
+                assert done.pop().cancelled()
+
+        asyncio.run(_run_test())
+
+
 class TestLoadStrategyStats:
     """UX-05 load_strategy_stats() 解析与容错（R19，设计 v5 §6 VM state）。"""
 
