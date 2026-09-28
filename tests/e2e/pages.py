@@ -328,6 +328,13 @@ class SettingsPage:
         （verify_token 未启动 → 无错误文本 → 60s 断言失败）。对齐 ``ScreenerPage.run``
         的 retry_until_triggered 抗吞模式。
 
+        MAJOR-03: 数据管理 tab 新增「危险操作」卡片后 Tushare 连接卡被下移, 验证按钮
+        bbox 中心落到视口下方 (E2E 实证 y≈950 > 视口高 900)。Playwright
+        ``mouse.click`` 对**视口外坐标**无效——点击被静默丢弃 (不抛异常, 但 Flutter
+        收不到 tap), 3 次重试 confirm 全 False → ``retry_until_triggered`` 误报
+        "interaction not triggered"。故每次重试先 ``scroll_into_view`` 把按钮滚入
+        视口再点（对齐 ``NewsRiskPage.generate`` 的同类修复）。
+
         confirm 信号: ``is_verifying=True`` 时再点击同步渲染 warning 文本
         ("tushare_verifying_in_progress"，无外部 IO)，或任一验证结果错误文本出现。
         两者均无需等待外部 Tushare IO 完成即可确认点击已真正触发 verify_token。
@@ -345,6 +352,9 @@ class SettingsPage:
         )
 
         async def _interact() -> None:
+            # 每次重试先滚入视口：内容流把按钮推到视口外时，bbox 中心坐标在视口
+            # 之外，mouse.click 点击落空（Flutter 收不到）——见方法 docstring MAJOR-03 段。
+            await self.ap.scroll_into_view(EIDS.TUSHARE.VERIFY_BUTTON, timeout_ms=timeout_ms)
             await self.ap.click(EIDS.TUSHARE.VERIFY_BUTTON, timeout_ms=timeout_ms)
 
         async def _confirm() -> bool:

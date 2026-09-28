@@ -820,6 +820,9 @@ def _mock_data_source_deps(monkeypatch):
     monkeypatch.setattr(_mod, "TushareConfigPanel", lambda **kwargs: ft.Column([]))
     monkeypatch.setattr(_mod, "HealthReportDialog", lambda **kwargs: ft.Column([]))
     monkeypatch.setattr(_mod, "HealthScanDialog", lambda **kwargs: ft.Column([]))
+    # MAJOR-03: 「先导出备份」子对话框复用既有 BackupRestorePanel, 桩掉避免其内部
+    # use_viewmodel/FilePicker hook 在组件测试中缺少真实运行环境而报错。
+    monkeypatch.setattr(_mod, "BackupRestorePanel", lambda **kwargs: ft.Column([]))
 
     # Phase 3.1: ConfigHandler/ThreadPoolManager/TaskManager 下沉到 VM, patch VM 模块
     fake_tm = MagicMock()
@@ -856,13 +859,14 @@ class TestDataSourceTabComponentBody:
         result, _ = _mount(component)
         assert isinstance(result, ft.Container)
 
-    def test_listview_contains_five_cards(
+    def test_listview_contains_six_cards(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """Container.content 是 ListView, 含 5 个 DashboardCard (mock 后为 Container)。
+        """Container.content 是 ListView, 含 6 个 DashboardCard (mock 后为 Container)。
 
-        5 个 card: health_dashboard / action_console / connection_card / historical_card /
-        data_flow_card (Task 2.3 数据存储与流向说明区)。
+        6 个 card: health_dashboard / action_console / danger_zone / connection_card /
+        historical_card / data_flow_card (Task 2.3 数据存储与流向说明区)。
+        MAJOR-03: 破坏性「重置本地数据库」入口从 action_console 拆出为独立 danger_zone 卡。
         """
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
@@ -871,7 +875,7 @@ class TestDataSourceTabComponentBody:
         result, _ = _mount(component)
         listview = result.content
         assert isinstance(listview, ft.ListView)
-        assert len(listview.controls) == 5
+        assert len(listview.controls) == 6
 
     def test_mount_triggers_main_vm_subscribe(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -2325,7 +2329,10 @@ class TestDataSourceTabCoverageBranches:
     def test_confirm_dialog_confirm_clear_triggers_clear_cache(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """confirm dialog (clear_cache) 确认按钮 → vm.execute_clear_cache。"""
+        """confirm dialog (clear_cache) 勾选确认项后点确认 → vm.execute_clear_cache。
+
+        MAJOR-03: 破坏性重置需先勾选「我已了解」复选框, 确认按钮才会启用。
+        """
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         fake_vm, _ = _patch_data_source_vms(monkeypatch)
@@ -2336,8 +2343,17 @@ class TestDataSourceTabCoverageBranches:
         clickables[2].on_click(_make_event())  # clear_cache
         render_once(component)
         dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
-        confirm_btn = dialog.actions[1]
-        confirm_btn.on_click(_make_event())
+        # MAJOR-03: 未勾选时确认按钮 disabled, 点击不触发 callback
+        assert dialog.actions[1].disabled is True
+        dialog.actions[1].on_click(_make_event())
+        assert "execute_clear_cache" not in [c[0] for c in fake_vm.method_calls]
+        # 勾选确认项后重新渲染 → 确认按钮启用 → 点击触发 clear_cache
+        ack_checkbox = _find_by_type(dialog.content, ft.Checkbox)[0]
+        ack_checkbox.on_change(_make_event(value=True, control=ack_checkbox))
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        assert dialog.actions[1].disabled is False
+        dialog.actions[1].on_click(_make_event())
         calls = [c[0] for c in fake_vm.method_calls]
         assert "execute_clear_cache" in calls
 
@@ -2476,3 +2492,119 @@ class TestDataSourceTabCoverageBranches:
         dropdowns[0].on_select(_make_event(value="3"))
         snack_cb.assert_called()
         assert "sys_snack_save_err" in snack_cb.call_args[0][0]
+
+
+class TestMajor03DangerZone:
+    """MAJOR-03: 破坏性「重置本地数据库」入口独立成区 + 二次确认增强。
+
+    DoD:
+    1. 重置入口与常规同步入口不在同一个 ResponsiveRow；
+    2. 未勾选确认项时确认按钮 disabled；
+    3. 确认文案逐项列出将删除的用户数据类别（含「自选股」关键字）。
+    """
+
+    def test_reset_entry_separated_from_sync_entries(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """DoD-1: 重置入口独立成区，不属于任何承载同步入口的 ResponsiveRow。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        clickables = _find_clickable_containers(result)
+        assert len(clickables) == 3  # full_sync / ai_concept_rebuild / reset
+        full_sync_chip, ai_concept_chip, reset_chip = clickables
+        rows = _find_by_type(result, ft.ResponsiveRow)
+        # 常规同步入口 (full_sync + ai_concept_rebuild) 共处同一个 ResponsiveRow
+        sync_row = next((r for r in rows if any(c is full_sync_chip for c in _collect_controls(r))), None)
+        assert sync_row is not None
+        assert any(c is ai_concept_chip for c in _collect_controls(sync_row))
+        # 重置入口不属于任何 ResponsiveRow (独立危险区, 与同步入口视觉/结构隔离)
+        for row in rows:
+            assert all(c is not reset_chip for c in _collect_controls(row))
+
+    def test_reset_confirm_button_disabled_until_acknowledged(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """DoD-2: 未勾选确认项 → 确认按钮 disabled；勾选后启用；取消勾选再次 disabled。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        _find_clickable_containers(result)[2].on_click(_make_event())  # reset
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        assert dialog.actions[1].disabled is True
+        # 勾选 → 启用
+        ack = _find_by_type(dialog.content, ft.Checkbox)[0]
+        ack.on_change(_make_event(value=True, control=ack))
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        assert dialog.actions[1].disabled is False
+        # 取消勾选 → 再次 disabled
+        ack = _find_by_type(dialog.content, ft.Checkbox)[0]
+        ack.on_change(_make_event(value=False, control=ack))
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        assert dialog.actions[1].disabled is True
+
+    def test_reset_confirm_lists_user_data_categories(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """DoD-3: 确认框逐项列出将删除的数据类别，真实文案含「自选股」。"""
+        import json
+
+        from ui.views.settings_tabs.data_source_tab import _RESET_DATA_CATEGORY_KEYS, DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        _find_clickable_containers(result)[2].on_click(_make_event())  # reset
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        rendered = {t.value for t in _find_by_type(dialog.content, ft.Text)}
+        # 每个数据类别逐项渲染 (mock I18n 下 value 为 key 本身)
+        for key in _RESET_DATA_CATEGORY_KEYS:
+            assert key in rendered
+        assert "danger_reset_cat_schema_note" in rendered
+        # 真实 zh_CN 文案: 含「自选股」类别; 副标题不复现弱化危险的「重新校验」措辞
+        zh = json.loads((Path(__file__).parents[3] / "locales" / "zh_CN" / "strings.json").read_text(encoding="utf-8"))
+        assert "自选股" in zh["danger_reset_cat_watchlist"]
+        assert "重新校验" not in zh["ds_reset_database_desc"]
+
+    def test_reset_confirm_backup_entry_opens_backup_dialog(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """MAJOR-03: 确认框「先导出备份」入口 → 打开承载既有 BackupRestorePanel 的子对话框。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        _find_clickable_containers(result)[2].on_click(_make_event())  # reset
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        backup_btn = next(
+            b for b in _find_by_type(dialog.content, ft.TextButton) if b.content == "dialog_reset_backup_entry"
+        )
+        backup_btn.on_click(_make_event())
+        render_once(component)
+        # AlertDialog.title 不是 content 子节点, 无法经 _find_by_type 递归; 直接读 title 文本。
+        backup_dialog = next(
+            (
+                c
+                for c in page._dialogs.controls
+                if isinstance(c, ft.AlertDialog)
+                and getattr(getattr(c, "title", None), "value", None) == "danger_zone_backup_title"
+            ),
+            None,
+        )
+        assert backup_dialog is not None
+        # 内容宿主为承载既有 BackupRestorePanel 的固定宽度 Container
+        assert isinstance(backup_dialog.content, ft.Container)
+        assert backup_dialog.content.width == 520

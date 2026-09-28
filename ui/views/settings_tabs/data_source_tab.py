@@ -27,10 +27,12 @@ from collections.abc import Callable
 
 import flet as ft
 
+from ui.components.config_panels.backup_restore_panel import BackupRestorePanel
 from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
 from ui.components.flet_type_helpers import (
     get_control_value,
     safe_icon_str,
+    safe_on_change,
     safe_on_click,
     safe_on_select,
 )
@@ -56,6 +58,34 @@ from utils.sanitizers import DataSanitizer
 from utils.app_env import is_e2e_mode
 
 logger = logging.getLogger(__name__)
+
+
+# 「重置本地数据库」将删除的用户数据类别 (i18n key)。
+# 该操作执行 ``DROP SCHEMA public CASCADE`` 后重建 schema，会清空全部业务表；
+# 此处按 ``data/data_dictionary.py`` 的 TABLE_DEFINITIONS 逐表核对后归并为
+# 用户可理解的类别，确保不遗漏、不臆造（表结构/版本标记由 schema_note 说明兜底）：
+#   watchlist / screening_history / screening_thinking / news_risk_brief /
+#   ai_concept_failures / daily_quotes / daily_indicators / moneyflow_daily /
+#   index_daily / index_dailybasic / northbound_holding / margin_daily /
+#   stk_limit / limit_list / top_list / top_inst / block_trade / moneyflow_hsgt /
+#   index_weight / suspend_d / financial_reports / fina_forecast / fina_audit /
+#   fina_mainbz / express / dividend / repurchase / stk_holdernumber /
+#   top10_holders / pledge_stat / pledge_detail / share_float / stk_holdertrade /
+#   stock_basic / stock_concepts / sw_industry_classify / sw_industry_member /
+#   stock_name_history / market_news / macro_economy / shibor_daily /
+#   backtest_results / task_history / sync_status / stock_sync_status /
+#   app_state / trade_cal
+_RESET_DATA_CATEGORY_KEYS: tuple[str, ...] = (
+    "danger_reset_cat_watchlist",
+    "danger_reset_cat_screening",
+    "danger_reset_cat_ai",
+    "danger_reset_cat_quotes",
+    "danger_reset_cat_financials",
+    "danger_reset_cat_basic",
+    "danger_reset_cat_news_macro",
+    "danger_reset_cat_backtest",
+    "danger_reset_cat_task_state",
+)
 
 
 # ============================================================================
@@ -346,14 +376,15 @@ def _build_action_console(
     state: DataSourceState,
     on_full_sync: Callable[[ft.ControlEvent], None],
     on_ai_concept_rebuild: Callable[[ft.ControlEvent], None],
-    on_clear_cache: Callable[[ft.ControlEvent], None],
     on_cancel_active_task: Callable[[ft.ControlEvent], None],
 ) -> ft.Control:
-    """Action Console 区块 (D15: 从 DataSourceTab 提取, P1-5 次级进度自含)."""
+    """Action Console 区块 (D15: 从 DataSourceTab 提取, P1-5 次级进度自含).
+
+    MAJOR-03: 破坏性「重置本地数据库」入口已移出本区块, 见 ``_build_danger_zone``。
+    """
     # ActionChip loading state (derived from is_syncing + active_key)
     action_full_sync_loading = state.is_syncing and state.active_key == "daily_sync"
     action_ai_concept_loading = state.is_syncing and state.active_key == "ai_concept_sync"
-    action_clear_cache_loading = state.is_syncing and state.active_key == "cache_clear"
 
     # P1-5: Secondary progress 区域
     secondary_progress_visible = state.is_syncing and state.active_key in (
@@ -401,13 +432,6 @@ def _build_action_console(
         on_click=on_ai_concept_rebuild,
         is_loading=action_ai_concept_loading,
     )
-    action_clear_cache = ActionChip(
-        icon=safe_icon_str(ft.Icons.CLEANING_SERVICES),
-        title=I18n.get("settings_clear_cache"),
-        subtitle=I18n.get("ds_action_clear"),
-        on_click=on_clear_cache,
-        is_loading=action_clear_cache_loading,
-    )
 
     return DashboardCard(
         content=ft.Column(
@@ -416,9 +440,8 @@ def _build_action_console(
                 ft.Divider(height=10, color=AppColors.TRANSPARENT),
                 ft.ResponsiveRow(
                     [
-                        ft.Column([action_full_sync], col={"sm": 12, "md": 4}),
-                        ft.Column([action_ai_concept_rebuild], col={"sm": 12, "md": 4}),
-                        ft.Column([action_clear_cache], col={"sm": 12, "md": 4}),
+                        ft.Column([action_full_sync], col={"sm": 12, "md": 6}),
+                        ft.Column([action_ai_concept_rebuild], col={"sm": 12, "md": 6}),
                     ],
                     run_spacing=10,
                 ),
@@ -429,6 +452,43 @@ def _build_action_console(
                 ),
             ],
         ),
+    )
+
+
+def _build_danger_zone(
+    state: DataSourceState,
+    on_clear_cache: Callable[[ft.ControlEvent], None],
+) -> ft.Control:
+    """危险操作区块 (MAJOR-03): 破坏性「重置本地数据库」入口独立成区.
+
+    - 不再与正常同步入口同处一个 ``ResponsiveRow``, 单独成卡并以危险色描边区分；
+    - 实际执行 ``DROP SCHEMA public CASCADE`` (本地数据库全量重建), 故视觉与文案
+      必须与常规同步操作明确区隔。
+    """
+    action_clear_cache_loading = state.is_syncing and state.active_key == "cache_clear"
+    action_clear_cache = ActionChip(
+        icon=safe_icon_str(ft.Icons.WARNING_AMBER_ROUNDED),
+        title=I18n.get("settings_reset_database"),
+        subtitle=I18n.get("ds_reset_database_desc"),
+        on_click=on_clear_cache,
+        is_loading=action_clear_cache_loading,
+    )
+    return ft.Container(
+        content=DashboardCard(
+            content=ft.Column(
+                [
+                    SectionHeader(I18n.get("settings_danger_zone"), title_key="settings_danger_zone"),
+                    ft.Divider(height=10, color=AppColors.TRANSPARENT),
+                    ft.Container(
+                        content=action_clear_cache,
+                        border=ft.Border.all(1, AppColors.ERROR),
+                        border_radius=12,
+                    ),
+                ],
+            ),
+        ),
+        border=ft.Border.all(1, AppColors.ERROR),
+        border_radius=12,
     )
 
 
@@ -705,7 +765,13 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     health_report_open, set_health_report_open = ft.use_state(False)
     scan_dialog_open, set_scan_dialog_open = ft.use_state(False)
     # confirm dialog 配置 dict, {} 表示关闭, 含 title_key/content_key/confirm_btn_key/callback/is_destructive
+    # MAJOR-03: 重置本地数据库的确认框额外携带 categories(将删除的数据类别 i18n key 列表)
+    #   与 checkbox_key(必须勾选后才启用确认按钮); 其余确认框沿用简单 content_key。
     confirm_dialog_config, set_confirm_dialog_config = ft.use_state({})
+    # 重置确认框的勾选状态 (对话框打开/关闭时复位, 防止残留勾选绕过二次确认)
+    reset_ack_checked, set_reset_ack_checked = ft.use_state(False)
+    # 「先导出备份」子对话框 (挂载既有 BackupRestorePanel)
+    backup_dialog_open, set_backup_dialog_open = ft.use_state(False)
 
     # --- Async handlers (R2: except Exception 不捕获 CancelledError) ---
     async def _do_tushare_save(token: str) -> None:
@@ -866,13 +932,17 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             if show_snack_callback:
                 show_snack_callback(I18n.get("ds_clear_cache_syncing"), color=AppColors.WARNING)
             return
+        # MAJOR-03: 破坏性重置需逐项列出将删除的数据类别 + 勾选确认后才可执行。
+        set_reset_ack_checked(False)
         set_confirm_dialog_config(
             {
-                "title_key": "dialog_confirm_clear_title",
-                "content_key": "dialog_confirm_clear_content",
-                "confirm_btn_key": "btn_confirm_clear",
+                "title_key": "dialog_confirm_reset_title",
+                "content_key": "dialog_confirm_reset_content",
+                "confirm_btn_key": "btn_confirm_reset",
                 "callback": _do_clear_cache,
                 "is_destructive": True,
+                "categories": list(_RESET_DATA_CATEGORY_KEYS),
+                "checkbox_key": "dialog_reset_ack_checkbox",
             }
         )
 
@@ -937,14 +1007,30 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         if page is not None:
             page.run_task(_do_init_historical)
 
+    def _on_reset_ack_change(e: ft.ControlEvent) -> None:
+        """重置确认框勾选变化 → 控制确认按钮可用性 (R16: 仅 set_state, 无同步阻塞)。"""
+        set_reset_ack_checked(bool(get_control_value(e.control, ft.Checkbox)))
+
+    def _on_open_backup_dialog(e: ft.ControlEvent) -> None:
+        """「先导出备份」入口 → 打开承载既有 BackupRestorePanel 的子对话框。"""
+        set_backup_dialog_open(True)
+
+    def _on_close_backup_dialog() -> None:
+        set_backup_dialog_open(False)
+
     def _on_confirm_dialog_close() -> None:
         set_confirm_dialog_config({})
+        set_reset_ack_checked(False)
 
     def _on_confirm_dialog_confirm() -> None:
         if not confirm_dialog_config:
             return
+        # MAJOR-03: 破坏性重置必须已勾选确认项 (防御纵深: 与按钮 disabled 双重守护)。
+        if confirm_dialog_config.get("categories") and not reset_ack_checked:
+            return
         callback = confirm_dialog_config.get("callback")
         set_confirm_dialog_config({})
+        set_reset_ack_checked(False)
         page = _get_page()
         if page is not None and callback is not None:
             page.run_task(callback)
@@ -1009,12 +1095,68 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
 
     # --- Build section cards (D15: 各区块为模块级纯函数, 从巨型组件中提出) ---
     health_dashboard = _build_health_dashboard(state, _on_check_health, _on_health_report_click)
-    action_console = _build_action_console(
-        state, _on_full_sync, _on_ai_concept_rebuild, _on_clear_cache, _on_cancel_active_task
-    )
+    action_console = _build_action_console(state, _on_full_sync, _on_ai_concept_rebuild, _on_cancel_active_task)
+    danger_zone = _build_danger_zone(state, _on_clear_cache)
     connection_card = _build_connection_card(tushare_vm)
     historical_card = _build_historical_card(state, vm, _on_init_historical, _on_history_years_change)
     data_flow_card = _build_data_flow_card()
+
+    # --- Confirm dialog content (MAJOR-03: 破坏性重置逐项列出数据类别 + 勾选确认) ---
+    confirm_categories = confirm_dialog_config.get("categories")
+    if confirm_categories:
+        confirm_content: ft.Control = ft.Column(
+            [
+                ft.Text(
+                    I18n.get(confirm_dialog_config.get("content_key", "")),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Icon(
+                                    ft.Icons.CIRCLE,
+                                    size=AppStyles.FONT_SIZE_CAPTION,
+                                    color=AppColors.ERROR,
+                                ),
+                                ft.Text(
+                                    I18n.get(cat_key),
+                                    size=AppStyles.FONT_SIZE_BODY_SM,
+                                    color=AppColors.TEXT_PRIMARY,
+                                ),
+                            ],
+                            spacing=8,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        )
+                        for cat_key in confirm_categories
+                    ],
+                    spacing=6,
+                ),
+                ft.Text(
+                    I18n.get("danger_reset_cat_schema_note"),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.WARNING,
+                ),
+                ft.Checkbox(
+                    label=I18n.get(confirm_dialog_config.get("checkbox_key", "")),
+                    value=reset_ack_checked,
+                    on_change=safe_on_change(_on_reset_ack_change),
+                ),
+                ft.TextButton(
+                    I18n.get("dialog_reset_backup_entry"),
+                    icon=ft.Icons.SAVE,
+                    on_click=safe_on_click(_on_open_backup_dialog),
+                ),
+            ],
+            spacing=10,
+            scroll=ft.ScrollMode.AUTO,
+        )
+    else:
+        confirm_content = ft.Text(I18n.get(confirm_dialog_config.get("content_key", "")))
+
+    # 确认按钮可用性: 破坏性重置未勾选确认项时必须 disabled
+    confirm_requires_ack = bool(confirm_categories) and not reset_ack_checked
 
     # --- Confirm dialog (use_dialog 无条件调用, 以 None/AlertDialog 切换显隐) ---
     # Flet hook 顺序必须跨渲染稳定: 禁止把 use_dialog 放进 if 块条件调用, 否则破坏
@@ -1023,12 +1165,13 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         ft.AlertDialog(
             modal=True,
             title=ft.Text(I18n.get(confirm_dialog_config.get("title_key", ""))),
-            content=ft.Text(I18n.get(confirm_dialog_config.get("content_key", ""))),
+            content=confirm_content,
             actions=[
                 ft.TextButton(I18n.get("common_cancel"), on_click=lambda e: _on_confirm_dialog_close()),
                 ft.TextButton(
                     I18n.get(confirm_dialog_config.get("confirm_btn_key", "")),
                     on_click=lambda e: _on_confirm_dialog_confirm(),
+                    disabled=confirm_requires_ack,
                     style=ft.ButtonStyle(color=AppColors.ERROR)
                     if confirm_dialog_config.get("is_destructive", False)
                     else ft.ButtonStyle(color=AppColors.PRIMARY),
@@ -1041,11 +1184,26 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     )
     ft.use_dialog(confirm_dialog)
 
+    # --- Backup dialog (MAJOR-03: 「先导出备份」复用既有 BackupRestorePanel) ---
+    backup_dialog = (
+        ft.AlertDialog(
+            modal=True,
+            title=ft.Text(I18n.get("danger_zone_backup_title")),
+            content=ft.Container(content=BackupRestorePanel(), width=520),
+            actions=[ft.TextButton(I18n.get("common_close"), on_click=lambda e: _on_close_backup_dialog())],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        if backup_dialog_open
+        else None
+    )
+    ft.use_dialog(backup_dialog)
+
     return ft.Container(
         content=ft.ListView(
             controls=[
                 health_dashboard,
                 action_console,
+                danger_zone,
                 connection_card,
                 historical_card,
                 data_flow_card,
