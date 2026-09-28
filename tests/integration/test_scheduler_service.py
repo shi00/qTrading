@@ -161,9 +161,15 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
     sched_mod.SchedulerService._reset_singleton()
     service = sched_mod.SchedulerService()
     service._last_pred_date = None
+    # D7-3/MINOR-01: 夜间预测以「当日同步完整成功」为前置条件（_last_update_date == today_str），
+    # 与下方 fake_now 同源，否则 job 被前置检查跳过、任务不会提交。
+    service._last_update_date = "20260423"
 
     fake_now = datetime.datetime(2026, 4, 23, 20, 30, 0)
     monkeypatch.setattr(sched_mod, "get_now", lambda: fake_now)
+    # _run_nightly_prediction 位于 services.scheduled_jobs.nightly_prediction，使用该模块自身
+    # import 的 get_now；仅 patch sched_mod.get_now 不生效（today_str 会退化为真实日期）。
+    monkeypatch.setattr("services.scheduled_jobs.nightly_prediction.get_now", lambda: fake_now)
     monkeypatch.setattr(sched_mod.ConfigHandler, "is_auto_update_enabled", staticmethod(lambda: True))
     monkeypatch.setattr(
         I18n,
@@ -251,9 +257,15 @@ async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
     sched_mod.SchedulerService._reset_singleton()
     service = sched_mod.SchedulerService()
     service._last_pred_date = None
+    # D7-3/MINOR-01: 夜间预测以「当日同步完整成功」为前置条件（_last_update_date == today_str），
+    # 与下方 fake_now 同源，否则 job 被前置检查跳过、任务不会提交。
+    service._last_update_date = "20260423"
 
     fake_now = datetime.datetime(2026, 4, 23, 20, 30, 0)
     monkeypatch.setattr(sched_mod, "get_now", lambda: fake_now)
+    # _run_nightly_prediction 位于 services.scheduled_jobs.nightly_prediction，使用该模块自身
+    # import 的 get_now；仅 patch sched_mod.get_now 不生效（today_str 会退化为真实日期）。
+    monkeypatch.setattr("services.scheduled_jobs.nightly_prediction.get_now", lambda: fake_now)
     monkeypatch.setattr(sched_mod.ConfigHandler, "is_auto_update_enabled", staticmethod(lambda: True))
     monkeypatch.setattr(
         I18n,
