@@ -260,7 +260,10 @@ def BacktestView(active: bool = True) -> ft.Container:
             page = ft.context.page
             if page is not None:
                 # D2: last_run 下沉 VM (vm.record_last_run), retry 时从 state.last_run_summary 读取
-                vm.record_last_run(state.selected_strategy_key, backtest_config)
+                # MINOR-08: 重入检查前置 — 上一次回测仍在运行时不得覆盖 last_run 配置
+                # （VM.run_backtest 的 is_running 守卫仍会拒绝重入并产出 already_running 告警）。
+                if not state.is_running:
+                    vm.record_last_run(state.selected_strategy_key, backtest_config)
                 page.run_task(vm.run_backtest, state.selected_strategy_key, backtest_config, _prefilled_params.current)
         except RuntimeError:
             logger.warning("[BacktestView] page not available for run_task")
@@ -390,7 +393,10 @@ def BacktestView(active: bool = True) -> ft.Container:
                 ft.Row([progress_bar, progress_text, cancel_button], spacing=8),
                 ft.Container(height=16),
                 ResizableSplitter(
-                    left_content=BacktestConfigPanel(on_run_backtest=_on_run_backtest),
+                    left_content=BacktestConfigPanel(
+                        on_run_backtest=_on_run_backtest,
+                        is_running=state.is_running,
+                    ),
                     right_content=right_content,
                     config_key="ui_splitter_backtest_config",
                     default_width=360,

@@ -550,6 +550,34 @@ class TestOnRunBacktest:
         # 但 create_config 已被调用 (在 try 块之前)
         env["fake_vm"].create_config_mock.assert_called_once()
 
+    def test_reentrant_run_does_not_overwrite_last_run(self, backtest_view_env) -> None:
+        """MINOR-08: is_running=True 时重入提交不得覆盖 last_run 配置 (record_last_run 前置守卫)."""
+        env = backtest_view_env
+        fake_vm = env["fake_vm"]
+        fake_vm.create_config_mock.side_effect = ["cfg_first", "cfg_second"]
+        on_run_backtest = env["captured_callbacks"]["on_run_backtest"]
+
+        # 1. 首次提交 (非运行中) → 记录 last_run = ("ma_cross", "cfg_first")
+        on_run_backtest(_make_config())
+        assert fake_vm.state.last_run_summary == ("ma_cross", "cfg_first")
+
+        # 2. 置 is_running=True 并重渲染, 使 handler 闭包捕获最新 state
+        fake_vm._set_state(is_running=True)
+        _rerender(env)
+        on_run_backtest = env["captured_callbacks"]["on_run_backtest"]
+
+        # 3. 重入提交 → record_last_run 不被调用, last_run 保持首次配置
+        on_run_backtest(_make_config())
+        assert fake_vm.state.last_run_summary == ("ma_cross", "cfg_first"), "重入被拒时 last_run 配置不得被覆盖"
+
+    def test_non_running_run_updates_last_run(self, backtest_view_env) -> None:
+        """MINOR-08 回归保护: 非运行中提交仍正常记录 last_run (守卫不误伤正常路径)."""
+        env = backtest_view_env
+        fake_vm = env["fake_vm"]
+        on_run_backtest = env["captured_callbacks"]["on_run_backtest"]
+        on_run_backtest(_make_config())
+        assert fake_vm.state.last_run_summary == ("ma_cross", "fake_backtest_config")
+
 
 # ============================================================================
 # Handler 测试: _on_cancel_backtest

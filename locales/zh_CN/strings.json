@@ -1901,6 +1901,7 @@
     "backtest_chart_axis_ic_value": "IC值",
     "backtest_chart_legend_strategy": "策略",
     "backtest_chart_legend_benchmark": "基准",
+    "backtest_benchmark_incomplete": "基准数据不完整（长度与净值不一致），已隐藏基准曲线",
     "backtest_chart_summary_title": "回测摘要",
     "backtest_chart_summary_source": "策略/基准：{strategy} / {benchmark}",
     "backtest_chart_summary_range": "回测区间：{start} ~ {end}",

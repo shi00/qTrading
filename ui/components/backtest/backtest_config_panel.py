@@ -169,6 +169,7 @@ def _make_date_picker(
 @ft.component
 def BacktestConfigPanel(
     on_run_backtest: Callable[[dict], None] | None = None,
+    is_running: bool = False,
 ) -> ft.Container:
     """回测配置面板（声明式）。
 
@@ -179,6 +180,7 @@ def BacktestConfigPanel(
 
     Args:
         on_run_backtest: 运行回测回调，接收 config dict
+        is_running: 回测是否正在运行（MINOR-08: 运行中禁用提交按钮，防重入提交）
     """
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
     ft.use_state(get_observable_state)
@@ -256,11 +258,14 @@ def BacktestConfigPanel(
         set_show_end_picker(True)
 
     def _on_run_click(e: ft.ControlEvent) -> None:
-        # UX-05: disabled 是第一道防线 (Flet 原生), handler 内校验短路是第二道防线 —
-        # 防御绕过按钮 enabled 语义的调用路径 (组件测试直调 handler/未来新调用方)
-        if validation_errors:
+        # UX-05 + MINOR-08: disabled 是第一道防线 (Flet 原生), handler 内校验短路是第二道防线 —
+        # 防御绕过按钮 enabled 语义的调用路径 (组件测试直调 handler/未来新调用方)；
+        # 运行中同样短路（与 disabled 双保险，防重入提交）。
+        if validation_errors or is_running:
             logger.warning(
-                "[BacktestConfigPanel] run blocked by input validation errors: %s", sorted(validation_errors)
+                "[BacktestConfigPanel] run blocked: validation_errors=%s is_running=%s",
+                sorted(validation_errors),
+                is_running,
             )
             return
         if on_run_backtest is not None:
@@ -451,8 +456,8 @@ def BacktestConfigPanel(
         ft.Button(
             content=I18n.get("backtest_run"),
             icon=ft.Icons.PLAY_ARROW,
-            # UX-05: 任何非法参数无法提交
-            disabled=bool(validation_errors),
+            # UX-05: 任何非法参数无法提交；MINOR-08: 回测运行中也禁用（防重入提交）
+            disabled=bool(validation_errors) or is_running,
             on_click=safe_on_click(_on_run_click),
             style=ft.ButtonStyle(
                 bgcolor=AppColors.PRIMARY,

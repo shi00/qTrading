@@ -1901,6 +1901,7 @@
     "backtest_chart_axis_ic_value": "IC Value",
     "backtest_chart_legend_strategy": "Strategy",
     "backtest_chart_legend_benchmark": "Benchmark",
+    "backtest_benchmark_incomplete": "Benchmark data is incomplete (length differs from NAV); benchmark curve hidden",
     "backtest_chart_summary_title": "Backtest Summary",
     "backtest_chart_summary_source": "Strategy/Benchmark: {strategy} / {benchmark}",
     "backtest_chart_summary_range": "Period: {start} ~ {end}",
