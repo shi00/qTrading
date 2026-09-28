@@ -3190,6 +3190,69 @@ class TestCanonicalTopicsYamlConsistency:
         errors = check_canonical_topics_consistency()
         assert any("workflow 路径不存在" in e for e in errors), f"应报 workflow 路径不存在, got: {errors}"
 
+    def test_detects_missing_section_heading(self, tmp_path, monkeypatch):
+        """section 指向的章节在 canonical 文档内不存在时应报错 (M4)."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n"
+            "  - id: strategy\n    title: A\n    canonical: docs/guides/testing.md\n"
+            "    section: 不存在的章节名\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        errors = check_canonical_topics_consistency()
+        assert any("section 章节不存在" in e for e in errors), f"应报 section 章节不存在, got: {errors}"
+
+    def test_accepts_existing_section_heading(self, tmp_path, monkeypatch):
+        """section 指向真实存在的章节时应通过（正例，防误杀）."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n"
+            "  - id: testing\n    title: A\n    canonical: docs/guides/testing.md\n"
+            "    section: 测试编写模板\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        assert check_canonical_topics_consistency() == []
+
+    def test_detects_non_str_section(self, tmp_path, monkeypatch):
+        """section 非字符串时应报类型错误."""
+        from check_docs_consistency import check_canonical_topics_consistency
+
+        tmp_yml = tmp_path / "canonical-topics.yml"
+        tmp_yml.write_text(
+            "topics:\n  - id: testing\n    title: A\n    canonical: docs/guides/testing.md\n    section: 123\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", tmp_yml)
+        errors = check_canonical_topics_consistency()
+        assert any("section 应为 str" in e for e in errors), f"应报 section 类型错误, got: {errors}"
+
+    def test_current_sections_all_resolved(self):
+        """空转守护：当前 yml 的每个 section 都能真实解析到标题（证明门禁确实抽取了标题）."""
+        import yaml
+
+        from check_docs_consistency import (
+            CANONICAL_TOPICS_YAML_PATH,
+            ROOT,
+            _extract_heading_texts,
+            _heading_matches_section,
+        )
+
+        data = yaml.safe_load(CANONICAL_TOPICS_YAML_PATH.read_text(encoding="utf-8"))
+        with_section = [t for t in data["topics"] if "section" in t]
+        assert with_section, "canonical-topics.yml 应至少有一个 section 字段供本门禁守护"
+        for entry in with_section:
+            headings = _extract_heading_texts((ROOT / entry["canonical"]).read_text(encoding="utf-8"))
+            assert headings, f"{entry['canonical']} 未抽到任何标题（门禁空转）"
+            assert _heading_matches_section(headings, entry["section"]), (
+                f"section '{entry['section']}' 应能解析到 {entry['canonical']} 内标题"
+            )
+
     def test_canonical_topics_align_with_claude_decision_tree(self):
         """§1.8 决策树表引用的路径应存在于 canonical-topics.yml 的 canonical 集合中 (P2-12 镜像一致性).
 
@@ -3279,6 +3342,107 @@ class TestCanonicalDocsAreGated:
         monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [])
         errors = check_canonical_docs_are_gated()
         assert any("canonical 路径不存在" in e for e in errors), f"应报 canonical 路径不存在, got: {errors}"
+
+
+class TestEvalsCaseIndexConsistency:
+    """evals 样例目录「当前 case 文件」列与实际文件一致性门禁 (L7)."""
+
+    def test_current_repo_passes(self):
+        """真实配置下 check_evals_case_index_consistency() 应返回空错误列表."""
+        from check_docs_consistency import check_evals_case_index_consistency
+
+        errors = check_evals_case_index_consistency()
+        assert errors == [], "当前 evals 索引应一致, 失败:\n  " + "\n  ".join(errors)
+
+    def test_current_index_parses_nonempty(self):
+        """空转守护：README 实际解析出类别目录与 case 文件（证明解析未空转）."""
+        from check_docs_consistency import EVALS_README_PATH, _EVALS_README_LINK_PATTERN
+
+        content = EVALS_README_PATH.read_text(encoding="utf-8")
+        targets = [
+            m.group(1)
+            for line in content.splitlines()
+            if line.lstrip().startswith("|")
+            for m in _EVALS_README_LINK_PATTERN.finditer(line)
+        ]
+        dirs = {t.rstrip("/") for t in targets if t.endswith("/")}
+        files = {t for t in targets if "/" in t and t.endswith(".md")}
+        assert dirs, "README 未解析到任何类别目录（门禁空转）"
+        assert files, "README 未解析到任何 case 文件（门禁空转）"
+
+    def test_detects_unregistered_case_file(self, tmp_path, monkeypatch):
+        """目录内存在未在 README 登记的 case 文件时应报错."""
+        from check_docs_consistency import check_evals_case_index_consistency
+
+        evals_dir = tmp_path / "evals"
+        (evals_dir / "known-defects").mkdir(parents=True)
+        (evals_dir / "known-defects" / "case-001.md").write_text("# a", encoding="utf-8")
+        (evals_dir / "known-defects" / "case-002.md").write_text("# b", encoding="utf-8")
+        readme = evals_dir / "README.md"
+        readme.write_text(
+            "| 类别 | 目录 | 当前 case 文件 | 目的 |\n"
+            "|------|------|---------------|------|\n"
+            "| 已知缺陷 | [known-defects/](./known-defects/) | "
+            "[known-defects/case-001.md](./known-defects/case-001.md) | x |\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EVALS_README_PATH", readme)
+        errors = check_evals_case_index_consistency()
+        assert any("未在 README" in e and "case-002.md" in e for e in errors), f"got: {errors}"
+
+    def test_detects_phantom_registered_case(self, tmp_path, monkeypatch):
+        """README 登记了不存在的 case 文件时应报错."""
+        from check_docs_consistency import check_evals_case_index_consistency
+
+        evals_dir = tmp_path / "evals"
+        (evals_dir / "known-defects").mkdir(parents=True)
+        readme = evals_dir / "README.md"
+        readme.write_text(
+            "| 类别 | 目录 | 当前 case 文件 | 目的 |\n"
+            "|------|------|---------------|------|\n"
+            "| 已知缺陷 | [known-defects/](./known-defects/) | "
+            "[known-defects/case-009.md](./known-defects/case-009.md) | x |\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EVALS_README_PATH", readme)
+        errors = check_evals_case_index_consistency()
+        assert any("不存在的样例文件" in e and "case-009.md" in e for e in errors), f"got: {errors}"
+
+    def test_detects_missing_category_dir(self, tmp_path, monkeypatch):
+        """README 登记的类别目录不存在时应报错."""
+        from check_docs_consistency import check_evals_case_index_consistency
+
+        evals_dir = tmp_path / "evals"
+        evals_dir.mkdir(parents=True)
+        readme = evals_dir / "README.md"
+        readme.write_text(
+            "| 类别 | 目录 | 当前 case 文件 | 目的 |\n"
+            "|------|------|---------------|------|\n"
+            "| 已知缺陷 | [known-defects/](./known-defects/) | "
+            "[known-defects/case-001.md](./known-defects/case-001.md) | x |\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.EVALS_README_PATH", readme)
+        errors = check_evals_case_index_consistency()
+        assert any("类别目录不存在" in e and "known-defects" in e for e in errors), f"got: {errors}"
+
+    def test_empty_index_is_error_not_silent_pass(self, tmp_path, monkeypatch):
+        """空转守护：README 无任何相对链接时应报错而非静默通过."""
+        from check_docs_consistency import check_evals_case_index_consistency
+
+        readme = tmp_path / "README.md"
+        readme.write_text("# evals\n\n无表格\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.EVALS_README_PATH", readme)
+        errors = check_evals_case_index_consistency()
+        assert any("未解析到任何类别目录" in e for e in errors), f"got: {errors}"
+
+    def test_missing_readme_is_error(self, tmp_path, monkeypatch):
+        """README 不存在时应报错."""
+        from check_docs_consistency import check_evals_case_index_consistency
+
+        monkeypatch.setattr("check_docs_consistency.EVALS_README_PATH", tmp_path / "nope.md")
+        errors = check_evals_case_index_consistency()
+        assert any("README 不存在" in e for e in errors), f"got: {errors}"
 
 
 class TestAgentsMdSync:
