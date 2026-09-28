@@ -582,3 +582,54 @@ class TestHomeViewModelConcurrency:
         gen2 = vm._load_generation
 
         assert gen2 == gen1 + 1
+
+
+class TestNewsRowSentimentWiring:
+    """MINOR-02: 入库 sentiment 经 _df_to_news_rows / _news_item_to_row 透传到 NewsRow.
+
+    缺失/NaN/空白归一为 None（R21：不伪装缺失），由 View 渲染中性样式。
+    """
+
+    def test_df_to_news_rows_reads_sentiment(self):
+        from ui.viewmodels.home_view_model import _df_to_news_rows
+
+        df = pd.DataFrame({"content": ["a", "b"], "sentiment": ["Positive", "Negative"]})
+        rows = _df_to_news_rows(df)
+        assert [r.sentiment for r in rows] == ["Positive", "Negative"]
+
+    def test_df_to_news_rows_null_sentiment_is_none(self):
+        from ui.viewmodels.home_view_model import _df_to_news_rows
+
+        df = pd.DataFrame({"content": ["a"], "sentiment": [None]})
+        rows = _df_to_news_rows(df)
+        assert rows[0].sentiment is None
+
+    def test_df_to_news_rows_nan_sentiment_is_none(self):
+        from ui.viewmodels.home_view_model import _df_to_news_rows
+
+        df = pd.DataFrame({"content": ["a"], "sentiment": [float("nan")]})
+        rows = _df_to_news_rows(df)
+        assert rows[0].sentiment is None
+
+    def test_news_item_to_row_reads_sentiment(self):
+        from ui.viewmodels.home_view_model import _news_item_to_row
+
+        row = _news_item_to_row({"content": "c", "sentiment": "Positive"})
+        assert row.sentiment == "Positive"
+
+    def test_news_item_to_row_missing_sentiment_is_none(self):
+        from ui.viewmodels.home_view_model import _news_item_to_row
+
+        row = _news_item_to_row({"content": "c"})
+        assert row.sentiment is None
+
+    def test_coerce_sentiment_nan_and_blank_is_none(self):
+        from ui.viewmodels.home_view_model import _coerce_sentiment
+
+        assert _coerce_sentiment(float("nan")) is None
+        assert _coerce_sentiment("   ") is None
+
+    def test_coerce_sentiment_strips_but_preserves_case(self):
+        from ui.viewmodels.home_view_model import _coerce_sentiment
+
+        assert _coerce_sentiment(" Positive ") == "Positive"
