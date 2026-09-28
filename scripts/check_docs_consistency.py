@@ -2475,7 +2475,7 @@ _CANONICAL_TOPICS_REQUIRED = frozenset({"id", "title", "canonical"})
 # 本白名单按 yml 稳定 id 声明每个共享 canonical 的期望主题归属，逐主题绑定仅升级方向 2。
 # 新增共享 canonical（同一路径被多个 topic 引用）时须在此登记，否则方向 2 视为单主题 canonical。
 _DECISION_TREE_MERGED_IDS: dict[str, set[str]] = {
-    "docs/flet/README.md": {"ui-view", "ui-layout", "i18n"},
+    "docs/flet/README.md": {"ui-view", "ui-layout", "ui-component", "i18n"},
     "docs/patterns/config-quality-perf.md": {"performance", "config"},
     "docs/guides/testing.md": {"testing", "e2e-testing"},
     "docs/guides/ci-cd.md": {"ci-deps", "release"},
