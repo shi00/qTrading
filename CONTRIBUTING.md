@@ -738,6 +738,10 @@ except Exception as e:
 - [profiles.md](./docs/bug-fix/profiles.md) — 专项 Profile（测试失败 / 构建依赖 / 性能 / 并发 / 数据迁移 / 安全 / 外部不可用 / 生产事故）
 - [appendix.md](./docs/bug-fix/appendix.md) — 附录（详细方法 / 输入输出模板 / 提示词 / 参考实践）
 
+### resources/maintenance/ — 数据库离线维护手册
+
+- [README-maintenance.md](./resources/maintenance/README-maintenance.md) — 主程序无法启动时的离线诊断 / 备份 / 恢复脚本手册（`status` / `doctor` / `dump` / `restore` / `stop` / `maintenance-shell`）
+
 ---
 
 ## 获取帮助
