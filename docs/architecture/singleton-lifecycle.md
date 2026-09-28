@@ -96,6 +96,8 @@ def __init__(self, *, config=None, clock=None):
 |------|---------|-----------------|
 | `ConfigHandler` | `utils/config_handler.py` | 全静态方法（classmethod + 类级 cache），无实例概念，无需 `__new__` 单例化 |
 | `ProxyManager` | `utils/proxy_manager.py` | 类级状态（`_no_proxy_domains` / `_initialized`），无实例概念，自定义 `_reset_singleton` 配合测试隔离 |
+| `DataExplorerQueryClient` | `data/persistence/data_explorer_query_client.py` | 共享引擎非单例（`__init__` 为空、实例不唯一），类级 `_shared_engine` 由 `close_all()` 释放；无 `__new__`/`_instance` 不满足 R15 触发条件，测试隔离由 `_reset_data_explorer_shared_engine` autouse fixture 覆盖 |
+| `OfflineCalendar` | `data/domain_services/offline_calendar.py` | 类级 `_calendar` + `get_instance` 缓存 `pandas_market_calendars` 不可变 SSE 日历，无状态变更/并发写/外部资源，R7 无实际危害；缓存语义变为可变或引入外部资源时需重新评估 |
 
 **非单例服务（每次按需实例化）**：
 

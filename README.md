@@ -115,7 +115,7 @@ graph TB
 
     subgraph INFRA["<b>基础设施层 Infrastructure</b>"]
         direction LR
-        DAOS["📝 17 个业务 DAO + Base<br/>Stock | Quote | Financial | Holder<br/>Macro | Market | Screener | Sync<br/>Backtest | Express | PledgeDetail<br/>ShareFloat | StkHoldertrade | StkLimit<br/>SwIndustry | TopInst | Watchlist"]
+        DAOS["📝 业务 DAO + Base<br/>Stock | Quote | Financial | Holder<br/>Macro | Market | Screener | Sync<br/>Backtest | Express | PledgeDetail<br/>ShareFloat | StkHoldertrade | StkLimit<br/>SwIndustry | TopInst | Watchlist"]
         SYNC["🔄 Sync Strategies<br/>断点续传 | 质量评分"]
         QUALITY["🛡️ Quality Gate<br/>Bronze → Silver → Gold"]
         REVIEW["🔁 ReviewManager<br/>AI 回顾闭环"]

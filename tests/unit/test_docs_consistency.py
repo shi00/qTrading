@@ -56,12 +56,6 @@ def _get_coverage_sources() -> list[str]:
         raise AssertionError(f"pyproject.toml missing [tool.coverage.run] source config (key {e} not found)") from e
 
 
-def _count_business_daos() -> int:
-    """统计 data/persistence/daos/ 下业务 DAO 文件数（排除 base_dao.py）。"""
-    daos_dir = ROOT / "data" / "persistence" / "daos"
-    return sum(1 for f in daos_dir.glob("*_dao.py") if f.name != "base_dao.py")
-
-
 class TestVersionConsistency:
     """Check 1-3: Real file version consistency (mirrors verify_versions.py)."""
 
@@ -290,17 +284,20 @@ class TestCoverageSourceConsistency:
 
 
 class TestDaoCountConsistency:
-    """审计报告 P1: README mermaid 图 DAO 数量与实际代码一致。"""
+    """README DAO 数量自述防漂移（审计报告 P1 + 第二轮检视 M5）。
 
-    def test_dao_count_matches_readme(self):
-        """README.md 'X 个业务 DAO + Base' 数量与 data/persistence/daos/ 实际文件数一致。"""
-        actual = _count_business_daos()
+    原守卫要求 README 出现「N 个业务 DAO + Base」并等于 `data/persistence/daos/` 文件数（17）。
+    第二轮检视 M5 判定该口径不清：dao 文件数 17 / CacheManager 实例化 19 / 枚举概念名 17 三者
+    不一致。照 H6-d「去数字化」先例移除数字、仅保留枚举，本测试改为守护「不再硬编码可数事实」，
+    防止回退到会漂移的数字形态（原则：可数事实要么门禁守护、要么不写数字）。
+    """
+
+    def test_readme_dao_node_has_no_hardcoded_count(self):
+        """README 不得再出现 'N 个业务 DAO + Base' 式硬编码数量（漂移源）。"""
         content = _read(README_PATH)
-        m = re.search(r"(\d+)\s*个业务\s*DAO\s*[+＋]\s*Base", content)
-        assert m, "README.md missing 'X 个业务 DAO + Base' count declaration"
-        declared = int(m.group(1))
-        assert declared == actual, (
-            f"README.md declares {declared} 业务 DAO but data/persistence/daos/ has {actual} (excluding base_dao.py)"
+        m = re.search(r"\d+\s*个业务\s*DAO", content)
+        assert m is None, (
+            f"README.md 不应硬编码业务 DAO 数量（M5：可数事实要么门禁守护要么不写数字），got: {m.group(0)}"
         )
 
 
@@ -6146,6 +6143,119 @@ class TestSingletonCountProse:
         monkeypatch.setattr("check_docs_consistency.SINGLETON_LIFECYCLE_PATH", tmp_path / "missing.md")
         errors = check_singleton_count_prose()
         assert any("不存在" in e for e in errors), f"文档缺失应报错, got: {errors}"
+
+
+class TestNonRegisteredSingletonDoc:
+    """M1：非注册单例清单双向守卫（代码 docstring 自述 ↔ 文档「非注册单例」表）。
+
+    代码常自述「属于非注册单例，详见 singleton-lifecycle.md」，但文档若漏登记则指针落空
+    （R15 人工评审对照基准漏项）。本守卫：代码标记者须登记于表；表内类名须在代码中存在。
+    """
+
+    _DOC_TEMPLATE = (
+        "### 单例注册清单\n\n"
+        "**注册单例（`@register_singleton`，1 个）**：\n\n"
+        "| 类名 | 模块路径 | 职责 |\n"
+        "|------|---------|------|\n"
+        "| `RealSingleton` | `data/real.py` | 职责 |\n\n"
+        "**非注册单例（无 `@register_singleton`，但事实单例）**：\n\n"
+        "| 类名 | 模块路径 | 不纳入注册的原因 |\n"
+        "|------|---------|-----------------|\n"
+        "{rows}"
+        "**非单例服务（每次按需实例化）**：\n\n"
+        "| 类名 | 模块路径 | 不纳入单例的原因 |\n"
+        "|------|---------|-----------------|\n"
+        "| `SomeService` | `services/x.py` | 按需实例化 |\n"
+    )
+
+    @staticmethod
+    def _write_class(root: Path, rel: str, class_name: str, doc: str) -> None:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'class {class_name}:\n    """{doc}"""\n', encoding="utf-8")
+
+    def _setup(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        doc_rows: str,
+        code: tuple[tuple[str, str, str], ...] = (),
+    ) -> None:
+        doc = tmp_path / "singleton-lifecycle.md"
+        doc.write_text(self._DOC_TEMPLATE.format(rows=doc_rows), encoding="utf-8")
+        code_root = tmp_path / "repo"
+        code_root.mkdir()
+        for rel, name, d in code:
+            self._write_class(code_root, rel, name, d)
+        monkeypatch.setattr("check_docs_consistency.SINGLETON_LIFECYCLE_PATH", doc)
+        monkeypatch.setattr("check_docs_consistency._NON_REGISTERED_SINGLETON_CODE_ROOT", code_root)
+
+    def test_current_repo_passes(self):
+        """存量仓库：代码自述与文档表一致 → 放行（含空转守护不触发）。"""
+        from check_docs_consistency import check_non_registered_singleton_doc
+
+        assert check_non_registered_singleton_doc() == []
+
+    def test_detects_code_declared_but_undocumented(self, tmp_path, monkeypatch):
+        """代码 docstring 自述非注册单例但文档表未登记 → 报错（M1 指针落空根因）。"""
+        from check_docs_consistency import check_non_registered_singleton_doc
+
+        self._setup(
+            tmp_path,
+            monkeypatch,
+            doc_rows="| `ConfigHandler` | `utils/config_handler.py` | 全静态方法 |\n",
+            code=(
+                ("data/a.py", "Foo", "本类属于非注册单例，详见 singleton-lifecycle.md"),
+                ("utils/config_handler.py", "ConfigHandler", "全静态方法（classmethod + 类级 cache）"),
+            ),
+        )
+        errors = check_non_registered_singleton_doc()
+        assert any("`Foo`" in e and "未登记" in e for e in errors), f"漏登记应报错, got: {errors}"
+
+    def test_detects_phantom_documented_class(self, tmp_path, monkeypatch):
+        """文档表登记了代码中不存在的类 → 报错（幽灵条目，删除单例后漏同步）。"""
+        from check_docs_consistency import check_non_registered_singleton_doc
+
+        self._setup(
+            tmp_path,
+            monkeypatch,
+            doc_rows=("| `Foo` | `data/a.py` | 非注册单例 |\n| `GhostClass` | `data/ghost.py` | 幽灵 |\n"),
+            code=(("data/a.py", "Foo", "本类属于非注册单例"),),
+        )
+        errors = check_non_registered_singleton_doc()
+        assert any("`GhostClass`" in e and "不存在" in e for e in errors), f"幽灵条目应报错, got: {errors}"
+
+    def test_empty_scan_is_error_not_silent_pass(self, tmp_path, monkeypatch):
+        """扫描不到任何标记 → 报错而非静默通过（防路径/标记词变更后门禁空转）。"""
+        from check_docs_consistency import check_non_registered_singleton_doc
+
+        self._setup(
+            tmp_path,
+            monkeypatch,
+            doc_rows="| `ConfigHandler` | `utils/config_handler.py` | 全静态方法 |\n",
+            code=(("data/a.py", "Bar", "普通类，无单例语义"),),
+        )
+        errors = check_non_registered_singleton_doc()
+        assert any("未检测到任何" in e for e in errors), f"空转应报错, got: {errors}"
+
+    def test_missing_doc_reports(self, tmp_path, monkeypatch):
+        """文档不存在 → 报错。"""
+        from check_docs_consistency import check_non_registered_singleton_doc
+
+        monkeypatch.setattr("check_docs_consistency.SINGLETON_LIFECYCLE_PATH", tmp_path / "missing.md")
+        errors = check_non_registered_singleton_doc()
+        assert any("不存在" in e for e in errors), f"文档缺失应报错, got: {errors}"
+
+    def test_missing_non_registered_section_reports(self, tmp_path, monkeypatch):
+        """文档无「**非注册单例」章节 → 报错（章节改名后勿静默通过）。"""
+        from check_docs_consistency import check_non_registered_singleton_doc
+
+        doc = tmp_path / "singleton-lifecycle.md"
+        doc.write_text("只有正文，无清单\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.SINGLETON_LIFECYCLE_PATH", doc)
+        errors = check_non_registered_singleton_doc()
+        assert any("未找到" in e for e in errors), f"缺章节应报错, got: {errors}"
 
 
 class TestAdrSupersedeChain:
