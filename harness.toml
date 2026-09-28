@@ -127,7 +127,7 @@ adopt_fake_implementation = false
 
 [tdd.enforce]
 # TDD の red-first 証跡フックは本プロジェクトでは無効（local trial safe default）。
-# 本プロジェクトの試験要件は CLAUDE.md §1.5（懶コード必須検証）と R19（業務ロジック
+# 本プロジェクトの試験要件は CLAUDE.md §1.2（非平凡ロジックの最小検証）と R19（業務ロジック
 # 変更は単測を伴う）で定まり、red-first 証跡の強制ではないため enabled=false を維持する。
 # これに伴い [worker.self_review].default_rules の tdd-red-evidence-attached を削除し、
 # 「TDD 強制 OFF ⇔ self-review が red 証跡を要求」の相互矛盾を解消する。
