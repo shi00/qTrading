@@ -13,7 +13,8 @@
 
 import asyncio
 import inspect
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
@@ -334,6 +335,16 @@ def _get_dropdowns(env: dict) -> list[ft.Dropdown]:
     return dropdowns
 
 
+def _toggle_advanced_group(root: Any, expanded: bool) -> None:
+    """模拟用户展开/折叠高级分组: 取唯一 ExpansionTile 的 on_change 并以 ``e.data=expanded`` 触发。"""
+    tiles = [c for c in _walk_all_controls(root) if isinstance(c, ft.ExpansionTile)]
+    assert len(tiles) == 1, f"应有 1 个高级分组 ExpansionTile, 实际 {len(tiles)}"
+    handler = cast("Callable[[Any], None]", tiles[0].on_change)
+    event = MagicMock()
+    event.data = expanded
+    handler(event)
+
+
 def _get_text_fields(env: dict) -> list[ft.TextField]:
     """按出现顺序返回 7 个 TextField。
 
@@ -591,6 +602,30 @@ class TestSystemTabMount:
         tiles = [c for c in _walk_all_controls(system_tab_env["result"]) if isinstance(c, ft.ExpansionTile)]
         assert len(tiles) == 1, f"应有 1 个高级分组 ExpansionTile, 实际 {len(tiles)}"
         assert tiles[0].expanded is False, "高级分组必须默认折叠"
+
+    def test_advanced_group_expansion_survives_rerender(self, system_tab_env) -> None:
+        """MAJOR-08 回归: 展开态跨重渲染保持, 不被 VM 通知触发的重渲染重置为折叠。
+
+        重渲染等价于切换日志级别后 ``settings_vm`` 通知驱动的重建。若展开态写死为
+        False, 重渲染会塌回折叠态 → 组内子控件不渲染 → E2E anchor 消失。
+        """
+        env = system_tab_env
+        _toggle_advanced_group(env["result"], True)
+
+        result = _rerender(env)
+        tiles = [c for c in _walk_all_controls(result) if isinstance(c, ft.ExpansionTile)]
+        assert tiles[0].expanded is True, "重渲染后展开态必须保持 (否则组内子控件不渲染)"
+
+    def test_advanced_group_collapse_survives_rerender(self, system_tab_env) -> None:
+        """MAJOR-08 回归: 用户折叠高级分组后, 重渲染不得把它重新展开。"""
+        env = system_tab_env
+        _toggle_advanced_group(env["result"], True)
+        _rerender(env)
+        _toggle_advanced_group(env["result"], False)
+
+        result = _rerender(env)
+        tiles = [c for c in _walk_all_controls(result) if isinstance(c, ft.ExpansionTile)]
+        assert tiles[0].expanded is False, "折叠态必须跨重渲染保持"
 
     def test_unmount_triggers_vm_dispose(self, system_tab_env) -> None:
         """卸载后 SystemViewModel.dispose 被调用。"""

@@ -279,6 +279,11 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     field_errors, set_field_errors = ft.use_state({})
     # MAJOR-08: 线程池保存前的运行任务确认对话框开关。
     thread_pool_confirm_open, set_thread_pool_confirm_open = ft.use_state(False)
+    # MAJOR-08 回归修复: 高级 (开发者) 分组的展开态必须由 use_state 持有。
+    # VM 通知 (如切换日志级别) 触发的重渲染会重建 ExpansionTile, 若把展开态写死
+    # 则每次重渲染都塌回折叠态; 折叠态下子控件不渲染 (maintain_state=False),
+    # 导致组内 anchor 语义节点消失, E2E 定位失败且用户操作被打断。
+    advanced_expanded, set_advanced_expanded = ft.use_state(False)
 
     def _set_field_error(error_key: str, err_key: str | None) -> None:
         """设置/清除某字段的校验错误 (仅在变化时 set_state, 避免多余重渲染)。"""
@@ -972,7 +977,9 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
             row_proxy,
         ],
-        expanded=False,
+        # 受控展开态: 由 use_state 驱动, 重渲染后保持用户展开/折叠选择。
+        expanded=advanced_expanded,
+        on_change=lambda e: set_advanced_expanded(bool(e.data)),
     )
 
     # F3（检视 06）：过渡期安全告警——仍在使用 legacy 明文密钥文件时，
