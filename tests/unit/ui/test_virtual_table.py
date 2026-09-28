@@ -28,6 +28,8 @@ import flet as ft
 import pytest
 
 from ui.components.virtual_table import (
+    DETAIL_COL_ID,
+    DETAIL_COL_WIDTH,
     HEADER_HEIGHT,
     MAX_COL_WIDTH,
     MIN_COL_WIDTH,
@@ -38,6 +40,8 @@ from ui.components.virtual_table import (
     _assert_table_positive_size,
     _clamp_width,
     _col_width,
+    _column_alignments,
+    _is_missing_value,
     _total_width,
     next_sort_state,
 )
@@ -207,6 +211,83 @@ class TestColWidthsCache:
         assert cache.last_time == 0.0
 
 
+# --- 2b. _is_missing_value / _column_alignments (MINOR-09 item 2 按列对齐) ---
+
+
+class TestIsMissingValue:
+    """缺失值判定 (item 2): ""/"-"(含空白) 视为缺失。"""
+
+    def test_empty_string_is_missing(self):
+        assert _is_missing_value("") is True
+
+    def test_dash_is_missing(self):
+        assert _is_missing_value("-") is True
+
+    def test_whitespace_wrapped_dash_is_missing(self):
+        assert _is_missing_value("  -  ") is True
+
+    def test_numeric_not_missing(self):
+        assert _is_missing_value("12.5") is False
+
+    def test_text_not_missing(self):
+        assert _is_missing_value("abc") is False
+
+    def test_percent_not_missing(self):
+        assert _is_missing_value("1.5%") is False
+
+
+class TestColumnAlignments:
+    """按列对齐推断 (item 2): 同列一致, 缺失值 "-" 随列对齐。"""
+
+    def test_numeric_column_right_aligned(self):
+        cols = [{"id": "price"}]
+        rows = [{"price": "10.5"}, {"price": "20.1"}]
+        assert _column_alignments(cols, rows)["price"] == ft.Alignment.CENTER_RIGHT
+
+    def test_text_column_left_aligned(self):
+        cols = [{"id": "name"}]
+        rows = [{"name": "A"}, {"name": "B"}]
+        assert _column_alignments(cols, rows)["name"] == ft.Alignment.CENTER_LEFT
+
+    def test_numeric_column_with_missing_stays_right(self):
+        """数值列含缺失值 "-" 时仍右对齐 — "-" 与同列数字对齐一致 (DoD)。"""
+        cols = [{"id": "price"}]
+        rows = [{"price": "10.5"}, {"price": "-"}, {"price": "20.1"}]
+        assert _column_alignments(cols, rows)["price"] == ft.Alignment.CENTER_RIGHT
+
+    def test_text_column_with_missing_stays_left(self):
+        cols = [{"id": "name"}]
+        rows = [{"name": "A"}, {"name": "-"}]
+        assert _column_alignments(cols, rows)["name"] == ft.Alignment.CENTER_LEFT
+
+    def test_mixed_numeric_and_text_is_left(self):
+        """同列既出现数字又出现文本 → 视为文本列, 左对齐 (与逐格推断的语义一致)。"""
+        cols = [{"id": "mixed"}]
+        rows = [{"mixed": "10"}, {"mixed": "N/A"}]
+        assert _column_alignments(cols, rows)["mixed"] == ft.Alignment.CENTER_LEFT
+
+    def test_all_missing_column_left(self):
+        cols = [{"id": "empty"}]
+        rows = [{"empty": "-"}, {"empty": ""}]
+        assert _column_alignments(cols, rows)["empty"] == ft.Alignment.CENTER_LEFT
+
+    def test_percent_and_comma_numeric_detected(self):
+        cols = [{"id": "pct"}, {"id": "amt"}]
+        rows = [{"pct": "1.5%", "amt": "1,234.5"}]
+        result = _column_alignments(cols, rows)
+        assert result["pct"] == ft.Alignment.CENTER_RIGHT
+        assert result["amt"] == ft.Alignment.CENTER_RIGHT
+
+    def test_action_column_centered(self):
+        cols = [{"id": DETAIL_COL_ID, "action": "detail"}]
+        rows = [{"name": "A"}]
+        assert _column_alignments(cols, rows)[DETAIL_COL_ID] == ft.Alignment.CENTER
+
+    def test_detail_column_constants(self):
+        assert DETAIL_COL_ID == "__detail__"
+        assert DETAIL_COL_WIDTH == 72
+
+
 # --- 3. 组件契约 (声明式标记 + 签名 + 禁止命令式 API) ---
 
 
@@ -241,6 +322,12 @@ class TestComponentContract:
         assert params["on_row_click"].default is None
         assert params["col_anchor"].default is None
         assert params["row_anchor"].default is None
+        # MINOR-09 item 3/4: 新增可选参数默认 None (不破坏既有调用方)
+        assert params["on_row_detail"].default is None
+        assert params["detail_anchor"].default is None
+        assert params["col_widths_key"].default is None
+        assert params["on_load_col_widths"].default is None
+        assert params["on_persist_col_widths"].default is None
 
     def test_no_set_rows(self):
         assert "set_rows" not in _code_source()

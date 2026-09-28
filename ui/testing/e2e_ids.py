@@ -65,6 +65,7 @@ class _ScreenerIds:
     # 动态 anchor 前缀（静态方法生成，禁止调用方字符串拼接）
     _RESULT_ROW_PREFIX = "e2e.screener.result_row"
     _COLUMN_HEADER_PREFIX = "e2e.screener.column_header"
+    _DETAIL_BUTTON_PREFIX = "e2e.screener.detail_button"
 
     @staticmethod
     def result_row(ts_code: str) -> Eid:
@@ -92,6 +93,21 @@ class _ScreenerIds:
         调用方负责确保输入合法，本方法不做运行时校验（YAGNI）。
         """
         return (f"{_ScreenerIds._COLUMN_HEADER_PREFIX}.{col_id}", AnchorKind.COMPLEX)
+
+    @staticmethod
+    def detail_button(ts_code: str) -> Eid:
+        """生成行内「详情」按钮 anchor（ft.TextButton，走 INTERACTIVE aria-label 通道，item 4）。
+
+        「详情」动作列入口作为**独立** anchor：与行 anchor（``result_row``）语义分离，
+        位于行 anchor 子树之外（兄弟节点，见 virtual_table 模块 docstring），
+        使 COMPLEX 行 anchor 的 ``role=button`` + textContent 前缀契约不被嵌套交互控件破坏。
+        TextButton 为 Flet 原生 Button 系列，PoC A1 实证走 aria-label 独立节点，
+        故 AnchorKind 取 INTERACTIVE（`flt-semantics[aria-label$="EID"]` 后缀匹配）。
+
+        Precondition: ts_code 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
+        调用方负责确保输入合法，本方法不做运行时校验（YAGNI）。
+        """
+        return (f"{_ScreenerIds._DETAIL_BUTTON_PREFIX}.{ts_code}", AnchorKind.INTERACTIVE)
 
 
 class _DetailDialogIds:

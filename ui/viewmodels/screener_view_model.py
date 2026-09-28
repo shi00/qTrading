@@ -255,6 +255,48 @@ class ScreenerViewModel(
         self._background_tasks.add(task)
         task.add_done_callback(self._on_background_task_done)
 
+    # --- 表格列宽持久化 (MINOR-09 item 3: 复用 splitter 持久化模式, View 不直接 import ConfigHandler) ---
+
+    def get_col_widths(self, config_key: str) -> dict[str, int] | None:
+        """读取持久化的表格列宽 {col_id: width} (对齐 get_splitter_width)。
+
+        ConfigHandler.get_typed 为内存读 (首次未命中触发小 JSON 读, 单次 < 5ms),
+        在 use_effect 上下文中可接受。无持久化值/类型非法时返回 None, 组件回退列定义默认宽度。
+        """
+        raw = ConfigHandler.get_typed(config_key, dict, {})
+        if not raw:
+            return None
+        try:
+            return {str(k): int(v) for k, v in raw.items()}
+        except (TypeError, ValueError):
+            logger.debug("[ScreenerVM] invalid persisted col widths for %s, ignored", config_key)
+            return None
+
+    def persist_col_widths(self, config_key: str, widths: dict[str, int]) -> None:
+        """持久化表格列宽 (MINOR-09 item 3: 异步写盘, R16 合规). fire-and-forget.
+
+        同步签名以满足 PaginatedTable ``on_persist_col_widths`` 回调契约; 内部经
+        ThreadPoolManager.run_async 提交 IO 写盘, 不阻塞 Flet 事件处理器。
+        复用 _background_tasks + _on_background_task_done 跟踪 task 生命周期。
+        """
+
+        async def _persist() -> None:
+            try:
+                await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_typed, config_key, dict(widths))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug(
+                    "[ScreenerVM] persist_col_widths failed: %s", DataSanitizer.sanitize_error(e), exc_info=True
+                )
+
+        loop = self._get_loop_or_none()
+        if loop is None:
+            return  # 无事件循环 (测试环境/已 disposed), 静默跳过
+        task = loop.create_task(_persist())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_background_task_done)
+
     def set_exclude_st(self, value: bool) -> None:
         """SC-01: 设置是否排除 ST/*ST 风险警示股（全局筛选设置，View 渲染开关调用）。
 

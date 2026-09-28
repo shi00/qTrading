@@ -19,6 +19,18 @@
 - _build_header / _build_cells / _build_row 单元构建 (theme-dependent)
 - 行点击 / trend 色 / code TextSpan
 - theme 自动重渲染: ``ft.use_state(AppColors.get_observable_state)`` 订阅 Layer 2 表格色
+
+修复要点 (MINOR-09):
+- item 1 单元格 no_wrap 加 ``overflow=ELLIPSIS`` + 外层 Container ``tooltip`` 展示完整值
+  (``exclude_from_semantics=True``: tooltip 文案不得进入语义树, 否则被合并进行 anchor
+  节点的无障碍名并挤占 EID 前缀位, 破坏 COMPLEX 行 anchor 与文本锚点)
+- item 2 对齐由逐格推断改为按列 (``_column_alignments``), 同列一致, 缺失值 "-" 随列对齐
+- item 3 列宽持久化: ``col_widths_key`` + ``on_load_col_widths`` / ``on_persist_col_widths``
+  回调上抛父 VM (对齐 resizable_splitter.py 的 config_key/持久化回调模式)
+- item 4 ``on_row_detail`` 非空时追加列尾可聚焦 TextButton「详情」动作列 (键盘可达入口);
+  **动作列单元格与行 anchor 子树互为兄弟** (不嵌套在 ``anchored()`` 内): 嵌套交互控件
+  会让 Flutter 语义合并节点由 ``role=button`` 退化为 ``role=group`` + ``aria-label``,
+  使 COMPLEX 行 anchor 的 textContent 前缀契约失效 (CI E2E 实证)
 """
 
 import logging
@@ -46,12 +58,22 @@ DRAG_INTERVAL = 16
 _TREND_COLS = frozenset({"pct_chg", "change", "chg"})
 _CODE_COLS = frozenset({"ts_code", "symbol"})
 
-# NOTE(lazy): 键盘契约降级 — Flet 0.86.5 无表格 focus/grid 键盘遍历
-# (无 Focus 控件; DataTable 无 on_key; KeyboardListener 无 focus 遍历), 键盘用户无方向键
-# 行导航与 Enter 打开详情入口 (行点击详情仅鼠标/触屏可达); 本次仅提供排序表头语义状态朗读
-# (Semantics 三态) + 行高 32. ceiling: 排序方向可感知, 完整键盘导航不可用.
-# upgrade: Flet 提供表格 focus/grid 能力, 或 KeyboardListener 组合方案经 E2E 验证可行时
-# (作为独立任务恢复), 评估控件级实现后再解除.
+# 详情入口动作列 (item 4): 追加到列尾, 单元格渲染可聚焦 TextButton, 提供键盘可达的
+# 详情入口 (行级 on_row_click 仅鼠标/触屏可达)。
+DETAIL_COL_ID = "__detail__"
+DETAIL_COL_WIDTH = 72
+_DETAIL_ACTION = "detail"
+
+# 缺失值标记: 与消费方 (screener_view._format_cell_value) 的 "-" 约定一致。
+# 用于按列推断对齐 (item 2) 时跳过缺失单元格。
+_MISSING_MARKERS = frozenset({"", "-"})
+
+# NOTE(lazy): 键盘契约部分降级 — Flet 0.86.5 无表格 focus/grid 键盘遍历
+# (无 Focus 控件; DataTable 无 on_key; KeyboardListener 无 focus 遍历), 行级方向键导航
+# 仍不可用; 详情入口改由列尾可聚焦 TextButton 承载 (item 4), 键盘用户可 Tab 聚焦后
+# Enter 打开详情. ceiling: 行级方向键导航不可用. upgrade: Flet 提供表格 focus/grid
+# 能力, 或 KeyboardListener 组合方案经 E2E 验证可行时 (作为独立任务恢复), 评估控件级
+# 实现后再解除.
 
 
 # --- 纯函数 (排序逻辑, 供单元测试覆盖) ---
@@ -93,6 +115,43 @@ def _total_width(
 def _clamp_width(width: float, min_width: int, max_width: int) -> int:
     """将宽度 clamp 到 ``[min_width, max_width]``。"""
     return max(min_width, min(max_width, int(width)))
+
+
+def _is_missing_value(val: str) -> bool:
+    """缺失值判定 (item 2): ""/"-" 视为缺失, 不参与列数值性推断。"""
+    return val.strip() in _MISSING_MARKERS
+
+
+def _column_alignments(
+    columns: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
+) -> dict[str, ft.Alignment]:
+    """按列推断对齐 (item 2): 同一列所有单元格对齐一致。
+
+    判定列是否「数值列」: 该列存在数值单元格且不存在非数值单元格 (缺失值 "-"/"" 跳过)。
+    数值列右对齐, 其余左对齐; 动作列居中。缺失值随列对齐, 从而 "-" 与同列数字对齐一致
+    (修复原逐格判断导致 "-" 左对齐、数字右对齐的错位)。
+    """
+    alignments: dict[str, ft.Alignment] = {}
+    for col in columns:
+        col_id = str(col["id"])
+        if col.get("action") == _DETAIL_ACTION:
+            alignments[col_id] = ft.Alignment.CENTER
+            continue
+        saw_numeric = False
+        saw_text = False
+        for row in rows:
+            raw = str(row.get(col_id, ""))
+            if _is_missing_value(raw):
+                continue
+            try:
+                float(raw.replace("%", "").replace(",", ""))
+            except ValueError:
+                saw_text = True
+                break
+            saw_numeric = True
+        alignments[col_id] = ft.Alignment.CENTER_RIGHT if (saw_numeric and not saw_text) else ft.Alignment.CENTER_LEFT
+    return alignments
 
 
 def _assert_table_positive_size(total_w: int, header_h: int, row_h: int) -> None:
@@ -159,6 +218,19 @@ def _make_row_click_handler(
     return _on_click
 
 
+def _make_detail_click_handler(
+    on_row_detail: Callable[[dict[str, Any]], None],
+    row_data: dict[str, Any],
+) -> Callable[..., None]:
+    """构建「详情」按钮点击 handler (捕获非 None 回调 + 行数据, item 4)。"""
+
+    # e 不标注类型: Flet 事件 handler 槽位为协变 ControlEventHandler[T], 无类型 e 兼容
+    def _on_click(e) -> None:
+        on_row_detail(row_data)
+
+    return _on_click
+
+
 # --- 单元构建 (theme-dependent, 随 Observable 重渲染) ---
 
 
@@ -208,11 +280,12 @@ def _build_header(
     controls: list[ft.Control] = []
     for col in columns:
         col_id = str(col["id"])
+        is_action = col.get("action") == _DETAIL_ACTION
         base_label = str(col.get("label", col_id))
         label = base_label
         if sort_col == col_id:
             label += " ↑" if sort_asc else " ↓"
-        if on_sort is not None:
+        if on_sort is not None and not is_action:
             # 排序表头读屏语义三态标注 — 升序 / 降序 / 可排序.
             if sort_col == col_id and sort_asc:
                 state_desc = I18n.get("table_sort_asc")
@@ -232,7 +305,7 @@ def _build_header(
             alignment=ft.Alignment.CENTER_LEFT,
             padding=ft.Padding.only(left=8, right=8),
         )
-        if on_sort is not None:
+        if on_sort is not None and not is_action:
             # 语义挂 `Text.semantics_label` 而非嵌套 `ft.Semantics`:
             # E2E CI 实证 (PR #655) 在 anchored(COMPLEX, container=True) 与 GestureDetector 之间
             # 插入带 label 的 Semantics 会在 Flutter 语义树生成独立 role=button 节点, 使 EID
@@ -256,7 +329,7 @@ def _build_header(
         else:
             control = content
         width = _col_width(col_widths, col)
-        if drag_handlers is not None:
+        if drag_handlers is not None and not is_action:
             start, update, end = drag_handlers[col_id]
             controls.append(
                 ft.Container(
@@ -275,12 +348,29 @@ def _build_header(
     return controls
 
 
+def _split_action_columns(
+    columns: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """按列定义拆分 (数据列, 动作列): 动作列渲染在行 anchor 子树之外 (item 4)。"""
+    data_cols = [col for col in columns if col.get("action") != _DETAIL_ACTION]
+    action_cols = [col for col in columns if col.get("action") == _DETAIL_ACTION]
+    return data_cols, action_cols
+
+
 def _build_cells(
     row_data: dict[str, Any],
     columns: list[dict[str, Any]],
     col_widths: dict[str, int] | None = None,
+    alignments: dict[str, ft.Alignment] | None = None,
 ) -> list[ft.Container]:
-    """构建一行单元格 (theme-dependent)。"""
+    """构建一行数据单元格 (theme-dependent)。
+
+    alignments: 按列对齐映射 (item 2), 同一列所有单元格 (含缺失值 "-") 对齐一致;
+        None 时回退逐格数值性推断 (向后兼容直接调用)。
+    动作列 (``action=detail``) 不在本函数内渲染 — 由 ``_build_row`` 经
+    ``_build_detail_cell`` 构建为行 anchor 子树的兄弟节点, 避免嵌套交互控件破坏
+    anchored() 的 ``role=button`` 合并 (见模块 docstring item 4)。
+    """
     cells: list[ft.Container] = []
     for col in columns:
         col_id = str(col["id"])
@@ -295,7 +385,10 @@ def _build_cells(
             pass
 
         text_color = AppColors.TABLE_CELL_NUMERIC if is_numeric else AppColors.TABLE_CELL_TEXT
-        alignment = ft.Alignment.CENTER_RIGHT if is_numeric else ft.Alignment.CENTER_LEFT
+        if alignments is not None and col_id in alignments:
+            alignment = alignments[col_id]
+        else:
+            alignment = ft.Alignment.CENTER_RIGHT if is_numeric else ft.Alignment.CENTER_LEFT
 
         is_trend = col_id in _TREND_COLS
         if is_trend and numeric_val is not None:
@@ -328,12 +421,14 @@ def _build_cells(
                 ],
                 size=AppStyles.FONT_SIZE_BODY_SM,
                 no_wrap=True,
+                overflow=ft.TextOverflow.ELLIPSIS,
             )
         else:
             text = ft.Text(
                 val,
                 size=AppStyles.FONT_SIZE_BODY_SM,
                 no_wrap=True,
+                overflow=ft.TextOverflow.ELLIPSIS,
                 weight=ft.FontWeight.BOLD if is_trend else None,
                 color=text_color,
                 font_family="Roboto Mono, monospace" if is_numeric else None,
@@ -343,6 +438,12 @@ def _build_cells(
             content=text,
             alignment=alignment,
             padding=ft.Padding.only(left=8, right=8),
+            # item 1: 超宽省略号 + tooltip 展示完整值 (Text 本身无 tooltip, 挂外层 Container)。
+            # exclude_from_semantics=True 强制 (E2E 契约): tooltip 文案若进入语义树, 会被
+            # Flutter 合并进行 anchor 节点的无障碍名并排在 label (EID) 之前, 使 COMPLEX
+            # 行 anchor 的 ``textContent`` 前缀判断 (startsWith(EID)) 失效; 同时该单元格
+            # 文本也会退化为 aria-label 形态, 破坏 ``text=+x.xx`` 文本锚点.
+            tooltip=ft.Tooltip(message=val, exclude_from_semantics=True) if val else None,
         )
         if col_widths is not None:
             cells.append(ft.Container(content, width=_col_width(col_widths, col)))
@@ -350,6 +451,36 @@ def _build_cells(
             width = col.get("width")
             cells.append(ft.Container(content, width=int(width)) if width else ft.Container(content, expand=1))
     return cells
+
+
+def _build_detail_cell(
+    row_data: dict[str, Any],
+    col: dict[str, Any],
+    col_widths: dict[str, int] | None,
+    on_row_detail: Callable[[dict[str, Any]], None] | None,
+    detail_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
+) -> ft.Container:
+    """构建「详情」动作列单元格 (item 4): 可聚焦 TextButton 承载键盘可达的详情入口。
+
+    TextButton 为 ActionControl, 默认可 Tab 聚焦 + Enter 触发; on_row_detail 为 None
+    时渲染空占位 (理论上动作列仅在 on_row_detail 非空时追加)。
+
+    detail_anchor 非空且返回 Eid 时用 anchored() 包裹 TextButton, 生成与行 anchor
+    独立 (append-only) 的 INTERACTIVE anchor (EIDS.SCREENER.detail_button); 该控件位于
+    行 anchor 子树之外 (兄弟节点), 不影响 COMPLEX 行 anchor 的 role=button 契约。
+    """
+    width = _col_width(col_widths, col)
+    if on_row_detail is None:
+        return ft.Container(width=width)
+    button: ft.Control = ft.TextButton(
+        content=ft.Text(I18n.get("col_details"), size=AppStyles.FONT_SIZE_CAPTION),
+        on_click=_make_detail_click_handler(on_row_detail, row_data),
+    )
+    if detail_anchor is not None:
+        eid = detail_anchor(row_data)
+        if eid is not None:
+            button = anchored(eid, button)
+    return ft.Container(content=button, width=width, alignment=ft.Alignment.CENTER)
 
 
 def _build_row(
@@ -362,6 +493,9 @@ def _build_row(
     on_hover: Callable[[ft.HoverEvent], None] | None = None,
     row_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
     col_widths: dict[str, int] | None = None,
+    alignments: dict[str, ft.Alignment] | None = None,
+    on_row_detail: Callable[[dict[str, Any]], None] | None = None,
+    detail_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
 ) -> ft.Control:
     """构建单个行 (方案 D: on_row_click 非空时用 GestureDetector 包裹生成 flt-tappable 语义属性)。
 
@@ -370,6 +504,13 @@ def _build_row(
         is_hovered: 当前行是否处于 hover 态 (P2-8: 切换 bgcolor 为 TABLE_ROW_HOVER)。
         on_hover: hover 事件回调 (P2-8: 由 TableRow 传入 set_hovered 触发当前行重渲染)。
         col_widths: 列宽拖拽覆盖 (None 时回退列定义默认宽度)。
+        on_row_detail: 非空时动作列 (item 4) 渲染为**行 anchor 子树的兄弟** —
+            anchored(GestureDetector) 内只放数据列, 动作列 TextButton 并列在
+            ``Row([anchored_row, detail_cell], spacing=0)`` 内, 保证行 anchor 子树结构
+            与无动作列时完全一致 (Semantics(container) > GestureDetector > 行内容),
+            ``role=button`` + textContent 前缀契约不被嵌套交互控件破坏 (见模块 docstring)。
+        detail_anchor: 动作列「详情」按钮的独立 anchor (EIDS.SCREENER.detail_button),
+            与 row_anchor 语义分离; 透传给 ``_build_detail_cell``。
 
     Note:
         on_row_click=None 时直接返回 Container (不包裹 GestureDetector), 避免 Flutter
@@ -382,25 +523,49 @@ def _build_row(
         导致行文本从语义树中彻底消失, get_by_text 无法匹配. GestureDetector 不合并子树
         语义, Text 节点独立存在, 行文本保持可见.
     """
+    data_cols, action_cols = _split_action_columns(columns)
+    data_width = sum(_col_width(col_widths, col) for col in data_cols)
+    row_bgcolor = AppStyles.data_table_row(abs_idx, is_hovered=is_hovered)
+    # 无动作列时保持既有结构 (行容器即 anchor 控件, 承载底色/ink/hover);
+    # 有动作列时底色/hover 上提到外层行容器 (覆盖数据列 + 动作列), 数据区不再重复
+    # 着色与挂 hover — 否则鼠标移出数据区进入动作列会误触发 hover=False
+    standalone = not action_cols
     inner = ft.Container(
         height=ROW_HEIGHT,
-        width=total_w,
+        width=total_w if standalone else data_width,
         ink=True,
-        bgcolor=AppStyles.data_table_row(abs_idx, is_hovered=is_hovered),
-        content=ft.Row(safe_controls(_build_cells(row_data, columns, col_widths)), spacing=0),
-        on_hover=on_hover,
+        bgcolor=row_bgcolor if standalone else None,
+        content=ft.Row(safe_controls(_build_cells(row_data, data_cols, col_widths, alignments)), spacing=0),
+        on_hover=on_hover if standalone else None,
     )
     if on_row_click is None:
-        return inner
-    gesture = ft.GestureDetector(
-        content=inner,
-        on_tap=_make_row_click_handler(on_row_click, row_data),
-    )
-    if row_anchor is not None:
-        eid = row_anchor(row_data)
-        if eid is not None:
-            return anchored(eid, gesture)
-    return gesture
+        # 无点击 handler 时不包裹 GestureDetector (避免 Flutter 空 handler 警告),
+        # 亦不挂 row_anchor (与原行为一致); 但动作列仍须渲染 (见下)。
+        anchored_row: ft.Control = inner
+    else:
+        gesture = ft.GestureDetector(
+            content=inner,
+            on_tap=_make_row_click_handler(on_row_click, row_data),
+        )
+        anchored_row = gesture
+        if row_anchor is not None:
+            eid = row_anchor(row_data)
+            if eid is not None:
+                anchored_row = anchored(eid, gesture)
+    # 动作列 (item 4): 与 anchored 子树并列 (兄弟), 不嵌套 — 嵌套交互控件会把合并节点
+    # role 从 button 退化为 group, 破坏 COMPLEX 行 anchor (CI E2E 实证)
+    if action_cols:
+        detail_cells = [
+            _build_detail_cell(row_data, col, col_widths, on_row_detail, detail_anchor) for col in action_cols
+        ]
+        return ft.Container(
+            height=ROW_HEIGHT,
+            width=total_w,
+            bgcolor=row_bgcolor,
+            content=ft.Row(safe_controls([anchored_row, *detail_cells]), spacing=0),
+            on_hover=on_hover,
+        )
+    return anchored_row
 
 
 @ft.component
@@ -411,6 +576,9 @@ def TableRow(
     col_widths: dict[str, int],
     on_row_click: Callable[[dict[str, Any]], None] | None,
     row_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
+    alignments: dict[str, ft.Alignment] | None = None,
+    on_row_detail: Callable[[dict[str, Any]], None] | None = None,
+    detail_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
 ) -> ft.Control:
     """独立行组件 (方案 §5.2/§5.3): hover state 下沉到行内 use_state (G5, ~100× 性能)。
 
@@ -434,6 +602,9 @@ def TableRow(
         on_hover=_on_hover,
         row_anchor=row_anchor,
         col_widths=col_widths,
+        alignments=alignments,
+        on_row_detail=on_row_detail,
+        detail_anchor=detail_anchor,
     )
 
 
@@ -447,6 +618,11 @@ def PaginatedTable(
     on_row_click: Callable[[dict[str, Any]], None] | None = None,
     col_anchor: Callable[[str], Eid] | None = None,
     row_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
+    on_row_detail: Callable[[dict[str, Any]], None] | None = None,
+    detail_anchor: Callable[[dict[str, Any]], Eid | None] | None = None,
+    col_widths_key: str | None = None,
+    on_load_col_widths: Callable[[], dict[str, int] | None] | None = None,
+    on_persist_col_widths: Callable[[dict[str, int]], None] | None = None,
 ) -> ft.Column:
     """声明式分页表格 (方案 D-v3: 水平滚动 + sticky header + 列宽拖拽 + hover 局部化).
 
@@ -461,6 +637,17 @@ def PaginatedTable(
         sort_asc: 当前排序方向 (True=升序)。
         on_sort: 列头点击回调 (col_id, new_asc); 由消费方更新 sort_col/sort_asc props。
         on_row_click: 行点击回调 (row_data)。
+        on_row_detail: 非空时追加列尾「详情」动作列, 每行渲染可聚焦 TextButton 并回调
+            (row_data) — 提供键盘可达的详情入口 (item 4); None 时不追加动作列。
+        detail_anchor: 「详情」按钮的独立 EID 工厂 (row_data → Eid | None); 非空时
+            TextButton 用 anchored() 包裹生成 INTERACTIVE anchor。与 row_anchor 语义
+            分离 (append-only), 位于行 anchor 子树之外 (兄弟节点, item 4)。
+        col_widths_key: 列宽持久化键; 与 on_load_col_widths/on_persist_col_widths 配套,
+            变化时经 use_effect 重新加载 (对齐 ResizableSplitter 的 config_key 模式)。
+        on_load_col_widths: 列宽读取回调 (返回 {col_id: width} 或 None); 由父 VM 同步返回
+            (ConfigHandler 内存读, 非 IO)。None 表示不做持久化加载。
+        on_persist_col_widths: 列宽写入回调 (drag end 时上抛); 由父 VM 内部经
+            ThreadPoolManager 异步写盘 (R16 合规)。None 表示不做持久化写入。
 
     布局树 (方案 §5.1):
         Outer(Column, expand=True)
@@ -488,6 +675,52 @@ def PaginatedTable(
     col_cache = ft.use_ref(_ColWidthsCache)
     cache = col_cache.current
     assert cache is not None
+
+    def _persist_widths(widths: dict[str, int]) -> None:
+        """经回调上抛列宽持久化请求 (P1-1 模式: 组件不直接 import ConfigHandler)。"""
+        if on_persist_col_widths is None:
+            return
+        try:
+            on_persist_col_widths(dict(widths))
+        except Exception as e:
+            logger.debug("[PaginatedTable] on_persist_col_widths failed: %s", e)
+
+    def _load_widths_effect() -> None:
+        """按 col_widths_key 加载持久化列宽 (item 3).
+
+        对齐 ResizableSplitter._load_effect: 读取经父 VM (内存读, 非 IO); 缺失/异常时
+        静默回退列定义默认宽度, 不阻断渲染。
+        """
+        if on_load_col_widths is None:
+            return
+        try:
+            loaded = on_load_col_widths()
+        except Exception as e:
+            logger.debug("[PaginatedTable] on_load_col_widths failed, use column defaults: %s", e)
+            return
+        if not loaded:
+            return
+        try:
+            set_col_widths({str(k): int(v) for k, v in loaded.items()})
+        except (TypeError, ValueError) as e:
+            logger.debug("[PaginatedTable] invalid persisted col widths ignored: %s", e)
+
+    ft.use_effect(_load_widths_effect, dependencies=[col_widths_key])
+
+    # 详情动作列 (item 4): on_row_detail 非空时追加到列尾, 参与宽度/对齐计算
+    effective_cols: list[dict[str, Any]] = cols_list
+    if on_row_detail is not None:
+        effective_cols = [
+            *cols_list,
+            {
+                "id": DETAIL_COL_ID,
+                "label": I18n.get("col_details"),
+                "width": DETAIL_COL_WIDTH,
+                "action": _DETAIL_ACTION,
+            },
+        ]
+    # 按列对齐 (item 2): 同一列一致, 缺失值 "-" 与同列数字对齐一致
+    col_alignments = _column_alignments(effective_cols, rows_list)
 
     # rows 变化时通过 key 重建 Column 重置滚动位置 (对齐原命令式数据推送行为)
     # scroll_to 对 Column "ineffective" (flet-mcp 验证), 故用 key 重建
@@ -529,13 +762,17 @@ def PaginatedTable(
             if cache.active_col is None:
                 return
             set_col_widths(dict(cache.widths))
+            _persist_widths(cache.widths)
             cache.active_col = None
 
         return _on_drag_end
 
-    # per-column 拖拽 handler (避免闭包晚绑定, 对齐 _make_sort_handler 模式)
+    # per-column 拖拽 handler (避免闭包晚绑定, 对齐 _make_sort_handler 模式);
+    # 动作列 (详情) 不参与拖拽, 不生成 handle
     drag_handlers: dict[str, tuple[Callable[..., None], Callable[..., None], Callable[..., None]]] = {}
-    for col in cols_list:
+    for col in effective_cols:
+        if col.get("action") == _DETAIL_ACTION:
+            continue
         col_id = str(col["id"])
         w = _col_width(col_widths, col)
         drag_handlers[col_id] = (
@@ -544,22 +781,25 @@ def PaginatedTable(
             _make_drag_end_handler(col_id),
         )
 
-    total_w = _total_width(cols_list, col_widths)
+    total_w = _total_width(effective_cols, col_widths)
     row_count = len(rows_list)
 
     # UIX-13 C5: 表格结构尺寸校验 (防列宽计算退化/非法尺寸参数)
     _assert_table_positive_size(total_w, HEADER_HEIGHT, ROW_HEIGHT)
 
-    header_controls = _build_header(cols_list, sort_col, sort_asc, on_sort, col_anchor, col_widths, drag_handlers)
+    header_controls = _build_header(effective_cols, sort_col, sort_asc, on_sort, col_anchor, col_widths, drag_handlers)
 
     all_rows = [
         TableRow(
             abs_idx=abs_idx,
             row_data=rows_list[abs_idx],
-            columns=cols_list,
+            columns=effective_cols,
             col_widths=col_widths,
             on_row_click=on_row_click,
             row_anchor=row_anchor,
+            alignments=col_alignments,
+            on_row_detail=on_row_detail,
+            detail_anchor=detail_anchor,
         )
         # NOTE(lazy): Python 端构建全量行控件, VScroll(Column, scroll=AUTO) 直接渲染全部行 (无窗口化). ceiling: 所有调用点单页 ≤100 行 (screener page_size 最大 100, data_view MAX_ROWS_UI=100). upgrade: 单页行数上限提升至 ≥500 或观察到构建耗时 > 50ms 时, 评估切换到 ListView build_controls_on_demand=True 并解决 E2E 视口高度为 0 时的子控件不构建问题.
         for abs_idx in range(row_count)
@@ -607,7 +847,11 @@ def PaginatedTable(
         expand=True,
         vertical_alignment=ft.CrossAxisAlignment.STRETCH,
     )
-    # NOTE(lazy): 列宽仅存活于 PaginatedTable 实例生命周期 (use_state), 关闭 tab/切视图/重启后重置为 columns 定义默认值. ceiling: 适用于用户偶发拖拽 (<5次/会话) 与列数量固定的场景, 每次进入视图重新拖 5 列 = 5 秒操作代价, 用户可容忍. upgrade: 用户反馈"每次都要重拖太烦"、或拖拽频率 profiling 显示 >20 次/会话、或产品新增"保存视图布局"需求时, 升级为 ConfigHandler 持久化 column_widths_by_view.
+    # NOTE(lazy): 列宽持久化经 col_widths_key + on_load_col_widths/on_persist_col_widths
+    # 回调上抛父 VM (ConfigHandler, 对齐 ResizableSplitter 模式); 未传回调时降级为
+    # 实例级 use_state (关闭 tab/切视图/重启重置为列定义默认值). ceiling: 持久化键由消费方
+    # 提供, 未接线的调用点仍为实例级. upgrade: 需跨视图共享布局或新增"保存视图布局"需求时,
+    # 扩展为按视图注册多个 col_widths_key.
     return ft.Column(
         controls=[h_scroll_row],
         expand=True,
