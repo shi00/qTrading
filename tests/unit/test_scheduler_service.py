@@ -6,7 +6,7 @@
 import asyncio
 import pytest
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
 from core.i18n import Message
@@ -1808,3 +1808,146 @@ class TestMisfireGraceTime:
         # AsyncIOScheduler 将 job_defaults 存入私有 _job_defaults（APScheduler 无公共属性）
         defaults = svc.scheduler._job_defaults
         assert defaults["misfire_grace_time"] == 1800
+
+
+class TestCatchupBackoff:
+    """MAJOR-01/D7-1: 补偿失败按指数退避（30s→5min→30min→2h 封顶），
+    防止 30 秒看门狗在持续性失败下无限固定频率重试（消耗配额 + 刷屏任务面板）。"""
+
+    _FIXED_NOW = datetime(2024, 6, 15, 12, 0, 0)
+
+    async def _run_incomplete_catchup(self, svc):
+        """驱动一次 _catchup_logic 并返回未完成结果（关键表失败）。"""
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.sync_daily_market_snapshot = AsyncMock()
+        mock_tm_instance = MagicMock()
+        mock_tm_instance.update_progress.return_value = True
+        with (
+            patch("utils.scheduler_service.get_now", return_value=self._FIXED_NOW),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            patch(
+                "data.sync.base.SyncResult",
+                return_value=SyncResult(failed_critical_tables=["daily_quotes"]),
+            ),
+            patch("utils.scheduler_service.logger.warning"),
+        ):
+            await svc._catchup_logic("task1", [date(2024, 6, 11)])
+
+    @pytest.mark.asyncio
+    async def test_incomplete_records_failure_and_schedules_retry(self):
+        """未完成补偿 → 连续失败计数 +1，并按首档退避（30s）设置下次重试时间。"""
+        svc = _make_svc()
+        assert svc._catchup_consecutive_failures == 0
+        assert svc._catchup_next_retry_at is None
+
+        await self._run_incomplete_catchup(svc)
+
+        assert svc._catchup_consecutive_failures == 1
+        assert svc._catchup_next_retry_at == self._FIXED_NOW + timedelta(seconds=30)
+
+    @pytest.mark.asyncio
+    async def test_backoff_sequence_grows_and_caps(self):
+        """连续失败按 30s→5min→30min→2h 递增，封顶后保持 2h（不再无限增长）。"""
+        svc = _make_svc()
+        expected_seconds = [30, 300, 1800, 7200, 7200]
+        for i, delay in enumerate(expected_seconds, start=1):
+            await self._run_incomplete_catchup(svc)
+            assert svc._catchup_consecutive_failures == i
+            assert svc._catchup_next_retry_at == self._FIXED_NOW + timedelta(seconds=delay)
+
+    @pytest.mark.asyncio
+    async def test_complete_resets_backoff(self):
+        """补偿成功（is_complete）→ 失败计数与退避状态清零。"""
+        svc = _make_svc()
+        svc._catchup_consecutive_failures = 3
+        svc._catchup_next_retry_at = self._FIXED_NOW + timedelta(minutes=30)
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.sync_daily_market_snapshot = AsyncMock()
+        mock_tm_instance = MagicMock()
+        mock_tm_instance.update_progress.return_value = True
+        with (
+            patch("utils.scheduler_service.get_now", return_value=self._FIXED_NOW),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            patch("data.sync.base.SyncResult", return_value=SyncResult()),
+        ):
+            svc._persist_run_date_db = AsyncMock()
+            await svc._catchup_logic("task1", [date(2024, 6, 11)])
+
+        assert svc._last_update_date == "20240611"
+        assert svc._catchup_consecutive_failures == 0
+        assert svc._catchup_next_retry_at is None
+
+    @pytest.mark.asyncio
+    async def test_watermark_advance_resets_backoff(self):
+        """水位推进（日更成功写幂等键）→ 退避状态清零，后续新遗漏不受旧退避阻塞。"""
+        svc = _make_svc()
+        svc._catchup_consecutive_failures = 2
+        svc._catchup_next_retry_at = self._FIXED_NOW + timedelta(minutes=5)
+        svc._persist_run_date_db = AsyncMock()
+
+        await svc._mark_daily_update_done_db("20240615")
+
+        assert svc._catchup_consecutive_failures == 0
+        assert svc._catchup_next_retry_at is None
+
+    @pytest.mark.asyncio
+    async def test_backoff_gate_skips_watchdog_submission(self):
+        """退避窗口内（30 秒看门狗路径）不提交补偿任务 → 打断固定频率重试风暴。"""
+        svc = _make_svc()
+        svc._last_update_date = "20240610"
+        svc._catchup_consecutive_failures = 1
+        svc._catchup_next_retry_at = self._FIXED_NOW + timedelta(seconds=30)
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.trade_calendar = MagicMock()
+        mock_dp_instance.trade_calendar.get_trade_dates = AsyncMock(return_value=[date(2024, 6, 11)])
+        mock_tm_instance = MagicMock()
+        with (
+            patch("utils.scheduler_service.get_now", return_value=self._FIXED_NOW),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+        ):
+            await svc._catch_up_missed_updates()
+        mock_tm_instance.submit_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_backoff_elapsed_resumes_submission(self):
+        """退避窗口已过 → 看门狗路径恢复提交。"""
+        svc = _make_svc()
+        svc._last_update_date = "20240610"
+        svc._catchup_consecutive_failures = 1
+        svc._catchup_next_retry_at = self._FIXED_NOW - timedelta(seconds=1)
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.trade_calendar = MagicMock()
+        mock_dp_instance.trade_calendar.get_trade_dates = AsyncMock(return_value=[date(2024, 6, 10), date(2024, 6, 11)])
+        mock_tm_instance = MagicMock()
+        with (
+            patch("utils.scheduler_service.get_now", return_value=self._FIXED_NOW),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+        ):
+            await svc._catch_up_missed_updates()
+        mock_tm_instance.submit_task.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_misfire_path_bypasses_backoff(self):
+        """_on_job_missed 的 include_today=True 路径不受退避限制：misfire 为一次性事件
+        （每天每 job 至多一次），且对应「下一个 cron 时刻」重试，避免当天数据永久丢失。"""
+        svc = _make_svc()
+        svc._last_update_date = "20240613"
+        svc._catchup_consecutive_failures = 5
+        svc._catchup_next_retry_at = self._FIXED_NOW + timedelta(hours=2)
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.trade_calendar = MagicMock()
+        mock_dp_instance.trade_calendar.get_trade_dates = AsyncMock(return_value=[date(2024, 6, 13), date(2024, 6, 14)])
+        mock_tm_instance = MagicMock()
+        with (
+            patch("utils.scheduler_service.get_now", return_value=self._FIXED_NOW),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+        ):
+            await svc._catch_up_missed_updates(include_today=True)
+        mock_tm_instance.submit_task.assert_called_once()
+        kwargs = mock_tm_instance.submit_task.call_args.kwargs
+        assert kwargs["unique_key"] == "daily_sync_catchup"

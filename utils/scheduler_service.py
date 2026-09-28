@@ -38,6 +38,11 @@ _DB_KEY_AI_CONCEPT_REFRESH = "sched_last_ai_concept_refresh"
 # 无条件注册下列全部 job（nightly_prediction 与 AI 功能开关无关）。
 _REQUIRED_JOBS: frozenset[str] = frozenset({"nightly_prediction"})
 
+# D7-1/MAJOR-01: 补偿同步失败后的指数退避序列（秒）：30s → 5min → 30min → 2h。
+# 达到末档后保持 2h 封顶，避免持续性失败（积分权限不足 / 限流 / 数据源延迟发布）下
+# 30 秒看门狗无限固定频率重试——持续消耗 Tushare 配额并挤占任务面板 200 条历史。
+_CATCHUP_BACKOFF_SECONDS: tuple[int, ...] = (30, 300, 1800, 7200)
+
 
 from utils.singleton_registry import register_singleton
 
@@ -131,6 +136,11 @@ class SchedulerService:
             self._last_update_date = ConfigHandler.get_setting(_CFG_LAST_DAILY_UPDATE)
             self._last_pred_date = ConfigHandler.get_setting(_CFG_LAST_NIGHTLY_PREDICTION)
             self._last_ai_concept_date = ConfigHandler.get_setting(_CFG_LAST_AI_CONCEPT_REFRESH)
+            # D7-1/MAJOR-01: 补偿失败退避状态（进程内，与 _last_update_date 同生命周期：
+            # 重启即重置，不引入 DB schema 变更）。_catchup_next_retry_at 为绝对时刻
+            # （= 上次失败时间 + 当前档位退避），退避窗口内看门狗不再提交补偿。
+            self._catchup_consecutive_failures = 0
+            self._catchup_next_retry_at: datetime.datetime | None = None
             self._db_state_loaded = False
             # review01-A2-1: 业务 job 注册表（services/scheduled_jobs/ 提供 build_<job>_job），
             # SchedulerService 仅调度注册的 callable，不感知具体业务类。
@@ -181,6 +191,9 @@ class SchedulerService:
     async def _mark_daily_update_done_db(self, today_str: str):
         # REVIEW-06 TO-02: 内存侧同样单调（与 DB GREATEST 语义一致），防止并发下水位倒退。
         self._last_update_date = max(self._last_update_date or "", today_str)
+        # D7-1/MAJOR-01: 水位推进即"数据已到最新"，补偿退避状态随之清零——避免旧的持续失败
+        # 退避阻塞后续新出现的遗漏。日更成功与补偿成功两条路径均经本方法推进水位，故一处覆盖。
+        self._reset_catchup_backoff()
         await self._persist_run_date_db(_DB_KEY_DAILY_UPDATE, _CFG_LAST_DAILY_UPDATE, today_str)
 
     async def _mark_nightly_prediction_done_db(self, today_str: str):
@@ -536,6 +549,43 @@ class SchedulerService:
             return None
         return to_yyyymmdd_str(latest)
 
+    def _catchup_backoff_active(self) -> bool:
+        """D7-1/MAJOR-01: 退避窗口内（连续失败且未到下次重试时刻）返回 True。
+
+        进程内状态，无锁——读写在单线程事件循环内（看门狗协程与补偿任务协程），不跨线程。
+        """
+        return (
+            self._catchup_consecutive_failures > 0
+            and self._catchup_next_retry_at is not None
+            and get_now() < self._catchup_next_retry_at
+        )
+
+    def _record_catchup_failure(self) -> None:
+        """D7-1/MAJOR-01: 记录一次补偿失败，并按指数退避更新下次重试时刻。
+
+        序列 30s → 5min → 30min → 2h，达到末档后保持 2h 封顶（不再无限增长）。
+        """
+        self._catchup_consecutive_failures += 1
+        index = min(self._catchup_consecutive_failures - 1, len(_CATCHUP_BACKOFF_SECONDS) - 1)
+        delay_seconds = _CATCHUP_BACKOFF_SECONDS[index]
+        self._catchup_next_retry_at = get_now() + datetime.timedelta(seconds=delay_seconds)
+        logger.info(
+            "[Scheduler] 补偿连续失败 %d 次，退避 %d 秒后重试（下次重试：%s）",
+            self._catchup_consecutive_failures,
+            delay_seconds,
+            self._catchup_next_retry_at,
+        )
+
+    def _reset_catchup_backoff(self) -> None:
+        """D7-1/MAJOR-01: 补偿成功或水位推进后清零失败计数与退避状态。"""
+        if self._catchup_consecutive_failures:
+            logger.info(
+                "[Scheduler] 补偿退避状态清零（此前连续失败 %d 次）",
+                self._catchup_consecutive_failures,
+            )
+        self._catchup_consecutive_failures = 0
+        self._catchup_next_retry_at = None
+
     async def _catch_up_missed_updates(self, include_today: bool = False) -> None:
         """D6-1 启动/周期/misfire 补偿：检查自 _last_update_date 以来是否有遗漏交易日并回补。
 
@@ -546,6 +596,17 @@ class SchedulerService:
         宽限 ≥ 17:00，已收盘），此时今天也应回补，否则"当天永久跳过"依旧存在。
         幂等由补偿任务独立 unique_key 去重 + 同步层 check_data_exists 缓存跳过共同保证。
         """
+        # D7-1/MAJOR-01: 退避窗口内跳过重复提交，打断"失败→30s 后重试"的固定频率风暴。
+        # misfire 路径（include_today=True）不受退避限制：其一为每天每 job 至多一次的一次性
+        # 事件（非 30s 循环），其二对应报告所述"下一个 cron 时刻"重试，施加退避可能导致
+        # 当天数据永久丢失。此处可提前返回，亦省去退避期间的交易日历查询。
+        if not include_today and self._catchup_backoff_active():
+            logger.debug(
+                "[Scheduler] 补偿退避中（连续失败 %d 次），本次跳过提交，下次重试：%s",
+                self._catchup_consecutive_failures,
+                self._catchup_next_retry_at,
+            )
+            return
         if not self._last_update_date:
             # REVIEW-06 TO-01: 无基准（None 或空串，_persist_run_date 以空串表示无值）时不再静默
             # 早退——注释原称"首次运行由全量初始化路径负责"，但该路径并不写调度幂等键（唯一写入
@@ -642,6 +703,8 @@ class SchedulerService:
             "[Scheduler] Catch-up NOT complete (critical=%s), NOT marking done",
             sync_result.failed_critical_tables,
         )
+        # D7-1/MAJOR-01: 记录失败并退避，避免看门狗每 30 秒重复提交（消耗配额 + 刷屏任务面板）。
+        self._record_catchup_failure()
         return Message("sched_catchup_partial", {"days": total})
 
     async def _run_daily_update(self):
