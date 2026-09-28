@@ -288,6 +288,43 @@ CI 通过 `.github/workflows/ci_cd.yml` 的 `embedded-tests` job 自动运行（
 
 ---
 
+### 12. 运行期排障
+
+> 适用场景：应用可启动或可获取诊断产物，但出现崩溃、性能劣化、数据异常等运行期问题的定位。
+> 开发期常见问题（单测状态污染 / Ruff / Pyright 等）的「现象 → 原因 → 排查点」正本见 [CONTRIBUTING.md 排查典型问题](../../CONTRIBUTING.md#排查典型问题)，本节以引用方式指向该正本，不再复制其条目。
+
+#### 12.1 日志与崩溃产物位置
+
+应用日志统一落在 `<app data>/logs/`（真相源为 `utils/logger.py` 的 `LOG_DIR = <USER_DATA_ROOT>/logs`）：
+
+| 产物 | 位置 | 用途 |
+|------|------|------|
+| 全量日志 | `logs/app.log`（`RotatingFileHandler` 轮转） | 按时间线定位异常起点 |
+| 错误日志 | `logs/error.log` | 只看 ERROR 及以上，快速收敛范围 |
+| 最新日志 | `logs/latest.log` | 快速查看最近一轮运行 |
+| 诊断包 | `logs/diagnostics_<时间戳>_<随机>.zip` | `SystemDiagnosticsCollector.export()` 生成，含 `diagnostics_summary.json` 与 `app.log`/`error.log` 末 500 行（经 `DataSanitizer` 脱敏） |
+
+诊断包可从 设置 → 系统 → 导出诊断 触发（`ui/views/settings_tabs/system_tab.py`），或直接调用 `utils/diagnostics.py` 的 `SystemDiagnosticsCollector.export()`。
+
+#### 12.2 性能劣化三步排查
+
+按顺序执行，命中即停：
+
+1. **看 `PerfThreshold` 告警**：慢操作由 `@log_async_operation` / `@track_performance()` 按 `utils/log_decorators.py::PerfThreshold` 档位触发告警；先在 `app.log` 捞出超阈值的操作名与耗时，确认劣化落在哪一层（DAO / 外部网络 / AI 推理）。
+2. **`EXPLAIN` 定量**：若告警指向数据库（`base_dao` 的 `Slow Read`/`Slow Write`/`Slow UPSERT`），对涉及 SQL 执行 `EXPLAIN (ANALYZE, BUFFERS)`，核对是否缺索引 / 数据量过大 / N+1。
+3. **核对覆盖率**：确认劣化路径是否被测试覆盖，用 `scripts/check_diff_coverage.py`（diff coverage ≥ 80%）与 `scripts/check_per_file_coverage.py`（单文件 ≥ 80%）定位未覆盖分支；未覆盖的高耗时路径优先补测，避免劣化无回归兜底。
+
+#### 12.3 运行期「现象 → 原因 → 排查点」表
+
+| 现象 | 可能原因 | 排查点 |
+|------|---------|--------|
+| 应用启动即崩 / 打不开 | PG 数据目录损坏或维护锁冲突 | 先跑离线诊断 `sidecars/qtrading-pg-sidecar doctor`（流程见本文档第 9 章），退出码 40/50 分别对应损坏/锁冲突 |
+| 进程无栈静默退出 | 未捕获异常或原生扩展崩溃 | 查 `logs/error.log` 与 `logs/latest.log`；仍无线索则按 12.1 导出诊断包 |
+| 界面卡死 | 主循环被同步 IO/CPU 阻塞 | 在 `app.log` 搜超 `PerfThreshold` 的告警；核对 UI 事件是否经 `ThreadPoolManager.run_async()` 提交（R16） |
+| 数据库连接断开后操作持续失败 | PG 进程整体不可用，连接池无法自愈 | 显式调用 `CacheManager.init_db()` 重建引擎（不作自动重连）；生命周期契约见 [data-sync.md](../patterns/data-sync.md) |
+
+---
+
 ## 完成判定（canonical 入口）
 
 - 改动类型对应本文件某章的完整执行（如「7. 新增回测配置」），产物可运行

@@ -2479,6 +2479,7 @@ _DECISION_TREE_MERGED_IDS: dict[str, set[str]] = {
     "docs/patterns/config-quality-perf.md": {"performance", "config"},
     "docs/guides/testing.md": {"testing", "e2e-testing"},
     "docs/guides/ci-cd.md": {"ci-deps", "release"},
+    "docs/guides/how-to.md": {"embedded-pg", "maintenance"},
 }
 
 # 决策树元条目（非具体任务路由，承载「未列类型 → 按层选最接近入口」的兜底规则）。
