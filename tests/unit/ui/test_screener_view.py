@@ -68,21 +68,31 @@ class TestFormatCellValue:
         result = _format_cell_value("trade_date", "notadate")
         assert result == "notadate"
 
-    def test_volume_col_over_yi(self):
-        with patch("ui.views.screener_view.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: "亿" if key == "unit_yi" else key
-            result = _format_cell_value("vol", 2_000_000_000)
-            assert "亿" in result
-
-    def test_volume_col_over_wan(self):
-        with patch("ui.views.screener_view.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: "万" if key == "unit_wan" else key
+    def test_volume_col_uses_wanshou(self):
+        # CRITICAL-02: vol(手) 统一经元数据换算 → 万手（与详情框同源）
+        with patch("ui.components.unit_format.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, *a, **kw: key
             result = _format_cell_value("vol", 50_000)
-            assert "万" in result
+            assert result == "5.0unit_wanshou"
 
-    def test_volume_col_small(self):
-        result = _format_cell_value("vol", 9999)
-        assert "9,999" in result
+    def test_amount_col_uses_unit_metadata(self):
+        # CRITICAL-02: amount(千元) → 亿元（zh 口径；en 为 B，见 test_unit_format.py）
+        with patch("ui.components.unit_format.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, *a, **kw: key
+            result = _format_cell_value("amount", 5_000_000)
+            assert result == "50.00unit_yi"
+
+    def test_total_mv_col_uses_unit_metadata(self):
+        with patch("ui.components.unit_format.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, *a, **kw: key
+            result = _format_cell_value("total_mv", 1_000_000)
+            assert result == "100.0unit_yi"
+
+    def test_bool_col_maps_to_yes_no(self):
+        with patch("ui.components.unit_format.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, *a, **kw: key
+            assert _format_cell_value("is_tradable", True) == "common_yes"
+            assert _format_cell_value("is_tradable", False) == "common_no"
 
     def test_float_format_two_decimals(self):
         result = _format_cell_value("close", 12.3456)
@@ -125,23 +135,23 @@ class TestFormatCellValue:
 
     def test_t1_pct_positive(self):
         result = _format_cell_value("t1_pct", 1.23)
-        assert result == "+1.23"
+        assert result == "+1.23%"
 
     def test_t1_pct_negative(self):
         result = _format_cell_value("t1_pct", -1.23)
-        assert result == "-1.23"
+        assert result == "-1.23%"
 
     def test_t5_pct_zero(self):
         result = _format_cell_value("t5_pct", 0.0)
-        assert result == "0.00"
+        assert result == "0.00%"
 
     def test_alpha_positive(self):
         result = _format_cell_value("alpha", 5.67)
-        assert result == "+5.67"
+        assert result == "+5.67%"
 
     def test_alpha_negative(self):
         result = _format_cell_value("alpha", -5.67)
-        assert result == "-5.67"
+        assert result == "-5.67%"
 
 
 class TestHiddenColsContract:
