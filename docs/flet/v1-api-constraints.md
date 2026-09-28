@@ -46,7 +46,7 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 | 20 | 控件 update | 未挂载时 `control.update()` 静默返回 | 未挂载抛 `RuntimeError`（测试代码由 `conftest._v1_page_compat` fixture 兼容） | RuntimeError |
 | 21 | 窗口方法 | `page.window.destroy()`（同步） | `await page.window.destroy()`（V1 协程） | 运行期（RuntimeWarning: coroutine never awaited） |
 
-> **⚠️ 桌面关闭事件不可用 `page.on_close`**：`page.on_close` 在会话关闭/超时断开时触发，**非**用户点击窗口关闭按钮。桌面端关闭拦截必须用 `page.window.prevent_close = True` + `page.window.on_event`（监听 `ft.WindowEventType.CLOSE`），见 `main.py` 的窗口事件处理器。此为 V1 正确实现，非 V0 遗留。
+> **⚠️ 桌面关闭事件不可用 `page.on_close`**：`page.on_close` 在会话关闭/超时断开时触发，**非**用户点击窗口关闭按钮。桌面端关闭拦截必须用 `page.window.prevent_close = True` + `page.window.on_event`（监听 `ft.WindowEventType.CLOSE`），见 `app/application.py` 的窗口事件处理器。此为 V1 正确实现，非 V0 遗留。
 
 > **来源说明**：第 8 项（`src_base64` → `src`）与第 16 项（`delta_x` → `primary_delta`）来自 Flet 官方 issue #5238（V1 breaking changes 汇总）。
 
@@ -137,7 +137,7 @@ def MetricCard(label: str):
   - **不手动订阅**：声明式组件内禁止调用 `I18n.subscribe()` / `I18n.unsubscribe()` / `refresh_locale`。locale 由 View 层独立状态源（通常在根组件由 `use_state` 持有，通过 props/context 下发）驱动重渲染。
   - **VM 不感知 locale**：ViewModel state 不含 locale 字段；VM 只产出 i18n key 与 params（封装为 `Message(key, params)`），View 渲染时按当前 locale 解析：`I18n.get(msg.key, **msg.params)`。
   - **唯一 canonical 示例**见 [§5 ViewModel 消费](#5-viewmodel-消费mvvm-桥接) 中的 `ScreenerView`（`state.status` 为 `Message` 对象，View 渲染时调用 `I18n.get(state.status.key, **state.status.params)`）。
-- **响应式**：视图栅格经 `ResponsiveRow` + `AppStyles.COL_*` 预置配置统一消费（沿用 Flet 默认断点），客户端断点驱动布局。**不再**实现 `handle_resize` 鸭子分发，也无需根组件 `page.on_resize` 订阅。
+- **响应式**：视图栅格经 `ResponsiveRow` + `AppStyles.COL_*` 预置配置统一消费（沿用 Flet 默认断点），客户端断点驱动布局。**不再**实现 `handle_resize` 鸭子分发。`page.on_resize` **默认不订阅**；仅需控件级实时尺寸的局部组件（如 `ui/views/settings_tabs/tier_api_panel.py` 按宽度动态计算列表高度）可在 `use_effect` 内挂载 `page.on_resize`，且必须在 `cleanup` 中恢复挂载前的原处理器（链式调用 prev，避免覆盖其他订阅者）。
 - **下拉刷新**：options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化。`refresh_dropdown_options()` 工具函数已在 Phase R.4.1 删除（声明式下不再需要）。
 
 ### 5. ViewModel 消费（MVVM 桥接）

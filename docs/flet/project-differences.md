@@ -150,7 +150,7 @@ ft.use_effect(setup, dependencies=[], cleanup=cleanup)
 
 **背景**：PR #392 修复 `PaginatedTable` E2E 测试失败时定位的根因。
 
-**现象**：`ft.ListView(build_controls_on_demand=False)` 在视口高度为 0（E2E 环境中父容器布局尚未稳定）时，Flutter 引擎仍可能跳过子控件语义节点生成，导致 Playwright `get_by_text` 找不到行内文本、`click_row_by_text` 全策略失败。`build_controls_on_demand=True` 时更严重（视口为 0 时 Flutter 不构建任何子控件）。
+**现象**：`ft.ListView(build_controls_on_demand=False)` 在视口高度为 0（E2E 环境中父容器布局尚未稳定）时，Flutter 引擎仍可能跳过子控件语义节点生成，导致 Playwright `get_by_text` 找不到行内文本、`click_row` 定位失败。`build_controls_on_demand=True` 时更严重（视口为 0 时 Flutter 不构建任何子控件）。
 
 **根因**：Flutter ListView 的虚拟化机制依赖视口高度计算可见区域，视口高度为 0 时 `build_sliver_list` 不构建任何 child，语义节点（`flt-semantics`）也不生成。
 
@@ -215,13 +215,7 @@ return ft.Container(
 )
 ```
 
-**E2E 点击策略优先级**（见 `tests/e2e/pages.py:click_row_by_text`）：
-1. `flt-semantics[flt-tappable]` bounding_box 中心 → `page.mouse.click`（真实鼠标事件）
-2. `flt-semantics[role="button"]` bounding_box 中心 → `page.mouse.click`
-3. 文本 bounding_box 中心 → `page.mouse.click`
-4. `flt-semantics[flt-tappable]` → `click(force=True)`（合成事件降级）
-5. `flt-semantics[role="button"]` → `click(force=True)`
-6. 文本 → `click(force=True)`
+**E2E 行点击定位**（见 `tests/e2e/pages.py::click_row`）：`click_row` 经 `tests/e2e/helpers/anchor_page.py::AnchorPage.click` 按 anchor 的 `AnchorKind` 分派、定位 `bbox` 中心，并一律用 `page.mouse.click`（真实鼠标事件）触发；行 anchor `result_row` 为 `AnchorKind.COMPLEX`（GestureDetector 合并节点，标签落 textContent）。`locator.click(force=True)`（合成 DOM 事件）对 CanvasKit 不可靠，仅保留给 actionability 不稳定的 Dropdown 选项等场景。
 
 ### 4.8 Flet 布局嵌套中 expand=True 的传递性陷阱
 

@@ -98,7 +98,7 @@ python scripts/sync_e2e_fonts.py --force
 
 ### 3.5 CanvasKit 子目录变体与新渲染器资源（Flet V1 系列）
 
-> 背景：Flet 0.86.x 引入了 CanvasKit 子目录变体（`chromium/`、`experimental_webparagraph/`）与新渲染器资源（`skwasm`、`wimp`）。Windows 平台默认使用 `skwasm` 渲染器。E2E 拦截器需匹配这些新资源路径并从本地提供，否则请求被 abort → Flutter 引擎无法初始化 → E2E 卡死。
+> 背景：当前锁定的 Flet V1 系列引入了 CanvasKit 子目录变体（`chromium/`、`experimental_webparagraph/`）与新渲染器资源（`skwasm`、`wimp`）。Windows 平台默认使用 `skwasm` 渲染器。E2E 拦截器需匹配这些新资源路径并从本地提供，否则请求被 abort → Flutter 引擎无法初始化 → E2E 卡死。
 
 **升级 Flet 时需验证**：
 
@@ -113,7 +113,7 @@ python scripts/sync_e2e_fonts.py --force
 
 ### 3.6 RiveNative 资源验证（Flet V1 系列）
 
-> 背景：Flet 0.86.x 的 `main.dart.js` 硬编码了 `@rive-app/flutter-native-wasm` CDN 依赖（`rive_native.js` / `rive_native.wasm`）。该请求被 E2E 拦截器 abort 后会阻塞 Flutter 引擎初始化。E2E 需预先缓存 RiveNative 资源到 `tests/e2e/mock_assets/rive/`，拦截器按 `@rive-app/flutter-native-wasm` 关键字匹配并从本地 `rive/<subdir>/<filename>` 提供。
+> 背景：当前锁定的 Flet V1 系列的 `main.dart.js` 硬编码了 `@rive-app/flutter-native-wasm` CDN 依赖（`rive_native.js` / `rive_native.wasm`）。该请求被 E2E 拦截器 abort 后会阻塞 Flutter 引擎初始化。E2E 需预先缓存 RiveNative 资源到 `tests/e2e/mock_assets/rive/`，拦截器按 `@rive-app/flutter-native-wasm` 关键字匹配并从本地 `rive/<subdir>/<filename>` 提供。
 
 **升级 Flet 时需验证**：
 
@@ -124,7 +124,7 @@ python scripts/sync_e2e_fonts.py --force
 
 ### 3.7 COEP + PNA 死锁与浏览器启动参数（Flet V1 系列）
 
-> 背景：Flet 0.86.x 设置 `Cross-Origin-Embedder-Policy: require-corp` 响应头，导致跨域 CanvasKit 资源加载被阻止（`webglContexts=0`）。尝试用 Playwright `route.fulfill()` 移除 COEP 头又会触发 Private Network Access（PNA）检查，阻止 Flet WebSocket 连接（`ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS`）。两者形成死锁。
+> 背景：当前锁定的 Flet V1 系列设置 `Cross-Origin-Embedder-Policy: require-corp` 响应头，导致跨域 CanvasKit 资源加载被阻止（`webglContexts=0`）。尝试用 Playwright `route.fulfill()` 移除 COEP 头又会触发 Private Network Access（PNA）检查，阻止 Flet WebSocket 连接（`ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS`）。两者形成死锁。
 
 **解决方案**：[tests/e2e/conftest.py](../../tests/e2e/conftest.py) 的 `e2e_browser` fixture 在 `chromium.launch()` 中传入启动参数：
 
