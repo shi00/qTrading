@@ -1246,6 +1246,7 @@
     "db_upgrade_success_content": "数据库已成功升级到最新版本。",
     "db_upgrade_error_title": "升级失败",
     "db_upgrade_error_content": "数据库升级失败\n\n请查看日志文件或联系技术支持。",
+    "db_upgrade_error_manual_hint": "该错误无法通过重试解决（如数据库结构不兼容）。请查看日志定位原因，必要时导出诊断包并联系技术支持。",
     "exit_program": "退出程序",
     "retry_upgrade": "重试升级",
     "db_upgrade_migration": "执行数据库迁移...",

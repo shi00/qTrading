@@ -207,7 +207,10 @@ class StartupController:
                 exc_info=True,
             )
             self._transition(
-                StartupState.UPGRADE_FAILED, error="db_upgrade_failed", detail=DataSanitizer.sanitize_error(e)
+                StartupState.UPGRADE_FAILED,
+                error="db_upgrade_failed",
+                detail=DataSanitizer.sanitize_error(e),
+                log_dir_hint=resolve_embedded_pg_log_dir_hint(),
             )
 
     async def proceed_after_upgrade_success(self):
@@ -226,3 +229,29 @@ class StartupController:
     async def onboarding_complete(self):
         """Onboarding wizard finished: init services."""
         await self._init_services()
+
+
+def resolve_embedded_pg_log_dir_hint() -> str | None:
+    """解析 embedded PG 日志目录路径，供启动错误 UI 显示日志位置。
+
+    优先级（与 ``DatabaseStatusViewModel._resolve_log_dir`` 一致）：
+    1. ``AppConfig.embedded_pg_log_dir``（用户显式配置）
+    2. ``<platformdirs.user_data_dir>/postgres-logs``（embedded PG 默认日志目录）
+
+    解析失败时返回 ``None``（调用方不显示日志路径 / 降级为禁用「打开日志目录」）。
+    """
+    try:
+        from pathlib import Path
+
+        from utils.config_handler import ConfigHandler
+        from utils.config_models import AppConfig
+
+        config = AppConfig.model_validate(ConfigHandler.load_config())
+        if config.embedded_pg_log_dir:
+            return config.embedded_pg_log_dir
+        import platformdirs
+
+        return str(Path(platformdirs.user_data_dir("qTrading")) / "postgres-logs")
+    except Exception as e:
+        logger.warning("[Startup] failed to resolve embedded PG log dir hint: %s", e, exc_info=True)
+        return None

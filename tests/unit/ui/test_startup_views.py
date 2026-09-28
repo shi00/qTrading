@@ -14,13 +14,14 @@
 # 测试行为由测试用例本身验证。
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import flet as ft
 import pytest
 
 from app.bootstrap import EmbeddedPgStartupScenario
 from app.startup_controller import StartupContext, StartupController, StartupState
+from ui.i18n import I18n
 from ui.startup_views import (
     StartupView,
     _StartupBridge,
@@ -31,7 +32,9 @@ from ui.startup_views import (
     _build_upgrade_failed_dialog,
     _build_upgrade_in_progress_dialog,
     _build_upgrade_success_dialog,
+    _export_startup_diagnostics,
     _get_localized_detail,
+    _is_upgrade_error_retryable,
 )
 
 pytestmark = pytest.mark.unit
@@ -769,6 +772,170 @@ def test_build_upgrade_failed_dialog(mock_i18n):
     on_exit.assert_called_once()
     _trigger_click(btn_retry)
     on_retry.assert_called_once()
+
+
+# --- MAJOR-02: 升级失败对话框 detail 展示 + 日志目录 + 诊断包 + 可重试判定 ---
+
+
+def test_is_upgrade_error_retryable_returns_true_by_default():
+    """确定性集合外/空/无法分类的 detail → 保守视为可重试。"""
+    assert _is_upgrade_error_retryable(None) is True
+    assert _is_upgrade_error_retryable("") is True
+    assert _is_upgrade_error_retryable("connection refused") is True
+    assert _is_upgrade_error_retryable("boom unknown") is True
+
+
+def test_is_upgrade_error_retryable_false_for_schema_incompatible():
+    """schema 版本不兼容 (orphaned_revision) → 不可重试。"""
+    assert _is_upgrade_error_retryable("Can't locate revision identified by abc") is False
+
+
+def test_is_upgrade_error_retryable_classify_failure_returns_true():
+    """分类失败 → 保守返回可重试（不误夺重试入口）。"""
+    with patch("utils.error_classifier.classify_error", side_effect=RuntimeError("boom")):
+        assert _is_upgrade_error_retryable("some detail") is True
+
+
+def test_build_upgrade_failed_dialog_shows_sanitized_detail(mock_i18n):
+    """MAJOR-02 DoD: 对话框含脱敏后的 detail 摘要，原始 token 不得泄漏 (R9)。"""
+    detail = "db upgrade boom token=sk-abcdef1234567890"
+    with patch("ui.startup_views.I18n", mock_i18n):
+        dialog = _build_upgrade_failed_dialog(MagicMock(), MagicMock(), detail=detail)
+    texts = [c.value for c in _find_controls(dialog, ft.Text) if isinstance(c.value, str)]
+    joined = "\n".join(texts)
+    assert "boom" in joined
+    assert "sk-abcdef1234567890" not in joined, "未脱敏的 token 不得渲染到 UI (R9)"
+    assert "***" in joined
+
+
+def test_build_upgrade_failed_dialog_truncates_long_detail(mock_i18n):
+    """超长 detail 截断 (<=200)，避免撑爆对话框。"""
+    long_detail = "boom " + "x" * 500
+    with patch("ui.startup_views.I18n", mock_i18n):
+        dialog = _build_upgrade_failed_dialog(MagicMock(), MagicMock(), detail=long_detail)
+    texts = [c.value for c in _find_controls(dialog, ft.Text) if isinstance(c.value, str)]
+    assert all(len(t) <= 200 for t in texts)
+
+
+def test_build_upgrade_failed_dialog_none_detail_does_not_crash(mock_i18n):
+    """detail 为 None → 不渲染 detail 文本，不崩溃。"""
+    with patch("ui.startup_views.I18n", mock_i18n):
+        dialog = _build_upgrade_failed_dialog(MagicMock(), MagicMock(), detail=None)
+    assert isinstance(dialog, ft.AlertDialog)
+
+
+def test_build_upgrade_failed_dialog_has_log_dir_and_callbacks(mock_i18n):
+    """MAJOR-02 DoD: 含日志路径文案 + 「打开日志目录」+「导出诊断包」按钮，回调可触发。"""
+    on_open = MagicMock()
+    on_export = MagicMock()
+    with patch("ui.startup_views.I18n", mock_i18n):
+        dialog = _build_upgrade_failed_dialog(
+            MagicMock(),
+            MagicMock(),
+            detail="boom",
+            log_dir_hint="/var/postgres-logs",
+            on_open_log_dir=on_open,
+            on_export_diagnostics=on_export,
+        )
+    # 「请查看日志」文案带日志路径 (i18n key 含 path 占位)
+    assert "startup_embedded_pg_log_dir_hint" in repr(dialog)
+    btn_open = _find_button_by_text(dialog, "db_status_open_log_dir")
+    assert isinstance(btn_open, ft.TextButton), "升级失败对话框必须含「打开日志目录」按钮"
+    assert btn_open.disabled is False
+    _trigger_click(btn_open)
+    on_open.assert_called_once_with(ANY)
+
+    btn_export = _find_button_by_text(dialog, "settings_diagnostics_btn")
+    assert isinstance(btn_export, ft.TextButton), "升级失败对话框必须含「导出诊断包」按钮"
+    _trigger_click(btn_export)
+    on_export.assert_called_once_with(ANY)
+
+
+def test_build_upgrade_failed_dialog_open_log_dir_disabled_without_path(mock_i18n):
+    """log_dir_hint 为 None → 「打开日志目录」按钮降级为禁用，不崩溃。"""
+    with patch("ui.startup_views.I18n", mock_i18n):
+        dialog = _build_upgrade_failed_dialog(
+            MagicMock(),
+            MagicMock(),
+            detail="boom",
+            log_dir_hint=None,
+            on_open_log_dir=MagicMock(),
+        )
+    btn_open = _find_button_by_text(dialog, "db_status_open_log_dir")
+    assert isinstance(btn_open, ft.TextButton)
+    assert btn_open.disabled is True
+
+
+def test_build_upgrade_failed_dialog_non_retryable_replaces_retry(mock_i18n):
+    """确定性错误 (schema 不兼容) → 无「重试升级」按钮，改显示处理指引。"""
+    with patch("ui.startup_views.I18n", mock_i18n):
+        dialog = _build_upgrade_failed_dialog(
+            MagicMock(), MagicMock(), detail="Can't locate revision identified by abc"
+        )
+    assert _find_button_by_text(dialog, "retry_upgrade") is None
+    assert "db_upgrade_error_manual_hint" in repr(dialog)
+
+
+def test_build_upgrade_failed_dialog_retryable_keeps_retry(mock_i18n):
+    """可重试错误 → 保留「重试升级」按钮，不显示处理指引。"""
+    on_retry = MagicMock()
+    with patch("ui.startup_views.I18n", mock_i18n):
+        dialog = _build_upgrade_failed_dialog(MagicMock(), on_retry, detail="connection refused")
+    btn_retry = _find_button_by_text(dialog, "retry_upgrade")
+    assert isinstance(btn_retry, ft.Button)
+    _trigger_click(btn_retry)
+    on_retry.assert_called_once_with(ANY)
+    assert "db_upgrade_error_manual_hint" not in repr(dialog)
+
+
+@pytest.mark.asyncio
+async def test_export_startup_diagnostics_success_toasts():
+    """诊断包导出成功 → 经 toast 反馈 (复用 SystemDiagnosticsCollector)。"""
+    with (
+        patch(
+            "utils.diagnostics.SystemDiagnosticsCollector.export",
+            new_callable=AsyncMock,
+            return_value="/tmp/diag.zip",
+        ),
+        patch("ui.startup_views._get_page", return_value=MagicMock()),
+        patch("ui.startup_views.toast_show") as mock_toast,
+    ):
+        await _export_startup_diagnostics()
+    args, kwargs = mock_toast.call_args
+    assert kwargs["toast_type"] == "success"
+    assert args[1] == I18n.get("settings_diagnostics_success").format(path="/tmp/diag.zip")
+
+
+@pytest.mark.asyncio
+async def test_export_startup_diagnostics_failure_toasts_error():
+    """诊断包导出失败 → 记录脱敏错误 + toast 失败提示，不抛出。"""
+    with (
+        patch(
+            "utils.diagnostics.SystemDiagnosticsCollector.export",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("export boom"),
+        ),
+        patch("ui.startup_views._get_page", return_value=MagicMock()),
+        patch("ui.startup_views.toast_show") as mock_toast,
+    ):
+        await _export_startup_diagnostics()
+    args, kwargs = mock_toast.call_args
+    assert kwargs["toast_type"] == "error"
+    assert args[1] == I18n.get("settings_diagnostics_failed")
+
+
+@pytest.mark.asyncio
+async def test_export_startup_diagnostics_propagates_cancel():
+    """R2: 诊断包导出被取消时 CancelledError 必须传播。"""
+    with patch(
+        "utils.diagnostics.SystemDiagnosticsCollector.export",
+        new_callable=AsyncMock,
+        side_effect=asyncio.CancelledError(),
+    ) as mock_export:
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await _export_startup_diagnostics()
+    assert isinstance(exc_info.value, asyncio.CancelledError)
+    assert mock_export.await_count == 1
 
 
 def test_build_error_view_db_init_failed(mock_i18n):

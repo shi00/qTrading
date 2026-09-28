@@ -151,7 +151,7 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
         """
         path = self._state.data_dir
         if path is not None:
-            self._open_path_in_file_manager(path)
+            self.open_path_in_file_manager(path)
 
     def open_log_dir(self) -> None:
         """打开日志目录 (subprocess.Popen 非阻塞)。
@@ -161,7 +161,7 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
         """
         path = self._state.log_dir
         if path is not None:
-            self._open_path_in_file_manager(path)
+            self.open_path_in_file_manager(path)
 
     def _resolve_log_dir(self, config: AppConfig) -> str:
         """从 AppConfig 解析 log_dir，空则用 platformdirs 默认 <app data>/postgres-logs。
@@ -175,15 +175,23 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
         app_data = Path(platformdirs.user_data_dir("qTrading"))
         return str(app_data / "postgres-logs")
 
-    def _open_path_in_file_manager(self, path: str) -> None:
+    @staticmethod
+    def open_path_in_file_manager(path: str) -> None:
         """跨平台打开文件管理器 (subprocess.Popen 非阻塞)。
+
+        可被其他启动期 UI 复用 (如 StartupView 升级失败对话框「打开日志目录」)。
 
         Security:
         - 路径存在性校验 (Path.exists)，不存在时不调用 Popen
-        - 路径白名单: 仅由 open_data_dir/open_log_dir 调用，路径来自 state (AppConfig/doctor)
+        - 路径白名单: 仅由 open_data_dir/open_log_dir 或启动期解析得到的目录调用，
+          路径来自 state (AppConfig/doctor)，不接受用户直接输入
+        - 日志中的路径经 DataSanitizer 脱敏 (R9，路径可能含用户名等信息)
         """
         if not Path(path).exists():
-            logger.warning("[DatabaseStatusVM] path does not exist, skip opening: %s", path)
+            logger.warning(
+                "[DatabaseStatusVM] path does not exist, skip opening: %s",
+                DataSanitizer.sanitize_error(path),
+            )
             return
         system = platform.system()
         cmd_args = _PLATFORM_FILE_MANAGER.get(system)
