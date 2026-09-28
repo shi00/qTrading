@@ -110,8 +110,8 @@ class PaginationSortingMixin:
     ) -> tuple[tuple[ScreenerRow, ...], tuple[ScreenerRow, ...], tuple[ScreenerRow, ...]]:
         """将当前页行按 ai_status 拆为 (recommended, excluded, failed) 三区 (D7-3).
 
-        - ai_status == "analyzed"   → recommended (AI 推荐)
-        - ai_status == "rejected"   → excluded (AI 已排除)
+        - ai_status == "analyzed"   → recommended (AI 已分析, 评分 > 0)
+        - ai_status == "rejected"   → excluded (AI 已分析, 评分 = 0)
         - 其余所有值 (failed/skipped/ai_unavailable/policy_not_acknowledged/缺失)
           一律归入 failed, 保证 current_page_rows 行零丢失 (D7-3 对抗检视 ROE-1).
         """

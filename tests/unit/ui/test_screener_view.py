@@ -15,14 +15,17 @@ import datetime
 from types import MappingProxyType
 from unittest.mock import MagicMock, patch
 
+import flet as ft
 import pandas as pd
 import pytest
 
+from ui.theme import AppColors
 from ui.viewmodels.screener_view_model import ScreenerRow, ScreenerViewModel, StrategyDepRow
 from ui.views.screener_view import (
     _COLUMN_WIDTHS,
     _COVERAGE_GAP_RATIO,
     _HIDDEN_COLS,
+    _SECTION_META,
     _build_page_size_options,
     _build_strategy_options,
     _build_table_data,
@@ -170,6 +173,29 @@ class TestHiddenColsContract:
     def test_is_delisting_hidden(self):
         """G2: 内部退市过滤列（is_st 同组）不得渲染为结果表裸列。"""
         assert "is_delisting" in _HIDDEN_COLS
+
+
+class TestSectionMetaNeutral:
+    """CRITICAL-01: 三分区标题中性化 — 分区标题只表达 AI 处理状态, 不作投资判断。
+
+    analyzed(评分>0) 分区原用「AI 推荐」+ SUCCESS 对勾, 会被误读为买入建议;
+    现改中性图标/中性色, 投资判断交由每行 ai_score 数值承载 (不依赖分区颜色暗示)。
+    """
+
+    def test_recommended_section_uses_neutral_icon_and_color(self):
+        meta = {m[3]: m for m in _SECTION_META}
+        assert meta["recommended"][0] == "screener_section_recommended"
+        assert meta["recommended"][1] != ft.Icons.CHECK_CIRCLE
+        assert meta["recommended"][2] == AppColors.TEXT_SECONDARY
+        assert meta["recommended"][2] != AppColors.SUCCESS
+
+    def test_section_order_and_labels_unchanged(self):
+        assert [m[0] for m in _SECTION_META] == [
+            "screener_section_recommended",
+            "screener_section_excluded",
+            "screener_section_failed",
+        ]
+        assert [m[3] for m in _SECTION_META] == ["recommended", "excluded", "failed"]
 
 
 class TestBuildTableData:

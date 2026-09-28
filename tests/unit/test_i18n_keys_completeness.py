@@ -109,6 +109,30 @@ class TestI18nKeysCompleteness(unittest.TestCase):
             f"Keys in en_US but missing from zh_CN: {sorted(missing_in_zh)[:20]}",
         )
 
+    def test_screener_section_titles_are_neutral(self):
+        """CRITICAL-01: 结果区三分区标题不得含投资判断语义 (推荐/看好/买入 等)。
+
+        分区标题只应表达 AI 处理状态 (是否分析 / 评分), 不得把内部状态表述成买入建议,
+        否则用户会据分区标题误判 AI 给了买入结论 (投资判断交由每行 ai_score 数值承载)。
+        """
+        forbidden = {
+            "zh_CN": ("推荐", "看好", "买入", "建议买", "值得买"),
+            "en_US": ("recommend", "bullish", "buy", "outperform", "overweight"),
+        }
+        for locale, words in forbidden.items():
+            with open(self.LOCALES_DIR / locale / "strings.json", encoding="utf-8") as f:
+                data = json.load(f)
+            for key, value in data.items():
+                if not key.startswith("screener_section_"):
+                    continue
+                lowered = value.lower()
+                for word in words:
+                    self.assertNotIn(
+                        word,
+                        lowered,
+                        f"{locale} {key} 分区标题含投资判断语义 '{word}': {value!r}",
+                    )
+
     def test_data_dictionary_i18n_keys_exist(self):
         from data.data_dictionary import TABLE_DEFINITIONS, column_i18n_key, columns_of
 
