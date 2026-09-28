@@ -67,6 +67,9 @@
 30. 人工评审红线自查清单一致性检查（H2）：CLAUDE.md「人工评审红线可执行自查清单」生成区块须等于
    redlines.yml `self_check` 字段渲染结果，且该字段声明时须为非空字符串列表——把需人工评审红线的
    「尤须 AI 自查」（态度式要求）变为可勾选判据（见 check_claude_self_check_sync()）。
+31. 非注册单例清单守卫检查（M1）：生产代码类 docstring 自述为「非注册单例/单例豁免」者须登记在
+   docs/architecture/singleton-lifecycle.md 的「非注册单例」表；表内类名亦须在生产代码中存在，
+   防「代码指向文档但文档零命中」的指针落空与幽灵条目。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
@@ -3663,6 +3666,75 @@ def check_singleton_count_prose() -> list[str]:
     return errors
 
 
+# 非注册单例清单守卫（M1）：代码 docstring 自述为「非注册单例/单例豁免」的类，须登记在
+# singleton-lifecycle.md 的「非注册单例」表；表内类名亦须在生产代码中存在（防幽灵条目）。
+_NON_REGISTERED_SINGLETON_MARKER = re.compile(r"非注册单例|单例豁免")
+# 生产层扫描根（不含 tests/scripts，排除测试夹具与门禁脚本自身引用造成的误报）
+_NON_REGISTERED_SINGLETON_CODE_ROOT = ROOT
+_NON_REGISTERED_SINGLETON_CODE_DIRS = ("data", "services", "strategies", "utils", "ui", "core", "app")
+
+
+def check_non_registered_singleton_doc() -> list[str]:
+    """检查项 31：非注册单例清单散文守卫（M1）。
+
+    代码 docstring 常自述「属于非注册单例，详见 docs/architecture/singleton-lifecycle.md」，
+    但该文档 grep 零命中时指针落空、R15 人工评审对照基准漏项。本守卫做双向校对：
+    - 生产代码类 docstring 含「非注册单例/单例豁免」标记者，须已登记在「非注册单例」表；
+    - 表内登记的类名须在生产代码中真实存在（幽灵条目报错）。
+    含空转守护：扫描不到任何标记即报错，避免路径/标记词变更后门禁静默失效。
+    """
+    errors: list[str] = []
+    try:
+        content = SINGLETON_LIFECYCLE_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return [f"单例注册清单文档不存在: {SINGLETON_LIFECYCLE_PATH}"]
+
+    if "**非注册单例" not in content:
+        return [f"{SINGLETON_LIFECYCLE_PATH.name}: 未找到「**非注册单例」章节标题"]
+
+    section = content.split("**非注册单例", 1)[1].split("**非单例服务", 1)[0]
+    documented = {m.group(1) for m in re.finditer(r"^\|\s*`(\w+)`", section, flags=re.M)}
+
+    all_classes: set[str] = set()
+    declared: dict[str, str] = {}
+    for dir_name in _NON_REGISTERED_SINGLETON_CODE_DIRS:
+        dir_path = _NON_REGISTERED_SINGLETON_CODE_ROOT / dir_name
+        if not dir_path.is_dir():
+            continue
+        for py in dir_path.rglob("*.py"):
+            try:
+                tree = ast.parse(py.read_text(encoding="utf-8"))
+            except (OSError, SyntaxError, ValueError):
+                # 无法读取/解析的源文件跳过（EncodingError 为 ValueError 子类）
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    all_classes.add(node.name)
+                    if _NON_REGISTERED_SINGLETON_MARKER.search(ast.get_docstring(node) or ""):
+                        declared[node.name] = py.relative_to(_NON_REGISTERED_SINGLETON_CODE_ROOT).as_posix()
+
+    if not declared:
+        errors.append(
+            "非注册单例守卫: 生产代码中未检测到任何「非注册单例/单例豁免」自述标记"
+            "（扫描路径或标记词变更时勿让本门禁空转）"
+        )
+        return errors
+
+    for name, rel in sorted(declared.items()):
+        if name not in documented:
+            errors.append(
+                f"非注册单例守卫: {rel} 的 `{name}` 自述为非注册单例，"
+                f"但 {SINGLETON_LIFECYCLE_PATH.name}「非注册单例」表未登记"
+            )
+    for name in sorted(documented):
+        if name not in all_classes:
+            errors.append(
+                f"非注册单例守卫: {SINGLETON_LIFECYCLE_PATH.name}「非注册单例」表登记的 `{name}` "
+                f"在生产代码中不存在（幽灵条目）"
+            )
+    return errors
+
+
 # ADR supersede 双向链守卫（盲2）：ADR 头元数据中的 supersedes 与 superseded-by 声明须互相印证。
 # 提取声明（收窄匹配避免解释性引用误报，如 ADR-0002 `Supersedes: CONTRIBUTING.md...（3b 由 ADR-0003 单独推翻）`）：
 #   - sup 行：`> Partial Supersedes: ADR-0003 ...` / `> Supersedes: ADR-0002 ...`
@@ -4055,6 +4127,7 @@ def main() -> int:
     all_errors.extend(check_exception_count_prose())  # L1：「现存 N 条 R1 例外」数量守卫
     # 盲1：注册单例散文数量守卫 + 盲2：ADR supersede 双向链守卫（文档复检指标盲区治理）
     all_errors.extend(check_singleton_count_prose())  # 盲1：散文 N vs 表格行数
+    all_errors.extend(check_non_registered_singleton_doc())  # M1：非注册单例清单双向校验
     all_errors.extend(check_adr_supersede_chain())  # 盲2：ADR supersede 双向链对称性
     all_errors.extend(check_governance_id_dual_meaning())  # GOV-06：治理 ID 同名异义（双义已清零，翻转 ERROR）
     # L7：evals 样例目录「当前 case 文件」列与实际 case 文件双向一致（新增 case 漏登记 README 即报错）
@@ -4076,7 +4149,7 @@ def main() -> int:
         "规则集变更日志版本一致 / ADR 索引完整性 / 脚本索引完整性 / 策略描述动态一致性 / "
         "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫 / "
         "注册单例散文数量守卫 / ADR supersede 双向链守卫 / "
-        "canonical section 章节存在性 / evals 样例目录索引一致性）"
+        "canonical section 章节存在性 / evals 样例目录索引一致性 / 非注册单例清单守卫）"
     )
     return 0
 
