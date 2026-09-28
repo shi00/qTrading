@@ -1910,6 +1910,8 @@ def check_canonical_topics_consistency() -> list[str]:
     3. id 唯一。
     4. canonical 路径在仓库中真实存在。
     5. workflow 路径（若存在）在仓库中真实存在。
+    6. section（若存在）在 canonical 文档内存在同名标题（M4）：章节改名/删除会静默断路由，
+       故以 `_heading_matches_section` 复用书名号引用的标题归一化逻辑（含「：」前缀与英文括注）。
     """
     errors: list[str] = []
 
@@ -1955,8 +1957,10 @@ def check_canonical_topics_consistency() -> list[str]:
 
         # canonical 路径存在性
         canonical = entry.get("canonical")
+        canonical_path: Path | None = None
         if isinstance(canonical, str):
-            if not (ROOT / canonical).exists():
+            canonical_path = ROOT / canonical
+            if not canonical_path.exists():
                 errors.append(f"topics[{idx}] canonical 路径不存在: {canonical}")
         elif canonical is not None:
             errors.append(f"topics[{idx}] canonical 应为 str, 实际 {type(canonical).__name__}")
@@ -1968,6 +1972,21 @@ def check_canonical_topics_consistency() -> list[str]:
                 errors.append(f"topics[{idx}] workflow 路径不存在: {workflow}")
         elif workflow is not None:
             errors.append(f"topics[{idx}] workflow 应为 str, 实际 {type(workflow).__name__}")
+
+        # section 存在性（可选）：canonical 文档内必须存在同名标题，否则章节改名静默断路由（M4）
+        section = entry.get("section")
+        if isinstance(section, str):
+            # 仅当 canonical 为真实文件时才读取；缺失/非文件已由上方存在性断言或受检范围门禁兜底
+            if canonical_path is not None and canonical_path.is_file():
+                if not _heading_matches_section(
+                    _extract_heading_texts(canonical_path.read_text(encoding="utf-8")), section
+                ):
+                    errors.append(
+                        f"topics[{idx}] section 章节不存在: '{section}'（canonical {canonical} 内无同名标题，"
+                        f"章节改名将静默断路由，请同步 canonical-topics.yml）"
+                    )
+        elif section is not None:
+            errors.append(f"topics[{idx}] section 应为 str, 实际 {type(section).__name__}")
 
     return errors
 
@@ -3764,13 +3783,21 @@ def _strip_english_suffix(heading: str) -> str:
 # 根目录文件本身由 `ROOT / raw_path` 首查覆盖，无需重复列出）。
 
 
-def _has_guillemet_heading(target: Path, section: str) -> bool:
-    """目标文档是否存在与章节引用同名的标题（含「：」前缀修饰与英文括注归一化）。"""
-    headings = _extract_heading_texts(target.read_text(encoding="utf-8"))
+def _heading_matches_section(headings: set[str], section: str) -> bool:
+    """标题集合中是否存在与章节引用同名的标题（含「：」前缀修饰与英文括注归一化）。
+
+    同时供书名号章节引用门禁（GDR-13）与 canonical-topics.yml 的 `section` 字段门禁（M4）复用，
+    避免两处各写一套匹配规则导致口径漂移。
+    """
     if any(h == section or h.endswith(f"：{section}") for h in headings):
         return True
     normalized = {_strip_english_suffix(h) for h in headings}
     return any(h == section or h.endswith(f"：{section}") for h in normalized)
+
+
+def _has_guillemet_heading(target: Path, section: str) -> bool:
+    """目标文档是否存在与章节引用同名的标题（含「：」前缀修饰与英文括注归一化）。"""
+    return _heading_matches_section(_extract_heading_texts(target.read_text(encoding="utf-8")), section)
 
 
 def _resolve_bare_doc_name(raw_path: str) -> list[Path]:
@@ -3864,6 +3891,61 @@ def check_strategy_desc_dynamic_consistency() -> list[str]:
     return errors
 
 
+# --- L7: evals 样例目录「当前 case 文件」列与实际文件一致性 ---
+# docs/reviews/evals/README.md 的「样例目录」表以「当前 case 文件」列登记每个类别目录下的
+# 样例文件，README 自述「新增 case 必须同步改本 README」，但此前无门禁守护：追加 case-002.md
+# 而漏登记 README（或登记了不存在的文件）均无报警。本检查双向断言二者一致。
+EVALS_README_PATH = ROOT / "docs" / "reviews" / "evals" / "README.md"
+# 「样例目录」表内仅本表使用 `./<相对路径>` 形式的链接（其余链接均为 `../` 跨目录引用或纯文本）。
+_EVALS_README_LINK_PATTERN = re.compile(r"\]\(\./([^)]+)\)")
+
+
+def check_evals_case_index_consistency() -> list[str]:
+    """检查项 22：evals 样例目录索引与实际 case 文件一致性（L7）。
+
+    解析 docs/reviews/evals/README.md「样例目录」表的相对链接，得到每个类别目录（以 `/` 结尾）
+    与登记的 case 文件集，双向断言：目录内 `case-*.md` 实际文件集 == README 登记集。
+    含空转守护：抽不到任何类别目录/case 文件即报错（而非静默通过），防止 README 表结构变更后
+    本检查退化为无操作。
+    """
+    errors: list[str] = []
+
+    if not EVALS_README_PATH.exists():
+        errors.append(f"evals 索引一致性: README 不存在: {EVALS_README_PATH}")
+        return errors
+
+    evals_dir = EVALS_README_PATH.parent
+    declared: dict[str, set[str]] = {}
+    for line in EVALS_README_PATH.read_text(encoding="utf-8").splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        for m in _EVALS_README_LINK_PATTERN.finditer(line):
+            target = m.group(1)
+            if target.endswith("/"):
+                declared.setdefault(target.rstrip("/"), set())
+            elif "/" in target and target.endswith(".md"):
+                declared.setdefault(target.rsplit("/", 1)[0], set()).add(target)
+
+    if not declared:
+        errors.append(
+            "evals 索引一致性: README「样例目录」表未解析到任何类别目录/case 文件链接"
+            "（检查格式是否变更，勿让本门禁空转）"
+        )
+        return errors
+
+    for rel_dir, declared_files in sorted(declared.items()):
+        dir_path = evals_dir / rel_dir
+        if not dir_path.is_dir():
+            errors.append(f"evals 索引一致性: README 登记的类别目录不存在: {rel_dir}/")
+            continue
+        actual = {f"{rel_dir}/{p.name}" for p in dir_path.glob("case-*.md") if p.is_file()}
+        for missing in sorted(declared_files - actual):
+            errors.append(f"evals 索引一致性: README 登记了不存在的样例文件: {missing}")
+        for unregistered in sorted(actual - declared_files):
+            errors.append(f"evals 索引一致性: 样例目录存在未在 README「样例目录」表登记的 case 文件: {unregistered}")
+    return errors
+
+
 def main() -> int:
     """运行全部检查，返回退出码。"""
     all_errors: list[str] = []
@@ -3939,6 +4021,8 @@ def main() -> int:
     all_errors.extend(check_singleton_count_prose())  # 盲1：散文 N vs 表格行数
     all_errors.extend(check_adr_supersede_chain())  # 盲2：ADR supersede 双向链对称性
     all_errors.extend(check_governance_id_dual_meaning())  # GOV-06：治理 ID 同名异义（双义已清零，翻转 ERROR）
+    # L7：evals 样例目录「当前 case 文件」列与实际 case 文件双向一致（新增 case 漏登记 README 即报错）
+    all_errors.extend(check_evals_case_index_consistency())
 
     if all_errors:
         print("[FAIL] 文档一致性检查失败：", file=sys.stderr)
@@ -3955,7 +4039,8 @@ def main() -> int:
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
         "规则集变更日志版本一致 / ADR 索引完整性 / 脚本索引完整性 / 策略描述动态一致性 / "
         "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫 / "
-        "注册单例散文数量守卫 / ADR supersede 双向链守卫）"
+        "注册单例散文数量守卫 / ADR supersede 双向链守卫 / "
+        "canonical section 章节存在性 / evals 样例目录索引一致性）"
     )
     return 0
 
