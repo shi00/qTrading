@@ -1,6 +1,6 @@
 """ui/components/news_feed.py 声明式契约守护测试 (Phase B.2).
 
-业务逻辑（情感检测/tag 翻译）由本文件纯函数测试覆盖。
+业务逻辑（情感着色/tag 翻译）由本文件纯函数测试覆盖。
 View 层测试聚焦于契约守护（grep 检查禁止的命令式模式），
 参照 test_settings_widgets.py 模式。
 """
@@ -16,6 +16,7 @@ from unittest.mock import patch
 import flet as ft
 import pytest
 
+from ui.theme import AppColors
 from ui.viewmodels.home_view_model import NewsRow
 
 pytestmark = pytest.mark.unit
@@ -129,256 +130,67 @@ class TestNewsFeedContract:
 
 
 # ---------------------------------------------------------------------------
-# Pure function tests: _detect_sentiment
+# Pure function tests: _sentiment_style (MINOR-02)
 # ---------------------------------------------------------------------------
 
 
-class TestDetectSentiment:
-    """Tests for sentiment detection via word-boundary matching (UI-M2)."""
+class TestSentimentStyle:
+    """_sentiment_style: 归一入库 market_news.sentiment 值.
 
-    def test_detect_sentiment_positive(self):
-        from ui.components.news_feed import _detect_sentiment
+    大小写不敏感（DB 混用 Positive/positive）；None/空白/未知 → neutral
+    （R21：缺失不伪装、不做本地关键词猜测）。
+    """
 
-        assert _detect_sentiment("Stock surge on rally") == "positive"
+    def test_none_is_neutral(self):
+        from ui.components.news_feed import _sentiment_style
 
-    def test_detect_sentiment_negative(self):
-        from ui.components.news_feed import _detect_sentiment
+        assert _sentiment_style(None) == "neutral"
 
-        assert _detect_sentiment("Market plunge and crash") == "negative"
+    def test_empty_is_neutral(self):
+        from ui.components.news_feed import _sentiment_style
 
-    def test_detect_sentiment_neutral(self):
-        from ui.components.news_feed import _detect_sentiment
+        assert _sentiment_style("") == "neutral"
 
-        assert _detect_sentiment("Regular market update") == "neutral"
+    def test_whitespace_is_neutral(self):
+        from ui.components.news_feed import _sentiment_style
 
-    def test_detect_sentiment_update_does_not_match_up(self):
-        from ui.components.news_feed import _detect_sentiment
+        assert _sentiment_style("   ") == "neutral"
 
-        assert _detect_sentiment("Update on quarterly results") == "neutral"
+    def test_positive_title_case(self):
+        from ui.components.news_feed import _sentiment_style
 
-    def test_detect_sentiment_case_insensitive(self):
-        from ui.components.news_feed import _detect_sentiment
+        assert _sentiment_style("Positive") == "positive"
 
-        assert _detect_sentiment("STOCK UP ON GAIN") == "positive"
+    def test_positive_lower_case(self):
+        from ui.components.news_feed import _sentiment_style
 
-    def test_detect_sentiment_mixed_more_positive(self):
-        from ui.components.news_feed import _detect_sentiment
+        assert _sentiment_style("positive") == "positive"
 
-        assert _detect_sentiment("Stock surge and rally but crash") == "positive"
+    def test_negative_title_case(self):
+        from ui.components.news_feed import _sentiment_style
 
-    def test_detect_sentiment_mixed_more_negative(self):
-        from ui.components.news_feed import _detect_sentiment
+        assert _sentiment_style("Negative") == "negative"
 
-        assert _detect_sentiment("Stock fall and plunge but gain") == "negative"
+    def test_negative_lower_case(self):
+        from ui.components.news_feed import _sentiment_style
 
-    def test_detect_sentiment_empty_content(self):
-        from ui.components.news_feed import _detect_sentiment
+        assert _sentiment_style("negative") == "negative"
 
-        assert _detect_sentiment("") == "neutral"
+    def test_neutral_value_is_neutral(self):
+        from ui.components.news_feed import _sentiment_style
 
-    def test_detect_sentiment_equal_counts_is_neutral(self):
-        from ui.components.news_feed import _detect_sentiment
+        assert _sentiment_style("Neutral") == "neutral"
 
-        assert _detect_sentiment("Stock up but also down") == "neutral"
+    def test_unknown_value_is_neutral(self):
+        """未知取值（如 bullish）不猜测，一律中性。"""
+        from ui.components.news_feed import _sentiment_style
 
-    def test_detect_sentiment_up_word_boundary(self):
-        from ui.components.news_feed import _detect_sentiment
+        assert _sentiment_style("bullish") == "neutral"
 
-        assert _detect_sentiment("Prices went up today") == "positive"
+    def test_surrounding_whitespace_stripped(self):
+        from ui.components.news_feed import _sentiment_style
 
-    def test_detect_sentiment_bullish_keyword(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("Market is bullish today") == "positive"
-
-    def test_detect_sentiment_beat_keyword(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("Company beat earnings estimates") == "positive"
-
-    def test_detect_sentiment_exceed_keyword(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("Revenue exceed expectations") == "positive"
-
-    def test_detect_sentiment_loss_keyword(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("Company reports loss this quarter") == "negative"
-
-    def test_detect_sentiment_bearish_keyword(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("Outlook is bearish") == "negative"
-
-    def test_detect_sentiment_miss_keyword(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("Earnings miss forecasts") == "negative"
-
-
-class TestDetectSentimentChinese:
-    """中文情感检测测试 — 新增于 Issue #417 修复。"""
-
-    # --- 中文正向 ---
-
-    def test_chinese_positive_zhangtingban(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("该股涨停板，封板资金达10亿") == "positive"
-
-    def test_chinese_positive_dazhang(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("贵州茅台大涨5%，创新高") == "positive"
-
-    def test_chinese_positive_lihao(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("政策利好刺激市场反弹") == "positive"
-
-    def test_chinese_positive_lingzhang(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("新能源板块领涨，比亚迪飙升") == "positive"
-
-    def test_chinese_positive_yiziting(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("该股一字涨停，市场情绪高涨") == "positive"
-
-    def test_chinese_positive_fangkgaozou(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("股价高开高走，成交量放大") == "positive"
-
-    # --- 中文负向 ---
-
-    def test_chinese_negative_dietingban(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("该股跌停板，封单超5000万") == "negative"
-
-    def test_chinese_negative_baodie(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("芯片股集体暴跌，板块重挫") == "negative"
-
-    def test_chinese_negative_lihai(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("利空消息导致股价跳水") == "negative"
-
-    def test_chinese_negative_lingdie(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("煤炭板块领跌，个股下挫") == "negative"
-
-    def test_chinese_negative_yizidie(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("该股一字跌停，市场恐慌") == "negative"
-
-    def test_chinese_negative_ditou(self):
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("股价低开低走，放量下跌") == "negative"
-
-    # --- 否定词测试 ---
-
-    def test_negation_bu_shangzhang(self):
-        """否定正向关键词应减少正向计数。"""
-        from ui.components.news_feed import _detect_sentiment
-
-        result = _detect_sentiment("该股未上涨，表现平平")
-        # "上涨" 被 "未" 否定，不应判为正向
-        assert result != "positive"
-
-    def test_negation_wei_xiadie(self):
-        """否定负向关键词应产生正向计数。"""
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("大盘并未下跌，企稳反弹") == "positive"
-
-    def test_negation_bingfei_lihai(self):
-        """双重否定："并非利空" 应转为正向。"""
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("并非利空，市场反弹") == "positive"
-
-    def test_negation_with_interval_meiyou(self):
-        """否定词+间隔字: "没有上涨" 应被否定。"""
-        from ui.components.news_feed import _detect_sentiment
-
-        result = _detect_sentiment("该股没有上涨，表现平平")
-        assert result != "positive"
-
-    def test_negation_with_interval_bushi(self):
-        """否定词+间隔字: "不是上涨" 应被否定。"""
-        from ui.components.news_feed import _detect_sentiment
-
-        result = _detect_sentiment("该股不是上涨，是震荡")
-        assert result != "positive"
-
-    def test_negation_mei_keyword(self):
-        """否定词"没"："没下跌" 应被否定。"""
-        from ui.components.news_feed import _detect_sentiment
-
-        result = _detect_sentiment("股价没下跌，企稳反弹")
-        assert result == "positive"
-
-    # --- 重叠去重 ---
-
-    def test_overlap_yizi_zhangtingban(self):
-        """ "一字涨停板" 仅计1次（"涨停板"不应重复计数）。"""
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("该股一字涨停板") == "positive"
-
-    def test_overlap_no_duplicate(self):
-        """同一文本中关键词不应重复计数。"""
-        from ui.components.news_feed import _detect_sentiment
-
-        result = _detect_sentiment("涨停板封板")
-        assert result == "positive"
-
-    # --- 中英混合 ---
-
-    def test_mixed_both_positive(self):
-        """中英文正向同时出现。"""
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("Stock surge, 该股涨停板") == "positive"
-
-    def test_mixed_both_negative(self):
-        """中英文负向同时出现。"""
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("Market plunge, 大盘暴跌") == "negative"
-
-    def test_mixed_english_positive_chinese_negative(self):
-        """英文正向 + 中文负向（数量决定结果）。"""
-        from ui.components.news_feed import _detect_sentiment
-
-        result = _detect_sentiment("Stock surge but 大盘跳水")
-        # surge=1 pos(英文), 跳水=1 neg(中文) → equal → neutral
-        assert result == "neutral"
-
-    def test_mixed_chinese_negative_english_positive(self):
-        """中文负向多于英文正向。"""
-        from ui.components.news_feed import _detect_sentiment
-
-        result = _detect_sentiment("该股暴跌重挫，Market surge")
-        # 暴跌=1 neg, 重挫=1 neg, surge=1 pos → neg>pos
-        assert result == "negative"
-
-    # --- 中文中性 ---
-
-    def test_chinese_neutral(self):
-        """无情感关键词的中文新闻。"""
-        from ui.components.news_feed import _detect_sentiment
-
-        assert _detect_sentiment("公司发布年报，营收稳定") == "neutral"
+        assert _sentiment_style("  Positive  ") == "positive"
 
 
 # ---------------------------------------------------------------------------
@@ -442,28 +254,70 @@ class TestBuildNewsItem:
         defaults.update(kwargs)
         return NewsRow(**defaults)
 
-    def test_build_news_item_positive_content(self):
+    def test_build_news_item_positive_sentiment_colored(self):
+        """DoD: 入库 sentiment=Positive → 正向色着色。"""
         from ui.components.news_feed import _build_news_item
 
-        row = self._make_row(content="利好消息 surge rally")
+        row = self._make_row(sentiment="Positive")
         item = _build_news_item(row, "0")
         assert isinstance(item, ft.Container)
-        assert item.bgcolor != ft.Colors.TRANSPARENT
+        assert item.bgcolor == ft.Colors.with_opacity(0.1, AppColors.UP_RED)
 
-    def test_build_news_item_negative_content(self):
+    def test_build_news_item_negative_sentiment_colored(self):
+        """DoD: 入库 sentiment=Negative → 负向色着色。"""
         from ui.components.news_feed import _build_news_item
 
-        row = self._make_row(content="Market crash and plunge")
+        row = self._make_row(sentiment="Negative")
         item = _build_news_item(row, "0")
         assert isinstance(item, ft.Container)
-        assert item.bgcolor != ft.Colors.TRANSPARENT
+        assert item.bgcolor == ft.Colors.with_opacity(0.1, AppColors.DOWN_GREEN)
 
-    def test_build_news_item_neutral_content(self):
+    def test_build_news_item_lowercase_sentiment_colored(self):
+        """DB 小写形态同样着色（大小写不敏感）。"""
         from ui.components.news_feed import _build_news_item
 
-        row = self._make_row(content="普通市场新闻")
+        row = self._make_row(sentiment="positive")
         item = _build_news_item(row, "0")
-        assert isinstance(item, ft.Container)
+        assert item.bgcolor == ft.Colors.with_opacity(0.1, AppColors.UP_RED)
+
+    def test_build_news_item_neutral_sentiment_not_colored(self):
+        """DoD: sentiment=Neutral → 中性不着色。"""
+        from ui.components.news_feed import _build_news_item
+
+        row = self._make_row(sentiment="Neutral")
+        item = _build_news_item(row, "0")
+        assert item.bgcolor == ft.Colors.TRANSPARENT
+
+    def test_build_news_item_missing_sentiment_not_colored(self):
+        """DoD: sentiment=None 时不着色（R21 不猜测填充）。"""
+        from ui.components.news_feed import _build_news_item
+
+        row = self._make_row(sentiment=None)
+        item = _build_news_item(row, "0")
+        assert item.bgcolor == ft.Colors.TRANSPARENT
+
+    def test_build_news_item_empty_sentiment_not_colored(self):
+        from ui.components.news_feed import _build_news_item
+
+        row = self._make_row(sentiment="")
+        item = _build_news_item(row, "0")
+        assert item.bgcolor == ft.Colors.TRANSPARENT
+
+    def test_build_news_item_ambiguous_phrase_not_colored(self):
+        """DoD: "set up" / "down payment" 歧义短语不再触发着色（已移除本地关键词猜测）。"""
+        from ui.components.news_feed import _build_news_item
+
+        for text in ("Company to set up a new factory", "Buy a house with 20% down payment"):
+            row = self._make_row(content=text, sentiment=None)
+            item = _build_news_item(row, "0")
+            assert item.bgcolor == ft.Colors.TRANSPARENT, text
+
+    def test_build_news_item_bullish_keyword_content_not_colored(self):
+        """本地关键词逻辑已移除：仅凭内容含 surge/rally 不再着色。"""
+        from ui.components.news_feed import _build_news_item
+
+        row = self._make_row(content="利好消息 surge rally", sentiment=None)
+        item = _build_news_item(row, "0")
         assert item.bgcolor == ft.Colors.TRANSPARENT
 
     def test_build_news_item_missing_tags(self):
