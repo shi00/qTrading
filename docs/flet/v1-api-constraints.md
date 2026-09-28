@@ -188,6 +188,7 @@ def ScreenerView():
 **强制规则：**
 
 1. **一律使用 `AppStyles.FONT_SIZE_*` token，禁止在 `ft.Text(size=...)` / `ft.TextStyle(size=...)` 处硬编码 int 字面数值**（如 `size=13`）。此规则由 `scripts/check_redlines.py` 的 `R_no_bare_font_size_in_ui` 检查自动守护（pre-commit `redline-check` hook）。
+   > **覆盖边界（非全量守护）**：该检查仅匹配 `ft.Text` / `ft.TextStyle` 的 `size=` int 字面量，**不覆盖** `ft.Icon(size=...)` 及其他控件的尺寸字面量；这些仍须按下方第 3 条人工评审，门禁通过不等于全量合规。
 2. **严格按语义选择 token**，不得用数值相近的 token 顶替功能层级。尤须区分：
    - **页面主标题**（各视图顶部标题）→ `FONT_SIZE_XL` (24)
    - **区块/卡片标题** → `FONT_SIZE_HEADLINE` (20)

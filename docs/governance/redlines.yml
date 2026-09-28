@@ -256,7 +256,7 @@ redlines:
 
   - id: R23
     title: 裸 UI token
-    description: "UI 层裸 ft.Colors 色值引用与裸字号数值（如 ft.Text(size=13)）必须改用 AppStyles 定义的 token（FONT_SIZE_* 等）"
+    description: "UI 层裸 ft.Colors 色值引用与裸字号数值（如 ft.Text(size=13)）必须改用 ui/theme.py 定义的 token：颜色用 AppColors（如 AppColors.UP_RED），字号等用 AppStyles（FONT_SIZE_* 等）"
     enforcement: "pre-commit（check_redlines.py）"
     checks:
       - check_R_no_bare_ft_colors_in_ui
