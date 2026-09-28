@@ -173,6 +173,20 @@ async def _run_nightly_prediction(svc: SchedulerService, runner: AISelectionRunn
         if get_now().weekday() >= 5:
             return
 
+    # D7-3/MINOR-01: 前置条件从「行情表里有今天的数据」改为「当日同步完整成功」。
+    # 以调度器水位线 _last_update_date 为唯一判据（日更或补偿任一完整成功后推进，
+    # 见 SchedulerService._mark_daily_update_done_db），不再依赖 prepare_market_data
+    # 内联同步（该路径绕过去重键，会与运行中的日更并发同步同一天）。
+    # 不满足时不提交、不标记 _last_pred_date（保留后续重试能力），由 30 秒看门狗在
+    # 数据就绪后补触发（SchedulerService._catch_up_nightly_prediction）。
+    if svc._last_update_date != today_str:
+        logger.warning(
+            "[Scheduler] Prediction skipped (%s: daily sync not complete, last_update_date=%s)",
+            today_str,
+            svc._last_update_date or "<none>",
+        )
+        return
+
     async def _factory(task_id: str, **kwargs) -> str:
         return await _prediction_logic(svc, runner, today_str, task_id, **kwargs)
 
