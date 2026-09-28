@@ -64,6 +64,10 @@ topics:
     title: 修改 UI 布局/响应式
     canonical: docs/flet/README.md
 
+  - id: ui-component
+    title: 新增/修改 UI 组件
+    canonical: docs/flet/README.md
+
   - id: viewmodel
     title: 新增/修改 ViewModel
     canonical: docs/patterns/mvvm.md

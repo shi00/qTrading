@@ -33,6 +33,52 @@
 - 修复 UI Bug：[docs/bug-fix/core-protocol.md](../bug-fix/core-protocol.md)
 - 工作流：[docs/guides/how-to.md](../guides/how-to.md)「4. 新增一个 UI 视图」
 
+### 新增或修改 UI 组件
+
+组件指 `ui/components/` 下可复用的声明式函数组件（Presentational Component，无业务状态）；持有业务状态或用例编排的组件改用 ViewModel 桥接（见「新增或修改 ViewModel」）。
+
+必读：
+
+1. [v1-api-constraints.md](./v1-api-constraints.md)「V1 声明式 UI 开发规范」：`@ft.component` 契约与 hooks 用法（§2 `@ft.component` 标准模板为完整模板正本）
+2. [ui-ux-best-practices.md](./ui-ux-best-practices.md)「组件选择」：何时抽取组件、信息架构与状态设计
+3. [ui/theme.py](../../ui/theme.py) `AppStyles` / `AppColors`：一律消费语义 token（字号 / 间距 / 图标 / 颜色），禁止裸数值与裸色值（R23）
+4. [accessibility-baseline.md](./accessibility-baseline.md)：组件级无障碍条款（label / 对比度 / 键盘路径）
+
+最小骨架（仅示组件级形态；完整模板与约束以 [v1-api-constraints.md](./v1-api-constraints.md)「V1 声明式 UI 开发规范」§2 为准）：
+
+```python
+import flet as ft
+
+from ui.i18n import get_observable_state
+from ui.theme import AppColors, AppStyles
+
+
+@ft.component
+def MetricTile(label: str, value: str, on_select=None) -> ft.Container:
+    # i18n / 主题变更自动重渲染（组件内禁止手动 I18n.subscribe）
+    ft.use_state(get_observable_state)
+    ft.use_state(AppColors.get_observable_state)
+
+    style = AppStyles.card()
+    return ft.Container(
+        padding=AppStyles.SPACING_MD,
+        border_radius=style.get("border_radius"),
+        bgcolor=style.get("bgcolor"),
+        content=ft.Column(
+            [
+                ft.Text(label, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_SECONDARY),
+                ft.Text(value, size=AppStyles.FONT_SIZE_XL),
+            ]
+        ),
+        on_click=on_select,
+    )
+```
+
+条件触发：
+
+- 使用不熟悉的 Flet API：[mcp-usage.md](./mcp-usage.md)
+- 组件需按实时尺寸自适应：[v1-api-constraints.md](./v1-api-constraints.md) 的响应式契约（`page.on_resize` 默认不订阅，控件级尺寸例外，见该节）
+
 ### 修改布局或响应式
 
 必读：
@@ -110,7 +156,7 @@ PR 评审按以下顺序逐项检查：
 
 - 一条规则只能有一个权威正文，本文件不复制任何专题规则。
 - 新增 `docs/flet/*.md` 时必须在本文件「文档职责清单」登记，否则会被 `check_flet_hub_completeness()` 门禁拦截。
-- 删除或改名专题文档时必须同步更新本文件及对应一致性测试（[tests/unit/test_docs_consistency.py](../../tests/unit/test_docs_consistency.py) 的 `TestFletHubCompleteness` 用例，其 `check_flet_hub_completeness` 校验本文件「文档职责清单」与 `docs/flet/*.md` 的完整一致性），并检查 [docs/governance/canonical-topics.yml](../governance/canonical-topics.yml) 中引用本文件的 `ui-view` / `ui-layout` / `i18n` 条目是否需要同步。
+- 删除或改名专题文档时必须同步更新本文件及对应一致性测试（[tests/unit/test_docs_consistency.py](../../tests/unit/test_docs_consistency.py) 的 `TestFletHubCompleteness` 用例，其 `check_flet_hub_completeness` 校验本文件「文档职责清单」与 `docs/flet/*.md` 的完整一致性），并检查 [docs/governance/canonical-topics.yml](../governance/canonical-topics.yml) 中引用本文件的 `ui-view` / `ui-layout` / `ui-component` / `i18n` 条目是否需要同步。
 - 通用 Flet v1 教程（路由、Services、存储、构建打包、响应式布局、控件清单等）直接查阅 [Flet 官方文档](https://docs.flet.dev/)，本目录不再复制，避免与上游漂移。
 
 ---
