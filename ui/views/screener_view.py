@@ -279,20 +279,23 @@ def _get_page() -> ft.Page | None:
         return None
 
 
-def _safe_show_toast(
+def _show_toast(
     page: ft.Page,
     msg: str,
     msg_type: str = "info",
     action_text: str | None = None,
     on_action: typing.Callable[[], None] | None = None,
 ) -> None:
-    """page.show_toast 是 main.py 动态挂载的，ft.Page 类型存根未声明。
+    """显式调用页面统一 Toast 组件 (``page.toast`` 由 application.py 挂载)。
 
     P2-10: action_text/on_action 透传 (导出成功"打开文件夹"按钮)。
     """
-    show_toast = getattr(page, "show_toast", None)
-    if show_toast is not None:
-        show_toast(msg, msg_type, action_text=action_text, on_action=on_action)
+    page.toast.show(  # type: ignore[attr-defined]  # [reason: page.toast 由 application.py 动态挂载, ft.Page 存根未声明]
+        msg,
+        msg_type,
+        action_text=action_text,
+        on_action=on_action,
+    )
 
 
 def _build_strategy_options(strategies_with_dep: tuple[StrategyDepRow, ...]) -> list[ft.dropdown.Option]:
@@ -1179,7 +1182,7 @@ async def _execute_screener_export(
     df = vm.get_export_data()
     if df is None:
         if page is not None:
-            _safe_show_toast(page, I18n.get("data_export_no_data"), "error")
+            _show_toast(page, I18n.get("data_export_no_data"), "error")
         return
     timestamp = get_now().strftime("%Y%m%d_%H%M%S")
     ext = "csv" if format_ == "csv" else "xlsx"
@@ -1193,7 +1196,7 @@ async def _execute_screener_export(
             )  # _err 意图性未用（下划线命名豁免 RUF059），错误经 vm.state 呈现
             if src_bytes is None:
                 if page is not None:
-                    _safe_show_toast(page, I18n.get("data_export_fail"), "error")
+                    _show_toast(page, I18n.get("data_export_fail"), "error")
                 return
             if file_picker is None:
                 return
@@ -1204,13 +1207,13 @@ async def _execute_screener_export(
                 src_bytes=src_bytes,
             )
             if page is not None:
-                _safe_show_toast(page, I18n.get("data_export_success", file=default_filename), "success")
+                _show_toast(page, I18n.get("data_export_success", file=default_filename), "success")
         except asyncio.CancelledError:
             raise
         except Exception as ex:
             logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
             if page is not None:
-                _safe_show_toast(page, I18n.get("data_export_fail"), "error")
+                _show_toast(page, I18n.get("data_export_fail"), "error")
         return
 
     if file_picker is None:
@@ -1230,7 +1233,7 @@ async def _execute_screener_export(
         if path:
             filename = os.path.basename(filepath)
             if page is not None:
-                _safe_show_toast(
+                _show_toast(
                     page,
                     I18n.get("data_export_success", file=filename),
                     "success",
@@ -1238,13 +1241,13 @@ async def _execute_screener_export(
                     on_action=lambda: page.run_task(open_export_folder, filepath),
                 )
         elif page is not None:
-            _safe_show_toast(page, I18n.get("data_export_fail"), "error")
+            _show_toast(page, I18n.get("data_export_fail"), "error")
     except asyncio.CancelledError:
         raise
     except Exception as ex:
         logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
         if page is not None:
-            _safe_show_toast(page, I18n.get("data_export_fail"), "error")
+            _show_toast(page, I18n.get("data_export_fail"), "error")
 
 
 async def _execute_load_history_tree(
@@ -1260,7 +1263,7 @@ async def _execute_load_history_tree(
     except Exception as ex:
         logger.error("[ScreenerView] History tree load failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
         if page is not None:
-            _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
+            _show_toast(page, I18n.get("screener_load_failed"), "error")
 
 
 async def _execute_load_strategy_stats(vm: ScreenerViewModel, page: ft.Page | None) -> None:
@@ -1276,7 +1279,7 @@ async def _execute_load_strategy_stats(vm: ScreenerViewModel, page: ft.Page | No
     except Exception as ex:
         logger.error("[ScreenerView] Review stats load failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
         if page is not None:
-            _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
+            _show_toast(page, I18n.get("screener_load_failed"), "error")
 
 
 async def _execute_load_ai_attribution(vm: ScreenerViewModel, page: ft.Page | None) -> None:
@@ -1292,7 +1295,7 @@ async def _execute_load_ai_attribution(vm: ScreenerViewModel, page: ft.Page | No
     except Exception as ex:
         logger.error("[ScreenerView] AI attribution load failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
         if page is not None:
-            _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
+            _show_toast(page, I18n.get("screener_load_failed"), "error")
 
 
 async def _execute_load_history_for_date(
@@ -1317,7 +1320,7 @@ async def _execute_load_history_for_date(
     except Exception as ex:
         logger.error("[ScreenerView] Load history for date failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
         if page is not None:
-            _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
+            _show_toast(page, I18n.get("screener_load_failed"), "error")
 
 
 async def _execute_add_to_watchlist(
@@ -1330,13 +1333,13 @@ async def _execute_add_to_watchlist(
     try:
         await wl_vm.add_to_watchlist(ts_code, stock_name)
         if page is not None:
-            _safe_show_toast(page, I18n.get("watchlist_added"), "success")
+            _show_toast(page, I18n.get("watchlist_added"), "success")
     except asyncio.CancelledError:
         raise
     except Exception as ex:
         logger.error("[ScreenerView] Add to watchlist failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
         if page is not None:
-            _safe_show_toast(page, I18n.get("watchlist_add_failed"), "error")
+            _show_toast(page, I18n.get("watchlist_add_failed"), "error")
 
 
 async def _execute_restore_default_prompt(
@@ -1350,7 +1353,7 @@ async def _execute_restore_default_prompt(
         new_val = await vm.reset_strategy_prompt(strat)
         on_update_param("ai_system_prompt", new_val)
         if page is not None:
-            _safe_show_toast(page, I18n.get("ai_settings_restored"), "info")
+            _show_toast(page, I18n.get("ai_settings_restored"), "info")
     except asyncio.CancelledError:
         raise
     except Exception as ex:
@@ -1358,7 +1361,7 @@ async def _execute_restore_default_prompt(
             "[ScreenerView] Restore default prompt failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
         )
         if page is not None:
-            _safe_show_toast(page, I18n.get("sys_snack_save_err"), "error")
+            _show_toast(page, I18n.get("sys_snack_save_err"), "error")
 
 
 async def _execute_save_prompt(
@@ -1376,7 +1379,7 @@ async def _execute_save_prompt(
         if success:
             set_prompt_error("")
             UILogger.log_action("ScreenerView", "SavePrompt", f"strategy={strat}")
-            _safe_show_toast(page, I18n.get("ai_settings_saved"), "success")
+            _show_toast(page, I18n.get("ai_settings_saved"), "success")
         else:
             from utils.prompt_guard import MAX_PROMPT_LENGTH
 
@@ -1390,7 +1393,7 @@ async def _execute_save_prompt(
     except Exception as ex:
         logger.error("[ScreenerView] Save prompt failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
         if page is not None:
-            _safe_show_toast(page, I18n.get("sys_snack_save_err"), "error")
+            _show_toast(page, I18n.get("sys_snack_save_err"), "error")
 
 
 async def _execute_pending_strategy_run(vm: ScreenerViewModel, key: str) -> None:

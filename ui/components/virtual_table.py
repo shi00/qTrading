@@ -507,12 +507,8 @@ def PaginatedTable(
             active_col = cache.active_col
             if active_col is None:
                 return
-            # R13: V1 DragUpdateEvent 用 primary_delta (水平拖拽 x 增量);
-            # local_delta.x 作为回退 (兼容边界场景)
-            delta_x = getattr(e, "primary_delta", None)
-            if delta_x is None:
-                local_delta = getattr(e, "local_delta", None)
-                delta_x = getattr(local_delta, "x", 0) if local_delta else 0
+            # R13: V1 DragUpdateEvent 用 primary_delta (水平拖拽 x 增量)
+            delta_x = e.primary_delta if e.primary_delta is not None else 0.0
             current = cache.widths[active_col]
             new_w = _clamp_width(current + delta_x, MIN_COL_WIDTH, MAX_COL_WIDTH)
             if new_w == current:

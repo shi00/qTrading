@@ -128,12 +128,8 @@ def ResizableSplitter(
         宽度计算始终跟随鼠标 (不丢弃 primary_delta), 仅节流 set_state 与回调,
         避免 reconcile 过频的同时保证拖动跟手。
         """
-        # R13: V1 DragUpdateEvent 用 primary_delta (水平拖拽 x 增量);
-        # local_delta.x 作为回退 (兼容 V0 mock 或边界场景)
-        delta_x = getattr(e, "primary_delta", None)
-        if delta_x is None:
-            local_delta = getattr(e, "local_delta", None)
-            delta_x = getattr(local_delta, "x", 0) if local_delta else 0
+        # R13: V1 DragUpdateEvent 用 primary_delta (水平拖拽 x 增量)
+        delta_x = e.primary_delta if e.primary_delta is not None else 0.0
         current = cache.width if cache.width is not None else width
         new_width = _clamp_width(current + delta_x, min_width, max_width)
         if new_width == current:

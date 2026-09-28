@@ -196,83 +196,67 @@ class TestShowSnack:
         _show_snack_impl(None, "msg")
 
     def test_show_snack_with_show_toast_info(self):
-        """page.show_toast 存在时按默认 info 类型触发。"""
+        """page.toast.show 按默认 info 类型触发。"""
         from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
-        mock_page.show_toast = MagicMock()
         _show_snack_impl(mock_page, "hello")
-        mock_page.show_toast.assert_called_once_with("hello", type="info")
+        mock_page.toast.show.assert_called_once_with("hello", "info", action_text=None, on_action=None)
 
     def test_show_snack_with_error_color_calls_error(self):
         """color=AppColors.ERROR → msg_type=error。"""
         from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
-        mock_page.show_toast = MagicMock()
         _show_snack_impl(mock_page, "err", color=AppColors.ERROR)
-        mock_page.show_toast.assert_called_once_with("err", type="error")
+        mock_page.toast.show.assert_called_once_with("err", "error", action_text=None, on_action=None)
 
     def test_show_snack_with_success_color_calls_success(self):
         """color=AppColors.SUCCESS → msg_type=success。"""
         from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
-        mock_page.show_toast = MagicMock()
         _show_snack_impl(mock_page, "ok", color=AppColors.SUCCESS)
-        mock_page.show_toast.assert_called_once_with("ok", type="success")
+        mock_page.toast.show.assert_called_once_with("ok", "success", action_text=None, on_action=None)
 
     def test_show_snack_with_warning_color_calls_warning(self):
         """color=AppColors.WARNING → msg_type=warning。"""
         from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
-        mock_page.show_toast = MagicMock()
         _show_snack_impl(mock_page, "warn", color=AppColors.WARNING)
-        mock_page.show_toast.assert_called_once_with("warn", type="warning")
+        mock_page.toast.show.assert_called_once_with("warn", "warning", action_text=None, on_action=None)
 
     def test_show_snack_with_string_color_compat(self):
         """color="success" 字符串 → msg_type=success (兼容 database_tab 调用)。"""
         from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
-        mock_page.show_toast = MagicMock()
         _show_snack_impl(mock_page, "saved", color="success")
-        mock_page.show_toast.assert_called_once_with("saved", type="success")
+        mock_page.toast.show.assert_called_once_with("saved", "success", action_text=None, on_action=None)
 
     def test_show_snack_passes_action_text_when_not_none(self):
-        """L126: action_text 非 None 时透传到 show_toast kwargs。
-
-        Task 5.1 snack action 按钮: action_text 提供按钮文案,
-        仅在非 None 时透传 (保持无 action 场景调用签名不变)。
-        """
+        """Task 5.1 snack action: action_text 透传到 page.toast.show。"""
         from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
-        mock_page.show_toast = MagicMock()
         _show_snack_impl(mock_page, "err", color="error", action_text="重试")
-        mock_page.show_toast.assert_called_once_with("err", type="error", action_text="重试")
+        mock_page.toast.show.assert_called_once_with("err", "error", action_text="重试", on_action=None)
 
     def test_show_snack_passes_on_action_when_not_none(self):
-        """L128: on_action 非 None 时透传到 show_toast kwargs。
-
-        Task 5.1 snack action 按钮: on_action 提供按钮回调,
-        仅在非 None 时透传。
-        """
+        """Task 5.1 snack action: on_action 透传到 page.toast.show。"""
         from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
-        mock_page.show_toast = MagicMock()
         on_action = MagicMock()
         _show_snack_impl(mock_page, "err", color="error", on_action=on_action)
-        mock_page.show_toast.assert_called_once_with("err", type="error", on_action=on_action)
+        mock_page.toast.show.assert_called_once_with("err", "error", action_text=None, on_action=on_action)
 
     def test_show_snack_passes_both_action_text_and_on_action(self):
-        """L126+L128: action_text + on_action 同时非 None 时全部透传。"""
+        """action_text + on_action 同时非 None 时全部透传。"""
         from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
-        mock_page.show_toast = MagicMock()
         on_action = MagicMock()
         _show_snack_impl(
             mock_page,
@@ -281,34 +265,28 @@ class TestShowSnack:
             action_text="检查健康",
             on_action=on_action,
         )
-        mock_page.show_toast.assert_called_once_with(
+        mock_page.toast.show.assert_called_once_with(
             "err",
-            type="error",
+            "error",
             action_text="检查健康",
             on_action=on_action,
         )
 
-    def test_show_snack_skips_action_text_when_none(self):
-        """L125: action_text=None 时 toast_kwargs 不含 action_text (保持调用签名不变)。"""
+    def test_show_snack_action_fields_default_to_none(self):
+        """action_text/on_action 缺省时以 None 透传 (调用签名恒定)。"""
         from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
-        mock_page.show_toast = MagicMock()
         _show_snack_impl(mock_page, "msg", action_text=None, on_action=None)
-        # 仅 type=info, 不含 action_text/on_action
-        mock_page.show_toast.assert_called_once_with("msg", type="info")
+        mock_page.toast.show.assert_called_once_with("msg", "info", action_text=None, on_action=None)
 
-    def test_show_snack_no_show_toast_logs_warning(self):
-        """page 无 show_toast 方法时，降级为 logger.warning，不调 show_dialog。"""
+    def test_show_snack_page_none_logs_warning(self):
+        """page=None 时降级为 logger.warning，不访问 page.toast。"""
         from ui.views.settings_view import _show_snack_impl
 
-        mock_page = MagicMock()
-        del mock_page.show_toast  # 删除属性，使 hasattr 返回 False
-        mock_page.show_dialog = MagicMock()
         with patch("ui.views.settings_view.logger") as mock_logger:
-            _show_snack_impl(mock_page, "fallback", color=ft.Colors.BLUE)
+            _show_snack_impl(None, "fallback", color=ft.Colors.BLUE)
             mock_logger.warning.assert_called_once()
-            mock_page.show_dialog.assert_not_called()
 
     def test_show_snack_none_page_returns_silently(self):
         """page 为 None 时静默返回。"""
@@ -743,37 +721,41 @@ class TestSettingsViewComponentBody:
 
         component = make_component(SettingsView)
         fake_page = FakePage()
-        fake_page.show_toast = MagicMock()  # type: ignore[method-assign]
+        fake_page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
         run_mount_effects(component, page=fake_page)
 
         # tabs[0] = DataSourceTab(show_snack) — 验证 show_snack 闭包通过 captured page 调用
         # run_mount_effects 内部触发首次渲染, _build_tabs 已被调用
         self.mock_data.assert_called()
         show_snack_closure = self.mock_data.call_args[0][0]
-        # 调用闭包 → 应通过 fake_page.show_toast 触发 (因 _show_snack_impl 接收 page)
+        # 调用闭包 → 应通过 fake_page.toast.show 触发 (因 _show_snack_impl 接收 page)
         show_snack_closure("test message", color="error")
-        fake_page.show_toast.assert_called_once_with("test message", type="error")
+        fake_page.toast.show.assert_called_once_with("test message", "error", action_text=None, on_action=None)
 
     def test_show_snack_closure_silently_when_no_page(
         self,
         mock_i18n_state,
         mock_app_colors_state,
     ):
-        """无 page (RuntimeError) 时 _show_snack 闭包静默返回。"""
-        # 不调用 attach_fake_page, ft.context.page 抛 RuntimeError → _page=None
+        """page 不可用 (RuntimeError → _page=None) 时 _show_snack 闭包静默返回。"""
+        from flet.controls.context import _context_page
+
         from tests.unit.ui.component_renderer import (
             make_component,
+            render_once,
             run_mount_effects,
         )
         from ui.views.settings_view import SettingsView
 
         component = make_component(SettingsView)
-        run_mount_effects(component)  # 无 page
+        run_mount_effects(component)
+        # 清除 ContextVar 模拟 page 不可用 → 重渲染时 _page 捕获为 None
+        _context_page.set(None)
+        render_once(component)
 
-        # show_snack 闭包捕获 _page=None, 调用应静默返回
+        # show_snack 闭包捕获 _page=None, 调用应静默返回 (不抛异常)
         self.mock_data.assert_called()
         show_snack_closure = self.mock_data.call_args[0][0]
-        # 不抛异常即可
         show_snack_closure("msg")
 
 

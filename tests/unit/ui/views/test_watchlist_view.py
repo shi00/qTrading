@@ -1,7 +1,7 @@
 """watchlist_view 单元测试 (FR-UX-004, Task 4.2).
 
 测试策略（参考 test_home_view.py / test_task_center_view.py 范式）：
-- 纯函数：``_get_page`` / ``_safe_show_toast`` / ``_build_watchlist_row`` 直接单测
+- 纯函数：``_get_page`` / ``_show_toast`` / ``_build_watchlist_row`` 直接单测
 - 组件运行时：``make_component`` + ``run_mount_effects`` + ``render_once`` 驱动声明式组件
 - FakeViewModel：满足 ``use_viewmodel`` 契约（state/subscribe/dispose），不依赖真实 CacheManager
 - R2 红线：CancelledError 必须 raise（不吞没）
@@ -24,7 +24,7 @@ from ui.views.watchlist_view import (
     WatchlistView,
     _build_watchlist_row,
     _get_page,
-    _safe_show_toast,
+    _show_toast,
 )
 
 pytestmark = pytest.mark.unit
@@ -211,24 +211,16 @@ class TestGetPage:
             _context_page.reset(token)
 
 
-class TestSafeShowToast:
-    def test_calls_show_toast_when_present(self) -> None:
+class TestShowToast:
+    def test_calls_toast_show(self) -> None:
         page = MagicMock()
-        page.show_toast = MagicMock()
-        _safe_show_toast(page, "test message", "success")
-        page.show_toast.assert_called_once_with("test message", "success")
-
-    def test_handles_missing_show_toast(self) -> None:
-        page = MagicMock()
-        page.show_toast = None
-        # 不应抛异常
-        _safe_show_toast(page, "test message", "info")
+        _show_toast(page, "test message", "success")
+        page.toast.show.assert_called_once_with("test message", "success")
 
     def test_default_msg_type_is_info(self) -> None:
         page = MagicMock()
-        page.show_toast = MagicMock()
-        _safe_show_toast(page, "msg")
-        page.show_toast.assert_called_once_with("msg", "info")
+        _show_toast(page, "msg")
+        page.toast.show.assert_called_once_with("msg", "info")
 
 
 class TestBuildWatchlistRow:
@@ -796,7 +788,8 @@ class TestWatchlistViewRemoveCallback:
         component = make_component(WatchlistView, active=True)
         page = FakePage()
         toast_calls: list[tuple[str, str]] = []
-        page.show_toast = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))  # type: ignore[assignment]
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        page.toast.show.side_effect = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))
         run_mount_effects(component, page=page)
         result = render_once(component)
 
@@ -877,7 +870,8 @@ class TestWatchlistViewRemoveCallback:
         component = make_component(WatchlistView, active=True)
         page = FakePage()
         toast_calls: list[tuple[str, str]] = []
-        page.show_toast = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))  # type: ignore[assignment]
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        page.toast.show.side_effect = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))
         run_mount_effects(component, page=page)
         result = render_once(component)
 
@@ -941,6 +935,7 @@ class TestWatchlistViewAddCallback:
         mock_watchlist_vm._state = WatchlistState(watchlist_rows=(), is_loading=False)
         component = make_component(WatchlistView, active=True)
         page = FakePage()
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
         page.run_task = MagicMock()
         run_mount_effects(component, page=page)
         result = render_once(component)
@@ -1027,7 +1022,8 @@ class TestWatchlistViewAddCallback:
             mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
         )
         toast_calls: list[tuple[str, str]] = []
-        page.show_toast = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))  # type: ignore[assignment]
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        page.toast.show.side_effect = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))
         page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
         callbacks = mock_watchlist_vm.captured_add_callbacks
         assert "on_add" in callbacks
@@ -1091,7 +1087,8 @@ class TestWatchlistViewAddCallback:
             mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
         )
         toast_calls: list[tuple[str, str]] = []
-        page.show_toast = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))  # type: ignore[assignment]
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        page.toast.show.side_effect = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))
         page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
         callbacks = mock_watchlist_vm.captured_add_callbacks
         assert "on_add" in callbacks

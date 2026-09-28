@@ -169,7 +169,7 @@ async def test_run_external_success_covers_main_flow(monkeypatch):
     assert page.window.on_event is not None
     assert page.on_error is not None
     assert page.on_disconnect is not None  # 非 E2E 应绑定 disconnect 处理
-    assert callable(page.show_toast)  # type: ignore[attr-defined]  # [reason: run() 动态挂载]
+    assert isinstance(page.toast, MagicMock)  # run() 挂载 ToastManager（测试中 mock 为 MagicMock）
     # 渲染了 RootView
     assert len(page.controls) >= 1
 
@@ -355,7 +355,7 @@ async def test_run_f3_cleanup_failure_is_caught_and_logged(monkeypatch):
 
     page = _DummyPage()
     await app_main.run(page)  # 不抛异常：F3 清理失败可安全降级
-    assert page.show_toast  # type: ignore[attr-defined]  # [reason: run() 动态挂载]
+    assert isinstance(page.toast, MagicMock)  # run() 挂载 ToastManager（测试中 mock 为 MagicMock）
 
 
 @pytest.mark.asyncio
@@ -390,4 +390,4 @@ async def test_run_f4_keyring_precheck_exception_is_caught(monkeypatch):
 
     page = _DummyPage()
     await app_main.run(page)  # 不抛异常：预检失败可安全降级
-    assert page.show_toast  # type: ignore[attr-defined]  # [reason: run() 动态挂载]
+    assert isinstance(page.toast, MagicMock)  # run() 挂载 ToastManager（测试中 mock 为 MagicMock）

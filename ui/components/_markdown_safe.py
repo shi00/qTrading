@@ -35,14 +35,11 @@ def _is_allowed_domain(url: str) -> bool:
 def _show_blocked_toast(page) -> None:
     """在给定 page 上显示"链接已拦截"提示。
 
-    CLAUDE.md §3.2 声明式 UI: 用 ``page.show_toast`` 替代 ``page.show_dialog(ft.SnackBar)``
-    (main.py:251 动态挂载 show_toast).
+    CLAUDE.md §3.2 声明式 UI: 用 ``page.toast.show`` 替代 ``page.show_dialog(ft.SnackBar)``
+    (``page.toast`` 由 application.py 启动时动态挂载).
     P3-25: 文案经 ``I18n.get("markdown_link_blocked")`` 国际化（en_US 下显示 "Link blocked"）。
     """
-    if hasattr(page, "show_toast"):
-        page.show_toast(I18n.get("markdown_link_blocked"), type="error")  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
-    else:
-        logger.warning("[MarkdownSafe] Blocked non-whitelisted URL (toast unavailable)")
+    page.toast.show(I18n.get("markdown_link_blocked"), "error")
 
 
 def safe_open_url(e) -> None:
@@ -89,7 +86,7 @@ def safe_open_url(e) -> None:
         page = getattr(control, "page", None)
     if page is None:
         page = getattr(e, "page", None)
-    if page is not None and hasattr(page, "run_task"):
+    if page is not None:
         page.run_task(_open_url_async, url)
     else:
         # 无 page 访问（测试场景或异常时态）：降级为同步调用并警告

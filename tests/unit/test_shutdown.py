@@ -432,24 +432,7 @@ class TestShutdownCoordinatorCleanupSteps:
         await coord._step4_clear_toast()
 
     @pytest.mark.asyncio
-    async def test_step4_clear_toast_with_page_no_toast(self):
-        mock_page = MagicMock()
-        mock_page.toast = None
-        coord = ShutdownCoordinator(page=mock_page)
-        await coord._step4_clear_toast()
-
-    @pytest.mark.asyncio
     async def test_step4_clear_toast_with_stop_all(self):
-        mock_page = MagicMock()
-        mock_toast = MagicMock()
-        mock_toast.stop_all = MagicMock()
-        mock_page.toast = mock_toast
-        coord = ShutdownCoordinator(page=mock_page)
-        await coord._step4_clear_toast()
-        mock_toast.stop_all.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_step4_clear_toast_async_stop_all(self):
         mock_page = MagicMock()
         mock_toast = MagicMock()
         mock_toast.stop_all = AsyncMock()

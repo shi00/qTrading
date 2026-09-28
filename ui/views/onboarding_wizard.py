@@ -79,7 +79,7 @@ def _get_page() -> ft.Page | None:
 
 
 def _show_snack(msg: str, color: str) -> None:
-    """通过 ``page.show_toast`` 显示提示 (main.py:251 动态挂载).
+    """通过 ``page.toast.show`` 显示提示 (``page.toast`` 由 application.py 启动时动态挂载).
 
     CLAUDE.md §3.2 声明式 UI: 禁用 ``page.show_dialog(ft.SnackBar)`` 命令式 API.
     """
@@ -87,11 +87,8 @@ def _show_snack(msg: str, color: str) -> None:
     if page is None:
         logger.debug("[OnboardingWizard] page not available for show_snack")
         return
-    if not hasattr(page, "show_toast"):
-        logger.warning("[OnboardingWizard] show_toast unavailable: %s", msg)
-        return
     msg_type = "error" if color == AppColors.ERROR else "info"
-    page.show_toast(msg, type=msg_type)  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
+    page.toast.show(msg, msg_type)  # type: ignore[attr-defined]  # [reason: page.toast 由 application.py 动态挂载, ft.Page 存根未声明]
 
 
 async def _default_on_complete() -> None:

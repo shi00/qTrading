@@ -197,7 +197,6 @@ def mock_config_handler():
 
 
 def wrap_mock_page(mock_page):
-    mock_page.show_toast = MagicMock()
     mock_page.run_task = MagicMock()
     mock_page.run_task.return_value = MagicMock()
     return mock_page

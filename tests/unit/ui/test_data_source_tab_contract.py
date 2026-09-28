@@ -657,7 +657,7 @@ def _run_async_coro(coro: Any) -> None:
 
 
 def _make_fake_page() -> FakePage:
-    """创建扩展的 FakePage, 支持 run_task/show_toast/pubsub/use_dialog。"""
+    """创建扩展的 FakePage, 支持 run_task/toast/pubsub/use_dialog。"""
     page = FakePage()
 
     def _run_task(fn: Any, *args: Any, **kwargs: Any) -> None:
@@ -666,7 +666,7 @@ def _make_fake_page() -> FakePage:
             _run_async_coro(result)
 
     page.run_task = MagicMock(side_effect=_run_task)  # type: ignore[method-assign]
-    page.show_toast = MagicMock()  # type: ignore[method-assign]
+    page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
     page.pubsub = MagicMock()  # type: ignore[method-assign]
     # use_dialog 支持: page._dialogs.controls 列表 + _prepare_dialog 吸收调用
     page._dialogs = MagicMock()  # type: ignore[attr-defined]

@@ -122,8 +122,8 @@ def _show_snack_impl(
         page 在 SettingsView 渲染时捕获, 供 run_task 回调中使用
         (ft.context.page 在 run_task 回调中不可用, 见 SettingsView docstring).
     """
-    if page is None or not hasattr(page, "show_toast"):
-        logger.warning("[SettingsView] show_toast unavailable: %s", message)
+    if page is None:
+        logger.warning("[SettingsView] page unavailable for toast: %s", message)
         return
     msg_type = "info"
     if color == AppColors.ERROR or color == "error":
@@ -132,13 +132,12 @@ def _show_snack_impl(
         msg_type = "success"
     elif color == AppColors.WARNING or color == "warning":
         msg_type = "warning"
-    # Task 5.1: action_text/on_action 仅在非 None 时透传 (保持无 action 场景调用签名不变)
-    toast_kwargs: dict[str, object] = {"type": msg_type}
-    if kwargs.get("action_text") is not None:
-        toast_kwargs["action_text"] = kwargs["action_text"]
-    if kwargs.get("on_action") is not None:
-        toast_kwargs["on_action"] = kwargs["on_action"]
-    page.show_toast(message, **toast_kwargs)  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
+    page.toast.show(  # type: ignore[attr-defined]  # [reason: page.toast 由 application.py 动态挂载, ft.Page 存根未声明]
+        message,
+        msg_type,
+        action_text=kwargs.get("action_text"),
+        on_action=kwargs.get("on_action"),
+    )
 
 
 @ft.component

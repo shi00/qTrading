@@ -110,7 +110,7 @@ async def test_toast_manager_cleanup_with_page():
     """Verify Toast Manager is cleaned up when page has toast attribute."""
     mock_page = MagicMock()
     mock_toast = MagicMock()
-    mock_toast.stop_all = MagicMock(return_value=None)
+    mock_toast.stop_all = AsyncMock()
     mock_page.toast = mock_toast
 
     coordinator = ShutdownCoordinator(page=mock_page)

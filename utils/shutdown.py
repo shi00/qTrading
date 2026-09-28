@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import logging
 import os
 import threading
@@ -432,23 +431,20 @@ class ShutdownCoordinator:
     async def _step4_clear_toast(self):
         logger.info("[Shutdown] Step 4: Clearing Toast Manager...")
         page = self._page
-        toast = getattr(page, "toast", None) if page is not None else None
-        if toast is not None and hasattr(toast, "stop_all"):
-            try:
-                res = toast.stop_all()
-                if inspect.iscoroutine(res):
-                    await res
-                logger.info("[Shutdown]   - Toast Manager stopped.")
-            except Exception as e:
-                log_classified(
-                    logger,
-                    e,
-                    "general",
-                    "[Shutdown]   - Toast Manager cleanup skipped (%s): %s",
-                    exc_info=True,
-                )
-        else:
+        if page is None:
             logger.info("[Shutdown]   - Toast Manager not initialized, skipping.")
+            return
+        try:
+            await page.toast.stop_all()
+            logger.info("[Shutdown]   - Toast Manager stopped.")
+        except Exception as e:
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[Shutdown]   - Toast Manager cleanup skipped (%s): %s",
+                exc_info=True,
+            )
 
     async def _step5_unload_ai_model(self):
         logger.info("[Shutdown] Step 5: Unloading AI model...")
