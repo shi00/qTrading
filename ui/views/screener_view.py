@@ -1502,9 +1502,12 @@ def _resolve_table_data(
 
 # D7-3: AI 三分区标题 → (i18n key, 图标, 标题颜色)。仅 View 渲染期使用; 数据按 ai_status
 # 已由 VM 拆分为 ai_recommended_rows/ai_excluded_rows/ai_failed_rows (§3.2 VM 只产出 key)。
+# CRITICAL-01: 分区标题只表达 AI 处理状态, 不作投资判断。"analyzed"(score>0) 分区原用
+# 「AI 推荐」+ SUCCESS 对勾, 会被误读为买入建议; 现改中性文案 + 中性色, 投资判断交由每行
+# ai_score 数值承载 (不依赖分区颜色暗示)。
 _SECTION_META: tuple[tuple[str, typing.Any, str, str], ...] = (
     # (i18n key, 图标名, 图标色, 分区标签)
-    ("screener_section_recommended", ft.Icons.CHECK_CIRCLE, AppColors.SUCCESS, "recommended"),
+    ("screener_section_recommended", ft.Icons.ANALYTICS, AppColors.TEXT_SECONDARY, "recommended"),
     ("screener_section_excluded", ft.Icons.DO_NOT_DISTURB, AppColors.WARNING, "excluded"),
     ("screener_section_failed", ft.Icons.ERROR_OUTLINE, AppColors.ERROR, "failed"),
 )

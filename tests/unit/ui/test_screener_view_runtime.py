@@ -626,6 +626,8 @@ def _patch_screener_view_mocks(mod, monkeypatch: pytest.MonkeyPatch, fake_vm: _F
     def _fake_paginated_table(**kwargs: Any) -> Any:
         captured_callbacks["on_sort"] = kwargs.get("on_sort")
         captured_callbacks["on_row_click"] = kwargs.get("on_row_click")
+        # CRITICAL-01: 捕获每次挂载的 (columns, rows), 供断言 AI 分数列固定渲染
+        captured_callbacks.setdefault("tables", []).append((kwargs.get("columns"), kwargs.get("rows")))
         return MagicMock(name="PaginatedTable")
 
     monkeypatch.setattr(mod, "PaginatedTable", _fake_paginated_table)
@@ -2897,6 +2899,58 @@ class TestScreenerViewSectionRendering:
         titles = self._section_titles(env)
         assert any("screener_section_recommended" in t for t in titles)
         assert any("screener_section_failed" in t for t in titles)
+
+    # --- CRITICAL-01: 分区标题中性化 (过渡方案·仅 UI) ---
+
+    def test_analyzed_rows_not_under_recommend_title(self, screener_view_env) -> None:
+        """CRITICAL-01: analyzed(评分>0) 分区标题不得含「推荐/看好/买入」语义。
+
+        View 只产 i18n key (不感知 locale), 标题语义由 locales 双语文案承载;
+        此处渲染层断言 analyzed 行挂在 screener_section_recommended key 下,
+        文案中性化由 test_i18n_section_titles_neutral (locales 直读) 守护。
+        """
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._set_current_page_rows(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "ai_status": ["analyzed", "rejected"],
+                    "ai_score": [88.0, 0.0],
+                }
+            )
+        )
+        _rerender(env)
+
+        titles = self._section_titles(env)
+        assert len(titles) >= 2
+        assert "screener_section_recommended" in titles[0]
+
+    def test_ai_score_column_fixed_in_every_section_table(self, screener_view_env) -> None:
+        """CRITICAL-01: 每个分区的表格都固定渲染 AI 分数列 (数值), 不依赖分区颜色暗示。"""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._set_current_page_rows(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                    "ai_status": ["analyzed", "analyzed", "rejected"],
+                    "ai_score": [88.0, 72.5, 0.0],
+                }
+            )
+        )
+        env["captured_callbacks"].clear()  # 隔离 fixture 初始渲染捕获的表格
+        _rerender(env)
+
+        tables = env["captured_callbacks"].get("tables", [])
+        assert len(tables) == 2, f"analyzed+rejected 两区各有表格, 实际 {len(tables)}"
+        for columns, rows in tables:
+            col_ids = [c["id"] for c in columns]
+            assert "ai_score" in col_ids, f"每区分区表须含 ai_score 列, 实际 {col_ids}"
+            # 每行 ai_score 为格式化后的数值字符串 (非空), 而非 "-"
+            assert all(r.get("ai_score") not in (None, "-") for r in rows), rows
 
 
 class TestTableDataMemo:
