@@ -3,8 +3,8 @@
 捕捉 Flet 0.28.3 → 0.85.3 升级时 MockFletPage 与真实 Page 的接口漂移：
 - 正向契约：MockFletPage 显式实现的公开成员必须在真实 ft.Page 上存在
   （Flet 删除/重命名属性时立即失败，提醒同步 mock）
-- 排除集校验：项目扩展（show_toast 由 main.py 动态挂载）不在
-  ft.Page 原生接口上，需显式排除并验证排除集仍然准确
+- 排除集校验：项目在 Page 实例上动态挂载的扩展不在
+  ft.Page 原生接口上，需显式排除并验证排除集仍然准确（当前为空集）
 - V1 关键成员存在性：services/show_dialog/pop_dialog/on_resize/run_task
   在 V1 Page 上必备（R2/R3/R4/R11 配方应用后），逐项断言避免 mock 漂移
 - §4.1 spike 实测结论全覆盖：入口/按钮/FilePicker/Page 字段/NavRail/flet_charts/
@@ -21,12 +21,12 @@ from tests.unit.ui.mock_flet import MockFletPage
 
 pytestmark = pytest.mark.unit
 
-# 项目扩展方法/属性：由 main.py 动态挂载到 Page 实例，不在 flet 原生 Page 类上
-# - show_toast: main.py 动态挂载（page.show_toast = show_toast）
+# 项目扩展方法/属性：由项目在 Page 实例上动态挂载，不在 flet 原生 Page 类上。
+# 当前为空——原 show_toast 桥接已随 Flet V1 迁移完成而移除，项目统一改用 page.toast。
 # R11 已删除 mock 的 dialog/open/close，不再纳入排除集；R10 已将 client_storage 替换为
 # shared_preferences，而 shared_preferences 也随 Flet 1.0.0 从 Page 移除（见 mock_flet.py），
 # 二者均不再纳入排除集。
-_PROJECT_EXTENSIONS = frozenset({"show_toast"})
+_PROJECT_EXTENSIONS: frozenset[str] = frozenset()
 
 # V1 Page 必备成员（R2/R3/R4/R11 配方应用后 mock 与真实 Page 均应存在）
 # - services: R4 FilePicker 服务化挂载点
@@ -57,8 +57,8 @@ def test_mock_flet_page_attrs_exist_on_real_page():
     """正向契约：MockFletPage 显式实现的公开成员必须在真实 ft.Page 上存在。
 
     捕捉 Flet 升级时 MockFletPage 残留已删除/重命名属性导致的接口漂移。
-    项目扩展（show_toast）由 main.py 动态挂载，不在 ft.Page 原生接口上，
-    因此显式排除。
+    项目在 Page 实例上动态挂载的扩展（_PROJECT_EXTENSIONS，当前为空集）
+    不在 ft.Page 原生接口上，因此显式排除。
     """
     mock_members = _mock_flet_page_public_members()
     real_members = _real_page_public_members()
@@ -478,8 +478,8 @@ def test_v1_line_chart_fields_exist_and_data_points_removed():
 def test_v1_drag_update_event_fields_exist_and_delta_removed():
     """R13 契约：DragUpdateEvent 必须含 local_delta/global_delta/primary_delta，delta_x/delta_y 应已移除（A11 spike ✅）。
 
-    V1 ``DragUpdateEvent`` 强类型化，无 V0 的 ``delta_x/delta_y``，改用 ``primary_delta``
-    （主路径）或 ``local_delta.x``（回退）。项目 ``resizable_splitter.py`` 依赖此字段链路。
+    V1 ``DragUpdateEvent`` 强类型化，无 V0 的 ``delta_x/delta_y``，改用 ``primary_delta``。
+    项目 ``resizable_splitter.py`` 依赖此字段链路。
     """
     assert hasattr(ft.DragUpdateEvent, "__dataclass_fields__"), "DragUpdateEvent 不是 dataclass——flet 可能已升级"
     fields = set(ft.DragUpdateEvent.__dataclass_fields__.keys())

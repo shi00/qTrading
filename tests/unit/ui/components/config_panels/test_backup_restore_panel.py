@@ -400,7 +400,6 @@ class TestClickHandlers:
         mock_file_picker = MagicMock()
         mock_file_picker.pick_files = AsyncMock(return_value=None)  # 未选文件
         mock_page = MagicMock()
-        mock_page.show_toast = MagicMock()
         _set_context_page(mock_page)
         try:
             handler = panel_module._on_restore_wizard_click_factory(vm, mock_file_picker)
@@ -411,10 +410,10 @@ class TestClickHandlers:
             _set_context_page(None)
 
         vm.start_restore_wizard.assert_not_called()
-        # 强断言: 验证 show_toast 参数 (type=info + 非空 message)
-        toast_args = mock_page.show_toast.call_args
-        assert toast_args is not None, "show_toast should be called when no file selected"
-        assert toast_args.kwargs.get("type") == "info"
+        # 强断言: 验证 page.toast.show 参数 (msg_type=info + 非空 message)
+        toast_args = mock_page.toast.show.call_args
+        assert toast_args is not None, "toast should be called when no file selected"
+        assert toast_args.args[1] == "info"
         assert isinstance(toast_args.args[0], str) and len(toast_args.args[0]) > 0
 
     def test_on_restore_wizard_click_silent_on_runtime_error(self) -> None:

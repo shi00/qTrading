@@ -15,10 +15,10 @@
   cleanup 中 ``gather_for_shutdown_cleanup`` 不重新抛出（关机清理语义）
 - ``gather_for_shutdown_cleanup`` 保留（``stop_all`` 优雅停机）
 
-消费方适配（后续 phase）:
-    main.py 中 ``page.toast = ToastManager(page)`` 仍可工作（命令式 API 保留），
-    但需额外将 ``ToastManagerView()`` 挂载到 page overlay 列表才能显示 toast。
-    本 phase 仅重写 toast_manager.py，main.py 适配留待后续。
+消费方适配:
+    ``app/application.py`` 启动时 ``page.toast = ToastManager(page)`` 完成挂载
+    （供 UI 层 ``page.toast.show(...)`` 调用），并将 ``ToastManagerView()`` 渲染进
+    RootView 的 ``ft.Stack``（二者共享同一 renderer）以真正显示 toast。
 """
 
 import asyncio
@@ -301,7 +301,7 @@ class ToastManager:
     跨调用/跨测试残留的类级或实例级可变状态（即不再作为"事实单例"承载状态）。
 
     本壳仅作 ``page.toast = ToastManager(page)`` 动态挂载的薄委托：``shutdown.py``
-    （utils 层）经 ``getattr(page, "toast", None).stop_all()`` 访问到进程级停机能力，
+    （utils 层）经 ``page.toast.stop_all()`` 访问到进程级停机能力，
     避免 utils→ui 反向依赖（import-linter "R1: utils must not import business layers" 契约）。首选用模块级无状态函数
     ``show(page, ...)`` / ``stop_all()``（显式传 page）。
     """
@@ -341,7 +341,7 @@ def ToastManagerView() -> ft.Container:
     """声明式 Toast 渲染组件，订阅全局 ``ToastManagerState``。
 
     消费方将本组件实例加入 page 的 overlay 列表即可显示 toast
-    （具体挂载方式由消费方负责，本 phase 不改 main.py）。
+    （具体挂载方式由消费方负责，见 ``app/application.py`` 的 RootView）。
 
     自动重渲染：``ToastManager.show()`` 更新 state.toasts 触发 Observable 通知，
     本组件通过 ``ft.use_state(get_global_state)`` 订阅，框架自动重渲染。

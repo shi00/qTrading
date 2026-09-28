@@ -35,11 +35,9 @@ def _get_page() -> ft.Page | None:
         return None
 
 
-def _safe_show_toast(page: ft.Page, msg: str, msg_type: str = "info") -> None:
-    """page.show_toast 是 main.py 动态挂载的，ft.Page 类型存根未声明。"""
-    show_toast = getattr(page, "show_toast", None)
-    if show_toast is not None:
-        show_toast(msg, msg_type)
+def _show_toast(page: ft.Page, msg: str, msg_type: str = "info") -> None:
+    """显式调用页面统一 Toast 组件 (``page.toast`` 由 application.py 挂载)。"""
+    page.toast.show(msg, msg_type)  # type: ignore[attr-defined]  # [reason: page.toast 由 application.py 动态挂载, ft.Page 存根未声明]
 
 
 def _build_watchlist_row(
@@ -146,14 +144,14 @@ def WatchlistView(
             await vm.remove_from_watchlist(ts_code)
             page = _get_page()
             if page is not None:
-                _safe_show_toast(page, I18n.get("watchlist_removed"), "success")
+                _show_toast(page, I18n.get("watchlist_removed"), "success")
         except asyncio.CancelledError:
             raise
         except Exception as ex:
             logger.error("[WatchlistView] Remove failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             page = _get_page()
             if page is not None:
-                _safe_show_toast(page, I18n.get("watchlist_remove_failed"), "error")
+                _show_toast(page, I18n.get("watchlist_remove_failed"), "error")
 
     # --- 添加关注 (issue #433) ---
     async def _do_add(ts_code: str, stock_name: str, note: str) -> None:
@@ -161,14 +159,14 @@ def WatchlistView(
             await vm.add_to_watchlist(ts_code, stock_name, note or None)
             page = _get_page()
             if page is not None:
-                _safe_show_toast(page, I18n.get("watchlist_added"), "success")
+                _show_toast(page, I18n.get("watchlist_added"), "success")
         except asyncio.CancelledError:
             raise
         except Exception as ex:
             logger.error("[WatchlistView] Add failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             page = _get_page()
             if page is not None:
-                _safe_show_toast(page, I18n.get("watchlist_add_failed"), "error")
+                _show_toast(page, I18n.get("watchlist_add_failed"), "error")
 
     def _on_add(ts_code: str, stock_name: str, note: str) -> None:
         """WatchlistAddDialog on_add: 关闭对话框并调度 _do_add 执行添加。"""

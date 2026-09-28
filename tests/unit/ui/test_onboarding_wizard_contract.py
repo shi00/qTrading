@@ -641,7 +641,7 @@ class _FakePanelViewModel:
 
 
 def _make_fake_page() -> FakePage:
-    """创建带 run_task/show_toast/locale_configuration 的 FakePage。
+    """创建带 run_task/toast/locale_configuration 的 FakePage。
 
     ``run_task`` 同步执行协程（测试需验证 cleanup 等异步路径的实际行为）。
     """
@@ -653,7 +653,7 @@ def _make_fake_page() -> FakePage:
             asyncio.run(coro)
 
     page.run_task = _run_task  # type: ignore[method-assign]
-    page.show_toast = MagicMock()  # type: ignore[method-assign]
+    page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
     page.locale_configuration = MagicMock()
     return page
 

@@ -184,12 +184,6 @@ async def _run_session(
 
     page.on_error = on_error
 
-    def show_toast(message, type="info", action_text=None, on_action=None):
-        # P2-10: action_text/on_action 透传（导出引导"打开文件夹"）；显式传入 page（review05-E15 无状态化）
-        toast_show(page, message, type, action_text=action_text, on_action=on_action)
-
-    page.show_toast = show_toast  # type: ignore[attr-defined]  # [reason: 动态挂载 show_toast 函数到 Page 实例，供 UI 层通过 page.show_toast 调用]
-
     # --- Startup flow: delegate to StartupController + StartupViewRenderer ---
 
     async def _perform_upgrade_exit():
@@ -197,8 +191,8 @@ async def _run_session(
         await perform_upgrade_exit(coordinator, page, is_web_mode_fn=_is_web_mode)
 
     def _on_show_toast(message_key, toast_type="info"):
-        """Wrap show_toast to resolve i18n keys before displaying."""
-        show_toast(I18n.get(message_key), toast_type)
+        """启动期 toast 回调：解析 i18n key 后经无状态 ``toast_show`` 呈现（显式传入 page）。"""
+        toast_show(page, I18n.get(message_key), toast_type)
 
     bridge = _StartupBridge()
     controller = StartupController(

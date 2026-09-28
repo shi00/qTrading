@@ -109,8 +109,10 @@ def _on_restore_wizard_click_factory(
                 page = ft.context.page
             except RuntimeError:
                 page = None
-            if page is not None and hasattr(page, "show_toast"):
-                page.show_toast(I18n.get("backup_view_offline_guide"), type="info")  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
+            if page is not None:
+                page.toast.show(  # type: ignore[attr-defined]  # [reason: page.toast 由 application.py 动态挂载, ft.Page 存根未声明]
+                    I18n.get("backup_view_offline_guide"), "info"
+                )
             return
         picked_path = result[0].path
         if not picked_path:

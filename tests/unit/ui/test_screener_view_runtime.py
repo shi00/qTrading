@@ -580,10 +580,10 @@ class _FakeScreenerViewModel:
 
 
 def _make_fake_page() -> FakePage:
-    """创建带 run_task / show_toast / pubsub 的 fake page."""
+    """创建带 run_task / toast / pubsub 的 fake page."""
     page = FakePage()
     page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
-    page.show_toast = MagicMock()  # type: ignore[attr-defined]
+    page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
     # Task 8.3: backtest 跳转按钮通过 page.pubsub.send_all_on_topic 广播导航
     page.pubsub = MagicMock()  # type: ignore[attr-defined]
     page.pubsub.send_all_on_topic = MagicMock()  # type: ignore[attr-defined]
@@ -1441,7 +1441,7 @@ class TestOnExportClick:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        page.show_toast.assert_called_once_with("i18n[data_export_no_data]", "error", action_text=None, on_action=None)
+        page.toast.show.assert_called_once_with("i18n[data_export_no_data]", "error", action_text=None, on_action=None)
 
     def test_empty_filepath_early_return(self, screener_view_env) -> None:
         """file_picker.save_file 返回空 → 早返回, 不调 export_results."""
@@ -1458,7 +1458,7 @@ class TestOnExportClick:
         file_picker.save_file = AsyncMock(return_value="")
 
         page.run_task.reset_mock()
-        page.show_toast.reset_mock()
+        page.toast.show.reset_mock()
         buttons = _get_buttons(env)
         export_btn = next(b for b in buttons if isinstance(b, ft.Button) and "export" in str(b.content))
         _invoke(export_btn.on_click, _make_event())
@@ -1482,7 +1482,7 @@ class TestOnExportClick:
         file_picker.save_file = AsyncMock(return_value="/path/to/file.csv")
 
         page.run_task.reset_mock()
-        page.show_toast.reset_mock()
+        page.toast.show.reset_mock()
         buttons = _get_buttons(env)
         export_btn = next(b for b in buttons if isinstance(b, ft.Button) and "export" in str(b.content))
         _invoke(export_btn.on_click, _make_event())
@@ -1490,7 +1490,7 @@ class TestOnExportClick:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        page.show_toast.assert_called_once_with(
+        page.toast.show.assert_called_once_with(
             "i18n[data_export_success]", "success", action_text="i18n[data_export_open_folder]", on_action=ANY
         )
 
@@ -1508,7 +1508,7 @@ class TestOnExportClick:
         file_picker.save_file = AsyncMock(return_value="/path/to/file.csv")
 
         page.run_task.reset_mock()
-        page.show_toast.reset_mock()
+        page.toast.show.reset_mock()
         buttons = _get_buttons(env)
         export_btn = next(b for b in buttons if isinstance(b, ft.Button) and "export" in str(b.content))
         _invoke(export_btn.on_click, _make_event())
@@ -1516,7 +1516,7 @@ class TestOnExportClick:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        page.show_toast.assert_called_once_with("i18n[data_export_fail]", "error", action_text=None, on_action=None)
+        page.toast.show.assert_called_once_with("i18n[data_export_fail]", "error", action_text=None, on_action=None)
 
     def test_export_exception_calls_sanitizer(self, screener_view_env) -> None:
         """R9: export_results 抛 Exception → DataSanitizer.sanitize_error + show_toast."""
@@ -1542,7 +1542,7 @@ class TestOnExportClick:
         file_picker.save_file = AsyncMock(return_value="/path/to/file.csv")
 
         page.run_task.reset_mock()
-        page.show_toast.reset_mock()
+        page.toast.show.reset_mock()
         buttons = _get_buttons(env)
         export_btn = next(b for b in buttons if isinstance(b, ft.Button) and "export" in str(b.content))
         _invoke(export_btn.on_click, _make_event())
@@ -1556,7 +1556,7 @@ class TestOnExportClick:
         assert isinstance(san_args[0], RuntimeError)
         assert str(san_args[0]) == "export crash"
         # show_toast 被调用 (error)
-        page.show_toast.assert_called_once_with("i18n[data_export_fail]", "error", action_text=None, on_action=None)
+        page.toast.show.assert_called_once_with("i18n[data_export_fail]", "error", action_text=None, on_action=None)
 
 
 class TestOnExportExcelClick:
@@ -1576,7 +1576,7 @@ class TestOnExportExcelClick:
         file_picker.save_file = AsyncMock(return_value="/path/to/file.xlsx")
 
         page.run_task.reset_mock()
-        page.show_toast.reset_mock()
+        page.toast.show.reset_mock()
         buttons = _get_buttons(env)
         # 定位 Excel 按钮 (i18n[data_export_excel] 含 "excel" 关键词)
         excel_btn = next(b for b in buttons if isinstance(b, ft.Button) and "data_export_excel" in str(b.content))
@@ -1590,7 +1590,7 @@ class TestOnExportExcelClick:
         # 验证未误调 CSV 导出方法
         assert not any(c.startswith("export_results:") for c in fake_vm.method_calls)
         # 成功 toast
-        page.show_toast.assert_called_once_with(
+        page.toast.show.assert_called_once_with(
             "i18n[data_export_success]", "success", action_text="i18n[data_export_open_folder]", on_action=ANY
         )
 
@@ -1645,7 +1645,7 @@ class TestOnExportClickWebMode:
         file_picker.save_file = AsyncMock(return_value="dummy")
 
         page.run_task.reset_mock()
-        page.show_toast.reset_mock()
+        page.toast.show.reset_mock()
         buttons = _get_buttons(env)
         export_btn = next(b for b in buttons if isinstance(b, ft.Button) and "export" in str(b.content))
         _invoke(export_btn.on_click, _make_event())
@@ -1660,7 +1660,7 @@ class TestOnExportClickWebMode:
         save_file_kwargs = file_picker.save_file.call_args.kwargs
         assert save_file_kwargs["src_bytes"] == b"csv_data_bytes"
         # 成功 toast
-        page.show_toast.assert_called_once_with(
+        page.toast.show.assert_called_once_with(
             "i18n[data_export_success]", "success", action_text=None, on_action=None
         )
 
@@ -1684,7 +1684,7 @@ class TestOnExportClickWebMode:
         file_picker.save_file = AsyncMock(return_value="dummy")
 
         page.run_task.reset_mock()
-        page.show_toast.reset_mock()
+        page.toast.show.reset_mock()
         buttons = _get_buttons(env)
         excel_btn = next(b for b in buttons if isinstance(b, ft.Button) and "data_export_excel" in str(b.content))
         _invoke(excel_btn.on_click, _make_event())
@@ -1713,7 +1713,7 @@ class TestOnExportClickWebMode:
         _rerender(env)
 
         page.run_task.reset_mock()
-        page.show_toast.reset_mock()
+        page.toast.show.reset_mock()
         buttons = _get_buttons(env)
         export_btn = next(b for b in buttons if isinstance(b, ft.Button) and "export" in str(b.content))
         _invoke(export_btn.on_click, _make_event())
@@ -1722,7 +1722,7 @@ class TestOnExportClickWebMode:
         asyncio.run(handler(*args))
 
         # 错误 toast
-        page.show_toast.assert_called_once_with("i18n[data_export_fail]", "error", action_text=None, on_action=None)
+        page.toast.show.assert_called_once_with("i18n[data_export_fail]", "error", action_text=None, on_action=None)
 
 
 # ============================================================================
@@ -1781,13 +1781,13 @@ class TestLoadHistoryTree:
 
         segs = _get_segmented_buttons(env)
         page.run_task.reset_mock()
-        page.show_toast.reset_mock()
+        page.toast.show.reset_mock()
         _invoke(segs[0].on_change, _make_event(selected=["HISTORY"]))
 
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        page.show_toast.assert_called_once_with("i18n[screener_load_failed]", "error", action_text=None, on_action=None)
+        page.toast.show.assert_called_once_with("i18n[screener_load_failed]", "error", action_text=None, on_action=None)
 
     def test_cancelled_error_propagates(self, screener_view_env) -> None:
         """R2: vm.load_history_tree 抛 CancelledError → 传播."""
@@ -1967,7 +1967,7 @@ class TestLoadHistoryForDate:
         asyncio.run(handler(*args))
 
         # 验证 show_toast 被调用 (screener_load_failed 错误提示, 强断言验证参数)
-        page.show_toast.assert_called_once_with("i18n[screener_load_failed]", "error", action_text=None, on_action=None)
+        page.toast.show.assert_called_once_with("i18n[screener_load_failed]", "error", action_text=None, on_action=None)
 
 
 # ============================================================================
@@ -2111,14 +2111,14 @@ class TestDoRestoreDefaultAsync:
         with patch.object(fake_vm, "reset_strategy_prompt", new_callable=AsyncMock) as mock_reset:
             mock_reset.return_value = "default_prompt"
             page.run_task.reset_mock()
-            page.show_toast.reset_mock()
+            page.toast.show.reset_mock()
             _invoke(restore_btn.on_click, _make_event())
 
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
             mock_reset.assert_awaited_once()
-            page.show_toast.assert_called_once_with(
+            page.toast.show.assert_called_once_with(
                 "i18n[ai_settings_restored]", "info", action_text=None, on_action=None
             )
 
@@ -2142,13 +2142,13 @@ class TestDoRestoreDefaultAsync:
         with patch.object(fake_vm, "reset_strategy_prompt", new_callable=AsyncMock) as mock_reset:
             mock_reset.side_effect = RuntimeError("db error")
             page.run_task.reset_mock()
-            page.show_toast.reset_mock()
+            page.toast.show.reset_mock()
             _invoke(restore_btn.on_click, _make_event())
 
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
-            page.show_toast.assert_called_once_with(
+            page.toast.show.assert_called_once_with(
                 "i18n[sys_snack_save_err]", "error", action_text=None, on_action=None
             )
 
@@ -2185,7 +2185,7 @@ class TestDoSavePromptAsync:
         with patch.object(fake_vm, "save_strategy_prompt", new_callable=AsyncMock) as mock_save:
             mock_save.return_value = (False, "prompt_err_length")
             page.run_task.reset_mock()
-            page.show_toast.reset_mock()
+            page.toast.show.reset_mock()
             _invoke(save_btn.on_click, _make_event())
 
             handler, args, _ = _await_run_task_handler(page)
@@ -2193,7 +2193,7 @@ class TestDoSavePromptAsync:
 
             mock_save.assert_awaited_once()
             # D19: 校验失败 → inline 错误 (代替 warning toast), Warning SnackBar 不应再出现
-            page.show_toast.assert_not_called()
+            page.toast.show.assert_not_called()
 
             # 重渲染后, ai_system_prompt 文本域 error 应显示翻译后的错误消息
             _rerender(env)
@@ -2226,14 +2226,14 @@ class TestDoSavePromptAsync:
         with patch.object(fake_vm, "save_strategy_prompt", new_callable=AsyncMock) as mock_save:
             mock_save.return_value = (True, None)
             page.run_task.reset_mock()
-            page.show_toast.reset_mock()
+            page.toast.show.reset_mock()
             _invoke(save_btn.on_click, _make_event())
 
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
             mock_save.assert_awaited_once()
-            page.show_toast.assert_called_once_with(
+            page.toast.show.assert_called_once_with(
                 "i18n[ai_settings_saved]", "success", action_text=None, on_action=None
             )
 
@@ -2257,13 +2257,13 @@ class TestDoSavePromptAsync:
         with patch.object(fake_vm, "save_strategy_prompt", new_callable=AsyncMock) as mock_save:
             mock_save.side_effect = RuntimeError("db error")
             page.run_task.reset_mock()
-            page.show_toast.reset_mock()
+            page.toast.show.reset_mock()
             _invoke(save_btn.on_click, _make_event())
 
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
-            page.show_toast.assert_called_once_with(
+            page.toast.show.assert_called_once_with(
                 "i18n[sys_snack_save_err]", "error", action_text=None, on_action=None
             )
 
@@ -3517,11 +3517,10 @@ class TestExecuteLoadAiAttribution:
         from ui.views.screener_view import _execute_load_ai_attribution
 
         page = MagicMock()
-        page.show_toast = MagicMock()
         with patch("ui.views.screener_view.DataSanitizer"):
             asyncio.run(_execute_load_ai_attribution(self._vm(ValueError("boom")), page))
-        assert page.show_toast.call_count == 1
-        assert page.show_toast.call_args[0][1] == "error"
+        assert page.toast.show.call_count == 1
+        assert page.toast.show.call_args[0][1] == "error"
 
     def test_exception_with_none_page_no_crash(self) -> None:
         from ui.views.screener_view import _execute_load_ai_attribution

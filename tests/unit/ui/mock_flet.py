@@ -142,9 +142,6 @@ class MockFletPage:
         self._tasks.append(mock_task)
         return mock_task
 
-    def show_toast(self, message, type="info"):
-        pass
-
     def show_dialog(self, control):
         """V1 dialog 管理：维护独立 dialog 栈并同步 overlay 以支持测试断言。
 
@@ -176,14 +173,13 @@ class MockDragUpdateEvent:
     V1 ``ft.DragUpdateEvent`` 已强类型化，dataclass 字段为
     ``name/data/control/local_position/global_position/local_delta/
     global_delta/primary_delta/timestamp``——不再有 V0 的 ``delta_x/delta_y``。
-    本桩提供 R13 主路径 ``primary_delta``（水平拖拽为 x 增量）与回退字段
-    ``local_delta.x``（兼容边界场景），覆盖 ``resizable_splitter._on_drag_update``
-    的两条路径。绕过真实 flet 需 ControlEvent + JSON 解析的构造，故提供此轻量桩。
+    本桩提供 R13 ``primary_delta``（水平拖拽为 x 增量），覆盖
+    ``resizable_splitter._on_drag_update``。绕过真实 flet 需 ControlEvent +
+    JSON 解析的构造，故提供此轻量桩。
     """
 
-    def __init__(self, primary_delta=0, local_delta=None, global_delta=None):
+    def __init__(self, primary_delta=0, global_delta=None):
         self.primary_delta = primary_delta
-        self.local_delta = local_delta
         self.global_delta = global_delta
 
 

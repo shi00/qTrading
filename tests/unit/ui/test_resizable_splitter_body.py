@@ -228,30 +228,14 @@ class TestDragHandlers:
         # set_width 被调用 → schedule_update 被调用
         assert component_in_updates(page, divider)
 
-    def test_on_drag_update_local_delta_fallback(self, mock_i18n_state, mock_app_colors_state):
-        """primary_delta=None 时回退到 local_delta.x。"""
-        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
-            page, result = _render(_make_splitter(drag_interval=0))
-        divider = _find_divider(result)
-
-        e = MagicMock()
-        e.primary_delta = None
-        local_delta = MagicMock()
-        local_delta.x = 30
-        e.local_delta = local_delta
-        # 不应抛异常
-        _trigger_callback(divider.on_horizontal_drag_update, e)
-        assert component_in_updates(page, divider)
-
-    def test_on_drag_update_local_delta_none(self, mock_i18n_state, mock_app_colors_state):
-        """primary_delta=None 且 local_delta=None 时 delta_x=0 → new_width==current → return。"""
+    def test_on_drag_update_primary_delta_none(self, mock_i18n_state, mock_app_colors_state):
+        """primary_delta=None 时 delta_x=0 → new_width==current → return（无 local_delta 回退）。"""
         with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
             page, result = _render(_make_splitter())
         divider = _find_divider(result)
 
         e = MagicMock()
         e.primary_delta = None
-        e.local_delta = None
         updates_before = len(page.session.scheduled_updates)
         # 不应抛异常；delta_x=0 → new_width=current → 提前 return
         _trigger_callback(divider.on_horizontal_drag_update, e)

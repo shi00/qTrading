@@ -844,21 +844,18 @@ class TestColumnDrag:
         cell0 = _header_cell_of(result2, 0)
         assert cell0.width == 60
 
-    def test_drag_update_local_delta_fallback(self, mock_i18n_state, mock_app_colors_state):
-        """primary_delta=None → 回退 local_delta.x (R13)。"""
+    def test_drag_update_primary_delta_none_is_noop(self, mock_i18n_state, mock_app_colors_state):
+        """primary_delta=None → 视为 0 增量，宽度不变（V1 无 local_delta 回退，R13）。"""
         component = _make_component()
         _, result = _render(component)
         handle = _header_handle_of(result, 0)
         _trigger_callback(handle.on_horizontal_drag_start, MagicMock())
         e = MagicMock()
         e.primary_delta = None
-        local_delta = MagicMock()
-        local_delta.x = 30
-        e.local_delta = local_delta
         _trigger_callback(handle.on_horizontal_drag_update, e)
         result2 = render_once(component)
         cell0 = _header_cell_of(result2, 0)
-        assert cell0.width == 150  # 120 + 30
+        assert cell0.width == 120
 
     def test_drag_end_commits_final_width(self, mock_i18n_state, mock_app_colors_state):
         """拖拽结束提交最终宽度并清空 active_col。"""
