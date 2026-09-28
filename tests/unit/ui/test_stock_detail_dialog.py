@@ -133,7 +133,7 @@ class TestFormatMvPureFunction:
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
         self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.unit_format.I18n", self.mock_i18n),
             patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
         ]
         with contextlib.ExitStack() as stack:
@@ -217,7 +217,7 @@ class TestFormatVolPureFunction:
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
         self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.unit_format.I18n", self.mock_i18n),
             patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
         ]
         with contextlib.ExitStack() as stack:
@@ -253,23 +253,23 @@ class TestFormatVolPureFunction:
         result = format_vol(50000)
         assert result == "5.0unit_wanshou"
 
-    def test_value_under_10000_uses_shou(self):
+    def test_value_under_10000_uses_wanshou(self):
         from ui.components.stock_detail_dialog import format_vol
 
+        # CRITICAL-02: 统一「万手」口径（与结果表表头一致），小额亦按万手 1 位小数
         result = format_vol(5000)
-        assert result == "5000unit_shou"
+        assert result == "0.5unit_wanshou"
 
     def test_zero_value_formats_correctly(self):
         from ui.components.stock_detail_dialog import format_vol
 
-        # 0 < 10000, so uses 手 unit
-        assert format_vol(0.0) == "0unit_shou"
+        assert format_vol(0.0) == "0.0unit_wanshou"
 
-    def test_negative_value_under_10000_uses_shou(self):
+    def test_negative_value_under_10000_uses_wanshou(self):
         from ui.components.stock_detail_dialog import format_vol
 
         result = format_vol(-5000)
-        assert result == "-5000unit_shou"
+        assert result == "-0.5unit_wanshou"
 
     def test_large_value_uses_wanshou(self):
         from ui.components.stock_detail_dialog import format_vol
@@ -307,7 +307,7 @@ class TestFormatAmountPureFunction:
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
         self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.unit_format.I18n", self.mock_i18n),
             patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
         ]
         with contextlib.ExitStack() as stack:
@@ -441,7 +441,7 @@ class TestFormatMvModuleFunction:
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
         self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.unit_format.I18n", self.mock_i18n),
             patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
         ]
         with contextlib.ExitStack() as stack:
@@ -481,7 +481,7 @@ class TestFormatVolModuleFunction:
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
         self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.unit_format.I18n", self.mock_i18n),
             patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
         ]
         with contextlib.ExitStack() as stack:
@@ -504,7 +504,7 @@ class TestFormatVolModuleFunction:
         from ui.components.stock_detail_dialog import _format_vol
 
         result = _format_vol({"vol": 5000}, "vol")
-        assert "5000" in result
+        assert "0.5" in result
 
     def test_format_vol_nan_returns_dash(self):
         from ui.components.stock_detail_dialog import _format_vol
@@ -527,7 +527,7 @@ class TestFormatAmountModuleFunction:
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
         self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.unit_format.I18n", self.mock_i18n),
             patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
         ]
         with contextlib.ExitStack() as stack:
@@ -574,7 +574,7 @@ class TestFormatPureFunctionExceptionBranch:
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
         self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.unit_format.I18n", self.mock_i18n),
             patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
         ]
         with contextlib.ExitStack() as stack:
@@ -1004,20 +1004,26 @@ class TestStockDetailDialogContract:
         assert "ft.use_effect(" in content
 
     def test_pure_functions_preserved(self) -> None:
-        """验证模块级纯函数保留导出。"""
+        """验证单位/数值纯函数经 ui/components/unit_format.py 承载并从本模块 re-export。
+
+        CRITICAL-02: 换算提升为 UI 层共用模块（结果表与详情框共用单一数据源）。
+        """
         from pathlib import Path
 
-        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "stock_detail_dialog.py"
-        content = dialog_path.read_text(encoding="utf-8")
+        comp_dir = Path(__file__).parent.parent.parent.parent / "ui" / "components"
+        dialog_content = (comp_dir / "stock_detail_dialog.py").read_text(encoding="utf-8")
+        unit_content = (comp_dir / "unit_format.py").read_text(encoding="utf-8")
 
-        # 纯函数
-        assert "def is_valid_number(" in content
-        assert "def format_mv(" in content
-        assert "def format_vol(" in content
-        assert "def format_amount(" in content
+        # 纯函数定义落在共用模块
+        assert "def is_valid_number(" in unit_content
+        assert "def format_mv(" in unit_content
+        assert "def format_vol(" in unit_content
+        assert "def format_amount(" in unit_content
+        # 本模块 re-export（外部/测试经 stock_detail_dialog 引用）
+        assert "from ui.components.unit_format import" in dialog_content
         # 常量
-        assert "TUSHARE_MV_UNIT" in content
-        assert "TUSHARE_AMOUNT_UNIT" in content
+        assert "TUSHARE_MV_UNIT" in unit_content
+        assert "TUSHARE_AMOUNT_UNIT" in unit_content
 
     def test_alert_dialog_modal_is_false(self) -> None:
         """契约：AlertDialog.modal=False，允许外部点击关闭（P3-UI-Source-Bugs-5）。"""
