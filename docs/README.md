@@ -1,4 +1,4 @@
-﻿# Project Documentation Index
+# Project Documentation Index
 
 本目录承载从 CONTRIBUTING.md 渐进式披露拆分出的专项深入文档。
 
@@ -21,7 +21,7 @@
 1. CLAUDE.md — 项目宪法（AI 自动加载，红线/架构边界/交互准则）
 2. CONTRIBUTING.md — 入口索引 + 最小命令 + PR 流程
 3. docs/ — 专项深入文档（本目录）
-4. man/ — 专题深度文档（database-account-separation / table-partitioning-strategy / flet-best-practices stub）
+4. man/ — 专题深度文档（database-account-separation / table-partitioning-strategy 为规划/设计文档、非现行实现；flet-best-practices 为指向 docs/flet/ 的 stub）
 
 按主题权威正本见 [CLAUDE.md](../CLAUDE.md) §1「文档权威性（按主题正本）」；冲突时先按主题确定正本，再以正本裁决。
 
