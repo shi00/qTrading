@@ -18,16 +18,31 @@
 
 ## 治理 ID 存量 WARNING 清零期限
 
-`scripts/check_docs_consistency.py::check_governance_id_glossary()`（检查项 19）对 `scripts/` 与 `tests/`
-的 `.py` 注释中**未登记治理 ID** 输出 WARNING（渐进部署、不阻断），脚本注释与文档均声明「存量清零后翻转
-ERROR」，但此前无清零期限或责任人，存在「无期限渐进部署永久停留 WARNING」的反模式（文档体系检视 F-11）。
-现记录如下约束：
+`scripts/check_docs_consistency.py::check_governance_id_glossary()`（检查项 19）对入口文档
+（CLAUDE.md / AGENTS.md / CONTRIBUTING.md）之外的受检面——其余受检文档（`docs/**`、`SECURITY.md`、
+`man/**`）、`docs/governance/*.yml` 与 `scripts/`、`tests/` 的 `.py`——中**未登记治理 ID** 输出
+WARNING（渐进部署、不阻断），脚本注释与文档均声明「存量清零后翻转 ERROR」，但此前无清零期限或责任人，
+存在「无期限渐进部署永久停留 WARNING」的反模式（文档体系检视 F-11）。现记录如下约束（H6-c/H2）：
 
 - **期限**：2026-12-31（Q4 末）。
 - **责任人**：架构维护者。
-- **翻转触发**：届期若存量未清零，须将对应 WARNING 升级为 ERROR（阻断门禁）并作为独立检视项复核；若存量
-  提前清零则立即翻转。
-- **现状基准**：2026-09-20 检视实录约 68 条（`scripts/` 与 `tests/` 的 `.py` 注释），检查脚本注释基线预估约 100 条。
+- **现状基准（已清零）**：H6-c 治理 ID 通用形态（`_GOVERNANCE_ID_PATTERN`）落地后，上述受检面实测
+  245 条未登记 ID；经在 `scripts/check_docs_consistency.py` 内建立**显式豁免清单**折算后，WARNING = 0。
+  豁免清单为该折算的唯一判据（SSOT），按命名空间性质分列并附理由：外部编号体系前缀
+  `_GOVERNANCE_ID_EXEMPT_PREFIXES`、纯报告命名空间前缀 `_REPORT_FINDING_PREFIXES`、共享命名空间逐条
+  列举 `_REPORT_FINDING_SHARED_IDS`（含已登记治理 ID 的前缀不得整体豁免）、门禁自引用
+  `_GATE_SELF_REFERENCE_PREFIXES` / `_GATE_SELF_REFERENCE_IDS`、门禁夹具 `_FIXTURE_ID_SUFFIX` /
+  `_FIXTURE_ID_PREFIXES`、非治理 token `_NON_GOVERNANCE_TOKEN_PREFIXES`；清单外任一新增未登记 ID 即
+  计入 WARNING（豁免清单增删须同步更新下述守卫单测，不得以宽泛正则静默）。
+- **量化判据**：连续 2 次全量扫描（CI 运行 `python scripts/check_docs_consistency.py`，检查项 19）
+  `check_governance_id_glossary()` 的 WARNING 条数 = 0（相对上述显式豁免清单）。该判据由
+  `tests/unit/test_docs_consistency.py::TestGovernanceIdGenericForm::test_real_repo_has_zero_unregistered_warning`
+  守护（断言 `errors == [] and warnings == []`，即「清单外仍有未登记 ID 时必须失败」），并以
+  `test_report_finding_prefixes_have_no_registered_member` 守护「纯报告前缀清单内不得出现已登记治理 ID」
+  的结构不变量，防止前缀级豁免退化为静默真实漂移。
+- **翻转触发**：届期（2026-12-31）若量化判据已连续满足，由架构维护者将其余受检面 WARNING 升级为
+  ERROR（阻断门禁）并作为独立检视项复核；若届期量化判据未满足（清单外存在未登记 ID），同样升级为
+  ERROR 以阻断清单外新增未登记 ID，不得继续以无期限 WARNING 停留。
 
 ## R20 报告模式升级期限
 

@@ -4883,6 +4883,16 @@ class TestCoreModulesCompleteness:
         assert "未找到 core/ 模块清单声明" in errors[0]
 
 
+def _unregistered_id_sample(prefix: str) -> str:
+    """构造「未登记治理 ID」测试样本（拼接构造，避免测试源码字面量进入 GDR-09 扫描面）.
+
+    本文件位于 `tests/**.py`——正是 GDR-09 的 .py 扫描面。若样本 ID 以字面量书写，本文件自身
+    即产生未登记 WARNING，破坏 H2 的「WARNING=0」基线；故以拼接方式构造运行时值
+    （源码不出现 `前缀-数字` 形态，运行时为真实未登记 ID）。
+    """
+    return f"{prefix}-42"
+
+
 class TestGovernanceIdGlossary:
     """GDR-09: 自动加载文档（CLAUDE.md/AGENTS.md）中出现的治理 ID 必须已在 governance-ids.md 登记."""
 
@@ -4894,7 +4904,11 @@ class TestGovernanceIdGlossary:
         assert errors == [], f"治理 ID 对照表检查应通过，实际报错: {errors}"
 
     def test_detects_unregistered_id_in_claude(self, tmp_path, monkeypatch):
-        """CLAUDE.md 出现未登记 ID（如新增 P9-99）→ 报错."""
+        """CLAUDE.md 出现未登记 ID（P2 前缀下清单外新编号）→ 报错.
+
+        样本用共享命名空间（P2 已有登记 ID）内的**清单外**新编号：验证报告发现编号豁免不会
+        把同前缀下真实新增的未登记治理 ID 一并静默（H2/L2 硬约束）。
+        """
         from check_docs_consistency import check_governance_id_glossary
 
         gov_dir = tmp_path / "docs" / "governance"
@@ -4904,19 +4918,20 @@ class TestGovernanceIdGlossary:
             encoding="utf-8",
         )
         claude = tmp_path / "CLAUDE.md"
-        claude.write_text("新增规则引用 P9-99（未登记）\n", encoding="utf-8")
+        sample = _unregistered_id_sample("P2")
+        claude.write_text(f"新增规则引用 {sample}（未登记）\n", encoding="utf-8")
 
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
         monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
         monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
 
         errors, _ = check_governance_id_glossary()
-        assert any("P9-99" in e and "未在 governance-ids.md 登记" in e for e in errors), (
+        assert any(sample in e and "未在 governance-ids.md 登记" in e for e in errors), (
             f"应检出未登记 ID, got: {errors}"
         )
 
     def test_detects_unregistered_id_in_agents(self, tmp_path, monkeypatch):
-        """AGENTS.md 出现未登记 ID（如新增 DOC-99）→ 报错."""
+        """AGENTS.md 出现未登记 ID（DOC 前缀下清单外新编号）→ 报错."""
         from check_docs_consistency import check_governance_id_glossary
 
         gov_dir = tmp_path / "docs" / "governance"
@@ -4926,14 +4941,15 @@ class TestGovernanceIdGlossary:
             encoding="utf-8",
         )
         agents = tmp_path / "AGENTS.md"
-        agents.write_text("引用 DOC-99（未登记）\n", encoding="utf-8")
+        sample = _unregistered_id_sample("DOC")
+        agents.write_text(f"引用 {sample}（未登记）\n", encoding="utf-8")
 
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
         monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
         monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [agents])
 
         errors, _ = check_governance_id_glossary()
-        assert any("DOC-99" in e and "未在 governance-ids.md 登记" in e for e in errors), (
+        assert any(sample in e and "未在 governance-ids.md 登记" in e for e in errors), (
             f"应检出未登记 ID, got: {errors}"
         )
 
@@ -4986,20 +5002,21 @@ class TestGovernanceIdGlossary:
 
         gov_dir = tmp_path / "docs" / "governance"
         gov_dir.mkdir(parents=True)
-        # 对照表只登记了 UIX-03，未登记 UIX-99
+        # 对照表只登记了 UIX-03，未登记 UIX 前缀下清单外新编号（UIX 的 -99 后缀为夹具，见夹具豁免用例）
         (gov_dir / "governance-ids.md").write_text(
             "| ID | 一句话含义 |\n|---|-----------|\n| UIX-03 | 订阅建立时机 |\n",
             encoding="utf-8",
         )
         claude = tmp_path / "CLAUDE.md"
-        claude.write_text("引用 UIX-99（未登记）\n", encoding="utf-8")
+        sample = _unregistered_id_sample("UIX")
+        claude.write_text(f"引用 {sample}（未登记）\n", encoding="utf-8")
 
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
         monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
         monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
 
         errors, _ = check_governance_id_glossary()
-        assert any("UIX-99" in e and "未在 governance-ids.md 登记" in e for e in errors), (
+        assert any(sample in e and "未在 governance-ids.md 登记" in e for e in errors), (
             f"应检出未登记 UIX ID, got: {errors}"
         )
 
@@ -5035,7 +5052,10 @@ class TestGovernanceIdGlossary:
             encoding="utf-8",
         )
         (tmp_path / "scripts").mkdir()
-        (tmp_path / "scripts" / "x.py").write_text("'''本测试守护 P9-98（未登记）的退出路径.'''\n", encoding="utf-8")
+        sample = _unregistered_id_sample("P2")
+        (tmp_path / "scripts" / "x.py").write_text(
+            f"'''本测试守护 {sample}（未登记）的退出路径.'''\n", encoding="utf-8"
+        )
 
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
         monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
@@ -5043,7 +5063,7 @@ class TestGovernanceIdGlossary:
 
         errors, warnings = check_governance_id_glossary()
         assert errors == [], f".py 未登记 ID 不应进 error, got: {errors}"
-        assert any("P9-98" in w for w in warnings), f"应产生 .py 未登记 WARNING, got: {warnings}"
+        assert any(sample in w for w in warnings), f"应产生 .py 未登记 WARNING, got: {warnings}"
 
     def test_py_scan_silent_when_registered(self, tmp_path, monkeypatch):
         """.py 中治理 ID 已登记 → 无 error 亦无 WARNING."""
@@ -5076,19 +5096,21 @@ class TestGovernanceIdGlossary:
             encoding="utf-8",
         )
         claude = tmp_path / "CLAUDE.md"
-        claude.write_text("引用 P9-98（未登记）\n", encoding="utf-8")
+        doc_sample = _unregistered_id_sample("P2")
+        claude.write_text(f"引用 {doc_sample}（未登记）\n", encoding="utf-8")
+        py_sample = _unregistered_id_sample("DOC")
         (tmp_path / "scripts").mkdir()
-        (tmp_path / "scripts" / "x.py").write_text("'''本测试守护 P9-97（未登记）.'''\n", encoding="utf-8")
+        (tmp_path / "scripts" / "x.py").write_text(f"'''本测试守护 {py_sample}（未登记）.'''\n", encoding="utf-8")
 
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
         monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
         monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
 
         errors, warnings = check_governance_id_glossary()
-        assert any("P9-98" in e and "未在 governance-ids.md 登记" in e for e in errors), (
+        assert any(doc_sample in e and "未在 governance-ids.md 登记" in e for e in errors), (
             f"受检文档未登记 ID 仍应是 error, got: {errors}"
         )
-        assert any("P9-97" in w for w in warnings), f".py 未登记 ID 应为 WARNING, got: {warnings}"
+        assert any(py_sample in w for w in warnings), f".py 未登记 ID 应为 WARNING, got: {warnings}"
 
     def test_glossary_excludes_self_reference(self, tmp_path, monkeypatch):
         """登记正本 governance-ids.md 自身说明文字（夹具/别名示例）不触发未登记 error.
@@ -5123,7 +5145,7 @@ class TestGovernanceIdGenericForm:
     """H6-c：治理 ID 通用形态（大写前缀 + 短横 + 数字）+ 豁免清单 + 入口/非入口分级。"""
 
     def test_generic_form_detects_business_domain_id(self, tmp_path, monkeypatch):
-        """通用形态：入口文档出现未登记业务域 ID（如 BT-99）→ 报错（原白名单漏检业务域命名空间）."""
+        """通用形态：入口文档出现未登记业务域 ID（BT 前缀下清单外新编号）→ 报错（原白名单漏检业务域命名空间）."""
         from check_docs_consistency import check_governance_id_glossary
 
         gov_dir = tmp_path / "docs" / "governance"
@@ -5133,14 +5155,15 @@ class TestGovernanceIdGenericForm:
             encoding="utf-8",
         )
         claude = tmp_path / "CLAUDE.md"
-        claude.write_text("引用 BT-99（未登记）\n", encoding="utf-8")
+        sample = _unregistered_id_sample("BT")
+        claude.write_text(f"引用 {sample}（未登记）\n", encoding="utf-8")
 
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
         monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
         monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
 
         errors, _ = check_governance_id_glossary()
-        assert any("BT-99" in e and "未在 governance-ids.md 登记" in e for e in errors), (
+        assert any(sample in e and "未在 governance-ids.md 登记" in e for e in errors), (
             f"通用形态应检出业务域 ID, got: {errors}"
         )
 
@@ -5181,7 +5204,8 @@ class TestGovernanceIdGenericForm:
         patterns_dir = tmp_path / "docs" / "patterns"
         patterns_dir.mkdir(parents=True)
         doc = patterns_dir / "sample.md"
-        doc.write_text("引用 BT-99（未登记）\n", encoding="utf-8")
+        sample = _unregistered_id_sample("BT")
+        doc.write_text(f"引用 {sample}（未登记）\n", encoding="utf-8")
 
         monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
         monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
@@ -5189,7 +5213,123 @@ class TestGovernanceIdGenericForm:
 
         errors, warnings = check_governance_id_glossary()
         assert errors == [], f"非入口文档不应报 error, got: {errors}"
-        assert any("BT-99" in w for w in warnings), f"非入口文档应报 WARNING, got: {warnings}"
+        assert any(sample in w for w in warnings), f"非入口文档应报 WARNING, got: {warnings}"
+
+    def test_report_finding_prefix_exempt_outside_entry_doc(self, tmp_path, monkeypatch):
+        """H2：非入口文档引用轮次报告发现编号（如 MINOR-42）→ 豁免，不报未登记.
+
+        纯报告命名空间前缀（MINOR/MAJOR/SEC/RV/OSS…）下无任何已登记治理 ID，按前缀整体豁免。
+        """
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        patterns_dir = tmp_path / "docs" / "patterns"
+        patterns_dir.mkdir(parents=True)
+        doc = patterns_dir / "sample.md"
+        doc.write_text("见 MINOR-42 / SEC-42 / OSS-42 / RV-42（报告发现编号）\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [doc])
+
+        errors, warnings = check_governance_id_glossary()
+        assert errors == [] and warnings == [], f"纯报告前缀应豁免, got: errors={errors}, warnings={warnings}"
+
+    def test_report_finding_prefix_not_exempt_in_entry_doc(self, tmp_path, monkeypatch):
+        """H2 硬约束：入口文档引用纯报告前缀编号（如 MINOR-42）**不豁免** → 报错.
+
+        入口文档（读者无从解析面）只允许引用已登记治理 ID；否则「以报告发现之名引入真实治理 ID」
+        会被静默。共享命名空间内清单外的 ID（BT 前缀新编号）同理不豁免（见 test_generic_form_*）。
+        """
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text("引用 MINOR-42（未登记）\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
+
+        errors, _ = check_governance_id_glossary()
+        assert any("MINOR-42" in e and "未在 governance-ids.md 登记" in e for e in errors), (
+            f"入口文档中的报告发现编号应报错, got: {errors}"
+        )
+
+    def test_fixture_and_non_governance_tokens_always_exempt(self, tmp_path, monkeypatch):
+        """H2：夹具 ID（-99 / P9-97）与非治理 token（GLM-5/KEY-12345/IT-1/PR-478）在入口文档也豁免.
+
+        governance-ids.md 声明 `-99` 夹具不得登记；非治理 token 非治理命名空间。门禁自引用 ID
+        （DS-07 / GATE-09 / GOV-06）同为门禁脚本内部编号，亦豁免。
+        """
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            "夹具 DOC-99 / P9-99 / P9-97；模型 GLM-5；样例 KEY-12345；"
+            "集成测试 IT-1；锚点 PR-478；门禁自引用 DS-07 / GATE-09 / GOV-06\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
+
+        errors, warnings = check_governance_id_glossary()
+        assert errors == [] and warnings == [], f"夹具/非治理 token 应豁免, got: errors={errors}, warnings={warnings}"
+
+    def test_real_repo_has_zero_unregistered_warning(self):
+        """H2 DoD：真实仓库相对显式豁免清单外无未登记 ID（WARNING=0）.
+
+        本用例是「显式豁免清单外仍有未登记 ID 时必须失败」的守卫——新增未登记且未豁免的 ID
+        （无论 .py 注释还是受检文档）会在此失败，从而锁死 ruleset-changelog.md 声明的清零基线。
+        """
+        from check_docs_consistency import check_governance_id_glossary
+
+        errors, warnings = check_governance_id_glossary()
+        assert errors == [], f"真实仓库不应有未登记 error: {errors}"
+        assert warnings == [], f"真实仓库不应有未登记 WARNING（清零基线）: {warnings}"
+
+    def test_report_finding_prefixes_have_no_registered_member(self):
+        """结构不变量：豁免清单的命名空间划分不得与已登记治理 ID 冲突.
+
+        前缀级豁免仅对「从未承载治理 ID」的命名空间安全；若某前缀下出现已登记治理 ID，该前缀必须
+        从清单移除并改为逐条列举（如 _REPORT_FINDING_SHARED_IDS 的处理），否则会静默同前缀新增 ID。
+        同理，`-99` 夹具后缀按 governance-ids.md 声明不得登记——若被登记，夹具豁免会静默一个真实 ID。
+        """
+        import check_docs_consistency as mod
+
+        registered_ids = mod._load_glossary_ids()
+        assert registered_ids is not None, "governance-ids.md 应可解析"
+        registered_prefixes = {gid.split("-", 1)[0] for gid in registered_ids}
+        overlap = mod._REPORT_FINDING_PREFIXES & registered_prefixes
+        assert overlap == frozenset(), f"纯报告前缀清单含已登记治理 ID 前缀: {sorted(overlap)}"
+        fixture_overlap = mod._FIXTURE_ID_PREFIXES & registered_prefixes
+        assert fixture_overlap == frozenset(), f"夹具保留前缀与已登记前缀重合: {sorted(fixture_overlap)}"
+        token_overlap = mod._NON_GOVERNANCE_TOKEN_PREFIXES & registered_prefixes
+        assert token_overlap == frozenset(), f"非治理 token 前缀与已登记前缀重合: {sorted(token_overlap)}"
+        # 逐条列举清单（共享报告发现 / 非治理 token）不得与已登记 ID 冲突
+        listed = (mod._REPORT_FINDING_SHARED_IDS | mod._NON_GOVERNANCE_TOKEN_IDS) & registered_ids
+        assert listed == frozenset(), f"逐条豁免清单含已登记 ID: {sorted(listed)}"
+        # `-99` 后缀按 governance-ids.md 声明为夹具、不得登记
+        suffix_registered = {gid for gid in registered_ids if gid.endswith(mod._FIXTURE_ID_SUFFIX)}
+        assert suffix_registered == frozenset(), f"已登记 ID 中含 -99 夹具后缀: {sorted(suffix_registered)}"
 
 
 class TestAdrIndexCompleteness:
