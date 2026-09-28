@@ -84,6 +84,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import subprocess
 import sys
 import tomllib
 import typing
@@ -152,7 +153,8 @@ FLET_DOCS_PATHS: list[Path] = sorted(FLET_DOCS_DIR.glob("*.md"))
 
 # 受检 markdown 文件清单（锚点死链 + 相对链接死链 + pre-commit hook 数量校验范围）
 # P2-06 修复：改为递归发现全部受跟踪 Markdown，再用显式排除清单处理生成物和归档。
-# 递归发现范围：根目录 *.md、docs/ 与 man/ 全部 *.md、requirements/ 全部 *.md、PR 模板；
+# H1 修复：受检集单一来源改为 git 跟踪文件（`git ls-files "*.md"`），未跟踪 / gitignored 的
+# 根级 md（如本地 .pr_body_*.md）自动不入集；git 不可用时降级为文件系统发现（见 _collect_checked_docs）。
 # 排除项必须带原因（_build_doc_excludes）。
 # Flet 入口完整性：FLET_DOCS_PATHS 动态发现 docs/flet/*.md，新增专题自动纳入门禁。
 
@@ -174,39 +176,110 @@ _LOCAL_ARTIFACT_DIRS: tuple[Path, ...] = _GITIGNORED_ARTIFACT_DIRS
 # 受检集漏排，导致本地 pre-commit 持续假 FAIL）。
 _LOCAL_PLAN_FILE_RELS: tuple[str, ...] = ("Plans.md", "Plans-tech-debt.md")
 
+# 排除登记的生效面（L1：排除机制归一入口后仍区分两个消费面）：
+# - _SCOPE_CHECKED_DOCS：从受检集 CHECKED_DOCS 中整体排除；
+# - _SCOPE_GOVERNANCE_SCAN：仅从治理 ID 扫描语料中排除（文件本身仍受其它检查管辖）。
+_SCOPE_CHECKED_DOCS = "checked_docs"
+_SCOPE_GOVERNANCE_SCAN = "governance_scan"
 
-def _build_doc_excludes() -> dict[Path, str]:
-    """构建受检集排除清单：gitignored 产物目录 + 本地会话计划文件（逐项带排除原因）。
+
+@dataclass(frozen=True)
+class _DocExclusion:
+    """单条排除登记：path 支持精确文件或目录前缀，scopes 声明生效的消费面。"""
+
+    path: Path
+    scopes: frozenset[str]
+    reason: str
+
+
+def _build_doc_excludes() -> tuple[_DocExclusion, ...]:
+    """构建排除登记清单（单一入口）：gitignored 产物目录 / 本地会话计划文件 / 扫描语料豁免。
 
     按当前 ROOT 动态计算（导入期由 _collect_checked_docs 调用；测试可先 monkeypatch
     ROOT 再调用 _collect_checked_docs 重算，无需真实本地文件在场）。
     """
-    excludes: dict[Path, str] = {
-        d: "本地 gitignored 产物 / 归档目录（GDR-07），非交付物，不参与文档一致性校验"
+    entries = [
+        _DocExclusion(
+            d,
+            frozenset({_SCOPE_CHECKED_DOCS}),
+            "本地 gitignored 产物 / 归档目录（GDR-07），非交付物，不参与文档一致性校验",
+        )
         for d in _GITIGNORED_ARTIFACT_DIRS
-    }
-    excludes.update(
-        (ROOT / rel, "本地会话计划文件（.gitignore 排除，内容随会话变化或固化历史状态），不参与一致性门禁")
+    ]
+    entries += [
+        _DocExclusion(
+            ROOT / rel,
+            frozenset({_SCOPE_CHECKED_DOCS}),
+            "本地会话计划文件（.gitignore 排除，内容随会话变化或固化历史状态），不参与一致性门禁",
+        )
         for rel in _LOCAL_PLAN_FILE_RELS
-    )
-    return excludes
+    ]
+    # 治理 ID 扫描语料豁免（L1：原硬编码在 check_governance_id_glossary 内，现归一到本入口）
+    entries += [
+        _DocExclusion(
+            ROOT / "CHANGELOG.md",
+            frozenset({_SCOPE_GOVERNANCE_SCAN}),
+            "release-please 自动生成发布日志，含历史提交标题里的治理 ID 噪声，非治理溯源目标",
+        ),
+        _DocExclusion(
+            ROOT / "docs" / "governance" / "governance-ids.md",
+            frozenset({_SCOPE_GOVERNANCE_SCAN}),
+            "治理 ID 登记正本自身，文本含别名/夹具示例等非「引用需登记」对象",
+        ),
+        _DocExclusion(
+            ROOT / "requirements",
+            frozenset({_SCOPE_GOVERNANCE_SCAN}),
+            "需求正本使用需求编号（FR-UX-xxx）与阶段工作码，属非治理 ID 噪声",
+        ),
+    ]
+    return tuple(entries)
+
+
+def _is_excluded(path: Path, scope: str, excludes: tuple[_DocExclusion, ...]) -> bool:
+    """path 是否在给定消费面被排除（精确文件或目录前缀匹配）。"""
+    return any(scope in e.scopes and (path == e.path or e.path in path.parents) for e in excludes)
+
+
+def _git_tracked_md_files() -> list[Path] | None:
+    """经 git 索引列出受跟踪的 markdown（受检集单一来源，H1）。
+
+    未跟踪 / gitignored 文件不在索引中，自动被排除。非 git 环境（归档解压、IDE 映射目录、
+    git 不可用）返回 None，由调用方降级为文件系统发现。
+    `-z` 关闭路径转义（quotepath），避免非 ASCII 文件名被转义为八进制序列。
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z", "--", "*.md"],
+            cwd=ROOT,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        # git 可执行文件缺失或无法启动
+        return None
+    if result.returncode != 0:
+        return None
+    return [ROOT / rel for rel in result.stdout.decode("utf-8", errors="replace").split("\0") if rel]
 
 
 def _collect_checked_docs() -> list[Path]:
-    """构建受检文档集（导入期执行；测试经 monkeypatch ROOT 后重算以注入临时仓库）。"""
+    """构建受检文档集（导入期执行；测试经 monkeypatch ROOT 后重算以注入临时仓库）。
+
+    来源为 git 跟踪文件；git 不可用时降级为文件系统发现（根目录 + docs/ + man/ +
+    requirements/ + PR 模板，与历史受检范围一致）。
+    """
     excludes = _build_doc_excludes()
-    return sorted(
-        d
-        for d in {
+    tracked = _git_tracked_md_files()
+    if tracked is None:
+        tracked = [
             *ROOT.glob("*.md"),
             *(ROOT / "docs").rglob("*.md"),
             *(ROOT / "man").rglob("*.md"),
             *(ROOT / "requirements").rglob("*.md"),
             ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md",
-        }
-        # 排除支持精确文件与目录前缀（目录下全部子文档一并排除）
-        if not any(d == e or e in d.parents for e in excludes)
-    )
+        ]
+    # 排除支持精确文件与目录前缀（目录下全部子文档一并排除）；is_file 过滤索引中已删除的路径
+    return sorted(d for d in set(tracked) if d.is_file() and not _is_excluded(d, _SCOPE_CHECKED_DOCS, excludes))
 
 
 CHECKED_DOCS: list[Path] = _collect_checked_docs()
@@ -3417,26 +3490,18 @@ def check_governance_id_glossary() -> tuple[list[str], list[str]]:
         errors.append("治理 ID 对照表: governance-ids.md 不存在或无法解析，跳过登记校验")
         return errors, warnings
     # 扩展扫描范围到受检治理文档：CHANGELOG.md（release-please 自动生成，含历史提交标题
-    # 里的治理 ID 噪声）不属于治理溯源目标，显式排除；本地会话计划文件（Plans*.md）已由
-    # 受检集构建（_build_doc_excludes）统一排除；
-    # 登记正本 governance-ids.md 自身同样排除——其文本除登记行外还含说明文字（别名/夹具
-    # 示例如 P1-4、DOC-99，以及嵌入式非治理编号如 Q-P2-7），这些不是「引用需登记」对象。
-    # 其余 CHECKED_DOCS 全部纳入。另补扫 docs/governance/ 下的机器可读治理文件
-    # （exceptions.yml / redlines.yml / canonical-topics.yml 等，非 markdown，不在 CHECKED_DOCS）。
+    # 里的治理 ID 噪声）、登记正本 governance-ids.md 自身（其文本除登记行外还含说明文字，
+    # 如别名/夹具示例 P1-4、DOC-99，以及嵌入式非治理编号如 Q-P2-7，这些不是「引用需登记」
+    # 对象）与需求正本 requirements/*.md（使用需求编号与阶段工作码，属非治理 ID 噪声）均在
+    # 排除登记清单（_build_doc_excludes）的 _SCOPE_GOVERNANCE_SCAN 面登记；本地会话计划文件
+    # （Plans*.md）已由 _SCOPE_CHECKED_DOCS 面整体排除。其余 CHECKED_DOCS 全部纳入。
+    # 另补扫 docs/governance/ 下的机器可读治理文件（exceptions.yml / redlines.yml /
+    # canonical-topics.yml 等，非 markdown，不在 CHECKED_DOCS）。
     governance_yml = [
         p for p in (ROOT / "docs" / "governance").rglob("*") if p.is_file() and p.suffix in (".yml", ".yaml")
     ]
-    # 需求正本（requirements/*.md）整体排除：其内容使用需求编号（FR-UX-xxx，通用形态会命中
-    # 其 UX-xxx 片段）与阶段工作码（P3-7~P3-20），属非治理 ID 噪声，登记会污染治理对照表；
-    # 与 CHANGELOG.md 的同类噪声排除同源（GDR-09 仅治理溯源目标）。
-    scan_paths = [
-        p
-        for p in CHECKED_DOCS
-        # 本地会话计划文件（_LOCAL_PLAN_FILE_RELS）已由受检集统一排除；此处按名排除 CHANGELOG.md
-        # （release-please 自动生成，含历史提交标题里的治理 ID 噪声）与登记正本 governance-ids.md
-        # 自身（其文本含别名/夹具示例等非「引用需登记」对象）。requirements/*.md 整体排除同下。
-        if p.name not in ("CHANGELOG.md", "governance-ids.md") and ROOT / "requirements" not in p.parents
-    ] + governance_yml
+    excludes = _build_doc_excludes()
+    scan_paths = [p for p in CHECKED_DOCS if not _is_excluded(p, _SCOPE_GOVERNANCE_SCAN, excludes)] + governance_yml
     warn_refs: set[str] = set()
     for path in scan_paths:
         if not path.exists():
