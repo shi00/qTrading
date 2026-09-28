@@ -488,6 +488,191 @@ class TestBuildNewsItem:
         assert item.key == "42"
 
 
+def _collect_text_values(control, acc: list[str] | None = None) -> list[str]:
+    """递归收集控件树中所有 ft.Text 的 value（测试辅助）。"""
+    if acc is None:
+        acc = []
+    if isinstance(control, ft.Text):
+        acc.append(control.value or "")
+    content = getattr(control, "content", None)
+    if isinstance(content, ft.Control):
+        _collect_text_values(content, acc)
+    elif isinstance(content, list):
+        for c in content:
+            _collect_text_values(c, acc)
+    controls = getattr(control, "controls", None)
+    if isinstance(controls, list):
+        for c in controls:
+            _collect_text_values(c, acc)
+    return acc
+
+
+# ---------------------------------------------------------------------------
+# Pure function tests: 时间显示格式 (MINOR-01)
+# ---------------------------------------------------------------------------
+
+
+class TestFormatNewsTime:
+    """MINOR-01: 今日 → HH:MM；非今日 → MM-DD HH:MM；缺失/无效 → 未知文案 (R21)."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_i18n(self):
+        with patch("ui.components.news_feed.I18n") as m:
+            m.get.side_effect = lambda key, default=None, **kw: default if default is not None else key
+            yield m
+
+    def test_today_news_shows_hhmm_only(self):
+        from datetime import date
+
+        from ui.components.news_feed import _format_news_time
+
+        assert _format_news_time("2024-06-15 10:30:00", date(2024, 6, 15)) == "10:30"
+
+    def test_non_today_news_shows_mm_dd_hhmm(self):
+        from datetime import date
+
+        from ui.components.news_feed import _format_news_time
+
+        assert _format_news_time("2024-06-15 10:30:00", date(2024, 6, 16)) == "06-15 10:30"
+
+    def test_cross_year_news_shows_mm_dd_hhmm(self):
+        """跨年新闻仍按需求显示 MM-DD HH:MM（年份歧义由分隔条承担）。"""
+        from datetime import date
+
+        from ui.components.news_feed import _format_news_time
+
+        assert _format_news_time("2024-12-31 23:59:00", date(2025, 1, 1)) == "12-31 23:59"
+
+    def test_empty_time_returns_unknown(self):
+        from datetime import date
+
+        from ui.components.news_feed import _format_news_time
+
+        # mock I18n.get 返回 key 本身 → 断言返回"未知"文案 key
+        assert _format_news_time("", date(2024, 6, 15)) == "news_time_unknown"
+
+    def test_invalid_time_returns_unknown(self):
+        """R21: 无法解析的时间串不得伪装成合法时分。"""
+        from datetime import date
+
+        from ui.components.news_feed import _format_news_time
+
+        assert _format_news_time("not-a-time", date(2024, 6, 15)) == "news_time_unknown"
+
+    def test_today_rendered_in_item_text(self):
+        """DoD: 今日新闻渲染文本只含时分（经 _build_news_item 整条渲染）。"""
+        from datetime import date
+
+        from ui.components.news_feed import _build_news_item
+
+        row = NewsRow(content="Test", publish_time="2024-06-15 10:30:00")
+        item = _build_news_item(row, "0", today=date(2024, 6, 15))
+        texts = _collect_text_values(item)
+        assert "10:30" in texts
+        assert "06-15" not in texts
+
+    def test_non_today_rendered_with_mm_dd(self):
+        """DoD: 跨日新闻渲染文本含 MM-DD。"""
+        from datetime import date
+
+        from ui.components.news_feed import _build_news_item
+
+        row = NewsRow(content="Test", publish_time="2024-06-15 10:30:00")
+        item = _build_news_item(row, "0", today=date(2024, 6, 16))
+        texts = _collect_text_values(item)
+        assert "06-15 10:30" in texts
+
+
+# ---------------------------------------------------------------------------
+# Pure function tests: 日期分隔条 (MINOR-01)
+# ---------------------------------------------------------------------------
+
+
+class TestDateSeparator:
+    """MINOR-01: 换日时插入日期分隔条。"""
+
+    @pytest.fixture(autouse=True)
+    def _mock_i18n(self):
+        with patch("ui.components.news_feed.I18n") as m:
+            m.get.side_effect = lambda key, default=None, **kw: default if default is not None else key
+            yield m
+
+    def _row(self, publish_time: str, content: str = "Test") -> NewsRow:
+        return NewsRow(content=content, publish_time=publish_time)
+
+    def _separator_keys(self, controls) -> list[str]:
+        return [c.key for c in controls if c.key and str(c.key).startswith("news-date-")]
+
+    def test_same_day_rows_single_separator(self):
+        from datetime import date
+
+        from ui.components.news_feed import _build_news_controls
+
+        rows = (
+            self._row("2024-06-15 10:30:00"),
+            self._row("2024-06-15 09:00:00"),
+        )
+        controls = _build_news_controls(rows, date(2024, 6, 16))
+        assert self._separator_keys(controls) == ["news-date-2024-06-15"]
+
+    def test_day_change_inserts_separator(self):
+        """DoD: 跨日时出现新分隔条。"""
+        from datetime import date
+
+        from ui.components.news_feed import _build_news_controls
+
+        rows = (
+            self._row("2024-06-16 10:30:00"),
+            self._row("2024-06-15 23:59:00"),
+        )
+        controls = _build_news_controls(rows, date(2024, 6, 16))
+        assert self._separator_keys(controls) == ["news-date-2024-06-16", "news-date-2024-06-15"]
+
+    def test_today_separator_label(self):
+        from datetime import date
+
+        from ui.components.news_feed import _format_date_group_label
+
+        assert _format_date_group_label(date(2024, 6, 15), date(2024, 6, 15)) == "news_date_today"
+
+    def test_same_year_label_mm_dd(self):
+        from datetime import date
+
+        from ui.components.news_feed import _format_date_group_label
+
+        assert _format_date_group_label(date(2024, 6, 14), date(2024, 6, 15)) == "06-14"
+
+    def test_cross_year_label_full_date(self):
+        """跨年边界：分隔条补全年份避免 MM-DD 歧义。"""
+        from datetime import date
+
+        from ui.components.news_feed import _format_date_group_label
+
+        assert _format_date_group_label(date(2024, 12, 31), date(2025, 1, 1)) == "2024-12-31"
+
+    def test_missing_time_no_separator(self):
+        """R21: 时间缺失的行不产生日期分隔条，不伪装日期。"""
+        from datetime import date
+
+        from ui.components.news_feed import _build_news_controls
+
+        rows = (
+            self._row("2024-06-16 10:30:00"),
+            self._row(""),
+            self._row("2024-06-15 09:00:00"),
+        )
+        controls = _build_news_controls(rows, date(2024, 6, 16))
+        # 缺失时间的行不触发分组变化（归入上一组），仅两个有效日期各一条分隔条
+        assert self._separator_keys(controls) == ["news-date-2024-06-16", "news-date-2024-06-15"]
+
+    def test_empty_rows_no_separator(self):
+        from datetime import date
+
+        from ui.components.news_feed import _build_news_controls
+
+        assert _build_news_controls((), date(2024, 6, 16)) == []
+
+
 # ---------------------------------------------------------------------------
 # Pure function tests: _translate_title_code (code → i18n key mapping)
 # ---------------------------------------------------------------------------

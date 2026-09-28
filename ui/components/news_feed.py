@@ -12,8 +12,11 @@
 - 情感检测 ``_detect_sentiment`` / tag 翻译 ``_translate_tag`` 保留为模块级纯函数
 - content→id 映射不再必要（声明式下 tag 更新由消费方推送新 news_rows 触发重渲染）
 - L771 合规: news_rows: tuple[NewsRow, ...] 替代 DataFrame
+- 时间显示: 今日 → ``HH:MM``；非今日 → ``MM-DD HH:MM``；换日插入日期分隔条
+  (``_build_news_controls``，``today`` 由 ``utils.time_utils.get_now()`` 注入)
 """
 
+import datetime
 import re
 from collections.abc import Callable
 
@@ -23,6 +26,7 @@ from ui.components.flet_type_helpers import safe_on_click
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.home_view_model import NewsRow
+from utils.time_utils import get_now
 
 # 英文关键词（保留原有，\b 单词边界匹配）
 _POSITIVE_EN_KEYWORDS = ("surge", "rally", "up", "gain", "bullish", "beat", "exceed")
@@ -197,20 +201,95 @@ def _extract_stock_code(content: str) -> str:
     return ""
 
 
+# 时间/日期缺失时的 i18n 键（R21: 不以看似合法的时分伪装缺失）
+NEWS_TIME_UNKNOWN_KEY = "news_time_unknown"
+NEWS_DATE_TODAY_KEY = "news_date_today"
+
+
+def _parse_publish_time(time_str: str) -> datetime.datetime | None:
+    """解析 publish_time 字符串为 datetime；缺失/无法解析返回 None。
+
+    兼容 DB 返回的 ``YYYY-MM-DD HH:MM:SS``（含 pandas.Timestamp 字符串化）
+    与 ISO ``T`` 分隔形态；不臆造时区（``market_news.publish_time`` 为无时区列）。
+    """
+    # NOTE(lazy): 直接按 publish_time 字面日期/HH:MM 展示与分组，不做 UTC→CST 换算。
+    # ceiling: 写库路径把源站 CST 文本经 to_utc_for_db 转为 UTC tz-naive，故 DB 字面时间为 UTC；
+    #   与 get_now() 的 CST "今日" 在 CST 00:00–07:59 窗口存在日期/时刻偏移（沿用既有展示口径，
+    #   修复前 time_str[-8:] 亦为 UTC 原值，非本次引入）。
+    # upgrade: 当首页快讯需与 CST 展示严格对齐，或出现跨时区分组投诉时，改用 from_utc_to_cst 换算后再格式化/分组。
+    if not time_str:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(time_str)
+    except (ValueError, TypeError):
+        return None
+
+
+def _format_news_time(time_str: str, today: datetime.date) -> str:
+    """格式化新闻发布时间显示。
+
+    今日 → ``HH:MM``；非今日 → ``MM-DD HH:MM``；
+    缺失/无法解析 → i18n ``news_time_unknown``（R21: 不以合法时分伪装缺失）。
+    """
+    dt = _parse_publish_time(time_str)
+    if dt is None:
+        return I18n.get(NEWS_TIME_UNKNOWN_KEY)
+    if dt.date() == today:
+        return dt.strftime("%H:%M")
+    return dt.strftime("%m-%d %H:%M")
+
+
+def _format_date_group_label(date_obj: datetime.date, today: datetime.date) -> str:
+    """日期分隔条标签：今日 → i18n ``news_date_today``；同年 → ``MM-DD``；跨年 → ``YYYY-MM-DD``。
+
+    跨年时补全年份，避免不同年份的 ``MM-DD`` 视觉歧义。
+    """
+    if date_obj == today:
+        return I18n.get(NEWS_DATE_TODAY_KEY)
+    if date_obj.year == today.year:
+        return date_obj.strftime("%m-%d")
+    return date_obj.strftime("%Y-%m-%d")
+
+
+def _build_date_separator(date_obj: datetime.date, today: datetime.date) -> ft.Control:
+    """构建日期分隔条（换日时出现）。"""
+    return ft.Container(
+        key=f"news-date-{date_obj.isoformat()}",
+        content=ft.Row(
+            [
+                ft.Container(expand=True, height=1, bgcolor=AppColors.DIVIDER),
+                ft.Text(
+                    _format_date_group_label(date_obj, today),
+                    color=AppColors.TEXT_HINT,
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                ),
+                ft.Container(expand=True, height=1, bgcolor=AppColors.DIVIDER),
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+        ),
+        padding=ft.Padding.symmetric(vertical=2),
+    )
+
+
 def _build_news_item(
     row: NewsRow,
     news_id: str,
     on_view_stock: Callable[[str], None] | None = None,
+    today: datetime.date | None = None,
 ) -> ft.Container:
     """Build a single news item container (pure function).
 
     Receives a NewsRow + key, no state dependency.
+    ``today`` 用于判定"今日/非今日"显示格式；缺省取 ``get_now().date()``
+    （测试应显式注入固定日期，与生产取日期同源）。
     """
+    if today is None:
+        today = get_now().date()
+
     raw_tag = row.tags
     translated_tag = _translate_tag(raw_tag)
 
     content = row.content
-    time_str = row.publish_time
 
     sentiment = _detect_sentiment(content)
     if sentiment == "positive":
@@ -247,7 +326,7 @@ def _build_news_item(
     tag_row_controls.append(ft.Container(expand=True))
     tag_row_controls.append(
         ft.Text(
-            time_str[-8:],
+            _format_news_time(row.publish_time, today),
             color=AppColors.TEXT_SECONDARY,
             size=AppStyles.FONT_SIZE_BODY_SM,
         )
@@ -280,6 +359,28 @@ def _build_news_item(
         bgcolor=bg_color,
         border=ft.Border.only(bottom=ft.BorderSide(1, AppColors.DIVIDER)),
     )
+
+
+def _build_news_controls(
+    news_rows: tuple[NewsRow, ...],
+    today: datetime.date,
+    on_view_stock: Callable[[str], None] | None = None,
+) -> list[ft.Control]:
+    """构建新闻列表控件，换日时插入日期分隔条（纯函数，``today`` 注入便于测试）。
+
+    按 ``news_rows`` 顺序遍历：某行日期与上一已渲染日期组不同时插入分隔条；
+    同一日期多条目仅一条分隔条；日期缺失/无法解析的行不触发分组变化（R21）。
+    """
+    controls: list[ft.Control] = []
+    current_date: datetime.date | None = None
+    for i, row in enumerate(news_rows):
+        parsed = _parse_publish_time(row.publish_time)
+        row_date = parsed.date() if parsed is not None else None
+        if row_date is not None and row_date != current_date:
+            controls.append(_build_date_separator(row_date, today))
+            current_date = row_date
+        controls.append(_build_news_item(row, str(i), on_view_stock=on_view_stock, today=today))
+    return controls
 
 
 @ft.component
@@ -341,10 +442,9 @@ def NewsFeed(
             padding=10,
         )
 
-    # --- Build news items ---
-    controls: list[ft.Control] = [
-        _build_news_item(row, str(i), on_view_stock=on_view_stock) for i, row in enumerate(news_rows)
-    ]
+    # --- Build news items (含换日日期分隔条) ---
+    today = get_now().date()
+    controls: list[ft.Control] = _build_news_controls(news_rows, today, on_view_stock=on_view_stock)
 
     # --- Load more button ---
     if has_more:

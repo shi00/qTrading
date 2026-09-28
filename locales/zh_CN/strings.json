@@ -87,6 +87,8 @@
     "news_load_more": "加载更多",
     "news_no_title": "无标题",
     "news_view_stock": "查看个股",
+    "news_date_today": "今天",
+    "news_time_unknown": "时间未知",
     "ai_generated_tag": "AI生成",
     "market_data_cached_at": "数据缓存于: {date}",
     "screener_title": "智能选股",

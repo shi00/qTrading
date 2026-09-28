@@ -83,6 +83,8 @@
     "news_load_more": "Load More",
     "news_no_title": "No Title",
     "news_view_stock": "View Stock",
+    "news_date_today": "Today",
+    "news_time_unknown": "Time unknown",
     "ai_generated_tag": "AI-Generated",
     "market_data_cached_at": "Data cached at: {date}",
     "screener_title": "Smart Screener",
