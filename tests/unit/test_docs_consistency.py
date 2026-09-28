@@ -12,6 +12,8 @@ Ensures real project files don't drift:
 
 import json
 import re
+import shutil
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -5472,6 +5474,60 @@ class TestCheckedDocsExclusions:
 
         monkeypatch.setattr(c, "CHECKED_DOCS", c._collect_checked_docs())
         assert c.check_guillemet_references() == []
+
+
+def _init_git_repo(repo: Path, paths: list[str] | None = None) -> None:
+    """初始化 git 仓库并暂存文件；paths 为 None 时 `git add -A`（供 gitignore 场景验证）。"""
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)
+    add_cmd = ["git", "add", "-A"] if paths is None else ["git", "add", "--", *paths]
+    subprocess.run(add_cmd, cwd=repo, check=True, capture_output=True)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="受检集来源为 git 跟踪文件，需 git 可用")
+class TestCheckedDocsGitSource:
+    """H1: 受检集来源为 git 跟踪文件（未跟踪 / gitignored 根 md 不入集，跟踪 md 仍入选）。"""
+
+    def test_untracked_root_md_not_collected(self, tmp_path, monkeypatch):
+        """未跟踪根级 md（如本地 .pr_body_*.md / 探针）不入受检集，跟踪的 CLAUDE.md 正常受检。"""
+        (tmp_path / "CLAUDE.md").write_text("# 宪法\n", encoding="utf-8")
+        (tmp_path / "_t1_untracked_probe.md").write_text("# 探针\n", encoding="utf-8")
+        _init_git_repo(tmp_path, ["CLAUDE.md"])
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        from check_docs_consistency import _collect_checked_docs
+
+        docs = _collect_checked_docs()
+        assert tmp_path / "CLAUDE.md" in docs
+        assert not any(p.name == "_t1_untracked_probe.md" for p in docs)
+
+    def test_gitignored_plan_files_not_collected(self, tmp_path, monkeypatch):
+        """gitignored 的 Plans.md / Plans-tech-debt.md 不入受检集（.gitignore 与排除登记双重保障）。"""
+        (tmp_path / ".gitignore").write_text("Plans*.md\n", encoding="utf-8")
+        (tmp_path / "CLAUDE.md").write_text("# 宪法\n", encoding="utf-8")
+        (tmp_path / "Plans.md").write_text("# 会话计划\n", encoding="utf-8")
+        (tmp_path / "Plans-tech-debt.md").write_text("# 历史归档\n", encoding="utf-8")
+        _init_git_repo(tmp_path)
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        from check_docs_consistency import _collect_checked_docs
+
+        docs = _collect_checked_docs()
+        assert tmp_path / "CLAUDE.md" in docs
+        assert not any(p.name in ("Plans.md", "Plans-tech-debt.md") for p in docs)
+
+    def test_tracked_root_md_collected(self, tmp_path, monkeypatch):
+        """git 跟踪的根级 md 仍入选，且 docs/ 子目录跟踪文档经 pathspec 递归发现。"""
+        (tmp_path / "README.md").write_text("# 说明\n", encoding="utf-8")
+        (tmp_path / "CONTRIBUTING.md").write_text("# 贡献\n", encoding="utf-8")
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "README.md").write_text("# 文档索引\n", encoding="utf-8")
+        _init_git_repo(tmp_path, ["README.md", "CONTRIBUTING.md", "docs/README.md"])
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        from check_docs_consistency import _collect_checked_docs
+
+        docs = _collect_checked_docs()
+        assert tmp_path / "README.md" in docs
+        assert tmp_path / "CONTRIBUTING.md" in docs
+        assert docs_dir / "README.md" in docs
 
 
 def _make_exceptions_yaml(count: int) -> str:
