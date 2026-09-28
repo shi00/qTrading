@@ -41,14 +41,29 @@ def _resolve_color(color_str: str | None) -> str:
     return AppColors.TEXT_SECONDARY
 
 
-# UX-08: 指数卡"无数据"占位符全集 — 上游 market_data_service 产出单横线 "-",
-# VM .get 缺键兜底 "--", 空串为防御. 真实零值 "0.00" 不在集内 (视为有数据).
-_EMPTY_INDEX_VALUES = frozenset({"", "--", "-"})
+# UX-08: 卡片"无数据"占位符全集 — 上游 market_data_service 产出单横线 "-",
+# VM 缺键兜底 "--", 空串为防御. 真实零值 "0.00" 不在集内 (视为有数据).
+# MINOR-12: 指数卡与北向卡共用同一判定集 (两者上游无数据均产出 "-").
+_EMPTY_VALUES = frozenset({"", "--", "-"})
+
+
+def _has_value(value: str) -> bool:
+    """UX-08: 值是否为真实数据 — 非占位符 (真实零值 "0.00" 视为有数据)."""
+    return value not in _EMPTY_VALUES
 
 
 def _has_index_data(info: MarketIndexRow) -> bool:
     """UX-08: 指数卡是否有数据 — value 非占位符 (真实零值 "0.00" 视为有数据)."""
-    return info.value not in _EMPTY_INDEX_VALUES
+    return _has_value(info.value)
+
+
+def _has_hsgt_data(info: HsgtRow) -> bool:
+    """MINOR-12: 北向卡是否有数据 — value 非占位符 (与指数卡同款判定).
+
+    上游北向 0 值仍产出真实数值 (仅 color="grey"), 故判定必须基于 value
+    而非 color, 避免"真实零流向"被误判为无数据.
+    """
+    return _has_value(info.value)
 
 
 def _build_index_card(title_key: str, info: MarketIndexRow) -> ft.Container:
@@ -104,8 +119,32 @@ def _build_index_card(title_key: str, info: MarketIndexRow) -> ft.Container:
 
 
 def _build_hsgt_card(info: HsgtRow) -> ft.Container:
-    """Build the northbound funds (HSGT) card — pure function."""
+    """Build the northbound funds (HSGT) card — pure function.
+
+    MINOR-12: 无数据 (value 为占位符, 与指数卡 _has_index_data 同款判定) 时
+    渲染中性占位文案并省略 sub — 避免占位 "-" 被着色的"数值+流向"样式误读为
+    真实净流入/流出 (报告 MINOR-12: 北向缺"无数据"分支). 有数据时按流向着色.
+    """
     style = AppStyles.dashboard_card()
+    has_data = _has_hsgt_data(info)
+    value_text = ft.Text(
+        info.value if has_data else I18n.get("home_index_empty"),
+        size=AppStyles.FONT_SIZE_HEADLINE,
+        weight=ft.FontWeight.BOLD,
+        color=_resolve_color(info.color) if has_data else AppColors.TEXT_SECONDARY,
+        no_wrap=True,  # 中文占位防折行 (与指数卡一致)
+    )
+    sub_controls = (
+        [
+            ft.Text(
+                info.sub,
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=AppColors.TEXT_SECONDARY,
+            )
+        ]
+        if has_data
+        else []
+    )
     return ft.Container(
         content=ft.Column(
             [
@@ -118,17 +157,8 @@ def _build_hsgt_card(info: HsgtRow) -> ft.Container:
                         no_wrap=True,
                     ),
                 ),
-                ft.Text(
-                    info.value,
-                    size=AppStyles.FONT_SIZE_HEADLINE,
-                    weight=ft.FontWeight.BOLD,
-                    color=_resolve_color(info.color),
-                ),
-                ft.Text(
-                    info.sub,
-                    size=AppStyles.FONT_SIZE_BODY_SM,
-                    color=AppColors.TEXT_SECONDARY,
-                ),
+                value_text,
+                *sub_controls,
             ],
             spacing=5,
         ),
@@ -142,11 +172,34 @@ def _build_hsgt_card(info: HsgtRow) -> ft.Container:
 
 
 def _build_concept_card(item: HotConceptRow) -> ft.Container:
-    """Build a single hot concept card — pure function."""
-    color_str = item.color
-    is_up = "red" in color_str
-    color = AppColors.UP_RED if is_up else AppColors.DOWN_GREEN
-    icon = ft.Icons.TRENDING_UP if is_up else ft.Icons.TRENDING_DOWN
+    """Build a single hot concept card — pure function.
+
+    MINOR-12: 涨跌幅分三档 — 红(涨)/绿(跌)/中性(平). 仅显式 red/green 判定涨跌
+    (与上游 news_fetcher 产出的 "red"/"green"/"grey" 一致); 中性档 (如 "grey"、
+    空串或未知色) 使用中性色且不渲染趋势图标, 避免 0 涨跌幅被误标为下跌.
+    """
+    color_str = (item.color or "").lower()
+    if "red" in color_str:
+        trend_color = AppColors.UP_RED
+        trend_icon = ft.Icons.TRENDING_UP
+    elif "green" in color_str:
+        trend_color = AppColors.DOWN_GREEN
+        trend_icon = ft.Icons.TRENDING_DOWN
+    else:
+        trend_color = AppColors.TEXT_SECONDARY
+        trend_icon = None
+
+    change_row_controls: list[ft.Control] = []
+    if trend_icon is not None:
+        change_row_controls.append(ft.Icon(trend_icon, size=AppStyles.FONT_SIZE_TITLE, color=trend_color))
+    change_row_controls.append(
+        ft.Text(
+            item.change,
+            size=AppStyles.FONT_SIZE_TITLE,
+            weight=ft.FontWeight.BOLD,
+            color=trend_color,
+        )
+    )
     return ft.Container(
         content=ft.Column(
             [
@@ -158,15 +211,7 @@ def _build_concept_card(item: HotConceptRow) -> ft.Container:
                     no_wrap=True,
                 ),
                 ft.Row(
-                    [
-                        ft.Icon(icon, size=AppStyles.FONT_SIZE_TITLE, color=color),
-                        ft.Text(
-                            item.change,
-                            size=AppStyles.FONT_SIZE_TITLE,
-                            weight=ft.FontWeight.BOLD,
-                            color=color,
-                        ),
-                    ],
+                    change_row_controls,
                     spacing=4,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
