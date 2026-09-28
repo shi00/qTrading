@@ -71,7 +71,7 @@
 - **[ROUND3-02]** 判断路径在现实输入和状态下是否可达；比较基线版本和项目同类实现。
 - **[ROUND3-03]** 运行安全、相关的目标测试或静态检查；记录脱敏后的可复现命令、执行环境、退出状态、关键结果摘要和副作用。不得只记录"已运行"或只凭测试名称推断覆盖内容；还要检查断言、测试选择条件、跳过项、缓存命中和实际执行的用例数量。
 - **[ROUND3-04]** 尝试寻找能推翻该问题的证据；无法确认时降低置信度或改列待验证风险。
-- **[ROUND3-05]** 对**无自动拦截**（`automation_coverage: none`，或自动化仅报告模式 warning、不阻断退出码）**且影响产品结论**的红线（本仓库：R21、R24），在给出通过结论前**必须执行独立会话复核**：新开一个上下文，只提供 diff 与判据（[redlines.yml](../governance/redlines.yml) 的 `self_check` 字段 / [project-profile.md](./review-profiles/project-profile.md) 的追查步骤），**不提供实现理由与自评结论**，由该会话独立判定是否命中——被约束者自评不构成有效控制（AI 文档体系检视 H2）。其余需人工评审的红线（R5 / R17 / R18）按 `self_check` 清单逐条回答即可。
+- **[ROUND3-05]** 对**无自动拦截**（`automation_coverage: none`，或自动化仅报告模式 warning、不阻断退出码）**且影响产品结论**的红线（本仓库：R21、R24），在给出通过结论前**必须执行独立会话复核**：新开一个上下文，只提供 diff 与判据（[redlines.yml](../governance/redlines.yml) 的 `self_check` 字段 / [project-profile.md](./review-profiles/project-profile.md) 的追查步骤），**不提供实现理由与自评结论**，由该会话独立判定是否命中——被约束者自评不构成有效控制（AI 文档体系检视 H2）。其余需人工评审的红线（R5 / R17）按 `self_check` 清单逐条回答即可；R18 无 `self_check` 字段，按其独立执行决策树（[CLAUDE.md §3.1](../../CLAUDE.md#31--绝对禁止)）与 [project-profile.md](./review-profiles/project-profile.md) 的追查步骤自查。
 
 ## 5. 停止条件（STOP-01 ~ STOP-03）
 
