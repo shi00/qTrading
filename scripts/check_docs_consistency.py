@@ -3233,6 +3233,15 @@ def check_core_modules_completeness() -> list[str]:
 # 的门禁对它们不生效。改为通用形态（大写字母前缀 + 短横 + 数字）+ 显式豁免清单（外部编号体系
 # 与检视协议内部规则 ID，均为封闭集合，不随项目治理命名空间增长）。
 _GOVERNANCE_ID_PATTERN = re.compile(r"(?<![A-Za-z0-9])([A-Z][A-Z0-9]*-\d+)(?![A-Za-z0-9])")
+# review 系列形态（review01-A2 / review03-C11 / review05-E18）：小写 review 前缀 + 轮次号 + 短横 +
+# 字母数字后缀。通用形态要求大写前缀，无法匹配该形态——H6-c 复核发现其在「对照表登记」与「文档引用」
+# 两侧同时漏匹配（净零报错），review 系列 ID 实质失去门禁覆盖（旧白名单 `review\d+-[A-Za-z0-9]+`
+# 被通用形态替换时引入的覆盖回退）。独立补一条后备形态，登记侧与引用侧必须共用同一形态集合。
+_REVIEW_ID_PATTERN = re.compile(r"(?<![A-Za-z0-9])(review\d+-[A-Za-z0-9]+)(?![A-Za-z0-9])")
+_GOVERNANCE_ID_REFERENCE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    _GOVERNANCE_ID_PATTERN,
+    _REVIEW_ID_PATTERN,
+)
 # 豁免前缀（封闭集合，非本项目治理 ID 命名空间）：
 #   - ADR / EX / CVE：架构决策记录编号（check_adr_index_completeness 守护）、架构例外 ID
 #     （exceptions.yml + GDR-01 双向引用守护）、安全公告编号（SECURITY.md 引用）；
@@ -3428,6 +3437,19 @@ _REPORT_FINDING_SHARED_IDS: frozenset[str] = frozenset(
         "UX-09",
         "UX-10",
         "UX-2",
+        # review 系列轮次报告发现编号（H6-c 复核 × H2 合并结论）：`review08-*` 前缀下已有已登记
+        # 治理 ID（review08-D1 / review08-D3），故不得按前缀整体豁免；以下为逐条列举的现存未晋升
+        # 报告发现编号（均未在对照表登记，仅是各轮检视报告的定位标签），清单外的同前缀新 ID
+        # （含未来晋升为治理 ID 者）仍会被门禁捕获。`review09-24` 为轮次编号形态
+        # （review09-24-dim01-major01），同样按条列举而非按 `review09` 前缀豁免（该前缀未来可能
+        # 承载已登记治理 ID）。
+        "review08-B2",
+        "review08-B3",
+        "review08-B4",
+        "review08-B5",
+        "review08-C2",
+        "review08-D2",
+        "review09-24",
     }
 )
 # 门禁自引用 ID（L2）：文档一致性门禁**自身**的决策点编号（check_docs_consistency.py 的 DS 系列
@@ -3455,17 +3477,31 @@ GOVERNANCE_IDS_PATH = ROOT / "docs" / "governance" / "governance-ids.md"
 
 
 def _collect_governance_ids(text: str, *, entry_doc: bool = False) -> set[str]:
-    """从文本提取治理 ID 引用（通用形态），过滤豁免项（外部体系 / 检视协议 / 报告发现 / 夹具）。
+    """从文本提取治理 ID 引用，过滤豁免项（外部体系 / 检视协议 / 报告发现 / 夹具）。
+
+    引用形态集合为通用形态（大写前缀 + 短横 + 数字）与 review 系列后备形态
+    （review01-A2 / review03-C11）：通用形态要求大写前缀，无法匹配小写 review 前缀，
+    H6-c 复核发现两侧同时漏匹配（净零报错）后补后备形态，登记侧与引用侧共用同一集合。
 
     entry_doc=True（入口级文档）时**不适用**报告发现编号豁免（纯报告前缀与共享 ID 清单均不生效）：
     入口文档是「读者无从解析」的原始诉求面（GDR-09），只允许引用已登记治理 ID；报告发现编号一旦
     进入入口文档即视为需要登记（详见 _is_exempt_governance_id）。
     """
-    return {
-        m.group(1)
-        for m in _GOVERNANCE_ID_PATTERN.finditer(text)
-        if not _is_exempt_governance_id(m.group(1), entry_doc=entry_doc)
-    }
+    ids = {m.group(1) for pattern in _GOVERNANCE_ID_REFERENCE_PATTERNS for m in pattern.finditer(text)}
+    return {i for i in ids if not _is_exempt_governance_id(i, entry_doc=entry_doc)}
+
+
+def _match_governance_id(text: str) -> str | None:
+    """返回文本中首个治理 ID（通用形态优先，review 后备形态兜底）；无匹配返回 None。
+
+    供登记侧（_load_glossary_entries 解析对照表首列）使用，与引用侧 _collect_governance_ids 共用
+    同一形态集合，避免两侧漏匹配不对称导致「登记与引用同时漏检」的净零报错（H6-c 复核缺陷 1）。
+    """
+    for pattern in _GOVERNANCE_ID_REFERENCE_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return m.group(1)
+    return None
 
 
 # 检视报告发现编号形态（F-09 / M9-010 / D6-1 / L111-134 / C5-5 等）：前缀为单字母或
@@ -3524,9 +3560,9 @@ def _load_glossary_entries() -> dict[str, list[tuple[str, int]]] | None:
         cells = [c.strip() for c in line.strip("|").split("|")]
         if len(cells) < 2:
             continue
-        m = _GOVERNANCE_ID_PATTERN.search(cells[0])
-        if m:
-            entries.setdefault(m.group(1), []).append((cells[1], line_no))
+        gov_id = _match_governance_id(cells[0])
+        if gov_id:
+            entries.setdefault(gov_id, []).append((cells[1], line_no))
     return entries
 
 

@@ -4893,6 +4893,14 @@ def _unregistered_id_sample(prefix: str) -> str:
     return f"{prefix}-42"
 
 
+def _review_series_id_sample() -> str:
+    """构造 review 系列形态（小写前缀 + 轮次号）测试样本（拼接构造，避免源码字面量进入扫描面）.
+
+    同 `_unregistered_id_sample`：本文件在 GDR-09 的 .py 扫描面内，字面量会破坏 H2「WARNING=0」基线。
+    """
+    return "review" + "09" + "-" + "Z9"
+
+
 class TestGovernanceIdGlossary:
     """GDR-09: 自动加载文档（CLAUDE.md/AGENTS.md）中出现的治理 ID 必须已在 governance-ids.md 登记."""
 
@@ -5330,6 +5338,82 @@ class TestGovernanceIdGenericForm:
         # `-99` 后缀按 governance-ids.md 声明为夹具、不得登记
         suffix_registered = {gid for gid in registered_ids if gid.endswith(mod._FIXTURE_ID_SUFFIX)}
         assert suffix_registered == frozenset(), f"已登记 ID 中含 -99 夹具后缀: {sorted(suffix_registered)}"
+
+    def test_review_series_id_detected_when_unregistered(self, tmp_path, monkeypatch):
+        """H6-c 复核缺陷 1：review 系列形态（小写前缀 + 轮次号）未登记时应被检出.
+
+        通用形态要求大写前缀（[A-Z][A-Z0-9]*），无法匹配该形态（如 review01-A2）；旧白名单被
+        替换为通用形态时引入覆盖回退，登记侧与引用侧同时漏匹配（净零报错）。此处守护后备形态已生效。
+        """
+        from check_docs_consistency import check_governance_id_glossary
+
+        sample = _review_series_id_sample()
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(f"见 {sample}（未登记）\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
+
+        errors, _ = check_governance_id_glossary()
+        assert any(sample in e and "未在 governance-ids.md 登记" in e for e in errors), (
+            f"review 系列未登记 ID 应被检出, got: {errors}"
+        )
+
+    def test_review_series_id_registered_passes(self, tmp_path, monkeypatch):
+        """H6-c 复核缺陷 1：review 系列形态已登记 → 通过（登记侧与引用侧共用同一形态集合）."""
+        from check_docs_consistency import check_governance_id_glossary
+
+        sample = _review_series_id_sample()
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            f"| ID | 一句话含义 |\n|---|-----------|\n| {sample} | 某轮检视发现 |\n",
+            encoding="utf-8",
+        )
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(f"见 {sample}\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [claude])
+
+        errors, _ = check_governance_id_glossary()
+        assert errors == [], f"review 系列已登记 ID 应通过, got: {errors}"
+
+    def test_py_scan_includes_tests_dir(self, tmp_path, monkeypatch):
+        """H6-c × H2/L2（#1240）合并结论：tests/ 的 .py 仍在 WARNING 扫描面内.
+
+        本分支原拟把扫描面收敛为仅 scripts/；main 侧 #1240 改为以显式豁免清单
+        （_REPORT_FINDING_PREFIXES / _REPORT_FINDING_SHARED_IDS）清零 tests/ 存量 WARNING，
+        全仓实测 WARNING 为 0，故保留 tests/ 覆盖、不做无收益的覆盖率回退。
+        tests/ 中未登记 ID 仍产出 WARNING（渐进部署，不阻断）。
+        """
+        from check_docs_consistency import check_governance_id_glossary
+
+        gov_dir = tmp_path / "docs" / "governance"
+        gov_dir.mkdir(parents=True)
+        (gov_dir / "governance-ids.md").write_text(
+            "| ID | 一句话含义 |\n|---|-----------|\n| P2-07 | 元数据统一格式 |\n",
+            encoding="utf-8",
+        )
+        sample = _unregistered_id_sample("BT")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "t.py").write_text(f"'''守护 {sample}（未登记）'''\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.GOVERNANCE_IDS_PATH", gov_dir / "governance-ids.md")
+        monkeypatch.setattr("check_docs_consistency.ROOT", tmp_path)
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [])
+
+        errors, warnings = check_governance_id_glossary()
+        assert errors == [], f"tests/ 未登记 ID 不应进 error, got: {errors}"
+        assert any(sample in w for w in warnings), f"tests/ 未登记 ID 应产出 WARNING, got: {warnings}"
 
 
 class TestAdrIndexCompleteness:
