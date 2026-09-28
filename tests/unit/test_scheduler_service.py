@@ -241,7 +241,7 @@ class TestSchedulerServiceOnJobEvents:
             task = next(iter(svc._catchup_tasks))
             await task
             assert len(svc._catchup_tasks) == 0, "任务完成后应从集合移除（discard）"
-            mock_catchup.assert_awaited_once_with(include_today=True)
+            mock_catchup.assert_awaited_once_with(include_today=True, bypass_backoff=True)
 
     @pytest.mark.asyncio
     @patch("utils.scheduler_service.ConfigHandler")
@@ -341,6 +341,8 @@ class TestSchedulerServiceScheduleJobs:
         minute_field = next(f for f in job.trigger.fields if f.name == "minute")
         assert "21" in str(hour_field)
         assert "45" in str(minute_field)
+        # D7-3/MINOR-01: 计划时刻须与注册的 cron 同源缓存，供看门狗谓词复用。
+        assert svc._nightly_hm == (21, 45)
 
     @patch("utils.scheduler_service.ConfigHandler")
     def test_schedule_jobs_adds_ai_concept_daily(self, mock_ch):
@@ -1661,12 +1663,16 @@ class TestCatchUpMissedUpdates:
             "ai_concept_enabled": False,
         }
         svc._last_known_config = config.copy()
-        with patch("utils.scheduler_service.ThreadPoolManager") as mock_tpm:
+        with (
+            patch("utils.scheduler_service.ThreadPoolManager") as mock_tpm,
+            # D7-3: 09:00 未过夜间预测时刻（默认 20:30）→ 看门狗不把今天纳入补偿范围。
+            patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 9, 0, 0)),
+        ):
             mock_tpm_instance = MagicMock()
             mock_tpm.return_value = mock_tpm_instance
             mock_tpm_instance.run_async = AsyncMock(return_value=config)
             await svc._watch_config_changes()
-        svc._catch_up_missed_updates.assert_awaited_once()
+        svc._catch_up_missed_updates.assert_awaited_once_with(include_today=False)
 
 
 class TestCatchupLogic:
@@ -1932,8 +1938,12 @@ class TestCatchupBackoff:
 
     @pytest.mark.asyncio
     async def test_misfire_path_bypasses_backoff(self):
-        """_on_job_missed 的 include_today=True 路径不受退避限制：misfire 为一次性事件
-        （每天每 job 至多一次），且对应「下一个 cron 时刻」重试，避免当天数据永久丢失。"""
+        """_on_job_missed 的 bypass_backoff=True 路径不受退避限制：misfire 为一次性事件
+        （每天每 job 至多一次），且对应「下一个 cron 时刻」重试，避免当天数据永久丢失。
+
+        D7-3 起"纳入今天"（include_today）与"绕过退避"（bypass_backoff）解耦：
+        看门狗虽也传 include_today=True（已过预测时刻），但必须受退避约束。
+        """
         svc = _make_svc()
         svc._last_update_date = "20240613"
         svc._catchup_consecutive_failures = 5
@@ -1947,7 +1957,154 @@ class TestCatchupBackoff:
             patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
             patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
         ):
-            await svc._catch_up_missed_updates(include_today=True)
+            await svc._catch_up_missed_updates(include_today=True, bypass_backoff=True)
         mock_tm_instance.submit_task.assert_called_once()
         kwargs = mock_tm_instance.submit_task.call_args.kwargs
         assert kwargs["unique_key"] == "daily_sync_catchup"
+
+    @pytest.mark.asyncio
+    async def test_include_today_without_bypass_still_respects_backoff(self):
+        """D7-3: 仅 include_today=True（看门狗已过预测时刻路径）仍受退避约束——
+        否则 MAJOR-01 的 30 秒固定频率重试风暴会经该路径复发。"""
+        svc = _make_svc()
+        svc._last_update_date = "20240613"
+        svc._catchup_consecutive_failures = 1
+        svc._catchup_next_retry_at = self._FIXED_NOW + timedelta(seconds=30)
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.trade_calendar = MagicMock()
+        mock_dp_instance.trade_calendar.get_trade_dates = AsyncMock(return_value=[date(2024, 6, 13), date(2024, 6, 14)])
+        mock_tm_instance = MagicMock()
+        with (
+            patch("utils.scheduler_service.get_now", return_value=self._FIXED_NOW),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+        ):
+            await svc._catch_up_missed_updates(include_today=True)
+        mock_tm_instance.submit_task.assert_not_called()
+
+
+class TestNightlyPredictionCatchup:
+    """D7-3/MINOR-01: 看门狗在「数据就绪 + 当日未预测 + 已过预测时刻」时补触发一次预测。"""
+
+    _NOW = datetime(2024, 6, 15, 21, 0, 0)  # 已过默认 20:30
+    _TODAY = "20240615"
+
+    def _svc_with_job(self):
+        svc = _make_svc()
+        svc._registered_jobs["nightly_prediction"] = AsyncMock()
+        svc._last_update_date = self._TODAY
+        return svc
+
+    @pytest.mark.asyncio
+    async def test_triggers_once_when_data_ready_and_not_predicted(self):
+        svc = self._svc_with_job()
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.get_now", return_value=self._NOW),
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._catch_up_nightly_prediction()
+            job = svc._registered_jobs["nightly_prediction"]
+            job.assert_awaited_once_with(svc)
+            assert svc._nightly_catchup_triggered_date == self._TODAY
+            # 已补触发当日 → 即使预测仍未标记完成（无候选/预算超限允许重试），
+            # 也不重复补触发（避免每 30 秒重跑付费 AI 选股）。
+            await svc._catch_up_nightly_prediction()
+            job.assert_awaited_once_with(svc)
+
+    @pytest.mark.asyncio
+    async def test_no_trigger_after_prediction_done(self):
+        """`_last_pred_date == today` 后不再触发。"""
+        svc = self._svc_with_job()
+        svc._last_pred_date = self._TODAY
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.get_now", return_value=self._NOW),
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._catch_up_nightly_prediction()
+        svc._registered_jobs["nightly_prediction"].assert_not_awaited()
+        assert svc._nightly_catchup_triggered_date is None
+
+    @pytest.mark.asyncio
+    async def test_no_trigger_when_sync_incomplete(self):
+        svc = self._svc_with_job()
+        svc._last_update_date = "20240614"
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.get_now", return_value=self._NOW),
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._catch_up_nightly_prediction()
+        svc._registered_jobs["nightly_prediction"].assert_not_awaited()
+        assert svc._nightly_catchup_triggered_date is None
+
+    @pytest.mark.asyncio
+    async def test_no_trigger_before_prediction_time(self):
+        svc = self._svc_with_job()
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 9, 0, 0)),
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._catch_up_nightly_prediction()
+        svc._registered_jobs["nightly_prediction"].assert_not_awaited()
+        assert svc._nightly_catchup_triggered_date is None
+
+    @pytest.mark.asyncio
+    async def test_no_trigger_when_job_unregistered(self):
+        svc = _make_svc()  # 未注册 job
+        svc._last_update_date = self._TODAY
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.get_now", return_value=self._NOW),
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._catch_up_nightly_prediction()  # 不抛错
+        assert svc._nightly_catchup_triggered_date is None
+
+    @pytest.mark.asyncio
+    async def test_no_trigger_when_auto_update_disabled(self):
+        svc = self._svc_with_job()
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.get_now", return_value=self._NOW),
+        ):
+            mock_ch.is_auto_update_enabled.return_value = False
+            await svc._catch_up_nightly_prediction()
+        svc._registered_jobs["nightly_prediction"].assert_not_awaited()
+        assert svc._nightly_catchup_triggered_date is None
+
+    @pytest.mark.asyncio
+    async def test_watchdog_includes_today_after_prediction_time(self):
+        """D7-3: 已过预测时刻 → 看门狗把"今天"纳入补偿范围（否则水位推不到今天）。"""
+        svc = _make_svc()
+        svc._catch_up_missed_updates = AsyncMock()
+        svc._catch_up_nightly_prediction = AsyncMock()
+        config = {
+            "time": "09:30",
+            "enabled": True,
+            "ai_concept_time": "10:00",
+            "ai_concept_enabled": False,
+        }
+        svc._last_known_config = config.copy()
+        with (
+            patch("utils.scheduler_service.ThreadPoolManager") as mock_tpm,
+            patch("utils.scheduler_service.get_now", return_value=self._NOW),
+        ):
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=config)
+            await svc._watch_config_changes()
+        svc._catch_up_missed_updates.assert_awaited_once_with(include_today=True)
+        svc._catch_up_nightly_prediction.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_is_past_prediction_time_uses_nightly_hm(self):
+        """谓词以 _schedule_jobs 解析出的预测时刻 `_nightly_hm` 为准（默认 20:30）。"""
+        svc = _make_svc()
+        assert svc._nightly_hm == (20, 30)
+        with patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 20, 30, 0)):
+            assert svc._is_past_nightly_prediction_time() is True
+        with patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 20, 29, 0)):
+            assert svc._is_past_nightly_prediction_time() is False

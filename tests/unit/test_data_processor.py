@@ -692,7 +692,10 @@ class TestDataProcessorPrepareMarketData:
 
     @pytest.mark.asyncio
     async def test_calendar_unavailable_falls_back_to_today(self):
-        """覆盖 L677-682: latest is None 时 sync_daily_market_snapshot(today) 并返回 today"""
+        """D7-3/MINOR-01: latest is None 时仅返回 today，不再内联触发同步。
+
+        内联同步会绕过 daily_sync 去重键，与运行中的日更并发同步同一天。
+        """
         dp = _make_dp()
         dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
         dp.sync_daily_market_snapshot = AsyncMock()
@@ -700,7 +703,29 @@ class TestDataProcessorPrepareMarketData:
         with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
             result = await dp.prepare_market_data()
         assert result == today
-        dp.sync_daily_market_snapshot.assert_called_once_with(today)
+        dp.sync_daily_market_snapshot.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_today_not_synced_does_not_inline_sync(self):
+        """D7-3/MINOR-01: 今天是最新交易日但本地行情尚未同步到今天时，只告警不同步。
+
+        同步完整性由调度器水位线统一判定（夜间预测在未就绪时跳过），
+        prepare_market_data 不得绕过 daily_sync 去重键并发同步同一天。
+        """
+        dp = _make_dp()
+        today = datetime.date(2024, 6, 14)
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=today)
+        dp.cache.quote_dao.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 13))
+        dp.sync_daily_market_snapshot = AsyncMock()
+        with (
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+            patch("data.data_processor.logger.warning") as mock_warn,
+        ):
+            result = await dp.prepare_market_data()
+        assert result == today
+        dp.sync_daily_market_snapshot.assert_not_awaited()
+        assert mock_warn.call_count == 1
+        assert "inline sync removed" in mock_warn.call_args.args[0]
 
 
 class TestDataProcessorGetMarketOverview:

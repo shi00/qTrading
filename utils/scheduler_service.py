@@ -141,6 +141,13 @@ class SchedulerService:
             # （= 上次失败时间 + 当前档位退避），退避窗口内看门狗不再提交补偿。
             self._catchup_consecutive_failures = 0
             self._catchup_next_retry_at: datetime.datetime | None = None
+            # D7-3/MINOR-01: 看门狗补触发夜间预测的"当日已补触发"标记（进程内，重启即重置）。
+            # 夜间预测"零落库/无候选"时刻意不标记 _last_pred_date（允许重试），若无此标记，
+            # 30 秒看门狗会在数据就绪后反复补触发付费 AI 选股。每日至多补触发一次。
+            self._nightly_catchup_triggered_date: str | None = None
+            # 夜间预测计划时刻 (hour, minute)，由 _schedule_jobs 解析配置后写入（与 cron 同源），
+            # 供 _is_past_nightly_prediction_time 判定而无需在看门狗热路径重复读配置。
+            self._nightly_hm: tuple[int, int] = (20, 30)
             self._db_state_loaded = False
             # review01-A2-1: 业务 job 注册表（services/scheduled_jobs/ 提供 build_<job>_job），
             # SchedulerService 仅调度注册的 callable，不感知具体业务类。
@@ -316,9 +323,11 @@ class SchedulerService:
             # 在事件循环线程执行，可直接获取 running loop 调度异步补偿协程。
             # include_today=True（D6-1 Q21）：misfire 已过计划时刻+宽限（已收盘），
             # 若仅补到昨天则"当天永久跳过"依旧存在。
+            # bypass_backoff=True（D7-1）：misfire 为每天每 job 至多一次的一次性事件，
+            # 不受 30 秒看门狗退避约束，避免当天数据永久丢失。
             try:
                 loop = asyncio.get_running_loop()
-                task = loop.create_task(self._catch_up_missed_updates(include_today=True))
+                task = loop.create_task(self._catch_up_missed_updates(include_today=True, bypass_backoff=True))
                 # F1 (OSS 检视): 事件循环只持弱引用，create_task 返回值须保存强引用直至任务
                 # 完成，否则补偿任务可能在执行中途被 GC 静默丢弃（漏跑且无日志）。
                 self._catchup_tasks.add(task)
@@ -423,7 +432,14 @@ class SchedulerService:
 
         # D6-1: 复用 30 秒周期任务检查遗漏交易日并补偿（无新增定时器）。
         # 幂等由 unique_key 去重 + 同步层 check_data_exists 缓存跳过共同保证。
-        await self._catch_up_missed_updates()
+        # D7-3/MINOR-01: 已过夜间预测计划时刻时把"今天"纳入补偿范围——否则傍晚才启动
+        # 应用的用户水位永远推不到今天，夜间预测前置检查永不放行（预测被永久跳过）。
+        # 用统一谓词而非常态 include_today=True：16:30 日更及其 30 分钟 misfire 宽限窗口
+        # 内不补今天，避免与运行中的日更并发同步同一天；退避约束照常生效（不传
+        # bypass_backoff），同步持续失败时不出选股结论。
+        await self._catch_up_missed_updates(include_today=self._is_past_nightly_prediction_time())
+        # D7-3/MINOR-01: 数据就绪 + 当日未预测 + 已过预测时刻时补触发一次（每日至多一次）。
+        await self._catch_up_nightly_prediction()
 
     def _schedule_jobs(self):
         """Register jobs with the scheduler"""
@@ -456,6 +472,8 @@ class SchedulerService:
             n_hour, n_minute = map(int, nightly_time.split(":"))
         except (ValueError, TypeError, AttributeError):
             n_hour, n_minute = 20, 30
+        # D7-3/MINOR-01: 与 cron 同源记录计划时刻，供看门狗谓词使用。
+        self._nightly_hm = (n_hour, n_minute)
 
         self.scheduler.add_job(
             self._run_nightly_prediction,
@@ -586,21 +604,63 @@ class SchedulerService:
         self._catchup_consecutive_failures = 0
         self._catchup_next_retry_at = None
 
-    async def _catch_up_missed_updates(self, include_today: bool = False) -> None:
+    def _is_past_nightly_prediction_time(self) -> bool:
+        """D7-3/MINOR-01: 当前时刻是否已到/已过夜间预测计划时刻（默认 20:30）。
+
+        统一谓词，同时服务两处判定：① 看门狗补偿是否把"今天"纳入范围（include_today）；
+        ② 是否补触发一次当日夜间预测。计划时刻取 ``self._nightly_hm``（``_schedule_jobs``
+        解析配置写入，与注册的 cron 同源），避免在 30 秒热路径重复读配置。
+        """
+        now = get_now()
+        return (now.hour, now.minute) >= self._nightly_hm
+
+    async def _catch_up_nightly_prediction(self) -> None:
+        """D7-3/MINOR-01: 数据就绪 + 当日未预测 + 已过预测时刻时，补触发一次夜间预测。
+
+        覆盖"20:30 时应用未运行（或当日同步晚于 20:30 才完成）"导致夜间预测永久跳过：
+        前置检查（``_last_update_date == today``）在数据未就绪时直接跳过，数据就绪后需有
+        一处再触发者；30 秒看门狗即该触发者。每日进程内至多补触发一次
+        （``_nightly_catchup_triggered_date``）——预测因无候选/预算超限而"不标记完成、
+        允许重试"时，避免看门狗每 30 秒重跑付费 AI 选股。
+        """
+        if "nightly_prediction" not in self._registered_jobs:
+            return
+        if not ConfigHandler.is_auto_update_enabled():
+            return
+        today_str = get_now().date().strftime("%Y%m%d")
+        if self._last_update_date != today_str:
+            return
+        if self._last_pred_date == today_str:
+            return
+        if self._nightly_catchup_triggered_date == today_str:
+            return
+        if not self._is_past_nightly_prediction_time():
+            return
+        self._nightly_catchup_triggered_date = today_str
+        logger.warning(
+            "[Scheduler] 夜间预测未在计划时刻执行且当日数据已就绪（%s），补触发一次（D7-3/MINOR-01）",
+            today_str,
+        )
+        await self._run_nightly_prediction()
+
+    async def _catch_up_missed_updates(self, include_today: bool = False, *, bypass_backoff: bool = False) -> None:
         """D6-1 启动/周期/misfire 补偿：检查自 _last_update_date 以来是否有遗漏交易日并回补。
 
         桌面应用无法保证在 cron 时刻处于运行状态，且 misfire_grace_time 在启动期/繁忙期
         极易超时。纯时间触发会导致当天永久丢失且用户无感。本方法以"上次成功日期"为权威
         状态驱动补偿。三处触发：_load_db_state 后 / _watch_config_changes 内 / _on_job_missed 内。
-        include_today=True 仅由 _on_job_missed 传入：misfire 意味着计划时间已过（16:30 + 1800s
-        宽限 ≥ 17:00，已收盘），此时今天也应回补，否则"当天永久跳过"依旧存在。
+        include_today=True 表示把"今天"也纳入回补范围（默认只补 [last+1, 昨天]，今天由 16:30
+        cron 负责）：misfire 路径（_on_job_missed，计划时间 + 1800s 宽限已过、已收盘）与
+        D7-3 看门狗"已过夜间预测时刻"路径均传 True，否则"当天永久跳过"依旧存在。
+        bypass_backoff=True 仅由 _on_job_missed 传入：misfire 为每天每 job 至多一次的一次性
+        事件（非 30s 循环），且对应报告所述"下一个 cron 时刻"重试，施加退避可能导致当天数据
+        永久丢失。范围（include_today）与退避绕过（bypass_backoff）刻意解耦——D7-3 看门狗
+        需要"纳入今天"但仍必须受 D7-1 退避约束（否则 MAJOR-01 的 30 秒固定频率重试风暴复发）。
         幂等由补偿任务独立 unique_key 去重 + 同步层 check_data_exists 缓存跳过共同保证。
         """
         # D7-1/MAJOR-01: 退避窗口内跳过重复提交，打断"失败→30s 后重试"的固定频率风暴。
-        # misfire 路径（include_today=True）不受退避限制：其一为每天每 job 至多一次的一次性
-        # 事件（非 30s 循环），其二对应报告所述"下一个 cron 时刻"重试，施加退避可能导致
-        # 当天数据永久丢失。此处可提前返回，亦省去退避期间的交易日历查询。
-        if not include_today and self._catchup_backoff_active():
+        # 此处可提前返回，亦省去退避期间的交易日历查询。
+        if not bypass_backoff and self._catchup_backoff_active():
             logger.debug(
                 "[Scheduler] 补偿退避中（连续失败 %d 次），本次跳过提交，下次重试：%s",
                 self._catchup_consecutive_failures,

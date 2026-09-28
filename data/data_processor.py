@@ -774,21 +774,33 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return 0
 
     async def prepare_market_data(self):
+        """解析供策略取数的目标交易日（只读诊断，不触发任何同步）。
+
+        D7-3/MINOR-01: 原先在此内联调用 ``sync_daily_market_snapshot`` 会绕过
+        ``daily_sync`` 去重键，与运行中的日更/补偿任务并发同步同一天（同一批 Tushare
+        配额被重复消耗，并可能把半成品当日数据写入行情表）。当日数据的同步完整性由
+        调度器水位线 ``_last_update_date`` 统一判定，夜间预测在同步完成前直接跳过
+        （见 ``services/scheduled_jobs/nightly_prediction.py``），故本方法不再触发同步。
+        """
         now = get_now()
         today_date = now.date()
         latest = await self.trade_calendar.get_latest_trade_date()
         if latest is None:
             logger.error(
-                "[DataProcessor] prepare_market_data | All calendar sources unavailable. Syncing today as last resort.",
+                "[DataProcessor] prepare_market_data | All calendar sources unavailable; "
+                "inline sync removed (daily_sync owns dedup), returning today",
             )
-            await self.sync_daily_market_snapshot(today_date)
             return today_date
         if latest != today_date:
             return latest
 
         cached_date = await self.cache.quote_dao.get_latest_trade_date()
         if cached_date is not None and cached_date != today_date:
-            await self.sync_daily_market_snapshot(today_date)
+            logger.warning(
+                "[DataProcessor] prepare_market_data | Today's quotes not yet synced "
+                "(cached latest=%s); inline sync removed (daily_sync owns dedup)",
+                cached_date,
+            )
 
         return today_date
 

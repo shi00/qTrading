@@ -31,6 +31,8 @@ class _FakeSvc:
 
     def __init__(self) -> None:
         self._last_pred_date: str | None = None
+        # D7-3/MINOR-01: 夜间预测前置条件以当日同步水位线为准。
+        self._last_update_date: str | None = None
         self.marked_dates: list[str] = []
 
     async def _mark_nightly_prediction_done_db(self, today_str: str) -> None:
@@ -129,6 +131,8 @@ class TestRunNightlyPrediction:
     @pytest.mark.asyncio
     async def test_trading_day_submits_task(self):
         svc = _FakeSvc()
+        # D7-3/MINOR-01: 当日同步完整成功（水位线=今天）才允许提交。
+        svc._last_update_date = "20240615"
         job, _ = _make_job(svc)
         with (
             patch("services.scheduled_jobs.nightly_prediction.ConfigHandler") as mock_ch,
@@ -151,6 +155,61 @@ class TestRunNightlyPrediction:
             assert submit_kwargs.get("cancellable") is False
             assert callable(submit_kwargs.get("coroutine_factory"))
 
+    @pytest.mark.asyncio
+    async def test_sync_incomplete_skips_submit(self):
+        """D7-3/MINOR-01: 当日同步未完整成功时前置检查跳过——不提交任务、不标记完成，
+        并以可诊断日志（含水位线值）说明原因。"""
+        svc = _FakeSvc()
+        svc._last_update_date = "20240614"  # 非当日
+        job, _ = _make_job(svc)
+        with (
+            patch("services.scheduled_jobs.nightly_prediction.ConfigHandler") as mock_ch,
+            patch("services.scheduled_jobs.nightly_prediction.DataProcessor") as mock_dp,
+            patch("services.scheduled_jobs.nightly_prediction.get_now") as mock_now,
+            patch("services.scheduled_jobs.nightly_prediction.TaskManager") as mock_tm,
+            patch("services.scheduled_jobs.nightly_prediction.logger.warning") as mock_warn,
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            mock_dp_instance = MagicMock()
+            mock_dp_instance.trade_calendar = MagicMock()
+            mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+            mock_dp.return_value = mock_dp_instance
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
+            await job(svc)
+            mock_tm.return_value.submit_task.assert_not_called()
+            assert svc.marked_dates == []
+            mock_warn.assert_called_once_with(
+                "[Scheduler] Prediction skipped (%s: daily sync not complete, last_update_date=%s)",
+                "20240615",
+                "20240614",
+            )
+
+    @pytest.mark.asyncio
+    async def test_sync_incomplete_unknown_baseline_logs_placeholder(self):
+        """水位线为空（从未同步过）时日志以占位符呈现，避免 "None" 造成误读。"""
+        svc = _FakeSvc()
+        job, _ = _make_job(svc)
+        with (
+            patch("services.scheduled_jobs.nightly_prediction.ConfigHandler") as mock_ch,
+            patch("services.scheduled_jobs.nightly_prediction.DataProcessor") as mock_dp,
+            patch("services.scheduled_jobs.nightly_prediction.get_now") as mock_now,
+            patch("services.scheduled_jobs.nightly_prediction.TaskManager") as mock_tm,
+            patch("services.scheduled_jobs.nightly_prediction.logger.warning") as mock_warn,
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            mock_dp_instance = MagicMock()
+            mock_dp_instance.trade_calendar = MagicMock()
+            mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+            mock_dp.return_value = mock_dp_instance
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
+            await job(svc)
+            mock_tm.return_value.submit_task.assert_not_called()
+            mock_warn.assert_called_once_with(
+                "[Scheduler] Prediction skipped (%s: daily sync not complete, last_update_date=%s)",
+                "20240615",
+                "<none>",
+            )
+
 
 class TestNightlyPredictionLogicClosure:
     """验证 _prediction_logic 编排：数据准备 → runner.run → ReviewManager.save_results。"""
@@ -169,6 +228,8 @@ class TestNightlyPredictionLogicClosure:
             mock_rm = MagicMock()
         if get_strategy_data is _NO_DATA:
             get_strategy_data = {"trade_date": "20240614"}
+        # D7-3/MINOR-01: 当日同步完整成功（水位线=今天）才允许提交，与 mock_now 同源。
+        svc._last_update_date = "20240614"
         job = build_nightly_prediction_job(runner)
         with (
             patch("services.scheduled_jobs.nightly_prediction.ConfigHandler") as mock_ch,
@@ -256,6 +317,8 @@ class TestNightlyPredictionLogicClosure:
         应返回专门 i18n 消息（而非与"无候选"同款），供 UI/日志诊断；仍不标记完成允许重试。
         """
         svc = _FakeSvc()
+        # D7-3/MINOR-01: 前置条件为当日同步完整成功（与 mock_now 同源）。
+        svc._last_update_date = "20240614"
         mock_tm = MagicMock()
         result_df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["budget_unpriced_prompt"]})
 
@@ -341,6 +404,8 @@ class TestNightlyPredictionLogicClosure:
         """DAT-26: get_strategy_data 抛 DatabaseQueryError（suppress_errors=False 后
         DB 故障显式传播）→ 收敛为 sched_pred_no_context，未标记完成。"""
         svc = _FakeSvc()
+        # D7-3/MINOR-01: 前置条件为当日同步完整成功（与 mock_now 同源）。
+        svc._last_update_date = "20240614"
         mock_tm = MagicMock()
         runner = AsyncMock(return_value=pd.DataFrame())
 
@@ -395,6 +460,8 @@ class TestNightlyPredictionLogicClosure:
         svc = _FakeSvc()
         job, _ = _make_job(svc)
         mock_tm = MagicMock()
+        # D7-3/MINOR-01: 前置条件为当日同步完整成功（与 mock_now 同源）。
+        svc._last_update_date = "20240612"
         with (
             patch("services.scheduled_jobs.nightly_prediction.ConfigHandler") as mock_ch,
             patch("services.scheduled_jobs.nightly_prediction.DataProcessor") as mock_dp,
