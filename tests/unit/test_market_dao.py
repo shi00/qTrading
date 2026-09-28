@@ -3,6 +3,8 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import datetime
+
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 import pandas as pd
@@ -175,6 +177,19 @@ class TestMarketDaoGetDailyIndicatorsBulk:
         codes = [f"{i:06d}.SZ" for i in range(600)]
         result = await dao.get_daily_indicators_bulk(codes, start_date="20240101")
         assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_date_range_placeholder_numbering(self):
+        """R4 等价改写守卫：start/end 日期占 $1/$2 前缀参数，IN 子句占位符顺延到 $3（编号不漂移）。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_daily_indicators_bulk(["000001.SZ"], start_date="20240101", end_date="20240630")
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "trade_date >= $1" in sql
+        assert "trade_date <= $2" in sql
+        assert "ts_code IN ($3)" in sql
+        assert call_args[0][1] == [datetime.date(2024, 1, 1), datetime.date(2024, 6, 30), "000001.SZ"]
 
 
 class TestMarketDaoSaveIndexWeights:

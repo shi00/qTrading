@@ -136,14 +136,13 @@ class MarketDao(BaseDao):
             pk_columns=["content_hash", "publish_time"],
             conflict_columns=["content_hash", "publish_time"],
         )
-        # 反查 id：平铺 $N 占位符 + 全部参数绑定（R4：无字符串拼接用户输入）。
+        # 反查 id：平铺 $N 占位符 + 全部参数绑定（R4：占位符编号为代码自增整数，
+        # 经普通字符串拼接写入 SQL 文本，禁用 f-string / .format 拼 SQL；值一律走 $N 参数绑定）。
         pairs = [(r["content_hash"], r["publish_time"]) for r in rows]
-        placeholders = ",".join(f"(${2 * i + 1},${2 * i + 2})" for i in range(len(pairs)))
+        placeholders = ",".join("($" + str(2 * i + 1) + ",$" + str(2 * i + 2) + ")" for i in range(len(pairs)))
         flat_params: list = [v for pair in pairs for v in pair]
-        sql = (
-            "SELECT id, content_hash, publish_time FROM market_news "
-            f"WHERE (content_hash, publish_time) IN ({placeholders})"
-        )
+        sql = "SELECT id, content_hash, publish_time FROM market_news "
+        sql += "WHERE (content_hash, publish_time) IN (" + placeholders + ")"
         df_ids = await self._read_db(sql, flat_params)
         lookup: dict = {}
         if df_ids is not None and not df_ids.empty:
@@ -224,11 +223,11 @@ class MarketDao(BaseDao):
         params: list = ["telegraph"]
         idx = 2
         if start_time is not None:
-            sql += f" AND publish_time >= ${idx}"
+            sql += " AND publish_time >= $" + str(idx)
             params.append(start_time)
             idx += 1
         if end_time is not None:
-            sql += f" AND publish_time <= ${idx}"
+            sql += " AND publish_time <= $" + str(idx)
             params.append(end_time)
             idx += 1
 
@@ -249,11 +248,11 @@ class MarketDao(BaseDao):
             clauses = []
             for pat in patterns:
                 like = f"%{pat}%"
-                clauses.append(f"(title ILIKE ${idx} OR content ILIKE ${idx + 1})")
+                clauses.append("(title ILIKE $" + str(idx) + " OR content ILIKE $" + str(idx + 1) + ")")
                 params.extend([like, like])
                 idx += 2
             sql += " AND (" + " OR ".join(clauses) + ")"
-        sql += f" ORDER BY publish_time DESC LIMIT ${idx}"
+        sql += " ORDER BY publish_time DESC LIMIT $" + str(idx)
         params.append(limit)
         # 证据读取不得吞 DB 故障（§10.3）：_read_db 默认 suppress_errors=True 会把
         # 基础设施故障伪装成"空结果"，导致服务层误判 no_evidence（对抗性检视 Major①）。
@@ -278,11 +277,11 @@ class MarketDao(BaseDao):
         params: list = [ts_code]
         idx = 2
         if start_time is not None:
-            sql += f" AND publish_time >= ${idx}"
+            sql += " AND publish_time >= $" + str(idx)
             params.append(start_time)
             idx += 1
         if end_time is not None:
-            sql += f" AND publish_time <= ${idx}"
+            sql += " AND publish_time <= $" + str(idx)
             params.append(end_time)
             idx += 1
         sql += " ORDER BY publish_time DESC"
@@ -375,23 +374,23 @@ class MarketDao(BaseDao):
         params = []
         idx = 1
         if ts_code:
-            sql += f" AND ts_code = ${idx}"
+            sql += " AND ts_code = $" + str(idx)
             params.append(ts_code)
             idx += 1
         sd = self._to_db_date(start_date) if start_date else None
         if sd:
-            sql += f" AND trade_date >= ${idx}"
+            sql += " AND trade_date >= $" + str(idx)
             params.append(sd)
             idx += 1
         ed = self._to_db_date(end_date) if end_date else None
         if ed:
-            sql += f" AND trade_date <= ${idx}"
+            sql += " AND trade_date <= $" + str(idx)
             params.append(ed)
             idx += 1
 
         sql += " ORDER BY trade_date DESC"
         if limit:
-            sql += f" LIMIT ${idx}"
+            sql += " LIMIT $" + str(idx)
             params.append(limit)
 
         return await self._read_db(sql, params)
@@ -423,12 +422,12 @@ class MarketDao(BaseDao):
 
         sd = self._to_db_date(start_date) if start_date else None
         if sd:
-            sql += f" AND trade_date >= ${idx}"
+            sql += " AND trade_date >= $" + str(idx)
             params.append(sd)
             idx += 1
         ed = self._to_db_date(end_date) if end_date else None
         if ed:
-            sql += f" AND trade_date <= ${idx}"
+            sql += " AND trade_date <= $" + str(idx)
             params.append(ed)
             idx += 1
 
@@ -505,13 +504,13 @@ class MarketDao(BaseDao):
         idx = 1
         td = self._to_db_date(trade_date) if trade_date else None
         if td:
-            sql += f" AND trade_date = ${idx}"
+            sql += " AND trade_date = $" + str(idx)
             params.append(td)
             idx += 1
 
         sql += " ORDER BY trade_date DESC"
         if limit:
-            sql += f" LIMIT ${idx}"
+            sql += " LIMIT $" + str(idx)
             params.append(limit)
 
         df = await self._read_db(sql, params)
