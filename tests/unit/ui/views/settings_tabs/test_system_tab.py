@@ -13,7 +13,8 @@
 
 import asyncio
 import inspect
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
@@ -334,6 +335,16 @@ def _get_dropdowns(env: dict) -> list[ft.Dropdown]:
     return dropdowns
 
 
+def _toggle_advanced_group(root: Any, expanded: bool) -> None:
+    """模拟用户展开/折叠高级分组: 取唯一 ExpansionTile 的 on_change 并以 ``e.data=expanded`` 触发。"""
+    tiles = [c for c in _walk_all_controls(root) if isinstance(c, ft.ExpansionTile)]
+    assert len(tiles) == 1, f"应有 1 个高级分组 ExpansionTile, 实际 {len(tiles)}"
+    handler = cast("Callable[[Any], None]", tiles[0].on_change)
+    event = MagicMock()
+    event.data = expanded
+    handler(event)
+
+
 def _get_text_fields(env: dict) -> list[ft.TextField]:
     """按出现顺序返回 7 个 TextField。
 
@@ -361,10 +372,10 @@ def _find_text_field_by_label(env: dict, label_key: str) -> ft.TextField:
 
 
 def _get_save_buttons(env: dict) -> list:
-    """按出现顺序返回保存按钮。
+    """按出现顺序返回按钮控件 (ft.Button / ft.IconButton)。
 
-    顺序: save_concurrency_btn(0) / save_thread_pool_btn(1) / save_db_pool_btn(2) /
-          save_no_proxy_btn(3) / diagnostics_button(ft.Button)
+    MAJOR-08: 数值/文本字段的保存改由 on_blur/on_submit 触发, 已移除
+    4 个行内保存 IconButton, 故当前仅剩 diagnostics_button (ft.Button)。
     """
     buttons: list[Any] = []
     visited: set[int] = set()
@@ -412,6 +423,22 @@ def _invoke(handler: Any, *args: Any) -> None:
     此 helper 用 Any 参数绕过两者。
     """
     handler(*args)
+
+
+def _set_field_value(env: dict, label_key: str, value: str) -> None:
+    """通过 on_change 写入字段值并重渲染 (MAJOR-08: 保留用户原始输入, 无 clamp)。"""
+    field = _find_text_field_by_label(env, label_key)
+    _invoke(field.on_change, _make_event(value))
+    _rerender(env)
+
+
+def _blur_field(env: dict, label_key: str) -> tuple[Any, tuple, dict]:
+    """触发字段 on_blur (MAJOR-08 失焦提交) 并返回 run_task 的 (handler, args, kwargs)。"""
+    field = _find_text_field_by_label(env, label_key)
+    page = env["page"]
+    page.run_task.reset_mock()
+    _invoke(field.on_blur, _make_event())
+    return _await_run_task_handler(page)
 
 
 def _await_run_task_handler(page: MagicMock) -> tuple[Any, tuple, dict]:
@@ -551,13 +578,54 @@ class TestSystemTabMount:
         fields = _get_text_fields(system_tab_env)
         assert len(fields) >= 7
 
-    def test_render_includes_save_buttons(self, system_tab_env) -> None:
-        """渲染含 4 个 IconButton + 1 个 ft.Button (diagnostics)。"""
+    def test_render_has_no_save_buttons(self, system_tab_env) -> None:
+        """MAJOR-08: 数值/文本字段不再有行内保存 IconButton, 仅保留 diagnostics ft.Button。
+
+        保存语义统一为「失焦 (on_blur) 校验通过即保存」。
+        """
         buttons = _get_save_buttons(system_tab_env)
         icon_btns = [b for b in buttons if isinstance(b, ft.IconButton)]
         diag_btns = [b for b in buttons if isinstance(b, ft.Button)]
-        assert len(icon_btns) >= 4
+        assert len(icon_btns) == 0, "不应再有行内保存 IconButton"
         assert len(diag_btns) == 1
+
+    def test_render_text_fields_have_on_blur_commit(self, system_tab_env) -> None:
+        """MAJOR-08: 7 个数值/文本字段均绑定 on_blur 失焦提交。"""
+        fields = _get_text_fields(system_tab_env)
+        assert len(fields) == 7
+        for field in fields:
+            # on_blur 必须绑定（失焦即保存核心语义），而不是 None 或空
+            assert callable(field.on_blur), f"字段 {field.label!r} 应绑定 on_blur"
+
+    def test_render_has_advanced_group_collapsed_by_default(self, system_tab_env) -> None:
+        """MAJOR-08: 技术参数收进默认折叠的高级 (开发者) 分组。"""
+        tiles = [c for c in _walk_all_controls(system_tab_env["result"]) if isinstance(c, ft.ExpansionTile)]
+        assert len(tiles) == 1, f"应有 1 个高级分组 ExpansionTile, 实际 {len(tiles)}"
+        assert tiles[0].expanded is False, "高级分组必须默认折叠"
+
+    def test_advanced_group_expansion_survives_rerender(self, system_tab_env) -> None:
+        """MAJOR-08 回归: 展开态跨重渲染保持, 不被 VM 通知触发的重渲染重置为折叠。
+
+        重渲染等价于切换日志级别后 ``settings_vm`` 通知驱动的重建。若展开态写死为
+        False, 重渲染会塌回折叠态 → 组内子控件不渲染 → E2E anchor 消失。
+        """
+        env = system_tab_env
+        _toggle_advanced_group(env["result"], True)
+
+        result = _rerender(env)
+        tiles = [c for c in _walk_all_controls(result) if isinstance(c, ft.ExpansionTile)]
+        assert tiles[0].expanded is True, "重渲染后展开态必须保持 (否则组内子控件不渲染)"
+
+    def test_advanced_group_collapse_survives_rerender(self, system_tab_env) -> None:
+        """MAJOR-08 回归: 用户折叠高级分组后, 重渲染不得把它重新展开。"""
+        env = system_tab_env
+        _toggle_advanced_group(env["result"], True)
+        _rerender(env)
+        _toggle_advanced_group(env["result"], False)
+
+        result = _rerender(env)
+        tiles = [c for c in _walk_all_controls(result) if isinstance(c, ft.ExpansionTile)]
+        assert tiles[0].expanded is False, "折叠态必须跨重渲染保持"
 
     def test_unmount_triggers_vm_dispose(self, system_tab_env) -> None:
         """卸载后 SystemViewModel.dispose 被调用。"""
@@ -612,52 +680,39 @@ class TestEventHandlersPageAvailable:
         assert args == ("DEBUG",)
 
     def test_on_save_concurrency_invokes_run_task(self, system_tab_env) -> None:
-        """_on_save_concurrency: page 可用 → page.run_task(_do_save_concurrency, concurrency_value)。"""
+        """_commit_concurrency (on_blur): page 可用 → page.run_task(_do_save_concurrency, value)。"""
         env = system_tab_env
-        buttons = _get_save_buttons(env)
-        page = env["page"]
-        page.run_task.reset_mock()
-
-        _invoke(buttons[0].on_click, _make_event())
-        handler, args, _ = _await_run_task_handler(page)
+        handler, args, _ = _blur_field(env, "settings_concurrency")
         assert inspect.iscoroutinefunction(handler)
-        assert len(args) == 1
+        assert args == ("4",)
 
     def test_on_save_db_pool_invokes_run_task(self, system_tab_env) -> None:
-        """_on_save_db_pool: page 可用 → page.run_task(_do_save_db_pool, pool/overflow/timeout)。"""
+        """_commit_db_pool (on_blur): page 可用 → page.run_task(_do_save_db_pool, pool/overflow/timeout)。"""
         env = system_tab_env
-        buttons = _get_save_buttons(env)
-        page = env["page"]
-        page.run_task.reset_mock()
-
-        _invoke(buttons[2].on_click, _make_event())
-        handler, args, _ = _await_run_task_handler(page)
+        handler, args, _ = _blur_field(env, "settings_db_pool")
         assert inspect.iscoroutinefunction(handler)
-        assert len(args) == 3
+        assert args == ("5", "10", "30")
 
     def test_on_save_thread_pool_invokes_run_task(self, system_tab_env) -> None:
-        """_on_save_thread_pool: page 可用 → page.run_task(_do_save_thread_pool, io_str, cpu_str)。"""
+        """_commit_thread_pool (on_blur): page 可用 → page.run_task(_do_save_thread_pool, io, cpu)。"""
         env = system_tab_env
-        buttons = _get_save_buttons(env)
-        page = env["page"]
-        page.run_task.reset_mock()
-
-        _invoke(buttons[1].on_click, _make_event())
-        handler, args, _ = _await_run_task_handler(page)
+        handler, args, _ = _blur_field(env, "sys_pool_io")
         assert inspect.iscoroutinefunction(handler)
-        assert len(args) == 2
+        assert args == ("8", "4")
 
     def test_on_save_no_proxy_invokes_run_task(self, system_tab_env) -> None:
-        """_on_save_no_proxy: page 可用 → page.run_task(_do_save_no_proxy, no_proxy_value)。"""
+        """_commit_no_proxy (on_blur): page 可用 → page.run_task(_do_save_no_proxy, value)。
+
+        no_proxy_input 无 label 注释项, 为遍历顺序最后一个 TextField。
+        """
         env = system_tab_env
-        buttons = _get_save_buttons(env)
+        fields = _get_text_fields(env)
         page = env["page"]
         page.run_task.reset_mock()
-
-        _invoke(buttons[3].on_click, _make_event())
+        _invoke(fields[-1].on_blur, _make_event())
         handler, args, _ = _await_run_task_handler(page)
         assert inspect.iscoroutinefunction(handler)
-        assert len(args) == 1
+        assert args == ("",)
 
     def test_on_export_diagnostics_invokes_run_task(self, system_tab_env) -> None:
         """_on_export_diagnostics: page 可用 → page.run_task(_do_export_diagnostics)。"""
@@ -729,42 +784,42 @@ class TestEventHandlersPageNoneEarlyReturn:
 
     def test_on_save_concurrency_page_none_no_run_task(self, system_tab_env) -> None:
         env = system_tab_env
-        buttons = _get_save_buttons(env)
+        field = _find_text_field_by_label(env, "settings_concurrency")
         page = env["page"]
         page.run_task.reset_mock()
 
         with patch("ui.views.settings_tabs.system_tab._get_page", return_value=None):
-            _invoke(buttons[0].on_click, _make_event())
+            _invoke(field.on_blur, _make_event())
         assert not page.run_task.called
 
     def test_on_save_db_pool_page_none_no_run_task(self, system_tab_env) -> None:
         env = system_tab_env
-        buttons = _get_save_buttons(env)
+        field = _find_text_field_by_label(env, "settings_db_pool")
         page = env["page"]
         page.run_task.reset_mock()
 
         with patch("ui.views.settings_tabs.system_tab._get_page", return_value=None):
-            _invoke(buttons[2].on_click, _make_event())
+            _invoke(field.on_blur, _make_event())
         assert not page.run_task.called
 
     def test_on_save_thread_pool_page_none_no_run_task(self, system_tab_env) -> None:
         env = system_tab_env
-        buttons = _get_save_buttons(env)
+        field = _find_text_field_by_label(env, "sys_pool_io")
         page = env["page"]
         page.run_task.reset_mock()
 
         with patch("ui.views.settings_tabs.system_tab._get_page", return_value=None):
-            _invoke(buttons[1].on_click, _make_event())
+            _invoke(field.on_blur, _make_event())
         assert not page.run_task.called
 
     def test_on_save_no_proxy_page_none_no_run_task(self, system_tab_env) -> None:
         env = system_tab_env
-        buttons = _get_save_buttons(env)
+        fields = _get_text_fields(env)
         page = env["page"]
         page.run_task.reset_mock()
 
         with patch("ui.views.settings_tabs.system_tab._get_page", return_value=None):
-            _invoke(buttons[3].on_click, _make_event())
+            _invoke(fields[-1].on_blur, _make_event())
         assert not page.run_task.called
 
     def test_on_export_diagnostics_page_none_no_run_task(self, system_tab_env) -> None:
@@ -1068,11 +1123,7 @@ class TestDoSaveConcurrency:
     """_do_save_concurrency: 成功/越界/ValueError/异常/CancelledError。"""
 
     def _trigger(self, env) -> tuple:
-        buttons = _get_save_buttons(env)
-        page = env["page"]
-        page.run_task.reset_mock()
-        _invoke(buttons[0].on_click, _make_event())
-        return _await_run_task_handler(page)
+        return _blur_field(env, "settings_concurrency")
 
     def test_success_path(self, system_tab_env) -> None:
         """concurrency_value=4 (有效) → set_sync_max_concurrent_heavy。"""
@@ -1087,25 +1138,19 @@ class TestDoSaveConcurrency:
         )
 
     def test_out_of_range_lower(self, system_tab_env) -> None:
-        """P2-13 语义: on_change 输入 "0" 被 VM set clamp 为 "1" → save 保存 clamp 后合法值。"""
+        """越界 "0" 直接调 handler (绕过 View 校验) → VM save 范围兜底失败。"""
         env = system_tab_env
-        fields = _get_text_fields(env)
-        _invoke(fields[0].on_change, _make_event("0"))
-        _rerender(env)
-        handler, args, _ = self._trigger(env)
-        asyncio.run(handler(*args))
+        handler, _, _ = self._trigger(env)
+        asyncio.run(handler("0"))
 
-        # P2-13: clamp 到 min=1 后保存成功
-        env["mock_config"].set_sync_max_concurrent_heavy.assert_called_once_with(1)
+        env["mock_config"].set_sync_max_concurrent_heavy.assert_not_called()
+        env["show_snack"].assert_called_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
     def test_value_error_path(self, system_tab_env) -> None:
-        """raw_val 非数字 → ValueError → snack num_fmt。"""
+        """raw_val 非数字 (绕过 View 校验) → ValueError → snack num_fmt。"""
         env = system_tab_env
-        fields = _get_text_fields(env)
-        _invoke(fields[0].on_change, _make_event("not_a_number"))
-        _rerender(env)
-        handler, args, _ = self._trigger(env)
-        asyncio.run(handler(*args))
+        handler, _, _ = self._trigger(env)
+        asyncio.run(handler("not_a_number"))
 
         env["mock_config"].set_sync_max_concurrent_heavy.assert_not_called()
         env["show_snack"].assert_called_once_with("i18n[sys_snack_num_fmt]", color=AppColors.ERROR)
@@ -1133,11 +1178,7 @@ class TestDoSaveDbPool:
     """_do_save_db_pool: 成功/越界/ValueError/异常/CancelledError。"""
 
     def _trigger(self, env) -> tuple:
-        buttons = _get_save_buttons(env)
-        page = env["page"]
-        page.run_task.reset_mock()
-        _invoke(buttons[2].on_click, _make_event())
-        return _await_run_task_handler(page)
+        return _blur_field(env, "settings_db_pool")
 
     def test_success_path(self, system_tab_env) -> None:
         """3 个值都有效 (5/10/30) → 三个 setter 被调用。"""
@@ -1154,7 +1195,7 @@ class TestDoSaveDbPool:
         )
 
     def test_pool_size_out_of_range(self, system_tab_env) -> None:
-        """P2-13 语义: 直接调 handler 绕过 set clamp → VM save 兜底范围检查失败 → snack sys_snack_save_err。"""
+        """直接调 handler (绕过 View 校验) → VM save 范围兜底失败 → snack sys_snack_save_err。"""
         env = system_tab_env
         handler, _, _ = self._trigger(env)
         asyncio.run(handler("0", "10", "30"))
@@ -1166,7 +1207,7 @@ class TestDoSaveDbPool:
         )
 
     def test_max_overflow_out_of_range(self, system_tab_env) -> None:
-        """P2-13 语义: max_overflow=100 绕过 clamp → VM 兜底失败 → snack sys_snack_save_err。"""
+        """直接调 handler 绕过 View 校验: max_overflow=100 → VM 兜底失败 → snack sys_snack_save_err。"""
         env = system_tab_env
         handler, _, _ = self._trigger(env)
         asyncio.run(handler("5", "100", "30"))
@@ -1178,7 +1219,7 @@ class TestDoSaveDbPool:
         )
 
     def test_timeout_out_of_range(self, system_tab_env) -> None:
-        """P2-13 语义: timeout=1 绕过 clamp → VM 兜底失败 → snack sys_snack_save_err。"""
+        """直接调 handler 绕过 View 校验: timeout=1 → VM 兜底失败 → snack sys_snack_save_err。"""
         env = system_tab_env
         handler, _, _ = self._trigger(env)
         asyncio.run(handler("5", "10", "1"))
@@ -1221,11 +1262,7 @@ class TestDoSaveThreadPool:
     """_do_save_thread_pool: 成功/越界/ValueError/异常/CancelledError。"""
 
     def _trigger(self, env) -> tuple:
-        buttons = _get_save_buttons(env)
-        page = env["page"]
-        page.run_task.reset_mock()
-        _invoke(buttons[1].on_click, _make_event())
-        return _await_run_task_handler(page)
+        return _blur_field(env, "sys_pool_io")
 
     def test_success_path(self, system_tab_env) -> None:
         """io=8, cpu=4 (有效) → setter + reload_config + show_snack。"""
@@ -1256,7 +1293,7 @@ class TestDoSaveThreadPool:
         )
 
     def test_io_out_of_range(self, system_tab_env) -> None:
-        """P2-13 语义: io=2 绕过 clamp → VM 兜底失败 → snack 末次为 sys_snack_save_err。"""
+        """直接调 handler 绕过 View 校验: io=2 → VM 兜底失败 → snack 末次为 sys_snack_save_err。"""
         env = system_tab_env
         handler, _, _ = self._trigger(env)
         asyncio.run(handler("2", "4"))
@@ -1266,7 +1303,7 @@ class TestDoSaveThreadPool:
         env["show_snack"].assert_called_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
     def test_cpu_out_of_range(self, system_tab_env) -> None:
-        """P2-13 语义: cpu=100 绕过 clamp → VM 兜底失败 → snack 末次为 sys_snack_save_err。"""
+        """直接调 handler 绕过 View 校验: cpu=100 → VM 兜底失败 → snack 末次为 sys_snack_save_err。"""
         env = system_tab_env
         handler, _, _ = self._trigger(env)
         asyncio.run(handler("8", "100"))
@@ -1308,10 +1345,10 @@ class TestDoSaveNoProxy:
     """_do_save_no_proxy: 成功(空)/带域名/异常/CancelledError。"""
 
     def _trigger(self, env) -> tuple:
-        buttons = _get_save_buttons(env)
+        fields = _get_text_fields(env)
         page = env["page"]
         page.run_task.reset_mock()
-        _invoke(buttons[3].on_click, _make_event())
+        _invoke(fields[-1].on_blur, _make_event())
         return _await_run_task_handler(page)
 
     def test_success_path_empty(self, system_tab_env) -> None:
@@ -1498,14 +1535,8 @@ class TestDoSaveVMExceptionPaths:
         from ui.viewmodels.system_settings_view_model import SystemSettingsViewModel
 
         env = system_tab_env
-        fields = _get_text_fields(env)
-        _invoke(fields[0].on_change, _make_event("4"))
-        _rerender(env)
-        buttons = _get_save_buttons(env)
-        page = env["page"]
-        page.run_task.reset_mock()
-        _invoke(buttons[0].on_click, _make_event())
-        handler, args, _ = _await_run_task_handler(page)
+        _set_field_value(env, "settings_concurrency", "4")
+        handler, args, _ = _blur_field(env, "settings_concurrency")
         with patch.object(
             SystemSettingsViewModel, "save_concurrency", new=AsyncMock(side_effect=RuntimeError("vm boom"))
         ):
@@ -1517,11 +1548,7 @@ class TestDoSaveVMExceptionPaths:
         from ui.viewmodels.system_settings_view_model import SystemSettingsViewModel
 
         env = system_tab_env
-        buttons = _get_save_buttons(env)
-        page = env["page"]
-        page.run_task.reset_mock()
-        _invoke(buttons[2].on_click, _make_event())
-        handler, args, _ = _await_run_task_handler(page)
+        handler, args, _ = _blur_field(env, "settings_db_pool")
         with patch.object(SystemSettingsViewModel, "save_db_pool", new=AsyncMock(side_effect=RuntimeError("vm boom"))):
             asyncio.run(handler(*args))
         env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
@@ -1535,11 +1562,7 @@ class TestDoSaveVMExceptionPaths:
         from ui.viewmodels.system_settings_view_model import SystemSettingsViewModel
 
         env = system_tab_env
-        buttons = _get_save_buttons(env)
-        page = env["page"]
-        page.run_task.reset_mock()
-        _invoke(buttons[1].on_click, _make_event())
-        handler, args, _ = _await_run_task_handler(page)
+        handler, args, _ = _blur_field(env, "sys_pool_io")
         with patch.object(
             SystemSettingsViewModel, "save_thread_pool", new=AsyncMock(side_effect=RuntimeError("vm boom"))
         ):
@@ -1553,10 +1576,10 @@ class TestDoSaveVMExceptionPaths:
         from ui.viewmodels.system_settings_view_model import SystemSettingsViewModel
 
         env = system_tab_env
-        buttons = _get_save_buttons(env)
+        fields = _get_text_fields(env)
         page = env["page"]
         page.run_task.reset_mock()
-        _invoke(buttons[3].on_click, _make_event())
+        _invoke(fields[-1].on_blur, _make_event())
         handler, args, _ = _await_run_task_handler(page)
         with (
             patch.object(SystemSettingsViewModel, "save_no_proxy", new=AsyncMock(side_effect=RuntimeError("vm boom"))),
@@ -1564,6 +1587,218 @@ class TestDoSaveVMExceptionPaths:
         ):
             asyncio.run(handler(*args))
         env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
+
+
+# ============================================================================
+# MAJOR-08: 失焦 (on_blur) 校验通过即保存 + 保留用户输入 + 线程池确认对话框
+# ============================================================================
+
+
+class TestFieldOnBlurValidation:
+    """MAJOR-08: 字段失焦提交语义 —— 校验失败展示 error, 保留用户输入, 不派发保存。"""
+
+    def test_invalid_input_preserved_and_error_shown(self, system_tab_env) -> None:
+        """输入越界值失焦: 字段显示 error 且保留原始输入, 不派发保存。"""
+        env = system_tab_env
+        _set_field_value(env, "settings_concurrency", "99")
+        page = env["page"]
+        page.run_task.reset_mock()
+
+        _invoke(_find_text_field_by_label(env, "settings_concurrency").on_blur, _make_event())
+
+        assert not page.run_task.called
+        _rerender(env)
+        field = _find_text_field_by_label(env, "settings_concurrency")
+        assert field.value == "99", "校验失败不得静默修正/回滚用户输入"
+        assert field.error == "i18n[sys_err_out_of_range_fmt]"
+
+    def test_empty_field_shows_required_error(self, system_tab_env) -> None:
+        """空值失焦 → sys_field_required, 不派发保存。"""
+        env = system_tab_env
+        _set_field_value(env, "settings_db_overflow", "")
+        env["page"].run_task.reset_mock()
+
+        _invoke(_find_text_field_by_label(env, "settings_db_overflow").on_blur, _make_event())
+
+        assert not env["page"].run_task.called
+        _rerender(env)
+        assert _find_text_field_by_label(env, "settings_db_overflow").error == "i18n[sys_field_required]"
+
+    def test_non_numeric_shows_num_fmt_error(self, system_tab_env) -> None:
+        """非数字失焦 → sys_snack_num_fmt, 不派发保存。"""
+        env = system_tab_env
+        _set_field_value(env, "settings_db_timeout", "abc")
+        env["page"].run_task.reset_mock()
+
+        _invoke(_find_text_field_by_label(env, "settings_db_timeout").on_blur, _make_event())
+
+        assert not env["page"].run_task.called
+        _rerender(env)
+        assert _find_text_field_by_label(env, "settings_db_timeout").error == "i18n[sys_snack_num_fmt]"
+
+    def test_on_change_clears_error(self, system_tab_env) -> None:
+        """用户继续修改输入 → 该字段 error 清除。"""
+        env = system_tab_env
+        _set_field_value(env, "sys_pool_cpu", "999")
+        _invoke(_find_text_field_by_label(env, "sys_pool_cpu").on_blur, _make_event())
+        _rerender(env)
+        assert _find_text_field_by_label(env, "sys_pool_cpu").error == "i18n[sys_err_out_of_range_fmt]"
+
+        _set_field_value(env, "sys_pool_cpu", "4")
+        assert _find_text_field_by_label(env, "sys_pool_cpu").error is None
+
+    def test_db_pool_partial_invalid_blocks_group_save(self, system_tab_env) -> None:
+        """db_pool 组内任一字段非法 → 整组不保存, 仅非法字段显示 error。"""
+        env = system_tab_env
+        _set_field_value(env, "settings_db_pool", "0")
+        env["page"].run_task.reset_mock()
+
+        _invoke(_find_text_field_by_label(env, "settings_db_pool").on_blur, _make_event())
+
+        assert not env["page"].run_task.called
+        _rerender(env)
+        assert _find_text_field_by_label(env, "settings_db_pool").error == "i18n[sys_err_out_of_range_fmt]"
+        assert _find_text_field_by_label(env, "settings_db_overflow").error is None
+
+    def test_no_proxy_blur_dispatches_save(self, system_tab_env) -> None:
+        """no_proxy (无范围校验) 失焦即保存, 值原样传入。"""
+        env = system_tab_env
+        fields = _get_text_fields(env)
+        _invoke(fields[-1].on_change, _make_event("a.com,b.com"))
+        _rerender(env)
+        env["page"].run_task.reset_mock()
+
+        _invoke(_get_text_fields(env)[-1].on_blur, _make_event())
+
+        handler, args, _ = _await_run_task_handler(env["page"])
+        assert handler.__name__ == "_do_save_no_proxy"
+        assert args == ("a.com,b.com",)
+
+    def test_repeated_blur_same_value_deduplicated(self, system_tab_env) -> None:
+        """同一值连续两次失焦 (Enter 提交会先 on_submit 后 on_blur) → 只派发一次。"""
+        env = system_tab_env
+        page = env["page"]
+        field = _find_text_field_by_label(env, "settings_concurrency")
+        page.run_task.reset_mock()
+
+        _invoke(field.on_blur, _make_event())
+        assert page.run_task.call_count == 1
+        _invoke(field.on_blur, _make_event())
+        assert page.run_task.call_count == 1, "窗口内同值重复失焦应被去重"
+
+    def test_blur_after_value_change_dispatches_again(self, system_tab_env) -> None:
+        """修改值后再次失焦 → 重新派发 (去重签名随值变化失效)。"""
+        env = system_tab_env
+        _set_field_value(env, "settings_concurrency", "8")
+        _blur_field(env, "settings_concurrency")
+        _set_field_value(env, "settings_concurrency", "16")
+
+        _, args, _ = _blur_field(env, "settings_concurrency")
+
+        assert args == ("16",)
+
+
+class TestThreadPoolSaveConfirm:
+    """MAJOR-08: 保存线程池前检测运行中任务 → 弹确认 (复用 ConfirmDialog)。"""
+
+    @staticmethod
+    def _patch_confirm_dialog(monkeypatch, mod: Any) -> dict:
+        """替换 mod.ConfirmDialog 捕获其 props (open_state 为 True 时记录回调)。"""
+        captured: dict[str, Any] = {}
+
+        def _fake_confirm_dialog(**kwargs: Any) -> Any:
+            if kwargs.get("open_state"):
+                captured["title"] = kwargs.get("title")
+                captured["body"] = kwargs.get("body")
+                captured["on_confirm"] = kwargs.get("on_confirm")
+                captured["on_cancel"] = kwargs.get("on_cancel")
+            return MagicMock(name="ConfirmDialog")
+
+        monkeypatch.setattr(mod, "ConfirmDialog", _fake_confirm_dialog)
+        return captured
+
+    def test_blur_with_running_tasks_opens_confirm(self, system_tab_env, monkeypatch) -> None:
+        """DoD: 存在运行中任务 → 失焦不保存, 弹确认对话框。"""
+        from services.task_manager import AppTask, TaskManager, TaskStatus
+
+        env = system_tab_env
+        monkeypatch.setattr(TaskManager, "get_all_tasks", lambda self: [AppTask(status=TaskStatus.RUNNING)])
+        captured = self._patch_confirm_dialog(monkeypatch, env["mod"])
+        page = env["page"]
+        page.run_task.reset_mock()
+
+        _invoke(_find_text_field_by_label(env, "sys_pool_io").on_blur, _make_event())
+
+        assert not page.run_task.called, "存在运行中任务时不得直接保存"
+        _rerender(env)
+        assert "on_confirm" in captured, "应弹出确认对话框"
+        assert captured["title"] == "i18n[sys_thread_pool_confirm_title]"
+        assert captured["body"] == "i18n[sys_thread_pool_confirm_body]"
+
+    def test_queued_task_also_opens_confirm(self, system_tab_env, monkeypatch) -> None:
+        """排队中 (QUEUED) 任务同样触发确认。"""
+        from services.task_manager import AppTask, TaskManager, TaskStatus
+
+        env = system_tab_env
+        monkeypatch.setattr(TaskManager, "get_all_tasks", lambda self: [AppTask(status=TaskStatus.QUEUED)])
+        captured = self._patch_confirm_dialog(monkeypatch, env["mod"])
+        env["page"].run_task.reset_mock()
+
+        _invoke(_find_text_field_by_label(env, "sys_pool_io").on_blur, _make_event())
+
+        assert not env["page"].run_task.called
+        _rerender(env)
+        assert "on_confirm" in captured
+
+    def test_confirm_dispatches_thread_pool_save(self, system_tab_env, monkeypatch) -> None:
+        """DoD: 确认 → 派发保存, 最终 save_thread_pool 生效 (结束 reload 线程池)。"""
+        from services.task_manager import AppTask, TaskManager, TaskStatus
+
+        env = system_tab_env
+        monkeypatch.setattr(TaskManager, "get_all_tasks", lambda self: [AppTask(status=TaskStatus.RUNNING)])
+        captured = self._patch_confirm_dialog(monkeypatch, env["mod"])
+        page = env["page"]
+        _invoke(_find_text_field_by_label(env, "sys_pool_io").on_blur, _make_event())
+        _rerender(env)
+
+        page.run_task.reset_mock()
+        captured["on_confirm"]()
+
+        handler, args, _ = _await_run_task_handler(page)
+        assert handler.__name__ == "_do_save_thread_pool"
+        assert args == ("8", "4")
+        asyncio.run(handler(*args))
+        env["mock_config"].set_max_io_workers.assert_called_once_with(8)
+        env["mock_config"].set_max_cpu_workers.assert_called_once_with(4)
+        env["mock_tpm"].reload_config.assert_called_once_with()
+
+    def test_cancel_does_not_save(self, system_tab_env, monkeypatch) -> None:
+        """取消确认 → 关闭对话框且不派发保存。"""
+        from services.task_manager import AppTask, TaskManager, TaskStatus
+
+        env = system_tab_env
+        monkeypatch.setattr(TaskManager, "get_all_tasks", lambda self: [AppTask(status=TaskStatus.RUNNING)])
+        captured = self._patch_confirm_dialog(monkeypatch, env["mod"])
+        page = env["page"]
+        _invoke(_find_text_field_by_label(env, "sys_pool_io").on_blur, _make_event())
+        _rerender(env)
+
+        page.run_task.reset_mock()
+        captured["on_cancel"]()
+
+        assert not page.run_task.called
+        env["mock_config"].set_max_io_workers.assert_not_called()
+
+    def test_blur_without_running_tasks_saves_directly(self, system_tab_env) -> None:
+        """DoD: 改线程数触发失焦 → 无运行中任务时直接保存 (save_thread_pool 被调用)。"""
+        env = system_tab_env
+        _set_field_value(env, "sys_pool_io", "16")
+
+        handler, args, _ = _blur_field(env, "sys_pool_io")
+
+        assert args == ("16", "4")
+        asyncio.run(handler(*args))
+        env["mock_config"].set_max_io_workers.assert_called_once_with(16)
 
 
 # ============================================================================

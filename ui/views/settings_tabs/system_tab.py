@@ -22,6 +22,7 @@ from collections.abc import Callable
 import flet as ft
 
 from config import USER_DATA_ROOT
+from ui.components.confirm_dialog import ConfirmDialog
 from ui.components.flet_type_helpers import (
     get_control_value,
     safe_icon_str,
@@ -95,6 +96,31 @@ def _build_log_level_options() -> list[ft.dropdown.Option]:
         ft.dropdown.Option("WARNING", I18n.get("sys_opt_warn")),
         ft.dropdown.Option("ERROR", I18n.get("sys_opt_error")),
     ]
+
+
+def _validate_int_field(raw: str | None, min_val: int, max_val: int) -> str | None:
+    """校验整数字段, 返回错误 i18n key; 合法返回 None (MAJOR-08).
+
+    不修改用户输入 —— 空值/非数字/越界分别返回对应错误 key, 由调用方在字段上
+    展示 ``error``, 保留原始输入 (UIX 最佳实践: 不静默修正用户输入)。
+    """
+    stripped = (raw or "").strip()
+    if not stripped:
+        return "sys_field_required"
+    try:
+        value = int(stripped)
+    except (ValueError, TypeError):
+        return "sys_snack_num_fmt"
+    if not (min_val <= value <= max_val):
+        return "sys_err_out_of_range_fmt"
+    return None
+
+
+def _format_field_error(err_key: str | None, min_val: int, max_val: int) -> str | None:
+    """将错误 i18n key 渲染为字段 error 文案 (无错误返回 None)。"""
+    if err_key is None:
+        return None
+    return I18n.get(err_key, min=min_val, max=max_val)
 
 
 def _build_legacy_key_warning() -> ft.Control:
@@ -248,6 +274,33 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     diagnostics_exporting, set_diagnostics_exporting = ft.use_state(False)
     # P3-17: 语言切换 loading 态 (纯 UI state, VM 不感知 locale 故不下沉 VM)
     is_changing_language, set_is_changing_language = ft.use_state(False)
+    # MAJOR-08: 字段级校验错误 (key = 字段 label i18n key)。校验失败时在字段下方
+    # 显示 error 且保留用户输入 (不清空/不回滚)。
+    field_errors, set_field_errors = ft.use_state({})
+    # MAJOR-08: 线程池保存前的运行任务确认对话框开关。
+    thread_pool_confirm_open, set_thread_pool_confirm_open = ft.use_state(False)
+    # MAJOR-08 回归修复: 高级 (开发者) 分组的展开态必须由 use_state 持有。
+    # VM 通知 (如切换日志级别) 触发的重渲染会重建 ExpansionTile, 若把展开态写死
+    # 则每次重渲染都塌回折叠态; 折叠态下子控件不渲染 (maintain_state=False),
+    # 导致组内 anchor 语义节点消失, E2E 定位失败且用户操作被打断。
+    advanced_expanded, set_advanced_expanded = ft.use_state(False)
+
+    def _set_field_error(error_key: str, err_key: str | None) -> None:
+        """设置/清除某字段的校验错误 (仅在变化时 set_state, 避免多余重渲染)。"""
+        if err_key is None:
+            if error_key in field_errors:
+                set_field_errors({k: v for k, v in field_errors.items() if k != error_key})
+        elif field_errors.get(error_key) != err_key:
+            set_field_errors({**field_errors, error_key: err_key})
+
+    def _make_change_handler(error_key: str, setter: Callable) -> Callable:
+        """构造 on_change 处理器: 写入 VM state 并清除该字段错误标记。"""
+
+        def _handler(e: ft.ControlEvent) -> None:
+            setter(get_control_value(e.control, ft.TextField) or "")
+            _set_field_error(error_key, None)
+
+        return _handler
 
     # --- Async handlers (R2: CancelledError 显式 raise; 调用 VM commands) ---
     async def _do_language_change(new_locale: str) -> None:
@@ -478,34 +531,91 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         if page is not None:
             page.run_task(_do_log_level_change, new_level)
 
-    def _on_save_concurrency(e: ft.ControlEvent) -> None:
+    # --- Field commit handlers (MAJOR-08: on_blur/on_submit 校验通过即保存) ---
+    def _commit_concurrency() -> None:
+        raw = settings_state.concurrency_value
+        err = _validate_int_field(raw, CONCURRENCY_MIN, CONCURRENCY_MAX)
+        _set_field_error("settings_concurrency", err)
+        if err is not None:
+            return
+        clean = raw.strip()
+        if not settings_vm.should_dispatch_save("concurrency", clean):
+            return
         page = _get_page()
         if page is not None:
-            page.run_task(_do_save_concurrency, settings_state.concurrency_value)
+            page.run_task(_do_save_concurrency, clean)
+
+    def _commit_db_pool() -> None:
+        pool_raw = settings_state.pool_size_value
+        overflow_raw = settings_state.db_overflow_value
+        timeout_raw = settings_state.db_timeout_value
+        pool_err = _validate_int_field(pool_raw, DB_POOL_MIN, DB_POOL_MAX)
+        overflow_err = _validate_int_field(overflow_raw, DB_OVERFLOW_MIN, DB_OVERFLOW_MAX)
+        timeout_err = _validate_int_field(timeout_raw, DB_TIMEOUT_MIN, DB_TIMEOUT_MAX)
+        _set_field_error("settings_db_pool", pool_err)
+        _set_field_error("settings_db_overflow", overflow_err)
+        _set_field_error("settings_db_timeout", timeout_err)
+        if pool_err is not None or overflow_err is not None or timeout_err is not None:
+            return
+        signature = f"{pool_raw.strip()}|{overflow_raw.strip()}|{timeout_raw.strip()}"
+        if not settings_vm.should_dispatch_save("db_pool", signature):
+            return
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_save_db_pool, pool_raw.strip(), overflow_raw.strip(), timeout_raw.strip())
+
+    def _dispatch_thread_pool_save(io_val: str, cpu_val: str) -> None:
+        if not settings_vm.should_dispatch_save("thread_pool", f"{io_val}|{cpu_val}"):
+            return
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_save_thread_pool, io_val, cpu_val)
+
+    def _commit_thread_pool() -> None:
+        io_raw = settings_state.io_workers_value
+        cpu_raw = settings_state.cpu_workers_value
+        io_err = _validate_int_field(io_raw, IO_WORKERS_MIN, IO_WORKERS_MAX)
+        cpu_err = _validate_int_field(cpu_raw, CPU_WORKERS_MIN, CPU_WORKERS_MAX)
+        _set_field_error("sys_pool_io", io_err)
+        _set_field_error("sys_pool_cpu", cpu_err)
+        if io_err is not None or cpu_err is not None:
+            return
+        # MAJOR-08: 保存线程池会重建线程池并中断排队任务, 存在运行中任务时先弹确认。
+        if settings_vm.has_running_tasks():
+            set_thread_pool_confirm_open(True)
+            return
+        _dispatch_thread_pool_save(io_raw.strip(), cpu_raw.strip())
+
+    def _commit_no_proxy() -> None:
+        raw = settings_state.no_proxy_value
+        if not settings_vm.should_dispatch_save("no_proxy", raw.strip()):
+            return
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_save_no_proxy, raw)
+
+    def _on_save_concurrency(e: ft.ControlEvent) -> None:
+        _commit_concurrency()
 
     def _on_save_db_pool(e: ft.ControlEvent) -> None:
-        page = _get_page()
-        if page is not None:
-            page.run_task(
-                _do_save_db_pool,
-                settings_state.pool_size_value,
-                settings_state.db_overflow_value,
-                settings_state.db_timeout_value,
-            )
+        _commit_db_pool()
 
     def _on_save_thread_pool(e: ft.ControlEvent) -> None:
-        page = _get_page()
-        if page is not None:
-            page.run_task(
-                _do_save_thread_pool,
-                settings_state.io_workers_value.strip(),
-                settings_state.cpu_workers_value.strip(),
-            )
+        _commit_thread_pool()
 
     def _on_save_no_proxy(e: ft.ControlEvent) -> None:
-        page = _get_page()
-        if page is not None:
-            page.run_task(_do_save_no_proxy, settings_state.no_proxy_value)
+        _commit_no_proxy()
+
+    def _on_confirm_thread_pool_save() -> None:
+        """确认对话框确认回调: 关闭对话框并派发线程池保存。"""
+        set_thread_pool_confirm_open(False)
+        _dispatch_thread_pool_save(
+            settings_state.io_workers_value.strip(),
+            settings_state.cpu_workers_value.strip(),
+        )
+
+    def _on_cancel_thread_pool_save() -> None:
+        set_thread_pool_confirm_open(False)
 
     def _on_export_diagnostics(e: ft.ControlEvent) -> None:
         page = _get_page()
@@ -581,9 +691,12 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         # P2-13: hint_text 提示范围 (VM 公开别名, 消除硬编码双重定义)
         hint_text=I18n.get("sys_hint_range_fmt", min=CONCURRENCY_MIN, max=CONCURRENCY_MAX),
         border_radius=8,
-        on_change=lambda e: settings_vm.set_concurrency_value(e.control.value),
+        on_change=_make_change_handler("settings_concurrency", settings_vm.set_concurrency_value),
         # UX-09 (P2-04): 单行主表单 Enter 提交 = 行内保存主动作 (与鼠标点击等价)
         on_submit=safe_on_change(_on_save_concurrency),
+        # MAJOR-08: 失焦校验通过即保存 (与行内保存按钮统一为失焦提交语义)
+        on_blur=safe_on_change(_on_save_concurrency),
+        error=_format_field_error(field_errors.get("settings_concurrency"), CONCURRENCY_MIN, CONCURRENCY_MAX),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
@@ -619,8 +732,10 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         suffix=I18n.get("common_items"),
         hint_text=I18n.get("sys_hint_range_fmt", min=DB_POOL_MIN, max=DB_POOL_MAX),  # P2-13
         border_radius=8,
-        on_change=lambda e: settings_vm.set_pool_size_value(e.control.value),
+        on_change=_make_change_handler("settings_db_pool", settings_vm.set_pool_size_value),
         on_submit=safe_on_change(_on_save_db_pool),  # UX-09: Enter = 组保存主动作
+        on_blur=safe_on_change(_on_save_db_pool),  # MAJOR-08: 失焦校验通过即保存
+        error=_format_field_error(field_errors.get("settings_db_pool"), DB_POOL_MIN, DB_POOL_MAX),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
@@ -637,8 +752,10 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         suffix=I18n.get("common_items"),
         hint_text=I18n.get("sys_hint_range_fmt", min=DB_OVERFLOW_MIN, max=DB_OVERFLOW_MAX),  # P2-13
         border_radius=8,
-        on_change=lambda e: settings_vm.set_db_overflow_value(e.control.value),
+        on_change=_make_change_handler("settings_db_overflow", settings_vm.set_db_overflow_value),
         on_submit=safe_on_change(_on_save_db_pool),  # UX-09: Enter = 组保存主动作
+        on_blur=safe_on_change(_on_save_db_pool),  # MAJOR-08: 失焦校验通过即保存
+        error=_format_field_error(field_errors.get("settings_db_overflow"), DB_OVERFLOW_MIN, DB_OVERFLOW_MAX),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
@@ -655,8 +772,10 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         suffix=I18n.get("common_seconds"),
         hint_text=I18n.get("sys_hint_range_fmt", min=DB_TIMEOUT_MIN, max=DB_TIMEOUT_MAX),  # P2-13
         border_radius=8,
-        on_change=lambda e: settings_vm.set_db_timeout_value(e.control.value),
+        on_change=_make_change_handler("settings_db_timeout", settings_vm.set_db_timeout_value),
         on_submit=safe_on_change(_on_save_db_pool),  # UX-09: Enter = 组保存主动作
+        on_blur=safe_on_change(_on_save_db_pool),  # MAJOR-08: 失焦校验通过即保存
+        error=_format_field_error(field_errors.get("settings_db_timeout"), DB_TIMEOUT_MIN, DB_TIMEOUT_MAX),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
@@ -673,8 +792,10 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         suffix=I18n.get("sys_suffix_threads"),
         hint_text=I18n.get("sys_hint_range_fmt", min=IO_WORKERS_MIN, max=IO_WORKERS_MAX),  # P2-13
         border_radius=8,
-        on_change=lambda e: settings_vm.set_io_workers_value(e.control.value),
+        on_change=_make_change_handler("sys_pool_io", settings_vm.set_io_workers_value),
         on_submit=safe_on_change(_on_save_thread_pool),  # UX-09: Enter = 组保存主动作
+        on_blur=safe_on_change(_on_save_thread_pool),  # MAJOR-08: 失焦校验通过即保存
+        error=_format_field_error(field_errors.get("sys_pool_io"), IO_WORKERS_MIN, IO_WORKERS_MAX),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
@@ -691,8 +812,10 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         suffix=I18n.get("sys_suffix_threads"),
         hint_text=I18n.get("sys_hint_range_fmt", min=CPU_WORKERS_MIN, max=CPU_WORKERS_MAX),  # P2-13
         border_radius=8,
-        on_change=lambda e: settings_vm.set_cpu_workers_value(e.control.value),
+        on_change=_make_change_handler("sys_pool_cpu", settings_vm.set_cpu_workers_value),
         on_submit=safe_on_change(_on_save_thread_pool),  # UX-09: Enter = 组保存主动作
+        on_blur=safe_on_change(_on_save_thread_pool),  # MAJOR-08: 失焦校验通过即保存
+        error=_format_field_error(field_errors.get("sys_pool_cpu"), CPU_WORKERS_MIN, CPU_WORKERS_MAX),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
@@ -706,8 +829,9 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         hint_text=I18n.get("settings_no_proxy_hint"),
         border_radius=8,
         multiline=False,
-        on_change=lambda e: settings_vm.set_no_proxy_value(e.control.value),
+        on_change=_make_change_handler("settings_no_proxy_domains", settings_vm.set_no_proxy_value),
         on_submit=safe_on_change(_on_save_no_proxy),  # UX-09: Enter = 保存主动作
+        on_blur=safe_on_change(_on_save_no_proxy),  # MAJOR-08: 失焦校验通过即保存
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
@@ -725,9 +849,9 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
     )
 
-    save_config_tip = I18n.get("settings_save_config")
-
     # --- SettingRows ---
+    # MAJOR-08: 数值/文本字段统一"失焦(on_blur)校验通过即保存", 移除行内保存
+    # IconButton (与语言/主题/日志级别下拉的即时保存语义统一)。
     row_language = SettingRow(
         icon=safe_icon_str(ft.Icons.LANGUAGE_ROUNDED),
         icon_color=AppColors.PRIMARY,
@@ -758,38 +882,26 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         subtitle_key="sys_log_label",
     )
 
-    save_concurrency_btn = ft.IconButton(
-        icon=ft.Icons.SAVE_ROUNDED,
-        icon_color=AppColors.PRIMARY,
-        tooltip=save_config_tip,
-        on_click=safe_on_click(_on_save_concurrency),
-    )
     row_concurrency = SettingRow(
         icon=safe_icon_str(ft.Icons.SPEED_ROUNDED),
         icon_color=AppColors.ACCENT,
         title=I18n.get("sys_sync_heavy"),
         subtitle=I18n.get("sys_sync_heavy_hint"),
         control=ft.Row(
-            [concurrency_input, save_concurrency_btn],
+            [concurrency_input],
             spacing=5,
         ),
         title_key="sys_sync_heavy",
         subtitle_key="sys_sync_heavy_hint",
     )
 
-    save_thread_pool_btn = ft.IconButton(
-        icon=ft.Icons.SAVE_ROUNDED,
-        icon_color=AppColors.PRIMARY,
-        tooltip=save_config_tip,
-        on_click=safe_on_click(_on_save_thread_pool),
-    )
     row_thread_pool = SettingRow(
         icon=safe_icon_str(ft.Icons.MEMORY_ROUNDED),
         icon_color=AppColors.PRIMARY_DARK,
         title=I18n.get("sys_thread_pool_title"),
         subtitle=I18n.get("sys_thread_pool_desc"),
         control=ft.Row(
-            [io_workers_input, cpu_workers_input, save_thread_pool_btn],
+            [io_workers_input, cpu_workers_input],
             spacing=5,
             wrap=True,
         ),
@@ -797,38 +909,26 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         subtitle_key="sys_thread_pool_desc",
     )
 
-    save_db_pool_btn = ft.IconButton(
-        icon=ft.Icons.SAVE_ROUNDED,
-        icon_color=AppColors.PRIMARY,
-        tooltip=save_config_tip,
-        on_click=safe_on_click(_on_save_db_pool),
-    )
     row_db_pool = SettingRow(
         icon=safe_icon_str(ft.Icons.STORAGE_ROUNDED),
         icon_color=AppColors.WARNING,
         title=I18n.get("settings_db_pool"),
         subtitle=I18n.get("settings_pool_desc"),
         control=SafeWrapRow(
-            [pool_size_input, db_overflow_input, db_timeout_input, save_db_pool_btn],
+            [pool_size_input, db_overflow_input, db_timeout_input],
             spacing=5,
         ),
         title_key="settings_db_pool",
         subtitle_key="settings_pool_desc",
     )
 
-    save_no_proxy_btn = ft.IconButton(
-        icon=ft.Icons.SAVE_ROUNDED,
-        icon_color=AppColors.PRIMARY,
-        tooltip=I18n.get("common_save"),
-        on_click=safe_on_click(_on_save_no_proxy),
-    )
     row_proxy = SettingRow(
         icon=safe_icon_str(ft.Icons.PUBLIC_OFF_ROUNDED),
         icon_color=AppColors.ACCENT,
         title=I18n.get("settings_no_proxy_domains"),
         subtitle=I18n.get("settings_no_proxy_desc"),
         control=ft.Row(
-            [no_proxy_input, save_no_proxy_btn],
+            [no_proxy_input],
             spacing=5,
             expand=True,
         ),
@@ -848,6 +948,39 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     # TierApiPanel 消费 system_vm (props 推送, 函数调用)
     tier_panel = TierApiPanel(system_vm)
+
+    # --- MAJOR-08: 高级 (开发者) 分组 — 默认折叠 ---
+    # 连接池 / 线程池 / 日志级别 / 代理白名单等技术参数默认折叠, 组内附
+    # 「重启或重载生效 / 调整会中断排队任务」说明, 降低普通用户误操作风险。
+    advanced_title = ft.Text(
+        I18n.get("sys_advanced_group_title"),
+        size=AppStyles.FONT_SIZE_LG,
+        weight=ft.FontWeight.BOLD,
+    )
+    advanced_subtitle = ft.Text(
+        I18n.get("sys_advanced_group_note"),
+        size=AppStyles.FONT_SIZE_CAPTION,
+        color=AppColors.WARNING,
+    )
+    advanced_group = ft.ExpansionTile(
+        title=advanced_title,
+        subtitle=advanced_subtitle,
+        controls=[
+            ft.Container(height=10),
+            row_log,
+            ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
+            row_concurrency,
+            ft.Container(height=10),
+            row_thread_pool,
+            ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
+            row_db_pool,
+            ft.Divider(height=20, color=ft.Colors.with_opacity(0.5, AppColors.BORDER)),
+            row_proxy,
+        ],
+        # 受控展开态: 由 use_state 驱动, 重渲染后保持用户展开/折叠选择。
+        expanded=advanced_expanded,
+        on_change=lambda e: set_advanced_expanded(bool(e.data)),
+    )
 
     # F3（检视 06）：过渡期安全告警——仍在使用 legacy 明文密钥文件时，
     # 在核心配置页顶部插入提示条。
@@ -873,20 +1006,6 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             row_language,
             ft.Divider(height=10, color=AppColors.TRANSPARENT),
             row_theme,
-            ft.Divider(height=10, color=AppColors.TRANSPARENT),
-            row_log,
-            ft.Divider(
-                height=20,
-                color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
-            ),
-            row_concurrency,
-            ft.Container(height=10),
-            row_thread_pool,
-            ft.Divider(
-                height=20,
-                color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
-            ),
-            row_db_pool,
             ft.Divider(
                 height=20,
                 color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
@@ -896,7 +1015,9 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                 height=20,
                 color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
             ),
-            row_proxy,
+            # MAJOR-08: 技术参数 (日志级别/并发/线程池/连接池/代理白名单) 收进
+            # 默认折叠的高级分组。
+            advanced_group,
             ft.Divider(
                 height=20,
                 color=ft.Colors.with_opacity(0.5, AppColors.BORDER),
@@ -908,6 +1029,17 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             # （PR #915 回归）。后置仍满足「告知用户数据保护状态」，且不挤压核心操作区。
             ft.Container(height=10),
             _build_storage_security_notice(),
+            # MAJOR-08: 保存线程池前, 存在运行中/排队任务时的确认对话框
+            # (复用 ConfirmDialog, open_state 由 thread_pool_confirm_open 驱动)。
+            ConfirmDialog(
+                open_state=thread_pool_confirm_open,
+                title=I18n.get("sys_thread_pool_confirm_title"),
+                body=I18n.get("sys_thread_pool_confirm_body"),
+                on_confirm=_on_confirm_thread_pool_save,
+                on_cancel=_on_cancel_thread_pool_save,
+                confirm_text=I18n.get("common_confirm"),
+                cancel_text=I18n.get("common_cancel"),
+            ),
         ]
     )
 

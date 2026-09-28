@@ -590,8 +590,8 @@ class TestSystemTabComponentBody:
         assert len(diag_buttons) == 1
         assert diag_buttons[0].disabled is False
 
-    def test_render_contains_save_icon_buttons(self, system_tab_env):
-        """渲染的控件树含 4 个保存 IconButton (SAVE_ROUNDED icon)。"""
+    def test_render_has_no_save_icon_buttons(self, system_tab_env):
+        """MAJOR-08: 渲染的控件树不再含保存 IconButton (统一为字段失焦提交)。"""
         mod, _, _, _ = system_tab_env
         page = FakePage()
         result = _render_with_page(mod, page)
@@ -599,8 +599,28 @@ class TestSystemTabComponentBody:
         save_btns = [
             c for c in ctrls if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.SAVE_ROUNDED
         ]
-        # 并发/线程池/DB池/no-proxy 4 个保存按钮
-        assert len(save_btns) == 4
+        assert len(save_btns) == 0, "MAJOR-08: 行内保存按钮应已移除, 改为字段失焦(on_blur)提交"
+
+    def test_render_text_fields_have_on_blur_commit(self, system_tab_env):
+        """MAJOR-08: 数值/文本字段绑定 on_blur 失焦提交 (7 个字段)。"""
+        mod, _, _, _ = system_tab_env
+        page = FakePage()
+        result = _render_with_page(mod, page)
+        ctrls = _walk_controls(result)
+        text_fields = [c for c in ctrls if isinstance(c, ft.TextField)]
+        with_blur = [t for t in text_fields if getattr(t, "on_blur", None) is not None]
+        # concurrency / pool_size / db_overflow / db_timeout / io / cpu / no_proxy = 7
+        assert len(with_blur) >= 7, f"MAJOR-08: 应有 7 个字段绑定 on_blur 失焦提交, 实际 {len(with_blur)}"
+
+    def test_render_has_advanced_group_collapsed_by_default(self, system_tab_env):
+        """MAJOR-08: 技术参数收进默认折叠的高级分组 (ExpansionTile expanded=False)。"""
+        mod, _, _, _ = system_tab_env
+        page = FakePage()
+        result = _render_with_page(mod, page)
+        ctrls = _walk_controls(result)
+        tiles = [c for c in ctrls if isinstance(c, ft.ExpansionTile)]
+        assert len(tiles) == 1, "MAJOR-08: 应有且仅有 1 个高级分组 ExpansionTile"
+        assert tiles[0].expanded is False, "MAJOR-08: 高级分组默认必须折叠"
 
     def test_consumes_tier_api_panel_with_system_vm(self, system_tab_env):
         """TierApiPanel 接收 system_vm 实例。"""
