@@ -189,6 +189,20 @@ class TestEidsScreenerPr2:
         assert not row_eid.startswith(EIDS.SCREENER._COLUMN_HEADER_PREFIX + ".")
         assert not col_eid.startswith(EIDS.SCREENER._RESULT_ROW_PREFIX + ".")
 
+    def test_detail_button_static_method(self):
+        """detail_button(ts_code) 生成独立 EID，INTERACTIVE 类（TextButton 走 aria-label 通道）."""
+        eid_str, kind = EIDS.SCREENER.detail_button("000001.SZ")
+        assert eid_str == "e2e.screener.detail_button.000001.SZ"
+        assert kind == AnchorKind.INTERACTIVE
+
+    def test_detail_button_prefix_no_overlap_with_row(self):
+        """detail_button 与 result_row 前缀不重叠（独立 anchor，避免 AnchorPage 误匹配）."""
+        detail_eid = EIDS.SCREENER.detail_button("000001.SZ")[0]
+        row_eid = EIDS.SCREENER.result_row("000001.SZ")[0]
+        assert not detail_eid.startswith(EIDS.SCREENER._RESULT_ROW_PREFIX + ".")
+        assert not row_eid.startswith(EIDS.SCREENER._DETAIL_BUTTON_PREFIX + ".")
+        assert detail_eid != row_eid
+
 
 class TestEidsDetailDialog:
     """PR-2 新增 EIDS.DETAIL_DIALOG 常量契约."""

@@ -40,6 +40,7 @@ from ui.components.virtual_table import (
     _column_alignments,
 )
 from ui.theme import AppColors, AppStyles
+from ui.testing.e2e_ids import AnchorKind
 
 pytestmark = pytest.mark.unit
 
@@ -518,9 +519,16 @@ class TestBuildCells:
         assert cells[0].content.content.overflow == ft.TextOverflow.ELLIPSIS
 
     def test_cell_container_has_tooltip_with_full_value(self):
-        """item 1: tooltip 展示完整值 (Text 无 tooltip, 挂外层 Container)。"""
+        """item 1: tooltip 展示完整值 + exclude_from_semantics=True (不污染行 anchor 语义)。
+
+        tooltip 文案若进入语义树, 会被 Flutter 合并进行 anchor 节点的无障碍名并排在
+        EID 之前, 破坏 COMPLEX 行 anchor 的 textContent 前缀契约 (CI E2E 实证)。
+        """
         cells = _build_cells(_make_row_data(), _make_columns())
-        assert cells[1].content.tooltip == "Test Stock"
+        tooltip = cells[1].content.tooltip
+        assert isinstance(tooltip, ft.Tooltip)
+        assert tooltip.message == "Test Stock"
+        assert tooltip.exclude_from_semantics is True
 
     def test_empty_cell_container_tooltip_is_none(self):
         """item 1: 空值不挂 tooltip (避免空白气泡)。"""
@@ -588,11 +596,37 @@ class TestDetailCell:
         cell = _build_detail_cell({}, self._detail_col(), {DETAIL_COL_ID: 120}, MagicMock())
         assert cell.width == 120
 
-    def test_cells_route_detail_column_to_button(self):
-        """_build_cells 遇到 action 列走 _build_detail_cell (item 4 路由)。"""
-        data = _make_row_data()
-        cells = _build_cells(data, _make_detail_columns(), None, None, MagicMock())
-        assert isinstance(cells[-1].content, ft.TextButton)
+    def test_cells_ignore_action_column(self):
+        """_build_cells 只构建数据列; 动作列由 _build_row 单独渲染为兄弟节点 (item 4)。"""
+        cells = _build_cells(_make_row_data(), _make_columns(), None, None)
+        assert len(cells) == 4  # 4 数据列, 不含动作列
+
+    def test_detail_anchor_wraps_button(self, monkeypatch):
+        """detail_anchor 非空时经 anchored() 包裹 TextButton (与行 anchor 语义分离)。"""
+        eid = ("e2e.screener.detail_button.600000.SH", AnchorKind.INTERACTIVE)
+        captured: list = []
+
+        def _fake_anchored(_eid, control):
+            captured.append((_eid, control))
+            return ft.Semantics(container=True, label=_eid[0], content=control, button=True)
+
+        monkeypatch.setattr("ui.components.virtual_table.anchored", _fake_anchored)
+        cell = _build_detail_cell(_make_row_data(), self._detail_col(), None, MagicMock(), lambda row: eid)
+        assert len(captured) == 1
+        assert captured[0][0] == eid
+        assert isinstance(cell.content, ft.Semantics)
+        assert cell.content.label == eid[0]
+        assert cell.content.content is captured[0][1]
+
+    def test_detail_anchor_none_keeps_plain_button(self):
+        """detail_anchor 未传/返回 None 时不包裹 (向后兼容)。"""
+        assert isinstance(
+            _build_detail_cell(_make_row_data(), self._detail_col(), None, MagicMock(), None).content, ft.TextButton
+        )
+        assert isinstance(
+            _build_detail_cell(_make_row_data(), self._detail_col(), None, MagicMock(), lambda row: None).content,
+            ft.TextButton,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +713,80 @@ class TestBuildRow:
         cells = inner.content.controls
         assert cells[0].width == 250
 
+    def test_action_column_is_sibling_of_anchor_subtree(self):
+        """item 4 契约: 动作列与行 anchor 子树互为兄弟 (不嵌套), 行 anchor 子树内只含数据列。
+
+        嵌套交互控件会让 Flutter 语义合并节点由 role=button 退化为 group + aria-label,
+        破坏 COMPLEX 行 anchor 的 textContent 前缀契约 (CI E2E 实证)。
+        """
+        row = _build_row(
+            0,
+            _make_row_data(),
+            _make_detail_columns(),
+            800,
+            MagicMock(),
+            on_row_detail=MagicMock(),
+        )
+        assert isinstance(row, ft.Container)
+        assert isinstance(row.content, ft.Row)
+        anchor_subtree, detail_cell = row.content.controls
+        # 行 anchor 子树 = GestureDetector(row_anchor=None), 内部只含 4 个数据单元格
+        assert isinstance(anchor_subtree, ft.GestureDetector)
+        assert len(anchor_subtree.content.content.controls) == 4
+        # 动作列是独立兄弟节点, 内含 TextButton
+        assert isinstance(detail_cell.content, ft.TextButton)
+
+    def test_data_area_width_excludes_action_column(self):
+        """有动作列时数据区宽度 = 数据列宽度和 (不含动作列), 外层行容器为 total_w。"""
+        row = _build_row(0, _make_row_data(), _make_detail_columns(), 800, MagicMock(), on_row_detail=MagicMock())
+        anchor_subtree = row.content.controls[0]
+        assert anchor_subtree.content.width == 520  # 120 + 200 + 100 + 100
+        assert row.width == 800
+
+    def test_action_column_row_bgcolor_and_hover_on_outer_container(self):
+        """有动作列时底色/hover 上提到外层行容器, 数据区不再着色/挂 hover (防跨列误触发)。"""
+        on_hover = MagicMock()
+        row = _build_row(
+            0,
+            _make_row_data(),
+            _make_detail_columns(),
+            800,
+            MagicMock(),
+            on_hover=on_hover,
+            on_row_detail=MagicMock(),
+        )
+        assert row.bgcolor == AppStyles.data_table_row(0, is_hovered=False)
+        assert callable(row.on_hover)
+        inner = row.content.controls[0].content
+        assert inner.bgcolor is None
+        assert inner.on_hover is None
+
+    def test_row_anchor_semantics_wraps_only_data_subtree_in_e2e(self, monkeypatch):
+        """E2E 下 row_anchor 的 Semantics 仅包裹数据区 GestureDetector, 动作列在其外 (兄弟)。"""
+        from ui.testing import anchor as anchor_mod
+
+        monkeypatch.setenv("E2E_TESTING", "true")
+        anchor_mod._e2e_enabled.cache_clear()
+        try:
+            eid = ("e2e.screener.result_row.600000.SH", AnchorKind.COMPLEX)
+            row = _build_row(
+                0,
+                _make_row_data(),
+                _make_detail_columns(),
+                800,
+                MagicMock(),
+                row_anchor=lambda r: eid,
+                on_row_detail=MagicMock(),
+            )
+            anchor_subtree, detail_cell = row.content.controls
+            assert isinstance(anchor_subtree, ft.Semantics)
+            assert anchor_subtree.label == eid[0]
+            assert anchor_subtree.button is None or anchor_subtree.button is False  # COMPLEX kind
+            assert isinstance(anchor_subtree.content, ft.GestureDetector)
+            assert isinstance(detail_cell.content, ft.TextButton)
+        finally:
+            anchor_mod._e2e_enabled.cache_clear()
+
 
 # ---------------------------------------------------------------------------
 # TableRow (独立组件, 行内 hover state)
@@ -758,6 +866,33 @@ class TestTableRow:
         assert inner.width == 800
         cells = inner.content.controls
         assert cells[0].width == 250
+
+    def test_detail_anchor_wraps_detail_button(self, monkeypatch, mock_i18n_state, mock_app_colors_state):
+        """detail_anchor 透传到行内「详情」按钮 (经 anchored() 包裹, 独立 INTERACTIVE EID)。
+
+        未传 row_anchor → 仅动作列触发 anchored, captured 仅含 detail_button EID。
+        """
+        captured: list = []
+
+        def _fake_anchored(_eid, control):
+            captured.append(_eid)
+            return control
+
+        monkeypatch.setattr("ui.components.virtual_table.anchored", _fake_anchored)
+        eid = ("e2e.screener.detail_button.600000.SH", AnchorKind.INTERACTIVE)
+        component = make_component(
+            TableRow,
+            abs_idx=0,
+            row_data=_make_row_data(),
+            columns=_make_detail_columns(),
+            col_widths={},
+            on_row_click=MagicMock(),
+            on_row_detail=MagicMock(),
+            detail_anchor=lambda row: eid,
+        )
+        _, result = _render(component)
+        assert captured, "detail_anchor 未被调用"
+        assert all(c == eid for c in captured)
 
 
 # ---------------------------------------------------------------------------

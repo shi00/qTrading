@@ -324,6 +324,7 @@ class TestComponentContract:
         assert params["row_anchor"].default is None
         # MINOR-09 item 3/4: 新增可选参数默认 None (不破坏既有调用方)
         assert params["on_row_detail"].default is None
+        assert params["detail_anchor"].default is None
         assert params["col_widths_key"].default is None
         assert params["on_load_col_widths"].default is None
         assert params["on_persist_col_widths"].default is None

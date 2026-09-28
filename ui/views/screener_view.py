@@ -1565,6 +1565,9 @@ def _build_screener_section_card(
                     col_anchor=EIDS.SCREENER.column_header,
                     row_anchor=lambda row: EIDS.SCREENER.result_row(row["ts_code"]) if row.get("ts_code") else None,
                     on_row_detail=on_row_click,
+                    detail_anchor=lambda row: (
+                        EIDS.SCREENER.detail_button(row["ts_code"]) if row.get("ts_code") else None
+                    ),
                     col_widths_key=_VT_COL_WIDTHS_KEY,
                     on_load_col_widths=on_load_col_widths,
                     on_persist_col_widths=on_persist_col_widths,
@@ -1949,6 +1952,9 @@ def _build_screener_table_card(
                             lambda row: EIDS.SCREENER.result_row(row["ts_code"]) if row.get("ts_code") else None
                         ),
                         on_row_detail=on_row_click,
+                        detail_anchor=(
+                            lambda row: EIDS.SCREENER.detail_button(row["ts_code"]) if row.get("ts_code") else None
+                        ),
                         col_widths_key=_VT_COL_WIDTHS_KEY,
                         on_load_col_widths=on_load_col_widths,
                         on_persist_col_widths=on_persist_col_widths,
