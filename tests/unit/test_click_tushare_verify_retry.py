@@ -22,9 +22,10 @@ pytestmark = pytest.mark.unit
 
 
 class _FakeAp:
-    """最小 AnchorPage stub，仅暴露 click_tushare_verify 用到的 click。"""
+    """最小 AnchorPage stub，暴露 click_tushare_verify 用到的 scroll_into_view / click。"""
 
     def __init__(self) -> None:
+        self.scroll_into_view = AsyncMock()
         self.click = AsyncMock()
 
 
@@ -90,3 +91,24 @@ async def test_confirm_window_with_multiplier_one_keeps_original_budget(_sleep: 
 
     ap.click.assert_awaited_once()
     _sleep.assert_not_awaited()
+
+
+@patch("tests.e2e.helpers.anchor_page.asyncio.sleep", new_callable=AsyncMock)
+async def test_scrolls_into_view_before_each_click(_sleep: AsyncMock) -> None:
+    """MAJOR-03: 每次点击前必须先 scroll_into_view（锁定视口外点击落空修复不回退）。
+
+    数据管理 tab 新增「危险操作」卡片后 Tushare 验证按钮被推到视口下方，bbox 中心
+    坐标落在视口之外，Playwright mouse.click 点击视口外坐标无声失效（Flutter 收不到
+    tap）→ confirm 恒为 False → retry_until_triggered 误报未触发。断言调用顺序为
+    scroll → click。
+    """
+    page = _SimPage(multiplier=1.0, text_appears_at=1.0)
+    settings, ap = _make_settings(page)
+    order: list[str] = []
+    ap.scroll_into_view.side_effect = lambda *a, **k: order.append("scroll")
+    ap.click.side_effect = lambda *a, **k: order.append("click")
+
+    with patch("tests.e2e.pages.time.monotonic", side_effect=lambda: page._t):
+        await settings.click_tushare_verify()
+
+    assert order == ["scroll", "click"]
