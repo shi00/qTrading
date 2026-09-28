@@ -106,6 +106,9 @@ async def _prediction_logic(
             trade_date=analysis_trade_date,
             run_id=run_id,
             params_snapshot={},
+            # CRITICAL-02 (R21/BT-03): 夜间预测同样落库执行期 warnings，
+            # 否则该路径产出的历史记录会被历史回看标为「未记录执行上下文」。
+            exec_warnings=context.get("warnings"),
         )
         if saved == 0:
             # D4-C1: 落库 0 条 = 本次预测未产生可复盘结果（预算超限/政策未确认/AI 全失败），

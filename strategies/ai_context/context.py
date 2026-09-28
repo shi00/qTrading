@@ -34,6 +34,9 @@ class PreFetchedContext:
     auxiliary_data: dict = field(default_factory=dict)
     news_as_of: date | None = None
     is_backtest: bool = False
+    # 交易所公布的逐日涨跌停价（stk_limit 近端窗口，整批共用）；None 表示未取到 →
+    # AI 上下文走板块规则近似降级路径（详见 utils.limit_status）
+    limit_df: pd.DataFrame | None = None
 
 
 ContextBuilder = Callable[[dict, PreFetchedContext], tuple[str, bool]]

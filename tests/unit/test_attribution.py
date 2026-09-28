@@ -193,16 +193,20 @@ class TestStrategyBuildAttribution:
         assert attr.rank.field == "dv_ttm"
         assert attr.rank.total == 50
 
-    def test_growth_strategy_rank_field_roe(self):
+    def test_growth_strategy_rank_field_roe_annualized(self):
+        """CRIT-01: 归因排名基于年化 ROE 列（与 _filter_logic 排序字段同列）。"""
         s = GrowthStrategy()
         attr = s.build_attribution(
-            {"or_yoy": 30.0, "netprofit_yoy": 40.0, "roe": 18.0}, total_candidates=10, context={"params": {}}
+            {"or_yoy": 30.0, "netprofit_yoy": 40.0, "roe": 18.0, "roe_annualized": 18.0},
+            total_candidates=10,
+            context={"params": {}},
         )
         assert attr is not None
         assert attr.rank is not None
-        assert attr.rank.field == "roe"
+        assert attr.rank.field == "roe_annualized"
         assert attr.rank.value == 18.0
         assert any(c.column == "or_yoy" for c in attr.conditions)
+        assert any(c.column == "roe_annualized" for c in attr.conditions)
 
     def test_dividend_strategy_rank_field_dv(self):
         s = DividendStrategy()
@@ -254,7 +258,7 @@ class TestEmptyDiagnose:
     def test_growth_declared_conditions_reflect_params(self):
         s = GrowthStrategy()
         conds = s.declared_conditions({"params": {"revenue_growth_min": 100, "profit_growth_min": 200, "roe_min": 50}})
-        assert {c.column for c in conds} == {"or_yoy", "netprofit_yoy", "roe"}
+        assert {c.column for c in conds} == {"or_yoy", "netprofit_yoy", "roe_annualized"}
         assert conds[0].threshold == 100.0
         assert conds[1].threshold == 200.0
         assert conds[2].threshold == 50.0
@@ -274,7 +278,9 @@ class TestEmptyDiagnose:
                 "n_income": [1000.0, 500.0],
             }
         )
-        base_lf = df.lazy()
+        # CRIT-01: 诊断在 base_lf 上求值派生列，需先经 _preprocess_lf 注入 roe_annualized
+        # （生产路径由 polars_base._convert_and_filter 注入；直调诊断须构造同形 base_lf）。
+        base_lf = s._preprocess_lf(df.lazy(), {"params": {}})
         result_lf = s._filter_logic(base_lf, {"params": {}})
         # 默认参数（rev=20/profit=25/roe=15）下 roe=8 的 000002 被剔除，仍有 000001 → 非空
         assert result_lf.collect().height == 1
@@ -284,8 +290,8 @@ class TestEmptyDiagnose:
         msgs = s._diagnose_empty_batch(base_lf, result_lf_full, {"params": {"roe_min": 50}})
         assert len(msgs) == 1
         assert msgs[0].key == "strategy_condition_excludes_all"
-        # 逐条件回溯：or_yoy>20 / netprofit_yoy>25 均剩 1 只（000001），roe>50 全剔除 → 报告 roe
-        assert msgs[0].params["column"] == "roe"
+        # 逐条件回溯：or_yoy>20 / netprofit_yoy>25 均剩 1 只（000001），年化 roe>50 全剔除 → 报告该条件
+        assert msgs[0].params["column"] == "roe_annualized"
         assert msgs[0].params["total"] == 2
 
     def test_attribution_disabled_returns_empty(self):

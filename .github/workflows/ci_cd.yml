@@ -140,7 +140,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
 
       - name: Install dependencies
         run: |
@@ -317,7 +317,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           # e2e-tests-windows 在 "Free disk space" 步骤主动调用 `uv cache clean`
           # 释放 C 盘空间（run 29655213301/30058650851 触发）；若启用 uv 本地缓存，
@@ -387,7 +387,7 @@ jobs:
           toolchain: 1.97.1
 
       - name: Cache Cargo registry & target
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: e2e-tests-windows-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
@@ -490,7 +490,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           # 同 e2e-tests-windows：ci-checks-windows 在 "Free disk space" 步骤
           # 主动 `uv cache clean`（litellm/llama-cpp-python build artifacts 大），
@@ -640,7 +640,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
 
       - name: Install dependencies
         run: |
@@ -662,7 +662,7 @@ jobs:
           toolchain: 1.97.1
 
       - name: Cache Cargo registry & target
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: embedded-tests-${{ matrix.os }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
@@ -842,7 +842,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           # 同 e2e-tests-windows：禁用 uv 本地缓存避免 post-job 报错
           enable-cache: false
@@ -897,7 +897,7 @@ jobs:
 
       - name: Cache Cargo registry & target (real-sidecar group only)
         if: matrix.needs_rust == 'true'
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: windows-skip-revalidation-real-sidecar-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
@@ -1069,7 +1069,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           enable-cache: false
 
@@ -1120,7 +1120,7 @@ jobs:
           toolchain: 1.97.1
 
       - name: Cache Cargo registry & target
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: e2e-sidecar-real-smoke-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
@@ -1221,7 +1221,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
 
       - name: Recompile requirements
         shell: bash
@@ -1265,7 +1265,7 @@ jobs:
           cache: 'pip'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
 
       - name: Recompile requirements
         shell: bash
@@ -1339,7 +1339,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
 
       - name: Install dependencies
         shell: pwsh
@@ -1732,7 +1732,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
 
       - name: Install dependencies
         run: |

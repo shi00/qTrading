@@ -1082,6 +1082,136 @@ class TestDataProcessorPrepareScreeningContext:
         assert len(result["screening_data"]) == 1
 
     @pytest.mark.asyncio
+    async def test_delisting_rows_filtered_with_diagnostic(self):
+        """review09-24-dim01-major01: is_delisting 为 True 的退市整理期股票须被排除并记录诊断。"""
+        dp = _make_dp()
+        dp._quality_tier = 3
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                    "trade_date": ["20240614", "20240614", "20240614"],
+                    "is_tradable": [True, True, True],
+                    "is_st": [False, False, False],
+                    "is_delisting": [False, True, True],
+                }
+            )
+        )
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=None)
+        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_block_trade = AsyncMock(return_value=None)
+        result = await dp.prepare_screening_context(trade_date="20240614")
+        assert list(result["screening_data"]["ts_code"]) == ["000001.SZ"]
+        assert result["_diagnostics"].get("delisting_excluded") == 2
+
+    @pytest.mark.asyncio
+    async def test_delisting_filter_combined_with_st(self):
+        """退市整理期过滤独立于 ST 过滤：两列各自剔除，诊断分别计数。"""
+        dp = _make_dp()
+        dp._quality_tier = 3
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                    "trade_date": ["20240614", "20240614", "20240614"],
+                    "is_tradable": [True, True, True],
+                    "is_st": [True, False, False],
+                    "is_delisting": [False, True, False],
+                }
+            )
+        )
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=None)
+        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_block_trade = AsyncMock(return_value=None)
+        result = await dp.prepare_screening_context(trade_date="20240614")
+        assert list(result["screening_data"]["ts_code"]) == ["000003.SZ"]
+        assert result["_diagnostics"].get("st_excluded") == 1
+        assert result["_diagnostics"].get("delisting_excluded") == 1
+
+    @pytest.mark.asyncio
+    async def test_delisting_excluded_even_when_exclude_st_disabled(self):
+        """退市排除无条件生效：exclude_st=False 时 ST 行保留，但退市股仍被剔除。"""
+        dp = _make_dp()
+        dp._quality_tier = 3
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                    "trade_date": ["20240614", "20240614", "20240614"],
+                    "is_tradable": [True, True, True],
+                    "is_st": [True, False, False],
+                    "is_delisting": [False, True, False],
+                }
+            )
+        )
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=None)
+        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_block_trade = AsyncMock(return_value=None)
+        result = await dp.prepare_screening_context(trade_date="20240614", exclude_st=False)
+        # ST 行（000001.SZ）保留，退市行（000002.SZ）被无条件剔除
+        assert list(result["screening_data"]["ts_code"]) == ["000001.SZ", "000003.SZ"]
+        assert "st_excluded" not in result["_diagnostics"]
+        assert result["_diagnostics"].get("delisting_excluded") == 1
+
+    @pytest.mark.asyncio
+    async def test_delisting_column_missing_logs_warning(self, caplog):
+        """列缺失路径：不抛错、不排除，并产生告警日志（保底回退不剔除）。"""
+        import logging
+
+        dp = _make_dp()
+        dp._quality_tier = 3
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240614"],
+                    "is_tradable": [True],
+                }
+            )
+        )
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=None)
+        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_block_trade = AsyncMock(return_value=None)
+        with caplog.at_level(logging.WARNING, logger="data.data_processor"):
+            result = await dp.prepare_screening_context(trade_date="20240614")
+        assert len(result["screening_data"]) == 1
+        assert "delisting_excluded" not in result["_diagnostics"]
+        assert "is_delisting column missing" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_fundamental_data_not_filtered_by_delisting(self):
+        """fundamental_screening_data 不受退市过滤影响（与 ST 处理保持一致）。"""
+        dp = _make_dp()
+        dp._quality_tier = 3
+        dp.cache.screener_dao.get_fundamental_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": ["20240614", "20240614"],
+                    "is_tradable": [True, True],
+                    "is_st": [False, False],
+                    "is_delisting": [False, True],
+                }
+            )
+        )
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=None)
+        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=None)
+        dp.cache.quote_dao.get_block_trade = AsyncMock(return_value=None)
+        result = await dp.prepare_screening_context(trade_date="20240614")
+        assert len(result["screening_data"]) == 1
+        assert len(result["fundamental_screening_data"]) == 2
+
+    @pytest.mark.asyncio
     async def test_get_strategy_data_passes_exclude_st(self):
         """DS-02: get_strategy_data 透传 exclude_st 关键字到 prepare_screening_context。"""
         dp = _make_dp()

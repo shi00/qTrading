@@ -4,16 +4,18 @@
 # 测试行为由测试用例本身验证。
 
 import asyncio
+import json
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import datetime
 
+from core.i18n import Message
 from data.cache.cache_manager import CacheManager
 from data.constants import DEFAULT_BENCHMARK_INDEX, REVIEW_STATUS_T1_DONE
 from data.external.tushare_client import TushareClient
 from data.persistence.daos.base_dao import EngineDisposedError
-from data.persistence.review_manager import ReviewManager
+from data.persistence.review_manager import ReviewManager, deserialize_exec_warnings
 from utils.time_utils import to_date
 
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
@@ -135,6 +137,94 @@ class TestReviewManagerSwIndustryPassThrough:
         saved_records = mock_screener_dao.save_screening_results.call_args.args[0]
         assert len(saved_records) == 1
         assert saved_records[0]["industry"] == "银行Ⅱ"
+
+
+class TestReviewManagerExecMetadataPersistence:
+    """CRITICAL-02 (R21/BT-03)：执行期可信度元数据必须随结果落库，不得在落库边界丢弃。
+
+    修复前 ``save_results`` 只写业务字段：策略执行期 ``context["warnings"]`` 与每行
+    筛选归因（``_filter_attribution``）被整体丢弃；历史回看据此把「已知不可信」
+    渲染为「无警告」。本组用例锁定写入路径的 wire format，并区分 None（未记录执行
+    上下文，SQL NULL）与空数组（已记录且无警告）两种语义（R21 缺失不伪装成合法值）。
+    """
+
+    @staticmethod
+    def _make_rm(mock_cm, rows: int = 1):
+        """构造注入 mock CacheManager 的 ReviewManager，返回 (rm, save_screening_results mock)."""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.save_screening_results = AsyncMock(return_value=rows)
+        mock_cache.screener_dao = mock_screener_dao
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        return rm, mock_screener_dao
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_persists_two_warnings_and_per_row_attribution(self, mock_cm, mock_tc):
+        """2 条执行期 warning + df 的 _filter_attribution 列 → 写入 record，且可读回长度 2。"""
+        rm, dao = self._make_rm(mock_cm)
+
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240615"],
+                "ai_score": [80],
+                "_filter_attribution": [json.dumps({"exclude_st": 3, "liquidity": 1})],
+            }
+        )
+        exec_warnings = [
+            Message("strategy_param_auto_adjusted", {"min": 1.0, "adjusted_max": 9.0}),
+            Message("strategy_ai_risk_check_skipped"),
+        ]
+        await rm.save_results("test_strategy", df, trade_date="20240615", exec_warnings=exec_warnings)
+
+        assert dao.save_screening_results.call_count == 1
+        saved = dao.save_screening_results.call_args.args[0]
+        assert len(saved) == 1
+        # wire format: [{"key": .., "params": ..}, ...]
+        assert saved[0]["exec_warnings"] == [
+            {"key": "strategy_param_auto_adjusted", "params": {"min": 1.0, "adjusted_max": 9.0}},
+            {"key": "strategy_ai_risk_check_skipped", "params": {}},
+        ]
+        # 从库读回：往返后 Messages 等值且长度为 2
+        restored = deserialize_exec_warnings(saved[0]["exec_warnings"])
+        assert restored == tuple(exec_warnings)
+        assert len(restored) == 2
+        # 每行归因：JSON 字符串 → JSONB dict（不伪造、不丢弃）
+        assert saved[0]["filter_attribution"] == {"exclude_st": 3, "liquidity": 1}
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_none_warnings_and_missing_attribution_persist_null(self, mock_cm, mock_tc):
+        """未提供执行上下文（默认 None）→ SQL NULL；缺 _filter_attribution 列 → None（不伪造）。"""
+        rm, dao = self._make_rm(mock_cm)
+
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240615"], "ai_score": [80]})
+        await rm.save_results("test_strategy", df, trade_date="20240615")
+
+        saved = dao.save_screening_results.call_args.args[0]
+        assert saved[0]["exec_warnings"] is None
+        assert saved[0]["filter_attribution"] is None
+        # NULL 语义 = 「未记录执行上下文」，必须与「已记录且无警告」区分（R21/BT-03）
+        assert deserialize_exec_warnings(saved[0]["exec_warnings"]) is None
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_empty_warnings_persist_empty_list(self, mock_cm, mock_tc):
+        """空 warnings 序列 → 空数组（已记录且无警告），与 NULL 语义不同。"""
+        rm, dao = self._make_rm(mock_cm)
+
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240615"], "ai_score": [80]})
+        await rm.save_results("test_strategy", df, trade_date="20240615", exec_warnings=[])
+
+        saved = dao.save_screening_results.call_args.args[0]
+        assert saved[0]["exec_warnings"] == []
+        assert deserialize_exec_warnings(saved[0]["exec_warnings"]) == ()
 
 
 class TestReviewManagerRunReview:

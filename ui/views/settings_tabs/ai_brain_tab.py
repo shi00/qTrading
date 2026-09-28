@@ -8,7 +8,7 @@
 - 3 个子 VM (LLM/failover/local_model) 通过 ``use_viewmodel(factory=)`` 内部模式实例化,
   hook 负责实例化 + dispose on unmount
 - AIBrainSettingsViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化 (Task 5.2),
-  构造注入 3 个子 VM (复用现有 config panel VM, 不再包一层薄 VM, §1.3 拒绝过度抽象),
+  构造注入 3 个子 VM (复用现有 config panel VM, 不再包一层薄 VM, §1.2 拒绝过度抽象),
   收敛 ConfigHandler/ThreadPoolManager 业务编排 (AI 调优参数 + 三阶段保存状态机)
 - Phase 3.2 P1-1: AIService/LocalModelManager/ThreadPoolManager 业务编排全部下沉到 VM
   (test_connection/reload_service/verify_local_model 静态 command + MD5 检查整合进

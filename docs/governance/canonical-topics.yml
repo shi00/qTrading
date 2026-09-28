@@ -99,14 +99,13 @@ topics:
     canonical: docs/patterns/config-quality-perf.md
 
   - id: ci-deps
-    title: 调整 CI / 依赖
+    title: 调整 CI / 依赖升级
     canonical: docs/guides/ci-cd.md
 
   - id: backtest
     title: 新增/修改回测
-    canonical: docs/guides/how-to.md
-    section: 7. 新增回测配置
-    note: 无独立回测正本，配置流程承载于 how-to
+    canonical: docs/patterns/backtest-correctness.md
+    note: 回测正确性正本（时点正确性 / 幸存者偏差 / 复权口径 / 财报修订 / 结论可信度边界）；配置流程见 how-to.md
 
   - id: config
     title: 修改配置项
@@ -130,6 +129,12 @@ topics:
     canonical: docs/guides/how-to.md
     section: 9. 内置 PostgreSQL 离线维护
 
+  - id: maintenance
+    title: 运行期排障 / 维护类问题
+    canonical: docs/guides/how-to.md
+    section: 12. 运行期排障
+    note: 运行期故障（崩溃产物 / 日志定位 / 性能劣化三步）排查 playbook；通用典型问题排查表正本见 CONTRIBUTING.md「排查典型问题」，本主题以引用方式指向正本，不复制
+
   - id: architecture-design
     title: 架构设计 / 公共契约 / 跨层范式
     canonical: docs/adr/0001-record-architecture-decisions.md
@@ -152,4 +157,4 @@ topics:
   - id: fallback
     title: 未列出的任务类型
     canonical: CLAUDE.md
-    note: "纯重构 / 依赖升级 / 日志可观测性 / 功能下线 / 模块删除等未列类型：先读 §3 红线 + §4 架构边界；再按改动实际触及的层选最接近的 canonical 入口，并在回复中说明所选入口与理由。DOC-04 方向 2 对该元条目豁免（见 check_docs_consistency.py）。"
+    note: "纯重构 / 日志可观测性 / 功能下线 / 模块删除等未列类型：先读 §3 红线 + §4 架构边界；再按改动实际触及的层选最接近的 canonical 入口，并在回复中说明所选入口与理由。DOC-04 方向 2 对该元条目豁免（见 check_docs_consistency.py）。"

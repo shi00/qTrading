@@ -271,6 +271,17 @@ class ScreeningHistory(Base):
     prediction_result = Column(String, info={"computed": True})
     review_status = Column(String, server_default="PENDING")
     params_snapshot = Column(JSONB)
+    # CRITICAL-02 (R21/BT-03)：策略执行期可信度元数据随结果落库，避免历史回看把
+    # 「已知不可信」渲染成「无信息」。``exec_warnings`` = 执行期 warnings 通道
+    # （Message key/params 序列化为 ``[{"key":.., "params":..}]``，空数组代表
+    # 「已记录且无警告」，SQL NULL 代表「该次筛选未记录执行上下文」）；
+    # ``filter_attribution`` = 每行归因（策略结果 ``_filter_attribution`` 列解析为 dict）。
+    # none_as_null=True：JSONB 默认把 Python None 编码为 JSON 'null'（非 SQL NULL），
+    # 会使 _save_upsert 的 null_protected coalesce 保护失效（coalesce('null', old)
+    # 仍返回 'null'）。声明 none_as_null 令空数组 ``[]`` 与非空 dict 正常落库、
+    # 「缺失」为 SQL NULL，使 coalesce(EXCLUDED, table) 正确保留既有值。
+    exec_warnings = Column(JSONB(none_as_null=True), info={"null_protected": True})
+    filter_attribution = Column(JSONB(none_as_null=True), info={"null_protected": True})
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
     __table_args__ = (

@@ -20,10 +20,10 @@ from strategies.ai_context import (
     _build_history_text,
     _build_multi_period_financials,
     _compute_technical_structure,
-    _get_limit_pct,
 )
 from strategies.ai_mixin import AIStrategyMixin
 from strategies.utils import safe_float
+from utils.limit_status import get_limit_pct
 
 pytestmark = pytest.mark.unit
 
@@ -48,6 +48,34 @@ def _mock_ai_external_acknowledged_default_true():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _mock_news_fetcher_network():
+    """单测不得触发真实新闻抓取（消除跨用例的 pandas 全局选项竞态）。
+
+    ``strategies.ai_mixin`` 的新闻预取会把 ``NewsFetcher.get_stock_news`` 提交到真实
+    ``ThreadPoolManager`` IO 线程池；该函数内部的 ``_run_with_python_string_storage``
+    会改写进程级 pandas 全局选项 ``pd.options.mode.string_storage``。CI 网络慢时该 IO
+    线程可能存活到本用例之后（``wait_for`` 超时无法强杀底层线程），与
+    ``test_news_fetcher.py::TestRunWithPythonStringStorage`` 中断言该全局选项的用例
+    竞态，导致其偶发失败（``assert 'auto' == 'python'``）。``get_us_major_moves`` 同为
+    真实出网（httpx 直连），一并打桩以消除 CI 网络延迟带来的 flaky。
+
+    默认返回空值保持「无新闻/无美股上下文」语义（与既有显式打桩一致）；
+    需要新闻内容或断言 as_of 传参的用例仍可在用例内自行 patch（就近覆盖本 autouse 打桩）。
+    """
+    with (
+        patch(
+            "strategies.ai_mixin.NewsFetcher.get_stock_news",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "strategies.ai_mixin.NewsFetcher.get_us_major_moves",
+            new=AsyncMock(return_value=""),
+        ),
+    ):
+        yield
+
+
 @pytest.fixture
 def _mock_ai_not_acknowledged():
     """review07-G1: 未确认 AI 外发政策的具名 fixture（安全门控的未确认路径专项覆盖）。
@@ -66,6 +94,23 @@ def _mock_ai_not_acknowledged():
         ),
     ):
         yield
+
+
+class TestNewsFetchNetworkIsolation:
+    """回归护栏：本文件不得触发真实新闻网络抓取。
+
+    真实抓取会在 ``ThreadPoolManager`` IO 线程中经 ``_run_with_python_string_storage``
+    改写进程级 pandas 全局选项 ``pd.options.mode.string_storage``，且线程可能存活到
+    后续用例，污染同 worker 的 ``test_news_fetcher.py::TestRunWithPythonStringStorage``
+    （CI 偶发 ``assert 'auto' == 'python'``）。此处断言 autouse 打桩确实生效，
+    防止 fixture 被误删后重现该竞态（本地难以复现，仅 CI 可见）。
+    """
+
+    def test_news_fetcher_methods_are_mocked(self):
+        from strategies.ai_mixin import NewsFetcher
+
+        assert isinstance(NewsFetcher.get_stock_news, AsyncMock)
+        assert isinstance(NewsFetcher.get_us_major_moves, AsyncMock)
 
 
 class TestBuildResultRowFailureClassification:
@@ -627,26 +672,57 @@ class TestComputeTechnicalStructure:
 
 
 class TestGetLimitPct:
-    def test_st_stock(self):
-        assert _get_limit_pct("000001.SZ", "ST某某") == 5.0
+    """涨跌停幅度降级规则（正本迁至 utils.limit_status，MAJOR-02）。"""
 
-    def test_star_st_stock(self):
-        assert _get_limit_pct("000001.SZ", "*ST某某") == 5.0
+    def test_main_board_st_stock(self):
+        # ST 仅主板适用 5%
+        assert get_limit_pct("000001.SZ", "ST某某") == 5.0
 
-    def test_bse_stock(self):
-        assert _get_limit_pct("830001.BJ") == 30.0
+    def test_main_board_star_st_stock(self):
+        assert get_limit_pct("000001.SZ", "*ST某某") == 5.0
+
+    def test_main_board_sh_st(self):
+        assert get_limit_pct("600001.SH", "ST某某") == 5.0
+
+    def test_gem_st_still_20(self):
+        # 创业板 ST 与板块一致 20%（非主板 5%）
+        assert get_limit_pct("300001.SZ", "ST某某") == 20.0
+
+    def test_gem_301_no_st(self):
+        assert get_limit_pct("301001.SZ") == 20.0
+
+    def test_star_st_still_20(self):
+        # 科创板 ST 与板块一致 20%
+        assert get_limit_pct("688001.SH", "ST某某") == 20.0
+
+    def test_bse_8_prefix(self):
+        assert get_limit_pct("830001.BJ") == 30.0
+
+    def test_bse_4_prefix(self):
+        assert get_limit_pct("430001.BJ") == 30.0
+
+    def test_bse_920_prefix(self):
+        assert get_limit_pct("920001.BJ") == 30.0
+
+    def test_bse_st_still_30(self):
+        assert get_limit_pct("830001.BJ", "ST某某") == 30.0
 
     def test_gem_stock(self):
-        assert _get_limit_pct("300001.SZ") == 20.0
+        assert get_limit_pct("300001.SZ") == 20.0
 
     def test_star_stock(self):
-        assert _get_limit_pct("688001.SH") == 20.0
+        assert get_limit_pct("688001.SH") == 20.0
 
     def test_main_board_sz(self):
-        assert _get_limit_pct("000001.SZ") == 10.0
+        assert get_limit_pct("000001.SZ") == 10.0
 
     def test_main_board_sh(self):
-        assert _get_limit_pct("600001.SH") == 10.0
+        assert get_limit_pct("600001.SH") == 10.0
+
+    def test_unknown_returns_none(self):
+        # R21：无法判定不猜
+        assert get_limit_pct("") is None
+        assert get_limit_pct("000001") is None
 
 
 class TestBuildHistoryText:
@@ -897,6 +973,40 @@ class TestRunAiAnalysis:
             dp.cache.quote_dao.get_moneyflow.assert_awaited_once_with(trade_date="20240118")
             dp.cache.quote_dao.get_top_list.assert_awaited_once_with(trade_date="20240118")
             dp.cache.quote_dao.get_northbound.assert_awaited_once_with(trade_date="20240118")
+
+    @pytest.mark.asyncio
+    async def test_prefetches_stk_limit_once_for_near_window(self):
+        """MAJOR-02：整批仅一次 stk_limit 区间查询，窗口为候选近 3 个交易日。"""
+        s = ConcreteStrategy()
+        dp = MagicMock()
+        dp.is_cancelled = MagicMock(return_value=False)
+        dp.cache = MagicMock()
+        dp.cache.get_concepts = AsyncMock(return_value={})
+        history_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 4,
+                "trade_date": ["20240115", "20240116", "20240117", "20240118"],
+                "close": [10.0, 10.1, 10.2, 10.3],
+                "pct_chg": [0.0, 1.0, 1.0, 1.0],
+            }
+        )
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=history_df)
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.stk_limit_dao.get_stk_limit_range = AsyncMock(return_value=pd.DataFrame())
+        context = {"data_processor": dp, "trade_date": "20240118"}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"], "close": [10.3]})
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+            await s.run_ai_analysis(candidates, context)
+        dp.cache.stk_limit_dao.get_stk_limit_range.assert_awaited_once()
+        assert dp.cache.stk_limit_dao.get_stk_limit_range.await_args.args == ("2024-01-16", "2024-01-18")
 
     @pytest.mark.asyncio
     async def test_with_cancellation(self):
@@ -2034,6 +2144,120 @@ class TestBuildCapitalFlowText:
         with patch("strategies.ai_context.capital_flow.get_column_unit", return_value="wan_yuan"):
             result = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
         assert "龙虎榜" in result
+
+    def test_top_list_multiple_reasons_all_listed_in_sorted_order(self):
+        """MINOR-03：同一股票当日多条上榜记录须全部列出，并按规范化 reason 稳定排序（不依赖 DB 返回顺序）。"""
+        reasons = [
+            "连续三个交易日内涨幅偏离值累计达20%",
+            "日涨幅偏离值达7%",
+            "日振幅值达15%",
+            "日涨幅偏离值达7%",  # 与第 2 条重复，用于校验稳定排序
+        ]
+        tl_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 4,
+                "reason": reasons,
+                "net_amount": [5000.0, 12000.0, 800.0, 600.0],
+            }
+        )
+        with patch("strategies.ai_context.capital_flow.get_column_unit", return_value="wan_yuan"):
+            text = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
+
+        assert I18n.get("ai_top_list_yes") in text
+        # 四条记录的理由与净买入额全部出现
+        assert text.count(I18n.get("ai_reason")) == 4
+        for reason in set(reasons):
+            assert reason in text
+        assert "1.20亿元" in text  # 12000 万
+        assert "5000.00万元" in text
+        assert "800.00万元" in text
+        assert "600.00万元" in text
+        # 输出顺序与按（reason, 净买入额）排序一致
+        expected_order = sorted(set(reasons))
+        positions = [text.index(reason) for reason in expected_order]
+        assert positions == sorted(positions)
+        # 相同 reason 的两条按净买入额升序（600 万在前，12000 万在后）
+        assert text.index("600.00万元") < text.index("1.20亿元")
+
+    def test_top_list_same_reason_secondary_sort_is_row_order_independent(self):
+        """MINOR-03 收口：同 reason 时以净买入额为二级键排序，输出与 DB 返回行序无关。"""
+        rows = [
+            {"ts_code": "000001.SZ", "reason": "日涨幅偏离值达7%", "net_amount": 12000.0},
+            {"ts_code": "000001.SZ", "reason": "日涨幅偏离值达7%", "net_amount": 600.0},
+        ]
+        with patch("strategies.ai_context.capital_flow.get_column_unit", return_value="wan_yuan"):
+            text_forward = _build_capital_flow_text("000001.SZ", {"top_list_df": pd.DataFrame(rows)})
+            text_reversed = _build_capital_flow_text("000001.SZ", {"top_list_df": pd.DataFrame(list(reversed(rows)))})
+
+        assert text_forward == text_reversed
+        assert text_forward.index("600.00万元") < text_forward.index("1.20亿元")
+
+    def test_top_list_missing_net_amount_renders_na(self):
+        """MINOR-03 收口：净买入额缺失/非有限渲染 N/A，不得伪装成业务合法的 0 元（R21）。"""
+        tl_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 4,
+                "reason": ["理由一", "理由二", "理由三", "理由四"],
+                "net_amount": [None, float("nan"), float("inf"), 5000.0],
+            }
+        )
+        with patch("strategies.ai_context.capital_flow.get_column_unit", return_value="wan_yuan"):
+            text = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
+
+        assert text.count(f"{I18n.get('ai_net_buy')}: N/A") == 3
+        assert "0元" not in text
+        assert "5000.00万元" in text
+
+    def test_top_list_single_row_matches_legacy_format(self):
+        """单行上榜时输出须与既有格式逐字一致。"""
+        tl_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "reason": ["涨幅偏离"],
+                "net_amount": [5000.0],
+            }
+        )
+        with patch("strategies.ai_context.capital_flow.get_column_unit", return_value="wan_yuan"):
+            text = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
+
+        expected_line = (
+            f"{I18n.get('ai_top_list_yes')} ({I18n.get('ai_reason')}: 涨幅偏离, {I18n.get('ai_net_buy')}: 5000.00万元)"
+        )
+        tl_lines = [line for line in text.splitlines() if line.startswith(I18n.get("ai_top_list_yes"))]
+        assert tl_lines == [expected_line]
+
+    def test_top_list_no_stock_record_uses_sentinel(self):
+        """当日无该股龙虎榜记录时输出 ai_top_list_no 哨兵。"""
+        tl_df = pd.DataFrame(
+            {
+                "ts_code": ["000002.SZ"],
+                "reason": ["涨幅偏离"],
+                "net_amount": [5000.0],
+            }
+        )
+        text = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
+        assert I18n.get("ai_top_list_no") in text
+
+    def test_top_list_missing_or_empty_uses_na_sentinel(self):
+        """top_list_df 为 None 或空表时输出 ai_top_list_na 哨兵。"""
+        for tl_df in (None, pd.DataFrame()):
+            text = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
+            assert I18n.get("ai_top_list_na") in text
+
+    def test_top_list_blank_or_nan_reason_renders_na(self):
+        """reason 为 None / NaN / 空串时容错渲染为 N/A，且不抛错。"""
+        tl_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 3,
+                "reason": [None, float("nan"), ""],
+                "net_amount": [5000.0, 600.0, 800.0],
+            }
+        )
+        with patch("strategies.ai_context.capital_flow.get_column_unit", return_value="wan_yuan"):
+            text = _build_capital_flow_text("000001.SZ", {"top_list_df": tl_df})
+        assert I18n.get("ai_top_list_yes") in text
+        assert text.count(I18n.get("ai_reason")) == 3
+        assert text.count("N/A") == 3
 
     def test_northbound_with_data(self):
         nb_df = pd.DataFrame(

@@ -1635,6 +1635,81 @@ class TestLoadHistoryData:
         assert vm.state.loading is False  # 异常路径仍复位 loading
 
 
+class TestLoadHistoryExecWarningsRestore:
+    """CRITICAL-02 (R21/BT-03)：历史回看必须还原执行期 warnings，不得把「已知不可信」
+    伪装成「无警告」（原先固定在 ``load_history_data`` 内写死 ``warnings=()``）。
+
+    语义区分（R21）：
+    - 非空数组 → 还原为该组 Message；
+    - 空数组 ``[]`` → 空元组（「已记录且无警告」）；
+    - NULL / 列缺失（存量记录，或历史路径未落该列）→ 「未记录执行上下文」哨兵，非空。
+    """
+
+    def _patch_cache(self, df):
+        """mock CacheManager.screener_dao.get_history_records."""
+        mock_records = AsyncMock(return_value=df)
+        return patch(
+            "ui.viewmodels.history_mode_mixin.CacheManager",
+            return_value=MagicMock(screener_dao=MagicMock(get_history_records=mock_records)),
+        )
+
+    @pytest.mark.asyncio
+    async def test_load_restores_exec_warnings(self, vm):
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "ai_score": [80],
+                "exec_warnings": [
+                    [
+                        {"key": "strategy_param_auto_adjusted", "params": {"min": 1.0, "adjusted_max": 9.0}},
+                        {"key": "strategy_ai_risk_check_skipped", "params": {}},
+                    ]
+                ],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert [m.key for m in vm.state.warnings] == [
+            "strategy_param_auto_adjusted",
+            "strategy_ai_risk_check_skipped",
+        ]
+        assert vm.state.warnings[0].params == {"min": 1.0, "adjusted_max": 9.0}
+
+    @pytest.mark.asyncio
+    async def test_load_null_exec_warnings_marks_unrecorded(self, vm):
+        """列值为 NULL → 「未记录」哨兵（非空），不得渲染成「无警告」的空 warnings。"""
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_score": [80], "exec_warnings": [None]})
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        # 断言是 1 元素哨兵元组（非空），与空元组的「无警告」语义不同
+        assert vm.state.warnings == (Message("screener_history_exec_context_unrecorded"),)
+
+    @pytest.mark.asyncio
+    async def test_load_missing_exec_warnings_column_marks_unrecorded(self, vm):
+        """列缺失（存量记录）同样走「未记录」分支。"""
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_score": [80]})
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (Message("screener_history_exec_context_unrecorded"),)
+
+    @pytest.mark.asyncio
+    async def test_load_empty_exec_warnings_is_no_warning(self, vm):
+        """空数组 = 「已记录且无警告」→ 空元组，与 NULL 的「未记录」区分。"""
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_score": [80], "exec_warnings": [[]]})
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == ()
+
+    def test_restore_exec_warnings_helper_empty_df(self, vm):
+        """空 df（无记录可展示）→ 空元组，不产生误导性「未记录」横幅。"""
+        assert ScreenerViewModel._restore_exec_warnings(pd.DataFrame()) == ()
+        assert ScreenerViewModel._restore_exec_warnings(None) == ()
+
+
 class TestGetExportData:
     def test_returns_none_for_none_results(self, vm):
         vm._full_results = None

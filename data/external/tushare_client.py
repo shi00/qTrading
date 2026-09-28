@@ -334,7 +334,7 @@ class TushareClient:
     }
 
     # 一致性断言：防止 dict 字面量 key 与 TUSHARE_POINT_TIERS 单一真相源漂移
-    # 字面量 key 因 Python 语法限制无法引用常量，用 assert 兜底（§1.5 懒代码必须验证）
+    # 字面量 key 因 Python 语法限制无法引用常量，用 assert 兜底（§1.2 必须验证）
     assert set(_POINT_TIER_PRESETS.keys()) == set(TUSHARE_POINT_TIERS), "_POINT_TIER_PRESETS drift"
     assert set(_TIER_ORDER.keys()) == set(TUSHARE_POINT_TIERS), "_TIER_ORDER drift"
     assert set(_TIER_API_COVERAGE.keys()) == set(TUSHARE_POINT_TIERS), "_TIER_API_COVERAGE drift"

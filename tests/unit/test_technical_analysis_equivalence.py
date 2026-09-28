@@ -9,7 +9,7 @@ pandas 侧（`get_macd`/`get_kdj` 末值快速路径，RSI 经薄委托
 
 核心结论（诊断探针实证，全部在 allclose(rtol=1e-9, atol=1e-12) 内等价）：
 - MACD dif/dea 全场景等价（含短序列 n=8，实测 max|Δ|≤3e-13 量级）；
-- KDJ k/d/j 在 random/up/down/short 场景等价；
+- KDJ 预热期前 n−1 根两侧同为缺失，其余全序列等价（short n=8 两侧全缺失）；
 - RSI 预热期后可比区 [period:] 等价（limit_head 一字板段两侧均以 50 相遇）。
 
 4 处边界分叉（组 B 固化，R21 存量缺陷现状固化、非目标契约）：
@@ -18,11 +18,13 @@ pandas 侧（`get_macd`/`get_kdj` 末值快速路径，RSI 经薄委托
 - B2 MACD hist 倍率：pd ``hist=dif-dea`` vs pl ``macd=(dif-dea)×2``。
   收敛方向：pl ×2 为国内行情软件通行口径（正本），收敛时 pd 侧改 ×2
   并同步更新本断言。
-- B3 KDJ 全横盘：pd rsv=0/0=NaN → k/d/j 全 NaN vs pl ``fill_nan(50)`` → 全 50。
+- B3 KDJ 全横盘：pd rsv=0/0=NaN → k/d/j 全 NaN vs pl 预热期前 n−1 根
+  null（真实未知）+ 第 n 根起 ``fill_nan(50)`` → 50。
 - B4 KDJ 连续一字板（恒定价格段，整窗同价触发 rsv=0/0）：pd 侧 pandas ewm
-  「头部 NaN 输入 → NaN 输出；中尾部 NaN 输入 → 延续值」vs pl 侧「填 50 递推」。
-  B4a 头部注入经 com=2 EWM 按 (2/3)^i 衰减，末值残余分叉≈8e-10（仅固化
-  衰减收敛行为）；峰值在 k[9]。B4b 尾部单点注入不衰减，末值真分叉。
+  「头部 NaN 输入 → NaN 输出；中尾部 NaN 输入 → 延续值」vs pl 侧「预热期
+  null → 第 n 根起填 50 递推」。B4a 头部注入经 com=2 EWM 按 (2/3)^i 衰减，
+  末值残余分叉≈8e-10（仅固化衰减收敛行为）；峰值在 k[9]。B4b 尾部单点注入
+  不衰减，末值真分叉。
 
 消费面事实（收敛指引）：
 - ``get_macd``/``get_kdj`` 唯一产品调用方 strategies/ai_mixin.py:1538-1539
@@ -44,8 +46,6 @@ pandas 侧（`get_macd`/`get_kdj` 末值快速路径，RSI 经薄委托
 - 组 A 末值采用三源互证（接口末值 vs 重建末值 vs expr 末值，allclose），
   绝对值不 pin（跨平台浮点稳健）；仅分叉契约处（B4）pin 绝对值
   （pytest.approx rel=1e-9）。
-- B4a 分叉区超 rtol 点数为种子/平台依赖值（实测 k=50/51、d/j=51/51），
-  断言用下限阈值（≥49/51），非稳定契约。
 """
 
 import numpy as np
@@ -154,10 +154,9 @@ def _macd_pd_series(close, fast, slow, sign):
 
 
 def _kdj_pd_series(df, n, m1, m2):
+    """pandas 教科书镜像：与 pl 正本同口径（预热期前 n−1 根不足整窗 → NaN）。"""
     low_list = df["low"].rolling(window=n, min_periods=n).min()
-    low_list = low_list.fillna(value=df["low"].expanding().min())
     high_list = df["high"].rolling(window=n, min_periods=n).max()
-    high_list = high_list.fillna(value=df["high"].expanding().max())
     rsv = (df["close"] - low_list) / (high_list - low_list) * 100
     k = rsv.ewm(com=m1 - 1, adjust=False).mean()
     d = k.ewm(com=m2 - 1, adjust=False).mean()
@@ -223,7 +222,8 @@ class TestSeriesEquivalence:
         - RSI: 预热期后可比区等价（保持，get_rsi 未纳入收敛）;
         - MACD: 预热期（前 slow-1 根）null + 可比区 dif 等价 + EWM 遗忘
           收敛窗内 dea/macd 等价（dea seed 差异随窗口衰减）;
-        - KDJ: 全序列等价（get_kdj_expr 仅去除 fill_null，random 场景无 null）。
+        - KDJ: 两侧同口径，预热期前 n−1 根同为缺失，可比区全序列等价
+          （random/up/down 无 0/0 窗，min_samples=n 与 pd min_periods=n 对齐）。
         """
         df = make(200, seed)
 
@@ -241,20 +241,18 @@ class TestSeriesEquivalence:
         assert macd_last == pytest.approx(mpl["macd"].iloc[-1], rel=RTOL)
 
         k_pd, kpl = _kdj_pd_series(df, KDJ_N, KDJ_M1, KDJ_M2), _pl_kdj(df)
+        # 两侧同口径：预热期前 n−1 根同为缺失，故须带 equal_nan=True（全序列断言）
         for col in ("k", "d", "j"):
-            assert np.allclose(k_pd[col], kpl[col], rtol=RTOL, atol=ATOL)
+            assert np.allclose(k_pd[col], kpl[col], rtol=RTOL, atol=ATOL, equal_nan=True), col
 
     def test_flat_scenario_rsi_macd_equivalent(self):
-        """flat：RSI 两侧恒 50（pd 全序列 / pl 预热期后）；MACD 两侧恒 0。
+        """flat：MACD 两侧恒 0（等价域保留）。
 
-        KDJ 在 flat 下无等价域（pd 全 NaN vs pl 全 50），由组 B B3 固化。
+        RSI 在 flat 下已无等价域——pl 正本因 rs = 0/0 全盘产出真实缺失 null
+        （R21，检视 09-24 §3.5），pd 教科书镜像仍沿用 fillna(50)；该分叉由组 B
+        B5 固化（与 KDJ flat 交组 B B3 同一约定）。
         """
         df = _make_flat(200)
-
-        pd_rsi, plr = _rsi_pd_series(df["close"], RSI_PERIOD), _pl_rsi(df)
-        assert bool((pd_rsi == 50).all())
-        assert plr.iloc[:RSI_PERIOD].isna().all()
-        assert bool((plr.iloc[RSI_PERIOD:] == 50).all())
 
         m_pd, mpl = _macd_pd_series(df["close"], MACD_FAST, MACD_SLOW, MACD_SIGN), _pl_macd(df)
         assert bool((m_pd["dif"].abs() < 1e-12).all())
@@ -273,12 +271,18 @@ class TestSeriesEquivalence:
         ids=["head", "tail"],
     )
     def test_limit_scenarios_rsi_macd_equivalent(self, df_maker):
-        """连续一字板场景：RSI 仅用 close（一字板段两侧均以 50 相遇）、MACD 不受
-        high/low 影响，均保持等价；KDJ 分叉由组 B B4 固化。"""
+        """连续一字板场景：RSI 仅用 close、MACD 不受 high/low 影响，均保持等价；
+        KDJ 分叉由组 B B4 固化。
+
+        RSI 仅在 pl 非缺失点等价：一字板段（价格恒定 → rs = 0/0）RSI 无定义，
+        pl 正本产出缺失 null（R21），pd 镜像仍填中性 50，该分叉由组 B B5 固化。
+        """
         df = df_maker()
 
         pd_rsi, plr = _rsi_pd_series(df["close"], RSI_PERIOD), _pl_rsi(df)
-        assert np.allclose(pd_rsi.iloc[RSI_PERIOD:], plr.iloc[RSI_PERIOD:], rtol=RTOL, atol=ATOL)
+        comparable = plr.notna()
+        assert bool(comparable.any())
+        assert np.allclose(pd_rsi[comparable], plr[comparable], rtol=RTOL, atol=ATOL)
 
         m_pd, mpl = _macd_pd_series(df["close"], MACD_FAST, MACD_SLOW, MACD_SIGN), _pl_macd(df)
         assert mpl["dif"].iloc[: MACD_SLOW - 1].isna().all()
@@ -287,8 +291,8 @@ class TestSeriesEquivalence:
     def test_short_scenario_series_equivalent(self):
         """n=8 短序列：RSI 可比区仅 2 点（pl 前 period 根 null 剔除后）；
         MACD n=8 < slow+2：pandas 接口走哨兵（UNKNOWN,0,0），pl expr 因
-        min_samples=slow 全体 null（预热期语义，R21）；KDJ n=8 < 9 时
-        pd 走 expanding 回填、pl min_samples=1 窗口同为 [0..i]，等价。"""
+        min_samples=slow 全体 null（预热期语义，R21）；KDJ n=8 < n → 两侧
+        均无完整窗口，全序列缺失（真实未知）。"""
         df = _make_random(8, 45)
 
         pd_rsi, plr = _rsi_pd_series(df["close"], RSI_PERIOD), _pl_rsi(df)
@@ -303,7 +307,8 @@ class TestSeriesEquivalence:
 
         k_pd, kpl = _kdj_pd_series(df, KDJ_N, KDJ_M1, KDJ_M2), _pl_kdj(df)
         for col in ("k", "d", "j"):
-            assert np.allclose(k_pd[col], kpl[col], rtol=RTOL, atol=ATOL)
+            assert bool(k_pd[col].isna().all()), f"pd {col}"
+            assert bool(kpl[col].isna().all()), f"pl {col}"
 
     def test_random_interface_last_values_match_expr(self):
         """接口末值三源互证：get_* 末值 == 重建末值 == expr 末值（allclose，
@@ -375,13 +380,14 @@ class TestBoundaryDivergenceSolidified:
             assert hist_val == pytest.approx(mpl["macd"].iloc[-1], rel=RTOL), name
 
     def test_b3_kdj_flat_all_fifty(self):
-        """B3 KDJ 全横盘收敛：get_kdj 委托 Polars 正本后，rsv=0/0 → fill_nan(50)，
-        k=d=j=50（不再返回 NaN 或以 "k: nan" 注入 AI prompt，D1）。断言接口与 exprg
-        一致。"""
+        """B3 KDJ 全横盘收敛：get_kdj 委托 Polars 正本后，预热期前 n−1 根为 null
+        （真实未知，R21），第 n 根起 rsv=0/0 → fill_nan(50)，k=d=j=50（不再返回
+        NaN 或以 "k: nan" 注入 AI prompt，D1）。断言接口与 expr 一致。"""
         df = _make_flat(200)
         kpl = _pl_kdj(df)
         for col in ("k", "d", "j"):
-            assert bool((kpl[col] == 50).all()), col
+            assert bool(kpl[col].iloc[: KDJ_N - 1].isna().all()), col
+            assert bool((kpl[col].iloc[KDJ_N - 1 :] == 50).all()), col
         status, k, d, j = TechnicalAnalysis.get_kdj(df)
         assert status == "NEUTRAL"
         assert k == pytest.approx(50.0, rel=RTOL)
@@ -390,15 +396,18 @@ class TestBoundaryDivergenceSolidified:
 
     def test_b4a_kdj_head_limit_boards(self):
         """B4a 头部 9 根连续一字板（n=60）：get_kdj 委托 Polars 正本后，
-        接口末值与 expr 末值一致（头部 NaN 注入历史已由 fill_nan(50) 统一
-        承载，末值残余分叉≈1e-12 内收敛）。"""
+        预热期前 n−1 根为 null（真实未知），第 n 根起 rsv=0/0 → fill_nan(50)
+        填 50 递推；接口末值与 expr 末值一致（头部 NaN 注入历史已由
+        fill_nan(50) 统一承载，末值残余分叉≈1e-12 内收敛）。"""
         df = _make_limit_head(60, 9, 51)
         k_pd, kpl = _kdj_pd_series(df, KDJ_N, KDJ_M1, KDJ_M2), _pl_kdj(df)
 
-        # expr 头部语义：pl 填 50 递推（k/d[:9] 全 50）
-        assert bool((kpl["k"].iloc[:9] == 50).all())
-        assert bool((kpl["d"].iloc[:9] == 50).all())
-        # pandas 重建镜像保留原 NaN 行为（教科书参照，不再与接口绑定）
+        # expr 头部语义：前 n−1 根不足整窗 → null；第 n 根起填 50 递推
+        assert bool(kpl["k"].iloc[: KDJ_N - 1].isna().all())
+        assert bool(kpl["d"].iloc[: KDJ_N - 1].isna().all())
+        assert kpl["k"].iloc[KDJ_N - 1] == 50
+        assert kpl["d"].iloc[KDJ_N - 1] == 50
+        # pandas 重建镜像头部一字板段 rsv=0/0 → NaN（教科书参照，不再与接口绑定）
         assert k_pd["k"].iloc[:9].isna().all()
         assert k_pd["d"].iloc[:9].isna().all()
 
@@ -422,14 +431,38 @@ class TestBoundaryDivergenceSolidified:
         assert not np.isnan(k_pd["k"].iloc[59])
 
         # 收敛判定：接口末值 == pl expr 末值（不再返回 pandas NaN-延续值）
+        # pin 随预热期语义修正更新（min_samples=n 使头部窗口不再以不完整窗口播种）
         pd_k_frozen = float(k_pd["k"].iloc[59])
         pl_k_frozen = float(kpl["k"].iloc[59])
-        assert pl_k_frozen == pytest.approx(83.06762830812652, rel=RTOL)
-        assert abs(pd_k_frozen - pl_k_frozen) / max(abs(pd_k_frozen), 1e-12) > 0.10  # 原分叉实测 16.60%
+        assert pl_k_frozen == pytest.approx(83.06762827149947, rel=RTOL)
+        # 分叉率 |pd−pl|/|pd| 实测 16.60%（若以 pl 为分母则为 19.90%），阈值 >0.10 保留下限
+        assert abs(pd_k_frozen - pl_k_frozen) / max(abs(pd_k_frozen), 1e-12) > 0.10
         _, kk, dd, jj = TechnicalAnalysis.get_kdj(df)
         assert kk == pytest.approx(pl_k_frozen, abs=1e-9)
         assert dd == pytest.approx(float(kpl["d"].iloc[59]), abs=1e-9)
         assert jj == pytest.approx(float(kpl["j"].iloc[59]), abs=1e-9)
+
+    def test_b5_rsi_undefined_null_not_fillna50(self):
+        """B5 RSI 无定义（全平盘/一字板段 rs = 0/0）边界固化（R21，检视 09-24 §3.5）：
+        pl 正本产出真实缺失 null，pd 教科书镜像沿用已废弃的 fillna(50) 中性填充；
+        生产 pandas 薄委托入口与 pl 同语义（缺失，不返回 50 哨兵）。"""
+        flat = _make_flat(200)
+        pd_rsi, plr = _rsi_pd_series(flat["close"], RSI_PERIOD), _pl_rsi(flat)
+        # 镜像侧：50 中性填充（历史语义，已被 R21 判定为「用合法值伪装缺失」）
+        assert bool((pd_rsi == 50).all())
+        # 正本侧：全序列（预热期 + 全平盘 0/0）均为缺失，无一处为 50
+        assert plr.isna().all()
+        # 生产 pandas 入口同语义：缺失而非 50 哨兵
+        prod_rsi = TechnicalAnalysis.calculate_rsi_pandas(flat["close"], RSI_PERIOD)
+        assert prod_rsi.isna().all()
+        assert not bool((prod_rsi == 50.0).any())
+
+        # 一字板（价格恒定）段同样产出缺失：分叉点恰为 pd 镜像的 50 填充点
+        head = _make_limit_head(60, 9, 51)
+        pd_head, pl_head = _rsi_pd_series(head["close"], RSI_PERIOD), _pl_rsi(head)
+        undefined = pl_head.isna() & (pl_head.index >= RSI_PERIOD)
+        assert bool(undefined.any())
+        assert bool((pd_head[undefined] == 50).all())
 
 
 # ---------------------------------------------------------------------------
@@ -458,9 +491,9 @@ class TestCrossImplSentinelFace:
 
     def test_c3_kdj_short_sentinel_vs_expr_output(self):
         """C3 n=8：pd 接口 len<9 → ("UNKNOWN", 0, 0, 0) vs pl expr
-        rolling min_samples=1 → 全数值序列。"""
+        ``min_samples=n`` 在 n=8 下全体 null（预热期未知，R21）。"""
         df = _make_random(8, 45)
         assert TechnicalAnalysis.get_kdj(df) == ("UNKNOWN", 0, 0, 0)
         kpl = _pl_kdj(df)
         assert len(kpl) == 8
-        assert bool(kpl["k"].notna().all())
+        assert bool(kpl["k"].isna().all())

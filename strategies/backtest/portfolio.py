@@ -54,6 +54,10 @@ class PortfolioSimulator:
         # warnings 会沿线汇入 data_warnings，触发 UI 可信度（unreliable）判定。
         self._stale_estimate_days: dict[str, int] = {}
         self._stale_estimate_warned: set[str] = set()
+        # MAJOR-01: 调仓日无信号天数（决策②⑦，empty_signal_days）。仅计数，不写
+        # data_warnings —— 信号稀疏是策略/数据特征而非数据质量缺陷，由计数指标 + 次级
+        # 提示承载，避免对信号稀疏策略大面积降级。
+        self.empty_signal_days: int = 0
 
     def reset(self) -> None:
         self.cash = self.config.initial_capital
@@ -67,6 +71,7 @@ class PortfolioSimulator:
         self.delist_loss_amount = 0.0
         self._stale_estimate_days = {}
         self._stale_estimate_warned = set()
+        self.empty_signal_days = 0
 
     def process_day(
         self,
@@ -112,14 +117,19 @@ class PortfolioSimulator:
         weights_df = apply_max_weight_constraint(
             weights_df, self.config.max_single_weight, renormalize=self.config.renormalize_after_cap
         )
-        # D1-M3：稀疏信号（候选数 N < 1/max_single_weight）无法满仓，实际仓位上限被压到
-        # N×max_single_weight，向 warnings 告警以接入 UI 可信度（unreliable）判定。
+        # 决策②: sparse-signal 提示从 data_warnings 移除（保留在 engine 日志/可审计处）。
+        # 信号稀疏是配置选择导致的特征，非数据质量缺陷。
         n_candidates = weights_df.height
         cap_max = self.config.max_single_weight
         if n_candidates > 0 and n_candidates * cap_max < 1.0:
-            self.warnings.append(
-                f"{exec_date}: sparse signals n={n_candidates} < 1/max_single_weight={1.0 / cap_max:.2f}, "
-                f"effective position ceiling = {n_candidates}×{cap_max} = {n_candidates * cap_max:.4f}"
+            logger.info(
+                "[PortfolioSimulator] Sparse signals: n=%d < 1/max_single_weight=%.2f, "
+                "effective position ceiling = %d×%.2f = %.4f",
+                n_candidates,
+                1.0 / cap_max,
+                n_candidates,
+                cap_max,
+                n_candidates * cap_max,
             )
         target_weights = {r["ts_code"]: float(r["weight"]) for r in weights_df.iter_rows(named=True)}
         if not target_weights or sum(target_weights.values()) <= 0:
@@ -196,13 +206,14 @@ class PortfolioSimulator:
         - hold：保持现有持仓不动；
         - liquidate：全清仓（沿用旧语义）。
 
-        无论哪种模式都向 warnings 告警，以便 UI 展示「无信号」事件、
-        接入可信度（unreliable）判定，避免静默清仓。
+        MAJOR-01: 不再向 warnings 告警（空信号是策略/数据特征非数据质量缺陷）——
+        仅累计 ``empty_signal_days`` 计数，引擎汇入 metrics 供 UI 次级提示，
+        避免对信号稀疏策略大面积判 unreliable。
         """
         mode = self.config.on_empty_signal
         if mode == "liquidate":
             self._sell_all_positions(exec_date, day_quotes)
-        self.warnings.append(f"{exec_date}: rebalance day with no signal → {mode}")
+        self.empty_signal_days += 1
 
     def _sell_all_positions(
         self,
@@ -254,7 +265,6 @@ class PortfolioSimulator:
                     "intended_volume": pos["volume"],
                 }
             )
-            self.warnings.append(f"{exec_date}: {ts_code} sell skipped (no_quote)")
             return
 
         is_tradable = quote.select("is_tradable").item() if "is_tradable" in quote.columns else True
@@ -268,7 +278,6 @@ class PortfolioSimulator:
                     "intended_volume": pos["volume"],
                 }
             )
-            self.warnings.append(f"{exec_date}: {ts_code} sell skipped (suspended)")
             return
 
         down_price = quote.select("limit_down_price").item() if "limit_down_price" in quote.columns else None
@@ -283,7 +292,6 @@ class PortfolioSimulator:
                         "intended_volume": pos["volume"],
                     }
                 )
-                self.warnings.append(f"{exec_date}: {ts_code} sell skipped (down_limit)")
                 return
 
         exit_price = self._exec_price(quote)
@@ -353,7 +361,6 @@ class PortfolioSimulator:
                     "intended_volume": pos["volume"],
                 }
             )
-            self.warnings.append(f"{exec_date}: {ts_code} sell skipped (no_quote)")
             return
 
         is_tradable = quote.select("is_tradable").item() if "is_tradable" in quote.columns else True
@@ -367,7 +374,6 @@ class PortfolioSimulator:
                     "intended_volume": pos["volume"],
                 }
             )
-            self.warnings.append(f"{exec_date}: {ts_code} sell skipped (suspended)")
             return
 
         down_price = quote.select("limit_down_price").item() if "limit_down_price" in quote.columns else None
@@ -382,7 +388,6 @@ class PortfolioSimulator:
                         "intended_volume": pos["volume"],
                     }
                 )
-                self.warnings.append(f"{exec_date}: {ts_code} sell skipped (down_limit)")
                 return
 
         exit_price = self._exec_price(quote)
@@ -502,8 +507,10 @@ class PortfolioSimulator:
             }
             if extra:
                 entry.update(extra)
+            # MAJOR-01: 常规撮合 skip 仅进 skipped_list（结构化明细通道），不再写
+            # self.warnings —— 涨跌停/停牌/资金不足是市场常规事件，非数据质量缺陷，
+            # 由 UI 的 skipped_orders 明细（degraded）呈现，避免大面积判 unreliable。
             self.skipped_list.append(entry)
-            self.warnings.append(f"{exec_date}: {ts_code} buy skipped ({reason})")
 
         for ts_code in order:
             delta_value = buy_targets[ts_code]
@@ -568,14 +575,18 @@ class PortfolioSimulator:
             )
             spent_by_code[ts_code] += cost.net_amount
 
-        # BT-05 建议3：整手取整失败超过候选 10% 时给出可执行建议（归因挽救的提示层）。
+        # 决策②: 整手取整失败的可执行建议（BT-05 建议3）不再写 data_warnings ——
+        # 是配置侧优化建议，非数据质量缺陷；降为 engine 日志留存可审计。
         if len(buy_targets) > 0 and lot_indivisible_count / len(buy_targets) > 0.1:
             per_candidate = sum(buy_targets.values()) / len(buy_targets)
-            self.warnings.append(
-                f"{exec_date}: {lot_indivisible_count}/{len(buy_targets)} candidates skipped "
-                f"(lot_size_indivisible): 单笔预算约 {per_candidate:.0f} 元，股价高于 "
-                f"{per_candidate / 100:.0f} 元的标的无法买入一手。建议降低 max_position_count "
-                f"或提高初始资金（辅助建议，不改变本次成交）。"
+            logger.info(
+                "[PortfolioSimulator] %d/%d candidates skipped (lot_size_indivisible): "
+                "单笔预算约 %.0f 元，股价高于 %.0f 元的标的无法买入一手。建议降低 "
+                "max_position_count 或提高初始资金（辅助建议，不改变本次成交）。",
+                lot_indivisible_count,
+                len(buy_targets),
+                per_candidate,
+                per_candidate / 100,
             )
 
         # BT-05 建议2：预算回收——把「买不起一手」释放的预算按信号强度降序补分配。
@@ -655,7 +666,8 @@ class PortfolioSimulator:
         因此补分配天然不突破 max_single_weight）。
 
         补分配会改变收益数值（闲置预算被用出），与默认配置结果不可比，
-        故开启时在 warnings 明确提示，随 data_warnings 进入 UI unreliable 判定。
+        故开启时在 engine 日志留存提示（MAJOR-01：配置侧补分配，非数据质量缺陷，
+        不写入 data_warnings，避免误升级 UI 可信度级别）。
         """
         reallocated_count = 0
         reallocated_amount = 0.0
@@ -705,10 +717,13 @@ class PortfolioSimulator:
             reallocated_amount += cost.net_amount
 
         if reallocated_count > 0:
-            self.warnings.append(
-                f"{exec_date}: reallocate_unfilled 补分配 {reallocated_count} 笔，"
-                f"释放预算 {released_budget:.0f} 元中实际投入 {reallocated_amount:.0f} 元，"
-                f"将整手取整闲置的现金重新配置到信号靠前的标的（本回测数值与默认配置不可比）。"
+            # 决策②: reallocate 提示不再写 data_warnings（配置侧补分配，非数据质量缺陷）——
+            # 降为 engine 日志留存可审计；数值与默认配置不可比由 report 侧配置快照体现。
+            logger.info(
+                "[PortfolioSimulator] reallocate_unfilled 补分配 %d 笔，释放预算 %.0f 元中实际投入 %.0f 元",
+                reallocated_count,
+                released_budget,
+                reallocated_amount,
             )
 
     def _is_delisted(self, ts_code: str, exec_date: date) -> bool:
@@ -748,7 +763,8 @@ class PortfolioSimulator:
           （A 股退市整理期普遍连续跌停，全额变现会系统性高估收益，见 config 字段说明）
         - 经 cost_model 计算卖出成本（退市无成交量，avg_daily_volume 传 None，
           滑点退化为固定 base_bps），现金流 = cost.net_amount
-        - cash += net_amount；从 positions 移除；记录 warning
+        - cash += net_amount；从 positions 移除（MAJOR-01：退市清算以 sell 交易
+          exit_reason=DELISTED 承载，不再写 data_warnings，避免误报数据质量）
         - 累计 delist_liquidation_count 与 delist_loss_amount（相对全额变现的折扣额），
           供 engine 透传到 BacktestResult 供用户评估退市假设的影响权重
         """
@@ -764,7 +780,6 @@ class PortfolioSimulator:
                     "intended_volume": pos["volume"],
                 }
             )
-            self.warnings.append(f"{exec_date}: {ts_code} sell skipped (no_quote)")
             return
 
         volume = pos["volume"]
@@ -804,7 +819,6 @@ class PortfolioSimulator:
         self.cash += cost.net_amount
         del self.positions[ts_code]
         self._last_known_prices.pop(ts_code, None)
-        self.warnings.append(f"{exec_date}: {ts_code} liquidated (delisted) at {recover_price}")
 
     def _record_daily_positions(
         self,
@@ -883,12 +897,13 @@ class PortfolioSimulator:
 
     def get_results(
         self,
-    ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str]]:
+    ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str], int]:
         return (
             pl.DataFrame(self.trades_list) if self.trades_list else pl.DataFrame(),
             pl.DataFrame(self.positions_list),
             pl.DataFrame(self.skipped_list) if self.skipped_list else pl.DataFrame(),
             self.warnings,
+            self.empty_signal_days,
         )
 
     def _exec_price(self, quote: pl.DataFrame) -> float:

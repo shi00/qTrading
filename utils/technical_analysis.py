@@ -95,8 +95,12 @@ class TechnicalAnalysis:
         OSS-05 收敛：唯一正本为 Polars get_kdj_expr。收敛前本方法为独立 Pandas
         实现，一字板/全横盘（hhv==llv → rsv=0/0）时 k/d/j 为 NaN，经 ai_mixin
         以 "k: nan" 注入 AI prompt（D1），且 NaN 比较全为 False 导致静默判为
-        NEUTRAL。现委托 Polars 正本计算后取末值，由 Polars 侧 fill_nan(50)
-        统一承载边界语义（R21：预热期 null 仍以 None 显式缺省，不伪造）。
+        NEUTRAL。现委托 Polars 正本计算后取末值，边界语义（整窗同价取中性 50、
+        预热期前 n−1 根为 null）统一由 get_kdj_expr 承载。
+
+        本方法只取末值，故其 None 分支的真实可达路径是**末窗含缺失价**（末 n 窗内
+        high/low 的非空计数 < n → RSV 为 null → 末值为真实未知），而非「预热期」。
+        ``len(df) < n`` 时返回 ``("UNKNOWN", 0, 0, 0)`` 为既有哨兵语义，本次不改。
         """
         if df is None or len(df) < n:
             return "UNKNOWN", 0, 0, 0
@@ -114,7 +118,7 @@ class TechnicalAnalysis:
             .collect()
         )
         curr_k, curr_d, curr_j = (result[c][-1] for c in ("k", "d", "j"))
-        # R21：预热期 null 是真实「未知」，显式返回 None，不填充数值
+        # R21：末窗含缺失价 → 末值为真实「未知」，显式返回 None，不填充数值
         if curr_k is None or curr_d is None or curr_j is None:
             return "UNKNOWN", None, None, None
 
@@ -127,9 +131,13 @@ class TechnicalAnalysis:
         return status, float(curr_k), float(curr_d), float(curr_j)
 
     @staticmethod
-    def calculate_rsi_pandas(close: pd.Series, period: int = 14) -> pd.Series:
+    def calculate_rsi_pandas(close: pd.Series, period: int) -> pd.Series:
         """
         使用 Polars 计算 RSI 序列并转回 Pandas（SC-05 合一：唯一正本为 Polars get_rsi_expr）。
+
+        周期口径：同名 RSI 只有一个周期口径，``period`` 必须由调用方显式给定——
+        本入口与 ``get_rsi_expr`` 曾各自持有隐式默认（14 / 6），不显式传参时同名的
+        "RSI" 会得到两个不同周期的结果；现统一取消入口默认值，杜绝此歧义。
 
         此方法返回完整的 RSI 序列，用于后续分析：
         - 连续超卖天数
@@ -139,12 +147,13 @@ class TechnicalAnalysis:
         SC-05: 合一前本方法为独立 Pandas 实现（min_periods=period），与 Polars 版
         （min_samples=0）口径不一致导致 EWM 种子污染与两套边界处理漂移。
         现改为调用 get_rsi_expr 计算后转回，预热期语义（前 period 根为 NaN/null）与
-        边界语义（无涨有跌→0、无跌有涨→100、无涨无跌→50）由 Polars 唯一实现承载。
+        边界语义（无涨有跌→0、无跌有涨→100、无涨无跌→NaN 缺失）由 Polars 唯一实现承载；
+        R21：无涨无跌（全平盘）时 RSI 业务上无定义，以缺失而非中性 50 表示。
         （D7：独立 pandas 末值实现 get_rsi 已删除，本方法是 pandas 侧 RSI 的唯一入口。）
 
         Args:
             close: 收盘价序列（需按时间升序排列）
-            period: RSI 周期（默认 14）
+            period: RSI 周期（必须显式给定，无隐式默认）
 
         Returns:
             RSI 序列（0-100），数据不足时返回空 Series
@@ -169,9 +178,13 @@ class TechnicalAnalysis:
         return rsi
 
     @staticmethod
-    def analyze_rsi_oversold_features(close: pd.Series, period: int = 14) -> dict:
+    def analyze_rsi_oversold_features(close: pd.Series, period: int) -> dict:
         """
         分析 RSI 超卖特征，用于判断"黄金坑" vs "价值陷阱"。
+
+        周期口径：同名 RSI 只有一个周期口径，``period`` 必须由调用方显式给定
+        （与 ``calculate_rsi_pandas`` / ``get_rsi_expr`` 统一无入口默认值），
+        避免隐式周期把「同名不同义」从下层挪到本层。
 
         返回三个关键特征：
         1. consecutive_oversold_days: 连续超卖天数（衡量跌势持续性）
@@ -180,7 +193,7 @@ class TechnicalAnalysis:
 
         Args:
             close: 收盘价序列（需按时间升序排列）
-            period: RSI 周期
+            period: RSI 周期（必须显式给定，无隐式默认）
 
         Returns:
             dict 包含特征值和描述文本
@@ -253,15 +266,24 @@ class TechnicalAnalysis:
     # Polars Expression Factories
     # ==========================
     @staticmethod
-    def get_rsi_expr(col_name="close", period=6, alias="rsi"):
+    def get_rsi_expr(col_name, period, alias="rsi"):
         """
         Returns a Polars Expression for RSI calculation.
         Use with .over('ts_code') for grouped calculation.
 
+        周期口径：同名 RSI 只有一个周期口径，``period`` 必须由调用方显式给定——
+        本工厂曾是隐式默认 6，而薄委托入口 calculate_rsi_pandas 曾是隐式默认 14，
+        不显式传参时同名 "RSI" 会得到两个不同周期的结果；现统一取消入口默认值
+        （``col_name`` 亦一并取消默认值：Python 语法不允许无默认参数排在有默认参数
+        之后），杜绝此歧义。
+
         SC-05: min_samples=period 与 Pandas 版 calculate_rsi_pandas 的 min_periods=period
         对齐，消除 EWM 种子污染（新上市/次新股前 period 根不产出值）。
-        预热期内的 null 是真实的「未知」，不 fill_null 伪装（R21）——下游
-        `.filter(rsi < threshold)` 对 null 返回 null 自然丢弃该行。
+        本表达式只在「业务上确实无法计算 RSI」时产出 null（预热期数据不足、
+        全平盘导致 0/0），是真实的「未知」，不 fill_null / fill_nan 伪装（R21）。
+        下游须显式处理缺失——见 strategies/oversold_strategy.py 的
+        ``.is_not_null()`` + 阈值过滤：无法计算 RSI 的标的既不算超跌也不算
+        中性，按缺失显式排除，而非隐式依赖 null 比较被丢弃。
         """
         import polars as pl
 
@@ -278,13 +300,14 @@ class TechnicalAnalysis:
         rs = roll_up / roll_down
         rsi = 100.0 - (100.0 / (1.0 + rs))
 
-        # Handle division by zero (inf) -> 100?
-        # Polars handles inf arithmetic usually?
-        # If roll_down is 0, rs is inf. 100/(1+inf) is 0. 100-0 = 100. Correct.
-        # But if both are 0? Nan -> fill_nan(50) 归中（无涨无跌=横盘=中性）。
-        # SC-05: 仅 fill_nan（inf 算术产生的 NaN 边界），不 fill_null（预热期真实未知，R21）。
+        # 分母为 0 的两种情形：
+        # - roll_up > 0 且 roll_down == 0（只涨不跌）→ rs = inf，100/(1+inf) = 0 → RSI = 100，正确；
+        # - roll_up == roll_down == 0（全平盘，无涨无跌）→ rs = 0/0 = NaN，RSI 业务上无定义。
+        # R21: 无定义归一为 null（与预热期同为真实「未知」），不填 50 等业务上合法的中性值
+        # （填 50 会让该标的落在「不超跌」的安全区而被静默排除，语义上是用合法值伪装缺失）。
+        # 下游须显式处理缺失（见 get_rsi_expr docstring），不得再填充中性值。
 
-        return rsi.fill_nan(50.0).alias(alias)
+        return rsi.fill_nan(None).alias(alias)
 
     @staticmethod
     def get_macd_expr(col_name="close", fast=12, slow=26, sign=9):
@@ -311,21 +334,30 @@ class TechnicalAnalysis:
 
     @staticmethod
     def get_kdj_expr(high="high", low="low", close="close", n=9, m1=3, m2=3):
+        """KDJ 表达式工厂（唯一正本）。
+
+        预热期语义：``min_samples=n`` 使前 n−1 根因不足整窗而 RSV 为 null；null 在
+        ``ewm_mean`` 中逐位置传播，故 k/d/j 前 n−1 根同步为 null（真实「未知」，
+        不填充业务合法值，R21）。
+
+        边界语义：整窗同价（一字板/全横盘）时 ``hhv==llv`` → RSV 为 0/0，该窗 RSV
+        在业务上无定义，取中性 50；``fill_nan`` 只作用于 NaN，不触碰预热期 null。
+
+        与行情软件的差异：行情软件以 K/D 初值 50 递推，本实现以「首根有效 RSV」
+        播种，差异按 ``(2/3)^t`` 衰减（m1=3），预热期后收敛。
+        """
         import polars as pl
 
         # RSV
-        llv = pl.col(low).rolling_min(
-            window_size=n,
-            min_samples=1,
-        )  # min_samples not fully supported in old polars?
-        # rolling_min in Polars usually requires window_size.
-        # Handle dynamic window? No, just standard rolling.
-        hhv = pl.col(high).rolling_max(window_size=n, min_samples=1)
+        llv = pl.col(low).rolling_min(window_size=n, min_samples=n)
+        hhv = pl.col(high).rolling_max(window_size=n, min_samples=n)
 
         rsv = (pl.col(close) - llv) / (hhv - llv) * 100
-        # fill_nan: 一字板/全横盘时 hhv==llv → 0/0，RSV 在业务上确实无定义，
-        # 取中性 50 有依据（与 get_rsi_expr 同法）。
-        # 不 fill_null: 预热期为真实未知，伪装成 50 属 R21 违规。
+        # fill_nan：整窗同价（hhv==llv → 0/0）时该窗 RSV 业务上无定义，取中性 50
+        # ——这是逐窗定义值，与「递归序列的种子初值」是两件事。不 fill_null：
+        # 预热期（前 n−1 根不足整窗）为真实未知，伪装成 50 属 R21 违规。
+        # 口径不一致（既有设计，保留不改）：RSI 对同类 0/0 取 null（真实未知），
+        # KDJ 取中性 50；详见 docs/debt/known-technical-debt.md 的 P3-TA-OSS05-DualImpl。
         rsv = rsv.fill_nan(50)
 
         # K, D, J via EWM

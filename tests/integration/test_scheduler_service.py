@@ -201,6 +201,7 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
             trade_date=None,
             run_id=None,
             params_snapshot=None,
+            exec_warnings=None,
         ):
             holder["saved"] = (strategy_name, trade_date, run_id, result_df.copy())
             # D4-C1: save_results 返回实际写入条数；测试 stub 模拟 1 条写入。
@@ -291,6 +292,7 @@ async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
             trade_date=None,
             run_id=None,
             params_snapshot=None,
+            exec_warnings=None,
         ):
             holder["save_called"] = True
 

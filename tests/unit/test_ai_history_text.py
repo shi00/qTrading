@@ -3,6 +3,7 @@ import datetime
 import numpy as np
 import pandas as pd
 
+from core.i18n import I18n
 from strategies.ai_context import _build_history_text
 from strategies.ai_context.history import _resolve_name_as_of
 import pytest
@@ -133,6 +134,169 @@ class TestBuildHistoryTextStLimit:
         result = _build_history_text(df, ts_code="000001.SZ", stock_name="ST当前")
         assert isinstance(result, str)
         assert "涨停" in result or "limit_up" in result or "🔴" in result
+
+
+class TestBuildHistoryTextLimitStatus:
+    """MAJOR-02：涨跌停判定优先用交易所公布价（stk_limit），缺失才降级板块规则。"""
+
+    _DATES = ["2024-06-10", "2024-06-11", "2024-06-12", "2024-06-13", "2024-06-14", "2024-06-17"]
+    _LAST3 = _DATES[-3:]
+
+    @staticmethod
+    def _df(closes: list[float], last_pct_chg: float) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "trade_date": [datetime.date.fromisoformat(d) for d in TestBuildHistoryTextLimitStatus._DATES],
+                "close": closes,
+                "open": closes,
+                "high": closes,
+                "low": closes,
+                "vol": [1000.0] * len(closes),
+                "pct_chg": [0.0] * (len(closes) - 1) + [last_pct_chg],
+            }
+        )
+
+    @staticmethod
+    def _limit_df(rows: list[tuple[str, float, float]]) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": datetime.date.fromisoformat(d),
+                    "up_limit": up,
+                    "down_limit": down,
+                }
+                for d, up, down in rows
+            ]
+        )
+
+    def test_gain_9_6pct_not_limit_up_with_exchange_price(self):
+        # 核心回归：主板涨 9.6% 未封板（close 低于交易所公布涨停价）不得打涨停标签
+        closes = [10.4, 10.5, 10.6, 10.7, 10.8, 10.96]
+        df = self._df(closes, last_pct_chg=9.6)
+        limit_df = self._limit_df([(d, 99.0, 0.01) for d in self._LAST3])
+        # 最后一天涨停价为 11.0 > close(10.96)+0.005 → 未封板
+        limit_df.loc[limit_df["trade_date"] == datetime.date.fromisoformat(self._LAST3[-1]), "up_limit"] = 11.0
+        result = _build_history_text(df, ts_code="000001.SZ", stock_name="普通股份", limit_df=limit_df)
+        assert f"🔴{I18n.get('ai_limit_up')}" not in result
+        assert I18n.get("ai_limit_price_missing") not in result
+
+    def test_exchange_price_close_at_limit_is_limit_up(self):
+        # 同一 9.6% 行情，若交易所公布价显示已封板（close >= up_limit-0.005）→ 打涨停标签
+        closes = [10.4, 10.5, 10.6, 10.7, 10.8, 10.96]
+        df = self._df(closes, last_pct_chg=9.6)
+        limit_df = self._limit_df([(d, 99.0, 0.01) for d in self._LAST3])
+        limit_df.loc[limit_df["trade_date"] == datetime.date.fromisoformat(self._LAST3[-1]), "up_limit"] = 10.96
+        result = _build_history_text(df, ts_code="000001.SZ", stock_name="普通股份", limit_df=limit_df)
+        assert f"🔴{I18n.get('ai_limit_up')}" in result
+
+    def test_missing_limit_row_skips_tag_and_notifies(self):
+        # stk_limit 非空但该日无记录 → 该日不打标签，段落只追加一次缺失提示（R21）
+        closes = [10.4, 10.5, 10.6, 10.7, 10.8, 10.96]
+        df = self._df(closes, last_pct_chg=9.6)
+        limit_df = self._limit_df([(d, 99.0, 0.01) for d in self._LAST3[:-1]])  # 缺最后一天
+        result = _build_history_text(df, ts_code="000001.SZ", stock_name="普通股份", limit_df=limit_df)
+        assert f"🔴{I18n.get('ai_limit_up')}" not in result
+        assert result.count(I18n.get("ai_limit_price_missing")) == 1
+
+    def test_empty_limit_df_falls_back_to_board_rule(self):
+        # limit_df 为 None/空 → 降级板块规则近似，真封板仍打标签，并整段追加一次近似提示
+        closes = [10.4, 10.5, 10.6, 10.7, 10.8, 11.0]
+        df = self._df(closes, last_pct_chg=10.0)
+        result = _build_history_text(df, ts_code="000001.SZ", stock_name="普通股份", limit_df=None)
+        assert f"🔴{I18n.get('ai_limit_up')}" in result
+        assert result.count(I18n.get("ai_limit_price_approx")) == 1
+        assert I18n.get("ai_limit_price_missing") not in result
+
+    def test_empty_limit_df_no_approx_when_insufficient(self):
+        # 数据不足走哨兵时不注册标签，也不追加近似提示
+        df = pd.DataFrame(
+            {
+                "trade_date": [datetime.date.fromisoformat(d) for d in self._DATES[:2]],
+                "close": [10.4, 10.5],
+                "vol": [1000.0, 1000.0],
+                "pct_chg": [0.0, 10.0],
+            }
+        )
+        result = _build_history_text(df, ts_code="000001.SZ", stock_name="普通股份", limit_df=None)
+        assert result == I18n.get("ai_history_insufficient")
+
+    def test_window_ex_right_still_tags_historical_limit_up(self):
+        """F1：窗口内除权（adj 1.0→1.05）时历史日仍能按名义价正确判定涨停。
+
+        06-14 名义 close = 11.0（涨停价 11.0）；前复权后 close ≈ 11.0 × 0.952 = 10.476，
+        若直接用复权 close 与名义涨停价比较会静默漏标（既无标签也无缺失提示）。
+        """
+        df = self._df([10.0, 10.0, 10.0, 10.0, 11.0, 10.5], last_pct_chg=-4.5)
+        df.loc[4, "pct_chg"] = 10.0
+        df["adj_factor"] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.05]
+        limit_df = self._limit_df([(d, 99.0, 0.01) for d in self._LAST3])
+        limit_df.loc[limit_df["trade_date"] == datetime.date.fromisoformat("2024-06-14"), "up_limit"] = 11.0
+        result = _build_history_text(df, ts_code="000001.SZ", stock_name="普通股份", limit_df=limit_df)
+        assert f"🔴{I18n.get('ai_limit_up')}" in result
+        assert I18n.get("ai_limit_price_missing") not in result
+
+    def test_low_price_board_rule_tolerance_tags_limit_up(self):
+        """F2：降级路径容差按 0.5/close 反推后，仍能标注取整导致的真实封板（不得过度收紧）。
+
+        pre_close 3.33 → 名义涨停价 3.663 按 0.01 元取整为 3.66 → 实际 pct_chg = 9.91% 略低于
+        名义 10%；若容差收紧过度（如取近零值），该真实涨停会被漏标。此处钉住下界。
+        """
+        df = self._df([3.0, 3.1, 3.2, 3.3, 3.33, 3.66], last_pct_chg=9.91)
+        result = _build_history_text(df, ts_code="000001.SZ", stock_name="普通股份", limit_df=None)
+        assert f"🔴{I18n.get('ai_limit_up')}" in result
+        assert result.count(I18n.get("ai_limit_price_approx")) == 1
+
+    def test_low_price_big_rise_not_tagged_limit_up(self):
+        """封顶生效：低价股容差退化为 0.5 个百分点上限，6% 普涨不得误标涨停。
+
+        名义 close = 0.1 元时无界容差 0.5 / close = 5 个百分点，阈值被降到 5，主板涨 6%
+        即被误标涨停；封顶后 tol = min(0.6 / 0.1, 0.5) = 0.5，阈值 9.5 不触发。
+        adj_factor 使前复权后仍能反推名义 close = 0.1 元（末行 ratio = 1 → 名义价 = 原始价）。
+        """
+        raw = [0.095, 0.095, 0.095, 0.095, 0.095, 0.1]
+        df = self._df(raw, last_pct_chg=6.0)
+        df["adj_factor"] = [0.95, 0.95, 0.95, 0.95, 0.95, 1.0]
+        result = _build_history_text(df, ts_code="000001.SZ", stock_name="普通股份", limit_df=None)
+        assert f"🔴{I18n.get('ai_limit_up')}" not in result
+        assert result.count(I18n.get("ai_limit_price_approx")) == 1
+
+    def test_mid_price_true_limit_up_still_tagged(self):
+        """封顶未造成漏标：名义 close 3.33（pre_close 3.03 → 涨停价 3.33）涨 9.91% 仍标涨停。
+
+        tol = min(0.6 / 3.33, 0.5) ≈ 0.18 个百分点 → 阈值 ≈ 9.82，9.91 ≥ 9.82 触发。
+        """
+        df = self._df([3.0, 3.1, 3.2, 3.3, 3.31, 3.33], last_pct_chg=9.91)
+        result = _build_history_text(df, ts_code="000001.SZ", stock_name="普通股份", limit_df=None)
+        assert f"🔴{I18n.get('ai_limit_up')}" in result
+        assert result.count(I18n.get("ai_limit_price_approx")) == 1
+
+    def test_invalid_nominal_close_uses_capped_tolerance(self):
+        """F2：名义 close 无效（NaN）时容差回退为封顶值 0.5 个百分点（不得更松）。"""
+        df_tag = self._df([10.4, 10.5, 10.6, 10.7, 10.8, 11.0], last_pct_chg=10.0)
+        df_tag.loc[5, "close"] = float("nan")
+        res_tag = _build_history_text(df_tag, ts_code="000001.SZ", stock_name="普通股份", limit_df=None)
+        assert f"🔴{I18n.get('ai_limit_up')}" in res_tag
+
+        # 9.4 < 10 - 0.5 → 未达阈值，不标涨停（回退值封顶于 0.5）
+        df_miss = self._df([10.4, 10.5, 10.6, 10.7, 10.8, 11.0], last_pct_chg=9.4)
+        df_miss.loc[5, "close"] = float("nan")
+        res_miss = _build_history_text(df_miss, ts_code="000001.SZ", stock_name="普通股份", limit_df=None)
+        assert f"🔴{I18n.get('ai_limit_up')}" not in res_miss
+
+    def test_null_up_limit_row_treated_as_missing(self):
+        """H2：该日有行但 up_limit 为 NULL → 按「无有效记录」处理（不打标签 + 缺失提示，R21）。
+
+        修复前：entry 存在 → classify 返回 None → 既无标签也无缺失提示，等同把「数据缺失」
+        伪装成「未涨停」。
+        """
+        df = self._df([10.4, 10.5, 10.6, 10.7, 10.8, 11.0], last_pct_chg=10.0)
+        limit_df = self._limit_df([(d, 99.0, 0.01) for d in self._LAST3])
+        last_day = datetime.date.fromisoformat(self._LAST3[-1])
+        limit_df.loc[limit_df["trade_date"] == last_day, "up_limit"] = float("nan")
+        result = _build_history_text(df, ts_code="000001.SZ", stock_name="普通股份", limit_df=limit_df)
+        assert f"🔴{I18n.get('ai_limit_up')}" not in result
+        assert result.count(I18n.get("ai_limit_price_missing")) == 1
 
 
 if __name__ == "__main__":

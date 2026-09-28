@@ -2,8 +2,10 @@ import asyncio
 import datetime
 import json
 import logging
+import math
 import typing
 import uuid
+from collections.abc import Sequence
 
 import pandas as pd
 
@@ -12,7 +14,7 @@ from data.constants import DEFAULT_BENCHMARK_INDEX, MAJOR_INDICES, REVIEW_STATUS
 from data.external.tushare_client import TushareClient
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.sync.base import safe_error
-from core.i18n import I18n
+from core.i18n import I18n, Message
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -20,6 +22,76 @@ from utils.time_utils import get_now, parse_date, to_date
 from utils.prompt_guard import neutralize_external_text
 
 logger = logging.getLogger(__name__)
+
+# CRITICAL-02：策略结果中承载结构化归因的列名（``strategies.attribution.ATTRIBUTION_COLUMN``
+# 的镜像常量）。R1 禁止 data 层 import strategies 层，故此处复制字面量，两侧修改须同步。
+_ATTRIBUTION_COLUMN = "_filter_attribution"
+
+
+def serialize_exec_warnings(warnings: Sequence[Message] | None) -> list[dict[str, typing.Any]] | None:
+    """执行期 warnings 通道 → JSONB 可落库形态（CRITICAL-02，R21/BT-03）。
+
+    ``None``（调用方未提供执行上下文）保持 SQL NULL，历史回看据此走「未记录」分支；
+    空序列返回空数组 ``[]``，表示「已记录且无警告」——两者语义不同（R21：缺失不伪装成
+    合法值）。Message 的 key/params 序列化为 ``{"key": .., "params": ..}``。
+    """
+    if warnings is None:
+        return None
+    serialized: list[dict[str, typing.Any]] = []
+    for w in warnings:
+        key = getattr(w, "key", None)
+        if not key:
+            continue
+        params = getattr(w, "params", None)
+        serialized.append({"key": str(key), "params": dict(params) if isinstance(params, dict) else {}})
+    return serialized
+
+
+def deserialize_exec_warnings(raw: typing.Any) -> tuple[Message, ...] | None:
+    """JSONB 落库值 → Message 元组（CRITICAL-02 历史回看还原）。
+
+    ``None``/空值（SQL NULL）表示「该次筛选未记录执行上下文」，返回 ``None`` 由调用方
+    决定渲染「未记录」哨兵；空数组返回空元组（已记录且无警告）。JSON 字符串（raw SQL
+    路径）与已解析 list（SQLAlchemy Core 路径）均接受，非法输入按「未记录」处理。
+    """
+    if raw is None or (isinstance(raw, float) and math.isnan(raw)):
+        return None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(raw, list):
+        return None
+    out: list[Message] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        key = item.get("key")
+        if not key:
+            continue
+        params = item.get("params")
+        out.append(Message(str(key), params if isinstance(params, dict) else {}))
+    return tuple(out)
+
+
+def _parse_filter_attribution(raw: typing.Any) -> dict[str, typing.Any] | None:
+    """解析策略结果 ``_filter_attribution`` 列（JSON 字符串）为 JSONB 可落库 dict。
+
+    缺失/非法/None → ``None``（不伪造归因）。R1：data 层不得 import strategies，
+    故列名沿用镜像常量 ``_ATTRIBUTION_COLUMN``。
+    """
+    if raw is None or (isinstance(raw, float) and math.isnan(raw)):
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
 
 
 # D2-4: 复权持仓期收益率唯一正本，供 run_review（T+1/T+5 内联）与
@@ -1330,6 +1402,7 @@ class ReviewManager:
         trade_date: datetime.date | datetime.datetime | pd.Timestamp | str | None = None,
         run_id: str | None = None,
         params_snapshot: str | dict[str, typing.Any] | None = None,
+        exec_warnings: Sequence[Message] | None = None,
     ) -> int:
         """
         Save screening results to history for future review.
@@ -1340,6 +1413,10 @@ class ReviewManager:
             df: DataFrame of screening results.
             trade_date: The trading date being analyzed (not the current natural date).
                         If omitted, a single unique df["trade_date"] value may be used.
+            exec_warnings: 策略执行期 warnings 通道（``context["warnings"]``）。``None``
+                        表示调用方无执行上下文（落库为 SQL NULL，历史回看走「未记录」
+                        分支，R21/BT-03）；空序列表示「已记录且无警告」。每行归因自动
+                        取自 df 的 ``_filter_attribution`` 列。
 
         Returns:
             Number of records actually persisted. ``0`` means nothing was written
@@ -1386,6 +1463,9 @@ class ReviewManager:
                 )
             except (json.JSONDecodeError, TypeError):
                 params_snapshot_value = {"raw": str(params_snapshot)}
+
+        # CRITICAL-02: 执行期 warnings 落库一次（同一 run 全体行共享），每行归因逐行取。
+        exec_warnings_value = serialize_exec_warnings(exec_warnings)
 
         # Helpers to safely extract fields
         def _f(row_data: typing.Any, key: typing.Any, default: typing.Any = None):
@@ -1459,6 +1539,8 @@ class ReviewManager:
                     "ai_reason": str(ai_reason),
                     "thinking": str(thinking),
                     "params_snapshot": params_snapshot_value,
+                    "exec_warnings": exec_warnings_value,
+                    "filter_attribution": _parse_filter_attribution(row.get(_ATTRIBUTION_COLUMN)),
                 }
             )
 

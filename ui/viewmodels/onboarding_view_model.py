@@ -254,7 +254,7 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
 
         MVVM 契约：VM 不得向 View 暴露可变状态。_step_validated 仅为验证短路缓存
         （非响应式 UI 状态），故以只读方法替代迁入 frozen OnboardingState：生产 View
-        从未消费该状态，迁入需跨多文件重构且收益有限（§1.3 极简设计）。取舍落档：
+        从未消费该状态，迁入需跨多文件重构且收益有限（§1.2 极简设计）。取舍落档：
         若日后需要响应式订阅该字段，再将其迁入 OnboardingState（原债务条目
         P3-M12 已在 known-technical-debt.md 移除存档）。
         """

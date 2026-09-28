@@ -25,10 +25,14 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     _KNOWN_UNIT_COLUMNS_HIGH,
     _KNOWN_UNIT_COLUMNS_LOW,
     _R16_SINGLETON_CLASSES,
+    _R24_SNAPSHOT_CLASSES,
+    _R24_SNAPSHOT_FIELDS,
+    _R24_SNAPSHOT_TABLES,
     _base_class_names,
     _check_R16_in_tree,
     _check_R20_in_tree,
     _check_R22_in_tree,
+    _check_R24_in_tree,
     _check_R4_fstring_in_tree,
     _check_R4_in_tree,
     _check_R4_literal_assignments_in_tree,
@@ -51,7 +55,9 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     check_R15,
     check_R16_vm_init_singleton_construction,
     check_R20,
+    check_R21,
     check_R22,
+    check_R24,
     check_R4,
     check_R4_in_tests,
     check_R4_literal_assignments,
@@ -1064,6 +1070,111 @@ class TestR20IntegrationOnCurrentCodebase:
         assert check_redlines.check_R20() == 0
 
 
+# ============================================================================
+# R21 报告模式测试（H2：启用原型 MissingMaskingVisitor 的检出/误报边界与不阻断语义）
+# ============================================================================
+
+
+def _run_r21_on_files(tmp_path, monkeypatch, files: dict[str, str]) -> tuple[int, str]:
+    """在临时 ROOT 下写入文件并运行 check_R21，返回 (warning 条数, stderr 文本)。"""
+    import check_redlines
+
+    for rel, src in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src, encoding="utf-8")
+    monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        count = check_redlines.check_R21()
+    return count, buf.getvalue()
+
+
+class TestR21PureDetection:
+    """R21 报告模式检出与误报抑制边界（判定逻辑复用原型 MissingMaskingVisitor）。"""
+
+    def test_masking_assign_confidence_hit(self, tmp_path, monkeypatch):
+        """confidence 填 50（Subscript 目标）应命中 R21。"""
+        src = "def f(row):\n    row['confidence'] = 50\n"
+        count, out = _run_r21_on_files(tmp_path, monkeypatch, {"strategies/fake_ai.py": src})
+        assert count == 1, out
+        assert "R21 缺失值伪装" in out
+        assert "confidence" in out
+
+    def test_masking_assign_score_zero_hit(self, tmp_path, monkeypatch):
+        """ai_score 填 0（Name 目标）应命中 R21。"""
+        src = "def f():\n    ai_score = 0\n"
+        count, out = _run_r21_on_files(tmp_path, monkeypatch, {"services/fake_job.py": src})
+        assert count == 1, out
+        assert "ai_score" in out
+
+    def test_masking_ternary_else_hit(self, tmp_path, monkeypatch):
+        """三元表达式 else 分支填 0（缺失即 0 分）应命中 R21。"""
+        src = "def f(res):\n    score = int(res['score']) if res else 0\n"
+        count, out = _run_r21_on_files(tmp_path, monkeypatch, {"strategies/fake_ai.py": src})
+        assert count == 1, out
+        assert "score" in out
+
+    def test_masking_fillna_lowconf_hit(self, tmp_path, monkeypatch):
+        """fillna(0) 应命中 R21 低置信档（须人工复核）。"""
+        src = "def f(df):\n    return df['score'].fillna(0)\n"
+        count, out = _run_r21_on_files(tmp_path, monkeypatch, {"strategies/fake_ai.py": src})
+        assert count == 1, out
+        assert "fillna" in out
+
+    def test_none_sentinel_not_flagged(self, tmp_path, monkeypatch):
+        """缺失用 None 表示（正确姿势）不应命中。"""
+        src = (
+            "def f(row, res):\n"
+            "    row['ai_score'] = None\n"
+            "    row['confidence'] = None\n"
+            "    score = res.get('score')\n"
+            "    return score\n"
+        )
+        count, out = _run_r21_on_files(tmp_path, monkeypatch, {"strategies/fake_ai.py": src})
+        assert count == 0, out
+
+    def test_score_zero_comparison_not_flagged(self, tmp_path, monkeypatch):
+        """合法的 score == 0 语义比较（模型明确否决）不是伪装赋值，不应命中。"""
+        src = "def f(row):\n    if row['score'] == 0:\n        return 'rejected'\n    return 'analyzed'\n"
+        count, out = _run_r21_on_files(tmp_path, monkeypatch, {"strategies/fake_ai.py": src})
+        assert count == 0, out
+
+    def test_non_sentinel_field_not_flagged(self, tmp_path, monkeypatch):
+        """非业务语义字段（非 score/ai_score/confidence）填 0 不受 R21 约束。"""
+        src = "def f(row):\n    row['retry_count'] = 0\n"
+        count, out = _run_r21_on_files(tmp_path, monkeypatch, {"services/fake_job.py": src})
+        assert count == 0, out
+
+
+class TestR21IntegrationOnCurrentCodebase:
+    """R21 报告模式集成测试：当前代码库基线、目录缺失与不阻断语义。"""
+
+    def test_check_R21_runs_clean_on_codebase(self):
+        """当前 services/ 与 strategies/ 在 R21 判定下无报警（AI-01/AI-02 已修为 None 表示）。"""
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            check_R21()
+        assert "R21 缺失值伪装" not in buf.getvalue()
+
+    def test_check_R21_missing_dir_returns_silently(self, tmp_path, monkeypatch):
+        """services/ 与 strategies/ 均不存在时静默返回 0（不抛错、无 warning）。"""
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        assert check_redlines.check_R21() == 0
+
+    def test_check_R21_warning_not_blocking(self, tmp_path, monkeypatch):
+        """命中时仅输出 warning 到 stderr、不抛错（报告模式不阻断退出码）。"""
+        count, out = _run_r21_on_files(
+            tmp_path,
+            monkeypatch,
+            {"strategies/fake_ai.py": "def f(row):\n    row['confidence'] = 50\n"},
+        )
+        assert count == 1
+        assert "报告模式" in out and "confidence" in out
+
+
 class TestR22:
     """R22 纯函数测试：set_app_state 写水位前缀 key 的单调检测与豁免边界。
 
@@ -1169,6 +1280,105 @@ class TestR22IntegrationOnCurrentCodebase:
     def test_check_R22_runs_clean_on_codebase(self):
         """全库扫描（排除 ui/app/tests 后）R22 无报警（合规基线契约）。"""
         assert check_R22() == []
+
+
+# ============================================================================
+# R24 时点正确性纯函数测试（AI 文档操作系统检视 H1）
+# ============================================================================
+
+
+def _r24_check(code: str) -> list[str]:
+    """对代码片段执行 R24 报告模式纯函数检查（fake 路径挂在 strategies/ 下）。"""
+    tree = ast.parse(code)
+    fake_path = ROOT / "strategies" / "fake_module.py"
+    return _check_R24_in_tree(tree, fake_path)
+
+
+class TestR24PureFunction:
+    """R24 报告模式纯函数测试：验证「当前快照」维度表/ORM 类/派生列键的检测与豁免边界。
+
+    覆盖窄规则（第一阶段）：无生效日期维度表（sw_industry_member 等）、ORM 类、
+    派生列键（industry_sw_l2 / sw_industry）字符串字面量命中；无关字符串不误报。
+    """
+
+    def test_snapshot_table_literal_warns(self):
+        """字符串字面量引用无生效日期快照表（sw_industry_member）应报警。"""
+        code = "def f():\n    return query('sw_industry_member')\n"
+        warnings = _r24_check(code)
+        assert len(warnings) == 1
+        assert "R24" in warnings[0]
+        assert "sw_industry_member" in warnings[0]
+
+    def test_snapshot_class_name_warns(self):
+        """引用快照维度 ORM 类名（SwIndustryMember）应报警。"""
+        code = "def f():\n    rows = await dao.fetch_all(SwIndustryMember)\n    return rows\n"
+        warnings = _r24_check(code)
+        assert len(warnings) == 1
+        assert "R24" in warnings[0]
+        assert "SwIndustryMember" in warnings[0]
+
+    def test_snapshot_field_literal_warns(self):
+        """引用当前快照行业维度列键（industry_sw_l2 / sw_industry）应报警。"""
+        code = "def f(df):\n    return df.groupby('industry_sw_l2')\n"
+        warnings = _r24_check(code)
+        assert len(warnings) == 1
+        assert "industry_sw_l2" in warnings[0]
+
+    def test_sw_industry_context_key_warns(self):
+        """AI 上下文字典键 'sw_industry'（快照表派生）应报警（提示确认取数时点）。"""
+        code = "def f(prefetched):\n    name = prefetched[ts_code]['sw_industry']\n    return name\n"
+        warnings = _r24_check(code)
+        assert len(warnings) == 1
+        assert "sw_industry" in warnings[0]
+
+    def test_unrelated_string_not_flagged(self):
+        """无关字符串（industry 常规列名/普通文案）不应误报。"""
+        code = (
+            "def f():\n"
+            "    industry = row.get('industry', '')\n"
+            "    msg = 'sw_industry_member table is a global snapshot'\n"
+            "    return industry, msg\n"
+        )
+        assert _r24_check(code) == []
+
+    def test_unrelated_class_name_not_flagged(self):
+        """无关类名（IndexWeight 带日期主键，非快照维度）不应误报。"""
+        code = "def f():\n    return IndexWeight\n"
+        assert _r24_check(code) == []
+
+    def test_known_snapshot_sets_cover_redline(self):
+        """快照表/类/字段清单与红线语义一致（防漂移快照）。"""
+        assert "sw_industry_member" in _R24_SNAPSHOT_TABLES
+        assert "SwIndustryMember" in _R24_SNAPSHOT_CLASSES
+        assert "industry_sw_l2" in _R24_SNAPSHOT_FIELDS
+        assert "sw_industry" in _R24_SNAPSHOT_FIELDS
+
+
+class TestR24IntegrationOnCurrentCodebase:
+    """R24 集成测试：报告模式机制验证（warning 输出 stderr、不阻断 exit code）。
+
+    test_check_R24_emits_baseline_not_blocking 为基线契约：当前 strategies/ 存在已知
+    「当前快照」维度引用（同日截面/prompt 上下文用途，非跨期前视），故按报告模式输出
+    warning 但**不阻断退出码**；基线命中数与 ruleset-changelog.md「R24 报告模式升级期限」
+    登记一致，供首次达标评估（2026-12-31 前）对比误报率。
+    """
+
+    def test_check_R24_emits_baseline_not_blocking(self):
+        """当前 strategies/ 基线：输出 R24 warning 且 main() 仍返回 0（报告模式不阻断）。"""
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            assert main() == 0
+        out = buf.getvalue()
+        assert "R24" in out, (
+            "R24 报告模式应输出 warning 基线（strategies/ 存在快照维度引用 industry_sw_l2 / sw_industry）"
+        )
+
+    def test_check_R24_missing_dir_returns_silently(self, tmp_path, monkeypatch):
+        """strategies/ 目录不存在时静默返回 0（不抛错、无 warning）。"""
+        import check_redlines
+
+        monkeypatch.setattr(check_redlines, "ROOT", tmp_path)
+        assert check_redlines.check_R24() == 0
 
 
 # ============================================================================

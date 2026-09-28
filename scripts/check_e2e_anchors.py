@@ -236,7 +236,7 @@ def check_unused_eids(
 ) -> list[str]:
     """UIX-18: 检查 e2e_ids.py 中声明的每个 public 常量/方法是否被引用或标注 # reserved:。
 
-    防止提前声明未使用常量，避免无接线的死锚点膨胀（CLAUDE.md §1.3 YAGNI）。
+    防止提前声明未使用常量，避免无接线的死锚点膨胀（CLAUDE.md §1.2 YAGNI）。
     """
     base_root = root if root is not None else ROOT
     target_eids = eids_path if eids_path is not None else base_root / "ui" / "testing" / "e2e_ids.py"

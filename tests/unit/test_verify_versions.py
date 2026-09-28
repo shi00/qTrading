@@ -84,6 +84,13 @@ def setup_test_files(
         encoding="utf-8",
     )
 
+    # harness.toml：[project].version 与 pyproject_v 绑定，保证 check_harness_version (Check 11) 一致
+    harness = tmp_path / "harness.toml"
+    harness.write_text(
+        f'[project]\nname = "AStockScreener"\nversion = "{pyproject_v}"  # x-release-please-version\n',
+        encoding="utf-8",
+    )
+
     requirements_dev = tmp_path / "requirements-dev.txt"
     requirements_dev.write_text(f"pyright=={pkg_pyright}\n", encoding="utf-8")
 
@@ -128,6 +135,8 @@ def _patch_all_paths(
         patch("verify_versions.CLAUDE_PATH", claude),
         # AGENTS_PATH 由 pyproject.parent 推导，与 setup_test_files 创建的 AGENTS.md 一致
         patch("verify_versions.AGENTS_PATH", pyproject.parent / "AGENTS.md"),
+        # HARNESS_PATH 由 pyproject.parent 推导，与 setup_test_files 创建的 harness.toml 一致
+        patch("verify_versions.HARNESS_PATH", pyproject.parent / "harness.toml"),
         patch("verify_versions.REQUIREMENTS_DEV_PATH", requirements_dev),
         patch("verify_versions.SIDECAR_CARGO_PATH", sidecar_dir / "Cargo.toml"),
         patch("verify_versions.SIDECAR_PROTOCOL_PATH", sidecar_dir / "src" / "protocol.rs"),
@@ -159,6 +168,49 @@ def test_agents_version_missing_header(tmp_path):
     with patch("verify_versions.AGENTS_PATH", agents):
         errors = verify_versions.check_agents_version("0.6.9")
     assert any("missing '**对应版本**'" in e for e in errors), f"应检出缺字段, got: {errors}"
+
+
+def test_harness_version_matches(tmp_path):
+    """harness.toml [project].version 与 pyproject 一致 → 无错误."""
+    harness = tmp_path / "harness.toml"
+    harness.write_text('[project]\nname = "AStockScreener"\nversion = "0.6.9"\n', encoding="utf-8")
+    with patch("verify_versions.HARNESS_PATH", harness):
+        errors = verify_versions.check_harness_version("0.6.9")
+    assert errors == []
+
+
+def test_harness_version_mismatch(tmp_path):
+    """harness.toml [project].version 与 pyproject 不一致 → 报错."""
+    harness = tmp_path / "harness.toml"
+    harness.write_text('[project]\nname = "AStockScreener"\nversion = "0.6.8"\n', encoding="utf-8")
+    with patch("verify_versions.HARNESS_PATH", harness):
+        errors = verify_versions.check_harness_version("0.6.9")
+    assert any("0.6.8" in e and "0.6.9" in e for e in errors), f"应检出版本失配, got: {errors}"
+
+
+def test_harness_version_missing_field(tmp_path):
+    """harness.toml 缺 [project].version → 报错."""
+    harness = tmp_path / "harness.toml"
+    harness.write_text('[project]\nname = "AStockScreener"\n', encoding="utf-8")
+    with patch("verify_versions.HARNESS_PATH", harness):
+        errors = verify_versions.check_harness_version("0.6.9")
+    assert any("missing [project].version" in e for e in errors), f"应检出缺字段, got: {errors}"
+
+
+def test_harness_version_missing_file_fail_open(tmp_path):
+    """harness.toml 不存在 → fail-open（无错误），与 Check 10 一致."""
+    with patch("verify_versions.HARNESS_PATH", tmp_path / "absent-harness.toml"):
+        errors = verify_versions.check_harness_version("0.6.9")
+    assert errors == []
+
+
+def test_harness_version_invalid_toml(tmp_path):
+    """harness.toml 非法 TOML → 报错而非崩溃."""
+    harness = tmp_path / "harness.toml"
+    harness.write_text("this is not = valid = toml\n", encoding="utf-8")
+    with patch("verify_versions.HARNESS_PATH", harness):
+        errors = verify_versions.check_harness_version("0.6.9")
+    assert any("not valid TOML" in e for e in errors), f"应检出非法 TOML, got: {errors}"
 
 
 def test_verify_versions_fix(tmp_path):

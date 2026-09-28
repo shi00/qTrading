@@ -48,7 +48,7 @@ class DataExplorerQueryClient:
     本类采用"共享引擎非单例"模式——__init__ 为空，每次实例化是新对象，
     但所有实例共用类级 _shared_engine。未注册到 singleton_registry 的原因：
     1. R15 触发条件要求 __new__ + _instance，本类不满足，非违规；
-    2. 强加 @register_singleton 需引入 __new__ 单例样板，违反 YAGNI（§1.3）；
+    2. 强加 @register_singleton 需引入 __new__ 单例样板，违反 YAGNI（§1.2）；
     3. 测试隔离由 tests/unit/conftest.py 的 _reset_data_explorer_shared_engine
        autouse fixture 覆盖（R7 已满足）；
     4. 同步引擎（sa.create_engine）与 CacheManager 的异步引擎完全隔离，

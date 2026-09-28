@@ -14,12 +14,12 @@
 |----|-----------|---------|---------|------|
 | P1-01 | 宪法绝对规则与已批准例外必须集中登记，例外唯一注册入口 | 文档体系检视 P1 系列 | [exceptions.yml](./exceptions.yml) | 使用中 |
 | P2-03 | 架构守护范围：import-linter 契约（layers + 补充 forbidden） + AST 静态测试互补 | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
-| P2-06 | 受检 markdown 递归发现 + 显式排除清单（_DOC_EXCLUDES） | 文档体系检视 P2 系列 | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
+| P2-06 | 受检 markdown 递归发现 + 显式排除清单（_build_doc_excludes） | 文档体系检视 P2 系列 | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | P2-07 | 治理文档元数据统一格式（owner/ruleset_version/review_triggers/canonical_for） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) / [AGENTS.md](../../AGENTS.md) 元数据块 | 使用中 |
 | P2-11 | 红线规则类型划分（INVARIANT/DEFAULT/NEW_CODE/MIGRATION_TARGET/WORKFLOW/EXCEPTIONABLE） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §3.1 | 使用中 |
 | P2-12 | 主题 → canonical 正本映射（任务决策树机器可读镜像） | 文档体系检视 P2 系列 | [canonical-topics.yml](./canonical-topics.yml) / [CLAUDE.md](../../CLAUDE.md) §1.8 | 使用中 |
 | P2-13 | R18 执行决策树（先识别对象再判定隔离） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §3.1 | 使用中 |
-| P2-16 | 跨平台命令策略（文档只描述命令目的，不绑定 shell） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §1.9 | 使用中 |
+| P2-16 | 跨平台命令策略（文档只描述命令目的，不绑定 shell） | 文档体系检视 P2 系列 | [CONTRIBUTING.md](../../CONTRIBUTING.md)「常用开发与测试命令」 | 使用中 |
 | P2-17 | 架构设计/公共契约任务路由（满足 ADR-0001 触发条件时新增 ADR） | 文档体系检视 P2 系列 | [CLAUDE.md](../../CLAUDE.md) §1.8 / [canonical-topics.yml](./canonical-topics.yml) | 使用中 |
 | P3-03 | AGENTS.md 定位为跨工具自动加载的规则入口 | 文档体系检视 P3 系列 | [AGENTS.md](../../AGENTS.md) | 使用中 |
 | DOC-01 | 规则集元数据一致性（ruleset_version / last_reviewed 三文档同步） | 文档体系·AI 可执行性专项（DOC 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |

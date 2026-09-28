@@ -7,7 +7,7 @@ ai_prompt/news_prompt) + 三阶段保存状态机编排（CLAUDE.md §3.2 MVVM�
 - frozen state snapshot (AIBrainSettingsState dataclass)
 - 三阶段保存状态机: idle → saving → success / error
 - 构造注入 LLMConfigPanelViewModel/FailoverConfigPanelViewModel/LocalModelConfigPanelViewModel
-  （复用现有 config panel VM, 不再包一层薄 VM, §1.3 拒绝过度抽象）
+  （复用现有 config panel VM, 不再包一层薄 VM, §1.2 拒绝过度抽象）
 - 同步阻塞 ConfigHandler 写入通过 ThreadPoolManager.run_async offload (R16)
 - R2: asyncio.CancelledError 显式 raise, 不被 except Exception 吞没
 - 重复提交检测：save_state="saving" 时拒绝新提交

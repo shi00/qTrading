@@ -14,6 +14,8 @@ Checks:
    可选 ``--check-sidecar-binary`` 启用四方校验（调用 sidecar version --json）。
 10. AGENTS.md 对应版本（产品版本）匹配 pyproject.toml version（DOC-13，AGENTS 纳入
     verify-versions 白名单后补实际校验，避免 hook 空转）。
+11. harness.toml [project].version 匹配 pyproject.toml version（M5，AI 工具侧运行时配置
+    纳入版本守护，避免第四套规范面版本漂移）。
 
 Usage: python scripts/verify_versions.py [--check-sidecar-binary <path>]
 """
@@ -38,6 +40,7 @@ CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
 SECURITY_PATH = ROOT / "SECURITY.md"
 CLAUDE_PATH = ROOT / "CLAUDE.md"
 AGENTS_PATH = ROOT / "AGENTS.md"
+HARNESS_PATH = ROOT / "harness.toml"
 SIDECAR_CARGO_PATH = ROOT / "sidecars" / "qtrading-pg-sidecar" / "Cargo.toml"
 SIDECAR_PROTOCOL_PATH = ROOT / "sidecars" / "qtrading-pg-sidecar" / "src" / "protocol.rs"
 
@@ -168,6 +171,32 @@ def check_agents_version(pyproject_ver: str) -> list[str]:
     ver = m.group(1)
     if ver != pyproject_ver:
         errors.append(f"AGENTS.md 对应版本 '{ver}' != pyproject.toml version '{pyproject_ver}'")
+    return errors
+
+
+def check_harness_version(pyproject_ver: str) -> list[str]:
+    """Check 11: harness.toml [project].version 匹配 pyproject.toml version（M5）。
+
+    harness.toml 为 AI 工具侧运行时配置（非规则正本），其 [project].version 须与产品
+    版本同步。自动 bump 由 release-please extra-files 负责，本校验提供门禁兜底（防止
+    手工改动或 extra-files 漏配导致版本漂移）。文件缺失时 fail-open（与 Check 10 一致，
+    存在性由文档登记守护，不在本脚本强制）。
+    """
+    errors: list[str] = []
+    if not HARNESS_PATH.exists():
+        return errors
+    try:
+        with open(HARNESS_PATH, "rb") as f:
+            cfg = tomllib.load(f)
+    except tomllib.TOMLDecodeError as exc:
+        errors.append(f"harness.toml is not valid TOML: {exc}")
+        return errors
+    ver = cfg.get("project", {}).get("version")
+    if not ver:
+        errors.append(f"harness.toml missing [project].version (expected '{pyproject_ver}')")
+        return errors
+    if ver != pyproject_ver:
+        errors.append(f"harness.toml [project].version '{ver}' != pyproject.toml version '{pyproject_ver}'")
     return errors
 
 
@@ -503,6 +532,9 @@ def main() -> None:
 
     # Check 10: AGENTS.md 产品版本一致性（DOC-13）
     errors.extend(check_agents_version(pyproject_ver))
+
+    # Check 11: harness.toml 产品版本一致性（M5）
+    errors.extend(check_harness_version(pyproject_ver))
 
     if fixed_any:
         print("Auto-fixed version mismatches. Please stage the changes and try committing again.")

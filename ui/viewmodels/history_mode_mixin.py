@@ -25,6 +25,7 @@ from data.domain_services.review_stats_service import (
     compute_ai_attribution_stats,
     compute_strategy_review_stats,
 )
+from data.persistence.review_manager import deserialize_exec_warnings
 from ui.viewmodels import Message
 from ui.viewmodels.screener_types import (
     HistoryTreeRow,
@@ -268,16 +269,20 @@ class HistoryModeMixin:
                 sort_column = "ai_score"
             else:
                 sort_column = None
+            # CRITICAL-02 (R21/BT-03): 从落库记录还原执行期 warnings，替代原先的
+            # ``warnings=()``——后者把「已知不可信」渲染成「无警告」。列为 NULL 的
+            # 存量记录走「未记录执行上下文」哨兵分支（见 _restore_exec_warnings）。
+            restored_warnings = self._restore_exec_warnings(df)
             # C2b H1: 数据内容变更后经唯一 owner 单帧原子产出分页元数据 + 当前页切片,
             # 避免「loading=False + 旧表格 + 旧 total」陈旧帧 (M-1)。
-            # UX-03: 历史记录无「实时候选池/收窄」上下文, 防御性清空态原因/业务警告。
+            # UX-03: 历史记录无「实时候选池/收窄」上下文, 防御性清空态原因。
             self._update_pagination(
                 page_no=1,
                 loading=False,
                 sort_column=sort_column,
                 sort_ascending=False,
                 empty_message=None,
-                warnings=(),
+                warnings=restored_warnings,
             )
         except asyncio.CancelledError:
             self._set_state(loading=False)
@@ -285,6 +290,26 @@ class HistoryModeMixin:
         except Exception:
             self._set_state(loading=False)
             raise
+
+    @staticmethod
+    def _restore_exec_warnings(records_df: pd.DataFrame | None) -> tuple[Message, ...]:
+        """从历史记录还原执行期 warnings（CRITICAL-02，R21/BT-03）。
+
+        - 记录含 ``exec_warnings`` 列且存在非 NULL 值：还原为 Message 元组
+          （空数组 → 空元组，表示「已记录且无警告」，与 NULL 语义不同）；
+        - 列为 NULL / 列缺失（存量记录，或结果经由不落该列的历史路径产生）：
+          返回「未记录执行上下文」哨兵，**不得**渲染成「无警告」；
+        - 无记录（空 df）：返回空元组（无结果可展示，避免产生误导性横幅）。
+        """
+        if records_df is None or records_df.empty:
+            return ()
+        if "exec_warnings" not in records_df.columns:
+            return (Message("screener_history_exec_context_unrecorded"),)
+        for value in records_df["exec_warnings"].tolist():
+            restored = deserialize_exec_warnings(value)
+            if restored is not None:
+                return restored
+        return (Message("screener_history_exec_context_unrecorded"),)
 
     async def load_strategy_stats(self) -> None:
         """加载复盘聚合统计到 state.strategy_stats (UX-05, T3).

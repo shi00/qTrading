@@ -743,6 +743,35 @@ class AIStrategyMixin:
                 "[AIStrategyMixin] Failed to pre-fetch auxiliary data: %s: %s",
             )
 
+        # --- Batch Pre-Fetch: stk_limit 交易所公布涨跌停价（整批一次，供 AI 上下文判定封板）---
+        # 取 prefetched_history 各候选近 3 个交易日的日期，以其 [min, max] **连续日期区间**作为近端
+        # 窗口（非真实日期并集：区间内停牌/无成交的日期也会被一并查询），禁止按股逐次查询。
+        # NOTE(lazy): 近端窗口以 [min, max] 连续日期区间近似各候选交易日并集. ceiling: 候选含长期停牌/久无成交股票时 min 被拉回很久以前，而 stk_limit_dao.get_stk_limit_range(start, end) 不按 ts_code 过滤（全市场区间查询），查询行数与耗时随之上升. upgrade: 该查询成为性能瓶颈时改为按去重交易日分片查询，或为该 DAO 方法增加 ts_code 过滤参数.
+        limit_df: pd.DataFrame | None = None
+        limit_date_vals: list[pd.Timestamp] = []
+        for _grp in prefetched_history.values():
+            if _grp is None or _grp.empty or "trade_date" not in _grp.columns:
+                continue
+            _s = pd.to_datetime(_grp["trade_date"], errors="coerce").dropna()
+            if _s.empty:
+                continue
+            limit_date_vals.extend(_s.sort_values().tail(3).tolist())
+        if limit_date_vals:
+            try:
+                limit_df = await dp.cache.stk_limit_dao.get_stk_limit_range(  # type: ignore[union-attr]
+                    min(limit_date_vals).date().isoformat(),
+                    max(limit_date_vals).date().isoformat(),
+                )
+            except asyncio.CancelledError:
+                # R2: 传播取消信号，配合优雅停机
+                raise
+            except Exception as e:
+                logger.warning(
+                    "[ai_mixin] stk_limit prefetch failed, fallback to board-rule limit pct: %s",
+                    DataSanitizer.sanitize_error(e),
+                )
+                limit_df = None
+
         # --- Bundle all pre-fetched data into PreFetchedContext ---
         prefetched = PreFetchedContext(
             capital={
@@ -761,6 +790,7 @@ class AIStrategyMixin:
             auxiliary_data=auxiliary_data,
             news_as_of=news_as_of,
             is_backtest=bool(context.get("is_backtest")),
+            limit_df=limit_df,
         )
 
         # --- Strategy-specific prefetch hook ---
@@ -1674,6 +1704,7 @@ class AIStrategyMixin:
                 name_ranges=name_ranges,
                 vol_ratio_threshold=vol_ratio_threshold,
                 labels_out=history_labels,
+                limit_df=prefetched.limit_df,
             )
 
             # 8. Build stock_info and call AI

@@ -10,6 +10,8 @@ Tests for TechnicalAnalysis utility class.
 # 测试行为由测试用例本身验证。
 
 import datetime
+import inspect
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -342,6 +344,34 @@ class TestKDJ:
         assert status == "UNKNOWN"
         assert k == 0
 
+    def test_kdj_last_window_missing_price_returns_none(self):
+        """末窗含缺失价 → 末值为真实未知，接口返回 None（R21）。
+
+        机制：pandas NaN 经 ``pl.from_pandas``（默认 ``nan_to_null=True``）变为
+        null，``rolling_min/max(min_samples=n)`` 按**非 null 计数**，故末窗有效价
+        < n 时窗口统计为 null → RSV 为 null → 末值为 null，接口显式返回 ``None``，
+        不填充 ``0``/``50`` 等业务上合法的值。
+
+        本用例为**防御性（合成）用例**：``high``/``low`` 在 schema 上无 NOT NULL
+        约束、取数路径无显式 OHLC 非空过滤（机制可达），但真实数据中是否出现
+        末窗缺失未经验证，故不宣称其为生产常见输入。
+        """
+        n, rows = 9, 20
+        df = pd.DataFrame(
+            {
+                "high": [10.0 + i * 0.1 for i in range(rows)],
+                "low": [9.0 + i * 0.1 for i in range(rows)],
+                "close": [9.5 + i * 0.1 for i in range(rows)],
+            }
+        )
+        df.loc[rows - 1, "high"] = np.nan
+
+        status, k, d, j = TechnicalAnalysis.get_kdj(df, n=n)
+        assert status == "UNKNOWN"
+        assert k is None
+        assert d is None
+        assert j is None
+
 
 class TestRSIPandas:
     def test_rsi_series_calculation(self):
@@ -401,6 +431,52 @@ class TestRSIPandas:
         assert rsi.empty
 
 
+class TestRSIPeriodMustBeExplicit:
+    """MINOR-02 契约：同名 RSI 只有一个周期口径，三个入口均不得持隐式默认周期。
+
+    检视 09-24 §3.2：`get_rsi_expr` 曾隐式 period=6，而薄委托入口
+    `calculate_rsi_pandas` 与其上层 `analyze_rsi_oversold_features` 曾隐式 period=14
+    ——同一 RSI 语义的两个入口不显式传参时，同名 "RSI" 会得到两个不同周期的结果。
+
+    以行为断言为主：缺 period 必须在调用期直接 TypeError（`match="period"` 锁定失败
+    原因即「缺 period 参数」，而非实现内部自抛的其它 TypeError）——默认值回潮（含改为
+    period=None 后内部兜底）必然使该用例失败；对「period=None 且无兜底」这类实现，
+    行为断言可能先被内部运算的 TypeError 命中，此时由结构断言兜住，故两者互补：
+    结构断言锁定「无默认值」契约本体，行为断言锁定「缺参必须报错」的可观测后果。
+    """
+
+    def test_missing_period_raises_type_error(self):
+        close = pd.Series([10.0 + i * 0.3 for i in range(30)])
+        # 缺 period 的调用形态：以 dict 承载 kwargs，避免 pyright 编译期拦截
+        # （本用例正是要在运行期验证「缺参必须报错」，编译期拦截会看不到断言结果）。
+        only_close: dict[str, Any] = {"close": close}
+        only_col_name: dict[str, Any] = {"col_name": "close"}
+
+        with pytest.raises(TypeError, match="period"):
+            TechnicalAnalysis.calculate_rsi_pandas(**only_close)
+
+        with pytest.raises(TypeError, match="period"):
+            TechnicalAnalysis.analyze_rsi_oversold_features(**only_close)
+
+        with pytest.raises(TypeError, match="period"):
+            TechnicalAnalysis.get_rsi_expr(**only_col_name)
+
+    def test_period_has_no_default(self):
+        entries = (
+            TechnicalAnalysis.get_rsi_expr,
+            TechnicalAnalysis.calculate_rsi_pandas,
+            TechnicalAnalysis.analyze_rsi_oversold_features,
+        )
+        for entry in entries:
+            params = inspect.signature(entry).parameters
+            assert params["period"].default is inspect.Parameter.empty, entry.__name__
+
+        # 语法联动：无默认参数不能排在有默认参数之后，故去 period 默认值时
+        # get_rsi_expr 的 col_name 必须一并去默认值。
+        col_name_param = inspect.signature(TechnicalAnalysis.get_rsi_expr).parameters["col_name"]
+        assert col_name_param.default is inspect.Parameter.empty
+
+
 class TestStrongNumericAssertionsD38:
     """D3-8: 指标函数"已知输入 → 精确期望值"强数值断言。
 
@@ -417,18 +493,21 @@ class TestStrongNumericAssertionsD38:
 
     # ---------- RSI ----------
     def test_rsi_boundaries_known_input(self):
-        """单调上涨→100、单调下跌→0、横盘→50（固定精确期望）。
+        """单调上涨→100、单调下跌→0（固定精确期望）；全平盘→缺失（非中性 50）。
 
-        D7 已删除独立 pandas 末值实现 get_rsi：上涨/下跌边界由
-        test_rsi_direction_is_correct 覆盖（calculate_rsi_pandas），
-        此处保留横盘归中（50）种子污染防护断言。
+        R21（检视 09-24 §3.5）：无涨无跌时 rs = 0/0，RSI 业务上无定义，必须以
+        缺失表示，不得填 50 等业务上合法的中性值。D7 已删独立 pandas 末值实现
+        get_rsi：上涨/下跌边界由 test_rsi_direction_is_correct 覆盖
+        （calculate_rsi_pandas）。
         """
         up = pd.Series(np.arange(100.0, 130.0))
         down = pd.Series(np.arange(130.0, 100.0, -1.0))
         flat = pd.Series(np.full(30, 100.0))
         assert TechnicalAnalysis.calculate_rsi_pandas(up, 14).iloc[-1] == pytest.approx(100.0)
         assert TechnicalAnalysis.calculate_rsi_pandas(down, 14).iloc[-1] == pytest.approx(0.0)
-        assert TechnicalAnalysis.calculate_rsi_pandas(flat, 14).iloc[-1] == pytest.approx(50.0)
+        flat_rsi = TechnicalAnalysis.calculate_rsi_pandas(flat, 14)
+        assert flat_rsi.isna().all()
+        assert not bool((flat_rsi == 50.0).any())
 
     def test_rsi_real_series_exact_value(self):
         """固定序列 → 精确 RSI 末值（D3-1 回归 + D3-8 强断言）。"""
@@ -460,13 +539,17 @@ class TestStrongNumericAssertionsD38:
 
     # ---------- KDJ ----------
     def test_kdj_real_series_exact_value(self):
-        """固定序列 → 精确 k/d/j 与状态。"""
+        """固定序列 → 精确 k/d/j 与状态。
+
+        pin 随预热期语义修正更新（``get_kdj_expr`` 的 ``min_samples`` 由 1 改为 n，
+        头部不再以不完整窗口播种）。
+        """
         df = self._real_ohlc()
         status, k, d, j = TechnicalAnalysis.get_kdj(df)
         assert status == "OVERBOUGHT"
-        assert k == pytest.approx(85.203612, abs=1e-3)
-        assert d == pytest.approx(82.564299, abs=1e-3)
-        assert j == pytest.approx(90.482238, abs=1e-3)
+        assert k == pytest.approx(85.203647, abs=1e-3)
+        assert d == pytest.approx(82.564731, abs=1e-3)
+        assert j == pytest.approx(90.481479, abs=1e-3)
 
 
 class TestRSIOversoldFeatures:
@@ -519,6 +602,30 @@ class TestPolarsExpressions:
         assert "rsi" in result.columns
         rsi_values = result["rsi"].to_list()
         assert all(0 <= v <= 100 for v in rsi_values if not pd.isna(v))
+
+    def test_rsi_expr_flat_is_missing_not_neutral(self):
+        """R21 回归（检视 09-24 §3.5）: 全平盘 → RSI 缺失，不填中性 50。
+
+        阈值取 60（> 50）构造「填中性 50 会被当作超跌放行」的场景：修复前
+        fill_nan(50.0) 使全平盘标的以 RSI = 50 通过 `< 60` 被误选；修复后 RSI
+        为 null，经显式 is_not_null() 过滤被排除（与 oversold_strategy
+        _compute_rsi_filter 的下游语义一致）——既不算超跌也不算中性。
+        """
+        import polars as pl
+
+        flat = pd.DataFrame({"ts_code": ["000001.SZ"] * 30, "close": [10.0] * 30})
+        result = (
+            pl.from_pandas(flat)
+            .lazy()
+            .with_columns(TechnicalAnalysis.get_rsi_expr("close", period=6, alias="rsi").over("ts_code"))
+            .collect()
+        )
+        # 预热期（前 6 根 null）与全平盘段（rs = 0/0）全部为缺失，且无一处被填为 50
+        assert result["rsi"].is_null().all()
+        assert result["rsi"].to_list().count(50.0) == 0
+        # 下游显式缺失语义：无法计算 RSI 的标的不进入候选（即便阈值 60 > 50）
+        picked = result.filter(pl.col("rsi").is_not_null() & (pl.col("rsi") < 60.0))
+        assert picked.height == 0
 
     def test_macd_expr(self):
         import polars as pl

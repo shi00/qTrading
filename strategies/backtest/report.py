@@ -60,7 +60,7 @@ class BacktestReport:
             lines.append("")
             lines.append(I18n.get("report_data_warnings", count=len(result.data_warnings)) + ":")
             for w in result.data_warnings:
-                lines.append(f"  - {w}")
+                lines.append(f"  - {w!s}")
         return "\n".join(lines)
 
     def format_monthly_stats(self, result: BacktestResult) -> str:
@@ -128,5 +128,5 @@ class BacktestReport:
                 ]
             )
             for w in result.data_warnings:
-                sections.append(f"- {w}")
+                sections.append(f"- {w!s}")
         return "\n".join(sections)

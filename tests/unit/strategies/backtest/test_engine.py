@@ -1109,7 +1109,7 @@ class TestSimulateTrades:
         quotes_df = pl.DataFrame()
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         assert trades.is_empty()
         assert positions.is_empty()
@@ -1161,7 +1161,7 @@ class TestRunMergesRangePreloadWarnings:
         monkeypatch.setattr(engine, "_generate_signals", AsyncMock(return_value=empty_signals))
         monkeypatch.setattr(engine, "_load_quotes", AsyncMock(return_value=(pl.DataFrame(), [])))
         monkeypatch.setattr(
-            engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), []))
+            engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), [], 0))
         )
         monkeypatch.setattr(
             engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [], []))
@@ -1183,7 +1183,7 @@ class TestRunMergesRangePreloadWarnings:
 
         result = await engine.run(strategy=strategy)
 
-        assert any(w.startswith("preload_range_too_wide") for w in result.data_warnings)
+        assert any(str(w).startswith("[preload_range_too_wide]") for w in result.data_warnings)
 
     @pytest.mark.asyncio
     async def test_run_omits_when_no_range_preload_warnings(self, monkeypatch):
@@ -1209,7 +1209,7 @@ class TestRunMergesRangePreloadWarnings:
         monkeypatch.setattr(engine, "_generate_signals", AsyncMock(return_value=empty_signals))
         monkeypatch.setattr(engine, "_load_quotes", AsyncMock(return_value=(pl.DataFrame(), [])))
         monkeypatch.setattr(
-            engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), []))
+            engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), [], 0))
         )
         monkeypatch.setattr(
             engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [], []))
@@ -1230,7 +1230,7 @@ class TestRunMergesRangePreloadWarnings:
 
         result = await engine.run(strategy=strategy)
 
-        assert not any(w.startswith("preload_range_too_wide") for w in result.data_warnings)
+        assert not any(str(w).startswith("[preload_range_too_wide]") for w in result.data_warnings)
 
 
 class TestRunPortfolioWipedOutWarning:
@@ -1264,7 +1264,7 @@ class TestRunPortfolioWipedOutWarning:
         monkeypatch.setattr(engine, "_generate_signals", AsyncMock(return_value=empty_signals))
         monkeypatch.setattr(engine, "_load_quotes", AsyncMock(return_value=(pl.DataFrame(), [])))
         monkeypatch.setattr(
-            engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), []))
+            engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), [], 0))
         )
         monkeypatch.setattr(
             engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [], []))
@@ -1288,13 +1288,13 @@ class TestRunPortfolioWipedOutWarning:
         """nav 曲线含 0（爆仓）时，data_warnings 追加 portfolio_wiped_out，让爆仓首屏可见。"""
         result = await self._run_with_nav(monkeypatch, pl.Series([100.0, 0.0], dtype=pl.Float64))
         # DataWarning.__str__ 以 "[portfolio_wiped_out] ..." 起始，故用包含匹配
-        assert any("portfolio_wiped_out" in w for w in result.data_warnings)
+        assert any(str(w).startswith("[portfolio_wiped_out]") for w in result.data_warnings)
 
     @pytest.mark.asyncio
     async def test_run_omits_warning_when_nav_never_zero(self, monkeypatch):
         """nav 全程为正（未爆仓）时，data_warnings 不含 portfolio_wiped_out。"""
         result = await self._run_with_nav(monkeypatch, pl.Series([100.0, 105.0], dtype=pl.Float64))
-        assert not any(w.startswith("portfolio_wiped_out") for w in result.data_warnings)
+        assert not any(str(w).startswith("[portfolio_wiped_out]") for w in result.data_warnings)
 
 
 class TestEnrichSuspendStatus:
@@ -1582,7 +1582,8 @@ class TestEngineEndToEndPipeline:
         simulator.process_day(date(2024, 1, 2), day_signals, day_quotes, is_rebalance=True)
 
         assert len(simulator.positions) == 0
-        assert any("up_limit" in w for w in simulator.warnings)
+        # MAJOR-01: 常规涨跌停 skip 仅进结构化 skipped_list，不再写 warnings。
+        assert any(r["reason"] == "up_limit" for r in simulator.skipped_list)
 
     @pytest.mark.asyncio
     async def test_limit_down_skips_sell_in_simulation(self):
@@ -1621,7 +1622,8 @@ class TestEngineEndToEndPipeline:
         simulator.process_day(date(2024, 1, 2), pl.DataFrame(), day_quotes, is_rebalance=True)
 
         assert "000001.SZ" in simulator.positions
-        assert any("down_limit" in w for w in simulator.warnings)
+        # MAJOR-01: 常规跌停 skip 仅进结构化 skipped_list，不再写 warnings。
+        assert any(r["reason"] == "down_limit" for r in simulator.skipped_list)
 
     @pytest.mark.asyncio
     async def test_suspended_skips_trading(self):
@@ -1664,7 +1666,43 @@ class TestEngineEndToEndPipeline:
         simulator.process_day(date(2024, 1, 2), day_signals, day_quotes, is_rebalance=True)
 
         assert len(simulator.positions) == 0
-        assert any("suspended" in w for w in simulator.warnings)
+        # MAJOR-01: 常规停牌 skip 仅进结构化 skipped_list，不再写 warnings。
+        assert any(r["reason"] == "suspended" for r in simulator.skipped_list)
+
+
+class TestRangePreloadWarningMeta:
+    """MAJOR-01 决策③：range_preload_warnings 字符串 → (warning_type, category) 映射。
+
+    覆盖 _range_preload_warning_meta 全部分支：区间缺口→data_quality（unreliable）；
+    慢路径（preload_range_too_wide / range_preload_failed / range_preload_error）与
+    未知前缀兜底→performance_path（仅提示，不升级级别）。
+    """
+
+    def test_range_quality_gaps_maps_to_data_quality(self):
+        from strategies.backtest.engine import _range_preload_warning_meta
+
+        wtype, category = _range_preload_warning_meta("[range_quality_gaps] 区间不可用")
+        assert wtype == "range_quality_gaps"
+        assert category == "data_quality"
+
+    def test_slow_path_variants_map_to_performance_path(self):
+        from strategies.backtest.engine import _range_preload_warning_meta
+
+        for raw, expect_type in (
+            ("preload_range_too_wide: 宽区间", "preload_range_too_wide"),
+            ("range_preload_failed: 拉取失败", "range_preload_failed"),
+            ("range_preload_error: 异常", "range_preload_error"),
+        ):
+            wtype, category = _range_preload_warning_meta(raw)
+            assert wtype == expect_type
+            assert category == "performance_path"
+
+    def test_unknown_prefix_falls_back_to_performance_path(self):
+        from strategies.backtest.engine import _range_preload_warning_meta
+
+        wtype, category = _range_preload_warning_meta("unforeseen_string")
+        assert wtype == "range_preload_failed"
+        assert category == "performance_path"
 
 
 class TestVectorizationEquivalence:
@@ -1726,7 +1764,7 @@ class TestVectorizationEquivalence:
             }
         )
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         # Reference: build expected trades by checking buy actions occurred on expected dates
         buy_trades = trades.filter(pl.col("action") == "buy")
@@ -1765,7 +1803,7 @@ class TestVectorizationEquivalence:
         )
 
         # Should not raise ColumnNotFoundError despite missing quotes on 2024-01-03
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         # Buy on 2024-01-03 skipped due to no_quote (schema preserved, filter works)
         no_quote_skips = skipped.filter(pl.col("reason") == "no_quote")
@@ -1798,7 +1836,7 @@ class TestVectorizationEquivalence:
         stock_meta = {"000001.SZ": {"delist_date": date(2024, 1, 3)}}
 
         delist_stats: dict[str, float | int] = {}
-        trades, positions, skipped, warnings = engine._simulate_trades(
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(
             signals,
             quotes_df,
             trade_dates,
@@ -1835,7 +1873,7 @@ class TestVectorizationEquivalence:
             }
         )
 
-        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+        trades, positions, skipped, warnings, _ = engine._simulate_trades(signals, quotes_df, trade_dates)
 
         # Buy only on 2024-01-03 (the only execution_date in signals)
         buy_trades = trades.filter(pl.col("action") == "buy")

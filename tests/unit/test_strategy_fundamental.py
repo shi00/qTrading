@@ -4,12 +4,16 @@ Tests for fundamental strategies (Value, Growth, Dividend, CashFlow, LargePE).
 验证基本面策略筛选逻辑的正确性。
 """
 
+import asyncio
+import datetime
 import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import polars as pl
 
 from core.errors import StrategyParamError
+from data.persistence.quality_gate import QualityTier
 from strategies.fundamental import (
     CashFlowStrategy,
     DividendStrategy,
@@ -17,6 +21,8 @@ from strategies.fundamental import (
     LargePEStrategy,
     ValueStrategy,
 )
+from strategies.utils import StrategyContext
+from utils.config_handler import ConfigHandler
 import pytest
 
 
@@ -475,22 +481,83 @@ class TestDividendStrategy(unittest.TestCase):
         ts_codes = result["ts_code"].to_list()
         self.assertEqual(sorted(ts_codes), ["000001.SZ", "000002.SZ"])
 
-    def test_dividend_sort_for_ai_ascending(self):
-        """SC-02: AI 截断前按 dv_ttm 升序重排，极端高息候选最后进入 AI 分析队列。"""
+    def test_dividend_sort_for_ai_is_noop_preserving_order(self):
+        """删除升序覆写后，_sort_for_ai 回退基类保序 no-op（保持 _filter_logic 的 dv_ttm 降序）。
+
+        AI 候选截断不再反向剔除高股息标的：队列首位仍是股息率最高者。
+        """
         df = self.sample_df.copy()
         out = self.strategy._sort_for_ai(df)
-        self.assertEqual(out["dv_ttm"].to_list(), [0.0, 1.5, 3.5, 5.5])
+        self.assertEqual(out["dv_ttm"].to_list(), [5.5, 3.5, 1.5, 0.0])
+        self.assertEqual(out["ts_code"].to_list(), df["ts_code"].to_list())
+        self.assertEqual(list(out.index), list(range(len(out))))
 
     def test_dividend_sort_for_ai_empty(self):
-        """SC-02: 空候选集直接返回，不排序不报错。"""
+        """基类 _sort_for_ai：空候选集直接返回，不报错。"""
         out = self.strategy._sort_for_ai(pd.DataFrame())
         self.assertTrue(out.empty)
 
     def test_dividend_sort_for_ai_missing_column(self):
-        """SC-02: 候选集缺 dv_ttm 列时原样返回（防御，正常路径必含该列）。"""
-        df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["缺列"]})
+        """基类 _sort_for_ai：候选集缺 dv_ttm 列时也不重排，行序保持不变（防御）。"""
+        df = pd.DataFrame({"ts_code": ["000002.SZ", "000001.SZ"], "name": ["乙", "甲"]})
         out = self.strategy._sort_for_ai(df)
-        self.assertEqual(out["ts_code"].to_list(), ["000001.SZ"])
+        self.assertEqual(out["ts_code"].to_list(), ["000002.SZ", "000001.SZ"])
+
+    def test_dividend_ai_cap_keeps_highest_yield_candidates(self):
+        """AI 候选池按 dv_ttm 降序送入，截断后名额落在股息率最高者（不再反向剔除）。
+
+        截断 ``head(cap)`` 与 ``strategy_ai_candidate_truncated`` 警告由
+        ``AIStrategyMixin.run_ai_analysis`` 内部产生，其语义已由
+        ``tests/unit/test_ai_mixin.py`` 的 ``test_with_candidates_cap`` 覆盖；本测试
+        负责策略侧的另一半契约：经真实 ``filter()`` 路径确认送入 AI 的候选池**按
+        dv_ttm 降序、且池首即全局最大股息率**（旧升序覆写会使该断言失败）。不断言
+        ``filter()`` 返回值行序——AI-on 终态按 ``[_ai_status_order, ai_score]`` 重排，
+        行序不承载本契约。
+        """
+        dv_values = [4.1 + 0.05 * i for i in range(100)]  # 4.1 → 9.05，共 100 行
+        df = pd.DataFrame(
+            {
+                "ts_code": [f"{i:06d}.SZ" for i in range(100)],
+                "name": [f"股{i}" for i in range(100)],
+                "dv_ttm": dv_values,
+                "roe": [10.0] * 100,
+                "or_yoy": [5.0] * 100,
+            }
+        )
+        dp = MagicMock()
+        dp._quality_tier = QualityTier.GOLD
+        context: StrategyContext = {
+            "screening_data": df,
+            "fundamental_screening_data": df,
+            "data_processor": dp,
+            "params": {},
+        }
+        captured: dict = {}
+
+        async def _fake_run_ai_analysis(candidates_df, _context, max_stocks=None):
+            captured["df"] = candidates_df
+            return candidates_df
+
+        with (
+            patch.object(
+                self.strategy,
+                "check_dependencies",
+                return_value={"status": "ready", "missing_keys": [], "missing_tables": []},
+            ),
+            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_candidates", return_value=10),
+            patch.object(self.strategy, "run_ai_analysis", new=AsyncMock(side_effect=_fake_run_ai_analysis)),
+        ):
+            asyncio.run(self.strategy.filter(context))
+            cap = ConfigHandler.get_ai_max_candidates()
+
+        self.assertIn("df", captured, "AI 路径未到达 run_ai_analysis")
+        sent = captured["df"]
+        # 池规模大于 cap 时生产侧 head(cap) 截断才实际生效，后续断言方具业务含义。
+        self.assertGreater(len(sent), cap)
+        # 送 AI 的候选池保持 _filter_logic 的 dv_ttm 降序（旧升序覆写会使本断言失败）。
+        self.assertEqual(sent["dv_ttm"].to_list(), sorted(sent["dv_ttm"].to_list(), reverse=True))
+        # 池首即全局最大股息率 ⇒ 生产 head(cap) 保留的 cap 行必然含最高股息标的。
+        self.assertEqual(sent["dv_ttm"].iloc[0], max(dv_values))
 
 
 class TestCashFlowStrategy(unittest.TestCase):
@@ -671,6 +738,101 @@ class TestLargePEStrategy(unittest.TestCase):
         """LargePEStrategy 显式声明 required_context_keys 与 required_tables"""
         self.assertEqual(self.strategy.required_context_keys, ("screening_data",))
         self.assertEqual(self.strategy.required_tables, ("daily_quotes",))
+
+
+class TestAnnualizedRoePeriodUniformity(unittest.TestCase):
+    """CRIT-01: 累计口径 ROE 年化——同一阈值在各披露期语义一致、跨期可比。
+
+    Tushare fina_indicator.roe 为报告期累计口径（一季报仅约全年 1/4 量级），
+    直接用固定阈值比较会随披露期切换筛出不同性质的公司。修复后按 fin_end_date
+    季度序号年化（Q1×4 / H1×2 / Q3×4/3 / 年报×1）后再比较。
+    """
+
+    @staticmethod
+    def _row(ts_code: str, roe: float, end_date: datetime.date) -> dict:
+        return {
+            "ts_code": ts_code,
+            "or_yoy": 30.0,
+            "netprofit_yoy": 40.0,
+            "roe": roe,
+            "n_income": 100.0,
+            "grossprofit_margin": 40.0,
+            "gpm_prev": 38.0,
+            "fin_end_date": end_date,
+        }
+
+    def test_growth_annualized_roe_cross_period_comparable(self):
+        """年报 16% 与一季报 4%（年化 16%）同门槛同判；一季报 3%（年化 12%）不通过。"""
+        df = pd.DataFrame(
+            [
+                self._row("A", 16.0, datetime.date(2025, 12, 31)),
+                self._row("B", 4.0, datetime.date(2026, 3, 31)),
+                self._row("C", 3.0, datetime.date(2026, 3, 31)),
+            ]
+        )
+        s = GrowthStrategy()
+        ctx = {"params": {"revenue_growth_min": 0, "profit_growth_min": 0, "roe_min": 15}}
+        base_lf = s._preprocess_lf(pl.from_pandas(df).lazy(), ctx)
+        result = s._filter_logic(base_lf, ctx).collect()
+
+        self.assertEqual(set(result["ts_code"].to_list()), {"A", "B"})
+        annualized = dict(zip(result["ts_code"].to_list(), result["roe_annualized"].to_list(), strict=True))
+        self.assertAlmostEqual(annualized["A"], 16.0)
+        self.assertAlmostEqual(annualized["B"], 16.0)  # 4.0 × 4（Q1 年化）
+        self.assertNotIn("C", annualized)
+
+    def test_fallback_without_period_column_keeps_legacy_behavior(self):
+        """降级：无 fin_end_date 列时注入 roe_annualized = roe 等价列，行为不变。"""
+        df = pd.DataFrame([self._row("X", 12.0, datetime.date(2025, 12, 31))]).drop(columns=["fin_end_date"])
+        s = GrowthStrategy()
+        ctx = {"params": {}}
+        out = s._preprocess_lf(pl.from_pandas(df).lazy(), ctx).collect()
+        self.assertEqual(out["roe_annualized"].to_list(), [12.0])
+        self.assertNotIn("strategy_mixed_report_periods", [getattr(m, "key", None) for m in ctx.get("warnings", [])])
+
+    def test_mixed_report_periods_warning_on_mixed_results(self):
+        """结果集跨 2 个报告期时写入 strategy_mixed_report_periods 警告。"""
+        df = pd.DataFrame(
+            [
+                self._row("A", 16.0, datetime.date(2025, 12, 31)),
+                self._row("B", 4.0, datetime.date(2026, 3, 31)),
+            ]
+        )
+        s = GrowthStrategy()
+        ctx = {"params": {"revenue_growth_min": 0, "profit_growth_min": 0, "roe_min": 15}}
+        base_lf = s._preprocess_lf(pl.from_pandas(df).lazy(), ctx)
+        s._filter_logic(base_lf, ctx).collect()
+        keys = [getattr(m, "key", None) for m in ctx.get("warnings", [])]
+        self.assertIn("strategy_mixed_report_periods", keys)
+
+    def test_single_report_period_no_warning(self):
+        """结果集仅单一报告期时不提示（避免常态刷屏，保留信号价值）。"""
+        df = pd.DataFrame(
+            [
+                self._row("A", 16.0, datetime.date(2025, 12, 31)),
+                self._row("D", 18.0, datetime.date(2025, 12, 31)),
+            ]
+        )
+        s = GrowthStrategy()
+        ctx = {"params": {"revenue_growth_min": 0, "profit_growth_min": 0, "roe_min": 15}}
+        base_lf = s._preprocess_lf(pl.from_pandas(df).lazy(), ctx)
+        s._filter_logic(base_lf, ctx).collect()
+        keys = [getattr(m, "key", None) for m in ctx.get("warnings", [])]
+        self.assertNotIn("strategy_mixed_report_periods", keys)
+
+    def test_cashflow_annualized_roe(self):
+        """CashFlowStrategy 同样按年化口径比较（一季报 4% 年化 16% 过 10% 门槛）。"""
+        df = pd.DataFrame(
+            [
+                {**self._row("E", 4.0, datetime.date(2026, 3, 31)), "debt_to_assets": 30.0},
+                {**self._row("F", 2.0, datetime.date(2026, 3, 31)), "debt_to_assets": 30.0},
+            ]
+        )
+        s = CashFlowStrategy()
+        ctx = {"params": {"debt_max": 50, "roe_min": 10}}
+        base_lf = s._preprocess_lf(pl.from_pandas(df).lazy(), ctx)
+        result = s._filter_logic(base_lf, ctx).collect()
+        self.assertEqual(result["ts_code"].to_list(), ["E"])  # F 年化 8% < 10%
 
 
 if __name__ == "__main__":

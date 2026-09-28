@@ -69,6 +69,17 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 
 > **操作指引**：新增/修改数据同步源的完整步骤见 [docs/guides/how-to.md](../guides/how-to.md)「5. 新增一个外部数据源」与「5.1 Tushare 集成工作流（简述）」；新增同步表前须更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS`，并遵循本节 CLAUDE.md §3.1 R2（取消传播）与 §3.2（质量门控）约束。
 
+## 同步排障（质量分 / 数据不完整 / 续传中断）
+
+> 本表只列**同步专属**现象，避免与通用排查正本双写：开发期典型问题的「现象 → 原因 → 排查点」见 [CONTRIBUTING.md 排查典型问题](../../CONTRIBUTING.md#排查典型问题)；运行期操作步骤（日志位置 / 诊断包 / 性能劣化三步）见 [how-to.md 运行期排障](../guides/how-to.md#12-运行期排障)。
+
+| 现象 | 可能原因 | 排查点 |
+|------|---------|--------|
+| 某日质量分低于阈值 | 源端当日数据缺失，或相对基准法判定数据不完整 | 用 `QuoteDAO.get_sync_quality_score()` 复核该日评分；`*_quality_score` 表标记为不完整的日期会在下次同步自动补齐（见「质量门控（C15）」） |
+| 同步后某表仍缺数据 / 数据不完整 | 表未在 `TABLE_DEFINITIONS` 注册，或分块写入未覆盖全量 | 核对 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 注册项；确认 syncer 分块循环与 `_save_upsert()` 的覆盖范围 |
+| 续传 / 同步中途中断且不再恢复 | `cancel_event` 被置位未清理，或取消异常被吞没 | 确认 syncer 分块循环检查 `cancel_event.is_set()`，主动退出必须 `raise asyncio.CancelledError`（R2，见「取消传播（C18）」） |
+| 续传后 DAO 操作抛 `EngineDisposedError` | PG 进程整体不可用（非单连接失效），连接池无法自愈 | 显式调用 `CacheManager.init_db()` 重建引擎（不实现自动重连），再按「操作指引」重跑同步（见「数据库连接生命周期（review03-C13 契约）」） |
+
 ---
 
 ## 完成判定（canonical 入口）

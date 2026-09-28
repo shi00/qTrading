@@ -39,6 +39,12 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 - 安全流水线：CodeQL 静态安全分析 (`codeql.yml`)、密钥泄露扫描 (`gitleaks.yml`)、OpenSSF Scorecard 安全评分 (`scorecard.yml`)
 - 依赖与发布：依赖更新机器人（自托管 Renovate workflow (`renovate.yml`)，每周一 02:00 UTC 定时 + 手动触发，配置见 [`.github/renovate.json`](../../.github/renovate.json)；Python/JS 依赖由其接管，GitHub Actions 生态由 [`.github/dependabot.yml`](../../.github/dependabot.yml) 承接，分工在两侧配置注释中声明。Python 漏洞另由 CI `run_pip_audit.py` 扫描）、自动化 Release PR (`release-please.yml`)
 
+### 依赖升级
+
+依赖升级 / 新增 / 移除的操作步骤以 [how-to.md「6. 新增与升级依赖」](./how-to.md#6-新增与升级依赖) 为唯一正本（本节只做路由，不复述步骤）；依赖管理总览与 PyInstaller 打包约束见 [dependency-management.md](./dependency-management.md)。
+
+常规更新由 Renovate / Dependabot 自动发起、来源漏洞由 CI Security Audit（`run_pip_audit.py`）扫描（分工见上「其他 workflow」与「CI Job 矩阵」）。
+
 ### Pre-commit Hooks
 
 本项目使用 pre-commit hooks，定义在 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml)，本地 `repo: local` 提供以下 16 个 hook（提交前必须全部通过）：
@@ -56,7 +62,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 | 脚本 | 用途 | 触发时机 | 是否阻断 |
 |------|------|---------|---------|
 | `scripts/check_docs_consistency.py` | 文档一致性门禁（锚点/相对链接/版本/规则集/ADR/脚本索引等一致性项，检查项清单见脚本 docstring） | pre-commit `docs-consistency` + CI | 阻断 |
-| `scripts/check_redlines.py` | 红线自动化（R4/R12/R13/R14/R15/R16+R20/R22+UI 裸色+token 脱敏） | pre-commit `redline-check` | 阻断 |
+| `scripts/check_redlines.py` | 红线自动化（R4/R12/R13/R14/R15/R16+R20/R21/R22+UI 裸色+token 脱敏；R20/R21 报告模式 warning 不阻断） | pre-commit `redline-check` | 阻断 |
 | `scripts/check_type_ignore_reason.py` | R3 裸 `type: ignore` 原因检查 | pre-commit `type-ignore-reason` | 阻断 |
 | `scripts/check_no_isolated_asyncio.py` | 禁止 `unittest.IsolatedAsyncioTestCase` | pre-commit `no-isolated-asyncio-testcase` | 阻断 |
 | `scripts/check_no_temp_files.py` | 拦截编译/二进制/归档临时文件入库 | pre-commit `no-temp-files` | 阻断 |
@@ -93,6 +99,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 - CI Job / pre-commit hook 增删已回填本文件与 `.pre-commit-config.yaml` / workflow 清单，名称级一致（避免枚举漂移）
 - 版本发布流程按「版本发布流程与 Release 管理」执行，release 产物验证通过
+- 依赖升级按「依赖升级」小节路由至 [how-to.md「6. 新增与升级依赖」](./how-to.md#6-新增与升级依赖)，`pyproject.toml` 与 `requirements*.txt` 保持一致
 
 _最小验证命令：_ CI/依赖变更 → 编辑 `pyproject.toml`（pre-commit 自动同步 requirements）或 workflow → 由 CI 验证；
         文档改动 → `python scripts/check_docs_consistency.py`。

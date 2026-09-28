@@ -33,7 +33,7 @@
 | review06 | 2026-08-24 | 安全 / 外部集成 / 供应链（R9/R10） | `reviews/06-安全与供应链.md`（本地） | 进行中 |
 | review07 | 2026-08-24 | 测试体系 / CI 门禁 / 文档治理 | `reviews/07-测试体系与工程治理.md`（本地） | 已归档 |
 | review08 | 2026-09-23 | AKShare 开源组件复用专项（重复造轮子 / akshare 行为 / 未补位 / 项目自身重复，13 项发现） | `reviews/akshare检视.md`（本地） | 进行中 |
-| business-review-2026-09-11 | 2026-09-11 | 业务检视（最高发三类失效模式：量纲 / 缺失伪装 / 水位线；结论：新增 R20/R21/R22 三条红线；11 项缺陷回归集见 `scripts/prototype_business_redlines.py` docstring 与 `_REGRESSION_TARGETS`） | 报告正文未落盘（gitignored 目录内亦无），正本仅存于 [prototype_business_redlines.py](../../scripts/prototype_business_redlines.py) docstring | 已消化 |
+| business-review-2026-09-11 | 2026-09-11 | 业务检视（最高发三类失效模式：量纲 / 缺失伪装 / 水位线；结论：新增 R20/R21/R22 三条红线；11 项缺陷回归集见 `scripts/prototype_business_redlines.py` docstring 与 `_REGRESSION_TARGETS`） | `reviews/09-11/`（本地，`00-INDEX.md` + 01~08 分册；ID 与 [prototype_business_redlines.py](../../scripts/prototype_business_redlines.py) docstring 对应） | 已消化 |
 | M3~M12 | 2026-08 | UI 基础设施 / 表现层模块专项检视 | 报告已丢失，ID 出现在 [known-technical-debt.md](../debt/known-technical-debt.md) | 已归档 |
 | UX-07 | 2026-08-06 | 全系统 UI/UX 专项审视 | `reviews/UX-reviews.md`（本地） | 已归档 |
 | 文档体系 | 2026-08-13 | CLAUDE.md 文档体系对抗性深度检视（GOV 系列） | `reviews/文档体系检视.md`（本地） | 已归档 |

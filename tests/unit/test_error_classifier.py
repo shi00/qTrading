@@ -194,6 +194,69 @@ class TestClassifyErrorLLMContext:
             pass
 
 
+class TestClassifyErrorStatusCodeBoundary:
+    """状态码须按词边界匹配，不得命中 request_id UUID 等长数字串中的数字。
+
+    回归场景（CI E2E test_ai_brain_test_connection 失败）：DeepSeek 认证失败异常
+    经 litellm 包装为 BadRequestError 后，message 含 ``request_id: 85d7a8c7-d075-404e-...``。
+    裸 ``"404" in error_str`` 命中该 UUID 子串，使 401 认证失败被误分类为 not_found，
+    用户看到"API 地址不存在，请检查 Base URL"而非连接失败提示。
+    """
+
+    # 真实 CI app 日志中的异常形态（仅 request_id 随机）
+    _REAL_AUTH_FAILED_MSG = (
+        "litellm.BadRequestError: DeepseekException - "
+        '{"error":{"message":"Authentication Fails, Your api key: ****-key is invalid '
+        '(request_id: 85d7a8c7-d075-404e-9f5c-b4cbfd7ecb73)"}} LiteLLM Retried: 2 times'
+    )
+
+    def test_real_ci_auth_failure_falls_back_to_llm_err_unknown(self):
+        """真实异常应落 unknown 兜底，不得伪装成 not_found 等其他具体错误。"""
+        result = classify_error(Exception(self._REAL_AUTH_FAILED_MSG), context="llm")
+        assert result["code"] == "unknown"
+        assert result["message_key"] == "llm_err_unknown"
+
+    @pytest.mark.parametrize(
+        ("request_id", "misclassified_code"),
+        [
+            ("85d7a8c7-d075-404e-9f5c-b4cbfd7ecb73", "not_found"),  # 含 "404" 子串
+            ("1a2b-502c-3d4e-5f60-7a8b9c0d1e2f", "server_error"),  # 含 "502" 子串
+            ("1a2b-429f-3d4e-5f60-7a8b9c0d1e2f", "rate_limit"),  # 含 "429" 子串
+            ("1a2b-401c-3d4e-5f60-7a8b9c0d1e2f", "auth_failed"),  # 含 "401" 子串
+        ],
+    )
+    def test_request_id_uuid_digits_not_read_as_status_code(self, request_id, misclassified_code):
+        result = classify_error(Exception(f"api error (request_id: {request_id})"), context="llm")
+        assert result["code"] != misclassified_code, f"UUID 中的数字不得被识别为 {misclassified_code}: {request_id}"
+
+    def test_general_context_ignores_digits_inside_longer_number(self):
+        # "15003" 含 "500" 子串，裸匹配会误判为 server
+        result = classify_error(Exception("upstream failed, port 15003 unreachable"), context="general")
+        assert result["code"] == "unknown"
+        assert result["message_key"] == "common_err_unknown"
+
+    def test_sync_context_ignores_digits_inside_request_id(self):
+        # "4020" 含 "402" 子串，裸匹配会误判为 insufficient_quota
+        result = classify_error(Exception("api rejected, request_id 1111-4020-abcd"), context="sync")
+        assert result["code"] == "unknown"
+        assert result["message_key"] == "common_op_fail"
+
+    @pytest.mark.parametrize(
+        ("error_str", "code", "expected"),
+        [
+            ("error code: 404", "404", True),  # 前后为空格/边界 → 命中
+            ("status_code=403", "403", True),  # 前后为 "="/结尾 → 命中
+            ("接口返回404错误", "404", True),  # 紧邻中文仍须命中（不得用 Unicode 词边界收窄）
+            ("request_id: d075-404e-9f5c", "404", False),  # 后接字母 → 不命中
+            ("port 15003 closed", "500", False),  # 前接数字 → 不命中
+        ],
+    )
+    def test_has_status_code_boundary_semantics(self, error_str, code, expected):
+        from utils.error_classifier import _has_status_code
+
+        assert _has_status_code(error_str, code) is expected
+
+
 class TestClassifyErrorDBContext:
     def test_value_error_format(self):
         result = classify_error(ValueError("bad format"), context="db")

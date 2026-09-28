@@ -112,10 +112,15 @@ _HIDDEN_COLS = frozenset(
         "review_status",
         "created_at",
         "is_st",  # SC-01: 内部过滤列（排除后恒为 False），不进结果表
+        "is_delisting",  # G2: 内部过滤列（排除后恒为 False），不进结果表
         "t1_price",
         "t5_price",
         "params_snapshot",
         "_filter_attribution",  # UX-04: 结构化筛选归因列 (仅详情弹窗展示, 不上表格)
+        # CRITICAL-02 (R21/BT-03): screening_history 落库的执行期可信度元数据
+        # （exec_warnings 经 warnings 横幅呈现；filter_attribution 供历史回看消费），不上表格。
+        "exec_warnings",
+        "filter_attribution",
     }
 )
 
@@ -363,7 +368,7 @@ def _render_strategy_desc(msg: Message | None) -> str:
 #   - build_stream_card    流式/AI 占位卡 (state.stream_cards 逐卡渲染)
 #   - build_params_panel   策略参数面板 (含 build_param_control 单控件)
 #   - build_history_tree   历史树侧栏 (state.history_tree 派生)
-# 仅作机械搬移 + props 化, 不引入新抽象层 (宪法 §1.3 禁推测性设计).
+# 仅作机械搬移 + props 化, 不引入新抽象层 (宪法 §1.2 禁推测性设计).
 # =============================================================================
 
 

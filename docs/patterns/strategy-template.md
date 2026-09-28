@@ -56,6 +56,7 @@ class MyStrategy(BaseStrategy):
 - 动态参数 / 描述：实现 `get_parameters()` / `get_dynamic_description()` / `check_dependencies()`（见 `strategies/base_strategy.py`）
 - 新增策略未用 `@register_strategy("key")` 装饰器 → 触发 R14（pre-commit `redline-check` 守护）
 - 涉及金额/数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）的数值比较：必须经 `threshold_in_data_unit()` 统一入口换算后再比较（`strategies/utils.py`）；单位声明见 `data/constants.py` 的 `HSGT_COLUMN_UNITS` / `TOP_LIST_COLUMN_UNITS`。违反触发 R20（见 [CLAUDE.md §3.1](../../CLAUDE.md#31--绝对禁止)）
+- 取数与票池构造的**时点正确性**：任何进入策略/回测的数据取数时点不得晚于被决策的交易日；使用「当前快照」类维度（行业分类 / 指数成分 / 股票池 / 财报最新值）参与历史区间计算即前视偏差，必须改用带生效日期的维度表，或显式声明为「当期近似」并在结果中标注。违反触发 R24（见 [CLAUDE.md §3.1](../../CLAUDE.md#31--绝对禁止)）；方法见 [backtest-correctness.md](./backtest-correctness.md)
 
 ### 完成判定
 
