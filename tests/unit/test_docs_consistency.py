@@ -2917,6 +2917,42 @@ class TestExceptionsYamlConsistency:
         errors = check_exceptions_reverse_coverage()
         assert errors == [], f"无豁免意图的裸级别行不应报错, got: {errors}"
 
+    def test_reverse_coverage_matches_p2_stable_id(self, tmp_path, monkeypatch):
+        """P2 前缀稳定 ID 的债目也应纳入反向覆盖检查（级别前缀泛化 P[0-3]-）."""
+        from check_docs_consistency import check_exceptions_reverse_coverage
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", self._write_rev_redlines_with_r5(tmp_path))
+        monkeypatch.setattr(
+            "check_docs_consistency.EXCEPTIONS_YAML_PATH", self._write_rev_exceptions(tmp_path, "exceptions: []\n")
+        )
+        monkeypatch.setattr(
+            "check_docs_consistency.KNOWN_TECHNICAL_DEBT_PATH",
+            self._write_rev_debt_with_exemption(tmp_path, row_id="P2-M9-NewsSub"),
+        )
+        errors = check_exceptions_reverse_coverage()
+        assert any("P2-M9-NewsSub" in e and "未登记任何 rule_id=R5" in e for e in errors), (
+            f"应报 P2 稳定 ID 条目未登记例外, got: {errors}"
+        )
+
+    def test_reverse_coverage_flags_p2_bare_level_row_with_exemption(self, tmp_path, monkeypatch):
+        """DS-03：裸级别 `| **P2** |` 且含豁免意图时应报错（级别前缀泛化 P[0-3]）."""
+        from check_docs_consistency import check_exceptions_reverse_coverage
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", self._write_rev_redlines_with_r5(tmp_path))
+        monkeypatch.setattr(
+            "check_docs_consistency.EXCEPTIONS_YAML_PATH", self._write_rev_exceptions(tmp_path, "exceptions: []\n")
+        )
+        debt = tmp_path / "known-technical-debt.md"
+        debt.write_text(
+            "| 级别 | 一句话 | upgrade 触发条件 |\n"
+            "|------|--------|------------------|\n"
+            "| **P2** | #M9 R5: 吞没 EngineDisposedError，保持现状 | 重构时 |\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.KNOWN_TECHNICAL_DEBT_PATH", debt)
+        errors = check_exceptions_reverse_coverage()
+        assert any("裸级别" in e and "无稳定 ID" in e for e in errors), f"应报 P2 裸级别无 ID, got: {errors}"
+
     def test_reverse_coverage_pass_on_current_repo(self):
         """真实仓库：技术债表豁免反向覆盖检查通过（所有豁免债目录均带稳定 ID 且已登记）."""
         from check_docs_consistency import check_exceptions_reverse_coverage
