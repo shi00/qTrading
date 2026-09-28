@@ -129,6 +129,12 @@ topics:
     canonical: docs/guides/how-to.md
     section: 9. 内置 PostgreSQL 离线维护
 
+  - id: maintenance
+    title: 运行期排障 / 维护类问题
+    canonical: docs/guides/how-to.md
+    section: 12. 运行期排障
+    note: 运行期故障（崩溃产物 / 日志定位 / 性能劣化三步）排查 playbook；通用典型问题排查表正本见 CONTRIBUTING.md「排查典型问题」，本主题以引用方式指向正本，不复制
+
   - id: architecture-design
     title: 架构设计 / 公共契约 / 跨层范式
     canonical: docs/adr/0001-record-architecture-decisions.md
