@@ -1,9 +1,12 @@
 """E2E 测试锚点包装器（单一入口）。
 
-E2E_TESTING=true 时用 `ft.Semantics(container=True)` 包裹控件；
+E2E_TESTING=true 时用 `ft.Semantics(container=True, label=EID, identifier=EID)` 包裹控件；
 生产 build 直接返回原控件，零性能/语义副作用。
 
-CanvasKit 对 Semantics label 的双轨映射（PoC EVIDENCE.md）：
+`identifier` 在 CanvasKit web 上落为 DOM 属性 `flt-semantics-identifier`（PoC EVIDENCE.md
+P0-1 实测），供 `AnchorPage` 走精确选择器定位（P2-2），其节点存在性与 `AnchorKind` 无关
+（P0-2 矩阵：16 枚基线 identifier 中 14 枚 count=1，其余 2 枚为 offstage 预期排除）。
+`label=EID` 旧双轨通道暂时保留（PR-2 双轨并存；旧启发式在 P2-5 删除）：
   - INTERACTIVE/INPUT 类控件 → 生成 `flt-semantics[aria-label="EID"]` 独立节点
   - LABEL/COMPLEX 类控件 → EID 落入该子树 `textContent`
 定位策略由 `AnchorPage` 依 `EIDS` 携带的 `AnchorKind` 分派，本模块只负责生成。
@@ -36,7 +39,9 @@ def anchored(eid: Eid, control: ft.Control) -> ft.Control:
     """给控件添加稳定测试锚点，无论 control 类型均返回可安全用作 Column/Row 子节点的 Control。
 
     生产 build (`_e2e_enabled=False`): 直接返回原控件，零副作用。
-    E2E build (`_e2e_enabled=True`): 用 `Semantics(container=True, label=eid_str)` 包裹。
+    E2E build (`_e2e_enabled=True`): 用 `Semantics(container=True, label=eid_str,
+    identifier=eid_str)` 包裹。`identifier` 提供精确选择器通道（P2-2），`label` 保留旧
+    双轨通道（P2-5 删旧启发式前双轨并存，回退只需切换定位层选择器）。
 
     INTERACTIVE kind 额外设 `button=True`：CanvasKit 双轨映射仅在 `content` 为
     标准交互控件（Button 等）时生成 `flt-semantics[aria-label=EID]` 独立节点。
@@ -52,6 +57,7 @@ def anchored(eid: Eid, control: ft.Control) -> ft.Control:
     return ft.Semantics(
         container=True,
         label=eid_str,
+        identifier=eid_str,
         content=control,
         button=(kind == AnchorKind.INTERACTIVE),
     )

@@ -1,16 +1,23 @@
-"""AnchorPage: 基于 EIDS + AnchorKind 的精确 Flet 控件定位。
+"""AnchorPage: 基于 EIDS 的精确 Flet 控件定位。
 
-CanvasKit 双轨语义映射（PoC 实证, reviews/poc/EVIDENCE.md）：
-  INTERACTIVE/INPUT → [aria-label=EID] + 内层 [flt-tappable] / input
-  LABEL/COMPLEX     → textContent 匹配
+两条互不混合的定位路径（P2-2，经构造参数 ``locator`` 选择）：
+- ``identifier``（默认）：精确选择器
+  ``flt-semantics[flt-semantics-identifier="<EID>"]``，无 kind 分派、无启发式
+  （PoC EVIDENCE.md P0-2 矩阵：identifier 节点存在性与 AnchorKind 无关）。
+- ``legacy``（保留至 P2-5，仅供回退/对照）：CanvasKit 双轨语义映射——
+  INTERACTIVE/INPUT → ``[aria-label$=EID]`` + 内层 ``[flt-tappable]`` / ``input``；
+  LABEL/COMPLEX → ``textContent`` 匹配。
+
+两路径不混合回退：每个操作只走所选路径，不存在「identifier 未命中即回退 legacy」
+的隐式兜底（否则会把定位失败伪装成成功）。
 
 click 一律用 `page.mouse.click(bbox_center)`，因为 CanvasKit 不响应合成 DOM 事件。
 """
 
 import asyncio
 import time
-from typing import Any
-from collections.abc import Awaitable, Callable
+from typing import Any, Literal
+from collections.abc import Awaitable, Callable, Mapping
 
 from playwright.async_api import Locator, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -18,6 +25,22 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.timeouts import TIMEOUTS
 from ui.testing.e2e_ids import AnchorKind, Eid
+
+AnchorLocatorMode = Literal["identifier", "legacy"]
+
+
+def _as_box(box: Mapping[str, Any]) -> dict[str, float]:
+    """把 Playwright bounding_box 归一为 ``{x, y, width, height}`` float dict。
+
+    显式构造（而非 ``dict(box)``）以保持 ``dict[str, float]`` 返回类型，
+    避免 pyright 对 ``bounding_box()`` 值类型推断为 ``object`` 的报错。
+    """
+    return {
+        "x": float(box["x"]),
+        "y": float(box["y"]),
+        "width": float(box["width"]),
+        "height": float(box["height"]),
+    }
 
 
 async def retry_until_triggered(
@@ -65,9 +88,11 @@ class AnchorPage:
         page: Page,
         fp: FletPage,
         timeout_multiplier: float | None = None,
+        locator: AnchorLocatorMode = "identifier",
     ):
         self.page = page
         self._fp = fp
+        self._use_identifier = locator == "identifier"
         # None 时复用 FletPage 的 multiplier (CI slow marker 已由 conftest 设置)
         self._tm_mult = (
             timeout_multiplier if timeout_multiplier is not None else fp._timeout_multiplier  # noqa: SLF001  # 访问 FletPage 私有属性以对齐 timeout
@@ -77,7 +102,75 @@ class AnchorPage:
         return int(ms * self._tm_mult)
 
     # ----------------------------------------------------------------
-    # 定位分派: 按 AnchorKind 走两种 locator 路径
+    # identifier 精确路径 (P2-2): 单一选择器, 无 kind 分派 / 无启发式
+    # ----------------------------------------------------------------
+
+    def _locator_by_identifier(self, eid_str: str) -> Locator:
+        """精确选择器: 命中带 `flt-semantics-identifier` 属性的语义节点。
+
+        EID 命名空间仅含 ASCII 字母数字下划线 + `.`，不含引号/反斜杠，故可直接内插
+        到属性选择器中（无需转义）。P0-2 矩阵实证该节点存在性与 AnchorKind 无关，
+        因此四类 kind 共用同一选择器——旧双轨启发式（后缀/前缀/role 过滤）与
+        strict mode violation 风险一并消失。
+        """
+        return self.page.locator(f'flt-semantics[flt-semantics-identifier="{eid_str}"]')
+
+    async def _identifier_node_box(self, eid_str: str, timeout_ms: int) -> dict[str, float]:
+        """identifier 节点自身 bbox。
+
+        P0-2 矩阵实证: Button 系列 / Text / Dropdown 顶层 / Dropdown 选项面板 /
+        ListView 行 / Dialog 内节点的 identifier 节点 bbox 与真实可点击节点一致
+        （Text 类节点自身即交互面, `pointer-events: auto`）。
+        """
+        locator = self._locator_by_identifier(eid_str)
+        await locator.first.wait_for(state="attached", timeout=self._tm(timeout_ms))
+        box = await locator.first.bounding_box()
+        if not box or box["width"] == 0 or box["height"] == 0:
+            raise RuntimeError(
+                f"AnchorPage: identifier node {eid_str!r} has no valid bbox (box={box}). "
+                f"Check that anchored() wrapped a rendered, non-offstage control."
+            )
+        return _as_box(box)
+
+    async def _identifier_input_box(self, eid_str: str, timeout_ms: int) -> dict[str, float]:
+        """INPUT: identifier 节点后代 `input` / `textarea` 的 bbox。
+
+        P0-2 矩阵行 7-8 实证: TextField 的 identifier 节点 bbox（200×48）与真实
+        `input` bbox（208×54）**不一致**（边框/内边距差异），故取真实输入面，
+        与 legacy 路径行为对齐。
+        """
+        outer = self._locator_by_identifier(eid_str)
+        await outer.first.wait_for(state="attached", timeout=self._tm(timeout_ms))
+        inner = outer.first.locator("input, textarea").first
+        await inner.wait_for(state="visible", timeout=self._tm(timeout_ms))
+        box = await inner.bounding_box()
+        if not box:
+            raise RuntimeError(f"AnchorPage: no bbox for input under identifier node {eid_str!r}")
+        return _as_box(box)
+
+    async def _identifier_box(self, eid: Eid, timeout_ms: int) -> dict[str, float]:
+        """identifier 路径的交互 bbox 解析: INPUT 取后代 input, 其余取节点自身。"""
+        eid_str, kind = eid
+        if kind == AnchorKind.INPUT:
+            return await self._identifier_input_box(eid_str, timeout_ms)
+        return await self._identifier_node_box(eid_str, timeout_ms)
+
+    async def _read_expanded_by_identifier(self, eid_str: str) -> str | None:
+        """identifier 路径读取下拉展开态 (`aria-expanded`)。
+
+        P0-2 矩阵行 12 实证: Dropdown 顶层节点带 `role=button` + `aria-expanded`。
+        """
+        return await self.page.evaluate(
+            r"""(args) => {
+                const el = document.querySelector(
+                    'flt-semantics[flt-semantics-identifier="' + args.label + '"]');
+                return el ? el.getAttribute('aria-expanded') : null;
+            }""",
+            {"label": eid_str},
+        )
+
+    # ----------------------------------------------------------------
+    # legacy 路径 (双轨语义映射, P2-5 删除)
     # ----------------------------------------------------------------
 
     def _locator_by_aria(self, eid_str: str) -> Locator:
@@ -221,10 +314,24 @@ class AnchorPage:
         原生 scrollIntoView，且统一走 evaluate 避免双轨差异。
 
         INTERACTIVE/INPUT 按 aria 后缀匹配定位；COMPLEX 按 role=button 文本前缀匹配
-        （与 _locate_by_text 对齐）。滚动画后短暂等待 Flutter 滚动动画稳定。
+        （与 _locate_by_text 对齐）。identifier 路径统一按 identifier 属性定位，无 kind
+        分派。滚动画后短暂等待 Flutter 滚动动画稳定。
         """
         eid_str, kind = eid
-        if kind in (AnchorKind.INTERACTIVE, AnchorKind.INPUT):
+        if self._use_identifier:
+            if kind == AnchorKind.LABEL:
+                raise RuntimeError(
+                    f"AnchorPage.scroll_into_view: LABEL kind ({eid_str!r}) is display-only, not scrollable target"
+                )
+            await self.page.evaluate(
+                r"""(args) => {
+                    const el = document.querySelector(
+                        'flt-semantics[flt-semantics-identifier="' + args.label + '"]');
+                    if (el) el.scrollIntoView({block: 'center', inline: 'center'});
+                }""",
+                {"label": eid_str},
+            )
+        elif kind in (AnchorKind.INTERACTIVE, AnchorKind.INPUT):
             await self.page.evaluate(
                 r"""(args) => {
                     const {label} = args;
@@ -267,9 +374,15 @@ class AnchorPage:
     # ----------------------------------------------------------------
 
     async def click(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
-        """按 AnchorKind 分派 click 目标 bbox, 一律走真实鼠标事件."""
+        """按所选定位路径解析 click 目标 bbox, 一律走真实鼠标事件.
+
+        identifier 路径无 kind 分派（P0-2：节点存在性与 AnchorKind 无关）；legacy
+        路径保留原 kind 分派与「分类误标」诊断。
+        """
         eid_str, kind = eid
-        if kind == AnchorKind.INTERACTIVE:
+        if self._use_identifier:
+            box = await self._identifier_box(eid, timeout_ms)
+        elif kind == AnchorKind.INTERACTIVE:
             try:
                 box = await self._locate_inner_tappable_bbox(eid_str, timeout_ms)
             except PlaywrightTimeoutError as exc:
@@ -299,7 +412,9 @@ class AnchorPage:
 
     async def hover(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         eid_str, kind = eid
-        if kind == AnchorKind.INTERACTIVE:
+        if self._use_identifier:
+            box = await self._identifier_box(eid, timeout_ms)
+        elif kind == AnchorKind.INTERACTIVE:
             box = await self._locate_inner_tappable_bbox(eid_str, timeout_ms)
         elif kind == AnchorKind.INPUT:
             box = await self._locate_inner_input_bbox(eid_str, timeout_ms)
@@ -329,8 +444,11 @@ class AnchorPage:
                 f"AnchorPage.click_label: only supports LABEL, got {kind} for {eid_str!r}. "
                 f"Use click() for INTERACTIVE/COMPLEX/INPUT."
             )
-        r = await self._wait_for_text_anchor(eid_str, exact=True, role_filter=None, timeout_ms=timeout_ms)
-        box = self._normalize_box(r)
+        if self._use_identifier:
+            box = await self._identifier_box(eid, timeout_ms)
+        else:
+            r = await self._wait_for_text_anchor(eid_str, exact=True, role_filter=None, timeout_ms=timeout_ms)
+            box = self._normalize_box(r)
         cx = box["x"] + box["width"] / 2
         cy = box["y"] + box["height"] / 2
         await self.page.mouse.click(cx, cy)
@@ -339,7 +457,10 @@ class AnchorPage:
         eid_str, kind = eid
         if kind != AnchorKind.INPUT:
             raise RuntimeError(f"AnchorPage.fill: only supports INPUT, got {kind} for {eid_str!r}")
-        box = await self._locate_inner_input_bbox(eid_str, timeout_ms)
+        if self._use_identifier:
+            box = await self._identifier_input_box(eid_str, timeout_ms)
+        else:
+            box = await self._locate_inner_input_bbox(eid_str, timeout_ms)
         cx = box["x"] + box["width"] / 2
         cy = box["y"] + box["height"] / 2
         await self.page.mouse.click(cx, cy)
@@ -441,8 +562,12 @@ class AnchorPage:
         if kind != AnchorKind.COMPLEX:
             raise RuntimeError(f"AnchorPage.select_option: only supports COMPLEX, got {kind} for {eid_str!r}")
 
+        # 展开态读取按所选路径分派（identifier：identifier 节点 aria-expanded；
+        # legacy：role=button 文本前缀节点），两路径不混合。
+        read_expanded = self._read_expanded_by_identifier if self._use_identifier else self._read_expanded
+
         # 0. C4: 若下拉残留 expanded 状态（上次选择未完全收合），先按 Escape 收合
-        expanded_check = await self._read_expanded(eid_str)
+        expanded_check = await read_expanded(eid_str)
         if expanded_check == "true":
             await self.page.keyboard.press("Escape")
             await self.page.wait_for_timeout(300)
@@ -451,14 +576,17 @@ class AnchorPage:
         #    菜单关闭时选项节点不存在（Flet 动态生成，见 canvaskit-rendering-e2e-guide 坑点 3），
         #    此时全页面文本匹配会误命中页面其他同文本元素（如结果表表头「代码」），
         #    导致菜单从未打开、点击落空（PR 585 E2E 失败根因）。故关闭态一律走展开流程。
-        menu_expanded = await self._read_expanded(eid_str)
+        menu_expanded = await read_expanded(eid_str)
         # Any: 后续闭包 (_interact/_menu_closed) 经 nonlocal 捕获，此处显式声明避免
         # pyright 在捕获点对 `else None` 分支报 Optional 成员访问 (reportOptionalMemberAccess)
         option_element: Any = await self._find_option_element(option_text, eid_str) if menu_expanded == "true" else None
         if not option_element:
-            # 展开菜单：获取 Dropdown bbox
-            r = await self._wait_for_text_anchor(eid_str, exact=False, role_filter="button", timeout_ms=timeout_ms)
-            box = self._normalize_box(r)
+            # 展开菜单：获取 Dropdown 顶层 bbox
+            if self._use_identifier:
+                box = await self._identifier_node_box(eid_str, timeout_ms)
+            else:
+                r = await self._wait_for_text_anchor(eid_str, exact=False, role_filter="button", timeout_ms=timeout_ms)
+                box = self._normalize_box(r)
 
             # 策略 A: 点击右侧下拉箭角 (width - 15px), 直接触发表单展开
             arrow_x = box["x"] + max(box["width"] - 15.0, box["width"] / 2)
@@ -538,7 +666,10 @@ class AnchorPage:
 
     async def expect_visible(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         eid_str, kind = eid
-        if kind in (AnchorKind.INTERACTIVE, AnchorKind.INPUT):
+        if self._use_identifier:
+            # identifier 路径: 四类 kind 共用精确选择器, 无 kind 分派 (P0-2 矩阵)
+            await self._locator_by_identifier(eid_str).first.wait_for(state="visible", timeout=self._tm(timeout_ms))
+        elif kind in (AnchorKind.INTERACTIVE, AnchorKind.INPUT):
             await self._locator_by_aria(eid_str).first.wait_for(state="visible", timeout=self._tm(timeout_ms))
         else:
             # LABEL/COMPLEX: 轮询 textContent 匹配, 无 Playwright locator 可 wait
@@ -552,7 +683,9 @@ class AnchorPage:
 
     async def expect_hidden(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         eid_str, kind = eid
-        if kind in (AnchorKind.INTERACTIVE, AnchorKind.INPUT):
+        if self._use_identifier:
+            await self._locator_by_identifier(eid_str).first.wait_for(state="hidden", timeout=self._tm(timeout_ms))
+        elif kind in (AnchorKind.INTERACTIVE, AnchorKind.INPUT):
             await self._locator_by_aria(eid_str).first.wait_for(state="hidden", timeout=self._tm(timeout_ms))
         else:
             deadline = time.monotonic() + self._tm(timeout_ms) / 1000
@@ -567,6 +700,9 @@ class AnchorPage:
 
     async def count(self, eid: Eid) -> int:
         eid_str, kind = eid
+        if self._use_identifier:
+            # identifier 路径: 单一选择器计数, 旧启发式的 strict mode violation 风险消失
+            return await self._locator_by_identifier(eid_str).count()
         if kind in (AnchorKind.INTERACTIVE, AnchorKind.INPUT):
             return await self._locator_by_aria(eid_str).count()
         role_filter = "button" if kind == AnchorKind.COMPLEX else None
