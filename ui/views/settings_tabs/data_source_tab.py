@@ -528,21 +528,15 @@ def _build_historical_card(
     vm: DataSourceViewModel,
     on_init_historical: Callable[[ft.ControlEvent], None],
     on_history_years_change: Callable[[ft.ControlEvent], None],
+    on_cancel_init_sync: Callable[[ft.ControlEvent], None],
 ) -> ft.Control:
     """Historical Data 区块 (D15: 从 DataSourceTab 提取, init sync 进度自含)."""
     # Sync button state (init sync)
-    if state.is_syncing and state.init_sync_cancellable:
-        sync_button_content = I18n.get("settings_cancel_sync")
-        sync_button_icon = ft.Icons.STOP_CIRCLE
-        sync_button_style = AppStyles.danger_button()
-    elif state.is_syncing:
-        sync_button_content = I18n.get("sys_init_cancel_wait")
-        sync_button_icon = ft.Icons.CLOUD_DOWNLOAD
-        sync_button_style = AppStyles.primary_button()
-    else:
-        sync_button_content = I18n.get("settings_init_data")
-        sync_button_icon = ft.Icons.CLOUD_DOWNLOAD
-        sync_button_style = AppStyles.primary_button()
+    # MINOR-11: 开始按钮恒定显示「初始化历史数据」且同步中禁用，不再 morph 成取消按钮——
+    # 避免同一按钮位置前一秒「开始」、后一秒「无确认取消」，双击即中断刚启动的长任务。
+    sync_button_content = I18n.get("settings_init_data")
+    sync_button_icon = ft.Icons.CLOUD_DOWNLOAD
+    sync_button_style = AppStyles.primary_button()
 
     # Progress bar/text (derived from init sync state)
     progress_visible = state.init_sync_running or (state.is_syncing and state.active_key == "system_init_sync")
@@ -573,11 +567,20 @@ def _build_historical_card(
         style=sync_button_style,
         height=40,
         width=AppStyles.CONTROL_WIDTH_MD,
-        disabled=(
-            (state.is_syncing and state.active_key in ("daily_sync", "ai_concept_sync", "cache_clear"))
-            or (state.is_syncing and state.active_key == "system_init_sync")
-        )
-        and not (state.is_syncing and state.init_sync_cancellable),
+        # MINOR-11: 任意同步进行中禁用开始按钮 (含 init sync 本身)，防止重复启动。
+        disabled=state.is_syncing,
+    )
+
+    # MINOR-11: 独立位置的取消按钮 (不复用开始按钮位置, 消除「双击即中断」误触风险)。
+    # 仅在 init sync 可取消时显示；取消本身走确认对话框 (on_cancel_init_sync 事件处理器),
+    # 与开始按钮位置分离, 避免误点。
+    cancel_init_button = ft.Button(
+        content=I18n.get("settings_cancel_sync"),
+        icon=ft.Icons.STOP_CIRCLE,
+        on_click=safe_on_click(on_cancel_init_sync),
+        style=AppStyles.danger_button(),
+        height=40,
+        visible=state.is_syncing and state.init_sync_cancellable,
     )
 
     years_value = str(vm.get_history_years())
@@ -607,8 +610,10 @@ def _build_historical_card(
                             spacing=2,
                             expand=True,
                         ),
+                        cancel_init_button,
                     ],
                     alignment=ft.MainAxisAlignment.END,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
             ],
             spacing=5,
@@ -981,17 +986,24 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
 
     async def _do_init_historical() -> None:
         ensure_correlation_id()
-        # 取消已运行的 init sync
-        if state.is_syncing and state.init_sync_cancellable:
-            UILogger.log_action("DataSourceTab", "Click", "btn_cancel_sync")
-            await vm.cancel_init_sync()
-            return
+        # MINOR-11: 取消不再复用开始入口 (独立按钮 + 确认对话框), 此处仅负责启动。
         if state.is_syncing:
             if show_snack_callback:
                 show_snack_callback(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
             return
         UILogger.log_action("DataSourceTab", "Click", "btn_init_historical")
         vm.execute_init_historical_data()
+
+    async def _do_cancel_init_sync() -> None:
+        """MINOR-11: 独立取消入口 (经确认对话框回调触发), 而非复用开始按钮。"""
+        ensure_correlation_id()
+        UILogger.log_action("DataSourceTab", "Click", "btn_cancel_sync")
+        try:
+            await vm.cancel_init_sync()
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception as ex:
+            logger.error("取消初始化同步失败: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
 
     async def _do_show_health_report() -> None:
         UILogger.log_action("DataSourceTab", "Click", "btn_health_report")
@@ -1072,12 +1084,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         )
 
     def _on_init_historical(e: ft.ControlEvent) -> None:
-        # 取消已运行的 init sync (直接调用, 无需 confirm dialog)
-        if state.is_syncing and state.init_sync_cancellable:
-            page = _get_page()
-            if page is not None:
-                page.run_task(_do_init_historical)
-            return
+        # MINOR-11: 开始按钮恒定只负责启动 (取消走独立按钮 _on_init_cancel + 确认)。
         if state.is_syncing:
             if show_snack_callback:
                 show_snack_callback(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
@@ -1089,6 +1096,20 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
                 "confirm_btn_key": "btn_confirm_init",
                 "callback": _do_init_historical,
                 "is_destructive": False,
+            }
+        )
+
+    def _on_init_cancel(e: ft.ControlEvent) -> None:
+        """MINOR-11: 独立取消按钮 → 二次确认后才真正取消长任务。"""
+        if not (state.is_syncing and state.init_sync_cancellable):
+            return
+        set_confirm_dialog_config(
+            {
+                "title_key": "dialog_confirm_cancel_init_title",
+                "content_key": "dialog_confirm_cancel_init_content",
+                "confirm_btn_key": "btn_confirm_cancel_sync",
+                "callback": _do_cancel_init_sync,
+                "is_destructive": True,
             }
         )
 
@@ -1227,7 +1248,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     action_console = _build_action_console(state, _on_full_sync, _on_ai_concept_rebuild, _on_cancel_active_task)
     danger_zone = _build_danger_zone(state, _on_clear_cache)
     connection_card = _build_connection_card(tushare_vm)
-    historical_card = _build_historical_card(state, vm, _on_init_historical, _on_history_years_change)
+    historical_card = _build_historical_card(state, vm, _on_init_historical, _on_history_years_change, _on_init_cancel)
     data_flow_card = _build_data_flow_card()
 
     # --- Confirm dialog content (MAJOR-03: 破坏性重置逐项列出数据类别 + 勾选确认) ---

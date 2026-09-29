@@ -43,6 +43,8 @@ class TaskRow:
     created_at: datetime.datetime
     error: str
     is_retryable: bool = False
+    # MINOR-11: 任务开始执行时刻 (TaskManager 转 RUNNING 时置位)；用于 View 计算已耗时/剩余。
+    started_at: datetime.datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,7 @@ class TaskCenterViewModel(ObservableViewModelMixin[TaskCenterState]):
                 created_at=t.created_at,
                 error=t.error,
                 is_retryable=t.is_retryable,
+                started_at=t.started_at,
             )
             for t in tasks
         )
