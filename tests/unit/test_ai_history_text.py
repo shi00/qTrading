@@ -298,6 +298,31 @@ class TestBuildHistoryTextLimitStatus:
         assert f"🔴{I18n.get('ai_limit_up')}" not in result
         assert result.count(I18n.get("ai_limit_price_missing")) == 1
 
+    def test_all_invalid_limit_rows_treated_as_missing(self):
+        """三态③：limit_df 非空但整批行均为无效价（0）→ 归入缺失态，不降级为板块规则近似。
+
+        修复前：lookup 因全部行被剔除而为空 → using_exchange_limit=False → 错走降级，
+        把「数据缺失」伪装成按板块规则的近似涨停（主板涨 10% 会被打标签）。修复后应
+        不打标签、追加缺失提示，且不得出现近似提示。
+        """
+        df = self._df([10.4, 10.5, 10.6, 10.7, 10.8, 11.0], last_pct_chg=10.0)
+        limit_df = self._limit_df([(d, 0.0, 0.0) for d in self._LAST3])  # 占位/异常价，全部无效
+        result = _build_history_text(df, ts_code="000001.SZ", stock_name="普通股份", limit_df=limit_df)
+        assert f"🔴{I18n.get('ai_limit_up')}" not in result
+        assert result.count(I18n.get("ai_limit_price_missing")) == 1
+        assert I18n.get("ai_limit_price_approx") not in result
+
+    def test_empty_dataframe_limit_df_falls_back_to_board_rule(self):
+        """三态①：limit_df 为空 DataFrame（查询未返回任何行）→ 降级板块规则近似并追加近似提示。
+
+        与三态③（非空但行均无效）区分：仅「没有任何行」才降级。
+        """
+        df = self._df([10.4, 10.5, 10.6, 10.7, 10.8, 11.0], last_pct_chg=10.0)
+        result = _build_history_text(df, ts_code="000001.SZ", stock_name="普通股份", limit_df=pd.DataFrame())
+        assert f"🔴{I18n.get('ai_limit_up')}" in result
+        assert result.count(I18n.get("ai_limit_price_approx")) == 1
+        assert I18n.get("ai_limit_price_missing") not in result
+
 
 if __name__ == "__main__":
     test_ai_macro()

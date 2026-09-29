@@ -1055,8 +1055,10 @@ class TestScreenerDaoExcludeSt:
     def test_is_st_upper_derived_column(self):
         """is_st 派生列采用 UPPER(COALESCE(nh.name, b.name)) LIKE '%ST%'。
 
-        UPPER 覆盖 *ST/S*ST，与 utils.limit_status.get_limit_pct 语义一致；COALESCE 双回退：有 as-of 记录
-        用历史名判定，无记录回退当前名称，空表不误判全市场非 ST。
+        UPPER 覆盖 *ST/S*ST，其 ST 名称匹配方式与 utils.limit_status.get_limit_pct 的 ST 识别一致；
+        COALESCE 双回退：有 as-of 记录用历史名判定，无记录回退当前名称，空表不误判全市场非 ST。
+        注意 is_st 为全板块名称标记，不等价于 get_limit_pct 的涨跌停幅度（后者 ST→5% 仅限主板，
+        创业板/科创板 ST 仍为 20%），限幅判定须经 utils.limit_status.get_limit_pct 按板块区分。
         """
         dao = ScreenerDao(MagicMock())
         for sql in (dao._build_screening_sql(), dao._build_screening_sql_range()):
