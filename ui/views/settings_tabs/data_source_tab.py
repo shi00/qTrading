@@ -1331,11 +1331,15 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         content=ft.ListView(
             controls=[
                 health_dashboard,
-                scheduler_status_card,
                 action_console,
                 danger_zone,
                 connection_card,
                 historical_card,
+                # D7-6: 调度状态面板插在 data_flow_card 之前。ListView 只构建进入视口的项，
+                # 若插到靠前位置会把既有卡片（如 Tushare 配置「验证 Token」）推出视口导致
+                # E2E 语义查询失败；此处保持前 5 张卡片顺序/可见性不变，并保留 data_flow_card
+                # 作为列表末尾卡片（既有契约 test_data_flow_section_is_last_card_in_listview）。
+                scheduler_status_card,
                 data_flow_card,
                 # 组件型 dialog 内部 use_dialog 无条件自挂载, 条件加入 controls 列表不影响
                 # 父组件 hook 顺序; 仅在打开时实例化, 关闭即卸载 (open_state=True 每次推送)。

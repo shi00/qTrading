@@ -931,8 +931,8 @@ class TestDataSourceTabComponentBody:
     ):
         """Container.content 是 ListView, 含 7 个 DashboardCard (mock 后为 Container)。
 
-        7 个 card: health_dashboard / scheduler_status_card (D7-6 调度状态面板) /
-        action_console / danger_zone / connection_card / historical_card / data_flow_card。
+        7 个 card: health_dashboard / action_console / danger_zone / connection_card /
+        historical_card / scheduler_status_card (D7-6 调度状态面板) / data_flow_card。
         MAJOR-03: 破坏性「重置本地数据库」入口从 action_console 拆出为独立 danger_zone 卡。
         """
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
