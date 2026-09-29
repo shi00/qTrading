@@ -901,6 +901,34 @@ class TestScreenerViewMount:
 
 
 # ============================================================================
+# MINOR-04 (reviews/09-24/09.md): 排除 ST 开关唯一性
+# ============================================================================
+
+
+class TestExcludeStSwitchUniqueness:
+    """MINOR-04: 选股控制区「排除 ST / 风险警示股」开关必须恰好 1 个.
+
+    回归守卫: 曾同时存在 filter_row 内开关与 realtime_controls 中重复的匿名开关,
+    两者绑定同一 state.exclude_st, 界面出现两个一模一样的控件。
+    """
+
+    def test_realtime_controls_has_single_exclude_st_switch(self, screener_view_env) -> None:
+        """DoD: label == I18n.get("screener_exclude_st") 的 ft.Switch 恰好 1 个, 且绑定 VM state."""
+        # 视图内经模块级 I18n 渲染, 与 fixture 注入的 mock I18n 同源
+        expected_label = screener_view_env["mock_i18n"].get("screener_exclude_st")
+        switches = [
+            ctrl
+            for ctrl in _walk_all_controls(screener_view_env["result"])
+            if isinstance(ctrl, ft.Switch) and ctrl.label == expected_label
+        ]
+        assert len(switches) == 1, f"控制区应恰好渲染 1 个排除 ST 开关, 实际 {len(switches)} 个"
+
+        switch = switches[0]
+        assert switch.value == screener_view_env["fake_vm"].state.exclude_st
+        assert switch.on_change is not None, "保留的排除 ST 开关必须绑定 on_change (vm.set_exclude_st)"
+
+
+# ============================================================================
 # Handler 测试: _on_strategy_change
 # ============================================================================
 
