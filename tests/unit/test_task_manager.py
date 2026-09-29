@@ -9,7 +9,13 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
 from core.i18n import Message
-from services.task_manager import TaskManager, AppTask, TaskStatus, TERMINAL_STATUSES
+from services.task_manager import (
+    EXCLUSIVE_GROUP_MARKET_SYNC,
+    TERMINAL_STATUSES,
+    AppTask,
+    TaskManager,
+    TaskStatus,
+)
 from tests.conftest import singleton_state
 from utils.time_utils import get_now
 
@@ -2358,6 +2364,8 @@ class TestRetryTask:
             cancellable=True,
             unique_key="uniq_retried",
             factory_key=None,
+            # D7-5: 透传组归属（此处未设组，透传 None）
+            exclusive_group=None,
             a=1,
         )
         # LIFE-01: retry 复用原 unique_key（防止并发重推），不再省略
@@ -2390,9 +2398,32 @@ class TestRetryTask:
             cancellable=True,
             unique_key="uniq_interrupted",
             factory_key=None,
+            # D7-5: 透传组归属（此处未设组，透传 None）
+            exclusive_group=None,
             a=1,
         )
         assert mock_submit.call_args.kwargs.get("unique_key") == "uniq_interrupted"
+
+    def test_retry_passes_exclusive_group(self):
+        """D7-5: 原任务带组时，重试提交须透传同一组名（维持同组互斥）。"""
+        with singleton_state(TaskManager):
+            mgr = TaskManager()
+            task = AppTask(
+                name="MarketSync",
+                task_type="Data",
+                status=TaskStatus.FAILED,
+                cancellable=True,
+                exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC,
+            )
+            task._coroutine_factory = MagicMock()
+            task._coroutine_kwargs = {}
+            mgr._tasks["tid6"] = task
+
+            with patch.object(mgr, "submit_task", return_value="new_tid_789") as mock_submit:
+                result = mgr.retry_task("tid6")
+
+        assert result == "new_tid_789"
+        assert mock_submit.call_args.kwargs.get("exclusive_group") == EXCLUSIVE_GROUP_MARKET_SYNC
 
 
 class TestTaskManagerLife01RetryableFactory:
@@ -2668,3 +2699,198 @@ class TestTaskManagerQueuedCancellation:
 
         # 清理创建的 task
         t._asyncio_task.cancel()
+
+
+class TestTaskManagerExclusiveGroup:
+    """D7-5/MINOR-03: 共享互斥分组（`exclusive_group`）串行语义与边界。
+
+    覆盖：同组串行 / 跨组与未分组不受阻塞 / 组锁 loop-local 与单例重置清理 /
+    组锁在异常、等待期取消、停机路径下必释放 / submit_task 与 retry_task 透传组归属。
+    """
+
+    @pytest.mark.asyncio
+    async def test_same_group_tasks_run_serially(self):
+        """同组任务串行：信号量放宽到 4，串行只能来自组锁。"""
+        mgr = TaskManager()
+        sem = asyncio.Semaphore(4)
+        overlap = 0
+        peak = 0
+
+        async def worker(idx: int):
+            nonlocal overlap, peak
+            task = AppTask(name=f"m{idx}", exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC)
+            async with mgr._acquire_task_slot(task):
+                overlap += 1
+                peak = max(peak, overlap)
+                await asyncio.sleep(0.02)
+                overlap -= 1
+
+        with patch.object(mgr, "_get_semaphore", return_value=sem):
+            await asyncio.gather(*(worker(i) for i in range(3)))
+
+        assert peak == 1  # 任意时刻至多一个同组任务在执行
+
+    @pytest.mark.asyncio
+    async def test_different_groups_run_concurrently(self):
+        """不同组互不互斥：两组任务可同时进入执行槽。"""
+        mgr = TaskManager()
+        sem = asyncio.Semaphore(4)
+        both_in = asyncio.Event()
+        entered = 0
+
+        async def worker(group: str):
+            nonlocal entered
+            task = AppTask(name=f"g-{group}", exclusive_group=group)
+            async with mgr._acquire_task_slot(task):
+                entered += 1
+                if entered == 2:
+                    both_in.set()
+                # 若两者互相阻塞，此处会超时失败
+                await asyncio.wait_for(both_in.wait(), timeout=1.0)
+
+        with patch.object(mgr, "_get_semaphore", return_value=sem):
+            await asyncio.gather(worker("grp_a"), worker("grp_b"))
+
+        assert entered == 2
+
+    @pytest.mark.asyncio
+    async def test_ungrouped_task_not_blocked_by_group(self):
+        """未分组任务与分组任务互不阻塞（行为与改动前一致）。"""
+        mgr = TaskManager()
+        sem = asyncio.Semaphore(4)
+        both_in = asyncio.Event()
+        entered: list[str] = []
+
+        async def _run(name: str, group: str | None):
+            task = AppTask(name=name, exclusive_group=group)
+            async with mgr._acquire_task_slot(task):
+                entered.append(name)
+                if len(entered) == 2:
+                    both_in.set()
+                # 若两者互相阻塞，此处会超时失败
+                await asyncio.wait_for(both_in.wait(), timeout=1.0)
+
+        with patch.object(mgr, "_get_semaphore", return_value=sem):
+            await asyncio.gather(
+                _run("grouped", EXCLUSIVE_GROUP_MARKET_SYNC),
+                _run("ungrouped", None),
+            )
+
+        assert sorted(entered) == ["grouped", "ungrouped"]
+
+    @pytest.mark.asyncio
+    async def test_group_lock_is_loop_local_and_reused(self):
+        """同一循环内同组取回同一锁对象；重置单例后重建（不跨测试泄漏持有态）。"""
+        mgr = TaskManager()
+        lock_first = mgr._get_group_lock("grp")
+        assert mgr._get_group_lock("grp") is lock_first  # 同组复用
+        assert mgr._get_group_lock("other") is not lock_first  # 跨组隔离
+
+        TaskManager._reset_singleton()
+        lock_after_reset = TaskManager()._get_group_lock("grp")
+        assert lock_after_reset is not lock_first  # 重置后为全新锁，无陈旧持有态
+
+    @pytest.mark.asyncio
+    async def test_group_lock_released_on_exception(self):
+        """任务体抛异常时组锁经 async with 释放，后续同组任务不被阻塞。"""
+        mgr = TaskManager()
+        sem = asyncio.Semaphore(1)
+        boom = AppTask(name="boom", exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC)
+        after = AppTask(name="after", exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC)
+        done: list[str] = []
+
+        with patch.object(mgr, "_get_semaphore", return_value=sem):
+            with pytest.raises(RuntimeError) as exc_info:
+                async with mgr._acquire_task_slot(boom):
+                    raise RuntimeError("boom")
+            assert str(exc_info.value) == "boom"
+            async with mgr._acquire_task_slot(after):
+                done.append("after")
+
+        assert done == ["after"]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_while_waiting_group_lock_does_not_block_next(self):
+        """等待组锁期间被取消：未进入上下文体、不会误释放或永久占用，后续同组任务可执行。"""
+        mgr = TaskManager()
+        sem = asyncio.Semaphore(1)
+        first_in = asyncio.Event()
+        release_first = asyncio.Event()
+        acquired: list[str] = []
+
+        async def hold():
+            task = AppTask(name="first", exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC)
+            async with mgr._acquire_task_slot(task):
+                acquired.append("first")
+                first_in.set()
+                await release_first.wait()
+
+        async def waiter():
+            task = AppTask(name="second", exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC)
+            async with mgr._acquire_task_slot(task):
+                acquired.append("second")
+
+        async def third():
+            task = AppTask(name="third", exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC)
+            async with mgr._acquire_task_slot(task):
+                acquired.append("third")
+
+        with patch.object(mgr, "_get_semaphore", return_value=sem):
+            holder = asyncio.create_task(hold())
+            await first_in.wait()
+            pending = asyncio.create_task(waiter())
+            await asyncio.sleep(0.01)  # 让 waiter 阻塞在组锁上
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+            release_first.set()
+            await holder
+            await asyncio.wait_for(third(), timeout=1.0)
+
+        assert acquired == ["first", "third"]
+
+    def test_submit_task_assigns_exclusive_group(self):
+        """submit_task 把 exclusive_group 落到 AppTask（去重键语义不受影响）。"""
+        mgr = TaskManager()
+        mock_loop = MagicMock()
+        mock_loop.is_running.return_value = True
+        mock_loop.call_soon_threadsafe.side_effect = lambda fn: fn()
+        mgr._loop = mock_loop
+        with patch.object(mgr, "_register_and_run"):
+            task_id = mgr.submit_task(
+                name="market_sync",
+                task_type="Data",
+                coroutine_factory=MagicMock(),
+                unique_key="k_d7_5_group",
+                exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC,
+            )
+        assert isinstance(task_id, str)
+        assert mgr._tasks[task_id].exclusive_group == EXCLUSIVE_GROUP_MARKET_SYNC
+
+    @pytest.mark.asyncio
+    async def test_task_runner_releases_group_lock_after_completion(self):
+        """端到端：经 _task_runner 执行后组锁释放，后续同组任务可立即执行。"""
+        mgr = TaskManager()
+        sem = asyncio.Semaphore(1)
+        exc_group = EXCLUSIVE_GROUP_MARKET_SYNC
+
+        def _make_task(name: str) -> AppTask:
+            t = AppTask(name=name, cancellable=True, exclusive_group=exc_group)
+            t._cancel_event = threading.Event()
+            t._coroutine_gen = lambda: asyncio.sleep(0)
+            mgr._tasks[t.id] = t
+            return t
+
+        with patch.object(mgr, "_get_semaphore", return_value=sem):
+            with (
+                patch.object(mgr, "_persist_task"),
+                patch.object(mgr, "_notify_subscribers"),
+                patch.object(mgr, "_evict_on_complete"),
+            ):
+                first = _make_task("first")
+                second = _make_task("second")
+                await mgr._task_runner(first.id)
+                await asyncio.wait_for(mgr._task_runner(second.id), timeout=1.0)
+
+        assert first.status == TaskStatus.COMPLETED
+        assert second.status == TaskStatus.COMPLETED

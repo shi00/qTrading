@@ -26,7 +26,7 @@ from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from data.external.tushare_client import TushareClient
 from data.sync.errors import InitSyncError
-from services.task_manager import AppTask, TaskManager, TaskStatus
+from services.task_manager import EXCLUSIVE_GROUP_MARKET_SYNC, AppTask, TaskManager, TaskStatus
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
@@ -473,6 +473,8 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
             coroutine_factory=_daily_logic,
             cancellable=True,
             unique_key="daily_sync",
+            # D7-5/MINOR-03: 与补偿同步/全量初始化写同一批行情表，入同组互斥
+            exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC,
         )
 
         if task_id is None:
@@ -646,6 +648,8 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
             cancellable=True,
             unique_key="system_init_sync",
             factory_key="init_historical_sync",  # LIFE-01: 崩溃后可按注册表重建续传
+            # D7-5/MINOR-03: 与日更/补偿同步写同一批行情表，入同组互斥
+            exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC,
         )
 
         if task_id is None:

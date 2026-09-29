@@ -369,6 +369,24 @@ class SchedulerService:
             "ai_concept_enabled": ConfigHandler.is_ai_concept_schedule_enabled(),
         }
 
+    def _is_market_sync_busy(self) -> bool:
+        """D7-5/MINOR-03: 是否有写行情表的任务在运行/排队，或缓存清理在运行。
+
+        只读 TaskManager 公开快照（内存遍历，无 IO），供看门狗路径决定是否跳过本轮补偿检查；
+        misfire 路径不经过此判定（否则当天数据永久丢失），故守卫只加在看门狗调用点。
+        """
+        from services.task_manager import (  # lazy-import: 启动性能（R1 例外 EX-0007）
+            EXCLUSIVE_GROUP_MARKET_SYNC,
+            TaskManager,
+            TaskStatus,
+        )
+
+        active = (TaskStatus.RUNNING, TaskStatus.QUEUED)
+        return any(
+            t.status in active and (t.exclusive_group == EXCLUSIVE_GROUP_MARKET_SYNC or t.unique_key == "cache_clear")
+            for t in TaskManager().get_all_tasks()
+        )
+
     async def _watch_config_changes(self):
         """Monitor config changes and reload jobs if needed"""
 
@@ -437,7 +455,13 @@ class SchedulerService:
         # 用统一谓词而非常态 include_today=True：16:30 日更及其 30 分钟 misfire 宽限窗口
         # 内不补今天，避免与运行中的日更并发同步同一天；退避约束照常生效（不传
         # bypass_backoff），同步持续失败时不出选股结论。
-        await self._catch_up_missed_updates(include_today=self._is_past_nightly_prediction_time())
+        # D7-5/MINOR-03: 同组（写同一批行情表）任务运行/排队中、或缓存清理运行中时跳过本轮
+        # 补偿检查——此时提交也只会排在同组锁之后，徒增面板噪音；下个周期（30s）重判。
+        # 仅看门狗路径加守卫：misfire 路径（bypass_backoff=True）跳过会导致当天数据永久丢失。
+        if self._is_market_sync_busy():
+            logger.info("[Scheduler] 行情表写入任务或清理缓存运行中，跳过本次补偿检查（D7-5/MINOR-03）")
+        else:
+            await self._catch_up_missed_updates(include_today=self._is_past_nightly_prediction_time())
         # D7-3/MINOR-01: 数据就绪 + 当日未预测 + 已过预测时刻时补触发一次（每日至多一次）。
         await self._catch_up_nightly_prediction()
 
@@ -682,7 +706,10 @@ class SchedulerService:
             logger.info("[Scheduler] 补偿基准缺失，以本地最新交易日 %s 自举", baseline)
             self._last_update_date = baseline
         from data.data_processor import DataProcessor  # lazy-import: 启动性能——仅补偿检查时加载
-        from services.task_manager import TaskManager  # lazy-import: 启动性能——仅提交补偿任务时加载
+        from services.task_manager import (  # lazy-import: 启动性能——仅提交补偿任务时加载
+            EXCLUSIVE_GROUP_MARKET_SYNC,
+            TaskManager,
+        )
 
         last_dt = parse_date(self._last_update_date).date()
         today = get_now().date()
@@ -711,6 +738,8 @@ class SchedulerService:
             coroutine_factory=self._catchup_logic,
             cancellable=True,
             unique_key="daily_sync_catchup",  # 独立 key，与常规同步解耦（D6-1 Q2 修订）
+            # D7-5/MINOR-03: 与日更/全量初始化写同一批行情表，入同组互斥
+            exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC,
             missed_dates=missed,
         )
         # D6-5: 返回值 None（去重命中/无事件循环）时，本次补偿未真正提交；不写幂等键，
@@ -833,7 +862,10 @@ class SchedulerService:
             # offline_result is True → 继续执行
 
         # Submit via TaskManager for visibility and persistence
-        from services.task_manager import TaskManager  # lazy-import: 启动性能——仅提交任务时加载 TaskManager
+        from services.task_manager import (  # lazy-import: 启动性能——仅提交任务时加载 TaskManager
+            EXCLUSIVE_GROUP_MARKET_SYNC,
+            TaskManager,
+        )
 
         async def _daily_update_logic(task_id: str, **kwargs):
             tm = TaskManager()
@@ -895,6 +927,8 @@ class SchedulerService:
             coroutine_factory=_daily_update_logic,
             cancellable=False,
             unique_key="daily_sync",
+            # D7-5/MINOR-03: 日更与补偿同步/全量初始化写同一批行情表，入同组互斥
+            exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC,
         )
         if task_id is None:
             logger.warning(

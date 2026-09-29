@@ -31,6 +31,12 @@ _NOTIFY_THROTTLE_S = 0.2
 # Marker for serialized Message in DB string columns (Task 3.1)
 _MSG_MARKER = "__i18n_msg__"
 
+# D7-5/MINOR-03: 「写同一批行情表」任务的共享互斥分组名。日更（daily_sync）、补偿同步
+# （daily_sync_catchup）与全量初始化（system_init_sync）写的是同一批行情表，可并发提交时
+# 会争用同一份 Tushare 限额并重复请求。同组任务经 exclusive_group 串行（组锁为 loop-local，
+# 见 _get_group_lock），提交方只需传入本常量，无需各自维护互斥状态。
+EXCLUSIVE_GROUP_MARKET_SYNC = "market_sync"
+
 
 def _serialize_msg_field(val: Message | str) -> str:
     """Serialize ``Message | str`` for DB storage (Task 3.1).
@@ -130,6 +136,9 @@ class AppTask:
     _asyncio_task: asyncio.Task | None = None
     _cancel_event: threading.Event | None = None
     unique_key: str | None = None  # For deduplication
+    # D7-5/MINOR-03: 同组任务串行执行的组名（None = 不分组）。仅进程内有效，不持久化
+    # （无 DB 列 / 无迁移）：跨重启 retry 的组归属见 docs/patterns/task-manager.md 已知边界。
+    exclusive_group: str | None = None
     factory_key: str | None = None  # LIFE-01: 崩溃重建工厂注册键（跨重启可重试的前提）
     correlation_id: str | None = None  # Inherited from caller context for full-chain tracing
     # Phase 6.2: Store original factory + kwargs for retry_task (FR-UX-006)
@@ -200,6 +209,8 @@ class TaskManager:
             cls._RETRYABLE_FACTORIES.clear()
 
         del_loop_local("task_manager_semaphore")
+        # D7-5: 同组互斥锁同为 loop-local，随单例重置一并清理，避免测试间泄漏持有态。
+        del_loop_local("task_manager_group_locks")
 
     @classmethod
     def _atexit_cleanup(cls):
@@ -256,6 +267,35 @@ class TaskManager:
     def _get_active_task_count(self) -> int:
         """Count active tasks that are either running or queued (holding or waiting for semaphore)."""
         return sum(1 for t in self._tasks.values() if t.status in (TaskStatus.RUNNING, TaskStatus.QUEUED))
+
+    @contextlib.asynccontextmanager
+    async def _acquire_task_slot(self, task: AppTask):
+        """D7-5/MINOR-03: 任务执行槽 = 同组互斥锁（可选）+ 并发信号量。
+
+        顺序刻意如此：**组锁在外层**。同组任务排队期间不占用并发许可，否则多个同组任务会
+        先各占一个信号量再阻塞等待组锁，白白挤占其它任务的可运行名额（甚至饿死非组任务）。
+        组锁释放由 ``async with`` 保证——正常返回、抛异常、被取消（含停机
+        ``cancel_all_running_async``）四条路径均经 ``__aexit__`` 释放，不会永久阻塞后续同组
+        任务；等待组锁期间被取消时未进入上下文体，故不会误释放未持有的锁。
+        未分组任务（``exclusive_group is None``）行为与改动前完全一致。
+        """
+        group = task.exclusive_group
+        if group is None:
+            async with self._get_semaphore():
+                yield
+            return
+        async with self._get_group_lock(group):
+            async with self._get_semaphore():
+                yield
+
+    def _get_group_lock(self, group: str) -> asyncio.Lock:
+        """按组名取绑定当前事件循环的组锁（R11：loop-local，不得作为类属性跨循环复用）。"""
+        locks: dict[str, asyncio.Lock] = get_loop_local("task_manager_group_locks", dict)
+        lock = locks.get(group)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[group] = lock
+        return lock
 
     def _get_semaphore(self) -> asyncio.Semaphore:
         """Lazily create semaphore bound to the current event loop.
@@ -394,6 +434,7 @@ class TaskManager:
         cancellable: bool = False,
         unique_key: str | None = None,
         factory_key: str | None = None,
+        exclusive_group: str | None = None,
         **kwargs,
     ) -> str | None:
         """
@@ -405,6 +446,9 @@ class TaskManager:
         (thread-safe, O(1)), so callers still receive None on duplicate hits.
         All _tasks mutations are deferred to the event loop thread via
         call_soon_threadsafe, eliminating cross-thread dict access.
+
+        D7-5: ``exclusive_group`` 指定共享互斥分组（如 ``EXCLUSIVE_GROUP_MARKET_SYNC``），
+        同组任务串行执行、跨组与未分组任务不受影响；仅进程内有效，不持久化。
         """
         # Synchronous dedup via _active_keys (thread-safe, O(1))
         if unique_key:
@@ -421,6 +465,7 @@ class TaskManager:
         task = AppTask(name=name, task_type=task_type, cancellable=cancellable)
         task.unique_key = unique_key
         task.factory_key = factory_key
+        task.exclusive_group = exclusive_group
         task._coroutine_gen = lambda t=task: coroutine_factory(task_id=t.id, **kwargs)
         # Phase 6.2: Store original factory + kwargs for retry_task (FR-UX-006)
         task._coroutine_factory = coroutine_factory
@@ -634,6 +679,8 @@ class TaskManager:
             unique_key=task.unique_key,
             # LIFE-01: 透传 factory_key，使重试后的任务本身仍可再崩溃恢复（重试链不断裂）。
             factory_key=task.factory_key,
+            # D7-5: 透传组归属（内存中的 task 仍持有），维持同组互斥语义。
+            exclusive_group=task.exclusive_group,
             **task._coroutine_kwargs,
         )
 
@@ -787,8 +834,8 @@ class TaskManager:
             task._cancel_event = threading.Event()
 
         try:
-            # Rehydrate the coroutine inside the semaphore
-            async with self._get_semaphore():
+            # Rehydrate the coroutine inside the execution slot (group lock + semaphore)
+            async with self._acquire_task_slot(task):
                 # CON-04: 拿到信号量后防御性检查排队期间是否被取消
                 if task.status == TaskStatus.CANCELLED or (task._cancel_event and task._cancel_event.is_set()):
                     if task.status != TaskStatus.CANCELLED:
