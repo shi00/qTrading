@@ -14,6 +14,7 @@ by integration tests (flet_test_page fixture), not this unit test file.
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
 import contextlib
 import datetime
 from unittest.mock import MagicMock, patch
@@ -30,10 +31,13 @@ from ui.viewmodels.task_center_view_model import (
 from ui.views.task_center_view import (
     PAGE_SIZE,
     _build_task_card,
+    _format_duration,
     _format_time,
     _get_status_color,
     _get_status_label,
+    _task_time_summary,
 )
+from utils.time_utils import get_now
 
 pytestmark = pytest.mark.unit
 
@@ -147,6 +151,89 @@ class TestGetStatusColor:
         color = _get_status_color(status)
         assert color is not None
         assert isinstance(color, str)
+
+
+# ---------------------------------------------------------------------------
+# MINOR-11: _format_duration / _task_time_summary
+# ---------------------------------------------------------------------------
+
+
+class TestFormatDuration:
+    """MINOR-11: 时长格式化 (mm:ss / h:mm:ss, 负值夹取为 0)。"""
+
+    def test_zero(self):
+        assert _format_duration(0) == "00:00"
+
+    def test_seconds_and_minutes(self):
+        assert _format_duration(75) == "01:15"
+
+    def test_hours(self):
+        assert _format_duration(3661) == "1:01:01"
+
+    def test_negative_clamped_to_zero(self):
+        assert _format_duration(-12.5) == "00:00"
+
+    def test_fractional_seconds_truncated(self):
+        assert _format_duration(59.9) == "00:59"
+
+
+class TestTaskTimeSummary:
+    """MINOR-11: 运行中任务「已耗时 / 预计剩余」文本生成。"""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n):
+        with patch("ui.views.task_center_view.I18n", mock_i18n):
+            yield
+
+    def _row(self, status=TaskStatus.RUNNING, started_at=datetime.datetime(2025, 1, 1, 12, 0, 0), **kwargs):
+        defaults = dict(
+            id="t1",
+            name="n",
+            task_type="System",
+            description="d",
+            status=status,
+            progress=0.5,
+            cancellable=True,
+            created_at=datetime.datetime(2025, 1, 1, 11, 0, 0),
+            error="",
+            started_at=started_at,
+        )
+        defaults.update(kwargs)
+        return TaskRow(**defaults)
+
+    def test_returns_none_for_non_running(self):
+        row = self._row(status=TaskStatus.COMPLETED)
+        assert _task_time_summary(row, datetime.datetime(2025, 1, 1, 12, 1, 0)) is None
+
+    def test_returns_none_without_started_at(self):
+        row = self._row(started_at=None)
+        assert _task_time_summary(row, datetime.datetime(2025, 1, 1, 12, 1, 0)) is None
+
+    def test_returns_none_without_now(self):
+        row = self._row()
+        assert _task_time_summary(row, None) is None
+
+    def test_progress_zero_shows_estimating(self):
+        """R21: 无法推算剩余时显示「计算中」而非伪造数值。"""
+        row = self._row(progress=0.0)
+        text = _task_time_summary(row, datetime.datetime(2025, 1, 1, 12, 2, 0))
+        assert text is not None
+        assert "task_elapsed_fmt" in text
+        assert "task_remaining_estimating" in text
+
+    def test_partial_progress_shows_elapsed_and_remaining(self):
+        row = self._row(progress=0.5)
+        text = _task_time_summary(row, datetime.datetime(2025, 1, 1, 12, 2, 0))
+        assert text is not None
+        assert "task_elapsed_fmt" in text
+        assert "task_remaining_fmt" in text
+
+    def test_complete_progress_shows_elapsed_only(self):
+        row = self._row(progress=1.0)
+        text = _task_time_summary(row, datetime.datetime(2025, 1, 1, 12, 2, 0))
+        assert text is not None
+        assert "task_elapsed_fmt" in text
+        assert "task_remaining" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +774,58 @@ class TestBuildTaskCard:
         buttons = _find_all_controls_by_type(card, ft.TextButton)
         assert len(buttons) == 0
 
+    # --- MINOR-11: 运行中任务显示已耗时 / 预计剩余 ---
+
+    def test_build_task_card_running_shows_time_summary(self):
+        """运行中任务卡含已耗时文本 (DoD 1)。"""
+        row = self._make_row(
+            status=TaskStatus.RUNNING,
+            cancellable=True,
+            progress=0.5,
+            started_at=datetime.datetime(2025, 1, 1, 12, 0, 0),
+        )
+        card = _build_task_card(row, on_cancel=MagicMock(), now=datetime.datetime(2025, 1, 1, 12, 2, 0))
+        texts = _find_all_controls_by_type(card, ft.Text)
+        assert any("task_elapsed_fmt" in (getattr(t, "value", "") or "") for t in texts)
+
+    def test_build_task_card_running_without_now_has_no_time_summary(self):
+        """未传 now (或 started_at 未知) 时不渲染耗时文本 (纯函数降级)。"""
+        row = self._make_row(status=TaskStatus.RUNNING, cancellable=True, progress=0.5, started_at=None)
+        card = _build_task_card(row, on_cancel=MagicMock(), now=None)
+        texts = _find_all_controls_by_type(card, ft.Text)
+        assert not any("task_elapsed_fmt" in (getattr(t, "value", "") or "") for t in texts)
+
+    # --- MINOR-11: 历史失败任务（不可重试）显示「前往数据源页重新发起」指引 ---
+
+    def test_build_task_card_not_retryable_failed_shows_reopen_source(self):
+        """DoD 3: 不可重试的历史失败任务显示重新发起指引。"""
+        row = self._make_row(status=TaskStatus.FAILED, error="disk full", is_retryable=False)
+        card = _build_task_card(
+            row,
+            on_cancel=MagicMock(),
+            on_retry=MagicMock(),
+            on_view_details=MagicMock(),
+            on_reopen_source=MagicMock(),
+        )
+        btn = _find_textbutton_by_content(card, "task_failed_reopen_source")
+        assert isinstance(btn, ft.TextButton)
+        assert btn.icon == ft.Icons.OPEN_IN_NEW
+
+    def test_build_task_card_reopen_source_triggers_callback(self):
+        row = self._make_row(id="hist-1", status=TaskStatus.FAILED, error="disk full", is_retryable=False)
+        on_reopen = MagicMock()
+        card = _build_task_card(row, on_cancel=MagicMock(), on_reopen_source=on_reopen)
+        btn = _find_textbutton_by_content(card, "task_failed_reopen_source")
+        assert isinstance(btn, ft.TextButton)
+        _trigger_callback(btn.on_click, MagicMock())
+        on_reopen.assert_called_once_with("hist-1")
+
+    def test_build_task_card_retryable_failed_hides_reopen_source(self):
+        """可重试任务已显示「重试」，不应再显示重新发起指引 (避免重复入口)。"""
+        row = self._make_row(status=TaskStatus.FAILED, error="disk full", is_retryable=True)
+        card = _build_task_card(row, on_cancel=MagicMock(), on_retry=MagicMock(), on_reopen_source=MagicMock())
+        assert _find_textbutton_by_content(card, "task_failed_reopen_source") is None
+
 
 # ---------------------------------------------------------------------------
 # TaskCenterView 组件体测试 (覆盖 263-408 行 @ft.component 函数体)
@@ -1051,6 +1190,112 @@ class TestTaskCenterViewComponentBody:
         dividers = [c for c in _collect_all_controls(result) if isinstance(c, ft.Divider)]
         assert len(dividers) >= 1
 
+    # --- MINOR-11: 长任务反馈与控制 ---
+
+    def _mount_with_page(self, monkeypatch, state: _FakeTaskCenterState | None = None):
+        """挂载并返回 (component, result, fake_vm, page), 以便检查 use_dialog 挂载结果。"""
+        from ui.views.task_center_view import TaskCenterView
+
+        fake_vm = _FakeTaskCenterViewModel(state=state)
+        monkeypatch.setattr("ui.views.task_center_view.TaskCenterViewModel", lambda: fake_vm)
+        component = make_component(TaskCenterView)
+        page = run_mount_effects(component)
+        result = render_once(component)
+        return component, result, fake_vm, page
+
+    def test_running_task_card_shows_elapsed_text(self, monkeypatch):
+        """DoD 1: 运行中任务卡含已耗时文本。"""
+        row = _make_task_row(
+            status=TaskStatus.RUNNING,
+            cancellable=True,
+            progress=0.5,
+            started_at=get_now() - datetime.timedelta(seconds=61),
+        )
+        _, result, _, _ = self._mount_with_page(
+            monkeypatch, state=_FakeTaskCenterState(tasks=(row,), total_count=1, running_count=1)
+        )
+        texts = [c for c in _collect_all_controls(result) if isinstance(c, ft.Text)]
+        assert any("task_elapsed_fmt" in (getattr(t, "value", "") or "") for t in texts)
+
+    def test_not_retryable_failed_card_shows_reopen_source_hint(self, monkeypatch):
+        """DoD 3: 历史失败任务 (不可重试) 渲染「前往数据源页重新发起」指引。"""
+        row = _make_task_row(id="hist-1", status=TaskStatus.FAILED, error="disk full", is_retryable=False)
+        _, result, _, _ = self._mount_with_page(monkeypatch, state=_FakeTaskCenterState(tasks=(row,), total_count=1))
+        btn = _find_textbutton_by_content(result, "task_failed_reopen_source")
+        assert isinstance(btn, ft.TextButton)
+        assert btn.icon == ft.Icons.OPEN_IN_NEW
+
+    def test_cancel_click_opens_confirm_without_cancelling(self, monkeypatch):
+        """DoD 2: 取消点击仅打开确认对话框，未确认时不执行取消。"""
+        row = _make_task_row(id="run-1", status=TaskStatus.RUNNING, cancellable=True)
+        component, result, fake_vm, page = self._mount_with_page(
+            monkeypatch, state=_FakeTaskCenterState(tasks=(row,), total_count=1, running_count=1)
+        )
+        btns = _find_all_controls_by_type(result, ft.TextButton)
+        assert len(btns) == 1
+        _trigger_callback(btns[0].on_click, MagicMock())
+        assert ("cancel_task", {"task_id": "run-1"}) not in fake_vm.method_calls
+        render_once(component)
+        dialogs = [c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog)]
+        assert len(dialogs) >= 1, "取消应弹出确认对话框"
+
+    def test_confirm_cancel_calls_cancel_task(self, monkeypatch):
+        """DoD 2: 确认后执行取消。"""
+        row = _make_task_row(id="run-2", status=TaskStatus.RUNNING, cancellable=True)
+        component, result, fake_vm, page = self._mount_with_page(
+            monkeypatch, state=_FakeTaskCenterState(tasks=(row,), total_count=1, running_count=1)
+        )
+        btns = _find_all_controls_by_type(result, ft.TextButton)
+        _trigger_callback(btns[0].on_click, MagicMock())
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        confirm_btn = dialog.actions[1]  # [0]=dismiss, [1]=confirm
+        _trigger_callback(confirm_btn.on_click, MagicMock())
+        assert ("cancel_task", {"task_id": "run-2"}) in fake_vm.method_calls
+
+    def test_dismiss_cancel_does_not_cancel(self, monkeypatch):
+        """DoD 2: 关闭确认框不执行取消。"""
+        row = _make_task_row(id="run-3", status=TaskStatus.RUNNING, cancellable=True)
+        component, result, fake_vm, page = self._mount_with_page(
+            monkeypatch, state=_FakeTaskCenterState(tasks=(row,), total_count=1, running_count=1)
+        )
+        btns = _find_all_controls_by_type(result, ft.TextButton)
+        _trigger_callback(btns[0].on_click, MagicMock())
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        dismiss_btn = dialog.actions[0]
+        _trigger_callback(dismiss_btn.on_click, MagicMock())
+        assert ("cancel_task", {"task_id": "run-3"}) not in fake_vm.method_calls
+
+    def test_ticker_not_started_without_running_task(self, monkeypatch):
+        """无运行中任务时不启动 1s ticker (无定时器开销)。"""
+        from tests.unit.ui.component_renderer import FakePage
+        from ui.views.task_center_view import TaskCenterView
+
+        fake_vm = _FakeTaskCenterViewModel(state=_FakeTaskCenterState(total_count=1, running_count=0))
+        monkeypatch.setattr("ui.views.task_center_view.TaskCenterViewModel", lambda: fake_vm)
+        page = FakePage()
+        page.run_task = MagicMock()
+        component = make_component(TaskCenterView)
+        run_mount_effects(component, page=page)
+        page.run_task.assert_not_called()
+
+    def test_ticker_started_with_running_task(self, monkeypatch):
+        """存在运行中任务时启动 ticker 以刷新耗时文本。"""
+        from tests.unit.ui.component_renderer import FakePage
+        from ui.views.task_center_view import TaskCenterView
+
+        fake_vm = _FakeTaskCenterViewModel(state=_FakeTaskCenterState(total_count=1, running_count=1))
+        monkeypatch.setattr("ui.views.task_center_view.TaskCenterViewModel", lambda: fake_vm)
+        page = FakePage()
+        page.run_task = MagicMock()
+        component = make_component(TaskCenterView)
+        run_mount_effects(component, page=page)
+        assert page.run_task.call_count == 1
+        args, _kwargs = page.run_task.call_args
+        assert len(args) == 1 and asyncio.iscoroutinefunction(args[0])
+        run_unmount_effects(component)
+
 
 def _find_control_by_type(root: ft.Control, control_type: type) -> ft.Control | None:
     """Recursively find first control of given type in the control tree.
@@ -1096,3 +1341,11 @@ def _find_all_controls_by_type(root: ft.Control, control_type: type) -> list[ft.
                 continue
             results.extend(_find_all_controls_by_type(ctrl, control_type))
     return results
+
+
+def _find_textbutton_by_content(root: ft.Control, content_text: str) -> ft.Control | None:
+    """按 content 文本查找 TextButton (MINOR-11: 定位重新发起指引按钮)。"""
+    return next(
+        (c for c in _find_all_controls_by_type(root, ft.TextButton) if getattr(c, "content", None) == content_text),
+        None,
+    )

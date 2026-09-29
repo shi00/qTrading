@@ -1221,10 +1221,11 @@ class TestDataSourceTabStateBranches:
         result, _ = _mount(component)
         assert _find_button_by_content(result, "settings_init_data") is not None  # noqa: weak-assertion UI 契约测试验证按钮存在性,按钮内容已作为查询键
 
-    def test_sync_button_shows_wait_when_syncing_not_cancellable(
+    def test_sync_button_stays_init_disabled_when_syncing_not_cancellable(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """is_syncing=True, init_sync_cancellable=False → content="sys_init_cancel_wait"。"""
+        """MINOR-11: is_syncing=True, init_sync_cancellable=False → 开始按钮恒定显示
+        "settings_init_data" 且 disabled=True; 无独立取消按钮 (不可取消)。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         _patch_data_source_vms(
@@ -1233,12 +1234,17 @@ class TestDataSourceTabStateBranches:
         )
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, _ = _mount(component)
-        assert _find_button_by_content(result, "sys_init_cancel_wait") is not None  # noqa: weak-assertion UI 契约测试验证按钮存在性,按钮内容已作为查询键
+        btn = _find_button_by_content(result, "settings_init_data")
+        assert btn is not None, "开始按钮应恒定显示初始化历史数据文案 (不再 morph)"
+        assert btn.disabled is True
+        cancel_btn = _find_button_by_content(result, "settings_cancel_sync")
+        assert cancel_btn is None or cancel_btn.visible is False, "不可取消时取消按钮应不可见"
 
-    def test_sync_button_shows_cancel_when_cancellable(
+    def test_sync_button_stays_init_and_shows_cancel_when_cancellable(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """is_syncing=True, init_sync_cancellable=True → content="settings_cancel_sync"。"""
+        """MINOR-11: is_syncing=True, init_sync_cancellable=True → 开始按钮仍为
+        "settings_init_data" 且 disabled; 独立位置显示 "settings_cancel_sync" 取消按钮。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         _patch_data_source_vms(
@@ -1247,7 +1253,12 @@ class TestDataSourceTabStateBranches:
         )
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, _ = _mount(component)
-        assert _find_button_by_content(result, "settings_cancel_sync") is not None  # noqa: weak-assertion UI 契约测试验证按钮存在性,按钮内容已作为查询键
+        sync_btn = _find_button_by_content(result, "settings_init_data")
+        assert isinstance(sync_btn, ft.Button)
+        assert sync_btn.disabled is True, "同步中开始按钮必须禁用"
+        cancel_btn = _find_button_by_content(result, "settings_cancel_sync")
+        assert isinstance(cancel_btn, ft.Button)
+        assert cancel_btn.visible is True
 
     def test_progress_bar_visible_when_init_sync_running(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -1333,10 +1344,10 @@ class TestDataSourceTabStateBranches:
         )
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, _ = _mount(component)
-        # is_syncing=True + not init_sync_cancellable → content="sys_init_cancel_wait"
-        btn = _find_button_by_content(result, "sys_init_cancel_wait")
+        # MINOR-11: is_syncing=True → 开始按钮恒定 "settings_init_data" 且 disabled=True
+        btn = _find_button_by_content(result, "settings_init_data")
         assert btn is not None
-        # actions_disabled = True (any_action_loading), not cancellable → disabled=True
+        # actions_disabled = True (any_action_loading) → disabled=True
         assert btn.disabled is True
 
     def test_action_chip_loading_when_full_sync_active(
@@ -1557,10 +1568,11 @@ class TestDataSourceTabEventHandlers:
         calls = [c[0] for c in fake_vm.method_calls]
         assert "set_history_years" not in calls
 
-    def test_on_init_historical_cancellable_triggers_cancel(
+    def test_on_init_cancel_opens_confirm_without_cancelling(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """is_syncing=True + init_sync_cancellable=True → sync_button → vm.cancel_init_sync。"""
+        """MINOR-11: is_syncing + cancellable → 独立取消按钮点击仅打开确认对话框,
+        未确认时不得直接取消 (DoD 2: 取消操作弹出确认)。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         fake_vm, _ = _patch_data_source_vms(
@@ -1571,7 +1583,34 @@ class TestDataSourceTabEventHandlers:
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, page = _mount(component, page=page)
         btn = _find_button_by_content(result, "settings_cancel_sync")
+        assert btn is not None
         btn.on_click(_make_event())
+        # 未确认前不得调用 cancel_init_sync
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "cancel_init_sync" not in calls, "打开确认框时不应立即取消"
+        # 重渲染后应出现 confirm AlertDialog
+        render_once(component)
+        dialogs = [c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog)]
+        assert len(dialogs) >= 1, "取消按钮应打开确认对话框"
+
+    def test_confirm_cancel_init_triggers_cancel_init_sync(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """MINOR-11: 确认对话框确认按钮 → vm.cancel_init_sync 被调用。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(is_syncing=True, init_sync_cancellable=True)),
+        )
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        _find_button_by_content(result, "settings_cancel_sync").on_click(_make_event())
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        confirm_btn = dialog.actions[1]  # [0]=cancel, [1]=confirm
+        confirm_btn.on_click(_make_event())
         calls = [c[0] for c in fake_vm.method_calls]
         assert "cancel_init_sync" in calls
 
@@ -1589,7 +1628,7 @@ class TestDataSourceTabEventHandlers:
         page = _make_fake_page()
         component = make_component(DataSourceTab, show_snack_callback=snack_cb)
         result, page = _mount(component, page=page)
-        btn = _find_button_by_content(result, "sys_init_cancel_wait")
+        btn = _find_button_by_content(result, "settings_init_data")
         btn.on_click(_make_event())
         snack_cb.assert_called_once()
         args = snack_cb.call_args
