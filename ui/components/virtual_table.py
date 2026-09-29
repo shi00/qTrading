@@ -307,12 +307,13 @@ def _build_header(
         )
         if on_sort is not None and not is_action:
             # 语义挂 `Text.semantics_label` 而非嵌套 `ft.Semantics`:
-            # E2E CI 实证 (PR #655) 在 anchored(COMPLEX, container=True) 与 GestureDetector 之间
-            # 插入带 label 的 Semantics 会在 Flutter 语义树生成独立 role=button 节点, 使 EID
-            # 前缀与 role=button 归因分离, AnchorPage role_filter="button" 前缀匹配失败
-            # (anchor_page.py _wait_for_text_anchor). Text.semantics_label 只改 Text 节点的读屏
-            # 标签, 不产生额外语义边界, anchored→GestureDetector 按 PoC A7 正常合并为单
-            # role=button 节点, textContent = EID\n语义, EID 保持前缀, 排序状态由该 label 朗读.
+            # 历史实证 (E2E CI, PR #655): 当年 legacy 定位按 textContent 前缀 + role 过滤匹配,
+            # 在 anchored(COMPLEX, container=True) 与 GestureDetector 之间插入带 label 的
+            # Semantics 会在 Flutter 语义树新增一个语义边界节点, 使锚点节点不再携带预期的
+            # textContent/role, 前缀/role 匹配失败. 定位改为 identifier 精确选择器后 (P2-5),
+            # 该失败模式已消失 (identifier 不依赖 textContent 前缀/role). 本处结构保持不变,
+            # 本次无行为变更. Text.semantics_label 只改 Text 节点的读屏标签, 不产生额外语义
+            # 边界, 排序状态由该 label 朗读.
             # 分隔符随 locale (zh 全角 / en 半角), 避免英文下跨语言标点混排.
             # label 含 ↑/↓ 箭头: E2E test_screener_sort_by_column 语义断言以
             # "pct_chg (涨跌幅) ↑" 作为朗读锚点 (aria-label* 子串匹配); CanvasKit 无 DOM 文本,

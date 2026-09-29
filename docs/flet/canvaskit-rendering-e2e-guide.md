@@ -22,70 +22,90 @@ Flet Web 依赖 Flutter Web Engine 运行时。Flet 版本由 [`pyproject.toml`]
 
 ---
 
-## 2. CanvasKit 双轨 HTML 语义树 (`<flt-semantics>`) 映射机制
+## 2. `Semantics.identifier` → `flt-semantics-identifier` 精确定位机制
 
 CanvasKit 并非渲染 HTML 原生控件，而是在 `<canvas>` 上绘图，并在上层维护一层 HTML 语义 DOM 树（`<flt-semantics>`）供无障碍辅助技术和 Web 自动化定位。
 
-### 2.1 双轨映射规则
+### 2.1 单一通道：`identifier` 属性
+
+E2E 锚点包装器 `anchored()`（`ui/testing/anchor.py`）在 E2E 模式（`E2E_TESTING=true`）下注入 `ft.Semantics(container=True, label=EID, identifier=EID)`。其中 `identifier=EID` 是**唯一**定位通道：CanvasKit web 将其落为 DOM 属性 `flt-semantics-identifier`。
 
 ```
-                      ┌─────────────────────────────────────────┐
-                      │ ft.Semantics(container=True, label=EID) │
-                      └────────────────────┬────────────────────┘
-                                           │
-                    ┌──────────────────────┴──────────────────────┐
-                    ▼                                             ▼
-       【轨 1: INTERACTIVE / INPUT】                 【轨 2: LABEL / COMPLEX】
-     • ft.Button 系列 (button=True)                 • ft.Text / ft.Dropdown /
-     • ft.TextField / ft.TextArea                  • GestureDetector / Container(on_click)
-                    │                                             │
-                    ▼                                             ▼
-┌───────────────────────────────────────┐     ┌───────────────────────────────────────┐
-│ DOM 生成独立 aria-label 节点:          │     │ DOM 无 aria-label 独立节点，EID 落入  │
-│ <flt-semantics aria-label="EID">      │     │ textContent 文本合并节点:             │
-│   <flt-semantics flt-tappable />     │     │ <flt-semantics>                       │
-│ </flt-semantics>                      │     │   EID\n显示文案                       │
-└───────────────────────────────────────┘     │ </flt-semantics>                      │
-                                              └───────────────────────────────────────┘
+                      ┌───────────────────────────────────────────────┐
+                      │ ft.Semantics(container=True,                  │
+                      │              label=EID, identifier=EID)        │
+                      └───────────────────────┬───────────────────────┘
+                                              │
+                                              ▼
+                        DOM 生成带 identifier 属性的语义节点：
+            <flt-semantics flt-semantics-identifier="<EID>" ...>
+                      （四类 AnchorKind 共用同一节点形态）
 ```
 
-#### 轨 1：INTERACTIVE / INPUT 轨（独立 `aria-label` 节点）
-- **触发条件**：Flet 原生 Button 系列（`ft.Button` / `ft.IconButton` / `ft.FilledButton` 等）、`ft.TextField`，或显式传入 `button=True` 的 Semantics 包装。
-- **DOM 结构**：
-  ```html
-  <flt-semantics aria-label="e2e.screener.run_button">
-    <flt-semantics flt-tappable role="button"></flt-semantics>
-  </flt-semantics>
-  ```
-- **定位策略**：`AnchorPage` 通过 `flt-semantics[aria-label$="EID"]` 精确匹配。
+- **选择器**：`AnchorPage` 一律用
+  `flt-semantics[flt-semantics-identifier="<EID>"]` 精确定位（`_locator_by_identifier`）：
+  无 kind 分派、无前缀/后缀匹配、无 `role` 过滤，也无启发式回退。
+- **节点存在性与 `AnchorKind` 无关**（PoC P0-2 矩阵）：Button 系列 / Text / Dropdown 顶层 /
+  ListView 行 / Dialog 内节点均在同一节点形态上暴露 `identifier`，故四类 kind 共用同一选择器。
+- **`label=EID` 仍然注入**：作为无障碍 label 通道保留（供
+  `tests/e2e/test_screener_anchor_smoke.py` 的 `container=True` 独立性守护断言使用），
+  但**不再是定位通道**。
 
-#### 轨 2：LABEL / COMPLEX 轨（`textContent` 换行合并节点）
-- **触发条件**：`ft.Text`（纯展示）、`ft.Dropdown`、`ft.Container(on_click=...)`、`ft.GestureDetector(on_tap=...)`。
-- **DOM 结构**：CanvasKit **不会**为此类控件生成 `aria-label="EID"` 节点（即使传了 `button=True`，Flutter 引擎对 GestureDetector 场景也会忽略）。
-- **文本合并格式**：Semantics `label`（EID）与子节点的展示文本合并到同一 `<flt-semantics>` 的 `textContent` 中，以 `\n` 分隔：
-  $$\text{textContent} = \text{EID} + \text{"\n"} + \text{Display\_Text}$$
-  *示例*：
-  - 导航标签 `EIDS.NAV.SETTINGS`：`textContent` 值为 `"e2e.nav.settings\n设置"`
-  - 选股列头 `EIDS.SCREENER.column_header("pct_chg")`：`textContent` 值为 `"e2e.screener.column_header.pct_chg\n涨跌幅"`
-- **定位策略**：`AnchorPage` 通过 `_locate_by_text` 在 JavaScript 侧扫描 `textContent` 前缀。
+### 2.2 四类 AnchorKind 的差异（仅影响 bbox 解析）
+
+四类 `AnchorKind` 共用同一 identifier 选择器，差异只体现在「取哪个 bbox 做交互」：
+
+| AnchorKind | bbox 解析 | 说明 |
+| :--- | :--- | :--- |
+| `INTERACTIVE` | identifier 节点自身 bbox | 节点自身即交互面 |
+| `COMPLEX` | identifier 节点自身 bbox | identifier 路径下与 INTERACTIVE 行为一致 |
+| `INPUT` | identifier 节点**后代** `input` / `textarea` bbox | 节点 bbox（如 200×48）与真实 `input` bbox（如 208×54）不一致，需下潜取真实输入面 |
+| `LABEL` | identifier 节点自身 bbox | 纯展示，`click` / `scroll_into_view` 显式拒绝 |
+
+- **INPUT 需下潜**：`ft.TextField` 的 identifier 节点 bbox 含边框/内边距，与真实输入面不一致。
+- **LABEL 为 display-only**：`click` / `scroll_into_view` 会显式抛 `RuntimeError`；断言用
+  `expect_visible` / `click_label`（后者依赖事件冒泡到可点击父容器）。
+- **选项面板无 identifier 覆盖**：Dropdown 打开后的选项节点由 Flet 动态生成、无 anchor
+  覆盖，仍需文本匹配（`_find_option_element`：候选组优先级 + 匹配优先级）。
+- **ListView 视口外行需先滚入**：视口外的行尚未进入语义树构建窗口，identifier 节点可能
+  count=0 / 无 bbox；须先经 `scroll_into_view` 滚入视口再定位点击。
+
+### 2.3 P0-1 PoC 证据（identifier 通道落地结论）
+
+PoC 在锁定 Flet 版本 + CanvasKit 上实测 `Semantics(identifier=…)` 的 web DOM 行为，结论：
+
+- **属性名确认**：`Semantics.identifier` 在 CanvasKit web 上落为 DOM 属性
+  `flt-semantics-identifier`（Android 为 `resource-id`、iOS 为 `accessibilityIdentifier`；
+  本项目只依赖 web 形态）。
+- **`container=True` 非必需**：identifier 属性的生成不依赖 `container=True`；项目仍保留
+  `container=True`，以便 `label` 不被父容器合并（供 `container=True` 独立性守护断言使用）。
+- **bbox 与控件一致**：identifier 节点 bbox 与真实控件/可点击节点一致（Text 类节点自身即
+  交互面，`pointer-events: auto`），故可直接取节点 bbox 中心做物理点击。
+- **未与祖先节点合并**：identifier 节点未被父/祖先语义节点合并，`count()` 全局唯一
+  （四类 kind 同形；offstage 控件为预期排除项，见坑点 8）。
+
+> 说明：本节不登记具体补丁版本号，Flet 版本以 [`pyproject.toml`](../../pyproject.toml) 锁定为准；
+> 引擎 revision 与资源层校验见 [Flet 升级检查清单 §3.4](./upgrade-checklist.md#34-canvaskit-版本验证)。
 
 ---
 
 ## 3. E2E 测试定位与交互坑点及防护规程
 
-### 坑点 1：`textContent` 判定不可使用 `t === label` 严格全匹配（PR 479 修复）
-- **根因**：`LABEL` 锚点包裹 `ft.Text` 时，节点 `textContent` 为 `"EID\n显示文本"`。若判断逻辑要求 `(textContent).trim() === EID`，全匹配必定返回 `false`，导致超时失败。
-- **规程**：`exact=True` 前缀匹配必须允许 `\n` 换行边界：
-  ```javascript
-  if (exact) return t === label || t.startsWith(label + '\n');
-  ```
-  使用 `\n` 分隔符既能精确匹配合并节点（如 `"e2e.nav.settings\n设置"`），又不会误命中同前缀的子命名空间（如 `e2e.nav.settings.tab`）。
+### 坑点 1（历史说明）：`textContent` 严格全匹配曾导致 LABEL 定位失败（PR 479 修复）
+> **已随 identifier 路径废弃**，保留作历史记录与迁移参照。
+- **根因（历史）**：早期 legacy 定位路径按 `textContent` 前缀匹配 EID。`LABEL` 锚点包裹
+  `ft.Text` 时，合并节点 `textContent` 为 `"EID\n显示文本"`，若判定逻辑要求
+  `(textContent).trim() === EID` 则全匹配恒为 `false`，导致超时失败；当年修复为允许
+  `\n` 换行边界（`t === label || t.startsWith(label + '\n')`）。
+- **现状**：定位已改为 identifier 精确选择器（§2），不再有 `textContent` 前缀匹配，
+  该问题不再适用于 anchor 定位。仍按文本匹配的只有 Dropdown 选项面板（坑点 3），
+  其匹配入口 `_find_option_element` 自带匹配优先级，不受本坑点影响。
 
 ### 坑点 2：Playwright DOM 合成 click 事件失效
 - **根因**：CanvasKit 的 `<flt-semantics>` 节点不响应 Playwright `locator.click()` 合成事件或 `element.dispatchEvent(...)`。
 - **规程**：一律获取节点 bounding box，使用真实物理鼠标坐标点击：
   ```python
-  box = await self._locate_inner_tappable_bbox(eid_str)
+  box = await self._identifier_box(eid)  # identifier 节点自身 bbox（INPUT 下潜后代 input）
   await self.page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
   ```
 
@@ -120,13 +140,31 @@ CanvasKit 并非渲染 HTML 原生控件，而是在 `<canvas>` 上绘图，并�
   - **重试粒度**：步骤级（交互方法内部），优于用例级 flaky（flaky 重跑整个用例含 DB seeding/页面加载，CI 成本高且不精准）。`DataPage.select_table` 整体重试（含 `select_option` + `TABLE_READY` 先 hidden 再 visible）。
   - 本地无法复现 CI 偶发，最终验收依赖 CI 连续多次运行时验证。
 
+### 坑点 7：语义树启用 ≠ 应用内容渲染完成（P0-1 PoC 实证）
+- **根因**：CanvasKit 的 `<flt-semantics>` 语义树被启用/挂载，与应用内容（控件）渲染到
+  语义 DOM 是**两件事**。`flt-semantics` 元素出现时其内部节点可能尚未构建完成。
+- **后果**：若以「语义节点数 > 0」作为内容已就绪的提前退出条件，会在内容渲染前就发起
+  定位查询，命中 0 个 identifier 节点，产生**假阴性**（看似控件不存在，实则未渲染完）。
+- **规程**：等待条件必须锚定「应用内容已渲染」的**可观测事实**，而非语义节点数量。
+  可靠做法：轮询 `document.body.innerText` 是否已包含应用文案（如页面标题/按钮文案），
+  确认内容可见后再查询 identifier 节点；随后仍以 identifier 节点的
+  `wait_for(state="visible")` 收敛。
+
+### 坑点 8：offstage / 视口外控件的 identifier 节点 count=0 或无 bbox
+- **根因**：尚未进入语义树构建窗口的控件（offstage 控件、`ListView` 视口外的行）不会
+  生成 identifier 语义节点，或生成了但无有效 bounding box。
+- **后果**：直接 `count()` 得 0、直接取 bbox 抛错，被误判为「锚点缺失」。
+- **规程**：视口外控件须先经 `scroll_into_view`（按 `flt-semantics-identifier` 执行 JS
+  滚入）进入视口再定位；断言/点击前用 `expect_visible`（identifier 节点 `visible` 等待）
+  收敛。`offstage` 控件为**预期排除项**，不应在定位前置等待其出现。
+
 ---
 
 ## 4. E2E 锚点 (EIDS + AnchorKind) 分类速查表
 
 | AnchorKind | 适用控件类型 | DOM 表现形态 | 定位与点击策略 |
 | :--- | :--- | :--- | :--- |
-| **`INTERACTIVE`** | `ft.Button`, `ft.IconButton`, `ft.FilledButton` | `[aria-label="EID"]` 独立节点 (`button=True`) + 内层 `[flt-tappable]` | 按 `aria-label$="EID"` 后缀定位内层 `flt-tappable` bbox，物理鼠标点击 |
-| **`INPUT`** | `ft.TextField`, `ft.TextArea` | `[aria-label="EID"]` + 内层 `<input>` / `<textarea>` | 按 `aria-label$="EID"` 定位 `<input>` bbox，`mouse.click` + `keyboard.type` |
-| **`COMPLEX`** | `ft.Dropdown`, `ft.PopupMenuButton`, `ft.GestureDetector`, `ft.Container(on_click=...)` | `role="button"`，EID 落 `textContent` 形态 `"EID\n<text>"` | 按 `textContent` 前缀 (`.` / `\n`) + `role="button"` 过滤，物理鼠标点击 |
-| **`LABEL`** | `ft.Text` (纯展示, 无点击) | 无 `aria-label` 独立节点，EID 落 `textContent` 形态 `"EID\n<text>"` | 按 `textContent` 精确匹配 (`t === EID` 或 `t.startsWith(EID + "\n")`)，纯展示/断言 |
+| **`INTERACTIVE`** | `ft.Button`, `ft.IconButton`, `ft.FilledButton` | `flt-semantics[flt-semantics-identifier="EID"]` 独立节点（`label="EID"` 另作无障碍通道，`button=True`） | 取 identifier 节点自身 bbox 中心物理鼠标点击（不下潜 `flt-tappable`） |
+| **`INPUT`** | `ft.TextField`, `ft.TextArea` | identifier 节点 + 内层 `<input>` / `<textarea>` | 下潜后代 `input, textarea` 取真实输入面 bbox，`mouse.click` + `keyboard.type` |
+| **`COMPLEX`** | `ft.Dropdown`, `ft.PopupMenuButton`, `ft.GestureDetector`, `ft.Container(on_click=...)` | identifier 节点自身（与 INTERACTIVE 同形） | 取 identifier 节点自身 bbox 中心物理鼠标点击 |
+| **`LABEL`** | `ft.Text` (纯展示, 无点击) | identifier 节点自身 | 取 identifier 节点自身 bbox，纯展示/断言；`click` / `scroll_into_view` 显式拒绝 |

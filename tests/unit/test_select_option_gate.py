@@ -4,17 +4,17 @@
 「代码」→ 菜单从不打开 → 点击落空），必须走展开流程；菜单已展开时才允许预探测。
 
 覆盖两种分支：
-1. 菜单关闭 → 走展开流程（_wait_for_text_anchor 被调用），预探测不短路展开。
-2. 菜单已展开 → 预探测命中选项（_wait_for_text_anchor 不被调用）。
+1. 菜单关闭 → 走展开流程（`_identifier_node_box` 被调用），预探测不短路展开。
+2. 菜单已展开 → 预探测命中选项（`_identifier_node_box` 不被调用）。
 
-P2-2 后 select_option 的展开态读取按定位路径分派（identifier → `_read_expanded_by_identifier`；
-legacy → `_read_expanded`），故本测试对两条路径参数化，保证分支均被覆盖。
+identifier 是唯一定位通道：展开态读取与顶层节点定位均走 identifier
+（`_read_expanded_by_identifier` / `_identifier_node_box`），无 legacy 分支。
 
 用最小 stub 替换 Playwright Page / FletPage，不依赖真实浏览器（同
 test_data_page_select_table_retry.py 模式）。
 """
 
-from typing import Any, Literal
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -72,26 +72,23 @@ class _FakeFletPage:
         self._timeout_multiplier = 1.0
 
 
-@pytest.fixture(params=["identifier", "legacy"])
-def ap(request: pytest.FixtureRequest) -> AnchorPage:
-    locator: Literal["identifier", "legacy"] = request.param
+@pytest.fixture
+def ap() -> AnchorPage:
     return AnchorPage(
         page=_FakePage(),  # type: ignore[arg-type]
         fp=_FakeFletPage(),  # type: ignore[arg-type]
         timeout_multiplier=1.0,
-        locator=locator,
     )
 
 
 def _stub_expanded(ap: AnchorPage, values: list[str | None]) -> None:
-    """两条路径的展开态读取方法均打桩（按 locator 只走其一，另一个不被调用）。"""
-    ap._read_expanded = AsyncMock(side_effect=values)
+    """展开态读取打桩（identifier 是唯一定位通道 → `_read_expanded_by_identifier`）。"""
     ap._read_expanded_by_identifier = AsyncMock(side_effect=values)
 
 
 def _expand_locator_mock(ap: AnchorPage) -> AsyncMock:
-    """返回当前定位路径用于展开下拉的定位桩（identifier → _identifier_node_box）。"""
-    return ap._identifier_node_box if ap._use_identifier else ap._wait_for_text_anchor  # type: ignore[return-value]
+    """返回展开下拉用的定位桩（identifier 唯一路径 → _identifier_node_box）。"""
+    return ap._identifier_node_box  # type: ignore[return-value]
 
 
 async def _run_select_option(ap: AnchorPage, expanded_values: list[str | None]) -> _FakeHandle:
@@ -99,7 +96,6 @@ async def _run_select_option(ap: AnchorPage, expanded_values: list[str | None]) 
     handle = _FakeHandle()
     _stub_expanded(ap, expanded_values)
     ap._find_option_element = AsyncMock(return_value=handle)
-    ap._wait_for_text_anchor = AsyncMock(return_value={"x": 10.0, "y": 20.0, "w": 100.0, "h": 30.0})
     ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
     await ap.select_option(_FILTER_COL_DROPDOWN, "代码", timeout_ms=1000)
     return handle
@@ -128,7 +124,6 @@ async def test_select_option_menu_already_open_uses_preselect(ap: AnchorPage) ->
     handle = _FakeHandle()
     _stub_expanded(ap, ["true", "true"])
     ap._find_option_element = AsyncMock(return_value=handle)
-    ap._wait_for_text_anchor = AsyncMock(return_value={"x": 10.0, "y": 20.0, "w": 100.0, "h": 30.0})
     ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
     await ap.select_option(_FILTER_COL_DROPDOWN, "代码", timeout_ms=1000)
 

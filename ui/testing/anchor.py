@@ -3,13 +3,14 @@
 E2E_TESTING=true 时用 `ft.Semantics(container=True, label=EID, identifier=EID)` 包裹控件；
 生产 build 直接返回原控件，零性能/语义副作用。
 
-`identifier` 在 CanvasKit web 上落为 DOM 属性 `flt-semantics-identifier`（PoC EVIDENCE.md
-P0-1 实测），供 `AnchorPage` 走精确选择器定位（P2-2），其节点存在性与 `AnchorKind` 无关
-（P0-2 矩阵：16 枚基线 identifier 中 14 枚 count=1，其余 2 枚为 offstage 预期排除）。
-`label=EID` 旧双轨通道暂时保留（PR-2 双轨并存；旧启发式在 P2-5 删除）：
-  - INTERACTIVE/INPUT 类控件 → 生成 `flt-semantics[aria-label="EID"]` 独立节点
-  - LABEL/COMPLEX 类控件 → EID 落入该子树 `textContent`
-定位策略由 `AnchorPage` 依 `EIDS` 携带的 `AnchorKind` 分派，本模块只负责生成。
+`identifier` 是唯一定位通道：CanvasKit web 上落为 DOM 属性 `flt-semantics-identifier`
+（PoC EVIDENCE.md P0-1 实测），供 `AnchorPage` 走精确选择器
+`flt-semantics[flt-semantics-identifier="<EID>"]` 定位，其节点存在性与 `AnchorKind`
+无关（P0-2 矩阵：16 枚基线 identifier 中 14 枚 count=1，其余 2 枚为 offstage 预期排除）。
+
+`label=EID` 仍然注入并保留，作为无障碍 label 通道（供 E2E 的 `container=True` 独立性
+守护断言使用），但已不再是定位通道。定位（bbox 解析）由 `AnchorPage` 依 kind 特定语义
+决定（INPUT 下潜后代 input，LABEL 拒绝点击），本模块只负责生成锚点。
 """
 
 from functools import cache
@@ -40,13 +41,12 @@ def anchored(eid: Eid, control: ft.Control) -> ft.Control:
 
     生产 build (`_e2e_enabled=False`): 直接返回原控件，零副作用。
     E2E build (`_e2e_enabled=True`): 用 `Semantics(container=True, label=eid_str,
-    identifier=eid_str)` 包裹。`identifier` 提供精确选择器通道（P2-2），`label` 保留旧
-    双轨通道（P2-5 删旧启发式前双轨并存，回退只需切换定位层选择器）。
+    identifier=eid_str)` 包裹。`identifier` 是唯一定位通道（CanvasKit 落为 DOM 属性
+    `flt-semantics-identifier`，`AnchorPage` 以精确选择器定位）；`label=eid_str` 仍保留，
+    作为无障碍 label 通道（供 E2E 的 `container=True` 独立性守护断言使用），非定位必需。
 
-    INTERACTIVE kind 额外设 `button=True`：CanvasKit 双轨映射仅在 `content` 为
-    标准交互控件（Button 等）时生成 `flt-semantics[aria-label=EID]` 独立节点。
-    GestureDetector 不是标准交互控件，`button=True` 强制 CanvasKit 将 Semantics
-    节点识别为按钮，确保 `aria-label` 生成（PR-2 列头/行 anchor 修复）。
+    INTERACTIVE kind 额外设 `button=True`：保留独立无障碍语义节点（标注为按钮）。
+    定位已由 identifier 承担，`button=True` 不再影响定位行为。
 
     事件穿透：不设 `Semantics.on_tap` → Button.on_click / GestureDetector.on_tap
     正常触发。PoC A3 confirmed（reviews/poc/EVIDENCE.md）。
