@@ -21,7 +21,7 @@ Flet 版本升级时，按以下清单逐项验证。每项验证结果建议记
 
 ### 1.1 版本一致性：`flet-web` 硬编码 pin 同步（必查）
 
-> 背景：`.github/workflows/ci_cd.yml` 的多个 job（我们 CI 中目前是 4 处在 `install dependencies` 段）为规避 Flet 运行时自动安装 `flet-web` 引发的并发 pip install Windows 文件锁 / 无 venv 崩溃问题，硬编码了 `uv pip install --system flet-web==<version>`。`flet-web` 作为 `flet` 的 transitive dependency 与主包同版本发布（见 [canvaskit-rendering-e2e-guide.md](./canvaskit-rendering-e2e-guide.md)），若不与 `pyproject.toml` 锁定的 `flet` 主包同步升级，会在 CI 中残留旧版本 pin。虽然 Flet 启动时 `ensure_flet_web_package_installed()` 会把版本纠正到匹配主包，但这是靠运行时自愈掩盖，会造成每次启动额外重装，且在该自愈路径与并发安装并存时存在文件锁隐患——正是当初引入硬编码 pin 想避免的问题。
+> 背景：`.github/workflows/ci_cd.yml` 的多个 job（我们 CI 中目前是 5 处在 `install dependencies` 段：`ci_cd.yml` 4 处 + `flet-nightly.yml` 1 处）为规避 Flet 运行时自动安装 `flet-web` 引发的并发 pip install Windows 文件锁 / 无 venv 崩溃问题，硬编码了 `uv pip install --system flet-web==<version>`。`flet-web` 作为 `flet` 的 transitive dependency 与主包同版本发布（见 [canvaskit-rendering-e2e-guide.md](./canvaskit-rendering-e2e-guide.md)），若不与 `pyproject.toml` 锁定的 `flet` 主包同步升级，会在 CI 中残留旧版本 pin。虽然 Flet 启动时 `ensure_flet_web_package_installed()` 会把版本纠正到匹配主包，但这是靠运行时自愈掩盖，会造成每次启动额外重装，且在该自愈路径与并发安装并存时存在文件锁隐患——正是当初引入硬编码 pin 想避免的问题。
 
 该 pin 不在 `pyproject.toml` 显式依赖内，`check_docs_consistency.py` 等脚本不会扫描它，属于**版本一致性检查盲区**，只能靠本清单人工同步。
 

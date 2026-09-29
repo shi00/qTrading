@@ -47,6 +47,27 @@
 
 ## 历史核验记录
 
+### Flet 1.0.2 patch 升级核验 @ 1.0 系列 (2026-09-29)
+
+- **API**: V1 声明式 API + 私有 API + flet_charts API + flet-mcp（同版本锁定）+ `Semantics.identifier`（本版本新增，本项目启用归 PR-2）
+- **锁定版本**: Flet 1.0.2（pyproject.toml 实际锁定；flet/flet-desktop/flet-charts/flet-code-editor/flet-mcp 五包同版本升级，flet-web CI pin 同步）
+- **核验来源**:
+  - 官方 CHANGELOG（GitHub Release `v1.0.2`，发布于 2026-09-28）: patch 升级，无破坏性 API 变更。要点：新增 `Semantics.identifier`（落为 Android `resource-id` / iOS `accessibilityIdentifier` / web `flt-semantics-identifier`）与 `Tester.find_by_semantics_identifier()`（flet-dev/flet#6832）；`flet build`/`debug`/`pack`/`test` 支持 `--` 后透传参数（#6879）；`serious_python` 升至 `5.0.0` 并修正含逗号路径 / brace glob 的排除项（#6890）；`flet build` 默认排除 app 根下隐藏项、`pyvenv.cfg` 检出的虚拟环境与 `__pycache__`（#6839/#6890）；修复 `Button(icon=...)` 无 `content` 时的错误框（仅图标居中，#6886/#6889）、CLI 在 Python 3.10–3.13.0 下拒绝选项后位置参数（#6840/#6875）、`--flutter-build-args`/`--pyinstaller-build-args` 以 `-` 开头取值（#6879）、`InteractiveViewer.alignment` 不渲染（#6744/#6887）、flet-charts `ScatterChart` 的 `x_error`/`y_error`（改用新 `ChartErrorRange` 类型，#6885）、Android SDK 自动安装于 Windows（#6522/#6892）、iOS 经 Xcode 运行 `sqlite3` 断言（#5480/#6882）
+  - 项目单元测试（Flet 1.0.2 实跑）: `tests/unit/` 全目录 **14781 passed / 1 skipped / 1 failed**；唯一失败为 `tests/unit/test_utils_config_lock.py::TestConfigThreadSafety::test_config_thread_safety`（`Writer success rate: 19/20`），单测 5 次复跑 **2 通过 / 3 失败**，根因为 Windows 原子重命名竞争（日志 `[WinError 5] 拒绝访问`，`utils/config_handler/storage.py` 的 `os.replace`），属既有 flaky；本次升级 diff 未触及 `utils/config_handler/**`，无因果关系
+  - 项目运行期验证（flet-mcp 1.0.2）: `flet_mcp.mcp.name == "flet-mcp"`，server 可加载；`pip list` 实测 `flet` / `flet-charts` / `flet-code-editor` / `flet-desktop` / `flet-mcp` / `flet-web` 六包均为 `1.0.2`
+  - E2E 资源验证: 升级前后 engineRevision 一致（`0cd610717bde95fd88343c64f81c11ba4e5c0010`），CanvasKit mock 资源无需更新；字体缓存 `sync_e2e_fonts.py` `[OK] 字体缓存完整`（下载 0 / 跳过 103 / 失败 0 / 总计 116）；`tests/e2e/mock_assets/canvaskit/` 与 `site-packages/flet_web/web/canvaskit/` 结构差异项数 == 0（本地 18 = site 18）；site 侧 18 个文件名全部被 `tests/e2e/conftest.py::intercept_external` 的渲染器关键字 `("canvaskit", "skwasm", "wimp")` 覆盖（含 `skwasm_heavy` 子串），**无新渲染器名**
+- **项目结论**: 继续使用
+  - 理由: 1.0.2 为 patch 升级、无破坏性 API 变更，项目切入点（声明式 API、`use_viewmodel`、锚点语义树）无漂移；E2E 资源三层（engineRevision / 字体缓存 / canvaskit 结构）零变化。本版本新增的 `Semantics.identifier` 正是本项目 E2E 定位改造的目标 API（P0 PoC 已在 1.0.2 上实测落地为 DOM 属性 `flt-semantics-identifier`，结论「成立」），但其**启用与旧路径收敛归 Phase 2（PR-2）**，本次 PR-1 不写入 `identifier=`、不改生产渲染行为。1.0.1 核验结论（2026-09-23）在 1.0.2 下保持成立。
+- **需更新文件**:
+  - [x] pyproject.toml (flet 五包 1.0.1 → 1.0.2)
+  - [x] .github/workflows/ci_cd.yml / flet-nightly.yml (flet-web==1.0.2 pin ×5)
+  - [x] .github/renovate.json / .github/ISSUE_TEMPLATE/bug_report.yml (版本描述同步)
+  - [x] requirements*.txt (pip-compile 再生成)
+  - [x] docs/flet/api-verification-template.md (本核验记录)
+  - [x] docs/flet/project-differences.md (最后验证日期 → 2026-09-29)
+  - [x] docs/flet/upgrade-checklist.md (§1.1 `flet-web` pin 处数 4 → 5)
+- **核验人**: AI 助手 (Flet 1.0.2 升级批次)
+
 ### Flet 1.0.1 patch 升级核验 @ 1.0 系列 (2026-09-23)
 
 - **API**: V1 声明式 API + 私有 API + flet_charts API + flet-mcp（同版本锁定）

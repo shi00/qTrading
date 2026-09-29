@@ -84,17 +84,17 @@ fastuuid==0.14.0
     # via litellm
 filelock==4.0.1
     # via huggingface-hub
-flet==1.0.1
+flet==1.0.2
     # via
     #   astockscreener (pyproject.toml)
     #   flet-charts
     #   flet-code-editor
     #   flet-desktop
-flet-charts==1.0.1
+flet-charts==1.0.2
     # via astockscreener (pyproject.toml)
-flet-code-editor==1.0.1
+flet-code-editor==1.0.2
     # via astockscreener (pyproject.toml)
-flet-desktop==1.0.1
+flet-desktop==1.0.2
     # via astockscreener (pyproject.toml)
 frozenlist==1.8.0
     # via
