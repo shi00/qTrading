@@ -2446,6 +2446,153 @@ class TestStreamCardsTruncatedHint:
         assert len(hint_texts) == 0, "不应渲染截断提示文本"
 
 
+# ============================================================================
+# MINOR-06: AI 流式卡片区滚动跟随 (仅贴底时自动跟随 + 「回到最新」入口)
+# ============================================================================
+
+
+def _get_log_column(env: dict) -> ft.Column:
+    """返回 AI 流式卡片区的滚动 Column (唯一 scroll=ScrollMode.ALWAYS 的 Column)."""
+    columns = [
+        c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.Column) and c.scroll == ft.ScrollMode.ALWAYS
+    ]
+    assert len(columns) == 1, f"应恰好有一个流式滚动 Column, 实际 {len(columns)}"
+    return columns[0]
+
+
+def _scroll_event(control: ft.Column, extent_after: float) -> ft.OnScrollEvent:
+    """构造 extent_after 为指定值的滚动事件 (min=0, pixels=0, max=extent_after)."""
+    return ft.OnScrollEvent(
+        name="on_scroll",
+        control=control,
+        event_type=ft.ScrollType.UPDATE,
+        pixels=0.0,
+        min_scroll_extent=0.0,
+        max_scroll_extent=extent_after,
+        viewport_dimension=100.0,
+    )
+
+
+def _jump_to_latest_buttons(env: dict) -> list:
+    """返回渲染树中的「回到最新」按钮."""
+    return [b for b in _get_buttons(env) if "i18n[ai_log_jump_to_latest]" in str(getattr(b, "content", ""))]
+
+
+class TestLogAutoFollowMinor06:
+    """MINOR-06: 用户上滚后停止自动跟随, 且提供「回到最新」入口.
+
+    DoD: 手动上滚后新 token 到达不改变滚动位置 (auto_scroll=False);
+         存在「回到最新」入口。
+    """
+
+    def test_is_log_scrolled_away_from_bottom_helper(self) -> None:
+        """纯函数: extent_after=0(贴底) → False; 超过容差 → True."""
+        from ui.views.screener_view import _is_log_scrolled_away_from_bottom
+
+        assert _is_log_scrolled_away_from_bottom(0.0) is False
+        assert _is_log_scrolled_away_from_bottom(4.0) is False
+        assert _is_log_scrolled_away_from_bottom(200.0) is True
+
+    def test_default_follows_latest(self, screener_view_env) -> None:
+        """初始: auto_scroll=True 且无「回到最新」按钮."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        fake_vm._set_state(
+            stream_cards=(StreamCard(name="test", content="分析结果"),),
+            strategies_loaded=True,
+        )
+        _rerender(env)
+
+        assert _get_log_column(env).auto_scroll is True
+        assert _jump_to_latest_buttons(env) == []
+
+    def test_scroll_away_disables_auto_follow(self, screener_view_env) -> None:
+        """用户上滚(extent_after 超容差) → auto_scroll 关闭 + 出现「回到最新」按钮."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        fake_vm._set_state(
+            stream_cards=(StreamCard(name="test", content="分析结果"),),
+            strategies_loaded=True,
+        )
+        _rerender(env)
+
+        column = _get_log_column(env)
+        _invoke(column.on_scroll, _scroll_event(column, 200.0))
+        _rerender(env)
+
+        assert _get_log_column(env).auto_scroll is False, "上滚后应停止自动跟随 (DoD#1)"
+        assert len(_jump_to_latest_buttons(env)) == 1, "上滚后应出现「回到最新」入口 (DoD#2)"
+
+    def test_scroll_back_to_bottom_resumes_follow(self, screener_view_env) -> None:
+        """滚回底部(extent_after≈0) → 恢复自动跟随且按钮消失."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        fake_vm._set_state(
+            stream_cards=(StreamCard(name="test", content="分析结果"),),
+            strategies_loaded=True,
+        )
+        _rerender(env)
+
+        column = _get_log_column(env)
+        _invoke(column.on_scroll, _scroll_event(column, 200.0))
+        _rerender(env)
+        column = _get_log_column(env)
+        _invoke(column.on_scroll, _scroll_event(column, 0.0))
+        _rerender(env)
+
+        assert _get_log_column(env).auto_scroll is True
+        assert _jump_to_latest_buttons(env) == []
+
+    def test_jump_to_latest_restores_follow_and_rebuilds(self, screener_view_env) -> None:
+        """点击「回到最新」→ 恢复自动跟随, 并按 key 重建滚动区(立即贴底)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        fake_vm._set_state(
+            stream_cards=(StreamCard(name="test", content="分析结果"),),
+            strategies_loaded=True,
+        )
+        _rerender(env)
+
+        column = _get_log_column(env)
+        _invoke(column.on_scroll, _scroll_event(column, 200.0))
+        _rerender(env)
+        before_key = _get_log_column(env).key
+        buttons = _jump_to_latest_buttons(env)
+        assert len(buttons) == 1
+
+        _invoke(buttons[0].on_click, _make_event())
+        _rerender(env)
+
+        column = _get_log_column(env)
+        assert column.auto_scroll is True
+        assert column.key != before_key, "点击后应重建滚动区 (key 变化, 立即贴底)"
+        assert _jump_to_latest_buttons(env) == []
+
+    def test_new_run_resets_follow(self, screener_view_env) -> None:
+        """新一轮运行(state.loading 转 True) → 恢复自动跟随, 不沿用上一轮「已上滚」旧状态."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        fake_vm._set_state(
+            stream_cards=(StreamCard(name="test", content="分析结果"),),
+            strategies_loaded=True,
+        )
+        _rerender(env)
+
+        column = _get_log_column(env)
+        _invoke(column.on_scroll, _scroll_event(column, 200.0))
+        _rerender(env)
+        assert _get_log_column(env).auto_scroll is False
+
+        # 新一轮运行开始 → loading 转 True → use_effect 触发恢复跟随
+        # (effect 在渲染 effects 阶段执行, 其结果需再渲染一次才反映到控件树)
+        fake_vm._set_state(loading=True)
+        _rerender(env)
+        _rerender(env)
+
+        assert _get_log_column(env).auto_scroll is True
+        assert _jump_to_latest_buttons(env) == []
+
+
 class TestBuildHistoryTree:
     """_build_history_tree: 空树/有数据/ExpansionTile."""
 
