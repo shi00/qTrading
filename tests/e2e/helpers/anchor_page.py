@@ -319,6 +319,11 @@ class AnchorPage:
               先展开再搜索. 选项搜索用**候选组优先级** (菜单角色 → role=button
               下拉选项 → 宽泛兜底) + **匹配优先级** (精确 > 前缀别名 > "(别名)"
               括号模式 > 裸子串), 避免裸子串误命中页面无关文本.
+        - C6 (视口外点击静默丢弃): 展开前先 ``scroll_into_view`` 把 Dropdown 滚入
+              视口再取 bbox 点击. MAJOR-08 将日志级别等技术参数收敛进默认折叠的
+              「高级（开发者）」分组后, 展开分组会把 Dropdown 推到视口下方; Playwright
+              ``mouse.click`` 对视口外坐标静默丢弃 (不抛异常、Flutter 收不到 tap),
+              下拉永不展开 → 选项节点不存在 → "option not found".
         - 收合确认 (坑点 6 步骤级重试): 空等 2s + ``retry_until_triggered`` 确认
               菜单收合, 选择未落地即抛明确错误, 不静默返回.
         """
@@ -341,7 +346,14 @@ class AnchorPage:
         # pyright 在捕获点对 `else None` 分支报 Optional 成员访问 (reportOptionalMemberAccess)
         option_element: Any = await self._find_option_element(option_text, eid_str) if menu_expanded == "true" else None
         if not option_element:
-            # 展开菜单：获取 Dropdown 顶层 identifier 节点 bbox
+            # 展开前先把 Dropdown 滚入视口，再取 bbox。
+            # MAJOR-08 将日志级别等技术参数收敛进默认折叠的「高级（开发者）」分组后，
+            # 展开分组会把 Dropdown 推到视口下方（CI run 36535917168 实证 identifier
+            # 节点 bbox y=991 > 视口高 900）。Playwright ``mouse.click`` 对视口外坐标
+            # **静默丢弃**（不抛异常、Flutter 收不到 tap）→ 下拉永不展开 → 选项节点
+            # 不存在 → "option not found"。故点击前必须 scroll_into_view 并重新取 bbox
+            # （同 ``SettingsPage.click_tushare_verify`` 的既有处理）。
+            await self.scroll_into_view(dropdown_eid, timeout_ms)
             box = await self._identifier_node_box(eid_str, timeout_ms)
 
             # 策略 A: 点击右侧下拉箭角 (width - 15px), 直接触发表单展开
