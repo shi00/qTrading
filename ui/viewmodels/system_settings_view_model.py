@@ -280,10 +280,12 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
     # --- Query commands ---
 
     def has_running_tasks(self) -> bool:
-        """是否存在运行中/排队中的后台任务 (保存线程池前的保护性检查, MAJOR-08)。
+        """是否存在运行中/排队中的后台任务 (保存线程池前的告知性确认, MAJOR-08)。
 
+        D7-2 后热重载以 ``cancel_futures=False`` 关闭旧池, 在途/排队任务在旧池继续
+        执行完成、不被中断, 故本检查仅用于弹出告知性确认 (而非拦截破坏性中断)。
         仅读 TaskManager 内存快照 (``get_all_tasks``), 无 IO/DB 访问。查询失败时
-        fail-open 返回 False (宁可漏一层保护也不阻塞用户保存), 并记录脱敏 debug 日志。
+        fail-open 返回 False (宁可漏一层提示也不阻塞用户保存), 并记录脱敏 debug 日志。
         """
         try:
             from services.task_manager import TaskManager, TaskStatus
