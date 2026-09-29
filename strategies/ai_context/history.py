@@ -54,7 +54,9 @@ def _is_valid_limit_price(value) -> bool:
     """涨跌停价是否有效：需为有限数且 ``> 0``。
 
     ``stk_limit`` 中 ``up_limit/down_limit`` 为 0 / 负 / NaN / Inf 均属**无效价**（占位或异常），
-    按「该日无有效记录」处理（H2/R21：不把它伪装成「未涨停」，而是走缺失提示）。
+    该行从查表中剔除，使其落入调用方的「无有效记录」态（H2/R21：不把它伪装成「未涨停」，
+    而是走缺失提示）。**整批行均无效时同样归入缺失态**（不打标签 + 段末缺失提示），不降级到
+    板块规则近似——降级仅在 ``stk_limit`` 查询未返回任何行（``limit_df`` 为 None 或空）时启用。
     """
     try:
         v = float(value)
@@ -66,9 +68,10 @@ def _is_valid_limit_price(value) -> bool:
 def _build_limit_lookup(limit_df: pd.DataFrame | None) -> dict[tuple[str, datetime.date], tuple[float, float]]:
     """将 stk_limit 区间数据一次性构建为 ``{(ts_code, trade_date): (up_limit, down_limit)}``。
 
-    O(1) 查表（非逐日扫 DataFrame）；``limit_df`` 为空或缺列时返回空字典（调用方降级）。
-    逐行跳过无有效涨跌停价（``up_limit`` 或 ``down_limit`` 非有限或 ≤0）的记录，使其落入
-    调用方的「无记录」态（不打标签 + 段末缺失提示，R21），而非静默当作「未涨停」。
+    O(1) 查表（非逐日扫 DataFrame）。``limit_df`` 为 None/空（查询未返回行）时返回空字典，
+    调用方走降级路径；非空但缺列、或行均为无效价时同样返回空字典，但调用方按**缺失态**处理
+    （不打标签 + 段末缺失提示，R21），而非降级近似。逐行跳过无有效涨跌停价（``up_limit`` 或
+    ``down_limit`` 非有限或 ≤0）的记录，使其落入调用方的「无记录」态，而非静默当作「未涨停」。
     """
     if limit_df is None or limit_df.empty:
         return {}
@@ -135,13 +138,14 @@ def _build_history_text(
             ``stock_name``），不引入逐日 DB 查询。
         limit_df: 交易所公布的逐日涨跌停价（``stk_limit`` 表，列
             ``ts_code/trade_date/up_limit/down_limit``）。三态语义：
-            ① None 或空 → 走 ``get_limit_pct`` **降级路径**（按板块规则近似，
-            段落末尾追加 ``ai_limit_price_approx`` 标注；``get_limit_pct`` 返回 None
-            时该日不打标签）；
+            ① ``limit_df`` 为 None 或空（查询未返回任何行）→ 走 ``get_limit_pct``
+            **降级路径**（按板块规则近似，段落末尾追加 ``ai_limit_price_approx`` 标注；
+            ``get_limit_pct`` 返回 None 时该日不打标签）；
             ② 非空且能查到该 (ts_code, 交易日) → 用 ``classify_limit_status`` 按交易所
             公布价判定封板；
-            ③ 非空但该日无记录 → 该日**不打标签**，段落末尾追加 ``ai_limit_price_missing``
-            提示（R21：不把"数据缺失"当成"未涨停"）。
+            ③ 非空但该 (ts_code, 交易日) 无有效记录（含**整批行均为无效价**、缺列、
+            日期无法解析）→ 该日**不打标签**，段落末尾追加 ``ai_limit_price_missing``
+            提示（R21：不把"数据缺失"当成"未涨停"，也不退回板块规则近似）。
 
     价格口径（F1）：``stk_limit`` 的 ``up_limit/down_limit`` 是名义价（与 raw_close 同口径），
     而展示用的 ``close`` 经 ``_get_qfq_df`` 前复权。故涨跌停判定改用**名义 close**
@@ -295,9 +299,13 @@ def _build_history_text(
             I18n.get("ai_kline_header"),
         ]
 
-        # 交易所公布价（stk_limit）优先：一次性构建 O(1) 查表，缺失时才降级到板块规则近似
+        # 交易所公布价（stk_limit）优先：一次性构建 O(1) 查表。只要查询**返回了行**即按交易所
+        # 口径逐日判定，该日无有效记录时归入缺失态（不打标签 + 缺失提示）；仅当查询未返回任何
+        # 行（limit_df 为 None/空）才降级到板块规则近似。判定依据 limit_df 是否有行、而非
+        # lookup 是否非空——否则「整批行均为无效价」时 lookup 为空，会被错走降级，把数据缺失
+        # 伪装成按板块规则的近似涨停，与 F1/R21 及三态③的界定不符。
         limit_lookup = _build_limit_lookup(limit_df)
-        using_exchange_limit = bool(limit_lookup)
+        using_exchange_limit = limit_df is not None and not limit_df.empty
         limit_missing = False
 
         for r in df.tail(3).to_dict("records"):

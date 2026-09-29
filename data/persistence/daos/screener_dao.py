@@ -89,8 +89,11 @@ def _delisting_flag_expr(as_of: str) -> str:
 # __DELISTING_FLAG__ 必须经 _delisting_flag_expr() 渲染（唯一正本），禁止内联复制。
 # DS-02（ST 时点还原链路）：name 列经 name-history LATERAL JOIN 按 as-of 时点还原历史名称
 # （无历史记录时 COALESCE 回退当前名称 stock_basic.name，防空表把全市场误判为非 ST）；
-# 新增派生列 is_st（UPPER(name) LIKE '%ST%'，覆盖 *ST/S*ST，与 utils.limit_status.get_limit_pct
-# 语义一致），供数据层行过滤排除风险警示股（P2）与 as-of 名称涨跌停判定。
+# 新增派生列 is_st（UPPER(name) LIKE '%ST%'，覆盖 *ST/S*ST；其 ST 名称匹配方式与
+# utils.limit_status.get_limit_pct 的 ST 识别一致），供数据层行过滤排除风险警示股（P2）。
+# 注意：is_st 是**全板块**的名称标记，不等价于 get_limit_pct 的涨跌停幅度——后者 ST→5% 仅限
+# 主板（.SH/.SZ），创业板/科创板 ST 仍为 20%、北交所 ST 为 30%；限幅判定须经 get_limit_pct
+# 按板块区分，禁止以 is_st 直接推涨跌停幅度（as-of 名称涨跌停判定走 StockNameHistoryDao）。
 # 新增派生列 is_delisting（名称含「退」或 delist_date 落在 as-of 后 N 天窗口内），供数据层
 # 行过滤排除退市整理期股票（选股池可推荐性）；与 stock_alive_condition 的「数据可见性」
 # 判定分离——退市整理期内确有行情（可见），但不适合推荐（不可推荐），两语义不得混用。
