@@ -2,7 +2,7 @@
 
 守护 `anchored()` 函数的行为契约：
 - 生产模式（E2E_TESTING 未设）: no-op，直接返回原控件（R16 不引入副作用）
-- E2E 模式（E2E_TESTING=true）: 返回 `ft.Semantics(container=True, label=EID, content=control)`
+- E2E 模式（E2E_TESTING=true）: 返回 `ft.Semantics(container=True, label=EID, identifier=EID, content=control)`
 - `@cache` 行为：env var 变更后需 `cache_clear()` 才生效（避免 pytest session 内漂移）
 
 PR-1 范围：仅守护 anchored() 函数行为；INTERACTIVE/INPUT/LABEL/COMPLEX 四类的
@@ -154,6 +154,58 @@ class TestAnchoredE2EMode:
         assert result.button is None or result.button is False, (
             "COMPLEX kind (含 GD) 不应设 button=True（PoC A7：引擎忽略且 GD 走 textContent 通道）"
         )
+
+
+class TestAnchoredIdentifierInjection:
+    """P2-1: `anchored()` E2E 模式注入 `identifier=eid_str`（精确选择器通道）。
+
+    PoC EVIDENCE.md P0-1 实测：`Semantics(identifier=…)` 在 CanvasKit web 落为
+    DOM 属性 `flt-semantics-identifier`；P0-2 矩阵实证其节点存在性与 AnchorKind 无关，
+    故四类 kind 均应注入同一 EID。
+    """
+
+    def test_identifier_is_eid_string_interactive(self, monkeypatch):
+        monkeypatch.setenv("E2E_TESTING", "true")
+        result = anchored(EIDS.SCREENER.RUN_BUTTON, ft.Button("run"))
+        assert isinstance(result, ft.Semantics)
+        eid_str, _kind = EIDS.SCREENER.RUN_BUTTON
+        assert result.identifier == eid_str
+
+    def test_identifier_is_eid_string_input(self, monkeypatch):
+        monkeypatch.setenv("E2E_TESTING", "true")
+        result = anchored(EIDS.DATA.FILTER_VALUE_INPUT, ft.TextField(label="v"))
+        assert isinstance(result, ft.Semantics)
+        eid_str, _kind = EIDS.DATA.FILTER_VALUE_INPUT
+        assert result.identifier == eid_str
+
+    def test_identifier_is_eid_string_label(self, monkeypatch):
+        monkeypatch.setenv("E2E_TESTING", "true")
+        result = anchored(EIDS.NAV.MARKET, ft.Text("行情"))
+        assert isinstance(result, ft.Semantics)
+        eid_str, _kind = EIDS.NAV.MARKET
+        assert result.identifier == eid_str
+
+    def test_identifier_is_eid_string_complex(self, monkeypatch):
+        monkeypatch.setenv("E2E_TESTING", "true")
+        result = anchored(EIDS.SCREENER.STRATEGY_DROPDOWN, ft.Dropdown(label="strategy"))
+        assert isinstance(result, ft.Semantics)
+        eid_str, _kind = EIDS.SCREENER.STRATEGY_DROPDOWN
+        assert result.identifier == eid_str
+
+    def test_identifier_equals_label_dual_track(self, monkeypatch):
+        """identifier 与 label 同值：双轨并存（P2-5 删旧路径前可随时回退选择器）."""
+        monkeypatch.setenv("E2E_TESTING", "true")
+        result = anchored(EIDS.SCREENER.RUN_BUTTON, ft.Button("run"))
+        assert isinstance(result, ft.Semantics)
+        assert result.identifier == result.label
+
+    def test_dynamic_eid_identifier_matches_generated_string(self, monkeypatch):
+        """动态 anchor（静态方法生成）同样注入 identifier，且与生成串逐字一致."""
+        monkeypatch.setenv("E2E_TESTING", "true")
+        eid = EIDS.SCREENER.result_row("000001.SZ")
+        result = anchored(eid, ft.Container(content=ft.Text("row")))
+        assert isinstance(result, ft.Semantics)
+        assert result.identifier == "e2e.screener.result_row.000001.SZ"
 
 
 class TestEidsScreenerPr2:
