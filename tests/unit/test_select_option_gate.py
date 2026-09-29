@@ -3,9 +3,10 @@
 验证核心逻辑：菜单关闭时预探测不得执行（避免全页面文本匹配误命中结果表表头
 「代码」→ 菜单从不打开 → 点击落空），必须走展开流程；菜单已展开时才允许预探测。
 
-覆盖两种分支：
+覆盖三种分支：
 1. 菜单关闭 → 走展开流程（`_identifier_node_box` 被调用），预探测不短路展开。
 2. 菜单已展开 → 预探测命中选项（`_identifier_node_box` 不被调用）。
+3. 展开流程先 `scroll_into_view` 再取 bbox（避免视口外坐标点击被静默丢弃）。
 
 identifier 是唯一定位通道：展开态读取与顶层节点定位均走 identifier
 （`_read_expanded_by_identifier` / `_identifier_node_box`），无 legacy 分支。
@@ -132,4 +133,37 @@ async def test_select_option_menu_already_open_uses_preselect(ap: AnchorPage) ->
     # 已展开 → 预探测直接命中选项，无需再走展开定位
     ap._find_option_element.assert_awaited()
     _expand_locator_mock(ap).assert_not_awaited()
+    assert not handle._visible
+
+
+@pytest.mark.asyncio
+async def test_select_option_scrolls_into_view_before_click(ap: AnchorPage) -> None:
+    """展开流程必须先把 Dropdown 滚入视口，再取 bbox 点击（视口外坐标点击会被静默丢弃）。
+
+    根因（CI run 36535917168）：MAJOR-08 将日志级别收敛进折叠的「高级（开发者）」分组后，
+    展开分组把 Dropdown 推到视口下方（trace 实证 identifier 节点 bbox y=991 > 视口高 900），
+    策略 A/B 的 ``mouse.click`` 坐标 (y=1015) 落在视口外 → 点击被静默丢弃 → 下拉永不展开
+    → "option not found"。故 scroll_into_view 必须发生在取 bbox（进而点击）之前。
+    """
+    events: list[str] = []
+
+    async def _scroll(*_args: Any, **_kwargs: Any) -> None:
+        events.append("scroll")
+
+    async def _box(*_args: Any, **_kwargs: Any) -> dict[str, float]:
+        events.append("box")
+        return {"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0}
+
+    handle = _FakeHandle()
+    _stub_expanded(ap, [None, None])
+    ap.scroll_into_view = AsyncMock(side_effect=_scroll)
+    ap._identifier_node_box = AsyncMock(side_effect=_box)
+    ap._find_option_element = AsyncMock(return_value=handle)
+
+    await ap.select_option(_FILTER_COL_DROPDOWN, "代码", timeout_ms=1000)
+
+    ap.scroll_into_view.assert_awaited_once()
+    # 顺序保证：先滚入视口，再取 bbox（随后立即物理点击）
+    assert events[:2] == ["scroll", "box"]
+    assert ap.page.mouse.clicks, "滚入视口后必须发生展开点击"
     assert not handle._visible
