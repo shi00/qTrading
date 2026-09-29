@@ -221,6 +221,8 @@ class _FakeHomeState:
     market_stale: bool = False
     market_date: str = "--"
     news_rows: tuple = ()
+    # UX-09 MINOR-03: 有效股票代码集合 (对齐 HomeState), 供 NewsFeed 链接校验
+    valid_stock_codes: Any = None
     market_indices: tuple = ()
     market_hsgt: Any = None
     market_hot_concepts: tuple = ()

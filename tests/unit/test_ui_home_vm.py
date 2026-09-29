@@ -633,3 +633,49 @@ class TestNewsRowSentimentWiring:
         from ui.viewmodels.home_view_model import _coerce_sentiment
 
         assert _coerce_sentiment(" Positive ") == "Positive"
+
+
+class TestEnsureValidStockCodes:
+    """UX-09 MINOR-03: _ensure_valid_stock_codes 加载有效代码集合 (源自 stock_basic)."""
+
+    @pytest.fixture
+    def vm(self):
+        vm = HomeViewModel()
+        vm.processor = MagicMock()
+        vm.processor.cache = MagicMock()
+        return vm
+
+    @pytest.mark.asyncio
+    async def test_loads_and_caches_valid_codes(self, vm):
+        vm.processor.cache.stock_dao.get_ts_code_map = AsyncMock(
+            return_value={"600519": "600519.SH", "000001": "000001.SZ"}
+        )
+        result = await vm._ensure_valid_stock_codes()
+        assert result == frozenset({"600519", "000001"})
+        assert vm.state.valid_stock_codes == frozenset({"600519", "000001"})
+
+        # 二次调用命中实例缓存, 不再读库
+        vm.processor.cache.stock_dao.get_ts_code_map.reset_mock()
+        await vm._ensure_valid_stock_codes()
+        vm.processor.cache.stock_dao.get_ts_code_map.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_map_returns_empty_set(self, vm):
+        vm.processor.cache.stock_dao.get_ts_code_map = AsyncMock(return_value={})
+        assert await vm._ensure_valid_stock_codes() == frozenset()
+        assert vm.state.valid_stock_codes == frozenset()
+
+    @pytest.mark.asyncio
+    async def test_db_error_degrades_to_empty_without_caching(self, vm):
+        """DB 失败降级为空集合且不缓存 (下次可重试), 不伪造代码 (R21 精神)."""
+        vm.processor.cache.stock_dao.get_ts_code_map = AsyncMock(side_effect=Exception("db down"))
+        assert await vm._ensure_valid_stock_codes() == frozenset()
+        assert vm._valid_stock_codes is None
+
+    @pytest.mark.asyncio
+    async def test_refresh_news_loads_valid_codes(self, vm):
+        """refresh_news 触发有效代码集合加载。"""
+        vm.processor.cache.stock_dao.get_ts_code_map = AsyncMock(return_value={"600519": "600519.SH"})
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=pd.DataFrame())
+        await vm.refresh_news()
+        assert vm.state.valid_stock_codes == frozenset({"600519"})

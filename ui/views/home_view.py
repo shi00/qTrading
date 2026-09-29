@@ -266,6 +266,7 @@ def HomeView(
                     has_more=state.has_more_news,
                     on_load_more_click=typing.cast("Callable[[ft.ControlEvent], None]", _on_load_more_click),
                     on_view_stock=_on_view_stock,
+                    valid_stock_codes=state.valid_stock_codes,
                 ),
             ]
         )
