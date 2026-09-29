@@ -157,6 +157,11 @@ PoC 在锁定 Flet 版本 + CanvasKit 上实测 `Semantics(identifier=…)` 的 
 - **规程**：视口外控件须先经 `scroll_into_view`（按 `flt-semantics-identifier` 执行 JS
   滚入）进入视口再定位；断言/点击前用 `expect_visible`（identifier 节点 `visible` 等待）
   收敛。`offstage` 控件为**预期排除项**，不应在定位前置等待其出现。
+- **变体：节点有 bbox 但坐标在视口外**：节点已生成、bbox 有效，但坐标落在视口之外
+  （如折叠分组展开后 Dropdown 被推到视口下方，CI 实证 bbox `y=991` > 视口高 `900`）。
+  此时 Playwright `mouse.click(x, y)` 对**视口外坐标静默丢弃**（不抛异常、Flutter 收不到
+  tap），表现为「点击无效、目标永不展开」。`AnchorPage.select_option` 与
+  `SettingsPage.click_tushare_verify` 均在点击前显式 `scroll_into_view` 并重新取 bbox 规避。
 
 ---
 

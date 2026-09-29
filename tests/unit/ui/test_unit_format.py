@@ -168,3 +168,35 @@ class TestIsValidNumber:
     def test_non_numbers(self):
         assert is_valid_number("abc") is False
         assert is_valid_number([1, 2]) is False
+
+
+class TestCritical02ResidualColumns:
+    """CRITICAL-02 残留列回归：选股结果集里曾以裸浮点显示的列。
+
+    - ``n_income``（Tushare 原始单位「元」）必须与 amount/total_mv 同源换算为「亿/B」，
+      不得再以裸浮点（如 ``1900000000.00``）展示；
+    - ``gpm_prev``（上年同期毛利率，值本身即百分数）必须带 "%"。
+    """
+
+    def test_n_income_yuan_to_yi_zh(self):
+        # n_income 原始单位元：1.9e9 元 = 19 亿
+        assert format_metadata_cell("n_income", 1_900_000_000) == "19.00亿"
+
+    def test_n_income_yuan_to_billion_en(self):
+        I18n.set_locale("en_US")
+        assert format_metadata_cell("n_income", 1_900_000_000) == "1.90B"
+
+    def test_n_income_header_unit(self):
+        assert column_header_unit("n_income") == "亿"
+
+    def test_n_income_missing_not_masqueraded(self):
+        # R21: 缺失 → "-"，不得伪装为 0
+        assert format_metadata_cell("n_income", None) == "-"
+        assert format_metadata_cell("n_income", float("nan")) == "-"
+
+    def test_gpm_prev_appends_percent(self):
+        assert format_metadata_cell("gpm_prev", 38.0) == "38.00%"
+        assert format_metadata_cell("gpm_prev", -5.5) == "-5.50%"
+
+    def test_gpm_prev_missing_returns_dash(self):
+        assert format_metadata_cell("gpm_prev", None) == "-"

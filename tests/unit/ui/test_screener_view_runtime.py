@@ -901,6 +901,34 @@ class TestScreenerViewMount:
 
 
 # ============================================================================
+# MINOR-04 (reviews/09-24/09.md): 排除 ST 开关唯一性
+# ============================================================================
+
+
+class TestExcludeStSwitchUniqueness:
+    """MINOR-04: 选股控制区「排除 ST / 风险警示股」开关必须恰好 1 个.
+
+    回归守卫: 曾同时存在 filter_row 内开关与 realtime_controls 中重复的匿名开关,
+    两者绑定同一 state.exclude_st, 界面出现两个一模一样的控件。
+    """
+
+    def test_realtime_controls_has_single_exclude_st_switch(self, screener_view_env) -> None:
+        """DoD: label == I18n.get("screener_exclude_st") 的 ft.Switch 恰好 1 个, 且绑定 VM state."""
+        # 视图内经模块级 I18n 渲染, 与 fixture 注入的 mock I18n 同源
+        expected_label = screener_view_env["mock_i18n"].get("screener_exclude_st")
+        switches = [
+            ctrl
+            for ctrl in _walk_all_controls(screener_view_env["result"])
+            if isinstance(ctrl, ft.Switch) and ctrl.label == expected_label
+        ]
+        assert len(switches) == 1, f"控制区应恰好渲染 1 个排除 ST 开关, 实际 {len(switches)} 个"
+
+        switch = switches[0]
+        assert switch.value == screener_view_env["fake_vm"].state.exclude_st
+        assert switch.on_change is not None, "保留的排除 ST 开关必须绑定 on_change (vm.set_exclude_st)"
+
+
+# ============================================================================
 # Handler 测试: _on_strategy_change
 # ============================================================================
 
@@ -3484,8 +3512,12 @@ class TestStockFilterUX04:
         field = _get_stock_filter_field(env)
         assert field.value == "NOMATCH", "空态分支过滤框应保留且绑定当前过滤值"
 
-    def test_stock_filter_enter_submit_triggers_run(self, screener_view_env) -> None:
-        """D19: 过滤输入框 Enter (on_submit) → 触发策略运行 (表单主操作)."""
+    def test_stock_filter_enter_submit_does_not_trigger_run(self, screener_view_env) -> None:
+        """MAJOR-05: 过滤输入框回车不再触发策略运行 (零外发/零计费).
+
+        旧实现 on_submit→run_click 使回车等同「运行选股」, AI 策略重复外发并计费、
+        覆盖用户正在查看的结果; 过滤已在 on_change 实时生效, 回车无过滤必要性, 故移除绑定。
+        """
         env = screener_view_env
         fake_vm = env["fake_vm"]
         page = env["page"]
@@ -3493,15 +3525,17 @@ class TestStockFilterUX04:
         fake_vm._set_state(selected_strategy="value", strategies_loaded=True)
         _rerender(env)
 
-        page.run_task.reset_mock()
         field = _get_stock_filter_field(env)
-        on_submit = getattr(field, "on_submit", None)
-        assert on_submit is not None, "过滤输入框应绑定 on_submit"  # noqa: weak-assertion on_submit 为后续 _invoke 调用的前置 guard
-        _invoke(on_submit, _make_event("000001"))
+        assert field.on_submit is None, "MAJOR-05: 过滤输入框不得绑定 on_submit (回车不应触发运行)"
 
-        handler, args, _ = _await_run_task_handler(page)
-        asyncio.run(handler(*args))
-        assert any("run_strategy:value" in c for c in fake_vm.method_calls), "Enter 提交应触发策略运行"
+        page.run_task.reset_mock()
+        # 纵深防御: 即便存在残留 submit 处理器也触发一次, 确认不会派发运行任务
+        on_submit: Any = getattr(field, "on_submit", None)
+        if on_submit is not None:
+            _invoke(on_submit, _make_event("000001"))
+
+        assert not page.run_task.called, "过滤输入框回车不得派发运行任务"
+        assert not any(c.startswith("run_strategy:") for c in fake_vm.method_calls), "过滤输入框回车不得触发策略运行"
 
 
 class TestBuildHistoryTreeRowsVectorized:
