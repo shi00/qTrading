@@ -109,24 +109,116 @@ class TestRunNightlyPrediction:
             )
 
     @pytest.mark.asyncio
-    async def test_calendar_check_fails_weekend(self):
+    async def test_calendar_fails_holiday_weekday_skips(self):
+        """D7-4/MINOR-02: 日历查询失败且离线日历判定非交易日（法定节假日，weekday<5）时跳过。
+
+        回归防线：旧实现退回 ``get_now().weekday() >= 5``，节假日（weekday<5）会继续提交付费
+        AI 预测，且 prepare_market_data 只取到上一交易日数据。
+        """
         svc = _FakeSvc()
+        holiday = date(2024, 10, 1)  # 国庆节，周二
+        assert holiday.weekday() < 5
         job, _ = _make_job(svc)
         with (
             patch("services.scheduled_jobs.nightly_prediction.ConfigHandler") as mock_ch,
             patch("services.scheduled_jobs.nightly_prediction.DataProcessor") as mock_dp,
             patch("services.scheduled_jobs.nightly_prediction.get_now") as mock_now,
+            patch("services.scheduled_jobs.nightly_prediction.TaskManager") as mock_tm,
+            patch("services.scheduled_jobs.nightly_prediction.OfflineCalendar") as mock_offline,
+            patch("services.scheduled_jobs.nightly_prediction.logger.info") as mock_info,
         ):
             mock_ch.is_auto_update_enabled.return_value = True
             mock_dp_instance = MagicMock()
             mock_dp_instance.trade_calendar = MagicMock()
             mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(side_effect=Exception("cal error"))
             mock_dp.return_value = mock_dp_instance
-            mock_now_dt = MagicMock()
-            mock_now_dt.date.return_value = date(2024, 6, 15)
-            mock_now_dt.weekday.return_value = 6
-            mock_now.return_value = mock_now_dt
+            mock_now.return_value.date.return_value = holiday
+            mock_offline.is_trading_day.return_value = False
             await job(svc)
+            mock_offline.is_trading_day.assert_called_once_with(holiday)
+            mock_tm.return_value.submit_task.assert_not_called()
+            assert svc.marked_dates == []
+            mock_info.assert_called_once_with("[Scheduler] 离线日历判定 %s 非交易日，跳过预测", holiday)
+
+    @pytest.mark.asyncio
+    async def test_calendar_fails_offline_false_skips(self):
+        """D7-4/MINOR-02: 日历查询失败、离线日历判定非交易日（周末）时跳过，不提交任务。"""
+        svc = _FakeSvc()
+        weekend = date(2024, 6, 15)  # 周六
+        assert weekend.weekday() >= 5
+        job, _ = _make_job(svc)
+        with (
+            patch("services.scheduled_jobs.nightly_prediction.ConfigHandler") as mock_ch,
+            patch("services.scheduled_jobs.nightly_prediction.DataProcessor") as mock_dp,
+            patch("services.scheduled_jobs.nightly_prediction.get_now") as mock_now,
+            patch("services.scheduled_jobs.nightly_prediction.TaskManager") as mock_tm,
+            patch("services.scheduled_jobs.nightly_prediction.OfflineCalendar") as mock_offline,
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            mock_dp_instance = MagicMock()
+            mock_dp_instance.trade_calendar = MagicMock()
+            mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(side_effect=Exception("cal error"))
+            mock_dp.return_value = mock_dp_instance
+            mock_now.return_value.date.return_value = weekend
+            mock_offline.is_trading_day.return_value = False
+            await job(svc)
+            mock_offline.is_trading_day.assert_called_once_with(weekend)
+            mock_tm.return_value.submit_task.assert_not_called()
+            assert svc.marked_dates == []
+
+    @pytest.mark.asyncio
+    async def test_calendar_fails_offline_none_skips(self):
+        """D7-4/MINOR-02: 离线日历超可信区间返回 None 时保守跳过（不提交、不标记完成）。"""
+        svc = _FakeSvc()
+        today = date(2024, 6, 15)
+        job, _ = _make_job(svc)
+        with (
+            patch("services.scheduled_jobs.nightly_prediction.ConfigHandler") as mock_ch,
+            patch("services.scheduled_jobs.nightly_prediction.DataProcessor") as mock_dp,
+            patch("services.scheduled_jobs.nightly_prediction.get_now") as mock_now,
+            patch("services.scheduled_jobs.nightly_prediction.TaskManager") as mock_tm,
+            patch("services.scheduled_jobs.nightly_prediction.OfflineCalendar") as mock_offline,
+            patch("services.scheduled_jobs.nightly_prediction.logger.warning") as mock_warn,
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            mock_dp_instance = MagicMock()
+            mock_dp_instance.trade_calendar = MagicMock()
+            mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(side_effect=Exception("cal error"))
+            mock_dp.return_value = mock_dp_instance
+            mock_now.return_value.date.return_value = today
+            mock_offline.is_trading_day.return_value = None
+            await job(svc)
+            mock_offline.is_trading_day.assert_called_once_with(today)
+            mock_tm.return_value.submit_task.assert_not_called()
+            assert svc.marked_dates == []
+            mock_warn.assert_called_once_with("[Scheduler] 预测交易日无法判定（离线日历超可信区间），跳过本次")
+
+    @pytest.mark.asyncio
+    async def test_calendar_fails_offline_true_submits(self):
+        """D7-4/MINOR-02: 日历查询失败但离线日历确认是交易日、且当日同步完整时，继续提交预测。"""
+        svc = _FakeSvc()
+        svc._last_update_date = "20240615"
+        today = date(2024, 6, 15)
+        job, _ = _make_job(svc)
+        with (
+            patch("services.scheduled_jobs.nightly_prediction.ConfigHandler") as mock_ch,
+            patch("services.scheduled_jobs.nightly_prediction.DataProcessor") as mock_dp,
+            patch("services.scheduled_jobs.nightly_prediction.get_now") as mock_now,
+            patch("services.scheduled_jobs.nightly_prediction.TaskManager") as mock_tm,
+            patch("services.scheduled_jobs.nightly_prediction.OfflineCalendar") as mock_offline,
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            mock_dp_instance = MagicMock()
+            mock_dp_instance.trade_calendar = MagicMock()
+            mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(side_effect=Exception("cal error"))
+            mock_dp.return_value = mock_dp_instance
+            mock_now.return_value.date.return_value = today
+            mock_offline.is_trading_day.return_value = True
+            await job(svc)
+            mock_offline.is_trading_day.assert_called_once_with(today)
+            submit_kwargs = mock_tm.return_value.submit_task.call_args.kwargs
+            assert submit_kwargs.get("unique_key") == "nightly_prediction"
+            assert submit_kwargs.get("cancellable") is False
 
     @pytest.mark.asyncio
     async def test_trading_day_submits_task(self):

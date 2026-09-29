@@ -19,6 +19,7 @@ import pandas as pd
 
 from core.i18n import I18n, Message
 from data.data_processor import DataProcessor
+from data.domain_services.offline_calendar import OfflineCalendar
 from data.persistence.daos.base_dao import DatabaseQueryError
 from data.persistence.review_manager import ReviewManager
 from services.task_manager import TaskManager
@@ -170,8 +171,24 @@ async def _run_nightly_prediction(svc: SchedulerService, runner: AISelectionRunn
             "[Scheduler] Trade calendar check failed for prediction (%s): %s",
             exc_info=True,
         )
-        if get_now().weekday() >= 5:
+        # D7-4/MINOR-02: 与日更（SchedulerService._run_daily_update，D6-2）一致的降级链末级——
+        # 日历查询失败时退回离线日历三态判定，不再退化为 weekday 判断。weekday 无法识别法定
+        # 节假日（全年约 15-20 天），会在节假日照常发起付费 AI 预测：prepare_market_data 取到
+        # 上一交易日数据，AI 对同一交易日重复分析却以今天日期标记完成。
+        offline_result = OfflineCalendar.is_trading_day(today)
+        if offline_result is False:
+            logger.info(
+                "[Scheduler] 离线日历判定 %s 非交易日，跳过预测",
+                today,
+            )
             return
+        if offline_result is None:
+            # 离线日历超可信区间（D2-7）：无法判定，保守跳过；由看门狗在数据就绪后补触发。
+            logger.warning(
+                "[Scheduler] 预测交易日无法判定（离线日历超可信区间），跳过本次",
+            )
+            return
+        # offline_result is True → 继续执行
 
     # D7-3/MINOR-01: 前置条件从「行情表里有今天的数据」改为「当日同步完整成功」。
     # 以调度器水位线 _last_update_date 为唯一判据（日更或补偿任一完整成功后推进，
