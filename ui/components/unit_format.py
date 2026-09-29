@@ -4,6 +4,7 @@ Tushare 原始数据单位（真值，禁改）：
 - ``amount``（成交额）：千元
 - ``vol`` / ``volume``（成交量）：手
 - ``total_mv`` / ``circ_mv``（市值）：万元
+- ``n_income``（净利润）：元
 
 展示口径分两步（先归一到基准单位，再按 locale 量级换算）：
 1. 原始值 → 基准单位：货币类 → 元，数量类 → 手；
@@ -99,6 +100,7 @@ COLUMN_UNIT_SPECS: Mapping[str, ColumnUnitSpec] = MappingProxyType(
         "amount": ColumnUnitSpec("thousand_cny", "cny", 1_000.0, 2, "unit_yi"),
         "total_mv": ColumnUnitSpec("wan_cny", "cny", 10_000.0, 1, "unit_yi"),
         "circ_mv": ColumnUnitSpec("wan_cny", "cny", 10_000.0, 1, "unit_yi"),
+        "n_income": ColumnUnitSpec("cny", "cny", 1.0, 2, "unit_yi"),
         "vol": ColumnUnitSpec("lot", "lot", 1.0, 1, "unit_wanshou"),
         "volume": ColumnUnitSpec("lot", "lot", 1.0, 1, "unit_wanshou"),
     }
@@ -115,6 +117,7 @@ PCT_COLS: frozenset[str] = SIGNED_PCT_COLS | frozenset(
         "dv_ttm",
         "roe",
         "grossprofit_margin",
+        "gpm_prev",
         "debt_to_assets",
         "or_yoy",
         "netprofit_yoy",
