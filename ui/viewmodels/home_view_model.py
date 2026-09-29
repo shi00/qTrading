@@ -76,6 +76,9 @@ class HomeState:
     is_loading_more: bool = False
     # 业务数据 (tuple[Row, ...], 符合 L771)
     news_rows: tuple[NewsRow, ...] = ()
+    # 有效股票代码集合 (6 位 symbol, 源自 stock_basic), 供新闻「查看个股」链接
+    # 校验 (UX-09 MINOR-03); 为空表示尚未加载或加载失败, 此时不生成任何链接。
+    valid_stock_codes: frozenset[str] = frozenset()
     market_indices: tuple[MarketIndexRow, ...] = ()
     market_hsgt: HsgtRow = field(default_factory=HsgtRow)
     market_hot_concepts: tuple[HotConceptRow, ...] = ()
@@ -111,6 +114,10 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         # Internal state (frozen snapshot)
         self._state = HomeState()
 
+        # 有效股票代码集合缓存 (UX-09 MINOR-03): None=未加载; 加载成功后缓存
+        # (stock_basic 每日同步, 变更频率低), 避免每次刷新重复读库。
+        self._valid_stock_codes: frozenset[str] | None = None
+
         # Concurrency Control
         self._load_generation = 0  # Prevent race conditions
 
@@ -129,6 +136,34 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
                 if self.processor is None:
                     self.processor = await ThreadPoolManager().run_async(TaskType.IO, DataProcessor)
         return self.processor
+
+    async def _ensure_valid_stock_codes(self) -> frozenset[str]:
+        """加载有效股票代码集合 (6 位 symbol), 供新闻「查看个股」链接校验 (UX-09 MINOR-03).
+
+        数据源复用 ``stock_dao.get_ts_code_map()`` (源自 ``stock_basic`` 落库的
+        symbol→ts_code 映射)。惰性加载 + 实例级缓存 (stock_basic 每日同步, 集合变更
+        频率低); async 原生 DB 访问, 不阻塞 UI 主线程 (R16)。
+
+        DB 读取失败时不缓存失败结果 (下次刷新重试), 并返回空集合——链接降级为不展示,
+        宁可少展示也不生成未经校验的错误链接 (R21 精神: 不伪造业务合法值)。
+        """
+        if self._valid_stock_codes is not None:
+            return self._valid_stock_codes
+        # NOTE(lazy): 代码集合按 VM 实例生命周期缓存, 不在 stock_basic 同步后主动失效.
+        # ceiling: 应用运行期间新上市/退市股票可能带来链接缺失或多余 (代码集合未刷新).
+        # upgrade: 当 stock_basic 同步具备完成事件/失效通知, 或用户报告链接缺失时, 改为监听同步完成刷新缓存.
+        try:
+            processor = await self._ensure_processor()
+            code_map = await processor.cache.stock_dao.get_ts_code_map()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("[HomeVM] Error loading valid stock codes: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("[HomeVM] Error loading valid stock codes traceback", exc_info=True)
+            return frozenset()
+        self._valid_stock_codes = frozenset(code_map.keys()) if code_map else frozenset()
+        self._set_state(valid_stock_codes=self._valid_stock_codes)
+        return self._valid_stock_codes
 
     def _invoke_single_subscriber(self, cb: Callable[[HomeState], None], snap: HomeState) -> None:
         """覆盖 per-cb 调用策略：HomeVM-specific try/except + warning logging。
@@ -291,6 +326,8 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         Returns: (DataFrame, has_more) — 保留返回值兼容测试
         """
         self._load_generation += 1  # Invalidate pending loads
+        # UX-09 MINOR-03: 加载有效代码集合, 供新闻「查看个股」链接校验 (失败降级为空, 不阻断刷新)
+        await self._ensure_valid_stock_codes()
         batch = await self._fetch_news_batch(0)
 
         has_more = self._state.has_more_news  # batch 为 None 时保持不变

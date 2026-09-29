@@ -36,8 +36,16 @@ from utils.time_utils import get_now
 # 在渲染时按当前 locale 翻译 (CLAUDE.md §3.2 i18n 状态驱动；data 层不感知 locale).
 NEWS_TITLE_CODE_TO_I18N_KEY: dict[str, str] = {"no_title": "news_no_title"}
 
-# A 股股票代码正则: 6 位数字, 可选 SH/SZ/BJ 前缀 (如 SZ000001, 600519)
-_STOCK_CODE_RE = re.compile(r"(?:SH|SZ|BJ)?(\d{6})")
+# A 股股票代码「强标记」正则 (UX-09 MINOR-03): 仅匹配带交易所前缀 (SH/SZ/BJ)
+# 或被括号包裹的 6 位数字 (如 SZ000001 / （600519） / （SH600519）), 不匹配孤立 6 位数字——
+# 裸数字易把金额/数量 (如「募资 600000 万元」「成交 300750 手」) 当股票代码, 且这些数值
+# 本身可能恰好是合法代码, 故必须依赖强标记 + 有效代码集合双重校验 (见 _extract_stock_codes)。
+# 两个捕获组分别对应「前缀式」与「括号式」, 命中其一即取该组。
+_STOCK_CODE_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:SH|SZ|BJ)(\d{6})(?!\d)"
+    r"|[（(]\s*(?:SH|SZ|BJ)?\s*(\d{6})\s*[）)]",
+    re.IGNORECASE,
+)
 
 
 def _sentiment_style(sentiment: str | None) -> str:
@@ -86,25 +94,39 @@ def _translate_title_code(code: str) -> str:
     return I18n.get(i18n_key)
 
 
-def _extract_stock_code(content: str) -> str:
-    """从新闻内容中提取第一个 A 股股票代码 (6 位数字).
+def _extract_stock_codes(content: str, valid_codes: frozenset[str] | None = None) -> list[str]:
+    """从新闻内容提取被强标记指向的 A 股股票代码 (6 位, 按出现顺序去重).
 
-    返回空字符串表示未找到。仅匹配 6 位连续数字, 过滤日期/年份等误匹配:
-    排除以 20 开头的年份模式 (如 20240101) 及纯 8 位日期。
+    UX-09 MINOR-03: 仅认可「带 SH/SZ/BJ 前缀」或「被括号包裹」的 6 位数字, 且必须落在
+    ``valid_codes`` (stock_basic 落库的有效代码集合) 内, 才视为股票引用 (双重校验)。
+    孤立 6 位数字不再匹配: 金额/数量 (如「募资 600000 万元」「成交 300750 手」) 与股票
+    代码同形, 且这些数值本身可能恰好是合法代码, 仅靠正则或代码集合都无法区分, 故以
+    强标记为准, 从源头杜绝误链接 (R21 精神: 宁可少链接也不伪造可信引用)。
+
+    正文含多只股票时返回多个代码 (按出现顺序), 供渲染多个「查看个股」链接。
+
+    Args:
+        content: 新闻正文。
+        valid_codes: 有效股票代码集合 (6 位 symbol, 源自 ``stock_basic``); 为空/None 时
+            一律返回空列表——DB 未就绪或加载失败时降级为不生成链接, 而非生成未经
+            校验的链接。
+
+    Returns:
+        校验通过且去重后的代码列表 (可能为空)。
     """
     if not content:
-        return ""
+        return []
+    valid = valid_codes or frozenset()
+    if not valid:
+        return []
+    codes: list[str] = []
+    seen: set[str] = set()
     for m in _STOCK_CODE_RE.finditer(content):
-        code = m.group(1)
-        # 排除 8 位日期中的 6 位子串: 检查前后是否有连续数字
-        start = m.start(1)
-        end = m.end(1)
-        before = content[start - 1] if start > 0 else ""
-        after = content[end] if end < len(content) else ""
-        if before.isdigit() or after.isdigit():
-            continue
-        return code
-    return ""
+        code = m.group(1) or m.group(2)
+        if code and code in valid and code not in seen:
+            seen.add(code)
+            codes.append(code)
+    return codes
 
 
 # 时间/日期缺失时的 i18n 键（R21: 不以看似合法的时分伪装缺失）
@@ -182,12 +204,15 @@ def _build_news_item(
     news_id: str,
     on_view_stock: Callable[[str], None] | None = None,
     today: datetime.date | None = None,
+    valid_stock_codes: frozenset[str] | None = None,
 ) -> ft.Container:
     """Build a single news item container (pure function).
 
     Receives a NewsRow + key, no state dependency.
     ``today`` 用于判定"今日/非今日"显示格式；缺省取 ``get_now().date()``
     （测试应显式注入固定日期，与生产取日期同源）。
+    ``valid_stock_codes`` 为有效股票代码集合 (stock_basic)，用于校验「查看个股」
+    链接候选 (UX-09 MINOR-03)；为空时不生成任何链接。
     """
     if today is None:
         today = get_now().date()
@@ -238,20 +263,21 @@ def _build_news_item(
         )
     )
 
-    # 查看个股 link (仅当内容含股票代码且提供回调时显示)
-    stock_code = _extract_stock_code(content)
+    # 查看个股 link (仅当内容含经校验的股票引用且提供回调时显示; 可含多只)
+    stock_codes = _extract_stock_codes(content, valid_stock_codes)
     content_controls: list[ft.Control] = [
         ft.Text(content, size=AppStyles.FONT_SIZE_LG, color=AppColors.TEXT_PRIMARY),
     ]
-    if stock_code and on_view_stock is not None:
-        content_controls.append(
-            ft.TextButton(
-                content=f"{I18n.get('news_view_stock')} ({stock_code})",
-                on_click=safe_on_click(lambda _e, c=stock_code: on_view_stock(c)),
-                style=ft.ButtonStyle(color=AppColors.PRIMARY),
-                height=28,
+    if on_view_stock is not None:
+        for stock_code in stock_codes:
+            content_controls.append(
+                ft.TextButton(
+                    content=f"{I18n.get('news_view_stock')} ({stock_code})",
+                    on_click=safe_on_click(lambda _e, c=stock_code: on_view_stock(c)),
+                    style=ft.ButtonStyle(color=AppColors.PRIMARY),
+                    height=28,
+                )
             )
-        )
 
     return ft.Container(
         key=news_id,
@@ -271,11 +297,13 @@ def _build_news_controls(
     news_rows: tuple[NewsRow, ...],
     today: datetime.date,
     on_view_stock: Callable[[str], None] | None = None,
+    valid_stock_codes: frozenset[str] | None = None,
 ) -> list[ft.Control]:
     """构建新闻列表控件，换日时插入日期分隔条（纯函数，``today`` 注入便于测试）。
 
     按 ``news_rows`` 顺序遍历：某行日期与上一已渲染日期组不同时插入分隔条；
     同一日期多条目仅一条分隔条；日期缺失/无法解析的行不触发分组变化（R21）。
+    ``valid_stock_codes`` 透传给 ``_build_news_item`` 以校验「查看个股」链接候选。
     """
     controls: list[ft.Control] = []
     current_date: datetime.date | None = None
@@ -285,7 +313,15 @@ def _build_news_controls(
         if row_date is not None and row_date != current_date:
             controls.append(_build_date_separator(row_date, today))
             current_date = row_date
-        controls.append(_build_news_item(row, str(i), on_view_stock=on_view_stock, today=today))
+        controls.append(
+            _build_news_item(
+                row,
+                str(i),
+                on_view_stock=on_view_stock,
+                today=today,
+                valid_stock_codes=valid_stock_codes,
+            )
+        )
     return controls
 
 
@@ -295,6 +331,7 @@ def NewsFeed(
     has_more: bool = False,
     on_load_more_click: Callable[[ft.ControlEvent], None] | None = None,
     on_view_stock: Callable[[str], None] | None = None,
+    valid_stock_codes: frozenset[str] | None = None,
 ) -> ft.Container:
     """News feed component (declarative).
 
@@ -313,6 +350,8 @@ def NewsFeed(
         has_more: 是否显示"加载更多"按钮
         on_load_more_click: "加载更多"按钮点击回调
         on_view_stock: "查看个股"点击回调, 接收股票代码 (Task 8.1)
+        valid_stock_codes: 有效股票代码集合 (stock_basic, 经 ViewModel 获取),
+                   用于校验"查看个股"链接候选 (UX-09 MINOR-03); 为空时不生成链接
     """
     # Subscribe to i18n + theme changes (triggers auto-rerender)
     ft.use_state(get_observable_state)
@@ -350,7 +389,12 @@ def NewsFeed(
 
     # --- Build news items (含换日日期分隔条) ---
     today = get_now().date()
-    controls: list[ft.Control] = _build_news_controls(news_rows, today, on_view_stock=on_view_stock)
+    controls: list[ft.Control] = _build_news_controls(
+        news_rows,
+        today,
+        on_view_stock=on_view_stock,
+        valid_stock_codes=valid_stock_codes,
+    )
 
     # --- Load more button ---
     if has_more:
