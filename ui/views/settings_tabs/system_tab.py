@@ -580,7 +580,9 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         _set_field_error("sys_pool_cpu", cpu_err)
         if io_err is not None or cpu_err is not None:
             return
-        # MAJOR-08: 保存线程池会重建线程池并中断排队任务, 存在运行中任务时先弹确认。
+        # MAJOR-08: 保存线程池会重建线程池 (新提交走新池)。D7-2 后旧池以
+        # cancel_futures=False 关闭, 在途/排队任务在旧池继续执行完、不被中断;
+        # 存在运行中任务时先弹告知性确认 (见 utils/thread_pool.py::reload_config)。
         if settings_vm.has_running_tasks():
             set_thread_pool_confirm_open(True)
             return
@@ -951,7 +953,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     # --- MAJOR-08: 高级 (开发者) 分组 — 默认折叠 ---
     # 连接池 / 线程池 / 日志级别 / 代理白名单等技术参数默认折叠, 组内附
-    # 「重启或重载生效 / 调整会中断排队任务」说明, 降低普通用户误操作风险。
+    # 「连接池需重启生效 / 保存线程池不中断在途与排队任务」说明, 降低普通用户误操作风险。
     advanced_title = ft.Text(
         I18n.get("sys_advanced_group_title"),
         size=AppStyles.FONT_SIZE_LG,
