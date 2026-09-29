@@ -33,6 +33,7 @@ from ui.views.task_center_view import (
     _build_task_card,
     _format_duration,
     _format_time,
+    _get_page,
     _get_status_color,
     _get_status_label,
     _task_time_summary,
@@ -92,6 +93,23 @@ class TestFormatTime:
     def test_midnight(self):
         dt = datetime.datetime(2025, 1, 1, 0, 0, 0)
         assert _format_time(dt) == "00:00:00"
+
+
+class TestGetPage:
+    """_get_page 模块级纯函数测试 (ft.context.page 守卫)。"""
+
+    def test_returns_page_when_context_available(self):
+        """渲染上下文可用时返回 page 实例。"""
+        mock_page = MagicMock(name="page")
+        with patch("ui.views.task_center_view.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: mock_page)  # noqa: B010
+            assert _get_page() is mock_page
+
+    def test_returns_none_when_runtime_error(self):
+        """ft.context.page 抛 RuntimeError 时返回 None (未在渲染上下文)。"""
+        with patch("ui.views.task_center_view.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))  # noqa: B010
+            assert _get_page() is None
 
 
 class TestGetStatusLabel:
@@ -1294,6 +1312,75 @@ class TestTaskCenterViewComponentBody:
         assert page.run_task.call_count == 1
         args, _kwargs = page.run_task.call_args
         assert len(args) == 1 and asyncio.iscoroutinefunction(args[0])
+        run_unmount_effects(component)
+
+    def test_ticker_tick_advances_and_propagates_cancelled_error(self, monkeypatch):
+        """MINOR-11: ticker 循环体每 1s 递增计数 (驱动耗时文本刷新), 且 CancelledError 必须传播 (R2)。"""
+        from tests.unit.ui.component_renderer import FakePage
+        from ui.views.task_center_view import TaskCenterView
+
+        fake_vm = _FakeTaskCenterViewModel(state=_FakeTaskCenterState(total_count=1, running_count=1))
+        monkeypatch.setattr("ui.views.task_center_view.TaskCenterViewModel", lambda: fake_vm)
+        page = FakePage()
+        page.run_task = MagicMock()
+        component = make_component(TaskCenterView)
+        run_mount_effects(component, page=page)
+        # page.run_task(handler) 要求传入协程函数 (Flet 内部执行 handler(*args))，
+        # 故此处取出的是 _tick 函数本身，需调用后得到协程再驱动。
+        tick_factory = page.run_task.call_args[0][0]
+
+        sleep_calls = 0
+
+        async def _fake_sleep(_seconds: float) -> None:
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls > 1:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr("ui.views.task_center_view.asyncio.sleep", _fake_sleep)
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            asyncio.run(tick_factory())
+        # R2: 异常原样传播, 未被 except 分支吞没
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        # 首轮 sleep 后执行循环体 (递增计数), 次轮 sleep 抛 CancelledError 终止循环
+        assert sleep_calls == 2
+        run_unmount_effects(component)
+
+    def test_reopen_source_click_navigates_to_data_source(self, monkeypatch):
+        """DoD 3: 点击「前往数据源页重新发起」→ PubSub 广播 TOPIC_NAVIGATE / "settings:data"。"""
+        from tests.unit.ui.component_renderer import FakePage
+        from ui.pubsub_topics import TOPIC_NAVIGATE
+        from ui.views.task_center_view import TaskCenterView
+
+        row = _make_task_row(id="hist-9", status=TaskStatus.FAILED, error="disk full", is_retryable=False)
+        fake_vm = _FakeTaskCenterViewModel(state=_FakeTaskCenterState(tasks=(row,), total_count=1))
+        monkeypatch.setattr("ui.views.task_center_view.TaskCenterViewModel", lambda: fake_vm)
+        page = FakePage()
+        page.pubsub = MagicMock()  # type: ignore[attr-defined]  # [reason: FakePage 未定义 pubsub, 测试注入以验证深链导航]
+        component = make_component(TaskCenterView)
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+        btn = _find_textbutton_by_content(result, "task_failed_reopen_source")
+        assert isinstance(btn, ft.TextButton)
+        _trigger_callback(btn.on_click, MagicMock())
+        page.pubsub.send_all_on_topic.assert_called_once_with(TOPIC_NAVIGATE, "settings:data")
+        run_unmount_effects(component)
+
+    def test_reopen_source_without_pubsub_does_not_raise(self, monkeypatch):
+        """无 pubsub 的 page (或未在渲染上下文) 时导航静默降级, 不抛异常。"""
+        from tests.unit.ui.component_renderer import FakePage
+        from ui.views.task_center_view import TaskCenterView
+
+        row = _make_task_row(id="hist-10", status=TaskStatus.FAILED, error="disk full", is_retryable=False)
+        fake_vm = _FakeTaskCenterViewModel(state=_FakeTaskCenterState(tasks=(row,), total_count=1))
+        monkeypatch.setattr("ui.views.task_center_view.TaskCenterViewModel", lambda: fake_vm)
+        page = FakePage()
+        component = make_component(TaskCenterView)
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+        btn = _find_textbutton_by_content(result, "task_failed_reopen_source")
+        assert isinstance(btn, ft.TextButton)
+        _trigger_callback(btn.on_click, MagicMock())
         run_unmount_effects(component)
 
 

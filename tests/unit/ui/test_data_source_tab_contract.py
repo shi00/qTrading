@@ -15,6 +15,7 @@
 # 测试行为由测试用例本身验证。
 
 import contextlib
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1613,6 +1614,77 @@ class TestDataSourceTabEventHandlers:
         confirm_btn.on_click(_make_event())
         calls = [c[0] for c in fake_vm.method_calls]
         assert "cancel_init_sync" in calls
+
+    def test_on_init_cancel_noop_when_not_cancellable(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """MINOR-11: 非同步态 (不可取消) 点击独立取消按钮 → 早返回, 不打开确认框、不取消。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(is_syncing=False, init_sync_cancellable=False)),
+        )
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        btn = _find_button_by_content(result, "settings_cancel_sync")
+        assert btn is not None
+        btn.on_click(_make_event())
+        render_once(component)
+        dialogs = [c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog)]
+        assert dialogs == [], "非同步态取消按钮不应打开确认框"
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "cancel_init_sync" not in calls
+
+    def test_do_cancel_init_sync_propagates_cancelled_error(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """R2: vm.cancel_init_sync 抛 CancelledError 时必须向上传播 (不被 except Exception 吞没)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        class _CancellingVM(_FakeDataSourceViewModel):
+            async def cancel_init_sync(self) -> None:
+                raise asyncio.CancelledError
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_CancellingVM(state=_FakeDataSourceState(is_syncing=True, init_sync_cancellable=True)),
+        )
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        _find_button_by_content(result, "settings_cancel_sync").on_click(_make_event())
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        confirm_btn = dialog.actions[1]  # [0]=cancel, [1]=confirm
+        with pytest.raises(asyncio.CancelledError):
+            confirm_btn.on_click(_make_event())
+
+    def test_do_cancel_init_sync_logs_error_on_exception(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch, caplog
+    ):
+        """非取消类异常 → 记录 error 日志且不上抛 (避免中断 UI 事件链)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        class _FailingVM(_FakeDataSourceViewModel):
+            async def cancel_init_sync(self) -> None:
+                raise RuntimeError("cancel boom")
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FailingVM(state=_FakeDataSourceState(is_syncing=True, init_sync_cancellable=True)),
+        )
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        _find_button_by_content(result, "settings_cancel_sync").on_click(_make_event())
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        confirm_btn = dialog.actions[1]  # [0]=cancel, [1]=confirm
+        with caplog.at_level(logging.ERROR, logger="ui.views.settings_tabs.data_source_tab"):
+            confirm_btn.on_click(_make_event())
+        assert any("取消初始化同步失败" in r.message for r in caplog.records)
 
     def test_on_init_historical_syncing_not_cancellable_shows_snack(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
