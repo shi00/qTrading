@@ -365,11 +365,11 @@ PR #373 定位根因为"main 基线视口 6px 边缘状态 + 新增 backtest\_bt
 
 **产生背景与现状**
 
-`ui/views/onboarding_wizard.py` 的 SKIP\_BUTTON 用 `ft.TextButton` + `AnchorKind.INTERACTIVE`。PoC 只验证了 `ft.Button` 的 INTERACTIVE 通道（生成 `flt-tappable`），未验证 `ft.TextButton`。`_locate_inner_tappable_bbox` 有回退逻辑（`flt-tappable` 不存在时回退到外层 `aria-label` 节点），但回退 bbox 可能偏离。当前 `click_skip` 未被任何测试使用。相关文件：`ui/views/onboarding_wizard.py`、`tests/e2e/helpers/anchor_page.py`、`ui/testing/e2e_ids.py`。
+`ui/views/onboarding_wizard.py` 的 SKIP\_BUTTON 用 `ft.TextButton` + `AnchorKind.INTERACTIVE`。PoC 只单独实测了 `ft.Button` 的 INTERACTIVE 行为（identifier 节点 bbox 与真实可点击节点一致），未单独实测 `ft.TextButton` 的 identifier 节点 bbox 是否同样与可点击面一致。identifier 路径取节点自身 bbox（不下潜 `flt-tappable`、无 `aria-label` 回退），若 `ft.TextButton` 节点 bbox 偏离真实可点击面，点击坐标会落空。当前 `click_skip` 仍未被任何测试使用。相关文件：`ui/views/onboarding_wizard.py`、`tests/e2e/helpers/anchor_page.py`、`ui/testing/e2e_ids.py`。
 
 **期望的最终解法**
 
-① 在 E2E smoke test 中验证 `ft.TextButton` 的 CanvasKit DOM 生成行为；② 若不生成 `flt-tappable`，将 `SKIP_BUTTON` 改为 `AnchorKind.COMPLEX` 或将 `ft.TextButton` 改为 `ft.Button`。验收标准：① `click_skip` E2E 测试通过；② bbox 点击坐标命中按钮。upgrade 触发条件：① 新增使用 `click_skip` 的测试时；② 或 `ft.TextButton` 升级时。
+① 在 E2E smoke test 中验证 `ft.TextButton` 的 CanvasKit identifier 节点 bbox 是否与真实可点击面一致；② 若 bbox 偏离，将 `SKIP_BUTTON` 改为 `AnchorKind.COMPLEX` 或将 `ft.TextButton` 改为 `ft.Button`。验收标准：① `click_skip` E2E 测试通过；② bbox 点击坐标命中按钮。upgrade 触发条件：① 新增使用 `click_skip` 的测试时；② 或 `ft.TextButton` 升级时。
 
 #### P3-PR3-MutPool-Locale-Restore-No-Fallback：PR-3 对抗性检视 M6：test\_settings\_language\_switch finally 块还原失败时 mut pool 内连坐污染
 

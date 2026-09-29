@@ -6,7 +6,8 @@
   （PoC EVIDENCE.md P0-2 矩阵：identifier 节点存在性与 AnchorKind 无关）。
 - INPUT 仍需下潜到后代 ``input, textarea``（P0-2 矩阵行 7-8：identifier 节点 bbox
   与真实 input bbox 不一致）。
-- 两路径不混合：``locator="legacy"`` 时不得出现 identifier 选择器，反之亦然。
+- identifier 是唯一定位通道：不得出现任何启发式选择器（aria 后缀 / textContent
+  前缀 / role 过滤），也不存在 legacy 回退路径。
 
 用最小 stub 替换 Playwright Page / FletPage，不依赖真实浏览器。
 """
@@ -111,13 +112,12 @@ class _FakeFletPage:
         self._timeout_multiplier = 1.0
 
 
-def _make_ap(locator: str = "identifier") -> tuple[AnchorPage, _FakePage]:
+def _make_ap() -> tuple[AnchorPage, _FakePage]:
     page = _FakePage()
     ap = AnchorPage(
         page=page,  # type: ignore[arg-type]
         fp=_FakeFletPage(),  # type: ignore[arg-type]
         timeout_multiplier=1.0,
-        locator=locator,  # type: ignore[arg-type]
     )
     return ap, page
 
@@ -141,7 +141,6 @@ def _stub_select_option(ap: AnchorPage, handle: _FakeHandle) -> AsyncMock:
     返回 `_find_option_element` 的 mock，供断言选项定位通道。
     """
     find_mock = AsyncMock(return_value=handle)
-    ap._read_expanded = AsyncMock(side_effect=[None, None])  # type: ignore[method-assign]
     ap._read_expanded_by_identifier = AsyncMock(side_effect=[None, None])  # type: ignore[method-assign]
     ap._find_option_element = find_mock  # type: ignore[method-assign]
     ap._identifier_node_box = AsyncMock(  # type: ignore[method-assign]
@@ -242,20 +241,6 @@ async def test_scroll_into_view_label_still_rejected() -> None:
     ap, _page = _make_ap()
     with pytest.raises(RuntimeError, match="display-only"):
         await ap.scroll_into_view(_LABEL, timeout_ms=1000)
-
-
-# ----------------------------------------------------------------
-# 两路径不混合：legacy 模式不得出现 identifier 选择器
-# ----------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_legacy_mode_does_not_use_identifier_selector() -> None:
-    ap, page = _make_ap(locator="legacy")
-    await ap.expect_visible(_INTERACTIVE, timeout_ms=1000)
-
-    assert not any("flt-semantics-identifier" in s for s in page.selectors)
-    assert any("aria-label$=" in s for s in page.selectors)
 
 
 # ----------------------------------------------------------------

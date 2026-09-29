@@ -157,16 +157,16 @@ args = (
 
 ### 3.9 CanvasKit 语义树行为验证（Flet 升级必查）
 
-> 背景：CanvasKit 在 `<canvas>` 上绘图，并维护一层 `<flt-semantics>` HTML 语义 DOM 树供无障碍辅助技术和 Playwright 定位。本项目 [canvaskit-rendering-e2e-guide.md](./canvaskit-rendering-e2e-guide.md) §2-§3 记录了双轨语义映射规则与 5 个交互坑点，这些行为由 Flutter engine 的 SemanticsBinding 实现，**随 engineRevision 变化可能漂移**。§3.4-3.8 只验证资源层（engineRevision 是否变化、canvaskit.js/wasm 是否同步），本节验证**行为层**是否仍然成立。
+> 背景：CanvasKit 在 `<canvas>` 上绘图，并维护一层 `<flt-semantics>` HTML 语义 DOM 树供无障碍辅助技术和 Playwright 定位。本项目 [canvaskit-rendering-e2e-guide.md](./canvaskit-rendering-e2e-guide.md) §2-§3 记录了 `Semantics.identifier` → `flt-semantics-identifier` 精确定位机制与交互坑点，这些行为由 Flutter engine 的 SemanticsBinding 实现，**随 engineRevision 变化可能漂移**。§3.4-3.8 只验证资源层（engineRevision 是否变化、canvaskit.js/wasm 是否同步），本节验证**行为层**是否仍然成立。
 
 **升级 Flet 时需验证**（engineRevision 变化时为必查项，未变化时为可选冒烟项）：
 
-- [ ] **双轨语义映射规则**：INTERACTIVE/INPUT 轨（`ft.Button` 系列、`ft.TextField`）仍生成 `[aria-label="EID"]` 独立节点 + 内层 `[flt-tappable]`；LABEL/COMPLEX 轨（`ft.Text`、`ft.Dropdown`、`ft.Container(on_click=...)`）仍走 `textContent` 合并节点（格式 `"EID\n显示文本"`）
-  - 验证方法：运行 `python -m pytest tests/unit/ui/test_anchor.py -v`（断言 AnchorKind 分类与 DOM 形态契约）
-  - 若失败：检查 [ui/testing/e2e_ids.py](../../ui/testing/e2e_ids.py) 的 AnchorKind 分类是否需调整，或 [anchor_page.py](../../tests/e2e/helpers/anchor_page.py) 的 `_locator_by_aria` / `_locate_by_text` 定位策略是否需更新
-- [ ] **坑点1：textContent 换行合并格式**：`"EID\n显示文本"` 格式仍成立（`\n` 作为 EID 与显示文本的分隔符）
-  - 验证方法：`test_anchor.py` 中 LABEL kind 的 textContent 匹配测试通过
-  - 若失败：CanvasKit 改变了合并格式，需更新 `anchor_page.py:_locate_by_text` 的 `t.startsWith(label + '\n')` 逻辑
+- [ ] **identifier 属性落点**：`ft.Semantics(identifier=EID)` 仍落为 DOM 属性 `flt-semantics-identifier`，且四类 AnchorKind（INTERACTIVE/INPUT/LABEL/COMPLEX）共用同一节点形态、与 kind 无关
+  - 验证方法：运行 `python -m pytest tests/unit/test_anchor_page_identifier_locator.py tests/unit/ui/test_anchor.py -v`（断言 identifier 注入与精确定位契约）
+  - 若失败：检查 [ui/testing/e2e_ids.py](../../ui/testing/e2e_ids.py) 的 AnchorKind 分类，及 [anchor_page.py](../../tests/e2e/helpers/anchor_page.py) 的 `_locator_by_identifier` / `_identifier_box` 定位策略是否需更新
+- [ ] **语义树启用与应用内容渲染的时序**：`flt-semantics` 节点出现 ≠ 应用内容已渲染完成；等待条件须锚定 `document.body.innerText` 含应用文案，不得以语义节点数量作提前退出条件
+  - 验证方法：运行 anchor smoke E2E（如 `test_screener_anchor_smoke.py`）确认定位不出现"节点恒为 0"的假阴性
+  - 若失败：检查 [tests/e2e/helpers/anchor_page.py](../../tests/e2e/helpers/anchor_page.py) 的等待逻辑是否被回归为以节点数作提前退出
 - [ ] **坑点2：合成 click 事件失效**：`flt-semantics` 节点仍不响应 Playwright `locator.click()` 合成事件，必须用 `page.mouse.click(bbox_center)` 物理鼠标点击
   - 验证方法：运行 1-2 个关键 E2E 用例（如 `test_run_screener_strategy`）确认 click 交互正常
   - 若失败：CanvasKit 开始响应合成事件，可评估简化 `anchor_page.py.click` 为 `locator.click()`（但需全量 E2E 验证）
@@ -174,7 +174,7 @@ args = (
   - 验证方法：运行含 Dropdown 交互的 E2E 用例（如 `test_settings_language_switch` 中的语言下拉选项路径）
   - 若失败：CanvasKit 改进了 actionability 稳定性，可评估移除 `force=True`（但需 Dropdown 相关 E2E 全量验证）
 
-> 排查指南：若升级后 E2E 测试大面积超时失败（等待 `flt-semantics` 节点或文本不出现），优先检查双轨语义映射规则是否漂移。DOM 诊断方法见 [conftest.py](../../tests/e2e/conftest.py) `_trigger_sidecar_startup_via_browser` 中的 `page.evaluate` DOM 诊断代码。
+> 排查指南：若升级后 E2E 测试大面积超时失败（等待 `flt-semantics` 节点或文本不出现），优先检查 `flt-semantics-identifier` 属性落点与语义树渲染时序是否漂移。DOM 诊断方法见 [conftest.py](../../tests/e2e/conftest.py) `_trigger_sidecar_startup_via_browser` 中的 `page.evaluate` DOM 诊断代码。
 
 ## 4. 项目验证步骤
 

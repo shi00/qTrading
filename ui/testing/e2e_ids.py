@@ -1,12 +1,16 @@
 """E2E 测试 anchor ID 命名空间常量。
 
 每个 EID 是 `(id_string, AnchorKind)` 二元组：
-- `id_string` 是稳定 ASCII 标识符（与 i18n key、控件文案、控件类型解耦）
-- `AnchorKind` 元数据供 `AnchorPage` 决定定位/点击策略，不影响 `anchored()` 生成逻辑
+- `id_string` 是稳定 ASCII 标识符（与 i18n key、控件文案、控件类型解耦），也是
+  CanvasKit 上的 DOM 属性 `flt-semantics-identifier`（由 `anchored()` 注入）；
+  `AnchorPage` 以精确选择器 `flt-semantics[flt-semantics-identifier="<EID>"]` 定位。
+- `AnchorKind` 现仅承载「kind 特定行为」（见 `AnchorKind` docstring），不影响
+  `anchored()` 生成逻辑
 
 命名规范（附录 A）：`e2e.<view>.<role>[.<qualifier>]`
 - 全 ASCII 小写，仅字母数字下划线 + `.` 分隔
 - 禁用：中文、空格、破折号 `-`（Flutter Web 解析冲突）
+- EID 全局唯一（按 identifier 精确选择器，无前缀/后缀匹配，故不要求互不为前缀/后缀）
 - 动态生成必须走静态方法，禁止调用方字符串拼接
 
 稳定性策略（附录 12A）：append-only。新增随意；删除/重命名 = 破坏性变更，
@@ -17,32 +21,28 @@ from enum import Enum
 
 
 class AnchorKind(Enum):
-    """决定 `AnchorPage` 定位/点击策略。
+    """承载 anchor 的「kind 特定行为」，不再决定定位通道。
 
-    依据 PoC 实证 CanvasKit 双轨映射（按 DOM 形态划分，非控件名）：
-    - INTERACTIVE/INPUT → `[aria-label="EID"]` 独立节点 + 内层 `[flt-tappable]/input`
-    - LABEL/COMPLEX → EID 落入 `textContent`（无 aria-label 独立节点）
+    identifier 是唯一定位通道：`anchored()` 注入 `Semantics(identifier=EID)`，CanvasKit
+    落为 DOM 属性 `flt-semantics-identifier`，`AnchorPage` 以精确选择器
+    `flt-semantics[flt-semantics-identifier="<EID>"]` 定位。该节点存在性与 AnchorKind
+    无关（P0-2 矩阵：四类 kind 共用同一选择器）。
 
-    `anchored()` 统一 `Semantics(container=True)` 包裹；INTERACTIVE 额外设
-    `button=True` 辅助 Button 系列生成 aria-label 独立节点（对 GestureDetector
-    场景被引擎忽略，故 GD 类应归 COMPLEX，PoC A7 实证）。
+    AnchorKind 现仅承载 kind 特定行为：
+    - `INPUT`：identifier 节点 bbox 与真实输入面不一致（边框/内边距差异），需下潜
+      后代 `input`/`textarea` 取真实 bbox。
+    - `LABEL`：display-only，`click` / `scroll_into_view` 显式拒绝（无点击语义）。
+    - `INTERACTIVE` / `COMPLEX`：在 identifier 路径下定位行为一致（均取 identifier
+      节点自身 bbox + 物理鼠标点击）。
 
-    分类依据（PoC A1 / A5 / A7 实证 DOM）：
-    - INTERACTIVE：外层控件自带 role=button + label→aria-label 通道的 Flet 原生
-      Button 系列（ft.Button / ft.IconButton / ft.FilledButton / ft.OutlinedButton）
-      或 TextField（走 [aria-label] + input）。
-    - COMPLEX：内部合并 Semantics 子树 + label 落 textContent 的复合控件族：
-      ① ft.Dropdown / ft.PopupMenuButton（内层自带 role=button，PoC A5 已证）
-      ② ft.Container(on_click=…) / ft.GestureDetector(on_tap=…)（PoC A7 已证：
-         Flutter 引擎将外层 Semantics 与 GD 合并为单个 `flt-semantics[role="button"]`
-         节点，label 落 textContent，`ft.Semantics.button=True` 参数被引擎忽略）
-      定位统一走 `textContent` 前缀匹配（`.` 或 `\n` 分隔）+ `role="button"` 过滤。
+    `anchored()` 统一以 `Semantics(container=True)` 包裹，并对 `INTERACTIVE` 设
+    `button=True`：保留独立无障碍语义节点（非定位必需，定位已由 identifier 承担）。
     """
 
-    INTERACTIVE = "interactive"  # Button 系列 / TextField (走 aria-label 独立节点)
-    INPUT = "input"  # TextField/TextArea
-    LABEL = "label"  # Text (纯展示, 无点击)
-    COMPLEX = "complex"  # Dropdown / GestureDetector / Container(on_click) (label 落 textContent)
+    INTERACTIVE = "interactive"  # Button 系列（无障碍语义标注；identifier 定位）
+    INPUT = "input"  # TextField/TextArea（identifier 定位需下潜后代 input）
+    LABEL = "label"  # Text (纯展示, 无点击；click/scroll 拒绝)
+    COMPLEX = "complex"  # Dropdown / GestureDetector / Container(on_click)
 
 
 # EID 类型别名：(id_string, AnchorKind) 二元组
@@ -69,12 +69,12 @@ class _ScreenerIds:
 
     @staticmethod
     def result_row(ts_code: str) -> Eid:
-        """生成单行 anchor（GestureDetector-based，走 COMPLEX textContent 通道）。
+        """生成单行 anchor（GestureDetector-based，AnchorKind=COMPLEX）。
 
-        ts_code 格式: 6位数字 + .SZ/.SH（ASCII，不会互相前缀重叠）。
-        行用 GestureDetector(on_tap) 包裹；PoC A7 实证 Flutter 合并 Semantics + GD
-        为单个 `flt-semantics[role="button"]` 节点，label 落 textContent，
-        需按 COMPLEX 定位（textContent 前缀匹配 + role=button 过滤）。
+        ts_code 格式: 6位数字 + .SZ/.SH（ASCII）。
+        行用 GestureDetector(on_tap) 包裹；identifier 路径不区分节点形态，统一以
+        `flt-semantics[flt-semantics-identifier="<EID>"]` 精确定位（AnchorKind=COMPLEX
+        不改变定位方式，仅标注可交互语义）。
 
         Precondition: ts_code 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
         调用方负责确保输入合法，本方法不做运行时校验（YAGNI）。
@@ -83,11 +83,11 @@ class _ScreenerIds:
 
     @staticmethod
     def column_header(col_id: str) -> Eid:
-        """生成列头 anchor（GestureDetector-based，走 COMPLEX textContent 通道）。
+        """生成列头 anchor（GestureDetector-based，AnchorKind=COMPLEX）。
 
         col_id 是数据列名（ASCII，如 pct_chg/close/name）。
-        列头用 GestureDetector(on_tap) 包裹（与行一致）；PoC A7 实证同 result_row，
-        需按 COMPLEX 定位。
+        列头用 GestureDetector(on_tap) 包裹；identifier 路径统一精确定位（与
+        result_row 同策略，AnchorKind 仅做语义标注）。
 
         Precondition: col_id 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
         调用方负责确保输入合法，本方法不做运行时校验（YAGNI）。
@@ -96,13 +96,13 @@ class _ScreenerIds:
 
     @staticmethod
     def detail_button(ts_code: str) -> Eid:
-        """生成行内「详情」按钮 anchor（ft.TextButton，走 INTERACTIVE aria-label 通道，item 4）。
+        """生成行内「详情」按钮 anchor（ft.TextButton，AnchorKind=INTERACTIVE）。
 
         「详情」动作列入口作为**独立** anchor：与行 anchor（``result_row``）语义分离，
         位于行 anchor 子树之外（兄弟节点，见 virtual_table 模块 docstring），
-        使 COMPLEX 行 anchor 的 ``role=button`` + textContent 前缀契约不被嵌套交互控件破坏。
-        TextButton 为 Flet 原生 Button 系列，PoC A1 实证走 aria-label 独立节点，
-        故 AnchorKind 取 INTERACTIVE（`flt-semantics[aria-label$="EID"]` 后缀匹配）。
+        使行 anchor 与行内交互控件的语义/命中区域互不覆盖。
+        TextButton 为 Flet 原生 Button 系列，AnchorKind 取 INTERACTIVE 以标注可交互语义
+        （identifier 路径下与 COMPLEX 定位方式一致：identifier 节点自身 bbox）。
 
         Precondition: ts_code 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
         调用方负责确保输入合法，本方法不做运行时校验（YAGNI）。
@@ -157,7 +157,7 @@ class _SettingsIds:
 
     @staticmethod
     def tab(role: str) -> Eid:
-        """生成 Tab 按钮 anchor（ft.Button，走 INTERACTIVE aria-label 通道）。
+        """生成 Tab 按钮 anchor（ft.Button，AnchorKind=INTERACTIVE）。
 
         role 是 tab 角色名（ASCII，如 data/database/ai/tasks/notify/system），
         从 _TAB_CONFIG 的 i18n_key 去掉 ``settings_tab_`` 前缀派生。
@@ -205,9 +205,9 @@ class _TushareIds:
     """Tushare 配置面板 anchor 命名空间（设置 data tab 与 onboarding wizard 复用）。
 
     VERIFY_BUTTON: ``ft.Button`` 标准交互控件（AnchorKind.INTERACTIVE）。
-    CanvasKit 下经 ``anchored()`` 的 ``button=True`` 生成 ``flt-semantics[aria-label=EID]``
-    独立节点 + 内层 ``flt-tappable``，AnchorPage 走稳定的 bbox 中心鼠标点击
-    （PR669 E2E 修复：非 anchor 的 click_button fallback 点击偶发不触发 Flutter 回调）。
+    identifier 路径下 AnchorPage 以 `flt-semantics-identifier` 精确定位该节点，取
+    bbox 中心做稳定的物理鼠标点击（PR669 E2E 修复：非 anchor 的 click_button
+    fallback 点击偶发不触发 Flutter 回调）。
     """
 
     VERIFY_BUTTON: Eid = ("e2e.tushare.verify_button", AnchorKind.INTERACTIVE)
@@ -217,7 +217,8 @@ class _NavIds:
     """导航栏 anchor 命名空间 (PR-4 Task 4.0/4.1)。
 
     NavigationRailDestination.label 用 ``anchored()`` 包裹 ``ft.Text``。
-    AnchorKind=LABEL（纯展示，无点击，EID 落 textContent）。
+    AnchorKind=LABEL（纯展示，无点击）；identifier 路径下以
+    `flt-semantics[flt-semantics-identifier="<EID>"]` 精确定位。
 
     Task 4.0 PoC 验证 T-3 不确定性：``NavigationRail(extended=False)`` 折叠态下
     ``Semantics(container=True)`` 包裹的 label 是否仍暴露到 DOM。PASS 则 4.1 P2-1
@@ -237,7 +238,8 @@ class _HomeIds:
     """首页 KPI 卡片 anchor 命名空间 (PR-4 Task 4.1, P2-2)。
 
     ``MarketDashboard`` 组件的 KPI 卡片标题用 ``anchored()`` 包裹 ``ft.Text``。
-    AnchorKind=LABEL（纯展示，无点击，EID 落 textContent）。
+    AnchorKind=LABEL（纯展示，无点击）；identifier 路径下以
+    `flt-semantics[flt-semantics-identifier="<EID>"]` 精确定位。
     """
 
     KPI_SH: Eid = ("e2e.home.kpi.sh", AnchorKind.LABEL)
@@ -250,7 +252,8 @@ class _TaskCenterIds:
     """任务中心 anchor 命名空间 (PR-4 Task 4.1, P2-3)。
 
     任务行卡片整体用 ``anchored()`` 包裹（``ft.Container`` 无 ``on_click``）。
-    AnchorKind=LABEL（卡片整体纯展示，EID 落 textContent）。
+    AnchorKind=LABEL（卡片整体纯展示）；identifier 路径下以
+    `flt-semantics[flt-semantics-identifier="<EID>"]` 精确定位。
 
     task_id 来自 ``TaskRow.id``（UUID 前 12 字符，ASCII）。
     """
