@@ -9,7 +9,7 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
                  ↘ INTERRUPTED (应用异常退出)
 ```
 
-- 任务通过 `submit_task()` 提交，`name` 与 `task_type` 为必填位置参数，`coroutine_factory` 是接收 `task_id` 关键字参数（并可透传 `**kwargs`）的可调用对象（返回 coroutine），可选参数含 `cancellable` / `unique_key` / `factory_key`。`unique_key` 承载任务去重语义：同一 key 重复提交会被同步拦截并返回 `None`，任务结束（无论成功/失败/取消）后 key 释放可重新提交。最小调用样例：
+- 任务通过 `submit_task()` 提交，`name` 与 `task_type` 为必填位置参数，`coroutine_factory` 是接收 `task_id` 关键字参数（并可透传 `**kwargs`）的可调用对象（返回 coroutine），可选参数含 `cancellable` / `unique_key` / `factory_key` / `exclusive_group`。`unique_key` 承载任务去重语义：同一 key 重复提交会被同步拦截并返回 `None`，任务结束（无论成功/失败/取消）后 key 释放可重新提交。最小调用样例：
 
   ```python
   task_id = task_manager.submit_task(
@@ -24,6 +24,11 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
       return
   ```
 - `unique_key` 冲突时 `submit_task` 返回 `None`（见 `services/task_manager.py::submit_task`），调用方必须判空，避免对 `None` 继续 `update_progress` / 挂回调。
+- **共享互斥分组 `exclusive_group`（D7-5/MINOR-03）**：为「写同一批行情表」的任务（`daily_sync` / `daily_sync_catchup` / `system_init_sync`）传入共享分组名常量 `EXCLUSIVE_GROUP_MARKET_SYNC`（`services/task_manager.py`），同组任务串行执行、跨组与未分组任务不受影响。语义与边界：
+  - 组锁为 **loop-local**（经 `utils/loop_local.py::get_loop_local` 获取，R11：不得作为类属性跨循环复用），在并发信号量**外层**获取——同组排队任务不占用并发许可，避免挤占其它任务的可运行名额；
+  - 组锁在任务正常结束、抛异常、被取消、停机（`cancel_all_running_async`）四条路径均经 `async with` 释放；`reload_config` 只重置信号量（`task_manager_semaphore`）、**刻意不重置组锁**（否则出现「旧锁持有者 + 新锁持有者并发」）；`_reset_singleton` 会随单例重置一并清理组锁；
+  - `exclusive_group` **仅进程内有效、不持久化**（无 DB 列）：崩溃重启后经 `retry_task` 重建的任务会丢失组归属，此为该能力的已知边界；
+  - 看门狗（`SchedulerService._watch_config_changes`）在同组任务运行/排队中或 `cache_clear` 运行期间跳过本轮补偿检查（下个周期重判）；misfire 路径不加此守卫。
 - 使用 `update_progress(progress)` 报告进度 (0.0-1.0)，内置节流避免 UI 风暴
 - 工作协程内部使用 `is_cancelled()` 检测取消信号 (用户主动取消 / 应用退出)
 - 任务持久化到本地，重启后 `RUNNING` 状态会被回填为 `INTERRUPTED`

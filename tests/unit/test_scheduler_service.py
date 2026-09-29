@@ -11,6 +11,7 @@ from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
 from core.i18n import Message
 from data.sync.base import SyncResult
+from services.task_manager import EXCLUSIVE_GROUP_MARKET_SYNC, AppTask, TaskStatus
 from utils.scheduler_service import SchedulerService
 
 pytestmark = pytest.mark.unit
@@ -692,6 +693,10 @@ class TestRunDailyUpdate:
             mock_tm.return_value = mock_tm_instance
             await svc._run_daily_update()
             mock_tm_instance.submit_task.assert_called_once()
+            # D7-5/MINOR-03: 日更写行情表 → 必须入同组互斥
+            kwargs = mock_tm_instance.submit_task.call_args.kwargs
+            assert kwargs["unique_key"] == "daily_sync"
+            assert kwargs["exclusive_group"] == EXCLUSIVE_GROUP_MARKET_SYNC
 
     @pytest.mark.asyncio
     async def test_trading_day_submit_returns_none_warns(self):
@@ -1472,6 +1477,8 @@ class TestCatchUpMissedUpdates:
             assert kwargs["missed_dates"] == [date(2024, 6, 11), date(2024, 6, 12), date(2024, 6, 13)]
             assert kwargs["unique_key"] == "daily_sync_catchup"
             assert kwargs["cancellable"] is True
+            # D7-5/MINOR-03: 补偿同步写同一批行情表 → 与日更同组互斥
+            assert kwargs["exclusive_group"] == EXCLUSIVE_GROUP_MARKET_SYNC
 
     @pytest.mark.asyncio
     async def test_baseline_query_failure_warns_and_returns(self, caplog):
@@ -2108,3 +2115,96 @@ class TestNightlyPredictionCatchup:
             assert svc._is_past_nightly_prediction_time() is True
         with patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 20, 29, 0)):
             assert svc._is_past_nightly_prediction_time() is False
+
+
+class TestWatchdogMarketSyncGuard:
+    """D7-5/MINOR-03: 看门狗在同组（行情表写入）任务或缓存清理运行/排队中跳过本轮补偿检查。
+
+    跳过只影响补偿检查分支；`_catch_up_nightly_prediction` 不在报告范围内、照常执行。
+    """
+
+    _NOW = datetime(2024, 6, 15, 21, 0, 0)
+    _CONFIG = {
+        "time": "09:30",
+        "enabled": True,
+        "ai_concept_time": "10:00",
+        "ai_concept_enabled": False,
+    }
+
+    def _svc(self):
+        svc = _make_svc()
+        svc._catch_up_missed_updates = AsyncMock()
+        svc._catch_up_nightly_prediction = AsyncMock()
+        svc._last_known_config = dict(self._CONFIG)
+        return svc
+
+    def _task_manager_with(self, *tasks):
+        """替身：TaskManager().get_all_tasks() 返回给定真实 AppTask 列表。"""
+        mock_cls = MagicMock()
+        mock_cls.return_value.get_all_tasks.return_value = list(tasks)
+        return mock_cls
+
+    async def _run_watchdog(self, svc, mock_tm_cls):
+        with (
+            patch("utils.scheduler_service.ThreadPoolManager") as mock_tpm,
+            patch("utils.scheduler_service.get_now", return_value=self._NOW),
+            patch("services.task_manager.TaskManager", mock_tm_cls),
+        ):
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=self._CONFIG)
+            await svc._watch_config_changes()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_group_task_running(self):
+        svc = self._svc()
+        active = AppTask(name="daily", exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC, status=TaskStatus.RUNNING)
+        await self._run_watchdog(svc, self._task_manager_with(active))
+        svc._catch_up_missed_updates.assert_not_awaited()
+        svc._catch_up_nightly_prediction.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_group_task_queued(self):
+        """排队中的同组任务也计入（提交只会排在组锁之后，无意义）。"""
+        svc = self._svc()
+        queued = AppTask(name="catchup", exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC, status=TaskStatus.QUEUED)
+        await self._run_watchdog(svc, self._task_manager_with(queued))
+        svc._catch_up_missed_updates.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_cache_clear_running(self):
+        svc = self._svc()
+        clearing = AppTask(name="cache_clear", unique_key="cache_clear", status=TaskStatus.RUNNING)
+        await self._run_watchdog(svc, self._task_manager_with(clearing))
+        svc._catch_up_missed_updates.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_proceeds_when_no_busy_task(self):
+        svc = self._svc()
+        await self._run_watchdog(svc, self._task_manager_with())
+        svc._catch_up_missed_updates.assert_awaited_once_with(include_today=True)
+
+    @pytest.mark.asyncio
+    async def test_proceeds_when_group_task_already_terminal(self):
+        """终态同组任务不构成忙碌（组锁早已释放）。"""
+        svc = self._svc()
+        done = AppTask(name="daily", exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC, status=TaskStatus.COMPLETED)
+        await self._run_watchdog(svc, self._task_manager_with(done))
+        svc._catch_up_missed_updates.assert_awaited_once_with(include_today=True)
+
+    @pytest.mark.asyncio
+    async def test_unrelated_running_task_does_not_skip(self):
+        """非行情表任务（如 AI 选股）运行中不影响补偿检查。"""
+        svc = self._svc()
+        other = AppTask(name="screening", unique_key="nightly_prediction", status=TaskStatus.RUNNING)
+        await self._run_watchdog(svc, self._task_manager_with(other))
+        svc._catch_up_missed_updates.assert_awaited_once_with(include_today=True)
+
+    def test_is_market_sync_busy_reads_public_snapshot(self):
+        """谓词只读公开快照：无任务 → False；同组运行 → True。"""
+        svc = _make_svc()
+        with patch("services.task_manager.TaskManager", self._task_manager_with()):
+            assert svc._is_market_sync_busy() is False
+        active = AppTask(name="daily", exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC, status=TaskStatus.RUNNING)
+        with patch("services.task_manager.TaskManager", self._task_manager_with(active)):
+            assert svc._is_market_sync_busy() is True
