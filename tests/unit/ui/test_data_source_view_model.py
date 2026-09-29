@@ -20,6 +20,7 @@ from services.ai_service import AIService
 from services.task_manager import TaskManager, TaskStatus
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceViewModel, HealthResultRow
+from utils.scheduler_service import ScheduledJobStatus, SchedulerService
 
 pytestmark = pytest.mark.unit
 
@@ -105,10 +106,19 @@ def mock_task_manager():
 
 
 @pytest.fixture
-def vm(mock_processor, mock_cache, mock_ai_service, mock_task_manager):
+def mock_scheduler_service():
+    """D7-6: SchedulerService 替身 (默认空快照), 避免测试触发真实单例构造。"""
+    instance = MagicMock(spec=SchedulerService)
+    instance.get_jobs_status_snapshot = MagicMock(return_value=())
+    return instance
+
+
+@pytest.fixture
+def vm(mock_processor, mock_cache, mock_ai_service, mock_task_manager, mock_scheduler_service):
     # B11 懒构造: 构造期 _processor 为 None, 此处显式 DI 注入 mock_processor,
     # 避免 _ensure_processor 触发真实构造 (R16)。测试行为与旧"构造期同步构造"一致。
-    return DataSourceViewModel(processor=mock_processor)
+    # D7-6: 同时注入 scheduler_service 替身, 避免 handle_task_update 刷新时构造真实单例。
+    return DataSourceViewModel(processor=mock_processor, scheduler_service=mock_scheduler_service)
 
 
 @pytest.fixture
@@ -1325,3 +1335,89 @@ class TestDataSourceViewModelSyncErrorClassification:
         assert bound_vm.state.snack.message.key == "common_op_fail"
         assert bound_vm.state.snack.action_key is None
         assert bound_vm.state.progress == 0.0
+
+
+class TestDataSourceViewModelSchedulerStatus:
+    """D7-6: state.scheduler_jobs 与 SchedulerService 只读快照同源。"""
+
+    def test_initial_state_has_empty_scheduler_jobs(self, vm):
+        """未刷新前为空元组 (View 显式占位, 不得伪装为「一切正常」)。"""
+        assert vm.state.scheduler_jobs == ()
+
+    def test_refresh_populates_state_from_snapshot(self, bound_vm, mock_scheduler_service, snapshots):
+        job = ScheduledJobStatus(
+            job_id="daily_update",
+            last_success_at="20240614",
+            last_failure_reason=None,
+            next_run_at="2024-06-15 16:30:00",
+            consecutive_failures=0,
+        )
+        mock_scheduler_service.get_jobs_status_snapshot.return_value = (job,)
+
+        bound_vm.refresh_scheduler_status()
+
+        assert bound_vm.state.scheduler_jobs == (job,)
+        assert any(s.scheduler_jobs == (job,) for s in snapshots)
+
+    def test_refresh_degrades_on_snapshot_failure(self, bound_vm, mock_scheduler_service):
+        """快照读取失败时不得抛出 (不中断任务生命周期), 保留原 state。"""
+        mock_scheduler_service.get_jobs_status_snapshot.side_effect = RuntimeError("config broken")
+
+        bound_vm.refresh_scheduler_status()  # 不抛
+
+        assert bound_vm.state.scheduler_jobs == ()
+
+    def test_refresh_preserves_missing_fields_as_none(self, bound_vm, mock_scheduler_service):
+        """缺失字段保持 None (不在 VM 层填充默认值, R21)。"""
+        job = ScheduledJobStatus(
+            job_id="review_backfill",
+            last_success_at=None,
+            last_failure_reason=None,
+            next_run_at=None,
+            consecutive_failures=None,
+        )
+        mock_scheduler_service.get_jobs_status_snapshot.return_value = (job,)
+
+        bound_vm.refresh_scheduler_status()
+
+        snapshot_job = bound_vm.state.scheduler_jobs[0]
+        assert snapshot_job.last_success_at is None
+        assert snapshot_job.next_run_at is None
+        assert snapshot_job.last_failure_reason is None
+        assert snapshot_job.consecutive_failures is None
+
+    def test_lazy_constructs_scheduler_service_when_not_injected(self, mock_task_manager):
+        """未注入时惰性构造注册单例, 构造期不触碰。"""
+        with patch("ui.viewmodels.data_source_view_model.SchedulerService") as cls:
+            instance = MagicMock(spec=SchedulerService)
+            instance.get_jobs_status_snapshot = MagicMock(return_value=())
+            cls.return_value = instance
+
+            vm = DataSourceViewModel()
+            assert vm._scheduler_service is None
+            vm.refresh_scheduler_status()
+
+        cls.assert_called_once_with()
+        assert vm._scheduler_service is instance
+
+    def test_task_termination_triggers_refresh(self, bound_vm, mock_scheduler_service):
+        """VM 跟踪的任务终结后自动刷新调度状态 (水位/失败原因可能变化)。"""
+        job = ScheduledJobStatus(
+            job_id="daily_update",
+            last_success_at="20240614",
+            last_failure_reason=None,
+            next_run_at=None,
+            consecutive_failures=0,
+        )
+        mock_scheduler_service.get_jobs_status_snapshot.return_value = (job,)
+
+        bound_vm._active_task_ids = {"daily_sync": "task_1"}
+        bound_vm._set_state(is_syncing=True, active_key="daily_sync")
+
+        task = MagicMock()
+        task.id = "task_1"
+        task.status = TaskStatus.COMPLETED
+
+        bound_vm.handle_task_update([task])
+
+        assert bound_vm.state.scheduler_jobs == (job,)

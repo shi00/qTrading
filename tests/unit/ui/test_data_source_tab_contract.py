@@ -396,6 +396,67 @@ class TestRenderMessage:
         assert "translated_test_key" in result
 
 
+class TestSchedFormatHelpers:
+    """D7-6 调度状态面板格式化纯函数测试 (_sched_last_success_text/_sched_optional_text/_sched_fail_count_text)。
+
+    R21: 缺失必须渲染为显式占位符 (「未记录」/「—」), 0 为真实计数 (非缺失)。
+    """
+
+    def test_last_success_none_renders_not_recorded(self):
+        """None (无记录) → ds_sched_not_recorded, 不伪装为具体时间。"""
+        with patch("ui.views.settings_tabs.data_source_tab.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, *a, **kw: key
+            from ui.views.settings_tabs.data_source_tab import _sched_last_success_text
+
+            assert _sched_last_success_text(None) == "ds_sched_not_recorded"
+
+    def test_last_success_value_returns_raw(self):
+        """有值 → 原样返回时间字符串。"""
+        from ui.views.settings_tabs.data_source_tab import _sched_last_success_text
+
+        assert _sched_last_success_text("2026-09-28 08:00:00") == "2026-09-28 08:00:00"
+
+    def test_optional_none_renders_placeholder(self):
+        """None → ds_sched_placeholder_none 占位符。"""
+        with patch("ui.views.settings_tabs.data_source_tab.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, *a, **kw: key
+            from ui.views.settings_tabs.data_source_tab import _sched_optional_text
+
+            assert _sched_optional_text(None) == "ds_sched_placeholder_none"
+
+    def test_optional_value_returns_raw(self):
+        """有值 → 原样返回。"""
+        from ui.views.settings_tabs.data_source_tab import _sched_optional_text
+
+        assert _sched_optional_text("failed_critical_tables=['daily_quotes']") == (
+            "failed_critical_tables=['daily_quotes']"
+        )
+
+    def test_fail_count_none_renders_placeholder(self):
+        """None (未记录) → 占位符, 不伪装为 0。"""
+        with patch("ui.views.settings_tabs.data_source_tab.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, *a, **kw: key
+            from ui.views.settings_tabs.data_source_tab import _sched_fail_count_text
+
+            assert _sched_fail_count_text(None) == "ds_sched_placeholder_none"
+
+    def test_fail_count_zero_is_real_count(self):
+        """0 为权威真实计数 → 走格式化分支并携带 count=0 (非缺失)。"""
+        with patch("ui.views.settings_tabs.data_source_tab.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, *a, **kw: f"{key}:{kw.get('count')}"
+            from ui.views.settings_tabs.data_source_tab import _sched_fail_count_text
+
+            assert _sched_fail_count_text(0) == "ds_sched_fail_count_fmt:0"
+
+    def test_fail_count_positive_formats(self):
+        """正整数 → 格式化并携带 count。"""
+        with patch("ui.views.settings_tabs.data_source_tab.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, *a, **kw: f"{key}:{kw.get('count')}"
+            from ui.views.settings_tabs.data_source_tab import _sched_fail_count_text
+
+            assert _sched_fail_count_text(3) == "ds_sched_fail_count_fmt:3"
+
+
 class TestResolveSnackColor:
     """_resolve_snack_color 模块级纯函数测试。"""
 
@@ -526,6 +587,8 @@ class _FakeDataSourceState:
     health_error: Message | None = None
     # 瞬态信号 (无数据负载, 非 dual-track)
     cache_cleared_version: int = 0
+    # D7-6 调度状态面板: 各定时任务只读状态快照 (空元组表示尚未刷新)
+    scheduler_jobs: tuple = ()
 
 
 class _FakeDataSourceViewModel:
@@ -608,6 +671,10 @@ class _FakeDataSourceViewModel:
 
     def recover_stale_state(self) -> None:
         self.method_calls.append(("recover_stale_state", {}))
+
+    def refresh_scheduler_status(self) -> None:
+        """D7-6: 刷新调度状态快照入口 (挂载 effect 调用)。"""
+        self.method_calls.append(("refresh_scheduler_status", {}))
 
     def cancel_active_task(self) -> None:
         """P1-5: daily_sync/ai_concept_sync 取消按钮入口。"""
@@ -859,13 +926,13 @@ class TestDataSourceTabComponentBody:
         result, _ = _mount(component)
         assert isinstance(result, ft.Container)
 
-    def test_listview_contains_six_cards(
+    def test_listview_contains_seven_cards(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """Container.content 是 ListView, 含 6 个 DashboardCard (mock 后为 Container)。
+        """Container.content 是 ListView, 含 7 个 DashboardCard (mock 后为 Container)。
 
-        6 个 card: health_dashboard / action_console / danger_zone / connection_card /
-        historical_card / data_flow_card (Task 2.3 数据存储与流向说明区)。
+        7 个 card: health_dashboard / action_console / danger_zone / connection_card /
+        historical_card / scheduler_status_card (D7-6 调度状态面板) / data_flow_card。
         MAJOR-03: 破坏性「重置本地数据库」入口从 action_console 拆出为独立 danger_zone 卡。
         """
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
@@ -875,7 +942,7 @@ class TestDataSourceTabComponentBody:
         result, _ = _mount(component)
         listview = result.content
         assert isinstance(listview, ft.ListView)
-        assert len(listview.controls) == 6
+        assert len(listview.controls) == 7
 
     def test_mount_triggers_main_vm_subscribe(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -922,6 +989,18 @@ class TestDataSourceTabComponentBody:
         _mount(component)
         calls = [c[0] for c in fake_tushare_vm.method_calls]
         assert "reload_config" in calls
+
+    def test_mount_calls_refresh_scheduler_status(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """挂载后 vm.refresh_scheduler_status 被调用 (D7-6 调度状态面板刷新)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "refresh_scheduler_status" in calls
 
     def test_unmount_disposes_main_vm(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch

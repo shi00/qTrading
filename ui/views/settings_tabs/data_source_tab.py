@@ -697,6 +697,131 @@ def _build_data_flow_card() -> ft.Control:
 
 
 # ============================================================================
+# D7-6 调度状态面板 (只读快照渲染)
+# ============================================================================
+
+# job_id → 展示名 i18n key (与 SchedulerService._SCHEDULED_JOB_IDS 顺序一致)。
+_SCHEDULER_JOB_NAME_KEYS: dict[str, str] = {
+    "daily_update": "ds_sched_job_daily_update",
+    "review_backfill": "ds_sched_job_review_backfill",
+    "ai_concept_daily_refresh": "ds_sched_job_ai_concept",
+    "nightly_prediction": "ds_sched_job_nightly_prediction",
+}
+
+
+def _sched_last_success_text(value: str | None) -> str:
+    """上次成功时间: 无记录时渲染「未记录」(R21: 不得伪装为 0/正常)。"""
+    return value if value else I18n.get("ds_sched_not_recorded")
+
+
+def _sched_optional_text(value: str | None) -> str:
+    """通用可选字段: 缺失渲染为占位符「—」(R21)。"""
+    return value if value else I18n.get("ds_sched_placeholder_none")
+
+
+def _sched_fail_count_text(value: int | None) -> str:
+    """连续失败次数: None(未记录)为「—」; 0 为真实计数(非缺失), 格式化为「0 次」。"""
+    if value is None:
+        return I18n.get("ds_sched_placeholder_none")
+    return I18n.get("ds_sched_fail_count_fmt", count=value)
+
+
+def _sched_field(label_key: str, value_text: str) -> ft.Column:
+    """单个字段块 (标签在上, 值在下), 供面板内 2x2 网格布局复用。"""
+    return ft.Column(
+        [
+            ft.Text(I18n.get(label_key), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_SECONDARY),
+            ft.Text(value_text, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_PRIMARY),
+        ],
+        spacing=2,
+    )
+
+
+def _build_scheduler_status_card(state: DataSourceState) -> ft.Control:
+    """D7-6: 调度状态面板 (各定时任务的上次成功/失败原因/下次计划/连续失败次数)。
+
+    数据源为 ``state.scheduler_jobs`` (SchedulerService 只读快照, VM 刷新写入); 空快照
+    (尚未刷新) 显式提示「未记录」, 不得渲染为「一切正常」(R21)。字段缺失由 View 层渲染
+    为占位符, 不透传 None 给控件。
+    """
+    jobs = state.scheduler_jobs
+    if not jobs:
+        body: ft.Control = ft.Text(
+            I18n.get("ds_sched_not_recorded"),
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.TEXT_SECONDARY,
+        )
+    else:
+        job_blocks: list[ft.Control] = []
+        for job in jobs:
+            job_blocks.append(
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.Text(
+                                I18n.get(_SCHEDULER_JOB_NAME_KEYS.get(job.job_id, job.job_id)),
+                                size=AppStyles.FONT_SIZE_BODY,
+                                weight=ft.FontWeight.BOLD,
+                                color=AppColors.TEXT_PRIMARY,
+                            ),
+                            ft.ResponsiveRow(
+                                [
+                                    ft.Column(
+                                        [
+                                            _sched_field(
+                                                "ds_sched_col_last_success",
+                                                _sched_last_success_text(job.last_success_at),
+                                            )
+                                        ],
+                                        col={"sm": 6, "md": 3},
+                                    ),
+                                    ft.Column(
+                                        [_sched_field("ds_sched_col_next_run", _sched_optional_text(job.next_run_at))],
+                                        col={"sm": 6, "md": 3},
+                                    ),
+                                    ft.Column(
+                                        [
+                                            _sched_field(
+                                                "ds_sched_col_fail_count",
+                                                _sched_fail_count_text(job.consecutive_failures),
+                                            )
+                                        ],
+                                        col={"sm": 6, "md": 3},
+                                    ),
+                                    ft.Column(
+                                        [
+                                            _sched_field(
+                                                "ds_sched_col_last_failure",
+                                                _sched_optional_text(job.last_failure_reason),
+                                            )
+                                        ],
+                                        col={"sm": 6, "md": 3},
+                                    ),
+                                ],
+                            ),
+                        ],
+                        spacing=6,
+                    ),
+                    padding=ft.Padding.symmetric(vertical=8, horizontal=12),
+                    bgcolor=AppColors.SURFACE_VARIANT,
+                    border_radius=8,
+                    border=ft.Border.all(1, AppColors.DIVIDER),
+                )
+            )
+        body = ft.Column(job_blocks, spacing=8)
+
+    return DashboardCard(
+        content=ft.Column(
+            [
+                SectionHeader(I18n.get("ds_sched_panel_title"), title_key="ds_sched_panel_title"),
+                ft.Divider(height=10, color=AppColors.TRANSPARENT),
+                body,
+            ],
+        ),
+    )
+
+
+# ============================================================================
 # DataSourceTab
 # ============================================================================
 
@@ -1035,9 +1160,11 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         if page is not None and callback is not None:
             page.run_task(callback)
 
-    # --- Mount: recover stale state + reload tushare config ---
+    # --- Mount: recover stale state + refresh scheduler status + reload tushare config ---
     def _on_mount() -> None:
         vm.recover_stale_state()
+        # D7-6: 首帧拉取调度状态快照 (纯内存读, 不阻塞主循环)。
+        vm.refresh_scheduler_status()
         tushare_vm.reload_config()
 
     ft.use_effect(_on_mount, dependencies=[])
@@ -1095,6 +1222,8 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
 
     # --- Build section cards (D15: 各区块为模块级纯函数, 从巨型组件中提出) ---
     health_dashboard = _build_health_dashboard(state, _on_check_health, _on_health_report_click)
+    # D7-6: 调度状态面板 (紧跟健康看板, 展示各定时任务的上次成功/失败原因/下次计划/连续失败)。
+    scheduler_status_card = _build_scheduler_status_card(state)
     action_console = _build_action_console(state, _on_full_sync, _on_ai_concept_rebuild, _on_cancel_active_task)
     danger_zone = _build_danger_zone(state, _on_clear_cache)
     connection_card = _build_connection_card(tushare_vm)
@@ -1206,6 +1335,11 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
                 danger_zone,
                 connection_card,
                 historical_card,
+                # D7-6: 调度状态面板插在 data_flow_card 之前。ListView 只构建进入视口的项，
+                # 若插到靠前位置会把既有卡片（如 Tushare 配置「验证 Token」）推出视口导致
+                # E2E 语义查询失败；此处保持前 5 张卡片顺序/可见性不变，并保留 data_flow_card
+                # 作为列表末尾卡片（既有契约 test_data_flow_section_is_last_card_in_listview）。
+                scheduler_status_card,
                 data_flow_card,
                 # 组件型 dialog 内部 use_dialog 无条件自挂载, 条件加入 controls 列表不影响
                 # 父组件 hook 顺序; 仅在打开时实例化, 关闭即卸载 (open_state=True 每次推送)。
