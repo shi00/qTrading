@@ -1675,7 +1675,6 @@ def _build_screener_control_card(
         text_size=AppStyles.FONT_SIZE_BODY,
         width=AppStyles.CONTROL_WIDTH_SM,
         on_change=safe_on_change(handlers["on_stock_filter_change"]),
-        on_submit=safe_on_change(handlers["on_run_click_sync"]),
     )
     # DS-02: 风险警示股（ST/*ST）排除开关，经 on_exclude_st_change → vm.set_exclude_st 透传数据层行过滤
     exclude_st_switch = ft.Switch(
