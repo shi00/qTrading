@@ -63,11 +63,20 @@ def _delisting_flag_expr(as_of: str) -> str:
       窗口内 → 已公告退市（stock_alive_condition 已保证存活行满足 delist_date > as_of
       或为 NULL）。
     - 名称项（兜底近似）：as-of 生效名称含「退」→ 退市整理期标识。名称虽经 name-history
-      LATERAL JOIN 按 as-of 还原，但无历史覆盖行时 COALESCE 回退**当前**名称；因此区间
-      回放时，尚未进入整理期的历史日期可能因当前名称带「退」而被前视剔除。该行为受
-      name-history 覆盖度影响，属**已知近似（R24 报告模式）**，不得宣称无前视偏差。
+      LATERAL JOIN 按 as-of 还原，但无历史覆盖行时 COALESCE 回退**当前**名称。
     - R21：delist_date 尚未回填时不得把「未知」当作「未退市」；两分支均为确定性
       表达式（True/False），缺失信息优先由结构化 delist_date 承载，名称项兜底。
+
+    R24 时点正确性（报告模式，显式声明为「当期近似」）：区间回放（回测）以历史交易日
+    为 as_of，但本表达式两个数据源均取自**当期快照**——① 名称项回退的 ``b.name`` 为
+    stock_basic 的**当前**名称；② delist_date 项的 ``b.delist_date`` 为 stock_basic 的
+    **当前**退市日。当某标的 name-history 无 as_of 覆盖行（回退当前名称）时，其当前名称
+    若含「退」，会在**全部历史日期**被判 is_delisting 而整体移出回测票池，可能造成
+    前视/幸存者偏差；delist_date 亦以当前快照参与历史区间计算。该口径受 name-history
+    覆盖度影响，属**已知近似**，不得宣称无前视偏差。按 R24「显式声明并在结果中标注」，
+    此近似必须在同一口径生效的回测结果中可见标注（由回测数据提供器检测票池内退市标记
+    并产生 ``delisting_asof_approximation`` 告警，经回测结果 caveat 呈现）。实盘路径
+    as_of=today，当期快照即 as-of 取值，无前视，不属近似。
 
     Args:
         as_of: 时点参数占位符（"$5" / "cal.cal_date"）——必须为代码受控常量，

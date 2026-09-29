@@ -36,6 +36,9 @@ class DataWarning:
         "preload_range_too_wide",
         "range_preload_failed",
         "range_preload_error",
+        # R24 当期近似：区间回放的退市整理期排除口径使用当前名称/delist_date 快照，
+        # name-history 缺覆盖时可能存在前视（screener_dao._delisting_flag_expr）。
+        "delisting_asof_approximation",
     ]
     start_date: str
     end_date: str
@@ -47,10 +50,13 @@ class DataWarning:
     # - termination：portfolio_wiped_out（爆仓）→ unreliable。
     # - performance_path：preload_range_too_wide / range_preload_failed /
     #   range_preload_error（慢路径）→ 仅提示，不升级级别。
+    # - asof_approximation（R24）：delisting_asof_approximation —— 退市整理期排除口径
+    #   使用当前名称/delist_date 快照，name-history 缺覆盖时可能前视。属**方法学声明**
+    #   （在结果中以 caveat 通道呈现），不升级可信度级别。
     # 默认 None：经 ``__post_init__`` 从 ``WarningCategory._TYPE_TO_CATEGORY``
     # 按 warning_type 解析（历史构造点无需逐一补参）；未知 warning_type 回退
     # data_quality（fail-closed，避免把已知异常伪装成「无信息」，R21）。
-    category: Literal["data_quality", "termination", "performance_path"] | None = None
+    category: Literal["data_quality", "termination", "performance_path", "asof_approximation"] | None = None
 
     def __post_init__(self) -> None:
         if self.category is None:
@@ -78,6 +84,9 @@ class WarningCategory:
     DATA_QUALITY = "data_quality"
     TERMINATION = "termination"
     PERFORMANCE_PATH = "performance_path"
+    # R24 当期近似（方法学声明）：结果正确性未被判定受影响，但必须在结果中标注。
+    # 由 ``_assess_credibility`` 单独经 caveat 通道呈现，不计入可信度分级。
+    ASOF_APPROXIMATION = "asof_approximation"
     # 系统级告警：结果正确性未受影响，但用户必须知晓（如持久化失败）。
     # 仅由 services 层以裸字符串追加（R1 禁止 services 运行时构造 DataWarning），
     # 故 DataWarning.category 的 Literal 不包含本值。
@@ -103,6 +112,7 @@ class WarningCategory:
         "preload_range_too_wide": "performance_path",
         "range_preload_failed": "performance_path",
         "range_preload_error": "performance_path",
+        "delisting_asof_approximation": "asof_approximation",
     }
     # fail-closed 历史异常关键词白名单：无 [type] 前缀的真实异常一定能兜底归类，
     # 满足 R21 BT-03（不以「无前缀一律非 unreliable」为默认默认值）。

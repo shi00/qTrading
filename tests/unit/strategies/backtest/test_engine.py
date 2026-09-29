@@ -11,7 +11,7 @@ import pytest
 
 from data.domain_services.offline_calendar import OfflineCalendar
 from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
-from strategies.backtest.config import BacktestConfig
+from strategies.backtest.config import BacktestConfig, DataWarning
 from strategies.backtest.engine import VectorBacktestEngine
 
 
@@ -1231,6 +1231,76 @@ class TestRunMergesRangePreloadWarnings:
         result = await engine.run(strategy=strategy)
 
         assert not any(str(w).startswith("[preload_range_too_wide]") for w in result.data_warnings)
+
+
+class TestRunDelistingAsOfApproximationWarning:
+    """R24: 票池内出现退市整理期标记标的时，engine.run 在 data_warnings 显式标注口径近似。
+
+    退市排除口径（screener_dao._delisting_flag_expr）在区间回放时以**当前**名称/
+    delist_date 快照参与历史计算，name-history 缺覆盖时可能前视——按 R24「显式声明并在
+    结果中标注」，provider.delisting_flag_seen 置位时产出 delisting_asof_approximation
+    告警（不改动票池行为），供 VM 经 caveat 通道呈现。
+    """
+
+    async def _run(self, monkeypatch, *, delisting_seen: bool):
+        from strategies.backtest.metrics import BacktestMetrics
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 5))
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = MagicMock()
+
+        dp = MagicMock()
+        dp.range_preload_warnings = []
+        dp.delisting_flag_seen = delisting_seen
+        dp.get_stock_meta = AsyncMock(return_value={})
+        engine.data_provider = dp
+        engine.strategy_adapter = MagicMock()
+
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        empty_signals = pl.DataFrame({"ts_code": [], "trade_date": [], "signal_rank": []})
+
+        monkeypatch.setattr(engine, "_get_trade_dates", AsyncMock(return_value=trade_dates))
+        monkeypatch.setattr(engine, "_load_benchmark", AsyncMock(return_value=(pl.DataFrame(), None)))
+        monkeypatch.setattr(engine, "_generate_signals", AsyncMock(return_value=empty_signals))
+        monkeypatch.setattr(engine, "_load_quotes", AsyncMock(return_value=(pl.DataFrame(), [])))
+        monkeypatch.setattr(
+            engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), [], 0))
+        )
+        monkeypatch.setattr(
+            engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [], []))
+        )
+        monkeypatch.setattr(engine, "_calc_benchmark_returns", MagicMock(return_value=(pl.DataFrame(), None)))
+        monkeypatch.setattr(engine, "_calc_period_stats", MagicMock(return_value={}))
+        monkeypatch.setattr(
+            BacktestMetrics, "calc_nav_curve", MagicMock(return_value=pl.Series([0.0, 0.0], dtype=pl.Float64))
+        )
+        monkeypatch.setattr(
+            BacktestMetrics, "calc_daily_returns", MagicMock(return_value=pl.Series([0.0, 0.0], dtype=pl.Float64))
+        )
+        monkeypatch.setattr(BacktestMetrics, "calc_all_metrics", MagicMock(return_value={}))
+        monkeypatch.setattr(BacktestMetrics, "calc_investment_metrics", MagicMock(return_value={}))
+
+        strategy = MagicMock()
+        strategy.name = "mock_strategy"
+
+        return await engine.run(strategy=strategy)
+
+    @pytest.mark.asyncio
+    async def test_appends_warning_when_flag_seen(self, monkeypatch):
+        result = await self._run(monkeypatch, delisting_seen=True)
+
+        assert any(
+            isinstance(w, DataWarning) and w.warning_type == "delisting_asof_approximation"
+            for w in result.data_warnings
+        )
+        assert any(str(w).startswith("[delisting_asof_approximation]") for w in result.data_warnings)
+
+    @pytest.mark.asyncio
+    async def test_omits_warning_when_flag_absent(self, monkeypatch):
+        result = await self._run(monkeypatch, delisting_seen=False)
+
+        assert not any(str(w).startswith("[delisting_asof_approximation]") for w in result.data_warnings)
 
 
 class TestRunPortfolioWipedOutWarning:

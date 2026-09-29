@@ -2031,6 +2031,7 @@
     "backtest_detail_skipped_orders_title": "Skipped orders",
     "backtest_warn_more_days": "…and {count} more trading day(s) (see exported report)",
     "backtest_caveat_ai_disabled": "This backtest did not include the AI analysis stage; results reflect only the mathematical screening part and do not represent how this strategy would perform with AI enabled in live trading.",
+    "backtest_caveat_delisting_asof_approximation": "This backtest universe contained delisting-period stocks, whose exclusion uses a \"current-snapshot approximation\" (R24): names are restored as-of via name-history but fall back to the current name when historical coverage is missing, and the delist date also uses the current snapshot; the exclusion timing of individual stocks may differ from what was known at the time, potentially introducing look-ahead/survivorship bias.",
     "backtest_skip_no_quote": "Skipped, no quote: {count}",
     "backtest_skip_suspended": "Skipped, suspended: {count}",
     "backtest_skip_down_limit": "Skipped, down-limit sell not allowed: {count}",
