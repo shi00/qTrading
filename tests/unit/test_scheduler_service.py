@@ -2208,3 +2208,128 @@ class TestWatchdogMarketSyncGuard:
         active = AppTask(name="daily", exclusive_group=EXCLUSIVE_GROUP_MARKET_SYNC, status=TaskStatus.RUNNING)
         with patch("services.task_manager.TaskManager", self._task_manager_with(active)):
             assert svc._is_market_sync_busy() is True
+
+
+class TestGetJobsStatusSnapshot:
+    """D7-6: SchedulerService.get_jobs_status_snapshot() 只读快照口径。
+
+    断言重点：覆盖全部已注册 job 且顺序稳定；缺失字段一律 None（R21，不得伪造成
+    0/空串）；daily_update 的连续失败次数与 D7-1 退避状态同源（不另立第二份计数）。
+    """
+
+    _FIXED_NOW = datetime(2024, 6, 15, 12, 0, 0)
+
+    def test_covers_all_jobs_in_order(self):
+        svc = _make_svc()
+        svc.scheduler.get_job = MagicMock(return_value=None)
+        snapshot = svc.get_jobs_status_snapshot()
+        assert [s.job_id for s in snapshot] == [
+            "daily_update",
+            "review_backfill",
+            "ai_concept_daily_refresh",
+            "nightly_prediction",
+        ]
+
+    def test_missing_fields_are_none_not_fake_values(self):
+        """无水位/无失败记录/无计划时刻时全部为 None；daily_update 计数为权威 0（非 None）。"""
+        svc = _make_svc()
+        svc.scheduler.get_job = MagicMock(return_value=None)
+        by_id = {s.job_id: s for s in svc.get_jobs_status_snapshot()}
+
+        for job_id in ("review_backfill", "ai_concept_daily_refresh", "nightly_prediction"):
+            assert by_id[job_id].last_success_at is None
+            assert by_id[job_id].consecutive_failures is None
+
+        for job_id in by_id:
+            assert by_id[job_id].last_failure_reason is None
+            assert by_id[job_id].next_run_at is None
+
+        # daily_update 是唯一有权威计数的 job：初始为真实 0，而非「未记录」的 None
+        assert by_id["daily_update"].consecutive_failures == 0
+        assert by_id["daily_update"].last_success_at is None
+
+    def test_daily_update_count_same_source_as_backoff(self):
+        """连续失败次数直接反映 _catchup_consecutive_failures（D7-1 同源），重置后归零。"""
+        svc = _make_svc()
+        svc.scheduler.get_job = MagicMock(return_value=None)
+        svc._catchup_consecutive_failures = 3
+        assert svc.get_jobs_status_snapshot()[0].consecutive_failures == 3
+
+        svc._reset_catchup_backoff()
+        assert svc.get_jobs_status_snapshot()[0].consecutive_failures == 0
+
+    def test_last_success_reads_watermarks(self):
+        """last_success_at 取既有幂等水位；review_backfill 无统一水位来源 → None。"""
+        svc = _make_svc()
+        svc.scheduler.get_job = MagicMock(return_value=None)
+        svc._last_update_date = "20240614"
+        svc._last_pred_date = "20240613"
+        svc._last_ai_concept_date = "20240612"
+
+        by_id = {s.job_id: s for s in svc.get_jobs_status_snapshot()}
+        assert by_id["daily_update"].last_success_at == "20240614"
+        assert by_id["nightly_prediction"].last_success_at == "20240613"
+        assert by_id["ai_concept_daily_refresh"].last_success_at == "20240612"
+        assert by_id["review_backfill"].last_success_at is None
+
+    def test_next_run_from_apscheduler_job(self):
+        """next_run_at 走 APScheduler job；未注册（get_job→None）时为 None。"""
+        svc = _make_svc()
+        mock_job = MagicMock()
+        mock_job.next_run_time = datetime(2024, 6, 15, 16, 30)
+        svc.scheduler.get_job = MagicMock(return_value=mock_job)
+        assert svc.get_jobs_status_snapshot()[0].next_run_at == "2024-06-15 16:30:00"
+
+        svc.scheduler.get_job = MagicMock(return_value=None)
+        assert svc.get_jobs_status_snapshot()[0].next_run_at is None
+
+    @pytest.mark.asyncio
+    async def test_catchup_failure_records_reason_then_reset_clears(self):
+        """补偿未完成写入 daily_update 失败原因（脱敏）；成功/水位推进后清除。"""
+        svc = _make_svc()
+        svc.scheduler.get_job = MagicMock(return_value=None)
+
+        await TestCatchupBackoff()._run_incomplete_catchup(svc)
+        reason = svc.get_jobs_status_snapshot()[0].last_failure_reason
+        assert reason is not None
+        assert "daily_quotes" in reason
+
+        svc._reset_catchup_backoff()
+        assert svc.get_jobs_status_snapshot()[0].last_failure_reason is None
+
+    def test_on_job_error_records_reason_for_business_job(self):
+        """业务 job 抛异常 → 记录脱敏后的失败原因。"""
+        svc = _make_svc()
+        svc.scheduler.get_job = MagicMock(return_value=None)
+        event = MagicMock()
+        event.job_id = "nightly_prediction"
+        event.exception = ValueError("boom-xyz")
+        with patch("utils.scheduler_service.logger"):
+            svc._on_job_error(event)
+
+        reason = next(s for s in svc.get_jobs_status_snapshot() if s.job_id == "nightly_prediction").last_failure_reason
+        assert "boom-xyz" in (reason or "")
+
+    def test_on_job_error_ignores_cancelled_error(self):
+        """CancelledError（优雅停机）不得记为失败（R2 语义，面板不得显示为故障）。"""
+        svc = _make_svc()
+        svc.scheduler.get_job = MagicMock(return_value=None)
+        event = MagicMock()
+        event.job_id = "daily_update"
+        event.exception = asyncio.CancelledError()
+        with patch("utils.scheduler_service.logger"):
+            svc._on_job_error(event)
+
+        assert svc.get_jobs_status_snapshot()[0].last_failure_reason is None
+
+    def test_on_job_error_ignores_non_business_job(self):
+        """非业务 job（如 config_watchdog）失败不写入面板状态，避免无界增长。"""
+        svc = _make_svc()
+        svc.scheduler.get_job = MagicMock(return_value=None)
+        event = MagicMock()
+        event.job_id = "config_watchdog"
+        event.exception = ValueError("boom")
+        with patch("utils.scheduler_service.logger"):
+            svc._on_job_error(event)
+
+        assert svc._job_last_failure_reason == {}

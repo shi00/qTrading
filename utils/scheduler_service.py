@@ -12,6 +12,7 @@ import datetime
 import logging
 import threading
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -42,6 +43,33 @@ _REQUIRED_JOBS: frozenset[str] = frozenset({"nightly_prediction"})
 # 达到末档后保持 2h 封顶，避免持续性失败（积分权限不足 / 限流 / 数据源延迟发布）下
 # 30 秒看门狗无限固定频率重试——持续消耗 Tushare 配额并挤占任务面板 200 条历史。
 _CATCHUP_BACKOFF_SECONDS: tuple[int, ...] = (30, 300, 1800, 7200)
+
+# D7-6: 状态面板展示的定时任务全集（与 _schedule_jobs 注册的 id 同源，顺序即展示顺序）。
+_SCHEDULED_JOB_IDS: tuple[str, ...] = (
+    "daily_update",
+    "review_backfill",
+    "ai_concept_daily_refresh",
+    "nightly_prediction",
+)
+
+
+@dataclass(frozen=True)
+class ScheduledJobStatus:
+    """D7-6: 单个定时任务的只读状态快照（不可变，跨层传递到 ViewModel/View）。
+
+    字段语义（缺失一律为 None，遵守 R21——不得用 0 / 空串 / 「正常」伪装缺失）：
+    - ``last_success_at``：该 job 最近一次成功推进的幂等水位（YYYYMMDD）；无来源或未成功过为 None。
+    - ``last_failure_reason``：最近一次失败原因（已经 DataSanitizer 脱敏，R9）；未记录为 None。
+    - ``next_run_at``：APScheduler 计划的下次运行时刻（"%Y-%m-%d %H:%M:%S"）；未注册/未计划为 None。
+    - ``consecutive_failures``：连续失败次数；仅 daily_update 有权威计数（与 D7-1 退避状态同源），
+      其余 job 为 None（未记录），不得伪造成 0。
+    """
+
+    job_id: str
+    last_success_at: str | None
+    last_failure_reason: str | None
+    next_run_at: str | None
+    consecutive_failures: int | None
 
 
 from utils.singleton_registry import register_singleton
@@ -141,6 +169,9 @@ class SchedulerService:
             # （= 上次失败时间 + 当前档位退避），退避窗口内看门狗不再提交补偿。
             self._catchup_consecutive_failures = 0
             self._catchup_next_retry_at: datetime.datetime | None = None
+            # D7-6: 各 job 最近一次失败原因（进程内，重启即重置；写入前经 DataSanitizer 脱敏，R9），
+            # 供数据源页调度状态面板展示"上次失败原因"。成功/水位推进时清除对应项。
+            self._job_last_failure_reason: dict[str, str] = {}
             # D7-3/MINOR-01: 看门狗补触发夜间预测的"当日已补触发"标记（进程内，重启即重置）。
             # 夜间预测"零落库/无候选"时刻意不标记 _last_pred_date（允许重试），若无此标记，
             # 30 秒看门狗会在数据就绪后反复补触发付费 AI 选股。每日至多补触发一次。
@@ -351,6 +382,9 @@ class SchedulerService:
                 DataSanitizer.sanitize_error(event.exception, show_traceback=True),
                 exc_info=True,
             )
+            # D7-6: 记录失败原因供状态面板展示（仅业务 job，避免无界增长；脱敏后写入，R9）。
+            if event.job_id in _SCHEDULED_JOB_IDS:
+                self._job_last_failure_reason[event.job_id] = DataSanitizer.sanitize_error(event.exception)
 
     def stop(self):
         """Stop the scheduler"""
@@ -468,7 +502,8 @@ class SchedulerService:
     def _schedule_jobs(self):
         """Register jobs with the scheduler"""
         # Only remove business jobs, NOT the config_watchdog
-        for job_id in ["daily_update", "nightly_prediction", "ai_concept_daily_refresh", "review_backfill"]:
+        # D7-6: 以 _SCHEDULED_JOB_IDS 为业务 job 全集唯一正本（避免与状态面板的 id 清单漂移）。
+        for job_id in _SCHEDULED_JOB_IDS:
             existing = self.scheduler.get_job(job_id)
             if existing:
                 existing.remove()
@@ -602,15 +637,18 @@ class SchedulerService:
             and get_now() < self._catchup_next_retry_at
         )
 
-    def _record_catchup_failure(self) -> None:
+    def _record_catchup_failure(self, reason: str | None = None) -> None:
         """D7-1/MAJOR-01: 记录一次补偿失败，并按指数退避更新下次重试时刻。
 
         序列 30s → 5min → 30min → 2h，达到末档后保持 2h 封顶（不再无限增长）。
+        D7-6: ``reason`` 为本次失败简述，脱敏后写入 daily_update 行的失败原因（R9）。
         """
         self._catchup_consecutive_failures += 1
         index = min(self._catchup_consecutive_failures - 1, len(_CATCHUP_BACKOFF_SECONDS) - 1)
         delay_seconds = _CATCHUP_BACKOFF_SECONDS[index]
         self._catchup_next_retry_at = get_now() + datetime.timedelta(seconds=delay_seconds)
+        if reason:
+            self._job_last_failure_reason["daily_update"] = DataSanitizer.sanitize_error(reason)
         logger.info(
             "[Scheduler] 补偿连续失败 %d 次，退避 %d 秒后重试（下次重试：%s）",
             self._catchup_consecutive_failures,
@@ -619,7 +657,10 @@ class SchedulerService:
         )
 
     def _reset_catchup_backoff(self) -> None:
-        """D7-1/MAJOR-01: 补偿成功或水位推进后清零失败计数与退避状态。"""
+        """D7-1/MAJOR-01: 补偿成功或水位推进后清零失败计数与退避状态。
+
+        D7-6: 同步清除 daily_update 行的失败原因——成功之后仍残留旧失败原因会误导状态面板。
+        """
         if self._catchup_consecutive_failures:
             logger.info(
                 "[Scheduler] 补偿退避状态清零（此前连续失败 %d 次）",
@@ -627,6 +668,7 @@ class SchedulerService:
             )
         self._catchup_consecutive_failures = 0
         self._catchup_next_retry_at = None
+        self._job_last_failure_reason.pop("daily_update", None)
 
     def _is_past_nightly_prediction_time(self) -> bool:
         """D7-3/MINOR-01: 当前时刻是否已到/已过夜间预测计划时刻（默认 20:30）。
@@ -793,7 +835,8 @@ class SchedulerService:
             sync_result.failed_critical_tables,
         )
         # D7-1/MAJOR-01: 记录失败并退避，避免看门狗每 30 秒重复提交（消耗配额 + 刷屏任务面板）。
-        self._record_catchup_failure()
+        # D7-6: 同时记录失败原因（关键表清单）供状态面板展示。
+        self._record_catchup_failure(reason=f"failed_critical_tables={sync_result.failed_critical_tables}")
         return Message("sched_catchup_partial", {"days": total})
 
     async def _run_daily_update(self):
@@ -1033,3 +1076,41 @@ class SchedulerService:
             "last_prediction": self._last_pred_date,
             "next_run": next_run,
         }
+
+    def _job_next_run_at(self, job_id: str) -> str | None:
+        """D7-6: 取 APScheduler 计划的下次运行时刻；未注册/未计划时返回 None（R21，不伪造）。"""
+        job = self.scheduler.get_job(job_id)
+        next_run = getattr(job, "next_run_time", None)
+        return next_run.strftime("%Y-%m-%d %H:%M:%S") if next_run else None
+
+    def get_jobs_status_snapshot(self) -> tuple[ScheduledJobStatus, ...]:
+        """D7-6: 全部已注册业务定时任务的只读状态快照（供数据源页调度状态面板）。
+
+        纯内存读取（APScheduler job 表 + 进程内状态），无 IO / DB 访问，可在 UI 线程直调，
+        不触发 R16。字段缺失一律为 None（R21），由 View 层渲染为占位符。
+
+        同源口径（不另立第二份状态）：
+        - ``last_success_at`` 取既有幂等水位（``_last_update_date`` / ``_last_pred_date`` /
+          ``_last_ai_concept_date``）；``review_backfill`` 不推进统一水位，恒为 None。
+        - ``consecutive_failures`` 仅 daily_update 取 ``_catchup_consecutive_failures``
+          （与 D7-1 退避状态同源，不新增计数）；其余 job 恒为 None。
+
+        NOTE(lazy): 仅日更域有权威连续失败计数. ceiling: 非补偿路径（回填/概念/预测）的
+        失败不累积计数，面板对其显示「—」. upgrade: 引入 per-job 失败计数并可在成功时清零时.
+        """
+        last_success_source = {
+            "daily_update": self._last_update_date,
+            "review_backfill": None,
+            "ai_concept_daily_refresh": self._last_ai_concept_date,
+            "nightly_prediction": self._last_pred_date,
+        }
+        return tuple(
+            ScheduledJobStatus(
+                job_id=job_id,
+                last_success_at=last_success_source[job_id] or None,
+                last_failure_reason=self._job_last_failure_reason.get(job_id),
+                next_run_at=self._job_next_run_at(job_id),
+                consecutive_failures=self._catchup_consecutive_failures if job_id == "daily_update" else None,
+            )
+            for job_id in _SCHEDULED_JOB_IDS
+        )

@@ -21,6 +21,7 @@ from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error
 from utils.loop_local import get_loop_local
 from utils.sanitizers import DataSanitizer
+from utils.scheduler_service import ScheduledJobStatus, SchedulerService
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
@@ -112,6 +113,11 @@ class DataSourceState:
     # --- 瞬态信号 (无数据负载, 用 int 递增表示事件次数; 非 dual-track: 无 property 包装) ---
     cache_cleared_version: int = 0
 
+    # --- D7-6 调度状态面板 ---
+    # scheduler_jobs: 各定时任务只读状态快照 (直接复用 utils 的 frozen dataclass, 避免重复类型);
+    # 空元组表示尚未刷新 (View 渲染显式占位, 不得伪装为「一切正常」, R21).
+    scheduler_jobs: tuple[ScheduledJobStatus, ...] = ()
+
 
 class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
     """ViewModel for DataSourceTab — manages data source business logic.
@@ -126,6 +132,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         processor: DataProcessor | None = None,
         cache: CacheManager | None = None,
         ai_service: AIService | None = None,
+        scheduler_service: SchedulerService | None = None,
     ):
         # Dependencies (constructor injection for testability)
         # T6 fix: 与 _processor / _cache 一致，AIService 也通过构造注入。
@@ -140,6 +147,8 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         self._processor = processor
         self._cache = cache or CacheManager()  # noqa: R16 - 持有注册单例引用（幂等工厂，DI 注入位）
         self._ai_service = ai_service
+        # D7-6: 调度状态面板数据源，与 _ai_service 一致惰性构造（构造期不触碰 SchedulerService）。
+        self._scheduler_service = scheduler_service
         self._tm = TaskManager()  # noqa: R16 - 持有注册单例引用（幂等工厂）
 
         # Business state (internal mutable tracking, not for View)
@@ -193,6 +202,12 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
 
             self._ai_service = AIService()
         return self._ai_service
+
+    def _get_scheduler_service(self) -> SchedulerService:
+        """D7-6: 惰性解析 SchedulerService（注册单例，幂等），构造期不触碰（避免打开面板即读配置）。"""
+        if self._scheduler_service is None:
+            self._scheduler_service = SchedulerService()
+        return self._scheduler_service
 
     def _unsubscribe_from_task_manager(self) -> None:
         """取消 TaskManager 订阅 (dispose 时调用)."""
@@ -260,6 +275,27 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
     def _emit_cache_cleared(self) -> None:
         """Notify cache cleared via cache_cleared_version (无数据瞬态信号, 非 dual-track)."""
         self._set_state(cache_cleared_version=self._state.cache_cleared_version + 1)
+
+    # --- D7-6 调度状态面板 ---
+
+    def refresh_scheduler_status(self) -> None:
+        """D7-6: 刷新各定时任务只读状态快照到 state（供数据源页调度状态面板渲染）。
+
+        SchedulerService.get_jobs_status_snapshot() 为纯内存读取（无 IO/DB），同步命令不触发 R16。
+        刷新时机（不新增轮询定时器，避免高频重渲染与第二个调度源）：页面挂载 + 任务终结。
+
+        尽力而为的展示性刷新：本方法由 handle_task_update 的 TaskManager 订阅回调调用，
+        快照读取失败（如单例构造读配置异常）不得影响核心任务生命周期与状态恢复，故降级为
+        记录日志并保留原 state（CancelledError 属 BaseException，不被 except Exception 吞没，R2）。
+        """
+        try:
+            snapshot = self._get_scheduler_service().get_jobs_status_snapshot()
+        except Exception as e:
+            logger.error(
+                "[DataSourceVM] 调度状态快照刷新失败（保留旧状态）: %s", DataSanitizer.sanitize_error(e), exc_info=True
+            )
+            return
+        self._set_state(scheduler_jobs=snapshot)
 
     # --- Error classification (Task 5.1) ---
 
@@ -737,6 +773,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
 
         active_ids = set(self._active_task_ids.values())
         recovered = False
+        terminated = False
         for t in current_tasks:
             if t.id in active_ids and t.status in (
                 TaskStatus.COMPLETED,
@@ -749,9 +786,13 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                     None,
                 )
                 self._active_task_ids = {k: v for k, v in self._active_task_ids.items() if v != t.id}
+                terminated = True
                 if not self._active_task_ids and self._state.is_syncing and not recovered:
                     self._recover_after_task_terminated(unique_key, t.status)
                     recovered = True
+        if terminated:
+            # D7-6: 任务终结后刷新调度状态面板（水位/失败原因可能因本次任务而变化）。
+            self.refresh_scheduler_status()
 
     def recover_stale_state(self):
         """Recover from stale task state (e.g. after page remount)."""

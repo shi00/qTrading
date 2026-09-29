@@ -30,6 +30,7 @@ from services.ai_service import AIService
 from services.task_manager import TaskManager, TaskStatus
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceViewModel
+from utils.scheduler_service import SchedulerService
 
 pytestmark = [pytest.mark.integration, pytest.mark.no_db]
 
@@ -87,12 +88,21 @@ def mock_ai_service():
 
 
 @pytest.fixture
-def vm(task_manager, mock_processor, mock_cache, mock_ai_service):
+def mock_scheduler_service():
+    """D7-6: 注入 mock SchedulerService, 避免任务终结时触发真实单例构造/配置读取。"""
+    instance = MagicMock(spec=SchedulerService)
+    instance.get_jobs_status_snapshot = MagicMock(return_value=())
+    return instance
+
+
+@pytest.fixture
+def vm(task_manager, mock_processor, mock_cache, mock_ai_service, mock_scheduler_service):
     """VM 构造时订阅真实 TaskManager (singleton 已由 fixture 初始化)."""
     instance = DataSourceViewModel(
         processor=mock_processor,
         cache=mock_cache,
         ai_service=mock_ai_service,
+        scheduler_service=mock_scheduler_service,
     )
     yield instance
     instance.dispose()
