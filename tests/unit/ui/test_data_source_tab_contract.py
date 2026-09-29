@@ -2687,3 +2687,27 @@ class TestMajor03DangerZone:
         # 内容宿主为承载既有 BackupRestorePanel 的固定宽度 Container
         assert isinstance(backup_dialog.content, ft.Container)
         assert backup_dialog.content.width == 520
+
+    def test_reset_runtime_labels_do_not_say_cache(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps
+    ):
+        """残余: 重置操作运行期用户可见文案不得再以「缓存」淡化删库后果。
+
+        入口与确认框已更名为「重置本地数据库」，但任务名/成功提示/冲突提示若仍写
+        「清空缓存/cache」，会让用户在破坏性操作执行前后收到自相矛盾的反馈。
+        """
+        import json
+
+        root = Path(__file__).parents[3] / "locales"
+        zh = json.loads((root / "zh_CN" / "strings.json").read_text(encoding="utf-8"))
+        en = json.loads((root / "en_US" / "strings.json").read_text(encoding="utf-8"))
+        keys = (
+            "task_name_clear_cache",
+            "ds_cache_cleared",
+            "ds_cache_clear_done",
+            "ds_clear_cache_syncing",
+            "ds_clean_fail",
+        )
+        for key in keys:
+            assert "缓存" not in zh[key], f"zh_CN[{key}] 仍以「缓存」淡化删库: {zh[key]!r}"
+            assert "cache" not in en[key].lower(), f"en_US[{key}] 仍以 cache 淡化删库: {en[key]!r}"
