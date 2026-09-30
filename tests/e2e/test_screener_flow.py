@@ -79,7 +79,9 @@ async def test_screener_pagination_info(e2e_page):
     await screener.expect_result("平安银行")
 
     # 验证页码信息文本（结果加载完成后渲染）
-    page_info = I18n.get("screener_page_info").format(current=1, total=1)
+    # MAJOR-06: 分页栏文案新增「共 {count} 条」, 总数随结果集变化, 故断言模板中
+    # {count} 之前的稳定前缀 (get_by_text 为子串匹配, exact=False)。
+    page_info = I18n.get("screener_page_info").split("{count}")[0].format(current=1, total=1).strip()
     await screener.expect_text(page_info, timeout_ms=TIMEOUTS.INTERACTION)
 
 
@@ -297,5 +299,7 @@ async def test_screener_1280x720_viewport_no_collapse(e2e_page_1280x720):
     await screener.run()
     await screener.expect_result("平安银行")
 
-    page_info = I18n.get("screener_page_info").format(current=1, total=1)
+    # MAJOR-06: 分页栏文案新增「共 {count} 条」, 总数随结果集变化, 故断言模板中
+    # {count} 之前的稳定前缀 (get_by_text 为子串匹配, exact=False)。
+    page_info = I18n.get("screener_page_info").split("{count}")[0].format(current=1, total=1).strip()
     await screener.expect_text(page_info, timeout_ms=TIMEOUTS.INTERACTION)

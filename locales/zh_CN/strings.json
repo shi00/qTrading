@@ -163,7 +163,7 @@
     "screener_page_prev": "上一页",
     "screener_page_next": "下一页",
     "screener_log_title": "执行日志",
-    "screener_page_info": "第 {current} 页 / 共 {total} 页",
+    "screener_page_info": "第 {current} 页 / 共 {total} 页（共 {count} 条）",
     "screener_per_page": "条/页",
     "screener_page_size": "每页条数",
     "screener_filter_stock": "股票代码过滤",

@@ -1214,6 +1214,127 @@ class TestUpdatePagination:
         assert vm.state.total_pages == 0
 
 
+def _ai_results_df(recommended: int, excluded: int, failed: int) -> pd.DataFrame:
+    """构造含 ai_status 的结果集 (MAJOR-06 分组计数用例; 行序即分组顺序)。"""
+    statuses = ["analyzed"] * recommended + ["rejected"] * excluded + ["failed"] * failed
+    return pd.DataFrame(
+        {
+            "ts_code": [f"{i:06d}.SZ" for i in range(len(statuses))],
+            "ai_status": statuses,
+        }
+    )
+
+
+class TestAiSectionCounts:
+    """MAJOR-06 (review 09-24): 分组先于分页 —— 页签计数取全量分组条数, 分页在组内进行。"""
+
+    def test_section_counts_are_full_results_not_current_page(self, vm):
+        """DoD: 120 行 / 每页 50 条 → 第 1 页「推荐」计数为**全量** 81, 而非页内 50。"""
+        vm._full_results = _ai_results_df(recommended=81, excluded=20, failed=19)
+        vm._set_state(page_size=50)
+        vm._update_pagination(page_no=1)
+
+        assert vm.state.ai_section_counts == (81, 20, 19)
+        assert vm.state.ai_active_section == "recommended"
+        assert len(vm.state.current_page_rows) == 50
+        assert {row.values["ai_status"] for row in vm.state.current_page_rows} == {"analyzed"}
+
+    def test_section_counts_stable_across_pages(self, vm):
+        """翻页不改变页签计数口径; 组内分页: 推荐 81 条 → 2 页, 第 2 页 31 条。"""
+        vm._full_results = _ai_results_df(81, 20, 19)
+        vm._set_state(page_size=50)
+        vm._update_pagination(page_no=2)
+
+        assert vm.state.ai_section_counts == (81, 20, 19)
+        assert vm.state.total_pages == 2
+        assert len(vm.state.current_page_rows) == 31
+        assert {row.values["ai_status"] for row in vm.state.current_page_rows} == {"analyzed"}
+
+    def test_counts_sum_equals_full_result_size(self, vm):
+        vm._full_results = _ai_results_df(81, 20, 19)
+        vm._update_pagination()
+
+        assert sum(vm.state.ai_section_counts) == 120
+
+    def test_default_falls_back_to_first_non_empty_section(self, vm):
+        """默认「推荐」为空时不呈现空表, 回落首个非空分组 (excluded)。"""
+        vm._full_results = _ai_results_df(0, 5, 0)
+        vm._update_pagination()
+
+        assert vm.state.ai_active_section == "excluded"
+        assert vm.state.total_items == 5
+        assert {row.values["ai_status"] for row in vm.state.current_page_rows} == {"rejected"}
+
+    def test_select_ai_section_reslices_within_group(self, vm):
+        """页签切换回到该分组第 1 页, 分页元数据随之描述该分组 (组内分页)。"""
+        vm._full_results = _ai_results_df(81, 20, 19)
+        vm._set_state(page_size=50)
+        vm._update_pagination(page_no=2)
+
+        vm.select_ai_section("failed")
+
+        assert vm.state.ai_active_section == "failed"
+        assert vm.state.page_no == 1
+        assert vm.state.total_items == 19
+        assert vm.state.total_pages == 1
+        assert {row.values["ai_status"] for row in vm.state.current_page_rows} == {"failed"}
+        # 计数口径不因切换分组而变化 (仍是全量)
+        assert vm.state.ai_section_counts == (81, 20, 19)
+
+    def test_select_ai_section_is_idempotent_and_rejects_unknown(self, vm):
+        vm._full_results = _ai_results_df(81, 20, 19)
+        vm._update_pagination()
+        before = vm.state.current_page_rows
+
+        vm.select_ai_section("recommended")  # 已是活动分组 → no-op
+        vm.select_ai_section("does-not-exist")  # 非法取值 → no-op
+
+        assert vm.state.ai_active_section == "recommended"
+        assert vm.state.current_page_rows is before
+
+    def test_section_counts_follow_stock_filter(self, vm):
+        """筛选后计数仍为「筛选后全量」, 与过滤同帧收敛 (非当前页长度)。"""
+        vm._full_results = _ai_results_df(81, 20, 19)
+
+        vm.set_stock_filter("00000")  # 前缀命中前 10 行 (全为 analyzed)
+
+        assert vm.state.ai_section_counts == (10, 0, 0)
+        assert vm.state.total_items == 10
+
+    def test_no_row_loss_across_sections(self, vm):
+        """分组先于分页后, 三分桶之和仍恒等于当前页切片 (零丢失契约不变)。"""
+        vm._full_results = _ai_results_df(81, 20, 19)
+        vm._set_state(page_size=50)
+
+        for page, expected_rows in ((1, 50), (2, 31)):
+            vm._update_pagination(page_no=page)
+            buckets = len(vm.state.ai_recommended_rows) + len(vm.state.ai_excluded_rows) + len(vm.state.ai_failed_rows)
+            assert len(vm.state.current_page_rows) == expected_rows
+            assert buckets == expected_rows
+
+    def test_non_ai_results_keep_single_table_semantics(self, vm):
+        """无 ai_status 列时不分区分页, total_items 仍为全量条数 (UX-02 回归)。"""
+        vm._full_results = pd.DataFrame({"A": range(75)})
+        vm._update_pagination()
+
+        assert vm.state.show_ai_sections is False
+        assert vm.state.ai_section_counts == (0, 0, 0)
+        assert vm.state.total_items == 75
+        assert len(vm.state.current_page_rows) == 50
+
+    def test_page_info_template_exposes_total_items(self, vm):
+        """DoD: screener_page_info 含总条数 (中英键集一致由 i18n 门禁守护)。"""
+        from ui.i18n import I18n
+
+        vm._full_results = _ai_results_df(81, 20, 19)
+        vm._update_pagination()
+
+        text = I18n.get("screener_page_info").format(
+            current=vm.state.page_no, total=vm.state.total_pages, count=vm.state.total_items
+        )
+        assert "81" in text
+
+
 class TestCurrentPageRows:
     """current_page_rows 切片契约 (C2b 消除双轨制)."""
 

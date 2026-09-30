@@ -208,6 +208,14 @@ class ScreenerState:
     # HISTORY 无该列), View 渲染单表而非三分区, 避免把成功的数学筛选误标「分析失败」
     # (05-explainability-ux UX-02; D7-3 三分区的非AI策略回归)。
     show_ai_sections: bool = False
+    # MAJOR-06: AI 三分区**全量**计数 (recommended, excluded, failed), 按 **过滤后全量结果集**
+    # 统计而非当前页切片长度 —— 分组标题 (页签标签) 的计数口径 (review 09-24 MAJOR-06)。
+    # 仅 show_ai_sections 为 True 时有意义; 其余情形为 (0, 0, 0)。
+    ai_section_counts: tuple[int, int, int] = (0, 0, 0)
+    # MAJOR-06: 当前活动 AI 分区 ("recommended"/"excluded"/"failed") —— 「先分组、再在组内
+    # 分页」的切片依据, 由 VM 解析 (请求分组为空时回落到首个非空分组, 默认「推荐」)。
+    # View 页签 selected 与表格数据同源于本字段, 不引入 View 侧业务状态。
+    ai_active_section: str = "recommended"
     # Sorting
     sort_column: str | None = None
     sort_ascending: bool = True
