@@ -1973,3 +1973,28 @@ class TestExpireStalePending:
             count = await dao.expire_stale_pending()
         assert count == 0
         assert any("Stale pending expiry failed" in r.message for r in caplog.records)
+
+
+class TestScreenerDaoGetLatestAiReviewsBulk:
+    """UX-09 MAJOR-04: 关注列表按 ts_code 批量取最近一次 AI 评分（仅非 NULL，R21）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_codes_returns_empty_df(self):
+        dao = ScreenerDao(MagicMock())
+        dao.chunked_in_query = AsyncMock()
+        result = await dao.get_latest_ai_reviews_bulk([])
+        assert result.empty
+        dao.chunked_in_query.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_distinct_on_query_skips_null_scores(self):
+        dao = ScreenerDao(MagicMock())
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_score": [85], "ai_reason": ["ok"]})
+        dao.chunked_in_query = AsyncMock(return_value=df)
+        result = await dao.get_latest_ai_reviews_bulk(["000001.SZ"])
+        assert not result.empty
+        sql_template = dao.chunked_in_query.call_args.args[1]
+        assert "DISTINCT ON (ts_code)" in sql_template
+        assert "ORDER BY ts_code, id DESC" in sql_template
+        assert "ai_score IS NOT NULL" in sql_template
+        assert dao.chunked_in_query.call_args.args[2] == ["000001.SZ"]

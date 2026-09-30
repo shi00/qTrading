@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pandas as pd
 import pytest
 
+from services.stock_detail_service import StockQuote
 from ui.viewmodels import Message
 from ui.viewmodels.watchlist_view_model import (
     StockSearchRow,
@@ -26,6 +27,7 @@ from ui.viewmodels.watchlist_view_model import (
     WatchlistViewModel,
     _df_to_stock_search_rows,
     _df_to_watchlist_rows,
+    _merge_quotes,
 )
 
 pytestmark = pytest.mark.unit
@@ -43,6 +45,13 @@ def mock_cache():
     cache.remove_from_watchlist = AsyncMock(return_value=1)
     cache.is_in_watchlist = AsyncMock(return_value=False)
     cache.search_stocks = AsyncMock(return_value=pd.DataFrame())
+    # UX-09 MAJOR-04：StockDetailService 经 CacheManager 代理批量取行情/详情。
+    cache.get_latest_quotes_bulk = AsyncMock(return_value=pd.DataFrame())
+    cache.get_latest_ai_reviews_bulk = AsyncMock(return_value=pd.DataFrame())
+    cache.get_latest_indicators_bulk = AsyncMock(return_value=pd.DataFrame())
+    cache.get_latest_financials_bulk = AsyncMock(return_value=pd.DataFrame())
+    cache.get_stock_basic_bulk = AsyncMock(return_value=pd.DataFrame())
+    cache.get_recent_quotes = AsyncMock(return_value=pd.DataFrame())
     return cache
 
 
@@ -373,3 +382,160 @@ class TestDfToStockSearchRows:
         assert len(rows) == 1
         assert rows[0].ts_code == "000001.SZ"
         assert rows[0].name == ""
+
+
+# --- _merge_quotes (UX-09 MAJOR-04 纯函数) ---
+
+
+class TestMergeQuotes:
+    """_merge_quotes 把行情快照合并进关注行，缺失保持 None（R21）。"""
+
+    def test_merge_sets_quote_fields(self):
+        rows = (WatchlistRow(ts_code="000001.SZ", stock_name="平安银行"),)
+        quotes = {"000001.SZ": StockQuote(latest_close=12.34, pct_chg=1.5, ai_score=85.0)}
+        merged = _merge_quotes(rows, quotes)
+        assert merged[0].latest_close == 12.34
+        assert merged[0].pct_chg == 1.5
+        assert merged[0].ai_score == 85.0
+
+    def test_merge_missing_quote_keeps_none(self):
+        rows = (WatchlistRow(ts_code="999999.SZ", stock_name="无行情"),)
+        merged = _merge_quotes(rows, {})
+        assert merged[0].latest_close is None
+        assert merged[0].pct_chg is None
+        assert merged[0].ai_score is None
+
+    def test_merge_partial_quote_keeps_missing_none(self):
+        """有行情价但无 AI 评分时，ai_score 仍为 None（不得填 0）。"""
+        rows = (WatchlistRow(ts_code="000001.SZ", stock_name="平安银行"),)
+        quotes = {"000001.SZ": StockQuote(latest_close=12.34, pct_chg=-0.8, ai_score=None)}
+        merged = _merge_quotes(rows, quotes)
+        assert merged[0].latest_close == 12.34
+        assert merged[0].pct_chg == -0.8
+        assert merged[0].ai_score is None
+
+    def test_merge_preserves_row_order_and_other_fields(self):
+        rows = (
+            WatchlistRow(ts_code="000001.SZ", stock_name="平安银行", added_at="2026-07-29", note="A"),
+            WatchlistRow(ts_code="600000.SH", stock_name="浦发银行", added_at="2026-07-28", note="B"),
+        )
+        merged = _merge_quotes(rows, {"600000.SH": StockQuote(latest_close=9.9)})
+        assert [r.ts_code for r in merged] == ["000001.SZ", "600000.SH"]
+        assert merged[0].note == "A"
+        assert merged[1].note == "B"
+        assert merged[1].latest_close == 9.9
+
+    def test_merge_empty_rows_returns_empty(self):
+        assert _merge_quotes((), {"000001.SZ": StockQuote(latest_close=1.0)}) == ()
+
+
+# --- load_watchlist 行情合并（UX-09 MAJOR-04） ---
+
+
+class TestLoadWatchlistQuotes:
+    @pytest.mark.asyncio
+    async def test_load_watchlist_merges_quotes(self, vm, mock_cache):
+        mock_cache.get_watchlist.return_value = _make_watchlist_df()
+        mock_cache.get_latest_quotes_bulk.return_value = pd.DataFrame(
+            [{"ts_code": "000001.SZ", "close": 12.34, "pct_chg": 1.5}]
+        )
+        mock_cache.get_latest_ai_reviews_bulk.return_value = pd.DataFrame([{"ts_code": "000001.SZ", "ai_score": 85}])
+        await vm.load_watchlist()
+        row0 = vm.state.watchlist_rows[0]
+        assert row0.latest_close == 12.34
+        assert row0.pct_chg == 1.5
+        assert row0.ai_score == 85.0
+        # 第二行无行情 → 全部 None（R21，不得填 0）
+        row1 = vm.state.watchlist_rows[1]
+        assert row1.latest_close is None
+        assert row1.pct_chg is None
+        assert row1.ai_score is None
+        mock_cache.get_latest_quotes_bulk.assert_awaited_once_with(["000001.SZ", "600000.SH"])
+
+    @pytest.mark.asyncio
+    async def test_load_watchlist_quote_failure_degrades_not_breaks(self, vm, mock_cache):
+        """行情查询失败 → 列表仍加载，行情列降级为 None（显示「—」）。"""
+        mock_cache.get_watchlist.return_value = _make_watchlist_df()
+        mock_cache.get_latest_quotes_bulk.side_effect = RuntimeError("db error")
+        await vm.load_watchlist()
+        assert len(vm.state.watchlist_rows) == 2
+        assert vm.state.watchlist_rows[0].latest_close is None
+        assert vm.state.load_error is None
+        assert vm.state.is_loading is False
+
+
+# --- open_stock_detail / close_stock_detail (UX-09 MAJOR-04) ---
+
+
+def _make_detail_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "ts_code": "000001.SZ",
+                "close": 12.34,
+                "pct_chg": 1.5,
+                "pe_ttm": 8.1,
+                "roe": 10.2,
+                "name": "平安银行",
+                "industry": "银行",
+                "ai_score": 85,
+            }
+        ]
+    )
+
+
+class TestOpenStockDetail:
+    @pytest.mark.asyncio
+    async def test_open_stock_detail_sets_detail_state(self, vm, mock_cache):
+        mock_cache.get_latest_quotes_bulk.return_value = _make_detail_df()
+        mock_cache.get_stock_basic_bulk.return_value = _make_detail_df()
+        result = await vm.open_stock_detail("000001.SZ")
+        assert result is True
+        assert vm.state.detail_stock_data is not None
+        assert vm.state.detail_stock_data["ts_code"] == "000001.SZ"
+        assert vm.state.detail_stock_data["name"] == "平安银行"
+
+    @pytest.mark.asyncio
+    async def test_open_stock_detail_does_not_require_watchlist_row_but_falls_back_name(self, vm, mock_cache):
+        """未在关注行内也能打开（不依赖列表），name 缺失时回退空（服务层回退 ts_code）。"""
+        result = await vm.open_stock_detail("600519.SH")
+        assert result is True
+        assert vm.state.detail_stock_data is not None
+        assert vm.state.detail_stock_data["ts_code"] == "600519.SH"
+        # 无 basic 数据且无自选行 → name 回退为 ts_code（服务层 fallback_name or code）
+        assert vm.state.detail_stock_data["name"] == "600519.SH"
+
+    @pytest.mark.asyncio
+    async def test_open_stock_detail_empty_code_returns_false(self, vm, mock_cache):
+        assert await vm.open_stock_detail("") is False
+        assert await vm.open_stock_detail("   ") is False
+        assert vm.state.detail_stock_data is None
+
+    @pytest.mark.asyncio
+    async def test_open_stock_detail_service_failure_returns_false(self, vm, mock_cache):
+        mock_cache.get_latest_quotes_bulk.side_effect = RuntimeError("db error")
+        result = await vm.open_stock_detail("000001.SZ")
+        assert result is False
+        assert vm.state.detail_stock_data is None
+        # 不得污染列表错误通道
+        assert vm.state.load_error is None
+
+    @pytest.mark.asyncio
+    async def test_open_stock_detail_propagates_cancelled_error(self, vm, mock_cache):
+        import asyncio
+
+        mock_cache.get_latest_quotes_bulk.side_effect = asyncio.CancelledError()
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion CancelledError 传播契约：raises 即验证，VM 不得吞没取消信号
+            await vm.open_stock_detail("000001.SZ")
+
+
+class TestCloseStockDetail:
+    def test_close_clears_detail_state(self, mock_cache):
+        vm = WatchlistViewModel(cache=mock_cache)
+        assert vm.state.detail_stock_data is None
+        vm._set_state(detail_stock_data={"ts_code": "000001.SZ"})
+        vm.close_stock_detail()
+        assert vm.state.detail_stock_data is None
+
+    def test_default_detail_state_is_none(self, vm):
+        assert vm.state.detail_stock_data is None

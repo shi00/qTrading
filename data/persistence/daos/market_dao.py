@@ -448,6 +448,22 @@ class MarketDao(BaseDao):
         sql += " ORDER BY ts_code, trade_date"
         return await self._read_db(sql, params)
 
+    async def get_latest_indicators_bulk(self, ts_codes: list[str]) -> pd.DataFrame:
+        """批量取多只股票各自最新交易日的估值/换手指标（DISTINCT ON，UX-09 MAJOR-04）。
+
+        与 ``get_daily_indicators_bulk`` 的区别：本方法返回「每码最新一行」而非区间
+        全量行，并补出 ps_ttm / dv_ttm（详情框估值区需要）。无记录的代码不出现。
+        """
+        if not ts_codes:
+            return pd.DataFrame()
+        sql_template = (
+            "SELECT DISTINCT ON (ts_code) ts_code, trade_date, turnover_rate, pe, pe_ttm, pb, ps, ps_ttm, "
+            "dv_ratio, dv_ttm, total_mv, circ_mv "
+            "FROM daily_indicators WHERE ts_code IN ({placeholders}) "
+            "ORDER BY ts_code, trade_date DESC"
+        )
+        return await self.chunked_in_query(self._read_db, sql_template, list(ts_codes))
+
     # --- Index Weights ---
     async def save_index_weights(self, df: pd.DataFrame):
         """Save Index Component Weights. Table: index_weight"""

@@ -153,6 +153,17 @@ class StockDao(BaseDao):
         )
         return await self._read_db_select(stmt)
 
+    async def get_stock_basic_bulk(self, ts_codes: list[str]) -> pd.DataFrame:
+        """批量取多只股票的基础信息（ts_code/name/industry/list_date，UX-09 MAJOR-04）。
+
+        不过滤 list_status：自选股可能已退市（用户仍需看到详情与退市状态数据）。
+        无记录的代码不出现在结果中（由调用方以 None/空表达，R21 不伪造）。
+        """
+        if not ts_codes:
+            return pd.DataFrame()
+        sql_template = "SELECT ts_code, name, industry, list_date FROM stock_basic WHERE ts_code IN ({placeholders})"
+        return await self.chunked_in_query(self._read_db, sql_template, list(ts_codes))
+
     # --- Trade Calendar ---
     async def save_trade_cal(self, df):
         cols = get_model_columns(TradeCal)

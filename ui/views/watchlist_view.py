@@ -1,7 +1,10 @@
 """watchlist_view — 关注列表视图 (FR-UX-004, Task 4.2).
 
-声明式组件，展示用户关注的股票列表，支持添加、移除、查看个股（UX-04: 深链跳
-选股页并按代码过滤）。
+声明式组件，展示用户关注的股票列表，支持添加、移除、查看个股。
+- UX-09 MAJOR-04：行内展示最新价 / 涨跌幅 / AI 评分（缺失显示「—」，R21）；
+  「查看」按 ts_code **直接打开个股详情对话框**（``StockDetailDialog``），
+  不再依赖当前选股结果集（原实现发 ``screener:{ts_code}`` 事件到选股页过滤
+  当前结果，未运行策略时必然落到空表）。
 - VM 通过 ``use_viewmodel(factory=lambda: WatchlistViewModel())`` 内部模式消费
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
 - 异步操作通过 ``page.run_task`` 调度 (R16); CancelledError 必须 raise (R2)
@@ -16,15 +19,18 @@ import flet as ft
 from ui.components.confirm_dialog import ConfirmDialog
 from ui.components.flet_type_helpers import safe_on_click
 from ui.components.state_views import GITHUB_ISSUES_URL, EmptyState, ErrorState, LoadingState
+from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.watchlist_add_dialog import WatchlistAddDialog
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
-from ui.pubsub_topics import TOPIC_NAVIGATE
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.watchlist_view_model import WatchlistRow, WatchlistViewModel
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
+
+# 缺失值统一占位（R21：不得用 0 / 0.00% 等业务上合法的具体值伪装缺失）。
+_MISSING_VALUE = "—"
 
 
 def _get_page() -> ft.Page | None:
@@ -40,14 +46,61 @@ def _show_toast(page: ft.Page, msg: str, msg_type: str = "info") -> None:
     page.toast.show(msg, msg_type)  # type: ignore[attr-defined]  # [reason: page.toast 由 application.py 动态挂载, ft.Page 存根未声明]
 
 
+def _format_quote_price(val: float | None) -> str:
+    """最新价 → 2 位小数；缺失显示「—」（纯函数，R21）。"""
+    if val is None:
+        return _MISSING_VALUE
+    return f"{val:.2f}"
+
+
+def _format_quote_pct(val: float | None) -> str:
+    """涨跌幅 → 2 位小数百分号（正数带 +）；缺失显示「—」（纯函数，R21）。"""
+    if val is None:
+        return _MISSING_VALUE
+    sign = "+" if val > 0 else ""
+    return f"{sign}{val:.2f}%"
+
+
+def _format_quote_ai_score(val: float | None) -> str:
+    """AI 评分 → 整数；缺失显示「—」（纯函数，R21）。"""
+    if val is None:
+        return _MISSING_VALUE
+    return f"{val:.0f}"
+
+
+def _quote_color(val: float | None) -> str | None:
+    """涨跌配色（A 股口径：涨红跌绿）；缺失/零值用中性色（None → 主文本色）。"""
+    if val is None or val == 0:
+        return None
+    return AppColors.UP_RED if val > 0 else AppColors.DOWN_GREEN
+
+
+def _quote_cell(label: str, value: str, color: str | None = None) -> ft.Column:
+    """构建单个紧凑行情单元格（caption 标签 + 数值）。"""
+    return ft.Column(
+        [
+            ft.Text(label, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_SECONDARY),
+            ft.Text(
+                value,
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                weight=ft.FontWeight.W_500,
+                color=color or AppColors.TEXT_PRIMARY,
+            ),
+        ],
+        spacing=0,
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+
 def _build_watchlist_row(
     row: WatchlistRow,
     on_remove: typing.Callable[[str], None],
     on_view: typing.Callable[[str], None] | None = None,
 ) -> ft.Container:
-    """构建单行关注列表项 (股票名 + 代码 + 加入日期 + 备注 + 查看/移除按钮).
+    """构建单行关注列表项 (股票名 + 代码 + 加入日期 + 备注 + 行情列 + 查看/移除按钮).
 
-    UX-04: ``on_view`` 传入时在删除按钮前渲染「查看个股」按钮 (SEARCH_OUTLINED,
+    UX-09 MAJOR-04: 渲染最新价 / 涨跌幅 / AI 评分三列（缺失显示「—」，R21）；
+    ``on_view`` 传入时在删除按钮前渲染「查看个股」按钮 (SEARCH_OUTLINED,
     描边风格对齐 DELETE_OUTLINE); None 时不渲染 (位置参数兼容).
     """
     name = row.stock_name or row.ts_code
@@ -55,6 +108,20 @@ def _build_watchlist_row(
     if row.added_at:
         sub_parts.append(row.added_at)
     sub_text = " · ".join(sub_parts)
+
+    quote_row = ft.Row(
+        [
+            _quote_cell(I18n.get("watchlist_col_price"), _format_quote_price(row.latest_close)),
+            _quote_cell(
+                I18n.get("watchlist_col_pct_chg"),
+                _format_quote_pct(row.pct_chg),
+                _quote_color(row.pct_chg),
+            ),
+            _quote_cell(I18n.get("watchlist_col_ai_score"), _format_quote_ai_score(row.ai_score)),
+        ],
+        spacing=16,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
 
     return ft.Container(
         content=ft.Row(
@@ -82,6 +149,7 @@ def _build_watchlist_row(
                     spacing=2,
                     expand=True,
                 ),
+                quote_row,
                 *(
                     [
                         ft.IconButton(
@@ -206,17 +274,30 @@ def WatchlistView(
         set_pending_remove_ts_code(ts_code)
         set_confirm_open(True)
 
-    def _on_view_stock(ts_code: str) -> None:
-        """UX-04: 行「查看」深链 — 携带 ts_code 跳选股页并填充代码过滤.
+    async def _do_open_detail(ts_code: str) -> None:
+        """按 ts_code 拉取详情并按需提示失败 (R2: CancelledError 必须 raise)。"""
+        try:
+            ok = await vm.open_stock_detail(ts_code)
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            logger.error("[WatchlistView] Open detail failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
+            ok = False
+        if not ok:
+            page = _get_page()
+            if page is not None:
+                _show_toast(page, I18n.get("watchlist_detail_failed"), "error")
 
-        ts_code 为 DB 主键正常非空; 空值时降级纯 tab 导航,
-        避免 "screener:" 空段消息被协议解析吞掉 (与 home_view 同构防护).
+    def _on_view_stock(ts_code: str) -> None:
+        """UX-09 MAJOR-04: 行「查看」— 按 ts_code 直接打开个股详情对话框.
+
+        不再发 ``screener:{ts_code}`` 事件到选股页过滤当前结果集（未运行策略时
+        必然落到空表），改为经 VM 按代码取数后由 ``StockDetailDialog`` 渲染。
         """
         page = _get_page()
         if page is None:
             return
-        message = f"screener:{ts_code}" if ts_code else "screener"
-        page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, message)
+        page.run_task(_do_open_detail, ts_code)
 
     def _do_confirm_remove() -> None:
         """ConfirmDialog on_confirm: 执行删除并关闭对话框。"""
@@ -298,6 +379,19 @@ def WatchlistView(
             pending_name = _r.stock_name or _r.ts_code
             break
 
+    # UX-09 MAJOR-04: 详情数据就绪时才渲染 StockDetailDialog。关闭时 VM 清空
+    # detail_stock_data → 组件从控件树移除；再次打开为全新实例（open_ 初值正确），
+    # 与 ScreenerView 的 `detail_dialog_data is None → 返回 None` 既有范式一致。
+    detail_dialog: ft.Control | None = None
+    if state.detail_stock_data is not None:
+        detail_dialog = StockDetailDialog(
+            stock_data=dict(state.detail_stock_data),
+            data_processor=vm.detail_service,
+            page=_get_page(),
+            open_state=True,
+            on_close=vm.close_stock_detail,
+        )
+
     return ft.Container(
         content=ft.Column(
             [
@@ -341,6 +435,7 @@ def WatchlistView(
                     on_add=_on_add,
                     on_close=_on_add_dialog_close,
                 ),
+                *([detail_dialog] if detail_dialog is not None else []),
             ],
             expand=True,
             spacing=12,

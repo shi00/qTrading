@@ -1143,3 +1143,29 @@ class CacheManager:
     async def is_in_watchlist(self, ts_code: str) -> bool:
         """检查是否已关注。"""
         return await self.watchlist_dao.is_in_watchlist(ts_code)
+
+    # --- Watchlist Quotes / Stock Detail by code (UX-09 MAJOR-04) ---
+
+    async def get_latest_quotes_bulk(self, ts_codes: list[str]) -> pd.DataFrame:
+        """批量取多只股票各自最新交易日行情（价/涨跌幅/量额），规避 N+1。"""
+        return await self.quote_dao.get_latest_quotes_bulk(ts_codes)
+
+    async def get_recent_quotes(self, ts_code: str, days: int = 365) -> pd.DataFrame:
+        """取该股最近 N 个交易日行情（升序），供按代码详情 K 线。"""
+        return await self.quote_dao.get_recent_quotes(ts_code, days)
+
+    async def get_latest_indicators_bulk(self, ts_codes: list[str]) -> pd.DataFrame:
+        """批量取多只股票各自最新交易日估值/换手指标。"""
+        return await self.market_dao.get_latest_indicators_bulk(ts_codes)
+
+    async def get_latest_financials_bulk(self, ts_codes: list[str]) -> pd.DataFrame:
+        """批量取多只股票最新报告期财务指标。"""
+        return await self.financial_dao.get_latest_financials_bulk(ts_codes)
+
+    async def get_stock_basic_bulk(self, ts_codes: list[str]) -> pd.DataFrame:
+        """批量取多只股票基础信息（名称/行业/上市日期）。"""
+        return await self.stock_dao.get_stock_basic_bulk(ts_codes)
+
+    async def get_latest_ai_reviews_bulk(self, ts_codes: list[str]) -> pd.DataFrame:
+        """批量取多只股票最近一次落库的 AI 评分与理由。"""
+        return await self.screener_dao.get_latest_ai_reviews_bulk(ts_codes)

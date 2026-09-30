@@ -612,3 +612,28 @@ class TestGetLatestOpenCalDate:
         dao = _make_dao()
         dao._read_db = AsyncMock(return_value=None)
         assert await dao.get_latest_open_cal_date() is None
+
+
+class TestStockDaoGetStockBasicBulk:
+    """UX-09 MAJOR-04: 详情/标题按 ts_code 批量取基础信息（不过滤 list_status，退市股可见）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_codes_returns_empty_df(self):
+        dao = _make_dao()
+        dao.chunked_in_query = AsyncMock()
+        result = await dao.get_stock_basic_bulk([])
+        assert result.empty
+        dao.chunked_in_query.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_query_shape_and_no_list_status_filter(self):
+        dao = _make_dao()
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]})
+        dao.chunked_in_query = AsyncMock(return_value=df)
+        result = await dao.get_stock_basic_bulk(["000001.SZ"])
+        assert not result.empty
+        sql_template = dao.chunked_in_query.call_args.args[1]
+        assert "FROM stock_basic" in sql_template
+        assert "name" in sql_template and "industry" in sql_template and "list_date" in sql_template
+        assert "list_status" not in sql_template
+        assert dao.chunked_in_query.call_args.args[2] == ["000001.SZ"]

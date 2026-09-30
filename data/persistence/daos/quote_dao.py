@@ -355,6 +355,46 @@ class QuoteDao(BaseDao):
         df = await self._read_db(sql, params, suppress_errors=suppress_errors)
         return attach_daily_quotes_column_units(df)
 
+    async def get_latest_quotes_bulk(self, ts_codes: list[str]) -> pd.DataFrame:
+        """批量取多只股票各自最新交易日的行情（DISTINCT ON，规避 N+1，UX-09 MAJOR-04）。
+
+        返回列：ts_code, trade_date, close, pct_chg, vol, amount。无行情记录的代码
+        不出现在结果中（缺失由调用方以 None 表达，R21 不伪造）。chunked_in_query
+        按块切分 ts_code，块间代码互斥，故块内 DISTINCT ON 的「每码最新一行」
+        语义在全量结果上仍成立。
+        """
+        if not ts_codes:
+            return pd.DataFrame(columns=["ts_code", "trade_date", "close", "pct_chg", "vol", "amount"])
+        sql_template = (
+            "SELECT DISTINCT ON (ts_code) ts_code, trade_date, close, pct_chg, vol, amount "
+            "FROM daily_quotes WHERE ts_code IN ({placeholders}) "
+            "ORDER BY ts_code, trade_date DESC"
+        )
+        df = await self.chunked_in_query(self._read_db, sql_template, list(ts_codes))
+        # attach_daily_quotes_column_units 无类型注解（None 透传）；df 恒非 None，结果即 DataFrame
+        return typing.cast(pd.DataFrame, attach_daily_quotes_column_units(df))
+
+    async def get_recent_quotes(self, ts_code: str, days: int = 365) -> pd.DataFrame:
+        """取该股最近 ``days`` 个交易日的行情（按 trade_date 升序），供按代码详情 K 线。
+
+        与 ``DataProcessor.get_stock_history`` 同表同口径（daily_quotes 原始行情，
+        含 adj_factor），但不依赖 trade_calendar / TushareClient 构造，使详情对话框
+        可由任意页面按 ts_code 直接打开（UX-09 MAJOR-04）。无记录时返回空表。
+        """
+        stmt = (
+            sa.select(DailyQuotes)
+            .where(DailyQuotes.ts_code == ts_code)
+            .order_by(DailyQuotes.trade_date.desc())
+            .limit(int(days))
+        )
+        df = await self._read_db_select(stmt, suppress_errors=False)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        # 同上：df 已排除 None，attach 仅补列单位元数据，返回恒为 DataFrame
+        return typing.cast(
+            pd.DataFrame, attach_daily_quotes_column_units(df.sort_values("trade_date", ignore_index=True))
+        )
+
     async def get_latest_trade_date(self):
         df = await self._read_db("SELECT MAX(trade_date) as max_td FROM daily_quotes")
         if df is not None and not df.empty:
