@@ -192,8 +192,10 @@ numpy==2.5.3
     #   exchange-calendars
     #   llama-cpp-python
     #   pandas
-oauthlib==3.3.1 ; sys_platform != 'emscripten'
-    # via flet
+oauthlib==4.0.0
+    # via
+    #   astockscreener (pyproject.toml)
+    #   flet
 openai==2.54.0
     # via litellm
 openpyxl==3.1.5

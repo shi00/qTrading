@@ -296,8 +296,10 @@ numpy==2.5.3
     #   llama-cpp-python
     #   pandas
     #   pandas-stubs
-oauthlib==3.3.1 ; sys_platform != 'emscripten'
-    # via flet
+oauthlib==4.0.0
+    # via
+    #   astockscreener (pyproject.toml)
+    #   flet
 openai==2.54.0
     # via litellm
 openapi-pydantic==0.5.1
