@@ -898,7 +898,9 @@ def StockDetailDialog(
 
     Args:
         stock_data: 股票原始数据字典
-        data_processor: DataProcessor 实例（用于拉取历史数据）
+        data_processor: 提供 ``async get_stock_history(ts_code, days)`` 的数据源（duck-typed）。
+            可为 ``DataProcessor``，亦可为按代码直接取数的 ``StockDetailService``
+            （UX-09 MAJOR-04：使详情可由任意页面按 ts_code 打开，无需构造 DataProcessor）。
         page: ft.Page 引用（用于计算对话框尺寸）
         open_state: 初始打开状态（消费方重新实例化推送，每次为 True）
         on_close: 关闭回调（消费方用于清理引用）

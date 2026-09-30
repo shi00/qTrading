@@ -1507,3 +1507,59 @@ class TestQuoteDaoCrossValidation:
         dao._read_db = AsyncMock(return_value=df)
         result = await dao.get_index_daily_coverage_summary()
         assert "ts_code" in result.columns and "latest_trade_date" in result.columns
+
+
+class TestQuoteDaoGetLatestQuotesBulk:
+    """UX-09 MAJOR-04: 关注列表按 ts_code 批量取最新行情（DISTINCT ON，规避 N+1）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_codes_returns_typed_empty_df(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao.chunked_in_query = AsyncMock()
+        result = await dao.get_latest_quotes_bulk([])
+        assert result.empty
+        assert list(result.columns) == ["ts_code", "trade_date", "close", "pct_chg", "vol", "amount"]
+        dao.chunked_in_query.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_distinct_on_query_shape(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [12.0], "pct_chg": [1.0]})
+        dao.chunked_in_query = AsyncMock(return_value=df)
+        result = await dao.get_latest_quotes_bulk(["000001.SZ", "600000.SH"])
+        assert not result.empty
+        sql_template = dao.chunked_in_query.call_args.args[1]
+        assert "DISTINCT ON (ts_code)" in sql_template
+        assert "ORDER BY ts_code, trade_date DESC" in sql_template
+        assert "{placeholders}" in sql_template
+        assert dao.chunked_in_query.call_args.args[2] == ["000001.SZ", "600000.SH"]
+
+
+class TestQuoteDaoGetRecentQuotes:
+    """UX-09 MAJOR-04: 详情 K 线按代码取近 N 日行情，归一为 trade_date 升序。"""
+
+    @pytest.mark.asyncio
+    async def test_sorts_ascending_and_truncates(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(
+            return_value=pd.DataFrame(
+                {"ts_code": ["000001.SZ"] * 3, "trade_date": ["20240103", "20240101", "20240102"]}
+            )
+        )
+        result = await dao.get_recent_quotes("000001.SZ", days=365)
+        assert list(result["trade_date"]) == ["20240101", "20240102", "20240103"]
+
+    @pytest.mark.asyncio
+    async def test_empty_returns_empty_df(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_recent_quotes("000001.SZ")
+        assert result.empty
+        assert isinstance(result, pd.DataFrame)
+
+    @pytest.mark.asyncio
+    async def test_none_returns_empty_df(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(return_value=None)
+        result = await dao.get_recent_quotes("000001.SZ")
+        assert isinstance(result, pd.DataFrame) and result.empty

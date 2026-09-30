@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from types import MappingProxyType
+from typing import Any
 
 import pandas as pd
 
 from data.cache.cache_manager import CacheManager
+from services.stock_detail_service import StockDetailService, StockQuote
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.error_classifier import classify_error, classify_severity
@@ -28,12 +32,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class WatchlistRow:
-    """关注列表行数据 (L771 合规: frozen dataclass)."""
+    """关注列表行数据 (L771 合规: frozen dataclass).
+
+    行情列（``latest_close`` / ``pct_chg`` / ``ai_score``）缺失一律为 ``None``，
+    由展示层渲染「—」（R21：不得用 0 冒充缺失）。
+    """
 
     ts_code: str = ""
     stock_name: str = ""
     added_at: str = ""
     note: str = ""
+    latest_close: float | None = None
+    pct_chg: float | None = None
+    ai_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +67,8 @@ class WatchlistState:
     is_searching: bool = False
     search_keyword: str = ""
     search_error: Message | None = None
+    # UX-09 MAJOR-04：按 ts_code 打开的个股详情数据（不可变映射）；None 表示当前无详情。
+    detail_stock_data: Mapping[str, Any] | None = None
 
 
 class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
@@ -69,17 +82,23 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
 
     def __init__(self, cache: CacheManager | None = None):
         self.cache = cache or CacheManager()  # noqa: R16 - 持有注册单例引用（幂等工厂，DI 注入位）
+        self.detail_service = StockDetailService(self.cache)
         self._state: WatchlistState = WatchlistState()
         self._init_mixin_fields()
 
-    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def load_watchlist(self) -> None:
-        """加载关注列表 (从 DB 读取并转换为 tuple[WatchlistRow, ...])."""
+        """加载关注列表 (从 DB 读取并转换为 tuple[WatchlistRow, ...]).
+
+        UX-09 MAJOR-04：加载行后按 ts_code 批量补最新价 / 涨跌幅 / AI 评分；
+        行情查询失败降级为「无行情」（对应列显示「—」），不影响列表本身加载。
+        """
         self._set_state(is_loading=True, load_error=None, load_error_detail=None)
         try:
             df = await self.cache.get_watchlist()
             rows = _df_to_watchlist_rows(df)
-            self._set_state(watchlist_rows=rows, is_loading=False)
+            quotes = await self.detail_service.load_watchlist_quotes([r.ts_code for r in rows])
+            self._set_state(watchlist_rows=_merge_quotes(rows, quotes), is_loading=False)
         except asyncio.CancelledError:
             self._set_state(is_loading=False)
             raise
@@ -154,6 +173,38 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
             search_error=None,
         )
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
+    async def open_stock_detail(self, ts_code: str) -> bool:
+        """按 ts_code 打开个股详情（UX-09 MAJOR-04：不依赖当前选股结果集）。
+
+        取数成功后写入 ``state.detail_stock_data``（不可变映射）并返回 True；
+        取数失败或 ts_code 为空返回 False（不写 ``load_error``——避免列表被
+        ErrorState 整体替换）。``name`` 缺失时以自选行内股票名回退。
+        """
+        code = (ts_code or "").strip()
+        if not code:
+            return False
+        fallback_name = next((r.stock_name for r in self._state.watchlist_rows if r.ts_code == code), "")
+        try:
+            data = await self.detail_service.load_stock_detail(code, fallback_name=fallback_name)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(
+                "[WatchlistVM] open_stock_detail failed: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
+            return False
+        if data is None:
+            return False
+        self._set_state(detail_stock_data=MappingProxyType(dict(data)))
+        return True
+
+    def close_stock_detail(self) -> None:
+        """关闭个股详情（清空 ``state.detail_stock_data``，使对话框从控件树移除）。"""
+        self._set_state(detail_stock_data=None)
+
 
 # ============================================================
 # 纯转换函数 (DataFrame → tuple[WatchlistRow, ...] / tuple[StockSearchRow, ...])
@@ -195,6 +246,28 @@ def _df_to_stock_search_rows(df: pd.DataFrame | None) -> tuple[StockSearchRow, .
         )
         for row in df.to_dict("records")
     )
+
+
+def _merge_quotes(
+    rows: Sequence[WatchlistRow],
+    quotes: Mapping[str, StockQuote],
+) -> tuple[WatchlistRow, ...]:
+    """把按 ts_code 的行情快照合并进关注行（无行情/无 AI 评分保持 ``None``，R21）。"""
+    merged: list[WatchlistRow] = []
+    for row in rows:
+        quote = quotes.get(row.ts_code)
+        if quote is None:
+            merged.append(row)
+            continue
+        merged.append(
+            replace(
+                row,
+                latest_close=quote.latest_close,
+                pct_chg=quote.pct_chg,
+                ai_score=quote.ai_score,
+            )
+        )
+    return tuple(merged)
 
 
 def _handle_error(e: Exception, op: str, vm: WatchlistViewModel, *, search: bool = False) -> None:

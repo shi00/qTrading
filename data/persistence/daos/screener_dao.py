@@ -389,6 +389,22 @@ class ScreenerDao(BaseDao):
         stmt = stmt.order_by(sh.c.ai_score.desc().nulls_last())
         return await self._read_db_select(stmt)
 
+    async def get_latest_ai_reviews_bulk(self, ts_codes: list[str]) -> pd.DataFrame:
+        """批量取多只股票最近一次落库的 AI 评分与理由（DISTINCT ON id DESC，UX-09 MAJOR-04）。
+
+        取「最近一次 AI 评分」而非全场次聚合：screening_history 为 append-only，
+        id 单调递增即最近写入。仅返回 ai_score 非 NULL 的行——无 AI 记录的代码由
+        调用方以 None 表达（R21：不得把「没有 AI 评分」渲染成 0 分）。
+        """
+        if not ts_codes:
+            return pd.DataFrame()
+        sql_template = (
+            "SELECT DISTINCT ON (ts_code) ts_code, ai_score, ai_reason "
+            "FROM screening_history WHERE ts_code IN ({placeholders}) AND ai_score IS NOT NULL "
+            "ORDER BY ts_code, id DESC"
+        )
+        return await self.chunked_in_query(self._read_db, sql_template, list(ts_codes))
+
     async def get_strategy_review_stats(self) -> pd.DataFrame:
         """按 (strategy_name, benchmark_code, trade_date) 返回复盘日组合聚合统计（UX-05）。
 

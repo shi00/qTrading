@@ -626,3 +626,28 @@ class TestMarketDaoGetLatestSuccessBrief:
         params = call_args[0][1]
         assert params[3] == "analyzed_with_events"
         assert params[4] == "analyzed_no_event"
+
+
+class TestMarketDaoGetLatestIndicatorsBulk:
+    """UX-09 MAJOR-04: 详情估值区按 ts_code 批量取「每码最新一行」指标（DISTINCT ON）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_codes_returns_empty_df(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao.chunked_in_query = AsyncMock()
+        result = await dao.get_latest_indicators_bulk([])
+        assert result.empty
+        dao.chunked_in_query.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_distinct_on_query_shape(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "pe_ttm": [8.1]})
+        dao.chunked_in_query = AsyncMock(return_value=df)
+        result = await dao.get_latest_indicators_bulk(["000001.SZ"])
+        assert not result.empty
+        sql_template = dao.chunked_in_query.call_args.args[1]
+        assert "DISTINCT ON (ts_code)" in sql_template
+        assert "ORDER BY ts_code, trade_date DESC" in sql_template
+        assert "ps_ttm" in sql_template and "dv_ttm" in sql_template
+        assert dao.chunked_in_query.call_args.args[2] == ["000001.SZ"]

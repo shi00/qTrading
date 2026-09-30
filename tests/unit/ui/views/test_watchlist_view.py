@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from types import MappingProxyType
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -18,6 +19,7 @@ import flet as ft
 import pytest
 from flet.components.component import Component
 
+from ui.components.stock_detail_dialog import _build_title
 from ui.viewmodels.watchlist_view_model import WatchlistRow, WatchlistState
 from ui.views.watchlist_view import (
     GITHUB_ISSUES_URL,
@@ -44,6 +46,8 @@ class _FakeWatchlistViewModel:
         self.dispose_called: bool = False
         self.subscribe_called: bool = False
         self.method_calls: list[tuple[str, dict[str, Any]]] = []
+        # View 渲染详情对话框时读取 vm.detail_service 作为 data_processor（duck-typed）。
+        self.detail_service: Any = MagicMock(name="StockDetailService")
 
     @property
     def state(self) -> WatchlistState:
@@ -86,6 +90,21 @@ class _FakeWatchlistViewModel:
     async def clear_search(self) -> None:
         self.method_calls.append(("clear_search", {}))
 
+    async def open_stock_detail(self, ts_code: str) -> bool:
+        """UX-09 MAJOR-04: 模拟按代码取数成功并写入详情快照（name 回退行内股票名）。"""
+        self.method_calls.append(("open_stock_detail", {"ts_code": ts_code}))
+        row = next((r for r in self._state.watchlist_rows if r.ts_code == ts_code), None)
+        if row is None or not ts_code:
+            return False
+        self._set_state(
+            detail_stock_data=MappingProxyType({"ts_code": ts_code, "name": row.stock_name or ts_code, "close": 12.34})
+        )
+        return True
+
+    def close_stock_detail(self) -> None:
+        self.method_calls.append(("close_stock_detail", {}))
+        self._set_state(detail_stock_data=None)
+
 
 # ---------------------------------------------------------------------------
 # 辅助函数
@@ -97,12 +116,18 @@ def _make_row(
     stock_name: str = "平安银行",
     added_at: str = "2026-07-29",
     note: str = "",
+    latest_close: float | None = None,
+    pct_chg: float | None = None,
+    ai_score: float | None = None,
 ) -> WatchlistRow:
     return WatchlistRow(
         ts_code=ts_code,
         stock_name=stock_name,
         added_at=added_at,
         note=note,
+        latest_close=latest_close,
+        pct_chg=pct_chg,
+        ai_score=ai_score,
     )
 
 
@@ -301,6 +326,34 @@ class TestBuildWatchlistRow:
         assert icon_buttons[0].icon == ft.Icons.DELETE_OUTLINE
         assert not any(b.icon == ft.Icons.SEARCH_OUTLINED for b in icon_buttons)
 
+    def test_row_renders_quote_columns(self) -> None:
+        """UX-09 MAJOR-04: 行内渲染最新价 / 涨跌幅 / AI 评分三列."""
+        row = _make_row(latest_close=12.34, pct_chg=1.5, ai_score=85.0)
+        container = _build_watchlist_row(row, MagicMock())
+        texts = _collect_all_controls(container)
+        text_values = [getattr(t, "value", "") for t in texts if isinstance(t, ft.Text)]
+        assert "12.34" in text_values
+        assert "+1.50%" in text_values
+        assert "85" in text_values
+
+    def test_row_missing_quotes_show_dash_placeholder(self) -> None:
+        """DoD: 自选行行情列缺失值显示「—」（R21：不得用 0 / 0.00% 伪装缺失）."""
+        row = _make_row(latest_close=None, pct_chg=None, ai_score=None)
+        container = _build_watchlist_row(row, MagicMock())
+        texts = _collect_all_controls(container)
+        text_values = [getattr(t, "value", "") for t in texts if isinstance(t, ft.Text)]
+        assert text_values.count("—") == 3
+        assert "0.00" not in text_values
+        assert "0.00%" not in text_values
+
+    def test_row_negative_pct_has_no_plus_sign(self) -> None:
+        """涨跌幅为负时不带正号（与详情框口径一致）."""
+        row = _make_row(pct_chg=-2.0)
+        container = _build_watchlist_row(row, MagicMock())
+        texts = _collect_all_controls(container)
+        text_values = [getattr(t, "value", "") for t in texts if isinstance(t, ft.Text)]
+        assert "-2.00%" in text_values
+
 
 # ---------------------------------------------------------------------------
 # 组件运行时测试
@@ -343,6 +396,17 @@ def mock_watchlist_vm(monkeypatch):
 
     monkeypatch.setattr(watchlist_view_module, "WatchlistAddDialog", _fake_add_dialog)
     fake_vm.captured_add_callbacks = captured_add_callbacks  # type: ignore[attr-defined]  # [reason: 测试桩动态挂载捕获 dict, 非 VM 契约属性]
+
+    # Mock StockDetailDialog: 捕获 stock_data/open_state 等 kwargs (UX-09 MAJOR-04)
+    captured_detail_kwargs: dict[str, Any] = {}
+
+    def _fake_detail_dialog(**kwargs: Any) -> Any:
+        captured_detail_kwargs.clear()
+        captured_detail_kwargs.update(kwargs)
+        return MagicMock(name="StockDetailDialog")
+
+    monkeypatch.setattr(watchlist_view_module, "StockDetailDialog", _fake_detail_dialog)
+    fake_vm.captured_detail_kwargs = captured_detail_kwargs  # type: ignore[attr-defined]  # [reason: 测试桩动态挂载捕获 dict, 非 VM 契约属性]
 
     return fake_vm
 
@@ -571,12 +635,16 @@ class TestWatchlistViewErrorStateCallbacks:
 
 
 class TestWatchlistViewViewStock:
-    """UX-04 (P2-01): 行「查看」按钮深链跳选股页测试."""
+    """UX-09 MAJOR-04: 行「查看」按 ts_code 直接打开个股详情（不依赖选股结果集）."""
 
-    def test_view_button_click_navigates_to_screener(
+    def test_view_button_opens_detail_dialog_for_stock(
         self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
     ):
-        """UX-04: 点击行「查看」按钮 → pubsub 广播深链 "screener:000001.SZ"."""
+        """DoD: 未运行任何策略时点「查看」→ 详情对话框打开且标题为该股名称.
+
+        旧实现发 ``screener:{ts_code}`` 到选股页过滤**当前选股结果**，未运行策略时
+        必然落空；新实现经 VM 按 ts_code 取数并由 ``StockDetailDialog`` 渲染。
+        """
         from tests.unit.ui.component_renderer import (
             FakePage,
             make_component,
@@ -584,13 +652,11 @@ class TestWatchlistViewViewStock:
             run_mount_effects,
         )
 
-        from ui.views.watchlist_view import TOPIC_NAVIGATE
-
-        rows = (_make_row(ts_code="000001.SZ"),)
+        rows = (_make_row(ts_code="000001.SZ", stock_name="平安银行"),)
         mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
         component = make_component(WatchlistView, active=True)
         page = FakePage()
-        page.pubsub = MagicMock()  # type: ignore[attr-defined]  # [reason: FakePage 未声明 pubsub, 测试按需挂载 mock]
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
         run_mount_effects(component, page=page)
         result = render_once(component)
 
@@ -605,15 +671,22 @@ class TestWatchlistViewViewStock:
 
         _click_icon_button(view_buttons[0])
 
-        page.pubsub.send_all_on_topic.assert_called_once_with(TOPIC_NAVIGATE, "screener:000001.SZ")
+        # 按 ts_code 取数（与选股结果集无关）
+        assert ("open_stock_detail", {"ts_code": "000001.SZ"}) in mock_watchlist_vm.method_calls
+        # 重渲染 → 详情对话框以 open_state=True 渲染
+        _rerender(component)
+        kwargs = mock_watchlist_vm.captured_detail_kwargs
+        assert kwargs.get("open_state") is True
+        stock_data = kwargs.get("stock_data")
+        assert stock_data is not None
+        # 对话框标题即该股名称（_build_title 为对话框标题唯一正本）
+        title = _build_title(dict(stock_data))
+        assert title.controls[0].value == "平安银行"
 
-    def test_view_button_empty_code_falls_back_to_pure_tab_navigation(
+    def test_view_button_empty_code_shows_failure_toast(
         self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
     ):
-        """UX-04 R1-MINOR-4: ts_code 为空时降级纯 tab 导航 "screener".
-
-        空代码若发 "screener:" 空段消息会被协议解析判非法整体吞掉, 导航失效.
-        """
+        """ts_code 为空 → VM.open_stock_detail 返回 False → 失败 toast（不打开对话框）."""
         from tests.unit.ui.component_renderer import (
             FakePage,
             make_component,
@@ -621,13 +694,14 @@ class TestWatchlistViewViewStock:
             run_mount_effects,
         )
 
-        from ui.views.watchlist_view import TOPIC_NAVIGATE
-
         rows = (_make_row(ts_code=""),)
         mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
         component = make_component(WatchlistView, active=True)
         page = FakePage()
-        page.pubsub = MagicMock()  # type: ignore[attr-defined]  # [reason: FakePage 未声明 pubsub, 测试按需挂载 mock]
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        toast_calls: list[tuple[str, str]] = []
+        page.toast.show.side_effect = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
         run_mount_effects(component, page=page)
         result = render_once(component)
 
@@ -640,7 +714,64 @@ class TestWatchlistViewViewStock:
 
         _click_icon_button(view_buttons[0])
 
-        page.pubsub.send_all_on_topic.assert_called_once_with(TOPIC_NAVIGATE, "screener")
+        assert any("watchlist_detail_failed" in msg for msg, _ in toast_calls)
+        _rerender(component)
+        assert mock_watchlist_vm.captured_detail_kwargs.get("open_state") is None  # 未渲染详情对话框
+
+    def test_view_button_no_page_does_not_crash(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """page 为 None 时 _on_view_stock 提前返回（不 crash）."""
+        from flet.controls.context import _context_page
+
+        from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
+
+        rows = (_make_row(ts_code="000001.SZ"),)
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        run_mount_effects(component)
+        _context_page.set(None)
+        result = render_once(component)
+
+        view_buttons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.SEARCH_OUTLINED
+        ]
+        _click_icon_button(view_buttons[0])
+        assert not any(call[0] == "open_stock_detail" for call in mock_watchlist_vm.method_calls)
+
+    def test_detail_dialog_close_clears_state(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """对话框 on_close 绑定 vm.close_stock_detail（清空 detail_stock_data）."""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+
+        rows = (_make_row(ts_code="000001.SZ", stock_name="平安银行"),)
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        view_buttons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.SEARCH_OUTLINED
+        ]
+        _click_icon_button(view_buttons[0])
+        _rerender(component)
+
+        on_close = mock_watchlist_vm.captured_detail_kwargs["on_close"]
+        assert callable(on_close)
+        on_close()
+        assert mock_watchlist_vm.state.detail_stock_data is None
 
 
 class TestWatchlistViewLoadEffect:

@@ -203,6 +203,24 @@ class FinancialDao(BaseDao):
             )
             return pd.DataFrame()
 
+    async def get_latest_financials_bulk(self, ts_codes: list[str]) -> pd.DataFrame:
+        """批量取多只股票最新报告期的财务指标（DISTINCT ON，UX-09 MAJOR-04）。
+
+        每码取 end_date 最大、同报告期内 ann_date 最新的版本（DAT-05 修订版本语义：
+        同一报告期的多版本按公告日取最新，避免读到被追溯调整前的旧值）。
+        ``ann_date IS NOT NULL`` 与 get_financial_reports_history 一致：公告日未知的
+        行无法判定可见时点，不参与展示（R21 缺失值不伪装）。
+        """
+        if not ts_codes:
+            return pd.DataFrame()
+        sql_template = (
+            "SELECT DISTINCT ON (ts_code) ts_code, end_date, ann_date, roe, grossprofit_margin, "
+            "debt_to_assets, or_yoy, netprofit_yoy "
+            "FROM financial_reports WHERE ts_code IN ({placeholders}) AND ann_date IS NOT NULL "
+            "ORDER BY ts_code, end_date DESC, ann_date DESC"
+        )
+        return await self.chunked_in_query(self._read_db, sql_template, list(ts_codes))
+
     async def get_financial_reports_history_batch(
         self, ts_codes: list[str], periods: int = 8, as_of_date=None
     ) -> pd.DataFrame:

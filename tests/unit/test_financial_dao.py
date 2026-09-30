@@ -1051,3 +1051,28 @@ class TestDat06AnnDateNotNullPredicates:
         sql = dao._read_db.call_args[0][0]
         assert "ann_date IS NOT NULL" in sql
         assert "ann_date <=" not in sql
+
+
+class TestFinancialDaoGetLatestFinancialsBulk:
+    """UX-09 MAJOR-04: 详情财务区按 ts_code 批量取最新报告期（DAT-05 修订版本语义）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_codes_returns_empty_df(self):
+        dao = _make_dao()
+        dao.chunked_in_query = AsyncMock()
+        result = await dao.get_latest_financials_bulk([])
+        assert result.empty
+        dao.chunked_in_query.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_distinct_on_query_shape(self):
+        dao = _make_dao()
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "roe": [10.2]})
+        dao.chunked_in_query = AsyncMock(return_value=df)
+        result = await dao.get_latest_financials_bulk(["000001.SZ"])
+        assert not result.empty
+        sql_template = dao.chunked_in_query.call_args.args[1]
+        assert "DISTINCT ON (ts_code)" in sql_template
+        assert "ORDER BY ts_code, end_date DESC, ann_date DESC" in sql_template
+        assert "ann_date IS NOT NULL" in sql_template
+        assert dao.chunked_in_query.call_args.args[2] == ["000001.SZ"]
