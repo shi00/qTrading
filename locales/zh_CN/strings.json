@@ -180,6 +180,7 @@
     "col_turnover": "换手率",
     "col_details": "详情",
     "screener_no_strategy_hint": "请选择策略以查看逻辑说明",
+    "screener_params_panel_title": "策略参数",
     "screener_loading_data": "正在初始化/重载数据库...",
     "screener_data_loaded": "数据加载完成",
     "screener_load_failed": "加载失败",

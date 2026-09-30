@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # 响应式断点阈值（与设计文档 §3.2.10 一致）
 # P3-14: AppStyles.BREAKPOINT_COMPACT 已删除 (YAGNI), 此处直接保留具体数值 1200 保持单一真相源.
 _TIER_PANEL_LG_BREAKPOINT = 1200
-# NOTE(lazy): MD 断点 800 保留作为防御代码, 生产 min_width=1280 下不可达. ceiling: width ≥ 1280 ≥ 1200 永远命中 LG 分支. upgrade: min_width 调低或组件嵌入更窄容器时自动生效.
+# NOTE(lazy): MD 断点 800 保留作为防御代码; min_width 降至 1024 (MAJOR-07) 后 MD 分支 (800~1199) 已可达. ceiling: 面板宽度 <800 的 SM 分支在生产 min_width=1024 下仍不可达. upgrade: min_width 调低至 <800 或组件嵌入更窄容器时自动生效.
 _TIER_PANEL_MD_BREAKPOINT = 800
 
 

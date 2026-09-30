@@ -2387,6 +2387,141 @@ class TestBuildParamsPanel:
         # 至少有一个 ExpansionTile (advanced group)
         assert len(tiles) >= 1
 
+    def test_advanced_group_wrapped_in_anchor(self) -> None:
+        """MAJOR-07 DoD: 高级设置 ExpansionTile 挂 E2E identifier anchor（稳定定位入口）。"""
+        from ui.testing.e2e_ids import EIDS
+
+        assert EIDS.SCREENER.ADVANCED_SETTINGS[0] == "e2e.screener.advanced_settings"
+        source = _read_source()
+        assert source.count("EIDS.SCREENER.ADVANCED_SETTINGS") == 1, "高级设置 ExpansionTile 应恰好挂 1 个 anchor"
+
+
+class TestBuildScreenerParamsSidebar:
+    """MAJOR-07: 参数侧栏构建 (_build_screener_params_sidebar)."""
+
+    @staticmethod
+    def _handlers() -> dict[str, Any]:
+        return {
+            k: (lambda *a, **kw: None)
+            for k in ("on_slider_value_change", "on_update_param", "on_save_prompt", "on_restore_prompt")
+        }
+
+    @staticmethod
+    def _build(env: dict, handlers: dict[str, Any]) -> Any:
+        """在 Renderer 上下文中构建侧栏。
+
+        ``_build_screener_params_sidebar`` 内部经 ``build_params_panel`` →
+        ``build_param_control`` 调用声明式 hook（SliderInput 等），生产环境始终由
+        ``ScreenerView`` 组件调用而处于 Renderer 上下文；单测直接调用需经
+        ``render_once(make_component(...))`` 提供同等上下文。
+        """
+
+        def _impl() -> Any:
+            return env["mod"]._build_screener_params_sidebar(
+                env["fake_vm"].state, env["fake_vm"], handlers=handlers, prompt_error=""
+            )
+
+        return render_once(make_component(_impl))
+
+    def test_no_selected_strategy_returns_none(self, screener_view_env) -> None:
+        """未选策略 → 返回 None（调用方退化为单栏布局，不渲染空侧栏）。"""
+        env = screener_view_env
+        sidebar = self._build(env, self._handlers())
+        assert sidebar is None
+
+    def test_with_params_returns_scrollable_container(self, screener_view_with_params_env) -> None:
+        """有参数 → 含标题 + 可滚动内容 Column 的 Container。"""
+        env = screener_view_with_params_env
+        sidebar = self._build(env, self._handlers())
+        assert isinstance(sidebar, ft.Container)
+        assert isinstance(sidebar.content, ft.Column)
+
+        controls = _walk_all_controls(sidebar)
+        title_texts = [
+            c
+            for c in controls
+            if isinstance(c, ft.Text) and c.value == env["mock_i18n"].get("screener_params_panel_title")
+        ]
+        assert len(title_texts) == 1, "参数侧栏须有唯一标题"
+
+        scroll_columns = [c for c in controls if isinstance(c, ft.Column) and c.scroll == ft.ScrollMode.AUTO]
+        assert len(scroll_columns) == 1, "参数侧栏内容区须可滚动（小高度窗口下不裁切）"
+        # 参数面板分组卡已渲染进滚动区
+        assert len(scroll_columns[0].controls) >= 1
+
+
+class TestBuildScreenerMainBodyParamsSidebar:
+    """MAJOR-07: _build_screener_main_body REALTIME 参数侧栏接线."""
+
+    @staticmethod
+    def _call(mod, monkeypatch, *, params_sidebar: ft.Control | None) -> tuple[Any, dict[str, Any]]:
+        captured: dict[str, Any] = {}
+
+        def _fake_splitter(**kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return kwargs["left_content"]
+
+        monkeypatch.setattr(mod, "ResizableSplitter", _fake_splitter)
+        result = mod._build_screener_main_body(
+            is_realtime=True,
+            table_card=ft.Container(),
+            log_card=ft.Container(),
+            history_tree=MagicMock(),
+            strategy_stats=(),
+            ai_attribution=(),
+            params_sidebar=params_sidebar,
+            on_tree_item_click=lambda *a: None,
+            on_load_more_history=lambda *a: None,
+            on_load_width=lambda: 250,
+            on_persist_width=lambda w: None,
+            on_load_params_width=lambda: 340,
+            on_persist_params_width=lambda w: None,
+        )
+        return result, captured
+
+    def test_realtime_with_params_builds_params_splitter(self, screener_view_env, monkeypatch) -> None:
+        """有参数侧栏 → 左右分割器，config_key 为 ui_splitter_screener_params。"""
+        env = screener_view_env
+        sidebar = ft.Container()
+        result, captured = self._call(env["mod"], monkeypatch, params_sidebar=sidebar)
+
+        assert captured["config_key"] == "ui_splitter_screener_params"
+        assert captured["left_content"] is sidebar
+        assert captured["default_width"] == 340
+        assert captured["min_width"] == 280
+        assert captured["max_width"] == 560
+        # 宽度回调透传（持久化经父 VM，键不与管理历史栏的 key 冲突）
+        assert captured["on_load_width"]() == 340
+        assert result is sidebar
+
+    def test_realtime_without_params_is_single_column(self, screener_view_env, monkeypatch) -> None:
+        """无参数侧栏 → 不构造分割器，退化为单栏（结果区独占）。"""
+        env = screener_view_env
+        called: list[dict[str, Any]] = []
+
+        def _fake_splitter(**kwargs: Any) -> Any:
+            called.append(kwargs)
+            return kwargs["left_content"]
+
+        monkeypatch.setattr(env["mod"], "ResizableSplitter", _fake_splitter)
+        result = env["mod"]._build_screener_main_body(
+            is_realtime=True,
+            table_card=ft.Container(),
+            log_card=ft.Container(),
+            history_tree=MagicMock(),
+            strategy_stats=(),
+            ai_attribution=(),
+            params_sidebar=None,
+            on_tree_item_click=lambda *a: None,
+            on_load_more_history=lambda *a: None,
+            on_load_width=lambda: 250,
+            on_persist_width=lambda w: None,
+            on_load_params_width=None,
+            on_persist_params_width=None,
+        )
+        assert called == []
+        assert isinstance(result, ft.Column)
+
 
 class TestValidateStrategyParams:
     """_validate_strategy_params: 纯函数判定矩阵 (UX-09 MINOR-07)."""

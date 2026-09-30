@@ -95,6 +95,10 @@ ARTIFACT_DIR = Path(os.environ.get("E2E_ARTIFACT_DIR", "e2e-artifacts"))
 
 TIMEOUT_MULTIPLIER = float(os.environ.get("E2E_TIMEOUT_MULTIPLIER", "1.0"))
 
+# MAJOR-07: E2E 最小视口基线（单一正本）。1280×672 = 1920×1080 @150% 缩放笔记本
+# 扣除任务栏后的可用逻辑区域（对齐 app/window_lifecycle.py 的 min_height=640）。
+MIN_VIEWPORT: tuple[int, int] = (1280, 672)
+
 from core.i18n import I18n
 
 I18n.initialize("zh")
@@ -1578,8 +1582,8 @@ async def _e2e_page_with_viewport(
 ) -> typing.AsyncGenerator[FletPage]:
     """e2e_page 生命周期（指定视口）：_make_page + slow 放大 + canary + teardown。
 
-    C5-5 (UIX-13): 1280×720 视口用例复用同一生命周期，仅视口不同（对照
-    docs/flet/accessibility-baseline.md §2.5 最小宽度 1280）。
+    C5-5 (UIX-13): 最小视口用例复用同一生命周期，仅视口不同（对照
+    docs/flet/accessibility-baseline.md §2.5 与 ``MIN_VIEWPORT``）。
     """
     fp = await _make_page(e2e_browser, app, request, check_db_error=True, viewport=viewport)
     if request.node.get_closest_marker("slow"):
@@ -1632,13 +1636,14 @@ async def e2e_page(e2e_browser, _e2e_app_dep: AppServer, request):
 
 
 @pytest_asyncio.fixture(loop_scope="session")
-async def e2e_page_1280x720(e2e_browser, _e2e_app_dep: AppServer, request):
-    """C5-5 (UIX-13): 1280×720 视口 Page（对照 accessibility-baseline §2.5 最小宽度 1280）。
+async def e2e_page_min_viewport(e2e_browser, _e2e_app_dep: AppServer, request):
+    """MAJOR-07: 最小视口 (``MIN_VIEWPORT`` = 1280×672) Page。
 
-    与 e2e_page 共用生命周期（read-only pool + 播种），仅视口不同；用于断言
-    最小宽度下主要视图无塌陷（PR373 视口塌陷回归防护）。
+    对照 docs/flet/accessibility-baseline.md §2.5 与 app/window_lifecycle.py 的
+    min_width=1024 / min_height=640：与 e2e_page 共用生命周期（read-only pool + 播种），
+    仅视口不同；用于断言最小视口下主要视图无塌陷（PR373 视口塌陷回归防护）。
     """
-    async with _e2e_page_with_viewport(e2e_browser, _e2e_app_dep, request, viewport=(1280, 720)) as fp:
+    async with _e2e_page_with_viewport(e2e_browser, _e2e_app_dep, request, viewport=MIN_VIEWPORT) as fp:
         yield fp
 
 

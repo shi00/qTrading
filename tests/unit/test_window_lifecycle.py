@@ -192,11 +192,11 @@ class TestBuildLocaleConfiguration:
 class TestSetupWindowGeometry:
     @pytest.mark.asyncio
     async def test_desktop_maximizes_with_min_dimensions(self) -> None:
-        """桌面模式：设置 min 下限并将窗口最大化以实现自适应。"""
+        """桌面模式：设置 min 下限 (MAJOR-07: 1024×640) 并将窗口最大化以实现自适应。"""
         page = _make_page()
         await setup_window_geometry(page, is_web_mode=False)
-        assert page.window.min_width == 1280
-        assert page.window.min_height == 720
+        assert page.window.min_width == 1024
+        assert page.window.min_height == 640
         assert page.window.maximized is True
         assert page.window.center_calls == 0
 

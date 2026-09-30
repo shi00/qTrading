@@ -463,3 +463,23 @@ class AnchorPage:
     async def count(self, eid: Eid) -> int:
         # 单一选择器计数, 无启发式的 strict mode violation 风险
         return await self._locator_by_identifier(eid[0]).count()
+
+    async def expect_in_viewport(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """断言 anchor 节点完整落入当前视口（未被上下边缘裁切）。
+
+        CanvasKit 下滚出视口的语义节点仍在 DOM 中，``expect_visible`` 无法区分
+        「已渲染但被挤出可视区」与「真实可见」，故显式比较 identifier 节点 bbox 与
+        ``page.viewport_size``。用于守护 MAJOR-07「小窗口下结果表首行被挤出视口」
+        的回归：断言节点存在 + 顶部 y ≥ 0 + 底部 y+height ≤ 视口高。
+        """
+        eid_str, _ = eid
+        await self.expect_visible(eid, timeout_ms=timeout_ms)
+        box = await self._identifier_node_box(eid_str, timeout_ms)
+        viewport = self.page.viewport_size
+        assert viewport is not None, "AnchorPage.expect_in_viewport: page.viewport_size 为空"
+        top = box["y"]
+        bottom = top + box["height"]
+        assert top >= 0, f"{eid_str}: 顶部被视口裁切 (y={top:.1f})"
+        assert bottom <= viewport["height"], (
+            f"{eid_str}: 底部被视口裁切 (bottom={bottom:.1f} > viewport_height={viewport['height']})"
+        )

@@ -117,6 +117,19 @@ class ScreenerPage:
         """等待选股页任意文本出现。"""
         await self.page.expect_text(text, timeout_ms=timeout_ms)
 
+    async def expand_advanced_settings(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """展开参数区「高级设置」折叠入口（MAJOR-07 最小视口 DoD）。
+
+        先滚入视口再点：最小视口下参数侧栏可能把该入口推到可视区下沿，
+        Playwright 对视口外坐标静默丢弃（对齐 AnchorPage.select_option 的既有处理）。
+        """
+        await self.ap.scroll_into_view(EIDS.SCREENER.ADVANCED_SETTINGS, timeout_ms=timeout_ms)
+        await self.ap.click(EIDS.SCREENER.ADVANCED_SETTINGS, timeout_ms=timeout_ms)
+
+    async def expect_row_in_viewport(self, ts_code: str, timeout_ms: int = TIMEOUTS.SCREEN_RESULT) -> None:
+        """断言指定结果行完整落入视口（MAJOR-07：小窗口下结果表首行不被裁切）。"""
+        await self.ap.expect_in_viewport(EIDS.SCREENER.result_row(ts_code), timeout_ms=timeout_ms)
+
     async def click_column_header(self, col_id: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         """点击表格列头触发排序（通过列 id，如 ``pct_chg``）。
 

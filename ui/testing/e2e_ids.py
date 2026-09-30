@@ -58,6 +58,9 @@ class _ScreenerIds:
     """
 
     STRATEGY_DROPDOWN: Eid = ("e2e.screener.strategy_dropdown", AnchorKind.COMPLEX)
+    # MAJOR-07：策略参数区「高级设置」ExpansionTile 入口 anchor。E2E 在最小视口
+    # (1280×672) 下展开它以验证控制区不被裁切且结果表首行仍可见（DoD）。
+    ADVANCED_SETTINGS: Eid = ("e2e.screener.advanced_settings", AnchorKind.COMPLEX)
     RUN_BUTTON: Eid = ("e2e.screener.run_button", AnchorKind.INTERACTIVE)
     EXPORT_CSV_BUTTON: Eid = ("e2e.screener.export_csv_button", AnchorKind.INTERACTIVE)
     EXPORT_EXCEL_BUTTON: Eid = ("e2e.screener.export_excel_button", AnchorKind.INTERACTIVE)

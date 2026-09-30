@@ -799,20 +799,25 @@ def build_params_panel(
     if groups["advanced"]:
         controls = _build_controls(groups["advanced"])
         if controls:
+            # MAJOR-07 DoD：高级设置入口挂稳定 anchor，E2E 在最小视口下展开它，
+            # 验证控制区不被裁切且结果表首行仍可见。
             result.append(
-                ft.ExpansionTile(
-                    title=ft.Text(
-                        I18n.get("ai_advanced_settings"), size=AppStyles.FONT_SIZE_LG, weight=ft.FontWeight.W_500
+                anchored(
+                    EIDS.SCREENER.ADVANCED_SETTINGS,
+                    ft.ExpansionTile(
+                        title=ft.Text(
+                            I18n.get("ai_advanced_settings"), size=AppStyles.FONT_SIZE_LG, weight=ft.FontWeight.W_500
+                        ),
+                        subtitle=ft.Text(
+                            I18n.get("ai_advanced_settings_desc"),
+                            size=AppStyles.FONT_SIZE_BODY_SM,
+                            color=AppColors.TEXT_SECONDARY,
+                        ),
+                        controls=controls,
+                        collapsed_text_color=AppColors.TEXT_PRIMARY,
+                        text_color=AppColors.PRIMARY,
+                        expanded=False,
                     ),
-                    subtitle=ft.Text(
-                        I18n.get("ai_advanced_settings_desc"),
-                        size=AppStyles.FONT_SIZE_BODY_SM,
-                        color=AppColors.TEXT_SECONDARY,
-                    ),
-                    controls=controls,
-                    collapsed_text_color=AppColors.TEXT_PRIMARY,
-                    text_color=AppColors.PRIMARY,
-                    expanded=False,
                 )
             )
 
@@ -1651,6 +1656,60 @@ def _build_screener_sections_card(
     )
 
 
+def _build_screener_params_sidebar(
+    state: ScreenerState,
+    vm: ScreenerViewModel,
+    *,
+    handlers: dict[str, typing.Any],
+    prompt_error: str,
+    param_errors: typing.Mapping[str, Message] | None = None,
+) -> ft.Control | None:
+    """构建左侧策略参数侧栏 (MAJOR-07)。
+
+    参数面板从顶部控制卡移入可调宽度侧栏（复用 ``ResizableSplitter``），控制卡高度
+    不再随参数组/参数数量增长，结果表在 1024×640 等小窗口下独占剩余全高，不再被挤没。
+
+    返回 ``None`` 表示当前无可渲染参数（未选策略或所选策略无参数定义），调用方据此
+    退化为单栏布局（不渲染空侧栏）。
+
+    侧栏内部用可滚动 ``Column``，小高度窗口下参数多于可视区时可滚动，不裁切。
+    """
+    panels = build_params_panel(
+        state,
+        vm,
+        dict(state.strategy_params),
+        handlers["on_slider_value_change"],
+        handlers["on_update_param"],
+        handlers["on_save_prompt"],
+        handlers["on_restore_prompt"],
+        prompt_error,
+        param_errors,
+    )
+    if not panels:
+        return None
+    return ft.Container(
+        content=ft.Column(
+            [
+                ft.Container(
+                    content=ft.Text(
+                        I18n.get("screener_params_panel_title"),
+                        weight=ft.FontWeight.BOLD,
+                        color=AppColors.TEXT_PRIMARY,
+                        size=AppStyles.FONT_SIZE_LG,
+                    ),
+                    padding=ft.Padding.only(left=12, top=10, bottom=5),
+                ),
+                ft.Divider(height=1, color=AppColors.DIVIDER),
+                ft.Column(panels, scroll=ft.ScrollMode.AUTO, expand=True, spacing=0),
+            ],
+            spacing=0,
+            expand=True,
+        ),
+        bgcolor=AppColors.SURFACE,
+        border=ft.Border.only(right=ft.BorderSide(1, AppColors.DIVIDER)),
+    )
+
+
 def _build_screener_control_card(
     state: ScreenerState,
     vm: ScreenerViewModel,
@@ -1660,11 +1719,13 @@ def _build_screener_control_card(
     progress_visible: bool,
     run_disabled: bool,
     export_btn_disabled: bool,
-    prompt_error: str,
-    param_errors: typing.Mapping[str, Message],
     handlers: dict[str, typing.Any],
 ) -> ft.Container:
-    """构建顶部控制卡 (标题栏/模式切换/策略下拉/参数面板/操作按钮)."""
+    """构建顶部控制卡 (标题栏/模式切换/策略下拉/策略说明/操作按钮).
+
+    MAJOR-07: 策略参数面板已从本卡移出，改由 ``_build_screener_params_sidebar`` 渲染到
+    可调宽度的左侧栏，使结果表独占右侧全高（控制卡高度不再随参数数量增长）。
+    """
     is_realtime = state.mode == "REALTIME"
 
     title_row = ft.Row(
@@ -1756,17 +1817,6 @@ def _build_screener_control_card(
                 color=AppColors.WARNING,
                 visible=state.tier_hint is not None,
                 no_wrap=False,
-            ),
-            *build_params_panel(
-                state,
-                vm,
-                dict(state.strategy_params),
-                handlers["on_slider_value_change"],
-                handlers["on_update_param"],
-                handlers["on_save_prompt"],
-                handlers["on_restore_prompt"],
-                prompt_error,
-                param_errors,
             ),
         ],
         spacing=10,
@@ -2161,19 +2211,39 @@ def _build_screener_main_body(
     history_tree: typing.Any,
     strategy_stats: tuple[StrategyStatRow, ...],
     ai_attribution: tuple[AiAttributionRow, ...],
+    params_sidebar: ft.Control | None,
     on_tree_item_click: typing.Callable[[str, str | None, str | None], None],
     on_load_more_history: typing.Callable[[ft.ControlEvent], None],
     on_load_width: typing.Callable[[], int | None],
     on_persist_width: typing.Callable[[int], None],
+    on_load_params_width: typing.Callable[[], int | None] | None,
+    on_persist_params_width: typing.Callable[[int], None] | None,
 ) -> ft.Control:
-    """构建选股视图主体 (REALTIME 单栏 vs HISTORY 分割器)."""
+    """构建选股视图主体 (REALTIME 单栏/参数侧栏 vs HISTORY 分割器).
+
+    MAJOR-07: REALTIME 模式在存在参数侧栏时返回「参数侧栏 + 结果区」左右分割器，
+    使结果表独占右侧全高；无参数可渲染时退化为单栏（``params_sidebar is None``）。
+    """
     right_content = ft.Column(
         [table_card, log_card] if is_realtime else [table_card],
         expand=True,
         spacing=10,
     )
     if is_realtime:
-        return right_content
+        if params_sidebar is None:
+            return right_content
+        return ResizableSplitter(
+            left_content=params_sidebar,
+            right_content=right_content,
+            config_key="ui_splitter_screener_params",
+            default_width=340,
+            min_width=280,
+            max_width=560,
+            collapsible=True,
+            collapsed=False,
+            on_load_width=on_load_params_width,
+            on_persist_width=on_persist_params_width,
+        )
 
     return ResizableSplitter(
         left_content=build_history_tree(
@@ -2497,6 +2567,23 @@ def ScreenerView(
     export_btn_disabled = not vm.has_export_data
     is_realtime = state.mode == "REALTIME"
 
+    handlers: dict[str, typing.Any] = {
+        "on_mode_change": _on_mode_change,
+        "on_strategy_change": _on_strategy_change,
+        "on_stock_filter_change": _on_stock_filter_change,
+        "on_exclude_st_change": _on_exclude_st_change,
+        "on_run_click_sync": _on_run_click_sync,
+        "on_cancel_click_sync": lambda _: vm.cancel_strategy(),
+        "on_slider_value_change": _on_slider_value_change,
+        "on_update_param": _update_param,
+        "on_save_prompt": _on_save_prompt,
+        "on_restore_prompt": _on_restore_prompt,
+        "on_go_sync_click": lambda _: _handle_go_sync(_get_page()),
+        "on_export_csv_click": _on_export_csv_click,
+        "on_export_excel_click": _on_export_excel_click,
+        "on_backtest_click_sync": lambda _: _handle_backtest_jump(state, vm, _get_page()),
+    }
+
     control_card = _build_screener_control_card(
         state,
         vm,
@@ -2505,24 +2592,13 @@ def ScreenerView(
         progress_visible=progress_visible,
         run_disabled=run_disabled,
         export_btn_disabled=export_btn_disabled,
-        prompt_error=prompt_error,
-        param_errors=param_errors,
-        handlers={
-            "on_mode_change": _on_mode_change,
-            "on_strategy_change": _on_strategy_change,
-            "on_stock_filter_change": _on_stock_filter_change,
-            "on_exclude_st_change": _on_exclude_st_change,
-            "on_run_click_sync": _on_run_click_sync,
-            "on_cancel_click_sync": lambda _: vm.cancel_strategy(),
-            "on_slider_value_change": _on_slider_value_change,
-            "on_update_param": _update_param,
-            "on_save_prompt": _on_save_prompt,
-            "on_restore_prompt": _on_restore_prompt,
-            "on_go_sync_click": lambda _: _handle_go_sync(_get_page()),
-            "on_export_csv_click": _on_export_csv_click,
-            "on_export_excel_click": _on_export_excel_click,
-            "on_backtest_click_sync": lambda _: _handle_backtest_jump(state, vm, _get_page()),
-        },
+        handlers=handlers,
+    )
+
+    # MAJOR-07: 参数区从控制卡移入左侧可调宽度侧栏（复用 ResizableSplitter + 既有
+    # ConfigHandler 持久化通道，键 ui_splitter_screener_params）。
+    params_sidebar = _build_screener_params_sidebar(
+        state, vm, handlers=handlers, prompt_error=prompt_error, param_errors=param_errors
     )
 
     table_card = _build_screener_table_card(
@@ -2560,10 +2636,13 @@ def ScreenerView(
         history_tree=state.history_tree,
         strategy_stats=state.strategy_stats,
         ai_attribution=state.ai_attribution,
+        params_sidebar=params_sidebar,
         on_tree_item_click=_on_tree_item_click,
         on_load_more_history=_on_load_more_history,
         on_load_width=lambda: int(vm.get_splitter_width("ui_splitter_screener_history", 250)),
         on_persist_width=lambda w: vm.persist_splitter_width("ui_splitter_screener_history", w),
+        on_load_params_width=lambda: int(vm.get_splitter_width("ui_splitter_screener_params", 340)),
+        on_persist_params_width=lambda w: vm.persist_splitter_width("ui_splitter_screener_params", w),
     )
 
     dialog_control = _build_stock_detail_dialog(

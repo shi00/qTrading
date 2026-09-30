@@ -73,7 +73,7 @@ VM 须满足 `_ViewModelProtocol`（结构性类型，见 [`ui/hooks.py`](../../
 | 维度 | Flet 官方默认 | 项目规范（优先） | 依据 |
 |------|-------------|----------------|------|
 | UI 模型 | 裸 `use_state`/`use_effect` 组件 | **MVVM + `use_viewmodel` hook** | [CLAUDE.md](../../CLAUDE.md) §3.2 |
-| 适用范围 | Web/移动/桌面通用 | **仅桌面端**（`page.window.min_width=1280`） | [ui-ux-best-practices.md §布局与响应式](./ui-ux-best-practices.md#3-布局与响应式) |
+| 适用范围 | Web/移动/桌面通用 | **仅桌面端**（`page.window.min_width=1024`） | [ui-ux-best-practices.md §布局与响应式](./ui-ux-best-practices.md#3-布局与响应式) |
 | 声明式 Dialog | `ft.use_dialog()` Hook | **`ft.use_dialog()` Hook**（声明式组件内唯一契约） | [v1-api-constraints.md §声明式组件内 API 契约](./v1-api-constraints.md#声明式组件内-api-契约) |
 | Dropdown 事件 | `on_change` | **`on_select`** | [v1-api-constraints.md §V0→V1 迁移 API 表](./v1-api-constraints.md#v0v1-迁移-api-表) 第 13 项 |
 | `use_effect` cleanup | setup 返回 cleanup 函数 | **显式 `cleanup=` 参数传入** | [v1-api-constraints.md §声明式组件内 API 契约](./v1-api-constraints.md#声明式组件内-api-契约) |

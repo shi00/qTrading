@@ -271,6 +271,7 @@
     "col_turnover": "Turnover",
     "col_details": "Details",
     "screener_no_strategy_hint": "Select a strategy to view its logic",
+    "screener_params_panel_title": "Strategy Parameters",
     "screener_loading_data": "Initializing/Reloading Database...",
     "screener_data_loaded": "Data Loaded",
     "screener_load_failed": "Load Failed",
