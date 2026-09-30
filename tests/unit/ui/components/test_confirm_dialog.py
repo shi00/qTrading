@@ -147,8 +147,8 @@ class TestConfirmDialogCallbacks:
         assert called == ["cancel"]
         run_unmount_effects(c)
 
-    def test_confirm_btn_uses_danger_button_style(self, mock_i18n_state, mock_app_colors_state):
-        """P2-9: confirm_btn 必须使用 AppStyles.danger_button() 样式."""
+    def test_confirm_btn_not_danger_when_non_destructive(self, mock_i18n_state, mock_app_colors_state):
+        """MINOR-05 DoD①: 非破坏性调用 (AI 外发确认/"继续"等) 确认按钮必须是普通主按钮样式, 非危险色."""
         from tests.unit.ui.component_renderer import (
             make_component,
             run_mount_effects,
@@ -164,12 +164,56 @@ class TestConfirmDialogCallbacks:
         page = run_mount_effects(c)
         dialog = page._dialogs.controls[0]
         confirm_btn = dialog.actions[1]
-        # danger_button() 返回 ButtonStyle 实例
-        assert confirm_btn.style is not None
-        assert isinstance(confirm_btn.style, ft.ButtonStyle)
-        # 验证与 AppStyles.danger_button() 返回值类型一致
-        expected_style = AppStyles.danger_button()
-        assert isinstance(expected_style, ft.ButtonStyle)
+        # destructive 缺省值 → primary_button(), 不得沿用危险色 (原实现固定 danger_button)
+        assert confirm_btn.style.bgcolor == AppStyles.primary_button().bgcolor
+        assert confirm_btn.style.bgcolor != AppStyles.danger_button().bgcolor
+        run_unmount_effects(c)
+
+    def test_confirm_btn_danger_when_destructive(self, mock_i18n_state, mock_app_colors_state):
+        """MINOR-05 DoD③: 破坏性调用 (destructive=True) 确认按钮仍为危险色."""
+        from tests.unit.ui.component_renderer import (
+            make_component,
+            run_mount_effects,
+            run_unmount_effects,
+        )
+
+        c = make_component(
+            ConfirmDialog,
+            open_state=True,
+            confirm_text="OK",
+            cancel_text="Cancel",
+            destructive=True,
+        )
+        page = run_mount_effects(c)
+        dialog = page._dialogs.controls[0]
+        confirm_btn = dialog.actions[1]
+        assert confirm_btn.style.bgcolor == AppStyles.danger_button().bgcolor
+        assert confirm_btn.style.bgcolor != AppStyles.primary_button().bgcolor
+        run_unmount_effects(c)
+
+    def test_long_body_uses_scrollable_container_with_max_height(self, mock_i18n_state, mock_app_colors_state):
+        """MINOR-05 DoD②: 长正文由对话框可滚动容器承载, 其高度上限由视口约束派生."""
+        from tests.unit.ui.component_renderer import (
+            make_component,
+            run_mount_effects,
+            run_unmount_effects,
+        )
+
+        long_body = "\n".join(f"line {i}" for i in range(500))
+        c = make_component(
+            ConfirmDialog,
+            open_state=True,
+            body=long_body,
+            confirm_text="OK",
+            cancel_text="Cancel",
+        )
+        page = run_mount_effects(c)
+        dialog = page._dialogs.controls[0]
+        # 正文完整渲染, 不截断
+        assert dialog.content.value == long_body
+        # scrollable=True → Flet 将 title/content 包进可滚动容器, 高度上限由对话框
+        # 视口约束 (inset_padding 内) 派生, 长正文在容器内滚动而非撑破对话框
+        assert dialog.scrollable is True
         run_unmount_effects(c)
 
     def test_cancel_btn_uses_primary_color(self, mock_i18n_state, mock_app_colors_state):
