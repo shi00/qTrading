@@ -18,6 +18,7 @@
 import asyncio
 import datetime
 import logging
+import math
 import os
 import typing
 
@@ -491,6 +492,50 @@ def build_stream_card(card: StreamCard, on_retry: typing.Callable[[str], None]) 
     )
 
 
+def _validate_strategy_params(params_def: list, params: typing.Mapping[str, typing.Any]) -> dict[str, Message]:
+    """校验策略参数面板中的数值型参数 (UX-09 MINOR-07)。
+
+    仅校验渲染为数字框的参数 (``type == "number"``, 与 ``build_param_control`` 同判据);
+    返回 ``{参数名: 错误 Message}``, 全部合法返回空 dict。View 渲染期派生调用, 不持有状态,
+    切换策略/切换 locale 后自动重算 (无残留)。
+
+    判定:
+    - 空值 → ``screener_param_required``
+    - 非数字 / 非有限 (inf/nan, 如 ``"1e999"``) → ``screener_param_invalid``
+    - 越界 (参数定义声明 ``min`` / ``max`` 时) → ``screener_param_below_min`` / ``screener_param_above_max``
+
+    范围仅以策略元数据声明的 ``min`` / ``max`` 为准, 未声明时只校验可解析性,
+    不在 UI 层硬编码业务阈值 (与 UX-03 单位单一数据源同理念)。
+    """
+    errors: dict[str, Message] = {}
+    for p in params_def:
+        if p.get("type", "number") != "number":
+            continue
+        name = p.get("name")
+        if not name:
+            continue
+        raw = params.get(name, p.get("default"))
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            errors[name] = Message("screener_param_required", {})
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            errors[name] = Message("screener_param_invalid", {})
+            continue
+        if not math.isfinite(value):
+            errors[name] = Message("screener_param_invalid", {})
+            continue
+        lower = p.get("min")
+        upper = p.get("max")
+        # min/max 由策略元数据声明; 未声明 (None) 或非数值时不作范围校验, 避免臆造业务阈值。
+        if isinstance(lower, (int, float)) and value < lower:
+            errors[name] = Message("screener_param_below_min", {"min": lower})
+        elif isinstance(upper, (int, float)) and value > upper:
+            errors[name] = Message("screener_param_above_max", {"max": upper})
+    return errors
+
+
 def build_param_control(
     p: dict,
     selected_strategy: str | None,
@@ -501,6 +546,7 @@ def build_param_control(
     on_save_prompt: typing.Callable[[str], None],
     on_restore_prompt: typing.Callable[[str], None],
     prompt_error: str = "",
+    param_error: Message | None = None,
 ) -> ft.Control | None:
     """构建单个策略参数控件 (D15: 从 ScreenerView._build_param_control 提取, props 化)."""
     label = I18n.get(p.get("label_key", p["name"]))
@@ -551,6 +597,8 @@ def build_param_control(
             text_size=AppStyles.FONT_SIZE_BODY,
             content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
             width=AppStyles.CONTROL_WIDTH_MD,
+            # UX-09 MINOR-07: 越界/非法输入 inline 错误 (Message → 当前 locale), 并禁用运行按钮
+            error=_render_status_message(param_error) or None,
             on_change=lambda e, n=p_name: on_update(n, _parse_num(e.control.value if e and e.control else "")),
         )
 
@@ -642,12 +690,15 @@ def build_params_panel(
     on_save_prompt: typing.Callable[[str], None],
     on_restore_prompt: typing.Callable[[str], None],
     prompt_error: str = "",
+    param_errors: typing.Mapping[str, Message] | None = None,
 ) -> list[ft.Control]:
     """构建策略参数面板 (D15: 从 ScreenerView._build_params_panel 提取, props 化)."""
     from ui.theme import PARAM_GROUP_ORDER
 
     if not state.selected_strategy:
         return []
+
+    errors = param_errors or {}
 
     params_def = vm.get_strategy_params(state.selected_strategy)
     if not params_def:
@@ -686,6 +737,7 @@ def build_params_panel(
                 on_save_prompt,
                 on_restore_prompt,
                 prompt_error,  # D19: 透传 AI prompt inline 错误
+                errors.get(p["name"]),  # UX-09 MINOR-07: 透传数值参数越界/非法 inline 错误
             )
             if ctrl is None:
                 continue
@@ -1606,6 +1658,7 @@ def _build_screener_control_card(
     run_disabled: bool,
     export_btn_disabled: bool,
     prompt_error: str,
+    param_errors: typing.Mapping[str, Message],
     handlers: dict[str, typing.Any],
 ) -> ft.Container:
     """构建顶部控制卡 (标题栏/模式切换/策略下拉/参数面板/操作按钮)."""
@@ -1710,6 +1763,7 @@ def _build_screener_control_card(
                 handlers["on_save_prompt"],
                 handlers["on_restore_prompt"],
                 prompt_error,
+                param_errors,
             ),
         ],
         spacing=10,
@@ -2411,6 +2465,14 @@ def ScreenerView(
 
     progress_visible = state.loading
     run_disabled = state.loading or state.is_retrying or not state.selected_strategy
+    # UX-09 MINOR-07: 数值参数越界/非法时禁用「运行选股」; 校验在渲染期派生 (不持有状态),
+    # 切换策略/locale 后自动重算。参数定义与判定同 build_param_control 同源。
+    param_errors: dict[str, Message] = (
+        _validate_strategy_params(list(vm.get_strategy_params(state.selected_strategy)), dict(state.strategy_params))
+        if state.selected_strategy
+        else {}
+    )
+    run_disabled = run_disabled or bool(param_errors)
     export_btn_disabled = not vm.has_export_data
     is_realtime = state.mode == "REALTIME"
 
@@ -2423,6 +2485,7 @@ def ScreenerView(
         run_disabled=run_disabled,
         export_btn_disabled=export_btn_disabled,
         prompt_error=prompt_error,
+        param_errors=param_errors,
         handlers={
             "on_mode_change": _on_mode_change,
             "on_strategy_change": _on_strategy_change,
