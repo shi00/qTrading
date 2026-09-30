@@ -55,6 +55,9 @@ class _FakeLocator:
     async def bounding_box(self) -> dict[str, float]:
         return self._page.box
 
+    async def get_attribute(self, name: str) -> str | None:
+        return self._page.attributes.get(name)
+
 
 class _FakeMouse:
     def __init__(self) -> None:
@@ -93,6 +96,8 @@ class _FakePage:
         self.wait_for_timeout = AsyncMock()
         self.count_value = count_value
         self.box: dict[str, float] = {"x": 1.0, "y": 2.0, "width": 30.0, "height": 40.0}
+        # 供 is_checked 下潜后代 checkbox 读取 aria-checked（默认未勾选）
+        self.attributes: dict[str, str | None] = {"aria-checked": "false"}
 
     def locator(self, selector: str) -> _FakeLocator:
         self.selectors.append(selector)
@@ -387,3 +392,38 @@ async def test_offstage_expect_hidden_passes() -> None:
     await ap.expect_hidden(_COMPLEX, timeout_ms=1000)
 
     assert any(st == "hidden" for _sel, st, _t in page.wait_calls)
+
+
+# ----------------------------------------------------------------
+# Checkbox 勾选态读取（幂等「确保已勾选」读状态入口）
+# ----------------------------------------------------------------
+#
+# Flet 1.0.2 CanvasKit 实测（reviews/poc/flet-1.0.2-identifier 同源探针）：
+# ``anchored()`` 的 ``Semantics(container=True)`` 包装节点自身为 ``role="group"``，
+# **无** ``aria-checked``；真实勾选态落在后代 ``flt-semantics[role="checkbox"]``
+# 的 ``aria-checked``（"true"/"false"），并随真实鼠标点击翻转。
+
+_CHECKBOX = EIDS.WIZARD.RISK_ACK  # ("e2e.wizard.risk_ack", COMPLEX)
+
+
+@pytest.mark.asyncio
+async def test_is_checked_descends_to_descendant_checkbox_aria_checked() -> None:
+    """勾选态经 identifier 包装节点**后代** checkbox 的 aria-checked 读取，
+    不得读包装节点自身属性，也不走 JS evaluate。"""
+    ap, page = _make_ap()
+    page.attributes["aria-checked"] = "true"
+
+    assert await ap.is_checked(_CHECKBOX, timeout_ms=1000) is True
+    assert _id_selector("e2e.wizard.risk_ack") in page.selectors
+    assert 'flt-semantics[role="checkbox"]' in page.descendant_selectors
+    assert page.evaluates == [], "勾选态读取不应走 JS 轮询"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["false", None], ids=["false", "absent"])
+async def test_is_checked_false_when_not_checked(value: str | None) -> None:
+    """aria-checked 为 "false" 或属性缺失时均判为未勾选（幂等置位据此决定是否点击）。"""
+    ap, page = _make_ap()
+    page.attributes["aria-checked"] = value
+
+    assert await ap.is_checked(_CHECKBOX, timeout_ms=1000) is False

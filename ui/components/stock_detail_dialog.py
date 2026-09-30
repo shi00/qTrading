@@ -25,6 +25,7 @@ import flet_charts as fch
 from ui.components._markdown_safe import safe_open_url
 from ui.components.chart_utils import generate_kline_chart_data
 from ui.components.news_insight_panel import NewsInsightPanel
+from ui.components.risk_disclaimer import build_risk_disclaimer
 from ui.components.unit_format import (
     TUSHARE_AMOUNT_UNIT,  # noqa: F401  # 公开常量 re-export（外部/测试经本模块引用）
     TUSHARE_MV_UNIT,  # noqa: F401  # 公开常量 re-export（外部/测试经本模块引用）
@@ -728,6 +729,8 @@ def _build_content(
     sections: list[ft.Control] = [
         chart_container,
         ai_section,
+        # UX-09 / MAJOR-01: 个股详情 AI 区块下方固定风险提示（AI 评分/预测非投资建议）。
+        build_risk_disclaimer(compact=True),
         _build_attribution_section(stock_data, column_label_fn),  # UX-04 筛选条件归因
         price_section,
         valuation_section,

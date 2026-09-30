@@ -190,6 +190,8 @@ class AppConfig(BaseModel):
     nightly_prediction_time: str = Field(default="20:30", pattern="^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
 
     onboarding_complete: bool = False
+    # UX-09 / MAJOR-01: 首次启动向导欢迎步的投资风险提示确认（未确认则不允许进入下一步）。
+    risk_disclaimer_acknowledged: bool = False
     enable_news_alerts: bool = True
     ai_prompt_dump_enabled: bool = False
     # Task 2.2 / AI-04 / SEC-01: AI 外发知情确认（按 provider 记录确认时的外发范围版本）

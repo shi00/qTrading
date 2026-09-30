@@ -199,6 +199,8 @@ class _WizardIds:
     PREV_BUTTON: Eid = ("e2e.wizard.prev_button", AnchorKind.INTERACTIVE)
     SKIP_BUTTON: Eid = ("e2e.wizard.skip_button", AnchorKind.INTERACTIVE)
     TOKEN_INPUT: Eid = ("e2e.wizard.token_input", AnchorKind.INPUT)
+    # UX-09 / MAJOR-01: 欢迎步投资风险提示确认勾选框（未勾选时 NEXT_BUTTON 禁用）。
+    RISK_ACK: Eid = ("e2e.wizard.risk_ack", AnchorKind.COMPLEX)
 
 
 class _TushareIds:

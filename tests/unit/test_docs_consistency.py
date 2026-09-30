@@ -150,6 +150,18 @@ class TestEmptyMarkdownLinks:
             assert "]()" not in line, f"README.md:{i} contains empty markdown link ']()'"
 
 
+class TestReadmeRiskDisclaimer:
+    """UX-09 / MAJOR-01: README 必须含投资风险免责章节。"""
+
+    def test_readme_has_disclaimer_section(self):
+        content = _read(README_PATH)
+        assert "免责" in content, "README.md 应包含投资风险免责声明章节"
+
+    def test_readme_disclaimer_not_investment_advice(self):
+        content = _read(README_PATH)
+        assert "不构成任何投资建议" in content, "README.md 免责声明应明确「不构成任何投资建议」"
+
+
 class TestClaudeReferences:
     """Check 7: CLAUDE.md reference-style pointers target existing files."""
 

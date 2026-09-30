@@ -163,6 +163,8 @@ class OnboardingState:
     schedule_time: str = "16:30"
     normalized_schedule_time: str = "16:30"
     init_history_years: int = 3
+    # UX-09 / MAJOR-01: 欢迎步投资风险提示是否已勾选（未勾选则「下一步」禁用）。
+    risk_acknowledged: bool = False
 
 
 class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
@@ -269,16 +271,23 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
 
         读取 auto_update_time / init_history_years，避免 View 直接调用 ConfigHandler。
         保留 hasattr 守卫以兼容 ConfigHandler.get_init_history_years 缺失场景。
+        UX-09: 一并读取 risk_disclaimer_acknowledged（老用户升级后已确认则不再禁用「下一步」）。
         """
         auto_update_time = ConfigHandler.get_auto_update_time()
         init_history_years = (
             ConfigHandler.get_init_history_years() if hasattr(ConfigHandler, "get_init_history_years") else 3
+        )
+        risk_acknowledged = (
+            bool(ConfigHandler.is_risk_disclaimer_acknowledged())
+            if hasattr(ConfigHandler, "is_risk_disclaimer_acknowledged")
+            else False
         )
         self._schedule_time = auto_update_time
         self._state = OnboardingState(
             schedule_time=auto_update_time,
             normalized_schedule_time=auto_update_time,
             init_history_years=init_history_years,
+            risk_acknowledged=risk_acknowledged,
         )
 
     # ------------------------------------------------------------------
@@ -330,6 +339,12 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
 
     async def next_step(self):
         config = STEP_CONFIGS[self._state.current_step]
+
+        # UX-09 / MAJOR-01: 欢迎步须先勾选投资风险提示确认；未勾选时不前进
+        # （导航按钮同时置 disabled，此处为与 disabled 无关的程序化守卫）。
+        if config.id == "welcome" and not self._state.risk_acknowledged:
+            logger.warning("[OnboardingVM] Risk disclaimer not acknowledged; blocking next from welcome step")
+            return
 
         if config.validate_before_next:
             if not await self.validate_and_persist_current_step():
@@ -436,6 +451,39 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
             schedule_time=time_str,
             normalized_schedule_time=time_str,
         )
+
+    async def update_risk_disclaimer_acknowledged(self, acknowledged: bool) -> bool:
+        """UX-09 / MAJOR-01: 记录欢迎步投资风险提示确认，并持久化。
+
+        先即时更新 state（驱动勾选框与「下一步」按钮 disabled，避免受控 Checkbox
+        视觉回退），再经 IO 线程池写入 ConfigHandler（R16）。
+
+        Returns:
+            True 保存成功; False 保存失败 (ConfigHandler 返回 False 或 IO 异常)。
+        Raises:
+            asyncio.CancelledError: 取消时显式 raise (R2)。
+        """
+        acknowledged = bool(acknowledged)
+        self._set_state(risk_acknowledged=acknowledged)
+        try:
+            saved = await ThreadPoolManager().run_async(
+                TaskType.IO,
+                ConfigHandler.set_risk_disclaimer_acknowledged,
+                acknowledged,
+            )
+            if not saved:
+                logger.warning("[OnboardingVM] set_risk_disclaimer_acknowledged returned False")
+                return False
+            return True
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception as ex:
+            logger.error(
+                "[OnboardingVM] Save risk disclaimer acknowledgement failed: %s",
+                DataSanitizer.sanitize_error(ex),
+                exc_info=True,
+            )
+            return False
 
     async def save_language(self, new_locale: str) -> bool:
         """保存语言配置到 ConfigHandler（IO offload via ThreadPoolManager, R16）。

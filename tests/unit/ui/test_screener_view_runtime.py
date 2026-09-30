@@ -2535,6 +2535,20 @@ class TestBuildLogCard:
         fake_vm = env["fake_vm"]
         assert len(fake_vm._state.stream_cards) == 0
 
+    def test_log_card_includes_risk_disclaimer(self, screener_view_env) -> None:
+        """UX-09 / MAJOR-01: AI 分析报告区固定展示投资风险提示。"""
+        from ui.i18n import I18n
+
+        env = screener_view_env
+        env["fake_vm"]._set_state(
+            stream_cards=(StreamCard(name="test", content="分析结果"),),
+            strategies_loaded=True,
+        )
+        _rerender(env)
+
+        texts = [t.value or "" for t in _get_texts(env)]
+        assert I18n.get("risk_disclaimer_notice") in texts
+
 
 class TestStreamCardsTruncatedHint:
     """Task 8.4: 卡片截断提示 (L1411-1420).
@@ -3148,6 +3162,32 @@ class TestTableDataRendering:
         # PaginatedTable mock 被调用 (rows 参数含数据)
         # 验证不抛异常
         assert callable(env["captured_callbacks"]["on_sort"])
+
+    def test_result_area_renders_risk_disclaimer(self, screener_view_env) -> None:
+        """UX-09 / MAJOR-01: 选股结果区顶部固定展示投资风险提示。"""
+        from ui.i18n import I18n
+
+        env = screener_view_env
+        env["fake_vm"]._set_current_page_rows(
+            pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"], "close": [10.5]})
+        )
+        env["fake_vm"]._set_state(strategies_loaded=True)
+        _rerender(env)
+
+        texts = [t.value or "" for t in _get_texts(env)]
+        assert I18n.get("risk_disclaimer_notice") in texts
+
+    def test_result_area_renders_risk_disclaimer_in_empty_state(self, screener_view_env) -> None:
+        """UX-09 / MAJOR-01: 结果区空态同样固定展示投资风险提示。"""
+        from ui.i18n import I18n
+
+        env = screener_view_env
+        env["fake_vm"]._set_current_page_rows(pd.DataFrame())
+        env["fake_vm"]._set_state(strategies_loaded=True)
+        _rerender(env)
+
+        texts = [t.value or "" for t in _get_texts(env)]
+        assert I18n.get("risk_disclaimer_notice") in texts
 
 
 class TestScreenerViewSectionRendering:

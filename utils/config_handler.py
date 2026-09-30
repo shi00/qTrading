@@ -424,6 +424,14 @@ class ConfigHandler:
         return app_prefs.set_onboarding_complete(complete)
 
     @staticmethod
+    def is_risk_disclaimer_acknowledged() -> bool:
+        return app_prefs.is_risk_disclaimer_acknowledged()
+
+    @staticmethod
+    def set_risk_disclaimer_acknowledged(acknowledged: bool = True) -> bool:
+        return app_prefs.set_risk_disclaimer_acknowledged(acknowledged)
+
+    @staticmethod
     def is_ai_external_acknowledged(provider: str | None = None, *, scope_version: int | None = None) -> bool:
         from utils.config_models import AI_EGRESS_SCOPE_VERSION
 

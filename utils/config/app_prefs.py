@@ -21,6 +21,22 @@ def set_onboarding_complete(complete=True):
     return cfg.ConfigHandler.save_config({"onboarding_complete": complete})
 
 
+def is_risk_disclaimer_acknowledged() -> bool:
+    """UX-09 / MAJOR-01: 用户是否已在向导欢迎步确认投资风险提示。"""
+    return bool(
+        cfg.ConfigHandler.get_typed(
+            "risk_disclaimer_acknowledged",
+            bool,
+            DEFAULTS["risk_disclaimer_acknowledged"],
+        )
+    )
+
+
+def set_risk_disclaimer_acknowledged(acknowledged: bool = True) -> bool:
+    """UX-09 / MAJOR-01: 持久化向导欢迎步风险提示确认状态（幂等）。"""
+    return cfg.ConfigHandler.set_typed("risk_disclaimer_acknowledged", bool(acknowledged))
+
+
 def is_ai_external_acknowledged(provider: str | None = None, *, scope_version: int = AI_EGRESS_SCOPE_VERSION) -> bool:
     """Task 2.2 / AI-04 / SEC-01: 用户是否已确认某 provider 的 AI 外发数据知情政策。
 

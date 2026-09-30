@@ -509,6 +509,29 @@ class WizardPage:
         """填充 token 输入框（通过 anchor）。"""
         await self.ap.fill(EIDS.WIZARD.TOKEN_INPUT, value, timeout_ms=timeout_ms)
 
+    async def accept_risk_disclaimer(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """确保欢迎步投资风险提示确认已勾选（UX-09 / MAJOR-01），使「下一步」按钮可用。
+
+        欢迎步未勾选时 NEXT 按钮 disabled；从欢迎步前进前须先调用本方法。
+
+        幂等语义（**非 toggle**）：RISK_ACK 是受控 ``ft.Checkbox``，勾选态来自
+        ``OnboardingState.risk_acknowledged``（由 ``ConfigHandler`` 持久化读取）。
+        跨用例/跨会话该值可能已为 True，欢迎步渲染即已勾选——若无条件 click 会将其
+        toggle 回 False → NEXT 再次 disabled → 后续点击空操作。故本方法**先读勾选态**，
+        仅当未勾选时才点击，并在点击后确认状态已置位（抗 CanvasKit 高负载吞点击）。
+        """
+        eid = EIDS.WIZARD.RISK_ACK
+        await self.ap.scroll_into_view(eid, timeout_ms=timeout_ms)
+        if await self.ap.is_checked(eid, timeout_ms=timeout_ms):
+            return
+        await retry_until_triggered(
+            lambda: self.ap.click(eid, timeout_ms=timeout_ms),
+            lambda: self.ap.is_checked(eid, timeout_ms=timeout_ms),
+            attempts=TIMEOUTS.RETRY_ATTEMPTS,
+            interval_ms=TIMEOUTS.RETRY_INTERVAL_MS,
+        )
+        await self.page.page.wait_for_timeout(300)
+
 
 # ============================================================================
 # PR-4 Task 4.2: NavPage / HomePage / TaskCenterPage

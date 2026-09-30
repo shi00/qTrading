@@ -2918,6 +2918,39 @@ class TestConfigHandlerAIExternalAcknowledged:
         assert dumped["ai_external_acknowledged"] == {}
 
 
+class TestConfigHandlerRiskDisclaimerAcknowledged:
+    """UX-09 / MAJOR-01: risk_disclaimer_acknowledged 读取/写入（向导欢迎步风险提示确认）。"""
+
+    @patch("utils.config_handler.ConfigHandler.get_typed")
+    def test_is_reads_false_by_default(self, mock_get):
+        mock_get.return_value = False
+        assert ConfigHandler.is_risk_disclaimer_acknowledged() is False
+        # 默认值取自 DEFAULT_CONFIG
+        assert mock_get.call_args.args[0] == "risk_disclaimer_acknowledged"
+        assert mock_get.call_args.args[2] is False
+
+    @patch("utils.config_handler.ConfigHandler.get_typed")
+    def test_is_reads_persisted_true(self, mock_get):
+        mock_get.return_value = True
+        assert ConfigHandler.is_risk_disclaimer_acknowledged() is True
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_true_persists(self, mock_set):
+        assert ConfigHandler.set_risk_disclaimer_acknowledged(True) is True
+        mock_set.assert_called_once_with("risk_disclaimer_acknowledged", True)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_defaults_to_true(self, mock_set):
+        assert ConfigHandler.set_risk_disclaimer_acknowledged() is True
+        mock_set.assert_called_once_with("risk_disclaimer_acknowledged", True)
+
+    def test_field_in_default_config(self):
+        """AppConfig 默认 dump 应包含 risk_disclaimer_acknowledged=False"""
+        from utils.config_models import AppConfig
+
+        assert AppConfig().model_dump()["risk_disclaimer_acknowledged"] is False
+
+
 class TestAIExternalAcknowledgementMigration:
     """AI-04 / SEC-01: 旧形态 ``ai_external_acknowledged`` 统一迁移为 ``dict[str, int]``。
 

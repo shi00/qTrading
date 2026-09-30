@@ -784,6 +784,14 @@ class TestBuildContentFunction:
         for md in found:
             assert md.on_tap_link is safe_open_url
 
+    def test_build_content_contains_risk_disclaimer(self):
+        """UX-09 / MAJOR-01: 个股详情固定展示投资风险提示（AI 区块下方）。"""
+        from ui.i18n import I18n
+
+        container = self._build({"ts_code": "000001.SZ", "ai_reason": "r", "ai_score": "80"})
+        texts = _collect_all_texts(container)
+        assert I18n.get("risk_disclaimer_notice") in texts
+
 
 def _collect_markdown_controls(control, found):
     """Recursively collect ft.Markdown controls from the flet control tree."""

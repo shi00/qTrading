@@ -429,8 +429,27 @@ class AnchorPage:
         await retry_until_triggered(_interact, _menu_closed, attempts=3, interval_ms=400)
 
     # ----------------------------------------------------------------
-    # 断言与探测: expect_visible/expect_hidden/count
+    # 断言与探测: expect_visible/expect_hidden/count/is_checked
     # ----------------------------------------------------------------
+
+    async def is_checked(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> bool:
+        """读取 anchor 化 Checkbox 的当前勾选态（幂等「确保已勾选」的读状态入口）。
+
+        ``anchored()`` 的 ``Semantics(container=True)`` 包装节点自身为 ``role="group"``，
+        **无** ``aria-checked``；真实勾选态落在其后代
+        ``flt-semantics[role="checkbox"]`` 的 ``aria-checked``（``"true"`` / ``"false"``）。
+        Flet 1.0.2 CanvasKit 实测（``reviews/poc/flet-1.0.2-identifier`` 同源探针）：
+        包装节点 group/无 aria-checked，后代 checkbox 节点值随真实鼠标点击翻转。
+
+        供「受控 Checkbox 幂等置位」使用：先读态再决定是否点击，避免无条件 click
+        把已勾选的受控控件 toggle 回未勾选。
+        """
+        eid_str, _ = eid
+        root = self._locator_by_identifier(eid_str).first
+        await root.wait_for(state="attached", timeout=self._tm(timeout_ms))
+        checkbox = root.locator('flt-semantics[role="checkbox"]').first
+        await checkbox.wait_for(state="attached", timeout=self._tm(timeout_ms))
+        return await checkbox.get_attribute("aria-checked") == "true"
 
     async def expect_visible(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         eid_str, _ = eid
