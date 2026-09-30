@@ -1563,44 +1563,46 @@ _SECTION_META: tuple[tuple[str, typing.Any, str, str], ...] = (
 )
 
 
-def _build_screener_section_card(
+def _build_screener_sections_card(
     *,
-    title_key: str,
-    count: int,
-    icon: typing.Any,
-    icon_color: str,
+    section_counts: tuple[int, int, int],
+    active_section: str,
     section_rows: list[dict],
     vt_columns: list,
     sort_col: str | None,
     sort_asc: bool,
     on_virtual_sort: typing.Callable[[str, bool], None],
     on_row_click: typing.Callable[[dict], None],
+    on_section_change: typing.Callable[[ft.ControlEvent], None],
     on_load_col_widths: typing.Callable[[], dict[str, int] | None],
     on_persist_col_widths: typing.Callable[[dict[str, int]], None],
 ) -> ft.Container:
-    """构建单个 AI 分区卡片 (D7-3): 标题栏(图标+文案+计数) + 该分区表格/空态.
+    """构建 AI 三分区卡片 (D7-3 + MAJOR-06): 分组页签 + 活动分组的表格/空态.
 
-    分区渲染仅消费 ``section_rows`` (当前页内按 ai_status 拆分的格式化行),
-    不持有业务状态 (§3.2 VM 只产出 key, View 渲染期翻译).
+    MAJOR-06 (review 09-24): 「分组先于分页」——
+    1. 页签标签承载**全量**分组计数 ``section_counts`` (VM 对过滤后全量结果的统计,
+       非当前页切片长度), 修掉「标题只统计当前页」的失真;
+    2. 一次只渲染活动分组的表格, 三张表不再同屏互相挤占高度 (视口 1280×720 下
+       每张表可独占卡片高度)。
+
+    页签仍只表达 AI 处理状态 (CRITICAL-01 中性文案), 不做投资判断。
+    本函数仅消费 state 快照, 不持有业务状态 (§3.2 VM 只产出 key, View 渲染期翻译)。
     """
-    title = ft.Row(
-        safe_controls(
-            [
-                ft.Icon(icon, color=icon_color, size=AppStyles.FONT_SIZE_LG),
-                ft.Text(
-                    I18n.get(title_key).format(count=count),
-                    size=AppStyles.FONT_SIZE_BODY,
-                    weight=ft.FontWeight.BOLD,
-                    color=AppColors.TEXT_PRIMARY,
-                ),
-            ]
-        ),
-        spacing=6,
-        alignment=ft.MainAxisAlignment.START,
+    switcher = ft.SegmentedButton(
+        segments=[
+            ft.Segment(
+                value=meta[3],
+                label=ft.Text(I18n.get(meta[0]).format(count=section_counts[index])),
+                icon=ft.Icon(meta[1], color=meta[2]),
+            )
+            for index, meta in enumerate(_SECTION_META)
+        ],
+        selected=[active_section],
+        on_change=on_section_change,
     )
 
     if section_rows:
-        body = ft.Column(
+        body: ft.Control = ft.Column(
             [
                 PaginatedTable(
                     rows=section_rows,
@@ -1642,7 +1644,7 @@ def _build_screener_section_card(
         )
 
     return ft.Container(
-        content=ft.Column([title, ft.Divider(height=1, color=AppColors.DIVIDER), body], spacing=4),
+        content=ft.Column([switcher, ft.Divider(height=1, color=AppColors.DIVIDER), body], spacing=4),
         **AppStyles.dashboard_card(padding=AppStyles.SPACING_MD),
         expand=True,
     )
@@ -1875,6 +1877,7 @@ def _build_screener_table_card(
     on_prev_page: typing.Callable[[ft.ControlEvent], None],
     on_next_page: typing.Callable[[ft.ControlEvent], None],
     on_page_size_change: typing.Callable[[ft.ControlEvent], None],
+    on_section_change: typing.Callable[[ft.ControlEvent], None],
     on_virtual_sort: typing.Callable[[str, bool], None],
     on_row_click: typing.Callable[[dict], None],
     on_load_col_widths: typing.Callable[[], dict[str, int] | None],
@@ -1901,7 +1904,7 @@ def _build_screener_table_card(
                     tooltip=I18n.get("screener_page_prev"),
                 ),
                 ft.Text(
-                    I18n.get("screener_page_info").format(current=page_no, total=total_pages),
+                    I18n.get("screener_page_info").format(current=page_no, total=total_pages, count=state.total_items),
                     color=AppColors.TEXT_PRIMARY,
                 ),
                 ft.IconButton(
@@ -1952,29 +1955,25 @@ def _build_screener_table_card(
         )
     else:
         if is_realtime and state.show_ai_sections:
-            # D7-3: 当前页内按 ai_status 拆分为三分区 (recommended/excluded/failed) 独立呈现;
-            # VM 已保证三分区和 data.current_page_rows 行零丢失 (非三分区值归入 failed)。
-            # 仅渲染有数据的分区: 空分区不留占位卡。否则小视口 (1280×720) 下有数据分区
-            # 被空分区挤到页面底部未布局区, CanvasKit 不物化其语义节点, 结果行不可见
-            # (C5-5 视口塌陷回归)。三态均有结果时并列呈现; 某态无行时该分区整体不显示,
-            # 决策可解释性由剩余有行分区承载。
+            # MAJOR-06 (review 09-24): 分组先于分页 —— 页签标签承载**全量**分组计数
+            # (state.ai_section_counts, 由 VM 对过滤后全量结果集统计), 修掉「标题只统计
+            # 当前页」的失真; 页签一次只呈现一个分组 (活动分组由 VM 在组内分页), 三张表
+            # 不再同屏挤占高度。VM 已保证三分组计数之和 = 全量条数 (非三分区值归入 failed),
+            # 且当前页切片恒属活动分组, 故此处只消费 section_formatted[active]。
             body_rows = [
-                _build_screener_section_card(
-                    title_key=meta[0],
-                    count=len(rows),
-                    icon=meta[1],
-                    icon_color=meta[2],
-                    section_rows=rows,
+                _build_screener_sections_card(
+                    section_counts=state.ai_section_counts,
+                    active_section=state.ai_active_section,
+                    section_rows=section_formatted.get(state.ai_active_section, []),
                     vt_columns=vt_columns,
                     sort_col=state.sort_column,
                     sort_asc=state.sort_ascending,
                     on_virtual_sort=on_virtual_sort,
                     on_row_click=on_row_click,
+                    on_section_change=on_section_change,
                     on_load_col_widths=on_load_col_widths,
                     on_persist_col_widths=on_persist_col_widths,
                 )
-                for meta in _SECTION_META
-                if (rows := section_formatted.get(meta[3], []))
             ]
         else:
             # 单表渲染路径: HISTORY (历史记录来自 ScreeningHistory 表, 无 ai_status 列)
@@ -2388,6 +2387,17 @@ def ScreenerView(
         else:
             vm.switch_to_realtime()
 
+    def _on_section_change(e: ft.ControlEvent) -> None:
+        # MAJOR-06: 分组页签切换 —— 分组选择属业务状态 (决定组内分页切片), 故交 VM 命令,
+        # View 不落地任何本地状态 (§3.2 MVVM)。Flet 分段控件可能回传空 selected
+        # (取消选择), 此类事件直接忽略, 保持当前分组不变。
+        selected = get_control_attr(e.control, ft.SegmentedButton, "selected") if e and e.control else []
+        if not selected:
+            return
+        section = next(iter(selected))
+        UILogger.log_action("ScreenerView", "Switch", f"ai_section={section}")
+        vm.select_ai_section(section)
+
     async def _load_history_for_date(trade_date: str, strategy_name: str | None, run_id: str | None) -> None:
         await _execute_load_history_for_date(vm, _get_page(), trade_date, strategy_name, run_id)
 
@@ -2512,6 +2522,7 @@ def ScreenerView(
         on_prev_page=lambda _: vm.change_page(-1),
         on_next_page=lambda _: vm.change_page(1),
         on_page_size_change=_on_page_size_change,
+        on_section_change=safe_on_change(_on_section_change),
         on_virtual_sort=_on_virtual_sort,
         on_row_click=_on_row_click,
         on_load_col_widths=lambda: vm.get_col_widths(_VT_COL_WIDTHS_KEY),

@@ -159,7 +159,7 @@
     "screener_page_prev": "Prev",
     "screener_page_next": "Next",
     "screener_log_title": "Execution Log",
-    "screener_page_info": "Page {current} of {total}",
+    "screener_page_info": "Page {current} of {total} ({count} items)",
     "screener_per_page": "/ page",
     "screener_page_size": "Page Size",
     "screener_filter_stock": "Filter by stock code",

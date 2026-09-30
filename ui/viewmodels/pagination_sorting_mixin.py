@@ -28,6 +28,10 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
+# MAJOR-06: AI 三分区顺序 (VM 侧唯一正本, 同时作为页签取值)。顺序即页签展示顺序,
+# 也是「请求分组为空时回落到首个非空分组」的优先级 (默认「推荐」)。
+AI_SECTION_KEYS: tuple[str, str, str] = ("recommended", "excluded", "failed")
+
 
 def _decode_cell(col: str, value) -> object:
     """UX-04: 把结果行单元格转为 row.values 中的可消费值。
@@ -70,8 +74,24 @@ class PaginationSortingMixin:
         # 单帧原子: stock_filter 随 changes 在帧末才落入 state, 计算过滤须显式取本次值
         # (否则读旧 state.stock_filter, 过滤不生效 — M-1 单帧化时序)
         filtered = self._get_filtered_results(stock_filter=changes.get("stock_filter"))
-        if filtered is not None:
-            total_items = len(filtered)
+        # UX-02: 本次结果是否含 AI 三态分区能力 — ai_status 列存在即 AI 管线介入过
+        # (非AI策略 enable_ai_analysis=False / AI 未执行返回无该列的候选表)。
+        # False 时 View 渲染单表而非三分区, 避免成功的数学筛选被误标「分析失败」
+        # (05-explainability-ux UX-02; D7-3 三分区的非AI策略回归)。
+        show_ai_sections = filtered is not None and not filtered.empty and "ai_status" in filtered.columns
+        # MAJOR-06 (review 09-24): 分组先于分页 —— 页签请求的分组随 changes 在帧末才落入
+        # state, 故与 stock_filter 同理须显式取本次值 (M-1 单帧化时序); 解析出的有效分组
+        # (请求分组为空时回落首个非空分组) 回写同一帧, 保证页签 selected 与切片内容一致。
+        requested_section = changes.pop("ai_active_section", self._state.ai_active_section)
+        section_counts: tuple[int, int, int] = (0, 0, 0)
+        active_section = self._state.ai_active_section
+        page_source: pd.DataFrame | None = filtered
+        if show_ai_sections:
+            section_counts, active_section, page_source = self._ai_section_view(
+                typing.cast("pd.DataFrame", filtered), requested_section
+            )
+        if page_source is not None:
+            total_items = len(page_source)
             total_pages = (total_items + ps - 1) // ps
         else:
             total_items = 0
@@ -80,16 +100,13 @@ class PaginationSortingMixin:
         # UX-04: 页码 clamp — 过滤/模式切换缩小 total_pages 后, 恢复的历史 page_no
         # 可能越界 (HISTORY 中修改过滤后 switch_to_realtime 恢复快照页码 → 空表格)
         pn = max(1, min(pn, total_pages)) if total_pages else 1
-        # UX-02: 本次结果是否含 AI 三态分区能力 — ai_status 列存在即 AI 管线介入过
-        # (非AI策略 enable_ai_analysis=False / AI 未执行返回无该列的候选表)。
-        # False 时 View 渲染单表而非三分区, 避免成功的数学筛选被误标「分析失败」
-        # (05-explainability-ux UX-02; D7-3 三分区的非AI策略回归)。
-        show_ai_sections = filtered is not None and not filtered.empty and "ai_status" in filtered.columns
-        rows = self._build_current_page_rows(filtered, pn, ps)
+        rows = self._build_current_page_rows(page_source, pn, ps)
         # 内容未变时复用引用 (NaN 会导致 value 比较误判重建, 属安全侧: 额外重格式化而非陈旧命中)
         if rows == self._state.current_page_rows:
             rows = self._state.current_page_rows
         # D7-3: 当前页切片按 ai_status 拆三区 (与 current_page_rows 同帧原子, 保证分区与页/排序/过滤一致)
+        # MAJOR-06: 分组先于分页后, 当前页切片已只含活动分组行, 故本拆分退化为「活动分组
+        # 独占全页、其余桶为空」; 三分桶之和仍恒等于 current_page_rows (零丢失契约不变)。
         recommended, excluded, failed = self._split_page_rows_by_ai_status(rows)
         self._set_state(
             page_size=ps,
@@ -101,8 +118,45 @@ class PaginationSortingMixin:
             ai_excluded_rows=excluded,
             ai_failed_rows=failed,
             show_ai_sections=show_ai_sections,
+            ai_section_counts=section_counts,
+            ai_active_section=active_section,
             **changes,
         )
+
+    @staticmethod
+    def _ai_section_view(
+        filtered: pd.DataFrame, requested_section: str
+    ) -> tuple[tuple[int, int, int], str, pd.DataFrame | None]:
+        """MAJOR-06: 对过滤后**全量**结果集「先分组」, 并解析活动分组 (供组内分页)。
+
+        - 计数口径为**全量**分组条数 (非当前页切片长度), 供页签标签展示「全量 N 只」;
+        - 请求分组为空 (或非法值) 时回落到首个非空分组, 默认「推荐」;
+        - 全走向量化布尔掩码 (单次 O(n) 扫描), 不逐行查询, 不引入 N+1。
+
+        Returns:
+            (section_counts, active_section, page_source): ``section_counts`` 为
+            (recommended, excluded, failed) 全量计数; ``page_source`` 为活动分组
+            对应行集合, 交给 ``_build_current_page_rows`` 在**组内**分页。
+        """
+        status = filtered["ai_status"]
+        rec_mask = status == "analyzed"
+        exc_mask = status == "rejected"
+        rec = int(rec_mask.sum())
+        exc = int(exc_mask.sum())
+        # 其余 (failed/skipped/ai_unavailable/policy_not_acknowledged/缺失) 全归 failed
+        # —— 与 _split_page_rows_by_ai_status 同口径, 保证三分组计数之和 = 全量条数 (零丢失)
+        counts: tuple[int, int, int] = (rec, exc, len(filtered) - rec - exc)
+        index = AI_SECTION_KEYS.index(requested_section) if requested_section in AI_SECTION_KEYS else 0
+        if counts[index] == 0:
+            index = next((i for i, count in enumerate(counts) if count > 0), index)
+        active = AI_SECTION_KEYS[index]
+        if active == "recommended":
+            page_source = filtered[rec_mask]
+        elif active == "excluded":
+            page_source = filtered[exc_mask]
+        else:
+            page_source = filtered[~(rec_mask | exc_mask)]
+        return counts, active, typing.cast("pd.DataFrame", page_source)
 
     @staticmethod
     def _split_page_rows_by_ai_status(
@@ -211,6 +265,16 @@ class PaginationSortingMixin:
         """Update pagination size and jump back to page 1."""
         if new_size > 0 and new_size != self._state.page_size:
             self._update_pagination(page_size=new_size, page_no=1)
+
+    def select_ai_section(self, section: str) -> None:
+        """MAJOR-06: 切换 AI 分组页签 (分组先于分页) —— 回到该分组第 1 页并重算切片。
+
+        非法取值或选择当前分组时幂等 no-op (Flet 分段控件可能触发取消选择/重复回调)。
+        请求分组为空时由 ``_ai_section_view`` 回落到首个非空分组, 不回退为「全表」。
+        """
+        if section not in AI_SECTION_KEYS or section == self._state.ai_active_section:
+            return
+        self._update_pagination(page_no=1, ai_active_section=section)
 
     def _get_filtered_results(self, stock_filter: str | None = None) -> pd.DataFrame | None:
         """UX-04: 应用股票代码过滤 — ts_code 子串匹配 (case-insensitive, 字面量).

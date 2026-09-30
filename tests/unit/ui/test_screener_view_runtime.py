@@ -38,7 +38,7 @@ from tests.unit.ui.component_renderer import (
 )
 from ui.viewmodels import Message
 from ui.viewmodels.history_mode_mixin import HistoryModeMixin
-from ui.viewmodels.pagination_sorting_mixin import PaginationSortingMixin
+from ui.viewmodels.pagination_sorting_mixin import AI_SECTION_KEYS, PaginationSortingMixin
 from ui.viewmodels.screener_view_model import (
     HistoryTreeRow,
     HistoryTreeState,
@@ -410,18 +410,28 @@ class _FakeScreenerViewModel:
         """Mock vm.get_column_alias (Task 5.1: 从 View 迁入 VM)."""
         return f"列别名[{col}]"
 
-    def _set_current_page_rows(self, df: pd.DataFrame | None, page_no: int = 1, page_size: int = 50) -> None:
+    def _set_current_page_rows(
+        self,
+        df: pd.DataFrame | None,
+        page_no: int = 1,
+        page_size: int = 50,
+        active_section: str | None = None,
+    ) -> None:
         """C2b: 注入 state.current_page_rows (locale-neutral 原始行), 替代旧 _current_page_data.
 
         D7-3: 与生产 VM._update_pagination 一致, 同帧原子产出按 ai_status 拆分的
         ai_recommended_rows/ai_excluded_rows/ai_failed_rows 三分区, 否则 REALTIME
         View 只渲染三分区空态, PaginatedTable 不挂载, 排序/行点击回调节点无法捕获。
+        MAJOR-06: 同步产出全量分组计数 ai_section_counts 与活动分组 ai_active_section
+        (默认首个非空分组, 可用 ``active_section`` 显式指定模拟页签切换后的渲染)。
         UX-02: show_ai_sections 与生产 VM 同源 (df 含 ai_status 列), 非AI策略无该列时
         View 走单表渲染路径。
         """
         if df is not None and not df.empty:
             rows = tuple(ScreenerRow(values=MappingProxyType(dict(record))) for record in df.to_dict("records"))
             recommended, excluded, failed = PaginationSortingMixin._split_page_rows_by_ai_status(rows)
+            counts = (len(recommended), len(excluded), len(failed))
+            resolved = active_section or AI_SECTION_KEYS[next((i for i, c in enumerate(counts) if c > 0), 0)]
             total_items = len(df)
             total_pages = (total_items + page_size - 1) // page_size
             self._set_state(
@@ -429,6 +439,8 @@ class _FakeScreenerViewModel:
                 ai_recommended_rows=recommended,
                 ai_excluded_rows=excluded,
                 ai_failed_rows=failed,
+                ai_section_counts=counts,
+                ai_active_section=resolved,
                 show_ai_sections="ai_status" in df.columns,
                 total_items=total_items,
                 total_pages=total_pages,
@@ -441,10 +453,17 @@ class _FakeScreenerViewModel:
                 ai_recommended_rows=(),
                 ai_excluded_rows=(),
                 ai_failed_rows=(),
+                ai_section_counts=(0, 0, 0),
+                ai_active_section="recommended",
                 show_ai_sections=False,
                 total_items=0,
                 total_pages=0,
             )
+
+    def select_ai_section(self, section: str) -> None:
+        """Mock vm.select_ai_section (MAJOR-06: 分组页签切换命令)."""
+        self.method_calls.append(f"select_ai_section:{section}")
+        self._set_state(ai_active_section=section)
 
     def get_export_data(self) -> Any:
         return self._export_data
@@ -3141,13 +3160,33 @@ class TestScreenerViewSectionRendering:
 
     @staticmethod
     def _section_titles(env: dict) -> list[str]:
-        """收集渲染树中三分区标题文本 (i18n[screener_section_*])."""
+        """收集渲染树中三分区标题文本 (i18n[screener_section_*]).
+
+        MAJOR-06: 三分区标题改为页签 (SegmentedButton) 标签, 标签不在 controls/content
+        子树中, 故须显式展开 segments 收集。
+        """
         titles: list[str] = []
         for ctrl in _walk_all_controls(env["result"]):
-            if isinstance(ctrl, ft.Text) and isinstance(ctrl.value, str):
+            if isinstance(ctrl, ft.SegmentedButton):
+                for seg in ctrl.segments:
+                    label = getattr(seg, "label", None)
+                    if isinstance(label, ft.Text) and isinstance(label.value, str):
+                        if label.value.startswith("i18n[screener_section_"):
+                            titles.append(label.value)
+            elif isinstance(ctrl, ft.Text) and isinstance(ctrl.value, str):
                 if ctrl.value.startswith("i18n[screener_section_"):
                     titles.append(ctrl.value)
         return titles
+
+    @staticmethod
+    def _section_switcher(env: dict) -> ft.SegmentedButton:
+        """定位三分区页签控件 (segments 取值恰为三个 AI 分组)。"""
+        for ctrl in _walk_all_controls(env["result"]):
+            if isinstance(ctrl, ft.SegmentedButton):
+                values = [getattr(seg, "value", None) for seg in ctrl.segments]
+                if values == ["recommended", "excluded", "failed"]:
+                    return ctrl
+        raise AssertionError("未找到三分区页签 (SegmentedButton)")
 
     def test_no_ai_sections_single_table(self, screener_view_env) -> None:
         """REALTIME + 无 ai_status 列 (非AI策略) → 单表渲染, 无三分区标题。"""
@@ -3162,7 +3201,11 @@ class TestScreenerViewSectionRendering:
         assert "on_sort" in env["captured_callbacks"], "单表路径应挂载 PaginatedTable"
 
     def test_ai_sections_three_panes(self, screener_view_env) -> None:
-        """REALTIME + 含 ai_status 列 (AI 策略) → 三分区标题渲染 (recommended/failed)。"""
+        """REALTIME + 含 ai_status 列 (AI 策略) → 三分组页签渲染, 但只挂载 1 张表 (MAJOR-06)。
+
+        MAJOR-06: 三分区由「三张表同屏」改为「页签切换 + 活动分组单表」, 避免三表互相
+        挤占高度; 页签仍覆盖三个分组 (计数含空分组), 分组可解释性不减。
+        """
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
@@ -3175,12 +3218,84 @@ class TestScreenerViewSectionRendering:
                 }
             )
         )
+        env["captured_callbacks"].clear()
         _rerender(env)
 
         assert fake_vm.state.show_ai_sections is True
         titles = self._section_titles(env)
         assert any("screener_section_recommended" in t for t in titles)
         assert any("screener_section_failed" in t for t in titles)
+        switcher = self._section_switcher(env)
+        assert switcher.selected == ["recommended"], "默认活动分组应为「推荐」页签"
+        tables = env["captured_callbacks"].get("tables", [])
+        assert len(tables) == 1, f"页签一次只渲染活动分组一张表, 实际 {len(tables)}"
+
+    def test_section_tab_labels_show_full_counts_not_page_slice(self, screener_view_env) -> None:
+        """MAJOR-06: 页签计数取 state.ai_section_counts (过滤后**全量**), 非当前页切片长度。"""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        env["mock_i18n"].get.side_effect = lambda key, *a, **kw: (
+            "{count} 只" if key.startswith("screener_section_") else f"i18n[{key}]"
+        )
+
+        fake_vm._set_current_page_rows(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "ai_status": ["analyzed", "analyzed"],
+                }
+            )
+        )
+        # 模拟生产: 当前页切片仅 2 行, 但全量分组计数为 (81, 20, 19)
+        fake_vm._set_state(ai_section_counts=(81, 20, 19))
+        _rerender(env)
+
+        labels: list[str] = []
+        for seg in self._section_switcher(env).segments:
+            label = getattr(seg, "label", None)
+            if isinstance(label, ft.Text) and isinstance(label.value, str):
+                labels.append(label.value)
+        assert labels == ["81 只", "20 只", "19 只"], f"页签须展示全量计数, 实际 {labels}"
+
+    def test_section_tab_change_dispatches_vm_command(self, screener_view_env) -> None:
+        """MAJOR-06: 页签切换把分组选择交 VM 命令 (View 不持有分组状态, §3.2 MVVM)。"""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._set_current_page_rows(
+            pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["analyzed"], "ai_score": [88.0]})
+        )
+        _rerender(env)
+        fake_vm.method_calls.clear()
+
+        handler = self._section_switcher(env).on_change
+        assert callable(handler)
+        event = MagicMock()
+        event.control = self._section_switcher(env)
+        event.control.selected = ["excluded"]
+        _invoke(handler, event)
+
+        assert "select_ai_section:excluded" in fake_vm.method_calls
+
+    def test_section_tab_change_empty_selection_ignored(self, screener_view_env) -> None:
+        """MAJOR-06: 分段控件取消选择 (selected 为空) 时不派发命令, 保持当前分组。"""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._set_current_page_rows(
+            pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["analyzed"], "ai_score": [88.0]})
+        )
+        _rerender(env)
+        fake_vm.method_calls.clear()
+
+        handler = self._section_switcher(env).on_change
+        assert callable(handler)
+        event = MagicMock()
+        event.control = self._section_switcher(env)
+        event.control.selected = []
+        _invoke(handler, event)
+
+        assert fake_vm.method_calls == []
 
     # --- CRITICAL-01: 分区标题中性化 (过渡方案·仅 UI) ---
 
@@ -3210,27 +3325,32 @@ class TestScreenerViewSectionRendering:
         assert "screener_section_recommended" in titles[0]
 
     def test_ai_score_column_fixed_in_every_section_table(self, screener_view_env) -> None:
-        """CRITICAL-01: 每个分区的表格都固定渲染 AI 分数列 (数值), 不依赖分区颜色暗示。"""
+        """CRITICAL-01: 每个分区的表格都固定渲染 AI 分数列 (数值), 不依赖分区颜色暗示。
+
+        MAJOR-06: 三分区改为页签 (一次只渲染活动分组单表) 后, 逐活动分组渲染并断言各自
+        表格含 ai_score 列 —— 与「三表同屏」旧断言等价的可解释性覆盖。
+        """
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
-        fake_vm._set_current_page_rows(
-            pd.DataFrame(
-                {
-                    "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
-                    "ai_status": ["analyzed", "analyzed", "rejected"],
-                    "ai_score": [88.0, 72.5, 0.0],
-                }
-            )
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "ai_status": ["analyzed", "analyzed", "rejected"],
+                "ai_score": [88.0, 72.5, 55.0],
+            }
         )
-        env["captured_callbacks"].clear()  # 隔离 fixture 初始渲染捕获的表格
-        _rerender(env)
+        for section in ("recommended", "excluded"):
+            fake_vm._set_current_page_rows(df, active_section=section)
+            env["captured_callbacks"].clear()  # 隔离上一分组渲染捕获的表格
+            _rerender(env)
 
-        tables = env["captured_callbacks"].get("tables", [])
-        assert len(tables) == 2, f"analyzed+rejected 两区各有表格, 实际 {len(tables)}"
-        for columns, rows in tables:
+            tables = env["captured_callbacks"].get("tables", [])
+            assert len(tables) == 1, f"页签一次只渲染活动分组一张表, section={section} 实际 {len(tables)}"
+            columns, rows = tables[0]
             col_ids = [c["id"] for c in columns]
-            assert "ai_score" in col_ids, f"每区分区表须含 ai_score 列, 实际 {col_ids}"
+            assert "ai_score" in col_ids, f"分区表须含 ai_score 列, section={section} 实际 {col_ids}"
+            assert rows, f"section={section} 的表格应有行"
             # 每行 ai_score 为格式化后的数值字符串 (非空), 而非 "-"
             assert all(r.get("ai_score") not in (None, "-") for r in rows), rows
 
@@ -3468,6 +3588,25 @@ class TestPaginationControls:
         buttons = _get_buttons(env)
         icon_btns = [b for b in buttons if isinstance(b, ft.IconButton)]
         assert icon_btns[0].disabled is False
+
+    def test_page_info_includes_total_count(self, screener_view_env) -> None:
+        """MAJOR-06: 分页栏文案补「共 N 条」, N 取 state.total_items (过滤后结果总数, 界面可见)。
+
+        结果总数原先界面上无处可见 (分组标题只统计当前页), 本次在分页栏显式呈现全量条数。
+        """
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        env["mock_i18n"].get.side_effect = lambda key, *a, **kw: (
+            "第 {current} 页 / 共 {total} 页（共 {count} 条）" if key == "screener_page_info" else f"i18n[{key}]"
+        )
+
+        fake_vm._set_state(page_no=1, total_pages=3, total_items=120, strategies_loaded=True)
+        _rerender(env)
+
+        texts = [
+            c.value for c in _walk_all_controls(env["result"]) if isinstance(c, ft.Text) and isinstance(c.value, str)
+        ]
+        assert "第 1 页 / 共 3 页（共 120 条）" in texts, f"分页栏须展示全量总数, 实际文本 {texts}"
 
     def test_export_disabled_when_no_data(self, screener_view_env) -> None:
         """UX-04: 全量结果为空 (has_export_data=False) → export button disabled."""
