@@ -171,10 +171,10 @@ async def test_wizard_db_validation_success(wizard_page):
 
     db_title = I18n.get("wizard_db_title")
     # [PITFALL FIX] 前一个用例 test_wizard_db_validation_failure 可能将向导留在 DB 步骤，
-    # 导致"开始使用"按钮不存在。先检查是否已在 DB 步骤，若在则跳过导航点击。
-    try:
-        await wizard_page.expect_text(db_title, timeout_ms=2000)
-    except Exception:  # noqa: BLE001
+    # 导致"开始使用"按钮不存在。确定性判定：若当前已在 DB 步骤则跳过导航点击。
+    # accept_risk_disclaimer 为幂等「确保已勾选」（先读态再决定是否点击），
+    # 故可安全无条件调用，无需 try/except 兜底。
+    if not await wizard_page.has_text(db_title):
         btn_start = I18n.get("wizard_btn_start")
         await WizardPage(wizard_page).accept_risk_disclaimer()
         await wizard_page.click_button(btn_start)
