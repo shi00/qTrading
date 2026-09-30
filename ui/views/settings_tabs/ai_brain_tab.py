@@ -831,6 +831,8 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                     on_cancel=_do_cancel_reset_ai_prompt,
                     confirm_text=I18n.get("common_confirm"),
                     cancel_text=I18n.get("common_cancel"),
+                    # 重置 AI 提示词会覆盖用户自定义内容 → 危险色 (MINOR-05)
+                    destructive=True,
                 ),
                 ConfirmDialog(
                     open_state=reset_news_dialog_open,
@@ -840,6 +842,8 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                     on_cancel=_do_cancel_reset_news_prompt,
                     confirm_text=I18n.get("common_confirm"),
                     cancel_text=I18n.get("common_cancel"),
+                    # 重置新闻提示词会覆盖用户自定义内容 → 危险色 (MINOR-05)
+                    destructive=True,
                 ),
             ],
             spacing=15,

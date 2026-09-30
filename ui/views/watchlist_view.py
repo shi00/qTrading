@@ -329,6 +329,8 @@ def WatchlistView(
                     on_cancel=_do_cancel_remove,
                     confirm_text=I18n.get("common_confirm"),
                     cancel_text=I18n.get("common_cancel"),
+                    # 移除自选为不可逆删除操作 → 危险色 (MINOR-05)
+                    destructive=True,
                 ),
                 WatchlistAddDialog(
                     open_state=add_dialog_open,
