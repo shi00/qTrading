@@ -1054,7 +1054,7 @@ class TestDat06AnnDateNotNullPredicates:
 
 
 class TestFinancialDaoGetLatestFinancialsBulk:
-    """UX-09 MAJOR-04: 详情财务区按 ts_code 批量取最新报告期（DAT-05 修订版本语义）。"""
+    """UX-09 MAJOR-04: 详情财务区按 ts_code 批量取最新报告期（同报告期多版本按公告日取最新）。"""
 
     @pytest.mark.asyncio
     async def test_empty_codes_returns_empty_df(self):
