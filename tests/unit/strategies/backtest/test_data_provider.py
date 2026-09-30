@@ -1448,3 +1448,172 @@ class TestR9SanitizationGuard:
         error_msg = table_status["northbound_data"].get("error", "")
         assert self._SECRET_PASSWORD not in error_msg
         assert "***" in error_msg
+
+
+class TestBacktestDelistingAsOfApproximation:
+    """R24 当期近似：BacktestDataProvider.delisting_flag_seen 的检测与重置语义。
+
+    覆盖 ``_build_historical_screening_context`` 的逐日退市标记检测（区间预载与
+    逐日降级两条路径的公共入口）与 ``preload_range`` 的重置语义。flag 为 True 时由
+    engine 在回测结果中标注「退市排除口径为当期近似（name-history 缺覆盖时可能前视）」
+    （R24「显式声明并在结果中标注」），仅在近似实际生效时置位，避免无差别噪音。
+    """
+
+    # 辅助表 (cache 属性名, 方法名)，daily 与 range 两种后缀共用
+    _AUX = (
+        ("quote_dao", "get_northbound"),
+        ("market_dao", "get_moneyflow_hsgt"),
+        ("quote_dao", "get_moneyflow"),
+        ("quote_dao", "get_top_list"),
+        ("quote_dao", "get_block_trade"),
+    )
+
+    def _make_daily_cache(self, screening_data: pd.DataFrame) -> MagicMock:
+        cache = MagicMock()
+        cache.screener_dao.get_screening_data = AsyncMock(return_value=screening_data)
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        for dao_name, method in self._AUX:
+            setattr(getattr(cache, dao_name), method, AsyncMock(return_value=pd.DataFrame()))
+        return cache
+
+    def _make_range_cache(self, range_df: pd.DataFrame) -> MagicMock:
+        cache = MagicMock()
+        cache.stock_dao.count_expected_rows = AsyncMock(return_value=100)
+        cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=range_df)
+        for dao_name, method in self._AUX:
+            setattr(getattr(cache, dao_name), f"{method}_range", AsyncMock(return_value=pd.DataFrame()))
+        return cache
+
+    @pytest.mark.asyncio
+    async def test_flag_set_when_flagged_stock_in_screening_data(self) -> None:
+        """票池内存在 is_delisting=True 标的时置位（daily 路径）。"""
+        cache = self._make_daily_cache(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": ["20240102", "20240102"],
+                    "close": [10.0, 20.0],
+                    "is_tradable": [True, True],
+                    "is_delisting": [False, True],
+                }
+            )
+        )
+        provider = BacktestDataProvider(cache)
+        assert provider.delisting_flag_seen is False
+
+        await provider.build_context(date(2024, 1, 2))
+
+        assert provider.delisting_flag_seen is True
+
+    @pytest.mark.asyncio
+    async def test_flag_false_when_no_flagged_stock(self) -> None:
+        """全部为非退市整理（is_delisting 全 False）时不置位。"""
+        cache = self._make_daily_cache(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "close": [10.0],
+                    "is_tradable": [True],
+                    "is_delisting": [False],
+                }
+            )
+        )
+        provider = BacktestDataProvider(cache)
+
+        await provider.build_context(date(2024, 1, 2))
+
+        assert provider.delisting_flag_seen is False
+
+    @pytest.mark.asyncio
+    async def test_flag_false_when_is_delisting_missing(self) -> None:
+        """票池无 is_delisting 列（未启用退市排除口径）时不置位。"""
+        cache = self._make_daily_cache(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "close": [10.0],
+                    "is_tradable": [True],
+                }
+            )
+        )
+        provider = BacktestDataProvider(cache)
+
+        await provider.build_context(date(2024, 1, 2))
+
+        assert provider.delisting_flag_seen is False
+
+    @pytest.mark.asyncio
+    async def test_flag_handles_na_values(self) -> None:
+        """is_delisting 含 NA（未知）时按 False 处理，不误置位（R21 缺失不伪装）。"""
+        cache = self._make_daily_cache(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "close": [10.0],
+                    "is_tradable": [True],
+                    "is_delisting": [None],
+                }
+            )
+        )
+        provider = BacktestDataProvider(cache)
+
+        await provider.build_context(date(2024, 1, 2))
+
+        assert provider.delisting_flag_seen is False
+
+    @pytest.mark.asyncio
+    async def test_flag_set_for_suspended_flagged_stock(self) -> None:
+        """在 is_tradable 过滤前检测：停牌但被标记退市的标的仍应置位（口径已生效）。"""
+        cache = self._make_daily_cache(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "close": [10.0],
+                    "is_tradable": [False],
+                    "is_delisting": [True],
+                }
+            )
+        )
+        provider = BacktestDataProvider(cache)
+
+        await provider.build_context(date(2024, 1, 2))
+
+        assert provider.delisting_flag_seen is True
+
+    @pytest.mark.asyncio
+    async def test_preload_range_resets_flag(self) -> None:
+        """preload_range 起始重置 flag，避免跨多次回测残留旧状态。"""
+        cache = self._make_range_cache(pd.DataFrame())
+        provider = BacktestDataProvider(cache)
+        provider._saw_delisting_flagged = True
+
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+        assert provider.delisting_flag_seen is False
+
+    @pytest.mark.asyncio
+    async def test_preload_then_build_context_detects_flagged_stock(self) -> None:
+        """区间预载路径：预载时初始为 False，逐日 build_context 切片出退市标记标的时置位。"""
+        cache = self._make_range_cache(
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": ["20240102", "20240102"],
+                    "close": [10.0, 20.0],
+                    "is_tradable": [True, True],
+                    "is_delisting": [False, True],
+                }
+            )
+        )
+        provider = BacktestDataProvider(cache)
+
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+        assert provider.delisting_flag_seen is False
+
+        await provider.build_context(date(2024, 1, 2))
+
+        assert provider.delisting_flag_seen is True

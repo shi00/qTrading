@@ -215,6 +215,27 @@ class VectorBacktestEngine:
                 )
             )
 
+        # R24 当期近似（报告模式）：本回测票池内出现退市整理期标记标的时，退市排除口径
+        # （screener_dao._delisting_flag_expr）以**当前**名称/delist_date 快照参与历史区间
+        # 计算，name-history 缺覆盖时可能前视/幸存者偏差。按 R24「显式声明并在结果中标注」，
+        # 在回测结果中显式标注该口径近似（category=asof_approximation，不升级可信度级别，
+        # VM 经 caveat 通道呈现；全程无退市标记标的时不产生噪音）。
+        if self.data_provider.delisting_flag_seen:
+            all_warnings.append(
+                DataWarning(
+                    warning_type="delisting_asof_approximation",
+                    start_date=str(trade_dates[0]),
+                    end_date=str(trade_dates[-1]),
+                    affected_stock_count=0,
+                    error_message=(
+                        "退市整理期排除口径为「当期近似」（R24）：区间回放的 is_delisting "
+                        "以当前名称/当前 delist_date 快照参与历史计算，name-history 缺覆盖时该 "
+                        "标的可能在全部历史日期被判退市整理而整体移出票池，可能造成前视/幸存者偏差。"
+                    ),
+                    category=WarningCategory.ASOF_APPROXIMATION,
+                )
+            )
+
         # D5-M2: 净值归零（爆仓）检测——不是数值噪声，必须让爆仓在 UI 可见。
         # daily_returns 已把爆仓日转为 null（无定义）供 drop_nulls 剔除，此处显式追加
         # DataWarning 进入 unreliable 判定，避免波动率低估/夏普被高估被静默掩盖。

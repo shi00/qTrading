@@ -14,7 +14,7 @@ import pytest
 
 from data.constants import DEFAULT_BENCHMARK_INDEX
 from services.task_manager import TaskManager
-from strategies.backtest.config import BacktestConfig
+from strategies.backtest.config import BacktestConfig, DataWarning
 from ui.viewmodels import Message
 from ui.viewmodels.backtest_view_model import (
     BacktestState,
@@ -521,6 +521,47 @@ class TestBacktestViewModelRunBacktest:
         vm = await self._exec_backtest_with_strategy(MagicMock(supports_ai=True), result=result)
 
         assert vm.state.caveats == ()
+
+    @pytest.mark.asyncio
+    async def test_delisting_asof_approximation_emits_caveat_without_level_upgrade(self):
+        """R24: 结果标注退市排除口径当期近似 → caveat 呈现，且不升级可信度级别。"""
+        result = self._result_with(
+            data_warnings=(
+                DataWarning(
+                    warning_type="delisting_asof_approximation",
+                    start_date="2024-01-01",
+                    end_date="2024-12-31",
+                    affected_stock_count=0,
+                    error_message="口径近似",
+                ),
+            )
+        )
+        vm = await self._exec_backtest_with_strategy(MagicMock(supports_ai=False), result=result)
+
+        assert vm.state.caveats == (Message("backtest_caveat_delisting_asof_approximation"),)
+        # 方法学声明不计入可信度分级，也不产生 data_quality/performance_path 提示。
+        assert vm.state.credibility_level == "ok"
+        assert vm.state.warnings == ()
+
+    @pytest.mark.asyncio
+    async def test_delisting_asof_approximation_legacy_str_emits_caveat(self):
+        """R24: 持久化 round-trip 的 '[delisting_asof_approximation] ...' 字符串同样在结果中标注。"""
+        result = self._result_with(data_warnings=("[delisting_asof_approximation] 2024-01-01-2024-12-31: 口径近似",))
+        vm = await self._exec_backtest_with_strategy(MagicMock(supports_ai=False), result=result)
+
+        assert vm.state.caveats == (Message("backtest_caveat_delisting_asof_approximation"),)
+        assert vm.state.credibility_level == "ok"
+
+    @pytest.mark.asyncio
+    async def test_ai_disabled_and_delisting_approximation_both_caveats(self):
+        """R24 + BIZ-04: 两类 caveat 叠加呈现（AI 能力边界 + 退市口径近似）。"""
+        result = self._result_with(data_warnings=("[delisting_asof_approximation] 2024-01-01: x",))
+        vm = await self._exec_backtest_with_strategy(MagicMock(supports_ai=True), result=result)
+
+        assert vm.state.caveats == (
+            Message("backtest_caveat_ai_disabled"),
+            Message("backtest_caveat_delisting_asof_approximation"),
+        )
 
     @pytest.mark.asyncio
     async def test_caveats_reset_on_next_run_start(self):

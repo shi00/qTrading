@@ -409,6 +409,17 @@ class TestWarningCategory:
         """结构化 DataWarning → 直接用 .category 字段。"""
         assert WarningCategory.category_of(_dw("portfolio_wiped_out", category="termination")) == "termination"
 
+    def test_delisting_asof_approximation_category_and_legacy_prefix(self) -> None:
+        """R24: 当期近似 warning_type → asof_approximation（方法学声明，不升级级别）。
+
+        兼容结构化 DataWarning 与经持久化 round-trip 的 '[delisting_asof_approximation] ...' 字符串。
+        """
+        assert _dw("delisting_asof_approximation").category == "asof_approximation"
+        assert (
+            WarningCategory.category_of("[delisting_asof_approximation] 2024-01-01-2024-12-31: 口径近似")
+            == "asof_approximation"
+        )
+
     def test_to_persist_serializes_datawarning_as_str(self) -> None:
         """to_persist_dict 对 DataWarning 统一按 str(w) 落库，保留 [type] 前缀。"""
         result = _make_result(data_warnings=(_dw("suspend_data_absent"),))

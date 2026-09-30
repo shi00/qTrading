@@ -20,7 +20,7 @@ from data.constants import DEFAULT_BENCHMARK_INDEX
 from data.cache.cache_manager import CacheManager
 from services.backtest_service import BacktestService
 from services.task_manager import TaskManager
-from strategies.backtest.config import BacktestConfig, BacktestResult, WarningCategory
+from strategies.backtest.config import BacktestConfig, BacktestResult, DataWarning, WarningCategory
 from strategies.base_strategy import get_strategy_registry
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -181,6 +181,8 @@ def _assess_credibility(
     - system（如持久化失败）→ 不升级级别，仅产出提示（结果正确性未受影响，
       但用户须知晓本次结果未落库）。
     - performance_path / 无 category 的历史旧撮合噪音 → 不升级级别，仅统计入提示。
+    - asof_approximation（R24 当期近似）→ 不计入可信度分级，由 caveats 通道单独
+      标注「退市排除口径为当期近似，name-history 缺覆盖时可能前视」。
     - empty_signal_days > 0 → 次级提示，不独立驱动 degraded（决策⑦）。
 
     Returns:
@@ -194,6 +196,9 @@ def _assess_credibility(
     # （含 fail-closed 白名单）；结果为 None（旧撮合噪音）视为非 unreliable。
     for w in result.data_warnings:
         cat = WarningCategory.category_of(w)
+        # R24 当期近似属方法学声明，经 caveats 通道单独呈现，不计入可信度分级。
+        if cat == WarningCategory.ASOF_APPROXIMATION:
+            continue
         if cat is not None:
             cat_counts[cat] += 1
 
@@ -228,6 +233,27 @@ def _assess_credibility(
         msgs.append(Message("backtest_warn_empty_signal_days", {"count": int(empty_days)}))
 
     return level, tuple(msgs), len(result.skipped_orders), len(result.failed_signal_dates)
+
+
+# R24 当期近似的告警类型（与 strategies.backtest.config.DataWarning.warning_type 一致）。
+_DELISTING_ASOF_WARNING_TYPE = "delisting_asof_approximation"
+
+
+def _has_delisting_asof_approximation(data_warnings: Sequence[str | DataWarning]) -> bool:
+    """R24：判定回测结果是否标注了退市排除口径的「当期近似」。
+
+    兼容结构化 ``DataWarning``（引擎实时产出）与经持久化 round-trip 的无类型字符串
+    ``"[delisting_asof_approximation] ..."``（``DataWarning.__str__`` 前缀），二者等价。
+    命中时 VM 以 caveat 通道在结果区显式标注该口径近似（不升级可信度级别）。
+    """
+    prefix = f"[{_DELISTING_ASOF_WARNING_TYPE}]"
+    for w in data_warnings or ():
+        if isinstance(w, DataWarning):
+            if w.warning_type == _DELISTING_ASOF_WARNING_TYPE:
+                return True
+        elif isinstance(w, str) and w.startswith(prefix):
+            return True
+    return False
 
 
 def _extract_failed_details(result: BacktestResult) -> tuple[tuple[str, str], ...]:
@@ -596,8 +622,15 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                 # 禁用 AI (config.disable_ai) 时, 结果不含 AI 分析环节, 显式声明能力边界,
                 # 避免「回测证明了 AI 有效」的误读 (01-requirement-closure §2.4)。
                 caveats: tuple[Message, ...] = ()
+                caveat_msgs: list[Message] = []
                 if strategy_uses_ai and result.config.disable_ai:
-                    caveats = (Message("backtest_caveat_ai_disabled"),)
+                    caveat_msgs.append(Message("backtest_caveat_ai_disabled"))
+                # R24 当期近似: 退市排除口径（is_delisting）在区间回放以当前名称/delist_date
+                # 快照参与历史计算，name-history 缺覆盖时可能前视。引擎在票池内出现退市标记
+                # 标的时产出 delisting_asof_approximation 告警，此处显式在结果中标注该口径近似。
+                if _has_delisting_asof_approximation(result.data_warnings):
+                    caveat_msgs.append(Message("backtest_caveat_delisting_asof_approximation"))
+                caveats = tuple(caveat_msgs)
 
                 # 成功终态: is_running=False + progress=1.0 + 拆解后渲染字段 (D11)
                 self._set_state(

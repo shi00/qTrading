@@ -112,15 +112,33 @@ class BacktestDataProvider:
         # D3-M4: 本次回测区间预载的降级警告（区间超限 / 范围预载失败 / 护栏超限），
         # 由 engine 在组装 BacktestResult.data_warnings 时并入，让「走了慢路径」在 UI 可见。
         self._range_preload_warnings: list[str] = []
+        # R24 当期近似：回测票池的退市整理期排除口径（is_delisting，见
+        # screener_dao._delisting_flag_expr）在区间回放时以**当前**名称/delist_date 快照
+        # 参与历史计算，name-history 缺覆盖时可能前视。此处记录本次回测是否在票池内实际
+        # 出现过退市标记标的（任一 signal_date 的 screening_data 存在 is_delisting=True）：
+        # 仅在近似「已生效」时由 engine 产出 delisting_asof_approximation 告警并在结果中
+        # 标注（R24「显式声明并在结果中标注」）。
+        self._saw_delisting_flagged = False
 
     @property
     def range_preload_warnings(self) -> list[str]:
         """本次回测区间预载的降级警告（D3-M4），供 engine 并入 BacktestResult.data_warnings。"""
         return self._range_preload_warnings
 
+    @property
+    def delisting_flag_seen(self) -> bool:
+        """本次回测票池内是否实际出现过退市整理期标记标的（R24 当期近似是否生效）。
+
+        为 True 时 engine 产出 ``delisting_asof_approximation`` 告警，让「退市排除口径为
+        当期近似（可能前视）」在回测结果中可见；全程无退市标记标的时为 False，不产生噪音。
+        """
+        return self._saw_delisting_flagged
+
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def preload_range(self, start_date: date, end_date: date):
         """一次性预取整个回测区间的各类数据到内存中，提升回测速度"""
+        # R24：每次回测（区间预载入口）重置退市标记观测，避免跨多次运行残留旧状态。
+        self._saw_delisting_flagged = False
         # 兼容处理输入参数类型并转为 date 对象
         from datetime import datetime
 
@@ -401,6 +419,19 @@ class BacktestDataProvider:
             screening_data = preloaded["screening_data"].get(trade_date_str, pd.DataFrame())
         else:
             screening_data = await self._get_screening_data(trade_date_str)
+
+        # R24 当期近似：票池内出现退市整理期标记标的（is_delisting=True）时置位，供 engine
+        # 在回测结果中标注「退市排除口径为当期近似，name-history 缺覆盖时可能前视」。
+        # 在 is_tradable 过滤**之前**检测——退市标记由 SQL 层按 as_of 口径对当日票池全量计算
+        # （无论标的是否停牌），故应在原始票池上判定口径是否生效；逐日检测（区间预载与逐日
+        # 降级两条路径均经本方法），仅在近似实际生效时告警。
+        if (
+            screening_data is not None
+            and not screening_data.empty
+            and "is_delisting" in screening_data.columns
+            and bool(screening_data["is_delisting"].astype("boolean").fillna(False).any())
+        ):
+            self._saw_delisting_flagged = True
 
         if screening_data is not None and not screening_data.empty and "is_tradable" in screening_data.columns:
             suspended_count = int((~screening_data["is_tradable"]).sum())
