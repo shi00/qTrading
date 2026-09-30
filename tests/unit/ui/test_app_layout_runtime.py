@@ -16,7 +16,7 @@ Phase 10.2: ViewportState/resize 重渲染链删除 — _setup_resize/_cleanup_r
 
 import asyncio
 import inspect
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import flet as ft
@@ -83,6 +83,7 @@ def _make_fake_page() -> FakePage:
     """
     page = FakePage()
     page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+    page.schedule_update = MagicMock()  # type: ignore[method-assign]
     page.pubsub = MagicMock()  # type: ignore[method-assign]
     page.pubsub.subscribe_topic = MagicMock()  # type: ignore[method-assign]
     page.pubsub.unsubscribe_topic = MagicMock()  # type: ignore[method-assign]
@@ -144,21 +145,32 @@ def app_layout_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
 def _get_nav_rail(env: dict) -> ft.NavigationRail:
     """从渲染树提取 NavigationRail (root.content.controls[0].content.controls[0]).
 
-    SEC-03 状态栏起, 根布局为 Container > Stack[
-      Row([nav_rail, VerticalDivider, body]), 状态栏 overlay
-    ] (底部状态栏改为 Stack overlay 不占布局净高, 见 app_layout.py 注释)。
+    MINOR-10 起, 根布局为 Container > Column[
+      Container(Row([nav_rail, VerticalDivider, body])), 状态栏
+    ] (状态栏由 Stack overlay 改为 Column 真实布局行, 见 app_layout.py 注释)。
     """
     result = env["result"]
     assert isinstance(result, ft.Container)
-    stack = result.content
-    assert isinstance(stack, ft.Stack)
-    body_region = stack.controls[0]  # Container(content=Row)
+    column = result.content
+    assert isinstance(column, ft.Column)
+    body_region = column.controls[0]  # Container(content=Row)
     assert isinstance(body_region, ft.Container)
     row = body_region.content
     assert isinstance(row, ft.Row)
     nav_rail = row.controls[0]
     assert isinstance(nav_rail, ft.NavigationRail)
     return nav_rail
+
+
+def _get_status_bar(env: dict) -> ft.Container:
+    """从渲染树提取底部状态栏 (root.content.controls[1], Column 第二行)。"""
+    result = env["result"]
+    assert isinstance(result, ft.Container)
+    column = result.content
+    assert isinstance(column, ft.Column)
+    status_bar = column.controls[1]
+    assert isinstance(status_bar, ft.Container)
+    return status_bar
 
 
 def _get_collapse_btn(env: dict) -> ft.IconButton:
@@ -271,7 +283,7 @@ class TestDoTabSwitch:
         _rerender(env)
         nav_rail = _get_nav_rail(env)
         assert nav_rail.selected_index == 2, "set_current_tab(2) 后 selected_index 应为 2"
-        env["mod"].UILogger.log_action.assert_called_with("AppLayout", "Navigate", "tab=backtest")
+        env["mod"].UILogger.log_action.assert_called_with("AppLayout", "Navigate", "tab=screener")
 
     def test_cancelled_error_propagates(self, app_layout_env) -> None:
         """R2: CancelledError 必须传播, 不被吞没."""
@@ -461,7 +473,7 @@ class TestOnNavigate:
         page = env["page"]
         page.run_task.reset_mock()
 
-        # current_tab 默认 MARKET (0), 导航到 SCREENER (1)
+        # current_tab 默认 MARKET (0), 导航到 SCREENER (2, MINOR-10 顺序)
         handler(env["mod"].TOPIC_NAVIGATE, "screener")
         run_task_calls = page.run_task.call_args_list
         assert len(run_task_calls) >= 1, "合法导航应调用 run_task"
@@ -469,7 +481,7 @@ class TestOnNavigate:
         handler_fn = call.args[0]
         args = call.args[1:]
         assert inspect.iscoroutinefunction(handler_fn), "handler 必须为协程函数"
-        assert args == (1,), f"应传 target_tab=1 (SCREENER), 实际 args={args}"
+        assert args == (2,), f"应传 target_tab=2 (SCREENER), 实际 args={args}"
 
     def test_unknown_target_keyerror_logged(self, app_layout_env) -> None:
         """非法 tab 名 → KeyError 捕获 + logger.warning, 不调 run_task."""
@@ -617,9 +629,9 @@ class TestOnNavigateDeepLink:
         """
         result = render_once(env["component"])
         env["result"] = result
-        # Container > Stack[ Row([nav_rail, VerticalDivider, body]), 状态栏 overlay ]
-        stack = result.content
-        body_region = stack.controls[0]
+        # Container > Column[ Container(Row([nav_rail, VerticalDivider, body])), 状态栏 ]
+        column = result.content
+        body_region = column.controls[0]
         main_row = body_region.content
         body = main_row.controls[2]
         stack_component = body.content
@@ -798,3 +810,112 @@ class TestBuildNavDestinationsWithBadge:
         destinations = _build_nav_destinations(running_count=0)
         for dest in destinations:
             assert not isinstance(dest.icon, ft.Stack), "running_count=0 时不应有角标"
+
+
+# ============================================================================
+# MINOR-10: 键盘快捷键 (Ctrl+1..7 切页 / Ctrl+F 聚焦导航栏)
+# ============================================================================
+
+
+def _make_key_event(
+    key: str,
+    *,
+    ctrl: bool = False,
+    shift: bool = False,
+    alt: bool = False,
+    meta: bool = False,
+) -> ft.KeyboardEvent:
+    """构造 ft.KeyboardEvent (name, control, key, shift, ctrl, alt, meta)。"""
+    return ft.KeyboardEvent("keydown", cast(Any, None), key, shift, ctrl, alt, meta)
+
+
+class TestKeyboardShortcutInstallation:
+    """DoD: 挂载安装 page.on_keyboard_event, 卸载清除。"""
+
+    def test_mount_installs_handler(self, app_layout_env) -> None:
+        """挂载 effect 安装 page.on_keyboard_event 并同步到客户端。"""
+        page = app_layout_env["page"]
+        assert page.on_keyboard_event.__name__ == "_on_keyboard", "挂载后应安装 _on_keyboard 回调"
+        page.schedule_update.assert_called_once_with()
+
+    def test_unmount_clears_handler(self, app_layout_env) -> None:
+        """卸载 cleanup 清除 page.on_keyboard_event。"""
+        env = app_layout_env
+        run_unmount_effects(env["component"])
+        assert env["page"].on_keyboard_event is None, "卸载后应清除键盘回调"
+
+
+class TestKeyboardTabShortcut:
+    """DoD: 切页快捷键真实生效 (改变当前页)。"""
+
+    def test_ctrl_digit_switches_tab(self, app_layout_env) -> None:
+        """Ctrl+4 (回测) → run_task(_do_tab_switch, 4) → rerender 后 selected_index 变化。"""
+        env = app_layout_env
+        page = env["page"]
+        page.run_task.reset_mock()
+
+        on_keyboard = page.on_keyboard_event
+        on_keyboard(_make_key_event("4", ctrl=True))
+
+        handler, args, _ = _await_run_task_handler(page)
+        assert inspect.iscoroutinefunction(handler), "handler 必须为协程函数"
+        assert args == (int(env["mod"].NavTabs.BACKTEST),), f"应切到 BACKTEST, 实际 {args}"
+
+        asyncio.run(handler(*args))
+        _rerender(env)
+        nav_rail = _get_nav_rail(env)
+        assert nav_rail.selected_index == int(env["mod"].NavTabs.BACKTEST), "快捷键应切换当前页"
+
+    def test_non_shortcut_key_does_not_schedule(self, app_layout_env) -> None:
+        """非快捷键按键不触发 run_task。"""
+        env = app_layout_env
+        page = env["page"]
+        page.run_task.reset_mock()
+
+        on_keyboard = page.on_keyboard_event
+        on_keyboard(_make_key_event("A"))
+        on_keyboard(_make_key_event("1"))  # 无 Ctrl
+        assert not page.run_task.called, "非快捷键不应调度任务"
+
+
+class TestKeyboardFocusShortcut:
+    """Ctrl+F 聚焦导航栏切换按钮。"""
+
+    def test_ctrl_f_focuses_nav_toggle(self, app_layout_env) -> None:
+        """Ctrl+F → log_action(Shortcut, focus_nav) + run_task(最新导航栏切换按钮.focus)。"""
+        env = app_layout_env
+        page = env["page"]
+        page.run_task.reset_mock()
+        env["mod"].UILogger.log_action.reset_mock()
+        collapse_btn = _get_collapse_btn(env)
+
+        on_keyboard = page.on_keyboard_event
+        on_keyboard(_make_key_event("F", ctrl=True))
+
+        env["mod"].UILogger.log_action.assert_called_once_with("AppLayout", "Shortcut", "focus_nav")
+        page.run_task.assert_called_once_with(collapse_btn.focus)
+
+
+class TestStatusBarLayout:
+    """DoD: 状态栏为 Column 真实布局行 (不再 Stack overlay 遮挡 body 底部)。"""
+
+    def test_root_is_column_not_stack_overlay(self, app_layout_env) -> None:
+        """根布局为 Column (非 Stack overlay), 状态栏为第二行且无 overlay 定位。"""
+        env = app_layout_env
+        result = env["result"]
+        assert isinstance(result, ft.Container)
+        column = result.content
+        assert isinstance(column, ft.Column), "根布局应为 Column (真实布局行), 非 Stack overlay"
+        assert column.expand is True
+        assert len(column.controls) == 2, "Column 应有 body 区与状态栏两行"
+        # 根 Column 必须 STRETCH: 保证 body 区 / 状态栏撑满宽度 (Flet 默认 START
+        # 仅给子控件固有宽度); 结合两行 Column 布局, 状态栏不遮挡 body 底部内容。
+        assert column.horizontal_alignment == ft.CrossAxisAlignment.STRETCH
+
+        body_region = column.controls[0]
+        assert isinstance(body_region, ft.Container)
+        assert body_region.expand is True, "body 区应 expand 占满剩余高度"
+
+        status_bar = _get_status_bar(env)
+        assert status_bar.top is None and status_bar.left is None
+        assert status_bar.right is None and status_bar.bottom is None

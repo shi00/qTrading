@@ -20,6 +20,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from enum import IntEnum
+from typing import Any
 
 import flet as ft
 
@@ -54,25 +55,27 @@ DEBOUNCE_MS = 50
 
 
 class NavTabs(IntEnum):
+    # MINOR-10: 导航顺序调整为「行情 / 自选 / 选股 / 回测 / 任务 / 数据 / 设置」
+    # (自选从末位提到行情之后, 与 _build_nav_destinations 的 nav_items 顺序一致)
     MARKET = 0
-    SCREENER = 1
-    BACKTEST = 2
-    DATA = 3
+    WATCHLIST = 1
+    SCREENER = 2
+    BACKTEST = 3
     TASKS = 4
-    SETTINGS = 5
-    WATCHLIST = 6
+    DATA = 5
+    SETTINGS = 6
 
 
 # nav i18n key → EIDS.NAV.{role} 映射 (PR-4 Task 4.0/4.1: nav label anchor 化)
-# 与 _build_nav_destinations 的 nav_items 顺序对齐
+# 与 _build_nav_destinations 的 nav_items 顺序对齐 (MINOR-10 顺序)
 _NAV_EIDS: dict[str, Eid] = {
     "nav_market": EIDS.NAV.MARKET,
+    "nav_watchlist": EIDS.NAV.WATCHLIST,
     "nav_screener": EIDS.NAV.SCREENER,
     "nav_backtest": EIDS.NAV.BACKTEST,
-    "nav_data": EIDS.NAV.DATA,
     "nav_tasks": EIDS.NAV.TASKS,
+    "nav_data": EIDS.NAV.DATA,
     "nav_settings": EIDS.NAV.SETTINGS,
-    "nav_watchlist": EIDS.NAV.WATCHLIST,
 }
 
 
@@ -99,6 +102,63 @@ def _parse_navigate_message(message: str) -> tuple[str, str | None]:
     if not parts[0] or len(parts) > 2 or (len(parts) == 2 and not parts[1]):
         return ("", None)
     return (parts[0], parts[1].lower() if len(parts) == 2 else None)
+
+
+# ============================================================================
+# 键盘快捷键 (MINOR-10): 纯函数解析 + shell 级动作标识
+# ============================================================================
+
+# 快捷键动作标识 (由 _resolve_shortcut 产出, AppLayout 内 _dispatch_shortcut 消费)
+SHORTCUT_TAB_PREFIX = "tab:"  # "tab:<n>": 切换到导航栏第 n 项 (1-based)
+SHORTCUT_FOCUS_NAV = "focus_nav"  # 聚焦导航栏切换按钮
+
+
+def _normalize_shortcut_key(key: str | None) -> str:
+    """归一化按键标签, 容忍跨平台键名变体 (纯函数)。
+
+    Flet ``KeyboardEvent.key`` 为可读键名 (如 ``"1"`` / ``"A"`` / ``"F5"``);
+    归一化 ``"Digit1"`` / ``"Numpad1"`` → ``"1"``, ``"KeyA"`` → ``"A"``,
+    其余字母统一大写, 便于匹配。
+    """
+    if not key:
+        return ""
+    stripped = key.strip()
+    if not stripped:
+        return ""
+    for prefix in ("Digit", "Numpad"):
+        if stripped.startswith(prefix) and stripped[len(prefix) :].isdigit():
+            return stripped[len(prefix) :]
+    if stripped.startswith("Key") and len(stripped) == 4:
+        return stripped[3:].upper()
+    return stripped.upper() if len(stripped) == 1 else stripped
+
+
+def _resolve_shortcut(event: ft.KeyboardEvent) -> str | None:
+    """将键盘事件解析为 shell 级快捷键动作, 无匹配返回 ``None`` (纯函数)。
+
+    支持的快捷键 (与 Flet ``Page.on_keyboard_event`` / ``KeyboardEvent`` 对齐):
+
+    - ``Ctrl+1`` ~ ``Ctrl+7`` → ``"tab:<index>"`` (index 0-based): 按导航栏顺序
+      切换页面 (Ctrl+1=行情 / 2=自选 / 3=选股 / 4=回测 / 5=任务 / 6=数据 / 7=设置)
+    - ``Ctrl+F`` → ``"focus_nav"``: 聚焦导航栏切换按钮 (键盘可达入口)
+
+    仅响应 Ctrl 组合键; 参与 Alt / Meta / Shift 的组合一律忽略, 避免与
+    系统 / 输入法 / 浏览器级快捷键冲突。
+    """
+    if not event.ctrl or event.alt or event.meta or event.shift:
+        return None
+    key = _normalize_shortcut_key(event.key)
+    if not key:
+        return None
+    if len(key) == 1 and key.isdigit():
+        position = int(key)
+        if 1 <= position <= len(NavTabs):
+            # position 为 1-based 导航序号; 动作携带 0-based 索引 (= NavigationRail selected_index)
+            return f"{SHORTCUT_TAB_PREFIX}{position - 1}"
+        return None
+    if key == "F":
+        return SHORTCUT_FOCUS_NAV
+    return None
 
 
 @ft.component
@@ -222,12 +282,12 @@ def _build_nav_destinations(running_count: int = 0) -> list[ft.NavigationRailDes
     """
     nav_items = [
         (ft.Icons.DASHBOARD_OUTLINED, ft.Icons.DASHBOARD, "nav_market"),
+        (ft.Icons.STAR_OUTLINE, ft.Icons.STAR, "nav_watchlist"),
         (ft.Icons.FILTER_ALT_OUTLINED, ft.Icons.FILTER_ALT, "nav_screener"),
         (ft.Icons.ASSESSMENT_OUTLINED, ft.Icons.ASSESSMENT, "nav_backtest"),
-        (ft.Icons.STORAGE_OUTLINED, ft.Icons.STORAGE_ROUNDED, "nav_data"),
         (ft.Icons.FORMAT_LIST_BULLETED_OUTLINED, ft.Icons.FORMAT_LIST_BULLETED, "nav_tasks"),
+        (ft.Icons.STORAGE_OUTLINED, ft.Icons.STORAGE_ROUNDED, "nav_data"),
         (ft.Icons.SETTINGS_OUTLINED, ft.Icons.SETTINGS, "nav_settings"),
-        (ft.Icons.STAR_OUTLINE, ft.Icons.STAR, "nav_watchlist"),
     ]
     destinations: list[ft.NavigationRailDestination] = []
     for icon, selected_icon, label_key in nav_items:
@@ -347,6 +407,59 @@ def AppLayout() -> ft.Container:
     def _toggle_nav(e: ft.ControlEvent) -> None:
         set_nav_collapsed(not nav_collapsed)
 
+    # --- MINOR-10 键盘快捷键: Ctrl+1..7 切页 / Ctrl+F 聚焦导航栏 ---
+    # holder 持有「每渲染刷新的最新动作分派器」与「导航栏切换按钮」引用:
+    # use_effect(dependencies=[]) 只在挂载时执行一次, 其闭包捕获挂载时快照;
+    # 经 holder 每渲染刷新引用, 键盘回调始终派发到最新闭包 (避免 stale current_tab)。
+    shortcut_dispatch_holder: Any = ft.use_ref(None)
+    nav_toggle_holder: Any = ft.use_ref(None)
+
+    def _dispatch_shortcut(action: str) -> None:
+        """执行 shell 级快捷键动作 (每次渲染重建, 闭包捕获最新 state / 控件)。"""
+        page = _get_page()
+        if page is None:
+            return
+        if action.startswith(SHORTCUT_TAB_PREFIX):
+            target = int(action[len(SHORTCUT_TAB_PREFIX) :])
+            page.run_task(_do_tab_switch, target)
+        elif action == SHORTCUT_FOCUS_NAV:
+            toggle = nav_toggle_holder.current
+            if toggle is not None:
+                UILogger.log_action("AppLayout", "Shortcut", "focus_nav")
+                page.run_task(toggle.focus)
+
+    # 每渲染刷新分派器引用 (键盘回调经 holder 取最新闭包)
+    shortcut_dispatch_holder.current = _dispatch_shortcut
+
+    def _on_keyboard(e: ft.KeyboardEvent) -> None:
+        """Page 级键盘回调: 解析快捷键后派发到最新分派器。"""
+        action = _resolve_shortcut(e)
+        if action is None:
+            return
+        dispatch = shortcut_dispatch_holder.current
+        if dispatch is not None:
+            dispatch(action)
+
+    def _setup_keyboard() -> None:
+        page = _get_page()
+        if page is None:
+            return
+        page.on_keyboard_event = _on_keyboard
+        page.schedule_update()
+
+    def _cleanup_keyboard() -> None:
+        page = _get_page()
+        if page is not None:
+            page.on_keyboard_event = None
+            page.schedule_update()
+
+    ft.use_effect(_setup_keyboard, dependencies=[], cleanup=_cleanup_keyboard)
+
+    # NOTE(lazy): 「刷新」(F5/Ctrl+R) 快捷键未接线. ceiling: shell 层无「无破坏性全局
+    # 刷新」原语 —— 复用 cache_cleared 信号会误清空首页状态, 重挂载当前页会取消运行中的
+    # 回测 (BacktestViewModel.dispose → cancel_backtest). upgrade: 各子视图暴露统一 reload
+    # 命令后接线 (需改动 ui/views/**, 超出 MINOR-10 文件白名单).
+
     # --- PubSub 导航订阅 (P1-3 批次 2 #55): home_view ErrorState CTA 通过 TOPIC_NAVIGATE 广播 ---
 
     def _on_navigate(topic: str, message: str) -> None:
@@ -439,6 +552,8 @@ def AppLayout() -> ft.Container:
         tooltip=I18n.get("nav_toggle_collapse"),
         icon_size=AppStyles.FONT_SIZE_HEADLINE,
     )
+    # MINOR-10: 刷新导航栏切换按钮引用 (供键盘 Ctrl+F 聚焦最新实例)
+    nav_toggle_holder.current = collapse_btn
     brand_text = ft.Text(
         I18n.get("app_brand"),
         size=AppStyles.FONT_SIZE_LG,
@@ -508,9 +623,6 @@ def AppLayout() -> ft.Container:
         border=ft.Border(top=ft.BorderSide(1, AppColors.BORDER)),
     )
 
-    # SEC-03: 状态栏以底部 overlay 呈现, 不占用 body/结果表布局净高,
-    # 避免在最小视口 1280x720 下压缩结果表可用高度致 Flet 布局跳过子节点
-    # (详见 virtual_table NOTE(lazy), 回归 E2E: test_screener_1280x720_viewport_no_collapse).
     body_region = ft.Container(
         content=ft.Row(
             [nav_rail, ft.VerticalDivider(width=1), body],
@@ -518,19 +630,21 @@ def AppLayout() -> ft.Container:
         ),
         expand=True,
     )
-    status_bar_egress.left = 0
-    status_bar_egress.right = 0
-    status_bar_egress.bottom = 0
 
-    # 保留返回 ft.Container (签名契约不变), 内部以 Stack 承载:
-    # body_region 占满净高, 状态栏为底部 overlay 不占布局高度.
+    # MINOR-10: 状态栏由 Stack overlay 改为 Column 真实布局行 —— 状态栏占据自身
+    # 高度, body 区域自动让出底部空间, 任意视口 (含 1280x672) 下分页栏 / 结果表底部
+    # 均不会被状态栏遮挡 (原 overlay 方案会覆盖 body 底部约 29px)。
     return ft.Container(
-        content=ft.Stack(
+        content=ft.Column(
             [
                 body_region,
                 status_bar_egress,
             ],
+            spacing=0,
             expand=True,
+            # MINOR-10: STRETCH 保证两行均撑满宽度 (Flet Column 默认 START 只给
+            # 子控件固有宽度, 与 data_view.py 经验一致), 保持原 Stack 全宽表现。
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         ),
         expand=True,
     )

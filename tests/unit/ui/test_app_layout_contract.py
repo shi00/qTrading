@@ -19,6 +19,7 @@ Phase 10.2: ViewportState/resize 重渲染链删除 — TestViewportState 契约
 
 import contextlib
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import flet as ft
@@ -300,7 +301,7 @@ class TestBuildNavDestinations:
             yield
 
     def test_returns_seven_destinations(self):
-        """返回 7 个 NavigationRailDestination (market/screener/backtest/data/tasks/settings/watchlist)。"""
+        """返回 7 个 NavigationRailDestination (market/watchlist/screener/backtest/tasks/data/settings)。"""
         from ui.app_layout import _build_nav_destinations
 
         destinations = _build_nav_destinations()
@@ -321,12 +322,12 @@ class TestBuildNavDestinations:
         destinations = _build_nav_destinations()
         expected_keys = [
             "nav_market",
+            "nav_watchlist",
             "nav_screener",
             "nav_backtest",
-            "nav_data",
             "nav_tasks",
+            "nav_data",
             "nav_settings",
-            "nav_watchlist",
         ]
         for dest, key in zip(destinations, expected_keys, strict=True):
             # label 是 ft.Text 控件, 文本通过 .value 访问
@@ -358,7 +359,7 @@ class TestNavTabs:
     """NavTabs IntEnum 契约测试。"""
 
     def test_nav_tabs_has_seven_members(self):
-        """NavTabs 必须有 7 个成员 (MARKET/SCREENER/BACKTEST/DATA/TASKS/SETTINGS/WATCHLIST)。"""
+        """NavTabs 必须有 7 个成员 (MARKET/WATCHLIST/SCREENER/BACKTEST/TASKS/DATA/SETTINGS)。"""
         from ui.app_layout import NavTabs
 
         assert len(NavTabs) == 7
@@ -369,3 +370,82 @@ class TestNavTabs:
 
         values = [int(tab) for tab in NavTabs]
         assert values == [0, 1, 2, 3, 4, 5, 6]
+
+
+class TestNavOrder:
+    """MINOR-10: 导航顺序契约守护 (自选排在行情之后, 设置排在末位)。"""
+
+    def test_nav_tabs_order_matches_requirement(self):
+        """DoD: 导航项顺序 = 行情 / 自选 / 选股 / 回测 / 任务 / 数据 / 设置。"""
+        from ui.app_layout import NavTabs
+
+        assert [tab.name for tab in NavTabs] == [
+            "MARKET",
+            "WATCHLIST",
+            "SCREENER",
+            "BACKTEST",
+            "TASKS",
+            "DATA",
+            "SETTINGS",
+        ]
+
+
+class TestResolveShortcut:
+    """MINOR-10: _resolve_shortcut 纯函数契约 (Ctrl+1..7 切页 / Ctrl+F 聚焦导航)。"""
+
+    @staticmethod
+    def _event(
+        key: str,
+        *,
+        ctrl: bool = False,
+        shift: bool = False,
+        alt: bool = False,
+        meta: bool = False,
+    ) -> ft.KeyboardEvent:
+        """构造 ft.KeyboardEvent (name, control, key, shift, ctrl, alt, meta)。"""
+        return ft.KeyboardEvent("keydown", cast(Any, None), key, shift, ctrl, alt, meta)
+
+    def test_ctrl_digit_maps_to_tab_action(self):
+        """Ctrl+1..7 → "tab:<index>" (index 0-based, 覆盖全部 7 个导航项)。"""
+        from ui.app_layout import _resolve_shortcut
+
+        for position in range(1, 8):
+            assert _resolve_shortcut(self._event(str(position), ctrl=True)) == f"tab:{position - 1}"
+
+    def test_ctrl_digit_out_of_range_ignored(self):
+        """Ctrl+0 / Ctrl+8 超出导航项数量 → None。"""
+        from ui.app_layout import _resolve_shortcut
+
+        assert _resolve_shortcut(self._event("0", ctrl=True)) is None
+        assert _resolve_shortcut(self._event("8", ctrl=True)) is None
+
+    def test_key_name_variants_normalized(self):
+        """跨平台键名变体 Digit3 / Numpad3 归一为同一动作。"""
+        from ui.app_layout import _resolve_shortcut
+
+        assert _resolve_shortcut(self._event("Digit3", ctrl=True)) == "tab:2"
+        assert _resolve_shortcut(self._event("Numpad3", ctrl=True)) == "tab:2"
+
+    def test_ctrl_f_maps_to_focus_action(self):
+        """Ctrl+F (含 KeyF 变体) → "focus_nav"。"""
+        from ui.app_layout import _resolve_shortcut
+
+        assert _resolve_shortcut(self._event("F", ctrl=True)) == "focus_nav"
+        assert _resolve_shortcut(self._event("KeyF", ctrl=True)) == "focus_nav"
+
+    def test_modifier_combinations_ignored(self):
+        """无 Ctrl / 带 Alt / Meta / Shift 的组合一律忽略 (避免与系统/输入法冲突)。"""
+        from ui.app_layout import _resolve_shortcut
+
+        assert _resolve_shortcut(self._event("1")) is None
+        assert _resolve_shortcut(self._event("1", ctrl=True, alt=True)) is None
+        assert _resolve_shortcut(self._event("1", ctrl=True, meta=True)) is None
+        assert _resolve_shortcut(self._event("1", ctrl=True, shift=True)) is None
+
+    def test_non_shortcut_key_ignored(self):
+        """非快捷键按键 (如 A / F5 / 空键) → None。"""
+        from ui.app_layout import _resolve_shortcut
+
+        assert _resolve_shortcut(self._event("A", ctrl=True)) is None
+        assert _resolve_shortcut(self._event("F5", ctrl=True)) is None
+        assert _resolve_shortcut(self._event("", ctrl=True)) is None
