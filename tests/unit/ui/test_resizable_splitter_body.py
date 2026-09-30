@@ -107,6 +107,19 @@ class TestSplitterRenderStructure:
         assert isinstance(row, ft.Row)
         assert len(row.controls) == 3
 
+    def test_row_stretches_children_vertically(self, mock_i18n_state, mock_app_colors_state):
+        """MAJOR-07: Row 垂直对齐为 STRETCH，两栏撑满容器高度。
+
+        Row 默认 vertical_alignment=CENTER 会让左栏（侧栏）按内容高度居中，
+        其内部滚动容器拿不到有界高度而无法滚动；STRETCH 是侧栏化的前提。
+        """
+        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
+            _, result = _render(_make_splitter())
+
+        row = result.content
+        assert isinstance(row, ft.Row)
+        assert row.vertical_alignment == ft.CrossAxisAlignment.STRETCH
+
     def test_left_container_holds_left_content(self, mock_i18n_state, mock_app_colors_state):
         """default==persisted 时 set_width 不触发，left_container.width=default_width。"""
         left = ft.Container(width=100)

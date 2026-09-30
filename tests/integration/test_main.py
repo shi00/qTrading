@@ -534,18 +534,19 @@ class TestMainHideCloseConfirmDialog:
 
 @pytest.mark.asyncio
 async def test_min_window_size_and_web_skip(monkeypatch):
-    """窗口最小尺寸 1280x720 并在桌面模式启动即最大化；Web 模式跳过窗口尺寸设置。
+    """窗口最小尺寸 1024x640 并在桌面模式启动即最大化；Web 模式跳过窗口尺寸设置。
 
     响应式布局修复：窗口启动最大化以适配当前设备屏幕，不再强制固定像素尺寸。
+    MAJOR-07：min 下限降至 1024×640（1920×1080 @150% 笔记本可用逻辑高度约 672）。
     _DummyWindow 初始 min_width/min_height/width/height 均为 0。
     """
-    # --- 桌面模式：设置最小尺寸 1280x720 并最大化 ---
+    # --- 桌面模式：设置最小尺寸 1024x640 并最大化 ---
     _prepare_main(monkeypatch)
     desktop_page = _DummyPage()
     await app_main.run(desktop_page)
 
-    assert desktop_page.window.min_width == 1280
-    assert desktop_page.window.min_height == 720
+    assert desktop_page.window.min_width == 1024
+    assert desktop_page.window.min_height == 640
     assert desktop_page.window.maximized is True
 
     # --- Web 模式：跳过窗口尺寸设置，保持 _DummyWindow 初始值 0 ---

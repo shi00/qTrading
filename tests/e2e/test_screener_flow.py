@@ -280,24 +280,30 @@ async def test_screener_pct_chg_positive_prefix(e2e_page):
     assert await plus_prefix_loc.count() > 0, "P3-15: 正值 pct_chg 未显示 '+' 前缀 (色盲友好)"
 
 
-async def test_screener_1280x720_viewport_no_collapse(e2e_page_1280x720):
-    """C5-5 (UIX-13): 1280×720 最小视口下选股主流程无塌陷。
+async def test_screener_min_viewport_no_collapse(e2e_page_min_viewport):
+    """MAJOR-07: 最小视口 (1280×672) 下选股主流程无塌陷且结果表首行可见。
 
-    对照 docs/flet/accessibility-baseline.md §2.5 最小宽度 1280（PR373 视口塌陷
-    回归防护）：1280×720 视口下导航 + 选策略 + 执行 + 结果表 + 分页信息均正常
-    渲染可见（ResponsiveRow 断点对齐 flet 0.86.5，xs 档不塌陷）。
+    对照 docs/flet/accessibility-baseline.md §2.5 与 app/window_lifecycle.py 的
+    min_width=1024 / min_height=640（PR373 视口塌陷回归防护）：最小视口下导航 +
+    选参数最多策略 + 展开高级设置 + 执行后结果表首行仍完整落入视口（未被裁切）。
     """
-    screener = ScreenerPage(e2e_page_1280x720)
+    screener = ScreenerPage(e2e_page_min_viewport)
     await screener.open()
 
-    # 页面标题 + 策略选择控件在最小视口下可见
+    # 页面标题 + 策略选择控件在最小视口下可见（策略下拉已移入顶部控制卡，与参数侧栏分离）
     await screener.expect_text(I18n.get("screener_title"), timeout_ms=TIMEOUTS.INTERACTION)
     await screener.expect_text(I18n.get("select_strategy"), timeout_ms=TIMEOUTS.INTERACTION)
 
-    # 选策略 → 执行 → 结果表可见（结果行 + 分页信息）
+    # 选参数最多的可运行策略（volume_breakout：默认 3 个数值参数 + 高级设置），
+    # 展开「高级设置」使参数侧栏内容达到最高，验证控制区不被裁切。
     await screener.select_strategy("volume_breakout")
+    await screener.expect_text(I18n.get("screener_params_panel_title"), timeout_ms=TIMEOUTS.INTERACTION)
+    await screener.expand_advanced_settings()
+
+    # 执行 → 结果表首行完整落入视口（结果行 + 分页信息）
     await screener.run()
     await screener.expect_result("平安银行")
+    await screener.expect_row_in_viewport("000001.SZ")
 
     # MAJOR-06: 分页栏文案新增「共 {count} 条」, 总数随结果集变化, 故断言模板中
     # {count} 之前的稳定前缀 (get_by_text 为子串匹配, exact=False)。

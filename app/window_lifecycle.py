@@ -53,14 +53,18 @@ async def setup_window_geometry(page: ft.Page, *, is_web_mode: bool) -> None:
     非 web_mode 时设置 min_width/min_height 作为下限，并将窗口最大化铺满当前屏幕工作区，
     保证任何分辨率/设备下内容自适应。web_mode 时跳过所有窗口几何设置（浏览器模式由 Flet 自动管理）。
 
+    最小尺寸取 1024×640（MAJOR-07）：1920×1080 系统缩放 150% 的常见笔记本逻辑分辨率仅
+    1280×720、扣除任务栏后可用高度约 672，旧下限 1280×720 会超出可用区域导致窗口底部被
+    任务栏遮挡。E2E 视口基线同步取 1280×672（见 tests/e2e/conftest.py ``MIN_VIEWPORT``）。
+
     Args:
         page: Flet Page 实例
         is_web_mode: 是否为 web 模式
     """
     if is_web_mode:
         return
-    page.window.min_width = 1280
-    page.window.min_height = 720
+    page.window.min_width = 1024
+    page.window.min_height = 640
     page.window.maximized = True
 
 

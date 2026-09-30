@@ -206,6 +206,11 @@ def ResizableSplitter(
             ],
             spacing=0,
             expand=True,
+            # STRETCH: 两栏与分隔条撑满容器高度。Row 默认 vertical_alignment=CENTER 会
+            # 让子控件按内容高度居中，侧栏内的滚动容器（Column+scroll）拿不到有界高度而
+            # 无法内部滚动，分隔条高度也会塌陷到内容高度。STRETCH 使两栏各自占满全高，
+            # 侧栏内部滚动与拖拽命中区均成立（MAJOR-07 侧栏化的前提）。
+            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
         ),
         expand=True,
     )
