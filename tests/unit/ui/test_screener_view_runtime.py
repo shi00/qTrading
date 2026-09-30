@@ -2369,6 +2369,113 @@ class TestBuildParamsPanel:
         assert len(tiles) >= 1
 
 
+class TestValidateStrategyParams:
+    """_validate_strategy_params: 纯函数判定矩阵 (UX-09 MINOR-07)."""
+
+    @staticmethod
+    def _fn():
+        from ui.views.screener_view import _validate_strategy_params
+
+        return _validate_strategy_params
+
+    def test_valid_returns_empty(self) -> None:
+        params_def = [{"name": "n", "type": "number", "min": 0, "max": 100}]
+        assert self._fn()(params_def, {"n": 50}) == {}
+
+    def test_missing_value_marks_required(self) -> None:
+        params_def = [{"name": "n", "type": "number"}]
+        assert self._fn()(params_def, {})["n"].key == "screener_param_required"
+        assert self._fn()(params_def, {"n": "  "})["n"].key == "screener_param_required"
+
+    def test_non_numeric_marks_invalid(self) -> None:
+        params_def = [{"name": "n", "type": "number"}]
+        assert self._fn()(params_def, {"n": "abc"})["n"].key == "screener_param_invalid"
+
+    def test_non_finite_marks_invalid(self) -> None:
+        """``1e999`` 解析为 inf, 属非法输入 (非有限)."""
+        params_def = [{"name": "n", "type": "number"}]
+        assert self._fn()(params_def, {"n": "1e999"})["n"].key == "screener_param_invalid"
+
+    def test_below_min_marks_error_with_bound(self) -> None:
+        params_def = [{"name": "n", "type": "number", "min": 5}]
+        msg = self._fn()(params_def, {"n": 1})["n"]
+        assert msg.key == "screener_param_below_min"
+        assert msg.params == {"min": 5}
+
+    def test_above_max_marks_error_with_bound(self) -> None:
+        params_def = [{"name": "n", "type": "number", "max": 10}]
+        msg = self._fn()(params_def, {"n": 11})["n"]
+        assert msg.key == "screener_param_above_max"
+        assert msg.params == {"max": 10}
+
+    def test_no_declared_range_skips_range_check(self) -> None:
+        """未声明 min/max 时只校验可解析性, 不臆造业务阈值."""
+        params_def = [{"name": "n", "type": "number"}]
+        assert self._fn()(params_def, {"n": 999999}) == {}
+
+    def test_non_number_type_ignored(self) -> None:
+        params_def = [{"name": "s", "type": "slider"}]
+        assert self._fn()(params_def, {"s": "abc"}) == {}
+
+    def test_missing_name_ignored(self) -> None:
+        assert self._fn()([{"type": "number"}], {}) == {}
+
+
+class TestNumericParamValidation:
+    """UX-09 MINOR-07 (DoD): 越界/非法数值 → 字段 error 非空且禁用运行按钮; 合法 → 启用."""
+
+    _PARAMS_DEF = [
+        {
+            "name": "num_param",
+            "label_key": "num_label",
+            "type": "number",
+            "min": 0,
+            "max": 100,
+            "default": 10,
+            "group": "core_signal",
+        }
+    ]
+
+    @staticmethod
+    def _number_field(env: dict) -> ft.TextField:
+        fields = [
+            c
+            for c in _walk_all_controls(env["result"])
+            if isinstance(c, ft.TextField) and c.keyboard_type == ft.KeyboardType.NUMBER
+        ]
+        assert fields, "未找到数字参数框"
+        return fields[0]
+
+    def _render_with(self, env: dict, value: Any) -> None:
+        env["fake_vm"]._strategy_params = list(self._PARAMS_DEF)
+        env["fake_vm"]._set_state(strategy_params={"num_param": value})
+        _rerender(env)
+
+    def test_valid_value_enables_run(self, screener_view_with_params_env) -> None:
+        env = screener_view_with_params_env
+        self._render_with(env, 50)
+        assert self._number_field(env).error in (None, "")
+        assert _get_run_button(env).disabled is False
+
+    def test_above_max_disables_run_and_shows_error(self, screener_view_with_params_env) -> None:
+        env = screener_view_with_params_env
+        self._render_with(env, 150)
+        assert self._number_field(env).error
+        assert _get_run_button(env).disabled is True
+
+    def test_below_min_disables_run_and_shows_error(self, screener_view_with_params_env) -> None:
+        env = screener_view_with_params_env
+        self._render_with(env, -5)
+        assert self._number_field(env).error
+        assert _get_run_button(env).disabled is True
+
+    def test_invalid_text_disables_run_and_shows_error(self, screener_view_with_params_env) -> None:
+        env = screener_view_with_params_env
+        self._render_with(env, "abc")
+        assert self._number_field(env).error
+        assert _get_run_button(env).disabled is True
+
+
 class TestBuildLogCard:
     """_build_log_card: is_analyzing 占位卡 / reasoning+content 流式卡."""
 
