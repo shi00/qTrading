@@ -91,6 +91,8 @@ async def test_wizard_forward_then_back(wizard_page):
     """
     wp = WizardPage(wizard_page)
     btn_start = I18n.get("wizard_btn_start")
+    # UX-09 / MAJOR-01: 欢迎步须先勾选风险提示确认，「下一步」才可用。
+    await wp.accept_risk_disclaimer()
     await wizard_page.click_button(btn_start)
 
     db_title = I18n.get("wizard_db_title")
@@ -121,6 +123,7 @@ async def test_wizard_db_validation_failure(wizard_page):
     （PR-3 范围仅 anchor 化 next/prev/skip/token），保留 FletPage.click_button / fill_textbox。
     """
     btn_start = I18n.get("wizard_btn_start")
+    await WizardPage(wizard_page).accept_risk_disclaimer()
     await wizard_page.click_button(btn_start)
 
     db_title = I18n.get("wizard_db_title")
@@ -173,6 +176,7 @@ async def test_wizard_db_validation_success(wizard_page):
         await wizard_page.expect_text(db_title, timeout_ms=2000)
     except Exception:  # noqa: BLE001
         btn_start = I18n.get("wizard_btn_start")
+        await WizardPage(wizard_page).accept_risk_disclaimer()
         await wizard_page.click_button(btn_start)
         await wizard_page.expect_text(db_title)
 

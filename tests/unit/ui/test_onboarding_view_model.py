@@ -67,6 +67,11 @@ def vm(monkeypatch):
         "ui.viewmodels.onboarding_view_model.ConfigHandler.get_auto_update_time",
         staticmethod(lambda: "16:30"),
     )
+    # UX-09 / MAJOR-01: 隔离真实配置文件, 使默认 risk_acknowledged 恒为 False。
+    monkeypatch.setattr(
+        "ui.viewmodels.onboarding_view_model.ConfigHandler.is_risk_disclaimer_acknowledged",
+        staticmethod(lambda: False),
+    )
     return OnboardingViewModel()
 
 
@@ -235,6 +240,8 @@ class TestOnboardingVMBind:
 
 class TestOnboardingVMNavigation:
     async def test_next_step_advances(self, bound_vm, snapshots):
+        # UX-09 / MAJOR-01: 欢迎步须先勾选风险提示确认才允许推进。
+        bound_vm._set_state(risk_acknowledged=True)
         await bound_vm.next_step()
         assert bound_vm.current_step == 1
         assert bound_vm.state.current_step == 1
@@ -493,6 +500,92 @@ class TestOnboardingVMLanguage:
         mock_config_handler.set_locale = MagicMock(return_value=True)
         result = await vm.save_language("zh_CN")
         assert result is True
+
+
+# =====================================================================
+# Test: Risk disclaimer acknowledgement (UX-09 / MAJOR-01)
+# =====================================================================
+
+
+class TestOnboardingVMRiskDisclaimer:
+    """欢迎步投资风险提示确认：持久化 + state 更新 + 未确认时阻断前进。"""
+
+    async def test_update_acknowledged_success_updates_state_and_persists(self, vm, mock_config_handler):
+        mock_config_handler.set_risk_disclaimer_acknowledged = MagicMock(return_value=True)
+        result = await vm.update_risk_disclaimer_acknowledged(True)
+        assert result is True
+        assert vm.state.risk_acknowledged is True
+        mock_config_handler.set_risk_disclaimer_acknowledged.assert_called_once_with(True)
+
+    async def test_update_acknowledged_false_persists_false(self, vm, mock_config_handler):
+        mock_config_handler.set_risk_disclaimer_acknowledged = MagicMock(return_value=True)
+        await vm.update_risk_disclaimer_acknowledged(True)
+        result = await vm.update_risk_disclaimer_acknowledged(False)
+        assert result is True
+        assert vm.state.risk_acknowledged is False
+
+    async def test_update_acknowledged_returns_false_when_persist_fails(self, vm, mock_config_handler):
+        """ConfigHandler.set_risk_disclaimer_acknowledged 返回 False → 方法返回 False。"""
+        mock_config_handler.set_risk_disclaimer_acknowledged = MagicMock(return_value=False)
+        result = await vm.update_risk_disclaimer_acknowledged(True)
+        assert result is False
+
+    async def test_update_acknowledged_exception_returns_false(self, vm, mock_config_handler):
+        """持久化抛异常时返回 False 且不向外传播（R9 脱敏）。"""
+        mock_config_handler.set_risk_disclaimer_acknowledged = MagicMock(side_effect=RuntimeError("IO error"))
+        result = await vm.update_risk_disclaimer_acknowledged(True)
+        assert result is False
+
+    async def test_update_acknowledged_cancelled_reraises(self, vm):
+        """R2: asyncio.CancelledError 必须向外传播, 不得被 except Exception 吞没。
+
+        直接令 IO offload 的 await 抛 CancelledError, 精确覆盖 VM 的 try/except 分支
+        （不依赖 run_in_executor 对 worker 异常的包装语义）。
+        """
+        import asyncio
+
+        with patch("ui.viewmodels.onboarding_view_model.ThreadPoolManager") as tp_cls:
+            tp_cls.return_value.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await vm.update_risk_disclaimer_acknowledged(True)
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        # 先即时更新 state 再持久化：取消发生在持久化阶段时勾选态仍已生效
+        # （取消只中断落盘，不吞没也不回滚）。
+        assert vm.state.risk_acknowledged is True
+
+    async def test_next_step_blocks_welcome_without_ack(self, bound_vm):
+        """欢迎步未勾选风险提示确认时不前进（step 0 守卫）。"""
+        assert bound_vm.current_step == 0
+        assert bound_vm.state.risk_acknowledged is False
+        await bound_vm.next_step()
+        assert bound_vm.current_step == 0
+
+    async def test_next_step_advances_welcome_when_acknowledged(self, bound_vm):
+        """欢迎步勾选确认后 next_step 正常推进到数据库步。"""
+        with patch(
+            "ui.viewmodels.onboarding_view_model.ConfigHandler.set_risk_disclaimer_acknowledged",
+            return_value=True,
+        ):
+            await bound_vm.update_risk_disclaimer_acknowledged(True)
+        assert bound_vm.state.risk_acknowledged is True
+        await bound_vm.next_step()
+        assert bound_vm.current_step == 1
+
+    def test_load_config_reads_risk_acknowledged(self, monkeypatch):
+        """_load_config_to_state 读取已确认状态（老用户升级后不再强制重勾）。"""
+        monkeypatch.setattr(
+            "ui.viewmodels.onboarding_view_model.ConfigHandler.get_init_history_years",
+            staticmethod(lambda: 3),
+        )
+        monkeypatch.setattr(
+            "ui.viewmodels.onboarding_view_model.ConfigHandler.get_auto_update_time",
+            staticmethod(lambda: "16:30"),
+        )
+        monkeypatch.setattr(
+            "ui.viewmodels.onboarding_view_model.ConfigHandler.is_risk_disclaimer_acknowledged",
+            staticmethod(lambda: True),
+        )
+        assert OnboardingViewModel().state.risk_acknowledged is True
 
 
 # =====================================================================

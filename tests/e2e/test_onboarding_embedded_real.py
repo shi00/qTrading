@@ -28,6 +28,7 @@ Windows skipif：
 import pytest
 
 from tests.e2e.helpers.app_launcher import PROJECT_ROOT
+from tests.e2e.pages import WizardPage
 from tests.e2e.timeouts import TIMEOUTS
 from ui.i18n import I18n
 
@@ -55,6 +56,8 @@ async def test_embedded_real_onboarding_zero_config_first_launch(embedded_real_w
 
     # 2. 点击 "开始使用" 进入 database step
     btn_start = I18n.get("wizard_btn_start")
+    # UX-09 / MAJOR-01: 欢迎步须先勾选风险提示确认，「下一步」才可用。
+    await WizardPage(embedded_real_wizard_page).accept_risk_disclaimer()
     await embedded_real_wizard_page.click_button(btn_start)
 
     # 3. 验证 embedded 模式只读状态 (EmbeddedStatusCard 显示的 i18n key)
@@ -87,6 +90,8 @@ async def test_embedded_real_wizard_forward_then_back(embedded_real_wizard_page)
 
     # 2. 点击 "开始使用" 进入 database step
     btn_start = I18n.get("wizard_btn_start")
+    # UX-09 / MAJOR-01: 欢迎步须先勾选风险提示确认，「下一步」才可用。
+    await WizardPage(embedded_real_wizard_page).accept_risk_disclaimer()
     await embedded_real_wizard_page.click_button(btn_start)
 
     # 3. 验证 embedded 模式只读状态 (确认进入 database step)
@@ -109,6 +114,8 @@ async def test_embedded_real_db_info_message_displayed(embedded_real_wizard_page
     """
     # 1. 点击 "开始使用" 进入 database step
     btn_start = I18n.get("wizard_btn_start")
+    # UX-09 / MAJOR-01: 欢迎步须先勾选风险提示确认，「下一步」才可用。
+    await WizardPage(embedded_real_wizard_page).accept_risk_disclaimer()
     await embedded_real_wizard_page.click_button(btn_start)
 
     # 2. 验证 status_message 显示 (embedded_pg_ready)

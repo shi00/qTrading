@@ -301,10 +301,81 @@ def _create_overview_card(
 # ============================================================================
 
 
+def _build_risk_ack_card(
+    risk_acknowledged: bool,
+    on_ack_change: Callable[[ft.ControlEvent], None] | None,
+    on_label_click: Callable[[ft.ControlEvent], None] | None,
+) -> ft.Container:
+    """欢迎步投资风险提示 + 确认勾选卡片（UX-09 / MAJOR-01）。
+
+    未勾选时向导「下一步」禁用（由 OnboardingWizard 导航区按 state.risk_acknowledged 计算）；
+    勾选结果经 OnboardingViewModel 持久化到 ConfigHandler。
+
+    长 label 在窄容器内无法换行会被截断，故沿用 llm_config_panel 既有模式：无 label 的
+    Checkbox + 可点击的独立 Text（点击文字等价于切换勾选）。
+    """
+    checkbox = ft.Checkbox(
+        value=risk_acknowledged,
+        on_change=safe_on_change(on_ack_change),
+        active_color=AppColors.PRIMARY,
+    )
+    label_clickable = ft.GestureDetector(
+        content=ft.Text(
+            I18n.get("wizard_risk_ack_label"),
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.TEXT_PRIMARY,
+        ),
+        on_tap=safe_on_click(on_label_click),
+        expand=True,
+    )
+    return ft.Container(
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Icon(
+                            ft.Icons.WARNING_AMBER_ROUNDED, color=AppColors.WARNING, size=AppStyles.FONT_SIZE_TITLE
+                        ),
+                        ft.Text(
+                            I18n.get("wizard_risk_title"),
+                            size=AppStyles.FONT_SIZE_TITLE,
+                            weight=ft.FontWeight.W_600,
+                            color=AppColors.TEXT_PRIMARY,
+                        ),
+                    ],
+                    spacing=AppStyles.SPACING_SM,
+                ),
+                ft.Text(
+                    I18n.get("wizard_risk_body"),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_SECONDARY,
+                    no_wrap=False,
+                ),
+                ft.Row(
+                    [
+                        anchored(EIDS.WIZARD.RISK_ACK, checkbox),
+                        label_clickable,
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                ),
+            ],
+            spacing=AppStyles.SPACING_SM,
+        ),
+        padding=AppStyles.SPACING_MD,
+        border_radius=8,
+        bgcolor=AppColors.SURFACE_VARIANT,
+        border=ft.Border.all(1, AppColors.BORDER),
+    )
+
+
 def _build_welcome_step(
     on_language_select: Callable[[ft.ControlEvent], None],
     hovered_card: int,
     on_card_hover: Callable[[int], Callable[[ft.ControlEvent], None]],
+    *,
+    risk_acknowledged: bool = False,
+    on_ack_change: Callable[[ft.ControlEvent], None] | None = None,
+    on_label_click: Callable[[ft.ControlEvent], None] | None = None,
 ) -> ft.Control:
     """Step 0: Welcome 概览 (D15: 从 OnboardingWizard step==0 分支提取).
 
@@ -389,6 +460,10 @@ def _build_welcome_step(
                     spacing=20,
                     run_spacing=20,
                 ),
+                # UX-09 / MAJOR-01: 置于概览卡片之后, 避免把首屏概览内容挤出视口
+                # (E2E 断言 wizard_overview_db_title 可见)。
+                ft.Container(height=12),
+                _build_risk_ack_card(risk_acknowledged, on_ack_change, on_label_click),
             ]
         ),
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -933,6 +1008,23 @@ def OnboardingWizard(
 
         return _hover
 
+    # UX-09 / MAJOR-01: 欢迎步风险提示确认（勾选结果经 VM 持久化到 ConfigHandler）。
+    def _on_risk_ack_change(e: ft.ControlEvent) -> None:
+        checked = bool(get_control_value(e.control, ft.Checkbox)) if e.control else False
+        page = _get_page()
+        if page is not None:
+            page.run_task(onboarding_vm.update_risk_disclaimer_acknowledged, checked)
+
+    def _on_risk_label_click(e: ft.ControlEvent) -> None:
+        # 点击 label 等价于切换勾选：读 VM 实时状态取反（不用渲染闭包快照，
+        # 避免连续点击时读到旧值导致取反失效）。
+        page = _get_page()
+        if page is not None:
+            page.run_task(
+                onboarding_vm.update_risk_disclaimer_acknowledged,
+                not onboarding_vm.state.risk_acknowledged,
+            )
+
     # --- Step indicators (1~6 显示) ---
     show_indicators = 1 <= state.current_step <= 6
     step_names = [
@@ -1015,7 +1107,14 @@ def OnboardingWizard(
     step = state.current_step
 
     if step == 0:
-        step_content = _build_welcome_step(_on_language_select, hovered_card, _on_card_hover)
+        step_content = _build_welcome_step(
+            _on_language_select,
+            hovered_card,
+            _on_card_hover,
+            risk_acknowledged=state.risk_acknowledged,
+            on_ack_change=_on_risk_ack_change,
+            on_label_click=_on_risk_label_click,
+        )
     elif step == 1:
         step_content = _build_database_step(database_vm)
     elif step == 2:
@@ -1088,7 +1187,8 @@ def OnboardingWizard(
                     icon=getattr(ft.Icons, config.next_icon, ft.Icons.ARROW_FORWARD),
                     on_click=safe_on_click(_on_next),
                     style=AppStyles.primary_button(),
-                    disabled=state.validation_in_progress,
+                    # UX-09 / MAJOR-01: 欢迎步未勾选风险提示确认时禁用「下一步」。
+                    disabled=state.validation_in_progress or (config.id == "welcome" and not state.risk_acknowledged),
                 ),
             )
         )

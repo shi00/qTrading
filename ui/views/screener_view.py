@@ -37,6 +37,7 @@ from ui.components.flet_type_helpers import (
 )
 from ui.components.confirm_dialog import ConfirmDialog
 from ui.components.resizable_splitter import ResizableSplitter
+from ui.components.risk_disclaimer import build_risk_disclaimer
 from ui.components.slider_input import SliderInput
 from ui.components.state_views import EmptyState
 from ui.components.stock_detail_dialog import StockDetailDialog
@@ -1941,6 +1942,8 @@ def _build_screener_table_card(
         )
         table_content = ft.Column(
             [
+                # UX-09 / MAJOR-01: 选股结果区顶部固定风险提示（含空态）。
+                build_risk_disclaimer(compact=True),
                 ft.Container(
                     content=EmptyState(
                         icon=ft.Icons.INBOX,
@@ -2005,7 +2008,13 @@ def _build_screener_table_card(
                 )
             ]
         table_content = ft.Column(
-            [*body_rows, ft.Divider(height=1, color=AppColors.DIVIDER), pagination_row],
+            # UX-09 / MAJOR-01: 选股结果区顶部固定风险提示。
+            [
+                build_risk_disclaimer(compact=True),
+                *body_rows,
+                ft.Divider(height=1, color=AppColors.DIVIDER),
+                pagination_row,
+            ],
             spacing=8,
             expand=True,
         )
@@ -2053,6 +2062,8 @@ def _build_screener_log_card(
             weight=ft.FontWeight.BOLD,
             color=AppColors.TEXT_PRIMARY,
         ),
+        # UX-09 / MAJOR-01: AI 分析报告区固定风险提示。
+        build_risk_disclaimer(compact=True),
     ]
     # AI-03(完整版): 本次选股实际消耗的 LLM 调用次数、token 总量与成本(元)。
     # 仅当确有消耗时渲染; None 表示当次未执行 AI 分析, 不展示 "消耗 0" 的误导信息。

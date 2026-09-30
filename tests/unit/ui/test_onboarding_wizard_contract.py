@@ -293,6 +293,109 @@ class TestWizardScheduleStepEnterSubmit:
 
 
 # ============================================================================
+# UX-09 / MAJOR-01: 欢迎步投资风险提示 + 确认勾选 + 下一步禁用联动
+# ============================================================================
+
+
+class TestWizardWelcomeRiskAck:
+    """欢迎步渲染风险提示卡；未勾选时 NEXT 按钮 disabled=True。"""
+
+    def _render_welcome(self, mock_onboarding_vms, risk_acknowledged: bool):
+        from ui.views.onboarding_wizard import OnboardingWizard
+
+        fake_vm = mock_onboarding_vms["onboarding"]
+        fake_vm._state = replace(fake_vm._state, current_step=0, risk_acknowledged=risk_acknowledged)
+        component = make_component(OnboardingWizard)
+        page = _make_fake_page()
+        run_mount_effects(component, page)
+        return render_once(component)
+
+    def _next_button(self, container) -> ft.Button:
+        from ui.i18n import I18n
+
+        buttons = [
+            c
+            for c in _collect_controls(container)
+            if isinstance(c, ft.Button) and c.content == I18n.get("wizard_btn_start")
+        ]
+        assert len(buttons) == 1, f"欢迎步应恰有 1 个 NEXT 按钮, 实际 {len(buttons)}"
+        return buttons[0]
+
+    def test_welcome_renders_risk_checkbox_and_notice(
+        self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms
+    ):
+        from ui.i18n import I18n
+
+        result = self._render_welcome(mock_onboarding_vms, False)
+        all_controls = _collect_controls(result)
+        checkboxes = [c for c in all_controls if isinstance(c, ft.Checkbox)]
+        assert len(checkboxes) == 1, "欢迎步应恰有 1 个风险提示确认 Checkbox"
+        assert checkboxes[0].value is False
+        texts = {c.value for c in all_controls if isinstance(c, ft.Text)}
+        assert I18n.get("wizard_risk_title") in texts
+        assert I18n.get("wizard_risk_body") in texts
+        assert I18n.get("wizard_risk_ack_label") in texts
+
+    def test_welcome_next_disabled_when_not_acknowledged(
+        self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms
+    ):
+        result = self._render_welcome(mock_onboarding_vms, False)
+        assert self._next_button(result).disabled is True
+
+    def test_welcome_next_enabled_when_acknowledged(self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms):
+        result = self._render_welcome(mock_onboarding_vms, True)
+        assert self._next_button(result).disabled is False
+        checkboxes = [c for c in _collect_controls(result) if isinstance(c, ft.Checkbox)]
+        assert checkboxes[0].value is True
+
+    def test_risk_ack_change_forwards_checked_value_to_vm(
+        self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms
+    ):
+        """勾选框 on_change 经 page.run_task 调用 VM 命令并透传勾选值 (R16 异步调度)。"""
+        result = self._render_welcome(mock_onboarding_vms, False)
+        checkbox = next(c for c in _collect_controls(result) if isinstance(c, ft.Checkbox))
+        fake_page = MagicMock(name="page")
+        event = MagicMock()
+        event.control.value = True
+        # Flet 事件回调类型为 Optional[ControlEventHandler]，测试直调底层函数故显式 Any。
+        on_change: Any = checkbox.on_change
+        with patch("ui.views.onboarding_wizard._get_page", return_value=fake_page):
+            on_change(event)
+        assert fake_page.run_task.call_count == 1
+        args = fake_page.run_task.call_args.args
+        assert args[0] == mock_onboarding_vms["onboarding"].update_risk_disclaimer_acknowledged
+        assert args[1] is True
+
+    def test_risk_label_click_toggles_live_vm_state(self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms):
+        """点击 label 取反 VM 实时勾选态（未勾选 → 提交 True）。"""
+        from ui.i18n import I18n
+
+        result = self._render_welcome(mock_onboarding_vms, False)
+        label = next(
+            c
+            for c in _collect_controls(result)
+            if isinstance(c, ft.GestureDetector)
+            and isinstance(c.content, ft.Text)
+            and c.content.value == I18n.get("wizard_risk_ack_label")
+        )
+        fake_page = MagicMock(name="page")
+        on_tap: Any = label.on_tap
+        with patch("ui.views.onboarding_wizard._get_page", return_value=fake_page):
+            on_tap(MagicMock())
+        assert fake_page.run_task.call_count == 1
+        assert fake_page.run_task.call_args.args[1] is True
+
+    def test_risk_handlers_noop_without_page(self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms):
+        """无 page 上下文（离屏渲染）时两个 handler 均安全 no-op。"""
+        result = self._render_welcome(mock_onboarding_vms, False)
+        checkbox = next(c for c in _collect_controls(result) if isinstance(c, ft.Checkbox))
+        on_change: Any = checkbox.on_change
+        with patch("ui.views.onboarding_wizard._get_page", return_value=None):
+            on_change(MagicMock())
+        assert mock_onboarding_vms["onboarding"].update_risk_disclaimer_acknowledged.call_count == 0
+
+
+# ============================================================================
 # 模块级纯函数测试
 # ============================================================================
 
@@ -540,6 +643,8 @@ class _FakeOnboardingState:
     schedule_time: str = "16:30"
     normalized_schedule_time: str = "16:30"
     init_history_years: int = 3
+    # UX-09 / MAJOR-01: 欢迎步风险提示确认状态。
+    risk_acknowledged: bool = False
 
 
 class _FakeOnboardingViewModel:
@@ -561,6 +666,7 @@ class _FakeOnboardingViewModel:
         self.start_sync = AsyncMock()
         self.skip_sync = AsyncMock()
         self.save_language = AsyncMock(return_value=True)
+        self.update_risk_disclaimer_acknowledged = AsyncMock(return_value=True)
 
     @property
     def state(self) -> _FakeOnboardingState:

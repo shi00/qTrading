@@ -509,6 +509,16 @@ class WizardPage:
         """填充 token 输入框（通过 anchor）。"""
         await self.ap.fill(EIDS.WIZARD.TOKEN_INPUT, value, timeout_ms=timeout_ms)
 
+    async def accept_risk_disclaimer(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """勾选欢迎步投资风险提示确认（UX-09 / MAJOR-01），使「下一步」按钮可用。
+
+        欢迎步未勾选时 NEXT 按钮 disabled；从欢迎步前进前须先调用本方法。
+        勾选会触发 VM 持久化并重渲染，故等待短暂稳定后再点击后续按钮。
+        """
+        await self.ap.scroll_into_view(EIDS.WIZARD.RISK_ACK, timeout_ms=timeout_ms)
+        await self.ap.click(EIDS.WIZARD.RISK_ACK, timeout_ms=timeout_ms)
+        await self.page.page.wait_for_timeout(300)
+
 
 # ============================================================================
 # PR-4 Task 4.2: NavPage / HomePage / TaskCenterPage
