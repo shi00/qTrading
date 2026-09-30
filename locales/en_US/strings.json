@@ -354,6 +354,7 @@
     "ai_expand_reasoning": "Click to expand/collapse reasoning",
     "ai_card_analyzing": "⏳ Analyzing…",
     "ai_cards_truncated_hint": "Showing the latest {max} analysis cards. Earlier cards have been collapsed",
+    "ai_log_jump_to_latest": "Jump to latest",
     "settings_ai_news_concurrency": "News Classification Concurrency",
     "settings_hint_ai_news_concurrency": "Cloud fallback only; local inference is always serial",
     "task_loading_data": "Loading strategy dataset...",

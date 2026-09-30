@@ -331,6 +331,7 @@
     "ai_expand_reasoning": "点击展开/折叠思考过程",
     "ai_card_analyzing": "⏳ 分析中…",
     "ai_cards_truncated_hint": "仅显示最近 {max} 张分析卡片，更早的卡片已折叠",
+    "ai_log_jump_to_latest": "回到最新",
     "settings_ai_news_concurrency": "新闻分类并发数",
     "settings_hint_ai_news_concurrency": "仅影响云端兜底；本地推理始终串行",
     "task_loading_data": "加载并组装基础策略数据集合...",

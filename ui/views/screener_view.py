@@ -1964,6 +1964,22 @@ def _build_screener_table_card(
     )
 
 
+# MINOR-06 (AI 流式卡片区强制回底): 判定「是否已滚离底部」的像素容差。
+# Flet 1.0.2 ``OnScrollEvent.extent_after`` 为滚动视口「之后」剩余的内容量(逻辑像素);
+# 用户上滚后该值 > 容差, 视为已滚离底部(此时须停止自动跟随)。
+_LOG_AT_BOTTOM_TOLERANCE_PX = 4.0
+
+
+def _is_log_scrolled_away_from_bottom(extent_after: float) -> bool:
+    """AI 流式卡片区是否已滚离底部 (MINOR-06)。
+
+    ``extent_after`` 为滚动视口「之后」剩余的内容量(逻辑像素)。仅当用户主动上滚、
+    且剩余可滚动内容超过容差时返回 ``True``; 位于底部(或内容不足以滚动, 此时
+    ``extent_after`` 为 0)返回 ``False``, 保证自动跟随仅在贴底时启用。
+    """
+    return extent_after > _LOG_AT_BOTTOM_TOLERANCE_PX
+
+
 def _build_screener_log_card(
     *,
     stream_cards: tuple[StreamCard, ...],
@@ -1971,6 +1987,10 @@ def _build_screener_log_card(
     is_realtime: bool,
     ai_usage_summary: tuple[int, int, float, int, int] | None,
     on_retry_click: typing.Callable[[str], None],
+    follow_latest: bool,
+    rebuild_token: int,
+    on_log_scroll: typing.Callable[[ft.OnScrollEvent], None],
+    on_jump_to_latest: typing.Callable[[ft.ControlEvent], None],
 ) -> ft.Container:
     """构建 AI 流式分析卡片区 (仅 REALTIME 模式有效)."""
     log_column_controls: list[ft.Control] = [
@@ -2017,7 +2037,18 @@ def _build_screener_log_card(
                 expand=True,
                 spacing=4,
                 scroll=ft.ScrollMode.ALWAYS,
-                auto_scroll=True,
+                # MINOR-06: 仅当用户仍停留在底部时才自动跟随新 token。用户上滚查看历史时
+                # follow_latest 转 False → auto_scroll 关闭, 新 token 到达不再把视口强制
+                # 拉回底部(on_scroll 依据 extent_after 判定是否已滚离底部)。
+                auto_scroll=follow_latest,
+                # 0ms 立即贴底: 默认 1s 缓动动画期间会产生「中途位置」的滚动事件而被误判为
+                # 已滚离底部; Flet 1.0.2 亦推荐 token 级流式跟随用 0 时长保持紧贴。
+                auto_scroll_animation=0,
+                on_scroll=on_log_scroll,
+                # rebuild_token 变化时按 key 重建滚动 Column, 使「回到最新」点击后立即贴底
+                # (对齐 virtual_table.py 既有 key 重建模式; scroll_to 对声明式 Column
+                #  ineffective, 见 docs/flet/project-differences.md §4.10)。
+                key=f"screener_log_{rebuild_token}",
             ),
             border_radius=8,
             padding=5,
@@ -2031,6 +2062,23 @@ def _build_screener_log_card(
                 size=AppStyles.FONT_SIZE_CAPTION,
                 color=AppColors.TEXT_SECONDARY,
                 text_align=ft.TextAlign.CENTER,
+            )
+        )
+    # MINOR-06: 用户滚离底部时提供「回到最新」入口 (点击恢复自动跟随并立即贴底)。
+    if not follow_latest:
+        log_column_controls.append(
+            ft.Row(
+                [
+                    ft.TextButton(
+                        content=I18n.get("ai_log_jump_to_latest"),
+                        icon=ft.Icons.ARROW_DOWNWARD,
+                        style=ft.ButtonStyle(color=AppColors.PRIMARY),
+                        height=30,
+                        tooltip=I18n.get("ai_log_jump_to_latest"),
+                        on_click=safe_on_click(on_jump_to_latest),
+                    )
+                ],
+                alignment=ft.MainAxisAlignment.END,
             )
         )
     return ft.Container(
@@ -2136,6 +2184,29 @@ def ScreenerView(
     desc_timer_ref = ft.use_ref(lambda: None)
     table_memo_ref = ft.use_ref(lambda: typing.cast(tuple | None, None))
     file_picker = ft.use_ref(lambda: ft.FilePicker()).current
+
+    # MINOR-06: AI 流式卡片区滚动跟随状态。属「纯 UI 交互态」(滚动位置), 非业务状态,
+    # 故留在 View 层 (MVVM 状态归属: View 仅禁持业务状态/双源真相, 不禁交互态)。
+    # follow_log_latest=True 表示用户仍在底部, 自动跟随新 token; 用户上滚后置 False。
+    # log_rebuild_token 变化时按 key 重建滚动 Column, 使「回到最新」点击后立即贴底。
+    follow_log_latest, set_follow_log_latest = ft.use_state(True)
+    log_rebuild_token, set_log_rebuild_token = ft.use_state(0)
+
+    # MINOR-06: 新一轮运行开始(state.loading 转 True; VM 于运行起点清空流式卡片)时恢复
+    # 自动跟随, 避免沿用上一轮「用户已上滚」的旧交互态导致新一轮卡片不再跟随。
+    ft.use_effect(lambda: set_follow_log_latest(True) if state.loading else None, dependencies=[state.loading])
+
+    def _on_log_scroll(e: ft.OnScrollEvent) -> None:
+        """MINOR-06: 依据滚动事件更新「是否仍在底部」, 仅在状态翻转时 set_state。"""
+        scrolled_away = _is_log_scrolled_away_from_bottom(e.extent_after)
+        if scrolled_away == follow_log_latest:
+            set_follow_log_latest(not scrolled_away)
+
+    def _on_jump_to_latest(e: ft.ControlEvent) -> None:
+        """MINOR-06: 回到最新 — 恢复自动跟随并重建滚动区以立即贴底。"""
+        UILogger.log_action("ScreenerView", "Click", "ai_log_jump_to_latest")
+        set_follow_log_latest(True)
+        set_log_rebuild_token(log_rebuild_token + 1)
 
     ft.use_effect(
         lambda: _sync_file_picker_service(_get_page(), file_picker, True) if active else None,
@@ -2391,6 +2462,10 @@ def ScreenerView(
         is_realtime=is_realtime,
         ai_usage_summary=state.ai_usage_summary,
         on_retry_click=lambda name: vm.schedule_retry(name),
+        follow_latest=follow_log_latest,
+        rebuild_token=log_rebuild_token,
+        on_log_scroll=_on_log_scroll,
+        on_jump_to_latest=_on_jump_to_latest,
     )
 
     main_body = _build_screener_main_body(
