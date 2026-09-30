@@ -1,5 +1,6 @@
 """ui/components/confirm_dialog.py 声明式契约 + 组件体测试 (P1-4 批次 2)."""
 
+import ast
 from pathlib import Path
 
 import flet as ft
@@ -9,6 +10,29 @@ from ui.components.confirm_dialog import ConfirmDialog
 from ui.theme import AppStyles
 
 pytestmark = pytest.mark.unit
+
+
+def _confirm_dialog_destructive_flags(rel_path: str) -> list[bool | None]:
+    """解析源文件中每个 ConfirmDialog(...) 调用的 destructive 关键字实参值。
+
+    缺省 (未显式传参) 记录为 None, 便于区分「显式 False」与「沿用默认」。
+    """
+    tree = ast.parse(Path(rel_path).read_text(encoding="utf-8"))
+    flags: list[bool | None] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "ConfirmDialog"):
+            continue
+        value: bool | None = None
+        for kw in node.keywords:
+            if kw.arg != "destructive":
+                continue
+            if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, bool):
+                value = kw.value.value
+        flags.append(value)
+    return flags
 
 
 class TestConfirmDialogContract:
@@ -238,3 +262,20 @@ class TestConfirmDialogCallbacks:
         assert cancel_btn.style is not None
         assert cancel_btn.style.color == AppColors.PRIMARY
         run_unmount_effects(c)
+
+
+class TestDestructiveCallSites:
+    """MINOR-05: 破坏性调用点必须显式 destructive=True (危险色), 非破坏性保持默认。"""
+
+    def test_watchlist_remove_is_destructive(self):
+        """移除自选股 (不可逆删除) 必须传 destructive=True → 危险色。"""
+        assert _confirm_dialog_destructive_flags("ui/views/watchlist_view.py") == [True]
+
+    def test_ai_brain_prompt_resets_are_destructive(self):
+        """重置 AI / 新闻提示词 (覆盖用户自定义内容) 两处均须 destructive=True。"""
+        assert _confirm_dialog_destructive_flags("ui/views/settings_tabs/ai_brain_tab.py") == [True, True]
+
+    def test_non_destructive_call_sites_keep_default(self):
+        """非破坏性确认 (AI 外发确认 / 不可计价"继续" / 线程池保存确认) 保持默认 → 非危险色。"""
+        assert _confirm_dialog_destructive_flags("ui/views/screener_view.py") == [None, None]
+        assert _confirm_dialog_destructive_flags("ui/views/settings_tabs/system_tab.py") == [None]
