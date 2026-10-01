@@ -24,6 +24,47 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+class TestSyncedTableRegistryConsistency:
+    """SYNCED_TABLES 与 quote_dao 各「表名登记表」必须同步。
+
+    review09-24 dim05 MAJOR-01：新增同步表若漏登记，该表会对完整性检查、质量评分、
+    断点续跑支撑静默失效（清单分散于多个模块，无一致性约束）。
+    """
+
+    def test_synced_tables_all_in_safe_whitelist(self):
+        """SYNCED_TABLES 每张表都必须登记进 _SAFE_TABLE_NAMES（否则被白名单过滤而隐形）。"""
+        from data.persistence.daos.quote_dao import _SAFE_TABLE_NAMES
+
+        missing = sorted(set(HistoricalSyncStrategy.SYNCED_TABLES) - _SAFE_TABLE_NAMES)
+        assert not missing, f"SYNCED_TABLES 中未登记进 _SAFE_TABLE_NAMES 的表: {missing}"
+
+    def test_synced_tables_all_registered_in_quality_scoring(self):
+        """SYNCED_TABLES 每张表都必须显式登记容忍系数 / 低频豁免 / 固定期望行数之一。"""
+        from data.persistence.daos.quote_dao import (
+            FIXED_EXPECTED_TABLES,
+            LOW_FREQUENCY_TABLES,
+            _build_table_tolerance_map,
+        )
+
+        config = {
+            "quotes_tolerance_ratio": 0.95,
+            "indicators_tolerance_ratio": 0.90,
+            "moneyflow_tolerance_ratio": 0.80,
+        }
+        registered = set(_build_table_tolerance_map(config)) | LOW_FREQUENCY_TABLES | set(FIXED_EXPECTED_TABLES)
+        unregistered = sorted(set(HistoricalSyncStrategy.SYNCED_TABLES) - registered)
+        assert not unregistered, (
+            f"SYNCED_TABLES 中未在质量评分侧登记（容忍系数/低频豁免/固定期望行数）的表: {unregistered}"
+        )
+
+    def test_synced_tables_all_supported_by_cached_dates(self):
+        """SYNCED_TABLES 每张表都必须登记进 _TABLE_DATE_COLUMN_MAP（否则断点续跑查询被拒并刷假告警）。"""
+        from data.persistence.daos.quote_dao import _TABLE_DATE_COLUMN_MAP
+
+        missing = sorted(set(HistoricalSyncStrategy.SYNCED_TABLES) - set(_TABLE_DATE_COLUMN_MAP))
+        assert not missing, f"SYNCED_TABLES 中未登记进 _TABLE_DATE_COLUMN_MAP 的表: {missing}"
+
+
 class TestSyncTypeConsistency:
     """Test cases for type consistency in data synchronization."""
 
