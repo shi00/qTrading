@@ -1782,6 +1782,117 @@ class TestCatchupLogic:
             # 两天都尝试同步（首日失败后继续次日）
             assert mock_dp_instance.sync_daily_market_snapshot.await_count == 2
 
+    @pytest.mark.asyncio
+    async def test_mid_batch_exception_does_not_advance_to_last_day(self):
+        """MAJOR-05: 中间某日同步异常（失败早于失败表登记段）→ 水位不得推进到末位，
+        只推进到最后一个连续成功日；且部分推进之后失败退避仍生效。"""
+        svc = _make_svc()
+        calls = {"n": 0}
+
+        async def _sync(trade_date=None, sync_result=None):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("day2 system failure before failure registration")
+
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.sync_daily_market_snapshot = AsyncMock(side_effect=_sync)
+        mock_tm_instance = MagicMock()
+        mock_tm_instance.update_progress.return_value = True
+        fixed_now = datetime(2024, 6, 15, 12, 0, 0)
+        with (
+            patch("utils.scheduler_service.get_now", return_value=fixed_now),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            patch("data.sync.base.SyncResult", return_value=SyncResult()),
+            patch("utils.scheduler_service.logger.warning"),
+        ):
+            svc._persist_run_date_db = AsyncMock()
+            await svc._catchup_logic(
+                "task1",
+                [date(2024, 6, 12), date(2024, 6, 13), date(2024, 6, 14)],
+            )
+
+        # 只推进到第 1 日（20240612），绝不推进到末位（20240614）
+        svc._persist_run_date_db.assert_awaited_once_with(
+            "sched_last_daily_update",
+            "scheduler_last_daily_update",
+            "20240612",
+        )
+        assert svc._last_update_date == "20240612"
+        # 部分推进位于记失败之前，故本次失败退避未被水位推进的清零逻辑抹掉
+        assert svc._catchup_consecutive_failures == 1
+        assert svc._catchup_next_retry_at == fixed_now + timedelta(seconds=30)
+        # D7-6: 失败原因含「未记账的失败日」（reason 经 DataSanitizer 脱敏，故断言包含）
+        assert "20240613" in svc._job_last_failure_reason["daily_update"]
+
+    @pytest.mark.asyncio
+    async def test_first_day_exception_does_not_advance_watermark(self):
+        """MAJOR-05: 首日即失败（其后不存在可推进的连续成功日）→ 不推进水位，仅记失败退避。"""
+        svc = _make_svc()
+        calls = {"n": 0}
+
+        async def _sync(trade_date=None, sync_result=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("day1 failure before failure registration")
+
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.sync_daily_market_snapshot = AsyncMock(side_effect=_sync)
+        mock_tm_instance = MagicMock()
+        mock_tm_instance.update_progress.return_value = True
+        fixed_now = datetime(2024, 6, 15, 12, 0, 0)
+        with (
+            patch("utils.scheduler_service.get_now", return_value=fixed_now),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            patch("data.sync.base.SyncResult", return_value=SyncResult()),
+            patch("utils.scheduler_service.logger.warning"),
+        ):
+            svc._mark_daily_update_done_db = AsyncMock()
+            await svc._catchup_logic("task1", [date(2024, 6, 12), date(2024, 6, 13)])
+
+        svc._mark_daily_update_done_db.assert_not_called()
+        assert svc._last_update_date is None
+        assert svc._catchup_consecutive_failures == 1
+        assert svc._catchup_next_retry_at == fixed_now + timedelta(seconds=30)
+
+    @pytest.mark.asyncio
+    async def test_critical_only_failure_day_not_treated_as_contiguous_success(self):
+        """MAJOR-05/R21: 「无异常但关键表登记失败」的日子不算连续成功日——不得据其推进水位，
+        否则该关键表失败日会被永久移出补偿区间（已知不可信被伪装为已完成）。"""
+        svc = _make_svc()
+        calls = {"n": 0}
+
+        async def _sync(trade_date=None, sync_result=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # historical.py 仅 quotes+basic 同时失败才 raise；仅其一失败时无异常、只登记失败表
+                sync_result.failed_critical_tables.append("daily_quotes")
+            elif calls["n"] == 2:
+                raise RuntimeError("day2 failure before failure registration")
+
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.sync_daily_market_snapshot = AsyncMock(side_effect=_sync)
+        mock_tm_instance = MagicMock()
+        mock_tm_instance.update_progress.return_value = True
+        with (
+            patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 12, 0, 0)),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            patch("data.sync.base.SyncResult", return_value=SyncResult()),
+            patch("utils.scheduler_service.logger.warning"),
+        ):
+            svc._mark_daily_update_done_db = AsyncMock()
+            await svc._catchup_logic(
+                "task1",
+                [date(2024, 6, 12), date(2024, 6, 13), date(2024, 6, 14)],
+            )
+
+        # 第 1 日关键表失败 → 不可作为连续成功日，水位不得推进（含不得推进到第 1 日）
+        svc._mark_daily_update_done_db.assert_not_called()
+        assert svc._last_update_date is None
+        assert mock_dp_instance.sync_daily_market_snapshot.await_count == 3
+
 
 class TestOnJobMissedCatchup:
     """D6-1: _on_job_missed 对业务 job 触发补偿检查。"""

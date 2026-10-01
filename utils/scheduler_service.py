@@ -796,8 +796,10 @@ class SchedulerService:
 
         同步层 `HistoricalSyncStrategy.sync_daily_market_snapshot(trade_date=d)` 已有
         check_data_exists 缓存跳过，重复同步安全（天然续传）。逐日捕获异常（CancelledError
-        重抛、其他异常记日志后继续），单日失败不中断整批；全部结束后按 is_complete 判定
-        是否推进幂等键，已成功日期下次被 check_data_exists 跳过。
+        重抛、其他异常记日志后继续），单日失败不中断整批。
+        MAJOR-05: 幂等键的推进以「每一天都明确成功」为准，而非仅看共享 sync_result 的
+        is_complete——单日同步的系统级异常在失败表登记段（historical.py 的 _record_failed）
+        之前就重抛，该日「失败了却没记账」，只看 is_complete 会把未记账的失败日当成功。
         """
         from services.task_manager import TaskManager  # lazy-import: 启动性能
         from data.data_processor import DataProcessor  # lazy-import: 启动性能
@@ -807,6 +809,17 @@ class SchedulerService:
         processor = DataProcessor()
         sync_result = SyncResult()
         total = len(missed_dates)
+        # MAJOR-05 逐日记账：
+        # - failed_dates：抛异常的日子（该日失败未反映到 sync_result）；
+        # - contiguous_success_end：最后一个「无异常且关键表全部成功」的连续日。
+        # 关键表仅其一失败时单日同步不抛异常（historical.py 仅两者都失败才 raise），故
+        # 不能只按「无异常」判定成功；failed_critical_tables 批内只增不减、is_complete 单调，
+        # 一旦为假即冻结，保证部分推进时水位不越过任何关键表失败日（R21/R22）。
+        # 已知边界（不在本次修复内，属报告 MINOR-02/MAJOR-02）：关键表因权限被拒时单日同步
+        # 同样不抛异常、也不登记失败表（SYNC_RESULT_SKIPPED_PERMISSION），本层无法区分该日的
+        # 「无数据」与「合法空」，仍会判为成功。
+        failed_dates: list[datetime.date] = []
+        contiguous_success_end: datetime.date | None = None
         for i, d in enumerate(missed_dates):
             if not tm.update_progress(
                 task_id, i / total, Message("sched_catchup_progress", {"date": d.strftime("%Y%m%d")})
@@ -817,6 +830,7 @@ class SchedulerService:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                failed_dates.append(d)
                 log_classified(
                     logger,
                     e,
@@ -825,18 +839,36 @@ class SchedulerService:
                     d.strftime("%Y%m%d"),
                     exc_info=True,
                 )
-        # D1-2: 幂等键以 is_complete 为准（关键表全部成功）
-        if sync_result.is_complete:
+                continue
+            if not failed_dates and sync_result.is_complete:
+                contiguous_success_end = d
+        # D1-2/MAJOR-05: 仅「全部日期成功且关键表全成功」才推进到最后一个遗漏交易日。
+        if not failed_dates and sync_result.is_complete:
             latest = missed_dates[-1]
             await self._mark_daily_update_done_db(latest.strftime("%Y%m%d"))
             return Message("sched_catchup_done", {"days": total})
+        # MAJOR-05: 存在失败日 → 不推进到末位，使失败日及其之后仍留在补偿区间内；
+        # 若失败日之前有连续成功日，只推进到该日（水位单调由 _mark_daily_update_done_db
+        # 的内存 max() + DB GREATEST 保证，R22），避免这些已成功日反复重试。
+        if failed_dates and contiguous_success_end is not None:
+            await self._mark_daily_update_done_db(contiguous_success_end.strftime("%Y%m%d"))
+            logger.warning(
+                "[Scheduler] Catch-up partially advanced watermark to %s (failed days: %s), NOT marking last day done",
+                contiguous_success_end.strftime("%Y%m%d"),
+                [d.strftime("%Y%m%d") for d in failed_dates],
+            )
         logger.warning(
             "[Scheduler] Catch-up NOT complete (critical=%s), NOT marking done",
             sync_result.failed_critical_tables,
         )
         # D7-1/MAJOR-01: 记录失败并退避，避免看门狗每 30 秒重复提交（消耗配额 + 刷屏任务面板）。
-        # D7-6: 同时记录失败原因（关键表清单）供状态面板展示。
-        self._record_catchup_failure(reason=f"failed_critical_tables={sync_result.failed_critical_tables}")
+        # 必须置于水位推进之后——_mark_daily_update_done_db 内部会清零退避状态，顺序颠倒会
+        # 使本次刚设置的退避被立刻清掉。
+        # D7-6: 同时记录失败原因（关键表清单 + 未记账失败日）供状态面板展示。
+        reason = f"failed_critical_tables={sync_result.failed_critical_tables}"
+        if failed_dates:
+            reason = f"failed_days={[d.strftime('%Y%m%d') for d in failed_dates]} {reason}"
+        self._record_catchup_failure(reason=reason)
         return Message("sched_catchup_partial", {"days": total})
 
     async def _run_daily_update(self):
