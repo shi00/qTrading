@@ -3,6 +3,7 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import logging
 import pytest
 import datetime
 import sqlalchemy as sa
@@ -378,6 +379,17 @@ class TestQuoteDaoGetCachedDatesForTable:
         result = await dao.get_cached_dates_for_table("daily_quotes")
         assert result == set()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("table", ["top_inst", "stk_limit"])
+    async def test_review09_24_major01_tables_registered(self, table, caplog):
+        """review09-24 dim05 MAJOR-01：新增同步表不得再走「Invalid table name rejected」分支。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"trade_date": ["20240615"]}))
+        with caplog.at_level(logging.WARNING, logger="data.persistence.daos.quote_dao"):
+            result = await dao.get_cached_dates_for_table(table)
+        assert "Invalid table name rejected" not in caplog.text
+        assert result == {"20240615"}
+
 
 class TestQuoteDaoCheckDataExists:
     @pytest.mark.asyncio
@@ -470,6 +482,27 @@ class TestQuoteDaoCheckDataExists:
             )
             result = await dao.check_data_exists("20240615", tables=["daily_quotes", "daily_indicators"])
             assert result is False
+
+    @pytest.mark.asyncio
+    async def test_review09_24_major01_stk_limit_visible_to_existence_check(self):
+        """review09-24 dim05 MAJOR-01：stk_limit 缺数据时存在性检查必须可见并返回 False（不再被白名单静默过滤）。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.check_data_exists("20240615", tables=["daily_quotes", "stk_limit"])
+        assert result is False
+
+        dao._read_db_select = AsyncMock(
+            return_value=pd.DataFrame({"tbl": ["daily_quotes", "stk_limit"], "val": [1, 1]})
+        )
+        result = await dao.check_data_exists("20240615", tables=["daily_quotes", "stk_limit"])
+        assert result is True
+
+    def test_review09_24_major01_default_synced_tables_include_new_tables(self):
+        """review09-24 dim05 MAJOR-01：白名单补齐后，新表须出现在默认同步表集合中。"""
+        from data.persistence.daos.quote_dao import _get_default_synced_tables
+
+        default_tables = set(_get_default_synced_tables())
+        assert {"stk_limit", "top_inst"} <= default_tables
 
     @pytest.mark.asyncio
     async def test_uses_sqlalchemy_core_not_raw_sql(self):
@@ -987,6 +1020,43 @@ class TestQuoteDaoGetBulkSyncQualityScores:
             mf = result[datetime.date(2024, 6, 15)]["tables"]["moneyflow_daily"]
             assert mf.get("exempt") is not True
             assert mf["ratio"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_review09_24_major01_new_tables_registered_in_scoring(self):
+        """review09-24 dim05 MAJOR-01：stk_limit 计入加权评分（非豁免），top_inst 走低频豁免。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+
+        async def _counts(table, start, end):
+            return {datetime.date(2024, 6, 15): 4800 if table == "daily_quotes" else 0}
+
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
+        dao.get_bulk_table_counts = AsyncMock(side_effect=_counts)
+        dao.get_field_completeness = AsyncMock(return_value={})
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes", "stk_limit", "top_inst"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quotes_tolerance_ratio": 0.90,
+                "indicators_tolerance_ratio": 0.80,
+                "moneyflow_tolerance_ratio": 0.70,
+                "quality_weights": {"daily_quotes": 10, "stk_limit": 5},
+            }
+            result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
+            day = result[datetime.date(2024, 6, 15)]
+
+            stk_limit = day["tables"]["stk_limit"]
+            assert stk_limit.get("exempt") is not True
+            assert stk_limit["expected"] == int(4800 * 0.90)
+            assert stk_limit["passed"] is False
+            assert any(issue.startswith("stk_limit:") for issue in day["issues"])
+
+            top_inst = day["tables"]["top_inst"]
+            assert top_inst.get("exempt") is True
+            assert top_inst["ratio"] is None
 
 
 class TestQuoteDaoCoverageGaps:

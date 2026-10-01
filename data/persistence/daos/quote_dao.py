@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_SYNCED_TABLES: list[str] | None = None
 
-LOW_FREQUENCY_TABLES = {"limit_list", "suspend_d", "top_list", "block_trade"}
+LOW_FREQUENCY_TABLES = {"limit_list", "suspend_d", "top_list", "top_inst", "block_trade"}
 
 # DS-01: index_daily 期望行数在运行期按 indices_to_sync()（含配置基准）派生，见本
 # 函数对 index_daily 的 special-case；此处保留基准下限值，供集成测试读取/断言。
@@ -47,6 +47,37 @@ FIXED_EXPECTED_TABLES: dict[str, int] = {
     "index_dailybasic": len(MAJOR_INDICES),
     "moneyflow_hsgt": 1,
 }
+
+
+def _build_table_tolerance_map(config: dict[str, typing.Any]) -> dict[str, float]:
+    """质量评分各表容忍系数登记表（期望行数 = int(参照基数 * 容忍系数)）。
+
+    未登记的表回落默认 0.80（见 get_bulk_sync_quality_scores）。新增同步表时必须显式
+    登记于此、或登记进 LOW_FREQUENCY_TABLES / FIXED_EXPECTED_TABLES，否则会被一致性
+    守护测试拦下（tests/unit/test_sync_type_consistency.py）。
+
+    review09-24 dim05 MAJOR-01：stk_limit 与 daily_quotes 同源同密度（Tushare doc_id=183
+    返回「全市场（含 A/B 股与基金）每日涨跌停价格」，每交易日每标的 1 行），故取与行情
+    一致的容忍系数，仅容忍个别标的缺行。
+    """
+    return {
+        "daily_quotes": config["quotes_tolerance_ratio"],
+        "daily_indicators": config["indicators_tolerance_ratio"],
+        "moneyflow_daily": config["moneyflow_tolerance_ratio"],
+        "margin_daily": config["moneyflow_tolerance_ratio"],
+        "northbound_holding": 0.50,
+        "limit_list": 0.30,
+        "suspend_d": 0.10,
+        # tolerance values below are not used for expected count calculation
+        # (FIXED_EXPECTED_TABLES provides fixed expected counts instead).
+        "index_daily": 0.95,
+        "index_dailybasic": 0.95,
+        "top_list": 0.30,
+        "stk_limit": config["quotes_tolerance_ratio"],
+        "block_trade": 0.20,
+        "moneyflow_hsgt": 0.95,
+    }
+
 
 _SAFE_TABLE_NAMES: frozenset[str] = frozenset(
     {
@@ -61,8 +92,10 @@ _SAFE_TABLE_NAMES: frozenset[str] = frozenset(
         "index_weight",
         "limit_list",
         "top_list",
+        "top_inst",
         "block_trade",
         "suspend_d",
+        "stk_limit",
         "financial_reports",
         "fina_audit",
         "fina_forecast",
@@ -79,6 +112,26 @@ _SAFE_TABLE_NAMES: frozenset[str] = frozenset(
         "market_news",
     }
 )
+
+# get_cached_dates_for_table 支撑的「表名 → 日期列」登记表（断点续传用）。
+# 新增同步表时须在此登记（守护测试见 tests/unit/test_sync_type_consistency.py），
+# 否则 get_cached_dates_for_table 会按「非法表名」拒绝并返回空集。
+_TABLE_DATE_COLUMN_MAP: dict[str, str] = {
+    "daily_quotes": "trade_date",
+    "daily_indicators": "trade_date",
+    "moneyflow_daily": "trade_date",
+    "northbound_holding": "trade_date",
+    "moneyflow_hsgt": "trade_date",
+    "margin_daily": "trade_date",
+    "limit_list": "trade_date",
+    "suspend_d": "trade_date",
+    "top_list": "trade_date",
+    "top_inst": "trade_date",
+    "block_trade": "trade_date",
+    "stk_limit": "trade_date",
+    "index_daily": "trade_date",
+    "index_dailybasic": "trade_date",
+}
 
 
 def _get_default_synced_tables() -> list[str]:
@@ -412,28 +465,13 @@ class QuoteDao(BaseDao):
     async def get_cached_dates_for_table(self, table_name: str) -> set:
         """
         Get distinct dates from a table for breakpoint resume check.
-        Supports tables with trade_date, end_date, or ann_date columns.
+        Supports tables registered in _TABLE_DATE_COLUMN_MAP.
         """
-        date_col_map = {
-            "daily_quotes": "trade_date",
-            "daily_indicators": "trade_date",
-            "moneyflow_daily": "trade_date",
-            "northbound_holding": "trade_date",
-            "moneyflow_hsgt": "trade_date",
-            "margin_daily": "trade_date",
-            "limit_list": "trade_date",
-            "suspend_d": "trade_date",
-            "top_list": "trade_date",
-            "block_trade": "trade_date",
-            "index_daily": "trade_date",
-            "index_dailybasic": "trade_date",
-        }
-
-        if table_name not in date_col_map:
+        if table_name not in _TABLE_DATE_COLUMN_MAP:
             logger.warning("[QuoteDao] Invalid table name rejected: %s", table_name)
             return set()
 
-        date_col = date_col_map[table_name]
+        date_col = _TABLE_DATE_COLUMN_MAP[table_name]
 
         if not _is_safe_identifier(table_name) or not _is_safe_identifier(date_col):
             logger.warning("[QuoteDao] Invalid identifier rejected: table=%s, col=%s", table_name, date_col)
@@ -962,22 +1000,7 @@ class QuoteDao(BaseDao):
         for table in tables:
             table_counts[table] = await self.get_bulk_table_counts(table, start_date, end_date)
 
-        table_tolerance_map = {
-            "daily_quotes": config["quotes_tolerance_ratio"],
-            "daily_indicators": config["indicators_tolerance_ratio"],
-            "moneyflow_daily": config["moneyflow_tolerance_ratio"],
-            "margin_daily": config["moneyflow_tolerance_ratio"],
-            "northbound_holding": 0.50,
-            "limit_list": 0.30,
-            "suspend_d": 0.10,
-            # tolerance values below are not used for expected count calculation
-            # (FIXED_EXPECTED_TABLES provides fixed expected counts instead).
-            "index_daily": 0.95,
-            "index_dailybasic": 0.95,
-            "top_list": 0.30,
-            "block_trade": 0.20,
-            "moneyflow_hsgt": 0.95,
-        }
+        table_tolerance_map = _build_table_tolerance_map(config)
 
         results = {}
 
