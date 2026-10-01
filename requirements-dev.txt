@@ -396,8 +396,10 @@ pygments==2.21.0
     #   pytest
     #   rich
     #   rich-rst
-pyjwt==2.14.0
-    # via mcp
+pyjwt==2.15.1
+    # via
+    #   astockscreener (pyproject.toml)
+    #   mcp
 pyluach==2.3.0
     # via exchange-calendars
 pyparsing==3.3.3
