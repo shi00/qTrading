@@ -1058,7 +1058,9 @@ class TestQuoteDaoGetBulkSyncQualityScores:
 
             stk_limit = day["tables"]["stk_limit"]
             assert stk_limit.get("exempt") is not True
-            assert stk_limit["expected"] == int(4800 * 0.90)
+            # CRITICAL-01：期望行数以理论股票数 expected_base(5000) 为分母，
+            # 而非当日实际 quotes_count(4800)，避免整批残缺时完整性退化为一致性。
+            assert stk_limit["expected"] == int(5000 * 0.90)
             assert stk_limit["passed"] is False
             assert any(issue.startswith("stk_limit:") for issue in day["issues"])
 
