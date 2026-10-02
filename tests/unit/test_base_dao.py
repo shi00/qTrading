@@ -719,7 +719,15 @@ class TestBaseDaoSaveUpsert:
 class TestBaseDaoSaveUpsertDuplicatePk:
     """DAT-09: _save_upsert 通用防线——API 返回重复主键时告警，防止静默丢行被忽视。"""
 
-    async def _run_save_upsert(self, dao, df, columns, pk_columns, mock_conn):
+    async def _run_save_upsert(
+        self,
+        dao,
+        df,
+        columns,
+        pk_columns,
+        mock_conn,
+        conflict_columns=None,
+    ):
         mock_table = MagicMock()
         mock_col_pk = MagicMock()
         mock_col_pk.name = pk_columns[0]
@@ -750,6 +758,7 @@ class TestBaseDaoSaveUpsertDuplicatePk:
                 columns,
                 pk_columns,
                 conn=mock_conn,
+                conflict_columns=conflict_columns,
             )
 
     @pytest.mark.asyncio
@@ -784,6 +793,52 @@ class TestBaseDaoSaveUpsertDuplicatePk:
         with caplog.at_level(logging.WARNING):
             await self._run_save_upsert(dao, df, ["id", "col_a"], ["id"], mock_conn)
         assert "主键重复" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_return_value_excludes_silently_merged_rows(self):
+        """CRITICAL-02: 返回值须为实际落库行数（去重后），而非提交行数。
+
+        1000 行输入、300 行主键重复 → 去重后 700 行；若返回提交行数 1000，
+        上游 save_if_ok 的 saved 将恒等于 fetched，行数完整性校验永不触发。
+        """
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        dao = BaseDao(mock_engine)
+        dup_ids = list(range(700)) + list(range(300))  # 1000 行，700 个唯一主键
+        df = pd.DataFrame({"id": dup_ids, "col_a": ["v"] * 1000})
+        result = await self._run_save_upsert(dao, df, ["id", "col_a"], ["id"], mock_conn)
+        assert result == 700
+
+    @pytest.mark.asyncio
+    async def test_return_value_equals_row_count_when_unique(self):
+        """无重复冲突键时返回值等于输入行数（无丢行）。"""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        dao = BaseDao(mock_engine)
+        df = pd.DataFrame({"id": [1, 2, 3, 4], "col_a": ["w", "x", "y", "z"]})
+        result = await self._run_save_upsert(dao, df, ["id", "col_a"], ["id"], mock_conn)
+        assert result == 4
+
+    @pytest.mark.asyncio
+    async def test_return_value_dedups_by_conflict_columns_not_pk(self):
+        """CRITICAL-02: 去重口径须为 ON CONFLICT 冲突键，而非主键。
+
+        pk_columns=['id'] 唯一（3 行），但 conflict_columns=['col_a'] 有两行同值 →
+        实际落库 2 行；若按主键去重会误报 3 行，掩盖自定义冲突键场景的静默合并。
+        """
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        dao = BaseDao(mock_engine)
+        df = pd.DataFrame({"id": [1, 2, 3], "col_a": ["a", "a", "b"]})
+        result = await self._run_save_upsert(
+            dao,
+            df,
+            ["id", "col_a"],
+            ["id"],
+            mock_conn,
+            conflict_columns=["col_a"],
+        )
+        assert result == 2
 
 
 class TestBaseDaoWriteDbExtended:
