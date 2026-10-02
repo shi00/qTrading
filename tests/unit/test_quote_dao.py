@@ -3,6 +3,7 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
 import logging
 import pytest
 import datetime
@@ -868,6 +869,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 0})
         dao.get_bulk_table_counts = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with patch(
             "data.persistence.daos.quote_dao._get_effective_synced_tables",
             return_value=["daily_quotes"],
@@ -882,6 +884,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
         dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 4800})
         dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -905,6 +908,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
         dao.get_bulk_table_counts = AsyncMock(return_value={})
         dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -932,6 +936,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
         dao.get_bulk_table_counts = AsyncMock(side_effect=_counts)
         dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -965,6 +970,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
         dao.get_bulk_table_counts = AsyncMock(side_effect=_counts)
         dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -999,6 +1005,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
         dao.get_bulk_table_counts = AsyncMock(side_effect=_counts)
         dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1032,6 +1039,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
         dao.get_bulk_table_counts = AsyncMock(side_effect=_counts)
         dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1057,6 +1065,225 @@ class TestQuoteDaoGetBulkSyncQualityScores:
             top_inst = day["tables"]["top_inst"]
             assert top_inst.get("exempt") is True
             assert top_inst["ratio"] is None
+
+    @pytest.mark.asyncio
+    async def test_review09_24_major04_stale_stock_basic_adds_issue(self):
+        """MAJOR-04：stock_basic 陈旧（分母不可信）时须在 issues 中显式告警。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
+        dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 4800})
+        dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 5, 1))
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quotes_tolerance_ratio": 0.90,
+                "indicators_tolerance_ratio": 0.80,
+                "moneyflow_tolerance_ratio": 0.70,
+                "quality_weights": {"daily_quotes": 10},
+            }
+            result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
+            day = result[datetime.date(2024, 6, 15)]
+            assert day["tables"]["daily_quotes"]["passed"] is True
+            assert day["issues"] == [
+                "stock_basic 最近更新 2024-05-01，早于交易日 2024-06-15 超过 7 天，理论股票数可能偏低"
+            ]
+            # warn-only：告警不调低 score（stock_basic 不在 SYNCED_TABLES，降分只会引发无效重抓）。
+            # 96 = 覆盖率 0.96(4800/5000) × 权重 10 / 权重 10；陈旧告警不额外扣分。
+            assert day["score"] == 96
+
+    @pytest.mark.parametrize(
+        ("updated", "expect_stale"),
+        [
+            (datetime.date(2024, 6, 8), False),  # 恰好 7 天（== 阈值）不告警
+            (datetime.date(2024, 6, 7), True),  # 超过 7 天告警
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_review09_24_major04_staleness_threshold_boundary(self, updated, expect_stale):
+        """MAJOR-04：陈旧判据为严格大于 `_STOCK_BASIC_STALENESS_MAX_DAYS`(7) 天。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
+        dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 4800})
+        dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=updated)
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quotes_tolerance_ratio": 0.90,
+                "indicators_tolerance_ratio": 0.80,
+                "moneyflow_tolerance_ratio": 0.70,
+                "quality_weights": {"daily_quotes": 10},
+            }
+            result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
+            stale_issues = [
+                issue
+                for issue in result[datetime.date(2024, 6, 15)]["issues"]
+                if issue.startswith("stock_basic 最近更新")
+            ]
+            assert bool(stale_issues) is expect_stale
+
+    @pytest.mark.asyncio
+    async def test_review09_24_major04_fresh_stock_basic_no_staleness_issue(self):
+        """MAJOR-04：stock_basic 新鲜（滞后不超阈值）时不产生陈旧告警。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
+        dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 4800})
+        dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quotes_tolerance_ratio": 0.90,
+                "indicators_tolerance_ratio": 0.80,
+                "moneyflow_tolerance_ratio": 0.70,
+                "quality_weights": {"daily_quotes": 10},
+            }
+            result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
+            assert result[datetime.date(2024, 6, 15)]["issues"] == []
+
+    @pytest.mark.asyncio
+    async def test_review09_24_major04_future_updated_no_staleness_issue(self):
+        """MAJOR-04：stock_basic 更新时刻晚于交易日（时钟偏差/历史回填）时不得误报陈旧。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
+        dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 4800})
+        dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 20))
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quotes_tolerance_ratio": 0.90,
+                "indicators_tolerance_ratio": 0.80,
+                "moneyflow_tolerance_ratio": 0.70,
+                "quality_weights": {"daily_quotes": 10},
+            }
+            result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
+            assert result[datetime.date(2024, 6, 15)]["issues"] == []
+
+    @pytest.mark.asyncio
+    async def test_review09_24_major04_unknown_freshness_adds_issue(self):
+        """MAJOR-04 / R21：无法判定 stock_basic 新鲜度（None）时不得静默放行，须显式告警。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
+        dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 4800})
+        dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=None)
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quotes_tolerance_ratio": 0.90,
+                "indicators_tolerance_ratio": 0.80,
+                "moneyflow_tolerance_ratio": 0.70,
+                "quality_weights": {"daily_quotes": 10},
+            }
+            result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
+            assert result[datetime.date(2024, 6, 15)]["issues"] == [
+                "无法确认 stock_basic 新鲜度（查询失败或表为空），理论股票数可能不准"
+            ]
+
+    @pytest.mark.asyncio
+    async def test_review09_24_major04_quotes_exceed_expected_base_warns(self):
+        """MAJOR-04：daily_quotes 行数超过理论股票数（分母漏了标的）时须告警，避免被截顶掩盖。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
+        dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5200})
+        dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quotes_tolerance_ratio": 0.90,
+                "indicators_tolerance_ratio": 0.80,
+                "moneyflow_tolerance_ratio": 0.70,
+                "quality_weights": {"daily_quotes": 10},
+            }
+            result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
+            day = result[datetime.date(2024, 6, 15)]
+            assert day["tables"]["daily_quotes"]["ratio"] == 1.0
+            assert day["issues"] == ["daily_quotes 行数(5200)超过理论股票数(5000)，stock_basic 可能陈旧"]
+
+
+class TestQuoteDaoStockBasicLatestUpdatedDate:
+    """MAJOR-04：stock_basic 新鲜度判据查询方法的边界与异常传播。"""
+
+    def _make_dao(self, read_result=None, side_effect=None):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        if side_effect is not None:
+            dao._read_db = AsyncMock(side_effect=side_effect)
+        else:
+            dao._read_db = AsyncMock(return_value=read_result)
+        return dao
+
+    @pytest.mark.asyncio
+    async def test_timestamp_value_returns_date(self):
+        dao = self._make_dao(read_result=pd.DataFrame({"latest_updated": [pd.Timestamp("2024-06-15 08:30:00")]}))
+        assert await dao.get_stock_basic_latest_updated_date() == datetime.date(2024, 6, 15)
+
+    @pytest.mark.asyncio
+    async def test_plain_date_value_returns_date(self):
+        dao = self._make_dao(read_result=pd.DataFrame({"latest_updated": [datetime.date(2024, 6, 15)]}))
+        assert await dao.get_stock_basic_latest_updated_date() == datetime.date(2024, 6, 15)
+
+    @pytest.mark.asyncio
+    async def test_nat_value_returns_none(self):
+        dao = self._make_dao(read_result=pd.DataFrame({"latest_updated": [pd.NaT]}))
+        assert await dao.get_stock_basic_latest_updated_date() is None
+
+    @pytest.mark.asyncio
+    async def test_empty_result_returns_none(self):
+        dao = self._make_dao(read_result=pd.DataFrame())
+        assert await dao.get_stock_basic_latest_updated_date() is None
+
+    @pytest.mark.asyncio
+    async def test_query_error_returns_none(self):
+        dao = self._make_dao(side_effect=Exception("db error"))
+        assert await dao.get_stock_basic_latest_updated_date() is None
+
+    @pytest.mark.asyncio
+    async def test_propagates_engine_disposed(self):
+        dao = self._make_dao(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError, match="disposed"):
+            await dao.get_stock_basic_latest_updated_date()
+
+    @pytest.mark.asyncio
+    async def test_propagates_cancelled_error(self):
+        """R2：asyncio.CancelledError 不得被吞，必须向上传播以配合优雅停机。"""
+        cancelled = asyncio.CancelledError()
+        dao = self._make_dao(side_effect=cancelled)
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await dao.get_stock_basic_latest_updated_date()
+        assert exc_info.value is cancelled
 
 
 class TestQuoteDaoCoverageGaps:
@@ -1154,6 +1381,7 @@ class TestQuoteDaoCoverageGaps:
             }
         )
         dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1177,6 +1405,7 @@ class TestQuoteDaoCoverageGaps:
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
         dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 100})
         dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1222,6 +1451,7 @@ class TestQuoteDaoCoverageGaps:
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
         dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 4800})
         dao.get_field_completeness = AsyncMock(return_value={"roe": 0.8, "pe_ttm": 0.9})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1504,6 +1734,7 @@ class TestQuoteDaoEngineDisposedErrorPropagation:
                 }
                 dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 1, 15): 100})
                 dao.get_bulk_table_counts = AsyncMock(return_value={})
+                dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 1, 15))
                 dao.get_field_completeness = AsyncMock(side_effect=EngineDisposedError("disposed"))
                 with pytest.raises(EngineDisposedError, match="disposed"):
                     await dao.get_bulk_sync_quality_scores("20240115", "20240115")
