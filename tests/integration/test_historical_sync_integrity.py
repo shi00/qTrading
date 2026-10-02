@@ -582,7 +582,8 @@ class TestLowFrequencyTableScoring:
         """
         低频表不应抬高质量分数
 
-        场景：高频表 ratio=0.9，低频表 ratio=None/exempt=True
+        场景：高频表 ratio=0.96（4800/5000，≥ quotes_tolerance_ratio 0.95 不触发 CRITICAL-01
+        一票否决），低频表 ratio=None/exempt=True
         期望：分数仅基于高频表计算，不被低频表抬高
         """
         from data.persistence.daos.quote_dao import LOW_FREQUENCY_TABLES
@@ -601,7 +602,7 @@ class TestLowFrequencyTableScoring:
                 return pd.DataFrame(
                     {
                         "trade_date": [datetime.date(2024, 1, 1)],
-                        "cnt": [4500],
+                        "cnt": [4800],
                     }
                 )
             return pd.DataFrame()
@@ -1113,7 +1114,7 @@ class TestP1IndexTablesInLowFrequency:
         """
         测试指数/聚合表使用固定期望值而非股票数比例
 
-        场景：index_daily/index_dailybasic/moneyflow_hsgt 不应使用 reference_count * tolerance
+        场景：index_daily/index_dailybasic/moneyflow_hsgt 不应使用"股票数 × 容差"的比例期望
         """
         from data.persistence.daos.quote_dao import FIXED_EXPECTED_TABLES
 
