@@ -47,6 +47,27 @@
 
 ## 历史核验记录
 
+### Flet 1.0.3 patch 升级核验 @ 1.0 系列 (2026-10-02)
+
+- **API**: V1 声明式 API + 私有 API + flet_charts API + flet-mcp（同版本锁定）+ `Semantics.identifier`（延续 1.0.2 引入的锚点通道，本次不改生产渲染）
+- **锁定版本**: Flet 1.0.3（pyproject.toml 实际锁定；flet/flet-desktop/flet-charts/flet-code-editor/flet-mcp 五包同版本升级，flet-web CI pin 同步）
+- **核验来源**:
+  - 官方 CHANGELOG（GitHub Release `v1.0.3`）: patch 升级，无破坏性 API 变更。要点：新增（additive）`FletApp.wait_idle()`、`TextField.on_paste_files`；修复 `Dropdown.expanded_insets` 在 `expand` 下失效、`Tabs` 同时改 `selected_index` 与 `length` 时忽略新值、**多子控件子项匹配由「按位置」改为「按 control id」**、`FilePicker.upload()` 多文件错配、`FletApp.on_error` 崩溃不触发。
+  - 项目影响面（grep 实测）: `expanded_insets` / `FilePicker.upload()` / `FletApp` 全仓零调用 → 三项判 **N/A**；最高回归面为 `ui/components/virtual_table.py`（`TableRow` 刻意不设显式 key、依赖「按列表位置复用实例」）与 `ft.Tabs(selected_index=...)`（`ui/views/data_view.py`、`ui/components/backtest/backtest_result_panel.py`）。
+  - 项目运行期验证（flet-mcp 1.0.3）: `flet_mcp.mcp.name == "flet-mcp"`，server 可加载；`pip list` 实测 `flet` / `flet-charts` / `flet-code-editor` / `flet-desktop` / `flet-mcp` / `flet-web` 六包均为 `1.0.3`
+  - E2E 资源验证: 升级前后 engineRevision 一致（`0cd610717bde95fd88343c64f81c11ba4e5c0010`，Flutter 引擎未变），`tests/e2e/mock_assets/canvaskit/` 无需重新同步；字体缓存 `sync_e2e_fonts.py` 输出 `[OK] 字体缓存完整`
+  - **本地未运行（按用户指示交由 CI 流水线验证，不得视为已通过）**: 全量单元测试、Flet 契约专项、E2E 全量回归、`ruff`/`ruff format`/`pre-commit`/`pyright`/`check_docs_consistency.py`
+- **项目结论**: 继续使用（最终以 CI 门禁结果为准）
+  - 理由: 1.0.3 为 patch 升级、无破坏性 API 变更；Flutter 引擎与 E2E 离线资源零变化。需重点回归的「子项按 control id 匹配」语义作用于 `virtual_table` 位置复用路径，已交由 CI 单测/E2E 覆盖。1.0.2 核验结论（2026-09-29）在 1.0.3 下预期保持成立，以 CI 结果为准。
+- **需更新文件**:
+  - [x] pyproject.toml (flet 五包 1.0.2 → 1.0.3)
+  - [x] .github/workflows/ci_cd.yml / flet-nightly.yml (flet-web==1.0.3 pin ×5)
+  - [x] requirements*.txt (pip-compile 再生成)
+  - [x] docs/flet/api-verification-template.md (本核验记录)
+  - [x] docs/flet/project-differences.md (最后验证日期 → 2026-10-02)
+  - [x] docs/flet/mcp-usage.md (§6 验证日期 → 2026-10-02)
+- **核验人**: AI 助手 (Flet 1.0.3 升级批次)
+
 ### Flet 1.0.2 patch 升级核验 @ 1.0 系列 (2026-09-29)
 
 - **API**: V1 声明式 API + 私有 API + flet_charts API + flet-mcp（同版本锁定）+ `Semantics.identifier`（本版本新增，本项目启用归 PR-2）
