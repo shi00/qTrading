@@ -756,6 +756,23 @@ class StockSyncStatus(Base):
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
 
+class SyncEmptyDay(Base):
+    """稀疏表"已核实合法为空"的交易日登记（review09-24 dim05 MAJOR-03）。
+
+    PK ``(table_name, trade_date)``。仅在同步侧确认该表该日**成功 fetch 且结果为空**
+    （``result_status == SYNC_RESULT_EMPTY``，排除抓取/落库失败与无权限跳过）时写入，
+    供质量评分把"已尝试且合法为空"与"从未尝试的真实缺口"区分开，避免 dense 表已完整
+    仍因个别稀疏空表反复重同步。区别于旧实现的"已尝试水位"（存于 ``app_state`` 键
+    ``sync_attempted_upto:<table>`` 的单点高水位）：此表按 (表, 日) 精确登记。
+    """
+
+    __tablename__ = "sync_empty_days"
+    table_name = Column(String, primary_key=True)
+    trade_date = Column(Date, primary_key=True)
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
 class FinaAudit(Base):
     __tablename__ = "fina_audit"
     ts_code = Column(String, primary_key=True)

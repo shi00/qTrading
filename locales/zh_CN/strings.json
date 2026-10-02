@@ -1341,6 +1341,7 @@
     "tab_screening_thinking": "选股思考",
     "tab_sync_status": "同步状态",
     "tab_stock_sync_status": "股票同步详情",
+    "tab_sync_empty_days": "稀疏表空日登记",
     "tab_macro_economy": "宏观经济数据",
     "tab_shibor_daily": "银行间拆借利率 (Shibor)",
     "tab_stk_holdernumber": "股东户数",

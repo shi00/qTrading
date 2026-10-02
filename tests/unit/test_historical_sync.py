@@ -40,6 +40,8 @@ def make_ctx():
     ctx.cache.quote_dao.save_index_daily = AsyncMock(return_value=3)
     ctx.cache.quote_dao.save_index_dailybasic = AsyncMock(return_value=3)
     ctx.cache.sync_dao.update_sync_status = AsyncMock()
+    # MAJOR-03：无 sink（独立单日调用）时 sync_daily_market_snapshot 会直接调 mark_empty_days
+    ctx.cache.sync_dao.mark_empty_days = AsyncMock(return_value=0)
     ctx.api.get_daily_quotes = AsyncMock(
         return_value=pd.DataFrame(
             {
@@ -1917,3 +1919,73 @@ class TestHistoricalSyncWatermark:
         ):
             await strategy._run_historical_sync(5, None, result)
         assert "watermark_all_missing" not in result.warnings
+
+
+class TestHistoricalSyncEmptyDays:
+    """MAJOR-03：稀疏表"已核实合法为空"登记（sync_empty_days）。"""
+
+    @pytest.mark.asyncio
+    async def test_snapshot_records_empty_days_directly_when_no_sink(self):
+        """无 sink（独立单日调用）时逐表直接落库，且 dense 表不登记。"""
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+        recorded_tables = [c.args[0] for c in ctx.cache.sync_dao.mark_empty_days.await_args_list]
+        assert "moneyflow_daily" in recorded_tables
+        assert "moneyflow_hsgt" in recorded_tables
+        assert "northbound_holding" in recorded_tables
+        assert "daily_quotes" not in recorded_tables
+        assert "daily_indicators" not in recorded_tables
+        for call in ctx.cache.sync_dao.mark_empty_days.await_args_list:
+            assert call.args[1] == [datetime.date(2024, 6, 14)]
+
+    @pytest.mark.asyncio
+    async def test_snapshot_aggregates_empty_days_into_sink(self):
+        """批处理路径传入 empty_day_sink 时不落库，仅做内存聚合。"""
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+        sink: dict[str, set[datetime.date]] = {}
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, empty_day_sink=sink)
+        assert result is True
+        ctx.cache.sync_dao.mark_empty_days.assert_not_awaited()
+        assert sink["moneyflow_daily"] == {datetime.date(2024, 6, 14)}
+        assert sink["northbound_holding"] == {datetime.date(2024, 6, 14)}
+        assert "daily_quotes" not in sink
+
+    @pytest.mark.asyncio
+    async def test_fetch_failed_sparse_table_not_registered_as_empty(self):
+        """fetch 失败的稀疏表（result_status=FETCH_FAILED）不得登记为合法空（R21 精神）。"""
+        ctx = make_ctx()
+        ctx.api.get_moneyflow = AsyncMock(side_effect=RuntimeError("boom"))
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+        recorded_tables = [c.args[0] for c in ctx.cache.sync_dao.mark_empty_days.await_args_list]
+        assert "moneyflow_daily" not in recorded_tables
+
+    @pytest.mark.asyncio
+    async def test_northbound_missing_frame_not_registered_as_empty(self):
+        """north 无数据帧且无异常（疑似失败日）不得登记为合法空。"""
+        ctx = make_ctx()
+        ctx.api.get_hk_hold = AsyncMock(return_value=None)
+        strategy = HistoricalSyncStrategy(ctx)
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        assert result is True
+        recorded_tables = [c.args[0] for c in ctx.cache.sync_dao.mark_empty_days.await_args_list]
+        assert "northbound_holding" not in recorded_tables
+
+    @pytest.mark.asyncio
+    async def test_batch_flush_aggregates_empty_days(self):
+        """批处理边界经 _flush_empty_days 将同日多表聚合批量落库。"""
+        ctx = make_ctx()
+        ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=["20240614"])
+        strategy = HistoricalSyncStrategy(ctx)
+        result = SyncResult()
+        with patch("data.sync.historical.ConfigHandler.get_sync_batch_size", return_value=1):
+            await strategy._run_historical_sync(1, None, result)
+        by_table: dict[str, list[datetime.date]] = {}
+        for call in ctx.cache.sync_dao.mark_empty_days.await_args_list:
+            by_table[call.args[0]] = call.args[1]
+        assert by_table["moneyflow_daily"] == [datetime.date(2024, 6, 14)]
+        assert by_table["northbound_holding"] == [datetime.date(2024, 6, 14)]

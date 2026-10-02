@@ -437,6 +437,10 @@ TABLE_DEFINITIONS = {
     "stock_sync_status": {
         "alias": "tab_stock_sync_status",
     },
+    "sync_empty_days": {
+        "alias": "tab_sync_empty_days",
+        "desc": "稀疏表已核实合法为空的交易日登记（MAJOR-03；复合主键 table_name+trade_date）",
+    },
     # --- Phase 3: Policy-Driven AI Architecture ---
     "macro_economy": {
         "alias": "tab_macro_economy",
