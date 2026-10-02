@@ -143,7 +143,7 @@ class TestAKShareConceptSync:
     @pytest.mark.asyncio
     async def test_success(self):
         ctx = _make_ctx()
-        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=4)
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=4)
 
         client = AkshareConceptClient()
         client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
@@ -154,16 +154,83 @@ class TestAKShareConceptSync:
 
         assert result.status == SyncStatus.SUCCESS.value
         assert result.added > 0
-        assert ctx.cache.stock_dao.upsert_em_concepts.call_count == 1
-        records = ctx.cache.stock_dao.upsert_em_concepts.call_args.args[0]
+        assert ctx.cache.stock_dao.overwrite_em_concepts.call_count == 1
+        records = ctx.cache.stock_dao.overwrite_em_concepts.call_args.args[0]
         assert len(records) == 4  # 2 板块 × 2 成分股
+
+    @pytest.mark.asyncio
+    async def test_fully_resolved_boards_marked_for_replacement(self):
+        """review09-24 MAJOR-06: 成分全部解析成功的板块进入 replace_board_codes（删除-重建）"""
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=4)
+
+        client = AkshareConceptClient()
+        client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
+        client.get_concept_constituents = AsyncMock(return_value=_make_constituents_df())
+
+        strategy = AKShareConceptSyncStrategy(ctx)
+        await strategy.run()
+
+        kwargs = ctx.cache.stock_dao.overwrite_em_concepts.call_args.kwargs
+        assert kwargs["replace_board_codes"] == ["BK0123", "BK0456"]
+
+    @pytest.mark.asyncio
+    async def test_partially_resolved_board_not_marked_for_replacement(self):
+        """review09-24 MAJOR-06: 部分代码未解析的板块不做删除（仅 upsert），避免误删有效旧成分"""
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=2)
+        df_cons = pd.DataFrame({"代码": ["000001", "999999"], "名称": ["平安银行", "未知"]})
+
+        client = AkshareConceptClient()
+        client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
+        client.get_concept_constituents = AsyncMock(return_value=df_cons)
+
+        strategy = AKShareConceptSyncStrategy(ctx)
+        result = await strategy.run()
+
+        assert result.status == SyncStatus.SUCCESS.value
+        kwargs = ctx.cache.stock_dao.overwrite_em_concepts.call_args.kwargs
+        assert kwargs["replace_board_codes"] == []  # 两板块均有未解析码 → 均不删除
+
+    @pytest.mark.asyncio
+    async def test_empty_constituents_board_skipped_no_record(self):
+        """review09-24 MAJOR-06 / R21: 空成分响应视为不确定，不产生记录、不删除旧行"""
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
+
+        client = AkshareConceptClient()
+        client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
+        client.get_concept_constituents = AsyncMock(return_value=pd.DataFrame())
+
+        strategy = AKShareConceptSyncStrategy(ctx)
+        result = await strategy.run()
+
+        assert result.status == SyncStatus.SUCCESS.value
+        ctx.cache.stock_dao.overwrite_em_concepts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_all_codes_unresolved_board_skipped_no_record(self):
+        """review09-24 MAJOR-06 / R21: 板块全部代码未解析时不产生记录、不删除旧行"""
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
+        df_cons = pd.DataFrame({"代码": ["999999"], "名称": ["未知"]})
+
+        client = AkshareConceptClient()
+        client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
+        client.get_concept_constituents = AsyncMock(return_value=df_cons)
+
+        strategy = AKShareConceptSyncStrategy(ctx)
+        result = await strategy.run()
+
+        assert result.status == SyncStatus.SUCCESS.value
+        ctx.cache.stock_dao.overwrite_em_concepts.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_unknown_code_skipped_with_warning(self):
         """review08 D2: 成分股代码在 stocks 表权威映射中缺失时，跳过该记录并记 warning，
         不再用交易所前缀猜测 fallback .SZ。"""
         ctx = _make_ctx()
-        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=1)
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=1)
         # 默认映射含 000001/600000；999999 未知
         df_cons = pd.DataFrame(
             {
@@ -183,13 +250,13 @@ class TestAKShareConceptSync:
         assert result.added == 1  # 仅 000001 入库
         assert result.skipped == 1
         assert any("999999" in w for w in result.warnings)
-        records = ctx.cache.stock_dao.upsert_em_concepts.call_args.args[0]
+        records = ctx.cache.stock_dao.overwrite_em_concepts.call_args.args[0]
         assert all("999999.SZ" not in r["ts_code"] for r in records)  # 无 fallback 猜测
 
     @pytest.mark.asyncio
     async def test_cancel_returns_cancelled(self):
         ctx = _make_ctx()
-        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
 
         client = AkshareConceptClient()
         client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
@@ -204,7 +271,7 @@ class TestAKShareConceptSync:
     @pytest.mark.asyncio
     async def test_partial_when_constituents_fail(self):
         ctx = _make_ctx()
-        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=2)
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=2)
 
         client = AkshareConceptClient()
         client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
@@ -229,7 +296,7 @@ class TestAKShareConceptSync:
     @pytest.mark.asyncio
     async def test_empty_concept_list(self):
         ctx = _make_ctx()
-        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
 
         client = AkshareConceptClient()
         client.get_concept_list = AsyncMock(return_value=pd.DataFrame())
@@ -240,12 +307,12 @@ class TestAKShareConceptSync:
 
         assert result.status == SyncStatus.SUCCESS.value
         assert result.added == 0
-        ctx.cache.stock_dao.upsert_em_concepts.assert_not_called()
+        ctx.cache.stock_dao.overwrite_em_concepts.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_concept_list_fetch_exception(self):
         ctx = _make_ctx()
-        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
 
         client = AkshareConceptClient()
         client.get_concept_list = AsyncMock(side_effect=ConnectionError("network error"))
@@ -268,7 +335,7 @@ class TestAKShareConceptSync:
         from data.persistence.daos.base_dao import DatabaseQueryError
 
         ctx = _make_ctx()
-        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
         ctx.cache.stock_dao.get_ts_code_map = AsyncMock(side_effect=DatabaseQueryError("db down"))
 
         client = AkshareConceptClient()
@@ -281,7 +348,7 @@ class TestAKShareConceptSync:
         assert result.status == SyncStatus.FAILED.value
         assert len(result.errors) > 0
         # 映射预载失败即中止，未写入任何概念
-        ctx.cache.stock_dao.upsert_em_concepts.assert_not_called()
+        ctx.cache.stock_dao.overwrite_em_concepts.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_cancel_after_concept_list_fetch(self):
@@ -290,7 +357,7 @@ class TestAKShareConceptSync:
         验证：第二次 _check_cancelled 命中 → 直接返回 CANCELLED，不调用 constituents 拉取。
         """
         ctx = _make_ctx()
-        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
         strategy = AKShareConceptSyncStrategy(ctx)
 
         client = AkshareConceptClient()
@@ -312,10 +379,10 @@ class TestAKShareConceptSync:
     async def test_cancel_after_gather_before_upsert(self):
         """覆盖 concept_sync.py:141-142：所有 board 并发拉取完成后、upsert 前触发取消。
 
-        验证：第三次 _check_cancelled 命中 → 返回 CANCELLED，不调用 upsert_em_concepts。
+        验证：第三次 _check_cancelled 命中 → 返回 CANCELLED，不调用 overwrite_em_concepts。
         """
         ctx = _make_ctx()
-        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
         strategy = AKShareConceptSyncStrategy(ctx)
 
         client = AkshareConceptClient()
@@ -332,7 +399,7 @@ class TestAKShareConceptSync:
         result = await strategy.run()
 
         assert result.status == SyncStatus.CANCELLED.value
-        ctx.cache.stock_dao.upsert_em_concepts.assert_not_called()
+        ctx.cache.stock_dao.overwrite_em_concepts.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_cancelled_error_in_constituents_propagates(self):
@@ -343,7 +410,7 @@ class TestAKShareConceptSync:
         import asyncio as _asyncio
 
         ctx = _make_ctx()
-        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
 
         client = AkshareConceptClient()
         client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
@@ -365,7 +432,7 @@ class TestAKShareConceptSync:
         from data.persistence.daos.base_dao import EngineDisposedError
 
         ctx = _make_ctx()
-        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
 
         client = AkshareConceptClient()
         client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
@@ -380,7 +447,7 @@ class TestAKShareConceptSync:
         # _make_concept_list_df() 返回 2 个板块，所以应调用 2 次（非 6 次）
         assert client.get_concept_constituents.call_count == 2
         # records 为空，不调用 upsert
-        ctx.cache.stock_dao.upsert_em_concepts.assert_not_called()
+        ctx.cache.stock_dao.overwrite_em_concepts.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_system_level_error_propagates(self):
@@ -389,7 +456,7 @@ class TestAKShareConceptSync:
         验证 classify_severity 返回 "system" 时，logger.critical 后 raise，不吞异常。
         """
         ctx = _make_ctx()
-        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(return_value=0)
 
         client = AkshareConceptClient()
         # MemoryError 是 SYSTEM_LEVEL_EXCEPTIONS，classify_severity 返回 "system"
@@ -1730,7 +1797,7 @@ class TestEngineDisposedPropagation:
         from data.persistence.daos.base_dao import EngineDisposedError
 
         ctx = _make_ctx()
-        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(side_effect=EngineDisposedError())
+        ctx.cache.stock_dao.overwrite_em_concepts = AsyncMock(side_effect=EngineDisposedError())
 
         # 触发 EngineDisposedError 需要在 _run_impl 内部抛出
         # 通过 mock client.get_concept_list 抛出

@@ -52,6 +52,10 @@ class StockDao(BaseDao):
     AI_CONCEPT_PREFIX = "AI_LLM_"
     EM_CONCEPT_PREFIX = "EM_"
     LIMIT_CONCEPT_PREFIX = "LIMIT_"
+    # review09-24 MAJOR-06: Tushare 概念同步自有行前缀。原先把接口裸 id 直接写入
+    # concept_id（无前缀），与 EM_/AI_LLM_/LIMIT_ 混存，导致 overwrite_concepts 只能
+    # 用 EM_% 作删除谓词（误删东财行）且自身旧行永不清理。加前缀后按来源隔离。
+    TS_CONCEPT_PREFIX = "TS_"
 
     async def save_stock_basic(self, df, priority=None):
         if df is None or df.empty:
@@ -299,9 +303,12 @@ class StockDao(BaseDao):
         threshold_ms=PerfThreshold.DB_BULK_IO,
     )
     async def overwrite_concepts(self, df):
-        """
-        Transactional overwrite of concepts.
-        Clears table and inserts new data in a single transaction.
+        """事务性覆盖 Tushare 概念（仅清理 TS_ 自有行，review09-24 MAJOR-06）。
+
+        删除谓词限定 ``TS_`` 前缀（Tushare 概念同步自有行），不再误删东财 ``EM_`` /
+        AI 打标 ``AI_LLM_`` / 涨停 ``LIMIT_`` 行；删除与新数据写入在同一事务内完成。
+        LIKE 中的下划线经 ``\\_`` 转义并配合 ``ESCAPE '\\'``，避免 ``_`` 被当作单字符
+        通配符把前缀匹配范围放大（否则 ``TS_%`` 会误匹配 ``TSX…`` 类非自有行）。
         """
         if df is None or df.empty:
             return 0
@@ -321,12 +328,15 @@ class StockDao(BaseDao):
         placeholders = ",".join("$" + str(i + 1) for i in range(len(cols)))
         sql_insert = "INSERT INTO stock_concepts (" + col_str + ") VALUES (" + placeholders + ")"
 
+        # 仅删除 Tushare 自有行；下划线转义为字面量（ESCAPE '\'）
+        ts_like_pattern = self.TS_CONCEPT_PREFIX.replace("_", "\\_") + "%"
+
         try:
             async with self._guarded_begin() as conn:
-                # 1. Clear old EM-prefixed concepts only (preserve AI_LLM_ concepts)
+                # 1. Clear old Tushare-owned (TS_) concepts only; preserve EM_/AI_LLM_/LIMIT_
                 await conn.exec_driver_sql(
-                    "DELETE FROM stock_concepts WHERE concept_id LIKE $1",
-                    [f"{self.EM_CONCEPT_PREFIX}%"],
+                    "DELETE FROM stock_concepts WHERE concept_id LIKE $1 ESCAPE '\\'",
+                    [ts_like_pattern],
                 )
 
                 # 2. Insert new data
@@ -378,9 +388,8 @@ class StockDao(BaseDao):
         Get concepts for given stock codes.
         Returns: Dict[ts_code, List[concept_name]]
 
-        前缀过滤（review08-D3）：排除 ``LIMIT_`` 伪概念前缀（涨停股股票名冒充概念名），
-        仅返回 ``EM_`` / ``AI_LLM_`` 真实概念；保持与 ``get_concepts_by_prefix``
-        一致的表级前缀隔离约定。
+        前缀过滤（review08-D3）：排除 ``LIMIT_`` 伪概念前缀（涨停股股票名冒充概念名）。
+        其余前缀（``EM_`` 东财 / ``AI_LLM_`` 打标 / ``TS_`` Tushare）均为真实概念，一并返回。
         """
         if ts_codes is None:
             rows = await self._read_db(
@@ -487,24 +496,61 @@ class StockDao(BaseDao):
             pk_columns=pk_columns,
         )
 
-    async def upsert_em_concepts(self, records: list[dict]) -> int:
+    @log_async_operation(
+        operation_name="StockDao.overwrite_em_concepts",
+        threshold_ms=PerfThreshold.DB_BULK_IO,
+    )
+    async def overwrite_em_concepts(
+        self,
+        records: list[dict],
+        *,
+        replace_board_codes: list[str],
+    ) -> int:
+        """按板块事务性覆盖东财概念成分股（review09-24 MAJOR-06）。
+
+        - 仅对 ``replace_board_codes`` 中列出的板块先删除其全部 ``EM_`` 行，再 upsert
+          本次抓取的成分，从而清理「已被移出板块」的陈旧成分；
+        - 未列入的板块（抓取失败 / 成分未完全解析）不做删除，避免误删仍需保留的旧行；
+        - 删除与写入在同一事务内完成，任一步失败整体回滚。
+
+        Args:
+            records: list of dict，如 ``[{"ts_code": "000001.SZ", "concept_id": "EM_C1",
+                "concept_name": "概念1"}]``。
+            replace_board_codes: 允许「删除-重建」的板块代码列表；为空表示本次不做任何
+                删除（仍会 upsert ``records``）。
         """
-        东财概念板块成分股入库接口。
-        records: list of dict, e.g. [{"ts_code": "000001.SZ", "concept_id": "EM_C1", "concept_name": "概念1"}]
-        """
-        if not records:
+        if not records and not replace_board_codes:
             return 0
 
-        df = pd.DataFrame(records)
-        cols = get_model_columns(StockConcepts)
-        pk_columns = get_model_pk_columns(StockConcepts)
-
-        return await self._save_upsert(
-            df,
-            "stock_concepts",
-            cols,
-            pk_columns=pk_columns,
-        )
+        try:
+            async with self._guarded_begin() as conn:
+                if replace_board_codes:
+                    await self._write_db(
+                        "DELETE FROM stock_concepts WHERE concept_id = ANY($1)",
+                        [[f"{self.EM_CONCEPT_PREFIX}{code}" for code in replace_board_codes]],
+                        conn=conn,
+                    )
+                saved = 0
+                if records:
+                    df = pd.DataFrame(records)
+                    cols = get_model_columns(StockConcepts)
+                    pk_columns = get_model_pk_columns(StockConcepts)
+                    saved = await self._save_upsert(
+                        df,
+                        "stock_concepts",
+                        cols,
+                        pk_columns=pk_columns,
+                        conn=conn,
+                    )
+            return saved
+        except asyncio.CancelledError:
+            logger.warning("[StockDao] Cancelled during overwrite_em_concepts.")
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.error("[StockDao] overwrite_em_concepts failed: %s", safe_error(e))
+            raise
 
     async def upsert_limit_concepts(self, records: list[dict], conn: typing.Any = None) -> int:
         """

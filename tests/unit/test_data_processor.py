@@ -27,6 +27,8 @@ def _make_dp():
         dp = DataProcessor()
         # LOG-1.1: initialize_system 起始新增 await cache.init_db()，测试默认 mock 为 awaitable
         dp.cache.init_db = AsyncMock()
+        # review09-24 MAJOR-06: sync_concepts 写入前拼接 TS_ 前缀，MagicMock 属性需显式赋 str
+        dp.cache.stock_dao.TS_CONCEPT_PREFIX = "TS_"
     return dp
 
 
@@ -366,6 +368,105 @@ class TestDataProcessorSyncConcepts:
         # 正常路径：API 调用 → is_cancelled() False → return result。
         result = await dp.sync_concepts()
         assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_successful_sync_applies_ts_prefix(self):
+        """review09-24 MAJOR-06: Tushare 概念行写入前拼接 TS_ 前缀，与他源隔离"""
+        dp = _make_dp()
+        dp.api.get_concept_list = AsyncMock(return_value=pd.DataFrame({"code": ["TS1"]}))
+        detail_df = pd.DataFrame(
+            {
+                "id": ["TS1"],
+                "concept_name": ["Concept1"],
+                "ts_code": ["000001.SZ"],
+                "name": ["Stock1"],
+            }
+        )
+        dp.api.get_concept_detail_by_id = AsyncMock(return_value=detail_df)
+        dp.cache.stock_dao.overwrite_concepts = AsyncMock(return_value=1)
+        dp.clear_cancel()
+        await dp.sync_concepts()
+        saved_df = dp.cache.stock_dao.overwrite_concepts.call_args.args[0]
+        assert saved_df["concept_id"].tolist() == ["TS_TS1"]
+
+    @pytest.mark.asyncio
+    async def test_partial_fetch_failure_uses_non_destructive_save(self):
+        """review09-24 MAJOR-06 / R21: 任一子任务失败时不得破坏性覆盖（否则清空未取到概念）"""
+        dp = _make_dp()
+        dp.api.get_concept_list = AsyncMock(return_value=pd.DataFrame({"code": ["TS1", "TS2"]}))
+        detail_df = pd.DataFrame(
+            {
+                "id": ["TS1"],
+                "concept_name": ["Concept1"],
+                "ts_code": ["000001.SZ"],
+                "name": ["Stock1"],
+            }
+        )
+
+        async def _detail(c):
+            if c == "TS2":
+                raise RuntimeError("concept detail fetch boom")
+            return detail_df
+
+        dp.api.get_concept_detail_by_id = AsyncMock(side_effect=_detail)
+        dp.cache.stock_dao.overwrite_concepts = AsyncMock(return_value=99)
+        dp.cache.stock_dao.save_concepts = AsyncMock(return_value=3)
+        dp.clear_cancel()
+        result = await dp.sync_concepts()
+        assert result == 3
+        saved_df = dp.cache.stock_dao.save_concepts.call_args.args[0]
+        assert saved_df["concept_id"].tolist() == ["TS_TS1"]
+        dp.cache.stock_dao.overwrite_concepts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_concept_response_treated_as_uncertain(self):
+        """review09-24 MAJOR-06 / R21: 空响应视为取数不确定，走非破坏性 save 而非覆盖"""
+        dp = _make_dp()
+        dp.api.get_concept_list = AsyncMock(return_value=pd.DataFrame({"code": ["TS1", "TS2"]}))
+        detail_df = pd.DataFrame(
+            {
+                "id": ["TS1"],
+                "concept_name": ["Concept1"],
+                "ts_code": ["000001.SZ"],
+                "name": ["Stock1"],
+            }
+        )
+
+        async def _detail(c):
+            if c == "TS2":
+                return pd.DataFrame()
+            return detail_df
+
+        dp.api.get_concept_detail_by_id = AsyncMock(side_effect=_detail)
+        dp.cache.stock_dao.overwrite_concepts = AsyncMock(return_value=99)
+        dp.cache.stock_dao.save_concepts = AsyncMock(return_value=2)
+        dp.clear_cancel()
+        result = await dp.sync_concepts()
+        assert result == 2
+        saved_df = dp.cache.stock_dao.save_concepts.call_args.args[0]
+        assert saved_df["concept_id"].tolist() == ["TS_TS1"]
+        dp.cache.stock_dao.overwrite_concepts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_drops_rows_missing_key_columns(self):
+        """review09-24 MAJOR-06 / R21: ts_code/concept_id 缺失的行不得生成 TS_nan 伪 id"""
+        dp = _make_dp()
+        dp.api.get_concept_list = AsyncMock(return_value=pd.DataFrame({"code": ["TS1"]}))
+        detail_df = pd.DataFrame(
+            {
+                "id": ["TS1", None],
+                "concept_name": ["Concept1", "Concept2"],
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "name": ["Stock1", "Stock2"],
+            }
+        )
+        dp.api.get_concept_detail_by_id = AsyncMock(return_value=detail_df)
+        dp.cache.stock_dao.overwrite_concepts = AsyncMock(return_value=1)
+        dp.clear_cancel()
+        await dp.sync_concepts()
+        saved_df = dp.cache.stock_dao.overwrite_concepts.call_args.args[0]
+        assert saved_df["concept_id"].tolist() == ["TS_TS1"]
+        assert not saved_df["concept_id"].astype(str).str.contains("nan").any()
 
     @pytest.mark.asyncio
     async def test_sync_concepts_cancel_event_set_before_fetch_one(self):
