@@ -83,6 +83,44 @@ def _build_table_tolerance_map(config: dict[str, typing.Any]) -> dict[str, float
     }
 
 
+def _expected_count_for_table(table: str, expected_base: int, tolerance_map: dict[str, float]) -> int:
+    """单表当日期望行数（质量评分与存在性检查共用的唯一正本）。
+
+    口径与 get_bulk_sync_quality_scores 的历史实现一致（DS-01 / CRITICAL-01）：
+    - index_daily：随同步目标集合动态派生（监控列表 ∪ 配置基准），避免配置外基准被写入后
+      因期望行数仍按旧列表算而漏检满分；
+    - index_dailybasic / moneyflow_hsgt：FIXED_EXPECTED_TABLES 的固定值；
+    - 其余：int(理论存活股票数 expected_base * 该表容忍系数)。
+
+    返回值可能为 0（expected_base 极小时）。调用方按各自语义处理：质量评分直接比较
+    （``count >= 0`` 恒真），存在性检查用 ``max(1, ...)`` 兜底为"至少 1 行"。
+    """
+    if table == "index_daily":
+        return len(indices_to_sync())
+    if table in FIXED_EXPECTED_TABLES:
+        return FIXED_EXPECTED_TABLES[table]
+    return int(expected_base * tolerance_map.get(table, 0.80))
+
+
+# review09-24 dim05 MAJOR-02：check_data_exists 按行数判定（而非"至少 1 行"）的稠密表。
+# 这些表当日期望行数与全市场存活股票数同量级（行情 / 指标 / 资金流 / 涨跌停价，且涨跌停价
+# 含 A/B 股与基金、行数不少于理论股票数）或为固定指数集合，截断写入（如 daily_quotes 只落
+# 200/5400 行）必须判为"未完整"，否则该日会被永久当作完整日跳过。
+# 未登记的表——两融 margin_daily、北向 northbound_holding 等"结构性覆盖子集"表，以及
+# LOW_FREQUENCY_TABLES 低频事件表——其覆盖数结构性少于全市场，用 expected_base 推导最低
+# 行数会持续误判为不完整（日常更新反复重同步同一日），故只做存在性判定（>= 1 行）。
+_DENSITY_CHECKED_TABLES: frozenset[str] = frozenset(
+    {
+        "daily_quotes",
+        "daily_indicators",
+        "moneyflow_daily",
+        "stk_limit",
+        "index_daily",
+        "index_dailybasic",
+    }
+)
+
+
 _SAFE_TABLE_NAMES: frozenset[str] = frozenset(
     {
         "daily_quotes",
@@ -227,12 +265,23 @@ class QuoteDao(BaseDao):
         This is used for reliable breakpoint resume - only skip a date if ALL
         synced tables have data.
 
+        review09-24 dim05 MAJOR-02：原实现以"每张表当天至少 1 行"当作"已同步"，任何截断
+        写入（如 daily_quotes 只落 200/5400 行后连接中断）都会通过检查，使该日被日常更新 /
+        定时补偿永久跳过。现按行数判定：
+        - 稠密表（``_DENSITY_CHECKED_TABLES``，行情 / 指标 / 资金流 / 涨跌停价 / 指数）：
+          当日行数须 >= ``max(1, _expected_count_for_table(...))``（容忍系数与质量评分同源）；
+        - 其余表（两融 / 北向等结构性覆盖子集、低频事件表）：保留存在性判定（>= 1 行）。
+        理论股票数无法确定（非交易日 / stock_basic 为空 / 查询失败）时保守返回 False，
+        不把"无法核对"当作"已同步"。
+
         :param trade_date: The trade date to check
         :param tables: List of table names to check. If None, uses tables from HistoricalSyncStrategy.SYNCED_TABLES.
         :param raise_on_error: If True, raise on DB errors instead of returning False.
             Use True for critical paths where "query failed" must not be confused with "data missing".
         :return: True if all tables have data for the given date
         """
+        from utils.config_handler import ConfigHandler
+
         if trade_date is None:
             logger.warning("[QuoteDao] check_data_exists called with None trade_date")
             return False
@@ -261,15 +310,29 @@ class QuoteDao(BaseDao):
             if tbl is None or "trade_date" not in tbl.c:
                 logger.warning("[QuoteDao] Table '%s' not in metadata or missing trade_date column", t)
                 return False
-            part = (
-                sa.select(
-                    sa.literal(t).label("tbl"),
-                    sa.literal(1).label("val"),
+            if t in _DENSITY_CHECKED_TABLES:
+                # review09-24 dim05 MAJOR-02：稠密表按当日实际行数判定（比较见下方），
+                # 不再以"至少 1 行"当作已同步。
+                part = (
+                    sa.select(
+                        sa.literal(t).label("tbl"),
+                        sa.func.count().label("cnt"),
+                    )
+                    .select_from(tbl)
+                    .where(tbl.c.trade_date == trade_date)
                 )
-                .select_from(tbl)
-                .where(tbl.c.trade_date == trade_date)
-                .limit(1)
-            )
+            else:
+                # 结构性覆盖子集表 / 低频事件表：保留存在性判定（至少 1 行），
+                # 避免用全市场理论股票数推导出的最低行数持续误判。
+                part = (
+                    sa.select(
+                        sa.literal(t).label("tbl"),
+                        sa.literal(1).label("cnt"),
+                    )
+                    .select_from(tbl)
+                    .where(tbl.c.trade_date == trade_date)
+                    .limit(1)
+                )
             union_parts.append(part)
         if len(union_parts) == 1:
             stmt = union_parts[0]
@@ -279,8 +342,35 @@ class QuoteDao(BaseDao):
             df = await self._read_db_select(stmt, suppress_errors=not raise_on_error)
             if df is None or df.empty:
                 return False
-            found_tables = set(df["tbl"].tolist())
-            return found_tables == set(safe_tables)
+
+            expected_base = 0
+            tolerance_map: dict[str, float] = {}
+            if any(t in _DENSITY_CHECKED_TABLES for t in safe_tables):
+                expected_base = await self.get_expected_stock_count(trade_date)
+                if expected_base <= 0:
+                    # 无法确定理论股票数（非交易日 / stock_basic 为空 / 查询失败）：保守判为
+                    # 未完整，不把"无法核对"当作"已同步"而跳过整日（R21 精神）。
+                    logger.warning(
+                        "[QuoteDao] check_data_exists: 无法确定 %s 的理论股票数，按未完整处理",
+                        trade_date,
+                    )
+                    return False
+                tolerance_map = _build_table_tolerance_map(ConfigHandler.get_sync_integrity_config())
+
+            counts = {str(tbl_name): int(cnt) for tbl_name, cnt in zip(df["tbl"], df["cnt"], strict=False)}
+            shortfalls = []
+            for t in safe_tables:
+                count = counts.get(t, 0)
+                if t in _DENSITY_CHECKED_TABLES:
+                    required = max(1, _expected_count_for_table(t, expected_base, tolerance_map))
+                    if count < required:
+                        shortfalls.append(f"{t}={count}/{required}")
+                elif count < 1:
+                    shortfalls.append(f"{t}=missing")
+            if shortfalls:
+                logger.debug("[QuoteDao] check_data_exists: %s 未完整同步（%s）", trade_date, ", ".join(shortfalls))
+                return False
+            return True
         except asyncio.CancelledError:
             raise
         except EngineDisposedError:
@@ -1119,7 +1209,6 @@ class QuoteDao(BaseDao):
                     continue
 
                 count = table_counts.get(table, {}).get(trade_date, 0)
-                tolerance = table_tolerance_map.get(table, 0.80)
 
                 if table in low_frequency_tables:
                     result["tables"][table] = {
@@ -1153,17 +1242,11 @@ class QuoteDao(BaseDao):
                             }
                             continue
 
-                if table == "index_daily":
-                    # DS-01: 期望行数随同步目标集合动态派生（监控列表 ∪ 配置基准），
-                    # 避免配置外基准被写入后因期望行数仍按旧列表算而漏检评分满分。
-                    expected = len(indices_to_sync())
-                elif table in FIXED_EXPECTED_TABLES:
-                    expected = FIXED_EXPECTED_TABLES[table]
-                else:
-                    # review09-24 dim05 CRITICAL-01：以理论存活股票数（expected_base）为参照，
-                    # 而非当天实际抓到的 quotes_count——后者在整批残缺时会同步缩水，
-                    # 使"完整性"退化为"各表彼此一致"。
-                    expected = int(expected_base * tolerance)
+                # review09-24 dim05 MAJOR-02：期望行数计算统一收敛到 _expected_count_for_table()
+                # （DS-01 的 index_daily 动态派生 / FIXED_EXPECTED_TABLES / CRITICAL-01 的
+                # expected_base 参照），与 check_data_exists 的稠密性判定共用同一正本，
+                # 避免两处口径漂移。
+                expected = _expected_count_for_table(table, expected_base, table_tolerance_map)
 
                 ratio = min(1.0, count / expected) if expected > 0 else 0
                 passed = count >= expected

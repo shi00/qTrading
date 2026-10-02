@@ -400,11 +400,12 @@ class TestQuoteDaoCheckDataExists:
             "data.persistence.daos.quote_dao._get_default_synced_tables",
             return_value=["daily_quotes"],
         ):
+            dao.get_expected_stock_count = AsyncMock(return_value=5400)
             dao._read_db_select = AsyncMock(
                 return_value=pd.DataFrame(
                     {
                         "tbl": ["daily_quotes"],
-                        "val": [1],
+                        "cnt": [5400],
                     }
                 )
             )
@@ -473,11 +474,12 @@ class TestQuoteDaoCheckDataExists:
             "data.persistence.daos.quote_dao._get_default_synced_tables",
             return_value=["daily_quotes", "daily_indicators"],
         ):
+            dao.get_expected_stock_count = AsyncMock(return_value=5400)
             dao._read_db_select = AsyncMock(
                 return_value=pd.DataFrame(
                     {
                         "tbl": ["daily_quotes"],
-                        "val": [1],
+                        "cnt": [5400],
                     }
                 )
             )
@@ -492,8 +494,9 @@ class TestQuoteDaoCheckDataExists:
         result = await dao.check_data_exists("20240615", tables=["daily_quotes", "stk_limit"])
         assert result is False
 
+        dao.get_expected_stock_count = AsyncMock(return_value=5400)
         dao._read_db_select = AsyncMock(
-            return_value=pd.DataFrame({"tbl": ["daily_quotes", "stk_limit"], "val": [1, 1]})
+            return_value=pd.DataFrame({"tbl": ["daily_quotes", "stk_limit"], "cnt": [5400, 5400]})
         )
         result = await dao.check_data_exists("20240615", tables=["daily_quotes", "stk_limit"])
         assert result is True
@@ -512,7 +515,8 @@ class TestQuoteDaoCheckDataExists:
             "data.persistence.daos.quote_dao._get_default_synced_tables",
             return_value=["daily_quotes"],
         ):
-            dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"tbl": ["daily_quotes"], "val": [1]}))
+            dao.get_expected_stock_count = AsyncMock(return_value=5400)
+            dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"tbl": ["daily_quotes"], "cnt": [5400]}))
             await dao.check_data_exists("20240615", tables=["daily_quotes"])
             call_args = dao._read_db_select.call_args
             stmt = call_args[0][0]
@@ -527,11 +531,12 @@ class TestQuoteDaoCheckDataExists:
             "data.persistence.daos.quote_dao._get_default_synced_tables",
             return_value=["daily_quotes", "daily_indicators", "moneyflow_daily"],
         ):
+            dao.get_expected_stock_count = AsyncMock(return_value=5400)
             dao._read_db_select = AsyncMock(
                 return_value=pd.DataFrame(
                     {
                         "tbl": ["daily_quotes", "daily_indicators", "moneyflow_daily"],
-                        "val": [1, 1, 1],
+                        "cnt": [5400, 5400, 5400],
                     }
                 )
             )
@@ -549,11 +554,12 @@ class TestQuoteDaoCheckDataExists:
             "data.persistence.daos.quote_dao._get_default_synced_tables",
             return_value=["daily_quotes", "daily_indicators", "moneyflow_daily"],
         ):
+            dao.get_expected_stock_count = AsyncMock(return_value=5400)
             dao._read_db_select = AsyncMock(
                 return_value=pd.DataFrame(
                     {
                         "tbl": ["daily_quotes", "daily_indicators"],
-                        "val": [1, 1],
+                        "cnt": [5400, 5400],
                     }
                 )
             )
@@ -562,6 +568,96 @@ class TestQuoteDaoCheckDataExists:
                 tables=["daily_quotes", "daily_indicators", "moneyflow_daily"],
             )
             assert result is False
+
+    @pytest.mark.asyncio
+    async def test_review09_24_major02_truncated_dense_table_returns_false(self):
+        """review09-24 dim05 MAJOR-02 报告验证方式：daily_quotes 当日仅 200 行、
+        expected_base=5400 → 判定为未完整同步。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes"],
+        ):
+            dao.get_expected_stock_count = AsyncMock(return_value=5400)
+            dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"tbl": ["daily_quotes"], "cnt": [200]}))
+            assert await dao.check_data_exists("20240615", tables=["daily_quotes"]) is False
+
+    @pytest.mark.asyncio
+    async def test_review09_24_major02_dense_threshold_boundary(self):
+        """稠密表阈值边界：int(5400*0.95)=5130，5129 未达标、5130 达标。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes"],
+        ):
+            dao.get_expected_stock_count = AsyncMock(return_value=5400)
+            dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"tbl": ["daily_quotes"], "cnt": [5129]}))
+            assert await dao.check_data_exists("20240615", tables=["daily_quotes"]) is False
+            dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"tbl": ["daily_quotes"], "cnt": [5130]}))
+            assert await dao.check_data_exists("20240615", tables=["daily_quotes"]) is True
+
+    @pytest.mark.asyncio
+    async def test_review09_24_major02_sparse_table_keeps_existence_only(self):
+        """结构性覆盖子集表（margin_daily）保留存在性判定：仅 1 行即通过，且不得查询理论股票数。
+
+        get_expected_stock_count 被 mock 为 0——若实现误入稠密分支会返回 False，
+        因此断言 True 同时证明该分支未被触发。
+        """
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["margin_daily"],
+        ):
+            dao.get_expected_stock_count = AsyncMock(return_value=0)
+            dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"tbl": ["margin_daily"], "cnt": [1]}))
+            assert await dao.check_data_exists("20240615", tables=["margin_daily"]) is True
+            dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+            assert await dao.check_data_exists("20240615", tables=["margin_daily"]) is False
+
+    @pytest.mark.asyncio
+    async def test_review09_24_major02_low_frequency_table_keeps_existence_only(self):
+        """低频事件表（limit_list）保留存在性判定，不因当日事件稀少而被判未完整。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["limit_list"],
+        ):
+            dao.get_expected_stock_count = AsyncMock(return_value=0)
+            dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"tbl": ["limit_list"], "cnt": [1]}))
+            assert await dao.check_data_exists("20240615", tables=["limit_list"]) is True
+
+    @pytest.mark.asyncio
+    async def test_review09_24_major02_unknown_expected_base_returns_false(self):
+        """理论股票数不可确定（0：非交易日 / stock_basic 为空 / 查询失败）时保守判未完整，
+        不得因当日行数充足而跳过整日。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes"],
+        ):
+            dao.get_expected_stock_count = AsyncMock(return_value=0)
+            dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"tbl": ["daily_quotes"], "cnt": [9999]}))
+            assert await dao.check_data_exists("20240615", tables=["daily_quotes"]) is False
+
+    @pytest.mark.asyncio
+    async def test_review09_24_major02_index_daily_requires_all_indices(self):
+        """index_daily 期望行数 = len(indices_to_sync())（DS-01 口径），只落部分指数判未完整。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_default_synced_tables",
+                return_value=["index_daily"],
+            ),
+            patch(
+                "data.persistence.daos.quote_dao.indices_to_sync",
+                return_value=["000001.SH", "399001.SZ", "000300.SH"],
+            ),
+        ):
+            dao.get_expected_stock_count = AsyncMock(return_value=5400)
+            dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"tbl": ["index_daily"], "cnt": [2]}))
+            assert await dao.check_data_exists("20240615", tables=["index_daily"]) is False
+            dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"tbl": ["index_daily"], "cnt": [3]}))
+            assert await dao.check_data_exists("20240615", tables=["index_daily"]) is True
 
 
 class TestQuoteDaoGetExpectedStockCount:
