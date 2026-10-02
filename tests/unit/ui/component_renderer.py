@@ -69,7 +69,7 @@ class FakeSession:
 class FakePage:
     """伪造的 page 对象，仅暴露 session 与 enable_components_mode 所需接口。
 
-    含 ``unsafe_hash=True``：Flet 1.0.0 的客户端动作（``shared_service`` 内部）以
+    含 ``unsafe_hash=True``：Flet 1.0.x 的客户端动作（``shared_service`` 内部）以
     ``WeakKeyDictionary`` 以 page 为键缓存服务实例，page 必须是可哈希的。
 
     含 ``_services`` 属性（``FakeServiceRegistry``），使 ``ft.FilePicker``

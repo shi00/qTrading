@@ -24,7 +24,7 @@ pytestmark = pytest.mark.unit
 # 项目扩展方法/属性：由项目在 Page 实例上动态挂载，不在 flet 原生 Page 类上。
 # 当前为空——原 show_toast 桥接已随 Flet V1 迁移完成而移除，项目统一改用 page.toast。
 # R11 已删除 mock 的 dialog/open/close，不再纳入排除集；R10 已将 client_storage 替换为
-# shared_preferences，而 shared_preferences 也随 Flet 1.0.0 从 Page 移除（见 mock_flet.py），
+# shared_preferences，而 shared_preferences 也随 Flet 1.0.x 从 Page 移除（见 mock_flet.py），
 # 二者均不再纳入排除集。
 _PROJECT_EXTENSIONS: frozenset[str] = frozenset()
 
@@ -111,7 +111,7 @@ def test_v1_removed_members_not_on_mock():
 
     - dialog/open/close: V1 已移除，R11 已从 mock 删除
     - client_storage: V1 已移除，R10 已替换为 shared_preferences
-    - go/shared_preferences: Flet 1.0.0 从 Page 移除，mock 已同步删除
+    - go/shared_preferences: Flet 1.0.x 从 Page 移除，mock 已同步删除
     """
     mock_members = _mock_flet_page_public_members()
     leaked = mock_members & {
@@ -122,7 +122,7 @@ def test_v1_removed_members_not_on_mock():
         "go",
         "shared_preferences",
     }
-    assert not leaked, f"MockFletPage 仍残留 V1/Flet 1.0.0 已移除的成员（R10/R11 未完全应用）: {sorted(leaked)}"
+    assert not leaked, f"MockFletPage 仍残留 V1/Flet 1.0.x 已移除的成员（R10/R11 未完全应用）: {sorted(leaked)}"
 
 
 def test_text_field_focused_border_color_field_exists():
@@ -353,10 +353,10 @@ def test_v1_text_button_content_kw_accepted_text_kw_rejected():
 
 
 def test_v1_button_exists_and_elevated_button_removed():
-    """R6 契约：ft.Button 必须可导入，ft.ElevatedButton 已随 Flet 1.0.0 移除（A8 spike）。
+    """R6 契约：ft.Button 必须可导入，ft.ElevatedButton 已随 Flet 1.0.x 移除（A8 spike）。
 
     - A8: ``ft.Button`` 真实存在（``flet.controls.material.button.Button``），R6 迁移目标控件
-    - Flet 1.0.0 顶层不再导出 ``ElevatedButton``（0.80~0.86 期间弃用后移除），
+    - Flet 1.0.x 顶层不再导出 ``ElevatedButton``（0.80~0.86 期间弃用后移除），
       项目已全面改用 ``ft.Button``，故断言其移除以固化契约。
     """
     assert hasattr(ft, "Button"), "ft.Button 缺失——请检查 R6 配方（A8 spike）"
