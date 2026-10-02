@@ -131,7 +131,11 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
 
     Fetches the concept board list, then concurrently fetches constituents for
     each board (3 concurrent, 3 retries with exponential backoff). Results are
-    upserted via ``StockDao.upsert_em_concepts``.
+    persisted via ``StockDao.overwrite_em_concepts``: for each board whose
+    constituents were fetched **and fully resolved** to authoritative ts_codes,
+    its existing ``EM_`` rows are deleted and rebuilt within one transaction, so
+    constituents removed from a board no longer linger. Boards that failed, or
+    whose constituents were only partially resolved, are upsert-only (no deletion).
     """
 
     @log_async_operation(
@@ -165,6 +169,12 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
             records: list[dict] = []
             failed_boards: list[str] = []
             unresolved: set[str] = set()
+            # 允许「删除-重建」的板块代码：仅当该板块成分成功抓取且全部解析为权威
+            # ts_code 时才登记，避免把抓取失败/部分解析板块的有效旧成分误删。
+            replace_board_codes: list[str] = []
+            # NOTE(lazy): 仅对本次成功抓取且成分完全解析的板块做删除-重建，不扫描
+            # 「已从板块列表消失」的板块. ceiling: 板块停用/更名后其历史 EM_ 行不会被清理.
+            # upgrade: 需要全量对账（库内 EM_ 板块集合 vs 当前板块列表 diff）时.
 
             async def sync_one_board(board_name: str, board_code: str) -> None:
                 if self._cancelled:
@@ -175,21 +185,50 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                     for attempt in range(_AKSHARE_MAX_RETRIES):
                         try:
                             df_cons = await client.get_concept_constituents(board_name)
-                            if df_cons is not None and not df_cons.empty:
-                                concept_id = f"{StockDao.EM_CONCEPT_PREFIX}{board_code}"
-                                for code in df_cons["代码"].astype(str):
-                                    ts_code = _to_ts_code(code, code_map)
-                                    if ts_code is None:
-                                        # R21: 未知/非法代码显式标记并跳过，不猜测交易所后缀
-                                        unresolved.add(code)
-                                        continue
-                                    records.append(
-                                        {
-                                            "ts_code": ts_code,
-                                            "concept_id": concept_id,
-                                            "concept_name": board_name,
-                                        }
-                                    )
+                            if df_cons is None or df_cons.empty:
+                                # 空响应（软失败）：不替换该板块，保留既有 EM_ 行（R21）
+                                logger.debug(
+                                    "[AKShareConceptSync] Board %s returned no constituents, skip replacement.",
+                                    board_name,
+                                )
+                                return
+                            concept_id = f"{StockDao.EM_CONCEPT_PREFIX}{board_code}"
+                            board_records: list[dict] = []
+                            board_unresolved = 0
+                            for code in df_cons["代码"].astype(str):
+                                ts_code = _to_ts_code(code, code_map)
+                                if ts_code is None:
+                                    # R21: 未知/非法代码显式标记并跳过，不猜测交易所后缀
+                                    unresolved.add(code)
+                                    board_unresolved += 1
+                                    continue
+                                board_records.append(
+                                    {
+                                        "ts_code": ts_code,
+                                        "concept_id": concept_id,
+                                        "concept_name": board_name,
+                                    }
+                                )
+                            if not board_records:
+                                # 全部代码均未解析：不替换，避免清空该板块既有 EM_ 行（R21）
+                                logger.warning(
+                                    "[AKShareConceptSync] Board %s: all %d code(s) unresolved, skip replacement.",
+                                    board_name,
+                                    board_unresolved,
+                                )
+                                return
+                            records.extend(board_records)
+                            if board_unresolved:
+                                # 部分未解析：只 upsert，不删除该板块旧行，避免把「映射临时
+                                # 缺失」的有效成分一并删除（R21 精神）。
+                                logger.warning(
+                                    "[AKShareConceptSync] Board %s: %d of %d code(s) unresolved, upsert-only (no replacement).",
+                                    board_name,
+                                    board_unresolved,
+                                    len(board_records) + board_unresolved,
+                                )
+                            else:
+                                replace_board_codes.append(board_code)
                             return
                         except asyncio.CancelledError:
                             raise
@@ -261,8 +300,13 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                 )
                 result.skipped += len(_unresolved_list)
 
+            # replace_board_codes 非空 ⟹ records 非空（见 sync_one_board 构造），
+            # 故此处以 records 判定是否落库即可。
             if records:
-                saved = await self.context.cache.stock_dao.upsert_em_concepts(records)
+                saved = await self.context.cache.stock_dao.overwrite_em_concepts(
+                    records,
+                    replace_board_codes=replace_board_codes,
+                )
                 result.added = saved or 0
 
             if failed_boards:

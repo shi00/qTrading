@@ -29,7 +29,7 @@ def _make_dao():
 
 
 class TestConceptPrefixConstants:
-    """Task 1.1: 三个前缀常量定义"""
+    """Task 1.1: 来源前缀常量定义（review09-24 MAJOR-06 新增 TS_）"""
 
     def test_ai_concept_prefix(self):
         assert StockDao.AI_CONCEPT_PREFIX == "AI_LLM_"
@@ -40,15 +40,19 @@ class TestConceptPrefixConstants:
     def test_limit_concept_prefix(self):
         assert StockDao.LIMIT_CONCEPT_PREFIX == "LIMIT_"
 
+    def test_ts_concept_prefix(self):
+        """Tushare 概念同步自有行前缀，与 EM_/AI_LLM_/LIMIT_ 隔离"""
+        assert StockDao.TS_CONCEPT_PREFIX == "TS_"
+
 
 class TestOverwriteConceptsDeleteScope:
-    """Task 1.1: 修复 overwrite_concepts 全表 DELETE 问题"""
+    """review09-24 MAJOR-06: overwrite_concepts 仅清理 TS_ 自有行，不再误删他源行"""
 
     @pytest.mark.asyncio
-    async def test_delete_only_em_prefix_concepts(self):
-        """DELETE 语句必须含 WHERE concept_id LIKE 'EM_%'，不得全表删除"""
+    async def test_delete_only_ts_prefix_concepts(self):
+        """DELETE 必须限定 TS_ 前缀（下划线转义 + ESCAPE），不得全表删除"""
         dao = _make_dao()
-        df = pd.DataFrame({"ts_code": ["000001.SZ"], "concept_id": ["EM_C1"], "concept_name": ["概念1"]})
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "concept_id": ["TS_C1"], "concept_name": ["概念1"]})
         mock_conn = AsyncMock()
         mock_conn.exec_driver_sql = AsyncMock()
         dao.engine.begin = MagicMock()
@@ -62,18 +66,20 @@ class TestOverwriteConceptsDeleteScope:
         delete_calls = [s for s in sql_calls if s.strip().upper().startswith("DELETE")]
         assert len(delete_calls) == 1, f"应只有一条 DELETE 语句，实际: {delete_calls}"
         assert "concept_id LIKE $1" in delete_calls[0], f"DELETE 应使用参数化 LIKE $1，实际: {delete_calls[0]}"
+        assert "ESCAPE" in delete_calls[0], f"DELETE 需显式 ESCAPE 以还原下划线字面量，实际: {delete_calls[0]}"
         assert delete_calls[0].strip().upper() != "DELETE FROM STOCK_CONCEPTS"
-        # 验证参数正确传入（R4 参数化）
+        # 验证参数正确传入（R4 参数化）：TS_ 的下划线须转义为字面量
         delete_call = next(
             c for c in mock_conn.exec_driver_sql.call_args_list if c.args[0].strip().upper().startswith("DELETE")
         )
-        assert delete_call.args[1] == [f"{StockDao.EM_CONCEPT_PREFIX}%"]
+        expected_pattern = StockDao.TS_CONCEPT_PREFIX.replace("_", "\\_") + "%"
+        assert delete_call.args[1] == [expected_pattern]
 
     @pytest.mark.asyncio
-    async def test_does_not_delete_ai_llm_concepts(self):
-        """DELETE 语句不得触及 AI_LLM_ 前缀概念"""
+    async def test_does_not_delete_other_source_concepts(self):
+        """DELETE 语句不得触及 EM_ / AI_LLM_ / LIMIT_ 其他来源行"""
         dao = _make_dao()
-        df = pd.DataFrame({"ts_code": ["000001.SZ"], "concept_id": ["EM_C1"], "concept_name": ["概念1"]})
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "concept_id": ["TS_C1"], "concept_name": ["概念1"]})
         mock_conn = AsyncMock()
         mock_conn.exec_driver_sql = AsyncMock()
         dao.engine.begin = MagicMock()
@@ -86,8 +92,13 @@ class TestOverwriteConceptsDeleteScope:
         sql_calls = [call.args[0] for call in mock_conn.exec_driver_sql.call_args_list]
         delete_calls = [s for s in sql_calls if s.strip().upper().startswith("DELETE")]
         assert len(delete_calls) == 1
-        assert "AI_LLM_" not in delete_calls[0]
-        assert "AI_DOUBAO_" not in delete_calls[0]
+        for other_prefix in (StockDao.EM_CONCEPT_PREFIX, StockDao.AI_CONCEPT_PREFIX, StockDao.LIMIT_CONCEPT_PREFIX):
+            assert other_prefix not in delete_calls[0]
+        # 参数仅含 TS_ 前缀，不放行他源
+        delete_call = next(
+            c for c in mock_conn.exec_driver_sql.call_args_list if c.args[0].strip().upper().startswith("DELETE")
+        )
+        assert delete_call.args[1] == [StockDao.TS_CONCEPT_PREFIX.replace("_", "\\_") + "%"]
 
 
 class TestClearAllAiLlmConcepts:
@@ -158,35 +169,94 @@ class TestGetStocksWithoutAiConceptsPrefixMigration:
         assert params_arg == [f"{StockDao.AI_CONCEPT_PREFIX}%"]
 
 
-class TestUpsertEmConcepts:
-    """Task 1.2: upsert_em_concepts 东财概念入库"""
+class TestOverwriteEmConcepts:
+    """review09-24 MAJOR-06: overwrite_em_concepts 按板块「删除-重建」东财概念"""
 
     @pytest.mark.asyncio
-    async def test_upsert_em_concepts_calls_save_upsert(self):
-        """验证调用 _save_upsert，table_name='stock_concepts'"""
+    async def test_deletes_replace_boards_then_upserts(self):
+        """仅删除 replace_board_codes 对应 EM_ 行（= ANY($1) 参数化），再 upsert 全部记录"""
         dao = _make_dao()
         records = [
-            {"ts_code": "000001.SZ", "concept_id": "EM_C1", "concept_name": "概念1"},
-            {"ts_code": "000002.SZ", "concept_id": "EM_C2", "concept_name": "概念2"},
+            {"ts_code": "000001.SZ", "concept_id": "EM_BK0123", "concept_name": "概念1"},
+            {"ts_code": "000002.SZ", "concept_id": "EM_BK0123", "concept_name": "概念1"},
         ]
-        result = await dao.upsert_em_concepts(records)
+        result = await dao.overwrite_em_concepts(records, replace_board_codes=["BK0123"])
         assert result == 5  # mock _save_upsert return_value=5
+
+        dao._write_db.assert_called_once()
+        sql_arg = dao._write_db.call_args.args[0]
+        assert "DELETE FROM stock_concepts" in sql_arg
+        assert "concept_id = ANY($1)" in sql_arg
+        assert dao._write_db.call_args.args[1] == [["EM_BK0123"]]
+        # 删除与写入共享同一事务 conn
+        assert dao._write_db.call_args.kwargs.get("conn") is dao._save_upsert.call_args.kwargs.get("conn")
+
         dao._save_upsert.assert_called_once()
         args = dao._save_upsert.call_args.args
-        # args[0]=df, args[1]=table_name, args[2]=cols, args[3]=pk_columns
         assert args[1] == "stock_concepts"
-        # 验证传入的 DataFrame 包含全部 records
         df_arg = args[0]
         assert len(df_arg) == 2
-        assert set(df_arg["concept_id"]) == {"EM_C1", "EM_C2"}
+        assert set(df_arg["concept_id"]) == {"EM_BK0123"}
 
     @pytest.mark.asyncio
-    async def test_upsert_em_concepts_empty_records_returns_zero(self):
-        """空列表返回 0，不调用 _save_upsert"""
+    async def test_no_replace_boards_upserts_without_delete(self):
+        """replace_board_codes 为空时不做删除，仅 upsert（保留旧行）"""
         dao = _make_dao()
-        result = await dao.upsert_em_concepts([])
+        records = [{"ts_code": "000001.SZ", "concept_id": "EM_BK0999", "concept_name": "概念9"}]
+        result = await dao.overwrite_em_concepts(records, replace_board_codes=[])
+        assert result == 5
+        dao._write_db.assert_not_called()
+        dao._save_upsert.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_records_with_replace_boards_only_deletes(self):
+        """记录为空但需替换板块时，仍删除对应旧行（清理已清空板块），不调用 upsert"""
+        dao = _make_dao()
+        result = await dao.overwrite_em_concepts([], replace_board_codes=["BK0123"])
         assert result == 0
+        dao._write_db.assert_called_once()
         dao._save_upsert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_both_empty_returns_zero_without_db(self):
+        """记录与替换板块均为空时直接返回 0，不触达 DB"""
+        dao = _make_dao()
+        result = await dao.overwrite_em_concepts([], replace_board_codes=[])
+        assert result == 0
+        dao._write_db.assert_not_called()
+        dao._save_upsert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_propagates_cancelled_error(self):
+        """CancelledError 必须传播（R2）"""
+        dao = _make_dao()
+        dao._guarded_begin = MagicMock()
+        dao._guarded_begin.return_value.__aenter__ = AsyncMock(side_effect=asyncio.CancelledError())
+        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        with pytest.raises(asyncio.CancelledError):
+            await dao.overwrite_em_concepts(
+                [{"ts_code": "000001.SZ", "concept_id": "EM_C1", "concept_name": "概念1"}],
+                replace_board_codes=[],
+            )
+
+    @pytest.mark.asyncio
+    async def test_propagates_engine_disposed(self):
+        """EngineDisposedError 必须传播（R5）"""
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        dao = _make_dao()
+        dao._guarded_begin = MagicMock()
+        dao._guarded_begin.return_value.__aenter__ = AsyncMock(side_effect=EngineDisposedError())
+        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        with pytest.raises(EngineDisposedError):
+            await dao.overwrite_em_concepts(
+                [{"ts_code": "000001.SZ", "concept_id": "EM_C1", "concept_name": "概念1"}],
+                replace_board_codes=[],
+            )
+
+    def test_old_upsert_em_concepts_removed(self):
+        """旧的 upsert_em_concepts（无删除语义）不应再存在"""
+        assert not hasattr(StockDao, "upsert_em_concepts")
 
 
 class TestUpsertLimitConcepts:

@@ -703,6 +703,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             tasks = [asyncio.create_task(fetch_one(c)) for c in c_codes]
 
             all_dfs = []
+            # 任一子任务失败（异常）或返回空数据（软失败）即置位：此时不得走破坏性
+            # overwrite_concepts（会清空全部 TS_ 行），改走非破坏性 save_concepts（R21）。
+            had_fetch_failures = False
             try:
                 # Wait for all tasks to complete or be cancelled
                 results = await gather_return_exceptions_propagating_cancel(*tasks)
@@ -719,9 +722,16 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                         all_dfs.append(r)
                     elif isinstance(r, Exception):
                         # Log but don't stop everything for one failed concept
+                        had_fetch_failures = True
                         logger.warning(
                             "[DataProcessor] Sync Concepts | ⚠️ Subtask failed: %s",
                             r,
+                        )
+                    elif isinstance(r, pd.DataFrame):
+                        # 空响应视为该概念取数不确定（R21），不得据此认定"该概念无成分"
+                        had_fetch_failures = True
+                        logger.warning(
+                            "[DataProcessor] Sync Concepts | ⚠️ Empty result for a concept, treated as uncertain.",
                         )
 
             except asyncio.CancelledError:
@@ -745,9 +755,20 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             full_df = full_df.rename(columns={"id": "concept_id"})
             # Ensure unique
             full_df = full_df[["ts_code", "concept_name", "concept_id"]].drop_duplicates()
+            # R21: 关键键缺失的行不得生成 "TS_nan" 之类伪 id，直接剔除
+            full_df = full_df.dropna(subset=["ts_code", "concept_id"])
+            # MAJOR-06: Tushare 概念行加 TS_ 前缀，与 EM_/AI_LLM_/LIMIT_ 来源隔离
+            full_df["concept_id"] = self.cache.stock_dao.TS_CONCEPT_PREFIX + full_df["concept_id"].astype(str)
 
-            # Atomic overwrite (refresh)
-            count = await self.cache.stock_dao.overwrite_concepts(full_df)
+            if had_fetch_failures:
+                logger.warning(
+                    "[DataProcessor] Sync Concepts | ⚠️ Partial fetch failures; using non-destructive upsert "
+                    "to avoid wiping un-fetched concepts.",
+                )
+                count = await self.cache.stock_dao.save_concepts(full_df)
+            else:
+                # Atomic overwrite (refresh)
+                count = await self.cache.stock_dao.overwrite_concepts(full_df)
             self._quality_tier = None
             self._health_cache = {"time": 0, "data": None}
             logger.info(
