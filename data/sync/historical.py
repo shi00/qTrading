@@ -903,7 +903,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
             """
             Save data for a given key if available.
             Returns a dict with:
-              - 'saved': number of rows saved (0 if empty, None if failed)
+              - 'saved': number of rows actually persisted (0 if empty, None if unknown/failed).
+                       CRITICAL-02: 取 save 方法实际落库行数（重复冲突键被 UPSERT 静默合并后
+                       会小于 fetched），不得回退为 len(df)，否则行数完整性校验形同虚设。
               - 'fetched': number of rows fetched from API
               - 'success': True if save succeeded (including empty data), False if failed
               - 'result_status': SYNC_RESULT_* constant indicating the outcome
@@ -939,7 +941,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         row_count = await method(df, suppress_errors=not critical)
                     else:
                         row_count = await method(df)
-                    saved = row_count if row_count is not None else len(df)
+                    # CRITICAL-02: saved 必须取 save 方法返回的实际落库行数，不得回退为 len(df)。
+                    # 回退会让 saved 恒等于 fetched，使 verify_data_integrity 的行数完整性校验
+                    # 与核心表 ">5% 标记 PARTIAL" 成为死代码。返回 None 表示「未知」（R21：不伪装为
+                    # fetched），此时 verify_data_integrity 按未知跳过而非误判为无问题。
+                    saved = row_count
                     return {
                         "saved": saved,
                         "fetched": fetched_count,

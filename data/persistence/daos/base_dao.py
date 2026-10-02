@@ -697,6 +697,11 @@ class BaseDao:
 
         conflict_columns: 自定义 ON CONFLICT 冲突键。默认 None 即使用 pk_columns；
         提供时以此为冲突键，且这些列在 DO UPDATE 的 set_ 中排除（与主键同权，防 EXCLUDED 改写冲突键）。
+
+        Returns:
+            实际落库行数（= 去重后行数，重复冲突键被 UPSERT 静默合并的行使之少于输入行数）。
+            空表 / 表未注册 / 主键列缺失返回 0；suppress_errors=True 且写库异常时返回 -1。
+            调用方（如 save_if_ok）据此与 fetched 对比做行数完整性校验，故此处不得返回提交行数。
         """
         if df is None or df.empty:
             return 0
@@ -737,13 +742,23 @@ class BaseDao:
 
         df_slice = df[columns]
 
-        # DAT-09: 通用防线——UPSERT 静默合并重复主键会导致丢行（明细表曾因此丢数据）。
-        # 在此告警，仅提示不阻断：重复主键可能是 API 自身重复返回，也可能仍需扩大主键维度。
-        duplicate_mask = df_slice.duplicated(subset=pk_columns, keep=False)
+        # CRITICAL-02: 静默合并发生在 ON CONFLICT 的冲突键上，故去重计数必须以 conflict_key
+        # 口径统计（conflict_columns 未提供时即 pk_columns），否则自定义冲突键场景会低估丢行数。
+        conflict_key = conflict_columns if conflict_columns is not None else pk_columns
+
+        # DAT-09: 通用防线——UPSERT 静默合并重复冲突键会导致丢行（明细表曾因此丢数据）。
+        # 在此告警，仅提示不阻断：重复冲突键可能是 API 自身重复返回，也可能仍需扩大主键维度。
+        # dup_lost 在任何分支都必须有值（无重复时为 0），供返回「实际落库行数」使用。
+        dup_lost = 0
+        duplicate_mask = df_slice.duplicated(subset=conflict_key, keep=False)
         dup_rows = int(duplicate_mask.sum())
         if dup_rows > 0:
-            dup_lost = int(len(df_slice) - df_slice.drop_duplicates(subset=pk_columns).shape[0])
-            dup_samples = df_slice.loc[duplicate_mask, pk_columns].drop_duplicates().head(3).to_dict(orient="records")
+            # CRITICAL-02: PostgreSQL 的 ON CONFLICT 视 NULL 互不相同（不合并），而 pandas
+            # duplicated 视 NaN 相等；故「预计丢行数」只统计冲突键全非空的行，避免高估丢行、
+            # 低报 saved 而误判 PARTIAL（NULL 冲突键的行在 PG 中各自独立落库）。
+            keyed_rows = df_slice[df_slice[conflict_key].notna().all(axis=1)]
+            dup_lost = int(len(keyed_rows) - keyed_rows.drop_duplicates(subset=conflict_key).shape[0])
+            dup_samples = df_slice.loc[duplicate_mask, conflict_key].drop_duplicates().head(3).to_dict(orient="records")
             # NULL 主键不会静默合并：Postgres 主键 NOT NULL，将抛约束异常（显式失败），
             # 与"静默丢行"排障方向不同，需在文案中区分（review 730）。
             null_pk_rows = int(df_slice.loc[duplicate_mask, pk_columns].isna().any(axis=1).sum())
@@ -801,7 +816,6 @@ class BaseDao:
         self._check_engine(context="upsert:post-prepare")
 
         stmt = pg_insert(table)
-        conflict_key = conflict_columns if conflict_columns is not None else pk_columns
         update_exclude = set(pk_columns) | set(conflict_key)
         update_cols = [c for c in columns if c not in update_exclude and c != "created_at" and c not in missing_cols]
 
@@ -873,7 +887,11 @@ class BaseDao:
                     table_name,
                 )
 
-            return total_written
+            # CRITICAL-02: 返回「实际落库行数」= 去重后行数，而非提交行数。提交行数在存在
+            # 重复冲突键时包含被 UPSERT 静默合并掉的行，会与上游 fetched 相等而使行数完整性
+            # 校验恒不触发（save_if_ok 的 saved 直接取本返回值）。total_written 仅用于日志。
+            persisted_rows = len(df_slice) - dup_lost
+            return persisted_rows
         except asyncio.CancelledError:
             logger.warning(
                 "[%s] UPSERT cancelled during shutdown: %s",
