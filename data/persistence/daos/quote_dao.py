@@ -54,7 +54,7 @@ FIXED_EXPECTED_TABLES: dict[str, int] = {
 
 
 def _build_table_tolerance_map(config: dict[str, typing.Any]) -> dict[str, float]:
-    """质量评分各表容忍系数登记表（期望行数 = int(参照基数 * 容忍系数)）。
+    """质量评分各表容忍系数登记表（期望行数 = int(理论存活股票数 expected_base * 容忍系数)）。
 
     未登记的表回落默认 0.80（见 get_bulk_sync_quality_scores）。新增同步表时必须显式
     登记于此、或登记进 LOW_FREQUENCY_TABLES / FIXED_EXPECTED_TABLES，否则会被一致性
@@ -1102,7 +1102,13 @@ class QuoteDao(BaseDao):
                     f"{_STOCK_BASIC_STALENESS_MAX_DAYS} 天，理论股票数可能偏低"
                 )
 
-            reference_count = quotes_count if quotes_count > 0 else expected_base
+            # review09-24 dim05 CRITICAL-01：daily_quotes 是否达标是一票否决信号。
+            # 整批残缺（限流/超时/分页中断导致的整批截断）时，其余表的实际行数会与
+            # daily_quotes 同步缩水；若以缩水后的 quotes_count 作参照（自我参照分母），
+            # 评分退化为"各表彼此是否一致"而非"是否完整"，加权平均无法把总分压到阈值下，
+            # 残缺日会被断点续传永久跳过。故 daily_quotes 不达标时最终得分强制封顶到阈值以下。
+            # 仅当本次评估确实包含 daily_quotes 时否决，避免调用方显式排除该表（只评部分表）时误否决。
+            quotes_veto = "daily_quotes" in tables and not quotes_passed
 
             # Low-frequency exemption must be controlled by explicit table allowlist,
             # not by tolerance values, to avoid accidental score inflation after config changes.
@@ -1154,7 +1160,10 @@ class QuoteDao(BaseDao):
                 elif table in FIXED_EXPECTED_TABLES:
                     expected = FIXED_EXPECTED_TABLES[table]
                 else:
-                    expected = int(reference_count * tolerance)
+                    # review09-24 dim05 CRITICAL-01：以理论存活股票数（expected_base）为参照，
+                    # 而非当天实际抓到的 quotes_count——后者在整批残缺时会同步缩水，
+                    # 使"完整性"退化为"各表彼此一致"。
+                    expected = int(expected_base * tolerance)
 
                 ratio = min(1.0, count / expected) if expected > 0 else 0
                 passed = count >= expected
@@ -1183,6 +1192,11 @@ class QuoteDao(BaseDao):
 
             if total_weight > 0:
                 result["score"] = int(min(100, (weighted_score / total_weight) * 100))
+
+            if quotes_veto:
+                # 封顶到阈值以下，使缓存判分路径（historical.py 的 score < quality_threshold）
+                # 必然重同步；max(0, ...) 防止 quality_threshold=0 时产生负分。
+                result["score"] = min(result["score"], max(0, config.get("quality_threshold", 80) - 1))
 
             results[trade_date] = result
 

@@ -1058,7 +1058,9 @@ class TestQuoteDaoGetBulkSyncQualityScores:
 
             stk_limit = day["tables"]["stk_limit"]
             assert stk_limit.get("exempt") is not True
-            assert stk_limit["expected"] == int(4800 * 0.90)
+            # CRITICAL-01：期望行数以理论股票数 expected_base(5000) 为分母，
+            # 而非当日实际 quotes_count(4800)，避免整批残缺时完整性退化为一致性。
+            assert stk_limit["expected"] == int(5000 * 0.90)
             assert stk_limit["passed"] is False
             assert any(issue.startswith("stk_limit:") for issue in day["issues"])
 
@@ -1232,6 +1234,124 @@ class TestQuoteDaoGetBulkSyncQualityScores:
             day = result[datetime.date(2024, 6, 15)]
             assert day["tables"]["daily_quotes"]["ratio"] == 1.0
             assert day["issues"] == ["daily_quotes 行数(5200)超过理论股票数(5000)，stock_basic 可能陈旧"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("quotes_ratio_value", [0.30, 0.50, 0.94, 0.95])
+    async def test_review09_24_critical01_daily_quotes_ratio_gates_resync(self, quotes_ratio_value):
+        """review09-24 dim05 CRITICAL-01：daily_quotes 覆盖率决定是否被判为低质量而重同步。
+
+        修复前其余表以缩水后的 quotes_count 为参照（自我参照分母），daily_quotes 覆盖约 50%
+        时（其余表满额）总分仍可达 ~82（≥80）而被断点续传永久跳过。修复后 daily_quotes 未达
+        quotes_tolerance_ratio(0.95) 即一票否决，得分封顶到阈值以下强制重同步。
+        其余表按理论股票数满额写入，以隔离 daily_quotes 单项对总分的影响。
+        注：r=0.30/0.95 为边界用例（修复前后结论一致，仅作边界锁定）；真正区分修复效果的是
+        r=0.50/0.94（修复前 ≥80、修复后 <80）。
+        """
+        expected_base = 5400
+        quotes_count = int(expected_base * quotes_ratio_value)
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+
+        async def _counts(table, start, end):
+            return {datetime.date(2024, 6, 15): quotes_count if table == "daily_quotes" else expected_base}
+
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): expected_base})
+        dao.get_bulk_table_counts = AsyncMock(side_effect=_counts)
+        dao.get_field_completeness = AsyncMock(return_value={})
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes", "daily_indicators", "moneyflow_daily", "margin_daily"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quality_threshold": 80,
+                "quotes_tolerance_ratio": 0.95,
+                "indicators_tolerance_ratio": 0.90,
+                "moneyflow_tolerance_ratio": 0.80,
+                "quality_weights": {
+                    "daily_quotes": 30,
+                    "daily_indicators": 25,
+                    "moneyflow_daily": 20,
+                    "margin_daily": 10,
+                },
+            }
+            day = (await dao.get_bulk_sync_quality_scores("20240615", "20240615"))[datetime.date(2024, 6, 15)]
+
+        assert day["tables"]["daily_quotes"]["passed"] is (quotes_ratio_value >= 0.95)
+        if quotes_ratio_value >= 0.95:
+            assert day["score"] >= 80
+        else:
+            assert day["score"] < 80
+            assert any(issue.startswith("daily_quotes:") for issue in day["issues"])
+
+    @pytest.mark.asyncio
+    async def test_review09_24_critical01_truncated_batch_not_self_referential(self):
+        """整批残缺（daily_quotes 与其余表同比例缩水）不得因"各表彼此一致"被判合格。
+
+        修复前其余表以 quotes_count=2700 为参照 → 各表 ratio≈1.0 → 总分约 82 ≥ 80，残缺日被跳过。
+        修复后参照改为 expected_base=5400 → 其余表 ratio 显著 <1，叠加一票否决 → 得分 <80 强制重同步。
+        """
+        expected_base = 5400
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+
+        async def _counts(table, start, end):
+            return {datetime.date(2024, 6, 15): 2700 if table != "margin_daily" else 2500}
+
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): expected_base})
+        dao.get_bulk_table_counts = AsyncMock(side_effect=_counts)
+        dao.get_field_completeness = AsyncMock(return_value={})
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes", "daily_indicators", "moneyflow_daily", "margin_daily"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quality_threshold": 80,
+                "quotes_tolerance_ratio": 0.95,
+                "indicators_tolerance_ratio": 0.90,
+                "moneyflow_tolerance_ratio": 0.80,
+                "quality_weights": {
+                    "daily_quotes": 30,
+                    "daily_indicators": 25,
+                    "moneyflow_daily": 20,
+                    "margin_daily": 10,
+                },
+            }
+            day = (await dao.get_bulk_sync_quality_scores("20240615", "20240615"))[datetime.date(2024, 6, 15)]
+
+        assert day["tables"]["daily_quotes"]["passed"] is False
+        assert day["score"] < 80
+        assert any(issue.startswith("daily_quotes:") for issue in day["issues"])
+
+    @pytest.mark.asyncio
+    async def test_review09_24_critical01_veto_skipped_when_daily_quotes_excluded(self):
+        """本次评估显式排除 daily_quotes 时不得触发一票否决（避免误否决只评部分表的调用）。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5400})
+        dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5400})
+        dao.get_field_completeness = AsyncMock(return_value={})
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_indicators"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quality_threshold": 80,
+                "quotes_tolerance_ratio": 0.95,
+                "indicators_tolerance_ratio": 0.90,
+                "moneyflow_tolerance_ratio": 0.80,
+                "quality_weights": {"daily_indicators": 25},
+            }
+            day = (await dao.get_bulk_sync_quality_scores("20240615", "20240615"))[datetime.date(2024, 6, 15)]
+
+        # daily_quotes 不在 evaluated tables 内（其 count=0 源自未查询），不参与一票否决：
+        # daily_indicators 满额 → 得分 ≥80。若误加否决会被封顶到 79 而导致该断言失败。
+        assert day["score"] >= 80
 
 
 class TestQuoteDaoStockBasicLatestUpdatedDate:
