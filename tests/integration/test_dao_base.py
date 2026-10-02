@@ -228,8 +228,41 @@ class TestQuoteDao:
         result = await quote_dao.get_daily_quotes(ts_code_list=["000001.SZ", "000002.SZ"])
         assert len(result) == 2
 
-    async def test_check_data_exists(self, quote_dao, clean_db):
-        """检查数据是否存在 - 使用 tables 参数只检查 quotes 表"""
+    async def test_check_data_exists(self, quote_dao, stock_dao, clean_db):
+        """检查数据是否存在 - 使用 tables 参数只检查 quotes 表
+
+        review09-24 dim05 MAJOR-02：daily_quotes 属稠密表，改为按行数
+        （>= max(1, 理论股票数 * 容忍系数)）判定，故须先补种 trade_cal（交易日）
+        与 stock_basic（1 只存活股）使理论股票数可确定。
+        """
+        assert not await quote_dao.check_data_exists("20240321", tables=["daily_quotes"])
+
+        await stock_dao.save_trade_cal(
+            pd.DataFrame(
+                [
+                    {
+                        "cal_date": "20240321",
+                        "exchange": "SSE",
+                        "is_open": "1",
+                        "pretrade_date": "20240320",
+                    }
+                ]
+            )
+        )
+        await stock_dao.save_stock_basic(
+            pd.DataFrame(
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "symbol": "000001",
+                        "name": "平安银行",
+                        "list_status": "L",
+                        "list_date": "19910403",
+                    }
+                ]
+            )
+        )
+        # 理论股票数可确定（expected_base=1），但当日行情为空 → 仍判未完整
         assert not await quote_dao.check_data_exists("20240321", tables=["daily_quotes"])
 
         df = pd.DataFrame(
