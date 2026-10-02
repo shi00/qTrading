@@ -264,7 +264,7 @@ class NewsRiskPage:
         await self.ap.expect_visible(EIDS.NEWS_RISK.event_card(idx), timeout_ms=timeout_ms)
 
     async def assert_summary_visible(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
-        # flet 1.0.0 out-of-sync 会部分丢弃嵌套的 Semantics 节点：E3 实证页面里
+        # Flet 1.0.x out-of-sync 会部分丢弃嵌套的 Semantics 节点：E3 实证页面里
         # risk_level/coverage/event_card 锚点都渲染成功，唯独 SUMMARY 的 Semantics
         # 锚点缺失，而「风险摘要」裸标题 Text 稳定渲染。故改等标题文本（expect_text
         # 已具备 textContent + aria-label 双轨匹配），抗 out-of-sync。

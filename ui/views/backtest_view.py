@@ -353,7 +353,7 @@ def BacktestView(active: bool = True) -> ft.Container:
             detail=state.error_detail,
             on_retry=_on_retry_backtest,
             retry_text=I18n.get("common_retry"),
-            cta_url=GITHUB_ISSUES_URL,  # Flet 1.0.0 客户端动作 OpenUrl (见 state_views.ErrorState)
+            cta_url=GITHUB_ISSUES_URL,  # Flet 1.0.x 客户端动作 OpenUrl (见 state_views.ErrorState)
             cta_text=I18n.get("error_state_contact_support"),
             cta_icon=ft.Icons.FEEDBACK,  # UX-03 (P2-09): 反馈问题语义匹配
         )

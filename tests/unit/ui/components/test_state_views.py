@@ -154,7 +154,7 @@ class TestErrorStateRender:
         assert isinstance(col.controls[4], ft.TextButton)
 
     def test_cta_url_renders_openurl_client_action(self, mock_i18n_state, mock_app_colors_state):
-        """Flet 1.0.0: cta_url 以声明式客户端动作 OpenUrl 渲染 (替代 on_cta 回调).
+        """Flet 1.0.x: cta_url 以声明式客户端动作 OpenUrl 渲染 (替代 on_cta 回调).
 
         OpenUrl.__post_init__ 经 shared_service 读 context.page, 故须先 attach_fake_page.
         """

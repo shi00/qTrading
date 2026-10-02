@@ -962,9 +962,9 @@ class TestBacktestViewErrorState:
         assert call_args.args[2] == "fake_backtest_config"
 
     def test_error_state_cta_uses_openurl_client_action(self, backtest_view_env) -> None:
-        """反馈到 GitHub Issues 的 CTA 采用 Flet 1.0.0 声明式客户端动作.
+        """反馈到 GitHub Issues 的 CTA 采用 Flet 1.0.x 声明式客户端动作.
 
-        旧实现经 async wrapper + page.run_task 调度 page.launch_url; 1.0.0 改用
+        旧实现经 async wrapper + page.run_task 调度 page.launch_url; 1.0.x 改用
         ``action=ft.OpenUrl`` 在客户端手势内直接打开 URL (见 state_views.ErrorState),
         测试改为验证 ErrorState 收到 ``cta_url`` (OpenUrl) 而非 ``on_cta`` 回调。
         """

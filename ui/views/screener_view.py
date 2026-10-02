@@ -2077,7 +2077,7 @@ def _build_screener_table_card(
 
 
 # MINOR-06 (AI 流式卡片区强制回底): 判定「是否已滚离底部」的像素容差。
-# Flet 1.0.2 ``OnScrollEvent.extent_after`` 为滚动视口「之后」剩余的内容量(逻辑像素);
+# Flet 1.0.x ``OnScrollEvent.extent_after`` 为滚动视口「之后」剩余的内容量(逻辑像素);
 # 用户上滚后该值 > 容差, 视为已滚离底部(此时须停止自动跟随)。
 _LOG_AT_BOTTOM_TOLERANCE_PX = 4.0
 
@@ -2156,7 +2156,7 @@ def _build_screener_log_card(
                 # 拉回底部(on_scroll 依据 extent_after 判定是否已滚离底部)。
                 auto_scroll=follow_latest,
                 # 0ms 立即贴底: 默认 1s 缓动动画期间会产生「中途位置」的滚动事件而被误判为
-                # 已滚离底部; Flet 1.0.2 亦推荐 token 级流式跟随用 0 时长保持紧贴。
+                # 已滚离底部; Flet 1.0.x 亦推荐 token 级流式跟随用 0 时长保持紧贴。
                 auto_scroll_animation=0,
                 on_scroll=on_log_scroll,
                 # rebuild_token 变化时按 key 重建滚动 Column, 使「回到最新」点击后立即贴底

@@ -125,7 +125,7 @@ def ErrorState(
         cta_text: CTA 按钮文案 (已翻译字符串); ``on_cta``/``cta_url`` 非空时必填。
         cta_icon: 次 CTA 按钮图标 (可选, UX-03 P2-09); None 时不显示图标,
             传入时渲染该图标 — 由消费方按动作语义提供, 避免固定图标误导。
-        cta_url: CTA 打开的外部链接 (可选, Flet 1.0.0 客户端动作 ``OpenUrl``);
+        cta_url: CTA 打开的外部链接 (可选, Flet 1.0.x 客户端动作 ``OpenUrl``);
             在组件渲染上下文内构造, 替代传回调的 on_click (无需 page/run_task)。
     """
     ft.use_state(get_observable_state)
@@ -143,7 +143,7 @@ def ErrorState(
     def _on_toggle_detail(_e: ft.ControlEvent) -> None:
         set_is_expanded(not is_expanded)
 
-    # Flet 1.0.0: 声明式客户端动作 (OpenUrl) 替代回调 + page.run_task 变通;
+    # Flet 1.0.x: 声明式客户端动作 (OpenUrl) 替代回调 + page.run_task 变通;
     # 必须在组件渲染上下文内构造 (OpenUrl.__post_init__ 经 shared_service 读 context.page)。
     cta_action = ft.OpenUrl(cta_url) if cta_url else None
 
