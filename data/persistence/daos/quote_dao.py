@@ -40,6 +40,10 @@ _DEFAULT_SYNCED_TABLES: list[str] | None = None
 
 LOW_FREQUENCY_TABLES = {"limit_list", "suspend_d", "top_list", "top_inst", "block_trade"}
 
+# review09-24 dim05 MAJOR-04：stock_basic 新鲜度阈值（自然日）。质量评分的理论股票数完全
+# 派生自 stock_basic，该表陈旧超过此天数时在 issues 中标注"理论股票数可能偏低"。
+_STOCK_BASIC_STALENESS_MAX_DAYS = 7
+
 # DS-01: index_daily 期望行数在运行期按 indices_to_sync()（含配置基准）派生，见本
 # 函数对 index_daily 的 special-case；此处保留基准下限值，供集成测试读取/断言。
 FIXED_EXPECTED_TABLES: dict[str, int] = {
@@ -953,6 +957,43 @@ class QuoteDao(BaseDao):
             logger.warning("[QuoteDao] Failed to get bulk expected counts: %s", safe_error(e))
             return {}
 
+    async def get_stock_basic_latest_updated_date(self) -> datetime.date | None:
+        """stock_basic 最近一次写入日期（质量评分新鲜度判据，review09-24 dim05 MAJOR-04）。
+
+        理论股票数（``get_bulk_expected_stock_counts``）完全派生自 stock_basic；该表陈旧会
+        使分母偏小、``daily_quotes`` 覆盖率被高估，故质量评分前需据此判断分母可信度。
+
+        语义：``_save_upsert`` 在 ON CONFLICT 时写 ``updated_at = now()``（见 base_dao），
+        故 ``MAX(updated_at)`` 可代表"最近一次成功写入 stock_basic 的时间"；空返回时
+        ``save_stock_basic`` 提前 return 不刷新，不会被误判为新鲜。
+
+        局限：该判据只反映"最近一次写入时刻"，无法发现"部分写入导致大量行仍缺失"
+        （此时分母偏小、评分虚高而本判据仍显示新鲜）；内容级完整性需另设行数/覆盖判据。
+
+        Returns:
+            最近写入日期；无法判定（表为空 / 全为 NULL / 查询失败）时返回 ``None``——
+            调用方必须按"未知"处理，不得当作"新鲜"（R21 精神：未知不伪装为正常）。
+        """
+        try:
+            df = await self._read_db("SELECT MAX(updated_at) AS latest_updated FROM stock_basic")
+            if df is None or df.empty:
+                return None
+            value = df["latest_updated"].iloc[0]
+            if value is None or pd.isna(value):
+                return None
+            if isinstance(value, datetime.datetime):
+                return value.date()
+            if isinstance(value, datetime.date):
+                return value
+            return None
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.debug("[QuoteDao] stock_basic freshness query failed: %s", safe_error(e))
+            return None
+
     async def get_bulk_sync_quality_scores(
         self,
         start_date: datetime.date | str,
@@ -996,6 +1037,9 @@ class QuoteDao(BaseDao):
             logger.warning("[QuoteDao] Cannot determine expected bases for quality check")
             return {}
 
+        # MAJOR-04：stock_basic 新鲜度决定 expected_base（分母）是否可信，全批只查一次。
+        stock_basic_updated = await self.get_stock_basic_latest_updated_date()
+
         table_counts = {}
         for table in tables:
             table_counts[table] = await self.get_bulk_table_counts(table, start_date, end_date)
@@ -1030,6 +1074,33 @@ class QuoteDao(BaseDao):
 
             if not quotes_passed:
                 result["issues"].append(f"daily_quotes: {quotes_count}/{expected_base} ({quotes_ratio:.1%})")
+            elif quotes_count > expected_base:
+                # MAJOR-04：行数超过理论数说明 stock_basic 漏了当日实际有行情的标的
+                # （正常情形下停牌股无行情，count 应小于 expected_base）；被 min(1.0, ...)
+                # 截顶后看不出超额，故显式告警。
+                result["issues"].append(
+                    f"daily_quotes 行数({quotes_count})超过理论股票数({expected_base})，stock_basic 可能陈旧"
+                )
+
+            # MAJOR-04：stock_basic 陈旧会使理论股票数偏小、覆盖率被高估（评分虚高）。
+            # 仅标注告警、不调低 score——stock_basic 不在 HistoricalSyncStrategy.SYNCED_TABLES，
+            # 降分只会驱使历史同步反复重抓同一些日期却无法修复分母（成本回归且不自愈）。
+            if isinstance(trade_date, datetime.datetime):
+                plain_trade_date: datetime.date | None = trade_date.date()
+            elif isinstance(trade_date, datetime.date):
+                plain_trade_date = trade_date
+            else:
+                plain_trade_date = None
+            if stock_basic_updated is None:
+                result["issues"].append("无法确认 stock_basic 新鲜度（查询失败或表为空），理论股票数可能不准")
+            elif (
+                plain_trade_date is not None
+                and (plain_trade_date - stock_basic_updated).days > _STOCK_BASIC_STALENESS_MAX_DAYS
+            ):
+                result["issues"].append(
+                    f"stock_basic 最近更新 {stock_basic_updated}，早于交易日 {plain_trade_date} 超过 "
+                    f"{_STOCK_BASIC_STALENESS_MAX_DAYS} 天，理论股票数可能偏低"
+                )
 
             reference_count = quotes_count if quotes_count > 0 else expected_base
 

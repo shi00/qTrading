@@ -462,6 +462,12 @@ class TestQualityScoreWeights:
                 new_callable=AsyncMock,
                 return_value={},
             ),
+            patch.object(
+                quote_dao,
+                "get_stock_basic_latest_updated_date",
+                new_callable=AsyncMock,
+                return_value=datetime.date(2024, 1, 1),
+            ),
         ):
             scores = await quote_dao.get_bulk_sync_quality_scores(
                 "20240101",
