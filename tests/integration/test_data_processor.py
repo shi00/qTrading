@@ -109,6 +109,8 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_cache.quote_dao.save_daily_quotes = AsyncMock()
         self.mock_cache.market_dao.save_daily_indicators = AsyncMock()
         self.mock_cache.sync_dao.update_sync_status = AsyncMock()
+        # MAJOR-03：独立单日快照（无 empty_day_sink）时稀疏空表会直接调 mark_empty_days
+        self.mock_cache.sync_dao.mark_empty_days = AsyncMock(return_value=0)
         self.mock_cache.quote_dao.get_cached_trade_dates = AsyncMock()
         self.mock_cache.financial_dao.get_cached_indicator_dates = AsyncMock()
         self.mock_cache.financial_dao.save_financial_reports = AsyncMock()
@@ -1114,7 +1116,7 @@ class TestDataProcessor(unittest.TestCase):
 
         call_count = 0
 
-        async def side_effect(date, force=False, sync_result=None, watermark_sink=None):
+        async def side_effect(date, force=False, sync_result=None, watermark_sink=None, empty_day_sink=None):
             nonlocal call_count
             call_count += 1
             if call_count <= 2:

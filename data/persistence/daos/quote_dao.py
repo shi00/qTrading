@@ -40,6 +40,11 @@ _DEFAULT_SYNCED_TABLES: list[str] | None = None
 
 LOW_FREQUENCY_TABLES = {"limit_list", "suspend_d", "top_list", "top_inst", "block_trade"}
 
+# 每交易日必有数据的 dense 表（与 historical.py 的断点续传完成度判定集合一致）。
+# 这些表"当日为空"必是真实缺口而非合法稀疏，故即使被误登记进 sync_empty_days
+# 也不予豁免，防止"已尝试水位"式豁免退化后把 dense 缺口伪装成合法空（R21 精神）。
+_DENSE_TABLES = frozenset({"daily_quotes", "daily_indicators"})
+
 # review09-24 dim05 MAJOR-04：stock_basic 新鲜度阈值（自然日）。质量评分的理论股票数完全
 # 派生自 stock_basic，该表陈旧超过此天数时在 issues 中标注"理论股票数可能偏低"。
 _STOCK_BASIC_STALENESS_MAX_DAYS = 7
@@ -1084,12 +1089,57 @@ class QuoteDao(BaseDao):
             logger.debug("[QuoteDao] stock_basic freshness query failed: %s", safe_error(e))
             return None
 
+    async def _get_empty_days_map(
+        self,
+        tables: list | None,
+        start_date: datetime.date | str,
+        end_date: datetime.date | str,
+    ) -> dict[str, set[datetime.date]]:
+        """读取窗口内各表"已核实合法为空"的交易日集合（review09-24 dim05 MAJOR-03）。
+
+        数据来源 ``sync_empty_days``（由同步侧仅对成功 fetch 且为空的稀疏表登记）。
+        查询失败/表缺失时返回空字典——调用方据此**不做豁免**（无登记即按真实缺口处理），
+        符合 R21 精神：未知不得伪装成"合法为空"。
+
+        Args:
+            tables: 待查询的表名列表
+            start_date: 开始日期
+            end_date: 结束日期
+
+        Returns:
+            {table_name: {trade_date, ...}}；无登记/查询失败时为空字典。
+        """
+        if not tables:
+            return {}
+        tbl = Base.metadata.tables.get("sync_empty_days")
+        if tbl is None:
+            logger.warning("[QuoteDao] Table 'sync_empty_days' not in metadata, skip empty-day exemption")
+            return {}
+        try:
+            stmt = sa.select(tbl.c.table_name, tbl.c.trade_date).where(
+                tbl.c.table_name.in_(list(tables)),
+                tbl.c.trade_date.between(start_date, end_date),
+            )
+            df = await self._read_db_select(stmt)
+            if df is None or df.empty:
+                return {}
+            empty_days_map: dict[str, set[datetime.date]] = {}
+            for table_name, trade_date in zip(df["table_name"], df["trade_date"], strict=False):
+                empty_days_map.setdefault(table_name, set()).add(_normalize_trade_date(trade_date))
+            return empty_days_map
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.warning("[QuoteDao] Failed to load sync_empty_days map: %s", safe_error(e))
+            return {}
+
     async def get_bulk_sync_quality_scores(
         self,
         start_date: datetime.date | str,
         end_date: datetime.date | str,
         tables: list | None = None,
-        attempted_upto: dict[str, str] | None = None,
     ) -> dict[datetime.date, dict]:
         """
         批量评估指定时间范围内每天的数据同步质量。
@@ -1100,10 +1150,6 @@ class QuoteDao(BaseDao):
             start_date: 开始日期
             end_date: 结束日期
             tables: 要检查的表列表
-            attempted_upto: 稀疏表"已尝试水位"（表名 -> YYYYMMDD，D1-1）。
-                未进 LOW_FREQUENCY_TABLES 的稀疏表，在某日 `date <= attempted_upto[table]`
-                且该表当日 count == 0 时，判为"已尝试且合法为空"，不计入加权评分，
-                避免 dense 表已完整仍因个别稀疏空表反复触发 re-sync。
 
         Returns:
             {trade_date: quality_info} 字典，其中 quality_info 包含：
@@ -1133,6 +1179,11 @@ class QuoteDao(BaseDao):
         table_counts = {}
         for table in tables:
             table_counts[table] = await self.get_bulk_table_counts(table, start_date, end_date)
+
+        # MAJOR-03：一次性读取窗口内"已核实合法为空"登记，供稀疏表豁免判据使用。
+        # 替代原单点高水位（sync_attempted_upto）——后者无法表达"区间内某些日为空、
+        # 某些日为真实缺口"，会把水位之前的真实缺口一并豁免。
+        empty_days_map = await self._get_empty_days_map(tables, start_date, end_date)
 
         table_tolerance_map = _build_table_tolerance_map(config)
 
@@ -1221,26 +1272,21 @@ class QuoteDao(BaseDao):
                     }
                     continue
 
-                # D1-1：已尝试水位豁免——未进低频白名单的稀疏表，某日已尝试
-                # （date <= attempted_upto[table]）且当日 count == 0 → 判为"已尝试合法为空"，
-                # 不计入加权评分，避免 dense 表已完整仍因个别稀疏空表反复触发 re-sync。
-                if count == 0 and attempted_upto:
-                    attempted_str = attempted_upto.get(table)
-                    if attempted_str:
-                        try:
-                            attempted_date = datetime.datetime.strptime(attempted_str, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
-                        except ValueError:
-                            attempted_date = None
-                        if attempted_date is not None and trade_date <= attempted_date:
-                            result["tables"][table] = {
-                                "count": 0,
-                                "expected": 0,
-                                "ratio": None,
-                                "passed": True,
-                                "exempt": True,
-                                "note": "已尝试且当日合法为空，不计入评分",
-                            }
-                            continue
+                # MAJOR-03：已核实合法为空豁免——未进低频白名单、非 dense 的稀疏表，
+                # 某日 count == 0 且该 (表, 日) 已在 sync_empty_days 显式登记
+                # → 判为"已尝试合法为空"，不计入加权评分，避免 dense 表已完整仍因
+                # 个别稀疏空表反复触发 re-sync。单点水位改为按 (表, 日) 精确登记后，
+                # 未登记的日期（含水位之前的真实缺口）不再被误豁免。
+                if count == 0 and table not in _DENSE_TABLES and trade_date in empty_days_map.get(table, set()):
+                    result["tables"][table] = {
+                        "count": 0,
+                        "expected": 0,
+                        "ratio": None,
+                        "passed": True,
+                        "exempt": True,
+                        "note": "已核实合法为空，不计入评分",
+                    }
+                    continue
 
                 # review09-24 dim05 MAJOR-02：期望行数计算统一收敛到 _expected_count_for_table()
                 # （DS-01 的 index_daily 动态派生 / FIXED_EXPECTED_TABLES / CRITICAL-01 的

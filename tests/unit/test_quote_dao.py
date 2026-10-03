@@ -948,6 +948,48 @@ class TestQuoteDaoGetSyncQualityScore:
         assert result["score"] == 0
 
 
+class TestQuoteDaoGetEmptyDaysMap:
+    """MAJOR-03：sync_empty_days 读取（豁免判据数据来源）。"""
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_tables(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        assert await dao._get_empty_days_map([], "20240614", "20240615") == {}
+
+    @pytest.mark.asyncio
+    async def test_groups_rows_by_table(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "table_name": ["moneyflow_daily", "moneyflow_daily", "moneyflow_hsgt"],
+                    "trade_date": [
+                        datetime.date(2024, 6, 14),
+                        datetime.date(2024, 6, 15),
+                        datetime.date(2024, 6, 15),
+                    ],
+                }
+            )
+        )
+        result = await dao._get_empty_days_map(["moneyflow_daily", "moneyflow_hsgt"], "20240614", "20240615")
+        assert result == {
+            "moneyflow_daily": {datetime.date(2024, 6, 14), datetime.date(2024, 6, 15)},
+            "moneyflow_hsgt": {datetime.date(2024, 6, 15)},
+        }
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_query_failure(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(side_effect=Exception("DB Error"))
+        assert await dao._get_empty_days_map(["moneyflow_daily"], "20240614", "20240615") == {}
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_empty_result(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        assert await dao._get_empty_days_map(["moneyflow_daily"], "20240614", "20240615") == {}
+
+
 class TestQuoteDaoGetBulkSyncQualityScores:
     @pytest.mark.asyncio
     async def test_no_expected_bases(self):
@@ -1022,8 +1064,8 @@ class TestQuoteDaoGetBulkSyncQualityScores:
             assert result[datetime.date(2024, 6, 15)]["tables"]["limit_list"].get("exempt") is True
 
     @pytest.mark.asyncio
-    async def test_attempted_upto_exempts_zero_count_sparse_table(self):
-        """D1-1：水位覆盖某日且稀疏表当日 count==0 → 判为"已尝试合法空"，exempt 不计分。"""
+    async def test_empty_day_exempts_zero_count_sparse_table(self):
+        """MAJOR-03：稀疏表某日已登记"合法为空"且当日 count==0 → exempt 不计分。"""
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
 
         async def _counts(table, start, end):
@@ -1031,6 +1073,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
 
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
         dao.get_bulk_table_counts = AsyncMock(side_effect=_counts)
+        dao._get_empty_days_map = AsyncMock(return_value={"moneyflow_daily": {datetime.date(2024, 6, 15)}})
         dao.get_field_completeness = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
@@ -1046,18 +1089,14 @@ class TestQuoteDaoGetBulkSyncQualityScores:
                 "moneyflow_tolerance_ratio": 0.70,
                 "quality_weights": {"daily_quotes": 10, "moneyflow_daily": 5},
             }
-            result = await dao.get_bulk_sync_quality_scores(
-                "20240615",
-                "20240615",
-                attempted_upto={"moneyflow_daily": "20240615"},
-            )
+            result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
             mf = result[datetime.date(2024, 6, 15)]["tables"]["moneyflow_daily"]
             assert mf.get("exempt") is True
             assert result[datetime.date(2024, 6, 15)]["score"] > 0
 
     @pytest.mark.asyncio
-    async def test_attempted_upto_not_exempt_when_count_positive(self):
-        """D1-1：水位存在但稀疏表当日 count>0 → 仍正常计分（不豁免）。"""
+    async def test_empty_day_not_exempt_when_count_positive(self):
+        """MAJOR-03：某日已登记合法空但稀疏表当日 count>0 → 仍正常计分（不豁免）。"""
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
 
         async def _counts(table, start, end):
@@ -1065,6 +1104,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
 
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
         dao.get_bulk_table_counts = AsyncMock(side_effect=_counts)
+        dao._get_empty_days_map = AsyncMock(return_value={"moneyflow_daily": {datetime.date(2024, 6, 15)}})
         dao.get_field_completeness = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
@@ -1080,19 +1120,18 @@ class TestQuoteDaoGetBulkSyncQualityScores:
                 "moneyflow_tolerance_ratio": 0.70,
                 "quality_weights": {"daily_quotes": 10, "moneyflow_daily": 5},
             }
-            result = await dao.get_bulk_sync_quality_scores(
-                "20240615",
-                "20240615",
-                attempted_upto={"moneyflow_daily": "20240615"},
-            )
+            result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
             mf = result[datetime.date(2024, 6, 15)]["tables"]["moneyflow_daily"]
             assert mf.get("exempt") is not True
             assert mf["ratio"] is not None
             assert mf["count"] == 100
 
     @pytest.mark.asyncio
-    async def test_attempted_upto_beyond_coverage_still_scores_zero(self):
-        """D1-1：水位未覆盖该日（date > attempted_upto）→ 不作为豁免，按正常 count==0 计分拉低。"""
+    async def test_empty_day_other_date_still_scores_zero(self):
+        """MAJOR-03：登记的是别的日期（该日未登记）→ 不豁免，按 count==0 计分拉低。
+
+        这是相对原单点水位的关键修正：水位覆盖区间内"更早的真实缺口"不再被一并豁免。
+        """
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
 
         async def _counts(table, start, end):
@@ -1100,6 +1139,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
 
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
         dao.get_bulk_table_counts = AsyncMock(side_effect=_counts)
+        dao._get_empty_days_map = AsyncMock(return_value={"moneyflow_daily": {datetime.date(2024, 6, 14)}})
         dao.get_field_completeness = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
@@ -1115,14 +1155,41 @@ class TestQuoteDaoGetBulkSyncQualityScores:
                 "moneyflow_tolerance_ratio": 0.70,
                 "quality_weights": {"daily_quotes": 10, "moneyflow_daily": 5},
             }
-            result = await dao.get_bulk_sync_quality_scores(
-                "20240615",
-                "20240615",
-                attempted_upto={"moneyflow_daily": "20240614"},
-            )
+            result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
             mf = result[datetime.date(2024, 6, 15)]["tables"]["moneyflow_daily"]
             assert mf.get("exempt") is not True
             assert mf["ratio"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_empty_day_dense_table_still_not_exempt(self):
+        """MAJOR-03：dense 表（daily_indicators）即使被误登记为空日也不豁免，避免伪装缺口。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+
+        async def _counts(table, start, end):
+            return {datetime.date(2024, 6, 15): 4800 if table == "daily_quotes" else 0}
+
+        dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
+        dao.get_bulk_table_counts = AsyncMock(side_effect=_counts)
+        dao._get_empty_days_map = AsyncMock(return_value={"daily_indicators": {datetime.date(2024, 6, 15)}})
+        dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
+        with (
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes", "daily_indicators"],
+            ),
+            patch("utils.config_handler.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_sync_integrity_config.return_value = {
+                "quotes_tolerance_ratio": 0.90,
+                "indicators_tolerance_ratio": 0.80,
+                "moneyflow_tolerance_ratio": 0.70,
+                "quality_weights": {"daily_quotes": 10, "daily_indicators": 5},
+            }
+            result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
+            di = result[datetime.date(2024, 6, 15)]["tables"]["daily_indicators"]
+            assert di.get("exempt") is not True
+            assert di["ratio"] == 0.0
 
     @pytest.mark.asyncio
     async def test_review09_24_major01_new_tables_registered_in_scoring(self):

@@ -45,9 +45,10 @@ _CALENDAR_DAY_BUFFER = 30
 # 其余表（稀疏事件表 / 官方停止披露表 / 无权限表）不参与完成度判定，但仍正常同步。
 _DENSE_TABLES = frozenset({"daily_quotes", "daily_indicators"})
 
-# "已尝试水位"存储键前缀（D1-1）：区分"该表该日已尝试且合法为空"（quality 豁免）
-# 与"从未尝试"（真实缺口）。key 形如 sync_attempted_upto:<table>，value 为 YYYYMMDD。
-# 前缀为 R22 水位键白名单（D3-m1），单一真相源在 data/constants.py。
+# "已尝试水位"存储键前缀（D1-1）：key 形如 sync_attempted_upto:<table>，value 为 YYYYMMDD。
+# MAJOR-03 后仅作 SYNC-04 遥测（稀疏表水位缺失告警），不再参与质量豁免——豁免改由
+# sync_empty_days 按 (表, 日) 精确登记驱动。前缀为 R22 水位键白名单（D3-m1），
+# 单一真相源在 data/constants.py。
 _WATERMARK_KEY_PREFIX = WATERMARK_KEY_PREFIXES[0]
 
 
@@ -359,21 +360,18 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
             if dates_to_verify:
                 try:
-                    # D1-1：读取各稀疏表"已尝试水位"，供 quality 评分豁免"已尝试且合法为空"的日期，
-                    # 避免 dense 表已完整仍因个别稀疏空表反复触发 re-sync。读取失败由 get_app_state 吞掉。
-                    # SYNC-04：收集缺失读数并告警——读循环仅在 dates_to_verify 非空（缓存数据已存在，
-                    # 非首次运行）时执行，全部缺失即属异常（水位从未建立或 app_state 读取异常），应予告警。
+                    # SYNC-04：读取各稀疏表"已尝试水位"（MAJOR-03 后为纯遥测，不再参与质量豁免），
+                    # 收集缺失读数并告警——读循环仅在 dates_to_verify 非空（缓存数据已存在，
+                    # 非首次运行）时执行，全部缺失即属异常（水位从未建立或 app_state 读取异常）。
+                    # 质量豁免改由 sync_empty_days 按 (表, 日) 精确登记驱动，见 get_bulk_sync_quality_scores。
                     resume_sparse = [t for t in effective_resume_tables if t not in _DENSE_TABLES]
-                    attempted_upto: dict[str, str] = {}
                     missing_watermark_tables: list[str] = []
                     for table in resume_sparse:
                         wm = await get_app_state(
                             self.context.cache.engine,
                             f"{_WATERMARK_KEY_PREFIX}:{table}",
                         )
-                        if wm:
-                            attempted_upto[table] = wm
-                        else:
+                        if not wm:
                             missing_watermark_tables.append(table)
 
                     if resume_sparse and len(missing_watermark_tables) == len(resume_sparse):
@@ -394,7 +392,6 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         start_date=dates_to_verify[0],
                         end_date=dates_to_verify[-1],
                         tables=list(effective_resume_tables),
-                        attempted_upto=attempted_upto or None,
                     )
 
                     for date in dates_to_verify:
@@ -503,10 +500,13 @@ class HistoricalSyncStrategy(ISyncStrategy):
         processed_count = 0
         BATCH_SIZE = ConfigHandler.get_sync_batch_size()
         counter_lock = get_loop_local("hist_counter_lock", asyncio.Lock)
-        # SYNC-02：批处理驱动的稀疏表水位聚合桶。各日成功 fetch 的表合并进此处（取 max），
-        # 批次边界统一 flush，避免每天每表一次独立事务（days=250 时由 ~3000 降到 ~12×批次数）。
+        # SYNC-02：批处理驱动的稀疏表水位聚合桶（纯遥测，MAJOR-03 后仅供 SYNC-04 告警）。
+        # 各日成功 fetch 的表合并进此处（取 max），批次边界统一 flush，避免每天每表一次独立事务。
         # 用 set_app_state_max 单调写，后续批次更旧日期不会回退已落高水位。
         pending_watermarks: dict[str, datetime.date] = {}
+        # MAJOR-03：批处理驱动的"已核实合法为空"聚合桶（表名 -> 交易日集合）。
+        # 批次边界统一经 sync_dao.mark_empty_days 批量落库，避免每天每表一次独立 upsert。
+        pending_empty_days: dict[str, set[datetime.date]] = {}
 
         async def sync_one_day(date: datetime.date | str):
             nonlocal abort_sync, processed_count
@@ -537,7 +537,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 try:
                     # P0-1: 检查返回值，False 表示取消信号触发，部分写入不应计为成功
                     success = await self.sync_daily_market_snapshot(
-                        date_obj, force=True, sync_result=result, watermark_sink=pending_watermarks
+                        date_obj,
+                        force=True,
+                        sync_result=result,
+                        watermark_sink=pending_watermarks,
+                        empty_day_sink=pending_empty_days,
                     )
                     if not success:
                         async with counter_lock:
@@ -587,6 +591,23 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 await set_app_state_max(engine, f"{_WATERMARK_KEY_PREFIX}:{table}", date.strftime("%Y%m%d"))
             pending_watermarks.clear()
 
+        async def _flush_empty_days() -> None:
+            """MAJOR-03：把聚合桶中累积的 (表, 空日) 批量落库后清空。
+
+            仅在驱动方提供了 empty_day_sink（批处理路径）时才有累积数据；独立单日调用
+            在 sync_daily_market_snapshot 内直接落库。落库经 sync_dao.mark_empty_days
+            幂等 upsert，普通写失败由该 DAO 经 suppress_errors 吞掉（不阻断同步主流程），
+            但 asyncio.CancelledError（R2）与 EngineDisposedError（R5）仍会传播。
+            """
+            if not pending_empty_days:
+                return
+            sync_dao = getattr(self.context.cache, "sync_dao", None)
+            if sync_dao is None:
+                return
+            for table, dates in pending_empty_days.items():
+                await sync_dao.mark_empty_days(table, sorted(dates))
+            pending_empty_days.clear()
+
         # Batch Processing
         for batch_start in range(0, len(trade_dates), BATCH_SIZE):
             if self._shutdown_event.is_set() or abort_sync or self._check_cancelled(result):
@@ -606,6 +627,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
             # SYNC-02：批次边界 flush 本批水位（含本批内有失败也照常刷成功日的表）。
             await _flush_watermarks()
+            # MAJOR-03：批次边界 flush 本批"已核实合法为空"登记。
+            await _flush_empty_days()
 
             batch_failures = sum(1 for d in batch if d in set(failed_dates))
             if batch_failures > 0:
@@ -672,7 +695,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         try:
                             # P0-1: 检查返回值，False 表示取消信号触发，不计为成功
                             success = await self.sync_daily_market_snapshot(
-                                date, force=True, sync_result=result, watermark_sink=pending_watermarks
+                                date,
+                                force=True,
+                                sync_result=result,
+                                watermark_sink=pending_watermarks,
+                                empty_day_sink=pending_empty_days,
                             )
                             if not success:
                                 async with counter_lock:
@@ -730,6 +757,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         # SYNC-02：重试阶段获得的水位同样落库（主路径每批已 flush，此处兜底重试新增）。
         await _flush_watermarks()
+        # MAJOR-03：重试阶段获得的空日登记兜底落库。
+        await _flush_empty_days()
 
         if failed_dates:
             result.errors.append(f"{len(failed_dates)} dates failed after retries")
@@ -757,6 +786,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         force: bool = False,
         sync_result: SyncResult | None = None,
         watermark_sink: dict[str, datetime.date] | None = None,
+        empty_day_sink: dict[str, set[datetime.date]] | None = None,
     ):
         """
         Sync ALL data types for a single day.
@@ -764,7 +794,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
         `watermark_sink`（可选，SYNC-02）：批处理驱动方传入的聚合桶，本日 fetch 成功
         （含合法空）的稀疏表水位合并进其中（取 max），不在本方法内直接写库；
         由调用方在批次边界统一 flush。不传时回退为直接单调写库（独立单日调用，
-        事务数少，无需聚合）。
+        事务数少，无需聚合）。MAJOR-03 后水位仅作 SYNC-04 遥测，不参与质量豁免。
+
+        `empty_day_sink`（可选，MAJOR-03）：批处理驱动方传入的"已核实合法为空"聚合桶
+        （表名 -> 交易日集合）。本日 result_status 恰为 EMPTY 的稀疏表日期并入其中，
+        不在本方法内直接写库；由调用方在批次边界经 sync_dao.mark_empty_days 批量落库。
+        不传时回退为直接写库（独立单日调用）。
         """
         if trade_date is not None:
             trade_date = to_date(trade_date)
@@ -1304,11 +1339,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 f"All critical tables (quotes, basic) failed for {trade_date}, triggering circuit breaker"
             )
 
-        # D1-1：记录稀疏表"已尝试水位"——仅记录当日 fetch 成功（含合法空）的表，
-        # 供后续 quality 评分豁免"已尝试且为空"的日期，避免 dense 已完整仍反复 re-sync。
+        # D1-1：记录稀疏表"已尝试水位"——仅记录当日 fetch 成功（含合法空）的表。
+        # MAJOR-03 后水位仅作 SYNC-04 遥测（水位缺失告警），不再参与质量豁免；
+        # 豁免改由下方"已核实合法为空"登记（sync_empty_days）精确驱动。
         # SYNC-02：批处理驱动方传入 watermark_sink 时仅做内存聚合（取 max），
         # 由调用方在批次边界统一 flush；独立单日调用回退为直接单调写库。
-        _ok_statuses = (SYNC_RESULT_EMPTY, SYNC_RESULT_HAS_DATA)
+        _ok_statuses = (SYNC_RESULT_HAS_DATA, SYNC_RESULT_EMPTY)
 
         async def _record(table: str, date: datetime.date) -> None:
             if watermark_sink is not None:
@@ -1317,6 +1353,15 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     watermark_sink[table] = date
             else:
                 await self._record_attempted_upto(table, date)
+
+        # MAJOR-03：登记"已核实合法为空"的 (表, 日)——仅 result_status **恰为 EMPTY**
+        # （成功 fetch 且结果为空），排除 FETCH_FAILED / SAVE_FAILED / SKIPPED_PERMISSION，
+        # 避免把抓取失败或无权限误登记为"合法为空"而豁免真实缺口（R21 精神）。
+        async def _record_empty(table: str, date: datetime.date) -> None:
+            if empty_day_sink is not None:
+                empty_day_sink.setdefault(table, set()).add(date)
+            else:
+                await self.context.cache.sync_dao.mark_empty_days(table, [date])
 
         for _res, _tbl in (
             (mf_result, "moneyflow_daily"),
@@ -1331,10 +1376,20 @@ class HistoricalSyncStrategy(ISyncStrategy):
             (index_basic_result, "index_dailybasic"),
             (stk_limit_result, "stk_limit"),
         ):
-            if isinstance(_res, dict) and _res.get("result_status") in _ok_statuses:
+            if not isinstance(_res, dict):
+                continue
+            _status = _res.get("result_status")
+            if _status in _ok_statuses:
                 await _record(_tbl, trade_date)
+            if _status == SYNC_RESULT_EMPTY:
+                await _record_empty(_tbl, trade_date)
+        # northbound 无统一 result_status，单独判定：仅当确实 fetch 到 df（data_map 非 None）
+        # 且成功、落库 0 行时登记为合法空；排除"df is None 且无异常"的疑似失败日
+        # （该分支在 north_result 中被误判为成功空，不可作豁免依据）。
         if data_map.get("north") is not None and north_result.get("success"):
             await _record("northbound_holding", trade_date)
+            if north_result.get("saved") == 0:
+                await _record_empty("northbound_holding", trade_date)
 
         return True
 

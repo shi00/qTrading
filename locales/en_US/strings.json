@@ -236,6 +236,7 @@
     "tab_screening_thinking": "Screening Thinking",
     "tab_sync_status": "Sync Status",
     "tab_stock_sync_status": "Stock Sync Details",
+    "tab_sync_empty_days": "Sparse Table Empty Days",
     "tab_macro_economy": "Macro Economy",
     "tab_shibor_daily": "Shibor Rates",
     "tab_stk_holdernumber": "Stock Holders",
