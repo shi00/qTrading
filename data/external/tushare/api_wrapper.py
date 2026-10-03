@@ -202,7 +202,10 @@ class TushareApiWrapper:
                     log_level = logging.ERROR
 
                 if is_permission_error:
-                    self.client.mark_api_unavailable(api_name)
+                    # runtime=True：单次调用报错得出的负缓存可能是关键字误判（服务端临时
+                    # 报错文案恰好含权限字样），标记为运行时负缓存，仅短期生效且不落库，
+                    # 避免对应表静默长期退出完整性检查（review09-24/05 MINOR-02）。
+                    self.client.mark_api_unavailable(api_name, runtime=True)
                     # 仅 token 认证失败触发全局熔断；per-API 权限错误（如积分不足）不熔断
                     # is_token_invalid 已在上方独立计算（覆盖纯 token 报错不含权限关键字的情况）
                     if is_token_invalid:
