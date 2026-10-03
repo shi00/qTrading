@@ -331,7 +331,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         try:
             cached_dates_per_table = {}
+            # MINOR-01：完成度判定只消费 DENSE 表（_completed_dates 仅取 _DENSE_TABLES 交集），
+            # 非 dense 表的缓存日期查询结果从未被使用。仅对 dense 表发起查询，避免全表 N+1。
             for table in effective_synced_tables:
+                if table not in _DENSE_TABLES:
+                    continue
                 cached_dates_per_table[table] = await self.context.cache.get_cached_dates_for_table(table)
 
             existing = self._completed_dates(cached_dates_per_table)

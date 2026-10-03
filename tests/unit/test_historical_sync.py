@@ -455,6 +455,31 @@ class TestHistoricalSyncRunExtended:
         assert result is not None
 
     @pytest.mark.asyncio
+    async def test_resume_queries_only_dense_tables(self):
+        """MINOR-01：断点续传只对 DENSE 表查询缓存日期，非 dense 表不发起查询。"""
+        from data.sync.historical import _DENSE_TABLES
+
+        ctx = make_ctx()
+        ctx.cache.quote_dao.check_data_exists = AsyncMock(return_value=True)
+        queried: list[str] = []
+
+        async def _spy(table):
+            queried.append(table)
+            return {"20240614", "20240613"}
+
+        ctx.cache.get_cached_dates_for_table = AsyncMock(side_effect=_spy)
+        strategy = HistoricalSyncStrategy(ctx)
+        with patch(
+            "data.sync.historical.TushareClient.get_effective_synced_tables",
+            return_value=["daily_quotes", "daily_indicators", "moneyflow_daily", "top_list"],
+        ):
+            await strategy.run(days=5)
+
+        # 非 dense 结果从不被 _completed_dates 消费，查询它们纯属浪费：现仅 dense 表被查询。
+        assert set(queried) <= set(_DENSE_TABLES), f"仅应查询 dense 表，实际 {queried}"
+        assert sorted(queried) == ["daily_indicators", "daily_quotes"]
+
+    @pytest.mark.asyncio
     async def test_run_with_low_quality_dates(self):
         ctx = make_ctx()
         ctx.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240614", "20240613"})
