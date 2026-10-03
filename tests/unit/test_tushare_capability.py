@@ -306,7 +306,9 @@ class TestProbeApiCapabilities:
         # get_now().year - 1 = 2024 → PROBE_RECENT_PERIOD = "20241231"
         fixed_now = datetime.datetime(2025, 1, 1)
         with (
-            patch("utils.time_utils.get_now", return_value=fixed_now),
+            # 必须 patch 使用方模块（capability_probe 以模块级 from...import 绑定 get_now），
+            # patch 源模块 utils.time_utils.get_now 不会影响已绑定的引用
+            patch("data.external.tushare.capability_probe.get_now", return_value=fixed_now),
             patch.object(client, "_handle_probe_call", new_callable=AsyncMock, side_effect=mock_probe_call),
             patch.object(client, "persist_capabilities_to_app_state", new_callable=AsyncMock),
         ):
