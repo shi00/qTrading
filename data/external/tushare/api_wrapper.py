@@ -319,6 +319,9 @@ class TushareApiWrapper:
         df_list = []
         offset = 0
         page = 0
+        # MAJOR-07：分页中途失败与 max_pages 截断同属「数据不完整」，
+        # 统一经 result.attrs["truncated"] 告知调用方。
+        truncated = False
 
         while page < max_pages:
             kwargs["offset"] = offset
@@ -337,6 +340,8 @@ class TushareApiWrapper:
                     DataSanitizer.sanitize_error(exc),
                     len(df_list),
                 )
+                # MAJOR-07：中途失败的返回同样不完整，须与 max_pages 截断一致地打标记
+                truncated = True
                 break
 
             # B9 修复：分页终止条件改为空页判断，而非"页大小小于第一页"。
@@ -350,7 +355,6 @@ class TushareApiWrapper:
             page += 1
 
         # B12 修复：达到 max_pages 时标记 truncated=True，调用方可检查 df.attrs["truncated"]
-        truncated = False
         if page >= max_pages:
             logger.warning(
                 "[API] Pagination hit max_pages=%s (offset=%s). Results are INCOMPLETE. Consider increasing max_pages or using date range filters.",
