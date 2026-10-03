@@ -168,6 +168,8 @@ class TestTushareClientBoundaryConditions:
 
         assert result is not None
         assert len(result) == 1
+        # MAJOR-07: 中途分页失败返回的部分数据须打「不完整」标记，调用方才能分辨
+        assert result.attrs.get("truncated") is True
 
     @pytest.mark.asyncio
     async def test_paginated_empty_result_returns_none(self):

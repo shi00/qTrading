@@ -246,6 +246,16 @@ class HolderSyncStrategy(ISyncStrategy):
                     enddate,
                     len(df),
                 )
+                if df.attrs.get("truncated") is True:
+                    # MAJOR-07：分页中途失败仅返回部分数据。已保存部分（UPSERT 幂等，
+                    # 重跑收敛），但返回 -1 使 _run_impl 记失败、不推进水位，等待下次重跑。
+                    logger.warning(
+                        "[HolderSync] stk_holdernumber enddate=%s: 分页中途失败仅得 %s 行（不完整），"
+                        "不推进水位，等待下次重跑。",
+                        enddate,
+                        len(df),
+                    )
+                    return -1
                 return len(df)
             logger.debug("[HolderSync] Table | stk_holdernumber enddate=%s: no data", enddate)
             return 0
@@ -629,6 +639,7 @@ class HolderSyncStrategy(ISyncStrategy):
             df = None
             actual_end_date = None
             all_api_failed = True
+            truncated = False
             for attempt in range(4):
                 if self._cancelled:
                     logger.debug("[HolderSync] pledge_stat | Cancelled during retry loop.")
@@ -657,7 +668,18 @@ class HolderSyncStrategy(ISyncStrategy):
 
                 if df is not None and not df.empty:
                     actual_end_date = candidate
-                    logger.debug("[HolderSync] pledge_stat | Got data for end_date=%s", end_date)
+                    if df.attrs.get("truncated") is True:
+                        # MAJOR-07：分页中途失败仅返回部分快照。保存部分数据但不推进水位
+                        # （count<0 → _run_impl 记失败），下次同步重跑收敛。
+                        truncated = True
+                        logger.warning(
+                            "[HolderSync] pledge_stat | end_date=%s: 分页中途失败仅得 %s 行（不完整），"
+                            "保存部分数据但不推进水位。",
+                            end_date,
+                            len(df),
+                        )
+                    else:
+                        logger.debug("[HolderSync] pledge_stat | Got data for end_date=%s", end_date)
                     break
                 logger.debug("[HolderSync] pledge_stat | No data for end_date=%s", end_date)
 
@@ -666,6 +688,8 @@ class HolderSyncStrategy(ISyncStrategy):
                 # to avoid lookahead bias in as_of queries (see MD-001).
                 await self.context.cache.financial_dao.save_pledge_stat(df)
                 logger.debug("[HolderSync] Table | pledge_stat: %s records", len(df))
+                if truncated:
+                    return -1, actual_end_date
                 return len(df), actual_end_date
 
             if all_api_failed:

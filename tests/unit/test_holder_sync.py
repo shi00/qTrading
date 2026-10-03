@@ -489,6 +489,32 @@ class TestHolderSyncSyncPledgeStat:
         assert count == -1
 
     @pytest.mark.asyncio
+    async def test_truncated_saves_partial_without_watermark(self):
+        """MAJOR-07: 候选快照分页截断 → 保存部分数据但返回 (-1, actual_date)。
+
+        本层只断言「返回 -1（交由 _run_impl 记失败）+ 部分数据仍被保存」；
+        「水位未推进」由 _run_impl 层用例 TestRunImplTruncatedNoWatermark 端到端验证
+        （子方法层本就不调用 update_sync_status，在此断言属空转）。
+        """
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        truncated_df = pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": [datetime.date(2024, 6, 14)]})
+        truncated_df.attrs["truncated"] = True
+        ctx.api.get_pledge_stat = AsyncMock(return_value=truncated_df)
+        ctx.cache = MagicMock()
+        ctx.cache.financial_dao.save_pledge_stat = AsyncMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+
+        count, date = await strategy._sync_pledge_stat()
+
+        assert count == -1
+        assert date == datetime.date(2024, 6, 14)
+        ctx.cache.financial_dao.save_pledge_stat.assert_awaited_once()
+        saved_arg = ctx.cache.financial_dao.save_pledge_stat.await_args.args[0]
+        assert saved_arg.attrs.get("truncated") is True
+
+    @pytest.mark.asyncio
     async def test_cancelled(self):
         ctx = MagicMock()
         strategy = HolderSyncStrategy(ctx)
@@ -802,6 +828,30 @@ class TestHolderSyncSyncStkHoldernumber:
         strategy = HolderSyncStrategy(ctx)
         result = await strategy._sync_stk_holdernumber("20240331")
         assert result == -1
+
+    @pytest.mark.asyncio
+    async def test_truncated_saves_partial_without_watermark(self):
+        """MAJOR-07: 分页中途失败（attrs['truncated']=True）→ 保存部分数据但返回 -1。
+
+        本层只断言「返回 -1（交由 _run_impl 记失败）+ 部分数据仍被保存」；
+        「水位未推进」由 _run_impl 层用例 TestRunImplTruncatedNoWatermark 端到端验证
+        （子方法层本就不调用 update_sync_status，在此断言属空转）。
+        """
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        truncated_df = pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"]})
+        truncated_df.attrs["truncated"] = True
+        ctx.api.get_stk_holdernumber = AsyncMock(return_value=truncated_df)
+        ctx.cache = MagicMock()
+        ctx.cache.holder_dao.save_holder_number = AsyncMock()
+        strategy = HolderSyncStrategy(ctx)
+
+        result = await strategy._sync_stk_holdernumber("20240331")
+
+        assert result == -1
+        ctx.cache.holder_dao.save_holder_number.assert_awaited_once()
+        saved_arg = ctx.cache.holder_dao.save_holder_number.await_args.args[0]
+        assert saved_arg.attrs.get("truncated") is True
 
 
 class TestHolderSyncSyncTop10Holders:
@@ -1478,6 +1528,38 @@ class TestRunImplFullSuccessPaths:
         assert result.status == "success"
         # 仅 stk_holdernumber + top10 触发 update
         assert ctx.cache.sync_dao.update_sync_status.await_count == 2
+
+
+class TestRunImplTruncatedNoWatermark:
+    """MAJOR-07: 子同步因分页截断返回 -1 时，_run_impl 不得推进对应表水位。
+
+    「水位未推进」的真实门控在 _run_impl（子方法层本就不调用 update_sync_status），
+    故不变量必须在此层端到端验证，否则断言恒真、无法证明修复有效。
+    """
+
+    @pytest.mark.asyncio
+    async def test_truncated_tables_do_not_advance_watermark(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_recent_quarter_ends = MagicMock(return_value=["20240331"])
+        strategy._sync_stk_holdernumber = AsyncMock(return_value=-1)  # 分页截断
+        strategy._sync_top10_holders = AsyncMock(return_value=0)  # 非截断（用于反证断言非空转）
+        strategy._sync_pledge_stat = AsyncMock(return_value=(-1, datetime.date(2024, 6, 14)))  # 分页截断
+        strategy._sync_share_float = AsyncMock(return_value=(0, None))
+        strategy._sync_pledge_detail = AsyncMock(return_value=(0, None))
+        strategy._sync_stk_holdertrade = AsyncMock(return_value=(0, None))
+
+        result = await strategy._run_impl()
+
+        advanced_tables = [call.args[0] for call in ctx.cache.sync_dao.update_sync_status.await_args_list]
+        # 反证：非截断表确实走了 update_sync_status 路径，证明断言非空转
+        assert "top10_holders" in advanced_tables
+        # 截断表不得推进水位
+        assert "stk_holdernumber" not in advanced_tables
+        assert "pledge_stat" not in advanced_tables
+        assert result.added == 0
 
 
 class TestRunImplSystemSeverityReraises:
