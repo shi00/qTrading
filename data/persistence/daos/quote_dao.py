@@ -979,6 +979,95 @@ class QuoteDao(BaseDao):
             logger.warning("[QuoteDao] Failed to get bulk counts for %s: %s", table_name, safe_error(e))
             return {}
 
+    async def get_bulk_table_counts_multi(
+        self,
+        tables: list[str],
+        start_date: datetime.date | str,
+        end_date: datetime.date | str,
+    ) -> dict[str, dict[datetime.date, int]]:
+        """
+        批量获取多张表在指定时间范围内每天的记录数（单次 UNION ALL 查询）。
+
+        替代 get_bulk_sync_quality_scores 中对每张表逐个调用 get_bulk_table_counts 的
+        N+1 模式（T 张表 → 1 次查询），语义与逐表调用等价：
+        - 非法表名 / 元数据缺失 / 无 trade_date 列 → 该表返回空 dict（不中断其余表）；
+        - 无数据同样以 {table: {}} 呈现，调用方按 0 处理。
+
+        失败隔离：union 查询整体失败时降级为逐表调用 get_bulk_table_counts（错误路径付 N 次），
+        避免"单次查询失败导致全表归零 → daily_quotes 一票否决 → 历史全量重同步"的放大效应。
+
+        Args:
+            tables: 表名列表
+            start_date: 开始日期
+            end_date: 结束日期
+
+        Returns:
+            {table_name: {日期: 记录数}}
+        """
+        result: dict[str, dict[datetime.date, int]] = {t: {} for t in tables}
+        if not tables:
+            return result
+
+        allowed_tables = set(_get_default_synced_tables())
+        metadata = Base.metadata
+        union_parts = []
+        queried_tables: list[str] = []
+        for table_name in tables:
+            if table_name not in allowed_tables or not _is_safe_identifier(table_name):
+                logger.warning("[QuoteDao] Invalid table name rejected: %s", table_name)
+                continue
+            tbl = metadata.tables.get(table_name)
+            if tbl is None or "trade_date" not in tbl.c:
+                logger.warning("[QuoteDao] Table '%s' not in metadata or missing trade_date column", table_name)
+                continue
+            part = (
+                sa.select(
+                    sa.literal(table_name).label("tbl"),
+                    tbl.c.trade_date.label("trade_date"),
+                    sa.func.count().label("cnt"),
+                )
+                .select_from(tbl)
+                .where(tbl.c.trade_date.between(start_date, end_date))
+                .group_by(tbl.c.trade_date)
+            )
+            union_parts.append(part)
+            queried_tables.append(table_name)
+
+        if not union_parts:
+            return result
+
+        stmt = union_parts[0] if len(union_parts) == 1 else sa.union_all(*union_parts)
+        try:
+            # suppress_errors=False：默认吞错会返回空 DataFrame，会把"查询失败"伪装成
+            # "全表无数据"，使下方逐表降级不可达，并把单表失败放大为全表归零
+            # （daily_quotes 一票否决 → 历史全量重同步）。必须显式抛出以进入降级路径。
+            df = await self._read_db_select(stmt, suppress_errors=False)
+            if df is None or df.empty:
+                return result
+            for tbl_name, trade_date, count in zip(df["tbl"], df["trade_date"], df["cnt"], strict=False):
+                if tbl_name in result:
+                    result[tbl_name][_normalize_trade_date(trade_date)] = count
+            return result
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.warning("[QuoteDao] Failed to get bulk counts (multi): %s; falling back to per-table", safe_error(e))
+
+        # 降级：逐表查询，保留原有的失败隔离（单表失败只影响该表，不放大为全表归零）。
+        for table_name in queried_tables:
+            try:
+                result[table_name] = await self.get_bulk_table_counts(table_name, start_date, end_date)
+            except asyncio.CancelledError:
+                raise
+            except EngineDisposedError:
+                raise
+            except Exception as e:
+                logger.warning("[QuoteDao] Fallback bulk counts failed for %s: %s", table_name, safe_error(e))
+                result[table_name] = {}
+        return result
+
     async def get_bulk_expected_stock_counts(
         self,
         start_date: datetime.date | str,
@@ -1176,9 +1265,8 @@ class QuoteDao(BaseDao):
         # MAJOR-04：stock_basic 新鲜度决定 expected_base（分母）是否可信，全批只查一次。
         stock_basic_updated = await self.get_stock_basic_latest_updated_date()
 
-        table_counts = {}
-        for table in tables:
-            table_counts[table] = await self.get_bulk_table_counts(table, start_date, end_date)
+        # MINOR-01：改为单次 UNION ALL 批量查询，替代对每张表逐个 get_bulk_table_counts 的 N+1。
+        table_counts = await self.get_bulk_table_counts_multi(list(tables), start_date, end_date)
 
         # MAJOR-03：一次性读取窗口内"已核实合法为空"登记，供稀疏表豁免判据使用。
         # 替代原单点高水位（sync_attempted_upto）——后者无法表达"区间内某些日为空、

@@ -244,6 +244,42 @@ class TestQuoteDaoIntegrity:
         }, f"应返回精确记录数，实际 {counts}"
 
     @pytest.mark.asyncio
+    async def test_get_bulk_table_counts_multi(self, test_engine: AsyncEngine, quote_dao: QuoteDao):
+        """
+        MINOR-01：多表 UNION ALL 单查询返回按表分组的记录数。
+
+        真实 asyncpg 下锁定 UNION ALL 的列别名（tbl/trade_date/cnt）与嵌套形状
+        （{table: {date: count}}），防止别名漂移使所有表静默返回空 dict。
+        场景：daily_quotes d1×2、d2×1；daily_indicators d1×1。
+        """
+        d1 = datetime.date(2024, 1, 1)
+        d2 = datetime.date(2024, 1, 2)
+        async with test_engine.begin() as conn:
+            for ts_code, trade_date in [
+                ("000001.SZ", d1),
+                ("000002.SZ", d1),
+                ("000001.SZ", d2),
+            ]:
+                await conn.execute(
+                    text(
+                        "INSERT INTO daily_quotes (ts_code, trade_date, close, pct_chg, vol, amount) "
+                        "VALUES (:ts_code, :trade_date, :close, :pct_chg, :vol, :amount)"
+                    ),
+                    make_daily_quote_row(ts_code=ts_code, trade_date=trade_date),
+                )
+            await conn.execute(
+                text("INSERT INTO daily_indicators (ts_code, trade_date, pe) VALUES (:ts_code, :trade_date, :pe)"),
+                {"ts_code": "000001.SZ", "trade_date": d1, "pe": 12.5},
+            )
+
+        counts = await quote_dao.get_bulk_table_counts_multi(["daily_quotes", "daily_indicators"], d1, d2)
+
+        assert counts == {
+            "daily_quotes": {d1: 2, d2: 1},
+            "daily_indicators": {d1: 1},
+        }, f"应按表分组返回精确记录数，实际 {counts}"
+
+    @pytest.mark.asyncio
     async def test_get_bulk_sync_quality_scores(self, test_engine: AsyncEngine, quote_dao: QuoteDao):
         """
         M2 测试：批量质量评分
@@ -446,9 +482,13 @@ class TestQualityScoreWeights:
             ),
             patch.object(
                 quote_dao,
-                "get_bulk_table_counts",
+                "get_bulk_table_counts_multi",
                 new_callable=AsyncMock,
-                return_value={datetime.date(2024, 1, 1): 5000},
+                return_value={
+                    "daily_quotes": {datetime.date(2024, 1, 1): 5000},
+                    "daily_indicators": {datetime.date(2024, 1, 1): 5000},
+                    "moneyflow_daily": {datetime.date(2024, 1, 1): 5000},
+                },
             ),
             patch.object(
                 quote_dao,

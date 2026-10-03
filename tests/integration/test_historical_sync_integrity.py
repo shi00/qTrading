@@ -906,9 +906,9 @@ class TestQualityWeightsConfig:
             ),
             patch.object(
                 quote_dao,
-                "get_bulk_table_counts",
+                "get_bulk_table_counts_multi",
                 new_callable=AsyncMock,
-                return_value={datetime.date(2024, 1, 1): 5000},
+                side_effect=lambda tables, start, end: {t: {datetime.date(2024, 1, 1): 5000} for t in tables},
             ),
             patch.object(
                 quote_dao,
@@ -1136,17 +1136,15 @@ class TestP1IndexTablesInLowFrequency:
 
         mock_expected = {datetime.date(2024, 1, 1): 5000}
 
-        async def mock_get_bulk_table_counts(table_name, start_date, end_date):
-            if table_name in FIXED_EXPECTED_TABLES:
-                return {datetime.date(2024, 1, 1): FIXED_EXPECTED_TABLES[table_name]}
-            return {datetime.date(2024, 1, 1): 5000}
+        async def mock_get_bulk_table_counts_multi(tables, start_date, end_date):
+            return {t: {datetime.date(2024, 1, 1): FIXED_EXPECTED_TABLES.get(t, 5000)} for t in tables}
 
         with (
             patch.object(
                 quote_dao,
-                "get_bulk_table_counts",
+                "get_bulk_table_counts_multi",
                 new_callable=AsyncMock,
-                side_effect=mock_get_bulk_table_counts,
+                side_effect=mock_get_bulk_table_counts_multi,
             ),
             patch.object(
                 quote_dao,
