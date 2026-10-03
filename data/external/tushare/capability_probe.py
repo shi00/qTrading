@@ -35,11 +35,22 @@ from typing import TYPE_CHECKING, Any
 
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
+from utils.time_utils import get_now
 
 if TYPE_CHECKING:
     from data.external.tushare_client import TushareClient
 
 logger = logging.getLogger(__name__)
+
+# 运行时负缓存 TTL（review09-24/05 MINOR-02）。
+# 负缓存分两类：
+# - 权威负缓存：由 ``probe_api_capabilities`` 实测得出，缓存为 False 长期有效
+#   （直到 token 变更 / 下次 probe 刷新），可持久化到 AppState。
+# - 运行时负缓存：由 ``_handle_api_call`` 单次权限类报错得出（``runtime=True``），
+#   可能因关键字误判（服务端临时性报错文案恰好含权限字样）把可用接口误标为不可用，
+#   进而使对应表静默退出 ``check_data_exists`` 与质量评分。此类标记仅保留本 TTL 时长，
+#   超时后由 ``is_api_available`` 惰性恢复为 None（未知），并**不**写入持久化 payload。
+_RUNTIME_UNAVAILABLE_TTL = datetime.timedelta(hours=1)
 
 
 class CapabilityProbeService:
@@ -66,35 +77,99 @@ class CapabilityProbeService:
         """
         Check if an API is available for the current token.
 
+        运行时负缓存（``_capability_runtime_marks``）超 ``_RUNTIME_UNAVAILABLE_TTL``
+        后惰性过期：视为未知（None），交下次真实调用 / probe 重新判定，避免单次误判
+        长期把对应表挡在完整性检查之外（review09-24/05 MINOR-02）。
+
         Returns:
             True: API is available
             False: API is known to be unavailable (permission denied)
-            None: Unknown (not tested yet)
+            None: Unknown (not tested yet, or runtime mark expired)
         """
         with self._capability_cache_lock:
-            return self._capability_cache.get(api_name)
+            value = self._capability_cache.get(api_name)
+            if value is False:
+                marked_at = self._capability_runtime_marks.get(api_name)
+                # 时钟回拨时差值可能为负 → 不判过期（保守：宁可多保留一个周期）
+                if marked_at is not None and get_now() - marked_at >= _RUNTIME_UNAVAILABLE_TTL:
+                    self._capability_cache.pop(api_name, None)
+                    self._capability_runtime_marks.pop(api_name, None)
+                    logger.info(
+                        "[API] Runtime availability mark for '%s' expired (ttl=%s), reset to unknown",
+                        api_name,
+                        _RUNTIME_UNAVAILABLE_TTL,
+                    )
+                    return None
+            return value
 
-    def mark_api_unavailable(self, api_name: str) -> None:
-        """Mark an API as unavailable for the current token."""
+    def mark_api_unavailable(self, api_name: str, *, runtime: bool = False) -> None:
+        """Mark an API as unavailable for the current token.
+
+        Args:
+            api_name: API 名。
+            runtime: True 表示负缓存来自单次运行时调用报错（``_handle_api_call`` 权限分支），
+                可能因关键字误判产生；仅保留 ``_RUNTIME_UNAVAILABLE_TTL`` 后惰性过期，
+                且不写入持久化 payload。False（默认）表示 probe 得出的权威负缓存，
+                长期有效直到 token 变更 / 重新 probe。
+        Note:
+            若 ``runtime=True`` 但该 API 已是权威负缓存（无运行时时间戳的 False），
+            则不降级、保留权威状态（避免 TTL 到期后丢失 probe 结论）。
+        """
         with self._capability_cache_lock:
-            self._capability_cache[api_name] = False
-            logger.warning("[API] Capability cached: '%s' marked as UNAVAILABLE for current token", api_name)
+            # 已是权威负缓存（probe 实测，无运行时时间戳）时，运行时信号不得将其降级：
+            # 否则该条目会被 get_capability_cache / 持久化过滤掉，且 TTL 到期后恢复为
+            # None，probe 得出的权威知识丢失、对应表被反复重试（review09-24/05 MINOR-02）。
+            is_durable_false = (
+                self._capability_cache.get(api_name) is False and api_name not in self._capability_runtime_marks
+            )
+            if runtime and is_durable_false:
+                applied = False
+            else:
+                applied = True
+                self._capability_cache[api_name] = False
+                if runtime:
+                    self._capability_runtime_marks[api_name] = get_now()
+                else:
+                    # 权威负缓存：清除可能残留的运行时时间戳，避免被 TTL 误判过期
+                    self._capability_runtime_marks.pop(api_name, None)
+        if not applied:
+            logger.debug(
+                "[API] Capability '%s' already cached as durable UNAVAILABLE; runtime mark skipped",
+                api_name,
+            )
+            return
+        logger.warning(
+            "[API] Capability cached: '%s' marked as UNAVAILABLE for current token (runtime=%s)",
+            api_name,
+            runtime,
+        )
 
     def mark_api_available(self, api_name: str) -> None:
         """Mark an API as available for the current token."""
         with self._capability_cache_lock:
             self._capability_cache[api_name] = True
+            self._capability_runtime_marks.pop(api_name, None)
 
     def clear_capability_cache(self) -> None:
         """Clear all cached capabilities. Call after token change."""
         with self._capability_cache_lock:
             self._capability_cache.clear()
+            self._capability_runtime_marks.clear()
             logger.info("[API] Capability cache cleared")
 
     def get_capability_cache(self) -> dict[str, bool | None]:
-        """Get a copy of the capability cache."""
+        """Get a copy of the capability cache.
+
+        运行时负缓存（值 False 且登记于 ``_capability_runtime_marks``）不对外暴露：
+        它是单次报错的临时信号，若被上层快照后经 ``mark_api_unavailable`` 回写会
+        「升格」为权威持久负缓存（review09-24/05 MINOR-02）。
+        """
         with self._capability_cache_lock:
-            return dict(self._capability_cache)
+            return {
+                api: value
+                for api, value in self._capability_cache.items()
+                if not (value is False and api in self._capability_runtime_marks)
+            }
 
     def get_last_probe_time(self) -> datetime.datetime | None:
         """返回上次 probe 完成时间（公共 getter，避免外部访问私有 _last_probe_time）。"""
@@ -206,7 +281,13 @@ class CapabilityProbeService:
 
         token_hash = hashlib.sha256(self.token.encode()).hexdigest()[:16] if self.token else None
         with self._capability_cache_lock:
-            capabilities = dict(self._capability_cache)
+            # 排除运行时负缓存：临时信号不落库，避免"升格"为跨重启存活的权威负缓存
+            # （review09-24/05 MINOR-02）。
+            capabilities = {
+                api: value
+                for api, value in self._capability_cache.items()
+                if not (value is False and api in self._capability_runtime_marks)
+            }
 
         # Phase 2A.1 §3.2.10：追加 last_probe_time ISO 8601 字符串，用于启动时自动 probe 判断
         last_probe_iso = self._last_probe_time.isoformat() if self._last_probe_time else None
@@ -302,7 +383,6 @@ class CapabilityProbeService:
             - None: Unable to determine (other error)
         """
         from utils.async_utils import gather_return_exceptions_propagating_cancel
-        from utils.time_utils import get_now
 
         # probe 互斥：单线程 asyncio 同步段内 ``if _probe_in_progress`` 与
         # ``self.client._probe_in_progress = True`` 之间无 await，理论原子。
@@ -316,8 +396,11 @@ class CapabilityProbeService:
         # B5/B19 修复：持锁访问 _capability_cache；B3 修复：同时快照 token，
         # set_token 在 probe 期间替换 token + 清空 cache + 重建 pro，回滚/写入时
         # 检查 token 一致性避免污染新 token 的 cache。
+        # 快照同时覆盖运行时标记字典：否则回滚只还原 cache、残留的运行时时间戳会把
+        # 权威负缓存误判为可 TTL 过期（review09-24/05 MINOR-02）。
         with self._capability_cache_lock:
             cache_snapshot = dict(self._capability_cache)
+            runtime_marks_snapshot = dict(self._capability_runtime_marks)
         token_snapshot = self.token
 
         try:
@@ -473,6 +556,8 @@ class CapabilityProbeService:
                 with self._capability_cache_lock:
                     self._capability_cache.clear()
                     self._capability_cache.update(cache_snapshot)
+                    self._capability_runtime_marks.clear()
+                    self._capability_runtime_marks.update(runtime_marks_snapshot)
             else:
                 logger.info("[TushareClient] Token changed during probe, skip rollback to avoid cache pollution")
             raise
@@ -487,6 +572,8 @@ class CapabilityProbeService:
                 with self._capability_cache_lock:
                     self._capability_cache.clear()
                     self._capability_cache.update(cache_snapshot)
+                    self._capability_runtime_marks.clear()
+                    self._capability_runtime_marks.update(runtime_marks_snapshot)
             else:
                 logger.info("[TushareClient] Token changed during probe, skip rollback to avoid cache pollution")
             return self.client.get_capability_cache()

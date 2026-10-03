@@ -427,6 +427,10 @@ class TushareClient:
 
             self._capability_cache: dict[str, bool | None] = {}
             self._capability_cache_lock = threading.Lock()
+            # 运行时负缓存时间戳（api -> get_now()）：区分单次调用报错（可 TTL 过期、
+            # 不持久化）与 probe 权威负缓存（review09-24/05 MINOR-02）。
+            # 语义与读写见 CapabilityProbeService.mark_api_unavailable / is_api_available。
+            self._capability_runtime_marks: dict[str, datetime.datetime] = {}
             self._bg_tasks: set[asyncio.Task] = set()
             # 全局 token 熔断标志：token 失效时置 True，阻止后续 API 调用避免无效重试刷屏。
             # 由 set_token_async() 重置（经 _get_token_invalid_lock 保护），
@@ -461,6 +465,9 @@ class TushareClient:
 
     def _ensure_subservices(self) -> None:
         """确保子模块实例存在（兼容 object.__new__(TushareClient) 构造的测试替身）。"""
+        if not hasattr(self, "_capability_runtime_marks"):
+            # 兼容测试替身：仅设置了 _capability_cache 等旧属性，补齐运行时标记字典
+            self._capability_runtime_marks = {}
         if not hasattr(self, "_rate_limiter_svc"):
             self._rate_limiter_svc = TushareRateLimiter(self)
             self._capability_probe = CapabilityProbeService(self)
@@ -554,10 +561,11 @@ class TushareClient:
         - 设置 self.token；
         - 重建 pro_api 引用（显式传 token，不写 tushare SDK 全局 ~/tk.csv）；
         - 重建 _rate_limiter / _api_limiters / _probe_rate_limiter；
-        - 清空 _capability_cache。
+        - 清空 _capability_cache 与 _capability_runtime_marks。
 
         不持 asyncio.Lock，不涉及 _token_invalid（由调用方负责重置）。
-        调用方需自行持有 self._lock 以保护 _capability_cache dict 与 rate_limiter 引用替换。
+        调用方需自行持有 self._lock 以保护 rate_limiter 引用替换；两处 capability 缓存
+        由本方法内部经 _capability_cache_lock 清空（与读写同锁）。
         """
         old_token = self.token
         self.token = token
@@ -566,8 +574,12 @@ class TushareClient:
 
         self._rate_limiter, self._api_limiters, self._probe_rate_limiter = self._build_rate_limiters()
 
-        cache_size = len(self._capability_cache)
-        self._capability_cache.clear()
+        # 经 _capability_cache_lock 保护：与 is_api_available / mark_* 的读写在同一把锁下，
+        # 避免 token 切换清缓存与并发读写竞争（两处缓存 + 运行时标记字典一并清空）。
+        with self._capability_cache_lock:
+            cache_size = len(self._capability_cache)
+            self._capability_cache.clear()
+            self._capability_runtime_marks.clear()
 
         logger.info(
             "[API] Token updated: %s -> %s. Cache cleared (%d entries).",
@@ -675,10 +687,17 @@ class TushareClient:
         self._ensure_subservices()
         return self._capability_probe.is_api_available(api_name)
 
-    def mark_api_unavailable(self, api_name: str) -> None:
-        """委托 CapabilityProbeService.mark_api_unavailable（保留显式签名）。"""
+    def mark_api_unavailable(self, api_name: str, *, runtime: bool = False) -> None:
+        """委托 CapabilityProbeService.mark_api_unavailable（保留显式签名）。
+
+        Args:
+            api_name: API 名。
+            runtime: True 表示负缓存来自单次运行时调用报错（可 TTL 过期、不持久化）；
+                False（默认）为 probe 权威负缓存。详见
+                ``CapabilityProbeService.mark_api_unavailable``。
+        """
         self._ensure_subservices()
-        return self._capability_probe.mark_api_unavailable(api_name)
+        return self._capability_probe.mark_api_unavailable(api_name, runtime=runtime)
 
     def mark_api_available(self, api_name: str) -> None:
         """委托 CapabilityProbeService.mark_api_available（保留显式签名）。"""

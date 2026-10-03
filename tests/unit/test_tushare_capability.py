@@ -5,8 +5,10 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import hashlib
 
+from data.external.tushare.capability_probe import _RUNTIME_UNAVAILABLE_TTL
 from data.external.tushare_client import TushareClient, TushareAPIPermissionError
 from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
+from utils.time_utils import get_now
 
 # 文件级标记 unit。历史曾因 slow_persist 使用 asyncio.sleep(10) 整文件标 slow，
 # 但被测任务在测试中立即 cancel，sleep 时长不影响断言；改为 unit 以纳入默认 CI 门禁。
@@ -769,3 +771,204 @@ class TestResetSingletonBgTasks:
             assert client.is_api_available("daily") is False
         finally:
             TushareClient._instance = original_instance
+
+
+class TestRuntimeUnavailableCacheTTL:
+    """review09-24/05 MINOR-02：区分运行时负缓存与 probe 权威负缓存。
+
+    运行时负缓存（``_handle_api_call`` 单次权限类报错得出）可能因关键字误判产生，
+    仅保留 ``_RUNTIME_UNAVAILABLE_TTL`` 后惰性过期，且不写入持久化 payload；
+    probe 得出的权威负缓存不受 TTL 影响、正常持久化。
+    """
+
+    def _set_runtime_mark_age(self, client, api_name: str, age: datetime.timedelta) -> None:
+        """直接设定运行时标记的年龄，避免依赖真实等待。"""
+        client._capability_runtime_marks[api_name] = get_now() - age
+
+    def test_runtime_mark_expires_to_none_after_ttl(self, tushare_client_mocks):
+        client, _, _ = tushare_client_mocks
+        client.mark_api_unavailable("top_list", runtime=True)
+        assert client.is_api_available("top_list") is False
+
+        self._set_runtime_mark_age(client, "top_list", _RUNTIME_UNAVAILABLE_TTL + datetime.timedelta(seconds=1))
+
+        # 超 TTL → 惰性恢复为 None，且内部两字典均清掉该条目
+        assert client.is_api_available("top_list") is None
+        assert "top_list" not in client._capability_cache
+        assert "top_list" not in client._capability_runtime_marks
+
+    def test_runtime_mark_stays_false_before_ttl(self, tushare_client_mocks):
+        client, _, _ = tushare_client_mocks
+        client.mark_api_unavailable("top_list", runtime=True)
+        # TTL 边界内（差 1 分钟到期）→ 仍为 False
+        self._set_runtime_mark_age(client, "top_list", _RUNTIME_UNAVAILABLE_TTL - datetime.timedelta(minutes=1))
+
+        assert client.is_api_available("top_list") is False
+        assert "top_list" not in client.get_effective_synced_tables(["top_list"])
+
+    def test_expired_runtime_mark_reenables_effective_table(self, tushare_client_mocks):
+        """MINOR-02 核心：运行时负缓存过期后，对应表重新纳入有效同步表。"""
+        client, _, _ = tushare_client_mocks
+        client.mark_api_unavailable("top_list", runtime=True)
+        assert "top_list" not in client.get_effective_synced_tables(["top_list"])
+
+        self._set_runtime_mark_age(client, "top_list", _RUNTIME_UNAVAILABLE_TTL + datetime.timedelta(seconds=1))
+
+        assert "top_list" in client.get_effective_synced_tables(["top_list"])
+
+    def test_durable_mark_clears_runtime_timestamp(self, tushare_client_mocks):
+        """权威负缓存（runtime=False）清除残留时间戳 → 不再被 TTL 误判过期。"""
+        client, _, _ = tushare_client_mocks
+        client.mark_api_unavailable("top_list", runtime=True)
+        assert "top_list" in client._capability_runtime_marks
+
+        client.mark_api_unavailable("top_list")  # 升格为权威负缓存
+
+        assert "top_list" not in client._capability_runtime_marks
+        assert client.is_api_available("top_list") is False
+
+    def test_mark_api_available_clears_runtime_timestamp(self, tushare_client_mocks):
+        client, _, _ = tushare_client_mocks
+        client.mark_api_unavailable("top_list", runtime=True)
+        assert "top_list" in client._capability_runtime_marks
+
+        client.mark_api_available("top_list")
+
+        assert client.is_api_available("top_list") is True
+        assert "top_list" not in client._capability_runtime_marks
+
+    def test_runtime_mark_does_not_downgrade_durable(self, tushare_client_mocks):
+        """已由 probe 判定的权威负缓存不被运行时信号降级（避免 TTL 到期丢失权威知识）。"""
+        client, _, _ = tushare_client_mocks
+        client.mark_api_unavailable("top_list")  # 权威负缓存（无时间戳）
+
+        client.mark_api_unavailable("top_list", runtime=True)
+
+        assert "top_list" not in client._capability_runtime_marks
+        assert client.get_capability_cache()["top_list"] is False
+        assert "top_list" not in client.get_effective_synced_tables(["top_list"])
+
+    def test_runtime_mark_refreshes_existing_runtime_entry(self, tushare_client_mocks):
+        """同一 API 再次运行时报错 → 时间戳刷新，仍为运行时负缓存。"""
+        client, _, _ = tushare_client_mocks
+        first_ts = get_now() - datetime.timedelta(minutes=30)
+        second_ts = get_now()
+
+        with patch("data.external.tushare.capability_probe.get_now", side_effect=[first_ts, second_ts]):
+            client.mark_api_unavailable("top_list", runtime=True)
+            client.mark_api_unavailable("top_list", runtime=True)
+
+        assert client._capability_runtime_marks["top_list"] == second_ts
+        assert client.is_api_available("top_list") is False
+
+    def test_delegation_passes_runtime_flag(self, tushare_client_mocks):
+        """TushareClient.mark_api_unavailable 的 runtime 关键字透传到服务子模块。"""
+        client, _, _ = tushare_client_mocks
+        client.mark_api_unavailable("api_runtime", runtime=True)
+        client.mark_api_unavailable("api_durable")
+
+        assert "api_runtime" in client._capability_runtime_marks
+        assert "api_durable" not in client._capability_runtime_marks
+
+    def test_clear_capability_cache_clears_both_dicts(self, tushare_client_mocks):
+        client, _, _ = tushare_client_mocks
+        client.mark_api_unavailable("api_runtime", runtime=True)
+        client.mark_api_available("api_ok")
+
+        client.clear_capability_cache()
+
+        assert client._capability_cache == {}
+        assert client._capability_runtime_marks == {}
+
+    def test_get_capability_cache_excludes_runtime_marks(self, tushare_client_mocks):
+        """运行时负缓存不对外暴露（否则上层快照回写会「升格」为持久负缓存）。"""
+        client, _, _ = tushare_client_mocks
+        client.mark_api_available("api_ok")
+        client.mark_api_unavailable("api_durable")
+        client.mark_api_unavailable("api_runtime", runtime=True)
+
+        cache = client.get_capability_cache()
+
+        assert cache["api_ok"] is True
+        assert cache["api_durable"] is False
+        assert "api_runtime" not in cache
+        # 内部仍保留运行时条目（仅不对外暴露）
+        assert client._capability_cache["api_runtime"] is False
+
+    @pytest.mark.asyncio
+    async def test_persist_payload_excludes_runtime_marks(self, tushare_client_mocks):
+        """运行时负缓存不落库，避免跨重启存活的错误负缓存。"""
+        import json
+
+        client, _, _ = tushare_client_mocks
+        client.mark_api_available("api_ok")
+        client.mark_api_unavailable("api_durable")
+        client.mark_api_unavailable("api_runtime", runtime=True)
+
+        captured: dict[str, str] = {}
+
+        async def fake_set_app_state(engine, key, value):
+            captured["key"] = key
+            captured["value"] = value
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.app_state_service.set_app_state", new=fake_set_app_state),
+        ):
+            mock_cm.return_value.engine = MagicMock()
+            await client.persist_capabilities_to_app_state()
+
+        assert captured["key"] == "tushare_capabilities"
+        capabilities = json.loads(captured["value"])["capabilities"]
+        assert capabilities["api_ok"] is True
+        assert capabilities["api_durable"] is False
+        assert "api_runtime" not in capabilities
+
+    @pytest.mark.asyncio
+    async def test_handle_api_call_permission_error_records_runtime_mark(self, tushare_client_mocks):
+        """权限报错经运行时分支落地时间戳（可 TTL 过期、不持久化）。"""
+        client, _, _ = tushare_client_mocks
+        with (
+            patch.object(client, "pro", MagicMock()),
+            patch.object(client, "_rate_limiter", None),
+            patch.object(client, "_api_limiters", {}),
+            patch.object(client, "_persist_capability_safely", new_callable=AsyncMock),
+        ):
+            mock_func = MagicMock()
+            mock_func.__name__ = "top_list"
+            mock_func.side_effect = Exception("权限不足，积分不够")
+
+            with pytest.raises(TushareAPIPermissionError, match="权限不足") as exc_info:
+                await client._handle_api_call(mock_func, trade_date="20240101")
+
+            assert exc_info.value.api_name == "top_list"
+
+        assert client.is_api_available("top_list") is False
+        assert "top_list" in client._capability_runtime_marks
+
+    @pytest.mark.asyncio
+    async def test_probe_rollback_restores_runtime_marks(self, tushare_client_mocks):
+        """probe 异常回滚同时还原运行时标记字典，避免残留时间戳让权威负缓存被误判过期。"""
+        client, _, _ = tushare_client_mocks
+        # 入口：top_list 为权威负缓存（无时间戳）
+        client.mark_api_unavailable("top_list")
+        assert "top_list" not in client._capability_runtime_marks
+
+        async def fake_probe_call(api_name, func, **params):
+            if api_name == "top_list":
+                # 模拟 probe 期间并发真实调用给 top_list 打上运行时标记
+                client.mark_api_unavailable("top_list", runtime=True)
+                # 该 API 探测结果为 None（网络错误）→ probe 主流程对该 API 不写入，
+                # 运行时标记得以保留到回滚路径，从而验证回滚是否还原时间戳字典
+                raise ConnectionError("network error")
+            return None
+
+        client._handle_probe_call = fake_probe_call
+        client.persist_capabilities_to_app_state = AsyncMock(side_effect=RuntimeError("persist failed"))
+
+        await client.probe_api_capabilities()
+
+        # 回滚后：权威负缓存保留且无运行时时间戳（若仅回滚 cache 会残留时间戳，
+        # 后续 TTL 到期会把权威负缓存误判为可过期）
+        assert client.is_api_available("top_list") is False
+        assert "top_list" not in client._capability_runtime_marks

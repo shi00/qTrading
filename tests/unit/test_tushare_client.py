@@ -128,17 +128,19 @@ class TestTushareClientSetToken:
 
     @pytest.mark.asyncio
     async def test_set_token_clears_capability_cache(self, tushare_client_mocks):
-        """T4.7: set_token_async 后 _capability_cache 应被清空。"""
+        """T4.7: set_token_async 后两处 capability 缓存（含运行时标记）应被清空。"""
         client, _, _ = tushare_client_mocks
         client.mark_api_available("api1")
         client.mark_api_available("api2")
         client.mark_api_unavailable("api3")
-        assert len(client._capability_cache) == 3
+        client.mark_api_unavailable("api4", runtime=True)
+        assert len(client._capability_cache) == 4
+        assert "api4" in client._capability_runtime_marks
 
         await client.set_token_async("new_token")
 
         assert client._capability_cache == {}
-        assert len(client._capability_cache) == 0
+        assert client._capability_runtime_marks == {}
 
 
 class TestTushareClientTokenBreakerProperty:
