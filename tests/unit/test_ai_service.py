@@ -667,6 +667,52 @@ class TestValidateAiAnalysisResponseContinued:
         result = validate_ai_analysis_response({"score": 50, "recommendation": "unknown"})
         assert result["conclusion_label"] is None
 
+    # --- MINOR-01: 置信度归一化（0~1 概率口径 → 百分数；越界不钳位置 None） ---
+
+    def test_confidence_probability_scale_converted_to_percent(self):
+        """MINOR-01: 0~1 概率口径按比例换算为百分数（0.85 → 85），不再 int() 截断为 0。"""
+        result = validate_ai_analysis_response({"score": 80, "confidence": 0.85})
+        assert result["confidence"] == 85
+
+    def test_confidence_percent_scale_kept(self):
+        result = validate_ai_analysis_response({"score": 80, "confidence": 80})
+        assert result["confidence"] == 80
+
+    def test_confidence_boundary_one_not_scaled(self):
+        """边界 1 按提示词契约（1-100）解读为 1%，不换算为 100——避免把最小置信度放大为满置信度。"""
+        result = validate_ai_analysis_response({"score": 80, "confidence": 1})
+        assert result["confidence"] == 1
+
+    def test_confidence_zero_kept(self):
+        """0 是合法置信度（0%），非缺失，保留 0 而非置 None。"""
+        result = validate_ai_analysis_response({"score": 80, "confidence": 0})
+        assert result["confidence"] == 0
+
+    def test_confidence_max_kept(self):
+        result = validate_ai_analysis_response({"score": 80, "confidence": 100})
+        assert result["confidence"] == 100
+
+    def test_confidence_out_of_range_high_is_none(self):
+        """R21/MINOR-01: >100 不钳位为 100，置 None（不把违规输出变成满置信度最强信号）。"""
+        result = validate_ai_analysis_response({"score": 80, "confidence": 500})
+        assert result["confidence"] is None
+
+    def test_confidence_out_of_range_low_is_none(self):
+        result = validate_ai_analysis_response({"score": 80, "confidence": -3})
+        assert result["confidence"] is None
+
+    def test_confidence_invalid_type_is_none(self):
+        result = validate_ai_analysis_response({"score": 80, "confidence": "high"})
+        assert result["confidence"] is None
+
+    def test_confidence_none_kept_none(self):
+        result = validate_ai_analysis_response({"score": 80, "confidence": None})
+        assert result["confidence"] is None
+
+    def test_confidence_missing_field_untouched(self):
+        result = validate_ai_analysis_response({"score": 80})
+        assert "confidence" not in result
+
 
 class TestValidateAiAnalysisResponseFreeText:
     """SEC-002: free-text field length limit and control-char cleaning."""
