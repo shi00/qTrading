@@ -873,8 +873,8 @@ class TestReviewManagerSaveResults:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_save_mixed_analyzed_failed_writes_only_analyzed(self, mock_cm, mock_tc):
-        """D4-C1+R19: 混合 analyzed/failed → 只写入 analyzed 行，返回值等于 analyzed 条数。"""
+    async def test_save_mixed_analyzed_rejected_written_failed_skipped(self, mock_cm, mock_tc):
+        """D4-C1+MINOR-03: 混合 analyzed/rejected/failed → 写 analyzed 与 rejected，仅跳过 failed。"""
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         mock_cache.screener_dao = MagicMock()
@@ -892,11 +892,10 @@ class TestReviewManagerSaveResults:
             }
         )
         result = await rm.save_results("test_strategy", df, trade_date="20240615")
-        assert result == 1
+        assert result == 2
         mock_cache.screener_dao.save_screening_results.assert_called_once()
         saved_records = mock_cache.screener_dao.save_screening_results.call_args.args[0]
-        assert len(saved_records) == 1
-        assert saved_records[0]["ts_code"] == "000001.SZ"
+        assert [r["ts_code"] for r in saved_records] == ["000001.SZ", "000003.SZ"]
 
 
 class TestReviewManagerNormalizeTradeDate:
@@ -2479,9 +2478,12 @@ class TestReviewManagerSaveResultsEdgeCases:
 
 
 class TestReviewManagerSaveResultsAiStatusFilter:
-    """D3-7: 复盘/预测写入侧守卫——仅 ai_status == analyzed 的记录可写入，rejected/failed 不落库。
+    """D3-7 / MINOR-03: 复盘/预测写入侧守卫——只写入「AI 已产出结论」的行。
 
-    避免 AI 失败/否决记录污染预测表进入学习闭环（降级不得伪装成成功，D2-1 原则）。
+    analyzed（正分）与 rejected（明确否决，score==0）照常落库；failed（分析未完成/
+    无分数）及 budget_exceeded / budget_unpriced_prompt / policy_not_acknowledged 等
+    「未执行分析」状态一律不落库——避免把「未分析」伪装成「已否决」（R21），也避免
+    未产出结论的行污染学习闭环。
     """
 
     def _make_rm(self, mock_cm):
@@ -2496,8 +2498,8 @@ class TestReviewManagerSaveResultsAiStatusFilter:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_only_analyzed_rows_written(self, mock_cm, mock_tc):
-        """含 ai_status 列时，rejected/failed 一律跳过，仅 analyzed 写库。"""
+    async def test_analyzed_and_rejected_written_failed_skipped(self, mock_cm, mock_tc):
+        """含 ai_status 列时，analyzed 与 rejected 写库，仅 failed 跳过。"""
         rm, mock_cache = self._make_rm(mock_cm)
         df = pd.DataFrame(
             {
@@ -2512,9 +2514,9 @@ class TestReviewManagerSaveResultsAiStatusFilter:
         await rm.save_results("test_strategy", df, trade_date="20240615")
         mock_cache.screener_dao.save_screening_results.assert_called_once()
         records = mock_cache.screener_dao.save_screening_results.call_args[0][0]
-        ts_codes = [r["ts_code"] for r in records]
-        assert ts_codes == ["S0"]
+        assert [r["ts_code"] for r in records] == ["S0", "S1"]
         assert records[0]["ai_score"] == 60
+        assert records[1]["ai_score"] == 0
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -2561,8 +2563,8 @@ class TestReviewManagerSaveResultsAiStatusFilter:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_all_rejected_failed_skip_dao(self, mock_cm, mock_tc):
-        """全部为 rejected/failed 时 nothing to write，跳过 DAO 落库。"""
+    async def test_rejected_written_failed_skipped_returns_one(self, mock_cm, mock_tc):
+        """MINOR-03: rejected 落库参与复盘，failed 跳过；仅 rejected 时返回 1。"""
         rm, mock_cache = self._make_rm(mock_cm)
         df = pd.DataFrame(
             {
@@ -2574,7 +2576,86 @@ class TestReviewManagerSaveResultsAiStatusFilter:
                 "ai_score": [0, None],
             }
         )
-        await rm.save_results("test_strategy", df, trade_date="20240615")
+        result = await rm.save_results("test_strategy", df, trade_date="20240615")
+        assert result == 1
+        mock_cache.screener_dao.save_screening_results.assert_called_once()
+        records = mock_cache.screener_dao.save_screening_results.call_args[0][0]
+        assert [r["ts_code"] for r in records] == ["S1"]
+        assert records[0]["ai_score"] == 0
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_rejected_row_persisted_with_label_and_score_for_learning(self, mock_cm, mock_tc):
+        """MINOR-03: 否决行以 ai_score==0 + conclusion_label=='reject' 落库。
+
+        落库的 ai_score 为 0（真实 AI 分数=否决，非 None），使 get_learning_context /
+        get_learning_context_stats 的 ``ai_score IS NOT NULL`` 过滤可命中该否决样本，
+        让复盘学习覆盖「正确的否决」。
+        """
+        rm, mock_cache = self._make_rm(mock_cm)
+        df = pd.DataFrame(
+            {
+                "ts_code": ["S1"],
+                "name": ["B"],
+                "close": [11.0],
+                "trade_date": ["20240615"],
+                "ai_status": ["rejected"],
+                "ai_score": [0],
+                "conclusion_label": ["reject"],
+            }
+        )
+        result = await rm.save_results("test_strategy", df, trade_date="20240615")
+        assert result == 1
+        mock_cache.screener_dao.save_screening_results.assert_called_once()
+        records = mock_cache.screener_dao.save_screening_results.call_args[0][0]
+        assert [r["ts_code"] for r in records] == ["S1"]
+        assert records[0]["ai_score"] == 0
+        assert records[0]["ai_score"] is not None
+        assert records[0]["conclusion_label"] == "reject"
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_failed_row_not_persisted_keeps_score_none(self, mock_cm, mock_tc):
+        """R21: failed（分析未完成/无分数）行不落库，不把「未分析」伪装成「已否决」。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        df = pd.DataFrame(
+            {
+                "ts_code": ["S1"],
+                "name": ["B"],
+                "close": [11.0],
+                "trade_date": ["20240615"],
+                "ai_status": ["failed"],
+                "ai_score": [None],
+            }
+        )
+        result = await rm.save_results("test_strategy", df, trade_date="20240615")
+        assert result == 0
+        mock_cache.screener_dao.save_screening_results.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status",
+        ["failed", "budget_exceeded", "budget_unpriced_prompt", "policy_not_acknowledged"],
+    )
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_unanalyzed_statuses_excluded(self, mock_cm, mock_tc, status):
+        """MINOR-03 回归: 仅 analyzed/rejected 入库，其余「未产出结论」状态一律排除。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        df = pd.DataFrame(
+            {
+                "ts_code": ["S1"],
+                "name": ["B"],
+                "close": [11.0],
+                "trade_date": ["20240615"],
+                "ai_status": [status],
+                "ai_score": [None],
+            }
+        )
+        result = await rm.save_results("test_strategy", df, trade_date="20240615")
+        assert result == 0
         mock_cache.screener_dao.save_screening_results.assert_not_called()
 
 

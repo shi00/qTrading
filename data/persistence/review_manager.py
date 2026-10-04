@@ -1423,6 +1423,8 @@ class ReviewManager:
             (empty df, or every row filtered out by ai_status — e.g. budget exceeded /
             policy not acknowledged / all AI failures). Callers MUST treat ``0`` as
             "no reviewable result produced", never as success (D4-C1).
+            MINOR-03: AI 明确否决（``ai_status == "rejected"``，score==0）的行照常落库并
+            参与复盘，故「候选全被否决」不再返回 0；被排除的仅限「未产出结论」的状态。
         """
         if df is None or df.empty:
             return 0
@@ -1489,11 +1491,18 @@ class ReviewManager:
             if not ts_code:
                 continue
 
-            # D3-7: 仅写入 ai_status == analyzed 的记录，不写入 rejected / failed
-            # 避免非分析结果污染 AI 学习闭环数据（failed 写盘会让 AI"学习从未输出过的预测"）
+            # D3-7 / MINOR-03: 只写入「AI 已产出结论」的行——
+            #   - analyzed：AI 给出正分；
+            #   - rejected：AI 明确否决（score==0，见 _build_result_row）。
+            # 否决行照常落库并进入 T+1/T+5 复盘，使学习样本覆盖「正确的否决」（此前仅
+            # analyzed 入库，学习样本在方向上只有一半）；否决语义由 ai_score==0 与
+            # conclusion_label=="reject" 共同承载。
+            # failed（分析未完成/无分数）及 budget_exceeded / budget_unpriced_prompt /
+            # policy_not_acknowledged 等「未执行分析」状态一律不入库——避免把「未分析」
+            # 伪装成「已否决」（R21），也不让未产出结论的行污染学习闭环。
             ai_status = row.get("ai_status")
-            if ai_status is not None and ai_status != "analyzed":
-                continue  # rejected/failed 不入数据库，由上层/UI 呈现不参与学习
+            if ai_status is not None and ai_status not in ("analyzed", "rejected"):
+                continue  # failed/未执行分析 不入数据库
 
             # BIZ-01: 缺省 None——「无 AI 分数」（纯数学策略/未配置 AI）与「AI 给 0 分」
             # 在数据层可区分，且不把非分析结果伪装成 0 分（R21 缺失值用 None 哨兵）。
