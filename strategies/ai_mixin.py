@@ -165,8 +165,11 @@ class AIStrategyMixin:
     _HISTORY_CACHE_MAX_BYTES = 128 * 1024 * 1024  # 128MB
     _HISTORY_CACHE_TTL = 120
 
-    # AI-01: 预算护栏「不可计价调用」保守提示的进程级一次确认标记。
-    # 用户确认后置 True，本进程内后续批次/重试不再重复弹提示；重启应用后重置。
+    # AI-01: 预算护栏「不可计价调用」保守提示的**本次运行**一次性确认标记。
+    # 本次运行内用户确认后置 True，同批次的后续批次/重试不再重复弹提示；
+    # 每次 run_ai_analysis 开启新运行时重置为 False（review09-24 维度04 MINOR-02），
+    # 使确认有效期止于本次运行而非整个进程——避免「一次点击确认后本进程内
+    # 不可计价调用始终不受预算护栏约束、花费无上限」。
     _ai_unpriced_acknowledged = False
 
     def __init__(self, *args, **kwargs):
@@ -361,6 +364,12 @@ class AIStrategyMixin:
         self._last_candidates_df = None
         self._last_prefetched = None
         self._last_dp = None
+
+        # AI-01（review09-24 维度04 MINOR-02）：每次批量运行开启新的「不可计价调用」
+        # 确认范围，重置确认标记，使确认有效期止于本次运行而非整个进程（否则一次确认后
+        # 本进程内所有运行时段的不可计价调用都不再受限）。单股重试（retry_single）不重置，
+        # 与所属运行共享同一确认。
+        self._ai_unpriced_acknowledged = False
 
         # Extract UI real-time prompt override (handles users clicking Run before blurring Flet textarea)
         ui_prompt_override = context.get("params", {}).get("ai_system_prompt", None)
@@ -1275,9 +1284,9 @@ class AIStrategyMixin:
         if await self._ai_budget_exhausted():
             return "ai_budget_exceeded"
         if await self._should_prompt_unpriced():
-            # 保守提示：预算已设且本月存在不可计价调用 → 先向用户确认（进程级一次）。
-            # 有确认能力（UI 注入 on_ai_unpriced_ack_request）→ 用户确认后放行并置进程级标记；
-            # 无法确认（夜间任务 / 无 UI）→ 保守拒绝，不静默放行不可计量调用（R21）。
+            # 保守提示：预算已设且本月存在不可计价调用 → 先向用户确认（本次运行一次）。
+            # 有确认能力（UI 注入 on_ai_unpriced_ack_request）→ 用户确认后放行并置本次运行
+            # 标记；无法确认（夜间任务 / 无 UI）→ 保守拒绝，不静默放行不可计量调用（R21）。
             if await self._confirm_unpriced(context):
                 return None
             # B1（review-pr1073）：拒绝原因写 context 标志，夜间 _prediction_logic 据此可诊断。
@@ -1318,8 +1327,9 @@ class AIStrategyMixin:
 
         语义（用户拍板「保守 —— 提示确认」）：预算已设置（``ai_cost_limit_cny>0``）且
         本月存在不可计价调用时，即便未超限也要先向用户确认（不可计价量可能绕过预算护栏）。
-        确认动作由 UI 层触发；确认标记 ``_ai_unpriced_acknowledged`` 为进程级一次
-        （重启后重置，每月至少校验/提示一次）。
+        确认动作由 UI 层触发；确认标记 ``_ai_unpriced_acknowledged`` 的作用域为**本次运行**
+        ——同一运行内确认一次即不再重复提示，但下次 ``run_ai_analysis`` 会重置该标记并重新
+        提示（review09-24 维度04 MINOR-02），避免「一次点击后本进程内花费无上限」。
         """
         if self._ai_unpriced_acknowledged:
             return False
@@ -1332,11 +1342,11 @@ class AIStrategyMixin:
         return month_unpriced_calls > 0
 
     async def _confirm_unpriced(self, context: dict) -> bool:
-        """向用户确认「继续发起不可计价调用」（进程级一次确认）。
+        """向用户确认「继续发起不可计价调用」（本次运行一次确认）。
 
         经 context 注入的 ``on_ai_unpriced_ack_request`` 协程（由 UI ViewModel 提供，
         与 SEC-01 的 ``on_ai_egress_ack_request`` 桥接同构）挂起等待用户决策：
-        - 确认 ⇒ UI 置 ``_ai_unpriced_acknowledged = True`` 后返回 True（本进程不再弹）；
+        - 确认 ⇒ UI 置 ``_ai_unpriced_acknowledged = True`` 后返回 True（本次运行不再弹）；
         - 拒绝 ⇒ 返回 False；
         - 无确认能力（夜间任务 / 未注入回调）⇒ 返回 False（保守拒绝，不静默放行，R21）。
         R2：asyncio.CancelledError 直接传播，不被 except Exception 吞没。

@@ -320,7 +320,7 @@
     "ai_budget_exceeded": "本月 AI 成本已达预算上限，已暂停 AI 分析",
     "ai_budget_unpriced_prompt": "本月存在无法计价的 AI 调用，预算护栏可能对这些调用失效；是否继续？",
     "ai_budget_unpriced_dialog_title": "存在无法计价的 AI 调用",
-    "ai_budget_unpriced_dialog_body": "本月部分 AI 调用的模型不在定价表中，无法核算成本，可能导致预算控制失效。是否仍继续发起云端 AI 调用？（本次确认本进程内不再重复询问）",
+    "ai_budget_unpriced_dialog_body": "本月部分 AI 调用的模型不在定价表中，无法核算成本，可能导致预算控制失效。是否仍继续发起云端 AI 调用？（本次确认仅对本次运行有效，再次运行将重新询问）",
     "ai_budget_unpriced_dialog_confirm": "继续",
     "ai_budget_unpriced_dialog_cancel": "取消",
     "ai_prompt_too_long": "自定义提示词过长：占用 {tokens} tokens，超出模型上下文窗口 {window} tokens。请缩短提示词或更换更大窗口的模型。",

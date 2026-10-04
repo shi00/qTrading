@@ -344,7 +344,7 @@
     "ai_budget_exceeded": "Monthly AI cost budget reached. AI analysis paused",
     "ai_budget_unpriced_prompt": "Some AI calls this month cannot be priced; the budget guard may not cover them. Continue?",
     "ai_budget_unpriced_dialog_title": "Unpriced AI calls detected",
-    "ai_budget_unpriced_dialog_body": "Some AI calls this month use models not in the pricing table, so their cost cannot be accounted and budget control may be ineffective. Still proceed with cloud AI calls? (This confirmation applies for the rest of this session.)",
+    "ai_budget_unpriced_dialog_body": "Some AI calls this month use models not in the pricing table, so their cost cannot be accounted and budget control may be ineffective. Still proceed with cloud AI calls? (This confirmation applies to this run only; you will be asked again the next time you run.)",
     "ai_budget_unpriced_dialog_confirm": "Continue",
     "ai_budget_unpriced_dialog_cancel": "Cancel",
     "ai_prompt_too_long": "Custom prompt too long: takes {tokens} tokens, exceeds model context window of {window} tokens. Shorten the prompt or switch to a larger model.",

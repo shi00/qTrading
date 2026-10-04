@@ -396,8 +396,9 @@ class AIStreamMixin:
 
         与 ``_request_egress_ack`` 同构：在**同一** asyncio loop 内创建待决 Future，写入
         state 由 View 渲染确认对话框；用户在 View 点击「继续/取消」调
-        ``resolve_ai_unpriced_ack`` 落地。返回值即用户决策。进程级一次确认由策略层
-        ``_confirm_unpriced`` 在确认后置 ``_ai_unpriced_acknowledged = True`` 达成。
+        ``resolve_ai_unpriced_ack`` 落地。返回值即用户决策。本次运行一次确认由策略层
+        ``_confirm_unpriced`` 在确认后置 ``_ai_unpriced_acknowledged = True`` 达成
+        （作用域止于本次运行，下次 ``run_ai_analysis`` 重置并重新提示）。
 
         R2：CancelledError 直接传播（不吞没）。
         """

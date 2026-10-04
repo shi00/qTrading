@@ -4512,7 +4512,7 @@ class TestUnpricedUsageGuards:
 
     @pytest.fixture(autouse=True)
     def _reset_unpriced_ack(self):
-        """R7: 进程级确认标记测试间隔离（AI-01 类属性）。"""
+        """R7: 运行级确认标记测试间隔离（AI-01 类属性）。"""
         AIStrategyMixin._ai_unpriced_acknowledged = False
         yield
         AIStrategyMixin._ai_unpriced_acknowledged = False
@@ -4641,7 +4641,7 @@ class TestUnpricedUsageGuards:
         assert s._ai_unpriced_acknowledged is False
 
     @pytest.mark.asyncio
-    async def test_confirm_unpriced_accept_sets_process_flag(self):
+    async def test_confirm_unpriced_accept_sets_run_flag(self):
         s = ConcreteStrategy()
         context = {"on_ai_unpriced_ack_request": AsyncMock(return_value=True)}
         assert await s._confirm_unpriced(context) is True
@@ -4660,6 +4660,42 @@ class TestUnpricedUsageGuards:
         context = {"on_ai_unpriced_ack_request": AsyncMock(side_effect=RuntimeError("ui error"))}
         assert await s._confirm_unpriced(context) is False
         assert s._ai_unpriced_acknowledged is False
+
+    # --- 确认作用域 = 本次运行（MINOR-02：跨运行重置） ---
+
+    @pytest.mark.asyncio
+    async def test_run_ai_analysis_resets_unpriced_ack_at_run_start(self):
+        """MINOR-02：每次批量运行开始重置「不可计价」确认标记（作用域 = 本次运行，非整个进程）。"""
+        s = ConcreteStrategy()
+        s._ai_unpriced_acknowledged = True  # 模拟上一次运行已确认
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"], "close": [10.0]})
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            # AI 未配置 → 早返回；重置发生在其之前的运行入口处
+            mock_ai.return_value.is_cloud_available = MagicMock(return_value=False)
+            await s.run_ai_analysis(candidates, {"data_processor": MagicMock()})
+        assert s._ai_unpriced_acknowledged is False
+
+    @pytest.mark.asyncio
+    async def test_unpriced_ack_reset_across_runs_reprompts(self):
+        """MINOR-02：上次运行已确认，下一次运行时确认状态重置 → 重新提示。"""
+        s = ConcreteStrategy()
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"], "close": [10.0]})
+        with (
+            patch("strategies.ai_mixin.ConfigHandler.get_setting", return_value=10),
+            patch("services.ai_service.usage_tracker.AIUsageTracker") as mock_tracker_cls,
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+        ):
+            mock_tracker = MagicMock()
+            mock_tracker.get_month_unpriced = AsyncMock(return_value=(3, 500))
+            mock_tracker_cls.return_value = mock_tracker
+            # 上次运行已确认 → 本次不再提示
+            s._ai_unpriced_acknowledged = True
+            assert await s._should_prompt_unpriced() is False
+            # 开启新运行（AI 未配置 → 早返回，但运行范围重置已生效）
+            mock_ai.return_value.is_cloud_available = MagicMock(return_value=False)
+            await s.run_ai_analysis(candidates, {"data_processor": MagicMock()})
+            # 跨运行后确认状态重置 → 新运行重新提示
+            assert await s._should_prompt_unpriced() is True
 
     @pytest.mark.asyncio
     async def test_preflight_unpriced_reject_sets_context_flag(self):

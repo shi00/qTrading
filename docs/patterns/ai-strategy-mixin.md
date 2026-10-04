@@ -66,6 +66,8 @@ class MyAIStrategy(BaseStrategy, AIStrategyMixin):
 
 进入 AI 分析统一经 `await self.run_ai_analysis(candidates_df, context)`（候选截断、云端可用性、外发确认、月度预算护栏、缺失语义 R21 均由混入内部处理），单股重试经 `retry_single`。双模式（云端 LiteLLM / 本地 llama-cpp-python）由 `AIService` 统一封装，策略无需感知。
 
+> 不可计价调用（模型不在定价表）的「保守确认」护栏作用域为**单次运行**：预算已设且本月存在不可计价调用时，每次 `run_ai_analysis` 首次发起云端调用前提示一次，用户确认（`_ai_unpriced_acknowledged`）仅对本次运行有效，下次运行重置并重新提示，避免一次确认后本进程内不可计价花费无上限（AI-01 / MINOR-02）；同一次运行内的 `retry_single` 共享该确认。
+
 ## 完成判定（canonical 入口）
 
 _最小验证命令：_ 按改动实际触及的层运行 CONTRIBUTING「变更类型 → 最小验证子集」；AI 策略混入逻辑改动后须 `redline-check` + 相关单测 + `python scripts/check_docs_consistency.py`。
