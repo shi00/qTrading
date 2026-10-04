@@ -54,6 +54,10 @@ async def _review_backfill_logic(svc: SchedulerService, task_id: str, **kwargs) 
         # RV-04: 基准降级/缺失诊断拼进任务结果（用户可见），不再只有日志 warning。
         if rm._benchmark_diag:
             result = f"{result} — {rm._benchmark_diag}"
+        # MAJOR-02: T+1 一字涨停不可成交、未计入收益与标签的记录数，向用户可见
+        # （对齐 RV-04 可见诊断原则），避免「复盘条数莫名偏少而不自知」。
+        if rm._untradable_count:
+            result = f"{result} — {I18n.get('review_untradable_skipped', count=rm._untradable_count)}"
         logger.info(
             "[Scheduler] Review backfill completed: T+1=%s, T+5=%s records updated, stale expired=%s.",
             t1_count,

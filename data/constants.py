@@ -95,6 +95,30 @@ SENTIMENT_INDEX_NAMES: dict[str, str] = {
 assert set(SENTIMENT_INDICES) <= set(MAJOR_INDICES), "情绪指数必须在同步列表 MAJOR_INDICES 内"
 assert set(SENTIMENT_INDEX_NAMES) == set(SENTIMENT_INDICES), "情绪指数中文名必须与代码一一对应"
 
+# MAJOR-02（复盘基准按板块）：单一股指对创业板/科创板个股产生系统性风格偏差
+# （把板块 beta 计为选股超额）。复盘超额收益按个股所属板块选择同板块基准：
+# 创业板→创业板指、科创板→科创50；主板/其余沿用配置基准（默认沪深300）。
+# 指数代码必须 ⊆ MAJOR_INDICES（否则不会被同步，复盘将静默无基准）。
+BOARD_BENCHMARK_CHINEXT = "399006.SZ"  # 创业板指
+BOARD_BENCHMARK_STAR = "000688.SH"  # 科创50
+assert BOARD_BENCHMARK_CHINEXT in MAJOR_INDICES, "创业板指基准必须在 MAJOR_INDICES 内"
+assert BOARD_BENCHMARK_STAR in MAJOR_INDICES, "科创50基准必须在 MAJOR_INDICES 内"
+
+
+def board_benchmark_for(ts_code: str, default_index: str) -> str:
+    """按股票代码所属板块返回复盘基准指数（MAJOR-02）。
+
+    创业板（300/301 开头）→ 创业板指；科创板（688 开头）→ 科创50；其余
+    （沪深主板/中小板/北交所等）沿用 ``default_index``（配置基准，默认沪深300）。
+    替代此前对一批预测统一使用单一股指的口径，避免把板块 beta 计为选股超额。
+    """
+    code = str(ts_code)
+    if code.startswith(("300", "301")):
+        return BOARD_BENCHMARK_CHINEXT
+    if code.startswith("688"):
+        return BOARD_BENCHMARK_STAR
+    return default_index
+
 
 def indices_to_sync() -> list[str]:
     """index_daily 实际需同步的指数 = 监控列表 ∪ 当前配置的基准（DS-01 根因修复）。
@@ -132,6 +156,11 @@ REVIEW_STATUS_COMPLETED = "COMPLETED"
 # BIZ-01: 超回溯窗口的存量 PENDING 记录置为终态 EXPIRED（迁移 0026），
 # 既不进入复盘池，也不被 T+1 回填通道处理（数据过旧、回填价值低）。
 REVIEW_STATUS_EXPIRED = "EXPIRED"
+# MAJOR-02: T+1 一字涨停（开盘价 ≥ 涨停价）个股无可成交价格，无法买入，
+# 其标签不具可执行意义。置为终态 UNTRADABLE：既不进入任何待复盘候选池
+# （PENDING/T1_DONE/NULL 过滤天然排除），也不被 UI 统计（仅计 COMPLETED）计入，
+# 仅单独计数供用户知情，避免把「买不进的一字涨停」当作选股命中（方向性偏差）。
+REVIEW_STATUS_UNTRADABLE = "UNTRADABLE"
 TOP_LIST_NET_AMOUNT_UNIT = "yuan"
 TOP_LIST_NET_AMOUNT_UNIT_SOURCE = {
     "provider": "tushare.top_list",

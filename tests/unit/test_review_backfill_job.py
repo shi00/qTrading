@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
+from core.i18n import I18n
 from services.scheduled_jobs.review_backfill import build_review_backfill_job
 
 pytestmark = pytest.mark.unit
@@ -35,6 +36,7 @@ def _make_mock_rm(
     t5_count: int = 42,
     diag: str | None = None,
     expired_count: int = 0,
+    untradable_count: int = 0,
 ) -> MagicMock:
     mock_rm = MagicMock()
     mock_rm.backfill_t1_returns = AsyncMock(return_value=t1_count)
@@ -42,6 +44,9 @@ def _make_mock_rm(
     # RV-11: 常驻过期清扫挂接 job，mock 其返回清理条数（默认 0 = 无僵尸）。
     mock_rm.expire_stale_pending = AsyncMock(return_value=expired_count)
     mock_rm._benchmark_diag = diag
+    # MAJOR-02: 不可成交计数（默认 0 = 无，镜像 ReviewManager 真实初始值，
+    # 避免裸 MagicMock 自动属性为真值而误触发诊断拼接）。
+    mock_rm._untradable_count = untradable_count
     return mock_rm
 
 
@@ -146,6 +151,19 @@ class TestBuildReviewBackfillJob:
             result = await _submit_and_run(job, mock_tm_cls)
         assert "000985.CSI" in result
         assert "000300.SH" in result
+
+    @pytest.mark.asyncio
+    async def test_job_result_includes_untradable_count(self):
+        """MAJOR-02: 存在 T+1 一字涨停不可成交记录时，结果拼接未计入条数（用户可见）。"""
+        job = build_review_backfill_job()
+        with (
+            patch("services.scheduled_jobs.review_backfill.ReviewManager") as mock_rm_cls,
+            patch("services.scheduled_jobs.review_backfill.TaskManager") as mock_tm_cls,
+        ):
+            mock_rm = _make_mock_rm(untradable_count=5)
+            mock_rm_cls.return_value = mock_rm
+            result = await _submit_and_run(job, mock_tm_cls)
+        assert I18n.get("review_untradable_skipped", count=5) in result
 
     @pytest.mark.asyncio
     async def test_job_result_omits_diag_when_normal(self):
