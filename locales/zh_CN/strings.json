@@ -76,6 +76,7 @@
     "sched_task_review_backfill": "复盘延迟回填 ({date})",
     "review_benchmark_degraded": "基准指数 {configured} 无数据，已降级使用 {fallback} 计算超额收益",
     "review_benchmark_missing": "基准指数 {benchmark} 及主要指数均无数据，复盘标签暂无法定稿（数值已保存，待基准数据补齐）",
+    "review_untradable_skipped": "另有 {count} 条因 T+1 一字涨停不可成交，未计入收益与标签",
     "sched_ai_concept_clear_history": "清空历史AI概念...",
     "sched_ai_concept_task_name": "AI概念周度重建",
     "sched_ai_concept_task_type": "AI打标",

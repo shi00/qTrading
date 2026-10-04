@@ -75,6 +75,7 @@
     "sched_task_review_backfill": "Review Backfill ({date})",
     "review_benchmark_degraded": "Benchmark index {configured} has no data; degraded to {fallback} for excess return",
     "review_benchmark_missing": "Benchmark index {benchmark} and all major indices unavailable; review labels pending (numeric values saved, awaiting benchmark data)",
+    "review_untradable_skipped": "{count} record(s) excluded from returns/labels: T+1 limit-up (unbuyable at open)",
     "sched_ai_concept_clear_history": "Clearing historical AI concepts...",
     "sched_ai_concept_task_name": "AI Concept Weekly Rebuild",
     "sched_ai_concept_task_type": "AI Tagging",

@@ -10,7 +10,13 @@ from collections.abc import Sequence
 import pandas as pd
 
 from data.cache.cache_manager import CacheManager
-from data.constants import DEFAULT_BENCHMARK_INDEX, MAJOR_INDICES, REVIEW_STATUS_T1_DONE
+from data.constants import (
+    DEFAULT_BENCHMARK_INDEX,
+    MAJOR_INDICES,
+    REVIEW_STATUS_T1_DONE,
+    REVIEW_STATUS_UNTRADABLE,
+    board_benchmark_for,
+)
 from data.external.tushare_client import TushareClient
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.sync.base import safe_error
@@ -131,6 +137,25 @@ def _index_window_return_pct(idx_close_t0: float, idx_close_tn: float) -> float 
     return (idx_close_tn / idx_close_t0 - 1.0) * 100.0
 
 
+# MAJOR-02: 一字涨停可成交性判定容差。stk_limit 的 up_limit 与个股 open 均为名义价，
+# 浮点相等判定留 1e-6 容差（对齐回测撮合层 strategies/backtest/portfolio.py 的
+# ``open >= up_limit - 1e-6`` 判定，避免两处口径漂移）。
+_LIMIT_UP_EPSILON = 1e-6
+
+
+def _is_t1_untradable(basis_open: float | None, up_limit: float | None) -> bool:
+    """MAJOR-02: 判定 T+1 是否「一字涨停不可成交」。
+
+    T+1 开盘价 ≥ 涨停价时，开盘即封涨停、无法以开盘价买入（一字板），其后计算的
+    「收益」是买不进的纸上收益，若照常打标签会把不可成交的涨停计为选股命中
+    （方向性偏差：牛市高 beta 股系统性 WIN）。缺失 up_limit（stk_limit 未同步/停牌）
+    或缺失 open 时返回 False（不判定），由调用方降级为原行为，避免误伤正常记录。
+    """
+    if basis_open is None or up_limit is None:
+        return False
+    return basis_open >= float(up_limit) - _LIMIT_UP_EPSILON
+
+
 class ReviewManager:
     """
     Manages the 'Verification' and 'Correction' phases of the AI loop.
@@ -160,6 +185,10 @@ class ReviewManager:
         # RV-04: 本次实例运行期的基准诊断（降级/全缺失说明），None=基准正常；
         # 供 review_backfill job 读取拼进任务结果（用户可见，nightly_prediction B1 先例）。
         self._benchmark_diag: str | None = None
+        # MAJOR-02: 本次实例运行期检出的「不可成交」（T+1 一字涨停）记录数。
+        # run_review 起始清零（其单次调用即一次完整复盘周期）；backfill 两通道共用实例
+        # 累加，由 review_backfill job 在跑完 T+1/T+5 后读取，向用户呈现「N 条未计入」。
+        self._untradable_count = 0
 
     def _classify_alpha(self, alpha: float) -> str:
         """按阈值将超额收益 alpha（百分点）分类为 WIN / LOSS / DRAW。
@@ -183,6 +212,9 @@ class ReviewManager:
         Should be run daily after 16:00.
         """
         logger.info("[Review] Starting daily review...")
+
+        # MAJOR-02: 单次 run_review 即一次完整复盘周期，起始清零不可成交计数。
+        self._untradable_count = 0
 
         pending_df = await self._get_pending_predictions()
         if pending_df.empty:
@@ -218,9 +250,14 @@ class ReviewManager:
         # RV-04: 基准经降级链解析（配置基准不可得 → MAJOR_INDICES 首个可得），
         # 实际基准记入 benchmark_code；诊断供 job 呈现。
         index_code = await self._resolve_benchmark(min_pred_date)
-        index_cache = await self._prefetch_index_cache(index_code, min_pred_date, max_quote_date)
-        # RV-01: 已完整探测（本地库+API 均无数据）的日期集合，避免对同一缺失日期逐股票重复探测。
-        index_missing: set[str] = set()
+        # MAJOR-02: 复盘基准按个股所属板块选择（创业板→创业板指、科创板→科创50、
+        # 主板/其余→配置基准），避免把板块 beta 计为选股超额。仅预取本批实际用到的基准。
+        needed_indices = {board_benchmark_for(code, index_code) for code in all_codes}
+        index_caches, index_missing = await self._prefetch_benchmark_caches(
+            index_code, needed_indices, min_pred_date, max_quote_date
+        )
+        # MAJOR-02: T+1 可成交性守卫数据（区间涨跌停价）。
+        limit_up_cache = await self._prefetch_limit_up_cache(min_pred_date, max_quote_date)
 
         for _, row in pending_df.iterrows():
             ts_code = row["ts_code"]
@@ -271,6 +308,35 @@ class ReviewManager:
                 basis_open = float(basis_open_raw) if bool(pd.notna(basis_open_raw)) else None
                 if basis_open is None or basis_open == 0:
                     continue  # T+1 开盘不可得 → 买入基准未知，无法计算，留 NULL 待自愈
+                # MAJOR-02: T+1 一字涨停（开盘价 ≥ 涨停价）无可成交价格，买入不可执行；
+                # 其后的「收益」是买不进的纸上收益。标记 UNTRADABLE 终态：不算收益、不打
+                # 标签、不计入 UI 统计，仅进 _untradable_count 供用户知情，避免把不可成交
+                # 的涨停当作选股命中（方向性偏差：牛市高 beta 股系统性 WIN）。
+                up_limit = limit_up_cache.get((ts_code, t1_date))
+                if _is_t1_untradable(basis_open, up_limit):
+                    updates.append(
+                        {
+                            "record_id": row["id"],
+                            "pct": None,
+                            "label": None,
+                            "index_pct": None,
+                            "benchmark_code": None,
+                            "t1_price": None,
+                            "t5_pct": None,
+                            "t5_price": None,
+                            "alpha": None,
+                            "review_status": REVIEW_STATUS_UNTRADABLE,
+                        }
+                    )
+                    self._untradable_count += 1
+                    logger.info(
+                        "[Review] %s: T+1 open %.4f >= up_limit %.4f on %s, marked UNTRADABLE (no return/label).",
+                        ts_code,
+                        basis_open,
+                        up_limit,
+                        t1_date.strftime("%Y%m%d"),
+                    )
+                    continue
                 basis_adj_raw = t1_row.get("adj_factor") if has_adj_factor else None
                 basis_adj = float(basis_adj_raw) if has_adj_factor and bool(pd.notna(basis_adj_raw)) else None
 
@@ -302,6 +368,10 @@ class ReviewManager:
                     else:
                         t1_date_obj = datetime.datetime.strptime(str(t1_date_val).replace("-", "")[:8], "%Y%m%d").date()  # noqa: DTZ007  归一化后的 YYYYMMDD 业务日期字符串无时区语义
 
+                    # MAJOR-02: 本记录使用的复盘基准（按个股所属板块选择：创业板→创业板指、
+                    # 科创板→科创50、主板/其余→配置基准）。
+                    used_index = board_benchmark_for(ts_code, index_code)
+
                     # D4-M4: 标签窗口取 T+5。get_learning_context 只读
                     # ``t5_pct IS NOT NULL + review_status=COMPLETED`` 记录，故标签必须反映
                     # T+5 窗口而非 T+1 单日；t5 未成熟时仅回填 t1 数值、打 DRAW 占位
@@ -321,7 +391,7 @@ class ReviewManager:
                                 "pct": t1_pct,
                                 "label": "DRAW",
                                 "index_pct": None,
-                                "benchmark_code": index_code,
+                                "benchmark_code": used_index,
                                 "t1_price": t1_price,
                                 "t5_pct": None,
                                 "t5_price": None,
@@ -335,36 +405,25 @@ class ReviewManager:
                         )
                         continue
 
-                    # RV-01/RV-02: 基准侧必须与个股侧同窗口。RV-01 起为「T0→label」窗口累计；
-                    # RV-02 起窗口起点改为 T+1 开盘（与回测默认 next_open、个股「T+1 开盘→
-                    # T+N 收盘」同口径），即 index_pct = close[label] / open[t1] − 1。
-                    # 指数点位无需复权（index_daily 无 adj_factor），取 T+1 开盘与 label 收盘两点。
-                    # 窗口终点取 label_date（t5 口径为 T+5，兼容 t1 口径为 T+1），保证同窗口同口径。
-                    # index_missing 记录「已完整探测（本地库+API）仍无数据」的日期，避免
-                    # 同一缺失日期对每只股票重复打 API（对抗检视 Minor-1：缓存 None 无法
-                    # 区分未探测与已探无，把去重移到独立集合保持「每次探测一次」语义）。
-                    # RV-02（对抗检视 Major-2 闭合）：探测循环起点显式用 t1_date，杜绝
-                    # 取到 idx_open(T0) 的 off-by-one。
+                    # RV-01/RV-02/MAJOR-02: 基准侧必须与个股侧同窗口，且基准按板块选择。
+                    # 窗口起点取 T+1 开盘、终点取 label 收盘（与个股「T+1 开盘→T+N 收盘」
+                    # 同口径，RV-02）。窗口/缓存/缺失去重逻辑收敛到 _window_index_pct，
+                    # run_review 与 backfill_horizon_returns 共用，杜绝口径漂移。
                     t1_date_str = t1_date.strftime("%Y%m%d")
                     label_date_str = label_date.strftime("%Y%m%d")
-                    for _d_str, _d in ((t1_date_str, t1_date), (label_date_str, label_date)):
-                        # RV-01 修复点：缓存存 None（本地库该日无数据）时也须
-                        # 尝试 API 兜底，仅凭 key 存在会短路兜底路径（对抗检视 Major-1）。
-                        if _d_str not in index_cache and _d_str not in index_missing:
-                            _d_quote = await self._resolve_index_quote(index_code, _d)
-                            if _d_quote is None:
-                                index_missing.add(_d_str)
-                            else:
-                                index_cache[_d_str] = _d_quote
-
-                    _t1_quote = index_cache.get(t1_date_str)
-                    _label_quote = index_cache.get(label_date_str)
-                    # RV-02: 窗口起点取 T+1 开盘、终点取 label 收盘（同源口径）。
-                    index_pct = (
-                        _index_window_return_pct(_t1_quote[0], _label_quote[1])
-                        if _t1_quote is not None and _label_quote is not None
-                        else None
+                    index_pct = await self._window_index_pct(
+                        used_index, t1_date, label_date, index_caches, index_missing
                     )
+                    effective_index = used_index
+                    if index_pct is None and used_index != index_code:
+                        # MAJOR-02: 板块基准不可得（同步滞后/停牌日缺失）→ 回退配置基准，
+                        # 仍产出标签并如实记录 benchmark_code，避免创业板/科创板个股因
+                        # 板块指数缺数据而永久停留待补标签。
+                        index_pct = await self._window_index_pct(
+                            index_code, t1_date, label_date, index_caches, index_missing
+                        )
+                        if index_pct is not None:
+                            effective_index = index_code
 
                     if index_pct is None:
                         # RV-04: 基准缺失不再丢弃已算好的数值——数值/标签解耦落库：
@@ -404,7 +463,7 @@ class ReviewManager:
                             "pct": t1_pct,
                             "label": label,
                             "index_pct": index_pct,
-                            "benchmark_code": index_code,
+                            "benchmark_code": effective_index,
                             "t1_price": t1_price,
                             "t5_pct": t5_pct if self.label_horizon == "t5" else None,
                             "t5_price": t5_price if self.label_horizon == "t5" else None,
@@ -483,13 +542,19 @@ class ReviewManager:
         # D4-M4: T+5 backfill 需定稿 T+5 标签，故须解析基准指数（与 run_review 同口径）。
         # RV-04: 基准经降级链解析（配置基准不可得 → MAJOR_INDICES 首个可得）。
         index_code = await self._resolve_benchmark(min_t0)
-        index_cache = await self._prefetch_index_cache(index_code, min_t0, max_quote_date)
-        # RV-01: 已完整探测（本地库+API 均无数据）的日期集合，避免对同一缺失日期逐记录重复探测。
-        index_missing: set[str] = set()
+        # MAJOR-02: 复盘基准按个股所属板块选择（与 run_review 同口径），仅预取本批用到的基准。
+        needed_indices = {board_benchmark_for(c["ts_code"], index_code) for c in candidates}
+        index_caches, index_missing = await self._prefetch_benchmark_caches(
+            index_code, needed_indices, min_t0, max_quote_date
+        )
+        # MAJOR-02: T+1 可成交性守卫数据（区间涨跌停价）。
+        limit_up_cache = await self._prefetch_limit_up_cache(min_t0, max_quote_date)
 
         updates: list[dict] = []
         # RV-04: B 类（数值已齐、标签待定稿）的补标签更新，走 _batch_finalize_labels。
         label_updates: list[dict] = []
+        # MAJOR-02: T+1 一字涨停不可成交的记录 → 终态 UNTRADABLE（走 _batch_update_results）。
+        untradable_updates: list[dict] = []
         for cand in candidates:
             code = cand["ts_code"]
             t0_date = self._normalize_trade_date(cand["trade_date"])
@@ -514,6 +579,33 @@ class ReviewManager:
                 if t0_mpos is None or t0_mpos + horizon >= len(market_trade_dates):
                     continue
                 t5_date = market_trade_dates[t0_mpos + horizon]
+                # MAJOR-02: 存量 B 类（数值先于本修复落库）可能源自 T+1 一字涨停。行情
+                # 可得时用同一守卫复核：不可成交则改判 UNTRADABLE，不再定稿标签（与 A 类
+                # /run_review 口径一致）。
+                _b_quotes = quotes_by_code.get(code)
+                if _b_quotes is not None and not _b_quotes.empty and t1_date is not None:
+                    _b_pos = {self._normalize_trade_date(d): int(i) for i, d in enumerate(_b_quotes["trade_date"])}
+                    _b_idx = _b_pos.get(t1_date)
+                    if _b_idx is not None:
+                        _b_open_raw = _b_quotes.iloc[_b_idx].get("open")
+                        _b_open = float(_b_open_raw) if bool(pd.notna(_b_open_raw)) else None
+                        if _is_t1_untradable(_b_open, limit_up_cache.get((code, t1_date))):
+                            untradable_updates.append(
+                                {
+                                    "record_id": cand["id"],
+                                    "pct": None,
+                                    "label": None,
+                                    "index_pct": None,
+                                    "benchmark_code": None,
+                                    "t1_price": None,
+                                    "t5_pct": None,
+                                    "t5_price": None,
+                                    "alpha": None,
+                                    "review_status": REVIEW_STATUS_UNTRADABLE,
+                                }
+                            )
+                            self._untradable_count += 1
+                            continue
             else:
                 df_quotes = quotes_by_code.get(code)
                 if df_quotes is None or df_quotes.empty:
@@ -537,6 +629,27 @@ class ReviewManager:
                 basis_open = float(basis_open_raw) if bool(pd.notna(basis_open_raw)) else None
                 if basis_open is None or basis_open == 0:
                     continue  # T+1 开盘不可得 → 买入基准未知，无法计算，留 NULL
+                # MAJOR-02: 与 run_review 同一 T+1 可成交性守卫——T+1 一字涨停（开盘 ≥ 涨停）
+                # 个股无可成交价格，不计算 T+5、不打标签，改判 UNTRADABLE 终态（与 run_review
+                # 口径一致，避免两通道漂移）。
+                up_limit = limit_up_cache.get((code, t1_date))
+                if _is_t1_untradable(basis_open, up_limit):
+                    untradable_updates.append(
+                        {
+                            "record_id": cand["id"],
+                            "pct": None,
+                            "label": None,
+                            "index_pct": None,
+                            "benchmark_code": None,
+                            "t1_price": None,
+                            "t5_pct": None,
+                            "t5_price": None,
+                            "alpha": None,
+                            "review_status": REVIEW_STATUS_UNTRADABLE,
+                        }
+                    )
+                    self._untradable_count += 1
+                    continue
                 basis_adj_raw = t1_row.get("adj_factor") if has_adj_factor else None
                 basis_adj = float(basis_adj_raw) if has_adj_factor and bool(pd.notna(basis_adj_raw)) else None
 
@@ -567,24 +680,16 @@ class ReviewManager:
                 continue
             t1_date_str = t1_date.strftime("%Y%m%d")
             t5_date_str = t5_date.strftime("%Y%m%d")
-            for _d_str, _d in ((t1_date_str, t1_date), (t5_date_str, t5_date)):
-                # RV-01 修复点：仅对未缓存且未标记缺失的日期探测（本地库 → API 兜底），
-                # 避免缓存 None 短路兜底（Major-1）同时也避免逐记录重复探测（Minor-1）。
-                if _d_str not in index_cache and _d_str not in index_missing:
-                    _d_quote = await self._resolve_index_quote(index_code, _d)
-                    if _d_quote is None:
-                        index_missing.add(_d_str)
-                    else:
-                        index_cache[_d_str] = _d_quote
-
-            _t1_quote = index_cache.get(t1_date_str)
-            _t5_quote = index_cache.get(t5_date_str)
-            # RV-02: 窗口起点取 T+1 开盘、终点取 T+5 收盘（与个股同源口径）。
-            index_pct = (
-                _index_window_return_pct(_t1_quote[0], _t5_quote[1])
-                if _t1_quote is not None and _t5_quote is not None
-                else None
-            )
+            # MAJOR-02: 基准按板块选择（创业板→创业板指、科创板→科创50、主板/其余→配置
+            # 基准）；窗口/缺失去重逻辑收敛到 _window_index_pct（与 run_review 共用）。
+            used_index = board_benchmark_for(code, index_code)
+            index_pct = await self._window_index_pct(used_index, t1_date, t5_date, index_caches, index_missing)
+            effective_index = used_index
+            if index_pct is None and used_index != index_code:
+                # MAJOR-02: 板块基准不可得 → 回退配置基准（与 run_review 同口径）。
+                index_pct = await self._window_index_pct(index_code, t1_date, t5_date, index_caches, index_missing)
+                if index_pct is not None:
+                    effective_index = index_code
             if index_pct is None:
                 if staged_t5_pct is None:
                     # RV-04: A 类基准缺失 → 数值-only 解耦落库（label=None →
@@ -626,7 +731,7 @@ class ReviewManager:
                         "record_id": cand["id"],
                         "label": label,
                         "index_pct": index_pct,
-                        "benchmark_code": index_code,
+                        "benchmark_code": effective_index,
                         "alpha": alpha,
                     }
                 )
@@ -638,7 +743,7 @@ class ReviewManager:
                         "t5_price": t5_price,
                         "label": label,
                         "index_pct": index_pct,
-                        "benchmark_code": index_code,
+                        "benchmark_code": effective_index,
                         "alpha": alpha,
                     }
                 )
@@ -647,13 +752,17 @@ class ReviewManager:
             await self._batch_backfill_t5(updates)
         if label_updates:
             await self._batch_finalize_labels(label_updates)
+        if untradable_updates:
+            # MAJOR-02: 不可成交记录走通用更新通道（支持 review_status=UNTRADABLE 终态）。
+            await self._batch_update_results(untradable_updates)
 
-        total = len(updates) + len(label_updates)
+        total = len(updates) + len(label_updates) + len(untradable_updates)
         logger.info(
-            "[Review] T+%d backfill completed: %s records updated (%s labels finalized).",
+            "[Review] T+%d backfill completed: %s records updated (%s labels finalized, %s untradable).",
             horizon,
             total,
             len(label_updates),
+            len(untradable_updates),
         )
         return total
 
@@ -707,6 +816,9 @@ class ReviewManager:
 
         has_adj_factor = "adj_factor" in bulk_quotes.columns
 
+        # MAJOR-02: T+1 可成交性守卫数据（区间涨跌停价），与 run_review 同口径。
+        limit_up_cache = await self._prefetch_limit_up_cache(min_t0, max_quote_date)
+
         # D4-M4: 标签窗口取 T+5，T+1 阶段不解析 T+1 基准指数（alpha/标签留待 T+5 定稿）。
         index_code = ConfigHandler.get_config("benchmark_index", DEFAULT_BENCHMARK_INDEX)
         updates: list[dict] = []
@@ -738,6 +850,27 @@ class ReviewManager:
             basis_open = float(basis_open_raw) if bool(pd.notna(basis_open_raw)) else None
             if basis_open is None or basis_open == 0:
                 continue  # T+1 开盘不可得 → 买入基准未知，无法计算，留 NULL
+            # MAJOR-02: 与 run_review 同一 T+1 可成交性守卫——T+1 一字涨停（开盘 ≥ 涨停）
+            # 个股无可成交价格，不回填 T+1、不当 DRAW 占位，改判 UNTRADABLE 终态（不再进入
+            # T+5 回填通道，避免把买不进的涨停当作候选）。
+            up_limit = limit_up_cache.get((code, t1_date))
+            if _is_t1_untradable(basis_open, up_limit):
+                updates.append(
+                    {
+                        "record_id": cand["id"],
+                        "pct": None,
+                        "label": None,
+                        "index_pct": None,
+                        "benchmark_code": None,
+                        "t1_price": None,
+                        "t5_pct": None,
+                        "t5_price": None,
+                        "alpha": None,
+                        "review_status": REVIEW_STATUS_UNTRADABLE,
+                    }
+                )
+                self._untradable_count += 1
+                continue
             basis_adj_raw = t1_row.get("adj_factor") if has_adj_factor else None
             basis_adj = float(basis_adj_raw) if has_adj_factor and bool(pd.notna(basis_adj_raw)) else None
             # RV-02: T+1 当日持有收益 = T+1 开盘 → T+1 收盘（不复用 T0 收盘基准，
@@ -760,7 +893,10 @@ class ReviewManager:
                     "pct": t1_pct,
                     "label": label,
                     "index_pct": None,
-                    "benchmark_code": index_code,
+                    # MAJOR-02: 与 run_review 的 T+1 staged 分支同口径——记录该股所属
+                    # 板块基准（创业板→创业板指、科创板→科创50、主板/其余→配置基准），
+                    # 供后续 T+5 定稿沿用，避免两通道 benchmark_code 漂移。
+                    "benchmark_code": board_benchmark_for(code, index_code),
                     "t1_price": t1_price,
                     "t5_pct": None,
                     "t5_price": None,
@@ -1282,6 +1418,111 @@ class ReviewManager:
             if severity == "system":
                 raise
         return index_cache
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
+    async def _prefetch_limit_up_cache(
+        self,
+        start_date: datetime.date,
+        end_date: datetime.date,
+    ) -> dict[tuple[str, datetime.date], float]:
+        """MAJOR-02: 批量预取区间涨跌停价，键 ``(ts_code, trade_date)`` → up_limit。
+
+        run_review / backfill_horizon_returns / backfill_t1_returns 共用，供 T+1
+        可成交性守卫（``_is_t1_untradable``）判定一字涨停。涨跌停价为名义价，与个股
+        open 同口径。预取失败（含测试替身未提供 stk_limit_dao）仅告警并返回空缓存 →
+        守卫降级为「不判定」，不阻塞复盘；EngineDisposedError 与 system 级异常上抛（R5）。
+        """
+        limit_cache: dict[tuple[str, datetime.date], float] = {}
+        try:
+            df_limit = await self.cache.stk_limit_dao.get_stk_limit_range(
+                start_date.strftime("%Y%m%d"),
+                end_date.strftime("%Y%m%d"),
+            )
+            if df_limit is not None and not df_limit.empty:
+                for _, l_row in df_limit.iterrows():
+                    up_raw = l_row.get("up_limit")
+                    if up_raw is None or pd.notna(up_raw) is not True:
+                        continue
+                    trade_date = self._normalize_trade_date(l_row.get("trade_date"))
+                    limit_cache[(str(l_row.get("ts_code")), trade_date)] = float(up_raw)
+        except asyncio.CancelledError:
+            logger.warning("[Review] Cancelled during stk_limit bulk pre-fetch.")
+            raise
+        except EngineDisposedError:
+            # R5 一致性：disposed 引擎不可恢复，主路径必须上抛避免被吞没.
+            raise
+        except Exception as exc:
+            severity = classify_severity(exc, context="db")
+            log_classified(
+                logger,
+                exc,
+                "db",
+                "[Review] Failed to bulk pre-fetch stk_limit (%s): %s",
+                exc_info=True,
+            )
+            if severity == "system":
+                raise
+        if not limit_cache:
+            logger.warning(
+                "[Review] stk_limit unavailable for [%s, %s]; T+1 tradability guard disabled.",
+                start_date,
+                end_date,
+            )
+        return limit_cache
+
+    async def _prefetch_benchmark_caches(
+        self,
+        default_index: str,
+        needed_indices: set[str],
+        start_date: datetime.date,
+        end_date: datetime.date,
+    ) -> tuple[dict[str, dict[str, tuple[float, float]]], dict[str, set[str]]]:
+        """MAJOR-02: 预取本批复盘实际用到的各基准指数开收盘缓存（含板块基准）。
+
+        默认基准必取；板块基准（创业板指/科创50）仅当本批存在对应板块个股时才取，
+        避免对无创业板/科创板候选的批次做无用查询。返回 ``(caches, missing)`` 两个
+        以 index_code 分桶的字典，供 ``_window_index_pct`` 逐股按板块基准取窗口收益。
+        """
+        caches: dict[str, dict[str, tuple[float, float]]] = {}
+        missing: dict[str, set[str]] = {}
+        for idx in dict.fromkeys([default_index, *sorted(needed_indices)]):
+            caches[idx] = await self._prefetch_index_cache(idx, start_date, end_date)
+            missing[idx] = set()
+        return caches, missing
+
+    async def _window_index_pct(
+        self,
+        index_code: str,
+        start_date: datetime.date,
+        end_date: datetime.date,
+        index_caches: dict[str, dict[str, tuple[float, float]]],
+        index_missing: dict[str, set[str]],
+    ) -> float | None:
+        """RV-02/MAJOR-02: 指定指数在 ``[start, end]`` 的窗口累计收益（百分点）。
+
+        窗口起点取 start 日开盘、终点取 end 日收盘（与个股「T+1 开盘 → label 收盘」
+        同口径，RV-02）。端点缺任一（本地库+API 均不可得）返回 None，由调用方按 RV-04
+        数值/标签解耦处理。index_caches/index_missing 以 index_code 分桶，避免不同
+        板块基准相互污染缓存。run_review 与 backfill_horizon_returns 共用，杜绝口径漂移。
+        """
+        cache = index_caches.setdefault(index_code, {})
+        missing = index_missing.setdefault(index_code, set())
+        start_str = start_date.strftime("%Y%m%d")
+        end_str = end_date.strftime("%Y%m%d")
+        for _d_str, _d in ((start_str, start_date), (end_str, end_date)):
+            # RV-01 修复点：缓存存 None（本地库该日无数据）时也须尝试 API 兜底，
+            # 仅凭 key 存在会短路兜底路径；index_missing 去重避免重复探测同一缺失日期。
+            if _d_str not in cache and _d_str not in missing:
+                _d_quote = await self._resolve_index_quote(index_code, _d)
+                if _d_quote is None:
+                    missing.add(_d_str)
+                else:
+                    cache[_d_str] = _d_quote
+        _start_quote = cache.get(start_str)
+        _end_quote = cache.get(end_str)
+        if _start_quote is None or _end_quote is None:
+            return None
+        return _index_window_return_pct(_start_quote[0], _end_quote[1])
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _resolve_index_quote(

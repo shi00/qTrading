@@ -12,10 +12,17 @@ import datetime
 
 from core.i18n import Message
 from data.cache.cache_manager import CacheManager
-from data.constants import DEFAULT_BENCHMARK_INDEX, REVIEW_STATUS_T1_DONE
+from data.constants import (
+    BOARD_BENCHMARK_CHINEXT,
+    BOARD_BENCHMARK_STAR,
+    DEFAULT_BENCHMARK_INDEX,
+    REVIEW_STATUS_T1_DONE,
+    REVIEW_STATUS_UNTRADABLE,
+    board_benchmark_for,
+)
 from data.external.tushare_client import TushareClient
 from data.persistence.daos.base_dao import EngineDisposedError
-from data.persistence.review_manager import ReviewManager, deserialize_exec_warnings
+from data.persistence.review_manager import ReviewManager, _is_t1_untradable, deserialize_exec_warnings
 from utils.time_utils import to_date
 
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
@@ -4248,3 +4255,269 @@ class TestReviewManagerExpireStalePending:
 
         mock_screener_dao.expire_stale_pending.assert_called_once_with(lookback_trade_days=30)
         assert count == 0
+
+
+class TestReviewManagerMajor02Tradability:
+    """MAJOR-02: T+1 一字涨停可成交性守卫 + 复盘基准按板块选择。
+
+    - 守卫：T+1 开盘价 ≥ 涨停价 → 标 UNTRADABLE 终态，不算收益/不打标签，单独计数；
+      run_review / backfill_horizon_returns / backfill_t1_returns 三通道同口径。
+    - 基准：创业板（300/301）→ 创业板指、科创板（688）→ 科创50、其余 → 配置基准；
+      板块基准不可得时回退配置基准，仍如实记录 benchmark_code。
+    """
+
+    # 全市场并集日历（与各用例 quotes 的 trade_date 并集一致）：610→611 为 T+1，610→617 为 T+5
+    _DATES = ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"]
+
+    @staticmethod
+    def _quotes(ts_code: str = "000001.SZ", *, open_t1: float = 10.0, close_t5: float = 10.5) -> pd.DataFrame:
+        """构造 6 行行情：T+1(20240611) 开盘可注入、T+5(20240617) 收盘可注入（adj_factor=1）。"""
+        return pd.DataFrame(
+            {
+                "ts_code": [ts_code] * 6,
+                "trade_date": TestReviewManagerMajor02Tradability._DATES,
+                "close": [10.0, 10.05, 10.05, 10.05, 10.05, close_t5],
+                "open": [10.0, open_t1, 10.0, 10.0, 10.0, 10.0],
+                "pct_chg": [1.0, 0.5, 0.0, 0.0, 0.0, 5.0],
+                "adj_factor": [1.0] * 6,
+            }
+        )
+
+    @staticmethod
+    def _stk_limit(ts_code: str = "000001.SZ", trade_date: str = "20240611", up_limit: float = 10.0) -> pd.DataFrame:
+        """stk_limit 区间数据（DAO 已把保留字 limit 经 name= 映射为 up_limit，R17）。"""
+        return pd.DataFrame(
+            {
+                "ts_code": [ts_code],
+                "trade_date": [trade_date],
+                "up_limit": [up_limit],
+                "down_limit": [9.0],
+            }
+        )
+
+    @staticmethod
+    def _index_cache() -> dict[str, tuple[float, float]]:
+        """基准窗口：T+1(20240611) 开 100 → T+5(20240617) 收 101，窗口 +1%。"""
+        return {"20240611": (100.0, 100.0), "20240617": (100.0, 101.0)}
+
+    # ---- 纯函数：基准按板块解析 ----
+
+    @pytest.mark.parametrize(
+        ("ts_code", "expected"),
+        [
+            ("300001.SZ", BOARD_BENCHMARK_CHINEXT),
+            ("301001.SZ", BOARD_BENCHMARK_CHINEXT),
+            ("688001.SH", BOARD_BENCHMARK_STAR),
+            ("000001.SZ", DEFAULT_BENCHMARK_INDEX),
+            ("600000.SH", DEFAULT_BENCHMARK_INDEX),
+            ("830001.BJ", DEFAULT_BENCHMARK_INDEX),
+        ],
+    )
+    def test_board_benchmark_for_maps_boards(self, ts_code, expected):
+        """创业板/科创板映射到同板块指数，主板/其余沿用配置基准。"""
+        assert board_benchmark_for(ts_code, DEFAULT_BENCHMARK_INDEX) == expected
+
+    @pytest.mark.parametrize(
+        ("basis_open", "up_limit", "expected"),
+        [
+            (11.0, 11.0, True),  # 开盘 == 涨停（一字板）
+            (11.0, 10.98, True),  # 开盘高于涨停（容差内）
+            (10.99, 11.0, False),  # 未触涨停
+            (None, 11.0, False),  # 缺开盘不判定（降级原行为）
+            (11.0, None, False),  # 缺涨停价不判定（stk_limit 未同步/停牌）
+        ],
+    )
+    def test_is_t1_untradable_threshold(self, basis_open, up_limit, expected):
+        """阈值判定：开盘 ≥ 涨停价 - 1e-6；缺失任一输入不判定，避免误伤正常记录。"""
+        assert _is_t1_untradable(basis_open, up_limit) is expected
+
+    # ---- run_review 通道 ----
+
+    def _make_rm(self, mock_cm, *, pending, quotes, up_limits, index_cache=None):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(return_value=pd.DataFrame(pending))
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        # 基准探针全不可得 → _resolve_benchmark 返回配置基准（不影响本组用例的主断言）。
+        rm._resolve_index_quote = AsyncMock(return_value=None)
+        rm._prefetch_index_cache = AsyncMock(return_value=index_cache if index_cache is not None else {})
+        mock_cache.stk_limit_dao.get_stk_limit_range = AsyncMock(return_value=up_limits)
+        rm._batch_update_results = AsyncMock()
+        return rm, mock_cache
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_run_review_t1_limit_up_marks_untradable(self, mock_cm, mock_tc):
+        """T+1 开盘 == 涨停价 → UNTRADABLE 终态：pct/label/alpha/index_pct 全 NULL，
+        单独计数 _untradable_count（R21：不伪造标签）；起始清零后仅计本次一条。"""
+        rm, _ = self._make_rm(
+            mock_cm,
+            pending=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610", "ai_score": 80, "ai_reason": "t"}],
+            quotes=self._quotes("000001.SZ", open_t1=10.0),
+            up_limits=self._stk_limit("000001.SZ", "20240611", up_limit=10.0),
+        )
+        rm._untradable_count = 7  # 起始清零验证：run_review 是单周期入口，须归零后重计
+        await rm.run_review()
+        assert rm._untradable_count == 1
+        assert rm._batch_update_results.await_count == 1
+        (u,) = rm._batch_update_results.call_args.args[0]
+        assert u["record_id"] == 1
+        assert u["review_status"] == REVIEW_STATUS_UNTRADABLE
+        assert u["pct"] is None
+        assert u["label"] is None  # R21
+        assert u["index_pct"] is None
+        assert u["alpha"] is None
+        assert u["benchmark_code"] is None
+        assert u["t5_pct"] is None
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_run_review_open_below_limit_still_labels(self, mock_cm, mock_tc):
+        """开盘价 < 涨停价（可成交）→ 照常计算并打 WIN 标签，不计入不可成交（守卫不误伤）。"""
+        rm, _ = self._make_rm(
+            mock_cm,
+            pending=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610", "ai_score": 80, "ai_reason": "t"}],
+            quotes=self._quotes("000001.SZ", open_t1=10.0, close_t5=10.5),
+            up_limits=self._stk_limit("000001.SZ", "20240611", up_limit=11.0),
+            index_cache=self._index_cache(),
+        )
+        await rm.run_review()
+        assert rm._untradable_count == 0
+        (u,) = rm._batch_update_results.call_args.args[0]
+        assert u.get("review_status") != REVIEW_STATUS_UNTRADABLE
+        assert u["label"] == "WIN"  # t5_pct 5.0 - index_pct 1.0 = alpha 4.0 > 3.0
+        assert u["alpha"] == pytest.approx(4.0)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_run_review_chinext_uses_chinext_benchmark(self, mock_cm, mock_tc):
+        """创业板个股（300 开头）→ 基准取创业板指，避免把板块 beta 计为选股超额。"""
+        rm, _ = self._make_rm(
+            mock_cm,
+            pending=[{"id": 1, "ts_code": "300001.SZ", "trade_date": "20240610", "ai_score": 80, "ai_reason": "t"}],
+            quotes=self._quotes("300001.SZ", open_t1=10.0, close_t5=10.5),
+            up_limits=self._stk_limit("300001.SZ", "20240611", up_limit=11.0),
+            index_cache=self._index_cache(),
+        )
+        await rm.run_review()
+        (u,) = rm._batch_update_results.call_args.args[0]
+        assert u["benchmark_code"] == BOARD_BENCHMARK_CHINEXT
+        assert u["index_pct"] == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_run_review_chinext_benchmark_unavailable_falls_back(self, mock_cm, mock_tc):
+        """板块基准不可得 → 回退配置基准，仍产标签并如实记录 benchmark_code（不永久悬空）。"""
+        rm, _ = self._make_rm(
+            mock_cm,
+            pending=[{"id": 1, "ts_code": "300001.SZ", "trade_date": "20240610", "ai_score": 80, "ai_reason": "t"}],
+            quotes=self._quotes("300001.SZ", open_t1=10.0, close_t5=10.5),
+            up_limits=self._stk_limit("300001.SZ", "20240611", up_limit=11.0),
+        )
+
+        async def _prefetch(idx, _start, _end):
+            # 创业板指无数据，配置基准有数据
+            return {} if idx == BOARD_BENCHMARK_CHINEXT else self._index_cache()
+
+        rm._prefetch_index_cache = AsyncMock(side_effect=_prefetch)
+        # 固定配置基准 ≠ 创业板指，确保走「板块基准不可得 → 回退配置基准」分支
+        with patch("data.persistence.review_manager.ConfigHandler.get_config", return_value=DEFAULT_BENCHMARK_INDEX):
+            await rm.run_review()
+        (u,) = rm._batch_update_results.call_args.args[0]
+        assert u["benchmark_code"] == DEFAULT_BENCHMARK_INDEX
+        assert u["index_pct"] == pytest.approx(1.0)
+
+    # ---- backfill_horizon_returns 通道（A 类）----
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_horizon_a_class_limit_up_marks_untradable(self, mock_cm, mock_tc):
+        """T+5 回填 A 类候选 T+1 一字涨停 → 改判 UNTRADABLE，数值/标签通道均不触发。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._resolve_index_quote = AsyncMock(return_value=None)
+        rm._prefetch_index_cache = AsyncMock(return_value=self._index_cache())
+        mock_cache.stk_limit_dao.get_stk_limit_range = AsyncMock(
+            return_value=self._stk_limit("000001.SZ", "20240611", up_limit=10.0)
+        )
+        mock_cache.screener_dao.get_unfilled_horizon_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        mock_cache.screener_dao.get_unlabeled_predictions = AsyncMock(return_value=[])
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=self._quotes("000001.SZ", open_t1=10.0))
+        rm._batch_backfill_t5 = AsyncMock()
+        rm._batch_finalize_labels = AsyncMock()
+        rm._batch_update_results = AsyncMock()
+
+        count = await rm.backfill_horizon_returns()
+        assert count == 1
+        rm._batch_backfill_t5.assert_not_called()
+        rm._batch_finalize_labels.assert_not_called()
+        assert rm._batch_update_results.await_count == 1
+        (u,) = rm._batch_update_results.call_args.args[0]
+        assert u["record_id"] == 1
+        assert u["review_status"] == REVIEW_STATUS_UNTRADABLE
+        assert u["t5_pct"] is None
+        assert rm._untradable_count == 1
+
+    # ---- backfill_t1_returns 通道 ----
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_backfill_t1_limit_up_marks_untradable(self, mock_cm, mock_tc):
+        """T+1 回填通道同口径：一字涨停 → UNTRADABLE，经 guard_t1 通道写入，不回填数值。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        mock_cache.screener_dao.get_unfilled_t1_predictions = AsyncMock(
+            return_value=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610"}]
+        )
+        mock_cache.stk_limit_dao.get_stk_limit_range = AsyncMock(
+            return_value=self._stk_limit("000001.SZ", "20240611", up_limit=10.0)
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=self._quotes("000001.SZ", open_t1=10.0))
+        rm._batch_update_results = AsyncMock()
+
+        count = await rm.backfill_t1_returns()
+        assert count == 1
+        assert rm._batch_update_results.call_args.kwargs == {"guard_t1": True}
+        (u,) = rm._batch_update_results.call_args.args[0]
+        assert u["record_id"] == 1
+        assert u["review_status"] == REVIEW_STATUS_UNTRADABLE
+        assert u["pct"] is None
+        assert rm._untradable_count == 1
+
+    # ---- 预取守卫自身 ----
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_prefetch_limit_up_cache_swallows_operational_error(self, mock_cm, mock_tc):
+        """非 system 级预取失败 → 返回空缓存（守卫降级为不判定），不阻塞复盘。"""
+        rm = ReviewManager()
+        rm.cache = MagicMock()
+        rm.cache.stk_limit_dao.get_stk_limit_range = AsyncMock(side_effect=TypeError("mock without stk_limit"))
+        cache = await rm._prefetch_limit_up_cache(datetime.date(2024, 6, 10), datetime.date(2024, 6, 17))
+        assert cache == {}
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_prefetch_limit_up_cache_propagates_engine_disposed(self, mock_cm, mock_tc):
+        """R5: EngineDisposedError 上抛，不在守卫预取中被吞没。"""
+        rm = ReviewManager()
+        rm.cache = MagicMock()
+        rm.cache.stk_limit_dao.get_stk_limit_range = AsyncMock(side_effect=EngineDisposedError("engine disposed"))
+        with pytest.raises(EngineDisposedError):
+            await rm._prefetch_limit_up_cache(datetime.date(2024, 6, 10), datetime.date(2024, 6, 17))
