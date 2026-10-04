@@ -2102,6 +2102,40 @@ class TestAIStrategyMixinBuildResultRowD36:
         # 缺失 confidence 不应污染 summary 文案（第 979 行 if confidence is not None 保护）
         assert "置信度" not in row["ai_reason"]
 
+    def test_analyzed_carries_conclusion_label(self):
+        """MAJOR-01: 正常分析行透传模型结论枚举。"""
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ"},
+            {"score": 88, "summary": "看好", "conclusion_label": "strong_buy"},
+        )
+        assert row["ai_status"] == "analyzed"
+        assert row["conclusion_label"] == "strong_buy"
+
+    def test_rejected_carries_conclusion_label(self):
+        """MAJOR-01: score==0 且 conclusion_label=reject 时结论随行保留（不被整体丢弃）。"""
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ"},
+            {"score": 0, "summary": "资金链断裂隐患", "conclusion_label": "reject"},
+        )
+        assert row["ai_status"] == "rejected"
+        assert row["ai_score"] == 0
+        assert row["conclusion_label"] == "reject"
+
+    def test_failed_sets_conclusion_label_none(self):
+        """MAJOR-01/R21: 分析失败行结论置 None。"""
+        row = AIStrategyMixin._build_result_row({"ts_code": "000001.SZ"}, None, error_reason="timeout")
+        assert row["ai_status"] == "failed"
+        assert row["conclusion_label"] is None
+
+    def test_missing_conclusion_label_is_none(self):
+        """R21: 模型未给 conclusion_label 时为 None，不伪造。"""
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ"},
+            {"score": 88, "summary": "看好"},
+        )
+        assert row["ai_status"] == "analyzed"
+        assert row["conclusion_label"] is None
+
 
 class TestBuildCapitalFlowText:
     def test_no_data(self):

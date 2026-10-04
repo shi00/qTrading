@@ -21,6 +21,9 @@ import pytest
 from core.prompt_base import (
     _UNIVERSAL_RULES,
     _clean_rules,
+    CONCLUSION_LABELS,
+    CONCLUSION_LABEL_FIELD,
+    RECOMMENDATION_TO_CONCLUSION_LABEL,
     get_base_prompt,
     resolve_prompt,
 )
@@ -34,6 +37,30 @@ def _noop_user_prompt(_key: str) -> str | None:
 
 def _noop_global_prompt() -> str:
     return ""
+
+
+class TestConclusionLabelSchema:
+    """MAJOR-01（输出契约统一）：结论 schema 常量与提示词枚举同源。"""
+
+    def test_field_name(self):
+        assert CONCLUSION_LABEL_FIELD == "conclusion_label"
+
+    def test_enum_values(self):
+        assert CONCLUSION_LABELS == ("strong_buy", "watchlist", "uncertain", "reject")
+
+    def test_universal_rules_lists_every_choice(self):
+        """提示词【输出格式】的 conclusion_label 枚举来自 schema（占位符注入）。"""
+        for label in CONCLUSION_LABELS:
+            assert label in _UNIVERSAL_RULES
+        assert " / ".join(CONCLUSION_LABELS) in _UNIVERSAL_RULES
+        # 占位符已被替换，不得残留在运行期文本中
+        assert "{conclusion_label_choices}" not in _UNIVERSAL_RULES
+
+    def test_alias_map_covers_valid_recommendations_and_maps_to_enum(self):
+        from services.ai_service.output import VALID_RECOMMENDATIONS
+
+        assert set(RECOMMENDATION_TO_CONCLUSION_LABEL) == VALID_RECOMMENDATIONS
+        assert set(RECOMMENDATION_TO_CONCLUSION_LABEL.values()) <= set(CONCLUSION_LABELS)
 
 
 class TestCleanRulesBoundaries:

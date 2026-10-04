@@ -138,12 +138,22 @@ _COLUMN_WIDTHS = {
     "industry_tushare": 110,
     "strategy_name": 120,
     "prediction_result": 80,
+    "conclusion_label": 100,
     "t1_pct": 80,
     "t5_pct": 80,
     "alpha": 80,
 }
 
 _DATE_COLS = frozenset({"list_date", "trade_date"})
+
+# MAJOR-01: 模型结论枚举（conclusion_label）→ i18n key 的呈现映射。
+# reject 呈现为「模型否决」，使被整体丢弃的定性结论在结果卡片中显式可见。
+_CONCLUSION_LABEL_KEYS = {
+    "strong_buy": "ai_conclusion_strong_buy",
+    "watchlist": "ai_conclusion_watchlist",
+    "uncertain": "ai_conclusion_uncertain",
+    "reject": "ai_conclusion_reject",
+}
 
 # MINOR-09 item 3: PaginatedTable 列宽持久化键 (经 VM 读写 ConfigHandler, 对齐 splitter 模式)
 _VT_COL_WIDTHS_KEY = "ui_vt_screener_col_widths"
@@ -218,6 +228,10 @@ def _format_cell_value(col: str, val) -> str:
         if val_str == "LOSS":
             return I18n.get("prediction_loss")
         return "-"
+    if col == "conclusion_label":  # MAJOR-01: 模型结论枚举 → i18n 呈现（含「模型否决」）
+        # 纯呈现映射（枚举 → i18n key），不在 UI 层做业务判断。
+        label_key = _CONCLUSION_LABEL_KEYS.get(str(val).lower().strip())
+        return I18n.get(label_key) if label_key else "-"
     if col in _DATE_COLS:
         if isinstance(val, (datetime.date, datetime.datetime)):
             return val.strftime("%Y-%m-%d")

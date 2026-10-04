@@ -1446,6 +1446,10 @@ class AIStrategyMixin:
                                 （含 error 字段 / ai_status="failed"），或成功返回但 score 缺失/不可解析
                                 （R21：不把"没打分"伪装成"否决"），ai_score=None，ai_reason 承载错误分类
 
+        MAJOR-01（输出契约统一）：额外写入 ``conclusion_label``（模型结论枚举，由
+        ``validate_ai_analysis_response`` 规范化）。失败/未打分路径置 None（R21），正常
+        路径透传模型结论。该字段正交于 ai_status（三态仍由 score 决定），不改变分区语义。
+
         返回始终为 dict（保留原始行全部字段），不再返回 None。
         """
         row_dict = dict(row_data)
@@ -1457,6 +1461,7 @@ class AIStrategyMixin:
             row_dict["ai_reason"] = error_reason or ""
             row_dict["thinking"] = ""
             row_dict["confidence"] = None
+            row_dict["conclusion_label"] = None
             return row_dict
 
         # 失败 dict 路径（stock_analysis 失败分支返回）：显式标记 ai_status="failed"
@@ -1469,6 +1474,7 @@ class AIStrategyMixin:
             row_dict["confidence"] = None
             row_dict["ai_reason"] = str(res.get("error") or error_reason or "")
             row_dict["thinking"] = ""
+            row_dict["conclusion_label"] = None
             return row_dict
 
         score_val = res.get("score", 0)  # type: ignore[union-attr]
@@ -1503,6 +1509,7 @@ class AIStrategyMixin:
             row_dict["ai_reason"] = summary or I18n.get("ai_card_no_score")
             row_dict["thinking"] = str(res.get("thinking", "") or "")  # type: ignore[union-attr]
             row_dict["confidence"] = None
+            row_dict["conclusion_label"] = None
             return row_dict
         score_float = float(score_val)
         if not (0 <= score_float <= 100):
@@ -1513,10 +1520,12 @@ class AIStrategyMixin:
             row_dict["ai_reason"] = summary or I18n.get("ai_card_no_score")
             row_dict["thinking"] = str(res.get("thinking", "") or "")  # type: ignore[union-attr]
             row_dict["confidence"] = None
+            row_dict["conclusion_label"] = None
             return row_dict
         score_int = round(score_float, 1)
         row_dict["ai_status"] = "rejected" if score_val == 0 else "analyzed"
         row_dict["ai_score"] = score_int
+        row_dict["conclusion_label"] = res.get("conclusion_label")  # type: ignore[union-attr]
         row_dict["ai_reason"] = summary
         thinking_raw = res.get("thinking", "")  # type: ignore[union-attr]
         row_dict["thinking"] = str(thinking_raw) if thinking_raw else ""

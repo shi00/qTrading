@@ -8,6 +8,12 @@ from __future__ import annotations
 import logging
 import re
 
+from core.prompt_base import (
+    CONCLUSION_LABEL_FIELD,
+    CONCLUSION_LABELS,
+    RECOMMENDATION_TO_CONCLUSION_LABEL,
+)
+
 logger = logging.getLogger(__name__)
 
 VALID_RECOMMENDATIONS = {"buy", "hold", "sell", "strong_buy", "strong_sell", "neutral"}
@@ -80,6 +86,21 @@ def validate_ai_analysis_response(response: dict) -> dict:
             response["recommendation"] = None
         else:
             response["recommendation"] = rec_lower
+
+    # MAJOR-01（输出契约统一）：conclusion_label 为权威结论字段，recommendation 仅作读兼容别名。
+    # 有 conclusion_label 则以它为准（非法枚举置 None，R21：不把失控输出伪装成业务结论）；
+    # 缺省/为 None 时从已规范化的 recommendation 别名映射兜底；两者皆无则显式置 None。
+    raw_label = response.get(CONCLUSION_LABEL_FIELD)
+    if raw_label is None:
+        rec = response.get("recommendation")
+        response[CONCLUSION_LABEL_FIELD] = RECOMMENDATION_TO_CONCLUSION_LABEL.get(rec) if isinstance(rec, str) else None
+    else:
+        label_lower = str(raw_label).lower().strip()
+        if label_lower in CONCLUSION_LABELS:
+            response[CONCLUSION_LABEL_FIELD] = label_lower
+        else:
+            logger.warning("[AIService] Output validation: unexpected conclusion_label: %s", raw_label)
+            response[CONCLUSION_LABEL_FIELD] = None
 
     # SEC-002: sanitize free-text fields (length limit + control-char cleaning)
     # UX-2.2: 读一次配置避免每字段重复读

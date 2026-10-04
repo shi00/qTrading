@@ -25,6 +25,23 @@ FORBIDDEN_STATIC_HEADERS: list[str] = [
     "你会收到以下",
 ]
 
+# MAJOR-01（输出契约统一）：AI 分析结论的单一 schema。提示词模板（下方
+# ``_UNIVERSAL_RULES``/``STRATEGY_PROMPTS``）与输出校验（``services/ai_service/output.py``）
+# 共用本组常量，避免「提示词要求 conclusion_label、校验却检查 recommendation」的契约分裂。
+CONCLUSION_LABEL_FIELD = "conclusion_label"
+CONCLUSION_LABELS = ("strong_buy", "watchlist", "uncertain", "reject")
+# 兼容别名：旧提示词/模型可能返回 recommendation，读取后映射到结论枚举（读兼容，写以
+# conclusion_label 为准）。
+RECOMMENDATION_TO_CONCLUSION_LABEL: dict[str, str] = {
+    "strong_buy": "strong_buy",
+    "buy": "strong_buy",
+    "hold": "watchlist",
+    "neutral": "uncertain",
+    "sell": "reject",
+    "strong_sell": "reject",
+}
+_CONCLUSION_LABEL_CHOICES = " / ".join(CONCLUSION_LABELS)
+
 _UNIVERSAL_RULES = """
 
 【铁律1】如果提供的近期新闻、财务数据或市场数据与你的预训练知识存在矛盾，请以本次提供的实时数据为准，并在 thinking 中明确指出你发现了变化。
@@ -33,12 +50,14 @@ _UNIVERSAL_RULES = """
 【铁律4】数据段落若以 `【数据停止更新，最后更新：YYYY-MM-DD】` 开头，表示该数据为历史参考（用户档位降级后停止同步）。分析时：（1）不得将该数据用于趋势/同比/环比等时间序列判断；（2）仅可作为静态快照参考（如"最近一次解禁日期"、"最近一次质押比例"）；（3）在 uncertainty_factors 中标注"部分数据停止更新（{api_list}）"，并酌情降低 confidence；（4）不得因 stale 数据存在而拒绝分析（仍需基于现有可用数据给出结论）。
 
 【输出格式】你必须只返回一个合法 JSON 对象，不要输出 markdown，不要输出代码块，不要输出额外说明文字。JSON 必须严格包含以下键名：
-1. conclusion_label：从 strong_buy / watchlist / uncertain / reject 中选择一个
+1. conclusion_label：从 {conclusion_label_choices} 中选择一个
 2. score：1-100 的数字评分
 3. confidence：1-100 的置信度（必填，禁止省略此字段；表示你对这个判断的确定程度，数据不足时请降低置信度）
 4. uncertainty_factors：罗列导致你置信度下降的1-3个主要不确定性因素。可以是包含1-3条内容的数组；若几乎没有不确定性，也可填写字符串"无"。
 5. thinking：你的推理与分析过程，使用自然语言简洁说明核心判断，通常控制在约80-180字，重点写结论依据、主要风险以及你为何这样判断。
-6. summary：一句话核心操作建议或定性总结。该字段将直接用于界面展示，请写得清晰、简短、可执行，避免空话和套话。"""
+6. summary：一句话核心操作建议或定性总结。该字段将直接用于界面展示，请写得清晰、简短、可执行，避免空话和套话。""".replace(
+    "{conclusion_label_choices}", _CONCLUSION_LABEL_CHOICES
+)
 
 
 STRATEGY_PROMPTS = {
