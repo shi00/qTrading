@@ -132,12 +132,26 @@ class StockAnalysisService:
         # 经组合根模块属性访问 ConfigHandler/DataSanitizer：保证测试
         # patch("services.ai_service.ConfigHandler"/"DataSanitizer") 生效。
         import services.ai_service as _ai
+        from core.i18n import I18n
 
+        # MAJOR-04（review09-24 维度04）：个股深度分析仅接入云端 LLM 路径，本地模型
+        # 不参与该路径（新闻分类等另有本地优先路径）。云端不可用（含「仅本地模式」）时
+        # 返回显式 unsupported 状态而非裸 None，使 UI/调用方能区分「能力边界不支持」与
+        # 「分析失败」，不把「不支持」伪装成「无结果」（R21）。
         if not self._service.is_cloud_available():
-            return None
+            reason_key = (
+                "ai_local_only_deep_analysis_unsupported"
+                if _ai.ConfigHandler.is_ai_local_only_mode()
+                else "ai_not_configured"
+            )
+            return {
+                "ai_status": "unsupported",
+                "score": None,
+                "confidence": None,
+                "error": I18n.get(reason_key),
+            }
 
         # Build Prompt
-        from core.i18n import I18n
 
         # Format news
         news_text = "\n".join(
