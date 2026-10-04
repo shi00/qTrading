@@ -46,11 +46,10 @@ class TestSyncedTableRegistryConsistency:
             _build_table_tolerance_map,
         )
 
-        config = {
-            "quotes_tolerance_ratio": 0.95,
-            "indicators_tolerance_ratio": 0.90,
-            "moneyflow_tolerance_ratio": 0.80,
-        }
+        from utils.config_models import SyncIntegrityConfig
+
+        # 用真实配置模型派生 config（而非硬编码 stub），使容忍系数键名漂移能被本用例捕获。
+        config = SyncIntegrityConfig().model_dump()
         registered = set(_build_table_tolerance_map(config)) | LOW_FREQUENCY_TABLES | set(FIXED_EXPECTED_TABLES)
         unregistered = sorted(set(HistoricalSyncStrategy.SYNCED_TABLES) - registered)
         assert not unregistered, (
@@ -63,6 +62,60 @@ class TestSyncedTableRegistryConsistency:
 
         missing = sorted(set(HistoricalSyncStrategy.SYNCED_TABLES) - set(_TABLE_DATE_COLUMN_MAP))
         assert not missing, f"SYNCED_TABLES 中未登记进 _TABLE_DATE_COLUMN_MAP 的表: {missing}"
+
+    def test_density_checked_tables_subset_of_synced(self):
+        """_DENSITY_CHECKED_TABLES 必须 ⊆ SYNCED_TABLES（防止登记已下线/拼写错误的表名而成为死登记）。"""
+        from data.persistence.daos.quote_dao import _DENSITY_CHECKED_TABLES
+
+        extra = sorted(set(_DENSITY_CHECKED_TABLES) - set(HistoricalSyncStrategy.SYNCED_TABLES))
+        assert not extra, f"_DENSITY_CHECKED_TABLES 中不在 SYNCED_TABLES 的表: {extra}"
+
+    def test_dense_tables_covered_by_density_checked(self):
+        """_DENSE_TABLES 必须 ⊆ _DENSITY_CHECKED_TABLES。
+
+        漏登记会让 check_data_exists 对该 dense 表退化为「≥1 行」存在性判定，截断写入被判为
+        完整、该日被永久跳过（review09-24 dim05 CRITICAL-01/MAJOR-02 的同类失效路径）。
+        """
+        from data.persistence.daos.quote_dao import _DENSITY_CHECKED_TABLES, _DENSE_TABLES
+
+        uncovered = sorted(set(_DENSE_TABLES) - set(_DENSITY_CHECKED_TABLES))
+        assert not uncovered, f"dense 表未纳入行数密度检查: {uncovered}"
+
+    def test_dense_table_registries_consistent(self):
+        """quote_dao 与 historical 各自维护的 _DENSE_TABLES 必须一致且 ⊆ SYNCED_TABLES。
+
+        两处副本语义相同（每交易日必有数据的表）；漂移会让断点续传完成度判定与
+        sync_empty_days 豁免口径不一致。
+        """
+        from data.persistence.daos.quote_dao import _DENSE_TABLES as quote_dense
+        from data.sync.historical import _DENSE_TABLES as historical_dense
+
+        assert quote_dense == historical_dense, (
+            f"两处 _DENSE_TABLES 漂移: quote_dao={sorted(quote_dense)} historical={sorted(historical_dense)}"
+        )
+        extra = sorted(set(quote_dense) - set(HistoricalSyncStrategy.SYNCED_TABLES))
+        assert not extra, f"_DENSE_TABLES 中不在 SYNCED_TABLES 的表: {extra}"
+
+    def test_density_checked_tables_not_low_frequency_exempt(self):
+        """行数密度检查表不得被 LOW_FREQUENCY_TABLES 豁免。
+
+        否则其缺口会被静默移出加权评分；dense 表混入低频豁免是同一失效路径的变体。
+        """
+        from data.persistence.daos.quote_dao import LOW_FREQUENCY_TABLES, _DENSITY_CHECKED_TABLES
+
+        overlap = sorted(set(_DENSITY_CHECKED_TABLES) & LOW_FREQUENCY_TABLES)
+        assert not overlap, f"行数密度检查表被误判为低频豁免: {overlap}"
+
+    def test_quality_weights_keys_subset_of_synced(self):
+        """quality_weights 的键必须 ⊆ SYNCED_TABLES。
+
+        拼写错误或已下线的键不会报错而是被静默忽略（真实表权重回落默认 5），
+        导致评分语义被无声改变。
+        """
+        from utils.config_models import SyncIntegrityConfig
+
+        extra = sorted(set(SyncIntegrityConfig().quality_weights) - set(HistoricalSyncStrategy.SYNCED_TABLES))
+        assert not extra, f"quality_weights 中不在 SYNCED_TABLES 的键: {extra}"
 
 
 class TestSyncTypeConsistency:
