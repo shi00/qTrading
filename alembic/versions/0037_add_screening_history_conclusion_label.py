@@ -1,7 +1,7 @@
 """add screening_history.conclusion_label
 
-Revision ID: 0035
-Revises: 0034
+Revision ID: 0037
+Revises: 0036
 Create Date: 2026-10-04 00:00:00.000000
 
 MAJOR-01（输出契约统一）：screening_history 新增 conclusion_label 列，承载模型给出的
@@ -18,8 +18,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0035"
-down_revision: str | Sequence[str] | None = "0034"
+revision: str = "0037"
+down_revision: str | Sequence[str] | None = "0036"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
