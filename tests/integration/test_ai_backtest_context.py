@@ -167,7 +167,7 @@ class TestBacktestAIContextIntegration:
         with (
             patch("strategies.ai_mixin.AIService") as mock_ai_cls,
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                "data.persistence.review_manager.ReviewManager.get_learning_context_with_meta",
                 new_callable=AsyncMock,
             ) as mock_lc,
             patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock) as mock_global,
@@ -234,7 +234,7 @@ class TestBacktestAIContextIntegration:
             patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock) as mock_news,
             patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock) as mock_global,
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                "data.persistence.review_manager.ReviewManager.get_learning_context_with_meta",
                 new_callable=AsyncMock,
             ) as mock_lc,
         ):
@@ -245,7 +245,7 @@ class TestBacktestAIContextIntegration:
 
             mock_news.return_value = []
             mock_global.return_value = ""
-            mock_lc.return_value = ""
+            mock_lc.return_value = ("", {})
 
             mock_dp_cache = MagicMock()
             mock_dp_cache.get_concepts = AsyncMock(return_value={})
@@ -291,7 +291,7 @@ class TestBacktestAIContextIntegration:
             patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock) as mock_news,
             patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock) as mock_global,
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                "data.persistence.review_manager.ReviewManager.get_learning_context_with_meta",
                 new_callable=AsyncMock,
             ) as mock_lc,
         ):
@@ -350,7 +350,7 @@ class TestBacktestAIContextIntegration:
             patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock) as mock_news,
             patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock) as mock_global,
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                "data.persistence.review_manager.ReviewManager.get_learning_context_with_meta",
                 new_callable=AsyncMock,
             ) as mock_lc,
         ):
@@ -361,7 +361,7 @@ class TestBacktestAIContextIntegration:
 
             mock_news.side_effect = capture_news_call
             mock_global.return_value = ""
-            mock_lc.return_value = ""
+            mock_lc.return_value = ("", {})
 
             mock_dp_cache = MagicMock()
             mock_dp_cache.get_concepts = AsyncMock(return_value={})
@@ -428,14 +428,14 @@ class TestBacktestAIContextIntegration:
         async def capture_learning_context(*args, **kwargs):
             nonlocal captured_as_of
             captured_as_of = kwargs.get("as_of")
-            return ""
+            return "", {}
 
         with (
             patch("strategies.ai_mixin.AIService") as mock_ai_cls,
             patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock) as mock_news,
             patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock) as mock_global,
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                "data.persistence.review_manager.ReviewManager.get_learning_context_with_meta",
                 new_callable=AsyncMock,
             ) as mock_lc,
             patch.object(strategy, "should_include_learning_context", return_value=True),
@@ -502,7 +502,7 @@ class TestBacktestAIContextIntegration:
             patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock) as mock_news,
             patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock) as mock_global,
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                "data.persistence.review_manager.ReviewManager.get_learning_context_with_meta",
                 new_callable=AsyncMock,
             ) as mock_lc,
         ):
@@ -513,7 +513,7 @@ class TestBacktestAIContextIntegration:
 
             mock_news.side_effect = capture_news_call
             mock_global.return_value = ""
-            mock_lc.return_value = ""
+            mock_lc.return_value = ("", {})
 
             mock_dp_cache = MagicMock()
             mock_dp_cache.get_concepts = AsyncMock(return_value={})

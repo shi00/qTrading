@@ -60,7 +60,7 @@ class TestUniversalRulesSeparateSystemMessage:
 
             with patch("services.ai_service.DataSanitizer"):
                 with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
-                    mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
+                    mock_rm.return_value.get_learning_context_with_meta = AsyncMock(return_value=("", {}))
                     with contextlib.suppress(RuntimeError, ValueError, TypeError):
                         await svc.analyze_stock(
                             stock_info={"ts_code": "000001.SZ", "name": "test"},
@@ -87,7 +87,7 @@ class TestUniversalRulesSeparateSystemMessage:
 
             with patch("services.ai_service.DataSanitizer"):
                 with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
-                    mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
+                    mock_rm.return_value.get_learning_context_with_meta = AsyncMock(return_value=("", {}))
                     with contextlib.suppress(RuntimeError, ValueError, TypeError):
                         await svc.analyze_stock(
                             stock_info={"ts_code": "000001.SZ", "name": "test"},
@@ -133,7 +133,7 @@ class TestUniversalRulesSeparateSystemMessage:
 
             with patch("services.ai_service.DataSanitizer"):
                 with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
-                    mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
+                    mock_rm.return_value.get_learning_context_with_meta = AsyncMock(return_value=("", {}))
                     with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
                         with patch(
                             "utils.prompt_guard.sanitize_prompt",

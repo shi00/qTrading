@@ -94,6 +94,58 @@ class TestSaveResultsDictFormat(unittest.TestCase):
         self.assertEqual(call_args[0]["run_id"], "abc123")
 
 
+class TestSaveResultsLearningContextTraceability(unittest.TestCase):
+    """D4-M3：save_results 把本次注入样本 ID 与学习开关状态写入 params_snapshot，使分析可追溯。"""
+
+    @patch("data.persistence.review_manager.ReviewManager.__init__", return_value=None)
+    def test_save_results_persists_learning_context_sample_ids(self, mock_init):
+        from data.persistence.review_manager import ReviewManager
+
+        rm = ReviewManager.__new__(ReviewManager)
+        rm.cache = MagicMock()
+        rm.cache.screener_dao = MagicMock()
+        rm.cache.screener_dao.save_screening_results = AsyncMock()
+
+        import datetime
+
+        meta = {
+            "enabled": True,
+            "sufficient": True,
+            "injected": True,
+            "total": 40,
+            "sample_ids": [101, 202],
+            "as_of": "2024-06-01",
+            "strategy_name": "test",
+        }
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["Test"],
+                "close": [10.0],
+                "ai_status": ["analyzed"],
+                "learning_context_meta": [meta],
+            }
+        )
+
+        import asyncio
+
+        asyncio.run(
+            rm.save_results(
+                strategy_name="test",
+                df=df,
+                trade_date=datetime.date(2024, 1, 1),
+                run_id="abc123",
+                params_snapshot={},
+            )
+        )
+
+        rm.cache.screener_dao.save_screening_results.assert_called_once()
+        records = rm.cache.screener_dao.save_screening_results.call_args[0][0]
+        persisted = records[0]["params_snapshot"]
+        self.assertEqual(persisted["learning_context"]["sample_ids"], [101, 202])
+        self.assertTrue(persisted["learning_context"]["enabled"])
+
+
 class TestUpdatePredictionResultStatusTransition(unittest.TestCase):
     def test_t1_price_must_be_keyword_argument(self):
         """O-1: 指标参数应使用命名传参，避免位置参数错位。"""

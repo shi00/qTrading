@@ -120,6 +120,9 @@ _HIDDEN_COLS = frozenset(
         "t5_price",
         "params_snapshot",
         "_filter_attribution",  # UX-04: 结构化筛选归因列 (仅详情弹窗展示, 不上表格)
+        # D4-M3: 学习上下文注入样本元数据（样本 ID / 学习开关状态），随结果落库到
+        # params_snapshot；仅作可追溯用途，不上结果表格。
+        "learning_context_meta",
         # CRITICAL-02 (R21/BT-03): screening_history 落库的执行期可信度元数据
         # （exec_warnings 经 warnings 横幅呈现；filter_attribution 供历史回看消费），不上表格。
         "exec_warnings",

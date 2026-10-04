@@ -197,6 +197,8 @@ class StockAnalysisService:
         stock_xml = "\n".join([f"  {k}: {v}" for k, v in clean_stock_info.items()])
 
         # Fetch Learning Context (Few-Shot) — skip if caller pre-fetched
+        # D4-M3 可追溯：直接分析路径（无批量预取）自取学习上下文时记录注入样本元数据。
+        learning_meta: dict | None = None
         if history_context is None and include_learning_context:
             if is_backtest:
                 raise ValueError(
@@ -213,7 +215,7 @@ class StockAnalysisService:
 
                 rm = ReviewManager()
                 safe_as_of = get_now().date() - datetime.timedelta(days=SAFE_LIVE_LEARNING_OFFSET_DAYS)
-                history_context = await rm.get_learning_context(
+                history_context, learning_meta = await rm.get_learning_context_with_meta(
                     as_of=safe_as_of,
                     strategy_name=learning_strategy_name,
                 )
@@ -615,6 +617,9 @@ class StockAnalysisService:
                 json_mode=True,
                 on_chunk=on_chunk,
             )
+            if isinstance(res, dict) and learning_meta is not None:
+                # D4-M3 可追溯：随该股结果回传注入元数据，供 _build_result_row 逐行携带落库。
+                res["learning_context_meta"] = learning_meta
             return validate_ai_analysis_response(res)
 
         except AIServiceUnavailableError as ae:

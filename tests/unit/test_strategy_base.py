@@ -585,7 +585,7 @@ async def test_phase2_triggered_when_ai_available():
             mock_news.get_stock_news = AsyncMock(return_value=[])
         with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
             mock_rm_instance = MagicMock()
-            mock_rm_instance.get_learning_context = AsyncMock(return_value="")
+            mock_rm_instance.get_learning_context_with_meta = AsyncMock(return_value=("", {}))
             mock_rm.return_value = mock_rm_instance
         with (
             patch("strategies.ai_mixin.ConfigHandler.get_ai_max_candidates", return_value=30),

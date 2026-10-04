@@ -6,7 +6,7 @@
 import datetime
 import pytest
 import httpx
-from unittest.mock import patch, AsyncMock, MagicMock
+from unittest.mock import ANY, patch, AsyncMock, MagicMock
 
 from services.ai_service import (
     AIService,
@@ -2649,7 +2649,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
         svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
 
         mock_rm = AsyncMock()
-        mock_rm.get_learning_context = AsyncMock(return_value="<learning>test</learning>")
+        mock_rm.get_learning_context_with_meta = AsyncMock(return_value=("<learning>test</learning>", {}))
 
         with (
             patch("core.prompt_base.get_base_prompt", return_value="prompt"),
@@ -2663,8 +2663,8 @@ class TestAIServiceAnalyzeStockDeepBranches:
                 include_learning_context=True,
             )
         assert result["score"] == 50
-        mock_rm.get_learning_context.assert_called_once()
-        call_kwargs = mock_rm.get_learning_context.call_args
+        mock_rm.get_learning_context_with_meta.assert_called_once_with(as_of=ANY, strategy_name=ANY)
+        call_kwargs = mock_rm.get_learning_context_with_meta.call_args
         as_of_arg = call_kwargs.kwargs.get("as_of") if call_kwargs.kwargs else call_kwargs[1].get("as_of")
         assert as_of_arg is not None, "fallback path must pass non-None as_of to prevent lookahead bias"
 
@@ -2678,7 +2678,9 @@ class TestAIServiceAnalyzeStockDeepBranches:
             patch("core.prompt_base.get_base_prompt", return_value="prompt"),
             patch(
                 "data.persistence.review_manager.ReviewManager",
-                return_value=AsyncMock(get_learning_context=AsyncMock(return_value="<learning>test</learning>")),
+                return_value=AsyncMock(
+                    get_learning_context_with_meta=AsyncMock(return_value=("<learning>test</learning>", {}))
+                ),
             ),
         ):
             await svc.analyze_stock(
@@ -2717,7 +2719,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
         svc = _make_svc_with_cloud()
         svc._chat_completion_with_failover = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
         mock_rm = AsyncMock()
-        mock_rm.get_learning_context = AsyncMock(return_value="<learning>test</learning>")
+        mock_rm.get_learning_context_with_meta = AsyncMock(return_value=("<learning>test</learning>", {}))
 
         with (
             patch("core.prompt_base.get_base_prompt", return_value="prompt"),
@@ -2732,7 +2734,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
                 is_backtest=False,
             )
             assert result["score"] == 50
-            mock_rm.get_learning_context.assert_called_once()
+            mock_rm.get_learning_context_with_meta.assert_called_once_with(as_of=ANY, strategy_name=ANY)
 
     @pytest.mark.asyncio
     async def test_no_strategy_key_no_override(self):
