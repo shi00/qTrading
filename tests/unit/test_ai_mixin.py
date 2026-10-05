@@ -23,6 +23,7 @@ from strategies.ai_context import (
 )
 from strategies.ai_mixin import AIStrategyMixin
 from strategies.utils import safe_float
+from services.ai_service.output import validate_ai_analysis_response
 from utils.limit_status import get_limit_pct
 
 pytestmark = pytest.mark.unit
@@ -2135,6 +2136,48 @@ class TestAIStrategyMixinBuildResultRowD36:
         )
         assert row["ai_status"] == "analyzed"
         assert row["conclusion_label"] is None
+
+    # --- MINOR-01: 置信度不再截断取整/钳位，越界与缺失一律 None（R21） ---
+
+    def test_confidence_out_of_range_is_none(self):
+        """MINOR-01/R21（纵深防御）：越界 confidence（绕过 validate）置 None，不钳位为 100。"""
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ"},
+            {"score": 88, "summary": "看好", "confidence": 500},
+        )
+        assert row["ai_status"] == "analyzed"
+        assert row["confidence"] is None
+        # 越界值不得污染 summary 文案
+        assert "500" not in row["ai_reason"]
+
+    def test_confidence_negative_is_none(self):
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ"},
+            {"score": 88, "summary": "看好", "confidence": -3},
+        )
+        assert row["confidence"] is None
+
+    def test_confidence_zero_kept(self):
+        """0 是合法置信度（0%），非缺失，保留 0 而非置 None。"""
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ"},
+            {"score": 88, "summary": "看好", "confidence": 0},
+        )
+        assert row["confidence"] == 0
+
+    def test_confidence_fractional_kept_without_truncation(self):
+        """MINOR-01: 百分数小数不再被 int() 截断取整（85.5 保留 85.5，非 85）。"""
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ"},
+            {"score": 88, "summary": "看好", "confidence": 85.5},
+        )
+        assert row["confidence"] == 85.5
+
+    def test_confidence_normalized_probability_flow(self):
+        """MINOR-01 端到端：validate 归一化 0.85 → 85，_build_result_row 消费到 85（不再截断为 1）。"""
+        res = validate_ai_analysis_response({"score": 88, "summary": "看好", "confidence": 0.85})
+        row = AIStrategyMixin._build_result_row({"ts_code": "000001.SZ"}, res)
+        assert row["confidence"] == 85
 
 
 class TestBuildCapitalFlowText:

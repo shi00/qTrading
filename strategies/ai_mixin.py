@@ -1481,6 +1481,11 @@ class AIStrategyMixin:
         summary_raw = res.get("summary", "")  # type: ignore[union-attr]
         summary = str(summary_raw) if summary_raw else ""
         confidence = res.get("confidence")  # type: ignore[union-attr]
+        # AI-02 / MINOR-01（R21 纵深防御）：越界或非数值置信度置 None，不钳位——正常链路已由
+        # validate_ai_analysis_response 归一化（0~1 概率口径按比例换算为百分数，越界置 None）。
+        # 此处兜底保证绕过校验的调用同样不把"模型失控输出"钳位成满置信度，与 score 的处理一致。
+        if not (isinstance(confidence, (int, float)) and 0 <= float(confidence) <= 100):
+            confidence = None
         uncertainty = res.get("uncertainty_factors")  # type: ignore[union-attr]
 
         if confidence is not None:
@@ -1529,9 +1534,8 @@ class AIStrategyMixin:
         row_dict["ai_reason"] = summary
         thinking_raw = res.get("thinking", "")  # type: ignore[union-attr]
         row_dict["thinking"] = str(thinking_raw) if thinking_raw else ""
-        row_dict["confidence"] = (
-            min(100, max(1, int(confidence))) if isinstance(confidence, (int, float)) else None
-        )  # AI-02: 缺失不伪造为 50，保留 None
+        # AI-02 / MINOR-01: 缺失或越界一律 None（R21），不钳位、不取整截断；已在函数上方归一化。
+        row_dict["confidence"] = round(float(confidence), 1) if confidence is not None else None
         return row_dict
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
