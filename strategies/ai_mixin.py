@@ -386,8 +386,14 @@ class AIStrategyMixin:
 
         # --- Guard: AI Available? ---
         if not ai_client.is_cloud_available():
+            # MAJOR-04（review09-24 维度04）：区分「仅本地模式」（用户主动选择，
+            # 能力边界：个股深度分析需云端 LLM，本地模型仅支撑新闻分类等）与「云端
+            # 未配置」，前者提示能力边界而非「未配置」，避免误导（README 同步修正）。
+            local_only = ConfigHandler.is_ai_local_only_mode()
+            notice_key = "ai_local_only_capability_boundary" if local_only else "ai_not_configured"
             logger.info(
-                "[AIStrategyMixin] AI service not configured — returning math-only results",
+                "[AIStrategyMixin] AI cloud unavailable (local_only=%s) — returning math-only results",
+                local_only,
             )
             # SC-02: 未配置 LLM 属"AI 有效不运行"，向 warnings 声明风险检查缺失。
             self._note_ai_risk_check_skipped(context)
@@ -395,7 +401,7 @@ class AIStrategyMixin:
                 on_progress(
                     0,
                     0,
-                    Message("ai_not_configured"),
+                    Message(notice_key),
                 )
             return candidates_df
 
@@ -1276,6 +1282,10 @@ class AIStrategyMixin:
         由调用方据此触发 on_card_error / on_progress。
         """
         if not AIService().is_cloud_available():
+            # MAJOR-04（review09-24 维度04）：仅本地模式走能力边界提示，其余维持
+            # 「未配置」，与 run_ai_analysis 入口文案保持一致。
+            if ConfigHandler.is_ai_local_only_mode():
+                return "ai_local_only_capability_boundary"
             return "ai_not_configured"
         ack_providers = collect_cloud_ack_providers(ConfigHandler.get_llm_provider())
         if not all(ConfigHandler.is_ai_external_acknowledged(provider=p) for p in ack_providers):
@@ -1455,6 +1465,10 @@ class AIStrategyMixin:
         - ai_status="failed":   res 为 None/异常，或 stock_analysis 失败分支的 dict
                                 （含 error 字段 / ai_status="failed"），或成功返回但 score 缺失/不可解析
                                 （R21：不把"没打分"伪装成"否决"），ai_score=None，ai_reason 承载错误分类
+        - ai_status="unsupported": res 为 stock_analysis 能力边界分支的 dict
+                                （ai_status="unsupported"，如仅本地模式下个股深度分析
+                                不可用），ai_score=None，ai_reason 承载能力边界说明
+                                （R21：不把"能力边界不支持"伪装成"失败/无结果"）
 
         返回始终为 dict（保留原始行全部字段），不再返回 None。
         """
@@ -1465,6 +1479,18 @@ class AIStrategyMixin:
             row_dict["ai_status"] = "failed"
             row_dict["ai_score"] = None
             row_dict["ai_reason"] = error_reason or ""
+            row_dict["thinking"] = ""
+            row_dict["confidence"] = None
+            return row_dict
+
+        # MAJOR-04（review09-24 维度04）：能力边界「不支持」路径（如仅本地模式下个体
+        # 深度分析不可用）由 stock_analysis 显式标记 ai_status="unsupported"。必须先于
+        # 下方 error 字段判定处理，避免把「能力边界不支持」误判为「分析失败」（R21：
+        # 不把已知的能力边界伪装成失败/无结果）。
+        if isinstance(res, dict) and res.get("ai_status") == "unsupported":
+            row_dict["ai_status"] = "unsupported"
+            row_dict["ai_score"] = None
+            row_dict["ai_reason"] = str(res.get("error") or error_reason or "")
             row_dict["thinking"] = ""
             row_dict["confidence"] = None
             return row_dict

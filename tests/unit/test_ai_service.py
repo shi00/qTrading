@@ -8,6 +8,7 @@ import pytest
 import httpx
 from unittest.mock import patch, AsyncMock, MagicMock
 
+from core.i18n import I18n
 from services.ai_service import (
     AIService,
     LITELLM_AVAILABLE,
@@ -1784,21 +1785,57 @@ class TestUniversalRulesSeparateSystemMessage:
 
 class TestAIServiceAnalyzeStockCloudNotAvailable:
     @pytest.mark.asyncio
+    @patch("utils.config_handler.ConfigHandler.is_ai_local_only_mode", return_value=False)
     @patch("services.ai_service.ConfigHandler")
-    async def test_returns_none_when_not_configured(self, mock_ch):
+    async def test_returns_unsupported_when_not_configured(self, mock_ch, _mock_local_only):
         mock_ch.get_ai_provider.return_value = "cloud"
         mock_ch.get_llm_config.return_value = {}
         mock_ch.get_ai_model.return_value = ""
         mock_ch.get_ai_api_key.return_value = ""
         mock_ch.get_ai_base_url.return_value = ""
         mock_ch.get_setting.return_value = False
+        mock_ch.is_ai_local_only_mode.return_value = False
         svc = AIService()
         result = await svc.analyze_stock(
             stock_info={"ts_code": "000001.SZ"},
             tech_info={},
             news_list=[],
         )
-        assert result is None
+        # MAJOR-04：云端不可用不再返回裸 None，而是显式 unsupported 状态（R21：不把
+        # 「能力边界/未配置」伪装成「无结果」，供 UI 区分）。
+        assert isinstance(result, dict)
+        assert result["ai_status"] == "unsupported"
+        assert result["score"] is None
+        assert result["confidence"] is None
+        assert result["error"] == I18n.get("ai_not_configured")
+
+    @pytest.mark.asyncio
+    @patch("utils.config_handler.ConfigHandler.is_ai_local_only_mode", return_value=True)
+    @patch("services.ai_service.ConfigHandler")
+    async def test_returns_unsupported_in_local_only_mode(self, mock_ch, _mock_local_only):
+        # 仅本地模式：即便云端 LLM 已配置，is_cloud_available() 仍因 local-only 恒 False。
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.is_ai_local_only_mode.return_value = True
+        svc = AIService()
+        result = await svc.analyze_stock(
+            stock_info={"ts_code": "000001.SZ"},
+            tech_info={},
+            news_list=[],
+        )
+        assert isinstance(result, dict)
+        assert result["ai_status"] == "unsupported"
+        assert result["score"] is None
+        assert result["confidence"] is None
+        assert result["error"] == I18n.get("ai_local_only_deep_analysis_unsupported")
 
 
 class TestAIServiceAnalyzeStockSuccess:

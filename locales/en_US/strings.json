@@ -331,6 +331,8 @@
     "param_block_discount_max_pct": "Max Block Discount (%)",
     "strategy_unit_unknown": "Unknown data unit {data_unit} or value unit {value_unit} for column {column}; refused amount-threshold comparison to avoid assuming a unit.",
     "ai_not_configured": "AI not configured — showing math-only results",
+    "ai_local_only_capability_boundary": "Local-only mode: per-stock deep analysis requires a cloud LLM and is currently unavailable; local features such as news classification are unaffected.",
+    "ai_local_only_deep_analysis_unsupported": "Per-stock deep analysis is unavailable in local-only mode (requires a cloud LLM)",
     "ai_external_acknowledgment_prompt": "AI external data policy not acknowledged — AI analysis skipped. Please acknowledge in \"Settings → AI\" or via the guide below.",
     "ai_external_acknowledgment_declined": "Data egress declined — AI analysis skipped. You can acknowledge anytime in \"Settings → AI\".",
     "ai_external_acknowledgment_dialog_title": "Confirm AI Data Egress",

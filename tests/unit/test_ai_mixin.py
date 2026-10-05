@@ -169,6 +169,22 @@ class TestBuildResultRowFailureClassification:
         assert row["ai_status"] == "failed"
         assert row["ai_score"] is None
 
+    def test_unsupported_capability_boundary_not_failed(self):
+        # MAJOR-04: stock_analysis 能力边界分支（如仅本地模式下个股深度分析不可用）
+        # 返回 ai_status="unsupported" 且带 error 字段，必须归类为 "unsupported" 而非
+        # "failed"，避免把能力边界伪装成分析失败（R21）。
+        res = {
+            "ai_status": "unsupported",
+            "score": None,
+            "confidence": None,
+            "error": "仅本地模式下不支持个股深度分析（需云端 LLM）",
+        }
+        row = AIStrategyMixin._build_result_row(self._row(), res)
+        assert row["ai_status"] == "unsupported"
+        assert row["ai_score"] is None
+        assert row["confidence"] is None
+        assert "仅本地模式下不支持个股深度分析" in row["ai_reason"]
+
 
 class ConcreteStrategy(AIStrategyMixin):
     key = "test_strategy"
@@ -921,6 +937,48 @@ class TestRunAiAnalysis:
             mock_ai.return_value.is_cloud_available.return_value = False
             result = await s.run_ai_analysis(candidates, context)
             assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_local_only_mode_emits_capability_boundary_notice(self):
+        # MAJOR-04：仅本地模式下 AI 入口提示应为能力边界文案，而非「未配置」。
+        from core.i18n import Message
+
+        s = ConcreteStrategy()
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"]})
+        messages: list[Message] = []
+        context = {
+            "data_processor": MagicMock(),
+            "on_progress": lambda *_args: messages.append(_args[-1]),
+        }
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_local_only_mode", return_value=True),
+        ):
+            mock_ai.return_value.is_cloud_available.return_value = False
+            result = await s.run_ai_analysis(candidates, context)
+        assert len(result) == 1
+        assert messages and messages[-1].key == "ai_local_only_capability_boundary"
+
+    @pytest.mark.asyncio
+    async def test_not_configured_emits_not_configured_notice(self):
+        # 回归：非仅本地模式仍提示「未配置」，能力边界文案不扩散。
+        from core.i18n import Message
+
+        s = ConcreteStrategy()
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["测试"]})
+        messages: list[Message] = []
+        context = {
+            "data_processor": MagicMock(),
+            "on_progress": lambda *_args: messages.append(_args[-1]),
+        }
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_local_only_mode", return_value=False),
+        ):
+            mock_ai.return_value.is_cloud_available.return_value = False
+            result = await s.run_ai_analysis(candidates, context)
+        assert len(result) == 1
+        assert messages and messages[-1].key == "ai_not_configured"
 
     @pytest.mark.asyncio
     async def test_no_data_processor(self):
@@ -4696,6 +4754,30 @@ class TestUnpricedUsageGuards:
             await s.run_ai_analysis(candidates, {"data_processor": MagicMock()})
             # 跨运行后确认状态重置 → 新运行重新提示
             assert await s._should_prompt_unpriced() is True
+
+    @pytest.mark.asyncio
+    async def test_preflight_local_only_returns_capability_boundary(self):
+        """MAJOR-04：仅本地模式下预检返回能力边界原因，而非「未配置」。"""
+        s = ConcreteStrategy()
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_local_only_mode", return_value=True),
+        ):
+            mock_ai.return_value.is_cloud_available = MagicMock(return_value=False)
+            reason = await s._preflight_cloud_call({})
+        assert reason == "ai_local_only_capability_boundary"
+
+    @pytest.mark.asyncio
+    async def test_preflight_not_configured_returns_not_configured(self):
+        """回归：非仅本地模式仍返回「未配置」原因。"""
+        s = ConcreteStrategy()
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("strategies.ai_mixin.ConfigHandler.is_ai_local_only_mode", return_value=False),
+        ):
+            mock_ai.return_value.is_cloud_available = MagicMock(return_value=False)
+            reason = await s._preflight_cloud_call({})
+        assert reason == "ai_not_configured"
 
     @pytest.mark.asyncio
     async def test_preflight_unpriced_reject_sets_context_flag(self):

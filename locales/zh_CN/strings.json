@@ -307,6 +307,8 @@
     "param_block_discount_max_pct": "大宗折价率上限(%)",
     "strategy_unit_unknown": "列 {column} 的数据单位 {data_unit} 或阈值单位 {value_unit} 未知，金额阈值比较已拒绝执行（避免误用假设单位）。",
     "ai_not_configured": "AI 服务未配置，仅展示数学筛选结果",
+    "ai_local_only_capability_boundary": "仅本地模式：个股深度分析需调用云端 LLM，当前不可用；新闻分类等本地功能不受影响。",
+    "ai_local_only_deep_analysis_unsupported": "仅本地模式下不支持个股深度分析（需云端 LLM）",
     "ai_external_acknowledgment_prompt": "未确认数据外发政策，已跳过 AI 分析。请先在「设置 → AI」或下方引导中确认。",
     "ai_external_acknowledgment_declined": "已拒绝数据外发，AI 分析跳过。可在「设置 → AI」中随时确认。",
     "ai_external_acknowledgment_dialog_title": "确认 AI 数据外发",
