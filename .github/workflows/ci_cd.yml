@@ -256,17 +256,6 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: true
           verbose: true
-          # 外部故障：*.codecov.io 通配证书（Sectigo）notAfter=2026-10-04 23:59:59 GMT 已过期，
-          # 同时影响下载主机 cli.codecov.io 与上传主机 ingest.codecov.io。
-          # 1) 下载/校验默认打 cli.codecov.io（curl 35 / sslv3 alert handshake failure，
-          #    连带 GPG/SHA256 校验中断，run 37252059492 / 37252417907）；
-          #    use_pypi 改为经 PyPI 安装 codecov-cli，绕开 cli.codecov.io 及其完整性校验。
-          use_pypi: true
-          # 2) 上传默认打 ingest.codecov.io，3 次重试后抛
-          #    "Request failed after too many retries"（run 37255647079）；
-          #    use_legacy_upload_endpoint 改走 https://codecov.io/upload/v4（证书有效），
-          #    待 Codecov 续期通配证书后应移除此开关以回到默认上传端点。
-          use_legacy_upload_endpoint: true
 
       - name: Upload test reports
         if: always()
