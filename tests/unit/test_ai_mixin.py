@@ -1550,7 +1550,7 @@ class TestRunAiAnalysis:
                 new=AsyncMock(side_effect=RuntimeError("macro down")),
             ),
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                "data.persistence.review_manager.ReviewManager.get_learning_context_with_meta",
                 new=AsyncMock(side_effect=RuntimeError("learning down")),
             ),
         ):

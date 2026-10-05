@@ -905,6 +905,12 @@ class ScreenerDao(BaseDao):
         按自然日计算的额外冗余边界，语义上并不等于「T+5 已回填」。**因此放宽本过滤条件前
         （如为增加样本量而接受 T1_DONE 记录），必须先同步把 ``as_of`` 偏移改为交易日口径
         （经 TradeCalendarService 回退 N 个交易日）**，否则偏移不足会立刻退化为真实的前视泄漏。
+
+        D4-M3 修复：返回列改为**事后可观察事实**——``id``（供调用方记录注入样本 ID）、
+        板块 ``industry``、T0 估值 ``pe_ttm``、与 alpha 同窗口的 ``t5_pct``、同期基准收益
+        ``index_pct``。**不再返回 ``ai_reason``**（T0 事前理由注入 few-shot 会造成自我强化，
+        且 AI-03 自由文本注入通道随之关闭）。ORDER BY 次键由 ``t1_pct`` 改为 ``t5_pct``，
+        与 alpha 同窗口，避免收益口径混排。
         """
         label = "WIN" if is_win else "LOSS"
         t = Base.metadata.tables["screening_history"]
@@ -917,11 +923,12 @@ class ScreenerDao(BaseDao):
                 t.c.id,
                 t.c.ts_code,
                 t.c.name,
+                t.c.industry,
+                t.c.pe_ttm,
                 t.c.alpha,
-                t.c.t1_pct,
                 t.c.t5_pct,
+                t.c.index_pct,
                 t.c.ai_score,
-                t.c.ai_reason,
                 t.c.benchmark_code,
                 t.c.trade_date,
                 t.c.strategy_name,
@@ -940,13 +947,15 @@ class ScreenerDao(BaseDao):
             .subquery("latest_learning")
         )
         stmt = sa.select(
+            latest.c.id,
             latest.c.ts_code,
             latest.c.name,
+            latest.c.industry,
+            latest.c.pe_ttm,
             latest.c.alpha,
-            latest.c.t1_pct,
             latest.c.t5_pct,
+            latest.c.index_pct,
             latest.c.ai_score,
-            latest.c.ai_reason,
             latest.c.benchmark_code,
         )
         if strategy_name is not None:
@@ -955,7 +964,8 @@ class ScreenerDao(BaseDao):
             if isinstance(as_of, datetime.datetime):
                 as_of = as_of.date()
             stmt = stmt.where(latest.c.trade_date < as_of)
-        stmt = stmt.order_by(order_dir(latest.c.alpha), order_dir(latest.c.t1_pct)).limit(limit)
+        # D4-M3: 次键与 alpha 同为 T+5 窗口，避免「T+5 超额 + T+1 单日」口径混排。
+        stmt = stmt.order_by(order_dir(latest.c.alpha), order_dir(latest.c.t5_pct)).limit(limit)
         df = await self._read_db_select(stmt)
         return df if df is not None else pd.DataFrame()
 

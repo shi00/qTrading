@@ -17,6 +17,7 @@ from data.constants import (
     REVIEW_STATUS_UNTRADABLE,
     board_benchmark_for,
 )
+from data.domain_services.review_stats_service import REVIEW_MIN_SAMPLE
 from data.external.tushare_client import TushareClient
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.sync.base import safe_error
@@ -1063,25 +1064,52 @@ class ReviewManager:
                 raise
             return pd.DataFrame()
 
-    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_learning_context(
         self,
         limit: int | None = 3,
         as_of: datetime.date | datetime.datetime | None = None,
         strategy_name: str | None = None,
-    ):
+    ) -> str:
+        """兼容入口：返回学习上下文 XML 字符串（向后兼容既有调用方）。
+
+        注入样本的可追溯元数据（样本 ID、学习开关状态）经
+        :meth:`get_learning_context_with_meta` 获取；本方法丢弃 meta。
+        """
+        xml, _meta = await self.get_learning_context_with_meta(
+            limit=limit,
+            as_of=as_of,
+            strategy_name=strategy_name,
+        )
+        return xml
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def get_learning_context_with_meta(
+        self,
+        limit: int | None = 3,
+        as_of: datetime.date | datetime.datetime | None = None,
+        strategy_name: str | None = None,
+    ) -> tuple[str, dict]:
         """
         Extract 'Best Wins' and 'Worst Losses' for Prompt Injection.
-        Returns formatted XML string for few-shot learning.
+        Returns ``(xml, meta)``: formatted XML string for few-shot learning plus the
+        traceability metadata of this injection (sample IDs + learning switch state).
 
         P0-5 fix: as_of parameter prevents look-ahead bias. When provided,
         only predictions with trade_date < as_of are included, preventing
         future data from leaking into historical replay contexts.
 
         D4-M3: ``strategy_name`` 非空时只取同策略样本，避免跨策略 few-shot 混用导致
-        模型学到错误的「特征 → 收益」映射。``limit`` 样本是分布尾部（top WIN/LOSS），
-        为让模型能校准置信度，额外注入同口径总体统计（样本总数 / alpha 中位数 / 胜率），
-        并声明样本量是否充足（不足时模型不应过度依赖尾部样本）。
+        模型学到错误的「特征 → 收益」映射。
+
+        D4-M3 修复（本方法核心变更）：
+        - **不注入 ``ai_reason``**：T0 事前理由不是「成功原因」，回灌会造成自我强化
+          确认偏差（AI-03 读取侧同时关闭了该自由文本注入通道）。
+        - **样本只含事后可观察事实**：股票代码、板块、T0 估值、T+5 收益、同期市场收益、
+          T+5 超额 Alpha（收益字段与 alpha 同为 T+5 窗口，口径不再混排）。
+        - **充足门槛与项目统计口径一致**：``total >= REVIEW_MIN_SAMPLE``（30）；不足时
+          **不注入尾部样本**，只注入总体统计 + 样本量不足声明（尾部样本最易被极端行情主导）。
+        - 返回 ``meta`` 供调用方写入 ``params_snapshot``，使「本次注入了哪些样本」
+          可事后追溯（对抗场景：用户发现 AI 风格漂移却无法归因）。
 
         Corner cases:
         - No history: Returns minimal XML
@@ -1095,61 +1123,64 @@ class ReviewManager:
                 "[ReviewManager] get_learning_context called without as_of; "
                 "using all completed samples. This may introduce look-ahead bias in backtest scenarios."
             )
-        wins = []
-        losses = []
+        wins: list[dict] = []
+        losses: list[dict] = []
         stats: dict | None = None
+        # 缺省哨兵（R21）：样本文本中缺失的可观察事实以 N/A 呈现，不伪造具体数值。
+        na = I18n.get("review_ctx_na")
+
+        def _num(value: typing.Any) -> float | None:
+            try:
+                if value is None or pd.isna(value):
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
 
         try:
-            df_wins = await self.cache.screener_dao.get_learning_context(
-                limit=limit or 3,
-                is_win=True,
-                as_of=as_of,
-                strategy_name=strategy_name,
-            )
-            if df_wins is not None and not df_wins.empty:
-                for _, row in df_wins.iterrows():
-                    # SEC-001：ai_reason 与 name 均为第三方/模型自由文本，入 Prompt 前中和
-                    # （AI-03：剥离零宽字符、转义尖括号、PII 脱敏），避免 few-shot 回灌注入通道。
-                    reason_raw = str(row["ai_reason"]) if row["ai_reason"] else ""  # type: ignore[union-attr]
-                    wins.append(
-                        {
-                            "code": row["ts_code"],
-                            "name": neutralize_external_text(str(row.get("name") or "")),
-                            "alpha": row["alpha"],
-                            "pct": row["t1_pct"],
-                            "score": row["ai_score"],
-                            "benchmark": row.get("benchmark_code"),
-                            "reason": neutralize_external_text(reason_raw)[:50],
-                        },
-                    )
-
-            df_losses = await self.cache.screener_dao.get_learning_context(
-                limit=limit or 3,
-                is_win=False,
-                as_of=as_of,
-                strategy_name=strategy_name,
-            )
-            if df_losses is not None and not df_losses.empty:
-                for _, row in df_losses.iterrows():
-                    # SEC-001：同上——wins/losses 两侧同一中性化处理。
-                    reason_raw = str(row["ai_reason"]) if row["ai_reason"] else ""  # type: ignore[union-attr]
-                    losses.append(
-                        {
-                            "code": row["ts_code"],
-                            "name": neutralize_external_text(str(row.get("name") or "")),
-                            "alpha": row["alpha"],
-                            "pct": row["t1_pct"],
-                            "score": row["ai_score"],
-                            "benchmark": row.get("benchmark_code"),
-                            "reason": neutralize_external_text(reason_raw)[:50],
-                        },
-                    )
-
+            # D4-M3: 先取总体统计以判定样本量是否充足；不足时不查询、不注入尾部样本。
             stats = await self.cache.screener_dao.get_learning_context_stats(
                 as_of=as_of,
                 strategy_name=strategy_name,
             )
+            total = _num(stats.get("total")) if isinstance(stats, dict) else None
+            sufficient = total is not None and int(total) >= REVIEW_MIN_SAMPLE
 
+            if sufficient:
+                for is_win, bucket in ((True, wins), (False, losses)):
+                    df_tail = await self.cache.screener_dao.get_learning_context(
+                        limit=limit or 3,
+                        is_win=is_win,
+                        as_of=as_of,
+                        strategy_name=strategy_name,
+                    )
+                    if df_tail is None or df_tail.empty:
+                        continue
+                    for _, row in df_tail.iterrows():
+                        alpha = _num(row.get("alpha"))
+                        t5 = _num(row.get("t5_pct"))
+                        pe = _num(row.get("pe_ttm"))
+                        index_pct = _num(row.get("index_pct"))
+                        benchmark = row.get("benchmark_code")
+                        sample_id = _num(row.get("id"))
+                        bucket.append(
+                            {
+                                "id": int(sample_id) if sample_id is not None else None,
+                                "code": row["ts_code"],
+                                # name/industry 为第三方/DB 自由文本，入 Prompt 前中和
+                                # （AI-03：剥离零宽字符、转义尖括号、PII 脱敏）。
+                                "name": neutralize_external_text(str(row.get("name") or "")),
+                                "industry": neutralize_external_text(str(row.get("industry") or "")) or na,
+                                "pe": f"{pe:.1f}" if pe is not None else na,
+                                "pct": f"{t5:+.1f}" if t5 is not None else na,
+                                "alpha": f"{alpha:+.1f}" if alpha is not None else na,
+                                "index": f"{index_pct:+.1f}" if index_pct is not None else na,
+                                "benchmark": str(benchmark)
+                                if benchmark is not None and not pd.isna(benchmark)
+                                else None,
+                                "score": row.get("ai_score"),
+                            },
+                        )
         except EngineDisposedError:
             # R5 一致性：disposed 引擎不可恢复，必须上抛避免被吞没（news_subscription_service 是停止后台循环策略，此处为同步调用路径需上抛）.
             raise
@@ -1166,51 +1197,61 @@ class ReviewManager:
                 raise
             # Non-blocking: return empty context on error
 
+        total_val = _num(stats.get("total")) if isinstance(stats, dict) else None
+        sufficient = total_val is not None and int(total_val) >= REVIEW_MIN_SAMPLE
+        sample_ids = [s["id"] for s in (*wins, *losses) if s["id"] is not None]
+        meta = {
+            "enabled": True,
+            "sufficient": sufficient,
+            "injected": bool(sample_ids),
+            "total": int(total_val) if total_val is not None else None,
+            "sample_ids": sample_ids,
+            "as_of": as_of.isoformat() if as_of is not None else None,
+            "strategy_name": strategy_name,
+        }
+
         # Build XML
         xml = "<history_context>\n"
 
         # D4-M3 偏差二/三：附总体统计 + 样本量充足性声明。
         # 仅统计口径与提示语对模型可见，不改变 top WIN/LOSS 样本本身。
-        if stats is not None and stats["total"] > 0:
+        if total_val is not None and total_val > 0:
+            assert stats is not None  # total_val 仅由 dict 形态的 stats 派生，此处必然非 None
             # 胜率 = WIN/(WIN+LOSS)，DRAW 不计入分母（与 get_strategy_review_stats 消费端口径一致）。
             labeled = stats["win_cnt"] + stats["loss_cnt"]
             win_rate = stats["win_cnt"] / labeled if labeled else None
             median_str = f"{float(stats['alpha_median']):+.1f}" if stats["alpha_median"] is not None else "N/A"
             win_rate_str = f"{win_rate * 100:.1f}%" if win_rate is not None else "N/A"
-            enough = stats["total"] >= (limit or 3) * 4
             xml += f"  {I18n.get('review_ctx_stats', total=stats['total'], median=median_str, win_rate=win_rate_str)}\n"
-            if not enough:
+            if not sufficient:
+                # 样本量不足：只注入总体统计，不注入尾部样本（避免尾部被极端行情主导）。
                 xml += f"  {I18n.get('review_ctx_low_sample')}\n"
+            elif wins or losses:
+                xml += f"  {I18n.get('review_ctx_tail_note')}\n"
 
         if wins:
             xml += f"  [{I18n.get('review_ctx_positive')}]\n"
             for w in wins:
-                alpha_str = f"{w['alpha']:+.1f}"
-                pct_str = f"{w['pct']:+.1f}"
-                reason = w["reason"] or I18n.get("review_ctx_no_reason")
                 benchmark = w["benchmark"] or I18n.get("review_ctx_benchmark_na")
                 xml += (
                     f"  - [{benchmark}] "
-                    f"{I18n.get('review_ctx_win_detail', code=w['code'], name=w['name'], alpha=alpha_str, pct=pct_str, reason=reason)}\n"
+                    f"{I18n.get('review_ctx_win_detail', code=w['code'], name=w['name'], industry=w['industry'], pe=w['pe'], pct=w['pct'], index=w['index'], alpha=w['alpha'])}\n"
                 )
 
         if losses:
             xml += f"  [{I18n.get('review_ctx_negative')}]\n"
             for loss in losses:
-                alpha_str = f"{loss['alpha']:+.1f}"
-                pct_str = f"{loss['pct']:+.1f}"
-                reason = loss["reason"] or I18n.get("review_ctx_no_reason")
                 benchmark = loss["benchmark"] or I18n.get("review_ctx_benchmark_na")
                 xml += (
                     f"  - [{benchmark}] "
-                    f"{I18n.get('review_ctx_loss_detail', code=loss['code'], name=loss['name'], alpha=alpha_str, pct=pct_str, reason=reason)}\n"
+                    f"{I18n.get('review_ctx_loss_detail', code=loss['code'], name=loss['name'], industry=loss['industry'], pe=loss['pe'], pct=loss['pct'], index=loss['index'], alpha=loss['alpha'])}\n"
                 )
 
         if not wins and not losses:
             xml += f"  {I18n.get('review_ctx_none')}\n"
 
         xml += "</history_context>"
-        return xml
+        return xml, meta
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _batch_update_results(self, updates: list[dict], *, guard_t1: bool = False):
@@ -1709,6 +1750,19 @@ class ReviewManager:
 
         # CRITICAL-02: 执行期 warnings 落库一次（同一 run 全体行共享），每行归因逐行取。
         exec_warnings_value = serialize_exec_warnings(exec_warnings)
+
+        # D4-M3 可追溯：若结果 df 携带本批次学习上下文元数据列（``learning_context_meta``，
+        # 由 AIStrategyMixin.run_ai_analysis 按批次附加；或 stock_analysis 直接分析路径逐行附加），
+        # 合并进 params_snapshot，使「本次注入了哪些样本 + 学习开关状态」随结果落库、可事后归因。
+        # 缺列 / 全为缺失值时不动 params_snapshot（不伪造记录）。
+        learning_meta: dict | None = None
+        if "learning_context_meta" in df.columns:
+            non_null_meta = df["learning_context_meta"].dropna()
+            if not non_null_meta.empty and isinstance(non_null_meta.iloc[0], dict):
+                learning_meta = dict(non_null_meta.iloc[0])
+        if learning_meta is not None:
+            base_params = params_snapshot_value if isinstance(params_snapshot_value, dict) else {}
+            params_snapshot_value = {**base_params, "learning_context": learning_meta}
 
         # Helpers to safely extract fields
         def _f(row_data: typing.Any, key: typing.Any, default: typing.Any = None):

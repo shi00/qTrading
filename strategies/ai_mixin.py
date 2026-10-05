@@ -558,6 +558,8 @@ class AIStrategyMixin:
         # --- Fetch Global Context ONCE ---
         # --- Pre-fetch Learning Context ONCE for the entire batch ---
         history_context = ""
+        # D4-M3 可追溯：本批次注入的学习样本元数据（样本 ID / 学习开关状态），随结果落库。
+        learning_meta: dict | None = None
         if self.should_include_learning_context():
             try:
                 from data.persistence.review_manager import ReviewManager
@@ -565,7 +567,7 @@ class AIStrategyMixin:
                 rm = ReviewManager()
                 as_of = self.compute_learning_as_of(context.get("trade_date"), context.get("is_backtest", False))
                 # D4-M3: 传入 name_key 只取同策略 few-shot 样本，避免跨策略污染。
-                history_context = await rm.get_learning_context(
+                history_context, learning_meta = await rm.get_learning_context_with_meta(
                     as_of=as_of,
                     strategy_name=getattr(self, "name_key", None),
                 )
@@ -576,6 +578,9 @@ class AIStrategyMixin:
                     "llm",
                     "[AIStrategyMixin] Failed to pre-fetch learning context: %s: %s",
                 )
+        else:
+            # 学习开关关闭：仍记录开关状态，使「开启 vs 关闭学习」的效果差异可归因。
+            learning_meta = {"enabled": False, "injected": False, "sample_ids": []}
 
         global_context = ""
         if self.should_include_global_context():
@@ -1075,6 +1080,15 @@ class AIStrategyMixin:
 
         result_df = pd.DataFrame(final_rows)
 
+        # D4-M3 可追溯：把本批次学习上下文元数据（样本 ID / 学习开关状态）附为批次级列，
+        # 由 ReviewManager.save_results 合并进 params_snapshot。UI 表格经 _HIDDEN_COLS 隐藏该列。
+        if learning_meta is not None:
+            result_df["learning_context_meta"] = pd.Series(
+                [learning_meta] * len(result_df),
+                index=result_df.index,
+                dtype=object,
+            )
+
         # Log partial analysis: if some stocks were skipped due to errors,
         # record it in logs so downstream consumers (UI, CSV, DB) are not polluted.
         error_count = total_tasks - len(final_rows)
@@ -1572,6 +1586,9 @@ class AIStrategyMixin:
         row_dict["thinking"] = str(thinking_raw) if thinking_raw else ""
         # AI-02 / MINOR-01: 缺失或越界一律 None（R21），不钳位、不取整截断；已在函数上方归一化。
         row_dict["confidence"] = round(float(confidence), 1) if confidence is not None else None
+        # D4-M3 可追溯：直接分析路径（stock_analysis 自取学习上下文）逐行携带注入元数据。
+        if isinstance(res, dict) and "learning_context_meta" in res:
+            row_dict["learning_context_meta"] = res["learning_context_meta"]
         return row_dict
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
