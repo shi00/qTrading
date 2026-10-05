@@ -615,7 +615,7 @@ class TestAIServiceErrorSanitization:
             with patch("services.ai_service.DataSanitizer") as mock_sanitizer:
                 mock_sanitizer.sanitize_error.side_effect = lambda e: "<SANITIZED>"
                 with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
-                    mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
+                    mock_rm.return_value.get_learning_context_with_meta = AsyncMock(return_value=("", {}))
                     result = await svc.analyze_stock(
                         stock_info={"ts_code": "000001.SZ", "name": "test"},
                         tech_info={},
@@ -683,7 +683,7 @@ class TestAIServiceErrorSanitization:
             with patch("services.ai_service.DataSanitizer") as mock_sanitizer:
                 mock_sanitizer.sanitize_error.side_effect = lambda e: "<SANITIZED>"
                 with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
-                    mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
+                    mock_rm.return_value.get_learning_context_with_meta = AsyncMock(return_value=("", {}))
                     result = await svc.analyze_stock(
                         stock_info={"ts_code": "000001.SZ", "name": "test"},
                         tech_info={},
@@ -723,7 +723,7 @@ class TestAIServiceErrorSanitization:
             mock_cfg.get_setting.return_value = False
             mock_cfg.get_ai_provider.return_value = "cloud"
             with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
-                mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
+                mock_rm.return_value.get_learning_context_with_meta = AsyncMock(return_value=("", {}))
                 result = await svc.analyze_stock(
                     stock_info={"ts_code": "000001.SZ", "name": "test"},
                     tech_info={},
@@ -761,7 +761,7 @@ class TestExcInfoDowngrade:
             mock_cfg.get_setting.return_value = False
             mock_cfg.get_ai_provider.return_value = "cloud"
             with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
-                mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
+                mock_rm.return_value.get_learning_context_with_meta = AsyncMock(return_value=("", {}))
                 with caplog.at_level(logging.ERROR):
                     await svc.analyze_stock(
                         stock_info={"ts_code": "000001.SZ", "name": "test"},

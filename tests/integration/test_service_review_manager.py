@@ -346,30 +346,44 @@ class TestGetLearningContext(unittest.TestCase):
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.ConfigHandler")
     def test_get_learning_context_with_data(self, mock_config, mock_api, mock_cache):
-        """有历史数据"""
+        """有历史数据（D4-M3：样本仅含事后可观察事实，不注入 ai_reason，收益取 T+5 窗口）"""
         mock_wins = pd.DataFrame(
             {
+                "id": [1],
                 "ts_code": ["000001.SZ"],
                 "name": ["平安银行"],
+                "industry": ["银行"],
+                "pe_ttm": [8.5],
                 "alpha": [4.2],
-                "t1_pct": [5.5],
+                "t5_pct": [6.0],
+                "index_pct": [1.8],
                 "ai_score": [85],
+                "benchmark_code": ["000300.SH"],
+                # 即使 DAO 意外返回 ai_reason，也不得注入 few-shot（D4-M3）
                 "ai_reason": ["技术突破"],
             }
         )
 
         mock_losses = pd.DataFrame(
             {
+                "id": [2],
                 "ts_code": ["000002.SZ"],
                 "name": ["万科A"],
+                "industry": ["房地产"],
+                "pe_ttm": [12.3],
                 "alpha": [-2.1],
-                "t1_pct": [-3.2],
+                "t5_pct": [-4.0],
+                "index_pct": [-1.9],
                 "ai_score": [70],
+                "benchmark_code": ["000300.SH"],
                 "ai_reason": ["市场下跌"],
             }
         )
 
         mock_screener_dao = MagicMock()
+        mock_screener_dao.get_learning_context_stats = AsyncMock(
+            return_value={"total": 40, "win_cnt": 12, "loss_cnt": 10, "alpha_mean": 0.6, "alpha_median": 0.4}
+        )
         mock_screener_dao.get_learning_context = AsyncMock(side_effect=[mock_wins, mock_losses])
 
         mock_cache_instance = MagicMock()
@@ -383,8 +397,11 @@ class TestGetLearningContext(unittest.TestCase):
             self.assertIn("history_context", result)
             self.assertIn("复盘参考 - 正向样本", result)
             self.assertIn("复盘参考 - 负向样本", result)
-            self.assertIn("Alpha(相对基准超额) +4.2%", result)
-            self.assertIn("Alpha(相对基准超额) -2.1%", result)
+            self.assertIn("T+5 超额 Alpha +4.2%", result)
+            self.assertIn("T+5 超额 Alpha -2.1%", result)
+            # D4-M3：T0 事前理由不得回灌
+            self.assertNotIn("技术突破", result)
+            self.assertNotIn("市场下跌", result)
             self.assertNotIn("Learn from these", result)
             self.assertNotIn("Do NOT repeat", result)
 
@@ -396,6 +413,7 @@ class TestGetLearningContext(unittest.TestCase):
     def test_get_learning_context_empty(self, mock_config, mock_api, mock_cache):
         """无历史数据"""
         mock_screener_dao = MagicMock()
+        mock_screener_dao.get_learning_context_stats = AsyncMock(return_value=None)
         mock_screener_dao.get_learning_context = AsyncMock(return_value=pd.DataFrame())
 
         mock_cache_instance = MagicMock()
@@ -416,6 +434,7 @@ class TestGetLearningContext(unittest.TestCase):
     def test_get_learning_context_error(self, mock_config, mock_api, mock_cache):
         """错误返回空上下文"""
         mock_screener_dao = MagicMock()
+        mock_screener_dao.get_learning_context_stats = AsyncMock(side_effect=Exception("DB error"))
         mock_screener_dao.get_learning_context = AsyncMock(side_effect=Exception("DB error"))
 
         mock_cache_instance = MagicMock()

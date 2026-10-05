@@ -401,11 +401,11 @@ class TestBacktestIntegration:
             patch("services.ai_service.AIService.is_cloud_available", return_value=True),
             patch("services.ai_service.AIService.analyze_stock", new_callable=AsyncMock) as mock_analyze,
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                "data.persistence.review_manager.ReviewManager.get_learning_context_with_meta",
                 new_callable=AsyncMock,
             ) as mock_lc,
         ):
-            mock_lc.return_value = "<learning>test</learning>"
+            mock_lc.return_value = ("<learning>test</learning>", {})
             mock_analyze.return_value = {"score": 70, "summary": "test"}
 
             candidates_df = pd.DataFrame([{"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}])
@@ -438,7 +438,7 @@ class TestBacktestIntegration:
                 new_callable=AsyncMock,
             ) as mock_get_news,
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                "data.persistence.review_manager.ReviewManager.get_learning_context_with_meta",
                 new_callable=AsyncMock,
             ),
         ):
