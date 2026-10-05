@@ -268,6 +268,11 @@ class ScreeningHistory(Base):
     alpha = Column(Numeric(12, 4), info={"computed": True})
     ai_score = Column(Numeric(12, 4))
     ai_reason = Column(String)
+    # MAJOR-01（输出契约统一）：模型结论枚举（strong_buy/watchlist/uncertain/reject）正交落库，
+    # 与 ai_score 并存使「模型明确否决」等定性结论在历史回看时不丢失。NULL 表示未记录结论
+    # （failed/未打分或存量历史行），区别于业务上合法的具体标签（R21）。非 computed：由
+    # save_screening_results 随 AI 分析结果写入。
+    conclusion_label = Column(String(20))
     prediction_result = Column(String, info={"computed": True})
     review_status = Column(String, server_default="PENDING")
     params_snapshot = Column(JSONB)

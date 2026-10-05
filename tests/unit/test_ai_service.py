@@ -635,6 +635,85 @@ class TestValidateAiAnalysisResponseContinued:
         result = validate_ai_analysis_response({"score": 75.5, "recommendation": "hold"})
         assert result["score"] == 75.5
 
+    # --- MAJOR-01: conclusion_label 权威字段 + recommendation 兼容别名 ---
+
+    def test_conclusion_label_kept_and_lowercased(self):
+        result = validate_ai_analysis_response({"score": 80, "conclusion_label": "STRONG_BUY"})
+        assert result["conclusion_label"] == "strong_buy"
+
+    def test_invalid_conclusion_label_set_none(self):
+        """R21: 非枚举结论置 None，不伪装成业务标签。"""
+        result = validate_ai_analysis_response({"score": 80, "conclusion_label": "maybe"})
+        assert result["conclusion_label"] is None
+
+    def test_conclusion_label_authoritative_over_recommendation(self):
+        """conclusion_label 为准，即使与 recommendation 冲突。"""
+        result = validate_ai_analysis_response({"score": 0, "conclusion_label": "reject", "recommendation": "buy"})
+        assert result["conclusion_label"] == "reject"
+
+    def test_recommendation_alias_mapped_when_label_absent(self):
+        result = validate_ai_analysis_response({"score": 75, "recommendation": "buy"})
+        assert result["conclusion_label"] == "strong_buy"
+
+    def test_recommendation_alias_mapped_sell_to_reject(self):
+        result = validate_ai_analysis_response({"score": 10, "recommendation": "strong_sell"})
+        assert result["conclusion_label"] == "reject"
+
+    def test_conclusion_label_none_when_both_absent(self):
+        """R21: 模型未给结论时置 None，不填业务上合法的具体标签。"""
+        result = validate_ai_analysis_response({"score": 50})
+        assert result["conclusion_label"] is None
+
+    def test_conclusion_label_none_when_recommendation_invalid(self):
+        result = validate_ai_analysis_response({"score": 50, "recommendation": "unknown"})
+        assert result["conclusion_label"] is None
+
+    # --- MINOR-01: 置信度归一化（0~1 概率口径 → 百分数；越界不钳位置 None） ---
+
+    def test_confidence_probability_scale_converted_to_percent(self):
+        """MINOR-01: 0~1 概率口径按比例换算为百分数（0.85 → 85），不再 int() 截断为 0。"""
+        result = validate_ai_analysis_response({"score": 80, "confidence": 0.85})
+        assert result["confidence"] == 85
+
+    def test_confidence_percent_scale_kept(self):
+        result = validate_ai_analysis_response({"score": 80, "confidence": 80})
+        assert result["confidence"] == 80
+
+    def test_confidence_boundary_one_not_scaled(self):
+        """边界 1 按提示词契约（1-100）解读为 1%，不换算为 100——避免把最小置信度放大为满置信度。"""
+        result = validate_ai_analysis_response({"score": 80, "confidence": 1})
+        assert result["confidence"] == 1
+
+    def test_confidence_zero_kept(self):
+        """0 是合法置信度（0%），非缺失，保留 0 而非置 None。"""
+        result = validate_ai_analysis_response({"score": 80, "confidence": 0})
+        assert result["confidence"] == 0
+
+    def test_confidence_max_kept(self):
+        result = validate_ai_analysis_response({"score": 80, "confidence": 100})
+        assert result["confidence"] == 100
+
+    def test_confidence_out_of_range_high_is_none(self):
+        """R21/MINOR-01: >100 不钳位为 100，置 None（不把违规输出变成满置信度最强信号）。"""
+        result = validate_ai_analysis_response({"score": 80, "confidence": 500})
+        assert result["confidence"] is None
+
+    def test_confidence_out_of_range_low_is_none(self):
+        result = validate_ai_analysis_response({"score": 80, "confidence": -3})
+        assert result["confidence"] is None
+
+    def test_confidence_invalid_type_is_none(self):
+        result = validate_ai_analysis_response({"score": 80, "confidence": "high"})
+        assert result["confidence"] is None
+
+    def test_confidence_none_kept_none(self):
+        result = validate_ai_analysis_response({"score": 80, "confidence": None})
+        assert result["confidence"] is None
+
+    def test_confidence_missing_field_untouched(self):
+        result = validate_ai_analysis_response({"score": 80})
+        assert "confidence" not in result
+
 
 class TestValidateAiAnalysisResponseFreeText:
     """SEC-002: free-text field length limit and control-char cleaning."""

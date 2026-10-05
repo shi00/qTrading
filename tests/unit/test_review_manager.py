@@ -2541,6 +2541,29 @@ class TestReviewManagerSaveResultsAiStatusFilter:
         records = mock_cache.screener_dao.save_screening_results.call_args[0][0]
         assert [r["ts_code"] for r in records] == ["S0", "S1"]
         assert all(r["ai_score"] is None for r in records)
+        # MAJOR-01: 无 conclusion_label 列（老调用方）时落库为 None（R21 缺失用 None）
+        assert all(r["conclusion_label"] is None for r in records)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_conclusion_label_persisted(self, mock_cm, mock_tc):
+        """MAJOR-01: analyzed 行的 conclusion_label 随记录落库；缺失值落 None（R21）。"""
+        rm, mock_cache = self._make_rm(mock_cm)
+        df = pd.DataFrame(
+            {
+                "ts_code": ["S0", "S1"],
+                "name": ["A", "B"],
+                "close": [10.0, 11.0],
+                "trade_date": ["20240615", "20240615"],
+                "ai_status": ["analyzed", "analyzed"],
+                "ai_score": [80, 70],
+                "conclusion_label": ["strong_buy", None],
+            }
+        )
+        await rm.save_results("test_strategy", df, trade_date="20240615")
+        records = mock_cache.screener_dao.save_screening_results.call_args[0][0]
+        assert [r["conclusion_label"] for r in records] == ["strong_buy", None]
 
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")

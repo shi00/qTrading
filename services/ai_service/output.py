@@ -8,6 +8,12 @@ from __future__ import annotations
 import logging
 import re
 
+from core.prompt_base import (
+    CONCLUSION_LABEL_FIELD,
+    CONCLUSION_LABELS,
+    RECOMMENDATION_TO_CONCLUSION_LABEL,
+)
+
 logger = logging.getLogger(__name__)
 
 VALID_RECOMMENDATIONS = {"buy", "hold", "sell", "strong_buy", "strong_sell", "neutral"}
@@ -69,6 +75,26 @@ def validate_ai_analysis_response(response: dict) -> dict:
     # AI-02: 模型能力信息——缺失 confidence 记 debug 日志，供排查某模型是否持续不返回置信度。
     if response.get("confidence") is None:
         logger.debug("[AIService] Output validation: response missing 'confidence' field (%s)", response.get("score"))
+    else:
+        # AI-02 / MINOR-01（R21）：置信度归一化的唯一事实源。提示词约定为 1-100 百分数，但模型
+        # 可能按 0~1 概率口径返回；对严格小于 1 的小数按比例换算为百分数（0.85 → 85）。边界值
+        # 1 不换算：它在提示词契约下是"最小置信度"，换算成 100 会把合规的最小值放大为满置信度，
+        # 与 R21"不把违规输出变成最强信号"的取向相悖。越界（<0 或 >100，或换算后越界）或不可解析
+        # 视为模型失控信号，置 None 交由下游按"未给出置信度"处理，**不钳位**（与 score 同语义）。
+        raw_confidence = response.get("confidence")
+        try:
+            confidence = float(raw_confidence)
+        except (ValueError, TypeError):
+            logger.warning("[AIService] Output validation: invalid confidence type: %s", raw_confidence)
+            response["confidence"] = None
+        else:
+            if 0 <= confidence < 1:
+                confidence *= 100
+            if 0 <= confidence <= 100:
+                response["confidence"] = round(confidence, 1)
+            else:
+                logger.warning("[AIService] Output validation: confidence out of range: %s", raw_confidence)
+                response["confidence"] = None
 
     recommendation = response.get("recommendation")
     if recommendation is not None:
@@ -80,6 +106,21 @@ def validate_ai_analysis_response(response: dict) -> dict:
             response["recommendation"] = None
         else:
             response["recommendation"] = rec_lower
+
+    # MAJOR-01（输出契约统一）：conclusion_label 为权威结论字段，recommendation 仅作读兼容别名。
+    # 有 conclusion_label 则以它为准（非法枚举置 None，R21：不把失控输出伪装成业务结论）；
+    # 缺省/为 None 时从已规范化的 recommendation 别名映射兜底；两者皆无则显式置 None。
+    raw_label = response.get(CONCLUSION_LABEL_FIELD)
+    if raw_label is None:
+        rec = response.get("recommendation")
+        response[CONCLUSION_LABEL_FIELD] = RECOMMENDATION_TO_CONCLUSION_LABEL.get(rec) if isinstance(rec, str) else None
+    else:
+        label_lower = str(raw_label).lower().strip()
+        if label_lower in CONCLUSION_LABELS:
+            response[CONCLUSION_LABEL_FIELD] = label_lower
+        else:
+            logger.warning("[AIService] Output validation: unexpected conclusion_label: %s", raw_label)
+            response[CONCLUSION_LABEL_FIELD] = None
 
     # SEC-002: sanitize free-text fields (length limit + control-char cleaning)
     # UX-2.2: 读一次配置避免每字段重复读

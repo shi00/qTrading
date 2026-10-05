@@ -1752,6 +1752,11 @@ class ReviewManager:
             if pd.isnull(thinking):  # type: ignore[union-attr]
                 thinking = ""
 
+            # MAJOR-01（输出契约统一）：模型结论枚举随结果落库（写入上游已由
+            # validate_ai_analysis_response 规范化为合法枚举或 None）。缺失/NaN 用 None
+            # 哨兵（R21），不填业务上合法的具体标签。
+            conclusion_label = _s(row, "conclusion_label", None)
+
             records.append(
                 {
                     "run_id": run_id,
@@ -1779,6 +1784,7 @@ class ReviewManager:
                     "ai_score": ai_score,
                     "ai_reason": str(ai_reason),
                     "thinking": str(thinking),
+                    "conclusion_label": conclusion_label,
                     "params_snapshot": params_snapshot_value,
                     "exec_warnings": exec_warnings_value,
                     "filter_attribution": _parse_filter_attribution(row.get(_ATTRIBUTION_COLUMN)),

@@ -1470,6 +1470,10 @@ class AIStrategyMixin:
                                 不可用），ai_score=None，ai_reason 承载能力边界说明
                                 （R21：不把"能力边界不支持"伪装成"失败/无结果"）
 
+        MAJOR-01（输出契约统一）：额外写入 ``conclusion_label``（模型结论枚举，由
+        ``validate_ai_analysis_response`` 规范化）。失败/未打分路径置 None（R21），正常
+        路径透传模型结论。该字段正交于 ai_status（三态仍由 score 决定），不改变分区语义。
+
         返回始终为 dict（保留原始行全部字段），不再返回 None。
         """
         row_dict = dict(row_data)
@@ -1481,6 +1485,7 @@ class AIStrategyMixin:
             row_dict["ai_reason"] = error_reason or ""
             row_dict["thinking"] = ""
             row_dict["confidence"] = None
+            row_dict["conclusion_label"] = None
             return row_dict
 
         # MAJOR-04（review09-24 维度04）：能力边界「不支持」路径（如仅本地模式下个体
@@ -1505,12 +1510,18 @@ class AIStrategyMixin:
             row_dict["confidence"] = None
             row_dict["ai_reason"] = str(res.get("error") or error_reason or "")
             row_dict["thinking"] = ""
+            row_dict["conclusion_label"] = None
             return row_dict
 
         score_val = res.get("score", 0)  # type: ignore[union-attr]
         summary_raw = res.get("summary", "")  # type: ignore[union-attr]
         summary = str(summary_raw) if summary_raw else ""
         confidence = res.get("confidence")  # type: ignore[union-attr]
+        # AI-02 / MINOR-01（R21 纵深防御）：越界或非数值置信度置 None，不钳位——正常链路已由
+        # validate_ai_analysis_response 归一化（0~1 概率口径按比例换算为百分数，越界置 None）。
+        # 此处兜底保证绕过校验的调用同样不把"模型失控输出"钳位成满置信度，与 score 的处理一致。
+        if not (isinstance(confidence, (int, float)) and 0 <= float(confidence) <= 100):
+            confidence = None
         uncertainty = res.get("uncertainty_factors")  # type: ignore[union-attr]
 
         if confidence is not None:
@@ -1539,6 +1550,7 @@ class AIStrategyMixin:
             row_dict["ai_reason"] = summary or I18n.get("ai_card_no_score")
             row_dict["thinking"] = str(res.get("thinking", "") or "")  # type: ignore[union-attr]
             row_dict["confidence"] = None
+            row_dict["conclusion_label"] = None
             return row_dict
         score_float = float(score_val)
         if not (0 <= score_float <= 100):
@@ -1549,16 +1561,17 @@ class AIStrategyMixin:
             row_dict["ai_reason"] = summary or I18n.get("ai_card_no_score")
             row_dict["thinking"] = str(res.get("thinking", "") or "")  # type: ignore[union-attr]
             row_dict["confidence"] = None
+            row_dict["conclusion_label"] = None
             return row_dict
         score_int = round(score_float, 1)
         row_dict["ai_status"] = "rejected" if score_val == 0 else "analyzed"
         row_dict["ai_score"] = score_int
+        row_dict["conclusion_label"] = res.get("conclusion_label")  # type: ignore[union-attr]
         row_dict["ai_reason"] = summary
         thinking_raw = res.get("thinking", "")  # type: ignore[union-attr]
         row_dict["thinking"] = str(thinking_raw) if thinking_raw else ""
-        row_dict["confidence"] = (
-            min(100, max(1, int(confidence))) if isinstance(confidence, (int, float)) else None
-        )  # AI-02: 缺失不伪造为 50，保留 None
+        # AI-02 / MINOR-01: 缺失或越界一律 None（R21），不钳位、不取整截断；已在函数上方归一化。
+        row_dict["confidence"] = round(float(confidence), 1) if confidence is not None else None
         return row_dict
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)

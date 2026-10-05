@@ -133,6 +133,26 @@ class TestFormatCellValue:
         result = _format_cell_value("prediction_result", "UNKNOWN")
         assert result == "-"
 
+    # --- MAJOR-01: 模型结论枚举呈现（含「模型否决」）---
+
+    def test_conclusion_label_reject_shows_model_rejected(self):
+        with patch("ui.views.screener_view.I18n.get", return_value="模型否决") as mock_get:
+            result = _format_cell_value("conclusion_label", "reject")
+            assert result == "模型否决"
+            mock_get.assert_called_with("ai_conclusion_reject")
+
+    def test_conclusion_label_strong_buy(self):
+        with patch("ui.views.screener_view.I18n.get", return_value="强烈看多") as mock_get:
+            result = _format_cell_value("conclusion_label", "strong_buy")
+            assert result == "强烈看多"
+            mock_get.assert_called_with("ai_conclusion_strong_buy")
+
+    def test_conclusion_label_none_returns_dash(self):
+        assert _format_cell_value("conclusion_label", None) == "-"
+
+    def test_conclusion_label_unknown_returns_dash(self):
+        assert _format_cell_value("conclusion_label", "bogus") == "-"
+
     def test_t1_pct_positive(self):
         result = _format_cell_value("t1_pct", 1.23)
         assert result == "+1.23%"

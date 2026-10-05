@@ -133,6 +133,8 @@ COMMON_COLUMNS = {
     "ai_reason": "col_ai_reason",
     "thinking": "col_thinking",
     "confidence": "col_confidence",
+    # MAJOR-01：模型结论枚举列（screener 结果表展示，含「模型否决」）。
+    "conclusion_label": "col_conclusion_label",
     # Screening & Review
     "strategy_name": "col_strategy_name",
     "prediction_result": "col_prediction_result",

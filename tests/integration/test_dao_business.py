@@ -819,6 +819,7 @@ class TestScreenerDao:
             "netprofit_yoy",
             "ai_score",
             "ai_reason",
+            "conclusion_label",
             "review_status",
             "params_snapshot",
             "exec_warnings",
@@ -852,6 +853,8 @@ class TestScreenerDao:
                 8.0,
                 85,
                 "AI推荐理由",
+                # MAJOR-01: 未提供结论标签 → SQL NULL（R21：缺失不伪装）
+                None,
                 None,
                 None,
                 # CRITICAL-02: 未提供执行上下文 → 两列落库 SQL NULL（R21：缺失不伪装）
