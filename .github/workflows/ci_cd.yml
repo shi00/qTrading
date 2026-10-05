@@ -1711,7 +1711,9 @@ jobs:
   flaky-detection:
     name: Flaky Test Detection (advisory)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 默认 10 轮完整 tests/unit/（约 1.5 万用例）实测需 23~33 分钟，
+    # 30 分钟预算在常规 runner 上会中途超时被取消，放宽至 45 分钟留足余量。
+    timeout-minutes: 45
     permissions:
       contents: read
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
