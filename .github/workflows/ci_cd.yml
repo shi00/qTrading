@@ -256,6 +256,11 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: true
           verbose: true
+          # 默认路径从 cli.codecov.io 下载 CLI 二进制并做 GPG/SHA256 校验；
+          # 该主机近期对 runner 返回 TLS 握手失败（curl 35 / sslv3 alert handshake failure），
+          # 连带签名下载失败使校验中断并令步骤退出 1（run 37252059492 / 37252417907）。
+          # use_pypi 改为经 PyPI 安装 codecov-cli，完全绕开 cli.codecov.io 及其完整性校验。
+          use_pypi: true
 
       - name: Upload test reports
         if: always()
