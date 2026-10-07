@@ -1527,7 +1527,6 @@ class AIStrategyMixin:
             row_dict["conclusion_label"] = None
             return row_dict
 
-        score_val = res.get("score", 0)  # type: ignore[union-attr]
         summary_raw = res.get("summary", "")  # type: ignore[union-attr]
         summary = str(summary_raw) if summary_raw else ""
         confidence = res.get("confidence")  # type: ignore[union-attr]

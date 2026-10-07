@@ -107,15 +107,17 @@ def _infer_unsaved_status_key(result_df: pd.DataFrame | None) -> str | None:
     """CRITICAL-03: ``save_results`` 落库 0 条时推断「未保存」提示的 i18n key。
 
     ``ReviewManager.save_results`` 仅持久化 ``ts_code`` 为真且
-    ``ai_status ∈ {None, "analyzed"}`` 的行（D4-C1）；因此结果表非空却落库 0 条，
-    意味着没有任何行满足该条件。本函数只在**可由 ``ai_status`` 全体一致直接推出**
-    时才返回定向 key，避免把未知原因误归因（R21）：
+    ``ai_status ∈ {None, "analyzed", "rejected"}`` 的行（D4-C1 / MINOR-03：AI 明确
+    否决的 rejected 行照常落库参与复盘）；因此结果表非空却落库 0 条，意味着没有任何
+    行满足该条件。本函数只在**可由 ``ai_status`` 全体一致直接推出**时才返回定向 key，
+    避免把未知原因误归因（R21）：
 
     - ``ts_code`` 列缺失，或该列真值判定后无一为真 → 通用 key（落库被跳过与 AI
       状态无关，归因到 AI 即误报）；
     - 缺 ``ai_status`` 列，或列内含缺失值 → 通用 key；
-    - 去重后仅剩 ``{"rejected"}`` → ``None``（业务正常：AI 将候选全部判为排除，
-      该状态按设计本就不入库，非异常）；
+    - 去重后仅剩 ``{"rejected"}`` → ``None``（MINOR-03 后 rejected 行照常入库，
+      生产调用方仅在 ``saved == 0`` 时调用本函数，而该情形不会与「全 rejected 且
+      ``ts_code`` 有真值」并存；此分支为模块级函数的防御性兜底，保留中立语义不告警）；
     - 去重后仅剩 ``{"budget_exceeded"}`` / ``{"policy_not_acknowledged"}`` /
       ``{"failed"}`` → 对应定向 key；
     - 其余（含 ``budget_unpriced_prompt``、混合状态、``{"analyzed"}`` 等）→ 通用 key。
@@ -810,8 +812,9 @@ class AIStreamMixin:
                     elif saved == 0:
                         # CRITICAL-03: save_results 落库 0 条必须视为非成功 (D4-C1)，
                         # 不得谎报「已保存」。仅在可由 ai_status 全体一致直接推出原因时
-                        # 定向提示 (warning)；归因为「业务正常」(AI 全部 reject) 时改用
-                        # 中立文案且不告警 (R21：不臆造未知原因)。
+                        # 定向提示 (warning)；归因为「业务正常」时改用中立文案且不告警
+                        # (R21：不臆造未知原因。MINOR-03 后 rejected 行照常入库，该归因
+                        # 分支为防御性兜底，正常链路不会命中)。
                         unsaved_key = _infer_unsaved_status_key(result_df)
                         self._set_state(
                             loading=False,
@@ -824,10 +827,11 @@ class AIStreamMixin:
                             ai_usage_summary=ai_usage_summary,
                         )
                     else:
-                        # 部分落库：rejected (AI 判 0 分) / 预算耗尽 / 分析失败等行按设计不入库，
-                        # 故 saved < count 属预期；如实同时给出总数与实际落库数即可让用户看到
-                        # 缺口 (finding 修改方案 3)，此处不叠加 warning —— 整批 failed 占比
-                        # > 30% 另有 _build_ai_failed_banner_message 横幅兜底。
+                        # 部分落库：预算耗尽 / 政策未确认 / 分析失败等「未产出结论」的行按设计
+                        # 不入库（MINOR-03 后 rejected 行照常入库），故 saved < count 属预期；
+                        # 如实同时给出总数与实际落库数即可让用户看到缺口 (finding 修改方案 3)，
+                        # 此处不叠加 warning —— 整批 failed 占比 > 30% 另有
+                        # _build_ai_failed_banner_message 横幅兜底。
                         self._set_state(
                             loading=False,
                             status_message=Message(
