@@ -150,6 +150,10 @@ class SyncResult:
     rows_written: int = 0  # D1-4: 实际写入/更新的行数（由各表 saved 累加）
     updated: int = 0
     skipped: int = 0
+    # MAJOR-02: 本次复盘检出「不可成交」（T+1 一字涨停，未计入收益与标签）的记录数。
+    # 由 DataProcessor.run_daily_update 从 ReviewManager 读回透传，供调度器任务结果
+    # 与 UI snack 向用户呈现，避免「复盘条数莫名偏少而无从知晓」。0 = 无可呈现项。
+    review_untradable_count: int = 0
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     status: str = "success"  # success, partial, failed, cancelled
@@ -176,6 +180,7 @@ class SyncResult:
         self.rows_written += other.rows_written
         self.updated += other.updated
         self.skipped += other.skipped
+        self.review_untradable_count += other.review_untradable_count
         self.errors.extend(other.errors)
         self.warnings.extend(other.warnings)
         self.failed_critical_tables.extend(
@@ -271,6 +276,7 @@ class SyncResult:
             "rows_written": self.rows_written,
             "updated": self.updated,
             "skipped": self.skipped,
+            "review_untradable_count": self.review_untradable_count,
             "errors": self.errors.copy(),
             "warnings": self.warnings.copy(),
             "message": self.message,

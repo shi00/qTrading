@@ -62,6 +62,17 @@ class TestSyncResult:
         assert result.rows_written == 25000
         assert result.added == 0
 
+    def test_review_untradable_count_default_zero(self):
+        """MAJOR-02: 未传入时不可成交计数缺省为 0（无可呈现项）。"""
+        assert SyncResult().review_untradable_count == 0
+
+    def test_merge_review_untradable_count(self):
+        """MAJOR-02: merge() 对 review_untradable_count 累加。"""
+        r1 = SyncResult(review_untradable_count=2)
+        r2 = SyncResult(review_untradable_count=3)
+        r1.merge(r2)
+        assert r1.review_untradable_count == 5
+
     def test_merge_adds_counts(self):
         r1 = SyncResult(added=5, updated=3)
         r2 = SyncResult(added=2, updated=1)
@@ -301,6 +312,11 @@ class TestSyncResultToDict:
         d = SyncResult(days_processed=2, rows_written=9000).to_dict()
         assert d["days_processed"] == 2
         assert d["rows_written"] == 9000
+
+    def test_review_untradable_count_in_dict(self):
+        """MAJOR-02: to_dict 输出不可成交计数（供持久化/日志观测）。"""
+        d = SyncResult(review_untradable_count=4).to_dict()
+        assert d["review_untradable_count"] == 4
 
     def test_returns_copy(self):
         r = SyncResult(errors=["e1"])

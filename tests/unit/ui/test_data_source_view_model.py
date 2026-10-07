@@ -501,6 +501,38 @@ class TestDataSourceViewModelFullDailySync:
         snack_msgs = [s.snack for s in snapshots if s.snack is not None]
         assert any(s.message == Message("snack_sync_permission_skipped_fmt", {"count": 2}) for s in snack_msgs)
 
+    async def test_daily_sync_untradable_count_emits_snack(
+        self, bound_vm, snapshots, mock_processor, mock_task_manager, mock_cache
+    ):
+        """MAJOR-02: review_untradable_count > 0 时发射 snack_review_untradable_fmt (warning)，不覆盖完成 snack。"""
+        mock_processor.run_daily_update = AsyncMock(return_value=SyncResult(added=10, review_untradable_count=3))
+        mock_cache.sync_dao.get_sync_status = AsyncMock(return_value=pd.DataFrame())
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        await factory(task_id="task_123")
+
+        snack_msgs = [s.snack for s in snapshots if s.snack is not None]
+        assert any(
+            s.message == Message("snack_review_untradable_fmt", {"count": 3}) and s.color_name == "warning"
+            for s in snack_msgs
+        )
+        assert any(s.message == Message("snack_full_sync_done_simple") for s in snack_msgs)
+
+    async def test_daily_sync_no_untradable_no_snack(
+        self, bound_vm, snapshots, mock_processor, mock_task_manager, mock_cache
+    ):
+        """MAJOR-02: 不可成交计数为 0 时不发射该 snack。"""
+        mock_processor.run_daily_update = AsyncMock(return_value=SyncResult(added=10, review_untradable_count=0))
+        mock_cache.sync_dao.get_sync_status = AsyncMock(return_value=pd.DataFrame())
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        await factory(task_id="task_123")
+
+        snack_msgs = [s.snack for s in snapshots if s.snack is not None]
+        assert all(s.message != Message("snack_review_untradable_fmt", {"count": 0}) for s in snack_msgs)
+
     async def test_daily_sync_no_skipped_no_extra_snack(
         self, bound_vm, snapshots, mock_processor, mock_task_manager, mock_cache
     ):

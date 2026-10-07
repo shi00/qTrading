@@ -409,6 +409,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             progress_callback(0.8, 1.0, Message("init_sync_ai_review"))
         review_mgr = ReviewManager()
         await review_mgr.run_review()
+        # MAJOR-02: 把本次复盘检出的「不可成交」（T+1 一字涨停）记录数透传到 SyncResult，
+        # 供调度器任务结果与 UI snack 向用户呈现（ReviewManager 实例在此方法内创建，
+        # 计数不经持久化；非 ReviewManager 替身返回非 int 时按 0 处理，避免污染观测）。
+        untradable = getattr(review_mgr, "_untradable_count", 0)
+        sync_result.review_untradable_count = untradable if isinstance(untradable, int) else 0
 
         if progress_callback:
             progress_callback(1.0, 1.0, Message("init_daily_update_done"))

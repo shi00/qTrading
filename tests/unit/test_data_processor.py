@@ -1006,6 +1006,36 @@ class TestDataProcessorRunDailyUpdate:
             assert result.is_complete is True
 
     @pytest.mark.asyncio
+    async def test_run_daily_update_passes_untradable_count(self):
+        """MAJOR-02: run_review 后从 ReviewManager 读回 _untradable_count 透传到 SyncResult。"""
+        dp = _make_dp()
+        dp.init_data = AsyncMock()
+        dp.sync_daily_market_snapshot = AsyncMock(return_value=pd.DataFrame())
+        dp.sync_financial_reports = AsyncMock()
+        with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
+            mock_instance = MagicMock()
+            mock_instance.run_review = AsyncMock()
+            mock_instance._untradable_count = 7
+            mock_rm.return_value = mock_instance
+            result = await dp.run_daily_update()
+            assert result.review_untradable_count == 7
+
+    @pytest.mark.asyncio
+    async def test_run_daily_update_untradable_count_non_int_guarded(self):
+        """MAJOR-02: 替身返回非 int（MagicMock）时按 0 处理，避免污染观测字段。"""
+        dp = _make_dp()
+        dp.init_data = AsyncMock()
+        dp.sync_daily_market_snapshot = AsyncMock(return_value=pd.DataFrame())
+        dp.sync_financial_reports = AsyncMock()
+        with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
+            mock_instance = MagicMock()
+            mock_instance.run_review = AsyncMock()
+            mock_instance._untradable_count = MagicMock()
+            mock_rm.return_value = mock_instance
+            result = await dp.run_daily_update()
+            assert result.review_untradable_count == 0
+
+    @pytest.mark.asyncio
     async def test_run_daily_update_passthrough_sync_result(self):
         """D1-2: sync_daily_market_snapshot(sync_result=sr) 将 sr 透传给策略；不传则仍返回 DataFrame。"""
         dp = _make_dp()
