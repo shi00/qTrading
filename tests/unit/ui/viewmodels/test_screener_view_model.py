@@ -596,7 +596,7 @@ class TestInferUnsavedStatusKey:
         assert _infer_unsaved_status_key(df) == "screener_done_not_saved_failed"
 
     def test_rejected_returns_none(self):
-        """AI 将候选全部判为排除属业务正常（该状态按设计不入库），不得告警。"""
+        """MINOR-03 后 rejected 行照常落库；全 rejected 且 ``saved == 0`` 在正常链路不会并存，返回 ``None`` 属防御性兜底，不得告警。"""
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["rejected"]})
         assert _infer_unsaved_status_key(df) is None
 
@@ -654,7 +654,7 @@ class TestSaveResultsZeroStatus:
 
     @pytest.mark.asyncio
     async def test_rejected_uses_neutral_message_without_warning(self, vm):
-        """AI 全部 reject 属业务正常：中立文案 + success，不告警。"""
+        """全 reject 命中「落库 0 条」分支属防御性兜底（MINOR-03 后 rejected 行照常落库）：中立文案 + success，不告警。"""
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_status": ["rejected"]})
         await _run_strategy_with_result(vm, result_df=df, save_return=0)
 
