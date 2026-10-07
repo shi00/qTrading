@@ -487,6 +487,17 @@ class ReviewManager:
         if updates:
             await self._batch_update_results(updates)
 
+        # MAJOR-02: 聚合计数不可成交（T+1 一字涨停）记录数，向用户/审计可见。
+        # 三通道（T+1 未成交、T+5 回填、过期清理）均累加至 _untradable_count，
+        # 此前仅在 review_backfill job 中呈现；run_review 路径（日更编排内直接调用）
+        # 从未呈现，导致「复盘条数莫名偏少而无从知晓」。此处补聚合 warning。
+        if self._untradable_count:
+            logger.warning(
+                "[Review] %s record(s) marked UNTRADABLE this cycle: T+1 limit-up "
+                "(unbuyable at open), excluded from returns/labels.",
+                self._untradable_count,
+            )
+
         logger.info("[Review] Completed. Updated %s records.", len(updates))
 
     @log_async_operation(operation_name="t5_backfill", threshold_ms=PerfThreshold.DB_BULK_IO)

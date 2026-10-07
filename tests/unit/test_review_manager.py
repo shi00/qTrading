@@ -4716,6 +4716,39 @@ class TestReviewManagerMajor02Tradability:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
+    async def test_run_review_logs_untradable_aggregate(self, mock_cm, mock_tc, caplog):
+        """MAJOR-02: run_review 结尾聚合 warning 呈现不可成交计数（run_review 路径观测性补缺）。"""
+        rm, _ = self._make_rm(
+            mock_cm,
+            pending=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610", "ai_score": 80, "ai_reason": "t"}],
+            quotes=self._quotes("000001.SZ", open_t1=10.0),
+            up_limits=self._stk_limit("000001.SZ", "20240611", up_limit=10.0),
+        )
+        with caplog.at_level("WARNING", logger="data.persistence.review_manager"):
+            await rm.run_review()
+        assert rm._untradable_count == 1
+        assert "1 record(s) marked UNTRADABLE this cycle" in caplog.text
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_run_review_no_untradable_no_aggregate_warning(self, mock_cm, mock_tc, caplog):
+        """MAJOR-02: 无不可成交记录时不产生该聚合 warning（避免噪音）。"""
+        rm, _ = self._make_rm(
+            mock_cm,
+            pending=[{"id": 1, "ts_code": "000001.SZ", "trade_date": "20240610", "ai_score": 80, "ai_reason": "t"}],
+            quotes=self._quotes("000001.SZ", open_t1=10.0, close_t5=10.5),
+            up_limits=self._stk_limit("000001.SZ", "20240611", up_limit=11.0),
+            index_cache=self._index_cache(),
+        )
+        with caplog.at_level("WARNING", logger="data.persistence.review_manager"):
+            await rm.run_review()
+        assert rm._untradable_count == 0
+        assert "UNTRADABLE this cycle" not in caplog.text
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
     async def test_run_review_open_below_limit_still_labels(self, mock_cm, mock_tc):
         """开盘价 < 涨停价（可成交）→ 照常计算并打 WIN 标签，不计入不可成交（守卫不误伤）。"""
         rm, _ = self._make_rm(

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from core.i18n import Message
+from core.i18n import I18n, Message
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
@@ -978,6 +978,15 @@ class SchedulerService:
                         "[Scheduler] Daily update produced 0 rows across %s trading day(s) "
                         "— possibly empty market or insufficient permission",
                         days,
+                    )
+                # MAJOR-02: 复盘不可成交（T+1 一字涨停）计数可见化——对齐 backfill
+                # （review_backfill.py）与 RV-04 基准诊断的呈现原则。Message 无法承载
+                # 拼接文本，故按当前 locale 渲染为 str 再拼（与 backfill 任务结果先例一致）。
+                untradable = getattr(result, "review_untradable_count", 0)
+                if isinstance(untradable, int) and untradable > 0:
+                    return (
+                        f"{I18n.get('sched_daily_done', days=days, rows=rows)} — "
+                        f"{I18n.get('review_untradable_skipped', count=untradable)}"
                     )
                 return Message("sched_daily_done", {"days": days, "rows": rows})
             # fallback（D1-2 后 run_daily_update 恒返回 SyncResult，以下为防御旧路径）

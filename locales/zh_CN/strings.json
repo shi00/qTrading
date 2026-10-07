@@ -965,6 +965,7 @@
     "snack_sync_critical_failed": "同步未完成，{tables} 个关键数据源（行情/指标）失败",
     "snack_sync_skipped_fmt": "同步完成，跳过 {skipped} 条已存在数据",
     "snack_sync_permission_skipped_fmt": "同步完成，{count} 张表因权限不足被跳过",
+    "snack_review_untradable_fmt": "另有 {count} 条因 T+1 一字涨停不可成交，未计入收益与标签",
     "progress_sync_prepare": "准备同步...",
     "snack_sync_not_completed": "同步未完成，请重试",
     "progress_sync_market": "正在同步行情: {date}",

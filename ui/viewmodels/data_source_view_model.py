@@ -484,6 +484,15 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                         Message("snack_full_sync_done_simple"),
                         "success",
                     )
+                # MAJOR-02: 复盘不可成交（T+1 一字涨停）计数可见化——日更编排内含 run_review，
+                # 此前该计数仅落日志，用户无从知晓「复盘条数为何偏少」。此处追加一条 snack
+                # （不覆盖上方完成/降级提示；与既有多次发射 snack 的模式一致）。
+                untradable = getattr(result, "review_untradable_count", 0)
+                if isinstance(untradable, int) and untradable > 0:
+                    self._emit_snack(
+                        Message("snack_review_untradable_fmt", {"count": untradable}),
+                        "warning",
+                    )
                 return Message("ds_daily_update_done")
             except asyncio.CancelledError:
                 # 不设 is_syncing 守卫: 真实 TaskManager 取消时 handle_task_update

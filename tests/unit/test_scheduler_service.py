@@ -9,7 +9,7 @@ import pandas as pd
 from datetime import date, datetime, timedelta
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
-from core.i18n import Message
+from core.i18n import I18n, Message
 from data.sync.base import SyncResult
 from services.task_manager import EXCLUSIVE_GROUP_MARKET_SYNC, AppTask, TaskStatus
 from utils.scheduler_service import SchedulerService
@@ -1213,6 +1213,49 @@ class TestDailyUpdateLogicClosure:
             # D1-4: 消息应包含条数 42（用户据此判断是否真的拉到数据）
             assert result_msg.params == {"days": 1, "rows": 42}
             assert svc._last_update_date == "20240614"
+
+    @pytest.mark.asyncio
+    async def test_daily_update_logic_appends_untradable_count(self):
+        """MAJOR-02: 不可成交计数 > 0 时，完成消息追加按 locale 渲染的说明（用户可见）。"""
+        svc = _make_svc()
+        mock_result = SyncResult(days_processed=1, rows_written=42, review_untradable_count=5)
+        mock_dp = MagicMock()
+        mock_dp.trade_calendar = MagicMock()
+        mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+        mock_dp.run_daily_update = AsyncMock(return_value=mock_result)
+        mock_tm = MagicMock()
+        now_val = datetime(2024, 6, 14, 16, 30)
+
+        patches = _get_patches(mock_dp, mock_tm, now_val)
+        with patches[0] as mock_ch, patches[1], patches[2], patches[3]:
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._run_daily_update()
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+            result_msg = await factory("test_task")
+            assert isinstance(result_msg, str)
+            assert I18n.get("sched_daily_done", days=1, rows=42) in result_msg
+            assert I18n.get("review_untradable_skipped", count=5) in result_msg
+
+    @pytest.mark.asyncio
+    async def test_daily_update_logic_no_untradable_keeps_message(self):
+        """MAJOR-02: 不可成交计数为 0 时不追加说明，保持 locale-neutral 的 Message。"""
+        svc = _make_svc()
+        mock_result = SyncResult(days_processed=1, rows_written=42, review_untradable_count=0)
+        mock_dp = MagicMock()
+        mock_dp.trade_calendar = MagicMock()
+        mock_dp.trade_calendar.is_trading_day = AsyncMock(return_value=True)
+        mock_dp.run_daily_update = AsyncMock(return_value=mock_result)
+        mock_tm = MagicMock()
+        now_val = datetime(2024, 6, 14, 16, 30)
+
+        patches = _get_patches(mock_dp, mock_tm, now_val)
+        with patches[0] as mock_ch, patches[1], patches[2], patches[3]:
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._run_daily_update()
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+            result_msg = await factory("test_task")
+            assert isinstance(result_msg, Message)
+            assert result_msg.params == {"days": 1, "rows": 42}
 
     @pytest.mark.asyncio
     async def test_daily_update_empty_day_warns(self):
