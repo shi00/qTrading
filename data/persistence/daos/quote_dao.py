@@ -7,6 +7,7 @@ import typing
 import pandas as pd
 import sqlalchemy as sa
 
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
 from data.constants import (
     MAJOR_INDICES,
@@ -242,6 +243,24 @@ def _normalize_trade_date(val: typing.Any) -> typing.Any:
         except ValueError:
             return val
     return val
+
+
+def _to_iso_string(value: typing.Any) -> str | None:
+    """把 date/datetime/pd.Timestamp 归一为 ISO 字符串；None/NaT/NaN/不可解析返回 None。
+
+    BT-03 MINOR-03：数据指纹需 JSON 安全且可与落库值（DAO 侧 ``_serialize_jsonb_value``
+    产出 ISO 字符串）逐字段比对，故此处统一转为 ISO 字符串（而非保留 datetime 对象）。
+    """
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        return None
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.isoformat()
+    return str(value)
 
 
 class QuoteDao(BaseDao):
@@ -1176,6 +1195,75 @@ class QuoteDao(BaseDao):
             raise
         except Exception as e:
             logger.debug("[QuoteDao] stock_basic freshness query failed: %s", safe_error(e))
+            return None
+
+    @log_async_operation(
+        operation_name="QuoteDao.get_data_fingerprint",
+        threshold_ms=PerfThreshold.DB_BULK_IO,
+    )
+    async def get_data_fingerprint(
+        self,
+        start_date: datetime.date | str,
+        end_date: datetime.date | str,
+    ) -> dict | None:
+        """回测可复现性数据指纹（BT-03 MINOR-03，区间时点口径）。
+
+        记录「本次回测所用数据是哪一版」，供同策略同区间重跑时比对差异。仅覆盖
+        ``daily_quotes``（行情，区间行数 + 最近写入时刻）与 ``financial_reports``
+        （财报，区间内可见的最新公告日）两张关键表——轻量指纹，其余辅助表
+        （northbound / moneyflow / top_list 等）暂不纳入。
+
+        R24 时点口径（非当前快照）：
+        - ``daily_quotes`` 仅统计 ``trade_date BETWEEN start AND end``（即本次回测
+          决策区间本身，与 BacktestDataProvider 区间预载窗口一致），不含区间外数据；
+        - ``financial_reports`` 仅统计 ``ann_date <= end``（决策终点时点可见的最新
+          公告），晚于 end 的财报不影响本次回测，故意排除以避免误报。
+
+        Returns:
+            指纹 dict（JSON 安全：计数为 int，时间为 ISO 字符串或 None）；查询失败 /
+            引擎释放等无法判定时返回 ``None``——调用方必须按「未知」处理，不得当作
+            「数据未变」（R21：未知不伪装为正常）。
+        """
+        try:
+            start = self._to_db_date(start_date)
+            end = self._to_db_date(end_date)
+            stmt = sa.select(
+                sa.func.count().label("row_count"),
+                sa.func.max(DailyQuotes.updated_at).label("max_updated_at"),
+            ).where(DailyQuotes.trade_date.between(start, end))
+            # suppress_errors=False：默认吞错返回空 DF 会把「查询失败」伪装成「零行」，
+            # 进而写入一个看似正常却错误的指纹（R21）。必须显式抛出以走 None 分支。
+            df_quotes = await self._read_db_select(stmt, suppress_errors=False)
+            row_count = 0
+            max_updated_at: str | None = None
+            if df_quotes is not None and not df_quotes.empty:
+                rec = df_quotes.iloc[0]
+                cnt = rec["row_count"]
+                row_count = int(cnt) if cnt is not None and not pd.isna(cnt) else 0
+                max_updated_at = _to_iso_string(rec["max_updated_at"])
+
+            # 财报：MAX(ann_date) WHERE ann_date <= end 可走 ix_financial_reports_ann_date 索引，
+            # 仅取区间内可见的最新公告日（PIT 上界）。
+            df_fin = await self._read_db(
+                "SELECT MAX(ann_date) AS max_ann_date FROM financial_reports WHERE ann_date <= $1",
+                [end],
+                suppress_errors=False,
+            )
+            max_ann_date: str | None = None
+            if df_fin is not None and not df_fin.empty:
+                max_ann_date = _to_iso_string(df_fin["max_ann_date"].iloc[0])
+
+            return {
+                "daily_quotes_row_count": row_count,
+                "daily_quotes_max_updated_at": max_updated_at,
+                "financial_reports_max_ann_date": max_ann_date,
+            }
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.warning("[QuoteDao] get_data_fingerprint failed: %s", safe_error(e))
             return None
 
     async def _get_empty_days_map(

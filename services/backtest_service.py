@@ -15,6 +15,7 @@ UI / 任务系统通过此服务调用回测，不直接实例化引擎。
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -24,12 +25,32 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from core.i18n import Message
 from data.cache.cache_manager import CacheManager
+from data.persistence.daos.base_dao import EngineDisposedError
 
 if TYPE_CHECKING:
     from strategies.backtest.config import BacktestConfig, BacktestResult
     from strategies.base_strategy import BaseStrategy
 
 logger = logging.getLogger(__name__)
+
+# BT-03 MINOR-03: 数据指纹参与比对的受控字段集（与 QuoteDao.get_data_fingerprint 输出对齐）。
+_FINGERPRINT_FIELDS: tuple[str, ...] = (
+    "daily_quotes_row_count",
+    "daily_quotes_max_updated_at",
+    "financial_reports_max_ann_date",
+)
+
+
+def diff_data_fingerprints(prev: dict | None, curr: dict | None) -> list[str]:
+    """比对两次运行的数据指纹，返回发生变化的字段名列表（BT-03 MINOR-03）。
+
+    仅在前后均为有效指纹时才构成可比基线；任一为 ``None``（无基线 / 指纹不可得）
+    时返回 ``[]``，调用方据此**不写入比较结论**（R21：未知不伪装为「数据未变」）。
+    仅比对受控的 ``_FINGERPRINT_FIELDS`` 字段，字段缺失按 ``None`` 处理。
+    """
+    if not isinstance(prev, dict) or not isinstance(curr, dict):
+        return []
+    return [field for field in _FINGERPRINT_FIELDS if prev.get(field) != curr.get(field)]
 
 
 class BacktestService:
@@ -114,6 +135,9 @@ class BacktestService:
             result_dict = result.to_persist_dict()
             result_dict["app_version"] = self._get_app_version()
 
+            # BT-03 MINOR-03: 注入数据版本指纹与重跑比对结论（best-effort，不阻断持久化）。
+            await self._augment_data_fingerprint(result_dict, result)
+
             await self.cache.backtest_dao.save_result(result_dict)
             logger.info(
                 "[BacktestService] Saved backtest result: run_id=%s, strategy=%s",
@@ -132,6 +156,59 @@ class BacktestService:
             )
             new_warnings = [*list(result.data_warnings), f"persist_failed: {sanitized}"]
             return result.with_warnings(new_warnings)
+
+    async def _augment_data_fingerprint(self, result_dict: dict, result: BacktestResult) -> None:
+        """为 ``quality_json`` 注入数据版本指纹与重跑比对结论（BT-03 MINOR-03，best-effort）。
+
+        指纹为辅助诊断信息，其任何失败都不得阻断结果持久化：本方法吞掉非取消 / 非引擎
+        释放异常并记录日志，保证 ``_persist_result`` 的核心职责（保存结果）不受影响。
+
+        写入约定（R21：不以「缺失」冒充「无变化」）：
+        - ``data_fingerprint``：仅当指纹查询成功时写入；查询失败则不写键（未知）；
+        - ``data_version_changes``：仅当存在可比基线时写入——``[]`` 表示「已比对且未变化」，
+          非空列表表示「已比对且这些字段发生变化」；无基线时**不写键**（不做未变化结论）。
+        """
+        quality = result_dict.get("quality_json")
+        if not isinstance(quality, dict):
+            return
+        try:
+            config = result.config
+            fingerprint = await self.cache.quote_dao.get_data_fingerprint(config.start_date, config.end_date)
+            if fingerprint is None:
+                # 指纹不可得：不写入键（未知），不得伪装为「数据未变」（R21）。
+                return
+            quality["data_fingerprint"] = fingerprint
+
+            baseline = await self.cache.backtest_dao.get_latest_data_fingerprint_for_range(
+                result.strategy_name,
+                config.start_date,
+                config.end_date,
+                exclude_run_id=result.run_id,
+            )
+            if baseline is None:
+                # 无上次运行 / 上次运行无指纹（存量旧记录）→ 不可比对，不写比较结论。
+                return
+            changes = diff_data_fingerprints(baseline, fingerprint)
+            quality["data_version_changes"] = changes  # [] = 已比对且未变化
+            if changes:
+                logger.warning(
+                    "[BacktestService] Data version changed for strategy=%s range=%s..%s (run_id=%s): fields=%s",
+                    result.strategy_name,
+                    config.start_date,
+                    config.end_date,
+                    result.run_id,
+                    changes,
+                )
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "[BacktestService] data fingerprint augmentation failed (run_id=%s): %s",
+                result.run_id,
+                DataSanitizer.sanitize_error(e),
+            )
 
     def _create_engine(self, config: BacktestConfig) -> Any:
         """通过注入的 engine_factory 创建引擎实例。

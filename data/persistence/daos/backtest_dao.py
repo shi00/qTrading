@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
 from typing import Any
@@ -192,6 +193,65 @@ class BacktestDAO(BaseDao):
             }
             for r in results.to_dict("records")
         ]
+
+    @log_async_operation(
+        operation_name="BacktestDAO.get_latest_data_fingerprint_for_range",
+        threshold_ms=PerfThreshold.DB_SINGLE_QUERY,
+    )
+    async def get_latest_data_fingerprint_for_range(
+        self,
+        strategy_name: str,
+        start_date: datetime.date,
+        end_date: datetime.date,
+        exclude_run_id: str | None = None,
+    ) -> dict | None:
+        """取同策略同区间「紧邻上一次运行」的数据指纹（BT-03 MINOR-03 重跑比对基线）。
+
+        以 ``executed_at`` 降序取最近一条同 ``strategy_name`` + 同 ``start_date`` /
+        ``end_date`` 的历史记录，返回其 ``quality_json.data_fingerprint``。严格以
+        「上一次运行」为基线——若其无指纹（存量旧记录 / 指纹查询失败），返回 ``None``，
+        调用方据此判定「无基线」而不做「未变化」结论（R21：未知不伪装为未变）。
+
+        Args:
+            strategy_name: 策略名
+            start_date: 回测区间起点
+            end_date: 回测区间终点
+            exclude_run_id: 需排除的 run_id（当前运行，防自比对）
+
+        Returns:
+            上一版指纹 dict；无基线时返回 ``None``。
+        """
+        try:
+            self._check_engine(context="read")
+        except EngineDisposedError:
+            raise
+
+        stmt = sa.select(BacktestResultModel.quality_json).where(
+            BacktestResultModel.strategy_name == strategy_name,
+            BacktestResultModel.start_date == start_date,
+            BacktestResultModel.end_date == end_date,
+        )
+        if exclude_run_id:
+            stmt = stmt.where(BacktestResultModel.run_id != exclude_run_id)
+        stmt = stmt.order_by(BacktestResultModel.executed_at.desc()).limit(1)
+
+        try:
+            df = await self._read_db_select(stmt, suppress_errors=False)
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.warning("[BacktestDAO] get_latest_data_fingerprint_for_range failed: %s", safe_error(e))
+            return None
+
+        if df is None or df.empty:
+            return None
+        quality = df.iloc[0]["quality_json"]
+        if not isinstance(quality, dict):
+            return None
+        fingerprint = quality.get("data_fingerprint")
+        return fingerprint if isinstance(fingerprint, dict) else None
 
     @log_async_operation(
         operation_name="BacktestDAO.delete_result",

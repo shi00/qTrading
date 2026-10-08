@@ -1702,6 +1702,89 @@ class TestQuoteDaoStockBasicLatestUpdatedDate:
         assert exc_info.value is cancelled
 
 
+class TestQuoteDaoGetDataFingerprint:
+    """BT-03 MINOR-03：回测数据指纹查询（区间时点口径 / R21 缺失不伪装）。"""
+
+    def _make_dao(self, quotes_df=None, fin_df=None, quotes_side_effect=None, fin_side_effect=None):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        if quotes_side_effect is not None:
+            dao._read_db_select = AsyncMock(side_effect=quotes_side_effect)
+        else:
+            dao._read_db_select = AsyncMock(return_value=quotes_df)
+        if fin_side_effect is not None:
+            dao._read_db = AsyncMock(side_effect=fin_side_effect)
+        else:
+            dao._read_db = AsyncMock(return_value=fin_df)
+        return dao
+
+    @pytest.mark.asyncio
+    async def test_returns_fingerprint_with_iso_strings(self):
+        dao = self._make_dao(
+            quotes_df=pd.DataFrame({"row_count": [123], "max_updated_at": [pd.Timestamp("2024-06-15 08:30:00")]}),
+            fin_df=pd.DataFrame({"max_ann_date": [datetime.date(2024, 3, 31)]}),
+        )
+        result = await dao.get_data_fingerprint(datetime.date(2024, 1, 1), datetime.date(2024, 6, 30))
+        assert result == {
+            "daily_quotes_row_count": 123,
+            "daily_quotes_max_updated_at": "2024-06-15T08:30:00",
+            "financial_reports_max_ann_date": "2024-03-31",
+        }
+        # 关键路径失败不得被吞成「零行」假指纹（R21）
+        assert dao._read_db_select.call_args.kwargs["suppress_errors"] is False
+        assert dao._read_db.call_args.kwargs["suppress_errors"] is False
+
+    @pytest.mark.asyncio
+    async def test_none_times_rendered_as_none(self):
+        dao = self._make_dao(
+            quotes_df=pd.DataFrame({"row_count": [0], "max_updated_at": [pd.NaT]}),
+            fin_df=pd.DataFrame({"max_ann_date": [pd.NaT]}),
+        )
+        result = await dao.get_data_fingerprint("20240101", "20240131")
+        assert result is not None
+        assert result["daily_quotes_row_count"] == 0
+        assert result["daily_quotes_max_updated_at"] is None
+        assert result["financial_reports_max_ann_date"] is None
+
+    @pytest.mark.asyncio
+    async def test_quotes_query_failure_returns_none(self):
+        dao = self._make_dao(quotes_side_effect=Exception("db error"))
+        assert await dao.get_data_fingerprint("20240101", "20240131") is None
+
+    @pytest.mark.asyncio
+    async def test_fin_query_failure_returns_none(self):
+        dao = self._make_dao(
+            quotes_df=pd.DataFrame({"row_count": [5], "max_updated_at": [pd.NaT]}),
+            fin_side_effect=Exception("fin error"),
+        )
+        assert await dao.get_data_fingerprint("20240101", "20240131") is None
+
+    @pytest.mark.asyncio
+    async def test_fin_query_uses_pit_upper_bound(self):
+        dao = self._make_dao(
+            quotes_df=pd.DataFrame({"row_count": [5], "max_updated_at": [pd.NaT]}),
+            fin_df=pd.DataFrame({"max_ann_date": [pd.NaT]}),
+        )
+        await dao.get_data_fingerprint(datetime.date(2024, 1, 1), datetime.date(2024, 6, 30))
+        fin_sql = dao._read_db.call_args[0][0]
+        assert "ann_date <= $1" in fin_sql
+        assert dao._read_db.call_args[0][1] == [datetime.date(2024, 6, 30)]
+
+    @pytest.mark.asyncio
+    async def test_propagates_engine_disposed(self):
+        dao = self._make_dao(quotes_side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError, match="disposed"):
+            await dao.get_data_fingerprint("20240101", "20240131")
+
+    @pytest.mark.asyncio
+    async def test_propagates_cancelled_error(self):
+        """R2：asyncio.CancelledError 不得被吞，必须向上传播以配合优雅停机。"""
+        cancelled = asyncio.CancelledError()
+        dao = self._make_dao(quotes_side_effect=cancelled)
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await dao.get_data_fingerprint("20240101", "20240131")
+        assert exc_info.value is cancelled
+
+
 class TestQuoteDaoCoverageGaps:
     @pytest.mark.asyncio
     async def test_get_bulk_table_counts_exception(self):
