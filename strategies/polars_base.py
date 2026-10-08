@@ -312,24 +312,21 @@ def _build_attributions(strategy, df: pd.DataFrame, total: int, context: Strateg
     """为每个筛选行构建归因并写入 ``ATTRIBUTION_COLUMN`` 列 (UX-04).
 
     在线程池 (``TaskType.CPU``) 内执行, 不阻塞 Flet 事件循环 (R16)。
-    ``rank.position`` 在此按 ``rank.field`` 在候选池内统一排序计算 (base 兜底,
-    单策略内 rank.field 共享, 一次排序即可); ``rank.total`` = AI 截断前候选池总数。
+
+    ``rank.position`` = 该行在候选池 (``_filter_logic`` 输出序, 即 AI 截断前展示序) 中的
+    1-based 序位, 直接取行序; base **不再**按 ``rank.field`` 二次重排——序位权威来源是策略
+    自身的排序 (检视 MINOR-01: 策略用复合排序键, 如 ``growth_quality_doubt`` 置后 + ``roe``
+    降序时, 按单键重排会让归因排名与列表序位对不上)。``rank.field`` / ``ascending`` 仅声明
+    主排序依据供展示, ``rank.total`` = AI 截断前候选池总数 (一次检视 Major#1)。
     """
     rows = df.to_dict("records")
     built: list = [strategy.build_attribution(r, total, context) for r in rows]
 
-    # 统一计算排名 (按 rank.field/ascending; 无值/缺值恒排末尾)。冻结构用 replace 重建。
-    # 缺值哨兵按方向选择: 升序时置 +inf 排最后, 降序时置 -inf 排最后 (二次检视 a2)。
-    ranked = [(i, a) for i, a in enumerate(built) if a is not None and a.rank is not None]
-    if ranked:
-        ascending = ranked[0][1].rank.ascending
-        missing = float("inf") if ascending else float("-inf")
-        ranked.sort(
-            key=lambda i_a: i_a[1].rank.value if i_a[1].rank.value is not None else missing,
-            reverse=not ascending,
-        )
-        for pos, (idx, attr) in enumerate(ranked, start=1):
-            built[idx] = replace(attr, rank=replace(attr.rank, position=pos, total=total))
+    # 序位即候选池行序 (1-based); 无归因/无排名的行保持原样。冻结构用 replace 重建。
+    for pos, attr in enumerate(built, start=1):
+        if attr is None or attr.rank is None:
+            continue
+        built[pos - 1] = replace(attr, rank=replace(attr.rank, position=pos, total=total))
 
     df[ATTRIBUTION_COLUMN] = [attribution_to_json(a) for a in built]
     return df

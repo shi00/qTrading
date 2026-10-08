@@ -2,7 +2,7 @@
 
 覆盖新增业务逻辑:
 - ``strategies.attribution`` 数据契约: fnum 归一 / JSON 序列化往返 / 非法降级 / 运算符校验。
-- ``polars_base._build_attributions``: 候选池内统一排名 (升/降序、缺值排末、total 语义) 与归因列写入。
+- ``polars_base._build_attributions``: 候选池序位 (策略输出序, base 不二次重排)、total 语义与归因列写入。
 - ``strategies.fundamental`` / ``strategies.market`` 各策略 ``build_attribution`` 条件与 rank 生成。
 - ``vm _decode_cell`` 归因列 JSON 解码与安全降级。
 """
@@ -118,7 +118,7 @@ class TestAttributionSerialization:
 
 
 # ============================================================================
-# polars_base._build_attributions — 统一排名与列写入
+# polars_base._build_attributions — 候选池序位与列写入
 # ============================================================================
 
 
@@ -140,22 +140,23 @@ class TestBuildAttributions:
         codes = [f"00000{i}.SZ" for i in range(len(values))]
         return pd.DataFrame({"ts_code": codes, "pe": values, "dv": values})
 
-    def test_descending_rank(self):
+    def test_position_follows_candidate_pool_order(self):
+        # MINOR-01: 序位 = 候选池行序 (策略自身排序即展示序), base 不得按 rank.value 二次重排。
         df = self._df([3.0, 1.0, 2.0])
         out = _build_attributions(_make_rank_strategy("pe", ascending=False), df, total=3, context={})
-        pos = [attribution_from_json(x).rank.position for x in out[ATTRIBUTION_COLUMN]]
-        # 降序: pe=3.0 → 1, pe=2.0 → 2, pe=1.0 → 3
-        assert pos == [1, 3, 2]
+        ranks = [attribution_from_json(x).rank for x in out[ATTRIBUTION_COLUMN]]
+        assert [r.position for r in ranks] == [1, 2, 3]
+        # rank.value 仍如实携带该行字段值 (旧实现按值重排会得到 position [1, 3, 2])
+        assert [r.value for r in ranks] == [3.0, 1.0, 2.0]
 
-    def test_ascending_rank_and_none_last(self):
-        df = self._df([3.0, None, 1.0])  # 第二行缺值 → 恒排末 (二次检视 a2)
+    def test_position_keeps_row_order_with_none_value(self):
+        # 缺值行保持其在候选池中的真实序位, 不被 sentinel 重排到末位。
+        df = self._df([3.0, None, 1.0])
         out = _build_attributions(_make_rank_strategy("pe", ascending=True), df, total=3, context={})
         ranks = [attribution_from_json(x).rank for x in out[ATTRIBUTION_COLUMN]]
-        ranks_by_code = {c: r for c, r in zip(out["ts_code"], ranks, strict=True)}
-        # 升序: pe=1.0(000002) → rank1, pe=3.0(000000) → rank2, None(000001) → rank3 (末位)
-        assert ranks_by_code["000000.SZ"].position == 2
-        assert ranks_by_code["000001.SZ"].position == 3
-        assert ranks_by_code["000002.SZ"].position == 1
+        assert [r.position for r in ranks] == [1, 2, 3]
+        assert ranks[1].value is None
+        assert all(r.ascending for r in ranks)
 
     def test_total_is_candidate_pool(self):
         df = self._df([5.0, 4.0, 3.0])
