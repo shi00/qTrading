@@ -179,6 +179,14 @@ class SchedulerService:
             # 夜间预测计划时刻 (hour, minute)，由 _schedule_jobs 解析配置后写入（与 cron 同源），
             # 供 _is_past_nightly_prediction_time 判定而无需在看门狗热路径重复读配置。
             self._nightly_hm: tuple[int, int] = (20, 30)
+            # REVIEW-06 TO-01 / D7-3/MINOR-01 (复核): 补偿下界自举值（进程内，重启即重置，缓存以
+            # 避免每个看门狗周期重复查 DB）。水位为空（None/空串）时以本地最新交易日作为遗漏交易日
+            # 区间下界，**仅用于计算补偿范围**，绝不写入 `_last_update_date`——后者是「当日同步完整
+            # 成功」的权威水位（仅由 is_complete 成功的日更/补偿经 `_mark_daily_update_done_db`
+            # 推进）。把自举值写进水位会把「行情表已有今日数据」误判为「当日同步完整」，使同一轮
+            # 看门狗紧随其后的 `_catch_up_nightly_prediction` 立即放行，用部分同步（关键表失败、
+            # is_complete 为假）的数据出 AI 选股结论并落库（MINOR-01 在水位为空路径上的复现）。
+            self._bootstrap_baseline_date: str | None = None
             self._db_state_loaded = False
             # review01-A2-1: 业务 job 注册表（services/scheduled_jobs/ 提供 build_<job>_job），
             # SchedulerService 仅调度注册的 callable，不感知具体业务类。
@@ -602,9 +610,10 @@ class SchedulerService:
     async def _infer_baseline_from_db(self) -> str | None:
         """REVIEW-06 TO-01: 以本地已落库的最新交易日（daily_quotes.MAX(trade_date)）作为补偿下界自举。
 
-        这是"已经同步到哪天"的天然真相源，比调度器自身维护的影子状态更可信，且仅在基准
-        缺失时调用一次（成功后 _last_update_date 非空，后续走常规检查路径）。查询失败或
-        本地无行情数据时返回 None，由调用方告警跳过并交由后续周期重试（幂等）。
+        这是"数据已落库到哪天"的天然真相源，**只表示数据前沿、不表示该日同步完整**：仅作为
+        `_catch_up_missed_updates` 计算遗漏交易日区间的下界，由调用方缓存到
+        `_bootstrap_baseline_date`（避免每个看门狗周期重复查询），不写入 `_last_update_date`。
+        查询失败或本地无行情数据时返回 None，由调用方告警跳过并交由后续周期重试（幂等）。
         """
         from data.data_processor import DataProcessor  # lazy-import: 启动性能——仅自举路径加载
 
@@ -723,6 +732,12 @@ class SchedulerService:
         永久丢失。范围（include_today）与退避绕过（bypass_backoff）刻意解耦——D7-3 看门狗
         需要"纳入今天"但仍必须受 D7-1 退避约束（否则 MAJOR-01 的 30 秒固定频率重试风暴复发）。
         幂等由补偿任务独立 unique_key 去重 + 同步层 check_data_exists 缓存跳过共同保证。
+        水位为空（None/空串）时以 `_bootstrap_baseline_date`（首次经 `_infer_baseline_from_db`
+        查询并缓存）作为区间下界，避免 REVIEW-06 TO-01 的"永久静默跳过"；该自举值仅用于区间
+        计算，不写入水位（否则「行情表已有今日数据」会被冒充为「当日同步完整」而误放行夜间预测）。
+        当水位为空且数据前沿恰为今日（常规区间为空）时，仍对今日提交一次**校验性补偿**，由同步层
+        `check_data_exists` / `SyncResult.is_complete` 判定其完整性并据此推进水位——完整则夜间预测
+        链路接通（D7-3/REVIEW-06 TO-01 不破），不完整则水位留空（MINOR-01 不复现）。
         """
         # D7-1/MAJOR-01: 退避窗口内跳过重复提交，打断"失败→30s 后重试"的固定频率风暴。
         # 此处可提前返回，亦省去退避期间的交易日历查询。
@@ -733,32 +748,58 @@ class SchedulerService:
                 self._catchup_next_retry_at,
             )
             return
-        if not self._last_update_date:
+        is_bootstrap = not self._last_update_date
+        if is_bootstrap:
             # REVIEW-06 TO-01: 无基准（None 或空串，_persist_run_date 以空串表示无值）时不再静默
             # 早退——注释原称"首次运行由全量初始化路径负责"，但该路径并不写调度幂等键（唯一写入
             # 点在补偿/日更逻辑自身），形成闭环依赖：从未在 cron 时刻运行过的用户基准永远为空、
-            # 补偿静默失效（自动更新永久停止）。改为以本地已落库的最新交易日作为可信补偿下界自举，
-            # 该基准是"已经同步到哪天"的天然真相源，且仅在缺失时查询一次（幂等）。
-            baseline = await self._infer_baseline_from_db()
+            # 补偿静默失效（自动更新永久停止）。改为以本地已落库的最新交易日作为补偿区间下界自举，
+            # 该基准是"数据已落库到哪天"的天然真相源，且仅在缺失时查询一次并缓存（幂等）。
+            # D7-3/MINOR-01 (复核): 自举值**只作补偿区间下界**，不写入 `_last_update_date`——水位是
+            # 「当日同步完整成功」的权威判据，写入会把「行情表已有今日数据」冒充「当日同步完整」，
+            # 使同一轮看门狗里 `_catch_up_nightly_prediction` 立即放行，用部分同步数据出 AI 选股结论。
+            # 水位留空后，日更/补偿任一 is_complete 成功仍会经 `_mark_daily_update_done_db` 推进水位，
+            # 之后看门狗照常补触发夜间预测（D7-3 链路不破）；数据前沿恰为今日时另走下方校验性补偿。
+            baseline = self._bootstrap_baseline_date
             if baseline is None:
-                logger.warning(
-                    "[Scheduler] 无补偿基准且本地无行情数据（daily_quotes 为空），跳过补偿（需先完成全量初始化）"
+                baseline = await self._infer_baseline_from_db()
+                if baseline is None:
+                    logger.warning(
+                        "[Scheduler] 无补偿基准且本地无行情数据（daily_quotes 为空），跳过补偿（需先完成全量初始化）"
+                    )
+                    return
+                self._bootstrap_baseline_date = baseline
+                logger.info(
+                    "[Scheduler] 补偿基准缺失，以本地最新交易日 %s 作为补偿区间下界自举（不推进水位，待补偿/日更完整成功后由 is_complete 推进）",
+                    baseline,
                 )
-                return
-            logger.info("[Scheduler] 补偿基准缺失，以本地最新交易日 %s 自举", baseline)
-            self._last_update_date = baseline
+            effective_last_date = baseline
+        else:
+            effective_last_date = self._last_update_date
         from data.data_processor import DataProcessor  # lazy-import: 启动性能——仅补偿检查时加载
         from services.task_manager import (  # lazy-import: 启动性能——仅提交补偿任务时加载
             EXCLUSIVE_GROUP_MARKET_SYNC,
             TaskManager,
         )
 
-        last_dt = parse_date(self._last_update_date).date()
+        last_dt = parse_date(effective_last_date).date()
         today = get_now().date()
         # 常规路径只补 [last_update_date+1, 昨天]：今天由 16:30 cron 负责，避免在盘中提前
         # 同步今日数据（数据不完整）。misfire 路径（include_today=True）已过计划时刻+宽限，
         # 今天数据已收盘，end=today 一并回补。
         end = today if include_today else today - datetime.timedelta(days=1)
+        # bootstrap 路径：frontier（daily_quotes.MAX）只是"数据已落库到哪天"的**下界**，不构成
+        # "该日同步完整"的证明。当水位为空、数据前沿恰为今日（include_today=True 且 last_dt==today，
+        # 即已过夜间预测时刻）时常规区间 (frontier, end] 为空，补偿会静默早退 → 水位永不推进 →
+        # `_catch_up_nightly_prediction` 永不放行（"数据完整但水位为空"，如全量初始化成功却不写幂等键，
+        # 导致当日夜间预测永久丢失）。故把下界回退一天，将 frontier 日本身纳入补偿，交由同步层
+        # `check_data_exists` / `SyncResult.is_complete` 判定完整性：
+        #   完整 → 补偿 is_complete 成功 → `_mark_daily_update_done_db` 推进水位 → 下一轮看门狗补触发
+        #     夜间预测（D7-3/REVIEW-06 TO-01 链路不破）；
+        #   不完整（关键表失败）→ 水位留空 → 不放行（MINOR-01 不复现："行情表有今日数据" ≠ "当日同步完整"）。
+        # 水位可信（非 bootstrap）路径语义不变（回退仅在 bootstrap 且 last_dt==today 时触发）。
+        if is_bootstrap and include_today and last_dt == today:
+            last_dt = last_dt - datetime.timedelta(days=1)
         if end <= last_dt:
             return
 
