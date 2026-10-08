@@ -1694,7 +1694,7 @@ class TestDataProcessorClearCancel:
     async def test_clear_cancel_propagates_to_context_cancel_event(self):
         """FIND-R1-006: A4 修复 — clear_cancel 传播到 context.cancel_event（覆盖 L180）。"""
         dp = _make_dp()
-        # 注入 mock context.cancel_event（模拟 run_ai_concept_tagging DI）
+        # 注入 mock context.cancel_event（模拟 run_concept_sync DI）
         mock_cancel_event = MagicMock()
         dp.context.cancel_event = mock_cancel_event
         dp._get_cancel_event().set()
@@ -1761,7 +1761,7 @@ class TestDataProcessorRequestCancel:
         dp = _make_dp()
         for s in dp.strategies.values():
             s.cancel = MagicMock()
-        # 注入 mock context.cancel_event（模拟 run_ai_concept_tagging DI）
+        # 注入 mock context.cancel_event（模拟 run_concept_sync DI）
         mock_cancel_event = MagicMock()
         dp.context.cancel_event = mock_cancel_event
         await dp.request_cancel()
@@ -1774,7 +1774,7 @@ class TestDataProcessorRequestCancel:
         dp = _make_dp()
         for s in dp.strategies.values():
             s.cancel = MagicMock()
-        # context.cancel_event 默认 None（无 run_ai_concept_tagging 注入）
+        # context.cancel_event 默认 None（无 run_concept_sync 注入）
         assert dp.context.cancel_event is None
         await dp.request_cancel()
         assert dp.is_cancelled() is True
@@ -1838,7 +1838,7 @@ class TestDataProcessorStop:
         dp = _make_dp()
         for s in dp.strategies.values():
             s.cancel = MagicMock()
-        # 注入 mock context.cancel_event（模拟 run_ai_concept_tagging DI）
+        # 注入 mock context.cancel_event（模拟 run_concept_sync DI）
         mock_cancel_event = MagicMock()
         dp.context.cancel_event = mock_cancel_event
         await dp.stop()

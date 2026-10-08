@@ -204,7 +204,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         self._get_cancel_event().set()
         # A4: 传播到 TaskManager 注入的 task-level cancel_event，确保
         # TaskManager 视角能看到取消信号。context.cancel_event 来自 DI
-        # （threading.Event，见 run_ai_concept_tagging docstring），非类属性，R11 合规。
+        # （threading.Event，见 run_concept_sync docstring），非类属性，R11 合规。
         if self.context.cancel_event is not None:
             self.context.cancel_event.set()
         self._quality_tier = None  # Reset to uninitialized; will re-evaluate on next strategy run
@@ -420,49 +420,36 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         return sync_result
 
     @log_async_operation(
-        operation_name="run_ai_concept_tagging",
-        threshold_ms=PerfThreshold.AI_INFERENCE,
+        operation_name="run_concept_sync",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
     )
-    async def run_ai_concept_tagging(
+    async def run_concept_sync(
         self,
         task_id: str | None = None,
         cancel_event: threading.Event | None = None,
-        *,
-        manual_trigger: bool = False,
         **kwargs,
     ) -> str:
-        """Orchestrate concept sync from multiple sources.
+        """Orchestrate concept sync from the retained sources.
 
-        Executes three strategies in sequence:
-        1. AKShareConceptSyncStrategy — East-Money concept boards (always)
-        2. LimitListSyncStrategy — Tushare limit_list (always)
-        3. AIConceptTagSyncStrategy — LLM-driven tagging (only when manual_trigger=True)
+        Executes two strategies in sequence:
+        1. AKShareConceptSyncStrategy — East-Money concept boards
+        2. LimitListSyncStrategy — Tushare limit_list
 
         Args:
             task_id: Optional task identifier for logging.
             cancel_event: Optional threading.Event for cancellation signaling.
-            manual_trigger: If True, execute LLM-based concept tagging.
-            **kwargs: Additional arguments. Supports `ai_service` for LLM injection
-                (R1: data/ must not import services/; AIService is passed via kwargs
-                and stored on SyncContext.ai_service).
 
         Returns:
-            Summary string, e.g. "akshare=success | limit_list=success | ai_tag=skipped".
+            Summary string, e.g. "akshare=success | limit_list=success".
         """
         from data.sync.concept_sync import (
-            AIConceptTagSyncStrategy,
             AKShareConceptSyncStrategy,
             LimitListSyncStrategy,
         )
 
-        # Inject ai_service into context for LLM-driven strategies (R1: DI, no direct import)
-        ai_service = kwargs.get("ai_service")
-        if ai_service is not None:
-            self.context.ai_service = ai_service
-
         # Propagate cancel_event to context so that long-running strategies
-        # (e.g. AIConceptTagSyncStrategy) can poll cancel state inside LLM
-        # calls (~2s granularity), satisfying project memory's hard constraint.
+        # (e.g. AKShareConceptSyncStrategy, which checks every 2 seconds) can
+        # poll cancel state, satisfying project memory's hard constraint.
         self.context.cancel_event = cancel_event
 
         def _cancelled() -> bool:
@@ -482,7 +469,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.error("[DataProcessor] AIConceptTag | AKShare failed: %s", safe_error(e), exc_info=True)
+                logger.error("[DataProcessor] ConceptSync | AKShare failed: %s", safe_error(e), exc_info=True)
                 parts.append("akshare=failed")
 
         # Step 2: LimitList
@@ -495,23 +482,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.error("[DataProcessor] AIConceptTag | LimitList failed: %s", safe_error(e), exc_info=True)
+                logger.error("[DataProcessor] ConceptSync | LimitList failed: %s", safe_error(e), exc_info=True)
                 parts.append("limit_list=failed")
-
-        # Step 3: AIConceptTag (only on manual trigger)
-        if not manual_trigger:
-            parts.append("ai_tag=skipped")
-        elif _cancelled():
-            parts.append("ai_tag=cancelled")
-        else:
-            try:
-                r = await AIConceptTagSyncStrategy(self.context).run()
-                parts.append(f"ai_tag={r.status}")
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.error("[DataProcessor] AIConceptTag | AI tag failed: %s", safe_error(e), exc_info=True)
-                parts.append("ai_tag=failed")
 
         return " | ".join(parts)
 

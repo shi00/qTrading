@@ -1,10 +1,9 @@
-"""Unit tests for DataProcessor.run_ai_concept_tagging orchestration.
+"""Unit tests for DataProcessor.run_concept_sync orchestration.
 
 Covers:
-- Orchestration of 3 strategies (AKShare → LimitList → AIConceptTag).
-- manual_trigger flag gates LLM-based AIConceptTagSyncStrategy.
+- Orchestration of the two retained strategies (AKShare → LimitList).
 - Cancellation skips remaining strategies.
-- Legacy run_doubao_tagging has been removed.
+- Legacy run_doubao_tagging / run_ai_concept_tagging entry points are removed.
 """
 
 import asyncio
@@ -38,15 +37,19 @@ def _make_sync_result(status="success", added=0):
     return m
 
 
-class TestRunDoubaoTaggingRemoved:
+class TestLegacyEntriesRemoved:
     def test_run_doubao_tagging_removed(self):
         dp = _make_dp()
-        assert not hasattr(dp, "run_doubao_tagging"), (
-            "run_doubao_tagging must be removed; replaced by run_ai_concept_tagging"
+        assert not hasattr(dp, "run_doubao_tagging"), "run_doubao_tagging must be removed"
+
+    def test_run_ai_concept_tagging_removed(self):
+        dp = _make_dp()
+        assert not hasattr(dp, "run_ai_concept_tagging"), (
+            "run_ai_concept_tagging must be removed; replaced by run_concept_sync"
         )
 
 
-class TestRunAIConceptTagging:
+class TestRunConceptSync:
     @pytest.mark.asyncio
     async def test_calls_akshare_strategy(self):
         dp = _make_dp()
@@ -55,15 +58,14 @@ class TestRunAIConceptTagging:
         with (
             patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
             patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
-            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
         ):
             MockAKShare.return_value.run = AsyncMock(return_value=mock_result)
             MockLimitList.return_value.run = AsyncMock(return_value=mock_result)
-            MockAITag.return_value.run = AsyncMock(return_value=mock_result)
 
-            result = await dp.run_ai_concept_tagging(manual_trigger=False)
+            result = await dp.run_concept_sync()
 
-            MockAKShare.return_value.run.assert_called_once()
+            MockAKShare.assert_called_once_with(dp.context)
+            MockAKShare.return_value.run.assert_awaited_once()
             assert "akshare=success" in result
 
     @pytest.mark.asyncio
@@ -74,59 +76,32 @@ class TestRunAIConceptTagging:
         with (
             patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
             patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
-            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
         ):
             MockAKShare.return_value.run = AsyncMock(return_value=mock_result)
             MockLimitList.return_value.run = AsyncMock(return_value=mock_result)
-            MockAITag.return_value.run = AsyncMock(return_value=mock_result)
 
-            result = await dp.run_ai_concept_tagging(manual_trigger=False)
+            result = await dp.run_concept_sync()
 
-            MockLimitList.return_value.run.assert_called_once()
+            MockLimitList.assert_called_once_with(dp.context)
+            MockLimitList.return_value.run.assert_awaited_once()
             assert "limit_list=success" in result
 
     @pytest.mark.asyncio
-    async def test_manual_trigger_calls_llm(self):
-        dp = _make_dp()
-        dp.clear_cancel()
-        mock_result = _make_sync_result(status="success", added=3)
-        ai_service_mock = MagicMock()
-        with (
-            patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
-            patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
-            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
-        ):
-            MockAKShare.return_value.run = AsyncMock(return_value=mock_result)
-            MockLimitList.return_value.run = AsyncMock(return_value=mock_result)
-            MockAITag.return_value.run = AsyncMock(return_value=mock_result)
-
-            result = await dp.run_ai_concept_tagging(
-                manual_trigger=True,
-                ai_service=ai_service_mock,
-            )
-
-            MockAITag.return_value.run.assert_called_once()
-            assert "ai_tag=success" in result
-            assert dp.context.ai_service is ai_service_mock
-
-    @pytest.mark.asyncio
-    async def test_no_manual_skips_llm(self):
+    async def test_no_ai_tag_segment_in_result(self):
+        """De-AI: run_concept_sync must not emit an ai_tag segment."""
         dp = _make_dp()
         dp.clear_cancel()
         mock_result = _make_sync_result(status="success", added=0)
         with (
             patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
             patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
-            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
         ):
             MockAKShare.return_value.run = AsyncMock(return_value=mock_result)
             MockLimitList.return_value.run = AsyncMock(return_value=mock_result)
-            MockAITag.return_value.run = AsyncMock(return_value=mock_result)
 
-            result = await dp.run_ai_concept_tagging(manual_trigger=False)
+            result = await dp.run_concept_sync()
 
-            MockAITag.return_value.run.assert_not_called()
-            assert "ai_tag=skipped" in result
+            assert "ai_tag" not in result
 
     @pytest.mark.asyncio
     async def test_cancelled_skips_remaining(self):
@@ -138,25 +113,19 @@ class TestRunAIConceptTagging:
         with (
             patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
             patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
-            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
         ):
             MockAKShare.return_value.run = AsyncMock(return_value=mock_result)
             MockLimitList.return_value.run = AsyncMock(return_value=mock_result)
-            MockAITag.return_value.run = AsyncMock(return_value=mock_result)
 
-            result = await dp.run_ai_concept_tagging(
-                cancel_event=cancel_event,
-                manual_trigger=True,
-            )
+            result = await dp.run_concept_sync(cancel_event=cancel_event)
 
             MockAKShare.return_value.run.assert_not_called()
             MockLimitList.return_value.run.assert_not_called()
-            MockAITag.return_value.run.assert_not_called()
             assert "cancelled" in result
 
     @pytest.mark.asyncio
     async def test_cancel_event_propagated_to_context(self):
-        """P0-2: cancel_event 必须设置到 context，供 AIConceptTagSyncStrategy 轮询"""
+        """cancel_event 必须设置到 context，供长运行策略轮询取消。"""
         dp = _make_dp()
         dp.clear_cancel()
         mock_result = _make_sync_result(status="success", added=0)
@@ -164,75 +133,45 @@ class TestRunAIConceptTagging:
         with (
             patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
             patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
-            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
         ):
             MockAKShare.return_value.run = AsyncMock(return_value=mock_result)
             MockLimitList.return_value.run = AsyncMock(return_value=mock_result)
-            MockAITag.return_value.run = AsyncMock(return_value=mock_result)
 
-            await dp.run_ai_concept_tagging(
-                cancel_event=cancel_event,
-                manual_trigger=True,
-            )
+            await dp.run_concept_sync(cancel_event=cancel_event)
 
             assert dp.context.cancel_event is cancel_event
 
     @pytest.mark.asyncio
     async def test_akshare_exception_logged_as_failed(self):
-        """覆盖 L394-401: AKShare sync 抛 Exception 时记录 failed"""
+        """AKShare sync 抛 Exception 时记录 failed，LimitList 仍继续。"""
         dp = _make_dp()
         dp.clear_cancel()
         mock_result = _make_sync_result(status="success", added=0)
         with (
             patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
             patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
-            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
         ):
             MockAKShare.return_value.run = AsyncMock(side_effect=Exception("akshare boom"))
             MockLimitList.return_value.run = AsyncMock(return_value=mock_result)
-            MockAITag.return_value.run = AsyncMock(return_value=mock_result)
-            result = await dp.run_ai_concept_tagging(manual_trigger=False)
+            result = await dp.run_concept_sync()
         assert "akshare=failed" in result
         assert "limit_list=success" in result
 
     @pytest.mark.asyncio
     async def test_limit_list_exception_logged_as_failed(self):
-        """覆盖 L407-414: LimitList sync 抛 Exception 时记录 failed"""
+        """LimitList sync 抛 Exception 时记录 failed。"""
         dp = _make_dp()
         dp.clear_cancel()
         mock_result = _make_sync_result(status="success", added=0)
         with (
             patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
             patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
-            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
         ):
             MockAKShare.return_value.run = AsyncMock(return_value=mock_result)
             MockLimitList.return_value.run = AsyncMock(side_effect=Exception("limit boom"))
-            MockAITag.return_value.run = AsyncMock(return_value=mock_result)
-            result = await dp.run_ai_concept_tagging(manual_trigger=False)
+            result = await dp.run_concept_sync()
         assert "akshare=success" in result
         assert "limit_list=failed" in result
-
-    @pytest.mark.asyncio
-    async def test_ai_tag_exception_logged_as_failed(self):
-        """覆盖 L422-429: AIConceptTag sync 抛 Exception 时记录 failed"""
-        dp = _make_dp()
-        dp.clear_cancel()
-        mock_result = _make_sync_result(status="success", added=0)
-        ai_service_mock = MagicMock()
-        with (
-            patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
-            patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
-            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
-        ):
-            MockAKShare.return_value.run = AsyncMock(return_value=mock_result)
-            MockLimitList.return_value.run = AsyncMock(return_value=mock_result)
-            MockAITag.return_value.run = AsyncMock(side_effect=Exception("ai boom"))
-            result = await dp.run_ai_concept_tagging(
-                manual_trigger=True,
-                ai_service=ai_service_mock,
-            )
-        assert "ai_tag=failed" in result
 
     @pytest.mark.asyncio
     async def test_cancelled_error_propagates_not_swallowed(self):
@@ -243,10 +182,8 @@ class TestRunAIConceptTagging:
         with (
             patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
             patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
-            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
         ):
             MockAKShare.return_value.run = AsyncMock(side_effect=asyncio.CancelledError())
             MockLimitList.return_value.run = AsyncMock(return_value=mock_result)
-            MockAITag.return_value.run = AsyncMock(return_value=mock_result)
             with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可，无有意义 message 可 match
-                await dp.run_ai_concept_tagging(manual_trigger=False)
+                await dp.run_concept_sync()
