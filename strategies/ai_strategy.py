@@ -4,7 +4,7 @@ import pandas as pd
 
 from data.persistence.quality_gate import QualityTier, require_quality
 from strategies.ai_mixin import AIStrategyMixin
-from strategies.utils import StrategyContext
+from strategies.utils import StrategyContext, filter_exclude_delisting
 from strategies.base_strategy import BaseStrategy, register_strategy
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -51,6 +51,15 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
         if df is None or df.empty:
             logger.warning("[AIStrategy] No data provided in context")
             return pd.DataFrame()
+
+        # G2（review09-24-dim01-major01 复核）: ai_active 继承 BaseStrategy、不走 Polars 基类，
+        # 此前 filter() 未接线退市整理期排除——回测路径（data_provider 仅按 is_tradable 过滤）
+        # 会把「XX退」纳入候选，与实盘（data_processor 已按同名派生列过滤）及策略层修复声明
+        # 「策略层排除」口径分裂。此处复用与 OversoldStrategy / PolarsBaseStrategy 同源的
+        # filter_exclude_delisting：无条件排除（可推荐性是正确性问题，无 UI 开关）；无
+        # is_delisting 列（旧数据源/测试构造）时原样返回（向后兼容）；实盘侧该列已全为 False
+        # 故幂等；排除数经既有 D3-4 warnings 通道上报（不静默过滤）。
+        df, _ = filter_exclude_delisting(df, context)
 
         # --- Step 1: Pre-Filter (The Sieve) ---
         # Rule: Profitable (PE>0), Active (Turnover > min)

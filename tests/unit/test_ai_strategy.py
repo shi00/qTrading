@@ -281,6 +281,87 @@ class TestAISelectionStrategyFilter:
         assert {"000001.SZ", "600000.SH"} == set(result["ts_code"])
 
 
+# --- G2: AISelectionStrategy（pandas/BaseStrategy 路径）退市整理期排除接线（review09-24-dim01-major01 复核） ---
+
+
+class TestAISelectionStrategyExcludeDelisting:
+    """G2: ai_active 与 PolarsBaseStrategy/OversoldStrategy 同源排除退市整理期股票。"""
+
+    @staticmethod
+    def _df(is_delisting):
+        return pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "600999.SS"],
+                "name": ["平安银行", "万科A", "某某退"],
+                "pe_ttm": [15.0, 20.0, 8.0],
+                "turnover_rate": [5.0, 6.0, 9.0],
+                "is_delisting": is_delisting,
+                "pct_chg": [2.0, 3.0, -1.0],
+            }
+        )
+
+    @pytest.mark.asyncio
+    @patch("strategies.ai_mixin.AIService")
+    @patch("strategies.ai_strategy.ConfigHandler")
+    async def test_filter_excludes_delisting_and_reports_warning(self, mock_ch, mock_ai_cls):
+        """退市整理期股票（is_delisting=True）必须被 ai_active 排除并经 warnings 上报。"""
+        mock_ch.get_ai_max_candidates.return_value = 10
+        mock_ch.get_strategy_min_turnover.return_value = 1.0
+        mock_ai_cls.return_value.is_cloud_available.return_value = False
+        s = AISelectionStrategy()
+        df = self._df([False, False, True])
+        context = {
+            "screening_data": df,
+            "fundamental_screening_data": df,
+            "data_processor": _make_dp(),
+        }
+        result = await s.filter(context)
+        assert "600999.SS" not in result["ts_code"].tolist(), "退市整理期股票必须被 ai_active 排除"
+        assert set(result["ts_code"].tolist()) == {"000001.SZ", "000002.SZ"}
+        warnings = context.get("warnings", [])
+        assert any(m.key == "strategy_excluded_delisting" and m.params == {"count": 1} for m in warnings)
+
+    @pytest.mark.asyncio
+    @patch("strategies.ai_mixin.AIService")
+    @patch("strategies.ai_strategy.ConfigHandler")
+    async def test_filter_without_is_delisting_column_keeps_all(self, mock_ch, mock_ai_cls):
+        """无 is_delisting 列（旧数据源/测试构造）时原样返回，保持向后兼容。"""
+        mock_ch.get_ai_max_candidates.return_value = 10
+        mock_ch.get_strategy_min_turnover.return_value = 1.0
+        mock_ai_cls.return_value.is_cloud_available.return_value = False
+        s = AISelectionStrategy()
+        df = self._df([False, False, True]).drop(columns=["is_delisting"])
+        context = {
+            "screening_data": df,
+            "fundamental_screening_data": df,
+            "data_processor": _make_dp(),
+        }
+        result = await s.filter(context)
+        assert set(result["ts_code"].tolist()) == {"000001.SZ", "000002.SZ", "600999.SS"}
+        assert not any(m.key == "strategy_excluded_delisting" for m in context.get("warnings", []))
+
+    @pytest.mark.asyncio
+    @patch("strategies.ai_mixin.AIService")
+    @patch("strategies.ai_strategy.ConfigHandler")
+    async def test_filter_null_is_delisting_treated_as_non_delisting(self, mock_ch, mock_ai_cls):
+        """NULL is_delisting（派生异常）按非退市保留，避免被 ~ 过滤造成静默漏股。"""
+        mock_ch.get_ai_max_candidates.return_value = 10
+        mock_ch.get_strategy_min_turnover.return_value = 1.0
+        mock_ai_cls.return_value.is_cloud_available.return_value = False
+        s = AISelectionStrategy()
+        df = self._df([False, None, True])
+        context = {
+            "screening_data": df,
+            "fundamental_screening_data": df,
+            "data_processor": _make_dp(),
+        }
+        result = await s.filter(context)
+        assert "000002.SZ" in result["ts_code"].tolist()
+        assert "600999.SS" not in result["ts_code"].tolist()
+        warnings = context.get("warnings", [])
+        assert any(m.key == "strategy_excluded_delisting" and m.params == {"count": 1} for m in warnings)
+
+
 class TestAISelectionStrategyGetAiContext:
     @patch("strategies.ai_strategy.ConfigHandler")
     def test_get_ai_context(self, mock_ch):
