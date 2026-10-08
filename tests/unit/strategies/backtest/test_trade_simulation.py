@@ -1132,6 +1132,56 @@ class TestSuspendedMarketValueEstimation:
         suspension_count = sum(1 for w in simulator.warnings if "suspension" in w)
         assert suspension_count == 1
 
+    def test_bt03_major02_data_gap_warns_first_day_not_suspension(self, config: BacktestConfig) -> None:
+        """BT-03 MAJOR-02: 持仓股不在 suspend_d 且无当日行情 → 数据缺口，首日即告警（非停牌）。
+
+        修复前无行情一律按停牌处理并等待 30 天才告警，本地数据缺口被伪装成合法停牌（R21）。
+        修复后提供 suspended_keys 时，未命中且无当日行情 → data_gap，首日（阈值 1）即告警。
+        """
+        simulator = PortfolioSimulator(
+            config,
+            TransactionCostModel(TransactionCostConfig()),
+            # 该股当日不在停牌集合（集合内是另一只标的）
+            suspended_keys={("000002.SZ", date(2024, 1, 30))},
+        )
+        simulator.positions["000001.SZ"] = {
+            "volume": 800,
+            "cost_basis": 8_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        simulator._last_known_prices["000001.SZ"] = 12.0
+
+        # day_quotes 不含 000001.SZ → 无当日行情
+        simulator.process_day(date(2024, 1, 30), pl.DataFrame(), pl.DataFrame(), is_rebalance=False)
+
+        assert simulator._stale_estimate_days["000001.SZ"] == 1
+        assert any("data_gap" in w and "000001.SZ" in w for w in simulator.warnings)
+        assert not any("suspension" in w for w in simulator.warnings)
+
+    def test_bt03_major02_suspended_day_keeps_threshold(self, config: BacktestConfig) -> None:
+        """BT-03 MAJOR-02: 持仓股当日在 suspend_d 中 → 正常停牌，首日不告警（维持 30 天阈值）。"""
+        sim_date = date(2024, 1, 30)
+        simulator = PortfolioSimulator(
+            config,
+            TransactionCostModel(TransactionCostConfig()),
+            suspended_keys={("000001.SZ", sim_date)},
+        )
+        simulator.positions["000001.SZ"] = {
+            "volume": 800,
+            "cost_basis": 8_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        simulator._last_known_prices["000001.SZ"] = 12.0
+
+        simulator.process_day(sim_date, pl.DataFrame(), pl.DataFrame(), is_rebalance=False)
+
+        assert simulator._stale_estimate_days["000001.SZ"] == 1
+        assert simulator.warnings == []
+
     def test_suspended_position_does_not_record_sell_trade(self, config: BacktestConfig) -> None:
         """临时停牌标的不会记录 sell 交易"""
         stock_meta = {"000002.SZ": {"delist_date": None}}

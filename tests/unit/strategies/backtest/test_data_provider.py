@@ -922,6 +922,57 @@ class TestBacktestQualityProxy:
         )
 
     @pytest.mark.asyncio
+    async def test_preload_range_wide_still_evaluates_range_gaps(self, _autouse_mock_trade_calendar) -> None:
+        """BT-03 MAJOR-02: 超过 preload_max_days 跳过预载时，仍执行区间缺口评估。
+
+        修复前宽区间 (>366 天) 在 preload_range 早退，完全跳过 screening_data 覆盖评估，
+        区间缺口对宽区间回测静默不可见；修复后无论是否预载都执行一次轻量覆盖查询求差。
+        """
+        from data.persistence.quality_gate import QualityTier
+
+        # 日历给出 5 个交易日；daily_quotes 轻量覆盖查询仅覆盖其中 3 个 → 缺 2 个
+        _autouse_mock_trade_calendar.return_value = [
+            date(2024, 1, 2),
+            date(2024, 1, 3),
+            date(2024, 1, 4),
+            date(2024, 1, 5),
+            date(2024, 1, 8),
+        ]
+        cache = MagicMock()
+        cache.quote_dao.get_quote_trade_dates = AsyncMock(
+            return_value={date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)}
+        )
+
+        provider = BacktestDataProvider(cache)  # preload_max_days=366
+        # 400 天区间 → 触发宽区间早退分支
+        await provider.preload_range(date(2024, 1, 1), date(2025, 2, 4))
+
+        assert provider._preloaded is None
+        assert any(w.startswith("preload_range_too_wide") for w in provider.range_preload_warnings)
+        assert any(
+            w.startswith("[range_quality_gaps]") and "2 of 5" in w and "20240105" in w and "20240108" in w
+            for w in provider.range_preload_warnings
+        )
+        assert provider._quality_proxy._quality_tier == int(QualityTier.GOLD)
+        assert provider._quality_proxy._scan_missing_dates == frozenset({"20240105", "20240108"})
+        # 轻量覆盖查询与预载解耦，确实被调用（宽区间亦评估缺口）
+        cache.quote_dao.get_quote_trade_dates.assert_awaited_once_with(date(2024, 1, 1), date(2025, 2, 4))
+
+    @pytest.mark.asyncio
+    async def test_wide_range_coverage_query_failure_keeps_default_gold(self) -> None:
+        """BT-03 MAJOR-02/R21: 宽区间轻量覆盖查询失败 → 保持默认 GOLD（未知不伪装成无缺口）。"""
+        cache = MagicMock()
+        cache.quote_dao.get_quote_trade_dates = AsyncMock(side_effect=Exception("db down"))
+
+        provider = BacktestDataProvider(cache)
+        await provider.preload_range(date(2024, 1, 1), date(2025, 2, 4))
+
+        assert provider._preloaded is None
+        # 查询失败 → 未知，不产生虚假缺口告警，也不因未知而崩溃
+        assert not any(w.startswith("[range_quality_gaps]") for w in provider.range_preload_warnings)
+        assert provider._quality_proxy._scan_missing_dates == frozenset()
+
+    @pytest.mark.asyncio
     async def test_gap_day_build_context_empty_screening_full_on_other_days(self) -> None:
         """D3-M2 残留修复: 缺口日 build_context 返回空 screening_data，非缺口日正常非空。
 

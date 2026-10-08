@@ -561,6 +561,28 @@ class QuoteDao(BaseDao):
             return set()
         return set(df["trade_date"])
 
+    async def get_quote_trade_dates(
+        self,
+        start_date: datetime.date | str,
+        end_date: datetime.date | str,
+    ) -> set[datetime.date]:
+        """区间内 daily_quotes 实际覆盖的交易日集合（轻量 DISTINCT，供回测区间缺口评估）。
+
+        BT-03 MAJOR-02：仅返回去重 trade_date（不载入任何行情列），使宽区间回测也能以
+        O(交易日数) 量级评估「本地行情缺失了哪些交易日」，与 preload_range 的 OOM 护栏解耦。
+
+        suppress_errors=False：查询失败必须显式抛出，供调用方区分「查询失败（未知）」与
+        「查询成功但零行（全区间缺失）」，避免把已知不可信伪装成无缺口（R21）。
+        """
+        df = await self._read_db(
+            "SELECT DISTINCT trade_date FROM daily_quotes WHERE trade_date >= $1 AND trade_date <= $2",
+            [self._to_db_date(start_date), self._to_db_date(end_date)],
+            suppress_errors=False,
+        )
+        if df is None or df.empty:
+            return set()
+        return set(df["trade_date"])
+
     async def get_cached_dates_for_table(self, table_name: str) -> set:
         """
         Get distinct dates from a table for breakpoint resume check.

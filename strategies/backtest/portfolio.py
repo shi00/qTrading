@@ -33,6 +33,7 @@ class PortfolioSimulator:
         config: BacktestConfig,
         cost_model: TransactionCostModel,
         stock_meta: dict[str, dict] | None = None,
+        suspended_keys: set[tuple[str, date]] | None = None,
     ):
         self.config = config
         self.cost_model = cost_model
@@ -46,6 +47,10 @@ class PortfolioSimulator:
         # BT-002: stock_meta 提供 delist_date 字段，用于区分退市与临时停牌
         # 结构: {ts_code: {"delist_date": date | None}}
         self.stock_meta: dict[str, dict] = stock_meta or {}
+        # BT-03 MAJOR-02: 区间内 (ts_code, trade_date) 停牌键集合，供无行情估值时区分
+        # 「正常停牌」与「本地数据缺口」。None 表示调用方未提供停牌信息（历史行为，
+        # 统一按停牌处理）。engine 在 _enrich_suspend_status 中构建并透传。
+        self._suspended_keys: set[tuple[str, date]] | None = suspended_keys
         # BT-02: 退市清算分项统计（供 engine 透传到 BacktestResult 评估影响权重）
         self.delist_liquidation_count: int = 0
         self.delist_loss_amount: float = 0.0
@@ -875,15 +880,24 @@ class PortfolioSimulator:
                         "pnl": estimated_value - qfq_cost_basis,
                         "estimated": True,
                     }
-                    # D1-C1: 长停（临时停牌）可见性护栏——累计连续估值天数，
-                    # 超阈值向 warnings 告警。warnings 沿线汇入 data_warnings，
-                    # 触发 UI 可信度（unreliable）判定，避免长期按最后已知价估值被掩盖。
+                    # D1-C1: 长停（临时停牌）可见性护栏——累计连续估值天数，超阈值向 warnings
+                    # 告警。warnings 沿线汇入 data_warnings，触发 UI 可信度（unreliable）判定，
+                    # 避免长期按最后已知价估值被掩盖。
+                    # BT-03 MAJOR-02: 区分原因，避免把本地数据缺口伪装成合法停牌（R21）：
+                    #   - 该股当日在 suspend_d 中（_suspended_keys 命中）或调用方未提供停牌信息
+                    #     （_suspended_keys is None，历史行为）→ 正常停牌，维持 30 天阈值；
+                    #   - 不在 suspend_d 中却无当日行情 → 本地数据缺口，首日即告警（fail-closed）。
+                    #   进入本分支即「当日无该股行情」；每日 record 无行情即计一日。
                     self._stale_estimate_days[ts_code] = self._stale_estimate_days.get(ts_code, 0) + 1
-                    if self._stale_estimate_days[ts_code] >= 30 and ts_code not in self._stale_estimate_warned:
+                    stale_days = self._stale_estimate_days[ts_code]
+                    is_suspension = self._suspended_keys is None or (ts_code, exec_date) in self._suspended_keys
+                    threshold = 30 if is_suspension else 1
+                    reason = "suspension" if is_suspension else "data_gap"
+                    if stale_days >= threshold and ts_code not in self._stale_estimate_warned:
                         self._stale_estimate_warned.add(ts_code)
                         self.warnings.append(
                             f"{exec_date}: {ts_code} valued at last known price for "
-                            f">={self._stale_estimate_days[ts_code]} trading days (suspension)"
+                            f">={stale_days} trading days ({reason})"
                         )
 
         self.positions_list.append(

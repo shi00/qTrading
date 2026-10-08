@@ -7,7 +7,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
 import polars as pl
@@ -73,6 +73,10 @@ class VectorBacktestEngine:
         self.cost_model = TransactionCostModel(config.get_cost_config())
         self.data_provider = BacktestDataProvider(cache, data_processor, preload_max_days=config.preload_max_days)
         self.strategy_adapter = BacktestStrategyAdapter()
+        # BT-03 MAJOR-02: 区间内 (ts_code, trade_date) 停牌键集合，由 _enrich_suspend_status
+        # 构建并透传给 PortfolioSimulator，供无行情估值时区分「正常停牌」与「本地数据缺口」。
+        # None 表示停牌信息不可得（查询失败/无数据），simulator 退化为统一按停牌处理。
+        self._suspended_keys: set[tuple[str, date]] | None = None
         # D4-8：优先复用策略层同一 TradeCalendarService（DB → API → 离线三级降级），
         # 消除回测层直接查 DB 的第二套日历通路；无 data_processor 时留空，_get_trade_dates 懒构造。
         self.trade_calendar = getattr(data_processor, "trade_calendar", None)
@@ -398,6 +402,9 @@ class VectorBacktestEngine:
                 # DATA-03：区分「查询失败（enrich 异常已告警）」与「查询成功但区间内无停牌数据」。
                 # 后者多为用户未同步 suspend_d 表，静默乐观降级会让回测在停牌股上成交，结果被美化，
                 # 故必须显式告警（逐区间一次）。
+                # BT-03 MAJOR-02: 无停牌信息 → 置空 _suspended_keys，simulator 无法区分停牌/数据缺口，
+                # 退化为统一按停牌处理（不误报数据缺口）。
+                self._suspended_keys = None
                 warning = DataWarning(
                     warning_type="suspend_data_absent",
                     start_date=start_date,
@@ -412,6 +419,9 @@ class VectorBacktestEngine:
 
             suspend_df = pl.from_pandas(suspend_pd)
             suspend_df = suspend_df.select(["ts_code", "trade_date"]).with_columns(pl.lit(False).alias("is_tradable"))
+            # BT-03 MAJOR-02: 构建区间内停牌键集合，供 PortfolioSimulator 在无行情估值时
+            # 区分「正常停牌」（命中）与「本地数据缺口」（未命中，首日即告警）。
+            self._suspended_keys = self._build_suspended_keys(suspend_df)
 
             quotes_df = quotes_df.join(suspend_df, on=["ts_code", "trade_date"], how="left")
 
@@ -420,6 +430,8 @@ class VectorBacktestEngine:
         except Exception as e:
             sanitized_msg = DataSanitizer.sanitize_error(e)
             logger.warning("[VectorBacktestEngine] Failed to enrich suspend_status: %s", sanitized_msg)
+            # BT-03 MAJOR-02: 停牌信息不可得 → 置空 _suspended_keys，simulator 退化为统一按停牌处理。
+            self._suspended_keys = None
             warning = DataWarning(
                 warning_type="suspend_enrich_failed",
                 start_date=start_date,
@@ -430,6 +442,35 @@ class VectorBacktestEngine:
             # 乐观降级：标记为可交易，避免查询失败导致全市场零交易
             # 停牌股票可能在撮合时因无成交价被自然跳过
             return quotes_df.with_columns(pl.lit(True).alias("is_tradable")), warning
+
+    @staticmethod
+    def _build_suspended_keys(suspend_df: pl.DataFrame) -> set[tuple[str, date]]:
+        """从 suspend_d 区间数据构建 (ts_code, trade_date) 停牌键集合（BT-03 MAJOR-02）。
+
+        trade_date 归一化为 datetime.date（兼容 date/datetime/Timestamp/str 混型）。
+        """
+        keys: set[tuple[str, date]] = set()
+        for ts_code, trade_date in suspend_df.select(["ts_code", "trade_date"]).iter_rows():
+            if ts_code is None:
+                continue
+            d = VectorBacktestEngine._coerce_trade_date(trade_date)
+            if d is not None:
+                keys.add((str(ts_code), d))
+        return keys
+
+    @staticmethod
+    def _coerce_trade_date(value: object) -> date | None:
+        """将 trade_date 值归一化为 datetime.date；无法解析返回 None。"""
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            try:
+                return datetime.strptime(value.replace("-", "").strip(), "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
+            except ValueError:
+                return None
+        return None
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _enrich_limit_status(
@@ -721,7 +762,14 @@ class VectorBacktestEngine:
                 0,
             )
 
-        simulator = PortfolioSimulator(self.config, self.cost_model, stock_meta=stock_meta)
+        # BT-03 MAJOR-02: 透传区间停牌键，供 simulator 区分停牌/数据缺口。
+        # getattr 兼容 __new__ 构造（未走 __init__ 的测试替身，无该属性）→ None（历史行为）。
+        simulator = PortfolioSimulator(
+            self.config,
+            self.cost_model,
+            stock_meta=stock_meta,
+            suspended_keys=getattr(self, "_suspended_keys", None),
+        )
 
         # PERF-C1: Pre-group by date via partition_by to avoid O(N*M) loop filters.
         # partition_by(as_dict=True) returns tuple keys like (date,), so we look up with (exec_date,).
