@@ -114,8 +114,8 @@ class _FakeBacktestViewModel:
             # UX-01 细化: 与 BacktestState 新增字段同步 (「查看详情」展开明细)
             failed_details: Any = ()
             skipped_reasons: Any = ()
-            # BT-01: 与 BacktestState 新增字段同步 (IC 是否来自独立打分)
-            has_real_score: Any = True
+            # BT-01/MINOR-02: 与 BacktestState 新增字段同步 (IC 独立打分占比)
+            real_score_ratio: Any = 1.0
             # BT-02: 与 BacktestState 新增字段同步 (退市清算分项统计)
             delist_liquidation_count: Any = 0
             delist_loss_amount: Any = 0.0
@@ -681,7 +681,7 @@ class TestStatusRendering:
             period_stats=(),
             strategy_name=None,
             benchmark_name=None,
-            has_real_score=True,
+            real_score_ratio=1.0,
             delist_liquidation_count=0,
             delist_loss_amount=0.0,
             delist_recovery_rate=0.3,
@@ -899,7 +899,7 @@ class TestBacktestViewErrorState:
             period_stats=(),
             strategy_name=None,
             benchmark_name=None,
-            has_real_score=True,
+            real_score_ratio=1.0,
             delist_liquidation_count=0,
             delist_loss_amount=0.0,
             delist_recovery_rate=0.3,

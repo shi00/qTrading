@@ -141,19 +141,47 @@ def _metric_card(label: str, value: str, value_color: str, tooltip: str | None =
     )
 
 
-def _ic_sort_tooltip(has_real_score: bool) -> str:
-    """BT-01: 无独立打分时，IC 卡片附 tooltip 说明「排序 IC」语义。"""
-    if has_real_score:
+def _ic_label_kind(real_score_ratio: float) -> str:
+    """MINOR-02: 由独立打分占比判定 IC 口径三态（真实 / 混合 / 排序）。
+
+    1.0=全部 IC 观测来自独立打分（真实）；0.0=全无（排序）；其余为混合口径。
+    不设任意阈值：纯真实口径须 100% 覆盖，部分缺失不得冒充纯真实口径（R21）。
+    """
+    if real_score_ratio >= 1.0:
+        return "real"
+    if real_score_ratio <= 0.0:
+        return "sort"
+    return "mixed"
+
+
+def _ic_sort_tooltip(real_score_ratio: float) -> str:
+    """BT-01/MINOR-02: 排序/混合口径的 IC 卡片附 tooltip 说明语义。"""
+    kind = _ic_label_kind(real_score_ratio)
+    if kind == "real":
         return ""
-    return I18n.get("backtest_metric_ic_sort_tooltip")
+    if kind == "sort":
+        return I18n.get("backtest_metric_ic_sort_tooltip")
+    # 占比下取整，避免 ratio<1（混合口径）时四舍五入显示为「100%」而自相矛盾。
+    percent = f"{int(real_score_ratio * 100)}"
+    return I18n.get("backtest_metric_ic_mixed_tooltip", percent=percent)
 
 
-def _ic_mean_label(has_real_score: bool) -> str:
-    return I18n.get("backtest_metric_ic_mean" if has_real_score else "backtest_metric_ic_mean_sort")
+def _ic_mean_label(real_score_ratio: float) -> str:
+    key = {
+        "real": "backtest_metric_ic_mean",
+        "mixed": "backtest_metric_ic_mean_mixed",
+        "sort": "backtest_metric_ic_mean_sort",
+    }[_ic_label_kind(real_score_ratio)]
+    return I18n.get(key)
 
 
-def _ic_ir_label(has_real_score: bool) -> str:
-    return I18n.get("backtest_metric_ic_ir" if has_real_score else "backtest_metric_ic_ir_sort")
+def _ic_ir_label(real_score_ratio: float) -> str:
+    key = {
+        "real": "backtest_metric_ic_ir",
+        "mixed": "backtest_metric_ic_ir_mixed",
+        "sort": "backtest_metric_ic_ir_sort",
+    }[_ic_label_kind(real_score_ratio)]
+    return I18n.get(key)
 
 
 def _invested_color(pct: float) -> str:
@@ -223,7 +251,7 @@ def _delist_warning(delist_count: int, delist_loss_amount: float, delist_recover
 
 def _build_metrics_section(
     metrics: dict,
-    has_real_score: bool = True,
+    real_score_ratio: float = 1.0,
     delist_liquidation_count: int = 0,
     delist_loss_amount: float = 0.0,
     delist_recovery_rate: float = 0.3,
@@ -287,19 +315,19 @@ def _build_metrics_section(
                 _profit_factor_card(metrics),
                 ft.Container(
                     content=_metric_card(
-                        _ic_mean_label(has_real_score),
+                        _ic_mean_label(real_score_ratio),
                         f"{ic_mean:.4f}" if ic_mean is not None else "N/A",
                         _get_color_for_ic(ic_mean) if ic_mean is not None else AppColors.TEXT_SECONDARY,
-                        tooltip=_ic_sort_tooltip(has_real_score) or None,
+                        tooltip=_ic_sort_tooltip(real_score_ratio) or None,
                     ),
                     col=_COL_QUARTER,
                 ),
                 ft.Container(
                     content=_metric_card(
-                        _ic_ir_label(has_real_score),
+                        _ic_ir_label(real_score_ratio),
                         f"{ic_ir:.2f}" if ic_ir is not None else "N/A",
                         _get_color_for_ic(ic_ir) if ic_ir is not None else AppColors.TEXT_SECONDARY,
-                        tooltip=_ic_sort_tooltip(has_real_score) or None,
+                        tooltip=_ic_sort_tooltip(real_score_ratio) or None,
                     ),
                     col=_COL_QUARTER,
                 ),
@@ -800,7 +828,7 @@ def _build_content(
     period_stats: tuple[tuple[str, float, float, float], ...],
     strategy_name: str | None,
     benchmark_name: str | None,
-    has_real_score: bool,
+    real_score_ratio: float,
     delist_liquidation_count: int,
     delist_loss_amount: float,
     delist_recovery_rate: float,
@@ -831,7 +859,7 @@ def _build_content(
         [
             _build_metrics_section(
                 dict(metrics),
-                has_real_score=has_real_score,
+                real_score_ratio=real_score_ratio,
                 delist_liquidation_count=delist_liquidation_count,
                 delist_loss_amount=delist_loss_amount,
                 delist_recovery_rate=delist_recovery_rate,
@@ -897,7 +925,7 @@ def BacktestResultPanel(
     period_stats: tuple[tuple[str, float, float, float], ...] = (),
     strategy_name: str | None = None,
     benchmark_name: str | None = None,
-    has_real_score: bool = True,
+    real_score_ratio: float = 1.0,
     delist_liquidation_count: int = 0,
     delist_loss_amount: float = 0.0,
     delist_recovery_rate: float = 0.3,
@@ -937,7 +965,7 @@ def BacktestResultPanel(
             period_stats,
             strategy_name,
             benchmark_name,
-            has_real_score,
+            real_score_ratio,
             delist_liquidation_count,
             delist_loss_amount,
             delist_recovery_rate,

@@ -35,6 +35,7 @@ from ui.components.backtest.backtest_result_panel import (
     _get_color_for_sharpe,
     _get_color_for_value,
     _ic_ir_label,
+    _ic_label_kind,
     _ic_mean_label,
     _ic_sort_tooltip,
     _invested_color,
@@ -339,29 +340,50 @@ class TestBuildMetricsSection:
 
 
 class TestIcSortLabel:
-    """BT-01: has_real_score=False 时 IC 卡片标签切换为「排序 IC」并附 tooltip。"""
+    """BT-01/MINOR-02: 按独立打分占比 real_score_ratio 切换 IC 卡片三态。
 
-    def test_ic_mean_label_switches_to_sort(self) -> None:
+    1.0=真实 IC；0.0=排序 IC（附 sort tooltip）；0<r<1=混合口径（附占比 tooltip）。
+    纯真实口径须 100% 覆盖，部分缺失不得冒充纯真实口径（R21）。
+    """
+
+    def test_ic_label_kind_three_states(self) -> None:
+        assert _ic_label_kind(1.0) == "real"
+        assert _ic_label_kind(0.0) == "sort"
+        assert _ic_label_kind(0.6) == "mixed"
+        assert _ic_label_kind(0.999) == "mixed"
+
+    def test_ic_mean_label_switches_by_ratio(self) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
-            _ic_mean_label(True)
+            _ic_mean_label(1.0)
             mock_i18n.assert_called_with("backtest_metric_ic_mean")
-            _ic_mean_label(False)
+            _ic_mean_label(0.0)
             mock_i18n.assert_called_with("backtest_metric_ic_mean_sort")
+            _ic_mean_label(0.5)
+            mock_i18n.assert_called_with("backtest_metric_ic_mean_mixed")
 
-    def test_ic_ir_label_switches_to_sort(self) -> None:
+    def test_ic_ir_label_switches_by_ratio(self) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
-            _ic_ir_label(True)
+            _ic_ir_label(1.0)
             mock_i18n.assert_called_with("backtest_metric_ic_ir")
-            _ic_ir_label(False)
+            _ic_ir_label(0.0)
             mock_i18n.assert_called_with("backtest_metric_ic_ir_sort")
+            _ic_ir_label(0.5)
+            mock_i18n.assert_called_with("backtest_metric_ic_ir_mixed")
 
-    def test_ic_sort_tooltip_only_when_no_real_score(self) -> None:
-        # has_real_score=True → 无 tooltip
-        assert _ic_sort_tooltip(True) == ""
+    def test_ic_tooltip_by_ratio(self) -> None:
+        # 纯真实口径（1.0）→ 无 tooltip
+        assert _ic_sort_tooltip(1.0) == ""
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
-            tip = _ic_sort_tooltip(False)
+            tip = _ic_sort_tooltip(0.0)
             assert tip != ""
             mock_i18n.assert_called_with("backtest_metric_ic_sort_tooltip")
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            _ic_sort_tooltip(0.4)
+            mock_i18n.assert_called_with("backtest_metric_ic_mixed_tooltip", percent="40")
+        # 下取整：ratio<1 不得显示为「100%」（与「混合」标签自相矛盾）。
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            _ic_sort_tooltip(0.995)
+            mock_i18n.assert_called_with("backtest_metric_ic_mixed_tooltip", percent="99")
 
 
 class TestInvestedVisibility:

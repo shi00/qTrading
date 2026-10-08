@@ -315,7 +315,12 @@ class BacktestResult:
     ic_dates: pl.Series = field(default_factory=lambda: pl.Series(dtype=pl.Date))
     # BT-01: 信号是否来自独立打分（存在 score/signal_score/rank_score/ai_score 列）。
     # False 表示 IC 仅基于策略排序字段的「排序 IC」，UI 据此调整呈现与 tooltip。
+    # MINOR-02: 语义收紧为「区间内全部 IC 观测均来自独立打分」（= real_score_ratio == 1.0）。
     has_real_score: bool = True
+
+    # MINOR-02: IC 观测中来自独立打分的比例（0.0~1.0）。1.0=纯真实口径；0.0=纯排序口径；
+    # 0<r<1=混合口径（部分交易日降级缺打分列）。供 UI 区分三态、并随 quality_json 落库。
+    real_score_ratio: float = 1.0
 
     # BT-02: 退市清算分项统计（置于末尾带默认值，避免破坏既有关键字构造点）。
     # delist_liquidation_count: 触发的退市强制清算笔数。
@@ -348,6 +353,7 @@ class BacktestResult:
             delist_liquidation_count=self.delist_liquidation_count,
             delist_loss_amount=self.delist_loss_amount,
             has_real_score=self.has_real_score,
+            real_score_ratio=self.real_score_ratio,
         )
 
     def to_persist_dict(self) -> dict:
@@ -396,5 +402,7 @@ class BacktestResult:
                 "delist_liquidation_count": self.delist_liquidation_count,
                 "delist_loss_amount": self.delist_loss_amount,
                 "has_real_score": self.has_real_score,
+                # MINOR-02: 独立打分占比随可信度元数据落库，供历史记录区分纯真实/混合/排序口径。
+                "real_score_ratio": self.real_score_ratio,
             },
         }
