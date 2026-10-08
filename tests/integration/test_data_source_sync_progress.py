@@ -66,7 +66,7 @@ def task_manager():
 def mock_processor():
     instance = MagicMock(spec=DataProcessor)
     instance.run_daily_update = AsyncMock()
-    instance.run_ai_concept_tagging = AsyncMock()
+    instance.run_concept_sync = AsyncMock()
     instance.initialize_system = AsyncMock(return_value={"success": True})
     instance.request_cancel = AsyncMock()
     instance.is_cancelled = MagicMock(return_value=False)
