@@ -31,9 +31,6 @@ def _make_dao():
 class TestConceptPrefixConstants:
     """Task 1.1: 来源前缀常量定义（review09-24 MAJOR-06 新增 TS_）"""
 
-    def test_ai_concept_prefix(self):
-        assert StockDao.AI_CONCEPT_PREFIX == "AI_LLM_"
-
     def test_em_concept_prefix(self):
         assert StockDao.EM_CONCEPT_PREFIX == "EM_"
 
@@ -41,7 +38,7 @@ class TestConceptPrefixConstants:
         assert StockDao.LIMIT_CONCEPT_PREFIX == "LIMIT_"
 
     def test_ts_concept_prefix(self):
-        """Tushare 概念同步自有行前缀，与 EM_/AI_LLM_/LIMIT_ 隔离"""
+        """Tushare 概念同步自有行前缀，与 EM_/LIMIT_ 隔离"""
         assert StockDao.TS_CONCEPT_PREFIX == "TS_"
 
 
@@ -77,7 +74,7 @@ class TestOverwriteConceptsDeleteScope:
 
     @pytest.mark.asyncio
     async def test_does_not_delete_other_source_concepts(self):
-        """DELETE 语句不得触及 EM_ / AI_LLM_ / LIMIT_ 其他来源行"""
+        """DELETE 语句不得触及 EM_ / LIMIT_ 其他来源行"""
         dao = _make_dao()
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "concept_id": ["TS_C1"], "concept_name": ["概念1"]})
         mock_conn = AsyncMock()
@@ -92,81 +89,13 @@ class TestOverwriteConceptsDeleteScope:
         sql_calls = [call.args[0] for call in mock_conn.exec_driver_sql.call_args_list]
         delete_calls = [s for s in sql_calls if s.strip().upper().startswith("DELETE")]
         assert len(delete_calls) == 1
-        for other_prefix in (StockDao.EM_CONCEPT_PREFIX, StockDao.AI_CONCEPT_PREFIX, StockDao.LIMIT_CONCEPT_PREFIX):
+        for other_prefix in (StockDao.EM_CONCEPT_PREFIX, StockDao.LIMIT_CONCEPT_PREFIX):
             assert other_prefix not in delete_calls[0]
         # 参数仅含 TS_ 前缀，不放行他源
         delete_call = next(
             c for c in mock_conn.exec_driver_sql.call_args_list if c.args[0].strip().upper().startswith("DELETE")
         )
         assert delete_call.args[1] == [StockDao.TS_CONCEPT_PREFIX.replace("_", "\\_") + "%"]
-
-
-class TestClearAllAiLlmConcepts:
-    """Task 1.1: 重命名 clear_all_doubao_concepts → clear_all_ai_llm_concepts"""
-
-    @pytest.mark.asyncio
-    async def test_method_exists_and_deletes_ai_llm_prefix(self):
-        dao = _make_dao()
-        dao._write_db = AsyncMock(return_value=10)
-        result = await dao.clear_all_ai_llm_concepts()
-        assert result == 10
-        sql_arg = dao._write_db.call_args.args[0]
-        assert "concept_id LIKE $1" in sql_arg
-        assert "AI_LLM_" not in sql_arg  # SQL 不应含字面量（R4 参数化）
-        assert "AI_DOUBAO_" not in sql_arg
-        # 验证参数正确传入（R4 参数化）
-        params_arg = dao._write_db.call_args.args[1]
-        assert params_arg == [f"{StockDao.AI_CONCEPT_PREFIX}%"]
-
-    def test_old_method_removed(self):
-        """旧的 clear_all_doubao_concepts 方法不应再存在"""
-        assert not hasattr(StockDao, "clear_all_doubao_concepts")
-
-
-class TestUpsertAiConceptsPrefixMigration:
-    """Task 1.1: upsert_ai_concepts 内部前缀迁移 AI_DOUBAO_ → AI_LLM_"""
-
-    @pytest.mark.asyncio
-    async def test_uses_ai_llm_prefix(self):
-        dao = _make_dao()
-        entries = [{"ts_code": "000001.SZ", "concepts": ["概念1"]}]
-        await dao.upsert_ai_concepts(entries)
-        dao._save_upsert.assert_called_once()
-        df_arg = dao._save_upsert.call_args.args[0]
-        concept_ids = df_arg["concept_id"].tolist()
-        assert all(cid.startswith("AI_LLM_") for cid in concept_ids), (
-            f"concept_id 应以 AI_LLM_ 开头，实际: {concept_ids}"
-        )
-        assert not any(cid.startswith("AI_DOUBAO_") for cid in concept_ids)
-
-    @pytest.mark.asyncio
-    async def test_dummy_id_uses_ai_llm_prefix(self):
-        """无概念时生成的 dummy_id 也应使用 AI_LLM_ 前缀"""
-        dao = _make_dao()
-        entries = [{"ts_code": "000001.SZ", "concepts": []}]
-        await dao.upsert_ai_concepts(entries)
-        dao._save_upsert.assert_called_once()
-        df_arg = dao._save_upsert.call_args.args[0]
-        concept_ids = df_arg["concept_id"].tolist()
-        assert len(concept_ids) == 1
-        assert concept_ids[0].startswith("AI_LLM_")
-
-
-class TestGetStocksWithoutAiConceptsPrefixMigration:
-    """Task 1.1: get_stocks_without_ai_concepts 内部前缀迁移"""
-
-    @pytest.mark.asyncio
-    async def test_sql_uses_ai_llm_prefix(self):
-        dao = _make_dao()
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]}))
-        await dao.get_stocks_without_ai_concepts(batch_size=10)
-        sql_arg = dao._read_db.call_args.args[0]
-        assert "concept_id LIKE $1" in sql_arg
-        assert "AI_LLM_" not in sql_arg  # SQL 不应含字面量（R4 参数化）
-        assert "AI_DOUBAO_" not in sql_arg
-        # 验证参数正确传入（R4 参数化）
-        params_arg = dao._read_db.call_args.args[1]
-        assert params_arg == [f"{StockDao.AI_CONCEPT_PREFIX}%"]
 
 
 class TestOverwriteEmConcepts:
@@ -364,299 +293,6 @@ class TestGetConceptsByPrefix:
         dao._read_db = AsyncMock(return_value=pd.DataFrame())
         result = await dao.get_concepts_by_prefix("EM_")
         assert result == []
-
-
-class TestAIConceptFailureConstants:
-    """错题本：默认重试上限与冷却期常量"""
-
-    def test_max_retry_constant(self):
-        assert StockDao.AI_CONCEPT_FAILURE_MAX_RETRY == 3
-
-    def test_cooldown_seconds_constant(self):
-        assert StockDao.AI_CONCEPT_FAILURE_COOLDOWN_SECONDS == 24 * 3600
-
-
-class TestUpsertAIConceptFailure:
-    """错题本：upsert_ai_concept_failure"""
-
-    @pytest.mark.asyncio
-    async def test_upsert_calls_guarded_begin_with_correct_sql(self):
-        """验证使用 _guarded_begin 事务保护，SQL 含 ON CONFLICT upsert"""
-        dao = _make_dao()
-        mock_conn = AsyncMock()
-        mock_conn.exec_driver_sql = AsyncMock()
-        dao._guarded_begin = MagicMock()
-        dao._guarded_begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
-        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
-
-        result = await dao.upsert_ai_concept_failure("000001.SZ", "平安银行", "LLM timeout")
-        assert result == 1
-        mock_conn.exec_driver_sql.assert_called_once()
-        sql_arg = mock_conn.exec_driver_sql.call_args.args[0]
-        assert "INSERT INTO ai_concept_failures" in sql_arg
-        assert "ON CONFLICT (ts_code) DO UPDATE" in sql_arg
-        assert "retry_count = ai_concept_failures.retry_count + 1" in sql_arg
-        params = mock_conn.exec_driver_sql.call_args.args[1]
-        assert params[0] == "000001.SZ"
-        assert params[1] == "平安银行"
-        assert params[2] == "LLM timeout"
-
-    @pytest.mark.asyncio
-    async def test_upsert_propagates_cancelled_error(self):
-        """CancelledError 必须传播（R2）"""
-        dao = _make_dao()
-        dao._guarded_begin = MagicMock()
-        dao._guarded_begin.return_value.__aenter__ = AsyncMock(
-            side_effect=asyncio.CancelledError(),
-        )
-        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
-        with pytest.raises(asyncio.CancelledError):
-            await dao.upsert_ai_concept_failure("000001.SZ", "test", "err")
-
-    @pytest.mark.asyncio
-    async def test_upsert_propagates_engine_disposed(self):
-        """EngineDisposedError 必须传播（R5）"""
-        from data.persistence.daos.base_dao import EngineDisposedError
-
-        dao = _make_dao()
-        dao._guarded_begin = MagicMock()
-        dao._guarded_begin.return_value.__aenter__ = AsyncMock(
-            side_effect=EngineDisposedError(),
-        )
-        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
-        with pytest.raises(EngineDisposedError):
-            await dao.upsert_ai_concept_failure("000001.SZ", "test", "err")
-
-    @pytest.mark.asyncio
-    async def test_upsert_custom_cooldown_overrides_default(self):
-        """显式传入 cooldown_seconds 时使用自定义值
-
-        T4 fix: next_retry_at 现以 UTC tz-naive 存储（S1-6 fix 模式），
-        测试边界也需用 to_utc_for_db 转换以保持时区一致。
-        """
-        import datetime as dt
-
-        from utils.time_utils import get_now, to_utc_for_db
-
-        dao = _make_dao()
-        mock_conn = AsyncMock()
-        mock_conn.exec_driver_sql = AsyncMock()
-        dao._guarded_begin = MagicMock()
-        dao._guarded_begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
-        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
-
-        before = to_utc_for_db(get_now())
-        assert before is not None  # get_now() 永不为 None，收窄类型供 Pyright
-        await dao.upsert_ai_concept_failure("000001.SZ", "test", "err", cooldown_seconds=60)
-        after = to_utc_for_db(get_now())
-        assert after is not None
-        params = mock_conn.exec_driver_sql.call_args.args[1]
-        # params[4] = next_retry_at（UTC tz-naive）
-        next_retry: dt.datetime = params[4]
-        # 应在 [before+60s, after+60s] 范围内
-        assert before + dt.timedelta(seconds=60) <= next_retry <= after + dt.timedelta(seconds=60)
-
-    @pytest.mark.asyncio
-    async def test_upsert_writes_utc_not_cst_naive(self):
-        """T4 fix: 验证写入的 last_attempt_at 是 UTC tz-naive，不是 CST tz-naive。
-
-        若仍写 CST tz-naive，与 DB `now()` 比较时会有 8 小时偏差。
-        """
-        import datetime as dt
-
-        from utils.time_utils import CST_TZ, get_now, to_utc_for_db
-
-        dao = _make_dao()
-        mock_conn = AsyncMock()
-        mock_conn.exec_driver_sql = AsyncMock()
-        dao._guarded_begin = MagicMock()
-        dao._guarded_begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
-        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
-
-        before_utc_naive = to_utc_for_db(get_now())
-        assert before_utc_naive is not None  # get_now() 永不为 None，收窄类型供 Pyright
-        await dao.upsert_ai_concept_failure("000001.SZ", "test", "err", cooldown_seconds=0)
-        params = mock_conn.exec_driver_sql.call_args.args[1]
-        # params[3] = last_attempt_at, params[4] = next_retry_at
-        last_attempt: dt.datetime = params[3]
-        # UTC tz-naive 应当比 before_utc_naive 晚（或相等），不应早 8 小时
-        assert last_attempt >= before_utc_naive
-        # 若写的是 CST tz-naive，last_attempt 会比 UTC 早 8 小时
-        cst_naive = get_now().astimezone(CST_TZ).replace(tzinfo=None)
-        cst_as_utc = to_utc_for_db(cst_naive)
-        assert cst_as_utc is not None
-        assert abs((last_attempt - cst_as_utc).total_seconds()) < 5  # 应接近 UTC，不是 CST
-
-
-class TestGetAIConceptFailuresForRetry:
-    """错题本：get_ai_concept_failures_for_retry"""
-
-    @pytest.mark.asyncio
-    async def test_returns_list_of_tuples(self):
-        dao = _make_dao()
-        dao._read_db = AsyncMock(
-            return_value=pd.DataFrame(
-                {"ts_code": ["000001.SZ", "600000.SH"], "name": ["平安银行", "浦发银行"]},
-            ),
-        )
-        result = await dao.get_ai_concept_failures_for_retry(batch_size=10)
-        assert result == [("000001.SZ", "平安银行"), ("600000.SH", "浦发银行")]
-        sql_arg = dao._read_db.call_args.args[0]
-        assert "retry_count < $1" in sql_arg
-        assert "next_retry_at IS NULL OR next_retry_at <= now()" in sql_arg
-        assert "ORDER BY last_attempt_at ASC" in sql_arg
-        assert "LIMIT $2" in sql_arg
-        # 默认 max_retry=3
-        params = dao._read_db.call_args.args[1]
-        assert params == (3, 10)
-
-    @pytest.mark.asyncio
-    async def test_custom_max_retry_overrides_default(self):
-        dao = _make_dao()
-        dao._read_db = AsyncMock(return_value=pd.DataFrame())
-        await dao.get_ai_concept_failures_for_retry(batch_size=5, max_retry=10)
-        params = dao._read_db.call_args.args[1]
-        assert params == (10, 5)
-
-    @pytest.mark.asyncio
-    async def test_empty_returns_empty_list(self):
-        dao = _make_dao()
-        dao._read_db = AsyncMock(return_value=pd.DataFrame())
-        result = await dao.get_ai_concept_failures_for_retry(batch_size=10)
-        assert result == []
-
-    @pytest.mark.asyncio
-    async def test_propagates_engine_disposed(self):
-        from data.persistence.daos.base_dao import EngineDisposedError
-
-        dao = _make_dao()
-        dao._read_db = AsyncMock(side_effect=EngineDisposedError())
-        with pytest.raises(EngineDisposedError):
-            await dao.get_ai_concept_failures_for_retry(batch_size=10)
-
-
-class TestClearAIConceptFailure:
-    """错题本：clear_ai_concept_failure"""
-
-    @pytest.mark.asyncio
-    async def test_clear_calls_write_db_with_param(self):
-        """成功打标后从错题本删除，使用参数化 SQL（R4）"""
-        dao = _make_dao()
-        dao._write_db = AsyncMock(return_value=1)
-        result = await dao.clear_ai_concept_failure("000001.SZ")
-        assert result == 1
-        sql_arg = dao._write_db.call_args.args[0]
-        assert "DELETE FROM ai_concept_failures WHERE ts_code = $1" in sql_arg
-        params = dao._write_db.call_args.args[1]
-        assert params == ("000001.SZ",)
-
-    @pytest.mark.asyncio
-    async def test_clear_propagates_cancelled(self):
-        dao = _make_dao()
-        dao._write_db = AsyncMock(side_effect=asyncio.CancelledError())
-        with pytest.raises(asyncio.CancelledError):
-            await dao.clear_ai_concept_failure("000001.SZ")
-
-    @pytest.mark.asyncio
-    async def test_clear_propagates_engine_disposed(self):
-        from data.persistence.daos.base_dao import EngineDisposedError
-
-        dao = _make_dao()
-        dao._write_db = AsyncMock(side_effect=EngineDisposedError())
-        with pytest.raises(EngineDisposedError):
-            await dao.clear_ai_concept_failure("000001.SZ")
-
-
-class TestCountAIConceptFailures:
-    """错题本：count_ai_concept_failures"""
-
-    @pytest.mark.asyncio
-    async def test_returns_count(self):
-        dao = _make_dao()
-        dao._read_db = AsyncMock(
-            return_value=pd.DataFrame({"cnt": [5]}),
-        )
-        result = await dao.count_ai_concept_failures()
-        assert result == 5
-
-    @pytest.mark.asyncio
-    async def test_returns_zero_on_empty(self):
-        dao = _make_dao()
-        dao._read_db = AsyncMock(return_value=None)
-        result = await dao.count_ai_concept_failures()
-        assert result == 0
-
-    @pytest.mark.asyncio
-    async def test_swallows_operational_errors_returns_zero(self):
-        """通用异常降级为 0，不传播（诊断用途）"""
-        dao = _make_dao()
-        dao._read_db = AsyncMock(side_effect=RuntimeError("connect fail"))
-        result = await dao.count_ai_concept_failures()
-        assert result == 0
-
-    @pytest.mark.asyncio
-    async def test_count_propagates_engine_disposed(self):
-        """EngineDisposedError 必须传播（R5），不可被降级为 0"""
-        from data.persistence.daos.base_dao import EngineDisposedError
-
-        dao = _make_dao()
-        dao._read_db = AsyncMock(side_effect=EngineDisposedError())
-        with pytest.raises(EngineDisposedError):
-            await dao.count_ai_concept_failures()
-
-
-class TestDeleteExpiredFailures:
-    """T5 fix: 错题本清理 — delete_expired_failures"""
-
-    @pytest.mark.asyncio
-    async def test_deletes_records_with_retry_count_ge_max(self):
-        """正常路径：删除 retry_count >= max_retry 的记录"""
-        dao = _make_dao()
-        dao._write_db = AsyncMock(return_value=2)
-        result = await dao.delete_expired_failures()
-        assert result == 2
-        dao._write_db.assert_called_once()
-        sql_arg = dao._write_db.call_args.args[0]
-        params = dao._write_db.call_args.args[1]
-        assert "DELETE FROM ai_concept_failures WHERE retry_count >= $1" in sql_arg
-        assert params == (StockDao.AI_CONCEPT_FAILURE_MAX_RETRY,)
-
-    @pytest.mark.asyncio
-    async def test_custom_max_retry_overrides_default(self):
-        """显式传入 max_retry 时使用自定义值"""
-        dao = _make_dao()
-        dao._write_db = AsyncMock(return_value=5)
-        result = await dao.delete_expired_failures(max_retry=10)
-        assert result == 5
-        params = dao._write_db.call_args.args[1]
-        assert params == (10,)
-
-    @pytest.mark.asyncio
-    async def test_propagates_cancelled_error(self):
-        """CancelledError 必须传播（R2）"""
-        dao = _make_dao()
-        dao._write_db = AsyncMock(side_effect=asyncio.CancelledError())
-        with pytest.raises(asyncio.CancelledError):
-            await dao.delete_expired_failures()
-
-    @pytest.mark.asyncio
-    async def test_propagates_engine_disposed(self):
-        """EngineDisposedError 必须传播（R5）"""
-        from data.persistence.daos.base_dao import EngineDisposedError
-
-        dao = _make_dao()
-        dao._write_db = AsyncMock(side_effect=EngineDisposedError())
-        with pytest.raises(EngineDisposedError):
-            await dao.delete_expired_failures()
-
-    @pytest.mark.asyncio
-    async def test_propagates_operational_errors(self):
-        """通用异常必须传播（与 count_ai_concept_failures 的降级语义不同：
-        清理是写操作，错误应让调用方感知而非静默）"""
-        dao = _make_dao()
-        dao._write_db = AsyncMock(side_effect=RuntimeError("connect fail"))
-        with pytest.raises(RuntimeError):
-            await dao.delete_expired_failures()
 
 
 class TestOverwriteLimitConcepts:
