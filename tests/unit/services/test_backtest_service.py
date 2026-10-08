@@ -9,7 +9,7 @@ import pytest
 
 from strategies.backtest.config import BacktestConfig, BacktestResult
 from data.cache.cache_manager import CacheManager
-from services.backtest_service import BacktestService
+from services.backtest_service import BacktestService, diff_data_fingerprints
 from strategies.base_strategy import BaseStrategy
 
 pytestmark = pytest.mark.unit
@@ -68,6 +68,8 @@ class TestBacktestService:
             }
         )
         cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes_df)
+        # BT-03 MINOR-03: 默认无数据指纹（None）——既有用例不受指纹注入影响。
+        cache.quote_dao.get_data_fingerprint = AsyncMock(return_value=None)
 
         benchmark_df = pd.DataFrame(
             {
@@ -91,6 +93,8 @@ class TestBacktestService:
         backtest_dao.get_result = AsyncMock(return_value=None)
         backtest_dao.list_results = AsyncMock(return_value=[])
         backtest_dao.delete_result = AsyncMock(return_value=True)
+        # BT-03 MINOR-03: 默认无历史基线指纹（None）——既有用例不受比对逻辑影响。
+        backtest_dao.get_latest_data_fingerprint_for_range = AsyncMock(return_value=None)
         cache.backtest_dao = backtest_dao
 
         return cache
@@ -520,3 +524,163 @@ class TestBacktestService:
 
         saved_dict = mock_cache.backtest_dao.save_result.call_args[0][0]
         assert saved_dict["app_version"] == "dev"
+
+
+def _make_persist_result(
+    *,
+    run_id: str = "run_fp",
+    strategy_name: str = "mock_strategy",
+    start: date = date(2024, 1, 2),
+    end: date = date(2024, 1, 4),
+) -> BacktestResult:
+    """构造用于数据指纹持久化测试的最小 BacktestResult。"""
+    from datetime import datetime
+
+    import polars as pl
+
+    config = BacktestConfig(start_date=start, end_date=end, initial_capital=1_000_000.0)
+    return BacktestResult(
+        config=config,
+        strategy_name=strategy_name,
+        params_snapshot={"p": 1},
+        nav_curve=pl.DataFrame({"trade_date": [start], "nav": [1_000_000.0]}),
+        daily_returns=pl.Series([0.0]),
+        benchmark_returns=pl.Series([0.0]),
+        trades=pl.DataFrame(),
+        positions=pl.DataFrame(),
+        skipped_orders=pl.DataFrame(),
+        metrics={"total_return": 0.0},
+        ic_series=pl.Series([0.0]),
+        period_stats=pl.DataFrame(),
+        data_warnings=(),
+        failed_signal_dates=(),
+        run_id=run_id,
+        executed_at=datetime(2024, 1, 4, 12, 0, 0),
+        duration_ms=100,
+    )
+
+
+class TestDataFingerprintPersistence:
+    """BT-03 MINOR-03：数据版本指纹注入与重跑比对（R21/R24 合规）。"""
+
+    @pytest.fixture
+    def mock_cache(self) -> MagicMock:
+        cache = MagicMock()
+        backtest_dao = MagicMock()
+        backtest_dao.save_result = AsyncMock(return_value=1)
+        backtest_dao.get_latest_data_fingerprint_for_range = AsyncMock(return_value=None)
+        cache.backtest_dao = backtest_dao
+        cache.quote_dao = MagicMock()
+        cache.quote_dao.get_data_fingerprint = AsyncMock(return_value=None)
+        return cache
+
+    def test_diff_returns_changed_fields(self) -> None:
+        prev = {
+            "daily_quotes_row_count": 10,
+            "daily_quotes_max_updated_at": "2024-01-02T00:00:00",
+            "financial_reports_max_ann_date": "2023-12-31",
+        }
+        curr = {**prev, "daily_quotes_row_count": 11}
+        assert diff_data_fingerprints(prev, curr) == ["daily_quotes_row_count"]
+
+    def test_diff_none_baseline_returns_empty(self) -> None:
+        assert diff_data_fingerprints(None, {"daily_quotes_row_count": 1}) == []
+
+    def test_diff_missing_field_treated_as_none(self) -> None:
+        prev = {"daily_quotes_row_count": 10}
+        curr = {
+            "daily_quotes_row_count": 10,
+            "daily_quotes_max_updated_at": None,
+            "financial_reports_max_ann_date": "2023-12-31",
+        }
+        assert diff_data_fingerprints(prev, curr) == ["financial_reports_max_ann_date"]
+
+    @pytest.mark.asyncio
+    async def test_fingerprint_injected_when_no_baseline(self, mock_cache: MagicMock) -> None:
+        fingerprint = {
+            "daily_quotes_row_count": 10,
+            "daily_quotes_max_updated_at": "2024-01-02T00:00:00",
+            "financial_reports_max_ann_date": "2023-12-31",
+        }
+        mock_cache.quote_dao.get_data_fingerprint = AsyncMock(return_value=fingerprint)
+        service = BacktestService(cache=mock_cache)
+
+        await service._persist_result(_make_persist_result())
+
+        saved = mock_cache.backtest_dao.save_result.call_args[0][0]
+        assert saved["quality_json"]["data_fingerprint"] == fingerprint
+        # 无基线：不写比较结论（不得伪装成「未变化」，R21）
+        assert "data_version_changes" not in saved["quality_json"]
+
+    @pytest.mark.asyncio
+    async def test_fingerprint_unchanged_writes_empty_changes(self, mock_cache: MagicMock) -> None:
+        fingerprint = {
+            "daily_quotes_row_count": 10,
+            "daily_quotes_max_updated_at": "2024-01-02T00:00:00",
+            "financial_reports_max_ann_date": "2023-12-31",
+        }
+        mock_cache.quote_dao.get_data_fingerprint = AsyncMock(return_value=fingerprint)
+        mock_cache.backtest_dao.get_latest_data_fingerprint_for_range = AsyncMock(return_value=dict(fingerprint))
+        service = BacktestService(cache=mock_cache)
+
+        await service._persist_result(_make_persist_result())
+
+        saved = mock_cache.backtest_dao.save_result.call_args[0][0]
+        assert saved["quality_json"]["data_version_changes"] == []
+
+    @pytest.mark.asyncio
+    async def test_fingerprint_changed_records_fields(self, mock_cache: MagicMock) -> None:
+        baseline = {
+            "daily_quotes_row_count": 10,
+            "daily_quotes_max_updated_at": "2024-01-02T00:00:00",
+            "financial_reports_max_ann_date": "2023-12-31",
+        }
+        current = {**baseline, "daily_quotes_row_count": 12, "financial_reports_max_ann_date": "2024-01-01"}
+        mock_cache.quote_dao.get_data_fingerprint = AsyncMock(return_value=current)
+        mock_cache.backtest_dao.get_latest_data_fingerprint_for_range = AsyncMock(return_value=baseline)
+        service = BacktestService(cache=mock_cache)
+
+        await service._persist_result(_make_persist_result())
+
+        saved = mock_cache.backtest_dao.save_result.call_args[0][0]
+        assert saved["quality_json"]["data_version_changes"] == [
+            "daily_quotes_row_count",
+            "financial_reports_max_ann_date",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_fingerprint_none_omits_key(self, mock_cache: MagicMock) -> None:
+        mock_cache.quote_dao.get_data_fingerprint = AsyncMock(return_value=None)
+        service = BacktestService(cache=mock_cache)
+
+        await service._persist_result(_make_persist_result())
+
+        saved = mock_cache.backtest_dao.save_result.call_args[0][0]
+        assert "data_fingerprint" not in saved["quality_json"]
+        assert "data_version_changes" not in saved["quality_json"]
+
+    @pytest.mark.asyncio
+    async def test_fingerprint_failure_does_not_block_persist(self, mock_cache: MagicMock) -> None:
+        mock_cache.quote_dao.get_data_fingerprint = AsyncMock(side_effect=RuntimeError("boom"))
+        service = BacktestService(cache=mock_cache)
+
+        returned = await service._persist_result(_make_persist_result())
+
+        mock_cache.backtest_dao.save_result.assert_called_once()
+        assert returned is not None
+        saved = mock_cache.backtest_dao.save_result.call_args[0][0]
+        assert "data_fingerprint" not in saved["quality_json"]
+
+    @pytest.mark.asyncio
+    async def test_fingerprint_query_passes_range_bounds(self, mock_cache: MagicMock) -> None:
+        mock_cache.quote_dao.get_data_fingerprint = AsyncMock(return_value=None)
+        service = BacktestService(cache=mock_cache)
+
+        await service._persist_result(_make_persist_result(start=date(2024, 2, 1), end=date(2024, 3, 1)))
+
+        call_args = mock_cache.quote_dao.get_data_fingerprint.call_args[0]
+        assert call_args[0] == date(2024, 2, 1)
+        assert call_args[1] == date(2024, 3, 1)
+        baseline_args = mock_cache.backtest_dao.get_latest_data_fingerprint_for_range.call_args
+        # 无指纹时不查询基线
+        assert baseline_args is None

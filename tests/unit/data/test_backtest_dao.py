@@ -679,3 +679,96 @@ class TestBacktestDAOJsonbSerialization:
                 "scalar": 42,
             },
         }
+
+
+class TestBacktestDAODataFingerprintBaseline:
+    """BT-03 MINOR-03：上次运行数据指纹基线查询（缺基线返回 None，R21）。"""
+
+    @pytest.mark.asyncio
+    async def test_returns_fingerprint_from_quality_json(self, dao: BacktestDAO) -> None:
+        dao._check_engine = MagicMock()
+        fingerprint = {
+            "daily_quotes_row_count": 100,
+            "daily_quotes_max_updated_at": "2024-01-31T00:00:00",
+            "financial_reports_max_ann_date": "2023-12-31",
+        }
+        dao._read_db_select = AsyncMock(
+            return_value=pd.DataFrame({"quality_json": [{"data_fingerprint": fingerprint}]})
+        )
+
+        result = await dao.get_latest_data_fingerprint_for_range("strategy1", date(2024, 1, 1), date(2024, 1, 31))
+
+        assert result == fingerprint
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_rows(self, dao: BacktestDAO) -> None:
+        dao._check_engine = MagicMock()
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+
+        assert await dao.get_latest_data_fingerprint_for_range("s", date(2024, 1, 1), date(2024, 1, 31)) is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_quality_json_null(self, dao: BacktestDAO) -> None:
+        """存量记录 quality_json 为 NULL → 无基线（R21：未知不伪装为未变）。"""
+        dao._check_engine = MagicMock()
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"quality_json": [None]}))
+
+        assert await dao.get_latest_data_fingerprint_for_range("s", date(2024, 1, 1), date(2024, 1, 31)) is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_fingerprint_key(self, dao: BacktestDAO) -> None:
+        dao._check_engine = MagicMock()
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"quality_json": [{"data_warnings": []}]}))
+
+        assert await dao.get_latest_data_fingerprint_for_range("s", date(2024, 1, 1), date(2024, 1, 31)) is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_fingerprint_not_dict(self, dao: BacktestDAO) -> None:
+        dao._check_engine = MagicMock()
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"quality_json": [{"data_fingerprint": "oops"}]}))
+
+        assert await dao.get_latest_data_fingerprint_for_range("s", date(2024, 1, 1), date(2024, 1, 31)) is None
+
+    @pytest.mark.asyncio
+    async def test_query_failure_returns_none(self, dao: BacktestDAO) -> None:
+        dao._check_engine = MagicMock()
+        dao._read_db_select = AsyncMock(side_effect=Exception("db error"))
+
+        assert await dao.get_latest_data_fingerprint_for_range("s", date(2024, 1, 1), date(2024, 1, 31)) is None
+
+    @pytest.mark.asyncio
+    async def test_propagates_engine_disposed_at_entry(self, dao: BacktestDAO) -> None:
+        dao._check_engine = MagicMock(side_effect=EngineDisposedError("disposed"))
+
+        with pytest.raises(EngineDisposedError, match="disposed"):
+            await dao.get_latest_data_fingerprint_for_range("s", date(2024, 1, 1), date(2024, 1, 31))
+
+    @pytest.mark.asyncio
+    async def test_propagates_engine_disposed_during_read(self, dao: BacktestDAO) -> None:
+        dao._check_engine = MagicMock()
+        dao._read_db_select = AsyncMock(side_effect=EngineDisposedError("disposed"))
+
+        with pytest.raises(EngineDisposedError):
+            await dao.get_latest_data_fingerprint_for_range("s", date(2024, 1, 1), date(2024, 1, 31))
+
+    @pytest.mark.asyncio
+    async def test_propagates_cancelled_error(self, dao: BacktestDAO) -> None:
+        """R2：asyncio.CancelledError 不得被吞。"""
+        dao._check_engine = MagicMock()
+        dao._read_db_select = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError):
+            await dao.get_latest_data_fingerprint_for_range("s", date(2024, 1, 1), date(2024, 1, 31))
+
+    @pytest.mark.asyncio
+    async def test_exclude_run_id_adds_filter(self, dao: BacktestDAO) -> None:
+        dao._check_engine = MagicMock()
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+
+        await dao.get_latest_data_fingerprint_for_range(
+            "s", date(2024, 1, 1), date(2024, 1, 31), exclude_run_id="run_x"
+        )
+
+        stmt = dao._read_db_select.call_args[0][0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "run_x" in compiled
