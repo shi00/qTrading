@@ -202,6 +202,47 @@ class TestIsTradingDay:
         assert not result
 
     @pytest.mark.asyncio
+    async def test_db_non_trading_day_returns_python_bool_false(self):
+        """DB 常规路径判定非交易日必须返回 Python bool False（而非 numpy.bool_）。
+
+        回归：调用方以身份比较 `is False` 判非交易日（scheduler_service._run_daily_update /
+        nightly_prediction._run_nightly_prediction）。is_open 为 int64 列时 `numpy.int64(0) == 1`
+        产出 numpy.bool_，命中不了 `is False`，导致节假日照常发起日更/夜间预测。
+        """
+        df_no_filter = pd.DataFrame({"cal_date": [datetime.date(2024, 6, 15)], "is_open": [0]})
+        svc = _make_service(cache_return=pd.DataFrame(), cache_return_no_filter=df_no_filter)
+        result = await svc.is_trading_day("20240615")
+        assert type(result) is bool
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_db_trading_day_returns_python_bool_true(self):
+        """DB 常规路径判定交易日必须返回 Python bool True（非 numpy.bool_）。"""
+        df_no_filter = pd.DataFrame({"cal_date": [datetime.date(2024, 6, 14)], "is_open": [1]})
+        svc = _make_service(cache_return=pd.DataFrame(), cache_return_no_filter=df_no_filter)
+        result = await svc.is_trading_day("20240614")
+        assert type(result) is bool
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_api_non_trading_day_returns_python_bool_false(self):
+        """API 补齐路径判定非交易日必须返回 Python bool False（而非 numpy.bool_）。"""
+        api_df = pd.DataFrame({"cal_date": ["20240615"], "is_open": [0]})
+        svc = _make_service(cache_return=None, api_return=api_df)
+        result = await svc.is_trading_day("20240615")
+        assert type(result) is bool
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_api_trading_day_returns_python_bool_true(self):
+        """API 补齐路径判定交易日必须返回 Python bool True（而非 numpy.bool_）。"""
+        api_df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        svc = _make_service(cache_return=None, api_return=api_df)
+        result = await svc.is_trading_day("20240614")
+        assert type(result) is bool
+        assert result is True
+
+    @pytest.mark.asyncio
     async def test_db_empty_then_api(self):
         api_df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
         svc = _make_service(cache_return=pd.DataFrame(), api_return=api_df)
