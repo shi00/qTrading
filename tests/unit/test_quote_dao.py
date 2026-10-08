@@ -148,6 +148,43 @@ class TestQuoteDaoGetCachedTradeDates:
         assert result == set()
 
 
+class TestQuoteDaoGetQuoteTradeDates:
+    """BT-03 MAJOR-02: 区间内 daily_quotes 实际覆盖的交易日集合（轻量 DISTINCT）。"""
+
+    @pytest.mark.asyncio
+    async def test_with_data(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame({"trade_date": [datetime.date(2024, 1, 2), datetime.date(2024, 1, 3)]})
+        )
+        result = await dao.get_quote_trade_dates(datetime.date(2024, 1, 1), datetime.date(2024, 1, 5))
+        assert isinstance(result, set)
+        assert result == {datetime.date(2024, 1, 2), datetime.date(2024, 1, 3)}
+
+    @pytest.mark.asyncio
+    async def test_empty(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_quote_trade_dates(datetime.date(2024, 1, 1), datetime.date(2024, 1, 5))
+        assert result == set()
+
+    @pytest.mark.asyncio
+    async def test_none_result_returns_empty_set(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=None)
+        result = await dao.get_quote_trade_dates(datetime.date(2024, 1, 1), datetime.date(2024, 1, 5))
+        assert result == set()
+
+    @pytest.mark.asyncio
+    async def test_failure_propagates_not_suppressed(self):
+        """suppress_errors=False：查询失败必须显式抛出，供调用方区分「未知」与「零行」。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(side_effect=RuntimeError("db down"))
+        with pytest.raises(RuntimeError):  # noqa: weak-assertion  # with 块后强断言 _read_db 以 suppress_errors=False 调用
+            await dao.get_quote_trade_dates(datetime.date(2024, 1, 1), datetime.date(2024, 1, 5))
+        assert dao._read_db.await_args.kwargs["suppress_errors"] is False
+
+
 class TestQuoteDaoGetDateRange:
     @pytest.mark.asyncio
     async def test_with_data(self):

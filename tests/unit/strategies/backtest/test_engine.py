@@ -3,7 +3,7 @@
 
 import math
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import polars as pl
@@ -1508,6 +1508,61 @@ class TestEnrichSuspendStatus:
         assert is_tradable_list[0] is False
         assert is_tradable_list[1] is True
         assert warning is None
+
+    @pytest.mark.asyncio
+    async def test_suspend_data_builds_suspended_keys(self):
+        """BT-03 MAJOR-02: 成功 enrich 时构建 (ts_code, trade_date) 停牌键集合供撮合层区分停牌/数据缺口。"""
+        import pandas as pd
+
+        engine = self._make_engine()
+        engine.cache = MagicMock()
+        suspend_pd = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3)],
+            }
+        )
+        engine.cache.quote_dao.get_suspend_d = AsyncMock(return_value=suspend_pd)
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3)],
+                "close": [10.0, 20.0],
+            }
+        )
+
+        await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
+
+        assert engine._suspended_keys == {("000001.SZ", date(2024, 1, 2)), ("000002.SZ", date(2024, 1, 3))}
+
+    @pytest.mark.asyncio
+    async def test_no_suspend_data_clears_suspended_keys(self):
+        """BT-03 MAJOR-02: 停牌数据缺失时 _suspended_keys 置 None（simulator 退化为统一按停牌处理）。"""
+        engine = self._make_engine()
+        engine.cache = MagicMock()
+        engine.cache.quote_dao.get_suspend_d = AsyncMock(return_value=None)
+        engine._suspended_keys = {("999999.SZ", date(2024, 1, 2))}  # 预置脏值
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [date(2024, 1, 2)],
+                "close": [10.0],
+            }
+        )
+        await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
+
+        assert engine._suspended_keys is None
+
+    def test_coerce_trade_date_handles_mixed_types(self):
+        """BT-03 MAJOR-02: _coerce_trade_date 兼容 date/datetime/str 混型，非法输入返回 None。"""
+        assert VectorBacktestEngine._coerce_trade_date(date(2024, 1, 2)) == date(2024, 1, 2)
+        assert VectorBacktestEngine._coerce_trade_date(datetime(2024, 1, 2, 15, 0)) == date(2024, 1, 2)
+        assert VectorBacktestEngine._coerce_trade_date("2024-01-02") == date(2024, 1, 2)
+        assert VectorBacktestEngine._coerce_trade_date("20240102") == date(2024, 1, 2)
+        assert VectorBacktestEngine._coerce_trade_date(None) is None
+        assert VectorBacktestEngine._coerce_trade_date("not-a-date") is None
 
     @pytest.mark.asyncio
     async def test_exception_marks_all_tradable_and_creates_warning(self):

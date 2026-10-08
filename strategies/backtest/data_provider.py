@@ -51,10 +51,9 @@ class _BacktestQualityProxy:
     无 delegate（未注入 data_processor 的纯数据预载场景）时退化为仅含质量字段的
     纯代理，与历史行为一致。
 
-    # NOTE(lazy): 非 preload 路径（宽区间跳过 / daily fallback）仍用默认 GOLD，
-    #              区间缺口评估仅在 preload_range 成功路径生效。
-    # ceiling: 未预载时无区间数据可评估，无法计算缺口。
-    # upgrade: 为非 preload 路径补充区间质量评估（evaluate_historical_window）。
+    BT-03 MAJOR-02：区间缺口评估已从 preload_range 拆出为 `evaluate_range_quality`，
+    由 preload_range 在**所有路径**（成功预载 / 宽区间跳过 / 预载失败逐日降级）统一调用，
+    不再受 preload_max_days 性能护栏约束——宽区间回测亦能识别区间缺口。
     """
 
     def __init__(
@@ -139,6 +138,10 @@ class BacktestDataProvider:
         """一次性预取整个回测区间的各类数据到内存中，提升回测速度"""
         # R24：每次回测（区间预载入口）重置退市标记观测，避免跨多次运行残留旧状态。
         self._saw_delisting_flagged = False
+        # 每次预载重置区间质量代理与降级警告列表，避免跨多次 preload_range 调用累积旧状态
+        # （含区间超限早退路径：无论是否预载，本次评测都以全新状态开始，不残留上次区间判定）。
+        self._range_preload_warnings = []
+        self._quality_proxy = _BacktestQualityProxy(delegate=self.data_processor)
         # 兼容处理输入参数类型并转为 date 对象
         from datetime import datetime
 
@@ -179,12 +182,10 @@ class BacktestDataProvider:
                 f"requested={(end_date_obj - start_date_obj).days} days. Fallback to daily query."
             )
             self._preloaded = None
+            # BT-03 MAJOR-02: 跳过预载不等于放弃缺口评估——以轻量 DISTINCT 覆盖查询
+            # （与预载 OOM 护栏解耦）独立评估区间缺口，避免宽区间回测静默无缺口告警。
+            await self.evaluate_range_quality(start_date_obj, end_date_obj)
             return
-
-        # 每次预载重置区间质量代理与降级警告列表，避免跨多次 preload_range 调用累积旧状态
-        # （重复调用时若本次跳过评估，proxy 不应残留上次区间的 BRONZE/GOLD 判定）。
-        self._range_preload_warnings = []
-        self._quality_proxy = _BacktestQualityProxy(delegate=self.data_processor)
 
         start_str = self._normalize_trade_date(start_date_obj)
         end_str = self._normalize_trade_date(end_date_obj)
@@ -215,22 +216,6 @@ class BacktestDataProvider:
         self._preloaded = {}
 
         try:
-            # D3-M2 区间质量评估：先取区间"全市场交易日"全集（TradeCalendarService，复用 D3-M1 通路），
-            # 用于检测 screening_data 的缺失交易日。查询失败/退化时 expected 为 None，保持默认 GOLD 代理。
-            from data.domain_services.trade_calendar_service import TradeCalendarService
-
-            expected_dates: set[str] | None = None
-            try:
-                cal_dates = await TradeCalendarService(self.cache, None).get_trade_dates(start_date_obj, end_date_obj)
-                expected_dates = {d.strftime("%Y%m%d") for d in cal_dates}
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.warning(
-                    "[BacktestDataProvider] Range quality evaluation calendar lookup failed, "
-                    "keep default GOLD quality proxy.",
-                    exc_info=True,
-                )
             # 并行查询所有数据
             results = await asyncio.gather(
                 self.cache.screener_dao.get_fundamental_screening_data_range(
@@ -300,43 +285,12 @@ class BacktestDataProvider:
                 else:
                     self._preloaded[key] = {}
 
-            # D3-M2 区间缺口评估：expected=全市场交易日全集，actual=screening_data 实际覆盖日期键。
-            # 空 dict（查询成功但零行）同样评估——整段区间无筛选数据等价于全缺口，必须可见。
-            # 仅查询失败 fallback daily（_preloaded[key]=None）或 expected 不可得时保持默认 GOLD 代理。
-            # D3-M2 残留修复：区间缺口只写入 `_scan_missing_dates` 与下方警告，**不降级 proxy tier**。
-            # 区间 tier 是聚合粒度，而 `_check_tier` 逐日消费——若任一缺口降级 BRONZE，默认 SILVER
-            # 策略（polars_base 默认等级）会在整个区间的每一天被 QualityGateError 拦截，整段回测零信号；
-            # 缺口日本身已由 build_context 返回空 screening_data → 策略空输出（无信号），无需拦截。
-            # 缺口可见性由下方 range_quality_gaps 警告承载（入 data_warnings → UI unreliable 判定）。
+            # BT-03 MAJOR-02: 区间缺口评估已拆出为 evaluate_range_quality，成功预载路径
+            # 直接以 screening_data 实际覆盖日期键作为 covered（空 dict=全区间缺口亦覆盖）；
+            # 非 dict（预载失败为 None）时传 None，交由该方法走轻量覆盖查询。
             screen_pre = self._preloaded.get("screening_data")
-            if expected_dates is not None and isinstance(screen_pre, dict):
-                actual = set(screen_pre.keys())
-                missing = frozenset(sorted(expected_dates - actual))
-                self._quality_proxy = _BacktestQualityProxy(
-                    delegate=self.data_processor,
-                    tier=QualityTier.GOLD,
-                    missing_dates=missing,
-                )
-                if missing:
-                    # D3-M2: 区间缺口必须可见——缺口不触发 `_check_tier` 的等级拦截（proxy 恒
-                    # GOLD，缺口日策略空输出）；但声明 `require_continuous_window=True` 的策略
-                    # （如 OversoldStrategy）仍被 quality_gate 的连续窗口检查拒绝（D2-9 保守
-                    # 设计，缺口区间整段 failed 经 failed_signal_dates 可见）。本警告覆盖其余
-                    # 静默场景（BRONZE 策略 / 未声明连续窗口的策略），经 _range_preload_warnings
-                    # 并入 BacktestResult.data_warnings，触发 backtest_view_model 的 unreliable 判定。
-                    # 格式对齐 DataWarning.__str__（[type] start-end: ...），含缺失数量与占比、
-                    # 前 5 个缺失日（超长截断防撑爆）。
-                    missing_sorted = sorted(missing)
-                    sample = ",".join(missing_sorted[:5]) + ("..." if len(missing_sorted) > 5 else "")
-                    self._range_preload_warnings.append(
-                        f"[range_quality_gaps] {start_str}-{end_str}: {len(missing)} of {len(expected_dates)} "
-                        f"trade date(s) missing in screening_data: {sample}"
-                    )
-                logger.info(
-                    "[BacktestDataProvider] Range quality: %s missing trade date(s) in screening_data → tier %s",
-                    len(missing),
-                    QualityTier(self._quality_proxy._quality_tier).name,
-                )
+            covered_dates = set(screen_pre.keys()) if isinstance(screen_pre, dict) else None
+            await self.evaluate_range_quality(start_date_obj, end_date_obj, covered_dates=covered_dates)
         except asyncio.CancelledError:
             raise
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出数据预加载异常. upgrade: 策略层重构时统一走 classify_error.
@@ -349,6 +303,85 @@ class BacktestDataProvider:
                 f"range_preload_error: {DataSanitizer.sanitize_error(e)}. Fallback to daily query."
             )
             self._preloaded = None
+            # BT-03 MAJOR-02: 整体预载失败（逐日降级）仍以轻量覆盖查询评估区间缺口，
+            # 保证失败区间不因未预载而完全丧失缺口可见性。
+            await self.evaluate_range_quality(start_date_obj, end_date_obj)
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def evaluate_range_quality(
+        self,
+        start_date: date,
+        end_date: date,
+        *,
+        covered_dates: set[str] | None = None,
+    ) -> None:
+        """评估区间内 screening_data 覆盖的交易日，生成区间缺口告警（BT-03 MAJOR-02）。
+
+        与 preload_range 解耦：在**所有路径**（成功预载 / 宽区间跳过预载 / 整体预载失败）
+        统一执行一次「区间全市场交易日全集 − 实际覆盖交易日」求差并写入区间缺口告警，
+        使宽区间回测（超过 preload_max_days 而跳过预载）同样能识别区间缺口，不再静默。
+
+        - ``covered_dates``：screening_data 实际覆盖的日期键集合（"YYYYMMDD"）。为 None 时
+          退化为一次轻量 ``SELECT DISTINCT trade_date``（daily_quotes），以 O(交易日数) 量级
+          独立评估覆盖，与 preload_range 的 OOM 护栏解耦。
+        - 交易日历查询失败 / 轻量覆盖查询失败时保持默认 GOLD 代理（未知不降级、不伪装成
+          无缺口，R21 fail-closed）。
+        - 区间缺口只写入 ``_scan_missing_dates`` 与 ``[range_quality_gaps]`` 告警，恒 GOLD
+          （D3-M2 残留修复：聚合降级会把「区间有缺口」放大为「整个区间每天都被拦截」）。
+        """
+        start_str = self._normalize_trade_date(start_date)
+        end_str = self._normalize_trade_date(end_date)
+
+        from data.domain_services.trade_calendar_service import TradeCalendarService
+
+        try:
+            cal_dates = await TradeCalendarService(self.cache, None).get_trade_dates(start_date, end_date)
+            expected_dates = {d.strftime("%Y%m%d") for d in cal_dates}
+        except asyncio.CancelledError:
+            raise
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出交易日历查询异常. upgrade: 策略层重构时统一走 classify_error.
+        except Exception:
+            logger.warning(
+                "[BacktestDataProvider] Range quality evaluation calendar lookup failed, "
+                "keep default GOLD quality proxy.",
+                exc_info=True,
+            )
+            return
+
+        if covered_dates is None:
+            try:
+                covered = await self.cache.quote_dao.get_quote_trade_dates(start_date, end_date)
+                covered_dates = {self._to_trade_date_key(d) for d in covered}
+            except asyncio.CancelledError:
+                raise
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出轻量覆盖查询异常. upgrade: 策略层重构时统一走 classify_error.
+            except Exception:
+                logger.warning(
+                    "[BacktestDataProvider] Range quality coverage lookup failed, keep default GOLD quality proxy.",
+                    exc_info=True,
+                )
+                return
+
+        missing = frozenset(sorted(expected_dates - covered_dates))
+        self._quality_proxy = _BacktestQualityProxy(
+            delegate=self.data_processor,
+            tier=QualityTier.GOLD,
+            missing_dates=missing,
+        )
+        if missing:
+            # 格式对齐 DataWarning.__str__（[type] start-end: ...），含缺失数量与占比、
+            # 前 5 个缺失日（超长截断防撑爆）。
+            missing_sorted = sorted(missing)
+            sample = ",".join(missing_sorted[:5]) + ("..." if len(missing_sorted) > 5 else "")
+            self._range_preload_warnings.append(
+                f"[range_quality_gaps] {start_str}-{end_str}: {len(missing)} of {len(expected_dates)} "
+                f"trade date(s) missing in screening_data: {sample}"
+            )
+        logger.info(
+            "[BacktestDataProvider] Range quality: %s missing trade date(s) in screening_data → tier %s",
+            len(missing),
+            QualityTier(self._quality_proxy._quality_tier).name,
+        )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def build_context(
@@ -572,6 +605,13 @@ class BacktestDataProvider:
         if isinstance(value, str):
             return value
         return str(value)
+
+    @staticmethod
+    def _to_trade_date_key(value: date | str) -> str:
+        """将 trade_date 值归一化为 "YYYYMMDD" 键（轻量覆盖查询返回 date/Timestamp/str 混型）。"""
+        if isinstance(value, str):
+            return value.replace("-", "").strip()
+        return value.strftime("%Y%m%d")
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_stock_meta(self) -> dict[str, dict]:
