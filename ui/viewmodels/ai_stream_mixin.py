@@ -73,6 +73,22 @@ def _build_ai_failed_banner_message(result_df: pd.DataFrame | None) -> Message |
     return Message("screener_ai_failed_banner", {"count": failed})
 
 
+def _resolve_candidate_total(context: dict, strategy: Any) -> int:
+    """UX-03/MINOR-02: 返回当前策略真实输入口径下的「筛选前候选规模」。
+
+    与 ``PolarsBaseStrategy.filter`` 的数据源选择保持同构：基本面类策略
+    (``requires_fundamental_coverage``) 实际消费 ``fundamental_screening_data``
+    (以 stock_basic 为基表、财报 LEFT JOIN, 与 ``screening_data`` 口径/行数不同)；
+    其余策略消费 ``screening_data``。「参数影响」分母须用策略真实输入, 否则
+    基本面策略的「筛选前 N 只」失真 (review09-24 MINOR-02)。
+    """
+    key = (
+        "fundamental_screening_data" if getattr(strategy, "requires_fundamental_coverage", False) else "screening_data"
+    )
+    pool = context.get(key)
+    return len(pool) if pool is not None else 0
+
+
 # CRITICAL-03: save_results 返回 0 时的定向归因表。仅收录「可由 ai_status 全体一致
 # 直接推出」的状态；未收录者一律回退通用 key（R21：不臆造未知原因）。
 _UNSAVED_STATUS_KEY_BY_AI_STATUS: dict[str, str] = {
@@ -729,12 +745,12 @@ class AIStreamMixin:
 
                 if result_df is not None and not result_df.empty:
                     self._full_results = result_df
-                    # UX-03 (影响反馈): 筛选前候选池 (screening_data) 是本次策略的输入;
-                    # 结果非空且明显收窄时, 向 D3-4 警告通道追加「候选从 N 收窄至 M」横幅,
-                    # 让参数实际效力立即可见, 使任何单位/阈值错位在首次使用时暴露。
+                    # UX-03 (影响反馈): 筛选真实输入 (基本面策略 fundamentals / 其余 screening_data)
+                    # 是本次策略的输入; 结果非空且明显收窄时, 向 D3-4 警告通道追加
+                    # 「候选从 N 收窄至 M」横幅, 让参数实际效力立即可见, 使任何单位/阈值错位
+                    # 在首次使用时暴露。分母用策略真实输入口径 (MINOR-02), 避免基本面策略失真。
                     # 结果为空(收窄至 0)时移到下方空态原因分支, 避免与本横幅冗余。
-                    sd = context.get("screening_data")
-                    candidate_total = len(sd) if sd is not None else 0
+                    candidate_total = _resolve_candidate_total(context, strategy)
                     if candidate_total > len(result_df):
                         strategy_warnings = (
                             *strategy_warnings,
@@ -845,11 +861,11 @@ class AIStreamMixin:
                     return Message("task_screening_success", {"count": len(result_df)})
 
                 self._full_results = pd.DataFrame()
-                # UX-03 (空态原因): 走到此分支说明筛选前有候选数据 (452 已兜底非空),
+                # UX-03 (空态原因): 走到此分支说明筛选前有真实候选输入 (452 已兜底非空),
                 # 但当前条件下无匹配 —— 在结果区空态提示「共考虑 N 只候选, 可调低条件」,
                 # 区分于「无数据」(需先同步), 避免用户误判「这个参数没用 / 软件有 bug」。
-                sd = context.get("screening_data")
-                candidate_total = len(sd) if sd is not None else 0
+                # 分母用策略真实输入口径 (MINOR-02): 基本面策略取 fundamentals 行数。
+                candidate_total = _resolve_candidate_total(context, strategy)
                 # DS-04: 基本面策略因财务数据缺失/覆盖率不足被守卫拦截时（_empty_reason
                 # = fundamental_data_missing），不显示「无匹配可调条件」空态提示——那会
                 # 给出与事实相反的指引（实际缺财务数据）。仅保留上方
