@@ -712,6 +712,7 @@ except Exception as e:
 - [0009-ai-snapshot-replay.md](./docs/adr/0009-ai-snapshot-replay.md) — AI 结论快照回放（统计归因视图落地，回测快照信号源为后续增强）
 - [0010-screening-history-append-only.md](./docs/adr/0010-screening-history-append-only.md) — screening_history 唯一键改回 append-only（含 run_id，反转 ADR-0007）
 - [0011-litellm-router-failover.md](./docs/adr/0011-litellm-router-failover.md) — 手写 failover 循环迁移至 litellm.Router（L4，含双层审计与错误收敛语义）
+- [0012-news-sentiment-inference-paradigm.md](./docs/adr/0012-news-sentiment-inference-paradigm.md) — 新闻情绪打分的本地推理范式（CLS embedding + numpy 分类头，不用 RANK 模式；独立常驻子进程；仅展示边界）
 
 ### docs/governance/ — 治理类机器可读文件
 
