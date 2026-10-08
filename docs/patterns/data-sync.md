@@ -82,6 +82,28 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 
 ---
 
+## 新闻源采集（离线采集器内核）
+
+新闻源采集器内核落 `data/external/news_sources/`（每源一个模块；`__init__` 不聚合导出，避免多源任务在同一文件冲突）。采集规范：每源限速 ≥ 2~3 秒 / 请求、常规 `User-Agent`、按源去重键、单源连续失败 N 次熔断告警（参照 `data/external/news_fetcher.py` 已有的 Sina / CLS 熔断计数实现）。
+
+与 `data/external/news_fetcher.py` 的边界：离线采集器复用独立解析内核，**不 import** `news_fetcher`（避免循环导入）；在线集成（`get_latest_global_news` 新增源）由后续任务在 `news_fetcher.py` 内完成。
+
+### 新浪 7x24（`data/external/news_sources/sina_7x24.py`）
+
+`GET https://zhibo.sina.com.cn/api/zhibo/feed`（`zhibo_id=152`，JSON，无签名 / 无 Cookie）。解析 `result.data.feed.list[]`：`id`（去重键）/ `rich_text`（正文）/ `create_time`（`YYYY-MM-DD HH:MM:SS` 北京时间）/ `tag[{id,name}]` / `docurl`；`ext` 为 **JSON 字符串**，含 `stocks[]`。
+
+**A 股 `ts_code` 映射规则（2026-10-08 实测确认）**：`ext.stocks[]` 每项 `{market, symbol, key}`；**A 股 = `market == "cn"`**，`symbol` 形如 `sh688333` / `sz002544` / `bj920670`（交易所小写前缀 + 6 位数字），映射为 `NNNNNN.SH` / `.SZ` / `.BJ`；其余 market（`us` / `hk` / `fund` / `foreign` / `commodity` / `global` / `worldIndex` / `sb` / `uk` / `CFF`，大小写不统一）不映射。
+
+> **陷阱**：`cn` 市场**混入指数 / 板块**——`sh000xxx`（上证指数系列）/ `sz399xxx`（深证指数系列）/ `bj899xxx`（北证 50）/ `si*`·`sih*`（新浪板块码）。这些可映射为合法指数 `ts_code`（指数与个股号段不冲突，如 `000001.SH` 为指数、`000001.SZ` 为平安银行），但语义上非个股，须经 `is_index_code()` 区分后由调用方决定是否保留。时间口径同 `news_fetcher._parse_news_time`：`create_time` 为北京时间文本，按 CST 归属后转 **UTC tz-naive** 存库。
+
+### 同花顺 7x24（补测结论：不纳入）
+
+2026-10-08 补测：`GET https://news.10jqka.com.cn/tapp/news/push/stock/`（`page` / `pagesize`）返回 200 JSON，`data.list[]` 含 `id` / `title` / `digest` / `url` / `ctime`（unix 秒字符串）/ `stock[{name, stockCode, stockMarket}]`；其余接口（`tapp/news/push/alllist/`、`tapp/news/roll/`、`tapp/news/real/`）实测返回 404。
+
+**结论：不纳入主源。** 理由：① 与新浪 7x24 定位重叠；② `stock[].stockMarket` 为**无文档数值编码**（实测 33=深市 / 17=沪市 / 151=北交所 / 177=港股 / 185·186·169=美股 / 20·36=基金 等），须自维护映射表且随上游变动失效率高；③ 增加第 4 个源的熔断 / 限速 / 解析维护面，收益不足。
+
+---
+
 ## 完成判定（canonical 入口）
 
 - 同步任务遵循 Tushare Syncer 设计模式，数据流向符合本文件「数据流向」
