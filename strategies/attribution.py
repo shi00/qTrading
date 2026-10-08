@@ -3,8 +3,10 @@
 模型说明：
 - ``FilterCondition``  单个筛选条件的展示化描述。仅在筛选幸存行上生成, 故「是否通过」恒真,
   用运算符表达 (gt/lt/between/geq/leq), 不设冗余 is_passed 死字段 (二次检视 M5)。
-- ``RankAttribution``  排序归因。口径恒为「按 strategy 输出 (AI 截断前) 候选池内,
-  按 rank_field 排序」, 由 base 统一计算 (一次检视 Major#1 修复: total 不因 AI 截断失真)。
+- ``RankAttribution``  排序归因。口径恒为「strategy 输出 (AI 截断前) 候选池内」:
+  ``position`` = 该行在候选池中的序位 (由策略自身排序决定, base 不二次重排, 检视 MINOR-01),
+  ``field`` / ``ascending`` 声明主排序依据, ``total`` 由 base 统一计算
+  (一次检视 Major#1 修复: total 不因 AI 截断失真)。
 - ``FilterAttribution`` 整只股票的归因, 以 JSON 序列化进结果 DataFrame 的 ``_filter_attribution`` 列。
 
 归因只携带 ``column`` (列名), 展示文案由 View 经 ``get_column_alias`` 翻译为 i18n key,
@@ -80,12 +82,12 @@ def condition_to_expr(cond: FilterCondition) -> pl.Expr:
 
 @dataclass(frozen=True)
 class RankAttribution:
-    """排序归因 (候选池内按某字段排序)."""
+    """排序归因 (候选池内序位 + 主排序依据)."""
 
     field: str
     ascending: bool = False
     value: float | None = None
-    position: int | None = None  # 1-based
+    position: int | None = None  # 1-based, 候选池 (策略输出序) 序位
     total: int | None = None
 
 

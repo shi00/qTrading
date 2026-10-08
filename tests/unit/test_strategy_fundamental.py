@@ -382,6 +382,51 @@ class TestGrowthStrategy(unittest.TestCase):
         )
         self.assertFalse(any(c.column == "growth_quality_doubt" for c in attr_normal.conditions))
 
+    def test_growth_attribution_position_matches_list_order_with_doubt(self):
+        """MINOR-01: 存在 growth_quality_doubt=1 行时, 归因序位须与列表序位一致。
+
+        ``_filter_logic`` 按 (growth_quality_doubt 升序, roe_annualized 降序) 复合排序;
+        基类归因若按单一 roe 字段重排, 会把置后的存疑行算成第 1 名, 与列表位置对不上。
+        """
+        from strategies.attribution import ATTRIBUTION_COLUMN, attribution_from_json
+        from strategies.polars_base import _build_attributions
+
+        # 列表序 (即 _filter_logic 输出序): 先非存疑 (roe 高→低), 存疑行置后
+        df = pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "or_yoy": 20.0,
+                    "netprofit_yoy": 30.0,
+                    "roe_annualized": 30.0,
+                    "growth_quality_doubt": 0,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "or_yoy": 20.0,
+                    "netprofit_yoy": 30.0,
+                    "roe_annualized": 22.0,
+                    "growth_quality_doubt": 0,
+                },
+                {
+                    "ts_code": "000003.SZ",
+                    "or_yoy": 20.0,
+                    "netprofit_yoy": 60.0,
+                    "roe_annualized": 50.0,
+                    "growth_quality_doubt": 1,
+                },
+            ]
+        )
+        out = _build_attributions(self.strategy, df, total=3, context={"params": {}})
+        pos: dict[str, int | None] = {}
+        for code, raw in zip(out["ts_code"], out[ATTRIBUTION_COLUMN], strict=True):
+            attr = attribution_from_json(raw)
+            pos[code] = attr.rank.position if attr is not None and attr.rank is not None else None
+        # 存疑行 roe 最高 (50) 但被置后, 应排第 3, 与列表序一致 (旧实现会给出第 1)
+        self.assertEqual(pos["000003.SZ"], 3)
+        self.assertEqual(pos["000001.SZ"], 1)
+        self.assertEqual(pos["000002.SZ"], 2)
+
 
 class TestDividendStrategy(unittest.TestCase):
     """测试红利策略"""
