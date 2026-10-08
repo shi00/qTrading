@@ -262,3 +262,103 @@ class TestUX03ModeSwitchContext:
         assert vm.state.mode == "REALTIME"
         assert vm.state.empty_message is not None
         assert vm.state.empty_message.key == "screener_nomatch"
+
+
+class TestUX03ParamImpactFundamentalBasis:
+    """review09-24 MINOR-02: 基本面策略的「参数影响」/ 空态分母须用其真实输入。
+
+    基本面类策略 (``requires_fundamental_coverage``) 实际消费
+    ``fundamental_screening_data`` (以 stock_basic 为基表、财报 LEFT JOIN,
+    与 ``screening_data`` 口径/行数不同)。旧实现固定用 ``screening_data`` 行数,
+    对基本面策略失真。
+    """
+
+    @staticmethod
+    def _wire(vm, *, screening_count: int, fundamental_count: int, result_rows: list):
+        """配置 mock 基本面策略 (requires_fundamental_coverage=True) + 两路数据源。"""
+        strategy = type("MockFundStrategy", (), {})()
+        strategy.name_key = "strategy_growth_name"
+        strategy.requires_fundamental_coverage = True
+        strategy.filter = lambda ctx: pd.DataFrame(result_rows)
+        vm.strategy_mgr.get_strategy.return_value = strategy
+        vm.data_processor.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(screening_count)]}),
+                "fundamental_screening_data": pd.DataFrame(
+                    {"ts_code": [f"{i:06d}.SZ" for i in range(fundamental_count)]}
+                ),
+                "trade_date": dt.date(2026, 7, 29),
+            },
+        )
+        vm.review_mgr.save_results = AsyncMock(return_value=None)
+
+    @pytest.mark.asyncio
+    async def test_param_impact_uses_fundamental_input_size(self, vm):
+        """基本面策略收窄时, before 取 fundamentals 行数 (200) 而非 screening_data (50)。"""
+        from services.task_manager import TaskManager
+
+        self._wire(
+            vm,
+            screening_count=50,
+            fundamental_count=200,
+            result_rows=[
+                {"ts_code": "000001.SZ", "name": "平安银行"},
+                {"ts_code": "000002.SZ", "name": "万科A"},
+            ],
+        )
+        holder, _sync_submit = _build_sync_submit_task_holder()
+        with (
+            patch.object(TaskManager, "submit_task", side_effect=_sync_submit),
+            patch.object(TaskManager, "update_progress"),
+        ):
+            await vm.run_strategy("growth")
+            assert holder.task is not None
+            await holder.task
+
+        impact = next(m for m in vm.state.warnings if m.key == "screener_param_impact")
+        assert impact.params["before"] == 200
+        assert impact.params["after"] == 2
+
+    @pytest.mark.asyncio
+    async def test_param_impact_absent_when_fundamental_not_narrowed(self, vm):
+        """基本面输入 (2) 未收窄而 screening_data (50) 更大 → 不得误报收窄横幅。"""
+        from services.task_manager import TaskManager
+
+        self._wire(
+            vm,
+            screening_count=50,
+            fundamental_count=2,
+            result_rows=[
+                {"ts_code": "000001.SZ", "name": "平安银行"},
+                {"ts_code": "000002.SZ", "name": "万科A"},
+            ],
+        )
+        holder, _sync_submit = _build_sync_submit_task_holder()
+        with (
+            patch.object(TaskManager, "submit_task", side_effect=_sync_submit),
+            patch.object(TaskManager, "update_progress"),
+        ):
+            await vm.run_strategy("growth")
+            assert holder.task is not None
+            await holder.task
+
+        assert all(m.key != "screener_param_impact" for m in vm.state.warnings), "未收窄时应不产出影响反馈横幅"
+
+    @pytest.mark.asyncio
+    async def test_no_match_total_uses_fundamental_input_size(self, vm):
+        """基本面策略空结果: empty_message total 取 fundamentals 行数 (200)。"""
+        from services.task_manager import TaskManager
+
+        self._wire(vm, screening_count=50, fundamental_count=200, result_rows=[])
+        holder, _sync_submit = _build_sync_submit_task_holder()
+        with (
+            patch.object(TaskManager, "submit_task", side_effect=_sync_submit),
+            patch.object(TaskManager, "update_progress"),
+        ):
+            await vm.run_strategy("growth")
+            assert holder.task is not None
+            await holder.task
+
+        assert vm.state.empty_message is not None
+        assert vm.state.empty_message.key == "screener_nomatch"
+        assert vm.state.empty_message.params["total"] == 200
