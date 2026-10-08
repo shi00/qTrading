@@ -370,13 +370,15 @@ class TradeCalendarService:
             if df is not None and len(df) == 0:
                 df = await self._cache.stock_dao.get_trade_cal(start_date=date_obj, end_date=date_obj)
                 if df is not None and not df.empty:
-                    return df["is_open"].iloc[0] == 1
+                    # 归一化为 Python bool：df["is_open"] 为 int64 列，`numpy.int64(0) == 1`
+                    # 产出 numpy.bool_，与调用方身份比较（`is False`）不匹配，须显式转换。
+                    return bool(df["is_open"].iloc[0] == 1)
 
             df = await self._fetch_from_api_and_persist(date_obj, date_obj)
             if df is not None and not df.empty:
                 row = df[df["cal_date"] == self._to_str(date_obj)]
                 if not row.empty:
-                    return row["is_open"].iloc[0] == 1  # type: ignore[index]
+                    return bool(row["is_open"].iloc[0] == 1)  # type: ignore[index]
 
             result = self._offline.is_trading_day(date_obj)
             if result is None:
