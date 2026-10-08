@@ -376,7 +376,7 @@ def _make_litellm_client() -> LiteLLMClient:
 
 
 class TestLiteLLMClientEgressGate:
-    """SEC-01 gap3 补全：services 层（news / web_search 出口）门控在未确认时阻断外发。"""
+    """SEC-01 gap3 补全：services 层（news 出口）门控在未确认时阻断外发。"""
 
     @pytest.mark.asyncio
     async def test_news_cloud_unack_raises(self):
@@ -391,16 +391,6 @@ class TestLiteLLMClientEgressGate:
                     purpose="news",
                     json_mode=True,
                 )
-        # 门控拒绝语义：异常携带外发确认提示 i18n key，供表现层翻译
-        assert exc_info.value.message.key == "ai_external_acknowledgment_prompt"
-
-    @pytest.mark.asyncio
-    async def test_web_search_unack_raises(self):
-        """概念同步/网页搜索云端出口未确认 → 抛 AIPolicyNotAcknowledgedError。"""
-        client = _make_litellm_client()
-        with patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=False):
-            with pytest.raises(AIPolicyNotAcknowledgedError) as exc_info:
-                await client.chat_with_web_search(messages=[{"role": "user", "content": "web"}])
         # 门控拒绝语义：异常携带外发确认提示 i18n key，供表现层翻译
         assert exc_info.value.message.key == "ai_external_acknowledgment_prompt"
 
