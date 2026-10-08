@@ -12,7 +12,55 @@ import pytest
 from data.domain_services.offline_calendar import OfflineCalendar
 from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
 from strategies.backtest.config import BacktestConfig, DataWarning
-from strategies.backtest.engine import VectorBacktestEngine
+from strategies.backtest.engine import VectorBacktestEngine, _compute_real_score_ratio
+
+
+class TestComputeRealScoreRatio:
+    """MINOR-02: 独立打分占比 real_score_ratio 的三态判定（含部分日缺失打分列）。"""
+
+    @staticmethod
+    def _signals(rows: list[tuple[date, bool]]) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "signal_date": [r[0] for r in rows],
+                "has_real_score": [r[1] for r in rows],
+            }
+        )
+
+    def test_all_real_score_returns_one(self):
+        d1, d2 = date(2024, 1, 2), date(2024, 1, 3)
+        signals = self._signals([(d1, True), (d1, True), (d2, True)])
+        assert _compute_real_score_ratio(signals, [d1, d2]) == 1.0
+
+    def test_no_real_score_returns_zero(self):
+        d1, d2 = date(2024, 1, 2), date(2024, 1, 3)
+        signals = self._signals([(d1, False), (d2, False)])
+        assert _compute_real_score_ratio(signals, [d1, d2]) == 0.0
+
+    def test_partial_days_missing_score_returns_ratio(self):
+        """部分交易日降级缺打分列 → 占比介于 0~1（不得判为纯真实口径）。"""
+        d1, d2, d3, d4 = date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5)
+        signals = self._signals([(d1, True), (d2, False), (d3, True), (d4, False)])
+        assert _compute_real_score_ratio(signals, [d1, d2, d3, d4]) == 0.5
+
+    def test_ratio_restricted_to_ic_dates(self):
+        """分母为 IC 观测日：未产出 IC 的信号日不纳入统计。"""
+        d1, d2, d3 = date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)
+        signals = self._signals([(d1, True), (d2, False), (d3, True)])
+        assert _compute_real_score_ratio(signals, [d2, d3]) == 0.5
+
+    def test_empty_signals_returns_zero(self):
+        assert _compute_real_score_ratio(pl.DataFrame(), []) == 0.0
+
+    def test_missing_column_returns_zero(self):
+        signals = pl.DataFrame({"signal_date": [date(2024, 1, 2)], "signal_rank": [1]})
+        assert _compute_real_score_ratio(signals, [date(2024, 1, 2)]) == 0.0
+
+    def test_empty_ic_dates_falls_back_to_signal_dates(self):
+        """无 IC 观测时按全部信号日统计（不因缺 IC 观测而误判为 0）。"""
+        d1, d2 = date(2024, 1, 2), date(2024, 1, 3)
+        signals = self._signals([(d1, True), (d2, True)])
+        assert _compute_real_score_ratio(signals, []) == 1.0
 
 
 class TestIsRebalanceDay:

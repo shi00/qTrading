@@ -319,6 +319,7 @@ class TestBacktestResultToPersistDict:
             delist_liquidation_count=2,
             delist_loss_amount=150.5,
             has_real_score=False,
+            real_score_ratio=0.0,
         )
         d = result.to_persist_dict()
         q = d["quality_json"]
@@ -329,6 +330,8 @@ class TestBacktestResultToPersistDict:
         assert q["delist_liquidation_count"] == 2
         assert q["delist_loss_amount"] == 150.5
         assert q["has_real_score"] is False
+        # MINOR-02: 独立打分占比随可信度元数据落库。
+        assert q["real_score_ratio"] == 0.0
 
     def test_to_persist_dict_quality_json_skipped_order_count(self) -> None:
         """BT-03: skipped_order_count 取 skipped_orders 行数（非空 DataFrame）。"""

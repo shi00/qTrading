@@ -52,6 +52,38 @@ def _range_preload_warning_meta(w: str) -> tuple[str, str]:
     return "range_preload_failed", WarningCategory.PERFORMANCE_PATH
 
 
+def _compute_real_score_ratio(signals: pl.DataFrame, ic_dates: list[date]) -> float:
+    """MINOR-02/BT-01: 计算 IC 观测中「来自独立打分」的比例（0.0~1.0）。
+
+    同一信号日的信号是否携带独立打分由适配器统一置入 ``has_real_score``
+    （同日同值，见 ``BacktestStrategyAdapter._normalize_signal_output``）。本函数以
+    **IC 观测日**（``ic_dates``）为分母统计占比，因为 IC 均值/IR 由这些观测派生；
+    无 IC 观测时退化为按全部信号日统计（仍反映信号口径）。
+
+    返回值语义（R21：部分口径不得伪装成纯真实口径）：
+    - ``1.0``：区间内全部 IC 观测均来自独立打分 → 纯真实 IC；
+    - ``0.0``：无独立打分（或信号为空/缺列）→ 纯排序 IC；
+    - ``0 < r < 1``：混合口径（部分交易日降级缺打分列）。
+
+    无信号、缺 ``has_real_score`` / ``signal_date`` 列时返回 ``0.0``（与旧行为
+    「无真实打分」一致）。
+    """
+    if signals.is_empty() or "has_real_score" not in signals.columns or "signal_date" not in signals.columns:
+        return 0.0
+
+    per_date = signals.group_by("signal_date").agg(pl.col("has_real_score").first()).to_dicts()
+    flags_by_date = {row["signal_date"]: bool(row["has_real_score"]) for row in per_date}
+
+    if ic_dates:
+        flags = [flags_by_date[d] for d in ic_dates if d in flags_by_date]
+    else:
+        flags = list(flags_by_date.values())
+
+    if not flags:
+        return 0.0
+    return sum(1 for f in flags if f) / len(flags)
+
+
 class VectorBacktestEngine:
     """
     基于 Polars 的向量化回测引擎。
@@ -252,13 +284,12 @@ class VectorBacktestEngine:
                 )
             )
 
-        # BT-01: 汇总信号层是否携带独立打分。任一信号日有真实打分即视为 True；
-        # 全为排序偏好（无打分列）时为 False，IC 语义退化为「排序 IC」。
-        has_real_score = (
-            bool(signals["has_real_score"].any())
-            if not signals.is_empty() and "has_real_score" in signals.columns
-            else False
-        )
+        # BT-01/MINOR-02: 汇总信号层的独立打分口径。以 IC 观测日的「独立打分占比」
+        # real_score_ratio 为准，仅当占比 == 1.0（区间内全部 IC 观测均来自独立打分）
+        # 时才视为纯真实口径 has_real_score=True；部分交易日缺打分列（占比介于 0~1）
+        # 时为「混合口径」，不得冒充纯真实口径（R21）。全无真实打分时为排序口径。
+        real_score_ratio = _compute_real_score_ratio(signals, ic_dates)
+        has_real_score = real_score_ratio == 1.0
 
         return BacktestResult(
             config=self.config,
@@ -287,6 +318,7 @@ class VectorBacktestEngine:
             delist_liquidation_count=delist_stats["delist_liquidation_count"],
             delist_loss_amount=delist_stats["delist_loss_amount"],
             has_real_score=has_real_score,
+            real_score_ratio=real_score_ratio,
         )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
