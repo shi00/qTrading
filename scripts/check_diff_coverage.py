@@ -98,10 +98,14 @@ def get_diff_added_lines(base: str) -> dict[str, list[int]]:
         # 无法找到共同祖先（浅克隆/无 merge-base）：三点语义不可用。
         # 不静默退化为两点（会把 base 侧改动误算进来），直接视为无量纲失败由 main() 以 advisory 处理。
         return {}
+    # diff 可能含非 UTF-8 字节（如 GB18030 编码的 HTML fixture 快照），
+    # 按 UTF-8 宽松解码：非法字节以替换符兜底。本函数只取 +++/@@ 等 ASCII 结构行，
+    # 内容行的替换符不影响行号解析，避免整步因 UnicodeDecodeError 失败。
     result = subprocess.run(
         ["git", "diff", "--unified=0", "--no-color", merge_base, "HEAD"],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         cwd=ROOT,
     )
     if result.returncode != 0:

@@ -487,3 +487,47 @@ class TestGetDiffAddedLinesNoDegradation:
 
         monkeypatch.setattr(m.subprocess, "run", fake_run)
         assert get_diff_added_lines("origin/main") == {}
+
+
+# ============================================================================
+# get_diff_added_lines: 非 UTF-8 diff 容忍 (review 流水线问题)
+# ============================================================================
+
+
+class TestGetDiffAddedLinesNonUtf8:
+    """get_diff_added_lines: git diff 含非 UTF-8 字节时不得因解码失败崩溃。
+
+    回归：PR 含 GB18030 编码的 HTML fixture（如新浪页面快照）时，git diff 输出携带
+    GBK 原始字节，按默认 UTF-8 严格解码会抛 UnicodeDecodeError，导致 diff-coverage
+    步骤 exit 1。修复为按 UTF-8 宽松解码（errors="replace"）。
+    """
+
+    def test_git_diff_call_decodes_tolerantly(self, monkeypatch):
+        """diff 调用须显式 UTF-8 + errors="replace"，避免非 UTF-8 字节触发 UnicodeDecodeError。"""
+        import check_diff_coverage as m
+
+        captured: dict[str, object] = {}
+
+        def fake_run(cmd, **kwargs):
+            if cmd[1] == "merge-base":
+                return _FakeResult(0, "mb1111\n")
+            captured.update(kwargs)
+            return _FakeResult(0, "")
+
+        monkeypatch.setattr(m.subprocess, "run", fake_run)
+        get_diff_added_lines("origin/main")
+
+        assert captured.get("encoding") == "utf-8"
+        assert captured.get("errors") == "replace"
+
+    def test_replacement_chars_do_not_break_line_parsing(self):
+        """宽松解码产生的替换符仅落在内容行，不影响 +++/@@ 结构行与行号推进。"""
+        diff = (
+            "diff --git a/data/foo.py b/data/foo.py\n"
+            "--- a/data/foo.py\n"
+            "+++ b/data/foo.py\n"
+            "@@ -1,0 +2,2 @@\n"
+            "+# \ufffd\ufffd GBK 标题\ufffd\n"
+            "+value = 1\n"
+        )
+        assert parse_diff(diff) == {"data/foo.py": [2, 3]}
