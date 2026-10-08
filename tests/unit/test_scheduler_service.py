@@ -1489,7 +1489,11 @@ class TestCatchUpMissedUpdates:
 
     @pytest.mark.asyncio
     async def test_empty_baseline_bootstraps_from_db_and_submits(self):
-        """REVIEW-06 TO-01: 基准为空串 + daily_quotes 有数据 → 以最新交易日自举并提交补偿（而非静默早退）。"""
+        """REVIEW-06 TO-01: 基准为空串 + daily_quotes 有数据 → 以最新交易日自举并提交补偿（而非静默早退）。
+
+        D7-3/MINOR-01 (复核): 自举值只作补偿区间下界，**不写入 `_last_update_date`**——水位是
+        「当日同步完整成功」的权威判据，写入会让「行情表已有今日数据」冒充「当日同步完整」。
+        """
         svc = _make_svc()
         svc._last_update_date = ""
         mock_dp_instance = MagicMock()
@@ -1510,18 +1514,88 @@ class TestCatchUpMissedUpdates:
             patch("utils.scheduler_service.logger.info") as mock_info,
         ):
             await svc._catch_up_missed_updates()
-            # 基准已自举为 daily_quotes 最新交易日
-            assert svc._last_update_date == "20240610"
+            # 水位保持为空（未被自举值冒充为「当日同步完整」）；自举值另存为下界
+            assert svc._last_update_date == ""
+            assert svc._bootstrap_baseline_date == "20240610"
             # 自举日志已记录
             info_calls = [c for c in mock_info.call_args_list]
             assert any("自举" in str(c.args[0]) for c in info_calls)
-            # 补偿任务以基准+1 起的遗漏交易日提交
+            # 补偿任务以基准+1 起的遗漏交易日提交（REVIEW-06 TO-01 闭环：未静默早退）
             kwargs = mock_tm_instance.submit_task.call_args.kwargs
             assert kwargs["missed_dates"] == [date(2024, 6, 11), date(2024, 6, 12), date(2024, 6, 13)]
             assert kwargs["unique_key"] == "daily_sync_catchup"
             assert kwargs["cancellable"] is True
             # D7-5/MINOR-03: 补偿同步写同一批行情表 → 与日更同组互斥
             assert kwargs["exclusive_group"] == EXCLUSIVE_GROUP_MARKET_SYNC
+
+    @pytest.mark.asyncio
+    async def test_empty_baseline_bootstrap_cached_across_cycles(self):
+        """D7-3/MINOR-01 (复核): 水位持续为空时，自举下界在多轮看门狗间缓存复用，不重复查 DB。"""
+        svc = _make_svc()
+        svc._last_update_date = None
+        mock_dp_instance = MagicMock()
+        mock_dao = MagicMock()
+        mock_dao.get_latest_trade_date = AsyncMock(return_value=date(2024, 6, 10))
+        mock_dp_instance.cache.quote_dao = mock_dao
+        mock_dp_instance.trade_calendar = MagicMock()
+        mock_dp_instance.trade_calendar.get_trade_dates = AsyncMock(return_value=[date(2024, 6, 10), date(2024, 6, 11)])
+        mock_tm_instance = MagicMock()
+        mock_now_val = MagicMock()
+        mock_now_val.date.return_value = date(2024, 6, 15)
+        with (
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("utils.scheduler_service.get_now", return_value=mock_now_val),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+        ):
+            await svc._catch_up_missed_updates()
+            await svc._catch_up_missed_updates()
+        mock_dao.get_latest_trade_date.assert_awaited_once()
+        assert svc._bootstrap_baseline_date == "20240610"
+        assert svc._last_update_date is None
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_cache_stale_still_covers_later_days(self):
+        """D7-3/MINOR-01 (复核) R-2 核验: 自举下界一旦缓存即不刷新（水位仍为空时后续周期复用），
+        但补偿区间上界 `end` 随看门狗推进 → 后续交易日仍被覆盖。缓存陈旧只造成"下界偏低"的保守
+        过覆盖（已被同步层 check_data_exists 跳过），不会漏补遗漏交易日。"""
+        svc = _make_svc()
+        svc._last_update_date = None
+        mock_dp_instance = MagicMock()
+        mock_dao = MagicMock()
+        mock_dao.get_latest_trade_date = AsyncMock(return_value=date(2024, 6, 10))
+        mock_dp_instance.cache.quote_dao = mock_dao
+        all_dates = [date(2024, 6, d) for d in (10, 11, 12, 13, 14, 15, 16, 17)]
+
+        async def _get_trade_dates(start_date=None, end_date=None):
+            s = start_date if start_date is not None else date.min
+            e = end_date if end_date is not None else date.max
+            return [x for x in all_dates if s <= x <= e]
+
+        mock_dp_instance.trade_calendar = MagicMock()
+        mock_dp_instance.trade_calendar.get_trade_dates = AsyncMock(side_effect=_get_trade_dates)
+        mock_tm_instance = MagicMock()
+        with (
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+        ):
+            # 首轮：今天=6/15 → 缓存下界=6/10，提交遗漏日 [6/11, 6/14]
+            with patch("utils.scheduler_service.get_now") as mock_now:
+                mock_now.return_value.date.return_value = date(2024, 6, 15)
+                await svc._catch_up_missed_updates()
+            assert mock_tm_instance.submit_task.call_args.kwargs["missed_dates"] == [
+                date(2024, 6, 11),
+                date(2024, 6, 12),
+                date(2024, 6, 13),
+                date(2024, 6, 14),
+            ]
+            # 次轮：今天推进到 6/16（缓存仍为 6/10，不刷新）→ 上界随 end 推进，6/15 仍被覆盖
+            mock_tm_instance.submit_task.reset_mock()
+            with patch("utils.scheduler_service.get_now") as mock_now:
+                mock_now.return_value.date.return_value = date(2024, 6, 16)
+                await svc._catch_up_missed_updates()
+            assert date(2024, 6, 15) in mock_tm_instance.submit_task.call_args.kwargs["missed_dates"]
+        # 下界仅查询一次（后续周期复用缓存）
+        mock_dao.get_latest_trade_date.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_baseline_query_failure_warns_and_returns(self, caplog):
@@ -1573,7 +1647,9 @@ class TestCatchUpMissedUpdates:
                 patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
             ):
                 await svc._catch_up_missed_updates()
-                assert svc._last_update_date == expected
+                # 水位不被写入（D7-3/MINOR-01 复核）；自举归一化后的值另存为下界
+                assert svc._last_update_date is None
+                assert svc._bootstrap_baseline_date == expected
 
     @pytest.mark.asyncio
     async def test_up_to_date_no_submit(self):
@@ -2199,6 +2275,55 @@ class TestNightlyPredictionCatchup:
             await svc._catch_up_nightly_prediction()
         svc._registered_jobs["nightly_prediction"].assert_not_awaited()
         assert svc._nightly_catchup_triggered_date is None
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_today_verifies_and_preserves_nightly_chain(self):
+        """D7-3/MINOR-01 (复核) + REVIEW-06 TO-01: 水位为空 + daily_quotes 已含今日数据时——
+
+        ① 自举值不得冒充「当日同步完整」（水位保持为空，同轮不补触发夜间预测，避免用部分同步的
+        不完整数据出 AI 选股结论并落库，MINOR-01 不复现）；
+        ② 但仍对今日提交一次**校验性补偿**（下界回退一天把 frontier 日纳入），交同步层
+        `check_data_exists` / is_complete 判定其完整性——完整则推进水位、夜间预测链路接通
+        （R-1 回归："数据完整但水位为空"时夜间预测永久丢失被堵住），不完整则水位留空。
+        """
+        svc = _make_svc()
+        svc._registered_jobs["nightly_prediction"] = AsyncMock()
+        svc._last_update_date = None
+        mock_dp_instance = MagicMock()
+        mock_dao = MagicMock()
+        mock_dao.get_latest_trade_date = AsyncMock(return_value=date(2024, 6, 15))  # == 今日（数据前沿）
+        mock_dp_instance.cache.quote_dao = mock_dao
+        mock_dp_instance.trade_calendar = MagicMock()
+        mock_dp_instance.trade_calendar.get_trade_dates = AsyncMock(return_value=[date(2024, 6, 15)])
+        mock_tm_instance = MagicMock()
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.get_now", return_value=self._NOW),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+        ):
+            mock_ch.is_auto_update_enabled.return_value = True
+            # 看门狗同轮：先补偿检查（已过预测时刻 → 纳入今天），紧接着尝试补触发夜间预测
+            await svc._catch_up_missed_updates(include_today=True)
+            # ① 水位未被自举值写入（不会同轮被误判为「当日同步完整」而放行）
+            assert svc._last_update_date is None
+            assert svc._bootstrap_baseline_date == self._TODAY
+            # ② 校验性补偿已提交：下界回退一天（6/14）以把 frontier 日（今日）纳入
+            kwargs = mock_tm_instance.submit_task.call_args.kwargs
+            assert kwargs["missed_dates"] == [date(2024, 6, 15)]
+            assert kwargs["unique_key"] == "daily_sync_catchup"
+            assert mock_dp_instance.trade_calendar.get_trade_dates.await_args.kwargs == {
+                "start_date": date(2024, 6, 14),
+                "end_date": date(2024, 6, 15),
+            }
+            # 同轮水位仍为空 → 不误放行夜间预测（避免用不完整数据出选股结论）
+            await svc._catch_up_nightly_prediction()
+            svc._registered_jobs["nightly_prediction"].assert_not_awaited()
+            assert svc._nightly_catchup_triggered_date is None
+            # 校验性补偿完整成功后（is_complete 推进水位）→ 夜间预测链路接通（D7-3 不破）
+            svc._last_update_date = self._TODAY
+            await svc._catch_up_nightly_prediction()
+            svc._registered_jobs["nightly_prediction"].assert_awaited_once_with(svc)
 
     @pytest.mark.asyncio
     async def test_no_trigger_before_prediction_time(self):
