@@ -127,8 +127,8 @@ class TestAppConfig:
             AppConfig(auto_update_time="25:00")
         assert "auto_update_time" in str(exc_info.value)
         with pytest.raises(ValidationError) as exc_info:
-            AppConfig(ai_concept_schedule_time="abc")
-        assert "ai_concept_schedule_time" in str(exc_info.value)
+            AppConfig(concept_schedule_time="abc")
+        assert "concept_schedule_time" in str(exc_info.value)
 
     def test_extra_allow_dynamic_keys(self):
         cfg = AppConfig.model_validate(

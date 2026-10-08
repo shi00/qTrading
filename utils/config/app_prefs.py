@@ -134,28 +134,20 @@ def set_init_history_years(years: int):
     return cfg.ConfigHandler.set_typed("init_history_years", years)
 
 
-def is_ai_concept_schedule_enabled() -> bool:
-    return cfg.ConfigHandler.get_typed("ai_concept_schedule_enabled", bool, DEFAULTS["ai_concept_schedule_enabled"])
+def is_concept_schedule_enabled() -> bool:
+    return cfg.ConfigHandler.get_typed("concept_schedule_enabled", bool, DEFAULTS["concept_schedule_enabled"])
 
 
-def set_ai_concept_schedule_enabled(enabled: bool):
-    return cfg.ConfigHandler.set_typed("ai_concept_schedule_enabled", bool(enabled))
+def set_concept_schedule_enabled(enabled: bool):
+    return cfg.ConfigHandler.set_typed("concept_schedule_enabled", bool(enabled))
 
 
-def get_ai_concept_schedule_time() -> str:
-    return cfg.ConfigHandler.get_typed("ai_concept_schedule_time", str, DEFAULTS["ai_concept_schedule_time"])
+def get_concept_schedule_time() -> str:
+    return cfg.ConfigHandler.get_typed("concept_schedule_time", str, DEFAULTS["concept_schedule_time"])
 
 
-def set_ai_concept_schedule_time(time_str: str):
-    return cfg.ConfigHandler.set_typed("ai_concept_schedule_time", str(time_str))
-
-
-def get_ai_concept_search_engine() -> str:
-    return cfg.ConfigHandler.get_typed("ai_concept_search_engine", str, DEFAULTS["ai_concept_search_engine"])
-
-
-def set_ai_concept_search_engine(engine: str):
-    return cfg.ConfigHandler.set_typed("ai_concept_search_engine", str(engine))
+def set_concept_schedule_time(time_str: str):
+    return cfg.ConfigHandler.set_typed("concept_schedule_time", str(time_str))
 
 
 def get_nightly_prediction_time() -> str:
