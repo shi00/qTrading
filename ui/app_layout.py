@@ -166,6 +166,7 @@ def _build_pages_stack(
     current_tab: int,
     settings_subtab_request: tuple[str, int] | None = None,
     screener_stock_request: tuple[str, int] | None = None,
+    backtest_prefill_request: int | None = None,
 ) -> ft.Stack:
     """构造所有页面控件的 ``ft.Stack`` (``visible`` prop 控制显示/隐藏)。
 
@@ -194,6 +195,9 @@ def _build_pages_stack(
             ``(subtab_key, seq)``, 透传给 SettingsView。
         screener_stock_request: UX-04 导航深链的 screener 股票代码过滤请求
             ``(code, seq)``, 透传给 ScreenerView。
+        backtest_prefill_request: F13 选股→回测透传请求序号 (单调递增), 透传给
+            BacktestView; 常驻回测页据此在「激活 + 新序号」时消费 pending prefill
+            (不依赖重新 mount), None 表示尚无回测导航请求。
     """
     is_e2e = is_e2e_mode()
 
@@ -226,7 +230,10 @@ def _build_pages_stack(
         ),
         ft.Container(
             content=_make_content(
-                lambda: BacktestView(active=current_tab == NavTabs.BACKTEST),
+                lambda: BacktestView(
+                    active=current_tab == NavTabs.BACKTEST,
+                    prefill_request=backtest_prefill_request,
+                ),
                 current_tab == NavTabs.BACKTEST,
             ),
             expand=True,
@@ -384,6 +391,10 @@ def AppLayout() -> ft.Container:
     # UX-04 导航深链: screener 股票代码过滤请求 (code, seq), seq 递增使重复深链可重触发
     screener_stock_request: tuple[str, int] | None = None
     screener_stock_request, set_screener_stock_request = ft.use_state(screener_stock_request)
+    # F13 常驻回测页透传: 回测导航请求序号 (单调递增), seq 变化使「已挂载/同 tab」的
+    # 回测页仍触发现有 pending prefill 消费 (函数式更新防订阅时闭包 stale 快照)
+    backtest_prefill_request: int | None = None
+    backtest_prefill_request, set_backtest_prefill_request = ft.use_state(backtest_prefill_request)
 
     # --- Tab 切换 (防抖, R2: CancelledError 必须 raise) ---
     async def _do_tab_switch(new_tab: int) -> None:
@@ -485,6 +496,11 @@ def AppLayout() -> ft.Container:
         except KeyError:
             logger.warning("[AppLayout] Unknown navigation target: %s", message)
             return
+        # F13: 每次 backtest 导航递增透传请求序号 (函数式更新, 防订阅时闭包 stale 快照)。
+        # 置于 same-tab 早返回之前 —— 即使回测页已挂载或当前 tab 相同, 新序号仍触发
+        # BacktestView 消费 pending prefill (常驻页不重新 mount, 仅靠序号驱动)。
+        if int(target_tab) == int(NavTabs.BACKTEST):
+            set_backtest_prefill_request(lambda old: (old + 1) if old is not None else 1)
         # UX-01/UX-04: 深链 subtab 分派 (settings=子页 key / screener=股票代码);
         # 未知/越页子页降级为切主 tab (不吞导航)
         subtab_handled = False
@@ -594,7 +610,12 @@ def AppLayout() -> ft.Container:
     )
 
     body = ft.Container(
-        content=_build_pages_stack(int(current_tab), settings_subtab_request, screener_stock_request),
+        content=_build_pages_stack(
+            int(current_tab),
+            settings_subtab_request,
+            screener_stock_request,
+            backtest_prefill_request,
+        ),
         expand=True,
         padding=AppStyles.SPACING_XL,
         bgcolor=AppColors.BACKGROUND,

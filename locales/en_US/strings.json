@@ -2004,6 +2004,7 @@
     "backtest_view_title": "Strategy Backtest",
     "backtest_select_strategy": "Select Strategy",
     "backtest_no_strategy": "Please select a strategy first",
+    "backtest_prefill_strategy_missing": "The requested strategy is unavailable; kept the current strategy and parameters",
     "tab_backtest_results": "Backtest Results",
     "failover_title": "Failover Configuration",
     "failover_add_provider": "Add Provider",

@@ -619,6 +619,8 @@ class TestOnNavigateDeepLink:
     - 非设置页带子页: 子页段忽略 + 正常切主 tab
     - UX-04: screener 段语义 = 股票代码, ScreenerView 收到 stock_filter_request,
       且不污染 settings request
+    - F13: backtest 导航递增 prefill_request 序号, BacktestView 收到透传序号
+      (常驻回测页不重新 mount, 靠序号驱动消费 pending prefill)
     """
 
     def _render_pages_stack(self, env: dict) -> MagicMock:
@@ -699,6 +701,40 @@ class TestOnNavigateDeepLink:
         self._render_pages_stack(env)
         screener_mock = env["mod"].ScreenerView
         assert screener_mock.call_args.kwargs.get("stock_filter_request") == ("000001", 2)
+
+    def test_backtest_navigation_passes_prefill_request(self, app_layout_env) -> None:
+        """F13: MARKET → "backtest": run_task(BACKTEST) + BacktestView 收到
+        prefill_request=1 (含 active prop), 且不污染 settings/screener request."""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        env["mod"].BacktestView.reset_mock()
+        env["mod"].SettingsView.reset_mock()
+        env["mod"].ScreenerView.reset_mock()
+
+        handler(env["mod"].TOPIC_NAVIGATE, "backtest")
+        _, args, _ = _await_run_task_handler(page)
+        assert args == (int(env["mod"].NavTabs.BACKTEST),), "应切换到 BACKTEST tab"
+
+        self._render_pages_stack(env)
+        backtest_mock = env["mod"].BacktestView
+        assert "active" in backtest_mock.call_args.kwargs, "BacktestView 应被构造 (含 active prop)"
+        assert backtest_mock.call_args.kwargs.get("prefill_request") == 1, "首次回测导航应透传序号 1"
+        assert env["mod"].SettingsView.call_args.kwargs.get("target_subtab") is None
+        assert env["mod"].ScreenerView.call_args.kwargs.get("stock_filter_request") is None
+
+    def test_backtest_repeated_navigation_increments_prefill_seq(self, app_layout_env) -> None:
+        """F13: 两次回测导航 → prefill_request 递增为 2 (函数式更新防 stale closure)."""
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        env["mod"].BacktestView.reset_mock()
+
+        handler(env["mod"].TOPIC_NAVIGATE, "backtest")
+        handler(env["mod"].TOPIC_NAVIGATE, "backtest")
+        self._render_pages_stack(env)
+        backtest_mock = env["mod"].BacktestView
+        assert backtest_mock.call_args.kwargs.get("prefill_request") == 2
 
     def test_screener_deep_link_code_with_suffix_normalized_lower(self, app_layout_env) -> None:
         """UX-04 契约锚定: "screener:000001.SZ" → 协议解析 .lower() 归一为 "000001.sz".

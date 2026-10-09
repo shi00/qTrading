@@ -2004,6 +2004,7 @@
     "backtest_view_title": "策略回测",
     "backtest_select_strategy": "选择策略",
     "backtest_no_strategy": "请先选择策略",
+    "backtest_prefill_strategy_missing": "跳转携带的策略不可用，已保留当前策略与参数",
     "tab_backtest_results": "回测结果",
     "failover_title": "Failover 配置",
     "failover_add_provider": "添加供应商",

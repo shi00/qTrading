@@ -13,6 +13,7 @@ View 组合（@ft.component + use_viewmodel）有状态，由集成测试覆盖�
 import inspect
 from pathlib import Path
 
+import flet as ft
 import pytest
 
 from ui.views import backtest_view as backtest_view_module
@@ -42,10 +43,19 @@ class TestBacktestViewDeclarativeContract:
         assert "page_ref" not in params, "BacktestView 不应接收 page_ref 参数"
 
     def test_source_has_ft_component_decorator(self):
-        """源码必须有 @ft.component 装饰器。"""
-        src = _source_text()
-        assert "@ft.component" in src
-        assert "def BacktestView(active: bool = True) -> ft.Container:" in src
+        """源码必须有 @ft.component 装饰器, 且保留声明式签名。
+
+        F13 后签名多 prop (``active`` + ``prefill_request``), 改为语义断言
+        (``__wrapped__`` 装饰器标记 + inspect 参数名/返回标注), 不依赖源码文本
+        形态: 既避免模块 docstring 中 ``def BacktestView()`` 造成文本误命中,
+        也避免下次新增 prop 因换行/签名变化再次误报。
+        """
+        assert "@ft.component" in _source_text()
+        assert hasattr(BacktestView, "__wrapped__"), "BacktestView 必须用 @ft.component 装饰"
+        sig = inspect.signature(BacktestView)
+        assert sig.return_annotation is ft.Container, "BacktestView 必须返回 ft.Container"
+        assert "active" in sig.parameters, "BacktestView 必须保留 active 参数"
+        assert "prefill_request" in sig.parameters, "BacktestView 必须接收 prefill_request 透传参数"
 
     def test_uses_use_viewmodel(self):
         """必须通过 use_viewmodel 消费 BacktestViewModel。"""

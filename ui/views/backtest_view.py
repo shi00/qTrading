@@ -17,6 +17,7 @@
 """
 
 import logging
+from typing import Any
 
 import flet as ft
 
@@ -206,7 +207,7 @@ def _build_backtest_caveat_banner(state: BacktestState) -> ft.Control | None:
 
 
 @ft.component
-def BacktestView(active: bool = True) -> ft.Container:
+def BacktestView(active: bool = True, prefill_request: int | None = None) -> ft.Container:
     """回测视图（声明式）。
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
@@ -218,6 +219,9 @@ def BacktestView(active: bool = True) -> ft.Container:
 
     Args:
         active: 当前 tab 是否激活 (控制副作用执行)。
+        prefill_request: F13 选股→回测透传请求序号 (单调递增), 由根导航透传。
+            常驻回测页据此在「激活 + 新序号」时消费 pending prefill; 非激活不消费,
+            运行中保留待终态消费 (仅以 seq 变化触发, 不依赖重新 mount)。
     """
     state, vm = use_viewmodel(BacktestViewModel)
     # 订阅 i18n + theme 变化（locale/theme 切换时自动重渲染）
@@ -230,11 +234,27 @@ def BacktestView(active: bool = True) -> ft.Container:
     # View 仅保留纯 UI 校验态 no_strategy_error.
     no_strategy_error, set_no_strategy_error = ft.use_state(False)
 
-    # Task 8.3: 选股→回测参数透传 — mount 时消费 pending prefill (strategy_key + params)
+    # Task 8.3 / F13: 选股→回测参数透传 — 由导航请求序号驱动消费 pending prefill
     # params 经 ref 透传到 run_backtest, 避免不必要的重渲染 (params 仅在 run 时读取)
-    _prefilled_params = ft.use_ref(lambda: None)
+    _prefilled_params: Any = ft.use_ref(None)
+    # F13: 记录透传参数所属策略, 供手工切换时判断是否清理不属于新策略的旧参数
+    _prefilled_strategy: Any = ft.use_ref(None)
+    # F13: 记录已消费的请求代次 (同一 seq 反复渲染不重放)
+    _applied_request: Any = ft.use_ref(None)
 
     def _consume_prefill() -> None:
+        # F13: 常驻回测页仅在「激活 + 收到新请求序号」时消费; 非激活不消费
+        if not active or prefill_request is None:
+            return
+        # F13: 同一请求代次已处理 → 幂等跳过 (反复 render / is_running 变化不重放)
+        if _applied_request.current == prefill_request:
+            return
+        # F13: 运行中到达的新请求保留待应用, 终态 (is_running 转 False) 后再消费,
+        # 不改当前任务的运行快照 (is_running 已纳入 dependencies 触发条件)
+        if state.is_running:
+            return
+        # F13: 确认消费该请求 (仅成功应用或明确拒绝后); 普通导航无 pending 数据则不改草稿
+        _applied_request.current = prefill_request
         prefill = consume_pending_prefill()
         if prefill is None:
             return
@@ -243,16 +263,26 @@ def BacktestView(active: bool = True) -> ft.Container:
         # isinstance 收窄为 str (prefill value 为 dict[str, object])
         if isinstance(strategy_key, str) and any(k == strategy_key for k, _ in state.available_strategies):
             vm.select_strategy(strategy_key)
-        _prefilled_params.current = prefill.get("params")  # type: ignore[reportAttributeAccessIssue]  # use_ref(None) 推断 MutableRef[None]，实际承载 dict 参数
+            # F13: 策略与对应 params 一次应用, 避免「新策略 + 旧参数」不一致
+            _prefilled_params.current = prefill.get("params")
+            _prefilled_strategy.current = strategy_key
+        else:
+            # F13: 无效策略 → 明确拒绝, 不写入参数 (不留「旧策略 + 新参数」混合态)
+            vm.report_prefill_rejected()
 
-    ft.use_effect(_consume_prefill, dependencies=[])
+    ft.use_effect(_consume_prefill, dependencies=[active, prefill_request, state.is_running])
 
     # --- Handlers ---
     def _on_strategy_change(e: ft.ControlEvent) -> None:
-        UILogger.log_action("BacktestView", "Select", f"strategy={get_control_value(e.control, ft.Dropdown)}")
+        new_key = get_control_value(e.control, ft.Dropdown)
+        UILogger.log_action("BacktestView", "Select", f"strategy={new_key}")
         # D2: 受控更新 — vm.select_strategy 下沉选中状态到 VM state
-        vm.select_strategy(get_control_value(e.control, ft.Dropdown))
+        vm.select_strategy(new_key)
         set_no_strategy_error(False)
+        # F13: 手工切换策略 → 清除不属于新策略的旧透传参数 (避免后续运行误用旧参数)
+        if _prefilled_strategy.current != new_key:
+            _prefilled_params.current = None
+            _prefilled_strategy.current = None
 
     def _on_run_backtest(config: dict) -> None:
         UILogger.log_action("BacktestView", "Click", "btn_run_backtest")
