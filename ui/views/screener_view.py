@@ -1410,17 +1410,26 @@ async def _execute_add_to_watchlist(
     ts_code: str,
     stock_name: str,
 ) -> None:
-    """FR-UX-004, Task 4.2: 加入关注."""
+    """FR-UX-004, Task 4.2: 加入关注 (F01-R1: 按写操作结果三态分支反馈, 不伪装成功).
+
+    与 ``watchlist_view._show_mutation_toast`` 同型: failed→失败;
+    applied→成功; applied_refresh_failed→warning (已写入但列表刷新失败)。
+    """
     try:
-        await wl_vm.add_to_watchlist(ts_code, stock_name)
-        if page is not None:
-            _show_toast(page, I18n.get("watchlist_added"), "success")
+        result = await wl_vm.add_to_watchlist(ts_code, stock_name)
     except asyncio.CancelledError:
         raise
     except Exception as ex:
         logger.error("[ScreenerView] Add to watchlist failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
-        if page is not None:
-            _show_toast(page, I18n.get("watchlist_add_failed"), "error")
+        result = None
+    if page is None:
+        return
+    if result is None or result.status == "failed":
+        _show_toast(page, I18n.get("watchlist_add_failed"), "error")
+    elif result.status == "applied":
+        _show_toast(page, I18n.get("watchlist_added"), "success")
+    else:  # applied_refresh_failed: 已写入但列表刷新失败, 提示手动刷新
+        _show_toast(page, I18n.get("watchlist_refresh_failed"), "warning")
 
 
 async def _execute_restore_default_prompt(
