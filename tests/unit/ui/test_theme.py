@@ -1,4 +1,6 @@
+import importlib
 import inspect
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -527,3 +529,114 @@ class TestGetCurrentThemeMode:
         """默认 ThemeMode 为 DARK（_CURRENT_THEME_MODE 初始值）。"""
         # fixture 恢复后 _CURRENT_THEME_MODE 回到默认值 DARK
         assert AppColors.get_current_theme_mode() == ft.ThemeMode.DARK
+
+
+# ============================================================================
+# F06: 业务状态/涨跌文字按正文 4.5 验收 (非 WCAG 大字号例外)
+# ============================================================================
+
+
+def _f06_ctc() -> types.ModuleType:
+    """加载门禁脚本模块, 复用其对比度算法与色对解析 (避免测试另立一套色表)。"""
+    import sys as _sys
+
+    scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
+    if str(scripts_dir) not in _sys.path:
+        _sys.path.insert(0, str(scripts_dir))
+    return importlib.import_module("check_theme_contrast")
+
+
+class TestF06BusinessTextContrast:
+    """F06: SUCCESS/WARNING/INFO/UP_RED/DOWN_GREEN 用于 13/14px 正文, 必须达 WCAG 正常文字 4.5。
+
+    背景取真实消费布局 = SURFACE 与 CARD_BG (面板/卡片/Toast/列表行/DataTable 默认行;
+    4 主题下两 token 同值, 仍显式分别验收以防未来分化)。virtual_table 的 ODD/EVEN
+    交替行单元格仅使用中性正文色, 业务色无 EVEN 行消费场景, 故不纳入背景集合。
+    """
+
+    # 正文业务色 → 需覆盖的真实背景 token (含 INFO: Toast/任务中心/数据源进度文字)
+    _TEXT_COLORS = ("UP_RED", "DOWN_GREEN", "SUCCESS", "WARNING", "INFO")
+    _TEXT_BACKGROUNDS = ("SURFACE", "CARD_BG")
+
+    @pytest.mark.parametrize("theme", (ThemeName.DARK, ThemeName.LIGHT, ThemeName.NAVY, ThemeName.DRACULA))
+    @pytest.mark.parametrize("color", _TEXT_COLORS)
+    def test_business_text_color_meets_4_5_on_real_backgrounds(self, theme: str, color: str):
+        """业务状态/涨跌正文色在 SURFACE 与 CARD_BG 上对比度 ≥ 4.5 (F06)。"""
+        ctc = _f06_ctc()
+
+        def resolve_valid_hex(token: str) -> str:
+            """解析 token 并强断言结果为合法 7 位 hex 色值 (内容校验, 非仅存在性)。"""
+            value = ctc._resolve_color(token, theme)
+            assert (
+                isinstance(value, str)
+                and len(value) == 7
+                and value.startswith("#")
+                and all(ch in "0123456789abcdefABCDEF" for ch in value[1:])
+            ), f"{theme}.{token} 解析结果非合法 hex 色值: {value!r}"
+            return value
+
+        fg = resolve_valid_hex(color)
+        for bg_token in self._TEXT_BACKGROUNDS:
+            bg = resolve_valid_hex(bg_token)
+            ratio = ctc.contrast_ratio(fg, bg)
+            assert ratio >= 4.5, f"{theme} {color}({fg}) on {bg_token}({bg}) = {ratio:.3f} < 4.5 (F06)"
+
+    def test_dark_up_red_keeps_headroom_above_threshold(self):
+        """深色 UP_RED 在阈值之上留余量 (原 #F44336 仅 4.53 压线, 派生背景微扰即跌破)。"""
+        ctc = _f06_ctc()
+        ratio = ctc.contrast_ratio(CUSTOM_COLOR_PRESETS[ThemeName.DARK]["UP_RED"], "#1E1E1E")
+        assert ratio >= 5.0, f"DARK UP_RED 对比度 {ratio:.3f} 应 ≥ 5.0 以留出派生背景余量 (F06)"
+
+    def test_light_old_business_colors_were_below_4_5_regression(self):
+        """回归: 修复前浅色 preset 的旧值确实低于 4.5 (证明本次调色是必要修复)。"""
+        # 旧 DOWN_GREEN/SUCCESS #388E3C 在白底 4.12; 旧 WARNING #EF6C00 白底 3.08; 旧 UP_RED #F44336 白底 3.68
+        ctc = _f06_ctc()
+        assert ctc.contrast_ratio("#388E3C", "#FFFFFF") < 4.5
+        assert ctc.contrast_ratio("#EF6C00", "#FFFFFF") < 4.5
+        assert ctc.contrast_ratio("#F44336", "#FFFFFF") < 4.5
+        # 当前浅色 preset 已不再使用这些不达标值
+        light = CUSTOM_COLOR_PRESETS[ThemeName.LIGHT]
+        assert light["DOWN_GREEN"] != "#388E3C"
+        assert light["WARNING"] != "#EF6C00"
+        assert light["UP_RED"] != "#F44336"
+
+    def test_dark_old_info_was_below_4_5_regression(self):
+        """回归: 深色 INFO 旧值 #2979FF 在深色 SURFACE 4.19 < 4.5 (证明本次调色必要)。"""
+        ctc = _f06_ctc()
+        assert ctc.contrast_ratio("#2979FF", "#1E1E1E") < 4.5
+        assert CUSTOM_COLOR_PRESETS[ThemeName.DARK]["INFO"] != "#2979FF"
+
+    def test_appcolors_defaults_sync_dark_preset(self):
+        """AppColors 类属性默认值必须与 DARK preset 同步 (DARK 是 _reset_singleton 复位基线)。"""
+        dark = CUSTOM_COLOR_PRESETS[ThemeName.DARK]
+        assert dark["UP_RED"] == AppColors.UP_RED
+        assert dark["INFO"] == AppColors.INFO
+
+    @pytest.mark.parametrize(
+        ("theme", "up", "down"),
+        [
+            (ThemeName.DARK, "#FF5252", "#4CAF50"),
+            (ThemeName.LIGHT, "#C62828", "#2E7D32"),
+            (ThemeName.NAVY, "#F87171", "#22C55E"),
+            (ThemeName.DRACULA, "#FF5555", "#4CAF50"),
+        ],
+    )
+    def test_rg_semantics_preserved(self, theme: str, up: str, down: str):
+        """保留红涨绿跌语义: 各主题 UP_RED 为红色占优, DOWN_GREEN 为绿色占优 (F06)。"""
+
+        def dominant(hex_color: str) -> str:
+            r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
+            return "red" if r > g and r > b else "green" if g > r and g > b else "other"
+
+        preset = CUSTOM_COLOR_PRESETS[theme]
+        assert preset["UP_RED"] == up
+        assert preset["DOWN_GREEN"] == down
+        assert dominant(preset["UP_RED"]) == "red", f"{theme} UP_RED 必须红色占优"
+        assert dominant(preset["DOWN_GREEN"]) == "green", f"{theme} DOWN_GREEN 必须绿色占优"
+
+    @pytest.mark.parametrize("theme", (ThemeName.DARK, ThemeName.LIGHT, ThemeName.NAVY, ThemeName.DRACULA))
+    def test_info_semantics_blue_dominant(self, theme: str):
+        """信息蓝语义: INFO 保持蓝色占优 (B 通道为最大分量, F06 调色不得改变色相语义)。"""
+        hex_color = CUSTOM_COLOR_PRESETS[theme]["INFO"]
+        r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
+        assert b > r and b > g, f"{theme} INFO({hex_color}) 必须蓝色占优"

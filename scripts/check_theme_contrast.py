@@ -17,6 +17,7 @@ import sys
 import typing
 from io import TextIOWrapper
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -97,26 +98,71 @@ def _resolve_color(name: str, theme: str) -> str | None:
 # 关键色对与阈值 (WCAG 2.1 §1.4.3)
 # ============================================================================
 
-# (前景色名, 背景色名, 阈值)
-# 正文文本 ≥4.5；大字号/图标/状态色 ≥3.0
-_CONTRAST_PAIRS: list[tuple[str, str, float]] = [
-    # 正文文本
-    ("TEXT_PRIMARY", "SURFACE", 4.5),
-    ("TEXT_SECONDARY", "SURFACE", 4.5),
-    # 表格文本（正文）
-    ("TABLE_HEADER_TEXT", "TABLE_HEADER_BG", 4.5),
-    ("TABLE_HEADER_TEXT", "TABLE_ROW_ODD", 4.5),
-    ("TABLE_HEADER_TEXT", "TABLE_ROW_EVEN", 4.5),
-    ("TABLE_CELL_TEXT", "TABLE_ROW_ODD", 4.5),
-    # 状态色（图标 / 大字号）
-    ("SUCCESS", "SURFACE", 3.0),
-    ("WARNING", "SURFACE", 3.0),
-    ("INFO", "SURFACE", 3.0),
-    ("ERROR", "SURFACE", 3.0),
-    ("TEXT_DISABLED", "SURFACE", 3.0),
-    # 涨跌色（图标 / 大字号数值）
-    ("UP_RED", "SURFACE", 3.0),
-    ("DOWN_GREEN", "SURFACE", 3.0),
+# WCAG 2.1 §1.4.3 阈值:
+#   正常文字 ≥ 4.5；大字号 (≥24px，或 ≥18.66px 且粗体) 与图形/图标 ≥ 3.0
+_THRESHOLD_TEXT = 4.5
+_THRESHOLD_LARGE = 3.0
+
+
+class ContrastPair(NamedTuple):
+    """一条对比度验收色对。
+
+    ``purpose`` 标注该色对的真实用途，决定适用阈值（F06：按用途分级，不把所有颜色设同阈值）：
+
+    - ``text``     正文文本（含业务状态/涨跌文字，字号 13/14，非 WCAG 大字号例外）
+    - ``icon``     图标 / 图形 / 错误态强调
+    - ``disabled`` 禁用或装饰性内容（WCAG §1.4.3 对禁用控件豁免，仍保留可读下限）
+    """
+
+    fg: str
+    bg: str
+    threshold: float
+    purpose: str
+
+
+# 色对按「文本 / 图标 / 禁用」用途分级标注阈值（F06）：
+#   业务状态/涨跌文字（SUCCESS/WARNING/INFO/UP_RED/DOWN_GREEN）实际用于 13/14px 正文
+#   （Toast、Token 状态文字、Slider 标签、行情单元格、任务/数据源提示等），
+#   不属于 WCAG 大字号例外，必须按正文 4.5 验收；仅图标或禁用内容才用 3.0。
+#
+#   背景建模（消费盘点结论）：
+#   - 业务色正文的真实背景 = SURFACE / CARD_BG（面板/卡片/Toast/列表行/DataTable 默认行；
+#     4 主题下两 token 同值，仍显式分别验收以防未来分化）。
+#   - virtual_table 的 ODD/EVEN 交替行单元格仅使用中性正文色（TABLE_CELL_TEXT 等），
+#     业务色无 EVEN 行消费场景，故不为业务色配置 EVEN 行色对。
+#
+#   已知覆盖边界（如实披露，不扩大为整应用 WCAG AA 认证）：
+#   - watchlist 列表行使用 Layer 1 派生色 SURFACE_VARIANT（surface_container_highest，
+#     运行时由 Flet/Flutter 派生，无法从主题表精确计算），不在本门禁可验收集合内。
+#   - ERROR 亦有正文场景（Toast 错误文字、交易明细 sell/负 pnl），但 Layer 1 error
+#     调整会联动 danger_button/on_error 等反色用途，超出 F06 范围，按图标档 3.0 验收，
+#     后续如需正文级验收须连同反色用途一并评估。
+_CONTRAST_PAIRS: list[ContrastPair] = [
+    # --- 正文文本 (4.5) ---
+    ContrastPair("TEXT_PRIMARY", "SURFACE", _THRESHOLD_TEXT, "text"),
+    ContrastPair("TEXT_SECONDARY", "SURFACE", _THRESHOLD_TEXT, "text"),
+    # 表格文本（正文）：表头文本在表头底色 + 奇偶行底色上的组合
+    ContrastPair("TABLE_HEADER_TEXT", "TABLE_HEADER_BG", _THRESHOLD_TEXT, "text"),
+    ContrastPair("TABLE_HEADER_TEXT", "TABLE_ROW_ODD", _THRESHOLD_TEXT, "text"),
+    ContrastPair("TABLE_HEADER_TEXT", "TABLE_ROW_EVEN", _THRESHOLD_TEXT, "text"),
+    # 表格单元格文本（正文）：奇偶行底色
+    ContrastPair("TABLE_CELL_TEXT", "TABLE_ROW_ODD", _THRESHOLD_TEXT, "text"),
+    ContrastPair("TABLE_CELL_TEXT", "TABLE_ROW_EVEN", _THRESHOLD_TEXT, "text"),
+    # 业务状态 / 涨跌文本（正文）：状态消息与行情/涨跌文字，字号 13/14，非大字号
+    ContrastPair("SUCCESS", "SURFACE", _THRESHOLD_TEXT, "text"),
+    ContrastPair("SUCCESS", "CARD_BG", _THRESHOLD_TEXT, "text"),
+    ContrastPair("WARNING", "SURFACE", _THRESHOLD_TEXT, "text"),
+    ContrastPair("WARNING", "CARD_BG", _THRESHOLD_TEXT, "text"),
+    ContrastPair("INFO", "SURFACE", _THRESHOLD_TEXT, "text"),
+    ContrastPair("INFO", "CARD_BG", _THRESHOLD_TEXT, "text"),
+    ContrastPair("UP_RED", "SURFACE", _THRESHOLD_TEXT, "text"),
+    ContrastPair("UP_RED", "CARD_BG", _THRESHOLD_TEXT, "text"),
+    ContrastPair("DOWN_GREEN", "SURFACE", _THRESHOLD_TEXT, "text"),
+    ContrastPair("DOWN_GREEN", "CARD_BG", _THRESHOLD_TEXT, "text"),
+    # --- 图标 / 错误态强调 (3.0；ERROR 亦有正文场景，见上方覆盖边界说明) ---
+    ContrastPair("ERROR", "SURFACE", _THRESHOLD_LARGE, "icon"),
+    # --- 禁用 / 装饰 (3.0，WCAG §1.4.3 禁用控件豁免，保留可读下限) ---
+    ContrastPair("TEXT_DISABLED", "SURFACE", _THRESHOLD_LARGE, "disabled"),
 ]
 
 
@@ -125,23 +171,25 @@ def check_contrast() -> list[str]:
     errors: list[str] = []
     themes = [ThemeName.DARK, ThemeName.LIGHT, ThemeName.NAVY, ThemeName.DRACULA]
     for theme in themes:
-        for fg_name, bg_name, threshold in _CONTRAST_PAIRS:
-            fg = _resolve_color(fg_name, theme)
-            bg = _resolve_color(bg_name, theme)
+        for pair in _CONTRAST_PAIRS:
+            fg = _resolve_color(pair.fg, theme)
+            bg = _resolve_color(pair.bg, theme)
             if fg is None or bg is None:
                 errors.append(
-                    f"{theme}: 无法解析色对 {fg_name}/{bg_name} "
+                    f"{theme}: 无法解析色对 {pair.fg}/{pair.bg} "
                     f"(fg={'<缺失>' if fg is None else fg}, bg={'<缺失>' if bg is None else bg})"
                 )
                 continue
             try:
                 ratio = contrast_ratio(fg, bg)
             except (ValueError, IndexError) as exc:
-                errors.append(f"{theme}: {fg_name}/{bg_name} 颜色解析失败 (fg={fg!r}, bg={bg!r}): {exc}")
+                errors.append(f"{theme}: {pair.fg}/{pair.bg} 颜色解析失败 (fg={fg!r}, bg={bg!r}): {exc}")
                 continue
-            if ratio < threshold:
+            # 使用未舍入比值比较，仅在显示时格式化（4.499 不得因显示 4.50 而通过）
+            if ratio < pair.threshold:
                 errors.append(
-                    f"{theme}: {fg_name}/{bg_name} 对比度 {ratio:.2f} 低于阈值 {threshold} (fg={fg}, bg={bg})"
+                    f"{theme}: {pair.fg}/{pair.bg} [{pair.purpose}] 对比度 {ratio:.2f} "
+                    f"低于阈值 {pair.threshold} (fg={fg}, bg={bg})"
                 )
     return errors
 

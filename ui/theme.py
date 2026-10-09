@@ -93,11 +93,15 @@ class ThemeColors(TypedDict):
 
 CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
     ThemeName.DARK: {
-        "UP_RED": "#F44336",
+        # F06: UP_RED 用于 13/14px 正文涨跌文字, 原 #F44336 在 #1E1E1E 上仅 4.53 (压线),
+        #   调整为 Red A200 #FF5252 (5.22) 留出对比度余量 (如 SURFACE_VARIANT 派生背景).
+        "UP_RED": "#FF5252",
         "DOWN_GREEN": "#4CAF50",
         "SUCCESS": "#00E676",
         "WARNING": "#FFAB00",
-        "INFO": "#2979FF",
+        # F06: INFO 用于 13/14px 正文状态文字, 原 #2979FF 在 #1E1E1E 上仅 4.19 (<4.5),
+        #   调整为 Blue A200 #448AFF (5.02) 以满足 WCAG §1.4.3 正常文字阈值.
+        "INFO": "#448AFF",
         "TABLE_HEADER_BG": "#252526",
         "TABLE_HEADER_TEXT": "#E0E0E0",
         "TABLE_ROW_ODD": "#1E1E1E",
@@ -116,16 +120,13 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "TEXT_DISABLED": "#90A4AE",
     },
     ThemeName.LIGHT: {
-        "UP_RED": "#F44336",
-        # NOTE(lazy): DOWN_GREEN 调整为 Green 700 以满足 WCAG §1.4.3 对比度≥3.0
-        #   (原 Green 500 #4CAF50 在白底对比度仅 2.78). ceiling: 视觉一致以 WCAG 为准.
-        #   upgrade: 调整为 Dracula/其他主题统一规范时一并刷新.
-        "DOWN_GREEN": "#388E3C",
-        "SUCCESS": "#388E3C",
-        # NOTE(lazy): WARNING 调整为 Orange 800 以满足 WCAG §1.4.3 对比度≥3.0
-        #   (原 Amber 800 #FFA000 在白底对比度仅 2.04). ceiling: 视觉一致以 WCAG 为准.
-        #   upgrade: 调整为 Dracula/其他主题统一规范时一并刷新.
-        "WARNING": "#EF6C00",
+        # NOTE(lazy): 涨跌/状态正文色统一调深以满足 WCAG §1.4.3 正常文字对比度 ≥4.5 (F06)
+        #   (原 UP_RED #F44336=3.68、DOWN_GREEN/SUCCESS #388E3C=4.12、WARNING #EF6C00=3.08 仅达 3.0 大字号档).
+        #   ceiling: 视觉鲜艳度以 WCAG 为准. upgrade: Dracula/其他主题统一刷新调色板时一并复核.
+        "UP_RED": "#C62828",  # Red 800
+        "DOWN_GREEN": "#2E7D32",  # Green 800
+        "SUCCESS": "#2E7D32",  # Green 800
+        "WARNING": "#BF360C",  # Deep Orange 900
         "INFO": "#1976D2",
         "TABLE_HEADER_BG": "#FAFAFA",
         "TABLE_HEADER_TEXT": "#424242",
@@ -145,7 +146,9 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "TEXT_DISABLED": "#607D8B",
     },
     ThemeName.NAVY: {
-        "UP_RED": "#EF4444",
+        # F06: UP_RED 用于 13/14px 正文涨跌文字, 原 #EF4444 在 #1E293B 上仅 3.89 (<4.5),
+        #   调整为 Red 400 #F87171 (5.29) 以满足 WCAG §1.4.3 正常文字阈值.
+        "UP_RED": "#F87171",
         "DOWN_GREEN": "#22C55E",
         "SUCCESS": "#4ADE80",
         "WARNING": "#FBBF24",
@@ -168,7 +171,9 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "TEXT_DISABLED": "#94A3B8",
     },
     ThemeName.DRACULA: {
-        "UP_RED": "#F44336",
+        # F06: UP_RED 用于 13/14px 正文涨跌文字, 原 #F44336 在 #282A36 上仅 3.87 (<4.5),
+        #   调整为 Dracula Red #FF5555 (4.53) 以满足 WCAG §1.4.3 正常文字阈值.
+        "UP_RED": "#FF5555",
         "DOWN_GREEN": "#4CAF50",
         "SUCCESS": "#50FA7B",
         "WARNING": "#FFB86C",  # Orange
@@ -370,12 +375,13 @@ class AppColors:
     # ====================================================================
     # Layer 2: 业务自定义色 (Hex 值 — 需手动更新)
     # ====================================================================
-    UP_RED = "#F44336"
+    # UP_RED/INFO 默认值与 DARK preset 同步 (DARK 为 _reset_singleton 复位基线, F06)
+    UP_RED = "#FF5252"
     DOWN_GREEN = "#4CAF50"
     # 业务语义直通色 (随主题切换) — SUCCESS 成功 / WARNING 警告 / INFO 信息状态色
     SUCCESS = "#00E676"
     WARNING = "#FFAB00"
-    INFO = "#2979FF"
+    INFO = "#448AFF"
     TABLE_HEADER_BG = "#252526"
     TABLE_HEADER_TEXT = "#E0E0E0"
     TABLE_ROW_ODD = "#1E1E1E"
