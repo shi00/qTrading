@@ -75,7 +75,6 @@ VM 须满足 `_ViewModelProtocol`（结构性类型，见 [`ui/hooks.py`](../../
 | UI 模型 | 裸 `use_state`/`use_effect` 组件 | **MVVM + `use_viewmodel` hook** | [CLAUDE.md](../../CLAUDE.md) §3.2 |
 | 适用范围 | Web/移动/桌面通用 | **仅桌面端**（`page.window.min_width=1024`） | [ui-ux-best-practices.md §布局与响应式](./ui-ux-best-practices.md#3-布局与响应式) |
 | 声明式 Dialog | `ft.use_dialog()` Hook | **`ft.use_dialog()` Hook**（声明式组件内唯一契约） | [v1-api-constraints.md §声明式组件内 API 契约](./v1-api-constraints.md#声明式组件内-api-契约) |
-| Dropdown 事件 | `on_change` | **`on_select`** | [v1-api-constraints.md §V0→V1 迁移 API 表](./v1-api-constraints.md#v0v1-迁移-api-表) 第 13 项 |
 | `use_effect` cleanup | setup 返回 cleanup 函数 | **显式 `cleanup=` 参数传入** | [v1-api-constraints.md §声明式组件内 API 契约](./v1-api-constraints.md#声明式组件内-api-契约) |
 | 异步阻塞段 | `asyncio.to_thread` / `page.run_thread` | **`ThreadPoolManager.run_async(TaskType.IO/CPU)`** | R16 红线（见 §5） |
 | 响应式断点 | xs/sm/md/lg/xl/xxl 576~1400 | **沿用 Flet 默认断点**，视图栅格经 `AppStyles.COL_*` 预置配置统一消费 | [`ui/theme.py`](../../ui/theme.py) `AppStyles` |
@@ -113,7 +112,7 @@ def DeleteButton():
 
 ### 4.2 Dropdown `on_select`（非 `on_change`）
 
-项目 `ft.Dropdown` 事件统一用 `on_select`：
+`ft.Dropdown` 的事件参数在 V1 为 `on_select`（V0 名称 `on_change` 在本版本已不存在，仅列于 [V0→V1 迁移 API 表](./v1-api-constraints.md#v0v1-迁移-api-表) 第 13 项，供迁移旧代码参考）。这是 V1 API 名称本身，**不是**项目相对官方默认的分叉；项目新代码统一用 `on_select`：
 
 ```python
 ft.Dropdown(
@@ -141,6 +140,8 @@ def cleanup() -> None:
 
 ft.use_effect(setup, dependencies=[], cleanup=cleanup)
 ```
+
+**机制（锁定版本）**：`use_effect` 每次渲染都会把 `hook.cleanup` 重写为传入的 `cleanup=` 参数，故 setup 返回值写法在重渲染后不可靠；显式 `cleanup=` 每次渲染传入同一函数引用，卸载时可靠执行。机制细节与 `dependencies` 三态语义见 [v1-api-constraints.md §3](./v1-api-constraints.md#3-use_state--use_effect-api)。
 
 ### 4.4 `use_viewmodel` 双模式
 

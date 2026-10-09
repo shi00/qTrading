@@ -1,8 +1,9 @@
-"""Flet 0.86.0 私有 API 兼容性验证（spike）。
+"""Flet 私有 API 兼容性验证（spike；文件名中的 "0_86" 为历史命名）。
 
-目的：在 spike worktree（flet 0.86.0）中固化项目深度依赖的 Flet 私有 API
-契约。任一断言失败即表示 0.86.0 引入了破坏性变更，需记录到 spike 报告并
-标记升级阻塞（Plans-flet-0.86.0-upgrade.md Task 0.2 DoD）。
+目的：固化项目深度依赖的 Flet 私有 API 契约。**文件名与历史记录中的 "0.86"
+仅是 spike 命名**：本探针当前针对 ``pyproject.toml`` 锁定的 Flet 版本执行
+（版本号从 ``pyproject.toml`` 读取，不在此硬编码）。任一断言失败即表示锁定
+版本引入了破坏性变更，需记录到对应检视/升级报告并标记升级阻塞。
 
 依赖点（项目内使用位置）：
 - ``_context_page`` ContextVar: ``tests/unit/ui/conftest.py`` 的
@@ -14,7 +15,10 @@
   ``tests/integration/conftest.py`` 的 V1 page 兼容桩（monkeypatch fget）
 - ``Observable, ObservableList``: ``scripts/spike_ui_debt/spike_observable.py``
 
-验证手段：``import`` + ``hasattr()`` + ``inspect.signature()``。
+验证手段：
+- 存在性/签名：``import`` + ``hasattr()`` + ``inspect.signature()``
+- 行为：真实 ``Session`` 调度器驱动的 mount/re-render/unmount 时序验证
+  （见 ``TestRealEffectScheduling`` 与 ``TestSyncSetupCleanupContrast``）
 """
 
 from __future__ import annotations
@@ -235,6 +239,39 @@ def _AsyncSetupReturningCleanup(log: list[str]):
     return ft.Text("probe")
 
 
+@ft.component
+def _SyncExplicitCleanup(log: list[str], unrelated: int):
+    """sync setup + 显式 ``cleanup=`` 探针（``unrelated`` 变化触发无关重渲染）。
+
+    记录显式 ``cleanup=`` 在 mount → 无关重渲染 → unmount 全链路的清理结果。
+    """
+
+    def _setup() -> None:
+        log.append("setup")
+
+    def _cleanup() -> None:
+        log.append("explicit_cleanup")
+
+    ft.use_effect(_setup, [], _cleanup)
+    return ft.Text(f"probe:{unrelated}")
+
+
+@ft.component
+def _SyncSetupReturningCleanup(log: list[str], unrelated: int):
+    """sync setup 通过返回值提供 cleanup 的探针（对照显式 ``cleanup=``）。"""
+
+    def _setup() -> object:
+        log.append("setup")
+
+        def _returned_cleanup() -> None:
+            log.append("returned_cleanup")
+
+        return _returned_cleanup
+
+    ft.use_effect(_setup, [])
+    return ft.Text(f"probe:{unrelated}")
+
+
 async def _wait_until(predicate, timeout: float = 2.0) -> None:
     """轮询等待 predicate 成立（绑定当前事件循环），超时抛 AssertionError。"""
     loop = asyncio.get_running_loop()
@@ -405,3 +442,70 @@ class TestRealEffectScheduling:
             assert "returned_cleanup" not in log
         finally:
             await _stop_session(session, gate, *tasks)
+
+
+class TestSyncSetupCleanupContrast:
+    """mount → 无关重渲染 → unmount：显式 ``cleanup=`` 与 setup 返回值的清理结果对照（F12）。
+
+    锁定版本源码决定两种写法的差异：
+    - ``flet/components/hooks/use_effect.py`` 的 ``use_effect`` 每次渲染末尾执行
+      ``hook.cleanup = cleanup``（以函数实参重写 hook 状态）；
+    - ``flet/messaging/session.py`` 的调度器仅在执行 **同步** setup 后，将其返回
+      的可调用对象暂存到 ``hook.cleanup``（``iscoroutinefunction`` 分支丢弃返回值）。
+
+    因此：显式 ``cleanup=`` 每次渲染被重写为同一函数引用，卸载时可靠执行；setup 返回值
+    在 mount 时被调度器暂存，任意后续（含无依赖变化、不触发 cleanup 重跑的 ``[]``）渲染
+    都会被 ``use_effect`` 的 ``hook.cleanup = cleanup``（None）清空，卸载时静默跳过。
+    """
+
+    @pytest.mark.asyncio
+    async def test_explicit_cleanup_runs_after_unrelated_rerender_and_unmount(self) -> None:
+        """显式 cleanup=：无关重渲染后 hook.cleanup 保持，卸载时执行 cleanup。"""
+        log: list[str] = []
+        session = await _new_session()
+        gate = asyncio.Event()
+        try:
+            component = make_component(_SyncExplicitCleanup, log=log, unrelated=1)
+            render_once(component)
+            component._run_mount_effects()
+            hook = component._state.hooks[0]
+            await _wait_until(lambda: "setup" in log)
+            assert callable(hook.cleanup)
+
+            component.kwargs = {"log": log, "unrelated": 2}
+            render_once(component)
+            component._run_render_effects()
+            assert callable(hook.cleanup)
+
+            component._state.mounted = False
+            component._run_unmount_effects()
+            await _wait_until(lambda: "explicit_cleanup" in log)
+            assert log.count("setup") == 1
+        finally:
+            await _stop_session(session, gate)
+
+    @pytest.mark.asyncio
+    async def test_setup_returned_cleanup_cleared_by_unrelated_rerender(self) -> None:
+        """setup 返回值：无关重渲染清空 hook.cleanup，卸载时静默跳过 cleanup。"""
+        log: list[str] = []
+        session = await _new_session()
+        gate = asyncio.Event()
+        try:
+            component = make_component(_SyncSetupReturningCleanup, log=log, unrelated=1)
+            render_once(component)
+            component._run_mount_effects()
+            hook = component._state.hooks[0]
+            await _wait_until(lambda: "setup" in log and callable(hook.cleanup))
+
+            component.kwargs = {"log": log, "unrelated": 2}
+            render_once(component)
+            component._run_render_effects()
+            assert hook.cleanup is None
+
+            component._state.mounted = False
+            component._run_unmount_effects()
+            for _ in range(3):
+                await asyncio.sleep(0)
+            assert "returned_cleanup" not in log
+        finally:
+            await _stop_session(session, gate)
