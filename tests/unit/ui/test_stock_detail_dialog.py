@@ -839,7 +839,7 @@ class TestLoadChartAsyncFunction:
         from ui.components.stock_detail_dialog import _load_chart_async
 
         calls: list = []
-        await _load_chart_async(None, {}, "000001.SZ", calls.append)
+        await _load_chart_async(None, {}, "000001.SZ", calls.append, lambda: True)
         assert len(calls) == 1
         assert isinstance(calls[0], ft.Text)
 
@@ -853,7 +853,7 @@ class TestLoadChartAsyncFunction:
         mock_dp.get_stock_history = AsyncMock(return_value=pd.DataFrame())
 
         calls: list = []
-        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append)
+        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append, lambda: True)
         # 第一次：loading（ProgressRing），第二次：no_history（Text）
         assert len(calls) == 2
         assert isinstance(calls[1], ft.Text)
@@ -866,7 +866,7 @@ class TestLoadChartAsyncFunction:
         mock_dp.get_stock_history = MagicMock(side_effect=Exception("network error"))
 
         calls: list = []
-        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append)
+        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append, lambda: True)
         # 第一次：loading，第二次：error
         assert len(calls) == 2
         assert isinstance(calls[1], ft.Text)
@@ -892,7 +892,7 @@ class TestLoadChartAsyncFunction:
         mock_dp.get_stock_history = AsyncMock(return_value=df)
 
         calls: list = []
-        await _load_chart_async(mock_dp, {"name": "测试股票"}, "000001.SZ", calls.append)
+        await _load_chart_async(mock_dp, {"name": "测试股票"}, "000001.SZ", calls.append, lambda: True)
 
         # set_chart_content 为 ft.Column (含 CandlestickChart + K 线图例 Row)
         assert isinstance(calls[-1], ft.Column)
@@ -925,7 +925,7 @@ class TestLoadChartAsyncFunction:
         mock_dp.get_stock_history = AsyncMock(return_value=df)
 
         calls: list = []
-        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append)
+        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append, lambda: True)
 
         assert isinstance(calls[-1], ft.Column)
         chart_ctrl = next(
@@ -942,6 +942,78 @@ class TestLoadChartAsyncFunction:
         )
         assert bar_ctrl is not None
         assert len(bar_ctrl.groups) == 2
+
+    @pytest.mark.asyncio
+    async def test_is_valid_false_discards_all_writes(self):
+        """is_valid 始终 False（组件已卸载 / 代次失效）时不写入任何 chart 状态。"""
+        from ui.components.stock_detail_dialog import _load_chart_async
+
+        mock_dp = MagicMock(spec=DataProcessor)
+        mock_dp.get_stock_history = AsyncMock(return_value=MagicMock())
+
+        calls: list = []
+        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append, lambda: False)
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_is_valid_false_after_fetch_discards_late_chart(self):
+        """await 取数期间代次失效：loading 已写，迟到图表结果被丢弃（F05 核心）。"""
+        import pandas as pd
+
+        from ui.components.stock_detail_dialog import _load_chart_async
+
+        df = pd.DataFrame(
+            {
+                "trade_date": pd.bdate_range("2024-01-02", periods=2),
+                "open": [10.0, 11.0],
+                "high": [10.5, 11.5],
+                "low": [9.5, 10.5],
+                "close": [10.2, 11.2],
+            }
+        )
+        mock_dp = MagicMock(spec=DataProcessor)
+        mock_dp.get_stock_history = AsyncMock(return_value=df)
+
+        state = {"valid": True}
+
+        def _is_valid() -> bool:
+            return state["valid"]
+
+        calls: list = []
+
+        def _record(control):
+            calls.append(control)
+            # 首次写入（loading，在 await 之前）后模拟卸载，令迟到图表结果失效
+            state["valid"] = False
+
+        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", _record, _is_valid)
+
+        # 仅 loading 写入；K 线图结果被丢弃
+        assert len(calls) == 1
+        assert not any(isinstance(c, fch.CandlestickChart) for c in calls[0].controls)
+
+    @pytest.mark.asyncio
+    async def test_is_valid_true_commits_chart(self):
+        """is_valid 恒 True（代次有效）时正常提交 chart（回归保护）。"""
+        import pandas as pd
+
+        from ui.components.stock_detail_dialog import _load_chart_async
+
+        df = pd.DataFrame(
+            {
+                "trade_date": pd.bdate_range("2024-01-02", periods=2),
+                "open": [10.0, 11.0],
+                "high": [10.5, 11.5],
+                "low": [9.5, 10.5],
+                "close": [10.2, 11.2],
+            }
+        )
+        mock_dp = MagicMock(spec=DataProcessor)
+        mock_dp.get_stock_history = AsyncMock(return_value=df)
+
+        calls: list = []
+        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append, lambda: True)
+        assert any(isinstance(c, fch.CandlestickChart) for c in calls[-1].controls)
 
 
 # ---------------------------------------------------------------------------
