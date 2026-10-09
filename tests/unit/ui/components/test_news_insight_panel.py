@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import flet as ft
 import pytest
@@ -25,6 +26,9 @@ from ui.components.news_insight_panel import (
     severity_color,
     source_status_label_key,
 )
+
+if TYPE_CHECKING:
+    from ui.viewmodels.news_insight_types import RiskEvent
 
 
 @pytest.fixture(autouse=True)
@@ -173,6 +177,43 @@ def test_build_ready_with_events():
     assert isinstance(control, ft.Column)
 
 
+def _iter_text_values(control) -> list:
+    """递归收集控件树（content / controls）中所有 ft.Text.value。"""
+    values: list = []
+    if isinstance(control, ft.Text):
+        values.append(control.value)
+    content = getattr(control, "content", None)
+    if content is not None:
+        values.extend(_iter_text_values(content))
+    for child in getattr(control, "controls", None) or []:
+        values.extend(_iter_text_values(child))
+    return values
+
+
+def _event_card_sections(card: ft.Control) -> list:
+    """事件卡片外层 Column 的直接子控件（header + 展开明细）。"""
+    outer = getattr(card, "content", None)
+    assert isinstance(outer, ft.Column)
+    return list(outer.controls)
+
+
+def _risk_event_with_body() -> RiskEvent:
+    from ui.viewmodels.news_insight_types import RiskEvent, RiskQuote
+
+    return RiskEvent(
+        event_type="诉讼",
+        severity="high",
+        company_role="",
+        event_status="",
+        impact_horizon="",
+        fact="事实内容",
+        impact_reasoning="影响推断内容",
+        uncertainty="不确定内容",
+        confidence=60,
+        evidence_quotes=(RiskQuote(news_id=1, quote="引用原文"),),
+    )
+
+
 def test_build_event_card_collapsed():
     from ui.viewmodels.news_insight_types import RiskEvent
 
@@ -192,7 +233,28 @@ def test_build_event_card_collapsed():
 
 
 def test_build_event_card_expanded_shows_sections():
-    from ui.viewmodels.news_insight_types import RiskEvent, RiskQuote
+    card = _build_event_card(_risk_event_with_body(), is_expanded=True, on_toggle=lambda _e: None)
+    assert isinstance(card, ft.Container)
+
+    values = _iter_text_values(card)
+    # F14：明细控件直接组合进 Column，Text.value 必须是字符串
+    assert values
+    assert all(isinstance(v, str) for v in values), f"Text.value 必须是字符串，实际={values!r}"
+
+    joined = "\n".join(values)
+    assert "事实内容" in joined
+    assert "影响推断内容" in joined
+    assert "不确定内容" in joined
+    assert "引用原文" in joined
+
+    # 引用保持自身 Column 子树（不被折叠进某个 Text.value）
+    nested_columns = [c for c in _event_card_sections(card) if isinstance(c, ft.Column)]
+    assert nested_columns, "引用应以 Column 子树呈现"
+    assert any("引用原文" in "\n".join(_iter_text_values(c)) for c in nested_columns)
+
+
+def test_build_event_card_expanded_omits_empty_sections():
+    from ui.viewmodels.news_insight_types import RiskEvent
 
     event = RiskEvent(
         event_type="诉讼",
@@ -200,14 +262,24 @@ def test_build_event_card_expanded_shows_sections():
         company_role="",
         event_status="",
         impact_horizon="",
-        fact="事实内容",
-        impact_reasoning="影响推断内容",
-        uncertainty="不确定内容",
-        confidence=60,
-        evidence_quotes=(RiskQuote(news_id=1, quote="引用原文"),),
+        fact="",
+        impact_reasoning="",
+        uncertainty="",
+        confidence=0,
+        evidence_quotes=(),
     )
     card = _build_event_card(event, is_expanded=True, on_toggle=lambda _e: None)
-    assert isinstance(card, ft.Container)
+    # 展开但所有明细字段为空：只保留 header，不生成空明细
+    assert len(_event_card_sections(card)) == 1
+
+
+def test_build_event_card_collapsed_excludes_expanded_body():
+    card = _build_event_card(_risk_event_with_body(), is_expanded=False, on_toggle=lambda _e: None)
+    joined = "\n".join(_iter_text_values(card))
+    assert "事实内容" not in joined
+    assert "影响推断内容" not in joined
+    assert "不确定内容" not in joined
+    assert "引用原文" not in joined
 
 
 def test_build_event_cards_multiple():
