@@ -1084,7 +1084,7 @@ class SchedulerService:
             processor = DataProcessor()
             # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
             # M3 fix: CancelledError 带消息，便于日志区分"调度取消"与"框架取消"
-            if not tm.update_progress(task_id, 0.05, Message("sched_ai_concept_clear_history")):
+            if not tm.update_progress(task_id, 0.05, Message("sched_concept_sync_progress")):
                 raise asyncio.CancelledError("task cancelled by scheduler (update_progress returned False)")
             # Scheduled run: 仅同步免费数据源（AKShare 东财 + Tushare 涨停）
             await processor.run_concept_sync(
@@ -1094,13 +1094,13 @@ class SchedulerService:
             # REVIEW-06 TO-02: 内存侧单调（同 daily/nightly 标记方法）
             self._last_concept_sync_date = max(self._last_concept_sync_date or "", today_str)
             await self._persist_run_date_db(_DB_KEY_CONCEPT_SYNC, _CFG_LAST_CONCEPT_SYNC, today_str)
-            return Message("sched_ai_concept_done")
+            return Message("sched_concept_sync_done")
 
         # D6-5: 检查返回值为 None 的两种情形（去重命中/无事件循环），日志在 TaskManager
         # 内已分别记录，此处仅从调度器视角告警，交由 D6-1 补偿机制兜底。
         task_id = TaskManager().submit_task(
-            name=Message("sched_ai_concept_task_name"),
-            task_type=Message("sched_ai_concept_task_type"),
+            name=Message("sched_concept_sync_task_name"),
+            task_type=Message("sched_concept_sync_task_type"),
             coroutine_factory=_concept_sync_logic,
             cancellable=True,
             unique_key="concept_sync",
