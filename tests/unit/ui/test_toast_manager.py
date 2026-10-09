@@ -42,7 +42,8 @@ from ui.components.toast_manager import (
     ToastData,
     ToastManager,
     ToastManagerView,
-    _resolve_color_icon,
+    _resolve_color,
+    _resolve_icon,
     get_global_state,
 )
 from ui.theme import AppColors
@@ -521,42 +522,56 @@ class TestRegisterTask:
 
 
 # ============================================================================
-# 8. _resolve_color_icon 模块级函数
+# 8. _resolve_color / _resolve_icon 模块级函数
 # ============================================================================
 
 
-class TestResolveColorIcon:
-    """验证 _resolve_color_icon 4 种 type + 未知 fallback。"""
+class TestResolveIcon:
+    """验证 _resolve_icon 4 种 type + 未知 fallback (F04: 图标与颜色名分离)."""
 
     def test_info_type(self):
-        """info type → AppColors.INFO + Icons.INFO。"""
-        color, icon = _resolve_color_icon("info")
-        assert color == AppColors.INFO
-        assert icon == ft.Icons.INFO
+        """info type → Icons.INFO。"""
+        assert _resolve_icon("info") == ft.Icons.INFO
 
     def test_success_type(self):
-        """success type → AppColors.SUCCESS + Icons.CHECK_CIRCLE。"""
-        color, icon = _resolve_color_icon("success")
-        assert color == AppColors.SUCCESS
-        assert icon == ft.Icons.CHECK_CIRCLE
+        """success type → Icons.CHECK_CIRCLE。"""
+        assert _resolve_icon("success") == ft.Icons.CHECK_CIRCLE
 
     def test_warning_type(self):
-        """warning type → AppColors.WARNING + Icons.WARNING。"""
-        color, icon = _resolve_color_icon("warning")
-        assert color == AppColors.WARNING
-        assert icon == ft.Icons.WARNING
+        """warning type → Icons.WARNING。"""
+        assert _resolve_icon("warning") == ft.Icons.WARNING
 
     def test_error_type(self):
-        """error type → AppColors.ERROR + Icons.ERROR。"""
-        color, icon = _resolve_color_icon("error")
-        assert color == AppColors.ERROR
-        assert icon == ft.Icons.ERROR
+        """error type → Icons.ERROR。"""
+        assert _resolve_icon("error") == ft.Icons.ERROR
 
     def test_unknown_type_falls_back_to_info(self):
         """未知 type → fallback 到 info。"""
-        color, icon = _resolve_color_icon("unknown")
-        assert color == AppColors.INFO
-        assert icon == ft.Icons.INFO
+        assert _resolve_icon("unknown") == ft.Icons.INFO
+
+
+class TestResolveColor:
+    """验证 _resolve_color 4 种 type + 未知 fallback (F04: 渲染时读取当期主题色)."""
+
+    def test_info_type(self):
+        """info type → AppColors.INFO。"""
+        assert _resolve_color("info") == AppColors.INFO
+
+    def test_success_type(self):
+        """success type → AppColors.SUCCESS。"""
+        assert _resolve_color("success") == AppColors.SUCCESS
+
+    def test_warning_type(self):
+        """warning type → AppColors.WARNING。"""
+        assert _resolve_color("warning") == AppColors.WARNING
+
+    def test_error_type(self):
+        """error type → AppColors.ERROR。"""
+        assert _resolve_color("error") == AppColors.ERROR
+
+    def test_unknown_type_falls_back_to_info(self):
+        """未知 type → fallback 到 info。"""
+        assert _resolve_color("unknown") == AppColors.INFO
 
 
 # ============================================================================
@@ -613,7 +628,7 @@ def _make_fake_page() -> FakePage:
 
 def _make_toast(message: str = "test", duration: int = 10) -> ToastData:
     """构造测试用 ToastData。"""
-    return ToastData(id=1, message=message, icon=ft.Icons.INFO, color="#000", duration=duration)
+    return ToastData(id=1, message=message, icon=ft.Icons.INFO, toast_type="info", duration=duration)
 
 
 def _walk_all_controls(root: Any) -> list[Any]:
@@ -1343,7 +1358,7 @@ class TestToastAction:
             id=1,
             message="exported",
             icon=ft.Icons.CHECK_CIRCLE,
-            color="#000",
+            toast_type="success",
             duration=30,
             action_text="打开文件夹",
             on_action=on_action or MagicMock(),

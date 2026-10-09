@@ -177,6 +177,7 @@ class AIStreamMixin:
     _background_tasks: set[asyncio.Task]
     _strategy_submitted: bool
     _active_task_id: str | None
+    _run_unique_key: str
     _last_ai_context: dict | None
     _last_strategy_key: str | None
     _retrying: bool
@@ -598,6 +599,21 @@ class AIStreamMixin:
         from utils.correlation import ensure_correlation_id
 
         ensure_correlation_id()
+
+        # F02: 入口去重/占用 — 已有本 VM 拥有的活动运行（持有取消句柄或本 VM 已提交）时
+        # 拒绝本次重复命令，不清进度/结果/流卡片，也不新建任务，避免多次执行共享单一
+        # _active_task_id 导致互相覆盖、取消错任务。检查与设置同处无 await 的同步段，
+        # 单线程事件循环内原子，无需额外 asyncio.Lock (R11)。
+        # 注：不复用 state.loading（排序/历史加载等非运行路径亦会置位），仅以本 VM
+        # 运行所有权为准，避免无关加载期间误拒正常运行命令。
+        if self._active_task_id is not None or self._strategy_submitted:
+            self._set_state(
+                status_message=Message("screener_already_running"),
+                status_color="warning",
+                status_action_key=None,
+            )
+            return
+
         self.clear_stream_cards()
 
         strategy = self.strategy_mgr.get_strategy(strategy_key)
@@ -939,7 +955,9 @@ class AIStreamMixin:
                 )
                 raise RuntimeError(f"Strategy execution crashed: {DataSanitizer.sanitize_error(e)}") from e
             finally:
-                self._active_task_id = None  # Task 3.2: 所有退出路径清空, 防止误取消已结束的 task
+                # F02: id-scoped 释放 — 仅当句柄仍指向本任务时清空。防「旧任务完成清空
+                # 新任务句柄」导致新运行失去页面取消入口；陈旧回调不再无条件覆盖。
+                self._release_run(task_id)
 
         # Reset Local UI State
         self._full_results = None
@@ -964,12 +982,31 @@ class AIStreamMixin:
         # Task 3.1: name 改为 Message (复用 screener_running_strategy key + name_key params),
         # task_type 也是 Message. _on_tasks_updated 通过 task_type.key 检测策略任务 (替代
         # 旧 TASK_NAME_PREFIX in t.name 字符串检测, 因 t.name 现为 Message 实例不支持 `in`).
-        task_id = TaskManager().submit_task(
-            name=Message("screener_running_strategy", {"name_key": strategy.name_key}),
-            task_type=Message("task_type_ai_screening"),
-            coroutine_factory=_execute_screening,
-            cancellable=True,
-        )
+        try:
+            task_id = TaskManager().submit_task(
+                name=Message("screener_running_strategy", {"name_key": strategy.name_key}),
+                task_type=Message("task_type_ai_screening"),
+                coroutine_factory=_execute_screening,
+                cancellable=True,
+                # F02 第二保障: 实例/业务粒度唯一键，阻止本 VM 的筛选与任务中心重推并发
+                # （主保障为上方入口守卫）；限定 VM 实例粒度，不跨页面误合并其它任务。
+                unique_key=self._run_unique_key,
+            )
+        except Exception as e:
+            # F02: 提交失败必须释放本次入口占用（loading=True），避免 UI 永久 loading。
+            # 捕获 Exception 而非 BaseException，保留 CancelledError 传播 (R2)。
+            logger.error(
+                "[ScreenerVM] submit_task failed: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
+            self._set_state(
+                loading=False,
+                status_message=Message("screener_exec_error"),
+                status_color="error",
+                status_action_key=None,
+            )
+            raise
 
         if task_id is None:
             self._set_state(
@@ -981,6 +1018,15 @@ class AIStreamMixin:
         else:
             self._strategy_submitted = True
             self._active_task_id = task_id  # Task 3.2: 保存供 cancel_strategy
+
+    def _release_run(self, task_id: str) -> None:
+        """F02: id-scoped 释放取消句柄 — 仅当句柄仍指向 ``task_id`` 时清空。
+
+        防止陈旧回调（旧任务的 ``_execute_screening`` finally / 终态通知）清空已被
+        新任务占用的句柄，从而误取消正在运行的新任务。
+        """
+        if self._active_task_id == task_id:
+            self._active_task_id = None
 
     def cancel_strategy(self) -> None:
         """Task 3.2: 取消正在运行的选股策略任务 (本页取消).

@@ -73,6 +73,7 @@ def WatchlistAddDialog(
     search_results: tuple[StockSearchRow, ...] = (),
     is_searching: bool = False,
     search_error: Message | None = None,
+    is_submitting: bool = False,
     on_search: Callable[[str], None] | None = None,
     on_add: Callable[[str, str, str], None] | None = None,
     on_close: Callable[[], None] | None = None,
@@ -84,6 +85,7 @@ def WatchlistAddDialog(
         search_results: VM 搜索返回的股票候选列表。
         is_searching: 搜索请求进行中。
         search_error: 搜索失败信息 (i18n Message)。
+        is_submitting: 添加写入进行中 (F01: 禁用重复确认/输入变更/手工关闭)。
         on_search: 触发搜索回调 (keyword)。
         on_add: 确认添加回调 (ts_code, stock_name, note)。
         on_close: 取消/关闭回调。
@@ -122,11 +124,16 @@ def WatchlistAddDialog(
         set_selected_name(row.name)
 
     def _on_confirm(_e: ft.ControlEvent) -> None:
-        """确认添加: 仅当已选中搜索结果时调用 on_add (按钮 disabled 双保险)."""
+        """确认添加: 仅当已选中搜索结果且未在提交中时调用 on_add (按钮 disabled 双保险)."""
+        if is_submitting:
+            return
         if selected_ts_code and on_add is not None:
             on_add(selected_ts_code, selected_name, note.strip())
 
     def _on_cancel(_e: ft.ControlEvent) -> None:
+        # F01: 写入执行中禁止手工关闭（避免已提交但未知结果被当成未写入）。
+        if is_submitting:
+            return
         if on_close is not None:
             on_close()
 
@@ -135,6 +142,7 @@ def WatchlistAddDialog(
         hint_text=I18n.get("watchlist_add_search_hint"),
         dense=True,
         expand=True,
+        disabled=is_submitting,
         on_change=safe_on_change(_on_keyword_change),
         on_submit=safe_on_click(_on_search),
     )
@@ -178,6 +186,7 @@ def WatchlistAddDialog(
         label=I18n.get("watchlist_add_note_label"),
         hint_text=I18n.get("watchlist_add_note_hint"),
         dense=True,
+        disabled=is_submitting,
         on_change=safe_on_change(lambda e: set_note(get_control_value(e.control, ft.TextField))),
     )
 
@@ -190,12 +199,13 @@ def WatchlistAddDialog(
 
     cancel_btn = ft.TextButton(
         content=I18n.get("common_cancel"),
+        disabled=is_submitting,
         on_click=safe_on_click(_on_cancel),
         style=ft.ButtonStyle(color=AppColors.PRIMARY),
     )
     confirm_btn = ft.Button(
         content=I18n.get("watchlist_add"),
-        disabled=not selected_ts_code,
+        disabled=not selected_ts_code or is_submitting,
         on_click=safe_on_click(_on_confirm),
         style=AppStyles.primary_button(),
     )
