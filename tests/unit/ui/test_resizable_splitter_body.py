@@ -23,6 +23,7 @@ from tests.unit.ui.component_renderer import (
     run_unmount_effects,
 )
 from ui.components.resizable_splitter import ResizableSplitter
+from ui.i18n import I18n
 
 pytestmark = pytest.mark.unit
 
@@ -388,6 +389,123 @@ class TestUnmount:
             _, _ = _render(_make_splitter())
         # 不应抛异常
         run_unmount_effects(_make_splitter())
+
+
+class TestCollapsibleToggle:
+    """F11: collapsible=True 渲染可聚焦的折叠/展开 IconButton, 兑现组件折叠契约。"""
+
+    def _left_container(self, container: ft.Container) -> ft.Container:
+        row = container.content
+        assert isinstance(row, ft.Row)
+        left = row.controls[0]
+        assert isinstance(left, ft.Container)
+        return left
+
+    def test_collapsible_renders_focusable_toggle(self, mock_i18n_state, mock_app_colors_state):
+        """collapsible=True 渲染可聚焦 IconButton (具备 on_click 与可访问 tooltip)。"""
+        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
+            _, result = _render(_make_splitter(collapsible=True))
+
+        btn = _find_toggle_button(result)
+        assert isinstance(btn, ft.IconButton)
+        assert btn.on_click is not None
+        assert btn.tooltip  # 可访问名称 (键盘/读屏可用)
+
+    def test_non_collapsible_has_no_toggle(self, mock_i18n_state, mock_app_colors_state):
+        """collapsible=False 不显示切换命令, 保留原有 3 段结构。"""
+        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
+            _, result = _render(_make_splitter(collapsible=False))
+
+        assert _find_toggle_button(result) is None
+        row = result.content
+        assert isinstance(row, ft.Row)
+        assert len(row.controls) == 3
+
+    def test_toggle_icon_and_tooltip_expanded(self, mock_i18n_state, mock_app_colors_state):
+        """展开态: 图标指左 (折叠动作), tooltip 为折叠文案。"""
+        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
+            _, result = _render(_make_splitter(collapsible=True, collapsed=False))
+
+        btn = _find_toggle_button(result)
+        assert btn.icon == ft.Icons.CHEVRON_LEFT
+        assert btn.tooltip == I18n.get("common_collapse")
+
+    def test_toggle_icon_and_tooltip_collapsed(self, mock_i18n_state, mock_app_colors_state):
+        """折叠态: 图标指右 (展开动作), tooltip 为展开文案, 入口始终可见。"""
+        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
+            _, result = _render(_make_splitter(collapsible=True, collapsed=True))
+
+        btn = _find_toggle_button(result)
+        assert btn is not None
+        assert btn.icon == ft.Icons.CHEVRON_RIGHT
+        assert btn.tooltip == I18n.get("common_expand")
+
+    def test_click_toggle_collapses_then_expands(self, mock_i18n_state, mock_app_colors_state):
+        """点击切换: 折叠隐藏左栏, 再次点击展开恢复。"""
+        component = _make_splitter(collapsible=True, collapsed=False)
+        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
+            _, result = _render(component)
+
+        assert self._left_container(result).visible is True
+
+        _trigger_callback(_find_toggle_button(result).on_click, MagicMock())
+        result = render_once(component)
+        assert self._left_container(result).visible is False
+
+        _trigger_callback(_find_toggle_button(result).on_click, MagicMock())
+        result = render_once(component)
+        assert self._left_container(result).visible is True
+
+    def test_initial_collapsed_remains_expandable(self, mock_i18n_state, mock_app_colors_state):
+        """初始 collapsed=True 时入口仍可见并可展开 (否则永远不可展开)。"""
+        component = _make_splitter(collapsible=True, collapsed=True)
+        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
+            _, result = _render(component)
+
+        assert self._left_container(result).visible is False
+        btn = _find_toggle_button(result)
+        assert isinstance(btn, ft.IconButton)
+
+        _trigger_callback(btn.on_click, MagicMock())
+        result = render_once(component)
+        assert self._left_container(result).visible is True
+
+    def test_width_preserved_across_collapse_expand(self, mock_i18n_state, mock_app_colors_state):
+        """折叠不覆盖最后展开宽度, 展开恢复原宽度。"""
+        component = _make_splitter(collapsible=True, collapsed=False, on_load_width=lambda: 450)
+        _, result = _render(component)
+        assert self._left_container(result).width == 450
+
+        _trigger_callback(_find_toggle_button(result).on_click, MagicMock())
+        result = render_once(component)
+
+        _trigger_callback(_find_toggle_button(result).on_click, MagicMock())
+        result = render_once(component)
+        assert self._left_container(result).visible is True
+        assert self._left_container(result).width == 450
+
+    def test_double_tap_resets_width_without_collapsing(self, mock_i18n_state, mock_app_colors_state):
+        """双击仅重置宽度, 不隐式切换折叠。"""
+        component = _make_splitter(collapsible=True, collapsed=False, default_width=400)
+        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
+            _, result = _render(component)
+
+        divider = _find_divider(result)
+        _trigger_callback(divider.on_double_tap, MagicMock())
+        result = render_once(component)
+
+        assert self._left_container(result).visible is True
+        assert self._left_container(result).width == 400
+
+
+def _find_toggle_button(container: ft.Container) -> ft.IconButton | None:
+    """从渲染结果中定位折叠/展开 IconButton (Collapsible 时存在)。"""
+    row = container.content
+    assert isinstance(row, ft.Row)
+    for ctrl in row.controls:
+        if isinstance(ctrl, ft.Container) and isinstance(ctrl.content, ft.IconButton):
+            return ctrl.content
+    return None
 
 
 def component_in_updates(page, _divider=None) -> bool:
