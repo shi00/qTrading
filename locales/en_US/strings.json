@@ -384,6 +384,7 @@
     "screener_exec_error": "Execution Error",
     "screener_sort_failed": "Sort Failed",
     "screener_cancelled": "Strategy execution cancelled by user",
+    "screener_already_running": "A screening run is already in progress. Cancel it or wait for it to finish",
     "screener_task_rejected": "Task submission rejected, please retry later",
     "screener_blocked": "Blocked: {reason}",
     "screener_action_go_sync": "Go to Sync",

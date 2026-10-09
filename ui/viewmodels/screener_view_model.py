@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import uuid
 from types import MappingProxyType
 
 import pandas as pd
@@ -125,6 +126,9 @@ class ScreenerViewModel(
         # TaskManager subscription state
         self._strategy_submitted = False
         self._active_task_id: str | None = None  # Task 3.2: 保存运行中 task_id 供 cancel_strategy
+        # F02: 实例粒度运行唯一键（第二保障去重，见 ai_stream_mixin.run_strategy）；
+        # 含 uuid 保证不同 VM 实例互不干扰，不跨业务页误合并任务。
+        self._run_unique_key: str = f"screener_run:{uuid.uuid4().hex}"
         # UX-2.3: 单株重试状态（实例属性，不进 state）
         self._last_ai_context: dict | None = None
         self._last_strategy_key: str | None = None
@@ -332,3 +336,20 @@ class ScreenerViewModel(
         if not running and self._strategy_submitted:
             self._strategy_submitted = False
             self._set_state(task_unlocked=True)
+
+        # F02: 终态订阅兜底释放 — 协程体尚未执行（排队期取消）时，_execute_screening 的
+        # finally 不会运行，需经 TaskManager 快照释放占用，避免永久 loading / 句柄泄漏。
+        # 仅在快照中「确实找到该 ID 且已终态」时动作；未找到不误释放（任务可能尚未 enqueue）。
+        if self._active_task_id is not None:
+            owned = next((t for t in tasks if getattr(t, "id", None) == self._active_task_id), None)
+            status_name = getattr(getattr(owned, "status", None), "name", None) if owned is not None else None
+            if status_name in ("COMPLETED", "FAILED", "CANCELLED"):
+                self._active_task_id = None
+                if self._state.loading:
+                    cancelled = status_name == "CANCELLED"
+                    self._set_state(
+                        loading=False,
+                        status_message=Message("screener_cancelled" if cancelled else "screener_exec_error"),
+                        status_color="warning" if cancelled else "error",
+                        status_action_key=None,
+                    )
