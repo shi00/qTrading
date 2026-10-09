@@ -762,6 +762,7 @@
     "watchlist_view_stock": "View stock",
     "watchlist_removed": "Removed from watchlist",
     "watchlist_remove_failed": "Failed to remove from watchlist",
+    "watchlist_refresh_failed": "Saved, but the list refresh failed. Please refresh manually.",
     "watchlist_confirm_remove_title": "Confirm Removal",
     "watchlist_confirm_remove_body": "Remove \"{name}\" from watchlist?",
     "watchlist_col_price": "Last Price",

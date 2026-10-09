@@ -15,7 +15,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -56,6 +56,23 @@ class StockSearchRow:
 
 
 @dataclass(frozen=True)
+class WatchlistMutationResult:
+    """自选股增删结果（F01 局部返回类型，不扩展为全系统 Result 框架）。
+
+    ``status`` 语义（三态区分「写入」与「刷新」两类事实）：
+    - ``failed``：持久化写入本身失败，列表未刷新，**不得**提示成功；
+    - ``applied``：写入成功且列表刷新成功；
+    - ``applied_refresh_failed``：写入成功但列表刷新失败（数据已落库，需提示手动刷新）。
+
+    ``message`` 仅在 ``failed`` 时给出，只含 i18n key 与安全参数，不携带原始 DB 异常字符串。
+    ``CancelledError`` 不编码为上述状态，仍向上抛出（R2）。
+    """
+
+    status: Literal["failed", "applied", "applied_refresh_failed"]
+    message: Message | None = None
+
+
+@dataclass(frozen=True)
 class WatchlistState:
     """WatchlistViewModel 的不可变状态快照 (L771 合规, 无 dual-track)."""
 
@@ -84,14 +101,20 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
         self.cache = cache or CacheManager()  # noqa: R16 - 持有注册单例引用（幂等工厂，DI 注入位）
         self.detail_service = StockDetailService(self.cache)
         self._state: WatchlistState = WatchlistState()
+        # F03: 搜索请求代次；仅当前代次可写 state（隔离乱序响应/关闭回填）。
+        self._search_generation: int = 0
         self._init_mixin_fields()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
-    async def load_watchlist(self) -> None:
+    async def load_watchlist(self) -> bool:
         """加载关注列表 (从 DB 读取并转换为 tuple[WatchlistRow, ...]).
 
         UX-09 MAJOR-04：加载行后按 ts_code 批量补最新价 / 涨跌幅 / AI 评分；
         行情查询失败降级为「无行情」（对应列显示「—」），不影响列表本身加载。
+
+        Returns:
+            成功加载（含空表）返回 True；已分类的普通异常返回 False。
+            ``CancelledError`` 清理 loading 后重新抛出（R2），不编码为返回值。
         """
         self._set_state(is_loading=True, load_error=None, load_error_detail=None)
         try:
@@ -99,11 +122,13 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
             rows = _df_to_watchlist_rows(df)
             quotes = await self.detail_service.load_watchlist_quotes([r.ts_code for r in rows])
             self._set_state(watchlist_rows=_merge_quotes(rows, quotes), is_loading=False)
+            return True
         except asyncio.CancelledError:
             self._set_state(is_loading=False)
             raise
         except Exception as e:
             _handle_error(e, "load_watchlist", self)
+            return False
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def add_to_watchlist(
@@ -111,26 +136,35 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
         ts_code: str,
         stock_name: str,
         note: str | None = None,
-    ) -> None:
-        """加入关注并刷新列表."""
+    ) -> WatchlistMutationResult:
+        """加入关注并刷新列表（F01：写失败不刷新、不伪装成功）。
+
+        Returns:
+            写入失败 → ``failed``（不刷新）；写入成功且刷新成功 → ``applied``；
+            写入成功但刷新失败 → ``applied_refresh_failed``。
+        """
         try:
             await self.cache.add_to_watchlist(ts_code, stock_name, note)
-            await self.load_watchlist()
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            _handle_error(e, "add_to_watchlist", self)
+            message = _handle_error(e, "add_to_watchlist", self, write_state=False)
+            return WatchlistMutationResult("failed", message)
+        refreshed = await self.load_watchlist()
+        return WatchlistMutationResult("applied" if refreshed else "applied_refresh_failed")
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def remove_from_watchlist(self, ts_code: str) -> None:
-        """移除关注并刷新列表."""
+    async def remove_from_watchlist(self, ts_code: str) -> WatchlistMutationResult:
+        """移除关注并刷新列表（F01：写失败不刷新、不伪装成功）。"""
         try:
             await self.cache.remove_from_watchlist(ts_code)
-            await self.load_watchlist()
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            _handle_error(e, "remove_from_watchlist", self)
+            message = _handle_error(e, "remove_from_watchlist", self, write_state=False)
+            return WatchlistMutationResult("failed", message)
+        refreshed = await self.load_watchlist()
+        return WatchlistMutationResult("applied" if refreshed else "applied_refresh_failed")
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def is_in_watchlist(self, ts_code: str) -> bool:
@@ -148,30 +182,60 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
         """按代码/名称搜索上市股票，结果写入 state.search_results（添加关注对话框）。
 
         keyword 为空/全空白时清空搜索结果，不发起查询。
+
+        F03：以实例字段 ``_search_generation`` 做请求代次隔离——只有与当前代次
+        相等的请求（含成功/异常/finally 路径）才允许写 state；旧代次响应一律丢弃，
+        避免乱序响应覆盖新结果或关闭后回填。
         """
         keyword = (keyword or "").strip()
         if not keyword:
             await self.clear_search()
             return
-        self._set_state(is_searching=True, search_error=None)
+        # 同一标准化 keyword 正在查询时忽略重复请求（最新请求优先，减少无收益重复查询）。
+        if keyword == self._state.search_keyword and self._state.is_searching:
+            return
+        self._search_generation += 1
+        generation = self._search_generation
+        self._set_state(
+            search_results=(),
+            search_keyword=keyword,
+            is_searching=True,
+            search_error=None,
+        )
         try:
             df = await self.cache.search_stocks(keyword)
+            if generation != self._search_generation:
+                return  # 旧代次：不得覆盖当前候选/错误/loading
             rows = _df_to_stock_search_rows(df)
             self._set_state(search_results=rows, search_keyword=keyword, is_searching=False)
         except asyncio.CancelledError:
-            self._set_state(is_searching=False)
+            if generation == self._search_generation:
+                self._set_state(is_searching=False)
             raise
         except Exception as e:
-            _handle_error(e, "search_stocks", self, search=True)
+            if generation == self._search_generation:
+                _handle_error(e, "search_stocks", self, search=True)
+            else:
+                # 旧代次异常只按规范脱敏记录，不覆盖新请求的错误区
+                _handle_error(e, "search_stocks", self, search=True, write_state=False)
 
     async def clear_search(self) -> None:
-        """清空搜索状态（添加关注对话框关闭时调用）。"""
+        """清空搜索状态（添加关注对话框关闭时调用）。
+
+        F03：先推进代次使所有在途请求失效，避免关闭后旧响应回填。
+        """
+        self._search_generation += 1
         self._set_state(
             search_results=(),
             search_keyword="",
             is_searching=False,
             search_error=None,
         )
+
+    def dispose(self) -> None:
+        """清理资源（F03：dispose 使在途搜索代次失效，禁止卸载后回填旧结果）。"""
+        self._search_generation += 1
+        super().dispose()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def open_stock_detail(self, ts_code: str) -> bool:
@@ -270,11 +334,24 @@ def _merge_quotes(
     return tuple(merged)
 
 
-def _handle_error(e: Exception, op: str, vm: WatchlistViewModel, *, search: bool = False) -> None:
+def _handle_error(
+    e: Exception,
+    op: str,
+    vm: WatchlistViewModel,
+    *,
+    search: bool = False,
+    write_state: bool = True,
+) -> Message:
     """统一错误处理: classify_error + Message + 日志 (对齐 DataExplorerViewModel).
 
     search=True 时错误写入 ``search_error``（添加关注对话框独立展示，不影响列表加载）；
     否则写入 ``load_error`` + ``load_error_detail``。
+
+    ``write_state=False`` 时只做分类/脱敏/日志并返回 Message（供 F01 写操作失败分支：
+    写失败不得污染列表 error 通道，避免空列表被 ErrorState 整体替换），不写 state。
+
+    Returns:
+        构建好的 i18n ``Message``（仅含 key 与安全参数，不含原始异常字符串）。
     """
     error_info = classify_error(e, context="db")
     severity = classify_severity(e, context="db")
@@ -295,7 +372,9 @@ def _handle_error(e: Exception, op: str, vm: WatchlistViewModel, *, search: bool
         error_info.get("message_key", "common_err_unknown"),
         error_info.get("format_args") or {},
     )
-    if search:
-        vm._set_state(is_searching=False, search_error=message)
-    else:
-        vm._set_state(is_loading=False, load_error=message, load_error_detail=sanitized)
+    if write_state:
+        if search:
+            vm._set_state(is_searching=False, search_error=message)
+        else:
+            vm._set_state(is_loading=False, load_error=message, load_error_detail=sanitized)
+    return message

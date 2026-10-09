@@ -632,6 +632,7 @@
     "watchlist_view_stock": "查看个股",
     "watchlist_removed": "已移除关注",
     "watchlist_remove_failed": "移除关注失败",
+    "watchlist_refresh_failed": "已写入，但列表刷新失败，请手动刷新",
     "watchlist_confirm_remove_title": "确认移除关注",
     "watchlist_confirm_remove_body": "确定移除「{name}」吗？",
     "watchlist_col_price": "最新价",

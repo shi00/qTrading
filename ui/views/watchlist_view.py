@@ -24,7 +24,7 @@ from ui.components.watchlist_add_dialog import WatchlistAddDialog
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.watchlist_view_model import WatchlistRow, WatchlistViewModel
+from ui.viewmodels.watchlist_view_model import WatchlistMutationResult, WatchlistRow, WatchlistViewModel
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,25 @@ def _get_page() -> ft.Page | None:
 def _show_toast(page: ft.Page, msg: str, msg_type: str = "info") -> None:
     """显式调用页面统一 Toast 组件 (``page.toast`` 由 application.py 挂载)。"""
     page.toast.show(msg, msg_type)  # type: ignore[attr-defined]  # [reason: page.toast 由 application.py 动态挂载, ft.Page 存根未声明]
+
+
+def _show_mutation_toast(
+    page: ft.Page,
+    result: WatchlistMutationResult | None,
+    *,
+    success_key: str,
+    failure_key: str,
+) -> None:
+    """按写操作结果分支反馈（F01）：failed→失败；applied→成功；刷新失败→warning。
+
+    ``result`` 为 None（VM 意外抛出普通异常）按写入失败处理，避免伪装成功。
+    """
+    if result is None or result.status == "failed":
+        _show_toast(page, I18n.get(failure_key), "error")
+    elif result.status == "applied":
+        _show_toast(page, I18n.get(success_key), "success")
+    else:  # applied_refresh_failed：已写入，但列表刷新失败，提示手动刷新
+        _show_toast(page, I18n.get("watchlist_refresh_failed"), "warning")
 
 
 def _format_quote_price(val: float | None) -> str:
@@ -197,6 +216,8 @@ def WatchlistView(
 
     # 「添加关注」对话框 state (issue #433)
     add_dialog_open, set_add_dialog_open = ft.use_state(False)
+    # F01: 添加提交中状态 (禁用重复确认/输入变更; 失败保持对话框与草稿)
+    add_submitting, set_add_submitting = ft.use_state(False)
 
     # --- 加载关注列表 (active 时) ---
     async def _load_effect() -> None:
@@ -209,39 +230,48 @@ def WatchlistView(
     # --- 移除关注 ---
     async def _do_remove(ts_code: str) -> None:
         try:
-            await vm.remove_from_watchlist(ts_code)
-            page = _get_page()
-            if page is not None:
-                _show_toast(page, I18n.get("watchlist_removed"), "success")
+            result = await vm.remove_from_watchlist(ts_code)
         except asyncio.CancelledError:
             raise
         except Exception as ex:
             logger.error("[WatchlistView] Remove failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
-            page = _get_page()
-            if page is not None:
-                _show_toast(page, I18n.get("watchlist_remove_failed"), "error")
+            result = None
+        page = _get_page()
+        if page is not None:
+            _show_mutation_toast(page, result, success_key="watchlist_removed", failure_key="watchlist_remove_failed")
 
     # --- 添加关注 (issue #433) ---
     async def _do_add(ts_code: str, stock_name: str, note: str) -> None:
         try:
-            await vm.add_to_watchlist(ts_code, stock_name, note or None)
-            page = _get_page()
-            if page is not None:
-                _show_toast(page, I18n.get("watchlist_added"), "success")
+            result = await vm.add_to_watchlist(ts_code, stock_name, note or None)
         except asyncio.CancelledError:
+            set_add_submitting(False)
             raise
         except Exception as ex:
             logger.error("[WatchlistView] Add failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
-            page = _get_page()
-            if page is not None:
-                _show_toast(page, I18n.get("watchlist_add_failed"), "error")
+            result = None
+        set_add_submitting(False)
+        page = _get_page()
+        if page is None:
+            return
+        # 写入成功（含刷新失败都已在库中）才关闭对话框并清理搜索；写失败保持对话框与草稿。
+        if result is not None and result.status != "failed":
+            set_add_dialog_open(False)
+            await vm.clear_search()
+        _show_mutation_toast(page, result, success_key="watchlist_added", failure_key="watchlist_add_failed")
 
     def _on_add(ts_code: str, stock_name: str, note: str) -> None:
-        """WatchlistAddDialog on_add: 关闭对话框并调度 _do_add 执行添加。"""
-        set_add_dialog_open(False)
+        """WatchlistAddDialog on_add: 调度 _do_add 执行添加（结果驱动关闭/反馈）。
+
+        F01: 不在提交前关闭对话框；提交中禁止重复确认。写失败由 _do_add 保持对话框，成功才关闭。
+        """
+        if add_submitting:
+            return
         page = _get_page()
-        if page is not None:
-            page.run_task(_do_add, ts_code, stock_name, note)
+        if page is None:
+            return
+        set_add_submitting(True)
+        page.run_task(_do_add, ts_code, stock_name, note)
 
     def _on_add_search(keyword: str) -> None:
         """WatchlistAddDialog on_search: run_task 调度 VM.search_stocks (R16)。"""
@@ -250,7 +280,12 @@ def WatchlistView(
             page.run_task(vm.search_stocks, keyword)
 
     def _on_add_dialog_close() -> None:
-        """WatchlistAddDialog on_close: 关闭对话框并清空搜索状态。"""
+        """WatchlistAddDialog on_close: 关闭对话框并清空搜索状态。
+
+        F01: 写入执行中禁止手工关闭（避免已提交但未知结果被当成未写入）。
+        """
+        if add_submitting:
+            return
         set_add_dialog_open(False)
         page = _get_page()
         if page is not None:
@@ -431,6 +466,7 @@ def WatchlistView(
                     search_results=state.search_results,
                     is_searching=state.is_searching,
                     search_error=state.search_error,
+                    is_submitting=add_submitting,
                     on_search=_on_add_search,
                     on_add=_on_add,
                     on_close=_on_add_dialog_close,
