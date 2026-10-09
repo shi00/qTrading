@@ -130,9 +130,13 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 - **`circuit_breaker.py`**：通用单源熔断（`threshold` 连续失败 N 次开路 / `cooldown_seconds` 冷却后 half-open 探活），沿用 `data/external/news_fetcher.py` 的 Sina / CLS 熔断模式。
 - **`cleaning.py`**：与源无关的通用清洗（去 HTML/实体/模板语、快讯截断 `FLASH_MAX_CHARS=120`、例行条目过滤）；巨潮标题的公司前缀剥离已在解析内核 `cninfo.clean_title` 完成，此处不重复。
 - **`dedup.py`**：字符 3-gram SimHash + 分段分桶索引（`NearDuplicateIndex`）做近重复去重（规格 §4.2.3 同一事件多源转载）；对内容级改写不敏感的敏感度上限见 `NOTE(lazy)`。
-- **`corpus.py`**：`CorpusStore`（标准库 `sqlite3`）——表 `corpus_documents` 主键 `(source, source_id)`，`INSERT OR IGNORE` 幂等写库；`publish_time` 缺失存 `NULL`（R21）；SimHash 无符号 64 位经 two's complement 无损往返（SQLite INTEGER 有符号 64 位）。
+- **`corpus.py`**：`CorpusStore`（标准库 `sqlite3`）——表 `corpus_documents` 主键 `(source, source_id)`，`INSERT OR IGNORE` 幂等写库；`publish_time` 缺失存 `NULL`（R21）；SimHash 无符号 64 位经 two's complement 无损往返（SQLite INTEGER 有符号 64 位）；`iter_documents()` 提供只读全量遍历（供离线标注 / 抽样 / 训练切分消费）。
 
 `collect_corpus.py` 为 CLI 编排层，仅依赖 `data/external/news_sources/`；跨请求单独维护指纹索引，做去重并统计清洗/丢弃计数。
+
+### 离线标注消费（N2-1，`scripts/laya_annotator.py`）
+
+`CorpusStore.iter_documents()` 之上承载本地 **laya-multilingual 零样本三分类标注**（choice 原语：利好 / 中性 / 利空）与**人工抽检 Gate**（一致率 ≥85% 才允许批量标注，不达标该路线置 `blocked`）。模型输出视为不可信输入，非法 label / 非有限 / 越界置信度一律丢弃计数，不做猜测性修复（R21）；置信度取 `answer_confidence`（= `max(p)`）而非归一化熵。`laya` / `torch` 不进运行时依赖与 CI，推理全在本地（数据不出本机）。
 
 ---
 
