@@ -87,9 +87,10 @@ sitecustomize.py
 astock.db
 astock.db-*
 user_settings.json
-# 新闻训练语料库（N1-4 离线 SQLite，含 SQLite 日志 / WAL 旁文件）
+# 新闻训练语料库（N1-4 离线 SQLite，含日志 / WAL 旁文件）与离线标注产物（N2-1 抽检集 / 预测 JSONL，本地资产不入库）
 data/corpus/*.db
 data/corpus/*.db-*
+data/corpus/*.jsonl
 
 # 2. Logs & Temporary Files
 logs/
