@@ -752,14 +752,24 @@ async def _load_chart_async(
     stock_data: dict,
     ts_code: str,
     set_chart_content: Callable[[ft.Control], None],
+    is_valid: Callable[[], bool],
 ) -> None:
     """异步加载 K 线图并通过 set_chart_content 更新状态。
 
     纯逻辑函数（接收 set_chart_content 回调），可独立单测。
+    ``is_valid`` 为代次校验回调：每次写入前及 ``await`` 耗时点后调用，
+    返回 False 时跳过写入，使弹窗关闭 / 股票切换 / 组件卸载后的迟到结果失效，
+    避免更新已卸载组件（F05）。
     CancelledError（BaseException）不被 ``except Exception`` 捕获，自动传播（R2）。
     """
+
+    def _commit(control: ft.Control) -> None:
+        """仅在代次仍有效时提交图表状态写入（失效则丢弃迟到结果）。"""
+        if is_valid():
+            set_chart_content(control)
+
     if not data_processor:
-        set_chart_content(
+        _commit(
             ft.Text(
                 I18n.get("detail_err_no_processor"),
                 color=AppColors.ERROR,
@@ -769,7 +779,7 @@ async def _load_chart_async(
 
     try:
         # 显示加载中
-        set_chart_content(
+        _commit(
             ft.Column(
                 [
                     ft.ProgressRing(),
@@ -787,8 +797,12 @@ async def _load_chart_async(
         # 拉取历史数据（365 天）
         df = await data_processor.get_stock_history(ts_code, days=365)
 
+        # 底层请求不可取消（或已取消但晚到）时，代次已变化则丢弃结果
+        if not is_valid():
+            return
+
         if df.empty:
-            set_chart_content(
+            _commit(
                 ft.Text(
                     I18n.get("detail_no_history"),
                     color=AppColors.TEXT_HINT,
@@ -856,7 +870,7 @@ async def _load_chart_async(
             )
         )
 
-        set_chart_content(
+        _commit(
             ft.Column(
                 chart_controls,
                 expand=True,
@@ -869,7 +883,7 @@ async def _load_chart_async(
 
         logger.error("Error loading chart: %s", DataSanitizer.sanitize_error(e), exc_info=True)
         error_info = classify_error(e, context="chart")
-        set_chart_content(
+        _commit(
             ft.Text(
                 get_error_message(error_info),
                 color=AppColors.ERROR,
@@ -931,20 +945,40 @@ def StockDetailDialog(
     width, height = _dialog_size(page)
 
     # --- K 线图异步加载 effect（open 变为 True 时触发）---
+    # 显式同步 cleanup（不能依赖 setup 的返回值，1.0.3 调度器丢弃 async setup
+    # 的返回值）+ 代次标记：卸载 / 依赖变化时递增 chart_generation_ref，使在途
+    # 请求的迟到结果失效，避免更新已卸载组件（F05）。
+    chart_generation_ref = ft.use_ref(0)
+
     async def _load_chart_effect() -> None:
         if not open_ or not data_processor:
             return
         ts_code = data.get("ts_code", "")
         if not ts_code:
             return
+        chart_generation_ref.current = (chart_generation_ref.current or 0) + 1
+        generation = chart_generation_ref.current
+
+        def _is_valid() -> bool:
+            return chart_generation_ref.current == generation
+
         await _load_chart_async(
             data_processor,
             data,
             ts_code,
             set_chart_content,
+            _is_valid,
         )
 
-    ft.use_effect(_load_chart_effect, dependencies=[open_, data.get("ts_code", "")])
+    def _cleanup_chart_effect() -> None:
+        # 递增代次，令在途（可能不可取消）的迟到结果失效
+        chart_generation_ref.current = (chart_generation_ref.current or 0) + 1
+
+    ft.use_effect(
+        _load_chart_effect,
+        dependencies=[open_, data.get("ts_code", "")],
+        cleanup=_cleanup_chart_effect,
+    )
 
     # --- 关闭处理（state 驱动，非 pop_dialog）---
     def _close(_e) -> None:
