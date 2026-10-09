@@ -70,10 +70,8 @@
 |------|---------|---------|------------------------|
 | 表格键盘遍历降级（`ui/components/virtual_table.py`） | §2.4 键盘路径 | Flet 无表格 focus/grid 键盘遍历（无 Focus 控件、DataTable 无 on_key、KeyboardListener 无 focus 遍历），键盘用户无方向键导航 | 复查触发：Flet 升级提供表格 focus/grid 能力，或 KeyboardListener 组合方案经 E2E 验证可行（与 `virtual_table.py` 的 `# NOTE(lazy:)` 语义一致） |
 | 排序指示语义（`ui/components/virtual_table.py` 排序指示） | §2.1 Label 关联 | 用 `↑`/`↓` 文本符号作排序指示，依赖字体支持，屏幕阅读器朗读结果不确定 | 修复方向：替换为 `ft.Icon(ft.Icons.ARROW_UPWARD)` / `ft.Icon(ft.Icons.ARROW_DOWNWARD)`，同步迁移 E2E `test_screener_sort_by_column` 的 `"pct_chg (涨跌幅) ↑"` 朗读锚点；升级触发：virtual_table 重构或可访问性 audit 时（债表 M12-020） |
-| 数值输入框无 `label`（`ui/components/slider_input.py` TextField） | §2.1 Label 关联 | `TextField` 无 `label=`；视觉标签由外部布局提供（Row 同行标题或组件顶部 Text），TextField 自身读屏语义未关联（Flet TextField 无语义字段，需 `ft.Semantics` 包装或升级后复查） | 修复方向：组件内部补 `label=`；升级触发：slider_input 重构或可访问性 audit 时 |
-| 确认 Checkbox 无 `label`（`ui/components/config_panels/llm_config_panel.py` Checkbox） | §2.1 Label 关联 | `ai_acknowledgment_checkbox` 无 `label=`/`tooltip=`，读屏聚焦时无语义名；配套 `ft.GestureDetector(content=ft.Text(...))` 默认不可 Tab 聚焦，键盘用户只能聚焦无名 Checkbox 按空格切换 | 修复方向：给 Checkbox 补 `label=`（长文本换行问题需处理）；升级触发：llm_config_panel 重构或可访问性 audit 时 |
-| 搜索框无 `label`（`ui/components/watchlist_add_dialog.py` search_field） | §2.1 Label 关联 | `TextField` 仅 `hint_text=` 无 `label=`，读屏无语义名 | 修复方向：补 `label=`；升级触发：watchlist_add_dialog 重构或可访问性 audit 时 |
-| 无代理输入无 `label`（`ui/views/settings_tabs/system_tab.py` no_proxy_input） | §2.1 Label 关联 | `TextField` 仅 `hint_text=` 无 `label=`（同文件其余 6 个输入框均有 `label=`），读屏无语义名 | 修复方向：补 `label=`；升级触发：system_tab 重构或可访问性 audit 时 |
+
+> 已修复项（检视报告 F08，2026-10）：`slider_input.py` 数值 TextField / `watchlist_add_dialog.py` 搜索框 / `system_tab.py` no_proxy 输入框 / `llm_config_panel.py` 确认 Checkbox 曾在本表登记，现已分别补语义名称（`tooltip` / 持久 `label=` / `semantics_label=`）移出例外；`test_accessibility_contract.py` 的 TextField/Checkbox 扫描已常态化守护，无例外条目。真实读屏（Narrator/NVDA）实测尚未执行，控件名称语义以结构契约测试为准。
 
 ## 5. 引用关系
 

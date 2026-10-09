@@ -62,6 +62,7 @@ def SliderInput(
     on_change: Callable[[float], None] | None = None,
     disabled: bool = False,
     label: str | None = None,
+    accessible_name: str | None = None,
     expand: bool = False,
 ) -> ft.Column:
     """Slider + TextField 联动组件 (UX 3.2)。
@@ -77,9 +78,16 @@ def SliderInput(
         on_change: 值变化回调（已 snap + clamp）；None 时无回调。
         disabled: 是否禁用（Slider 与 TextField 同步禁用）。
         label: 标签文案（已翻译字符串，由父级传入）；None 时不渲染顶部 Text（嵌入场景）。
+        accessible_name: 无障碍语义名称（已翻译字符串，F08）。``label`` 为 None 的嵌入
+            场景（标题在外部布局）由调用方明确提供，作为 TextField/Slider 的 tooltip
+            语义名称（读屏朗读 + 悬停辅助，不改变静态布局）；None 时回退到 ``label``。
+            参数较多时用于区分同页同名 SliderInput 实例。
         expand: 是否在父容器中扩展填充（``Column(expand=True)``）。
     """
     formatter = fmt or _default_fmt
+    # F08: 语义名称解析——嵌入场景（label=None）必须由调用方提供 accessible_name，
+    # 否则 Tab/读屏聚焦时无法区分同页参数（accessibility-baseline.md §2.1）。
+    semantic_name = accessible_name or label
 
     # 编辑中间态：TextField 光标输入中不即时上抛；父级 value 变化由 use_effect 同步。
     # use_state setter 有浅值比较，相同值不触发 re-render（不打断输入/拖动）。
@@ -136,6 +144,7 @@ def SliderInput(
         value=draft,
         keyboard_type=ft.KeyboardType.NUMBER,
         dense=True,
+        tooltip=semantic_name,
         border={
             ft.ControlState.DEFAULT: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.DIVIDER)),
             ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.PRIMARY)),
@@ -155,6 +164,7 @@ def SliderInput(
         value=value,
         divisions=divisions,
         label="{value}",
+        tooltip=semantic_name,
         active_color=AppColors.PRIMARY,
         expand=True,
         disabled=disabled,

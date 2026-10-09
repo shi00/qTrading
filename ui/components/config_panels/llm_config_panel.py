@@ -368,6 +368,9 @@ def LLMConfigPanel(
 
     ai_acknowledgment_checkbox = ft.Checkbox(
         value=state.ai_external_acknowledged,
+        # F08: semantics_label 提供读屏名称且不改变布局（长 label 直接作 Checkbox
+        # label 在窄容器内无法换行会被截断，故视觉仍由旁边可 expand 的独立 Text 承载）。
+        semantics_label=I18n.get("ai_external_acknowledgment_checkbox"),
         on_change=safe_on_change(_on_acknowledgment_change_factory(vm)),
     )
     ai_acknowledgment_label_clickable = ft.GestureDetector(

@@ -624,6 +624,7 @@
     "watchlist_add_failed": "加入关注失败",
     "watchlist_add_dialog_title": "添加关注",
     "watchlist_add_search_hint": "输入股票代码、名称或拼音搜索",
+    "watchlist_add_search_label": "股票代码或名称",
     "watchlist_add_searching": "搜索中…",
     "watchlist_add_no_result": "未找到匹配的股票",
     "watchlist_add_search_prompt": "输入关键词搜索上市股票",

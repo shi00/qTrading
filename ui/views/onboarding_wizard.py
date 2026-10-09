@@ -311,11 +311,13 @@ def _build_risk_ack_card(
     未勾选时向导「下一步」禁用（由 OnboardingWizard 导航区按 state.risk_acknowledged 计算）；
     勾选结果经 OnboardingViewModel 持久化到 ConfigHandler。
 
-    长 label 在窄容器内无法换行会被截断，故沿用 llm_config_panel 既有模式：无 label 的
-    Checkbox + 可点击的独立 Text（点击文字等价于切换勾选）。
+    长 label 在窄容器内无法换行会被截断，故沿用 llm_config_panel 既有模式：无视觉 label 的
+    Checkbox（经 semantics_label 提供读屏名称，F08）+ 可点击的独立 Text（点击文字等价于切换勾选）。
     """
     checkbox = ft.Checkbox(
         value=risk_acknowledged,
+        # F08: semantics_label 提供读屏名称且不改变布局（同 llm_config_panel 模式）。
+        semantics_label=I18n.get("wizard_risk_ack_label"),
         on_change=safe_on_change(on_ack_change),
         active_color=AppColors.PRIMARY,
     )

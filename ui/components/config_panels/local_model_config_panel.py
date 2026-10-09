@@ -216,6 +216,7 @@ def LocalModelConfigPanel(
 
     threads_input = SliderInput(
         label=None,
+        accessible_name=I18n.get("settings_local_threads"),
         value=float(state.n_threads),
         min_val=1,
         max_val=16,
@@ -235,6 +236,7 @@ def LocalModelConfigPanel(
         visible=not is_gpu_auto,
         content=SliderInput(
             label=None,
+            accessible_name=I18n.get("settings_local_gpu_layers"),
             value=float(gpu_layers_display),
             min_val=0,
             max_val=100,

@@ -1,8 +1,12 @@
-"""可访问性契约测试 (Phase 6.3 P2-2).
+"""可访问性契约测试 (Phase 6.3 P2-2 + F08 扩展).
 
 CLAUDE.md §3.2 MVVM + docs/flet/accessibility-baseline.md 要求:
 - IconButton 必须有 tooltip (鼠标悬停提示 + 屏幕阅读器朗读)
 - AlertDialog 必须有 title 和 close button (可关闭 + 可朗读标题)
+- TextField 必须有 label= 或 tooltip= 可访问名称 (F08: hint/placeholder
+  不被屏幕阅读器视为标签; tooltip 为 Flutter Tooltip 语义名称)
+- Checkbox 必须有 label= / semantics_label= / tooltip= 可读名称 (F08:
+  AI 外发确认等 Checkbox 聚焦时须有可读名称)
 
 本测试用 ``ast.NodeVisitor`` 扫描 ``ui/`` 下所有 .py 源码, 守护上述契约.
 白名单条目必须配套原因注释 (Plans Phase 6.3 DoD 3).
@@ -248,6 +252,47 @@ class _AlertDialogVisitor(ast.NodeVisitor):
         return False
 
 
+class _KeywordPresenceVisitor(ast.NodeVisitor):
+    """扫描指定控件调用, 检查语义名称关键字参数是否至少存在一个 (F08).
+
+    用于 TextField (label/tooltip) 与 Checkbox (label/semantics_label/tooltip)
+    的可访问名称契约: hint_text/placeholder 不被屏幕阅读器视为标签, 控件自身
+    必须携带可访问名称. func_name 栈语义与 _IconButtonVisitor 一致.
+    """
+
+    def __init__(self, control_name: str, accepted_kwargs: tuple[str, ...]) -> None:
+        self.control_name = control_name
+        self.accepted_kwargs = accepted_kwargs
+        self.violations: list[AccessibilityViolation] = []
+        self._func_stack: list[str] = []  # 外层函数名栈, 模块级为空
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._func_stack.append(node.name)
+        self.generic_visit(node)
+        self._func_stack.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._func_stack.append(node.name)
+        self.generic_visit(node)
+        self._func_stack.pop()
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if _is_call_named(node, self.control_name):
+            has_name = any(kw.arg in self.accepted_kwargs for kw in node.keywords)
+            if not has_name:
+                kwargs_desc = "/".join(self.accepted_kwargs)
+                self.violations.append(
+                    AccessibilityViolation(
+                        file="",  # 由调用方填充
+                        line=node.lineno,
+                        violation_type="missing_label",
+                        detail=f"ft.{self.control_name}(...) at line {node.lineno} 缺 {kwargs_desc} 参数",
+                        func_name=self._func_stack[-1] if self._func_stack else "<MODULE>",
+                    )
+                )
+        self.generic_visit(node)
+
+
 # ============================================================================
 # 扫描入口
 # ============================================================================
@@ -267,12 +312,16 @@ def _scan_file(path: Path) -> list[AccessibilityViolation]:
         return []
     icon_v = _IconButtonVisitor()
     dialog_v = _AlertDialogVisitor()
+    text_v = _KeywordPresenceVisitor("TextField", ("label", "tooltip"))
+    checkbox_v = _KeywordPresenceVisitor("Checkbox", ("label", "semantics_label", "tooltip"))
     icon_v.visit(tree)
     dialog_v.visit(tree)
+    text_v.visit(tree)
+    checkbox_v.visit(tree)
     rel = str(path.relative_to(UI_DIR)).replace("\\", "/")
-    for v in icon_v.violations + dialog_v.violations:
+    for v in icon_v.violations + dialog_v.violations + text_v.violations + checkbox_v.violations:
         v.file = rel
-    return icon_v.violations + dialog_v.violations
+    return icon_v.violations + dialog_v.violations + text_v.violations + checkbox_v.violations
 
 
 def _scan_all() -> list[AccessibilityViolation]:
@@ -334,6 +383,43 @@ class TestAlertDialogAccessibility:
         """
         violations = _filter_violations(_scan_all(), "missing_close")
         assert not violations, "AlertDialog 缺 close button 违规:\n" + "\n".join(
+            f"  {v.file}:{v.line} (in {v.func_name}) - {v.detail}" for v in violations
+        )
+
+
+class TestFieldAccessibility:
+    """TextField / Checkbox 必须有可访问名称 (F08).
+
+    hint_text / placeholder 不被屏幕阅读器视为标签; 控件自身须携带
+    label= (持久视觉标签) / tooltip= (语义名称, 不改变静态布局) /
+    semantics_label= (Checkbox 专用非视觉读屏名称) 之一.
+    """
+
+    @staticmethod
+    def _missing_label_violations(control: str) -> list[AccessibilityViolation]:
+        """取 missing_label 违规并按控件类型过滤 (detail 含控件名)."""
+        return [v for v in _filter_violations(_scan_all(), "missing_label") if f"ft.{control}" in v.detail]
+
+    def test_all_textfields_have_accessible_name(self):
+        """DoD: ui/ 下所有 ft.TextField 必须含 label= 或 tooltip= (F08).
+
+        盘点: 41 处 TextField 调用全部合规 (修复 4 处: slider_input 数值框 tooltip、
+        watchlist_add_dialog 搜索框 label、system_tab no_proxy label、
+        model_picker 搜索框 tooltip), 白名单 0.
+        """
+        violations = self._missing_label_violations("TextField")
+        assert not violations, "TextField 缺可访问名称违规:\n" + "\n".join(
+            f"  {v.file}:{v.line} (in {v.func_name}) - {v.detail}" for v in violations
+        )
+
+    def test_all_checkboxes_have_accessible_name(self):
+        """DoD: ui/ 下所有 ft.Checkbox 必须含 label=/semantics_label=/tooltip= (F08).
+
+        盘点: 6 处 Checkbox 调用全部合规 (修复 2 处: llm_config_panel 与
+        onboarding_wizard 的确认 Checkbox 补 semantics_label), 白名单 0.
+        """
+        violations = self._missing_label_violations("Checkbox")
+        assert not violations, "Checkbox 缺可访问名称违规:\n" + "\n".join(
             f"  {v.file}:{v.line} (in {v.func_name}) - {v.detail}" for v in violations
         )
 
@@ -495,6 +581,53 @@ dlg = ft.AlertDialog(
         source = "from flet import IconButton\nx = IconButton(icon='add')\n"
         tree = ast.parse(source)
         v = _IconButtonVisitor()
+        v.visit(tree)
+        assert len(v.violations) == 1
+
+    def test_scanner_catches_textfield_missing_label(self):
+        """DoD (F08): 扫描器能识别缺 label/tooltip 的 TextField (仅 hint 不算名称)."""
+        source = "import flet as ft\nx = ft.TextField(hint_text='search')\n"
+        tree = ast.parse(source)
+        v = _KeywordPresenceVisitor("TextField", ("label", "tooltip"))
+        v.visit(tree)
+        assert len(v.violations) == 1
+        assert v.violations[0].violation_type == "missing_label"
+        assert "label/tooltip" in v.violations[0].detail
+
+    def test_scanner_passes_textfield_with_label_or_tooltip(self):
+        """DoD (F08): 含 label 或 tooltip 的 TextField 不误报."""
+        for source in (
+            "import flet as ft\nx = ft.TextField(label='a')\n",
+            "import flet as ft\nx = ft.TextField(tooltip='a')\n",
+        ):
+            tree = ast.parse(source)
+            v = _KeywordPresenceVisitor("TextField", ("label", "tooltip"))
+            v.visit(tree)
+            assert len(v.violations) == 0
+
+    def test_scanner_catches_checkbox_missing_label(self):
+        """DoD (F08): 扫描器能识别缺 label/semantics_label/tooltip 的 Checkbox."""
+        source = "import flet as ft\nx = ft.Checkbox(value=False)\n"
+        tree = ast.parse(source)
+        v = _KeywordPresenceVisitor("Checkbox", ("label", "semantics_label", "tooltip"))
+        v.visit(tree)
+        assert len(v.violations) == 1
+        assert v.violations[0].violation_type == "missing_label"
+        assert "semantics_label" in v.violations[0].detail
+
+    def test_scanner_passes_checkbox_with_semantics_label(self):
+        """DoD (F08): 含 semantics_label 的 Checkbox 不误报 (长文本专门布局场景)."""
+        source = "import flet as ft\nx = ft.Checkbox(value=False, semantics_label='ack')\n"
+        tree = ast.parse(source)
+        v = _KeywordPresenceVisitor("Checkbox", ("label", "semantics_label", "tooltip"))
+        v.visit(tree)
+        assert len(v.violations) == 0
+
+    def test_field_scanner_handles_alias_import(self):
+        """DoD (F08): 扫描器识别直接 TextField(...) 形式 (from flet import TextField)."""
+        source = "from flet import TextField\nx = TextField()\n"
+        tree = ast.parse(source)
+        v = _KeywordPresenceVisitor("TextField", ("label", "tooltip"))
         v.visit(tree)
         assert len(v.violations) == 1
 

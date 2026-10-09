@@ -754,6 +754,7 @@
     "watchlist_add_failed": "Failed to add to watchlist",
     "watchlist_add_dialog_title": "Add to Watchlist",
     "watchlist_add_search_hint": "Search by stock code, name or pinyin",
+    "watchlist_add_search_label": "Stock code or name",
     "watchlist_add_searching": "Searching…",
     "watchlist_add_no_result": "No matching stocks found",
     "watchlist_add_search_prompt": "Type keywords to search listed stocks",
