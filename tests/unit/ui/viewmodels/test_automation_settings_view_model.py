@@ -4,7 +4,7 @@
 覆盖：
 - frozen state 不可变 (AutomationSettingsState)
 - 计划任务保存 (save_auto_update_enabled / save_auto_update_time)
-- AI 概念任务保存 (save_ai_concept_enabled / save_ai_concept_time / save_ai_concept_engine)
+- 概念同步任务保存 (save_concept_enabled / save_concept_time)
 - 新闻提醒保存 (save_news_enabled / save_news_interval)
 - 保存成功/失败/取消/重复提交
 - 构造注入 ConfigHandler/ThreadPoolManager
@@ -36,9 +36,8 @@ def mock_config_handler():
     with patch("ui.viewmodels.automation_settings_view_model.ConfigHandler") as m:
         m.is_auto_update_enabled.return_value = False
         m.get_auto_update_time.return_value = "16:30"
-        m.is_ai_concept_schedule_enabled.return_value = False
-        m.get_ai_concept_schedule_time.return_value = "20:00"
-        m.get_ai_concept_search_engine.return_value = "search_std"
+        m.is_concept_schedule_enabled.return_value = False
+        m.get_concept_schedule_time.return_value = "20:00"
         m.get_nightly_prediction_time.return_value = "20:30"
         m.set_nightly_prediction_time.return_value = True
         m.get_config.side_effect = lambda key, default=None: {
@@ -46,9 +45,8 @@ def mock_config_handler():
             "news_poll_interval": 60,
         }.get(key, default)
         m.save_config.return_value = True
-        m.set_ai_concept_schedule_enabled.return_value = True
-        m.set_ai_concept_schedule_time.return_value = True
-        m.set_ai_concept_search_engine.return_value = True
+        m.set_concept_schedule_enabled.return_value = True
+        m.set_concept_schedule_time.return_value = True
         yield m
 
 
@@ -85,9 +83,8 @@ class TestStateImmutability:
         vm = _make_vm(mock_config_handler)
         assert vm.state.auto_enabled is False
         assert vm.state.auto_time == "16:30"
-        assert vm.state.ai_enabled is False
-        assert vm.state.ai_time == "20:00"
-        assert vm.state.ai_engine == "search_std"
+        assert vm.state.concept_enabled is False
+        assert vm.state.concept_time == "20:00"
         assert vm.state.nightly_prediction_time == "20:30"
         assert vm.state.news_enabled is True
         assert vm.state.news_interval == "60"
@@ -160,47 +157,35 @@ class TestSaveAutoUpdateTime:
         mock_config_handler.save_config.assert_called_once_with({"auto_update_time": "18:00"})
 
 
-# --- save_ai_concept_enabled ---
+# --- save_concept_enabled ---
 
 
-class TestSaveAiConceptEnabled:
+class TestSaveConceptEnabled:
     @pytest.mark.asyncio
     async def test_save_success(self, mock_config_handler, mock_thread_pool):
         vm = _make_vm(mock_config_handler)
-        result = await vm.save_ai_concept_enabled(True)
+        result = await vm.save_concept_enabled(True)
         assert result is True
-        mock_config_handler.set_ai_concept_schedule_enabled.assert_called_once_with(True)
+        mock_config_handler.set_concept_schedule_enabled.assert_called_once_with(True)
 
     @pytest.mark.asyncio
     async def test_save_failure_returns_false(self, mock_config_handler, mock_thread_pool):
-        mock_config_handler.set_ai_concept_schedule_enabled.return_value = False
+        mock_config_handler.set_concept_schedule_enabled.return_value = False
         vm = _make_vm(mock_config_handler)
-        result = await vm.save_ai_concept_enabled(True)
+        result = await vm.save_concept_enabled(True)
         assert result is False
 
 
-# --- save_ai_concept_time ---
+# --- save_concept_time ---
 
 
-class TestSaveAiConceptTime:
+class TestSaveConceptTime:
     @pytest.mark.asyncio
     async def test_save_success(self, mock_config_handler, mock_thread_pool):
         vm = _make_vm(mock_config_handler)
-        result = await vm.save_ai_concept_time("17:00")
+        result = await vm.save_concept_time("17:00")
         assert result is True
-        mock_config_handler.set_ai_concept_schedule_time.assert_called_once_with("17:00")
-
-
-# --- save_ai_concept_engine ---
-
-
-class TestSaveAiConceptEngine:
-    @pytest.mark.asyncio
-    async def test_save_success(self, mock_config_handler, mock_thread_pool):
-        vm = _make_vm(mock_config_handler)
-        result = await vm.save_ai_concept_engine("search_pro")
-        assert result is True
-        mock_config_handler.set_ai_concept_search_engine.assert_called_once_with("search_pro")
+        mock_config_handler.set_concept_schedule_time.assert_called_once_with("17:00")
 
 
 # --- save_nightly_prediction_time (Task 7.3) ---

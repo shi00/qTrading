@@ -16,7 +16,6 @@ import pytest
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from data.sync.base import SyncResult
-from services.ai_service import AIService
 from services.task_manager import TaskManager, TaskStatus
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceViewModel, HealthResultRow
@@ -64,7 +63,6 @@ def mock_processor():
             },
         )
         instance.run_daily_update = AsyncMock()
-        instance.run_ai_concept_tagging = AsyncMock()
         instance.initialize_system = AsyncMock(return_value={"success": True})
         instance.request_cancel = AsyncMock()
         instance.is_cancelled = MagicMock(return_value=False)
@@ -78,16 +76,6 @@ def mock_cache():
         instance = MagicMock(spec=CacheManager)
         instance.clear_all_cache = AsyncMock()
         instance.sync_dao = MagicMock()
-        cls.return_value = instance
-        yield instance
-
-
-@pytest.fixture
-def mock_ai_service():
-    # Task 7.2: AIService 改为惰性构造, patch 源模块 (而非 VM 模块, 因 VM 已无运行时 import)
-    with patch("services.ai_service.AIService") as cls:
-        instance = MagicMock(spec=AIService)
-        instance.is_cloud_available = MagicMock(return_value=True)
         cls.return_value = instance
         yield instance
 
@@ -114,7 +102,7 @@ def mock_scheduler_service():
 
 
 @pytest.fixture
-def vm(mock_processor, mock_cache, mock_ai_service, mock_task_manager, mock_scheduler_service):
+def vm(mock_processor, mock_cache, mock_task_manager, mock_scheduler_service):
     # B11 懒构造: 构造期 _processor 为 None, 此处显式 DI 注入 mock_processor,
     # 避免 _ensure_processor 触发真实构造 (R16)。测试行为与旧"构造期同步构造"一致。
     # D7-6: 同时注入 scheduler_service 替身, 避免 handle_task_update 刷新时构造真实单例。
@@ -161,8 +149,6 @@ class TestDataSourceViewModelInit:
         assert vm._processor is mock_processor
         assert isinstance(vm._cache, CacheManager)
         assert isinstance(vm._tm, TaskManager)
-        # Task 7.2: AIService 惰性构造, 默认 None (仅 _get_ai_service() 调用时才构造)
-        assert vm._ai_service is None
 
     async def test_ensure_processor_lazy_constructs(self, mock_task_manager):
         """B11: 未注入时 _processor 为 None; _ensure_processor 首次调用经 IO 线程池构造。"""
@@ -192,22 +178,6 @@ class TestDataSourceViewModelInit:
 
         assert dp is mock_instance
         cls.assert_not_called()
-
-    def test_get_ai_service_lazy_constructs_on_first_call(self, mock_ai_service):
-        """Task 7.2: _get_ai_service() 首次调用惰性构造 AIService, 再次调用复用同一实例."""
-        vm = DataSourceViewModel()
-        assert vm._ai_service is None
-        svc1 = vm._get_ai_service()
-        assert svc1 is mock_ai_service
-        svc2 = vm._get_ai_service()
-        assert svc2 is svc1  # 复用, 不重复构造
-
-    def test_constructor_injection(self, mock_processor, mock_cache, mock_ai_service):
-        # T6 fix: ai_service 也支持构造注入，与 _processor / _cache 一致
-        vm = DataSourceViewModel(processor=mock_processor, cache=mock_cache, ai_service=mock_ai_service)
-        assert vm._processor is mock_processor
-        assert vm._cache is mock_cache
-        assert vm._ai_service is mock_ai_service
 
     def test_initial_state(self, vm):
         assert vm.state.is_syncing is False
@@ -264,7 +234,7 @@ class TestDataSourceViewModelDisposeCancelsTasks:
         """dispose() 遍历 _active_task_ids 逐一调 cancel_task（R.1.2）。"""
         vm._active_task_ids = {
             "daily_sync": "task_001",
-            "ai_concept_sync": "task_002",
+            "cache_clear": "task_002",
         }
         vm._set_state(
             is_syncing=True,
@@ -648,60 +618,6 @@ class TestDataSourceViewModelFullDailySync:
         assert all(s.message != Message("snack_full_sync_done_simple") for s in snack_msgs)
 
 
-class TestDataSourceViewModelAiConceptRebuild:
-    def test_execute_sets_sync_busy(self, bound_vm):
-        bound_vm.execute_ai_concept_rebuild()
-        assert bound_vm.state.is_syncing is True
-        assert bound_vm.state.active_key == "ai_concept_sync"
-
-    async def test_rebuild_success(self, bound_vm, snapshots, mock_processor, mock_task_manager):
-        bound_vm.execute_ai_concept_rebuild()
-        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
-        await factory(task_id="task_123")
-        _assert_snack(bound_vm, snapshots, "snack_ai_concept_done", "success")
-        # 验证通过 get_cancel_event 访问器获取取消事件（P0-2 取消链路）
-        mock_task_manager.get_cancel_event.assert_called_once_with("task_123")
-        # 验证 manual_trigger=True + cancel_event + ai_service 参数正确传递
-        mock_processor.run_ai_concept_tagging.assert_awaited_once_with(
-            task_id="task_123",
-            cancel_event=mock_task_manager.get_cancel_event.return_value,
-            manual_trigger=True,
-            ai_service=bound_vm._ai_service,
-        )
-        kwargs = mock_processor.run_ai_concept_tagging.call_args.kwargs
-        assert kwargs.get("manual_trigger") is True
-        assert kwargs.get("cancel_event") is mock_task_manager.get_cancel_event.return_value
-        assert "ai_service" in kwargs
-
-    async def test_rebuild_cancelled_propagates(self, bound_vm, mock_processor, mock_task_manager):
-        mock_processor.run_ai_concept_tagging = AsyncMock(side_effect=asyncio.CancelledError())
-
-        bound_vm.execute_ai_concept_rebuild()
-        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
-
-        with pytest.raises(asyncio.CancelledError) as exc_info:
-            await factory(task_id="task_123")
-        assert isinstance(exc_info.value, asyncio.CancelledError)
-
-        assert bound_vm.state.is_syncing is False
-        assert bound_vm.state.active_key is None
-
-    def test_task_rejected_resets_busy(self, bound_vm, mock_task_manager):
-        mock_task_manager.submit_task.return_value = None
-        bound_vm.execute_ai_concept_rebuild()
-        assert bound_vm.state.is_syncing is False
-
-    async def test_t8_update_progress_false_raises_cancelled(self, bound_vm, mock_processor, mock_task_manager):
-        """T8 fix: update_progress 返回 False（任务已取消/不再 RUNNING）时，应立即 raise CancelledError 早退。"""
-        mock_task_manager.update_progress = MagicMock(return_value=False)
-        bound_vm.execute_ai_concept_rebuild()
-        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
-        with pytest.raises(asyncio.CancelledError, match="task cancelled by user"):
-            await factory(task_id="task_123")
-        # 验证后续的 processor 调用未执行（早退生效）
-        mock_processor.run_ai_concept_tagging.assert_not_called()
-
-
 class TestDataSourceViewModelHealthCheckT8:
     """T8 fix: health check 任务（cancellable=True）的 update_progress 早退验证。"""
 
@@ -1018,22 +934,6 @@ class TestDataSourceViewModelSetHistoryYears:
             mock_ch.set_init_history_years.assert_called_with(3)
 
 
-class TestDataSourceViewModelIsAIExternalAcknowledged:
-    """Task 2.2: is_ai_external_acknowledged 透传 ConfigHandler (覆盖 L558)。"""
-
-    def test_returns_true_when_config_handler_returns_true(self, bound_vm):
-        with patch("ui.viewmodels.data_source_view_model.ConfigHandler") as mock_ch:
-            mock_ch.is_ai_external_acknowledged.return_value = True
-            assert bound_vm.is_ai_external_acknowledged() is True
-            mock_ch.is_ai_external_acknowledged.assert_called_once_with()
-
-    def test_returns_false_when_config_handler_returns_false(self, bound_vm):
-        with patch("ui.viewmodels.data_source_view_model.ConfigHandler") as mock_ch:
-            mock_ch.is_ai_external_acknowledged.return_value = False
-            assert bound_vm.is_ai_external_acknowledged() is False
-            mock_ch.is_ai_external_acknowledged.assert_called_once_with()
-
-
 class TestDataSourceViewModelGetHealthReport:
     async def test_returns_report(self, bound_vm, mock_processor):
         result = await bound_vm.get_health_report()
@@ -1050,7 +950,6 @@ class TestDataSourceViewModelCoverageFill:
     - 218: _recover_after_task_terminated 在 is_syncing=False 时早退
     - 238: check_health 第二次 update_progress(0.9) 返回 False 时早退
     - 278->exit / 429->exit: progress 回调 t=0 时不抛 ZeroDivisionError
-    - 348-354: ai_concept_rebuild Exception 分支
     - 485: cancel_init_sync 在无 system_init_sync 任务时跳过 cancel_task
     - 535->533 / 544->exit: recover_stale_state 保留 RUNNING 任务
     """
@@ -1097,19 +996,6 @@ class TestDataSourceViewModelCoverageFill:
         assert bound_vm.state.health_result is None
         assert not any(s.health_result is not None for s in snapshots)
 
-    async def test_ai_concept_rebuild_error_emits_snack(self, bound_vm, snapshots, mock_processor, mock_task_manager):
-        """AI concept rebuild 抛 Exception 时 emit error snack 并 re-raise（348-354）。"""
-        mock_processor.run_ai_concept_tagging = AsyncMock(side_effect=RuntimeError("LLM down"))
-        bound_vm.execute_ai_concept_rebuild()
-        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
-        with pytest.raises(RuntimeError, match="LLM down"):
-            await factory(task_id="task_123")
-        # error snack emitted
-        _assert_snack(bound_vm, snapshots, "common_op_fail", "error")
-        # finally 重置 sync busy
-        assert bound_vm.state.is_syncing is False
-        assert bound_vm.state.active_key is None
-
     async def test_cancel_init_sync_no_active_task(self, bound_vm, mock_processor, mock_task_manager):
         """cancel_init_sync 在 _active_task_ids 无 system_init_sync 时仅 await request_cancel（485）。"""
         assert "system_init_sync" not in bound_vm._active_task_ids
@@ -1123,7 +1009,7 @@ class TestDataSourceViewModelCoverageFill:
         bound_vm._set_state(is_syncing=True, active_key="daily_sync")
         bound_vm._active_task_ids = {
             "daily_sync": "task_running",  # 仍 RUNNING, 保留
-            "ai_concept_sync": "task_done",  # COMPLETED, 清理
+            "cache_clear": "task_done",  # COMPLETED, 清理
         }
         running_task = MagicMock()
         running_task.status = TaskStatus.RUNNING
@@ -1134,7 +1020,7 @@ class TestDataSourceViewModelCoverageFill:
         bound_vm.recover_stale_state()
 
         assert "daily_sync" in bound_vm._active_task_ids
-        assert "ai_concept_sync" not in bound_vm._active_task_ids
+        assert "cache_clear" not in bound_vm._active_task_ids
         # 仍有活跃任务, is_syncing 保持 True, 不调 _set_sync_busy(False)
         assert bound_vm.state.is_syncing is True
 
@@ -1185,12 +1071,12 @@ class TestDataSourceViewModelCoverageFill:
 
 
 class TestDataSourceViewModelCancelActiveTask:
-    """P1-5: cancel_active_task — daily_sync / ai_concept_sync 取消按钮入口。
+    """P1-5: cancel_active_task — daily_sync / cache_clear 取消按钮入口。
 
     取消语义:
     - active_key=None: 无活跃任务, 不动作
     - active_key="system_init_sync": 走专门 cancel_init_sync 通道, 此处不动作
-    - active_key="daily_sync"/"ai_concept_sync"/"cache_clear" 且 task_id 存在:
+    - active_key="daily_sync"/"cache_clear" 且 task_id 存在:
       委托 TaskManager.cancel_task(task_id)
     - active_key 有值但 _active_task_ids 无记录: 不动作 (防御)
     """
@@ -1215,10 +1101,10 @@ class TestDataSourceViewModelCancelActiveTask:
         bound_vm.cancel_active_task()
         mock_task_manager.cancel_task.assert_called_once_with("task_123")
 
-    def test_cancel_active_task_ai_concept_sync_cancels(self, bound_vm, mock_task_manager):
-        """active_key="ai_concept_sync" + task_id 存在 → cancel_task("task_123")。"""
-        bound_vm.execute_ai_concept_rebuild()
-        assert bound_vm.state.active_key == "ai_concept_sync"
+    def test_cancel_active_task_cache_clear_cancels(self, bound_vm, mock_task_manager):
+        """active_key="cache_clear" + task_id 存在 → cancel_task("task_123")。"""
+        bound_vm.execute_clear_cache()
+        assert bound_vm.state.active_key == "cache_clear"
         bound_vm.cancel_active_task()
         mock_task_manager.cancel_task.assert_called_once_with("task_123")
 
@@ -1234,7 +1120,7 @@ class TestDataSourceViewModelCancelActiveTask:
 class TestDataSourceViewModelSyncBusyProgressReset:
     """P1-5: _set_sync_busy 启动/结束时重置 progress 与 progress_message。
 
-    避免 init_sync 与 secondary sync (daily/ai_concept/cache_clear) 的
+    避免 init_sync 与 secondary sync (daily/cache_clear) 的
     进度条状态互相污染 (state 字段共用, 启动新任务必须清零旧值)。
     """
 

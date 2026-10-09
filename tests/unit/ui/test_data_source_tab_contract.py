@@ -641,13 +641,6 @@ class _FakeDataSourceViewModel:
     def execute_full_daily_sync(self) -> None:
         self.method_calls.append(("execute_full_daily_sync", {}))
 
-    def execute_ai_concept_rebuild(self) -> None:
-        self.method_calls.append(("execute_ai_concept_rebuild", {}))
-
-    def is_ai_external_acknowledged(self) -> bool:
-        """Task 2.2: View 调用此方法判断用户是否已确认 AI 外发数据政策."""
-        return True
-
     def execute_clear_cache(self) -> None:
         self.method_calls.append(("execute_clear_cache", {}))
 
@@ -678,7 +671,7 @@ class _FakeDataSourceViewModel:
         self.method_calls.append(("refresh_scheduler_status", {}))
 
     def cancel_active_task(self) -> None:
-        """P1-5: daily_sync/ai_concept_sync 取消按钮入口。"""
+        """P1-5: daily_sync 取消按钮入口。"""
         self.method_calls.append(("cancel_active_task", {}))
 
 
@@ -1095,15 +1088,15 @@ class TestDataSourceTabComponentBody:
         assert bars[0].visible is False
 
     def test_action_chips_present(self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch):
-        """渲染包含 3 个 ActionChip (mock 后为有 on_click 的 ft.Container)。"""
+        """渲染包含 2 个 ActionChip (mock 后为有 on_click 的 ft.Container)。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         _patch_data_source_vms(monkeypatch)
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, _ = _mount(component)
         clickables = _find_clickable_containers(result)
-        # 3 个 ActionChip (full_sync / ai_concept_rebuild / clear_cache)
-        assert len(clickables) >= 3
+        # 2 个 ActionChip (full_sync / clear_cache)
+        assert len(clickables) >= 2
 
 
 # ============================================================================
@@ -1148,7 +1141,7 @@ class TestDataSourceTabDataFlowSection:
     def test_data_flow_section_renders_outbound_channels(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """说明区渲染外发渠道清单 (Tushare/AkShare 查询 + 云端 LLM 分析)。"""
+        """说明区渲染外发渠道清单 (Tushare/AkShare 查询)。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         _patch_data_source_vms(monkeypatch)
@@ -1159,8 +1152,6 @@ class TestDataSourceTabDataFlowSection:
         assert "ds_data_flow_outbound_title" in values
         # Tushare/AkShare 渠道文案 (可能带 "• " 前缀)
         assert any("ds_data_flow_outbound_tushare" in v for v in values)
-        # 云端 LLM 渠道文案
-        assert any("ds_data_flow_outbound_llm" in v for v in values)
 
     def test_data_flow_section_renders_storage_icon(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -1394,7 +1385,7 @@ class TestDataSourceTabStateBranches:
         # 反向守护: 不应出现硬编码 "15:30" 占位
         assert not any("15:30" in (t.value or "") for t in texts)
 
-    # --- P1-5: Secondary progress 区域 (daily_sync/ai_concept_sync/cache_clear) ---
+    # --- P1-5: Secondary progress 区域 (daily_sync/cache_clear) ---
 
     def _mount_with_state(self, monkeypatch, state: _FakeDataSourceState):
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
@@ -1474,13 +1465,13 @@ class TestDataSourceTabStateBranches:
             monkeypatch,
             _FakeDataSourceState(
                 is_syncing=True,
-                active_key="ai_concept_sync",
+                active_key="daily_sync",
                 progress=0.5,
-                progress_message=Message("ds_ai_concept_rebuild_start"),
+                progress_message=Message("ds_sync_in_progress"),
             ),
         )
         texts = _find_by_type(result, ft.Text)
-        assert any("50.0%" in (t.value or "") and "ds_ai_concept_rebuild_start" in (t.value or "") for t in texts)
+        assert any("50.0%" in (t.value or "") and "ds_sync_in_progress" in (t.value or "") for t in texts)
 
     def test_cancel_button_click_invokes_vm_cancel_active_task(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -1755,9 +1746,9 @@ class TestDataSourceTabEventHandlers:
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, page = _mount(component, page=page)
         clickables = _find_clickable_containers(result)
-        # clear_cache 是第 3 个 ActionChip
-        assert len(clickables) >= 3
-        clickables[2].on_click(_make_event())
+        # clear_cache 是第 2 个 ActionChip
+        assert len(clickables) >= 2
+        clickables[1].on_click(_make_event())
         render_once(component)
         dialogs = [c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog)]
         assert len(dialogs) >= 1
@@ -2219,8 +2210,8 @@ class TestDataSourceTabDialogs:
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, page = _mount(component, page=page)
         clickables = _find_clickable_containers(result)
-        # clear_cache 是第 3 个 ActionChip
-        clickables[2].on_click(_make_event())
+        # clear_cache 是第 2 个 ActionChip
+        clickables[1].on_click(_make_event())
         render_once(component)
         dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
         confirm_btn = dialog.actions[1]
@@ -2443,41 +2434,6 @@ class TestDataSourceTabCoverageBranches:
         snack_cb.assert_called_once()
         assert "settings_snack_token_verified" in snack_cb.call_args[0][0]
 
-    def test_on_ai_concept_rebuild_opens_confirm_dialog(
-        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
-    ):
-        """_on_ai_concept_rebuild (is_syncing=False) → 打开 confirm dialog。"""
-        from ui.views.settings_tabs.data_source_tab import DataSourceTab
-
-        _patch_data_source_vms(monkeypatch)
-        page = _make_fake_page()
-        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
-        result, page = _mount(component, page=page)
-        clickables = _find_clickable_containers(result)
-        # ai_concept_rebuild 是第 2 个 ActionChip
-        clickables[1].on_click(_make_event())
-        render_once(component)
-        dialogs = [c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog)]
-        assert len(dialogs) >= 1
-
-    def test_on_ai_concept_rebuild_when_syncing_shows_snack(
-        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
-    ):
-        """_on_ai_concept_rebuild (is_syncing=True) → show_snack (ds_sync_in_progress)。"""
-        from ui.views.settings_tabs.data_source_tab import DataSourceTab
-
-        _patch_data_source_vms(
-            monkeypatch,
-            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(is_syncing=True)),
-        )
-        snack_cb = MagicMock()
-        page = _make_fake_page()
-        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
-        result, page = _mount(component, page=page)
-        clickables = _find_clickable_containers(result)
-        clickables[1].on_click(_make_event())
-        snack_cb.assert_called_once()
-
     def test_on_clear_cache_when_syncing_shows_snack(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
@@ -2493,28 +2449,9 @@ class TestDataSourceTabCoverageBranches:
         component = make_component(DataSourceTab, show_snack_callback=snack_cb)
         result, page = _mount(component, page=page)
         clickables = _find_clickable_containers(result)
-        clickables[2].on_click(_make_event())
+        clickables[1].on_click(_make_event())
         snack_cb.assert_called_once()
         assert "ds_clear_cache_syncing" in snack_cb.call_args[0][0]
-
-    def test_confirm_dialog_confirm_ai_concept_triggers_rebuild(
-        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
-    ):
-        """confirm dialog (ai_concept) 确认按钮 → vm.execute_ai_concept_rebuild。"""
-        from ui.views.settings_tabs.data_source_tab import DataSourceTab
-
-        fake_vm, _ = _patch_data_source_vms(monkeypatch)
-        page = _make_fake_page()
-        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
-        result, page = _mount(component, page=page)
-        clickables = _find_clickable_containers(result)
-        clickables[1].on_click(_make_event())  # ai_concept_rebuild
-        render_once(component)
-        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
-        confirm_btn = dialog.actions[1]
-        confirm_btn.on_click(_make_event())
-        calls = [c[0] for c in fake_vm.method_calls]
-        assert "execute_ai_concept_rebuild" in calls
 
     def test_confirm_dialog_confirm_clear_triggers_clear_cache(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -2530,7 +2467,7 @@ class TestDataSourceTabCoverageBranches:
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, page = _mount(component, page=page)
         clickables = _find_clickable_containers(result)
-        clickables[2].on_click(_make_event())  # clear_cache
+        clickables[1].on_click(_make_event())  # clear_cache
         render_once(component)
         dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
         # MAJOR-03: 未勾选时确认按钮 disabled, 点击不触发 callback
@@ -2703,13 +2640,12 @@ class TestMajor03DangerZone:
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, _ = _mount(component)
         clickables = _find_clickable_containers(result)
-        assert len(clickables) == 3  # full_sync / ai_concept_rebuild / reset
-        full_sync_chip, ai_concept_chip, reset_chip = clickables
+        assert len(clickables) == 2  # full_sync / reset
+        full_sync_chip, reset_chip = clickables
         rows = _find_by_type(result, ft.ResponsiveRow)
-        # 常规同步入口 (full_sync + ai_concept_rebuild) 共处同一个 ResponsiveRow
+        # 常规同步入口 (full_sync) 处于同一个 ResponsiveRow
         sync_row = next((r for r in rows if any(c is full_sync_chip for c in _collect_controls(r))), None)
         assert sync_row is not None
-        assert any(c is ai_concept_chip for c in _collect_controls(sync_row))
         # 重置入口不属于任何 ResponsiveRow (独立危险区, 与同步入口视觉/结构隔离)
         for row in rows:
             assert all(c is not reset_chip for c in _collect_controls(row))
@@ -2724,7 +2660,7 @@ class TestMajor03DangerZone:
         page = _make_fake_page()
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, page = _mount(component, page=page)
-        _find_clickable_containers(result)[2].on_click(_make_event())  # reset
+        _find_clickable_containers(result)[1].on_click(_make_event())  # reset
         render_once(component)
         dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
         assert dialog.actions[1].disabled is True
@@ -2753,7 +2689,7 @@ class TestMajor03DangerZone:
         page = _make_fake_page()
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, page = _mount(component, page=page)
-        _find_clickable_containers(result)[2].on_click(_make_event())  # reset
+        _find_clickable_containers(result)[1].on_click(_make_event())  # reset
         render_once(component)
         dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
         rendered = {t.value for t in _find_by_type(dialog.content, ft.Text)}
@@ -2776,7 +2712,7 @@ class TestMajor03DangerZone:
         page = _make_fake_page()
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, page = _mount(component, page=page)
-        _find_clickable_containers(result)[2].on_click(_make_event())  # reset
+        _find_clickable_containers(result)[1].on_click(_make_event())  # reset
         render_once(component)
         dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
         backup_btn = next(
