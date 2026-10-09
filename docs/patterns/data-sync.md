@@ -122,6 +122,18 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 
 **结论：不纳入主源。** 理由：① 与新浪 7x24 定位重叠；② `stock[].stockMarket` 为**无文档数值编码**（实测 33=深市 / 17=沪市 / 151=北交所 / 177=港股 / 185·186·169=美股 / 20·36=基金 等），须自维护映射表且随上游变动失效率高；③ 增加第 4 个源的熔断 / 限速 / 解析维护面，收益不足。
 
+### 语料库编排（N1-4，`scripts/collect_corpus.py`）
+
+按源插件化聚合三源（新浪 7x24 / 新浪个股 / 巨潮）→ 清洗去重 → 落 **SQLite 语料库**（`data/corpus/news_corpus.db`，离线、与应用 PostgreSQL 解耦），产出训练语料（规格 §3.3 / §4.1）。内核分三块，均落 `data/external/news_sources/`：
+
+- **`registry.py`**：`SourcePlugin` 抽象（`build_queries` / `fetch` / 归一化 schema）、`CollectQuery` / `CollectParams`、`all_plugins()` / `get_plugin(name)`；内置每源限速 `DEFAULT_RATE_LIMIT_SECONDS = 2.5s`（规格 §3.3 ≥ 2~3s）。
+- **`circuit_breaker.py`**：通用单源熔断（`threshold` 连续失败 N 次开路 / `cooldown_seconds` 冷却后 half-open 探活），沿用 `data/external/news_fetcher.py` 的 Sina / CLS 熔断模式。
+- **`cleaning.py`**：与源无关的通用清洗（去 HTML/实体/模板语、快讯截断 `FLASH_MAX_CHARS=120`、例行条目过滤）；巨潮标题的公司前缀剥离已在解析内核 `cninfo.clean_title` 完成，此处不重复。
+- **`dedup.py`**：字符 3-gram SimHash + 分段分桶索引（`NearDuplicateIndex`）做近重复去重（规格 §4.2.3 同一事件多源转载）；对内容级改写不敏感的敏感度上限见 `NOTE(lazy)`。
+- **`corpus.py`**：`CorpusStore`（标准库 `sqlite3`）——表 `corpus_documents` 主键 `(source, source_id)`，`INSERT OR IGNORE` 幂等写库；`publish_time` 缺失存 `NULL`（R21）；SimHash 无符号 64 位经 two's complement 无损往返（SQLite INTEGER 有符号 64 位）。
+
+`collect_corpus.py` 为 CLI 编排层，仅依赖 `data/external/news_sources/`；跨请求单独维护指纹索引，做去重并统计清洗/丢弃计数。
+
 ---
 
 ## 完成判定（canonical 入口）
