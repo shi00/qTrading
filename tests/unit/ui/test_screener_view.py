@@ -11,6 +11,7 @@
   声明式组件含 use_state 在无 renderer 下抛 RuntimeError
 """
 
+import asyncio
 import datetime
 from types import MappingProxyType
 from unittest.mock import MagicMock, patch
@@ -21,6 +22,7 @@ import pytest
 
 from ui.theme import AppColors
 from ui.viewmodels.screener_view_model import ScreenerRow, ScreenerViewModel, StrategyDepRow
+from ui.viewmodels.watchlist_view_model import WatchlistMutationResult, WatchlistViewModel
 from ui.views.screener_view import (
     _COLUMN_WIDTHS,
     _COVERAGE_GAP_RATIO,
@@ -30,6 +32,7 @@ from ui.views.screener_view import (
     _build_strategy_options,
     _build_table_data,
     _coverage_gap_pct,
+    _execute_add_to_watchlist,
     _format_cell_value,
     _parse_num,
     _render_status_message,
@@ -642,3 +645,113 @@ class TestCoverageGap:
     def test_avg_daily_count_zero_returns_none(self):
         alpha = _FakeAlpha(row_n=5, n=20)
         assert _coverage_gap_pct(alpha, avg_daily_count=0.0) is None
+
+
+# ---------------------------------------------------------------------------
+# F01-R1: _execute_add_to_watchlist 结果三态分支反馈
+# ---------------------------------------------------------------------------
+
+
+class _FakeWatchlistViewModelForAdd(WatchlistViewModel):
+    """仅满足 _execute_add_to_watchlist 调用面的 fake VM（覆盖 __init__，不实例化 CacheManager）。"""
+
+    def __init__(
+        self,
+        result: WatchlistMutationResult | None = None,
+        exc: BaseException | None = None,
+    ) -> None:
+        self._result = result
+        self._exc = exc
+        self.calls: list[tuple[str, str]] = []
+
+    async def add_to_watchlist(  # noqa: D102 - 测试替身无需 docstring
+        self, ts_code: str, stock_name: str, note: str | None = None
+    ) -> WatchlistMutationResult:
+        self.calls.append((ts_code, stock_name))
+        if self._exc is not None:
+            raise self._exc
+        assert self._result is not None
+        return self._result
+
+
+class TestExecuteAddToWatchlist:
+    """F01-R1: 加入关注按写操作结果三态分支反馈，写失败/刷新失败不得伪装成功."""
+
+    @staticmethod
+    def _make_page(toast_calls: list[tuple[str, str]]) -> MagicMock:
+        page = MagicMock(name="Page")
+        page.toast = MagicMock(name="ToastManager")
+        page.toast.show.side_effect = lambda msg, msg_type="info", **kw: toast_calls.append((msg, msg_type))
+        return page
+
+    @patch("ui.views.screener_view.I18n")
+    def test_applied_shows_success_toast(self, mock_i18n):
+        """写入成功且刷新成功 → 成功 toast."""
+        mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        toast_calls: list[tuple[str, str]] = []
+        page = self._make_page(toast_calls)
+        wl_vm = _FakeWatchlistViewModelForAdd(result=WatchlistMutationResult("applied"))
+
+        asyncio.run(_execute_add_to_watchlist(wl_vm, page, "000001.SZ", "平安银行"))
+
+        assert wl_vm.calls == [("000001.SZ", "平安银行")]
+        assert toast_calls == [("watchlist_added", "success")]
+
+    @patch("ui.views.screener_view.I18n")
+    def test_failed_shows_error_toast_not_success(self, mock_i18n):
+        """写入失败（VM 返回 failed）→ 失败 toast，不得出现成功提示（F01-R1 核心）."""
+        mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        toast_calls: list[tuple[str, str]] = []
+        page = self._make_page(toast_calls)
+        wl_vm = _FakeWatchlistViewModelForAdd(result=WatchlistMutationResult("failed"))
+
+        asyncio.run(_execute_add_to_watchlist(wl_vm, page, "000001.SZ", "平安银行"))
+
+        assert toast_calls == [("watchlist_add_failed", "error")]
+
+    @patch("ui.views.screener_view.I18n")
+    def test_applied_refresh_failed_shows_warning(self, mock_i18n):
+        """写入成功但刷新失败 → warning（已落库，提示手动刷新），不得伪装成功."""
+        mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        toast_calls: list[tuple[str, str]] = []
+        page = self._make_page(toast_calls)
+        wl_vm = _FakeWatchlistViewModelForAdd(result=WatchlistMutationResult("applied_refresh_failed"))
+
+        asyncio.run(_execute_add_to_watchlist(wl_vm, page, "600000.SH", "浦发银行"))
+
+        assert toast_calls == [("watchlist_refresh_failed", "warning")]
+
+    @patch("ui.views.screener_view.I18n")
+    def test_vm_exception_shows_error_toast(self, mock_i18n):
+        """VM 契约外普通异常 → 失败 toast（不 crash、不伪装成功）."""
+        mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        toast_calls: list[tuple[str, str]] = []
+        page = self._make_page(toast_calls)
+        wl_vm = _FakeWatchlistViewModelForAdd(exc=RuntimeError("unexpected vm failure"))
+
+        asyncio.run(_execute_add_to_watchlist(wl_vm, page, "000001.SZ", "平安银行"))
+
+        assert toast_calls == [("watchlist_add_failed", "error")]
+
+    @patch("ui.views.screener_view.I18n")
+    def test_cancelled_error_propagates(self, mock_i18n):
+        """R2 红线：CancelledError 必须 raise（不吞没）；取消路径不产生任何 toast。"""
+        mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        toast_calls: list[tuple[str, str]] = []
+        page = self._make_page(toast_calls)
+        wl_vm = _FakeWatchlistViewModelForAdd(exc=asyncio.CancelledError())
+
+        # R2 红线契约仅验证 CancelledError 类型传播即可，pytest.raises 本身即为强断言；
+        # 取消路径无进一步可断言状态（toast 必须为空，见 with 块后的断言）。
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播，pytest.raises 即为强断言
+            asyncio.run(_execute_add_to_watchlist(wl_vm, page, "000001.SZ", "平安银行"))
+
+        assert toast_calls == []
+
+    def test_none_page_does_not_crash(self):
+        """page 为 None（无渲染上下文）→ 不崩溃、不显示 toast."""
+        wl_vm = _FakeWatchlistViewModelForAdd(result=WatchlistMutationResult("applied"))
+
+        asyncio.run(_execute_add_to_watchlist(wl_vm, None, "000001.SZ", "平安银行"))
+
+        assert wl_vm.calls == [("000001.SZ", "平安银行")]
