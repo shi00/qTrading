@@ -178,14 +178,15 @@ class TestAppLayoutContract:
 
         UX-01 后 SettingsView 为多行构造 (active + target_subtab 两个 prop),
         UX-04 后 ScreenerView 为多行构造 (active + stock_filter_request 两个 prop),
-        断言放宽为 ``SettingsView(`` / ``ScreenerView(`` 函数调用存在性;
+        F13 后 BacktestView 为多行构造 (active + prefill_request 两个 prop),
+        断言放宽为 ``SettingsView(`` / ``ScreenerView(`` / ``BacktestView(`` 函数调用存在性;
         active prop 的 kwargs 验证由 test_app_layout_runtime.py 的深链测试覆盖。
         """
         source = _code_source()
         for view_name in [
             "HomeView(active=",
             "ScreenerView(",
-            "BacktestView(active=",
+            "BacktestView(",
             "DataExplorerView(active=",
             "TaskCenterView(active=",
             "SettingsView(",
@@ -267,14 +268,15 @@ class TestBuildPagesStack:
 
         UX-01 后 SettingsView 为多行构造 (active + target_subtab),
         UX-04 后 ScreenerView 为多行构造 (active + stock_filter_request),
-        断言为 ``SettingsView(`` / ``ScreenerView(`` 构造存在性;
+        F13 后 BacktestView 为多行构造 (active + prefill_request),
+        断言为 ``SettingsView(`` / ``ScreenerView(`` / ``BacktestView(`` 构造存在性;
         active prop 由 runtime 深链测试覆盖。
         """
         source = _code_source()
         for view_name in [
             "HomeView(active=",
             "ScreenerView(",
-            "BacktestView(active=",
+            "BacktestView(",
             "DataExplorerView(active=",
             "TaskCenterView(active=",
             "SettingsView(",

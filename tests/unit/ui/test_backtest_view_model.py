@@ -325,6 +325,15 @@ class TestBacktestViewModel:
 
         assert vm.state.last_run_summary == ("ma_cross", config)
 
+    def test_report_prefill_rejected_sets_warning_status(self):
+        """F13: report_prefill_rejected() → 明确反馈 (warning 色 + 缺失策略 i18n 键)。"""
+        vm = BacktestViewModel()
+        vm.report_prefill_rejected()
+
+        assert vm.state.status_color == "warning"
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == "backtest_prefill_strategy_missing"
+
     @pytest.mark.asyncio
     async def test_run_backtest_already_running(self):
         """测试回测已在运行时的处理。"""
