@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import FrozenInstanceError
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,6 +24,7 @@ from services.stock_detail_service import StockQuote
 from ui.viewmodels import Message
 from ui.viewmodels.watchlist_view_model import (
     StockSearchRow,
+    WatchlistMutationResult,
     WatchlistRow,
     WatchlistViewModel,
     _df_to_stock_search_rows,
@@ -539,3 +541,255 @@ class TestCloseStockDetail:
 
     def test_default_detail_state_is_none(self, vm):
         assert vm.state.detail_stock_data is None
+
+
+# --- F01: load_watchlist 返回值语义（成功/空表=True，异常=False） ---
+
+
+class TestLoadWatchlistReturnValue:
+    @pytest.mark.asyncio
+    async def test_success_returns_true(self, vm, mock_cache):
+        mock_cache.get_watchlist.return_value = _make_watchlist_df()
+        assert await vm.load_watchlist() is True
+
+    @pytest.mark.asyncio
+    async def test_empty_table_returns_true(self, vm, mock_cache):
+        """成功加载空表也算成功（True），不得与失败混淆（R21）。"""
+        mock_cache.get_watchlist.return_value = pd.DataFrame()
+        assert await vm.load_watchlist() is True
+
+    @pytest.mark.asyncio
+    async def test_exception_returns_false(self, vm, mock_cache):
+        mock_cache.get_watchlist.side_effect = RuntimeError("db error")
+        assert await vm.load_watchlist() is False
+
+
+# --- F01: add_to_watchlist 结果契约（写失败不刷新、不伪装成功） ---
+
+
+class TestAddMutationResult:
+    @pytest.mark.asyncio
+    async def test_success_returns_applied(self, vm, mock_cache):
+        result = await vm.add_to_watchlist("000001.SZ", "平安银行")
+        assert result == WatchlistMutationResult("applied")
+        mock_cache.get_watchlist.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_write_failure_returns_failed_without_refresh(self, vm, mock_cache):
+        mock_cache.add_to_watchlist.side_effect = RuntimeError("db error at /home/user/secret")
+        result = await vm.add_to_watchlist("000001.SZ", "平安银行")
+        assert result.status == "failed"
+        assert isinstance(result.message, Message)
+        # 写失败不得刷新列表（避免把未落库的空列表当成成功）
+        mock_cache.get_watchlist.assert_not_awaited()
+        # 不得污染列表 error 通道（否则空列表会被 ErrorState 整体替换）
+        assert vm.state.load_error is None
+        assert vm.state.is_loading is False
+        # message 仅含 i18n key / 安全参数，不含原始 DB 异常串（R9）
+        assert "secret" not in str(result.message.params)
+
+    @pytest.mark.asyncio
+    async def test_refresh_failure_returns_applied_refresh_failed(self, vm, mock_cache):
+        """写入成功但刷新失败 → applied_refresh_failed（数据已落库，需提示手动刷新）。"""
+        mock_cache.get_watchlist.side_effect = RuntimeError("db error")
+        result = await vm.add_to_watchlist("000001.SZ", "平安银行")
+        assert result.status == "applied_refresh_failed"
+        assert result.message is None
+
+
+# --- F01: remove_from_watchlist 结果契约 ---
+
+
+class TestRemoveMutationResult:
+    @pytest.mark.asyncio
+    async def test_success_returns_applied(self, vm, mock_cache):
+        result = await vm.remove_from_watchlist("000001.SZ")
+        assert result == WatchlistMutationResult("applied")
+        mock_cache.get_watchlist.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_write_failure_returns_failed_without_refresh(self, vm, mock_cache):
+        mock_cache.remove_from_watchlist.side_effect = RuntimeError("db error")
+        result = await vm.remove_from_watchlist("000001.SZ")
+        assert result.status == "failed"
+        assert isinstance(result.message, Message)
+        mock_cache.get_watchlist.assert_not_awaited()
+        assert vm.state.load_error is None
+
+    @pytest.mark.asyncio
+    async def test_refresh_failure_returns_applied_refresh_failed(self, vm, mock_cache):
+        mock_cache.get_watchlist.side_effect = RuntimeError("db error")
+        result = await vm.remove_from_watchlist("000001.SZ")
+        assert result.status == "applied_refresh_failed"
+        assert result.message is None
+
+
+# --- F03: search_stocks 请求代次隔离（乱序响应/关闭回填不得覆盖新结果） ---
+
+
+class TestSearchGenerationIsolation:
+    @pytest.mark.asyncio
+    async def test_new_search_clears_previous_results_and_sets_loading(self, vm, mock_cache):
+        mock_cache.search_stocks.return_value = _make_stock_search_df()
+        await vm.search_stocks("旧")
+        assert vm.state.search_results
+
+        started = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def _slow(keyword: str) -> pd.DataFrame:
+            started.set()
+            await gate.wait()
+            return _make_stock_search_df()
+
+        mock_cache.search_stocks.side_effect = _slow
+        task = asyncio.create_task(vm.search_stocks("新"))
+        await started.wait()
+        # 新请求发起时立即清空旧候选并置 loading（不等待旧响应）
+        assert vm.state.search_results == ()
+        assert vm.state.search_keyword == "新"
+        assert vm.state.is_searching is True
+        gate.set()
+        await task
+
+    @pytest.mark.asyncio
+    async def test_duplicate_in_flight_keyword_is_ignored(self, vm, mock_cache):
+        started = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def _slow(keyword: str) -> pd.DataFrame:
+            started.set()
+            await gate.wait()
+            return _make_stock_search_df()
+
+        mock_cache.search_stocks.side_effect = _slow
+        task = asyncio.create_task(vm.search_stocks("平安"))
+        await started.wait()
+        # 同一 keyword 且仍在查询中 → 忽略重复请求，不再发起查询
+        await vm.search_stocks("平安")
+        assert mock_cache.search_stocks.await_count == 1
+        gate.set()
+        await task
+
+    @pytest.mark.asyncio
+    async def test_stale_response_does_not_overwrite_newer(self, vm, mock_cache):
+        df_a = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["旧结果"]})
+        df_b = pd.DataFrame({"ts_code": ["600000.SH"], "name": ["新结果"]})
+        started_a = asyncio.Event()
+        gate_a = asyncio.Event()
+
+        async def _search(keyword: str) -> pd.DataFrame:
+            if keyword == "A":
+                started_a.set()
+                await gate_a.wait()
+                return df_a
+            return df_b
+
+        mock_cache.search_stocks.side_effect = _search
+        task_a = asyncio.create_task(vm.search_stocks("A"))
+        await started_a.wait()
+        task_b = asyncio.create_task(vm.search_stocks("B"))
+        await task_b
+        assert vm.state.search_keyword == "B"
+        assert vm.state.search_results[0].name == "新结果"
+        # 释放旧请求，其迟到响应不得覆盖新结果
+        gate_a.set()
+        await task_a
+        assert vm.state.search_keyword == "B"
+        assert vm.state.search_results[0].name == "新结果"
+        assert vm.state.is_searching is False
+
+    @pytest.mark.asyncio
+    async def test_stale_failure_does_not_overwrite_newer_error_channel(self, vm, mock_cache):
+        started_a = asyncio.Event()
+        gate_a = asyncio.Event()
+        df_b = pd.DataFrame({"ts_code": ["600000.SH"], "name": ["新结果"]})
+
+        async def _search(keyword: str) -> pd.DataFrame:
+            if keyword == "A":
+                started_a.set()
+                await gate_a.wait()
+                raise RuntimeError("stale failure")
+            return df_b
+
+        mock_cache.search_stocks.side_effect = _search
+        task_a = asyncio.create_task(vm.search_stocks("A"))
+        await started_a.wait()
+        task_b = asyncio.create_task(vm.search_stocks("B"))
+        await task_b
+        gate_a.set()
+        await task_a
+        # 旧请求失败不得写入新请求的 error 通道 / loading
+        assert vm.state.search_error is None
+        assert vm.state.is_searching is False
+        assert vm.state.search_results[0].name == "新结果"
+
+    @pytest.mark.asyncio
+    async def test_stale_cancel_does_not_clear_newer_loading(self, vm, mock_cache):
+        started_a = asyncio.Event()
+        gate_a = asyncio.Event()
+        started_b = asyncio.Event()
+        gate_b = asyncio.Event()
+
+        async def _search(keyword: str) -> pd.DataFrame:
+            if keyword == "A":
+                started_a.set()
+                await gate_a.wait()
+                return pd.DataFrame()
+            started_b.set()
+            await gate_b.wait()
+            return pd.DataFrame()
+
+        mock_cache.search_stocks.side_effect = _search
+        task_a = asyncio.create_task(vm.search_stocks("A"))
+        await started_a.wait()
+        task_b = asyncio.create_task(vm.search_stocks("B"))
+        await started_b.wait()
+        assert vm.state.is_searching is True
+        task_a.cancel()
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion CancelledError 传播契约：raises 即验证，VM 不得吞没取消信号
+            await task_a
+        # A 取消不得清除 B 的 loading
+        assert vm.state.is_searching is True
+        gate_b.set()
+        await task_b
+
+    @pytest.mark.asyncio
+    async def test_clear_search_invalidates_in_flight(self, vm, mock_cache):
+        started_a = asyncio.Event()
+        gate_a = asyncio.Event()
+
+        async def _search(keyword: str) -> pd.DataFrame:
+            started_a.set()
+            await gate_a.wait()
+            return _make_stock_search_df()
+
+        mock_cache.search_stocks.side_effect = _search
+        task_a = asyncio.create_task(vm.search_stocks("A"))
+        await started_a.wait()
+        await vm.clear_search()
+        gate_a.set()
+        await task_a
+        # 关闭对话框（clear_search）后，在途响应被代次隔离丢弃
+        assert vm.state.search_results == ()
+        assert vm.state.search_keyword == ""
+        assert vm.state.is_searching is False
+
+    @pytest.mark.asyncio
+    async def test_dispose_invalidates_in_flight(self, vm, mock_cache):
+        started_a = asyncio.Event()
+        gate_a = asyncio.Event()
+
+        async def _search(keyword: str) -> pd.DataFrame:
+            started_a.set()
+            await gate_a.wait()
+            return _make_stock_search_df()
+
+        mock_cache.search_stocks.side_effect = _search
+        task_a = asyncio.create_task(vm.search_stocks("A"))
+        await started_a.wait()
+        vm.dispose()
+        gate_a.set()
+        await task_a
+        # dispose 后旧响应不得回填候选结果
+        assert vm.state.search_results == ()

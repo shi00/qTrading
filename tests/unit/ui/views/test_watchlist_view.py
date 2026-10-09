@@ -20,7 +20,8 @@ import pytest
 from flet.components.component import Component
 
 from ui.components.stock_detail_dialog import _build_title
-from ui.viewmodels.watchlist_view_model import WatchlistRow, WatchlistState
+from ui.viewmodels import Message
+from ui.viewmodels.watchlist_view_model import WatchlistMutationResult, WatchlistRow, WatchlistState
 from ui.views.watchlist_view import (
     GITHUB_ISSUES_URL,
     WatchlistView,
@@ -46,6 +47,10 @@ class _FakeWatchlistViewModel:
         self.dispose_called: bool = False
         self.subscribe_called: bool = False
         self.method_calls: list[tuple[str, dict[str, Any]]] = []
+        # F01 结果契约：默认写操作成功且刷新成功（applied）；测试可按需覆盖。
+        self.load_result: bool = True
+        self.add_result: WatchlistMutationResult = WatchlistMutationResult("applied")
+        self.remove_result: WatchlistMutationResult = WatchlistMutationResult("applied")
         # View 渲染详情对话框时读取 vm.detail_service 作为 data_processor（duck-typed）。
         self.detail_service: Any = MagicMock(name="StockDetailService")
 
@@ -75,14 +80,17 @@ class _FakeWatchlistViewModel:
         self.dispose_called = True
         self._subscribers.clear()
 
-    async def load_watchlist(self) -> None:
+    async def load_watchlist(self) -> bool:
         self.method_calls.append(("load_watchlist", {}))
+        return self.load_result
 
-    async def remove_from_watchlist(self, ts_code: str) -> None:
+    async def remove_from_watchlist(self, ts_code: str) -> WatchlistMutationResult:
         self.method_calls.append(("remove_from_watchlist", {"ts_code": ts_code}))
+        return self.remove_result
 
-    async def add_to_watchlist(self, ts_code: str, stock_name: str, note: str | None = None) -> None:
+    async def add_to_watchlist(self, ts_code: str, stock_name: str, note: str | None = None) -> WatchlistMutationResult:
         self.method_calls.append(("add_to_watchlist", {"ts_code": ts_code, "stock_name": stock_name, "note": note}))
+        return self.add_result
 
     async def search_stocks(self, keyword: str) -> None:
         self.method_calls.append(("search_stocks", {"keyword": keyword}))
@@ -386,8 +394,11 @@ def mock_watchlist_vm(monkeypatch):
 
     # Mock WatchlistAddDialog: 捕获 on_add/on_search/on_close 回调 (open_state=True 时)
     captured_add_callbacks: dict[str, Any] = {}
+    add_dialog_calls: list[dict[str, Any]] = []
 
     def _fake_add_dialog(**kwargs: Any) -> Any:
+        # 记录每次渲染的 kwargs（供 F01 断言 open_state / is_submitting）
+        add_dialog_calls.append(dict(kwargs))
         if kwargs.get("open_state"):
             captured_add_callbacks["on_add"] = kwargs.get("on_add")
             captured_add_callbacks["on_search"] = kwargs.get("on_search")
@@ -396,6 +407,7 @@ def mock_watchlist_vm(monkeypatch):
 
     monkeypatch.setattr(watchlist_view_module, "WatchlistAddDialog", _fake_add_dialog)
     fake_vm.captured_add_callbacks = captured_add_callbacks  # type: ignore[attr-defined]  # [reason: 测试桩动态挂载捕获 dict, 非 VM 契约属性]
+    fake_vm.add_dialog_calls = add_dialog_calls  # type: ignore[attr-defined]  # [reason: 测试桩动态挂载捕获 list, 非 VM 契约属性]
 
     # Mock StockDetailDialog: 捕获 stock_data/open_state 等 kwargs (UX-09 MAJOR-04)
     captured_detail_kwargs: dict[str, Any] = {}
@@ -1251,3 +1263,198 @@ class TestWatchlistViewAddCallback:
         add_buttons[0].on_click(MagicMock())  # type: ignore[call-issue]  # [reason: 同 _click_icon_button, Flet on_click Union 含 0 参分支]
         # 对话框未打开 (无 open_state=True 渲染), 未捕获回调
         assert not mock_watchlist_vm.captured_add_callbacks.get("on_add")
+
+
+class TestWatchlistViewMutationFeedback:
+    """F01: 写操作结果驱动反馈（failed/applied/applied_refresh_failed）+ 提交中保护。"""
+
+    def _open_add_dialog(self, vm: Any, page: Any) -> Component:
+        """渲染视图并点击「添加关注」按钮打开对话框, 返回组件实例。"""
+        from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
+
+        vm._state = WatchlistState(watchlist_rows=(), is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+        add_buttons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.OutlinedButton) and getattr(c, "icon", None) == ft.Icons.ADD
+        ]
+        assert len(add_buttons) == 1, "标题栏应渲染「添加关注」按钮"
+        assert callable(add_buttons[0].on_click)
+        add_buttons[0].on_click(MagicMock())  # type: ignore[call-issue]  # [reason: 同 _click_icon_button, Flet on_click Union 含 0 参分支]
+        _rerender(component)
+        return component
+
+    def _render_and_confirm_remove(self, vm: Any, page: Any) -> Component:
+        """渲染含行视图 → 点删除 → 触发 on_confirm, 返回组件实例。"""
+        from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
+
+        rows = (_make_row(ts_code="000001.SZ"),)
+        vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        icon_buttons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.DELETE_OUTLINE
+        ]
+        _click_icon_button(icon_buttons[0])
+        _rerender(component)
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        on_confirm = vm.captured_callbacks.get("on_confirm")
+        assert on_confirm is not None
+        on_confirm()
+        return component
+
+    def test_remove_failed_shows_error_not_success(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """写失败（非刷新失败）→ error toast, 且绝不提示成功。"""
+        from tests.unit.ui.component_renderer import FakePage
+
+        page = FakePage()
+        toast_calls: list[tuple[str, str]] = []
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        page.toast.show.side_effect = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))
+        page.run_task = MagicMock()
+        mock_watchlist_vm.remove_result = WatchlistMutationResult("failed", Message("watchlist_remove_failed", {}))
+
+        self._render_and_confirm_remove(mock_watchlist_vm, page)
+
+        assert any(m == "watchlist_remove_failed" and t == "error" for m, t in toast_calls)
+        assert not any(m == "watchlist_removed" for m, _ in toast_calls)
+
+    def test_remove_refresh_failed_shows_warning(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """写入成功但刷新失败 → warning toast（不是成功，也不是错误）。"""
+        from tests.unit.ui.component_renderer import FakePage
+
+        page = FakePage()
+        toast_calls: list[tuple[str, str]] = []
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        page.toast.show.side_effect = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))
+        page.run_task = MagicMock()
+        mock_watchlist_vm.remove_result = WatchlistMutationResult("applied_refresh_failed")
+
+        self._render_and_confirm_remove(mock_watchlist_vm, page)
+
+        assert any(m == "watchlist_refresh_failed" and t == "warning" for m, t in toast_calls)
+        assert not any(m == "watchlist_removed" for m, _ in toast_calls)
+
+    def test_add_failed_keeps_dialog_open_and_no_success(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """写失败 → error toast 且对话框保持打开（草稿可重试），不提示成功。"""
+        from tests.unit.ui.component_renderer import FakePage
+
+        page = FakePage()
+        toast_calls: list[tuple[str, str]] = []
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        page.toast.show.side_effect = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))
+        page.run_task = MagicMock()
+        component = self._open_add_dialog(mock_watchlist_vm, page)
+
+        mock_watchlist_vm.add_result = WatchlistMutationResult("failed", Message("watchlist_add_failed", {}))
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        on_add = mock_watchlist_vm.captured_add_callbacks.get("on_add")
+        assert on_add is not None
+        on_add("000001.SZ", "平安银行", "重点")
+
+        assert any(m == "watchlist_add_failed" and t == "error" for m, t in toast_calls)
+        assert not any(m == "watchlist_added" for m, _ in toast_calls)
+        _rerender(component)
+        assert mock_watchlist_vm.add_dialog_calls[-1]["open_state"] is True
+        # 写失败不清理搜索状态（保持草稿/候选）
+        assert ("clear_search", {}) not in mock_watchlist_vm.method_calls
+
+    def test_add_refresh_failed_shows_warning_and_closes_dialog(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """写入成功但刷新失败 → warning toast 且关闭对话框（数据已落库）。"""
+        from tests.unit.ui.component_renderer import FakePage
+
+        page = FakePage()
+        toast_calls: list[tuple[str, str]] = []
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        page.toast.show.side_effect = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))
+        page.run_task = MagicMock()
+        component = self._open_add_dialog(mock_watchlist_vm, page)
+
+        mock_watchlist_vm.add_result = WatchlistMutationResult("applied_refresh_failed")
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        on_add = mock_watchlist_vm.captured_add_callbacks.get("on_add")
+        assert on_add is not None
+        on_add("000001.SZ", "平安银行", "重点")
+
+        assert any(m == "watchlist_refresh_failed" and t == "warning" for m, t in toast_calls)
+        _rerender(component)
+        assert mock_watchlist_vm.add_dialog_calls[-1]["open_state"] is False
+
+    def test_add_success_closes_dialog_and_clears_search(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """写入成功 → success toast + 关闭对话框 + 清理搜索状态。"""
+        from tests.unit.ui.component_renderer import FakePage
+
+        page = FakePage()
+        toast_calls: list[tuple[str, str]] = []
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        page.toast.show.side_effect = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))
+        page.run_task = MagicMock()
+        component = self._open_add_dialog(mock_watchlist_vm, page)
+
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        on_add = mock_watchlist_vm.captured_add_callbacks.get("on_add")
+        assert on_add is not None
+        on_add("000001.SZ", "平安银行", "重点")
+
+        assert any(m == "watchlist_added" and t == "success" for m, t in toast_calls)
+        assert ("clear_search", {}) in mock_watchlist_vm.method_calls
+        _rerender(component)
+        assert mock_watchlist_vm.add_dialog_calls[-1]["open_state"] is False
+
+    def test_add_submitting_guard_prevents_duplicate_submit(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """提交中二次确认被保护拦截（不重复提交）。"""
+        from tests.unit.ui.component_renderer import FakePage
+
+        page = FakePage()
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        page.run_task = MagicMock()  # 不同步执行, add_submitting 保持 True
+        component = self._open_add_dialog(mock_watchlist_vm, page)
+
+        on_add = mock_watchlist_vm.captured_add_callbacks["on_add"]
+        on_add("000001.SZ", "平安银行", "")
+        assert page.run_task.call_count == 1
+
+        # 重渲染使 add_submitting=True 生效并重新捕获 on_add
+        _rerender(component)
+        on_add_second = mock_watchlist_vm.captured_add_callbacks["on_add"]
+        on_add_second("600000.SH", "浦发银行", "")
+        assert page.run_task.call_count == 1  # 提交中被拦截
+
+    def test_add_in_flight_dialog_is_submitting_and_open(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """提交中对话框保持打开且 is_submitting=True（禁用输入/重复提交）。"""
+        from tests.unit.ui.component_renderer import FakePage
+
+        page = FakePage()
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        page.run_task = MagicMock()  # 不同步执行, 保持提交中
+        component = self._open_add_dialog(mock_watchlist_vm, page)
+
+        on_add = mock_watchlist_vm.captured_add_callbacks.get("on_add")
+        assert on_add is not None
+        on_add("000001.SZ", "平安银行", "")
+        _rerender(component)
+
+        last = mock_watchlist_vm.add_dialog_calls[-1]
+        assert last["is_submitting"] is True
+        assert last["open_state"] is True
