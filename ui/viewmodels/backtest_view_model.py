@@ -492,6 +492,17 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         """选择策略 command (D2: 选中策略关键状态下沉 VM, 对齐 Screener R.2.2)."""
         self._set_state(selected_strategy_key=key)
 
+    def report_prefill_rejected(self) -> None:
+        """F13: 选股→回测透传的策略在当前可用策略中不存在 → 明确反馈.
+
+        透传请求被明确拒绝 (而非静默), 由 View 经 status_message 通道渲染;
+        不写入透传参数, 避免留下「旧策略 + 新参数」的混合状态。
+        """
+        self._set_state(
+            status_message=Message("backtest_prefill_strategy_missing"),
+            status_color="warning",
+        )
+
     def record_last_run(self, strategy_key: str, config: BacktestConfig) -> None:
         """记录上次回测提交, 供 ErrorState on_retry 复用 (D2: last_run 下沉 VM).
 

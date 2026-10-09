@@ -31,6 +31,7 @@ from tests.unit.ui.component_renderer import (
     make_component,
     render_once,
     run_mount_effects,
+    run_render_effects,
     run_unmount_effects,
 )
 
@@ -80,6 +81,8 @@ class _FakeBacktestViewModel:
         self.create_config_mock = MagicMock(return_value="fake_backtest_config")
         self.run_backtest_mock = MagicMock()
         self.cancel_backtest_mock = MagicMock()
+        # F13: 记录无效透传策略的明确反馈调用
+        self.report_prefill_rejected_mock = MagicMock()
 
         # 构造 state-like 对象 (避免 import 真实 BacktestState 触发 strategies 层依赖)
         class _State:
@@ -154,6 +157,10 @@ class _FakeBacktestViewModel:
     def select_strategy(self, key: Any) -> None:
         """D2: command — 受控更新选中策略到 state."""
         self._set_state(selected_strategy_key=key)
+
+    def report_prefill_rejected(self) -> None:
+        """F13: command — 透传策略无效时明确反馈 (记录调用)."""
+        self.report_prefill_rejected_mock()
 
     def record_last_run(self, strategy_key: Any, config: Any) -> None:
         """D2: command — 记录上次提交供 retry 复用."""
@@ -1055,7 +1062,7 @@ class TestConsumePrefill:
             )
             _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
 
-            component = make_component(mod.BacktestView)
+            component = make_component(mod.BacktestView, prefill_request=1)
             page = _make_fake_page()
             run_mount_effects(component, page=page)
             render_once(component)
@@ -1085,7 +1092,7 @@ class TestConsumePrefill:
             fake_vm = _FakeBacktestViewModel(strategies=(("ma_cross", "strategy_ma_cross_name"),))
             _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
 
-            component = make_component(mod.BacktestView)
+            component = make_component(mod.BacktestView, prefill_request=1)
             page = _make_fake_page()
             run_mount_effects(component, page=page)
             render_once(component)
@@ -1107,7 +1114,7 @@ class TestConsumePrefill:
         fake_vm = _FakeBacktestViewModel(strategies=(("ma_cross", "strategy_ma_cross_name"),))
         _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
 
-        component = make_component(mod.BacktestView)
+        component = make_component(mod.BacktestView, prefill_request=1)
         page = _make_fake_page()
         run_mount_effects(component, page=page)
         render_once(component)
@@ -1128,7 +1135,7 @@ class TestConsumePrefill:
             fake_vm = _FakeBacktestViewModel(strategies=(("ma_cross", "strategy_ma_cross_name"),))
             mocks = _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
 
-            component = make_component(mod.BacktestView)
+            component = make_component(mod.BacktestView, prefill_request=1)
             page = _make_fake_page()
             page.run_task.reset_mock()
             run_mount_effects(component, page=page)
@@ -1350,3 +1357,254 @@ class TestWarningDetailControls:
         tiles = [c for c in _walk_all_controls(banner) if isinstance(c, ft.ExpansionTile)]
         assert len(tiles) == 1, "存在 detail 明细时应渲染 1 个 ExpansionTile"
         assert tiles[0].title.value == "i18n[backtest_warning_detail_title]"  # type: ignore[union-attr]  # title 为 view 构造的 ft.Text
+
+
+# ============================================================================
+# F13: 常驻回测页由导航请求序号驱动消费 pending prefill
+# ============================================================================
+
+
+def _mount_prefill_env(
+    monkeypatch: Any,
+    strategies: tuple[tuple[str, str], ...],
+    *,
+    active: bool = True,
+    prefill_request: int | None = None,
+) -> dict:
+    """挂载 BacktestView (可控 strategies/active/prefill_request), prefill stash 干净.
+
+    F13: 生产常驻回测页不重新 mount, 故以 prefill_request prop 变化驱动消费。
+    本 helper 挂载时清空模块级 pending prefill, 避免跨测试污染。
+    """
+    from ui.viewmodels.backtest_view_model import _pending_prefill
+    from ui.views import backtest_view as mod
+
+    _pending_prefill.clear()
+    fake_vm = _FakeBacktestViewModel(strategies=strategies)
+    mocks = _patch_backtest_view_mocks(mod, monkeypatch, fake_vm)
+    component = make_component(mod.BacktestView, active=active, prefill_request=prefill_request)
+    page = _make_fake_page()
+    run_mount_effects(component, page=page)
+    result = render_once(component)
+    return {
+        "mod": mod,
+        "component": component,
+        "page": page,
+        "result": result,
+        "fake_vm": fake_vm,
+        "mock_i18n": mocks["mock_i18n"],
+        "captured_callbacks": mocks["captured_callbacks"],
+    }
+
+
+def _push_prefill_request(env: dict, seq: int) -> None:
+    """模拟根导航透传新请求序号 → 触发 effect + 刷新渲染结果 (同页新序号)."""
+    env["component"].kwargs["prefill_request"] = seq
+    run_render_effects(env["component"])
+    env["result"] = render_once(env["component"])
+
+
+class TestPrefillRequestDrivenConsumption:
+    """F13: 常驻回测页仅在「激活 + 新请求序号」时消费 pending prefill.
+
+    旧实现 mount-only effect (dependencies=[]) 在常驻页面栈下不重新 mount,
+    导航只改 active/visible, 故新透传请求无法被消费 —— 本组用例在旧实现上失败。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_prefill_stash(self):
+        from ui.viewmodels.backtest_view_model import _pending_prefill
+
+        _pending_prefill.clear()
+        yield
+        _pending_prefill.clear()
+
+    def test_new_request_applies_different_strategy_and_params(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        """第二次跳转 (新 seq) → 应用不同策略 + 非默认参数 (旧实现不消费新请求, 失败)."""
+        from ui.viewmodels.backtest_view_model import set_pending_prefill
+
+        env = _mount_prefill_env(
+            monkeypatch,
+            (("ma_cross", "strategy_ma_cross_name"), ("volume_breakout", "strategy_volume_breakout_name")),
+            active=True,
+            prefill_request=1,
+        )
+        # mount 时无 pending → 保持默认 ma_cross
+        assert _get_dropdowns(env)[0].value == "ma_cross"
+
+        # 新的跳转请求到达 (不同策略 + 非默认参数)
+        set_pending_prefill("volume_breakout", params={"window": 20})
+        _push_prefill_request(env, 2)
+
+        assert _get_dropdowns(env)[0].value == "volume_breakout"
+        env["page"].run_task.reset_mock()
+        env["captured_callbacks"]["on_run_backtest"](_make_config())
+        assert env["page"].run_task.call_args.args[3] == {"window": 20}
+
+    def test_two_sequential_jumps_apply_latest(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
+        """首次与第二次跳转传不同策略/参数, 各消费一次, 最终为最新请求."""
+        from ui.viewmodels.backtest_view_model import set_pending_prefill
+
+        env = _mount_prefill_env(
+            monkeypatch,
+            (("ma_cross", "strategy_ma_cross_name"), ("volume_breakout", "strategy_volume_breakout_name")),
+            active=True,
+            prefill_request=1,
+        )
+        set_pending_prefill("volume_breakout", params={"window": 20})
+        _push_prefill_request(env, 2)
+        assert _get_dropdowns(env)[0].value == "volume_breakout"
+
+        set_pending_prefill("ma_cross", params={"window": 5})
+        _push_prefill_request(env, 3)
+        assert _get_dropdowns(env)[0].value == "ma_cross"
+        env["page"].run_task.reset_mock()
+        env["captured_callbacks"]["on_run_backtest"](_make_config())
+        assert env["page"].run_task.call_args.args[3] == {"window": 5}
+
+    def test_inactive_request_not_consumed(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
+        """非激活时不消费 (stash 保留); 激活后才应用."""
+        from ui.viewmodels.backtest_view_model import _pending_prefill, set_pending_prefill
+
+        env = _mount_prefill_env(
+            monkeypatch,
+            (("ma_cross", "strategy_ma_cross_name"), ("volume_breakout", "strategy_volume_breakout_name")),
+            active=False,
+            prefill_request=None,
+        )
+        set_pending_prefill("volume_breakout", params={"window": 20})
+        env["component"].kwargs["prefill_request"] = 1
+        run_render_effects(env["component"])
+        env["result"] = render_once(env["component"])
+
+        assert env["fake_vm"].state.selected_strategy_key == "ma_cross", "非激活不得应用透传"
+        assert _pending_prefill, "非激活不得消费 stash"
+
+        env["component"].kwargs["active"] = True
+        run_render_effects(env["component"])
+        env["result"] = render_once(env["component"])
+        assert _get_dropdowns(env)[0].value == "volume_breakout"
+        assert not _pending_prefill
+
+    def test_running_request_deferred_until_finish(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
+        """运行中收到新请求保留待应用, 不改当前快照; 终态 (is_running=False) 再消费."""
+        from ui.viewmodels.backtest_view_model import _pending_prefill, set_pending_prefill
+
+        env = _mount_prefill_env(
+            monkeypatch,
+            (("ma_cross", "strategy_ma_cross_name"), ("volume_breakout", "strategy_volume_breakout_name")),
+            active=True,
+            prefill_request=1,
+        )
+        env["fake_vm"]._set_state(is_running=True)
+        set_pending_prefill("volume_breakout", params={"window": 20})
+        _push_prefill_request(env, 2)
+
+        assert env["fake_vm"].state.selected_strategy_key == "ma_cross", "运行中不得改当前执行快照"
+        assert _pending_prefill, "运行中不得消费 stash"
+
+        env["fake_vm"]._set_state(is_running=False)
+        run_render_effects(env["component"])
+        env["result"] = render_once(env["component"])
+        assert _get_dropdowns(env)[0].value == "volume_breakout"
+        assert not _pending_prefill
+
+    def test_same_request_not_replayed(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
+        """同一请求代次反复 render (is_running 变化) 不重放, 不覆盖用户手工选择."""
+        from ui.viewmodels.backtest_view_model import _pending_prefill, set_pending_prefill
+
+        env = _mount_prefill_env(
+            monkeypatch,
+            (("ma_cross", "strategy_ma_cross_name"), ("volume_breakout", "strategy_volume_breakout_name")),
+            active=True,
+            prefill_request=1,
+        )
+        set_pending_prefill("volume_breakout", params={"window": 20})
+        _push_prefill_request(env, 2)
+        assert _get_dropdowns(env)[0].value == "volume_breakout"
+
+        # 用户手工切回 ma_cross
+        _invoke(_get_dropdowns(env)[0].on_select, _make_event("ma_cross"))
+        _rerender(env)
+        assert _get_dropdowns(env)[0].value == "ma_cross"
+
+        # 同代次 (seq=2) 再次触发 effect, 且 stash 被重新填充 → 仍不消费
+        set_pending_prefill("volume_breakout", params={"window": 99})
+        env["fake_vm"]._set_state(is_running=True)
+        run_render_effects(env["component"])
+        env["fake_vm"]._set_state(is_running=False)
+        run_render_effects(env["component"])
+        env["result"] = render_once(env["component"])
+
+        assert _get_dropdowns(env)[0].value == "ma_cross", "同代次不得重放覆盖用户选择"
+        assert _pending_prefill, "同代次不得消费请求"
+
+    def test_ordinary_navigation_does_not_reset_draft(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        """普通导航 (无新请求) 返回回测页不重置已编辑草稿."""
+        env = _mount_prefill_env(
+            monkeypatch,
+            (("ma_cross", "strategy_ma_cross_name"), ("volume_breakout", "strategy_volume_breakout_name")),
+            active=True,
+            prefill_request=None,
+        )
+        _invoke(_get_dropdowns(env)[0].on_select, _make_event("volume_breakout"))
+        _rerender(env)
+        assert _get_dropdowns(env)[0].value == "volume_breakout"
+
+        env["component"].kwargs["active"] = False
+        run_render_effects(env["component"])
+        env["component"].kwargs["active"] = True
+        run_render_effects(env["component"])
+        env["result"] = render_once(env["component"])
+
+        assert _get_dropdowns(env)[0].value == "volume_breakout", "普通返回不得重置草稿"
+
+    def test_invalid_strategy_rejected_without_mixed_params(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        """无效策略 → 明确拒绝反馈, 不写入参数 (旧实现「旧策略+新参数」混合态, 失败)."""
+        from ui.viewmodels.backtest_view_model import _pending_prefill, set_pending_prefill
+
+        env = _mount_prefill_env(
+            monkeypatch,
+            (("ma_cross", "strategy_ma_cross_name"),),
+            active=True,
+            prefill_request=1,
+        )
+        set_pending_prefill("nonexistent", params={"window": 99})
+        _push_prefill_request(env, 2)
+
+        assert _get_dropdowns(env)[0].value == "ma_cross", "无效策略不得改选中"
+        assert env["fake_vm"].report_prefill_rejected_mock.call_count == 1
+        assert not _pending_prefill, "明确拒绝后应确认消费"
+
+        env["page"].run_task.reset_mock()
+        env["captured_callbacks"]["on_run_backtest"](_make_config())
+        assert env["page"].run_task.call_args.args[3] is None, "无效策略不得写入旧/新参数"
+
+    def test_manual_change_clears_stale_prefill_params(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        """手工切换策略 → 清除不属于新策略的旧透传参数."""
+        from ui.viewmodels.backtest_view_model import set_pending_prefill
+
+        env = _mount_prefill_env(
+            monkeypatch,
+            (("ma_cross", "strategy_ma_cross_name"), ("volume_breakout", "strategy_volume_breakout_name")),
+            active=True,
+            prefill_request=1,
+        )
+        set_pending_prefill("volume_breakout", params={"window": 20})
+        _push_prefill_request(env, 2)
+        assert _get_dropdowns(env)[0].value == "volume_breakout"
+
+        # 手工切回 ma_cross → 旧透传参数 (window=20) 应被清除
+        _invoke(_get_dropdowns(env)[0].on_select, _make_event("ma_cross"))
+        _rerender(env)
+        env["page"].run_task.reset_mock()
+        env["captured_callbacks"]["on_run_backtest"](_make_config())
+        assert env["page"].run_task.call_args.args[3] is None
