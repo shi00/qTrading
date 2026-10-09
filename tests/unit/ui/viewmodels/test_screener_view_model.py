@@ -5,11 +5,12 @@
 
 import asyncio
 from collections.abc import Callable
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
+from services.task_manager import TaskManager, TaskStatus
 from ui.viewmodels import Message
 from ui.viewmodels.ai_stream_mixin import (
     _build_ai_failed_banner_message,
@@ -373,6 +374,220 @@ class TestCancelStrategy:
         # _active_task_id 不在 cancel_strategy 中清空 (由 _execute_screening finally 清空)
         # 防止 cancel_strategy 假设取消成功后清空, 实际取消异步完成
         assert vm._active_task_id == "task-xyz"
+
+
+# --- F02: 重复选股提交与单一取消句柄所有权 ---
+
+
+def _configure_strategy(vm) -> MagicMock:
+    """为 vm 注入可用的 mock 策略 (run_strategy 前置判定通过)."""
+    strat = MagicMock()
+    strat.name_key = "strategy_test_name"
+    vm.strategy_mgr.get_strategy = MagicMock(return_value=strat)
+    return strat
+
+
+def _terminal_task(task_id: str, status_name: str) -> MagicMock:
+    """构造 TaskManager 快照中的终态任务替身."""
+    task = MagicMock()
+    task.id = task_id
+    task.task_type = Message("task_type_ai_screening")
+    task.status.name = status_name
+    return task
+
+
+class TestRunOwnership:
+    """F02: 命令级入口去重/占用 + id-scoped 释放 + 终态订阅兜底释放。"""
+
+    @pytest.mark.asyncio
+    async def test_second_run_command_rejected_single_submission(self, vm):
+        """同一 VM 连续调用两次命令，只提交一次，且首次提交后仍占用。"""
+        _configure_strategy(vm)
+        submit = MagicMock(return_value="task-1")
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
+            mock_tm.return_value.submit_task = submit
+            await vm.run_strategy("k", save_results=False)
+            assert vm._active_task_id == "task-1"
+            assert vm.state.loading is True
+
+            await vm.run_strategy("k", save_results=False)
+
+        assert submit.call_count == 1
+        assert vm._active_task_id == "task-1"
+        assert vm.state.loading is True
+        assert vm.state.status_message.key == "screener_already_running"
+
+    @pytest.mark.asyncio
+    async def test_rejected_run_does_not_clear_results_or_stream(self, vm):
+        """已有运行占用时，重复命令不得清空进度/结果/流卡片，也不提交新任务。"""
+        _configure_strategy(vm)
+        vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["X"]})
+        vm.start_stream_card("card-a", is_analyzing=True)
+        vm._active_task_id = "existing-run"  # 模拟已有运行占用
+        cards_before = vm.state.stream_cards
+        rows_before = vm.state.current_page_rows
+
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
+            await vm.run_strategy("k", save_results=False)
+            mock_tm.return_value.submit_task.assert_not_called()
+
+        assert vm.state.stream_cards == cards_before
+        assert vm.state.current_page_rows == rows_before
+        assert vm.state.status_message.key == "screener_already_running"
+
+    @pytest.mark.asyncio
+    async def test_unrelated_loading_does_not_block_run(self, vm):
+        """无关加载（排序/历史加载亦用 state.loading）不得误拒正常运行命令。"""
+        _configure_strategy(vm)
+        vm._update_pagination(loading=True)  # 非运行路径的 loading
+
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
+            mock_tm.return_value.submit_task = MagicMock(return_value="t1")
+            await vm.run_strategy("k", save_results=False)
+            call_kwargs = mock_tm.return_value.submit_task.call_args.kwargs
+            assert call_kwargs["unique_key"] == vm._run_unique_key
+            assert callable(call_kwargs["coroutine_factory"])
+
+        assert vm._active_task_id == "t1"
+
+    @pytest.mark.asyncio
+    async def test_submit_returns_none_releases_occupancy(self, vm):
+        """submit 返回 None 时必须释放入口占用，避免永久 loading。"""
+        _configure_strategy(vm)
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
+            mock_tm.return_value.submit_task = MagicMock(return_value=None)
+            await vm.run_strategy("k", save_results=False)
+
+        assert vm._active_task_id is None
+        assert vm.state.loading is False
+        assert vm.state.status_message.key == "screener_task_rejected"
+
+    @pytest.mark.asyncio
+    async def test_submit_exception_releases_occupancy_and_propagates(self, vm):
+        """submit 抛异常时必须释放占用并向上传播 (不吞没)。"""
+        _configure_strategy(vm)
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
+            mock_tm.return_value.submit_task = MagicMock(side_effect=RuntimeError("boom"))
+            with pytest.raises(RuntimeError, match="boom"):
+                await vm.run_strategy("k", save_results=False)
+
+        assert vm._active_task_id is None
+        assert vm.state.loading is False
+        assert vm.state.status_message.key == "screener_exec_error"
+
+    @pytest.mark.asyncio
+    async def test_submit_passes_instance_scoped_unique_key(self, vm):
+        """提交必带实例粒度 unique_key (第二保障去重)。"""
+        _configure_strategy(vm)
+        captured: dict = {}
+
+        def _submit(name, task_type, coroutine_factory, cancellable=False, unique_key=None, **kwargs):
+            captured["key"] = unique_key
+            return "t1"
+
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
+            mock_tm.return_value.submit_task = _submit
+            await vm.run_strategy("k", save_results=False)
+
+        assert captured["key"] == vm._run_unique_key
+        assert captured["key"].startswith("screener_run:")
+
+    def test_run_unique_key_distinct_per_instance(self):
+        """不同 VM 实例的 unique_key 必须不同 (不跨实例误合并)。"""
+        with (
+            patch("ui.viewmodels.screener_view_model.DataProcessor"),
+            patch("ui.viewmodels.screener_view_model.StrategyManager"),
+            patch("ui.viewmodels.screener_view_model.ReviewManager"),
+        ):
+            a = ScreenerViewModel()
+            b = ScreenerViewModel()
+        assert a._run_unique_key != b._run_unique_key
+
+    def test_release_run_ignores_stale_task_id(self, vm):
+        """旧任务的 finally 不得清空已被新任务占用的句柄。"""
+        vm._active_task_id = "new-task"
+        vm._release_run("old-task")
+        assert vm._active_task_id == "new-task"
+
+        vm._release_run("new-task")
+        assert vm._active_task_id is None
+
+    def test_terminal_notify_releases_when_coroutine_never_ran(self, vm):
+        """协程体未执行 (排队期取消) 时，终态订阅兜底释放占用。"""
+        vm._active_task_id = "t1"
+        vm._update_pagination(loading=True)
+
+        vm._on_tasks_updated([_terminal_task("t1", "CANCELLED")])
+
+        assert vm._active_task_id is None
+        assert vm.state.loading is False
+        assert vm.state.status_message.key == "screener_cancelled"
+
+    def test_terminal_notify_ignores_missing_id(self, vm):
+        """快照中无该 ID (尚未 enqueue) 时不得误释放。"""
+        vm._active_task_id = "t1"
+        vm._update_pagination(loading=True)
+
+        vm._on_tasks_updated([_terminal_task("t2", "COMPLETED")])
+
+        assert vm._active_task_id == "t1"
+        assert vm.state.loading is True
+
+    def test_terminal_notify_retains_when_running(self, vm):
+        """非终态 (RUNNING) 时保留句柄。"""
+        vm._active_task_id = "t1"
+        vm._on_tasks_updated([_terminal_task("t1", "RUNNING")])
+        assert vm._active_task_id == "t1"
+
+    @pytest.mark.asyncio
+    async def test_resubmit_allowed_after_terminal(self, vm):
+        """终态释放后可再次提交 (无永久锁死)。"""
+        _configure_strategy(vm)
+        with patch("ui.viewmodels.ai_stream_mixin.TaskManager") as mock_tm:
+            mock_tm.return_value.submit_task = MagicMock(return_value="t1")
+            await vm.run_strategy("k", save_results=False)
+            assert vm._active_task_id == "t1"
+
+            vm._on_tasks_updated([_terminal_task("t1", "COMPLETED")])
+            assert vm._active_task_id is None
+
+            mock_tm.return_value.submit_task = MagicMock(return_value="t2")
+            await vm.run_strategy("k", save_results=False)
+
+        assert vm._active_task_id == "t2"
+
+    @pytest.mark.asyncio
+    async def test_real_task_manager_cancel_before_coroutine_body_releases(self, vm):
+        """真实 TaskManager: submit 返回 ID 后立刻取消 (协程体未执行)，占用被终态释放。"""
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        _configure_strategy(vm)
+        vm.subscribe_task_manager()
+
+        sem = asyncio.Semaphore(1)
+        await sem.acquire()  # 占满信号量 → 任务停留 QUEUED，协程体不执行
+        try:
+            with patch.object(mgr, "_get_semaphore", return_value=sem):
+                await vm.run_strategy("k", save_results=False)
+                task_id = vm._active_task_id
+                assert task_id is not None
+                assert vm.state.loading is True
+
+                # submit 返回 ID 后立刻取消
+                vm.cancel_strategy()
+                for _ in range(50):
+                    await asyncio.sleep(0.01)
+                    if vm._active_task_id is None:
+                        break
+
+            cancelled_task = mgr.get_task(task_id)
+            assert cancelled_task is not None
+            assert cancelled_task.status == TaskStatus.CANCELLED
+            assert vm._active_task_id is None
+            assert vm.state.loading is False
+        finally:
+            sem.release()
+            vm.unsubscribe_task_manager()
 
 
 # --- Task 3.3: save_results 失败分态 ---
