@@ -734,7 +734,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             full_df = full_df[["ts_code", "concept_name", "concept_id"]].drop_duplicates()
             # R21: 关键键缺失的行不得生成 "TS_nan" 之类伪 id，直接剔除
             full_df = full_df.dropna(subset=["ts_code", "concept_id"])
-            # MAJOR-06: Tushare 概念行加 TS_ 前缀，与 EM_/AI_LLM_/LIMIT_ 来源隔离
+            # MAJOR-06: Tushare 概念行加 TS_ 前缀，与 EM_/LIMIT_ 来源隔离
             full_df["concept_id"] = self.cache.stock_dao.TS_CONCEPT_PREFIX + full_df["concept_id"].astype(str)
 
             if had_fetch_failures:

@@ -11,7 +11,7 @@ submit → 进度上报 → 终态恢复 的完整闭环:
   COMPLETED 后 state 恢复 + ds_cache_cleared snack
 
 无需 DB (no_db): TaskManager._db_ready=False 时 _persist_task 为 no-op;
-DataProcessor/CacheManager/AIService 均以 spec mock 注入, 不触发真实 IO/单例.
+DataProcessor/CacheManager/SchedulerService 均以 spec mock 注入, 不触发真实 IO/单例.
 """
 
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
@@ -26,7 +26,6 @@ import pytest
 
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
-from services.ai_service import AIService
 from services.task_manager import TaskManager, TaskStatus
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceViewModel
@@ -81,13 +80,6 @@ def mock_cache():
 
 
 @pytest.fixture
-def mock_ai_service():
-    instance = MagicMock(spec=AIService)
-    instance.is_cloud_available = MagicMock(return_value=True)
-    return instance
-
-
-@pytest.fixture
 def mock_scheduler_service():
     """D7-6: 注入 mock SchedulerService, 避免任务终结时触发真实单例构造/配置读取。"""
     instance = MagicMock(spec=SchedulerService)
@@ -96,12 +88,11 @@ def mock_scheduler_service():
 
 
 @pytest.fixture
-def vm(task_manager, mock_processor, mock_cache, mock_ai_service, mock_scheduler_service):
+def vm(task_manager, mock_processor, mock_cache, mock_scheduler_service):
     """VM 构造时订阅真实 TaskManager (singleton 已由 fixture 初始化)."""
     instance = DataSourceViewModel(
         processor=mock_processor,
         cache=mock_cache,
-        ai_service=mock_ai_service,
         scheduler_service=mock_scheduler_service,
     )
     yield instance
