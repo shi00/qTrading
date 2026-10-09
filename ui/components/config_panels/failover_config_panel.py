@@ -45,10 +45,10 @@ _STATUS_ICON_MAP = {
 }
 
 _STATUS_COLOR_MAP = {
-    "success": AppColors.SUCCESS,
-    "error": AppColors.ERROR,
-    "warning": AppColors.WARNING,
-    "info": AppColors.PRIMARY,
+    "success": "SUCCESS",
+    "error": "ERROR",
+    "warning": "WARNING",
+    "info": "PRIMARY",
 }
 
 
@@ -143,6 +143,8 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
 
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
     ft.use_state(get_observable_state)
+    # F04: 订阅主题状态, 主题热切换时重渲染并取当期 AppColors 颜色.
+    ft.use_state(AppColors.get_observable_state)
 
     # --- Dialog form controls (driven by state) ---
     provider_options = _build_provider_options(
@@ -218,7 +220,7 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
 
     # --- Dialog status display ---
     status_text = _render_message(state.dialog_status_message)
-    status_color = _STATUS_COLOR_MAP.get(state.dialog_status_type, AppColors.PRIMARY)
+    status_color = getattr(AppColors, _STATUS_COLOR_MAP.get(state.dialog_status_type, "PRIMARY"))
     status_icon_name = _STATUS_ICON_MAP.get(state.dialog_status_type, ft.Icons.INFO)
 
     status_row = (
@@ -395,6 +397,8 @@ def FailoverConfigPanel(
 
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
     ft.use_state(get_observable_state)
+    # F04: 订阅主题状态, 主题热切换时重渲染并取当期 AppColors 颜色.
+    ft.use_state(AppColors.get_observable_state)
 
     # --- Build list items (driven by state.failover_items) ---
     if not state.failover_items:
@@ -416,7 +420,7 @@ def FailoverConfigPanel(
 
     # --- Panel status display ---
     status_text = _render_message(state.status_message)
-    status_color = _STATUS_COLOR_MAP.get(state.status_type, AppColors.PRIMARY)
+    status_color = getattr(AppColors, _STATUS_COLOR_MAP.get(state.status_type, "PRIMARY"))
     status_icon_name = _STATUS_ICON_MAP.get(state.status_type, ft.Icons.INFO)
 
     status_row = (

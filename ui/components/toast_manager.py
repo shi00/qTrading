@@ -32,7 +32,13 @@ from dataclasses import dataclass, field
 
 import flet as ft
 
-from ui.components.flet_type_helpers import safe_controls, safe_icon, safe_on_click, safe_on_hover
+from ui.components.flet_type_helpers import (
+    safe_controls,
+    safe_icon,
+    safe_icon_str,
+    safe_on_click,
+    safe_on_hover,
+)
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.async_utils import gather_for_shutdown_cleanup
@@ -65,7 +71,7 @@ class ToastData:
     id: int
     message: str
     icon: str
-    color: str
+    toast_type: str
     duration: int
     action_text: str | None = None
     on_action: Callable[[], None] | None = None
@@ -177,17 +183,36 @@ async def open_export_folder(filepath: str) -> None:
 # ============================================================================
 # 颜色/图标映射
 # ============================================================================
-
-_COLOR_MAP = {
-    "success": (AppColors.SUCCESS, ft.Icons.CHECK_CIRCLE),
-    "error": (AppColors.ERROR, ft.Icons.ERROR),
-    "warning": (AppColors.WARNING, ft.Icons.WARNING),
-    "info": (AppColors.INFO, ft.Icons.INFO),
+#
+# F04: 颜色不固化导入期 Hex 快照 —— 保存 AppColors 语义名，渲染时经
+# ``_resolve_color`` 读取当期主题色，主题热切换后新/旧 toast 均取新色。
+_TOAST_COLOR_NAMES = {
+    "success": "SUCCESS",
+    "error": "ERROR",
+    "warning": "WARNING",
+    "info": "INFO",
+}
+_TOAST_ICON_MAP = {
+    "success": ft.Icons.CHECK_CIRCLE,
+    "error": ft.Icons.ERROR,
+    "warning": ft.Icons.WARNING,
+    "info": ft.Icons.INFO,
 }
 
 
-def _resolve_color_icon(toast_type: str) -> tuple[str, str]:
-    return _COLOR_MAP.get(toast_type, _COLOR_MAP["info"])
+def _resolve_color(toast_type: str) -> str:
+    """解析 toast 类型到当期主题色 (F04: 渲染时读取 AppColors, 不固化快照)."""
+    name = _TOAST_COLOR_NAMES.get(toast_type, _TOAST_COLOR_NAMES["info"])
+    return getattr(AppColors, name)
+
+
+def _resolve_icon(toast_type: str) -> str:
+    """解析 toast 类型到图标. 未知类型 fallback 到 info.
+
+    ``ToastData.icon`` 为 str 契约; ``safe_icon_str`` 仅做类型断言 (运行时保持 IconData),
+    避免 pyright 报 ``IconData`` 不可分配给 ``str``.
+    """
+    return safe_icon_str(_TOAST_ICON_MAP.get(toast_type, _TOAST_ICON_MAP["info"]))
 
 
 # ============================================================================
@@ -228,7 +253,7 @@ def show(
         )
         return
 
-    color, icon = _resolve_color_icon(toast_type)
+    icon = _resolve_icon(toast_type)
 
     # P2-10: action toast 用更长 duration (30s), 给用户足够时间点击操作
     if action_text is not None:
@@ -245,7 +270,7 @@ def show(
             id=_next_id,
             message=message,
             icon=icon,
-            color=color,
+            toast_type=toast_type,
             duration=duration,
             action_text=action_text,
             on_action=on_action,
@@ -387,6 +412,10 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
     is_expanded, set_is_expanded = ft.use_state(False)
     is_dismissing, set_is_dismissing = ft.use_state(False)
 
+    # F04: 订阅主题状态，主题热切换时重渲染并重算 toast 颜色（已显示 toast 也取新色）。
+    ft.use_state(AppColors.get_observable_state)
+    toast_color = _resolve_color(data.toast_type)
+
     is_long_text = len(data.message) > LONG_TEXT_THRESHOLD
 
     # use_ref 持久化最新 hover/expand 状态（供 timer 闭包读取最新值）
@@ -518,7 +547,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
                         data.action_text,
                         on_click=safe_on_click(_on_action_click),
                         style=ft.ButtonStyle(
-                            color=data.color,
+                            color=toast_color,
                             padding=0,
                         ),
                     ),
@@ -532,7 +561,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
         content=ft.Row(
             safe_controls(
                 [
-                    ft.Icon(safe_icon(data.icon), color=data.color, size=AppStyles.FONT_SIZE_XL),
+                    ft.Icon(safe_icon(data.icon), color=toast_color, size=AppStyles.FONT_SIZE_XL),
                     ft.Column(
                         content_col_controls,
                         spacing=2,
@@ -552,7 +581,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
         ),
         padding=AppStyles.SPACING_MD,
         bgcolor=AppColors.SURFACE,
-        border=ft.Border.only(left=ft.BorderSide(4, data.color)),  # type: ignore[untyped]  # [reason: ft.Border.only/ft.BorderSide 类型存根缺失, 返回 Any, flet 类型标注滞后]
+        border=ft.Border.only(left=ft.BorderSide(4, toast_color)),  # type: ignore[untyped]  # [reason: ft.Border.only/ft.BorderSide 类型存根缺失, 返回 Any, flet 类型标注滞后]
         border_radius=8,
         shadow=ft.BoxShadow(
             spread_radius=1,

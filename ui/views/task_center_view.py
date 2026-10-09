@@ -68,12 +68,12 @@ _STATUS_ICON_MAP = {
 }
 
 _STATUS_COLOR_MAP = {
-    TaskStatus.QUEUED: AppColors.TEXT_SECONDARY,
-    TaskStatus.RUNNING: AppColors.INFO,
-    TaskStatus.COMPLETED: AppColors.SUCCESS,
-    TaskStatus.FAILED: AppColors.ERROR,
-    TaskStatus.CANCELLED: AppColors.WARNING,
-    TaskStatus.INTERRUPTED: AppColors.TEXT_DISABLED,
+    TaskStatus.QUEUED: "TEXT_SECONDARY",
+    TaskStatus.RUNNING: "INFO",
+    TaskStatus.COMPLETED: "SUCCESS",
+    TaskStatus.FAILED: "ERROR",
+    TaskStatus.CANCELLED: "WARNING",
+    TaskStatus.INTERRUPTED: "TEXT_DISABLED",
 }
 
 
@@ -118,7 +118,8 @@ def _get_status_label(status: TaskStatus) -> str:
 
 
 def _get_status_color(status: TaskStatus) -> str:
-    return _STATUS_COLOR_MAP.get(status, AppColors.TEXT_SECONDARY)
+    """任务状态 → 当期主题色 (F04: 渲染时读取 AppColors, 不固化导入期快照)."""
+    return getattr(AppColors, _STATUS_COLOR_MAP.get(status, "TEXT_SECONDARY"))
 
 
 def _render_task_field(val: Message | str) -> str:

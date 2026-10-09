@@ -35,10 +35,10 @@ _STATUS_ICON_MAP = {
 }
 
 _STATUS_COLOR_MAP = {
-    "success": AppColors.SUCCESS,
-    "error": AppColors.ERROR,
-    "warning": AppColors.WARNING,
-    "info": AppColors.TEXT_SECONDARY,
+    "success": "SUCCESS",
+    "error": "ERROR",
+    "warning": "WARNING",
+    "info": "TEXT_SECONDARY",
 }
 
 
@@ -67,10 +67,12 @@ def EmbeddedStatusCard() -> ft.Container:
 
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
     ft.use_state(get_observable_state)
+    # F04: 订阅主题状态, 主题热切换时重渲染并取当期 AppColors 颜色.
+    ft.use_state(AppColors.get_observable_state)
 
     # --- Status display (driven by state.status_message / status_type) ---
     status_text = _render_message(state.status_message)
-    status_color = _STATUS_COLOR_MAP.get(state.status_type, AppColors.TEXT_SECONDARY)
+    status_color = getattr(AppColors, _STATUS_COLOR_MAP.get(state.status_type, "TEXT_SECONDARY"))
     status_icon_name = _STATUS_ICON_MAP.get(state.status_type, ft.Icons.INFO)
 
     status_icon = ft.Icon(
