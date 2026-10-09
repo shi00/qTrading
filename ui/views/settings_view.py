@@ -119,8 +119,9 @@ def _show_snack_impl(
         on_action: Task 5.1 snack action 回调 (action_text 非空时必填).
 
     Note:
-        page 在 SettingsView 渲染时捕获, 供 run_task 回调中使用
-        (ft.context.page 在 run_task 回调中不可用, 见 SettingsView docstring).
+        page 在 SettingsView 渲染时捕获并直接传入 (显式引用, 避免回调内依赖 ContextVar 查找)。
+        page.run_task 会设置 page ContextVar, 故 run_task 回调内 ft.context.page 实际可用;
+        Renderer 的当前组件上下文与 page 上下文是不同机制, 详见 SettingsView docstring。
     """
     if page is None:
         logger.warning("[SettingsView] page unavailable for toast: %s", message)
@@ -151,7 +152,8 @@ def SettingsView(
     - ``use_state(current_tab)`` 驱动 tab 切换（条件渲染）
     - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
     - 无 VM（纯 UI 容器）
-    - page 在渲染时捕获 (供 _show_snack 闭包在 run_task 回调中使用)
+    - page 在渲染时捕获 (供 _show_snack 闭包显式使用); page.run_task 会设置 page ContextVar,
+      故 run_task 回调内 ft.context.page 实际可用, 捕获仅为显式/可读, 与 Renderer 组件上下文无关
 
     Issue #438: ``visited_tabs`` 跟踪已访问 Tab, 已访问 Tab 始终在 ``ft.Stack`` 中
     (``visible`` prop 控制显隐), 状态跨 Tab 切换保持 (与 ``AppLayout`` 模式一致)。
@@ -185,8 +187,10 @@ def SettingsView(
     ft.use_effect(_apply_target_subtab, dependencies=[target_subtab])
 
     # --- Capture page at render time for _show_snack closure ---
-    # ft.context.page 在 page.run_task 回调中不可用 (Renderer 上下文未跨 run_task 传播),
-    # 在渲染时捕获 page 引用, 供异步回调中的 snackbar/toast 使用。
+    # 在渲染时捕获 page 引用供闭包显式使用 (无需在回调内做 ContextVar 查找)。
+    # 澄清: 锁定版本 Page.run_task 会设置 page ContextVar (_context_page), 故 run_task
+    # 回调内 ft.context.page 实际可用; Renderer 的当前组件上下文 (hooks 依赖) 是另一机制,
+    # 不跨 run_task 传播——两者不可混为一谈。此处保留显式 page 注入以提升可读性。
     try:
         _page = ft.context.page
     except RuntimeError:

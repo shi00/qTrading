@@ -11,7 +11,7 @@ Flet 版本升级时，按以下清单逐项验证。每项验证结果建议记
 ## 1. API 兼容性检查
 
 - [ ] `ft.use_dialog()` 签名与行为（声明式 Dialog 唯一契约，见 [project-differences.md §4.1](./project-differences.md#41-ftuse_dialog声明式组件内唯一-dialog-契约)）
-- [ ] `ft.Dropdown.on_select` 事件名（项目统一用 `on_select`，非 `on_change`，见 [project-differences.md §4.2](./project-differences.md#42-dropdown-on_select非-on_change)）
+- [ ] `ft.Dropdown.on_select` 事件名存在（V1 API 名称本身，非项目分叉；V0 名称 `on_change` 见 [v1-api-constraints.md §V0→V1 迁移 API 表](./v1-api-constraints.md#v0v1-迁移-api-表) 第 13 项，见 [project-differences.md §4.2](./project-differences.md#42-dropdown-on_select非-on_change)）
 - [ ] `use_effect` 的 `cleanup=` 关键字参数（非 setup 返回值，见 [project-differences.md §4.3](./project-differences.md#43-use_effect-cleanup-显式参数)）
 - [ ] `use_viewmodel(factory=)` / `use_viewmodel(vm=)` 双模式互斥（见 [`ui/hooks.py`](../../ui/hooks.py)）
 - [ ] `ft.Router` / `ft.Route` 声明式路由

@@ -104,7 +104,7 @@ flet-mcp 是 Flet 0.86+ 官方提供的独立 PyPI 包（非 `flet` CLI 子命�
 
 ### 3.4 与项目契约的优先级
 
-flet-mcp 返回的是 **api.json 中版本特定的 Flet API 信息**（构建时快照，非运行时反射），项目契约（`v1-api-constraints.md` / `project-differences.md`）可能在此基础上进一步收窄（如项目统一用 `on_select` 而非 `on_change`）。**项目契约优先**，flet-mcp 用于验证 API 存在性与签名，不用于覆盖项目契约。
+flet-mcp 返回的是 **api.json 中版本特定的 Flet API 信息**（构建时快照，非运行时反射），项目契约（`v1-api-constraints.md` / `project-differences.md`）可能在此基础上进一步约束用法（如 `use_effect` 统一用显式 `cleanup=` 参数而非 setup 返回值）。**项目契约优先**，flet-mcp 用于验证 API 存在性与签名，不用于覆盖项目契约。
 
 **Flet API 核验主题内优先级**（主题正本，见 [CLAUDE.md](../../CLAUDE.md) §1「文档权威性（按主题正本）」）：
 1. CLAUDE.md 红线（§3）

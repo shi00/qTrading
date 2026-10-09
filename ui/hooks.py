@@ -4,7 +4,10 @@
 - 方案 §3.0.3 契约：``use_viewmodel(factory) -> (state, commands)``
 - spike 项 5 结论：``use_ref(factory)`` 持久化 VM（factory 仅首次调用 1 次）；
   ``use_state(factory())`` 陷阱：每次渲染实例化
-- spike 项 2 结论：``use_effect`` cleanup 是显式第三参数，非 setup 返回值
+- spike 项 2 结论：``use_effect`` cleanup 是显式第三参数，非 setup 返回值。
+  锁定版本机制：``use_effect`` 每次渲染都把 ``hook.cleanup`` 重写为传入的 ``cleanup=``
+  参数；setup 的返回值仅在调度器执行 setup 时被暂存，之后任意（含无关）重渲染都会将其
+  清空。故本 hook 每次渲染都传入同一 ``cleanup`` 引用，保证卸载时可靠退订/dispose。
 - spike 项 1 结论：``Observable.subscribe`` 弱引用，需保留 disposer（本 hook 用
   ref 持久化 unsub，防止 GC）
 
