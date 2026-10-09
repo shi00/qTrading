@@ -156,6 +156,22 @@ class CorpusStore:
             row = conn.execute("SELECT COUNT(*) AS n FROM corpus_documents WHERE source = ?", (source,)).fetchone()
         return int(row["n"])
 
+    def iter_documents(self) -> Iterator[dict[str, Any]]:
+        """迭代全部文档字典（用于离线标注 / 抽样 / 训练切分等只读消费）。
+
+        返回字段与入库一致（``publish_time`` / ``tags`` / ``simhash`` 为 None 时原样透传，
+        不做默认值伪装，R21）。
+        """
+        conn = self._connection()
+        cursor = conn.execute(
+            "SELECT source, source_id, source_kind, text, publish_time, source_url, ts_code, tags, simhash, content_hash "
+            "FROM corpus_documents"
+        )
+        for row in cursor:
+            value = dict(row)
+            value["simhash"] = _simhash_from_sqlite(int(value["simhash"])) if value["simhash"] is not None else None
+            yield value
+
     def iter_simhashes(self) -> Iterator[tuple[str, int]]:
         """迭代 ``(source_kind, simhash)``；用于跨运行重建近重复索引（simhash 为 NULL 时跳过）。"""
         conn = self._connection()

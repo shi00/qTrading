@@ -89,6 +89,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 | `scripts/collect_sina_stock.py` | 新浪个股新闻离线采集器（N1-2；录制 GB18030 HTML + 打印解析摘要；支持 `--parse` 离线复解析） | 手动/维护 | 不阻断 |
 | `scripts/collect_cninfo.py` | 巨潮资讯公告离线采集器（N1-3；录制原始 JSON + 打印解析摘要；支持 `--parse` 离线复解析） | 手动/维护 | 不阻断 |
 | `scripts/collect_corpus.py` | 多源语料库采集编排器（N1-4；按源插件化聚合三源 → 清洗去重 → 写 SQLite 语料库；含单源熔断与限速） | 手动/维护 | 不阻断 |
+| `scripts/laya_annotator.py` | 本地 laya-multilingual 零样本新闻情绪标注器 + 人工抽检 Gate（N2-1；choice 三分类 / 不可信输出丢弃计数 / 按源分层抽样 / 一致率 ≥85% 门禁；需 finbert 离线环境，数据不出本机） | 手动/维护 | 不阻断 |
 
 ### 数据库迁移
 
