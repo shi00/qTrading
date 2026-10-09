@@ -291,6 +291,8 @@ def ModelPicker(
     search_field = ft.TextField(
         value=display,
         hint_text=I18n.get("model_picker_search_hint"),
+        # F08: tooltip 提供读屏语义名称（该搜索框无外部标题，hint 不被读屏视为标签）。
+        tooltip=I18n.get("model_picker_search_hint"),
         dense=True,
         expand=True,
         width=text_field_width,

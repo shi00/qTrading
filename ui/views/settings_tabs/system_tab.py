@@ -828,6 +828,8 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         expand=True,
         text_size=AppStyles.FONT_SIZE_LG,
         content_padding=AppStyles.SPACING_SM,
+        # F08: 持久 label 提供读屏语义名称（格式说明继续由 hint 承担，不冒充字段名称）。
+        label=I18n.get("settings_no_proxy_domains"),
         hint_text=I18n.get("settings_no_proxy_hint"),
         border_radius=8,
         multiline=False,

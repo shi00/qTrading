@@ -139,6 +139,9 @@ def WatchlistAddDialog(
 
     search_field = ft.TextField(
         value=keyword,
+        # F08: 持久 label 提供读屏语义名称（hint 仅作输入示例，不冒充字段名称，
+        # 见 docs/flet/accessibility-baseline.md §2.1）。
+        label=I18n.get("watchlist_add_search_label"),
         hint_text=I18n.get("watchlist_add_search_hint"),
         dense=True,
         expand=True,

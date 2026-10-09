@@ -703,7 +703,7 @@ class TestEventHandlersPageAvailable:
     def test_on_save_no_proxy_invokes_run_task(self, system_tab_env) -> None:
         """_commit_no_proxy (on_blur): page 可用 → page.run_task(_do_save_no_proxy, value)。
 
-        no_proxy_input 无 label 注释项, 为遍历顺序最后一个 TextField。
+        no_proxy_input 为遍历顺序最后一个 TextField (F08 后已有 label, 定位仍依赖顺序)。
         """
         env = system_tab_env
         fields = _get_text_fields(env)
@@ -1858,7 +1858,7 @@ class TestOnSubmitEnter:
         """no_proxy_input Enter → _do_save_no_proxy (与保存按钮等价)。"""
         env = system_tab_env
         fields = _get_text_fields(env)
-        no_proxy_field = fields[-1]  # no_proxy_input 无 label, 为最后一个 TextField
+        no_proxy_field = fields[-1]  # no_proxy_input 为最后一个 TextField (F08 后已有 label, 定位仍依赖顺序)
         assert isinstance(no_proxy_field, ft.TextField)
         assert no_proxy_field.on_submit is not None
         env["page"].run_task.reset_mock()

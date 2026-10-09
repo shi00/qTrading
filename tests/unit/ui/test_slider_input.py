@@ -177,6 +177,61 @@ class TestSliderInputRender:
         assert result.width == 200
 
 
+class TestSliderInputAccessibleName:
+    """F08 无障碍语义名称：TextField/Slider tooltip 语义关联测试。"""
+
+    def test_accessible_name_sets_tooltip_on_both_controls(
+        self,
+        mock_app_colors_state,
+    ) -> None:
+        """accessible_name → TextField 与 Slider 的 tooltip 均为语义名称（嵌入场景）。"""
+        _, result = _mount({"value": 5.0, "label": None, "accessible_name": "佣金率"})
+
+        slider = _find_control(result, ft.Slider)
+        text_field = _find_control(result, ft.TextField)
+        assert slider.tooltip == "佣金率"
+        assert text_field.tooltip == "佣金率"
+
+    def test_accessible_name_overrides_label_for_tooltip(
+        self,
+        mock_app_colors_state,
+    ) -> None:
+        """accessible_name 与 label 同时提供 → tooltip 取 accessible_name（语义名称可与视觉标题不同）。"""
+        _, result = _mount({"value": 5.0, "label": "止损率", "accessible_name": "止损率（百分比）"})
+
+        assert _find_control(result, ft.TextField).tooltip == "止损率（百分比）"
+
+    def test_label_falls_back_as_semantic_name(
+        self,
+        mock_app_colors_state,
+    ) -> None:
+        """仅提供 label（无 accessible_name）→ tooltip 回退到 label（顶部标题场景）。"""
+        _, result = _mount({"value": 5.0, "label": "止损率"})
+
+        assert _find_control(result, ft.TextField).tooltip == "止损率"
+        assert _find_control(result, ft.Slider).tooltip == "止损率"
+
+    def test_no_name_no_tooltip(
+        self,
+        mock_app_colors_state,
+    ) -> None:
+        """label 与 accessible_name 均为 None → tooltip 不设置（调用方违反契约由扫描器拦截）。"""
+        _, result = _mount({"value": 5.0, "label": None, "accessible_name": None})
+
+        assert _find_control(result, ft.TextField).tooltip is None
+        assert _find_control(result, ft.Slider).tooltip is None
+
+    def test_accessible_name_does_not_render_visual_text(
+        self,
+        mock_app_colors_state,
+    ) -> None:
+        """accessible_name 不产生额外视觉 Text（不把标题重复显示两遍）。"""
+        _, result = _mount({"value": 5.0, "label": None, "accessible_name": "佣金率"})
+
+        texts = _find_all(result, ft.Text)
+        assert all(t.value != "佣金率" for t in texts)
+
+
 class TestSliderInputFormat:
     """SliderInput fmt 格式化测试。"""
 

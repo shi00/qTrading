@@ -393,6 +393,7 @@ def BacktestConfigPanel(
 
     commission_input = SliderInput(
         label=None,
+        accessible_name=I18n.get("backtest_commission_rate"),
         value=commission,
         min_val=0,
         max_val=10,
@@ -414,6 +415,7 @@ def BacktestConfigPanel(
 
     stamp_duty_input = SliderInput(
         label=None,
+        accessible_name=I18n.get("backtest_stamp_duty_rate"),
         value=stamp_duty_rate,
         min_val=0,
         max_val=2,
@@ -441,6 +443,7 @@ def BacktestConfigPanel(
 
     slippage_input = SliderInput(
         label=None,
+        accessible_name=I18n.get("backtest_slippage"),
         value=slippage,
         min_val=0,
         max_val=20,
