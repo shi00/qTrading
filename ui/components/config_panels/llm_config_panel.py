@@ -48,10 +48,10 @@ _STATUS_ICON_MAP = {
 }
 
 _STATUS_COLOR_MAP = {
-    "success": AppColors.SUCCESS,
-    "error": AppColors.ERROR,
-    "warning": AppColors.WARNING,
-    "info": AppColors.PRIMARY,
+    "success": "SUCCESS",
+    "error": "ERROR",
+    "warning": "WARNING",
+    "info": "PRIMARY",
 }
 
 
@@ -152,6 +152,8 @@ def LLMConfigPanel(
 
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
     ft.use_state(get_observable_state)
+    # F04: 订阅主题状态, 主题热切换时重渲染并取当期 AppColors 颜色.
+    ft.use_state(AppColors.get_observable_state)
 
     # --- Build form controls (driven by state) ---
     input_width = 360
@@ -288,7 +290,7 @@ def LLMConfigPanel(
 
     # --- Status display (driven by state.status_message / status_type) ---
     status_text = _render_message(state.status_message)
-    status_color = _STATUS_COLOR_MAP.get(state.status_type, AppColors.PRIMARY)
+    status_color = getattr(AppColors, _STATUS_COLOR_MAP.get(state.status_type, "PRIMARY"))
     status_icon_name = _STATUS_ICON_MAP.get(state.status_type, ft.Icons.INFO)
 
     status_icon = ft.Icon(

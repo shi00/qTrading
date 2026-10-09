@@ -35,12 +35,20 @@ from utils.log_decorators import UILogger
 logger = logging.getLogger(__name__)
 
 # VM 产出语义键 (error/warning/success/info), View 映射为 AppColors 实际颜色值 (§3.2 VM 不感知 UI 颜色).
+# F04: 映射保存 AppColors 语义属性名 (非导入期 Hex 快照), 渲染时经 _resolve_status_color 取当期主题色.
 _STATUS_COLOR_MAP = {
-    "error": AppColors.ERROR,
-    "warning": AppColors.WARNING,
-    "success": AppColors.SUCCESS,
-    "info": AppColors.INFO,
+    "error": "ERROR",
+    "warning": "WARNING",
+    "success": "SUCCESS",
+    "info": "INFO",
 }
+
+
+def _resolve_status_color(status_color: str) -> str:
+    """解析 VM 语义状态色到当期主题色 (F04: 渲染时读取 AppColors, 不固化导入期快照)."""
+    name = _STATUS_COLOR_MAP.get(status_color, "TEXT_SECONDARY")
+    return getattr(AppColors, name)
+
 
 # UX-01: 可信度等级 → 标题 i18n 全字面量 key (静态引用, 满足 i18n 键完整性静态扫描).
 # "ok" 亦有标题: ok 级仍可能携带提示类告警 (system / performance_path / empty_signal_days),
@@ -52,16 +60,22 @@ _CREDIBILITY_TITLE_KEYS = {
 }
 
 # 等级 → 强调色 / 图标 (三态; ok 为中性提示).
+# F04: 保存 AppColors 语义属性名, 渲染时经 _resolve_credibility_accent 取当期主题色.
 _CREDIBILITY_ACCENT_MAP = {
-    "ok": AppColors.INFO,
-    "degraded": AppColors.WARNING,
-    "unreliable": AppColors.ERROR,
+    "ok": "INFO",
+    "degraded": "WARNING",
+    "unreliable": "ERROR",
 }
 _CREDIBILITY_ICON_MAP = {
     "ok": ft.Icons.INFO_OUTLINE,
     "degraded": ft.Icons.WARNING_AMBER,
     "unreliable": ft.Icons.ERROR_OUTLINE,
 }
+
+
+def _resolve_credibility_accent(level: str) -> str:
+    """解析回测可信度等级到当期主题强调色 (F04: 渲染时读取 AppColors, 不固化导入期快照)."""
+    return getattr(AppColors, _CREDIBILITY_ACCENT_MAP[level])
 
 
 def _build_warning_detail_controls(state: BacktestState) -> list[ft.Control]:
@@ -103,7 +117,7 @@ def _build_backtest_warning_banner(state: BacktestState) -> ft.Control | None:
     if state.credibility_level == "ok" and not state.warnings:
         return None
     level = state.credibility_level
-    accent = _CREDIBILITY_ACCENT_MAP[level]
+    accent = _resolve_credibility_accent(level)
     title = I18n.get(_CREDIBILITY_TITLE_KEYS[level])
     detail_controls = _build_warning_detail_controls(state)
     children: list[ft.Control] = [
@@ -294,7 +308,7 @@ def BacktestView(active: bool = True) -> ft.Container:
         status_color = AppColors.ERROR
     elif state.status_message is not None:
         status_value = I18n.get(state.status_message.key, **state.status_message.params)
-        status_color = _STATUS_COLOR_MAP.get(state.status_color, AppColors.TEXT_SECONDARY)
+        status_color = _resolve_status_color(state.status_color)
     else:
         status_value = ""
         status_color = AppColors.TEXT_SECONDARY

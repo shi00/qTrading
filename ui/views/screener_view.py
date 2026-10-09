@@ -70,12 +70,20 @@ from utils.time_utils import get_now
 logger = logging.getLogger(__name__)
 
 # R.2.6.3: VM 产出语义键 (error/warning/success/info), View 映射为 AppColors 实际颜色值 (§3.2 VM 不感知 UI 颜色).
+# F04: 映射保存 AppColors 语义属性名 (非导入期 Hex 快照), 渲染时经 _resolve_status_color 取当期主题色.
 _STATUS_COLOR_MAP = {
-    "error": AppColors.ERROR,
-    "warning": AppColors.WARNING,
-    "success": AppColors.SUCCESS,
-    "info": AppColors.INFO,
+    "error": "ERROR",
+    "warning": "WARNING",
+    "success": "SUCCESS",
+    "info": "INFO",
 }
+
+
+def _resolve_status_color(status_color: str) -> str:
+    """解析 VM 语义状态色到当期主题色 (F04: 渲染时读取 AppColors, 不固化导入期快照)."""
+    name = _STATUS_COLOR_MAP.get(status_color, "TEXT_SECONDARY")
+    return getattr(AppColors, name)
+
 
 # UX-03 (单位单一数据源): 策略参数定义的 ``unit`` 字段 (策略层声明) → 本层 i18n key。
 # View 统一据此拼接参数阈值 label 的单位后缀，杜绝策略文案与代码换算单位漂移；
@@ -2546,7 +2554,7 @@ def ScreenerView(
             page.run_task(_do_save_prompt_async, strat)
 
     status_text_value = _render_status_message(state.status_message)
-    status_text_color = _STATUS_COLOR_MAP.get(state.status_color, AppColors.TEXT_SECONDARY)
+    status_text_color = _resolve_status_color(state.status_color)
     vt_columns, formatted_rows = _resolve_table_data(state.current_page_rows, table_memo_ref, vm)
     # D7-3: 当前页三分区行 (recommended/excluded/failed) 复用同一可见列集格式化。
     # VM 已按 ai_status 拆分 (零丢失兜底), View 仅据此渲染, 不引入额外状态机 (§3.2)。
