@@ -93,6 +93,8 @@ logs/
 *.log
 *.bak
 *.html
+# 例外：测试 fixture 需提交 HTML 原始样本（如新浪个股采集器 N1-2 录制页）
+!tests/fixtures/**/*.html
 mylog*.txt
 
 # 2.1 AI assistant & CI diagnostic artifacts (commit/PR/调查临时文件)

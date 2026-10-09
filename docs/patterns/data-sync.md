@@ -96,6 +96,14 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 
 > **陷阱**：`cn` 市场**混入指数 / 板块**——`sh000xxx`（上证指数系列）/ `sz399xxx`（深证指数系列）/ `bj899xxx`（北证 50）/ `si*`·`sih*`（新浪板块码）。这些可映射为合法指数 `ts_code`（指数与个股号段不冲突，如 `000001.SH` 为指数、`000001.SZ` 为平安银行），但语义上非个股，须经 `is_index_code()` 区分后由调用方决定是否保留。时间口径同 `news_fetcher._parse_news_time`：`create_time` 为北京时间文本，按 CST 归属后转 **UTC tz-naive** 存库。
 
+### 新浪个股新闻（`data/external/news_sources/sina_stock.py`）
+
+`GET https://vip.stock.finance.sina.com.cn/corp/go.php/vCB_AllNewsStock/symbol/{sh600519}.phtml`（HTML，**GB18030 编码**，每页 40 条；分页参数 `Page`，如 `?Page=2`，实测 200 / 40 条）。
+
+列表行在 `<div class="datelist">` 内，形如 `2026-10-08&nbsp;18:03&nbsp;&nbsp;<a target='_blank' href='URL'>标题</a>`；新闻行 `href` 用**单引号**、页面其余导航链接用双引号，故规格正则（仅匹配单引号 `href='...'`）天然只命中新闻行。去重键为 **URL**（规格 §3.3），页内去重由 `parse_news_list` 负责、跨页由调用方按 `source_id` 汇总。
+
+**时间口径**：行内时间为 `YYYY-MM-DD HH:MM`（**无秒**，北京时间），须先补 `:00` 至 19 位再解析（`_parse_news_time` 只接受 19~23 位，16 位会返回 `None` 导致时间丢失），按 CST 归属后转 **UTC tz-naive** 存库。关联标的由请求方已知，`parse_news_list(symbol=...)` 复用 `sina_7x24.map_symbol_to_ts_code` 得 `ts_code`。
+
 ### 同花顺 7x24（补测结论：不纳入）
 
 2026-10-08 补测：`GET https://news.10jqka.com.cn/tapp/news/push/stock/`（`page` / `pagesize`）返回 200 JSON，`data.list[]` 含 `id` / `title` / `digest` / `url` / `ctime`（unix 秒字符串）/ `stock[{name, stockCode, stockMarket}]`；其余接口（`tapp/news/push/alllist/`、`tapp/news/roll/`、`tapp/news/real/`）实测返回 404。
