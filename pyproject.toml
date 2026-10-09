@@ -257,7 +257,7 @@ ignore_imports = [
     "utils.diagnostics -> data.data_processor",
     # EX-0003
     "utils.diagnostics -> services.task_manager",
-    # EX-0004 scheduler_service 剩余函数内 lazy import（daily/ai_concept 提交与 DB idempotency 状态，
+    # EX-0004 scheduler_service 剩余函数内 lazy import（daily/concept_sync 提交与 DB idempotency 状态，
     # 启动性能优化——模块加载不拉起 data/services 全栈；review01-A2 已加 # lazy-import: 注释）
     "utils.scheduler_service -> data.cache.cache_manager",
     # EX-0005
