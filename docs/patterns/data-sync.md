@@ -104,6 +104,18 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 
 **时间口径**：行内时间为 `YYYY-MM-DD HH:MM`（**无秒**，北京时间），须先补 `:00` 至 19 位再解析（`_parse_news_time` 只接受 19~23 位，16 位会返回 `None` 导致时间丢失），按 CST 归属后转 **UTC tz-naive** 存库。关联标的由请求方已知，`parse_news_list(symbol=...)` 复用 `sina_7x24.map_symbol_to_ts_code` 得 `ts_code`。
 
+### 巨潮资讯公告（`data/external/news_sources/cninfo.py`）
+
+`POST https://www.cninfo.com.cn/new/hisAnnouncement/query`（表单 `column` / `tabName=fulltext` / `seDate=YYYY-MM-DD~YYYY-MM-DD` / `pageNum` / `pageSize`；JSON）。实测 2026-10-09：单日深市 `totalRecordNum=743`、单页 30 条；板块列用 `column`（深市 `szse` / 沪市 `sse` / 北交所 `bj`）。
+
+解析顶层 `announcements[]`：`announcementId`（去重键，规格 §3.3）/ `secCode`（6 位）/ `secName` / `announcementTitle`（可能含 `<em>` 高亮）/ `announcementTime`（毫秒时间戳）/ `adjunctUrl`（相对 PDF 路径，加 `https://static.cninfo.com.cn/` 前缀后实测 200 `application/pdf`）/ `pageColumn`（板块列）。分页信息取 `totalRecordNum` / `hasMore` / `totalpages`。
+
+**时间口径**：`announcementTime` 为**毫秒时间戳（UTC 绝对时刻）**，先构造 tz-aware(UTC) 再经 `to_utc_for_db` 转 **UTC tz-naive** 入库；**不得按北京时间二次换算**（否则偏移 8 小时）。
+
+**标题清洗**（`clean_title`）：去 HTML 标签 / 实体（含 `<em>`）→ 去公司全称前缀（仅「…公司」后紧跟「关于」时剥离）→ 去「关于……的公告」外壳，保留事件主体；前缀剥离的保守边界见内核 `NOTE(lazy)`。
+
+**标的关联**：`secCode` + `pageColumn` 前缀（实测 `SZCY` 深创业板 / `SZZB` 深主板 / `SHKCB` 沪科创 / `BJS` 北交所）映射 `ts_code`（`.SZ` / `.SH` / `.BJ`）；`secCode` 非 6 位或前缀未知时 `ts_code` 为 `None`。
+
 ### 同花顺 7x24（补测结论：不纳入）
 
 2026-10-08 补测：`GET https://news.10jqka.com.cn/tapp/news/push/stock/`（`page` / `pagesize`）返回 200 JSON，`data.list[]` 含 `id` / `title` / `digest` / `url` / `ctime`（unix 秒字符串）/ `stock[{name, stockCode, stockMarket}]`；其余接口（`tapp/news/push/alllist/`、`tapp/news/roll/`、`tapp/news/real/`）实测返回 404。
