@@ -23,6 +23,8 @@ from check_theme_contrast import (  # noqa: E402 - sys.path 注入后导入
     _CONTRAST_PAIRS,
     _hex_to_rgb,
     _LAYER1_FIELD_MAP,
+    _THRESHOLD_LARGE,
+    _THRESHOLD_TEXT,
     _resolve_color,
     check_contrast,
     contrast_ratio,
@@ -142,34 +144,72 @@ class TestContrastRatio:
 
 
 class TestContrastPairsConfig:
-    """_CONTRAST_PAIRS: 关键色对配置完整性。"""
+    """_CONTRAST_PAIRS: 关键色对配置完整性 (F06: 4 字段 + 用途标注)。"""
+
+    _VALID_PURPOSES = frozenset({"text", "icon", "disabled"})
 
     def test_pairs_not_empty(self):
         """必须配置至少 1 个色对。"""
         assert len(_CONTRAST_PAIRS) > 0
 
-    def test_pairs_have_3_tuple_structure(self):
-        """每个色对必须是 (fg, bg, threshold) 三元组。"""
+    def test_pairs_have_4_field_structure(self):
+        """每个色对必须是 (fg, bg, threshold, purpose) 四元组 (F06 用途标注)。"""
         for pair in _CONTRAST_PAIRS:
-            assert len(pair) == 3
-            fg, bg, threshold = pair
+            assert len(pair) == 4
+            fg, bg, threshold, purpose = pair
             assert isinstance(fg, str)
             assert isinstance(bg, str)
             assert isinstance(threshold, float)
+            assert purpose in self._VALID_PURPOSES, f"未知用途标注 {purpose!r}"
 
     def test_text_pairs_use_4_5_threshold(self):
-        """正文文本色对 (TEXT_PRIMARY/TEXT_SECONDARY) 阈值为 4.5。"""
-        text_pairs = [(fg, bg, t) for fg, bg, t in _CONTRAST_PAIRS if fg in ("TEXT_PRIMARY", "TEXT_SECONDARY")]
+        """正文文本色对 (purpose=text) 阈值必须为 4.5 (F06)。"""
+        text_pairs = [p for p in _CONTRAST_PAIRS if p.purpose == "text"]
         assert text_pairs, "必须包含正文文本色对"
-        for fg, bg, t in text_pairs:
-            assert t == 4.5, f"正文文本色对 {fg}/{bg} 阈值必须为 4.5, 实际 {t}"
+        for pair in text_pairs:
+            assert pair.threshold == _THRESHOLD_TEXT, f"正文色对 {pair.fg}/{pair.bg} 阈值必须为 4.5"
 
-    def test_status_pairs_use_3_0_threshold(self):
-        """状态色色对 (SUCCESS/WARNING/INFO/ERROR) 阈值为 3.0 (大字号/图标)。"""
-        status_pairs = [(fg, bg, t) for fg, bg, t in _CONTRAST_PAIRS if fg in ("SUCCESS", "WARNING", "INFO", "ERROR")]
-        assert status_pairs, "必须包含状态色色对"
-        for fg, bg, t in status_pairs:
-            assert t == 3.0, f"状态色色对 {fg}/{bg} 阈值必须为 3.0, 实际 {t}"
+    def test_icon_and_disabled_pairs_use_3_0_threshold(self):
+        """图标/禁用色对阈值必须为 3.0 (非正文用途)。"""
+        non_text = [p for p in _CONTRAST_PAIRS if p.purpose in ("icon", "disabled")]
+        assert non_text, "必须包含图标或禁用色对"
+        for pair in non_text:
+            assert pair.threshold == _THRESHOLD_LARGE, f"非正文色对 {pair.fg}/{pair.bg} 阈值必须为 3.0"
+
+    def test_business_status_and_trend_colors_are_text_purpose(self):
+        """F06: 业务状态/涨跌色 (SUCCESS/WARNING/INFO/UP_RED/DOWN_GREEN) 必须按正文 4.5 验收。"""
+        for color in ("SUCCESS", "WARNING", "INFO", "UP_RED", "DOWN_GREEN"):
+            pairs = [p for p in _CONTRAST_PAIRS if p.fg == color]
+            assert pairs, f"{color} 必须配置验收色对"
+            for pair in pairs:
+                assert pair.purpose == "text", f"{color}/{pair.bg} 必须按正文用途验收 (F06)"
+                assert pair.threshold == _THRESHOLD_TEXT, f"{color}/{pair.bg} 阈值必须为 4.5 (F06)"
+
+    def test_text_pairs_cover_table_row_backgrounds(self):
+        """表格文本色对必须覆盖真实奇偶行底色 (F06: 不限于抽象主题表)。"""
+        bg_names = {p.bg for p in _CONTRAST_PAIRS}
+        assert "TABLE_ROW_ODD" in bg_names
+        assert "TABLE_ROW_EVEN" in bg_names
+        assert "TABLE_HEADER_BG" in bg_names
+
+
+class TestCheckContrastUnroundedComparison:
+    """F06: 门禁必须比较未舍入数值 (4.499 不得因显示 4.50 而通过)。"""
+
+    def test_ratio_just_below_threshold_is_rejected(self, monkeypatch):
+        """构造恰低于阈值的色对, 断言被判为不达标 (未舍入比较)。"""
+        import check_theme_contrast as ctc
+
+        # 反解一个在白底上略低于 4.5 的灰色: #767676 约 4.54(过), #777777 约 4.48(不过)
+        fg = "#777777"
+        ratio = ctc.contrast_ratio(fg, "#FFFFFF")
+        assert 4.4 < ratio < 4.5, f"前提色值 {fg} 应在 4.4~4.5, 实际 {ratio:.4f}"
+        # 显示为 4.48, 不得因四舍五入显示 4.50 而通过
+        pair = ctc.ContrastPair("PROBE_FG", "PROBE_BG", _THRESHOLD_TEXT, "text")
+        monkeypatch.setattr(ctc, "_CONTRAST_PAIRS", [pair])
+        monkeypatch.setattr(ctc, "_resolve_color", lambda name, theme: fg if name == "PROBE_FG" else "#FFFFFF")
+        errors = ctc.check_contrast()
+        assert errors, "低于阈值的色对必须被判为不达标 (未舍入比较)"
 
 
 class TestLayer1FieldMap:
@@ -281,27 +321,35 @@ class TestFourThemesContrastIntegration:
         ratio = contrast_ratio(fg, bg)
         assert ratio >= 4.5, f"Dracula TEXT_PRIMARY/SURFACE 对比度 {ratio:.2f} < 4.5"
 
-    def test_dark_theme_status_colors_meet_3_0(self):
-        """Dark 主题: SUCCESS/WARNING/INFO/ERROR 与 SURFACE 对比度 ≥ 3.0。"""
+    def test_dark_theme_text_status_meets_4_5_and_error_3_0(self):
+        """Dark 主题: 正文级 SUCCESS/WARNING/INFO ≥ 4.5 (F06)，ERROR (图标档) ≥ 3.0。"""
         from ui.theme import ThemeName
 
         bg = _resolve_color("SURFACE", ThemeName.DARK)
-        for status in ("SUCCESS", "WARNING", "INFO", "ERROR"):
+        for status in ("SUCCESS", "WARNING", "INFO"):
             fg = _resolve_color(status, ThemeName.DARK)
             assert fg is not None and bg is not None
             ratio = contrast_ratio(fg, bg)
-            assert ratio >= 3.0, f"Dark {status}/SURFACE 对比度 {ratio:.2f} < 3.0"
+            assert ratio >= 4.5, f"Dark {status}/SURFACE 对比度 {ratio:.2f} < 4.5 (F06 正文)"
+        fg = _resolve_color("ERROR", ThemeName.DARK)
+        assert fg is not None and bg is not None
+        ratio = contrast_ratio(fg, bg)
+        assert ratio >= 3.0, f"Dark ERROR/SURFACE 对比度 {ratio:.2f} < 3.0 (图标档)"
 
-    def test_light_theme_status_colors_meet_3_0(self):
-        """Light 主题: SUCCESS/WARNING/INFO/ERROR 与 SURFACE 对比度 ≥ 3.0。"""
+    def test_light_theme_text_status_meets_4_5_and_error_3_0(self):
+        """Light 主题: 正文级 SUCCESS/WARNING/INFO ≥ 4.5 (F06)，ERROR (图标档) ≥ 3.0。"""
         from ui.theme import ThemeName
 
         bg = _resolve_color("SURFACE", ThemeName.LIGHT)
-        for status in ("SUCCESS", "WARNING", "INFO", "ERROR"):
+        for status in ("SUCCESS", "WARNING", "INFO"):
             fg = _resolve_color(status, ThemeName.LIGHT)
             assert fg is not None and bg is not None
             ratio = contrast_ratio(fg, bg)
-            assert ratio >= 3.0, f"Light {status}/SURFACE 对比度 {ratio:.2f} < 3.0"
+            assert ratio >= 4.5, f"Light {status}/SURFACE 对比度 {ratio:.2f} < 4.5 (F06 正文)"
+        fg = _resolve_color("ERROR", ThemeName.LIGHT)
+        assert fg is not None and bg is not None
+        ratio = contrast_ratio(fg, bg)
+        assert ratio >= 3.0, f"Light ERROR/SURFACE 对比度 {ratio:.2f} < 3.0 (图标档)"
 
 
 # ============================================================================
