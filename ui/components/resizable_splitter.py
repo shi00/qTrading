@@ -19,9 +19,13 @@ from collections.abc import Callable
 
 import flet as ft
 
-from ui.theme import AppColors
+from ui.i18n import I18n, get_observable_state
+from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
+
+# 折叠切换轨道宽度 (承载可聚焦 IconButton; 折叠/展开态均可见, 保证入口始终可用)
+_TOGGLE_RAIL_WIDTH = 22
 
 
 class _DragCache:
@@ -40,6 +44,41 @@ class _DragCache:
 def _clamp_width(width: float, min_width: int, max_width: int) -> int:
     """将宽度 clamp 到 ``[min_width, max_width]``。"""
     return max(min_width, min(max_width, int(width)))
+
+
+def _build_splitter_controls(
+    *,
+    left_container: ft.Container,
+    divider: ft.GestureDetector,
+    right_content: ft.Control,
+    collapsible: bool,
+    is_collapsed: bool,
+    on_toggle: Callable[[ft.Event[ft.IconButton]], None],
+) -> list[ft.Control]:
+    """组装左右分栏控件序列。
+
+    collapsible=True 时在分隔条与右栏之间插入始终可见的折叠切换轨道 (折叠态亦然),
+    保证折叠后展开入口不会被一并隐藏; 轨道内为可聚焦 IconButton (支持键盘激活) +
+    tooltip (可访问名称)。collapsible=False 保持 ``[左栏, 分隔条, 右栏]`` 结构不变。
+    """
+    controls: list[ft.Control] = [left_container, divider]
+    if collapsible:
+        controls.append(
+            ft.Container(
+                width=_TOGGLE_RAIL_WIDTH,
+                alignment=ft.Alignment.CENTER,
+                content=ft.IconButton(
+                    icon=ft.Icons.CHEVRON_LEFT if not is_collapsed else ft.Icons.CHEVRON_RIGHT,
+                    tooltip=(I18n.get("common_collapse") if not is_collapsed else I18n.get("common_expand")),
+                    icon_size=AppStyles.FONT_SIZE_TITLE,
+                    icon_color=AppColors.TEXT_SECONDARY,
+                    style=ft.ButtonStyle(padding=0),
+                    on_click=on_toggle,
+                ),
+            )
+        )
+    controls.append(ft.Container(content=right_content, expand=True))
+    return controls
 
 
 @ft.component
@@ -75,12 +114,17 @@ def ResizableSplitter(
         on_persist_width: 持久化宽度写入回调 (可选, 签名 (int) -> None);
             由父 VM 内部经 page.run_task + ThreadPoolManager.run_async 异步写盘 (R16 合规)
         drag_interval: 拖拽事件节流毫秒数, 默认 16ms (~60fps). NOTE(lazy): 匹配显示器刷新率. ceiling: 低性能设备 60fps reconcile 可能掉帧. upgrade: 设备性能检测或用户反馈掉帧时改 33ms.
-        collapsible: 是否允许折叠左侧栏
-        collapsed: 初始是否折叠左侧栏
+        collapsible: 是否允许折叠左侧栏; True 时渲染可聚焦的折叠/展开 IconButton
+            (折叠态保留紧凑且始终可见的展开入口)。组件本地持有折叠状态。
+        collapsed: 初始是否折叠左侧栏 (仅作初始值, 不充当外部受控值; 折叠不覆盖
+            最后展开宽度, 展开时恢复)。collapsible=False 时不渲染切换命令, 仅保留
+            该初始折叠行为。
     """
     width, set_width = ft.use_state(default_width)
     hovered, set_hovered = ft.use_state(False)
-    is_collapsed, _set_is_collapsed = ft.use_state(collapsed)  # setter 未直接使用（展开/收起经 state.callbacks 触发）
+    is_collapsed, set_is_collapsed = ft.use_state(collapsed)
+    # 订阅 i18n Observable 状态源: locale 切换时折叠/展开 tooltip 随之更新
+    ft.use_state(get_observable_state)
     # use_ref 缓存拖拽中的即时宽度 + 节流时间戳 (缓存数值非命令式实例, 符合声明式红线)
     drag = ft.use_ref(_DragCache)
     # use_ref.current 类型为 T | None (MutableRef 构造允许 None), 但 factory 在
@@ -162,6 +206,10 @@ def ResizableSplitter(
         set_width(default_width)
         _persist(default_width)
 
+    def _on_toggle_collapsed(e) -> None:
+        """切换左侧栏折叠状态 (折叠不改变宽度, 展开恢复最后展开宽度)。"""
+        set_is_collapsed(not is_collapsed)
+
     def _on_divider_enter(e) -> None:
         """鼠标进入分隔条: 高亮中线。"""
         set_hovered(True)
@@ -199,11 +247,14 @@ def ResizableSplitter(
 
     container = ft.Container(
         content=ft.Row(
-            [
-                left_container,
-                divider,
-                ft.Container(content=right_content, expand=True),
-            ],
+            _build_splitter_controls(
+                left_container=left_container,
+                divider=divider,
+                right_content=right_content,
+                collapsible=collapsible,
+                is_collapsed=is_collapsed,
+                on_toggle=_on_toggle_collapsed,
+            ),
             spacing=0,
             expand=True,
             # STRETCH: 两栏与分隔条撑满容器高度。Row 默认 vertical_alignment=CENTER 会
