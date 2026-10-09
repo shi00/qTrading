@@ -141,14 +141,33 @@ def _build_event_card(event: RiskEvent, is_expanded: bool, on_toggle) -> ft.Cont
         ],
         spacing=6,
     )
-    sections = []
+    sections: list[ft.Control] = []
     if is_expanded:
+        # 明细样式在首次构造 Text 时设置，不再外包 Text 施加样式（F14：禁止把控件塞进 Text.value）
         if event.fact:
-            sections.append(ft.Text(f"{I18n.get('news_insight_event_fact')}{event.fact}"))
+            sections.append(
+                ft.Text(
+                    f"{I18n.get('news_insight_event_fact')}{event.fact}",
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    selectable=True,
+                )
+            )
         if event.impact_reasoning:
-            sections.append(ft.Text(f"{I18n.get('news_insight_event_impact')}{event.impact_reasoning}"))
+            sections.append(
+                ft.Text(
+                    f"{I18n.get('news_insight_event_impact')}{event.impact_reasoning}",
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    selectable=True,
+                )
+            )
         if event.uncertainty:
-            sections.append(ft.Text(f"{I18n.get('news_insight_event_uncertainty')}{event.uncertainty}"))
+            sections.append(
+                ft.Text(
+                    f"{I18n.get('news_insight_event_uncertainty')}{event.uncertainty}",
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    selectable=True,
+                )
+            )
         if event.evidence_quotes:
             quote_rows = [
                 ft.Text(
@@ -166,10 +185,7 @@ def _build_event_card(event: RiskEvent, is_expanded: bool, on_toggle) -> ft.Cont
                 )
             )
     return ft.Container(
-        content=ft.Column(
-            [header] + [ft.Text(s, size=AppStyles.FONT_SIZE_BODY_SM, selectable=True) for s in sections],
-            spacing=4,
-        ),
+        content=ft.Column([header, *sections], spacing=4),
         padding=8,
         bgcolor=AppColors.SURFACE_VARIANT,
         border_radius=6,
