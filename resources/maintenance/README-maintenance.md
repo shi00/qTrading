@@ -43,6 +43,8 @@ cd "<安装目录>/resources/maintenance"
 | `version` | 显示 sidecar 版本与构建元数据 | 无 |
 | `help` | 显示帮助 | 无 |
 
+> 维护脚本未路由 `reset-password`（重置 postgres 密码）命令。密码文件缺失/不可解密/密码不匹配时，直接调用 sidecar binary：`qtrading-pg-sidecar reset-password --data-dir <数据目录>`，完整分流见 `docs/guides/how-to.md` §9.9。
+
 ## 默认数据目录
 
 脚本自动使用 platformdirs 默认路径作为 `--data-dir`：
@@ -73,7 +75,8 @@ cd "<安装目录>/resources/maintenance"
 | `status` 显示 `not_initialized` | 数据目录未初始化（首次启动前） | 正常现象，启动 qTrading 会自动 initdb |
 | `doctor` 报告 `state_file: corrupted` | state.json 损坏（异常退出/磁盘错误） | 按 doctor 输出指引修复，必要时从备份恢复 |
 | `stop` 返回 exit 50 | sidecar 运行中（维护锁被持有） | 先关闭 qTrading 主程序再试 |
-| `dump` 报 `password_file not found` | runtime/password 缺失 | 数据目录可能损坏，从备份恢复 |
+| `dump`/`restore` 等返回 exit 16，报「密码文件缺失…走 reset-password 流程」 | `runtime/password` 缺失、为空或不可解密（跨机器/账号复制后 DPAPI 无法解密）；数据目录本身未必损坏 | 先 `doctor` 确认 `issues` 无数据损坏项，再按 `docs/guides/how-to.md` §9.9 走 reset-password 分流（注意：此时 `dump` 补做备份也不可用，恢复只能依赖既有备份文件） |
+| `run` 返回 exit 40 / `doctor` `issues` 报 pg_control/WAL 损坏、关键文件缺失 | 数据目录损坏 | 按 `docs/guides/how-to.md` §9.9.2 恢复路径处理：先确认备份文件与 `.bak-*`/`.restore-*` 目录等恢复点，再执行 restore |
 
 ## 相关文档
 
