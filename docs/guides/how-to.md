@@ -178,7 +178,12 @@ sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --input <备份�
 sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 ```
 
-启动临时维护实例（需持维护锁：主实例/sidecar 运行中会拒绝，exit 50），输出含 `psql_path` + `connection_string_redacted`（密码已脱敏）的 JSON，用户可用 psql 直接连接进行高级维护。
+**交互式生命周期命令**（区别于 doctor/status 的 stdout 机器 JSON 协议，本命令 **stdout 无输出**）：持维护锁启动临时维护实例（主实例/sidecar 运行中会拒绝，exit 50；数据目录未初始化 exit 40；其余退出码见 9.6），实例存活期间可用 psql 反复连接、执行多条命令，结束后 sidecar 优雅停止实例并退出。启动到结束的时序如下（与 sidecar 实现一致）：
+
+1. **就绪后才提示连接信息**：随机分配端口启动临时实例，内部先以 psql `select 1` 探测就绪（探测窗口约 30 秒，失败 exit 12），探测通过后才开始打印连接信息——**提示出现时实例已可连接**。
+2. **提示全部走 stderr**：包含脱敏连接串（`postgresql://postgres:***@127.0.0.1:<port>/qtrading`，端口为本次随机分配）、完整 psql 命令行、密码文件位置（密码不打印明文，密码文件保护方式见 9.8），以及「完成后按 Enter 结束」提示。
+3. **交互使用**：按提示中的 psql 命令行连接实例，存活期间可执行多条命令（可多次启动 psql 会话）。
+4. **结束（Enter / EOF）**：等待 stdin 出现换行（终端按 **Enter**）后结束；stdin 到达 **EOF**（管道写端关闭、重定向空输入等非交互场景）或读取错误时同样立即结束，避免永久挂起。随后临时实例被优雅停止——**sidecar 进程退出即实例已停止，退出后不可再连接**，不存在「进程退出后解析 stdout 拿连接串」的用法。
 
 #### 9.6 错误分类
 
@@ -206,6 +211,8 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 #### 9.7 Python 服务封装
 
 工程实现见 `services/embedded_pg_maintenance_service.py`（`EmbeddedPgMaintenanceService` 单例），4 个命令（`doctor` / `dump` / `restore` / `maintenance_shell`）通过 `ThreadPoolManager.run_async(TaskType.IO)` 提交同步 `subprocess.run` 避免阻塞事件循环（R16）。设置页「数据库」标签底部的「离线维护工具」说明区块指向本章节。Python 包装内部的退出码→错误类型映射仅用于日志分级与用户提示，退出码语义正本以 sidecar 源码 `exit_codes.rs` 与各命令实际返回路径为准（见 9.6）。
+
+注意：`maintenance_shell()` 包装当前**不能程序化获取存活维护实例的连接信息**——sidecar 对该命令 stdout 无输出（交互提示走 stderr，见 9.5），且进程退出时实例已停止，包装进程退出后解析 stdout 只会得到空连接信息。交互式维护请直接运行 sidecar CLI 或维护脚本（见 9.5）；机器入口如需此能力须单独设计。
 
 #### 9.8 密码文件与备份的安全要求
 
