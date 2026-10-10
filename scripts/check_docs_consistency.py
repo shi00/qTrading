@@ -2131,26 +2131,109 @@ def check_agents_md_sync() -> list[str]:
 
 # M2（文档体系检视）：AGENTS.md 此前全文无任何命令——只加载它的工具链（Codex CLI 等）改完
 # 代码不知道跑什么验证，而「变更类型 → 最小验证子集」恰是 AI 交付质量的关键约束（CONTRIBUTING.md
-# canonical_for 含「最小命令入口」）。命令正本为 CONTRIBUTING.md「常用开发与测试命令」；
-# 渲染源为下列常量，check_agents_md_min_verify_commands() 同时断言 CONTRIBUTING.md 含每条命令，
-# 防「正本 ↔ 生成区块」双向漂移（与 redlines.yml → AGENTS.md 红线区块同机制）。
-_MIN_VERIFY_COMMANDS: tuple[str, ...] = (
-    "ruff check .",
-    "ruff format --check .",
-    "pre-commit run --all-files",
-    "pyright",
-    "python -m pytest tests/unit/ -v --tb=short",
-)
-_MIN_VERIFY_DOC_COMMANDS: tuple[str, ...] = (
-    "python scripts/check_docs_consistency.py",
-    "python -m pytest tests/unit/test_docs_consistency.py",
-)
+# canonical_for 含「最小命令入口」）。命令正本为 CONTRIBUTING.md「常用开发与测试命令」。
+# F02：渲染源由此前的脚本内 _MIN_VERIFY_COMMANDS 常量改为正本受控块（<!-- generated:min-verify-commands -->，
+# 见 CONTRIBUTING.md「常用开发与测试命令」节首）——常量与正本是两个独立维护源，参数/顺序/增删变化时
+# 镜像仍由常量决定，且旧校验对正本仅做子串包含检查、无法捕获有序性，存在独立维护源漂移。
+# 现由 _parse_min_verify_command_block() 从受控块解析完整有序命令列表（fail-closed），
+# check_agents_md_min_verify_commands() 经 _generated_block_sync 对 AGENTS.md 镜像做逐行精确比较，
+# 不再对正本做子串检查（与 redlines.yml → AGENTS.md 红线区块同机制）。
+_MIN_VERIFY_START_TAG = "<!-- generated:min-verify-commands -->"
+# 受控块两条 bullet 的固定标签前缀（受控契约：标签改写/增删 bullet 即视为正本形态漂移，fail-closed）。
+_MIN_VERIFY_GATE_LABEL = "- **变更相关门禁**"
+_MIN_VERIFY_DOC_LABEL = "- **仅 Markdown / 治理文档改动**"
 
 
-def _render_agents_min_verify_lines() -> list[str]:
-    """渲染 AGENTS.md「最小验证命令」生成区块内容（不含包裹标记，M2）。"""
-    chain = " → ".join(f"`{c}`" for c in _MIN_VERIFY_COMMANDS)
-    doc_chain = " + ".join(f"`{c}`" for c in _MIN_VERIFY_DOC_COMMANDS)
+def _parse_min_verify_command_block(content: str) -> tuple[list[str], list[str], list[str]]:
+    """解析 CONTRIBUTING.md「常用开发与测试命令」受控块中的完整有序命令列表（M2/F02）。
+
+    受控块 = `_MIN_VERIFY_START_TAG` 与 `<!-- /generated -->` 之间恰两条 bullet：
+    「变更相关门禁」（` → ` 链）与「仅 Markdown / 治理文档改动」（` + ` 链）。命令取各 bullet
+    首个「：」之后的行内代码段（标签散文中的代码引用如 `.github/workflows/ci_cd.yml` 位于
+    「：」之前，不参与解析）。
+    返回 (gate_commands, doc_commands, errors)：解析失败时 errors 非空且命令列表为空——
+    块缺失/结束标记缺失/含无法识别的行/标签 bullet 缺失或多条/缺「：」/无命令/链内重复命令
+    均显式报错，不静默跳过（fail-closed）。
+    """
+    errors: list[str] = []
+    start = content.find(_MIN_VERIFY_START_TAG)
+    if start == -1:
+        return (
+            [],
+            [],
+            [
+                f"CONTRIBUTING.md 缺少最小验证命令受控块标记（{_MIN_VERIFY_START_TAG}），"
+                "无法解析 AGENTS.md 镜像的渲染源（正本受控块为唯一渲染源，F02）"
+            ],
+        )
+    end = content.find(_GENERATED_END_TAG, start + len(_MIN_VERIFY_START_TAG))
+    if end == -1:
+        return [], [], [f"CONTRIBUTING.md 最小验证命令受控块缺少结束标记（{_GENERATED_END_TAG}）"]
+    # F02 反例防护（增加命令）：受控块结束后、同一小节（至下一个「## 」标题或文末）内新出现的
+    # bullet 一律 fail-closed 报错，防止新增命令绕过受控块被静默丢弃；真实正本该区间为 bash 代码块
+    # 与散文（行首非「- 」），不会误报。
+    after_block = content[end + len(_GENERATED_END_TAG) :]
+    next_heading = after_block.find("\n## ")
+    section_after = after_block if next_heading == -1 else after_block[:next_heading]
+    stray_bullets = [line for line in section_after.splitlines() if line.startswith("- ")]
+    if stray_bullets:
+        errors.append(
+            "CONTRIBUTING.md 最小验证命令受控块后同节内含无法识别的行"
+            "（新增命令必须写入受控块内，防止被静默丢弃，F02）: " + " / ".join(stray_bullets)
+        )
+    body_lines = [
+        line for line in content[start + len(_MIN_VERIFY_START_TAG) : end].strip().splitlines() if line.strip()
+    ]
+    unknown_lines = [
+        line for line in body_lines if not line.startswith((_MIN_VERIFY_GATE_LABEL, _MIN_VERIFY_DOC_LABEL))
+    ]
+    if unknown_lines:
+        errors.append(
+            "CONTRIBUTING.md 最小验证命令受控块含无法识别的行"
+            "（受控块仅允许「变更相关门禁」与「仅 Markdown / 治理文档改动」两条 bullet，F02）: "
+            + " / ".join(unknown_lines)
+        )
+    gate_commands: list[str] = []
+    doc_commands: list[str] = []
+    for label, target in ((_MIN_VERIFY_GATE_LABEL, gate_commands), (_MIN_VERIFY_DOC_LABEL, doc_commands)):
+        matched = [line for line in body_lines if line.startswith(label)]
+        if not matched:
+            errors.append(f"CONTRIBUTING.md 最小验证命令受控块缺少「{label}」bullet")
+            continue
+        if len(matched) > 1:
+            errors.append(
+                f"CONTRIBUTING.md 最小验证命令受控块「{label}」bullet 出现 {len(matched)} 条（应恰 1 条，F02）"
+            )
+            continue
+        line = matched[0]
+        _, sep, commands_part = line.partition("：")
+        if not sep:
+            errors.append(f"CONTRIBUTING.md 最小验证命令受控块 bullet 缺少「：」分隔: {line}")
+            continue
+        commands = [cmd.strip() for cmd in re.findall(r"`([^`]+)`", commands_part)]
+        if not commands or any(not cmd for cmd in commands):
+            errors.append(
+                f"CONTRIBUTING.md 最小验证命令受控块「{label}」未解析到非空命令"
+                "（命令须为「：」后的行内代码段列表，F02）"
+            )
+            continue
+        duplicates = sorted({cmd for cmd in commands if commands.count(cmd) > 1})
+        if duplicates:
+            errors.append(
+                f"CONTRIBUTING.md 最小验证命令受控块「{label}」存在重复命令 {duplicates}"
+                "（命令列表须唯一，F02 反例防护）"
+            )
+            continue
+        target.extend(commands)
+    if errors:
+        return [], [], errors
+    return gate_commands, doc_commands, []
+
+
+def _render_agents_min_verify_lines(gate_commands: list[str], doc_commands: list[str]) -> list[str]:
+    """据正本受控块解析出的完整有序命令列表渲染 AGENTS.md「最小验证命令」生成区块内容（不含包裹标记，M2/F02）。"""
+    chain = " → ".join(f"`{c}`" for c in gate_commands)
+    doc_chain = " + ".join(f"`{c}`" for c in doc_commands)
     return [
         f"- **变更相关门禁**（提交/PR 前，顺序与 `.github/workflows/ci_cd.yml` 一致）：{chain}",
         "- **最小验证子集**（按变更范围裁剪，勿全量跑）：见 [CONTRIBUTING.md](./CONTRIBUTING.md#变更类型--最小验证子集)",
@@ -2160,36 +2243,34 @@ def _render_agents_min_verify_lines() -> list[str]:
 
 
 def check_agents_md_min_verify_commands() -> list[str]:
-    """校验 AGENTS.md「最小验证命令」生成区块与正本一致（M2）。
+    """校验 AGENTS.md「最小验证命令」生成区块与正本受控块一致（M2/F02）。
 
-    渲染 `<!-- generated:min-verify-commands -->` 区块并断言与 AGENTS.md 现状一致；
-    同时断言正本 CONTRIBUTING.md（最小命令入口 canonical）含每条命令，防双向漂移。
+    渲染正本为 CONTRIBUTING.md「常用开发与测试命令」的受控块（唯一渲染源）：
+    1. `_parse_min_verify_command_block()` 解析受控块得到完整有序命令列表（fail-closed）；
+    2. 据此渲染 AGENTS.md 期望区块，经 `_generated_block_sync()` 与 AGENTS.md 现状逐行精确比较
+       （取代旧「每条命令 `cmd not in contributing` 子串包含检查」——子串检查无法捕获顺序与整块漂移）。
     """
     errors: list[str] = []
     if not AGENTS_PATH.exists():
         return [f"AGENTS.md 不存在: {AGENTS_PATH}"]
-    content = AGENTS_PATH.read_text(encoding="utf-8")
-    start_tag = "<!-- generated:min-verify-commands -->"
-    errors.extend(
-        _generated_block_sync(
-            content,
-            start_tag,
-            _render_agents_min_verify_lines(),
-            "AGENTS.md 最小验证命令区块与渲染结果不一致。请更新渲染源（_MIN_VERIFY_COMMANDS 常量）后同步 AGENTS.md，勿手工修改生成区块。",
-            f"AGENTS.md 缺少最小验证命令生成区块标记（{start_tag} / {_GENERATED_END_TAG}）",
-        )
-    )
     try:
         contributing = CONTRIBUTING_PATH.read_text(encoding="utf-8")
     except OSError:
-        errors.append(f"CONTRIBUTING.md 不存在或不可读: {CONTRIBUTING_PATH}")
-        return errors
-    for cmd in (*_MIN_VERIFY_COMMANDS, *_MIN_VERIFY_DOC_COMMANDS):
-        if cmd not in contributing:
-            errors.append(
-                f"AGENTS.md 最小验证命令区块引用的命令 '{cmd}' 未出现在正本 CONTRIBUTING.md 中"
-                f"（M2：命令正本为最小命令入口 canonical，双向漂移防护）"
-            )
+        return [f"CONTRIBUTING.md 不存在或不可读: {CONTRIBUTING_PATH}"]
+    gate_commands, doc_commands, parse_errors = _parse_min_verify_command_block(contributing)
+    if parse_errors:
+        return parse_errors
+    content = AGENTS_PATH.read_text(encoding="utf-8")
+    errors.extend(
+        _generated_block_sync(
+            content,
+            _MIN_VERIFY_START_TAG,
+            _render_agents_min_verify_lines(gate_commands, doc_commands),
+            "AGENTS.md 最小验证命令区块与 CONTRIBUTING.md 受控块渲染结果不一致（M2/F02）。"
+            "请改正本 CONTRIBUTING.md「常用开发与测试命令」受控块后按渲染逻辑同步 AGENTS.md，勿手工修改生成区块。",
+            f"AGENTS.md 缺少最小验证命令生成区块标记（{_MIN_VERIFY_START_TAG} / {_GENERATED_END_TAG}）",
+        )
+    )
     return errors
 
 
