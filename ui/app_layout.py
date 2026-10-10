@@ -45,7 +45,7 @@ from ui.views.screener_view import ScreenerView
 from ui.views.settings_view import SETTINGS_SUBTAB_INDEX, SettingsView
 from ui.views.task_center_view import TaskCenterView
 from ui.views.watchlist_view import WatchlistView
-from utils.app_env import is_e2e_mode
+from utils.app_env import is_e2e_full_mount_mode, is_e2e_mode
 from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
@@ -184,6 +184,17 @@ def _build_pages_stack(
     patch 下发导致 E2E 浏览器超时)。E2E 测试不需要非激活视图的 VM 状态, 跳过是
     安全的 (与 home_view._init_and_load 的 E2E_TESTING 跳过范式一致)。
 
+    F07 生产挂载场景: ``E2E_FULL_MOUNT=true`` (``is_e2e_full_mount_mode()``) 时,
+    全部视图按生产模型常驻构造 (非激活视图不再空占位), 供
+    ``tests/e2e/test_production_mount.py`` 覆盖「切页不销毁组件 / use_state 跨页
+    保持 / use_dialog overlay 跨页存活」。两种模式的覆盖边界:
+    - 快速 smoke (仅 ``E2E_TESTING=true``): 按页挂载, 覆盖导航/单页局部交互,
+      切走即销毁组件 (重建必丢 use_state), 启动快;
+    - full-mount (``E2E_FULL_MOUNT=true``): 生产常驻 parity, 覆盖跨页状态保持
+      与 overlay 存活, 启动构造成本与生产一致。
+    仅设置 ``E2E_FULL_MOUNT`` 而非 ``E2E_TESTING`` 时本分支不生效 (生产路径,
+    ``is_e2e`` 为 False 短路)。
+
     冷启动性能基线 (UX-06, 本机 proxy 实测, 波动随机器负载): 依赖库 import
     5.3-9.6s + 单例 ~0.46s + 全页渲染 ~0.1-1.0s; 低负载样本 ≈6.5-7s,
     冷首启/高负载可能超 8s SLA (见 scripts/probe/startup_perf.py 与技术债
@@ -202,9 +213,11 @@ def _build_pages_stack(
     is_e2e = is_e2e_mode()
 
     def _make_content(view_factory, is_active: bool) -> ft.Control:
-        # E2E 模式下非激活视图返回空 Container, 避免调用 view_factory() 触发 VM 构造链
-        # (单例注册表/策略注册表初始化 + View 控件树构建, 负载相关 ~0.1-1.0s) 阻塞 Flet patch 下发
-        if is_e2e and not is_active:
+        # E2E 快速 smoke 模式下非激活视图返回空 Container, 避免调用 view_factory() 触发
+        # VM 构造链 (单例注册表/策略注册表初始化 + View 控件树构建, 负载相关 ~0.1-1.0s)
+        # 阻塞 Flet patch 下发; F07 full-mount 场景池 (E2E_FULL_MOUNT=true) 例外——
+        # 全部视图按生产模型常驻构造, 见 docstring 两种模式的覆盖边界
+        if is_e2e and not is_e2e_full_mount_mode() and not is_active:
             return ft.Container(expand=True)
         return view_factory()
 

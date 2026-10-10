@@ -131,3 +131,4 @@
 | DATA-01 | 已知金额列裸比较未做单位换算（北向资金 `north_money` 错 100 倍）——催生 R20 统一换算入口 | business-review-2026-09-11（业务检视） | [redlines.yml](./redlines.yml) R20 / [prototype_business_redlines.py](../../scripts/prototype_business_redlines.py) | 使用中 |
 | DATA-02 | 同 DATA-01（龙虎榜 `net_amount` 错 10000 倍等），统一经 `threshold_in_data_unit()` 换算后再比较 | business-review-2026-09-11（业务检视） | [redlines.yml](./redlines.yml) R20 | 使用中 |
 | SYNC-01 | 水位线（checkpoint）写入非单调，断点续传水位可能回退——催生 R22 单调性红线 | business-review-2026-09-11（业务检视） | [redlines.yml](./redlines.yml) R22 | 使用中 |
+| FULLMOUNT-1 | F07 生产挂载 E2E 首跑阻塞缺陷：btn_jump_backtest 导航链路 RuntimeError（context not associated with a running event loop），场景①②暂 skip 待修复 | flet-review F07（生产挂载场景池 E2E 首跑） | [test_production_mount.py](../../tests/e2e/test_production_mount.py) | 使用中 |

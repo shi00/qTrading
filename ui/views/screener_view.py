@@ -1923,14 +1923,17 @@ def _build_screener_control_card(
             height=45,
         ),
     )
-    backtest_btn = ft.Button(
-        content=I18n.get("screener_run_backtest"),
-        icon=ft.Icons.SCIENCE,
-        on_click=safe_on_click(handlers["on_backtest_click_sync"]),
-        disabled=run_disabled or not is_realtime,
-        style=AppStyles.outline_button(),
-        height=45,
-        visible=is_realtime,
+    backtest_btn = anchored(
+        EIDS.SCREENER.RUN_BACKTEST_BUTTON,
+        ft.Button(
+            content=I18n.get("screener_run_backtest"),
+            icon=ft.Icons.SCIENCE,
+            on_click=safe_on_click(handlers["on_backtest_click_sync"]),
+            disabled=run_disabled or not is_realtime,
+            style=AppStyles.outline_button(),
+            height=45,
+            visible=is_realtime,
+        ),
     )
 
     right_controls = ft.Column(
