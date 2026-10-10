@@ -324,6 +324,18 @@ class TestDispose:
         assert vm._active_task is None
         assert vm._selected_ts_code == ""
 
+    async def test_dispose_cleans_loop_local_event(self, fake_service):
+        """验证 dispose 卸载时清理 loop-local 取消事件，避免残留无用映射。"""
+        from utils.loop_local import get_loop_local
+
+        vm = NewsInsightViewModel(service=fake_service)
+        key = vm._cancel_event_key
+        event_before = vm._cancel_event()
+        vm.dispose()
+        # 卸载后通过相同 key 获取应生成全新的 Event 实例
+        event_after = get_loop_local(key, asyncio.Event)
+        assert event_after is not event_before
+
 
 class TestLoadEvidenceError:
     async def test_evidence_error_sets_error(self, fake_service):
@@ -383,6 +395,43 @@ class TestCancelEventWiring:
         assert not vm._cancel_event().is_set()
         await _drain(vm)
         assert vm.state.phase == PHASE_EVIDENCE_READY
+
+    async def test_cancel_isolation_between_instances(self, fake_service):
+        """验证同一事件循环内两个独立 VM 实例并发时，取消实例 A 不得误伤实例 B。"""
+        vm_a = NewsInsightViewModel(service=fake_service)
+        vm_b = NewsInsightViewModel(service=fake_service)
+
+        event_a = vm_a._cancel_event()
+        event_b = vm_b._cancel_event()
+        assert event_a is not event_b, "两个独立 VM 实例必须拥有独立的取消事件"
+
+        b_cancelled = False
+        started = asyncio.Event()
+
+        async def b_analyze(*args, **kwargs):
+            cancel_event = kwargs.get("cancel_event")
+            started.set()
+            for _ in range(5):
+                await asyncio.sleep(0.01)
+                if cancel_event is not None and cancel_event.is_set():
+                    nonlocal b_cancelled
+                    b_cancelled = True
+                    raise asyncio.CancelledError()
+            return NewsInsightOutcome(result=_make_result(), reused=False)
+
+        fake_service.analyze = AsyncMock(side_effect=b_analyze)
+
+        vm_b.select_stock("000002.SZ")
+        await _drain(vm_b)
+        vm_b.generate()
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+
+        # 此时取消 vm_a
+        vm_a.cancel()
+
+        await _drain(vm_b)
+        assert not b_cancelled, "vm_a 取消不应误伤在途运行的 vm_b"
+        assert vm_b.state.phase == PHASE_READY
 
 
 class TestApplyOutcomeFailed:

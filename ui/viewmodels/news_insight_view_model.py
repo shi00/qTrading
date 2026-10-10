@@ -13,13 +13,14 @@
 
 红线自检：
 - R2：子任务 ``CancelledError`` 一律 ``raise`` 重新抛出，不吞没
-- R11：单飞用 ``get_loop_local()`` 获取 ``asyncio.Event``，绑定当前循环
+- R11：单飞用 ``get_loop_local()`` 获取 ``asyncio.Event``，绑定当前循环；按实例隔离 key 避免多实例取消串扰
 - R21：无置信度/无风险等级用 ``None`` 表示未知，不填充低风险
 """
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 
 from services.news_insight_models import EvidenceDocument
@@ -39,10 +40,13 @@ from ui.viewmodels.news_insight_types import (
     SourceCoverage,
 )
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
-from utils.loop_local import get_loop_local
+from utils.loop_local import del_loop_local, get_loop_local
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
+
+# 实例自增计数器：为每个 VM 实例生成唯一的 loop-local cancel event key，隔离跨实例取消信号（R11 合规）
+_instance_counter = itertools.count()
 
 # 服务层成功分析态（单一数据源）
 _SUCCESS = frozenset({"analyzed_with_events", "analyzed_no_event"})
@@ -137,6 +141,7 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
 
         self._active_task: asyncio.Task | None = None
         self._selected_ts_code: str = ""
+        self._cancel_event_key: str = f"news_insight_vm_cancel_event_{next(_instance_counter)}"
 
     # ------------------------------------------------------------------
     # state 只读访问（契约）
@@ -189,6 +194,7 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
         self._cancel_active()
         self._selected_ts_code = ""
         self._state = NewsInsightState()
+        del_loop_local(self._cancel_event_key)
         super().dispose()
 
     # ------------------------------------------------------------------
@@ -331,8 +337,8 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
             return ""
 
     def _cancel_event(self) -> asyncio.Event:
-        """取消边界原语：经 get_loop_local 绑定当前循环（R11），避免跨循环复用。"""
-        return get_loop_local("news_insight_vm_cancel_event", asyncio.Event)
+        """取消边界原语：经 get_loop_local 绑定当前循环（R11），避免跨循环复用；按实例隔离 key，避免跨实例串扰。"""
+        return get_loop_local(self._cancel_event_key, asyncio.Event)
 
     def _cancel_active(self) -> None:
         """取消在途任务（幂等）：任务级取消 + 事件级协同检查点（§12 第 6 步）。
