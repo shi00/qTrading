@@ -167,13 +167,14 @@ class AnchorPage:
         )
 
     async def scroll_into_view(self, eid: Eid, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
-        """把 anchor 所在 identifier 节点滚动到视口中心，供 click 前调用。
+        """把 anchor 所在 identifier 节点滚动到视口安全区，供 click 前调用。
 
-        E3 实证：dialog/长表单内目标控件可能被内容流推到视口外，Playwright
-        `mouse.click(bbox_center)` 对视口外坐标无效（点击落空，Flutter 收不到）。
-        滚动使控件进入视口后再点。用 JS `scrollIntoView({block,inline:'center'})`
-        而非 Playwright `scroll_into_view_if_needed`：CanvasKit 语义节点经测试仅响应
-        原生 scrollIntoView。identifier 是唯一定位通道，无 kind 分派。
+        CanvasKit 实证：DOM `scrollIntoView()` 仅改变无障碍语义节点的 DOM scrollTop，
+        不驱动 Flutter Framework 内部的 ScrollPosition 与 RenderViewport 渲染，
+        导致 Canvas 画面未滚动、DOM boundingBox 发生伪位移，物理点击落入未滚动的
+        上层控件（如误触发「完整日更新」弹出遮罩）。
+        因此，通过真实物理鼠标滚轮 `page.mouse.wheel` 驱动 Flutter 页面实际滚动，
+        确保 Canvas 渲染层与 DOM 语义层位置一致。
 
         LABEL 为 display-only，无可滚动目标，显式拒绝。滚动画后短暂等待 Flutter
         滚动动画稳定。
@@ -183,15 +184,36 @@ class AnchorPage:
             raise RuntimeError(
                 f"AnchorPage.scroll_into_view: LABEL kind ({eid_str!r}) is display-only, not scrollable target"
             )
-        await self.page.evaluate(
-            r"""(args) => {
-                const el = document.querySelector(
-                    'flt-semantics[flt-semantics-identifier="' + args.label + '"]');
-                if (el) el.scrollIntoView({block: 'center', inline: 'center'});
-            }""",
-            {"label": eid_str},
-        )
-        await self.page.wait_for_timeout(300)
+
+        locator = self._locator_by_identifier(eid_str)
+        await locator.first.wait_for(state="attached", timeout=self._tm(timeout_ms))
+        raw_box = await locator.first.bounding_box()
+        if not raw_box or raw_box["width"] == 0 or raw_box["height"] == 0:
+            return
+
+        box = _as_box(raw_box)
+        viewport = self.page.viewport_size
+        if viewport:
+            vh = float(viewport["height"])
+            vw = float(viewport["width"])
+            top = box["y"]
+            bottom = box["y"] + box["height"]
+
+            # 安全可视区：留出顶部 100px（避开 AppBar/TabBar）和底部 80px 缓冲区
+            safe_top = 100.0
+            safe_bottom = vh - 80.0
+
+            if top < safe_top or bottom > safe_bottom:
+                target_cy = box["y"] + box["height"] / 2.0
+                desired_cy = vh / 2.0
+                delta_y = target_cy - desired_cy
+
+                # 鼠标移动到目标水平区域、视口垂直中部的有效滚动承载面
+                scroll_x = min(max(box["x"] + box["width"] / 2.0, 200.0), vw - 100.0)
+                scroll_y = desired_cy
+                await self.page.mouse.move(scroll_x, scroll_y)
+                await self.page.mouse.wheel(0, delta_y)
+                await self.page.wait_for_timeout(300)
 
     # ----------------------------------------------------------------
     # 核心操作: click / fill / select_option / hover

@@ -63,12 +63,16 @@ class _FakeMouse:
     def __init__(self) -> None:
         self.clicks: list[tuple[float, float]] = []
         self.moves: list[tuple[float, float]] = []
+        self.wheels: list[tuple[float, float]] = []
 
     async def click(self, x: float, y: float) -> None:
         self.clicks.append((x, y))
 
     async def move(self, x: float, y: float) -> None:
         self.moves.append((x, y))
+
+    async def wheel(self, delta_x: float, delta_y: float) -> None:
+        self.wheels.append((delta_x, delta_y))
 
 
 class _FakeKeyboard:
@@ -95,6 +99,7 @@ class _FakePage:
         self.keyboard = _FakeKeyboard()
         self.wait_for_timeout = AsyncMock()
         self.count_value = count_value
+        self.viewport_size = {"width": 1400, "height": 900}
         self.box: dict[str, float] = {"x": 1.0, "y": 2.0, "width": 30.0, "height": 40.0}
         # 供 is_checked 下潜后代 checkbox 读取 aria-checked（默认未勾选）
         self.attributes: dict[str, str | None] = {"aria-checked": "false"}
@@ -148,6 +153,7 @@ def _stub_select_option(ap: AnchorPage, handle: _FakeHandle) -> AsyncMock:
     find_mock = AsyncMock(return_value=handle)
     ap._read_expanded_by_identifier = AsyncMock(side_effect=[None, None])  # type: ignore[method-assign]
     ap._find_option_element = find_mock  # type: ignore[method-assign]
+    ap.scroll_into_view = AsyncMock()  # type: ignore[method-assign]
     ap._identifier_node_box = AsyncMock(  # type: ignore[method-assign]
         return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0}
     )
@@ -231,13 +237,27 @@ async def test_hover_uses_identifier_selector() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scroll_into_view_uses_identifier_js() -> None:
+async def test_scroll_into_view_uses_mouse_wheel_when_outside_viewport() -> None:
+    """CanvasKit 实证：视口外控件 scroll_into_view 须通过物理鼠标滚轮 wheel 滚动，
+    避免 DOM scrollIntoView 导致 Canvas 画面未滚动、造成错位误触。"""
     ap, page = _make_ap()
+    page.box = {"x": 500.0, "y": 950.0, "width": 100.0, "height": 40.0}
     await ap.scroll_into_view(_COMPLEX, timeout_ms=1000)
 
-    assert page.evaluates, "identifier scroll_into_view 须执行 JS"
-    script = page.evaluates[0][0]
-    assert "flt-semantics-identifier" in script
+    assert _id_selector(_COMPLEX[0]) in page.selectors
+    assert page.mouse.wheels, "视口外控件 scroll_into_view 须通过物理鼠标滚轮 wheel 滚动"
+    assert page.mouse.wheels[0][1] > 0, "位于视口下方的控件须向下滚动滚轮"
+
+
+@pytest.mark.asyncio
+async def test_scroll_into_view_noop_when_already_in_viewport() -> None:
+    """已处于安全视口内部的控件不产生多余物理滚轮操作。"""
+    ap, page = _make_ap()
+    page.box = {"x": 500.0, "y": 400.0, "width": 100.0, "height": 40.0}
+    await ap.scroll_into_view(_COMPLEX, timeout_ms=1000)
+
+    assert _id_selector(_COMPLEX[0]) in page.selectors
+    assert page.mouse.wheels == [], "已在安全视口内的控件不产生多余滚轮操作"
 
 
 @pytest.mark.asyncio
