@@ -93,10 +93,17 @@ def _expand_locator_mock(ap: AnchorPage) -> AsyncMock:
 
 
 async def _run_select_option(ap: AnchorPage, expanded_values: list[str | None]) -> _FakeHandle:
-    """公共跑法：注入展开态序列 + 选项 handle + 展开定位桩，执行 select_option。"""
+    """公共跑法：注入展开态序列 + 选项 handle + 展开定位桩，执行 select_option。
+
+    ``scroll_into_view`` 打桩：68c25052 起其实现改走真实 Playwright locator + 物理滚轮
+    （``_locator_by_identifier`` → ``page.locator`` / ``mouse.wheel``），gating 单测
+    不应执行真实滚动实现（``_FakePage`` 无 locator），与 ``test_select_option_scrolls_into_view_before_click``
+    既有打桩模式一致。
+    """
     handle = _FakeHandle()
     _stub_expanded(ap, expanded_values)
     ap._find_option_element = AsyncMock(return_value=handle)
+    ap.scroll_into_view = AsyncMock()
     ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
     await ap.select_option(_FILTER_COL_DROPDOWN, "代码", timeout_ms=1000)
     return handle
