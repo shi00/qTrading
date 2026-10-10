@@ -10,7 +10,14 @@
 
 ### 数据质量门控
 
-使用 `@require_quality(QualityTier.SILVER)` 确保只有数据质量达标才执行逻辑。质量分层: `CRITICAL(0)` → `BRONZE(1)` → `SILVER(2)` → `GOLD(3)`。`STRICT_QUALITY_GATE` 环境变量控制严格模式（默认开启，设为 `false` 关闭）。
+使用 `@require_quality(QualityTier.SILVER)` 确保只有数据质量达标才执行逻辑。质量分层: `CRITICAL(0)` → `BRONZE(1)` → `SILVER(2)` → `GOLD(3)`。`STRICT_QUALITY_GATE` 环境变量（默认开启）**不是全部门控总开关**，仅控制 processor 缺失分支的放行；`@require_quality` 装饰的方法经 `data/persistence/quality_gate.py` 的 `_check_tier` 依次判定，四场景行为如下：
+
+- **E2E 模式**（`E2E_TESTING=true`，判定统一收口于 `utils/app_env.py` 的 `is_e2e_mode`；打包分发版恒为 False）：绕过全部门控直接放行，记 warning 留痕，与 `STRICT_QUALITY_GATE` 取值无关。
+- **processor 缺失**（方法上下文中找不到 `data_processor`）：默认严格模式抛 `QualityGateError`；`STRICT_QUALITY_GATE=false` 时改记 error 日志并放行——这是该开关**唯一**的作用范围。
+- **等级不足**（processor 存在且当前等级低于要求；未初始化按 `CRITICAL` 计，声明 `required_tables` 时取各表最小等级）：无论开关取值，一律抛 `QualityGateError` 拦截。`from_attr` 形式下策略类属性缺失同样直接抛，不受开关影响。
+- **窗口缺口**（`require_continuous_window=True` 且等级达标后采样检测到缺失交易日）：无论开关取值，一律抛 `QualityGateError` 拦截；fast-path 未跑深扫描时不拦截（详见下文区间完整性门控）。
+
+`STRICT_QUALITY_GATE=false` 属调试便利而非生产选项：非 E2E、非 DEBUG 模式下应用启动时会被 `app/bootstrap.py` 的启动校验以 `RuntimeError` 拒绝。
 
 **区间完整性门控（`require_continuous_window=True`，D2-9）**：仅当策略声明逻辑需要**连续数据窗口**（如基于 MA/RSI 等滚动窗口指标、且窗口内任一天缺失都会使结果失真）时，在 `@require_quality` 上追加该参数。语义：等级达标后再做区间完整性检查——依据 `processor._scan_missing_dates`（`run_quality_scan` 采样的缺失交易日代理证据），若采样检测到任何缺失交易日，即便等级达标也抛 `QualityGateError` 拦截，防止「策略所需窗口恰好缺某天」仍放行。默认 `False`，不改变既有策略行为。定义见 `data/persistence/quality_gate.py`（`require_quality` 的 `require_continuous_window` 关键字参数）；真实引用点：`strategies/oversold_strategy.py` 的 `async def filter` 上 `@require_quality(QualityTier.SILVER, require_continuous_window=True)`（配合 `required_tables=("daily_quotes",)` 的 per-table 门控）。向量化 `PolarsBaseStrategy` 走 `required_quality_tier` 类属性，不适用本参数。
 
