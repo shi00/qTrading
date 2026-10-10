@@ -33,14 +33,31 @@ class MyAIStrategy(BaseStrategy, AIStrategyMixin):
     enable_ai_analysis: bool = True  # False 跳过 Phase 2 AI 分析
     ai_risk_check_in_prompt: bool = False  # True 时承载定性风险检查职责
 
+    def __init__(self) -> None:
+        # BaseStrategy.__init__ 必需策略 i18n key（locales 注册文案）；
+        # AIStrategyMixin.__init__ 经 MRO 协作完成 _context_builders 等初始化，无需手动调用。
+        super().__init__("strategy_my_ai_name", "strategy_my_ai_desc")
+
     @require_quality(QualityTier.SILVER, require_continuous_window=True)
     async def filter(self, context: StrategyContext) -> pd.DataFrame:
-        # Phase 1: 数学筛选出候选集 candidates_df
-        candidates_df = self._math_filter(context)  # 策略自身的数学筛选
+        # 真实策略此处先经 self.check_dependencies(context) 依赖守卫（见 OversoldStrategy.filter）。
+        # Phase 1: 数学筛选出候选集 candidates_df（异步；真实完整示例见
+        # strategies/oversold_strategy.py::OversoldStrategy._math_filter）
+        candidates_df = await self._math_filter(context)
         if candidates_df.empty:
             return pd.DataFrame()
-        # Phase 2: AI 增强（真实完整示例见 strategies/oversold_strategy.py::OversoldStrategy）
+        # Phase 2: AI 增强（无云端配置时混入内部优雅降级，返回数学筛选结果）
         return await self.run_ai_analysis(candidates_df, context)
+
+    async def _math_filter(self, context: StrategyContext) -> pd.DataFrame:
+        """策略自身的数学筛选（占位示意，业务逻辑由策略作者实现）。
+
+        返回契约：通过数学筛选的候选集 DataFrame；无候选时返回空 DataFrame。
+        """
+        df = context.get("screening_data")
+        if df is None or df.empty:
+            return pd.DataFrame()
+        return df[df["close"] > 0].copy()
 
     def get_ai_context(self, row: dict) -> str:
         """Override: 注入策略特定上下文，告诉 LLM 该股为何被选中（防 context vacuum）。"""
@@ -52,6 +69,8 @@ class MyAIStrategy(BaseStrategy, AIStrategyMixin):
         """Override(可选): 预取策略特定数据，返回值需原样/增强返回。"""
         return prefetched
 ```
+
+该骨架可直接运行验证：`MyAIStrategy()` 无参实例化后，向 `filter` 传入含 `screening_data` 假数据的 context 即可执行。注意 `data_processor` 需提供带 `_quality_tier` 属性的替身对象（如 `SimpleNamespace(_quality_tier=QualityTier.SILVER)`）以满足 `require_quality` 门控（STRICT 模式默认开启，context 缺失 `data_processor` 时抛 `QualityGateError`）。未配置云端 LLM 时 `run_ai_analysis` 在混入内部优雅降级，原样返回数学筛选结果，不触发任何外发调用。
 
 需要 override 的钩子清单（均见 `strategies/ai_mixin.py::AIStrategyMixin`）：
 
