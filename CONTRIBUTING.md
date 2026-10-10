@@ -196,6 +196,13 @@ python -m alembic upgrade head
 
 ## 常用开发与测试命令
 
+**变更相关门禁正本**（下方受控块为 AGENTS.md「最小验证命令」生成区块的唯一渲染源，由 `scripts/check_docs_consistency.py` 解析校验；修改命令或顺序只在本受控块进行，随后同步再生成 AGENTS.md 镜像，勿手工改镜像）：
+
+<!-- generated:min-verify-commands -->
+- **变更相关门禁**（提交/PR 前，顺序与 `.github/workflows/ci_cd.yml` 一致）：`ruff check .` → `ruff format --check .` → `pre-commit run --all-files` → `pyright` → `python -m pytest tests/unit/ -v --tb=short`
+- **仅 Markdown / 治理文档改动**：`python scripts/check_docs_consistency.py` + `python -m pytest tests/unit/test_docs_consistency.py`
+<!-- /generated -->
+
 ```bash
 # 格式化与静态检查
 python -m ruff check . --fix

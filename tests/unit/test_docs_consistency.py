@@ -3536,14 +3536,184 @@ class TestAgentsMdSync:
 
 
 class TestAgentsMinVerifyCommands:
-    """M2：AGENTS.md「最小验证命令」生成区块与正本（CONTRIBUTING.md 命令入口）一致性。"""
+    """M2/F02：AGENTS.md「最小验证命令」生成区块与正本受控块（CONTRIBUTING.md）逐行一致性。"""
+
+    GATE_COMMANDS = [
+        "ruff check .",
+        "ruff format --check .",
+        "pre-commit run --all-files",
+        "pyright",
+        "python -m pytest tests/unit/ -v --tb=short",
+    ]
+    DOC_COMMANDS = [
+        "python scripts/check_docs_consistency.py",
+        "python -m pytest tests/unit/test_docs_consistency.py",
+    ]
+
+    @classmethod
+    def _contributing_with_block(cls, gate: list[str], doc: list[str]) -> str:
+        """构造带受控块的 CONTRIBUTING.md 片段（与真实正本同构，命令列表可注入反例）。"""
+        gate_chain = " → ".join(f"`{c}`" for c in gate)
+        doc_chain = " + ".join(f"`{c}`" for c in doc)
+        return (
+            "## 常用开发与测试命令\n\n"
+            "<!-- generated:min-verify-commands -->\n"
+            f"- **变更相关门禁**（提交/PR 前，顺序与 `.github/workflows/ci_cd.yml` 一致）：{gate_chain}\n"
+            f"- **仅 Markdown / 治理文档改动**：{doc_chain}\n"
+            "<!-- /generated -->\n"
+        )
+
+    @staticmethod
+    def _agents_with_mirror(lines: list[str]) -> str:
+        return "<!-- generated:min-verify-commands -->\n" + "\n".join(lines) + "\n<!-- /generated -->\n"
 
     def test_min_verify_commands_pass_on_current_repo(self):
-        """真实仓库：AGENTS.md 区块与渲染源一致，且每条命令都在 CONTRIBUTING.md 正本中."""
+        """真实仓库端到端：正本受控块解析渲染 == AGENTS.md 镜像."""
         from check_docs_consistency import check_agents_md_min_verify_commands
 
         errors = check_agents_md_min_verify_commands()
         assert errors == [], f"最小验证命令区块应通过, got: {errors}"
+
+    def test_render_from_canonical_block_passes(self, tmp_path, monkeypatch):
+        """正本受控块解析 → 渲染 → AGENTS.md 镜像逐行一致 → 通过."""
+        from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
+
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(
+            self._agents_with_mirror(_render_agents_min_verify_lines(self.GATE_COMMANDS, self.DOC_COMMANDS)),
+            encoding="utf-8",
+        )
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text(self._contributing_with_block(self.GATE_COMMANDS, self.DOC_COMMANDS), encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert errors == [], f"渲染自受控块应通过, got: {errors}"
+
+    def test_detects_parameter_change_not_synced_to_mirror(self, tmp_path, monkeypatch):
+        """反例（F02）：正本块命令参数变化而镜像未同步 → 逐行比较报不一致（旧常量渲染漏检）."""
+        from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
+
+        changed_gate = [*self.GATE_COMMANDS[:-1], "python -m pytest tests/unit/ -v --tb=long"]
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(
+            self._agents_with_mirror(_render_agents_min_verify_lines(self.GATE_COMMANDS, self.DOC_COMMANDS)),
+            encoding="utf-8",
+        )
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text(self._contributing_with_block(changed_gate, self.DOC_COMMANDS), encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert any("不一致" in e for e in errors), f"应检出参数变化漂移, got: {errors}"
+
+    def test_detects_order_swap_not_synced_to_mirror(self, tmp_path, monkeypatch):
+        """反例（F02）：正本块命令顺序交换 → 逐行比较捕获（旧子串检查漏检有序性）."""
+        from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
+
+        swapped_gate = [self.GATE_COMMANDS[1], self.GATE_COMMANDS[0], *self.GATE_COMMANDS[2:]]
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(
+            self._agents_with_mirror(_render_agents_min_verify_lines(self.GATE_COMMANDS, self.DOC_COMMANDS)),
+            encoding="utf-8",
+        )
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text(self._contributing_with_block(swapped_gate, self.DOC_COMMANDS), encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert any("不一致" in e for e in errors), f"应检出顺序漂移, got: {errors}"
+
+    def test_detects_command_removal_not_synced_to_mirror(self, tmp_path, monkeypatch):
+        """反例（F02）：正本块删除一条命令 → 镜像仍含该命令 → 报不一致."""
+        from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
+
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(
+            self._agents_with_mirror(_render_agents_min_verify_lines(self.GATE_COMMANDS, self.DOC_COMMANDS)),
+            encoding="utf-8",
+        )
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text(
+            self._contributing_with_block(self.GATE_COMMANDS[:-1], self.DOC_COMMANDS), encoding="utf-8"
+        )
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert any("不一致" in e for e in errors), f"应检出命令删除漂移, got: {errors}"
+
+    def test_detects_missing_canonical_block_in_contributing(self, tmp_path, monkeypatch):
+        """反例（F02）：正本 CONTRIBUTING.md 缺受控块 → fail-closed 报错（取代旧子串检查）."""
+        from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
+
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(
+            self._agents_with_mirror(_render_agents_min_verify_lines(self.GATE_COMMANDS, self.DOC_COMMANDS)),
+            encoding="utf-8",
+        )
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text("# CONTRIBUTING\n\n（无受控块）\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert any("缺少最小验证命令受控块标记" in e for e in errors), f"应检出正本块缺失, got: {errors}"
+
+    def test_detects_duplicate_command_in_block(self, tmp_path, monkeypatch):
+        """反例（F02）：受控块链内重复命令 → 解析层显式报错（旧机制无法发现）."""
+        from check_docs_consistency import check_agents_md_min_verify_commands
+
+        dup_gate = [*self.GATE_COMMANDS, self.GATE_COMMANDS[0]]
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(self._agents_with_mirror(["（占位镜像）"]), encoding="utf-8")
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text(self._contributing_with_block(dup_gate, self.DOC_COMMANDS), encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert any("重复命令" in e for e in errors), f"应检出受控块重复命令, got: {errors}"
+
+    def test_detects_unrecognized_line_in_block(self, tmp_path, monkeypatch):
+        """反例（F02）：受控块含第三条未知 bullet → 拒绝（防新增行被静默丢弃）."""
+        from check_docs_consistency import check_agents_md_min_verify_commands
+
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(self._agents_with_mirror(["（占位镜像）"]), encoding="utf-8")
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text(
+            self._contributing_with_block(self.GATE_COMMANDS, self.DOC_COMMANDS) + "- **额外行**：`some cmd`\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert any("无法识别" in e for e in errors), f"应检出受控块未知行, got: {errors}"
+
+    def test_detects_bullet_without_colon_separator(self, tmp_path, monkeypatch):
+        """反例（F02）：受控块 bullet 缺「：」分隔 → 解析层 fail-closed 报错."""
+        from check_docs_consistency import check_agents_md_min_verify_commands
+
+        agents = tmp_path / "AGENTS.md"
+        agents.write_text(self._agents_with_mirror(["（占位镜像）"]), encoding="utf-8")
+        contributing = tmp_path / "CONTRIBUTING.md"
+        contributing.write_text(
+            "<!-- generated:min-verify-commands -->\n"
+            f"- **变更相关门禁** `{'` → `'.join(self.GATE_COMMANDS)}`\n"
+            f"- **仅 Markdown / 治理文档改动**：`{self.DOC_COMMANDS[0]}` + `{self.DOC_COMMANDS[1]}`\n"
+            "<!-- /generated -->\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
+        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
+
+        errors = check_agents_md_min_verify_commands()
+        assert any("缺少「：」分隔" in e for e in errors), f"应检出 bullet 缺分隔, got: {errors}"
 
     def test_detects_missing_block_marker(self, tmp_path, monkeypatch):
         """AGENTS.md 缺生成区块标记 → 报错（不静默通过）."""
@@ -3555,25 +3725,6 @@ class TestAgentsMinVerifyCommands:
 
         errors = check_agents_md_min_verify_commands()
         assert any("缺少最小验证命令生成区块标记" in e for e in errors), f"应检出缺标记, got: {errors}"
-
-    def test_detects_command_missing_in_contributing(self, tmp_path, monkeypatch):
-        """正本 CONTRIBUTING.md 缺某条命令 → 报错（双向漂移防护）."""
-        from check_docs_consistency import _render_agents_min_verify_lines, check_agents_md_min_verify_commands
-
-        agents = tmp_path / "AGENTS.md"
-        agents.write_text(
-            "<!-- generated:min-verify-commands -->\n"
-            + "\n".join(_render_agents_min_verify_lines())
-            + "\n<!-- /generated -->\n",
-            encoding="utf-8",
-        )
-        contributing = tmp_path / "CONTRIBUTING.md"
-        contributing.write_text("# CONTRIBUTING\n\n（无任何命令）\n", encoding="utf-8")
-        monkeypatch.setattr("check_docs_consistency.AGENTS_PATH", agents)
-        monkeypatch.setattr("check_docs_consistency.CONTRIBUTING_PATH", contributing)
-
-        errors = check_agents_md_min_verify_commands()
-        assert any("未出现在正本 CONTRIBUTING.md 中" in e for e in errors), f"应检出正本缺命令, got: {errors}"
 
 
 class TestClaudeExecutiveSync:
