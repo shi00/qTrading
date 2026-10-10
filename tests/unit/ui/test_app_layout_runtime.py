@@ -454,7 +454,12 @@ def _get_navigate_handler(env: dict) -> Any:
 
 
 class TestOnNavigate:
-    """_on_navigate PubSub 事件处理测试 (P1-1 覆盖率补缺)."""
+    """_on_navigate PubSub 事件处理测试 (P1-1 覆盖率补缺).
+
+    F07-FULLMOUNT-1 修复后行为契约: _on_navigate 由 PubSubHub 经 ThreadPoolExecutor
+    分发 (池线程执行), 只做纯解析 + page.run_task(_apply_navigate, target, subtab);
+    hook setter 与切页在 _apply_navigate (事件循环 task) 中执行。
+    """
 
     def test_unknown_topic_early_return(self, app_layout_env) -> None:
         """topic != TOPIC_NAVIGATE 时早返回, 不调 page.run_task."""
@@ -466,8 +471,8 @@ class TestOnNavigate:
         handler("unknown_topic", "screener")
         assert not page.run_task.called, "未知 topic 应早返回"
 
-    def test_valid_target_invokes_run_task(self, app_layout_env) -> None:
-        """合法 tab 名 + 不同 tab → page.run_task(_do_tab_switch, target)."""
+    def test_valid_target_invokes_run_task_with_subtab_arg(self, app_layout_env) -> None:
+        """合法 tab 名 → page.run_task(_apply_navigate, target, None)."""
         env = app_layout_env
         handler = _get_navigate_handler(env)
         page = env["page"]
@@ -480,8 +485,8 @@ class TestOnNavigate:
         call = run_task_calls[0]
         handler_fn = call.args[0]
         args = call.args[1:]
-        assert inspect.iscoroutinefunction(handler_fn), "handler 必须为协程函数"
-        assert args == (2,), f"应传 target_tab=2 (SCREENER), 实际 args={args}"
+        assert inspect.iscoroutinefunction(handler_fn), "handler 必须为协程函数 (_apply_navigate)"
+        assert args == (2, None), f"应传 target_tab=2 (SCREENER) + subtab=None, 实际 args={args}"
 
     def test_unknown_target_keyerror_logged(self, app_layout_env) -> None:
         """非法 tab 名 → KeyError 捕获 + logger.warning, 不调 run_task."""
@@ -495,8 +500,13 @@ class TestOnNavigate:
             mock_warn.assert_called_once_with("[AppLayout] Unknown navigation target: %s", "nonexistent_tab")
         assert page.run_task.call_count == 0, "非法 tab 名不应调用 run_task"
 
-    def test_same_tab_early_return(self, app_layout_env) -> None:
-        """target_tab == current_tab 时早返回, 不调 run_task."""
+    def test_same_tab_does_not_switch_tab(self, app_layout_env) -> None:
+        """target_tab == current_tab 时 _apply_navigate 早返回, 不切换.
+
+        F07-FULLMOUNT-1 修复后 same-tab 判断移入 _apply_navigate (stale current_tab
+        快照, 语义与修复前同步侧判断一致) → handler("market") 仍会 run_task,
+        但协程执行后不切换 (selected_index 保持不变)。
+        """
         env = app_layout_env
         handler = _get_navigate_handler(env)
         page = env["page"]
@@ -504,18 +514,101 @@ class TestOnNavigate:
 
         # current_tab 默认 MARKET (0), 导航到 market → 相同 tab
         handler(env["mod"].TOPIC_NAVIGATE, "market")
-        assert not page.run_task.called, "相同 tab 应早返回"
+        handler_fn, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler_fn(*args))
 
-    def test_page_none_early_return(self, app_layout_env) -> None:
-        """page=None 时早返回, 不抛异常."""
+        _rerender(env)
+        nav_rail = _get_nav_rail(env)
+        assert nav_rail.selected_index == int(env["mod"].NavTabs.MARKET), "相同 tab 不应切换"
+
+    def test_on_navigate_body_has_no_context_dependent_calls(self, app_layout_env) -> None:
+        """F07-FULLMOUNT-1 结构守卫: _on_navigate 池线程执行, 函数体内禁止 hook setter.
+
+        PubSubHub 经 ThreadPoolExecutor 分发 sync handler → 池线程 ft.context.page
+        不可用, _on_navigate 内调用任何 hook state setter (→ _schedule_update →
+        context.page) 都会抛 RuntimeError。守卫: 源码层面 _on_navigate 函数体内
+        不出现 setter 调用与 _get_page() (上下文依赖段只允许在 _apply_navigate)。
+        """
+        import inspect
+
+        env = app_layout_env
+        handler = _get_navigate_handler(env)
+        source = inspect.getsource(handler)
+        for forbidden in (
+            "set_backtest_prefill_request",
+            "set_settings_subtab_request",
+            "set_screener_stock_request",
+            "_get_page(",
+        ):
+            assert forbidden not in source, f"_on_navigate 池线程闭包内禁止出现 {forbidden}"
+
+
+# ============================================================================
+# F07-FULLMOUNT-1 回归: pubsub handler 在无 context 线程执行 (池线程模拟)
+# ============================================================================
+
+
+class TestOnNavigateThreadPoolContext:
+    """F07-FULLMOUNT-1 核心回归: pubsub sync handler 在无 ContextVar 线程安全执行.
+
+    生产链路 (flet.app 恒配 ThreadPoolExecutor): PubSubHub.__send 对 sync handler
+    经 loop.run_in_executor 分发 → _on_navigate 在池线程执行, ft.context.page
+    (ContextVar) 不跨线程传播 → 修复前 F13 hook setter (set_backtest_prefill_request)
+    在此抛 ``RuntimeError: The context is not associated with any page`` ×N,
+    导航不发生。
+
+    复现方式: 在新建裸线程 (无 _context_page 注入) 中调用 handler ——
+    测试主线程经 component_renderer.attach_fake_page 注入过 FakePage, 不能暴露
+    本缺陷, 必须换线程。修复后 _on_navigate 只做纯解析 + 经 holder 中 page 的
+    run_task 调度 (MagicMock), 全程无 context 访问。
+    """
+
+    def test_handler_on_bare_thread_dispatches_and_applies(self, app_layout_env) -> None:
+        """裸线程调 handler: 不抛异常 + run_task 调度 + 主线程执行协程后 prefill 生效."""
+        import threading
+
         env = app_layout_env
         handler = _get_navigate_handler(env)
         page = env["page"]
         page.run_task.reset_mock()
+        env["mod"].BacktestView.reset_mock()
 
-        with patch("ui.app_layout._get_page", return_value=None):
-            handler(env["mod"].TOPIC_NAVIGATE, "screener")
-        assert not page.run_task.called, "page=None 应早返回"
+        errors: list[BaseException] = []
+
+        def _worker() -> None:
+            try:
+                # 模拟 PubSubHub.__send 在池线程 inline 调用 handler
+                handler(env["mod"].TOPIC_NAVIGATE, "backtest")
+            except BaseException as ex:  # noqa: BLE001 - 收集线程内异常供断言
+                errors.append(ex)
+
+        worker = threading.Thread(target=_worker)
+        worker.start()
+        worker.join(timeout=10)
+        assert not worker.is_alive(), "worker 线程超时未结束"
+        assert not errors, f"池线程调用 handler 不应抛异常, 实际: {errors!r}"
+
+        # _await_run_task_handler 内部断言 run_task 已调用, 并提取调度参数做强断言
+        handler_fn, args, _ = _await_run_task_handler(page)
+        assert inspect.iscoroutinefunction(handler_fn)
+        assert args == (int(env["mod"].NavTabs.BACKTEST), None)
+
+        # 主线程 (context 有 FakePage) 执行 _apply_navigate → setter 安全生效
+        asyncio.run(handler_fn(*args))
+        backtest_mock = self._render_pages_stack(env)
+        assert backtest_mock.call_args.kwargs.get("prefill_request") == 1, "池线程调度后 prefill 序号应生效"
+
+    def _render_pages_stack(self, env: dict) -> MagicMock:
+        """重渲染并展开 _build_pages_stack 子组件 (与 TestOnNavigateDeepLink 同款)。"""
+        result = render_once(env["component"])
+        env["result"] = result
+        column = result.content
+        body_region = column.controls[0]
+        main_row = body_region.content
+        body = main_row.controls[2]
+        stack_component = body.content
+        render_once(stack_component)
+        return env["mod"].BacktestView
 
 
 # ============================================================================
@@ -609,13 +702,17 @@ class TestParseNavigateMessage:
 
 
 class TestOnNavigateDeepLink:
-    """UX-01: _on_navigate 深链 "<tab>:<subtab>" 协议处理测试.
+    """UX-01: 深链 "<tab>:<subtab>" 端到端处理测试 (两段式: 调度 + 协程执行).
+
+    F07-FULLMOUNT-1 修复后行为契约: _on_navigate (池线程) 只做纯解析并
+    run_task(_apply_navigate, target, subtab); hook setter 与切页在
+    _apply_navigate (事件循环 task) 中执行 —— 测试以 asyncio.run 驱动协程。
 
     覆盖:
-    - 深链切页: run_task(target) + SettingsView 收到 target_subtab
+    - 深链切页: run_task(target, subtab) + SettingsView 收到 target_subtab
     - 重复深链: seq 递增 (函数式更新防 stale closure)
-    - 未知子页: 降级切主 tab + target_subtab 保持 None
-    - 格式非法: warning + 不 run_task
+    - 未知子页: 降级切主 tab + target_subtab 保持 None (warning 在 _apply_navigate)
+    - 格式非法: warning + 不 run_task (handler 内早返回)
     - 非设置页带子页: 子页段忽略 + 正常切主 tab
     - UX-04: screener 段语义 = 股票代码, ScreenerView 收到 stock_filter_request,
       且不污染 settings request
@@ -643,7 +740,8 @@ class TestOnNavigateDeepLink:
         return settings_mock
 
     def test_deep_link_switches_tab_and_passes_subtab(self, app_layout_env) -> None:
-        """MARKET → "settings:data": run_task(SETTINGS) + SettingsView 收到 target_subtab=("data",1)."""
+        """MARKET → "settings:data": run_task(SETTINGS, "data") + 协程执行后
+        SettingsView 收到 target_subtab=("data",1)."""
         env = app_layout_env
         handler = _get_navigate_handler(env)
         page = env["page"]
@@ -651,9 +749,10 @@ class TestOnNavigateDeepLink:
         env["mod"].SettingsView.reset_mock()
 
         handler(env["mod"].TOPIC_NAVIGATE, "settings:data")
-        _, args, _ = _await_run_task_handler(page)
-        assert args == (int(env["mod"].NavTabs.SETTINGS),), "深链应切换到 SETTINGS 主 tab"
+        handler_fn, args, _ = _await_run_task_handler(page)
+        assert args == (int(env["mod"].NavTabs.SETTINGS), "data"), "深链应调度到 SETTINGS 主 tab 并携带子页段"
 
+        asyncio.run(handler_fn(*args))
         settings_mock = self._render_pages_stack(env)
         assert settings_mock.call_args.kwargs.get("target_subtab") == ("data", 1)
 
@@ -661,10 +760,14 @@ class TestOnNavigateDeepLink:
         """两次 "settings:data" → seq 递增为 2 (函数式更新防 stale closure)."""
         env = app_layout_env
         handler = _get_navigate_handler(env)
+        page = env["page"]
         env["mod"].SettingsView.reset_mock()
 
-        handler(env["mod"].TOPIC_NAVIGATE, "settings:data")
-        handler(env["mod"].TOPIC_NAVIGATE, "settings:data")
+        for _ in range(2):
+            page.run_task.reset_mock()
+            handler(env["mod"].TOPIC_NAVIGATE, "settings:data")
+            handler_fn, args, _ = _await_run_task_handler(page)
+            asyncio.run(handler_fn(*args))
         settings_mock = self._render_pages_stack(env)
         assert settings_mock.call_args.kwargs.get("target_subtab") == ("data", 2)
 
@@ -680,8 +783,9 @@ class TestOnNavigateDeepLink:
         env["mod"].SettingsView.reset_mock()
 
         handler(env["mod"].TOPIC_NAVIGATE, "screener:000001")
-        _, args, _ = _await_run_task_handler(page)
-        assert args == (int(env["mod"].NavTabs.SCREENER),), "深链应切换到 SCREENER 主 tab"
+        handler_fn, args, _ = _await_run_task_handler(page)
+        assert args == (int(env["mod"].NavTabs.SCREENER), "000001"), "深链应调度到 SCREENER 主 tab 并携带股票代码段"
+        asyncio.run(handler_fn(*args))
 
         self._render_pages_stack(env)
         screener_mock = env["mod"].ScreenerView
@@ -694,10 +798,14 @@ class TestOnNavigateDeepLink:
         """UX-04: 两次 "screener:000001" → seq 递增为 2 (函数式更新防 stale closure)."""
         env = app_layout_env
         handler = _get_navigate_handler(env)
+        page = env["page"]
         env["mod"].ScreenerView.reset_mock()
 
-        handler(env["mod"].TOPIC_NAVIGATE, "screener:000001")
-        handler(env["mod"].TOPIC_NAVIGATE, "screener:000001")
+        for _ in range(2):
+            page.run_task.reset_mock()
+            handler(env["mod"].TOPIC_NAVIGATE, "screener:000001")
+            handler_fn, args, _ = _await_run_task_handler(page)
+            asyncio.run(handler_fn(*args))
         self._render_pages_stack(env)
         screener_mock = env["mod"].ScreenerView
         assert screener_mock.call_args.kwargs.get("stock_filter_request") == ("000001", 2)
@@ -714,8 +822,9 @@ class TestOnNavigateDeepLink:
         env["mod"].ScreenerView.reset_mock()
 
         handler(env["mod"].TOPIC_NAVIGATE, "backtest")
-        _, args, _ = _await_run_task_handler(page)
-        assert args == (int(env["mod"].NavTabs.BACKTEST),), "应切换到 BACKTEST tab"
+        handler_fn, args, _ = _await_run_task_handler(page)
+        assert args == (int(env["mod"].NavTabs.BACKTEST), None), "应调度到 BACKTEST tab (无子页段)"
+        asyncio.run(handler_fn(*args))
 
         self._render_pages_stack(env)
         backtest_mock = env["mod"].BacktestView
@@ -728,10 +837,14 @@ class TestOnNavigateDeepLink:
         """F13: 两次回测导航 → prefill_request 递增为 2 (函数式更新防 stale closure)."""
         env = app_layout_env
         handler = _get_navigate_handler(env)
+        page = env["page"]
         env["mod"].BacktestView.reset_mock()
 
-        handler(env["mod"].TOPIC_NAVIGATE, "backtest")
-        handler(env["mod"].TOPIC_NAVIGATE, "backtest")
+        for _ in range(2):
+            page.run_task.reset_mock()
+            handler(env["mod"].TOPIC_NAVIGATE, "backtest")
+            handler_fn, args, _ = _await_run_task_handler(page)
+            asyncio.run(handler_fn(*args))
         self._render_pages_stack(env)
         backtest_mock = env["mod"].BacktestView
         assert backtest_mock.call_args.kwargs.get("prefill_request") == 2
@@ -744,26 +857,32 @@ class TestOnNavigateDeepLink:
         """
         env = app_layout_env
         handler = _get_navigate_handler(env)
+        page = env["page"]
         env["mod"].ScreenerView.reset_mock()
 
         handler(env["mod"].TOPIC_NAVIGATE, "screener:000001.SZ")
+        handler_fn, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler_fn(*args))
         self._render_pages_stack(env)
         screener_mock = env["mod"].ScreenerView
         assert screener_mock.call_args.kwargs.get("stock_filter_request") == ("000001.sz", 1)
 
     def test_unknown_subtab_falls_back_to_main_tab(self, app_layout_env) -> None:
-        """ "settings:nonexistent" → warning + 仍切 settings + target_subtab 保持 None."""
+        """ "settings:nonexistent" → warning (在 _apply_navigate 中) + 仍切 settings
+        + target_subtab 保持 None."""
         env = app_layout_env
         handler = _get_navigate_handler(env)
         page = env["page"]
         page.run_task.reset_mock()
         env["mod"].SettingsView.reset_mock()
 
+        handler(env["mod"].TOPIC_NAVIGATE, "settings:nonexistent")
+        handler_fn, args, _ = _await_run_task_handler(page)
+        assert args == (int(env["mod"].NavTabs.SETTINGS), "nonexistent"), "未知子页仍调度切主 tab (携原始子页段)"
+
         with patch.object(env["mod"].logger, "warning") as mock_warn:
-            handler(env["mod"].TOPIC_NAVIGATE, "settings:nonexistent")
+            asyncio.run(handler_fn(*args))
             assert mock_warn.call_count == 1, "未知子页应记录 warning"
-        _, args, _ = _await_run_task_handler(page)
-        assert args == (int(env["mod"].NavTabs.SETTINGS),), "未知子页应降级切主 tab"
 
         settings_mock = self._render_pages_stack(env)
         assert settings_mock.call_args.kwargs.get("target_subtab") is None
@@ -783,10 +902,11 @@ class TestOnNavigateDeepLink:
         assert not page.run_task.called, "格式非法消息不应调用 run_task"
 
     def test_non_settings_tab_with_subtab_ignores_subtab(self, app_layout_env) -> None:
-        """ "backtest:data" → warning + 正常切 backtest 主 tab + 两个 request prop 均为 None.
+        """ "backtest:data" → warning + 正常切 backtest 主 tab + settings/screener request 均为 None.
 
         UX-04 后 screener 段为合法深链 (股票代码), 降级语义样本改用 backtest
-        (非当前 tab, 避开 same-tab 早返回路径)。
+        (非当前 tab, 避开 same-tab 早返回路径)。warning 移入 _apply_navigate
+        (F07-FULLMOUNT-1: handler 池线程只做纯解析)。
         """
         env = app_layout_env
         handler = _get_navigate_handler(env)
@@ -795,11 +915,13 @@ class TestOnNavigateDeepLink:
         env["mod"].SettingsView.reset_mock()
         env["mod"].ScreenerView.reset_mock()
 
+        handler(env["mod"].TOPIC_NAVIGATE, "backtest:data")
+        handler_fn, args, _ = _await_run_task_handler(page)
+        assert args == (int(env["mod"].NavTabs.BACKTEST), "data"), "应正常调度到 BACKTEST 主 tab (携原始子页段)"
+
         with patch.object(env["mod"].logger, "warning") as mock_warn:
-            handler(env["mod"].TOPIC_NAVIGATE, "backtest:data")
+            asyncio.run(handler_fn(*args))
             assert mock_warn.call_count == 1, "未知深链 tab 带子页应记录 warning"
-        _, args, _ = _await_run_task_handler(page)
-        assert args == (int(env["mod"].NavTabs.BACKTEST),), "应正常切换到 BACKTEST 主 tab"
 
         self._render_pages_stack(env)
         settings_mock = env["mod"].SettingsView

@@ -486,17 +486,77 @@ def AppLayout() -> ft.Container:
 
     # --- PubSub 导航订阅 (P1-3 批次 2 #55): home_view ErrorState CTA 通过 TOPIC_NAVIGATE 广播 ---
 
+    # holder 持有订阅时捕获的 page 引用: Flet PubSubHub 对 sync handler 经
+    # ThreadPoolExecutor 分发 (生产入口恒配 executor), 回调在池线程执行,
+    # ContextVar (ft.context.page) 不跨线程传播 → 池线程内 _get_page() 恒为 None,
+    # 且池线程内禁止直接调用 hook state setter (setter → _schedule_update →
+    # context.page 抛 RuntimeError, 即 F07-FULLMOUNT-1)。经 holder 取订阅时的
+    # page + page.run_task 调度, 把上下文依赖段 (_apply_navigate) 送回事件循环
+    # task 执行 (与 shortcut_dispatch_holder 的跨 effect 引用传递惯例一致)。
+    navigate_page_holder: Any = ft.use_ref(None)
+
+    async def _apply_navigate(target_tab: int, subtab: str | None) -> None:
+        """TOPIC_NAVIGATE 上下文依赖段: hook setter 分派 + 切页 (事件循环 task 中执行).
+
+        由 _on_navigate 经 page.run_task 调度, 本协程运行在事件循环上且
+        ft.context.page 可用, hook state setter (→ _schedule_update →
+        context.page) 才能安全执行 (F07-FULLMOUNT-1)。
+
+        Args:
+            target_tab: 目标 NavTabs 的 int 值。
+            subtab: 深链 subtab 段 (settings=子页 key / screener=股票代码),
+                无深链时为 None。
+
+        Note:
+            本协程闭包捕获的是订阅时 (use_effect(dependencies=[]) 只执行一次)
+            的 state 快照 → current_tab 读取是 stale 的, 与修复前 _on_navigate
+            行为一致; state 写入保持函数式更新。
+        """
+        # F13: 每次 backtest 导航递增透传请求序号 (函数式更新, 防闭包 stale 快照)。
+        # 置于 same-tab 早返回之前 —— 即使回测页已挂载或当前 tab 相同, 新序号仍触发
+        # BacktestView 消费 pending prefill (常驻页不重新 mount, 仅靠序号驱动)。
+        if target_tab == int(NavTabs.BACKTEST):
+            set_backtest_prefill_request(lambda old: (old + 1) if old is not None else 1)
+        # UX-01/UX-04: 深链 subtab 分派 (settings=子页 key / screener=股票代码);
+        # 未知/越页子页降级为切主 tab (不吞导航)
+        subtab_handled = False
+        if subtab is not None and target_tab == int(NavTabs.SETTINGS):
+            if subtab in SETTINGS_SUBTAB_INDEX:
+                # 函数式更新: 读取 hook.value 动态值递增 seq, 防闭包 stale 快照
+                set_settings_subtab_request(lambda old: (subtab, (old[1] + 1) if old else 1))
+                subtab_handled = True
+            # settings 未知子页 → 落入下方 warning 降级
+        elif subtab is not None and target_tab == int(NavTabs.SCREENER):
+            # UX-04: screener 段语义 = 股票代码 (任意非空字符串, 无白名单)
+            set_screener_stock_request(lambda old: (subtab, (old[1] + 1) if old else 1))
+            subtab_handled = True
+        if subtab is not None and not subtab_handled:
+            logger.warning(
+                "[AppLayout] Unknown subtab %r for tab %s, fallback to main tab",
+                subtab,
+                NavTabs(target_tab).name.lower(),
+            )
+            subtab = None
+        if target_tab == int(current_tab):
+            # stale 快照下几乎不命中; 命中时子页请求已先行 set, 深链不被吞
+            return
+        await _do_tab_switch(target_tab)
+
     def _on_navigate(topic: str, message: str) -> None:
-        """TOPIC_NAVIGATE 事件处理: 切换 NavigationRail selected_index (UX-01 深链协议).
+        """TOPIC_NAVIGATE 事件处理: 解析导航消息并调度切页 (UX-01 深链协议).
 
         消息格式: "<tab>" 或 "<tab>:<subtab>" (subtab 段语义由目标 tab 定义:
         settings = 子页 key 白名单, screener = 股票代码任意非空段 UX-04)。
         未知子页降级为切主 tab, 不吞导航; 格式非法整体忽略。
 
         Note:
-            本 handler 是订阅时闭包 (use_effect(dependencies=[]) 只执行一次),
-            捕获的 state 值读取是 stale 的 → 内部禁止读取 state 当前值做逻辑判断,
-            state 写入必须用函数式更新。
+            本 handler 是订阅时闭包 (use_effect(dependencies=[]) 只执行一次)。
+            Flet PubSubHub 对 sync handler 经 ThreadPoolExecutor 分发 (生产入口
+            恒配 executor), 本函数运行在池线程 —— ft.context.page 不可用
+            (ContextVar 不跨线程传播), 因此此处只做纯解析 (无 context 依赖),
+            上下文依赖段 (hook state setter / 切页) 一律经 page.run_task 调度到
+            _apply_navigate 在事件循环 task 中执行 (F07-FULLMOUNT-1)。
+            page 引用经 navigate_page_holder 取订阅时快照, 不依赖执行线程。
         """
         if topic != TOPIC_NAVIGATE:
             return
@@ -509,42 +569,16 @@ def AppLayout() -> ft.Container:
         except KeyError:
             logger.warning("[AppLayout] Unknown navigation target: %s", message)
             return
-        # F13: 每次 backtest 导航递增透传请求序号 (函数式更新, 防订阅时闭包 stale 快照)。
-        # 置于 same-tab 早返回之前 —— 即使回测页已挂载或当前 tab 相同, 新序号仍触发
-        # BacktestView 消费 pending prefill (常驻页不重新 mount, 仅靠序号驱动)。
-        if int(target_tab) == int(NavTabs.BACKTEST):
-            set_backtest_prefill_request(lambda old: (old + 1) if old is not None else 1)
-        # UX-01/UX-04: 深链 subtab 分派 (settings=子页 key / screener=股票代码);
-        # 未知/越页子页降级为切主 tab (不吞导航)
-        subtab_handled = False
-        if subtab is not None and int(target_tab) == int(NavTabs.SETTINGS):
-            if subtab in SETTINGS_SUBTAB_INDEX:
-                # 函数式更新: 读取 hook.value 动态值递增 seq, 防订阅时闭包 stale 快照
-                set_settings_subtab_request(lambda old: (subtab, (old[1] + 1) if old else 1))
-                subtab_handled = True
-            # settings 未知子页 → 落入下方 warning 降级
-        elif subtab is not None and int(target_tab) == int(NavTabs.SCREENER):
-            # UX-04: screener 段语义 = 股票代码 (任意非空字符串, 无白名单)
-            set_screener_stock_request(lambda old: (subtab, (old[1] + 1) if old else 1))
-            subtab_handled = True
-        if subtab is not None and not subtab_handled:
-            logger.warning(
-                "[AppLayout] Unknown subtab %r for tab %s, fallback to main tab",
-                subtab,
-                tab_name,
-            )
-            subtab = None
-        if int(target_tab) == int(current_tab):
-            # stale 快照下几乎不命中; 命中时子页请求已先行 set, 深链不被吞
+        page = navigate_page_holder.current
+        if page is None:
             return
-        page = _get_page()
-        if page is not None:
-            page.run_task(_do_tab_switch, int(target_tab))
+        page.run_task(_apply_navigate, int(target_tab), subtab)
 
     def _setup_navigate() -> None:
         page = _get_page()
         if page is None:
             return
+        navigate_page_holder.current = page
         page.pubsub.subscribe_topic(TOPIC_NAVIGATE, _on_navigate)
 
     def _cleanup_navigate() -> None:
