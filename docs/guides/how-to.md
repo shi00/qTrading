@@ -139,11 +139,11 @@ sidecars/qtrading-pg-sidecar doctor --data-dir <数据目录>
 
 输出 JSON（schema `qtrading.embedded_postgres.doctor.v1`），含 `initialized` / `pg_version` / `critical_files_missing` / `postgres_alive` / `state_file` / `issues` 等字段。
 
-exit code 含义：
-- `0` 成功（PG 运行中）
-- `20` PG 未运行（容忍，doctor 是只读诊断）
-- `40` 数据目录损坏
-- `50` 锁冲突（应用未完全退出）
+exit code 只有两种取值（doctor 是只读诊断，不获取维护锁）：
+- `0`：诊断流程执行成功（诊断 JSON 已输出）。**不等同于「数据库健康」**——数据目录损坏、版本不匹配等问题也会以 0 退出，结论须解析 JSON。
+- `2`：命令行参数错误，或诊断 JSON 输出失败。
+
+诊断结论全部在输出 JSON 中，不以退出码表达：`postgres_alive` 反映 PostgreSQL 进程活性（PG 未运行不是错误，不影响退出码）；`issues` 数组承载问题清单，`severity: "error"` 表示按当前状态 `run` 必然失败，`"warning"` 表示可运行但需关注。
 
 #### 9.3 备份（dump）
 
@@ -159,7 +159,18 @@ sidecars/qtrading-pg-sidecar dump --data-dir <数据目录> --output <备份文�
 sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --input <备份文件路径> [--target-data-dir <新数据目录>]
 ```
 
-**重要**：sidecar 采用原子切换策略 — 恢复到新目录而非覆盖原目录，避免恢复中途失败导致数据丢失。恢复成功后需手动切换数据目录指向新目录。
+**重要**：sidecar 采用原子切换策略 — 先恢复到新目录再切换，全程不原地覆盖写入，避免恢复中途失败破坏原数据。按是否指定 `--target-data-dir` 分两种模式：
+
+| 模式 | 行为 | 原数据目录去向 |
+|------|------|---------------|
+| **默认**（不指定 `--target-data-dir`） | 先恢复到数据目录同级的临时目录 `<数据目录名>.restore-<时间戳>`（initdb → 临时实例 → pg_restore → 健康检查），**全部成功后自动切换为当前数据目录**，并重置 state.json（status=stopped、清空 pid/port，避免残留旧实例状态误导 `status`）。**无需手动切换，完成后直接启动应用即可** | 改名为 `<数据目录名>.bak-<时间戳>`，**保留为备份（原数据不被销毁）**，确认恢复无误后可自行清理 |
+| **指定 `--target-data-dir <新目录>`** | 恢复到指定目录（目标目录已存在且非空时拒绝执行，不覆盖原则），**不切换当前数据目录**，state.json 不变。恢复成功后需自行让应用指向该目录（如调整 `AppConfig.embedded_pg_data_root`） | 完全不动 |
+
+**失败边界**（恢复执行失败统一返回 exit 30；维护锁冲突 exit 50、密码不可用 exit 16 等前置失败除外，见 9.6 错误分类）：
+
+- initdb / pg_restore / **健康检查**任一步失败：恢复用的临时目录（默认模式为 `.restore-*`，指定目标模式为 `<新目录>`）自动清理，原数据目录不受影响；
+- 默认模式切换阶段：旧目录改名 `.bak-*` 失败 → 报错退出，原目录与临时恢复目录均原地保留，需手动处理；新目录切换为当前目录失败 → 自动回滚改名（若回滚失败，原数据仍保留于 `.bak-*` 目录，需手动处理）；
+- 恢复期间新旧数据并存（默认模式成功后 `.bak-*` 备份也会继续保留），请确保磁盘空间充足。
 
 #### 9.5 维护实例（maintenance-shell）
 
@@ -167,23 +178,41 @@ sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --input <备份�
 sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 ```
 
-启动临时维护实例（需持维护锁：主实例/sidecar 运行中会拒绝，exit 50），输出含 `psql_path` + `connection_string_redacted`（密码已脱敏）的 JSON，用户可用 psql 直接连接进行高级维护。
+**交互式生命周期命令**（区别于 doctor/status 的 stdout 机器 JSON 协议，本命令 **stdout 无输出**）：持维护锁启动临时维护实例（主实例/sidecar 运行中会拒绝，exit 50；数据目录未初始化 exit 40；其余退出码见 9.6），实例存活期间可用 psql 反复连接、执行多条命令，结束后 sidecar 优雅停止实例并退出。启动到结束的时序如下（与 sidecar 实现一致）：
+
+1. **就绪后才提示连接信息**：随机分配端口启动临时实例，内部先以 psql `select 1` 探测就绪（探测窗口约 30 秒，失败 exit 12），探测通过后才开始打印连接信息——**提示出现时实例已可连接**。
+2. **提示全部走 stderr**：包含脱敏连接串（`postgresql://postgres:***@127.0.0.1:<port>/qtrading`，端口为本次随机分配）、完整 psql 命令行、密码文件位置（密码不打印明文，密码文件保护方式见 9.8），以及「完成后按 Enter 结束」提示。
+3. **交互使用**：按提示中的 psql 命令行连接实例，存活期间可执行多条命令（可多次启动 psql 会话）。
+4. **结束（Enter / EOF）**：等待 stdin 出现换行（终端按 **Enter**）后结束；stdin 到达 **EOF**（管道写端关闭、重定向空输入等非交互场景）或读取错误时同样立即结束，避免永久挂起。随后临时实例被优雅停止——**sidecar 进程退出即实例已停止，退出后不可再连接**，不存在「进程退出后解析 stdout 拿连接串」的用法。
 
 #### 9.6 错误分类
 
-| exit code | 错误类型 | 用户提示 |
-|-----------|---------|---------|
-| 10 | sidecar_arg_error | 维护命令参数错误 |
-| 11 | initdb_failed | 数据库初始化失败 |
-| 12 | pg_start_failed | 数据库启动失败 |
-| 15 | disk_full | 磁盘空间不足，请清理后重试 |
-| 20 | pg_not_running | 幂等，doctor 容忍 |
-| 40 | pgdata_corrupt | 数据目录损坏，请使用恢复向导 |
-| 50 | lock_conflict | 请先关闭 qTrading 再执行维护操作 |
+退出码正本为 `sidecars/qtrading-pg-sidecar/src/exit_codes.rs`（编号 append-only，禁止复用）；下表按该文件常量逐项列出，修改 sidecar 退出码语义时须同步本表。「典型触发命令」指可能返回该码的命令，非穷尽执行路径。
+
+| exit code | 常量 | 语义 | 典型触发命令 |
+|-----------|------|------|-------------|
+| 0 | `SUCCESS` | 进程执行成功；doctor 的诊断结论须看 JSON `issues` 字段，不等同数据库健康 | 全部命令 |
+| 2 | `ARGUMENT_ERROR` | 命令行参数解析失败，或 stdout JSON 输出失败 | 全部命令 |
+| 10 | `SETUP_FAILED` | 内置 PostgreSQL binaries 解压/安装失败（install dir 不完整） | run / dump / restore / maintenance-shell / reset-password |
+| 11 | `INITDB_FAILED` | initdb 初始化数据目录失败 | run / restore |
+| 12 | `START_FAILED` | postgres 实例启动失败（端口分配失败、启动超时、临时实例启动失败） | run / dump / restore / maintenance-shell |
+| 13 | `HEALTH_CHECK_FAILED` | 启动后健康检查未通过 | run |
+| 14 | `CREATE_DATABASE_FAILED` | 业务库创建失败 | run |
+| 15 | `PREFLIGHT_FAILED` | 资源预检失败：磁盘空间不足 / 目录权限不足 / 文件系统不支持 / 网盘同步路径 / 密码文件权限过宽 | run |
+| 16 | `PASSWORD_FAILED` | 密码文件缺失（PGDATA 已存在）或认证不匹配（28P01） | run / dump / restore / maintenance-shell / reset-password |
+| 20 | `STOP_FAILED` | 停止 postgres 失败（分级停止后进程仍存活）；PG 未运行时 stop 幂等成功返回 0 | stop / run |
+| 30 | `DUMP_RESTORE_FAILED` | 备份/恢复执行失败：备份文件不存在或损坏、版本不兼容、pg_dump/pg_restore 执行失败、恢复目录切换失败等 | dump / restore / reset-password |
+| 40 | `DATA_DIR_ABNORMAL` | 数据目录状态异常：非空但无 PG_VERSION、主版本不匹配、pg_control/WAL 损坏嫌疑、关键文件缺失 | run / maintenance-shell / reset-password |
+| 50 | `LOCK_CONFLICT` | 维护锁冲突：qTrading 或另一个维护进程正在使用该 PGDATA | run / stop / dump / restore / maintenance-shell / reset-password |
+| 60 | `POSTGRES_DIED` | 监督期间 postgres 意外退出（sidecar 不自动重启） | run |
+
+> doctor 只返回 0/2 两种退出码（见 9.2），上表其余退出码不会由 doctor 返回。
 
 #### 9.7 Python 服务封装
 
-工程实现见 `services/embedded_pg_maintenance_service.py`（`EmbeddedPgMaintenanceService` 单例），4 个命令（`doctor` / `dump` / `restore` / `maintenance_shell`）通过 `ThreadPoolManager.run_async(TaskType.IO)` 提交同步 `subprocess.run` 避免阻塞事件循环（R16）。设置页「数据库」标签底部的「离线维护工具」说明区块指向本章节。
+工程实现见 `services/embedded_pg_maintenance_service.py`（`EmbeddedPgMaintenanceService` 单例），4 个命令（`doctor` / `dump` / `restore` / `maintenance_shell`）通过 `ThreadPoolManager.run_async(TaskType.IO)` 提交同步 `subprocess.run` 避免阻塞事件循环（R16）。设置页「数据库」标签底部的「离线维护工具」说明区块指向本章节。Python 包装内部的退出码→错误类型映射仅用于日志分级与用户提示，退出码语义正本以 sidecar 源码 `exit_codes.rs` 与各命令实际返回路径为准（见 9.6）。
+
+注意：`maintenance_shell()` 包装当前**不能程序化获取存活维护实例的连接信息**——sidecar 对该命令 stdout 无输出（交互提示走 stderr，见 9.5），且进程退出时实例已停止，包装进程退出后解析 stdout 只会得到空连接信息。交互式维护请直接运行 sidecar CLI 或维护脚本（见 9.5）；机器入口如需此能力须单独设计。
 
 #### 9.8 密码文件与备份的安全要求
 
@@ -318,7 +347,7 @@ CI 通过 `.github/workflows/ci_cd.yml` 的 `embedded-tests` job 自动运行（
 
 | 现象 | 可能原因 | 排查点 |
 |------|---------|--------|
-| 应用启动即崩 / 打不开 | PG 数据目录损坏或维护锁冲突 | 先跑离线诊断 `sidecars/qtrading-pg-sidecar doctor`（流程见本文档第 9 章），退出码 40/50 分别对应损坏/锁冲突 |
+| 应用启动即崩 / 打不开 | PG 数据目录损坏或维护锁冲突 | 先跑离线诊断 `sidecars/qtrading-pg-sidecar doctor`（流程见本文档第 9 章），诊断结论看输出 JSON 的 `issues` 字段（doctor 退出码 0 不代表健康）；exit 40（数据目录异常）/ exit 50（维护锁冲突）是 `run`/`stop` 等命令的退出码 |
 | 进程无栈静默退出 | 未捕获异常或原生扩展崩溃 | 查 `logs/error.log` 与 `logs/latest.log`；仍无线索则按 12.1 导出诊断包 |
 | 界面卡死 | 主循环被同步 IO/CPU 阻塞 | 在 `app.log` 搜超 `PerfThreshold` 的告警；核对 UI 事件是否经 `ThreadPoolManager.run_async()` 提交（R16） |
 | 数据库连接断开后操作持续失败 | PG 进程整体不可用，连接池无法自愈 | 显式调用 `CacheManager.init_db()` 重建引擎（不作自动重连）；生命周期契约见 [data-sync.md](../patterns/data-sync.md) |
