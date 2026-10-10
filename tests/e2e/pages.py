@@ -82,6 +82,31 @@ class ScreenerPage:
         name = strategy_label(strategy_key)
         await self.ap.select_option(EIDS.SCREENER.STRATEGY_DROPDOWN, name, timeout_ms=timeout_ms)
 
+    async def click_run_backtest(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击「去回测」跳转按钮（F07 full-mount：anchor 精确点击 + 重试兜底）。
+
+        按钮文本与左导航 nav_backtest label 同名，click_button 文本定位存在
+        歧义/吞点风险（full-mount 首跑实测误点后 _handle_backtest_jump 静默
+        return），须走 RUN_BACKTEST_BUTTON anchor。整体重试（N=3）对齐
+        DataPage.select_table 模式，抗 headless CanvasKit 吞点——以「按钮消失」
+        为跳转确认（跳转后选股页 offstage，语义节点被排除，见 anchor.py P0-2
+        矩阵；跳转未发生时按钮仍可见，重试点击）。
+        """
+        last_exc: Exception | None = None
+        for idx in range(TIMEOUTS.RETRY_ATTEMPTS):
+            try:
+                await self.ap.click(EIDS.SCREENER.RUN_BACKTEST_BUTTON, timeout_ms=timeout_ms)
+                # 跳转确认：按钮语义节点消失（选股页 offstage 语义排除）
+                await self.ap.expect_hidden(EIDS.SCREENER.RUN_BACKTEST_BUTTON, timeout_ms=2000)
+                return
+            except Exception as exc:  # noqa: BLE001  # 记录末次异常，耗尽后抛原始异常
+                last_exc = exc
+                if idx < TIMEOUTS.RETRY_ATTEMPTS - 1:  # 仅尝试间休眠，末次失败不再等待直接抛原始异常
+                    await asyncio.sleep(TIMEOUTS.RETRY_INTERVAL_MS / 1000)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("click_run_backtest: exhausted retries without recorded failure")  # 逻辑上不可达
+
     async def run(self, timeout_ms: int = TIMEOUTS.TITLE) -> None:
         """点击执行选股按钮，带"确认触发"重试兜底。
 

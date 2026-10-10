@@ -1763,6 +1763,59 @@ async def news_risk_page_noevents(e2e_browser, seed_nr_noevents, news_risk_app_n
         yield fp
 
 
+# ============================================================================
+# F07 生产挂载场景池（full-mount）
+#
+# E2E_FULL_MOUNT=true：app_layout._build_pages_stack 按生产模型常驻构造全部视图
+# （非激活视图不再空占位），覆盖「切页不销毁组件 / use_state 跨页保持 / use_dialog
+# overlay 跨页存活」的生产挂载行为（tests/e2e/test_production_mount.py）。
+# 与快速 smoke 池（按页挂载，启动优化）互补，覆盖边界见 ui/app_layout.py
+# _make_content docstring。独立 session 池 + 播种（对齐 news_risk 场景池机制），
+# 与 ro/mut 池互不污染。
+# ============================================================================
+
+
+@pytest.fixture(scope="session")
+def embedded_url_file_fullmount(tmp_path_factory):
+    return tmp_path_factory.mktemp("embedded_url_fullmount") / "sidecar.url"
+
+
+@pytest.fixture(scope="session")
+def flet_app_full_mount(tmp_path_factory, real_sidecar_binary_e2e, embedded_url_file_fullmount) -> Iterator[AppServer]:
+    """F07 full-mount 场景池：E2E_FULL_MOUNT=true 的独立 session app 进程。"""
+    print("[E2E DIAG] flet_app_full_mount: spawning (pool=fullmount)", flush=True)
+    app = _spawn_app_session(
+        tmp_path_factory,
+        real_sidecar_binary_e2e,
+        pool_name="fullmount",
+        embedded_url_file=embedded_url_file_fullmount,
+        extra_env={"E2E_FULL_MOUNT": "true"},
+    )
+    print(
+        f"[E2E DIAG] flet_app_full_mount: ready, proc.pid={app.proc.pid}, url={app.url}",
+        flush=True,
+    )
+    yield app
+    print(f"[E2E DIAG] flet_app_full_mount: teardown, terminating proc {app.proc.pid}", flush=True)
+    _terminate(app.proc)
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def seed_full_mount(e2e_browser, flet_app_full_mount, embedded_url_file_fullmount):
+    """播种 full-mount 池（复用共享播种逻辑，keep-alive 防 main(page) 被取消）。"""
+    keep_alive = await _seed_app_database(flet_app_full_mount, embedded_url_file_fullmount, e2e_browser)
+    yield
+    if keep_alive is not None:
+        await keep_alive.close()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def full_mount_page(e2e_browser, seed_full_mount, flet_app_full_mount, request):
+    """F07 full-mount 场景 Page：复用统一生命周期（canary + teardown + 视口）。"""
+    async with _e2e_page_with_viewport(e2e_browser, flet_app_full_mount, request, viewport=(1400, 900)) as fp:
+        yield fp
+
+
 @pytest.fixture(autouse=True)
 def _collect_e2e_artifacts(request):
     """PR-4 Task 4.7: 集中化 artifact 收集。

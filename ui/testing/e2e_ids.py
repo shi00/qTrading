@@ -64,6 +64,9 @@ class _ScreenerIds:
     RUN_BUTTON: Eid = ("e2e.screener.run_button", AnchorKind.INTERACTIVE)
     EXPORT_CSV_BUTTON: Eid = ("e2e.screener.export_csv_button", AnchorKind.INTERACTIVE)
     EXPORT_EXCEL_BUTTON: Eid = ("e2e.screener.export_excel_button", AnchorKind.INTERACTIVE)
+    # F07 full-mount：选股→回测跳转按钮 anchor。文本「回测」与左导航 nav label 同名，
+    # click_button 文本定位存在歧义/吞点风险，full-mount E2E 须 anchor 精确点击。
+    RUN_BACKTEST_BUTTON: Eid = ("e2e.screener.run_backtest_button", AnchorKind.INTERACTIVE)
 
     # 动态 anchor 前缀（静态方法生成，禁止调用方字符串拼接）
     _RESULT_ROW_PREFIX = "e2e.screener.result_row"
