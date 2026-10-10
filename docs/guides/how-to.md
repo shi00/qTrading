@@ -159,7 +159,18 @@ sidecars/qtrading-pg-sidecar dump --data-dir <数据目录> --output <备份文�
 sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --input <备份文件路径> [--target-data-dir <新数据目录>]
 ```
 
-**重要**：sidecar 采用原子切换策略 — 恢复到新目录而非覆盖原目录，避免恢复中途失败导致数据丢失。恢复成功后需手动切换数据目录指向新目录。
+**重要**：sidecar 采用原子切换策略 — 先恢复到新目录再切换，全程不原地覆盖写入，避免恢复中途失败破坏原数据。按是否指定 `--target-data-dir` 分两种模式：
+
+| 模式 | 行为 | 原数据目录去向 |
+|------|------|---------------|
+| **默认**（不指定 `--target-data-dir`） | 先恢复到数据目录同级的临时目录 `<数据目录名>.restore-<时间戳>`（initdb → 临时实例 → pg_restore → 健康检查），**全部成功后自动切换为当前数据目录**，并重置 state.json（status=stopped、清空 pid/port，避免残留旧实例状态误导 `status`）。**无需手动切换，完成后直接启动应用即可** | 改名为 `<数据目录名>.bak-<时间戳>`，**保留为备份（原数据不被销毁）**，确认恢复无误后可自行清理 |
+| **指定 `--target-data-dir <新目录>`** | 恢复到指定目录（目标目录已存在且非空时拒绝执行，不覆盖原则），**不切换当前数据目录**，state.json 不变。恢复成功后需自行让应用指向该目录（如调整 `AppConfig.embedded_pg_data_root`） | 完全不动 |
+
+**失败边界**（失败统一返回 exit 30，见 9.6 错误分类）：
+
+- initdb / pg_restore / **健康检查**任一步失败：恢复用的临时目录（默认模式为 `.restore-*`，指定目标模式为 `<新目录>`）自动清理，原数据目录不受影响；
+- 默认模式切换阶段：旧目录改名 `.bak-*` 失败 → 报错退出，原目录与临时恢复目录均原地保留，需手动处理；新目录切换为当前目录失败 → 自动回滚改名（若回滚失败，原数据仍保留于 `.bak-*` 目录，需手动处理）；
+- 恢复期间新旧数据并存（默认模式成功后 `.bak-*` 备份也会继续保留），请确保磁盘空间充足。
 
 #### 9.5 维护实例（maintenance-shell）
 
@@ -178,6 +189,7 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 | 12 | pg_start_failed | 数据库启动失败 |
 | 15 | disk_full | 磁盘空间不足，请清理后重试 |
 | 20 | pg_not_running | 幂等，doctor 容忍 |
+| 30 | dump_restore_failed | 备份/恢复执行失败（备份文件损坏或版本不兼容等），详见命令输出 |
 | 40 | pgdata_corrupt | 数据目录损坏，请使用恢复向导 |
 | 50 | lock_conflict | 请先关闭 qTrading 再执行维护操作 |
 
