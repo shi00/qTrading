@@ -740,8 +740,9 @@ class TestRedlinesYamlConsistency:
     校验 docs/governance/redlines.yml 与 CLAUDE.md §3.1 红线表一致:
     - YAML 解析成功 + 含 redlines key
     - 每条红线含 6 字段 (id/title/description/enforcement/automation_coverage/human_review_required)
-    - R 编号连续 append-only (R1~R24, 无缺号/重号/跳号)
+    - R 编号当前连续 (R1~R24, 无缺号/重号/跳号; 为 append-only 不复用语义的机器可验证子集)
     - CLAUDE.md §3.1 表格行数 = yml 条目数
+    - CLAUDE.md §3.1 表格与 yml 两侧 ID 集合一致 (F04: 等行数替换/漏行不可逃逸)
     - automation_coverage 值合法 (full/partial/none) 且与 human_review_required 一致
     - CLAUDE.md §3.1 表格与 YAML 字段语义一致 (id/title/description/enforcement)
     - 构造缺 R15 的 yml 验证检测
@@ -777,7 +778,7 @@ class TestRedlinesYamlConsistency:
             assert not missing, f"redlines[{i}] 缺字段: {missing}, 实际字段: {set(entry.keys())}"
 
     def test_redline_ids_are_sequential_append_only(self):
-        """R 编号连续 append-only: R1, R2, ..., R_N, 无缺号/重号/跳号."""
+        """R 编号当前连续: R1, R2, ..., R_N, 无缺号/重号/跳号 (append-only 不复用的机器可验证子集)."""
         import re
 
         import yaml
@@ -1040,6 +1041,61 @@ class TestRedlinesYamlConsistency:
         errors = check_redlines_yaml_consistency()
         assert any("不是 EXCEPTIONABLE 规则" in e for e in errors), f"应报例外引用非 EXCEPTIONABLE 规则, got: {errors}"
 
+    # === F04: 等行数替换 / 畸形行 / ID 集合一致性失败用例 ===
+
+    @staticmethod
+    def _claude_table_rows() -> list[str]:
+        """从真实 CLAUDE.md 提取 §3.1 红线表行 (供 F04 用例篡改后构造临时文档)."""
+        import re
+
+        from check_docs_consistency import CLAUDE_PATH
+
+        content = CLAUDE_PATH.read_text(encoding="utf-8")
+        return [line for line in content.splitlines() if re.match(r"^\|\s*R\d+\s*\|", line)]
+
+    def test_detects_equal_row_count_id_replacement(self, tmp_path, monkeypatch):
+        """等行数替换 (R24 行替换为 R23 副本) 必须报错 (F04 核心逃逸路径)."""
+        from check_docs_consistency import check_redlines_yaml_consistency
+
+        rows = self._claude_table_rows()
+        r23_row = next(line for line in rows if line.startswith("| R23"))
+        replaced = [r23_row if line.startswith("| R24") else line for line in rows]
+        assert len(replaced) == len(rows), "前置: 替换不应改变行数"
+        tmp_claude = tmp_path / "CLAUDE_replaced.md"
+        tmp_claude.write_text("\n".join(replaced) + "\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", tmp_claude)
+
+        errors = check_redlines_yaml_consistency()
+        assert any("重复" in e and "R23" in e for e in errors), f"应报 R23 重复, got: {errors}"
+        assert any("缺失" in e and "R24" in e for e in errors), f"应报 R24 缺失, got: {errors}"
+
+    def test_detects_abnormal_column_count_row(self, tmp_path, monkeypatch):
+        """行数相等但存在列数异常行 (未转义管道符) 必须报错 (F04)."""
+        from check_docs_consistency import check_redlines_yaml_consistency
+
+        rows = self._claude_table_rows()
+        corrupted = [line + " 意外管道 | 尾部 |" if line.startswith("| R1 ") else line for line in rows]
+        assert len(corrupted) == len(rows), "前置: 篡改不应改变行数"
+        tmp_claude = tmp_path / "CLAUDE_corrupted.md"
+        tmp_claude.write_text("\n".join(corrupted) + "\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", tmp_claude)
+
+        errors = check_redlines_yaml_consistency()
+        assert any("列数异常" in e for e in errors), f"应报列数异常, got: {errors}"
+
+    def test_detects_id_set_mismatch_extra_in_claude(self, tmp_path, monkeypatch):
+        """CLAUDE.md 表含 yml 中不存在的 id (如 R99) 必须由集合断言报错 (F04)."""
+        from check_docs_consistency import check_redlines_yaml_consistency
+
+        rows = self._claude_table_rows()
+        fake_row = "| R99 | **幽灵红线** | yml 中不存在的 id | 测试 |"
+        tmp_claude = tmp_path / "CLAUDE_extra.md"
+        tmp_claude.write_text("\n".join([*rows, fake_row]) + "\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", tmp_claude)
+
+        errors = check_redlines_yaml_consistency()
+        assert any("不存在的红线 id" in e and "R99" in e for e in errors), f"应报 R99 不在 yml, got: {errors}"
+
     # === _normalize_for_comparison 纯函数测试 ===
 
     def test_normalize_removes_bold_markers(self):
@@ -1080,7 +1136,8 @@ class TestRedlinesYamlConsistency:
         from check_docs_consistency import _parse_claude_redline_table
 
         claude_content = "| R1 | **架构越界** | `core/` 导入任何其他层模块 | pre-commit（import-linter 4 条契约） |\n"
-        result = _parse_claude_redline_table(claude_content)
+        result, errors = _parse_claude_redline_table(claude_content)
+        assert errors == [], f"标准行不应报错, got: {errors}"
         assert "R1" in result
         assert result["R1"]["title"] == "架构越界"
         assert result["R1"]["description"] == "core/ 导入任何其他层模块"
@@ -1094,11 +1151,40 @@ class TestRedlinesYamlConsistency:
             "| R6 | **过时类型注解** | 使用 `Union[X, Y]` / `Optional[X]` "
             "(必须使用 `X \\| Y` / `X \\| None`) | ruff |\n"
         )
-        result = _parse_claude_redline_table(claude_content)
+        result, errors = _parse_claude_redline_table(claude_content)
+        assert errors == [], f"转义管道符不应报错, got: {errors}"
         assert "R6" in result
         assert result["R6"]["title"] == "过时类型注解"
         assert result["R6"]["description"] == "使用 Union[X, Y] / Optional[X] (必须使用 X | Y / X | None)"
         assert result["R6"]["enforcement"] == "ruff"
+
+    def test_parse_rejects_duplicate_id(self):
+        """重复 id 报错并保留首次出现 (F04: dict 覆盖写入会让等行数替换逃逸)."""
+        from check_docs_consistency import _parse_claude_redline_table
+
+        claude_content = "| R23 | **裸 UI token** | 原描述 | pre-commit |\n| R23 | **伪标题** | 伪描述 | 伪强制状态 |\n"
+        result, errors = _parse_claude_redline_table(claude_content)
+        assert any("重复" in e and "R23" in e for e in errors), f"应报 id 重复, got: {errors}"
+        # 保留首次出现, 第二条不覆盖
+        assert result["R23"]["title"] == "裸 UI token"
+
+    def test_parse_rejects_missing_columns(self):
+        """列数不足 (段数 < 6) 报错, 不静默跳过 (F04: 畸形行可被行数校验掩盖)."""
+        from check_docs_consistency import _parse_claude_redline_table
+
+        claude_content = "| R1 | **架构越界** | 只有三列内容 |\n"
+        result, errors = _parse_claude_redline_table(claude_content)
+        assert "R1" not in result
+        assert any("列数异常" in e for e in errors), f"应报列数异常, got: {errors}"
+
+    def test_parse_rejects_extra_columns(self):
+        """描述列含未转义管道符 (段数 > 6) 报错, 不静默截断字段 (F04)."""
+        from check_docs_consistency import _parse_claude_redline_table
+
+        claude_content = "| R1 | **架构越界** | 描述 A | 描述 B | 强制状态 |\n"
+        result, errors = _parse_claude_redline_table(claude_content)
+        assert "R1" not in result
+        assert any("列数异常" in e and "7 段" in e for e in errors), f"应报 7 段列数异常, got: {errors}"
 
 
 class TestEnforcementMapping:
@@ -3121,8 +3207,8 @@ class TestCanonicalTopicsYamlConsistency:
         assert errors == [], "当前项目配置应通过 canonical-topics.yml 校验, 失败:\n  " + "\n  ".join(errors)
 
     def test_release_and_packaging_canonical_topics_exist(self):
-        """GDR-08: release 与 packaging 主题存在且决策树映射与合并白名单正确绑定."""
-        from check_docs_consistency import _DECISION_TREE_MERGED_IDS, _load_canonical_topics
+        """GDR-08: release 与 packaging 主题存在且 §1.8 ci-cd 合并行锚点正确承载两主题 (F03)."""
+        from check_docs_consistency import CLAUDE_PATH, _load_canonical_topics, _parse_decision_tree_rows
 
         topics = _load_canonical_topics()
         assert topics is not None
@@ -3131,8 +3217,12 @@ class TestCanonicalTopicsYamlConsistency:
         assert "packaging" in topic_map
         assert topic_map["release"]["canonical"] == "docs/guides/ci-cd.md"
         assert topic_map["packaging"]["canonical"] == "docs/guides/dependency-management.md"
-        assert "docs/guides/ci-cd.md" in _DECISION_TREE_MERGED_IDS
-        assert _DECISION_TREE_MERGED_IDS["docs/guides/ci-cd.md"] == {"ci-deps", "release"}
+        # 共享 canonical 的主题归属由宪法 §1.8 正文锚点推导（不再依赖脚本内手工白名单）
+        rows, parse_errors = _parse_decision_tree_rows(CLAUDE_PATH.read_text(encoding="utf-8"))
+        assert parse_errors == [], f"真实 §1.8 锚点解析应无错误, got: {parse_errors}"
+        ci_rows = [row for row in rows if "docs/guides/ci-cd.md" in row.entry_paths]
+        assert len(ci_rows) == 1, "docs/guides/ci-cd.md 应恰好由一行承载"
+        assert set(ci_rows[0].route_ids) == {"ci-deps", "release"}
 
     def test_requirement_topic_canonical_and_decision_tree_extracted(self):
         """GDR-04: requirement 主题正本存在且能被 _extract_decision_tree_targets 提取."""
@@ -4069,10 +4159,15 @@ class TestReviewsFindingsIndex:
 
 
 class TestDecisionTreeMapping:
-    """决策树与其机器可读镜像双向一致（DOC-04）：CLAUDE.md §1.8 ↔ canonical-topics.yml."""
+    """决策树与机器可读镜像逐行绑定一致（DOC-04）：CLAUDE.md §1.8 ↔ canonical-topics.yml.
+
+    F03：路径集合相等不保证任务归属相等——§1.8 每个数据行以行尾 `<!-- route: ... -->` 锚
+    声明承载的 yml topic id，检查按「行 → 锚 id → canonical」精确绑定；两行入口交换、
+    合并成员删除、行内夹带其他正本、缺锚行均须检出（失败用例见本类各 test_detects_*）。
+    """
 
     def test_mapping_pass_on_current_repo(self):
-        """真实 §1.8 决策树与 canonical-topics.yml 应双向一致（无错误）."""
+        """真实 §1.8 决策树与 canonical-topics.yml 应逐行绑定一致（无错误）."""
         from check_docs_consistency import check_decision_tree_mapping
 
         assert check_decision_tree_mapping() == []
@@ -4088,7 +4183,7 @@ class TestDecisionTreeMapping:
             "## 1.8 任务类型 → 必读文件\n"
             "| 任务类型 | 必读入口 |\n"
             "| --- | --- |\n"
-            "| X | [foo](./docs/patterns/foo.md) |\n",
+            "| X | [foo](./docs/patterns/foo.md) <!-- route: foo --> |\n",
             encoding="utf-8",
         )
         yml = tmp_path / "canonical-topics.yml"
@@ -4105,7 +4200,7 @@ class TestDecisionTreeMapping:
         )
 
     def test_detects_yml_canonical_missing_in_claude(self, tmp_path, monkeypatch):
-        """yml 登记的 canonical 未在 §1.8 出现 → 报错."""
+        """yml 主题未锚定到 §1.8 任何行 → 报错."""
         import yaml
 
         from check_docs_consistency import check_decision_tree_mapping
@@ -4115,11 +4210,11 @@ class TestDecisionTreeMapping:
             "## 1.8 任务类型 → 必读文件\n"
             "| 任务类型 | 必读入口 |\n"
             "| --- | --- |\n"
-            "| X | [foo](./docs/patterns/foo.md) |\n",
+            "| X | [foo](./docs/patterns/foo.md) <!-- route: foo --> |\n",
             encoding="utf-8",
         )
         yml = tmp_path / "canonical-topics.yml"
-        # yml 追加一个宪法未出现的 canonical，制造反向漂移
+        # yml 追加一个宪法未锚定的主题，制造反向漂移
         yml.write_text(
             yaml.safe_dump(
                 {
@@ -4135,50 +4230,159 @@ class TestDecisionTreeMapping:
         monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
 
         errors = check_decision_tree_mapping()
-        assert any("CONTRIBUTING.md" in e and "未在 CLAUDE.md" in e for e in errors), f"应检出反向漂移, got: {errors}"
+        assert any("CONTRIBUTING.md" in e and "未锚定到 CLAUDE.md" in e for e in errors), (
+            f"应检出反向漂移, got: {errors}"
+        )
+
+    def test_detects_route_swap_between_rows(self, tmp_path, monkeypatch):
+        """F03 核心反例：两行合法入口交换（路径集合不变）→ 必须逐行报错."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        header = "## 1.8 任务类型 → 必读文件\n| 任务类型 | 必读入口 |\n| --- | --- |\n"
+        # 交换后：strategy 行指 dao 正本、dao 行指 strategy 正本（交换前为各自正本，可通过）
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            header
+            + "| 策略 | [s](./docs/patterns/dao-pattern.md) <!-- route: strategy --> |\n"
+            + "| DAO | [d](./docs/patterns/strategy-template.md) <!-- route: dao --> |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {"id": "strategy", "title": "S", "canonical": "docs/patterns/strategy-template.md"},
+                        {"id": "dao", "title": "D", "canonical": "docs/patterns/dao-pattern.md"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert any("第 1 行" in e and "docs/patterns/strategy-template.md" in e for e in errors), (
+            f"应检出第 1 行 strategy 锚的 canonical 缺席, got: {errors}"
+        )
+        assert any("第 1 行" in e and "docs/patterns/dao-pattern.md" in e for e in errors), (
+            f"应检出第 1 行入口夹带 dao 正本, got: {errors}"
+        )
+
+    def test_route_binding_passes_before_swap(self, tmp_path, monkeypatch):
+        """交换前的正确配置应通过（防交换用例误报，证明报错来自交换而非结构）."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        header = "## 1.8 任务类型 → 必读文件\n| 任务类型 | 必读入口 |\n| --- | --- |\n"
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            header
+            + "| 策略 | [s](./docs/patterns/strategy-template.md) <!-- route: strategy --> |\n"
+            + "| DAO | [d](./docs/patterns/dao-pattern.md) <!-- route: dao --> |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {"id": "strategy", "title": "S", "canonical": "docs/patterns/strategy-template.md"},
+                        {"id": "dao", "title": "D", "canonical": "docs/patterns/dao-pattern.md"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        assert check_decision_tree_mapping() == []
+
+    def test_detects_row_entry_replaced_with_other_canonical(self, tmp_path, monkeypatch):
+        """行入口被换成另一已登记正本（另一存在章节）→ 逐行报错."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        header = "## 1.8 任务类型 → 必读文件\n| 任务类型 | 必读入口 |\n| --- | --- |\n"
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            header
+            + "| VM | [v](./docs/patterns/strategy-template.md) <!-- route: viewmodel --> |\n"
+            + "| 策略 | [s](./docs/patterns/strategy-template.md) <!-- route: strategy --> |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {"id": "viewmodel", "title": "VM", "canonical": "docs/patterns/mvvm.md"},
+                        {"id": "strategy", "title": "S", "canonical": "docs/patterns/strategy-template.md"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert any("第 1 行" in e and "docs/patterns/mvvm.md" in e for e in errors), (
+            f"应检出 viewmodel 锚的 canonical 缺席该行入口, got: {errors}"
+        )
+        assert any("第 1 行" in e and "docs/patterns/strategy-template.md" in e for e in errors), (
+            f"应检出第 1 行入口不属于其锚点主题, got: {errors}"
+        )
 
     def test_detects_shared_canonical_topic_misassigned(self, tmp_path, monkeypatch):
-        """共享 canonical 的 yml 主题归属与白名单不一致（主题正本被指到别的主体）→ 报错."""
+        """共享 canonical 的行承载主题与锚点声明不一致（归属错配）→ 逐行报错."""
         import yaml
 
         from check_docs_consistency import check_decision_tree_mapping
 
         claude = tmp_path / "CLAUDE.md"
+        # 行 1 锚点声明承载 a,b，但行入口写的是 c 的正本 flet/README（a/b 的 canonical 是 mvvm.md）；
+        # 行 2 正确承载 c（保证 flet/README 已登记，夹带检查与方向 1 职责分离）
         claude.write_text(
             "## 1.8 任务类型 → 必读文件\n"
             "| 任务类型 | 必读入口 |\n"
             "| --- | --- |\n"
-            "| 视图 | [docs/flet/README.md](./docs/flet/README.md) |\n"
-            "| 主题 A | [docs/patterns/mvvm.md](./docs/patterns/mvvm.md) |\n",
+            "| 主题 A | [docs/flet/README.md](./docs/flet/README.md) <!-- route: a,b --> |\n"
+            "| 主题 C | [docs/flet/README.md](./docs/flet/README.md) <!-- route: c --> |\n",
             encoding="utf-8",
         )
         yml = tmp_path / "canonical-topics.yml"
-        # a/b 分别指向不同正本，集合级断言会因两者都存在于两侧而通过，但归属已错配
         yml.write_text(
             yaml.safe_dump(
                 {
                     "topics": [
                         {"id": "a", "title": "A", "canonical": "docs/patterns/mvvm.md"},
                         {"id": "b", "title": "B", "canonical": "docs/patterns/mvvm.md"},
+                        {"id": "c", "title": "C", "canonical": "docs/flet/README.md"},
                     ]
                 }
             ),
             encoding="utf-8",
         )
-        monkeypatch.setattr(
-            "check_docs_consistency._DECISION_TREE_MERGED_IDS",
-            {"docs/patterns/mvvm.md": {"a", "c"}},
-        )
         monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
         monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
 
         errors = check_decision_tree_mapping()
-        assert any("docs/patterns/mvvm.md" in e and "归属 ['a', 'b']" in e for e in errors), (
-            f"应检出共享 canonical 归属错配, got: {errors}"
+        assert any("第 1 行" in e and "docs/patterns/mvvm.md" in e and "不在该行入口" in e for e in errors), (
+            f"应检出锚主题 canonical 缺席行入口, got: {errors}"
+        )
+        assert any("第 1 行" in e and "docs/flet/README.md" in e and "不属于该行锚点主题" in e for e in errors), (
+            f"应检出行入口夹带非本行主题正本, got: {errors}"
         )
 
-    def test_detects_merged_topic_removed(self, tmp_path, monkeypatch):
-        """共享 canonical 的期望主题被删除（合并行承载主题数丢）→ 报错."""
+    def test_detects_merged_topic_removed_from_anchor(self, tmp_path, monkeypatch):
+        """合并行锚点成员在 yml 被删除（合并行承载主题数丢）→ 报锚引用未登记."""
         import yaml
 
         from check_docs_consistency import check_decision_tree_mapping
@@ -4188,28 +4392,25 @@ class TestDecisionTreeMapping:
             "## 1.8 任务类型 → 必读文件\n"
             "| 任务类型 | 必读入口 |\n"
             "| --- | --- |\n"
-            "| 视图 | [docs/flet/README.md](./docs/flet/README.md) |\n",
+            "| 视图 | [docs/flet/README.md](./docs/flet/README.md) <!-- route: a,b --> |\n",
             encoding="utf-8",
         )
         yml = tmp_path / "canonical-topics.yml"
+        # yml 只剩 a，b 被删除
         yml.write_text(
             yaml.safe_dump({"topics": [{"id": "a", "title": "A", "canonical": "docs/flet/README.md"}]}),
             encoding="utf-8",
         )
-        monkeypatch.setattr(
-            "check_docs_consistency._DECISION_TREE_MERGED_IDS",
-            {"docs/flet/README.md": {"a", "b"}},
-        )
         monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
         monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
 
         errors = check_decision_tree_mapping()
-        assert any("docs/flet/README.md" in e and "归属" in e for e in errors), (
-            f"应检出共享 canonical 主题删除, got: {errors}"
+        assert any("'b'" in e and "未在 canonical-topics.yml 中登记" in e for e in errors), (
+            f"应检出锚点引用已删除主题, got: {errors}"
         )
 
-    def test_detects_unregistered_shared_canonical(self, tmp_path, monkeypatch):
-        """单主题 canonical 被多个 yml 主题共享但未登记白名单 → 报错."""
+    def test_detects_merged_topic_removed_from_yml(self, tmp_path, monkeypatch):
+        """yml 主题被删后宪法锚点仍引用（或 yml 新增主题未锚定）→ 报反向漂移."""
         import yaml
 
         from check_docs_consistency import check_decision_tree_mapping
@@ -4219,7 +4420,42 @@ class TestDecisionTreeMapping:
             "## 1.8 任务类型 → 必读文件\n"
             "| 任务类型 | 必读入口 |\n"
             "| --- | --- |\n"
-            "| 策略 | [docs/patterns/strategy.md](./docs/patterns/strategy.md) |\n",
+            "| 视图 | [docs/flet/README.md](./docs/flet/README.md) <!-- route: a --> |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        # yml 有 a、b 两个主题共享 flet/README，宪法行只锚 a（b 的锚成员被删）
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {"id": "a", "title": "A", "canonical": "docs/flet/README.md"},
+                        {"id": "b", "title": "B", "canonical": "docs/flet/README.md"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert any("'b'" in e and "未锚定到 CLAUDE.md" in e for e in errors), (
+            f"应检出 yml 主题未被任何行锚定, got: {errors}"
+        )
+
+    def test_detects_unregistered_shared_canonical(self, tmp_path, monkeypatch):
+        """单主题行只锚定部分共享主题（其余 yml 主题悬空）→ 报反向漂移."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            "## 1.8 任务类型 → 必读文件\n"
+            "| 任务类型 | 必读入口 |\n"
+            "| --- | --- |\n"
+            "| 策略 | [docs/patterns/strategy.md](./docs/patterns/strategy.md) <!-- route: p1 --> |\n",
             encoding="utf-8",
         )
         yml = tmp_path / "canonical-topics.yml"
@@ -4238,12 +4474,10 @@ class TestDecisionTreeMapping:
         monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
 
         errors = check_decision_tree_mapping()
-        assert any("docs/patterns/strategy.md" in e and "未登记" in e for e in errors), (
-            f"应检出未登记共享 canonical, got: {errors}"
-        )
+        assert any("'p2'" in e and "未锚定到 CLAUDE.md" in e for e in errors), f"应检出共享主题悬空, got: {errors}"
 
     def test_detects_merged_canonical_missing_in_claude(self, tmp_path, monkeypatch):
-        """共享 canonical 已登记白名单但未在宪法 §1.8 出现 → 报错."""
+        """共享 canonical 的主题未锚定到宪法 §1.8 → 报反向漂移."""
         import yaml
 
         from check_docs_consistency import check_decision_tree_mapping
@@ -4253,7 +4487,7 @@ class TestDecisionTreeMapping:
             "## 1.8 任务类型 → 必读文件\n"
             "| 任务类型 | 必读入口 |\n"
             "| --- | --- |\n"
-            "| A | [docs/patterns/a.md](./docs/patterns/a.md) |\n",
+            "| A | [docs/patterns/a.md](./docs/patterns/a.md) <!-- route: a --> |\n",
             encoding="utf-8",
         )
         yml = tmp_path / "canonical-topics.yml"
@@ -4269,17 +4503,128 @@ class TestDecisionTreeMapping:
             ),
             encoding="utf-8",
         )
-        monkeypatch.setattr(
-            "check_docs_consistency._DECISION_TREE_MERGED_IDS",
-            {"docs/patterns/merged.md": {"x", "y"}},
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert any("docs/patterns/merged.md" in e and "未锚定到 CLAUDE.md" in e for e in errors), (
+            f"应检出合并 canonical 主题缺于宪法, got: {errors}"
+        )
+
+    def test_detects_missing_route_anchor(self, tmp_path, monkeypatch):
+        """F03 fail-closed：数据行缺 <!-- route: ... --> 锚 → 报错（防新增行绕过身份绑定）."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            "## 1.8 任务类型 → 必读文件\n"
+            "| 任务类型 | 必读入口 |\n"
+            "| --- | --- |\n"
+            "| X | [foo](./docs/patterns/foo.md) |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        yml.write_text(
+            yaml.safe_dump({"topics": [{"id": "foo", "title": "Foo", "canonical": "docs/patterns/foo.md"}]}),
+            encoding="utf-8",
         )
         monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
         monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
 
         errors = check_decision_tree_mapping()
-        assert any("docs/patterns/merged.md" in e and "已登记合并但未在" in e for e in errors), (
-            f"应检出合并 canonical 缺于宪法, got: {errors}"
+        assert any("缺少行尾 <!-- route: ... --> 锚点" in e for e in errors), f"应检出缺锚数据行, got: {errors}"
+
+    def test_detects_entry_path_hijack(self, tmp_path, monkeypatch):
+        """行内夹带其他主题的正本（同表内另一行的 canonical）→ 报错."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        header = "## 1.8 任务类型 → 必读文件\n| 任务类型 | 必读入口 |\n| --- | --- |\n"
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            header + "| 策略 | [s](./docs/patterns/strategy-template.md) [d](./docs/patterns/dao-pattern.md)"
+            " <!-- route: strategy --> |\n" + "| DAO | [d](./docs/patterns/dao-pattern.md) <!-- route: dao --> |\n",
+            encoding="utf-8",
         )
+        yml = tmp_path / "canonical-topics.yml"
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {"id": "strategy", "title": "S", "canonical": "docs/patterns/strategy-template.md"},
+                        {"id": "dao", "title": "D", "canonical": "docs/patterns/dao-pattern.md"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert any(
+            "第 1 行" in e and "docs/patterns/dao-pattern.md" in e and "不属于该行锚点主题" in e for e in errors
+        ), f"应检出第 1 行夹带 dao 正本, got: {errors}"
+
+    def test_detects_duplicate_anchor_binding(self, tmp_path, monkeypatch):
+        """同一 topic id 锚定多行 → 报错."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        header = "## 1.8 任务类型 → 必读文件\n| 任务类型 | 必读入口 |\n| --- | --- |\n"
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            header
+            + "| A | [a](./docs/patterns/a.md) <!-- route: t1 --> |\n"
+            + "| B | [a](./docs/patterns/a.md) <!-- route: t1 --> |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        yml.write_text(
+            yaml.safe_dump({"topics": [{"id": "t1", "title": "T1", "canonical": "docs/patterns/a.md"}]}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert any("'t1'" in e and "同时锚定" in e for e in errors), f"应检出重复锚定, got: {errors}"
+
+    def test_double_anchor_ids_are_merged(self, tmp_path, monkeypatch):
+        """一行挂两个锚注释时应合并全部 id（防第二个锚被静默丢弃）→ 正例通过."""
+        import yaml
+
+        from check_docs_consistency import check_decision_tree_mapping
+
+        claude = tmp_path / "CLAUDE.md"
+        claude.write_text(
+            "## 1.8 任务类型 → 必读文件\n"
+            "| 任务类型 | 必读入口 |\n"
+            "| --- | --- |\n"
+            "| A | [a](./docs/patterns/a.md) <!-- route: t1 --> <!-- route: t2 --> |\n",
+            encoding="utf-8",
+        )
+        yml = tmp_path / "canonical-topics.yml"
+        yml.write_text(
+            yaml.safe_dump(
+                {
+                    "topics": [
+                        {"id": "t1", "title": "T1", "canonical": "docs/patterns/a.md"},
+                        {"id": "t2", "title": "T2", "canonical": "docs/patterns/a.md"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", claude)
+        monkeypatch.setattr("check_docs_consistency.CANONICAL_TOPICS_YAML_PATH", yml)
+
+        errors = check_decision_tree_mapping()
+        assert errors == [], f"双锚合并后应无错误（t2 不得被静默丢弃）, got: {errors}"
 
     def test_missing_id_field_does_not_crash(self, tmp_path, monkeypatch):
         """topic 缺 id 字段不应 KeyError 崩溃，而应优雅报缺字段（回归 guard）."""
@@ -4292,7 +4637,7 @@ class TestDecisionTreeMapping:
             "## 1.8 任务类型 → 必读文件\n"
             "| 任务类型 | 必读入口 |\n"
             "| --- | --- |\n"
-            "| A | [docs/patterns/a.md](./docs/patterns/a.md) |\n",
+            "| A | [docs/patterns/a.md](./docs/patterns/a.md) <!-- route: a --> |\n",
             encoding="utf-8",
         )
         yml = tmp_path / "canonical-topics.yml"
@@ -4317,7 +4662,7 @@ class TestDecisionTreeMapping:
             "## 1.8 任务类型 → 必读文件\n"
             "| 任务类型 | 必读入口 |\n"
             "| --- | --- |\n"
-            "| A | [docs/patterns/a.md](./docs/patterns/a.md) |\n",
+            "| A | [docs/patterns/a.md](./docs/patterns/a.md) <!-- route: a --> |\n",
             encoding="utf-8",
         )
         yml = tmp_path / "canonical-topics.yml"
