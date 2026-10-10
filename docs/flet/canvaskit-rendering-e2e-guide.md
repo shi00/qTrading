@@ -154,8 +154,9 @@ PoC 在锁定 Flet 版本 + CanvasKit 上实测 `Semantics(identifier=…)` 的 
 - **根因**：尚未进入语义树构建窗口的控件（offstage 控件、`ListView` 视口外的行）不会
   生成 identifier 语义节点，或生成了但无有效 bounding box。
 - **后果**：直接 `count()` 得 0、直接取 bbox 抛错，被误判为「锚点缺失」。
-- **规程**：视口外控件须先经 `scroll_into_view`（按 `flt-semantics-identifier` 执行 JS
-  滚入）进入视口再定位；断言/点击前用 `expect_visible`（identifier 节点 `visible` 等待）
+- **规程**：视口外控件须先经 `scroll_into_view`（按 identifier 坐标通过物理鼠标滚轮
+  `page.mouse.wheel` 真实滚入，严禁直接对 DOM 节点调 `scrollIntoView` 导致 Canvas 渲染与
+  DOM 脱节）进入视口再定位；断言/点击前用 `expect_visible`（identifier 节点 `visible` 等待）
   收敛。`offstage` 控件为**预期排除项**，不应在定位前置等待其出现。
 - **变体：节点有 bbox 但坐标在视口外**：节点已生成、bbox 有效，但坐标落在视口之外
   （如折叠分组展开后 Dropdown 被推到视口下方，CI 实证 bbox `y=991` > 视口高 `900`）。
