@@ -430,7 +430,7 @@ def _build_action_console(
                 ft.Divider(height=10, color=AppColors.TRANSPARENT),
                 ft.ResponsiveRow(
                     [
-                        ft.Column([action_full_sync], col={"sm": 12, "md": 6}),
+                        ft.Column([action_full_sync], col={"sm": 12, "md": 12}),
                     ],
                     run_spacing=10,
                 ),
