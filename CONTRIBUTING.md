@@ -586,6 +586,7 @@ hooks/            ← 本地 Git/工具钩子脚本
 
 ```python
 # ✅ 标准异常处理模式
+# 模块顶部: from utils.sanitizers import DataSanitizer
 try:
     result = await some_operation()
 except asyncio.CancelledError:
@@ -597,14 +598,21 @@ except EngineDisposedError:
 except Exception as e:
     error_info = classify_error(e, context="general")  # 返回 dict: code / message_key [/ format_args / should_retry]
     severity = classify_severity(e, context="general")  # 返回: system / recoverable / operational
+    safe_msg = DataSanitizer.sanitize_error(e)  # R9: 异常消息先脱敏再入日志
     if severity == "system":
-        logger.critical(f"[Module] SYSTEM-LEVEL failure: {e}", exc_info=True)
+        logger.critical("[Module] SYSTEM-LEVEL failure: %s", safe_msg, exc_info=True)
         raise  # 系统级错误必须上抛
     elif severity == "recoverable":
-        logger.warning(f"[Module] Recoverable error ({error_info['code']}): {e}")
+        logger.warning("[Module] Recoverable error (%s): %s", error_info["code"], safe_msg)
     else:
-        logger.error(f"[Module] Operational error: {e}", exc_info=True)
+        logger.error("[Module] Operational error: %s", safe_msg, exc_info=True)
 ```
+
+**脱敏边界（R9）**：
+
+- 异常消息 `{e}` 可能携带 Token / 连接串 / PII，**禁止直接拼入日志**，必须先经 `DataSanitizer.sanitize_error(e)` 脱敏（上例 `safe_msg`，惰性 `%s` 传参）。项目已有等价封装 [app/error_logging.py](./app/error_logging.py) 的 `log_exception_with_severity()`，同等场景优先复用。
+- `exc_info=True` 的堆栈由 `utils/logger.py` 的 `_SanitizingFormatter.formatException` 统一做**路径**脱敏（`DataSanitizer.sanitize_paths`，路径 → `<PATH>`），但**不覆盖凭证 / PII / 裸 token**——因此不能依赖 `exc_info` 兜底敏感消息，消息本身仍须先经 `sanitize_error`。
+- 需要自行输出堆栈文本时（如写入错误详情），使用 `DataSanitizer.sanitize_error(e, show_traceback=True)` 获取已脱敏的完整堆栈。
 
 **错误分类上下文** (`classify_error` 的 `context` 参数):
 
