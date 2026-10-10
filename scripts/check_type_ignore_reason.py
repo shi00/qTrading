@@ -1,21 +1,25 @@
 """pre-commit hook: R3 type: ignore 原因检查（review07-G5 务实版）。
 
 分级规则：
-- 生产代码（core/data/services/strategies/utils/ui/app）：``# type: ignore`` 必须带
-  ``[error-code]``（原规则，ERROR；如 ``# type: ignore[attr-defined]``）。
+- 裸 ``# type: ignore``（无 ``[error-code]``，含裸 ignore 加 human reason）一律
+  ERROR：生产代码（core/data/services/strategies/utils/ui/app）与 tests/ 同判
+  （R3 为 INVARIANT；review07-G5 的豁免仅限带码 ``attr-defined`` 的 human
+  reason 要求，不豁免裸 ignore）。
 - tests/：``# type: ignore[attr-defined]`` 豁免（mock 替身场景，无需 human reason）；
   其他 ``[error-code]``（arg-type/return-value/assignment 等）建议带 human reason
   （形如 ``# type: ignore[arg-type]  # <原因>``）。
 
 存量策略（渐进部署）：tests/ 下"非 attr-defined 且无 human reason"存量 226 处
-（2026-08-26 盘点），>5 处，故本规则以 WARNING 输出不阻断；升级触发条件：
+（2026-08-26 盘点），>5 处，故该子项以 WARNING 输出不阻断；升级触发条件：
 存量 ≤5 处或 2026-11-30 前转为 ERROR（见 docs/debt/known-technical-debt.md 登记）。
+裸 ignore 不在此渐进范围内（生产与 tests/ 均为 ERROR）。
 
 用法（由 pre-commit 调用，文件名作为参数传入）::
 
     python scripts/check_type_ignore_reason.py <file1> <file2> ...
 
-退出码：0 通过（含 WARNING）；1 发现生产代码裸 type: ignore（无 error-code）。
+退出码：0 通过（含 WARNING）；1 发现裸 type: ignore（无 error-code，生产与
+tests/ 同判）。
 """
 
 import re
@@ -24,7 +28,7 @@ from pathlib import Path
 
 # 生产目录（R3 原规则强制 ERROR 的目录）
 _PROD_PREFIXES = ("core", "data", "services", "strategies", "utils", "ui", "app")
-# 裸 type: ignore（无 [error-code]）——违反 R3 原规则
+# 裸 type: ignore（无 [error-code]）——违反 R3 原规则（生产与 tests/ 同判 ERROR）
 _BARE_RE = re.compile(r"# type:\s?ignore(\s+#|$)")
 # 带 error-code 的 type: ignore（[xxx]）
 _CODED_RE = re.compile(r"# type:\s?ignore\[([a-z\-]+)\]")
@@ -52,8 +56,8 @@ def check_file(path: Path) -> tuple[list[str], list[str]]:
     for lineno, line in enumerate(lines, 1):
         bare = _BARE_RE.search(line)
         if bare and "# type:" in line:
-            if not is_test:
-                errors.append(f"{path}:{lineno}: R3 模糊压制 — # type: ignore 必须带 [error-code]")
+            # 裸 ignore（无 error-code）一律 ERROR：R3 为 INVARIANT，tests/ 不豁免
+            errors.append(f"{path}:{lineno}: R3 模糊压制 — # type: ignore 必须带 [error-code]")
             continue
         m = _CODED_RE.search(line)
         if m is None:

@@ -247,7 +247,7 @@ python main.py
 - [ ] Pyright 无新增 error（pre-commit `pyright-changed` hook 自动拦截 staged 文件）
 - [ ] 无新增弱断言（pre-commit `weak-assertion-changed` hook 自动拦截，与 CI baseline 一致）
 - [ ] 相关单测通过（见下方「变更类型 → 最小验证子集」）
-- [ ] 无裸 `# type: ignore`（均带 `[reason]`，pre-commit 强制拦截）
+- [ ] 无裸 `# type: ignore`（均带 `[error-code]`，人类理由写在方括号外，对应 [CLAUDE.md R3](./CLAUDE.md#31--绝对禁止)；pre-commit 强制拦截）
 - [ ] 新增 `# NOTE(lazy):` 三要素齐全（简化内容 / ceiling / upgrade）
 - [ ] 对照 CLAUDE.md §3 红线逐条自查，无违规
 
@@ -297,8 +297,8 @@ python -m pytest tests/unit/ -v --tb=short -m "not slow"
 ### 类型注解
 
 - 所有公共函数必须有类型注解
-- 使用 `# type: ignore[错误码]  # 原因` 格式抑制类型错误
-- 禁止裸 `# type: ignore`（pre-commit 会拦截，对应 [CLAUDE.md R3](./CLAUDE.md#31--绝对禁止)）
+- 使用 `# type: ignore[错误码]` 格式抑制类型错误；人类理由写在方括号外（`# type: ignore[错误码]  # 原因`，理由可选）
+- 禁止裸 `# type: ignore`（即不带 `[error-code]`，即使带理由；pre-commit 会拦截，对应 [CLAUDE.md R3](./CLAUDE.md#31--绝对禁止)）
 
 ## 提交信息规范
 
@@ -534,15 +534,29 @@ hooks/            ← 本地 Git/工具钩子脚本
 | `reportAttributeAccessIssue` | `warning` | 属性访问问题应修复 |
 | `reportOptionalSubscript` | `warning` | Optional 值下标访问应判空 |
 
-- **`type: ignore` 必须带理由** (pre-commit 强制拦截裸 `# type: ignore`):
+- **`type: ignore` 必须带 `[error-code]`，人类理由写在方括号外**（对应 [CLAUDE.md R3](./CLAUDE.md#31--绝对禁止)；pre-commit `type-ignore-reason` hook 强制拦截）：
 
   ```python
-  # ✅ 正确
+  # ✅ 正确（error-code 必带；human reason 可选，写在方括号外）
   task._coroutine_gen = None  # type: ignore[assignment]
+  task._coroutine_gen = None  # type: ignore[assignment]  # Flet 内部属性，运行时存在
 
-  # ❌ 错误 (pre-commit 会拒绝)
+  # ❌ 错误（裸 ignore，无 error-code，即使带理由；pre-commit 会拒绝）
   task._coroutine_gen = None  # type: ignore
   ```
+
+  判据明细（`scripts/check_type_ignore_reason.py` 实际行为，生产代码与 `tests/` 边界不同）：
+
+  | 场景 | 判据 |
+  |------|------|
+  | 生产代码（core/data/services/strategies/utils/ui/app）裸 `# type: ignore`（含裸 ignore 加理由） | ERROR，阻断（exit 1） |
+  | 生产代码带 `[error-code]`（human reason 可选） | 通过 |
+  | `tests/` 裸 `# type: ignore`（含裸 ignore 加理由） | ERROR，阻断（R3 为 INVARIANT，与生产同判；G5 豁免仅限带码 `attr-defined` 的理由要求，不豁免裸 ignore） |
+  | `tests/` `# type: ignore[attr-defined]`（mock 替身场景） | 通过，豁免 human reason |
+  | `tests/` 其他 `[error-code]` 无 human reason | WARNING，不阻断（建议 `# type: ignore[code]  # <原因>`；存量 ≤5 处或 2026-11-30 前转 ERROR，见技术债 P3-TypeIgnores-Tests-HumanReason） |
+  | `tests/` 其他 `[error-code]` 带 human reason | 通过 |
+
+  覆盖边界：触发面为 pre-commit `type-ignore-reason` hook（本地 staged 文件；CI 经 `pre-commit run --all-files` 全量触发，hook 清单见 [ci-cd.md「Pre-commit Hooks」](./docs/guides/ci-cd.md#pre-commit-hooks)）；脚本按 `# type: ignore` 规范形态匹配（`type:` 与 `ignore` 间至多一个空白，不覆盖多空白变体）；入口仅处理 `.py`（hook 声明含 `.pyi`，但入口过滤后不检查，仓库当前亦无自有 `.pyi`）。
 
 ## 日志规范
 

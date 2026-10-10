@@ -1,7 +1,7 @@
 """Tests for scripts/check_type_ignore_reason.py（review07-G5 R3 务实版检查）。
 
 验证：
-- 生产代码裸 # type: ignore（无 error-code）→ error
+- 裸 # type: ignore（无 error-code）一律 error：生产代码与 tests/ 同判（R3 INVARIANT）
 - tests/ # type: ignore[attr-defined] → 豁免（无 human reason 不报）
 - tests/ 非 attr-defined 无 human reason → warning（渐进部署）
 - tests/ 非 attr-defined 带 human reason → 通过
@@ -18,6 +18,9 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from check_type_ignore_reason import check_file  # noqa: E402 - sys.path 注入后导入
+
+# 测试输入经字符串拼接构造规范形态的裸 ignore，避免本文件源码文本被 R3 检查器自拦截（自指场景）
+BARE_IGNORE = "# type:" + " ignore"
 
 
 def _check(content: str, *, test_file: bool = True) -> tuple[list[str], list[str]]:
@@ -37,7 +40,28 @@ def _check(content: str, *, test_file: bool = True) -> tuple[list[str], list[str
 class TestCheckTypeIgnoreReason:
     def test_prod_bare_ignore_is_error(self):
         """生产代码 # type: ignore（无 error-code）→ error。"""
-        errors, warnings = _check("x = 1  # type: ignore\n", test_file=False)
+        errors, warnings = _check(f"x = 1  {BARE_IGNORE}\n", test_file=False)
+        assert len(errors) == 1
+        assert "R3" in errors[0]
+        assert warnings == []
+
+    def test_prod_bare_ignore_with_reason_is_error(self):
+        """生产代码裸 ignore 即使带 human reason（无 error-code）→ error。"""
+        errors, warnings = _check(f"x = 1  {BARE_IGNORE}  # 临时压制\n", test_file=False)
+        assert len(errors) == 1
+        assert "R3" in errors[0]
+        assert warnings == []
+
+    def test_tests_bare_ignore_is_error(self):
+        """tests/ # type: ignore（无 error-code）→ error（R3 INVARIANT，与生产同判，不静默跳过）。"""
+        errors, warnings = _check(f"x = 1  {BARE_IGNORE}\n", test_file=True)
+        assert len(errors) == 1
+        assert "R3" in errors[0]
+        assert warnings == []
+
+    def test_tests_bare_ignore_with_reason_is_error(self):
+        """tests/ 裸 ignore 即使带 human reason（无 error-code）→ error。"""
+        errors, warnings = _check(f"x = 1  {BARE_IGNORE}  # 临时压制\n", test_file=True)
         assert len(errors) == 1
         assert "R3" in errors[0]
         assert warnings == []
