@@ -740,8 +740,9 @@ class TestRedlinesYamlConsistency:
     校验 docs/governance/redlines.yml 与 CLAUDE.md §3.1 红线表一致:
     - YAML 解析成功 + 含 redlines key
     - 每条红线含 6 字段 (id/title/description/enforcement/automation_coverage/human_review_required)
-    - R 编号连续 append-only (R1~R24, 无缺号/重号/跳号)
+    - R 编号当前连续 (R1~R24, 无缺号/重号/跳号; 为 append-only 不复用语义的机器可验证子集)
     - CLAUDE.md §3.1 表格行数 = yml 条目数
+    - CLAUDE.md §3.1 表格与 yml 两侧 ID 集合一致 (F04: 等行数替换/漏行不可逃逸)
     - automation_coverage 值合法 (full/partial/none) 且与 human_review_required 一致
     - CLAUDE.md §3.1 表格与 YAML 字段语义一致 (id/title/description/enforcement)
     - 构造缺 R15 的 yml 验证检测
@@ -777,7 +778,7 @@ class TestRedlinesYamlConsistency:
             assert not missing, f"redlines[{i}] 缺字段: {missing}, 实际字段: {set(entry.keys())}"
 
     def test_redline_ids_are_sequential_append_only(self):
-        """R 编号连续 append-only: R1, R2, ..., R_N, 无缺号/重号/跳号."""
+        """R 编号当前连续: R1, R2, ..., R_N, 无缺号/重号/跳号 (append-only 不复用的机器可验证子集)."""
         import re
 
         import yaml
@@ -1040,6 +1041,61 @@ class TestRedlinesYamlConsistency:
         errors = check_redlines_yaml_consistency()
         assert any("不是 EXCEPTIONABLE 规则" in e for e in errors), f"应报例外引用非 EXCEPTIONABLE 规则, got: {errors}"
 
+    # === F04: 等行数替换 / 畸形行 / ID 集合一致性失败用例 ===
+
+    @staticmethod
+    def _claude_table_rows() -> list[str]:
+        """从真实 CLAUDE.md 提取 §3.1 红线表行 (供 F04 用例篡改后构造临时文档)."""
+        import re
+
+        from check_docs_consistency import CLAUDE_PATH
+
+        content = CLAUDE_PATH.read_text(encoding="utf-8")
+        return [line for line in content.splitlines() if re.match(r"^\|\s*R\d+\s*\|", line)]
+
+    def test_detects_equal_row_count_id_replacement(self, tmp_path, monkeypatch):
+        """等行数替换 (R24 行替换为 R23 副本) 必须报错 (F04 核心逃逸路径)."""
+        from check_docs_consistency import check_redlines_yaml_consistency
+
+        rows = self._claude_table_rows()
+        r23_row = next(line for line in rows if line.startswith("| R23"))
+        replaced = [r23_row if line.startswith("| R24") else line for line in rows]
+        assert len(replaced) == len(rows), "前置: 替换不应改变行数"
+        tmp_claude = tmp_path / "CLAUDE_replaced.md"
+        tmp_claude.write_text("\n".join(replaced) + "\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", tmp_claude)
+
+        errors = check_redlines_yaml_consistency()
+        assert any("重复" in e and "R23" in e for e in errors), f"应报 R23 重复, got: {errors}"
+        assert any("缺失" in e and "R24" in e for e in errors), f"应报 R24 缺失, got: {errors}"
+
+    def test_detects_abnormal_column_count_row(self, tmp_path, monkeypatch):
+        """行数相等但存在列数异常行 (未转义管道符) 必须报错 (F04)."""
+        from check_docs_consistency import check_redlines_yaml_consistency
+
+        rows = self._claude_table_rows()
+        corrupted = [line + " 意外管道 | 尾部 |" if line.startswith("| R1 ") else line for line in rows]
+        assert len(corrupted) == len(rows), "前置: 篡改不应改变行数"
+        tmp_claude = tmp_path / "CLAUDE_corrupted.md"
+        tmp_claude.write_text("\n".join(corrupted) + "\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", tmp_claude)
+
+        errors = check_redlines_yaml_consistency()
+        assert any("列数异常" in e for e in errors), f"应报列数异常, got: {errors}"
+
+    def test_detects_id_set_mismatch_extra_in_claude(self, tmp_path, monkeypatch):
+        """CLAUDE.md 表含 yml 中不存在的 id (如 R99) 必须由集合断言报错 (F04)."""
+        from check_docs_consistency import check_redlines_yaml_consistency
+
+        rows = self._claude_table_rows()
+        fake_row = "| R99 | **幽灵红线** | yml 中不存在的 id | 测试 |"
+        tmp_claude = tmp_path / "CLAUDE_extra.md"
+        tmp_claude.write_text("\n".join([*rows, fake_row]) + "\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CLAUDE_PATH", tmp_claude)
+
+        errors = check_redlines_yaml_consistency()
+        assert any("不存在的红线 id" in e and "R99" in e for e in errors), f"应报 R99 不在 yml, got: {errors}"
+
     # === _normalize_for_comparison 纯函数测试 ===
 
     def test_normalize_removes_bold_markers(self):
@@ -1080,7 +1136,8 @@ class TestRedlinesYamlConsistency:
         from check_docs_consistency import _parse_claude_redline_table
 
         claude_content = "| R1 | **架构越界** | `core/` 导入任何其他层模块 | pre-commit（import-linter 4 条契约） |\n"
-        result = _parse_claude_redline_table(claude_content)
+        result, errors = _parse_claude_redline_table(claude_content)
+        assert errors == [], f"标准行不应报错, got: {errors}"
         assert "R1" in result
         assert result["R1"]["title"] == "架构越界"
         assert result["R1"]["description"] == "core/ 导入任何其他层模块"
@@ -1094,11 +1151,40 @@ class TestRedlinesYamlConsistency:
             "| R6 | **过时类型注解** | 使用 `Union[X, Y]` / `Optional[X]` "
             "(必须使用 `X \\| Y` / `X \\| None`) | ruff |\n"
         )
-        result = _parse_claude_redline_table(claude_content)
+        result, errors = _parse_claude_redline_table(claude_content)
+        assert errors == [], f"转义管道符不应报错, got: {errors}"
         assert "R6" in result
         assert result["R6"]["title"] == "过时类型注解"
         assert result["R6"]["description"] == "使用 Union[X, Y] / Optional[X] (必须使用 X | Y / X | None)"
         assert result["R6"]["enforcement"] == "ruff"
+
+    def test_parse_rejects_duplicate_id(self):
+        """重复 id 报错并保留首次出现 (F04: dict 覆盖写入会让等行数替换逃逸)."""
+        from check_docs_consistency import _parse_claude_redline_table
+
+        claude_content = "| R23 | **裸 UI token** | 原描述 | pre-commit |\n| R23 | **伪标题** | 伪描述 | 伪强制状态 |\n"
+        result, errors = _parse_claude_redline_table(claude_content)
+        assert any("重复" in e and "R23" in e for e in errors), f"应报 id 重复, got: {errors}"
+        # 保留首次出现, 第二条不覆盖
+        assert result["R23"]["title"] == "裸 UI token"
+
+    def test_parse_rejects_missing_columns(self):
+        """列数不足 (段数 < 6) 报错, 不静默跳过 (F04: 畸形行可被行数校验掩盖)."""
+        from check_docs_consistency import _parse_claude_redline_table
+
+        claude_content = "| R1 | **架构越界** | 只有三列内容 |\n"
+        result, errors = _parse_claude_redline_table(claude_content)
+        assert "R1" not in result
+        assert any("列数异常" in e for e in errors), f"应报列数异常, got: {errors}"
+
+    def test_parse_rejects_extra_columns(self):
+        """描述列含未转义管道符 (段数 > 6) 报错, 不静默截断字段 (F04)."""
+        from check_docs_consistency import _parse_claude_redline_table
+
+        claude_content = "| R1 | **架构越界** | 描述 A | 描述 B | 强制状态 |\n"
+        result, errors = _parse_claude_redline_table(claude_content)
+        assert "R1" not in result
+        assert any("列数异常" in e and "7 段" in e for e in errors), f"应报 7 段列数异常, got: {errors}"
 
 
 class TestEnforcementMapping:

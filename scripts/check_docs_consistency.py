@@ -908,7 +908,8 @@ AUTOMATION_COVERAGE_VALUES: frozenset[str] = frozenset({"full", "partial", "none
 RULE_TYPE_VALUES: frozenset[str] = frozenset(
     {"INVARIANT", "DEFAULT", "NEW_CODE", "MIGRATION_TARGET", "WORKFLOW", "EXCEPTIONABLE"}
 )
-# R 编号格式正则: R1 ~ R999 (append-only, 不复用废弃编号)
+# R 编号格式正则: R1 ~ R999。仅验证格式; append-only / 不复用废弃编号为治理语义,
+# 由校验 3 的当前连续性检查近似守护 (连续性不能证明历史编号未被复用, F04)
 REDLINE_ID_PATTERN = re.compile(r"^R(\d+)$")
 # CLAUDE.md §3.1 红线表行匹配: 以 `| R\d+ |` 开头的 markdown 表格行
 CLAUDE_REDLINE_TABLE_ROW_PATTERN = re.compile(r"^\|\s*R\d+\s*\|")
@@ -939,8 +940,8 @@ def _normalize_for_comparison(text: str) -> str:
     return s.strip()
 
 
-def _parse_claude_redline_table(claude_content: str) -> dict[str, dict[str, str]]:
-    """解析 CLAUDE.md §3.1 红线表，返回 {id: {title, description, enforcement}} 映射。
+def _parse_claude_redline_table(claude_content: str) -> tuple[dict[str, dict[str, str]], list[str]]:
+    """解析 CLAUDE.md §3.1 红线表，返回 ({id: {title, description, enforcement}}, errors) 二元组。
 
     表格行格式: ``| R1 | **title** | description | enforcement |``
     列之间用 ``|`` 分隔，描述列可能含转义管道符 ``\\|``（如 R6 的 ``X \\| Y``）。
@@ -948,18 +949,26 @@ def _parse_claude_redline_table(claude_content: str) -> dict[str, dict[str, str]
     解析策略:
     1. 匹配以 ``| R\\d+ |`` 开头的行
     2. 按 ``(?<!\\\\)\\|`` 分割（不分割转义管道符）
-    3. 预期 6 段（首尾空 + id + title + description + enforcement）
-    4. 对每个字段做 ``_normalize_for_comparison()`` 标准化
+    3. 严格预期 6 段（首尾空 + id + title + description + enforcement），畸形行（
+       段数不足/含未转义管道符）报错跳过，不静默吞掉（F04：畸形行可被行数校验掩盖）
+    4. 重复 id 报错并保留首次出现（F04：dict 覆盖写入会让等行数替换逃逸字段比较）
+    5. id 不匹配 ``R\\d+`` 报错（fail-closed，不静默 continue）
+    6. 对每个字段做 ``_normalize_for_comparison()`` 标准化
 
     纯函数，便于单元测试。
     """
     result: dict[str, dict[str, str]] = {}
+    errors: list[str] = []
     for line in claude_content.splitlines():
         if not CLAUDE_REDLINE_TABLE_ROW_PATTERN.match(line):
             continue
         # 按非转义管道符分割
         parts = re.split(r"(?<!\\)\|", line)
-        if len(parts) < 6:
+        if len(parts) != 6:
+            errors.append(
+                f"CLAUDE.md §3.1 红线表行列数异常 (应为 6 段, 实际 {len(parts)} 段, "
+                f"注意描述列内管道符须转义为 \\|): {line[:80]}"
+            )
             continue
         # parts[0] 和 parts[-1] 为首尾空串，中间 4 列为 id/title/description/enforcement
         rid = _normalize_for_comparison(parts[1])
@@ -968,13 +977,17 @@ def _parse_claude_redline_table(claude_content: str) -> dict[str, dict[str, str]
         enforcement = _normalize_for_comparison(parts[4])
         id_match = REDLINE_ID_PATTERN.match(rid)
         if not id_match:
+            errors.append(f"CLAUDE.md §3.1 红线表行 id 非法: '{rid}' (应为 R\\d+): {line[:80]}")
+            continue
+        if rid in result:
+            errors.append(f"CLAUDE.md §3.1 红线表 id 重复: {rid} (保留首次出现, 后续重复行忽略; F04)")
             continue
         result[rid] = {
             "title": title,
             "description": description,
             "enforcement": enforcement,
         }
-    return result
+    return result, errors
 
 
 def check_redlines_yaml_consistency() -> list[str]:
@@ -983,14 +996,18 @@ def check_redlines_yaml_consistency() -> list[str]:
     校验:
     1. redlines.yml 可被 yaml.safe_load 解析, 顶层为 dict, 含 "redlines" key (list)
     2. 每条红线含 7 字段: id/title/description/enforcement/automation_coverage/human_review_required/rule_type
-    3. id 格式为 R\\d+, 连续 append-only (R1, R2, ..., R_N, 无缺号/重号/跳号)
+    3. id 格式为 R\\d+; 当前连续 (R1, R2, ..., R_N, 无缺号/重号/跳号)。
+       注: 连续性是 append-only「不复用废弃编号」的机器可验证子集——它只能证明当前
+       集合无缺号/重号, 不能证明历史废弃编号未被复用 (历史复用需人工核验 git 历史, F04)
     4. CLAUDE.md §3.1 红线表行数 (以 ``| R\\d+ |`` 开头的行) = yml 条目数
+       (行数相等仅是必要条件, 身份一致性由第 7 条的 ID 集合断言守护, F04)
     5. automation_coverage 值校验: 必须为 full/partial/none 之一
     6. automation_coverage 与 human_review_required 一致性:
        automation_coverage != full ⇒ human_review_required == true
        automation_coverage == full ⇒ human_review_required == false
-    7. CLAUDE.md §3.1 表格与 YAML 字段语义一致: id/title/description/enforcement 四字段
-       标准化比较（strip 空白、移除两端引号、移除 markdown 标记后比较）
+    7. CLAUDE.md §3.1 表格与 YAML 两侧 ID 集合一致 + 字段语义一致: 先断言两侧 id 集合
+       双向相等 (等行数替换/漏行不可逃逸, F04), 再对 id/title/description/enforcement 四字段
+       做标准化比较（strip 空白、移除两端引号、移除 markdown 标记后比较）
 
     退出码: 0 通过, 1 失败 (返回非空 errors 列表)。
     """
@@ -1113,21 +1130,35 @@ def check_redlines_yaml_consistency() -> list[str]:
             errors.append(f"redlines.yml R 编号超出连续范围: 多 {extra_ids}")
 
     # 校验 4: CLAUDE.md §3.1 表格行数 = yml 条目数
+    # (行数相等仅是必要条件; 身份一致性由校验 5 的 ID 集合断言守护, F04)
     claude_content = CLAUDE_PATH.read_text(encoding="utf-8")
     r_lines = [line for line in claude_content.splitlines() if CLAUDE_REDLINE_TABLE_ROW_PATTERN.match(line)]
     if len(r_lines) != len(redlines):
         errors.append(f"CLAUDE.md §3.1 表格行数 {len(r_lines)} != redlines.yml 条目数 {len(redlines)}")
 
-    # 校验 5: CLAUDE.md §3.1 表格与 YAML 字段语义一致
+    # 校验 5: CLAUDE.md §3.1 表格与 YAML 两侧 ID 集合一致 + 字段语义一致
     # 解析 CLAUDE.md 红线表，提取 id/title/description/enforcement 四字段
     # 与 YAML 中对应条目的同名字段做标准化比较（strip 空白、移除两端引号、移除 markdown 标记后比较）
-    claude_table = _parse_claude_redline_table(claude_content)
+    claude_table, parse_errors = _parse_claude_redline_table(claude_content)
+    errors.extend(parse_errors)
+    # ID 集合断言 (F04): 仅行数相等不足以证明身份一致——等行数替换 (如以第二条 R23 副本
+    # 替换 R24 行) 在旧逻辑下经 dict 覆盖写入 + 逐条目 continue 完全逃逸。
+    yaml_ids = {str(entry["id"]) for entry in redlines if isinstance(entry, dict) and "id" in entry}
+    claude_ids = set(claude_table)
+    only_in_claude = sorted(claude_ids - yaml_ids)
+    only_in_yaml = sorted(yaml_ids - claude_ids)
+    if only_in_claude:
+        errors.append(f"CLAUDE.md §3.1 表含 redlines.yml 中不存在的红线 id: {only_in_claude}")
+    if only_in_yaml:
+        errors.append(
+            f"redlines.yml 存在但 CLAUDE.md §3.1 表缺失的红线 id: {only_in_yaml} (等行数替换/漏行不可逃逸, F04)"
+        )
     for entry in redlines:
         if not isinstance(entry, dict):
             continue
         rid = str(entry.get("id", "?"))
         if rid not in claude_table:
-            continue  # 行数不匹配已由校验 4 报告
+            continue  # 两侧 ID 集合不一致已由上方集合断言报告 (F04)
         claude_entry = claude_table[rid]
         for field in ("title", "description", "enforcement"):
             yaml_value = _normalize_for_comparison(str(entry.get(field, "")))
