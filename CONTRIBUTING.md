@@ -104,7 +104,7 @@
 
 > **注意**：
 > - **GitHub Web UI 创建 PR**：自动加载模板，无需手动复制，在草稿基础上如实勾选与填写。
-> - **`gh pr create` 创建 PR**：**不会自动加载模板**，必须使用 `--template .github/PULL_REQUEST_TEMPLATE.md` 参数显式加载（详见 [Git 工作流与分支策略](./docs/guides/git-workflow.md)「AI 助手创建 PR 标准流程（强制）」）。
+> - **`gh pr create` 创建 PR**：**不会自动加载模板**，body 必须保留模板全部章节结构、按交互能力选参数——本地人工（有 TTY）用 `--template .github/PULL_REQUEST_TEMPLATE.md` 加载；AI/CI（无 TTY）将模板全部章节预填为最终 body 后经 `--body-file` 提交（详见 [Git 工作流与分支策略](./docs/guides/git-workflow.md)「AI 助手创建 PR 标准流程（强制）」）。
 >
 > 无论哪种方式，都必须确认满足“提交前自检清单（强制全部核对）”项。
 
@@ -240,7 +240,7 @@ python main.py
 - [ ] Pyright 无新增 error（pre-commit `pyright-changed` hook 自动拦截 staged 文件）
 - [ ] 无新增弱断言（pre-commit `weak-assertion-changed` hook 自动拦截，与 CI baseline 一致）
 - [ ] 相关单测通过（见下方「变更类型 → 最小验证子集」）
-- [ ] 无裸 `# type: ignore`（均带 `[reason]`，pre-commit 强制拦截）
+- [ ] 无裸 `# type: ignore`（均带 `[error-code]`，人类理由写在方括号外，对应 [CLAUDE.md R3](./CLAUDE.md#31--绝对禁止)；pre-commit 强制拦截）
 - [ ] 新增 `# NOTE(lazy):` 三要素齐全（简化内容 / ceiling / upgrade）
 - [ ] 对照 CLAUDE.md §3 红线逐条自查，无违规
 
@@ -290,8 +290,8 @@ python -m pytest tests/unit/ -v --tb=short -m "not slow"
 ### 类型注解
 
 - 所有公共函数必须有类型注解
-- 使用 `# type: ignore[错误码]  # 原因` 格式抑制类型错误
-- 禁止裸 `# type: ignore`（pre-commit 会拦截，对应 [CLAUDE.md R3](./CLAUDE.md#31--绝对禁止)）
+- 使用 `# type: ignore[错误码]` 格式抑制类型错误；人类理由写在方括号外（`# type: ignore[错误码]  # 原因`，理由可选）
+- 禁止裸 `# type: ignore`（即不带 `[error-code]`，即使带理由；pre-commit 会拦截，对应 [CLAUDE.md R3](./CLAUDE.md#31--绝对禁止)）
 
 ## 提交信息规范
 
@@ -527,15 +527,29 @@ hooks/            ← 本地 Git/工具钩子脚本
 | `reportAttributeAccessIssue` | `warning` | 属性访问问题应修复 |
 | `reportOptionalSubscript` | `warning` | Optional 值下标访问应判空 |
 
-- **`type: ignore` 必须带理由** (pre-commit 强制拦截裸 `# type: ignore`):
+- **`type: ignore` 必须带 `[error-code]`，人类理由写在方括号外**（对应 [CLAUDE.md R3](./CLAUDE.md#31--绝对禁止)；pre-commit `type-ignore-reason` hook 强制拦截）：
 
   ```python
-  # ✅ 正确
+  # ✅ 正确（error-code 必带；human reason 可选，写在方括号外）
   task._coroutine_gen = None  # type: ignore[assignment]
+  task._coroutine_gen = None  # type: ignore[assignment]  # Flet 内部属性，运行时存在
 
-  # ❌ 错误 (pre-commit 会拒绝)
+  # ❌ 错误（裸 ignore，无 error-code，即使带理由；pre-commit 会拒绝）
   task._coroutine_gen = None  # type: ignore
   ```
+
+  判据明细（`scripts/check_type_ignore_reason.py` 实际行为，生产代码与 `tests/` 边界不同）：
+
+  | 场景 | 判据 |
+  |------|------|
+  | 生产代码（core/data/services/strategies/utils/ui/app）裸 `# type: ignore`（含裸 ignore 加理由） | ERROR，阻断（exit 1） |
+  | 生产代码带 `[error-code]`（human reason 可选） | 通过 |
+  | `tests/` 裸 `# type: ignore`（含裸 ignore 加理由） | ERROR，阻断（R3 为 INVARIANT，与生产同判；G5 豁免仅限带码 `attr-defined` 的理由要求，不豁免裸 ignore） |
+  | `tests/` `# type: ignore[attr-defined]`（mock 替身场景） | 通过，豁免 human reason |
+  | `tests/` 其他 `[error-code]` 无 human reason | WARNING，不阻断（建议 `# type: ignore[code]  # <原因>`；存量 ≤5 处或 2026-11-30 前转 ERROR，见技术债 P3-TypeIgnores-Tests-HumanReason） |
+  | `tests/` 其他 `[error-code]` 带 human reason | 通过 |
+
+  覆盖边界：触发面为 pre-commit `type-ignore-reason` hook（本地 staged 文件；CI 经 `pre-commit run --all-files` 全量触发，hook 清单见 [ci-cd.md「Pre-commit Hooks」](./docs/guides/ci-cd.md#pre-commit-hooks)）；脚本按 `# type: ignore` 规范形态匹配（`type:` 与 `ignore` 间至多一个空白，不覆盖多空白变体）；入口仅处理 `.py`（hook 声明含 `.pyi`，但入口过滤后不检查，仓库当前亦无自有 `.pyi`）。
 
 ## 日志规范
 
@@ -586,6 +600,7 @@ hooks/            ← 本地 Git/工具钩子脚本
 
 ```python
 # ✅ 标准异常处理模式
+# 模块顶部: from utils.sanitizers import DataSanitizer
 try:
     result = await some_operation()
 except asyncio.CancelledError:
@@ -597,14 +612,21 @@ except EngineDisposedError:
 except Exception as e:
     error_info = classify_error(e, context="general")  # 返回 dict: code / message_key [/ format_args / should_retry]
     severity = classify_severity(e, context="general")  # 返回: system / recoverable / operational
+    safe_msg = DataSanitizer.sanitize_error(e)  # R9: 异常消息先脱敏再入日志
     if severity == "system":
-        logger.critical(f"[Module] SYSTEM-LEVEL failure: {e}", exc_info=True)
+        logger.critical("[Module] SYSTEM-LEVEL failure: %s", safe_msg, exc_info=True)
         raise  # 系统级错误必须上抛
     elif severity == "recoverable":
-        logger.warning(f"[Module] Recoverable error ({error_info['code']}): {e}")
+        logger.warning("[Module] Recoverable error (%s): %s", error_info["code"], safe_msg)
     else:
-        logger.error(f"[Module] Operational error: {e}", exc_info=True)
+        logger.error("[Module] Operational error: %s", safe_msg, exc_info=True)
 ```
+
+**脱敏边界（R9）**：
+
+- 异常消息 `{e}` 可能携带 Token / 连接串 / PII，**禁止直接拼入日志**，必须先经 `DataSanitizer.sanitize_error(e)` 脱敏（上例 `safe_msg`，惰性 `%s` 传参）。项目已有等价封装 [app/error_logging.py](./app/error_logging.py) 的 `log_exception_with_severity()`，同等场景优先复用。
+- `exc_info=True` 的堆栈由 `utils/logger.py` 的 `_SanitizingFormatter.formatException` 统一做**路径**脱敏（`DataSanitizer.sanitize_paths`，路径 → `<PATH>`），但**不覆盖凭证 / PII / 裸 token**——因此不能依赖 `exc_info` 兜底敏感消息，消息本身仍须先经 `sanitize_error`。
+- 需要自行输出堆栈文本时（如写入错误详情），使用 `DataSanitizer.sanitize_error(e, show_traceback=True)` 获取已脱敏的完整堆栈。
 
 **错误分类上下文** (`classify_error` 的 `context` 参数):
 

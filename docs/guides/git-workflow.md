@@ -81,7 +81,8 @@ python -m pytest tests/unit/ -v -m "not slow"
 
 # 6. 推送并创建 PR
 git push -u origin feature/strategy-macd
-# AI 助手创建 PR 时必须使用 --template 加载模板，禁止手写简化 PR body
+# PR body 必须保留模板全部章节结构，禁止手写简化 body；按交互能力选参数：
+# 本地人工（有 TTY）可用 --template 加载（下例）；AI/CI（无 TTY）须走 --body-file 非交互路径，见下节方式 B
 gh pr create --title "feat(strategy): add MACD crossover" \
   --template .github/PULL_REQUEST_TEMPLATE.md \
   --base main
@@ -95,11 +96,11 @@ git branch -d feature/strategy-macd       # Squash Merge 后本地分支可删
 
 ### AI 助手创建 PR 标准流程（强制）
 
-**背景**：`gh pr create --body "..."` 不会自动加载 `.github/PULL_REQUEST_TEMPLATE.md`（GitHub Web UI 才会自动加载）。AI 助手使用 `gh pr create` 时必须显式加载模板，否则会生成不合规的简化 PR 描述。
+**背景**：`gh pr create --body "..."` 不会自动加载 `.github/PULL_REQUEST_TEMPLATE.md`（GitHub Web UI 才会自动加载）。AI 助手使用 `gh pr create` 时必须显式提供模板结构（本地人工经 `--template` 加载，AI/CI 经 `--body-file` 提交预填的最终 body），否则会生成不合规的简化 PR 描述。
 
 **强制要求**（AI 助手创建 PR 时必须遵守）：
 
-1. **必须按模板预填 PR body**，可使用以下任一方式（按能否打开交互式编辑器二选一）：
+1. **必须按模板预填 PR body**，可使用以下任一方式。统一判据：**保留模板全部章节结构，按交互能力选参数**——有交互式编辑器（本地人工、有 TTY）用 `--template`；无 TTY（AI/CI）将模板各章节预填为最终 body 后用 `--body-file`：
 
    - **方式 A（本地人工、有 TTY）**：`--template` 打开编辑器加载模板，在模板基础上填写各章节，保留模板结构（标题、勾选项、注释提示）：
      ```bash
@@ -109,7 +110,7 @@ git branch -d feature/strategy-macd       # Squash Merge 后本地分支可删
      ```
    - **方式 B（AI/CI、无 TTY 非交互）**：将模板内容预填到临时文件后再提交。`--template` 会打开交互式编辑器，在无 TTY 环境（CI、AI 助手）会挂起，因此 AI/CI 应先将模板各章节预填为最终 body 写入临时文件，再用 `--body-file` 提交：
      ```bash
-     # 1) 依据 .github/PULL_REQUEST_TEMPLATE.md 九个 section 预填 body 至临时文件
+     # 1) 依据 .github/PULL_REQUEST_TEMPLATE.md 全部 section 预填 body 至临时文件
      # 2) 非交互创建（不打开编辑器）
      gh pr create --title "<conventional commit title>" \
        --body-file _pr_body.md \
@@ -117,7 +118,7 @@ git branch -d feature/strategy-macd       # Squash Merge 后本地分支可删
      # 3) 创建成功后删除临时 body 文件
      rm _pr_body.md
      ```
-     预填时必须保留模板全部章节（标题、勾选项、注释提示），不得手写精简 body；结算完勾选后删除临时文件。
+     预填时必须保留模板全部章节（标题、勾选项、注释提示），不得手写精简 body；勾选完成后删除临时文件。
 
    `--template` 仅适合本地人工操作；AI / CI 创建 PR 一律走方式 B 的 `--body-file` 非交互路径。
 
@@ -153,6 +154,8 @@ git branch -d feature/strategy-macd       # Squash Merge 后本地分支可删
    ```
 
    此命令会打开编辑器加载模板表单内容，AI 助手应在模板基础上填写各章节，保留模板结构。
+
+   > **版本核验标注**：`gh issue create --template` 对 Issue Forms（`.yml`）模板的加载行为依赖 gh CLI 版本（不同版本对 `.yml` 表单的支持与渲染方式存在差异），使用前应按当前安装的 gh CLI 版本实际核验（确认能否正确加载表单字段）；本文档不未经证据断言特定 CLI 版本的 API 行为。若当前环境无法可靠加载 Issue Forms，应改用 GitHub Web UI 创建（表单仅在 Web UI 完整渲染）。
 
 2. **禁止手写简化 issue body**：不得用 `--body "简短描述"` 跳过模板，也不得创建空白 issue（`blank_issues_enabled: false`）。
 
@@ -210,6 +213,6 @@ Feature 分支存活建议 ≤ 7 天。超期需评估：
 ## 完成判定（canonical 入口）
 
 - 分支命名规范符合；开发在 worktree 内隔离（R18），未在主工作区 `git checkout -b`
-- 提交为原子提交，走提交信息规范；PR 创建使用 `--template` 显式加载模板（AI 助手强制）
+- 提交为原子提交，走提交信息规范；PR body 保留模板全部章节结构、按交互能力选参数：本地人工（有 TTY）经 `--template` 加载，AI/CI（无 TTY）预填最终 body 经 `--body-file` 非交互提交——两条路径均满足完成判据
 
 _最小验证命令：_ 提交前 `pre-commit run --all-files` + 对应最小测试子集 + `python scripts/check_docs_consistency.py`。
