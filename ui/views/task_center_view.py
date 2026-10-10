@@ -427,17 +427,23 @@ def TaskCenterView(active: bool = True) -> ft.Container:
     # MINOR-11: 取消确认对话框状态 (待取消的 task_id, None = 关闭)
     pending_cancel_id, set_pending_cancel_id = ft.use_state(None)
 
-    # MINOR-11: 每秒刷新运行中任务的「已耗时 / 预计剩余」文本。仅在存在运行中任务时
-    # 启动定时器（无运行中任务时不引入任何定时器开销）；依赖 running_count>0 触发启停。
+    # MINOR-11: 每秒刷新运行中任务的「已耗时 / 预计剩余」文本。
+    # F10: ticker 仅在「页面可见(active) 且 存在运行中任务」时启用——生产七页常驻时
+    # 切到别页不卸载组件，旧实现只按 running_count>0 启停，隐藏页只要有运行任务就
+    # 每秒唤醒重渲染任务中心。deps 同时含 active 与 has_running，任一变化即经统一
+    # cleanup 路径取消旧 ticker 并按需重建（重激活只建一个）。耗时文本按墙钟即时计算
+    # （_task_time_summary 以渲染时 get_now() 差值计），切回页面因 active 变化触发
+    # 重渲染即显示最新时长，不以隐藏期间暂停的 tick 累计假时间。
     _tick_count, set_tick_count = ft.use_state(0)
     tick_counter_ref = ft.use_ref(0)
     ticker_task_ref = ft.use_ref(None)
     has_running = state.running_count > 0
+    ticker_enabled = active and has_running
 
     def _setup_ticker() -> None:
-        # MINOR-11: use_effect 的 setup 在 deps 变化时必被调用 (与 deps 取值无关)，
-        # 因此需显式守卫——仅在确有运行中任务时启动 1s ticker，否则不引入定时器开销。
-        if not has_running:
+        # F10: use_effect 的 setup 在 deps 变化时必被调用 (与 deps 取值无关)，因此需
+        # 显式守卫——仅页面可见且确有运行中任务时启动 1s ticker，否则不创建循环。
+        if not ticker_enabled:
             return
         page = _get_page()
         # FakePage（单测）无 run_task 时跳过，避免测试上下文报错
@@ -456,11 +462,13 @@ def TaskCenterView(active: bool = True) -> ft.Container:
         ticker_task_ref.current = page.run_task(_tick)
 
     def _cleanup_ticker() -> None:
+        # F10: 切离页面 (active→False)、任务归零 (has_running→False)、组件卸载均经此
+        # 统一清理路径；置 None 保证重复 cleanup 不重复 cancel，重激活只建一个 ticker。
         if ticker_task_ref.current is not None:
             ticker_task_ref.current.cancel()
             ticker_task_ref.current = None
 
-    ft.use_effect(_setup_ticker, dependencies=[has_running], cleanup=_cleanup_ticker)
+    ft.use_effect(_setup_ticker, dependencies=[active, has_running], cleanup=_cleanup_ticker)
 
     # --- Handlers ---
     def _on_cancel(task_id: str) -> None:
