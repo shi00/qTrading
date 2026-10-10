@@ -172,6 +172,8 @@ sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --input <备份�
 - 默认模式切换阶段：旧目录改名 `.bak-*` 失败 → 报错退出，原目录与临时恢复目录均原地保留，需手动处理；新目录切换为当前目录失败 → 自动回滚改名（若回滚失败，原数据仍保留于 `.bak-*` 目录，需手动处理）；
 - 恢复期间新旧数据并存（默认模式成功后 `.bak-*` 备份也会继续保留），请确保磁盘空间充足。
 
+**凭证依赖**：restore 使用当前密码文件初始化新目录（保持凭据一致，见 9.8）——密码文件缺失或不可解密时 restore 无法进行（exit 16），请先按 9.9 凭证分流处理再恢复。
+
 #### 9.5 维护实例（maintenance-shell）
 
 ```bash
@@ -199,7 +201,7 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 | 13 | `HEALTH_CHECK_FAILED` | 启动后健康检查未通过 | run |
 | 14 | `CREATE_DATABASE_FAILED` | 业务库创建失败 | run |
 | 15 | `PREFLIGHT_FAILED` | 资源预检失败：磁盘空间不足 / 目录权限不足 / 文件系统不支持 / 网盘同步路径 / 密码文件权限过宽 | run |
-| 16 | `PASSWORD_FAILED` | 密码文件缺失（PGDATA 已存在）或认证不匹配（28P01） | run / dump / restore / maintenance-shell / reset-password |
+| 16 | `PASSWORD_FAILED` | 密码文件缺失/为空/不可解密（PGDATA 已存在）或认证不匹配（28P01） | run / dump / restore / maintenance-shell / reset-password |
 | 20 | `STOP_FAILED` | 停止 postgres 失败（分级停止后进程仍存活）；PG 未运行时 stop 幂等成功返回 0 | stop / run |
 | 30 | `DUMP_RESTORE_FAILED` | 备份/恢复执行失败：备份文件不存在或损坏、版本不兼容、pg_dump/pg_restore 执行失败、恢复目录切换失败等 | dump / restore / reset-password |
 | 40 | `DATA_DIR_ABNORMAL` | 数据目录状态异常：非空但无 PG_VERSION、主版本不匹配、pg_control/WAL 损坏嫌疑、关键文件缺失 | run / maintenance-shell / reset-password |
@@ -219,6 +221,54 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 - **Windows**：`<app data>/postgres/16/runtime/password` 以 DPAPI 加密存储（文件内容为 `PGPW2:<hex blob>`），仅当前 Windows 用户可解密；复制到其他机器/账号后无法解密，应用将视为启动失败。
 - **Unix**：`runtime/password` 使用 `0600` 权限（`password_file_perms_ok`）保护明文。
 - **目录说明**：应用运行时数据目录 `<app data>/postgres/16/`（含 `runtime/`）与离线备份 `backups/` 目录不应放入云同步目录（OneDrive / iCloud / 网盘等）。Windows 上 DPAPI 密钥绑定本机+当前用户，云同步可能触发不一致副本、或让密钥在本机外的副本无法解密；备份文件本身未加密（见安全检视 F19），请勿将备份置于不受控的共享位置。
+
+#### 9.9 凭证丢失与数据损坏的故障分流
+
+> 适用场景：`run` / `dump` / `restore` / `maintenance-shell` 因密码文件问题返回 exit 16，或数据目录损坏（run 返回 exit 40 / doctor `issues` 报损坏嫌疑）时，按本节定位处理路径。命令细节见 9.2~9.6，密码文件保护方式见 9.8。
+
+**保全前置条件**（执行任何重置/恢复操作前逐项确认）：
+
+1. **应用完全退出**：维护命令均持维护锁，qTrading 或另一维护进程运行中返回 exit 50；存在活实例时先 `stop`（9.6）。
+2. **先 doctor 定位再动手**：doctor 只读、不需要密码、不获取维护锁（9.2），以 JSON `issues` 字段区分「凭证问题」与「数据损坏」；诊断前不删除、不改名任何数据目录。
+3. **确认恢复点**：恢复只能依赖既有备份文件（`<app data>/backups/` 下的 dump 文件，或自行指定过的输出路径）。**凭证已丢失时无法再执行 `dump` 补做备份**（dump 同样需要读取密码文件），请先确认既有备份存在再选择路径。
+4. **不手动触碰数据目录**：`data`、`.bak-*`、`.restore-*` 目录是恢复与回退的资本；restore 默认模式会自动把原目录保留为 `.bak-*`（9.4），无需也不应提前手动改名。
+5. **确认磁盘空间**：恢复期间新旧数据并存（9.4 失败边界）。
+6. **不手工改认证**：不要手动编辑 `pg_hba.conf` 或手工构造密码文件；`reset-password` 已封装临时 trust + 自动恢复原文件的安全流程。
+
+**四类场景分流**（现象与处理均与 sidecar 实现一致）：
+
+| 场景 | 典型表现 | 定位手段 | 处理路径 |
+|------|---------|---------|---------|
+| 密码文件缺失 | run/dump/restore/maintenance-shell 返回 exit 16，stderr 提示「密码文件缺失（…）：若密码丢失请先走 reset-password 流程」 | doctor JSON `password_file_present: false` | 数据目录未初始化（`initialized: false`）：无需维护，直接启动应用会自动 initdb 并生成密码文件。已初始化：`issues` 无数据损坏项走 9.9.1 reset-password；有数据损坏项走 9.9.2 |
+| 密码文件不可解密 | Windows 上密码文件存在（`password_file_present: true`）但上述命令仍 exit 16；常见于密码文件被复制到其他机器/Windows 账号（DPAPI 绑定本机+当前用户，9.8）或系统用户配置变更 | `password_file_present: true` 与 exit 16 组合（doctor 不校验可解密性） | 走 9.9.1 reset-password；成功后新密码文件覆盖旧文件，无需手动清理 |
+| 密码不匹配 | run 启动后健康检查认证失败，stderr 提示「认证失败（密码与 cluster 不匹配…）：改回原 data_dir、走 reset-password、或改用外置模式」，exit 16（28P01） | stderr 提示 + exit 16 | 先确认 `--data-dir` 没有指错（提示中的「改回原 data_dir」即针对该情形）；确认无误后走 9.9.1 reset-password，使密码文件与数据库凭据重新一致 |
+| 数据损坏 | run 返回 exit 40；doctor `issues` 报 pg_control/WAL 损坏嫌疑、`critical_files_missing` 非空、版本不匹配等 | doctor JSON `issues` | 走 9.9.2 数据损坏恢复路径 |
+
+##### 9.9.1 重置密码（reset-password）
+
+```bash
+sidecars/qtrading-pg-sidecar reset-password --data-dir <数据目录>
+```
+
+> 维护脚本（`qtrading-db-maintenance.bat` / `.sh`）未路由该命令，须如上直接调用 sidecar binary 并显式传 `--data-dir`。
+
+行为与前提（与 sidecar 实现一致）：
+
+- **不需要旧密码**：临时将 `pg_hba.conf` 置为仅 `127.0.0.1` trust 启动临时实例执行 `ALTER USER postgres PASSWORD`，随后重写 `pg_hba.conf` 为 scram-sha-256；出错路径自动恢复原 `pg_hba.conf`。
+- **不触碰业务数据**：只重置认证凭据；成功后生成新的随机密码写入密码文件（Windows DPAPI 加密 / Unix 0600，见 9.8），覆盖旧文件。完成后重启 qTrading 即可，随后可按 9.3 重新 `dump` 建立新恢复点。
+- **前提**：数据目录已初始化（`PG_VERSION` 存在，否则 exit 40）；应用完全退出且无活实例（exit 50；残留 stale pid 自动清理，活实例须先 `stop`）。
+- 其余退出码见 9.6：临时实例启动失败 / ALTER USER 失败 / 新密码文件写入失败 → exit 16；`pg_hba.conf` 重写失败 → exit 30。
+
+##### 9.9.2 数据损坏的恢复路径
+
+restore（9.4）依赖两个输入：**可读的密码文件**（初始化新目录、保持凭据一致）与**备份文件**，不依赖原数据目录能否启动。按以下顺序分流：
+
+1. **密码文件可用** → 直接按 9.4 执行 restore（默认模式原子切换，原目录自动保留为 `.bak-*`）。
+2. **密码文件缺失/不可解密，且原目录 `PG_VERSION` 仍存在** → 先走 9.9.1 reset-password（不动业务数据），成功后再按 9.4 restore。若 reset-password 因数据损坏失败（临时实例无法启动等），转入下一分支。
+3. **密码文件不可用且无法 reset-password**（目录损坏至 `PG_VERSION` 缺失，或临时实例始终无法启动）→ **无受支持的自动路径**：restore 因读不到密码文件返回 exit 16，reset-password 因目录未初始化返回 exit 40。此时若存在同级的 `.bak-*` / `.restore-*` 目录，可作为最后手段手动处理（改回原路径前先确认其 `PG_VERSION` 与文件完整性，风险自担，建议联系维护者）；否则把损坏目录移出数据目录路径后由应用全新初始化，**库内数据不可恢复**。
+4. **无任何恢复点**（既无备份文件，也无 `.bak-*` / `.restore-*` 目录）→ 数据不可恢复，只能移走损坏目录后全新初始化并重新同步数据。
+
+> 数据完好而仅凭证丢失时（前三类场景），无需先恢复数据：reset-password 不动业务数据，重置成功后即可正常使用并重新备份。
 
 ### 10. 运行 embedded 模式真实 sidecar 测试
 
