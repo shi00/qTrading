@@ -22,8 +22,10 @@
    必填字段、id 唯一性、canonical/workflow 路径在仓库中真实存在。
 12. 规则集元数据一致性检查（DOC-01）：CLAUDE.md 与 CONTRIBUTING.md 的 ruleset_version 相等、
    last_reviewed 为合法日期且前者不早于后者。
-13. 决策树映射一致性检查（DOC-04）：CLAUDE.md §1.8 决策树「必读入口」与 canonical-topics.yml
-   canonical 镜像双向一致（同一主题必须指向同一正本）。
+13. 决策树映射一致性检查（DOC-04）：CLAUDE.md §1.8 决策树与 canonical-topics.yml 逐行绑定一致——
+   每个数据行以行尾 `<!-- route: ... -->` 锚声明承载的 yml topic id（正文任务身份），
+   校验「行 → 锚 id → canonical」精确对应（F03：路径集合相等不保证任务归属相等，两行入口
+   交换 / 合并成员删除 / 行内夹带其他正本均须检出）。
 14. canonical 路由一致性检查（DOC-05）：声明 workflow 的 canonical 入口必须含指向该 workflow 的链接，
    令入口承担条件路由责任。
 15. 文档索引全覆盖检查（DOC-07/DOC-11）：docs/**/*.md 每个文件均被 CONTRIBUTING.md 或
@@ -2574,20 +2576,17 @@ def check_ruleset_changelog_version() -> list[str]:
 _CANONICAL_TOPICS_REQUIRED = frozenset({"id", "title", "canonical"})
 
 # 宪法 §1.8 采用「合并行」：一行任务类型承载 yml 拆分的多个主题（共享同一 canonical）。
-# 集合级双向断言会压平该分布，使「主题归属被指到别的主体」或「合并行承载主题被删」静默漏报。
-# 本白名单按 yml 稳定 id 声明每个共享 canonical 的期望主题归属，逐主题绑定仅升级方向 2。
-# 新增共享 canonical（同一路径被多个 topic 引用）时须在此登记，否则方向 2 视为单主题 canonical。
-_DECISION_TREE_MERGED_IDS: dict[str, set[str]] = {
-    "docs/flet/README.md": {"ui-view", "ui-layout", "ui-component", "i18n"},
-    "docs/patterns/config-quality-perf.md": {"performance", "config"},
-    "docs/guides/testing.md": {"testing", "e2e-testing"},
-    "docs/guides/ci-cd.md": {"ci-deps", "release"},
-    "docs/guides/how-to.md": {"embedded-pg", "maintenance"},
-}
+# （F03）路由检查绑定正文任务身份：每个数据行以行尾 `<!-- route: <id1>[,<id2>...] -->` 锚
+# 显式声明本行承载的 yml 稳定 topic id，检查按「行 → 锚 id → canonical」逐行精确绑定——
+# 两行入口交换、锚点成员删除、行内夹带其他正本均可检出；共享 canonical 的主题归属不再
+# 依赖脚本内手工白名单（原 _DECISION_TREE_MERGED_IDS），而由正文锚点直接推导（单一数据源）。
+_DECISION_TREE_ROUTE_ANCHOR_PATTERN = re.compile(r"<!--\s*route:\s*([\w\-]+(?:\s*,\s*[\w\-]+)*)\s*-->")
+# 与 CLAUDE.md §1.8「必读入口」列的路径 token 形态一致（markdown 链接目标或裸路径）
+_DECISION_TREE_PATH_TOKEN_PATTERN = re.compile(r"(?:\./)?(?:(?:docs|requirements)/[\w.\-/]+\.md|CONTRIBUTING\.md)")
 
 # 决策树元条目（非具体任务路由，承载「未列类型 → 按层选最接近入口」的兜底规则）。
-# 其 canonical 指向 CLAUDE.md §3/§4（红线 + 架构边界），不参与任务到正本的路由映射，
-# DOC-04 方向 2（canonical 必须在 §1.8 决策树出现）据此豁免（F-11）。
+# 其 canonical 指向 CLAUDE.md §3/§4（红线 + 架构边界），不在路径 token 形态内，
+# 不参与「锚 id → 行入口路径」绑定，DOC-04 对其豁免（F-11）。
 _DECISION_TREE_META_IDS: frozenset[str] = frozenset({"fallback"})
 
 
@@ -2604,52 +2603,87 @@ def _load_canonical_topics() -> list[dict] | None:
     return [t for t in data["topics"] if isinstance(t, dict)]
 
 
-def _extract_decision_tree_targets(claude_content: str) -> set[str]:
-    """从 CLAUDE.md §1.8 决策树表格「必读入口」列提取目标路径集合（去 ./ 前缀、去重）。
+class _DecisionTreeRow(typing.NamedTuple):
+    """§1.8 决策树表格的一个数据行：锚点声明的 topic id 与该行入口路径（均已归一化）。"""
 
-    表格行格式：`| 任务类型 | 必读入口 |`。仅处理以 `|` 开头、含第二列的表格行，
-    从第二列提取所有形如 `docs/x/y.md` 或 `CONTRIBUTING.md` 的路径 token。
-    归一化：剥离前导 `./`，保留仓库相对路径。
+    route_ids: tuple[str, ...]
+    entry_paths: tuple[str, ...]
+
+
+def _parse_decision_tree_rows(claude_content: str) -> tuple[list[_DecisionTreeRow], list[str]]:
+    """解析 CLAUDE.md §1.8 决策树表格为逐行 (route_ids, entry_paths)；fail-closed。
+
+    表头行（含「必读入口」）与分隔行跳过；其余 `|` 开头行视为数据行：
+    - 行内 `<!-- route: ... -->` 锚（可多个，全部合并）声明本行承载的 topic id；
+    - 「必读入口」列提取路径 token（剥离 `./` 前缀）。
+    数据行缺锚不中断解析（该行 route_ids 记为空并报错），其入口路径仍参与方向 1
+    登记校验，防止缺锚行夹带未登记路径逃逸。
     """
-    targets: set[str] = set()
+    rows: list[_DecisionTreeRow] = []
+    errors: list[str] = []
     in_decision_table = False
     for line in claude_content.splitlines():
         stripped = line.strip()
         if not in_decision_table:
             if stripped.startswith("|") and "必读入口" in line:
                 in_decision_table = True
-            else:
-                continue
+            continue
         if not stripped.startswith("|"):
             break  # 决策树表格结束（其后的引用块说明行不含 `|` 前缀）
+        if set(stripped) <= {"|", "-", ":", " "}:
+            continue  # 分隔行（仅含 | - : 与空白）
         cols = stripped.split("|")
-        if len(cols) < 2:
-            continue
-        entry_col = cols[2] if len(cols) >= 3 else cols[1]
-        for token in re.findall(r"(?:\./)?(?:(?:docs|requirements)/[\w.\-/]+\.md|CONTRIBUTING\.md)", entry_col):
-            targets.add(token.removeprefix("./"))
-    return targets
+        if len(cols) < 3:
+            continue  # 单列残行，无入口列
+        entry_col = cols[2]
+        entry_paths = tuple(t.removeprefix("./") for t in _DECISION_TREE_PATH_TOKEN_PATTERN.findall(entry_col))
+        anchor_ids: list[str] = []
+        for m in _DECISION_TREE_ROUTE_ANCHOR_PATTERN.finditer(line):
+            anchor_ids.extend(part.strip() for part in m.group(1).split(",") if part.strip())
+        if not anchor_ids:
+            row_label = cols[1].strip()[:30] or stripped[:30]
+            errors.append(
+                f"决策树映射: §1.8 数据行「{row_label}」缺少行尾 <!-- route: ... --> 锚点"
+                "（每行须显式声明承载的 canonical-topics.yml topic id）"
+            )
+        rows.append(_DecisionTreeRow(tuple(anchor_ids), entry_paths))
+    return rows, errors
+
+
+def _extract_decision_tree_targets(claude_content: str) -> set[str]:
+    """从 CLAUDE.md §1.8 决策树表格「必读入口」列提取目标路径集合（去 ./ 前缀、去重）。
+
+    基于 _parse_decision_tree_rows 的逐行解析扁平化，保持单一解析路径（F03）。
+    """
+    rows, _ = _parse_decision_tree_rows(claude_content)
+    return {path for row in rows for path in row.entry_paths}
 
 
 def check_decision_tree_mapping() -> list[str]:
-    """检查项 13：CLAUDE.md §1.8 决策树与 canonical-topics.yml 镜像双向一致（DOC-04）。
+    """检查项 13：CLAUDE.md §1.8 决策树与 canonical-topics.yml 逐行绑定一致（DOC-04）。
 
-    宪法 §1.8 是「本体」，canonical-topics.yml 是「机器可读镜像」，二者对同一主题必须指向
-    同一正本。双向断言（允许一对多：宪法合并行 ↔ yml 拆分主题，只要 canonical 值相同）：
-    1. 宪法 §1.8 表格「必读入口」列出现的每个目标路径，必须能在 yml canonical 中找到。
-    2. yml 每个 canonical 值，必须能在宪法 §1.8 表格「必读入口」列中找到；共享 canonical
-       额外按 _DECISION_TREE_MERGED_IDS 白名单逐主题绑定，防止主题归属被指到别的主体。
+    宪法 §1.8 是「本体」，canonical-topics.yml 是「机器可读镜像」。检查把正文任务身份
+    绑定到路由（F03）：每个数据行以 `<!-- route: ... -->` 锚声明承载的 yml topic id，
+    校验「行 → 锚 id → canonical」精确对应：
+    1. fail-closed：数据行缺锚即报错（防新增行绕过身份绑定）；
+    2. 行锚引用的 topic id 必须在 yml 登记，且同一 id 不得绑定多行；
+    3. 行入口路径必须已登记（方向 1），且与该行锚主题的 canonical 双向一致——
+       入口不得夹带非本行主题的正本、锚主题的 canonical 不得缺席该行入口
+       （两行入口交换 / 行内夹带在此检出）；
+    4. 反向：yml 每个非元 topic id 必须锚定到某行（yml 单边新增 / 合并成员删除在此检出）。
+    元条目（fallback）canonical 指向宪法自身，豁免 3 的行级绑定与 4 的反向锚定。
     """
     errors: list[str] = []
     claude_content = CLAUDE_PATH.read_text(encoding="utf-8")
-    claude_targets = _extract_decision_tree_targets(claude_content)
+    rows, parse_errors = _parse_decision_tree_rows(claude_content)
+    errors.extend(parse_errors)
 
     topics = _load_canonical_topics()
     if topics is None:
         errors.append("canonical-topics.yml 无法解析或无 topics 列表，跳过决策树映射校验")
         return errors
 
-    yml_canonical_map: dict[str, set[str]] = {}
+    topic_canonical: dict[str, str] = {}
     missing_fields = []
     for idx, topic in enumerate(topics, 1):
         missing = _CANONICAL_TOPICS_REQUIRED - topic.keys()
@@ -2658,41 +2692,62 @@ def check_decision_tree_mapping() -> list[str]:
         canonical = topic.get("canonical")
         topic_id = topic.get("id")
         if isinstance(canonical, str) and isinstance(topic_id, str):
-            yml_canonical_map.setdefault(canonical.removeprefix("./"), set()).add(topic_id)
+            topic_canonical[topic_id] = canonical.removeprefix("./")
     errors.extend(missing_fields)
 
-    # 方向 1: 宪法入口都应在 yml 中登记（不含 canonical-topics.yml 自身引用）
-    for target in sorted(claude_targets):
-        if target == "docs/governance/canonical-topics.yml":
-            continue
-        if target not in yml_canonical_map:
-            errors.append(f"决策树映射: CLAUDE.md §1.8 引用目标 '{target}' 未在 canonical-topics.yml 中登记")
+    all_canonicals = set(topic_canonical.values())
+    bound_row_of: dict[str, int] = {}  # topic_id -> 锚定行号（重复绑定检测）
 
-    # 方向 2: 逐主题绑定 canonical 归属（补齐集合级丢失「分布/归属」的交叉错配与归属丢失）
-    for canonical, topic_ids in sorted(yml_canonical_map.items()):
-        # 元条目（fallback 兜底行）的 canonical 不是任务路由目标，豁免跨引用校验（DOC-04 方向 2）
-        if topic_ids == _DECISION_TREE_META_IDS:
-            continue
-        if canonical in _DECISION_TREE_MERGED_IDS:
-            # 共享 canonical：须在宪法出现，且 yml 归属与白名单（宪法合并行承载主题集）一致
-            if canonical not in claude_targets:
-                errors.append(f"决策树映射: canonical '{canonical}' 已登记合并但未在 CLAUDE.md §1.8 决策树中出现")
-            expected = _DECISION_TREE_MERGED_IDS[canonical]
-            if topic_ids != expected:
+    # 正向：逐行绑定「任务身份 ↔ 入口路径」
+    for row_idx, row in enumerate(rows, 1):
+        # 锚引用的 topic id 须在 yml 登记；同一 id 不得绑定多行
+        for topic_id in row.route_ids:
+            if topic_id in _DECISION_TREE_META_IDS:
+                continue
+            if topic_id in bound_row_of:
                 errors.append(
-                    f"决策树映射: canonical '{canonical}' 归属 {sorted(topic_ids)} 与宪法 §1.8 "
-                    f"合并行承载 {sorted(expected)} 不一致（同步 yml 归属或登记合并白名单）"
+                    f"决策树映射: topic id '{topic_id}' 同时锚定 §1.8 第 {bound_row_of[topic_id]} 与"
+                    f" 第 {row_idx} 行，一个主题只能绑定一行"
                 )
+            else:
+                bound_row_of[topic_id] = row_idx
+            if topic_id not in topic_canonical:
+                errors.append(
+                    f"决策树映射: §1.8 第 {row_idx} 行锚点引用 topic id '{topic_id}' 未在 canonical-topics.yml 中登记"
+                )
+        # 方向 1: 行入口路径须在 yml 登记（缺锚行同样受检，防夹带未登记路径逃逸）
+        for path in row.entry_paths:
+            if path == "docs/governance/canonical-topics.yml":
+                continue
+            if path not in all_canonicals:
+                errors.append(f"决策树映射: CLAUDE.md §1.8 引用目标 '{path}' 未在 canonical-topics.yml 中登记")
+        if not row.route_ids or set(row.route_ids) & _DECISION_TREE_META_IDS:
+            continue  # 缺锚行已单独报错；元条目行（fallback）canonical 指向宪法自身，豁免行级绑定
+        row_canonicals = {topic_canonical[tid] for tid in row.route_ids if tid in topic_canonical}
+        # 行入口不得夹带非本行主题的正本（两行入口交换在此检出）
+        for path in row.entry_paths:
+            if path in all_canonicals and path not in row_canonicals:
+                errors.append(
+                    f"决策树映射: §1.8 第 {row_idx} 行入口 '{path}' 不属于该行锚点主题的正本"
+                    f" {sorted(row_canonicals)}（任务身份与入口错配，如两行入口交换）"
+                )
+        # 每个锚主题的 canonical 必须出现在该行入口（身份声明与入口反向一致）
+        for topic_id in row.route_ids:
+            canonical = topic_canonical.get(topic_id)
+            if canonical is not None and canonical not in row.entry_paths:
+                errors.append(
+                    f"决策树映射: §1.8 第 {row_idx} 行锚点主题 '{topic_id}' 的 canonical '{canonical}'"
+                    f" 不在该行入口 {list(row.entry_paths)} 中（任务身份与入口错配）"
+                )
+
+    # 反向：yml 每个非元 topic id 须锚定到宪法某行（yml 单边新增 / 合并成员删除在此检出）
+    for topic_id in sorted(topic_canonical):
+        if topic_id in _DECISION_TREE_META_IDS:
             continue
-        # 单主题 canonical：须在宪法出现，且不得被多主题共享（如确需合并须登记白名单）
-        if canonical not in claude_targets:
+        if topic_id not in bound_row_of:
             errors.append(
-                f"决策树映射: canonical-topics.yml 的 canonical '{canonical}' 未在 CLAUDE.md §1.8 决策树中出现"
-            )
-        if len(topic_ids) != 1:
-            errors.append(
-                f"决策树映射: canonical '{canonical}' 被多个主题 {sorted(topic_ids)} 共享但未登记 "
-                f"_DECISION_TREE_MERGED_IDS，如属宪法 §1.8 合并行请登记白名单"
+                f"决策树映射: canonical-topics.yml 主题 '{topic_id}'（canonical '{topic_canonical[topic_id]}'）"
+                "未锚定到 CLAUDE.md §1.8 决策树任何行"
             )
     return errors
 

@@ -65,31 +65,34 @@
 
 | 任务类型 | 必读入口 |
 |---------|---------|
-| 新增业务功能 / 需求澄清 | [requirements/USER_REQUIREMENTS.md](./requirements/USER_REQUIREMENTS.md) |
-| 新增/修改策略 | [docs/patterns/strategy-template.md](./docs/patterns/strategy-template.md) |
-| 新增向量化策略（Polars） | [docs/patterns/polars-vectorized-strategy.md](./docs/patterns/polars-vectorized-strategy.md) |
-| 新增 AI 策略混入 | [docs/patterns/ai-strategy-mixin.md](./docs/patterns/ai-strategy-mixin.md) |
-| 新增/修改 DAO 或数据表 | [docs/patterns/dao-pattern.md](./docs/patterns/dao-pattern.md) |
-| 新增/修改数据同步 | [docs/patterns/data-sync.md](./docs/patterns/data-sync.md) |
-| 新增/修改应用服务 | [docs/patterns/application-service.md](./docs/patterns/application-service.md) |
-| 修改任务生命周期 / TaskManager | [docs/patterns/task-manager.md](./docs/patterns/task-manager.md) |
-| 新增/修改 UI 视图 / 布局 / 组件 / i18n | [docs/flet/README.md](./docs/flet/README.md) |
-| 新增/修改 ViewModel | [docs/patterns/mvvm.md](./docs/patterns/mvvm.md) |
-| 新增/修改 AI 服务 / LLM 集成 | [docs/patterns/ai-service.md](./docs/patterns/ai-service.md) |
-| 修改异常处理 | [CONTRIBUTING.md「错误处理标准模式」](./CONTRIBUTING.md#错误处理标准模式) |
-| 修复 bug / 排查问题 | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) |
-| AI 代码检视 / PR review | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) |
-| 修改单例 / 资源生命周期 | [docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md) |
-| 性能优化 / 阈值调整 / 修改配置项 | [docs/patterns/config-quality-perf.md](./docs/patterns/config-quality-perf.md) |
-| 调整 CI / 依赖 / 版本发布 | [docs/guides/ci-cd.md](./docs/guides/ci-cd.md) |
-| 打包分发 / PyInstaller 构建 | [docs/guides/dependency-management.md](./docs/guides/dependency-management.md) |
-| 新增/修改回测 | [docs/patterns/backtest-correctness.md](./docs/patterns/backtest-correctness.md)（回测正确性正本；含回测配置流程与结论可信度边界路由） |
-| 新增测试 / E2E 测试 | [docs/guides/testing.md](./docs/guides/testing.md) |
-| Git 操作 / worktree / 创建 PR / 创建 Issue | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md) |
-| 内置 PostgreSQL 离线维护 / 数据恢复 | [docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」](./docs/guides/how-to.md#9-内置-postgresql-离线维护) |
-| 架构设计 / 公共契约 / 跨层范式 | [docs/adr/0001-record-architecture-decisions.md](./docs/adr/0001-record-architecture-decisions.md) |
-| 修改治理文档 / 规则（CLAUDE / AGENTS / CONTRIBUTING / docs/**） | [docs/adr/0002-document-layering.md](./docs/adr/0002-document-layering.md) |
-| 未列出的任务类型（纯重构 / 依赖升级 / 日志可观测性 / 功能下线 / 模块删除等） | 先读 §3 红线 + §4 架构边界；再按改动**实际触及的层**选最接近的 canonical 入口，并在回复中说明所选入口与理由 |
+| 新增业务功能 / 需求澄清 | [requirements/USER_REQUIREMENTS.md](./requirements/USER_REQUIREMENTS.md) <!-- route: requirement --> |
+| 新增/修改策略 | [docs/patterns/strategy-template.md](./docs/patterns/strategy-template.md) <!-- route: strategy --> |
+| 新增向量化策略（Polars） | [docs/patterns/polars-vectorized-strategy.md](./docs/patterns/polars-vectorized-strategy.md) <!-- route: polars-strategy --> |
+| 新增 AI 策略混入 | [docs/patterns/ai-strategy-mixin.md](./docs/patterns/ai-strategy-mixin.md) <!-- route: ai-strategy-mixin --> |
+| 新增/修改 DAO 或数据表 | [docs/patterns/dao-pattern.md](./docs/patterns/dao-pattern.md) <!-- route: dao --> |
+| 新增/修改数据同步 | [docs/patterns/data-sync.md](./docs/patterns/data-sync.md) <!-- route: data-sync --> |
+| 新增/修改应用服务 | [docs/patterns/application-service.md](./docs/patterns/application-service.md) <!-- route: application-service --> |
+| 修改任务生命周期 / TaskManager | [docs/patterns/task-manager.md](./docs/patterns/task-manager.md) <!-- route: task-manager --> |
+| 新增/修改 UI 视图 / 布局 / 组件 / i18n | [docs/flet/README.md](./docs/flet/README.md) <!-- route: ui-view,ui-layout,ui-component,i18n --> |
+| 新增/修改 ViewModel | [docs/patterns/mvvm.md](./docs/patterns/mvvm.md) <!-- route: viewmodel --> |
+| 新增/修改 AI 服务 / LLM 集成 | [docs/patterns/ai-service.md](./docs/patterns/ai-service.md) <!-- route: ai-service --> |
+| 修改异常处理 | [CONTRIBUTING.md「错误处理标准模式」](./CONTRIBUTING.md#错误处理标准模式) <!-- route: exception-handling --> |
+| 修复 bug / 排查问题 | [docs/bug-fix/core-protocol.md](./docs/bug-fix/core-protocol.md) <!-- route: bug-fix --> |
+| AI 代码检视 / PR review | [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) <!-- route: code-review --> |
+| 修改单例 / 资源生命周期 | [docs/architecture/singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md) <!-- route: singleton --> |
+| 性能优化 / 阈值调整 / 修改配置项 | [docs/patterns/config-quality-perf.md](./docs/patterns/config-quality-perf.md) <!-- route: performance,config --> |
+| 调整 CI / 依赖 / 版本发布 | [docs/guides/ci-cd.md](./docs/guides/ci-cd.md) <!-- route: ci-deps,release --> |
+| 打包分发 / PyInstaller 构建 | [docs/guides/dependency-management.md](./docs/guides/dependency-management.md) <!-- route: packaging --> |
+| 新增/修改回测 | [docs/patterns/backtest-correctness.md](./docs/patterns/backtest-correctness.md)（回测正确性正本；含回测配置流程与结论可信度边界路由） <!-- route: backtest --> |
+| 新增测试 / E2E 测试 | [docs/guides/testing.md](./docs/guides/testing.md) <!-- route: testing,e2e-testing --> |
+| Git 操作 / worktree / 创建 PR / 创建 Issue | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md) <!-- route: git --> |
+| 内置 PostgreSQL 离线维护 / 数据恢复 | [docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」](./docs/guides/how-to.md#9-内置-postgresql-离线维护) <!-- route: embedded-pg,maintenance --> |
+| 架构设计 / 公共契约 / 跨层范式 | [docs/adr/0001-record-architecture-decisions.md](./docs/adr/0001-record-architecture-decisions.md) <!-- route: architecture-design --> |
+| 修改治理文档 / 规则（CLAUDE / AGENTS / CONTRIBUTING / docs/**） | [docs/adr/0002-document-layering.md](./docs/adr/0002-document-layering.md) <!-- route: governance-docs --> |
+| 未列出的任务类型（纯重构 / 依赖升级 / 日志可观测性 / 功能下线 / 模块删除等） | 先读 §3 红线 + §4 架构边界；再按改动**实际触及的层**选最接近的 canonical 入口，并在回复中说明所选入口与理由 <!-- route: fallback --> |
+
+> 行尾 `<!-- route: ... -->` 锚为本行承载的 canonical-topics.yml 稳定 topic id 列表（合并行逗号分隔），
+> 由 check_docs_consistency.py 逐行绑定校验（DOC-04）；新增/调整行须同步锚点与 yml，渲染不可见。
 
 > 红线（§3）与架构边界（§4）为通用约束，任何任务均须遵守；高风险任务经确认后再编码。另记两条硬规则：创建 PR/Issue 必须使用仓库模板（禁止手写简化 body）；内置 PostgreSQL 离线维护/数据恢复前须确认应用已完全退出。
 
