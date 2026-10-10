@@ -6,7 +6,7 @@
 
 - qTrading 主程序启动失败，怀疑 embedded PostgreSQL 数据目录损坏
 - 需要在主程序停止状态下备份数据库（一致性快照）
-- 需要从备份文件恢复数据库到新目录
+- 需要从备份文件恢复数据库（成功后自动切换为当前数据目录，详见下文 restore 说明）
 - 诊断 sidecar / PostgreSQL 状态（postmaster.pid 残留、锁文件、版本不匹配等）
 
 ## 前置条件
@@ -37,7 +37,7 @@ cd "<安装目录>/resources/maintenance"
 | `status` | 查询 embedded PostgreSQL 状态（state.json + postmaster.pid 活性 + 锁探测） | 无 |
 | `doctor` | 诊断数据目录/版本/锁/上次异常退出，输出 doctor JSON | 无 |
 | `dump <file>` | 备份数据库到文件（PostgreSQL custom format） | 输出文件路径 |
-| `restore <file>` | 从备份文件恢复到新目录（不覆盖原目录，§12.2 原子切换流程） | 输入文件路径 |
+| `restore <file>` | 从备份文件恢复；**成功后自动切换为当前数据目录**，旧目录改名为 `.bak-<时间戳>` 保留为备份（§12.2 原子切换流程，不覆盖原目录） | 输入文件路径 |
 | `stop` | 停止运行中的 PostgreSQL（分级停止：smart 25s → fast 5s → kill） | 无 |
 | `maintenance-shell` | 启动临时维护实例，输出脱敏连接信息与 psql 路径 | 无 |
 | `version` | 显示 sidecar 版本与构建元数据 | 无 |
@@ -60,7 +60,7 @@ cd "<安装目录>/resources/maintenance"
 ## 安全注意事项
 
 1. **备份前先 stop**：`dump` 命令在运行中实例上使用 `pg_dump` 直连，但为获得一致性快照建议先 `stop` 再 `dump`（离线临时实例模式）
-2. **restore 不覆盖原目录**：恢复到 `<data-dir>-restored-<timestamp>` 新目录，需手动确认数据无误后切换
+2. **restore 采用原子切换（§12.2）**：先恢复到数据目录同级的 `<数据目录名>.restore-<时间戳>` 临时目录，全部成功后**自动切换为当前数据目录**，旧目录改名为 `<数据目录名>.bak-<时间戳>` **保留为备份（原数据不被销毁）**，确认恢复无误后可自行清理；恢复中途失败（含健康检查失败）会自动清理临时目录，原数据目录不受影响。如需恢复到指定目录而不切换当前目录，直接调用 sidecar binary 并传 `--target-data-dir <新目录>`（目标目录须为空，不存在亦可；成功后需自行让应用指向该目录）
 3. **maintenance-shell 需维护锁**：sidecar 运行中会拒绝（exit 50），需先 `stop` 主程序
 4. **操作前备份**：任何破坏性操作前先 `dump` 备份当前数据目录
 5. **日志位置**：sidecar 日志在 `<app data>/postgres-logs/sidecar.log`，service 日志在 `embedded-pg-service.log`
