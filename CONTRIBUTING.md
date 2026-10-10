@@ -104,7 +104,7 @@
 
 > **注意**：
 > - **GitHub Web UI 创建 PR**：自动加载模板，无需手动复制，在草稿基础上如实勾选与填写。
-> - **`gh pr create` 创建 PR**：**不会自动加载模板**，必须使用 `--template .github/PULL_REQUEST_TEMPLATE.md` 参数显式加载（详见 [Git 工作流与分支策略](./docs/guides/git-workflow.md)「AI 助手创建 PR 标准流程（强制）」）。
+> - **`gh pr create` 创建 PR**：**不会自动加载模板**，body 必须保留模板全部章节结构、按交互能力选参数——本地人工（有 TTY）用 `--template .github/PULL_REQUEST_TEMPLATE.md` 加载；AI/CI（无 TTY）将模板全部章节预填为最终 body 后经 `--body-file` 提交（详见 [Git 工作流与分支策略](./docs/guides/git-workflow.md)「AI 助手创建 PR 标准流程（强制）」）。
 >
 > 无论哪种方式，都必须确认满足“提交前自检清单（强制全部核对）”项。
 
