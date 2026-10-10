@@ -435,6 +435,80 @@ class TestBuildPagesStackE2E:
         ]:
             view_mocks[view_name].assert_called_once(), f"正常模式下 {view_name} 应被构造"
 
+    def test_e2e_full_mount_mode_constructs_all_views(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        """F07: E2E 全量挂载模式 (E2E_TESTING=true + E2E_FULL_MOUNT=true) 下所有 7 个视图均被全量构造。"""
+        from ui import app_layout as mod
+
+        view_mocks: dict[str, MagicMock] = {}
+        for view_name in [
+            "HomeView",
+            "ScreenerView",
+            "BacktestView",
+            "DataExplorerView",
+            "TaskCenterView",
+            "SettingsView",
+            "WatchlistView",
+        ]:
+            mock = MagicMock(return_value=MagicMock(name=view_name))
+            view_mocks[view_name] = mock
+            monkeypatch.setattr(mod, view_name, mock)
+
+        monkeypatch.setenv("E2E_TESTING", "true")
+        monkeypatch.setenv("E2E_FULL_MOUNT", "true")
+        try:
+            component = make_component(mod._build_pages_stack, 0)
+            render_once(component)
+        finally:
+            monkeypatch.delenv("E2E_TESTING", raising=False)
+            monkeypatch.delenv("E2E_FULL_MOUNT", raising=False)
+
+        # 全量挂载模式下所有 7 个视图都被构造 (parity with production)
+        view_mocks["HomeView"].assert_called_once_with(active=True)
+        view_mocks["ScreenerView"].assert_called_once_with(active=False, stock_filter_request=None)
+        view_mocks["BacktestView"].assert_called_once_with(active=False, prefill_request=None)
+        view_mocks["DataExplorerView"].assert_called_once_with(active=False)
+        view_mocks["TaskCenterView"].assert_called_once_with(active=False)
+        view_mocks["SettingsView"].assert_called_once_with(active=False, target_subtab=None)
+        view_mocks["WatchlistView"].assert_called_once_with(active=False)
+
+    def test_e2e_full_mount_alone_without_e2e_testing_constructs_all_views(
+        self, mock_i18n_state, mock_app_colors_state, monkeypatch
+    ) -> None:
+        """单独设置 E2E_FULL_MOUNT 而非 E2E_TESTING 时（生产路径），所有 7 个视图正常构造。"""
+        from ui import app_layout as mod
+
+        view_mocks: dict[str, MagicMock] = {}
+        for view_name in [
+            "HomeView",
+            "ScreenerView",
+            "BacktestView",
+            "DataExplorerView",
+            "TaskCenterView",
+            "SettingsView",
+            "WatchlistView",
+        ]:
+            mock = MagicMock(return_value=MagicMock(name=view_name))
+            view_mocks[view_name] = mock
+            monkeypatch.setattr(mod, view_name, mock)
+
+        monkeypatch.delenv("E2E_TESTING", raising=False)
+        monkeypatch.setenv("E2E_FULL_MOUNT", "true")
+        try:
+            component = make_component(mod._build_pages_stack, 0)
+            render_once(component)
+        finally:
+            monkeypatch.delenv("E2E_FULL_MOUNT", raising=False)
+
+        view_mocks["HomeView"].assert_called_once_with(active=True)
+        view_mocks["ScreenerView"].assert_called_once_with(active=False, stock_filter_request=None)
+        view_mocks["BacktestView"].assert_called_once_with(active=False, prefill_request=None)
+        view_mocks["DataExplorerView"].assert_called_once_with(active=False)
+        view_mocks["TaskCenterView"].assert_called_once_with(active=False)
+        view_mocks["SettingsView"].assert_called_once_with(active=False, target_subtab=None)
+        view_mocks["WatchlistView"].assert_called_once_with(active=False)
+
 
 # ============================================================================
 # _on_navigate 测试: TOPIC_NAVIGATE PubSub 事件处理
