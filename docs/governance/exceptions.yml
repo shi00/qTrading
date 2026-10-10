@@ -66,10 +66,10 @@ exceptions:
   - id: EX-0004
     rule_id: R1
     paths: ["utils/scheduler_service.py"]
-    reason: "scheduler_service 剩余函数内 lazy import（daily/ai_concept 提交与 DB idempotency 状态），启动性能优化——模块加载不拉起 data/services 全栈；review01-A2 已加 # lazy-import: 注释。"
+    reason: "scheduler_service 剩余函数内 lazy import（daily/concept_sync 提交与 DB idempotency 状态），启动性能优化——模块加载不拉起 data/services 全栈；review01-A2 已加 # lazy-import: 注释。"
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
-    removal_trigger: "daily/ai_concept 提交与 DB idempotency 状态改为经 app 层显式依赖注入、scheduler_service 不再按需加载 data/services 后移除（review01-A2 夜间预测下沉已完成，本条目为剩余的启动性能 lazy import）。"
+    removal_trigger: "daily/concept_sync 提交与 DB idempotency 状态改为经 app 层显式依赖注入、scheduler_service 不再按需加载 data/services 后移除（review01-A2 夜间预测下沉已完成，本条目为剩余的启动性能 lazy import）。"
     verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0004）。"
     validity_criteria: "`utils/scheduler_service.py` 仍含 `# lazy-import:` 标注的指向 `data.cache.cache_manager`（L239）/`data.persistence.app_state_service`（L240）的函数内导入，且 `app` 层尚未对 idempotency 状态读写提供显式依赖注入。"
   # EX-0005: utils/scheduler_service.py -> data.data_processor（启动性能优化）
@@ -79,7 +79,7 @@ exceptions:
     reason: "同 EX-0004：scheduler_service 剩余函数内 lazy import，启动性能优化，review01-A2 已加 # lazy-import: 注释。"
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
-    removal_trigger: "同 EX-0004：daily/ai_concept 提交与 DB idempotency 状态改为经 app 层显式依赖注入后移除。"
+    removal_trigger: "同 EX-0004：daily/concept_sync 提交与 DB idempotency 状态改为经 app 层显式依赖注入后移除。"
     verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0005）。"
     validity_criteria: "`utils/scheduler_service.py` 仍含 `# lazy-import:` 标注的指向 `data.data_processor` 的函数内导入（L482/L530/L585/L636/L719），且 `app` 层尚未提供对应注入点。"
   # EX-0006: utils/scheduler_service.py -> data.persistence.app_state_service（启动性能优化）
@@ -89,7 +89,7 @@ exceptions:
     reason: "同 EX-0004：scheduler_service 剩余函数内 lazy import，启动性能优化，review01-A2 已加 # lazy-import: 注释。"
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
-    removal_trigger: "同 EX-0004：daily/ai_concept 提交与 DB idempotency 状态改为经 app 层显式依赖注入后移除。"
+    removal_trigger: "同 EX-0004：daily/concept_sync 提交与 DB idempotency 状态改为经 app 层显式依赖注入后移除。"
     verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0006）。"
     validity_criteria: "`utils/scheduler_service.py` 仍含 `# lazy-import:` 标注的指向 `data.persistence.app_state_service` 的函数内导入（L158/L240），且 `app` 层尚未对 idempotency 状态读写提供显式依赖注入。"
   # EX-0007: utils/scheduler_service.py -> services.task_manager（启动性能优化）
@@ -99,7 +99,7 @@ exceptions:
     reason: "同 EX-0004：scheduler_service 剩余函数内 lazy import，启动性能优化，review01-A2 已加 # lazy-import: 注释。"
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
-    removal_trigger: "同 EX-0004：daily/ai_concept 提交与 DB idempotency 状态改为经 app 层显式依赖注入后移除。"
+    removal_trigger: "同 EX-0004：daily/concept_sync 提交与 DB idempotency 状态改为经 app 层显式依赖注入后移除。"
     verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0007）。"
     validity_criteria: "`utils/scheduler_service.py` 仍含 `# lazy-import:` 标注的指向 `services.task_manager` 的函数内导入（L483/L529/L632/L714），且 `app` 层尚未提供对应注入点。"
   # EX-0008: utils/shutdown.py 关机步骤按需加载（聚合条目，覆盖 EX-0009~EX-0016 同因目标）

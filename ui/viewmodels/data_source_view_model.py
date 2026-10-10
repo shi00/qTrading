@@ -15,7 +15,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error
@@ -30,9 +30,6 @@ from data.sync.errors import InitSyncError
 from services.task_manager import EXCLUSIVE_GROUP_MARKET_SYNC, AppTask, TaskManager, TaskStatus
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
-
-if TYPE_CHECKING:
-    from services.ai_service import AIService
 
 logger = logging.getLogger(__name__)
 
@@ -131,23 +128,16 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         self,
         processor: DataProcessor | None = None,
         cache: CacheManager | None = None,
-        ai_service: AIService | None = None,
         scheduler_service: SchedulerService | None = None,
     ):
         # Dependencies (constructor injection for testability)
-        # T6 fix: 与 _processor / _cache 一致，AIService 也通过构造注入。
-        # AIService 已是 @register_singleton，AIService() 默认返回同一实例，
-        # 显式注入仅为统一风格、便于测试替换。
-        # Task 7.2: AIService 改为惰性构造 (避免 DataSourceTab 打开即触发 litellm import
-        # 阻塞主线程); 仅在 execute_ai_concept_rebuild 实际用到时才构造。
         # B11: DataProcessor 懒构造——DataProcessor.__init__ 同步初始化 TushareClient
         # （40+ API rate_limiter，耗时 34s+），构造期同步会阻塞 Flet 主线程 (R16)。
         # 首次实际使用经 _ensure_processor() 在 IO 线程池异步构造；显式 DI 注入保留
         # （测试注入 mock 后 _ensure_processor 直接返回已注入实例）。
         self._processor = processor
         self._cache = cache or CacheManager()  # noqa: R16 - 持有注册单例引用（幂等工厂，DI 注入位）
-        self._ai_service = ai_service
-        # D7-6: 调度状态面板数据源，与 _ai_service 一致惰性构造（构造期不触碰 SchedulerService）。
+        # D7-6: 调度状态面板数据源，惰性构造（构造期不触碰 SchedulerService）。
         self._scheduler_service = scheduler_service
         self._tm = TaskManager()  # noqa: R16 - 持有注册单例引用（幂等工厂）
 
@@ -190,18 +180,6 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
             return
         self._tm_callback = self.handle_task_update
         self._tm.subscribe(self._tm_callback)
-
-    def _get_ai_service(self) -> AIService:
-        """Task 7.2: 惰性构造 AIService (仅在 execute_ai_concept_rebuild 用到时才 import + 构造).
-
-        避免 DataSourceTab 打开即触发 ``services.ai_service`` → litellm 同步 import
-        阻塞主线程; 同时保持显式注入可测试性。
-        """
-        if self._ai_service is None:
-            from services.ai_service import AIService
-
-            self._ai_service = AIService()
-        return self._ai_service
 
     def _get_scheduler_service(self) -> SchedulerService:
         """D7-6: 惰性解析 SchedulerService（注册单例，幂等），构造期不触碰（避免打开面板即读配置）。"""
@@ -346,7 +324,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         """Update sync busy state and notify View.
 
         P1-5: 任务启动/结束时重置 progress/progress_message, 避免 init_sync 与
-        daily_sync/ai_concept_sync/cache_clear 进度字段复用错乱 (场景遗漏 #16).
+        daily_sync/cache_clear 进度字段复用错乱 (场景遗漏 #16).
         init_sync 终态走 _reset_init_sync (不经本方法 is_busy=False 分支), 不受影响.
         """
         if is_busy:
@@ -527,65 +505,6 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         else:
             self._active_task_ids["daily_sync"] = task_id
 
-    # --- AI Concept Rebuild ---
-
-    def execute_ai_concept_rebuild(self):
-        """Execute AI concept rebuild (called by View after user confirms)."""
-        self._set_sync_busy(True, "ai_concept_sync")
-
-        async def _ai_concept_logic(task_id: str, **kwargs):
-            cancel_event = self._tm.get_cancel_event(task_id)
-            try:
-                # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
-                # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
-                if not self._tm.update_progress(task_id, 0.05, Message("ds_ai_concept_rebuild_start")):
-                    raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
-                # P1-5: 起始进度上报到 VM state (View ProgressBar 渲染)
-                self._set_state(progress=0.05, progress_message=Message("ds_ai_concept_rebuild_start"))
-                # Manual trigger: manual_trigger=True → execute LLM-driven concept tagging.
-                # ai_service injected via kwargs to satisfy R1 (data/ must not import services/).
-                # Task 7.2: _get_ai_service() 惰性构造, 避免 __init__ 触发 litellm import
-                dp = await self._ensure_processor()
-                await dp.run_ai_concept_tagging(
-                    task_id=task_id,
-                    cancel_event=cancel_event,
-                    manual_trigger=True,
-                    ai_service=self._get_ai_service(),
-                )
-                # P1-5: 完成进度 100% (任务结束 finally 重置为 0, 此处先让用户看到完成态)
-                self._set_state(progress=1.0, progress_message=Message("ds_ai_concept_rebuild_done"))
-                self._emit_snack(Message("snack_ai_concept_done"), "success")
-                return Message("ds_ai_concept_rebuild_done")
-            except asyncio.CancelledError:
-                # 同 _daily_logic: 不设 is_syncing 守卫 (真实取消时序下守卫必跳过 snack)
-                self._emit_snack(
-                    Message("settings_msg_sync_cancelled"),
-                    "warning",
-                )
-                raise
-            except Exception as ex:
-                classify_error(ex, context="general")
-                self._emit_snack(
-                    Message("common_op_fail"),
-                    "error",
-                )
-                raise
-            finally:
-                self._set_sync_busy(False)
-
-        task_id = self._tm.submit_task(
-            name=Message("task_name_ai_concept_rebuild"),
-            task_type=Message("ds_task_type_ai_tagging"),
-            coroutine_factory=_ai_concept_logic,
-            cancellable=True,
-            unique_key="ai_concept_sync",
-        )
-
-        if task_id is None:
-            self._set_sync_busy(False)
-        else:
-            self._active_task_ids["ai_concept_sync"] = task_id
-
     # --- Clear Cache ---
 
     def execute_clear_cache(self):
@@ -713,7 +632,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
             self._tm.cancel_task(task_id)
 
     def cancel_active_task(self) -> None:
-        """取消当前活跃任务 (P1-5: daily_sync/ai_concept_sync 取消按钮).
+        """取消当前活跃任务 (P1-5: daily_sync 取消按钮).
 
         按 state.active_key 定位 task_id 并委托 TaskManager 取消。
         cache_clear (cancellable=False) 由 View 层隐藏取消按钮, 此处不重复检查;
@@ -734,13 +653,6 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         Phase 3.1: 从 View 下沉 (原 View 直接调 ConfigHandler.get_init_history_years).
         """
         return ConfigHandler.get_init_history_years()
-
-    def is_ai_external_acknowledged(self) -> bool:
-        """Task 2.2: 读取 AI 外发知情确认状态（供 View 决定 dialog 文案）.
-
-        View 不直接 import ConfigHandler（MVVM 契约），由 VM 透传.
-        """
-        return ConfigHandler.is_ai_external_acknowledged()
 
     async def save_tushare_token(self, token: str) -> None:
         """异步保存 Tushare token 到配置并更新客户端 (R16: IO offload via ThreadPoolManager).

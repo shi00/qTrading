@@ -11,7 +11,7 @@
 - `financial.py` — 财务报告同步
 - `holder.py` — 股东数据同步
 - `macro.py` — 宏观数据同步
-- `concept_sync.py` — 概念板块映射同步（AKShare 东财概念板块 / Tushare 涨跌停 / LLM 概念打标）
+- `concept_sync.py` — 概念板块映射同步（AKShare 东财概念板块 / Tushare 涨跌停）
 - `sw_industry.py` — 申万行业分类同步（全局快照，月度更新）
 - `name_change.py` — 证券更名历史同步
 - `errors.py` — 同步异常定义 (`InitSyncError`)

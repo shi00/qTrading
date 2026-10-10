@@ -140,36 +140,36 @@ class TestAutomationTabR2Compliance:
     """R2 红线: 7 个 async handler 必须有 CancelledError raise 守卫。"""
 
     def test_all_async_handlers_have_cancelled_error_raise(self) -> None:
-        """验证 ≥8 处 `except asyncio.CancelledError` + ≥8 处 `raise  # R2`。
+        """验证 ≥7 处 `except asyncio.CancelledError` + ≥7 处 `raise  # R2`。
 
-        8 个 async handler:
+        7 个 async handler:
         - AutomationTab: _do_schedule_toggle / _do_schedule_time_change /
-          _do_ai_concept_toggle / _do_ai_concept_time_change / _do_ai_concept_engine_change /
+          _do_concept_toggle / _do_concept_time_change /
           _do_nightly_prediction_time_change (Task 7.3)
         - NotificationsTab: _do_news_toggle / _do_interval_change
         """
         source = _read_source()
         cancelled_count = source.count("except asyncio.CancelledError")
         raise_count = source.count("raise  # R2")
-        assert cancelled_count >= 8, f"应有 ≥8 处 CancelledError 守卫, 实际 {cancelled_count}"
-        assert raise_count >= 8, f"应有 ≥8 处 `raise  # R2`, 实际 {raise_count}"
+        assert cancelled_count >= 7, f"应有 ≥7 处 CancelledError 守卫, 实际 {cancelled_count}"
+        assert raise_count >= 7, f"应有 ≥7 处 `raise  # R2`, 实际 {raise_count}"
 
 
 class TestAutomationTabR16Compliance:
     """R16 红线: 同步 event handler 必须用 page.run_task 调度 async handler。"""
 
     def test_all_event_handlers_use_run_task(self) -> None:
-        """验证 ≥8 处 `page.run_task(` 调度。
+        """验证 ≥7 处 `page.run_task(` 调度。
 
-        8 个 event handler:
+        7 个 event handler:
         - AutomationTab: _on_schedule_toggle / _on_schedule_time_change /
-          _on_ai_concept_toggle / _on_ai_concept_time_change / _on_ai_concept_engine_change /
+          _on_concept_toggle / _on_concept_time_change /
           _on_nightly_prediction_time_change (Task 7.3)
         - NotificationsTab: _on_news_toggle / _on_interval_change
         """
         source = _read_source()
         run_task_count = source.count("page.run_task(")
-        assert run_task_count >= 8, f"应有 ≥8 处 page.run_task, 实际 {run_task_count}"
+        assert run_task_count >= 7, f"应有 ≥7 处 page.run_task, 实际 {run_task_count}"
 
 
 # ============================================================================
@@ -213,18 +213,6 @@ class TestModulePureFunctions:
         options = _build_time_options()
         assert len(options) == 7
         assert all(isinstance(o, ft.dropdown.Option) for o in options)
-
-    def test_build_search_engine_options(self, mock_i18n_state) -> None:
-        """_build_search_engine_options 返回 2 个 dropdown.Option。"""
-        from core.i18n import DEFAULT_LOCALE, I18n
-
-        I18n._locale = DEFAULT_LOCALE
-        from ui.views.settings_tabs.automation_tab import _build_search_engine_options
-
-        options = _build_search_engine_options()
-        assert len(options) == 2
-        keys = {o.key for o in options}
-        assert keys == {"search_std", "search_pro"}
 
     def test_build_interval_options(self, mock_i18n_state) -> None:
         """_build_interval_options 返回 4 个 dropdown.Option。"""
@@ -393,9 +381,8 @@ def _patch_automation_common_mocks(mod, monkeypatch) -> dict:
     mock_config = MagicMock()
     mock_config.is_auto_update_enabled.return_value = False
     mock_config.get_auto_update_time.return_value = "16:30"
-    mock_config.is_ai_concept_schedule_enabled.return_value = False
-    mock_config.get_ai_concept_schedule_time.return_value = "20:00"
-    mock_config.get_ai_concept_search_engine.return_value = "search_std"
+    mock_config.is_concept_schedule_enabled.return_value = False
+    mock_config.get_concept_schedule_time.return_value = "20:00"
     mock_config.get_nightly_prediction_time.return_value = "20:30"
     mock_config.set_nightly_prediction_time.return_value = True
     mock_config.get_config.side_effect = lambda key, default=None: {
@@ -403,9 +390,8 @@ def _patch_automation_common_mocks(mod, monkeypatch) -> dict:
         "news_poll_interval": 60,
     }.get(key, default)
     mock_config.save_config.return_value = True
-    mock_config.set_ai_concept_schedule_enabled.return_value = True
-    mock_config.set_ai_concept_schedule_time.return_value = True
-    mock_config.set_ai_concept_search_engine.return_value = True
+    mock_config.set_concept_schedule_enabled.return_value = True
+    mock_config.set_concept_schedule_time.return_value = True
     # Task 5.2: ConfigHandler/ThreadPoolManager 下沉到 AutomationSettingsViewModel,
     # patch 目标改为 VM 模块 (View 不再直接持有这两个符号)
     monkeypatch.setattr("ui.viewmodels.automation_settings_view_model.ConfigHandler", mock_config)
@@ -493,14 +479,14 @@ class TestAutomationTabMount:
         assert isinstance(result.content, ft.Column)
 
     def test_render_includes_switches(self, automation_tab_env) -> None:
-        """渲染含 2 个 Switch (schedule / ai_concept)。"""
+        """渲染含 2 个 Switch (schedule / concept)。"""
         switches = _get_switches(automation_tab_env)
         assert len(switches) >= 2
 
     def test_render_includes_dropdowns(self, automation_tab_env) -> None:
-        """渲染含 4 个 Dropdown (schedule_time / ai_concept_time / ai_concept_engine / nightly_prediction_time)。"""
+        """渲染含 3 个 Dropdown (schedule_time / concept_time / nightly_prediction_time)。"""
         dropdowns = _get_dropdowns(automation_tab_env)
-        assert len(dropdowns) >= 4
+        assert len(dropdowns) >= 3
 
     def test_unmount_does_not_raise(self, automation_tab_env) -> None:
         """卸载组件不抛异常。"""
@@ -565,10 +551,10 @@ class TestEventHandlersPageAvailable:
         assert inspect.iscoroutinefunction(handler)
         assert args == ("17:00",)
 
-    def test_on_ai_concept_toggle_invokes_run_task(self, automation_tab_env) -> None:
-        """_on_ai_concept_toggle: page 可用 → page.run_task(_do_ai_concept_toggle, new_enabled)。"""
+    def test_on_concept_toggle_invokes_run_task(self, automation_tab_env) -> None:
+        """_on_concept_toggle: page 可用 → page.run_task(_do_concept_toggle, new_enabled)。"""
         env = automation_tab_env
-        switch = _find_switch_by_label(env, "settings_ai_concept_update")
+        switch = _find_switch_by_label(env, "settings_concept_sync_update")
         page = env["page"]
         page.run_task.reset_mock()
 
@@ -577,32 +563,20 @@ class TestEventHandlersPageAvailable:
         assert inspect.iscoroutinefunction(handler)
         assert args == (True,)
 
-    def test_on_ai_concept_time_change_invokes_run_task(self, automation_tab_env) -> None:
-        """_on_ai_concept_time_change: page 可用 → page.run_task(_do_ai_concept_time_change, new_time)。"""
+    def test_on_concept_time_change_invokes_run_task(self, automation_tab_env) -> None:
+        """_on_concept_time_change: page 可用 → page.run_task(_do_concept_time_change, new_time)。"""
         env = automation_tab_env
         dropdowns = _get_dropdowns(env)
-        # ai_concept_time_dropdown 的 label 也是 settings_update_time,
+        # concept_time_dropdown 的 label 也是 settings_update_time,
         # 与 schedule_time_dropdown 同 i18n key (源码设计如此), 用出现顺序区分 (第 2 个)
-        ai_time_dropdown = dropdowns[1]
+        concept_time_dropdown = dropdowns[1]
         page = env["page"]
         page.run_task.reset_mock()
 
-        _invoke(ai_time_dropdown.on_select, _make_event("20:00"))
+        _invoke(concept_time_dropdown.on_select, _make_event("20:00"))
         handler, args, _ = _await_run_task_handler(page)
         assert inspect.iscoroutinefunction(handler)
         assert args == ("20:00",)
-
-    def test_on_ai_concept_engine_change_invokes_run_task(self, automation_tab_env) -> None:
-        """_on_ai_concept_engine_change: page 可用 → page.run_task(_do_ai_concept_engine_change, new_engine)。"""
-        env = automation_tab_env
-        dropdown = _find_dropdown_by_label(env, "settings_ai_concept_search_engine")
-        page = env["page"]
-        page.run_task.reset_mock()
-
-        _invoke(dropdown.on_select, _make_event("search_pro"))
-        handler, args, _ = _await_run_task_handler(page)
-        assert inspect.iscoroutinefunction(handler)
-        assert args == ("search_pro",)
 
     def test_on_nightly_prediction_time_change_invokes_run_task(self, automation_tab_env) -> None:
         """Task 7.3: _on_nightly_prediction_time_change: page 可用 → page.run_task。"""
@@ -672,9 +646,9 @@ class TestEventHandlersPageNoneEarlyReturn:
             _invoke(dropdown.on_select, _make_event("17:00"))
         assert not page.run_task.called
 
-    def test_on_ai_concept_toggle_page_none_no_run_task(self, automation_tab_env) -> None:
+    def test_on_concept_toggle_page_none_no_run_task(self, automation_tab_env) -> None:
         env = automation_tab_env
-        switch = _find_switch_by_label(env, "settings_ai_concept_update")
+        switch = _find_switch_by_label(env, "settings_concept_sync_update")
         page = env["page"]
         page.run_task.reset_mock()
 
@@ -682,25 +656,15 @@ class TestEventHandlersPageNoneEarlyReturn:
             _invoke(switch.on_change, _make_event(True))
         assert not page.run_task.called
 
-    def test_on_ai_concept_time_change_page_none_no_run_task(self, automation_tab_env) -> None:
+    def test_on_concept_time_change_page_none_no_run_task(self, automation_tab_env) -> None:
         env = automation_tab_env
         dropdowns = _get_dropdowns(env)
-        ai_time_dropdown = dropdowns[1]
+        concept_time_dropdown = dropdowns[1]
         page = env["page"]
         page.run_task.reset_mock()
 
         with patch("ui.views.settings_tabs.automation_tab._get_page", return_value=None):
-            _invoke(ai_time_dropdown.on_select, _make_event("20:00"))
-        assert not page.run_task.called
-
-    def test_on_ai_concept_engine_change_page_none_no_run_task(self, automation_tab_env) -> None:
-        env = automation_tab_env
-        dropdown = _find_dropdown_by_label(env, "settings_ai_concept_search_engine")
-        page = env["page"]
-        page.run_task.reset_mock()
-
-        with patch("ui.views.settings_tabs.automation_tab._get_page", return_value=None):
-            _invoke(dropdown.on_select, _make_event("search_pro"))
+            _invoke(concept_time_dropdown.on_select, _make_event("20:00"))
         assert not page.run_task.called
 
     def test_on_nightly_prediction_time_change_page_none_no_run_task(self, automation_tab_env) -> None:
@@ -829,71 +793,71 @@ class TestDoScheduleTimeChange:
         assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
-class TestDoAiConceptToggle:
-    """_do_ai_concept_toggle: 成功/异常回滚/CancelledError。"""
+class TestDoConceptToggle:
+    """_do_concept_toggle: 成功/异常回滚/CancelledError。"""
 
     def _trigger(self, env, new_enabled: bool = True) -> tuple:
-        switch = _find_switch_by_label(env, "settings_ai_concept_update")
+        switch = _find_switch_by_label(env, "settings_concept_sync_update")
         page = env["page"]
         page.run_task.reset_mock()
         _invoke(switch.on_change, _make_event(new_enabled))
         return _await_run_task_handler(page)
 
     def test_success_path(self, automation_tab_env) -> None:
-        """成功: set_ai_concept_schedule_enabled + show_snack。"""
+        """成功: set_concept_schedule_enabled + show_snack。"""
         env = automation_tab_env
         handler, args, _ = self._trigger(env, True)
         asyncio.run(handler(*args))
 
-        env["mock_config"].set_ai_concept_schedule_enabled.assert_called_once_with(True)
+        env["mock_config"].set_concept_schedule_enabled.assert_called_once_with(True)
         env["show_snack"].assert_called_once_with("i18n[settings_snack_auto_on]")
 
     def test_exception_path_rolls_back(self, automation_tab_env) -> None:
-        """set_ai_concept_schedule_enabled 抛 Exception → set_ai_enabled 回滚 + show_snack 错误。"""
+        """set_concept_schedule_enabled 抛 Exception → set_concept_enabled 回滚 + show_snack 错误。"""
         env = automation_tab_env
-        env["mock_config"].set_ai_concept_schedule_enabled.side_effect = RuntimeError("boom")
+        env["mock_config"].set_concept_schedule_enabled.side_effect = RuntimeError("boom")
         handler, args, _ = self._trigger(env, True)
         asyncio.run(handler(*args))
 
         env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
         _rerender(env)
-        switch = _find_switch_by_label(env, "settings_ai_concept_update")
+        switch = _find_switch_by_label(env, "settings_concept_sync_update")
         assert switch.value is False
 
     def test_cancelled_error_propagates(self, automation_tab_env) -> None:
         """R2: CancelledError 必须传播。"""
         env = automation_tab_env
-        env["mock_config"].set_ai_concept_schedule_enabled.side_effect = asyncio.CancelledError()
+        env["mock_config"].set_concept_schedule_enabled.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env, True)
         with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
         assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
-class TestDoAiConceptTimeChange:
-    """_do_ai_concept_time_change: 成功/异常/CancelledError。"""
+class TestDoConceptTimeChange:
+    """_do_concept_time_change: 成功/异常/CancelledError。"""
 
     def _trigger(self, env, new_time: str = "20:00") -> tuple:
         dropdowns = _get_dropdowns(env)
-        ai_time_dropdown = dropdowns[1]
+        concept_time_dropdown = dropdowns[1]
         page = env["page"]
         page.run_task.reset_mock()
-        _invoke(ai_time_dropdown.on_select, _make_event(new_time))
+        _invoke(concept_time_dropdown.on_select, _make_event(new_time))
         return _await_run_task_handler(page)
 
     def test_success_path(self, automation_tab_env) -> None:
-        """成功: set_ai_concept_schedule_time + show_snack(含 time)。"""
+        """成功: set_concept_schedule_time + show_snack(含 time)。"""
         env = automation_tab_env
         handler, args, _ = self._trigger(env, "20:00")
         asyncio.run(handler(*args))
 
-        env["mock_config"].set_ai_concept_schedule_time.assert_called_once_with("20:00")
+        env["mock_config"].set_concept_schedule_time.assert_called_once_with("20:00")
         env["show_snack"].assert_called_once_with("i18n[settings_snack_time_set]")
 
     def test_exception_path_calls_show_snack(self, automation_tab_env) -> None:
-        """set_ai_concept_schedule_time 抛 Exception → snack 错误。"""
+        """set_concept_schedule_time 抛 Exception → snack 错误。"""
         env = automation_tab_env
-        env["mock_config"].set_ai_concept_schedule_time.side_effect = RuntimeError("boom")
+        env["mock_config"].set_concept_schedule_time.side_effect = RuntimeError("boom")
         handler, args, _ = self._trigger(env, "20:00")
         asyncio.run(handler(*args))
 
@@ -902,46 +866,8 @@ class TestDoAiConceptTimeChange:
     def test_cancelled_error_propagates(self, automation_tab_env) -> None:
         """R2: CancelledError 必须传播。"""
         env = automation_tab_env
-        env["mock_config"].set_ai_concept_schedule_time.side_effect = asyncio.CancelledError()
+        env["mock_config"].set_concept_schedule_time.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env, "20:00")
-        with pytest.raises(asyncio.CancelledError) as exc_info:
-            asyncio.run(handler(*args))
-        assert isinstance(exc_info.value, asyncio.CancelledError)
-
-
-class TestDoAiConceptEngineChange:
-    """_do_ai_concept_engine_change: 成功/异常/CancelledError。"""
-
-    def _trigger(self, env, new_engine: str = "search_pro") -> tuple:
-        dropdown = _find_dropdown_by_label(env, "settings_ai_concept_search_engine")
-        page = env["page"]
-        page.run_task.reset_mock()
-        _invoke(dropdown.on_select, _make_event(new_engine))
-        return _await_run_task_handler(page)
-
-    def test_success_path(self, automation_tab_env) -> None:
-        """成功: set_ai_concept_search_engine + show_snack(common_saved)。"""
-        env = automation_tab_env
-        handler, args, _ = self._trigger(env, "search_pro")
-        asyncio.run(handler(*args))
-
-        env["mock_config"].set_ai_concept_search_engine.assert_called_once_with("search_pro")
-        env["show_snack"].assert_called_once_with("i18n[common_saved]")
-
-    def test_exception_path_calls_show_snack(self, automation_tab_env) -> None:
-        """set_ai_concept_search_engine 抛 Exception → snack 错误。"""
-        env = automation_tab_env
-        env["mock_config"].set_ai_concept_search_engine.side_effect = RuntimeError("boom")
-        handler, args, _ = self._trigger(env, "search_pro")
-        asyncio.run(handler(*args))
-
-        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
-
-    def test_cancelled_error_propagates(self, automation_tab_env) -> None:
-        """R2: CancelledError 必须传播。"""
-        env = automation_tab_env
-        env["mock_config"].set_ai_concept_search_engine.side_effect = asyncio.CancelledError()
-        handler, args, _ = self._trigger(env, "search_pro")
         with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
         assert isinstance(exc_info.value, asyncio.CancelledError)
@@ -1125,24 +1051,22 @@ class TestDisabledState:
         dropdown = _find_dropdown_by_label(env, "settings_update_time")
         assert dropdown.disabled is False
 
-    def test_ai_concept_disabled_initial(self, automation_tab_env) -> None:
-        """初始 ai_enabled=False → ai_time/engine dropdowns.disabled=True。"""
+    def test_concept_disabled_initial(self, automation_tab_env) -> None:
+        """初始 concept_enabled=False → concept_time dropdown.disabled=True。"""
         env = automation_tab_env
         dropdowns = _get_dropdowns(env)
-        # ai_concept_time_dropdown = dropdowns[1], ai_concept_engine_dropdown = dropdowns[2]
+        # concept_time_dropdown = dropdowns[1]
         assert dropdowns[1].disabled is True
-        assert dropdowns[2].disabled is True
 
-    def test_ai_concept_enabled_toggles_dropdowns_disabled(self, automation_tab_env) -> None:
-        """toggle ai_concept switch → set_ai_enabled(True) → 两个 ai dropdowns.disabled=False。"""
+    def test_concept_enabled_toggles_dropdown_disabled(self, automation_tab_env) -> None:
+        """toggle concept switch → set_concept_enabled(True) → concept_time dropdown.disabled=False。"""
         env = automation_tab_env
-        switch = _find_switch_by_label(env, "settings_ai_concept_update")
+        switch = _find_switch_by_label(env, "settings_concept_sync_update")
         _invoke(switch.on_change, _make_event(True))
         _rerender(env)
 
         dropdowns = _get_dropdowns(env)
         assert dropdowns[1].disabled is False
-        assert dropdowns[2].disabled is False
 
     def test_news_disabled_initial(self, notifications_tab_env) -> None:
         """初始 news_enabled=True → interval_dropdown.disabled=False。"""
@@ -1168,9 +1092,8 @@ class TestDisabledState:
 #
 # 背景: VM 的 save_xxx 方法内部 try/except Exception 吞异常返回 False,
 # 导致 View 的 except Exception 块在常规路径下不可达 (走 if not success 分支).
-# 为覆盖 View 的 except Exception 块 (automation_tab.py 7 个 async handler 的
-# lines 140-144 / 157-160 / 176-180 / 193-196 / 209-212 / 479-483 / 497-500),
-# 直接 patch VM 类方法 raise RuntimeError, 绕过 VM 内部 try/except.
+# 为覆盖 View 的 except Exception 块 (automation_tab.py 各 async handler 的
+# except Exception 分支), 直接 patch VM 类方法 raise RuntimeError, 绕过 VM 内部 try/except.
 
 
 class TestDoScheduleToggleViewExceptionPath:
@@ -1232,13 +1155,13 @@ class TestDoScheduleTimeChangeViewExceptionPath:
         env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
 
-class TestDoAiConceptToggleViewExceptionPath:
-    """_do_ai_concept_toggle except Exception 路径 (automation_tab.py L176-180)."""
+class TestDoConceptToggleViewExceptionPath:
+    """_do_concept_toggle except Exception 路径."""
 
     def test_view_exception_path_rolls_back_and_snack(self, automation_tab_env, monkeypatch) -> None:
-        """VM save_ai_concept_enabled raise RuntimeError → View except Exception:
+        """VM save_concept_enabled raise RuntimeError → View except Exception:
         - logger.error 记录异常
-        - settings_vm.set_ai_enabled(not new_enabled) 回滚 state
+        - settings_vm.set_concept_enabled(not new_enabled) 回滚 state
         - show_snack_callback(sys_snack_save_err, color=ERROR)
         """
         from ui.viewmodels.automation_settings_view_model import AutomationSettingsViewModel
@@ -1246,11 +1169,11 @@ class TestDoAiConceptToggleViewExceptionPath:
         env = automation_tab_env
         monkeypatch.setattr(
             AutomationSettingsViewModel,
-            "save_ai_concept_enabled",
+            "save_concept_enabled",
             AsyncMock(side_effect=RuntimeError("boom")),
         )
 
-        switch = _find_switch_by_label(env, "settings_ai_concept_update")
+        switch = _find_switch_by_label(env, "settings_concept_sync_update")
         page = env["page"]
         page.run_task.reset_mock()
         _invoke(switch.on_change, _make_event(True))
@@ -1260,15 +1183,15 @@ class TestDoAiConceptToggleViewExceptionPath:
         env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
         # 回滚验证: render_once 后 switch.value=False (回滚 not True=False)
         _rerender(env)
-        switch = _find_switch_by_label(env, "settings_ai_concept_update")
+        switch = _find_switch_by_label(env, "settings_concept_sync_update")
         assert switch.value is False
 
 
-class TestDoAiConceptTimeChangeViewExceptionPath:
-    """_do_ai_concept_time_change except Exception 路径 (automation_tab.py L193-196)."""
+class TestDoConceptTimeChangeViewExceptionPath:
+    """_do_concept_time_change except Exception 路径."""
 
     def test_view_exception_path_calls_snack(self, automation_tab_env, monkeypatch) -> None:
-        """VM save_ai_concept_time raise RuntimeError → View except Exception:
+        """VM save_concept_time raise RuntimeError → View except Exception:
         - logger.error 记录异常 (无 state 回滚)
         - show_snack_callback(sys_snack_save_err, color=ERROR)
         """
@@ -1277,42 +1200,15 @@ class TestDoAiConceptTimeChangeViewExceptionPath:
         env = automation_tab_env
         monkeypatch.setattr(
             AutomationSettingsViewModel,
-            "save_ai_concept_time",
+            "save_concept_time",
             AsyncMock(side_effect=RuntimeError("boom")),
         )
 
         dropdowns = _get_dropdowns(env)
-        ai_time_dropdown = dropdowns[1]
+        concept_time_dropdown = dropdowns[1]
         page = env["page"]
         page.run_task.reset_mock()
-        _invoke(ai_time_dropdown.on_select, _make_event("20:00"))
-        handler, args, _ = _await_run_task_handler(page)
-        asyncio.run(handler(*args))
-
-        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
-
-
-class TestDoAiConceptEngineChangeViewExceptionPath:
-    """_do_ai_concept_engine_change except Exception 路径 (automation_tab.py L209-212)."""
-
-    def test_view_exception_path_calls_snack(self, automation_tab_env, monkeypatch) -> None:
-        """VM save_ai_concept_engine raise RuntimeError → View except Exception:
-        - logger.error 记录异常 (无 state 回滚)
-        - show_snack_callback(sys_snack_save_err, color=ERROR)
-        """
-        from ui.viewmodels.automation_settings_view_model import AutomationSettingsViewModel
-
-        env = automation_tab_env
-        monkeypatch.setattr(
-            AutomationSettingsViewModel,
-            "save_ai_concept_engine",
-            AsyncMock(side_effect=RuntimeError("boom")),
-        )
-
-        dropdown = _find_dropdown_by_label(env, "settings_ai_concept_search_engine")
-        page = env["page"]
-        page.run_task.reset_mock()
-        _invoke(dropdown.on_select, _make_event("search_pro"))
+        _invoke(concept_time_dropdown.on_select, _make_event("20:00"))
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 

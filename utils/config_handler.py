@@ -499,28 +499,20 @@ class ConfigHandler:
         return app_prefs.set_init_history_years(years)
 
     @classmethod
-    def is_ai_concept_schedule_enabled(cls) -> bool:
-        return app_prefs.is_ai_concept_schedule_enabled()
+    def is_concept_schedule_enabled(cls) -> bool:
+        return app_prefs.is_concept_schedule_enabled()
 
     @classmethod
-    def set_ai_concept_schedule_enabled(cls, enabled: bool):
-        return app_prefs.set_ai_concept_schedule_enabled(enabled)
+    def set_concept_schedule_enabled(cls, enabled: bool):
+        return app_prefs.set_concept_schedule_enabled(enabled)
 
     @classmethod
-    def get_ai_concept_schedule_time(cls) -> str:
-        return app_prefs.get_ai_concept_schedule_time()
+    def get_concept_schedule_time(cls) -> str:
+        return app_prefs.get_concept_schedule_time()
 
     @classmethod
-    def set_ai_concept_schedule_time(cls, time_str: str):
-        return app_prefs.set_ai_concept_schedule_time(time_str)
-
-    @classmethod
-    def get_ai_concept_search_engine(cls) -> str:
-        return app_prefs.get_ai_concept_search_engine()
-
-    @classmethod
-    def set_ai_concept_search_engine(cls, engine: str):
-        return app_prefs.set_ai_concept_search_engine(engine)
+    def set_concept_schedule_time(cls, time_str: str):
+        return app_prefs.set_concept_schedule_time(time_str)
 
     @classmethod
     def get_nightly_prediction_time(cls) -> str:

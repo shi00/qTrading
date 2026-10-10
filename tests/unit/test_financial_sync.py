@@ -1178,8 +1178,7 @@ class TestFinancialSyncEngineDisposed:
     async def test_engine_disposed_in_run(self):
         """R5: EngineDisposedError 必须从策略外层 raise，不能被吞。
 
-        与 historical/macro/holder/concept_sync 一致，与集成测试
-        test_ai_concept_tagging.py::TestEngineDisposedE2E 对齐。
+        与 historical/macro/holder/concept_sync 等同步策略一致。
         """
         ctx = make_ctx()
         ctx.cache.stock_dao.get_stock_basic = AsyncMock(side_effect=EngineDisposedError("disposed"))

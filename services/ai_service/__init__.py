@@ -451,24 +451,6 @@ class AIService:
         self._ensure_subservices()
         return await self._litellm.verify_connection()
 
-    async def chat_with_web_search(
-        self,
-        messages: list[dict],
-        search_domain_filter: list[str] | None = None,
-        search_engine: str = "search_std",
-        temperature: float = 0.3,
-        timeout: float = 60.0,
-    ) -> dict:
-        """委托 LiteLLMClient.chat_with_web_search（保留显式签名）。"""
-        self._ensure_subservices()
-        return await self._litellm.chat_with_web_search(
-            messages,
-            search_domain_filter=search_domain_filter,
-            search_engine=search_engine,
-            temperature=temperature,
-            timeout=timeout,
-        )
-
     @staticmethod
     async def test_connection(
         provider: str = "deepseek",

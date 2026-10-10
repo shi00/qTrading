@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 # 此处按 ``data/data_dictionary.py`` 的 TABLE_DEFINITIONS 逐表核对后归并为
 # 用户可理解的类别，确保不遗漏、不臆造（表结构/版本标记由 schema_note 说明兜底）：
 #   watchlist / screening_history / screening_thinking / news_risk_brief /
-#   ai_concept_failures / daily_quotes / daily_indicators / moneyflow_daily /
+#   daily_quotes / daily_indicators / moneyflow_daily /
 #   index_daily / index_dailybasic / northbound_holding / margin_daily /
 #   stk_limit / limit_list / top_list / top_inst / block_trade / moneyflow_hsgt /
 #   index_weight / suspend_d / financial_reports / fina_forecast / fina_audit /
@@ -375,7 +375,6 @@ def _build_health_dashboard(
 def _build_action_console(
     state: DataSourceState,
     on_full_sync: Callable[[ft.ControlEvent], None],
-    on_ai_concept_rebuild: Callable[[ft.ControlEvent], None],
     on_cancel_active_task: Callable[[ft.ControlEvent], None],
 ) -> ft.Control:
     """Action Console 区块 (D15: 从 DataSourceTab 提取, P1-5 次级进度自含).
@@ -384,15 +383,13 @@ def _build_action_console(
     """
     # ActionChip loading state (derived from is_syncing + active_key)
     action_full_sync_loading = state.is_syncing and state.active_key == "daily_sync"
-    action_ai_concept_loading = state.is_syncing and state.active_key == "ai_concept_sync"
 
     # P1-5: Secondary progress 区域
     secondary_progress_visible = state.is_syncing and state.active_key in (
         "daily_sync",
-        "ai_concept_sync",
         "cache_clear",
     )
-    secondary_cancellable = state.active_key in ("daily_sync", "ai_concept_sync")
+    secondary_cancellable = state.active_key == "daily_sync"
     if secondary_progress_visible and state.progress_message is not None:
         secondary_progress_text_value = f"{state.progress * 100:.1f}% - {_render_message(state.progress_message)}"
     elif secondary_progress_visible and state.active_key != "cache_clear":
@@ -425,13 +422,6 @@ def _build_action_console(
         on_click=on_full_sync,
         is_loading=action_full_sync_loading,
     )
-    action_ai_concept_rebuild = ActionChip(
-        icon=safe_icon_str(ft.Icons.AUTO_FIX_HIGH),
-        title=I18n.get("ds_btn_ai_concept_rebuild"),
-        subtitle=I18n.get("ds_btn_ai_concept_rebuild_desc"),
-        on_click=on_ai_concept_rebuild,
-        is_loading=action_ai_concept_loading,
-    )
 
     return DashboardCard(
         content=ft.Column(
@@ -440,8 +430,7 @@ def _build_action_console(
                 ft.Divider(height=10, color=AppColors.TRANSPARENT),
                 ft.ResponsiveRow(
                     [
-                        ft.Column([action_full_sync], col={"sm": 12, "md": 6}),
-                        ft.Column([action_ai_concept_rebuild], col={"sm": 12, "md": 6}),
+                        ft.Column([action_full_sync], col={"sm": 12, "md": 12}),
                     ],
                     run_spacing=10,
                 ),
@@ -683,11 +672,6 @@ def _build_data_flow_card() -> ft.Control:
                                     size=AppStyles.FONT_SIZE_BODY_SM,
                                     color=AppColors.TEXT_SECONDARY,
                                 ),
-                                ft.Text(
-                                    f"• {I18n.get('ds_data_flow_outbound_llm')}",
-                                    size=AppStyles.FONT_SIZE_BODY_SM,
-                                    color=AppColors.TEXT_SECONDARY,
-                                ),
                             ],
                             spacing=2,
                             expand=True,
@@ -709,7 +693,7 @@ def _build_data_flow_card() -> ft.Control:
 _SCHEDULER_JOB_NAME_KEYS: dict[str, str] = {
     "daily_update": "ds_sched_job_daily_update",
     "review_backfill": "ds_sched_job_review_backfill",
-    "ai_concept_daily_refresh": "ds_sched_job_ai_concept",
+    "concept_sync_daily_refresh": "ds_sched_job_concept_sync",
     "nightly_prediction": "ds_sched_job_nightly_prediction",
 }
 
@@ -966,15 +950,6 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             return
         vm.execute_full_daily_sync()
 
-    async def _do_ai_concept_rebuild() -> None:
-        ensure_correlation_id()
-        UILogger.log_action("DataSourceTab", "Click", "btn_ai_concept_rebuild")
-        if state.is_syncing:
-            if show_snack_callback:
-                show_snack_callback(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
-            return
-        vm.execute_ai_concept_rebuild()
-
     async def _do_clear_cache() -> None:
         ensure_correlation_id()
         UILogger.log_action("DataSourceTab", "Click", "btn_clear_cache")
@@ -1043,27 +1018,6 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             }
         )
 
-    def _on_ai_concept_rebuild(e: ft.ControlEvent) -> None:
-        if state.is_syncing:
-            if show_snack_callback:
-                show_snack_callback(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
-            return
-        # Task 2.2: 未确认 AI 外发政策时，dialog 增加外发说明
-        content_key = (
-            "dialog_ai_concept_rebuild_content_with_external"
-            if not vm.is_ai_external_acknowledged()
-            else "dialog_ai_concept_rebuild_content"
-        )
-        set_confirm_dialog_config(
-            {
-                "title_key": "dialog_ai_concept_rebuild_title",
-                "content_key": content_key,
-                "confirm_btn_key": "btn_confirm_rebuild",
-                "callback": _do_ai_concept_rebuild,
-                "is_destructive": True,
-            }
-        )
-
     def _on_clear_cache(e: ft.ControlEvent) -> None:
         if state.is_syncing:
             if show_snack_callback:
@@ -1127,7 +1081,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             page.run_task(_do_show_health_report)
 
     def _on_cancel_active_task(e: ft.ControlEvent) -> None:
-        """P1-5: 取消 daily_sync/ai_concept_sync 活跃任务 (cache_clear 不显示此按钮)."""
+        """P1-5: 取消 daily_sync 活跃任务 (cache_clear 不显示此按钮)."""
         UILogger.log_action("DataSourceTab", "Click", "btn_cancel_active_task")
         vm.cancel_active_task()
 
@@ -1245,7 +1199,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     health_dashboard = _build_health_dashboard(state, _on_check_health, _on_health_report_click)
     # D7-6: 调度状态面板 (紧跟健康看板, 展示各定时任务的上次成功/失败原因/下次计划/连续失败)。
     scheduler_status_card = _build_scheduler_status_card(state)
-    action_console = _build_action_console(state, _on_full_sync, _on_ai_concept_rebuild, _on_cancel_active_task)
+    action_console = _build_action_console(state, _on_full_sync, _on_cancel_active_task)
     danger_zone = _build_danger_zone(state, _on_clear_cache)
     connection_card = _build_connection_card(tushare_vm)
     historical_card = _build_historical_card(state, vm, _on_init_historical, _on_history_years_change, _on_init_cancel)

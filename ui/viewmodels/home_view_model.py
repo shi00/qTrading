@@ -446,8 +446,7 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
 def _detect_ai_tagged(tags: str, source: str) -> bool:
     """检测新闻是否被 AI 打标 (tags 含 AI_ 前缀或 source 标识 AI 来源).
 
-    AI 概念打标写入 stock_concepts 时 concept_id 以 'AI_LLM_' 前缀标识,
-    对应 news tags 中可能出现 'AI_' 前缀标签; source 为 'AI' 时亦视为 AI 生成.
+    新闻经 LLM 分析后, tags 中可能出现 'AI_' 前缀标签; source 为 'AI' 时亦视为 AI 生成.
     """
     if not tags and not source:
         return False

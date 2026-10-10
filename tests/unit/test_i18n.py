@@ -647,29 +647,29 @@ class TestI18nReExport:
 
 
 class TestSchedulerI18nKeys:
-    def test_ai_concept_i18n_keys_exist_in_zh_cn(self):
+    def test_concept_sync_i18n_keys_exist_in_zh_cn(self):
         I18n._locale = "zh_CN"
         I18n._initialized = False
         I18n._strings_cache = {}
         keys = [
-            "sched_ai_concept_clear_history",
-            "sched_ai_concept_task_name",
-            "sched_ai_concept_task_type",
-            "sched_ai_concept_done",
+            "sched_concept_sync_progress",
+            "sched_concept_sync_task_name",
+            "sched_concept_sync_task_type",
+            "sched_concept_sync_done",
         ]
         for key in keys:
             val = I18n.get(key)
             assert val != key, f"I18n key '{key}' should have a zh_CN translation"
 
-    def test_ai_concept_i18n_keys_exist_in_en_us(self):
+    def test_concept_sync_i18n_keys_exist_in_en_us(self):
         I18n._locale = "en_US"
         I18n._initialized = False
         I18n._strings_cache = {}
         keys = [
-            "sched_ai_concept_clear_history",
-            "sched_ai_concept_task_name",
-            "sched_ai_concept_task_type",
-            "sched_ai_concept_done",
+            "sched_concept_sync_progress",
+            "sched_concept_sync_task_name",
+            "sched_concept_sync_task_type",
+            "sched_concept_sync_done",
         ]
         for key in keys:
             val = I18n.get(key)

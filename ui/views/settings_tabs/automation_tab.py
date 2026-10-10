@@ -7,7 +7,7 @@
 - 2 个命令式容器子类 → 2 个 ``@ft.component`` 函数组件
   (AutomationTab / NotificationsTab)
 - AutomationSettingsViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化 (Task 5.2)
-  收敛 ConfigHandler/ThreadPoolManager 业务编排 (计划任务/AI 概念任务/新闻提醒)
+  收敛 ConfigHandler/ThreadPoolManager 业务编排 (计划任务/概念同步/新闻提醒)
 - 移除命令式生命周期回调 / 手动刷新 / 手动重渲染 / page 引用持有
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
 - 状态驱动: switch/dropdown value 用 ``use_state`` (声明式自动重渲染)
@@ -64,14 +64,6 @@ def _build_time_options() -> list[ft.dropdown.Option]:
     ]
 
 
-def _build_search_engine_options() -> list[ft.dropdown.Option]:
-    """构建搜索引擎选项列表"""
-    return [
-        ft.dropdown.Option("search_std", I18n.get("settings_ai_concept_search_std")),
-        ft.dropdown.Option("search_pro", I18n.get("settings_ai_concept_search_pro")),
-    ]
-
-
 def _build_interval_options() -> list[ft.dropdown.Option]:
     """构建新闻拉取间隔选项列表"""
     return [
@@ -105,7 +97,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
     - AutomationSettingsViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化 (Task 5.2),
-      收敛 ConfigHandler/ThreadPoolManager 业务编排 (计划任务/AI 概念任务)
+      收敛 ConfigHandler/ThreadPoolManager 业务编排 (计划任务/概念同步)
     - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
     - 状态驱动: switch/dropdown value 用 ``use_state`` (声明式自动重渲染)
     - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
@@ -165,11 +157,11 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
-    async def _do_ai_concept_toggle(new_enabled: bool) -> None:
+    async def _do_concept_toggle(new_enabled: bool) -> None:
         try:
-            success = await settings_vm.save_ai_concept_enabled(new_enabled)
+            success = await settings_vm.save_concept_enabled(new_enabled)
             if not success:
-                settings_vm.set_ai_enabled(not new_enabled)
+                settings_vm.set_concept_enabled(not new_enabled)
                 if show_snack_callback:
                     show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
                 return
@@ -181,15 +173,15 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
             raise  # R2: 必须传播
         except Exception as ex:
             logger.error(
-                "[AutomationTab] ai concept toggle save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
+                "[AutomationTab] concept toggle save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
             )
-            settings_vm.set_ai_enabled(not new_enabled)
+            settings_vm.set_concept_enabled(not new_enabled)
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
-    async def _do_ai_concept_time_change(new_time: str) -> None:
+    async def _do_concept_time_change(new_time: str) -> None:
         try:
-            success = await settings_vm.save_ai_concept_time(new_time)
+            success = await settings_vm.save_concept_time(new_time)
             if not success:
                 if show_snack_callback:
                     show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
@@ -200,27 +192,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
             raise  # R2: 必须传播
         except Exception as ex:
             logger.error(
-                "[AutomationTab] ai concept time save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
-            )
-            if show_snack_callback:
-                show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
-
-    async def _do_ai_concept_engine_change(new_engine: str) -> None:
-        try:
-            success = await settings_vm.save_ai_concept_engine(new_engine)
-            if not success:
-                if show_snack_callback:
-                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
-                return
-            if show_snack_callback:
-                show_snack_callback(I18n.get("common_saved"))
-        except asyncio.CancelledError:
-            raise  # R2: 必须传播
-        except Exception as ex:
-            logger.error(
-                "[AutomationTab] ai concept search engine save failed: %s",
-                DataSanitizer.sanitize_error(ex),
-                exc_info=True,
+                "[AutomationTab] concept time save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
             )
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
@@ -261,26 +233,19 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         if page is not None:
             page.run_task(_do_schedule_time_change, new_time)
 
-    def _on_ai_concept_toggle(e: ft.ControlEvent) -> None:
+    def _on_concept_toggle(e: ft.ControlEvent) -> None:
         new_enabled = get_control_value(e.control, ft.Switch)
-        settings_vm.set_ai_enabled(new_enabled)
+        settings_vm.set_concept_enabled(new_enabled)
         page = _get_page()
         if page is not None:
-            page.run_task(_do_ai_concept_toggle, new_enabled)
+            page.run_task(_do_concept_toggle, new_enabled)
 
-    def _on_ai_concept_time_change(e: ft.ControlEvent) -> None:
+    def _on_concept_time_change(e: ft.ControlEvent) -> None:
         new_time = get_control_value(e.control, ft.Dropdown)
-        settings_vm.set_ai_time(new_time)
+        settings_vm.set_concept_time(new_time)
         page = _get_page()
         if page is not None:
-            page.run_task(_do_ai_concept_time_change, new_time)
-
-    def _on_ai_concept_engine_change(e: ft.ControlEvent) -> None:
-        new_engine = get_control_value(e.control, ft.Dropdown)
-        settings_vm.set_ai_engine(new_engine)
-        page = _get_page()
-        if page is not None:
-            page.run_task(_do_ai_concept_engine_change, new_engine)
+            page.run_task(_do_concept_time_change, new_time)
 
     def _on_nightly_prediction_time_change(e: ft.ControlEvent) -> None:
         """Task 7.3: 夜间预测时辰 event handler。"""
@@ -292,7 +257,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
 
     # --- Build controls (状态驱动: value/disabled/color 从 state 派生) ---
     schedule_status_color = AppColors.SUCCESS if settings_state.auto_enabled else AppColors.TEXT_HINT
-    ai_status_color = AppColors.SUCCESS if settings_state.ai_enabled else AppColors.TEXT_HINT
+    concept_status_color = AppColors.SUCCESS if settings_state.concept_enabled else AppColors.TEXT_HINT
 
     schedule_enabled_switch = ft.Switch(
         label=I18n.get("settings_auto_update"),
@@ -316,37 +281,26 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         color=schedule_status_color,
     )
 
-    ai_concept_enabled_switch = ft.Switch(
-        label=I18n.get("settings_ai_concept_update"),
-        value=settings_state.ai_enabled,
-        on_change=safe_on_change(_on_ai_concept_toggle),
+    concept_enabled_switch = ft.Switch(
+        label=I18n.get("settings_concept_sync_update"),
+        value=settings_state.concept_enabled,
+        on_change=safe_on_change(_on_concept_toggle),
     )
-    ai_concept_time_dropdown = ft.Dropdown(
+    concept_time_dropdown = ft.Dropdown(
         label=I18n.get("settings_update_time"),
         width=_DROPDOWN_WIDTH,
-        value=settings_state.ai_time,
+        value=settings_state.concept_time,
         options=_build_time_options(),
-        on_select=safe_on_select(_on_ai_concept_time_change),
-        disabled=not settings_state.ai_enabled,
+        on_select=safe_on_select(_on_concept_time_change),
+        disabled=not settings_state.concept_enabled,
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
-    ai_concept_status = ft.Text(
-        _get_schedule_status_text(settings_state.ai_enabled),
+    concept_status = ft.Text(
+        _get_schedule_status_text(settings_state.concept_enabled),
         size=AppStyles.FONT_SIZE_BODY_SM,
-        color=ai_status_color,
-    )
-    ai_concept_engine_dropdown = ft.Dropdown(
-        label=I18n.get("settings_ai_concept_search_engine"),
-        width=_DROPDOWN_WIDTH,
-        value=settings_state.ai_engine,
-        options=_build_search_engine_options(),
-        on_select=safe_on_select(_on_ai_concept_engine_change),
-        disabled=not settings_state.ai_enabled,
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
+        color=concept_status_color,
     )
     # Task 7.3: 夜间 AI 预测时辰 (原 scheduler_service 硬编码 20:30, 提升为可配项)
     nightly_prediction_time_dropdown = ft.Dropdown(
@@ -400,41 +354,30 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         ),
     )
 
-    row_ai_schedule = SettingRow(
+    row_concept_schedule = SettingRow(
         icon=safe_icon_str(ft.Icons.AUTO_AWESOME),
-        title=I18n.get("settings_ai_concept_update"),
-        subtitle=I18n.get("settings_ai_concept_desc"),
-        control=ai_concept_enabled_switch,
+        title=I18n.get("settings_concept_sync_update"),
+        subtitle=I18n.get("settings_concept_sync_desc"),
+        control=concept_enabled_switch,
         icon_color=AppColors.PRIMARY,
-        title_key="settings_ai_concept_update",
-        subtitle_key="settings_ai_concept_desc",
+        title_key="settings_concept_sync_update",
+        subtitle_key="settings_concept_sync_desc",
     )
-    row_ai_time = SettingRow(
+    row_concept_time = SettingRow(
         icon=safe_icon_str(ft.Icons.ACCESS_TIME),
         title=I18n.get("settings_update_time"),
         subtitle=I18n.get("settings_saturdays"),
-        control=ai_concept_time_dropdown,
+        control=concept_time_dropdown,
         icon_color=AppColors.ACCENT,
         title_key="settings_update_time",
         subtitle_key="settings_saturdays",
     )
-    row_ai_engine = SettingRow(
-        icon=safe_icon_str(ft.Icons.MANAGE_SEARCH),
-        title=I18n.get("settings_ai_concept_search_engine"),
-        subtitle=I18n.get("settings_ai_concept_search_engine_desc"),
-        control=ai_concept_engine_dropdown,
-        icon_color=AppColors.ACCENT,
-        title_key="settings_ai_concept_search_engine",
-        subtitle_key="settings_ai_concept_search_engine_desc",
-    )
-    card_ai = DashboardCard(
+    card_concept = DashboardCard(
         content=ft.Column(
             [
-                row_ai_schedule,
+                row_concept_schedule,
                 ft.Divider(height=10, color=AppColors.TRANSPARENT),
-                row_ai_time,
-                ft.Divider(height=10, color=AppColors.TRANSPARENT),
-                row_ai_engine,
+                row_concept_time,
                 ft.Divider(height=10, color=AppColors.TRANSPARENT),
                 ft.Row(
                     [
@@ -443,7 +386,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
                             size=_ICON_SIZE_SMALL,
                             color=AppColors.TEXT_SECONDARY,
                         ),
-                        ai_concept_status,
+                        concept_status,
                     ],
                 ),
             ],
@@ -493,7 +436,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
                 txt_desc,
                 ft.Container(height=_SPACING_SMALL),
                 card_main,
-                card_ai,
+                card_concept,
                 card_nightly,
                 txt_hint,
             ],

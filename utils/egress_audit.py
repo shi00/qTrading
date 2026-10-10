@@ -59,7 +59,7 @@ class EgressRecord:
 
     timestamp: datetime
     destination: str  # "llm:<effective_model>"，如 "llm:deepseek/deepseek-chat" 或 "llm:qwen/qwen-max"
-    category: str  # "analysis" / "news" / "web_search" / "verify"
+    category: str  # "analysis" / "news" / "verify"
     payload_size_bytes: int
     item_count: int
     status: str = "sent"  # "sent" / "failed"

@@ -28,11 +28,11 @@ logger = logging.getLogger(__name__)
 
 _CFG_LAST_DAILY_UPDATE = "scheduler_last_daily_update"
 _CFG_LAST_NIGHTLY_PREDICTION = "scheduler_last_nightly_prediction"
-_CFG_LAST_AI_CONCEPT_REFRESH = "scheduler_last_ai_concept_refresh"
+_CFG_LAST_CONCEPT_SYNC = "scheduler_last_concept_sync"
 
 _DB_KEY_DAILY_UPDATE = "sched_last_daily_update"
 _DB_KEY_NIGHTLY_PREDICTION = "sched_last_nightly_prediction"
-_DB_KEY_AI_CONCEPT_REFRESH = "sched_last_ai_concept_refresh"
+_DB_KEY_CONCEPT_SYNC = "sched_last_concept_sync"
 
 # D6-6: 依赖注入的必需 job（启动期契约）。这些 job 由 app 层装配注册，缺失即装配
 # 遗漏，应在启动期立即暴露而非等触发时仅留一条 warning 静默跳过。app 层 `_register_scheduler_jobs`
@@ -48,7 +48,7 @@ _CATCHUP_BACKOFF_SECONDS: tuple[int, ...] = (30, 300, 1800, 7200)
 _SCHEDULED_JOB_IDS: tuple[str, ...] = (
     "daily_update",
     "review_backfill",
-    "ai_concept_daily_refresh",
+    "concept_sync_daily_refresh",
     "nightly_prediction",
 )
 
@@ -163,7 +163,7 @@ class SchedulerService:
             )
             self._last_update_date = ConfigHandler.get_setting(_CFG_LAST_DAILY_UPDATE)
             self._last_pred_date = ConfigHandler.get_setting(_CFG_LAST_NIGHTLY_PREDICTION)
-            self._last_ai_concept_date = ConfigHandler.get_setting(_CFG_LAST_AI_CONCEPT_REFRESH)
+            self._last_concept_sync_date = ConfigHandler.get_setting(_CFG_LAST_CONCEPT_SYNC)
             # D7-1/MAJOR-01: 补偿失败退避状态（进程内，与 _last_update_date 同生命周期：
             # 重启即重置，不引入 DB schema 变更）。_catchup_next_retry_at 为绝对时刻
             # （= 上次失败时间 + 当前档位退避），退避窗口内看门狗不再提交补偿。
@@ -316,21 +316,21 @@ class SchedulerService:
         try:
             db_daily = await get_app_state(engine, _DB_KEY_DAILY_UPDATE)
             db_pred = await get_app_state(engine, _DB_KEY_NIGHTLY_PREDICTION)
-            db_ai_concept = await get_app_state(engine, _DB_KEY_AI_CONCEPT_REFRESH)
+            db_concept_sync = await get_app_state(engine, _DB_KEY_CONCEPT_SYNC)
 
             if db_daily is not None:
                 self._last_update_date = db_daily
             if db_pred is not None:
                 self._last_pred_date = db_pred
-            if db_ai_concept is not None:
-                self._last_ai_concept_date = db_ai_concept
+            if db_concept_sync is not None:
+                self._last_concept_sync_date = db_concept_sync
 
             self._db_state_loaded = True
             logger.info(
-                "[Scheduler] DB state loaded: daily=%s, pred=%s, ai_concept=%s",
+                "[Scheduler] DB state loaded: daily=%s, pred=%s, concept_sync=%s",
                 self._last_update_date,
                 self._last_pred_date,
-                self._last_ai_concept_date,
+                self._last_concept_sync_date,
             )
             # D6-1: DB 幂等状态就绪后立即检查遗漏交易日并启动补偿。
             await self._catch_up_missed_updates()
@@ -357,7 +357,7 @@ class SchedulerService:
             job_id,
             run_time,
         )
-        if job_id in ("daily_update", "nightly_prediction", "ai_concept_daily_refresh", "review_backfill"):
+        if job_id in ("daily_update", "nightly_prediction", "concept_sync_daily_refresh", "review_backfill"):
             # _on_job_missed 为 APScheduler listener 回调；AsyncIOScheduler 的 listener
             # 在事件循环线程执行，可直接获取 running loop 调度异步补偿协程。
             # include_today=True（D6-1 Q21）：misfire 已过计划时刻+宽限（已收盘），
@@ -407,8 +407,8 @@ class SchedulerService:
         return {
             "time": ConfigHandler.get_auto_update_time(),
             "enabled": ConfigHandler.is_auto_update_enabled(),
-            "ai_concept_time": ConfigHandler.get_ai_concept_schedule_time(),
-            "ai_concept_enabled": ConfigHandler.is_ai_concept_schedule_enabled(),
+            "concept_time": ConfigHandler.get_concept_schedule_time(),
+            "concept_enabled": ConfigHandler.is_concept_schedule_enabled(),
         }
 
     def _is_market_sync_busy(self) -> bool:
@@ -459,8 +459,8 @@ class SchedulerService:
 
         current_time = current_config["time"]
         current_enabled = current_config["enabled"]
-        current_ai_concept_time = current_config["ai_concept_time"]
-        current_ai_concept_enabled = current_config["ai_concept_enabled"]
+        current_concept_time = current_config["concept_time"]
+        current_concept_enabled = current_config["concept_enabled"]
 
         changed = False
         if current_time != self._last_known_config["time"]:
@@ -479,10 +479,10 @@ class SchedulerService:
             )
             changed = True
 
-        if current_ai_concept_time != self._last_known_config.get(
-            "ai_concept_time",
-        ) or current_ai_concept_enabled != self._last_known_config.get("ai_concept_enabled"):
-            logger.info("[Scheduler] Detected AI Concept schedule config change")
+        if current_concept_time != self._last_known_config.get(
+            "concept_time",
+        ) or current_concept_enabled != self._last_known_config.get("concept_enabled"):
+            logger.info("[Scheduler] Detected concept sync schedule config change")
             changed = True
 
         if changed:
@@ -550,21 +550,21 @@ class SchedulerService:
         )
         logger.info("[Scheduler] Scheduled Nightly Prediction at %02d:%02d", n_hour, n_minute)
 
-        # 3. AI Concept Tagging Job (Daily)
-        ai_concept_time = ConfigHandler.get_ai_concept_schedule_time() or "18:00"
+        # 3. Concept Sync Job (Daily)
+        concept_sync_time = ConfigHandler.get_concept_schedule_time() or "18:00"
         try:
-            dh, dm = map(int, ai_concept_time.split(":"))
+            dh, dm = map(int, concept_sync_time.split(":"))
         except (ValueError, TypeError, AttributeError):
             dh, dm = 18, 0
 
         self.scheduler.add_job(
-            self._run_ai_concept_tagger,
+            self._run_concept_sync,
             CronTrigger(hour=dh, minute=dm),
-            id="ai_concept_daily_refresh",
+            id="concept_sync_daily_refresh",
             replace_existing=True,
         )
         logger.info(
-            "[Scheduler] Scheduled AI Concept Daily Refresh at %02d:%02d",
+            "[Scheduler] Scheduled Concept Sync Daily Refresh at %02d:%02d",
             dh,
             dm,
         )
@@ -588,13 +588,13 @@ class SchedulerService:
     def _validate_job_ordering(daily_hm: tuple[int, int], backfill_hm, concept_hm, pred_hm: tuple[int, int]) -> None:
         """REVIEW-06 TO-03: 校验依赖 job 是否晚于日更，违反时 warning（消费 T-1 数据）。
 
-        日更（daily_update）产出当日行情，review_backfill / ai_concept_daily_refresh /
+        日更（daily_update）产出当日行情，review_backfill / concept_sync_daily_refresh /
         nightly_prediction 均以其为先决条件。任一依赖 job 此刻不晚于日更即顺序违反
         （相等意味着同日同时段执行，顺序未保证，同样按违反处理）。
         """
         for name, hm in (
             ("review_backfill", backfill_hm),
-            ("ai_concept_daily_refresh", concept_hm),
+            ("concept_sync_daily_refresh", concept_hm),
             ("nightly_prediction", pred_hm),
         ):
             if hm <= daily_hm:
@@ -1061,22 +1061,22 @@ class SchedulerService:
                 "not marking done, catch-up will retry"
             )
 
-    async def _run_ai_concept_tagger(self):
+    async def _run_concept_sync(self):
         from utils.correlation import ensure_correlation_id
 
         ensure_correlation_id()
 
-        if not ConfigHandler.is_ai_concept_schedule_enabled():
+        if not ConfigHandler.is_concept_schedule_enabled():
             return
 
         today_str = get_now().strftime("%Y%m%d")
-        if self._last_ai_concept_date == today_str:
-            logger.debug("[Scheduler] AI Concept tagging already done for %s, skipping", today_str)
+        if self._last_concept_sync_date == today_str:
+            logger.debug("[Scheduler] Concept sync already done for %s, skipping", today_str)
             return
 
         from services.task_manager import TaskManager  # lazy-import: 启动性能——仅提交任务时加载 TaskManager
 
-        async def _ai_concept_logic(task_id: str, **kwargs):
+        async def _concept_sync_logic(task_id: str, **kwargs):
             tm = TaskManager()
             cancel_event = tm.get_cancel_event(task_id)
             from data.data_processor import DataProcessor  # lazy-import: 启动性能——编排闭包内延迟加载 DataProcessor
@@ -1084,30 +1084,29 @@ class SchedulerService:
             processor = DataProcessor()
             # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
             # M3 fix: CancelledError 带消息，便于日志区分"调度取消"与"框架取消"
-            if not tm.update_progress(task_id, 0.05, Message("sched_ai_concept_clear_history")):
+            if not tm.update_progress(task_id, 0.05, Message("sched_concept_sync_progress")):
                 raise asyncio.CancelledError("task cancelled by scheduler (update_progress returned False)")
-            # Scheduled run: manual_trigger=False → only sync free data sources, no LLM call
-            await processor.run_ai_concept_tagging(
+            # Scheduled run: 仅同步免费数据源（AKShare 东财 + Tushare 涨停）
+            await processor.run_concept_sync(
                 task_id=task_id,
                 cancel_event=cancel_event,
-                manual_trigger=False,
             )
             # REVIEW-06 TO-02: 内存侧单调（同 daily/nightly 标记方法）
-            self._last_ai_concept_date = max(self._last_ai_concept_date or "", today_str)
-            await self._persist_run_date_db(_DB_KEY_AI_CONCEPT_REFRESH, _CFG_LAST_AI_CONCEPT_REFRESH, today_str)
-            return Message("sched_ai_concept_done")
+            self._last_concept_sync_date = max(self._last_concept_sync_date or "", today_str)
+            await self._persist_run_date_db(_DB_KEY_CONCEPT_SYNC, _CFG_LAST_CONCEPT_SYNC, today_str)
+            return Message("sched_concept_sync_done")
 
         # D6-5: 检查返回值为 None 的两种情形（去重命中/无事件循环），日志在 TaskManager
         # 内已分别记录，此处仅从调度器视角告警，交由 D6-1 补偿机制兜底。
         task_id = TaskManager().submit_task(
-            name=Message("sched_ai_concept_task_name"),
-            task_type=Message("sched_ai_concept_task_type"),
-            coroutine_factory=_ai_concept_logic,
+            name=Message("sched_concept_sync_task_name"),
+            task_type=Message("sched_concept_sync_task_type"),
+            coroutine_factory=_concept_sync_logic,
             cancellable=True,
-            unique_key="ai_concept_sync",
+            unique_key="concept_sync",
         )
         if task_id is None:
-            logger.warning("[Scheduler] AI concept task not submitted (dedup hit or no event loop)")
+            logger.warning("[Scheduler] Concept sync task not submitted (dedup hit or no event loop)")
 
     async def _run_nightly_prediction(self):
         """Execute registered nightly prediction job (review01-A2-1 下沉).
@@ -1173,7 +1172,7 @@ class SchedulerService:
 
         同源口径（不另立第二份状态）：
         - ``last_success_at`` 取既有幂等水位（``_last_update_date`` / ``_last_pred_date`` /
-          ``_last_ai_concept_date``）；``review_backfill`` 不推进统一水位，恒为 None。
+          ``_last_concept_sync_date``）；``review_backfill`` 不推进统一水位，恒为 None。
         - ``consecutive_failures`` 仅 daily_update 取 ``_catchup_consecutive_failures``
           （与 D7-1 退避状态同源，不新增计数）；其余 job 恒为 None。
 
@@ -1183,7 +1182,7 @@ class SchedulerService:
         last_success_source = {
             "daily_update": self._last_update_date,
             "review_backfill": None,
-            "ai_concept_daily_refresh": self._last_ai_concept_date,
+            "concept_sync_daily_refresh": self._last_concept_sync_date,
             "nightly_prediction": self._last_pred_date,
         }
         return tuple(

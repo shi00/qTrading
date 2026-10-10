@@ -1,6 +1,6 @@
 """定时任务业务编排（review01-A2-1 下沉）。
 
-将原 ``utils/scheduler_service.py`` 的三个业务 job（每日更新 / AI 概念标注 / 夜间 AI 预测）
+将原 ``utils/scheduler_service.py`` 的三个业务 job（每日更新 / 概念数据同步 / 夜间 AI 预测）
 的完整编排下沉到 services 层：SchedulerService 仅保留"注册 callable + 调度 + 上报进度"职责，
 不再感知具体业务类（DataProcessor / TaskManager / AISelectionStrategy / ReviewManager），
 消除 ``utils → data/services/strategies`` 方向性违规（"R1: utils must not import business layers" 契约）与隐藏三角依赖。

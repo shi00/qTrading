@@ -6,7 +6,7 @@
 - frozen state snapshot (AutomationSettingsState dataclass)
 - subscribe/_notify 通知机制
 - commands 作为 async 实例方法 (save_auto_update_enabled/save_auto_update_time/
-  save_ai_concept_enabled/save_ai_concept_time/save_ai_concept_engine/
+  save_concept_enabled/save_concept_time/
   save_news_enabled/save_news_interval)
 - 同步阻塞 ConfigHandler 写入通过 ThreadPoolManager.run_async offload (R16)
 - R2: asyncio.CancelledError 显式 raise
@@ -34,10 +34,9 @@ class AutomationSettingsState:
     # 计划任务
     auto_enabled: bool = False
     auto_time: str = "16:30"
-    # AI 概念任务
-    ai_enabled: bool = False
-    ai_time: str = "20:00"
-    ai_engine: str = "search_std"
+    # 概念同步任务
+    concept_enabled: bool = False
+    concept_time: str = "20:00"
     # Task 7.3: 夜间 AI 预测时辰 (与 scheduler_service 硬编码 20:30 对齐, 提升为可配项)
     nightly_prediction_time: str = "20:30"
     # 新闻提醒
@@ -74,9 +73,8 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
         self._state = AutomationSettingsState(
             auto_enabled=ConfigHandler.is_auto_update_enabled(),
             auto_time=ConfigHandler.get_auto_update_time(),
-            ai_enabled=ConfigHandler.is_ai_concept_schedule_enabled(),
-            ai_time=ConfigHandler.get_ai_concept_schedule_time(),
-            ai_engine=ConfigHandler.get_ai_concept_search_engine(),
+            concept_enabled=ConfigHandler.is_concept_schedule_enabled(),
+            concept_time=ConfigHandler.get_concept_schedule_time(),
             nightly_prediction_time=ConfigHandler.get_nightly_prediction_time(),
             news_enabled=bool(enable_news),
             news_interval=str(news_interval),
@@ -91,14 +89,11 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
     def set_auto_time(self, value: str) -> None:
         self._set_state(auto_time=value)
 
-    def set_ai_enabled(self, value: bool) -> None:
-        self._set_state(ai_enabled=value)
+    def set_concept_enabled(self, value: bool) -> None:
+        self._set_state(concept_enabled=value)
 
-    def set_ai_time(self, value: str) -> None:
-        self._set_state(ai_time=value)
-
-    def set_ai_engine(self, value: str) -> None:
-        self._set_state(ai_engine=value)
+    def set_concept_time(self, value: str) -> None:
+        self._set_state(concept_time=value)
 
     def set_nightly_prediction_time(self, value: str) -> None:
         """Task 7.3: 更新本地 state 的夜间预测时辰 (View 乐观更新)."""
@@ -164,20 +159,20 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
         finally:
             self._set_state(is_saving=False)
 
-    async def save_ai_concept_enabled(self, new_enabled: bool) -> bool:
-        """保存 AI 概念任务开关。"""
+    async def save_concept_enabled(self, new_enabled: bool) -> bool:
+        """保存概念同步任务开关。"""
         if self._state.is_saving:
             return False
         self._set_state(is_saving=True)
         try:
             success = await ThreadPoolManager().run_async(
                 TaskType.IO,
-                ConfigHandler.set_ai_concept_schedule_enabled,
+                ConfigHandler.set_concept_schedule_enabled,
                 new_enabled,
             )
             if not success:
                 logger.warning(
-                    "[AutomationSettingsVM] set_ai_concept_schedule_enabled returned False for enabled=%s",
+                    "[AutomationSettingsVM] set_concept_schedule_enabled returned False for enabled=%s",
                     new_enabled,
                 )
                 return False
@@ -186,7 +181,7 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
             raise  # R2
         except Exception as ex:
             logger.error(
-                "[AutomationSettingsVM] ai concept toggle save failed: %s",
+                "[AutomationSettingsVM] concept toggle save failed: %s",
                 DataSanitizer.sanitize_error(ex),
                 exc_info=True,
             )
@@ -194,15 +189,15 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
         finally:
             self._set_state(is_saving=False)
 
-    async def save_ai_concept_time(self, new_time: str) -> bool:
-        """保存 AI 概念任务时间。"""
+    async def save_concept_time(self, new_time: str) -> bool:
+        """保存概念同步任务时间。"""
         if self._state.is_saving:
             return False
         self._set_state(is_saving=True)
         try:
             await ThreadPoolManager().run_async(
                 TaskType.IO,
-                ConfigHandler.set_ai_concept_schedule_time,
+                ConfigHandler.set_concept_schedule_time,
                 new_time,
             )
             return True
@@ -210,31 +205,7 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
             raise  # R2
         except Exception as ex:
             logger.error(
-                "[AutomationSettingsVM] ai concept time save failed: %s",
-                DataSanitizer.sanitize_error(ex),
-                exc_info=True,
-            )
-            return False
-        finally:
-            self._set_state(is_saving=False)
-
-    async def save_ai_concept_engine(self, new_engine: str) -> bool:
-        """保存 AI 概念任务搜索引擎。"""
-        if self._state.is_saving:
-            return False
-        self._set_state(is_saving=True)
-        try:
-            await ThreadPoolManager().run_async(
-                TaskType.IO,
-                ConfigHandler.set_ai_concept_search_engine,
-                new_engine,
-            )
-            return True
-        except asyncio.CancelledError:
-            raise  # R2
-        except Exception as ex:
-            logger.error(
-                "[AutomationSettingsVM] ai concept search engine save failed: %s",
+                "[AutomationSettingsVM] concept time save failed: %s",
                 DataSanitizer.sanitize_error(ex),
                 exc_info=True,
             )

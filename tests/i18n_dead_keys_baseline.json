@@ -1,6 +1,6 @@
 {
   "_description": "UIX-16: Ratchet baseline for unreferenced i18n keys. This count may only decrease.",
-  "count": 216,
+  "count": 214,
   "keys": [
     "ai_analyzing_stock",
     "ai_btn_test",
@@ -44,8 +44,6 @@
     "detail_chart_generated",
     "detail_open_browser",
     "ds_action_today",
-    "ds_ai_concept_llm_not_zhipu",
-    "ds_ai_concept_no_llm",
     "ds_btn_repair",
     "ds_btn_repair_fmt",
     "ds_internal_error",

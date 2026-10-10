@@ -2,8 +2,8 @@
 
 声明式重写后 View 层测试聚焦:
 1. 契约守护 (grep 检查禁止的命令式模式: class 继承/did_mount/.update()/weakref page_ref)
-2. 模块级纯函数测试 (_build_time_options/_build_search_engine_options/
-   _build_interval_options/_get_schedule_status_text/_get_page)
+2. 模块级纯函数测试 (_build_time_options/_build_interval_options/
+   _get_schedule_status_text/_get_page)
 
 业务逻辑覆盖（ConfigHandler 读写 + 异常路径 + 异步保存）由集成测试
 （flet_test_page fixture）承担, 声明式组件含 use_state 在无 renderer 下抛 RuntimeError。
@@ -221,23 +221,6 @@ class TestBuildTimeOptions:
         options = _build_time_options()
         for opt in options:
             assert isinstance(opt, ft.dropdown.Option)
-
-
-class TestBuildSearchEngineOptions:
-    """_build_search_engine_options 模块级纯函数测试。"""
-
-    def test_returns_two_options(self):
-        from ui.views.settings_tabs.automation_tab import _build_search_engine_options
-
-        options = _build_search_engine_options()
-        assert len(options) == 2
-
-    def test_option_keys_correct(self):
-        from ui.views.settings_tabs.automation_tab import _build_search_engine_options
-
-        options = _build_search_engine_options()
-        keys = [opt.key for opt in options]
-        assert keys == ["search_std", "search_pro"]
 
 
 class TestBuildIntervalOptions:

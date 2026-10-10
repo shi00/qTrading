@@ -183,9 +183,8 @@ class AppConfig(BaseModel):
 
     auto_update_enabled: bool = False
     auto_update_time: str = Field(default="16:30", pattern="^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
-    ai_concept_schedule_enabled: bool = False
-    ai_concept_schedule_time: str = Field(default="18:00", pattern="^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
-    ai_concept_search_engine: str = Field(default="search_std", pattern="^(search_std|search_pro)$")
+    concept_schedule_enabled: bool = False
+    concept_schedule_time: str = Field(default="18:00", pattern="^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
     # Task 7.3: 夜间 AI 预测时辰 (原 scheduler_service 硬编码 20:30, 提升为可配置项)
     nightly_prediction_time: str = Field(default="20:30", pattern="^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
 
@@ -220,7 +219,7 @@ class AppConfig(BaseModel):
 
     scheduler_last_daily_update: str = ""
     scheduler_last_nightly_prediction: str = ""
-    scheduler_last_ai_concept_refresh: str = ""
+    scheduler_last_concept_sync: str = ""
 
     # Phase 2：Embedded PostgreSQL 内嵌模式配置（pg_plan §8.3）
     # 模式开关由 QTRADING_DATABASE_MODE 环境变量 + embedded_pg_enabled 共同判定

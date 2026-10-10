@@ -142,7 +142,7 @@ class AIPolicyNotAcknowledgedError(AppError):
     任一云端出口（选股分析经 ``run_ai_analysis``，新闻分类/概念同步等其他出口经
     ``utils.egress_ack``）在主 provider + failover provider 的当前 scope_version 下
     未被确认时，禁止发起云端请求，显式抛出本异常，由调用方非交互降级（如新闻分类
-    回落 unknown、概念标注逐批失败）。
+    回落 unknown）。
 
     设计为**非可重试**策略阻断异常：``ErrorInfo.retryable`` 默认 ``False``，经
     ``classify_error`` 透传后 ``_chat_completion_with_failover`` 以

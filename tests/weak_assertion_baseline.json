@@ -1,21 +1,7 @@
 {
   "version": 2,
-  "total": 773,
+  "total": 764,
   "entries": [
-    {
-      "file": "integration/test_ai_concept_tagging.py",
-      "line": 218,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "        with pytest.raises(asyncio.CancelledError):"
-    },
-    {
-      "file": "integration/test_ai_concept_tagging.py",
-      "line": 243,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "        with pytest.raises(EngineDisposedError):"
-    },
     {
       "file": "integration/test_api_tushare_client.py",
       "line": 449,
@@ -479,13 +465,6 @@
       "source_line": "                mock_completion_patch.assert_called_once()"
     },
     {
-      "file": "unit/test_ai_service_web_search.py",
-      "line": 207,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "            with pytest.raises(asyncio.CancelledError):"
-    },
-    {
       "file": "unit/test_akshare_concept_client.py",
       "line": 56,
       "type": "weak_is_not_none_ratio",
@@ -890,27 +869,6 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_evt.clear.assert_called_once()"
-    },
-    {
-      "file": "unit/test_data_processor_ai_concept.py",
-      "line": 66,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "            MockAKShare.return_value.run.assert_called_once()"
-    },
-    {
-      "file": "unit/test_data_processor_ai_concept.py",
-      "line": 85,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "            MockLimitList.return_value.run.assert_called_once()"
-    },
-    {
-      "file": "unit/test_data_processor_ai_concept.py",
-      "line": 108,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "            MockAITag.return_value.run.assert_called_once()"
     },
     {
       "file": "unit/test_db_config_service.py",
@@ -2094,13 +2052,6 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            svc._schedule_jobs.assert_called_once()"
-    },
-    {
-      "file": "unit/test_scheduler_service.py",
-      "line": 957,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "            mock_dp.run_ai_concept_tagging.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",

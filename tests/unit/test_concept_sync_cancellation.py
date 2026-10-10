@@ -6,10 +6,7 @@
   旧实现"每 200 条"在单 board 最坏 7s+ 时最坏 1000s 才响应取消，远超 2s 红线。
 - LimitListSyncStrategy: 仍按每 200 条检查（Phase 2F 行为）。
 
-AIConceptTagSyncStrategy 已有每条都检查 _cancelled + cancel_event.is_set()
-（concept_sync.py:366-372），比"每 200 条"更严格，由既有测试 test_concept_sync.py
-覆盖，此处不重复。DataProcessor.run_ai_concept_tagging 的取消由
-test_data_processor_ai_concept.py 覆盖。
+DataProcessor.run_concept_sync 的取消由 test_data_processor_concept_sync.py 覆盖。
 """
 
 import pandas as pd
@@ -38,11 +35,9 @@ def _make_ctx(**overrides):
     ctx.cache = MagicMock()
     ctx.cache.stock_dao = MagicMock()
     ctx.api = MagicMock()
-    ctx.ai_service = None
     ctx.cancel_event = None
     ctx.processor = None
-    ctx.config.get_ai_concept_search_engine = MagicMock(return_value="search_std")
-    # P0-2 fix: LimitListSyncStrategy 现在调用 overwrite_limit_concepts（事务原子性）
+    # LimitListSyncStrategy 调用 overwrite_limit_concepts（事务原子性）
     ctx.cache.stock_dao.overwrite_limit_concepts = AsyncMock(return_value=0)
     # review08-D3: LimitListSyncStrategy 停写后调用 clear_all_limit_concepts（清空存量）
     ctx.cache.stock_dao.clear_all_limit_concepts = AsyncMock(return_value=0)

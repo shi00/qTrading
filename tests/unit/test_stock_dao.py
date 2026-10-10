@@ -271,52 +271,6 @@ class TestOverwriteConcepts:
                 await dao.overwrite_concepts(df)
 
 
-class TestClearAllAiLlmConcepts:
-    @pytest.mark.asyncio
-    async def test_success(self):
-        dao = _make_dao()
-        dao._write_db = AsyncMock(return_value=10)
-        result = await dao.clear_all_ai_llm_concepts()
-        assert result == 10
-
-
-class TestGetStocksWithoutAiConcepts:
-    @pytest.mark.asyncio
-    async def test_with_data(self):
-        dao = _make_dao()
-        dao._read_db = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "ts_code": ["000001.SZ"],
-                    "name": ["平安银行"],
-                }
-            )
-        )
-        result = await dao.get_stocks_without_ai_concepts(batch_size=10)
-        assert len(result) == 1
-
-    @pytest.mark.asyncio
-    async def test_empty(self):
-        dao = _make_dao()
-        dao._read_db = AsyncMock(return_value=None)
-        result = await dao.get_stocks_without_ai_concepts(batch_size=10)
-        assert result == []
-
-    @pytest.mark.asyncio
-    async def test_with_exclude(self):
-        dao = _make_dao()
-        dao._read_db = AsyncMock(
-            return_value=pd.DataFrame(
-                {
-                    "ts_code": ["000001.SZ", "000002.SZ"],
-                    "name": ["平安银行", "万科A"],
-                }
-            )
-        )
-        result = await dao.get_stocks_without_ai_concepts(batch_size=10, exclude_codes=["000001.SZ"])
-        assert len(result) == 1
-
-
 class TestGetConcepts:
     @pytest.mark.asyncio
     async def test_none_result(self):
@@ -384,7 +338,7 @@ class TestGetConcepts:
                     "concept_name": [
                         "银行",
                         "深圳本地股",
-                    ],  # 真实概念名（EM_/AI_LLM_ 前缀在 concept_id，查询只返回 name）
+                    ],  # 真实概念名（EM_/TS_ 前缀在 concept_id，查询只返回 name）
                 }
             )
         )
@@ -491,34 +445,6 @@ class TestGetConceptCount:
         dao = _make_dao()
         dao._read_db = AsyncMock(side_effect=Exception("db error"))
         assert await dao.get_concept_count() == 0
-
-
-class TestUpsertAiConcepts:
-    @pytest.mark.asyncio
-    async def test_empty_entries(self):
-        dao = _make_dao()
-        assert await dao.upsert_ai_concepts([]) == 0
-
-    @pytest.mark.asyncio
-    async def test_no_ts_code(self):
-        dao = _make_dao()
-        entries = [{"concepts": ["概念1"]}]
-        result = await dao.upsert_ai_concepts(entries)
-        assert result == 0
-
-    @pytest.mark.asyncio
-    async def test_no_concepts(self):
-        dao = _make_dao()
-        entries = [{"ts_code": "000001.SZ", "concepts": []}]
-        await dao.upsert_ai_concepts(entries)
-        dao._save_upsert.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_with_concepts(self):
-        dao = _make_dao()
-        entries = [{"ts_code": "000001.SZ", "concepts": ["概念1", "概念2"]}]
-        await dao.upsert_ai_concepts(entries)
-        dao._save_upsert.assert_called_once()
 
 
 class TestSearchStocks:

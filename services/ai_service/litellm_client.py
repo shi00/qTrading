@@ -764,9 +764,8 @@ class LiteLLMClient:
 
             # SEC-01：新闻分类通过 _chat_completion(provider="cloud", purpose="news")
             # 是独立于 run_ai_analysis 的云端外发通道，须先通过外发知情确认门控再发起
-            # 云端请求（未确认绝不外发）。analysis 通道在入口由 run_ai_analysis 门控，
-            # 此处仅需补 news（chat_with_web_search 同理，见该方法）。非交互降级：未确认
-            # 即抛策略阻断异常，由调用方（news_classifier）降级为默认分类。
+            # 云端请求（未确认绝不外发）。analysis 通道在入口由 run_ai_analysis 门控。
+            # 非交互降级：未确认即抛策略阻断异常，由调用方（news_classifier）降级为默认分类。
             if purpose == "news" and not is_egress_acknowledged():
                 logger.warning(
                     "[AIService] Cloud | News egress policy not acknowledged — skipping cloud "
@@ -1255,78 +1254,6 @@ class LiteLLMClient:
             )
             logger.debug("[AIService] Verify | Connection verification traceback:", exc_info=True)
             raise
-
-    @log_async_operation(
-        operation_name="chat_with_web_search",
-        threshold_ms=PerfThreshold.AI_INFERENCE,
-    )
-    async def chat_with_web_search(
-        self,
-        messages: list[dict],
-        search_domain_filter: list[str] | None = None,
-        search_engine: str = "search_std",
-        temperature: float = 0.3,
-        timeout: float = 60.0,
-    ) -> dict:
-        """
-        使用智谱 GLM web_search 工具进行带网络搜索的对话。
-
-        封装 LiteLLM tools API，构造 web_search 工具调用。仅适用于支持
-        web_search 工具的模型（如智谱 GLM-4 系列）。
-
-        Args:
-            messages: 消息列表 [{"role":..., "content":...}]
-            search_domain_filter: 域名过滤列表，限制搜索范围（如财经网站）
-            search_engine: 搜索引擎，"search_std"（标准）或 "search_pro"（增强）
-            temperature: 采样温度
-            timeout: 超时时间（秒）
-
-        Returns:
-            {"content": str, "usage": dict, "reasoning_content": str}
-
-        Raises:
-            ValueError: 云端 LLM 未配置时抛出
-            asyncio.CancelledError: 任务被取消时传播（R2）
-        """
-        if not self._service.is_cloud_available():
-            raise ValueError("Cloud LLM not configured. Please set up API Key.")
-
-        # SEC-01：chat_with_web_search（概念 AI 标注等）是独立于 run_ai_analysis 的云端
-        # 外发通道，须先通过外发知情确认门控再发起云端请求（未确认绝不外发）。非交互
-        # 降级：未确认即抛策略阻断异常，由调用方（concept_sync）逐批失败降级处理。
-        if not is_egress_acknowledged():
-            logger.warning(
-                "[AIService] WebSearch | Egress policy not acknowledged — skipping cloud "
-                "web search (no external requests initiated)",
-            )
-            raise AIPolicyNotAcknowledgedError(
-                Message("ai_external_acknowledgment_prompt"),
-                detail="Web-search cloud egress requires user acknowledgment (SEC-01); "
-                "no external request was initiated.",
-            )
-
-        web_search_config: dict = {
-            "enable": True,
-            "search_engine": search_engine,
-        }
-        if search_domain_filter:
-            web_search_config["search_domain_filter"] = search_domain_filter
-
-        tools = [{"type": "web_search", "web_search": web_search_config}]
-
-        # SEC-03：概念同步等 web_search 云端出口同样记录审计。此前该路径直连
-        # _chat_completion_litellm，绕过 _chat_completion 的审计点，导致此类云端外发
-        # 对审计面板/状态栏「外发 N 次」计数不可见；经共享 helper 补记（单一事实源）。
-        await self._record_cloud_egress(messages, model=None, category="web_search")
-
-        # 经组合根 (self._service) 调用：保证测试对 AIService 实例属性
-        # （如 `svc._chat_completion_litellm = AsyncMock(...)`）的 monkeypatch 生效。
-        return await self._service._chat_completion_litellm(
-            messages,
-            temperature=temperature,
-            timeout=timeout,
-            tools=tools,
-        )
 
     @staticmethod
     @log_async_operation(
