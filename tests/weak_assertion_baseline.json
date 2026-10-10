@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "total": 765,
+  "total": 764,
   "entries": [
     {
       "file": "integration/test_api_tushare_client.py",
@@ -463,13 +463,6 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "                mock_completion_patch.assert_called_once()"
-    },
-    {
-      "file": "unit/test_ai_service_web_search.py",
-      "line": 207,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_akshare_concept_client.py",
