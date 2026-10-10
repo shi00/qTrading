@@ -293,11 +293,17 @@ async def _new_session():
 
 
 async def _stop_session(session, gate: asyncio.Event, *tasks) -> None:
-    """释放 gate、取消调度器与残留任务并 await，避免测试残留后台工作。"""
+    """释放 gate、取消调度器与残留任务并 await，避免测试残留后台工作。
+
+    F10 修复：残留 task 可能挂在与 ``gate`` 无关的 Event 上（如探针 ticker
+    的 ``held.wait()``），``gate.set()`` 释放不了它们——await 前必须先逐个
+    cancel，否则测试在 finally 无限挂起直至 pytest-timeout 超时。
+    """
     gate.set()
     sched = getattr(session, "_Session__updates_task", None)
-    if sched is not None and not sched.done():
-        sched.cancel()
+    for task in (sched, *tasks):
+        if task is not None and not task.done():
+            task.cancel()
     for task in (sched, *tasks):
         if task is None:
             continue
@@ -509,3 +515,161 @@ class TestSyncSetupCleanupContrast:
             assert "returned_cleanup" not in log
         finally:
             await _stop_session(session, gate)
+
+
+# ===========================================================================
+# F10：真实调度器驱动的 active 门控 ticker 启停验证
+#
+# 生产实现（ui/views/task_center_view.py 的 _setup_ticker/_cleanup_ticker）结构：
+#   - effect deps=[active, has_running]，任一变化经统一 cleanup 取消旧 ticker；
+#   - setup 守卫仅 ``active and has_running`` 时创建 ticker；
+#   - cleanup 显式 cancel 并置 None（切离页面/任务归零/卸载同一路径）。
+#
+# 探针 _ActiveGatedTicker 完全复刻该结构；ticker 循环体改 await 可控 ``held``
+# Event（真实 Page.run_task 依赖 session.connection.loop，探针环境不可用，
+# 故以 loop.create_task 等价承载调度语义）。真实每秒 tick 语义由
+# test_task_center_view 的 _fake_sleep 模式覆盖，此处验证调度启停时序。
+# ===========================================================================
+
+
+@ft.component
+def _ActiveGatedTicker(active: bool, has_running: bool, log: list[str], tasks: list[asyncio.Task], held: asyncio.Event):
+    """F10 探针：复刻任务中心 ticker 的 active 门控 effect 结构。"""
+
+    ticker_ref = ft.use_ref(None)
+
+    def _setup() -> None:
+        if not (active and has_running):
+            return
+
+        async def _tick() -> None:
+            try:
+                while True:
+                    await held.wait()  # 可控挂起点，永不 set；取消经 CancelledError 传播
+            except asyncio.CancelledError:
+                raise  # R2: 必须传播
+
+        task = asyncio.get_running_loop().create_task(_tick())
+        ticker_ref.current = task
+        tasks.append(task)
+        log.append("start")
+
+    def _cleanup() -> None:
+        if ticker_ref.current is not None:
+            ticker_ref.current.cancel()
+            ticker_ref.current = None
+            log.append("cancel")
+
+    ft.use_effect(_setup, [active, has_running], _cleanup)
+    return ft.Text("probe")
+
+
+class TestActiveGatedTickerScheduling:
+    """真实 Session scheduler 下 active 门控 ticker 的启停时序（F10）。"""
+
+    @staticmethod
+    def _kwargs(active: bool, has_running: bool, log: list[str], tasks: list[asyncio.Task], held: asyncio.Event):
+        return {"active": active, "has_running": has_running, "log": log, "tasks": tasks, "held": held}
+
+    async def _drive(self, component, **kwargs) -> None:
+        """以新 props 重渲染并触发 render effects（deps 变化经真实调度器执行）。"""
+        component.kwargs = kwargs
+        render_once(component)
+        component._run_render_effects()
+
+    @pytest.mark.asyncio
+    async def test_active_toggle_stops_and_restarts_ticker(self) -> None:
+        """运行中切离页面取消 ticker，切回只重建一个新 ticker。"""
+        log: list[str] = []
+        tasks: list[asyncio.Task] = []
+        held = asyncio.Event()
+        stop_gate = asyncio.Event()
+        session = await _new_session()
+        try:
+            component = make_component(_ActiveGatedTicker, **self._kwargs(True, True, log, tasks, held))
+            render_once(component)
+            component._run_mount_effects()
+            await _wait_until(lambda: log.count("start") == 1)
+            assert len(tasks) == 1
+            old_task = tasks[0]
+
+            await self._drive(component, **self._kwargs(False, True, log, tasks, held))
+            await _wait_until(lambda: log.count("cancel") == 1)
+            await _wait_until(lambda: old_task.cancelled())
+
+            await self._drive(component, **self._kwargs(True, True, log, tasks, held))
+            await _wait_until(lambda: log.count("start") == 2)
+            assert log.count("cancel") == 1
+            assert len(tasks) == 2
+            assert tasks[1] is not old_task
+            assert not tasks[1].done()
+        finally:
+            await _stop_session(session, stop_gate, *tasks)
+
+    @pytest.mark.asyncio
+    async def test_inactive_running_flip_does_not_spawn_ticker(self) -> None:
+        """页面 inactive 下 has_running 抖动（0→1→0）不创建任何 ticker。"""
+        log: list[str] = []
+        tasks: list[asyncio.Task] = []
+        held = asyncio.Event()
+        stop_gate = asyncio.Event()
+        session = await _new_session()
+        try:
+            component = make_component(_ActiveGatedTicker, **self._kwargs(False, False, log, tasks, held))
+            render_once(component)
+            component._run_mount_effects()
+            await self._drive(component, **self._kwargs(False, True, log, tasks, held))
+            await self._drive(component, **self._kwargs(False, False, log, tasks, held))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert log == [], "inactive 期间不应有任何 ticker 创建"
+            assert tasks == []
+        finally:
+            await _stop_session(session, stop_gate, *tasks)
+
+    @pytest.mark.asyncio
+    async def test_unmount_cancels_running_ticker(self) -> None:
+        """卸载组件时 cleanup 取消在跑 ticker，无遗留循环。"""
+        log: list[str] = []
+        tasks: list[asyncio.Task] = []
+        held = asyncio.Event()
+        stop_gate = asyncio.Event()
+        session = await _new_session()
+        try:
+            component = make_component(_ActiveGatedTicker, **self._kwargs(True, True, log, tasks, held))
+            render_once(component)
+            component._run_mount_effects()
+            await _wait_until(lambda: len(tasks) == 1)
+            ticker_task = tasks[0]
+
+            component._state.mounted = False
+            component._run_unmount_effects()
+            await _wait_until(lambda: ticker_task.cancelled())
+            assert log.count("cancel") == 1
+        finally:
+            await _stop_session(session, stop_gate, *tasks)
+
+    @pytest.mark.asyncio
+    async def test_repeated_cycles_spawn_one_ticker_per_activation(self) -> None:
+        """反复往返切页（True→False→True→False→True），每个 active 周期只建一个 ticker。"""
+        log: list[str] = []
+        tasks: list[asyncio.Task] = []
+        held = asyncio.Event()
+        stop_gate = asyncio.Event()
+        session = await _new_session()
+        try:
+            component = make_component(_ActiveGatedTicker, **self._kwargs(True, True, log, tasks, held))
+            render_once(component)
+            component._run_mount_effects()
+            await _wait_until(lambda: log.count("start") == 1)
+            for _ in range(2):
+                await self._drive(component, **self._kwargs(False, True, log, tasks, held))
+                await _wait_until(lambda: log[-1] == "cancel")
+                await self._drive(component, **self._kwargs(True, True, log, tasks, held))
+                await _wait_until(lambda: log.count("start") == log.count("cancel") + 1)
+            assert log.count("start") == 3
+            assert log.count("cancel") == 2
+            assert len(tasks) == 3
+            assert not tasks[-1].done()
+        finally:
+            await _stop_session(session, stop_gate, *tasks)

@@ -1346,6 +1346,131 @@ class TestTaskCenterViewComponentBody:
         assert sleep_calls == 2
         run_unmount_effects(component)
 
+    # --- F10: ticker 门控 active（页面可见）——隐藏页不参与每秒唤醒 ---
+
+    def _mount_ticker_view(self, monkeypatch, active: bool, running_count: int):
+        """挂载带可控 active 的 TaskCenterView, 返回 (component, fake_vm, page)。
+
+        FakePage.run_task 注入 MagicMock 以记录 ticker 创建/取消次数。
+        """
+        from tests.unit.ui.component_renderer import FakePage
+        from ui.views.task_center_view import TaskCenterView
+
+        fake_vm = _FakeTaskCenterViewModel(
+            state=_FakeTaskCenterState(total_count=max(running_count, 1), running_count=running_count)
+        )
+        monkeypatch.setattr("ui.views.task_center_view.TaskCenterViewModel", lambda: fake_vm)
+        page = FakePage()
+        page.run_task = MagicMock()
+        component = make_component(TaskCenterView, active=active)
+        run_mount_effects(component, page=page)
+        return component, fake_vm, page
+
+    def _rerender_with_active(self, component, active: bool):
+        """以新 active prop 重渲染并触发 render effects (deps 变化检测), 返回渲染结果。"""
+        component.kwargs = {"active": active}
+        result = render_once(component)
+        component._run_render_effects()
+        return result
+
+    def test_ticker_not_started_when_inactive_even_with_running_task(self, monkeypatch):
+        """F10: 页面 inactive 时即使存在运行中任务也不启动 ticker。"""
+        component, _, page = self._mount_ticker_view(monkeypatch, active=False, running_count=1)
+        page.run_task.assert_not_called()
+        # inactive 期间重复渲染 (如 VM 推送) 也不创建
+        render_once(component)
+        component._run_render_effects()
+        page.run_task.assert_not_called()
+        run_unmount_effects(component)
+
+    def test_ticker_stops_and_restarts_on_active_toggle(self, monkeypatch):
+        """F10: 切离页面取消 ticker, 切回只重建一个; inactive 期间无新建。"""
+        component, _, page = self._mount_ticker_view(monkeypatch, active=True, running_count=1)
+        assert page.run_task.call_count == 1
+        _rerender = self._rerender_with_active
+        _rerender(component, active=False)
+        assert page.run_task.call_count == 1, "inactive 时不应创建新 ticker"
+        _rerender(component, active=True)
+        assert page.run_task.call_count == 2, "重激活应只重建一个 ticker"
+        run_unmount_effects(component)
+
+    def test_ticker_single_instance_across_repeated_cycles(self, monkeypatch):
+        """F10: 反复往返切页, 每个 active 周期只建一个 ticker, 不累积。"""
+        component, _, page = self._mount_ticker_view(monkeypatch, active=True, running_count=1)
+        created = 1  # mount 时建 1 个
+        for _ in range(3):
+            self._rerender_with_active(component, active=False)
+            assert page.run_task.call_count == created, "inactive 段不建 ticker"
+            self._rerender_with_active(component, active=True)
+            created += 1
+            assert page.run_task.call_count == created, "重激活只建一个 ticker"
+        assert page.run_task.call_count == 4, "mount 1 次 + 3 次重激活各 1 次"
+        run_unmount_effects(component)
+
+    def test_ticker_stops_when_running_count_drops(self, monkeypatch):
+        """F10: 页面 active 下运行任务归零, ticker 经 cleanup 取消且不重建。"""
+        component, fake_vm, page = self._mount_ticker_view(monkeypatch, active=True, running_count=1)
+        assert page.run_task.call_count == 1
+        page.run_task.return_value.cancel.assert_not_called()
+        fake_vm._set_state(tasks=(), total_count=0, running_count=0)
+        render_once(component)
+        component._run_render_effects()
+        # 任务归零 → cleanup 取消旧 ticker, setup 守卫不新建
+        # (assert_called_once_with: 恰好一次且无参调用, 与 _cleanup_ticker 的 cancel() 签名对齐)
+        page.run_task.return_value.cancel.assert_called_once_with()
+        assert page.run_task.call_count == 1
+        # 归零后重复渲染仍不重建
+        render_once(component)
+        component._run_render_effects()
+        assert page.run_task.call_count == 1
+        run_unmount_effects(component)
+
+    def test_ticker_cancelled_on_unmount(self, monkeypatch):
+        """F10: 组件卸载时显式 cleanup 取消在跑 ticker, 无遗留循环。"""
+        component, _, page = self._mount_ticker_view(monkeypatch, active=True, running_count=1)
+        ticker_task = page.run_task.return_value
+        assert not ticker_task.cancel.called
+        run_unmount_effects(component)
+        # assert_called_once_with: 恰好一次且无参调用, 与 _cleanup_ticker 的 cancel() 签名对齐
+        ticker_task.cancel.assert_called_once_with()
+
+    def test_elapsed_time_shows_latest_wall_clock_on_reactivation(self, monkeypatch):
+        """F10: 切回页面即时按墙钟计算经过时间, 包含隐藏期真实流逝 (不累计假时间)。
+
+        隐藏期间 ticker 停止、不重渲染; 切回时 active prop 变化触发重渲染,
+        渲染时 get_now() 取最新墙钟 → elapsed = 最新墙钟 - started_at。
+        """
+        from tests.unit.ui.component_renderer import FakePage
+        from ui.views.task_center_view import TaskCenterView
+
+        started_at = datetime.datetime(2025, 1, 1, 12, 0, 0)
+        row = _make_task_row(status=TaskStatus.RUNNING, cancellable=True, progress=0.5, started_at=started_at)
+        fake_vm = _FakeTaskCenterViewModel(state=_FakeTaskCenterState(tasks=(row,), total_count=1, running_count=1))
+        monkeypatch.setattr("ui.views.task_center_view.TaskCenterViewModel", lambda: fake_vm)
+        # 可控时钟: 挂载时 13:00 (elapsed 1h); 隐藏期前进 5 分钟后 13:05 (elapsed 1h05m)
+        clock = {"now": datetime.datetime(2025, 1, 1, 13, 0, 0)}
+        monkeypatch.setattr("ui.views.task_center_view.get_now", lambda: clock["now"])
+        # duration 参数透出以便断言具体时长 (task_elapsed_fmt 带 duration kwarg)
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: kw.get("duration", key)
+
+        page = FakePage()
+        page.run_task = MagicMock()
+        component = make_component(TaskCenterView, active=True)
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+        texts = [(getattr(t, "value", "") or "") for t in _find_all_controls_by_type(result, ft.Text)]
+        assert any("1:00:00" in t for t in texts), "挂载时应显示 1h 经过时间"
+
+        # 切离页面 (时钟静止不推进——隐藏期 ticker 停止)
+        self._rerender_with_active(component, active=False)
+        # 隐藏 5 分钟后切回: 重渲染以最新墙钟即时计算
+        clock["now"] = datetime.datetime(2025, 1, 1, 13, 5, 0)
+        result = self._rerender_with_active(component, active=True)
+        texts = [(getattr(t, "value", "") or "") for t in _find_all_controls_by_type(result, ft.Text)]
+        assert any("1:05:00" in t for t in texts), "切回后应显示包含隐藏期流逝的最新时长"
+        assert not any("1:00:00" in t for t in texts), "不应残留隐藏前的旧时长"
+        run_unmount_effects(component)
+
     def test_reopen_source_click_navigates_to_data_source(self, monkeypatch):
         """DoD 3: 点击「前往数据源页重新发起」→ PubSub 广播 TOPIC_NAVIGATE / "settings:data"。"""
         from tests.unit.ui.component_renderer import FakePage
