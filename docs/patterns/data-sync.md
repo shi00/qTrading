@@ -61,10 +61,21 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 
 ### 数据库连接生命周期（review03-C13 契约）
 
-**断连后必须显式 `CacheManager.init_db()`**：若 PostgreSQL 进程整体不可用（内置 PG 崩溃、外部 PG 重启），连接池的 `pool_pre_ping=True` 只能处理"连接失效"（池内单个连接被服务端关闭），**无法**处理"数据库进程不可用"。恢复后必须由调用方显式调用 `CacheManager.init_db()` 重建引擎与连接池。
+**三类生命周期状态与恢复入口**（严格区分引擎身份、查询恢复与停止语义，遵守 R5 僵尸引擎红线）：
 
-- **不实现自动重连**：自动重连会引入重连风暴风险，且会掩盖真实故障（PG 崩溃是异常事件，应让用户看到明确错误并触发诊断流程）。
-- **失败表现**：断连期间 DAO 操作抛 `EngineDisposedError`（R5）或连接池超时异常，经 `classify_error` 分类后按严重度记录；不应静默吞没。
+1. **首次 schema 初始化与引擎按需创建（`CacheManager.init_db()`）**：
+   - `CacheManager.__init__` 在已配置连接串时创建 `AsyncEngine` 并经 `DaoRegistry.sync_engines()` 同步至全部 DAO；若启动时未配置连接串（`self.engine is None`），则在向导完成后首次调用 `CacheManager.init_db()` 时按需调用 `_create_engine()` 创建引擎并执行 `DatabaseMigrator.init_db()`。
+   - **幂等短路与 `force` 的真实边界**：当 `self._schema_initialized` 为 `True`、`not force` 且 `self.engine is not None` 时，`init_db()` 直接返回；即便传入 `force=True`，也仅在 `self.engine is None` 时才调用 `_create_engine()` 创建新引擎——若 `self.engine` 非空，`init_db(force=True)` **不会重建引擎或连接池**，仅在既有引擎上重跑 `DatabaseMigrator.init_db()`。
+2. **显式释放后的引擎重建（`await CacheManager.close()` → `await CacheManager.init_db()`）**：
+   - `CacheManager.close()` 将当前引擎标记为已释放（`self._disposed = True` 且 `engine_provider.mark_disposed(True)` 将该引擎对象永久记入 `_disposed_engines` 集合）、调用 `EngineManager.dispose()` 关闭连接池、将 `self.engine` 与全部 DAO 的 `engine` 引用置为 `None`，并重置 `self._schema_initialized = False`。
+   - **R5 僵尸引擎不变量**：引擎释放不可逆，`BaseDao._check_engine()` 在每次操作及维护等待唤醒后检查引擎状态——当 DAO 的 `engine` 已被清空为 `None` 时抛出 `RuntimeError`（提示未初始化）；当外部残留引用仍指向已进入 `_disposed_engines` 的旧引擎对象时抛出 `EngineDisposedError`。
+   - 若需在释放后重建引擎（如重新配置数据库连接 `StartupController.reconfigure()` 或彻底重建连接池），必须先完成 `await cache_manager.close()` 清空引擎引用，再调用 `await cache_manager.init_db()` 创建**全新** `AsyncEngine` 实例并同步至全部 DAO；单独调用 `init_db()` 无法替换非空引擎。
+3. **数据库服务暂不可达 / 重启时的连接池恢复与重试语义**：
+   - **引擎身份保持不变**：PostgreSQL 进程重启或短暂不可达期间，`CacheManager.engine` 未执行 `close()`，引擎引用非空且未标记 disposed，此时 DAO 操作因连接被拒/超时抛出连接异常或 `DatabaseQueryError`（若正处于飞行中的事务或查询连接被服务端中途断开且匹配 `classify_error(e, "db")["code"] == "interrupted"`，则会被转译为 `EngineDisposedError`，但引擎对象本身并未进入 `_disposed_engines`）。
+   - **单连接失效 vs 服务不可达**：连接池配置的 `pool_pre_ping=True` 能在数据库服务已恢复可连后，于下次借出连接（checkout）时自动检测并丢弃服务端重启前遗留的失效连接、建立新物理连接；但在数据库进程不可达期间，`pool_pre_ping` 无法自愈，操作将持续抛出连接异常。
+   - **不实现后台自动重连循环**：不在数据层内置后台重连轮询，以避免重连风暴并防止掩盖真实故障（PG 崩溃属异常事件，应向用户暴露明确错误并引导诊断）。待外部或内置 PG 服务进程恢复后，常规查询可经既有引擎的 `pool_pre_ping=True` 在重跑任务时恢复连接；若需彻底重置连接池或切换连接配置，则须显式执行 `await cache_manager.close()` 后再调用 `await cache_manager.init_db()`。
+
+- **失败表现与分类**：已释放引擎引用上的操作抛 `EngineDisposedError`（R5 守卫），`engine is None` 时抛 `RuntimeError`；数据库进程不可达或连接中断期间，DAO 执行路径（`_guarded_begin` / `_write_db` / `_save_upsert` / `_read_db` / `_read_db_select`）将 `classify_error(e, "db")["code"] == "interrupted"` 的中途断连异常转译为 `EngineDisposedError`，其余连接被拒/超时异常按 `suppress_errors` 契约抛出原异常/`DatabaseQueryError` 或记录日志返回兜底值，统一经 `classify_error` + `classify_severity`（`log_classified`）按严重度分级记录，禁止静默吞没。
 - **UI 提示映射**：连接失败/`EngineDisposedError` 应映射为可操作用户提示（如"数据库连接已断开，点击重新连接"），而非通用错误——该映射属错误反馈路径（报告 05 范围）。
 
 > **操作指引**：新增/修改数据同步源的完整步骤见 [docs/guides/how-to.md](../guides/how-to.md)「5. 新增一个外部数据源」与「5.1 Tushare 集成工作流（简述）」；新增同步表前须更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS`，并遵循本节 CLAUDE.md §3.1 R2（取消传播）与 §3.2（质量门控）约束。
@@ -78,7 +89,7 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 | 某日质量分低于阈值 | 源端当日数据缺失，或相对基准法判定数据不完整 | 用 `QuoteDAO.get_sync_quality_score()` 复核该日评分；`*_quality_score` 表标记为不完整的日期会在下次同步自动补齐（见「质量门控（C15）」） |
 | 同步后某表仍缺数据 / 数据不完整 | 表未在 `TABLE_DEFINITIONS` 注册，或分块写入未覆盖全量 | 核对 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 注册项；确认 syncer 分块循环与 `_save_upsert()` 的覆盖范围 |
 | 续传 / 同步中途中断且不再恢复 | `cancel_event` 被置位未清理，或取消异常被吞没 | 确认 syncer 分块循环检查 `cancel_event.is_set()`，主动退出必须 `raise asyncio.CancelledError`（R2，见「取消传播（C18）」） |
-| 续传后 DAO 操作抛 `EngineDisposedError` | PG 进程整体不可用（非单连接失效），连接池无法自愈 | 显式调用 `CacheManager.init_db()` 重建引擎（不实现自动重连），再按「操作指引」重跑同步（见「数据库连接生命周期（review03-C13 契约）」） |
+| 续传/同步中 DAO 操作抛 `EngineDisposedError`、`RuntimeError`（Engine not initialized）或连接异常 | ① 抛 `EngineDisposedError` 或 `RuntimeError`：引擎已被 `CacheManager.close()` 释放（如停机/重配期间，R5 守卫生效或 `engine` 已置 `None`），或飞行中连接被中途断开（`interrupted`）；② 抛连接异常/`DatabaseQueryError`：PG 服务进程暂不可达，连接池 `pool_pre_ping` 在服务恢复前无法自愈 | ① 若引擎已 `close()` 释放（`self.engine is None`），须待停机/重配流程结束后调用 `await CacheManager.init_db()` 创建新引擎（禁止在已释放旧引擎上绕过 R5 继续操作）；② 若属 PG 进程崩溃/重启，先确认 PG 服务恢复，重跑同步即可经 `pool_pre_ping=True` 恢复连接，或显式执行 `await CacheManager.close()` → `await CacheManager.init_db()` 彻底重建引擎（见「数据库连接生命周期（review03-C13 契约）」） |
 
 ---
 
