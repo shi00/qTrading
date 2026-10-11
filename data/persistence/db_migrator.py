@@ -66,9 +66,12 @@ class DatabaseMigrator:
         """Create Alembic config with correct project paths.
 
         Shared by _get_head_revision and _run_alembic_upgrade to avoid
-        duplicate path construction.
+        duplicate path construction. Uses config.RESOURCE_ROOT so frozen
+        builds (_MEIPASS) and source runs share a single canonical root.
         """
-        project_root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        import config
+
+        project_root = os.path.normpath(config.RESOURCE_ROOT)
         alembic_ini_path = os.path.join(project_root, "alembic.ini")
         cfg = Config(alembic_ini_path)
         cfg.set_main_option("script_location", os.path.join(project_root, "alembic"))

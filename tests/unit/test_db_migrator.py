@@ -77,6 +77,20 @@ class TestGetAlembicConfig:
         assert cfg.config_file_name is not None
         assert cfg.config_file_name.endswith("alembic.ini")
 
+    def test_uses_config_resource_root(self, monkeypatch, tmp_path):
+        """B09: _get_alembic_config 应从 config.RESOURCE_ROOT 解析 alembic.ini 与 script_location。"""
+        import os
+
+        import config
+
+        fake_ini = tmp_path / "alembic.ini"
+        fake_ini.write_text("[alembic]\nscript_location = alembic\n", encoding="utf-8")
+        monkeypatch.setattr(config, "RESOURCE_ROOT", str(tmp_path))
+
+        cfg = DatabaseMigrator._get_alembic_config()
+        assert cfg.config_file_name == os.path.join(str(tmp_path), "alembic.ini")
+        assert cfg.get_main_option("script_location") == os.path.join(str(tmp_path), "alembic")
+
 
 class TestCheckSchemaStatus:
     @pytest.mark.asyncio

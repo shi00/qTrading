@@ -486,6 +486,65 @@ class TestEmbeddedPgMaintenanceServiceArgv:
         target_idx = argv.index("--target-data-dir") + 1
         assert argv[target_idx] == str(target)
 
+    def test_build_doctor_argv_frozen_resolves_meipass_sidecar(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """B08: sys.frozen=True 且 embedded_pg_sidecar_path 为空时，应从 sys._MEIPASS/sidecars 解析 sidecar。"""
+        import os
+        import sys
+
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+
+        mock_config = {
+            "embedded_pg_enabled": True,
+            "embedded_pg_sidecar_path": "",
+            "embedded_pg_data_root": str(tmp_path / "data_root"),
+            "embedded_pg_install_root": str(tmp_path / "install_root"),
+            "embedded_pg_log_dir": str(tmp_path / "log_dir"),
+        }
+        with patch(
+            "services.embedded_pg_maintenance_service.ConfigHandler.load_config",
+            return_value=mock_config,
+        ):
+            from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceService
+
+            svc = EmbeddedPgMaintenanceService()
+            argv = svc._build_doctor_argv()
+
+        exe_suffix = ".exe" if os.name == "nt" else ""
+        expected_sidecar = str(tmp_path / "sidecars" / f"qtrading-pg-sidecar{exe_suffix}")
+        assert argv[0] == expected_sidecar
+
+    def test_build_doctor_argv_frozen_without_meipass_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """B08: sys.frozen=True 但 sys._MEIPASS 为 None 且未配置 sidecar_path 时，应抛 EmbeddedPgMaintenanceError。"""
+        import sys
+
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "_MEIPASS", None, raising=False)
+
+        mock_config = {
+            "embedded_pg_enabled": True,
+            "embedded_pg_sidecar_path": "",
+            "embedded_pg_data_root": str(tmp_path / "data_root"),
+            "embedded_pg_install_root": str(tmp_path / "install_root"),
+            "embedded_pg_log_dir": str(tmp_path / "log_dir"),
+        }
+        with patch(
+            "services.embedded_pg_maintenance_service.ConfigHandler.load_config",
+            return_value=mock_config,
+        ):
+            from services.embedded_pg_maintenance_service import (
+                EmbeddedPgMaintenanceError,
+                EmbeddedPgMaintenanceService,
+            )
+
+            svc = EmbeddedPgMaintenanceService()
+            with pytest.raises(EmbeddedPgMaintenanceError, match="_MEIPASS is None"):
+                svc._build_doctor_argv()
+
 
 class TestRunSidecarTimeout:
     """review03-C19: subprocess.TimeoutExpired 必须包装为 EmbeddedPgMaintenanceError（可操作提示）。
