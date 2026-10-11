@@ -9,7 +9,7 @@
 - 构建结构化 Prompt → 调用 LLM → 解析结构化响应
 - 支持云端 (LiteLLM) 和本地 (llama-cpp-python) 双模式
 - 内置重试、超时、Token 计量、Prompt 安全防护 (`utils/prompt_guard.py`)
-- Prompt 模板集中在 `strategies/strategy_prompts.py`，响应校验在 `strategies/prompt_validator.py`
+- Prompt 模板集中在 `strategies/strategy_prompts.py`（底层常量、结论枚举契约与无依赖解析位于 `core/prompt_base.py`）；Prompt 输入数据声明一致性校验在 `strategies/prompt_validator.py::validate_prompt_declarations`（仅校验声明的数据源是否可用，不校验 LLM 响应），LLM 响应输出 schema 与归一化校验在 `services/ai_service/output.py::validate_ai_analysis_response`（策略结果行组装与二次兜底在 `strategies/ai_mixin.py::AIStrategyMixin._build_result_row`，完整输出校验边界见 [ai-service.md](./ai-service.md#3-输出契约与校验边界)）
 
 ### 最小可提交骨架
 
