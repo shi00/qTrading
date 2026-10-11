@@ -720,6 +720,66 @@ class TestShutdownWorker:
         assert mgr._worker_ready is False
 
 
+class TestUnloadModel:
+    """N3-3：公开关机 API（utils.shutdown Step 5b 调用点）。"""
+
+    def test_force_terminates_and_resets_load_state(self):
+        mgr = _make_mgr()
+        proc = MagicMock(spec=_RealProcess)
+        proc.is_alive.side_effect = [True, False]
+        mgr._request_queue = MagicMock(spec=queue.Queue)
+        mgr._worker_proc = proc
+        mgr._result_queue = MagicMock(spec=queue.Queue)
+        mgr._worker_ready = True
+        mgr._model_path = "model.gguf"
+        mgr._paths_stat = ((1.0, 2), (3.0, 4))
+        mgr._core_signature = (6, 128)
+        mgr._head = {"mode": "linear"}
+
+        mgr.unload_model(force=True)
+
+        proc.terminate.assert_called_once_with()
+        proc.kill.assert_not_called()
+        assert mgr._model_path == ""
+        assert mgr._paths_stat == (0, 0)
+        assert mgr._core_signature == (0, 0)
+        assert mgr._head is None
+        assert mgr._worker_proc is None
+        assert mgr._worker_ready is False
+
+    def test_soft_unload_sends_sentinel_and_resets_load_state(self):
+        mgr = _make_mgr()
+        req_q = MagicMock(spec=queue.Queue)
+        proc = MagicMock(spec=_RealProcess)
+        proc.is_alive.return_value = True
+        mgr._request_queue = req_q
+        mgr._worker_proc = proc
+        mgr._result_queue = MagicMock(spec=queue.Queue)
+        mgr._worker_ready = True
+        mgr._model_path = "model.gguf"
+        mgr._head = {"mode": "bert"}
+
+        mgr.unload_model()
+
+        req_q.put.assert_called_once_with(_SENTINEL, timeout=2.0)
+        assert mgr._model_path == ""
+        assert mgr._head is None
+        assert mgr._worker_proc is None
+
+    def test_unload_without_worker_is_noop_but_resets_state(self):
+        mgr = _make_mgr()
+        mgr._worker_proc = None
+        mgr._request_queue = None
+        mgr._result_queue = None
+        mgr._model_path = "model.gguf"
+
+        mgr.unload_model()
+
+        assert mgr._model_path == ""
+        assert mgr._worker_proc is None
+        assert mgr._worker_ready is False
+
+
 # --------------------------------------------------------------------------- #
 # 单例生命周期（R15 / R7）
 # --------------------------------------------------------------------------- #

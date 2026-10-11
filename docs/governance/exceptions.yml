@@ -110,12 +110,12 @@ exceptions:
   - id: EX-0008
     rule_id: R1
     paths: ["utils/shutdown.py"]
-    reason: "shutdown 关机步骤按需加载，避免模块加载即拉起全栈（A2 标注 lazy-import，保留）。覆盖以下被下拉模块：EX-0009 data.domain_services.market_data_service、EX-0010 data.persistence.data_explorer_query_client、EX-0011 data.persistence.embedded_postgres.service、EX-0012 services.embedded_pg_maintenance_service、EX-0013 services.local_model_manager、EX-0014 services.news_subscription_service、EX-0015 services.task_manager。"
+    reason: "shutdown 关机步骤按需加载，避免模块加载即拉起全栈（A2 标注 lazy-import，保留）。覆盖以下被下拉模块：EX-0009 data.domain_services.market_data_service、EX-0010 data.persistence.data_explorer_query_client、EX-0011 data.persistence.embedded_postgres.service、EX-0012 services.embedded_pg_maintenance_service、EX-0013 services.local_model_manager、EX-0014 services.news_subscription_service、EX-0015 services.task_manager、EX-0020 services.news_sentiment_scorer。"
     owner: 架构维护者
     approved_by: 架构维护者（GDR-01 修复）
-    removal_trigger: "关机编排重构为显式依赖注入（关闭步骤经 app 层注入关闭处理器）后移除，本聚合条目与 EX-0009~EX-0015 一并移除。条件式 trigger 须随 review03-C11 关机重构推进周期性检查。"
+    removal_trigger: "关机编排重构为显式依赖注入（关闭步骤经 app 层注入关闭处理器）后移除，本聚合条目与 EX-0009~EX-0015、EX-0020 一并移除。条件式 trigger 须随 review03-C11 关机重构推进周期性检查。"
     verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0008）。"
-    validity_criteria: "`utils/shutdown.py` 仍含 `# lazy-import:` 标注的指向下方被下拉 data/services 模块（EX-0009~EX-0015）的函数内导入（L368/L404/L424/L483 等关机步骤），且关机编排尚未重构为经 `app` 层显式注入关闭处理器。"
+    validity_criteria: "`utils/shutdown.py` 仍含 `# lazy-import:` 标注的指向下方被下拉 data/services 模块（EX-0009~EX-0015、EX-0020）的函数内导入（关机步骤 _step0~_step8 内），且关机编排尚未重构为经 `app` 层显式注入关闭处理器。"
   # EX-0009: utils/shutdown.py -> data.domain_services.market_data_service（关机按需加载）
   - id: EX-0009
     rule_id: R1
@@ -228,3 +228,13 @@ exceptions:
     removal_trigger: "同 EX-0004~EX-0007：DB idempotency 状态写入改为经 app 层显式依赖注入后与 EX-0004~EX-0007 一并移除。"
     verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0019）。"
     validity_criteria: "`utils/scheduler_service.py` 的 `_persist_run_date_db` 仍含 `# lazy-import:` 标注的 `data.persistence.engine_provider` 函数内导入，且幂等键 DB 写入尚未经 app 层显式依赖注入。"
+  # EX-0020: utils/shutdown.py -> services.news_sentiment_scorer（N3-3 Step 5b 关机按需加载）
+  - id: EX-0020
+    rule_id: R1
+    paths: ["utils/shutdown.py"]
+    reason: "同 EX-0008（被下拉模块之一，理由见 EX-0008 reason）。N3-3 新增关机步骤 _step5b_stop_sentiment_scorer 按需加载新闻情绪打分子进程服务。"
+    owner: 架构维护者
+    approved_by: 架构维护者（N3-3 优雅停机接入）
+    removal_trigger: "同 EX-0008（一并移除）。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0020）。"
+    validity_criteria: "同 EX-0008：`utils/shutdown.py` 仍含 `# lazy-import:` 标注的指向 `services.news_sentiment_scorer` 的函数内导入（_step5b_stop_sentiment_scorer_sync），且关机编排仍未经 `app` 层注入。"
