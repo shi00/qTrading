@@ -16,11 +16,27 @@ import sys
 import flet as ft
 
 
-def _run_smoke_test() -> int:
-    """B04: 构建产物与源码自检模式（--smoke-test）。
+def _write_smoke_output_file(content: str) -> None:
+    """若设置了 QTRADING_SMOKE_OUTPUT_FILE，将自检输出安全写入该文件（兼容 console=False GUI 子系统）。"""
+    smoke_out_file = os.environ.get("QTRADING_SMOKE_OUTPUT_FILE")
+    if not smoke_out_file:
+        return
+    try:
+        with open(smoke_out_file, "w", encoding="utf-8") as f:
+            f.write(content)
+    except OSError as exc:
+        if sys.stderr is not None:
+            sys.stderr.write(f"AStockScreener smoke check WARNING: failed to write {smoke_out_file}: {exc}\n")
+            sys.stderr.flush()
 
-    校验核心模块可导入且 RESOURCE_ROOT 下静态资源目录齐全，输出特征字符串并以退出码 0 结束。
+
+def _run_smoke_test() -> int:
+    r"""B04: 构建产物与源码自检模式（--smoke-test）。
+
+    校验核心模块可导入且 RESOURCE_ROOT 下静态资源目录与配置文件齐全，输出特征字符串并以退出码 0 结束。
     所有重依赖均在本函数内延迟导入，不影响 ``import main`` 首帧最小导入集（PRF-02）。
+    注：Windows 打包产物为 GUI 子系统（console=False），手动命令行自检可通过管道
+    ``.\AStockScreener.exe --smoke-test | Out-Host`` 或设置 ``QTRADING_SMOKE_OUTPUT_FILE`` 查看输出。
     """
     import importlib
 
@@ -42,21 +58,21 @@ def _run_smoke_test() -> int:
         os.path.join("data", "tiktoken_cache"),
     )
     missing = [rel for rel in required_dirs if not os.path.isdir(os.path.join(config.RESOURCE_ROOT, rel))]
+    if not os.path.isfile(os.path.join(config.RESOURCE_ROOT, "alembic.ini")):
+        missing.append("alembic.ini")
     if missing:
         msg = f"AStockScreener smoke check FAILED: missing resources under {config.RESOURCE_ROOT}: {missing}\n"
         if sys.stderr is not None:
             sys.stderr.write(msg)
             sys.stderr.flush()
+        _write_smoke_output_file(msg)
         return 1
 
     ok_msg = "AStockScreener smoke check OK\n"
     if sys.stdout is not None:
         sys.stdout.write(ok_msg)
         sys.stdout.flush()
-    smoke_out_file = os.environ.get("QTRADING_SMOKE_OUTPUT_FILE")
-    if smoke_out_file:
-        with open(smoke_out_file, "w", encoding="utf-8") as f:
-            f.write(ok_msg)
+    _write_smoke_output_file(ok_msg)
     return 0
 
 
@@ -67,10 +83,7 @@ def main() -> None:
     上述轻量模块，``app.application`` 等推迟到本函数调用、进入 Flet 运行环境前才加载。
     """
     if "--smoke-test" in sys.argv:
-        rc = _run_smoke_test()
-        if rc != 0:
-            raise SystemExit(rc)
-        return
+        raise SystemExit(_run_smoke_test())
 
     import config
     from app.application import run

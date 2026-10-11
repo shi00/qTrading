@@ -917,3 +917,39 @@ def test_detect_scenario_frozen_without_sidecar_returns_none(monkeypatch, tmp_pa
 
     assert result is None, f"标准版 frozen 包无 sidecar 时 detect 应返回 None，实际: {result}"
     assert from_config_calls == [], f"无 sidecar 时 detect 不应调用 from_config，实际: {from_config_calls}"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_database_runtime_frozen_without_sidecar_raises_when_maintenance_dir_exists(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """B01/MAJOR-2: 若安装目录下存在 resources/maintenance（embedded-* 变体特征），
+    即使 _MEIPASS/sidecars/qtrading-pg-sidecar[.exe] 缺失（如被杀毒软件隔离），
+    也绝不可静默降级为 external，必须继续走 embedded 路径抛出 EmbeddedPostgresStartError。
+    """
+    import sys
+
+    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    meipass = tmp_path / "app" / "_internal"
+    meipass.mkdir(parents=True)
+    (tmp_path / "app" / "resources" / "maintenance").mkdir(parents=True)
+    monkeypatch.setattr(sys, "_MEIPASS", str(meipass), raising=False)
+
+    from app.bootstrap import prepare_database_runtime
+    from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.load_config",
+        staticmethod(lambda: _make_config_dict(embedded_pg_enabled=True, embedded_pg_sidecar_path="")),
+    )
+
+    mock_service = MagicMock()
+    mock_service.start = AsyncMock(side_effect=EmbeddedPostgresStartError("sidecar binary not found"))
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: mock_service),
+    )
+
+    with pytest.raises(EmbeddedPostgresStartError, match="sidecar binary not found"):
+        await prepare_database_runtime()

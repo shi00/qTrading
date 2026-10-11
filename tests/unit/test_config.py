@@ -38,11 +38,26 @@ class TestConfigModule:
     def test_app_root_when_frozen(self, monkeypatch):
         monkeypatch.setattr(sys, "frozen", True, raising=False)
         monkeypatch.setattr(sys, "executable", "/path/to/executable", raising=False)
+        monkeypatch.setattr(sys, "_MEIPASS", "/path/to/_internal", raising=False)
         import importlib
         import config
 
         importlib.reload(config)
-        assert os.path.dirname("/path/to/executable") == config.APP_ROOT
+        expected_app_root = os.path.dirname("/path/to/executable")
+        assert expected_app_root == config.APP_ROOT
+        assert config.RESOURCE_ROOT == "/path/to/_internal"
+
+    def test_frozen_when_meipass_is_none_falls_back_to_executable_dir(self, monkeypatch):
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", "/path/to/executable", raising=False)
+        monkeypatch.setattr(sys, "_MEIPASS", None, raising=False)
+        import importlib
+        import config
+
+        importlib.reload(config)
+        expected_dir = os.path.dirname("/path/to/executable")
+        assert expected_dir == config.APP_ROOT
+        assert expected_dir == config.RESOURCE_ROOT
 
     def test_tiktoken_cache_dir_set_when_exists(self, monkeypatch, tmp_path):
         monkeypatch.delenv("TIKTOKEN_CACHE_DIR", raising=False)

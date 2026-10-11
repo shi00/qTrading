@@ -53,7 +53,8 @@ class I18n:
             import sys
 
             if getattr(sys, "frozen", False):
-                root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+                meipass = getattr(sys, "_MEIPASS", None)
+                root = Path(meipass) if meipass else Path(sys.executable).parent
             else:
                 root = Path(__file__).parent.parent
             cls._locales_dir = root / "locales"

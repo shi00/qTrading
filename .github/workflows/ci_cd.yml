@@ -1349,8 +1349,9 @@ jobs:
           # 从对应后端源覆盖安装 llama-cpp-python，防止 requirements.txt 中的版本约束触发默认 PyPI CPU 轮子覆盖 CUDA 轮子。
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt
-          uv pip install --system --reinstall-package llama-cpp-python llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
+          uv pip install --system --reinstall-package llama-cpp-python --no-deps -c requirements-optional.txt llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
           uv pip install --system pyinstaller==6.19.0
+
 
       - name: Verify llama-cpp-python CUDA backend DLLs (CUDA variants only)
         if: contains(matrix.variant, 'cuda')
@@ -1692,27 +1693,31 @@ jobs:
           # installer.iss [Files] 段引用 dist\AStockScreener\* (主程序产物)
           # PR smoke 阶段不跑 PyInstaller (耗时长)，创建最小 stub 让 ISCC 能扫描通过
           # 验证 installer.iss 语法正确性，不生成有效 release artifact
-          New-Item -ItemType Directory -Force -Path "dist\AStockScreener" | Out-Null
+          New-Item -ItemType Directory -Force -Path "dist\AStockScreener\_internal\sidecars" | Out-Null
           New-Item -ItemType File -Force -Path "dist\AStockScreener\AStockScreener.exe" | Out-Null
-          Write-Host "Stub layout created for ISCC compile (TargetVariant=cpu)"
+          New-Item -ItemType File -Force -Path "dist\AStockScreener\_internal\sidecars\qtrading-pg-sidecar.exe" | Out-Null
+          Write-Host "Stub layout created for ISCC compile (TargetVariant=cpu and embedded-cpu)"
 
       - name: Compile Installer with Inno Setup (smoke)
         if: steps.detect.outputs.skip == 'false'
         shell: cmd
         run: |
-          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss /DMyAppVersion=0.0.0-smoke /DTargetVariant=cpu
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss /DMyAppVersion=0.0.0-smoke /DTargetVariant=cpu && "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss /DMyAppVersion=0.0.0-smoke /DTargetVariant=embedded-cpu
 
       - name: Verify Installer Compiled
         if: steps.detect.outputs.skip == 'false'
         shell: pwsh
         run: |
-          $installerPath = "Output\AStockScreener-Setup-cpu.exe"
-          if (Test-Path $installerPath) {
-            Write-Host "ISCC smoke test passed: installer.iss compiled successfully"
-          } else {
-            Write-Error "ISCC smoke test failed: installer not found at $installerPath"
-            exit 1
+          foreach ($v in @("cpu", "embedded-cpu")) {
+            $installerPath = "Output\AStockScreener-Setup-$v.exe"
+            if (Test-Path $installerPath) {
+              Write-Host "ISCC smoke test passed for variant $v: $installerPath"
+            } else {
+              Write-Error "ISCC smoke test failed: installer not found at $installerPath"
+              exit 1
+            }
           }
+
 
   flaky-detection:
     name: Flaky Test Detection (advisory)

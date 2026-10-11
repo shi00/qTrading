@@ -459,27 +459,13 @@ def mask_sensitive(value):
 def _is_frozen_standard_variant_without_sidecar(config: AppConfig) -> bool:
     """判定当前是否为不含内置 PostgreSQL sidecar 二进制的标准版打包发行物（B01）。
 
-    触发自动降级为 external 模式的四个条件（缺一不可）：
-    1. ``sys.frozen`` 为 ``True``（PyInstaller 打包运行态）；
-    2. 环境变量 ``QTRADING_DATABASE_MODE`` 未显式设为 ``embedded``（用户未强制要求内置库）；
-    3. ``config.embedded_pg_sidecar_path`` 未配置自定义路径；
-    4. ``sys._MEIPASS`` 存在，但默认 ``_MEIPASS/sidecars/qtrading-pg-sidecar[.exe]`` 二进制不存在。
+    委托 ``utils.config.db.is_frozen_standard_variant_without_sidecar`` 单一判定源（R-B1），
+    确保 ``prepare_database_runtime``、``detect_embedded_pg_startup_scenario`` 与
+    ``ConfigHandler.is_embedded_mode()`` 行为完全一致。
     """
-    import sys
+    from utils.config.db import is_frozen_standard_variant_without_sidecar
 
-    if not getattr(sys, "frozen", False):
-        return False
-    explicit_mode = os.environ.get("QTRADING_DATABASE_MODE", "").strip().lower()
-    if explicit_mode == "embedded":
-        return False
-    if config.embedded_pg_sidecar_path:
-        return False
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass is None:
-        return False
-    exe_suffix = ".exe" if os.name == "nt" else ""
-    sidecar_path = Path(meipass) / "sidecars" / f"qtrading-pg-sidecar{exe_suffix}"
-    return not sidecar_path.exists()
+    return is_frozen_standard_variant_without_sidecar(config)
 
 
 async def prepare_database_runtime() -> str | None:

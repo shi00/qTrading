@@ -69,8 +69,9 @@ try {
     Write-Ok "Environment cleaned"
 
     # STEP 2: 先安装一次（确保有 EXE 可启动）
-    Write-Step "2. Install embedded variant (initial install)"
+    Write-Step "2. Install application (initial install)"
     & $InstallerPath /SILENT /NORESTART
+
     Start-Sleep -Seconds 5
     Assert-True (Test-Path $AppExePath) "App installed: $AppExePath"
 
