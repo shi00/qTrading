@@ -35,7 +35,7 @@
 ### R16 UI 阻塞主循环（事件处理器维度）
 1. Flet 事件回调（`@ft.component` 的 `on_*` 处理器及 VM 异步 command 内）做同步阻塞 IO/CPU 即违规。改到事件回调时确认耗时位置改为 `await ThreadPoolManager.run_async(task_type, func, ...)`（`utils/thread_pool.py:268`）提交线程池。
 2. 搜索式：对改动 diff 中所有 `on_*` 事件处理器及其同步调用体，`grep -n "time\.sleep\|requests\.\|open(\|\.read()\|asyncio\.run"` 命中同步阻塞调用且外层非 `run_async` 的即 R16 候选。
-3. 调用链追溯：`@ft.component` 的 on_* → VM command → 是否 `await run_async(...)`；同步段被事件回调直接顶层调用未排队即阻塞主循环。CPU 密集（Polars 等释放 GIL 库）例外见红线描述，但纯 Python 计算须向量化。
+3. 调用链追溯：`@ft.component` 的 `on_*` → VM command → 是否 `await run_async(...)`；同步段被事件回调直接顶层调用未排队即阻塞主循环。统一按执行线程（事件循环线程）、耗时阈值（>100ms）与同步阻塞判据核验（见 [CLAUDE.md §3.2](../../../CLAUDE.md#32--强制要求)）：释放 GIL 不会让同步调用所在的事件循环线程自行返回，长同步 C 扩展 / Polars / NumPy 计算在事件循环线程上执行仍须经 `ThreadPoolManager`（`TaskType.CPU`）提交线程池（且纯 Python 密集计算须先改为 Polars 向量化）；短小非阻塞计算可按耗时阈值（≤100ms）判断，async-native IO（`httpx.AsyncClient`、SQLAlchemy async、asyncpg 等）按原生 `await` 模型执行，不重复包装线程池。
 
 ### R17 保留字作字段
 1. 新增/修改 ORM 模型（`data/models.py` 的 `Table`/列定义）或数据字典（`data/data_dictionary.py:148` 的 `TABLE_DEFINITIONS`）时，检查表名/列名是否数字开头、含特殊字符（`.`/`-`/空格）、或 SQL 保留字（如 `order`/`group`/`select`/`desc`/`from`）。
