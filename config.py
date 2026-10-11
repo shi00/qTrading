@@ -10,10 +10,11 @@ except ImportError:
     pass
 
 # 程序资源目录：只读，随安装包分发（tiktoken 编码文件、locales、PG sidecar 二进制等）。
-# 打包后 = 可执行文件所在目录；源码运行 = 本文件所在目录。用户数据**不得**写于此
+# 打包后（PyInstaller 6+ onedir）优先指向 sys._MEIPASS（_internal 目录），回退可执行文件所在目录；
+# 源码运行 = 本文件所在目录。用户数据**不得**写于此
 # （安装目录通常不可写，多用户共用互相覆盖，卸载/升级会丢失）。
 if getattr(sys, "frozen", False):
-    RESOURCE_ROOT = os.path.dirname(sys.executable)
+    RESOURCE_ROOT = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
 else:
     RESOURCE_ROOT = os.path.dirname(os.path.abspath(__file__))
 

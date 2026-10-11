@@ -456,6 +456,32 @@ def mask_sensitive(value):
     return DataSanitizer.sanitize_token(value)
 
 
+def _is_frozen_standard_variant_without_sidecar(config: AppConfig) -> bool:
+    """判定当前是否为不含内置 PostgreSQL sidecar 二进制的标准版打包发行物（B01）。
+
+    触发自动降级为 external 模式的四个条件（缺一不可）：
+    1. ``sys.frozen`` 为 ``True``（PyInstaller 打包运行态）；
+    2. 环境变量 ``QTRADING_DATABASE_MODE`` 未显式设为 ``embedded``（用户未强制要求内置库）；
+    3. ``config.embedded_pg_sidecar_path`` 未配置自定义路径；
+    4. ``sys._MEIPASS`` 存在，但默认 ``_MEIPASS/sidecars/qtrading-pg-sidecar[.exe]`` 二进制不存在。
+    """
+    import sys
+
+    if not getattr(sys, "frozen", False):
+        return False
+    explicit_mode = os.environ.get("QTRADING_DATABASE_MODE", "").strip().lower()
+    if explicit_mode == "embedded":
+        return False
+    if config.embedded_pg_sidecar_path:
+        return False
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass is None:
+        return False
+    exe_suffix = ".exe" if os.name == "nt" else ""
+    sidecar_path = Path(meipass) / "sidecars" / f"qtrading-pg-sidecar{exe_suffix}"
+    return not sidecar_path.exists()
+
+
 async def prepare_database_runtime() -> str | None:
     """根据数据库模式准备运行时（Phase 2 §3.4）。
 
@@ -501,6 +527,13 @@ async def prepare_database_runtime() -> str | None:
     config = AppConfig.model_validate(ConfigHandler.load_config())
     if not config.embedded_pg_enabled:
         logger.warning("[Bootstrap] QTRADING_DATABASE_MODE=embedded but embedded_pg_enabled=False; skip")
+        return None
+
+    if _is_frozen_standard_variant_without_sidecar(config):
+        logger.info(
+            "[Bootstrap] Standard frozen build without bundled sidecar binary detected; "
+            "falling back to external database mode"
+        )
         return None
 
     # R-Arch-2/Ske-1：embedded 模式下若 DATABASE_URL 环境变量被外部误设，
@@ -600,6 +633,9 @@ def detect_embedded_pg_startup_scenario(config: AppConfig) -> EmbeddedPgStartupS
         return None
     if not config.embedded_pg_enabled:
         logger.debug("[Bootstrap] detect skipped: embedded_pg_enabled=False")
+        return None
+    if _is_frozen_standard_variant_without_sidecar(config):
+        logger.debug("[Bootstrap] detect skipped: standard frozen build without bundled sidecar")
         return None
 
     from data.persistence.embedded_postgres.service import EmbeddedPostgresService

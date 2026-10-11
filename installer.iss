@@ -60,9 +60,9 @@ Filename: "{app}\AStockScreener.exe"; Description: "启动 AStockScreener"; Flag
 Filename: "{app}\_internal\sidecars\qtrading-pg-sidecar.exe"; Parameters: "stop --data-dir ""{localappdata}\qTrading\postgres\16\data"""; Flags: runhidden; RunOnceId: "StopSidecar"; Check: SidecarExists
 #endif
 
-#if TargetVariant == "embedded-cpu" || TargetVariant == "embedded-cuda"
 [Code]
-// Phase 5 失败注入 #32 + P1-11：qTrading 主进程或 sidecar 运行中启动安装器被拒绝
+// Phase 5 失败注入 #32 + P1-11 + B06：所有变体在 AStockScreener.exe 运行中均拒绝安装升级；
+// embedded-* 变体额外检测 qtrading-pg-sidecar.exe 与卸载前 SidecarExists()。
 // 使用 tasklist + find（Windows 原生，无需 PowerShell，Inno Setup Exec 调用 cmd 更稳定）
 // find 返回 0 表示找到匹配（进程存在），非 0 表示未找到
 function IsProcessRunning(const ProcessName: String): Boolean;
@@ -85,6 +85,7 @@ begin
     Result := False;
     Exit;
   end;
+#if TargetVariant == "embedded-cpu" || TargetVariant == "embedded-cuda"
   // P1-11: sidecar 运行中（用户手动启动维护实例或异常残留）也拒绝安装，
   // 避免升级期间 sidecar 持有 PGDATA 文件锁导致 [UninstallRun] stop 失败
   if IsProcessRunning('qtrading-pg-sidecar.exe') then
@@ -93,9 +94,11 @@ begin
     Result := False;
     Exit;
   end;
+#endif
   Result := True;
 end;
 
+#if TargetVariant == "embedded-cpu" || TargetVariant == "embedded-cuda"
 // Check 函数：sidecar binary 存在时才执行 [UninstallRun] 中的 stop 命令
 // 开发环境或 standard variant 升级到 embedded variants（无 sidecar binary）时不报错
 function SidecarExists(): Boolean;
@@ -103,3 +106,4 @@ begin
   Result := FileExists(ExpandConstant('{app}\_internal\sidecars\qtrading-pg-sidecar.exe'));
 end;
 #endif
+

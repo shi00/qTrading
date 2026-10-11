@@ -375,6 +375,33 @@ class TestPyInstallerSpecExcludesKeyFiles:
         assert "_key_patterns" in content, "S-P1-4: .spec should define _key_patterns for exclusion"
         assert "_datas_filtered" in content, "S-P1-4: .spec should filter datas list"
 
+    def test_spec_binaries_filtered_and_no_project_walk(self):
+        """B05: .spec 应对 binaries 列表执行 _key_patterns 过滤并赋值，且不应包含全仓 os.walk 死循环。"""
+        import os
+
+        spec_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "AStockScreener.spec")
+        if not os.path.exists(spec_path):
+            pytest.skip("AStockScreener.spec not found")
+        with open(spec_path, encoding="utf-8") as f:
+            content = f.read()
+        assert "_binaries_filtered" in content, "B05: .spec 应定义 _binaries_filtered"
+        assert "binaries = _binaries_filtered" in content, "B05: .spec 应将过滤后的 _binaries_filtered 赋值给 binaries"
+        assert "os.walk" not in content, "B05: .spec 不应包含全量 os.walk(project_root) 死代码"
+
+    def test_spec_syntax_valid_and_upx_disabled(self):
+        """B07: .spec 文件应为合法 Python AST，且禁用无差别 upx=True（交由 Inno Setup lzma2/ultra64 固实压缩）。"""
+        import ast
+        import os
+
+        spec_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "AStockScreener.spec")
+        if not os.path.exists(spec_path):
+            pytest.skip("AStockScreener.spec not found")
+        with open(spec_path, encoding="utf-8") as f:
+            content = f.read()
+        ast.parse(content, filename="AStockScreener.spec")
+        assert "upx=False" in content, "B07: .spec 中 EXE/COLLECT 应设置 upx=False"
+        assert "upx=True" not in content, "B07: .spec 不应启用无差别 upx=True"
+
 
 class TestSecurityError:
     """P0-7: SecurityError 异常类测试"""

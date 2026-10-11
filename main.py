@@ -11,8 +11,53 @@ main.py 仅保留"日志初始化 + 全局异常钩子 + ft.run(app.application.
 
 import multiprocessing
 import os
+import sys
 
 import flet as ft
+
+
+def _run_smoke_test() -> int:
+    """B04: 构建产物与源码自检模式（--smoke-test）。
+
+    校验核心模块可导入且 RESOURCE_ROOT 下静态资源目录齐全，输出特征字符串并以退出码 0 结束。
+    所有重依赖均在本函数内延迟导入，不影响 ``import main`` 首帧最小导入集（PRF-02）。
+    """
+    import importlib
+
+    import config
+
+    for mod_name in (
+        "app.application",
+        "flet",
+        "flet_charts",
+        "flet_code_editor",
+        "polars",
+    ):
+        importlib.import_module(mod_name)
+
+    required_dirs = (
+        "locales",
+        "assets",
+        "alembic",
+        os.path.join("data", "tiktoken_cache"),
+    )
+    missing = [rel for rel in required_dirs if not os.path.isdir(os.path.join(config.RESOURCE_ROOT, rel))]
+    if missing:
+        msg = f"AStockScreener smoke check FAILED: missing resources under {config.RESOURCE_ROOT}: {missing}\n"
+        if sys.stderr is not None:
+            sys.stderr.write(msg)
+            sys.stderr.flush()
+        return 1
+
+    ok_msg = "AStockScreener smoke check OK\n"
+    if sys.stdout is not None:
+        sys.stdout.write(ok_msg)
+        sys.stdout.flush()
+    smoke_out_file = os.environ.get("QTRADING_SMOKE_OUTPUT_FILE")
+    if smoke_out_file:
+        with open(smoke_out_file, "w", encoding="utf-8") as f:
+            f.write(ok_msg)
+    return 0
 
 
 def main() -> None:
@@ -21,6 +66,13 @@ def main() -> None:
     重依赖在函数体内延迟导入（PRF-02 首帧最小 import）：``import main`` 时只加载
     上述轻量模块，``app.application`` 等推迟到本函数调用、进入 Flet 运行环境前才加载。
     """
+    if "--smoke-test" in sys.argv:
+        rc = _run_smoke_test()
+        if rc != 0:
+            raise SystemExit(rc)
+        return
+
+    import config
     from app.application import run
     from utils.app_env import is_e2e_mode
     from utils.exception_hooks import install_global_exception_hooks
@@ -28,7 +80,7 @@ def main() -> None:
 
     setup_logging()
     install_global_exception_hooks()
-    assets = os.path.join(os.path.dirname(__file__), "assets")
+    assets = os.path.join(config.RESOURCE_ROOT, "assets")
     run_kwargs = {"main": run, "assets_dir": assets}
     if is_e2e_mode():
         # E2E 强制 CanvasKit：Flet 0.86.x 默认 skwasm 在 headless Windows CI 上

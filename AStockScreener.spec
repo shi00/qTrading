@@ -87,7 +87,6 @@ excludes = [
 ]
 
 import fnmatch
-import glob as _glob
 
 _key_patterns = ["*.key", "*.key.bak", "*.key.tmp", "*.salt", "*.salt.tmp", "*.legacy"]
 
@@ -103,14 +102,15 @@ for src, dst in datas:
 datas = _datas_filtered
 
 _binaries_filtered = []
-_binaries_key_excludes = []
-for root, dirs, files in os.walk(str(project_root)):
-    for f in files:
-        for pattern in _key_patterns:
-            if fnmatch.fnmatch(f, pattern):
-                rel = os.path.relpath(os.path.join(root, f), str(project_root))
-                _binaries_key_excludes.append(rel)
-                break
+for src, dst in binaries:
+    skip = False
+    for pattern in _key_patterns:
+        if fnmatch.fnmatch(os.path.basename(src), pattern):
+            skip = True
+            break
+    if not skip:
+        _binaries_filtered.append((src, dst))
+binaries = _binaries_filtered
 
 icon_path = project_root / "assets" / "hope.ico"
 if not icon_path.exists():
@@ -140,7 +140,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -157,7 +157,8 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="AStockScreener",
 )
+
