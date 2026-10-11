@@ -508,7 +508,7 @@ class NewsSentimentScorer:
         """Shut down the scoring worker subprocess (thread-safe).
 
         Args:
-            force: True 时跳过 sentinel 直接 terminate（关机路径，N3-3 Step 5
+            force: True 时跳过 sentinel 直接 terminate（关机路径，N3-3 Step 5b
                    2.0s 预算：terminate 1.5s + kill 0.5s）。
         """
         with self._worker_lock:
@@ -574,6 +574,23 @@ class NewsSentimentScorer:
         self._request_queue = None
         self._result_queue = None
         self._worker_ready = False
+
+    def unload_model(self, *, force: bool = False):
+        """Terminate the scoring worker subprocess and reset load state (public API).
+
+        与 ``LocalModelManager.unload_model`` 语义对齐：关机路径（utils.shutdown
+        Step 5b）经本方法强制终止子进程；同时重置加载态，下次 ``_ensure_ready``
+        走完整重载链（_worker_ready=False 已封死快路径，重置 head/签名释放引用）。
+
+        Args:
+            force: True 时跳过 sentinel 直接 terminate（关机路径使用）。
+        """
+        self._shutdown_worker(force=force)
+        self._model_path = ""
+        self._paths_stat = (0, 0)
+        self._core_signature = (0, 0)
+        self._head = None
+        logger.info("[NewsSentiment] Scoring model unloaded (worker terminated).")
 
     def _ensure_worker_impl(self, model_path: str, tokenizer_path: str, core_config: dict) -> bool:
         """同步实现，在线程池中执行（含 process.join 同步阻塞，R16）。"""

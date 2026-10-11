@@ -578,7 +578,7 @@ class TestShutdownCoordinatorContinuesOnCriticalFailure:
         assert ok is False
         step0 = next(r for r in coordinator.step_results if r.name == "Step 0")
         assert step0.ok is False
-        assert len(coordinator.step_results) == 9
+        assert len(coordinator.step_results) == 10
 
     @pytest.mark.asyncio
     async def test_non_critical_failure_still_returns_ok(self):
@@ -596,7 +596,7 @@ class TestShutdownCoordinatorContinuesOnCriticalFailure:
             ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=2.0)
 
         assert ok is True
-        assert len(coordinator.step_results) == 9
+        assert len(coordinator.step_results) == 10
 
 
 class TestPageRunTaskWiring:

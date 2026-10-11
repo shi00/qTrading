@@ -25,8 +25,8 @@ class StepResult:
 
 # 停机步骤定义：(步骤名, 方法名, 是否关键步骤, 默认超时秒数)
 # 注意：_run_cleanup_steps 使用 effective_timeout = min(default_timeout, step_timeout_s)。
-# 步骤 0~7 的默认超时均 <= 6.0s，因此调用方传入的 step_timeout_s (如 35.0s) 实际仅对 Step 8 (35.0s) 生效，
-# 步骤 0~7 始终受各自定义的默认超时上限保护，无法被外部放宽。
+# 步骤 0~8（含 5b）的默认超时均 <= 6.0s，因此调用方传入的 step_timeout_s (如 35.0s) 实际仅对
+# Step 8 (35.0s) 生效，步骤 0~7（含 5b）始终受各自定义的默认超时上限保护，无法被外部放宽。
 _CLEANUP_STEPS = [
     ("Step 0", "_step0_cancel_tasks", True, 6.0),
     ("Step 1", "_step1_stop_services", True, 5.0),
@@ -34,6 +34,7 @@ _CLEANUP_STEPS = [
     ("Step 3", "_step3_close_processor", True, 3.0),
     ("Step 4", "_step4_clear_toast", False, 1.0),
     ("Step 5", "_step5_unload_ai_model", True, 2.0),
+    ("Step 5b", "_step5b_stop_sentiment_scorer", True, 2.0),
     ("Step 6", "_step6_shutdown_thread_pools", True, 2.0),
     ("Step 7", "_step7_close_database_managers", True, 1.0),
     ("Step 8", "_step8_stop_embedded_postgres", True, 35.0),
@@ -463,6 +464,28 @@ class ShutdownCoordinator:
             logger.info("[Shutdown]   - Llama.cpp model evicted (subprocess terminated).")
         else:
             logger.info("[Shutdown]   - AI model not loaded, skipping.")
+
+    async def _step5b_stop_sentiment_scorer(self):
+        logger.info("[Shutdown] Step 5b: Stopping news sentiment scoring subprocess...")
+        # 关机路径专用，不依赖 ThreadPoolManager（避免关机时与池关闭竞态）
+        await asyncio.to_thread(self._step5b_stop_sentiment_scorer_sync)
+
+    def _step5b_stop_sentiment_scorer_sync(self):
+        from services.news_sentiment_scorer import (
+            NewsSentimentScorer,
+        )  # lazy-import: 关机步骤按需加载，避免模块加载即拉起全栈
+
+        inst = NewsSentimentScorer._instance
+        if inst is None:
+            logger.info("[Shutdown]   - News sentiment scorer not initialized, skipping.")
+            return
+        # 三条件守卫：_worker_proc 非 None 覆盖「worker 启动中关机」窗口——
+        # proc.start() 后、ready 置位前 _worker_ready/_model_path 均为假值（对抗性检视 Q6）。
+        if not (inst._worker_ready or inst._model_path or inst._worker_proc is not None):
+            logger.info("[Shutdown]   - News sentiment scorer not loaded, skipping.")
+            return
+        inst.unload_model(force=True)
+        logger.info("[Shutdown]   - News sentiment scoring subprocess terminated.")
 
     async def _step6_shutdown_thread_pools(self):
         logger.info("[Shutdown] Step 6: Shutting down Thread Pools...")

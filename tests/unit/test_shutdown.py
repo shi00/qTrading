@@ -10,11 +10,15 @@
 """
 
 import asyncio
+import multiprocessing
+import queue
+import threading
 import time
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
+from services.news_sentiment_scorer import NewsSentimentScorer
 from utils.shutdown import ShutdownCoordinator, StepResult, _CLEANUP_STEPS
 
 # 大部分测试使用 MagicMock 无真实长睡眠；少数含 asyncio.sleep 的测试类单独标注 slow
@@ -56,13 +60,17 @@ class TestCleanupSteps:
     """验证 _CLEANUP_STEPS 步骤定义的结构、超时预算与顺序约束。"""
 
     def test_steps_defined(self):
-        assert len(_CLEANUP_STEPS) == 9
+        assert len(_CLEANUP_STEPS) == 10
         assert _CLEANUP_STEPS[0][0] == "Step 0"
         assert _CLEANUP_STEPS[0][1] == "_step0_cancel_tasks"
         assert _CLEANUP_STEPS[0][2] is True
         assert _CLEANUP_STEPS[0][3] == 6.0
         assert _CLEANUP_STEPS[4][2] is False
         assert _CLEANUP_STEPS[4][3] == 1.0
+        # N3-3: Step 5b 紧跟 Step 5（新闻情绪打分子进程清理，预算 2.0s）
+        assert _CLEANUP_STEPS[6] == ("Step 5b", "_step5b_stop_sentiment_scorer", True, 2.0)
+        assert _CLEANUP_STEPS[7][0] == "Step 6"
+        assert _CLEANUP_STEPS[9][0] == "Step 8"
 
     def test_each_step_has_timeout(self):
         """ASYNC-004/005: Each cleanup step has its own timeout."""
@@ -480,6 +488,102 @@ class TestShutdownCoordinatorCleanupSteps:
             mock_instance.unload_model.assert_called_once_with(force=True)
 
     @pytest.mark.asyncio
+    async def test_step5b_no_instance(self):
+        coord = ShutdownCoordinator()
+        with patch("services.news_sentiment_scorer.NewsSentimentScorer") as mock_nss:
+            mock_nss._instance = None
+            await coord._step5b_stop_sentiment_scorer()
+
+    @pytest.mark.asyncio
+    async def test_step5b_not_loaded_skips_unload(self):
+        """未加载（无 ready / 无路径 / 无进程）时跳过，不触发 unload。"""
+        coord = ShutdownCoordinator()
+        with patch("services.news_sentiment_scorer.NewsSentimentScorer") as mock_nss:
+            mock_instance = MagicMock()
+            mock_instance._worker_ready = False
+            mock_instance._model_path = ""
+            mock_instance._worker_proc = None
+            mock_nss._instance = mock_instance
+            await coord._step5b_stop_sentiment_scorer()
+            mock_instance.unload_model.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_step5b_calls_force_unload(self):
+        """已加载时以 force=True 强制终止（关机路径，适配 2.0s 预算）。"""
+        coord = ShutdownCoordinator()
+        with patch("services.news_sentiment_scorer.NewsSentimentScorer") as mock_nss:
+            mock_instance = MagicMock()
+            mock_instance._worker_ready = True
+            mock_instance.unload_model = MagicMock()
+            mock_nss._instance = mock_instance
+            await coord._step5b_stop_sentiment_scorer()
+            mock_instance.unload_model.assert_called_once_with(force=True)
+
+    @pytest.mark.asyncio
+    async def test_step5b_startup_window_still_cleaned(self):
+        """对抗性 Q6：worker 启动中（proc 已 start、ready 未置位、路径未记录）关机也须清理。"""
+        coord = ShutdownCoordinator()
+        with patch("services.news_sentiment_scorer.NewsSentimentScorer") as mock_nss:
+            mock_instance = MagicMock()
+            mock_instance._worker_ready = False
+            mock_instance._model_path = ""
+            mock_instance._worker_proc = MagicMock()
+            mock_instance.unload_model = MagicMock()
+            mock_nss._instance = mock_instance
+            await coord._step5b_stop_sentiment_scorer()
+            mock_instance.unload_model.assert_called_once_with(force=True)
+
+    @pytest.mark.asyncio
+    async def test_step5b_real_worker_within_step_budget(self):
+        """DoD：退出流程中子进程被清理且不超 Step 5b 预算（2.0s）。
+
+        用真实 multiprocessing 进程（30s 长眠）验证 force 路径 terminate
+        在预算内完成且子进程确实退出；进程启动耗时在计时窗口之外。
+        """
+        mgr = NewsSentimentScorer()
+        proc = multiprocessing.Process(target=time.sleep, args=(30,))
+        proc.start()
+        mgr._worker_proc = proc
+        # _shutdown_worker_locked 以 _request_queue 非 None 作为清理块入口条件，
+        # 生产场景 queue 在 proc.start() 前创建（_ensure_worker_impl L599-600）；
+        # 测试须同步补齐，否则 kill 块整体跳过（首次跑已实测）。
+        mgr._request_queue = MagicMock(spec=queue.Queue)
+        mgr._worker_ready = False
+        mgr._model_path = "model.gguf"
+        coord = ShutdownCoordinator()
+        with patch("services.news_sentiment_scorer.NewsSentimentScorer") as mock_nss:
+            mock_nss._instance = mgr
+            start = time.perf_counter()
+            await coord._step5b_stop_sentiment_scorer()
+            elapsed = time.perf_counter() - start
+        assert elapsed < 2.0, f"Step 5b took {elapsed:.2f}s, exceeding the 2.0s budget"
+        assert proc.exitcode is not None  # 子进程已被 terminate 并退出
+
+    @pytest.mark.asyncio
+    async def test_step5b_cancelled_error_propagates(self):
+        """R2：步骤被取消时 CancelledError 向上传播，不被吞没。"""
+        release = threading.Event()
+
+        def _block():
+            release.wait(5.0)
+
+        try:
+            coord = ShutdownCoordinator()
+            with (
+                patch("services.news_sentiment_scorer.NewsSentimentScorer") as mock_nss,
+                patch.object(coord, "_step5b_stop_sentiment_scorer_sync", side_effect=_block),
+            ):
+                mock_nss._instance = MagicMock()
+                mock_nss._instance._worker_ready = True
+                task = asyncio.create_task(coord._step5b_stop_sentiment_scorer())
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        finally:
+            release.set()
+
+    @pytest.mark.asyncio
     async def test_step6_shutdown_pools_no_instance(self):
         coord = ShutdownCoordinator()
         with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
@@ -571,6 +675,7 @@ class TestShutdownCoordinatorDoCleanup:
             patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
             patch("data.data_processor.DataProcessor") as mock_dp,
             patch("services.local_model_manager.LocalModelManager") as mock_lmm,
+            patch("services.news_sentiment_scorer.NewsSentimentScorer") as mock_nss,
             patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
         ):
             mock_tm._instance = None
@@ -579,6 +684,7 @@ class TestShutdownCoordinatorDoCleanup:
             mock_mds._instance = None
             mock_dp._instance = None
             mock_lmm._instance = None
+            mock_nss._instance = None
             mock_tpm._instance = None
             await coord.do_cleanup(timeout_s=10.0, step_timeout_s=5.0)
             assert coord.cleanup_done is True
@@ -1042,13 +1148,14 @@ class TestRunCleanupStepsDeep:
         coord._step3_close_processor = step_ok
         coord._step4_clear_toast = step_ok
         coord._step5_unload_ai_model = step_ok
+        coord._step5b_stop_sentiment_scorer = step_ok
         coord._step6_shutdown_thread_pools = step_ok
         coord._step7_close_database_managers = step_ok
         coord._step8_stop_embedded_postgres = step_ok
 
         results = await coord._run_cleanup_steps(step_timeout_s=2.0)
-        # 9 个步骤全部执行
-        assert len(results) == 9
+        # 10 个步骤全部执行
+        assert len(results) == 10
         # Step 0 失败但其余执行
         assert results[0].ok is False
         assert results[0].critical is True
@@ -1056,7 +1163,7 @@ class TestRunCleanupStepsDeep:
             assert r.ok is True
         # 所有步骤都被调用（critical failure 不中断流程）
         assert "step0" in call_log
-        assert call_log.count("step_ok") == 8
+        assert call_log.count("step_ok") == 9
 
     @pytest.mark.asyncio
     async def test_cancelled_step_propagates_after_loop(self):
@@ -1096,6 +1203,7 @@ class TestRunCleanupStepsDeep:
         coord._step3_close_processor = step_ok
         coord._step4_clear_toast = step_ok
         coord._step5_unload_ai_model = step_ok
+        coord._step5b_stop_sentiment_scorer = step_ok
         coord._step6_shutdown_thread_pools = step_ok
         coord._step7_close_database_managers = step_ok
         coord._step8_stop_embedded_postgres = step_ok
@@ -1103,7 +1211,7 @@ class TestRunCleanupStepsDeep:
         # step_timeout_s=0.5 远小于各 step 的 default（1.0~35.0，Step 8=35.0）
         # M13: 更新注释 — Step 8 加入后 default 上限由 5.0 提升至 35.0
         results = await coord._run_cleanup_steps(step_timeout_s=0.5)
-        assert len(results) == 9
+        assert len(results) == 10
         # 全部成功（mock step 立即返回，不超时）
         for r in results:
             assert r.ok is True

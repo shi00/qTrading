@@ -22,11 +22,11 @@ import pytest
 from utils.shutdown import ShutdownCoordinator, _CLEANUP_STEPS
 
 
-def test_step8_in_cleanup_steps_at_index_8() -> None:
-    """_CLEANUP_STEPS[8] 应为 Step 8 定义。"""
-    assert len(_CLEANUP_STEPS) >= 9, f"_CLEANUP_STEPS 应至少 9 项，实际 {len(_CLEANUP_STEPS)}"
-    assert _CLEANUP_STEPS[8] == ("Step 8", "_step8_stop_embedded_postgres", True, 35.0), (
-        f"_CLEANUP_STEPS[8] 实际：{_CLEANUP_STEPS[8]}"
+def test_step8_in_cleanup_steps_at_index_9() -> None:
+    """_CLEANUP_STEPS[9] 应为 Step 8 定义（N3-3 插入 Step 5b 后 Step 8 位于 index 9）。"""
+    assert len(_CLEANUP_STEPS) >= 10, f"_CLEANUP_STEPS 应至少 10 项，实际 {len(_CLEANUP_STEPS)}"
+    assert _CLEANUP_STEPS[9] == ("Step 8", "_step8_stop_embedded_postgres", True, 35.0), (
+        f"_CLEANUP_STEPS[9] 实际：{_CLEANUP_STEPS[9]}"
     )
 
 
@@ -143,7 +143,7 @@ def test_step8_timeout_not_limited_by_min_logic() -> None:
     验证 utils/shutdown.py:250 effective_timeout = min(default_timeout, step_timeout_s)
     当 step_timeout_s=35.0 时，Step 8 默认 35.0 不被 min 钳制为更小值。
     """
-    step8_def = _CLEANUP_STEPS[8]
+    step8_def = _CLEANUP_STEPS[9]
     default_timeout = step8_def[3]
     assert default_timeout == 35.0, f"Step 8 default_timeout 应为 35.0，实际：{default_timeout}"
 
