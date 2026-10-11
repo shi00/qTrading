@@ -22,9 +22,9 @@ flet-mcp 是 Flet 0.86+ 官方提供的独立 PyPI 包（非 `flet` CLI 子命�
 ## 2. 何时使用 flet-mcp（触发条件）
 
 **强制使用**（违反即触犯 §1.10 红线）：
-- 使用任何不熟悉的 Flet API 前（如 `ft.use_dialog`、`ft.use_effect`、`use_viewmodel` 等 hooks）
-- 不确定某 API 在当前锁定版本（见 `pyproject.toml`）是否存在、签名是否变化
-- V0→V1 迁移时验证迁移目标 API 的当前签名
+- 使用任何不熟悉的 **Flet 原生 API** 前（如 `ft.use_state`、`ft.use_effect`、`ft.use_dialog`、`ft.use_ref` 等 `ft.*` 原生 hooks、控件或服务）
+- 不确定某 Flet 原生 API 在当前锁定版本（见 `pyproject.toml`）是否存在、签名是否变化
+- V0→V1 迁移时验证迁移目标 Flet 原生 API 的当前签名
 - 涉及 flet_charts / flet-desktop 等子包 API
 - 使用枚举值前验证成员是否存在（`enum_has_member`）
 
@@ -34,10 +34,18 @@ flet-mcp 是 Flet 0.86+ 官方提供的独立 PyPI 包（非 `flet` CLI 子命�
 - Flet 版本升级后批量核验高风险 API
 - 查找图标时用 `find_icon`（支持同义词，如 "user"→"account_circle"）
 
-**无需使用**：
+**无需使用（含禁止误路由项）**：
+- **项目自建 hook 与本地 UI 封装**（如 [`ui/hooks.py`](../../ui/hooks.py) 的 `use_viewmodel`，非 `flet` 原生符号）：**禁止**向官方 `flet-mcp` 查询，更**禁止**将官方 `get_api` 返回的 `"not found"` 当作删除或替换项目 API 的依据；应改查本地实现与项目契约（见下方分流表）
 - 已在 `v1-api-constraints.md` V0→V1 迁移表中明确记录的 API（已核验）
 - 已在 `api-verification-template.md` 历史核验记录中沉淀的 API
 - 纯业务逻辑代码（不涉及 Flet API 调用）
+
+**核验来源分流（Flet 原生符号 vs 项目自建符号）**：
+
+| 符号类别 | 判定特征与代表符号 | 唯一权威核验来源 | 明确禁止与边界说明 |
+|---------|-------------------|-----------------|-------------------|
+| **Flet 原生 API** | 位于 `flet`（`ft.*`）、`flet_charts`、`flet_desktop` 等官方包命名空间（如 `ft.use_state`、`ft.use_effect`、`ft.use_dialog`、`ft.use_ref`、`ft.Dropdown`） | 匹配版本的 `flet-mcp`（`get_api` / `get_enum` / `enum_has_member`）或 `pyproject.toml` 锁定版本 Flet 源码，并受 [`v1-api-constraints.md`](./v1-api-constraints.md) 项目契约约束 | 禁止凭记忆臆造签名；项目契约优先于官方默认用法（如 `ft.use_effect` 统一使用显式 `cleanup=` 参数而非 setup 返回值） |
+| **项目自建 hook / 封装** | 位于仓库本地模块（如 [`ui/hooks.py`](../../ui/hooks.py) 的 `use_viewmodel`，不在 `ft.*` 原生命名空间） | 本地实现（[`ui/hooks.py`](../../ui/hooks.py) 的 `use_viewmodel`）、MVVM 契约正本（[`docs/patterns/mvvm.md`](../patterns/mvvm.md)）、UI 约束（[`v1-api-constraints.md`](./v1-api-constraints.md)）及契约测试（[`tests/unit/ui/test_flet_0_86_v1_api_compat.py`](../../tests/unit/ui/test_flet_0_86_v1_api_compat.py) 的 `test_use_viewmodel_is_project_custom_not_flet_native` 与 `test_use_viewmodel_signature_factory_vm_dispose`） | **禁止**向官方 `flet-mcp` 查询项目自建符号，**禁止**将官方 `"not found"` 当作项目符号不存在或应删除的依据；但其内部调用的底层 Flet 原生 hooks（`ft.use_ref`、`ft.use_state`、`ft.use_effect`）仍按「Flet 原生 API」路由核验 |
 
 ## 3. 如何使用 flet-mcp
 
@@ -66,7 +74,7 @@ flet-mcp 是 Flet 0.86+ 官方提供的独立 PyPI 包（非 `flet` CLI 子命�
 
 | 工具 | 签名 | 用途 | 典型场景 |
 |------|------|------|---------|
-| `get_api` | `(name, member?, query?, format="text")` | 获取任意 Flet 符号 API 参考 | 不确定 `ft.use_dialog` 签名时；"not found" 在 api.json 完整收录前提下为否定 |
+| `get_api` | `(name, member?, query?, format="text")` | 获取任意 Flet 原生符号 API 参考 | 不确定 `ft.use_dialog` 签名时；"not found" 在 api.json 完整收录前提下仅对 Flet 原生符号为否定（项目自建 hook 如 `use_viewmodel` 不在此列，见 [§2](#2-何时使用-flet-mcp触发条件)） |
 | `list_controls` | `(category?, kind?, limit=50)` | 列出控件/服务 | 浏览可用控件 |
 | `get_enum` | `(name)` | 获取枚举定义 | 查看枚举全部成员（小枚举） |
 | `search_enum_members` | `(name, query, limit=10)` | 搜索枚举成员 | 在 Icons 大枚举中查找特定图标名 |
@@ -104,13 +112,13 @@ flet-mcp 是 Flet 0.86+ 官方提供的独立 PyPI 包（非 `flet` CLI 子命�
 
 ### 3.4 与项目契约的优先级
 
-flet-mcp 返回的是 **api.json 中版本特定的 Flet API 信息**（构建时快照，非运行时反射），项目契约（`v1-api-constraints.md` / `project-differences.md`）可能在此基础上进一步约束用法（如 `use_effect` 统一用显式 `cleanup=` 参数而非 setup 返回值）。**项目契约优先**，flet-mcp 用于验证 API 存在性与签名，不用于覆盖项目契约。
+flet-mcp 返回的是 **api.json 中版本特定的 Flet 官方 API 信息**（构建时快照，非运行时反射，仅覆盖 Flet 官方包符号；[`ui/hooks.py`](../../ui/hooks.py) 的 `use_viewmodel` 等项目自建 hook 不在 `api.json` 收录范围内，其核验来源分流见 [§2](#2-何时使用-flet-mcp触发条件)），项目契约（`v1-api-constraints.md` / `project-differences.md`）可能在此基础上进一步约束用法（如 `ft.use_effect` 统一用显式 `cleanup=` 参数而非 setup 返回值）。**项目契约优先**，flet-mcp 用于验证 Flet 原生 API 存在性与签名，不用于覆盖项目契约。
 
 **Flet API 核验主题内优先级**（主题正本，见 [CLAUDE.md](../../CLAUDE.md) §1「文档权威性（按主题正本）」）：
 1. CLAUDE.md 红线（§3）
-2. `v1-api-constraints.md` 项目契约
+2. `v1-api-constraints.md` 项目契约（及 [`docs/patterns/mvvm.md`](../patterns/mvvm.md) MVVM 桥接契约）
 3. `project-differences.md` 项目分叉
-4. flet-mcp 返回的官方行为
+4. flet-mcp 返回的官方行为（仅限 Flet 原生符号）
 
 ### 3.5 `get_api` 返回格式说明
 
@@ -136,7 +144,7 @@ flet-mcp 返回的是 **api.json 中版本特定的 Flet API 信息**（构建�
 | `python -c "from flet_mcp import mcp; mcp.run()"` 报 ModuleNotFoundError | venv 中未装 flet-mcp | 同上 |
 | AI 未自动加载 MCP server | IDE 的 MCP 配置未创建或路径/格式错误 | 按 §3.1 在所用 IDE 中手动创建 MCP 配置；重启 IDE；IDE 本地配置不入版本控制需手动维护 |
 | worktree 内 python.exe 不存在 | worktree 未与主工作区共享 venv | 在该 worktree 内 `pip install -e ".[dev]"`，或改用主工作区 venv 绝对路径 |
-| `get_api` 返回 "not found" | API 名错误，或当前版本已删除该 API，或 flet-mcp 与 flet 版本漂移 | 检查 API 名拼写；确认 flet-mcp 版本与 flet 主包对齐（见 §1 权威性边界）；若确认已删除，按 V0→V1 迁移表寻找替代 |
+| `get_api` 返回 "not found" | 误查项目自建符号（如 `use_viewmodel`），或 API 名错误，或当前版本已删除该 Flet 原生 API，或 flet-mcp 与 flet 版本漂移 | 先按 [§2 分流表](#2-何时使用-flet-mcp触发条件) 确认是否为项目自建 hook/封装（若是则改查本地实现 [`ui/hooks.py`](../../ui/hooks.py) 与项目契约，**严禁**将 `"not found"` 当作删除项目 API 的依据）；若确系 Flet 原生符号，检查拼写、确认 flet-mcp 与 flet 主包对齐（见 §1），确认已删除时按 V0→V1 迁移表寻找替代 |
 | flet-mcp 工具与 flet 版本不匹配 | flet-mcp 包版本与 flet 主包版本差距过大 | 项目用 `==` 锁定 flet-mcp 与 flet 主包同步升级（版本见 `pyproject.toml`）；升级 flet 时必须同步升级 flet-mcp |
 | flet 升级时 flet-mcp 无对应版本 | flet-mcp 滞后发布或停维 | 临时改用 flet-mcp 已有最高版本 + 在 `api-verification-template.md` 记录已知偏差；或暂缓 flet 升级并在 `docs/debt/known-technical-debt.md` 登记 |
 | Linux 环境下 `python.exe` 不存在 | 路径平台差异 | Linux 路径为 `venv/bin/python`，需按 OS 调整 MCP 配置 |
