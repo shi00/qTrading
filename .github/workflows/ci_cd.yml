@@ -1711,7 +1711,7 @@ jobs:
           foreach ($v in @("cpu", "embedded-cpu")) {
             $installerPath = "Output\AStockScreener-Setup-$v.exe"
             if (Test-Path $installerPath) {
-              Write-Host "ISCC smoke test passed for variant $v: $installerPath"
+              Write-Host "ISCC smoke test passed for variant ${v}: $installerPath"
             } else {
               Write-Error "ISCC smoke test failed: installer not found at $installerPath"
               exit 1
