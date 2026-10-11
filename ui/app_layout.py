@@ -390,7 +390,7 @@ def AppLayout() -> ft.Container:
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
     # SEC-03: 状态栏「本会话外发 N 次」指示器数据源 (会话计数变化自动重渲染)
-    egress_status_state = ft.use_state(get_egress_status_state)
+    egress_status_state, _ = ft.use_state(get_egress_status_state)
 
     # --- Phase 6.1 FR-UX-006: nav_tasks 运行中任务数角标 (TaskManager.subscribe 驱动) ---
     nav_badge_state, _ = use_viewmodel(factory=NavBadgeViewModel)

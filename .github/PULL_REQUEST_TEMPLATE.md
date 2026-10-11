@@ -23,19 +23,44 @@ Relates to #XXX
 - 文档：xxx.md，同步更新内容：
 - 数据库：alembic版本：xxx，变更说明：
 
-## 🧪 测试覆盖（必须全部勾选验证）
+## 🧪 测试覆盖（按适用范围勾选，不要求全部勾选）
+<!-- 填写规则（对齐 CONTRIBUTING.md「变更类型 → 最小验证子集」的按变更范围裁剪原则，适用于本模板全部勾选清单节）：
+① 适用且已验证：勾选 [x]，行内注明验证方式（本地命令或 CI job 名）；
+② 不适用：保持 [ ]，行内标注「N/A：<原因>」；
+③ 适用但未执行：保持 [ ]，行内标注「未执行：<原因>」并附补救计划或风险声明。
+禁止将不适用或未执行项勾选为通过；CI 实际触发条件以 .github/workflows/ci_cd.yml 为准。-->
 ### 自动化测试
 - [ ] 单元测试：新增/更新用例，覆盖率达标
 - [ ] 集成测试：DAO/Service层链路验证
 - [ ] E2E（`tests/e2e/`，Flet + pytest；本地可用 `run_e2e_local.py`）：UI流程验证，无超时/断言失败
 - [ ] 静态检查：ruff + pyright 无报错
-- [ ] CI流水线全部通过（lint / test / build / windows e2e）
+- [ ] CI 流水线（PR 触发 job：lint-fast / ci-checks / ci-checks-windows / e2e-tests-windows / embedded-tests / requirements-drift 全部通过；installer-smoke 仅 installer.iss 或 scripts/*installer* 变更时执行 ISCC；build-windows 仅在 tag 推送（`v*.*.*`）或手动触发时运行，PR 阶段不存在 build job）
 
 ### 手动验证
+<!-- 下列各项同样按三态规则填写：与本 PR 变更范围无关的项标「N/A：<原因>」，不删行，便于评审逐条核对 -->
 - [ ] 本地完整启动项目验证正向流程
 - [ ] 边界场景、异常分支、并发场景验证
 - [ ] 数据库迁移回滚验证（如有DDL变更）
-- [ ] UI变更附前后截图/GIF（无UI可删除本段）
+- [ ] UI变更附前后截图/GIF（无UI变更标 N/A）
+
+<!-- 四类填写实例（勾选组合与 .github/workflows/ci_cd.yml 实际 job 触发条件一致）：
+① 纯文档 PR（仅 docs/**、*.md 等 Markdown 类路径，均不在 pull_request paths 白名单 → 主 CI workflow 不触发，0 个 job 运行）：
+   单元测试 N/A（无 Python 变更；最小子集为 scripts/check_docs_consistency.py + tests/unit/test_docs_consistency.py，本地运行）
+   集成测试 / E2E / CI 流水线 N/A（主 CI 不触发；E2E 针对 UI 流程）· 静态检查 N/A（ruff/pyright 不覆盖 Markdown）
+   手动验证各项 N/A；自检清单中 ruff/pyright 行写「未执行：纯文档改动按最小验证子集不要求」
+② DAO PR（data/ DAO/模型，含 alembic 迁移；**.py 与 alembic/** 均在白名单 → 主 CI 全套触发）：
+   单元测试 [x]（CI ci-checks）· 集成测试 [x]（CI ci-checks「Run Integration Tests」）· E2E [x]（CI e2e-tests-windows）
+   静态检查 [x]（lint-fast + ci-checks Pyright）· CI 流水线 [x]（PR 触发 job 全绿；build 不适用于 PR 阶段）
+   手动验证：数据库迁移回滚 [x]（CI「Verify Alembic Migrations」含 downgrade base → upgrade head 回归；本地 alembic upgrade head + alembic check）；本地完整启动/边界场景按影响面；UI 截图 N/A
+③ UI PR（ui/ 模块；**.py 在白名单 → 主 CI 全套触发）：
+   单元测试 [x]（tests/unit/ui/）· 集成测试 N/A（无 DAO/Service 链路变更；CI ci-checks 中集成测试照常执行并作为门禁，非本 PR 验证目标）
+   E2E [x]（CI e2e-tests-windows，UI 流程为其核心验证目标）· 静态检查 [x] · CI 流水线 [x]（build 不适用于 PR 阶段）
+   手动验证：本地完整启动 [x]（正向流程）· UI 前后截图 [x] · 迁移回滚 N/A（无 DDL 变更）
+④ 普通代码 PR（strategies/services 等 .py；**.py 在白名单 → 主 CI 全套触发）：
+   单元测试 [x]（对应策略/服务用例）· 集成测试 N/A（未触及 DAO/Service 持久层；若触及改按②组合填写）· E2E [x]（CI e2e-tests-windows，PR 门禁必跑）
+   静态检查 [x] · CI 流水线 [x]（build 不适用于 PR 阶段）
+   手动验证：边界场景 [x]（单测覆盖）；本地完整启动/迁移回滚/UI 截图按影响面标 N/A
+混合改动（文档 + 代码）按代码侧适用组合填写；任何「适用但未执行」的项写「未执行：<原因>」，不勾选。-->
 
 ## ⚠️ 风险与兼容说明
 1. 是否存在**破坏性变更**（旧接口/旧数据不兼容）：
@@ -52,6 +77,7 @@ Relates to #XXX
 - [ ] CHANGELOG.md 由release-please自动生成，无手动修改
 
 ## ✅ 提交前自检清单（强制全部核对）
+<!-- 「核对」= 逐条表态，同「测试覆盖」节三态规则：适用且已达成勾选 [x]；不适用行内标注「N/A：<原因>」；未达成写「未执行：<原因>」；禁止空置不表态 -->
 - [ ] 代码符合 [CLAUDE.md 架构红线 R1-R24](../CLAUDE.md#31--绝对禁止)、分层规范、单例约束
 - [ ] 无硬编码密钥、数据库密码、Token、隐私信息
 - [ ] 无废弃死代码、注释掉的临时调试代码

@@ -175,14 +175,28 @@ async def test_language_switch_applies_to_unvisited_page(full_mount_page):
     lang_zh = I18n.get("settings_lang_zh")
     await full_mount_page.expect_text(lang_label, timeout_ms=10000)
 
+    nav = NavPage(full_mount_page)
     try:
         await sp.select_language(lang_en, timeout_ms=10000)
         # 同步测试进程 I18n（对齐 test_settings_language_switch 既有模式）
         I18n.set_locale("en_US")
 
+        # 先等待当前页及导航栏英文重渲染落地（_do_language_change 含异步配置持久化 +
+        # full-mount 7 视图全量重渲染，期间 AppLayout 会重建 NavigationRail 实例；
+        # 若不等重渲染完成就立即点击 nav_data，事件会发往即将卸载的旧 NavigationRail ID 而被丢弃。
+        # 注意：不能用 "Screener" 或 "Language"，因为中文界面下也存在 "AStockScreener" 路径和
+        # "e2e.settings.language_dropdown" 标识符，case-insensitive 匹配会立即误命中）
+        nav_data_en = I18n.get("nav_data")  # "Data Center"
+        for _ in range(50):  # 50 * 200ms = 10s
+            if await full_mount_page.has_text(nav_data_en):
+                break
+            await full_mount_page.page.wait_for_timeout(200)
+        else:
+            pytest.fail(f"导航栏 {nav_data_en!r} 在 10000ms 内未出现（语言切换重渲染未完成）")
+        await full_mount_page.expect_text(I18n.get("settings_theme"), timeout_ms=TIMEOUTS.TITLE)
+
         # 未访问页（data）直接以英文渲染（has_text 轮询，避开 strict mode 多节点）
         data_explorer_en = I18n.get("data_tab_explorer")
-        nav = NavPage(full_mount_page)
         await nav.goto("nav_data")
         for _ in range(50):  # 50 * 200ms = 10s
             if await full_mount_page.has_text(data_explorer_en):
@@ -193,11 +207,12 @@ async def test_language_switch_applies_to_unvisited_page(full_mount_page):
 
         # 切回设置页：仍在 system 子页且 locale 保持英文
         await nav.goto("nav_settings")
-        await full_mount_page.expect_text(I18n.get("settings_language"), timeout_ms=TIMEOUTS.TITLE)
+        await full_mount_page.expect_text(I18n.get("settings_theme"), timeout_ms=TIMEOUTS.TITLE)
     finally:
         # 还原 flet_app 内存 I18n locale（pristine_config 不覆盖本池，测试自治还原）
         I18n.set_locale("zh")
         try:
+            await nav.goto("nav_settings")
             await sp.select_language(lang_zh, timeout_ms=10000)
             nav_settings_zh = I18n.get("nav_settings", locale="zh_CN")
             for _ in range(25):
