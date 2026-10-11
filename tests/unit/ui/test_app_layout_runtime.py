@@ -1077,3 +1077,23 @@ class TestStatusBarLayout:
         status_bar = _get_status_bar(env)
         assert status_bar.top is None and status_bar.left is None
         assert status_bar.right is None and status_bar.bottom is None
+
+    def test_status_bar_renders_integer_egress_count(self, app_layout_env) -> None:
+        """SEC-03 回归守护: ft.use_state(get_egress_status_state) 必须解包 (state, _),
+        状态栏文本须渲染整数 count 而非 tuple.count built-in method。"""
+        from ui.egress_status_state import notify_egress_count
+
+        env = app_layout_env
+        env["mock_i18n"].get.side_effect = lambda key, *a, **kw: (
+            "本会话外发 {count} 次" if key == "egress_session_indicator" else key
+        )
+        notify_egress_count(7)
+        _rerender(env)
+
+        status_bar = _get_status_bar(env)
+        row = status_bar.content
+        assert isinstance(row, ft.Row)
+        text_ctrl = row.controls[1]
+        assert isinstance(text_ctrl, ft.Text)
+        assert text_ctrl.value == "本会话外发 7 次"
+        assert "built-in method" not in (text_ctrl.value or "")
