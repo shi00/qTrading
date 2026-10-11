@@ -11,6 +11,7 @@ from data.external.tushare_client import TushareClient  # noqa: F401
 from data.persistence.metadata_manager import MetaDataManager  # noqa: F401
 from services.ai_service import AIService  # noqa: F401 (side-effect 注册)
 from services.local_model_manager import LocalModelManager
+from services.news_sentiment_scorer import NewsSentimentScorer  # noqa: F401
 from services.news_subscription_service import NewsSubscriptionService
 from services.task_manager import TaskManager, AppTask, TaskStatus
 from strategies.all_strategies import StrategyManager  # noqa: F401
