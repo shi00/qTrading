@@ -170,3 +170,60 @@ def loaded_modules(stdout: str) -> list[str]:
             text = line[len("loaded=") :].strip()
             return ast.literal_eval(text)
     return ["<无法解析子进程输出>"]
+
+
+def test_config_frozen_uses_meipass_for_resource_root_and_tiktoken_cache(tmp_path: Path) -> None:
+    """B02: PyInstaller 6+ onedir 模式下 sys.frozen=True 且 sys._MEIPASS 指向 _internal，
+    config.RESOURCE_ROOT 应优先解析为 sys._MEIPASS，并正确注入 TIKTOKEN_CACHE_DIR。
+    """
+    tiktoken_dir = tmp_path / "data" / "tiktoken_cache"
+    tiktoken_dir.mkdir(parents=True, exist_ok=True)
+    code = (
+        "import os, sys\n"
+        "os.environ.pop('TIKTOKEN_CACHE_DIR', None)\n"
+        "os.environ.pop('CUSTOM_TIKTOKEN_CACHE_DIR', None)\n"
+        "sys.frozen = True\n"
+        f"sys._MEIPASS = {str(tmp_path)!r}\n"
+        "import config\n"
+        "print('RESOURCE_ROOT=' + config.RESOURCE_ROOT)\n"
+        "print('TIKTOKEN=' + os.environ.get('TIKTOKEN_CACHE_DIR', ''))\n"
+        "print('CUSTOM_TIKTOKEN=' + os.environ.get('CUSTOM_TIKTOKEN_CACHE_DIR', ''))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_subprocess_env(),
+        cwd=str(_REPO_ROOT),
+    )
+    assert result.returncode == 0, f"子进程失败: {result.stderr or result.stdout}"
+    lines = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    assert lines.get("RESOURCE_ROOT") == str(tmp_path), (
+        f"frozen 模式下 RESOURCE_ROOT 应等于 sys._MEIPASS ({tmp_path})，实际: {lines.get('RESOURCE_ROOT')}"
+    )
+    assert lines.get("TIKTOKEN") == str(tiktoken_dir), (
+        f"TIKTOKEN_CACHE_DIR 应指向 _MEIPASS/data/tiktoken_cache，实际: {lines.get('TIKTOKEN')}"
+    )
+    assert lines.get("CUSTOM_TIKTOKEN") == str(tiktoken_dir), (
+        f"CUSTOM_TIKTOKEN_CACHE_DIR 应指向 _MEIPASS/data/tiktoken_cache，实际: {lines.get('CUSTOM_TIKTOKEN')}"
+    )
+
+
+def test_main_smoke_test_flag_exits_zero() -> None:
+    """B04: python main.py --smoke-test 应完成核心包与静态资源自检、输出特征字符串并以退出码 0 退出。"""
+    result = subprocess.run(
+        [sys.executable, "main.py", "--smoke-test"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_subprocess_env(),
+        cwd=str(_REPO_ROOT),
+        timeout=30,
+    )
+    assert result.returncode == 0, f"--smoke-test 退出码应为 0，实际: {result.returncode}\nstderr: {result.stderr}"
+    assert "AStockScreener smoke check OK" in result.stdout, (
+        f"--smoke-test 应输出 'AStockScreener smoke check OK'，实际 stdout: {result.stdout}"
+    )

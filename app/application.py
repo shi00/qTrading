@@ -532,8 +532,10 @@ async def run(page: ft.Page):
     I18n.initialize(ConfigHandler.get_locale())
     page.locale_configuration = build_locale_configuration(I18n.current_locale())
     page.title = I18n.get("app_title")
-    icon_ico_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "hope.ico"))  # noqa: ASYNC240  # 低危纯路径字符串计算，无文件 IO 阻塞
-    icon_png_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icon.png"))  # noqa: ASYNC240  # 低危纯路径字符串计算
+    import config as _app_config
+
+    icon_ico_path = os.path.abspath(os.path.join(_app_config.RESOURCE_ROOT, "assets", "hope.ico"))  # noqa: ASYNC240  # 低危纯路径字符串计算，无文件 IO 阻塞
+    icon_png_path = os.path.abspath(os.path.join(_app_config.RESOURCE_ROOT, "assets", "icon.png"))  # noqa: ASYNC240  # 低危纯路径字符串计算
     page.window.icon = icon_ico_path if os.path.exists(icon_ico_path) else icon_png_path  # noqa: ASYNC240  # 启动期一次性 exists 探测（~µs 级），不阻塞交互
 
     is_web_mode = os.environ.get("FLET_FORCE_WEB_SERVER", "").lower() in ("true", "1", "yes")

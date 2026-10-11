@@ -49,14 +49,10 @@ if (-not (Test-Path $InstallerPath)) {
     exit 1
 }
 
-# 仅 embedded variant 有 InitializeSetup 前置检测
-# 通过 installer 文件名判断 variant
-if ($InstallerPath -notmatch "embedded") {
-    Write-Fail "This smoke test only applies to embedded variant installer"
-    Write-Host "  Expected: path contains 'embedded'"
-    Write-Host "  Got: $InstallerPath"
-    exit 1
-}
+# B06/B11: 所有 4 个变体（cpu/cuda/embedded-cpu/embedded-cuda）均启用 InitializeSetup 主进程运行拦截；
+# Step 6~8 的 sidecar 进程拦截仅在存在 _internal\sidecars\qtrading-pg-sidecar.exe（embedded 变体）时执行。
+Write-Host "Variant check: testing InitializeSetup running-app rejection (sidecar check auto-runs if bundled)"
+
 
 try {
     # STEP 1: 清理环境
@@ -73,8 +69,9 @@ try {
     Write-Ok "Environment cleaned"
 
     # STEP 2: 先安装一次（确保有 EXE 可启动）
-    Write-Step "2. Install embedded variant (initial install)"
+    Write-Step "2. Install application (initial install)"
     & $InstallerPath /SILENT /NORESTART
+
     Start-Sleep -Seconds 5
     Assert-True (Test-Path $AppExePath) "App installed: $AppExePath"
 

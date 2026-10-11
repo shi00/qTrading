@@ -7,9 +7,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import contextlib
 import os
+from pathlib import Path
 import re
+from typing import Any
 
 from utils import config_handler as cfg
 from utils.sanitizers import DataSanitizer
@@ -54,24 +57,76 @@ def with_db_url_override(url: str):
         cfg.ConfigHandler._db_url_override.reset(token)
 
 
+def is_frozen_standard_variant_without_sidecar(raw_config: Mapping[str, Any] | object | None = None) -> bool:
+    """判定当前是否为不含内置 PostgreSQL sidecar 二进制的标准版打包发行物（B01 / MAJOR-1 / MAJOR-2）。
+
+    触发自动降级为 external 模式的条件（缺一不可）：
+    1. ``sys.frozen`` 为 ``True``（PyInstaller 打包运行态）；
+    2. 环境变量 ``QTRADING_DATABASE_MODE`` 未显式设为 ``embedded``（用户未强制要求内置库）；
+    3. ``embedded_pg_sidecar_path`` 与 ``embedded_pg_data_root`` 未配置自定义路径；
+    4. ``sys._MEIPASS`` 存在，且默认 ``_MEIPASS/sidecars/qtrading-pg-sidecar[.exe]`` 二进制不存在；
+    5. 安装目录下不存在 ``resources/maintenance``（区分标准版 cpu/cuda 安装包与 sidecar 被误删的 embedded-* 安装包）。
+    """
+    import sys
+
+    if not getattr(sys, "frozen", False):
+        return False
+    explicit_mode = os.environ.get("QTRADING_DATABASE_MODE", "").strip().lower()
+    if explicit_mode == "embedded":
+        return False
+
+    sidecar_cfg = ""
+    data_root_cfg = ""
+    if raw_config is not None:
+        if isinstance(raw_config, Mapping):
+            sidecar_cfg = str(raw_config.get("embedded_pg_sidecar_path") or "")
+            data_root_cfg = str(raw_config.get("embedded_pg_data_root") or "")
+        else:
+            sidecar_cfg = str(getattr(raw_config, "embedded_pg_sidecar_path", "") or "")
+            data_root_cfg = str(getattr(raw_config, "embedded_pg_data_root", "") or "")
+    if sidecar_cfg or data_root_cfg:
+        return False
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return False
+    meipass_path = Path(meipass)
+    exe_suffix = ".exe" if os.name == "nt" else ""
+    sidecar_path = meipass_path / "sidecars" / f"qtrading-pg-sidecar{exe_suffix}"
+    if sidecar_path.exists():
+        return False
+
+    # MAJOR-2 守卫：installer.iss 仅对 embedded-cpu / embedded-cuda 变体安装 {app}/resources/maintenance，
+    # 若该目录存在说明原本是 embedded 变体但 sidecar 二进制丢失/被杀软隔离，禁止静默降级
+    return not (
+        (meipass_path.parent / "resources" / "maintenance").is_dir()
+        or (meipass_path / "resources" / "maintenance").is_dir()
+    )
+
+
 def is_embedded_mode() -> bool:
     """判断是否为 embedded PostgreSQL 模式（R-B1 单一入口点）。
 
-    判定条件：QTRADING_DATABASE_MODE == "embedded" AND AppConfig.embedded_pg_enabled == True。
+    判定条件：
+    1. QTRADING_DATABASE_MODE == "embedded" AND AppConfig.embedded_pg_enabled == True
+    2. 非“无 bundled sidecar 的标准版 PyInstaller 发行包”（B01）
     `.get()` default True 与 AppConfig.embedded_pg_enabled field default 保持一致。
     """
     mode = os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower()
     if mode != "embedded":
         return False
     try:
-        return bool(cfg.ConfigHandler.load_config().get("embedded_pg_enabled", True))
+        raw_cfg = cfg.ConfigHandler.load_config()
     except Exception as e:
         cfg.logger.warning(
             "[ConfigHandler] is_embedded_mode load_config failed: %s",
             DataSanitizer.sanitize_error(e),
         )
         # 与 QTRADING_DATABASE_MODE 默认 "embedded" 保持一致
-        return True
+        return not is_frozen_standard_variant_without_sidecar(None)
+    if not bool(raw_cfg.get("embedded_pg_enabled", True)):
+        return False
+    return not is_frozen_standard_variant_without_sidecar(raw_cfg)
 
 
 def get_db_url():

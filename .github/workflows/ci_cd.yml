@@ -1344,12 +1344,25 @@ jobs:
       - name: Install dependencies
         shell: pwsh
         run: |
-          # 所有变体（cpu / cuda / embedded-cpu / embedded-cuda）都安装对应后端的
-          # llama-cpp-python（CPU/CUDA 原生库在构建期绑定；embedded-* 额外内置侧车数据库）。
-          uv pip install --system llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
+          $ErrorActionPreference = "Stop"
+          # B03: 先安装 requirements.txt 与 requirements-optional.txt，再用 --reinstall-package
+          # 从对应后端源覆盖安装 llama-cpp-python，防止 requirements.txt 中的版本约束触发默认 PyPI CPU 轮子覆盖 CUDA 轮子。
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt
-          pip install pyinstaller
+          uv pip install --system --reinstall-package llama-cpp-python --no-deps -c requirements-optional.txt llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
+          uv pip install --system pyinstaller==6.19.0
+
+
+      - name: Verify llama-cpp-python CUDA backend DLLs (CUDA variants only)
+        if: contains(matrix.variant, 'cuda')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -c "import pathlib, sys, llama_cpp; lib_dir = pathlib.Path(llama_cpp.__file__).resolve().parent / 'lib'; cuda_dlls = list(lib_dir.glob('*cuda*.dll')); print('Found CUDA DLLs:', [p.name for p in cuda_dlls]); sys.exit(0 if cuda_dlls else 1)"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "B03: No CUDA backend DLL (*cuda*.dll) found in llama_cpp/lib for variant ${{ matrix.variant }}!"
+            exit 1
+          }
 
       - name: Download sidecar binary (embedded variants only, Phase 5)
         if: matrix.embedded == 'true'
@@ -1418,61 +1431,55 @@ jobs:
             exit 1
           }
 
-      - name: Install UPX
-        run: choco install upx -y
-
       - name: Build EXE with PyInstaller
         run: pyinstaller AStockScreener.spec
 
-      - name: "Smoke Test - Run EXE (standard variants: --help)"
-        if: matrix.embedded != 'true'
+      - name: "Smoke Test - Run EXE (--smoke-test)"
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $exePath = "dist\AStockScreener\AStockScreener.exe"
-          if (Test-Path $exePath) {
-            Write-Host "Running smoke test on built EXE (--help)..."
-            $proc = Start-Process -FilePath $exePath -ArgumentList "--help" -NoNewWindow -PassThru -RedirectStandardOutput "smoke-out.txt" -RedirectStandardError "smoke-err.txt"
-            # 轮询等待进程退出或超时（最长 30 秒，每 500ms 检查）
-            $timeout = 30
-            $elapsed = 0
-            while (-not $proc.HasExited -and $elapsed -lt $timeout) {
-              Start-Sleep -Milliseconds 500
-              $elapsed += 0.5
-            }
-            if (-not $proc.HasExited) {
-              Write-Host "EXE started successfully (process still running after ${timeout}s timeout)"
-              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            } else {
-              $exitCode = $proc.ExitCode
-              if ($exitCode -ne 0) {
-                Write-Error "EXE exited with non-zero code: $exitCode"
-                if (Test-Path "smoke-err.txt") {
-                  $errOutput = Get-Content "smoke-err.txt" -Raw
-                  if ($errOutput.Length -gt 0) {
-                    Write-Host "=== STDERR ==="
-                    Write-Host $errOutput.Substring(0, [Math]::Min(2000, $errOutput.Length))
-                  }
-                }
-                exit 1
-              }
-            }
-            # 校验 --help 输出包含预期关键字
-            if (Test-Path "smoke-out.txt") {
-              $output = Get-Content "smoke-out.txt" -Raw
-              if ($output -match "AStockScreener|usage") {
-                Write-Host "Smoke test passed: --help output contains expected keyword"
-              } else {
-                Write-Error "Smoke test failed: --help output does not contain expected keyword (AStockScreener|usage)"
-                exit 1
-              }
-              if ($output.Length -gt 0) {
-                Write-Host "=== STDOUT Preview ==="
-                Write-Host $output.Substring(0, [Math]::Min(500, $output.Length))
-              }
-            }
-            Write-Host "Smoke test completed successfully."
-          } else {
+          if (-not (Test-Path $exePath)) {
             Write-Error "EXE not found at $exePath"
+            exit 1
+          }
+          Write-Host "Running smoke test on built EXE (--smoke-test)..."
+          $smokeOutFile = Join-Path (Get-Location) "smoke-out.txt"
+          if (Test-Path $smokeOutFile) { Remove-Item $smokeOutFile -Force }
+          $env:QTRADING_SMOKE_OUTPUT_FILE = $smokeOutFile
+          $proc = Start-Process -FilePath $exePath -ArgumentList "--smoke-test" -PassThru -RedirectStandardError "smoke-err.txt"
+          $timeout = 30
+          $elapsed = 0
+          while (-not $proc.HasExited -and $elapsed -lt $timeout) {
+            Start-Sleep -Milliseconds 500
+            $elapsed += 0.5
+          }
+          if (-not $proc.HasExited) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            Write-Error "B04: EXE --smoke-test timed out after ${timeout}s (did not exit cleanly)"
+            exit 1
+          }
+          $exitCode = $proc.ExitCode
+          if ($exitCode -ne 0) {
+            Write-Error "EXE --smoke-test exited with non-zero code: $exitCode"
+            if (Test-Path "smoke-err.txt") {
+              $errOutput = Get-Content "smoke-err.txt" -Raw
+              if ($errOutput -and $errOutput.Length -gt 0) {
+                Write-Host "=== STDERR ==="
+                Write-Host $errOutput.Substring(0, [Math]::Min(2000, $errOutput.Length))
+              }
+            }
+            exit 1
+          }
+          if (-not (Test-Path $smokeOutFile)) {
+            Write-Error "Smoke test failed: expected output file $smokeOutFile was not created"
+            exit 1
+          }
+          $output = Get-Content $smokeOutFile -Raw
+          if ($output -match "AStockScreener smoke check OK") {
+            Write-Host "Smoke test passed: $output"
+          } else {
+            Write-Error "Smoke test failed: output does not contain 'AStockScreener smoke check OK' (got: $output)"
             exit 1
           }
 
@@ -1686,27 +1693,31 @@ jobs:
           # installer.iss [Files] 段引用 dist\AStockScreener\* (主程序产物)
           # PR smoke 阶段不跑 PyInstaller (耗时长)，创建最小 stub 让 ISCC 能扫描通过
           # 验证 installer.iss 语法正确性，不生成有效 release artifact
-          New-Item -ItemType Directory -Force -Path "dist\AStockScreener" | Out-Null
+          New-Item -ItemType Directory -Force -Path "dist\AStockScreener\_internal\sidecars" | Out-Null
           New-Item -ItemType File -Force -Path "dist\AStockScreener\AStockScreener.exe" | Out-Null
-          Write-Host "Stub layout created for ISCC compile (TargetVariant=cpu)"
+          New-Item -ItemType File -Force -Path "dist\AStockScreener\_internal\sidecars\qtrading-pg-sidecar.exe" | Out-Null
+          Write-Host "Stub layout created for ISCC compile (TargetVariant=cpu and embedded-cpu)"
 
       - name: Compile Installer with Inno Setup (smoke)
         if: steps.detect.outputs.skip == 'false'
         shell: cmd
         run: |
-          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss /DMyAppVersion=0.0.0-smoke /DTargetVariant=cpu
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss /DMyAppVersion=0.0.0-smoke /DTargetVariant=cpu && "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss /DMyAppVersion=0.0.0-smoke /DTargetVariant=embedded-cpu
 
       - name: Verify Installer Compiled
         if: steps.detect.outputs.skip == 'false'
         shell: pwsh
         run: |
-          $installerPath = "Output\AStockScreener-Setup-cpu.exe"
-          if (Test-Path $installerPath) {
-            Write-Host "ISCC smoke test passed: installer.iss compiled successfully"
-          } else {
-            Write-Error "ISCC smoke test failed: installer not found at $installerPath"
-            exit 1
+          foreach ($v in @("cpu", "embedded-cpu")) {
+            $installerPath = "Output\AStockScreener-Setup-$v.exe"
+            if (Test-Path $installerPath) {
+              Write-Host "ISCC smoke test passed for variant ${v}: $installerPath"
+            } else {
+              Write-Error "ISCC smoke test failed: installer not found at $installerPath"
+              exit 1
+            }
           }
+
 
   flaky-detection:
     name: Flaky Test Detection (advisory)

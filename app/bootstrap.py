@@ -456,6 +456,18 @@ def mask_sensitive(value):
     return DataSanitizer.sanitize_token(value)
 
 
+def _is_frozen_standard_variant_without_sidecar(config: AppConfig) -> bool:
+    """判定当前是否为不含内置 PostgreSQL sidecar 二进制的标准版打包发行物（B01）。
+
+    委托 ``utils.config.db.is_frozen_standard_variant_without_sidecar`` 单一判定源（R-B1），
+    确保 ``prepare_database_runtime``、``detect_embedded_pg_startup_scenario`` 与
+    ``ConfigHandler.is_embedded_mode()`` 行为完全一致。
+    """
+    from utils.config.db import is_frozen_standard_variant_without_sidecar
+
+    return is_frozen_standard_variant_without_sidecar(config)
+
+
 async def prepare_database_runtime() -> str | None:
     """根据数据库模式准备运行时（Phase 2 §3.4）。
 
@@ -501,6 +513,13 @@ async def prepare_database_runtime() -> str | None:
     config = AppConfig.model_validate(ConfigHandler.load_config())
     if not config.embedded_pg_enabled:
         logger.warning("[Bootstrap] QTRADING_DATABASE_MODE=embedded but embedded_pg_enabled=False; skip")
+        return None
+
+    if _is_frozen_standard_variant_without_sidecar(config):
+        logger.info(
+            "[Bootstrap] Standard frozen build without bundled sidecar binary detected; "
+            "falling back to external database mode"
+        )
         return None
 
     # R-Arch-2/Ske-1：embedded 模式下若 DATABASE_URL 环境变量被外部误设，
@@ -600,6 +619,9 @@ def detect_embedded_pg_startup_scenario(config: AppConfig) -> EmbeddedPgStartupS
         return None
     if not config.embedded_pg_enabled:
         logger.debug("[Bootstrap] detect skipped: embedded_pg_enabled=False")
+        return None
+    if _is_frozen_standard_variant_without_sidecar(config):
+        logger.debug("[Bootstrap] detect skipped: standard frozen build without bundled sidecar")
         return None
 
     from data.persistence.embedded_postgres.service import EmbeddedPostgresService

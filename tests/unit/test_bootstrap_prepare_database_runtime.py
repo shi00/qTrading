@@ -770,3 +770,186 @@ def test_cleanup_embedded_pg_url_file_handles_oserror(monkeypatch, tmp_path: Pat
 
     # 不应抛异常
     _cleanup_embedded_pg_url_file(url_file)
+
+
+# --- B01: 标准版安装包（frozen 且不含 sidecar 二进制）自动降级为 external 模式测试 ---
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_database_runtime_frozen_without_sidecar_falls_back_to_external(
+    monkeypatch, tmp_path: Path, caplog
+) -> None:
+    """B01: sys.frozen=True + QTRADING_DATABASE_MODE 未显式设置 + 默认 sidecar 二进制缺失 → 自动降级返回 None。
+
+    标准版安装包（cpu/cuda）在 installer.iss 中排除了 _internal/sidecars/，首次启动不应
+    因找不到 sidecar 抛 EmbeddedPostgresStartError 进入 PreInitErrorView 死循环，
+    而应自动降级返回 None（进入外置 PostgreSQL Onboarding 向导），且不持久化修改 config。
+    """
+    import logging
+    import sys
+
+    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    from app.bootstrap import prepare_database_runtime
+
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.load_config",
+        staticmethod(lambda: _make_config_dict(embedded_pg_enabled=True, embedded_pg_sidecar_path="")),
+    )
+
+    from_config_calls: list[int] = []
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: from_config_calls.append(1) or MagicMock()),
+    )
+
+    save_db_config_calls: list[dict] = []
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.save_db_config",
+        staticmethod(lambda **kwargs: save_db_config_calls.append(kwargs) or True),
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.bootstrap"):
+        result = await prepare_database_runtime()
+
+    assert result is None, f"标准版 frozen 包无 sidecar 时应降级返回 None，实际: {result}"
+    assert from_config_calls == [], f"无 sidecar 降级路径不应调用 from_config，实际: {from_config_calls}"
+    assert save_db_config_calls == [], f"不应修改持久化配置，实际: {save_db_config_calls}"
+    assert any("falling back to external" in r.message for r in caplog.records), (
+        f"期望日志记录自动降级 external 模式提示，实际: {[r.message for r in caplog.records]}"
+    )
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_database_runtime_frozen_without_sidecar_raises_when_mode_explicitly_embedded(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """B01 边界：sys.frozen=True 且用户显式设置 QTRADING_DATABASE_MODE=embedded → 不静默降级，仍走 embedded 路径报错。"""
+    import sys
+
+    monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    from app.bootstrap import prepare_database_runtime
+    from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.load_config",
+        staticmethod(lambda: _make_config_dict(embedded_pg_enabled=True, embedded_pg_sidecar_path="")),
+    )
+
+    mock_service = MagicMock()
+    mock_service.start = AsyncMock(side_effect=EmbeddedPostgresStartError("sidecar binary not found"))
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: mock_service),
+    )
+
+    with pytest.raises(EmbeddedPostgresStartError, match="sidecar binary not found"):
+        await prepare_database_runtime()
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_database_runtime_frozen_with_sidecar_starts_service(monkeypatch, tmp_path: Path) -> None:
+    """B01 对照：sys.frozen=True 且 _MEIPASS/sidecars/qtrading-pg-sidecar[.exe] 存在 → 正常启动 sidecar 并返回 URL。"""
+    import os
+    import sys
+
+    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    exe_suffix = ".exe" if os.name == "nt" else ""
+    sidecar_dir = tmp_path / "sidecars"
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    (sidecar_dir / f"qtrading-pg-sidecar{exe_suffix}").write_bytes(b"fake-binary")
+
+    from app.bootstrap import prepare_database_runtime
+    from data.persistence.embedded_postgres.protocol import ConnectionInfo
+
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.load_config",
+        staticmethod(lambda: _make_config_dict(embedded_pg_enabled=True, embedded_pg_sidecar_path="")),
+    )
+
+    fake_url = "postgresql+asyncpg://qtrading:mock_password_55432@127.0.0.1:55432/qtrading"
+    fake_info = ConnectionInfo(
+        url=fake_url,
+        port=55432,
+        pid=12345,
+        data_dir="/fake/pgdata",
+    )
+    mock_service = MagicMock()
+    mock_service.start = AsyncMock(return_value=fake_info)
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: mock_service),
+    )
+
+    result = await prepare_database_runtime()
+
+    assert result == fake_url
+
+
+def test_detect_scenario_frozen_without_sidecar_returns_none(monkeypatch, tmp_path: Path) -> None:
+    """B01: detect_embedded_pg_startup_scenario 在标准版 frozen 包（无 sidecar）下返回 None，不渲染 embedded LoadingView。"""
+    import sys
+
+    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    from app.bootstrap import detect_embedded_pg_startup_scenario
+    from utils.config_models import AppConfig
+
+    config = AppConfig.model_validate(_make_config_dict(embedded_pg_enabled=True, embedded_pg_sidecar_path=""))
+
+    from_config_calls: list[int] = []
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: from_config_calls.append(1) or MagicMock()),
+    )
+
+    result = detect_embedded_pg_startup_scenario(config)
+
+    assert result is None, f"标准版 frozen 包无 sidecar 时 detect 应返回 None，实际: {result}"
+    assert from_config_calls == [], f"无 sidecar 时 detect 不应调用 from_config，实际: {from_config_calls}"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_database_runtime_frozen_without_sidecar_raises_when_maintenance_dir_exists(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """B01/MAJOR-2: 若安装目录下存在 resources/maintenance（embedded-* 变体特征），
+    即使 _MEIPASS/sidecars/qtrading-pg-sidecar[.exe] 缺失（如被杀毒软件隔离），
+    也绝不可静默降级为 external，必须继续走 embedded 路径抛出 EmbeddedPostgresStartError。
+    """
+    import sys
+
+    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    meipass = tmp_path / "app" / "_internal"
+    meipass.mkdir(parents=True)
+    (tmp_path / "app" / "resources" / "maintenance").mkdir(parents=True)
+    monkeypatch.setattr(sys, "_MEIPASS", str(meipass), raising=False)
+
+    from app.bootstrap import prepare_database_runtime
+    from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.load_config",
+        staticmethod(lambda: _make_config_dict(embedded_pg_enabled=True, embedded_pg_sidecar_path="")),
+    )
+
+    mock_service = MagicMock()
+    mock_service.start = AsyncMock(side_effect=EmbeddedPostgresStartError("sidecar binary not found"))
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: mock_service),
+    )
+
+    with pytest.raises(EmbeddedPostgresStartError, match="sidecar binary not found"):
+        await prepare_database_runtime()

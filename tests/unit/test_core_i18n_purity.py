@@ -77,3 +77,33 @@ def test_core_i18n_initialize_triggers_listeners():
     assert "_listeners" in func_src, "initialize() 函数体内必须触发 _listeners (A1 fix)"
     # 进一步检查有 for 循环迭代 _listeners
     assert "for" in func_src and "_listeners" in func_src, "initialize() 必须有 for listener in _listeners 迭代逻辑"
+
+
+def test_core_i18n_get_locales_dir_uses_meipass_when_frozen(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path):
+    """B09: sys.frozen=True 且 sys._MEIPASS 存在时，I18n._get_locales_dir() 应解析为 _MEIPASS/locales。"""
+    import sys
+
+    from core.i18n import I18n
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(I18n, "_locales_dir", None)
+
+    assert I18n._get_locales_dir() == tmp_path / "locales"
+
+
+def test_core_i18n_get_locales_dir_falls_back_when_meipass_is_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+):
+    """MAJOR-4: sys.frozen=True 但 sys._MEIPASS=None 时，I18n._get_locales_dir() 不抛 TypeError，回退到 executable 父目录。"""
+    import sys
+
+    from core.i18n import I18n
+
+    fake_exe = tmp_path / "AStockScreener.exe"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", None, raising=False)
+    monkeypatch.setattr(sys, "executable", str(fake_exe), raising=False)
+    monkeypatch.setattr(I18n, "_locales_dir", None)
+
+    assert I18n._get_locales_dir() == tmp_path / "locales"

@@ -10,12 +10,16 @@ except ImportError:
     pass
 
 # 程序资源目录：只读，随安装包分发（tiktoken 编码文件、locales、PG sidecar 二进制等）。
-# 打包后 = 可执行文件所在目录；源码运行 = 本文件所在目录。用户数据**不得**写于此
+# 打包后（PyInstaller 6+ onedir）RESOURCE_ROOT 优先指向 sys._MEIPASS（_internal 目录），回退可执行文件所在目录；
+# APP_ROOT 在打包后始终指向可执行文件所在目录（{app}），用于 D8-4 旧版配置/密钥/日志升级迁移；
+# 源码运行 = 本文件所在目录。用户数据**不得**写于此
 # （安装目录通常不可写，多用户共用互相覆盖，卸载/升级会丢失）。
 if getattr(sys, "frozen", False):
-    RESOURCE_ROOT = os.path.dirname(sys.executable)
+    APP_ROOT = os.path.dirname(sys.executable)
+    RESOURCE_ROOT = getattr(sys, "_MEIPASS", None) or APP_ROOT
 else:
-    RESOURCE_ROOT = os.path.dirname(os.path.abspath(__file__))
+    APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+    RESOURCE_ROOT = APP_ROOT
 
 # 用户数据目录（D8-4）：可写、per-user、卸载不丢失，遵循各平台约定。
 # 密钥/配置/日志必须位于此而非 RESOURCE_ROOT —— security_utils 的多用户隔离
@@ -45,10 +49,6 @@ def _user_data_dir(app_name: str = "AStockScreener") -> str:
 
 USER_DATA_ROOT = _user_data_dir()
 
-# 兼容别名：APP_ROOT 曾经同时承担"资源目录"与"用户数据目录"两个职责。
-# 此处仅作策略别名指向 RESOURCE_ROOT；用户数据（密钥/配置/日志）一律用 USER_DATA_ROOT，
-# 存量引用逐步迁移，禁止再以 APP_ROOT 作为用户数据写入根。
-APP_ROOT = RESOURCE_ROOT
 
 # Pre-configure tiktoken cache directory BEFORE litellm/tiktoken is imported.
 # This ensures the bundled encoding files (cl100k_base, o200k_base) are used

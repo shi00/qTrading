@@ -2595,6 +2595,45 @@ class TestConfigHandlerIsEmbeddedMode:
         ):
             assert ConfigHandler.is_embedded_mode() is True
 
+    def test_frozen_standard_variant_without_sidecar_returns_false(self, monkeypatch, tmp_path):
+        """B01/MAJOR-1: sys.frozen=True、未显式设 QTRADING_DATABASE_MODE=embedded 且无 sidecar 二进制时，
+        ConfigHandler.is_embedded_mode() 必须返回 False，确保 OnboardingWizard 渲染 ExternalPgForm。
+        """
+        import sys
+
+        monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        meipass = tmp_path / "app" / "_internal"
+        meipass.mkdir(parents=True)
+        monkeypatch.setattr(sys, "_MEIPASS", str(meipass), raising=False)
+        with patch.object(
+            cfg_mod.ConfigHandler,
+            "load_config",
+            return_value={"embedded_pg_enabled": True, "embedded_pg_sidecar_path": ""},
+        ):
+            assert ConfigHandler.is_embedded_mode() is False
+
+    def test_frozen_embedded_variant_missing_sidecar_but_maintenance_dir_exists_returns_true(
+        self, monkeypatch, tmp_path
+    ):
+        """B01/MAJOR-2: sys.frozen=True、无 sidecar 二进制，但存在 {app}/resources/maintenance 目录时，
+        说明是 embedded 变体丢失了 sidecar，is_embedded_mode() 仍返回 True（禁止静默降级）。
+        """
+        import sys
+
+        monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        meipass = tmp_path / "app" / "_internal"
+        meipass.mkdir(parents=True)
+        (tmp_path / "app" / "resources" / "maintenance").mkdir(parents=True)
+        monkeypatch.setattr(sys, "_MEIPASS", str(meipass), raising=False)
+        with patch.object(
+            cfg_mod.ConfigHandler,
+            "load_config",
+            return_value={"embedded_pg_enabled": True, "embedded_pg_sidecar_path": ""},
+        ):
+            assert ConfigHandler.is_embedded_mode() is True
+
 
 class TestConfigHandlerStrategyPresets:
     """Task 4.1: 策略参数预设保存/载入/删除 (FR-UX-003)

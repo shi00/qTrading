@@ -251,7 +251,9 @@ class EmbeddedPgMaintenanceService:
         """从 AppConfig 解析 sidecar binary 路径 + data_dir 路径。
 
         与 ``EmbeddedPostgresService.from_config`` 一致的默认搜索逻辑：
-        - sidecar_path 为空时按平台默认搜索 ``sidecars/qtrading-pg-sidecar[.exe]``
+        - sidecar_path 为空时：
+          - PyInstaller frozen 模式（``sys.frozen``）：``sys._MEIPASS / sidecars / qtrading-pg-sidecar[.exe]``
+          - 开发模式：按平台默认搜索 ``sidecars/qtrading-pg-sidecar[.exe]``
         - data_root 为空时用 platformdirs 默认 ``<app data>/postgres/<pg_major>``，
           其中 <pg_major> 由 ``resolve_pg_major_version(Path(sidecar_path))`` 动态解析
           （以 sidecar 二进制为权威来源，见 version.py）
@@ -259,8 +261,18 @@ class EmbeddedPgMaintenanceService:
         config = AppConfig.model_validate(ConfigHandler.load_config())
         sidecar_path = config.embedded_pg_sidecar_path
         if not sidecar_path:
+            import sys
+
             exe_suffix = ".exe" if os.name == "nt" else ""
-            sidecar_path = str(Path("sidecars") / f"qtrading-pg-sidecar{exe_suffix}")
+            if getattr(sys, "frozen", False):
+                meipass = getattr(sys, "_MEIPASS", None)
+                if meipass is None:
+                    raise EmbeddedPgMaintenanceError(
+                        "sys.frozen is True but sys._MEIPASS is None; cannot resolve sidecar binary path"
+                    )
+                sidecar_path = str(Path(meipass) / "sidecars" / f"qtrading-pg-sidecar{exe_suffix}")
+            else:
+                sidecar_path = str(Path("sidecars") / f"qtrading-pg-sidecar{exe_suffix}")
         if config.embedded_pg_data_root:
             data_root = Path(config.embedded_pg_data_root)
         else:

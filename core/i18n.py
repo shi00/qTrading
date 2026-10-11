@@ -50,7 +50,14 @@ class I18n:
     @classmethod
     def _get_locales_dir(cls) -> Path:
         if cls._locales_dir is None:
-            cls._locales_dir = Path(__file__).parent.parent / "locales"
+            import sys
+
+            if getattr(sys, "frozen", False):
+                meipass = getattr(sys, "_MEIPASS", None)
+                root = Path(meipass) if meipass else Path(sys.executable).parent
+            else:
+                root = Path(__file__).parent.parent
+            cls._locales_dir = root / "locales"
         return cls._locales_dir
 
     @classmethod
