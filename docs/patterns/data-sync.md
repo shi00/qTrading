@@ -97,7 +97,7 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 
 新闻源采集器内核落 `data/external/news_sources/`（每源一个模块；`__init__` 不聚合导出，避免多源任务在同一文件冲突）。采集规范：每源限速 ≥ 2~3 秒 / 请求、常规 `User-Agent`、按源去重键、单源连续失败 N 次熔断告警（参照 `data/external/news_fetcher.py` 已有的 Sina / CLS 熔断计数实现）。
 
-与 `data/external/news_fetcher.py` 的边界：离线采集器复用独立解析内核，**不 import** `news_fetcher`（避免循环导入）；在线集成（`get_latest_global_news` 新增源）由后续任务在 `news_fetcher.py` 内完成。
+与 `data/external/news_fetcher.py` 的边界：离线采集器复用独立解析内核，**不 import** `news_fetcher`（避免循环导入）；在线集成已由 N3-4 完成：个股新闻层（`_fetch_stock_news_core` Layer 2）用新浪个股（同步 `httpx.Client` 直连，IO 线程池内核执行、不套 async 装饰器）替换 `ak.stock_news_em`，`source_label` 新增 `sina_stock`（content 为空串——列表页无正文）；`get_latest_global_news` 为 CLS 主源 + 新浪 7x24 回退（async-native，CLS 空数据 / 失败 / 熔断时启用，回退源独立熔断计数，返回项 `source="sina_7x24"`）。
 
 ### 新浪 7x24（`data/external/news_sources/sina_7x24.py`）
 

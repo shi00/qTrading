@@ -6,6 +6,7 @@ URL 去重、``ts_code`` 关联映射、条目 schema、抓取（假 httpx 客�
 """
 
 import datetime
+import inspect
 from pathlib import Path
 from typing import Any, cast
 
@@ -211,4 +212,94 @@ async def test_fetch_page_propagates_http_status_error():
     client = _FakeClient(_FakeResponse(b"", raise_exc=exc))
     with pytest.raises(httpx.HTTPStatusError) as excinfo:
         await sina_stock.fetch_page(_as_client(client), "sh600519")
+    assert excinfo.value.response.status_code == 500
+
+
+# --------------------------------------------------------------------------- #
+# ts_code_to_symbol / fetch_page_sync（N3-4）
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("ts_code", "expected"),
+    [
+        ("600519.SH", "sh600519"),
+        ("000001.SZ", "sz000001"),
+        ("430047.BJ", "bj430047"),
+        ("600519.sh", "sh600519"),  # 后缀大小写不敏感
+        (" 000001.SZ ", "sz000001"),  # 容忍首尾空白
+    ],
+)
+def test_ts_code_to_symbol_maps_valid(ts_code, expected):
+    assert sina_stock.ts_code_to_symbol(ts_code) == expected
+
+
+@pytest.mark.parametrize("ts_code", [None, 123, "", "600519", "60051A.SH", "600519.HK", "SH.600519", "60051.SH"])
+def test_ts_code_to_symbol_rejects_invalid(ts_code):
+    # 非字符串 / 无后缀 / 代码非 6 位数字 / 后缀不在 SH/SZ/BJ → None（调用方跳过新闻层）
+    assert sina_stock.ts_code_to_symbol(ts_code) is None
+
+
+def test_ts_code_to_symbol_roundtrip_with_map_symbol_to_ts_code():
+    # 与 sina_7x24.map_symbol_to_ts_code 互逆（docstring 契约）
+    from data.external.news_sources.sina_7x24 import map_symbol_to_ts_code
+
+    assert map_symbol_to_ts_code(sina_stock.ts_code_to_symbol("600519.SH")) == "600519.SH"
+
+
+def test_fetch_page_sync_is_pure_sync_function():
+    """N3-4 DoD：同步内核不得被 async 装饰器包裹（R16：同步阻塞段在 IO 线程池执行）。"""
+    assert inspect.iscoroutinefunction(sina_stock.fetch_page_sync) is False
+
+
+def test_fetch_page_sync_decodes_and_builds_url(monkeypatch):
+    payload = "贵州茅台 2026-10-08".encode("gb18030")
+
+    class _FakeSyncClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.last_url = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def get(self, url: str):
+            self.last_url = url
+            return _FakeResponse(payload)
+
+    created: list[_FakeSyncClient] = []
+
+    def _fake_client_factory(**kwargs):
+        client = _FakeSyncClient(**kwargs)
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(sina_stock.httpx, "Client", _fake_client_factory)
+    html = sina_stock.fetch_page_sync("sh600519", page=2)
+    assert "贵州茅台" in html
+    assert created[0].last_url == sina_stock.build_url("sh600519", 2)
+
+
+def test_fetch_page_sync_propagates_http_status_error(monkeypatch):
+    request = httpx.Request("GET", sina_stock.build_url("sh600519"))
+    response = httpx.Response(500, request=request)
+    exc = httpx.HTTPStatusError("boom", request=request, response=response)
+
+    class _RaisingSyncClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def get(self, url: str):
+            return _FakeResponse(b"", raise_exc=exc)
+
+    monkeypatch.setattr(sina_stock.httpx, "Client", _RaisingSyncClient)
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        sina_stock.fetch_page_sync("sh600519")
     assert excinfo.value.response.status_code == 500

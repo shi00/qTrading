@@ -1,14 +1,21 @@
 """个股新闻 / 公告 / 全球财经快讯 / 美股行情 / 概念热度抓取（NewsFetcher）。
 
-数据源取舍（review08-A1 固化，勿视为遗漏）：
-- CLS 财联社电报（``get_latest_global_news``）与新浪美股行情（``get_us_major_moves``）
+数据源取舍（review08-A1 固化 + N3-4 更新，勿视为遗漏）：
+- CLS 财联社电报（``get_latest_global_news`` 主源）与新浪美股行情（``get_us_major_moves``）
   由本模块手写 httpx 客户端直连，而非改用 akshare 同源接口（``stock_info_global_cls`` /
   ``stock_us_spot_em``）：akshare 为同步 requests 实现，提交线程池后无法被
   ``asyncio.wait_for`` 取消，会持续占用 IO 池槽位直至自然返回（B16 迁移动机）。
   代价：接口漂移与反爬策略由本项目自维护。
-- akshare 出站调用（``stock_news_em`` / ``stock_zh_a_disclosure_report_cninfo``）统一经
+- 个股新闻层（``_fetch_stock_news_core`` Layer 2）自 N3-4 起用**新浪个股列表页**
+  （``data/external/news_sources/sina_stock``，同步 ``httpx.Client`` 直连）替换
+  ``ak.stock_news_em``：东财源被用户约束排除；新浪层为 httpx 直连，不接 akshare 限速器，
+  同步请求在 IO 线程池内核中执行、不套 async 装饰器（R16：阻塞段不进事件循环）。
+- akshare 出站调用（仅剩 ``stock_zh_a_disclosure_report_cninfo`` 巨潮公告层）统一经
   模块级共享限速器（``data/external/akshare_rate_limiter``）限速后提交线程池执行；
   新增 akshare 调用须同样接入（review08-B4）。
+- ``get_latest_global_news`` 自 N3-4 起新增**新浪 7x24 回退**（``data/external/news_sources/sina_7x24``，
+  ``httpx.AsyncClient`` async-native，可被外层 ``wait_for`` 取消）：CLS 成功且非空即返回，
+  CLS 空数据 / 请求失败 / 熔断开启时回退新浪 7x24；回退源独立熔断计数（沿用 CLS 熔断模式）。
 - 概念热度（``get_hot_concepts``）走 httpx 直连新浪 HTTPS 端点，不走 akshare
   ``stock_sector_spot``（其内部明文 HTTP 且无 timeout，review08-B2）。
 - akshare 经 ``_get_akshare()`` 惰性导入（review08-B5，勿改回顶层 import）：顶层导入会抵消
@@ -30,6 +37,7 @@ import httpx
 from cachetools import TTLCache
 
 from data.external.akshare_rate_limiter import get_akshare_rate_limiter
+from data.external.news_sources import sina_7x24, sina_stock
 from utils.sanitizers import DataSanitizer
 from utils.log_decorators import log_async_operation, PerfThreshold
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -100,6 +108,16 @@ _CLS_CIRCUIT_COOLDOWN_SECONDS = 60.0
 # 熔断器状态一致性（计数达阈值时熔断时间必须已设置）。临界区无 IO，无需超时。
 _CLS_STATE_LOCK = threading.Lock()
 
+# 新浪 7x24 回退源熔断状态（N3-4，沿用 CLS 熔断模式：阈值 3 次 → 冷却 60s → 半开探活）
+_S7X24_CONSECUTIVE_FAILURES = 0
+_S7X24_FAILURE_THRESHOLD = 3
+_S7X24_CIRCUIT_OPENED_AT = 0.0
+_S7X24_CIRCUIT_COOLDOWN_SECONDS = 60.0
+
+# F5-P1 同款：保护 _S7X24_CONSECUTIVE_FAILURES 与 _S7X24_CIRCUIT_OPENED_AT 的并发读写；
+# read-modify-write 同临界区完成，logger 一律移出锁外。临界区无 IO，无需超时。
+_S7X24_STATE_LOCK = threading.Lock()
+
 
 def _run_with_python_string_storage(fetcher):
     """Run AKShare calls under a single critical section for global pandas option safety."""
@@ -151,12 +169,12 @@ def _parse_news_time(raw: str | None, *, day_only: bool = False) -> datetime.dat
     text = f"{raw_text} 00:00:00" if day_only and len(raw_text) <= 10 else raw_text
     try:
         if len(text) >= 19 and len(text) <= 23:
-            parsed = datetime.datetime.strptime(text, "%Y-%m-%d %H:%M:%S")  # noqa: DTZ007  东财/巨潮发布时间为 CST 本地时间文本，无时区字面量；下方 to_utc_for_db 按 CST 归属
+            parsed = datetime.datetime.strptime(text, "%Y-%m-%d %H:%M:%S")  # noqa: DTZ007  巨潮发布时间为 CST 本地时间文本，无时区字面量；下方 to_utc_for_db 按 CST 归属
         else:
             return None
     except ValueError:
         return None
-    # 无 tz 的东财/巨潮时间为 CST 本地时间 → 本地化后转 UTC naive 存库
+    # 无 tz 的巨潮时间为 CST 本地时间 → 本地化后转 UTC naive 存库
     return to_utc_for_db(parsed)
 
 
@@ -166,7 +184,7 @@ def _fetch_stock_news_core(
     *,
     log_prefix: str = "",
 ) -> tuple[list[dict], list[dict], dict[str, str]]:
-    """一次抓取并归一化 CNINFO 公告 + EM 新闻（review08-D1 共享内核）。
+    """一次抓取并归一化 CNINFO 公告 + 新浪个股新闻（review08-D1 共享内核，N3-4 更新）。
 
     返回 ``(announcement_docs, news_docs, coverage)``：
     - 内部 doc 结构：``{"title", "publish_time"(UTC tz-naive datetime|None), "url", "content", "source_label"}``；
@@ -174,6 +192,7 @@ def _fetch_stock_news_core(
     - 单层失败返回该层空列表 + coverage 对应 ``"fail"``；日志文本经 ``log_prefix``
       区分两个公开方法（``get_stock_news`` 传 ``""``，``get_stock_news_documents`` 传 ``"documents "``，
       与各自历史日志逐字一致）。
+    - 本函数为**同步内核**（IO 线程池线程执行），不得套 async 装饰器（R16）。
     """
     announcement_docs: list[dict] = []
     news_docs: list[dict] = []
@@ -191,14 +210,18 @@ def _fetch_stock_news_core(
         end_date = get_now().strftime("%Y%m%d")
         start_date = (get_now() - timedelta(days=180)).strftime("%Y%m%d")
 
-        df_cninfo = _ensure_dataframe(
-            ak.stock_zh_a_disclosure_report_cninfo(
-                symbol=symbol,
-                market=market,
-                start_date=start_date,
-                end_date=end_date,
-            ),
-            source="stock_zh_a_disclosure_report_cninfo",
+        # review08-B4-FIND-03 / N3-4：pandas string_storage workaround 收窄至 akshare 调用本身
+        # （新浪个股层为 httpx 直连，不经 pandas/akshare，无需包裹）
+        df_cninfo = _run_with_python_string_storage(
+            lambda: _ensure_dataframe(
+                ak.stock_zh_a_disclosure_report_cninfo(
+                    symbol=symbol,
+                    market=market,
+                    start_date=start_date,
+                    end_date=end_date,
+                ),
+                source="stock_zh_a_disclosure_report_cninfo",
+            )
         )
 
         if df_cninfo is not None and not df_cninfo.empty:
@@ -232,33 +255,36 @@ def _fetch_stock_news_core(
             DataSanitizer.sanitize_error(e),
         )
 
-    # Layer 2: 东财新闻搜索（news）
+    # Layer 2: 新浪个股新闻列表页（news，N3-4 替换 ak.stock_news_em）
     try:
-        df_em = _ensure_dataframe(ak.stock_news_em(symbol=symbol), source="stock_news_em")
-
-        if df_em is not None and not df_em.empty:
-            # EastMoney returns '新闻内容' as title, '新闻链接', '发布时间', etc.
-            for _, row in df_em.iterrows():
-                title = str(row.get("新闻标题", row.get("新闻内容", "")) or "").strip()
-                # review08-D1 复核修复：真实列名为 '发布时间'（akshare 1.18.97 实测），
-                # 原主键 '新闻时间' 在生产返回中不存在、仅靠 fallback 侥幸生效。
-                raw_time = row.get("发布时间", "")
-                url = str(row.get("新闻链接", "") or "") if "新闻链接" in df_em.columns else ""
-                content = str(row.get("新闻内容", "") or "").strip()
+        symbol_sina = sina_stock.ts_code_to_symbol(ts_code)
+        if symbol_sina is None:
+            # 无法映射（如指数 ts_code / 非标准后缀）→ 该层按失败处理，不影响公告层
+            logger.warning("[News] %sCannot map ts_code %s to Sina symbol, skipping news layer", log_prefix, ts_code)
+        else:
+            # 同步 httpx 直连（IO 线程池线程执行，R16）；解析复用 news_sources 内核：
+            # 无秒时间补 :00 → UTC tz-naive（时间口径 §3.1，与 _parse_news_time 一致）
+            html = sina_stock.fetch_page_sync(symbol_sina, page=1)
+            parsed = sina_stock.parse_news_list(html, symbol=symbol_sina)
+            # NOTE(lazy): content 置空串（列表页无正文，契约允许空串）. ceiling: 每条新闻一次
+            # 详情页 HTTP 的在线成本不划算，详情正文仅离线语料增强（N2-1）.
+            # upgrade: N5-2 情绪聚合需要正文级特征（标题+URL 不足）时，为 top-N 条目按需抓详情页.
+            for doc in parsed:
                 news_docs.append(
                     {
-                        "title": title,
-                        "publish_time": _parse_news_time(str(raw_time)),
-                        "url": url,
-                        "content": content,
-                        "source_label": str(row.get("文章来源", "东财新闻")),
+                        "title": doc["text"],
+                        "publish_time": doc["publish_time"],
+                        "url": doc["source_url"],
+                        "content": "",
+                        "source_label": "sina_stock",
                     }
                 )
-            coverage["news"] = "ok"
+            if parsed:
+                coverage["news"] = "ok"
     except Exception as e:
         _log_with_severity(
             e,
-            f"[News] {log_prefix}EM search failed for %s: %s",
+            f"[News] {log_prefix}Sina stock news failed for %s: %s",
             ts_code,
             DataSanitizer.sanitize_error(e),
         )
@@ -266,10 +292,114 @@ def _fetch_stock_news_core(
     return announcement_docs, news_docs, coverage
 
 
+async def _fetch_sina_7x24_fallback(limit: int | None = 20) -> list[dict]:
+    """新浪 7x24 回退源（N3-4）：CLS 空数据 / 失败 / 熔断时返回 7x24 快讯。
+
+    - async-native（``httpx.AsyncClient`` + ``sina_7x24.fetch_page``，内核自带
+      ``@log_async_operation``），可被外层 ``asyncio.wait_for`` 取消；``CancelledError``
+      不被 ``except Exception`` 捕获、直接传播（R2）。
+    - 返回项契约与 CLS 主源一致：``{"title","title_code","content","time"}``，另带
+      ``"source": "sina_7x24"``（``CacheManager.normalize_news_item`` 尊重 item 内 source，
+      落库不误标 CLS）；``time`` 为 CST ``YYYY-MM-DD HH:MM:SS`` 文本（与 CLS time_str 同口径，
+      订阅服务按字符串比较水位线不受影响）。
+    - 熔断沿用 CLS 模式（连续失败 3 次 → 冷却 60s → 半开探活），独立于 CLS 计数。
+    - **模块级函数**：``get_latest_global_news`` 按名调用，单测可 patch 隔离。
+    """
+    global _S7X24_CONSECUTIVE_FAILURES, _S7X24_CIRCUIT_OPENED_AT
+    now_ts = get_now().timestamp()  # 遵循系统统一时间获取规范
+
+    # 1. 熔断判定（F5-P1: 锁内读取保证一致性，锁外判断+记日志）
+    with _S7X24_STATE_LOCK:
+        s7x24_failures = _S7X24_CONSECUTIVE_FAILURES
+        s7x24_opened_at = _S7X24_CIRCUIT_OPENED_AT
+
+    if s7x24_failures >= _S7X24_FAILURE_THRESHOLD:
+        if now_ts - s7x24_opened_at < _S7X24_CIRCUIT_COOLDOWN_SECONDS:
+            logger.warning("[NewsFetcher] Sina 7x24 circuit breaker is OPEN. Fast failing fallback request.")
+            return []
+        logger.info("[NewsFetcher] Sina 7x24 circuit breaker is HALF-OPEN. Attempting probe request.")
+
+    try:
+        # B16 同款：httpx async-native 直连（build_client_kwargs 已按 NO_PROXY 语义注入代理）
+        async with httpx.AsyncClient(**sina_7x24.build_client_kwargs()) as client:
+            payload = await sina_7x24.fetch_page(
+                client,
+                page=1,
+                page_size=limit if limit is not None else sina_7x24.DEFAULT_PAGE_SIZE,
+            )
+        docs, _page_info = sina_7x24.parse_feed_payload(payload)
+
+        # 请求成功，闭合熔断器并清空计数（F5-P1: 锁内重置，锁外记日志）
+        with _S7X24_STATE_LOCK:
+            was_open = _S7X24_CONSECUTIVE_FAILURES >= _S7X24_FAILURE_THRESHOLD
+            _S7X24_CONSECUTIVE_FAILURES = 0
+        if was_open:
+            logger.info("[NewsFetcher] Sina 7x24 circuit breaker CLOSED (recovered).")
+
+        news_list: list[dict] = []
+        for doc in docs:
+            text = doc["text"]
+            # time：UTC naive → CST 文本（与 CLS time_str 同口径）；缺失回退 now（CLS 同款）
+            pub = doc["publish_time"]
+            if pub is not None:
+                time_str = pub.replace(tzinfo=datetime.UTC).astimezone(CST_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                time_str = get_now().strftime("%Y-%m-%d %H:%M:%S")
+            # 7x24 无独立标题：rich_text 同充 title/content（CLS 亦为 title 回退 content）
+            news_list.append(
+                {
+                    "title": text,
+                    "title_code": "" if text else "no_title",
+                    "content": text,
+                    "time": time_str,
+                    "source": "sina_7x24",
+                }
+            )
+
+        # 按时间降序排列（与 CLS 主源一致）
+        news_list.sort(key=lambda x: x["time"], reverse=True)
+        return news_list[:limit] if limit is not None else news_list
+
+    except Exception as e:
+        # 异常处理：递增连续失败计数并视情况触发熔断
+        # F5-P1: 锁内完成 read-modify-write（递增+阈值判断+熔断时间设置），锁外记日志
+        with _S7X24_STATE_LOCK:
+            _S7X24_CONSECUTIVE_FAILURES += 1
+            count = _S7X24_CONSECUTIVE_FAILURES
+            if count >= _S7X24_FAILURE_THRESHOLD:
+                _S7X24_CIRCUIT_OPENED_AT = get_now().timestamp()
+                is_threshold: bool | None = count == _S7X24_FAILURE_THRESHOLD
+            else:
+                is_threshold = None  # 未达阈值标志
+
+        if is_threshold is True:
+            _log_with_severity(
+                e,
+                "[NewsFetcher] Sina 7x24 fallback failed 3 consecutive times. Circuit breaker OPENED. Error: %s",
+                DataSanitizer.sanitize_error(e),
+            )
+        elif is_threshold is False:
+            # 半开探活失败：重置冷却计时器（CLS 同款）
+            _log_with_severity(
+                e,
+                "[NewsFetcher] Sina 7x24 fallback failed in HALF-OPEN state. Cooldown reset. Error: %s",
+                DataSanitizer.sanitize_error(e),
+            )
+        else:
+            _log_with_severity(
+                e,
+                "[NewsFetcher] Sina 7x24 fallback request failed (%d/%d): %s",
+                count,
+                _S7X24_FAILURE_THRESHOLD,
+                DataSanitizer.sanitize_error(e),
+            )
+        return []
+
+
 class NewsFetcher:
     """
-    Fetches news data using AKShare and direct robust Sina/THS clients.
-    Replaces blocked EastMoney interfaces.
+    Fetches news data using AKShare (CNINFO) and direct robust Sina/CLS clients.
+    Replaces blocked EastMoney interfaces (N3-4: stock news layer switched to Sina).
     """
 
     @staticmethod
@@ -281,9 +411,10 @@ class NewsFetcher:
         """
         Fetch specific stock news using a dual-layer strategy:
         1. 巨潮公告 (stock_zh_a_disclosure_report_cninfo) - Official exchange filings (Highest quality)
-        2. 东财搜索 (stock_news_em) - Fallback to keyword search (Lower quality, more noise)
+        2. 新浪个股列表页 (sina_stock, N3-4) - Fallback to stock news list (Lower quality, more noise)
 
-        Both use a pyarrow string_storage workaround for pandas compatibility.
+        巨潮层经 pyarrow string_storage workaround 保证 pandas 兼容；新浪层为同步 httpx 直连
+        （IO 线程池内核执行，不套 async 装饰器）。
 
         as_of: When set to a historical date, returns empty list to prevent
         look-ahead bias in backtesting / AI context construction.
@@ -307,14 +438,12 @@ class NewsFetcher:
                 }
 
             try:
-                # review08-B4-FIND-03: 令牌必须在 pandas 全局锁（_pd_options_lock）外一次性
-                # 预留（两层各 1，共 2 = burst 容量），避免限速 sleep 计入临界区、放大并发
+                # review08-B4-FIND-03 / N3-4: 令牌在 pandas 全局锁（_pd_options_lock）外一次性
+                # 预留（仅巨潮 akshare 层 1 个），避免限速 sleep 计入临界区、放大并发
                 # 批量抓取时的锁等待（等锁 >10s 即 TimeoutError → 静默降级）。consume() 在
-                # IO 线程池线程执行，同步阻塞不阻塞事件循环（R16）；新增数据层须同步调整预留数。
-                get_akshare_rate_limiter().consume(2)
-                announcement_docs, news_docs, _coverage = _run_with_python_string_storage(
-                    lambda: _fetch_stock_news_core(symbol, ts_code)
-                )
+                # IO 线程池线程执行，同步阻塞不阻塞事件循环（R16）；新增 akshare 数据层须同步调整预留数。
+                get_akshare_rate_limiter().consume(1)
+                announcement_docs, news_docs, _coverage = _fetch_stock_news_core(symbol, ts_code)
             except Exception as outer_e:
                 _log_with_severity(
                     outer_e,
@@ -324,7 +453,7 @@ class NewsFetcher:
                 )
                 return []
 
-            # 公告优先，EM 回退（与重构前一致：公告层有行即返回，否则用 EM）
+            # 公告优先，新浪个股回退（与重构前一致：公告层有行即返回，否则用个股新闻层）
             source_docs = announcement_docs if announcement_docs else news_docs
             return [_shape(d) for d in source_docs[:limit]]
 
@@ -364,7 +493,7 @@ class NewsFetcher:
         window_days: int = 30,
         limit: int = 50,
     ) -> dict:
-        """合并个股新闻：巨潮公告 + 东财新闻（非二选一回退）。
+        """合并个股新闻：巨潮公告 + 新浪个股新闻（非二选一回退，N3-4 起 news 层为新浪）。
 
         返回 ``{"docs": [...], "coverage": {"announcement": "ok"/"fail", "news": "ok"/"fail"}}``。
         每个 doc 含：ts_code / source_kind（announcement|news）/ title / publish_time（UTC tz-naive datetime，
@@ -384,10 +513,10 @@ class NewsFetcher:
             coverage = {"announcement": "fail", "news": "fail"}
 
             try:
-                # review08-B4-FIND-03: 同 get_stock_news，令牌在 pandas 全局锁外预留（两层共 2）。
-                get_akshare_rate_limiter().consume(2)
-                announcement_docs, news_docs, coverage = _run_with_python_string_storage(
-                    lambda: _fetch_stock_news_core(symbol, ts_code, log_prefix="documents ")
+                # review08-B4-FIND-03 / N3-4: 同 get_stock_news，令牌在 pandas 全局锁外预留（仅巨潮层 1）。
+                get_akshare_rate_limiter().consume(1)
+                announcement_docs, news_docs, coverage = _fetch_stock_news_core(
+                    symbol, ts_code, log_prefix="documents "
                 )
             except Exception as outer_e:
                 _log_with_severity(
@@ -469,10 +598,10 @@ class NewsFetcher:
             cls_opened_at = _CLS_CIRCUIT_OPENED_AT
 
         if cls_failures >= _CLS_FAILURE_THRESHOLD:
-            # 熔断开启期间（冷却窗口内），直接快速失败
+            # 熔断开启期间（冷却窗口内），直接快速失败 → 回退新浪 7x24（N3-4）
             if now_ts - cls_opened_at < _CLS_CIRCUIT_COOLDOWN_SECONDS:
                 logger.warning("[NewsFetcher] CLS circuit breaker is OPEN. Fast failing request.")
-                return []
+                return await _fetch_sina_7x24_fallback(limit)
             else:
                 logger.info("[NewsFetcher] CLS circuit breaker is HALF-OPEN. Attempting probe request.")
 
@@ -506,14 +635,14 @@ class NewsFetcher:
             if was_open:
                 logger.info("[NewsFetcher] CLS circuit breaker CLOSED (recovered).")
 
-            # 3. 健壮解析 JSON
+            # 3. 健壮解析 JSON（结构缺失 / 空数据 → 回退新浪 7x24，N3-4）
             if not data or not isinstance(data, dict) or "data" not in data or "roll_data" not in data["data"]:
                 logger.warning("[NewsFetcher] CLS API response missing expected structure")
-                return []
+                return await _fetch_sina_7x24_fallback(limit)
 
             roll_data = data["data"]["roll_data"]
             if not isinstance(roll_data, list) or not roll_data:
-                return []
+                return await _fetch_sina_7x24_fallback(limit)
 
             news_list = []
 
@@ -559,13 +688,14 @@ class NewsFetcher:
             return news_list
 
         except RuntimeError as infra_err:
-            # 基础设施错误（如线程池未初始化）不应计入 CLS API 连续失败计数
+            # 基础设施错误（如线程池未初始化）不应计入 CLS API 连续失败计数；
+            # 回退源为 async-native（不依赖线程池），仍尝试新浪 7x24（N3-4）
             _log_with_severity(
                 infra_err,
                 "[NewsFetcher] CLS fetch skipped due to infrastructure error: %s",
                 DataSanitizer.sanitize_error(infra_err),
             )
-            return []
+            return await _fetch_sina_7x24_fallback(limit)
         except Exception as e:
             # 异常处理，递增连续失败计数并视情况触发熔断
             # F5-P1: 锁内完成 read-modify-write（递增+阈值判断+熔断时间设置），锁外记日志
@@ -599,7 +729,8 @@ class NewsFetcher:
                     _CLS_FAILURE_THRESHOLD,
                     DataSanitizer.sanitize_error(e),
                 )
-            return []
+            # CLS 失败 → 回退新浪 7x24（N3-4）
+            return await _fetch_sina_7x24_fallback(limit)
 
     @staticmethod
     @log_async_operation(
