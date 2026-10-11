@@ -51,6 +51,15 @@
 - `utils/prompt_guard.py` 为**正则黑名单式**防御，能力有限：能拦截已知指令形态，**挡不住新闻正文等外部文本中的植入指令**（review06 的 F12，见 [reviews/README.md](../reviews/README.md)）。
 - **黑名单不是完整防御**：不要把 `prompt_guard` 当作充分防护；任何 AI 功能还须叠加 ADR-0008 的执行权边界（即使注入成功后果也被限制在错误建议范围）+ 输出侧结构化校验。新增 AI 功能在设计文档中须明确其输出仅用于展示，并通过测试验证无执行路径。
 
+### 6. 本地新闻情绪打分（FinBERT 子进程，N3-2）
+
+- **正本**：[ADR-0012](../adr/0012-news-sentiment-inference-paradigm.md)（编码器 + CLS 池化 embedding + numpy 分类头，不用 RANK 模式）；设计细节见 `reviews/新闻达标模型微调.md` §8/§9.2。
+- **实现位置**：`services/news_sentiment_scorer.py::NewsSentimentScorer`（注册单例）；编码器运行在**独立常驻子进程**（与 `LocalModelManager` 的对话子进程分离），分词必用 HF `tokenizers`（`Tokenizer.from_file`），**禁用 `Llama.embed(text)` 内部分词**（N0-4 实测与 HF 不一致）。
+- **仅展示边界**：打分输出（`label`/`confidence`/`score`/`probs`）仅用于新闻流着色与展示面板（ADR-0008），**选股/策略模块不得读取**（N3-7 展示边界测试守护）。
+- **缺失语义（R21）**：`score_texts` 服务不可用（未启用/未配置/加载失败/超时/worker 错误）整体返回 `None`，条目 NaN/Inf 返回 `None`，**不回填中性、不回填 0 分**；`head.npz` 形状/标签序/有限性校验不符时拒绝加载，不静默降级。
+- **配置键**：`news_sentiment_enabled`（默认 `False`）/ `news_sentiment_model_path` / `news_sentiment_head_path` / `news_sentiment_tokenizer_path` / `news_sentiment_n_threads` / `news_sentiment_max_length` / `news_sentiment_timeout_s`（设置页接入见 N3-6）。
+- **依赖**：`llama-cpp-python` / `tokenizers` 为可选依赖（`importlib` 延迟导入，缺失时打分降级 `None`，不影响 App 启动）；`head.npz` 与 GGUF 产物不进仓库。
+
 ## 完成判定（canonical 入口）
 
 _最小验证命令：_ 按改动实际触及的层运行 CONTRIBUTING「变更类型 → 最小验证子集」对应最小子集；AI 服务逻辑改动后须 `redline-check` + 相关单测 + `python scripts/check_docs_consistency.py`。

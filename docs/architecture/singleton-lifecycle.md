@@ -66,7 +66,7 @@ def __init__(self, *, config=None, clock=None):
 
 > R15 人工评审对照基准。新增/移除单例时同步更新本清单。
 
-**注册单例（`@register_singleton`，19 个）**：
+**注册单例（`@register_singleton`，20 个）**：
 
 | 类名 | 模块路径 | 职责 |
 |------|---------|------|
@@ -82,6 +82,7 @@ def __init__(self, *, config=None, clock=None):
 | `TushareClient` | `data/external/tushare_client.py` | Tushare API 客户端 |
 | `AkshareConceptClient` | `data/external/akshare_concept_client.py` | Akshare 概念板块客户端 |
 | `LocalModelManager` | `services/local_model_manager.py` | 本地模型生命周期 |
+| `NewsSentimentScorer` | `services/news_sentiment_scorer.py` | 新闻情绪打分子进程生命周期（FinBERT GGUF + numpy 分类头，ADR-0012） |
 | `StrategyManager` | `strategies/all_strategies.py` | 策略注册表 |
 | `MetaDataManager` | `data/persistence/metadata_manager.py` | 表/列别名预加载与缓存管理 |
 | `EmbeddedPostgresService` | `data/persistence/embedded_postgres/service.py` | 内置 PostgreSQL 生命周期管理 |
