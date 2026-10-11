@@ -1340,6 +1340,7 @@ _R16_SINGLETON_CLASSES = frozenset(
         "TushareClient",
         "AkshareConceptClient",
         "LocalModelManager",
+        "NewsSentimentScorer",
         "StrategyManager",
         "MetaDataManager",
         "EmbeddedPostgresService",
