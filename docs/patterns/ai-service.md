@@ -16,7 +16,7 @@
 
 - 正本：`project-profile.md` R21 自查段（上述必读 2）。
 - **跨层传递**：缺失语义沿 `ai_service` 产出 → ViewModel state → UI 渲染链路保持一致，缺失一律用 `None`/哨兵表达，**不得**在任一层回填业务值；UI 对 `None`/哨兵渲染为「未知」，不渲染为数值。
-- **实现模板**：`strategies/ai_mixin.py` 与 `strategies/prompt_validator.py`（见 [ai-strategy-mixin.md](./ai-strategy-mixin.md)）是 AI 输出进策略的落点，改这里须对照 R21 自查。
+- **实现模板**：`services/ai_service/output.py::validate_ai_analysis_response`（服务侧输出校验与置信度归一化）与 `strategies/ai_mixin.py::AIStrategyMixin._build_result_row`（策略侧结果行组装与纵深防御，见 [ai-strategy-mixin.md](./ai-strategy-mixin.md)）是 AI 输出进策略的落点，改这里须对照 R21 自查（`strategies/prompt_validator.py` 仅校验 Prompt 声明的数据源是否真实可用，不承担 LLM 响应校验）。
 
 ### 2. 成本与配额的单一事实源
 
@@ -27,7 +27,9 @@
 
 ### 3. 输出契约与校验边界
 
-- LLM 结构化输出的 schema 定义与校验器位置：`strategies/prompt_validator.py`（策略侧）与 `services/ai_service/stock_analysis.py` / `news_classifier.py` / `output.py`（分析侧）。
+- **输入声明 vs 输出校验职责边界**：
+  - **Prompt 输入数据声明校验（策略/测试侧）**：`strategies/prompt_validator.py::validate_prompt_declarations`（配合 `DataDeclaration` / `get_declarations`）——仅校验 System Prompt 声明的数据源在当前库中是否真实可用，**不校验 LLM 响应内容**；坏数据声明用例归口该输入声明边界（如 `tests/unit/test_prompt_validator.py`），不得以输入声明校验替代输出响应校验。
+  - **LLM 输出 schema 与归一化所有者（服务/策略侧）**：个股分析结论枚举与字段契约定义于 `core/prompt_base.py`（`CONCLUSION_LABEL_FIELD` / `CONCLUSION_LABELS` / `RECOMMENDATION_TO_CONCLUSION_LABEL`），响应边界校验、置信度归一化与自由文本清洗位于 `services/ai_service/output.py::validate_ai_analysis_response`（含 `VALID_RECOMMENDATIONS` 读兼容与 `_sanitize_free_text`），由 `services/ai_service/stock_analysis.py::StockAnalysisService.analyze_stock` 调用，并在策略侧经 `strategies/ai_mixin.py::AIStrategyMixin._build_result_row` 完成结果行组装与二次兜底；新闻分类输出解析、白名单校验（对照 `utils/config_models.py::NEWS_CATEGORY_MAP`）与层级兜底位于 `services/ai_service/news_classifier.py::NewsClassifier._parse_news_result`。坏模型响应用例须落在上述输出消费边界验证。
 - **已知缺口**：review06 的 F13 指出 LLM 输出影响选股排序，**仅校验部分字段，缺完整输出 schema 校验与 AI 免责声明**（见 [reviews/README.md](../reviews/README.md) 未关闭发现）。改动输出域时把模型输出视为**不可信输入**（对应 [ai-ml-llm.md](../reviews/review-profiles/ai-ml-llm.md) 检视要点），补齐 schema/边界/确定性校验，不得只校验展示字段。
 
 ### 4. 外发边界与审计
