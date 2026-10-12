@@ -13,6 +13,7 @@
   声明式重写后改为父组件 state 驱动）
 """
 
+import datetime
 import json
 import logging
 import math
@@ -26,6 +27,7 @@ from ui.components._markdown_safe import safe_open_url
 from ui.components.chart_utils import generate_kline_chart_data
 from ui.components.news_insight_panel import NewsInsightPanel
 from ui.components.risk_disclaimer import build_risk_disclaimer
+from ui.components.sentiment_bar import SentimentBar
 from ui.components.unit_format import (
     TUSHARE_AMOUNT_UNIT,  # noqa: F401  # 公开常量 re-export（外部/测试经本模块引用）
     TUSHARE_MV_UNIT,  # noqa: F401  # 公开常量 re-export（外部/测试经本模块引用）
@@ -39,6 +41,7 @@ from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.news_insight_types import NewsInsightState
+from ui.viewmodels.sentiment_index_types import SentimentIndexState
 from strategies.attribution import FilterCondition, RankAttribution, attribution_from_json
 from utils.sanitizers import DataSanitizer
 
@@ -474,6 +477,7 @@ def _build_content(
     height: int,
     column_label_fn: Callable[[str], str] | None = None,
     news_panel: ft.Control | None = None,
+    sentiment_strip: ft.Control | None = None,
 ) -> ft.Container:  # pragma: no cover
     """构建详情内容（K线图 + AI分析 + 价格 + 估值 + 财务 + 基础信息）。"""
     # Chart container（content 由 chart_content state 驱动）
@@ -728,16 +732,22 @@ def _build_content(
 
     sections: list[ft.Control] = [
         chart_container,
-        ai_section,
-        # UX-09 / MAJOR-01: 个股详情 AI 区块下方固定风险提示（AI 评分/预测非投资建议）。
-        build_risk_disclaimer(compact=True),
-        _build_attribution_section(stock_data, column_label_fn),  # UX-04 筛选条件归因
-        price_section,
-        valuation_section,
-        financial_section,
-        basic_section,
-        _build_review_section(stock_data),  # Task 4.3 (FR-UX-005)
     ]
+    if sentiment_strip is not None:
+        sections.append(sentiment_strip)  # N5-3：日度情绪条紧随 K 线之下
+    sections.extend(
+        [
+            ai_section,
+            # UX-09 / MAJOR-01: 个股详情 AI 区块下方固定风险提示（AI 评分/预测非投资建议）。
+            build_risk_disclaimer(compact=True),
+            _build_attribution_section(stock_data, column_label_fn),  # UX-04 筛选条件归因
+            price_section,
+            valuation_section,
+            financial_section,
+            basic_section,
+            _build_review_section(stock_data),  # Task 4.3 (FR-UX-005)
+        ]
+    )
     if news_panel is not None:
         sections.append(news_panel)
     return ft.Container(
@@ -904,6 +914,9 @@ def StockDetailDialog(
     news_on_generate: Callable[[], None] | None = None,
     news_on_retry: Callable[[], None] | None = None,
     news_on_cancel: Callable[[], None] | None = None,
+    sentiment_state: SentimentIndexState | None = None,
+    sentiment_on_select_day: Callable[[datetime.date], None] | None = None,
+    sentiment_on_cancel: Callable[[], None] | None = None,
 ) -> ft.Container:  # pragma: no cover  # UI 组件闭包（hooks/use_dialog/事件处理器）不可无头单测
     """股票详情弹窗（声明式 V1）。
 
@@ -929,6 +942,9 @@ def StockDetailDialog(
         news_on_generate: 生成风险解读命令（§12 第 2 步按钮触发）
         news_on_retry: 重试命令（degraded/error 重试按钮触发）
         news_on_cancel: 关闭弹窗时同步取消在途任务（§12 第 6 步，不在 handler 中 await）
+        sentiment_state: N5-3 新闻情绪指数不可变状态快照；为 None 时不渲染情绪条。
+        sentiment_on_select_day: 点击情绪柱选中/收起某日 → 展开当日新闻明细命令。
+        sentiment_on_cancel: 关闭弹窗时取消情绪指数在途任务（双任务槽，同 news_on_cancel）。
     """
     # --- i18n 订阅（locale 切换自动重渲染）---
     ft.use_state(get_observable_state)
@@ -985,6 +1001,8 @@ def StockDetailDialog(
         set_open(False)
         if news_on_cancel is not None:
             news_on_cancel()
+        if sentiment_on_cancel is not None:
+            sentiment_on_cancel()
         if on_close is not None:
             on_close()
 
@@ -996,10 +1014,18 @@ def StockDetailDialog(
     news_panel = (
         NewsInsightPanel(
             news_state=news_state,
+            sentiment_state=sentiment_state,
             news_on_generate=news_on_generate,
             news_on_retry=news_on_retry,
         )
         if news_state is not None
+        else None
+    )
+
+    # N5-3：K 线下方日度情绪条（state 为 None 不渲染；点击柱由消费方命令展开当日新闻）
+    sentiment_strip = (
+        SentimentBar(sentiment_state=sentiment_state, on_select_day=sentiment_on_select_day)
+        if sentiment_state is not None
         else None
     )
 
@@ -1012,7 +1038,7 @@ def StockDetailDialog(
             modal=False,
             on_dismiss=_close,
             title=_build_title(data),
-            content=_build_content(data, chart_content, width, height, column_label_fn, news_panel),
+            content=_build_content(data, chart_content, width, height, column_label_fn, news_panel, sentiment_strip),
             actions=actions,
             actions_alignment=ft.MainAxisAlignment.END,
         )
