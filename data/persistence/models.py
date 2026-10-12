@@ -10,6 +10,7 @@ from sqlalchemy import (
     Column,
     Date,
     DateTime,
+    Double,
     ForeignKey,
     Index,
     Integer,
@@ -360,6 +361,10 @@ class MarketNews(Base):
     category_l1 = Column(String(32))
     category_l2 = Column(String(64))
     sentiment = Column(String(16))
+    # 新闻情绪打分（新闻达标模型 M5 Phase 5）新增可空字段：未打分历史保持 NULL（R21）
+    sentiment_score = Column(Double)
+    sentiment_conf = Column(Double)
+    sentiment_model = Column(String(32))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
     __table_args__ = (
