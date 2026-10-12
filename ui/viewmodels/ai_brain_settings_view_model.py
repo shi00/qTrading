@@ -77,6 +77,11 @@ class AIBrainSettingsState:
     # Phase 3.2 P1-1: MD5 检查结果 i18n key (非空时 View 显示 WARNING snack)
     # 下沉自 View._check_local_model_md5, VM 在 save_ai_settings 末尾写入
     warning_message: str = ""
+    # N3-6: 新闻情绪打分设置（本地小模型 + LLM 降级回退；键与 scorer._read_config 一致）
+    news_sentiment_enabled: bool = False
+    news_sentiment_model_path: str = ""
+    news_sentiment_head_path: str = ""
+    news_sentiment_tokenizer_path: str = ""
 
 
 class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
@@ -184,6 +189,11 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             ai_configured=ai_configured,
             ai_cost_limit_value=ai_cost_limit_value,
             usd_to_cny_rate_value=usd_to_cny_rate_value,
+            # N3-6: get_typed 默认值与 NewsSentimentScorer._read_config 保持一致
+            news_sentiment_enabled=ConfigHandler.get_typed("news_sentiment_enabled", bool, False),
+            news_sentiment_model_path=ConfigHandler.get_typed("news_sentiment_model_path", str, ""),
+            news_sentiment_head_path=ConfigHandler.get_typed("news_sentiment_head_path", str, ""),
+            news_sentiment_tokenizer_path=ConfigHandler.get_typed("news_sentiment_tokenizer_path", str, ""),
         )
 
     # --- Update commands (View 通过 set_* 更新本地 state) ---
@@ -214,6 +224,20 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
 
     def set_usd_to_cny_rate_value(self, value: str) -> None:
         self._set_state(usd_to_cny_rate_value=value)
+
+    # --- N3-6: 新闻情绪打分 update commands ---
+
+    def set_news_sentiment_enabled(self, value: bool) -> None:
+        self._set_state(news_sentiment_enabled=bool(value))
+
+    def set_news_sentiment_model_path(self, value: str) -> None:
+        self._set_state(news_sentiment_model_path=value or "")
+
+    def set_news_sentiment_head_path(self, value: str) -> None:
+        self._set_state(news_sentiment_head_path=value or "")
+
+    def set_news_sentiment_tokenizer_path(self, value: str) -> None:
+        self._set_state(news_sentiment_tokenizer_path=value or "")
 
     # --- 验证 (阶段 1) ---
 
@@ -302,6 +326,23 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             logger.warning("[AIBrainSettingsVM] validation failed: %s", err_key)
             return False
 
+        # N3-6: 新闻情绪打分启用时三路径非空（同步纯字符串校验；专属 err key 经
+        # warning_message 透出——现有 _validate_all 失败统一走 settings_save_failed
+        # 文案且被 View 测试锁定，不在本次变更范围内改动其 UX 契约）。
+        if self._state.news_sentiment_enabled:
+            paths = (
+                self._state.news_sentiment_model_path.strip(),
+                self._state.news_sentiment_head_path.strip(),
+                self._state.news_sentiment_tokenizer_path.strip(),
+            )
+            if not all(paths):
+                self._set_state(
+                    save_state=SAVE_ERROR,
+                    warning_message="settings_news_sentiment_paths_required",
+                )
+                logger.warning("[AIBrainSettingsVM] news sentiment paths required but incomplete")
+                return False
+
         # ========== 阶段 2: 持久化 ==========
         self._set_state(save_state=SAVE_SAVING)
         try:
@@ -337,6 +378,25 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                 self._set_state(save_state=SAVE_ERROR, warning_message="")
                 return False
 
+            # N3-6: 情绪模型文件 GGUF 魔数校验（复用 scorer 加载前同一入口
+            # _validate_model_file，提案 §9.2；同步文件 IO 经 IO 池执行，R16）。
+            # 失败 → SAVE_ERROR + 专属 i18n key（View 据此展示具体原因）。
+            if self._state.news_sentiment_enabled:
+                from services.local_model_manager import _validate_model_file
+
+                sentiment_model_path = self._state.news_sentiment_model_path.strip()
+                gguf_valid = await ThreadPoolManager().run_async(
+                    TaskType.IO,
+                    _validate_model_file,
+                    sentiment_model_path,
+                )
+                if not gguf_valid:
+                    self._set_state(
+                        save_state=SAVE_ERROR,
+                        warning_message="settings_news_sentiment_model_invalid",
+                    )
+                    return False
+
             def _save_configs_sync() -> bool:
                 """LocalModel + 其他 AI 配置保存, 在 IO 线程池执行 (R16)。"""
                 if not ConfigHandler.save_local_ai_config(**local_save_kwargs):
@@ -350,6 +410,12 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                         "ai_cost_limit_cny": ai_cost_limit_cny,
                         "ai_usd_to_cny_rate": usd_to_cny_rate,
                         "ai_local_only_mode": self._state.ai_local_only_mode,
+                        # N3-6: 新闻情绪打分配置（键与 scorer._read_config 一致；
+                        # scorer._ensure_ready 每次打分重读配置，保存后自动生效无需重启）
+                        "news_sentiment_enabled": self._state.news_sentiment_enabled,
+                        "news_sentiment_model_path": self._state.news_sentiment_model_path.strip(),
+                        "news_sentiment_head_path": self._state.news_sentiment_head_path.strip(),
+                        "news_sentiment_tokenizer_path": self._state.news_sentiment_tokenizer_path.strip(),
                     }
                 ):
                     return False

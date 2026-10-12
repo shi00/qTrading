@@ -476,6 +476,8 @@ def _patch_ai_brain_common_mocks(mod, monkeypatch) -> dict:
     mock_config.save_config.return_value = True
     mock_config.save_ai_system_prompt.return_value = True
     mock_config.set_ai_news_prompt.return_value = True
+    # N3-6: get_typed 返回 default（news_sentiment_* 配置），避免 MagicMock 真值误触发启用态校验
+    mock_config.get_typed.side_effect = lambda key, t, default: default
     # Task 5.2: ConfigHandler/ThreadPoolManager 下沉到 AIBrainSettingsViewModel,
     # patch 目标改为 VM 模块 (View 不再直接持有这两个符号);
     # 同时 patch utils.thread_pool 源模块, 覆盖 ai_brain_tab._do_save_ai_settings
@@ -833,6 +835,21 @@ class TestDoSaveAISettingsValidationPhase:
         env["fake_llm_vm"].save_config_mock.assert_not_called()
         env["show_snack"].assert_called_once_with("i18n[prompt_err_injection]", color=AppColors.WARNING)
 
+    def test_news_sentiment_enabled_missing_paths_specific_error(self, ai_brain_tab_env) -> None:
+        """N3-6: 启用情绪打分但路径为空 → 专属 i18n key 经 warning_message 透出（非通用文案）。
+
+        Switch 定位按遍历顺序: card_news_sentiment 先于 card_local_only,
+        故首个 ft.Switch 即新闻情绪打分开关。
+        """
+        env = ai_brain_tab_env
+        switches = [c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.Switch)]
+        _invoke(switches[0].on_change, _make_event(True))
+        handler, args, _ = self._trigger_save(env)
+        asyncio.run(handler(*args))
+
+        env["fake_llm_vm"].save_config_mock.assert_not_called()
+        env["show_snack"].assert_called_once_with("i18n[settings_news_sentiment_paths_required]", color=AppColors.ERROR)
+
     def test_max_cand_value_error_path(self, ai_brain_tab_env) -> None:
         """max_cand 非数字 → ValueError → show_snack(param_err), 不调 llm_vm.save_config。"""
         env = ai_brain_tab_env
@@ -914,6 +931,11 @@ class TestDoSaveAISettingsSaveFailedPhase:
                 "ai_cost_limit_cny": None,
                 "ai_usd_to_cny_rate": 7.2,
                 "ai_local_only_mode": False,
+                # N3-6: 新闻情绪打分配置（未启用 → 默认值）
+                "news_sentiment_enabled": False,
+                "news_sentiment_model_path": "",
+                "news_sentiment_head_path": "",
+                "news_sentiment_tokenizer_path": "",
             }
         )
         env["show_snack"].assert_called_once_with("i18n[settings_save_failed]", color=AppColors.ERROR)

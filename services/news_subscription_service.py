@@ -37,6 +37,28 @@ _HOT_CONCEPT_TAG_TIMEOUT_S = 3.0  # 热概念打标监听器等待上限
 # news_feed._sentiment_style 按该取值契约着色）。label 未知按缺失处理（None，R21 不伪装）。
 _SENTIMENT_LABEL_TO_CODE = {"利好": "Positive", "中性": "Neutral", "利空": "Negative"}
 
+# N3-6：LLM sentiment 入库白名单（严格大小写，与取值契约一致）。
+_LLM_SENTIMENT_CODES = ("Positive", "Neutral", "Negative")
+
+
+def _coerce_llm_sentiment(ai_result: dict | None) -> str | None:
+    """N3-6：从 classify_news 结果提取可入库的 sentiment code（纯函数）。
+
+    提案 §9.3：classify_news 全供应商失败路径返回 ``{"category": "unknown",
+    "sentiment": "neutral", "error": ...}``（小写 neutral）——存量 _parse_news_result
+    把该值回填为合法中性属伪装（R21），本新增路径不得沿用。故白名单严格大小写：
+    仅接受 ``Positive`` / ``Neutral`` / ``Negative``；失败标记（error 键 /
+    category=="unknown"）、空结果、未知取值一律归 ``None``（缺失不伪装）。
+    """
+    if not ai_result:
+        return None
+    if "error" in ai_result:
+        return None
+    if ai_result.get("category") == "unknown":
+        return None
+    label = ai_result.get("sentiment")
+    return label if label in _LLM_SENTIMENT_CODES else None
+
 
 class NewsUpdateType:
     NEW_ITEM = "new_item"
@@ -358,21 +380,16 @@ class NewsSubscriptionService:
             # Optional: Implement retry logic here if needed, but for periodic polling,
             # just failing and waiting for next interval is often cleaner.
 
-    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
-    async def _generate_tags(self, content: typing.Any):
-        """Generate tags for news content using AI or Rule-based fallback"""
-        clean_content = content.strip()
-        tag = ""
+    async def _classify_news_safe(self, content: str) -> dict | None:
+        """N3-6：classify_news 安全包装（从 _generate_tags 提取，tags/sentiment 共用单次调用）。
 
-        # Try AI Classification first
+        异常语义与原 _generate_tags 内联处理完全一致（Q1 语义不漂移）：
+        system 级异常记 error 后 raise（向 _processing_loop 传播）；其余异常记
+        warning 后返回 ``None``（调用方走规则回退）。``CancelledError`` 为
+        BaseException 子类，不被 ``except Exception`` 捕获，天然向上传播（R2）。
+        """
         try:
-            ai_result = await self.ai_client.classify_news(clean_content)
-            if ai_result:
-                emoji = ai_result.get("emoji", "[NEWS]")
-                category = ai_result.get("category", "News")
-
-                tag = I18n.get("news_tag_format", emoji=emoji, category=category)
-                return tag
+            return await self.ai_client.classify_news(content)
         except Exception as e:
             error_info = classify_error(e, context="general")
             severity = classify_severity(e)
@@ -388,6 +405,29 @@ class NewsSubscriptionService:
                 error_info["code"],
                 DataSanitizer.sanitize_error(e),
             )
+            return None
+
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
+    async def _generate_tags(self, content: typing.Any, ai_result: dict | None = None):
+        """Generate tags for news content using AI or Rule-based fallback.
+
+        N3-6：``ai_result`` 非空时复用调用方已获取的 classify_news 结果
+        （_processing_loop 单次调用，tags 与 sentiment 降级回退共用），默认
+        ``None`` 保持原有内部调用行为。两条路径的异常语义由 ``_classify_news_safe``
+        统一承载。
+        """
+        clean_content = content.strip()
+        tag = ""
+
+        # Try AI Classification first (caller-provided result wins; else fetch once)
+        if ai_result is None:
+            ai_result = await self._classify_news_safe(clean_content)
+        if ai_result:
+            emoji = ai_result.get("emoji", "[NEWS]")
+            category = ai_result.get("category", "News")
+
+            tag = I18n.get("news_tag_format", emoji=emoji, category=category)
+            return tag
 
         if any(k in clean_content for k in ["央行", "证监会", "国务院", "财政部", "政策", "立案", "违规"]):
             tag = I18n.get("news_tag_format", emoji="🏛️", category=I18n.get("tag_policy"))
@@ -399,18 +439,21 @@ class NewsSubscriptionService:
         return tag
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
-    async def _score_sentiment(self, content: str) -> str | None:
-        """N3-5：单条新闻情感打分 → 入库 code。
+    async def _score_sentiment(self, content: str, llm_fallback: str | None = None) -> str | None:
+        """N3-5：单条新闻情感打分 → 入库 code；N3-6：服务不可用时回退 LLM 结果。
 
         打分器契约（N3-2）：服务不可用（未启用/未配置/加载失败/超时/worker 错误）
-        整体返回 ``None``；条目非有限（NaN/Inf）为 ``None``——均按缺失处理（R21，
-        不回填中性、不伪装），label 未知同样归 ``None``。除 ``CancelledError``
-        （R2 向上传播）外不抛异常，无需 try 包裹。
+        整体返回 ``None``——此为「降级回退 LLM」的唯一触发面（提案 §9.2）：
+        返回 ``llm_fallback``（调用方经 ``_coerce_llm_sentiment`` 白名单过滤后的
+        classify_news sentiment）。条目非有限（NaN/Inf）与 label 未知仍按缺失处理
+        归 ``None`` 不回退——模型可用但输出无效 ≠ 服务不可用（R21，不伪装）。
+        ``llm_fallback`` 为 ``None``（无 LLM 结果或已被白名单拒绝）时维持 N3-5
+        语义：缺失即 ``None``。除 ``CancelledError``（R2 向上传播）外不抛异常。
         """
         scorer = await NewsSentimentScorer.get_instance()
         results = await scorer.score_texts([content])
         if not results:
-            return None
+            return llm_fallback
         first = results[0]
         if first is None:
             return None
@@ -446,12 +489,19 @@ class NewsSubscriptionService:
                     "content_hash", hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()[:12]
                 )  # 内容去重，非安全用途
                 with correlation_scope(f"news-{content_hash}"):
-                    tags = await self._generate_tags(content)
+                    # N3-6：单次 classify_news，tags 与 sentiment 降级回退共用同一结果
+                    # （system 级异常经 _classify_news_safe raise → 循环既有 system 分支处理）。
+                    ai_result = await self._classify_news_safe(content)
+                    tags = await self._generate_tags(content, ai_result=ai_result)
                     item["tags"] = tags
 
                     # N3-5：情感打分接线（打分 → normalize 透传 → 落库 sentiment 列）。
-                    # 服务不可用/NaN/未知 label 均归 None（R21 缺失不伪装）。
-                    item["sentiment"] = await self._score_sentiment(content)
+                    # N3-6：打分服务整体不可用时回退 LLM sentiment（白名单过滤，提案 §9.2）；
+                    # 服务可用但输出 NaN/未知 label 归 None 不回退（R21 缺失不伪装）。
+                    item["sentiment"] = await self._score_sentiment(
+                        content,
+                        llm_fallback=_coerce_llm_sentiment(ai_result),
+                    )
 
                     normalized = CacheManager.normalize_news_item(
                         item,

@@ -40,6 +40,8 @@ def mock_config_handler():
         m.get_ai_system_prompt.return_value = "default prompt"
         m.get_ai_news_prompt.return_value = "default news prompt"
         m.get_setting.return_value = None
+        # N3-6: 未显式配置的自由键（news_sentiment_*）返回 default，避免 MagicMock 真值误触发 GGUF 校验
+        m.get_typed.side_effect = lambda key, t, default: default
         m.save_local_ai_config.return_value = True
         m.save_config.return_value = True
         m.save_ai_system_prompt.return_value = True
