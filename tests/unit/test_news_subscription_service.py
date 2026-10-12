@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from services.news_subscription_service import (
     NewsSubscriptionService,
     NewsUpdateType,
+    _coerce_llm_sentiment,
 )
 from data.cache.cache_manager import CacheManager as RealCacheManager
 from data.persistence.daos.base_dao import EngineDisposedError
@@ -494,6 +495,41 @@ class TestGenerateTags:
 
 
 # ---------------------------------------------------------------------------
+# _coerce_llm_sentiment (N3-6)
+# ---------------------------------------------------------------------------
+
+
+class TestCoerceLlmSentiment:
+    """LLM sentiment 白名单过滤：严格大小写 + 失败标记拒绝（提案 §9.3 / Q7）。"""
+
+    def test_valid_codes_pass_through(self):
+        assert _coerce_llm_sentiment({"sentiment": "Positive"}) == "Positive"
+        assert _coerce_llm_sentiment({"sentiment": "Neutral"}) == "Neutral"
+        assert _coerce_llm_sentiment({"sentiment": "Negative"}) == "Negative"
+
+    def test_lowercase_neutral_rejected(self):
+        """classify_news 全供应商失败输出小写 "neutral" —— 存量伪装路径不得沿用。"""
+        assert _coerce_llm_sentiment({"category": "unknown", "sentiment": "neutral", "error": "x"}) is None
+
+    def test_error_key_rejected(self):
+        assert _coerce_llm_sentiment({"sentiment": "Positive", "error": "x"}) is None
+
+    def test_category_unknown_rejected(self):
+        assert _coerce_llm_sentiment({"category": "unknown", "sentiment": "Positive"}) is None
+
+    def test_none_and_empty_rejected(self):
+        assert _coerce_llm_sentiment(None) is None
+        assert _coerce_llm_sentiment({}) is None
+
+    def test_unknown_label_rejected(self):
+        assert _coerce_llm_sentiment({"sentiment": "看涨"}) is None
+        assert _coerce_llm_sentiment({"sentiment": "positive"}) is None
+
+    def test_missing_sentiment_key_rejected(self):
+        assert _coerce_llm_sentiment({"emoji": "🚀", "category": "Tech"}) is None
+
+
+# ---------------------------------------------------------------------------
 # _score_sentiment (N3-5)
 # ---------------------------------------------------------------------------
 
@@ -546,6 +582,38 @@ class TestScoreSentiment:
         """契约外 label 按缺失处理（None），不伪装为 Neutral 合法值。"""
         with self._patched_scorer([{"label": "无法判断", "confidence": 0.5, "score": 0.0}]):
             assert await svc._score_sentiment("内容") is None
+
+    # --- N3-6: 服务不可用 → LLM 降级回退（提案 §9.2）---
+
+    @pytest.mark.asyncio
+    async def test_service_unavailable_falls_back_to_llm(self, svc):
+        """打分服务整体不可用 → 回退 llm_fallback（经白名单过滤后的 LLM sentiment）。"""
+        with self._patched_scorer(None):
+            assert await svc._score_sentiment("内容", llm_fallback="Positive") == "Positive"
+
+    @pytest.mark.asyncio
+    async def test_service_unavailable_no_fallback_returns_none(self, svc):
+        """无 LLM 结果（fallback=None）→ 维持 N3-5 语义缺失即 None。"""
+        with self._patched_scorer(None):
+            assert await svc._score_sentiment("内容", llm_fallback=None) is None
+
+    @pytest.mark.asyncio
+    async def test_nan_entry_ignores_fallback(self, svc):
+        """模型可用但条目 NaN → 不回退（输出无效 ≠ 服务不可用，R21）。"""
+        with self._patched_scorer([None]):
+            assert await svc._score_sentiment("内容", llm_fallback="Positive") is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_label_ignores_fallback(self, svc):
+        """模型可用但 label 未知 → 不回退。"""
+        with self._patched_scorer([{"label": "无法判断", "confidence": 0.5, "score": 0.0}]):
+            assert await svc._score_sentiment("内容", llm_fallback="Positive") is None
+
+    @pytest.mark.asyncio
+    async def test_scored_result_wins_over_fallback(self, svc):
+        """打分成功时优先打分结果，fallback 不生效。"""
+        with self._patched_scorer([{"label": "利空", "confidence": 0.8, "score": -0.5}]):
+            assert await svc._score_sentiment("内容", llm_fallback="Positive") == "Negative"
 
 
 # ---------------------------------------------------------------------------
@@ -635,6 +703,72 @@ class TestProcessingLoop:
         saved = await self._run_one_item(svc, {"content": "紫金矿业发现金矿", "time": "2024-01-01"}, "Positive")
         assert saved["sentiment"] == "Positive"
 
+    @staticmethod
+    async def _run_one_item_llm_fallback(svc, item, scorer_results, classify_result):
+        """N3-6 全链：真实 _generate_tags/_score_sentiment（scorer/classify mock），返回落库 dict。
+
+        与 _run_one_item 区别：不 mock 服务方法本身，验证单次 classify_news 共用 +
+        白名单过滤 + 降级回退贯通。scorer_results=None 模拟打分服务整体不可用。
+        """
+        svc._running = True
+        svc.processing_queue = asyncio.Queue(maxsize=1)
+        svc.processing_queue.put_nowait(item)
+        svc.ai_client.classify_news = AsyncMock(return_value=classify_result)
+        with (
+            patch("services.news_subscription_service.NewsSentimentScorer") as mock_scorer_cls,
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=RealCacheManager.normalize_news_item,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", AsyncMock()) as mock_save,
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+        ):
+            mock_scorer_cls.get_instance = AsyncMock(
+                return_value=MagicMock(score_texts=AsyncMock(return_value=scorer_results))
+            )
+            task = asyncio.create_task(svc._processing_loop())
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        return mock_save.call_args[0][0], svc.ai_client.classify_news
+
+    @pytest.mark.asyncio
+    async def test_llm_fallback_flows_when_scorer_unavailable(self, svc):
+        """N3-6 全链：打分服务不可用 + LLM 判利好 → 落库 sentiment="Positive"；单次 classify。"""
+        saved, classify = await self._run_one_item_llm_fallback(
+            svc,
+            {"content": "紫金矿业发现金矿", "time": "2024-01-01"},
+            None,
+            {"emoji": "🚀", "category": "Tech", "sentiment": "Positive"},
+        )
+        assert saved["sentiment"] == "Positive"
+        classify.assert_called_once_with("紫金矿业发现金矿")  # N3-6: 单次 classify_news 且入参为原始 content
+
+    @pytest.mark.asyncio
+    async def test_llm_lowercase_neutral_never_persists(self, svc):
+        """Q7 全链：classify 全供应商失败（小写 neutral + error）→ 落库 None 不伪装。"""
+        saved, _ = await self._run_one_item_llm_fallback(
+            svc,
+            {"content": "紫金矿业发现金矿", "time": "2024-01-01"},
+            None,
+            {"category": "unknown", "sentiment": "neutral", "error": "all providers failed"},
+        )
+        assert saved["sentiment"] is None
+
+    @pytest.mark.asyncio
+    async def test_both_unavailable_no_keyword_guess(self, svc):
+        """R21 负向：打分与 LLM 均不可用 → 落库 None（不做关键词猜测、不回填中性）。"""
+        saved, _ = await self._run_one_item_llm_fallback(
+            svc,
+            {"content": "普通新闻无关键词", "time": "2024-01-01"},
+            None,
+            None,
+        )
+        assert saved["sentiment"] is None
+
     @pytest.mark.asyncio
     async def test_engine_disposed_breaks_loop(self, svc):
         """EngineDisposedError 应 break 循环。"""
@@ -657,7 +791,7 @@ class TestProcessingLoop:
 
         call_count = 0
 
-        async def mock_gen_tags(content):
+        async def mock_gen_tags(content, ai_result=None):
             nonlocal call_count
             call_count += 1
             raise RuntimeError("processing error")
@@ -696,7 +830,7 @@ class TestProcessingLoop:
         md5_mock = MagicMock()
         md5_mock.hexdigest.return_value = "a" * 12
 
-        async def fake_generate_tags(content):
+        async def fake_generate_tags(content, ai_result=None):
             processed.set()
             return "tag"
 

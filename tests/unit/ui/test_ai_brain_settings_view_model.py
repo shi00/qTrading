@@ -38,6 +38,9 @@ def mock_config_handler():
         ch.save_config.return_value = True
         ch.save_ai_system_prompt.return_value = True
         ch.set_ai_news_prompt.return_value = True
+        # N3-6: get_typed 默认返回 default 值（news_sentiment_* 配置读取路径），
+        # 避免 MagicMock 真值误触发启用态校验
+        ch.get_typed.side_effect = lambda key, t, default: default
         yield ch
 
 
@@ -282,6 +285,117 @@ class TestUsdToCnyRateConfig:
             assert await vm.save_ai_settings() is True
         call_data = mock_config_handler.save_config.call_args.args[0]
         assert call_data["ai_usd_to_cny_rate"] == 7.2
+
+
+# ============================================================================
+# N3-6: 新闻情绪打分设置（State 字段 / 持久化 / 启用态校验 / GGUF 魔数校验）
+# ============================================================================
+
+
+class TestNewsSentimentSettings:
+    """news_sentiment_* 配置读写与启用态校验（键与 scorer._read_config 一致）。"""
+
+    def test_load_defaults(self, make_vm, mock_config_handler):
+        vm = make_vm()
+        assert vm.state.news_sentiment_enabled is False
+        assert vm.state.news_sentiment_model_path == ""
+        assert vm.state.news_sentiment_head_path == ""
+        assert vm.state.news_sentiment_tokenizer_path == ""
+
+    def test_load_from_config(self, make_vm, mock_config_handler):
+        mock_config_handler.get_typed.side_effect = lambda key, t, default: {
+            "news_sentiment_enabled": True,
+            "news_sentiment_model_path": "m.gguf",
+            "news_sentiment_head_path": "h.json",
+            "news_sentiment_tokenizer_path": "tok",
+        }.get(key, default)
+        vm = make_vm()
+        assert vm.state.news_sentiment_enabled is True
+        assert vm.state.news_sentiment_model_path == "m.gguf"
+        assert vm.state.news_sentiment_head_path == "h.json"
+        assert vm.state.news_sentiment_tokenizer_path == "tok"
+
+    def test_setters_update_state(self, make_vm):
+        vm = make_vm()
+        vm.set_news_sentiment_enabled(True)
+        vm.set_news_sentiment_model_path("a.gguf")
+        vm.set_news_sentiment_head_path("b.json")
+        vm.set_news_sentiment_tokenizer_path("c")
+        assert vm.state.news_sentiment_enabled is True
+        assert vm.state.news_sentiment_model_path == "a.gguf"
+        assert vm.state.news_sentiment_head_path == "b.json"
+        assert vm.state.news_sentiment_tokenizer_path == "c"
+        # None 防御 → 空串（R21 缺失不伪装为合法路径）
+        vm.set_news_sentiment_model_path(None)
+        assert vm.state.news_sentiment_model_path == ""
+
+    async def test_save_persists_news_sentiment_keys(self, make_vm, mock_config_handler):
+        vm = make_vm()
+        vm.set_news_sentiment_enabled(True)
+        vm.set_news_sentiment_model_path(" a.gguf ")
+        vm.set_news_sentiment_head_path(" b.json ")
+        vm.set_news_sentiment_tokenizer_path(" c ")
+        with (
+            patch("services.local_model_manager._validate_model_file", return_value=True),
+            _patch_save_deps(),
+        ):
+            assert await vm.save_ai_settings() is True
+        call_data = mock_config_handler.save_config.call_args.args[0]
+        assert call_data["news_sentiment_enabled"] is True
+        assert call_data["news_sentiment_model_path"] == "a.gguf"
+        assert call_data["news_sentiment_head_path"] == "b.json"
+        assert call_data["news_sentiment_tokenizer_path"] == "c"
+
+    async def test_enabled_missing_paths_rejected(self, make_vm, mock_config_handler):
+        """启用但路径不全 → SAVE_ERROR + 专属 i18n key，不进入持久化。"""
+        vm = make_vm()
+        vm.set_news_sentiment_enabled(True)
+        vm.set_news_sentiment_model_path("a.gguf")
+        with _patch_save_deps():
+            assert await vm.save_ai_settings() is False
+        assert vm.state.save_state == "error"
+        assert vm.state.warning_message == "settings_news_sentiment_paths_required"
+        mock_config_handler.save_config.assert_not_called()
+
+    async def test_disabled_skips_gguf_check(self, make_vm, mock_config_handler):
+        """未启用时不做 GGUF 魔数校验（路径可为空）。"""
+        vm = make_vm()
+        with patch("services.local_model_manager._validate_model_file") as mock_validate:
+            with _patch_save_deps():
+                assert await vm.save_ai_settings() is True
+        mock_validate.assert_not_called()
+
+    async def test_enabled_invalid_gguf_rejected(self, make_vm, mock_config_handler):
+        """启用且魔数校验失败 → SAVE_ERROR + 专属 i18n key，不持久化。"""
+        vm = make_vm()
+        vm.set_news_sentiment_enabled(True)
+        vm.set_news_sentiment_model_path("bad.gguf")
+        vm.set_news_sentiment_head_path("h.json")
+        vm.set_news_sentiment_tokenizer_path("tok")
+        with (
+            patch("services.local_model_manager._validate_model_file", return_value=False) as mock_validate,
+            _patch_save_deps(),
+        ):
+            assert await vm.save_ai_settings() is False
+        mock_validate.assert_called_once_with("bad.gguf")
+        assert vm.state.save_state == "error"
+        assert vm.state.warning_message == "settings_news_sentiment_model_invalid"
+        mock_config_handler.save_config.assert_not_called()
+
+    async def test_enabled_valid_gguf_saves(self, make_vm, mock_config_handler):
+        vm = make_vm()
+        vm.set_news_sentiment_enabled(True)
+        vm.set_news_sentiment_model_path("good.gguf")
+        vm.set_news_sentiment_head_path("h.json")
+        vm.set_news_sentiment_tokenizer_path("tok")
+        with (
+            patch("services.local_model_manager._validate_model_file", return_value=True) as mock_validate,
+            _patch_save_deps(),
+        ):
+            assert await vm.save_ai_settings() is True
+        mock_validate.assert_called_once_with("good.gguf")
+        assert vm.state.save_state == "success"
+        assert vm.state.warning_message == ""
 
 
 # ============================================================================

@@ -62,6 +62,7 @@ logger = logging.getLogger(__name__)
 # UI Constants
 # ============================================================================
 _INPUT_WIDTH_SMALL = 190
+_INPUT_WIDTH_PATH = 560  # N3-6: 情绪模型路径输入（完整路径需更宽，约 3 倍数值输入宽）
 
 
 # ============================================================================
@@ -216,7 +217,14 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
             # (异步流程中读 ai_settings_vm.state 拿最新值, 非 use_viewmodel 快照)
             current_state = ai_settings_vm.state
             if current_state.save_state == SAVE_ERROR:
-                show_snack_callback(I18n.get("settings_save_failed"), color=AppColors.ERROR)
+                # N3-6: warning_message 非空时透出具体失败原因（如新闻情绪模型校验失败），
+                # 空值维持既有统一文案（现有失败路径 warning_message 恒为空，行为不变）
+                err_text = (
+                    I18n.get(current_state.warning_message)
+                    if current_state.warning_message
+                    else I18n.get("settings_save_failed")
+                )
+                show_snack_callback(err_text, color=AppColors.ERROR)
             elif current_state.save_state == SAVE_SUCCESS:
                 # warning_message 非空表示 MD5 检查发现模型文件变化 (VM 已写入 i18n key)
                 if current_state.warning_message:
@@ -507,6 +515,62 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     )
     card_local_ai = DashboardCard(
         content=ft.Column([local_model_panel]),
+    )
+
+    # --- N3-6: 新闻情绪打分卡片（本地小模型打分 + LLM 降级回退；路径手输，N5-4 接文件选择器）---
+    def _on_news_sentiment_toggle(e: ft.ControlEvent) -> None:
+        ai_settings_vm.set_news_sentiment_enabled(get_control_value(e.control, ft.Switch))
+
+    news_sentiment_switch = ft.Switch(
+        label="",
+        value=ai_settings_state.news_sentiment_enabled,
+        on_change=safe_on_change(_on_news_sentiment_toggle),
+    )
+
+    def _news_sentiment_path_input(label_key: str, state_attr: str, setter: str) -> ft.TextField:
+        """N3-6: 路径输入框统一构造（R23 token 范式与调优卡片一致）。"""
+        return ft.TextField(
+            label=I18n.get(label_key),
+            value=getattr(ai_settings_state, state_attr),
+            width=_INPUT_WIDTH_PATH,
+            on_change=lambda e: getattr(ai_settings_vm, setter)(e.control.value),
+            on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
+            bgcolor=AppColors.INPUT_BG,
+            color=AppColors.INPUT_TEXT,
+            border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
+        )
+
+    news_sentiment_model_input = _news_sentiment_path_input(
+        "settings_news_sentiment_model_path", "news_sentiment_model_path", "set_news_sentiment_model_path"
+    )
+    news_sentiment_head_input = _news_sentiment_path_input(
+        "settings_news_sentiment_head_path", "news_sentiment_head_path", "set_news_sentiment_head_path"
+    )
+    news_sentiment_tokenizer_input = _news_sentiment_path_input(
+        "settings_news_sentiment_tokenizer_path", "news_sentiment_tokenizer_path", "set_news_sentiment_tokenizer_path"
+    )
+    card_news_sentiment = DashboardCard(
+        content=ft.Column(
+            [
+                SettingRow(
+                    icon=safe_icon_str(ft.Icons.INSIGHTS),
+                    title=I18n.get("settings_news_sentiment_title"),
+                    subtitle=I18n.get("settings_news_sentiment_desc"),
+                    control=news_sentiment_switch,
+                    icon_color=AppColors.PRIMARY,
+                    title_key="settings_news_sentiment_title",
+                    subtitle_key="settings_news_sentiment_desc",
+                ),
+                news_sentiment_model_input,
+                news_sentiment_head_input,
+                news_sentiment_tokenizer_input,
+                ft.Text(
+                    I18n.get("settings_news_sentiment_hint"),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_HINT,
+                ),
+            ],
+        ),
     )
 
     # --- Tuning card ---
@@ -809,6 +873,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                 card_data_boundary,
                 card_failover,
                 card_local_ai,
+                card_news_sentiment,
                 card_tuning,
                 card_prompt,
                 card_local_only,
