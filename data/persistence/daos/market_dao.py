@@ -159,18 +159,23 @@ class MarketDao(BaseDao):
 
         N3-5：sentiment 冲突时取 ``COALESCE(excluded, 旧值)``——处理循环 UPSERT
         补写打分结果；重试/重复打分失败（None）不清空已有值（与 tags 同范式）。
+        N5-2：sentiment_score / sentiment_conf / sentiment_model 三打分列随载荷落库，
+        冲突时同 COALESCE 范式（打分失败 None 不清空既有值）。
         """
         content = news_item.get("content", "") or ""
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
         sql = """
-              INSERT INTO market_news ("content","content_hash","tags","publish_time","source","sentiment","created_at")
-              VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+              INSERT INTO market_news ("content","content_hash","tags","publish_time","source","sentiment","sentiment_score","sentiment_conf","sentiment_model","created_at")
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP)
               ON CONFLICT("content_hash","publish_time") DO
               UPDATE SET "tags" = COALESCE(excluded."tags", market_news."tags"),
                          "content" = excluded."content",
                          "source" = excluded."source",
-                         "sentiment" = COALESCE(excluded."sentiment", market_news."sentiment")
+                         "sentiment" = COALESCE(excluded."sentiment", market_news."sentiment"),
+                         "sentiment_score" = COALESCE(excluded."sentiment_score", market_news."sentiment_score"),
+                         "sentiment_conf" = COALESCE(excluded."sentiment_conf", market_news."sentiment_conf"),
+                         "sentiment_model" = COALESCE(excluded."sentiment_model", market_news."sentiment_model")
               """
         params = (
             content,
@@ -179,6 +184,9 @@ class MarketDao(BaseDao):
             news_item.get("publish_time"),
             news_item.get("source", "Sina"),
             news_item.get("sentiment"),
+            news_item.get("sentiment_score"),
+            news_item.get("sentiment_conf"),
+            news_item.get("sentiment_model"),
         )
         return await self._write_db(sql, params)
 
@@ -292,6 +300,67 @@ class MarketDao(BaseDao):
         sql += " ORDER BY publish_time DESC"
         # 证据读取不得吞 DB 故障（§10.3）：与 get_telegraph_news_for_stocks 同理由，
         # suppress_errors=False 让 DB 故障显式抛异常，避免伪装成 no_evidence。
+        return await self._read_db(sql, params, suppress_errors=False)
+
+    async def get_scored_stock_news(
+        self,
+        ts_code: str,
+        start_time: typing.Any = None,
+        end_time: typing.Any = None,
+    ):
+        """按 ts_code 读取个股公告/个股新闻的打分行（N5-2 情绪指数聚合用）。
+
+        限定 ``source_kind IN ('announcement','news')``（ts_code 直达口径，与
+        ``get_market_news_documents`` 一致）；显式列含
+        sentiment_score / sentiment_conf / sentiment_model 三打分列。
+        telegraph 快讯不在此列（ts_code 恒为 NULL，由服务层经
+        ``get_telegraph_news_for_stocks`` + ``match_news_to_stock`` 精确关联另行并入）。
+        """
+        if not ts_code:
+            return pd.DataFrame()
+        sql = (
+            "SELECT id, content, title, publish_time, source, source_kind, "
+            "sentiment, sentiment_score, sentiment_conf, sentiment_model FROM market_news"
+        )
+        sql += " WHERE ts_code = $1 AND source_kind IN ($2, $3)"
+        params: list = [ts_code, "announcement", "news"]
+        idx = 4
+        if start_time is not None:
+            sql += " AND publish_time >= $" + str(idx)
+            params.append(start_time)
+            idx += 1
+        if end_time is not None:
+            sql += " AND publish_time <= $" + str(idx)
+            params.append(end_time)
+        sql += " ORDER BY publish_time DESC"
+        # 聚合读取不得吞 DB 故障（§10.3 同理由）：suppress_errors=False。
+        return await self._read_db(sql, params, suppress_errors=False)
+
+    async def get_telegraph_news_in_window(
+        self,
+        start_time: typing.Any = None,
+        end_time: typing.Any = None,
+        limit: int = 1000,
+    ):
+        """读取时间窗内全部 telegraph/存量快讯（N5-2 市场级情绪聚合用，无个股预筛）。
+
+        口径与 ``get_telegraph_news_for_stocks`` 一致（``source_kind = 'telegraph'
+        OR NULL``）；``【市场】`` 前缀过滤属业务语义，由服务层承担（DAO 保持通用）。
+        """
+        sql = "SELECT * FROM market_news WHERE (source_kind = $1 OR source_kind IS NULL)"
+        params: list = ["telegraph"]
+        idx = 2
+        if start_time is not None:
+            sql += " AND publish_time >= $" + str(idx)
+            params.append(start_time)
+            idx += 1
+        if end_time is not None:
+            sql += " AND publish_time <= $" + str(idx)
+            params.append(end_time)
+            idx += 1
+        sql += " ORDER BY publish_time DESC LIMIT $" + str(idx)
+        params.append(limit)
+        # 聚合读取不得吞 DB 故障（§10.3 同理由）：suppress_errors=False。
         return await self._read_db(sql, params, suppress_errors=False)
 
     async def save_news_risk_brief(self, brief: dict) -> None:

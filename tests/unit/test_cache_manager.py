@@ -1646,6 +1646,27 @@ class TestCacheManagerNormalizeNewsItem:
         result = CacheManager.normalize_news_item(item)
         assert result["sentiment"] is None
 
+    def test_sentiment_score_columns_passthrough(self):
+        """N5-2：item 带三打分键（score/conf/model）时透传入库 code。"""
+        item = {
+            "content": "test",
+            "sentiment_score": 0.87,
+            "sentiment_conf": 0.92,
+            "sentiment_model": "finbert2-news-q8_0",
+        }
+        result = CacheManager.normalize_news_item(item)
+        assert result["sentiment_score"] == 0.87
+        assert result["sentiment_conf"] == 0.92
+        assert result["sentiment_model"] == "finbert2-news-q8_0"
+
+    def test_sentiment_score_columns_missing_defaults_none(self):
+        """N5-2/R21：item 无三打分键（未打分路径）→ None，不伪装为 0 分/0 置信度。"""
+        item = {"content": "test"}
+        result = CacheManager.normalize_news_item(item)
+        assert result["sentiment_score"] is None
+        assert result["sentiment_conf"] is None
+        assert result["sentiment_model"] is None
+
 
 class TestCacheManagerSanitizeUrl:
     """URL 脱敏逻辑（review01-A4 Step2 移入 EngineManager.sanitize_url 静态方法）。"""

@@ -436,6 +436,19 @@ class NewsSentimentScorer:
             "timeout_s": ConfigHandler.get_typed("news_sentiment_timeout_s", float, _DEFAULT_TIMEOUT_S),
         }
 
+    @property
+    def model_tag(self) -> str | None:
+        """N5-2：已加载模型标识（GGUF 文件 stem，截断 ≤32 字符对齐
+        market_news.sentiment_model String(32)）。
+
+        未加载/未配置时 ``None``（R21：缺失不伪装）。仅在 ``score_texts`` 成功路径
+        有值——打分载荷写入该标识即「本条分数由该模型产出」的溯源语义。
+        """
+        path = self._model_path
+        if not path:
+            return None
+        return Path(path).stem[:32]
+
     def _is_enabled(self) -> bool:
         return bool(self._config_reader().get("enabled"))
 

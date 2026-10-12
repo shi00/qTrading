@@ -439,25 +439,50 @@ class NewsSubscriptionService:
         return tag
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
-    async def _score_sentiment(self, content: str, llm_fallback: str | None = None) -> str | None:
-        """N3-5：单条新闻情感打分 → 入库 code；N3-6：服务不可用时回退 LLM 结果。
+    async def _score_sentiment_result(self, content: str, llm_fallback: str | None = None) -> dict:
+        """N5-2：打分 → 完整落库载荷（sentiment code + score/conf/model 三数值列）。
 
-        打分器契约（N3-2）：服务不可用（未启用/未配置/加载失败/超时/worker 错误）
-        整体返回 ``None``——此为「降级回退 LLM」的唯一触发面（提案 §9.2）：
-        返回 ``llm_fallback``（调用方经 ``_coerce_llm_sentiment`` 白名单过滤后的
-        classify_news sentiment）。条目非有限（NaN/Inf）与 label 未知仍按缺失处理
-        归 ``None`` 不回退——模型可用但输出无效 ≠ 服务不可用（R21，不伪装）。
-        ``llm_fallback`` 为 ``None``（无 LLM 结果或已被白名单拒绝）时维持 N3-5
-        语义：缺失即 ``None``。除 ``CancelledError``（R2 向上传播）外不抛异常。
+        降级面与 _score_sentiment 一致（N3-5/N3-6）：
+        - 服务整体不可用（未启用/未配置/加载失败/超时/worker 错误）→ sentiment 取
+          ``llm_fallback``（白名单过滤后的 classify_news 结果），三数值列 None（R21）；
+        - 条目无效（NaN/Inf/未知 label）→ sentiment None 且不回退；score/conf 为
+          模型数值输出，有效则保留（label 与 score 语义独立）；
+        - ``sentiment_model`` 取打分器已加载模型标识（未加载/未配置 None，R21）。
+        除 ``CancelledError``（R2 向上传播）外不抛异常。
         """
         scorer = await NewsSentimentScorer.get_instance()
         results = await scorer.score_texts([content])
         if not results:
-            return llm_fallback
+            return {
+                "sentiment": llm_fallback,
+                "sentiment_score": None,
+                "sentiment_conf": None,
+                "sentiment_model": None,
+            }
         first = results[0]
         if first is None:
-            return None
-        return _SENTIMENT_LABEL_TO_CODE.get(first.get("label"))
+            return {
+                "sentiment": None,
+                "sentiment_score": None,
+                "sentiment_conf": None,
+                "sentiment_model": None,
+            }
+        label = first.get("label")
+        return {
+            "sentiment": _SENTIMENT_LABEL_TO_CODE.get(label) if isinstance(label, str) else None,
+            "sentiment_score": first.get("score"),
+            "sentiment_conf": first.get("confidence"),
+            "sentiment_model": scorer.model_tag,
+        }
+
+    async def _score_sentiment(self, content: str, llm_fallback: str | None = None) -> str | None:
+        """N3-5：单条新闻情感打分 → 入库 code；N3-6：服务不可用时回退 LLM 结果。
+
+        契约细节见 :meth:`_score_sentiment_result`（N5-2 起 sentiment 为其载荷的
+        sentiment 键；score/conf/model 三列由处理循环经同一载荷落库）。
+        """
+        payload = await self._score_sentiment_result(content, llm_fallback=llm_fallback)
+        return payload["sentiment"]
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _processing_loop(self):
@@ -498,10 +523,12 @@ class NewsSubscriptionService:
                     # N3-5：情感打分接线（打分 → normalize 透传 → 落库 sentiment 列）。
                     # N3-6：打分服务整体不可用时回退 LLM sentiment（白名单过滤，提案 §9.2）；
                     # 服务可用但输出 NaN/未知 label 归 None 不回退（R21 缺失不伪装）。
-                    item["sentiment"] = await self._score_sentiment(
+                    # N5-2：完整载荷（sentiment + 三打分列）随 normalize 透传落库。
+                    payload = await self._score_sentiment_result(
                         content,
                         llm_fallback=_coerce_llm_sentiment(ai_result),
                     )
+                    item.update(payload)
 
                     normalized = CacheManager.normalize_news_item(
                         item,
