@@ -12,6 +12,19 @@ from utils.time_utils import to_utc_for_db
 
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
 
+# N3-4 patch 目标与 HTML 构造（与 test_news_fetcher.py 同款）
+_SINA_FETCH_SYNC = "data.external.news_sources.sina_stock.fetch_page_sync"
+
+
+def _sina_html_row(date_s: str, time_s: str, url: str, title: str) -> str:
+    """构造符合 sina_stock.LIST_ROW_RE 的一行新闻 HTML（与真实页面行格式一致）。"""
+    return f"&nbsp;&nbsp;&nbsp;&nbsp;{date_s}&nbsp;{time_s}&nbsp;&nbsp;<a target='_blank' href='{url}'>{title}</a> <br>"
+
+
+def _sina_html(rows: list[tuple[str, str, str, str]]) -> str:
+    """把 (日期, 时间, URL, 标题) 行列表拼为完整 HTML（供 mock fetch_page_sync 返回）。"""
+    return "".join(_sina_html_row(*row) for row in rows)
+
 
 @pytest.fixture(autouse=True)
 def _mock_akshare_shared_limiter():
@@ -69,8 +82,9 @@ class TestGetStockNewsDocuments:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(_SINA_FETCH_SYNC)
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_merges_both_sources(self, mock_get_ak, mock_run, mock_tpm):
+    async def test_merges_both_sources(self, mock_get_ak, mock_sina_fetch, mock_run, mock_tpm):
         mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         today = datetime.date.today()
         diff = datetime.timedelta(days=1)
@@ -83,17 +97,11 @@ class TestGetStockNewsDocuments:
                 "公告链接": ["http://cninfo/a"],
             }
         )
-        em = pd.DataFrame(
-            {
-                "新闻标题": ["银行股上涨"],
-                "新闻内容": ["详细内容"],
-                "发布时间": [today.strftime("%Y-%m-%d 10:00:00")],
-                "新闻链接": ["http://em/1"],
-                "文章来源": ["东财"],
-            }
+        # N3-4：news 层为新浪个股列表页（content 恒空串，列表页无正文）
+        mock_sina_fetch.return_value = _sina_html(
+            [(today.strftime("%Y-%m-%d"), "10:00", "http://sina/1", "银行股上涨")]
         )
         mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = cninfo
-        mock_ak.stock_news_em.return_value = em
 
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
@@ -116,31 +124,28 @@ class TestGetStockNewsDocuments:
         assert ann["publish_time"].tzinfo is None
         # review08-D1：公告仅日期（CST）→ 补 00:00:00 后转 UTC naive（前日 16:00），与 get_stock_news 同口径
         assert ann["publish_time"] == to_utc_for_db(datetime.datetime.combine(today - diff, datetime.time()))
-        assert nws["url"] == "http://em/1"
-        assert nws["content"] == "详细内容"
+        assert nws["url"] == "http://sina/1"
+        assert nws["content"] == ""
+        # N3-4：新浪行内时间无秒补 :00，CST 10:00 → UTC naive 02:00
         assert nws["publish_time"] == to_utc_for_db(datetime.datetime.combine(today, datetime.time(10, 0, 0)))
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(_SINA_FETCH_SYNC)
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_limits_after_window_filter(self, mock_get_ak, mock_run, mock_tpm):
+    async def test_limits_after_window_filter(self, mock_get_ak, mock_sina_fetch, mock_run, mock_tpm):
         """排序降序 + 窗口过滤后限量。"""
         mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         today = datetime.date.today()
-        em = pd.DataFrame(
-            {
-                "新闻标题": ["t1", "t2", "t3"],
-                "新闻内容": ["c1", "c2", "c3"],
-                "发布时间": [
-                    today.strftime("%Y-%m-%d 12:00:00"),
-                    today.strftime("%Y-%m-%d 11:00:00"),
-                    today.strftime("%Y-%m-%d 10:00:00"),
-                ],
-                "新闻链接": ["http://e/1", "http://e/2", "http://e/3"],
-            }
+        # N3-4：新浪层三行（列表页按时间降序给出），合并后仍按 publish_time 降序取前 2
+        mock_sina_fetch.return_value = _sina_html(
+            [
+                (today.strftime("%Y-%m-%d"), "12:00", "http://e/1", "t1"),
+                (today.strftime("%Y-%m-%d"), "11:00", "http://e/2", "t2"),
+                (today.strftime("%Y-%m-%d"), "10:00", "http://e/3", "t3"),
+            ]
         )
-        mock_ak.stock_news_em.return_value = em
         mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame(
             {"公告标题": [], "公告时间": [], "公告链接": []}
         )
@@ -157,20 +162,23 @@ class TestGetStockNewsDocuments:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(_SINA_FETCH_SYNC)
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_cninfo_fail_still_returns_em_with_coverage(self, mock_get_ak, mock_run, mock_tpm):
+    async def test_cninfo_fail_still_returns_sina_with_coverage(self, mock_get_ak, mock_sina_fetch, mock_run, mock_tpm):
+        """N3-4：巨潮层失败仍返回新浪个股新闻 + coverage 状态正确。"""
         mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo down")
-        today = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        em = pd.DataFrame(
-            {
-                "新闻标题": ["东财消息"],
-                "新闻内容": ["x"],
-                "发布时间": [today],
-                "新闻链接": ["http://em/1"],
-            }
+        now_dt = datetime.datetime.now()
+        mock_sina_fetch.return_value = _sina_html(
+            [
+                (
+                    now_dt.strftime("%Y-%m-%d"),
+                    now_dt.strftime("%H:%M"),
+                    "http://sina/1",
+                    "新浪消息",
+                )
+            ]
         )
-        mock_ak.stock_news_em.return_value = em
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(side_effect=lambda task_type, fn, *a, **k: fn() or (None, None))

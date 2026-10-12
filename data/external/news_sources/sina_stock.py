@@ -60,8 +60,26 @@ DEFAULT_USER_AGENT = (
 PAGE_SIZE = 40
 NEWS_ENCODING = "gb18030"
 
+# ts_code 交易所后缀（Tushare 大写后缀 → 新浪小写前缀；与 sina_7x24._EXCHANGE_SUFFIX 互逆）
+_EXCHANGE_PREFIX = {"sh": "sh", "sz": "sz", "bj": "bj"}
+
 # 规格 §3.1 列表行正则：无秒时间 + 单引号 href（页面导航链接为双引号，天然不命中）
 LIST_ROW_RE = re.compile(r"(\d{4}-\d{2}-\d{2})&nbsp;(\d{2}:\d{2})&nbsp;&nbsp;<a[^>]*href='([^']+)'[^>]*>([^<]+)</a>")
+
+
+def ts_code_to_symbol(ts_code: object) -> str | None:
+    """Tushare ``ts_code``（``600519.SH``）→ 新浪个股 symbol（``sh600519``）。
+
+    与 :func:`sina_7x24.map_symbol_to_ts_code` 互逆：仅接受 6 位数字代码 + ``SH``/``SZ``/``BJ``
+    （大小写不敏感）后缀；其余（指数 ts_code 语义由调用方自行判断、无后缀、非数字）返回 ``None``。
+    """
+    if not isinstance(ts_code, str):
+        return None
+    code, _, suffix = ts_code.strip().rpartition(".")
+    prefix = _EXCHANGE_PREFIX.get(suffix.strip().lower())
+    if prefix is None or len(code) != 6 or not code.isdigit():
+        return None
+    return f"{prefix}{code}"
 
 
 def build_url(symbol: str, page: int = 1) -> str:
@@ -171,3 +189,17 @@ async def fetch_page(
     response = await client.get(build_url(symbol, page))
     response.raise_for_status()
     return decode_html(response.content)
+
+
+def fetch_page_sync(symbol: str, page: int = 1) -> str:
+    """**同步**请求单页个股新闻列表并返回解码后的 HTML 文本（N3-4 在线内核专用）。
+
+    供 ``news_fetcher._fetch_stock_news_core`` 同步内核（IO 线程池线程执行）调用：
+    必须保持纯同步、**不得**套 ``@log_async_operation`` 等 async 装饰器（R16 语义：
+    同步阻塞段在线程池中执行，不进事件循环）。与 :func:`fetch_page` 共用
+    :func:`build_client_kwargs`（代理 / UA / Referer / timeout）与 :func:`decode_html`。
+    """
+    with httpx.Client(**build_client_kwargs()) as client:
+        response = client.get(build_url(symbol, page))
+        response.raise_for_status()
+        return decode_html(response.content)

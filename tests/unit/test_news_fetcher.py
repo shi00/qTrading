@@ -66,6 +66,23 @@ def _concept_jsonp_text(rows: list[tuple[str, str]]) -> str:
     return "var arr={" + ",".join(items) + "}"
 
 
+# N3-4 patch 目标：news_fetcher 经模块属性调用新浪层，patch 模块属性即可隔离网络。
+_SINA_FETCH_SYNC = "data.external.news_sources.sina_stock.fetch_page_sync"
+_SINA_7X24_FETCH = "data.external.news_sources.sina_7x24.fetch_page"
+_SINA_7X24_PARSE = "data.external.news_sources.sina_7x24.parse_feed_payload"
+_S7X24_FALLBACK = "data.external.news_fetcher._fetch_sina_7x24_fallback"
+
+
+def _sina_html_row(date_s: str, time_s: str, url: str, title: str) -> str:
+    """构造符合 sina_stock.LIST_ROW_RE 的一行新闻 HTML（与真实页面行格式一致）。"""
+    return f"&nbsp;&nbsp;&nbsp;&nbsp;{date_s}&nbsp;{time_s}&nbsp;&nbsp;<a target='_blank' href='{url}'>{title}</a> <br>"
+
+
+def _sina_html(rows: list[tuple[str, str, str, str]]) -> str:
+    """把 (日期, 时间, URL, 标题) 行列表拼为完整 HTML（供 mock fetch_page_sync 返回）。"""
+    return "".join(_sina_html_row(*row) for row in rows)
+
+
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
 
 
@@ -76,9 +93,11 @@ def clean_global_caches():
     _SINA_CONSECUTIVE_EMPTY["concept"] = 0
     _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
     _SINA_CONSECUTIVE_FAILURES["concept"] = 0
-    # 重置 CLS 熔断器状态，防止测试间状态泄漏
+    # 重置 CLS / 新浪 7x24 熔断器状态，防止测试间状态泄漏（N3-4 新增 7x24）
     nf_mod._CLS_CONSECUTIVE_FAILURES = 0
     nf_mod._CLS_CIRCUIT_OPENED_AT = 0.0
+    nf_mod._S7X24_CONSECUTIVE_FAILURES = 0
+    nf_mod._S7X24_CIRCUIT_OPENED_AT = 0.0
     yield
     _US_MOVES_CACHE.clear()
     _SINA_CONSECUTIVE_EMPTY.clear()
@@ -87,6 +106,8 @@ def clean_global_caches():
     _SINA_CONSECUTIVE_FAILURES["concept"] = 0
     nf_mod._CLS_CONSECUTIVE_FAILURES = 0
     nf_mod._CLS_CIRCUIT_OPENED_AT = 0.0
+    nf_mod._S7X24_CONSECUTIVE_FAILURES = 0
+    nf_mod._S7X24_CIRCUIT_OPENED_AT = 0.0
 
 
 @pytest.fixture(autouse=True)
@@ -240,18 +261,10 @@ class TestGetStockNews:
         side_effect=lambda f: f(),
     )
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_cninfo_fails_em_fallback(self, mock_get_ak, mock_run, mock_tpm):
+    async def test_cninfo_fails_news_layer_fallback(self, mock_get_ak, mock_run, mock_tpm):
+        """N3-4：巨潮层失败 → 新浪个股新闻层回退（wait_for mock 不执行内核，仅验证降级路径）。"""
         mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo error")
-        df_em = pd.DataFrame(
-            {
-                "新闻标题": ["银行股上涨"],
-                "新闻内容": ["详细内容"],
-                "发布时间": ["2024-06-14 10:00:00"],
-                "文章来源": ["东财新闻"],
-            }
-        )
-        mock_ak.stock_news_em.return_value = df_em
 
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
@@ -264,7 +277,7 @@ class TestGetStockNews:
                 {
                     "title": "银行股上涨",
                     "publish_time": "2024-06-14 10:00:00",
-                    "source": "东财新闻",
+                    "source": "sina_stock",
                 }
             ]
             result = await NewsFetcher.get_stock_news("000001.SZ")
@@ -1203,8 +1216,9 @@ class TestGetStockNewsDirectExecution:
     """Tests that exercise the _fetch/_fetch_locked inner functions directly."""
 
     @pytest.mark.asyncio
+    @patch(_SINA_FETCH_SYNC, return_value="")
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_cninfo_direct_success(self, mock_get_ak):
+    async def test_cninfo_direct_success(self, mock_get_ak, mock_sina_fetch):
         mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         df_cninfo = pd.DataFrame(
             {
@@ -1231,19 +1245,15 @@ class TestGetStockNewsDirectExecution:
         assert result[0]["publish_time"].tzinfo is None
 
     @pytest.mark.asyncio
+    @patch(_SINA_FETCH_SYNC)
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_cninfo_empty_em_fallback_direct(self, mock_get_ak):
+    async def test_cninfo_empty_sina_fallback_direct(self, mock_get_ak, mock_sina_fetch):
         mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
-        df_em = pd.DataFrame(
-            {
-                "新闻标题": ["银行股上涨"],
-                "新闻内容": ["详细内容"],
-                "发布时间": ["2024-06-14 10:00:00"],
-                "文章来源": ["东财新闻"],
-            }
+        # N3-4：巨潮层为空 → 公告优先语义下回退新浪个股新闻层
+        mock_sina_fetch.return_value = _sina_html(
+            [("2024-06-14", "10:00", "https://finance.sina.com.cn/stock/n1", "银行股上涨")]
         )
-        mock_ak.stock_news_em.return_value = df_em
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -1252,15 +1262,19 @@ class TestGetStockNewsDirectExecution:
 
             result = await NewsFetcher.get_stock_news("000001.SZ", limit=5)
         assert isinstance(result, list)
-        assert len(result) >= 1
-        assert result[0]["source"] == "东财新闻"
+        assert len(result) == 1
+        assert result[0]["source"] == "sina_stock"
+        assert result[0]["title"] == "银行股上涨"
+        # N3-4：新浪行内时间无秒补 :00，CST 10:00 → UTC naive 02:00
+        assert result[0]["publish_time"] == to_utc_for_db(datetime.datetime(2024, 6, 14, 10, 0, 0))
+        assert result[0]["publish_time"].tzinfo is None
 
     @pytest.mark.asyncio
+    @patch(_SINA_FETCH_SYNC, side_effect=Exception("sina error"))
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_both_layers_fail_direct(self, mock_get_ak):
+    async def test_both_layers_fail_direct(self, mock_get_ak, mock_sina_fetch):
         mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo error")
-        mock_ak.stock_news_em.side_effect = Exception("em error")
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -1271,12 +1285,13 @@ class TestGetStockNewsDirectExecution:
         assert result == []
 
     @pytest.mark.asyncio
+    @patch(_SINA_FETCH_SYNC, return_value="")
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_cninfo_no_title_col_returns_empty(self, mock_get_ak):
+    async def test_cninfo_no_title_col_returns_empty(self, mock_get_ak, mock_sina_fetch):
         mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         df_cninfo = pd.DataFrame({"col_a": [1], "col_b": [2]})
         mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = df_cninfo
-        mock_ak.stock_news_em.return_value = pd.DataFrame()
+        # 新浪层空 HTML → 无新闻行
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -1287,8 +1302,9 @@ class TestGetStockNewsDirectExecution:
         assert result == []
 
     @pytest.mark.asyncio
+    @patch(_SINA_FETCH_SYNC, return_value="")
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_cninfo_positional_fallback_columns(self, mock_get_ak):
+    async def test_cninfo_positional_fallback_columns(self, mock_get_ak, mock_sina_fetch):
         mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         df_cninfo = pd.DataFrame(
             {
@@ -1310,18 +1326,15 @@ class TestGetStockNewsDirectExecution:
         assert len(result) >= 1
 
     @pytest.mark.asyncio
+    @patch(_SINA_FETCH_SYNC)
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_em_news_content_fallback(self, mock_get_ak):
+    async def test_sina_news_time_caliber(self, mock_get_ak, mock_sina_fetch):
+        """N3-4：巨潮层失败 → 新浪个股新闻层 + 无秒时间口径（CST 10:00 → UTC naive 02:00）。"""
         mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo error")
-        df_em = pd.DataFrame(
-            {
-                "新闻内容": ["详细内容作为标题"],
-                "发布时间": ["2024-06-14 10:00:00"],
-                "文章来源": ["东财新闻"],
-            }
+        mock_sina_fetch.return_value = _sina_html(
+            [("2024-06-14", "10:00", "https://finance.sina.com.cn/stock/n2", "详细内容作为标题")]
         )
-        mock_ak.stock_news_em.return_value = df_em
 
         with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -1331,7 +1344,7 @@ class TestGetStockNewsDirectExecution:
             result = await NewsFetcher.get_stock_news("000001.SZ", limit=5)
         assert isinstance(result, list)
         assert result[0]["title"] == "详细内容作为标题"
-        # review08-D1：EM 时间统一为 UTC naive datetime（CST 10:00 → UTC 02:00）
+        assert result[0]["source"] == "sina_stock"
         assert result[0]["publish_time"] == to_utc_for_db(datetime.datetime(2024, 6, 14, 10, 0, 0))
         assert result[0]["publish_time"].tzinfo is None
 
@@ -1340,12 +1353,14 @@ class TestSharedRateLimiter:
     """review08-B4/-FIND-03：NewsFetcher 的 akshare 调用经模块级共享限速器。
 
     显式替换 autouse mock（_mock_akshare_shared_limiter），断言 consume 调用；
-    令牌由公开方法在 pandas 全局锁外一次性预留（两层各 1，共 2）。
+    令牌由公开方法在 pandas 全局锁外一次性预留。N3-4 起 news 层为新浪 httpx 直连
+    （不接 akshare 限速器），仅巨潮 akshare 层 1 个令牌。
     """
 
     @pytest.mark.asyncio
+    @patch(_SINA_FETCH_SYNC, return_value="")
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_stock_news_reserves_limiter_for_both_layers(self, mock_get_ak):
+    async def test_stock_news_reserves_limiter_for_cninfo_layer(self, mock_get_ak, mock_sina_fetch):
         mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame(
             {
@@ -1356,7 +1371,6 @@ class TestSharedRateLimiter:
                 "公告链接": ["http://example.com"],
             }
         )
-        mock_ak.stock_news_em.return_value = pd.DataFrame()
 
         mock_limiter = MagicMock()
         mock_limiter.consume = MagicMock()
@@ -1373,15 +1387,15 @@ class TestSharedRateLimiter:
 
         assert isinstance(result, list)
         assert len(result) >= 1
-        # review08-B4-FIND-03：两层令牌（各 1，共 2）在进入 pandas 全局锁前一次性预留
-        mock_limiter.consume.assert_called_once_with(2)
+        # N3-4：仅巨潮 akshare 层预留 1 个令牌（新浪层 httpx 直连，不接限速器）
+        mock_limiter.consume.assert_called_once_with(1)
 
     @pytest.mark.asyncio
+    @patch(_SINA_FETCH_SYNC, return_value="")
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_documents_reserves_limiter_for_both_layers(self, mock_get_ak):
+    async def test_documents_reserves_limiter_for_cninfo_layer(self, mock_get_ak, mock_sina_fetch):
         mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
-        mock_ak.stock_news_em.return_value = pd.DataFrame()
 
         mock_limiter = MagicMock()
         mock_limiter.consume = MagicMock()
@@ -1396,8 +1410,8 @@ class TestSharedRateLimiter:
 
             await NewsFetcher.get_stock_news_documents("000001.SZ", window_days=30, limit=50)
 
-        # 与 get_stock_news 对称：进入 pandas 全局锁前一次性预留两层令牌
-        mock_limiter.consume.assert_called_once_with(2)
+        # 与 get_stock_news 对称：仅巨潮层 1 个令牌
+        mock_limiter.consume.assert_called_once_with(1)
 
 
 class TestNewsTimeCaliberConsistency:
@@ -1417,15 +1431,7 @@ class TestNewsTimeCaliberConsistency:
                 "公告链接": ["http://cninfo/1"],
             }
         )
-        em = pd.DataFrame(
-            {
-                "新闻标题": ["银行股上涨"],
-                "新闻内容": ["x"],
-                "发布时间": [today.strftime("%Y-%m-%d 10:00:00")],
-                "新闻链接": ["http://em/1"],
-                "文章来源": ["东财"],
-            }
-        )
+        sina_html = _sina_html([(today.strftime("%Y-%m-%d"), "10:00", "http://sina/1", "银行股上涨")])
         expected_ann = to_utc_for_db(datetime.datetime.combine(ann_date, datetime.time()))
         expected_news = to_utc_for_db(datetime.datetime.combine(today, datetime.time(10, 0, 0)))
 
@@ -1433,10 +1439,12 @@ class TestNewsTimeCaliberConsistency:
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
 
-        with patch("data.external.news_fetcher._get_akshare") as mock_get_ak:
+        with (
+            patch("data.external.news_fetcher._get_akshare") as mock_get_ak,
+            patch(_SINA_FETCH_SYNC, return_value=sina_html),
+        ):
             mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
             mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = cninfo
-            mock_ak.stock_news_em.return_value = em
 
             news = await NewsFetcher.get_stock_news("000001.SZ", limit=5)
             documents = await NewsFetcher.get_stock_news_documents("000001.SZ", window_days=30, limit=50)
@@ -1453,6 +1461,8 @@ class TestNewsTimeCaliberConsistency:
         assert news_doc["publish_time"] == expected_news
         assert ann_doc["publish_time"].tzinfo is None
         assert news_doc["publish_time"].tzinfo is None
+        assert news_doc["url"] == "http://sina/1"
+        assert news_doc["content"] == ""  # 新浪列表页无正文，空串为合法缺失表示
 
 
 class TestGetLatestGlobalNewsDirectExecution:
@@ -1765,10 +1775,11 @@ class TestCLSCircuitBreaker:
     """测试 CLS 熔断器的开启、半开探活与恢复逻辑。"""
 
     @pytest.mark.asyncio
+    @patch(_S7X24_FALLBACK, new_callable=AsyncMock, return_value=[])
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("httpx.AsyncClient")
-    async def test_circuit_opens_after_threshold(self, mock_get, mock_tpm):
-        """连续 3 次失败后熔断器开启。"""
+    async def test_circuit_opens_after_threshold(self, mock_get, mock_tpm, mock_s7_fallback):
+        """连续 3 次失败后熔断器开启（7x24 回退已隔离，仅验证 CLS 计数）。"""
         _wire_http_get(mock_get, MagicMock())
         mock_get.return_value.get.side_effect = requests.ConnectionError("network down")
         mock_manager = MagicMock()
@@ -1784,10 +1795,11 @@ class TestCLSCircuitBreaker:
             assert base_time.timestamp() == nf_mod._CLS_CIRCUIT_OPENED_AT
 
     @pytest.mark.asyncio
+    @patch(_S7X24_FALLBACK, new_callable=AsyncMock, return_value=[])
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("httpx.AsyncClient")
-    async def test_circuit_fast_fails_when_open(self, mock_get, mock_tpm):
-        """熔断开启期间直接返回空列表，不发起网络调用。"""
+    async def test_circuit_fast_fails_when_open(self, mock_get, mock_tpm, mock_s7_fallback):
+        """熔断开启期间直接返回空列表，不发起 CLS 网络调用（N3-4：7x24 回退已隔离）。"""
         nf_mod._CLS_CONSECUTIVE_FAILURES = 3
         nf_mod._CLS_CIRCUIT_OPENED_AT = datetime.datetime(2024, 6, 14, 10, 0, 0).replace(tzinfo=CST_TZ).timestamp()
 
@@ -1831,10 +1843,11 @@ class TestCLSCircuitBreaker:
             assert nf_mod._CLS_CONSECUTIVE_FAILURES == 0
 
     @pytest.mark.asyncio
+    @patch(_S7X24_FALLBACK, new_callable=AsyncMock, return_value=[])
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("httpx.AsyncClient")
-    async def test_circuit_half_open_failure_resets_cooldown(self, mock_get, mock_tpm):
-        """半开探活失败时重置冷却计时器，下一个 60s 窗口重新计时。"""
+    async def test_circuit_half_open_failure_resets_cooldown(self, mock_get, mock_tpm, mock_s7_fallback):
+        """半开探活失败时重置冷却计时器，下一个 60s 窗口重新计时（7x24 回退已隔离）。"""
         nf_mod._CLS_CONSECUTIVE_FAILURES = 3
         base_time = datetime.datetime(2024, 6, 14, 10, 0, 0).replace(tzinfo=CST_TZ)
         nf_mod._CLS_CIRCUIT_OPENED_AT = base_time.timestamp()
@@ -1870,6 +1883,143 @@ class TestCLSCircuitBreaker:
             res = await NewsFetcher.get_latest_global_news()
             assert res == []
             mock_get.assert_called_once()
+
+
+def _s7x24_docs(rows: list[tuple[str, datetime.datetime | None]]) -> list[dict]:
+    """构造 sina_7x24.parse_feed_payload 产出的文档（publish_time 为 UTC tz-naive datetime）。"""
+    return [
+        {
+            "source": "sina_7x24",
+            "source_id": f"zhibo-{i}",
+            "text": text,
+            "publish_time": pub,
+            "tags": [],
+            "source_url": "",
+            "stocks": [],
+        }
+        for i, (text, pub) in enumerate(rows)
+    ]
+
+
+class TestSina7x24Fallback:
+    """N3-4：新浪 7x24 回退（_fetch_sina_7x24_fallback）——映射契约 / 熔断 / 时间口径 / R2。"""
+
+    @pytest.mark.asyncio
+    @patch(_SINA_7X24_PARSE)
+    @patch(_SINA_7X24_FETCH, new_callable=AsyncMock)
+    async def test_success_maps_source_time_and_title_code(self, mock_fetch, mock_parse):
+        """成功映射：title/content 同 rich_text、time 为 CST 文本、source=sina_7x24、计数清零。"""
+        nf_mod._S7X24_CONSECUTIVE_FAILURES = 2
+        mock_fetch.return_value = {}
+        # 2024-06-14 02:00 UTC == CST 10:00；时间降序排列（与 CLS 主源一致）
+        utc = datetime.datetime(2024, 6, 14, 2, 0, 0)
+        mock_parse.return_value = (
+            _s7x24_docs([("旧快讯", utc - datetime.timedelta(hours=1)), ("新快讯", utc)]),
+            {},
+        )
+        result = await nf_mod._fetch_sina_7x24_fallback(limit=5)
+        assert [d["title"] for d in result] == ["新快讯", "旧快讯"]
+        assert all(d["source"] == "sina_7x24" for d in result)
+        assert result[0]["title_code"] == ""
+        assert result[0]["content"] == "新快讯"
+        assert result[0]["time"] == "2024-06-14 10:00:00"
+        assert nf_mod._S7X24_CONSECUTIVE_FAILURES == 0
+
+    @pytest.mark.asyncio
+    @patch(_SINA_7X24_PARSE)
+    @patch(_SINA_7X24_FETCH, new_callable=AsyncMock)
+    async def test_empty_text_maps_no_title_code(self, mock_fetch, mock_parse):
+        """rich_text 为空 → title_code 业务码 "no_title"（data 层不感知 locale）。"""
+        mock_fetch.return_value = {}
+        utc = datetime.datetime(2024, 6, 14, 2, 0, 0)
+        mock_parse.return_value = (_s7x24_docs([("", utc)]), {})
+        result = await nf_mod._fetch_sina_7x24_fallback(limit=5)
+        assert result[0]["title"] == ""
+        assert result[0]["title_code"] == "no_title"
+
+    @pytest.mark.asyncio
+    @patch(_SINA_7X24_PARSE)
+    @patch(_SINA_7X24_FETCH, new_callable=AsyncMock)
+    async def test_publish_time_none_falls_back_to_now(self, mock_fetch, mock_parse):
+        """publish_time 缺失 → 回退 get_now()（CST 文本口径与 CLS 同款）。"""
+        mock_fetch.return_value = {}
+        mock_parse.return_value = (_s7x24_docs([("无时间戳", None)]), {})
+        now = datetime.datetime(2024, 6, 14, 10, 30, 0).replace(tzinfo=CST_TZ)
+        with patch("data.external.news_fetcher.get_now", return_value=now):
+            result = await nf_mod._fetch_sina_7x24_fallback(limit=5)
+        assert result[0]["time"] == "2024-06-14 10:30:00"
+
+    @pytest.mark.asyncio
+    @patch(_SINA_7X24_PARSE)
+    @patch(_SINA_7X24_FETCH, new_callable=AsyncMock)
+    async def test_limit_truncates(self, mock_fetch, mock_parse):
+        mock_fetch.return_value = {}
+        utc = datetime.datetime(2024, 6, 14, 2, 0, 0)
+        mock_parse.return_value = (_s7x24_docs([(f"新闻{i}", utc) for i in range(10)]), {})
+        result = await nf_mod._fetch_sina_7x24_fallback(limit=3)
+        assert len(result) == 3
+
+    @pytest.mark.asyncio
+    @patch(_SINA_7X24_FETCH, new_callable=AsyncMock, side_effect=Exception("sina 7x24 down"))
+    async def test_circuit_opens_after_threshold(self, mock_fetch):
+        """连续 3 次失败 → 熔断器开启（独立于 CLS 计数）。"""
+        base_time = datetime.datetime(2024, 6, 14, 10, 0, 0).replace(tzinfo=CST_TZ)
+        with patch("data.external.news_fetcher.get_now", return_value=base_time):
+            for _ in range(3):
+                assert await nf_mod._fetch_sina_7x24_fallback() == []
+        assert nf_mod._S7X24_CONSECUTIVE_FAILURES == 3
+        assert base_time.timestamp() == nf_mod._S7X24_CIRCUIT_OPENED_AT
+
+    @pytest.mark.asyncio
+    @patch(_SINA_7X24_FETCH, new_callable=AsyncMock)
+    async def test_circuit_fast_fails_when_open(self, mock_fetch):
+        """熔断开启冷却期内快速失败，不发起网络调用。"""
+        nf_mod._S7X24_CONSECUTIVE_FAILURES = 3
+        nf_mod._S7X24_CIRCUIT_OPENED_AT = datetime.datetime(2024, 6, 14, 10, 0, 0).replace(tzinfo=CST_TZ).timestamp()
+        now = datetime.datetime(2024, 6, 14, 10, 0, 30).replace(tzinfo=CST_TZ)
+        with patch("data.external.news_fetcher.get_now", return_value=now):
+            result = await nf_mod._fetch_sina_7x24_fallback()
+        assert result == []
+        mock_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch(_SINA_7X24_PARSE)
+    @patch(_SINA_7X24_FETCH, new_callable=AsyncMock)
+    async def test_circuit_half_open_recovery(self, mock_fetch, mock_parse):
+        """冷却期过后半开探活成功 → 熔断器闭合、计数清零。"""
+        base_time = datetime.datetime(2024, 6, 14, 10, 0, 0).replace(tzinfo=CST_TZ)
+        nf_mod._S7X24_CONSECUTIVE_FAILURES = 3
+        nf_mod._S7X24_CIRCUIT_OPENED_AT = base_time.timestamp()
+        utc = datetime.datetime(2024, 6, 14, 2, 0, 0)
+        mock_parse.return_value = (_s7x24_docs([("探活成功", utc)]), {})
+
+        future_time = base_time + datetime.timedelta(seconds=61)
+        with patch("data.external.news_fetcher.get_now", return_value=future_time):
+            result = await nf_mod._fetch_sina_7x24_fallback(limit=1)
+        assert len(result) == 1
+        assert result[0]["title"] == "探活成功"
+        assert nf_mod._S7X24_CONSECUTIVE_FAILURES == 0
+
+    @pytest.mark.asyncio
+    @patch(_SINA_7X24_FETCH, new_callable=AsyncMock, side_effect=Exception("still down"))
+    async def test_circuit_half_open_failure_resets_cooldown(self, mock_fetch):
+        """半开探活失败 → 计数继续累加 + 冷却计时器重置（CLS 同款）。"""
+        base_time = datetime.datetime(2024, 6, 14, 10, 0, 0).replace(tzinfo=CST_TZ)
+        nf_mod._S7X24_CONSECUTIVE_FAILURES = 3
+        nf_mod._S7X24_CIRCUIT_OPENED_AT = base_time.timestamp()
+
+        probe_time = base_time + datetime.timedelta(seconds=61)
+        with patch("data.external.news_fetcher.get_now", return_value=probe_time):
+            assert await nf_mod._fetch_sina_7x24_fallback() == []
+        assert nf_mod._S7X24_CONSECUTIVE_FAILURES == 4
+        assert probe_time.timestamp() == nf_mod._S7X24_CIRCUIT_OPENED_AT
+
+    @pytest.mark.asyncio
+    @patch(_SINA_7X24_FETCH, new_callable=AsyncMock, side_effect=asyncio.CancelledError())
+    async def test_cancelled_error_propagates(self, mock_fetch):
+        """CancelledError 不被 except Exception 捕获（R2：优雅停机）。"""
+        with pytest.raises(asyncio.CancelledError):
+            await nf_mod._fetch_sina_7x24_fallback()
 
 
 class TestLogWithSeverity:
@@ -1946,14 +2096,14 @@ class TestClassifyErrorIntegration:
         assert code_records, "Expected [code=...] in log"
 
     @pytest.mark.asyncio
+    @patch(_SINA_FETCH_SYNC, return_value="")
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_cninfo_failure_logs_code(self, mock_get_ak, mock_run, mock_tpm, caplog):
+    async def test_cninfo_failure_logs_code(self, mock_get_ak, mock_run, mock_tpm, mock_sina_fetch, caplog):
         """路径 3: get_stock_news except Exception (CNINFO) — 失败日志含 [code=]。"""
         mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo connection error")
-        mock_ak.stock_news_em.return_value = pd.DataFrame()
 
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
@@ -1966,14 +2116,14 @@ class TestClassifyErrorIntegration:
         assert code_records, "Expected [code=...] in log"
 
     @pytest.mark.asyncio
+    @patch(_SINA_FETCH_SYNC, side_effect=Exception("sina error"))
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_em_failure_logs_code(self, mock_get_ak, mock_run, mock_tpm, caplog):
-        """路径 4: get_stock_news except Exception (EM) — 失败日志含 [code=]。"""
+    async def test_sina_failure_logs_code(self, mock_get_ak, mock_run, mock_tpm, mock_sina_fetch, caplog):
+        """路径 4: get_stock_news except Exception (新浪个股层) — 失败日志含 [code=]。"""
         mock_ak = mock_get_ak.return_value  # review08-B5: 惰性导入缝（_get_akshare）→ akshare 模块 mock
         mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
-        mock_ak.stock_news_em.side_effect = Exception("em error")
 
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
@@ -1982,13 +2132,17 @@ class TestClassifyErrorIntegration:
         with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
             result = await NewsFetcher.get_stock_news("000001.SZ")
         assert result == []
-        code_records = [r for r in caplog.records if "[code=" in r.getMessage()]
-        assert code_records, "Expected [code=...] in log"
+        code_records = [
+            r for r in caplog.records if "[code=" in r.getMessage() and "Sina stock news failed" in r.getMessage()
+        ]
+        assert code_records, "Expected [code=...] in Sina stock news failure log"
 
     @pytest.mark.asyncio
+    @patch(_SINA_FETCH_SYNC, return_value="")
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._run_with_python_string_storage")
-    async def test_fatal_error_logs_code(self, mock_run, mock_tpm, caplog):
+    @patch("data.external.news_fetcher._get_akshare")
+    async def test_fatal_error_logs_code(self, mock_get_ak, mock_run, mock_tpm, mock_sina_fetch, caplog):
         """路径 5: get_stock_news except Exception (Fatal) — 致命错误日志含 [code=]。"""
         mock_run.side_effect = Exception("fatal error")
         mock_tpm_instance = MagicMock()
@@ -2213,9 +2367,10 @@ class TestHttpxProxyKwargs:
     """review08-B2 复核：三处 httpx 调用点按 NO_PROXY 语义注入 host-aware 代理 kwargs。"""
 
     @pytest.mark.asyncio
+    @patch(_S7X24_FALLBACK, new_callable=AsyncMock, return_value=[])
     @patch("httpx.AsyncClient")
-    async def test_cls_uses_cls_host(self, mock_client):
-        """CLS 电报：host 判定用 www.cls.cn，且 kwargs 透传给 AsyncClient。"""
+    async def test_cls_uses_cls_host(self, mock_client, mock_s7_fallback):
+        """CLS 电报：host 判定用 www.cls.cn，且 kwargs 透传给 AsyncClient（7x24 回退已隔离）。"""
         _wire_http_get(mock_client, MagicMock())
         with patch(
             "utils.proxy_manager.ProxyManager.get_httpx_proxy_kwargs",
@@ -2288,13 +2443,13 @@ class TestHttpxProxyKwargs:
         assert all("Data source may be degraded" not in msg for msg in messages), "未达间隔不应带降级提示后缀"
 
     @pytest.mark.asyncio
+    @patch(_SINA_FETCH_SYNC, return_value="")
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("data.external.news_fetcher._get_akshare")
-    async def test_cninfo_market_param_is_hushenjing(self, mock_get_ak, mock_tpm):
+    async def test_cninfo_market_param_is_hushenjing(self, mock_get_ak, mock_tpm, mock_sina_fetch):
         """review08-B3 复核：巨潮公告调用固定传 market="沪深京"。"""
         mock_ak = mock_get_ak.return_value
         mock_ak.stock_zh_a_disclosure_report_cninfo.return_value = pd.DataFrame()
-        mock_ak.stock_news_em.return_value = pd.DataFrame()
 
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
