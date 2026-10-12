@@ -13,6 +13,7 @@ AIService / LocalModelManager / 子 VM), 参考 test_data_source_view_model.py �
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 
 from ui.viewmodels.ai_brain_settings_view_model import AIBrainSettingsViewModel
@@ -329,12 +330,15 @@ class TestNewsSentimentSettings:
         vm.set_news_sentiment_model_path(None)
         assert vm.state.news_sentiment_model_path == ""
 
-    async def test_save_persists_news_sentiment_keys(self, make_vm, mock_config_handler):
+    async def test_save_persists_news_sentiment_keys(self, make_vm, mock_config_handler, tmp_path):
+        head = _write_valid_head(tmp_path)
+        tok = tmp_path / "tokenizer.json"
+        tok.write_text("{}", encoding="utf-8")
         vm = make_vm()
         vm.set_news_sentiment_enabled(True)
         vm.set_news_sentiment_model_path(" a.gguf ")
-        vm.set_news_sentiment_head_path(" b.json ")
-        vm.set_news_sentiment_tokenizer_path(" c ")
+        vm.set_news_sentiment_head_path(f" {head} ")
+        vm.set_news_sentiment_tokenizer_path(f" {tok} ")
         with (
             patch("services.local_model_manager._validate_model_file", return_value=True),
             _patch_save_deps(),
@@ -343,8 +347,8 @@ class TestNewsSentimentSettings:
         call_data = mock_config_handler.save_config.call_args.args[0]
         assert call_data["news_sentiment_enabled"] is True
         assert call_data["news_sentiment_model_path"] == "a.gguf"
-        assert call_data["news_sentiment_head_path"] == "b.json"
-        assert call_data["news_sentiment_tokenizer_path"] == "c"
+        assert call_data["news_sentiment_head_path"] == str(head)
+        assert call_data["news_sentiment_tokenizer_path"] == str(tok)
 
     async def test_enabled_missing_paths_rejected(self, make_vm, mock_config_handler):
         """启用但路径不全 → SAVE_ERROR + 专属 i18n key，不进入持久化。"""
@@ -382,12 +386,15 @@ class TestNewsSentimentSettings:
         assert vm.state.warning_message == "settings_news_sentiment_model_invalid"
         mock_config_handler.save_config.assert_not_called()
 
-    async def test_enabled_valid_gguf_saves(self, make_vm, mock_config_handler):
+    async def test_enabled_valid_gguf_saves(self, make_vm, mock_config_handler, tmp_path):
+        head = _write_valid_head(tmp_path)
+        tok = tmp_path / "tokenizer.json"
+        tok.write_text("{}", encoding="utf-8")
         vm = make_vm()
         vm.set_news_sentiment_enabled(True)
         vm.set_news_sentiment_model_path("good.gguf")
-        vm.set_news_sentiment_head_path("h.json")
-        vm.set_news_sentiment_tokenizer_path("tok")
+        vm.set_news_sentiment_head_path(str(head))
+        vm.set_news_sentiment_tokenizer_path(str(tok))
         with (
             patch("services.local_model_manager._validate_model_file", return_value=True) as mock_validate,
             _patch_save_deps(),
@@ -396,6 +403,94 @@ class TestNewsSentimentSettings:
         mock_validate.assert_called_once_with("good.gguf")
         assert vm.state.save_state == "success"
         assert vm.state.warning_message == ""
+
+    async def test_enabled_invalid_head_rejected(self, make_vm, mock_config_handler, tmp_path):
+        """启用且 head.npz 结构校验失败（cw 形状非法）→ SAVE_ERROR + 专属 key，不持久化（N5-4）。"""
+        vm = make_vm()
+        head = tmp_path / "head_bad.npz"
+        np.savez(
+            head,
+            mode="linear",
+            labels=np.array(["利空", "中性", "利好"]),
+            cw=np.zeros((3, 10), dtype=np.float32),
+            cb=np.zeros(3, dtype=np.float32),
+        )
+        vm.set_news_sentiment_enabled(True)
+        vm.set_news_sentiment_model_path("good.gguf")
+        vm.set_news_sentiment_head_path(str(head))
+        vm.set_news_sentiment_tokenizer_path(str(tmp_path / "tokenizer.json"))
+        with (
+            patch("services.local_model_manager._validate_model_file", return_value=True),
+            _patch_save_deps(),
+        ):
+            assert await vm.save_ai_settings() is False
+        assert vm.state.save_state == "error"
+        assert vm.state.warning_message == "settings_news_sentiment_head_invalid"
+        mock_config_handler.save_config.assert_not_called()
+
+    async def test_enabled_head_missing_arrays_rejected(self, make_vm, mock_config_handler, tmp_path):
+        """head.npz 缺少数组键（KeyError 异常面）→ SAVE_ERROR + 专属 key（N5-4）。"""
+        vm = make_vm()
+        head = tmp_path / "head_empty.npz"
+        np.savez(head, mode="linear")
+        vm.set_news_sentiment_enabled(True)
+        vm.set_news_sentiment_model_path("good.gguf")
+        vm.set_news_sentiment_head_path(str(head))
+        vm.set_news_sentiment_tokenizer_path(str(tmp_path / "tokenizer.json"))
+        with (
+            patch("services.local_model_manager._validate_model_file", return_value=True),
+            _patch_save_deps(),
+        ):
+            assert await vm.save_ai_settings() is False
+        assert vm.state.warning_message == "settings_news_sentiment_head_invalid"
+        mock_config_handler.save_config.assert_not_called()
+
+    async def test_enabled_head_not_npz_rejected(self, make_vm, mock_config_handler, tmp_path):
+        """head 路径指向非 .npz 文件（BadZipFile/OSError 异常面）→ SAVE_ERROR + 专属 key（N5-4）。"""
+        vm = make_vm()
+        head = tmp_path / "head_fake.npz"
+        head.write_text("not a zip", encoding="utf-8")
+        vm.set_news_sentiment_enabled(True)
+        vm.set_news_sentiment_model_path("good.gguf")
+        vm.set_news_sentiment_head_path(str(head))
+        vm.set_news_sentiment_tokenizer_path(str(tmp_path / "tokenizer.json"))
+        with (
+            patch("services.local_model_manager._validate_model_file", return_value=True),
+            _patch_save_deps(),
+        ):
+            assert await vm.save_ai_settings() is False
+        assert vm.state.warning_message == "settings_news_sentiment_head_invalid"
+        mock_config_handler.save_config.assert_not_called()
+
+    async def test_enabled_missing_tokenizer_rejected(self, make_vm, mock_config_handler, tmp_path):
+        """启用且分词器文件不存在 → SAVE_ERROR + 专属 key，不持久化（N5-4）。"""
+        vm = make_vm()
+        head = _write_valid_head(tmp_path)
+        vm.set_news_sentiment_enabled(True)
+        vm.set_news_sentiment_model_path("good.gguf")
+        vm.set_news_sentiment_head_path(str(head))
+        vm.set_news_sentiment_tokenizer_path(str(tmp_path / "nonexistent_tokenizer.json"))
+        with (
+            patch("services.local_model_manager._validate_model_file", return_value=True),
+            _patch_save_deps(),
+        ):
+            assert await vm.save_ai_settings() is False
+        assert vm.state.save_state == "error"
+        assert vm.state.warning_message == "settings_news_sentiment_tokenizer_invalid"
+        mock_config_handler.save_config.assert_not_called()
+
+
+def _write_valid_head(tmp_path):
+    """生成结构合法的最小 head.npz（mode=linear，cw/cb 形状与标签序符合契约）。"""
+    head = tmp_path / "head.npz"
+    np.savez(
+        head,
+        mode="linear",
+        labels=np.array(["利空", "中性", "利好"]),
+        cw=np.zeros((3, 768), dtype=np.float32),
+        cb=np.zeros(3, dtype=np.float32),
+    )
+    return head
 
 
 # ============================================================================

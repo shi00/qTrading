@@ -514,7 +514,9 @@ def ai_brain_tab_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
     - ThreadPoolManager (实例化调用, run_async 同步执行 func)
     - I18n / UILogger (横切关注点)
     - 3 个子 VM (LLMConfigPanelViewModel/FailoverConfigPanelViewModel/LocalModelConfigPanelViewModel)
-    - 3 个子组件 (LLMConfigPanel/FailoverConfigPanel/LocalModelConfigPanel)
+    - 4 个子组件 (LLMConfigPanel/FailoverConfigPanel/LocalModelConfigPanel/NewsSentimentConfigPanel),
+      其中 NewsSentimentConfigPanel 经捕获工厂记录传入的真实 ai_settings_vm
+      (env["news_sentiment_vm"]), 供启用情绪打分的用例直接调 VM setter
     """
     from ui.views.settings_tabs import ai_brain_tab as mod
 
@@ -534,6 +536,17 @@ def ai_brain_tab_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
     monkeypatch.setattr(mod, "LLMConfigPanel", MagicMock(return_value=MagicMock(name="LLMConfigPanel")))
     monkeypatch.setattr(mod, "FailoverConfigPanel", MagicMock(return_value=MagicMock(name="FailoverConfigPanel")))
     monkeypatch.setattr(mod, "LocalModelConfigPanel", MagicMock(return_value=MagicMock(name="LocalModelConfigPanel")))
+
+    # N5-4: NewsSentimentConfigPanel 同样 mock (子面板渲染产物不在 _walk_all_controls
+    # 可遍历范围内——遍历器只展开 Component 的 props 不展开子组件渲染树), 改用捕获工厂
+    # 记录传入的真实 ai_settings_vm, 供情绪打分用例直接调 VM setter 启用
+    captured_news_vm: dict[str, Any] = {}
+
+    def _fake_news_sentiment_panel(**kwargs: Any) -> Any:
+        captured_news_vm["vm"] = kwargs.get("vm")
+        return MagicMock(name="NewsSentimentConfigPanel")
+
+    monkeypatch.setattr(mod, "NewsSentimentConfigPanel", _fake_news_sentiment_panel)
 
     # P1-4 批次 2: Mock ConfirmDialog 捕获 on_confirm/on_cancel 回调
     # (reset 按钮点击后先打开 ConfirmDialog, 需触发 on_confirm 才执行 reset + show_snack)
@@ -563,6 +576,7 @@ def ai_brain_tab_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
         "fake_llm_vm": fake_llm_vm,
         "fake_failover_vm": fake_failover_vm,
         "fake_local_vm": fake_local_vm,
+        "news_sentiment_vm": captured_news_vm.get("vm"),
         "captured_callbacks": captured_callbacks,
         **mocks,
     }
@@ -838,12 +852,13 @@ class TestDoSaveAISettingsValidationPhase:
     def test_news_sentiment_enabled_missing_paths_specific_error(self, ai_brain_tab_env) -> None:
         """N3-6: 启用情绪打分但路径为空 → 专属 i18n key 经 warning_message 透出（非通用文案）。
 
-        Switch 定位按遍历顺序: card_news_sentiment 先于 card_local_only,
-        故首个 ft.Switch 即新闻情绪打分开关。
+        启用方式: 经 fixture 捕获的真实 ai_settings_vm 直接调 setter
+        (N5-4 子面板化后情绪开关在 NewsSentimentConfigPanel 渲染树内,
+        _walk_all_controls 遍历不到; Switch → vm.set_news_sentiment_enabled
+        的 View 接线由 test_news_sentiment_config_panel_contract.py 守护)。
         """
         env = ai_brain_tab_env
-        switches = [c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.Switch)]
-        _invoke(switches[0].on_change, _make_event(True))
+        env["news_sentiment_vm"].set_news_sentiment_enabled(True)
         handler, args, _ = self._trigger_save(env)
         asyncio.run(handler(*args))
 

@@ -30,6 +30,7 @@ import flet as ft
 from ui.components.config_panels.failover_config_panel import FailoverConfigPanel
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
+from ui.components.config_panels.news_sentiment_config_panel import NewsSentimentConfigPanel
 from ui.components.confirm_dialog import ConfirmDialog
 from ui.components.flet_type_helpers import (
     get_control_value,
@@ -62,7 +63,6 @@ logger = logging.getLogger(__name__)
 # UI Constants
 # ============================================================================
 _INPUT_WIDTH_SMALL = 190
-_INPUT_WIDTH_PATH = 560  # N3-6: 情绪模型路径输入（完整路径需更宽，约 3 倍数值输入宽）
 
 
 # ============================================================================
@@ -517,58 +517,12 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         content=ft.Column([local_model_panel]),
     )
 
-    # --- N3-6: 新闻情绪打分卡片（本地小模型打分 + LLM 降级回退；路径手输，N5-4 接文件选择器）---
-    def _on_news_sentiment_toggle(e: ft.ControlEvent) -> None:
-        ai_settings_vm.set_news_sentiment_enabled(get_control_value(e.control, ft.Switch))
-
-    news_sentiment_switch = ft.Switch(
-        label="",
-        value=ai_settings_state.news_sentiment_enabled,
-        on_change=safe_on_change(_on_news_sentiment_toggle),
-    )
-
-    def _news_sentiment_path_input(label_key: str, state_attr: str, setter: str) -> ft.TextField:
-        """N3-6: 路径输入框统一构造（R23 token 范式与调优卡片一致）。"""
-        return ft.TextField(
-            label=I18n.get(label_key),
-            value=getattr(ai_settings_state, state_attr),
-            width=_INPUT_WIDTH_PATH,
-            on_change=lambda e: getattr(ai_settings_vm, setter)(e.control.value),
-            on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
-            bgcolor=AppColors.INPUT_BG,
-            color=AppColors.INPUT_TEXT,
-            border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
-        )
-
-    news_sentiment_model_input = _news_sentiment_path_input(
-        "settings_news_sentiment_model_path", "news_sentiment_model_path", "set_news_sentiment_model_path"
-    )
-    news_sentiment_head_input = _news_sentiment_path_input(
-        "settings_news_sentiment_head_path", "news_sentiment_head_path", "set_news_sentiment_head_path"
-    )
-    news_sentiment_tokenizer_input = _news_sentiment_path_input(
-        "settings_news_sentiment_tokenizer_path", "news_sentiment_tokenizer_path", "set_news_sentiment_tokenizer_path"
-    )
+    # --- N5-4: 新闻情绪打分卡片（子面板含文件选择器 GGUF/head.npz/tokenizer.json，
+    #     外部 VM 模式消费 ai_settings_vm；保存校验在 VM，Enter 提交回调注入）---
     card_news_sentiment = DashboardCard(
         content=ft.Column(
             [
-                SettingRow(
-                    icon=safe_icon_str(ft.Icons.INSIGHTS),
-                    title=I18n.get("settings_news_sentiment_title"),
-                    subtitle=I18n.get("settings_news_sentiment_desc"),
-                    control=news_sentiment_switch,
-                    icon_color=AppColors.PRIMARY,
-                    title_key="settings_news_sentiment_title",
-                    subtitle_key="settings_news_sentiment_desc",
-                ),
-                news_sentiment_model_input,
-                news_sentiment_head_input,
-                news_sentiment_tokenizer_input,
-                ft.Text(
-                    I18n.get("settings_news_sentiment_hint"),
-                    size=AppStyles.FONT_SIZE_CAPTION,
-                    color=AppColors.TEXT_HINT,
-                ),
+                NewsSentimentConfigPanel(vm=ai_settings_vm, on_submit_save=_on_save_ai),
             ],
         ),
     )

@@ -171,6 +171,12 @@ class TestAIBrainTabContract:
         """DoD: 必须函数调用消费 LocalModelConfigPanel (vm props 推送)。"""
         assert "LocalModelConfigPanel(" in _code_source(), "必须函数调用 LocalModelConfigPanel(vm=local_vm)"
 
+    def test_consumes_news_sentiment_config_panel(self):
+        """DoD: 必须函数调用消费 NewsSentimentConfigPanel (N5-4 文件选择器子面板)。"""
+        assert "NewsSentimentConfigPanel(" in _code_source(), (
+            "必须函数调用 NewsSentimentConfigPanel(vm=ai_settings_vm, on_submit_save=...)"
+        )
+
     def test_no_page_ref_param(self):
         """DoD: AIBrainTab 签名不应包含 page_ref 参数 (声明式用 ft.context.page)。"""
         import inspect
