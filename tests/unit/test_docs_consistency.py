@@ -332,6 +332,7 @@ def _actual_registered_singletons() -> frozenset[str]:
     import services.ai_service  # noqa: F401 (side-effect 注册)
     import services.embedded_pg_maintenance_service  # noqa: F401 (side-effect 注册)
     import services.local_model_manager  # noqa: F401 (side-effect 注册)
+    import services.news_sentiment_index_service  # noqa: F401 (side-effect 注册)
     import services.news_sentiment_scorer  # noqa: F401 (side-effect 注册)
     import services.news_subscription_service  # noqa: F401 (side-effect 注册)
     import services.task_manager  # noqa: F401 (side-effect 注册)

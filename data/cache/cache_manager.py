@@ -281,6 +281,10 @@ class CacheManager:
             # N3-5：透传情感入库 code（利好→Positive/中性→Neutral/利空→Negative）；
             # item 未带 sentiment 时为 None（R21：缺失不伪装为中性）。
             "sentiment": item.get("sentiment"),
+            # N5-2：三打分列透传（初始同步等未打分路径为 None，R21 不伪装）。
+            "sentiment_score": item.get("sentiment_score"),
+            "sentiment_conf": item.get("sentiment_conf"),
+            "sentiment_model": item.get("sentiment_model"),
         }
 
     # Backward compatibility for direct SQL usage if any

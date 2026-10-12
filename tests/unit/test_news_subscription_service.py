@@ -617,6 +617,84 @@ class TestScoreSentiment:
 
 
 # ---------------------------------------------------------------------------
+# _score_sentiment_result (N5-2：完整落库载荷)
+# ---------------------------------------------------------------------------
+
+
+class TestScoreSentimentResult:
+    """打分 → 完整载荷（sentiment + score/conf/model 三数值列）的降级语义。"""
+
+    @staticmethod
+    @contextmanager
+    def _patched_scorer(results, model_tag=None):
+        with patch("services.news_subscription_service.NewsSentimentScorer") as mock_cls:
+            mock_cls.get_instance = AsyncMock(
+                return_value=MagicMock(score_texts=AsyncMock(return_value=results), model_tag=model_tag)
+            )
+            yield
+
+    @pytest.mark.asyncio
+    async def test_full_payload_on_success(self, svc):
+        with self._patched_scorer(
+            [{"label": "利好", "confidence": 0.9, "score": 0.8}],
+            model_tag="finbert2-news-q8_0",
+        ):
+            payload = await svc._score_sentiment_result("央行降准")
+        assert payload == {
+            "sentiment": "Positive",
+            "sentiment_score": 0.8,
+            "sentiment_conf": 0.9,
+            "sentiment_model": "finbert2-news-q8_0",
+        }
+
+    @pytest.mark.asyncio
+    async def test_unavailable_falls_back_llm_only(self, svc):
+        """服务整体不可用 → sentiment 取 LLM 白名单结果，三数值列 None（R21 不填 0）。"""
+        with self._patched_scorer(None):
+            payload = await svc._score_sentiment_result("内容", llm_fallback="Positive")
+        assert payload == {
+            "sentiment": "Positive",
+            "sentiment_score": None,
+            "sentiment_conf": None,
+            "sentiment_model": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_invalid_entry_all_none(self, svc):
+        """条目 NaN → 四键全 None（不回退，R21）。"""
+        with self._patched_scorer([None]):
+            payload = await svc._score_sentiment_result("内容", llm_fallback="Positive")
+        assert payload == {
+            "sentiment": None,
+            "sentiment_score": None,
+            "sentiment_conf": None,
+            "sentiment_model": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_unknown_label_keeps_numeric_outputs(self, svc):
+        """label 未知 → sentiment None；score/conf 为有效数值输出仍保留（语义独立）。"""
+        with self._patched_scorer([{"label": "无法判断", "confidence": 0.5, "score": 0.1}]):
+            payload = await svc._score_sentiment_result("内容")
+        assert payload["sentiment"] is None
+        assert payload["sentiment_score"] == 0.1
+        assert payload["sentiment_conf"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_model_tag_none_when_unloaded(self, svc):
+        """打分器未加载模型 → sentiment_model None（R21 缺失不伪装）。"""
+        with self._patched_scorer([{"label": "中性", "confidence": 0.6, "score": 0.0}], model_tag=None):
+            payload = await svc._score_sentiment_result("常规消息")
+        assert payload["sentiment_model"] is None
+
+    @pytest.mark.asyncio
+    async def test_score_sentiment_reads_payload_sentiment(self, svc):
+        """_score_sentiment（N3-5 契约）= 载荷的 sentiment 键。"""
+        with self._patched_scorer([{"label": "利空", "confidence": 0.8, "score": -0.5}]):
+            assert await svc._score_sentiment("立案调查") == "Negative"
+
+
+# ---------------------------------------------------------------------------
 # _processing_loop
 # ---------------------------------------------------------------------------
 
@@ -662,18 +740,25 @@ class TestProcessingLoop:
         assert svc.processing_queue.qsize() == 0
 
     @staticmethod
-    async def _run_one_item(svc, item, sentiment):
+    async def _run_one_item(svc, item, sentiment, payload=None):
         """处理单条 item（真实 normalize 链），返回 save_market_news 收到的 dict。
 
         svc fixture 已把 CacheManager 整类 patch 为 MagicMock，
-        此处用 side_effect 接回真实静态方法以验证 sentiment 透传。
+        此处用 side_effect 接回真实静态方法以验证 sentiment 与 N5-2 三打分列透传。
         """
+        if payload is None:
+            payload = {
+                "sentiment": sentiment,
+                "sentiment_score": None,
+                "sentiment_conf": None,
+                "sentiment_model": None,
+            }
         svc._running = True
         svc.processing_queue = asyncio.Queue(maxsize=1)
         svc.processing_queue.put_nowait(item)
         with (
             patch.object(svc, "_generate_tags", AsyncMock(return_value="tag")),
-            patch.object(svc, "_score_sentiment", AsyncMock(return_value=sentiment)),
+            patch.object(svc, "_score_sentiment_result", AsyncMock(return_value=payload)),
             patch(
                 "services.news_subscription_service.CacheManager.normalize_news_item",
                 side_effect=RealCacheManager.normalize_news_item,
@@ -702,6 +787,33 @@ class TestProcessingLoop:
         """N3-5 全链：打分利好 → normalize 透传 → 落库 sentiment="Positive"。"""
         saved = await self._run_one_item(svc, {"content": "紫金矿业发现金矿", "time": "2024-01-01"}, "Positive")
         assert saved["sentiment"] == "Positive"
+
+    @pytest.mark.asyncio
+    async def test_scored_payload_persists_full(self, svc):
+        """N5-2 全链：完整载荷（sentiment + 三打分列）→ normalize 透传 → 落库。"""
+        saved = await self._run_one_item(
+            svc,
+            {"content": "紫金矿业发现金矿", "time": "2024-01-01"},
+            "Positive",
+            payload={
+                "sentiment": "Positive",
+                "sentiment_score": 0.8,
+                "sentiment_conf": 0.9,
+                "sentiment_model": "finbert2-news-q8_0",
+            },
+        )
+        assert saved["sentiment"] == "Positive"
+        assert saved["sentiment_score"] == 0.8
+        assert saved["sentiment_conf"] == 0.9
+        assert saved["sentiment_model"] == "finbert2-news-q8_0"
+
+    @pytest.mark.asyncio
+    async def test_unscored_path_persists_none_columns(self, svc):
+        """N5-2/R21：未打分路径三数值列为 None，不伪装（R21 不填 0）。"""
+        saved = await self._run_one_item(svc, {"content": "普通新闻", "time": "2024-01-01"}, None)
+        assert saved["sentiment_score"] is None
+        assert saved["sentiment_conf"] is None
+        assert saved["sentiment_model"] is None
 
     @staticmethod
     async def _run_one_item_llm_fallback(svc, item, scorer_results, classify_result):

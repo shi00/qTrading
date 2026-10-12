@@ -15,6 +15,7 @@
 
 - 正确做法：按 `as_of` 时点做 PIT（point-in-time）过滤；财报按 `ann_date <= trade_date` 约束；存活判定用「退市日晚于 as_of」而非「今天是否在市」。
 - 反面样本：`sw_industry_member`（申万行业成员）主键不含日期，是**全局快照**；用**今天**的行业归属去回测若干年前，跨分类调整期即前视（详见下方「已知限制」DAT-08）。
+- 新闻类数据的交易日归属口径（N5-2）：新闻按**发布时间（UTC → CST）**归属交易日——发布时刻 **< 15:00** 且当日为交易日 → 归属**当日**；**≥ 15:00** 或发布于非交易日 → 归属**次一交易日**；交易日历不可得 → 该条新闻**丢弃不归属**（禁止用自然日或当前日历近似）。实现锚点：`services/news_sentiment_index_service.py::assign_trade_day`（纯函数，单测 `tests/unit/test_news_sentiment_index_service.py`）。
 - 自动守护：R24（报告模式，`check_redlines.py::check_R24`），扫 `strategies/` 下对无生效日期维度表/ORM 类/派生列键的引用，输出 warning 提示人工确认取数时点；语义与升级期限见 [ruleset-changelog.md](../governance/ruleset-changelog.md)。
 
 ### 2. 幸存者偏差（Survivorship Bias / 票池构造）

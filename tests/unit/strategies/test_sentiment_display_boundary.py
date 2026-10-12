@@ -44,8 +44,9 @@ pytestmark = pytest.mark.unit
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 STRATEGIES_DIR = PROJECT_ROOT / "strategies"
 
-# 守护的新闻情绪字段名（market_news 列 + 打分输出落库字段；精确匹配，见 Plans N3-7 DoD）
-GUARDED_FIELDS: frozenset[str] = frozenset({"sentiment", "sentiment_score"})
+# 守护的新闻情绪字段名（market_news 列 + 打分输出落库字段；精确匹配，见 Plans N3-7 DoD；
+# N5-2 扩充 sentiment_conf / sentiment_model 三打分列随聚合落地后同步纳入守护）
+GUARDED_FIELDS: frozenset[str] = frozenset({"sentiment", "sentiment_score", "sentiment_conf", "sentiment_model"})
 
 # 打分服务模块（策略层不得导入：输出仅展示边界，ADR-0008 / ai-service.md §5）
 SCORER_MODULE = "services.news_sentiment_scorer"

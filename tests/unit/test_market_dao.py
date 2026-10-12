@@ -89,7 +89,7 @@ class TestMarketDaoSaveMarketNews:
         params = dao._write_db.call_args[0][1]
         assert '"sentiment" = COALESCE(excluded."sentiment", market_news."sentiment")' in sql
         assert '"sentiment"' in sql.split("VALUES")[0]
-        assert params[-1] == "Positive"
+        assert params[-4] == "Positive"  # N5-2 扩列后 sentiment 位于 $6（其后跟三打分列 $7-$9）
 
     @pytest.mark.asyncio
     async def test_sql_sentiment_missing_binds_none(self):
@@ -105,7 +105,7 @@ class TestMarketDaoSaveMarketNews:
             }
         )
         params = dao._write_db.call_args[0][1]
-        assert params[-1] is None
+        assert params[-4] is None
 
 
 class TestMarketDaoGetMarketNews:
@@ -687,3 +687,84 @@ class TestMarketDaoGetLatestIndicatorsBulk:
         assert "ORDER BY ts_code, trade_date DESC" in sql_template
         assert "ps_ttm" in sql_template and "dv_ttm" in sql_template
         assert dao.chunked_in_query.call_args.args[2] == ["000001.SZ"]
+
+
+class TestMarketDaoScoredNewsReads:
+    """N5-2：情绪指数聚合读取（get_scored_stock_news / get_telegraph_news_in_window）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_ts_code_returns_empty_df(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock()
+        result = await dao.get_scored_stock_news("")
+        assert result.empty
+        dao._read_db.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scored_stock_news_query_shape(self):
+        """ts_code 直达 + source_kind IN (announcement, news) + 三打分列 + 不吞 DB 故障。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_scored_stock_news("600519.SH", start_time="2026-10-01", end_time="2026-10-12")
+        sql, params, kwargs = (
+            dao._read_db.call_args.args[0],
+            dao._read_db.call_args.args[1],
+            dao._read_db.call_args.kwargs,
+        )
+        assert "WHERE ts_code = $1 AND source_kind IN ($2, $3)" in sql
+        assert params == ["600519.SH", "announcement", "news", "2026-10-01", "2026-10-12"]
+        for col in ("sentiment_score", "sentiment_conf", "sentiment_model"):
+            assert col in sql
+        assert kwargs.get("suppress_errors") is False
+
+    @pytest.mark.asyncio
+    async def test_telegraph_window_query_shape(self):
+        """市场级窗口读取：telegraph/NULL 口径 + 时间窗 + LIMIT + 不吞 DB 故障。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_telegraph_news_in_window(start_time="2026-10-01", end_time="2026-10-12", limit=100)
+        sql, params, kwargs = (
+            dao._read_db.call_args.args[0],
+            dao._read_db.call_args.args[1],
+            dao._read_db.call_args.kwargs,
+        )
+        assert "(source_kind = $1 OR source_kind IS NULL)" in sql
+        assert params == ["telegraph", "2026-10-01", "2026-10-12", 100]
+        assert "LIMIT $4" in sql
+        assert kwargs.get("suppress_errors") is False
+
+
+class TestMarketDaoSaveScoredColumns:
+    """N5-2：save_market_news 三打分列落库 + 冲突 COALESCE 范式。"""
+
+    @pytest.mark.asyncio
+    async def test_scored_columns_bound_and_coalesced(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._write_db = AsyncMock(return_value=1)
+        await dao.save_market_news(
+            {
+                "content": "Test",
+                "tags": None,
+                "publish_time": "2024-06-15 10:00:00",
+                "source": "CLS",
+                "sentiment": "Positive",
+                "sentiment_score": 0.8,
+                "sentiment_conf": 0.9,
+                "sentiment_model": "finbert2-news-q8_0",
+            }
+        )
+        sql = dao._write_db.call_args[0][0]
+        params = dao._write_db.call_args[0][1]
+        assert params[-3:] == (0.8, 0.9, "finbert2-news-q8_0")
+        assert '"sentiment_score" = COALESCE(excluded."sentiment_score", market_news."sentiment_score")' in sql
+        assert '"sentiment_conf" = COALESCE(excluded."sentiment_conf", market_news."sentiment_conf")' in sql
+        assert '"sentiment_model" = COALESCE(excluded."sentiment_model", market_news."sentiment_model")' in sql
+
+    @pytest.mark.asyncio
+    async def test_missing_scored_columns_bind_none(self):
+        """未打分（初始同步路径）→ 三数值列绑定 None（R21 不伪装）。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._write_db = AsyncMock(return_value=1)
+        await dao.save_market_news({"content": "Test", "publish_time": "2024-06-15 10:00:00"})
+        params = dao._write_db.call_args[0][1]
+        assert params[-3:] == (None, None, None)
