@@ -33,8 +33,11 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     """Add nullable sentiment score columns to market_news (no backfill)."""
-    op.add_column("market_news", sa.Column("sentiment_score", sa.Float(), nullable=True))
-    op.add_column("market_news", sa.Column("sentiment_conf", sa.Float(), nullable=True))
+    # Double（而非无精度 Float）：PG 反射 float8 统一报告 DOUBLE PRECISION，
+    # ORM↔迁移一致性门禁（test_orm_migration_consistency.py）按 PG dialect 编译字符串
+    # 严格比较，sa.Float() 编译为 FLOAT 会与之不匹配；两者底层同为 float8，语义不变。
+    op.add_column("market_news", sa.Column("sentiment_score", sa.Double(), nullable=True))
+    op.add_column("market_news", sa.Column("sentiment_conf", sa.Double(), nullable=True))
     op.add_column("market_news", sa.Column("sentiment_model", sa.String(length=32), nullable=True))
 
 
