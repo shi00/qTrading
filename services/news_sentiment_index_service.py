@@ -381,3 +381,38 @@ class NewsSentimentIndexService:
         )
         rows = [row for row in _df_to_scored_rows(tele) if _is_market_scope_row(row)]
         return aggregate_daily(rows, trade_days, as_of=now_cst, days=days)
+
+    async def get_stock_day_news(
+        self,
+        ts_code: str,
+        stock_name: str | None = None,
+        trade_date: datetime.date | None = None,
+    ) -> list[dict]:
+        """某交易日的个股新闻明细（N5-3：点击情绪柱展开当日新闻及各自分数）。
+
+        归属口径与 :func:`aggregate_daily` 一致（R24）：取数窗口 =
+        [前一交易日 15:00 CST, trade_date 15:00 CST)（≥15:00 归次一交易日，
+        前一交易日收盘后的新闻归属当日；窗口起点取交易日历的前一交易日，
+        长假归属不漏），再经 :func:`assign_trade_day` 复核归属后过滤。
+
+        - 未打分行（score/conf 为 NULL）保留返回，由展示层以「-」标注（R21，
+          不在本层丢弃或填值；聚合层自会排除）；
+        - ``【市场】`` 前缀快讯不进个股明细（与 :meth:`get_stock_daily_index`
+          的个股桶互斥）；
+        - 按 publish_time 倒序（最新在前）。
+        """
+        if not ts_code or trade_date is None:
+            return []
+        calendar = self._get_calendar()
+        cal_start = trade_date - datetime.timedelta(days=30)
+        cal_end = trade_date + datetime.timedelta(days=_FORWARD_CALENDAR_DAYS)
+        trade_days = sorted(set(await calendar.get_trade_dates(cal_start, cal_end)))
+        prev = max((d for d in trade_days if d < trade_date), default=None)
+        if prev is None:
+            return []
+        start_utc = to_utc_for_db(datetime.datetime.combine(prev, NEWS_DAY_CUTOFF))
+        end_utc = to_utc_for_db(datetime.datetime.combine(trade_date, NEWS_DAY_CUTOFF))
+        rows = await self._collect_stock_rows(str(ts_code), stock_name, start_utc, end_utc)
+        day_rows = [r for r in rows if assign_trade_day(r.get("publish_time"), trade_days) == trade_date]
+        day_rows.sort(key=lambda r: r.get("publish_time") or datetime.datetime.min, reverse=True)  # noqa: DTZ901  # 哨兵边界（None 置尾），排序键不参与时区运算，与 naive publish_time 同口径
+        return day_rows

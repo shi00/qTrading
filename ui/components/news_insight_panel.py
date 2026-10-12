@@ -19,9 +19,11 @@ from collections.abc import Callable
 import flet as ft
 
 from ui.i18n import I18n, get_observable_state
+from ui.components.sentiment_bar import build_latest_sentiment_line
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
+from ui.viewmodels.sentiment_index_types import SentimentIndexState
 from ui.viewmodels.news_insight_types import (
     EvidenceItem,
     NewsInsightState,
@@ -193,8 +195,10 @@ def _build_event_card(event: RiskEvent, is_expanded: bool, on_toggle) -> ft.Cont
     )
 
 
-def _build_ready(state: NewsInsightState, event_cards: ft.Control) -> ft.Control:
-    """ready：风险等级 + 窗口/时间/复用 + 覆盖 + 事件卡片 + 证据列表。"""
+def _build_ready(
+    state: NewsInsightState, event_cards: ft.Control, sentiment_state: SentimentIndexState | None = None
+) -> ft.Control:
+    """ready：风险等级 + 情绪指数行 + 窗口/时间/复用 + 覆盖 + 事件卡片 + 证据列表。"""
     level_txt = I18n.get(risk_level_label_key(state.risk_level))
     level_color = severity_color(state.risk_level)
     info_rows = [
@@ -212,6 +216,10 @@ def _build_ready(state: NewsInsightState, event_cards: ft.Control) -> ft.Control
             ]
         )
     ]
+    # N5-3：近 7 日情绪指数行（分数与置信度=样本数；state 缺失/无数据不渲染）
+    latest_sentiment = build_latest_sentiment_line(sentiment_state)
+    if latest_sentiment is not None:
+        info_rows.append(latest_sentiment)
     if state.window_label and state.window_label != "unknown":
         info_rows.append(
             ft.Text(
@@ -298,6 +306,7 @@ def _build_event_cards(state: NewsInsightState, expanded_idx: int, on_toggle) ->
 @ft.component
 def NewsInsightPanel(
     news_state: NewsInsightState,
+    sentiment_state: SentimentIndexState | None = None,
     news_on_generate: Callable[[], None] | None = None,
     news_on_retry: Callable[[], None] | None = None,
 ) -> ft.Container:  # pragma: no cover  # UI 组件闭包（hooks/事件处理器）不可无头单测
@@ -339,7 +348,7 @@ def NewsInsightPanel(
             ),
         )
     elif phase == PHASE_READY:
-        body = _build_ready(news_state, _build_event_cards(news_state, expanded_idx, _toggle_event))
+        body = _build_ready(news_state, _build_event_cards(news_state, expanded_idx, _toggle_event), sentiment_state)
     elif phase == PHASE_DEGRADED:
         rows: list[ft.Control] = []
         rows.append(ft.Text(_translate_message(news_state.message)))

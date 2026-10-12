@@ -1,5 +1,5 @@
-# pyright: reportArgumentType=false
-# 本文件含测试替身/mock 模式，统一局部禁用参数类型告警（同 test_market_dao.py 范式）。
+# pyright: reportArgumentType=false, reportOptionalMemberAccess=false
+# 本文件含测试替身/mock 模式，统一局部禁用参数类型与 mock 属性访问告警（同 test_market_dao.py 范式）。
 
 """N5-2 情绪指数聚合服务单测：R24 交易日归属 / 加权聚合 / 盘中衰减 / 市场级互斥。
 
@@ -364,7 +364,7 @@ class TestNewsSentimentIndexService:
         mdao.get_telegraph_news_for_stocks = AsyncMock(return_value=_mk_df([]))
         assert await svc.get_stock_daily_index("600519.SH", None, days=7, as_of=_cst(2026, 10, 13, 10, 0)) == []
         assert await svc.get_market_daily_index(days=7, as_of=_cst(2026, 10, 13, 10, 0)) == []
-        mdao.get_scored_stock_news.assert_not_awaited()
+        mdao.get_scored_stock_news.assert_not_called()
         mdao.get_telegraph_news_in_window.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -376,7 +376,7 @@ class TestNewsSentimentIndexService:
         assert await svc.get_stock_daily_index("", None, days=7) == []
         assert await svc.get_stock_daily_index("600519.SH", None, days=0) == []
         assert await svc.get_market_daily_index(days=0) == []
-        mdao.get_scored_stock_news.assert_not_awaited()
+        mdao.get_scored_stock_news.assert_not_called()
         mdao.get_telegraph_news_in_window.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -391,6 +391,87 @@ class TestNewsSentimentIndexService:
         target = next(p for p in points if p.trade_date == datetime.date(2026, 10, 12))
         assert target.sample_count == 0
         assert target.index is None
+
+
+# ---------------------------------------------------------------------------
+# get_stock_day_news（N5-3：点击情绪柱展开当日新闻明细）
+# ---------------------------------------------------------------------------
+
+
+class TestGetStockDayNews:
+    @pytest.mark.asyncio
+    async def test_day_window_and_assignment_filter(self, service):
+        """归属过滤：仅保留归属 trade_date 的行（含前一交易日 15:00 后），倒序返回。
+
+        - 10-9 15:30（CST）→ 归 10-12 ✓；
+        - 10-9 15:00 整（≥15:00 归次一交易日 = 10-12）✓；
+        - 10-9 14:59 → 归 10-9 ✗（窗口外，即便 DAO 返回也被归属防线剔除）；
+        - 10-12 盘中/14:59 → 10-12 ✓；
+        - 10-12 15:00 整 → 归 10-13 ✗。
+        """
+        svc, mdao, _ = service
+        mdao.get_scored_stock_news = AsyncMock(
+            return_value=_mk_df(
+                [
+                    _db_row(_cst(2026, 10, 9, 15, 30), 0.8, 0.9),
+                    _db_row(_cst(2026, 10, 9, 15, 0), 0.6, 0.9),
+                    _db_row(_cst(2026, 10, 9, 14, 59), 0.1, 0.9),
+                    _db_row(_cst(2026, 10, 12, 9, 0), 0.5, 0.8),
+                    _db_row(_cst(2026, 10, 12, 14, 59), 0.3, 0.7),
+                    _db_row(_cst(2026, 10, 12, 15, 0), 0.9, 0.9),
+                ]
+            )
+        )
+        mdao.get_telegraph_news_for_stocks = AsyncMock(return_value=_mk_df([]))
+        rows = await svc.get_stock_day_news("600519.SH", "贵州茅台", datetime.date(2026, 10, 12))
+        assert [r["sentiment_score"] for r in rows] == [0.3, 0.5, 0.8, 0.6]  # publish_time 倒序
+        # 取数窗口：[前一交易日 15:00, trade_date 15:00)（CST → UTC naive）
+        kwargs = mdao.get_scored_stock_news.await_args.kwargs
+        assert kwargs["start_time"] == to_utc_for_db(_cst(2026, 10, 9, 15, 0))
+        assert kwargs["end_time"] == to_utc_for_db(_cst(2026, 10, 12, 15, 0))
+
+    @pytest.mark.asyncio
+    async def test_unscored_rows_kept_for_detail(self, service):
+        """明细保留未打分行（R21：展示「-」，不在此层丢弃/填值）。"""
+        svc, mdao, _ = service
+        mdao.get_scored_stock_news = AsyncMock(return_value=_mk_df([_db_row(_cst(2026, 10, 12, 9, 0), None, None)]))
+        mdao.get_telegraph_news_for_stocks = AsyncMock(return_value=_mk_df([]))
+        rows = await svc.get_stock_day_news("600519.SH", None, datetime.date(2026, 10, 12))
+        assert len(rows) == 1
+        assert rows[0]["sentiment_score"] is None
+        assert rows[0]["sentiment_conf"] is None
+
+    @pytest.mark.asyncio
+    async def test_market_prefix_excluded(self, service):
+        """【市场】前缀快讯即使命中个股名也不进个股日明细（与个股桶互斥）。"""
+        svc, mdao, _ = service
+        mdao.get_scored_stock_news = AsyncMock(return_value=_mk_df([]))
+        mdao.get_telegraph_news_for_stocks = AsyncMock(
+            return_value=_mk_df([_db_row(_cst(2026, 10, 12, 10, 0), 0.5, 1.0, content="【市场】贵州茅台领涨")])
+        )
+        assert await svc.get_stock_day_news("600519.SH", "贵州茅台", datetime.date(2026, 10, 12)) == []
+
+    @pytest.mark.asyncio
+    async def test_invalid_args_return_empty(self, service):
+        svc, mdao, _ = service
+        assert await svc.get_stock_day_news("", None, datetime.date(2026, 10, 12)) == []
+        assert await svc.get_stock_day_news("600519.SH", None, None) == []
+        mdao.get_scored_stock_news.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_prev_trade_day_returns_empty(self, service):
+        """trade_date 为日历首个交易日（无前一交易日）→ 空明细。"""
+        svc, mdao, calendar = service
+        calendar.get_trade_dates = AsyncMock(return_value=[datetime.date(2026, 10, 12)])
+        assert await svc.get_stock_day_news("600519.SH", None, datetime.date(2026, 10, 12)) == []
+        mdao.get_scored_stock_news.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_calendar_unavailable_returns_empty(self, service):
+        svc, mdao, calendar = service
+        calendar.get_trade_dates = AsyncMock(return_value=[])
+        assert await svc.get_stock_day_news("600519.SH", None, datetime.date(2026, 10, 12)) == []
+        mdao.get_scored_stock_news.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
