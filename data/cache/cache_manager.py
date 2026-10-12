@@ -278,6 +278,9 @@ class CacheManager:
             "tags": item.get("tags", ""),
             "publish_time": publish_time,
             "source": item.get("source", default_source),
+            # N3-5：透传情感入库 code（利好→Positive/中性→Neutral/利空→Negative）；
+            # item 未带 sentiment 时为 None（R21：缺失不伪装为中性）。
+            "sentiment": item.get("sentiment"),
         }
 
     # Backward compatibility for direct SQL usage if any

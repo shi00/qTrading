@@ -20,6 +20,7 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
 from data.persistence.daos.base_dao import EngineDisposedError
 from services.ai_service import AIService
+from services.news_sentiment_scorer import NewsSentimentScorer
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,10 @@ _QUEUE_DRAIN_DEFAULT_S = 3.0  # stop_async 默认 drain 超时（默认参数值
 _PROCESSING_SLEEP_S = 5.0  # 处理循环异常后休眠间隔，避免紧密错误循环
 _FETCH_RESULT_TIMEOUT_S = 5.0  # 单次异步监听器结果等待上限
 _HOT_CONCEPT_TAG_TIMEOUT_S = 3.0  # 热概念打标监听器等待上限
+
+# N3-5：打分器中文 label → market_news.sentiment 入库 code（NewsRow._coerce_sentiment /
+# news_feed._sentiment_style 按该取值契约着色）。label 未知按缺失处理（None，R21 不伪装）。
+_SENTIMENT_LABEL_TO_CODE = {"利好": "Positive", "中性": "Neutral", "利空": "Negative"}
 
 
 class NewsUpdateType:
@@ -393,6 +398,24 @@ class NewsSubscriptionService:
 
         return tag
 
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
+    async def _score_sentiment(self, content: str) -> str | None:
+        """N3-5：单条新闻情感打分 → 入库 code。
+
+        打分器契约（N3-2）：服务不可用（未启用/未配置/加载失败/超时/worker 错误）
+        整体返回 ``None``；条目非有限（NaN/Inf）为 ``None``——均按缺失处理（R21，
+        不回填中性、不伪装），label 未知同样归 ``None``。除 ``CancelledError``
+        （R2 向上传播）外不抛异常，无需 try 包裹。
+        """
+        scorer = await NewsSentimentScorer.get_instance()
+        results = await scorer.score_texts([content])
+        if not results:
+            return None
+        first = results[0]
+        if first is None:
+            return None
+        return _SENTIMENT_LABEL_TO_CODE.get(first.get("label"))
+
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _processing_loop(self):
         """
@@ -425,6 +448,10 @@ class NewsSubscriptionService:
                 with correlation_scope(f"news-{content_hash}"):
                     tags = await self._generate_tags(content)
                     item["tags"] = tags
+
+                    # N3-5：情感打分接线（打分 → normalize 透传 → 落库 sentiment 列）。
+                    # 服务不可用/NaN/未知 label 均归 None（R21 缺失不伪装）。
+                    item["sentiment"] = await self._score_sentiment(content)
 
                     normalized = CacheManager.normalize_news_item(
                         item,

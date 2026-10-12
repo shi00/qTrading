@@ -71,6 +71,42 @@ class TestMarketDaoSaveMarketNews:
         assert '"content" = excluded."content"' in sql
         assert '"source" = excluded."source"' in sql
 
+    @pytest.mark.asyncio
+    async def test_sql_sentiment_coalesce_on_conflict(self):
+        """N3-5：sentiment 冲突时 COALESCE 保留旧值（重试打分失败不清空已有结果）。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._write_db = AsyncMock(return_value=1)
+        await dao.save_market_news(
+            {
+                "content": "Test",
+                "tags": "tag",
+                "publish_time": "2024-06-15 10:00:00",
+                "source": "CLS",
+                "sentiment": "Positive",
+            }
+        )
+        sql = dao._write_db.call_args[0][0]
+        params = dao._write_db.call_args[0][1]
+        assert '"sentiment" = COALESCE(excluded."sentiment", market_news."sentiment")' in sql
+        assert '"sentiment"' in sql.split("VALUES")[0]
+        assert params[-1] == "Positive"
+
+    @pytest.mark.asyncio
+    async def test_sql_sentiment_missing_binds_none(self):
+        """N3-5/R21：未打分（item 无 sentiment）绑定 None，不伪装为中性。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._write_db = AsyncMock(return_value=1)
+        await dao.save_market_news(
+            {
+                "content": "Test",
+                "tags": None,
+                "publish_time": "2024-06-15 10:00:00",
+                "source": "CLS",
+            }
+        )
+        params = dao._write_db.call_args[0][1]
+        assert params[-1] is None
+
 
 class TestMarketDaoGetMarketNews:
     @pytest.mark.asyncio
