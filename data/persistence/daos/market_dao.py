@@ -156,17 +156,21 @@ class MarketDao(BaseDao):
         Uses raw SQL because MarketNews has an auto-increment PK (id),
         but the UPSERT conflict key is (content_hash, publish_time).
         _save_upsert only supports PK-based conflict resolution.
+
+        N3-5：sentiment 冲突时取 ``COALESCE(excluded, 旧值)``——处理循环 UPSERT
+        补写打分结果；重试/重复打分失败（None）不清空已有值（与 tags 同范式）。
         """
         content = news_item.get("content", "") or ""
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
         sql = """
-              INSERT INTO market_news ("content","content_hash","tags","publish_time","source","created_at")
-              VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+              INSERT INTO market_news ("content","content_hash","tags","publish_time","source","sentiment","created_at")
+              VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
               ON CONFLICT("content_hash","publish_time") DO
               UPDATE SET "tags" = COALESCE(excluded."tags", market_news."tags"),
                          "content" = excluded."content",
-                         "source" = excluded."source"
+                         "source" = excluded."source",
+                         "sentiment" = COALESCE(excluded."sentiment", market_news."sentiment")
               """
         params = (
             content,
@@ -174,6 +178,7 @@ class MarketDao(BaseDao):
             news_item.get("tags"),
             news_item.get("publish_time"),
             news_item.get("source", "Sina"),
+            news_item.get("sentiment"),
         )
         return await self._write_db(sql, params)
 

@@ -475,7 +475,7 @@ def _news_item_to_row(item: Any) -> NewsRow:
     """单个 news item (dict) → NewsRow.
 
     复用 CacheManager.normalize_news_item 保证字段一致
-    (normalize 会丢弃 sentiment，故从原始 item 直接读取).
+    (N3-5 起 normalize 透传 sentiment；此处仍从原始 item 读取，幂等).
     """
     from data.cache.cache_manager import CacheManager
 

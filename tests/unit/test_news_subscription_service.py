@@ -9,7 +9,8 @@
 - 轮询循环 (_poll_loop：取消传播)
 - 错误包装 (_safe_fetch_task：EngineDisposedError / 通用异常)
 - AI 标签 (_generate_tags：AI 成功 / AI 失败回退规则)
-- 处理队列 (_processing_loop：空内容 / 正常 / 取消 / EngineDisposed / 通用异常)
+- 情感打分 (_score_sentiment：label 映射三例 / 服务不可用 / NaN / 未知 label → None，R21)
+- 处理队列 (_processing_loop：空内容 / 正常 / 取消 / EngineDisposed / 通用异常 / sentiment 落库贯通)
 - 通知 (_notify_listeners：async/sync/0-2 参数 / 超时 / 连续失败移除)
 - 抓取通知 (_fetch_and_notify：空新闻 / 初始同步 / 新条目 / 告警 / 水位线保护)
 """
@@ -18,12 +19,14 @@ import asyncio
 import functools
 import logging
 import pytest
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from services.news_subscription_service import (
     NewsSubscriptionService,
     NewsUpdateType,
 )
+from data.cache.cache_manager import CacheManager as RealCacheManager
 from data.persistence.daos.base_dao import EngineDisposedError
 
 pytestmark = pytest.mark.unit
@@ -491,6 +494,61 @@ class TestGenerateTags:
 
 
 # ---------------------------------------------------------------------------
+# _score_sentiment (N3-5)
+# ---------------------------------------------------------------------------
+
+
+class TestScoreSentiment:
+    """打分器 label → 入库 code 映射与 R21 缺失语义。"""
+
+    @staticmethod
+    @contextmanager
+    def _patched_scorer(results):
+        """patch 单例 get_instance + score_texts 返回固定 results。"""
+        with patch("services.news_subscription_service.NewsSentimentScorer") as mock_cls:
+            mock_cls.get_instance = AsyncMock(return_value=MagicMock(score_texts=AsyncMock(return_value=results)))
+            yield
+
+    @pytest.mark.asyncio
+    async def test_bullish_maps_positive(self, svc):
+        with self._patched_scorer([{"label": "利好", "confidence": 0.9, "score": 0.8}]):
+            assert await svc._score_sentiment("央行降准") == "Positive"
+
+    @pytest.mark.asyncio
+    async def test_neutral_maps_neutral(self, svc):
+        with self._patched_scorer([{"label": "中性", "confidence": 0.6, "score": 0.0}]):
+            assert await svc._score_sentiment("常规消息") == "Neutral"
+
+    @pytest.mark.asyncio
+    async def test_bearish_maps_negative(self, svc):
+        with self._patched_scorer([{"label": "利空", "confidence": 0.85, "score": -0.7}]):
+            assert await svc._score_sentiment("立案调查") == "Negative"
+
+    @pytest.mark.asyncio
+    async def test_service_unavailable_returns_none(self, svc):
+        """R21：打分服务整体不可用（未启用/加载失败等）→ None，不回填中性。"""
+        with self._patched_scorer(None):
+            assert await svc._score_sentiment("内容") is None
+
+    @pytest.mark.asyncio
+    async def test_nan_entry_returns_none(self, svc):
+        """R21：条目非有限（NaN/Inf）→ None，不回填中性。"""
+        with self._patched_scorer([None]):
+            assert await svc._score_sentiment("内容") is None
+
+    @pytest.mark.asyncio
+    async def test_empty_results_returns_none(self, svc):
+        with self._patched_scorer([]):
+            assert await svc._score_sentiment("内容") is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_label_returns_none(self, svc):
+        """契约外 label 按缺失处理（None），不伪装为 Neutral 合法值。"""
+        with self._patched_scorer([{"label": "无法判断", "confidence": 0.5, "score": 0.0}]):
+            assert await svc._score_sentiment("内容") is None
+
+
+# ---------------------------------------------------------------------------
 # _processing_loop
 # ---------------------------------------------------------------------------
 
@@ -534,6 +592,48 @@ class TestProcessingLoop:
             except asyncio.CancelledError:
                 pass
         assert svc.processing_queue.qsize() == 0
+
+    @staticmethod
+    async def _run_one_item(svc, item, sentiment):
+        """处理单条 item（真实 normalize 链），返回 save_market_news 收到的 dict。
+
+        svc fixture 已把 CacheManager 整类 patch 为 MagicMock，
+        此处用 side_effect 接回真实静态方法以验证 sentiment 透传。
+        """
+        svc._running = True
+        svc.processing_queue = asyncio.Queue(maxsize=1)
+        svc.processing_queue.put_nowait(item)
+        with (
+            patch.object(svc, "_generate_tags", AsyncMock(return_value="tag")),
+            patch.object(svc, "_score_sentiment", AsyncMock(return_value=sentiment)),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=RealCacheManager.normalize_news_item,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", AsyncMock()) as mock_save,
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+        ):
+            task = asyncio.create_task(svc._processing_loop())
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        return mock_save.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_sentiment_unavailable_persists_none(self, svc):
+        """R21：打分服务不可用（None）→ 落库 sentiment=None，不伪装为中性。"""
+        saved = await self._run_one_item(svc, {"content": "央行发布新政策", "time": "2024-01-01"}, None)
+        assert saved["sentiment"] is None
+        assert saved["tags"] == "tag"
+
+    @pytest.mark.asyncio
+    async def test_sentiment_scored_persists_code(self, svc):
+        """N3-5 全链：打分利好 → normalize 透传 → 落库 sentiment="Positive"。"""
+        saved = await self._run_one_item(svc, {"content": "紫金矿业发现金矿", "time": "2024-01-01"}, "Positive")
+        assert saved["sentiment"] == "Positive"
 
     @pytest.mark.asyncio
     async def test_engine_disposed_breaks_loop(self, svc):

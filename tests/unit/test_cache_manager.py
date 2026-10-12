@@ -1634,6 +1634,18 @@ class TestCacheManagerNormalizeNewsItem:
         result = CacheManager.normalize_news_item(item)
         assert result["content"] == "test"
 
+    def test_sentiment_passthrough(self):
+        """N3-5：item 带 sentiment 时透传入库 code。"""
+        item = {"content": "test", "sentiment": "Positive"}
+        result = CacheManager.normalize_news_item(item)
+        assert result["sentiment"] == "Positive"
+
+    def test_sentiment_missing_defaults_none(self):
+        """N3-5/R21：item 无 sentiment 键（初始同步等未打分路径）→ None，不伪装为中性。"""
+        item = {"content": "test"}
+        result = CacheManager.normalize_news_item(item)
+        assert result["sentiment"] is None
+
 
 class TestCacheManagerSanitizeUrl:
     """URL 脱敏逻辑（review01-A4 Step2 移入 EngineManager.sanitize_url 静态方法）。"""
