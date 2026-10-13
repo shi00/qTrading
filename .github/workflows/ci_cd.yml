@@ -1352,7 +1352,8 @@ jobs:
           Write-Host "Installing CUDA Toolkit 12.1 via winget (driver skipped, only compiler+runtime subpackages)..."
           # --override 绕过 winget 默认"全装"策略，只装编译必需的 CUDA 组件，跳过 driver
           # （CUDA 12.1 installer 默认带 driver，在 Windows runner 上装 driver 会触发重启/蓝屏）
-          winget install --id Nvidia.CUDA -e --version 12.1.0 --accept-package-agreements --accept-source-agreements `
+          # winget 源中 Nvidia.CUDA 12.1 的清单版本号为 "12.1"（无 "12.1.0"），精确匹配失败会导致安装跳过
+          winget install --id Nvidia.CUDA -e --version 12.1 --accept-package-agreements --accept-source-agreements `
             --override "-s nvcc_12.1 cudart_12.1 cublas_12.1 cublas_dev_12.1 cuda_nvrtc_12.1 cuda_nvrtc_dev_12.1 -n"
           # CUDA 默认装到 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1
           $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin"
