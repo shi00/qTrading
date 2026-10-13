@@ -70,6 +70,10 @@ R2（`CancelledError` 重抛）/ R7 / R11（loop-local 原语）/ R15（单例�
 - 推理形态与依赖边界清晰：运行时只依赖已锁定的 `llama-cpp-python` + numpy，
   `torch` / `transformers` / `scikit-learn` 仅用于离线训练与导出（不进 `pyproject.toml`
   运行时依赖、不进 CI）。
+  > **2026-10-13 修订（[ADR-0013](./0013-runtime-selection-final-gguf.md)）**：「不进 CI」
+  > 修订为「训练依赖（torch / transformers / scikit-learn）仅限 `finbert-train.yml` 训练
+  > job 内临时安装，不进 `pyproject.toml` 主依赖」；「不进运行时依赖」语义不变。
+  > 背景见 ADR-0013（推理运行时选型终局，保持 GGUF）。
 - 规避 RANK 模式的 `Llama.embed()` 越界读取风险，CLS 维度经 Gate 实测确认为 768。
 - 与对话 LLM 进程隔离，互不争抢；子进程沿用既有 `_persistent_worker` 范式，停机路径可控。
 - 展示边界与 ADR-0008 一致，避免模型输出悄悄影响执行路径。
