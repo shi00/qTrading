@@ -1306,22 +1306,25 @@ jobs:
     strategy:
       fail-fast: false
       # 4 个发布变体：cpu / cuda 为独立安装包（外置 PostgreSQL 模式），embedded-cpu / embedded-cuda
-      # 额外内置 sidecar PostgreSQL。llama-cpp-python 是编译型原生扩展，CPU/CUDA 后端在构建期
-      # 通过不同 wheel 绑定（AStockScreener.spec 以 collect_dynamic_libs 打包对应原生库），
-      # 因此每个 EXE 只能运行单一后端，需按后端拆分发行。embedded 标记供 if: 条件区分内嵌。
+      # 额外内置 sidecar PostgreSQL。llama-cpp-python 是编译型原生扩展，PyPI 0.3.x 仅发源码包，
+      # 各后端在 CI 构建期通过 cmake args 编译（CMAKE_ARGS="-DGGML_CUDA=on" → CUDA，不设则 CPU）。
+      # abetlen 预编译 wheel 已无法匹配项目的 Python 3.13 + llama-cpp-python 0.3.35 组合
+      # （abl wheel 最高支持 Python 3.12 + llama-cpp-python 0.3.4），故 v0.3.35 起切换到
+      # 源码编译路径。因此每个 EXE 只能运行单一后端，需按后端拆分发行。
+      # embedded 标记供 if: 条件区分内嵌。
       matrix:
         include:
           - variant: cpu
-            llama_index_url: https://abetlen.github.io/llama-cpp-python/whl/cpu
+            backend: cpu
             embedded: "false"
           - variant: cuda
-            llama_index_url: https://abetlen.github.io/llama-cpp-python/whl/cu121
+            backend: cuda
             embedded: "false"
           - variant: embedded-cpu
-            llama_index_url: https://abetlen.github.io/llama-cpp-python/whl/cpu
+            backend: cpu
             embedded: "true"
           - variant: embedded-cuda
-            llama_index_url: https://abetlen.github.io/llama-cpp-python/whl/cu121
+            backend: cuda
             embedded: "true"
 
     steps:
@@ -1341,15 +1344,47 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
 
+      - name: Install CUDA Toolkit (CUDA variants only)
+        if: matrix.backend == 'cuda'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "Installing CUDA Toolkit 12.1 via winget (driver skipped, only compiler+runtime subpackages)..."
+          # --override 绕过 winget 默认"全装"策略，只装编译必需的 CUDA 组件，跳过 driver
+          # （CUDA 12.1 installer 默认带 driver，在 Windows runner 上装 driver 会触发重启/蓝屏）
+          winget install --id Nvidia.CUDA -e --version 12.1.0 --accept-package-agreements --accept-source-agreements `
+            --override "-s nvcc_12.1 cudart_12.1 cublas_12.1 cublas_dev_12.1 cuda_nvrtc_12.1 cuda_nvrtc_dev_12.1 -n"
+          # CUDA 默认装到 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1
+          $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin"
+          $cudaHome = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1"
+          if (-not (Test-Path $cudaBin)) {
+            Write-Error "CUDA Toolkit 12.1 not found at $cudaBin after install"
+            exit 1
+          }
+          Write-Host "CUDA Toolkit installed: $cudaHome"
+          Get-ChildItem $cudaBin | Select-Object -First 10 Name
+
       - name: Install dependencies
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # B03: 先安装 requirements.txt 与 requirements-optional.txt，再用 --reinstall-package
-          # 从对应后端源覆盖安装 llama-cpp-python，防止 requirements.txt 中的版本约束触发默认 PyPI CPU 轮子覆盖 CUDA 轮子。
+          # B03: llama-cpp-python 0.3.x 在 PyPI 仅发源码包，本地 C++ 编译器已就绪（windows-latest
+          # 自带 VS Build Tools），直接源码编译。CUDA 变体额外注入 CMAKE_ARGS="-DGGML_CUDA=on"
+          # 使 nvcc 编译 CUDA 后端；CPU 变体不设 CMAKE_ARGS，cmake 自动只编 CPU。
+          # abetlen 预编译 wheel 已无法匹配 Python 3.13 + llama-cpp-python 0.3.35
+          # （abl wheel 最高 cp312 + 0.3.4），故 v0.3.35 起切换到此源码编译路径。
+          if ("${{ matrix.backend }}" -eq "cuda") {
+            $env:CMAKE_ARGS = "-DGGML_CUDA=on"
+            # winget 可能把 CUDA 加到了系统 PATH 但当前 shell 未刷新；显式追加确保 cmake 找到 nvcc
+            $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin"
+            if (Test-Path $cudaBin) {
+              $env:Path = "$cudaBin;$env:Path"
+            }
+            Write-Host "CMAKE_ARGS=$env:CMAKE_ARGS"
+            nvcc --version
+          }
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt
-          uv pip install --system --reinstall-package llama-cpp-python --no-deps -c requirements-optional.txt llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
           uv pip install --system pyinstaller==6.19.0
 
 
