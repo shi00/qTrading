@@ -22,6 +22,7 @@ import asyncio
 import logging
 import os
 import typing
+import zipfile
 from dataclasses import dataclass
 
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -300,7 +301,8 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
         """三阶段保存 AI 配置 (云端 LLM + 本地模型 + 调优参数 + prompts).
 
         链路:
-        1. **验证**: 校验 max_candidates/min_turnover/concurrency/news_concurrency 范围
+        1. **验证**: 校验 max_candidates/min_turnover/concurrency/news_concurrency 范围;
+           启用新闻情绪打分时校验 GGUF 魔数 / head.npz 结构 / 分词器存在性 (N5-4)
         2. **持久化**:
            - llm_vm.save_config() (LLM 配置)
            - ConfigHandler.save_local_ai_config(...) (本地模型)
@@ -378,9 +380,9 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                 self._set_state(save_state=SAVE_ERROR, warning_message="")
                 return False
 
-            # N3-6: 情绪模型文件 GGUF 魔数校验（复用 scorer 加载前同一入口
-            # _validate_model_file，提案 §9.2；同步文件 IO 经 IO 池执行，R16）。
+            # N3-6/N5-4: 新闻情绪模型文件校验（同步文件 IO 经 IO 池执行，R16）。
             # 失败 → SAVE_ERROR + 专属 i18n key（View 据此展示具体原因）。
+            # 顺序：GGUF 魔数 → head.npz 结构 → 分词器存在性，逐一短路。
             if self._state.news_sentiment_enabled:
                 from services.local_model_manager import _validate_model_file
 
@@ -394,6 +396,39 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                     self._set_state(
                         save_state=SAVE_ERROR,
                         warning_message="settings_news_sentiment_model_invalid",
+                    )
+                    return False
+
+                # N5-4: head.npz 结构校验——单一正本 load_head_npz（allow_pickle=False +
+                # mode/形状/标签序/有限性强校验），复用优先不写第二份校验逻辑。
+                from services.news_sentiment_scorer import load_head_npz
+
+                head_path = self._state.news_sentiment_head_path.strip()
+                try:
+                    await ThreadPoolManager().run_async(TaskType.IO, load_head_npz, head_path)
+                except (OSError, ValueError, KeyError, zipfile.BadZipFile) as ex:
+                    logger.warning(
+                        "[AIBrainSettingsVM] head.npz validation failed: %s",
+                        DataSanitizer.sanitize_error(ex),
+                    )
+                    self._set_state(
+                        save_state=SAVE_ERROR,
+                        warning_message="settings_news_sentiment_head_invalid",
+                    )
+                    return False
+
+                # N5-4: 分词器文件存在性校验（内容合法性依赖可选 tokenizers 栈，保存期
+                # 仅校验存在；加载失败由打分链路降级 + LLM 回退兜底，不阻断新闻链路）。
+                tokenizer_path = self._state.news_sentiment_tokenizer_path.strip()
+                tokenizer_exists = await ThreadPoolManager().run_async(
+                    TaskType.IO,
+                    os.path.isfile,
+                    tokenizer_path,
+                )
+                if not tokenizer_exists:
+                    self._set_state(
+                        save_state=SAVE_ERROR,
+                        warning_message="settings_news_sentiment_tokenizer_invalid",
                     )
                     return False
 

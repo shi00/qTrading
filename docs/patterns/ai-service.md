@@ -62,6 +62,16 @@
 - **配置键**：`news_sentiment_enabled`（默认 `False`）/ `news_sentiment_model_path` / `news_sentiment_head_path` / `news_sentiment_tokenizer_path` / `news_sentiment_n_threads` / `news_sentiment_max_length` / `news_sentiment_timeout_s`（设置页接入见 N3-6）。
 - **依赖**：`llama-cpp-python` / `tokenizers` 为可选依赖（`importlib` 延迟导入，缺失时打分降级 `None`，不影响 App 启动）；`head.npz` 与 GGUF 产物不进仓库。
 
+### 6.1 模型产物分发与归档（N5-4）
+
+- **产物清单与归档位置**：微调产物归档于 `ai_models/`（已被 `.gitignore` 忽略，**不进仓库、不进安装包**——`AStockScreener.spec` / `installer.iss` 未引用，无需打包配置）：
+  - `finbert2-sentiment-q8_0.gguf`：编码器（Q8_0 量化，~121 MB）；
+  - `finbert2-sentiment-head.npz`：分类头（`np.savez`，`mode`/`labels`/`cw`/`cb`[/`pw`/`pb`]，格式正本 `load_head_npz`）；
+  - `tokenizer.json`：HF `tokenizers` 词表（训练时随 `save_pretrained` 导出，随编码器配套分发）。
+- **校验门禁**：发布前手动运行 `scripts/verify_finbert_gguf.py`（分词一致率 / CLS 余弦相似度 / 三类概率最大差 / 标签一致率，见 `docs/guides/ci-cd.md` 工程脚本清单），验证报告留存 `ai_models/*.verify.json`（schema `finbert-gguf-verification.v1`）；App 侧保存路径时再做轻量校验（GGUF 魔数 + `head.npz` 结构 + 分词器存在性，`AIBrainSettingsViewModel.save_ai_settings`）。
+- **分发方式（首次使用由用户提供文件）**：设置页「AI 大脑」情绪卡片三路径支持手输或文件选择器（GGUF/`.npz`/`.json`），保存即生效（`NewsSentimentScorer` 每次打分重读配置，stat 签名变化自动重载）；产物不随 App 下载/打包。
+- **来源边界**：模型文件由用户自行获取，来源与合规由用户承担；GGUF 仅做 4 字节魔数校验、`head.npz` 仅做结构与数值校验，均不构成对文件内容的信任（已登记 [known-technical-debt.md](../debt/known-technical-debt.md)）。
+
 ## 完成判定（canonical 入口）
 
 _最小验证命令：_ 按改动实际触及的层运行 CONTRIBUTING「变更类型 → 最小验证子集」对应最小子集；AI 服务逻辑改动后须 `redline-check` + 相关单测 + `python scripts/check_docs_consistency.py`。

@@ -141,6 +141,8 @@ ruff_diff.txt
 *.h5
 *.parquet
 *.gguf
+# N5-4: 情绪模型分类头产物（ai_models/** 归档，不进仓库/安装包）
+*.npz
 
 # 5. E2E test diagnostics
 e2e-artifacts/

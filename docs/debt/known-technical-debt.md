@@ -66,6 +66,7 @@
 | P3-B12-Screener-Formatting-Logic-in-VM | #B12-2 review02 B12 第 2 步：格式化逻辑下沉 VM（`_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM） | P3 | ① report04 D9（AI 流式更新重建机制重构）合并时；② 或 `screener_view` 再次因格式化逻辑内联出现缺陷时 |
 | P2-BT05-QualityGate-Bypass | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计） | P2 | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或 review03 BT-05 第二步实施（实现 `evaluate_historical_window()` 区间质量评估）时 |
 | P3-TA-OSS05-DualImpl | 技术指标（RSI/MACD/KDJ）双实现分叉的 OSS-05 结论仅存于测试 docstring，未登记技术债（原著 reviews/ 已丢失） | P3 | ① 技术指标测试文件（`test_technical_analysis_equivalence.py`）被重构或拆分时；② 或双实现再次扩散（新增未经等价性断言覆盖的指标分支）时；③ 或指标语义变更时 |
+| P3-N54-Model-File-Trust-Boundary | 情绪模型文件（GGUF/head.npz）保存期仅轻量校验（GGUF 4 字节魔数 / head 结构与数值），不构成对文件内容的信任，来源由用户自担 | P3 | ① App 引入模型下载/分发渠道（文件来源不再由用户自备）时；② 或 GGUF/head 解析器漏洞（如 llama.cpp/np.load CVE）公开披露时；③ 或安全审计要求文件内容级校验（哈希白名单/签名）时 |
 
 ## 技术债清单
 
@@ -314,6 +315,20 @@ M3 模块化检视发现：`app/bootstrap.py:123`（`MetaDataManager.preload_ali
 **期望的最终解法**
 
 不主动修复。若未来 `preload_aliases` / `validate_failover_credentials` / `validate_strategy_tier_coverage` 引入网络 IO 或耗时 CPU 操作（如 >100ms），改用 `ThreadPoolManager().run_async(TaskType.IO, ...)` 提交。验收标准：① 改造后启动期 UI 无阻塞；② 现有 `test_bootstrap.py` 全过。upgrade 触发条件：① 这些函数引入网络/磁盘 IO；② 或启动期 UI 响应延迟被用户感知时。
+
+#### P3-N54-Model-File-Trust-Boundary：情绪模型文件（GGUF/head.npz）保存期仅轻量校验，不构成对文件内容的信任（来源由用户自担）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-N54-Model-File-Trust-Boundary** | 情绪模型文件（GGUF/head.npz）保存期仅轻量校验（GGUF 4 字节魔数 / head 结构与数值），不构成对文件内容的信任，来源由用户自担 | ① App 引入模型下载/分发渠道（文件来源不再由用户自备）时；② 或 GGUF/head 解析器漏洞（如 llama.cpp/np.load CVE）公开披露时；③ 或安全审计要求文件内容级校验（哈希白名单/签名）时 |
+
+**产生背景与现状**
+
+N5-4 模型分发裁定「首次使用由用户下载/选择文件」路线（不随安装包打包）：设置页三路径支持手输或文件选择器，保存时校验 = GGUF 4 字节魔数（`_validate_model_file`）+ `head.npz` 结构校验（`load_head_npz`：`allow_pickle=False` + mode/形状/标签序/有限性）+ 分词器存在性。边界：① 魔数/结构校验不防「结构合法但内容恶意构造」的文件（如精心构造触发解析器漏洞的 GGUF）；② 分词器仅校验存在，内容合法性依赖可选 `tokenizers` 栈在加载期暴露；③ 模型文件由用户自行获取（自训/第三方转换），来源与合规由用户承担——设置页 hint 已明示。实际攻击面评估：文件解析发生在常驻子进程（`_scoring_worker`，崩溃由父进程终止重启兜底）与父进程 `np.load`（`allow_pickle=False` 已封死 pickle 载体主攻击面），且打分输出仅用于展示边界（ADR-0008），不进入策略/回测决策。
+
+**期望的最终解法**
+
+不主动修复（当前威胁模型下轻量校验 + 子进程隔离 + 来源自担为合理权衡）。若升级为内容级信任需求：① 分发渠道内置时改哈希白名单或签名校验；② 解析器 CVE 披露时升级依赖版本并在校验链加内容级约束。验收标准：校验链单测覆盖新增约束；`ai-service.md` §6.1 同步。upgrade 触发条件见上表。
 
 #### P3-M12-FailoverConfigPanel-BtnSave-No-RunTask：#M12-023 一致性：failover\_config\_panel.py btn\_save 未通过 \_run\_task\_no\_args 提交
 
