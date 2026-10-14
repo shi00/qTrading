@@ -402,6 +402,27 @@ CI 通过 `.github/workflows/ci_cd.yml` 的 `embedded-tests` job 自动运行（
 | 界面卡死 | 主循环被同步 IO/CPU 阻塞 | 在 `app.log` 搜超 `PerfThreshold` 的告警；核对 UI 事件是否经 `ThreadPoolManager.run_async()` 提交（R16） |
 | 数据库连接断开后操作持续失败 | PG 进程整体不可用，连接池无法自愈 | 显式调用 `CacheManager.init_db()` 重建引擎（不作自动重连）；生命周期契约见 [data-sync.md](../patterns/data-sync.md) |
 
+### 13. 获取新闻情绪模型产物（finbert-gguf-v* Release）
+
+> 适用场景：首次启用本地新闻情绪打分（[ai-service.md](../patterns/ai-service.md)）需三个模型文件——编码器 `.gguf` 与分类头 `head.npz` 由 CI 微调产线（`.github/workflows/finbert-train.yml`）发布于 `finbert-gguf-v*` Release；`tokenizer.json` 不随 Release 分发，从 HF 基座仓库获取（基座名与固定 revision 见 Release note 的 lineage 段）。
+
+```bash
+# 1. 查找最新 finbert-gguf-v* release
+gh release list --repo <your-repo> --limit 100 --exclude-drafts --exclude-pre-releases | grep "finbert-gguf-v"
+
+# 2. 下载模型产物（finbert2-news-q8_0.gguf + head.npz + SHA256SUMS.txt）
+gh release download <tag> --repo <your-repo> --dir ai_models --clobber
+
+# 3. SHA256 完整性校验（三文件同目录，输出两个 OK）
+cd ai_models && sha256sum -c SHA256SUMS.txt
+
+# 4. tokenizer.json 从 HF 基座仓库下载（<revision> 替换为 Release note 登记的基座 revision）
+curl -L -o tokenizer.json \
+  "https://huggingface.co/valuesimplex-ai-lab/FinBERT2-base/resolve/<revision>/tokenizer.json"
+```
+
+下载完成后到 设置 → AI 大脑 → 新闻情绪卡片，为三个路径选择文件（或手输路径）保存即生效（保存时校验 GGUF 魔数、分类头结构与分词器文件）；模型来源与合规由用户承担。
+
 ---
 
 ## 完成判定（canonical 入口）
