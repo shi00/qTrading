@@ -9,9 +9,15 @@
 # 定因见 export 脚本 docstring）→ pre-tokenizer 登记补丁
 # （scripts/patch_llama_cpp_pre_registry.py，FinBERT2-base chkhsh 上游未登记）→
 # 一致性 Gate（scripts/verify_finbert_gguf.py --head，N0-3 四判据）→
-# 上传 artifact（无论 Gate 成败，便于排障）→ Gate 通过后发布 Release
-# `finbert-gguf-v{model_version}`（note 含训练语料 corpus_tag 及其 SHA256，
-# 模型↔语料 lineage 溯源）。
+# 上传排障 artifact（无论 Gate 成败）与发布 artifact（仅 Gate 通过后）→
+# 发布 job 复验 SHA256 后发布 Release `finbert-gguf-v{model_version}`
+#（note 含训练语料 corpus_tag 及其 SHA256，模型↔语料 lineage 溯源）。
+#
+# 最小权限拆分（FT-06）：训练/导出/Gate job（train-export-gate）全链路
+# 仅 contents: read——依赖安装 / 语料下载 / 训练 / 导出 / Gate 期间 job
+# token 不具备写仓库能力；发布 job（publish-release）单独授予
+# contents: write，仅消费已上传的发布 artifact（下载后 sha256sum -c
+# 复验再发布），不 checkout、不执行仓库脚本。
 #
 # 与主 CI（ci_cd.yml）隔离：
 # - 本 workflow 仅 workflow_dispatch 触发（无 push / PR / schedule 触发器）；
@@ -51,14 +57,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  train-export-gate-release:
-    name: Train / Export / Gate / Release
+  # job1：训练 / 导出 / Gate（FT-06 最小权限拆分）。全链路（依赖安装 /
+  # llama.cpp 工具链 / 语料下载 / 训练 / 导出 / Gate / 产物整理）仅需
+  # contents: read——语料下载（gh release download）读 Release asset 亦
+  # 只需读权限；发布写权限单独收敛到 publish-release job。
+  train-export-gate:
+    name: Train / Export / Gate
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
-      # 仅 Release 发布（gh release create / upload）需要 contents: write；
-      # Gate 失败时不执行任何写 Release 步骤。
-      contents: write
+      # 训练全链路只读：任一前置步骤被恶意/攻陷代码控制时，job token
+      # 暴露期间也不具备写仓库内容 / Release 的能力（FT-06）。
+      contents: read
+    outputs:
+      # 跨 job 传递发布所需参数（validate_inputs 的 step outputs 仅本 job 可见）。
+      model_version: ${{ steps.validate_inputs.outputs.model_version }}
+      release_tag: ${{ steps.validate_inputs.outputs.release_tag }}
     env:
       # ubuntu runner 4 核：训练（--num-threads 4）与 llama.cpp 推理线程数对齐，
       # 避免超线程互踩。
@@ -66,7 +80,7 @@ jobs:
       OMP_NUM_THREADS: '4'
       MKL_NUM_THREADS: '4'
       HF_HUB_DISABLE_PROGRESS_BARS: '1'
-      # 语料 / Release 操作走 gh CLI（github.token 即可，无需 PAT）
+      # 语料下载走 gh CLI（github.token 只读即可，无需 PAT）
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Validate dispatch inputs (model_version semver, anti tag-injection)
@@ -217,7 +231,8 @@ jobs:
       # 一致性 Gate（N0-3 四判据：分词一致 / CLS 余弦 / 概率差<0.02 / 标签一致率≥99%）。
       # 发布产物为 f16（f16-only，可选 q8 对照件不使用）；参考模型为训练产物 best
       #（微调后编码器）；--head 使用训练好的分类头。
-      # 退出码 0=PASS / 1=FAIL；FAIL 时本步骤失败 → Release 步骤不执行。
+      # 退出码 0=PASS / 1=FAIL；FAIL 时本步骤失败 → 发布 artifact 上传与
+      # 发布 job（publish-release）均不执行。
       - name: Consistency gate (verify_finbert_gguf.py --head)
         id: gate
         run: |
@@ -299,36 +314,34 @@ jobs:
               "本模型仅用于 App 内新闻情绪打分展示（ADR-0008 / ADR-0013「仅展示边界」），\n"
               "不构成投资建议。\n"
           )
-          Path("release_note.md").write_text(note, encoding="utf-8")
-          print("release_note.md 已生成")
+          # 写入 stage_b_out 与发布产物同目录：发布 artifact 四文件同源时
+          # upload-artifact 以 stage_b_out 为根平铺，发布 job 下载后
+          # sha256sum -c 的相对路径与 SHA256SUMS.txt 直接对齐。
+          Path("stage_b_out/release_note.md").write_text(note, encoding="utf-8")
+          print("stage_b_out/release_note.md 已生成")
           EOF
-          cat release_note.md
+          cat stage_b_out/release_note.md
 
-      # Gate 通过 → 发布 Release（tag 已存在时 --clobber 覆盖上传，重跑幂等）。
-      # tag `finbert-gguf-v*` 不以 v 开头，不匹配主 CI `v*.*.*` 过滤（见文件头注释）。
-      - name: Publish release (finbert-gguf-v*)
-        if: success()
-        env:
-          RELEASE_TAG: ${{ steps.validate_inputs.outputs.release_tag }}
-        run: |
-          set -euo pipefail
-          ASSETS=(
+      # 发布 artifact（Gate 通过后才会执行到这里）：仅含发布所需最小文件集，
+      # 由 publish-release job 下载复验后发布。四文件同在 stage_b_out，
+      # artifact 根为 stage_b_out（平铺），下载侧与 SHA256SUMS.txt 相对路径
+      # 一致；if-no-files-found: error 保证文件缺失时上传即失败（fail-safe）。
+      # 排障 artifact（见文末）单独上传：两者命名与用途互不混用。
+      - name: Upload release artifacts (for publish job)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: finbert-gguf-release-${{ steps.validate_inputs.outputs.model_version }}-${{ github.run_id }}
+          path: |
             stage_b_out/finbert2-news-f16.gguf
             stage_b_out/head.npz
             stage_b_out/SHA256SUMS.txt
-          )
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "${ASSETS[@]}" \
-              --repo "$GITHUB_REPOSITORY" --clobber
-          else
-            gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "finbert-gguf-v${{ steps.validate_inputs.outputs.model_version }}" \
-              --notes-file release_note.md \
-              --target "$GITHUB_SHA"
-          fi
+            stage_b_out/release_note.md
+          if-no-files-found: error
+          retention-days: 7
 
       # 无论 Gate 成败上传产物（训练摘要 / 导出产物 / verify 报告），便于排障。
+      # 与上方发布 artifact 分开上传：本步骤 if: always() 且含 verify.json 等
+      # 排障文件；发布 artifact 仅 Gate 通过后上传，仅含发布最小文件集。
       - name: Upload artifacts (incl. gate-failure debugging)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -343,3 +356,62 @@ jobs:
             stage_b_out/finbert2-news-f16.verify.json
           if-no-files-found: warn
           retention-days: 7
+
+  # job2：发布 Release（FT-06 最小权限拆分）。仅此 job 授予 contents: write；
+  # 不 checkout 仓库、不执行仓库脚本——只消费 job1 上传的发布 artifact：
+  # 下载 → sha256sum -c 本地复验 → gh release view（已存在则 --clobber 覆盖
+  # 上传，重跑幂等）/ create。Gate 失败时 job1 结果非 success → 本 job 跳过，
+  # 不会以未校验产物发布。
+  publish-release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [train-export-gate]
+    if: needs.train-export-gate.result == 'success'
+    permissions:
+      # 仅发布 Release（gh release create / upload）需要 contents: write。
+      contents: write
+    env:
+      # Release 操作走 gh CLI（github.token 即可，无需 PAT）
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # 按 name 精确下载（artifact 不存在时本步骤直接失败，fail-safe）；
+      # v8 传输层默认校验服务端 digest（mismatch 即 error），下载后再做本地
+      # sha256sum 复验（发布资产自校验凭证），构成双重完整性保障。
+      - name: Download release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: finbert-gguf-release-${{ needs.train-export-gate.outputs.model_version }}-${{ github.run_id }}
+          path: release-assets
+
+      # 发布前复验：job1 生成的 SHA256SUMS.txt（相对文件名）与 artifact
+      # 平铺根对齐；release_note.md 不在清单内，单独断言存在。
+      - name: Verify checksums before publish
+        run: |
+          set -euo pipefail
+          test -f release-assets/release_note.md
+          cd release-assets
+          sha256sum -c SHA256SUMS.txt
+
+      # Gate 已通过（job 级 if 保证），此处直接发布。
+      # tag `finbert-gguf-v*` 不以 v 开头，不匹配主 CI `v*.*.*` 过滤（见文件头注释）。
+      - name: Publish release (finbert-gguf-v*)
+        env:
+          RELEASE_TAG: ${{ needs.train-export-gate.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          ASSETS=(
+            release-assets/finbert2-news-f16.gguf
+            release-assets/head.npz
+            release-assets/SHA256SUMS.txt
+          )
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${ASSETS[@]}" \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "finbert-gguf-v${{ needs.train-export-gate.outputs.model_version }}" \
+              --notes-file release-assets/release_note.md \
+              --target "$GITHUB_SHA"
+          fi
