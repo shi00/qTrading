@@ -306,6 +306,108 @@ def test_evaluate_gate_missing_prediction_skipped_not_penalized():
     report = laya_annotator.evaluate_gate(predictions, gold, threshold=0.85)
     assert report["matched"] == 1
     assert report["agreement"] == pytest.approx(1.0)
+    # 覆盖率上下文（FT-03）：缺失预测使 coverage < 1，与 agreement 独立呈现
+    assert report["gold_count"] == 2
+    assert report["coverage"] == pytest.approx(0.5)
+
+
+def test_evaluate_gate_exposes_coverage_and_counts():
+    # 覆盖率上下文（FT-03）：matched/gold_count、未匹配数、非法预测数并列可见
+    predictions = [
+        _pred("利好", source_id="0"),  # 匹配且正确
+        _pred("上涨", source_id="1"),  # 有人工标签但 label 非法 → illegal_count
+        _pred("中性", source_id="ghost"),  # 无人工标签 → unmatched_count
+    ]
+    gold = [_gold("利好", source_id="0"), _gold("中性", source_id="1"), _gold("利好", source_id="2")]
+    report = laya_annotator.evaluate_gate(predictions, gold, threshold=0.85)
+    assert report["matched"] == 1
+    assert report["gold_count"] == 3
+    assert report["coverage"] == pytest.approx(1 / 3)
+    assert report["agreement"] == pytest.approx(1.0)
+    assert report["passed"] is True  # PASS 语义不受 coverage 影响（只看 agreement）
+    assert report["unmatched_count"] == 1
+    assert report["illegal_count"] == 1
+
+
+def test_evaluate_gate_no_overlap_raises():
+    # gold 非空但预测与人工标签零匹配 → 无法评估（coverage 分母>0 而分子为 0，R21：不以 0 伪装可评估）
+    predictions = [_pred("利好", source_id="x")]
+    gold = [_gold("利好", source_id="0")]
+    with pytest.raises(ValueError, match="无任何匹配"):
+        laya_annotator.evaluate_gate(predictions, gold, threshold=0.85)
+
+
+def test_evaluate_gate_low_coverage_high_agreement_distinguished():
+    # 大量缺失：2/10 覆盖且全对 → coverage 低（0.2）而 agreement 高（1.0），二者独立呈现
+    predictions = [_pred("利好", source_id="0"), _pred("利好", source_id="1")]
+    gold = [_gold("利好", source_id=str(i)) for i in range(10)]
+    report = laya_annotator.evaluate_gate(predictions, gold, threshold=0.85)
+    assert report["matched"] == 2
+    assert report["gold_count"] == 10
+    assert report["coverage"] == pytest.approx(0.2)
+    assert report["agreement"] == pytest.approx(1.0)
+    assert report["passed"] is True
+    # unmatched_count 是 pred→gold 方向：pred 2 条全部有 gold → 0；gold 侧 8 条缺失经 coverage 呈现
+    assert report["unmatched_count"] == 0
+    assert report["illegal_count"] == 0
+
+
+def test_evaluate_gate_report_keys_are_fixed_contract():
+    # 固化返回键集合契约（FT-03 后共 10 键），防止意外扩/缩键破坏消费方
+    report = laya_annotator.evaluate_gate([_pred("利好", source_id="0")], [_gold("利好", source_id="0")])
+    assert set(report) == {
+        "matched",
+        "gold_count",
+        "coverage",
+        "agreement",
+        "passed",
+        "threshold",
+        "confusion",
+        "missed_negative_rate",
+        "unmatched_count",
+        "illegal_count",
+    }
+
+
+def test_main_evaluate_writes_report_with_coverage(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    # CLI 报告并列展示覆盖率与一致率（FT-03），且 --report 落盘 JSON 含新键
+    pred = tmp_path / "pred.jsonl"
+    gold = tmp_path / "gold.jsonl"
+    report_out = tmp_path / "gate_report.jsonl"
+    pred.write_text(json.dumps(_pred("利好", source_id="0"), ensure_ascii=False) + "\n", encoding="utf-8")
+    gold.write_text(
+        json.dumps(_gold("利好", source_id="0"), ensure_ascii=False)
+        + "\n"
+        + json.dumps(_gold("中性", source_id="1"), ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+    code = laya_annotator.main(
+        [
+            "evaluate",
+            "--pred",
+            str(pred),
+            "--gold",
+            str(gold),
+            "--threshold",
+            "0.85",
+            "--report",
+            str(report_out),
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "覆盖率 50.0%" in out
+    assert "一致率 1.000" in out
+    # unmatched_count 是 pred→gold 方向（有预测但无人工标签）：pred 全部有 gold → 0；
+    # gold 侧缺失（id-1 无人预测）经 coverage 50% 呈现
+    assert "未匹配（有预测无人工标签）0 条" in out
+    assert "预测非法 0 条" in out
+    written = json.loads(report_out.read_text(encoding="utf-8").splitlines()[0])
+    assert written["gold_count"] == 2
+    assert written["coverage"] == pytest.approx(0.5)
+    assert written["unmatched_count"] == 0
+    assert written["illegal_count"] == 0
 
 
 def test_evaluate_gate_rejects_empty_inputs():
