@@ -66,7 +66,7 @@ jobs:
       # 语料 / Release 操作走 gh CLI（github.token 即可，无需 PAT）
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: 校验 dispatch 输入（model_version 纯 semver 数字，防注入 tag 名）
+      - name: Validate dispatch inputs (model_version semver, anti tag-injection)
         id: validate_inputs
         env:
           MODEL_VERSION: ${{ inputs.model_version }}
@@ -85,7 +85,7 @@ jobs:
           echo "corpus_tag=$CORPUS_TAG" >> "$GITHUB_OUTPUT"
           echo "release_tag=finbert-gguf-v$MODEL_VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout 主仓库
+      - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Python 3.13
@@ -98,7 +98,7 @@ jobs:
       # 版本考证：transformers==5.19.0 为离线训练实物版本（scripts/train_finbert.py
       # docstring），其 requires torch>=2.5，取 CPU index 最新稳定 2.9.1；
       # Trainer 依赖 accelerate（transformers 的 extra，不随主包装），须显式安装。
-      - name: 安装训练 / 导出 / Gate 依赖
+      - name: Install training / export / gate dependencies
         run: |
           set -euo pipefail
           pip install --no-cache-dir "torch==2.9.1" \
@@ -121,7 +121,7 @@ jobs:
 
       # convert_hf_to_gguf.py import gguf：以同源 llama.cpp/gguf-py 安装（而非 PyPI
       # gguf），保证 GGUF 写出端与工具链同版本。
-      - name: 安装 gguf（llama.cpp 仓库内 gguf-py）
+      - name: Install gguf-py (from llama.cpp checkout)
         run: |
           set -euo pipefail
           pip install --no-cache-dir ./llama.cpp/gguf-py
@@ -129,7 +129,7 @@ jobs:
       # Release v0.3.0 无预编译包 → 源码编译。仅编译 quantize 工具
       #（GGML_NATIVE=OFF 取基线 x86-64 指令集，不依赖 runner CPU 特性）；
       # 产物路径 build/bin/llama-quantize 与 export 脚本 resolve_tool_paths 推导一致。
-      - name: 编译 llama-quantize
+      - name: Build llama-quantize
         run: |
           set -euo pipefail
           cmake -S llama.cpp -B llama.cpp/build \
@@ -150,7 +150,7 @@ jobs:
       # gated=false，Apache-2.0；本地产物 ai_models/FinBERT2-base/config.json 与
       # reviews/新闻达标模型微调.md §15.2 同源）。固定 revision 为当前 HF sha，
       # 保证可复现；升级基座时同步更新此 hash 与 release note。
-      - name: 下载基座模型（HF Hub 固定 revision）
+      - name: Download base model (HF Hub pinned revision)
         env:
           FINBERT_BASE_REPO: valuesimplex-ai-lab/FinBERT2-base
           FINBERT_BASE_REVISION: 804a488abcece861e9241d55e9d6fd1f867ebee1
@@ -171,7 +171,7 @@ jobs:
       # 语料：gh release download + SHA256 全量校验 + 行数守恒断言
       #（8813 + 1102 + 1102 = 11017，与 corpus-v1 Release note 登记行数一致；
       # 非空行计数与 scripts/train_finbert.load_split_file 的空行跳过口径对齐）。
-      - name: 下载训练语料（corpus Release）并校验完整性
+      - name: Download training corpus (Release) and verify integrity
         env:
           CORPUS_TAG: ${{ steps.validate_inputs.outputs.corpus_tag }}
         run: |
@@ -201,7 +201,7 @@ jobs:
 
       # 固定 seed 训练（reviews §5.2 超参固化在脚本内，seed=DEFAULT_SEED 20261008；
       # ubuntu runner 4 核 → --num-threads 4）。
-      - name: 阶段 B 训练（train_finbert.py）
+      - name: Train FinBERT (train_finbert.py)
         run: |
           set -euo pipefail
           python scripts/train_finbert.py \
@@ -212,7 +212,7 @@ jobs:
             --num-threads 4
 
       # 拆头导出：head.npz + 编码器 f16 → Q8_0（工具路径按 --llama-cpp-repo 布局推导）。
-      - name: GGUF 导出（export_finbert_gguf.py）
+      - name: Export GGUF (export_finbert_gguf.py)
         run: |
           set -euo pipefail
           python scripts/export_finbert_gguf.py \
@@ -224,7 +224,7 @@ jobs:
       # 一致性 Gate（N0-3 四判据：分词一致 / CLS 余弦 / 概率差<0.02 / 标签一致率≥99%）。
       # 参考模型为训练产物 best（微调后编码器）；--head 使用训练好的分类头。
       # 退出码 0=PASS / 1=FAIL；FAIL 时本步骤失败 → Release 步骤不执行。
-      - name: 一致性 Gate（verify_finbert_gguf.py --head）
+      - name: Consistency gate (verify_finbert_gguf.py --head)
         id: gate
         run: |
           set -euo pipefail
@@ -236,7 +236,7 @@ jobs:
             --report stage_b_out/finbert2-news-q8_0.verify.json
 
       # 产物 SHA256 清单（发布资产自校验凭证）。
-      - name: 生成产物 SHA256SUMS.txt
+      - name: Generate SHA256SUMS.txt
         run: |
           set -euo pipefail
           cd stage_b_out
@@ -245,7 +245,7 @@ jobs:
 
       # Release note：模型 ↔ 语料 lineage 溯源（corpus_tag + 语料 SHA256）。
       # 生成逻辑全用 Python 变量（不用 Actions 表达式嵌入字符串，避免 ${{ }} 误展开）。
-      - name: 生成 Release note
+      - name: Generate release note
         env:
           MODEL_VERSION: ${{ steps.validate_inputs.outputs.model_version }}
           CORPUS_TAG: ${{ steps.validate_inputs.outputs.corpus_tag }}
@@ -313,7 +313,7 @@ jobs:
 
       # Gate 通过 → 发布 Release（tag 已存在时 --clobber 覆盖上传，重跑幂等）。
       # tag `finbert-gguf-v*` 不以 v 开头，不匹配主 CI `v*.*.*` 过滤（见文件头注释）。
-      - name: 发布 Release（finbert-gguf-v*）
+      - name: Publish release (finbert-gguf-v*)
         if: success()
         env:
           RELEASE_TAG: ${{ steps.validate_inputs.outputs.release_tag }}
@@ -336,7 +336,7 @@ jobs:
           fi
 
       # 无论 Gate 成败上传产物（训练摘要 / 导出产物 / verify 报告），便于排障。
-      - name: 上传 artifact（含 Gate 失败排障）
+      - name: Upload artifacts (incl. gate-failure debugging)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
