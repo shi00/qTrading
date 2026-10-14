@@ -132,3 +132,5 @@
 | DATA-02 | 同 DATA-01（龙虎榜 `net_amount` 错 10000 倍等），统一经 `threshold_in_data_unit()` 换算后再比较 | business-review-2026-09-11（业务检视） | [redlines.yml](./redlines.yml) R20 | 使用中 |
 | SYNC-01 | 水位线（checkpoint）写入非单调，断点续传水位可能回退——催生 R22 单调性红线 | business-review-2026-09-11（业务检视） | [redlines.yml](./redlines.yml) R22 | 使用中 |
 | FULLMOUNT-1 | F07 生产挂载 E2E 首跑阻塞缺陷：btn_jump_backtest 导航链路 RuntimeError（context not associated with a running event loop），场景①②暂 skip 待修复 | flet-review F07（生产挂载场景池 E2E 首跑） | [test_production_mount.py](../../tests/e2e/test_production_mount.py) | 使用中 |
+| CG-1 | FinBERT 新闻情绪模型微调产线 CI 化：训练与 GGUF 导出脚本固化（train_finbert + export_finbert_gguf，固化 reviews/新闻达标模型微调.md §5/§6，TDD 配套单测） | FinBERT 模型产线 CI 化任务链（本地任务计划） | [train_finbert.py](../../scripts/train_finbert.py) / [export_finbert_gguf.py](../../scripts/export_finbert_gguf.py) / [ci-cd.md](../guides/ci-cd.md) | 使用中 |
+| CG-3 | FinBERT 产线 CI 接线：finbert-train workflow 安装 torch/transformers（不进 pyproject 主依赖）并调用 CG-1 脚本 | FinBERT 模型产线 CI 化任务链（本地任务计划，待实施） | [ci-cd.md](../guides/ci-cd.md) | 使用中 |

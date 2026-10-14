@@ -90,6 +90,8 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 | `scripts/collect_cninfo.py` | 巨潮资讯公告离线采集器（N1-3；录制原始 JSON + 打印解析摘要；支持 `--parse` 离线复解析） | 手动/维护 | 不阻断 |
 | `scripts/collect_corpus.py` | 多源语料库采集编排器（N1-4；按源插件化聚合三源 → 清洗去重 → 写 SQLite 语料库；含单源熔断与限速） | 手动/维护 | 不阻断 |
 | `scripts/laya_annotator.py` | 本地 laya-multilingual 零样本新闻情绪标注器 + 人工抽检 Gate（N2-1；choice 三分类 / 不可信输出丢弃计数 / 按源分层抽样 / 一致率 ≥85% 门禁；需 finbert 离线环境，数据不出本机） | 手动/维护 | 不阻断 |
+| `scripts/train_finbert.py` | FinBERT 新闻情绪三分类阶段 B 训练 driver（CG-1；固化 reviews §5.2 超参 / 固定 seed / 语料完整性校验 / `--dry-run` 计划；需 finbert 离线环境） | 手动/维护 | 不阻断 |
+| `scripts/export_finbert_gguf.py` | FinBERT GGUF 导出流水线（CG-1；分类头 → head.npz + 编码器 f16 + Q8_0；llama.cpp 对齐 tag v0.3.0 见脚本 docstring；`--dry-run` 预检；需 finbert 离线环境） | 手动/维护 | 不阻断 |
 
 ### 数据库迁移
 
