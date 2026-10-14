@@ -1,4 +1,11 @@
-"""FinBERT2-base GGUF 一致性门禁（M0 Gate，模型发布前手动执行，不进 CI）。
+"""FinBERT2-base GGUF 一致性门禁（N0-3 四判据）。
+
+已集成训练产线 workflow ``.github/workflows/finbert-train.yml``（workflow_dispatch
+触发的产线流水线，非主 CI）：Consistency gate step 在导出 f16 GGUF 与
+``head.npz`` 后自动运行本脚本（``--head`` 指向训练好的分类头），退出码
+0=PASS / 1=FAIL；FAIL 时该 step 失败，后续 Release 步骤不执行（Gate 通过才会
+发布 ``finbert-gguf-v<model_version>`` Release）。本脚本仍可独立手动执行，
+用于对既有产物复验（用法见文末 Usage）。
 
 对比「PyTorch 原模型（HF transformers）」与「GGUF + llama-cpp-python」两条推理链路，
 判定 Plan N0-3 的四项判据（正本见 `reviews/新闻达标模型微调.md` §7）：
@@ -23,17 +30,19 @@ f16 产物四判据宽裕通过（见 scripts/export_finbert_gguf.py docstring�
 是正确的），再重验第 2~4 项。生产打分子进程（N3-2）必须沿用该兜底路径，不得使用
 ``Llama.embed(text)`` 的内部分词。
 
-**确定性参考头约定（重要）**：本 Gate 处于 M0 阶段，业务分类头要到 N3-1 才产出
-（``head.npz``）。因此第 3 / 4 项默认使用一个**固定种子的确定性参考头**（linear 模式，
-行向量为单位向量、增益 1.0（不做任意缩放）、零偏置），同一权重同时作用于 PyTorch 侧
-与 GGUF 侧的**原始 CLS 特征**，使两侧概率在**同一映射**下可比。N3-1 产出 ``head.npz``
-后，用 ``--head`` 指向该文件即可改用训练好的头（格式见 ``reviews/新闻达标模型微调.md``
-§8.2：``mode`` / ``labels`` / ``cw`` / ``cb``，非线性另有 ``pw`` / ``pb``）。
+**分类头对照（N3-1 产物 ``head.npz``）**：业务分类头已由 N3-1 产出（``head.npz``），
+产线 workflow 与正式发布均以 ``--head`` 指向该文件，第 3 / 4 项按训练好的头计算
+（格式见 ``reviews/新闻达标模型微调.md`` §8.2：``mode`` / ``labels`` / ``cw`` / ``cb``，
+非线性另有 ``pw`` / ``pb``）。省略 ``--head`` 时回退为**固定种子的确定性参考头**
+（linear 模式，行向量为单位向量、增益 1.0（不做任意缩放）、零偏置），同一权重
+同时作用于 PyTorch 侧与 GGUF 侧的**原始 CLS 特征**，使两侧概率在**同一映射**下
+可比——该模式用于在无训练头时独立复验两条链路的数值等价。
 
 > 概率差判据对参考头尺度敏感（近似线性正相关），标签一致率对尺度不敏感。为便于
 > 复核，报告同时给出与头无关的原始偏差指标 ``cls_max_abs_diff`` / ``cls_relative_l2_max``
 > 与参考头增益灵敏度扫描 ``head_scale_sensitivity``。本 Gate 结论仅证明「两条链路数值
-> 等价」；正式发布前须用训练好的 ``head.npz`` 重跑本脚本（``--head``）。
+> 等价」；产线 workflow 已强制以训练好的 ``head.npz``（``--head``）执行本 Gate，
+> 独立手动复验发布产物时同样应提供 ``--head``。
 
 **输入路径默认值**：``--reference-model`` 默认取仓库内 ``ai_models/``（该目录已被
 ``.gitignore`` 忽略）；``--f16-gguf`` 默认取环境变量 ``FINBERT_F16_GGUF``；

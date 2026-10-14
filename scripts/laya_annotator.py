@@ -215,9 +215,17 @@ def evaluate_gate(
     ``ValueError``（无法评估）。重点关注「利空 → 中性」漏判率（正本 §11 评估重点：
     漏报利空代价最高）。
 
+    **覆盖率口径（FT-03）**：``coverage = matched / gold_count`` 仅描述抽检覆盖情况
+    （观测用），**不参与 PASS 判定**（PASS 只看 ``agreement >= threshold``）；
+    ``gold_count`` 按条计、不去重——gold 含重复键时 coverage 被低估（宁低勿高，
+    提示人工检查上游数据）。pred 重复键可致 ``coverage > 1``（扎眼即上游数据错误
+    信号，不做钳制伪装，R21）。
+
     Returns:
-        ``{"matched", "agreement", "passed", "threshold", "confusion",
-        "missed_negative_rate"}``。
+        ``{"matched", "gold_count", "coverage", "agreement", "passed", "threshold",
+        "confusion", "missed_negative_rate", "unmatched_count", "illegal_count"}``；
+        ``unmatched_count`` = 有预测但无人工标签的条数，``illegal_count`` = 有人工
+        标签但预测 label 非法的条数（计数 0 为真实统计值，非缺失伪装）。
     """
     if not gold_labels:
         raise ValueError("无人工标签，无法评估（Gate 需要 gold 标注）")
@@ -225,13 +233,17 @@ def evaluate_gate(
     confusion: dict[str, dict[str, int]] = {label: {other: 0 for other in LABELS} for label in LABELS}
     matched = 0
     correct = 0
+    unmatched_count = 0
+    illegal_count = 0
     for pred in predictions:
         key = (str(pred["source"]), str(pred["source_id"]))
         gold = gold_by_key.get(key)
         if gold is None:
+            unmatched_count += 1
             continue  # 人工未标注该条 → 跳过
         predicted = pred.get("label")
         if predicted not in _LABEL_SET:
+            illegal_count += 1
             continue  # 预测非法 → 跳过（缺失语义，不计入分母）
         matched += 1
         confusion[gold][predicted] += 1
@@ -240,23 +252,31 @@ def evaluate_gate(
     if matched == 0:
         raise ValueError("预测与人工标签无任何匹配记录，无法评估")
     agreement = correct / matched
+    gold_count = len(gold_labels)
+    coverage = matched / gold_count
     missed_negative = confusion["利空"]["中性"]
     missed_negative_rate = missed_negative / max(sum(confusion["利空"].values()), 1)
     return {
         "matched": matched,
+        "gold_count": gold_count,
+        "coverage": coverage,
         "agreement": agreement,
         "passed": agreement >= threshold,
         "threshold": threshold,
         "confusion": confusion,
         "missed_negative_rate": missed_negative_rate,
+        "unmatched_count": unmatched_count,
+        "illegal_count": illegal_count,
     }
 
 
 def _print_gate_report(report: dict[str, Any]) -> None:
     print(
-        f"抽检匹配 {report['matched']} 条；一致率 {report['agreement']:.3f}"
+        f"抽检匹配 {report['matched']}/{report['gold_count']} 条（覆盖率 {report['coverage']:.1%}）；"
+        f"一致率 {report['agreement']:.3f}"
         f"（阈值 {report['threshold']:.2f}）→ {'PASS' if report['passed'] else 'FAIL'}"
     )
+    print(f"未匹配（有预测无人工标签）{report['unmatched_count']} 条；预测非法 {report['illegal_count']} 条")
     print(f"利空→中性漏判率 {report['missed_negative_rate']:.3f}")
     print("混淆矩阵（行=人工，列=预测）: " + json.dumps(report["confusion"], ensure_ascii=False))
 
