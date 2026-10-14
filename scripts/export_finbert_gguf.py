@@ -1,8 +1,15 @@
 """FinBERT2-base GGUF 导出流水线（CG-1，固化 ``reviews/新闻达标模型微调.md`` §6）。
 
-三步：① 从 HF ``BertForSequenceClassification`` 权重抽取分类头 → ``head.npz``
-（§8.2 正本格式）；② 调 llama.cpp ``convert_hf_to_gguf.py`` 把拆出的编码器转 f16；
-③ 调 ``llama-quantize`` 转 Q8_0。本脚本自包含，不 import data/cache 层业务逻辑。
+两步：① 从 HF ``BertForSequenceClassification`` 权重抽取分类头 → ``head.npz``
+（§8.2 正本格式）；② 调 llama.cpp ``convert_hf_to_gguf.py`` 把拆出的编码器转 f16，
+**f16 即发布产物**。本脚本自包含，不 import data/cache 层业务逻辑。
+
+**f16 交付定因（2026-10-14 实测，方案 A）**：Q8_0 量化不再执行——12 层 block 权重
+量化噪声经训练头放大后，探针集概率最大绝对差达 0.047 ~ 0.055，必然超出 §7 判据
+``< 0.02`` 阈值（该阈值源自 2026-10-08 旧产物的经验标定）；f16 产物四判据宽裕通过
+（CLS 余弦 0.99999 / 概率差 0.0048 / 标签一致率 1.0）。对权重与分类头错位的旧产物
+保持阈值不动是正确行为——它正应在 Gate 被拒。f16 体积约 215MB（Q8_0 约 116MB）；
+运行时（llama-cpp-python）无量化格式硬编码，设置页三路径手选不受影响。
 
 **head.npz 格式（§6.1 / §8.2 正本 + 实物考证）**：离线产物
 （``data/corpus/stage_b_out/head.npz``）为 ``mode="bert"`` 非线性形态——
@@ -29,10 +36,9 @@
   直接证明 ``4df29be`` 为 ``v0.3.0`` 的直系祖先（``behind_by=167`` 单独不构成祖先
   证据，故以 merge_base + ahead_by=0 双证锚定；v0.3.0 领先该 commit 167 次提交 / 约 9 天）。
 - **结论**：CI clone llama.cpp 时应 checkout tag ``v0.3.0``（更严格可直接 checkout
-  上述精确 commit sha），``--llama-cpp-repo`` 指向该 clone；``--convert-script`` /
-  ``--quantize-bin`` 未给定时按该仓库布局推导（``convert_hf_to_gguf.py`` 与
-  ``build/bin/llama-quantize[.exe]``）。注意 v0.3.0 与该 commit 并非逐位等价
-  （上游 167 提交），GGUF 格式随版本演进，导出产物必须先过
+  上述精确 commit sha），``--llama-cpp-repo`` 指向该 clone；``--convert-script``
+  未给定时按该仓库布局推导（``convert_hf_to_gguf.py``）。注意 v0.3.0 与该 commit
+  并非逐位等价（上游 167 提交），GGUF 格式随版本演进，导出产物必须先过
   ``scripts/verify_finbert_gguf.py`` 四判据门禁再发布（reviews §7）。
 
 **依赖边界**：torch / transformers 仅离线导出使用，不进 pyproject 运行时依赖、不进 CI
@@ -45,7 +51,7 @@ Usage:
 
     # 只做输入 / 工具存在性校验并打印导出计划
     python scripts/export_finbert_gguf.py --model-dir ... --out-dir ... \\
-        --convert-script /path/convert_hf_to_gguf.py --quantize-bin /path/llama-quantize --dry-run
+        --convert-script /path/convert_hf_to_gguf.py --dry-run
 
 退出码：成功 0；输入 / 工具校验或转换失败 1。
 """
@@ -56,7 +62,6 @@ import argparse
 import importlib
 import json
 import logging
-import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -79,13 +84,12 @@ HEAD_MODE_CHOICES = (HEAD_MODE_LINEAR, HEAD_MODE_BERT)
 LLAMA_CPP_ALIGN_TAG = "v0.3.0"
 LLAMA_CPP_ALIGN_COMMIT = "4df29be4f4c3673f428170fda944a5b19f743bb8"
 
-# 前缀对齐现役产物命名：ai_models/finbert2-news-q8_0.gguf（通过 N0-3 四判据门禁的
-# 现役产物，scripts/verify_finbert_gguf.py usage 同名正本）；ai_models 下的
-# finbert2-sentiment-* 为已废弃 ONNX/OpenVINO PoC 路线遗留产物（PoC 判定失败），勿混淆
+# 前缀沿用 N0-3 四判据门禁产物命名正本（scripts/verify_finbert_gguf.py usage）；
+# ai_models 下的 finbert2-sentiment-* 为已废弃 ONNX/OpenVINO PoC 路线遗留产物
+# （PoC 判定失败），勿混淆
 DEFAULT_OUT_PREFIX = "finbert2-news"
 
 F16_SUFFIX = "-f16.gguf"
-Q8_SUFFIX = "-q8_0.gguf"
 HEAD_FILE_NAME = "head.npz"
 ENCODER_DIR_NAME = "encoder"
 
@@ -153,36 +157,26 @@ def write_head_npz(head: Mapping[str, Any], path: Path) -> None:
 def resolve_tool_paths(
     *,
     convert_script: Path | str | None,
-    quantize_bin: Path | str | None,
     llama_cpp_repo: Path | str | None,
-) -> tuple[Path, Path]:
-    """解析 llama.cpp 工具路径：显式参数优先，否则按 ``--llama-cpp-repo`` 布局推导。
+) -> Path:
+    """解析 llama.cpp 转换脚本路径：显式参数优先，否则按 ``--llama-cpp-repo`` 布局推导。
 
-    仓库布局：``convert_hf_to_gguf.py``（仓库根）与 ``build/bin/llama-quantize[.exe]``
-    （Windows 取 .exe）。参数全缺或任一路径不存在时 ``ValueError`` 拒绝。
-    对齐 tag 见模块 docstring / ``LLAMA_CPP_ALIGN_TAG``。
+    仓库布局：``convert_hf_to_gguf.py``（仓库根）。参数全缺或路径不存在时
+    ``ValueError`` 拒绝。对齐 tag 见模块 docstring / ``LLAMA_CPP_ALIGN_TAG``。
     """
     repo = Path(llama_cpp_repo) if llama_cpp_repo else None
     convert = Path(convert_script) if convert_script else (repo / "convert_hf_to_gguf.py" if repo else None)
-    if quantize_bin:
-        quantize = Path(quantize_bin)
-    elif repo is not None:
-        name = "llama-quantize.exe" if os.name == "nt" else "llama-quantize"
-        quantize = repo / "build" / "bin" / name
-    else:
-        quantize = None
-    if convert is None or quantize is None:
+    if convert is None:
         raise ValueError(
-            "必须提供 --convert-script 与 --quantize-bin，或提供 --llama-cpp-repo "
+            "必须提供 --convert-script，或提供 --llama-cpp-repo "
             f"（需 checkout tag {LLAMA_CPP_ALIGN_TAG} 或 commit {LLAMA_CPP_ALIGN_COMMIT}）"
         )
-    missing = [path for path in (convert, quantize) if not path.is_file()]
-    if missing:
+    if not convert.is_file():
         raise ValueError(
-            f"工具路径不存在: {', '.join(str(path) for path in missing)}"
+            f"工具路径不存在: {convert}"
             f"（llama.cpp 需 checkout tag {LLAMA_CPP_ALIGN_TAG} 或 commit {LLAMA_CPP_ALIGN_COMMIT}）"
         )
-    return convert, quantize
+    return convert
 
 
 def _read_model_config(model_dir: Path) -> dict[str, Any]:
@@ -206,9 +200,8 @@ def build_export_plan(args: argparse.Namespace) -> dict[str, Any]:
     model_dir = Path(args.model_dir)
     config = _read_model_config(model_dir)
     hidden = int(config.get("hidden_size", EMBEDDING_DIM))
-    convert, quantize = resolve_tool_paths(
+    convert = resolve_tool_paths(
         convert_script=args.convert_script,
-        quantize_bin=args.quantize_bin,
         llama_cpp_repo=args.llama_cpp_repo,
     )
     out_dir = Path(args.out_dir)
@@ -227,22 +220,19 @@ def build_export_plan(args: argparse.Namespace) -> dict[str, Any]:
             "pb_shape": [hidden] if is_bert_mode else None,
         },
         "f16_gguf": str(out_dir / f"{args.out_prefix}{F16_SUFFIX}"),
-        "q8_gguf": str(out_dir / f"{args.out_prefix}{Q8_SUFFIX}"),
         "convert_script": str(convert),
-        "quantize_bin": str(quantize),
         "llama_cpp_alignment": {"tag": LLAMA_CPP_ALIGN_TAG, "commit": LLAMA_CPP_ALIGN_COMMIT},
     }
 
 
 def export(args: argparse.Namespace) -> dict[str, str]:
-    """执行完整导出（拆头 → 编码器 → f16 → Q8_0）；torch / transformers 延迟导入。"""
+    """执行完整导出（拆头 → 编码器 → f16）；torch / transformers 延迟导入。"""
     importlib.import_module("torch")  # transformers 依赖 torch；触发导入以保证报错信息明确
     transformers = importlib.import_module("transformers")
 
     plan = build_export_plan(args)
     LOGGER.info("导出计划:\n%s", json.dumps(plan, ensure_ascii=False, indent=2))
     convert_script = plan["convert_script"]
-    quantize_bin = plan["quantize_bin"]
     # hidden_size 与 dry-run 计划同源（config.hidden_size），保证计划与实际抽取一致
     hidden_size = int(plan["head"]["cw_shape"][1])
 
@@ -267,25 +257,18 @@ def export(args: argparse.Namespace) -> dict[str, str]:
     tokenizer.save_pretrained(str(encoder_dir))
     LOGGER.info("编码器已拆分: %s", encoder_dir)
 
-    # ② f16 GGUF
+    # ② f16 GGUF（发布产物，f16 交付定因见模块 docstring）
     f16_path = out_dir / f"{args.out_prefix}{F16_SUFFIX}"
     subprocess.run(
         [sys.executable, convert_script, str(encoder_dir), "--outtype", "f16", "--outfile", str(f16_path)],
         check=True,
     )
 
-    # ③ Q8_0 量化（POSIX 下先校验执行权限，给出 chmod +x 提示而非裸 PermissionError）
-    q8_path = out_dir / f"{args.out_prefix}{Q8_SUFFIX}"
-    if os.name != "nt" and not os.access(str(quantize_bin), os.X_OK):
-        raise ValueError(f"量化工具无执行权限（POSIX 请 chmod +x）: {quantize_bin}")
-    subprocess.run([quantize_bin, str(f16_path), str(q8_path), "Q8_0"], check=True)
-
-    LOGGER.info("导出完成: %s / %s", f16_path, q8_path)
+    LOGGER.info("导出完成: %s", f16_path)
     return {
         "head_path": str(head_path),
         "encoder_dir": str(encoder_dir),
         "f16_gguf": str(f16_path),
-        "q8_gguf": str(q8_path),
     }
 
 
@@ -294,7 +277,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--model-dir", required=True, help="HF BertForSequenceClassification 权重目录（如 stage_b_out/best）"
     )
-    parser.add_argument("--out-dir", required=True, help="输出目录（head.npz / encoder/ / f16 / q8_0）")
+    parser.add_argument("--out-dir", required=True, help="输出目录（head.npz / encoder/ / f16）")
     parser.add_argument("--out-prefix", default=DEFAULT_OUT_PREFIX, help="GGUF 产物文件名前缀")
     parser.add_argument(
         "--head-mode",
@@ -303,13 +286,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="head 模式：bert=非线性（pooler+classifier，§6.1/§8.2，实物形态）；linear=已折算 CLS 域线性头（§5.1）",
     )
     parser.add_argument("--convert-script", default=None, help="llama.cpp convert_hf_to_gguf.py 路径（CI 提供）")
-    parser.add_argument("--quantize-bin", default=None, help="llama.cpp llama-quantize 可执行路径（CI 提供）")
     parser.add_argument(
         "--llama-cpp-repo",
         default=None,
         help=(
             "已 checkout tag v0.3.0（或 commit 4df29be4f4c3673f428170fda944a5b19f743bb8）的 llama.cpp 仓库根目录；"
-            "--convert-script / --quantize-bin 未给定时按仓库布局推导"
+            "--convert-script 未给定时按仓库布局推导"
         ),
     )
     parser.add_argument("--dry-run", action="store_true", help="只做输入 / 工具存在性校验并打印导出计划，不执行导出")

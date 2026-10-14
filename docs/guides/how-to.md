@@ -410,7 +410,7 @@ CI 通过 `.github/workflows/ci_cd.yml` 的 `embedded-tests` job 自动运行（
 # 1. 查找最新 finbert-gguf-v* release
 gh release list --repo <your-repo> --limit 100 --exclude-drafts --exclude-pre-releases | grep "finbert-gguf-v"
 
-# 2. 下载模型产物（finbert2-news-q8_0.gguf + head.npz + SHA256SUMS.txt）
+# 2. 下载模型产物（finbert2-news-f16.gguf + head.npz + SHA256SUMS.txt）
 gh release download <tag> --repo <your-repo> --dir ai_models --clobber
 
 # 3. SHA256 完整性校验（三文件同目录，输出两个 OK）

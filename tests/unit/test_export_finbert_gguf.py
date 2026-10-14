@@ -154,58 +154,45 @@ def test_write_head_npz_linear_roundtrip_gate_contract(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # 工具路径解析
 # --------------------------------------------------------------------------- #
-def test_resolve_tool_paths_explicit_arguments(tmp_path: Path) -> None:
-    """显式给定 --convert-script / --quantize-bin 时优先使用。"""
+def test_resolve_tool_paths_explicit_argument(tmp_path: Path) -> None:
+    """显式给定 --convert-script 时优先使用。"""
     convert = tmp_path / "convert_hf_to_gguf.py"
-    quantize = tmp_path / "llama-quantize.exe"
     convert.write_text("# stub", encoding="utf-8")
-    quantize.write_bytes(b"")
-    result = efg.resolve_tool_paths(convert_script=convert, quantize_bin=quantize, llama_cpp_repo=None)
-    assert result == (convert, quantize)
+    result = efg.resolve_tool_paths(convert_script=convert, llama_cpp_repo=None)
+    assert result == convert
 
 
 def test_resolve_tool_paths_from_repo(tmp_path: Path) -> None:
-    """仅给 --llama-cpp-repo 时按 llama.cpp 仓库布局推导（Windows 优先 .exe）。"""
-    import os
-
+    """仅给 --llama-cpp-repo 时按 llama.cpp 仓库布局推导。"""
     repo = tmp_path / "llama.cpp"
     convert = repo / "convert_hf_to_gguf.py"
     convert.parent.mkdir(parents=True)
     convert.write_text("# stub", encoding="utf-8")
-    quantize_name = "llama-quantize.exe" if os.name == "nt" else "llama-quantize"
-    quantize = repo / "build" / "bin" / quantize_name
-    quantize.parent.mkdir(parents=True)
-    quantize.write_bytes(b"")
-    result = efg.resolve_tool_paths(convert_script=None, quantize_bin=None, llama_cpp_repo=repo)
-    assert result[0] == convert
-    assert result[1] == quantize
+    result = efg.resolve_tool_paths(convert_script=None, llama_cpp_repo=repo)
+    assert result == convert
 
 
 def test_resolve_tool_paths_missing_raises() -> None:
-    """--convert-script / --quantize-bin / --llama-cpp-repo 全缺时必须报错。"""
+    """--convert-script / --llama-cpp-repo 全缺时必须报错。"""
     with pytest.raises(ValueError, match="llama-cpp-repo"):
-        efg.resolve_tool_paths(convert_script=None, quantize_bin=None, llama_cpp_repo=None)
+        efg.resolve_tool_paths(convert_script=None, llama_cpp_repo=None)
 
 
 def test_resolve_tool_paths_missing_file_raises(tmp_path: Path) -> None:
     """给定路径不存在时必须报错（不得把失败推迟到 subprocess）。"""
     with pytest.raises(ValueError, match="不存在"):
-        efg.resolve_tool_paths(
-            convert_script=tmp_path / "nope.py", quantize_bin=tmp_path / "nope.bin", llama_cpp_repo=None
-        )
+        efg.resolve_tool_paths(convert_script=tmp_path / "nope.py", llama_cpp_repo=None)
 
 
 # --------------------------------------------------------------------------- #
 # 导出计划与 CLI --dry-run
 # --------------------------------------------------------------------------- #
 def test_build_export_plan_shape(tmp_path: Path) -> None:
-    """计划含 head 模式与期望形状、f16 / q8_0 产物路径与 llama.cpp 对齐元数据。"""
+    """计划含 head 模式与期望形状、f16 产物路径与 llama.cpp 对齐元数据（f16 即发布产物）。"""
     model_dir = _make_model_dir(tmp_path)
     out_dir = tmp_path / "out"
     convert = tmp_path / "convert_hf_to_gguf.py"
     convert.write_text("# stub", encoding="utf-8")
-    quantize = tmp_path / "llama-quantize.exe"
-    quantize.write_bytes(b"")
     args = efg._parse_args(
         [
             "--model-dir",
@@ -214,8 +201,6 @@ def test_build_export_plan_shape(tmp_path: Path) -> None:
             str(out_dir),
             "--convert-script",
             str(convert),
-            "--quantize-bin",
-            str(quantize),
         ]
     )
     plan = efg.build_export_plan(args)
@@ -224,7 +209,8 @@ def test_build_export_plan_shape(tmp_path: Path) -> None:
     assert plan["head"]["cw_shape"] == [3, 768]
     assert plan["head"]["pw_shape"] == [768, 768]
     assert plan["f16_gguf"].endswith("f16.gguf")
-    assert plan["q8_gguf"].endswith("q8_0.gguf")
+    assert "q8_gguf" not in plan
+    assert "quantize_bin" not in plan
     assert plan["llama_cpp_alignment"]["tag"] == "v0.3.0"
     assert plan["llama_cpp_alignment"]["commit"] == "4df29be4f4c3673f428170fda944a5b19f743bb8"
 
@@ -235,9 +221,7 @@ def test_main_dry_run_prints_plan_without_export(
     """--dry-run 只做输入/工具存在性校验并打印计划，不得触发真实导出。"""
     model_dir = _make_model_dir(tmp_path)
     convert = tmp_path / "convert_hf_to_gguf.py"
-    quantize = tmp_path / "llama-quantize.exe"
     convert.write_text("# stub", encoding="utf-8")
-    quantize.write_bytes(b"")
     monkeypatch.setattr(efg, "export", lambda args: pytest.fail("dry-run 不得触发 export()"))
     with caplog.at_level("INFO", logger="scripts.export_finbert_gguf"):
         code = efg.main(
@@ -248,14 +232,13 @@ def test_main_dry_run_prints_plan_without_export(
                 str(tmp_path / "out"),
                 "--convert-script",
                 str(convert),
-                "--quantize-bin",
-                str(quantize),
                 "--dry-run",
             ]
         )
     assert code == 0
     joined = "\n".join(record.getMessage() for record in caplog.records)
-    assert "q8_0.gguf" in joined
+    assert "f16.gguf" in joined
+    assert "q8_0" not in joined
     assert "v0.3.0" in joined
 
 
@@ -271,8 +254,6 @@ def test_main_dry_run_fails_when_tools_missing(tmp_path: Path, caplog: pytest.Lo
                 str(tmp_path / "out"),
                 "--convert-script",
                 str(tmp_path / "missing.py"),
-                "--quantize-bin",
-                str(tmp_path / "missing.bin"),
                 "--dry-run",
             ]
         )
@@ -294,17 +275,23 @@ def test_main_dry_run_fails_on_non_bert_model(tmp_path: Path, caplog: pytest.Log
                 str(tmp_path / "out"),
                 "--convert-script",
                 str(tmp_path / "c.py"),
-                "--quantize-bin",
-                str(tmp_path / "q.exe"),
                 "--dry-run",
             ]
         )
     assert code == 1
 
 
+def test_parse_args_rejects_removed_quantize_bin() -> None:
+    """Q8_0 量化已移除（f16 交付）：CLI 不得再接受 --quantize-bin（防回归）。"""
+    with pytest.raises(SystemExit) as excinfo:
+        efg._parse_args(["--model-dir", "m", "--out-dir", "o", "--convert-script", "c", "--quantize-bin", "q"])
+    # argparse 对未识别参数以 exit code 2 退出
+    assert excinfo.value.code == 2
+
+
 def test_parse_args_defaults_and_alignment_metadata() -> None:
     """默认参数：out-prefix / head-mode / 对齐 tag 与 sha 常量正确。"""
-    args = efg._parse_args(["--model-dir", "m", "--out-dir", "o", "--convert-script", "c", "--quantize-bin", "q"])
+    args = efg._parse_args(["--model-dir", "m", "--out-dir", "o", "--convert-script", "c"])
     assert args.out_prefix == "finbert2-news"
     assert args.head_mode == "bert"
     assert efg.LLAMA_CPP_ALIGN_TAG == "v0.3.0"

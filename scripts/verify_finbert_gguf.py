@@ -4,12 +4,17 @@
 判定 Plan N0-3 的四项判据（正本见 `reviews/新闻达标模型微调.md` §7）：
 
 1. 分词：HF tokenizer ids vs ``Llama.tokenize()`` 完全一致（含首尾 ``[CLS]`` / ``[SEP]``）；
-2. CLS 余弦相似度：f16 > 0.999；Q8_0 > 0.995；
+2. CLS 余弦相似度：f16 > 0.999；Q8_0 > 0.995（Q8_0 为可选对照件，见下）；
 3. 三类概率最大绝对差 < 0.02；
 4. 预测标签一致率 ≥ 99%。
 
+**发布产物为 f16（2026-10-14 方案 A）**：``--f16-gguf`` 为**必评判据主体**；
+``--q8-gguf`` 降级为可选对照件（默认不提供，提供时其判据按 Q8_0 阈值一并评估）。
+定因：Q8_0 层权重量化噪声经训练头放大后概率差 0.047 ~ 0.055 必然超出 0.02 阈值，
+f16 产物四判据宽裕通过（见 scripts/export_finbert_gguf.py docstring）。
+
 同时实测 ``Llama.embed()`` CLS 池化返回维度（须 = 768，验证非 RANK 越界读取）与
-单条耗时基线（预期 10 ~ 30 ms / 条，CPU + Q8_0 + 标题长度）。
+单条耗时基线（预期 10 ~ 30 ms / 条，CPU + 标题长度）。
 
 **分词兜底（§7 / §8.3）**：llama.cpp 的 WordPiece 实现对「HF 基线词表 + 追加金融词」
 （``len(tokenizer) = 34932``）的贪心切分与 HF 不一致；一旦第 1 项不达标，本脚本自动
@@ -30,17 +35,16 @@
 > 与参考头增益灵敏度扫描 ``head_scale_sensitivity``。本 Gate 结论仅证明「两条链路数值
 > 等价」；正式发布前须用训练好的 ``head.npz`` 重跑本脚本（``--head``）。
 
-**输入路径默认值**：``--reference-model`` / ``--q8-gguf`` 默认取仓库内 ``ai_models/``
-（该目录已被 ``.gitignore`` 忽略）；``--f16-gguf`` 默认取环境变量 ``FINBERT_F16_GGUF``
-（f16 对照件通常落在仓库外），未提供时跳过 f16 相关判据。
+**输入路径默认值**：``--reference-model`` 默认取仓库内 ``ai_models/``（该目录已被
+``.gitignore`` 忽略）；``--f16-gguf`` 默认取环境变量 ``FINBERT_F16_GGUF``；
+``--q8-gguf`` 默认不提供（可选对照件）。
 
 Usage:
     python scripts/verify_finbert_gguf.py \
         --reference-model ai_models/FinBERT2-base \
-        --q8-gguf ai_models/finbert2-news-q8_0.gguf \
         --f16-gguf "$FINBERT_F16_GGUF" \
         --head ai_models/head.npz \
-        --report ai_models/finbert2-news-q8_0.verify.json
+        --report ai_models/finbert2-news-f16.verify.json
 
 （``--head`` 可省略：省略时使用确定性参考头；正式发布须提供训练好的 ``head.npz``。）
 
@@ -338,14 +342,19 @@ def evaluate_criteria(
     tokenizer_consistent: bool,
     tokenizer_detail: str,
     cos_f16: float | None,
-    cos_q8: float,
+    cos_q8: float | None,
     prob_diff_f16: float | None,
-    prob_diff_q8: float,
+    prob_diff_q8: float | None,
     label_rate_f16: float | None,
-    label_rate_q8: float,
+    label_rate_q8: float | None,
     embedding_dim: int,
 ) -> dict[str, dict[str, Any]]:
-    """按 §7 阈值判定各判据（纯函数，供单测覆盖边界）。"""
+    """按 §7 阈值判定各判据（纯函数，供单测覆盖边界）。
+
+    f16 为发布产物判据主体；q8 为可选对照件——值为 ``None`` 时对应判据置
+    ``skipped``，不参与 ``is_gate_passed`` 判定。f16 余弦阈值更严（> 0.999），
+    Q8_0 因量化精度放宽（> 0.995）；概率差 / 标签一致率两种格式同阈值。
+    """
     criteria: dict[str, dict[str, Any]] = {
         "tokenizer_ids_consistent": {
             "ok": bool(tokenizer_consistent),
@@ -358,28 +367,16 @@ def evaluate_criteria(
             "value": embedding_dim,
             "threshold": EMBEDDING_DIM,
         },
-        "cls_cosine_q8": {
-            "ok": cos_q8 > COSINE_MIN_Q8,
-            "value": cos_q8,
-            "threshold": COSINE_MIN_Q8,
-        },
-        "probability_max_abs_diff_q8": {
-            "ok": prob_diff_q8 < PROBABILITY_MAX_ABS_DIFF,
-            "value": prob_diff_q8,
-            "threshold": PROBABILITY_MAX_ABS_DIFF,
-        },
-        "label_agreement_q8": {
-            "ok": label_rate_q8 >= LABEL_AGREEMENT_MIN,
-            "value": label_rate_q8,
-            "threshold": LABEL_AGREEMENT_MIN,
-        },
     }
-    optional = {
-        "cls_cosine_f16": (cos_f16, COSINE_MIN_F16, ">"),
-        "probability_max_abs_diff_f16": (prob_diff_f16, PROBABILITY_MAX_ABS_DIFF, "<"),
-        "label_agreement_f16": (label_rate_f16, LABEL_AGREEMENT_MIN, ">="),
-    }
-    for name, (value, threshold, op) in optional.items():
+    backend_metrics = (
+        ("cls_cosine_f16", cos_f16, COSINE_MIN_F16, ">"),
+        ("probability_max_abs_diff_f16", prob_diff_f16, PROBABILITY_MAX_ABS_DIFF, "<"),
+        ("label_agreement_f16", label_rate_f16, LABEL_AGREEMENT_MIN, ">="),
+        ("cls_cosine_q8", cos_q8, COSINE_MIN_Q8, ">"),
+        ("probability_max_abs_diff_q8", prob_diff_q8, PROBABILITY_MAX_ABS_DIFF, "<"),
+        ("label_agreement_q8", label_rate_q8, LABEL_AGREEMENT_MIN, ">="),
+    )
+    for name, value, threshold, op in backend_metrics:
         if value is None:
             criteria[name] = {"ok": None, "value": None, "threshold": threshold, "skipped": True}
             continue
@@ -553,10 +550,17 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
     hf_ids = _hf_input_ids(tokenizer, texts, args.max_length)
     pytorch_cls = _pytorch_cls(model, tokenizer, texts, args.max_length)
 
-    # 第 1 项：直连分词一致性（llama.cpp 内置分词器 vs HF）
-    q8_path = Path(args.q8_gguf)
-    _assert_gguf_file(q8_path)
-    probe_llm, _probe_mod = _load_gguf(q8_path, n_threads=args.n_threads, n_ctx=args.n_ctx)
+    # 第 1 项：直连分词一致性（llama.cpp 内置分词器 vs HF）。
+    # 探针任取一个已提供的 GGUF（f16 优先 = 发布判据主体；仅给 q8 对照件时用 q8）。
+    f16_path = Path(args.f16_gguf) if args.f16_gguf else None
+    q8_path = Path(args.q8_gguf) if args.q8_gguf else None
+    probe_path = f16_path if f16_path is not None else q8_path
+    if probe_path is None:
+        raise ValueError(
+            "必须提供 --f16-gguf（发布判据主体，或设置 FINBERT_F16_GGUF 环境变量）；--q8-gguf 仅作可选对照件"
+        )
+    _assert_gguf_file(probe_path)
+    probe_llm, _probe_mod = _load_gguf(probe_path, n_threads=args.n_threads, n_ctx=args.n_ctx)
     try:
         direct = compare_token_ids(hf_ids, _gguf_tokenize_internal(probe_llm, texts))
     finally:
@@ -570,10 +574,22 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     backends: dict[str, Any] = {}
-    if args.f16_gguf:
+    if f16_path is not None:
         backends["f16"] = _verify_one_backend(
-            gguf_path=Path(args.f16_gguf),
+            gguf_path=f16_path,
             name="f16",
+            hf_ids=hf_ids,
+            pytorch_cls=pytorch_cls,
+            reference_head=reference_head,
+            seed=args.seed,
+            n_threads=args.n_threads,
+            n_ctx=args.n_ctx,
+            measure_latency=True,
+        )
+    if q8_path is not None:
+        backends["q8_0"] = _verify_one_backend(
+            gguf_path=q8_path,
+            name="q8_0",
             hf_ids=hf_ids,
             pytorch_cls=pytorch_cls,
             reference_head=reference_head,
@@ -582,30 +598,20 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             n_ctx=args.n_ctx,
             measure_latency=False,
         )
-    backends["q8_0"] = _verify_one_backend(
-        gguf_path=q8_path,
-        name="q8_0",
-        hf_ids=hf_ids,
-        pytorch_cls=pytorch_cls,
-        reference_head=reference_head,
-        seed=args.seed,
-        n_threads=args.n_threads,
-        n_ctx=args.n_ctx,
-        measure_latency=True,
-    )
 
-    q8 = backends["q8_0"]
     f16 = backends.get("f16")
+    q8 = backends.get("q8_0")
     criteria = evaluate_criteria(
         tokenizer_consistent=fallback_used or direct["match"],
         tokenizer_detail=tokenizer_detail,
         cos_f16=None if f16 is None else f16["cosine_min"],
-        cos_q8=q8["cosine_min"],
+        cos_q8=None if q8 is None else q8["cosine_min"],
         prob_diff_f16=None if f16 is None else f16["probability_max_abs_diff"],
-        prob_diff_q8=q8["probability_max_abs_diff"],
+        prob_diff_q8=None if q8 is None else q8["probability_max_abs_diff"],
         label_rate_f16=None if f16 is None else f16["label_agreement"],
-        label_rate_q8=q8["label_agreement"],
-        embedding_dim=q8["embedding_dim"],
+        label_rate_q8=None if q8 is None else q8["label_agreement"],
+        # 同一编码器的 f16 / q8 embedding_dim 一致；probe_path 非空保证 backends 非空
+        embedding_dim=int(next(iter(backends.values()))["embedding_dim"]),
     )
 
     return {
@@ -614,7 +620,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
         "inputs": {
             "reference_model": str(args.reference_model),
             "f16_gguf": args.f16_gguf,
-            "q8_gguf": str(q8_path),
+            "q8_gguf": None if q8_path is None else str(q8_path),
             "n_titles": args.n_titles,
             "seed": args.seed,
             "max_length": args.max_length,
@@ -622,7 +628,10 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
             "corpus": "synthetic-deterministic (25 entities × 8 events; 宏观标题仅在 n_titles > 200 时追加)",
         },
         "head": head_meta,
-        "embedding": {"dim": q8["embedding_dim"], "expected_dim": EMBEDDING_DIM},
+        "embedding": {
+            "dim": int(next(iter(backends.values()))["embedding_dim"]),
+            "expected_dim": EMBEDDING_DIM,
+        },
         "tokenizer": {
             "direct_match": direct["match"],
             "direct_match_rate": direct["match_rate"],
@@ -681,11 +690,11 @@ def _print_summary(report: dict[str, Any]) -> None:
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FinBERT2-base GGUF 一致性门禁（N0-3）")
     parser.add_argument("--reference-model", default="ai_models/FinBERT2-base", help="HF 参考模型目录（仅取编码器）")
-    parser.add_argument("--q8-gguf", default="ai_models/finbert2-news-q8_0.gguf", help="发布用 Q8_0 GGUF")
+    parser.add_argument("--q8-gguf", default=None, help="可选 Q8_0 对照 GGUF（提供时按 Q8_0 阈值评估对照判据）")
     parser.add_argument(
-        "--f16-gguf", default=os.environ.get("FINBERT_F16_GGUF"), help="f16 对照 GGUF（缺省时跳过 f16 判据）"
+        "--f16-gguf", default=os.environ.get("FINBERT_F16_GGUF"), help="发布用 f16 GGUF（发布判据主体）"
     )
-    parser.add_argument("--report", default="ai_models/finbert2-news-q8_0.verify.json", help="报告输出路径")
+    parser.add_argument("--report", default="ai_models/finbert2-news-f16.verify.json", help="报告输出路径")
     parser.add_argument("--head", default=None, help="训练好的分类头 head.npz（N3-1 产出；提供时取代确定性参考头）")
     parser.add_argument("--n-titles", type=int, default=DEFAULT_N_TITLES, help="探针标题数")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="确定性参考头种子")
