@@ -141,7 +141,10 @@ jobs:
             -DGGML_RPC=OFF
           cmake --build llama.cpp/build --target llama-quantize -j4
           chmod +x llama.cpp/build/bin/llama-quantize
-          llama.cpp/build/bin/llama-quantize --version
+          # llama-quantize 不支持 --version（无参运行打印 usage 且 exit 1，
+          # 首跑实测），此处只校验可执行位；实际可用性由导出步骤自然验证。
+          test -x llama.cpp/build/bin/llama-quantize
+          echo "llama-quantize 构建完成: $(du -h llama.cpp/build/bin/llama-quantize | cut -f1)"
 
       # 基座模型（HF Hub 公开可得，2026-10-14 实证：valuesimplex-ai-lab/FinBERT2-base
       # gated=false，Apache-2.0；本地产物 ai_models/FinBERT2-base/config.json 与
