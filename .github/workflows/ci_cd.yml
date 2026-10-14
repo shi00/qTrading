@@ -1353,12 +1353,23 @@ jobs:
           # --override 绕过 winget 默认"全装"策略，只装编译必需的 CUDA 组件，跳过 driver
           # （CUDA 12.1 installer 默认带 driver，在 Windows runner 上装 driver 会触发重启/蓝屏）
           # winget 源中 Nvidia.CUDA 12.1 的清单版本号为 "12.1"（无 "12.1.0"），精确匹配失败会导致安装跳过
+          # 子包名须与 CUDA 12.1 安装指南 Table 3 一致（NVRTC 为 nvrtc_12.1/nvrtc_dev_12.1，
+          # 无 "cuda_" 前缀；cuda_nvrtc_12.1 是 12.4+ 才有的名字，传入无效子包名会使 installer 整体失败 0xE0E00019）
           winget install --id Nvidia.CUDA -e --version 12.1 --accept-package-agreements --accept-source-agreements `
-            --override "-s nvcc_12.1 cudart_12.1 cublas_12.1 cublas_dev_12.1 cuda_nvrtc_12.1 cuda_nvrtc_dev_12.1 -n"
+            --override "-s nvcc_12.1 cudart_12.1 cublas_12.1 cublas_dev_12.1 nvrtc_12.1 nvrtc_dev_12.1 -n"
+          if ($LASTEXITCODE -ne 0) {
+            # 失败时 dump NVIDIA installer 日志便于定位（静默安装失败默认无输出）
+            Get-ChildItem "$env:ProgramData\NVIDIA Corporation" -Recurse -Filter *.log -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "----- $($_.FullName) -----"; Get-Content $_.FullName -Tail 80 -ErrorAction SilentlyContinue }
+            Write-Error "winget install Nvidia.CUDA exited with $LASTEXITCODE"
+            exit 1
+          }
           # CUDA 默认装到 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1
           $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin"
           $cudaHome = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1"
           if (-not (Test-Path $cudaBin)) {
+            Get-ChildItem "$env:ProgramData\NVIDIA Corporation" -Recurse -Filter *.log -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "----- $($_.FullName) -----"; Get-Content $_.FullName -Tail 80 -ErrorAction SilentlyContinue }
             Write-Error "CUDA Toolkit 12.1 not found at $cudaBin after install"
             exit 1
           }
