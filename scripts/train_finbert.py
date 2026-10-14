@@ -40,10 +40,11 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import itertools
 import json
 import logging
 import random
-from collections.abc import Mapping
+from collections.abc import Callable, Hashable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,22 @@ DEFAULT_NUM_THREADS = 16  # reviews §5.2：CPU torch.set_num_threads(16)
 
 BEST_DIR_NAME = "best"
 
+# 跨 split 互斥检查使用的可选元数据字段（FT-04）：``id`` 稳定样本 ID 追踪 +
+# ``(ts_code, publish_time)`` 事件分组键；JSON 行中存在且为非空字符串才保留，
+# 缺失不造值（缺失即缺失，不伪装成已检查——R21）
+OPTIONAL_METADATA_FIELDS = ("id", "ts_code", "publish_time")
+
+# 跨 split 互斥检查报错信息中定位样本的最大条数（防报错文本爆炸）
+_EXCLUSIVITY_MAX_REPORT = 5
+
+
+def _describe_sample(row: Mapping[str, str]) -> str:
+    """构造跨 split 冲突样本的单行定位描述：``id`` 优先，缺失时退化为文本前缀（纯函数）。"""
+    ident = row.get("id")
+    if ident:
+        return f"id={ident}"
+    return f"text={row['text'].strip()[:30]!r}"
+
 
 def load_split_file(path: Path) -> list[dict[str, str]]:
     """加载并校验单个 split 文件（纯函数）。
@@ -80,6 +97,10 @@ def load_split_file(path: Path) -> list[dict[str, str]]:
     逐行 JSON 合法性、``text`` 非空字符串、标签域仅允许 ``[利空, 中性, 利好]``、
     行数非零；空行跳过（不计入语料行）；非法行带行号拒绝，不做猜测性修复。
     以 ``utf-8-sig`` 读取，UTF-8 BOM 首行不误报。
+
+    ``OPTIONAL_METADATA_FIELDS``（``id`` / ``ts_code`` / ``publish_time``）为可选元数据，
+    行内存在且为非空字符串时原样保留（供 ``validate_corpus_dir`` 跨 split 互斥检查与
+    样本追踪；训练输入仍只消费 ``text`` / ``label``），缺失时不出现在行 dict 中。
     """
     path = Path(path)
     if not path.is_file():
@@ -102,10 +123,105 @@ def load_split_file(path: Path) -> list[dict[str, str]]:
             label = item.get("label")
             if label not in LABELS:
                 raise ValueError(f"{path.name} 第 {line_no} 行标签越域（标签域仅允许 {list(LABELS)}）: {label!r}")
-            rows.append({"text": text, "label": label})
+            row = {"text": text, "label": label}
+            for field in OPTIONAL_METADATA_FIELDS:
+                value = item.get(field)
+                if isinstance(value, str) and value:
+                    row[field] = value
+            rows.append(row)
     if not rows:
         raise ValueError(f"{path.name} 行数为 0，拒绝空语料")
     return rows
+
+
+def _text_key(row: Mapping[str, str]) -> str:
+    """精确文本重复的归一化键：``text.strip()``（不做删除全部空白等更强归一化）。"""
+    return row["text"].strip()
+
+
+def _id_key(row: Mapping[str, str]) -> str | None:
+    """样本 ID 键：``id`` 字段非空才参与检查，缺失（含非字符串）返回 None 跳过。"""
+    return row.get("id") or None
+
+
+def _event_key(row: Mapping[str, str]) -> tuple[str, str] | None:
+    """事件分组键：``(ts_code, publish_time)`` 精确字符串匹配，任一缺失返回 None 跳过。"""
+    ts_code = row.get("ts_code")
+    publish_time = row.get("publish_time")
+    if ts_code and publish_time:
+        return (ts_code, publish_time)
+    return None
+
+
+def _find_conflicts[K: Hashable](
+    left_rows: list[dict[str, str]],
+    right_rows: list[dict[str, str]],
+    key_of: Callable[[Mapping[str, str]], K | None],
+) -> list[tuple[K, dict[str, str], dict[str, str]]]:
+    """按 ``key_of`` 提取键做两两比对，返回全部跨集合冲突 ``(键, 左样本, 右样本)``（纯函数）。"""
+    left_by_key: dict[K, dict[str, str]] = {}
+    for row in left_rows:
+        key = key_of(row)
+        if key is not None:
+            left_by_key.setdefault(key, row)
+    conflicts: list[tuple[K, dict[str, str], dict[str, str]]] = []
+    seen_right: set[K] = set()
+    for row in right_rows:
+        key = key_of(row)
+        if key is None or key in seen_right:
+            continue
+        if key in left_by_key:
+            seen_right.add(key)
+            conflicts.append((key, left_by_key[key], row))
+    return conflicts
+
+
+def _check_split_exclusivity(splits: Mapping[str, list[dict[str, str]]], file_names: Mapping[str, str]) -> None:
+    """跨 split 互斥检查（纯函数，FT-04）；任一命中即 ``raise ValueError`` 拒绝训练。
+
+    按 split 两两比对（不检查同一 split 内部），三项检查依次执行：
+    1. **精确文本重复**（``_text_key``）：归一化口径 ``text.strip()``；
+    2. **样本 ID 重复**（``_id_key``）：同一稳定样本 ID 不得跨集合；
+    3. **事件分组泄漏**（``_event_key``）：``(ts_code, publish_time)`` 精确键相同的多条
+       文本视为同组，不得跨集合（精确字符串匹配，不做日粒度放宽）。
+
+    检查边界（如实声明，R21）：``id`` / ``ts_code`` / ``publish_time`` 缺失或非字符串的
+    样本跳过对应检查；文本近重复 / 转载改写 / 同股同日不同时刻样本不做相似度检查——
+    本检查仅排除可精确判定的泄漏形态，不构成「分组泄漏已全部排除」的证明。
+    """
+    for left, right in itertools.combinations(splits, 2):
+        left_rows, right_rows = splits[left], splits[right]
+        where = f"{file_names[left]} × {file_names[right]}"
+
+        text_conflicts = _find_conflicts(left_rows, right_rows, _text_key)
+        if text_conflicts:
+            samples = "; ".join(
+                f"[{_describe_sample(left_row)}] × [{_describe_sample(right_row)}]"
+                for _, left_row, right_row in text_conflicts[:_EXCLUSIVITY_MAX_REPORT]
+            )
+            raise ValueError(
+                f"跨 split 精确重复文本（text.strip() 归一化，共 {len(text_conflicts)} 个不同文本），"
+                f"拒绝训练: {where}: {samples}"
+            )
+
+        id_conflicts = _find_conflicts(left_rows, right_rows, _id_key)
+        if id_conflicts:
+            samples = "; ".join(
+                f"{key}: [{_describe_sample(left_row)}] × [{_describe_sample(right_row)}]"
+                for key, left_row, right_row in id_conflicts[:_EXCLUSIVITY_MAX_REPORT]
+            )
+            raise ValueError(f"跨 split 样本 id 重复（共 {len(id_conflicts)} 个 id），拒绝训练: {where}: {samples}")
+
+        event_conflicts = _find_conflicts(left_rows, right_rows, _event_key)
+        if event_conflicts:
+            samples = "; ".join(
+                f"{key}: [{_describe_sample(left_row)}] × [{_describe_sample(right_row)}]"
+                for key, left_row, right_row in event_conflicts[:_EXCLUSIVITY_MAX_REPORT]
+            )
+            raise ValueError(
+                f"跨 split 事件分组泄漏（(ts_code, publish_time) 相同，共 {len(event_conflicts)} 个事件组），"
+                f"拒绝训练: {where}: {samples}"
+            )
 
 
 def validate_corpus_dir(corpus_dir: Path | str, *, with_distribution: bool = False) -> dict[str, Any]:
@@ -113,7 +229,14 @@ def validate_corpus_dir(corpus_dir: Path | str, *, with_distribution: bool = Fal
 
     ``dev`` 文件优先 ``split_dev.jsonl``，缺失时回退 ``split_val.jsonl``
     （现网语料目录命名，见 ``DEV_CANDIDATES``）；返回 ``train`` / ``dev`` / ``test``
-    三组 ``{"text", "label"}`` 行，``with_distribution=True`` 时附 ``train_distribution``。
+    三组行（``text`` / ``label`` 必有，``id`` / ``ts_code`` / ``publish_time`` 可选元数据，
+    见 ``load_split_file``），``with_distribution=True`` 时附 ``train_distribution``。
+
+    跨 split 互斥检查（FT-04）：三 split 两两比对，精确文本重复（``text.strip()``
+    归一化）/ 样本 ``id`` 重复 / ``(ts_code, publish_time)`` 事件分组任一命中即
+    ``raise ValueError``（规则与检查边界见 ``_check_split_exclusivity`` docstring）；
+    现网 corpus-v1 语料（train 8813 / val 1102 / test 1102）实测三项检查均通过。
+    文本近重复 / 转载改写不做相似度检查（如实声明，R21）。
     """
     base = Path(corpus_dir)
     dev_path = next((base / name for name in DEV_CANDIDATES if (base / name).is_file()), None)
@@ -124,6 +247,10 @@ def validate_corpus_dir(corpus_dir: Path | str, *, with_distribution: bool = Fal
         "dev": load_split_file(dev_path),
         "test": load_split_file(base / TEST_FILE),
     }
+    _check_split_exclusivity(
+        {"train": splits["train"], "dev": splits["dev"], "test": splits["test"]},
+        {"train": TRAIN_FILE, "dev": dev_path.name, "test": TEST_FILE},
+    )
     if with_distribution:
         splits["train_distribution"] = {
             label: sum(1 for row in splits["train"] if row["label"] == label) for label in LABELS

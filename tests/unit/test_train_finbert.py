@@ -150,6 +150,198 @@ def test_validate_corpus_dir_reports_label_distribution(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 跨 split 互斥检查（FT-04）
+# --------------------------------------------------------------------------- #
+def test_load_split_file_preserves_optional_metadata_fields(tmp_path: Path) -> None:
+    """行内 id / ts_code / publish_time 非空字符串时原样保留；缺失不造值（R21）。"""
+    path = tmp_path / "split.jsonl"
+    _write_split(
+        path,
+        [
+            {
+                "text": "回购利好",
+                "label": "利好",
+                "id": "sina:x1",
+                "ts_code": "600000.SH",
+                "publish_time": "2026-08-20T10:00:00",
+            },
+            {"text": "减持利空", "label": "利空"},
+        ],
+    )
+    loaded = tf.load_split_file(path)
+    assert loaded[0]["id"] == "sina:x1"
+    assert loaded[0]["ts_code"] == "600000.SH"
+    assert loaded[0]["publish_time"] == "2026-08-20T10:00:00"
+    assert set(loaded[1]) == {"text", "label"}
+
+
+def test_validate_corpus_dir_rejects_exact_text_dup_across_splits(tmp_path: Path) -> None:
+    """跨 train/dev 精确重复文本（strip 归一化）必须拒绝，定位含两侧文件名。"""
+    corpus_dir = _make_corpus_dir(tmp_path)
+    # dev 首行与 train 首行 strip 等价（"回购利好" vs "  回购利好  "）
+    _write_split(
+        corpus_dir / "split_val.jsonl",
+        [{"text": "  回购利好  ", "label": "利好"}, {"text": "立案调查", "label": "利空"}],
+    )
+    with pytest.raises(ValueError, match="精确重复文本") as excinfo:
+        tf.validate_corpus_dir(corpus_dir)
+    message = str(excinfo.value)
+    assert "split_train.jsonl" in message
+    assert "split_val.jsonl" in message
+
+
+def test_validate_corpus_dir_reports_conflict_count_across_multiple_keys(tmp_path: Path) -> None:
+    """多处不同文本跨集合重复时，报错计数按不同文本数如实统计（键级口径）。"""
+    corpus_dir = _make_corpus_dir(tmp_path)
+    _write_split(
+        corpus_dir / "split_val.jsonl",
+        [{"text": " 回购利好 ", "label": "利好"}, {"text": "减持利空", "label": "利空"}],
+    )
+    with pytest.raises(ValueError, match="共 2 个不同文本") as excinfo:
+        tf.validate_corpus_dir(corpus_dir)
+    message = str(excinfo.value)
+    assert "回购利好" in message
+    assert "减持利空" in message
+
+
+def test_validate_corpus_dir_rejects_same_sample_id_across_splits(tmp_path: Path) -> None:
+    """同一稳定样本 id 跨集合出现（即使文本不同）必须拒绝。"""
+    corpus_dir = _make_corpus_dir(tmp_path)
+    _write_split(corpus_dir / "split_test.jsonl", [{"text": "业绩预亏", "label": "利空", "id": "sina:x1"}])
+    _write_split(
+        corpus_dir / "split_train.jsonl",
+        [
+            {"text": "回购利好", "label": "利好"},
+            {"text": "减持利空", "label": "利空"},
+            {"text": "例行公告", "label": "中性", "id": "sina:x1"},
+        ],
+    )
+    with pytest.raises(ValueError, match="id 重复") as excinfo:
+        tf.validate_corpus_dir(corpus_dir)
+    message = str(excinfo.value)
+    assert "sina:x1" in message
+    assert "split_train.jsonl" in message
+    assert "split_test.jsonl" in message
+
+
+def test_validate_corpus_dir_rejects_same_event_group_across_splits(tmp_path: Path) -> None:
+    """同 (ts_code, publish_time) 不同文本跨 split 必须按事件分组泄漏拒绝。"""
+    corpus_dir = _make_corpus_dir(tmp_path)
+    _write_split(
+        corpus_dir / "split_train.jsonl",
+        [
+            {
+                "text": "回购利好",
+                "label": "利好",
+                "ts_code": "600000.SH",
+                "publish_time": "2026-08-20T10:00:00",
+            },
+            {"text": "减持利空", "label": "利空"},
+            {"text": "例行公告", "label": "中性"},
+        ],
+    )
+    _write_split(
+        corpus_dir / "split_val.jsonl",
+        [
+            {
+                "text": "中标重大合同",
+                "label": "利好",
+                "ts_code": "600000.SH",
+                "publish_time": "2026-08-20T10:00:00",
+            },
+            {"text": "立案调查", "label": "利空"},
+        ],
+    )
+    with pytest.raises(ValueError, match="事件分组泄漏") as excinfo:
+        tf.validate_corpus_dir(corpus_dir)
+    message = str(excinfo.value)
+    assert "600000.SH" in message
+    assert "2026-08-20T10:00:00" in message
+
+
+def test_validate_corpus_dir_accepts_mutually_exclusive_corpus_with_metadata(tmp_path: Path) -> None:
+    """完全互斥三组（含元数据）通过；rows 保留 id 供追踪，训练字段 text/label 不变。"""
+    corpus_dir = _make_corpus_dir(tmp_path)
+    _write_split(
+        corpus_dir / "split_train.jsonl",
+        [
+            {
+                "text": "回购利好",
+                "label": "利好",
+                "id": "s1",
+                "ts_code": "600000.SH",
+                "publish_time": "2026-08-20T10:00:00",
+            },
+            {
+                "text": "减持利空",
+                "label": "利空",
+                "id": "s2",
+                "ts_code": "600000.SH",
+                "publish_time": "2026-08-20T10:00:00",
+            },
+            {
+                "text": "例行公告",
+                "label": "中性",
+                "id": "s3",
+                "ts_code": "000001.SZ",
+                "publish_time": "2026-08-21T09:00:00",
+            },
+        ],
+    )
+    _write_split(
+        corpus_dir / "split_val.jsonl",
+        [
+            {
+                "text": "中标重大合同",
+                "label": "利好",
+                "id": "s4",
+                "ts_code": "600000.SH",
+                "publish_time": "2026-08-22T10:00:00",
+            },
+            {
+                "text": "立案调查",
+                "label": "利空",
+                "id": "s5",
+                "ts_code": "600000.SH",
+                "publish_time": "2026-08-22T11:00:00",
+            },
+        ],
+    )
+    _write_split(
+        corpus_dir / "split_test.jsonl",
+        [
+            {
+                "text": "业绩预亏",
+                "label": "利空",
+                "id": "s6",
+                "ts_code": "600519.SH",
+                "publish_time": "2026-08-23T10:00:00",
+            }
+        ],
+    )
+    splits = tf.validate_corpus_dir(corpus_dir)
+    assert splits["train"][0]["id"] == "s1"
+    assert splits["train"][1]["id"] == "s2"  # 同 (ts_code, publish_time) 在同一 split 内不拒绝
+    assert [row["text"] for row in splits["test"]] == ["业绩预亏"]
+    assert [row["label"] for row in splits["dev"]] == ["利好", "利空"]
+
+
+def test_validate_corpus_dir_ignores_duplicates_within_single_split(tmp_path: Path) -> None:
+    """同一 split 内部重复不属于跨集合互斥检查范围（两两比对语义），不拒绝。"""
+    corpus_dir = _make_corpus_dir(tmp_path)
+    _write_split(
+        corpus_dir / "split_train.jsonl",
+        [
+            {"text": "回购利好", "label": "利好"},
+            {"text": "回购利好", "label": "利好"},
+            {"text": "减持利空", "label": "利空"},
+        ],
+    )
+    splits = tf.validate_corpus_dir(corpus_dir)
+    assert len(splits["train"]) == 3
+
+
+# --------------------------------------------------------------------------- #
 # seed 设置
 # --------------------------------------------------------------------------- #
 def test_seed_everything_sets_random_and_numpy_reproducibly() -> None:
