@@ -65,7 +65,7 @@
 ### 6.1 模型产物分发与归档（N5-4；CG-3 CI 微调产线后更新）
 
 - **产物清单与分发**：微调产物**不进仓库、不进安装包**（`AStockScreener.spec` / `installer.iss` 未引用，无需打包配置）：
-  - **CI 产线产物**（`finbert-train.yml`，ADR-0013）发布于 GitHub Release `finbert-gguf-v<model_version>`：`finbert2-news-q8_0.gguf`（Q8_0 量化编码器）+ `head.npz`（分类头：`mode`/`labels`/`cw`/`cb`[/`pw`/`pb`]，格式正本 `load_head_npz`）+ `SHA256SUMS.txt`（前两者自校验凭证）；获取步骤见 [how-to.md「13. 获取新闻情绪模型产物」](../guides/how-to.md)。
+  - **CI 产线产物**（`finbert-train.yml`，ADR-0013）发布于 GitHub Release `finbert-gguf-v<model_version>`：`finbert2-news-f16.gguf`（f16 编码器，发布产物；Q8_0 量化因概率差判据必 FAIL 已于 2026-10-14 移除，定因见 `scripts/export_finbert_gguf.py` docstring）+ `head.npz`（分类头：`mode`/`labels`/`cw`/`cb`[/`pw`/`pb`]，格式正本 `load_head_npz`）+ `SHA256SUMS.txt`（前两者自校验凭证）；获取步骤见 [how-to.md「13. 获取新闻情绪模型产物」](../guides/how-to.md)。
   - **`tokenizer.json` 不随 Release 分发**：从 HF 基座仓库 `valuesimplex-ai-lab/FinBERT2-base`（固定 revision，见 Release note lineage 段）获取——微调不改变词表，基座分词器即最终分词器（N0-4：必须用此外部分词器文件，禁用 GGUF 内部分词）。
   - 本地离线重训产物仍归档 `ai_models/`（已被 `.gitignore` 忽略）。
 - **校验门禁**：CI 产线发布前自动运行 `scripts/verify_finbert_gguf.py --head`（N0-3 四判据：分词一致 / CLS 余弦 / 概率差<0.02 / 标签一致率≥99%；Gate 不过不发布），验证报告进 workflow artifact（schema `finbert-gguf-verification.v1`）；线下重训发布前手动运行同一脚本，报告留存 `ai_models/*.verify.json`（工程脚本清单见 `docs/guides/ci-cd.md`）。App 侧保存路径时再做轻量校验（GGUF 魔数 + `head.npz` 结构 + 分词器存在性，`AIBrainSettingsViewModel.save_ai_settings`）。

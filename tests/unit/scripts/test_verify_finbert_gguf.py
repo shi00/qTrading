@@ -233,6 +233,15 @@ def _criteria_kwargs(**overrides: Any) -> dict[str, Any]:
     return base
 
 
+def test_gate_threshold_constants_unchanged() -> None:
+    """§7 判据阈值正本（f16 交付不改阈值；0.02 拒绝错源/量化噪声产物是正确行为）。"""
+    assert vfg.PROBABILITY_MAX_ABS_DIFF == 0.02
+    assert vfg.COSINE_MIN_F16 == 0.999
+    assert vfg.COSINE_MIN_Q8 == 0.995
+    assert vfg.LABEL_AGREEMENT_MIN == 0.99
+    assert vfg.EMBEDDING_DIM == 768
+
+
 def test_evaluate_criteria_all_pass() -> None:
     """全项达标时门禁通过。"""
     criteria = vfg.evaluate_criteria(**_criteria_kwargs())
@@ -261,22 +270,50 @@ def test_evaluate_criteria_dimension_and_tokenizer() -> None:
     assert bad_tok["tokenizer_ids_consistent"]["ok"] is False
 
 
-def test_evaluate_criteria_f16_skipped_when_absent() -> None:
-    """f16 缺省时相关判据标记 skipped，且不影响整体通过判定。"""
-    criteria = vfg.evaluate_criteria(**_criteria_kwargs(cos_f16=None, prob_diff_f16=None, label_rate_f16=None))
-    assert criteria["cls_cosine_f16"] == {
+def test_evaluate_criteria_q8_skipped_when_absent() -> None:
+    """q8 对照件缺省（f16 交付方案 A）时其判据标记 skipped，且不影响整体通过判定。"""
+    criteria = vfg.evaluate_criteria(**_criteria_kwargs(cos_q8=None, prob_diff_q8=None, label_rate_q8=None))
+    assert criteria["cls_cosine_q8"] == {
         "ok": None,
         "value": None,
-        "threshold": vfg.COSINE_MIN_F16,
+        "threshold": vfg.COSINE_MIN_Q8,
         "skipped": True,
     }
     assert vfg.is_gate_passed(criteria) is True
+    # f16 为主体判据，未提供即 FAIL 场景不在本用例；此处确认 f16 各项仍被评估
+    assert criteria["cls_cosine_f16"]["ok"] is True
+
+
+def test_evaluate_criteria_f16_fail_blocks_gate() -> None:
+    """f16 主体判据失败必须阻塞 Gate（发布产物即 f16，错源/量化噪声产物应被拒）。"""
+    criteria = vfg.evaluate_criteria(**_criteria_kwargs(cos_f16=0.9999, prob_diff_f16=0.05))
+    assert criteria["probability_max_abs_diff_f16"]["ok"] is False
+    assert vfg.is_gate_passed(criteria) is False
+
+
+def test_evaluate_criteria_f16_cosine_threshold_stricter_than_q8() -> None:
+    """f16 余弦阈值（0.999）严于 Q8_0（0.995）：0.9985 在 q8 判据可过、f16 判据必须 FAIL。"""
+    value = 0.9985
+    f16_side = vfg.evaluate_criteria(
+        **_criteria_kwargs(cos_f16=value, cos_q8=None, prob_diff_q8=None, label_rate_q8=None)
+    )
+    assert f16_side["cls_cosine_f16"]["ok"] is False
+    q8_side = vfg.evaluate_criteria(
+        **_criteria_kwargs(cos_q8=value, cos_f16=None, prob_diff_f16=None, label_rate_f16=None)
+    )
+    assert q8_side["cls_cosine_q8"]["ok"] is True
 
 
 def test_is_gate_passed_detects_failure() -> None:
     """任一已评估判据失败即门禁失败。"""
     criteria = vfg.evaluate_criteria(**_criteria_kwargs(cos_q8=0.1))
     assert vfg.is_gate_passed(criteria) is False
+
+
+def test_is_gate_passed_ignores_skipped_only() -> None:
+    """is_gate_passed：skipped（ok=None）不阻塞，False 阻塞。"""
+    assert vfg.is_gate_passed({"a": {"ok": True}, "b": {"ok": None}}) is True
+    assert vfg.is_gate_passed({"a": {"ok": True}, "b": {"ok": False}}) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -358,3 +395,32 @@ def test_main_returns_nonzero_on_failure(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr(vfg, "_gguf_cls_via_hf_ids", lambda llm, mod, ids, timing_sink=None: -cls)
     code = vfg.main(["--n-titles", "6", "--q8-gguf", "q8.gguf", "--report", str(tmp_path / "r.json")])
     assert code == 1
+
+
+def test_run_gate_f16_only_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """f16-only（f16 交付方案 A 的发布形态）：probe 用 f16，q8 判据 skipped，Gate PASS。"""
+    _patch_heavy(monkeypatch, direct_match=True)
+    args = vfg._parse_args(["--n-titles", "6", "--f16-gguf", "f16.gguf"])
+    report = vfg.run_gate(args)
+    assert report["inputs"]["f16_gguf"] == "f16.gguf"
+    assert report["inputs"]["q8_gguf"] is None
+    assert report["criteria"]["cls_cosine_f16"]["ok"] is True
+    assert report["criteria"]["cls_cosine_q8"]["skipped"] is True
+    assert report["verdict"] == "PASS"
+
+
+def test_run_gate_rejects_missing_backends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """f16 与 q8 全缺：run_gate 必须拒绝（发布判据主体不可缺席）。"""
+    _patch_heavy(monkeypatch, direct_match=True)
+    args = vfg._parse_args(["--n-titles", "6"])
+    args.f16_gguf = None
+    args.q8_gguf = None
+    with pytest.raises(ValueError, match="--f16-gguf"):
+        vfg.run_gate(args)
+
+
+def test_parse_args_defaults_f16_delivery() -> None:
+    """CLI 默认值（f16 交付方案 A）：q8 为可选对照件默认 None，report 默认 f16 命名。"""
+    args = vfg._parse_args([])
+    assert args.q8_gguf is None
+    assert args.report == "ai_models/finbert2-news-f16.verify.json"

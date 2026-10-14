@@ -4,7 +4,10 @@
 # （torch CPU / transformers，仅离线训练使用，不进 pyproject 运行时依赖）→
 # 下载基座模型（HF Hub 固定 revision）+ 语料 Release（SHA256 + 行数守恒断言）→
 # 固定 seed 训练（scripts/train_finbert.py）→ 拆头导出 GGUF
-# （scripts/export_finbert_gguf.py，llama.cpp 工具链 tag v0.3.0）→
+# （scripts/export_finbert_gguf.py，llama.cpp 工具链 tag v0.3.0，
+# f16 即发布产物——Q8_0 量化因概率差判据必 FAIL 已于 2026-10-14 移除，
+# 定因见 export 脚本 docstring）→ pre-tokenizer 登记补丁
+# （scripts/patch_llama_cpp_pre_registry.py，FinBERT2-base chkhsh 上游未登记）→
 # 一致性 Gate（scripts/verify_finbert_gguf.py --head，N0-3 四判据）→
 # 上传 artifact（无论 Gate 成败，便于排障）→ Gate 通过后发布 Release
 # `finbert-gguf-v{model_version}`（note 含训练语料 corpus_tag 及其 SHA256，
@@ -20,9 +23,9 @@
 # llama.cpp 工具链获取路径（2026-10-14 查证固化）：llama.cpp v0.3.0 GitHub Release
 # 无 ubuntu 预编译包（assets 仅 nightly-tag.txt，GitHub API 实证），故走 fallback——
 # checkout tag v0.3.0（对齐结论与证据链见 scripts/export_finbert_gguf.py 模块
-# docstring）后仅编译 llama-quantize 工具（cmake --target llama-quantize，不编译
-# server/examples/tests）；convert_hf_to_gguf.py 为纯 Python 脚本直接使用 checkout
-# 内文件，其 gguf 依赖以同源 llama.cpp/gguf-py 安装，避免 PyPI 版本漂移。
+# docstring）；convert_hf_to_gguf.py 为纯 Python 脚本直接使用 checkout 内文件，
+# 其 gguf 依赖以同源 llama.cpp/gguf-py 安装，避免 PyPI 版本漂移。f16 交付后
+# 不再需要 llama-quantize 二进制（无 cmake 编译步骤）。
 
 name: FinBERT GGUF Train Pipeline
 
@@ -126,25 +129,15 @@ jobs:
           set -euo pipefail
           pip install --no-cache-dir ./llama.cpp/gguf-py
 
-      # Release v0.3.0 无预编译包 → 源码编译。仅编译 quantize 工具
-      #（GGML_NATIVE=OFF 取基线 x86-64 指令集，不依赖 runner CPU 特性）；
-      # 产物路径 build/bin/llama-quantize 与 export 脚本 resolve_tool_paths 推导一致。
-      - name: Build llama-quantize
+      # FinBERT2-base（vocab=21128）的 BPE pre-tokenizer chkhsh 在上游 llama.cpp
+      # 全版本未登记（v0.3.0~v0.6.0 实证），convert_hf_to_gguf.py 会直接
+      # NotImplementedError；运行时（llama-cpp-python）对 BERT 分类器始终外部分词，
+      # pre 名仅为元数据 → 注入已识别的 bert-bge-large 登记项（幂等，详见脚本 docstring）。
+      - name: Patch llama.cpp pre-tokenizer registry (FinBERT2-base chkhsh)
         run: |
           set -euo pipefail
-          cmake -S llama.cpp -B llama.cpp/build \
-            -DGGML_NATIVE=OFF \
-            -DLLAMA_BUILD_TESTS=OFF \
-            -DLLAMA_BUILD_EXAMPLES=OFF \
-            -DLLAMA_BUILD_SERVER=OFF \
-            -DLLAMA_BUILD_TOOLS=ON \
-            -DGGML_RPC=OFF
-          cmake --build llama.cpp/build --target llama-quantize -j4
-          chmod +x llama.cpp/build/bin/llama-quantize
-          # llama-quantize 不支持 --version（无参运行打印 usage 且 exit 1，
-          # 首跑实测），此处只校验可执行位；实际可用性由导出步骤自然验证。
-          test -x llama.cpp/build/bin/llama-quantize
-          echo "llama-quantize 构建完成: $(du -h llama.cpp/build/bin/llama-quantize | cut -f1)"
+          python scripts/patch_llama_cpp_pre_registry.py \
+            --base-file llama.cpp/conversion/base.py
 
       # 基座模型（HF Hub 公开可得，2026-10-14 实证：valuesimplex-ai-lab/FinBERT2-base
       # gated=false，Apache-2.0；本地产物 ai_models/FinBERT2-base/config.json 与
@@ -211,7 +204,7 @@ jobs:
             --seed 20261008 \
             --num-threads 4
 
-      # 拆头导出：head.npz + 编码器 f16 → Q8_0（工具路径按 --llama-cpp-repo 布局推导）。
+      # 拆头导出：head.npz + 编码器 f16 GGUF（发布产物，工具路径按 --llama-cpp-repo 布局推导）。
       - name: Export GGUF (export_finbert_gguf.py)
         run: |
           set -euo pipefail
@@ -222,7 +215,8 @@ jobs:
             --out-prefix finbert2-news
 
       # 一致性 Gate（N0-3 四判据：分词一致 / CLS 余弦 / 概率差<0.02 / 标签一致率≥99%）。
-      # 参考模型为训练产物 best（微调后编码器）；--head 使用训练好的分类头。
+      # 发布产物为 f16（f16-only，可选 q8 对照件不使用）；参考模型为训练产物 best
+      #（微调后编码器）；--head 使用训练好的分类头。
       # 退出码 0=PASS / 1=FAIL；FAIL 时本步骤失败 → Release 步骤不执行。
       - name: Consistency gate (verify_finbert_gguf.py --head)
         id: gate
@@ -230,17 +224,16 @@ jobs:
           set -euo pipefail
           python scripts/verify_finbert_gguf.py \
             --reference-model stage_b_out/best \
-            --q8-gguf stage_b_out/finbert2-news-q8_0.gguf \
             --f16-gguf stage_b_out/finbert2-news-f16.gguf \
             --head stage_b_out/head.npz \
-            --report stage_b_out/finbert2-news-q8_0.verify.json
+            --report stage_b_out/finbert2-news-f16.verify.json
 
       # 产物 SHA256 清单（发布资产自校验凭证）。
       - name: Generate SHA256SUMS.txt
         run: |
           set -euo pipefail
           cd stage_b_out
-          sha256sum finbert2-news-q8_0.gguf head.npz > SHA256SUMS.txt
+          sha256sum finbert2-news-f16.gguf head.npz > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       # Release note：模型 ↔ 语料 lineage 溯源（corpus_tag + 语料 SHA256）。
@@ -292,7 +285,7 @@ jobs:
               "\n"
               "| 文件 | 用途 |\n"
               "|------|------|\n"
-              "| `finbert2-news-q8_0.gguf` | 发布用 Q8_0 量化编码器（llama-cpp-python 加载） |\n"
+              "| `finbert2-news-f16.gguf` | 发布用 f16 编码器（llama-cpp-python 加载；f16 交付定因见 scripts/export_finbert_gguf.py docstring） |\n"
               "| `head.npz` | 分类头（mode=bert：cw/cb/pw/pb，reviews §8.2 格式；labels = [利空, 中性, 利好]） |\n"
               "| `SHA256SUMS.txt` | 上述两文件 SHA256 自校验凭证 |\n"
               "\n"
@@ -320,7 +313,7 @@ jobs:
         run: |
           set -euo pipefail
           ASSETS=(
-            stage_b_out/finbert2-news-q8_0.gguf
+            stage_b_out/finbert2-news-f16.gguf
             stage_b_out/head.npz
             stage_b_out/SHA256SUMS.txt
           )
@@ -347,7 +340,6 @@ jobs:
             stage_b_out/best/test_macro_f1.txt
             stage_b_out/head.npz
             stage_b_out/finbert2-news-f16.gguf
-            stage_b_out/finbert2-news-q8_0.gguf
-            stage_b_out/finbert2-news-q8_0.verify.json
+            stage_b_out/finbert2-news-f16.verify.json
           if-no-files-found: warn
           retention-days: 7
