@@ -9,7 +9,9 @@
 llama.cpp 对齐结论（查证于 2026-10-13，见脚本 docstring）：
 llama-cpp-python v0.3.35 的 vendor/llama.cpp submodule 指向 ggml-org/llama.cpp
 commit ``4df29be4f4c3673f428170fda944a5b19f743bb8``；最近的覆盖型 semver tag
-为 ``v0.3.0``（c1d0e7a00401，2026-08-25，领先该 commit 167 次提交）。
+为 ``v0.3.0``（c1d0e7a00401，2026-08-25；compare API ``v0.3.0...4df29be`` 返回
+ahead_by=0 / behind_by=167 / merge_base=4df29be4…，证明该 commit 为其直系祖先，
+v0.3.0 领先 167 次提交）。
 """
 
 from __future__ import annotations

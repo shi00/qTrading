@@ -10,6 +10,9 @@
 
 **超参来源（reviews §5.2）**：lr 2e-5 / batch 32 / epoch 3 / warmup 10% / weight decay 0.01 /
 ``max_length`` 64（标题）/ 验证集 macro-F1 早停 patience=1；CPU ``torch.set_num_threads(16)``。
+**类别权重（§5.2「损失=交叉熵+类别权重」；§4.5「中性常占 60%+：训练时使用类别权重」）**：
+按 train split 类别频率以 balanced 语义（``w_c = N / (C·n_c)``）计算，经自定义
+``Trainer.compute_loss`` 注入加权交叉熵（见 ``compute_class_weights``）。
 离线实物（``data/corpus/stage_b_out/best/config.json``）为 ``BertForSequenceClassification``
 （transformers 5.19.0），与本脚本流程一致。
 
@@ -40,6 +43,7 @@ import importlib
 import json
 import logging
 import random
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -74,13 +78,14 @@ def load_split_file(path: Path) -> list[dict[str, str]]:
     """加载并校验单个 split 文件（纯函数）。
 
     逐行 JSON 合法性、``text`` 非空字符串、标签域仅允许 ``[利空, 中性, 利好]``、
-    行数非零；非法行带行号拒绝，不做静默跳过或猜测性修复。
+    行数非零；空行跳过（不计入语料行）；非法行带行号拒绝，不做猜测性修复。
+    以 ``utf-8-sig`` 读取，UTF-8 BOM 首行不误报。
     """
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"split 文件不存在: {path}")
     rows: list[dict[str, str]] = []
-    with path.open(encoding="utf-8") as handle:
+    with path.open(encoding="utf-8-sig") as handle:
         for line_no, raw in enumerate(handle, start=1):
             line = raw.strip()
             if not line:
@@ -166,15 +171,38 @@ def macro_f1(y_true: list[int], y_pred: list[int], num_classes: int = 3) -> floa
     return f1_sum / num_classes
 
 
-def build_training_plan(args: argparse.Namespace) -> dict[str, Any]:
-    """构造训练计划（含语料校验与行数 / 超参 / seed / 产物路径），供 dry-run 打印与复核。"""
-    splits = validate_corpus_dir(args.corpus_dir, with_distribution=True)
+def compute_class_weights(distribution: Mapping[str, int]) -> list[float]:
+    """按 train split 类别频率计算 balanced 类别权重（纯函数，reviews §5.2 / §4.5）。
+
+    语义与 sklearn ``class_weight="balanced"`` 一致：``w_c = N / (C·n_c)``；
+    返回顺序与 ``LABELS``（0=利空, 1=中性, 2=利好）对齐。任一类别计数为 0 时拒绝
+    （除零无意义，训练语料必须覆盖全部三类）。
+    """
+    counts = [int(distribution.get(label, 0)) for label in LABELS]
+    if any(count == 0 for count in counts):
+        paired = dict(zip(LABELS, counts, strict=True))
+        raise ValueError(f"类别计数为 0，无法计算类别权重（训练语料须覆盖全部三类）: {paired}")
+    total = sum(counts)
+    num_classes = len(LABELS)
+    return [total / (num_classes * count) for count in counts]
+
+
+def build_training_plan(args: argparse.Namespace, *, splits: dict[str, Any] | None = None) -> dict[str, Any]:
+    """构造训练计划（含语料校验与行数 / 超参 / seed / 类别权重 / 产物路径），供 dry-run 打印与复核。
+
+    ``splits`` 为调用方已加载的语料（须含 ``train_distribution``，即
+    ``validate_corpus_dir(..., with_distribution=True)`` 的返回值）时直接复用，
+    避免重复语料校验（``train()`` 路径）；缺省时内部自行校验。
+    """
+    if splits is None:
+        splits = validate_corpus_dir(args.corpus_dir, with_distribution=True)
     return {
         "corpus_dir": str(args.corpus_dir),
         "train_rows": len(splits["train"]),
         "dev_rows": len(splits["dev"]),
         "test_rows": len(splits["test"]),
         "train_distribution": splits["train_distribution"],
+        "class_weights": compute_class_weights(splits["train_distribution"]),
         "model_dir": str(args.model_dir),
         "out_dir": str(args.out_dir),
         "best_dir": str(Path(args.out_dir) / BEST_DIR_NAME),
@@ -196,6 +224,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     """执行阶段 B 训练（reviews §5.2），保存 best 权重（HF 格式）与摘要。
 
     torch / transformers 在函数体内延迟导入；本函数不在单测环境执行。
+    损失注入类别权重（§5.2「损失=交叉熵+类别权重」）：经 ``_WeightedCETrainer``
+    施加 ``compute_class_weights``（balanced）权重。
     """
     torch = importlib.import_module("torch")
     transformers = importlib.import_module("transformers")
@@ -204,12 +234,14 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     torch.set_num_threads(args.num_threads)
 
     splits = validate_corpus_dir(args.corpus_dir, with_distribution=True)
+    plan = build_training_plan(args, splits=splits)  # 复用 splits，语料仅校验一次
     LOGGER.info(
-        "语料: train=%d dev=%d test=%d 分布=%s",
-        len(splits["train"]),
-        len(splits["dev"]),
-        len(splits["test"]),
+        "语料: train=%d dev=%d test=%d 分布=%s 类别权重=%s",
+        plan["train_rows"],
+        plan["dev_rows"],
+        plan["test_rows"],
         splits["train_distribution"],
+        plan["class_weights"],
     )
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(str(args.model_dir))
@@ -247,6 +279,22 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         y_true = [int(x) for x in eval_pred.label_ids]
         return {"macro_f1": macro_f1(y_true, y_pred)}
 
+    class_weights = torch.tensor(plan["class_weights"], dtype=torch.float32)
+
+    class _WeightedCETrainer(transformers.Trainer):
+        """交叉熵注入类别权重（reviews §5.2「损失=交叉熵+类别权重」）。
+
+        基类透传的 ``num_items_in_batch`` 等关键字参数显式不消费——损失保持
+        batch 内 mean 加权交叉熵语义。
+        """
+
+        def compute_loss(self, model: Any, inputs: dict[str, Any], return_outputs: bool = False, **kwargs: Any) -> Any:
+            labels = inputs.pop("labels")
+            outputs = model(**inputs)
+            logits = outputs.logits
+            loss = torch.nn.functional.cross_entropy(logits, labels, weight=class_weights)
+            return (loss, outputs) if return_outputs else loss
+
     training_args = transformers.TrainingArguments(
         output_dir=str(Path(args.out_dir) / "trainer"),
         num_train_epochs=args.epochs,
@@ -266,7 +314,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         data_seed=args.seed,
         report_to=[],
     )
-    trainer = transformers.Trainer(
+    trainer = _WeightedCETrainer(
         model=model,
         args=training_args,
         train_dataset=_make_dataset(splits["train"]),
@@ -287,7 +335,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     summary = {
         "best_dir": str(best_dir),
         "seed": args.seed,
-        "hyperparams": build_training_plan(args)["hyperparams"],
+        "hyperparams": plan["hyperparams"],
+        "class_weights": plan["class_weights"],
         "best_dev_macro_f1": best_macro_f1,
         "test_macro_f1": float(test_metrics.get("test_macro_f1", float("nan"))),
         "labels": list(LABELS),

@@ -98,6 +98,15 @@ def test_load_split_file_rejects_missing_or_empty_text(tmp_path: Path) -> None:
             tf.load_split_file(path)
 
 
+def test_load_split_file_tolerates_utf8_bom(tmp_path: Path) -> None:
+    """UTF-8 BOM 首行不误报（utf-8-sig 读取，无 BOM 文件行为不变）。"""
+    path = tmp_path / "split.jsonl"
+    body = (json.dumps({"text": "回购利好", "label": "利好"}, ensure_ascii=False) + "\n").encode("utf-8")
+    path.write_bytes("\ufeff".encode("utf-8") + body)
+    loaded = tf.load_split_file(path)
+    assert loaded == [{"text": "回购利好", "label": "利好"}]
+
+
 def test_load_split_file_rejects_empty_file(tmp_path: Path) -> None:
     """空文件（0 行）必须拒绝。"""
     path = tmp_path / "split.jsonl"
@@ -144,22 +153,22 @@ def test_validate_corpus_dir_reports_label_distribution(tmp_path: Path) -> None:
 # seed 设置
 # --------------------------------------------------------------------------- #
 def test_seed_everything_sets_random_and_numpy_reproducibly() -> None:
-    """同 seed 两次调用后 random / numpy 随机序列完全一致。"""
+    """同 seed 两次调用后 random / numpy 全局 RNG 序列完全一致（证明种子确被设置）。"""
     components = tf.seed_everything(20261008)
     assert "random" in components
     assert "numpy" in components
     seq_a = [random.random() for _ in range(5)]
-    arr_a = np.random.default_rng(0).standard_normal(1)  # 占位，避免 default_rng 全局态耦合
+    np_a = np.random.standard_normal(4)
+    # 换 seed 产生不同序列，排除「两种子恰好同序列」的假阳性
+    tf.seed_everything(7)
+    seq_c = [random.random() for _ in range(5)]
+    np_c = np.random.standard_normal(4)
+    assert seq_c != seq_a
+    assert not np.array_equal(np_c, np_a)
+    # 回到同 seed 后 random / numpy 两 RNG 序列均复现
     tf.seed_everything(20261008)
-    seq_b = [random.random() for _ in range(5)]
-    assert seq_a == seq_b
-    np.random.seed(20261008)
-    legacy_a = np.random.standard_normal(4)
-    tf.seed_everything(20261008)
-    np.random.seed(20261008)
-    legacy_b = np.random.standard_normal(4)
-    np.testing.assert_array_equal(legacy_a, legacy_b)
-    assert arr_a.shape == (1,)
+    assert [random.random() for _ in range(5)] == seq_a
+    np.testing.assert_array_equal(np.random.standard_normal(4), np_a)
 
 
 def test_seed_everything_torch_only_when_available() -> None:
@@ -207,6 +216,21 @@ def test_macro_f1_rejects_length_mismatch_and_empty() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 类别权重（reviews §5.2「损失=交叉熵+类别权重」/ §4.5）
+# --------------------------------------------------------------------------- #
+def test_compute_class_weights_balanced_reference() -> None:
+    """balanced 语义 w_c = N/(C·n_c)，顺序与 LABELS（利空, 中性, 利好）对齐。"""
+    weights = tf.compute_class_weights({"利空": 1, "中性": 2, "利好": 1})
+    assert weights == pytest.approx([4.0 / 3.0, 4.0 / 6.0, 4.0 / 3.0])
+
+
+def test_compute_class_weights_rejects_absent_class() -> None:
+    """任一类别计数为 0 拒绝（训练语料须覆盖全部三类，除零无意义）。"""
+    with pytest.raises(ValueError, match="类别计数为 0"):
+        tf.compute_class_weights({"利空": 1, "中性": 0, "利好": 1})
+
+
+# --------------------------------------------------------------------------- #
 # 训练计划与 CLI --dry-run
 # --------------------------------------------------------------------------- #
 def _base_args(tmp_path: Path) -> list[str]:
@@ -235,12 +259,14 @@ def test_parse_args_defaults_match_reviews_section5() -> None:
 
 
 def test_build_training_plan_shape(tmp_path: Path) -> None:
-    """计划包含行数 / 超参 / seed / 产物路径，供 dry-run 打印与复核。"""
+    """计划包含行数 / 类别权重 / 超参 / seed / 产物路径，供 dry-run 打印与复核。"""
     args = tf._parse_args(_base_args(tmp_path))
     plan = tf.build_training_plan(args)
     assert plan["train_rows"] == 3
     assert plan["dev_rows"] == 2
     assert plan["test_rows"] == 1
+    assert plan["train_distribution"] == {"利空": 1, "中性": 1, "利好": 1}
+    assert plan["class_weights"] == pytest.approx([1.0, 1.0, 1.0])
     assert plan["seed"] == 20261008
     assert plan["hyperparams"]["epochs"] == 3
     assert plan["hyperparams"]["lr"] == pytest.approx(2e-5)

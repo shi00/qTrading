@@ -23,9 +23,11 @@
   证据：``https://api.github.com/repos/abetlen/llama-cpp-python/contents/vendor/llama.cpp?ref=v0.3.35``
   （``sha`` 字段即 submodule 指针）。
 - 该 commit 无同名 tag；其后最近的覆盖型 semver tag 为 ``v0.3.0``
-  （``c1d0e7a00401``，2026-08-25，"llama.cpp : bump version to 0.3.0 (#27696)"），
-  compare API ``.../compare/v0.3.0...4df29be`` 返回 ``behind_by=167``
-  （即 v0.3.0 领先该 commit 167 次提交 / 约 9 天）。
+  （``c1d0e7a00401``，2026-08-25，"llama.cpp : bump version to 0.3.0 (#27696)"）。
+  compare API ``.../compare/v0.3.0...4df29be`` 返回 ``ahead_by=0``、``behind_by=167``、
+  ``merge_base=4df29be4…``——``merge_base`` 即 head 本身且 ``ahead_by=0``，
+  直接证明 ``4df29be`` 为 ``v0.3.0`` 的直系祖先（``behind_by=167`` 单独不构成祖先
+  证据，故以 merge_base + ahead_by=0 双证锚定；v0.3.0 领先该 commit 167 次提交 / 约 9 天）。
 - **结论**：CI clone llama.cpp 时应 checkout tag ``v0.3.0``（更严格可直接 checkout
   上述精确 commit sha），``--llama-cpp-repo`` 指向该 clone；``--convert-script`` /
   ``--quantize-bin`` 未给定时按该仓库布局推导（``convert_hf_to_gguf.py`` 与
@@ -77,6 +79,9 @@ HEAD_MODE_CHOICES = (HEAD_MODE_LINEAR, HEAD_MODE_BERT)
 LLAMA_CPP_ALIGN_TAG = "v0.3.0"
 LLAMA_CPP_ALIGN_COMMIT = "4df29be4f4c3673f428170fda944a5b19f743bb8"
 
+# 前缀对齐现役产物命名：ai_models/finbert2-news-q8_0.gguf（通过 N0-3 四判据门禁的
+# 现役产物，scripts/verify_finbert_gguf.py usage 同名正本）；ai_models 下的
+# finbert2-sentiment-* 为已废弃 ONNX/OpenVINO PoC 路线遗留产物（PoC 判定失败），勿混淆
 DEFAULT_OUT_PREFIX = "finbert2-news"
 
 F16_SUFFIX = "-f16.gguf"
@@ -96,7 +101,9 @@ def extract_head_from_state_dict(
 
     ``bert``（非线性）模式取 ``bert.pooler.dense.*`` 与 ``classifier.*``；
     ``linear`` 模式仅取 ``classifier.*``（语义：权重已折算到 CLS 域，§5.1）。
-    张量缺失或形状不符时以 ``ValueError`` 拒绝（不能静默降级，§8.2）。
+    state_dict 中所需张量之外的键（编码器各层等）静默忽略——本函数只抽取分类头
+    所需张量，不校验全量权重。张量缺失或形状不符时以 ``ValueError`` 拒绝
+    （不能静默降级，§8.2）。
     """
     if mode not in HEAD_MODE_CHOICES:
         raise ValueError(f"未知 head 模式: {mode!r}（允许 {list(HEAD_MODE_CHOICES)}）")
@@ -236,6 +243,8 @@ def export(args: argparse.Namespace) -> dict[str, str]:
     LOGGER.info("导出计划:\n%s", json.dumps(plan, ensure_ascii=False, indent=2))
     convert_script = plan["convert_script"]
     quantize_bin = plan["quantize_bin"]
+    # hidden_size 与 dry-run 计划同源（config.hidden_size），保证计划与实际抽取一致
+    hidden_size = int(plan["head"]["cw_shape"][1])
 
     model_dir = Path(args.model_dir)
     out_dir = Path(args.out_dir)
@@ -245,7 +254,9 @@ def export(args: argparse.Namespace) -> dict[str, str]:
     model = transformers.AutoModelForSequenceClassification.from_pretrained(str(model_dir))
     tokenizer = transformers.AutoTokenizer.from_pretrained(str(model_dir))
     state_dict = {key: tensor.detach().float().cpu().numpy() for key, tensor in model.state_dict().items()}
-    head = extract_head_from_state_dict(state_dict, mode=args.head_mode)
+    head = extract_head_from_state_dict(
+        state_dict, num_classes=NUM_CLASSES, hidden_size=hidden_size, mode=args.head_mode
+    )
     head_path = out_dir / HEAD_FILE_NAME
     write_head_npz(head, head_path)
     LOGGER.info("head.npz 已写出: %s（mode=%s）", head_path, head["mode"])
@@ -263,8 +274,10 @@ def export(args: argparse.Namespace) -> dict[str, str]:
         check=True,
     )
 
-    # ③ Q8_0 量化
+    # ③ Q8_0 量化（POSIX 下先校验执行权限，给出 chmod +x 提示而非裸 PermissionError）
     q8_path = out_dir / f"{args.out_prefix}{Q8_SUFFIX}"
+    if os.name != "nt" and not os.access(str(quantize_bin), os.X_OK):
+        raise ValueError(f"量化工具无执行权限（POSIX 请 chmod +x）: {quantize_bin}")
     subprocess.run([quantize_bin, str(f16_path), str(q8_path), "Q8_0"], check=True)
 
     LOGGER.info("导出完成: %s / %s", f16_path, q8_path)
