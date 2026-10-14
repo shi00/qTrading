@@ -301,7 +301,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         learning_rate=args.lr,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
-        warmup_ratio=args.warmup_ratio,
+        # transformers 5.x 移除 warmup_ratio，比例语义并入 warmup_steps（float，
+        # [0, 1) 表示 total steps 比例；v5.19.0 training_args.py L796）。CLI 参数
+        # 名保留 --warmup-ratio 以表达 reviews §5.2 的「warmup 10%」超参语义。
+        warmup_steps=args.warmup_ratio,
         weight_decay=args.weight_decay,
         eval_strategy="epoch",
         save_strategy="epoch",
@@ -363,7 +366,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--max-length", type=int, default=DEFAULT_MAX_LENGTH, help="分词截断长度（reviews §5.2：标题 64）"
     )
     parser.add_argument(
-        "--warmup-ratio", type=float, default=DEFAULT_WARMUP_RATIO, help="warmup 比例（reviews §5.2：10%%）"
+        "--warmup-ratio",
+        type=float,
+        default=DEFAULT_WARMUP_RATIO,
+        help="warmup 比例（reviews §5.2：10%%；映射 transformers 5.x TrainingArguments.warmup_steps 的 float 比例语义）",
     )
     parser.add_argument("--weight-decay", type=float, default=DEFAULT_WEIGHT_DECAY, help="weight decay（reviews §5.2）")
     parser.add_argument("--patience", type=int, default=DEFAULT_PATIENCE, help="早停 patience（reviews §5.2）")
