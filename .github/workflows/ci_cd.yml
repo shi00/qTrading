@@ -1297,7 +1297,11 @@ jobs:
     name: Build Windows EXE (${{ matrix.variant }})
     needs: [ci-checks, ci-checks-windows, e2e-tests-windows, embedded-tests]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    runs-on: windows-latest
+    # 锁定 windows-2022（VS 2022）：windows-latest 已滚动迁移到 VS 2026（GitHub 2026-05 公告），
+    # 而 CUDA 12.1 nvcc 仅支持 MSVC 192x/193x（VS 2019/2022），在 VS 2026 上 CMake 报
+    # "No CUDA toolset found."，llama-cpp-python CUDA 后端源码编译失败（B03 随之误报
+    # ModuleNotFoundError）。升级 CUDA Toolkit 版本且确认其支持新镜像 VS 版本后才可解除锁定。
+    runs-on: windows-2022
     timeout-minutes: 60
     permissions:
       contents: read
