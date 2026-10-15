@@ -12,6 +12,21 @@
   不换 note 会令 lineage 静默错位）；``gh release create`` 仅在 tag
   不存在分支可达。
 
+依赖与环境基线（FT-08，P3）：
+- 训练依赖安装步骤全部精确 pin（``name==version``），禁止范围约束
+  （``>=``/``<=``/``~=``/``!=``）与未版本化 bare 包名——范围约束随 PyPI
+  漂移引入训练数值行为差异（聚合精度/默认参数），使跨次训练 lineage
+  比较失真；
+- Release note 含运行时环境 lineage：runner 镜像（ImageOS/ImageVersion）、
+  Python 版本、显式 pin 依赖版本（动态读取已安装 metadata，与 pip pin 单一
+  事实源）、已安装环境**全量依赖清单 + SHA256 摘要**（覆盖显式 pin 之外的
+  传递依赖，避免「pin 住 6 个包、传递依赖静默漂移」的归因盲区）、
+  llama.cpp 工具链 commit（与 checkout ref 单一事实源）；
+- llama.cpp 工具链由 tag 改为不可变 commit 锚定（tag v0.3.0 指向的提交——
+  tag 可被上游移动/重打，仅记录 tag 无法定位实际拉取的提交）；
+- runner 基线为滚动 ``ubuntu-latest``（权衡与兜底见 workflow 文件头注释），
+  改固定 container 须有意变更本断言。
+
 全部为 workflow YAML 的静态断言，不触发任何训练 / 发布副作用。
 """
 
@@ -28,6 +43,31 @@ WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "finbert-train.yml"
 
 JOB1_NAME = "train-export-gate"
 JOB2_NAME = "publish-release"
+
+INSTALL_STEP_NAME = "Install training / export / gate dependencies"
+NOTE_STEP_NAME = "Generate release note"
+
+# FT-08：训练依赖全 pin 的最小包集（torch 经 PyTorch CPU index 单独安装，
+# 其余与其后安装的 llama-cpp-python 同一条 pip install 命令）。
+PINNED_TRAINING_PACKAGES = frozenset(
+    {
+        "torch",
+        "transformers",
+        "accelerate",
+        "numpy",
+        "sentencepiece",
+        "llama-cpp-python",
+    }
+)
+
+# 精确 pin 规格：``name==version``（local version 如 2.9.1+cpu 亦合法）。
+# fullmatch 天然排除 >= / <= / ~= / != / bare 包名等一切非精确 pin 形态。
+PINNED_SPEC_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9][A-Za-z0-9.+]*")
+
+# FT-08：llama.cpp 工具链锚定的 commit（tag v0.3.0 指向的提交）。
+# checkout ref 与 note lineage 均须逐字等于该值（tag 可被上游移动，commit 不可变）。
+LLAMA_CPP_CHECKOUT_STEP = "Checkout llama.cpp v0.3.0"
+LLAMA_CPP_COMMIT = "c1d0e7a004015f23bc0233470b747b596f29b264"
 
 
 @pytest.fixture(scope="module")
@@ -218,3 +258,176 @@ def test_publish_step_has_no_clobber_partial_update(workflow: dict) -> None:
         run = step.get("run", "")
         assert "gh release upload" not in run
         assert "--clobber" not in run
+
+
+def _extract_pip_install_specs(run: str) -> list[str]:
+    """从 shell run 文本提取 ``pip install`` 命令的包规格 token 列表。
+
+    - 行尾 ``\\`` 续行拼接为完整命令行后逐行扫描；
+    - 仅收集 ``pip install`` 命令的参数（遇其他命令行边界即停）；
+    - 剥除引号、跳过 ``--flag`` 与 URL（``--index-url`` 的取值），只留包规格。
+    yaml.safe_load 已丢弃 YAML 注释，注释中的示例写法不会被误提取。
+    """
+    logical_lines: list[str] = []
+    buffer = ""
+    for raw in run.splitlines():
+        stripped = raw.rstrip()
+        if stripped.endswith("\\"):
+            buffer += stripped[:-1] + " "
+        else:
+            buffer += raw
+            logical_lines.append(buffer)
+            buffer = ""
+    if buffer:
+        logical_lines.append(buffer)
+
+    specs: list[str] = []
+    in_install = False
+    for line in logical_lines:
+        tokens = line.split()
+        if tokens and tokens[0] == "pip":
+            in_install = len(tokens) > 1 and tokens[1] == "install"
+            if in_install:
+                tokens = tokens[2:]
+        elif in_install and tokens:
+            # 逻辑行 = 完整命令（续行已拼接）：离开 install 上下文后
+            # 其余命令（如 cd）不得误收集为包规格
+            in_install = False
+            continue
+        if not in_install:
+            continue
+        skip_next = False
+        for tok in tokens:
+            if skip_next:
+                skip_next = False
+                continue
+            if tok.startswith("--"):
+                # --index-url <url>：取值（非 flag 形态的下一 token）一并跳过
+                skip_next = tok == "--index-url"
+                continue
+            if "://" in tok:
+                continue
+            tok = tok.strip("\"'")
+            if tok:
+                specs.append(tok)
+    return specs
+
+
+def test_training_dependencies_fully_pinned(workflow: dict) -> None:
+    # FT-08：训练依赖全部精确 pin——范围约束（如 accelerate>=1.1.0）与 bare
+    # 包名（如 numpy sentencepiece）会随 PyPI 新版本漂移，引入训练数值行为
+    # 差异，使跨次训练 lineage 比较失真。fullmatch 天然拦截一切非 == 形态。
+    job1 = workflow["jobs"][JOB1_NAME]
+    install = next(s for s in job1["steps"] if s.get("name") == INSTALL_STEP_NAME)
+    specs = _extract_pip_install_specs(install["run"])
+    assert specs, "未从依赖安装步骤提取到任何 pip 包规格（提取逻辑与 workflow 结构失配）"
+    for spec in specs:
+        assert PINNED_SPEC_PATTERN.fullmatch(spec), f"依赖未精确 pin（禁止范围约束/bare 包名）: {spec!r}"
+    pinned_names = {spec.split("==", 1)[0] for spec in specs}
+    missing = PINNED_TRAINING_PACKAGES - pinned_names
+    assert not missing, f"训练依赖缺 pin: {sorted(missing)}"
+
+
+def test_release_note_records_runtime_lineage(workflow: dict) -> None:
+    # FT-08：Release note 环境段——滚动 runner 基线的兜底凭证，逐 run 如实
+    # 记录当日 runner 镜像 / Python / 依赖版本，跨次训练行为差异可归因。
+    job1 = workflow["jobs"][JOB1_NAME]
+    note = next(s for s in job1["steps"] if s.get("name") == NOTE_STEP_NAME)
+    run = note["run"]
+    # runner 镜像当日版本（ImageOS/ImageVersion 为 runner-images 预置环境变量，
+    # 缺失时显性记录 unknown 而非静默丢失）
+    assert 'os.environ.get("ImageOS"' in run
+    assert 'os.environ.get("ImageVersion"' in run
+    assert "**训练环境**" in run and "ImageVersion=" in run
+    # Python 实际版本（platform.python_version() 等价 python --version 输出）
+    assert "platform.python_version()" in run
+    assert "**Python**:" in run
+    # 显式 pin 依赖版本动态读取已安装 metadata（与 pip pin 单一事实源，防双份硬编码漂移）
+    assert "importlib.metadata" in run
+    assert "**显式 pin 训练依赖**:" in run
+    # fail-fast：metadata 读取失败时拒绝发布（lineage 不完整的 note 不上 Release）
+    assert "PackageNotFoundError" in run
+    assert "拒绝发布" in run
+
+
+def test_release_note_records_full_dependency_inventory(workflow: dict) -> None:
+    # FT-08 对抗性检视补强：只记录 6 个显式 pin 会留下「传递依赖静默漂移」盲区
+    # （tokenizers / safetensors / huggingface-hub / gguf-py 等随 PyPI 解析与本地路径
+    # 安装变化，无可归因记录）。清单须取自已安装环境实况
+    # （importlib.metadata.distributions()，不维护第二份手写列表），排序后拼接为规范
+    # 文本并给出 SHA256 摘要，供跨次训练直接比对。
+    job1 = workflow["jobs"][JOB1_NAME]
+    run = next(s for s in job1["steps"] if s.get("name") == NOTE_STEP_NAME)["run"]
+    assert "from importlib.metadata import distributions" in run
+    assert "for dist in distributions():" in run
+    assert "env_inventory.sort(key=str.lower)" in run
+    assert "hashlib.sha256" in run
+    # note 文本含：条目数 + 摘要 + 可展开的全量清单（全部依赖版本写入 lineage）
+    assert "**完整依赖清单**" in run
+    assert "len(env_inventory)" in run
+    assert "env_inventory_digest" in run
+    assert "env_inventory_text" in run
+    assert "展开完整依赖清单" in run
+
+
+def test_release_note_lineage_packages_match_pinned_dependencies(workflow: dict) -> None:
+    # FT-08：note 生成脚本读取的包列表与 pip install pin 的包集合一致——
+    # 拦截「pin 了但 note 没读 / note 读了但没 pin」的错配漂移。
+    job1 = workflow["jobs"][JOB1_NAME]
+    install = next(s for s in job1["steps"] if s.get("name") == INSTALL_STEP_NAME)
+    specs = _extract_pip_install_specs(install["run"])
+    pinned_names = {spec.split("==", 1)[0] for spec in specs}
+    note = next(s for s in job1["steps"] if s.get("name") == NOTE_STEP_NAME)
+    match = re.search(r"lineage_packages\s*=\s*\(([^)]*)\)", note["run"], re.DOTALL)
+    assert match, "note 生成脚本缺少 lineage_packages 定义"
+    note_names = set(re.findall(r'"([^"]+)"', match.group(1)))
+    assert note_names, "lineage_packages 元组为空"
+    assert note_names == pinned_names, (
+        f"note lineage 包列表与 pip pin 集合错配: 仅 note 有 {sorted(note_names - pinned_names)}, "
+        f"仅 pin 有 {sorted(pinned_names - note_names)}"
+    )
+
+
+def test_release_note_embedded_python_compiles(workflow: dict) -> None:
+    # 防手误：note 生成 heredoc 内嵌 Python 代码必须可编译（yaml.safe_load 仅
+    # 验证 YAML 结构，shell heredoc 内的 Python 语法错误无其他门禁拦截）。
+    job1 = workflow["jobs"][JOB1_NAME]
+    note = next(s for s in job1["steps"] if s.get("name") == NOTE_STEP_NAME)
+    run = note["run"]
+    start = run.index("python - <<'EOF'")
+    start = run.index("\n", start) + 1
+    end = run.index("\nEOF", start)
+    embedded = run[start:end]
+    compile(embedded, "finbert-train.yml:Generate release note heredoc", "exec")
+
+
+def test_runner_baseline_is_ubuntu_latest(workflow: dict) -> None:
+    # FT-08 基线决策：保持滚动 runner ubuntu-latest（固定 container 的权衡与
+    # note 环境段兜底见 workflow 文件头注释）；改固定 container 须有意变更本断言。
+    for job_name in (JOB1_NAME, JOB2_NAME):
+        assert workflow["jobs"][job_name]["runs-on"] == "ubuntu-latest"
+
+
+def test_llama_cpp_checkout_is_commit_anchored(workflow: dict) -> None:
+    # FT-08：llama.cpp 工具链必须 checkout 不可变 commit（tag v0.3.0 指向的提交），
+    # 而非可变 tag——tag 被上游移动/重打时，仅记录 tag 无法定位实际拉取的提交。
+    job1 = workflow["jobs"][JOB1_NAME]
+    checkout = next(s for s in job1["steps"] if s.get("name") == LLAMA_CPP_CHECKOUT_STEP)
+    with_block = checkout["with"]
+    assert with_block["repository"] == "ggml-org/llama.cpp"
+    ref = with_block["ref"]
+    assert re.fullmatch(r"[0-9a-f]{40}", ref), f"llama.cpp ref 非 40 位 commit 锚定: {ref!r}"
+    assert ref == LLAMA_CPP_COMMIT
+
+
+def test_release_note_records_anchored_llama_cpp_commit(workflow: dict) -> None:
+    # FT-08：note lineage 的 llama.cpp commit 必须逐字等于 checkout 锚定的 ref
+    # （单一事实源，拦截「ref 改了但 note 未同步」的双份记录漂移）；同时保留 tag
+    # 别名，便于与上游 release note 对照。
+    job1 = workflow["jobs"][JOB1_NAME]
+    checkout = next(s for s in job1["steps"] if s.get("name") == LLAMA_CPP_CHECKOUT_STEP)
+    note = next(s for s in job1["steps"] if s.get("name") == NOTE_STEP_NAME)["run"]
+    assert "**llama.cpp 工具链**" in note
+    assert checkout["with"]["ref"] in note, "Release note lineage 未记录实际锚定的 llama.cpp commit"
+    assert LLAMA_CPP_COMMIT in note
+    assert "v0.3.0" in note

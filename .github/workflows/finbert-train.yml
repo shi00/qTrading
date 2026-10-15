@@ -4,7 +4,7 @@
 # （torch CPU / transformers，仅离线训练使用，不进 pyproject 运行时依赖）→
 # 下载基座模型（HF Hub 固定 revision）+ 语料 Release（SHA256 + 行数守恒断言）→
 # 固定 seed 训练（scripts/train_finbert.py）→ 拆头导出 GGUF
-# （scripts/export_finbert_gguf.py，llama.cpp 工具链 tag v0.3.0，
+# （scripts/export_finbert_gguf.py，llama.cpp 工具链 v0.3.0 @ c1d0e7a0——tag 别名见下，
 # f16 即发布产物——Q8_0 量化因概率差判据必 FAIL 已于 2026-10-14 移除，
 # 定因见 export 脚本 docstring）→ pre-tokenizer 登记补丁
 # （scripts/patch_llama_cpp_pre_registry.py，FinBERT2-base chkhsh 上游未登记）→
@@ -28,10 +28,25 @@
 #
 # llama.cpp 工具链获取路径（2026-10-14 查证固化）：llama.cpp v0.3.0 GitHub Release
 # 无 ubuntu 预编译包（assets 仅 nightly-tag.txt，GitHub API 实证），故走 fallback——
-# checkout tag v0.3.0（对齐结论与证据链见 scripts/export_finbert_gguf.py 模块
-# docstring）；convert_hf_to_gguf.py 为纯 Python 脚本直接使用 checkout 内文件，
-# 其 gguf 依赖以同源 llama.cpp/gguf-py 安装，避免 PyPI 版本漂移。f16 交付后
-# 不再需要 llama-quantize 二进制（无 cmake 编译步骤）。
+# checkout commit c1d0e7a004015f23bc0233470b747b596f29b264（tag v0.3.0 指向的提交，
+# 对齐结论与证据链见 scripts/export_finbert_gguf.py 模块 docstring）；
+# convert_hf_to_gguf.py 为纯 Python 脚本直接使用 checkout 内文件，其 gguf 依赖以
+# 同源 llama.cpp/gguf-py 安装，避免 PyPI 版本漂移。f16 交付后不再需要
+# llama-quantize 二进制（无 cmake 编译步骤）。
+#
+# 依赖与环境基线（FT-08）：训练依赖全部精确 pin（==，含 accelerate/numpy/
+# sentencepiece，考证依据见安装步骤注释），范围约束与 bare 包名会随 PyPI 漂移、
+# 引入训练数值行为差异。PyPI 不允许同版本重传，"name==version" 本身即不可变锚点，
+# 故不另建 requirements lock / wheel hash 清单——训练依赖不进 pyproject，独立 lock
+# 会与 workflow 双份维护并引入两份 pin 漂移（升级须整组重训验证后同步更新，见安装
+# 步骤注释）。工具链同理：由 tag 改为 commit 锚定（tag 可被上游移动/重打，commit
+# 不可变），实际 commit 写入 Release note lineage。runner 保持滚动基线 ubuntu-latest
+# （固定 container 需自维护镜像并改造 gh CLI 依赖，收益仅锁 glibc 等系统库——torch
+# CPU wheel 静态内嵌数学内核，不链接系统 BLAS，数值影响路径几乎不存在，权衡后不采用），
+# 代价由 Release note 环境段兜底：ImageOS/ImageVersion（当日 runner 镜像，
+# runner-images 预置）/ Python / 显式 pin 依赖版本 / 已安装环境全量依赖清单 + SHA256
+# 摘要（覆盖显式 pin 之外的传递依赖）逐 run 如实记录，跨次训练行为差异可归因
+#（见 Generate release note）。
 
 name: FinBERT GGUF Train Pipeline
 
@@ -113,8 +128,19 @@ jobs:
       # 训练依赖（ADR-0012 修订经 ADR-0013 承载：不进 pyproject，仅 workflow 临时安装）。
       # torch 用 CPU wheel（--index-url download.pytorch.org/whl/cpu）避免 CUDA 巨包；
       # 版本考证：transformers==5.19.0 为离线训练实物版本（scripts/train_finbert.py
-      # docstring），其 requires torch>=2.5，取 CPU index 最新稳定 2.9.1；
+      # docstring），其 requires torch>=2.5，torch 取 CPU index 版本 2.9.1（2026-10 锁定；
+      # 该索引此后已发布更高版本，"取最新"不再是可维持的表述，升级须整组重训验证后
+      # 同步更新 pin 与注释）；
       # Trainer 依赖 accelerate（transformers 的 extra，不随主包装），须显式安装。
+      # 全 pin（FT-08）：accelerate/numpy/sentencepiece 以 CI 实证组合锚定
+      # （finbert-train 成功 run 38530387711 于 2026-10-14 实际安装版本，训练+
+      # 导出+Gate 全链路通过），PyPI 元数据交叉验证：transformers 5.19.0 要求
+      # accelerate>=1.1.0 / sentencepiece!=0.1.92,>=0.1.91 / numpy>=1.17，
+      # accelerate 1.15.0 要求 torch>=2.0.0 / numpy>=1.17，torch 2.9.1 不设
+      # numpy 版本上限（torch 2.x 原生支持 numpy 2.x）——均满足。范围约束
+      # （如 accelerate>=1.1.0）与 bare 包名会随 PyPI 新版本漂移，引入训练数值
+      # 行为差异（聚合精度/默认参数），使跨次训练 lineage 比较失真，故全部
+      # 精确 pin；升级时须整组重训验证后同步更新 pin 与注释。
       - name: Install training / export / gate dependencies
         run: |
           set -euo pipefail
@@ -122,17 +148,21 @@ jobs:
             --index-url https://download.pytorch.org/whl/cpu
           pip install --no-cache-dir \
             "transformers==5.19.0" \
-            "accelerate>=1.1.0" \
-            numpy sentencepiece \
+            "accelerate==1.15.0" \
+            "numpy==2.5.4" \
+            "sentencepiece==0.2.2" \
             "llama-cpp-python==0.3.35"
 
-      # llama.cpp 工具链：checkout tag v0.3.0（对齐 llama-cpp-python 0.3.35 vendor，
-      # 查证证据链见 scripts/export_finbert_gguf.py docstring）。
+      # llama.cpp 工具链：checkout commit（tag v0.3.0 指向的提交，2026-08-25）——tag 可被
+      # 上游移动/重打，commit 不可变（FT-08 由 tag 改为 commit 锚定；该 sha 同步写入
+      # Release note lineage，防「记录 tag、实际拉取被移动后的提交」静默漂移）。对齐
+      # llama-cpp-python 0.3.35 vendor，查证证据链见 scripts/export_finbert_gguf.py docstring。
       - name: Checkout llama.cpp v0.3.0
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ggml-org/llama.cpp
-          ref: v0.3.0
+          # v0.3.0 指向的 commit（不可变锚点，sha 与 note lineage 经静态断言绑定）
+          ref: c1d0e7a004015f23bc0233470b747b596f29b264
           path: llama.cpp
           persist-credentials: false
 
@@ -253,6 +283,11 @@ jobs:
 
       # Release note：模型 ↔ 语料 lineage 溯源（corpus_tag + 语料 SHA256）。
       # 生成逻辑全用 Python 变量（不用 Actions 表达式嵌入字符串，避免 ${{ }} 误展开）。
+      # 环境段（FT-08）：训练环境（runner 镜像 ImageOS/ImageVersion）/ Python /
+      # 依赖版本（显式 pin 取自已安装 metadata，与 pip pin 单一事实源；另附已安装
+      # 环境全量清单 + SHA256 摘要，覆盖显式 pin 之外的传递依赖）/ llama.cpp 工具链
+      # commit（与 checkout ref 单一事实源，静态断言绑定）逐 run 如实记录，跨次训练
+      # 行为差异可归因——滚动 runner（ubuntu-latest）基线决策见文件头注释与 PR 说明。
       - name: Generate release note
         env:
           MODEL_VERSION: ${{ steps.validate_inputs.outputs.model_version }}
@@ -260,14 +295,55 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'EOF'
+          import hashlib
           import json
           import os
+          import platform
+          from importlib.metadata import PackageNotFoundError
+          from importlib.metadata import distributions
+          from importlib.metadata import version as pkg_version
           from pathlib import Path
 
           model_version = os.environ["MODEL_VERSION"]
           corpus_tag = os.environ["CORPUS_TAG"]
           repo_full = os.environ["GITHUB_REPOSITORY"]
           run_url = f"{os.environ['GITHUB_SERVER_URL']}/{repo_full}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+
+          # FT-08 环境 lineage（可复现性）：依赖版本自已安装环境动态读取（与上方
+          # pip install pin 单一事实源，防双份硬编码漂移）；读不到即 fail-fast——
+          # 缺版本号的 note 不应发布（训练 1~3h 后失败可接受，胜过 lineage 失真）。
+          lineage_packages = (
+              "torch",
+              "transformers",
+              "accelerate",
+              "numpy",
+              "sentencepiece",
+              "llama-cpp-python",
+          )
+          try:
+              dep_versions = " / ".join(f"{name} {pkg_version(name)}" for name in lineage_packages)
+          except PackageNotFoundError as exc:
+              raise SystemExit(f"训练依赖 metadata 读取失败，release note lineage 不完整，拒绝发布: {exc}")
+          # 完整依赖清单（FT-08）：显式 pin 之外的传递依赖（tokenizers / safetensors /
+          # huggingface-hub / gguf-py 等）随 PyPI 解析与本地路径安装可能变化，仅记录
+          # 显式 pin 会留下无归因依据的静默漂移窗口。清单直接取自已安装环境实况
+          # （importlib.metadata.distributions()，非第二份手写列表），排序后拼接为
+          # 规范文本并给出 SHA256 摘要——两次训练环境是否一致可据此直接比对。
+          env_inventory = []
+          for dist in distributions():
+              dist_name = dist.metadata["Name"]
+              if dist_name and dist.version:
+                  env_inventory.append(f"{dist_name}=={dist.version}")
+          env_inventory.sort(key=str.lower)
+          env_inventory_text = "\n".join(env_inventory)
+          env_inventory_digest = hashlib.sha256(env_inventory_text.encode("utf-8")).hexdigest()
+          # runner 镜像预置变量（actions/runner-images images/ubuntu/scripts/build/
+          # configure-environment.sh 写入 etc-environment）；缺失时显性记录 unknown，
+          # 不阻断训练——跨次训练行为差异可据此归因到当日 runner 镜像。
+          image_os = os.environ.get("ImageOS", "unknown")
+          image_version = os.environ.get("ImageVersion", "unknown")
+          # 等价 python --version 输出（如 3.13.9），记录当日 setup-python 实际解析版本。
+          python_version = platform.python_version()
 
           corpus_sums = {}
           for line in Path("data/corpus/SHA256SUMS.txt").read_text(encoding="utf-8").splitlines():
@@ -292,8 +368,21 @@ jobs:
               "- **行数守恒**: 8813 + 1102 + 1102 = 11017 ✅\n"
               "- **基座模型**: valuesimplex-ai-lab/FinBERT2-base @ 804a488abcece861e9241d55e9d6fd1f867ebee1（HF Hub，Apache-2.0）\n"
               f"- **训练 seed**: {summary['seed']}（scripts/train_finbert.py DEFAULT_SEED）\n"
-              "- **llama.cpp 工具链**: tag v0.3.0（对齐 llama-cpp-python 0.3.35，见 scripts/export_finbert_gguf.py docstring）\n"
-              "- **训练环境**: GitHub Actions ubuntu-latest CPU（torch 2.9.1+cpu / transformers 5.19.0）\n"
+              "- **llama.cpp 工具链**: v0.3.0 @ c1d0e7a004015f23bc0233470b747b596f29b264"
+              "（tag v0.3.0 指向的 commit，已 commit 锚定；对齐 llama-cpp-python 0.3.35，"
+              "见 scripts/export_finbert_gguf.py docstring）\n"
+              f"- **训练环境**: GitHub Actions ubuntu-latest CPU（ImageOS={image_os}, ImageVersion={image_version}）\n"
+              f"- **Python**: {python_version}\n"
+              f"- **显式 pin 训练依赖**: {dep_versions}\n"
+              f"- **完整依赖清单**: {len(env_inventory)} 项，SHA256 `{env_inventory_digest}`"
+              "（已安装环境全量，含传递依赖；两次训练该摘要不一致即环境漂移）\n"
+              "<details><summary>展开完整依赖清单</summary>\n"
+              "\n"
+              "```\n"
+              f"{env_inventory_text}\n"
+              "```\n"
+              "\n"
+              "</details>\n"
               f"- **dev macro-F1**: {summary.get('best_dev_macro_f1')} / **test macro-F1**: {summary.get('test_macro_f1')}\n"
               "\n"
               "## 产物\n"
