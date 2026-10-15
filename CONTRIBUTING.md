@@ -743,6 +743,7 @@ except Exception as e:
 - [0011-litellm-router-failover.md](./docs/adr/0011-litellm-router-failover.md) — 手写 failover 循环迁移至 litellm.Router（L4，含双层审计与错误收敛语义）
 - [0012-news-sentiment-inference-paradigm.md](./docs/adr/0012-news-sentiment-inference-paradigm.md) — 新闻情绪打分的本地推理范式（CLS embedding + numpy 分类头，不用 RANK 模式；独立常驻子进程；仅展示边界）
 - [0013-runtime-selection-final-gguf.md](./docs/adr/0013-runtime-selection-final-gguf.md) — 新闻情绪打分推理运行时选型终局（ORT / OpenVINO 双 PoC FAIL，保持 GGUF；修订 ADR-0012 训练依赖条款为仅限 finbert-train.yml job 内安装）
+- [0014-unified-model-scheduling.md](./docs/adr/0014-unified-model-scheduling.md) — 统一模型管理的场景调度契约（ScenarioExecutor 独占候选调度；替代 ADR-0011 Router 职责的批准范围待用户裁定，Status 为 Proposed）
 
 ### docs/governance/ — 治理类机器可读文件
 
