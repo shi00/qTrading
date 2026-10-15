@@ -32,6 +32,14 @@
 # docstring）；convert_hf_to_gguf.py 为纯 Python 脚本直接使用 checkout 内文件，
 # 其 gguf 依赖以同源 llama.cpp/gguf-py 安装，避免 PyPI 版本漂移。f16 交付后
 # 不再需要 llama-quantize 二进制（无 cmake 编译步骤）。
+#
+# 依赖与环境基线（FT-08）：训练依赖全部精确 pin（==，含 accelerate/numpy/
+# sentencepiece，考证依据见安装步骤注释），范围约束与 bare 包名会随 PyPI 漂移、
+# 引入训练数值行为差异；runner 保持滚动基线 ubuntu-latest（固定 container 需
+# 自维护镜像并改造 gh CLI 依赖，收益仅锁 glibc 等系统库——torch CPU wheel 静态
+# 内嵌数学内核，不链接系统 BLAS，数值影响路径几乎不存在，权衡后不采用），代价
+# 由 Release note 环境段兜底：ImageOS/ImageVersion（当日 runner 镜像）与 Python
+# / 依赖版本逐 run 如实记录，跨次训练行为差异可归因（见 Generate release note）。
 
 name: FinBERT GGUF Train Pipeline
 
@@ -115,6 +123,15 @@ jobs:
       # 版本考证：transformers==5.19.0 为离线训练实物版本（scripts/train_finbert.py
       # docstring），其 requires torch>=2.5，取 CPU index 最新稳定 2.9.1；
       # Trainer 依赖 accelerate（transformers 的 extra，不随主包装），须显式安装。
+      # 全 pin（FT-08）：accelerate/numpy/sentencepiece 以 CI 实证组合锚定
+      # （finbert-train 成功 run 38530387711 于 2026-10-14 实际安装版本，训练+
+      # 导出+Gate 全链路通过），PyPI 元数据交叉验证：transformers 5.19.0 要求
+      # accelerate>=1.1.0 / sentencepiece!=0.1.92,>=0.1.91 / numpy>=1.17，
+      # accelerate 1.15.0 要求 torch>=2.0.0 / numpy>=1.17，torch 2.9.1 不设
+      # numpy 版本上限（torch 2.x 原生支持 numpy 2.x）——均满足。范围约束
+      # （如 accelerate>=1.1.0）与 bare 包名会随 PyPI 新版本漂移，引入训练数值
+      # 行为差异（聚合精度/默认参数），使跨次训练 lineage 比较失真，故全部
+      # 精确 pin；升级时须整组重训验证后同步更新 pin 与注释。
       - name: Install training / export / gate dependencies
         run: |
           set -euo pipefail
@@ -122,8 +139,9 @@ jobs:
             --index-url https://download.pytorch.org/whl/cpu
           pip install --no-cache-dir \
             "transformers==5.19.0" \
-            "accelerate>=1.1.0" \
-            numpy sentencepiece \
+            "accelerate==1.15.0" \
+            "numpy==2.5.4" \
+            "sentencepiece==0.2.2" \
             "llama-cpp-python==0.3.35"
 
       # llama.cpp 工具链：checkout tag v0.3.0（对齐 llama-cpp-python 0.3.35 vendor，
@@ -253,6 +271,9 @@ jobs:
 
       # Release note：模型 ↔ 语料 lineage 溯源（corpus_tag + 语料 SHA256）。
       # 生成逻辑全用 Python 变量（不用 Actions 表达式嵌入字符串，避免 ${{ }} 误展开）。
+      # 环境段（FT-08）：训练环境（runner 镜像 ImageOS/ImageVersion）/ Python /
+      # 依赖版本（动态读取已安装 metadata）逐 run 如实记录，跨次训练行为差异
+      # 可归因——滚动 runner（ubuntu-latest）基线决策见文件头注释与 PR 说明。
       - name: Generate release note
         env:
           MODEL_VERSION: ${{ steps.validate_inputs.outputs.model_version }}
@@ -262,12 +283,38 @@ jobs:
           python - <<'EOF'
           import json
           import os
+          import platform
+          from importlib.metadata import PackageNotFoundError
+          from importlib.metadata import version as pkg_version
           from pathlib import Path
 
           model_version = os.environ["MODEL_VERSION"]
           corpus_tag = os.environ["CORPUS_TAG"]
           repo_full = os.environ["GITHUB_REPOSITORY"]
           run_url = f"{os.environ['GITHUB_SERVER_URL']}/{repo_full}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+
+          # FT-08 环境 lineage（可复现性）：依赖版本自已安装环境动态读取（与上方
+          # pip install pin 单一事实源，防双份硬编码漂移）；读不到即 fail-fast——
+          # 缺版本号的 note 不应发布（训练 1~3h 后失败可接受，胜过 lineage 失真）。
+          lineage_packages = (
+              "torch",
+              "transformers",
+              "accelerate",
+              "numpy",
+              "sentencepiece",
+              "llama-cpp-python",
+          )
+          try:
+              dep_versions = " / ".join(f"{name} {pkg_version(name)}" for name in lineage_packages)
+          except PackageNotFoundError as exc:
+              raise SystemExit(f"训练依赖 metadata 读取失败，release note lineage 不完整，拒绝发布: {exc}")
+          # runner 镜像预置变量（actions/runner-images images/ubuntu/scripts/build/
+          # configure-environment.sh 写入 etc-environment）；缺失时显性记录 unknown，
+          # 不阻断训练——跨次训练行为差异可据此归因到当日 runner 镜像。
+          image_os = os.environ.get("ImageOS", "unknown")
+          image_version = os.environ.get("ImageVersion", "unknown")
+          # 等价 python --version 输出（如 3.13.9），记录当日 setup-python 实际解析版本。
+          python_version = platform.python_version()
 
           corpus_sums = {}
           for line in Path("data/corpus/SHA256SUMS.txt").read_text(encoding="utf-8").splitlines():
@@ -293,7 +340,9 @@ jobs:
               "- **基座模型**: valuesimplex-ai-lab/FinBERT2-base @ 804a488abcece861e9241d55e9d6fd1f867ebee1（HF Hub，Apache-2.0）\n"
               f"- **训练 seed**: {summary['seed']}（scripts/train_finbert.py DEFAULT_SEED）\n"
               "- **llama.cpp 工具链**: tag v0.3.0（对齐 llama-cpp-python 0.3.35，见 scripts/export_finbert_gguf.py docstring）\n"
-              "- **训练环境**: GitHub Actions ubuntu-latest CPU（torch 2.9.1+cpu / transformers 5.19.0）\n"
+              f"- **训练环境**: GitHub Actions ubuntu-latest CPU（ImageOS={image_os}, ImageVersion={image_version}）\n"
+              f"- **Python**: {python_version}\n"
+              f"- **依赖版本**: {dep_versions}\n"
               f"- **dev macro-F1**: {summary.get('best_dev_macro_f1')} / **test macro-F1**: {summary.get('test_macro_f1')}\n"
               "\n"
               "## 产物\n"
