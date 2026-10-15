@@ -4,7 +4,7 @@
 # （torch CPU / transformers，仅离线训练使用，不进 pyproject 运行时依赖）→
 # 下载基座模型（HF Hub 固定 revision）+ 语料 Release（SHA256 + 行数守恒断言）→
 # 固定 seed 训练（scripts/train_finbert.py）→ 拆头导出 GGUF
-# （scripts/export_finbert_gguf.py，llama.cpp 工具链 tag v0.3.0，
+# （scripts/export_finbert_gguf.py，llama.cpp 工具链 v0.3.0 @ c1d0e7a0——tag 别名见下，
 # f16 即发布产物——Q8_0 量化因概率差判据必 FAIL 已于 2026-10-14 移除，
 # 定因见 export 脚本 docstring）→ pre-tokenizer 登记补丁
 # （scripts/patch_llama_cpp_pre_registry.py，FinBERT2-base chkhsh 上游未登记）→
