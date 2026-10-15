@@ -2,7 +2,8 @@
 #
 # 产线链路：workflow_dispatch（model_version + corpus_tag）→ 临时安装训练依赖
 # （torch CPU / transformers，仅离线训练使用，不进 pyproject 运行时依赖）→
-# 下载基座模型（HF Hub 固定 revision）+ 语料 Release（SHA256 + 行数守恒断言）→
+# 下载基座模型（HF Hub 固定 revision）+ 语料 Release（SHA256 全量校验 + 语料 manifest
+# 校验——行数/digest 期望值取自 manifest，缺失/不兼容即报错，FT-07）→
 # 固定 seed 训练（scripts/train_finbert.py）→ 拆头导出 GGUF
 # （scripts/export_finbert_gguf.py，llama.cpp 工具链 v0.3.0 @ c1d0e7a0——tag 别名见下，
 # f16 即发布产物——Q8_0 量化因概率差判据必 FAIL 已于 2026-10-14 移除，
@@ -205,9 +206,15 @@ jobs:
           print("基座模型已下载至 ai_models/FinBERT2-base")
           EOF
 
-      # 语料：gh release download + SHA256 全量校验 + 行数守恒断言
-      #（8813 + 1102 + 1102 = 11017，与 corpus-v1 Release note 登记行数一致；
-      # 非空行计数与 scripts/train_finbert.load_split_file 的空行跳过口径对齐）。
+      # 语料：gh release download + SHA256 全量校验 + manifest 校验（FT-07）。
+      # manifest（corpus_manifest.json）为行数 / digest 期望值的唯一权威来源，替代原先固定在
+      # 本 workflow 内的硬编码行数期望值，使任意带 manifest 的 corpus tag 可用（多版本共存）。
+      # manifest 缺失或
+      # 不兼容时脚本清晰报错：未登记 tag 无 manifest 即 FAIL（不静默回退硬编码）。legacy
+      # 兜底（corpus-v1 已发布、无 manifest）显式登记于 scripts/corpus_manifest.py 的
+      # LEGACY_CORPUS_REGISTRY，走该路径时报告与 Release note 显式声明「未做 manifest 校验」
+      #（R21：不得把未校验伪装成已校验）。行数口径 = 非空行，与
+      # scripts/train_finbert.load_split_file 的空行跳过对齐。
       - name: Download training corpus (Release) and verify integrity
         env:
           CORPUS_TAG: ${{ steps.validate_inputs.outputs.corpus_tag }}
@@ -215,26 +222,11 @@ jobs:
           set -euo pipefail
           gh release download "$CORPUS_TAG" --repo "$GITHUB_REPOSITORY" \
             --dir data/corpus --clobber
-          cd data/corpus
-          sha256sum -c SHA256SUMS.txt
-          python - <<'EOF'
-          from pathlib import Path
-
-          expected = {
-              "split_train.jsonl": 8813,
-              "split_val.jsonl": 1102,
-              "split_test.jsonl": 1102,
-          }
-          total = 0
-          for name, rows in expected.items():
-              actual = sum(1 for line in Path(name).read_text(encoding="utf-8").splitlines() if line.strip())
-              if actual != rows:
-                  raise SystemExit(f"语料行数守恒断言失败: {name} 实际 {actual} 行 != 期望 {rows} 行")
-              total += actual
-          if total != 11017:
-              raise SystemExit(f"语料总行数守恒断言失败: {total} != 11017")
-          print(f"语料行数守恒断言通过: {' + '.join(str(v) for v in expected.values())} = {total}")
-          EOF
+          (cd data/corpus && sha256sum -c SHA256SUMS.txt)
+          python scripts/corpus_manifest.py verify \
+            --corpus-dir data/corpus \
+            --corpus-tag "$CORPUS_TAG" \
+            --report stage_b_out/corpus_manifest_report.json
 
       # 固定 seed 训练（reviews §5.2 超参固化在脚本内，seed=DEFAULT_SEED 20261008；
       # ubuntu runner 4 核 → --num-threads 4）。
@@ -372,16 +364,32 @@ jobs:
           # 等价 python --version 输出（如 3.13.9），记录当日 setup-python 实际解析版本。
           python_version = platform.python_version()
 
-          corpus_sums = {}
-          for line in Path("data/corpus/SHA256SUMS.txt").read_text(encoding="utf-8").splitlines():
-              digest, name = line.split(maxsplit=1)
-              corpus_sums[name] = digest
-
-          corpus_rows = {"split_train.jsonl": 8813, "split_val.jsonl": 1102, "split_test.jsonl": 1102}
+          # 语料 lineage（FT-07）：行数 / digest 取自语料 manifest 校验报告
+          # （stage_b_out/corpus_manifest_report.json，上一步产出），为唯一事实源——note 不再
+          # 另算行数或另读 SHA256SUMS.txt（避免双份事实源漂移）。缺失即 fail-fast，不发布
+          # lineage 不完整的 note。legacy 语料（无 manifest）在 note 中显式声明「未做 manifest
+          # 校验」（R21：不得把未校验伪装成已校验）。
+          corpus_report_path = Path("stage_b_out/corpus_manifest_report.json")
+          if not corpus_report_path.is_file():
+              raise SystemExit("corpus_manifest_report.json 缺失，语料 manifest lineage 不完整，拒绝发布")
+          corpus_report = json.loads(corpus_report_path.read_text(encoding="utf-8"))
+          corpus_splits = corpus_report["splits"]
           corpus_lines = "\n".join(
-              f"  - `{name}`: `{corpus_sums[name]}`（{rows} 行）"
-              for name, rows in corpus_rows.items()
+              f"  - `{name}`: `{item['actual_sha256']}`（{item['actual_rows']} 行）"
+              for name, item in corpus_splits.items()
           )
+          corpus_rows_expr = " + ".join(str(item["actual_rows"]) for item in corpus_splits.values())
+          corpus_total = corpus_report["total_rows"]
+          if corpus_report["manifest_state"] == "manifest":
+              manifest_lineage = (
+                  f"已按 manifest 声明校验行数/digest（schema `{corpus_report['manifest_schema']}`，"
+                  f"corpus_version `{corpus_report['manifest_version']}`，corpus_tag `{corpus_report['corpus_tag']}`）"
+              )
+          else:
+              manifest_lineage = (
+                  "⚠️ 该语料 **无 manifest**，采用显式登记值（legacy registry），**未做 manifest 校验**；"
+                  "新增语料版本必须随附 corpus_manifest.json"
+              )
 
           summary = json.loads(Path("stage_b_out/best/train_summary.json").read_text(encoding="utf-8"))
 
@@ -426,9 +434,10 @@ jobs:
               "\n"
               f"- **model_version**: {model_version}\n"
               f"- **训练语料**: `{corpus_tag}`（[Release](https://github.com/{repo_full}/releases/tag/{corpus_tag})，模型↔语料 lineage 溯源）\n"
-              "- **语料 SHA256**（corpus Release 内 SHA256SUMS.txt）:\n"
+              "- **语料 SHA256**（corpus Release 内 SHA256SUMS.txt / manifest 声明）:\n"
               f"{corpus_lines}\n"
-              "- **行数守恒**: 8813 + 1102 + 1102 = 11017 ✅\n"
+              f"- **行数守恒**: {corpus_rows_expr} = {corpus_total} ✅\n"
+              f"- **语料 manifest（FT-07）**: {manifest_lineage}\n"
               "- **基座模型**: valuesimplex-ai-lab/FinBERT2-base @ 804a488abcece861e9241d55e9d6fd1f867ebee1（HF Hub，Apache-2.0）\n"
               f"- **训练 seed**: {summary['seed']}（scripts/train_finbert.py DEFAULT_SEED）\n"
               "- **llama.cpp 工具链**: v0.3.0 @ c1d0e7a004015f23bc0233470b747b596f29b264"
@@ -508,6 +517,7 @@ jobs:
             stage_b_out/finbert2-news-f16.gguf
             stage_b_out/finbert2-news-f16.verify.json
             stage_b_out/effect_gate.json
+            stage_b_out/corpus_manifest_report.json
           if-no-files-found: warn
           retention-days: 7
 

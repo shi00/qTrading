@@ -781,3 +781,107 @@ def test_resolve_anchor_missing_metrics_in_note_is_fail_closed(monkeypatch, effe
     anchor = module.resolve_anchor("owner/repo")
     assert anchor.state == "unreadable"
     assert anchor.tag == "finbert-gguf-v0.1.0"
+
+
+# --------------------------------------------------------------------------- #
+# FT-07：corpus 多版本 manifest 校验（行数/digest 期望值取自语料 manifest）
+# --------------------------------------------------------------------------- #
+CORPUS_STEP_NAME = "Download training corpus (Release) and verify integrity"
+CORPUS_MANIFEST_SCRIPT = REPO_ROOT / "scripts" / "corpus_manifest.py"
+CORPUS_MANIFEST_REPORT = "stage_b_out/corpus_manifest_report.json"
+# 原硬编码语料行数（8813 + 1102 + 1102 = 11017，corpus-v1 口径）。FT-07 后这些期望值须取自
+# 语料 manifest——workflow 全文（含注释）不得再出现，否则换用不同样本量的语料版本即被旧断言
+# 拒绝（正是本问题根因）。
+FORBIDDEN_HARDCODED_CORPUS_COUNTS = ("8813", "11017", "1102")
+
+
+def _corpus_step(workflow: dict) -> dict:
+    return next(s for s in workflow["jobs"][JOB1_NAME]["steps"] if s.get("name") == CORPUS_STEP_NAME)
+
+
+def test_corpus_step_uses_manifest_verifier(workflow: dict) -> None:
+    # 语料校验须交给 scripts/corpus_manifest.py（读 manifest 期望值），而非 workflow 内联断言。
+    run = _corpus_step(workflow)["run"]
+    assert 'gh release download "$CORPUS_TAG"' in run
+    assert "sha256sum -c SHA256SUMS.txt" in run
+    assert "scripts/corpus_manifest.py verify" in run
+    assert "--corpus-dir data/corpus" in run
+    assert '--corpus-tag "$CORPUS_TAG"' in run
+    assert CORPUS_MANIFEST_REPORT in run
+
+
+def test_corpus_step_no_hardcoded_counts_anywhere_in_workflow(workflow: dict) -> None:
+    # 反根因：workflow 全文（含注释）不得再出现硬编码语料行数（与 FT-02 锚点同款口径）。
+    workflow_text = WORKFLOW_PATH.read_text(encoding="utf-8")
+    for forbidden in FORBIDDEN_HARDCODED_CORPUS_COUNTS:
+        assert not re.search(rf"\b{re.escape(forbidden)}\b", workflow_text), (
+            f"workflow 仍硬编码了语料行数 {forbidden}——期望值须取自语料 manifest"
+        )
+
+
+def test_corpus_step_cannot_silently_swallow_failure(workflow: dict) -> None:
+    # 绕过面：continue-on-error 吞失败 / if 条件跳过（校验未跑也算通过）。
+    step = _corpus_step(workflow)
+    assert "continue-on-error" not in step
+    assert "if" not in step
+    run = step["run"]
+    assert "set -euo pipefail" in run
+    # 上下文经 env 注入（表达式注入面收敛）：run 内不得直接内插 ${{ ... }}
+    assert "${{" not in run
+    assert step["env"]["CORPUS_TAG"] == "${{ steps.validate_inputs.outputs.corpus_tag }}"
+
+
+def test_release_note_reads_corpus_manifest_report_and_declares_state(workflow: dict) -> None:
+    # lineage 单一事实源：note 的行数/digest 取自 manifest 校验报告，不再自行读 SHA256SUMS.txt；
+    # 缺失即 fail-fast；legacy 语料须显式声明「未做 manifest 校验」（R21）。
+    steps = workflow["jobs"][JOB1_NAME]["steps"]
+    names = [s.get("name") for s in steps]
+    # 语料校验须先于 note 生成（报告为 note 的行数/digest 唯一事实源）。
+    assert names.index(CORPUS_STEP_NAME) < names.index(NOTE_STEP_NAME)
+    run = next(s for s in steps if s.get("name") == NOTE_STEP_NAME)["run"]
+    assert CORPUS_MANIFEST_REPORT in run
+    assert "corpus_manifest_report.json 缺失" in run
+    assert "manifest_state" in run
+    assert "manifest_schema" in run
+    assert "manifest_version" in run
+    assert "未做 manifest 校验" in run
+    assert "新增语料版本必须随附 corpus_manifest.json" in run
+    # note 生成脚本不得再出现硬编码行数（唯一事实源为报告）。
+    for forbidden in FORBIDDEN_HARDCODED_CORPUS_COUNTS:
+        assert not re.search(rf"\b{re.escape(forbidden)}\b", run), f"note 硬编码了语料行数 {forbidden}"
+
+
+def test_corpus_manifest_report_uploaded_for_debug(workflow: dict) -> None:
+    # 校验报告须落入调试 artifact（失败时仍可归因：缺 manifest / 行数不符 / 漂移）。
+    debug = next(
+        s
+        for s in workflow["jobs"][JOB1_NAME]["steps"]
+        if s.get("name") == "Upload artifacts (incl. gate-failure debugging)"
+    )
+    paths = [p.strip() for p in debug["with"]["path"].strip().splitlines()]
+    assert CORPUS_MANIFEST_REPORT in paths
+
+
+def test_corpus_manifest_script_explicitly_labels_legacy_registry() -> None:
+    # legacy 兜底必须是显式登记 + 显式声明（不得静默回退硬编码，R21）。
+    script = CORPUS_MANIFEST_SCRIPT.read_text(encoding="utf-8")
+    assert "LEGACY_CORPUS_REGISTRY" in script
+    assert "未做 manifest 校验" in script
+    assert "拒绝静默沿用硬编码期望值" in script
+    # 未登记 tag 的修复指引必须给出（生成 manifest 的路径）。
+    assert "corpus_manifest.py build" in script
+    # dev 候选名防错位（train_finbert.DEV_CANDIDATES 首选 split_dev.jsonl）不得被删——
+    # 混入该文件时校验对象与训练输入错位。
+    assert "split_dev.jsonl" in script
+    # schema 不兼容须拒绝（不按未知语义静默校验）。
+    assert "schema 不兼容" in script
+
+
+def test_corpus_step_tag_whitelist_still_guards_dispatch_input(workflow: dict) -> None:
+    # corpus_tag 仍为 dispatch 输入，须经 Validate dispatch inputs 白名单校验后才进入下载/校验。
+    validate_name = "Validate dispatch inputs (model_version semver, anti tag-injection)"
+    steps = workflow["jobs"][JOB1_NAME]["steps"]
+    names = [s.get("name") for s in steps]
+    assert names.index(validate_name) < names.index(CORPUS_STEP_NAME)
+    validate = next(s for s in steps if s.get("name") == validate_name)
+    assert "corpus_tag" in validate["run"]
