@@ -1,9 +1,9 @@
 # ADR-0014: 统一模型管理的场景调度契约（ScenarioExecutor 独占候选调度）
 
-> Status: Proposed（替代 ADR-0011 Router 职责的批准范围待用户裁定，见 Decision §3；批准后本状态转 Accepted 并回写 ADR-0011 双向链接）
+> Status: Accepted（替代 ADR-0011 Router 职责的批准范围已经用户于 PR #1389 合并批准，见 Decision §3）
 > Date: 2026-10-14
 > Owner: 架构维护者
-> Supersedes: 拟替代 ADR-0011 中 litellm.Router 承担的候选选择 / 重试 / 冷却职责（替代范围批准前不生效）
+> Supersedes: ADR-0011（部分替代：litellm.Router 承担的候选选择 / 重试 / 冷却职责；保留语义见 Decision §3）
 
 ## Context
 
@@ -53,7 +53,7 @@ worker 生命周期）随 S1~S3 落各技术正本，不在本 ADR 展开。
 - 「无 SDK 隐藏重试 / 备用」以真实锁定库 + 受控 HTTP 端点断言实际出站次数证明（S2 DoD），
   不以全局 MagicMock 证明 SDK 行为。
 
-### 3. 替代 ADR-0011 的批准范围（待用户裁定）
+### 3. 替代 ADR-0011 的批准范围（已经用户批准）
 
 - **拟替代**：ADR-0011 Decision §1/§2 中 Router 承担的同供应商瞬时重试、失败冷却、健康
   路由与跨供应商候选切换。
@@ -63,8 +63,8 @@ worker 生命周期）随 S1~S3 落各技术正本，不在本 ADR 展开。
 - **不影响**：[ADR-0012](./0012-news-sentiment-inference-paradigm.md) 与
   [ADR-0013](./0013-runtime-selection-final-gguf.md) 的运行时决策（GGUF 路线、外部分词
   兜底、独立 worker、仅展示边界）保留不变，不标被替代、不重写历史证据。
-- **批准后动作**（由后续 commit 执行，本 ADR 落盘时不预设批准结果）：本 ADR Status 转
-  Accepted；ADR-0011 Status 更新为被替代（注明替代范围与保留语义）；两 ADR 双向链接互指。
+- **批准记录**：替代范围经用户于 PR #1389 合并批准；本 ADR Status 已转 Accepted，
+  ADR-0011 Status 已更新为 Superseded（注明部分替代范围与保留语义），两 ADR 双向链接互指。
 
 ### 4. 类型与错误契约（S1~S3 实施的公共契约，先于此落定）
 
