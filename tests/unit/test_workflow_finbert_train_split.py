@@ -6,7 +6,11 @@
 - 发布 job（publish-release）单独授予 ``contents: write``，且仅在
   train-export-gate 结果为 success 时运行（Gate 失败 → 发布 job 跳过）；
 - 发布 job 只消费 job1 上传的发布 artifact（最小文件集），下载后先
-  ``sha256sum -c`` 本地复验再发布，不 checkout、不执行仓库脚本。
+  ``sha256sum -c`` 本地复验再发布，不 checkout、不执行仓库脚本；
+- 发布步骤版本不可变（FT-05）：Release tag 已存在时拒绝发布并失败
+  （exit 1 + 明确指引），不提供 ``--clobber`` 部分更新（只换资产二进制、
+  不换 note 会令 lineage 静默错位）；``gh release create`` 仅在 tag
+  不存在分支可达。
 
 全部为 workflow YAML 的静态断言，不触发任何训练 / 发布副作用。
 """
@@ -179,3 +183,38 @@ def test_timeout_budgets_preserved(workflow: dict) -> None:
     # 训练大头（1~3h）保留 360 分钟预算；发布 job 收紧到 10 分钟
     assert jobs[JOB1_NAME]["timeout-minutes"] == 360
     assert jobs[JOB2_NAME]["timeout-minutes"] == 10
+
+
+def test_publish_step_rejects_existing_release_tag(workflow: dict) -> None:
+    # FT-05：同 tag 重跑拒绝覆盖——model_version 为不可变发布标识。
+    # Release（tag）已存在时必须显式失败（exit 1 + 指引提升 model_version），
+    # 防止 --clobber 部分更新令 lineage（note ↔ 资产 digest ↔ 运行参数）错位。
+    job2 = workflow["jobs"][JOB2_NAME]
+    publish = next(s for s in job2["steps"] if s.get("name") == "Publish release (finbert-gguf-v*)")
+    run = publish["run"]
+    # tag 已存在检测入口（gh release view 命中即拒绝）
+    assert "gh release view" in run
+    # 拒绝语义：非零退出 + 明确错误指引（含中断恢复路径：人工删 Release 留痕）
+    assert "exit 1" in run
+    assert "拒绝覆盖" in run
+    assert "提升 model_version" in run
+    # gh release create 仅在 tag 不存在分支可达：view 检查与拒绝退出
+    # 必须先于 create 出现（顺序即分支语义的静态表达）
+    assert run.index("gh release view") < run.index("gh release create")
+    assert run.index("exit 1") < run.index("gh release create")
+
+
+def test_publish_step_has_no_clobber_partial_update(workflow: dict) -> None:
+    # FT-05：不把 --clobber 部分更新（只换资产不换 note）当作重跑幂等——
+    # job2 不得残留 gh release upload / --clobber 上传路径。
+    # （yaml.safe_load 丢弃 YAML 注释后 dump，注释中的说明性 "--clobber"
+    # 提及不计入；job1 语料下载的 gh release download --clobber 为本地
+    # 临时目录覆盖下载，与 Release 资产发布无关，不在本断言范围。）
+    job2 = workflow["jobs"][JOB2_NAME]
+    job2_raw = yaml.safe_dump(job2, allow_unicode=True)
+    assert "--clobber" not in job2_raw
+    assert "gh release upload" not in job2_raw
+    for step in job2["steps"]:
+        run = step.get("run", "")
+        assert "gh release upload" not in run
+        assert "--clobber" not in run

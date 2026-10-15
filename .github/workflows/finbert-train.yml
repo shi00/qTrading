@@ -359,8 +359,8 @@ jobs:
 
   # job2：发布 Release（FT-06 最小权限拆分）。仅此 job 授予 contents: write；
   # 不 checkout 仓库、不执行仓库脚本——只消费 job1 上传的发布 artifact：
-  # 下载 → sha256sum -c 本地复验 → gh release view（已存在则 --clobber 覆盖
-  # 上传，重跑幂等）/ create。Gate 失败时 job1 结果非 success → 本 job 跳过，
+  # 下载 → sha256sum -c 本地复验 → gh release view（已存在即拒绝覆盖并失败，
+  # FT-05 版本不可变）/ create。Gate 失败时 job1 结果非 success → 本 job 跳过，
   # 不会以未校验产物发布。
   publish-release:
     name: Publish Release
@@ -394,6 +394,12 @@ jobs:
           sha256sum -c SHA256SUMS.txt
 
       # Gate 已通过（job 级 if 保证），此处直接发布。
+      # 同 tag 重跑拒绝覆盖（FT-05）：model_version 为不可变发布标识，Release
+      # （tag）已存在时拒绝发布并失败——--clobber 部分更新（只换资产二进制、
+      # 不换 note）会使 lineage（note ↔ 资产 digest ↔ 运行参数）静默错位；
+      # 新结果必须提升 model_version 后以新 tag 发布（note 本就按版本生成）。
+      # 若首次发布中断（tag 已建而资产不完整），须人工删除该 Release 并留痕
+      # 后重跑（错误信息中有指引）。
       # tag `finbert-gguf-v*` 不以 v 开头，不匹配主 CI `v*.*.*` 过滤（见文件头注释）。
       - name: Publish release (finbert-gguf-v*)
         env:
@@ -406,12 +412,11 @@ jobs:
             release-assets/SHA256SUMS.txt
           )
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "${ASSETS[@]}" \
-              --repo "$GITHUB_REPOSITORY" --clobber
-          else
-            gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "finbert-gguf-v${{ needs.train-export-gate.outputs.model_version }}" \
-              --notes-file release-assets/release_note.md \
-              --target "$GITHUB_SHA"
+            echo "::error::$RELEASE_TAG 已存在（同 model_version 已发布）——拒绝覆盖，请提升 model_version 后重跑；若系首次发布中断致资产不完整，请人工删除该 Release（留痕）后重跑" >&2
+            exit 1
           fi
+          gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "finbert-gguf-v${{ needs.train-export-gate.outputs.model_version }}" \
+            --notes-file release-assets/release_note.md \
+            --target "$GITHUB_SHA"
