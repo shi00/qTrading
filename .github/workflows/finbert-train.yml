@@ -273,6 +273,33 @@ jobs:
             --head stage_b_out/head.npz \
             --report stage_b_out/finbert2-news-f16.verify.json
 
+      # 效果硬门槛（FT-02）：与**最近一次已发布 Release**（tag `finbert-gguf-v*`，按
+      # semver 降序取最新）的 dev/test macro-F1 比较——主门槛 `test macro-F1 >= 锚点
+      # test macro-F1 - 0.03`，dev 下限护栏 `dev macro-F1 >= 锚点 dev macro-F1 - 0.03`，
+      # 任一低于「锚点值 - 0.03」即 FAIL。容差 0.03 出处：reviews/新闻达标模型微调.md
+      # §5.2「阶段 B 在 400 条测试集上的 macro-F1 比阶段 A 高 >= 3 个百分点」判据
+      # （语义=允许的噪声回退上限）。锚点数值**运行期从该 Release note 解析**，禁止在
+      # 本 workflow / 脚本中硬编码。判定为纯 Python 函数（scripts/verify_finbert_effect_gate.py，
+      # 可单测），失败时退出码非零。
+      # 锚点不可得三态（R21，不得把「已知不可比」伪装成「已达标」）：① 有历史 Release 但
+      # note 指标缺失/不可解析，或锚点查询失败（gh 不可用/网络故障）→ FAIL（fail-closed，
+      # 不可归因不得放行）；② 确无历史 Release（首版）→ 不阻断，判定 NO_BASELINE 并在
+      # Release note 显式声明「无基线可比，未施加效果门槛」；③ 本次自身指标缺失/NaN/非有限
+      # → FAIL。
+      # 闸门落点（发布路径，不可绕过）：本步骤在 job1（train-export-gate，只读权限）内，
+      # FAIL → job1 失败 → publish-release（needs + if success）跳过 → Release 不产生；
+      # 不放进 publish-release job 以免绕过 job1 的失败判定。
+      - name: Effect gate (verify_finbert_effect_gate.py)
+        id: effect_gate
+        env:
+          EFFECT_GATE_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python scripts/verify_finbert_effect_gate.py \
+            --train-summary stage_b_out/best/train_summary.json \
+            --repo "$EFFECT_GATE_REPO" \
+            --report stage_b_out/effect_gate.json
+
       # 产物 SHA256 清单（发布资产自校验凭证）。
       - name: Generate SHA256SUMS.txt
         run: |
@@ -358,6 +385,42 @@ jobs:
 
           summary = json.loads(Path("stage_b_out/best/train_summary.json").read_text(encoding="utf-8"))
 
+          # FT-02 效果门槛 lineage：读取 Effect gate 步骤产出的 effect_gate.json，把门槛口径
+          # （公式 + 容差出处）、锚点 Release tag、锚点 dev/test、本次 dev/test、判定结论
+          # （PASS / NO_BASELINE）全部写入 note。FAIL 时本步骤不可达（job1 已在 Effect gate
+          # 步骤失败、不会生成 note 也不会发布），故此处只记录 PASS / NO_BASELINE；文件缺失
+          # 即 fail-fast，不发布 lineage 不完整的 note。
+          effect_path = Path("stage_b_out/effect_gate.json")
+          if not effect_path.is_file():
+              raise SystemExit("effect_gate.json 缺失，效果门槛 lineage 不完整，拒绝发布")
+          effect = json.loads(effect_path.read_text(encoding="utf-8"))
+
+          def _metric(value):
+              return "无" if value is None else repr(value)
+
+          anchor_tag = effect.get("anchor_tag")
+          if effect["verdict"] == "NO_BASELINE":
+              effect_verdict = "无基线可比（无历史 Release）——未施加效果门槛"
+          else:
+              effect_verdict = str(effect["verdict"])
+
+          effect_lines = [
+              "## 效果门槛（FT-02）",
+              "",
+              f"- **门槛口径**: `test macro-F1 >= 锚点 test macro-F1 - {effect['tolerance']}` 且 "
+              f"`dev macro-F1 >= 锚点 dev macro-F1 - {effect['tolerance']}`"
+              f"（容差出处：{effect['tolerance_source']}）",
+              f"- **锚点 Release**: {'`' + anchor_tag + '`' if anchor_tag else '无（首版，无基线可比）'}",
+              f"- **锚点 dev/test macro-F1**: {_metric(effect.get('baseline_dev_macro_f1'))} / "
+              f"{_metric(effect.get('baseline_test_macro_f1'))}",
+              f"- **本次 dev/test macro-F1**: {_metric(effect.get('current_dev_macro_f1'))} / "
+              f"{_metric(effect.get('current_test_macro_f1'))}",
+              f"- **判定**: **{effect_verdict}**",
+          ]
+          if effect.get("reasons"):
+              effect_lines.append(f"- **说明**: {'; '.join(effect['reasons'])}")
+          effect_section = "\n".join(effect_lines) + "\n\n"
+
           note = (
               f"# FinBERT GGUF 模型 finbert-gguf-v{model_version}\n"
               "\n"
@@ -398,6 +461,7 @@ jobs:
               "N0-3 四判据（scripts/verify_finbert_gguf.py --head）：分词一致 / CLS 余弦 /\n"
               f"概率差<0.02 / 标签一致率≥99% —— 已通过（训练流水线 run：{run_url}）。\n"
               "\n"
+              f"{effect_section}"
               "## 边界声明\n"
               "\n"
               "本模型仅用于 App 内新闻情绪打分展示（ADR-0008 / ADR-0013「仅展示边界」），\n"
@@ -443,6 +507,7 @@ jobs:
             stage_b_out/head.npz
             stage_b_out/finbert2-news-f16.gguf
             stage_b_out/finbert2-news-f16.verify.json
+            stage_b_out/effect_gate.json
           if-no-files-found: warn
           retention-days: 7
 
