@@ -18,7 +18,9 @@
   漂移引入训练数值行为差异（聚合精度/默认参数），使跨次训练 lineage
   比较失真；
 - Release note 含运行时环境 lineage：runner 镜像（ImageOS/ImageVersion）、
-  Python 版本、依赖版本（动态读取已安装 metadata，与 pip pin 单一事实源）、
+  Python 版本、显式 pin 依赖版本（动态读取已安装 metadata，与 pip pin 单一
+  事实源）、已安装环境**全量依赖清单 + SHA256 摘要**（覆盖显式 pin 之外的
+  传递依赖，避免「pin 住 6 个包、传递依赖静默漂移」的归因盲区）、
   llama.cpp 工具链 commit（与 checkout ref 单一事实源）；
 - llama.cpp 工具链由 tag 改为不可变 commit 锚定（tag v0.3.0 指向的提交——
   tag 可被上游移动/重打，仅记录 tag 无法定位实际拉取的提交）；
@@ -340,12 +342,32 @@ def test_release_note_records_runtime_lineage(workflow: dict) -> None:
     # Python 实际版本（platform.python_version() 等价 python --version 输出）
     assert "platform.python_version()" in run
     assert "**Python**:" in run
-    # 依赖版本动态读取已安装 metadata（与 pip pin 单一事实源，防双份硬编码漂移）
+    # 显式 pin 依赖版本动态读取已安装 metadata（与 pip pin 单一事实源，防双份硬编码漂移）
     assert "importlib.metadata" in run
-    assert "**依赖版本**:" in run
+    assert "**显式 pin 训练依赖**:" in run
     # fail-fast：metadata 读取失败时拒绝发布（lineage 不完整的 note 不上 Release）
     assert "PackageNotFoundError" in run
     assert "拒绝发布" in run
+
+
+def test_release_note_records_full_dependency_inventory(workflow: dict) -> None:
+    # FT-08 对抗性检视补强：只记录 6 个显式 pin 会留下「传递依赖静默漂移」盲区
+    # （tokenizers / safetensors / huggingface-hub / gguf-py 等随 PyPI 解析与本地路径
+    # 安装变化，无可归因记录）。清单须取自已安装环境实况
+    # （importlib.metadata.distributions()，不维护第二份手写列表），排序后拼接为规范
+    # 文本并给出 SHA256 摘要，供跨次训练直接比对。
+    job1 = workflow["jobs"][JOB1_NAME]
+    run = next(s for s in job1["steps"] if s.get("name") == NOTE_STEP_NAME)["run"]
+    assert "from importlib.metadata import distributions" in run
+    assert "for dist in distributions():" in run
+    assert "env_inventory.sort(key=str.lower)" in run
+    assert "hashlib.sha256" in run
+    # note 文本含：条目数 + 摘要 + 可展开的全量清单（全部依赖版本写入 lineage）
+    assert "**完整依赖清单**" in run
+    assert "len(env_inventory)" in run
+    assert "env_inventory_digest" in run
+    assert "env_inventory_text" in run
+    assert "展开完整依赖清单" in run
 
 
 def test_release_note_lineage_packages_match_pinned_dependencies(workflow: dict) -> None:
