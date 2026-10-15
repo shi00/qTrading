@@ -137,7 +137,7 @@
 | FT-01 | 模型微调产线 Release 缺运行时必需 tokenizer.json：复核确认 CG-4 文档路线（获取步骤 + 基座 revision 锚定 + 保存校验链）实质满足，无真实缺陷残留 | 模型微调流水线检视任务链（本地检视报告） | [how-to.md](../guides/how-to.md) / [ai-service.md](../patterns/ai-service.md) | 使用中 |
 | FT-02 | FinBERT 产线是否设模型效果硬门槛待决策（dev/test macro-F1 仅记录于 Release note，无准入拦截） | 模型微调流水线检视任务链（本地检视报告） | [finbert-train.yml](../../.github/workflows/finbert-train.yml) | 使用中 |
 | FT-03 | Laya 人工抽检 Gate 覆盖率上下文：evaluate_gate 并列输出 gold_count/unmatched_count/illegal_count/coverage（PASS 语义与 Gate 适用范围不变） | 模型微调流水线检视任务链（本地检视报告） | [laya_annotator.py](../../scripts/laya_annotator.py) | 使用中 |
-| FT-04 | 训练语料跨 split 准入检查：精确重复文本 / 样本 id 重复 / 事件分组泄漏 fail-fast 拒绝训练 | 模型微调流水线检视任务链（本地检视报告） | [train_finbert.py](../../scripts/train_finbert.py) | 使用中 |
+| FT-04 | FinBERT 训练语料跨 split 重复/泄漏准入检查：`id` / `ts_code` / `publish_time` 可选元数据 + 跨 split 互斥检查（精确文本重复与事件分组键重叠任一命中即拒绝训练；元数据缺失不造值——R21） | FinBERT 模型产线 CI 化任务链（本地任务计划） | [train_finbert.py](../../scripts/train_finbert.py) / [test_train_finbert.py](../../tests/unit/test_train_finbert.py) | 使用中 |
 | FT-05 | FinBERT 产线同模型版本重跑 Release 覆盖防护（tag 已存在时的幂等语义与 lineage 一致性） | 模型微调流水线检视任务链（本地检视报告） | [finbert-train.yml](../../.github/workflows/finbert-train.yml) | 使用中 |
 | FT-06 | FinBERT 产线最小权限拆分：训练/导出/Gate job contents:read，发布独立 job 才 contents:write 并复验 checksum | 模型微调流水线检视任务链（本地检视报告） | [finbert-train.yml](../../.github/workflows/finbert-train.yml) | 使用中 |
 | FT-07 | corpus_tag 支持范围与固定行数契约待决策（workflow 行数断言绑定 corpus-v1） | 模型微调流水线检视任务链（本地检视报告） | [finbert-train.yml](../../.github/workflows/finbert-train.yml) | 使用中 |
