@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from utils.constants import TUSHARE_POINT_TIERS
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION
@@ -110,6 +112,238 @@ class ProviderCredential(BaseModel):
     models: list[str] = []
 
 
+# ==========================================================================
+# 统一模型管理配置域（reviews/模型统一.md §3 / §3.4 / §4.3，S1 交付）
+# 存储与 AppConfig 不导入 services 类型；schema_version=1。
+# ==========================================================================
+
+SCENARIO_IDS = ("news_annotation", "stock_analysis", "news_risk")
+EGRESS_PURPOSES = (*SCENARIO_IDS, "synthetic_test")
+ADAPTER_KINDS = ("litellm_chat", "gguf_chat", "gguf_sentiment")
+BILLING_MODES = ("usage_only", "estimate_cost")
+PRICING_UNITS = ("llm_tokens", "encoder_input_tokens")
+CAPABILITY_SUPPORT_STATES = ("supported", "unsupported", "unknown")
+CAPABILITY_SOURCES = ("adapter_contract", "artifact", "validation", "user_declaration")
+
+
+class CapabilityEvidenceConfig(BaseModel):
+    """能力证据（§4.1）：不使用字符串数组冒充验证结果。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    support: Literal["supported", "unsupported", "unknown"] = "unknown"
+    source: Literal["adapter_contract", "artifact", "validation", "user_declaration"] = "user_declaration"
+    connection_revision: int = Field(default=0, ge=0)
+    checked_at: str | None = None
+    artifact_digest: str | None = None
+
+
+class BillingConfig(BaseModel):
+    """连接计量（§3.1 / §9.1）：mode 必须由用户选择，无默认「免费」。
+
+    金额字段为十进制字符串（Decimal 从十进制字符串计算，§9.1），
+    保证 JSON 往返不丢精度。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["usage_only", "estimate_cost"]
+    pricing_unit: Literal["llm_tokens", "encoder_input_tokens"]
+    price_source: str | None = None
+    input_price_per_m: str | None = None
+    output_price_per_m: str | None = None
+    cache_read_price_per_m: str | None = None
+    cache_write_price_per_m: str | None = None
+    encoder_price_per_m: str | None = None
+    fx_to_cny: str | None = None
+    price_effective_at: str | None = None
+
+
+class ModelConnectionConfig(BaseModel):
+    """连接 ModelConnection（§3.1）：同名模型在不同地址 / 凭据 / 计价下是不同连接。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    connection_id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    enabled: bool = True
+    adapter_kind: Literal["litellm_chat", "gguf_chat", "gguf_sentiment"]
+    provider: str = ""
+    model: str = Field(min_length=1)
+    api_base: str | None = None
+    credential_ref: str | None = None
+    credential_version: str | None = None
+    adapter_options: dict[str, Any] = {}
+    capabilities: dict[str, CapabilityEvidenceConfig] = {}
+    context_window: int | None = Field(default=None, ge=1)
+    concurrency_limit: int = Field(default=1, ge=1)
+    billing: BillingConfig
+    connection_revision: int = Field(default=1, ge=1)
+    last_validation: dict[str, Any] | None = None
+
+
+class SentimentSubRouteConfig(BaseModel):
+    """news_annotation 的情绪子路由（§3.2 task_routes）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["bundled", "dedicated"] = "bundled"
+    candidates: list[str] = []
+    reuse_bundled_sentiment: bool = True
+
+
+class ScenarioRouteConfig(BaseModel):
+    """场景路由（§3.2）：用户有序候选即业务契约；空列表合法保存。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scenario_id: Literal["news_annotation", "stock_analysis", "news_risk"]
+    enabled: bool = False
+    candidates: list[str] = []
+    execution_options: dict[str, Any] = {}
+    total_timeout_seconds: int = Field(ge=1)
+    transient_retries: int = Field(default=1, ge=0, le=2)
+    fallback_enabled: bool = True
+    route_revision: int = Field(default=1, ge=1)
+    task_routes: dict[str, SentimentSubRouteConfig] = {}
+
+    @model_validator(mode="after")
+    def _restrict_task_routes(self) -> ScenarioRouteConfig:
+        unknown = set(self.task_routes) - {"sentiment"}
+        if unknown:
+            raise ValueError(f"task_routes 只支持 sentiment 子路由: {sorted(unknown)}")
+        if self.task_routes and self.scenario_id != "news_annotation":
+            raise ValueError("仅 news_annotation 允许 task_routes")
+        return self
+
+
+class UsagePolicyConfig(BaseModel):
+    """月度软预算策略（§9.2）：一个人民币月软预算覆盖三场景与测试。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    monthly_cny_limit: str | None = None
+    detail_retention_days: int = Field(default=180, ge=1)
+
+
+class EgressGrantConfig(BaseModel):
+    """目标级外发授权 grant（§4.3）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    grant_id: str = Field(min_length=1)
+    connection_id: str = Field(min_length=1)
+    target_fingerprint: str = Field(min_length=1)
+    purpose: Literal["news_annotation", "stock_analysis", "news_risk", "synthetic_test"]
+    scope_version: int = Field(ge=1)
+    confirmed_at: str
+    revoked_at: str | None = None
+
+
+class RevokedCredentialConfig(BaseModel):
+    """已撤销凭据版本（§5.2）：旧版本不允许取消撤销。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    credential_version: str = Field(min_length=1)
+    revoked_at: str
+
+
+class ModelSecurityStateConfig(BaseModel):
+    """安全状态（§4.3）：授权事实源，security_revision 单调递增。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    security_revision: int = Field(default=0, ge=0)
+    grants: list[EgressGrantConfig] = []
+    revoked_credential_versions: list[RevokedCredentialConfig] = []
+
+
+class LastConfigCommitConfig(BaseModel):
+    """§5.1 提交回执：与配置同一次 os.replace 落盘，不含秘密。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: str = Field(min_length=1)
+    committed_revision: int = Field(ge=1)
+    payload_fingerprint: str
+    committed_at: str
+
+
+def _default_scenario_routes() -> list[ScenarioRouteConfig]:
+    """三场景默认行：enabled=False、空候选；总时限为产品默认（§6.2）。"""
+    return [
+        ScenarioRouteConfig(
+            scenario_id="news_annotation",
+            total_timeout_seconds=45,
+            task_routes={"sentiment": SentimentSubRouteConfig()},
+        ),
+        ScenarioRouteConfig(scenario_id="stock_analysis", total_timeout_seconds=180),
+        ScenarioRouteConfig(scenario_id="news_risk", total_timeout_seconds=90),
+    ]
+
+
+class ModelManagementConfig(BaseModel):
+    """统一模型管理唯一持久域（§3.4）：schema_version=1。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    config_revision: int = Field(default=1, ge=1)
+    migration_state: Literal["pending", "active"] = "pending"
+    connections: list[ModelConnectionConfig] = []
+    scenario_routes: list[ScenarioRouteConfig] = Field(default_factory=_default_scenario_routes)
+    usage_policy: UsagePolicyConfig = UsagePolicyConfig()
+    security_state: ModelSecurityStateConfig = ModelSecurityStateConfig()
+    # §5.1 提交回执与 §12.2 切换屏障，默认 None
+    last_config_commit: LastConfigCommitConfig | None = None
+    migration_transition: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _validate_references(self) -> ModelManagementConfig:
+        connection_ids = [c.connection_id for c in self.connections]
+        if len(connection_ids) != len(set(connection_ids)):
+            raise ValueError("connections 中 connection_id 重复")
+        known = set(connection_ids)
+        for route in self.scenario_routes:
+            if len(route.candidates) != len(set(route.candidates)):
+                raise ValueError(f"场景 {route.scenario_id} 的 candidates 存在重复")
+            missing = [cid for cid in route.candidates if cid not in known]
+            if missing:
+                raise ValueError(f"场景 {route.scenario_id} 引用不存在的连接: {missing}")
+            for sub in route.task_routes.values():
+                missing_sub = [cid for cid in sub.candidates if cid not in known]
+                if missing_sub:
+                    raise ValueError(f"场景 {route.scenario_id} 子路由引用不存在的连接: {missing_sub}")
+        for grant in self.security_state.grants:
+            if grant.connection_id not in known:
+                raise ValueError(f"grant {grant.grant_id} 引用不存在的连接: {grant.connection_id}")
+        return self
+
+
+def model_management_payload_fingerprint(payload: dict[str, Any]) -> str:
+    """非敏感 payload 指纹（§5.1 last_config_commit）：不含秘密，仅用于回执核对。"""
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+
+@dataclass(frozen=True)
+class ModelManagementSaveResult:
+    """ConfigHandler 层 CAS 保存结果（中性结构，由 services 层转译三态）。
+
+    status:
+    - committed: 已提交（os.replace 成功且缓存已更新）
+    - revision_conflict: expected_revision 与磁盘不符（确定未提交，旧配置仍有效）
+    - not_committed: 替换前确定失败（校验失败 / 写盘失败），旧配置仍有效
+    - lock_timeout: 跨进程文件锁等待超时（确定未提交）
+    """
+
+    status: Literal["committed", "revision_conflict", "not_committed", "lock_timeout"]
+    current_revision: int | None = None
+    committed_revision: int | None = None
+    last_config_commit: dict[str, Any] | None = None
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -213,6 +447,10 @@ class AppConfig(BaseModel):
     ts_token: str = ""
 
     sync_integrity: SyncIntegrityConfig = SyncIntegrityConfig()
+
+    # 统一模型管理唯一持久域（reviews/模型统一.md §3.4，S1 交付）。
+    # DEFAULT_CONFIG 经 model_dump 自动登记，ensure_defaults 不得当未知键删除。
+    model_management: ModelManagementConfig = Field(default_factory=ModelManagementConfig)
 
     ai_system_prompt: str = Field(default=DEFAULT_AI_PROMPT)
     ai_news_prompt: str = Field(default=DEFAULT_NEWS_PROMPT)

@@ -8,10 +8,15 @@
 
 from __future__ import annotations
 
+import contextlib
+import copy
+import datetime as dt
 import json
 import os
 from collections.abc import Callable
+from collections.abc import Iterator
 
+import filelock
 from pydantic import ValidationError
 
 from utils import config_handler as cfg
@@ -19,9 +24,59 @@ from utils.config_models import (
     AI_EXTERNAL_ACK_GLOBAL_KEY,
     AppConfig,
     ConfigValidationResult,
+    ModelManagementSaveResult,
     get_default_config,
+    model_management_payload_fingerprint,
 )
 from utils.sanitizers import DataSanitizer
+
+# 跨进程配置文件锁等待上限（§5.1：锁等待有界，超时显示可重试错误）。
+_CONFIG_FILE_LOCK_TIMEOUT_SECONDS = 10.0
+
+
+class ConfigFreshReadError(RuntimeError):
+    """新鲜读取时磁盘损坏 / 不可读 / 校验失败（§5.1：禁止静默落默认）。"""
+
+
+class ConfigFileLockTimeoutError(RuntimeError):
+    """跨进程配置文件锁等待超时（可重试）。"""
+
+
+@contextlib.contextmanager
+def _config_file_lock() -> Iterator[filelock.FileLock]:
+    """跨进程配置文件锁（filelock，同一路径锁文件）。
+
+    锁顺序固定为「文件锁 → RWLock」；所有会替换配置文件的路径
+    （save_config / ensure_defaults / compare_and_save_model_management）同用此顺序，
+    锁内重读磁盘，只合并调用方实际变更键，不用旧缓存整字典覆盖新内容（§5.1）。
+    RWLock 只保证进程内并发，跨进程互斥由本文件锁承载。
+    """
+    lock = filelock.FileLock(f"{cfg.CONFIG_FILE}.lock", timeout=_CONFIG_FILE_LOCK_TIMEOUT_SECONDS)
+    try:
+        with lock:
+            yield lock
+    except filelock.Timeout as e:
+        raise ConfigFileLockTimeoutError(
+            f"配置文件锁等待超时（{_CONFIG_FILE_LOCK_TIMEOUT_SECONDS}s），请重试: {DataSanitizer.sanitize_error(e)}"
+        ) from e
+
+
+def _read_disk_dict() -> tuple[dict | None, str | None]:
+    """读磁盘原始 JSON（无锁，调用方必须已持「文件锁 → RWLock」）。
+
+    Returns:
+        (data, error)：文件不存在返回 (None, None)；损坏 / 不可读返回 (None, 脱敏错误)。
+    """
+    if not os.path.exists(cfg.CONFIG_FILE):
+        return None, None
+    try:
+        with _open_builtin()(cfg.CONFIG_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return None, DataSanitizer.sanitize_error(e)
+    if not isinstance(data, dict):
+        return None, "config root is not an object"
+    return data, None
 
 
 def _open_builtin():
@@ -258,69 +313,67 @@ def _migrate_config_location() -> None:
 def ensure_defaults():
     """Ensure default settings exist AND remove unused keys from user_settings.json.
 
-    Uses write lock for the entire read-modify-write cycle to prevent TOCTOU races.
-    Reads config directly inside the lock (not via load_config) to avoid
-    wlock->rlock deadlock with RWLockFair.
+    Uses the cross-process file lock and write lock for the entire
+    read-modify-write cycle (§5.1: 文件锁 → RWLock，锁内重读磁盘，防止 TOCTOU
+    与跨进程覆盖)。磁盘损坏时保留既有启动修复语义（重建默认）。
     """
     _migrate_config_location()
     try:
-        with cfg.ConfigHandler._lock.gen_wlock():
-            if cfg.ConfigHandler._config_cache is not None:
-                current_config = cfg.ConfigHandler._config_cache.copy()
-            elif os.path.exists(cfg.CONFIG_FILE):
-                try:
-                    with _open_builtin()(cfg.CONFIG_FILE, encoding="utf-8") as f:
-                        current_config = json.load(f)
-                except (json.JSONDecodeError, OSError) as e:
+        with _config_file_lock():
+            with cfg.ConfigHandler._lock.gen_wlock():
+                data, err = _read_disk_dict()
+                if err is not None:
                     cfg.logger.warning(
                         "[ConfigHandler] Config file unreadable, rebuilding from defaults: %s",
-                        DataSanitizer.sanitize_error(e) if hasattr(DataSanitizer, "sanitize_error") else repr(e),
+                        err,
                     )
                     current_config = {}
-            else:
-                current_config = {}
+                elif data is None:
+                    current_config = {}
+                else:
+                    current_config = data
 
-            dirty = False
+                dirty = False
 
-            if _normalize_ai_external_acknowledged(current_config):
-                dirty = True
-
-            for key, default_val in cfg.ConfigHandler.DEFAULT_CONFIG.items():
-                if key not in current_config:
-                    current_config[key] = default_val
+                if _normalize_ai_external_acknowledged(current_config):
                     dirty = True
-                    cfg.logger.info("Initialized default config: %s", key)
-                elif isinstance(default_val, dict) and isinstance(current_config.get(key), dict):
-                    nested_result, nested_dirty = cfg.ConfigHandler._deep_merge_defaults(
-                        current_config[key], default_val
-                    )
-                    if nested_dirty:
-                        current_config[key] = nested_result
+
+                for key, default_val in cfg.ConfigHandler.DEFAULT_CONFIG.items():
+                    if key not in current_config:
+                        current_config[key] = default_val
                         dirty = True
-                        cfg.logger.info("Updated nested config: %s", key)
+                        cfg.logger.info("Initialized default config: %s", key)
+                    elif isinstance(default_val, dict) and isinstance(current_config.get(key), dict):
+                        nested_result, nested_dirty = cfg.ConfigHandler._deep_merge_defaults(
+                            current_config[key], default_val
+                        )
+                        if nested_dirty:
+                            current_config[key] = nested_result
+                            dirty = True
+                            cfg.logger.info("Updated nested config: %s", key)
 
-            valid_keys = set(cfg.ConfigHandler.DEFAULT_CONFIG.keys())
-            existing_keys = list(current_config.keys())
+                valid_keys = set(cfg.ConfigHandler.DEFAULT_CONFIG.keys())
+                existing_keys = list(current_config.keys())
 
-            for key in existing_keys:
-                if key.startswith("ai_strategy_prompt_"):
-                    continue
-                if key not in valid_keys:
-                    cfg.logger.info("Removing deprecated/unused config: %s", key)
-                    current_config.pop(key)
+                for key in existing_keys:
+                    if key.startswith("ai_strategy_prompt_"):
+                        continue
+                    if key not in valid_keys:
+                        cfg.logger.info("Removing deprecated/unused config: %s", key)
+                        current_config.pop(key)
+                        dirty = True
+
+                if cfg.ConfigHandler._migrate_custom_models_credentials(current_config):
                     dirty = True
 
-            if cfg.ConfigHandler._migrate_custom_models_credentials(current_config):
-                dirty = True
-
-            if dirty:
-                success = cfg.ConfigHandler._save_json_atomically(current_config, cfg.CONFIG_FILE)
-                if success:
-                    cfg.ConfigHandler._config_cache = current_config
-                cfg.logger.info(
-                    "Configuration (defaults & cleanup) synchronized. Cleared deprecated keys: %s",
-                    set(existing_keys) - valid_keys,
-                )
+                if dirty:
+                    success = cfg.ConfigHandler._save_json_atomically(current_config, cfg.CONFIG_FILE)
+                    if success:
+                        cfg.ConfigHandler._config_cache = current_config
+                    cfg.logger.info(
+                        "Configuration (defaults & cleanup) synchronized. Cleared deprecated keys: %s",
+                        set(existing_keys) - valid_keys,
+                    )
 
     # NOTE(lazy): 配置管理整体兜底避免单点失败阻断流程. ceiling: 配置管理内部逻辑不应抛异常. upgrade: 配置管理内部统一走 classify_error.
     except Exception as e:
@@ -408,49 +461,164 @@ def load_config_with_validation() -> ConfigValidationResult:
 
 
 def save_config(config_data, replace=False):
-    """Save config with Write Lock, Validation and Atomic Write.
+    """Save config with File Lock, Write Lock, Validation and Atomic Write.
 
     :param config_data: Dict to save
     :param replace: If True, replaces entire config with config_data. If False, merges.
+
+    §5.1: 锁顺序固定「文件锁 → RWLock」；锁内重读磁盘为基底，只合并调用方
+    实际变更键，不用旧缓存整字典覆盖新内容（防止跨进程丢失他进程写入）。
+    磁盘损坏时中止保存返回 False，不以空/缓存基底覆盖损坏文件（保留用户
+    可手工恢复现场）。
     """
     _migrate_config_location()
     try:
-        with cfg.ConfigHandler._lock.gen_wlock():
-            if replace:
-                current_config = config_data.copy()
-            else:
-                current_config = {}
-                if cfg.ConfigHandler._config_cache is not None:
-                    current_config = cfg.ConfigHandler._config_cache.copy()
-                elif os.path.exists(cfg.CONFIG_FILE):
-                    try:
-                        with _open_builtin()(cfg.CONFIG_FILE, encoding="utf-8") as f:
-                            current_config = json.load(f)
-                            # AI-04/SEC-01: raw 读盘与 load_config 对称，先归一化旧 bool 形态，
-                            # 否则下方 model_validate 因类型不符抛 ValidationError → 静默 return
-                            # False，读时迁移（_persist_migration）将永不落盘。
-                            _normalize_ai_external_acknowledged(current_config)
-                    except (json.JSONDecodeError, OSError):
-                        pass
-                current_config.update(config_data)
+        with _config_file_lock():
+            with cfg.ConfigHandler._lock.gen_wlock():
+                if replace:
+                    current_config = config_data.copy()
+                else:
+                    data, err = _read_disk_dict()
+                    if err is not None:
+                        cfg.logger.error(
+                            "[ConfigHandler] Config file unreadable, aborting save to avoid overwrite: %s", err
+                        )
+                        return False
+                    if data is not None:
+                        # AI-04/SEC-01: 磁盘基底与 load_config 对称，先归一化旧形态，
+                        # 否则 model_validate 因类型不符抛 ValidationError → 静默 False。
+                        _normalize_ai_external_acknowledged(data)
+                        current_config = data
+                    elif cfg.ConfigHandler._config_cache is not None:
+                        current_config = cfg.ConfigHandler._config_cache.copy()
+                    else:
+                        current_config = {}
+                    current_config.update(config_data)
 
-            try:
-                validated = AppConfig.model_validate(current_config)
-                current_config = validated.model_dump()
-            except ValidationError as e:
-                cfg.logger.error("[ConfigHandler] Invalid config data: %s", DataSanitizer.sanitize_error(e))
+                try:
+                    validated = AppConfig.model_validate(current_config)
+                    current_config = validated.model_dump()
+                except ValidationError as e:
+                    cfg.logger.error("[ConfigHandler] Invalid config data: %s", DataSanitizer.sanitize_error(e))
+                    return False
+
+                success = cfg.ConfigHandler._save_json_atomically(current_config, cfg.CONFIG_FILE)
+
+                if success:
+                    cfg.ConfigHandler._config_cache = current_config
+                    return True
                 return False
-
-            success = cfg.ConfigHandler._save_json_atomically(current_config, cfg.CONFIG_FILE)
-
-            if success:
-                cfg.ConfigHandler._config_cache = current_config
-                return True
-            return False
     # NOTE(lazy): 配置管理整体兜底避免单点失败阻断流程. ceiling: 配置管理内部逻辑不应抛异常. upgrade: 配置管理内部统一走 classify_error.
     except Exception as e:
         cfg.logger.error("Error saving config: %s", DataSanitizer.sanitize_error(e))
         return False
+
+
+def compare_and_save_model_management(
+    expected_revision: int,
+    payload: dict,
+    operation_id: str,
+    *,
+    update_security_state: bool = False,
+) -> ModelManagementSaveResult:
+    """CAS 保存 model_management 域（§5.2）。
+
+    锁顺序固定「文件锁 → RWLock」；锁内重读磁盘比对 revision，成功时把
+    config_revision+1 与 last_config_commit 回执随同一次 os.replace 落盘。
+    结果明确前不自动重试、不轮换凭据、不回滚（由调用方决定下一步）。
+
+    update_security_state=False（save_draft 草稿路径）：安全子域以磁盘现值为准，
+    payload 携带的安全键被忽略（草稿不能修改 security_state）。
+    update_security_state=True（安全命令专用路径）：payload 安全子域原样提交。
+    """
+    _migrate_config_location()
+    try:
+        with _config_file_lock():
+            with cfg.ConfigHandler._lock.gen_wlock():
+                data, err = _read_disk_dict()
+                if err is not None:
+                    cfg.logger.error("[ConfigHandler] compare_and_save: config file unreadable, aborting: %s", err)
+                    return ModelManagementSaveResult(status="not_committed")
+
+                base = data if data is not None else {}
+                disk_mm = base.get("model_management")
+                if isinstance(disk_mm, dict):
+                    try:
+                        current_revision = int(disk_mm.get("config_revision", 1))
+                    except (TypeError, ValueError):
+                        current_revision = 1
+                else:
+                    current_revision = 1
+
+                if current_revision != expected_revision:
+                    return ModelManagementSaveResult(status="revision_conflict", current_revision=current_revision)
+
+                merged_mm = copy.deepcopy(payload)
+                if not update_security_state and isinstance(disk_mm, dict) and "security_state" in disk_mm:
+                    merged_mm["security_state"] = copy.deepcopy(disk_mm["security_state"])
+
+                committed_revision = current_revision + 1
+                merged_mm["config_revision"] = committed_revision
+                merged_mm["last_config_commit"] = {
+                    "operation_id": operation_id,
+                    "committed_revision": committed_revision,
+                    "payload_fingerprint": model_management_payload_fingerprint(merged_mm),
+                    "committed_at": dt.datetime.now(dt.UTC).isoformat(),
+                }
+
+                new_config = copy.deepcopy(base)
+                new_config["model_management"] = merged_mm
+
+                try:
+                    validated = AppConfig.model_validate(new_config)
+                except ValidationError as e:
+                    cfg.logger.error(
+                        "[ConfigHandler] compare_and_save: invalid payload, aborting: %s",
+                        DataSanitizer.sanitize_error(e),
+                    )
+                    return ModelManagementSaveResult(status="not_committed", current_revision=current_revision)
+
+                final_config = validated.model_dump()
+                if not cfg.ConfigHandler._save_json_atomically(final_config, cfg.CONFIG_FILE):
+                    return ModelManagementSaveResult(status="not_committed", current_revision=current_revision)
+                cfg.ConfigHandler._config_cache = final_config
+                return ModelManagementSaveResult(
+                    status="committed",
+                    current_revision=committed_revision,
+                    committed_revision=committed_revision,
+                    last_config_commit=final_config["model_management"].get("last_config_commit"),
+                )
+    except ConfigFileLockTimeoutError:
+        return ModelManagementSaveResult(status="lock_timeout", current_revision=None)
+    # NOTE(lazy): 配置管理整体兜底避免单点失败阻断流程. ceiling: 配置管理内部逻辑不应抛异常. upgrade: 配置管理内部统一走 classify_error.
+    except Exception as e:
+        cfg.logger.error("compare_and_save_model_management failed: %s", DataSanitizer.sanitize_error(e))
+        return ModelManagementSaveResult(status="not_committed")
+
+
+def read_model_management_fresh() -> dict:
+    """新鲜读取完整配置（§5.2）：磁盘为唯一事实源，绕过进程内缓存。
+
+    成功时刷新进程内缓存并返回深拷贝完整配置 dict（model_management 域由
+    调用方按 ``fresh["model_management"]`` 取用）。磁盘损坏 / 不可读 /
+    校验失败时抛 :class:`ConfigFreshReadError`，禁止静默落默认。
+    """
+    _migrate_config_location()
+    with _config_file_lock():
+        with cfg.ConfigHandler._lock.gen_rlock():
+            data, err = _read_disk_dict()
+            if err is not None:
+                raise ConfigFreshReadError(f"config file unreadable: {err}")
+            if data is None:
+                raise ConfigFreshReadError("config file does not exist")
+            try:
+                _normalize_ai_external_acknowledged(data)
+                validated = AppConfig.model_validate(data)
+            except ValidationError as e:
+                raise ConfigFreshReadError(f"config validation failed: {DataSanitizer.sanitize_error(e)}") from e
+            fresh = validated.model_dump()
+            cfg.ConfigHandler._config_cache = fresh
+            return copy.deepcopy(fresh)
 
 
 def _persist_migration(update: dict, migration_name: str) -> bool:

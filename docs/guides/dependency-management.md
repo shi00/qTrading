@@ -6,6 +6,7 @@
 
 - `flet` / `flet-desktop` / `flet-charts` / `flet-code-editor` 四个独立包，版本以 `==` 精确锁定（锁定值见 [`pyproject.toml`](../../pyproject.toml) 的 `dependencies` 中 `flet` / `flet-desktop` / `flet-charts` / `flet-code-editor` 四项）
 - `flet-charts` 是 V1 拆分出的图表控件独立包，新增图表控件必须 `import flet_charts as fch`
+- `filelock`：配置文件跨进程锁（S1 统一模型管理，`utils/config/storage.py` 的 `_config_file_lock`），`>=` 前向兼容；环境当前为 4.x，API 与 3.x 的 `FileLock` / `Timeout` 兼容
 - 版本锁定策略：`==` 精确锁定，避免 minor 版本间的 API 漂移（V1 已稳定发布，仍须精确锁定以规避 breaking changes）
 - 升级 Flet 版本时，四个包必须同步升级
 

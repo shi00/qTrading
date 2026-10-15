@@ -100,6 +100,22 @@ class ConfigHandler:
         return storage.save_config(config_data, replace)
 
     @staticmethod
+    def compare_and_save_model_management(
+        expected_revision: int,
+        payload: dict,
+        operation_id: str,
+        *,
+        update_security_state: bool = False,
+    ):
+        return storage.compare_and_save_model_management(
+            expected_revision, payload, operation_id, update_security_state=update_security_state
+        )
+
+    @staticmethod
+    def read_model_management_fresh() -> dict:
+        return storage.read_model_management_fresh()
+
+    @staticmethod
     def ensure_defaults():
         return storage.ensure_defaults()
 

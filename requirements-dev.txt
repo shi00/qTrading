@@ -132,6 +132,7 @@ fastuuid==0.14.0
     # via litellm
 filelock==4.0.1
     # via
+    #   astockscreener (pyproject.toml)
     #   cachecontrol
     #   huggingface-hub
 flet==1.0.3

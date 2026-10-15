@@ -8,6 +8,14 @@
 
 `ConfigHandler` 使用读写锁 (`rwlock.RWLockFair`) 保护并发访问。敏感信息优先使用 `keyring`，降级到 AES-GCM 加密文件 (`utils/security_utils.py`)。
 
+**统一模型管理配置域（S1，ADR-0014 / reviews/模型统一.md §5）**：`model_management` 域的保存与读取有独立契约，普通键的 `save_config` 不适用于该域：
+
+- **锁顺序固定「跨进程文件锁 → RWLock」**（`utils/config/storage.py` `_config_file_lock`，filelock 锁文件 `CONFIG_FILE.lock`）：`save_config` / `ensure_defaults` / `compare_and_save_model_management` 全部走该顺序，锁内重读磁盘为基底，不用旧缓存整字典覆盖新内容；磁盘损坏时中止保存返回 `False`，不以空基底覆盖。
+- **CAS 保存**：`compare_and_save_model_management(expected_revision, payload, operation_id, *, update_security_state=False)`——revision 不符返回 `revision_conflict`；成功时 `config_revision+1` 与 `last_config_commit` 回执（operation_id / committed_revision / 非敏感指纹 / 时间戳）随同一次 `os.replace` 落盘。结果明确前不自动重试、不轮换凭据、不回滚。
+- **安全子域保护**：`update_security_state=False`（草稿路径）时 payload 的 `security_state` 被磁盘现值替换；安全子域只经 `ModelConfigurationService.grant_egress / revoke_egress / revoke_credential` 专用命令修改（`security_revision` 单调递增，安全命令同时递增 `config_revision`）。
+- **新鲜读取**：`read_model_management_fresh()` 按相同锁顺序重读磁盘、校验后刷新缓存并返回深拷贝；磁盘损坏 / 校验失败抛 `ConfigFreshReadError`（禁止静默落默认）。快照创建与 `authorize_attempt` 必须用此入口，不走 `load_config()` 缓存命中路径。
+- **服务层三态转译**：ConfigHandler 返回中性 `ModelManagementSaveResult`（四态），`services/model_configuration_service.py` 转译为 `ConfigurationSaveOutcome` 三态（committed / not_committed / commit_unknown，ADR-0014 §4）；回执丢失按相同锁顺序重读磁盘凭 operation_id 确认。
+
 ### 数据质量门控
 
 使用 `@require_quality(QualityTier.SILVER)` 确保只有数据质量达标才执行逻辑。质量分层: `CRITICAL(0)` → `BRONZE(1)` → `SILVER(2)` → `GOLD(3)`。`STRICT_QUALITY_GATE` 环境变量（默认开启）**不是全部门控总开关**，仅控制 processor 缺失分支的放行；`@require_quality` 装饰的方法经 `data/persistence/quality_gate.py` 的 `_check_tier` 依次判定，四场景行为如下：
