@@ -18,7 +18,10 @@
   漂移引入训练数值行为差异（聚合精度/默认参数），使跨次训练 lineage
   比较失真；
 - Release note 含运行时环境 lineage：runner 镜像（ImageOS/ImageVersion）、
-  Python 版本、依赖版本（动态读取已安装 metadata，与 pip pin 单一事实源）；
+  Python 版本、依赖版本（动态读取已安装 metadata，与 pip pin 单一事实源）、
+  llama.cpp 工具链 commit（与 checkout ref 单一事实源）；
+- llama.cpp 工具链由 tag 改为不可变 commit 锚定（tag v0.3.0 指向的提交——
+  tag 可被上游移动/重打，仅记录 tag 无法定位实际拉取的提交）；
 - runner 基线为滚动 ``ubuntu-latest``（权衡与兜底见 workflow 文件头注释），
   改固定 container 须有意变更本断言。
 
@@ -58,6 +61,11 @@ PINNED_TRAINING_PACKAGES = frozenset(
 # 精确 pin 规格：``name==version``（local version 如 2.9.1+cpu 亦合法）。
 # fullmatch 天然排除 >= / <= / ~= / != / bare 包名等一切非精确 pin 形态。
 PINNED_SPEC_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9][A-Za-z0-9.+]*")
+
+# FT-08：llama.cpp 工具链锚定的 commit（tag v0.3.0 指向的提交）。
+# checkout ref 与 note lineage 均须逐字等于该值（tag 可被上游移动，commit 不可变）。
+LLAMA_CPP_CHECKOUT_STEP = "Checkout llama.cpp v0.3.0"
+LLAMA_CPP_COMMIT = "c1d0e7a004015f23bc0233470b747b596f29b264"
 
 
 @pytest.fixture(scope="module")
@@ -376,3 +384,28 @@ def test_runner_baseline_is_ubuntu_latest(workflow: dict) -> None:
     # note 环境段兜底见 workflow 文件头注释）；改固定 container 须有意变更本断言。
     for job_name in (JOB1_NAME, JOB2_NAME):
         assert workflow["jobs"][job_name]["runs-on"] == "ubuntu-latest"
+
+
+def test_llama_cpp_checkout_is_commit_anchored(workflow: dict) -> None:
+    # FT-08：llama.cpp 工具链必须 checkout 不可变 commit（tag v0.3.0 指向的提交），
+    # 而非可变 tag——tag 被上游移动/重打时，仅记录 tag 无法定位实际拉取的提交。
+    job1 = workflow["jobs"][JOB1_NAME]
+    checkout = next(s for s in job1["steps"] if s.get("name") == LLAMA_CPP_CHECKOUT_STEP)
+    with_block = checkout["with"]
+    assert with_block["repository"] == "ggml-org/llama.cpp"
+    ref = with_block["ref"]
+    assert re.fullmatch(r"[0-9a-f]{40}", ref), f"llama.cpp ref 非 40 位 commit 锚定: {ref!r}"
+    assert ref == LLAMA_CPP_COMMIT
+
+
+def test_release_note_records_anchored_llama_cpp_commit(workflow: dict) -> None:
+    # FT-08：note lineage 的 llama.cpp commit 必须逐字等于 checkout 锚定的 ref
+    # （单一事实源，拦截「ref 改了但 note 未同步」的双份记录漂移）；同时保留 tag
+    # 别名，便于与上游 release note 对照。
+    job1 = workflow["jobs"][JOB1_NAME]
+    checkout = next(s for s in job1["steps"] if s.get("name") == LLAMA_CPP_CHECKOUT_STEP)
+    note = next(s for s in job1["steps"] if s.get("name") == NOTE_STEP_NAME)["run"]
+    assert "**llama.cpp 工具链**" in note
+    assert checkout["with"]["ref"] in note, "Release note lineage 未记录实际锚定的 llama.cpp commit"
+    assert LLAMA_CPP_COMMIT in note
+    assert "v0.3.0" in note
