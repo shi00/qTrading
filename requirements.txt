@@ -80,7 +80,9 @@ exchange-calendars==4.13.2
 fastuuid==0.14.0
     # via litellm
 filelock==4.0.1
-    # via huggingface-hub
+    # via
+    #   astockscreener (pyproject.toml)
+    #   huggingface-hub
 flet==1.0.3
     # via
     #   astockscreener (pyproject.toml)

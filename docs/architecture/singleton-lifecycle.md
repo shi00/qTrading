@@ -106,6 +106,7 @@ def __init__(self, *, config=None, clock=None):
 | 类名 | 模块路径 | 不纳入单例的原因 |
 |------|---------|-----------------|
 | `BacktestService` | `services/backtest_service.py` | 按需实例化，依赖注入 `CacheManager` + `engine_factory` + `strategy_lookup`，无全局共享状态 |
+| `ModelConfigurationService` | `services/model_configuration_service.py` | 统一模型管理配置 / 凭据 / 授权应用服务（ADR-0014 / S1），按需 DI 实例化，无进程级职责；事实源为 `model_management` 配置域与 keyring，实例内仅持同 operation_id 凭据租约映射（MM-12），不注册单例 |
 
 ### TushareClient 特殊说明
 

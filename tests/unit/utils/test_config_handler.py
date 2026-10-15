@@ -1,4 +1,5 @@
 from unittest.mock import patch, MagicMock
+import json
 import os
 
 from utils import config_handler as cfg_mod
@@ -647,18 +648,20 @@ class TestConfigHandlerSyncIntegrityConfig:
 
 class TestConfigHandlerEnsureDefaults:
     @patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=True)
-    def test_merges_and_saves(self, mock_save):
-        with patch.object(cfg_mod.ConfigHandler, "_config_cache", {}):
+    def test_merges_and_saves(self, mock_save, tmp_path):
+        """磁盘存在部分配置时，ensure_defaults 以磁盘为基底合并默认项并落盘（§5.1）。"""
+        config_file = tmp_path / "user_settings.json"
+        config_file.write_text(json.dumps({"llm_provider": "deepseek"}), encoding="utf-8")
+        with patch.object(cfg_mod, "CONFIG_FILE", str(config_file)):
             cfg_mod.ConfigHandler.ensure_defaults()
             mock_save.assert_called_once()
 
     @patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=True)
-    def test_no_save_when_already_complete(self, mock_save):
-        with patch.object(
-            cfg_mod.ConfigHandler,
-            "_config_cache",
-            cfg_mod.ConfigHandler.DEFAULT_CONFIG.copy(),
-        ):
+    def test_no_save_when_already_complete(self, mock_save, tmp_path):
+        """磁盘已是完整默认配置时，ensure_defaults 不产生多余写入（§5.1 磁盘为基底）。"""
+        config_file = tmp_path / "user_settings.json"
+        config_file.write_text(json.dumps(cfg_mod.ConfigHandler.DEFAULT_CONFIG), encoding="utf-8")
+        with patch.object(cfg_mod, "CONFIG_FILE", str(config_file)):
             cfg_mod.ConfigHandler.ensure_defaults()
             mock_save.assert_not_called()
 
@@ -2992,15 +2995,16 @@ class TestAIExternalAcknowledgementMigration:
         assert _normalize_ai_external_acknowledged(config4) is False
 
     @patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=True)
-    def test_ensure_defaults_migrates_legacy_bool(self, mock_save):
-        """ensure_defaults 在写锁下把旧 bool 迁移为 dict[str,int] 并落盘。"""
+    def test_ensure_defaults_migrates_legacy_bool(self, mock_save, tmp_path):
+        """ensure_defaults 在「文件锁+写锁、磁盘为基底」下把旧 bool 迁移为 dict[str,int] 并落盘。"""
         from utils.config_models import AI_EXTERNAL_ACK_GLOBAL_KEY, AI_EGRESS_SCOPE_VERSION
 
-        with patch.object(
-            cfg_mod.ConfigHandler,
-            "_config_cache",
-            {"ai_external_acknowledged": True, "llm_provider": "deepseek"},
-        ):
+        config_file = tmp_path / "user_settings.json"
+        config_file.write_text(
+            json.dumps({"ai_external_acknowledged": True, "llm_provider": "deepseek"}),
+            encoding="utf-8",
+        )
+        with patch.object(cfg_mod, "CONFIG_FILE", str(config_file)):
             cfg_mod.ConfigHandler.ensure_defaults()
             mock_save.assert_called_once()
             migrated = mock_save.call_args.args[0]["ai_external_acknowledged"]
