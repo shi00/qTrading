@@ -514,6 +514,7 @@ def test_effect_gate_stays_in_readonly_job_absent_from_publish_job(workflow: dic
 def test_effect_gate_step_cannot_silently_swallow_failure(workflow: dict) -> None:
     # 绕过面 1：continue-on-error → 失败被吞，job1 仍 success 并放行发布；
     # 绕过面 2：条件跳过（if）→ 闸门未跑也算通过。
+    job1 = workflow["jobs"][JOB1_NAME]
     step = _effect_gate_step(workflow)
     assert "continue-on-error" not in step
     assert "if" not in step
@@ -525,6 +526,9 @@ def test_effect_gate_step_cannot_silently_swallow_failure(workflow: dict) -> Non
     # 上下文经 env 注入（表达式注入面收敛）：run 内不得直接内插 ${{ ... }}
     assert step["env"]["EFFECT_GATE_REPO"] == "${{ github.repository }}"
     assert "${{" not in run
+    # gh 鉴权依赖：job1 级 env 必须提供 GH_TOKEN（缺失时 gh 报错 → 闸门恒 fail-closed，
+    # 发布被永久阻断）；对齐 job2 同款 `github.token`（只读足够列/读 Release）。
+    assert job1["env"]["GH_TOKEN"] == "${{ github.token }}"
 
 
 def test_effect_gate_no_hardcoded_baseline_values(workflow: dict) -> None:
