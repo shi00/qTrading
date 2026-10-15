@@ -1,6 +1,6 @@
 # ADR-0011: 手写 failover 循环迁移至 litellm.Router（L4）
 
-> Status: Accepted
+> Status: Superseded by ADR-0014（部分替代：Router 候选选择 / 重试 / 冷却 / 健康路由职责由 ScenarioExecutor 承接；SEC-01 门控与 SEC-03 审计语义迁入新链保留，批准记录见 ADR-0014 Decision §3）
 > Date: 2026-09-23
 > Owner: 架构维护者
 > Supersedes: 无（重构既有实现，无旧 ADR 对应）
