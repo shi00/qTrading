@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
+from services.ai_service.model_management_types import AttemptContext, ResolvedConnection
 from services.news_sentiment_scorer import (
     _DEFAULT_MAX_LENGTH,
     _DEFAULT_N_CTX,
@@ -300,8 +301,10 @@ class TestScoreTextsGuardClauses:
         mgr = _make_mgr()
         mgr._ensure_ready = AsyncMock(return_value=_head())
 
-        async def fake_chunk(chunk):
-            return None if len(chunk) == 32 else np.zeros((len(chunk), _EMBEDDING_DIM), dtype=np.float32)
+        async def fake_chunk(chunk, *, timeout_s, generation):
+            if len(chunk) == 32:
+                return None
+            return (np.zeros((len(chunk), _EMBEDDING_DIM), dtype=np.float32), {})
 
         mgr._score_chunk = fake_chunk
         assert await mgr.score_texts(["x"] * 64) is None
@@ -314,9 +317,9 @@ class TestScoreTextsBatchSplitting:
         mgr._ensure_ready = AsyncMock(return_value=_head("linear"))
         calls: list[list[str]] = []
 
-        async def fake_chunk(chunk):
+        async def fake_chunk(chunk, *, timeout_s, generation):
             calls.append(list(chunk))
-            return np.zeros((len(chunk), _EMBEDDING_DIM), dtype=np.float32)
+            return (np.zeros((len(chunk), _EMBEDDING_DIM), dtype=np.float32), {})
 
         mgr._score_chunk = fake_chunk
         texts = [f"text-{i}" for i in range(70)]
@@ -341,17 +344,22 @@ def _install_queues(mgr: NewsSentimentScorer, responses: list) -> tuple[MagicMoc
 
 
 class TestScoreChunk:
+    """S2 协议：请求 3-tuple ("score", rid, chunk)；响应 5-tuple ok 携带 generation。"""
+
     @pytest.mark.asyncio
     async def test_ok_response_returns_vectors(self):
         mgr = _make_mgr(_config(timeout_s=2.0))
         vec = np.zeros((2, _EMBEDDING_DIM), dtype=np.float32)
-        req_q, res_q = _install_queues(mgr, [("ok", 0, vec)])
+        req_q, res_q = _install_queues(mgr, [("ok", 0, 0, vec, {})])
         mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
-        out = await mgr._score_chunk(["a", "b"])
+        out = await mgr._score_chunk(["a", "b"], timeout_s=2.0, generation=0)
 
-        assert out is vec
+        assert out is not None
+        vectors, meta = out
+        assert vectors is vec
+        assert meta == {}
         req_q.put.assert_called_once_with(("score", 0, ["a", "b"]), timeout=5)
 
     @pytest.mark.asyncio
@@ -359,43 +367,68 @@ class TestScoreChunk:
         # 响应配对：不匹配 req_id 的响应丢弃，继续等待自己的响应
         mgr = _make_mgr(_config(timeout_s=2.0))
         vec = np.zeros((1, _EMBEDDING_DIM), dtype=np.float32)
-        _install_queues(mgr, [("ok", 999, vec), ("ok", 0, vec)])
+        _install_queues(mgr, [("ok", 999, 0, vec, {}), ("ok", 0, 0, vec, {})])
         mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
-        out = await mgr._score_chunk(["a"])
-        assert out is vec
+        out = await mgr._score_chunk(["a"], timeout_s=2.0, generation=0)
+        assert out is not None and out[0] is vec
 
     @pytest.mark.asyncio
     async def test_worker_error_terminates_and_returns_none(self):
         mgr = _make_mgr(_config(timeout_s=2.0))
-        _install_queues(mgr, [("error", 0, "decode failed")])
+        _install_queues(mgr, [("error", 0, 0, "decode failed")])
         mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
         with patch.object(mgr, "_shutdown_worker") as sw:
-            out = await mgr._score_chunk(["a"])
+            out = await mgr._score_chunk(["a"], timeout_s=2.0, generation=0)
         assert out is None
         sw.assert_called_once_with()
         assert mgr._worker_ready is False
 
     @pytest.mark.asyncio
-    async def test_timeout_terminates_and_returns_none(self):
-        # DoD「超时」：轮询超时 → 终止 worker → None（下次调用重启）
+    async def test_timeout_raises_and_quarantines(self):
+        # S2 语义：轮询预算耗尽 → TimeoutError（worker quarantined + 异步清理），
+        # 调用方（score_for_connection）决定 timeout/partial 降级。
         mgr = _make_mgr()
         _req_q, res_q = _install_queues(mgr, [])
         res_q.get_nowait.side_effect = queue.Empty
         mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
+        mgr._worker_ready = True  # 模拟先前已就绪的 worker
 
-        with (
-            patch.object(mgr, "_resolve_timeout", return_value=0.05),  # 超时下限已单测，此处提速
-            patch.object(mgr, "_shutdown_worker") as sw,
-        ):
-            out = await mgr._score_chunk(["a"])
-        assert out is None
-        sw.assert_called_once_with()
-        assert mgr._worker_ready is False
+        with patch.object(mgr, "_shutdown_worker") as sw:
+            with pytest.raises(TimeoutError) as exc_info:
+                await mgr._score_chunk(["a"], timeout_s=0.05, generation=0)
+        assert type(exc_info.value) is TimeoutError
+        sw.assert_not_called()  # 同步 shutdown 不在此路径（异步清理任务负责）
+        assert mgr._worker_state == "quarantined"
+        assert mgr._worker_ready is True  # ready 标志不清（快路径由 quarantined 失效）
+        # 收尾清理任务避免悬挂（同步取消，不 await）
+        mgr._cancel_cleanup_task()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_quarantines_and_propagates(self):
+        # R2：put 前取消 → 隔离 + 传播
+        mgr = _make_mgr(_config(timeout_s=2.0))
+        _install_queues(mgr, [])
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
+
+        def cancelled_put(*args, **kwargs):
+            # 生产代码将 put 包在 run_in_executor 中以同步方式调用，
+            # 故替身须为同步函数直接抛 CancelledError（async 函数只会返回协程不抛）
+            raise asyncio.CancelledError()
+
+        with patch.object(mgr._request_queue, "put", side_effect=cancelled_put):
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await asyncio.wait_for(
+                    mgr._score_chunk(["a"], timeout_s=2.0, generation=0),
+                    timeout=2.0,
+                )
+        assert type(exc_info.value) is asyncio.CancelledError  # R2 传播纯度：非子类包装
+        assert mgr._worker_state == "quarantined"
+        mgr._cancel_cleanup_task()
 
     @pytest.mark.asyncio
     async def test_value_error_from_closed_queue_treated_as_empty(self):
@@ -403,12 +436,12 @@ class TestScoreChunk:
         mgr = _make_mgr(_config(timeout_s=2.0))
         vec = np.zeros((1, _EMBEDDING_DIM), dtype=np.float32)
         _req_q, res_q = _install_queues(mgr, [])
-        res_q.get_nowait.side_effect = [ValueError("Queue is closed"), ("ok", 0, vec)]
+        res_q.get_nowait.side_effect = [ValueError("Queue is closed"), ("ok", 0, 0, vec, {})]
         mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
-        out = await mgr._score_chunk(["a"])
-        assert out is vec
+        out = await mgr._score_chunk(["a"], timeout_s=2.0, generation=0)
+        assert out is not None and out[0] is vec
 
     @pytest.mark.asyncio
     async def test_worker_crash_returns_none(self):
@@ -421,7 +454,7 @@ class TestScoreChunk:
         mgr._worker_proc = proc
 
         with patch.object(mgr, "_shutdown_worker") as sw:
-            out = await mgr._score_chunk(["a"])
+            out = await mgr._score_chunk(["a"], timeout_s=2.0, generation=0)
         assert out is None
         sw.assert_called_once_with()
 
@@ -431,46 +464,74 @@ class TestScoreChunk:
         mgr = _make_mgr(_config(timeout_s=2.0))
         vec = np.zeros((1, _EMBEDDING_DIM), dtype=np.float32)
         _req_q, res_q = _install_queues(mgr, [])
-        res_q.get_nowait.side_effect = [queue.Empty, ("ok", 0, vec)]
+        res_q.get_nowait.side_effect = [queue.Empty, ("ok", 0, 0, vec, {})]
         proc = MagicMock(spec=_RealProcess)
         proc.is_alive.return_value = False
         mgr._worker_proc = proc
 
-        out = await mgr._score_chunk(["a"])
-        assert out is vec
+        out = await mgr._score_chunk(["a"], timeout_s=2.0, generation=0)
+        assert out is not None and out[0] is vec
+
+    @pytest.mark.asyncio
+    async def test_stale_generation_response_discarded(self):
+        # S2 generation 过滤：旧 worker 残留响应（gen 不匹配）丢弃后继续等待
+        mgr = _make_mgr(_config(timeout_s=2.0))
+        vec = np.zeros((1, _EMBEDDING_DIM), dtype=np.float32)
+        _install_queues(mgr, [("ok", 0, 7, vec, {}), ("ok", 0, 0, vec, {})])
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
+        mgr._worker_proc.is_alive.return_value = True
+
+        out = await mgr._score_chunk(["a"], timeout_s=2.0, generation=0)
+        assert out is not None and out[0] is vec
 
 
 class TestConsumeResult:
     def test_ok_matching(self):
         vec = np.zeros((1, _EMBEDDING_DIM), dtype=np.float32)
         mgr = _make_mgr()
-        assert mgr._consume_result(0, ("ok", 0, vec)) is vec
+        consumed = mgr._consume_result(0, ("ok", 0, 0, vec, {}), generation=0)
+        assert consumed is not None and consumed[0] is vec
 
     def test_ok_mismatched_returns_none(self):
         vec = np.zeros((1, _EMBEDDING_DIM), dtype=np.float32)
         mgr = _make_mgr()
-        assert mgr._consume_result(0, ("ok", 7, vec)) is None
+        assert mgr._consume_result(0, ("ok", 7, 0, vec, {}), generation=0) is None
+
+    def test_ok_stale_generation_returns_none(self):
+        # S2：generation 不匹配 → 丢弃（调用方继续轮询）
+        vec = np.zeros((1, _EMBEDDING_DIM), dtype=np.float32)
+        mgr = _make_mgr()
+        assert mgr._consume_result(0, ("ok", 0, 3, vec, {}), generation=0) is None
 
     def test_ok_malformed_raises(self):
         mgr = _make_mgr()
         from services.news_sentiment_scorer import _WorkerError
 
         with pytest.raises(_WorkerError, match="Malformed ok"):
-            mgr._consume_result(0, ("ok", 0))
+            mgr._consume_result(0, ("ok", 0, 0, np.zeros((1, _EMBEDDING_DIM), dtype=np.float32)), generation=0)
 
     def test_ok_bad_vector_shape_raises(self):
         mgr = _make_mgr()
         from services.news_sentiment_scorer import _WorkerError
 
         with pytest.raises(_WorkerError, match="Malformed vectors"):
-            mgr._consume_result(0, ("ok", 0, np.zeros((1, 3), dtype=np.float32)))
+            mgr._consume_result(0, ("ok", 0, 0, np.zeros((1, 3), dtype=np.float32), {}), generation=0)
+
+    def test_ok_bad_meta_raises(self):
+        mgr = _make_mgr()
+        from services.news_sentiment_scorer import _WorkerError
+
+        with pytest.raises(_WorkerError, match="Malformed meta"):
+            mgr._consume_result(
+                0, ("ok", 0, 0, np.zeros((1, _EMBEDDING_DIM), dtype=np.float32), "not-a-mapping"), generation=0
+            )
 
     def test_error_matching_raises(self):
         from services.news_sentiment_scorer import _WorkerError
 
         mgr = _make_mgr()
         with pytest.raises(_WorkerError, match="boom"):
-            mgr._consume_result(0, ("error", 0, "boom"))
+            mgr._consume_result(0, ("error", 0, 0, "boom"), generation=0)
 
     def test_error_invalid_req_raises(self):
         # worker 协议校验失败用 rid=-1 广播 → 视为请求级失败
@@ -478,25 +539,33 @@ class TestConsumeResult:
 
         mgr = _make_mgr()
         with pytest.raises(_WorkerError, match="bad format"):
-            mgr._consume_result(0, ("error", -1, "bad format"))
+            mgr._consume_result(0, ("error", -1, 0, "bad format"), generation=0)
 
     def test_error_mismatched_returns_none(self):
         mgr = _make_mgr()
-        assert mgr._consume_result(0, ("error", 9, "boom")) is None
+        assert mgr._consume_result(0, ("error", 9, 0, "boom"), generation=0) is None
+
+    def test_error_stale_generation_returns_none(self):
+        mgr = _make_mgr()
+        assert mgr._consume_result(0, ("error", 0, 5, "boom"), generation=0) is None
 
     def test_shutdown_raises(self):
         from services.news_sentiment_scorer import _WorkerError
 
         mgr = _make_mgr()
         with pytest.raises(_WorkerError, match="shut down"):
-            mgr._consume_result(0, ("shutdown", "ok"))
+            mgr._consume_result(0, ("shutdown", "ok", 0), generation=0)
+
+    def test_shutdown_stale_generation_returns_none(self):
+        mgr = _make_mgr()
+        assert mgr._consume_result(0, ("shutdown", "ok", 9), generation=0) is None
 
     def test_unknown_status_raises(self):
         from services.news_sentiment_scorer import _WorkerError
 
         mgr = _make_mgr()
         with pytest.raises(_WorkerError, match="Unknown result status"):
-            mgr._consume_result(0, ("weird",))
+            mgr._consume_result(0, ("weird",), generation=0)
 
 
 # --------------------------------------------------------------------------- #
@@ -571,18 +640,19 @@ class TestAwaitWorkerReady:
     async def test_ready(self):
         mgr = _make_mgr()
         mgr._result_queue = MagicMock(spec=queue.Queue)
-        mgr._result_queue.get_nowait.return_value = ("ready", "model.gguf")
+        mgr._result_queue.get_nowait.return_value = ("ready", "model.gguf", 0)
         mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
         assert await mgr._await_worker_ready(timeout=1.0) is True
         assert mgr._worker_ready is True
+        assert mgr._worker_state == "idle"
 
     @pytest.mark.asyncio
     async def test_load_error_returns_false(self):
         mgr = _make_mgr()
         mgr._result_queue = MagicMock(spec=queue.Queue)
-        mgr._result_queue.get_nowait.return_value = ("error", "model load failed")
+        mgr._result_queue.get_nowait.return_value = ("error", "model load failed", 0)
         mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
@@ -859,16 +929,212 @@ class TestScoreTextsConcurrency:
         active = 0
         max_active = 0
 
-        async def fake_chunk(chunk):
+        async def fake_chunk(chunk, *, timeout_s, generation):
             nonlocal active, max_active
             active += 1
             max_active = max(max_active, active)
             await asyncio.sleep(0.01)
             active -= 1
-            return np.zeros((len(chunk), _EMBEDDING_DIM), dtype=np.float32)
+            return np.zeros((len(chunk), _EMBEDDING_DIM), dtype=np.float32), {}
 
         mgr._score_chunk = fake_chunk
 
         out = await asyncio.gather(mgr.score_texts(["a"]), mgr.score_texts(["b"]))
         assert max_active == 1
         assert all(r is not None and len(r) == 1 for r in out)
+
+
+# --------------------------------------------------------------------------- #
+# S2 统一单连接入口：§7.3 判定用例（「A 提交后取消，B 立即提交，A 迟到返回」）
+# --------------------------------------------------------------------------- #
+def _conn(tmp_path=None, **overrides) -> ResolvedConnection:
+    defaults = dict(
+        connection_id="conn-1",
+        connection_revision=1,
+        adapter_kind="gguf_sentiment",
+        provider="local",
+        model="C:/models/finbert.gguf",
+        api_base=None,
+        adapter_options={"head_path": "C:/models/head.npz", "tokenizer_path": "C:/models/tokenizer.json"},
+        context_window=None,
+        concurrency_limit=1,
+        credential_ref=None,
+        credential_version=None,
+    )
+    defaults.update(overrides)
+    return ResolvedConnection(**defaults)
+
+
+def _ctx(invocation_id: str = "inv-1") -> AttemptContext:
+    return AttemptContext(
+        owner_session_id="test-session", owner_epoch=1, invocation_id=invocation_id, attempt_id="att-1"
+    )
+
+
+class TestScoreForConnection:
+    """统一单连接入口判定用例（Plans.md S2 DoD：四场景回归）。"""
+
+    @pytest.mark.asyncio
+    async def test_cancel_then_immediate_submit_late_response_discarded(self):
+        """场景①同模型不同输入：A 取消后 B 立即提交，A 迟到响应（rid=0）被
+        rid 配对丢弃——B 的结果与用量只含 B 自己的输入，不发生数据串扰。"""
+        mgr = _make_mgr()
+        head = _head("linear")
+        mgr._validate_input_files = lambda paths: True
+        mgr._ensure_ready = AsyncMock(return_value=head)
+        mgr._shutdown_worker = MagicMock()  # 清理任务 no-op，防 mock 队列被清空
+        req_q, res_q = _install_queues(mgr, [])
+        res_q.get_nowait.side_effect = queue.Empty
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
+        mgr._worker_proc.is_alive.return_value = True
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 30.0
+        conn = _conn()
+        ctx = _ctx()
+
+        dispatched_a = asyncio.Event()
+
+        def _put(payload, timeout=None):
+            dispatched_a.set()
+
+        req_q.put.side_effect = _put
+        task_a = asyncio.create_task(mgr.score_for_connection(["A-文本"], conn, deadline, ctx))
+        await asyncio.wait_for(dispatched_a.wait(), timeout=2.0)
+        task_a.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task_a
+        assert type(exc_info.value) is asyncio.CancelledError
+        assert mgr._worker_state == "quarantined"
+
+        # B 立即提交：响应队列中 A 的迟到响应（rid=0）在前，B 的（rid=1）在后
+        vec_a = np.full((1, _EMBEDDING_DIM), 2.0, dtype=np.float32)
+        vec_b = np.full((1, _EMBEDDING_DIM), -2.0, dtype=np.float32)
+        res_q.get_nowait.side_effect = [
+            ("ok", 0, 0, vec_a, {"input_tokens": [11], "truncated": [True], "processed": 1}),
+            ("ok", 1, 0, vec_b, {"input_tokens": [7], "truncated": [False], "processed": 1}),
+        ]
+        req_q.put.side_effect = None
+
+        outcome = await asyncio.wait_for(mgr.score_for_connection(["B-文本"], conn, deadline, ctx), timeout=5.0)
+
+        assert outcome.status == "success"
+        # B 的结果与 vec_b 经 head 计算一致（非 A 的迟到向量）
+        expected = apply_head_and_score(vec_b, head)
+        assert len(outcome.results) == 1
+        assert outcome.results[0].text_id == "0"
+        assert outcome.results[0].label == expected[0]["label"]
+        assert outcome.results[0].probabilities == tuple(expected[0]["probs"])
+        assert outcome.results[0].score == pytest.approx(expected[0]["score"])
+        # 用量与元数据只含 B 的 token（A 迟到 meta 的 11 tokens 未被聚合）
+        assert outcome.usage is not None
+        assert outcome.usage.input_total_tokens == 7
+        assert outcome.usage.uncached_input_tokens == 7
+        assert outcome.metadata is not None
+        assert outcome.metadata["processed"] == 1
+        assert outcome.metadata["input_tokens"] == (7,)
+        assert outcome.metadata["truncated"] == (False,)
+        # 请求出站顺序：A=rid 0，B=rid 1（计数器跨取消单调）
+        assert [c.args[0] for c in req_q.put.call_args_list] == [("score", 0, ["A-文本"]), ("score", 1, ["B-文本"])]
+        assert mgr._worker_state == "idle"
+        mgr._cancel_cleanup_task()
+
+    @pytest.mark.asyncio
+    async def test_connection_switch_reloads_new_paths_and_head(self, tmp_path):
+        """场景②跨连接三文件与 head 切换：conn1 取消后 conn2 提交，
+        真实 _ensure_ready 按新三文件路径走完整重载链并换用新 head。"""
+        model_a, model_b, head_a_path, head_b_path, tokenizer_a, tokenizer_b = _make_switch_files(tmp_path)
+        mgr = _make_mgr()
+        mgr._shutdown_worker = MagicMock()
+        mgr._ensure_worker_impl = MagicMock(return_value=True)
+        mgr._await_worker_ready = AsyncMock(return_value=True)
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
+        mgr._worker_proc.is_alive.return_value = True
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 30.0
+        ctx = _ctx()
+
+        # conn1（linear head）：A 提交后取消
+        conn1 = _conn(
+            model=str(model_a),
+            adapter_options={"head_path": str(head_a_path), "tokenizer_path": str(tokenizer_a)},
+        )
+        req_q, res_q = _install_queues(mgr, [])
+        res_q.get_nowait.side_effect = queue.Empty
+        dispatched = asyncio.Event()
+        req_q.put.side_effect = lambda payload, timeout=None: dispatched.set()
+
+        task_a = asyncio.create_task(mgr.score_for_connection(["A-文本"], conn1, deadline, ctx))
+        await asyncio.wait_for(dispatched.wait(), timeout=2.0)
+        task_a.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task_a
+        assert type(exc_info.value) is asyncio.CancelledError
+        assert mgr._worker_state == "quarantined"
+
+        # conn2（bert head，三文件全不同）：B 立即提交
+        conn2 = _conn(
+            connection_id="conn-2",
+            model=str(model_b),
+            adapter_options={"head_path": str(head_b_path), "tokenizer_path": str(tokenizer_b)},
+        )
+        vec_b = np.full((1, _EMBEDDING_DIM), -2.0, dtype=np.float32)
+        res_q.get_nowait.side_effect = [
+            ("ok", 0, 0, np.zeros((1, _EMBEDDING_DIM), dtype=np.float32), {"processed": 1}),
+            ("ok", 1, 0, vec_b, {"input_tokens": [7], "truncated": [False], "processed": 1}),
+        ]
+        req_q.put.side_effect = None
+
+        outcome = await asyncio.wait_for(mgr.score_for_connection(["B-文本"], conn2, deadline, ctx), timeout=5.0)
+
+        assert outcome.status == "success"
+        # 切换证据：worker 已按 conn2 三文件重载，head 换为 conn2 的 bert head
+        assert mgr._model_path == str(model_b)
+        assert mgr._head is not None and mgr._head["mode"] == "bert"
+        head_b = load_head_npz(str(head_b_path))
+        expected = apply_head_and_score(vec_b, head_b)
+        assert outcome.results[0].label == expected[0]["label"]
+        assert outcome.results[0].score == pytest.approx(expected[0]["score"])
+        assert outcome.usage is not None and outcome.usage.input_total_tokens == 7
+        assert [c.args[0] for c in req_q.put.call_args_list] == [("score", 0, ["A-文本"]), ("score", 1, ["B-文本"])]
+        mgr._cancel_cleanup_task()
+
+    @pytest.mark.asyncio
+    async def test_startup_cancel_quarantines_and_propagates(self):
+        """场景③启动取消：ready 等待阶段取消 → CancelledError 传播（R2），
+        worker 隔离并 spawn 清理任务（隔离覆盖启动/ready 阶段）。"""
+        mgr = _make_mgr()
+        mgr._validate_input_files = lambda paths: True
+        mgr._stat_of = lambda *args, **kwargs: (1, 1)
+        mgr._shutdown_worker = MagicMock()
+        mgr._ensure_worker_impl = MagicMock(return_value=True)
+        mgr._await_worker_ready = AsyncMock(side_effect=asyncio.CancelledError())
+
+        loop = asyncio.get_running_loop()
+        with patch("services.news_sentiment_scorer.load_head_npz", return_value=_head("linear")):
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await mgr.score_for_connection(["x"], _conn(), loop.time() + 30.0, _ctx())
+
+        assert type(exc_info.value) is asyncio.CancelledError
+        assert mgr._worker_state == "quarantined"
+        assert mgr._cleanup_task is not None
+        assert mgr._cleanup_target_generation == 0
+        mgr._cancel_cleanup_task()
+
+
+def _make_switch_files(tmp_path):
+    """场景②的双连接三文件构造（model GGUF 魔数 + head npz + tokenizer 存在性）。"""
+    model_a = tmp_path / "model_a.gguf"
+    model_a.write_bytes(b"GGUFA" + b"payload")
+    model_b = tmp_path / "model_b.gguf"
+    model_b.write_bytes(b"GGUFB" + b"payload")
+    head_a_path = tmp_path / "head_a.npz"
+    _write_npz(head_a_path, "linear")
+    head_b_path = tmp_path / "head_b.npz"
+    _write_npz(head_b_path, "bert")
+    tokenizer_a = tmp_path / "tokenizer_a.json"
+    tokenizer_a.write_text("{}")
+    tokenizer_b = tmp_path / "tokenizer_b.json"
+    tokenizer_b.write_text("{}")
+    return model_a, model_b, head_a_path, head_b_path, tokenizer_a, tokenizer_b
