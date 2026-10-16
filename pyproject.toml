@@ -57,6 +57,7 @@ dependencies = [
     "pillow>=12.3.0",  # Security: PYSEC-2026-2253~2257 (decompression bomb + shell injection) fixed in 12.3.0
     "soupsieve>=2.9.0",  # Security: CVE-2026-85999/86000 (ReDoS) fixed in 2.9.0; transitive via beautifulsoup4 (akshare/bs4)
     "oauthlib>=4.0.0",  # Security: CVE-2026-49265 (PKCE timing side-channel, CWE-208) fixed in 4.0.0; transitive via flet (flet requires oauthlib>=3.2.2)
+    "tenacity>=9,<10",  # S2 统一模型管理（ADR-0014）：S3 ScenarioExecutor 单连接重试策略消费
 ]
 
 [project.optional-dependencies]
@@ -85,6 +86,9 @@ dev = [
 optional = [
     "brotlicffi>=1.2.0.2",
     "playwright>=1.63.0",  # E2E browser automation for Flet desktop tests
+]
+sentiment = [
+    "tokenizers>=0.15,<1",  # 新闻情绪打分（N3-2）：HF tokenizers 分词兜底（NOTE(lazy) 可选功能栈）
 ]
 
 [tool.ruff]

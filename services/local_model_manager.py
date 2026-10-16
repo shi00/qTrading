@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import importlib
 import importlib.util
+import itertools
 import logging
 import multiprocessing
 import os
@@ -13,7 +14,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import log_classified
@@ -21,6 +22,16 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
+
+if TYPE_CHECKING:
+    # 仅类型标注消费（运行时禁止导入：services.ai_service 组合根反向依赖本模块，
+    # 顶层导入会成环）；R1 import-linter 豁免 TYPE_CHECKING 块。
+    from services.ai_service.model_management_types import (
+        AdapterResponse,
+        AttemptContext,
+        InferenceRequest,
+        ResolvedConnection,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +44,36 @@ class LocalInferenceTimeoutError(RuntimeError):
 
 _SENTINEL = "__SHUTDOWN__"
 _VERIFICATION_TIMEOUT_SECONDS = 300
+
+# invoke_for_connection 的默认推理参数（与 litellm_client.DEFAULT_LOCAL_MAX_TOKENS 对齐）。
+_DEFAULT_INVOKE_MAX_TOKENS = 256
+_DEFAULT_INVOKE_TEMPERATURE = 0.7
+_DEFAULT_INVOKE_SYSTEM_PROMPT = "You are a helpful assistant."
+_DEFAULT_INVOKE_TIMEOUT_S = 90.0
+
+
+def _model_tag_of(model_path: str) -> str:
+    """模型文件 stem 截断 ≤32 字符（GGUF 溯源标识统一口径，对抗轮 H 单点）。
+
+    与 NewsSentimentScorer.model_tag 共用：``market_news.sentiment_model``
+    String(32) 及 AdapterResponse.actual_model 均经本函数产出。
+    """
+    return Path(model_path).stem[:32]
+
+
+def _response_generation(result: tuple) -> int | None:
+    """S2 响应协议的 generation 字段统一位于下标 2。
+
+    全部 worker 响应形态（ok/error 请求级 / ready / error 加载级 / shutdown）
+    的第 3 个元素均为 worker_generation；缺失或非 int（含 bool）返回 None，
+    由调用方按「协议坏 / 旧协议残留」处理，不参与 generation 过滤。
+    """
+    if len(result) >= 3:
+        gen = result[2]
+        if isinstance(gen, int) and not isinstance(gen, bool):
+            return gen
+    return None
+
 
 # 受支持的本地模型文件魔数白名单（小端 32 位整数视角即 0x46554747）。
 # 当前唯一后端 llama.cpp（llama_cpp.Llama）仅支持 GGUF；若未来引入支持
@@ -76,18 +117,22 @@ def _validate_model_file(model_path: str) -> bool:
 def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverable by unit tests
     model_path: str,
     config: dict,
+    worker_generation: int,
     request_queue: multiprocessing.Queue,
     result_queue: multiprocessing.Queue,
 ):
     """Persistent subprocess worker that loads the model once and serves requests.
 
-    Communication protocol:
+    Communication protocol (S2 单连接执行，响应统一携带 worker_generation）：
     - Parent sends a tuple via request_queue:
-        (prompt, max_tokens, temperature, system_prompt)
+        (prompt, max_tokens, temperature, system_prompt, req_id)  5 元组
     - Worker puts result via result_queue:
-        ("ok", output_text) or ("error", error_message)
-    - Parent sends _SENTINEL to request graceful shutdown.
-    - On model load failure, worker puts ("error", ...) and exits.
+        ("ok", req_id, worker_generation, output_text)
+        ("error", req_id, worker_generation, error_message)
+    - Parent sends _SENTINEL to request graceful shutdown:
+        ("shutdown", "ok", worker_generation)
+    - On model load failure, worker puts ("error", error_message, worker_generation) and exits.
+    - Invalid request format → ("error", -1, worker_generation, msg)（rid=-1 广播）。
     """
     try:
         llama_cpp_module = importlib.import_module("llama_cpp")
@@ -96,7 +141,7 @@ def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverabl
         ChatCompletionRequestSystemMessage = llama_types_module.ChatCompletionRequestSystemMessage
         ChatCompletionRequestUserMessage = llama_types_module.ChatCompletionRequestUserMessage
     except (ImportError, AttributeError) as e:
-        result_queue.put(("error", f"llama-cpp-python import failed: {e}\n{traceback.format_exc()}"))
+        result_queue.put(("error", f"llama-cpp-python import failed: {e}\n{traceback.format_exc()}", worker_generation))
         return
 
     try:
@@ -109,7 +154,7 @@ def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverabl
             flash_attn=config.get("flash_attn", True),
             verbose=False,
         )
-        result_queue.put(("ready", model_path))
+        result_queue.put(("ready", model_path, worker_generation))
     except Exception as e:
         sanitized = DataSanitizer.sanitize_error(e)
         log_classified(
@@ -119,7 +164,7 @@ def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverabl
             "[LocalModel] Model load failed (%s): %s",
             exc_info=True,
         )
-        result_queue.put(("error", f"Model load failed: {sanitized}\n{traceback.format_exc()}"))
+        result_queue.put(("error", f"Model load failed: {sanitized}\n{traceback.format_exc()}", worker_generation))
         return
 
     while True:
@@ -138,14 +183,14 @@ def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverabl
             continue
 
         if request == _SENTINEL:
-            result_queue.put(("shutdown", "ok"))
+            result_queue.put(("shutdown", "ok", worker_generation))
             break
 
-        if not isinstance(request, tuple) or len(request) != 4:
-            result_queue.put(("error", f"Invalid request format: {type(request)}"))
+        if not isinstance(request, tuple) or len(request) != 5:
+            result_queue.put(("error", -1, worker_generation, f"Invalid request format: {type(request)}"))
             continue
 
-        prompt, max_tokens, temperature, system_prompt = request
+        prompt, max_tokens, temperature, system_prompt, req_id = request
         try:
             messages = [
                 ChatCompletionRequestSystemMessage(role="system", content=system_prompt),
@@ -169,7 +214,7 @@ def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverabl
                         collected_content.append(content)
 
             output = "".join(collected_content)
-            result_queue.put(("ok", output))
+            result_queue.put(("ok", req_id, worker_generation, output))
         except Exception as e:
             sanitized = DataSanitizer.sanitize_error(e)
             log_classified(
@@ -179,7 +224,7 @@ def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverabl
                 "[LocalModel] Worker inference failed (%s): %s",
                 exc_info=True,
             )
-            result_queue.put(("error", f"{sanitized}\n{traceback.format_exc()}"))
+            result_queue.put(("error", req_id, worker_generation, f"{sanitized}\n{traceback.format_exc()}"))
 
 
 def _probe_llama_cpp() -> bool:
@@ -245,6 +290,7 @@ class LocalModelManager:
             inst = cls._instance
             if inst is not None:
                 try:
+                    inst._cancel_cleanup_task()
                     inst._shutdown_worker()
                 except Exception as e:
                     log_classified(
@@ -264,6 +310,7 @@ class LocalModelManager:
         inst = cls._instance
         if inst is not None:
             try:
+                inst._cancel_cleanup_task()
                 inst._shutdown_worker()
             except Exception as e:
                 log_classified(
@@ -314,24 +361,37 @@ class LocalModelManager:
             self._verification_mode: bool = False
             self._verification_start_time: float = 0.0
             self._clock = clock or time.monotonic
+            # S2 单连接执行状态（ADR-0014 §6.1 invoke_for_connection 与 legacy 共享底座）：
+            self._worker_generation: int = 0  # 每次 spawn 递增；req_id 计数器跨 generation 不重置
+            self._worker_state: str = "stopped"  # idle / busy / quarantined / stopped
+            self._inflight: dict[int, tuple[str, str]] = {}  # req_id → (invocation_id, attempt_id)
+            self._req_counter = itertools.count()
+            self._cleanup_task: asyncio.Task | None = None
+            self._cleanup_target_generation: int = -1
             self._initialized = True
 
-    def _shutdown_worker(self, *, force: bool = False):
+    def _shutdown_worker(self, *, force: bool = False, generation: int | None = None):
         """Shut down the persistent worker subprocess (thread-safe).
 
         Args:
             force: True 时跳过 sentinel 直接 terminate。用于关机路径——
                    worker 可能正忙于推理，sentinel 要等推理完成才会被处理。
+            generation: 非 None 时仅当与当前 _worker_generation 一致才执行
+                   （quarantined 清理任务的 generation 守卫，防误杀后继 worker）。
         """
         with self._worker_lock:
-            self._shutdown_worker_locked(force=force)
+            self._shutdown_worker_locked(force=force, generation=generation)
 
-    def _shutdown_worker_locked(self, *, force: bool = False):
+    def _shutdown_worker_locked(self, *, force: bool = False, generation: int | None = None):
         """Internal: shut down worker. Caller MUST hold _worker_lock.
 
         Args:
             force: True 时跳过 sentinel 直接 terminate（关机路径使用）。
+            generation: 非 None 时与当前 _worker_generation 不一致则幂等退出
+                   （不 shutdown、不改状态）。
         """
+        if generation is not None and generation != self._worker_generation:
+            return
         if self._request_queue is not None and self._worker_proc is not None and self._worker_proc.is_alive():
             if not force:
                 try:
@@ -393,6 +453,8 @@ class LocalModelManager:
         self._request_queue = None
         self._result_queue = None
         self._worker_ready = False
+        self._worker_state = "stopped"
+        self._inflight.clear()
 
     async def _ensure_worker(self, model_path: str, core_config: dict) -> bool:
         """Start a persistent worker subprocess with the given model.
@@ -414,30 +476,44 @@ class LocalModelManager:
                 and self._worker_proc.is_alive()
                 and self._worker_ready
                 and self._model_path == model_path
+                # quarantined：worker 状态未知（取消/超时后可能仍在推理），
+                # 快路径失效，走完整 shutdown+respawn 自愈（对抗轮 E-1）。
+                and self._worker_state != "quarantined"
             ):
                 return True
 
             self._shutdown_worker_locked()
+            # generation 每次 spawn 递增；旧响应经 _response_generation 过滤丢弃
+            # （计数器 _req_counter 跨 generation 不重置，对抗轮 C）。
+            self._worker_generation += 1
+            generation = self._worker_generation
 
             self._request_queue = multiprocessing.Queue()
             self._result_queue = multiprocessing.Queue()
 
             proc = multiprocessing.Process(
                 target=_persistent_worker,
-                args=(model_path, core_config, self._request_queue, self._result_queue),
+                args=(model_path, core_config, generation, self._request_queue, self._result_queue),
                 daemon=True,
             )
             proc.start()
             self._worker_proc = proc
-            logger.info("[LocalModel] Persistent worker started. pid=%s", proc.pid)
+            logger.info("[LocalModel] Persistent worker started. pid=%s generation=%s", proc.pid, generation)
             return True
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
-    async def _await_worker_ready(self, timeout: float = 180.0) -> bool:
+    async def _await_worker_ready(self, timeout: float = 180.0, *, check_cancel_event: bool = True) -> bool:
         """Wait for the persistent worker to become ready without blocking the event loop.
 
         Uses a polling approach (like run_inference) so we can detect a crashed
         subprocess early instead of blocking on result_queue.get() for the full timeout.
+
+        Args:
+            check_cancel_event: legacy 链（run_inference 语义）默认 True；统一链
+                invoke_for_connection 传 False——``_cancel_event`` 为 legacy 全局
+                取消语义（unload_model 后永久 set，仅 legacy 加载链 clear），
+                统一链不消费该状态，否则每次 respawn 的 ready 等待都会被历史
+                unload 误杀（与 _dispatch_and_collect 的对抗轮 B-3 同源）。
         """
         result_queue = self._result_queue
         if result_queue is None:
@@ -449,7 +525,7 @@ class LocalModelManager:
         deadline = asyncio.get_running_loop().time() + timeout
 
         while True:
-            if self._cancel_event.is_set():
+            if check_cancel_event and self._cancel_event.is_set():
                 logger.info("[LocalModel] Cancel event detected while waiting for worker ready.")
                 self._worker_ready = False
                 # F4-S-1: offload 到线程池避免阻塞事件循环 (R16)
@@ -463,12 +539,22 @@ class LocalModelManager:
             # Non-blocking check for result (use captured ref to avoid TOCTOU race)
             try:
                 result = result_queue.get_nowait()
-                break
             except queue.Empty:
-                pass
+                result = None
             except OSError:
                 logger.warning("[LocalModel] OSError reading result queue while waiting for worker ready.")
-                pass
+                result = None
+
+            # S2: generation 过滤——旧 worker 的残留响应直接丢弃继续等待。
+            if result is not None:
+                gen = _response_generation(result) if isinstance(result, tuple) else None
+                if gen is not None and gen != self._worker_generation:
+                    logger.warning(
+                        "[LocalModel] Discarding stale-generation response while waiting for ready (gen=%s).", gen
+                    )
+                    result = None
+            if result is not None:
+                break
 
             # Detect subprocess crash early (capture proc locally to avoid TOCTOU race)
             proc = self._worker_proc
@@ -477,7 +563,15 @@ class LocalModelManager:
                 try:
                     result = result_queue.get_nowait()
                 except (queue.Empty, OSError):
-                    pass
+                    result = None
+                if result is not None:
+                    gen = _response_generation(result) if isinstance(result, tuple) else None
+                    if gen is not None and gen != self._worker_generation:
+                        logger.warning(
+                            "[LocalModel] Discarding stale-generation response while waiting for ready (gen=%s).",
+                            gen,
+                        )
+                        result = None
                 worker_died = True
                 break
 
@@ -501,9 +595,17 @@ class LocalModelManager:
             await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
             return False
 
-        status, payload = result
+        if not (isinstance(result, tuple) and len(result) == 3):
+            logger.error("[LocalModel] Malformed result while waiting for worker ready: %s", type(result))
+            self._worker_ready = False
+            # F4-S-1: offload 到线程池避免阻塞事件循环 (R16)
+            await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
+            return False
+
+        status, payload = result[0], result[1]
         if status == "ready":
             self._worker_ready = True
+            self._worker_state = "idle"
             logger.info("[LocalModel] Persistent worker ready with model: %s", payload)
             return True
 
@@ -771,69 +873,20 @@ class LocalModelManager:
             timeout_val,
         )
         start_time = asyncio.get_running_loop().time()
+        # S2: legacy 链亦走 5-tuple 协议（req_id 响应配对）；attempt 绑定用
+        # ("legacy", "0") 占位（attempt_context 归属仅 S3 Executor 语义需要）。
+        req_id = next(self._req_counter)
 
         try:
-            loop = asyncio.get_running_loop()
-            if self._request_queue is None:
-                raise RuntimeError("Request queue not initialized")
-            request_queue = self._request_queue
-            await loop.run_in_executor(
-                None,
-                lambda: request_queue.put((prompt, max_tokens, temperature, system_prompt), timeout=5),
+            output = await self._dispatch_and_collect(
+                req_id=req_id,
+                generation=self._worker_generation,
+                request_payload=(prompt, max_tokens, temperature, system_prompt, req_id),
+                poll_budget=float(timeout_val),
+                invocation_id="legacy",
+                attempt_id="0",
+                should_abort=self._cancel_event.is_set,
             )
-        except Exception as e:
-            sanitized = DataSanitizer.sanitize_error(e)
-            log_classified(
-                logger,
-                e,
-                "general",
-                "[LocalModel] Failed to send request to worker (%s): %s",
-                exc_info=True,
-            )
-            self._worker_ready = False
-            raise RuntimeError(f"Failed to send request to worker: {sanitized}") from e
-
-        result = None
-        worker_died = False
-        # Capture result_queue locally to avoid TOCTOU race with _shutdown_worker
-        result_queue = self._result_queue
-        if result_queue is None:
-            raise RuntimeError("Result queue not initialized")
-        try:
-            deadline = asyncio.get_running_loop().time() + float(timeout_val)
-            while True:
-                if self._cancel_event.is_set():
-                    logger.info("[LocalModel] Cancel event detected during inference polling, aborting.")
-                    # F4-S-1: offload 到线程池避免阻塞事件循环 (R16)
-                    await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
-                    raise RuntimeError("Inference cancelled by user (unload_model called).")
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    break
-                try:
-                    result = result_queue.get_nowait()
-                    break
-                except queue.Empty:
-                    pass
-                # Capture proc locally to avoid TOCTOU race
-                proc = self._worker_proc
-                if proc is not None and not proc.is_alive():
-                    try:
-                        result = result_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                    worker_died = True
-                    break
-                await asyncio.sleep(min(0.2, remaining))
-
-            if result is None:
-                try:
-                    result = result_queue.get_nowait()
-                except queue.Empty:
-                    pass
-
-            if result is None and not worker_died:
-                raise TimeoutError()
         except TimeoutError as te:
             elapsed = asyncio.get_running_loop().time() - start_time
             logger.error(
@@ -847,32 +900,389 @@ class LocalModelManager:
                 f"Local inference timed out ({timeout_val}s). Worker terminated, will restart on next call.",
             ) from te
 
-        if result is None:
-            self._worker_ready = False
-            raise RuntimeError("Inference worker exited without producing a result.")
-
-        status, payload = result
         elapsed = asyncio.get_running_loop().time() - start_time
-
-        if status == "error":
-            # R9: payload 来自子进程 result_queue，可能含 traceback（模型路径/系统信息），
-            # 经 sanitize_error 脱敏后再记录。
-            # 异常消息同样必须脱敏：上游 ai_service.py 在 _log(..., exc_info=True) 时
-            # 会输出完整 traceback（含 RuntimeError 消息体），未脱敏 payload 会经此路径泄露。
-            sanitized_payload = DataSanitizer.sanitize_error(payload)
-            logger.error("[LocalModel] Inference error: %s", sanitized_payload)
-            raise RuntimeError(f"Inference execution failed: {sanitized_payload}")
-
-        if status == "shutdown":
-            self._worker_ready = False
-            raise RuntimeError("Worker shut down unexpectedly during inference.")
-
         logger.info(
             "[LocalModel] Persistent worker inference completed in %.2fs. Output len: %s",
             elapsed,
-            len(payload),
+            len(output),
         )
-        return payload
+        return output
+
+    # ------------------------------------------------------------------ #
+    # S2 单连接执行共享底座（legacy run_inference 与 invoke_for_connection）
+    # ------------------------------------------------------------------ #
+    async def _dispatch_and_collect(
+        self,
+        *,
+        req_id: int,
+        generation: int,
+        request_payload: tuple,
+        poll_budget: float,
+        invocation_id: str,
+        attempt_id: str,
+        should_abort=None,
+    ) -> str:
+        """提交 5-tuple 请求并轮询配对响应（单点：submit + poll + 配对）。
+
+        - req_id 进 ``_inflight``（绑定 invocation_id/attempt_id）；提交前注册，
+          终态（发送失败/取消/超时/崩溃/成功消费/匹配 error）时移除；
+        - 响应消费经 :meth:`_consume_inference_result` 单点（generation 过滤 +
+          inflight 校验）；
+        - ``should_abort`` 为 legacy 取消钩子（unload_model 语义）；统一链
+          （invoke_for_connection）不复用 ``_cancel_event``（其 unload 后永久
+          set，复用会误杀后续请求，对抗轮 B-3）。
+
+        Raises:
+            RuntimeError: 发送失败 / worker 取消 / 崩溃 / 匹配 error / 协议坏。
+            TimeoutError: 轮询预算耗尽（调用方决定是否终止 worker）。
+        """
+        with self._worker_lock:
+            self._inflight[req_id] = (invocation_id, attempt_id)
+            self._worker_state = "busy"
+
+        loop = asyncio.get_running_loop()
+        try:
+            request_queue = self._request_queue
+            if request_queue is None:
+                raise RuntimeError("Request queue not initialized")
+            await loop.run_in_executor(
+                None,
+                lambda: request_queue.put(request_payload, timeout=5),
+            )
+        except asyncio.CancelledError:
+            # 取消：req_id 终态（docstring 终态表），出站注册即移除
+            # （迟到响应由 req_id 单调递增保证被 rid 配对丢弃）。
+            with self._worker_lock:
+                self._inflight.pop(req_id, None)
+            raise
+        except Exception as e:
+            sanitized = DataSanitizer.sanitize_error(e)
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[LocalModel] Failed to send request to worker (%s): %s",
+                exc_info=True,
+            )
+            self._worker_ready = False
+            with self._worker_lock:
+                self._inflight.pop(req_id, None)
+            raise RuntimeError(f"Failed to send request to worker: {sanitized}") from e
+
+        result_queue = self._result_queue
+        if result_queue is None:
+            with self._worker_lock:
+                self._inflight.pop(req_id, None)
+            raise RuntimeError("Result queue not initialized")
+
+        poll_deadline = loop.time() + poll_budget
+        while True:
+            if should_abort is not None and should_abort():
+                logger.info("[LocalModel] Cancel event detected during inference polling, aborting.")
+                with self._worker_lock:
+                    self._inflight.pop(req_id, None)
+                # F4-S-1: offload 到线程池避免阻塞事件循环 (R16)
+                await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
+                raise RuntimeError("Inference cancelled by user (unload_model called).")
+
+            remaining = poll_deadline - loop.time()
+            if remaining <= 0:
+                with self._worker_lock:
+                    self._inflight.pop(req_id, None)
+                raise TimeoutError()
+
+            try:
+                result: object = result_queue.get_nowait()
+            except queue.Empty:
+                result = None
+            except (OSError, ValueError):
+                # ValueError：队列被 close()+join_thread() 后 get_nowait 的实测行为。
+                logger.warning("[LocalModel] OSError/ValueError reading result queue during inference.")
+                result = None
+
+            if result is not None and isinstance(result, tuple):
+                gen = _response_generation(result)
+                if gen is not None and gen != generation:
+                    logger.warning("[LocalModel] Discarding stale-generation response during inference (gen=%s).", gen)
+                else:
+                    output = self._consume_inference_result(req_id, result, generation=generation)
+                    if output is not None:
+                        return output
+
+            # Capture proc locally to avoid TOCTOU race
+            proc = self._worker_proc
+            if proc is not None and not proc.is_alive():
+                try:
+                    result = result_queue.get_nowait()
+                except (queue.Empty, OSError, ValueError):
+                    result = None
+                if result is not None and isinstance(result, tuple):
+                    gen = _response_generation(result)
+                    if gen is None or gen == generation:
+                        output = self._consume_inference_result(req_id, result, generation=generation)
+                        if output is not None:
+                            return output
+                # worker 已退出：ready 标志必须清除，否则下次调用走快路径
+                # 对已死 worker 发请求（发送失败兜底，但状态先行失真）。
+                self._worker_ready = False
+                with self._worker_lock:
+                    self._inflight.pop(req_id, None)
+                raise RuntimeError("Inference worker exited without producing a result.")
+
+            # R2: except Exception 不吞 CancelledError；sleep 被取消时直接传播，
+            # req_id 按终态语义移除出站注册（docstring 终态表）。
+            try:
+                await asyncio.sleep(min(0.2, remaining))
+            except asyncio.CancelledError:
+                with self._worker_lock:
+                    self._inflight.pop(req_id, None)
+                raise
+
+    def _consume_inference_result(self, req_id: int, result: tuple, *, generation: int) -> str | None:
+        """单点解析推理响应（generation 配对 + _inflight 绑定，对抗轮 C/D）。
+
+        Returns:
+            匹配 ``req_id`` 的输出文本；不匹配 / 过期 generation 返回 None
+            （调用方丢弃后继续轮询）。
+
+        Raises:
+            RuntimeError: 匹配 req_id 的 error / rid=-1 广播 / 意外 shutdown /
+                协议坏（消息经 R9 脱敏）。
+        """
+        status = result[0]
+        if status == "ok":
+            if len(result) != 4:
+                raise RuntimeError(f"Malformed ok result (len={len(result)}).")
+            _, rid, gen, output = result
+            if gen != generation:
+                logger.warning("[LocalModel] Discarding stale-generation ok response (rid=%s gen=%s).", rid, gen)
+                return None
+            if rid != req_id:
+                logger.warning("[LocalModel] Discarding mismatched ok response (rid=%s).", rid)
+                return None
+            with self._worker_lock:
+                if req_id not in self._inflight:
+                    # 迟到响应（请求已终态）：只消费 generation 匹配且在 inflight 的。
+                    logger.warning("[LocalModel] Discarding late response for unknown req_id=%s.", req_id)
+                    return None
+                self._inflight.pop(req_id, None)
+                if not self._inflight:
+                    self._worker_state = "idle"
+            if not isinstance(output, str):
+                raise RuntimeError(f"Malformed output payload: {type(output)}.")
+            return output
+        if status == "error":
+            if len(result) == 4:
+                rid, gen, payload = result[1], result[2], result[3]
+                if gen != generation:
+                    logger.warning("[LocalModel] Discarding stale-generation error response (rid=%s gen=%s).", rid, gen)
+                    return None
+                if rid == req_id or rid == -1:
+                    with self._worker_lock:
+                        self._inflight.pop(req_id, None)
+                        if not self._inflight:
+                            self._worker_state = "idle"
+                    # R9: payload 来自子进程，可能含 traceback，脱敏后入异常消息。
+                    raise RuntimeError(f"Inference execution failed: {DataSanitizer.sanitize_error(payload)}")
+                logger.warning("[LocalModel] Discarding mismatched error response (rid=%s).", rid)
+                return None
+            if len(result) == 3:
+                # 加载级/worker 级广播形态 ("error", msg, gen)。
+                gen, payload = result[2], result[1]
+                if gen != generation:
+                    return None
+                with self._worker_lock:
+                    self._inflight.pop(req_id, None)
+                    if not self._inflight:
+                        self._worker_state = "idle"
+                raise RuntimeError(f"Inference execution failed: {DataSanitizer.sanitize_error(payload)}")
+            raise RuntimeError(f"Malformed error result (len={len(result)}).")
+        if status == "shutdown":
+            gen = _response_generation(result)
+            if gen is not None and gen != generation:
+                return None
+            # worker 已自行退出：ready 标志同步清除（下次调用走完整重载链）。
+            self._worker_ready = False
+            raise RuntimeError("Worker shut down unexpectedly during inference.")
+        raise RuntimeError(f"Unknown result status from worker: {status!r}.")
+
+    def _quarantine_worker(self, generation: int) -> None:
+        """标记 worker quarantined 并 spawn 异步清理任务（须在事件循环线程调用）。
+
+        取消/超时后 worker 状态未知（启动加载/推理中均可能）→ 隔离 + 异步清理；
+        ``_ensure_worker_impl`` 快路径因 quarantined 失效，下次调用走完整
+        shutdown+respawn 自愈。
+        """
+        with self._worker_lock:
+            self._worker_state = "quarantined"
+        self._spawn_cleanup_task(generation)
+
+    def _spawn_cleanup_task(self, generation: int) -> None:
+        """Spawn（或收编）quarantined worker 的异步清理任务（须在事件循环线程调用）。
+
+        同一 generation 已有清理任务在跑则幂等；目标 generation 已过时的
+        旧任务被取消（其 generation 守卫保证它本也会幂等退出，对抗轮 B-2）。
+        """
+        task = self._cleanup_task
+        if task is not None and not task.done():
+            if self._cleanup_target_generation == generation:
+                return
+            task.cancel()
+        self._cleanup_target_generation = generation
+        self._cleanup_task = asyncio.get_running_loop().create_task(self._cleanup_worker_async(generation))
+
+    def _cancel_cleanup_task(self) -> None:
+        """取消待执行/执行中的清理任务（reset/atexit 路径，防悬空任务）。"""
+        task = self._cleanup_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._cleanup_task = None
+
+    async def _cleanup_worker_async(self, generation: int) -> None:
+        """异步清理 quarantined worker（同步段 offload 到线程池，R16）。
+
+        generation 快照守卫经 ``_shutdown_worker(generation=...)`` 生效：执行时
+        若 ``_worker_generation`` 已前进（新 worker 已 spawn），幂等退出不误杀。
+        清理失败保持 quarantined（下次调用快路径失效，走完整重载链自愈）。
+        """
+        try:
+            # 有界终止 force 语义：terminate 1.5s + kill 0.5s（对抗轮 I-2）。
+            await ThreadPoolManager().run_async(
+                TaskType.IO,
+                self._shutdown_worker,
+                force=True,
+                generation=generation,
+            )
+        except Exception as e:
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[LocalModel] Cleanup of quarantined worker failed (%s): %s",
+                exc_info=True,
+            )
+
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
+    async def invoke_for_connection(
+        self,
+        request: InferenceRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+    ) -> AdapterResponse:
+        """统一单连接推理（S2，ADR-0014 §6.1）：不读全局配置、不做候选选择。
+
+        - 模型路径 = ``resolved_connection.model``，服务参数（n_threads/n_batch/
+          n_ctx/n_gpu_layers/flash_attn/timeout）= ``adapter_options``——配置快照
+          语义由调用方（S3 ScenarioExecutor）保证，本方法不读
+          ``ConfigHandler.get_local_ai_config``；
+        - deadline 为单调时钟截止值（loop.time() 口径）：ready 等待 =
+          min(180, remaining)，推理轮询 = min(adapter timeout, remaining)；
+          remaining 耗尽抛 ``TimeoutError``（ready 前零出站）；
+        - req_id 绑定 ``attempt_context`` 进 ``_inflight``；取消/超时 → worker
+          标记 quarantined 并 spawn 异步清理任务（generation 守卫）；
+        - ``asyncio.CancelledError`` 始终传播（R2），不包装；
+        - 并发契约：同连接串行由 S3 ScenarioExecutor 许可语义保证
+          （``concurrency_limit``）；与 legacy ``run_inference`` 的互斥沿用既有
+          UI 层串行约束——本方法不建 loop-local 锁（与 run_inference 同现状），
+          请求-响应配对经 rid 单调递增 + generation 过滤兜底丢弃错配。
+
+        Raises:
+            TimeoutError: deadline 已耗尽 / 轮询预算耗尽。
+            RuntimeError: 文件校验失败 / worker 启动或就绪失败 / 推理失败。
+            ImportError: llama-cpp-python 缺失。
+        """
+        if not _HAS_LLAMA_CPP:
+            raise ImportError("llama-cpp-python not installed.")
+
+        model_path = resolved_connection.model
+        # GGUF 魔数校验含文件 open+read（同步 IO），offload 线程池（R16，与
+        # scorer _validate_input_files 同口径）。
+        if not await ThreadPoolManager().run_async(TaskType.IO, _validate_model_file, model_path):
+            raise RuntimeError(f"Invalid GGUF model file (missing, wrong type, or bad magic header): {model_path}")
+
+        loop = asyncio.get_running_loop()
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError("Deadline exhausted before local inference dispatch.")
+
+        adapter_options = resolved_connection.adapter_options
+        core_config = {
+            "n_threads": adapter_options.get("n_threads", 4),
+            "n_batch": adapter_options.get("n_batch", 1024),
+            "n_ctx": adapter_options.get("n_ctx", 4096),
+            "n_gpu_layers": adapter_options.get("n_gpu_layers", 0),
+            "flash_attn": adapter_options.get("flash_attn", True),
+        }
+
+        try:
+            if not await self._ensure_worker(model_path, core_config):
+                raise RuntimeError("Persistent worker failed to start. Check logs for details.")
+            if not self._worker_ready:
+                ready_budget = min(180.0, deadline - loop.time())
+                if ready_budget <= 0:
+                    raise TimeoutError("Deadline exhausted while waiting for local worker ready.")
+                if not await self._await_worker_ready(timeout=ready_budget, check_cancel_event=False):
+                    raise RuntimeError("Persistent worker failed to become ready. Check logs for details.")
+        except asyncio.CancelledError:
+            # 启动/ready 阶段取消：worker 子进程可能正在加载模型（状态未知）→
+            # 隔离 + 异步清理（取消隔离覆盖启动/ready/提交/推理全程，R2 传播）。
+            self._quarantine_worker(self._worker_generation)
+            raise
+        except TimeoutError:
+            # ready 预算耗尽：刚 spawn 的 worker 可能仍在加载 → 隔离 + 异步清理。
+            self._quarantine_worker(self._worker_generation)
+            raise
+
+        payload = request.payload
+        adapter_timeout = float(adapter_options.get("timeout", _DEFAULT_INVOKE_TIMEOUT_S) or _DEFAULT_INVOKE_TIMEOUT_S)
+        poll_budget = min(adapter_timeout, deadline - loop.time())
+        if poll_budget <= 0:
+            raise TimeoutError("Deadline exhausted after local worker ready.")
+
+        req_id = next(self._req_counter)
+        request_payload = (
+            str(payload.get("prompt", "")),
+            int(payload.get("max_tokens", _DEFAULT_INVOKE_MAX_TOKENS)),
+            float(payload.get("temperature", _DEFAULT_INVOKE_TEMPERATURE)),
+            str(payload.get("system_prompt", _DEFAULT_INVOKE_SYSTEM_PROMPT)),
+            req_id,
+        )
+        generation = self._worker_generation
+        try:
+            output = await self._dispatch_and_collect(
+                req_id=req_id,
+                generation=generation,
+                request_payload=request_payload,
+                poll_budget=poll_budget,
+                invocation_id=attempt_context.invocation_id,
+                attempt_id=attempt_context.attempt_id,
+            )
+        except asyncio.CancelledError:
+            # 取消时 worker 状态未知（可能仍在推理）→ 隔离 + 异步清理；
+            # 不复用 _cancel_event（其 unload 后永久 set）。
+            self._quarantine_worker(generation)
+            raise
+        except TimeoutError:
+            logger.warning(
+                "[LocalModel] invoke_for_connection timed out (req_id=%s connection=%s); quarantining worker.",
+                req_id,
+                resolved_connection.connection_id,
+            )
+            self._quarantine_worker(generation)
+            raise
+
+        # lazy-import: AdapterResponse 仅 TYPE_CHECKING 导入（services.ai_service
+        # 组合根反向依赖本模块，顶层运行时导入会成环）；成功路径运行时构造，
+        # 判定用例（场景①）首次命中该路径时暴露 NameError，故函数内延迟导入。
+        from services.ai_service.model_management_types import AdapterResponse
+
+        return AdapterResponse(
+            content=output,
+            usage=None,
+            actual_model=_model_tag_of(model_path),
+            metadata={},
+        )
 
     def unload_model(self, *, force: bool = False):
         """Free memory by terminating the worker subprocess and resetting state.

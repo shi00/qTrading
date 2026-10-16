@@ -3,6 +3,7 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
 import multiprocessing
 import queue
 import time
@@ -11,10 +12,18 @@ from pathlib import Path
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
+from services.ai_service.model_management_types import (
+    AdapterResponse,
+    AttemptContext,
+    InferenceRequest,
+    ResolvedConnection,
+)
 from services.local_model_manager import (
     LocalModelManager,
+    _DEFAULT_INVOKE_SYSTEM_PROMPT,
     _HAS_LLAMA_CPP,
     _SENTINEL,
+    _model_tag_of,
     _persistent_worker,
     _probe_llama_cpp,
     _validate_model_file,
@@ -179,7 +188,7 @@ class TestPersistentWorkerEnsureWorker:
             patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
         ):
             mock_res_queue = MagicMock(spec=queue.Queue)
-            mock_res_queue.get.return_value = ("ready", "/new/model.gguf")
+            mock_res_queue.get.return_value = ("ready", "/new/model.gguf", 0)
             mock_req_queue = MagicMock(spec=queue.Queue)
             mock_queue_cls.side_effect = [mock_req_queue, mock_res_queue]
 
@@ -220,6 +229,7 @@ class TestPersistentWorkerEnsureWorker:
         mgr._result_queue.get_nowait.return_value = (
             "error",
             "Model load failed: no file",
+            0,
         )
         mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
@@ -235,7 +245,7 @@ class TestPersistentWorkerEnsureWorker:
         mgr = LocalModelManager()
         mgr._worker_ready = False
         mgr._result_queue = MagicMock(spec=queue.Queue)
-        mgr._result_queue.get_nowait.return_value = ("ready", "/path/to/model.gguf")
+        mgr._result_queue.get_nowait.return_value = ("ready", "/path/to/model.gguf", 0)
         mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
@@ -428,11 +438,11 @@ class TestPersistentWorkerModelReuse:
                 }
 
                 mgr._result_queue = MagicMock(spec=queue.Queue)
-                mgr._result_queue.get_nowait.return_value = ("ok", "first result")
+                mgr._result_queue.get_nowait.return_value = ("ok", 0, 0, "first result")
                 result1 = await mgr.run_inference("first prompt")
                 assert result1 == "first result"
 
-                mgr._result_queue.get_nowait.return_value = ("ok", "second result")
+                mgr._result_queue.get_nowait.return_value = ("ok", 1, 0, "second result")
                 result2 = await mgr.run_inference("second prompt")
                 assert result2 == "second result"
 
@@ -718,7 +728,7 @@ class TestLocalModelManagerRunInferenceWithModel:
 
                 mock_req_queue = MagicMock(spec=queue.Queue)
                 mock_res_queue = MagicMock(spec=queue.Queue)
-                mock_res_queue.get_nowait.return_value = ("ok", "result text")
+                mock_res_queue.get_nowait.return_value = ("ok", 0, 0, "result text")
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
                 mgr._worker_ready = True
@@ -780,6 +790,8 @@ class TestLocalModelManagerRunInferenceWithModel:
                 mock_res_queue = MagicMock(spec=queue.Queue)
                 mock_res_queue.get_nowait.return_value = (
                     "error",
+                    0,
+                    0,
                     "something went wrong",
                 )
                 mgr._request_queue = mock_req_queue
@@ -808,7 +820,7 @@ class TestLocalModelManagerRunInferenceWithModel:
 
                 mock_req_queue = MagicMock(spec=queue.Queue)
                 mock_res_queue = MagicMock(spec=queue.Queue)
-                mock_res_queue.get_nowait.return_value = ("shutdown", "ok")
+                mock_res_queue.get_nowait.return_value = ("shutdown", "ok", 0)
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
                 mgr._worker_ready = True
@@ -1195,7 +1207,7 @@ class TestShutdownWorkerLockedNoDeadlock:
 
         with patch.object(mgr, "_shutdown_worker_locked") as mock_locked:
             mgr._shutdown_worker()
-            mock_locked.assert_called_once_with(force=False)
+            mock_locked.assert_called_once_with(force=False, generation=None)
 
 
 class TestAwaitWorkerReadyPolling:
@@ -1240,7 +1252,7 @@ class TestAwaitWorkerReadyPolling:
         """Worker sends ("error", msg) via queue → return False with _worker_ready=False."""
         mgr = LocalModelManager()
         mgr._result_queue = MagicMock(spec=queue.Queue)
-        mgr._result_queue.get_nowait.return_value = ("error", "CUDA out of memory")
+        mgr._result_queue.get_nowait.return_value = ("error", "CUDA out of memory", 0)
         mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
@@ -1252,10 +1264,10 @@ class TestAwaitWorkerReadyPolling:
 
     @pytest.mark.asyncio
     async def test_ready_status_sets_worker_ready(self):
-        """Worker sends ("ready", path) → return True, _worker_ready=True."""
+        """Worker sends ("ready", path, gen) → return True, _worker_ready=True."""
         mgr = LocalModelManager()
         mgr._result_queue = MagicMock(spec=queue.Queue)
-        mgr._result_queue.get_nowait.return_value = ("ready", "/path/to/model.gguf")
+        mgr._result_queue.get_nowait.return_value = ("ready", "/path/to/model.gguf", 0)
         mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
@@ -1286,7 +1298,7 @@ class TestAwaitWorkerReadyPolling:
         # First get_nowait raises Empty (in polling loop), second returns error (after crash detected)
         mgr._result_queue.get_nowait.side_effect = [
             queue.Empty,
-            ("error", "import failed"),
+            ("error", "import failed", 0),
         ]
         mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = False
@@ -1402,7 +1414,7 @@ class TestAwaitWorkerReadyEdgeCases:
             call_count += 1
             if call_count <= 1:
                 raise queue.Empty
-            return ("ready", "/path/to/model.gguf")
+            return ("ready", "/path/to/model.gguf", 0)
 
         mgr._result_queue.get_nowait = get_nowait_sequence
 
@@ -1433,7 +1445,7 @@ class TestRunInferenceWorkerNotReady:
 
                 mock_req_queue = MagicMock(spec=queue.Queue)
                 mock_res_queue = MagicMock(spec=queue.Queue)
-                mock_res_queue.get_nowait.return_value = ("ok", "result")
+                mock_res_queue.get_nowait.return_value = ("ok", 0, 0, "result")
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
                 mgr._worker_proc = MagicMock(spec=_RealProcess)
@@ -1530,7 +1542,7 @@ class TestPersistentWorkerImportFailure:
         mock_res_queue = MagicMock(spec=queue.Queue)
 
         with patch("importlib.import_module", side_effect=ImportError("no module")):
-            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+            _persistent_worker("/path/to/model.gguf", {}, 0, mock_req_queue, mock_res_queue)
 
         mock_res_queue.put.assert_called_once()  # noqa: weak-assertion result 含非确定性 traceback；参数已由后续 call_args 断言验证
         call_args = mock_res_queue.put.call_args[0][0]
@@ -1543,7 +1555,7 @@ class TestPersistentWorkerImportFailure:
         mock_res_queue = MagicMock(spec=queue.Queue)
 
         with patch("importlib.import_module", side_effect=AttributeError("no attr")):
-            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+            _persistent_worker("/path/to/model.gguf", {}, 0, mock_req_queue, mock_res_queue)
 
         mock_res_queue.put.assert_called_once()  # noqa: weak-assertion result 含非确定性 traceback；参数已由后续 call_args 断言验证
         call_args = mock_res_queue.put.call_args[0][0]
@@ -1562,7 +1574,7 @@ class TestPersistentWorkerModelLoadFailure:
         mock_llama_module.Llama.side_effect = Exception("model not found")
 
         with patch("importlib.import_module", return_value=mock_llama_module):
-            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+            _persistent_worker("/path/to/model.gguf", {}, 0, mock_req_queue, mock_res_queue)
 
         mock_res_queue.put.assert_called_once()  # noqa: weak-assertion result 含非确定性 traceback；参数已由后续 call_args 断言验证
         call_args = mock_res_queue.put.call_args[0][0]
@@ -1586,11 +1598,11 @@ class TestPersistentWorkerInvalidRequest:
         mock_req_queue.get.side_effect = ["invalid_request", _SENTINEL]
 
         with patch("importlib.import_module", return_value=mock_llama_module):
-            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+            _persistent_worker("/path/to/model.gguf", {}, 0, mock_req_queue, mock_res_queue)
 
         error_calls = [c for c in mock_res_queue.put.call_args_list if c[0][0][0] == "error"]
         assert len(error_calls) >= 1
-        assert "Invalid request format" in error_calls[0][0][0][1]
+        assert "Invalid request format" in error_calls[0][0][0][3]
 
     def test_invalid_request_format_wrong_length(self):
         mock_req_queue = MagicMock(spec=queue.Queue)
@@ -1605,7 +1617,7 @@ class TestPersistentWorkerInvalidRequest:
         mock_req_queue.get.side_effect = [("prompt", 100), _SENTINEL]
 
         with patch("importlib.import_module", return_value=mock_llama_module):
-            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+            _persistent_worker("/path/to/model.gguf", {}, 0, mock_req_queue, mock_res_queue)
 
         error_calls = [c for c in mock_res_queue.put.call_args_list if c[0][0][0] == "error"]
         assert len(error_calls) >= 1
@@ -1625,14 +1637,14 @@ class TestPersistentWorkerInferenceError:
         mock_llama.create_chat_completion.side_effect = Exception("inference failed")
         mock_llama_module.Llama.return_value = mock_llama
 
-        mock_req_queue.get.side_effect = [("prompt", 100, 0.7, "system"), _SENTINEL]
+        mock_req_queue.get.side_effect = [("prompt", 100, 0.7, "system", 0), _SENTINEL]
 
         with patch("importlib.import_module", return_value=mock_llama_module):
-            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+            _persistent_worker("/path/to/model.gguf", {}, 0, mock_req_queue, mock_res_queue)
 
         error_calls = [c for c in mock_res_queue.put.call_args_list if c[0][0][0] == "error"]
         assert len(error_calls) >= 1
-        assert "inference failed" in error_calls[-1][0][0][1]
+        assert "inference failed" in error_calls[-1][0][0][3]
 
 
 class TestPersistentWorkerQueueGetError:
@@ -1651,7 +1663,7 @@ class TestPersistentWorkerQueueGetError:
         mock_req_queue.get.side_effect = [Exception("queue error"), _SENTINEL]
 
         with patch("importlib.import_module", return_value=mock_llama_module):
-            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+            _persistent_worker("/path/to/model.gguf", {}, 0, mock_req_queue, mock_res_queue)
 
         ready_calls = [c for c in mock_res_queue.put.call_args_list if c[0][0][0] == "ready"]
         assert len(ready_calls) == 1
@@ -1673,7 +1685,7 @@ class TestPersistentWorkerSentinelShutdown:
         mock_req_queue.get.side_effect = [_SENTINEL]
 
         with patch("importlib.import_module", return_value=mock_llama_module):
-            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+            _persistent_worker("/path/to/model.gguf", {}, 0, mock_req_queue, mock_res_queue)
 
         shutdown_calls = [c for c in mock_res_queue.put.call_args_list if c[0][0][0] == "shutdown"]
         assert len(shutdown_calls) == 1
@@ -1738,7 +1750,7 @@ class TestRunInferenceWorkerDiesDuringPolling:
                     poll_count += 1
                     if poll_count == 1:
                         raise queue.Empty()
-                    return ("ok", "result")
+                    return ("ok", 0, 0, "result")
 
                 mock_res_queue.get_nowait.side_effect = mock_get_nowait
 
@@ -1783,7 +1795,7 @@ class TestRunInferenceDeadlineReached:
                     call_count += 1
                     if call_count <= 5:
                         raise queue.Empty()
-                    return ("ok", "late result")
+                    return ("ok", 0, 0, "late result")
 
                 mock_res_queue.get_nowait.side_effect = mock_get_nowait
 
@@ -2268,7 +2280,7 @@ class TestPayloadSanitization:
         # 含空格的 Windows 路径（项目真实工作目录风格）
         sensitive_path = r"D:\workspace\Quantitative Trading\models\test.gguf"
         payload = f'Model load failed: Traceback:\n  File "{sensitive_path}", line 1'
-        mgr._result_queue.get_nowait.return_value = ("error", payload)
+        mgr._result_queue.get_nowait.return_value = ("error", payload, 0)
         mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
@@ -2301,7 +2313,7 @@ class TestPayloadSanitization:
                 payload = f'Inference failed: Traceback:\n  File "{sensitive_path}", line 42'
                 mock_req_queue = MagicMock(spec=queue.Queue)
                 mock_res_queue = MagicMock(spec=queue.Queue)
-                mock_res_queue.get_nowait.return_value = ("error", payload)
+                mock_res_queue.get_nowait.return_value = ("error", 0, 0, payload)
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
                 mgr._worker_ready = True
@@ -2405,3 +2417,232 @@ class TestLlamaCppProbe:
         monkeypatch.delitem(sys.modules, "llama_cpp", raising=False)
         with patch("importlib.util.find_spec", side_effect=exc):
             assert _probe_llama_cpp() is False
+
+
+# --------------------------------------------------------------------------- #
+# S2 统一单连接入口：§7.3 判定用例（「A 提交后取消，B 立即提交，A 迟到返回」）
+# --------------------------------------------------------------------------- #
+def _conn(**overrides) -> ResolvedConnection:
+    defaults = dict(
+        connection_id="conn-1",
+        connection_revision=1,
+        adapter_kind="gguf_chat",
+        provider="local",
+        model="C:/models/chat.gguf",
+        api_base=None,
+        adapter_options={},
+        context_window=None,
+        concurrency_limit=1,
+        credential_ref=None,
+        credential_version=None,
+    )
+    defaults.update(overrides)
+    return ResolvedConnection(**defaults)
+
+
+def _ctx(invocation_id: str = "inv-1") -> AttemptContext:
+    return AttemptContext(
+        owner_session_id="test-session", owner_epoch=1, invocation_id=invocation_id, attempt_id="att-1"
+    )
+
+
+def _req(prompt: str, deadline: float) -> InferenceRequest:
+    return InferenceRequest(
+        scenario_id="scenario-test",
+        task_id="task-test",
+        invocation_id="inv-1",
+        payload={"prompt": prompt},
+        deadline=deadline,
+    )
+
+
+class TestInvokeForConnection:
+    """统一单连接推理判定用例（Plans.md S2 DoD：四场景回归）。"""
+
+    @pytest.mark.asyncio
+    async def test_cancel_then_immediate_submit_late_response_discarded(self):
+        """场景①同模型不同输入：A 取消后 B 立即提交，A 迟到响应（rid=0）被
+        rid 配对丢弃——B 收到自己的输出；req_id 终态后 _inflight 同步移除。"""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            with patch("services.local_model_manager._validate_model_file", return_value=True):
+                mgr = LocalModelManager()
+                mgr._worker_ready = True  # 跳过 ready 等待，聚焦请求-响应配对
+                mgr._shutdown_worker = MagicMock()  # 清理任务 no-op，防 mock 队列被清空
+                mgr._ensure_worker = AsyncMock(return_value=True)
+                mgr._request_queue = MagicMock(spec=queue.Queue)
+                mgr._result_queue = MagicMock(spec=queue.Queue)
+                mgr._result_queue.get_nowait.side_effect = queue.Empty
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
+                mgr._worker_proc.is_alive.return_value = True
+
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 30.0
+                conn = _conn()
+                ctx = _ctx()
+
+                dispatched_a = asyncio.Event()
+
+                def _put(payload, timeout=None):
+                    dispatched_a.set()
+
+                mgr._request_queue.put.side_effect = _put
+                task_a = asyncio.create_task(mgr.invoke_for_connection(_req("A-prompt", deadline), conn, deadline, ctx))
+                await asyncio.wait_for(dispatched_a.wait(), timeout=2.0)
+                task_a.cancel()
+                with pytest.raises(asyncio.CancelledError) as exc_info:
+                    await task_a
+                assert type(exc_info.value) is asyncio.CancelledError
+                assert mgr._worker_state == "quarantined"
+                # 取消即终态：A 的出站注册已移除（迟到响应由 rid 单调性丢弃）
+                assert mgr._inflight == {}
+
+                # B 立即提交：A 的迟到响应（rid=0）在前，B 的（rid=1）在后
+                mgr._result_queue.get_nowait.side_effect = [
+                    ("ok", 0, 0, "A-output"),
+                    ("ok", 1, 0, "B-output"),
+                ]
+                mgr._request_queue.put.side_effect = None
+
+                response = await asyncio.wait_for(
+                    mgr.invoke_for_connection(_req("B-prompt", deadline), conn, deadline, ctx),
+                    timeout=5.0,
+                )
+
+                assert isinstance(response, AdapterResponse)
+                assert response.content == "B-output"
+                assert response.actual_model == _model_tag_of(conn.model)
+                assert response.usage is None
+                assert response.metadata == {}
+                # 出站顺序：A=rid 0，B=rid 1（计数器跨取消单调）
+                assert [c.args[0] for c in mgr._request_queue.put.call_args_list] == [
+                    ("A-prompt", 256, 0.7, _DEFAULT_INVOKE_SYSTEM_PROMPT, 0),
+                    ("B-prompt", 256, 0.7, _DEFAULT_INVOKE_SYSTEM_PROMPT, 1),
+                ]
+                assert mgr._inflight == {}
+                assert mgr._worker_state == "idle"
+                mgr._cancel_cleanup_task()
+
+    @pytest.mark.asyncio
+    async def test_startup_cancel_quarantines_and_propagates(self):
+        """场景③启动取消：ready 等待阶段取消 → CancelledError 传播（R2），
+        worker 隔离并 spawn 清理任务（隔离覆盖启动/ready 阶段）。"""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            with patch("services.local_model_manager._validate_model_file", return_value=True):
+                mgr = LocalModelManager()
+                mgr._worker_ready = False
+                mgr._ensure_worker = AsyncMock(return_value=True)
+                mgr._await_worker_ready = AsyncMock(side_effect=asyncio.CancelledError())
+
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 30.0
+                with pytest.raises(asyncio.CancelledError) as exc_info:
+                    await mgr.invoke_for_connection(_req("x", deadline), _conn(), deadline, _ctx())
+
+                assert type(exc_info.value) is asyncio.CancelledError
+                assert mgr._worker_state == "quarantined"
+                assert mgr._cleanup_task is not None
+                assert mgr._cleanup_target_generation == 0
+                mgr._cancel_cleanup_task()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_failure_keeps_quarantined_then_self_heals(self):
+        """场景④清理失败：清理任务失败（shutdown 抛 OSError）→ 保持
+        quarantined；下次调用快路径失效，走完整 shutdown+respawn 自愈
+        （generation 递增，B 以新 generation 拿到自己的响应）。"""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            with patch("services.local_model_manager._validate_model_file", return_value=True):
+                mgr = LocalModelManager()
+                conn = _conn()
+                mgr._model_path = conn.model
+                mgr._worker_ready = True
+                mgr._shutdown_worker = MagicMock(side_effect=OSError("terminate failed"))
+                mgr._await_worker_ready = AsyncMock(return_value=True)
+                mgr._request_queue = MagicMock(spec=queue.Queue)
+                mgr._result_queue = MagicMock(spec=queue.Queue)
+                mgr._result_queue.get_nowait.side_effect = queue.Empty
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
+                mgr._worker_proc.is_alive.return_value = True
+
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 30.0
+                ctx = _ctx()
+
+                # A：推理轮询阶段取消 → 隔离 + spawn 清理（清理将失败）
+                with patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)):
+                    dispatched_a = asyncio.Event()
+                    mgr._request_queue.put.side_effect = lambda payload, timeout=None: dispatched_a.set()
+                    task_a = asyncio.create_task(
+                        mgr.invoke_for_connection(_req("A-prompt", deadline), conn, deadline, ctx)
+                    )
+                    await asyncio.wait_for(dispatched_a.wait(), timeout=2.0)
+                    task_a.cancel()
+                    with pytest.raises(asyncio.CancelledError) as exc_info:
+                        await task_a
+                    assert type(exc_info.value) is asyncio.CancelledError
+                assert mgr._worker_state == "quarantined"
+
+                # 让清理任务执行并失败
+                await asyncio.sleep(0.1)
+                assert mgr._cleanup_task.done()
+                assert mgr._worker_state == "quarantined"  # 清理失败保持隔离
+                mgr._shutdown_worker.assert_called_once_with(force=True, generation=0)
+
+                # B：下次调用——quarantined 使快路径失效，走完整 respawn 自愈
+                mgr._request_queue.put.side_effect = None
+                new_req_q = MagicMock(spec=queue.Queue)
+                new_res_q = MagicMock(spec=queue.Queue)
+                new_res_q.get_nowait.side_effect = [("ok", 1, 1, "B-output")]
+                with (
+                    patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
+                    patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+                ):
+                    mock_queue_cls.side_effect = [new_req_q, new_res_q]
+                    mock_proc = MagicMock(spec=_RealProcess)
+                    mock_proc.is_alive.return_value = True
+                    mock_proc_cls.return_value = mock_proc
+
+                    response = await asyncio.wait_for(
+                        mgr.invoke_for_connection(_req("B-prompt", deadline), conn, deadline, ctx),
+                        timeout=5.0,
+                    )
+
+                assert response.content == "B-output"
+                assert mgr._worker_generation == 1  # respawn 后 generation 递增
+                assert mgr._worker_state == "idle"
+                assert mgr._inflight == {}
+                mgr._cancel_cleanup_task()
+
+    @pytest.mark.asyncio
+    async def test_legacy_cancel_event_does_not_kill_unified_chain(self):
+        """D1 回归：legacy unload_model 后 _cancel_event 永久 set（仅 legacy
+        加载链 clear），统一链 invoke_for_connection 的 ready 等待不得被历史
+        unload 误杀（check_cancel_event=False）——正常 ready 并返回响应。"""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            with patch("services.local_model_manager._validate_model_file", return_value=True):
+                mgr = LocalModelManager()
+                mgr._cancel_event.set()  # 模拟用户曾 unload_model（永久取消态）
+                mgr._worker_ready = False
+                mgr._ensure_worker = AsyncMock(return_value=True)  # spawn 成功
+                mgr._await_worker_ready = AsyncMock(return_value=True)  # ready 成功
+                mgr._request_queue = MagicMock(spec=queue.Queue)
+                mgr._result_queue = MagicMock(spec=queue.Queue)
+                mgr._result_queue.get_nowait.side_effect = [
+                    ("ok", 0, 0, "output-after-unload"),
+                ]
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
+                mgr._worker_proc.is_alive.return_value = True
+
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 30.0
+                conn = _conn()
+
+                response = await asyncio.wait_for(
+                    mgr.invoke_for_connection(_req("prompt", deadline), conn, deadline, _ctx()),
+                    timeout=5.0,
+                )
+                assert response.content == "output-after-unload"
+                # ready 等待以统一链语义调用（不消费 legacy 全局取消态）
+                mgr._await_worker_ready.assert_awaited_once()
+                assert mgr._await_worker_ready.await_args.kwargs["check_cancel_event"] is False
+                assert mgr._inflight == {}
+                assert mgr._worker_state == "idle"

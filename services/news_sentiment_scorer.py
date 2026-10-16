@@ -14,10 +14,13 @@
 - 非有限输出（NaN / Inf）返回 ``None``，由调用方按缺失处理（R21），
   不回填中性。
 
-对外契约：:meth:`NewsSentimentScorer.score_texts` 任何失败（未启用/未配置/
-加载失败/超时/worker 错误/协议坏）整体返回 ``None`` 降级，不抛异常、不阻断
-新闻链路；条目级失败同样以 ``None`` 表示。输出仅用于展示边界（ADR-0008），
-选股/策略模块不得读取。
+对外契约（S2 双入口）：
+- :meth:`NewsSentimentScorer.score_texts` 为 legacy 业务入口：整体失败返回
+  ``None`` 降级，不抛异常、不阻断新闻链路；条目级失败同样以 ``None`` 表示。
+- :meth:`NewsSentimentScorer.score_for_connection` 为统一单连接入口
+  （ADR-0014 §6.1，S3 ScenarioExecutor 消费）：不读全局配置，返回
+  ``ScoringOutcome`` 终态。
+- 两者输出仅用于展示边界（ADR-0008），选股/策略模块不得读取。
 """
 
 from __future__ import annotations
@@ -33,12 +36,21 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
 
-from services.local_model_manager import _validate_model_file
+from services.ai_service.model_management_types import (
+    AttemptContext,
+    NormalizedLLMUsage,
+    ResolvedConnection,
+    ScoredText,
+    ScoringOutcome,
+)
+from services.local_model_manager import _model_tag_of, _response_generation, _validate_model_file
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -63,6 +75,10 @@ _DEFAULT_N_THREADS = 6
 _DEFAULT_MAX_LENGTH = 128
 _DEFAULT_TIMEOUT_S = 30.0
 _DEFAULT_N_CTX = 512
+
+# S2 score_for_connection 预算上限（min(上限, deadline−now) 裁剪，对抗轮 A-2 同型）。
+_READY_TIMEOUT_S = 180.0
+_SCORE_CHUNK_TIMEOUT_S = 30.0
 
 
 class _WorkerError(RuntimeError):
@@ -225,14 +241,24 @@ def _scoring_worker(  # pragma: no cover — runs in subprocess, not coverable b
     model_path: str,
     tokenizer_path: str,
     config: dict,
+    worker_generation: int,
     request_queue: multiprocessing.Queue,
     result_queue: multiprocessing.Queue,
 ):
     """常驻打分子进程：加载一次模型，循环服务 ``("score", req_id, [texts])`` 请求。
 
-    响应协议：``("ok", req_id, (N, 768) float32)`` / ``("error", req_id, msg)``；
-    加载结果 ``("ready", model_path)`` / ``("error", msg)``；父进程发 ``_SENTINEL``
-    优雅退出。
+    响应协议（S2，统一携带 worker_generation）：
+    - ``("ok", req_id, worker_generation, (N, 768) float32, meta)``
+      （meta = {"input_tokens": [int | None, ...], "truncated": [bool, ...], "processed": int}）
+    - ``("error", req_id, worker_generation, msg)``（req_id=-1 为协议级广播）
+    - 加载结果 ``("ready", model_path, worker_generation)`` /
+      ``("error", msg, worker_generation)``
+    - 父进程发 ``_SENTINEL`` 优雅退出 → ``("shutdown", "ok", worker_generation)``
+
+    meta 语义（tokenizers Encoding）：截断后 ``ids`` 长度 = 实际输入 token 数
+    （含特殊 token，供 encoder_input_tokens 计量）；``overflowing`` 非空 =
+    该条发生截断。空 token 序列行不入向量（保持 NaN → 父进程判 None，R21），
+    其 input_tokens 记 None。
 
     单条文本失败（如空 token 序列）→ 该行填 NaN 继续（父进程按 R21 判 None）；
     decode 失败属状态损坏 → 整批 ``("error", ...)``。
@@ -242,7 +268,9 @@ def _scoring_worker(  # pragma: no cover — runs in subprocess, not coverable b
         tokenizers_mod = importlib.import_module("tokenizers")
         Tokenizer = tokenizers_mod.Tokenizer
     except (ImportError, AttributeError) as e:
-        result_queue.put(("error", f"optional dependency import failed: {e}\n{traceback.format_exc()}"))
+        result_queue.put(
+            ("error", f"optional dependency import failed: {e}\n{traceback.format_exc()}", worker_generation)
+        )
         return
 
     try:
@@ -258,7 +286,7 @@ def _scoring_worker(  # pragma: no cover — runs in subprocess, not coverable b
         )
         tokenizer = Tokenizer.from_file(tokenizer_path)
         tokenizer.enable_truncation(config.get("max_length", _DEFAULT_MAX_LENGTH))
-        result_queue.put(("ready", model_path))
+        result_queue.put(("ready", model_path, worker_generation))
     except Exception as e:
         sanitized = DataSanitizer.sanitize_error(e)
         log_classified(
@@ -268,7 +296,9 @@ def _scoring_worker(  # pragma: no cover — runs in subprocess, not coverable b
             "[NewsSentiment] Model/tokenizer load failed (%s): %s",
             exc_info=True,
         )
-        result_queue.put(("error", f"Model/tokenizer load failed: {sanitized}\n{traceback.format_exc()}"))
+        result_queue.put(
+            ("error", f"Model/tokenizer load failed: {sanitized}\n{traceback.format_exc()}", worker_generation)
+        )
         return
 
     while True:
@@ -287,11 +317,11 @@ def _scoring_worker(  # pragma: no cover — runs in subprocess, not coverable b
             continue
 
         if request == _SENTINEL:
-            result_queue.put(("shutdown", "ok"))
+            result_queue.put(("shutdown", "ok", worker_generation))
             break
 
         if not _validate_score_request(request):
-            result_queue.put(("error", -1, f"Invalid request format: {type(request)}"))
+            result_queue.put(("error", -1, worker_generation, f"Invalid request format: {type(request)}"))
             continue
 
         _, req_id, texts = request
@@ -301,12 +331,18 @@ def _scoring_worker(  # pragma: no cover — runs in subprocess, not coverable b
             if batch is None:
                 raise RuntimeError("llm._batch is NULL; cannot build token batches")
             vectors = np.full((len(texts), n_embd), np.nan, dtype=np.float32)
+            input_tokens: list[int | None] = [None] * len(texts)
+            truncated_flags: list[bool] = [False] * len(texts)
+            processed = 0
             for row, text in enumerate(texts):
-                ids = list(tokenizer.encode(text, add_special_tokens=True).ids)
+                encoding = tokenizer.encode(text, add_special_tokens=True)
+                truncated_flags[row] = len(encoding.overflowing) > 0
+                ids = list(encoding.ids)
                 if not ids:
                     # 空 token 序列送入 add_sequence 会导致 llama.cpp 堆损坏
                     # （0xC0000374），必须跳过；该行保持 NaN → 父进程判 None（R21）。
                     continue
+                input_tokens[row] = len(ids)
                 llm._ctx.kv_cache_clear()
                 batch.reset()
                 batch.add_sequence(ids, 0, True)
@@ -314,7 +350,9 @@ def _scoring_worker(  # pragma: no cover — runs in subprocess, not coverable b
                 ptr = llama_cpp.llama_get_embeddings_seq(llm._ctx.ctx, 0)
                 vectors[row] = np.asarray(ptr[:n_embd], dtype=np.float32)
                 batch.reset()
-            result_queue.put(("ok", req_id, vectors))
+                processed += 1
+            meta = {"input_tokens": input_tokens, "truncated": truncated_flags, "processed": processed}
+            result_queue.put(("ok", req_id, worker_generation, vectors, meta))
         except Exception as e:
             # decode 失败后 KV/批状态可能损坏，按整批错误处理（父进程将终止并
             # 重启 worker），不做「单条降级继续」。
@@ -326,7 +364,7 @@ def _scoring_worker(  # pragma: no cover — runs in subprocess, not coverable b
                 "[NewsSentiment] Worker scoring failed (%s): %s",
                 exc_info=True,
             )
-            result_queue.put(("error", req_id, f"{sanitized}\n{traceback.format_exc()}"))
+            result_queue.put(("error", req_id, worker_generation, f"{sanitized}\n{traceback.format_exc()}"))
 
 
 # --------------------------------------------------------------------------- #
@@ -336,8 +374,9 @@ def _scoring_worker(  # pragma: no cover — runs in subprocess, not coverable b
 class NewsSentimentScorer:
     """新闻情绪打分子进程服务的生命周期与请求管理。
 
-    - ``score_texts`` 为唯一业务入口：整体失败返回 ``None``（降级不阻断新闻链路），
-      成功返回与输入等长的 ``list[dict | None]``（条目 NaN/Inf → ``None``，R21）。
+    - ``score_texts`` 为 legacy 业务入口：整体失败返回 ``None``（降级不阻断新闻
+      链路），成功返回与输入等长的 ``list[dict | None]``（条目 NaN/Inf →
+      ``None``，R21）；``score_for_connection`` 为 S2 统一单连接入口。
     - 子进程生命周期管理照 ``LocalModelManager``：双检锁单例、loop-local 锁（R11）、
       阻塞操作 offload 到 IO 线程池（R16）、超时/关机 terminate（N3-3 对接）。
     """
@@ -362,6 +401,7 @@ class NewsSentimentScorer:
             inst = cls._instance
             if inst is not None:
                 try:
+                    inst._cancel_cleanup_task()
                     inst._shutdown_worker()
                 except Exception as e:
                     log_classified(
@@ -381,6 +421,7 @@ class NewsSentimentScorer:
         inst = cls._instance
         if inst is not None:
             try:
+                inst._cancel_cleanup_task()
                 inst._shutdown_worker()
             except Exception as e:
                 log_classified(
@@ -418,6 +459,12 @@ class NewsSentimentScorer:
             self._head: dict[str, Any] | None = None
             self._clock = clock or time.monotonic
             self._config_reader = config_reader or self._read_config
+            # S2 单连接执行状态（ADR-0014 §6.1，与 LocalModelManager 同型；
+            # scorer 以 req_id 响应配对兜底，不建 _inflight 绑定）：
+            self._worker_generation: int = 0  # 每次 spawn 递增；req_id 计数器跨 generation 不重置
+            self._worker_state: str = "stopped"  # idle / busy / quarantined / stopped
+            self._cleanup_task: asyncio.Task | None = None
+            self._cleanup_target_generation: int = -1
             self._initialized = True
 
     # ------------------------------------------------------------------ #
@@ -447,7 +494,7 @@ class NewsSentimentScorer:
         path = self._model_path
         if not path:
             return None
-        return Path(path).stem[:32]
+        return _model_tag_of(path)
 
     def _is_enabled(self) -> bool:
         return bool(self._config_reader().get("enabled"))
@@ -517,18 +564,28 @@ class NewsSentimentScorer:
 
         return get_loop_local("sentiment_scorer_lock", _factory)
 
-    def _shutdown_worker(self, *, force: bool = False):
+    def _shutdown_worker(self, *, force: bool = False, generation: int | None = None):
         """Shut down the scoring worker subprocess (thread-safe).
 
         Args:
             force: True 时跳过 sentinel 直接 terminate（关机路径，N3-3 Step 5b
                    2.0s 预算：terminate 1.5s + kill 0.5s）。
+            generation: 非 None 时仅当与当前 _worker_generation 一致才执行
+                   （quarantined 清理任务的 generation 守卫，防误杀后继 worker）。
         """
         with self._worker_lock:
-            self._shutdown_worker_locked(force=force)
+            self._shutdown_worker_locked(force=force, generation=generation)
 
-    def _shutdown_worker_locked(self, *, force: bool = False):
-        """Internal: shut down worker. Caller MUST hold _worker_lock."""
+    def _shutdown_worker_locked(self, *, force: bool = False, generation: int | None = None):
+        """Internal: shut down worker. Caller MUST hold _worker_lock.
+
+        Args:
+            force: True 时跳过 sentinel 直接 terminate（关机路径使用）。
+            generation: 非 None 时与当前 _worker_generation 不一致则幂等退出
+                   （不 shutdown、不改状态）。
+        """
+        if generation is not None and generation != self._worker_generation:
+            return
         if self._request_queue is not None and self._worker_proc is not None and self._worker_proc.is_alive():
             if not force:
                 try:
@@ -587,6 +644,7 @@ class NewsSentimentScorer:
         self._request_queue = None
         self._result_queue = None
         self._worker_ready = False
+        self._worker_state = "stopped"
 
     def unload_model(self, *, force: bool = False):
         """Terminate the scoring worker subprocess and reset load state (public API).
@@ -620,10 +678,17 @@ class NewsSentimentScorer:
                 and self._worker_ready
                 and self._model_path == model_path
                 and self._core_signature == signature
+                # quarantined：worker 状态未知（取消/超时后可能仍在推理），
+                # 快路径失效，走完整 shutdown+respawn 自愈（与 LMM 对抗轮 E-1 同型）。
+                and self._worker_state != "quarantined"
             ):
                 return True
 
             self._shutdown_worker_locked()
+            # generation 每次 spawn 递增；旧响应经 _response_generation 过滤丢弃
+            # （计数器 _req_counter 跨 generation 不重置）。
+            self._worker_generation += 1
+            generation = self._worker_generation
             self._core_signature = signature
 
             self._request_queue = multiprocessing.Queue()
@@ -631,16 +696,20 @@ class NewsSentimentScorer:
 
             proc = multiprocessing.Process(
                 target=_scoring_worker,
-                args=(model_path, tokenizer_path, core_config, self._request_queue, self._result_queue),
+                args=(model_path, tokenizer_path, core_config, generation, self._request_queue, self._result_queue),
                 daemon=True,
             )
             proc.start()
             self._worker_proc = proc
-            logger.info("[NewsSentiment] Scoring worker started. pid=%s", proc.pid)
+            logger.info("[NewsSentiment] Scoring worker started. pid=%s generation=%s", proc.pid, generation)
             return True
 
     async def _await_worker_ready(self, timeout: float) -> bool:
-        """轮询等待 worker 就绪（异步不阻塞事件循环，R16）。"""
+        """轮询等待 worker 就绪（异步不阻塞事件循环，R16）。
+
+        S2：旧 generation 的残留响应直接丢弃继续等待（respawn 后队列虽已重建，
+        此处仍为防御性过滤）。
+        """
         result_queue = self._result_queue
         if result_queue is None:
             logger.error("[NewsSentiment] Result queue not initialized.")
@@ -656,21 +725,40 @@ class NewsSentimentScorer:
                 break
             try:
                 result = result_queue.get_nowait()
-                break
             except queue.Empty:
-                pass
+                result = None
             except (OSError, ValueError):
                 # ValueError：队列被 close()+join_thread() 后 get_nowait 的实测行为。
                 logger.warning(
                     "[NewsSentiment] OSError/ValueError reading result queue while waiting for worker ready."
                 )
+                result = None
+
+            # S2: generation 过滤——旧 worker 的残留响应直接丢弃继续等待。
+            if result is not None:
+                gen = _response_generation(result) if isinstance(result, tuple) else None
+                if gen is not None and gen != self._worker_generation:
+                    logger.warning(
+                        "[NewsSentiment] Discarding stale-generation response while waiting for ready (gen=%s).", gen
+                    )
+                    result = None
+            if result is not None:
+                break
 
             proc = self._worker_proc
             if proc is not None and not proc.is_alive():
                 try:
                     result = result_queue.get_nowait()
                 except (queue.Empty, OSError, ValueError):
-                    pass
+                    result = None
+                if result is not None and isinstance(result, tuple):
+                    gen = _response_generation(result)
+                    if gen is not None and gen != self._worker_generation:
+                        logger.warning(
+                            "[NewsSentiment] Discarding stale-generation response while waiting for ready (gen=%s).",
+                            gen,
+                        )
+                        result = None
                 worker_died = True
                 break
 
@@ -694,15 +782,16 @@ class NewsSentimentScorer:
             await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
             return False
 
-        if not (isinstance(result, tuple) and len(result) == 2):
+        if not (isinstance(result, tuple) and len(result) == 3):
             logger.error("[NewsSentiment] Malformed result while waiting for worker ready: %s", type(result))
             self._worker_ready = False
             await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
             return False
 
-        status, payload = result
+        status, payload = result[0], result[1]
         if status == "ready":
             self._worker_ready = True
+            self._worker_state = "idle"
             logger.info("[NewsSentiment] Scoring worker ready with model: %s", payload)
             return True
 
@@ -712,13 +801,26 @@ class NewsSentimentScorer:
         await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
         return False
 
-    async def _ensure_ready(self, paths: dict[str, str]) -> dict[str, Any] | None:
+    async def _ensure_ready(
+        self,
+        paths: dict[str, str],
+        *,
+        core_config: dict[str, Any],
+        ready_timeout: float = _READY_TIMEOUT_S,
+    ) -> dict[str, Any] | None:
         """确保 worker 就绪并返回分类头（失败返回 None）。
 
         加载链：文件校验 → head 加载校验（stat 变化时重载）→ 启动/复用 worker →
-        等待 ready。任一步失败返回 None，不抛异常。
-        调用方（``score_texts``）须已持有 loop-local 串行锁；本方法不自取锁
-        （asyncio.Lock 不可重入，锁粒度见 ``_get_lock`` docstring）。
+        等待 ready。任一步失败返回 None，不抛异常（CancelledError 传播，R2）。
+        调用方（``score_texts`` / ``score_for_connection``）须已持有 loop-local
+        串行锁；本方法不自取锁（asyncio.Lock 不可重入，锁粒度见 ``_get_lock``
+        docstring）。
+
+        Args:
+            paths: 三文件路径（model/head/tokenizer）。
+            core_config: worker 核心参数——legacy 链传配置派生值
+                （``_core_config``），统一链传 adapter_options 派生值。
+            ready_timeout: ready 等待预算；统一链传 ``min(180, deadline−now)``。
         """
         if not _HAS_LLAMA_CPP or not _HAS_TOKENIZERS:
             logger.error("[NewsSentiment] llama-cpp-python / tokenizers not installed, scoring unavailable.")
@@ -731,11 +833,14 @@ class NewsSentimentScorer:
             return None
 
         try:
-            core_config = self._core_config()
             current_stat = self._stat_of(paths["model_path"], paths["head_path"], paths["tokenizer_path"])
-            signature = (core_config["n_threads"], core_config["max_length"])
+            signature = (
+                int(core_config.get("n_threads", _DEFAULT_N_THREADS)),
+                int(core_config.get("max_length", _DEFAULT_MAX_LENGTH)),
+            )
             if (
                 self._worker_ready
+                and self._worker_state != "quarantined"
                 and self._model_path == paths["model_path"]
                 and self._paths_stat == current_stat
                 and self._head is not None
@@ -754,7 +859,7 @@ class NewsSentimentScorer:
             if not started:
                 logger.error("[NewsSentiment] Scoring worker failed to start.")
                 return None
-            if not await self._await_worker_ready(timeout=180.0):
+            if not await self._await_worker_ready(timeout=max(0.0, ready_timeout)):
                 return None
 
             self._model_path = paths["model_path"]
@@ -798,20 +903,44 @@ class NewsSentimentScorer:
             return None
 
         async with self._get_lock():
-            head = await self._ensure_ready(paths)
+            head = await self._ensure_ready(paths, core_config=self._core_config())
             if head is None:
                 return None
 
+            timeout_s = self._resolve_timeout()
             results: list[dict[str, Any] | None] = []
             for chunk in _chunked(texts, _SCORE_CHUNK_SIZE):
-                vectors = await self._score_chunk(chunk)
-                if vectors is None:
+                try:
+                    scored = await self._score_chunk(chunk, timeout_s=timeout_s, generation=self._worker_generation)
+                except TimeoutError:
                     return None
-                results.extend(apply_head_and_score(vectors, head))
+                if scored is None:
+                    return None
+                results.extend(apply_head_and_score(scored[0], head))
             return results
 
-    async def _score_chunk(self, chunk: list[str]) -> np.ndarray | None:
-        """发送单块请求并轮询配对响应；失败返回 None（调用方整体降级）。"""
+    async def _score_chunk(
+        self,
+        chunk: list[str],
+        *,
+        timeout_s: float,
+        generation: int,
+    ) -> tuple[np.ndarray, Mapping[str, Any]] | None:
+        """发送单块请求并轮询配对响应（S2 共享底座，legacy 与统一链共用）。
+
+        timeout_s / generation 由调用方显式传入：legacy ``score_texts`` 传配置
+        派生超时与当前 ``_worker_generation``；``score_for_connection`` 传
+        ``min(块上限, deadline−now)`` 与进入时的 generation 快照。
+
+        Returns:
+            成功返回 ``(vectors, meta)``；worker 级失败（发送失败 / 请求级 error /
+            崩溃且残留无匹配）返回 None（已同步终止 worker，调用方整体降级）。
+
+        Raises:
+            TimeoutError: 轮询预算耗尽（worker 已标记 quarantined 并 spawn 异步
+                清理任务；调用方决定降级方式）。
+            asyncio.CancelledError: 调用方取消（worker 已隔离，R2 传播）。
+        """
         req_id = next(self._req_counter)
         request_queue = self._request_queue
         result_queue = self._result_queue
@@ -819,9 +948,10 @@ class NewsSentimentScorer:
             logger.error("[NewsSentiment] Request/result queue not initialized.")
             return None
 
-        timeout_s = self._resolve_timeout()
         loop = asyncio.get_running_loop()
         start_time = loop.time()
+        with self._worker_lock:
+            self._worker_state = "busy"
 
         # put 在队列缓冲满时会阻塞，offload 到执行器避免阻塞事件循环（R16）。
         try:
@@ -829,6 +959,9 @@ class NewsSentimentScorer:
                 None,
                 lambda: request_queue.put(("score", req_id, chunk), timeout=5),
             )
+        except asyncio.CancelledError:
+            self._quarantine_worker(generation)
+            raise
         except Exception as e:
             log_classified(
                 logger,
@@ -842,7 +975,18 @@ class NewsSentimentScorer:
             return None
 
         try:
-            vectors = await self._poll_result(req_id, result_queue, timeout_s)
+            polled = await self._poll_result(req_id, result_queue, timeout_s, generation)
+        except asyncio.CancelledError:
+            self._quarantine_worker(generation)
+            raise
+        except TimeoutError:
+            logger.error(
+                "[NewsSentiment] Scoring timed out after %.1fs (req_id=%s). Quarantining worker.",
+                loop.time() - start_time,
+                req_id,
+            )
+            self._quarantine_worker(generation)
+            raise
         except _WorkerError as e:
             # 请求级失败（worker error / 意外 shutdown / 协议坏）：终止 worker，整体降级。
             logger.error("[NewsSentiment] Scoring request failed (req_id=%s): %s", req_id, e)
@@ -850,29 +994,36 @@ class NewsSentimentScorer:
             await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
             return None
 
-        if vectors is None:
+        if polled is None:
+            # worker 崩溃且崩溃前残留响应无匹配：终止 worker，整体降级。
             logger.error(
-                "[NewsSentiment] Scoring timed out or worker crashed after %.1fs (req_id=%s). Terminating worker.",
-                loop.time() - start_time,
+                "[NewsSentiment] Scoring worker crashed without matching response (req_id=%s). Terminating worker.",
                 req_id,
             )
             self._worker_ready = False
             await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
-        return vectors
+            return None
+
+        vectors, meta = polled
+        with self._worker_lock:
+            self._worker_state = "idle"
+        return vectors, meta
 
     async def _poll_result(
         self,
         req_id: int,
         result_queue: multiprocessing.Queue,
         timeout_s: float,
-    ) -> np.ndarray | None:
-        """轮询响应直到取得匹配 ``req_id`` 的向量 / 请求级失败 / 超时 / 崩溃。
+        generation: int,
+    ) -> tuple[np.ndarray, Mapping[str, Any]] | None:
+        """轮询响应直到取得匹配 ``req_id`` 的结果 / 请求级失败 / 超时 / 崩溃。
 
         Returns:
-            匹配的 (N, 768) 向量；超时或崩溃（含崩溃前最后一次残留响应仍无匹配）
-            返回 None（调用方终止 worker 并整体降级）。
+            匹配的 ``((N, 768) 向量, meta)``；崩溃（含崩溃前最后一次残留响应仍
+            无匹配）返回 None（调用方终止 worker 并整体降级）。
 
         Raises:
+            TimeoutError: 轮询预算耗尽。
             _WorkerError: 收到匹配 req_id 的 error 响应 / 意外 shutdown / 协议坏。
         """
         loop = asyncio.get_running_loop()
@@ -880,7 +1031,7 @@ class NewsSentimentScorer:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
-                return None
+                raise TimeoutError()
             try:
                 result: object = result_queue.get_nowait()
             except queue.Empty:
@@ -892,56 +1043,361 @@ class NewsSentimentScorer:
                 result = None
 
             if result is not None and isinstance(result, tuple):
-                vectors = self._consume_result(req_id, result)
-                if vectors is not None:
-                    return vectors
-                continue
+                gen = _response_generation(result)
+                if gen is not None and gen != generation:
+                    logger.warning("[NewsSentiment] Discarding stale-generation response during scoring (gen=%s).", gen)
+                else:
+                    consumed = self._consume_result(req_id, result, generation=generation)
+                    if consumed is not None:
+                        return consumed
 
             proc = self._worker_proc
             if proc is not None and not proc.is_alive():
-                # 崩溃前最后一次尝试取残留响应（恰含匹配向量时仍可用）
+                # 崩溃前最后一次尝试取残留响应（恰含匹配结果时仍可用）
                 try:
                     result = result_queue.get_nowait()
                 except (queue.Empty, OSError, ValueError):
                     result = None
                 if result is not None and isinstance(result, tuple):
-                    return self._consume_result(req_id, result)
+                    gen = _response_generation(result)
+                    if gen is None or gen == generation:
+                        consumed = self._consume_result(req_id, result, generation=generation)
+                        if consumed is not None:
+                            return consumed
                 logger.error("[NewsSentiment] Scoring worker crashed during request (req_id=%s).", req_id)
                 return None
 
             # R2: except Exception 不会吞 CancelledError；sleep 被取消时直接传播。
             await asyncio.sleep(min(0.2, remaining))
 
-    def _consume_result(self, req_id: int, result: tuple) -> np.ndarray | None:
-        """解析单条响应。
+    def _consume_result(
+        self,
+        req_id: int,
+        result: tuple,
+        *,
+        generation: int,
+    ) -> tuple[np.ndarray, Mapping[str, Any]] | None:
+        """单点解析打分响应（generation 配对 + req_id 配对，与 LMM 同型）。
 
         Returns:
-            匹配 ``req_id`` 的 ``("ok", ...)`` 返回向量；不匹配的响应返回 None
-            （调用方丢弃后继续轮询）。
+            匹配 ``req_id`` 的 ``(vectors, meta)``；不匹配 / 过期 generation 返回
+            None（调用方丢弃后继续轮询）。
 
         Raises:
-            _WorkerError: 匹配 ``req_id`` 的 error 响应 / 意外 shutdown / 协议坏。
+            _WorkerError: 匹配 ``req_id`` 的 error 响应 / 意外 shutdown / 协议坏
+                （消息经 R9 脱敏）。
         """
         status = result[0]
         if status == "ok":
-            if len(result) != 3:
+            if len(result) != 5:
                 raise _WorkerError(f"Malformed ok result (len={len(result)}).")
-            _, rid, vectors = result
-            if rid == req_id:
-                if not isinstance(vectors, np.ndarray) or vectors.ndim != 2 or vectors.shape[1] != _EMBEDDING_DIM:
-                    raise _WorkerError(f"Malformed vectors payload: shape={getattr(vectors, 'shape', None)}.")
-                return vectors
-            logger.warning("[NewsSentiment] Discarding mismatched ok response (rid=%s).", rid)
-            return None
+            _, rid, gen, vectors, meta = result
+            if gen != generation:
+                logger.warning("[NewsSentiment] Discarding stale-generation ok response (rid=%s gen=%s).", rid, gen)
+                return None
+            if rid != req_id:
+                logger.warning("[NewsSentiment] Discarding mismatched ok response (rid=%s).", rid)
+                return None
+            if not isinstance(vectors, np.ndarray) or vectors.ndim != 2 or vectors.shape[1] != _EMBEDDING_DIM:
+                raise _WorkerError(f"Malformed vectors payload: shape={getattr(vectors, 'shape', None)}.")
+            if not isinstance(meta, Mapping):
+                raise _WorkerError(f"Malformed meta payload: {type(meta)}.")
+            return vectors, meta
         if status == "error":
-            if len(result) == 3:
-                rid, payload = result[1], result[2]
+            if len(result) == 4:
+                rid, gen, payload = result[1], result[2], result[3]
+                if gen != generation:
+                    logger.warning(
+                        "[NewsSentiment] Discarding stale-generation error response (rid=%s gen=%s).", rid, gen
+                    )
+                    return None
                 if rid == req_id or rid == -1:
-                    # R9: payload 可能含 traceback（文件路径/系统信息），脱敏后记录。
+                    # R9: payload 可能含 traceback（文件路径/系统信息），脱敏后入异常消息。
                     raise _WorkerError(str(DataSanitizer.sanitize_error(payload)))
                 logger.warning("[NewsSentiment] Discarding mismatched error response (rid=%s).", rid)
                 return None
+            if len(result) == 3:
+                # 加载级/worker 级广播形态 ("error", msg, gen)。
+                gen, payload = result[2], result[1]
+                if gen != generation:
+                    return None
+                raise _WorkerError(str(DataSanitizer.sanitize_error(payload)))
             raise _WorkerError(f"Malformed error result (len={len(result)}).")
         if status == "shutdown":
+            gen = _response_generation(result)
+            if gen is not None and gen != generation:
+                return None
             raise _WorkerError("Worker shut down unexpectedly during scoring.")
         raise _WorkerError(f"Unknown result status from worker: {status!r}.")
+
+    # ------------------------------------------------------------------ #
+    # quarantined worker 异步清理（S2，与 LocalModelManager 同型）
+    # ------------------------------------------------------------------ #
+    def _quarantine_worker(self, generation: int) -> None:
+        """标记 worker quarantined 并 spawn 异步清理任务（须在事件循环线程调用）。
+
+        取消/超时后 worker 状态未知（可能仍在推理）→ 隔离 + 异步清理；
+        ``_ensure_worker_impl`` 快路径因 quarantined 失效，下次调用走完整
+        shutdown+respawn 自愈。
+        """
+        with self._worker_lock:
+            self._worker_state = "quarantined"
+        self._spawn_cleanup_task(generation)
+
+    def _spawn_cleanup_task(self, generation: int) -> None:
+        """Spawn（或收编）quarantined worker 的异步清理任务（须在事件循环线程调用）。
+
+        同一 generation 已有清理任务在跑则幂等；目标 generation 已过时的
+        旧任务被取消（其 generation 守卫保证它本也会幂等退出）。
+        """
+        task = self._cleanup_task
+        if task is not None and not task.done():
+            if self._cleanup_target_generation == generation:
+                return
+            task.cancel()
+        self._cleanup_target_generation = generation
+        self._cleanup_task = asyncio.get_running_loop().create_task(self._cleanup_worker_async(generation))
+
+    def _cancel_cleanup_task(self) -> None:
+        """取消待执行/执行中的清理任务（reset/atexit 路径，防悬空任务）。"""
+        task = self._cleanup_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._cleanup_task = None
+
+    async def _cleanup_worker_async(self, generation: int) -> None:
+        """异步清理 quarantined worker（同步段 offload 到线程池，R16）。
+
+        generation 快照守卫经 ``_shutdown_worker(generation=...)`` 生效：执行时
+        若 ``_worker_generation`` 已前进（新 worker 已 spawn），幂等退出不误杀。
+        清理失败保持 quarantined（下次调用快路径失效，走完整重载链自愈）。
+        """
+        try:
+            # 有界终止 force 语义：terminate 1.5s + kill 0.5s。
+            await ThreadPoolManager().run_async(
+                TaskType.IO,
+                self._shutdown_worker,
+                force=True,
+                generation=generation,
+            )
+        except Exception as e:
+            log_classified(
+                logger,
+                e,
+                "general",
+                "[NewsSentiment] Cleanup of quarantined worker failed (%s): %s",
+                exc_info=True,
+            )
+
+    # ------------------------------------------------------------------ #
+    # S2 统一单连接入口（ADR-0014 §6.1）
+    # ------------------------------------------------------------------ #
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
+    async def score_for_connection(
+        self,
+        texts: list[str],
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+    ) -> ScoringOutcome:
+        """统一单连接情绪打分：不读全局配置、不返回 None。
+
+        - ``resolved_connection.model`` = 模型路径；``adapter_options`` 携带
+          head_path / tokenizer_path / n_threads / max_length——配置快照语义由
+          调用方（S3 ScenarioExecutor）保证，本方法不读 ConfigHandler；
+        - deadline 为单调时钟截止值（loop.time() 口径）：ready 等待 =
+          min(180, remaining)，单块轮询 = min(30, remaining)；块循环预算耗尽 →
+          已完成块以 partial 返回（零完成 → timeout）；
+        - 不可用（adapter_kind 不符 / 依赖缺失 / 路径缺失 / 文件校验失败）→
+          unavailable；ready 失败 → worker_error；worker 请求级失败 →
+          worker_error + 已完成块；
+        - 取消/超时 → worker 隔离 + 异步清理（generation 守卫，见
+          ``_score_chunk``）；``CancelledError`` 传播（R2），不包装。
+
+        Args:
+            texts: 待打分文本列表（text_id = 全局批内下标的十进制字符串）。
+            attempt_context: 尝试归属（S3 Executor 落账语义；scorer 以 req_id
+                响应配对兜底，不建 inflight 绑定）。
+
+        Returns:
+            ScoringOutcome：usage 仅统计已完成块的 input_tokens（本地无缓存
+            语义，uncached == input_total；无 token 计量 → None）。
+        """
+        if resolved_connection.adapter_kind != "gguf_sentiment":
+            return ScoringOutcome(
+                status="unavailable",
+                results=(),
+                reason=f"adapter_kind={resolved_connection.adapter_kind!r} is not gguf_sentiment.",
+                usage=None,
+            )
+        if not texts:
+            return ScoringOutcome(
+                status="success",
+                results=(),
+                reason=None,
+                usage=None,
+                metadata=MappingProxyType({"processed": 0, "input_tokens": (), "truncated": ()}),
+            )
+        if not _HAS_LLAMA_CPP or not _HAS_TOKENIZERS:
+            return ScoringOutcome(
+                status="unavailable",
+                results=(),
+                reason="llama-cpp-python / tokenizers not installed.",
+                usage=None,
+            )
+
+        adapter_options = resolved_connection.adapter_options
+        model_path = resolved_connection.model
+        head_path = str(adapter_options.get("head_path", ""))
+        tokenizer_path = str(adapter_options.get("tokenizer_path", ""))
+        if not model_path or not head_path or not tokenizer_path:
+            return ScoringOutcome(
+                status="unavailable",
+                results=(),
+                reason="model/head/tokenizer path missing in connection.",
+                usage=None,
+            )
+        paths = {"model_path": model_path, "head_path": head_path, "tokenizer_path": tokenizer_path}
+
+        loop = asyncio.get_running_loop()
+        if deadline - loop.time() <= 0:
+            return ScoringOutcome(
+                status="timeout",
+                results=(),
+                reason="Deadline exhausted before scoring dispatch.",
+                usage=None,
+            )
+
+        # GGUF 魔数 + tokenizer 存在性校验（同步 Path 操作 offload 到 IO 线程池，R16）。
+        valid = await ThreadPoolManager().run_async(TaskType.IO, self._validate_input_files, paths)
+        if not valid:
+            return ScoringOutcome(
+                status="unavailable",
+                results=(),
+                reason="Invalid GGUF model file or missing tokenizer file.",
+                usage=None,
+            )
+
+        core_config = {
+            "n_ctx": _DEFAULT_N_CTX,
+            "n_threads": max(1, int(adapter_options.get("n_threads", _DEFAULT_N_THREADS))),
+            # 上限 clamp 至 n_ctx-8：max_length 超过上下文容量会使 add_sequence
+            # 反复溢出 → worker 崩溃（与 _core_config 同口径）。
+            "max_length": min(_DEFAULT_N_CTX - 8, max(8, int(adapter_options.get("max_length", _DEFAULT_MAX_LENGTH)))),
+        }
+
+        async with self._get_lock():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return ScoringOutcome(
+                    status="timeout",
+                    results=(),
+                    reason="Deadline exhausted before scorer ready.",
+                    usage=None,
+                )
+            try:
+                head = await self._ensure_ready(
+                    paths,
+                    core_config=core_config,
+                    ready_timeout=min(_READY_TIMEOUT_S, remaining),
+                )
+            except asyncio.CancelledError:
+                # 启动/ready 阶段取消：worker 子进程可能正在加载（状态未知）→
+                # 隔离 + 异步清理（取消隔离覆盖启动/ready/提交/推理全程，R2 传播）。
+                self._quarantine_worker(self._worker_generation)
+                raise
+            if head is None:
+                if deadline - loop.time() <= 0:
+                    return ScoringOutcome(
+                        status="timeout",
+                        results=(),
+                        reason="Deadline exhausted while waiting for scorer ready.",
+                        usage=None,
+                    )
+                return ScoringOutcome(
+                    status="worker_error",
+                    results=(),
+                    reason="Scorer failed to become ready (load/start failure).",
+                    usage=None,
+                )
+
+            results: list[ScoredText] = []
+            input_tokens_all: list[int | None] = []
+            truncated_all: list[bool] = []
+            processed_total = 0
+            chunk_offset = 0
+            outcome_status: str = "success"
+            outcome_reason: str | None = None
+
+            for chunk in _chunked(texts, _SCORE_CHUNK_SIZE):
+                chunk_budget = min(_SCORE_CHUNK_TIMEOUT_S, deadline - loop.time())
+                if chunk_budget <= 0:
+                    outcome_status = "timeout" if not results else "partial"
+                    outcome_reason = "Deadline exhausted during chunked scoring."
+                    break
+                try:
+                    scored = await self._score_chunk(
+                        chunk,
+                        timeout_s=chunk_budget,
+                        generation=self._worker_generation,
+                    )
+                except TimeoutError:
+                    outcome_status = "timeout" if not results else "partial"
+                    outcome_reason = "Chunk scoring budget exhausted; worker quarantined."
+                    break
+                if scored is None:
+                    outcome_status = "worker_error" if not results else "partial"
+                    outcome_reason = "Scoring chunk failed (worker error); worker terminated."
+                    break
+
+                vectors, meta = scored
+                items = apply_head_and_score(vectors, head)
+                for row, item in enumerate(items):
+                    text_id = str(chunk_offset + row)
+                    if item is None:
+                        results.append(ScoredText(text_id=text_id, label=None, probabilities=None, score=None))
+                    else:
+                        results.append(
+                            ScoredText(
+                                text_id=text_id,
+                                label=item["label"],
+                                probabilities=tuple(item["probs"]),
+                                score=item["score"],
+                            )
+                        )
+                meta_tokens = meta.get("input_tokens")
+                meta_truncated = meta.get("truncated")
+                if isinstance(meta_tokens, list):
+                    input_tokens_all.extend(meta_tokens)
+                if isinstance(meta_truncated, list):
+                    truncated_all.extend(meta_truncated)
+                processed_total += int(meta.get("processed", 0) or 0)
+                chunk_offset += len(chunk)
+
+            token_ints = [t for t in input_tokens_all if isinstance(t, int) and not isinstance(t, bool)]
+            usage = None
+            if token_ints:
+                total = sum(token_ints)
+                usage = NormalizedLLMUsage(
+                    input_total_tokens=total,
+                    uncached_input_tokens=total,
+                    cache_read_tokens=None,
+                    cache_write_tokens=None,
+                    output_tokens=None,
+                )
+            metadata: Mapping[str, Any] | None = None
+            if outcome_status in ("success", "partial"):
+                metadata = MappingProxyType(
+                    {
+                        "processed": processed_total,
+                        "input_tokens": tuple(input_tokens_all),
+                        "truncated": tuple(truncated_all),
+                    }
+                )
+            return ScoringOutcome(
+                status=outcome_status,  # type: ignore[arg-type]  # outcome_status 仅由本方法字面量赋值
+                results=tuple(results),
+                reason=outcome_reason,
+                usage=usage,
+                metadata=metadata,
+            )

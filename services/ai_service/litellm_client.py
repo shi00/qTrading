@@ -21,19 +21,33 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from core.errors import AIConfigError, AIPolicyNotAcknowledgedError
 from core.i18n import Message
+from services.ai_service.model_management_types import (
+    AdapterResponse,
+    AttemptContext,
+    InferenceRequest,
+    NormalizedLLMUsage,
+    ResolvedConnection,
+)
 from services.ai_service.pricing import estimate_cost
 from services.ai_service.token_budget import _estimate_tokens, _get_model_context_window
-from services.local_model_manager import LocalInferenceTimeoutError, LocalModelManager
+from services.local_model_manager import (
+    _DEFAULT_INVOKE_SYSTEM_PROMPT,
+    LocalInferenceTimeoutError,
+    LocalModelManager,
+)
 from utils.egress_ack import is_egress_acknowledged
 from utils.error_classifier import classify_error, classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -97,6 +111,102 @@ def _resolve_effective_model(llm_config: dict, model_override: str | None) -> st
     provider = llm_config.get("provider", "")
     model_id = llm_config.get("model", "")
     return f"{provider}/{model_id}" if provider else model_id
+
+
+def normalize_litellm_usage(usage: Any) -> NormalizedLLMUsage | None:
+    """五字段用量归一化（S2，ADR-0014 §9.1 MM-08 口径）。
+
+    - OpenAI 协议：``prompt_tokens`` 已含 ``prompt_tokens_details.cached_tokens``，
+      不重复相加；``uncached = prompt_tokens − cached_tokens``；
+    - Anthropic 协议（``cache_creation_input_tokens`` / ``cache_read_input_tokens``
+      存在非 None）：``input_tokens`` 不含缓存 token，归一化时加回；
+    - 字段为非负整数或 None：缺失不默认 0（R21 同源语义）、bool 排除、非整数
+      拒绝为 None、负值 clamp 0；全部业务字段不可用时返回 None。
+    """
+    if usage is None:
+        return None
+
+    def _get(obj: Any, name: str) -> Any:
+        if isinstance(obj, Mapping):
+            return obj.get(name)
+        return getattr(obj, name, None)
+
+    def _int_of(value: Any) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return max(0, value)
+
+    prompt_tokens = _int_of(_get(usage, "prompt_tokens"))
+    completion_tokens = _int_of(_get(usage, "completion_tokens"))
+
+    cache_creation = _int_of(_get(usage, "cache_creation_input_tokens"))
+    cache_read = _int_of(_get(usage, "cache_read_input_tokens"))
+
+    if cache_creation is not None or cache_read is not None:
+        # Anthropic 协议：原 prompt_tokens 即 uncached，input_total 加回缓存两段。
+        uncached = prompt_tokens
+        base = prompt_tokens if prompt_tokens is not None else 0
+        input_total = base + (cache_creation or 0) + (cache_read or 0)
+    else:
+        input_total = prompt_tokens
+        detail = _get(usage, "prompt_tokens_details")
+        cache_read = _int_of(_get(detail, "cached_tokens")) if detail is not None else None
+        if input_total is not None and cache_read is not None:
+            uncached = max(0, input_total - cache_read)
+        else:
+            uncached = input_total if cache_read is None else None
+
+    if input_total is None and completion_tokens is None:
+        return None
+
+    return NormalizedLLMUsage(
+        input_total_tokens=input_total,
+        uncached_input_tokens=uncached,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_creation,
+        output_tokens=completion_tokens,
+    )
+
+
+def resolve_credential(credential_ref: str | None) -> str | None:
+    """credential_ref 三形态 → 实际秘密（同步实现，调用方须经 ThreadPoolManager offload）。
+
+    - ``None`` → 无凭据（如 loopback 自部署 API）；
+    - ``env:<VAR_NAME>`` → 读环境变量（内存操作，运行开始解析一次，§5.2）；
+    - ``keyring:<item>`` → ``keyring.get_password(KEYRING_SERVICE_NAME, item)``
+      （同步 IO，仅在线程池中执行）；
+    - 其他 scheme → ValueError（配置校验失败，显式失败不静默降级）。
+
+    R9：异常消息只含引用形态与项名/变量名（非秘密），底层异常经 DataSanitizer 脱敏。
+    """
+    if credential_ref is None:
+        return None
+    if credential_ref.startswith("env:"):
+        var_name = credential_ref[len("env:") :]
+        if not var_name:
+            raise ValueError("Malformed env credential_ref: empty variable name.")
+        value = os.environ.get(var_name)
+        if value is None:
+            raise ValueError(f"Credential environment variable not set: {var_name}")
+        return value
+    if credential_ref.startswith("keyring:"):
+        item = credential_ref[len("keyring:") :]
+        if not item:
+            raise ValueError("Malformed keyring credential_ref: empty item name.")
+        import services.ai_service as _ai
+        import utils.config_handler as cfg
+
+        try:
+            secret = cfg.keyring.get_password(cfg.KEYRING_SERVICE_NAME, item)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Credential keyring lookup failed for item {item}: {_ai.DataSanitizer.sanitize_error(exc)}"
+            ) from exc
+        if secret is None:
+            raise ValueError(f"Credential keyring item not found: {item}")
+        return secret
+    scheme = credential_ref.split(":", 1)[0]
+    raise ValueError(f"Unsupported credential_ref scheme: {scheme!r}")
 
 
 def _ensure_litellm_loaded() -> bool:
@@ -691,6 +801,111 @@ class LiteLLMClient:
                     )
 
                 return result
+
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
+    async def invoke_single_connection(
+        self,
+        request: InferenceRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+    ) -> AdapterResponse:
+        """统一单连接云端推理（S2，ADR-0014 §6.1/§6.2）：只执行当前目标。
+
+        - 不读全局配置、不走 Router、不做候选切换/重试（``num_retries=0``）；
+          Tenacity 重试与冷却归 S3 ScenarioExecutor；
+        - model 前缀按 provider 的 ``litellm_prefix`` 拼接（azure 走
+          ``azure/<deployment>``），api_base 取连接定义；
+        - 凭据经 ``resolve_credential`` 三形态解析（keyring 读取为同步 IO，
+          offload 线程池，R16）；
+        - deadline 为单调时钟截止值（loop.time() 口径）：剩余预算裁剪 httpx
+          总超时，dispatch 前耗尽抛 ``TimeoutError``（零出站）；
+        - usage 经 ``normalize_litellm_usage`` 归一化为五字段（MM-08）；
+        - ``attempt_context`` 归 S3 Executor 落账语义，本方法不消费；
+        - ``asyncio.CancelledError`` 始终传播（R2），不包装。
+
+        Raises:
+            ValueError: adapter_kind 非 litellm_chat / credential_ref 形态非法。
+            TimeoutError: dispatch 前 deadline 已耗尽。
+            RuntimeError: litellm 不可用 / keyring 读取失败。
+        """
+        if resolved_connection.adapter_kind != "litellm_chat":
+            raise ValueError(
+                f"invoke_single_connection requires adapter_kind='litellm_chat', got {resolved_connection.adapter_kind!r}"
+            )
+
+        import services.ai_service as _ai
+
+        if not _ai._ensure_litellm_loaded():
+            raise RuntimeError("LiteLLM not installed, cloud LLM features disabled")
+
+        loop = asyncio.get_running_loop()
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError("Deadline exhausted before cloud inference dispatch.")
+
+        payload = request.payload
+        adapter_options = resolved_connection.adapter_options
+        adapter_timeout = float(adapter_options.get("timeout", DEFAULT_CLOUD_TIMEOUT) or DEFAULT_CLOUD_TIMEOUT)
+        timeout_val = min(adapter_timeout, remaining)
+        if timeout_val <= 0:
+            raise TimeoutError("Deadline exhausted after adapter timeout resolution.")
+
+        # model 前缀拼接（ResolvedConnection.model 为裸 deployment/model 名）。
+        model = resolved_connection.model
+        provider = resolved_connection.provider
+        if provider == "azure":
+            litellm_model = f"azure/{model}"
+            from utils.llm_providers import AZURE_DEFAULT_API_VERSION
+
+            api_version = adapter_options.get("api_version", AZURE_DEFAULT_API_VERSION)
+        else:
+            from utils.llm_providers import LLM_PROVIDERS
+
+            prefix = LLM_PROVIDERS.get(provider, {}).get("litellm_prefix", "openai")
+            litellm_model = f"{prefix}/{model}"
+            api_version = None
+
+        # R16：keyring 为同步 IO，凭据解析 offload 线程池（None 亦走同路径，
+        # 语义为「解析即得无凭据」而非跳过解析）。
+        api_key = await ThreadPoolManager().run_async(
+            TaskType.IO, resolve_credential, resolved_connection.credential_ref
+        )
+
+        messages = [
+            {"role": "system", "content": str(payload.get("system_prompt", _DEFAULT_INVOKE_SYSTEM_PROMPT))},
+            {"role": "user", "content": str(payload.get("prompt", ""))},
+        ]
+        request_params: dict = {
+            "messages": messages,
+            "model": litellm_model,
+            "num_retries": 0,  # §6.2：单连接无 SDK 隐藏重试，重试/冷却归 Executor
+            "timeout": httpx.Timeout(timeout_val, connect=CONNECT_TIMEOUT),
+        }
+        if api_version is not None:
+            request_params["api_version"] = api_version
+        if resolved_connection.api_base:
+            request_params["api_base"] = resolved_connection.api_base
+        if api_key is not None:
+            request_params["api_key"] = api_key
+        if "temperature" in payload:
+            request_params["temperature"] = float(payload["temperature"])
+        if "max_tokens" in payload:
+            request_params["max_tokens"] = int(payload["max_tokens"])
+
+        from utils.proxy_manager import ProxyManager
+
+        with ProxyManager.litellm_env_context():
+            response = await _ai.acompletion(**request_params)
+
+        content = response.choices[0].message.content  # type: ignore[union-attr]
+        usage = normalize_litellm_usage(getattr(response, "usage", None))
+        return AdapterResponse(
+            content=content,
+            usage=usage,
+            actual_model=getattr(response, "model", None),
+            metadata={},
+        )
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
     async def _chat_completion(

@@ -224,12 +224,17 @@ class ScoredText:
 
 @dataclass(frozen=True, slots=True)
 class ScoringOutcome:
-    """情绪打分终态（§6.1）：CancelledError 传播，不包装成 unavailable。"""
+    """情绪打分终态（§6.1）：CancelledError 传播，不包装成 unavailable。
+
+    metadata（S2）：运行元数据（processed_count / 逐条 input_tokens / 逐条
+    truncation 标记等），只读 Mapping 或 None；不承载业务语义字段，缺失不伪装。
+    """
 
     status: Literal["success", "partial", "unavailable", "invalid_output", "timeout", "worker_error"]
     results: tuple[ScoredText, ...]
     reason: str | None
     usage: NormalizedLLMUsage | None
+    metadata: Mapping[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------

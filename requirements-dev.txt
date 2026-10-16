@@ -536,6 +536,8 @@ syrupy==6.1.1
     # via astockscreener (pyproject.toml)
 tabulate==0.10.0
     # via akshare
+tenacity==9.2.1
+    # via astockscreener (pyproject.toml)
 tiktoken==0.14.0
     # via litellm
 tokenizers==0.23.2
