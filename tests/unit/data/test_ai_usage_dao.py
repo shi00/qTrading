@@ -10,10 +10,12 @@
 
 import datetime
 from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from core.model_management_types import NormalizedLLMUsage
 from data.persistence.daos.ai_usage_dao import AIUsageDao, parse_legacy_cents
 
 pytestmark = pytest.mark.unit
@@ -24,17 +26,20 @@ class _CaptureConn:
 
     def __init__(self, results):
         self.results = list(results)
-        self.calls: list[tuple[str, tuple]] = []
+        self.calls: list[tuple[str, Any]] = []
 
     async def execute(self, sql, params=None):
         import sqlalchemy
 
-        self.calls.append((str(sql), tuple(params) if params else ()))
+        self.calls.append((str(sql), params))
         result = MagicMock()
         item = self.results.pop(0) if self.results else None
         if isinstance(item, Exception):
             raise item
         result.fetchone = MagicMock(return_value=item)
+        if isinstance(item, list):
+            # 多行结果（如 read_month_usage 的 fetchall）
+            result.fetchall = MagicMock(return_value=item)
         result.rowcount = item if isinstance(item, int) else 0
         return result
 
@@ -70,6 +75,40 @@ def _reserve_kwargs(**overrides):
         "owner_epoch": 1,
         "owner_lease_expires_at": datetime.datetime(2026, 10, 16, 12, 0, 0),
         "lease_expires_at": datetime.datetime(2026, 10, 16, 12, 0, 0),
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _settle_kwargs(**overrides):
+    kwargs = {
+        "attempt_id": "att-1",
+        "invocation_id": "inv-1",
+        "status": "succeeded",
+        "usage_status": "final",
+        "usage": NormalizedLLMUsage(
+            input_total_tokens=100,
+            uncached_input_tokens=80,
+            cache_read_tokens=10,
+            cache_write_tokens=10,
+            output_tokens=50,
+        ),
+        "usage_revision": 2,
+        "error_code": None,
+        "duration_ms": 123.4,
+        "cost_cny": "0.05",
+        "actual_model": "glm-4-air",
+        "connection_id": "conn-1",
+        "connection_revision": 1,
+        "adapter_kind": "litellm_chat",
+        "configured_model": "glm-4-air",
+        "scenario_id": "news_sentiment",
+        "task_id": "sentiment",
+        "trigger": "manual",
+        "candidate_index": 0,
+        "retry_index": 0,
+        "security_revision": 1,
+        "month": "202610",
     }
     kwargs.update(overrides)
     return kwargs
@@ -186,6 +225,156 @@ class TestMonthlyMonotonic:
         )
         sql, _ = conn.calls[0]
         assert "GREATEST" in sql.upper()
+
+
+class TestSettleAttemptUsage:
+    @pytest.mark.asyncio
+    async def test_settle_existing_attempt_updates_and_rolls_both_scopes(self):
+        """终态落账（D6）：attempt 修订单调推进 + 差额整体计入两 scope 月汇总。"""
+        # 序列：lock(None) → SELECT FOR UPDATE((0, 0.02)) → UPDATE(None) → upsert×2(None)
+        conn = _CaptureConn(results=[None, (0, Decimal("0.02")), None, None, None])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(**_settle_kwargs())
+        assert result is True
+        assert len(conn.calls) == 5  # noqa: weak-assertion 语句数即语义：结算事务必须 lock/SELECT/UPDATE/rollup×2 共五条
+        update_sql, update_params = conn.calls[2]
+        assert "UPDATE ai_attempt" in update_sql
+        assert "accounted_usage_revision" in update_sql
+        assert update_params["usage_revision"] == 2
+        assert update_params["cost_cny"] == "0.05"
+        # 五字段用量写入（§9.1 归一化）
+        assert update_params["input_total_tokens"] == 100
+        assert update_params["output_tokens"] == 50
+        # 两 scope 月汇总：差额 = 0.05 - 已计入 0.02 = 0.03
+        upserts = [params for _sql, params in conn.calls[3:]]
+        scenario = [p for p in upserts if p["grouping_key"] == "news_sentiment"]
+        connection = [p for p in upserts if p["grouping_key"] == "conn-1"]
+        assert len(scenario) == 1 and len(connection) == 1
+        assert Decimal(scenario[0]["cost_cny"]) == Decimal("0.03")
+        assert scenario[0]["succeeded_count"] == 1
+        assert scenario[0]["invocation_count"] == 0  # settle 不动 invocation 计数
+        # connection scope：scenario/task 维度置 None（§10 两 scope 不相加不混算）
+        assert connection[0]["scenario_id"] is None
+        assert connection[0]["task_id"] is None
+        assert connection[0]["connection_id"] == "conn-1"
+
+    @pytest.mark.asyncio
+    async def test_settle_stale_revision_returns_false(self):
+        """迟到旧修订不覆盖新修订（R22 水位语义）：不 UPDATE、不计费。"""
+        conn = _CaptureConn(results=[None, (3, Decimal("0.02"))])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(**_settle_kwargs(usage_revision=2))
+        assert result is False
+        assert len(conn.calls) == 2  # noqa: weak-assertion 语句数即语义：旧修订仅 lock+修订查询，无 UPDATE/月汇总
+        assert "accounted_usage_revision" in conn.calls[1][0]  # 第二条即修订水位查询
+
+    @pytest.mark.asyncio
+    async def test_settle_missing_attempt_inserts_terminal_row(self):
+        """attempt 行缺失（mark_dispatched 从未落库）：直接插入终态，usage=None 不伪装用量。"""
+        # 序列：lock(0) → SELECT FOR UPDATE(1, None) → INSERT 终态(2) → upsert×2(3,4)
+        conn = _CaptureConn(results=[None, None, None, None])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(
+            **_settle_kwargs(status="failed", usage=None, usage_revision=1, cost_cny=None)
+        )
+        assert result is True
+        insert_sql, insert_params = conn.calls[2]
+        assert "INSERT INTO ai_attempt" in insert_sql
+        assert insert_params["status"] == "failed"
+        assert insert_params["cost_cny"] is None
+        assert insert_params["input_total_tokens"] is None  # usage=None → 各用量列 NULL
+        # 失败不计 succeeded
+        upserts = [params for _sql, params in conn.calls[3:]]
+        assert len(upserts) == 2
+        assert all(p["succeeded_count"] == 0 for p in upserts)
+
+
+class TestRecoverAndClose:
+    @pytest.mark.asyncio
+    async def test_recover_expired_owners_returns_rowcount(self):
+        """启动前恢复（D9/D4）：过期租约的 dispatched 预留转 held_unconfirmed。"""
+        conn = _CaptureConn(results=[7])
+        dao = _dao(conn)
+        n = await dao.recover_expired_owners(now=datetime.datetime(2026, 10, 16, 12, 0, 0))
+        assert n == 7
+        sql, params = conn.calls[0]
+        assert "held_unconfirmed" in sql
+        assert params["now"] == datetime.datetime(2026, 10, 16, 12, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_close_usage_window_true_and_false(self):
+        """惰性窗口关闭：rowcount>0 → True（已关闭或未到期 → False）。"""
+        dao = _dao(_CaptureConn(results=[1]))
+        assert await dao.close_usage_window(attempt_id="att-1") is True
+        dao = _dao(_CaptureConn(results=[0]))
+        assert await dao.close_usage_window(attempt_id="att-1") is False
+
+
+class TestReadMonthUsage:
+    @pytest.mark.asyncio
+    async def test_read_month_usage_returns_mapping_dicts(self):
+        """月汇总读取（S5 UI 展示边界）：行 _mapping → dict。"""
+        row = MagicMock()
+        row._mapping = {"month": "202610", "grouping_key": "news_sentiment", "cost_cny": "0.05"}
+        conn = _CaptureConn(results=[[row]])
+        dao = _dao(conn)
+        rows = await dao.read_month_usage(month="202610", aggregation_scope="scenario")
+        assert rows == [{"month": "202610", "grouping_key": "news_sentiment", "cost_cny": "0.05"}]
+        sql, params = conn.calls[0]
+        assert "ai_usage_monthly" in sql
+        assert params == {"month": "202610", "scope": "scenario"}
+
+
+class TestTryReserveBudgetBranches:
+    @pytest.mark.asyncio
+    async def test_usage_only_skips_budget_check(self):
+        """usage_only（amount_cny=None）不占预算：无余额查询，直接登记预留。"""
+        kwargs = _reserve_kwargs(amount_cny=None, budget_limit_cny=None)
+        conn = _CaptureConn(results=[None, None, None])  # lock → INSERT → UPDATE
+        dao = _dao(conn)
+        reservation = await dao.try_reserve(**kwargs)
+        assert reservation is not None
+        assert reservation.amount_cny is None
+        # 预算检查两查询（SUM + app_state）未发生：语句数即语义
+        assert len(conn.calls) == 3  # noqa: weak-assertion 语句数即语义：usage_only 仅 lock/INSERT/UPDATE 三条
+        all_sql = "\n".join(sql for sql, _params in conn.calls)
+        assert "ai_usage_monthly" not in all_sql
+        assert "app_state" not in all_sql
+
+    @pytest.mark.asyncio
+    async def test_month_committed_null_sum_falls_back_to_legacy(self):
+        """SUM 返回 NULL → settled 保持 0，legacy 分值参与预算口径。"""
+        # 序列：lock → INSERT → SUM((None,)) → app_state(("500",))
+        conn = _CaptureConn(results=[None, None, (None,), ("500",)])
+        dao = _dao(conn)
+        reservation = await dao.try_reserve(**_reserve_kwargs(amount_cny="0.05", budget_limit_cny="10.00"))
+        assert reservation is not None  # used 0 + legacy 5.00 + 0.05 < 10.00
+        assert Decimal(reservation.amount_cny) == Decimal("0.05")
+
+    @pytest.mark.asyncio
+    async def test_month_committed_bad_sum_treated_as_zero(self):
+        """SUM 返回坏值 → Decimal 解析异常 → 0（不阻断预留、不伪装成本）。"""
+        conn = _CaptureConn(results=[None, None, ("garbage",), None])
+        dao = _dao(conn)
+        reservation = await dao.try_reserve(**_reserve_kwargs(amount_cny="0.05", budget_limit_cny="10.00"))
+        assert reservation is not None
+
+    @pytest.mark.asyncio
+    async def test_claim_invocation_with_created_at_month_key(self):
+        """恢复认领：created_at 为 datetime → +8h 归属月计算锁键（D2 归属口径）。"""
+        # 序列：created_at((2026-10-15 20:00,)) → advisory(None) → UPDATE RETURNING((5,))
+        conn = _CaptureConn(results=[(datetime.datetime(2026, 10, 15, 20, 0, 0),), None, (5,)])
+        dao = _dao(conn)
+        new_epoch = await dao.claim_invocation(
+            invocation_id="inv-1",
+            owner_session_id="owner-2",
+            lease_expires_at=datetime.datetime(2026, 10, 16, 12, 0, 0),
+        )
+        assert new_epoch == 5
+        lock_sql, lock_params = conn.calls[1]
+        assert "pg_advisory_xact_lock" in lock_sql
+        # (2026-10-15 20:00 + 8h) → 2026-10 → 锁键 202610
+        assert lock_params["lock_key"] == 202610
 
 
 class TestTablesExist:
