@@ -1,18 +1,24 @@
 # FinBERT GGUF 微调产线 workflow（CG-3，ADR-0012 修订经 ADR-0013 承载）。
 #
-# 产线链路：workflow_dispatch（model_version + corpus_tag）→ 临时安装训练依赖
+# 产线链路：workflow_dispatch（model_version 可选 + corpus_tag + force_retrain）→
+# 指纹路由（ADR-0015 内容寻址：对语料 sums + 产线脚本白名单 + workflow + 基座
+# revision + llama.cpp commit 计算 canonical 指纹，与最新 finbert-gguf-v* Release
+# 随附 fingerprint.json 对比——输入无变化即拒绝重训，省 1~3h 无效训练；版本留空
+# 自动 minor+1）→ 临时安装训练依赖
 # （torch CPU / transformers，仅离线训练使用，不进 pyproject 运行时依赖）→
 # 下载基座模型（HF Hub 固定 revision）+ 语料 Release（SHA256 全量校验 + 语料 manifest
-# 校验——行数/digest 期望值取自 manifest，缺失/不兼容即报错，FT-07）→
+# 校验——行数/digest 期望值取自 manifest，缺失/不兼容即报错，FT-07；另作 F2 语料锚
+# 断言：实际下载的 SHA256SUMS.txt 必须与指纹锚一致）→
 # 固定 seed 训练（scripts/train_finbert.py）→ 拆头导出 GGUF
 # （scripts/export_finbert_gguf.py，llama.cpp 工具链 v0.3.0 @ c1d0e7a0——tag 别名见下，
 # f16 即发布产物——Q8_0 量化因概率差判据必 FAIL 已于 2026-10-14 移除，
 # 定因见 export 脚本 docstring）→ pre-tokenizer 登记补丁
 # （scripts/patch_llama_cpp_pre_registry.py，FinBERT2-base chkhsh 上游未登记）→
 # 一致性 Gate（scripts/verify_finbert_gguf.py --head，N0-3 四判据）→
-# 上传排障 artifact（无论 Gate 成败）与发布 artifact（仅 Gate 通过后）→
+# 上传排障 artifact（无论 Gate 成败）与发布 artifact（仅 Gate 通过后，含
+# fingerprint.json 供下轮训练作去重基线）→
 # 发布 job 复验 SHA256 后发布 Release `finbert-gguf-v{model_version}`
-#（note 含训练语料 corpus_tag 及其 SHA256，模型↔语料 lineage 溯源）。
+#（note 含训练语料 corpus_tag 及其 SHA256、训练指纹，模型↔语料 lineage 溯源）。
 #
 # 最小权限拆分（FT-06）：训练/导出/Gate job（train-export-gate）全链路
 # 仅 contents: read——依赖安装 / 语料下载 / 训练 / 导出 / Gate 期间 job
@@ -55,15 +61,19 @@ on:
   workflow_dispatch:
     inputs:
       model_version:
-        description: '模型版本号（纯数字 semver，如 0.1.0；发布 tag 为 finbert-gguf-v<model_version>）'
-        required: true
-        default: '0.1.0'
+        description: '模型版本号（纯数字 semver；留空则自动取最新 Release minor+1 并探测 tag 空位；发布 tag 为 finbert-gguf-v<model_version>）'
+        required: false
         type: string
       corpus_tag:
         description: '训练语料 Release tag（写入 Release note 作模型↔语料 lineage）'
         required: true
         default: 'corpus-v1'
         type: string
+      force_retrain:
+        description: '强制重训（训练指纹与最新 Release 一致时仍继续训练；指纹路由默认拒绝输入无变化的重复训练）'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -86,9 +96,10 @@ jobs:
       # 暴露期间也不具备写仓库内容 / Release 的能力（FT-06）。
       contents: read
     outputs:
-      # 跨 job 传递发布所需参数（validate_inputs 的 step outputs 仅本 job 可见）。
-      model_version: ${{ steps.validate_inputs.outputs.model_version }}
-      release_tag: ${{ steps.validate_inputs.outputs.release_tag }}
+      # 跨 job 传递发布所需参数（model_version / release_tag 由指纹路由步骤产出；
+      # validate_inputs 仅产出 corpus_tag）。
+      model_version: ${{ steps.fingerprint_route.outputs.model_version }}
+      release_tag: ${{ steps.fingerprint_route.outputs.release_tag }}
     env:
       # ubuntu runner 4 核：训练（--num-threads 4）与 llama.cpp 推理线程数对齐，
       # 避免超线程互踩。
@@ -106,20 +117,47 @@ jobs:
           CORPUS_TAG: ${{ inputs.corpus_tag }}
         run: |
           set -euo pipefail
-          if ! [[ "$MODEL_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::model_version 必须为纯数字 semver（如 0.1.0），实际: $MODEL_VERSION" >&2
+          # model_version 可选（ADR-0015）：留空由指纹路由步骤自动 minor+1；
+          # 仅在非空时校验 semver 形态。
+          if [ -n "$MODEL_VERSION" ] && ! [[ "$MODEL_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::model_version 必须为纯数字 semver（如 0.2.0）或留空（自动 minor+1），实际: $MODEL_VERSION" >&2
             exit 1
           fi
           if ! [[ "$CORPUS_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
             echo "::error::corpus_tag 含非法字符，实际: $CORPUS_TAG" >&2
             exit 1
           fi
-          echo "model_version=$MODEL_VERSION" >> "$GITHUB_OUTPUT"
           echo "corpus_tag=$CORPUS_TAG" >> "$GITHUB_OUTPUT"
-          echo "release_tag=finbert-gguf-v$MODEL_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # 指纹路由（ADR-0015 内容寻址发布）：对训练输入（语料 SHA256SUMS.txt +
+      # 产线脚本白名单 5+1 自举 + workflow 全文 + 基座 revision + llama.cpp commit，
+      # 后两者从 workflow 文本 fail-safe 提取）计算 canonical JSON 指纹，与最新
+      # finbert-gguf-v* Release 随附的 fingerprint.json 对比：
+      # - 无历史 Release / 锚点无指纹资产 / spec 不兼容 → 放行（INCOMPARABLE）；
+      # - 指纹一致且未勾选 force_retrain → exit 1 拒绝（输入无变化，省 1~3h 重训）；
+      # - 指纹不同 → 放行并打印分量级 diff。
+      # 版本解析：显式 model_version 原样使用（对应 Release tag 已存在时秒拒，
+      # FT-05 fail-fast）；留空自动取 semver 最新 tag minor+1 并循环探测 tag 空位。
+      # 步骤落点：置于装依赖**之前**——路由拒绝时无需安装训练依赖（fail-fast）；
+      # 脚本 stdlib 运行（F3 复用链传递依赖的 utils/core 模块当前亦全 stdlib，
+      # 引入三方依赖时路由即 fail-closed，方向安全），runner 预置 python3 即可
+      # 运行（四支柱与 runner 镜像豁免见 scripts/compute_training_fingerprint.py
+      # docstring）。
+      - name: Fingerprint route (compute_training_fingerprint.py, ADR-0015)
+        id: fingerprint_route
+        env:
+          CORPUS_TAG: ${{ steps.validate_inputs.outputs.corpus_tag }}
+          INPUT_MODEL_VERSION: ${{ inputs.model_version }}
+          FORCE_RETRAIN: ${{ inputs.force_retrain }}
+        run: |
+          set -euo pipefail
+          ARGS=(route --corpus-tag "$CORPUS_TAG" --repo "$GITHUB_REPOSITORY" --output stage_a_out/fingerprint.json)
+          if [ -n "$INPUT_MODEL_VERSION" ]; then ARGS+=(--model-version "$INPUT_MODEL_VERSION"); fi
+          if [ "$FORCE_RETRAIN" = "true" ]; then ARGS+=(--force-retrain); fi
+          python3 scripts/compute_training_fingerprint.py "${ARGS[@]}"
 
       - name: Setup Python 3.13
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -223,6 +261,12 @@ jobs:
           gh release download "$CORPUS_TAG" --repo "$GITHUB_REPOSITORY" \
             --dir data/corpus --clobber
           (cd data/corpus && sha256sum -c SHA256SUMS.txt)
+          # F2 语料锚断言（ADR-0015）：实际下载的 SHA256SUMS.txt 必须与指纹锚一致——
+          # 防 corpus Release 资产在「路由步骤下载」与「语料下载」之间被替换导致
+          # 指纹与训练输入错位；错位即 fail-fast。
+          python scripts/compute_training_fingerprint.py verify-corpus-anchor \
+            --fingerprint stage_a_out/fingerprint.json \
+            --corpus-sums data/corpus/SHA256SUMS.txt
           python scripts/corpus_manifest.py verify \
             --corpus-dir data/corpus \
             --corpus-tag "$CORPUS_TAG" \
@@ -292,12 +336,15 @@ jobs:
             --repo "$EFFECT_GATE_REPO" \
             --report stage_b_out/effect_gate.json
 
-      # 产物 SHA256 清单（发布资产自校验凭证）。
+      # 产物 SHA256 清单（发布资产自校验凭证）。fingerprint.json（ADR-0015 指纹）
+      # 随发布资产一并发布：下轮训练以它为对比基线（内容寻址去重的锚）——cp 自
+      # 路由步骤产出的 stage_a_out。
       - name: Generate SHA256SUMS.txt
         run: |
           set -euo pipefail
+          cp stage_a_out/fingerprint.json stage_b_out/fingerprint.json
           cd stage_b_out
-          sha256sum finbert2-news-f16.gguf head.npz > SHA256SUMS.txt
+          sha256sum finbert2-news-f16.gguf head.npz fingerprint.json > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       # Release note：模型 ↔ 语料 lineage 溯源（corpus_tag + 语料 SHA256）。
@@ -309,15 +356,17 @@ jobs:
       # 行为差异可归因——滚动 runner（ubuntu-latest）基线决策见文件头注释与 PR 说明。
       - name: Generate release note
         env:
-          MODEL_VERSION: ${{ steps.validate_inputs.outputs.model_version }}
+          MODEL_VERSION: ${{ steps.fingerprint_route.outputs.model_version }}
           CORPUS_TAG: ${{ steps.validate_inputs.outputs.corpus_tag }}
         run: |
           set -euo pipefail
           python - <<'EOF'
           import hashlib
+          import importlib.util
           import json
           import os
           import platform
+          import sys
           from importlib.metadata import PackageNotFoundError
           from importlib.metadata import distributions
           from importlib.metadata import version as pkg_version
@@ -429,6 +478,24 @@ jobs:
               effect_lines.append(f"- **说明**: {'; '.join(effect['reasons'])}")
           effect_section = "\n".join(effect_lines) + "\n\n"
 
+          # ADR-0015 训练指纹 lineage：读取路由步骤产出、随发布资产发布的
+          # fingerprint.json，给出指纹总 SHA256（canonical components 口径——
+          # 哈希实现经 import 复用 compute_training_fingerprint.py，单一事实源）。
+          # 缺失即 fail-fast，不发布 lineage 不完整的 note。
+          fingerprint_path = Path("stage_b_out/fingerprint.json")
+          if not fingerprint_path.is_file():
+              raise SystemExit("fingerprint.json 缺失，训练指纹 lineage 不完整，拒绝发布")
+          fingerprint = json.loads(fingerprint_path.read_text(encoding="utf-8"))
+          _fp_spec = importlib.util.spec_from_file_location(
+              "compute_training_fingerprint", "scripts/compute_training_fingerprint.py"
+          )
+          if _fp_spec is None or _fp_spec.loader is None:
+              raise SystemExit("compute_training_fingerprint.py 无法加载，指纹 lineage 不完整，拒绝发布")
+          _fp_mod = importlib.util.module_from_spec(_fp_spec)
+          sys.modules.setdefault("compute_training_fingerprint", _fp_mod)
+          _fp_spec.loader.exec_module(_fp_mod)
+          fingerprint_sha = _fp_mod.fingerprint_sha256(fingerprint["components"])
+
           note = (
               f"# FinBERT GGUF 模型 finbert-gguf-v{model_version}\n"
               "\n"
@@ -438,6 +505,8 @@ jobs:
               f"{corpus_lines}\n"
               f"- **行数守恒**: {corpus_rows_expr} = {corpus_total} ✅\n"
               f"- **语料 manifest（FT-07）**: {manifest_lineage}\n"
+              f"- **训练指纹（ADR-0015）**: spec `{fingerprint.get('fingerprint_spec')}`，SHA256 `{fingerprint_sha}`"
+              "（资产 fingerprint.json；canonical components 口径，与最新 Release 指纹一致的重跑会被路由拒绝）\n"
               "- **基座模型**: valuesimplex-ai-lab/FinBERT2-base @ 804a488abcece861e9241d55e9d6fd1f867ebee1（HF Hub，Apache-2.0）\n"
               f"- **训练 seed**: {summary['seed']}（scripts/train_finbert.py DEFAULT_SEED）\n"
               "- **llama.cpp 工具链**: v0.3.0 @ c1d0e7a004015f23bc0233470b747b596f29b264"
@@ -463,7 +532,8 @@ jobs:
               "|------|------|\n"
               "| `finbert2-news-f16.gguf` | 发布用 f16 编码器（llama-cpp-python 加载；f16 交付定因见 scripts/export_finbert_gguf.py docstring） |\n"
               "| `head.npz` | 分类头（mode=bert：cw/cb/pw/pb，reviews §8.2 格式；labels = [利空, 中性, 利好]） |\n"
-              "| `SHA256SUMS.txt` | 上述两文件 SHA256 自校验凭证 |\n"
+              "| `fingerprint.json` | 训练指纹（ADR-0015 内容寻址；下轮训练以此为去重基线） |\n"
+              "| `SHA256SUMS.txt` | 上述三文件 SHA256 自校验凭证 |\n"
               "\n"
               "## 一致性 Gate\n"
               "\n"
@@ -485,18 +555,19 @@ jobs:
           cat stage_b_out/release_note.md
 
       # 发布 artifact（Gate 通过后才会执行到这里）：仅含发布所需最小文件集，
-      # 由 publish-release job 下载复验后发布。四文件同在 stage_b_out，
+      # 由 publish-release job 下载复验后发布。文件同在 stage_b_out，
       # artifact 根为 stage_b_out（平铺），下载侧与 SHA256SUMS.txt 相对路径
       # 一致；if-no-files-found: error 保证文件缺失时上传即失败（fail-safe）。
       # 排障 artifact（见文末）单独上传：两者命名与用途互不混用。
       - name: Upload release artifacts (for publish job)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: finbert-gguf-release-${{ steps.validate_inputs.outputs.model_version }}-${{ github.run_id }}
+          name: finbert-gguf-release-${{ steps.fingerprint_route.outputs.model_version }}-${{ github.run_id }}
           path: |
             stage_b_out/finbert2-news-f16.gguf
             stage_b_out/head.npz
             stage_b_out/SHA256SUMS.txt
+            stage_b_out/fingerprint.json
             stage_b_out/release_note.md
           if-no-files-found: error
           retention-days: 7
@@ -508,8 +579,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: finbert-gguf-${{ steps.validate_inputs.outputs.model_version }}-${{ github.run_id }}
+          name: finbert-gguf-${{ steps.fingerprint_route.outputs.model_version }}-${{ github.run_id }}
           path: |
+            stage_a_out/fingerprint.json
             stage_b_out/best/train_summary.json
             stage_b_out/best/best_f1.txt
             stage_b_out/best/test_macro_f1.txt
@@ -574,6 +646,7 @@ jobs:
             release-assets/finbert2-news-f16.gguf
             release-assets/head.npz
             release-assets/SHA256SUMS.txt
+            release-assets/fingerprint.json
           )
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             echo "::error::$RELEASE_TAG 已存在（同 model_version 已发布）——拒绝覆盖，请提升 model_version 后重跑；若系首次发布中断致资产不完整，请人工删除该 Release（留痕）后重跑" >&2

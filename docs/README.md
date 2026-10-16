@@ -4,7 +4,7 @@
 
 ## 目录结构
 
-- [guides/](./guides/) — 流程类指南（Git workflow / 测试 / CI/CD / 依赖管理 / How-To）
+- [guides/](./guides/) — 流程类指南（Git workflow / 测试 / CI/CD / 依赖管理 / How-To / FinBERT 模型产线）
 - [architecture/](./architecture/) — 架构类深入（单例生命周期模板等，含 TushareClient 特殊说明）
 - [patterns/](./patterns/) — 模式类深入（DAO / 策略 / 数据同步 / MVVM 等，data-sync.md 含 Tushare Syncer 设计模式）
 - [flet/](./flet/) — Flet UI/UX 设计、声明式 API、无障碍、项目差异、MCP 核验、升级与 CanvasKit E2E 避坑入口
@@ -39,6 +39,20 @@ Tushare 相关文档分散在多个章节，按主题索引如下：
 | 已知技术债 | [debt/known-technical-debt.md](./debt/known-technical-debt.md) |
 | 红线自动化守护 | `scripts/check_redlines.py` 的 `check_R_tushare_token_log`（R9 红线专属守护） |
 
+## FinBERT 模型产线文档索引
+
+FinBERT 新闻情绪模型产线相关文档分散在多个章节，按主题索引如下（产线机制总览正本为 [guides/finbert-pipeline.md](./guides/finbert-pipeline.md)）：
+
+| 主题 | 文档位置 |
+|------|---------|
+| 产线机制总览（流水线阶段 / 指纹路由 / 双 Gate / 发布与闭环） | [guides/finbert-pipeline.md](./guides/finbert-pipeline.md) |
+| 本地推理范式（CLS embedding + numpy 分类头） | [adr/0012-news-sentiment-inference-paradigm.md](./adr/0012-news-sentiment-inference-paradigm.md) |
+| 推理运行时选型终局（GGUF） | [adr/0013-runtime-selection-final-gguf.md](./adr/0013-runtime-selection-final-gguf.md) |
+| 指纹驱动发布决策（内容寻址去重） | [adr/0015-fingerprint-driven-release.md](./adr/0015-fingerprint-driven-release.md) |
+| 模型产物获取操作（Release 下载 / tokenizer） | [guides/how-to.md「13. 获取新闻情绪模型产物」](./guides/how-to.md#13-获取新闻情绪模型产物finbert-gguf-v-release) |
+| 运行时集成（AI 服务 / 新闻情绪打分） | [patterns/ai-service.md](./patterns/ai-service.md) |
+| workflow 与脚本实现细节 | `.github/workflows/finbert-train.yml` + `scripts/`（脚本清单见 [guides/ci-cd.md](./guides/ci-cd.md)） |
+
 ## ADR 索引
 
 各 ADR 的 Status 以文件头部为准，本表仅作发现入口，不复制状态语义。
@@ -59,3 +73,4 @@ Tushare 相关文档分散在多个章节，按主题索引如下：
 | ADR-0012 | 新闻情绪打分的本地推理范式（CLS embedding + numpy 分类头） | [0012-news-sentiment-inference-paradigm.md](./adr/0012-news-sentiment-inference-paradigm.md) |
 | ADR-0013 | 新闻情绪打分推理运行时选型终局（保持 GGUF，ORT / OpenVINO 双 PoC FAIL） | [0013-runtime-selection-final-gguf.md](./adr/0013-runtime-selection-final-gguf.md) |
 | ADR-0014 | 统一模型管理的场景调度契约（ScenarioExecutor 独占候选调度） | [0014-unified-model-scheduling.md](./adr/0014-unified-model-scheduling.md) |
+| ADR-0015 | FinBERT 产线指纹驱动发布（内容寻址去重，训练输入指纹对比） | [0015-fingerprint-driven-release.md](./adr/0015-fingerprint-driven-release.md) |

@@ -40,6 +40,24 @@
   确无历史 Release → 不阻断（NO_BASELINE，须显式声明未施加门槛）；本次自身指标缺失/
   NaN/非有限 → FAIL。
 
+指纹驱动发布（ADR-0015，内容寻址去重）：
+- dispatch 输入：model_version 可选（required: false，无 default；留空由指纹路由
+  自动 minor+1），新增 force_retrain boolean（默认 false）；corpus_tag 必填 +
+  白名单校验语义不变；
+- job1 在 Checkout Code 之后、Setup Python / 装依赖之前运行指纹路由步骤
+  （id fingerprint_route，脚本 scripts/compute_training_fingerprint.py stdlib
+  运行——F3 复用链当前 stdlib-only，python3 直接运行）——路由拒绝时无需安装
+  训练依赖（fail-fast）；上下文经 env 注入，run 内不得内插 ${{ }}；步骤不可
+  continue-on-error / 条件跳过（绕过即重复训练静默放行）；
+- F2 语料锚断言：语料下载校验后 verify-corpus-anchor——实际下载的 SHA256SUMS.txt
+  必须与指纹锚一致，先于 corpus manifest 校验 fail-fast；
+- validate_inputs 仅产出 corpus_tag（model_version 仅非空时校验 semver），
+  model_version / release_tag 统一由 fingerprint_route 步骤产出（job outputs、
+  artifact 命名、note env 单一事实源）；
+- fingerprint.json 随发布资产发布（SHA256SUMS.txt 覆盖三文件）、路由产物落调试
+  artifact（skip 时也可归因）；note 记录指纹 lineage（总 SHA256 经 import 复用
+  compute 脚本计算，缺失即 fail-fast 拒绝发布）。
+
 全部为 workflow YAML 的静态断言，不触发任何训练 / 发布副作用。
 """
 
@@ -113,9 +131,11 @@ def test_job2_depends_on_job1_and_guards_on_success(workflow: dict) -> None:
 
 
 def test_job1_exposes_outputs_for_publish(workflow: dict) -> None:
+    # ADR-0015：model_version / release_tag 由指纹路由步骤产出（显式入参原样用或
+    # 自动 minor+1），validate_inputs 仅产出 corpus_tag。
     outputs = workflow["jobs"][JOB1_NAME]["outputs"]
-    assert outputs["model_version"] == "${{ steps.validate_inputs.outputs.model_version }}"
-    assert outputs["release_tag"] == "${{ steps.validate_inputs.outputs.release_tag }}"
+    assert outputs["model_version"] == "${{ steps.fingerprint_route.outputs.model_version }}"
+    assert outputs["release_tag"] == "${{ steps.fingerprint_route.outputs.release_tag }}"
 
 
 def test_job2_steps_order_download_verify_publish(workflow: dict) -> None:
@@ -168,6 +188,7 @@ def test_release_artifact_fileset_is_minimal(workflow: dict) -> None:
     assert paths == [
         "stage_b_out/SHA256SUMS.txt",
         "stage_b_out/finbert2-news-f16.gguf",
+        "stage_b_out/fingerprint.json",
         "stage_b_out/head.npz",
         "stage_b_out/release_note.md",
     ]
@@ -885,3 +906,145 @@ def test_corpus_step_tag_whitelist_still_guards_dispatch_input(workflow: dict) -
     assert names.index(validate_name) < names.index(CORPUS_STEP_NAME)
     validate = next(s for s in steps if s.get("name") == validate_name)
     assert "corpus_tag" in validate["run"]
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0015：指纹驱动发布（内容寻址去重）
+# --------------------------------------------------------------------------- #
+FINGERPRINT_ROUTE_STEP_NAME = "Fingerprint route (compute_training_fingerprint.py, ADR-0015)"
+FINGERPRINT_SCRIPT = REPO_ROOT / "scripts" / "compute_training_fingerprint.py"
+
+
+def _fingerprint_route_step(workflow: dict) -> dict:
+    return next(s for s in workflow["jobs"][JOB1_NAME]["steps"] if s.get("name") == FINGERPRINT_ROUTE_STEP_NAME)
+
+
+def test_dispatch_inputs_for_fingerprint_route(workflow: dict) -> None:
+    # model_version 可选（留空由路由自动 minor+1），force_retrain 为重训豁免入口；
+    # corpus_tag 必填 + 默认 corpus-v1 语义不变。
+    # 注意：yaml.safe_load 将顶层 `on` 键解析为 True（YAML 1.1 布尔 quirk）。
+    inputs = workflow[True]["workflow_dispatch"]["inputs"]
+    assert inputs["model_version"]["required"] is False
+    assert "default" not in inputs["model_version"]
+    assert inputs["force_retrain"]["type"] == "boolean"
+    assert inputs["force_retrain"]["required"] is False
+    assert inputs["force_retrain"]["default"] is False
+    assert inputs["corpus_tag"]["required"] is True
+    assert inputs["corpus_tag"]["default"] == "corpus-v1"
+
+
+def test_fingerprint_route_step_position_before_dependency_setup(workflow: dict) -> None:
+    # 路由拒绝时无需安装训练依赖（fail-fast）：置于 Checkout 之后、Setup Python 之前。
+    names = [s.get("name") for s in workflow["jobs"][JOB1_NAME]["steps"]]
+    checkout_idx = names.index("Checkout Code")
+    route_idx = names.index(FINGERPRINT_ROUTE_STEP_NAME)
+    setup_idx = names.index("Setup Python 3.13")
+    install_idx = names.index(INSTALL_STEP_NAME)
+    assert checkout_idx < route_idx < setup_idx
+    assert route_idx < install_idx
+
+
+def test_fingerprint_route_step_cannot_silently_swallow_failure(workflow: dict) -> None:
+    # 绕过面：continue-on-error / if 条件跳过会让「输入无变化拒绝」与路由故障
+    # 被吞 → job1 仍 success → 重复训练静默放行，去重失效。
+    step = _fingerprint_route_step(workflow)
+    assert step["id"] == "fingerprint_route"
+    assert "continue-on-error" not in step
+    assert "if" not in step
+    run = step["run"]
+    assert "set -euo pipefail" in run
+    assert "python3 scripts/compute_training_fingerprint.py" in run
+    assert "--output stage_a_out/fingerprint.json" in run
+    # 显式入参仅非空时传递；force_retrain 为布尔开关（默认路径不携带）
+    assert '[ -n "$INPUT_MODEL_VERSION" ]' in run
+    assert '--model-version "$INPUT_MODEL_VERSION"' in run
+    assert "--force-retrain" in run
+    # 上下文经 env 注入（表达式注入面收敛）：run 内不得直接内插 ${{ ... }}
+    assert "${{" not in run
+    assert step["env"]["CORPUS_TAG"] == "${{ steps.validate_inputs.outputs.corpus_tag }}"
+    assert step["env"]["INPUT_MODEL_VERSION"] == "${{ inputs.model_version }}"
+    assert step["env"]["FORCE_RETRAIN"] == "${{ inputs.force_retrain }}"
+
+
+def test_validate_inputs_guard_is_optional_semver_and_only_outputs_corpus_tag(workflow: dict) -> None:
+    # model_version 可选：仅非空时校验 semver；validate_inputs 只产出 corpus_tag，
+    # model_version / release_tag 由指纹路由步骤产出（单一事实源）。
+    validate_name = "Validate dispatch inputs (model_version semver, anti tag-injection)"
+    validate = next(s for s in workflow["jobs"][JOB1_NAME]["steps"] if s.get("name") == validate_name)
+    run = validate["run"]
+    assert 'if [ -n "$MODEL_VERSION" ]' in run
+    gh_output_writes = [line.strip() for line in run.splitlines() if "GITHUB_OUTPUT" in line]
+    assert gh_output_writes == ['echo "corpus_tag=$CORPUS_TAG" >> "$GITHUB_OUTPUT"']
+
+
+def test_job1_has_no_stale_model_version_refs_from_validate_inputs(workflow: dict) -> None:
+    # validate_inputs 不再产出 model_version / release_tag：job1 内残留
+    # steps.validate_inputs.outputs.model_version 引用会在运行时静默解析为空串
+    # （GitHub Actions 对不存在的 output 不报错），导致 artifact 命名 / tag 拼接
+    # 错位——静态拦截。
+    job1_raw = yaml.safe_dump(workflow["jobs"][JOB1_NAME], allow_unicode=True)
+    assert "steps.validate_inputs.outputs.model_version" not in job1_raw
+    assert "steps.validate_inputs.outputs.release_tag" not in job1_raw
+    # 发布 artifact 命名统一由 fingerprint_route 产出（与 job2 下载侧 needs.* 对齐）
+    upload = next(
+        s
+        for s in workflow["jobs"][JOB1_NAME]["steps"]
+        if str(s.get("with", {}).get("name", "")).startswith("finbert-gguf-release-")
+    )
+    assert upload["with"]["name"] == (
+        "finbert-gguf-release-${{ steps.fingerprint_route.outputs.model_version }}-${{ github.run_id }}"
+    )
+
+
+def test_corpus_step_verifies_fingerprint_anchor_before_manifest(workflow: dict) -> None:
+    # F2 语料锚断言（ADR-0015）：实际下载的 SHA256SUMS.txt 必须与指纹锚一致——
+    # 防 corpus Release 资产在「路由下载」与「语料下载」之间被替换；锚校验须在
+    # sha256sum -c 之后、corpus manifest 校验之前 fail-fast。
+    run = _corpus_step(workflow)["run"]
+    assert "python scripts/compute_training_fingerprint.py verify-corpus-anchor" in run
+    assert "--fingerprint stage_a_out/fingerprint.json" in run
+    assert "--corpus-sums data/corpus/SHA256SUMS.txt" in run
+    assert run.index("sha256sum -c SHA256SUMS.txt") < run.index("verify-corpus-anchor")
+    assert run.index("verify-corpus-anchor") < run.index("corpus_manifest.py verify")
+
+
+def test_release_sums_covers_fingerprint_and_copy_from_route(workflow: dict) -> None:
+    # fingerprint.json 由路由步骤产出于 stage_a_out，发布整理时 cp 入 stage_b_out
+    # 随三文件 SHA256 清单发布——下轮训练以此为去重基线（内容寻址锚）。
+    sums = next(s for s in workflow["jobs"][JOB1_NAME]["steps"] if s.get("name") == "Generate SHA256SUMS.txt")
+    run = sums["run"]
+    assert "cp stage_a_out/fingerprint.json stage_b_out/fingerprint.json" in run
+    assert "sha256sum finbert2-news-f16.gguf head.npz fingerprint.json > SHA256SUMS.txt" in run
+
+
+def test_fingerprint_asset_uploaded_for_publish_and_debug(workflow: dict) -> None:
+    steps = workflow["jobs"][JOB1_NAME]["steps"]
+    debug = next(s for s in steps if s.get("name") == "Upload artifacts (incl. gate-failure debugging)")
+    debug_paths = [p.strip() for p in debug["with"]["path"].strip().splitlines()]
+    # 路由产物（stage_a_out）落调试 artifact：skip（输入无变化）时也可归因
+    assert "stage_a_out/fingerprint.json" in debug_paths
+    # 发布侧 stage_b_out/fingerprint.json 文件集由 test_release_artifact_fileset_is_minimal 守护；
+    # 此处守护发布 job 的 ASSETS 列表包含 fingerprint.json（随 Release 分发）。
+    publish = next(
+        s for s in workflow["jobs"][JOB2_NAME]["steps"] if s.get("name") == "Publish release (finbert-gguf-v*)"
+    )
+    assert "release-assets/fingerprint.json" in publish["run"]
+
+
+def test_release_note_records_fingerprint_lineage(workflow: dict) -> None:
+    # note 指纹 lineage：MODEL_VERSION 改由 fingerprint_route 产出；指纹总 SHA256
+    # 经 importlib 复用 compute 脚本计算（单一事实源）；fingerprint.json 缺失即
+    # fail-fast，不发布 lineage 不完整的 note。
+    note = next(s for s in workflow["jobs"][JOB1_NAME]["steps"] if s.get("name") == NOTE_STEP_NAME)
+    assert note["env"]["MODEL_VERSION"] == "${{ steps.fingerprint_route.outputs.model_version }}"
+    run = note["run"]
+    assert "fingerprint.json 缺失" in run
+    assert "训练指纹（ADR-0015）" in run
+    assert "compute_training_fingerprint.py" in run
+    assert "fingerprint_sha256" in run
+    assert "stage_b_out/fingerprint.json" in run
+
+
+def test_fingerprint_script_exists_for_route_step() -> None:
+    # workflow 路由/锚断言步骤引用的脚本必须存在于仓库（静态引用一致性）。
+    assert FINGERPRINT_SCRIPT.is_file()

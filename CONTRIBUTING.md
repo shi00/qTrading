@@ -48,6 +48,7 @@
   - [错误处理标准模式](#错误处理标准模式)
   - [测试规范](./docs/guides/testing.md)
   - [CI/CD 流水线与门禁](./docs/guides/ci-cd.md)
+  - [FinBERT 模型产线流水线机制](./docs/guides/finbert-pipeline.md)
   - [标准开发工作流 (How-To)](./docs/guides/how-to.md)
   - [排查典型问题](#排查典型问题)
   - [已知架构技术债 (Known Technical Debt)](#已知架构技术债-known-technical-debt)
@@ -702,6 +703,7 @@ except Exception as e:
 - [testing.md](./docs/guides/testing.md) — 测试规范（单元 / 集成 / E2E）
 - [ci-cd.md](./docs/guides/ci-cd.md) — CI/CD 流水线与门禁
 - [dependency-management.md](./docs/guides/dependency-management.md) — 依赖管理 + PyInstaller 打包
+- [finbert-pipeline.md](./docs/guides/finbert-pipeline.md) — FinBERT 模型产线流水线机制（指纹路由 / 双 Gate / 发布闭环）
 - [how-to.md](./docs/guides/how-to.md) — 标准开发工作流 (How-To)
 
 ### docs/architecture/ — 架构类深入
@@ -744,6 +746,7 @@ except Exception as e:
 - [0012-news-sentiment-inference-paradigm.md](./docs/adr/0012-news-sentiment-inference-paradigm.md) — 新闻情绪打分的本地推理范式（CLS embedding + numpy 分类头，不用 RANK 模式；独立常驻子进程；仅展示边界）
 - [0013-runtime-selection-final-gguf.md](./docs/adr/0013-runtime-selection-final-gguf.md) — 新闻情绪打分推理运行时选型终局（ORT / OpenVINO 双 PoC FAIL，保持 GGUF；修订 ADR-0012 训练依赖条款为仅限 finbert-train.yml job 内安装）
 - [0014-unified-model-scheduling.md](./docs/adr/0014-unified-model-scheduling.md) — 统一模型管理的场景调度契约（ScenarioExecutor 独占候选调度；部分替代 ADR-0011 Router 职责，已经用户批准，Status 为 Accepted）
+- [0015-fingerprint-driven-release.md](./docs/adr/0015-fingerprint-driven-release.md) — FinBERT 产线指纹驱动发布（内容寻址去重：装依赖前对训练输入算指纹与最新 Release 对比，输入无变化即拒绝重训）
 
 ### docs/governance/ — 治理类机器可读文件
 
