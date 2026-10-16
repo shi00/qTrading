@@ -99,7 +99,7 @@ jobs:
 
       - name: Install cargo-llvm-cov (Linux only)
         if: matrix.os == 'linux'
-        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad  # v2.87.26
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8  # v2.87.28
         with:
           tool: cargo-llvm-cov
 
@@ -113,7 +113,7 @@ jobs:
 
       - name: Upload coverage report (Linux only)
         if: matrix.os == 'linux' && always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: rust-coverage-lcov
           path: lcov.info
@@ -193,7 +193,7 @@ jobs:
             --output sidecar-manifest-${{ matrix.os }}.json
 
       - name: Upload release artifact (含 manifest)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ matrix.artifact_name }}
           # upload-artifact path 相对于 GITHUB_WORKSPACE，需补 working-directory 前缀
@@ -221,7 +221,7 @@ jobs:
           toolchain: 1.97.1
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad  # v2.87.26
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8  # v2.87.28
         with:
           tool: cargo-audit
 

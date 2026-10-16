@@ -560,7 +560,7 @@ jobs:
       # 一致；if-no-files-found: error 保证文件缺失时上传即失败（fail-safe）。
       # 排障 artifact（见文末）单独上传：两者命名与用途互不混用。
       - name: Upload release artifacts (for publish job)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: finbert-gguf-release-${{ steps.fingerprint_route.outputs.model_version }}-${{ github.run_id }}
           path: |
@@ -577,7 +577,7 @@ jobs:
       # 排障文件；发布 artifact 仅 Gate 通过后上传，仅含发布最小文件集。
       - name: Upload artifacts (incl. gate-failure debugging)
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: finbert-gguf-${{ steps.fingerprint_route.outputs.model_version }}-${{ github.run_id }}
           path: |
@@ -615,7 +615,7 @@ jobs:
       # v8 传输层默认校验服务端 digest（mismatch 即 error），下载后再做本地
       # sha256sum 复验（发布资产自校验凭证），构成双重完整性保障。
       - name: Download release artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: finbert-gguf-release-${{ needs.train-export-gate.outputs.model_version }}-${{ github.run_id }}
           path: release-assets
