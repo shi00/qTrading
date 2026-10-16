@@ -1471,3 +1471,113 @@ class TestFullCleanupWithCriticalFailure:
             # 至少有一个 critical failure
             failures = [r for r in coord.step_results if r.critical and not r.ok]
             assert len(failures) >= 1
+
+
+class TestDynamicCleanupCallbacks:
+    """S3（D8）：动态清理回调在 Step 5b 后、Step 6 前穿插执行。"""
+
+    _STEP_METHODS = (
+        "_step0_cancel_tasks",
+        "_step1_stop_services",
+        "_step2_flush_db_writes",
+        "_step3_close_processor",
+        "_step4_clear_toast",
+        "_step5_unload_ai_model",
+        "_step5b_stop_sentiment_scorer",
+        "_step6_shutdown_thread_pools",
+        "_step7_close_database_managers",
+        "_step8_stop_embedded_postgres",
+    )
+
+    @staticmethod
+    def _stub_steps(coord: ShutdownCoordinator, call_log: list[str]) -> None:
+        for method in TestDynamicCleanupCallbacks._STEP_METHODS:
+
+            async def _step(_m=method):
+                call_log.append(_m)
+
+            setattr(coord, method, _step)
+
+    @pytest.mark.asyncio
+    async def test_dynamic_callback_runs_between_step5b_and_step6(self):
+        """动态回调必须穿插在 Step 5b（sentiment scorer 停止）之后、Step 6（线程池关闭）之前。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        call_log: list[str] = []
+        self._stub_steps(coord, call_log)
+
+        async def recorder_close():
+            call_log.append("dyn-recorder-close")
+
+        coord.register_cleanup_callback("Step 5c: usage recorder close", recorder_close, critical=True, timeout_s=5.0)
+
+        results = await coord._run_cleanup_steps(step_timeout_s=2.0)
+        # 10 个静态步骤 + 1 个动态回调
+        assert len(results) == 11
+        assert call_log.index("_step5b_stop_sentiment_scorer") < call_log.index("dyn-recorder-close")
+        assert call_log.index("dyn-recorder-close") < call_log.index("_step6_shutdown_thread_pools")
+
+    @pytest.mark.asyncio
+    async def test_dynamic_callbacks_execute_in_registration_order(self):
+        """多个动态回调按注册顺序执行（worker 收敛 → Recorder.aclose）。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        call_log: list[str] = []
+        self._stub_steps(coord, call_log)
+
+        async def first():
+            call_log.append("dyn-first")
+
+        async def second():
+            call_log.append("dyn-second")
+
+        coord.register_cleanup_callback("dyn-1", first, critical=True, timeout_s=5.0)
+        coord.register_cleanup_callback("dyn-2", second, critical=True, timeout_s=5.0)
+
+        await coord._run_cleanup_steps(step_timeout_s=2.0)
+        assert call_log.index("dyn-first") < call_log.index("dyn-second")
+
+    @pytest.mark.asyncio
+    async def test_sync_dynamic_callback_supported(self):
+        """register_cleanup_callback 承诺 sync callable 可用：sync 回调正常执行不报错。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        call_log: list[str] = []
+        self._stub_steps(coord, call_log)
+
+        coord.register_cleanup_callback("dyn-sync", lambda: call_log.append("dyn-sync"), critical=True, timeout_s=5.0)
+
+        results = await coord._run_cleanup_steps(step_timeout_s=2.0)
+        assert len(results) == 11
+        assert "dyn-sync" in call_log
+        sync_result = next(r for r in results if r.name == "dyn-sync")
+        assert sync_result.ok is True
+
+    @pytest.mark.asyncio
+    async def test_no_dynamic_callbacks_keeps_static_step_count(self):
+        """未注册动态回调时 results 保持 10 个静态步骤（回归保护）。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        call_log: list[str] = []
+        self._stub_steps(coord, call_log)
+
+        results = await coord._run_cleanup_steps(step_timeout_s=2.0)
+        assert len(results) == 10
+        assert coord._dynamic_cleanup_callbacks == []
+
+    @pytest.mark.asyncio
+    async def test_critical_dynamic_callback_failure_continues_remaining_steps(self):
+        """critical 动态回调失败不中断后续静态步骤（资源释放步骤必须全部执行）。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        call_log: list[str] = []
+        self._stub_steps(coord, call_log)
+
+        async def failing_close():
+            raise RuntimeError("recorder close failed")
+
+        coord.register_cleanup_callback("Step 5c: usage recorder close", failing_close, critical=True, timeout_s=5.0)
+
+        results = await coord._run_cleanup_steps(step_timeout_s=2.0)
+        assert len(results) == 11
+        dyn_result = next(r for r in results if r.name == "Step 5c: usage recorder close")
+        assert dyn_result.ok is False
+        assert dyn_result.critical is True
+        # Step 6~8 仍执行
+        assert "_step6_shutdown_thread_pools" in call_log
+        assert "_step8_stop_embedded_postgres" in call_log

@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from services.ai_service.gguf_sentiment_adapter import invoke
-from services.ai_service.model_management_types import (
+from core.model_management_types import (
     AdapterResponse,
     AttemptContext,
     InferenceRequest,

@@ -30,7 +30,7 @@ import httpx
 
 from core.errors import AIConfigError, AIPolicyNotAcknowledgedError
 from core.i18n import Message
-from services.ai_service.model_management_types import (
+from core.model_management_types import (
     AdapterResponse,
     AttemptContext,
     InferenceRequest,

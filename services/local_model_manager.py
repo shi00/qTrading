@@ -26,7 +26,7 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 if TYPE_CHECKING:
     # 仅类型标注消费（运行时禁止导入：services.ai_service 组合根反向依赖本模块，
     # 顶层导入会成环）；R1 import-linter 豁免 TYPE_CHECKING 块。
-    from services.ai_service.model_management_types import (
+    from core.model_management_types import (
         AdapterResponse,
         AttemptContext,
         InferenceRequest,
@@ -1275,7 +1275,7 @@ class LocalModelManager:
         # lazy-import: AdapterResponse 仅 TYPE_CHECKING 导入（services.ai_service
         # 组合根反向依赖本模块，顶层运行时导入会成环）；成功路径运行时构造，
         # 判定用例（场景①）首次命中该路径时暴露 NameError，故函数内延迟导入。
-        from services.ai_service.model_management_types import AdapterResponse
+        from core.model_management_types import AdapterResponse
 
         return AdapterResponse(
             content=output,

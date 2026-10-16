@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from services.ai_service.model_management_types import (
+from core.model_management_types import (
     AdapterResponse,
     AttemptContext,
     InferenceRequest,

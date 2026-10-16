@@ -132,6 +132,13 @@ async def _run_session(
     coordinator = ShutdownCoordinator(page)
     session.coordinator = coordinator
 
+    # S3（D8）：统一模型计量 Recorder 收敛注册为动态停机步骤（Step 5b 后执行）。
+    # 此刻调度三服务尚未组装（assemble 在 controller.start() 内的 initialize_services
+    # 中执行），bootstrap 记 pending coordinator 并在组装完成后自动补挂。
+    from app import bootstrap as bootstrap_module
+
+    bootstrap_module.register_scheduling_cleanup(coordinator)
+
     def _is_web_mode() -> bool:
         return os.environ.get("FLET_FORCE_WEB_SERVER", "").lower() in ("true", "1", "yes")
 

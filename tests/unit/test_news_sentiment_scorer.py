@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
-from services.ai_service.model_management_types import AttemptContext, ResolvedConnection
+from core.model_management_types import AttemptContext, ResolvedConnection
 from services.news_sentiment_scorer import (
     _DEFAULT_MAX_LENGTH,
     _DEFAULT_N_CTX,

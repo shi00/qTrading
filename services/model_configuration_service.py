@@ -17,7 +17,7 @@ import socket
 import uuid
 from typing import Any
 
-from services.ai_service.model_management_types import (
+from core.model_management_types import (
     AttemptPermit,
     ConfigurationSaveOutcome,
     ModelConfigurationConflictError,

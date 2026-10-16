@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from services.ai_service.model_management_types import (
+from core.model_management_types import (
     AdapterResponse,
     ModelOutputValidationError,
     ScoredText,
@@ -31,7 +31,7 @@ from services.local_model_manager import _model_tag_of
 from services.news_sentiment_scorer import NewsSentimentScorer
 
 if TYPE_CHECKING:
-    from services.ai_service.model_management_types import AttemptContext, InferenceRequest, ResolvedConnection
+    from core.model_management_types import AttemptContext, InferenceRequest, ResolvedConnection
 
 
 def _serialize_results(results: tuple[ScoredText, ...]) -> list[dict[str, Any]]:

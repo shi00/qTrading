@@ -12,7 +12,7 @@ from unittest import mock
 
 import pytest
 
-from services.ai_service.model_management_types import (
+from core.model_management_types import (
     ConfigurationSaveOutcome,
     ModelConfigurationConflictError,
 )
