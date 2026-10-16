@@ -59,3 +59,4 @@ Tushare 相关文档分散在多个章节，按主题索引如下：
 | ADR-0012 | 新闻情绪打分的本地推理范式（CLS embedding + numpy 分类头） | [0012-news-sentiment-inference-paradigm.md](./adr/0012-news-sentiment-inference-paradigm.md) |
 | ADR-0013 | 新闻情绪打分推理运行时选型终局（保持 GGUF，ORT / OpenVINO 双 PoC FAIL） | [0013-runtime-selection-final-gguf.md](./adr/0013-runtime-selection-final-gguf.md) |
 | ADR-0014 | 统一模型管理的场景调度契约（ScenarioExecutor 独占候选调度） | [0014-unified-model-scheduling.md](./adr/0014-unified-model-scheduling.md) |
+| ADR-0015 | FinBERT 产线指纹驱动发布（内容寻址去重，训练输入指纹对比） | [0015-fingerprint-driven-release.md](./adr/0015-fingerprint-driven-release.md) |
