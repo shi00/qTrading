@@ -1,5 +1,9 @@
 """统一模型管理执行 / 发布类型与异常（S1 交付，ADR-0014 §4 公共契约）。
 
+S3 起下沉至 ``core/``（ADR-0014 §4）：本模块为 data（AIUsageDao 账本）与
+services（Executor / Recorder / 配置服务）跨层共享的纯类型契约，仅依赖
+stdlib，符合 CLAUDE.md §4.2「多层引用的基础设施提升到 core」准入。
+
 类型约定（ADR-0014 §4）：
 - 全部 frozen dataclass + slots；容器一律 tuple / Mapping 只读视图，不发布可变 dict / list；
 - 配置 schema 从 ``utils.config_models`` 消费，本模块不反向进入 utils 存储层；

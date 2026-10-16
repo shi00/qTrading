@@ -33,7 +33,8 @@ from data.persistence.daos.base_dao import BaseDao  # noqa: E402
 def _dao_attr_for_class(cls_name: str) -> str:
     """DAO 类名 → 约定实例属性名。
 
-    支持驼峰多词：PledgeDetailDao → pledge_detail_dao；BacktestDAO → backtest_dao。
+    支持驼峰多词与缩写词连写：PledgeDetailDao → pledge_detail_dao；
+    BacktestDAO → backtest_dao；AIUsageDao → ai_usage_dao（PEP 8 缩写词惯例）。
     """
     for suffix in ("DAO", "Dao"):
         if cls_name.endswith(suffix):
@@ -41,8 +42,10 @@ def _dao_attr_for_class(cls_name: str) -> str:
             break
     else:
         base = cls_name
-    # 驼峰 → snake_case：连续大写/首字母大写处插入 '_'
-    snake = re.sub(r"(?<!^)(?=[A-Z])", "_", base).lower()
+    # 两段式驼峰 → snake_case：先切缩写词边界（连续大写后接"大写+小写"），
+    # 再切普通驼峰边界（小写/数字后接大写）
+    snake = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", base)
+    snake = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", snake).lower()
     return snake + "_dao"
 
 

@@ -43,7 +43,7 @@ from typing import Any
 
 import numpy as np
 
-from services.ai_service.model_management_types import (
+from core.model_management_types import (
     AttemptContext,
     NormalizedLLMUsage,
     ResolvedConnection,

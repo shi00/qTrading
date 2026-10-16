@@ -68,7 +68,9 @@ worker 生命周期）随 S1~S3 落各技术正本，不在本 ADR 展开。
 
 ### 4. 类型与错误契约（S1~S3 实施的公共契约，先于此落定）
 
-- 执行 / 发布类型统一定义于 `services/ai_service/model_management_types.py`（S1 交付）：
+- 执行 / 发布类型统一定义于 `core/model_management_types.py`（S1 交付；S3 起自
+  `services/ai_service/` 下沉至 `core/`——data 层 AIUsageDao 账本与 services 跨层
+  共享纯类型契约，符合 CLAUDE.md §4.2 提升准入，仅依赖 stdlib）：
   ModelManagementDraft、ModelManagementSnapshot、ExecutionSnapshot、InferenceRequest、
   ResolvedConnection、AttemptContext、AttemptPermit、AdapterResponse、
   ValidatedBusinessOutput、ScenarioExecutionResult、ScoredText、ScoringOutcome、

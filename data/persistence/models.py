@@ -1025,6 +1025,117 @@ class Watchlist(Base):
     added_price = Column(Numeric(12, 6))
 
 
+class AiInvocation(Base):
+    """统一模型调度调用记录（S3，ADR-0014 §9.2/§10）。
+
+    三表账本之首：一次场景调用的预算与归属事实源。``reservations`` JSONB 为
+    预算持久事实源（§9.2，追加唯一 reservation_id）；owner 三元组
+    (owner_session_id, owner_epoch, owner_lease_expires_at) 支撑跨暂停恢复（§9.2）。
+    无 FK 约束（D1）：与 ai_attempt 逻辑关联，避免锁级联；锁序
+    「advisory 月锁 → invocation FOR UPDATE → attempt → 月汇总」。
+    """
+
+    __tablename__ = "ai_invocation"
+
+    invocation_id = Column(String, primary_key=True)
+    scenario_id = Column(String, nullable=False)
+    trigger = Column(String, nullable=False)
+    run_id = Column(String)
+    budget_policy_snapshot = Column(JSONB(none_as_null=True))
+    reservations = Column(JSONB(none_as_null=True), nullable=False, server_default=text("'[]'::jsonb"))
+    candidate_decisions = Column(JSONB(none_as_null=True), server_default=text("'[]'::jsonb"))
+    owner_session_id = Column(String, nullable=False)
+    owner_epoch = Column(Integer, nullable=False)
+    owner_lease_expires_at = Column(DateTime(timezone=False), nullable=False)
+    test_operation_id = Column(String)
+    draft_fingerprint = Column(String)
+    created_at = Column(DateTime(timezone=False), server_default=text("(now() AT TIME ZONE 'UTC')"), nullable=False)
+    updated_at = Column(DateTime(timezone=False), server_default=text("(now() AT TIME ZONE 'UTC')"), nullable=False)
+
+    __table_args__ = (
+        Index("idx_ai_invocation_owner_lease", "owner_session_id", "owner_lease_expires_at"),
+        Index("idx_ai_invocation_scenario_created", "scenario_id", "created_at"),
+    )
+
+
+class AiAttempt(Base):
+    """单次尝试账目（S3，ADR-0014 §6.1/§10）。
+
+    五字段用量归一化（§9.1）+ encoder_input_tokens/text_count（本地 GGUF 侧）；
+    ``usage_status`` ∈ reported|estimated|unavailable（缺失不伪装，R21）；
+    金额 NUMERIC(24,8) 十进制字符串口径（§10）；迟到差额按
+    usage_revision/accounted_usage_revision 幂等整体推进（revision 为 R22 水位语义）。
+    """
+
+    __tablename__ = "ai_attempt"
+
+    attempt_id = Column(String, primary_key=True)
+    invocation_id = Column(String, nullable=False)
+    task_id = Column(String, nullable=False)
+    candidate_index = Column(Integer, nullable=False)
+    retry_index = Column(Integer, nullable=False)
+    # 连接快照（§10）：写账时冻结，不随配置后续修订漂移
+    connection_id = Column(String, nullable=False)
+    connection_revision = Column(Integer, nullable=False)
+    adapter_kind = Column(String, nullable=False)
+    configured_model = Column(String, nullable=False)
+    actual_model = Column(String)
+    security_revision = Column(Integer, nullable=False)
+    reservation_id = Column(String)
+    status = Column(String, nullable=False)
+    error_code = Column(String)
+    # 显式登记 i18n（S3）：locales 已有 col_duration_ms（公共语义），按
+    # TestNoPhantomDerivedTranslations 契约新增列须走显式通道，禁止静默派生
+    duration_ms = Column(Double, info={"i18n": "col_duration_ms"})
+    input_total_tokens = Column(Integer)
+    uncached_input_tokens = Column(Integer)
+    cache_read_tokens = Column(Integer)
+    cache_write_tokens = Column(Integer)
+    output_tokens = Column(Integer)
+    encoder_input_tokens = Column(Integer)
+    text_count = Column(Integer)
+    usage_status = Column(String, nullable=False, server_default=text("'unavailable'"))
+    usage_revision = Column(Integer, nullable=False, server_default=text("0"))
+    accounted_usage_revision = Column(Integer, nullable=False, server_default=text("0"))
+    usage_fingerprint = Column(String)
+    usage_window_expires_at = Column(DateTime(timezone=False))
+    usage_window_closed_at = Column(DateTime(timezone=False))
+    cost_cny = Column(Numeric(24, 8))
+    created_at = Column(DateTime(timezone=False), server_default=text("(now() AT TIME ZONE 'UTC')"), nullable=False)
+    updated_at = Column(DateTime(timezone=False), server_default=text("(now() AT TIME ZONE 'UTC')"), nullable=False)
+
+    __table_args__ = (
+        Index("idx_ai_attempt_invocation", "invocation_id"),
+        Index("idx_ai_attempt_connection_created", "connection_id", "created_at"),
+        Index("idx_ai_attempt_window_expiry", "usage_window_expires_at"),
+    )
+
+
+class AiUsageMonthly(Base):
+    """月度用量汇总（S3，ADR-0014 §10）：两 scope（scenario/connection）不相加。
+
+    主键 (month, aggregation_scope, grouping_key)；month 为 Asia/Shanghai 归属月。
+    ``last_usage_revision`` 为 R22 水位（GREATEST 单调），金额按差额累加。
+    """
+
+    __tablename__ = "ai_usage_monthly"
+
+    month = Column(String(6), primary_key=True)
+    aggregation_scope = Column(String(16), primary_key=True)
+    grouping_key = Column(String, primary_key=True)
+    scenario_id = Column(String)
+    trigger = Column(String)
+    task_id = Column(String)
+    connection_id = Column(String)
+    invocation_count = Column(Integer, nullable=False, server_default=text("0"))
+    attempt_count = Column(Integer, nullable=False, server_default=text("0"))
+    succeeded_count = Column(Integer, nullable=False, server_default=text("0"))
+    cost_cny = Column(Numeric(24, 8), nullable=False, server_default=text("0"))
+    last_usage_revision = Column(Integer, nullable=False, server_default=text("0"))
+    created_at = Column(DateTime(timezone=False), server_default=text("(now() AT TIME ZONE 'UTC')"), nullable=False)
+    updated_at = Column(DateTime(timezone=False), server_default=text("(now() AT TIME ZONE 'UTC')"), nullable=False)
+
+
 def get_model_columns(model_class: type, exclude: set[str] | None = None) -> list[str]:
     exclude = exclude or {"updated_at", "created_at"}
     return [

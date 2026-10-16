@@ -24,7 +24,7 @@ import httpx
 import pytest
 
 from services.ai_service.litellm_client import LiteLLMClient
-from services.ai_service.model_management_types import (
+from core.model_management_types import (
     AdapterResponse,
     AttemptContext,
     InferenceRequest,
@@ -46,7 +46,7 @@ def _attempt_context() -> AttemptContext:
 
 
 def _connection(**overrides):
-    from services.ai_service.model_management_types import ResolvedConnection
+    from core.model_management_types import ResolvedConnection
 
     base = {
         "connection_id": "conn-1",

@@ -1194,3 +1194,144 @@ class TestRegisterSchedulerJobs:
         assert calls[0].args[1] == mock_night_build.return_value
         assert calls[1].args[0] == "review_backfill"
         assert calls[1].args[1] == mock_rb_build.return_value
+
+
+class TestSchedulingServicesAssembly:
+    """S3（D8/D9）：统一模型调度三服务组装与停机回调注册时序。"""
+
+    @pytest.fixture(autouse=True)
+    def _reset_scheduling_state(self, monkeypatch):
+        import app.bootstrap as bootstrap_module
+
+        monkeypatch.setattr(bootstrap_module, "_scheduling_services", None)
+        monkeypatch.setattr(bootstrap_module, "_pending_scheduling_coordinator", None)
+
+    def test_assemble_returns_three_services(self):
+        """D9：组装返回 Recorder / Compatibility / Executor 三服务，get 访问同一对象。"""
+        import app.bootstrap as bootstrap_module
+
+        services = bootstrap_module.assemble_scheduling_services()
+        assert set(services) == {"recorder", "compatibility", "executor"}
+        assert bootstrap_module.get_scheduling_services() is services
+
+    def test_register_before_assemble_pends_then_attaches_after(self):
+        """D8 时序：_run_session 在 controller.start() 前注册 → 记 pending；
+        initialize_services 内 assemble 完成后自动补挂，停机回调不静默丢失。"""
+        import app.bootstrap as bootstrap_module
+
+        coordinator = MagicMock()
+        bootstrap_module.register_scheduling_cleanup(coordinator)
+        coordinator.register_cleanup_callback.assert_not_called()
+
+        services = bootstrap_module.assemble_scheduling_services()
+        coordinator.register_cleanup_callback.assert_called_once_with(
+            "Step 5c: usage recorder close",
+            services["recorder"].aclose,
+            critical=True,
+            timeout_s=5.0,
+        )
+
+    def test_register_after_assemble_attaches_directly(self):
+        """多 session 重入：服务已组装时直接挂载当期 coordinator。"""
+        import app.bootstrap as bootstrap_module
+
+        services = bootstrap_module.assemble_scheduling_services()
+        coordinator = MagicMock()
+        bootstrap_module.register_scheduling_cleanup(coordinator)
+        coordinator.register_cleanup_callback.assert_called_once_with(
+            "Step 5c: usage recorder close",
+            services["recorder"].aclose,
+            critical=True,
+            timeout_s=5.0,
+        )
+
+    def test_pending_cleared_after_attach_no_duplicate(self):
+        """pending 补挂一次后清空；assemble 重入不重复注册。"""
+        import app.bootstrap as bootstrap_module
+
+        coordinator = MagicMock()
+        bootstrap_module.register_scheduling_cleanup(coordinator)
+        bootstrap_module.assemble_scheduling_services()
+        bootstrap_module.assemble_scheduling_services()
+        assert coordinator.register_cleanup_callback.call_count == 1
+        assert bootstrap_module._pending_scheduling_coordinator is None
+
+    def test_register_noop_when_recorder_missing(self):
+        """组装结果缺 recorder（异常兜底形态）时不挂载，不伪装注册成功。"""
+        import app.bootstrap as bootstrap_module
+
+        bootstrap_module._scheduling_services = {
+            "recorder": None,
+            "compatibility": MagicMock(),
+            "executor": MagicMock(),
+        }
+        coordinator = MagicMock()
+        bootstrap_module.register_scheduling_cleanup(coordinator)
+        coordinator.register_cleanup_callback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_initialize_services_recovers_expired_owners(self):
+        """D9/D4：initialize_services 成功路径调用 recover_expired_owners 清理失权 owner。"""
+        import app.bootstrap as bootstrap_module
+
+        mock_cm = MagicMock()
+        mock_cm.init_db = AsyncMock()
+        mock_cm.engine = MagicMock()
+
+        mock_dao = MagicMock()
+        mock_dao.recover_expired_owners = AsyncMock(return_value=2)
+        mock_cm.ai_usage_dao = mock_dao
+
+        with (
+            patch("app.bootstrap.MetaDataManager"),
+            patch("app.bootstrap.TaskManager") as mock_tm,
+            patch("app.bootstrap.SchedulerService"),
+            patch("app.bootstrap.NewsSubscriptionService") as mock_ns,
+            patch("app.bootstrap.MarketDataService") as mock_mds,
+            patch("app.bootstrap.assemble_scheduling_services"),
+            patch("data.cache.cache_manager.CacheManager", return_value=mock_cm),
+        ):
+            mock_tm_instance = MagicMock()
+            mock_tm.return_value = mock_tm_instance
+            mock_tm_instance.init_db = AsyncMock()
+
+            mock_ns.return_value = MagicMock(start=AsyncMock())
+            mock_mds.return_value = MagicMock(start=AsyncMock())
+
+            result = await initialize_services(mock_cm)
+
+        assert result["success"] is True
+        mock_dao.recover_expired_owners.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_initialize_services_owner_recovery_failure_tolerant(self):
+        """D9：owner 恢复失败（如账本不可用）不阻断启动（尽力而为降级）。"""
+        import app.bootstrap as bootstrap_module
+
+        mock_cm = MagicMock()
+        mock_cm.init_db = AsyncMock()
+        mock_cm.engine = MagicMock()
+
+        mock_dao = MagicMock()
+        mock_dao.recover_expired_owners = AsyncMock(side_effect=RuntimeError("ledger unavailable"))
+        mock_cm.ai_usage_dao = mock_dao
+
+        with (
+            patch("app.bootstrap.MetaDataManager"),
+            patch("app.bootstrap.TaskManager") as mock_tm,
+            patch("app.bootstrap.SchedulerService"),
+            patch("app.bootstrap.NewsSubscriptionService") as mock_ns,
+            patch("app.bootstrap.MarketDataService") as mock_mds,
+            patch("app.bootstrap.assemble_scheduling_services"),
+            patch("data.cache.cache_manager.CacheManager", return_value=mock_cm),
+        ):
+            mock_tm_instance = MagicMock()
+            mock_tm.return_value = mock_tm_instance
+            mock_tm_instance.init_db = AsyncMock()
+
+            mock_ns.return_value = MagicMock(start=AsyncMock())
+            mock_mds.return_value = MagicMock(start=AsyncMock())
+
+            result = await initialize_services(mock_cm)
+
+        assert result["success"] is True

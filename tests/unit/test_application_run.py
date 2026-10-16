@@ -89,6 +89,7 @@ class _FakeCoordinator:
         self.cancel_watchdog_calls = 0
         self.do_cleanup_calls = 0
         self.register_task_calls = []
+        self.register_cleanup_calls = []
         _FakeCoordinator.last = self
 
     def start_watchdog(self, _timeout=None):
@@ -108,6 +109,10 @@ class _FakeCoordinator:
 
     def register_task(self, task):
         self.register_task_calls.append(task)
+
+    def register_cleanup_callback(self, name, callback, *, critical=True, timeout_s=10.0):
+        """记录动态清理回调注册（S3 shutdown 步骤 5c 契约，见 utils/shutdown.py）。"""
+        self.register_cleanup_calls.append((name, callback, critical, timeout_s))
 
 
 def _prepare_run_mocks(monkeypatch, *, embedded_db_url: str | None = None) -> None:

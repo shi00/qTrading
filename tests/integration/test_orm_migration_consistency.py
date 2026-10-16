@@ -119,6 +119,9 @@ def _normalize_default(default_text: str | None) -> str | None:
             s = inner.strip()
         else:
             break
+    # Paren removal can reveal a cast suffix again:
+    # PG 反射 ``(now() AT TIME ZONE 'UTC'::text)`` → 括号剥除后需再剥 ``::text``
+    s = re.sub(r"::[\w\s]+$", "", s).strip()
     # Normalize whitespace
     s = re.sub(r"\s+", " ", s)
     return s

@@ -509,6 +509,18 @@ TABLE_DEFINITIONS = {
         "alias": "tab_watchlist",
         "desc": "用户关注列表（FR-UX-004, Task 4.2）",
     },
+    "ai_invocation": {
+        "alias": "tab_ai_invocation",
+        "desc": "统一模型调度调用记录（S3：预算预留事实源 + owner 租约归属，ADR-0014 §9.2）",
+    },
+    "ai_attempt": {
+        "alias": "tab_ai_attempt",
+        "desc": "统一模型单次尝试账目（S3：用量五字段归一化 + 迟到差额 revision 幂等推进，§10）",
+    },
+    "ai_usage_monthly": {
+        "alias": "tab_ai_usage_monthly",
+        "desc": "统一模型月度用量汇总（S3：scenario/connection 两 scope 不相加，§10）",
+    },
 }
 
 

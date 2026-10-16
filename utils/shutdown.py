@@ -1,10 +1,12 @@
 import asyncio
+import inspect
 import logging
 import os
 import threading
 import time
 from dataclasses import dataclass
 from collections.abc import Callable
+from typing import Any
 
 from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
@@ -80,6 +82,23 @@ class ShutdownCoordinator:
         # Phase 2A.1 Task 2A.1.9：注册的 fire-and-forget 任务（如启动期 auto probe），
         # 关机时先于 TaskManager 任务取消，避免资源泄漏
         self._registered_tasks: set[asyncio.Task] = set()
+        # S3（D8）：动态清理回调注册点——在 Step 5b 后、Step 6 前穿插执行
+        self._dynamic_cleanup_callbacks: list[tuple[str, Callable[[], Any], bool, float]] = []
+
+    def register_cleanup_callback(
+        self,
+        name: str,
+        callback: Callable[[], Any],
+        *,
+        critical: bool = True,
+        timeout_s: float = 5.0,
+    ) -> None:
+        """注册动态清理步骤（S3 D8）：在 Step 5b 之后、Step 6 之前穿插执行。
+
+        callback 可为 sync 或 async callable；不动 _CLEANUP_STEPS 静态表
+        （避免破坏索引断言）。注册顺序即执行顺序（worker 收敛 → Recorder.aclose）。
+        """
+        self._dynamic_cleanup_callbacks.append((name, callback, critical, timeout_s))
 
     def register_task(self, task: asyncio.Task) -> None:
         """Phase 2A.1 Task 2A.1.9：注册 fire-and-forget asyncio.Task 以便关机时取消。
@@ -260,6 +279,46 @@ class ShutdownCoordinator:
         cancelled = False
         for step_def in _CLEANUP_STEPS:
             name, method_name, critical, default_timeout = step_def[0], step_def[1], step_def[2], step_def[3]
+            # S3（D8）：动态清理回调在 Step 5b 后、Step 6 前穿插执行
+            if method_name == "_step6_shutdown_thread_pools" and self._dynamic_cleanup_callbacks:
+                for dyn_name, dyn_callback, dyn_critical, dyn_timeout in self._dynamic_cleanup_callbacks:
+                    start_dyn = time.perf_counter()
+
+                    # S3（D8）：sync/async callable 统一适配为 awaitable step
+                    # （_run_async_step 以 await asyncio.wait_for(step()) 执行，sync
+                    # callable 直接传入会 TypeError；默认参数规避循环变量晚绑定）
+                    async def dyn_step(_cb=dyn_callback):
+                        result = _cb()
+                        if inspect.isawaitable(result):
+                            result = await result
+
+                    try:
+                        dyn_result = await self._run_async_step(
+                            name=dyn_name,
+                            step=dyn_step,
+                            step_timeout_s=min(dyn_timeout, step_timeout_s),
+                            critical=dyn_critical,
+                        )
+                    except asyncio.CancelledError as dyn_cancel:
+                        results.append(
+                            StepResult(
+                                name=dyn_name,
+                                critical=dyn_critical,
+                                ok=False,
+                                timed_out=False,
+                                elapsed_ms=(time.perf_counter() - start_dyn) * 1000,
+                                error="cancelled",
+                            )
+                        )
+                        cancelled = True
+                        pending_cancel = dyn_cancel
+                        continue
+                    results.append(dyn_result)
+                    if dyn_critical and not dyn_result.ok:
+                        logger.error(
+                            "[Shutdown] Critical dynamic step '%s' failed. Continuing remaining steps.",
+                            dyn_name,
+                        )
             # Use the smaller of per-step default and caller-provided step_timeout_s
             effective_timeout = min(default_timeout, step_timeout_s)
             step_func = getattr(self, method_name)

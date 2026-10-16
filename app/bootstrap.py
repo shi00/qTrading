@@ -6,7 +6,7 @@ import logging
 import os
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from data.domain_services.market_data_service import MarketDataService
 from services.news_subscription_service import NewsSubscriptionService
@@ -39,6 +39,100 @@ _AUTO_PROBE_INTERVAL = timedelta(days=7)
 # prepare_database_runtime，若 QTRADING_EMBEDDED_PG_URL_FILE 设置会无条件 atexit.register，
 # 导致 N+1 个 handler 指向同一 url_file。模块级 flag 保证只注册一次。
 _embedded_pg_url_file_atexit_registered = False
+
+# S3（D9）：统一模型调度三服务组装结果（Recorder / Executor / Compatibility）。
+# per-session 组装覆盖（initialize_services 重入时重建），shutdown 回调经
+# register_scheduling_cleanup 挂到当期 coordinator。
+_scheduling_services: dict[str, Any] | None = None
+# S3（D8）：register 早于 assemble 的时序兼容——application._run_session 在
+# controller.start() 前注册 coordinator，而 assemble 在 initialize_services 内才执行；
+# 未组装时记 pending，assemble 完成后自动补挂，避免停机回调静默丢失。
+_pending_scheduling_coordinator: Any = None
+
+
+def _ai_usage_dao_provider() -> Any:
+    """账本 DAO 惰性解析（D6）：engine 未就绪 / 未组装时返回 None（persisted=False 降级）。"""
+
+    from data.cache.cache_manager import CacheManager
+
+    return getattr(CacheManager(), "ai_usage_dao", None)
+
+
+def _build_default_adapters() -> dict[str, Any]:
+    """适配器协议注入（D7）：litellm 单连接 / 本地 GGUF 统一 invoke。"""
+
+    async def litellm_adapter(request, resolved_connection, deadline, attempt_context):
+        from services.ai_service import AIService
+
+        return await AIService()._litellm.invoke_single_connection(
+            request, resolved_connection, deadline, attempt_context
+        )
+
+    async def gguf_adapter(request, resolved_connection, deadline, attempt_context):
+        from services.local_model_manager import LocalModelManager
+
+        return await LocalModelManager().invoke_for_connection(request, resolved_connection, deadline, attempt_context)
+
+    return {"litellm_chat": litellm_adapter, "gguf_chat": gguf_adapter, "gguf_sentiment": gguf_adapter}
+
+
+def assemble_scheduling_services() -> dict[str, Any]:
+    """组装统一模型调度三服务（S3 D9；DI 组合根）。
+
+    构造均为轻量对象，无 IO / 无网络；adapter 内部惰性解析重依赖
+    （AIService / LocalModelManager 单例），不拖慢启动链路。
+    """
+    global _scheduling_services
+    from services.ai_service.model_compatibility import ModelCompatibilityService
+    from services.ai_service.scenario_executor import ScenarioExecutor
+    from services.ai_service.usage_recorder import UsageRecorder
+    from services.model_configuration_service import ModelConfigurationService
+
+    recorder = UsageRecorder(dao_provider=_ai_usage_dao_provider)
+    compatibility = ModelCompatibilityService()
+    executor = ScenarioExecutor(
+        config_service=ModelConfigurationService(),
+        recorder=recorder,
+        compatibility=compatibility,
+        adapters=_build_default_adapters(),
+    )
+    _scheduling_services = {"recorder": recorder, "compatibility": compatibility, "executor": executor}
+    # S3（D8）：补挂 register_scheduling_cleanup 记下的 pending coordinator
+    global _pending_scheduling_coordinator
+    if _pending_scheduling_coordinator is not None:
+        _attach_scheduling_cleanup(_pending_scheduling_coordinator)
+        _pending_scheduling_coordinator = None
+    return _scheduling_services
+
+
+def get_scheduling_services() -> dict[str, Any] | None:
+    """访问当期组装结果（S4 三入口接线用；未组装返回 None 不伪装）。"""
+    return _scheduling_services
+
+
+def register_scheduling_cleanup(coordinator: Any) -> None:
+    """把 Recorder 收敛注册为动态停机步骤（S3 D8：Step 5b 后、Step 6 前）。
+
+    时序兼容：application._run_session 在 controller.start() 之前调用本函数，
+    而 assemble_scheduling_services 在 initialize_services（controller.start 内）
+    才执行——服务未组装时记 pending coordinator，assemble 完成后自动补挂；
+    已组装（多 session 重入）则直接挂载。
+    """
+    global _pending_scheduling_coordinator
+    if _scheduling_services is None:
+        _pending_scheduling_coordinator = coordinator
+        return
+    _attach_scheduling_cleanup(coordinator)
+
+
+def _attach_scheduling_cleanup(coordinator: Any) -> None:
+    """从当期组装结果取 Recorder，注册为 coordinator 的动态停机步骤。"""
+    recorder = (_scheduling_services or {}).get("recorder")
+    if recorder is None:
+        return
+    coordinator.register_cleanup_callback(
+        "Step 5c: usage recorder close", recorder.aclose, critical=True, timeout_s=5.0
+    )
 
 
 class InitResult(TypedDict):
@@ -136,6 +230,9 @@ async def initialize_services(
             "partial_state": {"db_initialized": False},
         }
 
+    # S3（D9）：CacheManager 就绪后组装统一模型调度三服务（轻量、无 IO）
+    assemble_scheduling_services()
+
     try:
         logger.info("[Bootstrap] Calling TaskManager.init_db()...")
         await TaskManager().init_db()
@@ -215,6 +312,24 @@ async def initialize_services(
 
         # Phase 2A.1 Task 2A.1.8：启动期自动 probe（fire-and-forget）
         auto_probe_task = asyncio.create_task(_maybe_auto_probe_on_startup())
+
+    # S3（D9/D4）：启动前恢复过期 owner 租约（dispatched 预留转 held_unconfirmed）；
+    # 失败不阻断启动（恢复属尽力而为，账本不可用时降级为无在途预留）
+    try:
+        from data.cache.cache_manager import CacheManager
+
+        ai_usage_dao = getattr(CacheManager(), "ai_usage_dao", None)
+        if ai_usage_dao is not None:
+            recovered = await ai_usage_dao.recover_expired_owners()
+            if recovered:
+                logger.info("[Bootstrap] Recovered %s expired AI usage owner lease(s).", recovered)
+    except Exception as e:
+        log_classified(
+            logger,
+            e,
+            "general",
+            "[Bootstrap] AI usage owner recovery skipped (%s): %s",
+        )
 
     # review01-A9: 不再由本模块写模块级 flag；调用方（StartupController per-session 实例）
     # 根据 result["success"] 自行置位 _services_initialized。
