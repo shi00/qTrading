@@ -48,6 +48,7 @@
   - [错误处理标准模式](#错误处理标准模式)
   - [测试规范](./docs/guides/testing.md)
   - [CI/CD 流水线与门禁](./docs/guides/ci-cd.md)
+  - [FinBERT 模型产线流水线机制](./docs/guides/finbert-pipeline.md)
   - [标准开发工作流 (How-To)](./docs/guides/how-to.md)
   - [排查典型问题](#排查典型问题)
   - [已知架构技术债 (Known Technical Debt)](#已知架构技术债-known-technical-debt)
@@ -702,6 +703,7 @@ except Exception as e:
 - [testing.md](./docs/guides/testing.md) — 测试规范（单元 / 集成 / E2E）
 - [ci-cd.md](./docs/guides/ci-cd.md) — CI/CD 流水线与门禁
 - [dependency-management.md](./docs/guides/dependency-management.md) — 依赖管理 + PyInstaller 打包
+- [finbert-pipeline.md](./docs/guides/finbert-pipeline.md) — FinBERT 模型产线流水线机制（指纹路由 / 双 Gate / 发布闭环）
 - [how-to.md](./docs/guides/how-to.md) — 标准开发工作流 (How-To)
 
 ### docs/architecture/ — 架构类深入
