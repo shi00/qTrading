@@ -64,7 +64,7 @@ job2 `publish-release`（唯一 `contents: write`，不 checkout、不执行仓�
 | `base_model_revision` | HF 基座固定 revision（从 workflow 文本 fail-safe 提取） |
 | `llama_cpp_commit` | llama.cpp checkout ref（同上） |
 
-任一分量缺失 / 不可提取即 `FingerprintError`（fail-closed，不得放行）。runner 镜像不入指纹（滚动基线会使去重失效），环境漂移由 Release note 环境段逐 run 记录兜底（ADR-0015 Alternatives）。
+任一分量缺失 / 不可提取即 `FingerprintError`（fail-closed，不得放行）。runner 镜像不入指纹（滚动基线会使去重失效），环境漂移由 Release note 环境段逐 run 记录兜底（ADR-0015 Alternatives）。显式边界：指纹只覆盖训练**输入**，不覆盖校验工具严格度——`corpus_manifest.py`（FT-07）不在白名单，「改弱校验 + 换语料」的组合会在 `corpus_sums_sha256` 分量 diff 中如实可归因，且 manifest 校验缺失 / 不兼容路径仍 fail-closed（详见 ADR-0015 已知豁免）。
 
 ### 3.2 路由四态与退出码
 

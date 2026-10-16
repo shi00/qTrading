@@ -199,6 +199,17 @@ def test_extract_llama_cpp_missing_marker_or_ref_fails(fp_module) -> None:
         fp_module.extract_llama_cpp_commit(text)
 
 
+def test_extract_anchors_from_real_workflow(fp_module) -> None:
+    # 守护真实 finbert-train.yml 与 fail-safe 提取正则的同步：行结构变化（如
+    # ref / FINBERT_BASE_REVISION 行尾加行内注释）会使运行期提取 exit 2 阻断
+    # 全部 dispatch，而仅测合成 snippet 的单测仍绿（假绿）——本断言让单测同步红。
+    text = (REPO_ROOT / ".github" / "workflows" / "finbert-train.yml").read_text(encoding="utf-8")
+    revision = fp_module.extract_base_model_revision(text)
+    commit = fp_module.extract_llama_cpp_commit(text)
+    assert len(revision) == 40 and int(revision, 16) >= 0
+    assert len(commit) == 40 and int(commit, 16) >= 0
+
+
 # --------------------------------------------------------------------------- #
 # build_fingerprint：分量完整性与 fail-safe
 # --------------------------------------------------------------------------- #
@@ -658,6 +669,36 @@ def test_verify_corpus_anchor_missing_inputs_fails(fp_module, tmp_path: Path) ->
     with pytest.raises(fp_module.FingerprintError, match="指纹文件缺失") as excinfo:
         fp_module.verify_corpus_anchor(tmp_path / "no.json", tmp_path / "no-sums.txt")
     assert "no.json" in str(excinfo.value)
+
+
+def test_verify_corpus_anchor_malformed_fingerprint_fails(fp_module, corpus_sums: Path, tmp_path: Path) -> None:
+    # 非 dict 指纹 / components 非 dict / 分量非字符串：结构校验统一转
+    # FingerprintError（经 main 归一为 exit 2），不抛 AttributeError 裸 traceback
+    # 以 exit 1 与「输入无变化」业务码混淆（第 3 轮对抗检视 MINOR-1）。
+    fp_file = tmp_path / "bad.json"
+    for payload in ("[]", "null", '{"components": "x"}', '{"components": {"corpus_sums_sha256": 1}}'):
+        fp_file.write_text(payload, encoding="utf-8")
+        with pytest.raises(fp_module.FingerprintError, match="结构非法|corpus_sums_sha256"):
+            fp_module.verify_corpus_anchor(fp_file, corpus_sums)
+
+
+def test_main_io_error_exit_code_is_2(fp_module, corpus_sums: Path, tmp_path: Path, monkeypatch) -> None:
+    # OSError（指纹落盘 / sums 读取 / GITHUB_OUTPUT 写入故障）经 main 兜底归一为
+    # exit 2（fail-closed），不得以裸 traceback exit 1 混淆业务码（第 3 轮对抗检视 MINOR-1）。
+    fp_file = tmp_path / "fp.json"
+    fp_file.write_text(
+        json.dumps(
+            {"fingerprint_spec": "v1", "components": {"corpus_sums_sha256": fp_module.sha256_file(corpus_sums)}}
+        ),
+        encoding="utf-8",
+    )
+
+    def _boom(_path: object) -> str:
+        raise PermissionError(13, "磁盘/权限故障模拟")
+
+    monkeypatch.setattr(fp_module, "sha256_file", _boom)
+    argv = ["verify-corpus-anchor", "--fingerprint", str(fp_file), "--corpus-sums", str(corpus_sums)]
+    assert fp_module.main(argv) == 2
 
 
 # --------------------------------------------------------------------------- #

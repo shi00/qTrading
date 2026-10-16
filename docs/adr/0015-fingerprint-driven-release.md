@@ -48,6 +48,10 @@ checkout 内由本脚本完成，不依赖外部状态）；③ **自举**（本
 **已知豁免（documented）**：runner 镜像（ubuntu-latest 滚动基线）不入指纹——滚动镜像每周
 漂移会使指纹几乎永不相同、去重失效，而固定 container 需自维护镜像（FT-08 已论证不采用）；
 代价由 Release note 环境 lineage 段兜底（ImageOS/ImageVersion + 全量依赖清单 SHA256）。
+另一显式边界：`corpus_manifest.py`（FT-07 校验脚本）**不入**脚本白名单——指纹只覆盖训练
+**输入**，不覆盖校验工具的严格度，「改弱校验 + 换新语料」可得到放行且校验弱化的组合；缓解：
+语料变更本身如实反映在 `corpus_sums_sha256` 分量 diff 中（可归因），且 manifest 缺失 / 不兼容
+路径 fail-closed（FT-07）、校验 report 受 note lineage fail-fast 约束。
 
 ### 3. 路由语义与退出码契约
 

@@ -513,7 +513,11 @@ def verify_corpus_anchor(fingerprint_path: Path, corpus_sums_path: Path) -> None
         fingerprint = json.loads(fingerprint_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise FingerprintError(f"指纹文件不可解析: {fingerprint_path}（{exc}）") from exc
-    expected = fingerprint.get("components", {}).get("corpus_sums_sha256")
+    if not isinstance(fingerprint, dict) or not isinstance(fingerprint.get("components"), dict):
+        raise FingerprintError(f"指纹文件结构非法（fingerprint/components 须为 JSON object）: {fingerprint_path}")
+    expected = fingerprint["components"].get("corpus_sums_sha256")
+    if not isinstance(expected, str):
+        raise FingerprintError(f"指纹文件缺少 corpus_sums_sha256 分量（须为字符串）: {fingerprint_path}")
     actual = sha256_file(corpus_sums_path)
     if expected != actual:
         raise FingerprintError(
@@ -589,6 +593,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except FingerprintError as exc:
         print(f"::error::{exc}")
+        return 2
+    except OSError as exc:
+        # 指纹落盘 / sums 哈希读取 / GITHUB_OUTPUT 写入等 IO 故障：fail-closed（exit 2），
+        # 不以裸 traceback 的 exit 1 与「输入无变化」业务码混淆（ADR-0015 退出码契约）。
+        print(f"::error::IO 故障: {exc}")
         return 2
 
 
