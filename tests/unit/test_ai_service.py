@@ -2097,6 +2097,238 @@ class TestAIServiceAnalyzeStockSuccess:
         assert result["ai_status"] == "failed"
 
 
+class TestAnalyzeStockScenarioChain:
+    """S4 §8.2 stock_analysis 新链接线（s4_plan §3.1/§3.2）。
+
+    订阅判定：patch stock_analysis 模块级 `_resolve_stock_analysis_dispatch`
+    注入 ScenarioDispatch（mock executor），不真走 Executor——分派/计量由
+    scenario_dispatch / executor 层测试承载。
+    """
+
+    @staticmethod
+    def _make_dispatch(exec_result):
+        from core.model_management_types import ScenarioExecutionResult as R
+        from services.ai_service.scenario_dispatch import ScenarioDispatch
+
+        executor = MagicMock()
+        executor.execute = AsyncMock(return_value=exec_result)
+        snapshot = MagicMock()
+        snapshot.config_revision = 7
+        return ScenarioDispatch(
+            executor=executor,
+            snapshot=snapshot,
+            route_revision=3,
+            total_timeout_seconds=120.0,
+            task_routes={},
+        )
+
+    @staticmethod
+    def _ok_exec_result(output=None, actual_usage=()):
+        from core.model_management_types import CandidateDecision, ScenarioExecutionResult, ValidatedBusinessOutput
+
+        return ScenarioExecutionResult(
+            scenario_id="stock_analysis",
+            invocation_id="inv-x",
+            status="succeeded",
+            outputs=(
+                ValidatedBusinessOutput(
+                    output=output if output is not None else {"score": 80, "recommendation": "buy"},
+                    metadata={"actual_model": "m-1", "connection_revision": 5},
+                ),
+            ),
+            candidate_decisions=(
+                CandidateDecision(
+                    task_id="analysis",
+                    candidate_index=0,
+                    connection_id="conn-1",
+                    decision="succeeded",
+                    reason="ok",
+                ),
+            ),
+            actual_usage=actual_usage,
+        )
+
+    @staticmethod
+    def _analyze_kwargs():
+        return {
+            "stock_info": {"ts_code": "000001.SZ"},
+            "tech_info": {"rsi_14": 25},
+            "news_list": [],
+            "history_context": "",
+            "include_learning_context": False,
+        }
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_dispatch_precedes_unsupported_check(self, mock_ch):
+        """S4（s4_plan §3.1）：云端不可用时若新链分派命中 → 走 Executor，不返回 unsupported。"""
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc.is_cloud_available = MagicMock(return_value=False)  # 旧链会在此拒绝
+        dispatch = self._make_dispatch(self._ok_exec_result())
+        with (
+            patch(
+                "services.ai_service.stock_analysis._resolve_stock_analysis_dispatch",
+                AsyncMock(return_value=dispatch),
+            ),
+            patch("core.prompt_base.get_base_prompt") as mock_resolve,
+        ):
+            mock_resolve.return_value = "Strategy prompt"
+            result = await svc.analyze_stock(strategy_key="oversold", **self._analyze_kwargs())
+        assert result["score"] == 80  # 非 unsupported
+        assert result["execution_metadata"]["ai_status"] == "succeeded"
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_scenario_success_program_metadata_overwrite(self, mock_ch):
+        """程序状态覆写（s4_plan §3.1）：模型输出伪造 execution_metadata 被程序值覆盖。"""
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc.is_cloud_available = MagicMock(return_value=True)
+        output = {
+            "score": 80,
+            "recommendation": "buy",
+            "execution_metadata": {"invocation_id": "fake-from-model", "actual_model": "fake"},
+        }
+        from core.model_management_types import NormalizedLLMUsage
+
+        usage = NormalizedLLMUsage(
+            input_total_tokens=100,
+            uncached_input_tokens=None,
+            cache_read_tokens=None,
+            cache_write_tokens=None,
+            output_tokens=10,
+        )
+        dispatch = self._make_dispatch(self._ok_exec_result(output=output, actual_usage=(usage,)))
+        with (
+            patch(
+                "services.ai_service.stock_analysis._resolve_stock_analysis_dispatch",
+                AsyncMock(return_value=dispatch),
+            ),
+            patch("core.prompt_base.get_base_prompt") as mock_resolve,
+        ):
+            mock_resolve.return_value = "Strategy prompt"
+            result = await svc.analyze_stock(strategy_key="oversold", **self._analyze_kwargs())
+        am = result["execution_metadata"]
+        assert am["invocation_id"] != "fake-from-model"  # 程序覆写
+        assert len(am["invocation_id"]) == 32  # uuid4 hex
+        assert am["actual_model"] == "m-1"
+        assert am["route_revision"] == 3
+        assert am["connection_id"] == "conn-1"
+        assert am["connection_revision"] == 5
+        assert am["usage_status"] == "reported"
+        assert am["ai_status"] == "succeeded"
+        assert am["config_revision"] == 7
+        assert result["score"] == 80
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_scenario_payload_shape(self, mock_ch):
+        """InferenceRequest 形状（s4_plan §3.1）：scenario/task/payload(system 合并+user+json_mode)。"""
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc.is_cloud_available = MagicMock(return_value=True)
+        dispatch = self._make_dispatch(self._ok_exec_result())
+        with (
+            patch(
+                "services.ai_service.stock_analysis._resolve_stock_analysis_dispatch",
+                AsyncMock(return_value=dispatch),
+            ),
+            patch("core.prompt_base.get_base_prompt") as mock_resolve,
+        ):
+            mock_resolve.return_value = "Strategy prompt"
+            await svc.analyze_stock(strategy_key="oversold", **self._analyze_kwargs())
+        request = dispatch.executor.execute.call_args[0][0]
+        assert request.scenario_id == "stock_analysis"
+        assert request.task_id == "analysis"
+        assert request.payload["json_mode"] is True
+        # 两条 system 消息合并为单 system_prompt（adapter 契约）
+        assert "<strategy_rules>" in request.payload["system_prompt"]
+        assert "铁律" in request.payload["system_prompt"]  # _UNIVERSAL_RULES
+        # user content 携带 market_data 容器
+        assert "<market_data>" in request.payload["prompt"]
+        assert request.deadline > 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("reason", "expected_status"),
+        [
+            ("cooldown until 1", "unavailable"),
+            ("no adapter for kind litellm_chat", "unavailable"),
+            ("connection not found in snapshot", "unavailable"),
+            ("deadline exhausted", "unavailable"),
+            ("budget dispatch forbidden: BUDGET_001", "budget_blocked"),
+            ("authorize failed: PolicyError", "policy_blocked"),
+            ("output validation failed: ModelOutputValidationError", "failed"),
+        ],
+    )
+    @patch("services.ai_service.ConfigHandler")
+    async def test_scenario_failure_ai_status_mapping(self, mock_ch, reason, expected_status):
+        """全候选失败 → ai_status ∈ {failed, unavailable, budget_blocked, policy_blocked}（R21）。"""
+        from core.model_management_types import CandidateDecision, ScenarioExecutionResult
+
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc.is_cloud_available = MagicMock(return_value=True)
+        exec_result = ScenarioExecutionResult(
+            scenario_id="stock_analysis",
+            invocation_id="inv-f",
+            status="failed",
+            outputs=(),
+            candidate_decisions=(
+                CandidateDecision(
+                    task_id="analysis",
+                    candidate_index=0,
+                    connection_id="conn-1",
+                    decision="failed",
+                    reason=reason,
+                ),
+            ),
+            actual_usage=(),
+        )
+        dispatch = self._make_dispatch(exec_result)
+        with (
+            patch(
+                "services.ai_service.stock_analysis._resolve_stock_analysis_dispatch",
+                AsyncMock(return_value=dispatch),
+            ),
+            patch("core.prompt_base.get_base_prompt") as mock_resolve,
+        ):
+            mock_resolve.return_value = "Strategy prompt"
+            result = await svc.analyze_stock(strategy_key="oversold", **self._analyze_kwargs())
+        assert result["ai_status"] == expected_status
+        assert result["score"] is None  # R21：失败不伪装为 0 分
+        assert result["confidence"] is None
+        assert reason in result["error"]
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.ConfigHandler")
+    async def test_scenario_executor_exception_maps_failed(self, mock_ch):
+        """executor.execute 抛异常 → ai_status=failed（错误脱敏）。"""
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+        svc = AIService()
+        svc.is_cloud_available = MagicMock(return_value=True)
+        dispatch = self._make_dispatch(None)
+        dispatch.executor.execute = AsyncMock(side_effect=RuntimeError("boom-secret"))
+        with (
+            patch(
+                "services.ai_service.stock_analysis._resolve_stock_analysis_dispatch",
+                AsyncMock(return_value=dispatch),
+            ),
+            patch("core.prompt_base.get_base_prompt") as mock_resolve,
+        ):
+            mock_resolve.return_value = "Strategy prompt"
+            result = await svc.analyze_stock(strategy_key="oversold", **self._analyze_kwargs())
+        assert result["ai_status"] == "failed"
+        assert result["score"] is None
+        assert result["error"]  # 错误经 DataSanitizer 转译为可读摘要（R9 脱敏在 sanitize_error 内）
+
+
 class TestAIServiceClassifyNewsFallback:
     @pytest.mark.asyncio
     @patch("services.ai_service.ConfigHandler")

@@ -15,14 +15,24 @@ purpose='news')`` 入口调用 LLM（复用外发门禁/审计/新闻信号量�
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import re
 import unicodedata
+import uuid
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
 from core.errors import AIPolicyNotAcknowledgedError
+from core.model_management_types import (
+    AdapterResponse,
+    InferenceRequest,
+    ModelOutputValidationError,
+    ValidatedBusinessOutput,
+)
+from services.ai_service.stock_analysis import _scenario_ai_status
 from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from services.news_insight_models import (
@@ -34,6 +44,7 @@ from services.news_insight_models import (
 
 if TYPE_CHECKING:
     from services.ai_service import AIService
+    from services.ai_service.scenario_dispatch import ScenarioDispatch
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +54,28 @@ _QUOTEABLE_TEXT_MAX_LEN = 500
 _TOTAL_EVIDENCE_BODY_MAX_LEN = 6000
 # 本地模型推理 max_tokens（新闻风险为结构化 JSON，需足够空间承载事件数组）。
 _LOCAL_MAX_TOKENS = 2048
+
+
+async def _resolve_news_risk_dispatch() -> ScenarioDispatch | None:
+    """news_risk 场景分派（s4_plan §4.1）：任一条件不满足 → None 走旧链。
+
+    分派过程异常（如配置损坏）降级旧链，不伪装成功（R21）。
+    """
+    from services.ai_service.scenario_dispatch import resolve_executor
+
+    try:
+        return await resolve_executor("news_risk")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log_classified(
+            logger,
+            e,
+            "llm",
+            "[NewsRisk] scenario dispatch failed, falling back to legacy (%s): %s",
+            exc_info=True,
+        )
+        return None
 
 
 class RiskQuote(BaseModel):
@@ -239,6 +272,7 @@ class NewsRiskAnalyzer:
         confidence: int | None,
         model_id: str | None,
         evidence_news_ids: list[int],
+        execution_metadata: dict | None = None,
     ) -> NewsInsightResult:
         return NewsInsightResult(
             analysis_status=analysis_status,
@@ -251,17 +285,33 @@ class NewsRiskAnalyzer:
             model_id=model_id,
             analysis_profile=request.analysis_profile,
             prompt_version=request.prompt_version,
+            execution_metadata=execution_metadata,
         )
 
-    def _process_raw(self, raw: dict, request: NewsInsightRequest, model_id: str | None) -> NewsInsightResult:
+    @staticmethod
+    def _parse_and_validate(raw: dict, request: NewsInsightRequest) -> dict:
+        """RiskOutput pydantic 解析 + 证据引用校验（s4_plan §4.1：Executor 校验器与旧链共用）。
+
+        枚举 / schema 非法由 pydantic 整体判失败（抛 ValidationError）；证据引用级非法
+        逐条剔除（validate_events）。返回 ``{"summary", "events"}`` 中间结构。
+        """
         parsed = RiskOutput.model_validate(raw)
         valid_events, _dropped = validate_events(parsed.events, request.evidence)
-        evidence_ids = [ev.news_id for ev in request.evidence]
+        return {"summary": parsed.summary, "events": valid_events}
 
-        # summary 清洗（输出侧长度/控制字符限定）
+    def _finalize(
+        self,
+        validated: dict,
+        request: NewsInsightRequest,
+        model_id: str | None,
+        execution_metadata: dict | None = None,
+    ) -> NewsInsightResult:
+        """后处理（两链共用）：summary 清洗 + 分类 + 驱动置信度 + 确定性聚合。"""
         from services.ai_service.output import _sanitize_free_text
 
-        summary = _sanitize_free_text(parsed.summary) if parsed.summary else None
+        summary = _sanitize_free_text(validated["summary"]) if validated.get("summary") else None
+        valid_events = validated["events"]
+        evidence_ids = [ev.news_id for ev in request.evidence]
 
         # 无有效事件 → analyzed_no_event，risk_level 保持 None（R21）
         if not valid_events:
@@ -273,6 +323,7 @@ class NewsRiskAnalyzer:
                 confidence=None,
                 model_id=model_id,
                 evidence_news_ids=evidence_ids,
+                execution_metadata=execution_metadata,
             )
 
         # 股票级置信度取驱动风险等级（最高严重程度）事件的置信度
@@ -289,16 +340,28 @@ class NewsRiskAnalyzer:
             confidence=driving_conf,
             model_id=model_id,
             evidence_news_ids=evidence_ids,
+            execution_metadata=execution_metadata,
         )
+
+    def _process_raw(self, raw: dict, request: NewsInsightRequest, model_id: str | None) -> NewsInsightResult:
+        """旧链处理入口：结构校验 + 证据过滤 + 后处理（保持既有行为不变）。"""
+        return self._finalize(self._parse_and_validate(raw, request), request, model_id)
 
     @log_async_operation(operation_name="analyze_news_risk", threshold_ms=PerfThreshold.AI_INFERENCE)
     async def analyze_news_risk(self, request: NewsInsightRequest) -> NewsInsightResult:
         """对一个已组织好的证据集做风险解读（C2 主流程）。
 
-        本地优先（§17 本地模型优先/成本），云端口经 ``purpose='news'`` 统一外发门禁与审计
-        （§10.2）。所有 provider 均不可用或被外发门禁拒接时返回 ``evidence_only``；LLM 有响应
-        但输出校验失败时返回 ``failed``（§10.3，不保存结论、UI 显示证据与可重试）。
+        S4 分派点（s4_plan §4.1）：统一调度链命中时走 Executor 有序候选（同请求单轨，
+        §14.2-6）；未命中走旧链「本地优先 / 云端兜底」——云端口经 ``purpose='news'``
+        统一外发门禁与审计（§10.2）。所有 provider 均不可用或被外发门禁拒接时返回
+        ``evidence_only``；LLM 有响应但输出校验失败时返回 ``failed``（§10.3，不保存
+        结论、UI 显示证据与可重试）。
         """
+        # S4 新链分派：一次请求只走一条链；分派异常 / 未激活降级旧链（R21 不伪装）。
+        dispatch = await _resolve_news_risk_dispatch()
+        if dispatch is not None:
+            return await self._execute_scenario_risk(dispatch, request)
+
         messages = [
             {"role": "system", "content": self._build_system_prompt()},
             {"role": "user", "content": self._build_user_prompt(request)},
@@ -385,3 +448,149 @@ class NewsRiskAnalyzer:
                 model_id=model_id,
                 evidence_news_ids=[ev.news_id for ev in request.evidence],
             )
+
+    # ------------------------------------------------------------------
+    # S4 统一场景链（§8.3，s4_plan §4.1）
+    # ------------------------------------------------------------------
+
+    def _make_scenario_validator(self, request: NewsInsightRequest):
+        """构造 Executor 校验器：RiskOutput pydantic 解析 + 证据引用校验（复用既有逻辑）。
+
+        闭包捕获 request（证据校验需本次输入证据集）；AdapterResponse.content 为空 /
+        JSON 不可解析 / 非 dict / pydantic 校验失败 → :class:`ModelOutputValidationError`
+        （Executor 按失败表格切换候选）。
+        """
+
+        def _validate(response: AdapterResponse) -> ValidatedBusinessOutput:
+            content = response.content
+            if not content:
+                raise ModelOutputValidationError("risk output: empty content")
+            try:
+                raw = json.loads(content)
+            except (json.JSONDecodeError, TypeError) as e:
+                raise ModelOutputValidationError(f"risk output: invalid json ({type(e).__name__})") from e
+            if not isinstance(raw, dict):
+                raise ModelOutputValidationError("risk output: non-dict payload")
+            validated = self._parse_and_validate(raw, request)
+            metadata = {"actual_model": response.actual_model, **dict(response.metadata)}
+            return ValidatedBusinessOutput(output=validated, metadata=metadata)
+
+        return _validate
+
+    @staticmethod
+    def _scenario_execution_metadata(
+        invocation_id: str,
+        dispatch: ScenarioDispatch,
+        connection_id: str | None,
+        meta: dict | None,
+        usage_status: str,
+        ai_status: str,
+    ) -> dict:
+        """execution_metadata 程序字段（s4_plan §3.3 字段清单）：模型输出不可覆写。"""
+        meta = meta or {}
+        return {
+            "invocation_id": invocation_id,
+            "route_revision": dispatch.route_revision,
+            "connection_id": connection_id,
+            "connection_revision": meta.get("connection_revision"),
+            "actual_model": meta.get("actual_model"),
+            "usage_status": usage_status,
+            "ai_status": ai_status,
+            "config_revision": dispatch.snapshot.config_revision,
+        }
+
+    async def _execute_scenario_risk(
+        self, dispatch: ScenarioDispatch, request: NewsInsightRequest
+    ) -> NewsInsightResult:
+        """S4 新链（s4_plan §4.1）：Executor 有序候选替换「本地优先 / 云端兜底」。
+
+        - 证据整理保留在 NewsInsightService（30 自然日 / 公告优先 / 12 条 / 500 字符）；
+        - validate_output 复用 RiskOutput pydantic + 证据引用校验（Executor 切候选）；
+        - 全部候选不可用 → evidence_only；输出全校验失败 → failed（§10.3，二者不当
+          「无风险」，R21）；CancelledError 裸传播（R2）；
+        - model_id 仅保留兼容显示（actual_model 优先，缺省 connection_id）。
+        """
+        loop = asyncio.get_running_loop()
+        invocation_id = uuid.uuid4().hex
+        inference = InferenceRequest(
+            scenario_id="news_risk",
+            task_id="risk",
+            invocation_id=invocation_id,
+            payload={
+                "system_prompt": self._build_system_prompt(),
+                "prompt": self._build_user_prompt(request),
+                "json_mode": True,
+                "max_tokens": _LOCAL_MAX_TOKENS,
+            },
+            deadline=loop.time() + dispatch.total_timeout_seconds,
+        )
+        try:
+            exec_result = await dispatch.executor.execute(
+                inference, dispatch.snapshot, self._make_scenario_validator(request)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log_classified(
+                logger,
+                e,
+                "llm",
+                "[NewsRisk] scenario chain error (%s): %s",
+                exc_info=True,
+            )
+            return self._result(
+                request,
+                analysis_status="evidence_only",
+                events=[],
+                summary=None,
+                confidence=None,
+                model_id=None,
+                evidence_news_ids=[ev.news_id for ev in request.evidence],
+                execution_metadata=self._scenario_execution_metadata(
+                    invocation_id, dispatch, None, None, "unavailable", "failed"
+                ),
+            )
+
+        if exec_result.status != "succeeded" or not exec_result.outputs:
+            reason = "; ".join(d.reason for d in exec_result.candidate_decisions) or exec_result.status
+            ai_status = _scenario_ai_status(reason)
+            # 校验失败（LLM 有响应但输出格式错误）→ failed；其余（deadline / cooldown /
+            # connection / budget / authorize 等）均为「不可用」→ evidence_only（§10.3）。
+            analysis_status = "failed" if "output validation failed" in reason else "evidence_only"
+            return self._result(
+                request,
+                analysis_status=analysis_status,
+                events=[],
+                summary=None,
+                confidence=None,
+                model_id=None,
+                evidence_news_ids=[ev.news_id for ev in request.evidence],
+                execution_metadata=self._scenario_execution_metadata(
+                    invocation_id, dispatch, None, None, "unavailable", ai_status
+                ),
+            )
+
+        output = exec_result.outputs[0].output
+        meta = dict(exec_result.outputs[0].metadata)
+        connection_id = next(
+            (d.connection_id for d in exec_result.candidate_decisions if d.decision == "succeeded"),
+            None,
+        )
+        exec_meta = self._scenario_execution_metadata(
+            invocation_id,
+            dispatch,
+            connection_id or meta.get("connection_id"),
+            meta,
+            "reported" if exec_result.actual_usage else "unavailable",
+            "succeeded",
+        )
+        # model_id 兼容显示：actual_model 优先（旧链为 "local" / "cloud:provider/model"）
+        model_id = meta.get("actual_model") or connection_id
+        result = self._finalize(output, request, model_id, execution_metadata=exec_meta)
+        logger.debug(
+            "[NewsRisk] Scenario ✅ status=%s risk=%s model=%s",
+            result.analysis_status,
+            result.risk_level,
+            model_id,
+        )
+        return result

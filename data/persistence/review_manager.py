@@ -1831,6 +1831,13 @@ class ReviewManager:
             # 哨兵（R21），不填业务上合法的具体标签。
             conclusion_label = _s(row, "conclusion_label", None)
 
+            # S4 统一场景链（s4_plan §3.3）：execution_metadata 逐行透传（analyze_stock
+            # 新链返回的 8 键程序字段）。旧链 / 缺失 / 非 dict → None（SQL NULL，历史
+            # 回看走「未记录」分支，不伪装，R21）；null_protected 由 DAO info 声明。
+            execution_metadata = row.get("execution_metadata")
+            if not isinstance(execution_metadata, dict):
+                execution_metadata = None
+
             records.append(
                 {
                     "run_id": run_id,
@@ -1862,6 +1869,7 @@ class ReviewManager:
                     "params_snapshot": params_snapshot_value,
                     "exec_warnings": exec_warnings_value,
                     "filter_attribution": _parse_filter_attribution(row.get(_ATTRIBUTION_COLUMN)),
+                    "execution_metadata": execution_metadata,
                 }
             )
 

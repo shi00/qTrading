@@ -233,6 +233,53 @@ class TestReviewManagerExecMetadataPersistence:
         assert saved[0]["exec_warnings"] == []
         assert deserialize_exec_warnings(saved[0]["exec_warnings"]) == ()
 
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_execution_metadata_persisted(self, mock_cm, mock_tc):
+        """S4（s4_plan §3.3）：df 行携带 execution_metadata dict → 逐行透传进 record（8 键程序字段）。"""
+        rm, dao = self._make_rm(mock_cm)
+        exec_meta = {
+            "invocation_id": "inv-1",
+            "route_revision": 3,
+            "connection_id": "conn-1",
+            "connection_revision": 5,
+            "actual_model": "m-1",
+            "usage_status": "reported",
+            "ai_status": "succeeded",
+            "config_revision": 7,
+        }
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240615"],
+                "ai_score": [80],
+                "execution_metadata": [exec_meta],
+            }
+        )
+        await rm.save_results("test_strategy", df, trade_date="20240615")
+        saved = dao.save_screening_results.call_args.args[0]
+        assert saved[0]["execution_metadata"] == exec_meta
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_execution_metadata_missing_persists_null(self, mock_cm, mock_tc):
+        """旧链 / 缺列 / 非 dict → SQL NULL（「未记录」分支），不伪造（R21）。"""
+        rm, dao = self._make_rm(mock_cm)
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": ["20240615", "20240615"],
+                "ai_score": [80, 70],
+                "execution_metadata": [None, "not-a-dict"],
+            }
+        )
+        await rm.save_results("test_strategy", df, trade_date="20240615")
+        saved = dao.save_screening_results.call_args.args[0]
+        assert saved[0]["execution_metadata"] is None
+        assert saved[1]["execution_metadata"] is None
+
 
 class TestReviewManagerRunReview:
     @pytest.mark.asyncio

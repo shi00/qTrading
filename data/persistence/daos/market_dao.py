@@ -1,9 +1,12 @@
 import datetime
 import hashlib
+import json
 import logging
 import typing
 
 import pandas as pd
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from data.persistence.models import (
     DailyIndicators,
@@ -19,6 +22,11 @@ from data.news_match import _cn_len
 from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
+
+# news_risk_brief 成功态值域（S4 MM-06 条件 upsert 用）。
+# R1（data 不得 import services）：与 services.news_insight_models.SUCCESS_STATUS
+# 同值的字面量复制，由 test_market_dao 的 parity 测试守护两者一致。
+_RISK_SUCCESS_STATUS: typing.Final[tuple[str, ...]] = ("analyzed_with_events", "analyzed_no_event")
 
 # B2: market_news 批量落库（_save_upsert）显式插入列；不含 id（自增主键）与 created_at（server_default）。
 _MARKET_NEWS_BATCH_COLUMNS = [
@@ -161,34 +169,160 @@ class MarketDao(BaseDao):
         补写打分结果；重试/重复打分失败（None）不清空已有值（与 tags 同范式）。
         N5-2：sentiment_score / sentiment_conf / sentiment_model 三打分列随载荷落库，
         冲突时同 COALESCE 范式（打分失败 None 不清空既有值）。
+
+        S4 MM-06 情绪字段组三态分支（s4_plan §2.3）：
+        - 载荷无 ``analysis_metadata``（或非 dict）→ 旧 SQL 逐字节保留
+          （pending 期间旧链生产语义不变，S6 退役）；
+        - ``analysis_metadata.sentiment_applied is True``（本次 LLM/GGUF 校验成功）→
+          情绪四列 excluded 直写（整组原子写入；LLM 成功载荷 score/conf/model=None
+          即清空旧 GGUF 数值组，不逐列继承），来源元数据写 ``analysis_metadata``，
+          category_l1/l2 经 COALESCE 透传（缺失不清空既有分类）；
+        - 非 True（失败/情绪缺失）→ 仅写 ``analysis_metadata``（最近尝试状态通道）+
+          category 透传，旧成功情绪组整组保留（不逐列混写，R21 不伪装）。
         """
         content = news_item.get("content", "") or ""
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
-        sql = """
-              INSERT INTO market_news ("content","content_hash","tags","publish_time","source","sentiment","sentiment_score","sentiment_conf","sentiment_model","created_at")
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP)
-              ON CONFLICT("content_hash","publish_time") DO
-              UPDATE SET "tags" = COALESCE(excluded."tags", market_news."tags"),
-                         "content" = excluded."content",
-                         "source" = excluded."source",
-                         "sentiment" = COALESCE(excluded."sentiment", market_news."sentiment"),
-                         "sentiment_score" = COALESCE(excluded."sentiment_score", market_news."sentiment_score"),
-                         "sentiment_conf" = COALESCE(excluded."sentiment_conf", market_news."sentiment_conf"),
-                         "sentiment_model" = COALESCE(excluded."sentiment_model", market_news."sentiment_model")
-              """
-        params = (
-            content,
-            content_hash,
-            news_item.get("tags"),
-            news_item.get("publish_time"),
-            news_item.get("source", "Sina"),
-            news_item.get("sentiment"),
-            news_item.get("sentiment_score"),
-            news_item.get("sentiment_conf"),
-            news_item.get("sentiment_model"),
-        )
+        am = news_item.get("analysis_metadata")
+        if not isinstance(am, dict) or not am:
+            sql = """
+                  INSERT INTO market_news ("content","content_hash","tags","publish_time","source","sentiment","sentiment_score","sentiment_conf","sentiment_model","created_at")
+                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP)
+                  ON CONFLICT("content_hash","publish_time") DO
+                  UPDATE SET "tags" = COALESCE(excluded."tags", market_news."tags"),
+                             "content" = excluded."content",
+                             "source" = excluded."source",
+                             "sentiment" = COALESCE(excluded."sentiment", market_news."sentiment"),
+                             "sentiment_score" = COALESCE(excluded."sentiment_score", market_news."sentiment_score"),
+                             "sentiment_conf" = COALESCE(excluded."sentiment_conf", market_news."sentiment_conf"),
+                             "sentiment_model" = COALESCE(excluded."sentiment_model", market_news."sentiment_model")
+                  """
+            params = (
+                content,
+                content_hash,
+                news_item.get("tags"),
+                news_item.get("publish_time"),
+                news_item.get("source", "Sina"),
+                news_item.get("sentiment"),
+                news_item.get("sentiment_score"),
+                news_item.get("sentiment_conf"),
+                news_item.get("sentiment_model"),
+            )
+            return await self._write_db(sql, params)
+
+        am_json = json.dumps(am, ensure_ascii=False, default=str)
+        if am.get("sentiment_applied") is True:
+            sql = """
+                  INSERT INTO market_news ("content","content_hash","tags","publish_time","source","category_l1","category_l2","sentiment","sentiment_score","sentiment_conf","sentiment_model","analysis_metadata","created_at")
+                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, CURRENT_TIMESTAMP)
+                  ON CONFLICT("content_hash","publish_time") DO
+                  UPDATE SET "tags" = COALESCE(excluded."tags", market_news."tags"),
+                             "content" = excluded."content",
+                             "source" = excluded."source",
+                             "category_l1" = COALESCE(excluded."category_l1", market_news."category_l1"),
+                             "category_l2" = COALESCE(excluded."category_l2", market_news."category_l2"),
+                             "sentiment" = excluded."sentiment",
+                             "sentiment_score" = excluded."sentiment_score",
+                             "sentiment_conf" = excluded."sentiment_conf",
+                             "sentiment_model" = excluded."sentiment_model",
+                             "analysis_metadata" = excluded."analysis_metadata"
+                  """
+            params = (
+                content,
+                content_hash,
+                news_item.get("tags"),
+                news_item.get("publish_time"),
+                news_item.get("source", "Sina"),
+                news_item.get("category_l1"),
+                news_item.get("category_l2"),
+                news_item.get("sentiment"),
+                news_item.get("sentiment_score"),
+                news_item.get("sentiment_conf"),
+                news_item.get("sentiment_model"),
+                am_json,
+            )
+        else:
+            sql = """
+                  INSERT INTO market_news ("content","content_hash","tags","publish_time","source","category_l1","category_l2","analysis_metadata","created_at")
+                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, CURRENT_TIMESTAMP)
+                  ON CONFLICT("content_hash","publish_time") DO
+                  UPDATE SET "tags" = COALESCE(excluded."tags", market_news."tags"),
+                             "content" = excluded."content",
+                             "source" = excluded."source",
+                             "category_l1" = COALESCE(excluded."category_l1", market_news."category_l1"),
+                             "category_l2" = COALESCE(excluded."category_l2", market_news."category_l2"),
+                             "analysis_metadata" = excluded."analysis_metadata"
+                  """
+            params = (
+                content,
+                content_hash,
+                news_item.get("tags"),
+                news_item.get("publish_time"),
+                news_item.get("source", "Sina"),
+                news_item.get("category_l1"),
+                news_item.get("category_l2"),
+                am_json,
+            )
         return await self._write_db(sql, params)
+
+    async def update_market_news_analysis(
+        self,
+        news_id: int,
+        *,
+        sentiment: str | None = None,
+        sentiment_score: float | None = None,
+        sentiment_conf: float | None = None,
+        sentiment_model: str | None = None,
+        category_l1: str | None = None,
+        category_l2: str | None = None,
+        analysis_metadata: typing.Mapping[str, typing.Any] | None = None,
+    ) -> bool:
+        """按 market_news.id 更新分析结果（S4 dedicated 二段写入 / 补写路径）。
+
+        字段组语义与 :meth:`save_market_news` 三态一致：
+        - ``analysis_metadata.sentiment_applied is True`` → 情绪四列直写
+          （score/conf/model=None 即清空旧 GGUF 数值组）+ ``analysis_metadata``；
+        - 非 True → 仅写 ``analysis_metadata``，旧成功情绪组整组保留；
+        - category_l1/l2 经 COALESCE 透传（None 不清空既有分类）。
+
+        Returns:
+            bool: 是否命中行（rowcount > 0）。
+
+        Raises:
+            ValueError: ``analysis_metadata`` 非 dict / 空——调用契约破坏，显式失败不伪装。
+        """
+        if not isinstance(analysis_metadata, dict) or not analysis_metadata:
+            raise ValueError("update_market_news_analysis requires a non-empty analysis_metadata mapping")
+        am_json = json.dumps(analysis_metadata, ensure_ascii=False, default=str)
+        if analysis_metadata.get("sentiment_applied") is True:
+            sql = (
+                'UPDATE market_news SET "sentiment" = $2, "sentiment_score" = $3, "sentiment_conf" = $4, '
+                '"sentiment_model" = $5, "analysis_metadata" = $6::jsonb, '
+                '"category_l1" = COALESCE($7::varchar, "category_l1"), '
+                '"category_l2" = COALESCE($8::varchar, "category_l2") '
+                'WHERE "id" = $1'
+            )
+            params = (
+                news_id,
+                sentiment,
+                sentiment_score,
+                sentiment_conf,
+                sentiment_model,
+                am_json,
+                category_l1,
+                category_l2,
+            )
+        else:
+            sql = (
+                'UPDATE market_news SET "analysis_metadata" = $2::jsonb, '
+                '"category_l1" = COALESCE($3::varchar, "category_l1"), '
+                '"category_l2" = COALESCE($4::varchar, "category_l2") '
+                'WHERE "id" = $1'
+            )
+            params = (news_id, am_json, category_l1, category_l2)
+        async with self._guarded_begin() as conn:
+            result = await conn.exec_driver_sql(sql, params)
+            return bool(getattr(result, "rowcount", 0))
 
     async def get_market_news(
         self,
@@ -363,22 +497,42 @@ class MarketDao(BaseDao):
         # 聚合读取不得吞 DB 故障（§10.3 同理由）：suppress_errors=False。
         return await self._read_db(sql, params, suppress_errors=False)
 
-    async def save_news_risk_brief(self, brief: dict) -> None:
-        """持久化 NewsRiskBrief 快照（R8：走 _save_upsert 主键冲突路径）。
+    async def save_news_risk_brief(self, brief: dict) -> dict:
+        """持久化 NewsRiskBrief 快照（S4 MM-06：Core 条件 upsert，s4_plan §4.3）。
 
-        - 复合主键 ``(ts_code, input_hash)`` 走主键冲突；结果列已在模型声明
-          ``null_protected``，避免新写入 NULL 覆盖既有成功结果（§7.2 失败不覆盖成功）。
-        - ``updated_at`` 由 _save_upsert 在冲突命中时自动刷新。
+        - 复合主键 ``(ts_code, input_hash)`` 冲突（Core ``on_conflict_do_update``，
+          参数化 R4）；
+        - 成功态（``_RISK_SUCCESS_STATUS``）无条件 upsert（允许刷新成功快照）；
+        - 失败态 DO UPDATE 带 ``analysis_status NOT IN (成功态)`` 条件——既有成功快照
+          保留（rowcount=0 → ``kept_success``），失败不得覆盖成功（§7.2）；
+        - null_protected 列 ``coalesce(EXCLUDED, table)`` 防 None 覆盖既有非空结果；
+        - created_at 不参与写入（server_default）；updated_at 冲突命中时刷新 now()；
+        - ``_guarded_begin`` 事务内执行（R5 守卫 + EngineDisposedError 传播）。
+
+        Returns:
+            dict: ``{"written": bool, "kept_success": bool}``——written 表示本语句实际
+            写入（insert 或 update）；kept_success 仅失败写入被条件挡下时为 True。
         """
         if not brief:
-            return
-        df = pd.DataFrame([brief])
-        await self._save_upsert(
-            df,
-            "news_risk_brief",
-            columns=get_model_columns(NewsRiskBrief),
-            pk_columns=["ts_code", "input_hash"],
-        )
+            return {"written": False, "kept_success": False}
+        self._check_engine(context="upsert")
+        table = NewsRiskBrief.__table__
+        value_cols = [c for c in get_model_columns(NewsRiskBrief) if c in brief]
+        values = {c: brief.get(c) for c in value_cols}
+        ins = pg_insert(table).values(**values)
+        null_protected = {c.name for c in table.columns if c.info.get("null_protected", False)}
+        set_: dict[str, typing.Any] = {
+            c: (sa.func.coalesce(ins.excluded[c], table.c[c]) if c in null_protected else ins.excluded[c])
+            for c in values
+        }
+        set_["updated_at"] = sa.func.now()
+        is_success = brief.get("analysis_status") in _RISK_SUCCESS_STATUS
+        where = None if is_success else table.c.analysis_status.notin_(_RISK_SUCCESS_STATUS)
+        stmt = ins.on_conflict_do_update(index_elements=["ts_code", "input_hash"], set_=set_, where=where)
+        async with self._guarded_begin() as conn:
+            result = await conn.execute(stmt)
+            rowcount = int(result.rowcount or 0)
+        return {"written": rowcount > 0, "kept_success": (not is_success) and rowcount == 0}
 
     async def get_news_risk_brief(
         self,

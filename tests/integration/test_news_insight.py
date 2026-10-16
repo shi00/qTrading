@@ -170,11 +170,11 @@ class TestNewsInsightIntegration(TestDatabaseBase):
         assert got2["risk_level"] == "critical"
 
     async def test_brief_failed_does_not_overwrite_success(self):
-        """failed 空结果写同主键（服务层：无既有成功快照时才落 failed，§7.2）。
+        """failed 空结果写同主键：服务层不再先查再写，由 DAO 条件 upsert 兜底（S4 MM-06，§7.2）。
 
-        业务的「失败不覆盖成功」由服务层保证（``test_subset_reuse`` 与
-        ``test_ai_failure_produces_failed_without_success_snapshot`` 覆盖）；
-        本用例校验当既有成功快照存在时，同窗口同输入的新分析走复用成功，不落 failed。
+        业务的「失败不覆盖成功」由 DAO 条件 upsert（``analysis_status NOT IN
+        成功态``）保证（``tests/integration/test_null_protected_jsonb.py`` 覆盖）；
+        本用例校验成功快照落库后的读回与证据 ID 持久化。
         """
         # 先造一条成功快照
         input_hash = "z" * 64

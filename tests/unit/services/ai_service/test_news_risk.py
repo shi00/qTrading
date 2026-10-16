@@ -10,10 +10,11 @@ self._service 访问）；monkeypatch ``services.ai_service.ConfigHandler`` 控�
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from core.errors import AIPolicyNotAcknowledgedError
 from core.i18n import Message
@@ -392,3 +393,257 @@ class TestProcessRaw:
         result = await analyzer.analyze_news_risk(_request(evidence=[_evidence(news_id=1, text="公告")]))
         assert result.analysis_status == "failed"
         assert result.evidence_news_ids == [1]
+
+
+class TestAnalyzeNewsRiskScenarioChain:
+    """S4 §8.3 news_risk 新链接线（s4_plan §4.1）。
+
+    订阅判定：patch news_risk 模块级 ``_resolve_news_risk_dispatch`` 注入
+    ScenarioDispatch（mock executor），不真走 Executor——分派/计量由
+    scenario_dispatch / executor 层测试承载。
+    """
+
+    @staticmethod
+    def _make_dispatch(exec_result):
+        from services.ai_service.scenario_dispatch import ScenarioDispatch
+
+        executor = MagicMock()
+        executor.execute = AsyncMock(return_value=exec_result)
+        snapshot = MagicMock()
+        snapshot.config_revision = 7
+        return ScenarioDispatch(
+            executor=executor,
+            snapshot=snapshot,
+            route_revision=3,
+            total_timeout_seconds=60.0,
+            task_routes={},
+        )
+
+    @staticmethod
+    def _exec_result(status, output=None, decisions=None, actual_usage=()):
+        from core.model_management_types import (
+            CandidateDecision,
+            ScenarioExecutionResult,
+            ValidatedBusinessOutput,
+        )
+
+        outputs = ()
+        if output is not None:
+            outputs = (
+                ValidatedBusinessOutput(
+                    output=output,
+                    metadata={"actual_model": "m-1", "connection_revision": 5},
+                ),
+            )
+        if decisions is None:
+            decisions = (
+                CandidateDecision(
+                    task_id="risk",
+                    candidate_index=0,
+                    connection_id="conn-1",
+                    decision="succeeded" if status == "succeeded" else "failed",
+                    reason="ok" if status == "succeeded" else "deadline exhausted",
+                ),
+            )
+        return ScenarioExecutionResult(
+            scenario_id="news_risk",
+            invocation_id="inv-r",
+            status=status,
+            outputs=outputs,
+            candidate_decisions=decisions,
+            actual_usage=actual_usage,
+        )
+
+    @staticmethod
+    def _validated_output():
+        """Executor validate_output 产出形态：_parse_and_validate 之后的中间结构。"""
+        return {
+            "summary": "风险提示",
+            "events": [
+                {
+                    "event_type": "litigation",
+                    "severity": "high",
+                    "company_role": "direct",
+                    "event_status": "ongoing",
+                    "impact_horizon": "short_term",
+                    "fact": "被诉讼",
+                    "impact_reasoning": "影响声誉",
+                    "uncertainty": "",
+                    "confidence": 85,
+                    "evidence_quotes": [{"news_id": 1, "quote": "公告"}],
+                }
+            ],
+        }
+
+    @pytest.mark.asyncio
+    async def test_dispatch_precedes_legacy_chain(self):
+        """新链命中 → executor.execute 被调用、旧链 _chat_completion 不被调用。"""
+        dispatch = self._make_dispatch(self._exec_result("succeeded", output=self._validated_output()))
+        svc = _service_stub()
+        analyzer = _analyzer(svc)
+        with patch(
+            "services.ai_service.news_risk._resolve_news_risk_dispatch",
+            AsyncMock(return_value=dispatch),
+        ):
+            result = await analyzer.analyze_news_risk(_request())
+        svc._chat_completion.assert_not_awaited()
+        dispatch.executor.execute.assert_awaited_once()
+        assert result.analysis_status == "analyzed_with_events"
+        assert result.risk_level == "high"
+        assert result.execution_metadata["ai_status"] == "succeeded"
+
+    @pytest.mark.asyncio
+    async def test_scenario_payload_shape(self):
+        """payload 契约：单 system_prompt + 单 prompt + json_mode + max_tokens；task_id=risk。"""
+        dispatch = self._make_dispatch(self._exec_result("succeeded", output=self._validated_output()))
+        analyzer = _analyzer()
+        req = _request()
+        with patch(
+            "services.ai_service.news_risk._resolve_news_risk_dispatch",
+            AsyncMock(return_value=dispatch),
+        ):
+            await analyzer.analyze_news_risk(req)
+        request = dispatch.executor.execute.await_args.args[0]
+        assert request.scenario_id == "news_risk"
+        assert request.task_id == "risk"
+        assert request.payload["json_mode"] is True
+        assert "只能引用你收到的证据" in request.payload["system_prompt"]
+        assert "000001.SZ" in request.payload["prompt"]
+        assert isinstance(request.payload["max_tokens"], int)
+
+    @pytest.mark.asyncio
+    async def test_scenario_success_metadata(self):
+        """成功 → execution_metadata 8 键（程序构造，config_revision 来自 snapshot）。"""
+        dispatch = self._make_dispatch(self._exec_result("succeeded", output=self._validated_output()))
+        analyzer = _analyzer()
+        with patch(
+            "services.ai_service.news_risk._resolve_news_risk_dispatch",
+            AsyncMock(return_value=dispatch),
+        ):
+            result = await analyzer.analyze_news_risk(_request())
+        em = result.execution_metadata
+        assert em["ai_status"] == "succeeded"
+        assert em["route_revision"] == 3
+        assert em["config_revision"] == 7
+        assert em["connection_id"] == "conn-1"
+        assert em["connection_revision"] == 5
+        assert em["actual_model"] == "m-1"
+        assert em["usage_status"] == "unavailable"
+        assert em["invocation_id"]
+        # model_id 兼容显示：actual_model 优先
+        assert result.model_id == "m-1"
+
+    @pytest.mark.asyncio
+    async def test_scenario_success_no_event(self):
+        """无有效事件 → analyzed_no_event（合法成功，risk_level None，R21）。"""
+        dispatch = self._make_dispatch(self._exec_result("succeeded", output={"summary": "无重大风险", "events": []}))
+        analyzer = _analyzer()
+        with patch(
+            "services.ai_service.news_risk._resolve_news_risk_dispatch",
+            AsyncMock(return_value=dispatch),
+        ):
+            result = await analyzer.analyze_news_risk(_request())
+        assert result.analysis_status == "analyzed_no_event"
+        assert result.risk_level is None
+        assert result.confidence is None
+        assert result.execution_metadata["ai_status"] == "succeeded"
+
+    @pytest.mark.asyncio
+    async def test_scenario_all_unavailable_maps_evidence_only(self):
+        """全候选不可用（deadline/cooldown 等）→ evidence_only，不伪装无风险（R21）。"""
+        dispatch = self._make_dispatch(self._exec_result("failed"))
+        analyzer = _analyzer()
+        with patch(
+            "services.ai_service.news_risk._resolve_news_risk_dispatch",
+            AsyncMock(return_value=dispatch),
+        ):
+            result = await analyzer.analyze_news_risk(_request())
+        assert result.analysis_status == "evidence_only"
+        assert result.risk_level is None
+        assert result.execution_metadata["ai_status"] == "unavailable"
+
+    @pytest.mark.asyncio
+    async def test_scenario_validation_failure_maps_failed(self):
+        """输出全校验失败（reason 含 output validation failed）→ failed（§10.3 不保存结论）。"""
+        dispatch = self._make_dispatch(
+            self._exec_result(
+                "failed",
+                decisions=(
+                    MagicMock(
+                        task_id="risk",
+                        candidate_index=0,
+                        connection_id="c1",
+                        decision="failed",
+                        reason="output validation failed: ModelOutputValidationError",
+                    ),
+                ),
+            )
+        )
+        analyzer = _analyzer()
+        with patch(
+            "services.ai_service.news_risk._resolve_news_risk_dispatch",
+            AsyncMock(return_value=dispatch),
+        ):
+            result = await analyzer.analyze_news_risk(_request())
+        assert result.analysis_status == "failed"
+        assert result.execution_metadata["ai_status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_scenario_executor_exception_maps_evidence_only(self):
+        """executor 抛异常（非取消）→ evidence_only + 明确 ai_status，不伪装成功（R21）。"""
+        dispatch = self._make_dispatch(None)
+        dispatch.executor.execute = AsyncMock(side_effect=RuntimeError("boom-secret"))
+        analyzer = _analyzer()
+        with patch(
+            "services.ai_service.news_risk._resolve_news_risk_dispatch",
+            AsyncMock(return_value=dispatch),
+        ):
+            result = await analyzer.analyze_news_risk(_request())
+        assert result.analysis_status == "evidence_only"
+        assert result.events == []
+        assert result.execution_metadata["ai_status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_error_falls_back_to_legacy(self):
+        """分派过程异常（如配置损坏）→ 分派函数内部降级旧链（_chat_completion 被调），不伪装（R21）。"""
+        svc = _service_stub()
+        analyzer = _analyzer(svc)
+        with patch(
+            "services.ai_service.scenario_dispatch.resolve_executor",
+            AsyncMock(side_effect=RuntimeError("config corrupt")),
+        ):
+            result = await analyzer.analyze_news_risk(_request())
+        svc._chat_completion.assert_awaited_once()
+        assert result.analysis_status == "analyzed_with_events"
+        assert result.execution_metadata is None  # 旧链无新链元数据
+
+    @pytest.mark.asyncio
+    async def test_dispatch_none_falls_back_to_legacy(self):
+        """分派返回 None（pending/未注册）→ 旧链行为逐字节保留。"""
+        svc = _service_stub()
+        analyzer = _analyzer(svc)
+        with patch(
+            "services.ai_service.news_risk._resolve_news_risk_dispatch",
+            AsyncMock(return_value=None),
+        ):
+            result = await analyzer.analyze_news_risk(_request())
+        svc._chat_completion.assert_awaited_once()
+        assert result.analysis_status == "analyzed_with_events"
+        assert result.execution_metadata is None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        """executor 抛 CancelledError → 裸传播（R2，不包装成 evidence_only）。"""
+        dispatch = self._make_dispatch(None)
+        dispatch.executor.execute = AsyncMock(side_effect=asyncio.CancelledError())
+        analyzer = _analyzer()
+        with (
+            patch(
+                "services.ai_service.news_risk._resolve_news_risk_dispatch",
+                AsyncMock(return_value=dispatch),
+            ),
+            pytest.raises(asyncio.CancelledError) as excinfo,
+        ):
+            await analyzer.analyze_news_risk(_request())
+        # R2 强断言：CancelledError 类型原样传播，未被包装/替换（excinfo.type 身份校验）。
+        assert excinfo.type is asyncio.CancelledError

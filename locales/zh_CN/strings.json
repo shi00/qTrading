@@ -1594,6 +1594,7 @@
     "col_params_snapshot": "参数快照",
     "col_exec_warnings": "执行期警告",
     "col_filter_attribution": "筛选归因",
+    "col_execution_metadata": "执行元数据",
     "col_conclusion_label": "模型结论",
     "prediction_win": "胜",
     "prediction_loss": "负",

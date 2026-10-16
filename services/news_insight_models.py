@@ -102,3 +102,5 @@ class NewsInsightResult:
     model_id: str | None
     analysis_profile: str
     prompt_version: str
+    # S4 统一场景链（s4_plan §4.1）：程序构造的执行元数据（8 键），旧链为 None。
+    execution_metadata: dict | None = None
