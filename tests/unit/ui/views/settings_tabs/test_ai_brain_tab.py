@@ -21,6 +21,7 @@ concurrency / news_concurrency / cost limit / 月度成本 / 新闻情绪打分�
 
 import asyncio
 import inspect
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1017,3 +1018,186 @@ class TestAIBrainTabDataBoundaryDisclosure:
             body = data.get("settings_ai_data_boundary_body")
             assert isinstance(title, str) and title.strip(), f"{locale} settings_ai_data_boundary_title 缺失或为空"
             assert isinstance(body, str) and body.strip(), f"{locale} settings_ai_data_boundary_body 缺失或为空"
+
+
+# ============================================================================
+# 模块级辅助函数（覆盖率门禁补充：provider / 惰性解析 / 账本摘要降级链）
+# ============================================================================
+
+
+class TestFormatBytes:
+    """_format_bytes 字节格式化（SEC-03 数据量列）。"""
+
+    def test_bytes(self) -> None:
+        from ui.views.settings_tabs.ai_brain_tab import _format_bytes
+
+        assert _format_bytes(0) == "0 B"
+        assert _format_bytes(512) == "512 B"
+
+    def test_kilobytes(self) -> None:
+        from ui.views.settings_tabs.ai_brain_tab import _format_bytes
+
+        assert _format_bytes(2048) == "2.0 KB"
+
+    def test_megabytes(self) -> None:
+        from ui.views.settings_tabs.ai_brain_tab import _format_bytes
+
+        assert _format_bytes(5 * 1024 * 1024) == "5.0 MB"
+
+    def test_gigabytes(self) -> None:
+        from ui.views.settings_tabs.ai_brain_tab import _format_bytes
+
+        assert _format_bytes(3 * 1024**3) == "3.0 GB"
+
+
+class TestAiUsageDaoProvider:
+    """_ai_usage_dao_provider 惰性解析（engine 未就绪 / 未组装时降级为 None）。"""
+
+    def test_returns_dao_when_assembled(self, monkeypatch) -> None:
+        import data.cache.cache_manager as cm_module
+
+        dao = object()
+        monkeypatch.setattr(cm_module, "CacheManager", lambda: SimpleNamespace(ai_usage_dao=dao))
+
+        from ui.views.settings_tabs.ai_brain_tab import _ai_usage_dao_provider
+
+        assert _ai_usage_dao_provider() is dao
+
+    def test_returns_none_when_not_assembled(self, monkeypatch) -> None:
+        import data.cache.cache_manager as cm_module
+
+        monkeypatch.setattr(cm_module, "CacheManager", lambda: SimpleNamespace())
+
+        from ui.views.settings_tabs.ai_brain_tab import _ai_usage_dao_provider
+
+        assert _ai_usage_dao_provider() is None
+
+
+class TestReleaseUnconfirmedReservation:
+    """_release_unconfirmed_reservation：DAO 不可用异常降级 + 布尔结果透传（R21 不伪装）。"""
+
+    def test_raises_runtime_error_when_dao_unavailable(self, monkeypatch) -> None:
+        import ui.views.settings_tabs.ai_brain_tab as mod
+
+        monkeypatch.setattr(mod, "_ai_usage_dao_provider", lambda: None)
+
+        with pytest.raises(RuntimeError, match="ai_usage dao unavailable"):
+            asyncio.run(mod._release_unconfirmed_reservation("res-1"))
+
+    def test_returns_true_when_released(self, monkeypatch) -> None:
+        import ui.views.settings_tabs.ai_brain_tab as mod
+
+        dao = SimpleNamespace(release_reservation=AsyncMock(return_value=True))
+        monkeypatch.setattr(mod, "_ai_usage_dao_provider", lambda: dao)
+
+        assert asyncio.run(mod._release_unconfirmed_reservation("res-1")) is True
+        dao.release_reservation.assert_awaited_once_with(reservation_id="res-1")
+
+    def test_returns_false_when_noop(self, monkeypatch) -> None:
+        """预留已不处于未确认状态 → False（VM 据此区分「已解除」与「无变更」）。"""
+        import ui.views.settings_tabs.ai_brain_tab as mod
+
+        dao = SimpleNamespace(release_reservation=AsyncMock(return_value=False))
+        monkeypatch.setattr(mod, "_ai_usage_dao_provider", lambda: dao)
+
+        assert asyncio.run(mod._release_unconfirmed_reservation("res-2")) is False
+
+
+class TestLoadConnectionsUsageSummary:
+    """_load_connections_usage_summary：本月已知费用加载与降级链（R21 不伪零）。"""
+
+    def _make_dao(self, summary: dict) -> SimpleNamespace:
+        return SimpleNamespace(read_budget_summary=AsyncMock(return_value=summary))
+
+    def test_returns_empty_summary_when_dao_unavailable(self, monkeypatch) -> None:
+        from ui.viewmodels.model_connections_view_model import UsageCostSummary
+        import ui.views.settings_tabs.ai_brain_tab as mod
+
+        monkeypatch.setattr(mod, "_ai_usage_dao_provider", lambda: None)
+
+        result = asyncio.run(mod._load_connections_usage_summary())
+        assert result == UsageCostSummary()
+        assert result.known_cost_cny is None
+
+    def test_known_cost_converted_to_str(self, monkeypatch) -> None:
+        from ui.viewmodels.model_connections_view_model import UsageCostSummary
+        import ui.views.settings_tabs.ai_brain_tab as mod
+
+        dao = self._make_dao({"known_cny": 12.34})
+        monkeypatch.setattr(mod, "_ai_usage_dao_provider", lambda: dao)
+
+        result = asyncio.run(mod._load_connections_usage_summary())
+        assert result.known_cost_cny == "12.34"
+        assert result.unknown_cost_count is None  # R21: 其余字段保持 None 不伪零
+
+    def test_known_none_kept_none(self, monkeypatch) -> None:
+        from ui.viewmodels.model_connections_view_model import UsageCostSummary
+        import ui.views.settings_tabs.ai_brain_tab as mod
+
+        dao = self._make_dao({"known_cny": None})
+        monkeypatch.setattr(mod, "_ai_usage_dao_provider", lambda: dao)
+
+        result = asyncio.run(mod._load_connections_usage_summary())
+        assert result == UsageCostSummary()
+
+    def test_dao_exception_degrades_to_empty_summary(self, monkeypatch) -> None:
+        from ui.viewmodels.model_connections_view_model import UsageCostSummary
+        import ui.views.settings_tabs.ai_brain_tab as mod
+
+        dao = SimpleNamespace(read_budget_summary=AsyncMock(side_effect=ValueError("boom")))
+        monkeypatch.setattr(mod, "_ai_usage_dao_provider", lambda: dao)
+
+        result = asyncio.run(mod._load_connections_usage_summary())
+        assert result == UsageCostSummary()
+
+    def test_cancelled_error_propagates(self, monkeypatch) -> None:
+        """R2：CancelledError 必须传播，不得吞没为降级摘要。"""
+        import ui.views.settings_tabs.ai_brain_tab as mod
+
+        dao = SimpleNamespace(read_budget_summary=AsyncMock(side_effect=asyncio.CancelledError()))
+        monkeypatch.setattr(mod, "_ai_usage_dao_provider", lambda: dao)
+
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2: CancelledError 无属性载荷，类型即完整契约
+            asyncio.run(mod._load_connections_usage_summary())
+
+
+class TestProviderLaziness:
+    """_scenario_executor_provider / _model_configuration_service 惰性导入与降级。"""
+
+    def test_scenario_executor_returns_executor_when_assembled(self, monkeypatch) -> None:
+        import services.ai_service.scenario_dispatch as dispatch_module
+
+        executor = object()
+        monkeypatch.setattr(dispatch_module, "get_scheduling_services", lambda: {"executor": executor})
+
+        from ui.views.settings_tabs.ai_brain_tab import _scenario_executor_provider
+
+        assert _scenario_executor_provider() is executor
+
+    def test_scenario_executor_returns_none_when_not_assembled(self, monkeypatch) -> None:
+        import services.ai_service.scenario_dispatch as dispatch_module
+
+        monkeypatch.setattr(dispatch_module, "get_scheduling_services", lambda: None)
+
+        from ui.views.settings_tabs.ai_brain_tab import _scenario_executor_provider
+
+        assert _scenario_executor_provider() is None
+
+    def test_scenario_executor_returns_none_when_key_missing(self, monkeypatch) -> None:
+        import services.ai_service.scenario_dispatch as dispatch_module
+
+        monkeypatch.setattr(dispatch_module, "get_scheduling_services", lambda: {})
+
+        from ui.views.settings_tabs.ai_brain_tab import _scenario_executor_provider
+
+        assert _scenario_executor_provider() is None
+
+    def test_model_configuration_service_constructed(self, monkeypatch) -> None:
+        import services.model_configuration_service as mcs_module
+
+        service = object()
+        monkeypatch.setattr(mcs_module, "ModelConfigurationService", lambda: service)
+
+        from ui.views.settings_tabs.ai_brain_tab import _model_configuration_service
+
+        assert _model_configuration_service() is service

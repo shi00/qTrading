@@ -14,15 +14,18 @@
   桌面经线程池写路径，C-1）。
 """
 
+import asyncio
 import datetime as dt
 from dataclasses import replace
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
 import pytest
 
+from core.i18n import Message
 from tests.unit.ui.component_renderer import FakePage
 from ui.components import model_management_panel as panel_module
 from ui.components.model_management_panel import (
@@ -42,7 +45,13 @@ from ui.components.model_management_panel import (
 )
 from ui.i18n import I18n
 from ui.theme import AppColors
-from ui.viewmodels.model_connections_view_model import BillingSummary, ConnectionRow
+from ui.viewmodels.model_connections_view_model import (
+    BillingSummary,
+    ConnectionRow,
+    ConnectionsSummary,
+    ModelConnectionsState,
+)
+from ui.viewmodels.model_routes_view_model import ModelRoutesState
 from ui.viewmodels.model_usage_view_model import (
     ORIGIN_TEST,
     BudgetSummary,
@@ -511,3 +520,296 @@ class TestConnectionRowBillingLocalized:
         texts = _texts(_build_connection_row(_row("c1", "Conn")))
         assert I18n.get("model_connection_billing_usage_only") in texts
         assert "usage_only" not in texts
+
+
+# ============================================================================
+# 覆盖率门禁补充：事件包装 / FilePicker 服务 / 摘要行 / 三页签构建器（S5 §11.1）
+# ============================================================================
+
+
+class _ExplodingPageContext:
+    """模拟「无页面渲染上下文」：访问 page 属性抛 RuntimeError（对齐 flet.context 行为）。"""
+
+    @property
+    def page(self) -> ft.Page:
+        raise RuntimeError("no page context")
+
+
+def _walk_controls(control: Any):
+    """先序遍历控件树（controls 列表 + content 单子控件）。"""
+    stack = [control]
+    while stack:
+        cur = stack.pop()
+        yield cur
+        children = getattr(cur, "controls", None)
+        if isinstance(children, list):
+            stack.extend(children)
+        content = getattr(cur, "content", None)
+        if content is not None:
+            stack.append(content)
+
+
+def _collect_keys(control: Any) -> list[str]:
+    """递归收集控件树内所有 str key（用于断言 e2e / 业务锚点）。"""
+    return [key for c in _walk_controls(control) if isinstance(key := getattr(c, "key", None), str)]
+
+
+class TestRenderMessage:
+    def test_none_renders_empty(self, monkeypatch):
+        mock_i18n = MagicMock()
+        monkeypatch.setattr(panel_module, "I18n", mock_i18n)
+        assert panel_module._render_message(None) == ""
+        mock_i18n.get.assert_not_called()
+
+    def test_plain_params_passthrough(self, monkeypatch):
+        mock_i18n = MagicMock()
+        mock_i18n.get = MagicMock(return_value="TEXT")
+        monkeypatch.setattr(panel_module, "I18n", mock_i18n)
+        assert panel_module._render_message(Message("k", {"a": 1})) == "TEXT"
+        mock_i18n.get.assert_called_once_with("k", a=1)
+
+    def test_key_suffix_params_translated_first(self, monkeypatch):
+        """``*_key`` 后缀参数先翻译后以原名填入主模板（MVVM i18n 约定）。"""
+        mock_i18n = MagicMock()
+        mock_i18n.get = MagicMock(side_effect=lambda key, **kw: f"T[{key}]")
+        monkeypatch.setattr(panel_module, "I18n", mock_i18n)
+        assert panel_module._render_message(Message("k", {"name_key": "strategy_x"})) == "T[k]"
+        mock_i18n.get.assert_any_call("strategy_x")
+        mock_i18n.get.assert_any_call("k", name="T[strategy_x]")
+
+
+class TestClickWrapper:
+    def test_wraps_sync_command(self):
+        calls: list[int] = []
+        handler = panel_module._click(lambda: calls.append(1))
+        handler(MagicMock(name="event"))
+        assert calls == [1]
+
+
+class TestRunTaskHandler:
+    def test_submits_via_page_run_task(self, monkeypatch):
+        page = MagicMock(name="page")
+        monkeypatch.setattr(ft, "context", SimpleNamespace(page=page))
+        coro = MagicMock(name="coro_func")
+        panel_module._run_task_handler(coro, "arg1")(MagicMock(name="event"))
+        page.run_task.assert_called_once_with(coro, "arg1")
+
+    def test_no_page_context_degrades_to_debug_log(self, monkeypatch):
+        monkeypatch.setattr(ft, "context", _ExplodingPageContext())
+        mock_logger = MagicMock()
+        monkeypatch.setattr(panel_module, "logger", mock_logger)
+        panel_module._run_task_handler(MagicMock(name="coro_func"))(MagicMock(name="event"))
+        assert mock_logger.debug.call_count == 1
+        assert "page unavailable" in mock_logger.debug.call_args.args[0]
+
+
+class TestGetPage:
+    def test_returns_none_outside_page_context(self, monkeypatch):
+        monkeypatch.setattr(ft, "context", _ExplodingPageContext())
+        assert panel_module._get_page() is None
+
+    def test_returns_page_in_context(self, monkeypatch):
+        page = MagicMock(name="page")
+        monkeypatch.setattr(ft, "context", SimpleNamespace(page=page))
+        assert panel_module._get_page() is page
+
+
+class TestSyncFilePickerService:
+    def test_detach_removes_existing_picker(self):
+        page = MagicMock(name="page")
+        page.services = [MagicMock(), "picker"]
+        panel_module._sync_file_picker_service(page, "picker", attach=False)
+        assert "picker" not in page.services
+
+    def test_attach_skips_when_already_registered(self):
+        page = MagicMock(name="page")
+        picker = object()
+        page.services = [picker]
+        panel_module._sync_file_picker_service(page, picker, attach=True)
+        assert page.services == [picker]
+
+    def test_noop_when_page_or_picker_none(self):
+        panel_module._sync_file_picker_service(None, object(), attach=True)
+        panel_module._sync_file_picker_service(MagicMock(name="page"), None, attach=False)
+
+
+class TestExportCsvFailurePaths:
+    @pytest.mark.asyncio
+    async def test_export_cancelled_propagates(self):
+        """R2：export_csv 的 CancelledError 必须传播，不得降级为失败提示。"""
+        vm = MagicMock()
+        vm.export_csv = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2: CancelledError 无属性载荷，类型即完整契约
+            await panel_module._export_csv_and_notify(vm, MagicMock(), MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_no_file_picker_returns_silently(self):
+        vm = MagicMock()
+        vm.export_csv = AsyncMock(return_value="csv")
+        show_snack = MagicMock()
+        with patch.object(panel_module, "_get_page", return_value=MagicMock(name="page")):
+            await panel_module._export_csv_and_notify(vm, None, show_snack)
+        show_snack.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_save_failure_logs_and_notifies(self):
+        vm = MagicMock()
+        vm.export_csv = AsyncMock(return_value="csv-body")
+        vm.write_csv = AsyncMock()
+        picker = MagicMock()
+        picker.save_file = AsyncMock(side_effect=RuntimeError("disk full"))
+        show_snack = MagicMock()
+        with (
+            patch.object(panel_module, "_get_page", return_value=_fake_page(web=False)),
+            patch.object(panel_module, "logger") as mock_logger,
+        ):
+            await panel_module._export_csv_and_notify(vm, picker, show_snack)
+        vm.write_csv.assert_not_awaited()
+        show_snack.assert_called_once_with(I18n.get("model_usage_export_failed"), color=AppColors.ERROR)
+        assert mock_logger.error.call_count == 1
+        assert "[ModelManagementPanel] CSV export failed" in mock_logger.error.call_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_save_cancelled_propagates(self):
+        """R2：save_file 阶段的 CancelledError 必须传播。"""
+        vm = MagicMock()
+        vm.export_csv = AsyncMock(return_value="csv-body")
+        picker = MagicMock()
+        picker.save_file = AsyncMock(side_effect=asyncio.CancelledError())
+        with patch.object(panel_module, "_get_page", return_value=_fake_page(web=False)):
+            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2: CancelledError 无属性载荷，类型即完整契约
+                await panel_module._export_csv_and_notify(vm, picker, MagicMock())
+
+
+class TestMessageText:
+    def test_renders_message_to_text(self):
+        ctrl = panel_module._message_text(Message("model_usage_export_ready"))
+        assert isinstance(ctrl, ft.Text)
+        assert ctrl.value == I18n.get("model_usage_export_ready")
+
+
+class TestBuildSummaryRow:
+    def test_full_summary_renders_three_chips(self):
+        state = ModelConnectionsState(
+            summary=ConnectionsSummary(executable_scenarios=3, configs_needing_attention=1, known_cost_cny="12.50")
+        )
+        row = panel_module._build_summary_row(state)
+        assert isinstance(row, ft.Row)
+        texts = [t.value for c in row.controls for t in c.controls]  # type: ignore[attr-defined]
+        assert "3" in texts and "1" in texts and "12.50" in texts
+        assert len(row.controls) == 3
+
+    def test_missing_cost_and_optional_counts(self):
+        """R21：已知费用缺失渲染「未知」；未知 / 未统计数存在时追加 chip。"""
+        state = ModelConnectionsState(summary=ConnectionsSummary(unknown_cost_count=2, unpriced_count=1))
+        row = panel_module._build_summary_row(state)
+        texts = [t.value for c in row.controls for t in c.controls]  # type: ignore[attr-defined]
+        assert I18n.get("model_usage_unknown") in texts
+        assert "2" in texts and "1" in texts
+        assert len(row.controls) == 5
+
+
+class TestBuildConnectionEditor:
+    def _editor(self, monkeypatch, *, commit_unknown_pending: bool):
+        form_mock = MagicMock(return_value=ft.Text("form-stub"))
+        monkeypatch.setattr(panel_module, "ModelConnectionForm", form_mock)
+        state = ModelConnectionsState(editor_step=1, commit_unknown_pending=commit_unknown_pending)
+        vm = MagicMock()
+        return panel_module._build_connection_editor(state, vm, compact=False), form_mock, vm
+
+    def test_renders_form_and_step_actions(self, monkeypatch):
+        container, form_mock, vm = self._editor(monkeypatch, commit_unknown_pending=False)
+        assert isinstance(container, ft.Container)
+        assert container.key == "model_connection_editor"
+        form_mock.assert_called_once_with(vm=vm, editor_step=1, compact=False)
+        keys = set(_collect_keys(container))
+        assert {"model_editor_prev", "model_editor_next", "model_editor_test", "model_editor_save"} <= keys
+        assert "model_editor_resolve" not in keys
+
+    def test_commit_unknown_pending_inserts_resolve_button(self, monkeypatch):
+        container, _, _ = self._editor(monkeypatch, commit_unknown_pending=True)
+        assert "model_editor_resolve" in set(_collect_keys(container))
+
+
+class TestBuildConnectionsView:
+    def test_lists_rows_with_filter_and_add(self):
+        vm = MagicMock()
+        vm.visible_connections.return_value = (_row("c1", "Conn One"), _row("c2", "Conn Two"))
+        state = ModelConnectionsState(search_query="q", status_filter="enabled")
+        view = panel_module._build_connections_view(state, vm, compact=False)
+        assert isinstance(view, ft.Column)
+        assert len(view.controls) == 3  # 过滤行 + 2 连接行
+        vm.visible_connections.assert_called_once_with()
+
+    def test_empty_state_renders_empty_hint(self):
+        vm = MagicMock()
+        vm.visible_connections.return_value = []
+        view = panel_module._build_connections_view(ModelConnectionsState(), vm, compact=False)
+        assert I18n.get("model_management_no_connections") in _texts(view)
+
+    def test_editor_open_and_message_appended(self, monkeypatch):
+        form_mock = MagicMock(return_value=ft.Text("form-stub"))
+        monkeypatch.setattr(panel_module, "ModelConnectionForm", form_mock)
+        vm = MagicMock()
+        vm.visible_connections.return_value = [_row("c1", "Conn One")]
+        state = ModelConnectionsState(editor_open=True, message=Message("model_management_no_connections"))
+        view = panel_module._build_connections_view(state, vm, compact=True)
+        assert "model_connection_editor" in set(_collect_keys(view))
+        assert I18n.get("model_management_no_connections") in _texts(view)
+        form_mock.assert_called_once_with(vm=vm, editor_step=1, compact=True)
+
+
+class TestBuildRoutesView:
+    def test_renders_editor_stub_and_save_row(self, monkeypatch):
+        editor_mock = MagicMock(return_value=ft.Text("editor-stub"))
+        monkeypatch.setattr(panel_module, "ScenarioRouteEditor", editor_mock)
+        vm = MagicMock()
+        connections_vm = MagicMock()
+        view = panel_module._build_routes_view(ModelRoutesState(), vm, connections_vm, compact=False)
+        assert isinstance(view, ft.Column)
+        editor_mock.assert_called_once_with(vm=vm, egress_vm=connections_vm, compact=False)
+        save_btn = next(c for c in _walk_controls(view) if getattr(c, "key", None) == "routes_save_current")
+        assert save_btn.content == I18n.get("model_routes_save_current")
+
+    def test_message_appended(self, monkeypatch):
+        monkeypatch.setattr(panel_module, "ScenarioRouteEditor", MagicMock(return_value=ft.Text("editor-stub")))
+        view = panel_module._build_routes_view(
+            ModelRoutesState(message=Message("model_management_no_connections")),
+            MagicMock(),
+            MagicMock(),
+            compact=True,
+        )
+        assert I18n.get("model_management_no_connections") in _texts(view)
+
+
+class TestRequestRowsExpandedDetail:
+    def test_expanded_row_includes_attempts_detail(self):
+        """展开行渲染 attempts 明细；空 attempts 显示显式「无尝试」提示。"""
+        state = _usage_state(
+            requests=(
+                {
+                    "invocation_id": "inv-1",
+                    "created_at": "2026-10-19 10:00:00",
+                    "scenario_id": "news_annotation",
+                    "terminal_status": "succeeded",
+                    "cost_status": "known",
+                },
+            ),
+            expanded_id="inv-1",
+            attempts=(),
+        )
+        rows = panel_module._build_request_rows(state, MagicMock())
+        assert len(rows) == 1
+        assert I18n.get("model_usage_no_attempts") in _texts(rows[0])
+
+
+class TestUsageViewRetentionAndMessage:
+    def test_retention_hint_rendered(self):
+        view = panel_module._build_usage_view(_usage_state(retention_exceeded=True), MagicMock(), [], None, MagicMock())
+        assert I18n.get("model_usage_retention_hint") in _texts(view)
+
+    def test_message_rendered(self):
+        view = panel_module._build_usage_view(
+            _usage_state(message=Message("model_usage_export_ready")), MagicMock(), [], None, MagicMock()
+        )
+        assert I18n.get("model_usage_export_ready") in _texts(view)
