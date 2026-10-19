@@ -876,6 +876,32 @@ class AIStrategyMixin:
             async with screening_sem:
                 if dp and dp.is_cancelled():
                     return None  # 已取消，不触发 on_card_error
+                # S6 D6 批量循环收敛（在途停接）：每股新鲜读旧链准入，非 allowed
+                # 安静停接（不触发 on_card_error 噪音，对齐「已许可调用跑完、
+                # 后续停接」语义）。strategies→services 为合法方向（R1）。
+                from services.ai_service.scenario_dispatch import evaluate_legacy_admission  # lazy-import
+
+                # NOTE(lazy): 每股一次配置新鲜读。ceiling: 批量 N 股 × ~1ms 文件读，且并发上限受限（默认 semaphore）。upgrade: 用户可感知批量卡顿时引入秒级只读快照缓存。
+                try:
+                    admission = await evaluate_legacy_admission()
+                except Exception as e:
+                    # 准入读取失败与三入口「分派失败降级旧链」同语义：fail-open
+                    # 继续旧链（CancelledError 继承 BaseException 不被捕获，R2）。
+                    log_classified(
+                        logger,
+                        e,
+                        "llm",
+                        "[AIStrategyMixin] legacy admission read failed, continuing legacy (%s): %s",
+                        exc_info=True,
+                    )
+                    admission = "allowed"
+                if admission != "allowed":
+                    logger.info(
+                        "[AIStrategyMixin] Legacy AI dispatch stopped (admission=%s), skipping candidate %s",
+                        admission,
+                        row_data.get("ts_code", "?"),
+                    )
+                    return None
                 stock_name = row_data.get("name", row_data.get("ts_code", "?"))
                 on_chunk = on_stream_start(stock_name) if on_stream_start else None
                 if on_card_start:

@@ -85,6 +85,8 @@ class MyAIStrategy(BaseStrategy, AIStrategyMixin):
 
 进入 AI 分析统一经 `await self.run_ai_analysis(candidates_df, context)`（候选截断、云端可用性、外发确认、月度预算护栏、缺失语义 R21 均由混入内部处理），单股重试经 `retry_single`。双模式（云端 LiteLLM / 本地 llama-cpp-python）由 `AIService` 统一封装，策略无需感知。
 
+模型统一切换（S6）期间旧链停接：迁移 draining / sealed / active 状态下三入口 helper raise `LegacyDispatchBlockedError`（呈现为「AI 分析不可用」，不降级旧链伪装成功）；批量循环 `analyze_one` 每轮经 `evaluate_legacy_admission()` 准入检查（新鲜读），非 allowed 安静停接返回 `None`，不触发 `on_card_error` 噪音。
+
 > 不可计价调用（模型不在定价表）的「保守确认」护栏作用域为**单次运行**：预算已设且本月存在不可计价调用时，每次 `run_ai_analysis` 首次发起云端调用前提示一次，用户确认（`_ai_unpriced_acknowledged`）仅对本次运行有效，下次运行重置并重新提示，避免一次确认后本进程内不可计价花费无上限（AI-01 / MINOR-02）；同一次运行内的 `retry_single` 共享该确认。
 
 ## 完成判定（canonical 入口）

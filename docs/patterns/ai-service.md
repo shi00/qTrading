@@ -24,6 +24,7 @@
 - `services/ai_service/token_budget.py`：token 预算 / 上下文窗口裁剪（`DEFAULT_CONTEXT_WINDOW` / `CONTEXT_RESERVE_TOKENS` / `OUTPUT_RESERVE_TOKENS`），未知/自定义模型用保守回退值。
 - `services/ai_service/usage_tracker.py`：`AIUsageTracker` 单例按月（分）原子累加，跨月轮换；未注入 engine 时 no-op 降级不阻断流程。
 - `services/ai_service/pricing.py` 与 `usage_tracker.py` 即为 AI-03「完整成本计量」的现行实现（对应原 P3-AI03 债目，已闭环删除）；改动价格/成本前先按 `pricing`（元）/`usage_tracker`（分）的单位约定对齐，避免单位错配。
+- **模型统一切换与旧链停接（S6）**：迁移期旧链准入经 `services/ai_service/scenario_dispatch.py::evaluate_legacy_admission`（allowed / draining_stop / refused，每次新鲜读），三入口 helper（news_risk / news_classifier / stock_analysis）非 allowed 时 raise `LegacyDispatchBlockedError`，**不降级旧链伪装成功**（R21）；`AIUsageTracker.add_cost_cents` / `add_unpriced` 写入时同事务检查封口行 `ai_legacy_seal:{YYYYMM}`（由 `AIUsageDao.seal_legacy_month` 幂等封口），已封口 raise `LegacySealedError` 不静默丢账，封口后迟到差额经既有 `apply_monthly_delta`（grouping_key=`legacy_tail`）入预算基线。切换四阶段命令（`begin_migration` / `seal_legacy` / `activate`）归属 model_management 配置域契约，见 [config-quality-perf.md](./config-quality-perf.md)。
 
 ### 3. 输出契约与校验边界
 

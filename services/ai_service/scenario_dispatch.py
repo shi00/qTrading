@@ -11,6 +11,13 @@ ExecutionSnapshot 返回分派上下文；任一条件不满足返回 None（调
 同请求单轨（§14.2-6）：分派点唯一且在入口处，一次请求只走一条链；
 不同请求按分派时点状态各自选择。
 
+S6 D6 旧链准入（读入口）：``resolve_executor`` 未命中（走旧链前）由三入口
+helper 调 :func:`evaluate_legacy_admission` 新鲜读迁移期状态判定旧链放行——
+``active`` → ``refused``、无 transition → ``allowed``、``draining`` →
+``draining_stop``、``sealed`` → ``refused``；非 ``allowed`` 时三入口 helper
+raise ``LegacyDispatchBlockedError``（不落入「分派异常降级旧链」分支伪装成功，
+R21），旧链记账写入由 ``AIUsageTracker`` 写入口封口检查二次拦截。
+
 R1 合规：本模块与三入口同在 services 层，不 import ``app.bootstrap``——
 调度服务经 :func:`set_scheduling_services_provider` 注册点由 app 层注入
 （app → services 为合法方向），bootstrap 组装完成后注册。
@@ -20,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from core.model_management_types import ExecutionSnapshot
 
@@ -125,3 +132,33 @@ async def resolve_executor(scenario_id: str) -> ScenarioDispatch | None:
         total_timeout_seconds=float(route.get("total_timeout_seconds", 60)),
         task_routes=route.get("task_routes") or {},
     )
+
+
+# S6 D6 旧链准入判定值域：allowed=旧链照常 / draining_stop=排水期停接 / refused=拒绝。
+LegacyAdmission = Literal["allowed", "draining_stop", "refused"]
+
+
+async def evaluate_legacy_admission() -> LegacyAdmission:
+    """旧链准入判定（S6 D6 读入口）：新鲜读配置快照，三入口走旧链前调用。
+
+    状态表（§12.2）：``migration_state == "active"`` → ``"refused"``（新链已接管）；
+    ``migration_transition is None`` → ``"allowed"``（pending 未开启迁移）；
+    ``phase == "draining"`` → ``"draining_stop"``（排水期停止新接旧链请求）；
+    ``phase == "sealed"`` → ``"refused"``（已封存）；其他未知 phase 值防御性
+    ``"allowed"``（不因未知值误停接，写入侧封口检查仍兜底）。
+
+    每次调用均经 ``get_snapshot()`` 新鲜读（正本要求，不做进程内缓存）；
+    配置读取异常由调用方（三入口 helper / 批量循环）按各自既有语义处置。
+    """
+    mm_snapshot = await _new_config_service().get_snapshot()
+    if mm_snapshot.migration_state == "active":
+        return "refused"
+    transition = mm_snapshot.migration_transition
+    if transition is None:
+        return "allowed"
+    phase = transition.get("phase")
+    if phase == "draining":
+        return "draining_stop"
+    if phase == "sealed":
+        return "refused"
+    return "allowed"

@@ -94,15 +94,20 @@ class TestGetMonthCostCny:
     @pytest.mark.asyncio
     async def test_writes_uses_month_key(self):
         mock_conn = MagicMock()
-        mock_conn.execute = AsyncMock()
+        seal_result = MagicMock()
+        seal_result.fetchone.return_value = None  # S6 D6 封口检查 SELECT 未命中
+        mock_conn.execute = AsyncMock(return_value=seal_result)
         engine = _make_begin_engine(mock_conn)
         tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
 
         await tracker.add_cost_cents(250)
-        stmt = mock_conn.execute.call_args[0][0]
-        params = _extract_params(stmt)
+        # S6 D6：写入路径 = 同事务封口检查 SELECT + 成本 upsert，两条语句
+        assert mock_conn.execute.await_count == 2
+        seal_params = _extract_params(mock_conn.execute.await_args_list[0].args[0])
+        assert "ai_legacy_seal:202609" in str(seal_params)
+        upsert_params = _extract_params(mock_conn.execute.await_args_list[-1].args[0])
         # 插入/冲突目标 key 应为月份 key "ai_cost:202609"
-        assert "202609" in str(params)
+        assert "ai_cost:202609" in str(upsert_params)
 
 
 class TestAddCostCny:
@@ -127,32 +132,34 @@ class TestAddCostCny:
     @pytest.mark.asyncio
     async def test_accumulates_positive_delta(self):
         mock_conn = MagicMock()
-        mock_conn.execute = AsyncMock()
+        seal_result = MagicMock()
+        seal_result.fetchone.return_value = None  # S6 D6 封口检查 SELECT 未命中
+        mock_conn.execute = AsyncMock(return_value=seal_result)
         engine = _make_begin_engine(mock_conn)
         tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
 
         await tracker.add_cost_cents(250)
 
-        # begin 上下文由 execute 被 await 隐式证明；语句对象经 compile 参数验证（见
-        # test_writes_uses_month_key），此处仅确认 begin 曾进入并向 conn 提交 SQL。
-        mock_conn.execute.assert_awaited_once()
-        stmt = mock_conn.execute.call_args[0][0]
+        # S6 D6：begin 事务内先封口检查再 upsert（两条语句）；begin 上下文由 execute
+        # 被 await 隐式证明，upsert 语句对象经 compile 参数验证（见 test_writes_uses_month_key）。
+        assert mock_conn.execute.await_count == 2
+        stmt = mock_conn.execute.await_args_list[-1].args[0]
         # 强断言：execute 收到的是可编译的 SQL 语句对象（非 None / 非原始 mock）
         assert hasattr(stmt, "compile")
 
     @pytest.mark.asyncio
     async def test_writes_uses_month_key(self):
         mock_conn = MagicMock()
-        mock_conn.execute = AsyncMock()
+        seal_result = MagicMock()
+        seal_result.fetchone.return_value = None  # S6 D6 封口检查 SELECT 未命中
+        mock_conn.execute = AsyncMock(return_value=seal_result)
         engine = _make_begin_engine(mock_conn)
         tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
 
         await tracker.add_cost_cents(250)
-        from services.ai_service import usage_tracker as ut
-
-        stmt = mock_conn.execute.call_args[0][0]
+        stmt = mock_conn.execute.await_args_list[-1].args[0]
         # 参数中应含月份 key "ai_cost:202609"
-        assert any("ai_cost:202609" in str(v) for v in _extract_params(stmt)) or ut._AI_COST_KEY_PREFIX
+        assert any("ai_cost:202609" in str(v) for v in _extract_params(stmt))
 
     @pytest.mark.asyncio
     async def test_handles_exception_gracefully(self):
@@ -168,7 +175,12 @@ def _extract_params(stmt):
     try:
         return stmt.compile().params.values()
     except Exception:
-        return []
+        try:
+            from sqlalchemy.dialects import postgresql
+
+            return stmt.compile(dialect=postgresql.dialect()).params.values()
+        except Exception:
+            return []
 
 
 class TestGetMonthUnpriced:
@@ -250,21 +262,25 @@ class TestAddUnpriced:
     @pytest.mark.asyncio
     async def test_accumulates_deltas(self):
         mock_conn = MagicMock()
-        mock_conn.execute = AsyncMock()
+        seal_result = MagicMock()
+        seal_result.fetchone.return_value = None  # S6 D6 封口检查 SELECT 未命中
+        mock_conn.execute = AsyncMock(return_value=seal_result)
         engine = _make_begin_engine(mock_conn)
         tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
 
         await tracker.add_unpriced(3, 500)
 
-        # 两 key（calls + tokens）各一次 upsert，同事务写入
-        assert mock_conn.execute.await_count == 2
-        for call in mock_conn.execute.await_args_list:
+        # S6 D6 封口检查 SELECT + 两 key（calls + tokens）各一次 upsert，同事务写入
+        assert mock_conn.execute.await_count == 3
+        for call in mock_conn.execute.await_args_list[1:]:
             assert hasattr(call.args[0], "compile")
 
     @pytest.mark.asyncio
     async def test_writes_uses_month_keys(self):
         mock_conn = MagicMock()
-        mock_conn.execute = AsyncMock()
+        seal_result = MagicMock()
+        seal_result.fetchone.return_value = None  # S6 D6 封口检查 SELECT 未命中
+        mock_conn.execute = AsyncMock(return_value=seal_result)
         engine = _make_begin_engine(mock_conn)
         tracker = AIUsageTracker(engine=engine, clock=lambda: datetime.date(2026, 9, 14))
 

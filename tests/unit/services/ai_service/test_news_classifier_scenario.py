@@ -138,11 +138,15 @@ def _patch_env(monkeypatch, dispatch: MagicMock | None):
     svc = {"executor": dispatch.executor} if dispatch is not None else None
     scenario_dispatch.set_scheduling_services_provider(lambda: svc)
     config_service = MagicMock()
+    # S6 D6：dispatch=None 分支会经 evaluate_legacy_admission 读同一快照，
+    # 该分支语义是「调度服务未组装 + 迁移未开启 → 降级旧链」，故 pending；
+    # dispatch 非 None 分支的快照由 resolve_executor 消费，须 active。
     config_service.get_snapshot = AsyncMock(
         return_value=MagicMock(
             snapshot_id="snap-1",
             config_revision=7,
-            migration_state="active",
+            migration_state="active" if dispatch is not None else "pending",
+            migration_transition=None,
             connections=({"connection_id": "conn-1"},),
             scenario_routes=(
                 {

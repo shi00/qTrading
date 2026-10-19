@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Final
 from core.model_management_types import (
     AdapterResponse,
     InferenceRequest,
+    LegacyDispatchBlockedError,
     ModelOutputValidationError,
     ScenarioExecutionResult,
     ValidatedBusinessOutput,
@@ -641,11 +642,20 @@ class NewsClassifier:
 
 
 async def _resolve_news_annotation_dispatch() -> ScenarioDispatch | None:
-    """news_annotation 场景分派（分派过程异常降级旧链，不伪装成功）。"""
-    from services.ai_service.scenario_dispatch import resolve_executor
+    """news_annotation 场景分派：任一条件不满足 → None 走旧链（与三入口统一形态）。
+
+    S6 D6 旧链准入：分派未命中时经 ``evaluate_legacy_admission`` 判定迁移期放行——
+    draining / sealed / active raise :class:`LegacyDispatchBlockedError`（在 try 外
+    raise，不落入分派异常的降级旧链分支，R21 不伪装成功）；分派 / 准入读取过程异常
+    （如配置损坏）仍降级旧链（既有行为），封口期写入由 tracker 写入口二次拦截。
+    """
+    from services.ai_service.scenario_dispatch import evaluate_legacy_admission, resolve_executor
 
     try:
-        return await resolve_executor("news_annotation")
+        dispatch = await resolve_executor("news_annotation")
+        if dispatch is not None:
+            return dispatch
+        admission = await evaluate_legacy_admission()
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -657,3 +667,7 @@ async def _resolve_news_annotation_dispatch() -> ScenarioDispatch | None:
             exc_info=True,
         )
         return None
+    # S6 D6：准入停接在 try 外 raise——「AI 功能明确不可用」必须传出，不得降级旧链。
+    if admission != "allowed":
+        raise LegacyDispatchBlockedError(admission)
+    return None

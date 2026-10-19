@@ -39,6 +39,36 @@ class ModelConfigurationCorruptError(RuntimeError):
     """配置磁盘损坏 / 校验失败（§5.1）：禁止静默落默认，由调用方显式处置。"""
 
 
+class MigrationTransitionError(RuntimeError):
+    """非法迁移状态变更（§12.2）：未取屏障 / 越 phase / 非 owner 接管 / seal 不一致。"""
+
+
+class LegacyDispatchBlockedError(RuntimeError):
+    """旧链在 draining / sealed / active 被停接或拒绝（§12.2 D2）。
+
+    ``admission`` 取 ``evaluate_legacy_admission`` 的判定值
+    （``"draining_stop"`` / ``"refused"``），调用方按「AI 功能明确不可用」处置，
+    不得降级伪装成功（R21）。
+    """
+
+    def __init__(self, admission: str, message: str | None = None) -> None:
+        self.admission = admission
+        super().__init__(message or f"legacy dispatch blocked (admission={admission})")
+
+
+class LegacySealedError(RuntimeError):
+    """旧链记账写入被月度封口拒绝（S6 D6 写入口）：封口后 app_state 基线冻结。
+
+    ``month`` 为被拒月份（``YYYY-MM``）；迟到结算差额经 DAO
+    ``apply_monthly_delta``（``legacy_tail`` 分组）兜底入账，本异常不得被
+    ``except Exception`` 日志分支吞没，也不得降级伪装成功（R21）。
+    """
+
+    def __init__(self, month: str, message: str | None = None) -> None:
+        self.month = month
+        super().__init__(message or f"legacy ledger month {month} is sealed; write rejected")
+
+
 # ---------------------------------------------------------------------------
 # 配置保存三态（ADR-0014 §4）
 # ---------------------------------------------------------------------------
@@ -79,6 +109,8 @@ class ModelManagementSnapshot:
     # 目标级外发授权 grant（§4.3）：设置与向导的「场景检查区」共用授权摘要的事实源；
     # 仅承载展示所需的非敏感字段（目标指纹 / 用途 / 撤销时间），不含任何秘密。
     security_grants: tuple[Mapping[str, Any], ...] = ()
+    # §12.2 切换屏障只读视图（S6 D2）：draining / sealed 迁移期状态；None = 未开启迁移
+    migration_transition: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

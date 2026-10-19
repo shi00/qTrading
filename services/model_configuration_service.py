@@ -13,13 +13,16 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
 import socket
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 from core.model_management_types import (
     AttemptPermit,
     ConfigurationSaveOutcome,
+    MigrationTransitionError,
     ModelConfigurationConflictError,
     ModelManagementSnapshot,
     SyntheticTestConsent,
@@ -31,9 +34,28 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 
 _PURPOSES = ("news_annotation", "stock_analysis", "news_risk", "synthetic_test")
 
+# legacy 封口月份格式（S6 D4）：与 LegacySealConfig.month 正则一致，服务侧先行校验给出精确错误
+_MONTH_SEAL_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
 
 def _utc_now_iso() -> str:
     return dt.datetime.now(dt.UTC).isoformat()
+
+
+def _lease_expired(lease_expires_at: Any) -> bool:
+    """迁移租约过期判定（S6 D4）：``now(UTC) >= lease_expires_at`` 解析值即过期。
+
+    缺失 / 格式非法按已过期处理（保守：坏数据不无限续权，接管方会以合法租约覆写）。
+    """
+    if not isinstance(lease_expires_at, str) or not lease_expires_at:
+        return True
+    try:
+        expires = dt.datetime.fromisoformat(lease_expires_at)
+    except ValueError:
+        return True
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=dt.UTC)
+    return dt.datetime.now(dt.UTC) >= expires
 
 
 def _payload_fingerprint(payload: dict[str, Any]) -> str:
@@ -78,6 +100,7 @@ class ModelConfigurationService:
 
             fresh = cfg.ConfigHandler.read_model_management_fresh()
             mm = fresh["model_management"]
+            transition = mm.get("migration_transition")
             return ModelManagementSnapshot(
                 snapshot_id=str(uuid.uuid4()),
                 config_revision=mm["config_revision"],
@@ -87,6 +110,7 @@ class ModelConfigurationService:
                 usage_policy=MappingProxyType(mm["usage_policy"]),
                 security_revision=mm["security_state"]["security_revision"],
                 security_grants=tuple(MappingProxyType(g) for g in mm["security_state"]["grants"]),
+                migration_transition=MappingProxyType(transition) if transition is not None else None,
                 created_at=_utc_now_iso(),
             )
 
@@ -227,6 +251,151 @@ class ModelConfigurationService:
         return _outcome_from_cas(await ThreadPoolManager().run_async(TaskType.IO, _revoke), expected_revision)
 
     # ------------------------------------------------------------------
+    # 迁移切换（S6 D4，§12.2：begin / seal / activate 全经 compare_and_save CAS）
+    # ------------------------------------------------------------------
+
+    async def begin_migration(
+        self,
+        expected_revision: int,
+        operation_id: str,
+        owner_session_id: str,
+        lease_seconds: int = 300,
+    ) -> ConfigurationSaveOutcome:
+        """开启 / 续租迁移屏障（§12.2）：pending → draining。
+
+        - 无 transition → draining（transition_id 新建、epoch=1、租约 now+lease_seconds）；
+        - 同 owner 租约未过期 → 续租（epoch+1、新租期）；
+        - 异 owner 租约未过期 → :class:`MigrationTransitionError`（不抢占）；
+        - 租约过期 → 接管（沿用原 transition_id，epoch 单调递增，R22）；
+        - 已 sealed → 幂等：屏障数据不变，经 CAS 重写回执（sealed 不可回退）。
+        """
+
+        def _begin() -> ModelManagementSaveResult:
+            fresh = cfg.ConfigHandler.read_model_management_fresh()
+            mm = dict(fresh["model_management"])
+            lease_expires_at = (dt.datetime.now(dt.UTC) + dt.timedelta(seconds=lease_seconds)).isoformat()
+            raw = mm.get("migration_transition")
+            if raw is not None:
+                transition = dict(raw)
+                if transition.get("phase") == "sealed":
+                    # sealed 不可回退：幂等重写屏障数据不变（epoch / transition_id 保持）
+                    mm["migration_transition"] = transition
+                    return cfg.ConfigHandler.compare_and_save_model_management(
+                        expected_revision, mm, operation_id, update_security_state=False
+                    )
+                if (
+                    not _lease_expired(transition.get("lease_expires_at"))
+                    and transition.get("owner_session_id") != owner_session_id
+                ):
+                    raise MigrationTransitionError(
+                        f"迁移屏障租约未过期且 owner 不同，拒绝接管: owner={transition.get('owner_session_id')}"
+                    )
+                # 同 owner 续租 / 租约过期接管：epoch 单调递增，transition_id 保持稳定恢复锚
+                transition["transition_epoch"] = int(transition["transition_epoch"]) + 1
+                transition["owner_session_id"] = owner_session_id
+                transition["lease_expires_at"] = lease_expires_at
+                mm["migration_transition"] = transition
+            else:
+                mm["migration_transition"] = {
+                    "transition_id": str(uuid.uuid4()),
+                    "owner_session_id": owner_session_id,
+                    "transition_epoch": 1,
+                    "phase": "draining",
+                    "lease_expires_at": lease_expires_at,
+                    "source_fingerprint": _payload_fingerprint(mm),
+                    "legacy_seals": [],
+                }
+            return cfg.ConfigHandler.compare_and_save_model_management(
+                expected_revision, mm, operation_id, update_security_state=False
+            )
+
+        return _outcome_from_cas(await ThreadPoolManager().run_async(TaskType.IO, _begin), expected_revision)
+
+    async def seal_legacy(
+        self,
+        expected_revision: int,
+        operation_id: str,
+        month_seals: Mapping[str, str],
+        owner_session_id: str,
+    ) -> ConfigurationSaveOutcome:
+        """封存 legacy 累计并翻 sealed（§12.2）：phase 必须 draining 或 sealed 幂等。
+
+        仅限屏障 owner（``begin_migration`` 的 ``owner_session_id``）调用：异 owner
+        须先经 begin 接管（租约过期）后才能封口，防止其他进程绕过排水收敛直接封存
+        （MM-10「两进程旧批次收敛」）。sealed 状态追加跨月封口时 owner 须与屏障
+        记录一致（接管后 owner 已变更，以现值为准）。
+
+        调用顺序契约：调用方先逐月 ``AIUsageDao.seal_legacy_month`` 取 seal_id，
+        再一次性本方法全量封口（缺月不自动补，须显式提供）。month_seals 非空、
+        month 形如 YYYY-MM、seal_id 非空；与既有 legacy_seals 合并：同月同 seal_id
+        幂等（保留原 sealed_at）、同月异 seal_id 拒绝（:class:`MigrationTransitionError`）、
+        新月追加（跨月分别封口）；成功后 phase=sealed。
+        """
+        if not month_seals:
+            raise ValueError("month_seals 不能为空（缺月不自动补，须显式全量封口）")
+        for month, seal_id in month_seals.items():
+            if not _MONTH_SEAL_PATTERN.match(month):
+                raise ValueError(f"month 形如 YYYY-MM: {month!r}")
+            if not seal_id:
+                raise ValueError(f"seal_id 不能为空: month={month!r}")
+
+        def _seal() -> ModelManagementSaveResult:
+            fresh = cfg.ConfigHandler.read_model_management_fresh()
+            mm = dict(fresh["model_management"])
+            raw = mm.get("migration_transition")
+            if raw is None:
+                raise MigrationTransitionError("未取得迁移屏障（migration_transition 为空），禁止 seal_legacy")
+            transition = dict(raw)
+            if transition.get("owner_session_id") != owner_session_id:
+                raise MigrationTransitionError(
+                    f"seal_legacy 仅限屏障 owner 调用: owner={transition.get('owner_session_id')!r}"
+                )
+            existing: dict[str, dict[str, Any]] = {s["month"]: dict(s) for s in transition.get("legacy_seals", [])}
+            for month, seal_id in month_seals.items():
+                prior = existing.get(month)
+                if prior is not None and prior.get("legacy_seal_id") != seal_id:
+                    raise MigrationTransitionError(
+                        f"月 {month} 已存在不同 seal_id 封口: {prior.get('legacy_seal_id')!r} != {seal_id!r}"
+                    )
+                if prior is None:
+                    existing[month] = {"month": month, "legacy_seal_id": seal_id, "sealed_at": _utc_now_iso()}
+            transition["legacy_seals"] = list(existing.values())
+            transition["phase"] = "sealed"
+            mm["migration_transition"] = transition
+            return cfg.ConfigHandler.compare_and_save_model_management(
+                expected_revision, mm, operation_id, update_security_state=False
+            )
+
+        return _outcome_from_cas(await ThreadPoolManager().run_async(TaskType.IO, _seal), expected_revision)
+
+    async def activate(
+        self,
+        expected_revision: int,
+        operation_id: str,
+    ) -> ConfigurationSaveOutcome:
+        """激活新链（§12.2）：phase 必须 sealed → migration_state="active"。
+
+        transition 保留作审计；CAS not_committed（及回执恢复 commit_unknown）时
+        磁盘保持 sealed，由调用方重试（幂等：凭 transition_id / seal 锚重试，
+        不重开旧写者、不双记）。
+        """
+
+        def _activate() -> ModelManagementSaveResult:
+            fresh = cfg.ConfigHandler.read_model_management_fresh()
+            mm = dict(fresh["model_management"])
+            raw = mm.get("migration_transition")
+            if raw is None:
+                raise MigrationTransitionError("未取得迁移屏障（migration_transition 为空），禁止 activate")
+            if raw.get("phase") != "sealed":
+                raise MigrationTransitionError(f"phase={raw.get('phase')!r} 未封存，禁止 activate")
+            mm["migration_state"] = "active"
+            return cfg.ConfigHandler.compare_and_save_model_management(
+                expected_revision, mm, operation_id, update_security_state=False
+            )
+
+        return _outcome_from_cas(await ThreadPoolManager().run_async(TaskType.IO, _activate), expected_revision)
+
+    # ------------------------------------------------------------------
     # 逐次许可（§4.3 authorize_attempt：线程池内配置文件锁重读，锁内无网络 IO）
     # ------------------------------------------------------------------
 
@@ -321,10 +490,27 @@ class ModelConfigurationService:
 
         新连接在草稿创建时取得 UUID，不要求已保存或已分配场景；配置归属使用
         新鲜读取的 config_revision；不提交连接、场景或业务授权。
+
+        S6 D7 pending 费用型测试屏障：pending 状态下云端（``litellm_chat`` = 费用型）
+        单次测试须存在未过期 draining 迁移屏障，防止绕过迁移流程继续产生云端费用；
+        ``gguf_*``（本地，无云费用）与 active（新链接管）不受限。屏障判定在同一
+        新鲜读取点完成，不加第二次读。
         """
 
         def _begin() -> SyntheticTestContext:
             fresh = cfg.ConfigHandler.read_model_management_fresh()
+            mm = fresh["model_management"]
+            if draft_connection.get("adapter_kind") == "litellm_chat" and mm["migration_state"] == "pending":
+                transition = mm.get("migration_transition")
+                if (
+                    not isinstance(transition, dict)
+                    or transition.get("phase") != "draining"
+                    or _lease_expired(transition.get("lease_expires_at"))
+                ):
+                    raise MigrationTransitionError(
+                        "pending 状态下的云端（费用型）单次测试须先暂停旧 AI 任务并取得"
+                        "未过期的 draining 迁移屏障（先 begin_migration）"
+                    )
             conn_id = draft_connection.get("connection_id") or str(uuid.uuid4())
             return SyntheticTestContext(
                 test_operation_id=str(uuid.uuid4()),
@@ -335,7 +521,7 @@ class ModelConfigurationService:
                 draft_fingerprint=_payload_fingerprint(draft_connection),
                 task_id=task_id,
                 credential_version=credential_version,
-                config_revision=fresh["model_management"]["config_revision"],
+                config_revision=mm["config_revision"],
             )
 
         return await ThreadPoolManager().run_async(TaskType.IO, _begin)

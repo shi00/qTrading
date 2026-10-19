@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Features
+* **model-management:** S6 模型统一切换交付——迁移确认流程四阶段（pending→draining→sealed→active）与旧链停接封口
+  * `ModelConfigurationService.begin_migration` / `seal_legacy` / `activate` 三命令全经 CAS，`migration_transition` 配置域收紧为 `MigrationTransitionConfig`
+  * 旧链准入停接（`LegacyDispatchBlockedError` 不降级）；`AIUsageTracker` 同事务检查封口行，已封口 raise `LegacySealedError`；迟到差额经 `apply_monthly_delta`（legacy_tail）入预算基线
+
 ### Bug Fixes
 * **strategy/oversold:** `vol_ratio_5d` 分母改为前 5 日均量（`shift(1)` 排除当日，D2-m1）
   * 修复 `rolling_mean(5)` 含当日导致量比动态范围压缩的问题（真实放量 3 倍此前仅算约 1.9）

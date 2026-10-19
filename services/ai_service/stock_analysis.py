@@ -30,6 +30,7 @@ from core.errors import AIBudgetError
 from core.model_management_types import (
     AdapterResponse,
     InferenceRequest,
+    LegacyDispatchBlockedError,
     ModelOutputValidationError,
     ValidatedBusinessOutput,
 )
@@ -127,12 +128,18 @@ def _validate_analysis_output(response: AdapterResponse) -> ValidatedBusinessOut
 async def _resolve_stock_analysis_dispatch() -> ScenarioDispatch | None:
     """stock_analysis 场景分派（s4_plan §3.1）：任一条件不满足 → None 走旧链。
 
-    分派过程异常（如配置损坏）降级旧链，不伪装成功（R21）。
+    S6 D6 旧链准入：分派未命中时经 ``evaluate_legacy_admission`` 判定迁移期放行——
+    draining / sealed / active raise :class:`LegacyDispatchBlockedError`（在 try 外
+    raise，不落入分派异常的降级旧链分支，R21 不伪装成功）；分派 / 准入读取过程异常
+    （如配置损坏）仍降级旧链（既有行为），封口期写入由 tracker 写入口二次拦截。
     """
-    from services.ai_service.scenario_dispatch import resolve_executor
+    from services.ai_service.scenario_dispatch import evaluate_legacy_admission, resolve_executor
 
     try:
-        return await resolve_executor("stock_analysis")
+        dispatch = await resolve_executor("stock_analysis")
+        if dispatch is not None:
+            return dispatch
+        admission = await evaluate_legacy_admission()
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -144,6 +151,10 @@ async def _resolve_stock_analysis_dispatch() -> ScenarioDispatch | None:
             exc_info=True,
         )
         return None
+    # S6 D6：准入停接在 try 外 raise——「AI 功能明确不可用」必须传出，不得降级旧链。
+    if admission != "allowed":
+        raise LegacyDispatchBlockedError(admission)
+    return None
 
 
 class StockAnalysisService:

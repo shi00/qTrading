@@ -17,6 +17,7 @@
 
 import datetime
 import json
+import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
 from zoneinfo import ZoneInfo
@@ -38,6 +39,15 @@ _ADVISORY_LOCK_NAMESPACE: Final[int] = 0x4149_5553
 
 # legacy 成本 app_state key 前缀（S2 之前 AIUsageTracker 的月累计，单位：分）
 _LEGACY_COST_KEY_PREFIX: Final[str] = "ai_cost:"
+
+# legacy 封口记录 app_state key 前缀（S6 D1）：key = f"ai_legacy_seal:{YYYYMM}"
+_LEGACY_SEAL_KEY_PREFIX: Final[str] = "ai_legacy_seal:"
+# legacy 不可计价累计 app_state key 前缀（S6 D5 冻结快照读取；与 services 层
+# AIUsageTracker 同名键同值——data 层禁入 services（R1），此处以 Final 常量对齐，勿改）
+_LEGACY_UNPRICED_CALLS_KEY_PREFIX: Final[str] = "ai_unpriced_calls:"
+_LEGACY_UNPRICED_TOKENS_KEY_PREFIX: Final[str] = "ai_unpriced_tokens:"
+# 封口记录结构版本（S6 D1）：记录字段演进时递增
+_LEGACY_SEAL_VERSION: Final[int] = 1
 
 # 月汇总两种 scope（§10）：不相加、不混算
 SCOPE_SCENARIO: Final[str] = "scenario"
@@ -232,6 +242,23 @@ def parse_legacy_cents(raw: Any) -> Decimal:
 def month_to_lock_key(month: str) -> int:
     """``"202610"`` → int 锁键（YYYYMM 数值）。"""
     return int(month)
+
+
+def normalize_seal_month(month: str) -> str:
+    """``"2026-10"`` / ``"202610"`` → ``"202610"``（封口 key 与月锁键统一 YYYYMM）。
+
+    封口 API 面向服务层（LegacySealConfig.month 为 YYYY-MM），亦兼容账本域既有
+    YYYYMM 形态；非法格式 raise ValueError（不静默归零，R21）。
+    """
+    compact = month.replace("-", "")
+    if len(compact) != 6 or not compact.isdigit() or not 1 <= int(compact[4:6]) <= 12:
+        raise ValueError(f"month 格式须为 YYYY-MM 或 YYYYMM: {month!r}")
+    return compact
+
+
+def seal_month_to_iso(compact: str) -> str:
+    """``"202610"`` → ``"2026-10"``（封口记录 month 字段，对齐 LegacySealConfig）。"""
+    return f"{compact[:4]}-{compact[4:6]}"
 
 
 def _month_utc_bounds(month: str) -> tuple[datetime.datetime, datetime.datetime]:
@@ -1359,3 +1386,105 @@ class AIUsageDao(BaseDao):
         async with self._guarded_begin() as conn:
             rows = (await conn.execute(sa.text(_UNCONFIRMED_RESERVATIONS_SQL))).mappings().fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # legacy 封口（S6 D1/D5：AppState JSON 行，不新建表）
+    # 封口行 key = ai_legacy_seal:{YYYYMM}，与 legacy 成本同表（AppState），
+    # 同事务内先读封口再写入的线性化观察由 advisory 月锁保证。
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _read_app_state_value(conn: Any, key: str) -> str | None:
+        """读取 app_state 单键文本值（缺键 / NULL → None）。"""
+        row = (
+            await conn.execute(
+                sa.text("SELECT config_value FROM app_state WHERE config_key = :key"),
+                {"key": key},
+            )
+        ).fetchone()
+        return None if row is None or row[0] is None else str(row[0])
+
+    @staticmethod
+    async def _read_app_state_int(conn: Any, key: str) -> int:
+        """读取 app_state 整数累计值（缺键 / 坏值 → 0，事实零）。"""
+        value = _to_int(await AIUsageDao._read_app_state_value(conn, key))
+        return 0 if value is None else value
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def seal_legacy_month(
+        self,
+        *,
+        month: str,
+        owner_session_id: str,
+        owner_epoch: int,
+    ) -> dict[str, Any] | None:
+        """封存 legacy 月累计（S6 D5）：冻结基线快照写入 AppState 封口行，幂等。
+
+        advisory 月锁（两键）内完成：已有封口行直接返回既有记录（幂等，seal_id
+        不变）；否则读 ``ai_cost:{YYYYMM}``（分 → 元 Decimal 字符串）与
+        ``ai_unpriced_calls/tokens:{YYYYMM}``（缺键 = 0）后写封口 JSON。封口后
+        app_state 旧键不再修改（基线冻结），旧链写入由 D6 tracker 写入口拒绝。
+        ``month`` 接受 ``YYYY-MM`` / ``YYYYMM``；记录 ``month`` 字段统一 YYYY-MM。
+
+        R5：入口 ``_check_engine`` 守卫引擎状态。
+        """
+        self._check_engine(context="ai_usage.seal_legacy_month")
+        compact = normalize_seal_month(month)
+        async with self._guarded_begin() as conn:
+            await conn.execute(
+                sa.text("SELECT pg_advisory_xact_lock(:ns, :lock_key)"),
+                {"ns": _ADVISORY_LOCK_NAMESPACE, "lock_key": month_to_lock_key(compact)},
+            )
+            seal_key = f"{_LEGACY_SEAL_KEY_PREFIX}{compact}"
+            existing = await self._read_app_state_value(conn, seal_key)
+            if existing is not None:
+                return json.loads(existing)
+
+            cost_cny = parse_legacy_cents(await self._read_app_state_value(conn, f"{_LEGACY_COST_KEY_PREFIX}{compact}"))
+            unpriced_calls = await self._read_app_state_int(conn, f"{_LEGACY_UNPRICED_CALLS_KEY_PREFIX}{compact}")
+            unpriced_tokens = await self._read_app_state_int(conn, f"{_LEGACY_UNPRICED_TOKENS_KEY_PREFIX}{compact}")
+            record: dict[str, Any] = {
+                "seal_id": str(uuid.uuid4()),
+                "month": seal_month_to_iso(compact),
+                "cost_cny": str(cost_cny),
+                "unpriced_calls": unpriced_calls,
+                "unpriced_tokens": unpriced_tokens,
+                "last_writer_session_id": owner_session_id,
+                "last_writer_epoch": owner_epoch,
+                "seal_version": _LEGACY_SEAL_VERSION,
+                "sealed_at": datetime.datetime.now(datetime.UTC).isoformat(),
+            }
+            await conn.execute(
+                sa.text(
+                    """
+                    INSERT INTO app_state (config_key, config_value)
+                    VALUES (:key, :value)
+                    """
+                ),
+                {"key": seal_key, "value": json.dumps(record, ensure_ascii=False)},
+            )
+            return record
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def read_legacy_seal(self, *, month: str) -> dict[str, Any] | None:
+        """读取 legacy 封口记录（缺行 → None；记录 JSON 损坏时异常传播，不静默伪装）。
+
+        R5：入口 ``_check_engine`` 守卫引擎状态。
+        """
+        self._check_engine(context="ai_usage.read_legacy_seal")
+        compact = normalize_seal_month(month)
+        async with self._guarded_begin() as conn:
+            raw = await self._read_app_state_value(conn, f"{_LEGACY_SEAL_KEY_PREFIX}{compact}")
+        return json.loads(raw) if raw is not None else None
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def is_month_sealed(self, *, month: str) -> bool:
+        """该月是否已封口（存在封口行即 True，不解析值）。
+
+        R5：入口 ``_check_engine`` 守卫引擎状态。
+        """
+        self._check_engine(context="ai_usage.is_month_sealed")
+        compact = normalize_seal_month(month)
+        async with self._guarded_begin() as conn:
+            raw = await self._read_app_state_value(conn, f"{_LEGACY_SEAL_KEY_PREFIX}{compact}")
+        return raw is not None
