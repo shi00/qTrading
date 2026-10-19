@@ -75,7 +75,10 @@ jobs:
           # Pre-install flet-web to prevent the Flet runtime from auto-installing it at app startup.
           # Same fix as embedded-tests job (ci_cd.yml): without this, Linux E2E fails because
           # Flet tries to pip install flet-web at runtime into system Python without a venv.
-          uv pip install --system flet-web==1.0.3
+          # Constrain fastapi<0.145: flet-web 1.0.3 passes the removed `openapi_prefix` to
+          # FastAPI.__init__; fastapi 0.145.0+ crashes Flet Web startup. See
+          # docs/flet/upgrade-checklist.md section 1.1.
+          uv pip install --system flet-web==1.0.3 "fastapi<0.145"
           pip install playwright pytest-playwright
 
       - name: Install Playwright chromium
