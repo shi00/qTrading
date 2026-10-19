@@ -181,7 +181,7 @@ def ModelConnectionForm(
     ft.use_state(AppColors.get_observable_state)
 
     # --- FilePicker 生命周期：沿 page.services 注册 / cleanup（§11.2） ---
-    file_picker = ft.use_ref(lambda: ft.FilePicker()).current
+    file_picker = ft.use_ref(ft.FilePicker).current
 
     def _setup_file_picker() -> None:
         try:
@@ -197,6 +197,7 @@ def ModelConnectionForm(
             if page is not None and file_picker in page.services:
                 page.services.remove(file_picker)
         except RuntimeError:
+            # 组件卸载时 page 上下文可能已不可用，FilePicker 随之销毁，无需再做清理
             pass
 
     ft.use_effect(_setup_file_picker, dependencies=[], cleanup=_cleanup_file_picker)

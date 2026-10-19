@@ -152,12 +152,16 @@ class I18n:
                     logger.debug(
                         "[I18n] Using default fallback '%s' for missing key: '%s' (Locale: %s)",
                         default,
+                        # i18n key 为静态翻译键、非敏感数据；命中 CodeQL maybePrivate 命名启发式（如 "billing"）误报
+                        # codeql[py/clear-text-logging-sensitive-data]
                         key,
                         normalized_locale,
                     )
                 else:
                     logger.warning(
                         "[I18n] Missing translation for key: '%s' (Locale: %s)",
+                        # i18n key 为静态翻译键、非敏感数据；命中 CodeQL maybePrivate 命名启发式（如 "billing"）误报
+                        # codeql[py/clear-text-logging-sensitive-data]
                         key,
                         normalized_locale,
                     )
@@ -170,6 +174,8 @@ class I18n:
             try:
                 return template.format(**kwargs)
             except KeyError as e:
+                # i18n key 为静态翻译键、非敏感数据；命中 CodeQL maybePrivate 命名启发式（如 "billing"）误报
+                # codeql[py/clear-text-logging-sensitive-data]
                 logger.warning("[I18n] Missing format arg for '%s': %s", key, e)
                 return template
         return template
