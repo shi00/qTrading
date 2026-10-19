@@ -9,8 +9,13 @@ paths-ignore:
   - "**/mock_assets/**"
   - "**/helpers/**"
 
+# 显式纳入告警抑制查询：security-and-quality 套件不含 py/alert-suppression，
+# 缺失时源码内 `# codeql[...]` 抑制注释不生效（见 core/i18n.py 对命名启发式误报的抑制）。
+# 语法注意：config 文件中 `pack:path[:query.ql]` 形式只属于 packs: 数组；
+# queries[].uses: 仅支持本地路径/套件名，写成 pack:path 会被当作 external repository
+# 解析并报 "Specifier for external repository is invalid"（CodeQL 2.27.2 实证）。
+packs:
+  - codeql/python-queries:AlertSuppression.ql
+
 queries:
   - uses: security-and-quality
-  # 显式纳入告警抑制查询：security-and-quality 套件不含 py/alert-suppression，
-  # 缺失时源码内 `# codeql[...]` 抑制注释不生效（见 core/i18n.py 对命名启发式误报的抑制）。
-  - uses: codeql/python-queries:AlertSuppression.ql
