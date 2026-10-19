@@ -336,14 +336,14 @@ class TestLocaleChangeSignature:
     通过 ft.use_state(get_observable_state) 自动重渲染，不再需要 _on_locale_change。
     """
 
-    def test_llm_config_panel_uses_i18n_observable_state(self):
-        """DoD: LLMConfigPanel 通过 ft.use_state(get_observable_state) 订阅 i18n（声明式）。"""
+    def test_model_connection_form_uses_i18n_observable_state(self):
+        """DoD: ModelConnectionForm 通过 ft.use_state(get_observable_state) 订阅 i18n（声明式）。"""
         from pathlib import Path
 
-        import ui.components.config_panels.llm_config_panel as mod
+        import ui.components.config_panels.model_connection_form as mod
 
         source = Path(mod.__file__).read_text(encoding="utf-8")
-        assert "get_observable_state" in source, "LLMConfigPanel 必须订阅 get_observable_state"
+        assert "get_observable_state" in source, "ModelConnectionForm 必须订阅 get_observable_state"
 
     # --- 声明式组件契约守护（@ft.component + 无 _on_locale_change）---
 
@@ -385,28 +385,28 @@ class TestLocaleChangeSignature:
             "声明式 DatabaseConfigPanel 不应有 _on_locale_change"
         )
 
-    def test_failover_config_panel_locale_change_is_zero_arg(self):
-        """FailoverConfigPanel 已重写为声明式组件，通过 ft.use_state(get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
-        from ui.components.config_panels.failover_config_panel import (
-            FailoverConfigPanel,
+    def test_model_connection_form_locale_change_is_zero_arg(self):
+        """ModelConnectionForm 为声明式组件，通过 ft.use_state(get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
+        from ui.components.config_panels.model_connection_form import (
+            ModelConnectionForm,
         )
 
         # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
-        assert hasattr(FailoverConfigPanel, "__wrapped__"), "FailoverConfigPanel 必须是 @ft.component 声明式组件"
-        assert not hasattr(FailoverConfigPanel, "_on_locale_change"), (
-            "声明式 FailoverConfigPanel 不应有 _on_locale_change"
+        assert hasattr(ModelConnectionForm, "__wrapped__"), "ModelConnectionForm 必须是 @ft.component 声明式组件"
+        assert not hasattr(ModelConnectionForm, "_on_locale_change"), (
+            "声明式 ModelConnectionForm 不应有 _on_locale_change"
         )
 
-    def test_local_model_config_panel_locale_change_is_zero_arg(self):
-        """LocalModelConfigPanel 已重写为声明式组件，通过 ft.use_state(get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
-        from ui.components.config_panels.local_model_config_panel import (
-            LocalModelConfigPanel,
+    def test_scenario_route_editor_locale_change_is_zero_arg(self):
+        """ScenarioRouteEditor 为声明式组件，通过 ft.use_state(get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
+        from ui.components.config_panels.scenario_route_editor import (
+            ScenarioRouteEditor,
         )
 
         # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
-        assert hasattr(LocalModelConfigPanel, "__wrapped__"), "LocalModelConfigPanel 必须是 @ft.component 声明式组件"
-        assert not hasattr(LocalModelConfigPanel, "_on_locale_change"), (
-            "声明式 LocalModelConfigPanel 不应有 _on_locale_change"
+        assert hasattr(ScenarioRouteEditor, "__wrapped__"), "ScenarioRouteEditor 必须是 @ft.component 声明式组件"
+        assert not hasattr(ScenarioRouteEditor, "_on_locale_change"), (
+            "声明式 ScenarioRouteEditor 不应有 _on_locale_change"
         )
 
     def test_system_tab_locale_change_is_zero_arg(self):
@@ -432,78 +432,6 @@ class TestLocaleChangeSignature:
         # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
         assert hasattr(NotificationsTab, "__wrapped__"), "NotificationsTab 必须是 @ft.component 声明式组件"
         assert not hasattr(NotificationsTab, "_on_locale_change"), "声明式 NotificationsTab 不应有 _on_locale_change"
-
-
-class TestLLMProviderSwitch:
-    """Tests for LLM provider switch behavior.
-
-    注：LLMConfigPanel 已重写为声明式组件（Phase 3.2.3），
-    provider 切换逻辑收敛进 VM.update_provider command，
-    api_key_modified flag 收敛进 VM state。
-    旧命令式 API 测试（_on_provider_change/_load_config/_api_key_modified）已移除。
-    """
-
-    def test_llm_vm_has_update_provider(self):
-        """DoD: VM 暴露 update_provider command（声明式）。"""
-        from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
-
-        assert hasattr(LLMConfigPanelViewModel, "update_provider"), "VM 必须暴露 update_provider command"
-
-    def test_llm_vm_state_has_api_key_modified_flag(self):
-        """DoD: VM state 包含 api_key_modified flag（声明式）。"""
-        from ui.viewmodels.llm_config_panel_view_model import LLMConfigState
-
-        assert hasattr(LLMConfigState, "__dataclass_fields__"), "LLMConfigState 必须是 dataclass"
-        assert "api_key_modified" in LLMConfigState.__dataclass_fields__, "state 必须包含 api_key_modified"
-
-    def test_llm_vm_has_reload_config(self):
-        """DoD: VM 暴露 reload_config command（替代旧 _load_config）。"""
-        from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
-
-        assert hasattr(LLMConfigPanelViewModel, "reload_config"), "VM 必须暴露 reload_config command"
-
-
-class TestLocalModelAsyncVerification:
-    """Tests for local model async verification.
-
-    注：LocalModelConfigPanel 已重写为声明式组件（Phase 3.2.4），
-    验证/保存逻辑收敛进 VM.verify_model / VM.save_config commands，
-    loading 状态收敛进 VM state.is_verifying。
-    旧命令式 API 测试（async_verify_model/_set_loading_state/progress_indicator）已移除。
-    """
-
-    def test_local_model_vm_has_verify_model(self):
-        """DoD: VM 暴露 verify_model command（声明式，替代旧 async_verify_model）。"""
-        from ui.viewmodels.local_model_config_panel_view_model import (
-            LocalModelConfigPanelViewModel,
-        )
-
-        assert hasattr(LocalModelConfigPanelViewModel, "verify_model"), "VM 必须暴露 verify_model command"
-
-    def test_local_model_vm_has_save_config(self):
-        """DoD: VM 暴露 save_config command（声明式）。"""
-        from ui.viewmodels.local_model_config_panel_view_model import (
-            LocalModelConfigPanelViewModel,
-        )
-
-        assert hasattr(LocalModelConfigPanelViewModel, "save_config"), "VM 必须暴露 save_config command"
-
-    def test_local_model_vm_state_has_is_verifying_flag(self):
-        """DoD: VM state 包含 is_verifying flag（声明式，替代旧 _set_loading_state）。"""
-        from ui.viewmodels.local_model_config_panel_view_model import (
-            LocalModelConfigState,
-        )
-
-        assert hasattr(LocalModelConfigState, "__dataclass_fields__"), "LocalModelConfigState 必须是 dataclass"
-        assert "is_verifying" in LocalModelConfigState.__dataclass_fields__, "state 必须包含 is_verifying"
-
-    def test_local_model_vm_has_reload_config(self):
-        """DoD: VM 暴露 reload_config command（替代旧 _load_config）。"""
-        from ui.viewmodels.local_model_config_panel_view_model import (
-            LocalModelConfigPanelViewModel,
-        )
-
-        assert hasattr(LocalModelConfigPanelViewModel, "reload_config"), "VM 必须暴露 reload_config command"
 
 
 class TestLocalModelManagerIntegration:
@@ -578,39 +506,6 @@ class TestSliderLabelAttribute:
         )
 
         with open(screener_path, encoding="utf-8") as f:
-            content = f.read()
-
-        slider_starts = [m.start() for m in re.finditer(r"ft\.Slider\s*\(", content)]
-
-        for start in slider_starts:
-            bracket_count = 0
-            end = start
-            for i, char in enumerate(content[start:], start):
-                if char == "(":
-                    bracket_count += 1
-                elif char == ")":
-                    bracket_count -= 1
-                    if bracket_count == 0:
-                        end = i + 1
-                        break
-
-            slider_block = content[start:end]
-            assert "label=" in slider_block, f"Slider should have label attribute: {slider_block[:100]}"
-
-    def test_local_model_panel_slider_has_label(self):
-        """Test that local_model_config_panel Slider has label attribute"""
-        import os
-        import re
-
-        panel_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            "ui",
-            "components",
-            "config_panels",
-            "local_model_config_panel.py",
-        )
-
-        with open(panel_path, encoding="utf-8") as f:
             content = f.read()
 
         slider_starts = [m.start() for m in re.finditer(r"ft\.Slider\s*\(", content)]

@@ -4,9 +4,9 @@
 1. 契约守护 (grep 检查禁止的命令式模式: class 继承/did_mount/.update()/
    _on_locale_change/refresh_locale/_rebuild_steps_after_locale_change/
    handle_resize/PageRefMixin/_page_ref/_bind_vm)
-2. 模块级纯函数测试 (_get_page/_render_message/_validate_cloud_ai/_validate_local_model)
+2. 模块级纯函数测试 (_get_page/_render_message/_commit_model_stage)
 
-业务逻辑覆盖（8 步状态机 + config panel 消费 + 同步流程）由集成测试
+业务逻辑覆盖（7 步状态机 + config panel 消费 + 同步流程）由集成测试
 （flet_test_page fixture）承担, 声明式组件含 use_state 在无 renderer 下抛 RuntimeError。
 """
 
@@ -166,13 +166,20 @@ class TestOnboardingWizardContract:
         """DoD: 必须函数调用消费 TushareConfigPanel (props 推送)。"""
         assert "TushareConfigPanel(" in _code_source(), "必须函数调用 TushareConfigPanel(vm=...)"
 
-    def test_consumes_llm_config_panel(self):
-        """DoD: 必须函数调用消费 LLMConfigPanel (props 推送)。"""
-        assert "LLMConfigPanel(" in _code_source(), "必须函数调用 LLMConfigPanel(vm=...)"
+    def test_consumes_model_connection_form(self):
+        """DoD: 模型阶段必须函数调用消费共用 ModelConnectionForm (S5 §11.6)。"""
+        assert "ModelConnectionForm(" in _code_source(), "必须函数调用 ModelConnectionForm(vm=...)"
+        assert "ModelConnectionsViewModel" in _code_source(), "必须经独立 ModelConnectionsViewModel 消费"
 
-    def test_consumes_local_model_config_panel(self):
-        """DoD: 必须函数调用消费 LocalModelConfigPanel (props 推送)。"""
-        assert "LocalModelConfigPanel(" in _code_source(), "必须函数调用 LocalModelConfigPanel(vm=...)"
+    def test_consumes_scenario_route_editor(self):
+        """DoD: 模型阶段必须函数调用消费共用 ScenarioRouteEditor (S5 §11.6)。"""
+        assert "ScenarioRouteEditor(" in _code_source(), "必须函数调用 ScenarioRouteEditor(vm=...)"
+        assert "ModelRoutesViewModel" in _code_source(), "必须经独立 ModelRoutesViewModel 消费"
+
+    def test_consumes_shared_model_config_service(self):
+        """DoD: 宿主必须共享 ModelConfigurationService 并原子提交 (§11.6 一次 save_draft)。"""
+        assert "ModelConfigurationService(" in _code_source(), "必须创建共享 ModelConfigurationService"
+        assert "save_draft(" in _code_source(), "必须经 config_service.save_draft 原子提交"
 
     def test_no_page_param_in_signature(self):
         """DoD: OnboardingWizard 签名不应包含 page 参数 (声明式用 ft.context.page)。"""
@@ -187,31 +194,41 @@ class TestOnboardingWizardContract:
 
     def test_uses_step_configs(self):
         """DoD: 必须使用 STEP_CONFIGS 驱动导航按钮。"""
-        assert "STEP_CONFIGS" in _raw_source(), "必须使用 STEP_CONFIGS 驱动 8 步状态机"
+        assert "STEP_CONFIGS" in _raw_source(), "必须使用 STEP_CONFIGS 驱动 7 步状态机"
+
+    def test_uses_use_state_model_substep(self):
+        """DoD: 模型阶段子步骤号由宿主 View 本地 ft.use_state 承载 (S5 §11.6)。"""
+        assert "model_substep, set_model_substep = ft.use_state(" in _code_source(), (
+            "模型阶段三子步骤号必须由 View 本地 use_state 承载"
+        )
 
 
 # ============================================================================
-# UX-09 (P2-04): wizard 关闭 4 个 config panel 的 Enter 提交
+# UX-09 (P2-04): wizard 关闭 config panel / 共用组件的 Enter 提交与内部保存
 # ============================================================================
 
 
 class TestWizardPanelsDisableEnterSubmit:
-    """UX-09: OnboardingWizard 消费 4 个 config panel 时传 ``enable_enter_submit=False``。
+    """UX-09 (§11.6): wizard 消费 config panel / 共用组件时禁用 Enter 提交。
 
-    wizard 首次配置流程中, Enter 不应触发网络验证（卡流程）, 故 4 处面板调用
-    必须显式 ``enable_enter_submit=False``, 使各 panel 的 ``on_submit`` 为 None。
+    wizard 首次配置流程中, Enter 不应触发网络验证（卡流程）, 故面板调用必须显式
+    ``enable_enter_submit=False``；模型阶段共用 ``ModelConnectionForm`` 还需
+    ``show_internal_save=False``（向导隐藏组件内部保存按钮，由宿主显式按钮推进）。
+    ``ScenarioRouteEditor`` 不接收 ``enable_enter_submit``（其内部无字段 Enter 提交）。
     用 AST 精确断言关键字参数实际值为 ``False``（非字符串/弱断言）。
     """
 
     _PANEL_NAMES = (
         "DatabaseConfigPanel",
         "TushareConfigPanel",
-        "LLMConfigPanel",
-        "LocalModelConfigPanel",
+        "ModelConnectionForm",
+        "ScenarioRouteEditor",
     )
+    #: 必须显式传 enable_enter_submit=False 的面板。
+    _ENTER_SUBMIT_PANELS = ("DatabaseConfigPanel", "TushareConfigPanel", "ModelConnectionForm")
 
     def _panel_calls(self):
-        """AST 提取 4 个 config panel 函数调用的关键字参数。"""
+        """AST 提取 config panel / 共用组件函数调用的关键字参数。"""
         tree = ast.parse(_raw_source())
         panel_calls: dict[str, dict[str, ast.AST]] = {}
         for node in ast.walk(tree):
@@ -223,11 +240,15 @@ class TestWizardPanelsDisableEnterSubmit:
                 panel_calls[node.func.id] = kwargs
         return panel_calls
 
-    def test_all_four_panels_passed_enable_enter_submit_false(self):
-        """4 个 panel 调用均存在且传 enable_enter_submit=False。"""
+    def test_wizard_consumes_all_panels_and_shared_components(self):
+        """4 个消费点均存在（DatabaseConfigPanel / TushareConfigPanel / 共用组件）。"""
         calls = self._panel_calls()
-        assert set(calls.keys()) == set(self._PANEL_NAMES), f"wizard 应消费 4 个 panel, 实际 {set(calls.keys())}"
-        for name in self._PANEL_NAMES:
+        assert set(calls.keys()) == set(self._PANEL_NAMES), f"wizard 应消费 4 个组件, 实际 {set(calls.keys())}"
+
+    def test_panels_passed_enable_enter_submit_false(self):
+        """面板调用均传 enable_enter_submit=False。"""
+        calls = self._panel_calls()
+        for name in self._ENTER_SUBMIT_PANELS:
             kwargs = calls[name]
             assert "enable_enter_submit" in kwargs, f"{name} 应传 enable_enter_submit=False"
             val = kwargs["enable_enter_submit"]
@@ -248,19 +269,24 @@ class TestWizardPanelsDisableEnterSubmit:
         assert isinstance(val, ast.Constant)
         assert val.value is False
 
-    def test_llm_panel_disable_enter_submit(self):
-        """AST: LLMConfigPanel 传 enable_enter_submit=False。"""
+    def test_model_connection_form_disable_enter_submit(self):
+        """AST: ModelConnectionForm 传 enable_enter_submit=False。"""
         calls = self._panel_calls()
-        val = calls["LLMConfigPanel"]["enable_enter_submit"]
+        val = calls["ModelConnectionForm"]["enable_enter_submit"]
         assert isinstance(val, ast.Constant)
         assert val.value is False
 
-    def test_local_model_panel_disable_enter_submit(self):
-        """AST: LocalModelConfigPanel 传 enable_enter_submit=False。"""
+    def test_model_connection_form_hides_internal_save(self):
+        """AST (§11.6): ModelConnectionForm 传 show_internal_save=False（隐藏组件内部保存按钮）。"""
         calls = self._panel_calls()
-        val = calls["LocalModelConfigPanel"]["enable_enter_submit"]
+        val = calls["ModelConnectionForm"]["show_internal_save"]
         assert isinstance(val, ast.Constant)
         assert val.value is False
+
+    def test_scenario_route_editor_no_enable_enter_submit(self):
+        """ScenarioRouteEditor 不接收 enable_enter_submit（其内部无字段 Enter 提交）。"""
+        calls = self._panel_calls()
+        assert "enable_enter_submit" not in calls["ScenarioRouteEditor"]
 
 
 class TestWizardScheduleStepEnterSubmit:
@@ -441,105 +467,125 @@ class TestRenderMessage:
             assert _render_message(msg) == "Ready"
 
 
-class TestValidateCloudAi:
-    """_validate_cloud_ai 模块级纯函数测试。"""
+class TestCommitModelStage:
+    """``_commit_model_stage`` 模块级宿主提交函数测试 (S5 §11.6)。
 
-    @pytest.fixture(autouse=True)
-    def _setup(self):
-        self.patches = [
-            patch("ui.views.onboarding_wizard._show_snack"),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
+    「保存并继续」经共享 ``ModelConfigurationService.save_draft`` 单次原子提交
+    连接草稿（合并进已提交连接）+ 全部场景路由草稿；冲突/失败返回 False；
+    取消显式传播 (R2)。
+    """
+
+    @staticmethod
+    def _make_vms(*, draft_name: str = "New Conn", status: str = "committed"):
+        """构造两个 fake VM + fake config_service（共享 service）。"""
+        from core.model_management_types import ConfigurationSaveOutcome
+
+        draft = ModelConnectionDraft(name=draft_name)
+        connections = _FakeModelConnectionsViewModel(ModelConnectionsState(draft=draft, config_revision=7))
+        connections._raw_connections = ({"connection_id": "existing-1", "name": "Old"},)
+        connections.entry_result = {"connection_id": "new-1", "name": draft_name}
+        routes = _FakeModelRoutesViewModel(ModelRoutesState(selected_scenario="stock_analysis"))
+        routes.payload_result = {"schema_version": 1, "config_revision": 7}
+        routes.routes_result = [{"scenario_id": "stock_analysis", "candidates": []}]
+        config_service = MagicMock(name="config_service")
+        config_service.save_draft = AsyncMock(return_value=ConfigurationSaveOutcome(status=status))
+        return connections, routes, config_service
 
     @pytest.mark.asyncio
-    async def test_returns_true_when_connection_and_save_succeed(self):
-        """连接测试 + 保存均成功时返回 True。"""
-        from ui.views.onboarding_wizard import _validate_cloud_ai
+    async def test_commits_all_connections_and_routes_in_single_save(self):
+        """连接草稿 + 场景路由草稿经单次 save_draft 原子提交，返回 True。"""
+        from ui.views.onboarding_wizard import _commit_model_stage
 
-        llm_vm = MagicMock()
-        llm_vm.verify_connection = AsyncMock(return_value=True)
-        llm_vm.save_config = AsyncMock(return_value=True)
+        connections, routes, config_service = self._make_vms()
 
-        result = await _validate_cloud_ai(llm_vm)
+        result = await _commit_model_stage(connections, routes, config_service)
+
         assert result is True
+        config_service.save_draft.assert_awaited_once()
+        payload, expected_revision, operation_id = config_service.save_draft.call_args.args
+        assert expected_revision == 7
+        assert isinstance(operation_id, str) and operation_id
+        # 已提交连接 existing-1 保留，草稿 new-1 追加（无重复）
+        assert [c["connection_id"] for c in payload["connections"]] == ["existing-1", "new-1"]
+        # 场景路由草稿随同一 payload 提交
+        assert "scenario_routes" in payload
 
     @pytest.mark.asyncio
-    async def test_returns_false_when_connection_fails(self):
-        """连接测试失败时返回 False。"""
-        from ui.views.onboarding_wizard import _validate_cloud_ai
+    async def test_returns_false_when_not_committed(self):
+        """save_draft 结果非 committed 时返回 False。"""
+        from ui.views.onboarding_wizard import _commit_model_stage
 
-        llm_vm = MagicMock()
-        llm_vm.verify_connection = AsyncMock(return_value=False)
-        llm_vm.save_config = AsyncMock(return_value=True)
+        connections, routes, config_service = self._make_vms(status="not_committed")
 
-        result = await _validate_cloud_ai(llm_vm)
+        result = await _commit_model_stage(connections, routes, config_service)
+
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_returns_false_when_save_fails(self):
-        """连接成功但保存失败时返回 False。"""
-        from ui.views.onboarding_wizard import _validate_cloud_ai
+    async def test_returns_false_on_conflict(self):
+        """save_draft 抛 ModelConfigurationConflictError 时返回 False（保留草稿）。"""
+        from core.model_management_types import ModelConfigurationConflictError
+        from ui.views.onboarding_wizard import _commit_model_stage
 
-        llm_vm = MagicMock()
-        llm_vm.verify_connection = AsyncMock(return_value=True)
-        llm_vm.save_config = AsyncMock(return_value=False)
+        connections, routes, config_service = self._make_vms()
+        config_service.save_draft = AsyncMock(side_effect=ModelConfigurationConflictError(3, 5))
 
-        result = await _validate_cloud_ai(llm_vm)
+        result = await _commit_model_stage(connections, routes, config_service)
+
         assert result is False
 
+    @pytest.mark.asyncio
+    async def test_propagates_cancelled_error(self):
+        """取消时显式传播 asyncio.CancelledError（R2），不降级为 False。"""
+        from ui.views.onboarding_wizard import _commit_model_stage
 
-class TestValidateLocalModel:
-    """_validate_local_model 模块级纯函数测试。"""
+        connections, routes, config_service = self._make_vms()
+        config_service.save_draft = AsyncMock(side_effect=asyncio.CancelledError())
 
-    @pytest.fixture(autouse=True)
-    def _setup(self):
-        self.patches = [
-            patch("ui.views.onboarding_wizard._show_snack"),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await _commit_model_stage(connections, routes, config_service)
+        # 取消来自保存调用本身（非未触达即抛出），确认确已执行到保存边界
+        config_service.save_draft.assert_awaited_once()
+        assert type(exc_info.value) is asyncio.CancelledError
 
     @pytest.mark.asyncio
-    async def test_returns_true_when_model_path_empty(self):
-        """空路径时跳过验证返回 True。"""
-        from ui.views.onboarding_wizard import _validate_local_model
+    async def test_empty_draft_name_does_not_insert_connection(self):
+        """连接草稿名称为空时不解析凭据/不追加连接，仅提交既有连接与路由。"""
+        from ui.views.onboarding_wizard import _commit_model_stage
 
-        local_model_vm = MagicMock()
-        local_model_vm.state.model_path = "  "
+        connections, routes, config_service = self._make_vms(draft_name="")
 
-        result = await _validate_local_model(local_model_vm)
+        result = await _commit_model_stage(connections, routes, config_service)
+
         assert result is True
+        payload = config_service.save_draft.call_args.args[0]
+        assert payload["connections"] == [{"connection_id": "existing-1", "name": "Old"}]
 
     @pytest.mark.asyncio
-    async def test_returns_true_when_verify_and_save_succeed(self):
-        """模型验证 + 保存均成功时返回 True。"""
-        from ui.views.onboarding_wizard import _validate_local_model
+    async def test_validation_failure_blocks_save(self):
+        """连接草稿静态校验失败时返回 False 且不提交（本地校验前置）。"""
+        from ui.views.onboarding_wizard import _commit_model_stage
 
-        local_model_vm = MagicMock()
-        local_model_vm.state.model_path = "/path/to/model"
-        local_model_vm.verify_model = AsyncMock(return_value=True)
-        local_model_vm.save_config = AsyncMock(return_value=True)
+        connections, routes, config_service = self._make_vms()
+        connections.validation_errors = ("model_connection_error_model_required",)
 
-        result = await _validate_local_model(local_model_vm)
-        assert result is True
+        result = await _commit_model_stage(connections, routes, config_service)
 
-    @pytest.mark.asyncio
-    async def test_returns_false_when_verify_fails(self):
-        """模型验证失败时返回 False。"""
-        from ui.views.onboarding_wizard import _validate_local_model
-
-        local_model_vm = MagicMock()
-        local_model_vm.state.model_path = "/path/to/model"
-        local_model_vm.verify_model = AsyncMock(return_value=False)
-        local_model_vm.save_config = AsyncMock(return_value=True)
-
-        result = await _validate_local_model(local_model_vm)
         assert result is False
+        config_service.save_draft.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_validates_only_when_draft_named(self):
+        """空草稿名时跳过静态校验（不因缺名阻断只配置场景路由的用户）。"""
+        from ui.views.onboarding_wizard import _commit_model_stage
+
+        connections, routes, config_service = self._make_vms(draft_name="")
+        connections.validate_draft = MagicMock(return_value=("model_connection_error_name_required",))
+
+        result = await _commit_model_stage(connections, routes, config_service)
+
+        assert result is True
+        connections.validate_draft.assert_not_called()  # type: ignore[attr-defined]
 
 
 class TestDefaultOnComplete:
@@ -628,6 +674,8 @@ from tests.unit.ui.component_renderer import (
     run_unmount_effects,
 )
 from ui.viewmodels import Message
+from ui.viewmodels.model_connections_view_model import ModelConnectionDraft, ModelConnectionsState
+from ui.viewmodels.model_routes_view_model import ModelRoutesState
 
 
 @dataclass(frozen=True)
@@ -746,6 +794,111 @@ class _FakePanelViewModel:
         return MagicMock()
 
 
+class _FakeModelConnectionsViewModel:
+    """模拟 ModelConnectionsViewModel（连接草稿 VM，S5 §11.6 模型阶段）。
+
+    实现向导宿主实际消费的公开 API（``validate_draft`` / ``draft_connection_entry`` /
+    ``merged_connections``）；未显式定义的方法/属性经 ``__getattr__`` 返回 MagicMock。
+    """
+
+    def __init__(self, state: ModelConnectionsState | None = None) -> None:
+        self._state: ModelConnectionsState = state or ModelConnectionsState()
+        self._subscribers: list[Any] = []
+        self.dispose_called: bool = False
+        self._raw_connections: tuple[Any, ...] = ()
+        self.load = AsyncMock()
+        self.start_add = MagicMock()
+        self.save = AsyncMock(return_value=True)
+        #: ``validate_draft`` 返回的静态校验结果（默认无错误）。
+        self.validation_errors: tuple[str, ...] = ()
+        #: ``draft_connection_entry`` 的固定返回（草稿非空时）。
+        self.entry_result: dict[str, Any] | None = None
+
+    @property
+    def state(self) -> ModelConnectionsState:
+        return self._state
+
+    def subscribe(self, callback: Any) -> Any:
+        self._subscribers.append(callback)
+
+        def _unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return _unsubscribe
+
+    def dispose(self) -> None:
+        self.dispose_called = True
+        self._subscribers.clear()
+
+    def validate_draft(self) -> tuple[str, ...]:
+        return tuple(self.validation_errors)
+
+    async def draft_connection_entry(self, operation_id: str) -> dict[str, Any] | None:
+        if not self._state.draft.name.strip():
+            return None
+        return self.entry_result
+
+    def merged_connections(self, entry: Any) -> list[dict[str, Any]]:
+        merged = [dict(c) for c in self._raw_connections]
+        if entry is None:
+            return merged
+        connection_id = str(entry.get("connection_id", ""))
+        for index, existing in enumerate(merged):
+            if str(existing.get("connection_id")) == connection_id:
+                merged[index] = dict(entry)
+                return merged
+        merged.append(dict(entry))
+        return merged
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return MagicMock()
+
+
+class _FakeModelRoutesViewModel:
+    """模拟 ModelRoutesViewModel（场景路由草稿 VM，S5 §11.6 模型阶段）。"""
+
+    def __init__(self, state: ModelRoutesState | None = None) -> None:
+        self._state: ModelRoutesState = state or ModelRoutesState()
+        self._subscribers: list[Any] = []
+        self.dispose_called: bool = False
+        self.load = AsyncMock()
+        #: ``build_payload`` 返回的完整 payload 基底。
+        self.payload_result: dict[str, Any] = {"schema_version": 1, "config_revision": 1}
+        #: ``all_routes_payload`` 返回的全部场景草稿序列化。
+        self.routes_result: list[dict[str, Any]] = []
+
+    @property
+    def state(self) -> ModelRoutesState:
+        return self._state
+
+    def subscribe(self, callback: Any) -> Any:
+        self._subscribers.append(callback)
+
+        def _unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return _unsubscribe
+
+    def dispose(self) -> None:
+        self.dispose_called = True
+        self._subscribers.clear()
+
+    def build_payload(self, scenario_id: str) -> dict[str, Any]:
+        return dict(self.payload_result)
+
+    def all_routes_payload(self) -> list[dict[str, Any]]:
+        return list(self.routes_result)
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return MagicMock()
+
+
 def _make_fake_page() -> FakePage:
     """创建带 run_task/toast/locale_configuration 的 FakePage。
 
@@ -795,61 +948,61 @@ def _find_by_type(container: Any, control_type: type) -> list[Any]:
 
 @pytest.fixture
 def mock_onboarding_vms(monkeypatch):
-    """注入 5 个 FakeVM 替换 OnboardingWizard 消费的 VM 类。
+    """注入 FakeVM/FakeComponent 替换 OnboardingWizard 消费的 VM 类与共用组件。
 
     替换：
     - OnboardingViewModel → _FakeOnboardingViewModel
-    - DatabaseConfigPanelViewModel / TushareConfigPanelViewModel /
-      LLMConfigPanelViewModel / LocalModelConfigPanelViewModel → _FakePanelViewModel
+    - DatabaseConfigPanelViewModel / TushareConfigPanelViewModel → _FakePanelViewModel
+    - ModelConnectionsViewModel → _FakeModelConnectionsViewModel
+    - ModelRoutesViewModel → _FakeModelRoutesViewModel
+    - ModelConfigurationService → MagicMock（宿主共享 service）
+    - ModelConnectionForm / ScenarioRouteEditor → 记录调用的 Fake 组件（返回带 key 的 Container）
 
-    Phase 3.4 后 view 不再直接调用 ConfigHandler/ThreadPoolManager/LocalModelManager，
-    相关 mock 由 VM 层 fixture 承担（见 test_onboarding_view_model.py）。
+    契约测试聚焦「wizard 消费共用组件 + 独立 VM + 提交/dispose/Enter 行为」，故共用组件
+    以 Fake 替换，避免在离屏渲染器中执行其内部 hooks（真实组件行为由各自契约测试覆盖）。
     """
     # 确保 ui.views.onboarding_wizard 模块已加载（monkeypatch.setattr 需要模块属性存在）
-    import ui.views.onboarding_wizard  # noqa: F401
+    import ui.views.onboarding_wizard as wizard_mod  # noqa: F401
 
     fake_onboarding_vm = _FakeOnboardingViewModel()
     fake_database_vm = _FakePanelViewModel()
     fake_tushare_vm = _FakePanelViewModel()
-    fake_llm_vm = _FakePanelViewModel()
-    fake_local_model_vm = _FakePanelViewModel()
+    fake_connections_vm = _FakeModelConnectionsViewModel()
+    fake_routes_vm = _FakeModelRoutesViewModel()
+    fake_config_service = MagicMock(name="config_service")
+    fake_config_service.save_draft = AsyncMock()
+    fake_connection_form = MagicMock(name="ModelConnectionForm")
+    fake_connection_form.return_value = ft.Container(key="fake_model_connection_form")
+    fake_route_editor = MagicMock(name="ScenarioRouteEditor")
+    fake_route_editor.return_value = ft.Container(key="fake_scenario_route_editor")
 
     # 生产代码 factory lambda 带关键字参数调用 VM 构造器（如 load_password=True），
     # mock lambda 需接受任意参数返回 fake_vm 实例
-    monkeypatch.setattr(
-        "ui.views.onboarding_wizard.OnboardingViewModel",
-        lambda *a, **kw: fake_onboarding_vm,
-    )
-    monkeypatch.setattr(
-        "ui.views.onboarding_wizard.DatabaseConfigPanelViewModel",
-        lambda *a, **kw: fake_database_vm,
-    )
-    monkeypatch.setattr(
-        "ui.views.onboarding_wizard.TushareConfigPanelViewModel",
-        lambda *a, **kw: fake_tushare_vm,
-    )
-    monkeypatch.setattr(
-        "ui.views.onboarding_wizard.LLMConfigPanelViewModel",
-        lambda *a, **kw: fake_llm_vm,
-    )
-    monkeypatch.setattr(
-        "ui.views.onboarding_wizard.LocalModelConfigPanelViewModel",
-        lambda *a, **kw: fake_local_model_vm,
-    )
+    monkeypatch.setattr(wizard_mod, "OnboardingViewModel", lambda *a, **kw: fake_onboarding_vm)
+    monkeypatch.setattr(wizard_mod, "DatabaseConfigPanelViewModel", lambda *a, **kw: fake_database_vm)
+    monkeypatch.setattr(wizard_mod, "TushareConfigPanelViewModel", lambda *a, **kw: fake_tushare_vm)
+    monkeypatch.setattr(wizard_mod, "ModelConnectionsViewModel", lambda *a, **kw: fake_connections_vm)
+    monkeypatch.setattr(wizard_mod, "ModelRoutesViewModel", lambda *a, **kw: fake_routes_vm)
+    monkeypatch.setattr(wizard_mod, "ModelConfigurationService", lambda *a, **kw: fake_config_service)
+    monkeypatch.setattr(wizard_mod, "ModelConnectionForm", fake_connection_form)
+    monkeypatch.setattr(wizard_mod, "ScenarioRouteEditor", fake_route_editor)
 
     return {
         "onboarding": fake_onboarding_vm,
         "database": fake_database_vm,
         "tushare": fake_tushare_vm,
-        "llm": fake_llm_vm,
-        "local_model": fake_local_model_vm,
+        "connections": fake_connections_vm,
+        "routes": fake_routes_vm,
+        "config_service": fake_config_service,
+        "connection_form": fake_connection_form,
+        "route_editor": fake_route_editor,
     }
 
 
 class TestOnboardingWizardComponentBody:
     """OnboardingWizard @ft.component 组件体测试（attach_fake_page 模式）。
 
-    覆盖 8 步状态机渲染 + VM 生命周期 + 条件可见性，目标覆盖率 ≥80%。
+    覆盖 7 步状态机渲染 + VM 生命周期 + 条件可见性，目标覆盖率 ≥80%。
     """
 
     def test_step0_welcome_renders_language_dropdown_and_overview_cards(
@@ -858,7 +1011,7 @@ class TestOnboardingWizardComponentBody:
         mock_app_colors_state,
         mock_onboarding_vms,
     ):
-        """step 0 (Welcome)：渲染语言下拉 + 6 张 overview 卡片。"""
+        """step 0 (Welcome)：渲染语言下拉 + 5 张 overview 卡片。"""
         from ui.views.onboarding_wizard import OnboardingWizard
 
         component = make_component(OnboardingWizard)
@@ -913,13 +1066,13 @@ class TestOnboardingWizardComponentBody:
         assert isinstance(result, ft.Container)
         assert len(_find_icons(result, ft.Icons.KEY)) >= 1
 
-    def test_step3_cloud_ai_renders_cloud_icon(
+    def test_step3_model_scenario_renders_hub_icon_and_connection_form(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_onboarding_vms,
     ):
-        """step 3 (Cloud AI)：渲染 CLOUD 图标 + LLMConfigPanel 组件。"""
+        """step 3 (模型与场景配置)：渲染 HUB 图标 + 共用 ModelConnectionForm 组件。"""
         from ui.views.onboarding_wizard import OnboardingWizard
 
         fake_vm = mock_onboarding_vms["onboarding"]
@@ -931,39 +1084,21 @@ class TestOnboardingWizardComponentBody:
         result = render_once(component)
 
         assert isinstance(result, ft.Container)
-        assert len(_find_icons(result, ft.Icons.CLOUD)) >= 1
+        assert len(_find_icons(result, ft.Icons.HUB)) >= 1
+        # 首子步骤(1) 渲染共用 ModelConnectionForm（fake 返回带 key 的 Container）
+        assert any(getattr(c, "key", None) == "fake_model_connection_form" for c in _collect_controls(result))
 
-    def test_step4_local_model_renders_psychology_icon(
+    def test_step4_data_sync_renders_sync_buttons_and_progress_bar(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_onboarding_vms,
     ):
-        """step 4 (Local Model)：渲染 PSYCHOLOGY 图标 + LocalModelConfigPanel 组件。"""
+        """step 4 (Data Sync)：渲染同步按钮 + 进度条 + CLOUD_DOWNLOAD 图标。"""
         from ui.views.onboarding_wizard import OnboardingWizard
 
         fake_vm = mock_onboarding_vms["onboarding"]
         fake_vm._state = replace(fake_vm._state, current_step=4)
-
-        component = make_component(OnboardingWizard)
-        page = _make_fake_page()
-        run_mount_effects(component, page)
-        result = render_once(component)
-
-        assert isinstance(result, ft.Container)
-        assert len(_find_icons(result, ft.Icons.PSYCHOLOGY)) >= 1
-
-    def test_step5_data_sync_renders_sync_buttons_and_progress_bar(
-        self,
-        mock_i18n_state,
-        mock_app_colors_state,
-        mock_onboarding_vms,
-    ):
-        """step 5 (Data Sync)：渲染同步按钮 + 进度条 + CLOUD_DOWNLOAD 图标。"""
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        fake_vm = mock_onboarding_vms["onboarding"]
-        fake_vm._state = replace(fake_vm._state, current_step=5)
 
         component = make_component(OnboardingWizard)
         page = _make_fake_page()
@@ -979,17 +1114,17 @@ class TestOnboardingWizardComponentBody:
         buttons = [c for c in all_controls if isinstance(c, ft.Button)]
         assert len(buttons) >= 3
 
-    def test_step6_schedule_renders_checkbox_and_time_input(
+    def test_step5_schedule_renders_checkbox_and_time_input(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_onboarding_vms,
     ):
-        """step 6 (Schedule)：渲染复选框 + 时间输入 + SCHEDULE 图标。"""
+        """step 5 (Schedule)：渲染复选框 + 时间输入 + SCHEDULE 图标。"""
         from ui.views.onboarding_wizard import OnboardingWizard
 
         fake_vm = mock_onboarding_vms["onboarding"]
-        fake_vm._state = replace(fake_vm._state, current_step=6)
+        fake_vm._state = replace(fake_vm._state, current_step=5)
 
         component = make_component(OnboardingWizard)
         page = _make_fake_page()
@@ -1002,17 +1137,17 @@ class TestOnboardingWizardComponentBody:
         assert any(isinstance(c, ft.Checkbox) for c in all_controls)
         assert any(isinstance(c, ft.TextField) for c in all_controls)
 
-    def test_step7_complete_renders_celebration_icon(
+    def test_step6_complete_renders_celebration_icon(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_onboarding_vms,
     ):
-        """step 7 (Complete)：渲染 CELEBRATION 图标。"""
+        """step 6 (Complete)：渲染 CELEBRATION 图标。"""
         from ui.views.onboarding_wizard import OnboardingWizard
 
         fake_vm = mock_onboarding_vms["onboarding"]
-        fake_vm._state = replace(fake_vm._state, current_step=7)
+        fake_vm._state = replace(fake_vm._state, current_step=6)
 
         component = make_component(OnboardingWizard)
         page = _make_fake_page()
@@ -1038,8 +1173,8 @@ class TestOnboardingWizardComponentBody:
         assert len(mock_onboarding_vms["onboarding"]._subscribers) > 0
         assert len(mock_onboarding_vms["database"]._subscribers) > 0
         assert len(mock_onboarding_vms["tushare"]._subscribers) > 0
-        assert len(mock_onboarding_vms["llm"]._subscribers) > 0
-        assert len(mock_onboarding_vms["local_model"]._subscribers) > 0
+        assert len(mock_onboarding_vms["connections"]._subscribers) > 0
+        assert len(mock_onboarding_vms["routes"]._subscribers) > 0
 
     def test_mount_triggers_onboarding_vm_bind(
         self,
@@ -1077,8 +1212,8 @@ class TestOnboardingWizardComponentBody:
         assert mock_onboarding_vms["onboarding"].dispose_called is True
         assert mock_onboarding_vms["database"].dispose_called is True
         assert mock_onboarding_vms["tushare"].dispose_called is True
-        assert mock_onboarding_vms["llm"].dispose_called is True
-        assert mock_onboarding_vms["local_model"].dispose_called is True
+        assert mock_onboarding_vms["connections"].dispose_called is True
+        assert mock_onboarding_vms["routes"].dispose_called is True
 
     def test_unmount_cleanup_logs_when_cancel_sync_fails(
         self,
@@ -1158,7 +1293,7 @@ class TestOnboardingWizardComponentBody:
         mock_app_colors_state,
         mock_onboarding_vms,
     ):
-        """step 1-6 显示进度条 (visible=True), step 0/7 隐藏 (visible=False)。"""
+        """step 1-5 显示进度条 (visible=True), step 0/6 隐藏 (visible=False)。"""
         from ui.views.onboarding_wizard import OnboardingWizard
 
         fake_vm = mock_onboarding_vms["onboarding"]
@@ -1183,13 +1318,23 @@ class TestOnboardingWizardComponentBody:
         step_indicators3 = main_col3.controls[2]  # type: ignore[union-attr]
         assert step_indicators3.visible is True
 
+        # Step 6 (complete): indicators hidden
+        fake_vm._state = replace(fake_vm._state, current_step=6)
+        comp6 = make_component(OnboardingWizard)
+        page6 = _make_fake_page()
+        run_mount_effects(comp6, page6)
+        result6 = render_once(comp6)
+        main_col6 = result6.content.controls[0]  # type: ignore[union-attr]
+        step_indicators6 = main_col6.controls[2]  # type: ignore[union-attr]
+        assert step_indicators6.visible is False
+
     def test_navigation_bar_button_visibility(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_onboarding_vms,
     ):
-        """不同 step 的导航按钮可见性（step 0 无 prev, step 4 有 prev+skip+next）。"""
+        """不同 step 的导航按钮可见性（step 0 无 prev, step 3 有 prev+skip+next）。"""
         from ui.theme import AppColors
         from ui.views.onboarding_wizard import OnboardingWizard
 
@@ -1212,18 +1357,18 @@ class TestOnboardingWizardComponentBody:
         buttons0 = [c for c in nav_row0.controls if isinstance(c, ft.Button)]
         assert len(buttons0) >= 1
 
-        # Step 4: show_prev + show_skip + show_next
-        fake_vm._state = replace(fake_vm._state, current_step=4)
-        comp4 = make_component(OnboardingWizard)
-        page4 = _make_fake_page()
-        run_mount_effects(comp4, page4)
-        result4 = render_once(comp4)
-        main_col4 = result4.content.controls[0]  # type: ignore[union-attr]
-        nav_container4 = main_col4.controls[-1]  # type: ignore[union-attr]
-        nav_row4 = nav_container4.content  # type: ignore[union-attr]
-        nav_buttons4 = [c for c in nav_row4.controls if isinstance(c, (ft.Button, ft.TextButton))]
+        # Step 3 (model_scenario): show_prev + show_skip + show_next
+        fake_vm._state = replace(fake_vm._state, current_step=3)
+        comp3 = make_component(OnboardingWizard)
+        page3 = _make_fake_page()
+        run_mount_effects(comp3, page3)
+        result3 = render_once(comp3)
+        main_col3 = result3.content.controls[0]  # type: ignore[union-attr]
+        nav_container3 = main_col3.controls[-1]  # type: ignore[union-attr]
+        nav_row3 = nav_container3.content  # type: ignore[union-attr]
+        nav_buttons3 = [c for c in nav_row3.controls if isinstance(c, (ft.Button, ft.TextButton))]
         # prev (Button) + skip (TextButton) + next (Button) = 3
-        assert len(nav_buttons4) >= 3
+        assert len(nav_buttons3) >= 3
 
     def test_navigation_buttons_trigger_vm_methods(
         self,
@@ -1231,11 +1376,11 @@ class TestOnboardingWizardComponentBody:
         mock_app_colors_state,
         mock_onboarding_vms,
     ):
-        """点击导航按钮触发 VM 的 next_step/prev_step/skip_step 方法。"""
+        """点击导航按钮触发 VM 方法：模型阶段首子步骤 prev/skip 直达 VM，next 仅推进子步骤。"""
         from ui.views.onboarding_wizard import OnboardingWizard
 
         fake_vm = mock_onboarding_vms["onboarding"]
-        fake_vm._state = replace(fake_vm._state, current_step=4)
+        fake_vm._state = replace(fake_vm._state, current_step=3)
 
         component = make_component(OnboardingWizard)
         page = _make_fake_page()
@@ -1251,10 +1396,10 @@ class TestOnboardingWizardComponentBody:
             if hasattr(btn, "on_click") and btn.on_click is not None:
                 btn.on_click(mock_event)
 
-        # 验证 VM 异步方法被调用
-        fake_vm.next_step.assert_called_once()
+        # 模型阶段首子步骤(1)：prev → vm.prev_step；skip → vm.skip_step；next 仅推进子步骤
         fake_vm.prev_step.assert_called_once()
         fake_vm.skip_step.assert_called_once()
+        fake_vm.next_step.assert_not_called()
 
     def test_sync_buttons_trigger_vm_methods(
         self,
@@ -1266,7 +1411,7 @@ class TestOnboardingWizardComponentBody:
         from ui.views.onboarding_wizard import OnboardingWizard
 
         fake_vm = mock_onboarding_vms["onboarding"]
-        fake_vm._state = replace(fake_vm._state, current_step=5)
+        fake_vm._state = replace(fake_vm._state, current_step=4)
 
         component = make_component(OnboardingWizard)
         page = _make_fake_page()
@@ -1371,13 +1516,13 @@ class TestOnboardingWizardComponentBody:
 
         # 不抛异常即覆盖 _on_card_hover 路径
 
-    def test_step6_schedule_time_enter_submit_triggers_next(
+    def test_step5_schedule_time_enter_submit_triggers_next(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_onboarding_vms,
     ):
-        """UX-09: step 6 schedule 时间输入 on_submit → 触发 wizard 下一步 (vm.next_step)。
+        """UX-09: step 5 schedule 时间输入 on_submit → 触发 wizard 下一步 (vm.next_step)。
 
         时间 TextField ``on_submit`` 绑定 ``_on_next`` → ``page.run_task(_next_step)``
         → ``await onboarding_vm.next_step()``（与下一步按钮等价）。
@@ -1385,7 +1530,7 @@ class TestOnboardingWizardComponentBody:
         from ui.views.onboarding_wizard import OnboardingWizard
 
         fake_vm = mock_onboarding_vms["onboarding"]
-        fake_vm._state = replace(fake_vm._state, current_step=6)
+        fake_vm._state = replace(fake_vm._state, current_step=5)
 
         component = make_component(OnboardingWizard)
         page = _make_fake_page()
@@ -1394,7 +1539,7 @@ class TestOnboardingWizardComponentBody:
 
         all_controls = _collect_controls(result)
         time_fields = [c for c in all_controls if isinstance(c, ft.TextField)]
-        assert len(time_fields) == 1, "step 6 应仅含 schedule 时间输入 1 个 TextField"
+        assert len(time_fields) == 1, "step 5 应仅含 schedule 时间输入 1 个 TextField"
         time_field = time_fields[0]
         # 守卫 + 下行触发/next_step 行为断言构成链式验证
         assert time_field.on_submit is not None  # noqa: weak-assertion 守卫, 下行 on_submit/next_step 断言为链式验证

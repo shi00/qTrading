@@ -39,6 +39,14 @@ async def test_embedded_onboarding_zero_config_first_launch(embedded_wizard_page
     welcome_guide = I18n.get("wizard_welcome_desc_with_time")
     await embedded_wizard_page.expect_text(welcome_guide)
 
+    # 1b. S5 §11.6: 欢迎概览的模型卡已由原「云端 AI」「本地模型」两卡合并为单张
+    #     「模型与场景配置」卡（向导 8 步 → 7 步，model_scenario 单步含三子步骤）。
+    #     注：合并后的 model_scenario 步在 E2E 中不可达——前序 token 步经真实
+    #     Tushare 网络校验且无 skip，受控网络下必失败阻断；模型阶段交互由 S5
+    #     组件 / VM / 集成测试承载。
+    model_title = I18n.get("wizard_overview_model_title")
+    assert await embedded_wizard_page.has_text(model_title)
+
     # 2. 点击 "开始使用" 进入 database step
     # UX-09 / MAJOR-01: 欢迎步须先勾选风险提示确认，「下一步」才可用。
     btn_start = I18n.get("wizard_btn_start")

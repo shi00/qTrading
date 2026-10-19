@@ -38,12 +38,27 @@ def _parse_db_url(url: str) -> dict[str, str]:
 
 
 async def test_wizard_renders_welcome(wizard_page):
-    """测试：向导启动后停在欢迎页。"""
+    """测试：向导启动后停在欢迎页。
+
+    S5 §11.6：原「云端 AI」「本地模型」两个引导概览卡片合并为单张
+    「模型与场景配置」卡（向导步数 8 → 7，其中 model_scenario 单步含三子步骤）。
+    欢迎页概览断言该合并卡可见（``wizard_overview_model_title``）。
+
+    注：合并后的 ``model_scenario`` 步在 E2E 中不可达——其前序 token 步
+    （``required=True`` / ``validate_before_next=True`` / 无 skip）经
+    ``tushare_vm.verify_token`` 走真实 Tushare 网络校验，受控网络下 dummy token
+    必然失败并阻断前进；故「返回 / 跳过 / 一次保存」的模型阶段交互由 S5 组件 /
+    VM 单测与集成测试承载，欢迎页概览卡为 E2E 可观测的合并证据。
+    """
     welcome_guide = I18n.get("wizard_welcome_desc_with_time")
     await wizard_page.expect_text(welcome_guide, timeout_ms=TIMEOUTS.PAGE_OPEN)
 
     db_title = I18n.get("wizard_overview_db_title")
     assert await wizard_page.has_text(db_title)
+
+    # S5 §11.6：合并后的单张模型概览卡可见（原云端 / 本地两卡已合并）。
+    model_title = I18n.get("wizard_overview_model_title")
+    assert await wizard_page.has_text(model_title)
 
 
 @pytest.mark.mutates_config

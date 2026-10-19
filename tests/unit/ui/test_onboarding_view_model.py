@@ -91,8 +91,7 @@ def bound_vm(vm, snapshots):
     vm.bind(
         fn_validate_database=AsyncMock(return_value=True),
         fn_validate_token=AsyncMock(return_value=True),
-        fn_validate_cloud_ai=AsyncMock(return_value=True),
-        fn_validate_local_model=AsyncMock(return_value=True),
+        fn_validate_model_scenario=AsyncMock(return_value=True),
         fn_push_schedule_state=MagicMock(),
         on_complete=AsyncMock(),
     )
@@ -261,15 +260,15 @@ class TestOnboardingVMNavigation:
         assert bound_vm.state.current_step == 1
 
     async def test_next_step_on_complete_calls_callback(self, bound_vm):
-        bound_vm.current_step = 7  # complete step
+        bound_vm.current_step = 6  # complete step
         await bound_vm.next_step()
         bound_vm.on_complete.assert_awaited_once()
 
     async def test_next_step_does_not_exceed_max(self, bound_vm):
-        bound_vm.current_step = 7
+        bound_vm.current_step = 6
         # on_complete returns, doesn't advance
         await bound_vm.next_step()
-        assert bound_vm.current_step == 7
+        assert bound_vm.current_step == 6
 
     async def test_prev_step_goes_back(self, bound_vm, snapshots):
         bound_vm.current_step = 3
@@ -291,24 +290,24 @@ class TestOnboardingVMNavigation:
         assert not bound_vm.is_step_validated("database")
 
     async def test_skip_step_advances(self, bound_vm, snapshots):
-        bound_vm.current_step = 4  # local_model step
+        bound_vm.current_step = 4  # data_sync step
         await bound_vm.skip_step()
         assert bound_vm.current_step == 5
         assert bound_vm.state.current_step == 5
         assert any(s.current_step == 5 for s in snapshots)
 
-    async def test_skip_step_from_cloud_ai_advances(self, bound_vm, snapshots):
-        """FR-UX-001: 在 cloud_ai 步骤执行 skip 命令可推进到 local_model 步骤。"""
-        bound_vm.current_step = 3  # cloud_ai step
+    async def test_skip_step_from_model_scenario_advances(self, bound_vm, snapshots):
+        """FR-UX-001 + S5 §11.6: 在 model_scenario 步骤执行 skip 命令可推进到 data_sync 步骤。"""
+        bound_vm.current_step = 3  # model_scenario step
         await bound_vm.skip_step()
         assert bound_vm.current_step == 4
         assert bound_vm.state.current_step == 4
         assert any(s.current_step == 4 for s in snapshots)
 
     async def test_skip_step_does_not_exceed_max(self, bound_vm):
-        bound_vm.current_step = 7
+        bound_vm.current_step = 6
         await bound_vm.skip_step()
-        assert bound_vm.current_step == 7
+        assert bound_vm.current_step == 6
 
     def test_invalidate_step(self, bound_vm):
         bound_vm._step_validated["database"] = True
@@ -348,19 +347,12 @@ class TestOnboardingVMValidation:
         bound_vm.fn_validate_token.assert_awaited_once()
         assert bound_vm.is_step_validated("token") is True
 
-    async def test_validate_calls_cloud_ai_fn(self, bound_vm):
-        bound_vm.current_step = 3
+    async def test_validate_calls_model_scenario_fn(self, bound_vm):
+        bound_vm.current_step = 3  # model_scenario step (S5 §11.6 合并单步)
         result = await bound_vm.validate_and_persist_current_step()
         assert result is True
-        bound_vm.fn_validate_cloud_ai.assert_awaited_once()
-        assert bound_vm.is_step_validated("cloud_ai") is True
-
-    async def test_validate_calls_local_model_fn(self, bound_vm):
-        bound_vm.current_step = 4
-        result = await bound_vm.validate_and_persist_current_step()
-        assert result is True
-        bound_vm.fn_validate_local_model.assert_awaited_once()
-        assert bound_vm.is_step_validated("local_model") is True
+        bound_vm.fn_validate_model_scenario.assert_awaited_once()
+        assert bound_vm.is_step_validated("model_scenario") is True
 
     async def test_validate_database_failure(self, bound_vm):
         bound_vm.fn_validate_database = AsyncMock(return_value=False)
@@ -398,7 +390,7 @@ class TestOnboardingVMValidation:
 class TestOnboardingVMScheduleValidation:
     def _setup_schedule_vm(self, bound_vm, mock_ch):
         """Setup VM with mock push_state and schedule time/enabled."""
-        bound_vm.current_step = 6  # schedule step
+        bound_vm.current_step = 5  # schedule step
         bound_vm.set_schedule_state(enabled=True, time_str="16:30")
         return bound_vm
 
@@ -618,7 +610,7 @@ class TestOnboardingVMSync:
         assert call_kwargs["quick"] is False
 
     async def test_start_sync_success_advances(self, sync_vm, mock_data_processor, snapshots):
-        sync_vm.current_step = 5  # data_sync step
+        sync_vm.current_step = 4  # data_sync step
         sync_vm.next_step = AsyncMock()
         with patch("ui.viewmodels.onboarding_view_model.asyncio.sleep", new_callable=AsyncMock):
             await sync_vm.start_sync(quick=True)
@@ -633,7 +625,7 @@ class TestOnboardingVMSync:
     async def test_start_sync_success_no_double_end_notification(self, sync_vm, mock_data_processor, snapshots):
         """sync_in_progress must transition exactly twice on success: True at start, False in finally.
         Before the fix, it was 3 transitions (start + manual end + finally end)."""
-        sync_vm.current_step = 5
+        sync_vm.current_step = 4
         sync_vm.next_step = AsyncMock()
         with patch("ui.viewmodels.onboarding_view_model.asyncio.sleep", new_callable=AsyncMock):
             await sync_vm.start_sync(quick=True)
@@ -804,15 +796,9 @@ class TestOnboardingVMUnboundValidator:
         result = await vm.validate_and_persist_current_step()
         assert result is False
 
-    async def test_unbound_cloud_ai_validator_passes(self, vm):
-        """FR-UX-001: cloud_ai is optional (block_on_missing_validator=False); unbound validator allows pass."""
-        vm.current_step = 3  # cloud_ai
-        result = await vm.validate_and_persist_current_step()
-        assert result is True
-
-    async def test_unbound_local_model_validator_passes(self, vm):
-        """local_model is optional (block_on_missing_validator=False); unbound validator allows pass."""
-        vm.current_step = 4  # local_model
+    async def test_unbound_model_scenario_validator_passes(self, vm):
+        """FR-UX-001 + S5 §11.6: model_scenario is optional (block_on_missing_validator=False); 未绑定 validator 允许通过."""
+        vm.current_step = 3  # model_scenario
         result = await vm.validate_and_persist_current_step()
         assert result is True
 
@@ -831,7 +817,7 @@ class TestOnboardingVMUnboundValidator:
 
     async def test_data_sync_step_passes_without_validator(self, vm):
         """data_sync step has no validator and should still pass."""
-        vm.current_step = 5
+        vm.current_step = 4
         result = await vm.validate_and_persist_current_step()
         assert result is True
 
@@ -876,8 +862,7 @@ class TestStepConfigContract:
             "welcome",
             "database",
             "token",
-            "cloud_ai",
-            "local_model",
+            "model_scenario",
             "data_sync",
             "schedule",
             "complete",
@@ -886,7 +871,7 @@ class TestStepConfigContract:
         assert actual_ids == expected_ids
 
     def test_required_steps(self):
-        # FR-UX-001: cloud_ai 可选化（required=False），必填步骤仅剩 database/token
+        # FR-UX-001 + S5 §11.6: model_scenario 可选化（required=False），必填步骤仅剩 database/token
         required_steps = [config.id for config in STEP_CONFIGS if config.required]
         assert required_steps == ["database", "token"]
 
@@ -895,8 +880,7 @@ class TestStepConfigContract:
         assert validate_steps == [
             "database",
             "token",
-            "cloud_ai",
-            "local_model",
+            "model_scenario",
             "schedule",
         ]
 
@@ -914,13 +898,14 @@ class TestStepConfigContract:
     def test_welcome_step_has_next(self):
         assert STEP_CONFIGS[0].show_next is True
 
-    def test_local_model_step_has_skip(self):
-        assert STEP_CONFIGS[4].show_skip is True
+    def test_data_sync_step_has_no_skip(self):
+        """S5 §11.6: 跳过按钮移至 model_scenario 单步；data_sync 步不再显示跳过。"""
+        assert STEP_CONFIGS[4].show_skip is False
 
-    def test_cloud_ai_step_has_skip(self):
-        """FR-UX-001: cloud_ai 步骤显示跳过按钮，且非必填，未绑定 validator 时不阻断。"""
+    def test_model_scenario_step_has_skip(self):
+        """FR-UX-001 + S5 §11.6: model_scenario 步骤显示跳过按钮，且非必填，未绑定 validator 时不阻断。"""
         config = STEP_CONFIGS[3]
-        assert config.id == "cloud_ai"
+        assert config.id == "model_scenario"
         assert config.show_skip is True
         assert config.skip_text_key == "wizard_btn_skip"
         assert config.required is False

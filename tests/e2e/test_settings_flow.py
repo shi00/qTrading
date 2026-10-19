@@ -3,7 +3,7 @@ import logging
 import pytest
 
 from ui.i18n import I18n
-from tests.e2e.pages import SettingsPage
+from tests.e2e.pages import ModelManagementPage, SettingsPage
 
 pytestmark = [pytest.mark.timeout(180), pytest.mark.e2e, pytest.mark.timeout_e2e_standard]
 
@@ -15,6 +15,37 @@ async def test_settings_page_loads(e2e_page):
     sp = SettingsPage(e2e_page)
     await sp.open()
     await sp.expect_title()
+
+
+@pytest.mark.xdist_group("settings_e2e")
+async def test_ai_brain_model_management_tabs(e2e_page):
+    """S5 §11.1/§11.2：AI 大脑「模型管理」三页签切换流程（读路径，不改配置）。
+
+    覆盖（read-only）：进入设置 AI tab → 默认落在「模型连接」页 → 依次切换
+    「场景配置」「使用记录」再切回「模型连接」，每页结构 anchor 可见。
+    三页签为同一 ``ft.Tabs`` 受控切换（``selected_index`` + ``on_change``），
+    断言各页关键交互 anchor（结构校验，经 Page Object 封装，不直连 EIDS）。
+
+    注：S5 §13.3 的「排序 / 未分配 / 风险 / 失败 / 冲突 / 取消 / 双入口」判定
+    场景以「真实提交 + 双入口读取」为主，E2E 进程受控网络下不落真实外发，
+    相关判定由 S5 连接 / 路由 / 使用三 VM 的单元与集成测试承载（本用例只做
+    渲染层读路径回归）。
+    """
+    mp = ModelManagementPage(e2e_page)
+    await mp.open()
+
+    # 首次打开即「模型连接」页（三页签默认 selected_index=0）。
+    await mp.expect_connection_view()
+
+    await mp.select_tab(mp.TAB_ROUTES)
+    await mp.expect_routes_view()
+
+    await mp.select_tab(mp.TAB_USAGE)
+    await mp.expect_usage_view()
+
+    # 切回「模型连接」页，确认三页签可双向切换（无 one-way 状态残留）。
+    await mp.select_tab(mp.TAB_CONNECTION)
+    await mp.expect_connection_view()
 
 
 @pytest.mark.mutates_config

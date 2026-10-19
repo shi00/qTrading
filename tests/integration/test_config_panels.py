@@ -5,7 +5,9 @@ Integration Tests for Onboarding Wizard Configuration Panels
 ViewModel 的业务逻辑（连接测试、配置保存、验证），覆盖原命令式 API 场景。
 
 - DatabaseConfigPanelViewModel: get_config / validate / save_config / on_change
-- LocalModelConfigPanelViewModel: get_current_config / save_config / verify_model / on_change
+- ModelConnectionsViewModel / ModelRoutesViewModel: 与真实配置域（隔离配置文件 +
+  ConfigHandler + ModelConfigurationService）交互，覆盖 CAS、凭据引用与两宿主
+  提交范围读回（reviews/模型统一.md §13.2）
 - DatabaseConfigService: run_migrations / ensure_tables_exist（service 层，保留真实 DB）
 """
 
@@ -18,15 +20,16 @@ import pytest
 import pytest_asyncio
 
 from data.persistence.db_url_override import override_db_url
+from services.model_configuration_service import ModelConfigurationService
 from tests._helpers import build_db_urls, create_test_engine, get_pg_connection_params
 from tests.integration.test_data_db_migrator import (
     _create_isolated_db,
     _drop_isolated_db,
 )
 from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
-from ui.viewmodels.local_model_config_panel_view_model import (
-    LocalModelConfigPanelViewModel,
-)
+from ui.viewmodels.model_connections_view_model import ModelConnectionsViewModel
+from ui.viewmodels.model_routes_view_model import ModelRoutesViewModel
+from utils.config_models import SCENARIO_IDS
 
 # no_db: 跳过 db_schema_ready 中的 test_engine 加载（本文件的 DB 测试使用 isolated_db
 # 自建独立 DB，无需共享 test_engine；UI/VM 测试不需要 DB）
@@ -56,12 +59,6 @@ def isolated_config(tmp_path):
 
 
 @pytest.fixture
-def mock_verify_model():
-    """on_verify_model 回调 mock，默认返回成功。"""
-    return AsyncMock(return_value=True)
-
-
-@pytest.fixture
 def mock_db_thread_pool():
     """Mock DatabaseConfigPanelViewModel 模块的 ThreadPoolManager.run_async 为同步 passthrough。"""
 
@@ -78,19 +75,12 @@ def mock_db_thread_pool():
 
 
 @pytest.fixture
-def mock_local_thread_pool():
-    """Mock LocalModelConfigPanelViewModel 模块的 ThreadPoolManager.run_async 为同步 passthrough。"""
+def model_config_service(isolated_config):  # noqa: ARG001 - 确保 isolated_config 激活
+    """真实配置域：隔离配置文件 + 默认 model_management + 真实配置服务。"""
+    from utils.config_handler import ConfigHandler
 
-    async def _passthrough(task_type, func, *args, **kwargs):
-        return func(*args, **kwargs)
-
-    mock_tpm = MagicMock()
-    mock_tpm.run_async = AsyncMock(side_effect=_passthrough)
-    with patch(
-        "ui.viewmodels.local_model_config_panel_view_model.ThreadPoolManager",
-        return_value=mock_tpm,
-    ):
-        yield mock_tpm
+    ConfigHandler.ensure_defaults()
+    return ModelConfigurationService()
 
 
 def _make_db_vm(
@@ -112,25 +102,32 @@ def _make_db_vm(
     )
 
 
-def _make_local_vm(
-    isolated_config,  # noqa: ARG001 - 确保 isolated_config fixture 激活
-    mock_verify_model,
-    *,
-    on_verify_success: Callable | None = None,
-    on_save: Callable | None = None,
-    on_change: Callable | None = None,
-    on_loading_change: Callable[[bool], None] | None = None,
-    show_internal_loading: bool = True,
-) -> LocalModelConfigPanelViewModel:
-    """构造 LocalModelConfigPanelViewModel（在 isolated_config 上下文中调用）。"""
-    return LocalModelConfigPanelViewModel(
-        on_verify_model=mock_verify_model,
-        on_verify_success=on_verify_success,
-        on_save=on_save,
-        on_change=on_change,
-        on_loading_change=on_loading_change,
-        show_internal_loading=show_internal_loading,
-    )
+def _add_litellm_connection(
+    vm: ModelConnectionsViewModel, *, name: str = "官方 API", api_key: str | None = None
+) -> None:
+    """在连接 VM 上填写一个合法 litellm 连接草稿。"""
+    vm.start_add()
+    vm.update_name(name)
+    vm.update_model("deepseek-chat")
+    vm.update_provider("deepseek")
+    vm.update_api_base("https://api.deepseek.com")
+    if api_key is not None:
+        vm.update_credential(api_key)
+
+
+async def _seed_connection(config_service: ModelConfigurationService) -> str:
+    """经向导阶段提交落一个连接（宿主 A），返回已落盘 connection_id。"""
+    from ui.views.onboarding_wizard import _commit_model_stage
+    from utils.config_handler import ConfigHandler
+
+    conn_vm = ModelConnectionsViewModel(config_service)
+    routes_vm = ModelRoutesViewModel(config_service)
+    await conn_vm.load()
+    await routes_vm.load()
+    _add_litellm_connection(conn_vm, name="Conn")
+    assert await _commit_model_stage(conn_vm, routes_vm, config_service) is True
+    disk = ConfigHandler.read_model_management_fresh()["model_management"]
+    return str(disk["connections"][0]["connection_id"])
 
 
 class TestDatabaseConfigPanel:
@@ -194,55 +191,6 @@ class TestDatabaseConfigPanel:
         assert is_valid is False
 
 
-class TestLocalModelConfigPanel:
-    """Tests for LocalModelConfigPanelViewModel business logic"""
-
-    def test_get_current_config(self, isolated_config, mock_verify_model):
-        """Test get_current_config returns correct structure"""
-        vm = _make_local_vm(isolated_config, mock_verify_model)
-        vm.update_model_path("/path/to/model.gguf")
-
-        config = vm.get_current_config()
-
-        assert config["model_path"] == "/path/to/model.gguf"
-
-    @pytest.mark.asyncio
-    async def test_save_config_empty_path(self, isolated_config, mock_verify_model, mock_local_thread_pool):
-        """Test save_config returns True for empty path (local model is optional)"""
-        vm = _make_local_vm(isolated_config, mock_verify_model)
-        vm.update_model_path("")
-        vm.update_timeout("300")
-
-        with patch("services.local_model_manager.LocalModelManager.commit_verification_if_active"):
-            result = await vm.save_config()
-
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_save_config_nonexistent_path(self, isolated_config, mock_verify_model, mock_local_thread_pool):
-        """Test save_config returns True for nonexistent path (validation is in verify)"""
-        vm = _make_local_vm(isolated_config, mock_verify_model)
-        vm.update_model_path("/nonexistent/path/model.gguf")
-        vm.update_timeout("300")
-
-        with patch("services.local_model_manager.LocalModelManager.commit_verification_if_active"):
-            result = await vm.save_config()
-
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_save_config_wrong_format(self, isolated_config, mock_verify_model, mock_local_thread_pool):
-        """Test save_config returns True for wrong file format (validation is in verify)"""
-        vm = _make_local_vm(isolated_config, mock_verify_model)
-        vm.update_model_path("/path/to/model.txt")
-        vm.update_timeout("300")
-
-        with patch("services.local_model_manager.LocalModelManager.commit_verification_if_active"):
-            result = await vm.save_config()
-
-        assert result is True
-
-
 class TestConfigPanelsIntegration:
     """Integration tests for configuration panels on_change callback"""
 
@@ -258,17 +206,142 @@ class TestConfigPanelsIntegration:
 
         assert len(callback_called) > 0
 
-    def test_local_model_panel_on_change_callback(self, isolated_config, mock_verify_model):
-        """Test on_change callback is triggered for local model VM"""
-        callback_called = []
 
-        def on_change():
-            callback_called.append(True)
+class TestModelDomainIntegration:
+    """共用连接 / 路由 VM 与真实配置域（reviews/模型统一.md §13.2）。
 
-        vm = _make_local_vm(isolated_config, mock_verify_model, on_change=on_change)
-        vm.update_model_path("/new/path.gguf")
+    覆盖：CAS 冲突、凭据引用落盘、两宿主提交范围读回（向导阶段提交 vs 设置页
+    单对象提交），全部走隔离配置文件 + 真实 ConfigHandler / ModelConfigurationService。
+    """
 
-        assert len(callback_called) > 0
+    @pytest.mark.asyncio
+    async def test_onboarding_stage_commit_reads_back_full_scope(self, model_config_service):
+        """向导宿主一次原子提交连接 + 全部场景路由，落盘范围可读回。"""
+        from ui.views.onboarding_wizard import _commit_model_stage
+        from utils.config_handler import ConfigHandler
+
+        conn_vm = ModelConnectionsViewModel(model_config_service)
+        routes_vm = ModelRoutesViewModel(model_config_service)
+        await conn_vm.load()
+        await routes_vm.load()
+        rev_before = conn_vm.state.config_revision
+
+        _add_litellm_connection(conn_vm, name="官方 API")
+
+        assert await _commit_model_stage(conn_vm, routes_vm, model_config_service) is True
+
+        disk = ConfigHandler.read_model_management_fresh()["model_management"]
+        assert disk["config_revision"] == rev_before + 1
+        assert [c["name"] for c in disk["connections"]] == ["官方 API"]
+        # 阶段提交范围含全部场景路由，不是只提交当前场景
+        assert {r["scenario_id"] for r in disk["scenario_routes"]} == set(SCENARIO_IDS)
+
+    @pytest.mark.asyncio
+    async def test_connection_credential_ref_persisted_to_keyring(self, model_config_service):
+        """新凭据经服务写入版本化 keyring 项，落盘仅存 credential_ref，草稿不回显。"""
+        import utils.config_handler as cfg_mod
+        from ui.views.onboarding_wizard import _commit_model_stage
+        from utils.config_handler import ConfigHandler
+
+        conn_vm = ModelConnectionsViewModel(model_config_service)
+        routes_vm = ModelRoutesViewModel(model_config_service)
+        await conn_vm.load()
+        await routes_vm.load()
+        _add_litellm_connection(conn_vm, name="官方 API", api_key="sk-integration-secret")
+
+        assert await _commit_model_stage(conn_vm, routes_vm, model_config_service) is True
+
+        disk = ConfigHandler.read_model_management_fresh()["model_management"]
+        ref = disk["connections"][0]["credential_ref"]
+        assert ref is not None
+        assert ref.startswith("keyring:")
+        _, item = ref.split(":", 1)
+        assert cfg_mod.keyring.get_password(cfg_mod.KEYRING_SERVICE_NAME, item) == "sk-integration-secret"
+        # 凭据不回显：编辑同一连接时草稿只带回引用，不回填明文
+        reader = ModelConnectionsViewModel(model_config_service)
+        await reader.load()
+        reader.edit(str(disk["connections"][0]["connection_id"]))
+        assert reader.state.draft.credential_api_key == ""
+        assert reader.state.draft.credential_ref == ref
+
+    @pytest.mark.asyncio
+    async def test_settings_single_scenario_commit_scope_read_back(self, model_config_service):
+        """设置页宿主只提交当前场景路由；其它场景与连接定义保持已提交值。"""
+        from utils.config_handler import ConfigHandler
+
+        conn_id = await _seed_connection(model_config_service)
+        rev_before = ConfigHandler.read_model_management_fresh()["model_management"]["config_revision"]
+
+        routes_vm = ModelRoutesViewModel(model_config_service)
+        await routes_vm.load()
+        routes_vm.select_scenario("stock_analysis")
+        routes_vm.add_candidate(conn_id)
+
+        await routes_vm.save_current_scenario()
+
+        assert routes_vm.state.save_state == "committed"
+        disk = ConfigHandler.read_model_management_fresh()["model_management"]
+        assert disk["config_revision"] == rev_before + 1
+        rows = {r["scenario_id"]: r["candidates"] for r in disk["scenario_routes"]}
+        # 单对象提交范围：仅当前场景变更，其它场景保持已提交值（空候选）
+        assert rows["stock_analysis"] == [conn_id]
+        assert rows["news_annotation"] == []
+        assert rows["news_risk"] == []
+        # 连接定义不被路由提交改写
+        assert [c["connection_id"] for c in disk["connections"]] == [conn_id]
+
+    @pytest.mark.asyncio
+    async def test_routes_stale_revision_conflict_keeps_disk_unchanged(self, model_config_service):
+        """CAS：落后 revision 的提交冲突，保留草稿且不覆盖磁盘旧配置。"""
+        from utils.config_handler import ConfigHandler
+
+        conn_id = await _seed_connection(model_config_service)
+
+        stale = ModelRoutesViewModel(model_config_service)
+        await stale.load()
+
+        newer = ModelRoutesViewModel(model_config_service)
+        await newer.load()
+        newer.select_scenario("news_risk")
+        newer.add_candidate(conn_id)
+        await newer.save_current_scenario()
+        assert newer.state.save_state == "committed"
+
+        stale.select_scenario("stock_analysis")
+        stale.add_candidate(conn_id)
+        await stale.save_current_scenario()
+
+        assert stale.state.save_state == "conflict"
+        assert stale.current_draft().candidates == (conn_id,)
+        rows = {
+            r["scenario_id"]: r["candidates"]
+            for r in ConfigHandler.read_model_management_fresh()["model_management"]["scenario_routes"]
+        }
+        # 磁盘只保留成功提交的 newer 变更；stale 的草稿未落盘
+        assert rows["news_risk"] == [conn_id]
+        assert rows["stock_analysis"] == []
+
+    @pytest.mark.asyncio
+    async def test_two_hosts_read_back_shared_config(self, model_config_service):
+        """两宿主 VM 独立，但读写同一真实配置域（双向读回）。"""
+        conn_id = await _seed_connection(model_config_service)
+
+        # 宿主 A（设置页）提交当前场景路由
+        host_a_routes = ModelRoutesViewModel(model_config_service)
+        await host_a_routes.load()
+        host_a_routes.add_candidate(conn_id)
+        await host_a_routes.save_current_scenario()
+        assert host_a_routes.state.save_state == "committed"
+
+        # 宿主 B（向导）新建 VM，读回宿主 A 的提交
+        host_b_conn = ModelConnectionsViewModel(model_config_service)
+        await host_b_conn.load()
+        assert [r.connection_id for r in host_b_conn.state.connections] == [conn_id]
+
+        host_b_routes = ModelRoutesViewModel(model_config_service)
+        await host_b_routes.load()
+        assert host_b_routes.state.selected_scenario == SCENARIO_IDS[0]
+        assert host_b_routes.current_draft().candidates == (conn_id,)
 
 
 class TestDatabaseConfigServiceMigrations:
@@ -616,68 +689,3 @@ class TestOnboardingWizardDatabaseValidation:
 
         assert result is False
         mock_ensure.assert_called_once()
-
-
-class TestLocalModelConfigPanelVerificationState:
-    """Tests for LocalModelConfigPanelViewModel verification state management"""
-
-    def test_is_verifying_initial_state(self, isolated_config, mock_verify_model):
-        """Test state.is_verifying is initially False"""
-        vm = _make_local_vm(isolated_config, mock_verify_model)
-        assert vm.state.is_verifying is False
-
-    @pytest.mark.asyncio
-    async def test_double_verify_prevention(self, isolated_config, mock_verify_model):
-        """Test that double verification is prevented"""
-        vm = _make_local_vm(isolated_config, mock_verify_model)
-        vm.update_model_path("/path/to/model.gguf")
-        vm.update_timeout("300")
-        # 模拟正在验证中
-        vm._set_state(is_verifying=True)  # type: ignore[attr-defined]
-
-        result = await vm.verify_model()
-
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_verify_state_reset_on_success(self, isolated_config, mock_verify_model):
-        """Test is_verifying is reset after successful verification"""
-        vm = _make_local_vm(isolated_config, mock_verify_model)
-        vm.update_model_path("/path/to/model.gguf")
-        vm.update_timeout("300")
-
-        with patch("os.path.exists", return_value=True):
-            result = await vm.verify_model()
-
-        assert result is True
-        assert vm.state.is_verifying is False
-
-    @pytest.mark.asyncio
-    async def test_verify_state_reset_on_failure(self, isolated_config, mock_verify_model):
-        """Test is_verifying is reset after failed verification"""
-        # on_verify_model 返回 False 模拟验证失败
-        mock_verify_model.return_value = False
-        vm = _make_local_vm(isolated_config, mock_verify_model)
-        vm.update_model_path("/path/to/model.gguf")
-        vm.update_timeout("300")
-
-        with patch("os.path.exists", return_value=True):
-            result = await vm.verify_model()
-
-        assert result is False
-        assert vm.state.is_verifying is False
-
-    @pytest.mark.asyncio
-    async def test_verify_state_reset_on_exception(self, isolated_config, mock_verify_model):
-        """Test is_verifying is reset after exception"""
-        # on_verify_model 抛异常模拟验证异常
-        mock_verify_model.side_effect = Exception("Test error")
-        vm = _make_local_vm(isolated_config, mock_verify_model)
-        vm.update_model_path("/path/to/model.gguf")
-        vm.update_timeout("300")
-
-        with patch("os.path.exists", return_value=True):
-            result = await vm.verify_model()
-
-        assert result is False
-        assert vm.state.is_verifying is False

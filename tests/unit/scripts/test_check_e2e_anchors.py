@@ -43,7 +43,7 @@ class TestExtractEidsNamespaces:
     """_extract_eids_namespaces: 从 e2e_ids.py 静态分析命名空间。"""
 
     def test_extracts_real_eids_file(self):
-        """对真实 ui/testing/e2e_ids.py 应提取出 11 个命名空间。"""
+        """对真实 ui/testing/e2e_ids.py 应提取出 12 个命名空间。"""
         eids_path = ROOT / "ui" / "testing" / "e2e_ids.py"
         ns = _extract_eids_namespaces(eids_path)
         assert set(ns.keys()) == {
@@ -58,6 +58,7 @@ class TestExtractEidsNamespaces:
             "NAV",
             "HOME",
             "TASK_CENTER",
+            "MODEL",
         }
         # SCREENER 应含常量 + 动态方法
         assert "RUN_BUTTON" in ns["SCREENER"]

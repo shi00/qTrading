@@ -5,35 +5,40 @@
 
 变更要点:
 - 旧命令式容器子类 → ``@ft.component def OnboardingWizard(on_complete)``
-- OnboardingViewModel + 4 个 config panel VM 通过 ``use_viewmodel(factory=)`` 内部模式实例化,
+- OnboardingViewModel + DatabaseConfigPanelViewModel/TushareConfigPanelViewModel +
+  ModelConnectionsViewModel/ModelRoutesViewModel 通过 ``use_viewmodel`` 实例化,
   hook 负责实例化 + dispose on unmount
-- 消费已声明式 DatabaseConfigPanel/TushareConfigPanel/LLMConfigPanel/LocalModelConfigPanel (函数调用, vm props)
+- 消费已声明式 DatabaseConfigPanel/TushareConfigPanel (函数调用, vm props);
+  模型阶段消费共用 ModelConnectionForm / ScenarioRouteEditor
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
-- 8 步状态机用 ``use_state`` + VM state.current_step 驱动条件渲染
+- 7 步状态机用 VM state.current_step 驱动条件渲染
 - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
 - 异步任务: ``page.run_task`` 调度; R2 CancelledError 不被 ``except Exception`` 捕获
 - 移除命令式生命周期回调 / 手动刷新 / page 引用持有 / resize 级联 / 命令式 VM 绑定 / locale 重建
 
-Steps (8 total):
+Steps (7 total):
 0. Welcome - Configuration overview
 1. Database Configuration (Required)
 2. Token Configuration (Required)
-3. Cloud AI Configuration (Required)
-4. Local Model Configuration (Optional)
-5. Data Sync (Optional)
-6. Schedule Setup (Optional)
-7. Complete
+3. Model & Scenario Configuration (Optional) — 连接信息 / 统计方式 / 场景与检查 三子步骤
+4. Data Sync (Optional)
+5. Schedule Setup (Optional)
+6. Complete
 """
 
+import asyncio
 import logging
 import typing
+import uuid
 from collections.abc import Awaitable, Callable
 
 import flet as ft
 
+from core.model_management_types import ModelConfigurationConflictError
+from services.model_configuration_service import ModelConfigurationService
 from ui.components.config_panels.database_config_panel import DatabaseConfigPanel
-from ui.components.config_panels.llm_config_panel import LLMConfigPanel
-from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
+from ui.components.config_panels.model_connection_form import ModelConnectionForm
+from ui.components.config_panels.scenario_route_editor import ScenarioRouteEditor
 from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
 from ui.components.flet_type_helpers import (
     get_control_value,
@@ -52,8 +57,8 @@ from ui.testing.e2e_ids import EIDS
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
-from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
-from ui.viewmodels.local_model_config_panel_view_model import LocalModelConfigPanelViewModel
+from ui.viewmodels.model_connections_view_model import ModelConnectionsViewModel
+from ui.viewmodels.model_routes_view_model import ModelRoutesViewModel
 from ui.viewmodels.onboarding_view_model import STEP_CONFIGS, OnboardingViewModel
 from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
 from utils.log_decorators import UILogger
@@ -96,51 +101,65 @@ async def _default_on_complete() -> None:
     pass
 
 
-async def _on_llm_test_connection(
-    provider: str,
-    model: str,
-    base_url: str,
-    api_key: str,
-    **kwargs,
-) -> dict:
-    """LLM 连接测试回调 — 委托 OnboardingViewModel 静态方法。"""
-    return await OnboardingViewModel.test_llm_connection(
-        provider=provider,
-        model=model,
-        base_url=base_url,
-        api_key=api_key,
-        **kwargs,
-    )
+async def _commit_model_stage(
+    connections_vm: ModelConnectionsViewModel,
+    routes_vm: ModelRoutesViewModel,
+    config_service: ModelConfigurationService,
+) -> bool:
+    """模型阶段「保存并继续」: 原子提交本阶段全部差异 (§11.6)。
 
+    宿主合并两 VM 的草稿为**完整** ``model_management`` payload（含 schema_version /
+    config_revision / migration_state / usage_policy），单次经 ``config_service.save_draft``
+    提交连接草稿与全部场景路由草稿，避免两次非原子写。子步骤「下一步」只导航（不提交）。
 
-async def _on_verify_local_model(model_path: str, config: dict) -> bool:
-    """验证本地模型回调 — 委托 OnboardingViewModel 静态方法。"""
-    return await OnboardingViewModel.verify_local_model(model_path, config)
-
-
-async def _validate_cloud_ai(llm_vm: LLMConfigPanelViewModel) -> bool:
-    """Cloud AI 步骤验证: 连接测试 + 保存配置。"""
-    if await llm_vm.verify_connection():
-        if not await llm_vm.save_config():
-            logger.error("[OnboardingWizard] Failed to save LLM config")
-            _show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
+    Returns:
+        True 提交成功（committed）; False 冲突 / 失败 / 结果未知。
+    Raises:
+        asyncio.CancelledError: 取消时显式 raise (R2)。
+    """
+    # 仅当用户实际录入连接（草稿有名称）时做静态校验；空草稿表示本阶段无连接变更，
+    # 不因「未填名称」阻断只配置场景路由的用户（§11.6「暂不配置 AI」语义邻近）。
+    if connections_vm.state.draft.name.strip():
+        errors = connections_vm.validate_draft()
+        if errors:
+            _show_snack(I18n.get("model_connection_validation_failed"), AppColors.ERROR)
             return False
-        return True
-    return False
 
+    operation_id = str(uuid.uuid4())
+    try:
+        # 经 VM 公开入口重建完整 model_management payload（宿主不得触达 VM 私有成员）：
+        # ``draft_connection_entry`` 内含凭据解析与单调 ``connection_revision``；
+        # ``merged_connections`` 合并已提交连接与草稿 entry；``all_routes_payload``
+        # 序列化本阶段全部场景草稿（§11.6 原子提交本阶段全部差异）。
+        entry = await connections_vm.draft_connection_entry(operation_id)
+        payload = routes_vm.build_payload(routes_vm.state.selected_scenario)
+        payload["connections"] = connections_vm.merged_connections(entry)
+        payload["scenario_routes"] = routes_vm.all_routes_payload()
+        outcome = await config_service.save_draft(payload, payload["config_revision"], operation_id)
+    except asyncio.CancelledError:
+        raise  # R2: 必须传播
+    except ModelConfigurationConflictError:
+        logger.warning("[OnboardingWizard] Model stage save conflict; keeping draft")
+        _show_snack(I18n.get("model_connection_save_conflict"), AppColors.ERROR)
+        return False
+    except Exception as ex:
+        logger.error(
+            "[OnboardingWizard] Model stage save failed: %s",
+            DataSanitizer.sanitize_error(ex),
+            exc_info=True,
+        )
+        _show_snack(I18n.get("model_connection_save_failed"), AppColors.ERROR)
+        return False
 
-async def _validate_local_model(local_model_vm: LocalModelConfigPanelViewModel) -> bool:
-    """Local Model 步骤验证: 模型验证 + 保存配置 (空路径跳过)。"""
-    model_path = local_model_vm.state.model_path.strip()
-    if not model_path:
-        return True
-    if await local_model_vm.verify_model():
-        if not await local_model_vm.save_config():
-            logger.error("[OnboardingWizard] Failed to save local model config")
-            _show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
-            return False
-        return True
-    return False
+    if outcome.status != "committed":
+        logger.warning("[OnboardingWizard] Model stage save status=%s", outcome.status)
+        _show_snack(I18n.get("model_connection_save_failed"), AppColors.ERROR)
+        return False
+
+    # 提交成功后刷新两 VM 的已提交基线（防止返回本步时残留未保存徽标 / 陈旧行）。
+    await connections_vm.load()
+    await routes_vm.load()
+    return True
 
 
 async def _validate_database_embedded() -> bool:
@@ -401,21 +420,14 @@ def _build_welcome_step(
     overview_cards_data = [
         (ft.Icons.STORAGE, AppColors.PRIMARY, "wizard_overview_db_title", "wizard_overview_db_desc", True, 0),
         (ft.Icons.KEY, AppColors.PRIMARY, "wizard_overview_token_title", "wizard_overview_token_desc", True, 1),
+        # S5 §11.6: 原「云端 AI」「本地模型」两卡合并为「模型与场景配置」一卡（可选）。
         (
-            ft.Icons.CLOUD,
+            ft.Icons.HUB,
             AppColors.ACCENT,
-            "wizard_overview_cloud_ai_title",
-            "wizard_overview_cloud_ai_desc",
-            True,
-            2,
-        ),
-        (
-            ft.Icons.PSYCHOLOGY,
-            AppColors.ACCENT,
-            "wizard_overview_local_model_title",
-            "wizard_overview_local_model_desc",
+            "wizard_overview_model_title",
+            "wizard_overview_model_desc",
             False,
-            3,
+            2,
         ),
         (
             ft.Icons.CLOUD_SYNC,
@@ -423,7 +435,7 @@ def _build_welcome_step(
             "wizard_overview_sync_title",
             "wizard_overview_sync_desc",
             False,
-            4,
+            3,
         ),
         (
             ft.Icons.SCHEDULE,
@@ -431,7 +443,7 @@ def _build_welcome_step(
             "wizard_overview_schedule_title",
             "wizard_overview_schedule_desc",
             False,
-            5,
+            4,
         ),
     ]
 
@@ -535,68 +547,74 @@ def _build_token_step(tushare_vm: TushareConfigPanelViewModel) -> ft.Control:
     )
 
 
-def _build_cloud_ai_step(llm_vm: LLMConfigPanelViewModel) -> ft.Control:
-    """Step 3: Cloud AI 配置 (D15: 从 OnboardingWizard step==3 分支提取)."""
-    return ft.Column(
+_MODEL_SUBSTEP_KEYS: tuple[str, ...] = (
+    "wizard_step_model_substep_1",
+    "wizard_step_model_substep_2",
+    "wizard_step_model_substep_3",
+)
+
+
+def _build_model_scenario_step(
+    connections_vm: ModelConnectionsViewModel,
+    routes_vm: ModelRoutesViewModel,
+    substep: int,
+) -> ft.Control:
+    """Step 3: 模型与场景配置 (S5 §11.6 合并原「云端 AI」「本地模型」两步).
+
+    三子步骤（子步骤号由宿主 View 本地 ``ft.use_state`` 承载）:
+    ① 连接信息 ② 统计方式 → 共用 ``ModelConnectionForm``;
+    ③ 场景与检查 → 共用 ``ScenarioRouteEditor``.
+    向导隐藏组件内部保存按钮与字段 Enter 提交（``show_internal_save=False`` /
+    ``enable_enter_submit=False``），由宿主显式「保存并继续」经 ``config_service.save_draft``
+    原子提交本阶段全部差异；子步骤「下一步」只校验/导航。
+    """
+    substep_indicators = ft.Row(
         [
-            ft.Icon(ft.Icons.CLOUD, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
-            ft.Text(
-                I18n.get("wizard_step_cloud_ai_title"),
-                size=AppStyles.FONT_SIZE_XL,
-                weight=ft.FontWeight.W_500,
-                color=AppColors.TEXT_PRIMARY,
-            ),
-            ft.Container(height=10),
-            ft.Text(
-                I18n.get("wizard_step_cloud_ai_desc"),
-                size=AppStyles.FONT_SIZE_LG,
-                color=AppColors.TEXT_SECONDARY,
-                text_align=ft.TextAlign.CENTER,
-            ),
-            ft.Container(height=10),
-            ft.Container(
-                content=LLMConfigPanel(
-                    vm=llm_vm,
-                    compact=True,
-                    show_save_button=False,
-                    enable_enter_submit=False,  # UX-09: wizard 关闭 Enter 提交
+            anchored(
+                EIDS.MODEL.substep(index),
+                ft.Text(
+                    f"{index}. {I18n.get(_MODEL_SUBSTEP_KEYS[index - 1])}",
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    weight=ft.FontWeight.W_600 if index == substep else ft.FontWeight.W_400,
+                    color=AppColors.PRIMARY if index == substep else AppColors.TEXT_HINT,
                 ),
-                padding=AppStyles.SPACING_SM,
-                border_radius=8,
-                bgcolor=AppColors.SURFACE,
-            ),
+            )
+            for index in (1, 2, 3)
         ],
-        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        alignment=ft.MainAxisAlignment.CENTER,
+        spacing=AppStyles.SPACING_LG,
     )
-
-
-def _build_local_model_step(local_model_vm: LocalModelConfigPanelViewModel) -> ft.Control:
-    """Step 4: Local Model 配置 (D15: 从 OnboardingWizard step==4 分支提取)."""
+    if substep >= 3:
+        body = ScenarioRouteEditor(vm=routes_vm, egress_vm=connections_vm, compact=True)
+    else:
+        body = ModelConnectionForm(
+            vm=connections_vm,
+            editor_step=substep,
+            compact=True,
+            enable_enter_submit=False,  # UX-09: wizard 关闭 Enter 提交
+            show_internal_save=False,  # §11.6: 向导隐藏组件内部保存按钮
+        )
     return ft.Column(
         [
-            ft.Icon(ft.Icons.PSYCHOLOGY, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
+            ft.Icon(ft.Icons.HUB, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
             ft.Text(
-                I18n.get("wizard_step_local_model_title"),
+                I18n.get("wizard_step_model_scenario"),
                 size=AppStyles.FONT_SIZE_XL,
                 weight=ft.FontWeight.W_500,
                 color=AppColors.TEXT_PRIMARY,
             ),
             ft.Container(height=10),
             ft.Text(
-                I18n.get("wizard_step_local_model_desc"),
+                I18n.get("wizard_step_model_scenario_desc"),
                 size=AppStyles.FONT_SIZE_LG,
                 color=AppColors.TEXT_SECONDARY,
                 text_align=ft.TextAlign.CENTER,
             ),
-            ft.Container(height=20),
+            ft.Container(height=10),
+            substep_indicators,
+            ft.Container(height=10),
             ft.Container(
-                content=LocalModelConfigPanel(
-                    vm=local_model_vm,
-                    show_save_button=False,
-                    compact=True,
-                    show_internal_loading=False,
-                    enable_enter_submit=False,  # UX-09: wizard 关闭 Enter 提交
-                ),
+                content=body,
                 padding=AppStyles.SPACING_SM,
                 border_radius=8,
                 bgcolor=AppColors.SURFACE,
@@ -810,10 +828,12 @@ def OnboardingWizard(
     """逐步引导配置向导 (声明式).
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
-    - OnboardingViewModel + 4 个 config panel VM 通过 ``use_viewmodel(factory=)`` 内部模式实例化
-    - 消费已声明式 DatabaseConfigPanel/TushareConfigPanel/LLMConfigPanel/LocalModelConfigPanel
+    - OnboardingViewModel + 4 个 config VM (DatabaseConfigPanelViewModel/TushareConfigPanelViewModel/
+      ModelConnectionsViewModel/ModelRoutesViewModel) 通过 ``use_viewmodel(factory=)`` 内部模式实例化
+    - 消费已声明式 DatabaseConfigPanel/TushareConfigPanel;
+      模型阶段消费共用 ModelConnectionForm / ScenarioRouteEditor (三子步骤)
     - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
-    - 8 步状态机用 VM state.current_step 驱动条件渲染
+    - 7 步状态机用 VM state.current_step 驱动条件渲染
     - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
     - 异步任务: ``page.run_task`` 调度, R2 CancelledError 不被 ``except Exception`` 捕获
 
@@ -827,7 +847,7 @@ def OnboardingWizard(
     # --- OnboardingViewModel (内部模式: hook 实例化 + dispose on unmount) ---
     state, onboarding_vm = use_viewmodel(factory=lambda: OnboardingViewModel())
 
-    # --- 4 config panel VM (内部模式, hook 负责 dispose) ---
+    # --- 4 config VM (内部模式, hook 负责 dispose) ---
     # on_change 回调捕获 onboarding_vm (已通过 use_viewmodel 持久化, 稳定引用)
     _db_state, database_vm = use_viewmodel(
         factory=lambda: DatabaseConfigPanelViewModel(
@@ -840,22 +860,18 @@ def OnboardingWizard(
             show_internal_loading=False,
         )
     )
-    _llm_state, llm_vm = use_viewmodel(
-        factory=lambda: LLMConfigPanelViewModel(
-            on_test_connection=_on_llm_test_connection,
-        )
-    )
-    _local_state, local_model_vm = use_viewmodel(
-        factory=lambda: LocalModelConfigPanelViewModel(
-            on_verify_model=_on_verify_local_model,
-            on_change=lambda: onboarding_vm.invalidate_step("local_model"),
-            show_internal_loading=False,
-        )
-    )
+    # S5 §11.6: 模型阶段单一「模型与场景配置」步，宿主经共享的 ModelConfigurationService
+    # 注入两个独立 VM（连接草稿 / 场景路由草稿）；「保存并继续」原子提交本阶段全部差异。
+    # 共享 service 用 ft.use_state(callable) 惰性初始化一次（契约测试禁止 ref 缓存）。
+    config_service = ft.use_state(lambda: ModelConfigurationService())[0]
+    _conn_state, connections_vm = use_viewmodel(factory=lambda: ModelConnectionsViewModel(config_service))
+    _routes_state, routes_vm = use_viewmodel(factory=lambda: ModelRoutesViewModel(config_service))
 
     # --- Pure UI state ---
     schedule_enabled, set_schedule_enabled = ft.use_state(True)
     schedule_time, set_schedule_time = ft.use_state(state.schedule_time)
+    # S5 §11.6: 模型阶段的 3 子步骤号由宿主 View 本地 state 承载 (1 连接信息 / 2 统计方式 / 3 场景与检查)
+    model_substep, set_model_substep = ft.use_state(1)
     # D17: locale 直接读 observable (已订阅 get_observable_state 自动重渲染),
     # 不再持有局部副本 (语言切换/校验失败均以 I18n 状态源为准, 消除 stale)
     hovered_card, set_hovered_card = ft.use_state(-1)
@@ -864,14 +880,28 @@ def OnboardingWizard(
     onboarding_vm.bind(
         fn_validate_database=_resolve_database_validator(database_vm),
         fn_validate_token=tushare_vm.verify_token,
-        fn_validate_cloud_ai=lambda: _validate_cloud_ai(llm_vm),
-        fn_validate_local_model=lambda: _validate_local_model(local_model_vm),
+        # S5 §11.6: 模型阶段单一 validator — 宿主「保存并继续」经 _commit_model_stage 原子提交
+        fn_validate_model_scenario=lambda: _commit_model_stage(connections_vm, routes_vm, config_service),
         fn_push_schedule_state=lambda: onboarding_vm.set_schedule_state(
             enabled=schedule_enabled,
             time_str=schedule_time,
         ),
         on_complete=on_complete or _default_on_complete,
     )
+
+    # --- S5 §11.6: 模型阶段两个独立 VM 挂载时加载已提交快照 (连接 / 场景路由草稿重建) ---
+    def _load_model_vms_setup() -> None:
+        page = _get_page()
+        if page is None:
+            return
+
+        async def _do_load() -> None:
+            await connections_vm.load()
+            await routes_vm.load()
+
+        page.run_task(_do_load)
+
+    ft.use_effect(_load_model_vms_setup, dependencies=[])
 
     # --- Sync normalized schedule time from VM to UI input ---
     def _sync_normalized_time() -> None:
@@ -938,14 +968,28 @@ def OnboardingWizard(
 
     async def _next_step() -> None:
         UILogger.log_action("OnboardingWizard", "Click", f"next_step={state.current_step}")
+        # S5 §11.6: 模型阶段子步骤「下一步」只校验/导航（返回保留草稿，不提交）；
+        # 末子步骤(3)「保存并继续」才经 fn_validate_model_scenario 原子提交本阶段全部差异。
+        if STEP_CONFIGS[state.current_step].id == "model_scenario" and model_substep < 3:
+            set_model_substep(model_substep + 1)
+            return
         await onboarding_vm.next_step()
 
     async def _prev_step() -> None:
         UILogger.log_action("OnboardingWizard", "Click", f"prev_step={state.current_step}")
+        # S5 §11.6: 模型阶段「返回」先回退子步骤（保留草稿），首子步骤才回退上一步。
+        if STEP_CONFIGS[state.current_step].id == "model_scenario" and model_substep > 1:
+            set_model_substep(model_substep - 1)
+            return
         await onboarding_vm.prev_step()
 
     async def _skip_step() -> None:
         UILogger.log_action("OnboardingWizard", "Click", f"skip_step={state.current_step}")
+        # S5 §11.6: 「暂不配置 AI」丢弃本阶段未提交草稿，保留已提交连接与路由（不提交）。
+        if STEP_CONFIGS[state.current_step].id == "model_scenario":
+            connections_vm.start_add()
+            await routes_vm.load()
+            set_model_substep(1)
         await onboarding_vm.skip_step()
 
     async def _on_quick_sync() -> None:
@@ -1027,27 +1071,26 @@ def OnboardingWizard(
                 not onboarding_vm.state.risk_acknowledged,
             )
 
-    # --- Step indicators (1~6 显示) ---
-    show_indicators = 1 <= state.current_step <= 6
+    # --- Step indicators (1~5 显示) ---
+    show_indicators = 1 <= state.current_step <= 5
     step_names = [
         None,
         I18n.get("wizard_step_database"),
         I18n.get("wizard_step_label_token"),
         I18n.get("wizard_step_label_ai"),
-        I18n.get("wizard_step_local_model"),
         I18n.get("wizard_step_label_sync"),
         I18n.get("wizard_step_label_schedule"),
         None,
     ]
     current_step_name = step_names[state.current_step] or ""
-    progress_percent = state.current_step / 6 if show_indicators else 0
+    progress_percent = state.current_step / 5 if show_indicators else 0
 
     step_indicators = ft.Row(
         [
             ft.Column(
                 [
                     ft.Text(
-                        f"{current_step_name}  ({state.current_step}/6)",
+                        f"{current_step_name}  ({state.current_step}/5)",
                         size=AppStyles.FONT_SIZE_LG,
                         weight=ft.FontWeight.W_600,
                         color=AppColors.TEXT_PRIMARY,
@@ -1083,8 +1126,8 @@ def OnboardingWizard(
         visible=show_indicators,
     )
 
-    # --- Header (step 0, 7 显示) ---
-    show_header = state.current_step in (0, 7)
+    # --- Header (step 0, 6 显示) ---
+    show_header = state.current_step in (0, 6)
     header_container = ft.Column(
         [
             ft.Text(
@@ -1122,10 +1165,8 @@ def OnboardingWizard(
     elif step == 2:
         step_content = _build_token_step(tushare_vm)
     elif step == 3:
-        step_content = _build_cloud_ai_step(llm_vm)
+        step_content = _build_model_scenario_step(connections_vm, routes_vm, model_substep)
     elif step == 4:
-        step_content = _build_local_model_step(local_model_vm)
-    elif step == 5:
         step_content = _build_data_sync_step(
             state.init_history_years,
             state.sync_in_progress,
@@ -1136,7 +1177,7 @@ def OnboardingWizard(
             _on_sync_later,
             _on_cancel_sync_click,
         )
-    elif step == 6:
+    elif step == 5:
         step_content = _build_schedule_step(
             schedule_enabled,
             lambda v: set_schedule_enabled(v),
@@ -1168,6 +1209,15 @@ def OnboardingWizard(
     else:
         nav_buttons.append(ft.Container())
 
+    # S5 §11.6: 模型阶段末子步骤(3)「保存并继续」(原子提交)，前两子步骤「下一步」(仅导航)。
+    # 末子步骤复用同一 nav 按钮，改用 MODEL.SAVE_AND_CONTINUE anchor 精确区分语义。
+    if config.id == "model_scenario":
+        next_text_key = "wizard_btn_save_and_continue" if model_substep >= 3 else "wizard_btn_next"
+        next_eid = EIDS.MODEL.SAVE_AND_CONTINUE if model_substep >= 3 else EIDS.WIZARD.NEXT_BUTTON
+    else:
+        next_text_key = config.next_text_key
+        next_eid = EIDS.WIZARD.NEXT_BUTTON
+
     if config.show_skip:
         nav_buttons.append(
             anchored(
@@ -1183,9 +1233,9 @@ def OnboardingWizard(
     if config.show_next:
         nav_buttons.append(
             anchored(
-                EIDS.WIZARD.NEXT_BUTTON,
+                next_eid,
                 ft.Button(
-                    content=I18n.get(config.next_text_key),
+                    content=I18n.get(next_text_key),
                     icon=getattr(ft.Icons, config.next_icon, ft.Icons.ARROW_FORWARD),
                     on_click=safe_on_click(_on_next),
                     style=AppStyles.primary_button(),

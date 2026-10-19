@@ -3,7 +3,7 @@ import logging
 import pytest
 
 from ui.i18n import I18n
-from tests.e2e.pages import SettingsPage
+from tests.e2e.pages import ModelManagementPage, SettingsPage
 from tests.e2e.timeouts import TIMEOUTS
 
 pytestmark = [
@@ -115,70 +115,71 @@ async def _wait_for_any_text(e2e_page, texts: list[str], timeout_ms: int = 30000
     return ""
 
 
-# LLM 测试连接失败可能出现的错误 i18n key 全集（classify_error context="llm" 的
-# 各终态 key + 通用兜底 common_err_unknown）。
-# 期望列表须同时含 key 原文与翻译文本：AIService.test_connection 失败路径与 VM
-# 透传路径产出 key（Message(key)），View 经 _render_message → I18n.get 渲染翻译
-# 文本，两种形态都属有效错误反馈；只列其一会在渲染形态变化时漏检（见 CI 回归：
-# llm_err_not_found 仅列 key 未列翻译，实际渲染翻译文本导致断言失败）。
-_LLM_ERR_KEYS = [
-    "llm_err_network",
-    "llm_err_unknown",
-    "llm_err_timeout",
-    "llm_err_auth_failed",
-    "llm_err_forbidden",
-    "llm_err_server",
-    "llm_err_dns",
-    "llm_err_ssl",
-    "llm_err_rate_limit",
-    "llm_err_insufficient_quota",
-    "llm_err_model_not_found",
-    "llm_err_content_policy",
-    "llm_err_not_found",
-    "common_err_unknown",
-]
+# ============================================================================
+# S5 §11.1/§11.2/§13.2: AI 大脑「模型管理」三页签 E2E（替代已退役的
+# LLMConfigPanel / LocalModelConfigPanel / FailoverConfigPanel 旧组件断言）
+# ============================================================================
 
 
-@pytest.mark.network
-async def test_llm_config_save_and_validate(e2e_page):
-    """LLM 配置测试连接流程 E2E.
+async def test_model_management_connection_tab(e2e_page):
+    """「模型连接」页：三页签可见 + 连接页关键交互 + 三步创建编辑器结构。
 
-    场景: 填入无效 API Key → 点击"测试连接" → 期望错误 toast（外部请求失败）
-
-    注: 原"空 API Key 前置校验"场景已移除——conftest.py 的 flet_app fixture 注入
-    AI_API_KEY=e2e-dummy-key 环境变量, ConfigHandler.get_llm_config 优先读 env var,
-    VM state 预填 api_key, "空输入"场景在 UI 中不存在.
-
-    mock 策略: AIService.test_connection 调用真实 LLM API (litellm acompletion),
-    无效 key 触发异常 (网络离线/auth 失败), AIService 捕获后返回
-    {"success": False, "message": error_info["message_key"]} (i18n key).
-    VM 以 Message(key) 存入 state, View 经 _render_message → I18n.get 渲染翻译文本.
-
-    PR-3: tab 切换迁移到 SettingsPage anchor 操作。
+    S5 §11.1：AI 大脑模型区域改为「模型管理」三页签（模型连接 / 场景配置 /
+    使用记录）；本用例覆盖「模型连接」页与三步创建编辑器（名称 / 适配器 /
+    步骤导航）。原 ``test_llm_config_save_and_validate``（消费已移除的
+    LLMConfigPanel）由本用例替代。
     """
-    sp = SettingsPage(e2e_page)
-    await sp.open()
-    await sp.expect_title()
-    await sp.click_tab("ai")
+    mp = ModelManagementPage(e2e_page)
+    await mp.open()
+    for role in (mp.TAB_CONNECTION, mp.TAB_ROUTES, mp.TAB_USAGE):
+        await mp.expect_tab_visible(role)
 
-    # 等待 LLM 面板渲染（测试连接按钮可见）
-    test_btn_label = I18n.get("llm_test_connection")
-    await e2e_page.expect_text(test_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
+    await mp.select_tab(mp.TAB_CONNECTION)
+    await mp.expect_connection_view()
 
-    # 填入无效 API Key 点击测试连接, 外部请求失败触发错误
-    # 注：LLM API Key TextField 未 anchor 化，保留 fill_textbox
-    api_key_label = I18n.get("llm_api_key")
-    await e2e_page.fill_textbox(api_key_label, "sk-invalid-e2e-test-key", timeout_ms=TIMEOUTS.INTERACTION)
+    # 打开三步创建编辑器（连接信息子步骤）→ 断言共用表单字段与步骤导航可见
+    await mp.click_add_connection()
+    await mp.expect_connection_editor()
 
-    await e2e_page.click_button(test_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
+    # 子步骤前进 / 回退只导航（不提交），返回后仍保留编辑器
+    await mp.click_editor_next()
+    await mp.click_editor_prev()
+    await mp.expect_connection_editor()
 
-    # AIService.test_connection 失败路径返回 error_info["message_key"]（i18n key）,
-    # VM 以 Message(key) 存入 state, View 经 _render_message → I18n.get 渲染翻译文本.
-    # 期望列表覆盖 key 原文与全部翻译文本, 渲染形态差异不影响检出.
-    possible_errors = _LLM_ERR_KEYS + [I18n.get(key) for key in _LLM_ERR_KEYS]
-    hit = await _wait_for_any_text(e2e_page, possible_errors, timeout_ms=30000)
-    assert hit, f"LLM 测试连接未显示错误 toast, 期望之一: {possible_errors}"
-    logger.info("LLM 测试连接错误路径验证通过: %s", hit)
+
+async def test_model_management_routes_tab(e2e_page):
+    """「场景配置」页：三场景导航 + 保存当前场景 + 候选选择器开合。
+
+    S5 §11.4：场景编辑器含三场景导航与有序候选列表；本用例覆盖导航结构、
+    保存入口与候选选择器（打开 → 关闭）。原 ``test_local_model_load_and_reload``
+    （消费已移除的 LocalModelConfigPanel / ``wizard_btn_verify_model``）由本用例替代。
+    """
+    mp = ModelManagementPage(e2e_page)
+    await mp.open()
+    await mp.select_tab(mp.TAB_ROUTES)
+    await mp.expect_routes_view()
+
+    # 切换场景导航（草稿各自保留，不提交）
+    await mp.select_scenario("stock_analysis")
+    await mp.expect_scenario_visible("stock_analysis")
+
+    # 候选选择器：打开 → 断言搜索框 / 关闭按钮 → 关闭
+    await mp.click_add_candidate()
+    await mp.expect_picker_open()
+    await mp.close_picker()
+
+
+async def test_model_management_usage_tab(e2e_page):
+    """「使用记录」页：来源过滤 + 导出脱敏 CSV + 进入月汇总 结构。
+
+    S5 §11.5：使用记录页含来源过滤、导出与月汇总入口；本用例覆盖其 anchor 化
+    关键交互。原 ``test_ai_brain_test_connection``（消费已移除的 LLMConfigPanel /
+    ``llm_test_connection``）由本用例替代。
+    """
+    mp = ModelManagementPage(e2e_page)
+    await mp.open()
+    await mp.select_tab(mp.TAB_USAGE)
+    await mp.expect_usage_view()
 
 
 @pytest.mark.network
@@ -285,75 +286,3 @@ async def test_db_connection_test_and_save(e2e_page):
     hit = await _wait_for_any_text(e2e_page, possible_results, timeout_ms=30000)
     assert hit, f"DB 测试连接未显示结果, 期望: {possible_results}"
     logger.info("DB 测试连接路径验证通过: %s", hit)
-
-
-async def test_local_model_load_and_reload(e2e_page):
-    """本地模型验证前置校验流程 E2E.
-
-    场景: 直接点击"验证模型" → 期望 `wizard_err_model_required` 错误（model_path 为空）
-
-    注: 原"填入不存在的 .gguf 路径 → wizard_err_model_not_found"和"填入 main.py →
-    wizard_err_model_format"场景已移除——fill_textbox 在 CanvasKit 模式下不生效
-    (INPUT value 保持原值不变), model_path 保持空, VM 前置校验返回 required 错误.
-
-    mock 策略: LocalModelConfigPanelViewModel.verify_model 的前置校验在调
-    on_verify_model 回调前执行, 纯本地路径校验 (os.path.exists / endswith),
-    不需要网络 mock. model_path 为空触发 required 分支.
-
-    PR-3: tab 切换迁移到 SettingsPage anchor 操作。
-    """
-    sp = SettingsPage(e2e_page)
-    await sp.open()
-    await sp.expect_title()
-    await sp.click_tab("ai")
-
-    # 等待本地模型面板渲染（验证模型按钮可见）
-    verify_btn_label = I18n.get("wizard_btn_verify_model")
-    await e2e_page.expect_text(verify_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
-
-    # model_path 默认为空 (ConfigHandler.get_local_ai_config 无设置时返回 ""),
-    # fill_textbox 在 CanvasKit 下不生效, 直接点击验证触发 required 校验
-    await e2e_page.click_button(verify_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
-
-    # VM 前置校验: model_path 为空 → Message("wizard_err_model_required")
-    # View 渲染: I18n.get("wizard_err_model_required") = "请选择模型文件"
-    required_msg = I18n.get("wizard_err_model_required")
-    await e2e_page.expect_text(required_msg, timeout_ms=TIMEOUTS.INTERACTION)
-    logger.info("本地模型空路径校验通过: %s", required_msg)
-
-
-async def test_ai_brain_test_connection(e2e_page):
-    """AI Brain tab 测试连接流程 E2E.
-
-    场景: 填入无效 Key → 点击"测试连接" → 期望错误 toast（外部请求失败）
-
-    注: 原"空 API Key 前置校验"场景已移除——conftest.py 的 flet_app fixture 注入
-    AI_API_KEY=e2e-dummy-key 环境变量, ConfigHandler.get_llm_config 优先读 env var,
-    VM state 预填 api_key, "空输入"场景在 UI 中不存在.
-
-    此测试与 test_llm_config_save_and_validate 互补, 聚焦 AI Brain tab 整体
-    测试连接 UX, 验证 abort 路径的错误反馈.
-
-    PR-3: tab 切换迁移到 SettingsPage anchor 操作。
-    """
-    sp = SettingsPage(e2e_page)
-    await sp.open()
-    await sp.expect_title()
-    await sp.click_tab("ai")
-
-    test_btn_label = I18n.get("llm_test_connection")
-    await e2e_page.expect_text(test_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
-
-    # 填入无效 Key, 外部请求失败触发错误
-    # 注：LLM API Key TextField 未 anchor 化，保留 fill_textbox
-    api_key_label = I18n.get("llm_api_key")
-    await e2e_page.fill_textbox(api_key_label, "sk-invalid-ai-brain-test", timeout_ms=TIMEOUTS.INTERACTION)
-    await e2e_page.click_button(test_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
-
-    # AIService.test_connection 失败路径返回 error_info["message_key"]（i18n key）,
-    # VM 以 Message(key) 存入 state, View 经 _render_message → I18n.get 渲染翻译文本.
-    # 期望列表覆盖 key 原文与全部翻译文本, 渲染形态差异不影响检出.
-    possible_errors = _LLM_ERR_KEYS + [I18n.get(key) for key in _LLM_ERR_KEYS]
-    hit = await _wait_for_any_text(e2e_page, possible_errors, timeout_ms=30000)
-    assert hit, f"AI Brain 测试连接未显示错误 toast, 期望之一: {possible_errors}"
-    logger.info("AI Brain 测试连接错误路径验证通过: %s", hit)

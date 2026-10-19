@@ -341,9 +341,9 @@ class TestOnboardingDBIntegration:
             await onboarding_vm.next_step()
             assert onboarding_vm.current_step == 2
 
-            # 第二次 next_step：token 验证（fn_validate_token mock 返回 True），前进到 cloud_ai
+            # 第二次 next_step：token 验证（fn_validate_token mock 返回 True），前进到 model_scenario
             await onboarding_vm.next_step()
-            assert onboarding_vm.current_step == 3  # cloud_ai step
+            assert onboarding_vm.current_step == 3  # model_scenario step (S5 §11.6)
 
         # 验证 fn_validate_token 被调用
         assert onboarding_vm.fn_validate_token is not None

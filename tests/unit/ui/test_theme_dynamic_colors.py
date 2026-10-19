@@ -46,12 +46,9 @@ _CONSUMER_MAPS: list[tuple[str, str]] = [
     ("ui.views.backtest_view", "_CREDIBILITY_ACCENT_MAP"),
     ("ui.views.task_center_view", "_STATUS_COLOR_MAP"),
     ("ui.components.config_panels.tushare_config_panel", "_STATUS_COLOR_MAP"),
-    ("ui.components.config_panels.local_model_config_panel", "_STATUS_COLOR_MAP"),
-    ("ui.components.config_panels.llm_config_panel", "_STATUS_COLOR_MAP"),
     ("ui.components.config_panels.database_status_panel", "_STATUS_COLOR_MAP"),
     ("ui.components.config_panels.embedded_status_card", "_STATUS_COLOR_MAP"),
     ("ui.components.config_panels.external_pg_form", "_STATUS_COLOR_MAP"),
-    ("ui.components.config_panels.failover_config_panel", "_STATUS_COLOR_MAP"),
 ]
 
 # 直接使用自定义 Hex 的 config_panels 组件 → 必须订阅 AppColors 主题状态以触发重渲染.

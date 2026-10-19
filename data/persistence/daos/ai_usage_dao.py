@@ -43,6 +43,178 @@ _LEGACY_COST_KEY_PREFIX: Final[str] = "ai_cost:"
 SCOPE_SCENARIO: Final[str] = "scenario"
 SCOPE_CONNECTION: Final[str] = "connection"
 
+# ---------------------------------------------------------------------------
+# 使用记录读取（S5 UI 展示边界，模型统一.md §11.5）
+# 全部经 ``sa.text()`` 命名参数化（R4；无 f-string / %s / 字面量拼接）。
+# 终态 / 费用状态为「按 ai_attempt 派生」的展示列——invocation 表（0040 迁移 /
+# models.py）未存终态 / 费用状态列，故派生而非臆造存储列；派生口径见方法 docstring。
+# ---------------------------------------------------------------------------
+
+# 请求页派生查询：invocation LEFT JOIN 尝试聚合（a）与候选决策聚合（d）。
+# 连接 / 子任务过滤经 EXISTS（一个请求一行，天然去重，§11.5）。
+_REQUEST_PAGE_SELECT_SQL: Final[str] = """
+SELECT
+    r.invocation_id,
+    r.scenario_id,
+    r.trigger,
+    r.created_at,
+    r.updated_at,
+    r.is_test,
+    r.task_summary,
+    r.attempt_count,
+    r.total_duration_ms,
+    r.source_summary,
+    r.known_cost_cny,
+    r.priced_attempts,
+    CASE
+        WHEN r.succeeded_attempts > 0 THEN 'succeeded'
+        WHEN r.cancelled_attempts > 0 THEN 'cancelled'
+        WHEN r.dispatched_attempts > 0 THEN 'running'
+        WHEN r.failed_attempts > 0 THEN 'failed'
+        WHEN r.attempt_count = 0 AND r.skipped_decisions > 0 THEN 'skipped'
+        ELSE 'unknown'
+    END AS terminal_status,
+    CASE
+        WHEN r.attempt_count = 0 THEN NULL
+        WHEN r.priced_attempts = r.attempt_count THEN 'known'
+        WHEN r.priced_attempts = 0 AND r.unpriced_attempts = r.attempt_count THEN 'unpriced'
+        WHEN r.priced_attempts = 0 THEN 'unknown'
+        ELSE 'partial'
+    END AS cost_status
+FROM (
+    SELECT
+        i.invocation_id,
+        i.scenario_id,
+        i.trigger,
+        i.created_at,
+        i.updated_at,
+        (i.test_operation_id IS NOT NULL) AS is_test,
+        i.candidate_decisions,
+        COALESCE(a.attempt_count, 0) AS attempt_count,
+        COALESCE(a.succeeded_attempts, 0) AS succeeded_attempts,
+        COALESCE(a.failed_attempts, 0) AS failed_attempts,
+        COALESCE(a.cancelled_attempts, 0) AS cancelled_attempts,
+        COALESCE(a.dispatched_attempts, 0) AS dispatched_attempts,
+        COALESCE(a.priced_attempts, 0) AS priced_attempts,
+        COALESCE(a.unpriced_attempts, 0) AS unpriced_attempts,
+        a.total_duration_ms,
+        a.known_cost_cny,
+        a.source_summary,
+        a.task_summary,
+        COALESCE(d.skipped_decisions, 0) AS skipped_decisions
+    FROM ai_invocation i
+    LEFT JOIN (
+        SELECT
+            a.invocation_id,
+            COUNT(*)::int AS attempt_count,
+            COUNT(*) FILTER (WHERE a.status = 'succeeded')::int AS succeeded_attempts,
+            COUNT(*) FILTER (WHERE a.status = 'failed')::int AS failed_attempts,
+            COUNT(*) FILTER (WHERE a.status = 'cancelled')::int AS cancelled_attempts,
+            COUNT(*) FILTER (WHERE a.status = 'dispatched')::int AS dispatched_attempts,
+            COUNT(*) FILTER (WHERE a.cost_cny IS NOT NULL)::int AS priced_attempts,
+            COUNT(*) FILTER (WHERE a.usage_status = 'unavailable')::int AS unpriced_attempts,
+            SUM(a.duration_ms) AS total_duration_ms,
+            SUM(a.cost_cny) AS known_cost_cny,
+            string_agg(DISTINCT COALESCE(a.actual_model, a.configured_model, a.connection_id), ', ') AS source_summary,
+            string_agg(DISTINCT a.task_id, ', ') AS task_summary
+        FROM ai_attempt a
+        GROUP BY a.invocation_id
+    ) a ON a.invocation_id = i.invocation_id
+    LEFT JOIN (
+        SELECT
+            i2.invocation_id,
+            COUNT(*) FILTER (WHERE d->>'decision' = 'skipped')::int AS skipped_decisions
+        FROM ai_invocation i2,
+             jsonb_array_elements(COALESCE(i2.candidate_decisions, '[]'::jsonb)) AS d
+        GROUP BY i2.invocation_id
+    ) d ON d.invocation_id = i.invocation_id
+) r
+"""
+
+# 有序尝试明细（含候选序号 / retry_index / 状态 / 错误 / 价格快照 / 用量）。
+_REQUEST_ATTEMPTS_SQL: Final[str] = """
+SELECT
+    a.attempt_id,
+    a.task_id,
+    a.candidate_index,
+    a.retry_index,
+    a.connection_id,
+    a.status,
+    a.error_code,
+    a.actual_model,
+    a.configured_model,
+    a.duration_ms,
+    a.cost_cny,
+    a.usage_status,
+    a.input_total_tokens,
+    a.output_tokens
+FROM ai_attempt a
+WHERE a.invocation_id = :invocation_id
+ORDER BY a.task_id, a.candidate_index, a.retry_index, a.created_at
+"""
+
+# 跳过行来源：candidate_decisions（decision='skipped'）。仅取非敏感字段，
+# 不生成用量（§10.1：append_decision 不建 attempt、不增 usage）。
+_REQUEST_SKIPPED_DECISIONS_SQL: Final[str] = """
+SELECT
+    d->>'task_id' AS task_id,
+    d->>'candidate_index' AS candidate_index,
+    d->>'retry_index' AS retry_index,
+    d->>'connection_id' AS connection_id,
+    d->>'reason' AS reason
+FROM ai_invocation i,
+     jsonb_array_elements(COALESCE(i.candidate_decisions, '[]'::jsonb)) AS d
+WHERE i.invocation_id = :invocation_id
+  AND d->>'decision' = 'skipped'
+ORDER BY d->>'task_id', d->>'candidate_index', d->>'retry_index'
+"""
+
+# 已知费用：月汇总 scenario scope 合计（NULL 表示无数据 → None，禁伪零，R21）。
+_MONTH_KNOWN_COST_SQL: Final[str] = """
+SELECT SUM(cost_cny)
+FROM ai_usage_monthly
+WHERE month = :month AND aggregation_scope = :scope
+"""
+
+# 有效预留：归属月内、租约未过期的活跃预留金额合计（与 D3 口径一致）。
+_MONTH_EFFECTIVE_RESERVED_SQL: Final[str] = """
+SELECT SUM((elem->>'amount_cny')::numeric)
+FROM ai_invocation, jsonb_array_elements(reservations) AS elem
+WHERE elem->>'state' = ANY(CAST(:states AS text[]))
+  AND elem->>'amount_cny' IS NOT NULL
+  AND owner_lease_expires_at > (now() AT TIME ZONE 'UTC')
+  AND created_at >= :month_start
+  AND created_at < :next_month_start
+"""
+
+# 未确认预留：held_unconfirmed（不受租约是否过期影响，需人工处置）。
+_MONTH_UNCONFIRMED_RESERVED_SQL: Final[str] = """
+SELECT SUM((elem->>'amount_cny')::numeric)
+FROM ai_invocation, jsonb_array_elements(reservations) AS elem
+WHERE elem->>'state' = 'held_unconfirmed'
+  AND elem->>'amount_cny' IS NOT NULL
+  AND created_at >= :month_start
+  AND created_at < :next_month_start
+"""
+
+# 未确认预留明细（§11.5「未确认详情」）：逐条 reservation_id / 子任务 / 金额 / 归属月，
+# 供使用记录页按条解除；仅择非敏感字段（不返回 UUID 之外的凭据 / 正文）。
+# **不按当前月过滤**：预留可能跨月仍停留 held_unconfirmed，若只查当前月则历史遗漏永远
+# 无法解除，违反 §10.3「未确认预留需先明确处理」；按归属月升序展示便于识别陈欠。
+_UNCONFIRMED_RESERVATIONS_SQL: Final[str] = """
+SELECT
+    elem->>'reservation_id' AS reservation_id,
+    elem->>'task_id' AS task_id,
+    elem->>'amount_cny' AS amount_cny,
+    to_char((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM') AS billing_month
+FROM ai_invocation, jsonb_array_elements(reservations) AS elem
+WHERE elem->>'state' = 'held_unconfirmed'
+  AND elem->>'reservation_id' IS NOT NULL
+ORDER BY billing_month, elem->>'reservation_id'
+"""
+
+_LEGACY_MONTH_COST_SQL: Final[str] = "SELECT config_value FROM app_state WHERE config_key = :key"
+
 
 def parse_legacy_cents(raw: Any) -> Decimal:
     """legacy app_state ``ai_cost:{YYYYMM}`` 值（分）→ 元 Decimal（D3）。
@@ -60,6 +232,36 @@ def parse_legacy_cents(raw: Any) -> Decimal:
 def month_to_lock_key(month: str) -> int:
     """``"202610"`` → int 锁键（YYYYMM 数值）。"""
     return int(month)
+
+
+def _month_utc_bounds(month: str) -> tuple[datetime.datetime, datetime.datetime]:
+    """Asia/Shanghai 归属月 → 该月的 naive UTC 墙钟 ``[start, next_start)`` 边界。"""
+    tz = ZoneInfo("Asia/Shanghai")
+    year, mon = int(month[:4]), int(month[4:6])
+    start = datetime.datetime(year, mon, 1, tzinfo=tz).astimezone(datetime.UTC).replace(tzinfo=None)
+    next_year, next_mon = (year + 1, 1) if mon == 12 else (year, mon + 1)
+    next_start = datetime.datetime(next_year, next_mon, 1, tzinfo=tz).astimezone(datetime.UTC).replace(tzinfo=None)
+    return start, next_start
+
+
+def _to_int(value: Any) -> int | None:
+    """JSONB 文本值 → int；非法 / None 返回 None（不伪零）。"""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _decimal_or_zero(row: Any) -> Decimal:
+    """``fetchone`` 结果为 None / NULL / 坏值时返回 ``Decimal("0")``（事实零）。"""
+    if row is None or row[0] is None:
+        return Decimal("0")
+    try:
+        return Decimal(str(row[0]))
+    except (InvalidOperation, ValueError, ArithmeticError):
+        return Decimal("0")
 
 
 def _reservation_to_jsonb(r: BudgetReservation) -> dict[str, Any]:
@@ -447,6 +649,95 @@ class AIUsageDao(BaseDao):
             )
             return int(result.rowcount or 0)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def release_reservation(self, *, reservation_id: str) -> bool:
+        """解除未确认预留：``held_unconfirmed`` → ``released``（保留历史，不删除元素）。
+
+        §11.5：未确认详情「解除未确认预留」——只把该预留元素 state 改为 ``released``，
+        并记 ``released_at`` / ``released_reason``（保留历史记录，不删除、不改写既有已结算
+        费用）；预算摘要由 state 派生，改后未确认 / 有效预留自然扣除，无需改月汇总行（D3）。
+
+        锁序（§9.2 / §10.2）：先定位承载该预留的 invocation，再按其**归属月**取
+        ``pg_advisory_xact_lock``，最后改 invocation 行——与 ``try_reserve`` /
+        ``settle_attempt_usage`` 同序，避免跨月并发下与月汇总结算交错。无 owner 条件
+        （人工解除非 owner 身份绑定操作）。找不到该 reservation / 状态非
+        ``held_unconfirmed`` → rowcount=0 → 返回 False（不抛）。
+
+        R5：入口 ``_check_engine`` 守卫引擎状态。
+        """
+        self._check_engine(context="ai_usage.release_reservation")
+        released_at = datetime.datetime.now(datetime.UTC).replace(tzinfo=None).isoformat()
+        async with self._guarded_begin() as conn:
+            invocation_id = await self._reservation_holder(conn, reservation_id)
+            if invocation_id is None:
+                return False
+            lock_key = await self._invocation_month_key(conn, invocation_id)
+            await conn.execute(
+                sa.text("SELECT pg_advisory_xact_lock(:ns, :lock_key)"),
+                {"ns": _ADVISORY_LOCK_NAMESPACE, "lock_key": lock_key},
+            )
+            result = await conn.execute(
+                sa.text(
+                    """
+                    UPDATE ai_invocation
+                    SET reservations = (
+                            SELECT jsonb_agg(
+                                CASE
+                                    WHEN elem->>'reservation_id' = :reservation_id
+                                        AND elem->>'state' = 'held_unconfirmed'
+                                        THEN elem || jsonb_build_object(
+                                            'state', 'released',
+                                            'released_at', cast(:released_at as text),
+                                            'released_reason', 'manual'
+                                        )
+                                    ELSE elem
+                                END
+                            )
+                            FROM jsonb_array_elements(reservations) AS elem
+                        ),
+                        updated_at = (now() AT TIME ZONE 'UTC')
+                    WHERE invocation_id = :invocation_id
+                      AND EXISTS (
+                          SELECT 1 FROM jsonb_array_elements(reservations) AS e
+                          WHERE e->>'reservation_id' = :reservation_id
+                            AND e->>'state' = 'held_unconfirmed'
+                      )
+                    """
+                ),
+                {
+                    "reservation_id": reservation_id,
+                    "invocation_id": invocation_id,
+                    "released_at": released_at,
+                },
+            )
+            return bool(result.rowcount and result.rowcount > 0)
+
+    @staticmethod
+    async def _reservation_holder(conn: Any, reservation_id: str) -> str | None:
+        """承载该预留的 invocation_id（无锁读，随后月锁 + 条件 UPDATE 兜底 TOCTOU）。
+
+        同一 reservation_id 只属于一个 held_unconfirmed 元素；取 created_at 最新者以
+        对齐归属月判定。
+        """
+        row = (
+            await conn.execute(
+                sa.text(
+                    """
+                    SELECT invocation_id FROM ai_invocation
+                    WHERE EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(reservations) AS e
+                        WHERE e->>'reservation_id' = :reservation_id
+                          AND e->>'state' = 'held_unconfirmed'
+                    )
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {"reservation_id": reservation_id},
+            )
+        ).fetchone()
+        return None if row is None else str(row[0])
+
     # ------------------------------------------------------------------
     # 用量结算（D6，§10：迟到差额幂等整体推进）
     # ------------------------------------------------------------------
@@ -827,3 +1118,244 @@ class AIUsageDao(BaseDao):
             )
             rows = result.fetchall() if hasattr(result, "fetchall") else result.mappings().fetchall()
             return [dict(r._mapping) for r in rows]
+
+    # ------------------------------------------------------------------
+    # 使用记录读取（S5 UI 展示边界，模型统一.md §11.5）
+    # ------------------------------------------------------------------
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
+    async def read_request_page(
+        self,
+        *,
+        start: datetime.datetime | None = None,
+        end: datetime.datetime | None = None,
+        scenario_id: str | None = None,
+        task_id: str | None = None,
+        connection_id: str | None = None,
+        origin: str | None = None,
+        terminal_status: str | None = None,
+        cost_status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """请求分页（§11.5）：一份请求一行 + 总数，支持多维过滤、分页 50。
+
+        ``terminal_status`` / ``cost_status`` 为「按 ai_attempt 派生」的展示列
+        （见 ``_REQUEST_PAGE_SELECT_SQL``）：invocation 表未存终态 / 费用状态列，
+        故按尝试聚合派生而非臆造存储列。
+
+        ``origin``：``"test"`` → 测试请求（``test_operation_id IS NOT NULL``）；
+        ``"business"`` → 业务请求；其它值 ``raise ValueError``（不静默放宽）。
+
+        派生列过滤（``terminal_status`` / ``cost_status``）经外层包裹别名 ``p`` 引用
+        （PostgreSQL 不允许在 ``WHERE`` 引用 SELECT 输出列别名）；子任务 / 连接过滤经
+        ``EXISTS`` 子查询（一个请求一行，天然去重）。返回 ``(rows, total_count)``。
+        """
+        self._check_engine(context="ai_usage.read_request_page")
+        if origin is not None and origin not in ("test", "business"):
+            raise ValueError(f"unknown origin filter: {origin!r}")
+
+        clauses: list[str] = []
+        base_params: dict[str, Any] = {}
+        if start is not None:
+            clauses.append("p.created_at >= :start")
+            base_params["start"] = start
+        if end is not None:
+            clauses.append("p.created_at < :end")
+            base_params["end"] = end
+        if scenario_id is not None:
+            clauses.append("p.scenario_id = :scenario_id")
+            base_params["scenario_id"] = scenario_id
+        if task_id is not None:
+            clauses.append(
+                "(EXISTS (SELECT 1 FROM ai_attempt ta"
+                " WHERE ta.invocation_id = p.invocation_id AND ta.task_id = :task_id)"
+                " OR EXISTS (SELECT 1 FROM ai_invocation ti,"
+                " jsonb_array_elements(COALESCE(ti.candidate_decisions, '[]'::jsonb)) td"
+                " WHERE ti.invocation_id = p.invocation_id AND td->>'task_id' = :task_id))"
+            )
+            base_params["task_id"] = task_id
+        if connection_id is not None:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM ai_attempt ca"
+                " WHERE ca.invocation_id = p.invocation_id AND ca.connection_id = :connection_id)"
+            )
+            base_params["connection_id"] = connection_id
+        if origin == "test":
+            clauses.append("p.is_test = TRUE")
+        elif origin == "business":
+            clauses.append("p.is_test = FALSE")
+        if terminal_status is not None:
+            clauses.append("p.terminal_status = :terminal_status")
+            base_params["terminal_status"] = terminal_status
+        if cost_status is not None:
+            clauses.append("p.cost_status = :cost_status")
+            base_params["cost_status"] = cost_status
+
+        where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        # 外层包裹派生表别名 p：WHERE 只能引用 FROM 项，不能引用 SELECT 输出列别名
+        # （PG 语义），故把 WHERE 施加在包裹层、并以 p.<派生列> 引用。
+        filtered_sql = "\n".join(["SELECT * FROM (", _REQUEST_PAGE_SELECT_SQL, ") AS p", where_sql])
+        page_sql = "\n".join(
+            [
+                filtered_sql,
+                "ORDER BY p.created_at DESC, p.invocation_id",
+                "LIMIT :limit OFFSET :offset",
+            ]
+        )
+        count_sql = "\n".join(["SELECT COUNT(*) AS total_cnt FROM (", filtered_sql, ") AS t"])
+        page_params = {**base_params, "limit": int(limit), "offset": int(offset)}
+
+        async with self._guarded_begin() as conn:
+            page_rows = (await conn.execute(sa.text(page_sql), page_params)).mappings().fetchall()
+            count_row = (await conn.execute(sa.text(count_sql), dict(base_params))).fetchone()
+
+        total = int(count_row[0]) if count_row is not None and count_row[0] is not None else 0
+        return [dict(row) for row in page_rows], total
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def read_request_attempts(self, *, invocation_id: str) -> list[dict[str, Any]]:
+        """请求的有序尝试明细（§11.5）。
+
+        实际尝试行（``ai_attempt``）标 ``kind="attempt", executed=True``，含候选
+        序号 / retry_index / 终态 / 失败原因（error_code）/ 价格快照 / 用量。
+
+        跳过行来自 ``candidate_decisions``（``decision="skipped"``），标
+        ``kind="skipped", executed=False, status="skipped"``，用量字段全 ``None``
+        （§10.1：跳过决策不建 attempt、不增 usage，禁止返回虚构用量，R21）。
+        """
+        self._check_engine(context="ai_usage.read_request_attempts")
+        async with self._guarded_begin() as conn:
+            attempt_rows = (
+                (await conn.execute(sa.text(_REQUEST_ATTEMPTS_SQL), {"invocation_id": invocation_id}))
+                .mappings()
+                .fetchall()
+            )
+            skipped_rows = (
+                (await conn.execute(sa.text(_REQUEST_SKIPPED_DECISIONS_SQL), {"invocation_id": invocation_id}))
+                .mappings()
+                .fetchall()
+            )
+
+        records: list[dict[str, Any]] = []
+        for row in attempt_rows:
+            d = dict(row)
+            records.append(
+                {
+                    "kind": "attempt",
+                    "executed": True,
+                    "task_id": d.get("task_id"),
+                    "candidate_index": _to_int(d.get("candidate_index")),
+                    "retry_index": _to_int(d.get("retry_index")),
+                    "connection_id": d.get("connection_id"),
+                    "status": d.get("status"),
+                    "reason": d.get("error_code"),
+                    "actual_model": d.get("actual_model"),
+                    "configured_model": d.get("configured_model"),
+                    "duration_ms": d.get("duration_ms"),
+                    "cost_cny": d.get("cost_cny"),
+                    "usage_status": d.get("usage_status"),
+                    "input_total_tokens": d.get("input_total_tokens"),
+                    "output_tokens": d.get("output_tokens"),
+                }
+            )
+        for row in skipped_rows:
+            d = dict(row)
+            records.append(
+                {
+                    "kind": "skipped",
+                    "executed": False,
+                    "task_id": d.get("task_id"),
+                    "candidate_index": _to_int(d.get("candidate_index")),
+                    "retry_index": _to_int(d.get("retry_index")),
+                    "connection_id": d.get("connection_id"),
+                    "status": "skipped",
+                    "reason": d.get("reason"),
+                    "actual_model": None,
+                    "configured_model": None,
+                    "duration_ms": None,
+                    "cost_cny": None,
+                    "usage_status": None,
+                    "input_total_tokens": None,
+                    "output_tokens": None,
+                }
+            )
+        records.sort(
+            key=lambda r: (
+                r["task_id"] or "",
+                r["candidate_index"] if r["candidate_index"] is not None else -1,
+                r["retry_index"] if r["retry_index"] is not None else -1,
+            )
+        )
+        return records
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def read_budget_summary(self, *, month: str) -> dict[str, Any]:
+        """月度预算摘要（§11.5）：已知费用 / 有效预留 / 未确认预留三者独立。
+
+        - ``known_cny``：已结算费用（月汇总 scenario scope 合计）+ legacy 汇总
+          （app_state ``ai_cost:{YYYYMM}``，分→元）；两者皆无数据 → ``None``
+          （未知禁伪零，R21）。
+        - ``effective_reserved_cny``：有效预留（租约未过期活跃预留金额合计）；
+          无预留 → ``0``（事实零，非未知）。
+        - ``unconfirmed_reserved_cny``：未确认预留（``held_unconfirmed``，不受租约
+          影响，需人工处置）；无 → ``0``。
+        """
+        self._check_engine(context="ai_usage.read_budget_summary")
+        month_start, next_month_start = _month_utc_bounds(month)
+        async with self._guarded_begin() as conn:
+            known_row = (
+                await conn.execute(sa.text(_MONTH_KNOWN_COST_SQL), {"month": month, "scope": SCOPE_SCENARIO})
+            ).fetchone()
+            effective_row = (
+                await conn.execute(
+                    sa.text(_MONTH_EFFECTIVE_RESERVED_SQL),
+                    {
+                        "states": list(_ACTIVE_RESERVATION_STATES),
+                        "month_start": month_start,
+                        "next_month_start": next_month_start,
+                    },
+                )
+            ).fetchone()
+            unconfirmed_row = (
+                await conn.execute(
+                    sa.text(_MONTH_UNCONFIRMED_RESERVED_SQL),
+                    {"month_start": month_start, "next_month_start": next_month_start},
+                )
+            ).fetchone()
+            legacy_row = (
+                await conn.execute(
+                    sa.text(_LEGACY_MONTH_COST_SQL),
+                    {"key": f"{_LEGACY_COST_KEY_PREFIX}{month}"},
+                )
+            ).fetchone()
+
+        settled = known_row[0] if known_row is not None else None
+        legacy_raw = legacy_row[0] if legacy_row is not None else None
+        if settled is None and legacy_raw is None:
+            known: Decimal | None = None
+        else:
+            known = (Decimal(str(settled)) if settled is not None else Decimal("0")) + parse_legacy_cents(legacy_raw)
+
+        return {
+            "month": month,
+            "known_cny": known,
+            "effective_reserved_cny": _decimal_or_zero(effective_row),
+            "unconfirmed_reserved_cny": _decimal_or_zero(unconfirmed_row),
+        }
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def read_unconfirmed_reservations(self) -> list[dict[str, Any]]:
+        """全局未确认预留明细（§11.5「未确认详情」）。
+
+        逐条返回 ``reservation_id`` / ``task_id`` / ``amount_cny``（金额为 JSONB 文本，
+        缺失 / 无法解析时保持原值或 None，不伪零，R21）与 ``billing_month``（Asia/Shanghai
+        归属月），供使用记录页按条「解除未确认预留」。
+
+        不按当前月过滤：预留可能跨月仍停留 ``held_unconfirmed``，只查当前月会让历史遗留
+        永远无法解除，违反 §10.3「未确认预留需先明确处理」后方可清理的约束。
+        """
+        self._check_engine(context="ai_usage.read_unconfirmed_reservations")
+        async with self._guarded_begin() as conn:
+            rows = (await conn.execute(sa.text(_UNCONFIRMED_RESERVATIONS_SQL))).mappings().fetchall()
+        return [dict(r) for r in rows]

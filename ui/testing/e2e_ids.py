@@ -209,6 +209,129 @@ class _WizardIds:
     RISK_ACK: Eid = ("e2e.wizard.risk_ack", AnchorKind.COMPLEX)
 
 
+class _ModelIds:
+    """模型管理（S5「模型与场景配置」双入口）anchor 命名空间 (e2e.model.*)。
+
+    承载两条入口共用组件的 anchor：
+    - 设置页 AI 大脑「模型管理」三页签（``tab(role)``, role ∈ connection/routes/usage）
+      及各页关键交互：连接表单 / 场景编辑器 / 使用记录；
+    - 场景编辑器三场景导航（``scenario_tab(scenario_id)``）与候选行排序 / 移除
+      动态 anchor（``move_up`` / ``move_down`` / ``remove``）；
+    - 向导模型阶段三子步骤指示器（``substep(index)``）与末子步骤「保存并继续」按钮。
+
+    Tab / 场景导航按钮的 identifier 挂在 ``ft.Tab`` 的 label 控件上（对齐 nav label
+    以 ``anchored`` 包裹 label 的既有模式），``AnchorKind=INTERACTIVE`` 走 identifier
+    节点自身 bbox 的物理鼠标点击。
+    """
+
+    _TAB_PREFIX = "e2e.model.tab"
+    _SCENARIO_TAB_PREFIX = "e2e.model.scenario_tab"
+    _SUBSTEP_PREFIX = "e2e.model.substep"
+    _MOVE_UP_PREFIX = "e2e.model.move_up"
+    _MOVE_DOWN_PREFIX = "e2e.model.move_down"
+    _REMOVE_PREFIX = "e2e.model.remove"
+    _EGRESS_GRANT_PREFIX = "e2e.model.egress_grant"
+    _EGRESS_REVOKE_PREFIX = "e2e.model.egress_revoke"
+
+    # --- 设置页三页签页头 / 页内关键交互 ---
+    ADD_CONNECTION: Eid = ("e2e.model.add_connection", AnchorKind.INTERACTIVE)
+    SEARCH_INPUT: Eid = ("e2e.model.search_input", AnchorKind.INPUT)
+    STATUS_FILTER: Eid = ("e2e.model.status_filter", AnchorKind.COMPLEX)
+    EDITOR_PREV: Eid = ("e2e.model.editor_prev", AnchorKind.INTERACTIVE)
+    EDITOR_NEXT: Eid = ("e2e.model.editor_next", AnchorKind.INTERACTIVE)
+    EDITOR_TEST: Eid = ("e2e.model.editor_test", AnchorKind.INTERACTIVE)
+    EDITOR_SAVE: Eid = ("e2e.model.editor_save", AnchorKind.INTERACTIVE)
+    EDITOR_RESOLVE: Eid = ("e2e.model.editor_resolve", AnchorKind.INTERACTIVE)
+    # 连接表单关键字段（创建三步与编辑入口共用组件；向导内嵌复用同一 anchor）。
+    NAME_INPUT: Eid = ("e2e.model.name_input", AnchorKind.INPUT)
+    ADAPTER_DROPDOWN: Eid = ("e2e.model.adapter_dropdown", AnchorKind.COMPLEX)
+    MODEL_INPUT: Eid = ("e2e.model.model_input", AnchorKind.INPUT)
+    CREDENTIAL_INPUT: Eid = ("e2e.model.credential_input", AnchorKind.INPUT)
+    API_BASE_INPUT: Eid = ("e2e.model.api_base_input", AnchorKind.INPUT)
+
+    # --- 场景编辑器关键交互 ---
+    ROUTES_SAVE_CURRENT: Eid = ("e2e.model.routes_save_current", AnchorKind.INTERACTIVE)
+    ADD_CANDIDATE: Eid = ("e2e.model.add_candidate", AnchorKind.INTERACTIVE)
+    UNDO: Eid = ("e2e.model.undo", AnchorKind.INTERACTIVE)
+    ADVANCED_TOGGLE: Eid = ("e2e.model.advanced_toggle", AnchorKind.INTERACTIVE)
+    PICKER_SEARCH: Eid = ("e2e.model.picker_search", AnchorKind.INPUT)
+    PICKER_CLOSE: Eid = ("e2e.model.picker_close", AnchorKind.INTERACTIVE)
+
+    # --- 使用记录关键交互 ---
+    USE_START_FILTER: Eid = ("e2e.model.use_start_filter", AnchorKind.INPUT)
+    USE_END_FILTER: Eid = ("e2e.model.use_end_filter", AnchorKind.INPUT)
+    USE_SCENARIO_FILTER: Eid = ("e2e.model.use_scenario_filter", AnchorKind.COMPLEX)
+    USE_TASK_FILTER: Eid = ("e2e.model.use_task_filter", AnchorKind.COMPLEX)
+    USE_CONNECTION_FILTER: Eid = ("e2e.model.use_connection_filter", AnchorKind.COMPLEX)
+    USE_TERMINAL_FILTER: Eid = ("e2e.model.use_terminal_filter", AnchorKind.COMPLEX)
+    USE_COST_FILTER: Eid = ("e2e.model.use_cost_filter", AnchorKind.COMPLEX)
+    USE_ORIGIN_FILTER: Eid = ("e2e.model.use_origin_filter", AnchorKind.COMPLEX)
+    USE_ENTER_MONTHLY: Eid = ("e2e.model.use_enter_monthly", AnchorKind.INTERACTIVE)
+    USE_EXPORT: Eid = ("e2e.model.use_export", AnchorKind.INTERACTIVE)
+    USE_PREV_PAGE: Eid = ("e2e.model.use_prev_page", AnchorKind.INTERACTIVE)
+    USE_NEXT_PAGE: Eid = ("e2e.model.use_next_page", AnchorKind.INTERACTIVE)
+
+    # --- 向导模型阶段 ---
+    # 末子步骤(3)由「保存并继续」原子提交本阶段全部差异；前两子步骤仍为 WIZARD.NEXT_BUTTON。
+    SAVE_AND_CONTINUE: Eid = ("e2e.model.save_and_continue", AnchorKind.INTERACTIVE)
+
+    @staticmethod
+    def tab(role: str) -> Eid:
+        """生成「模型管理」页签 label anchor（role ∈ connection/routes/usage）。
+
+        identifier 挂在 ``ft.Tab(label=anchored(...))`` 的 label 控件上；点击 label
+        中心触发 Flutter Tab 切换（对齐 nav label 的事件冒泡模式）。
+
+        Precondition: role 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
+        """
+        return (f"{_ModelIds._TAB_PREFIX}.{role}", AnchorKind.INTERACTIVE)
+
+    @staticmethod
+    def scenario_tab(scenario_id: str) -> Eid:
+        """生成场景编辑器场景导航按钮 anchor（scenario_id ∈ news_annotation/stock_analysis/news_risk）。
+
+        Precondition: scenario_id 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
+        """
+        return (f"{_ModelIds._SCENARIO_TAB_PREFIX}.{scenario_id}", AnchorKind.INTERACTIVE)
+
+    @staticmethod
+    def substep(index: int) -> Eid:
+        """生成向导模型阶段第 index 子步骤指示器 anchor（LABEL, 存在性 / 高亮探测）。
+
+        Precondition: index ∈ {1, 2, 3}。
+        """
+        return (f"{_ModelIds._SUBSTEP_PREFIX}.{index}", AnchorKind.LABEL)
+
+    @staticmethod
+    def move_up(connection_id: str) -> Eid:
+        """生成候选行「上移」按钮 anchor（INTERACTIVE）。"""
+        return (f"{_ModelIds._MOVE_UP_PREFIX}.{connection_id}", AnchorKind.INTERACTIVE)
+
+    @staticmethod
+    def move_down(connection_id: str) -> Eid:
+        """生成候选行「下移」按钮 anchor（INTERACTIVE）。"""
+        return (f"{_ModelIds._MOVE_DOWN_PREFIX}.{connection_id}", AnchorKind.INTERACTIVE)
+
+    @staticmethod
+    def remove(connection_id: str) -> Eid:
+        """生成候选行「移除」按钮 anchor（INTERACTIVE）。"""
+        return (f"{_ModelIds._REMOVE_PREFIX}.{connection_id}", AnchorKind.INTERACTIVE)
+
+    @staticmethod
+    def egress_grant(connection_id: str) -> Eid:
+        """生成场景检查区「授权外发」按钮 anchor（INTERACTIVE）。
+
+        授权摘要区按候选连接逐条渲染；identifier 含 connection_id 以区分同场景多候选。
+        Precondition: connection_id 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
+        """
+        return (f"{_ModelIds._EGRESS_GRANT_PREFIX}.{connection_id}", AnchorKind.INTERACTIVE)
+
+    @staticmethod
+    def egress_revoke(connection_id: str) -> Eid:
+        """生成场景检查区「撤销授权」按钮 anchor（INTERACTIVE）。"""
+        return (f"{_ModelIds._EGRESS_REVOKE_PREFIX}.{connection_id}", AnchorKind.INTERACTIVE)
+
+
 class _TushareIds:
     """Tushare 配置面板 anchor 命名空间（设置 data tab 与 onboarding wizard 复用）。
 
@@ -293,6 +416,7 @@ class EIDS:
     DATA = _DataIds
     BACKTEST = _BacktestIds
     WIZARD = _WizardIds
+    MODEL = _ModelIds
     TUSHARE = _TushareIds
     NAV = _NavIds
     HOME = _HomeIds

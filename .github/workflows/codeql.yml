@@ -7,12 +7,16 @@ on:
       - '**.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
+      - '.github/codeql/**'
+      - '.github/workflows/codeql.yml'
   pull_request:
     branches: [main]
     paths:
       - '**.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
+      - '.github/codeql/**'
+      - '.github/workflows/codeql.yml'
   schedule:
     - cron: "0 5 * * 1"
   workflow_dispatch:
@@ -36,7 +40,6 @@ jobs:
         uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d  # v4.38.3
         with:
           languages: python
-          queries: security-and-quality
           config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL Analysis
