@@ -53,7 +53,7 @@ dependencies = [
     "filelock>=3.15.0",  # S1 统一模型管理：配置文件跨进程锁（§5.1）
     "cachetools>=7.2.0",
     "pydantic>=2.13.5",
-    "aiohttp>=3.14.3",  # Security: CVE-2026-69244/69243/59881 fixed in 3.14.3
+    "aiohttp>=3.14.4",  # Security: CVE-2026-111064/GHSA-2g87-pp6c-29x5/CVE-2026-111063 fixed in 3.14.4
     "pillow>=12.3.0",  # Security: PYSEC-2026-2253~2257 (decompression bomb + shell injection) fixed in 12.3.0
     "soupsieve>=2.9.0",  # Security: CVE-2026-85999/86000 (ReDoS) fixed in 2.9.0; transitive via beautifulsoup4 (akshare/bs4)
     "oauthlib>=4.0.0",  # Security: CVE-2026-49265 (PKCE timing side-channel, CWE-208) fixed in 4.0.0; transitive via flet (flet requires oauthlib>=3.2.2)
