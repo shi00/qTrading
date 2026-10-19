@@ -7,12 +7,16 @@ on:
       - '**.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
+      - '.github/codeql/**'
+      - '.github/workflows/codeql.yml'
   pull_request:
     branches: [main]
     paths:
       - '**.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
+      - '.github/codeql/**'
+      - '.github/workflows/codeql.yml'
   schedule:
     - cron: "0 5 * * 1"
   workflow_dispatch:

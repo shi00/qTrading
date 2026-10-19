@@ -11,3 +11,6 @@ paths-ignore:
 
 queries:
   - uses: security-and-quality
+  # 显式纳入告警抑制查询：security-and-quality 套件不含 py/alert-suppression，
+  # 缺失时源码内 `# codeql[...]` 抑制注释不生效（见 core/i18n.py 对命名启发式误报的抑制）。
+  - uses: codeql/python-queries:AlertSuppression.ql
