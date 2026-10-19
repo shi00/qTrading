@@ -86,6 +86,7 @@ class ModelConfigurationService:
                 scenario_routes=tuple(MappingProxyType(r) for r in mm["scenario_routes"]),
                 usage_policy=MappingProxyType(mm["usage_policy"]),
                 security_revision=mm["security_state"]["security_revision"],
+                security_grants=tuple(MappingProxyType(g) for g in mm["security_state"]["grants"]),
                 created_at=_utc_now_iso(),
             )
 

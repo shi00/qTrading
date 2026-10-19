@@ -82,24 +82,13 @@ STEP_CONFIGS = [
         validate_before_next=True,
     ),
     StepConfig(
-        id="cloud_ai",
-        name="wizard_step_cloud_ai",
-        show_prev=True,
-        show_next=True,
-        next_text_key="wizard_btn_verify_next",
-        next_icon="ARROW_FORWARD",
-        # FR-UX-001: 云端 AI 可选化，允许无 API Key 用户跳过（skip_step 不触发校验，
-        # validate_before_next=True 保留：用户点「下一步」仍走连接验证；
-        # block_on_missing_validator=False：未绑定 validator 时不阻断，与 local_model 一致）
-        show_skip=True,
-        skip_text_key="wizard_btn_skip",
-        required=False,
-        validate_before_next=True,
-        block_on_missing_validator=False,
-    ),
-    StepConfig(
-        id="local_model",
-        name="wizard_step_local_model",
+        id="model_scenario",
+        # FR-UX-001 + S5 §11.6: 原「云端 AI」与「本地模型」两步合并为「模型与场景配置」单步，
+        # 含连接信息 / 统计方式 / 场景与检查三子步骤（子步骤号由 View 本地 use_state 承载）。
+        # 可选（show_skip=True, required=False）：允许用户「暂不配置 AI」跳过。
+        # validate_before_next=True + block_on_missing_validator=False：宿主「保存并继续」
+        # 经绑定 validator 原子提交本阶段全部差异；未绑定 validator 时不阻断。
+        name="wizard_step_model_scenario",
         show_prev=True,
         show_next=True,
         next_text_key="wizard_btn_verify_next",
@@ -185,6 +174,9 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         # --- Panel operation callbacks (View injects, View→VM function) ---
         self.fn_validate_database: Callable[[], Awaitable[bool]] | None = None
         self.fn_validate_token: Callable[[], Awaitable[bool]] | None = None
+        # S5 §11.6: 原云端 AI / 本地模型两步合并为 model_scenario 单步的 validator。
+        self.fn_validate_model_scenario: Callable[[], Awaitable[bool]] | None = None
+        # 兼容旧调用方（集成测试等）仍按旧名注入的 validator（bind 时组合进 model_scenario）。
         self.fn_validate_cloud_ai: Callable[[], Awaitable[bool]] | None = None
         self.fn_validate_local_model: Callable[[], Awaitable[bool]] | None = None
         self.fn_push_schedule_state: Callable[[], None] | None = None
@@ -299,17 +291,48 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         *,
         fn_validate_database: Callable[[], Awaitable[bool]],
         fn_validate_token: Callable[[], Awaitable[bool]],
-        fn_validate_cloud_ai: Callable[[], Awaitable[bool]],
-        fn_validate_local_model: Callable[[], Awaitable[bool]],
         fn_push_schedule_state: Callable[[], None],
         on_complete: Callable[[], Awaitable[None]],
+        fn_validate_model_scenario: Callable[[], Awaitable[bool]] | None = None,
+        fn_validate_cloud_ai: Callable[[], Awaitable[bool]] | None = None,
+        fn_validate_local_model: Callable[[], Awaitable[bool]] | None = None,
     ):
+        """注入 View→VM 回调。
+
+        S5 §11.6 合并后，模型阶段由单一 ``fn_validate_model_scenario`` 承载；为兼容旧调用方
+        （如集成测试仍按 ``fn_validate_cloud_ai`` / ``fn_validate_local_model`` 注入），
+        当未提供新回调时，将旧两步 validator 以 AND 短路组合为 ``model_scenario`` 回调。
+        """
         self.fn_validate_database = fn_validate_database
         self.fn_validate_token = fn_validate_token
         self.fn_validate_cloud_ai = fn_validate_cloud_ai
         self.fn_validate_local_model = fn_validate_local_model
+        self.fn_validate_model_scenario = fn_validate_model_scenario
+        if self.fn_validate_model_scenario is None and (
+            fn_validate_cloud_ai is not None or fn_validate_local_model is not None
+        ):
+            self.fn_validate_model_scenario = self._combine_legacy_model_validators(
+                fn_validate_cloud_ai, fn_validate_local_model
+            )
         self.fn_push_schedule_state = fn_push_schedule_state
         self.on_complete = on_complete
+
+    @staticmethod
+    def _combine_legacy_model_validators(
+        cloud_ai: Callable[[], Awaitable[bool]] | None,
+        local_model: Callable[[], Awaitable[bool]] | None,
+    ) -> Callable[[], Awaitable[bool]]:
+        """把旧两步（cloud_ai / local_model）validator 组合为 model_scenario 单一 validator。
+
+        两者均通过方视为通过（AND 短路），保持旧调用方的语义不丢失。
+        """
+
+        async def _combined() -> bool:
+            if cloud_ai is not None and not await cloud_ai():
+                return False
+            return not (local_model is not None and not await local_model())
+
+        return _combined
 
     def dispose(self):
         if self._state.sync_in_progress:
@@ -322,6 +345,7 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         LocalModelManager.cancel_verification_if_active()
         self.fn_validate_database = None
         self.fn_validate_token = None
+        self.fn_validate_model_scenario = None
         self.fn_validate_cloud_ai = None
         self.fn_validate_local_model = None
         self.fn_push_schedule_state = None
@@ -384,8 +408,7 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         validators: dict[str, Callable[[], Awaitable[bool]] | None] = {
             "database": self.fn_validate_database,
             "token": self.fn_validate_token,
-            "cloud_ai": self.fn_validate_cloud_ai,
-            "local_model": self.fn_validate_local_model,
+            "model_scenario": self.fn_validate_model_scenario,
             "schedule": self._validate_and_save_schedule,
         }
 

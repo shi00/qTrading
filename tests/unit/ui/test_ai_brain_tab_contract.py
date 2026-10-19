@@ -159,23 +159,19 @@ class TestAIBrainTabContract:
         """DoD: 必须通过 use_viewmodel hook 消费子 VM。"""
         assert "use_viewmodel" in _raw_source(), "必须使用 use_viewmodel hook"
 
-    def test_consumes_llm_config_panel(self):
-        """DoD: 必须函数调用消费 LLMConfigPanel (vm props 推送)。"""
-        assert "LLMConfigPanel(" in _code_source(), "必须函数调用 LLMConfigPanel(vm=llm_vm)"
-
-    def test_consumes_failover_config_panel(self):
-        """DoD: 必须函数调用消费 FailoverConfigPanel (vm props 推送)。"""
-        assert "FailoverConfigPanel(" in _code_source(), "必须函数调用 FailoverConfigPanel(vm=failover_vm)"
-
-    def test_consumes_local_model_config_panel(self):
-        """DoD: 必须函数调用消费 LocalModelConfigPanel (vm props 推送)。"""
-        assert "LocalModelConfigPanel(" in _code_source(), "必须函数调用 LocalModelConfigPanel(vm=local_vm)"
-
-    def test_consumes_news_sentiment_config_panel(self):
-        """DoD: 必须函数调用消费 NewsSentimentConfigPanel (N5-4 文件选择器子面板)。"""
-        assert "NewsSentimentConfigPanel(" in _code_source(), (
-            "必须函数调用 NewsSentimentConfigPanel(vm=ai_settings_vm, on_submit_save=...)"
+    def test_consumes_model_management_panel(self):
+        """DoD: S5 §11.1 必须函数调用消费 ModelManagementPanel (模型管理三页签)。"""
+        assert "ModelManagementPanel(" in _code_source(), (
+            "必须函数调用 ModelManagementPanel(connections_vm, routes_vm, usage_vm, ...)"
         )
+
+    def test_no_longer_consumes_legacy_config_panels(self):
+        """DoD: S5 后模型连接配置迁出, 本页不再消费旧 config panel。"""
+        code = _code_source()
+        assert "LLMConfigPanel(" not in code, "S5 后不应再消费 LLMConfigPanel"
+        assert "FailoverConfigPanel(" not in code, "S5 后不应再消费 FailoverConfigPanel"
+        assert "LocalModelConfigPanel(" not in code, "S5 后不应再消费 LocalModelConfigPanel"
+        assert "NewsSentimentConfigPanel(" not in code, "S5 后不应再消费 NewsSentimentConfigPanel"
 
     def test_no_page_ref_param(self):
         """DoD: AIBrainTab 签名不应包含 page_ref 参数 (声明式用 ft.context.page)。"""
@@ -362,35 +358,3 @@ class TestValidatePromptOrWarn:
         show_snack.assert_called_once()
         msg = show_snack.call_args.args[0]
         assert "err length max=8000" in msg
-
-
-class TestShowSavedSnack:
-    """_show_saved_snack 模块级纯函数测试 (配置保存成功 snack)。"""
-
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"i18n[{key}]"
-        self.patches = [
-            patch("ui.views.settings_tabs.ai_brain_tab.I18n", self.mock_i18n),
-            patch("ui.views.settings_tabs.ai_brain_tab.AppColors", self.mock_ac),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def test_calls_show_snack_with_success_color(self):
-        """调用 show_snack 传入 settings_verify_success 文案 + SUCCESS 颜色。"""
-        from ui.views.settings_tabs.ai_brain_tab import _show_saved_snack
-
-        show_snack = MagicMock()
-        _show_saved_snack(show_snack)
-
-        show_snack.assert_called_once_with(
-            "i18n[settings_verify_success]",
-            color=self.mock_ac.SUCCESS,
-        )

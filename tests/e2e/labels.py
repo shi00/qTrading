@@ -25,6 +25,34 @@ _LANGUAGE_LABEL_KEYS: dict[str, str] = {
     "en_US": "settings_lang_en",
 }
 
+# 「模型管理」页签 role → i18n label key（与 ui/components/model_management_panel 页签顺序对齐）
+_MODEL_TAB_LABEL_KEYS: dict[str, str] = {
+    "connection": "model_management_tab_connections",
+    "routes": "model_management_tab_routes",
+    "usage": "model_management_tab_usage",
+}
+
+# 连接状态过滤 key → i18n label key（与 model_management_panel._STATUS_FILTER_KEYS 对齐）
+_MODEL_STATUS_FILTER_KEYS: dict[str, str] = {
+    "all": "model_management_filter_all",
+    "enabled": "model_management_filter_enabled",
+    "disabled": "model_management_filter_disabled",
+}
+
+# 使用记录来源过滤 key → i18n label key（与 model_management_panel._ORIGIN_FILTER_KEYS 对齐）
+_MODEL_ORIGIN_FILTER_KEYS: dict[str, str] = {
+    "all": "model_management_filter_all",
+    "business": "model_usage_origin_business",
+    "test": "model_usage_origin_test",
+}
+
+# 场景 id → i18n label key（与 scenario_route_editor._SCENARIO_LABEL_KEYS 对齐）
+_MODEL_SCENARIO_LABEL_KEYS: dict[str, str] = {
+    "news_annotation": "model_routes_scenario_news_annotation",
+    "stock_analysis": "model_routes_scenario_stock_analysis",
+    "news_risk": "model_routes_scenario_news_risk",
+}
+
 
 def strategy_label(strategy_key: str) -> str:
     """根据策略 key 返回本地化显示名。
@@ -49,4 +77,28 @@ def theme_label(theme_key: str) -> str:
 def language_label(lang_key: str) -> str:
     """根据语言 key 返回本地化文案。"""
     label_key = _LANGUAGE_LABEL_KEYS.get(lang_key, f"settings_lang_{lang_key}")
+    return I18n.get(label_key)
+
+
+def model_tab_label(role: str) -> str:
+    """根据「模型管理」页签 role 返回本地化文案（role ∈ connection/routes/usage）。"""
+    label_key = _MODEL_TAB_LABEL_KEYS.get(role, f"model_management_tab_{role}")
+    return I18n.get(label_key)
+
+
+def model_status_filter_label(filter_key: str) -> str:
+    """根据连接状态过滤 key 返回本地化选项文案（all/enabled/disabled）。"""
+    label_key = _MODEL_STATUS_FILTER_KEYS.get(filter_key, filter_key)
+    return I18n.get(label_key)
+
+
+def model_origin_filter_label(filter_key: str) -> str:
+    """根据使用记录来源过滤 key 返回本地化选项文案（all/business/test）。"""
+    label_key = _MODEL_ORIGIN_FILTER_KEYS.get(filter_key, filter_key)
+    return I18n.get(label_key)
+
+
+def model_scenario_label(scenario_id: str) -> str:
+    """根据场景 id 返回本地化导航文案（news_annotation/stock_analysis/news_risk）。"""
+    label_key = _MODEL_SCENARIO_LABEL_KEYS.get(scenario_id, scenario_id)
     return I18n.get(label_key)

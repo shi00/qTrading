@@ -396,3 +396,324 @@ class TestTablesExist:
 
         pk_cols = [c.name for c in AiInvocation.__table__.primary_key.columns]
         assert pk_cols == ["invocation_id"]
+
+
+class _StubResult:
+    """读取结果桩：分别支持 ``.mappings().fetchall()`` 与 ``.fetchone()``。"""
+
+    def __init__(self, *, rows=None, one=None):
+        self._rows = list(rows or [])
+        self._one = one
+
+    def mappings(self):
+        m = MagicMock()
+        m.fetchall = MagicMock(return_value=list(self._rows))
+        return m
+
+    def fetchall(self):
+        return list(self._rows)
+
+    def fetchone(self):
+        return self._one
+
+
+class _QueueConn:
+    """按预设结果序列依次返回的读连接桩。"""
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls: list[tuple[str, Any]] = []
+
+    async def execute(self, sql, params=None):
+        self.calls.append((str(sql), params))
+        return self.results.pop(0)
+
+
+class TestReadRequestPage:
+    @pytest.mark.asyncio
+    async def test_returns_rows_and_total(self):
+        """read_request_page：映射行 + 总数计数，SQL 参数化 limit/offset。"""
+        rows = [
+            {
+                "invocation_id": "inv-1",
+                "scenario_id": "news_sentiment",
+                "terminal_status": "succeeded",
+                "cost_status": "known",
+            }
+        ]
+        conn = _QueueConn([_StubResult(rows=rows), _StubResult(one=(3,))])
+        dao = _dao(conn)
+        records, total = await dao.read_request_page(scenario_id="news_sentiment", limit=50, offset=0)
+        assert records == [
+            {
+                "invocation_id": "inv-1",
+                "scenario_id": "news_sentiment",
+                "terminal_status": "succeeded",
+                "cost_status": "known",
+            }
+        ]
+        assert total == 3
+        page_sql, page_params = conn.calls[0]
+        assert "ai_invocation" in page_sql
+        assert "ai_attempt" in page_sql
+        assert "LIMIT :limit OFFSET :offset" in page_sql
+        assert page_params["scenario_id"] == "news_sentiment"
+        assert page_params["limit"] == 50 and page_params["offset"] == 0
+        count_sql, _count_params = conn.calls[1]
+        assert "COUNT(" in count_sql.upper()
+        assert "ai_invocation" in count_sql
+
+    @pytest.mark.asyncio
+    async def test_connection_filter_uses_exists_to_dedupe_requests(self):
+        """连接过滤经 EXISTS 子查询 → 一个请求一行，天然去重（§11.5）。"""
+        conn = _QueueConn([_StubResult(rows=[]), _StubResult(one=(0,))])
+        dao = _dao(conn)
+        await dao.read_request_page(connection_id="conn-1")
+        page_sql, params = conn.calls[0]
+        assert "EXISTS" in page_sql.upper()
+        assert params["connection_id"] == "conn-1"
+
+    @pytest.mark.asyncio
+    async def test_origin_filter_uses_test_operation_id(self):
+        conn = _QueueConn([_StubResult(rows=[]), _StubResult(one=(0,))])
+        dao = _dao(conn)
+        await dao.read_request_page(origin="test")
+        assert "p.is_test = TRUE" in conn.calls[0][0]
+        conn2 = _QueueConn([_StubResult(rows=[]), _StubResult(one=(0,))])
+        dao2 = _dao(conn2)
+        await dao2.read_request_page(origin="business")
+        assert "p.is_test = FALSE" in conn2.calls[0][0]
+
+    @pytest.mark.asyncio
+    async def test_unknown_origin_raises(self):
+        conn = _QueueConn([_StubResult(rows=[]), _StubResult(one=(0,))])
+        dao = _dao(conn)
+        with pytest.raises(ValueError, match="unknown origin filter"):
+            await dao.read_request_page(origin="bogus")
+
+    @pytest.mark.asyncio
+    async def test_terminal_and_cost_status_filters_bound(self):
+        conn = _QueueConn([_StubResult(rows=[]), _StubResult(one=(0,))])
+        dao = _dao(conn)
+        await dao.read_request_page(terminal_status="failed", cost_status="known")
+        page_sql, params = conn.calls[0]
+        assert "terminal_status" in page_sql
+        assert "cost_status" in page_sql
+        assert params["terminal_status"] == "failed"
+        assert params["cost_status"] == "known"
+
+    @pytest.mark.asyncio
+    async def test_derived_status_columns_filtered_via_wrapped_alias(self):
+        """派生列（terminal_status / cost_status）过滤必须经外层别名 ``p`` 引用。
+
+        回归：PostgreSQL 不允许在 ``WHERE`` 引用 SELECT 输出列别名，直接写
+        ``WHERE terminal_status = :x`` 在真实 PG 上会报 ``column ... does not exist``；
+        故 SQL 必须包裹派生表 ``p`` 并以 ``p.terminal_status`` 引用。count 语句同构。
+        """
+        conn = _QueueConn([_StubResult(rows=[]), _StubResult(one=(0,))])
+        dao = _dao(conn)
+        await dao.read_request_page(terminal_status="failed", cost_status="known")
+        page_sql, _ = conn.calls[0]
+        count_sql, _ = conn.calls[1]
+        assert "AS p" in page_sql
+        assert "p.terminal_status = :terminal_status" in page_sql
+        assert "p.cost_status = :cost_status" in page_sql
+        assert "ORDER BY p.created_at DESC" in page_sql
+        assert "AS p" in count_sql
+        # 派生列不得以裸列名 / 旧内层别名出现在 WHERE 中（防回归到 PG 非法形态）
+        assert " WHERE terminal_status" not in page_sql
+        assert " WHERE cost_status" not in page_sql
+        assert "r.terminal_status" not in page_sql
+        # 子任务过滤经基表（不再依赖已不暴露的 p.candidate_decisions）
+        task_conn = _QueueConn([_StubResult(rows=[]), _StubResult(one=(0,))])
+        await _dao(task_conn).read_request_page(task_id="sentiment")
+        task_sql, _ = task_conn.calls[0]
+        assert "ai_invocation ti" in task_sql
+        assert "p.candidate_decisions" not in task_sql
+
+    @pytest.mark.asyncio
+    async def test_date_range_filters_bound(self):
+        conn = _QueueConn([_StubResult(rows=[]), _StubResult(one=(0,))])
+        dao = _dao(conn)
+        start = datetime.datetime(2026, 10, 1)
+        end = datetime.datetime(2026, 11, 1)
+        await dao.read_request_page(start=start, end=end)
+        _sql, params = conn.calls[0]
+        assert params["start"] == start and params["end"] == end
+
+
+class TestReadRequestAttempts:
+    @pytest.mark.asyncio
+    async def test_merges_attempts_and_skipped_decisions(self):
+        """有序尝试 + candidate_decisions 跳过行（未执行，不返回虚构用量）。"""
+        attempts = [
+            {
+                "attempt_id": "att-1",
+                "task_id": "sentiment",
+                "candidate_index": 0,
+                "retry_index": 0,
+                "connection_id": "conn-1",
+                "status": "failed",
+                "error_code": "timeout",
+                "actual_model": None,
+                "configured_model": "glm-4",
+                "duration_ms": 120.0,
+                "cost_cny": None,
+                "usage_status": "unavailable",
+                "input_total_tokens": None,
+                "output_tokens": None,
+            }
+        ]
+        decisions = [
+            {
+                "task_id": "sentiment",
+                "candidate_index": "1",
+                "retry_index": "0",
+                "connection_id": "conn-2",
+                "reason": "budget",
+            }
+        ]
+        conn = _QueueConn([_StubResult(rows=attempts), _StubResult(rows=decisions)])
+        dao = _dao(conn)
+        out = await dao.read_request_attempts(invocation_id="inv-1")
+        assert len(out) == 2
+        kinds = {r["kind"] for r in out}
+        assert kinds == {"attempt", "skipped"}
+        skipped = next(r for r in out if r["kind"] == "skipped")
+        assert skipped["executed"] is False
+        assert skipped["status"] == "skipped"
+        assert skipped["reason"] == "budget"
+        assert skipped["cost_cny"] is None
+        assert skipped["input_total_tokens"] is None
+        executed = next(r for r in out if r["kind"] == "attempt")
+        assert executed["executed"] is True
+        assert executed["status"] == "failed"
+        assert executed["reason"] == "timeout"
+        # 跳过行读取 candidate_decisions
+        decision_sql, _params = conn.calls[1]
+        assert "candidate_decisions" in decision_sql
+        assert "'skipped'" in decision_sql
+
+
+class TestReadBudgetSummary:
+    @pytest.mark.asyncio
+    async def test_three_amounts_are_separate(self):
+        """已知费用 / 有效预留 / 未确认预留三者分开（不混算）。"""
+        conn = _QueueConn(
+            [
+                _StubResult(one=(Decimal("0.05"),)),  # 已知费用（月汇总 scenario scope）
+                _StubResult(one=(Decimal("0.10"),)),  # 有效预留
+                _StubResult(one=(Decimal("0.02"),)),  # 未确认预留
+                _StubResult(one=None),  # legacy app_state 无值
+            ]
+        )
+        dao = _dao(conn)
+        summary = await dao.read_budget_summary(month="202610")
+        assert summary["known_cny"] == Decimal("0.05")
+        assert summary["effective_reserved_cny"] == Decimal("0.10")
+        assert summary["unconfirmed_reserved_cny"] == Decimal("0.02")
+        assert summary["month"] == "202610"
+
+    @pytest.mark.asyncio
+    async def test_known_cost_unknown_returns_none_not_zero(self):
+        """未知费用用 None，禁伪零（R21）。"""
+        conn = _QueueConn(
+            [
+                _StubResult(one=(None,)),
+                _StubResult(one=(None,)),
+                _StubResult(one=(None,)),
+                _StubResult(one=None),
+            ]
+        )
+        dao = _dao(conn)
+        summary = await dao.read_budget_summary(month="202610")
+        assert summary["known_cny"] is None
+        # 无有效预留时数值 0 是事实（非未知）
+        assert summary["effective_reserved_cny"] == Decimal("0")
+        assert summary["unconfirmed_reserved_cny"] == Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_legacy_cents_included_in_known(self):
+        conn = _QueueConn(
+            [
+                _StubResult(one=(None,)),
+                _StubResult(one=(Decimal("0"),)),
+                _StubResult(one=(None,)),
+                _StubResult(one=("500",)),  # legacy 分 → 5.00 元
+            ]
+        )
+        dao = _dao(conn)
+        summary = await dao.read_budget_summary(month="202610")
+        assert summary["known_cny"] == Decimal("5.00")
+        # unconfirmed 查询 SQL 指明 held_unconfirmed
+        unconfirmed_sql = conn.calls[2][0]
+        assert "held_unconfirmed" in unconfirmed_sql
+
+
+class TestReleaseReservation:
+    """解除未确认预留（§11.5）：held_unconfirmed → released，保留历史不删除元素。"""
+
+    @pytest.mark.asyncio
+    async def test_release_changes_state_to_released_and_returns_true(self):
+        created = datetime.datetime(2026, 10, 16, 12, 0, 0)
+        conn = _CaptureConn(results=[("inv-1",), (created,), None, 1])
+        dao = _dao(conn)
+        released = await dao.release_reservation(reservation_id="res-1")
+        assert released is True
+        sql, params = conn.calls[-1]
+        assert "UPDATE ai_invocation" in sql
+        assert "jsonb_build_object" in sql
+        assert "'released'" in sql  # jsonb_build_object 写字符串值 '"released"' 的文本形态
+        # 只改写 held_unconfirmed 元素（非删除：jsonb_agg 保留全部元素）
+        assert "held_unconfirmed" in sql
+        assert "jsonb_agg" in sql
+        assert params["reservation_id"] == "res-1"
+        assert params["invocation_id"] == "inv-1"
+        assert isinstance(params["released_at"], str)
+        # 锁序（§9.2 / §10.2）：先定位 holder → 归属月 advisory lock → 条件 UPDATE
+        assert "SELECT invocation_id FROM ai_invocation" in conn.calls[0][0]
+        assert conn.calls[0][1] == {"reservation_id": "res-1"}
+        assert "pg_advisory_xact_lock" in conn.calls[2][0]
+
+    @pytest.mark.asyncio
+    async def test_release_not_held_returns_false(self):
+        """找不到该 reservation 或状态非 held_unconfirmed → holder 为 None → False（不抛）。"""
+        dao = _dao(_CaptureConn(results=[None]))
+        assert await dao.release_reservation(reservation_id="res-missing") is False
+
+    @pytest.mark.asyncio
+    async def test_release_engine_disposed_raises(self, monkeypatch):
+        """R5：入口 _check_engine 守卫（引擎已释放时抛 EngineDisposedError，不执行写）。"""
+        from data.persistence import engine_provider
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        monkeypatch.setattr(engine_provider, "is_disposed", lambda _engine: True)
+        conn = _CaptureConn(results=[1])
+        dao = _dao(conn)
+        with pytest.raises(EngineDisposedError, match="Engine disposed"):
+            await dao.release_reservation(reservation_id="res-1")
+        assert conn.calls == []  # 守卫先于任何 SQL 执行
+
+
+class TestReadUnconfirmedReservations:
+    """未确认预留明细读取（§11.5「未确认详情」；§10.3 全局跨月可解除）。"""
+
+    @pytest.mark.asyncio
+    async def test_returns_unconfirmed_rows(self):
+        rows = [{"reservation_id": "res-1", "task_id": "sentiment", "amount_cny": "0.02", "billing_month": "2026-10"}]
+        conn = _QueueConn([_StubResult(rows=rows)])
+        dao = _dao(conn)
+        out = await dao.read_unconfirmed_reservations()
+        assert out == rows
+        sql, params = conn.calls[0]
+        assert "ai_invocation" in sql
+        assert "held_unconfirmed" in sql
+        assert "reservation_id" in sql
+        assert "billing_month" in sql
+        # 全局查询无参数绑定：不按当前月过滤，历史遗留预留可解除（§10.3）
+        assert params is None
+
+    @pytest.mark.asyncio
+    async def test_no_unconfirmed_returns_empty(self):
+        dao = _dao(_QueueConn([_StubResult(rows=[])]))
+        assert await dao.read_unconfirmed_reservations() == []

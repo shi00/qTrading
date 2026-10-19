@@ -160,8 +160,8 @@ class TestStepConfigsContract:
         assert STEP_CONFIGS[1].required is True
 
     def test_step_configs_length_unchanged(self) -> None:
-        """DoD: STEP_CONFIGS 长度 8 不变 (不增不减 step)."""
-        assert len(STEP_CONFIGS) == 8
+        """DoD: STEP_CONFIGS 长度 7 (S5 §11.6 合并云端 AI/本地模型为 model_scenario 单步)."""
+        assert len(STEP_CONFIGS) == 7
 
     def test_step_configs_index_0_is_welcome(self) -> None:
         """守护: STEP_CONFIGS[0] 仍是 welcome (索引结构稳定)."""

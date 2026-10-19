@@ -419,6 +419,196 @@ class SettingsPage:
         await retry_until_triggered(_interact, _confirm)
 
 
+class ModelManagementPage:
+    """设置「AI 大脑」内「模型管理」三页签 Page Object（S5 §11.1 / §11.2）。
+
+    封装：进入设置 AI tab → 切「模型连接 / 场景配置 / 使用记录」三页签（锚定
+    ``EIDS.MODEL.tab(role)``）→ 各页关键交互（连接表单 / 场景编辑器 / 使用记录）。
+    向导模型阶段复用同一套共用组件与 anchor，故本 Page Object 亦覆盖向导内嵌项。
+
+    设计原则（方案 §7.2 封装边界）：Page Object 持有 EIDS 引用，test_*.py 不直接
+    import EIDS；anchor 化控件走 AnchorPage，非 anchor 化文案透传 FletPage。
+    """
+
+    #: 三页签 role（与 model_management_panel 页签顺序对齐）。
+    TAB_CONNECTION = "connection"
+    TAB_ROUTES = "routes"
+    TAB_USAGE = "usage"
+
+    def __init__(self, page: FletPage):
+        self.page = page
+        self.ap = AnchorPage(page.page, page)
+        self.settings = SettingsPage(page)
+
+    async def open(self, timeout_ms: int = TIMEOUTS.NAV) -> None:
+        """进入设置页 AI tab（承载模型管理三页签）。"""
+        await self.settings.open(timeout_ms=timeout_ms)
+        await self.settings.click_tab("ai", timeout_ms=timeout_ms)
+
+    # --- 三页签 ---
+    async def select_tab(self, role: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """切换模型管理页签（``role`` ∈ connection/routes/usage）。"""
+        await self.ap.click(EIDS.MODEL.tab(role), timeout_ms=timeout_ms)
+
+    async def expect_tab_visible(self, role: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """断言模型管理页签可见（通过 anchor）。"""
+        await self.ap.expect_visible(EIDS.MODEL.tab(role), timeout_ms=timeout_ms)
+
+    # --- 各页结构断言（供用例做 anchor 化结构校验，不直接暴露 EIDS 给 test_*.py） ---
+    async def expect_connection_view(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """断言「模型连接」页关键交互可见（搜索框 + 添加连接）。"""
+        await self.ap.expect_visible(EIDS.MODEL.SEARCH_INPUT, timeout_ms=timeout_ms)
+        await self.ap.expect_visible(EIDS.MODEL.ADD_CONNECTION, timeout_ms=timeout_ms)
+
+    async def expect_connection_editor(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """断言连接编辑器（三步创建）已展开（名称 / 适配器字段 + 步骤导航）。"""
+        await self.ap.expect_visible(EIDS.MODEL.NAME_INPUT, timeout_ms=timeout_ms)
+        await self.ap.expect_visible(EIDS.MODEL.ADAPTER_DROPDOWN, timeout_ms=timeout_ms)
+        await self.ap.expect_visible(EIDS.MODEL.EDITOR_NEXT, timeout_ms=timeout_ms)
+
+    async def expect_routes_view(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """断言「场景配置」页关键交互可见（三场景导航 + 保存当前场景）。"""
+        await self.ap.expect_visible(EIDS.MODEL.scenario_tab("news_annotation"), timeout_ms=timeout_ms)
+        await self.ap.expect_visible(EIDS.MODEL.ROUTES_SAVE_CURRENT, timeout_ms=timeout_ms)
+
+    async def expect_picker_open(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """断言候选选择器已打开（搜索框 + 关闭按钮可见）。"""
+        await self.ap.expect_visible(EIDS.MODEL.PICKER_SEARCH, timeout_ms=timeout_ms)
+        await self.ap.expect_visible(EIDS.MODEL.PICKER_CLOSE, timeout_ms=timeout_ms)
+
+    async def expect_usage_view(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """断言「使用记录」页关键交互可见（来源过滤 + 导出 + 进入月汇总）。"""
+        await self.ap.expect_visible(EIDS.MODEL.USE_ORIGIN_FILTER, timeout_ms=timeout_ms)
+        await self.ap.expect_visible(EIDS.MODEL.USE_EXPORT, timeout_ms=timeout_ms)
+        await self.ap.expect_visible(EIDS.MODEL.USE_ENTER_MONTHLY, timeout_ms=timeout_ms)
+
+    # --- 「模型连接」页 ---
+    async def search_connections(self, query: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """在搜索框输入连接名 / 模型名（通过 anchor）。"""
+        await self.ap.fill(EIDS.MODEL.SEARCH_INPUT, query, timeout_ms=timeout_ms)
+
+    async def select_status_filter(self, option_text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """选择连接状态过滤项（全部 / 已启用 / 已停用，本地化文案）。"""
+        await self.ap.select_option(EIDS.MODEL.STATUS_FILTER, option_text, timeout_ms=timeout_ms)
+
+    async def click_add_connection(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击「添加连接」进入三步创建（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.ADD_CONNECTION, timeout_ms=timeout_ms)
+
+    async def fill_connection_name(self, value: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """填入连接名称（通过 anchor）。"""
+        await self.ap.fill(EIDS.MODEL.NAME_INPUT, value, timeout_ms=timeout_ms)
+
+    async def select_adapter(self, option_text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """选择适配器 / 协议（通过 anchor）。"""
+        await self.ap.select_option(EIDS.MODEL.ADAPTER_DROPDOWN, option_text, timeout_ms=timeout_ms)
+
+    async def fill_model(self, value: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """填入模型名（通过 anchor）。"""
+        await self.ap.fill(EIDS.MODEL.MODEL_INPUT, value, timeout_ms=timeout_ms)
+
+    async def fill_credential(self, value: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """填入凭据（通过 anchor，不回显）。"""
+        await self.ap.fill(EIDS.MODEL.CREDENTIAL_INPUT, value, timeout_ms=timeout_ms)
+
+    async def fill_api_base(self, value: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """填入 API 地址（通过 anchor）。"""
+        await self.ap.fill(EIDS.MODEL.API_BASE_INPUT, value, timeout_ms=timeout_ms)
+
+    async def click_editor_prev(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """编辑器回退一步（通过 anchor）。
+
+        编辑器字段组较高（连接信息含 provider/model/地址/凭据），步骤导航按钮可能
+        被推到视口下沿；Playwright ``mouse.click`` 对视口外坐标静默丢弃，故先
+        ``scroll_into_view`` 再点（对齐 ``SettingsPage.click_tushare_verify`` 既有处理）。
+        """
+        await self.ap.scroll_into_view(EIDS.MODEL.EDITOR_PREV, timeout_ms=timeout_ms)
+        await self.ap.click(EIDS.MODEL.EDITOR_PREV, timeout_ms=timeout_ms)
+
+    async def click_editor_next(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """编辑器前进一步（通过 anchor，先滚入视口再点，见 ``click_editor_prev``）。"""
+        await self.ap.scroll_into_view(EIDS.MODEL.EDITOR_NEXT, timeout_ms=timeout_ms)
+        await self.ap.click(EIDS.MODEL.EDITOR_NEXT, timeout_ms=timeout_ms)
+
+    async def click_editor_test(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击编辑器「测试连接」（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.EDITOR_TEST, timeout_ms=timeout_ms)
+
+    async def click_editor_save(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击编辑器「保存」（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.EDITOR_SAVE, timeout_ms=timeout_ms)
+
+    async def click_editor_resolve(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击「重新读取」恢复提交结果未知（commit_unknown）状态（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.EDITOR_RESOLVE, timeout_ms=timeout_ms)
+
+    # --- 「场景配置」页 ---
+    async def select_scenario(self, scenario_id: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """切换场景导航（``scenario_id`` ∈ news_annotation/stock_analysis/news_risk）。"""
+        await self.ap.click(EIDS.MODEL.scenario_tab(scenario_id), timeout_ms=timeout_ms)
+
+    async def expect_scenario_visible(self, scenario_id: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """断言场景导航按钮可见（通过 anchor）。"""
+        await self.ap.expect_visible(EIDS.MODEL.scenario_tab(scenario_id), timeout_ms=timeout_ms)
+
+    async def click_add_candidate(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """打开候选选择器（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.ADD_CANDIDATE, timeout_ms=timeout_ms)
+
+    async def search_picker(self, query: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """在候选选择器搜索框输入（通过 anchor）。"""
+        await self.ap.fill(EIDS.MODEL.PICKER_SEARCH, query, timeout_ms=timeout_ms)
+
+    async def close_picker(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """关闭候选选择器（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.PICKER_CLOSE, timeout_ms=timeout_ms)
+
+    async def click_undo(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """撤销最后一次移动 / 移除（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.UNDO, timeout_ms=timeout_ms)
+
+    async def toggle_advanced(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """展开 / 收起高级参数区（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.ADVANCED_TOGGLE, timeout_ms=timeout_ms)
+
+    async def click_save_current(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """保存当前场景（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.ROUTES_SAVE_CURRENT, timeout_ms=timeout_ms)
+
+    async def move_up(self, connection_id: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """候选行上移（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.move_up(connection_id), timeout_ms=timeout_ms)
+
+    async def move_down(self, connection_id: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """候选行下移（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.move_down(connection_id), timeout_ms=timeout_ms)
+
+    async def remove_candidate(self, connection_id: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """移除候选引用（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.remove(connection_id), timeout_ms=timeout_ms)
+
+    # --- 「使用记录」页 ---
+    async def select_origin_filter(self, option_text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """选择来源过滤项（全部 / 业务 / 测试，本地化文案）。"""
+        await self.ap.select_option(EIDS.MODEL.USE_ORIGIN_FILTER, option_text, timeout_ms=timeout_ms)
+
+    async def click_enter_monthly(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """进入月汇总视图（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.USE_ENTER_MONTHLY, timeout_ms=timeout_ms)
+
+    async def click_export(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """导出脱敏 CSV（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.USE_EXPORT, timeout_ms=timeout_ms)
+
+    async def click_prev_page(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """使用记录上一页（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.USE_PREV_PAGE, timeout_ms=timeout_ms)
+
+    async def click_next_page(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """使用记录下一页（通过 anchor）。"""
+        await self.ap.click(EIDS.MODEL.USE_NEXT_PAGE, timeout_ms=timeout_ms)
+
+
 class DataPage:
     """数据浏览器页 Page Object，封装 3 个 Dropdown + 过滤值 TextField + 查询按钮的 anchor 操作。"""
 
@@ -546,6 +736,22 @@ class WizardPage:
     async def fill_token(self, value: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         """填充 token 输入框（通过 anchor）。"""
         await self.ap.fill(EIDS.WIZARD.TOKEN_INPUT, value, timeout_ms=timeout_ms)
+
+    async def expect_model_substep(self, index: int, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """断言模型阶段第 ``index`` 子步骤指示器可见（LABEL anchor，存在性 / 高亮探测）。
+
+        S5 §11.6：原「云端 AI」+「本地模型」两步合并为单步 ``model_scenario``，
+        内部三子步骤（①连接信息 ②统计方式 ③场景与检查）。
+        """
+        await self.ap.expect_visible(EIDS.MODEL.substep(index), timeout_ms=timeout_ms)
+
+    async def click_save_and_continue(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击模型阶段末子步骤「保存并继续」（通过 anchor，原子提交本阶段全部差异）。
+
+        S5 §11.6：末子步骤(3) 复用同一 nav 按钮但换用 ``MODEL.SAVE_AND_CONTINUE``
+        anchor；前两子步骤仍为 ``WIZARD.NEXT_BUTTON``（见 ``click_next``）。
+        """
+        await self.ap.click(EIDS.MODEL.SAVE_AND_CONTINUE, timeout_ms=timeout_ms)
 
     async def accept_risk_disclaimer(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         """确保欢迎步投资风险提示确认已勾选（UX-09 / MAJOR-01），使「下一步」按钮可用。

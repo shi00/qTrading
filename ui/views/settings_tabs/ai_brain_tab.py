@@ -1,20 +1,18 @@
-"""ai_brain_tab — 声明式组件 (Phase E.1 + Task 5.2 + Phase 3.2 P1-1).
+"""ai_brain_tab — 声明式组件 (Phase E.1 + Task 5.2 + Phase 3.2 P1-1 + S5 §11.1).
 
 从命令式容器子类重写为 ``@ft.component`` 函数组件范式
 (CLAUDE.md §3.2 MVVM, §3.3 声明式 UI).
 
 变更要点:
 - 旧命令式 ``class AIBrainTab(ft.Container)`` → ``@ft.component def AIBrainTab(show_snack_callback)``
-- 3 个子 VM (LLM/failover/local_model) 通过 ``use_viewmodel(factory=)`` 内部模式实例化,
-  hook 负责实例化 + dispose on unmount
-- AIBrainSettingsViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化 (Task 5.2),
-  构造注入 3 个子 VM (复用现有 config panel VM, 不再包一层薄 VM, §1.2 拒绝过度抽象),
-  收敛 ConfigHandler/ThreadPoolManager 业务编排 (AI 调优参数 + 三阶段保存状态机)
-- Phase 3.2 P1-1: AIService/LocalModelManager/ThreadPoolManager 业务编排全部下沉到 VM
-  (test_connection/reload_service/verify_local_model 静态 command + MD5 检查整合进
-  save_ai_settings); View 不再 lazy import 任何业务对象, 仅调 save_ai_settings() 并据
-  state.save_state/state.warning_message 展示反馈
-- 消费已声明式 LLMConfigPanel/LocalModelConfigPanel/FailoverConfigPanel (函数调用, vm props 推送)
+- S5 §11.1: 模型连接 / 场景配置 / 使用记录三类配置迁入 ``ui/components/model_management_panel.py``
+  的 ``ModelManagementPanel``（三页签），由三个专用 VM
+  （ModelConnectionsViewModel / ModelRoutesViewModel / ModelUsageViewModel）承载；
+  本页不再构造 LLM/failover/local 子 VM，不再消费 LLMConfigPanel / FailoverConfigPanel /
+  LocalModelConfigPanel / NewsSentimentConfigPanel
+- AIBrainSettingsViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化 (S5 后无参构造),
+  仅保留本页仍负责的调优参数 (max_candidates / min_turnover)、AI / 新闻 Prompt 与
+  「仅本地模式」开关, 以及三阶段保存状态机
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
 - save_state 从 ai_settings_state.save_state 派生 (声明式自动重渲染)
 - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
@@ -27,10 +25,6 @@ from collections.abc import Callable
 
 import flet as ft
 
-from ui.components.config_panels.failover_config_panel import FailoverConfigPanel
-from ui.components.config_panels.llm_config_panel import LLMConfigPanel
-from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
-from ui.components.config_panels.news_sentiment_config_panel import NewsSentimentConfigPanel
 from ui.components.confirm_dialog import ConfirmDialog
 from ui.components.flet_type_helpers import (
     get_control_value,
@@ -38,6 +32,7 @@ from ui.components.flet_type_helpers import (
     safe_on_change,
     safe_on_click,
 )
+from ui.components.model_management_panel import ModelManagementPanel
 from ui.components.settings_widgets import DashboardCard, SectionHeader, SettingRow
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -49,9 +44,12 @@ from ui.viewmodels.ai_brain_settings_view_model import (
     AIBrainSettingsViewModel,
 )
 from ui.viewmodels.egress_audit_view_model import EgressAuditViewModel
-from ui.viewmodels.failover_config_panel_view_model import FailoverConfigPanelViewModel
-from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
-from ui.viewmodels.local_model_config_panel_view_model import LocalModelConfigPanelViewModel
+from ui.viewmodels.model_connections_view_model import (
+    ModelConnectionsViewModel,
+    UsageCostSummary,
+)
+from ui.viewmodels.model_routes_view_model import ModelRoutesViewModel
+from ui.viewmodels.model_usage_view_model import ModelUsageViewModel
 from utils.config_models import DEFAULT_AI_PROMPT, DEFAULT_NEWS_PROMPT
 from utils.log_decorators import UILogger
 from utils.prompt_guard import MAX_PROMPT_LENGTH, validate_prompt
@@ -90,11 +88,6 @@ def _validate_prompt_or_warn(prompt: str, show_snack: Callable) -> bool:
     return True
 
 
-def _show_saved_snack(show_snack: Callable) -> None:
-    """配置保存成功 snack（注入 LLM/failover/local_model VM 的 on_save 回调）。"""
-    show_snack(I18n.get("settings_verify_success"), color=AppColors.SUCCESS)
-
-
 def _format_bytes(size_bytes: int) -> str:
     """人类可读字节格式化（SEC-03 数据出口面板数据量列展示）。"""
     value = float(size_bytes)
@@ -103,6 +96,66 @@ def _format_bytes(size_bytes: int) -> str:
             return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
         value /= 1024
     return f"{value:.1f} GB"
+
+
+def _ai_usage_dao_provider():
+    """账本 DAO 惰性解析（D6）：engine 未就绪 / 未组装时返回 None（降级）。
+
+    R1: ui 不可 import app 层; 本 provider 沿 data 层 CacheManager 直接解析, 与
+    app.bootstrap._ai_usage_dao_provider 同口径但避开反向依赖。
+    """
+    from data.cache.cache_manager import CacheManager
+
+    return getattr(CacheManager(), "ai_usage_dao", None)
+
+
+async def _release_unconfirmed_reservation(reservation_id: str) -> bool:
+    """解除未确认预留宿主副作用（§11.5「未确认详情」）：惰性解析账本 DAO 后调用写方法。
+
+    与 ``_ai_usage_dao_provider`` 同口径惰性解析（engine 未就绪 / DAO 未组装返回 None）;
+    DAO 不可用时以异常降级（VM 据异常记为释放失败, 不伪装成功, R21/R5）, 不崩溃;
+    返回 ``True`` 表示确有预留由 ``held_unconfirmed`` 转为已解除，``False`` 表示该预留
+    已不处于未确认状态（no-op）——VM 据此如实区分「已解除」与「无变更」（R21）;
+    R2: 本方法不捕获 CancelledError, 由 VM 侧显式传播。
+    """
+    dao = _ai_usage_dao_provider()
+    if dao is None:
+        raise RuntimeError("ai_usage dao unavailable")
+    return await dao.release_reservation(reservation_id=reservation_id)
+
+
+async def _load_connections_usage_summary() -> UsageCostSummary:
+    """「模型连接」页头本月已知费用（其余未知 / 未统计字段保持 None，R21 不伪零）。"""
+    dao = _ai_usage_dao_provider()
+    if dao is None:
+        return UsageCostSummary()
+    try:
+        from utils.time_utils import get_now
+
+        now = get_now()
+        month = f"{now.year:04d}{now.month:02d}"
+        summary = await dao.read_budget_summary(month=month)
+    except asyncio.CancelledError:
+        raise  # R2
+    except Exception:
+        return UsageCostSummary()
+    known = summary.get("known_cny")
+    return UsageCostSummary(known_cost_cny=str(known) if known is not None else None)
+
+
+def _scenario_executor_provider():
+    """单次测试执行器（S3 调度服务组装结果）；未组装时返回 None（测试降级）。"""
+    from services.ai_service.scenario_dispatch import get_scheduling_services
+
+    services = get_scheduling_services()
+    return services.get("executor") if services else None
+
+
+def _model_configuration_service():
+    """模型配置服务（非单例，惰性导入以保持 ui 模块加载轻量）。"""
+    from services.model_configuration_service import ModelConfigurationService
+
+    return ModelConfigurationService()
 
 
 # ============================================================================
@@ -114,21 +167,14 @@ def _format_bytes(size_bytes: int) -> str:
 def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     """AI Brain 配置标签页 (声明式).
 
-    CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
-    - 3 个子 VM (LLM/failover/local_model) 通过 ``use_viewmodel(factory=)`` 内部模式实例化,
-      hook 负责 VM 实例化 + dispose on unmount
-    - AIBrainSettingsViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化 (Task 5.2),
-      构造注入 3 个子 VM (复用 save_config/get_current_config API), 收敛
-      ConfigHandler/ThreadPoolManager 业务编排 (验证/保存/重载状态机)
-    - Phase 3.2 P1-1: 子 VM 业务回调 (test_connection/reload_service/verify_local_model)
-      注入 AIBrainSettingsViewModel 静态 command; View 不再 lazy import 业务对象
-    - 消费已声明式 LLMConfigPanel/LocalModelConfigPanel/FailoverConfigPanel (函数调用, vm props)
+    CLAUDE.md §3.2 MVVM + §3.3 声明式 UI + S5 §11.1:
+    - 模型管理的三个 VM（连接 / 场景 / 使用）由 ``use_viewmodel(factory=)`` 内部模式
+      实例化, 组合进 ``ModelManagementPanel`` 三页签; 本页不再持有子 VM
+    - AIBrainSettingsViewModel 经 ``use_viewmodel(factory=)`` 实例化 (无参构造)
     - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
-    - save_state 从 ai_settings_state.save_state 派生 (声明式自动重渲染)
     - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
     - 异步保存: ``page.run_task`` 调度, R2 CancelledError 显式 raise
-    - View 仅调 ai_settings_vm.save_ai_settings() 并据 state.save_state/
-      state.warning_message 展示反馈 (业务编排全部下沉到 VM)
+    - View 仅调 ai_settings_vm.save_ai_settings() 并据 state.save_state 展示反馈
 
     Args:
         show_snack_callback: 消费方(SettingsView)传入的 snackbar 触发函数
@@ -137,52 +183,38 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
-    # --- 3 子 VM (内部模式: hook 实例化 + dispose on unmount) ---
-    # VM 工厂仅首次渲染调用一次 (use_viewmodel 内部 use_ref 持久化)
-    # Phase 3.2 P1-1: 业务回调注入 AIBrainSettingsViewModel 静态 command (View 不再 lazy import)
-    _llm_state, llm_vm = use_viewmodel(
-        factory=lambda: LLMConfigPanelViewModel(
-            on_test_connection=AIBrainSettingsViewModel.test_connection,
-            on_reload_service=AIBrainSettingsViewModel.reload_service,
-            on_save=lambda: _show_saved_snack(show_snack_callback),
+    # --- 模型管理三页签 VM (内部模式: factory 首次渲染调用一次, 卸载 dispose) ---
+    _conn_state, connections_vm = use_viewmodel(
+        factory=lambda: ModelConnectionsViewModel(
+            usage_summary_loader=_load_connections_usage_summary,
+            scenario_executor=_scenario_executor_provider(),
         )
     )
-    _failover_state, failover_vm = use_viewmodel(
-        factory=lambda: FailoverConfigPanelViewModel(
-            on_test_connection=AIBrainSettingsViewModel.test_connection,
-            on_save=lambda: _show_saved_snack(show_snack_callback),
-        )
-    )
-    _local_state, local_vm = use_viewmodel(
-        factory=lambda: LocalModelConfigPanelViewModel(
-            on_verify_model=AIBrainSettingsViewModel.verify_local_model,
-            on_save=lambda: _show_saved_snack(show_snack_callback),
+    _routes_state, routes_vm = use_viewmodel(factory=lambda: ModelRoutesViewModel(_model_configuration_service()))
+    _usage_state, usage_vm = use_viewmodel(
+        factory=lambda: ModelUsageViewModel(
+            dao_provider=_ai_usage_dao_provider,
+            reservation_releaser=_release_unconfirmed_reservation,
         )
     )
 
-    # --- AIBrainSettingsViewModel (Task 5.2): 构造注入 3 个子 VM, 复用 save_config/get_current_config ---
-    ai_settings_state, ai_settings_vm = use_viewmodel(
-        factory=lambda: AIBrainSettingsViewModel(
-            llm_vm=llm_vm,
-            failover_vm=failover_vm,
-            local_vm=local_vm,
-        )
-    )
+    # --- AIBrainSettingsViewModel: 仅本页调优参数 / Prompt / 仅本地模式 (S5 无参构造) ---
+    ai_settings_state, ai_settings_vm = use_viewmodel(factory=AIBrainSettingsViewModel)
 
     # --- SEC-03 第二步: 数据出口聚合 ViewModel (今日/本月聚合 + 会话计数) ---
     egress_state, egress_vm = use_viewmodel(factory=EgressAuditViewModel)
 
-    # --- AI-03 完整版 T7: 首次渲染挂载时调度一次本月累计成本加载 (声明式 hook) ---
-    # ft.use_effect 空依赖仅执行一次 (mount effect, 见 ui/hooks.py 用法); 经
-    # page.run_task 调度 VM 异步 command, 不阻塞渲染 (R16 async-native DB 读)。
-    def _trigger_load_month_cost() -> None:
+    # --- 首次渲染挂载时各调度一次加载 (声明式 hook, 经 page.run_task, R16) ---
+    def _trigger_load_model_management() -> None:
         page = _get_page()
-        if page is not None:
-            page.run_task(ai_settings_vm.load_month_cost_cny)
+        if page is None:
+            return
+        page.run_task(connections_vm.load)
+        page.run_task(routes_vm.load)
+        page.run_task(usage_vm.load)
 
-    ft.use_effect(_trigger_load_month_cost, dependencies=[])
+    ft.use_effect(_trigger_load_model_management, dependencies=[])
 
-    # --- SEC-03 第二步: 数据出口面板挂载时加载一次聚合 (scan JSONL, 经 IO 池) ---
     def _trigger_load_egress() -> None:
         page = _get_page()
         if page is not None:
@@ -197,11 +229,10 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
 
     # --- 异步保存 (R2: CancelledError 显式 raise; 调用 VM commands) ---
     async def _do_save_ai_settings() -> None:
-        """保存 AI 配置 (云端 LLM + 本地模型 + 调优参数).
+        """保存本页配置 (调优参数 + prompts + 仅本地模式)。
 
-        Phase 3.2 P1-1: View 仅调 ai_settings_vm.save_ai_settings() 并据
-        ai_settings_vm.state.save_state / state.warning_message 展示反馈;
-        业务编排 (含 MD5 检查) 全部下沉到 VM。R2: CancelledError 显式 raise。
+        View 仅调 ai_settings_vm.save_ai_settings() 并据 state.save_state 展示反馈;
+        业务编排全部下沉到 VM。R2: CancelledError 显式 raise。
         """
         UILogger.log_action("AIBrainTab", "Click", "btn_save_ai")
 
@@ -213,27 +244,11 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
 
         try:
             await ai_settings_vm.save_ai_settings()
-            # VM 内部已完成三阶段保存 + MD5 检查, 据 state 反馈 UI
-            # (异步流程中读 ai_settings_vm.state 拿最新值, 非 use_viewmodel 快照)
             current_state = ai_settings_vm.state
             if current_state.save_state == SAVE_ERROR:
-                # N3-6: warning_message 非空时透出具体失败原因（如新闻情绪模型校验失败），
-                # 空值维持既有统一文案（现有失败路径 warning_message 恒为空，行为不变）
-                err_text = (
-                    I18n.get(current_state.warning_message)
-                    if current_state.warning_message
-                    else I18n.get("settings_save_failed")
-                )
-                show_snack_callback(err_text, color=AppColors.ERROR)
+                show_snack_callback(I18n.get("settings_save_failed"), color=AppColors.ERROR)
             elif current_state.save_state == SAVE_SUCCESS:
-                # warning_message 非空表示 MD5 检查发现模型文件变化 (VM 已写入 i18n key)
-                if current_state.warning_message:
-                    show_snack_callback(
-                        I18n.get(current_state.warning_message),
-                        color=AppColors.WARNING,
-                    )
-                else:
-                    show_snack_callback(I18n.get("settings_snack_ai_saved"))
+                show_snack_callback(I18n.get("settings_snack_ai_saved"))
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as e:
@@ -317,77 +332,6 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         color=AppColors.INPUT_TEXT,
         border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
     )
-    ai_concurrency_input = ft.TextField(
-        label=I18n.get("settings_ai_concurrency"),
-        value=ai_settings_state.ai_concurrency_value,
-        width=_INPUT_WIDTH_SMALL,
-        keyboard_type=ft.KeyboardType.NUMBER,
-        hint_text=I18n.get("ai_hint_default").format(val=5),
-        tooltip=I18n.get("settings_hint_ai_model"),
-        on_change=lambda e: ai_settings_vm.set_ai_concurrency_value(e.control.value),
-        on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
-    )
-    ai_news_concurrency_input = ft.TextField(
-        label=I18n.get("settings_ai_news_concurrency"),
-        value=ai_settings_state.news_concurrency_value,
-        width=_INPUT_WIDTH_SMALL,
-        keyboard_type=ft.KeyboardType.NUMBER,
-        hint_text=I18n.get("ai_hint_default").format(val=1),
-        tooltip=I18n.get("settings_hint_ai_news_concurrency"),
-        on_change=lambda e: ai_settings_vm.set_news_concurrency_value(e.control.value),
-        on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
-    )
-    # AI-03 完整版 T7: 月度 AI 成本上限输入 (空串=不限制) + 本月累计展示
-    ai_cost_limit_input = ft.TextField(
-        label=I18n.get("settings_ai_cost_limit"),
-        value=ai_settings_state.ai_cost_limit_value,
-        width=_INPUT_WIDTH_SMALL,
-        keyboard_type=ft.KeyboardType.NUMBER,
-        hint_text=I18n.get("settings_hint_ai_cost_limit"),
-        tooltip=I18n.get("settings_hint_ai_cost_limit"),
-        on_change=lambda e: ai_settings_vm.set_ai_cost_limit_value(e.control.value),
-        on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
-    )
-    _month_cost_value = ai_settings_state.month_cost_cny
-    if _month_cost_value is None:
-        _month_cost_text = "—"
-    else:
-        _month_cost_text = I18n.get("settings_month_ai_cost").format(cost=f"{_month_cost_value:.2f}")
-        # AI-01/R21: 本月存在不可计价调用时追加「成本未知」诚实说明，避免「无法计量」被误读为「零成本」。
-        _unpriced_calls, _unpriced_tokens = ai_settings_state.month_unpriced
-        if _unpriced_calls > 0:
-            _month_cost_text += I18n.get("ai_usage_unpriced_note").format(
-                unpriced_calls=_unpriced_calls,
-                unpriced_tokens=_unpriced_tokens,
-            )
-    month_cost_display = ft.Text(
-        _month_cost_text,
-        size=AppStyles.FONT_SIZE_BODY_SM,
-        color=AppColors.TEXT_SECONDARY,
-    )
-    # review-pr1073 M3: 美元→人民币估算汇率输入（成本展示换算用，标注"估算"以免与实时汇率混淆）
-    usd_rate_input = ft.TextField(
-        label=I18n.get("settings_ai_usd_rate"),
-        value=ai_settings_state.usd_to_cny_rate_value,
-        width=_INPUT_WIDTH_SMALL,
-        keyboard_type=ft.KeyboardType.NUMBER,
-        hint_text=I18n.get("settings_hint_ai_usd_rate"),
-        tooltip=I18n.get("settings_hint_ai_usd_rate"),
-        on_change=lambda e: ai_settings_vm.set_usd_to_cny_rate_value(e.control.value),
-        on_submit=safe_on_change(_on_save_ai),  # UX-09: Enter = 保存 AI 设置主动作
-        bgcolor=AppColors.INPUT_BG,
-        color=AppColors.INPUT_TEXT,
-        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
-    )
     ai_prompt_input = ft.TextField(
         label=I18n.get("settings_ai_prompt"),
         value=ai_settings_state.ai_prompt_value,
@@ -452,42 +396,18 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         stroke_width=2,
     )
 
-    # --- Sub-panels (函数调用, vm props 推送) ---
-    llm_panel = LLMConfigPanel(vm=llm_vm, show_save_button=False)
-    failover_panel = FailoverConfigPanel(vm=failover_vm, show_save_button=False)
-    local_model_panel = LocalModelConfigPanel(vm=local_vm, show_save_button=False)
+    # --- S5 §11.1: 模型管理三页签 (连接 / 场景 / 使用), 由三个专用 VM 承载 ---
+    model_management_panel = ModelManagementPanel(
+        connections_vm,
+        routes_vm,
+        usage_vm,
+        show_snack_callback,
+        compact=False,
+    )
 
-    # --- Cards ---
-    card_connection = DashboardCard(
-        content=ft.Column([llm_panel]),
-    )
-    # BIZ-02: 云端 LLM 未配置时提示——选股与复盘闭环不受影响（BIZ-01 修复后纯数学/
-    # 无 AI 路径均可进入复盘），仅 AI 解读关闭。仅未配置时渲染，避免布局挤压。
-    ai_unconfigured_note = (
-        ft.Container(
-            content=ft.Row(
-                [
-                    ft.Icon(
-                        ft.Icons.INFO_OUTLINE,
-                        size=AppStyles.FONT_SIZE_TITLE,
-                        color=AppColors.TEXT_SECONDARY,
-                    ),
-                    ft.Text(
-                        I18n.get("settings_ai_unconfigured_review_note"),
-                        size=AppStyles.FONT_SIZE_CAPTION,
-                        color=AppColors.TEXT_SECONDARY,
-                    ),
-                ],
-                spacing=6,
-            ),
-            padding=ft.Padding.symmetric(horizontal=8, vertical=4),
-        )
-        if not ai_settings_state.ai_configured
-        else ft.Container()
-    )
     # SEC-02: 向用户披露提示注入防护边界（UN-07/UN-08 AI 风险知情）。
     # 承认正则黑名单净化无法穷尽注入（prompt_guard SEC-003），并如实告知用户：
-    # AI 结果仅供参考、勿作唯一决策依据。放置于云端 LLM 连接配置正下方，用户在
+    # AI 结果仅供参考、勿作唯一决策依据。放置于模型管理正下方，用户在
     # 启用云端外发时即可见。
     card_data_boundary = DashboardCard(
         content=ft.Column(
@@ -510,24 +430,8 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
             ],
         ),
     )
-    card_failover = DashboardCard(
-        content=ft.Column([failover_panel]),
-    )
-    card_local_ai = DashboardCard(
-        content=ft.Column([local_model_panel]),
-    )
 
-    # --- N5-4: 新闻情绪打分卡片（子面板含文件选择器 GGUF/head.npz/tokenizer.json，
-    #     外部 VM 模式消费 ai_settings_vm；保存校验在 VM，Enter 提交回调注入）---
-    card_news_sentiment = DashboardCard(
-        content=ft.Column(
-            [
-                NewsSentimentConfigPanel(vm=ai_settings_vm, on_submit_save=_on_save_ai),
-            ],
-        ),
-    )
-
-    # --- Tuning card ---
+    # --- Tuning card (S5: 仅保留 max_candidates / min_turnover) ---
     icon_help_max = ft.Icon(
         ft.Icons.HELP_OUTLINE,
         size=AppStyles.FONT_SIZE_TITLE,
@@ -539,19 +443,6 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         size=AppStyles.FONT_SIZE_TITLE,
         color=AppColors.TEXT_HINT,
         tooltip=I18n.get("ai_hint_turnover_min"),
-    )
-    icon_help_conc = ft.Icon(
-        ft.Icons.HELP_OUTLINE,
-        size=AppStyles.FONT_SIZE_TITLE,
-        color=AppColors.TEXT_HINT,
-        tooltip=I18n.get("settings_hint_ai_model"),
-    )
-    # AI-03 完整版 T7: 月度成本上限 help 图标
-    icon_help_cost_limit = ft.Icon(
-        ft.Icons.HELP_OUTLINE,
-        size=AppStyles.FONT_SIZE_TITLE,
-        color=AppColors.TEXT_HINT,
-        tooltip=I18n.get("settings_hint_ai_cost_limit"),
     )
 
     section_header_tuning = SectionHeader(
@@ -594,36 +485,9 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                             ],
                             col={"sm": 12, "md": 4},
                         ),
-                        ft.Column(
-                            [
-                                ft.Row(
-                                    [ai_concurrency_input, icon_help_conc],
-                                    spacing=5,
-                                ),
-                                ft.Row(
-                                    [ai_news_concurrency_input],
-                                    spacing=5,
-                                ),
-                            ],
-                            col={"sm": 12, "md": 4},
-                        ),
                     ],
                     run_spacing=10,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                # AI-03 完整版 T7: 月度 AI 成本区块 (上限输入 + 本月累计)
-                ft.Divider(height=20, color=AppColors.BORDER),
-                ft.Row(
-                    [ai_cost_limit_input, icon_help_cost_limit],
-                    spacing=5,
-                ),
-                ft.Row(
-                    [month_cost_display],
-                    spacing=5,
-                ),
-                ft.Row(
-                    [usd_rate_input],
-                    spacing=5,
                 ),
             ],
         ),
@@ -822,12 +686,8 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     return ft.Container(
         content=ft.Column(
             controls=[
-                card_connection,
-                ai_unconfigured_note,
+                model_management_panel,
                 card_data_boundary,
-                card_failover,
-                card_local_ai,
-                card_news_sentiment,
                 card_tuning,
                 card_prompt,
                 card_local_only,

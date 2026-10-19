@@ -1,15 +1,14 @@
-"""AIBrainSettingsViewModel 单元测试 (Task 5.2 TDD Red).
+"""AIBrainSettingsViewModel 单元测试 (S5 拆分后)。
 
 测试 VM state/commands, 不依赖 Flet 渲染。
 覆盖：
 - frozen state 不可变 (AIBrainSettingsState)
 - 三阶段保存状态机: idle → saving → success / error
 - 验证/保存/重载状态机 (validate → persist → reload AIService)
-- 重复提交检测 (is_saving=True 时拒绝)
-- 构造注入 LLMConfigPanelViewModel/FailoverConfigPanelViewModel/LocalModelConfigPanelViewModel
+- 重复提交检测 (save_state=saving 时拒绝)
 - 同步阻塞操作走 ThreadPoolManager (R16)
 - R2 CancelledError 显式 raise
-- subscribe / _notify / dispose
+- subscribe / dispose
 """
 
 import asyncio
@@ -35,14 +34,9 @@ def mock_config_handler():
     with patch("ui.viewmodels.ai_brain_settings_view_model.ConfigHandler") as m:
         m.get_ai_max_candidates.return_value = 30
         m.get_strategy_min_turnover.return_value = 2.0
-        m.get_ai_max_concurrent_analysis.return_value = 5
-        m.get_ai_news_max_concurrent.return_value = 1
         m.get_ai_system_prompt.return_value = "default prompt"
         m.get_ai_news_prompt.return_value = "default news prompt"
-        m.get_setting.return_value = None
-        # N3-6: 未显式配置的自由键（news_sentiment_*）返回 default，避免 MagicMock 真值误触发 GGUF 校验
-        m.get_typed.side_effect = lambda key, t, default: default
-        m.save_local_ai_config.return_value = True
+        m.is_ai_local_only_mode.return_value = False
         m.save_config.return_value = True
         m.save_ai_system_prompt.return_value = True
         m.set_ai_news_prompt.return_value = True
@@ -63,18 +57,8 @@ def mock_thread_pool():
         yield mock_tpm
 
 
-def _make_vm(
-    mock_config_handler,
-    *,
-    llm_vm=None,
-    failover_vm=None,
-    local_vm=None,
-) -> AIBrainSettingsViewModel:
-    return AIBrainSettingsViewModel(
-        llm_vm=llm_vm or MagicMock(save_config=AsyncMock(return_value=True)),
-        failover_vm=failover_vm or MagicMock(save_config=AsyncMock(return_value=True)),
-        local_vm=local_vm or MagicMock(get_current_config=MagicMock(return_value={})),
-    )
+def _make_vm(mock_config_handler) -> AIBrainSettingsViewModel:
+    return AIBrainSettingsViewModel()
 
 
 # --- State immutability ---
@@ -90,36 +74,14 @@ class TestStateImmutability:
         vm = _make_vm(mock_config_handler)
         assert vm.state.max_candidates_value == "30"
         assert vm.state.min_turnover_value == "2.0"
-        assert vm.state.ai_concurrency_value == "5"
-        assert vm.state.news_concurrency_value == "1"
         assert vm.state.ai_prompt_value == "default prompt"
         assert vm.state.news_prompt_value == "default news prompt"
         assert vm.state.save_state == "idle"
+        assert vm.state.ai_local_only_mode is False
+        assert vm.state.warning_message == ""
 
 
 # --- Subscribe / notify ---
-
-
-class TestAiConfiguredState:
-    """BIZ-02: ai_configured 与 AIService.is_cloud_available 同口径（主 provider 有 api_key 且非仅本地模式）。"""
-
-    def test_true_when_api_key_and_not_local_only(self, mock_config_handler):
-        mock_config_handler.get_llm_config.return_value = {"api_key": "sk-test"}
-        mock_config_handler.is_ai_local_only_mode.return_value = False
-        vm = _make_vm(mock_config_handler)
-        assert vm.state.ai_configured is True
-
-    def test_false_when_no_api_key(self, mock_config_handler):
-        mock_config_handler.get_llm_config.return_value = {}
-        mock_config_handler.is_ai_local_only_mode.return_value = False
-        vm = _make_vm(mock_config_handler)
-        assert vm.state.ai_configured is False
-
-    def test_false_when_local_only_mode(self, mock_config_handler):
-        mock_config_handler.get_llm_config.return_value = {"api_key": "sk-test"}
-        mock_config_handler.is_ai_local_only_mode.return_value = True
-        vm = _make_vm(mock_config_handler)
-        assert vm.state.ai_configured is False
 
 
 class TestSubscribeNotify:
@@ -146,36 +108,17 @@ class TestSubscribeNotify:
 class TestSaveAiSettingsStateMachine:
     @pytest.mark.asyncio
     async def test_save_success_transitions_to_success(self, mock_config_handler, mock_thread_pool):
-        # local_vm returns valid config
-        local_vm = MagicMock()
-        local_vm.get_current_config.return_value = {
-            "model_path": "/tmp/model.gguf",
-            "timeout": 300,
-            "n_threads": 4,
-            "n_batch": 512,
-            "n_ctx": 2048,
-            "flash_attn": False,
-            "n_gpu_layers": 0,
-        }
-        llm_vm = MagicMock()
-        llm_vm.save_config = AsyncMock(return_value=True)
-        # patch AIService.reload_config
         with patch("services.ai_service.AIService") as mock_ai_svc:
             mock_ai_svc.return_value.reload_config = AsyncMock()
-            with patch("services.local_model_manager.LocalModelManager") as mock_lm:
-                mock_lm.commit_verification_if_active = MagicMock()
-                mock_lm.get_instance = AsyncMock(return_value=mock_lm.return_value)
-                # local_path empty → skip file check
-                local_vm.get_current_config.return_value["model_path"] = ""
-                vm = _make_vm(
-                    mock_config_handler,
-                    llm_vm=llm_vm,
-                    local_vm=local_vm,
-                )
-                result = await vm.save_ai_settings()
-                assert result is True
-                assert vm.state.save_state == "success"
-                llm_vm.save_config.assert_awaited_once()
+            vm = _make_vm(mock_config_handler)
+            result = await vm.save_ai_settings()
+        assert result is True
+        assert vm.state.save_state == "success"
+        mock_config_handler.save_config.assert_called_once_with(
+            {"ai_max_candidates": 30, "strategy_min_turnover": 2.0, "ai_local_only_mode": False}
+        )
+        mock_config_handler.save_ai_system_prompt.assert_called_once_with("default prompt")
+        mock_config_handler.set_ai_news_prompt.assert_called_once_with("default news prompt")
 
     @pytest.mark.asyncio
     async def test_save_validation_failure_returns_error_state(self, mock_config_handler, mock_thread_pool):
@@ -187,22 +130,9 @@ class TestSaveAiSettingsStateMachine:
         assert vm.state.save_state == "error"
 
     @pytest.mark.asyncio
-    async def test_save_llm_failure_returns_error_state(self, mock_config_handler, mock_thread_pool):
-        llm_vm = MagicMock()
-        llm_vm.save_config = AsyncMock(return_value=False)
-        vm = _make_vm(mock_config_handler, llm_vm=llm_vm)
-        result = await vm.save_ai_settings()
-        assert result is False
-        assert vm.state.save_state == "error"
-
-    @pytest.mark.asyncio
-    async def test_save_local_config_failure_returns_error_state(self, mock_config_handler, mock_thread_pool):
-        mock_config_handler.save_local_ai_config.return_value = False
-        llm_vm = MagicMock()
-        llm_vm.save_config = AsyncMock(return_value=True)
-        local_vm = MagicMock()
-        local_vm.get_current_config.return_value = {"model_path": ""}
-        vm = _make_vm(mock_config_handler, llm_vm=llm_vm, local_vm=local_vm)
+    async def test_save_persist_failure_returns_error_state(self, mock_config_handler, mock_thread_pool):
+        mock_config_handler.save_config.return_value = False
+        vm = _make_vm(mock_config_handler)
         result = await vm.save_ai_settings()
         assert result is False
         assert vm.state.save_state == "error"
@@ -210,11 +140,7 @@ class TestSaveAiSettingsStateMachine:
     @pytest.mark.asyncio
     async def test_save_io_exception_returns_error_state(self, mock_config_handler, mock_thread_pool):
         mock_thread_pool.run_async = AsyncMock(side_effect=RuntimeError("disk full"))
-        llm_vm = MagicMock()
-        llm_vm.save_config = AsyncMock(return_value=True)
-        local_vm = MagicMock()
-        local_vm.get_current_config.return_value = {"model_path": ""}
-        vm = _make_vm(mock_config_handler, llm_vm=llm_vm, local_vm=local_vm)
+        vm = _make_vm(mock_config_handler)
         result = await vm.save_ai_settings()
         assert result is False
         assert vm.state.save_state == "error"
@@ -222,46 +148,28 @@ class TestSaveAiSettingsStateMachine:
     @pytest.mark.asyncio
     async def test_save_cancelled_error_propagates(self, mock_config_handler, mock_thread_pool):
         mock_thread_pool.run_async = AsyncMock(side_effect=asyncio.CancelledError())
-        llm_vm = MagicMock()
-        llm_vm.save_config = AsyncMock(return_value=True)
-        local_vm = MagicMock()
-        local_vm.get_current_config.return_value = {"model_path": ""}
-        vm = _make_vm(mock_config_handler, llm_vm=llm_vm, local_vm=local_vm)
+        vm = _make_vm(mock_config_handler)
         with pytest.raises(asyncio.CancelledError):
             await vm.save_ai_settings()
 
     @pytest.mark.asyncio
     async def test_save_duplicate_submit_returns_false(self, mock_config_handler, mock_thread_pool):
-        # 模拟 in-flight 状态：is_saving=True
         from dataclasses import replace
 
-        llm_vm = MagicMock()
-        llm_vm.save_config = AsyncMock(return_value=True)
-        local_vm = MagicMock()
-        local_vm.get_current_config.return_value = {"model_path": ""}
-        vm = _make_vm(mock_config_handler, llm_vm=llm_vm, local_vm=local_vm)
+        vm = _make_vm(mock_config_handler)
         vm._state = replace(vm._state, save_state="saving")
         result = await vm.save_ai_settings()
         assert result is False
-        llm_vm.save_config.assert_not_called()
+        mock_config_handler.save_config.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_save_exception_sanitizes_sensitive_path_in_log(self, mock_config_handler, mock_thread_pool, caplog):
-        """F4-U-1: R9 异常消息脱敏 — 含敏感路径的异常消息体不应原样传给 logger format string。
-
-        注：exc_info=True 输出的 traceback 由 Python 自动生成（含原始异常消息），
-        这是项目既有模式（services/local_model_manager.py 等多处一致），
-        sanitize_error 仅脱敏传给 logger 的 format string 参数。
-        """
+        """F4-U-1: R9 异常消息脱敏 — 含敏感路径的异常消息体不应原样传给 logger format string。"""
         import logging
 
         sensitive_path = "C:\\Users\\secret\\api_key.txt"
         mock_thread_pool.run_async = AsyncMock(side_effect=OSError(f"disk error accessing {sensitive_path}"))
-        llm_vm = MagicMock()
-        llm_vm.save_config = AsyncMock(return_value=True)
-        local_vm = MagicMock()
-        local_vm.get_current_config.return_value = {"model_path": ""}
-        vm = _make_vm(mock_config_handler, llm_vm=llm_vm, local_vm=local_vm)
+        vm = _make_vm(mock_config_handler)
 
         with (
             caplog.at_level(logging.ERROR, logger="ui.viewmodels.ai_brain_settings_view_model"),
@@ -271,10 +179,8 @@ class TestSaveAiSettingsStateMachine:
 
         assert result is False
         assert vm.state.save_state == "error"
-        # F4-U-1: 传给 logger 的 format string 参数（sanitize_error 输出）不应含原始路径
         for call in mock_logger.error.call_args_list + mock_logger.critical.call_args_list:
             args = call.args
-            # 格式: logger.error("...: %s", sanitized, exc_info=True)
             if len(args) >= 2:
                 sanitized_arg = args[1]
                 assert sensitive_path not in str(sanitized_arg), (
@@ -288,21 +194,10 @@ class TestSaveAiSettingsStateMachine:
 class TestThreadPoolOffloadContract:
     @pytest.mark.asyncio
     async def test_save_ai_settings_uses_thread_pool_for_persist(self, mock_config_handler, mock_thread_pool):
-        llm_vm = MagicMock()
-        llm_vm.save_config = AsyncMock(return_value=True)
-        local_vm = MagicMock()
-        local_vm.get_current_config.return_value = {"model_path": ""}
         with patch("services.ai_service.AIService") as mock_ai_svc:
             mock_ai_svc.return_value.reload_config = AsyncMock()
-            with patch("services.local_model_manager.LocalModelManager") as mock_lm:
-                mock_lm.commit_verification_if_active = MagicMock()
-                vm = _make_vm(
-                    mock_config_handler,
-                    llm_vm=llm_vm,
-                    local_vm=local_vm,
-                )
-                await vm.save_ai_settings()
-                # ThreadPoolManager.run_async 至少调用一次 (save_local_ai_config + save_config + save_ai_system_prompt + set_ai_news_prompt)
-                assert mock_thread_pool.run_async.call_count >= 1
-                args, _ = mock_thread_pool.run_async.call_args
-                assert args[0] is TaskType.IO
+            vm = _make_vm(mock_config_handler)
+            await vm.save_ai_settings()
+        assert mock_thread_pool.run_async.call_count >= 1
+        args, _ = mock_thread_pool.run_async.call_args
+        assert args[0] is TaskType.IO

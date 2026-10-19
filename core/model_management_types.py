@@ -76,6 +76,9 @@ class ModelManagementSnapshot:
     usage_policy: Mapping[str, Any]
     security_revision: int
     created_at: str
+    # 目标级外发授权 grant（§4.3）：设置与向导的「场景检查区」共用授权摘要的事实源；
+    # 仅承载展示所需的非敏感字段（目标指纹 / 用途 / 撤销时间），不含任何秘密。
+    security_grants: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
