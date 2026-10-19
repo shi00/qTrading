@@ -288,6 +288,11 @@ class ScreeningHistory(Base):
     # 「缺失」为 SQL NULL，使 coalesce(EXCLUDED, table) 正确保留既有值。
     exec_warnings = Column(JSONB(none_as_null=True), info={"null_protected": True})
     filter_attribution = Column(JSONB(none_as_null=True), info={"null_protected": True})
+    # S4 统一场景链（s4_plan §3.3）：AI 深度分析 execution_metadata 通道（JSONB），
+    # 8 键程序字段 {invocation_id, route_revision, connection_id, connection_revision,
+    # actual_model, usage_status, ai_status, config_revision}；NULL 表示旧链/未记录，
+    # 不伪装。null_protected + none_as_null 同 exec_warnings 先例。
+    execution_metadata = Column(JSONB(none_as_null=True), info={"null_protected": True})
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
     __table_args__ = (
@@ -365,6 +370,12 @@ class MarketNews(Base):
     sentiment_score = Column(Double)
     sentiment_conf = Column(Double)
     sentiment_model = Column(String(32))
+    # S4 统一场景链（s4_plan §3.2）：新闻分类 analysis_metadata 通道（JSONB）。
+    # 内容：输入摘要（content_hash/长度）、分析时间、schema 版本、invocation_id、
+    # 任务成功状态、最近尝试状态、connection_revision、来源信息、三文件摘要及概率；
+    # **不存 prompt / 完整响应**（R9/R10）。null_protected：同冲突键重复保存时
+    # None 不得覆盖既有值；none_as_null=True 保证 coalesce(EXCLUDED, table) 生效。
+    analysis_metadata = Column(JSONB(none_as_null=True), info={"null_protected": True})
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
     __table_args__ = (

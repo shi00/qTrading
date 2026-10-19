@@ -4,16 +4,52 @@
 # 测试行为由测试用例本身验证。
 
 import datetime
+import json
+from contextlib import asynccontextmanager
 
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 import pandas as pd
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.daos.base_dao import EngineDisposedError
-from data.persistence.daos.market_dao import MarketDao, _row_to_dict
+from data.persistence.daos.market_dao import MarketDao, _RISK_SUCCESS_STATUS, _row_to_dict
 
 pytestmark = pytest.mark.unit
+
+
+class _FakeResult:
+    """模拟 exec_driver_sql / Core execute 的 rowcount 载体。"""
+
+    def __init__(self, rowcount: int):
+        self.rowcount = rowcount
+
+
+def _install_guarded_begin(dao: MarketDao, rowcount: int) -> list:
+    """替换 _guarded_begin 为捕获 stmt 的假上下文，返回 execute 调用收集列表。"""
+
+    executed: list = []
+
+    class _Conn:
+        async def exec_driver_sql(self, sql, params):
+            executed.append(("raw", sql, params))
+            return _FakeResult(rowcount)
+
+        async def execute(self, stmt):
+            executed.append(("core", stmt, None))
+            return _FakeResult(rowcount)
+
+    @asynccontextmanager
+    async def fake_guarded(conn=None):
+        yield _Conn()
+
+    dao._guarded_begin = fake_guarded
+    return executed
+
+
+def _compile_core_stmt(stmt) -> str:
+    return str(stmt.compile(dialect=postgresql.dialect()))
 
 
 class TestMarketDaoSaveMarketNews:
@@ -603,23 +639,281 @@ class TestMarketDaoGetMarketNewsDocuments:
 
 
 class TestMarketDaoSaveNewsRiskBrief:
-    @pytest.mark.asyncio
-    async def test_empty_brief_returns(self):
-        dao = MarketDao(MagicMock(spec=AsyncEngine))
-        dao._save_upsert = AsyncMock()
-        await dao.save_news_risk_brief({})
-        dao._save_upsert.assert_not_called()
+    """S4 MM-06：save_news_risk_brief 改 Core 条件 upsert（s4_plan §4.3）。
+
+    成功态无条件 upsert（允许刷新成功快照）；失败态 DO UPDATE 带
+    ``analysis_status NOT IN (成功态)`` 条件保护既有成功快照；
+    null_protected 列 coalesce(EXCLUDED, table)。
+    """
 
     @pytest.mark.asyncio
-    async def test_save_upsert(self):
+    async def test_empty_brief_returns_written_false(self):
         dao = MarketDao(MagicMock(spec=AsyncEngine))
-        dao._save_upsert = AsyncMock()
-        await dao.save_news_risk_brief({"ts_code": "000001.SZ", "input_hash": "h", "summary": "s"})
-        dao._save_upsert.assert_called_once()  # noqa: weak-assertion 数据表名与 pk_columns 由下两行 call_args 强断言验证
-        # 强断言：走 news_risk_brief 主键冲突路径（复合主键 ts_code + input_hash）
-        table_arg = dao._save_upsert.call_args[0][1]
-        assert table_arg == "news_risk_brief"
-        assert dao._save_upsert.call_args.kwargs["pk_columns"] == ["ts_code", "input_hash"]
+        executed = _install_guarded_begin(dao, rowcount=1)
+        outcome = await dao.save_news_risk_brief({})
+        assert outcome == {"written": False, "kept_success": False}
+        assert executed == []
+
+    @pytest.mark.asyncio
+    async def test_success_unconditional_upsert(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        executed = _install_guarded_begin(dao, rowcount=1)
+        brief = {
+            "ts_code": "000001.SZ",
+            "input_hash": "h",
+            "window_start": datetime.datetime(2026, 9, 1),
+            "window_end": datetime.datetime(2026, 9, 10),
+            "analysis_status": "analyzed_with_events",
+            "risk_level": "high",
+            "confidence": 80,
+            "summary": "s",
+            "events": [{"severity": "high"}],
+            "evidence_news_ids": [1],
+            "coverage": {},
+            "model_id": "local",
+            "analysis_profile": "p",
+            "prompt_version": "v1",
+        }
+        outcome = await dao.save_news_risk_brief(brief)
+        assert outcome == {"written": True, "kept_success": False}
+        assert len(executed) == 1
+        kind, stmt, _ = executed[0]
+        assert kind == "core"
+        sql = _compile_core_stmt(stmt).lower()
+        # 复合主键冲突目标
+        assert "on conflict (ts_code, input_hash) do update set" in sql
+        # 成功态无条件 upsert：无 NOT IN 条件
+        assert "not in" not in sql
+        # null_protected 列 coalesce 保护（防 None 覆盖既有非空结果）
+        assert "coalesce(excluded.risk_level, news_risk_brief.risk_level)" in sql
+        assert "coalesce(excluded.summary, news_risk_brief.summary)" in sql
+        # 直写列（非 null_protected）
+        assert "analysis_status = excluded.analysis_status" in sql
+        # 冲突命中刷新 updated_at
+        assert "updated_at = now()" in sql
+
+    @pytest.mark.asyncio
+    async def test_failure_conditional_upsert(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        executed = _install_guarded_begin(dao, rowcount=0)
+        brief = {
+            "ts_code": "000001.SZ",
+            "input_hash": "h",
+            "window_start": datetime.datetime(2026, 9, 1),
+            "window_end": datetime.datetime(2026, 9, 10),
+            "analysis_status": "failed",
+            "risk_level": None,
+            "confidence": None,
+            "summary": None,
+            "events": [],
+            "evidence_news_ids": [],
+            "coverage": {},
+            "model_id": None,
+            "analysis_profile": "p",
+            "prompt_version": "v1",
+        }
+        outcome = await dao.save_news_risk_brief(brief)
+        assert outcome == {"written": False, "kept_success": True}
+        assert len(executed) == 1
+        kind, stmt, _ = executed[0]
+        assert kind == "core"
+        sql = _compile_core_stmt(stmt)
+        # 失败态条件保护：仅当既有行非成功态才允许覆盖
+        assert "analysis_status NOT IN" in sql
+
+    @pytest.mark.asyncio
+    async def test_success_written_when_rowcount_one_on_failure_state(self):
+        """失败态写入且无既有成功快照（rowcount=1）→ written=True。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        _install_guarded_begin(dao, rowcount=1)
+        outcome = await dao.save_news_risk_brief(
+            {
+                "ts_code": "000001.SZ",
+                "input_hash": "h",
+                "window_start": datetime.datetime(2026, 9, 1),
+                "window_end": datetime.datetime(2026, 9, 10),
+                "analysis_status": "failed",
+                "analysis_profile": "p",
+                "prompt_version": "v1",
+            }
+        )
+        assert outcome == {"written": True, "kept_success": False}
+
+    def test_success_status_parity_with_service_models(self):
+        """data 层成功态常量与 services.news_insight_models.SUCCESS_STATUS 同值（R1 复制守护）。"""
+        from services.news_insight_models import SUCCESS_STATUS
+
+        assert set(_RISK_SUCCESS_STATUS) == set(SUCCESS_STATUS)
+
+
+class TestMarketDaoSaveMarketNewsAnalysisMetadata:
+    """S4 MM-06：save_market_news 情绪字段组三态分支（s4_plan §2.3）。
+
+    - 无 analysis_metadata（或非 dict）→ 旧 SQL 逐字节保留；
+    - sentiment_applied=True（成功）→ 情绪四列 excluded 直写（LLM 成功清空 GGUF 数值组）
+      + analysis_metadata + category_l1/l2 透传（COALESCE 不清空既有分类）；
+    - sentiment_applied 非 True（失败）→ 仅 analysis_metadata + category 透传，
+      旧成功情绪组整组保留（不逐列混写）。
+    """
+
+    @staticmethod
+    def _base_item(**extra) -> dict:
+        item = {
+            "content": "T",
+            "tags": "tag",
+            "publish_time": "2024-06-15 10:00:00",
+            "source": "CLS",
+            "sentiment": "Positive",
+        }
+        item.update(extra)
+        return item
+
+    @pytest.mark.asyncio
+    async def test_legacy_payload_keeps_legacy_sql(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._write_db = AsyncMock(return_value=1)
+        await dao.save_market_news(self._base_item())
+        sql = dao._write_db.call_args[0][0]
+        assert '"sentiment" = COALESCE(excluded."sentiment", market_news."sentiment")' in sql
+        assert "analysis_metadata" not in sql
+
+    @pytest.mark.asyncio
+    async def test_metadata_none_value_falls_back_legacy(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._write_db = AsyncMock(return_value=1)
+        await dao.save_market_news(self._base_item(analysis_metadata=None))
+        sql = dao._write_db.call_args[0][0]
+        assert '"sentiment" = COALESCE(excluded."sentiment", market_news."sentiment")' in sql
+        assert "analysis_metadata" not in sql
+
+    @pytest.mark.asyncio
+    async def test_success_group_direct_write(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._write_db = AsyncMock(return_value=1)
+        am = {"sentiment_applied": True, "invocation_id": "inv-1", "sentiment_source": "dedicated:gguf"}
+        await dao.save_market_news(
+            self._base_item(
+                sentiment="Positive",
+                sentiment_score=None,
+                sentiment_conf=None,
+                sentiment_model=None,
+                category_l1="finance",
+                category_l2="a_stock",
+                analysis_metadata=am,
+            )
+        )
+        sql = dao._write_db.call_args[0][0]
+        params = dao._write_db.call_args[0][1]
+        update_part = " ".join(sql.split()).split("DO UPDATE SET")[1]
+        # 情绪四列 excluded 直写（成功组整体原子写入，score/conf/model None 即清空 GGUF 数值组）
+        assert '"sentiment" = excluded."sentiment"' in update_part
+        assert '"sentiment_score" = excluded."sentiment_score"' in update_part
+        assert '"sentiment_conf" = excluded."sentiment_conf"' in update_part
+        assert '"sentiment_model" = excluded."sentiment_model"' in update_part
+        # 来源元数据写入 analysis_metadata
+        assert '"analysis_metadata" = excluded."analysis_metadata"' in update_part
+        # category_l1/l2 透传：缺失不清空既有分类
+        assert '"category_l1" = COALESCE(excluded."category_l1", market_news."category_l1")' in update_part
+        assert '"category_l2" = COALESCE(excluded."category_l2", market_news."category_l2")' in update_part
+        # analysis_metadata 以 JSON 文本绑定（asyncpg JSONB 需要 str）
+        assert json.dumps(am, ensure_ascii=False, default=str) in [p for p in params if isinstance(p, str)]
+
+    @pytest.mark.asyncio
+    async def test_failure_group_kept(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._write_db = AsyncMock(return_value=1)
+        am = {"sentiment_applied": False, "invocation_id": "inv-2"}
+        await dao.save_market_news(
+            self._base_item(
+                sentiment=None,
+                category_l1="finance",
+                category_l2="a_stock",
+                analysis_metadata=am,
+            )
+        )
+        sql = dao._write_db.call_args[0][0]
+        update_part = " ".join(sql.split()).split("DO UPDATE SET")[1]
+        # 旧成功情绪组整组保留：DO UPDATE SET 不触碰情绪四列
+        assert '"sentiment" = excluded."sentiment"' not in update_part
+        assert "sentiment_score" not in update_part
+        assert "sentiment_conf" not in update_part
+        assert "sentiment_model" not in update_part
+        # 失败状态通道照写（最近尝试状态）
+        assert '"analysis_metadata" = excluded."analysis_metadata"' in update_part
+        # 主题分类照常透传
+        assert '"category_l1" = COALESCE(excluded."category_l1", market_news."category_l1")' in update_part
+
+
+class TestMarketDaoUpdateMarketNewsAnalysis:
+    """S4：update_market_news_analysis 按 ID 更新入口（字段组语义同 save 三态）。"""
+
+    @pytest.mark.asyncio
+    async def test_success_writes_all_sentiment_columns(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        executed = _install_guarded_begin(dao, rowcount=1)
+        am = {"sentiment_applied": True, "invocation_id": "inv-3"}
+        result = await dao.update_market_news_analysis(
+            42,
+            sentiment="Negative",
+            sentiment_score=None,
+            sentiment_conf=None,
+            sentiment_model=None,
+            analysis_metadata=am,
+        )
+        assert result is True
+        assert len(executed) == 1
+        kind, sql, params = executed[0]
+        assert kind == "raw"
+        # 情绪四列直写（None 即清空）+ analysis_metadata；WHERE id 参数化（R4）
+        assert '"sentiment" = $2' in sql
+        assert '"sentiment_score" = $3' in sql
+        assert '"sentiment_conf" = $4' in sql
+        assert '"sentiment_model" = $5' in sql
+        assert '"analysis_metadata" = $6::jsonb' in sql
+        assert 'WHERE "id" = $1' in sql
+        assert params[0] == 42
+        assert params[1] == "Negative"
+        assert params[2] is None and params[3] is None and params[4] is None
+        assert params[5] == json.dumps(am, ensure_ascii=False, default=str)
+
+    @pytest.mark.asyncio
+    async def test_failure_updates_metadata_only(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        executed = _install_guarded_begin(dao, rowcount=1)
+        am = {"sentiment_applied": False, "invocation_id": "inv-4"}
+        result = await dao.update_market_news_analysis(
+            42,
+            sentiment=None,
+            category_l1="finance",
+            analysis_metadata=am,
+        )
+        assert result is True
+        kind, sql, params = executed[0]
+        assert kind == "raw"
+        # 失败：情绪四列整组保留（SQL 不含任何情绪列 SET）
+        assert "sentiment" not in sql
+        assert '"analysis_metadata" = $2::jsonb' in sql
+        # category_l1 透传（COALESCE 不清空）
+        assert '"category_l1" = COALESCE($3::varchar, "category_l1")' in sql
+        assert params[1] == json.dumps(am, ensure_ascii=False, default=str)
+        assert params[2] == "finance"
+
+    @pytest.mark.asyncio
+    async def test_rowcount_zero_returns_false(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        _install_guarded_begin(dao, rowcount=0)
+        result = await dao.update_market_news_analysis(999, analysis_metadata={"sentiment_applied": True})
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_missing_metadata_rejected(self):
+        """analysis_metadata 非 dict → 显式拒绝（不伪装成功）。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        executed = _install_guarded_begin(dao, rowcount=1)
+        with pytest.raises(ValueError) as excinfo:
+            await dao.update_market_news_analysis(42, sentiment="Positive", analysis_metadata=None)
+        assert "requires a non-empty analysis_metadata" in str(excinfo.value)
+        assert executed == []
 
 
 class TestMarketDaoGetNewsRiskBrief:

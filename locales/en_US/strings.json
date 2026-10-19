@@ -1603,6 +1603,7 @@
     "col_params_snapshot": "Params Snapshot",
     "col_exec_warnings": "Execution Warnings",
     "col_filter_attribution": "Filter Attribution",
+    "col_execution_metadata": "Execution Metadata",
     "col_conclusion_label": "AI Conclusion",
     "prediction_win": "Win",
     "prediction_loss": "Loss",

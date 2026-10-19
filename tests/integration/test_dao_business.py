@@ -824,6 +824,7 @@ class TestScreenerDao:
             "params_snapshot",
             "exec_warnings",
             "filter_attribution",
+            "execution_metadata",
         ]
         assert all_cols == expected_order, f"Column order mismatch: {all_cols}"
 
@@ -857,7 +858,8 @@ class TestScreenerDao:
                 None,
                 None,
                 None,
-                # CRITICAL-02: 未提供执行上下文 → 两列落库 SQL NULL（R21：缺失不伪装）
+                # CRITICAL-02: 未提供执行上下文 → 三列落库 SQL NULL（R21：缺失不伪装）
+                None,
                 None,
                 None,
             ),

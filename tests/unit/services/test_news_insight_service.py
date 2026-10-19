@@ -64,6 +64,19 @@ def _make_ai() -> MagicMock:
     return ai
 
 
+@pytest.fixture(autouse=True)
+def _patch_config_service(monkeypatch):
+    """默认把统一配置快照读取 patch 为 pending（旧链文本指纹路径）。
+
+    S4 §4.4：_analysis_profile 异步化后在 unified 分支会构造 ModelConfigurationService
+    并读快照；单测默认隔离该真实读盘路径（migration_state="pending" → 走旧链指纹，
+    与既有断言语义一致），unified 用例在各自测试内显式覆盖该锚。
+    """
+    fake = MagicMock()
+    fake.get_snapshot = AsyncMock(return_value=MagicMock(migration_state="pending"))
+    monkeypatch.setattr(module, "_new_config_service", lambda: fake)
+
+
 # --- _window ---
 
 
@@ -119,17 +132,22 @@ _WINDOW_DAYS = 30
 
 
 class TestAnalysisProfile:
-    def test_normal_path_cloud_and_local(self, monkeypatch):
+    """旧链文本指纹（migration_state=pending / 快照读取失败回退路径）。"""
+
+    @pytest.mark.asyncio
+    async def test_normal_path_cloud_and_local(self, monkeypatch):
         monkeypatch.setattr(ConfigHandler, "get_llm_config", lambda: {"provider": "deepseek", "model": "chat"})
         monkeypatch.setattr(ConfigHandler, "get_setting", lambda key, default=None: "/opt/models/llm.bin")
-        assert NewsInsightService._analysis_profile() == "cloud:deepseek/chat,local:llm.bin"
+        assert await NewsInsightService._analysis_profile() == "cloud:deepseek/chat,local:llm.bin"
 
-    def test_no_provider_model_cloud_none(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_no_provider_model_cloud_none(self, monkeypatch):
         monkeypatch.setattr(ConfigHandler, "get_llm_config", lambda: {})
         monkeypatch.setattr(ConfigHandler, "get_setting", lambda key, default=None: None)
-        assert NewsInsightService._analysis_profile() == "cloud:none"
+        assert await NewsInsightService._analysis_profile() == "cloud:none"
 
-    def test_llm_config_error_yields_cloud_none(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_llm_config_error_yields_cloud_none(self, monkeypatch):
         def boom():
             raise RuntimeError("cfg")
 
@@ -138,21 +156,166 @@ class TestAnalysisProfile:
         # 隔离日志边界：异常路径触发 log_classified，其消息模板/参数透传由生产代码决定，
         # 测试不依赖其格式化实现，仅验证业务分支（异常 → cloud:none）。
         monkeypatch.setattr(module, "log_classified", _validating_log_classified)
-        assert NewsInsightService._analysis_profile() == "cloud:none"
+        assert await NewsInsightService._analysis_profile() == "cloud:none"
 
-    def test_local_path_missing_omits_local(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_local_path_missing_omits_local(self, monkeypatch):
         monkeypatch.setattr(ConfigHandler, "get_llm_config", lambda: {"provider": "deepseek", "model": "chat"})
         monkeypatch.setattr(ConfigHandler, "get_setting", lambda key, default=None: "")
-        assert NewsInsightService._analysis_profile() == "cloud:deepseek/chat"
+        assert await NewsInsightService._analysis_profile() == "cloud:deepseek/chat"
 
-    def test_local_get_setting_error_still_cloud(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_local_get_setting_error_still_cloud(self, monkeypatch):
         def boom(key, default=None):
             raise RuntimeError("path")
 
         monkeypatch.setattr(ConfigHandler, "get_llm_config", lambda: {"provider": "deepseek", "model": "chat"})
         monkeypatch.setattr(ConfigHandler, "get_setting", boom)
         monkeypatch.setattr(module, "log_classified", _validating_log_classified)
-        assert NewsInsightService._analysis_profile() == "cloud:deepseek/chat"
+        assert await NewsInsightService._analysis_profile() == "cloud:deepseek/chat"
+
+
+class TestAnalysisProfileUnified:
+    """S4 §4.4：migration_state=active 时 unified 指纹 = 规范化 JSON 的 SHA-256。
+
+    失效语义：模型 / 地址 / 产物改变 → 指纹变化；仅改显示名或价格 → 不变。
+    排除字段：name / billing / last_validation / connection_revision（价格与瞬时状态）。
+    """
+
+    @staticmethod
+    def _conn(**overrides) -> dict:
+        conn = {
+            "connection_id": "c1",
+            "name": "显示名",
+            "enabled": True,
+            "adapter_kind": "litellm_chat",
+            "provider": "deepseek",
+            "model": "chat",
+            "api_base": "https://api.example.com",
+            "credential_ref": "keyring-ref",
+            "credential_version": "v1",
+            "adapter_options": {"temperature": 0.2},
+            "context_window": 8192,
+            "concurrency_limit": 4,
+            "billing": {"input": 1.0, "output": 2.0},
+            "connection_revision": 7,
+            "last_validation": "2026-10-01T00:00:00",
+        }
+        conn.update(overrides)
+        return conn
+
+    @staticmethod
+    def _snapshot(conns, routes, security_revision=3):
+        snap = MagicMock()
+        snap.migration_state = "active"
+        snap.connections = tuple(conns)
+        snap.scenario_routes = tuple(routes)
+        snap.security_revision = security_revision
+        return snap
+
+    @staticmethod
+    def _risk_route(candidates):
+        return {
+            "scenario_id": "news_risk",
+            "enabled": True,
+            "candidates": list(candidates),
+            "route_revision": 1,
+            "total_timeout_seconds": 60,
+            "task_routes": {},
+        }
+
+    @staticmethod
+    def _install(monkeypatch, snapshot):
+        fake = MagicMock()
+        fake.get_snapshot = AsyncMock(return_value=snapshot)
+        monkeypatch.setattr(module, "_new_config_service", lambda: fake)
+
+    @pytest.mark.asyncio
+    async def test_active_returns_deterministic_sha256_hex(self, monkeypatch):
+        conn = self._conn()
+        self._install(monkeypatch, self._snapshot([conn], [self._risk_route(["c1"])]))
+        p1 = await NewsInsightService._analysis_profile()
+        p2 = await NewsInsightService._analysis_profile()
+        assert len(p1) == 64
+        assert all(ch in "0123456789abcdef" for ch in p1)
+        assert p1 == p2
+
+    @pytest.mark.asyncio
+    async def test_name_and_price_change_do_not_invalidate(self, monkeypatch):
+        """仅改显示名 / 价格 → 指纹不变（§4.4 失效语义）。"""
+        conn_a = self._conn(name="名称A", billing={"input": 1.0, "output": 2.0}, last_validation="t1")
+        conn_b = self._conn(name="名称B", billing={"input": 9.0, "output": 99.0}, last_validation="t2")
+        self._install(monkeypatch, self._snapshot([conn_a], [self._risk_route(["c1"])]))
+        p_a = await NewsInsightService._analysis_profile()
+        self._install(monkeypatch, self._snapshot([conn_b], [self._risk_route(["c1"])]))
+        p_b = await NewsInsightService._analysis_profile()
+        assert p_a == p_b
+
+    @pytest.mark.asyncio
+    async def test_model_or_api_base_change_invalidates(self, monkeypatch):
+        conn_a = self._conn(model="chat", api_base="https://api.example.com")
+        conn_b = self._conn(model="chat-v2", api_base="https://api.example.com")
+        conn_c = self._conn(model="chat", api_base="https://api2.example.com")
+        self._install(monkeypatch, self._snapshot([conn_a], [self._risk_route(["c1"])]))
+        p_a = await NewsInsightService._analysis_profile()
+        self._install(monkeypatch, self._snapshot([conn_b], [self._risk_route(["c1"])]))
+        p_b = await NewsInsightService._analysis_profile()
+        self._install(monkeypatch, self._snapshot([conn_c], [self._risk_route(["c1"])]))
+        p_c = await NewsInsightService._analysis_profile()
+        assert p_a != p_b
+        assert p_a != p_c
+
+    @pytest.mark.asyncio
+    async def test_candidate_order_and_membership_matter(self, monkeypatch):
+        conn1 = self._conn(connection_id="c1", model="m1")
+        conn2 = self._conn(connection_id="c2", model="m2")
+        self._install(monkeypatch, self._snapshot([conn1, conn2], [self._risk_route(["c1", "c2"])]))
+        p_both = await NewsInsightService._analysis_profile()
+        self._install(monkeypatch, self._snapshot([conn1, conn2], [self._risk_route(["c2", "c1"])]))
+        p_reversed = await NewsInsightService._analysis_profile()
+        self._install(monkeypatch, self._snapshot([conn1, conn2], [self._risk_route(["c1"])]))
+        p_single = await NewsInsightService._analysis_profile()
+        assert p_both != p_reversed
+        assert p_both != p_single
+
+    @pytest.mark.asyncio
+    async def test_unrelated_connection_change_no_effect(self, monkeypatch):
+        """非本场景候选（c3）的连接变化不影响 news_risk 指纹。"""
+        conn1 = self._conn(connection_id="c1", model="m1")
+        conn3_a = self._conn(connection_id="c3", model="m3", adapter_kind="gguf_chat")
+        conn3_b = self._conn(connection_id="c3", model="m3-v2", adapter_kind="gguf_chat")
+        self._install(monkeypatch, self._snapshot([conn1, conn3_a], [self._risk_route(["c1"])]))
+        p_a = await NewsInsightService._analysis_profile()
+        self._install(monkeypatch, self._snapshot([conn1, conn3_b], [self._risk_route(["c1"])]))
+        p_b = await NewsInsightService._analysis_profile()
+        assert p_a == p_b
+
+    @pytest.mark.asyncio
+    async def test_route_disabled_or_security_change_invalidates(self, monkeypatch):
+        conn = self._conn()
+        route_enabled = self._risk_route(["c1"])
+        route_disabled = {**route_enabled, "enabled": False}
+        self._install(monkeypatch, self._snapshot([conn], [route_enabled]))
+        p_enabled = await NewsInsightService._analysis_profile()
+        self._install(monkeypatch, self._snapshot([conn], [route_disabled]))
+        p_disabled = await NewsInsightService._analysis_profile()
+        self._install(monkeypatch, self._snapshot([conn], [route_enabled], security_revision=99))
+        p_sec = await NewsInsightService._analysis_profile()
+        assert p_enabled != p_disabled
+        assert p_enabled != p_sec
+
+    @pytest.mark.asyncio
+    async def test_snapshot_read_failure_falls_back_legacy(self, monkeypatch):
+        def boom():
+            raise RuntimeError("snapshot")
+
+        fake = MagicMock()
+        fake.get_snapshot = AsyncMock(side_effect=boom)
+        monkeypatch.setattr(module, "_new_config_service", lambda: fake)
+        monkeypatch.setattr(ConfigHandler, "get_llm_config", lambda: {"provider": "deepseek", "model": "chat"})
+        monkeypatch.setattr(ConfigHandler, "get_setting", lambda key, default=None: None)
+        monkeypatch.setattr(module, "log_classified", _validating_log_classified)
+        assert await NewsInsightService._analysis_profile() == "cloud:deepseek/chat"
 
 
 class TestBuildInputHash:
@@ -551,56 +714,58 @@ class TestLoadEvidence:
 
 
 class TestPersist:
-    def test_success_saved(self):
-        dao = _make_dao()
-        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
-        result = _result("analyzed_with_events")
+    """S4 §4.2：失败写入直接交 DAO 条件 upsert 裁决（去掉先查再写）。"""
+
+    @staticmethod
+    def _persist(dao, svc, status):
+        result = _result(status)
         asyncio.run(
             svc._persist("000001.SZ", "h", datetime.datetime(2026, 9, 1), datetime.datetime(2026, 9, 10), result)
         )
+
+    def test_success_saved(self):
+        dao = _make_dao()
+        dao.save_news_risk_brief = AsyncMock(return_value={"written": True, "kept_success": False})
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        self._persist(dao, svc, "analyzed_with_events")
         dao.save_news_risk_brief.assert_awaited_once()
         dao.get_news_risk_brief.assert_not_awaited()
 
-    def test_failed_no_existing_saved(self):
+    def test_failed_writes_via_conditional_upsert(self):
+        """failed → 直接 save，由 DAO 条件 upsert 决定是否生效；不再先查。"""
         dao = _make_dao()
-        dao.get_news_risk_brief = AsyncMock(return_value=None)
+        dao.save_news_risk_brief = AsyncMock(return_value={"written": True, "kept_success": False})
         svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
-        result = _result("failed")
-        asyncio.run(
-            svc._persist("000001.SZ", "h", datetime.datetime(2026, 9, 1), datetime.datetime(2026, 9, 10), result)
-        )
-        dao.get_news_risk_brief.assert_awaited_once()
+        self._persist(dao, svc, "failed")
+        dao.get_news_risk_brief.assert_not_awaited()
         dao.save_news_risk_brief.assert_awaited_once()
 
-    def test_failed_with_existing_success_not_saved(self, caplog):
+    def test_failed_kept_success_logged(self, caplog):
+        """DAO 返回 kept_success=True（既有成功快照保留）→ 记录日志，不报错。"""
         dao = _make_dao()
-        dao.get_news_risk_brief = AsyncMock(
-            return_value={"analysis_status": "analyzed_with_events", "evidence_news_ids": [1]}
-        )
+        dao.save_news_risk_brief = AsyncMock(return_value={"written": False, "kept_success": True})
         svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
-        result = _result("failed")
-        asyncio.run(
-            svc._persist("000001.SZ", "h", datetime.datetime(2026, 9, 1), datetime.datetime(2026, 9, 10), result)
-        )
-        dao.save_news_risk_brief.assert_not_awaited()
+        self._persist(dao, svc, "failed")
+        dao.save_news_risk_brief.assert_awaited_once()
         assert any("failed analysis not persisted" in r.message for r in caplog.records)
+
+    def test_failed_written_no_keep_log(self, caplog):
+        dao = _make_dao()
+        dao.save_news_risk_brief = AsyncMock(return_value={"written": True, "kept_success": False})
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        self._persist(dao, svc, "failed")
+        assert not any("failed analysis not persisted" in r.message for r in caplog.records)
 
     def test_evidence_only_not_persisted(self):
         dao = _make_dao()
         svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
-        result = _result("evidence_only")
-        asyncio.run(
-            svc._persist("000001.SZ", "h", datetime.datetime(2026, 9, 1), datetime.datetime(2026, 9, 10), result)
-        )
+        self._persist(dao, svc, "evidence_only")
         dao.save_news_risk_brief.assert_not_awaited()
 
     def test_no_evidence_not_persisted(self):
         dao = _make_dao()
         svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
-        result = _result("no_evidence")
-        asyncio.run(
-            svc._persist("000001.SZ", "h", datetime.datetime(2026, 9, 1), datetime.datetime(2026, 9, 10), result)
-        )
+        self._persist(dao, svc, "no_evidence")
         dao.save_news_risk_brief.assert_not_awaited()
 
 

@@ -25,10 +25,15 @@ Flet 版本升级时，按以下清单逐项验证。每项验证结果建议记
 
 该 pin 不在 `pyproject.toml` 显式依赖内，`check_docs_consistency.py` 等脚本不会扫描它，属于**版本一致性检查盲区**，只能靠本清单人工同步。
 
+同一盲区之二：`flet-web` 的 transitive dependency `fastapi` 亦为**无上界**声明（仅 `>=0.115`，未设上界），`uv pip install` 会解析到当时最新版。fastapi 0.145 起移除了 `FastAPI.__init__` 的 `openapi_prefix` 参数，而当前 pin 的 `flet_web` 仍在构造时传入该参数 → Flet Web 服务启动即抛 `TypeError`，导致 E2E 全量 setup ERROR（PR 1402 run 39183228649 实例）。因此所有 5 处 `flet-web==` 预装命令必须**在同一安装事务内**追加 `"fastapi<0.145"` 约束（fastapi 0.144 已验证可用）。
+
 - [ ] **同步 `flet-web==` pin**：CI 中所有 `uv pip install --system flet-web==` 的版本号与 `pyproject.toml` 锁定的 `flet` 主包一致
   - 检查命令：`grep -n "flet-web==" .github/workflows/ci_cd.yml`
   - 对照目标版本：`python -c "import flet; print(flet.__version__)"`（须与 `pyproject.toml` 中 `flet==X.Y.Z` 一致）
   - 若 ci_cd 的 pin 仍是旧版本号 → 逐处改为目标版本并提交
+- [ ] **同步 `fastapi` 上界约束**：CI 中每处 `uv pip install --system flet-web==` 命令同时追加 `"fastapi<0.145"`（当前 pin 的 `flet-web` 仍有 `openapi_prefix` 兼容上界；fastapi 0.145 起移除该参数致启动崩溃）
+  - 检查命令：`grep -n 'flet-web==\|fastapi<' .github/workflows/ci_cd.yml .github/workflows/flet-nightly.yml`
+  - 若 flet-web 升级到已适配新版 fastapi 的版本，再评估放宽 / 移除该上界
 
 ## 2. 兼容性测试与文档检查
 

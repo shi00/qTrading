@@ -892,6 +892,9 @@ class LiteLLMClient:
             request_params["temperature"] = float(payload["temperature"])
         if "max_tokens" in payload:
             request_params["max_tokens"] = int(payload["max_tokens"])
+        # S4（§8.1）：JSON mode 经 payload 透传（旧链 _chat_completion 同语义）
+        if payload.get("json_mode"):
+            request_params["response_format"] = {"type": "json_object"}
 
         from utils.proxy_manager import ProxyManager
 

@@ -20,12 +20,19 @@ import json
 import logging
 import os
 import re
+import uuid
 from typing import TYPE_CHECKING
 
 import httpx
 import pandas as pd
 
 from core.errors import AIBudgetError
+from core.model_management_types import (
+    AdapterResponse,
+    InferenceRequest,
+    ModelOutputValidationError,
+    ValidatedBusinessOutput,
+)
 from services.ai_service.labels import filter_available_labels
 from services.ai_service.litellm_client import AIServiceUnavailableError, DEFAULT_ANALYSIS_TIMEOUT
 from services.ai_service.output import validate_ai_analysis_response
@@ -37,6 +44,7 @@ from utils.time_utils import from_utc_to_cst
 
 if TYPE_CHECKING:
     from services.ai_service import AIService
+    from services.ai_service.scenario_dispatch import ScenarioDispatch
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +82,68 @@ def _write_prompt_dump(dump_file: str, content: str) -> None:
     """
     with open(dump_file, "w", encoding="utf-8") as f:
         f.write(content)
+
+
+# ---------------------------------------------------------------------------
+# S4 统一场景链（§8.2，s4_plan §3.1/§3.2）
+# ---------------------------------------------------------------------------
+
+# 全候选失败 reason → ai_status 映射（s4_plan §3.2 值域：failed/unavailable/
+# budget_blocked/policy_blocked）。reason 关键词与 scenario_executor 失败表格对齐
+# （deadline/cooldown/connection/no adapter → 不可用；budget/authorize → 预算/策略拦截）。
+_UNAVAILABLE_REASON_MARKERS = ("deadline", "cooldown", "connection not found", "no adapter")
+
+
+def _scenario_ai_status(reason: str) -> str:
+    if "budget" in reason:
+        return "budget_blocked"
+    if "authorize" in reason or "policy" in reason:
+        return "policy_blocked"
+    if any(marker in reason for marker in _UNAVAILABLE_REASON_MARKERS):
+        return "unavailable"
+    return "failed"
+
+
+def _validate_analysis_output(response: AdapterResponse) -> ValidatedBusinessOutput:
+    """stock_analysis 输出校验（s4_plan §3.1）：复用 validate_ai_analysis_response。
+
+    JSON 不可解析 / 非 dict 抛 :class:`ModelOutputValidationError`（Executor 按失败
+    表格切换候选）；字段级无效由 validate 内部按 R21 置 None（不抛）。
+    """
+    content = response.content
+    if not content:
+        raise ModelOutputValidationError("analysis output: empty content")
+    try:
+        raw = json.loads(content)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise ModelOutputValidationError(f"analysis output: invalid json ({type(e).__name__})") from e
+    if not isinstance(raw, dict):
+        raise ModelOutputValidationError("analysis output: non-dict payload")
+    validated = validate_ai_analysis_response(raw)
+    metadata = {"actual_model": response.actual_model, **dict(response.metadata)}
+    return ValidatedBusinessOutput(output=validated, metadata=metadata)
+
+
+async def _resolve_stock_analysis_dispatch() -> ScenarioDispatch | None:
+    """stock_analysis 场景分派（s4_plan §3.1）：任一条件不满足 → None 走旧链。
+
+    分派过程异常（如配置损坏）降级旧链，不伪装成功（R21）。
+    """
+    from services.ai_service.scenario_dispatch import resolve_executor
+
+    try:
+        return await resolve_executor("stock_analysis")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log_classified(
+            logger,
+            e,
+            "llm",
+            "[AIService] Analyze | scenario dispatch failed, falling back to legacy (%s): %s",
+            exc_info=True,
+        )
+        return None
 
 
 class StockAnalysisService:
@@ -134,11 +204,17 @@ class StockAnalysisService:
         import services.ai_service as _ai
         from core.i18n import I18n
 
+        # S4 分派点（s4_plan §3.1）：在 unsupported 提前拒绝**之前**——新链分支的
+        # 候选资格 / 输入预算 / 实际目标授权由 Executor + ExecutionSnapshot 承担，
+        # 合格设备内 GGUF 或兼容 API 均可用（禁止外发策略由授权链路自带）；
+        # 旧链分支保留 unsupported 提前拒绝（pending 期间生产语义不变，S6 退役）。
+        dispatch = await _resolve_stock_analysis_dispatch()
+
         # MAJOR-04（review09-24 维度04）：个股深度分析仅接入云端 LLM 路径，本地模型
         # 不参与该路径（新闻分类等另有本地优先路径）。云端不可用（含「仅本地模式」）时
         # 返回显式 unsupported 状态而非裸 None，使 UI/调用方能区分「能力边界不支持」与
         # 「分析失败」，不把「不支持」伪装成「无结果」（R21）。
-        if not self._service.is_cloud_available():
+        if dispatch is None and not self._service.is_cloud_available():
             reason_key = (
                 "ai_local_only_deep_analysis_unsupported"
                 if _ai.ConfigHandler.is_ai_local_only_mode()
@@ -624,6 +700,14 @@ class StockAnalysisService:
                 )
 
         try:
+            # S4 新链分叉（s4_plan §3.1）：同一输入构造产物（messages）经 Executor
+            # 统一调度（§14.2-6 同请求单轨）；执行器之后无旧链 failover。
+            if dispatch is not None:
+                return await self._execute_scenario_analysis(
+                    dispatch=dispatch,
+                    messages=messages,
+                    learning_meta=learning_meta,
+                )
             # P1-12: Analyze Stock uses Cloud with failover by default
             res = await self._service._chat_completion_with_failover(
                 messages,
@@ -661,3 +745,123 @@ class StockAnalysisService:
             )
             logger.debug("[AIService] Analyze | Top-level failure traceback:", exc_info=True)
             return {"error": _ai.DataSanitizer.sanitize_error(e), "score": None, "ai_status": "failed"}
+
+    # ------------------------------------------------------------------
+    # S4 统一场景链（§8.2）
+    # ------------------------------------------------------------------
+
+    async def _execute_scenario_analysis(
+        self,
+        *,
+        dispatch: ScenarioDispatch,
+        messages: list[dict],
+        learning_meta: dict | None,
+    ) -> dict:
+        """S4 新链（s4_plan §3.1/§3.2）：Executor 统一请求 + 程序状态覆写 + R21 失败语义。
+
+        - payload 复用同一输入构造产物（messages）：多条 system 合并为单 system_prompt
+          （adapter 契约），user content 原样透传（上下文截断已在请求构造时完成，不经 Executor）；
+        - validate_output 复用 validate_ai_analysis_response（包装为 Executor 校验器）；
+        - 程序状态覆写：``execution_metadata`` 整体由程序构造（§3.3 字段清单），
+          模型输出中同名键丢弃；
+        - 全部候选失败 → ai_status ∈ {failed, unavailable, budget_blocked, policy_blocked}，
+          score/confidence 保持 None（R21）；CancelledError 裸传播（R2）。
+        """
+        import services.ai_service as _ai
+
+        loop = asyncio.get_running_loop()
+        invocation_id = uuid.uuid4().hex
+        system_texts = [m["content"] for m in messages if m["role"] == "system"]
+        user_content = next((m["content"] for m in messages if m["role"] == "user"), "")
+        request = InferenceRequest(
+            scenario_id="stock_analysis",
+            task_id="analysis",
+            invocation_id=invocation_id,
+            payload={
+                "system_prompt": "\n\n".join(system_texts),
+                "prompt": user_content,
+                "json_mode": True,
+            },
+            deadline=loop.time() + dispatch.total_timeout_seconds,
+        )
+        try:
+            exec_result = await dispatch.executor.execute(request, dispatch.snapshot, _validate_analysis_output)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log_classified(
+                logger,
+                e,
+                "llm",
+                "[AIService] Analyze | scenario chain error (%s): %s",
+                exc_info=True,
+            )
+            return {
+                "error": _ai.DataSanitizer.sanitize_error(e),
+                "score": None,
+                "confidence": None,
+                "ai_status": "failed",
+                "execution_metadata": self._scenario_execution_metadata(
+                    invocation_id, dispatch, None, None, "unavailable", "failed"
+                ),
+            }
+
+        if exec_result.status != "succeeded" or not exec_result.outputs:
+            reason = "; ".join(d.reason for d in exec_result.candidate_decisions) or exec_result.status
+            return {
+                "error": reason,
+                "score": None,
+                "confidence": None,
+                "ai_status": _scenario_ai_status(reason),
+                "execution_metadata": self._scenario_execution_metadata(
+                    invocation_id, dispatch, None, None, "unavailable", "failed"
+                ),
+            }
+
+        output = dict(exec_result.outputs[0].output)
+        meta = exec_result.outputs[0].metadata
+        if learning_meta is not None:
+            # D4-M3 可追溯：随该股结果回传注入元数据（与旧链分支同语义）。
+            output["learning_context_meta"] = learning_meta
+        # 程序状态覆写（s4_plan §3.1）：模型输出中同名键丢弃，程序赋值。
+        connection_id = next(
+            (d.connection_id for d in exec_result.candidate_decisions if d.decision == "succeeded"),
+            None,
+        )
+        output["execution_metadata"] = self._scenario_execution_metadata(
+            invocation_id,
+            dispatch,
+            connection_id or meta.get("connection_id"),
+            meta,
+            "reported" if exec_result.actual_usage else "unavailable",
+            "succeeded",
+        )
+        logger.debug(
+            "[AIService] Analyze | Scenario ✅ score=%s conf=%s model=%s",
+            output.get("score"),
+            output.get("confidence"),
+            meta.get("actual_model"),
+        )
+        return output
+
+    @staticmethod
+    def _scenario_execution_metadata(
+        invocation_id: str,
+        dispatch: ScenarioDispatch,
+        connection_id: str | None,
+        meta: dict | None,
+        usage_status: str,
+        ai_status: str,
+    ) -> dict:
+        """execution_metadata 程序字段（s4_plan §3.3）：模型输出不可覆写。"""
+        meta = meta or {}
+        return {
+            "invocation_id": invocation_id,
+            "route_revision": dispatch.route_revision,
+            "connection_id": connection_id,
+            "connection_revision": meta.get("connection_revision"),
+            "actual_model": meta.get("actual_model"),
+            "usage_status": usage_status,
+            "ai_status": ai_status,
+            "config_revision": dispatch.snapshot.config_revision,
+        }

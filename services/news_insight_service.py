@@ -18,8 +18,10 @@ from __future__ import annotations
 import asyncio
 import datetime
 import hashlib
+import json
 import logging
 import os
+import typing
 from dataclasses import dataclass
 
 from data.cache.cache_manager import CacheManager
@@ -49,6 +51,14 @@ _WINDOW_DAYS = 30
 _EVIDENCE_LIMIT = 12
 # 单条 quoteable_text 上限（§9.1）
 _QUOTEABLE_MAX_LEN = 500
+
+
+def _new_config_service() -> typing.Any:
+    """ModelConfigurationService 构造锚（S4 §4.4，测试 monkeypatch 点）。"""
+
+    from services.model_configuration_service import ModelConfigurationService  # lazy-import: 同层服务延迟加载
+
+    return ModelConfigurationService()
 
 
 @dataclass
@@ -98,8 +108,69 @@ class NewsInsightService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _analysis_profile() -> str:
-        """不含凭据的 provider/model 配置指纹（§7.2 §11）。配置变更时使缓存失效。"""
+    async def _analysis_profile() -> str:
+        """不含凭据的分析输入指纹（§7.2 §11；S4 §4.4 unified 化）。
+
+        migration_state=active → unified 指纹：news_risk 场景路由（有序候选 +
+        task_routes）+ 候选连接的推理相关字段（adapter_kind / provider / model /
+        api_base / credential_version / context_window / adapter_options）+
+        security_revision 的规范化 JSON SHA-256（sort_keys + 紧凑分隔符）。
+        **排除**显示名 / 价格（billing）/ last_validation / connection_revision
+        ——仅改名称或价格不失效缓存；模型 / 地址 / 产物 / 候选序变化 → 新指纹。
+
+        非 active（pending 期间旧链生产）/ 快照读取失败 / 无 news_risk 路由 →
+        旧链文本指纹（``cloud:provider/model,local:name``），不伪装（R21）。
+        """
+        try:
+            snapshot = await _new_config_service().get_snapshot()
+        except asyncio.CancelledError:
+            raise  # R2：取消必须传播
+        except Exception as e:
+            log_classified(logger, e, "general", "[NewsInsight] read mm snapshot failed (%s): %s")
+            return NewsInsightService._legacy_analysis_profile()
+        if getattr(snapshot, "migration_state", None) != "active":
+            return NewsInsightService._legacy_analysis_profile()
+
+        route = next(
+            (r for r in snapshot.scenario_routes if r.get("scenario_id") == "news_risk"),
+            None,
+        )
+        if route is None:
+            return NewsInsightService._legacy_analysis_profile()
+
+        candidate_ids = list(route.get("candidates") or [])
+        conns_by_id = {c.get("connection_id"): c for c in snapshot.connections}
+        profile_payload: dict[str, typing.Any] = {
+            "kind": "unified_profile_v1",
+            "scenario": "news_risk",
+            "route": {
+                "scenario_id": route.get("scenario_id"),
+                "enabled": bool(route.get("enabled")),
+                "candidates": candidate_ids,
+                "task_routes": route.get("task_routes") or {},
+            },
+            "connections": [
+                {
+                    "connection_id": conn.get("connection_id"),
+                    "adapter_kind": conn.get("adapter_kind"),
+                    "provider": conn.get("provider"),
+                    "model": conn.get("model"),
+                    "api_base": conn.get("api_base"),
+                    "credential_version": conn.get("credential_version"),
+                    "context_window": conn.get("context_window"),
+                    "adapter_options": conn.get("adapter_options"),
+                }
+                for cid in candidate_ids
+                if (conn := conns_by_id.get(cid)) is not None
+            ],
+            "security_revision": snapshot.security_revision,
+        }
+        canonical = json.dumps(profile_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _legacy_analysis_profile() -> str:
+        """旧链文本指纹（pending / 快照不可用回退路径；S6 退役）。"""
         parts: list[str] = []
         try:
             llm = ConfigHandler.get_llm_config() or {}
@@ -361,7 +432,13 @@ class NewsInsightService:
         window_end_utc,
         result: NewsInsightResult,
     ) -> None:
-        """按 §7.2/§11 持久化：仅成功态作可缓存快照；``failed`` 仅在无既有成功快照时落库。"""
+        """按 §7.2/§11 持久化（S4 §4.2：失败写入直接交 DAO 条件 upsert 裁决）。
+
+        - 成功态 → save（无条件 upsert，允许刷新成功快照）；
+        - failed → 直接 save（不再先查再写），由 DAO 条件 upsert 决定是否生效；
+          消费返回的 ``kept_success`` 记录「既有成功快照保留」；
+        - evidence_only / no_evidence：确定性/降级结果，不作为可缓存快照持久化。
+        """
         brief = {
             "ts_code": ts_code,
             "input_hash": input_hash,
@@ -382,10 +459,8 @@ class NewsInsightService:
             await self.dao.save_news_risk_brief(brief)
             return
         if result.analysis_status == "failed":
-            existing = await self.dao.get_news_risk_brief(ts_code, input_hash)
-            if existing is None or existing.get("analysis_status") not in SUCCESS_STATUS:
-                await self.dao.save_news_risk_brief(brief)
-            else:
+            outcome = await self.dao.save_news_risk_brief(brief)
+            if outcome.get("kept_success"):
                 logger.info("[NewsInsight] failed analysis not persisted; keep existing success snapshot (%s)", ts_code)
             return
         # evidence_only / no_evidence：确定性/降级结果，不作为可缓存快照持久化
@@ -439,7 +514,7 @@ class NewsInsightService:
         await self._maybe_cancel(cancel_event)
 
         content_hashes = [ev.content_hash or "" for ev in evidence]
-        analysis_profile = self._analysis_profile()
+        analysis_profile = await self._analysis_profile()
         input_hash = self._build_input_hash(ts_code, start_cst, end_cst, content_hashes, analysis_profile)
 
         # 无有效证据 → no_evidence（§10.3），不持久化、不调用 AI。

@@ -97,6 +97,10 @@ def assemble_scheduling_services() -> dict[str, Any]:
         adapters=_build_default_adapters(),
     )
     _scheduling_services = {"recorder": recorder, "compatibility": compatibility, "executor": executor}
+    # S4（R1）：调度服务注入 services 层分派点（services 不 import app，app→services 合法方向）
+    from services.ai_service.scenario_dispatch import set_scheduling_services_provider
+
+    set_scheduling_services_provider(lambda: _scheduling_services)
     # S3（D8）：补挂 register_scheduling_cleanup 记下的 pending coordinator
     global _pending_scheduling_coordinator
     if _pending_scheduling_coordinator is not None:

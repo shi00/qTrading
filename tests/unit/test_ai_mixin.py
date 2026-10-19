@@ -2195,6 +2195,31 @@ class TestAIStrategyMixinBuildResultRowD36:
         assert row["ai_status"] == "analyzed"
         assert row["conclusion_label"] is None
 
+    def test_execution_metadata_passthrough(self):
+        """S4（s4_plan §3.3）：analyze_stock 新链返回 execution_metadata → 随行透传。"""
+        exec_meta = {"invocation_id": "inv-1", "ai_status": "succeeded", "config_revision": 7}
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ"},
+            {"score": 88, "summary": "看好", "execution_metadata": exec_meta},
+        )
+        assert row["execution_metadata"] == exec_meta
+
+    def test_execution_metadata_missing_not_set(self):
+        """旧链返回（无 execution_metadata 键）不设键——save_results 提取 None（R21 不伪装）。"""
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ"},
+            {"score": 88, "summary": "看好"},
+        )
+        assert "execution_metadata" not in row
+
+    def test_execution_metadata_non_dict_ignored(self):
+        """execution_metadata 非 dict（异常返回形状）不透传，防脏数据入库。"""
+        row = AIStrategyMixin._build_result_row(
+            {"ts_code": "000001.SZ"},
+            {"score": 88, "summary": "看好", "execution_metadata": "bogus"},
+        )
+        assert "execution_metadata" not in row
+
     # --- MINOR-01: 置信度不再截断取整/钳位，越界与缺失一律 None（R21） ---
 
     def test_confidence_out_of_range_is_none(self):

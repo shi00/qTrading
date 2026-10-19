@@ -17,6 +17,7 @@ from utils.loop_local import del_loop_local, get_loop_local
 from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import register_singleton
 from utils.thread_pool import TaskType, ThreadPoolManager
+from utils.time_utils import get_now, to_utc_for_db
 from data.cache.cache_manager import CacheManager
 from data.persistence.daos.base_dao import EngineDisposedError
 from services.ai_service import AIService
@@ -40,6 +41,16 @@ _SENTIMENT_LABEL_TO_CODE = {"利好": "Positive", "中性": "Neutral", "利空":
 # N3-6：LLM sentiment 入库白名单（严格大小写，与取值契约一致）。
 _LLM_SENTIMENT_CODES = ("Positive", "Neutral", "Negative")
 
+# S4（s4_plan §2.3）：新链 analysis_metadata schema 版本（结构变更时递增）。
+_ANALYSIS_METADATA_SCHEMA_VERSION: typing.Final[int] = 1
+
+
+class _Unset:
+    """``_generate_tags`` ai_result 参数哨兵：区分「尚未调用」（不传）与「已调用无结果」（显式 None）。"""
+
+
+_AI_RESULT_UNSET: typing.Final[_Unset] = _Unset()
+
 
 def _coerce_llm_sentiment(ai_result: dict | None) -> str | None:
     """N3-6：从 classify_news 结果提取可入库的 sentiment code（纯函数）。
@@ -58,6 +69,47 @@ def _coerce_llm_sentiment(ai_result: dict | None) -> str | None:
         return None
     label = ai_result.get("sentiment")
     return label if label in _LLM_SENTIMENT_CODES else None
+
+
+def _is_scenario_chain_result(ai_result: object) -> typing.TypeIs[dict]:
+    """S4 新链判定（s4_plan §2.2）：classify_news 返回含程序状态 execution_metadata
+    即统一场景链结果（NewsClassifier 新链分支专属键）；否则为旧链结果 → False。"""
+    return isinstance(ai_result, dict) and isinstance(ai_result.get("execution_metadata"), dict)
+
+
+def _build_analysis_metadata(content: str, ai_result: dict, exec_meta: dict) -> dict:
+    """S4（s4_plan §2.3）：新链 analysis_metadata 构造（程序状态，模型输出不可覆写）。
+
+    - ``sentiment_applied`` 仅当情绪为校验成功白名单 code（R21：缺失/失败不伪装，
+      旧成功情绪组由 save_market_news 条件分支整组保留）；
+    - 输入摘要与 save_market_news 旧链 content_hash 同口径（sha256 全文 hex）；
+    - 只存程序状态摘要，不存 prompt / 完整响应。
+    """
+    sentiment = ai_result.get("sentiment")
+    applied = sentiment in _LLM_SENTIMENT_CODES
+    topic_failed = bool(ai_result.get("error")) or ai_result.get("category") == "unknown"
+    # to_utc_for_db 可空返回（传 None 时）；get_now() 非 None，防御性归 None 不伪装时间戳。
+    analyzed_at = to_utc_for_db(get_now())
+    metadata: dict = {
+        "schema_version": _ANALYSIS_METADATA_SCHEMA_VERSION,
+        "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "content_length": len(content),
+        "analyzed_at": analyzed_at.isoformat() if analyzed_at else None,
+        "invocation_id": exec_meta.get("invocation_id"),
+        "route_revision": exec_meta.get("route_revision"),
+        "connection_id": exec_meta.get("connection_id"),
+        "connection_revision": exec_meta.get("connection_revision"),
+        "actual_model": exec_meta.get("actual_model"),
+        "usage_status": exec_meta.get("usage_status"),
+        "sentiment_applied": applied,
+        "sentiment_status": ai_result.get("sentiment_status") or ("success" if applied else "unavailable"),
+        "sentiment_source": ai_result.get("sentiment_source"),
+        "topic_status": "failed" if topic_failed else "succeeded",
+    }
+    error_text = ai_result.get("error")
+    if error_text:
+        metadata["error"] = error_text
+    return metadata
 
 
 class NewsUpdateType:
@@ -408,23 +460,27 @@ class NewsSubscriptionService:
             return None
 
     @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
-    async def _generate_tags(self, content: typing.Any, ai_result: dict | None = None):
+    async def _generate_tags(self, content: typing.Any, ai_result: dict | _Unset | None = _AI_RESULT_UNSET):
         """Generate tags for news content using AI or Rule-based fallback.
 
-        N3-6：``ai_result`` 非空时复用调用方已获取的 classify_news 结果
-        （_processing_loop 单次调用，tags 与 sentiment 降级回退共用），默认
-        ``None`` 保持原有内部调用行为。两条路径的异常语义由 ``_classify_news_safe``
-        统一承载。
+        N3-6：``ai_result`` 非 None 时复用调用方已获取的 classify_news 结果
+        （_processing_loop 单次调用，tags 与 sentiment 降级回退共用）。
+
+        S4（s4_plan §2.2）：入参三态区分「尚未调用」与「已调用无结果」——
+        不传（哨兵）→ 内部单次调用 classify_news；显式 ``None`` → 已调用无
+        结果，直接规则回退（规则 tags 不是模型成功证据，不重复请求）。
         """
         clean_content = content.strip()
         tag = ""
 
         # Try AI Classification first (caller-provided result wins; else fetch once)
-        if ai_result is None:
-            ai_result = await self._classify_news_safe(clean_content)
-        if ai_result:
-            emoji = ai_result.get("emoji", "[NEWS]")
-            category = ai_result.get("category", "News")
+        if isinstance(ai_result, _Unset):
+            fetched = await self._classify_news_safe(clean_content)
+        else:
+            fetched = ai_result
+        if fetched:
+            emoji = fetched.get("emoji", "[NEWS]")
+            category = fetched.get("category", "News")
 
             tag = I18n.get("news_tag_format", emoji=emoji, category=category)
             return tag
@@ -520,20 +576,39 @@ class NewsSubscriptionService:
                     tags = await self._generate_tags(content, ai_result=ai_result)
                     item["tags"] = tags
 
-                    # N3-5：情感打分接线（打分 → normalize 透传 → 落库 sentiment 列）。
-                    # N3-6：打分服务整体不可用时回退 LLM sentiment（白名单过滤，提案 §9.2）；
-                    # 服务可用但输出 NaN/未知 label 归 None 不回退（R21 缺失不伪装）。
-                    # N5-2：完整载荷（sentiment + 三打分列）随 normalize 透传落库。
-                    payload = await self._score_sentiment_result(
-                        content,
-                        llm_fallback=_coerce_llm_sentiment(ai_result),
-                    )
-                    item.update(payload)
+                    if _is_scenario_chain_result(ai_result):
+                        # S4 新链（§8.1 只调一次）：sentiment 直取统一结果（校验成功才非
+                        # None，R21），执行器之后不再打分（NewsSentimentScorer 直调移除，
+                        # GGUF 情绪走 dedicated 路由经 Executor 调度）；LLM 未校准置信度
+                        # 不填数值列（§2.4），成功组整组原子语义由 save_market_news 承载。
+                        exec_meta = ai_result["execution_metadata"]
+                        normalized = CacheManager.normalize_news_item(
+                            {
+                                **item,
+                                "sentiment": ai_result.get("sentiment"),
+                                "sentiment_score": None,
+                                "sentiment_conf": None,
+                                "sentiment_model": None,
+                            },
+                            default_source="CLS",
+                        )
+                        # category 透传（s4_plan §2.3）：L2 空串归一化为缺失（COALESCE 不清空既有分类）。
+                        normalized["category_l1"] = ai_result.get("category_L1")
+                        normalized["category_l2"] = ai_result.get("category_L2") or None
+                        normalized["analysis_metadata"] = _build_analysis_metadata(content, ai_result, exec_meta)
+                    else:
+                        # 旧链（pending 生产语义逐字节保留）：打分 → 载荷 → normalize。
+                        # N3-5：情感打分接线（打分 → normalize 透传 → 落库 sentiment 列）。
+                        # N3-6：打分服务整体不可用时回退 LLM sentiment（白名单过滤，提案 §9.2）；
+                        # 服务可用但输出 NaN/未知 label 归 None 不回退（R21 缺失不伪装）。
+                        # N5-2：完整载荷（sentiment + 三打分列）随 normalize 透传落库。
+                        payload = await self._score_sentiment_result(
+                            content,
+                            llm_fallback=_coerce_llm_sentiment(ai_result),
+                        )
+                        item.update(payload)
+                        normalized = CacheManager.normalize_news_item(item, default_source="CLS")
 
-                    normalized = CacheManager.normalize_news_item(
-                        item,
-                        default_source="CLS",
-                    )
                     await self.cache.market_dao.save_market_news(normalized, wait=True)
 
                     await self._notify_listeners(

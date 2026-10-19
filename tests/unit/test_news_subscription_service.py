@@ -17,6 +17,7 @@
 
 import asyncio
 import functools
+import hashlib
 import logging
 import pytest
 from contextlib import contextmanager
@@ -25,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from services.news_subscription_service import (
     NewsSubscriptionService,
     NewsUpdateType,
+    _build_analysis_metadata,
     _coerce_llm_sentiment,
 )
 from data.cache.cache_manager import CacheManager as RealCacheManager
@@ -492,6 +494,24 @@ class TestGenerateTags:
         with caplog.at_level(logging.WARNING, logger="services.news_subscription_service"):
             await svc._generate_tags("普通新闻无关键词")
         assert any("code=timeout" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_explicit_none_skips_ai_call(self, svc):
+        """S4（s4_plan §2.2）：显式 ai_result=None =「已调用无结果」→ 不再内部调用，规则回退。"""
+        svc.ai_client.classify_news = AsyncMock(return_value={"emoji": "🚀", "category": "Tech"})
+        with patch("services.news_subscription_service.I18n.get", return_value="🏛️ Policy"):
+            tag = await svc._generate_tags("央行发布新政策", ai_result=None)
+        svc.ai_client.classify_news.assert_not_called()
+        assert tag == "🏛️ Policy"
+
+    @pytest.mark.asyncio
+    async def test_unset_fetches_result_once(self, svc):
+        """S4：不传 ai_result（哨兵）→ 内部单次调用 classify_news（尚未调用语义保留）。"""
+        svc.ai_client.classify_news = AsyncMock(return_value={"emoji": "🚀", "category": "Tech"})
+        with patch("services.news_subscription_service.I18n.get", return_value="🚀 Tech"):
+            tag = await svc._generate_tags("some content")
+        svc.ai_client.classify_news.assert_called_once_with("some content")
+        assert tag == "🚀 Tech"
 
 
 # ---------------------------------------------------------------------------
@@ -963,6 +983,256 @@ class TestProcessingLoop:
                 pass
 
         md5_spy.assert_any_call(b"test news", usedforsecurity=False)
+
+
+# ---------------------------------------------------------------------------
+# S4 统一场景链接线（s4_plan §2.2：新链一次统一请求直取结果 / 旧链逐字节保留）
+# ---------------------------------------------------------------------------
+
+
+class TestScenarioChainWiring:
+    """订阅服务新链接线：classify_news 返回含 execution_metadata → 新链；否则旧链。
+
+    订阅服务层判定键为 execution_metadata（NewsClassifier 构造的程序状态），
+    不真走 Executor——分派/校验/计量由 NewsClassifier 层测试承载（批次 1）。
+    """
+
+    # 新链 bundled 成功形态（NewsClassifier._classify_bundled 输出契约）
+    BUNDLED_OK = {
+        "category_L1": "macro_policy",
+        "category_L2": "",
+        "category": "政策",
+        "emoji": "🏛️",
+        "sentiment": "Positive",
+        "sentiment_status": "success",
+        "sentiment_source": "bundled",
+        "execution_metadata": {
+            "invocation_id": "inv-ok",
+            "route_revision": 1,
+            "connection_id": "conn-1",
+            "connection_revision": 3,
+            "actual_model": "gpt-x",
+            "usage_status": "reported",
+        },
+    }
+    # 新链全失败形态（_scenario_failure_result 契约）
+    BUNDLED_FAILED = {
+        "category": "unknown",
+        "sentiment": None,
+        "sentiment_status": "unavailable",
+        "sentiment_source": "bundled",
+        "error": "all candidates failed",
+        "execution_metadata": {
+            "invocation_id": "inv-fail",
+            "route_revision": 1,
+            "connection_id": None,
+            "connection_revision": None,
+            "actual_model": None,
+            "usage_status": "unavailable",
+        },
+    }
+
+    @staticmethod
+    async def _run_with_classify(svc, item, classify_result):
+        """单条 item 走真实 _processing_loop，返回 (save 载荷, classify mock, scorer mock)。"""
+        svc._running = True
+        svc.processing_queue = asyncio.Queue(maxsize=1)
+        svc.processing_queue.put_nowait(item)
+        svc.ai_client.classify_news = AsyncMock(return_value=classify_result)
+        with (
+            patch.object(
+                svc,
+                "_score_sentiment_result",
+                AsyncMock(
+                    return_value={
+                        "sentiment": "Negative",
+                        "sentiment_score": 0.1,
+                        "sentiment_conf": 0.2,
+                        "sentiment_model": "finbert2-news-q8_0",
+                    }
+                ),
+            ) as mock_score,
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=RealCacheManager.normalize_news_item,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", AsyncMock()) as mock_save,
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+        ):
+            task = asyncio.create_task(svc._processing_loop())
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        return mock_save.call_args[0][0], svc.ai_client.classify_news, mock_score
+
+    @pytest.mark.asyncio
+    async def test_new_chain_direct_take_single_request(self, svc):
+        """新链：sentiment 直取统一结果 + 三数值列 None（不再打分）+ metadata 完整；scorer 零调用。"""
+        saved, classify, mock_score = await self._run_with_classify(
+            svc,
+            {"content": "央行发布新政策", "time": "2024-01-01"},
+            dict(self.BUNDLED_OK),
+        )
+        classify.assert_called_once_with("央行发布新政策")  # 一次统一请求
+        mock_score.assert_not_awaited()  # 执行器之后不再打分（NewsSentimentScorer 直调移除）
+        assert saved["sentiment"] == "Positive"
+        assert saved["sentiment_score"] is None
+        assert saved["sentiment_conf"] is None
+        assert saved["sentiment_model"] is None
+        assert saved["category_l1"] == "macro_policy"
+        assert saved["category_l2"] is None  # 空串归一化为缺失（COALESCE 不清空既有分类）
+        am = saved["analysis_metadata"]
+        assert am["sentiment_applied"] is True
+        assert am["sentiment_status"] == "success"
+        assert am["sentiment_source"] == "bundled"
+        assert am["invocation_id"] == "inv-ok"
+        assert am["route_revision"] == 1
+        assert am["connection_id"] == "conn-1"
+        assert am["connection_revision"] == 3
+        assert am["actual_model"] == "gpt-x"
+        assert am["usage_status"] == "reported"
+        assert am["topic_status"] == "succeeded"
+        assert am["schema_version"] == 1
+        assert am["analyzed_at"]
+        assert "error" not in am
+
+    @pytest.mark.asyncio
+    async def test_new_chain_failure_group_kept_via_dao_branch(self, svc):
+        """新链全失败：sentiment_applied=False（旧成功组由 DAO 条件分支保留）+ error 通道。"""
+        saved, _, mock_score = await self._run_with_classify(
+            svc,
+            {"content": "普通新闻", "time": "2024-01-01"},
+            dict(self.BUNDLED_FAILED),
+        )
+        mock_score.assert_not_awaited()
+        assert saved["sentiment"] is None  # R21：缺失不伪装
+        assert saved["sentiment_score"] is None
+        assert saved["sentiment_conf"] is None
+        assert saved["sentiment_model"] is None
+        am = saved["analysis_metadata"]
+        assert am["sentiment_applied"] is False
+        assert am["sentiment_status"] == "unavailable"
+        assert am["topic_status"] == "failed"
+        assert am["error"] == "all candidates failed"
+        assert "category_l1" not in saved or saved["category_l1"] is None
+
+    @pytest.mark.asyncio
+    async def test_new_chain_topic_ok_sentiment_missing(self, svc):
+        """新链主题成功但情绪缺失：applied=False（不覆盖旧成功组），topic_status=succeeded。"""
+        result = dict(self.BUNDLED_OK)
+        result["sentiment"] = None
+        result["sentiment_status"] = "unavailable"
+        saved, _, _ = await self._run_with_classify(
+            svc,
+            {"content": "普通新闻", "time": "2024-01-01"},
+            result,
+        )
+        am = saved["analysis_metadata"]
+        assert am["sentiment_applied"] is False
+        assert am["sentiment_status"] == "unavailable"
+        assert am["topic_status"] == "succeeded"
+        assert saved["sentiment"] is None
+
+    @pytest.mark.asyncio
+    async def test_legacy_chain_rescores_and_no_metadata(self, svc):
+        """旧链（pending 逐字节保留）：scorer 照常打分、载荷无 analysis_metadata（DAO 旧 SQL 分支）。"""
+        legacy = {"emoji": "🚀", "category": "Tech", "sentiment": "Positive"}
+        saved, _, mock_score = await self._run_with_classify(
+            svc,
+            {"content": "紫金矿业发现金矿", "time": "2024-01-01"},
+            legacy,
+        )
+        mock_score.assert_awaited_once_with("紫金矿业发现金矿", llm_fallback="Positive")
+        assert saved["sentiment"] == "Negative"  # scorer 载荷透传（mock 返回值）
+        assert "analysis_metadata" not in saved
+        assert "category_l1" not in saved
+        assert "category_l2" not in saved
+
+    @pytest.mark.asyncio
+    async def test_legacy_chain_classify_none_still_rescores(self, svc):
+        """旧链 classify 异常降级（None）：照常打分、无 metadata（行为冻结）。"""
+        saved, _, mock_score = await self._run_with_classify(
+            svc,
+            {"content": "普通新闻", "time": "2024-01-01"},
+            None,
+        )
+        mock_score.assert_awaited_once_with("普通新闻", llm_fallback=None)
+        assert "analysis_metadata" not in saved
+
+    @pytest.mark.asyncio
+    async def test_dedicated_gguf_success_direct_take(self, svc):
+        """dedicated:gguf 情绪成功：同样直取（source 进 metadata），三数值列 None。"""
+        result = dict(self.BUNDLED_OK)
+        result["sentiment"] = "Negative"
+        result["sentiment_source"] = "dedicated:gguf"
+        result["category_L1"] = "company_ops"
+        result["category_L2"] = "earnings"
+        saved, _, _ = await self._run_with_classify(
+            svc,
+            {"content": "某公司业绩暴雷", "time": "2024-01-01"},
+            result,
+        )
+        assert saved["sentiment"] == "Negative"
+        assert saved["category_l1"] == "company_ops"
+        assert saved["category_l2"] == "earnings"
+        am = saved["analysis_metadata"]
+        assert am["sentiment_applied"] is True
+        assert am["sentiment_source"] == "dedicated:gguf"
+
+
+class TestAnalysisMetadataBuilder:
+    """_build_analysis_metadata 纯函数契约（s4_plan §2.3：程序状态，不存 prompt/完整响应）。"""
+
+    EXEC_META = {
+        "invocation_id": "inv-1",
+        "route_revision": 2,
+        "connection_id": "conn-9",
+        "connection_revision": 5,
+        "actual_model": "m-1",
+        "usage_status": "reported",
+    }
+
+    def test_content_hash_matches_dao_calculation(self):
+        """输入摘要与 save_market_news 旧链 content_hash 同口径（sha256 全文 hex）。"""
+        content = "某条新闻全文"
+        am = _build_analysis_metadata(content, {"sentiment": None}, dict(self.EXEC_META))
+        assert am["content_hash"] == hashlib.sha256(content.encode("utf-8")).hexdigest()
+        assert am["content_length"] == len(content)
+
+    def test_success_fields(self):
+        am = _build_analysis_metadata(
+            "内容",
+            {
+                "sentiment": "Positive",
+                "sentiment_status": "success",
+                "sentiment_source": "bundled",
+            },
+            dict(self.EXEC_META),
+        )
+        assert am["sentiment_applied"] is True
+        assert am["topic_status"] == "succeeded"
+        assert am["schema_version"] == 1
+        assert am["invocation_id"] == "inv-1"
+        assert "error" not in am
+
+    def test_failure_fields_and_error_channel(self):
+        am = _build_analysis_metadata(
+            "内容",
+            {"category": "unknown", "sentiment": None, "error": "boom"},
+            dict(self.EXEC_META),
+        )
+        assert am["sentiment_applied"] is False
+        assert am["topic_status"] == "failed"
+        assert am["error"] == "boom"
+
+    def test_no_prompt_or_response_stored(self):
+        """R9/§2.3 边界：metadata 只含程序状态摘要，不存 prompt/完整响应。"""
+        am = _build_analysis_metadata("内容", {"sentiment": None}, dict(self.EXEC_META))
+        for key in ("prompt", "response", "raw_output", "system_prompt"):
+            assert key not in am
 
 
 # ---------------------------------------------------------------------------

@@ -153,6 +153,9 @@ COMMON_COLUMNS = {
     # 唯一登记处即本表（与 params_snapshot 同惯例）。
     "exec_warnings": "col_exec_warnings",
     "filter_attribution": "col_filter_attribution",
+    # S4 统一场景链（s4_plan §3.3）：AI 深度分析 execution_metadata 通道列标签
+    # （与 exec_warnings 同惯例：唯一登记处为本表，i18n 键见 locales）。
+    "execution_metadata": "col_execution_metadata",
     # Sync Status
     "table_name": "col_table_name",
     "last_sync_date": "col_last_sync_date",

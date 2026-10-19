@@ -1492,6 +1492,12 @@ class AIStrategyMixin:
         """
         row_dict = dict(row_data)
 
+        # S4 统一场景链（s4_plan §3.3）：execution_metadata 透传（analyze_stock 新链
+        # 返回的 8 键程序字段，模型输出不可覆写）。旧链 / 缺失 / 非 dict 不设键——
+        # save_results 提取为 None → SQL NULL（「未记录」分支，R21 不伪装）。
+        if isinstance(res, dict) and isinstance(res.get("execution_metadata"), dict):
+            row_dict["execution_metadata"] = res["execution_metadata"]
+
         # 失败/未完成路径：保留原始候选行，填充 failed 状态
         if isinstance(res, Exception) or res is None:
             row_dict["ai_status"] = "failed"
