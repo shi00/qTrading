@@ -376,7 +376,7 @@ class AIUsageDao(BaseDao):
             )
 
             if amount_cny is not None and budget_limit_cny is not None:
-                used = await self._read_month_committed_usage(conn, month, scenario_id)
+                used = await self._read_month_committed_usage(conn, month)
                 in_flight = await self._read_active_reservations_sum(conn, month)
                 if used + in_flight + Decimal(amount_cny) > Decimal(budget_limit_cny):
                     return None
@@ -414,8 +414,19 @@ class AIUsageDao(BaseDao):
             )
             return reservation
 
-    async def _read_month_committed_usage(self, conn: Any, month: str, scenario_id: str) -> Decimal:
-        """该月 scenario scope 已结算成本 + legacy 汇总（D3）。"""
+    async def _read_month_committed_usage(self, conn: Any, month: str) -> Decimal:
+        """该月全部场景 scope 已结算成本合计 + legacy 汇总（F21 预算总口径）。
+
+        月度预算为全部场景与测试请求共享（与 ``read_budget_summary`` 的
+        ``_MONTH_KNOWN_COST_SQL`` 同口径）：scenario scope 每笔费用仅归属一个
+        场景行，合计全部行即三场景 + 测试总已结算费用，无重复计算；
+        connection scope 为另一维度（同一笔费用另有其行，§10 两 scope 不相加、
+        不混算），不参与预算。legacy 基线（app_state ``ai_cost:{YYYYMM}``，全局
+        月累计）只读取一次、只加一次，不得按场景重复计入。
+
+        须在月 advisory 锁内调用（调用方 ``try_reserve`` 保证）：同月全部
+        预算变动（预留 / 结算落账 / 封口）经同一锁键串行化，锁内读合计无竞态。
+        """
         row = (
             await conn.execute(
                 sa.text(
@@ -424,10 +435,9 @@ class AIUsageDao(BaseDao):
                     FROM ai_usage_monthly
                     WHERE month = :month
                       AND aggregation_scope = :scope
-                      AND grouping_key = :grouping_key
                     """
                 ),
-                {"month": month, "scope": SCOPE_SCENARIO, "grouping_key": scenario_id},
+                {"month": month, "scope": SCOPE_SCENARIO},
             )
         ).fetchone()
         settled = Decimal("0")
