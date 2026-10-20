@@ -304,7 +304,7 @@ def _build_summary_row(state: ModelConnectionsState) -> ft.Control:
 # ---------------------------------------------------------------------------
 
 
-def _build_connection_row(row: ConnectionRow) -> ft.Control:
+def _build_connection_row(row: ConnectionRow, vm: ModelConnectionsViewModel) -> ft.Control:
     status_text = I18n.get("model_management_status_enabled" if row.enabled else "model_management_status_disabled")
     status_color = AppColors.SUCCESS if row.enabled else AppColors.TEXT_DISABLED
     billing_mode_key = (
@@ -335,6 +335,16 @@ def _build_connection_row(row: ConnectionRow) -> ft.Control:
                 ft.Text(status_text, size=AppStyles.FONT_SIZE_CAPTION, color=status_color),
                 ft.Text(billing_text, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_SECONDARY),
                 ft.Text(ref_text, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_HINT),
+                anchored(
+                    EIDS.MODEL.connection_edit(row.connection_id),
+                    ft.TextButton(
+                        content=I18n.get("model_management_edit_connection"),
+                        icon=ft.Icons.EDIT,
+                        key="model_connection_edit",
+                        tooltip=I18n.get("model_management_edit_connection"),
+                        on_click=safe_on_click(_click(lambda: vm.edit(row.connection_id))),
+                    ),
+                ),
             ],
             spacing=AppStyles.SPACING_SM,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -473,7 +483,7 @@ def _build_connections_view(
 
     rows = vm.visible_connections()
     if rows:
-        controls.extend(_build_connection_row(row) for row in rows)
+        controls.extend(_build_connection_row(row, vm) for row in rows)
     else:
         controls.append(_empty_text("model_management_no_connections"))
 

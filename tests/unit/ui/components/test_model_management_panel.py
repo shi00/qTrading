@@ -19,8 +19,9 @@ import datetime as dt
 from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any, cast
+from collections.abc import Callable
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import flet as ft
 import pytest
@@ -512,14 +513,63 @@ class TestConnectionRowBillingLocalized:
 
     def test_estimate_cost_mode_localized(self):
         row = replace(_row("c1", "Conn"), billing=BillingSummary(mode="estimate_cost", pricing_unit="llm_tokens"))
-        texts = _texts(_build_connection_row(row))
+        texts = _texts(_build_connection_row(row, MagicMock()))
         assert I18n.get("model_connection_billing_estimate_cost") in texts
         assert "estimate_cost" not in texts
 
     def test_usage_only_mode_localized(self):
-        texts = _texts(_build_connection_row(_row("c1", "Conn")))
+        texts = _texts(_build_connection_row(_row("c1", "Conn"), MagicMock()))
         assert I18n.get("model_connection_billing_usage_only") in texts
         assert "usage_only" not in texts
+
+
+class TestConnectionRowEditEntry:
+    """F12：连接行必须提供可达的编辑入口（显式按钮绑定 ``vm.edit``，不做行级隐式点击）。"""
+
+    def _edit_button(self, row_control: ft.Control) -> ft.TextButton:
+        for ctrl in _walk_controls(row_control):
+            if getattr(ctrl, "key", None) == "model_connection_edit":
+                assert isinstance(ctrl, ft.TextButton)
+                return ctrl
+        raise AssertionError("edit button not found in connection row")
+
+    def _fire(self, button: ft.TextButton) -> None:
+        """触发编辑按钮 on_click（Flet ControlEventHandler 为 0/1 参联合，测试侧 cast 边界）。"""
+        handler = button.on_click
+        assert handler is not None
+        cast(Callable[[Any], None], handler)(MagicMock(name="event"))
+
+    def test_edit_button_bound_to_vm_edit(self):
+        vm = MagicMock()
+        button = self._edit_button(_build_connection_row(_row("c1", "Conn One"), vm))
+        assert button.icon == ft.Icons.EDIT
+        self._fire(button)
+        vm.edit.assert_called_once_with("c1")
+
+    def test_edit_button_localized(self):
+        button = self._edit_button(_build_connection_row(_row("c1", "Conn"), MagicMock()))
+        assert button.content == I18n.get("model_management_edit_connection")
+        assert button.tooltip == I18n.get("model_management_edit_connection")
+
+    def test_rows_bind_their_own_connection_id(self):
+        """每行 handler 独立绑定本行 id（无闭包晚绑定串行）。"""
+        vm = MagicMock()
+        buttons = [self._edit_button(_build_connection_row(row, vm)) for row in (_row("c1"), _row("c2"))]
+        for button in buttons:
+            self._fire(button)
+        assert vm.edit.call_args_list == [call("c1"), call("c2")]
+
+    def test_row_has_no_container_level_click(self):
+        """行容器不接 on_click：编辑只走显式按钮，避免行点击与按钮语义冲突。"""
+        container = _build_connection_row(_row("c1", "Conn"), MagicMock())
+        assert isinstance(container, ft.Container)
+        assert container.on_click is None
+
+    def test_connections_view_rows_carry_edit_entry(self):
+        vm = MagicMock()
+        vm.visible_connections.return_value = (_row("c1", "Conn One"),)
+        view = panel_module._build_connections_view(ModelConnectionsState(), vm, compact=False)
+        assert "model_connection_edit" in _collect_keys(view)
 
 
 # ============================================================================
