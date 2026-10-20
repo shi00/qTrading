@@ -42,7 +42,6 @@ _MA_PERIODS = (5, 10, 20)
 def generate_kline_chart_data(
     df: pd.DataFrame,
     title: str = "",
-    theme_mode: str | None = None,
 ) -> KlineChartData:
     """Generate flet-charts data for K-line + volume chart.
 
@@ -52,7 +51,6 @@ def generate_kline_chart_data(
     :param df: DataFrame requiring columns: trade_date, open, high, low, close.
                Optional: vol (volume).
     :param title: Chart title text (unused in data conversion, for API compat).
-    :param theme_mode: "light" | "dark" | None (unused, colors are theme-independent).
     :returns: KlineChartData with spots, volume groups, axis labels, and ranges.
     """
     if df is None or df.empty:

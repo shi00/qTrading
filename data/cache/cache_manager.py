@@ -442,16 +442,6 @@ class CacheManager:
         """
         return await self.stock_dao.get_concepts(ts_codes)  # type: ignore[return-value]  # DAO return type may vary from expected dict structure
 
-    async def get_stock_concepts(self, ts_code: str) -> list[str]:
-        """Phase 2E：单股反查所属概念标签列表。
-
-        区别于现有 ``get_concepts(ts_codes)``（批量 → ``dict[ts_code, list[str]]``），
-        本方法接受单个 ts_code，直接返回该股票的概念标签列表，便于 AI 策略层单股反查。
-        实现复用 ``stock_dao.get_concepts``，避免重复 SQL。
-        """
-        concepts_map = await self.stock_dao.get_concepts([ts_code])
-        return concepts_map.get(ts_code, [])
-
     async def search_stocks(self, keyword: str, limit: int = 10) -> pd.DataFrame:
         """按代码/名称模糊搜索上市股票（供关注列表「添加关注」搜索框）。"""
         return await self.stock_dao.search_stocks(keyword, limit=limit)

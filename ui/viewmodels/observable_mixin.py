@@ -19,7 +19,7 @@
 - loop 用强引用；_owner_tid 每次 subscribe 刷新绑定到最新线程（Skeptic P1 #8）
 - _pending_notifications deque maxlen=1000（Skeptic P1 #7）
 - _do_notify 默认 per-cb try/except 异常隔离（Skeptic P1 #4）
-- closure 默认参数绑定 loop 强引用（Skeptic P1 #1）；fire_and_wrap 每 cb 前查 disposed（P0 #3）
+- fire_and_wrap 以默认参数绑定快照防 late-binding；每 cb 前查 disposed（P0 #3）
 """
 
 from __future__ import annotations
@@ -361,7 +361,6 @@ class ViewModelNotifier[T]:
         def fire_and_wrap(
             subs_closure: list[Callable[[T], None]] = subs_snap,
             state_closure: T = state_snap,
-            loop_closure: asyncio.AbstractEventLoop = loop,
             my_seq: int = seq,
         ) -> None:
             if self._disposed:

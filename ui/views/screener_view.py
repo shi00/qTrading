@@ -2562,7 +2562,7 @@ def ScreenerView(
         if state.selected_strategy:
             _schedule_desc_update(desc_timer_ref, vm, state.selected_strategy)
 
-    async def _do_restore_default_async(strat: str, ctrl_field: ft.TextField | None) -> None:
+    async def _do_restore_default_async(strat: str) -> None:
         await _execute_restore_default_prompt(vm, _get_page(), strat, _update_param)
 
     async def _do_save_prompt_async(strat: str) -> None:
@@ -2570,7 +2570,7 @@ def ScreenerView(
 
     def _on_restore_prompt(strat: str) -> None:
         if page := _get_page():
-            page.run_task(_do_restore_default_async, strat, None)
+            page.run_task(_do_restore_default_async, strat)
 
     def _on_save_prompt(strat: str) -> None:
         if page := _get_page():
