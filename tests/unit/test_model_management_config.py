@@ -15,12 +15,19 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Literal
 from unittest import mock
 
 import pytest
 
 import utils.config_handler as cfg_mod
-from utils.config_models import AppConfig
+from utils.config_models import (
+    MODEL_MANAGEMENT_SCHEMA_VERSION,
+    AppConfig,
+    ModelManagementConfig,
+    SecurityStateCorruptionError,
+    validate_security_subdomain_integrity,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -399,3 +406,162 @@ class TestSaveConfigCorruptionSemantics:
 
         assert cfg_mod.ConfigHandler.save_config({"log_level": "DEBUG"}) is False
         assert isolated_config.read_text(encoding="utf-8") == "{corrupt"
+
+
+class TestSecuritySubdomainIntegrity:
+    """F08：区分「合法初始化 / 旧版本迁移」与「已初始化安全子域的结构损坏」。
+
+    Pydantic 对缺失的 security_state 子字段补默认值（零修订 / 空 grants / 空撤销），
+    会把「合法 JSON 的部分安全字段丢失」洗白为合法空安全态；入口必须在 schema
+    校验前按磁盘原始形态判定，损坏即抛 :class:`SecurityStateCorruptionError`。
+    """
+
+    @pytest.mark.parametrize(
+        "raw_mm",
+        [
+            pytest.param(None, id="domain-missing-initialization"),
+            pytest.param({"schema_version": 0}, id="legacy-schema-migration"),
+            pytest.param({"schema_version": 0, "security_state": {}}, id="legacy-schema-with-partial-state"),
+        ],
+    )
+    def test_passes_for_initialization_and_legacy_migration(self, raw_mm):
+        validate_security_subdomain_integrity(raw_mm)
+
+    def test_passes_for_complete_security_state(self):
+        raw_mm = {
+            "schema_version": 1,
+            "security_state": {"security_revision": 3, "grants": [], "revoked_credential_versions": []},
+        }
+        validate_security_subdomain_integrity(raw_mm)
+
+    def test_schema_version_literal_matches_constant(self):
+        """Literal[1] 与 MODEL_MANAGEMENT_SCHEMA_VERSION 常量一致性守护（无法直接引用，见模型注释）。"""
+        assert MODEL_MANAGEMENT_SCHEMA_VERSION == 1
+        assert ModelManagementConfig.model_fields["schema_version"].annotation == Literal[1]
+
+    @pytest.mark.parametrize(
+        "raw_mm",
+        [
+            pytest.param("corrupted", id="domain-not-dict"),
+            pytest.param({"config_revision": 1}, id="schema-version-missing"),
+            pytest.param({"schema_version": "1"}, id="schema-version-string"),
+            pytest.param({"schema_version": True}, id="schema-version-bool"),
+            pytest.param({"schema_version": 1}, id="security-state-missing"),
+            pytest.param({"schema_version": 1, "security_state": None}, id="security-state-null"),
+            pytest.param(
+                {"schema_version": 1, "security_state": {"grants": []}},
+                id="grants-only-missing-revision-and-revocations",
+            ),
+            pytest.param(
+                {"schema_version": 1, "security_state": {"security_revision": 1, "grants": []}},
+                id="missing-revoked-credential-versions",
+            ),
+            pytest.param(
+                {"schema_version": 1, "security_state": {"security_revision": 1, "revoked_credential_versions": []}},
+                id="missing-grants",
+            ),
+            pytest.param(
+                {"schema_version": 1, "security_state": {"grants": [], "revoked_credential_versions": []}},
+                id="missing-security-revision",
+            ),
+        ],
+    )
+    def test_raises_for_structural_corruption(self, raw_mm):
+        with pytest.raises(SecurityStateCorruptionError) as excinfo:
+            validate_security_subdomain_integrity(raw_mm)
+        # 强断言：错误消息须携带结构损坏判定语义（区别于任意 ValueError）
+        assert "结构损坏" in str(excinfo.value)
+
+
+class TestFreshReadSecurityCorruption:
+    """F08 回归：撤销后逐字段删除安全键，fresh read 必须失败关闭。"""
+
+    @pytest.mark.parametrize(
+        "drop_key",
+        ["revoked_credential_versions", "grants", "security_revision", "security_state", "schema_version"],
+    )
+    def test_fresh_read_fails_closed_on_dropped_security_key(self, isolated_config, drop_key):
+        cfg_mod.ConfigHandler.ensure_defaults()
+        # 注入撤销事实（MM-02 语义的持久形态）并确认 fresh read 基线可见
+        raw = _read_raw_config(isolated_config)
+        raw["model_management"]["security_state"]["revoked_credential_versions"] = [
+            {"credential_version": "v-old", "revoked_at": "2026-01-01T00:00:00+00:00"}
+        ]
+        _write_raw_config(isolated_config, raw)
+        fresh = cfg_mod.ConfigHandler.read_model_management_fresh()
+        assert fresh["model_management"]["security_state"]["revoked_credential_versions"][0]["credential_version"] == (
+            "v-old"
+        )
+
+        # 逐字段删除安全键（模拟合法 JSON 的部分字段丢失，schema 层面仍可合法）
+        raw = _read_raw_config(isolated_config)
+        if drop_key == "security_state":
+            del raw["model_management"]["security_state"]
+        elif drop_key == "schema_version":
+            del raw["model_management"]["schema_version"]
+        else:
+            del raw["model_management"]["security_state"][drop_key]
+        _write_raw_config(isolated_config, raw)
+        corrupted_disk = isolated_config.read_text(encoding="utf-8")
+
+        from utils.config.storage import ConfigFreshReadError
+
+        with pytest.raises(ConfigFreshReadError, match="security subdomain corruption"):
+            cfg_mod.ConfigHandler.read_model_management_fresh()
+        # 失败关闭：只读路径，磁盘损坏形态未被改写
+        assert isolated_config.read_text(encoding="utf-8") == corrupted_disk
+
+    def test_fresh_read_fails_closed_on_future_schema_version(self, isolated_config):
+        """schema_version 高于当前版本：入口放行、Literal schema 拒绝，同样失败关闭。"""
+        cfg_mod.ConfigHandler.ensure_defaults()
+        raw = _read_raw_config(isolated_config)
+        raw["model_management"]["schema_version"] = 2
+        _write_raw_config(isolated_config, raw)
+
+        from utils.config.storage import ConfigFreshReadError
+
+        with pytest.raises(ConfigFreshReadError, match="config validation failed"):
+            cfg_mod.ConfigHandler.read_model_management_fresh()
+
+    def test_fresh_read_backfills_domain_when_missing(self, isolated_config):
+        """合法初始化回归：磁盘无 model_management 域时 fresh read 照常补默认。"""
+        _write_raw_config(isolated_config, {"llm_provider": "deepseek"})
+
+        fresh = cfg_mod.ConfigHandler.read_model_management_fresh()
+
+        security = fresh["model_management"]["security_state"]
+        assert fresh["model_management"]["schema_version"] == 1
+        assert security["security_revision"] == 0
+        assert security["grants"] == []
+        assert security["revoked_credential_versions"] == []
+
+
+class TestCompareAndSaveSecurityCorruption:
+    """F08：CAS 持久化边界——磁盘安全子域损坏时确定不提交，禁止洗白落盘。"""
+
+    def test_cas_aborts_when_disk_security_subdomain_corrupted(self, isolated_config):
+        cfg_mod.ConfigHandler.ensure_defaults()
+        payload = dict(cfg_mod.ConfigHandler.load_config()["model_management"])
+        expected = payload["config_revision"]
+        raw = _read_raw_config(isolated_config)
+        del raw["model_management"]["security_state"]["revoked_credential_versions"]
+        _write_raw_config(isolated_config, raw)
+
+        result = cfg_mod.ConfigHandler.compare_and_save_model_management(expected, payload, "op-f08")
+
+        assert result.status == "not_committed"
+        # 磁盘保持损坏原样：撤销键未被补出的空列表洗白
+        raw_after = _read_raw_config(isolated_config)
+        assert "revoked_credential_versions" not in raw_after["model_management"]["security_state"]
+
+    def test_cas_initializes_domain_when_disk_missing(self, isolated_config):
+        """首次初始化不阻断：磁盘无 model_management 域时 CAS 可正常创建完整域。"""
+        _write_raw_config(isolated_config, {"llm_provider": "deepseek"})
+        payload = AppConfig().model_dump()["model_management"]
+
+        result = cfg_mod.ConfigHandler.compare_and_save_model_management(1, payload, "op-init")
+
+        assert result.status == "committed"
+        raw = _read_raw_config(isolated_config)
+        assert raw["model_management"]["schema_version"] == 1
+        assert raw["model_management"]["security_state"]["security_revision"] == 0

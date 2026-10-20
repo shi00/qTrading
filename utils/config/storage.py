@@ -25,8 +25,10 @@ from utils.config_models import (
     AppConfig,
     ConfigValidationResult,
     ModelManagementSaveResult,
+    SecurityStateCorruptionError,
     get_default_config,
     model_management_payload_fingerprint,
+    validate_security_subdomain_integrity,
 )
 from utils.sanitizers import DataSanitizer
 
@@ -530,6 +532,9 @@ def compare_and_save_model_management(
     update_security_state=False（save_draft 草稿路径）：安全子域以磁盘现值为准，
     payload 携带的安全键被忽略（草稿不能修改 security_state）。
     update_security_state=True（安全命令专用路径）：payload 安全子域原样提交。
+
+    F08：磁盘上已初始化的安全子域存在结构损坏（安全键缺失等）时确定不提交
+    （not_committed），禁止把损坏经 Pydantic 默认值洗白为合法空安全态后落盘。
     """
     _migrate_config_location()
     try:
@@ -542,6 +547,14 @@ def compare_and_save_model_management(
 
                 base = data if data is not None else {}
                 disk_mm = base.get("model_management")
+                try:
+                    validate_security_subdomain_integrity(disk_mm)
+                except SecurityStateCorruptionError as e:
+                    cfg.logger.error(
+                        "[ConfigHandler] compare_and_save: security subdomain corruption, aborting: %s",
+                        DataSanitizer.sanitize_error(e),
+                    )
+                    return ModelManagementSaveResult(status="not_committed")
                 if isinstance(disk_mm, dict):
                     try:
                         current_revision = int(disk_mm.get("config_revision", 1))
@@ -601,7 +614,8 @@ def read_model_management_fresh() -> dict:
 
     成功时刷新进程内缓存并返回深拷贝完整配置 dict（model_management 域由
     调用方按 ``fresh["model_management"]`` 取用）。磁盘损坏 / 不可读 /
-    校验失败时抛 :class:`ConfigFreshReadError`，禁止静默落默认。
+    校验失败 / 已初始化安全子域结构损坏（F08）时抛 :class:`ConfigFreshReadError`，
+    禁止静默落默认。
     """
     _migrate_config_location()
     with _config_file_lock():
@@ -613,9 +627,12 @@ def read_model_management_fresh() -> dict:
                 raise ConfigFreshReadError("config file does not exist")
             try:
                 _normalize_ai_external_acknowledged(data)
+                validate_security_subdomain_integrity(data.get("model_management"))
                 validated = AppConfig.model_validate(data)
             except ValidationError as e:
                 raise ConfigFreshReadError(f"config validation failed: {DataSanitizer.sanitize_error(e)}") from e
+            except SecurityStateCorruptionError as e:
+                raise ConfigFreshReadError(f"security subdomain corruption: {DataSanitizer.sanitize_error(e)}") from e
             fresh = validated.model_dump()
             cfg.ConfigHandler._config_cache = fresh
             return copy.deepcopy(fresh)
