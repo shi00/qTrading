@@ -2166,6 +2166,7 @@
     "model_connection_validation_failed": "Validation failed",
     "model_connections_load_failed": "Failed to load model connections",
     "model_management_add_connection": "New connection",
+    "model_management_edit_connection": "Edit",
     "model_management_editor_title": "Edit connection",
     "model_management_filter_all": "All",
     "model_management_filter_disabled": "Disabled",

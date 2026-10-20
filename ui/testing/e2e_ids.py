@@ -232,6 +232,7 @@ class _ModelIds:
     _REMOVE_PREFIX = "e2e.model.remove"
     _EGRESS_GRANT_PREFIX = "e2e.model.egress_grant"
     _EGRESS_REVOKE_PREFIX = "e2e.model.egress_revoke"
+    _CONNECTION_EDIT_PREFIX = "e2e.model.connection_edit"
 
     # --- 设置页三页签页头 / 页内关键交互 ---
     ADD_CONNECTION: Eid = ("e2e.model.add_connection", AnchorKind.INTERACTIVE)
@@ -330,6 +331,16 @@ class _ModelIds:
     def egress_revoke(connection_id: str) -> Eid:
         """生成场景检查区「撤销授权」按钮 anchor（INTERACTIVE）。"""
         return (f"{_ModelIds._EGRESS_REVOKE_PREFIX}.{connection_id}", AnchorKind.INTERACTIVE)
+
+    @staticmethod
+    def connection_edit(connection_id: str) -> Eid:
+        """生成连接列表行「编辑」按钮 anchor（INTERACTIVE，F12 编辑入口）。
+
+        连接列表每行一个编辑按钮，进入既有连接编辑器；identifier 含 connection_id
+        以区分多行（选择与详情状态一致性由 ``vm.edit`` 保证）。
+        Precondition: connection_id 必须为 ASCII 且不含空格/破折号（附录 A 命名规范）。
+        """
+        return (f"{_ModelIds._CONNECTION_EDIT_PREFIX}.{connection_id}", AnchorKind.INTERACTIVE)
 
 
 class _TushareIds:

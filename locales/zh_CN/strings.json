@@ -2166,6 +2166,7 @@
     "model_connection_validation_failed": "校验未通过",
     "model_connections_load_failed": "加载模型连接失败",
     "model_management_add_connection": "新建连接",
+    "model_management_edit_connection": "编辑",
     "model_management_editor_title": "连接编辑",
     "model_management_filter_all": "全部",
     "model_management_filter_disabled": "已停用",
