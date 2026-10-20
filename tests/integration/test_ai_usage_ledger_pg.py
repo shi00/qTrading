@@ -543,3 +543,98 @@ class TestConcurrentMixedOpsNoDeadlock:
         assert row is not None
         assert int(row[0]) == 1
         assert Decimal(str(row[1])) == Decimal("0.10")
+
+
+class TestF22ReservationLifecycle:
+    """场景 6（F22）：预留状态机三条回归链的预算闭环（真实 PG 行为契约）。
+
+    修复前：结算后预留停留 dispatched（与已结算费用双占）；owner 租约过期后
+    held_unconfirmed 从预算有效占用中消失。修复后：结算同事务将对应预留转为
+    settled；held_unconfirmed 持续占用直到明确处置（released / settled）。
+
+    链 1 预留→派发→结算：settle 带 reservation_id → 转 settled → 不再双占；
+    链 2 崩溃→过期恢复：recover 转 held_unconfirmed → 持续占用预算；
+    链 3 手动解除：release_reservation → released → 预算释放。
+    """
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_settle_converts_reservation_and_avoids_double_count(self, ledger_dao: AIUsageDao):
+        """链 1：结算同事务转换预留；结算后旧预留不再占用（再预留不双计）。"""
+        reserved = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f22-a", amount="0.50"))
+        assert reserved is not None
+        assert await ledger_dao.mark_dispatched(
+            invocation_id="inv-f22-a",
+            reservation_id=reserved.reservation_id,
+            owner_session_id="sess-owner",
+            owner_epoch=1,
+        )
+
+        settle_kwargs = {
+            **_make_settle_kwargs("att-f22-a", month=_current_month(), cost_cny="0.50"),
+            "invocation_id": "inv-f22-a",
+            "reservation_id": reserved.reservation_id,
+        }
+        assert await ledger_dao.settle_attempt_usage(**settle_kwargs)
+
+        reservations = await _fetch_reservations(ledger_dao, "inv-f22-a")
+        assert reservations[0]["state"] == "settled"
+        assert reservations[0]["settled_attempt_id"] == "att-f22-a"
+
+        # 修复前：used 0.50 + 旧 dispatched 0.50 + 新 0.50 = 1.50 > 1.00 拒绝（双占）
+        # 修复后：used 0.50 + settled 0 占用 + 新 0.50 = 1.00 ≤ 1.00 获准
+        again = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f22-a-2", amount="0.50"))
+        assert again is not None, "结算转换后旧预留不得继续占用（双占窗口应消除）"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_held_unconfirmed_keeps_budget_after_owner_expiry(self, ledger_dao: AIUsageDao):
+        """链 2：崩溃→过期恢复→held_unconfirmed 持续占用，过期 owner 不释放占用。"""
+        reserved = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f22-b", amount="0.80"))
+        assert reserved is not None
+        assert await ledger_dao.mark_dispatched(
+            invocation_id="inv-f22-b",
+            reservation_id=reserved.reservation_id,
+            owner_session_id="sess-owner",
+            owner_epoch=1,
+        )
+
+        assert ledger_dao.engine is not None
+        async with ledger_dao.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE ai_invocation SET owner_lease_expires_at = :past WHERE invocation_id = :iid"),
+                {"past": _utcnow_naive() - datetime.timedelta(hours=1), "iid": "inv-f22-b"},
+            )
+        assert await ledger_dao.recover_expired_owners() == 1
+        reservations = await _fetch_reservations(ledger_dao, "inv-f22-b")
+        assert reservations[0]["state"] == "held_unconfirmed"
+
+        # 修复前：行级租约条件把过期 owner 的 0.80 从预算占用中过滤掉 → 0.50 获准（缺陷）
+        # 修复后：held_unconfirmed 持续占用 → 0.80 + 0.50 > 1.00 拒绝
+        blocked = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f22-b-2", amount="0.50"))
+        assert blocked is None, "过期 owner 的未确认预留必须持续占用预算"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_manual_release_frees_budget(self, ledger_dao: AIUsageDao):
+        """链 3：人工解除 held_unconfirmed → released → 预算占用释放。"""
+        reserved = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f22-c", amount="0.80"))
+        assert reserved is not None
+        assert await ledger_dao.mark_dispatched(
+            invocation_id="inv-f22-c",
+            reservation_id=reserved.reservation_id,
+            owner_session_id="sess-owner",
+            owner_epoch=1,
+        )
+
+        assert ledger_dao.engine is not None
+        async with ledger_dao.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE ai_invocation SET owner_lease_expires_at = :past WHERE invocation_id = :iid"),
+                {"past": _utcnow_naive() - datetime.timedelta(hours=1), "iid": "inv-f22-c"},
+            )
+        assert await ledger_dao.recover_expired_owners() == 1
+        assert await ledger_dao.release_reservation(reservation_id=reserved.reservation_id)
+        reservations = await _fetch_reservations(ledger_dao, "inv-f22-c")
+        assert reservations[0]["state"] == "released"
+
+        # released 不在活跃集合 → 占用释放 → 0.80 ≤ 1.00 获准
+        freed = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f22-c-2", amount="0.80"))
+        assert freed is not None, "人工解除后预算占用应释放"

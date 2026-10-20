@@ -3,7 +3,9 @@
 锁与一致性契约（方案 D2~D4）：
 - **advisory 月锁**：``pg_advisory_xact_lock(NAMESPACE, YYYYMM)`` 两键，事务级；
   归属月 = Asia/Shanghai 下 invocation 开始月；
-- **锁序**：月锁 → invocation（UPSERT 锁定行）→ attempt → 月汇总，同类按主键序；
+- **锁序**：月锁先行（全部预算/结算变更经同月锁键串行化）；锁内 try_reserve /
+  release_reservation 为「invocation → …」，settle_attempt_usage 为
+  「attempt（FOR UPDATE）→ invocation（F22 预留转换）→ 月汇总」，同类按主键序；
 - **owner 条件写入**：所有变更带 owner_session_id / owner_epoch /
   owner_lease_expires_at > (now() AT TIME ZONE 'UTC') 三条件，rowcount=0 即失权
   （时间列统一 naive UTC 墙钟，now() 经 AT TIME ZONE 'UTC' 归一，与 session 时区无关）；
@@ -31,7 +33,11 @@ from core.model_management_types import (
 )
 from utils.log_decorators import PerfThreshold, log_async_operation
 
-# 预留有效状态（D3）：预算占用口径
+# 预留有效状态（D3 + F22 预算占用口径）：reserved / dispatched 为 owner 在世的
+# 正常占用（受 owner 租约约束）；held_unconfirmed 为崩溃/失权后「结果未知」占用，
+# **不受租约约束持续占用预算**（见 _read_active_reservations_sum），直到明确处置：
+# settled（结算同事务转换，_settle_reservation）/ released（人工解除）。
+# 终态：settled / released 均不再占用预算。
 _ACTIVE_RESERVATION_STATES: Final[tuple[str, ...]] = ("reserved", "dispatched", "held_unconfirmed")
 
 # advisory 锁固定命名空间（"AIUS" ASCII 编码低 32 位，全局唯一语义，勿改）
@@ -458,7 +464,13 @@ class AIUsageDao(BaseDao):
         return settled + legacy
 
     async def _read_active_reservations_sum(self, conn: Any, month: str) -> Decimal:
-        """该月归属、租约未过期的有效预留金额合计（D3）。
+        """该月归属的预算有效占用合计（D3 + F22 口径）。
+
+        F22 修正：owner 租约条件仅约束 ``reserved`` / ``dispatched``（owner 在世时的
+        正常占用）；``held_unconfirmed`` 是崩溃/失权后「结果未知」的费用占用，**不受
+        租约是否过期影响、持续占用预算**，直到明确处置（``released`` 人工解除 /
+        ``settled`` 结算确认）——过期 owner 的未确认金额不得从有效占用中消失
+        （展示「未确认」列不能代替预算保护）。
 
         归属月按 created_at（Asia/Shanghai 月界）判定，与 D2 归属月口径一致。
 
@@ -475,7 +487,10 @@ class AIUsageDao(BaseDao):
                     """
                     SELECT COALESCE(SUM((elem->>'amount_cny')::numeric), 0)
                     FROM ai_invocation, jsonb_array_elements(reservations) AS elem
-                    WHERE owner_lease_expires_at > (now() AT TIME ZONE 'UTC')
+                    WHERE (
+                            elem->>'state' = 'held_unconfirmed'
+                            OR owner_lease_expires_at > (now() AT TIME ZONE 'UTC')
+                          )
                       AND elem->>'state' = ANY(CAST(:states AS text[]))
                       AND elem->>'amount_cny' IS NOT NULL
                       AND created_at >= :month_start
@@ -804,6 +819,7 @@ class AIUsageDao(BaseDao):
         retry_index: int,
         security_revision: int,
         month: str,
+        reservation_id: str | None = None,
         encoder_input_tokens: int | None = None,
         text_count: int | None = None,
         usage_window_expires_at: datetime.datetime | None = None,
@@ -814,6 +830,16 @@ class AIUsageDao(BaseDao):
 
         幂等：usage_revision <= accounted_usage_revision 时不重复计费（迟到差额
         只推进一次）；返回 False = 本次无推进（旧修订或已结算）。
+
+        预留转换（F22）：``reservation_id`` 非 None 且本次结算推进时，**同一事务内**
+        将对应预留从活跃状态（reserved / dispatched / held_unconfirmed）转为
+        ``settled``（记 ``settled_at`` / ``settled_attempt_id``）——费用落账与预留
+        退出同生共死，消除「已结算费用 + 旧预留双占」窗口；金额不重复扣减
+        （月汇总走差额推进，预留仅退出占用），也不提前释放（终态落账即费用事实
+        确定，后续修订仍可经迟到差额推进）。转换未命中（预留已 settled / released
+        或不存在）幂等跳过（rowcount=0，不影响结算推进语义）。
+        ``reservation_id`` 为 None（未接入预留的调用链）不执行转换，行为与既有
+        完全一致。
         """
         self._check_engine(context="ai_usage.settle_attempt_usage")
         async with self._guarded_begin() as conn:
@@ -916,6 +942,16 @@ class AIUsageDao(BaseDao):
             if not should_account:
                 return False
 
+            # F22：费用落账与预留退出同事务原子生效（结算成功但转换失败 → 整体回滚，
+            # 不出现「费用已入账而预留仍占预算」的双占中间态）
+            if reservation_id is not None:
+                await self._settle_reservation(
+                    conn,
+                    invocation_id=invocation_id,
+                    reservation_id=reservation_id,
+                    attempt_id=attempt_id,
+                )
+
             # 差额 = 本次成本 - 已计入成本，整体推进月汇总（迟到差额只计一次）
             new_cost = Decimal(cost_cny) if cost_cny is not None else Decimal("0")
             delta = new_cost - old_accounted_cost
@@ -940,6 +976,58 @@ class AIUsageDao(BaseDao):
                     usage_revision=usage_revision,
                 )
             return True
+
+    @staticmethod
+    async def _settle_reservation(conn: Any, *, invocation_id: str, reservation_id: str, attempt_id: str) -> None:
+        """结算同事务内预留转换：活跃状态（reserved/dispatched/held_unconfirmed）→ settled。
+
+        F22 状态机闭环：与 ``release_reservation`` 同构的条件 UPDATE——仅改写目标
+        预留元素 state（保留历史，不删除），并记 ``settled_at`` / ``settled_attempt_id``；
+        ``settled`` / ``released`` 元素不再命中 ``_ACTIVE_RESERVATION_STATES``，预算
+        有效占用随之扣除。EXISTS 守卫：目标元素不存在或已终态时 rowcount=0（幂等
+        跳过，不抛错）；同时保证 jsonb_agg 至少一行（reservations 不会被改写为 NULL）。
+
+        锁序（与 ``settle_attempt_usage`` 一致）：月 advisory 锁已持有（调用方），
+        attempt 行 FOR UPDATE 之后改 invocation 行——与 ``try_reserve`` /
+        ``release_reservation`` 经同月锁键串行，无跨月交错。
+        """
+        settled_at = datetime.datetime.now(datetime.UTC).replace(tzinfo=None).isoformat()
+        await conn.execute(
+            sa.text(
+                """
+                UPDATE ai_invocation
+                SET reservations = (
+                        SELECT jsonb_agg(
+                            CASE
+                                WHEN elem->>'reservation_id' = :reservation_id
+                                    AND elem->>'state' = ANY(CAST(:active_states AS text[]))
+                                    THEN elem || jsonb_build_object(
+                                        'state', 'settled',
+                                        'settled_at', cast(:settled_at as text),
+                                        'settled_attempt_id', cast(:settled_attempt_id as text)
+                                    )
+                                ELSE elem
+                            END
+                        )
+                        FROM jsonb_array_elements(reservations) AS elem
+                    ),
+                    updated_at = (now() AT TIME ZONE 'UTC')
+                WHERE invocation_id = :invocation_id
+                  AND EXISTS (
+                      SELECT 1 FROM jsonb_array_elements(reservations) AS e
+                      WHERE e->>'reservation_id' = :reservation_id
+                        AND e->>'state' = ANY(CAST(:active_states AS text[]))
+                  )
+                """
+            ),
+            {
+                "reservation_id": reservation_id,
+                "active_states": list(_ACTIVE_RESERVATION_STATES),
+                "settled_at": settled_at,
+                "settled_attempt_id": attempt_id,
+                "invocation_id": invocation_id,
+            },
+        )
 
     async def _insert_terminal_attempt(self, conn: Any, **kwargs: Any) -> None:
         await conn.execute(
