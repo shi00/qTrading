@@ -164,6 +164,33 @@ PoC 在锁定 Flet 版本 + CanvasKit 上实测 `Semantics(identifier=…)` 的 
   tap），表现为「点击无效、目标永不展开」。`AnchorPage.select_option` 与
   `SettingsPage.click_tushare_verify` 均在点击前显式 `scroll_into_view` 并重新取 bbox 规避。
 
+### 坑点 9：长菜单视口外选项 force 点击误选相邻项 + 菜单收合 ≠ 选中目标项（CI run 39387686968 实证）
+- **根因**：Flet Dropdown 菜单项 25+ 时（如数据探索的表下拉），排序靠后的选项渲染在
+  **菜单视口之外**（trace 实证：菜单展开 25+ 项，`stock_basic` 按字母序在视口外）。
+  CanvasKit 高负载下语义节点 bbox 与视觉渲染错位时，`force=True` 对视口外选项 bbox 的
+  点击命中**相邻错误选项**（实证：切 `stock_basic` 误选 `macro_economy`）。
+- **后果（两层）**：
+  1. 命中错误选项后菜单**正常收合**——既有防御（N=3 重试防 option not found、收合确认
+     防点击被吞、TABLE_READY 消失→重现防未加载）全部通过，因为它们只能证明「某次选择
+     落地」，不能证明「选中了目标项」；
+  2. 错误选项在种子库无数据 → 空状态 → 下游文本断言（`000001.SZ`）30s 超时，报错方向
+     与根因完全脱节（表象在断言，病灶在 select_option）。
+- **规程**（`AnchorPage.select_option` C7/C8 双层防御）：
+  - **C8 视口内化滚动**：点击前检查选项 bbox，未完全落入视口先经物理滚轮
+    `page.mouse.wheel`（与坑点 8 同源，严禁 DOM scrollIntoView）把选项滚入视口；
+    滚动触发 Flet 菜单重渲染，原 ElementHandle 可能失效，每轮滚动后重新
+    `_find_option_element` 定位；鼠标落点 clamp 进视口（视口外 `move` 后 wheel 落空），
+    步幅 clamp ±600 防过冲；耗尽（12 次尝试 × deadline）抛
+    `never within viewport`，不静默点击视口外坐标。
+  - **C7 选中值校验**：菜单收合后轮询 Dropdown identifier 节点显示值（textContent 为
+    `EID + "\n" + 显示文本`，前缀剥离必须以**完整 EID** 为锚——EID 自身含 `.`，按首个
+    `.` 切分会把 EID 主体误剥），与目标选项不匹配即抛 `selected value mismatch`。
+    匹配判据对齐选项定位的 matchPrio 1/2/3（精确 / 前缀 / `(别名)`——过滤列传
+    `"代码"` 而显示 `"ts_code (代码)"`，须接受），**拒绝裸子串**（prio 4：
+    `index_daily` 会误匹配 `index_dailybaseline`）。
+  - 经验：下拉类交互的防御不能止步于「交互成功」，必须校验「结果正确」——错误目标
+    命中的所有表型（误选项、错误值、错误页）都会让既有「成功判据」绿灯通过。
+
 ---
 
 ## 4. E2E 锚点 (EIDS + AnchorKind) 分类速查表

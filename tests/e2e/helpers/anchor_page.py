@@ -43,6 +43,35 @@ def _as_box(box: Mapping[str, Any]) -> dict[str, float]:
     }
 
 
+# C8 视口内化滚动的收敛参数：最多 12 次尝试 × 每次 ≤600px，覆盖 25+ 项长菜单；
+# 单次步幅 clamp ±600 避免滚轮惯性过冲；滚动后 150ms 等待 Flutter 滚动动画稳定。
+_OPTION_SCROLL_MAX_ATTEMPTS = 12
+_OPTION_SCROLL_STEP_PX = 600.0
+_OPTION_SCROLL_SETTLE_MS = 150
+
+
+def _display_matches_option(display: str | None, option_text: str) -> bool:
+    """判断 Dropdown 显示值是否与目标选项匹配（C7 选中值校验判据）。
+
+    接受三类形态（对齐 ``_find_option_element`` 的 matchPrio 1/2/3）：
+    - 精确相等（prio 1）：显示值 = 选项 key；
+    - 前缀形态（prio 2）：``key+空格`` / ``key+(`` / ``key+换行`` 开头；
+    - 别名形态（prio 3）：显示值含 ``(key)``——``select_filter_col`` 传 ``"代码"``
+      而命中项显示 ``"ts_code (代码)"``，校验必须接受，否则合法路径误报。
+    拒绝裸子串（prio 4）：``index_daily`` 会误匹配 ``index_dailybaseline``，
+    把「命中错误选项」伪装成「校验通过」。
+    """
+    d = (display or "").strip()
+    t = option_text.strip()
+    if not d or not t:
+        return False
+    if d == t:
+        return True
+    if d.startswith(t + " ") or d.startswith(t + "(") or d.startswith(t + "\n"):
+        return True
+    return f"({t})" in d
+
+
 async def retry_until_triggered(
     interact: Callable[[], Awaitable[None]],
     confirm: Callable[[], Awaitable[bool]],
@@ -313,6 +342,122 @@ class AnchorPage:
         )
         return option_handle.as_element()
 
+    async def _read_dropdown_display_value(self, eid_str: str) -> str | None:
+        """读取 Dropdown identifier 节点当前显示值（C7 校验数据源）。
+
+        Flet CanvasKit 下 identifier 节点 textContent 格式为 ``EID + "\\n" + 显示文本``
+        （另有 ``EID + "."`` 变体）。前缀剥离必须以完整 EID 为锚（``startsWith(eid)``）：
+        EID 自身含 ``.``（如 ``e2e.data.table_dropdown``），按首个 ``.`` 切分会把
+        EID 主体误当前缀剥掉。
+        """
+        value = await self.page.evaluate(
+            r"""(args) => {
+                const el = document.querySelector(
+                    'flt-semantics[flt-semantics-identifier="' + args.label + '"]');
+                if (!el) return null;
+                const t = (el.textContent || '').trim();
+                if (t.startsWith(args.label + '\n')) return t.slice(args.label.length + 1);
+                if (t.startsWith(args.label + '.')) return t.slice(args.label.length + 1);
+                return t;
+            }""",
+            {"label": eid_str},
+        )
+        return value if isinstance(value, str) else None
+
+    async def _scroll_menu_option_into_view(
+        self,
+        option_element: Any,
+        option_text: str,
+        eid_str: str,
+        timeout_ms: int,
+    ) -> Any:
+        """把下拉菜单中视口外的选项经物理滚轮滚入视口（C8），返回最新选项句柄。
+
+        长菜单（25+ 项）中排序靠后的选项渲染在视口外，语义节点 bbox 与视觉渲染
+        错位时 ``force=True`` 点击命中相邻错误选项（CI run 39387686968 实证：
+        test_table_viewer_switch 切 stock_basic 误选 macro_economy）。DOM
+        ``scrollIntoView`` 不驱动 Flutter ScrollPosition（PR #1342 已实证），故复用
+        ``scroll_into_view`` 同源的 ``mouse.wheel`` 物理滚动。
+
+        bbox 已完全落入视口时 no-op 直接返回；无 bbox 时以 Dropdown 框下方作为
+        滚动承载面。滚动会触发 Flet 菜单重渲染，原 ElementHandle 可能失效，每轮
+        滚动后重新 ``_find_option_element``。耗尽仍无法入视口即抛错，不静默继续。
+        """
+        viewport = self.page.viewport_size
+        if not viewport:
+            return option_element
+        vh = float(viewport["height"])
+        vw = float(viewport["width"])
+        current = option_element
+        deadline = time.monotonic() + self._tm(timeout_ms) / 1000
+
+        for _ in range(_OPTION_SCROLL_MAX_ATTEMPTS):
+            try:
+                raw_box = await current.bounding_box()
+            except Exception:  # noqa: BLE001  # handle 随重渲染失效属预期，按无 bbox 走承载面兜底
+                raw_box = None
+            if raw_box and raw_box["width"] > 0 and raw_box["height"] > 0:
+                box = _as_box(raw_box)
+                top = box["y"]
+                bottom = box["y"] + box["height"]
+                if top >= 0 and bottom <= vh:
+                    return current
+                center_y = (top + bottom) / 2
+                # 鼠标落点 clamp 进视口（视口外 move 后 wheel 事件落空），滚轮步幅
+                # clamp ±600 避免过冲。
+                await self.page.mouse.move(
+                    min(max(box["x"] + box["width"] / 2, 0.0), vw - 1.0),
+                    min(max(center_y, 0.0), vh - 1.0),
+                )
+                delta = min(max(center_y - vh / 2, -_OPTION_SCROLL_STEP_PX), _OPTION_SCROLL_STEP_PX)
+                await self.page.mouse.wheel(0, delta)
+            else:
+                try:
+                    dd_box = await self._identifier_node_box(eid_str, timeout_ms)
+                except Exception:  # noqa: BLE001  # Dropdown 自身也可能瞬时无 bbox，退化为视口中心
+                    dd_box = None
+                if dd_box:
+                    await self.page.mouse.move(
+                        dd_box["x"] + dd_box["width"] / 2,
+                        min(dd_box["y"] + dd_box["height"] + 30.0, vh - 1.0),
+                    )
+                else:
+                    await self.page.mouse.move(vw / 2, vh / 2)
+                await self.page.mouse.wheel(0, _OPTION_SCROLL_STEP_PX)
+            await self.page.wait_for_timeout(_OPTION_SCROLL_SETTLE_MS)
+
+            fresh = await self._find_option_element(option_text, eid_str)
+            if fresh:
+                current = fresh
+            if time.monotonic() >= deadline:
+                break
+
+        raise RuntimeError(
+            f"AnchorPage.select_option: option {option_text!r} never within viewport after scrolling "
+            f"(dropdown={eid_str!r})"
+        )
+
+    async def _confirm_selection_value(self, eid_str: str, option_text: str) -> None:
+        """确认 Dropdown 显示值已更新为选中项（C7）。
+
+        菜单收合只证明「某次选择落地」，不证明「选中了目标项」：命中错误选项时
+        菜单同样正常收合（CI run 39387686968 实证误选 macro_economy 后空状态
+        污染下游断言 30s）。轮询 identifier 节点显示值，匹配判据见
+        ``_display_matches_option``，不匹配即抛错，把「命中错误目标」从静默污染
+        变为显式失败。
+        """
+        display: str | None = None
+        deadline = time.monotonic() + self._tm(2000) / 1000
+        while time.monotonic() < deadline:
+            display = await self._read_dropdown_display_value(eid_str)
+            if _display_matches_option(display, option_text):
+                return
+            await self.page.wait_for_timeout(100)
+        raise RuntimeError(
+            f"AnchorPage.select_option: selected value mismatch "
+            f"(dropdown={eid_str!r}, expected={option_text!r}, actual={display!r})"
+        )
+
     async def select_option(
         self,
         dropdown_eid: Eid,
@@ -346,6 +491,15 @@ class AnchorPage:
               「高级（开发者）」分组后, 展开分组会把 Dropdown 推到视口下方; Playwright
               ``mouse.click`` 对视口外坐标静默丢弃 (不抛异常、Flutter 收不到 tap),
               下拉永不展开 → 选项节点不存在 → "option not found".
+        - C7 (选中值校验): 菜单收合后轮询 Dropdown identifier 节点显示值, 与目标
+              选项不匹配即抛 ``selected value mismatch``. 收合只证明「某次选择
+              落地」, 不证明「选中了目标项」; 命中错误选项时菜单同样正常收合,
+              静默返回会污染下游全部断言.
+        - C8 (视口内化滚动): 选项 bbox 未完全落入视口时先经物理滚轮把选项滚入
+              视口再点击. 长菜单 (25+ 项) 中排序靠后的选项渲染在视口外, CanvasKit
+              语义节点 bbox 与视觉渲染错位时 ``force=True`` 点击命中相邻错误选项
+              (CI run 39387686968 实证: test_table_viewer_switch 切 stock_basic
+              误选 macro_economy, 空状态致下游 '000001.SZ' 30s 超时).
         - 收合确认 (坑点 6 步骤级重试): 空等 2s + ``retry_until_triggered`` 确认
               菜单收合, 选择未落地即抛明确错误, 不静默返回.
         """
@@ -411,6 +565,12 @@ class AnchorPage:
                 f"dropdown={eid_str!r}, option={option_text!r}"
             )
 
+        # 1.5 C8: 选项未完全落入视口时先经物理滚轮滚入视口再点击。长菜单（25+ 项）
+        #     中排序靠后的选项渲染在视口外，语义节点 bbox 与视觉渲染错位时
+        #     force=True 点击命中相邻错误选项（CI run 39387686968 实证：stock_basic
+        #     误选 macro_economy）。滚动可能触发菜单重渲染，以返回的最新句柄继续。
+        option_element = await self._scroll_menu_option_into_view(option_element, option_text, eid_str, timeout_ms)
+
         # 2. 用 force=True 强力点击选项，在 ElementHandle 被 DOM 卸载时重新获取
         for click_attempt in range(3):
             try:
@@ -446,9 +606,16 @@ class AnchorPage:
         settle_deadline = time.monotonic() + 2.0
         while time.monotonic() < settle_deadline:
             if await _menu_closed():
-                return
+                break
             await self.page.wait_for_timeout(100)
-        await retry_until_triggered(_interact, _menu_closed, attempts=3, interval_ms=400)
+        else:
+            await retry_until_triggered(_interact, _menu_closed, attempts=3, interval_ms=400)
+
+        # 4. C7: 选中值校验。菜单收合只证明「某次选择落地」，不证明「选中了目标项」；
+        #    命中错误选项（见 C8）时菜单同样正常收合，静默返回会污染下游全部断言
+        #    （CI run 39387686968 实证：误选 macro_economy 后空状态致
+        #    '000001.SZ' 30s 超时且无明确报错方向）。
+        await self._confirm_selection_value(eid_str, option_text)
 
     # ----------------------------------------------------------------
     # 断言与探测: expect_visible/expect_hidden/count/is_checked
