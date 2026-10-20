@@ -379,6 +379,68 @@ class TestTryReserveBudgetBranches:
         assert lock_params["lock_key"] == 202610
 
 
+class TestTryReserveBudgetAllScopeAggregation:
+    """F21 回归：月度预算为全部场景与测试请求共享，预算判定必须合计全部场景 scope。
+
+    检视报告 F21 触发用例：限额 100，场景 A 已结算 90、无残余预留，
+    场景 B 再预留 20——修复前只查 B 自身 grouping_key（漏掉 A 的 90）仍获准，
+    修复后同月锁内合计全部场景 scope 应拒绝。
+    """
+
+    @pytest.mark.asyncio
+    async def test_reserve_blocked_by_other_scenario_settled_usage(self):
+        """场景 A 已结算 90，场景 B 预留 20、限额 100 → 跨场景合计后拒绝。"""
+        # 序列：lock(None) → INSERT(None) → SUM 全场景((90.00,)) → app_state(None)
+        conn = _CaptureConn(results=[None, None, (Decimal("90.00"),), None])
+        dao = _dao(conn)
+        reservation = await dao.try_reserve(
+            **_reserve_kwargs(scenario_id="news_risk", amount_cny="20", budget_limit_cny="100")
+        )
+        assert reservation is None
+
+    @pytest.mark.asyncio
+    async def test_reserve_granted_when_all_scenarios_within_limit(self):
+        """三场景已结算合计 60，当前场景再预留 30、限额 100 → 总口径内获准。"""
+        # 序列：lock(None) → INSERT(None) → SUM 全场景((60.00,)) → app_state(None)
+        conn = _CaptureConn(results=[None, None, (Decimal("60.00"),), None])
+        dao = _dao(conn)
+        reservation = await dao.try_reserve(
+            **_reserve_kwargs(scenario_id="news_sentiment", amount_cny="30", budget_limit_cny="100")
+        )
+        assert reservation is not None
+
+    @pytest.mark.asyncio
+    async def test_legacy_baseline_added_once_across_scenarios(self):
+        """legacy 基线只加一次：settled 90 + legacy 5.00 + 预留 4 = 99 ≤ 100 → 获准。
+
+        若 legacy 被按场景重复计入（N 次），90 + 5N + 4 > 100（N≥2）即拒绝——
+        获准本身证明 legacy 恰加一次；再断言 app_state 查询恰好 1 次。
+        """
+        # 序列：lock(None) → INSERT(None) → SUM 全场景((90.00,)) → app_state(("500",))
+        conn = _CaptureConn(results=[None, None, (Decimal("90.00"),), ("500",)])
+        dao = _dao(conn)
+        reservation = await dao.try_reserve(
+            **_reserve_kwargs(scenario_id="news_risk", amount_cny="4", budget_limit_cny="100")
+        )
+        assert reservation is not None
+        assert reservation.amount_cny == "4"
+        app_state_calls = [sql for sql, _ in conn.calls if "app_state" in sql]
+        assert len(app_state_calls) == 1  # noqa: weak-assertion legacy 基线只读一次（多读即按场景重复计入）
+
+    @pytest.mark.asyncio
+    async def test_budget_sum_sql_has_no_grouping_key_filter(self):
+        """预算 SUM 查询不得按当前场景 grouping_key 过滤（params 仅 month/scope）。"""
+        conn = _CaptureConn(results=[None, None, (Decimal("0.00"),), None])
+        dao = _dao(conn)
+        await dao.try_reserve(**_reserve_kwargs())
+        sum_calls = [(sql, params) for sql, params in conn.calls if "ai_usage_monthly" in sql]
+        assert len(sum_calls) == 1  # noqa: weak-assertion 预算口径恰一条月汇总查询
+        sum_sql, sum_params = sum_calls[0]
+        assert "aggregation_scope" in sum_sql
+        assert "grouping_key" not in sum_sql
+        assert sum_params == {"month": "202610", "scope": "scenario"}
+
+
 class TestTablesExist:
     def test_three_tables_registered_in_orm(self):
         from data.persistence.models import AiAttempt, AiInvocation, AiUsageMonthly
