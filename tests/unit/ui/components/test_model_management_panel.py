@@ -14,8 +14,10 @@
   桌面经线程池写路径，C-1）。
 """
 
+import ast
 import asyncio
 import datetime as dt
+import inspect
 from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
@@ -813,3 +815,32 @@ class TestUsageViewRetentionAndMessage:
             _usage_state(message=Message("model_usage_export_ready")), MagicMock(), [], None, MagicMock()
         )
         assert I18n.get("model_usage_export_ready") in _texts(view)
+
+
+class TestTabsStructureGuard:
+    """防回归守护：panel 页签结构禁止使用 ft.TabBarView（AI 大脑空白 BUG）。
+
+    BUG 现场：panel 曾用 ``ft.TabBarView(expand=True)`` 承载三个子页，而宿主
+    AIBrainTab 根为 ``Column(scroll=AUTO)``（scrollable 列表的子项主轴约束无界）。
+    TabBarView 的 Flutter 侧 page-view viewport 在无界主轴约束下布局崩溃产生
+    NaN 并沿父链传染，导致 AI 大脑整层不绘制、hit test 失效；语义树仍完整
+    （CanvasKit E2E 语义断言无法拦截），桌面客户端 release 模式吞掉布局异常，
+    仅 UIA 呈现 Infinity 矩形。修复为条件渲染（``tab_pages[selected_tab]``）。
+
+    断言用 AST 调用点扫描（注释/docstring 不进 AST），避免源码注释中的
+    「ft.TabBarView」字样误命中。
+    """
+
+    def test_panel_source_must_not_use_tabbar_view(self):
+        src = inspect.getsource(panel_module)
+        tree = ast.parse(src)
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "TabBarView"
+        ]
+        assert not calls, (
+            "model_management_panel 禁止使用 ft.TabBarView：其 Flutter 侧 page-view "
+            "viewport 在宿主 scrollable Column（无界主轴约束）下布局崩溃，NaN 传染"
+            "导致整层不绘制。子页切换请用条件渲染（tab_pages[selected_tab]）。"
+        )
