@@ -12,10 +12,13 @@ from pydantic import ValidationError
 from utils.config_handler import ConfigHandler
 from utils.config_models import (
     AppConfig,
+    BillingConfig,
     ConfigValidationResult,
     DEFAULT_AI_PROMPT,
     DEFAULT_NEWS_PROMPT,
+    ModelConnectionConfig,
     SyncIntegrityConfig,
+    UsagePolicyConfig,
     get_default_config,
 )
 
@@ -473,3 +476,131 @@ class TestTusharePointTier:
         with pytest.raises(ValidationError) as exc_info:
             AppConfig(sync_full_batch_size=501)
         assert "sync_full_batch_size" in str(exc_info.value)
+
+
+class TestBillingAmountValidation:
+    """R05 缺陷 D1：BillingConfig / UsagePolicyConfig 金额字段持久化边界校验。
+
+    输入域覆盖：非法字符 / 负数 / NaN / sNaN / ±Infinity / 巨型指数 / 千分位 /
+    空白 / 既有合法值回归（None 直通、原样保留不改写）。
+    """
+
+    # BillingConfig 六个价格字段 + fx_to_cny（与 field_validator 注册字段一致）
+    AMOUNT_FIELDS = (
+        "input_price_per_m",
+        "output_price_per_m",
+        "cache_read_price_per_m",
+        "cache_write_price_per_m",
+        "encoder_price_per_m",
+        "fx_to_cny",
+    )
+
+    # ------------------------------------------------------------------
+    # 合法值回归：既有合法旧值必须继续通过，且原样保留（不改写）
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("value", ["0", "-0", "12.5", "0.000001", "1e-7", "1e15", "999999999999999", " 12 "])
+    def test_billing_accepts_valid_amounts(self, value):
+        cfg = BillingConfig(mode="estimate_cost", pricing_unit="llm_tokens", input_price_per_m=value)
+        assert cfg.input_price_per_m == value
+
+    def test_billing_accepts_none(self):
+        cfg = BillingConfig(mode="usage_only", pricing_unit="llm_tokens")
+        assert cfg.input_price_per_m is None
+        assert cfg.fx_to_cny is None
+
+    @pytest.mark.parametrize("field", AMOUNT_FIELDS)
+    @pytest.mark.parametrize("value", ["12.5", None])
+    def test_billing_valid_amounts_all_fields(self, field, value):
+        payload = {"mode": "estimate_cost", "pricing_unit": "llm_tokens", field: value}
+        cfg = BillingConfig.model_validate(payload)
+        assert getattr(cfg, field) == value
+
+    # ------------------------------------------------------------------
+    # 非法值拒绝：R05 列出的全部输入域 + 类型防线
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("field", AMOUNT_FIELDS)
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "abc",  # 非法字符
+            "-5",  # 负数
+            "-0.01",  # 负小数
+            "NaN",  # 非有限
+            "sNaN",  # signaling NaN（参与比较会抛 InvalidOperation）
+            "Infinity",
+            "-Infinity",  # 负无穷（下游静默绕过预算）
+            "+Infinity",
+            "1e999999",  # 可解析且有限但超出上界
+            "1,000",  # 千分位
+            "",  # 空串
+            "   ",  # 纯空白
+            True,  # 非 str 类型
+            12.5,  # 非 str 类型
+        ],
+    )
+    def test_billing_rejects_invalid_amounts(self, field, value):
+        payload = {"mode": "estimate_cost", "pricing_unit": "llm_tokens", field: value}
+        with pytest.raises(ValidationError) as exc_info:
+            BillingConfig.model_validate(payload)
+        assert field in str(exc_info.value)
+
+    # ------------------------------------------------------------------
+    # UsagePolicyConfig.monthly_cny_limit
+    # ------------------------------------------------------------------
+
+    def test_usage_policy_accepts_valid(self):
+        assert UsagePolicyConfig(monthly_cny_limit="200.50").monthly_cny_limit == "200.50"
+        assert UsagePolicyConfig(monthly_cny_limit=None).monthly_cny_limit is None
+        assert UsagePolicyConfig().monthly_cny_limit is None
+
+    @pytest.mark.parametrize(
+        "value",
+        ["abc", "-5", "NaN", "sNaN", "Infinity", "-Infinity", "1e999999", "1,000", "", "   ", True],
+    )
+    def test_usage_policy_rejects_invalid(self, value):
+        with pytest.raises(ValidationError) as exc_info:
+            UsagePolicyConfig(monthly_cny_limit=value)
+        assert "monthly_cny_limit" in str(exc_info.value)
+
+    # ------------------------------------------------------------------
+    # 真实保存链形态：嵌套 dict 载入与 JSON 往返
+    # ------------------------------------------------------------------
+
+    def test_app_config_nested_rejects_invalid_limit(self):
+        """嵌套路径（AppConfig.model_validate 真实保存链）拒绝非法月预算。"""
+        raw = {"model_management": {"usage_policy": {"monthly_cny_limit": "-5"}}}
+        with pytest.raises(ValidationError) as exc_info:
+            AppConfig.model_validate(raw)
+        assert "monthly_cny_limit" in str(exc_info.value)
+
+    def test_app_config_nested_accepts_legacy_valid_limit(self):
+        """旧配置文件中的合法月预算继续可用（向后兼容）。"""
+        raw = {"model_management": {"usage_policy": {"monthly_cny_limit": "100"}}}
+        cfg = AppConfig.model_validate(raw)
+        assert cfg.model_management.usage_policy.monthly_cny_limit == "100"
+
+    def test_model_connection_nested_billing_rejects(self):
+        payload = {
+            "connection_id": "c1",
+            "name": "n",
+            "adapter_kind": "litellm_chat",
+            "model": "m",
+            "billing": {"mode": "estimate_cost", "pricing_unit": "llm_tokens", "input_price_per_m": "abc"},
+        }
+        with pytest.raises(ValidationError) as exc_info:
+            ModelConnectionConfig.model_validate(payload)
+        assert "input_price_per_m" in str(exc_info.value)
+
+    def test_dump_roundtrip_preserves_value(self):
+        """合法值 JSON 往返不丢精度、二次校验通过。"""
+        cfg = BillingConfig(
+            mode="estimate_cost",
+            pricing_unit="llm_tokens",
+            input_price_per_m="12.5",
+            fx_to_cny="7.2",
+        )
+        restored = BillingConfig.model_validate(cfg.model_dump())
+        assert restored.input_price_per_m == "12.5"
+        assert restored.fx_to_cny == "7.2"
