@@ -223,13 +223,3 @@ class TransactionCostModel:
             participation = volume / avg_daily_volume
             return self.config.slippage_bps / 10000 * math.sqrt(participation * 100)
         return self.config.slippage_bps / 10000
-
-    def _calc_slippage(
-        self,
-        price: float,
-        volume: int,
-        is_buy: bool,
-        avg_daily_volume: float | None,
-    ) -> float:
-        """计算滑点费用金额（向后兼容）。"""
-        return abs(price * volume * self._calc_slippage_pct(price, volume, is_buy, avg_daily_volume))
