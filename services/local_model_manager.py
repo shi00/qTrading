@@ -347,10 +347,17 @@ class LocalModelManager:
         with self._lock:
             if self._initialized:
                 return
+            # F25 worker 身份记录（三字段 = 当前 generation 实际加载产物的唯一身份源，
+            # legacy 与统一链共用）：仅在 worker ready 成功时提交（pending 暂存），
+            # 复用判定只依据该身份，不依赖任何链路的私有回写。
             self._model_path: str = ""
             self._model_sha256: str = ""
             self._model_stat: tuple = (0, 0)
             self._last_config: dict = {}
+            # spawn 后、ready 前的暂存身份 (path, (mtime, size), core_config)；
+            # ready 成功时由 _await_worker_ready 提交进上述三字段，失败/残留无害
+            # （复用判定另查 proc 存活 + ready，下次 spawn 会覆盖）。
+            self._pending_identity: tuple[str, tuple, dict[str, Any]] | None = None
             self._is_loading: bool = False
             self._cancel_event: threading.Event = threading.Event()
             self._worker_proc: multiprocessing.Process | None = None
@@ -470,12 +477,23 @@ class LocalModelManager:
 
     def _ensure_worker_impl(self, model_path: str, core_config: dict) -> bool:
         """_ensure_worker 的同步实现，在线程池中执行。"""
+        # F25: 复用判定与产物指纹核对在锁内与 spawn 决策同源（stat 微秒级，可接受）。
         with self._worker_lock:
+            try:
+                stat = os.stat(model_path)
+                current_stat = (stat.st_mtime, stat.st_size)
+            except OSError:
+                current_stat = (0, 0)
+
             if (
                 self._worker_proc is not None
                 and self._worker_proc.is_alive()
                 and self._worker_ready
+                # F25: 身份判定 = 路径 + 产物 stat + 核心参数全一致（此前仅比路径，
+                # 同路径换产物/换参数会误复用；旧链 A→统一链 B→再 A 会错载 B）。
                 and self._model_path == model_path
+                and self._model_stat == current_stat
+                and self._last_config == core_config
                 # quarantined：worker 状态未知（取消/超时后可能仍在推理），
                 # 快路径失效，走完整 shutdown+respawn 自愈（对抗轮 E-1）。
                 and self._worker_state != "quarantined"
@@ -487,6 +505,8 @@ class LocalModelManager:
             # （计数器 _req_counter 跨 generation 不重置，对抗轮 C）。
             self._worker_generation += 1
             generation = self._worker_generation
+            # F25: 暂存本 generation 的真实身份，ready 成功时提交（单一身份源）。
+            self._pending_identity = (model_path, current_stat, dict(core_config))
 
             self._request_queue = multiprocessing.Queue()
             self._result_queue = multiprocessing.Queue()
@@ -606,6 +626,16 @@ class LocalModelManager:
         if status == "ready":
             self._worker_ready = True
             self._worker_state = "idle"
+            # F25: ready 成功即提交 spawn 时暂存的真实身份——legacy run_inference /
+            # 统一 invoke_for_connection 的 respawn 从此也回写身份（此前仅 legacy
+            # load_model 回写，A→B→A 会按 A 复用实际加载 B 的 worker）。
+            pending = self._pending_identity
+            if pending is not None:
+                self._model_path, self._model_stat, self._last_config = pending
+                # 新产物尚未计算指纹：清空旧 sha，禁止旧模型指纹冒充当前产物
+                # （完整 load_model 链在 sha 校验成功后回填）。
+                self._model_sha256 = ""
+                self._pending_identity = None
             logger.info("[LocalModel] Persistent worker ready with model: %s", payload)
             return True
 
@@ -712,6 +742,12 @@ class LocalModelManager:
 
                 if (
                     self._worker_ready
+                    # F25: 早退分支与 _ensure_worker_impl 快路径同口径——还须核实
+                    # proc 存活与非 quarantined，否则 worker 静默死亡/隔离后仍按
+                    # 残留身份复用谎报「已加载」。
+                    and self._worker_proc is not None
+                    and self._worker_proc.is_alive()
+                    and self._worker_state != "quarantined"
                     and self._model_path == model_path
                     and self._model_stat == current_stat
                     and self._last_config == core_config
@@ -786,6 +822,7 @@ class LocalModelManager:
                     self._model_path = ""
                     self._model_stat = (0, 0)
                     self._last_config = {}
+                    self._pending_identity = None  # F25: 加载失败不得残留暂存身份
                     log_classified(
                         logger,
                         e,
@@ -1296,6 +1333,7 @@ class LocalModelManager:
         self._model_sha256 = ""
         self._model_stat = (0, 0)
         self._last_config = {}
+        self._pending_identity = None  # F25: 卸载后不残留暂存身份
         logger.info("[LocalModel] Model unloaded (worker terminated).")
 
     def commit_verification(self):
