@@ -33,10 +33,12 @@ from core.model_management_types import (
     AttemptContext,
     CandidateDecision,
     ExecutionSnapshot,
+    InferenceAdapter,
     InferenceRequest,
     NormalizedLLMUsage,
     ResolvedConnection,
     ScenarioExecutionResult,
+    ensure_inference_adapter,
 )
 from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -71,7 +73,7 @@ class ScenarioExecutor:
         config_service: Any,
         recorder: Any,
         compatibility: Any,
-        adapters: Mapping[str, Any],
+        adapters: Mapping[str, InferenceAdapter],
         clock: Callable[[], float] | None = None,
         retry_attempts: int = 1,
         retry_max_attempts: int = 2,
@@ -80,7 +82,12 @@ class ScenarioExecutor:
         self._config_service = config_service
         self._recorder = recorder
         self._compatibility = compatibility
-        self._adapters = dict(adapters)
+        # 检视 F02：注入点逐项协议校验——错误形状 adapter 在组装期 TypeError 快速失败，
+        # 而非执行期 adapter.invoke AttributeError 被误判为模型故障重试。
+        self._adapters: dict[str, InferenceAdapter] = {}
+        for kind, adapter in adapters.items():
+            ensure_inference_adapter(kind, adapter)
+            self._adapters[kind] = adapter
         self._clock = clock
         self._retry_attempts = max(0, min(retry_attempts, retry_max_attempts))
         self._cooldown_seconds = cooldown_seconds
