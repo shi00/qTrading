@@ -2,7 +2,7 @@ import logging
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -10,6 +10,20 @@ import pytest
 from utils.sanitizers import DataSanitizer
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _legacy_admission_allowed(monkeypatch):
+    """旧链测试前提显式化（F05 fail-closed）：分派/准入读取必须成功且为 allowed
+    （pending 未开启迁移）才走旧链——读取异常现在阻断旧链，不再 fail-open。
+    自行 mock 分派环境的场景链测试会覆盖此设置，互不冲突。"""
+    from services.ai_service import scenario_dispatch
+
+    config_service = MagicMock()
+    config_service.get_snapshot = AsyncMock(
+        return_value=MagicMock(migration_state="pending", migration_transition=None, scenario_routes=())
+    )
+    monkeypatch.setattr(scenario_dispatch, "_new_config_service", lambda: config_service)
 
 
 @pytest.fixture(autouse=True)
