@@ -270,6 +270,40 @@ class LastConfigCommitConfig(BaseModel):
     committed_at: str
 
 
+class LegacySealConfig(BaseModel):
+    """单月 legacy 封口凭证（S6 D1/D3）：与 AppState ``ai_legacy_seal:{YYYYMM}`` 行的 seal_id 对应。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    month: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    legacy_seal_id: str
+    sealed_at: str
+
+
+class MigrationTransitionConfig(BaseModel):
+    """迁移切换屏障（S6 D3，§12.2）：draining→sealed 两阶段 + owner 租约。
+
+    ``transition_epoch`` 单调递增（R22）；``legacy_seals`` 同月唯一由 model_validator 校验。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    transition_id: str
+    owner_session_id: str
+    transition_epoch: int = Field(ge=1)
+    phase: Literal["draining", "sealed"]
+    lease_expires_at: str
+    source_fingerprint: str
+    legacy_seals: list[LegacySealConfig] = []
+
+    @model_validator(mode="after")
+    def _validate_unique_seal_months(self) -> MigrationTransitionConfig:
+        months = [s.month for s in self.legacy_seals]
+        if len(months) != len(set(months)):
+            raise ValueError("legacy_seals 中 month 重复")
+        return self
+
+
 def _default_scenario_routes() -> list[ScenarioRouteConfig]:
     """三场景默认行：enabled=False、空候选；总时限为产品默认（§6.2）。"""
     return [
@@ -295,9 +329,10 @@ class ModelManagementConfig(BaseModel):
     scenario_routes: list[ScenarioRouteConfig] = Field(default_factory=_default_scenario_routes)
     usage_policy: UsagePolicyConfig = UsagePolicyConfig()
     security_state: ModelSecurityStateConfig = ModelSecurityStateConfig()
-    # §5.1 提交回执与 §12.2 切换屏障，默认 None
+    # §5.1 提交回执与 §12.2 切换屏障，默认 None（旧数据 migration_transition=None 兼容；
+    # dict 载入时由 pydantic 自动校验为 MigrationTransitionConfig）
     last_config_commit: LastConfigCommitConfig | None = None
-    migration_transition: dict[str, Any] | None = None
+    migration_transition: MigrationTransitionConfig | None = None
 
     @model_validator(mode="after")
     def _validate_references(self) -> ModelManagementConfig:

@@ -8,6 +8,10 @@
 - 跨月轮换：key 含年月，进入新月自然落到新 key；旧月数据保留供历史参考。
 - 原子累加：并发写（多策略/多批次）用 ``on_conflict_do_update`` 在 SQL 侧
   ``cast(value as bigint) + delta`` 递增，杜绝「读-改-写」竞态丢数（对抗审查修正）。
+- S6 D6 写入口封口检查：每次写入在既有 ``engine.begin()`` 事务内、写入执行前
+  先查同月封口行 ``ai_legacy_seal:{YYYYMM}``（与 AIUsageDao 封口行同表同键），
+  命中即 raise ``LegacySealedError``（月度封口后基线冻结，不静默丢账 R21）；
+  封口行缺失才执行原累加，竞态窗口由 DAO ``legacy_tail`` 尾写兜底。
 - engine 注入：经 ``configure(engine)`` 注入，不反向依赖 ``CacheManager`` 单例
   （对抗审查修正）；未注入 engine 时读写均为 no-op（降级为不持久化，不阻断流程）。
 - 单例：``@register_singleton`` + ``_reset_singleton`` 供测试隔离（R15）。
@@ -24,6 +28,7 @@ from collections.abc import Callable
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from core.model_management_types import LegacySealedError
 from data.persistence.models import AppState
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.singleton_registry import register_singleton
@@ -36,6 +41,9 @@ _AI_COST_KEY_PREFIX = "ai_cost"
 # 计数其 calls/tokens 以避免 "不可计量" 被呈现为 "零成本"（R21）。
 _AI_UNPRICED_CALLS = "ai_unpriced_calls"
 _AI_UNPRICED_TOKENS = "ai_unpriced_tokens"
+# legacy 封口行 key 前缀（S6 D1/D6）：与 AIUsageDao 封口行同表同键约定
+# （data 层禁入 services（R1），此处以 Final 常量对齐，勿改）。
+_AI_LEGACY_SEAL_KEY_PREFIX = "ai_legacy_seal:"
 
 
 def month_key(when: date) -> str:
@@ -51,6 +59,27 @@ def month_unpriced_calls_key(when: date) -> str:
 def month_unpriced_tokens_key(when: date) -> str:
     """生成某年月的不可计价 token 数 key。"""
     return f"{_AI_UNPRICED_TOKENS}:{when:%Y%m}"
+
+
+def month_seal_key(when: date) -> str:
+    """生成某年月的 legacy 封口行 key（S6 D6 写入口检查用，YYYYMM 紧凑形态）。"""
+    return f"{_AI_LEGACY_SEAL_KEY_PREFIX}{when:%Y%m}"
+
+
+def seal_month_iso(when: date) -> str:
+    """生成封口记录口径的月份标识（``YYYY-MM``，与 DAO 封口记录 month 字段一致）。"""
+    return f"{when:%Y-%m}"
+
+
+async def _raise_if_month_sealed(conn: Any, when: date) -> None:
+    """同事务封口检查（S6 D6 写入口）：命中封口行即 raise :class:`LegacySealedError`。
+
+    与后续累加共用同一 conn / 同一事务（线性化观察）；封口行缺失才放行原累加，
+    竞态窗口（SELECT 未命中后封口落库）由 DAO ``legacy_tail`` 尾写兜底（D5）。
+    """
+    result = await conn.execute(sa.select(AppState.config_value).where(AppState.config_key == month_seal_key(when)))
+    if result.fetchone() is not None:
+        raise LegacySealedError(seal_month_iso(when))
 
 
 @register_singleton
@@ -142,9 +171,15 @@ class AIUsageTracker:
             return
         if cents == 0:
             return
-        key = month_key(when or self._clock())
+        base = when or self._clock()
+        key = month_key(base)
         try:
             async with engine.begin() as conn:
+                # S6 D6 写入口封口检查（同事务先读封口行 = 线性化观察）：已封口即
+                # raise（不静默丢账，R21）；except LegacySealedError: raise 保证
+                # 不落入下方 except Exception 日志分支被吞（LegacySealedError
+                # 是「明确不可用」信号，非可降级故障）。
+                await _raise_if_month_sealed(conn, base)
                 stmt = pg_insert(AppState).values(config_key=key, config_value=str(cents))
                 stmt = stmt.on_conflict_do_update(
                     index_elements=["config_key"],
@@ -157,6 +192,8 @@ class AIUsageTracker:
                     },
                 )
                 await conn.execute(stmt)
+        except LegacySealedError:
+            raise
         except Exception as e:
             logger.warning("[AIUsageTracker] Failed to accumulate cost on key='%s': %s", key, e)
 
@@ -206,6 +243,9 @@ class AIUsageTracker:
         ]
         try:
             async with engine.begin() as conn:  # 单事务，两 key 一致性
+                # S6 D6 写入口封口检查：同事务先查封口行，已封口 raise
+                # LegacySealedError（同 add_cost_cents，不落 except Exception 被吞）。
+                await _raise_if_month_sealed(conn, base)
                 for key, delta in updates:
                     if delta <= 0:
                         continue
@@ -221,5 +261,7 @@ class AIUsageTracker:
                         },
                     )
                     await conn.execute(stmt)
+        except LegacySealedError:
+            raise
         except Exception as e:
             logger.warning("[AIUsageTracker] Failed to accumulate unpriced on key: %s", e)

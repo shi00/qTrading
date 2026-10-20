@@ -5,10 +5,12 @@
 - owner 条件写入：变更 SQL 带 owner_session_id / owner_epoch / lease 三条件（D4）；
 - legacy 汇总解析：app_state ``ai_cost:{YYYYMM}`` 分 → 元 Decimal（D3）；
 - R22：月汇总写入 SQL 用 GREATEST 保持单调；
-- 预算不足返回 None（不抛异常、不伪装成功）。
+- 预算不足返回 None（不抛异常、不伪装成功）；
+- legacy 封口（S6 D1/D5）：首封冻结基线快照 / 重封幂等同 seal_id / 读接口 / advisory 月锁。
 """
 
 import datetime
+import json
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -717,3 +719,91 @@ class TestReadUnconfirmedReservations:
     async def test_no_unconfirmed_returns_empty(self):
         dao = _dao(_QueueConn([_StubResult(rows=[])]))
         assert await dao.read_unconfirmed_reservations() == []
+
+
+class TestLegacySeal:
+    """legacy 封口（S6 D1/D5）：AppState JSON 行，幂等 + advisory 月锁内完成。"""
+
+    @pytest.mark.asyncio
+    async def test_first_seal_freezes_baseline_snapshot(self):
+        """首封：分→元 Decimal 字符串、unpriced 缺键=0、owner 身份与版本就位。"""
+        # 序列：advisory → 封口键读(None) → ai_cost(("1234",)) → calls(None) → tokens(("78",)) → INSERT
+        conn = _CaptureConn(results=[None, None, ("1234",), None, ("78",), None])
+        dao = _dao(conn)
+        record = await dao.seal_legacy_month(month="2026-10", owner_session_id="owner-1", owner_epoch=3)
+        assert record is not None
+        assert record["month"] == "2026-10"
+        assert record["cost_cny"] == "12.34"  # 1234 分 → 12.34 元
+        assert record["unpriced_calls"] == 0  # 缺键 = 0
+        assert record["unpriced_tokens"] == 78
+        assert record["last_writer_session_id"] == "owner-1"
+        assert record["last_writer_epoch"] == 3
+        assert record["seal_version"] == 1
+        assert record["seal_id"]
+        assert record["sealed_at"]
+        # advisory 月锁两键：namespace 常量 + YYYYMM 锁键
+        lock_sql, lock_params = conn.calls[0]
+        assert "pg_advisory_xact_lock" in lock_sql
+        assert lock_params["lock_key"] == 202610
+        # 封口行 key 归一 YYYYMM，JSON 内容与返回记录一致
+        insert_sql, insert_params = conn.calls[-1]
+        assert "INSERT INTO app_state" in insert_sql
+        assert insert_params["key"] == "ai_legacy_seal:202610"
+        assert json.loads(insert_params["value"]) == record
+
+    @pytest.mark.asyncio
+    async def test_reseal_returns_existing_record_idempotent(self):
+        """重封幂等：已有封口行直接返回既有记录（seal_id 不变），不重写。"""
+        existing = {"seal_id": "seal-fixed", "month": "2026-10", "cost_cny": "1.00", "seal_version": 1}
+        # 序列：advisory → 封口键读(命中既有 JSON)；fetchone 返回行元组，值在 row[0]
+        conn = _CaptureConn(results=[None, (json.dumps(existing),)])
+        dao = _dao(conn)
+        record = await dao.seal_legacy_month(month="202610", owner_session_id="owner-2", owner_epoch=9)
+        assert record == existing
+        # 幂等路径仅锁 + 读两条语句，无 INSERT
+        assert len(conn.calls) == 2  # noqa: weak-assertion 语句数即语义：幂等仅锁+读，无写入
+        assert all("INSERT INTO app_state" not in sql for sql, _ in conn.calls)
+
+    @pytest.mark.asyncio
+    async def test_read_legacy_seal_none_and_record(self):
+        """读接口：缺行 → None；有行 → 记录 dict；key 归一 YYYYMM。"""
+        conn = _QueueConn([_StubResult(one=None)])
+        assert await _dao(conn).read_legacy_seal(month="2026-10") is None
+        record = {"seal_id": "s-1", "month": "2026-10", "cost_cny": "0.00"}
+        conn2 = _QueueConn([_StubResult(one=(json.dumps(record),))])
+        assert await _dao(conn2).read_legacy_seal(month="2026-10") == record
+        assert conn2.calls[0][1]["key"] == "ai_legacy_seal:202610"
+
+    @pytest.mark.asyncio
+    async def test_is_month_sealed_true_and_false(self):
+        """封口判定：存在封口行即 True（不解析值），缺行 False。"""
+        conn = _QueueConn([_StubResult(one=None)])
+        assert await _dao(conn).is_month_sealed(month="2026-10") is False
+        conn2 = _QueueConn([_StubResult(one=('{"seal_id": "s"}',))])
+        assert await _dao(conn2).is_month_sealed(month="202610") is True
+
+    @pytest.mark.asyncio
+    async def test_invalid_month_raises_value_error_before_sql(self):
+        """month 非法（非 YYYY-MM / YYYYMM）→ ValueError，且先于任何 SQL。"""
+        conn = _CaptureConn(results=[])
+        dao = _dao(conn)
+        with pytest.raises(ValueError, match="month 格式"):
+            await dao.seal_legacy_month(month="2026-1", owner_session_id="o", owner_epoch=1)
+        with pytest.raises(ValueError, match="month 格式"):
+            await dao.read_legacy_seal(month="bad")
+        with pytest.raises(ValueError, match="month 格式"):
+            await dao.is_month_sealed(month="2026-13")
+        assert conn.calls == []
+
+    @pytest.mark.asyncio
+    async def test_seal_engine_disposed_raises(self, monkeypatch):
+        """R5：入口 _check_engine 守卫（引擎已释放时抛 EngineDisposedError，不执行写）。"""
+        from data.persistence import engine_provider
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        monkeypatch.setattr(engine_provider, "is_disposed", lambda _engine: True)
+        conn = _CaptureConn(results=[None])
+        dao = _dao(conn)
+        with pytest.raises(EngineDisposedError, match="Engine disposed"):
+            await dao.seal_legacy_month(month="2026-10", owner_session_id="o", owner_epoch=1)
+        assert conn.calls == []

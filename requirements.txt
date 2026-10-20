@@ -2,7 +2,7 @@
 #    uv pip compile --universal --no-emit-index-url pyproject.toml -o requirements.txt
 aiohappyeyeballs==2.7.1
     # via aiohttp
-aiohttp==3.14.3
+aiohttp==3.14.4
     # via
     #   astockscreener (pyproject.toml)
     #   litellm
