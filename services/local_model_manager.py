@@ -323,7 +323,14 @@ class LocalModelManager:
 
     @classmethod
     def _get_load_lock(cls):
-        """Get or create load lock dynamically per event loop to avoid cross-loop binding deadlocks."""
+        """Get or create the per-loop worker op lock dynamically (R11 loop-local).
+
+        R02: load_model / run_inference / invoke_for_connection 共享同一对
+        request/result 队列（进程单例），任一链并发进入都会在轮询循环中拿走
+        对方的响应（rid 不匹配被丢弃 → 双双超时并 quarantine 误杀 healthy
+        worker）。三条链全程持同一把锁串行化；asyncio.Lock 不可重入，三条链
+        之间不得互相调用（现状均直接 ``_ensure_worker``，无重入路径）。
+        """
 
         def _factory():
             return asyncio.Lock()
@@ -862,88 +869,91 @@ class LocalModelManager:
         if not _HAS_LLAMA_CPP:
             raise ImportError("llama-cpp-python not installed.")
 
-        config = ConfigHandler.get_local_ai_config()
-        path = config.get("local_model_path", "")
+        # R02: 全程持 loop-local 操作锁（语义见 _get_load_lock）——legacy 推理与
+        # load_model / invoke_for_connection 互斥，杜绝共享队列互吞响应。
+        async with self._get_load_lock():
+            config = ConfigHandler.get_local_ai_config()
+            path = config.get("local_model_path", "")
 
-        if not path:
-            raise RuntimeError("Model not configured (no path set).")
+            if not path:
+                raise RuntimeError("Model not configured (no path set).")
 
-        if self._verification_mode:
-            elapsed = self._clock() - self._verification_start_time
-            if elapsed < _VERIFICATION_TIMEOUT_SECONDS:
-                raise RuntimeError(
-                    f"Local inference blocked: model verification in progress "
-                    f"({elapsed:.0f}s elapsed). Falling back to cloud."
+            if self._verification_mode:
+                elapsed = self._clock() - self._verification_start_time
+                if elapsed < _VERIFICATION_TIMEOUT_SECONDS:
+                    raise RuntimeError(
+                        f"Local inference blocked: model verification in progress "
+                        f"({elapsed:.0f}s elapsed). Falling back to cloud."
+                    )
+                logger.warning(
+                    "[LocalModel] Verification timed out after %ds, auto-cancelling.",
+                    _VERIFICATION_TIMEOUT_SECONDS,
                 )
-            logger.warning(
-                "[LocalModel] Verification timed out after %ds, auto-cancelling.",
-                _VERIFICATION_TIMEOUT_SECONDS,
-            )
-            # F4-S-1: cancel_verification → unload_model → _shutdown_worker 含 join timeout (~12s)，
-            # offload 到线程池避免阻塞事件循环 (R16 举一反三)
-            await ThreadPoolManager().run_async(TaskType.IO, self.cancel_verification)
+                # F4-S-1: cancel_verification → unload_model → _shutdown_worker 含 join timeout (~12s)，
+                # offload 到线程池避免阻塞事件循环 (R16 举一反三)
+                await ThreadPoolManager().run_async(TaskType.IO, self.cancel_verification)
 
-        core_config = {
-            "n_threads": config.get("n_threads", 4),
-            "n_batch": config.get("n_batch", 1024),
-            "n_ctx": config.get("n_ctx", 4096),
-            "n_gpu_layers": config.get("n_gpu_layers", 0),
-            "flash_attn": config.get("flash_attn", True),
-        }
+            core_config = {
+                "n_threads": config.get("n_threads", 4),
+                "n_batch": config.get("n_batch", 1024),
+                "n_ctx": config.get("n_ctx", 4096),
+                "n_gpu_layers": config.get("n_gpu_layers", 0),
+                "flash_attn": config.get("flash_attn", True),
+            }
 
-        if not await self._ensure_worker(path, core_config):
-            raise RuntimeError("Persistent worker failed to start. Check logs for details.")
+            if not await self._ensure_worker(path, core_config):
+                raise RuntimeError("Persistent worker failed to start. Check logs for details.")
 
-        if not self._worker_ready:
-            if not await self._await_worker_ready():
-                raise RuntimeError("Persistent worker failed to become ready. Check logs for details.")
+            if not self._worker_ready:
+                if not await self._await_worker_ready():
+                    raise RuntimeError("Persistent worker failed to become ready. Check logs for details.")
 
-        timeout_val = config.get("local_model_timeout", 90) or 90
+            timeout_val = config.get("local_model_timeout", 90) or 90
 
-        logger.info(
-            "[LocalModel] Sending inference request to persistent worker. "
-            "Input len: %s, Max tokens: %s, "
-            "Temp: %s, Timeout: %ss",
-            len(prompt),
-            max_tokens,
-            temperature,
-            timeout_val,
-        )
-        start_time = asyncio.get_running_loop().time()
-        # S2: legacy 链亦走 5-tuple 协议（req_id 响应配对）；attempt 绑定用
-        # ("legacy", "0") 占位（attempt_context 归属仅 S3 Executor 语义需要）。
-        req_id = next(self._req_counter)
-
-        try:
-            output = await self._dispatch_and_collect(
-                req_id=req_id,
-                generation=self._worker_generation,
-                request_payload=(prompt, max_tokens, temperature, system_prompt, req_id),
-                poll_budget=float(timeout_val),
-                invocation_id="legacy",
-                attempt_id="0",
-                should_abort=self._cancel_event.is_set,
-            )
-        except TimeoutError as te:
-            elapsed = asyncio.get_running_loop().time() - start_time
-            logger.error(
-                "[LocalModel] Persistent worker inference timed out after %ss (elapsed: %.1fs). Terminating worker.",
+            logger.info(
+                "[LocalModel] Sending inference request to persistent worker. "
+                "Input len: %s, Max tokens: %s, "
+                "Temp: %s, Timeout: %ss",
+                len(prompt),
+                max_tokens,
+                temperature,
                 timeout_val,
-                elapsed,
             )
-            # F4-S-1: offload 到线程池避免阻塞事件循环 (R16)
-            await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
-            raise LocalInferenceTimeoutError(
-                f"Local inference timed out ({timeout_val}s). Worker terminated, will restart on next call.",
-            ) from te
+            start_time = asyncio.get_running_loop().time()
+            # S2: legacy 链亦走 5-tuple 协议（req_id 响应配对）；attempt 绑定用
+            # ("legacy", "0") 占位（attempt_context 归属仅 S3 Executor 语义需要）。
+            req_id = next(self._req_counter)
 
-        elapsed = asyncio.get_running_loop().time() - start_time
-        logger.info(
-            "[LocalModel] Persistent worker inference completed in %.2fs. Output len: %s",
-            elapsed,
-            len(output),
-        )
-        return output
+            try:
+                output = await self._dispatch_and_collect(
+                    req_id=req_id,
+                    generation=self._worker_generation,
+                    request_payload=(prompt, max_tokens, temperature, system_prompt, req_id),
+                    poll_budget=float(timeout_val),
+                    invocation_id="legacy",
+                    attempt_id="0",
+                    should_abort=self._cancel_event.is_set,
+                )
+            except TimeoutError as te:
+                elapsed = asyncio.get_running_loop().time() - start_time
+                logger.error(
+                    "[LocalModel] Persistent worker inference timed out after %ss (elapsed: %.1fs). Terminating worker.",
+                    timeout_val,
+                    elapsed,
+                )
+                # F4-S-1: offload 到线程池避免阻塞事件循环 (R16)
+                await ThreadPoolManager().run_async(TaskType.IO, self._shutdown_worker)
+                raise LocalInferenceTimeoutError(
+                    f"Local inference timed out ({timeout_val}s). Worker terminated, will restart on next call.",
+                ) from te
+
+            elapsed = asyncio.get_running_loop().time() - start_time
+            logger.info(
+                "[LocalModel] Persistent worker inference completed in %.2fs. Output len: %s",
+                elapsed,
+                len(output),
+            )
+            return output
 
     # ------------------------------------------------------------------ #
     # S2 单连接执行共享底座（legacy run_inference 与 invoke_for_connection）
@@ -1219,10 +1229,12 @@ class LocalModelManager:
         - req_id 绑定 ``attempt_context`` 进 ``_inflight``；取消/超时 → worker
           标记 quarantined 并 spawn 异步清理任务（generation 守卫）；
         - ``asyncio.CancelledError`` 始终传播（R2），不包装；
-        - 并发契约：同连接串行由 S3 ScenarioExecutor 许可语义保证
-          （``concurrency_limit``）；与 legacy ``run_inference`` 的互斥沿用既有
-          UI 层串行约束——本方法不建 loop-local 锁（与 run_inference 同现状），
-          请求-响应配对经 rid 单调递增 + generation 过滤兜底丢弃错配。
+        - 并发契约（R02）：同 loop 全部 worker 操作（load_model / run_inference /
+          本方法）经 loop-local 操作锁全程串行——跨连接 semaphore 不能隔离进程
+          单例共享的请求/结果队列，无锁时两个轮询循环会互吞对方响应（rid 不匹配
+          被丢弃 → 双双超时并 quarantine 误杀 healthy worker）。S3 的按连接
+          semaphore 仍在调用方约束同连接提交节奏；跨 loop（项目现无此场景）
+          由 rid 单调递增 + generation 过滤兜底，错配响应被丢弃、不会张冠李戴。
 
         Raises:
             TimeoutError: deadline 已耗尽 / 轮询预算耗尽。
@@ -1239,87 +1251,92 @@ class LocalModelManager:
             raise RuntimeError(f"Invalid GGUF model file (missing, wrong type, or bad magic header): {model_path}")
 
         loop = asyncio.get_running_loop()
-        remaining = deadline - loop.time()
-        if remaining <= 0:
+        if deadline - loop.time() <= 0:
             raise TimeoutError("Deadline exhausted before local inference dispatch.")
 
-        adapter_options = resolved_connection.adapter_options
-        core_config = {
-            "n_threads": adapter_options.get("n_threads", 4),
-            "n_batch": adapter_options.get("n_batch", 1024),
-            "n_ctx": adapter_options.get("n_ctx", 4096),
-            "n_gpu_layers": adapter_options.get("n_gpu_layers", 0),
-            "flash_attn": adapter_options.get("flash_attn", True),
-        }
+        # R02: 全程持 loop-local 操作锁（语义见 _get_load_lock）——统一链与
+        # load_model / run_inference 互斥；锁内各阶段按 deadline 重新取
+        # loop.time()，等锁排队时间自动计入预算。
+        async with self._get_load_lock():
+            adapter_options = resolved_connection.adapter_options
+            core_config = {
+                "n_threads": adapter_options.get("n_threads", 4),
+                "n_batch": adapter_options.get("n_batch", 1024),
+                "n_ctx": adapter_options.get("n_ctx", 4096),
+                "n_gpu_layers": adapter_options.get("n_gpu_layers", 0),
+                "flash_attn": adapter_options.get("flash_attn", True),
+            }
 
-        try:
-            if not await self._ensure_worker(model_path, core_config):
-                raise RuntimeError("Persistent worker failed to start. Check logs for details.")
-            if not self._worker_ready:
-                ready_budget = min(180.0, deadline - loop.time())
-                if ready_budget <= 0:
-                    raise TimeoutError("Deadline exhausted while waiting for local worker ready.")
-                if not await self._await_worker_ready(timeout=ready_budget, check_cancel_event=False):
-                    raise RuntimeError("Persistent worker failed to become ready. Check logs for details.")
-        except asyncio.CancelledError:
-            # 启动/ready 阶段取消：worker 子进程可能正在加载模型（状态未知）→
-            # 隔离 + 异步清理（取消隔离覆盖启动/ready/提交/推理全程，R2 传播）。
-            self._quarantine_worker(self._worker_generation)
-            raise
-        except TimeoutError:
-            # ready 预算耗尽：刚 spawn 的 worker 可能仍在加载 → 隔离 + 异步清理。
-            self._quarantine_worker(self._worker_generation)
-            raise
+            try:
+                if not await self._ensure_worker(model_path, core_config):
+                    raise RuntimeError("Persistent worker failed to start. Check logs for details.")
+                if not self._worker_ready:
+                    ready_budget = min(180.0, deadline - loop.time())
+                    if ready_budget <= 0:
+                        raise TimeoutError("Deadline exhausted while waiting for local worker ready.")
+                    if not await self._await_worker_ready(timeout=ready_budget, check_cancel_event=False):
+                        raise RuntimeError("Persistent worker failed to become ready. Check logs for details.")
+            except asyncio.CancelledError:
+                # 启动/ready 阶段取消：worker 子进程可能正在加载模型（状态未知）→
+                # 隔离 + 异步清理（取消隔离覆盖启动/ready/提交/推理全程，R2 传播）。
+                self._quarantine_worker(self._worker_generation)
+                raise
+            except TimeoutError:
+                # ready 预算耗尽：刚 spawn 的 worker 可能仍在加载 → 隔离 + 异步清理。
+                self._quarantine_worker(self._worker_generation)
+                raise
 
-        payload = request.payload
-        adapter_timeout = float(adapter_options.get("timeout", _DEFAULT_INVOKE_TIMEOUT_S) or _DEFAULT_INVOKE_TIMEOUT_S)
-        poll_budget = min(adapter_timeout, deadline - loop.time())
-        if poll_budget <= 0:
-            raise TimeoutError("Deadline exhausted after local worker ready.")
-
-        req_id = next(self._req_counter)
-        request_payload = (
-            str(payload.get("prompt", "")),
-            int(payload.get("max_tokens", _DEFAULT_INVOKE_MAX_TOKENS)),
-            float(payload.get("temperature", _DEFAULT_INVOKE_TEMPERATURE)),
-            str(payload.get("system_prompt", _DEFAULT_INVOKE_SYSTEM_PROMPT)),
-            req_id,
-        )
-        generation = self._worker_generation
-        try:
-            output = await self._dispatch_and_collect(
-                req_id=req_id,
-                generation=generation,
-                request_payload=request_payload,
-                poll_budget=poll_budget,
-                invocation_id=attempt_context.invocation_id,
-                attempt_id=attempt_context.attempt_id,
+            payload = request.payload
+            adapter_timeout = float(
+                adapter_options.get("timeout", _DEFAULT_INVOKE_TIMEOUT_S) or _DEFAULT_INVOKE_TIMEOUT_S
             )
-        except asyncio.CancelledError:
-            # 取消时 worker 状态未知（可能仍在推理）→ 隔离 + 异步清理；
-            # 不复用 _cancel_event（其 unload 后永久 set）。
-            self._quarantine_worker(generation)
-            raise
-        except TimeoutError:
-            logger.warning(
-                "[LocalModel] invoke_for_connection timed out (req_id=%s connection=%s); quarantining worker.",
+            poll_budget = min(adapter_timeout, deadline - loop.time())
+            if poll_budget <= 0:
+                raise TimeoutError("Deadline exhausted after local worker ready.")
+
+            req_id = next(self._req_counter)
+            request_payload = (
+                str(payload.get("prompt", "")),
+                int(payload.get("max_tokens", _DEFAULT_INVOKE_MAX_TOKENS)),
+                float(payload.get("temperature", _DEFAULT_INVOKE_TEMPERATURE)),
+                str(payload.get("system_prompt", _DEFAULT_INVOKE_SYSTEM_PROMPT)),
                 req_id,
-                resolved_connection.connection_id,
             )
-            self._quarantine_worker(generation)
-            raise
+            generation = self._worker_generation
+            try:
+                output = await self._dispatch_and_collect(
+                    req_id=req_id,
+                    generation=generation,
+                    request_payload=request_payload,
+                    poll_budget=poll_budget,
+                    invocation_id=attempt_context.invocation_id,
+                    attempt_id=attempt_context.attempt_id,
+                )
+            except asyncio.CancelledError:
+                # 取消时 worker 状态未知（可能仍在推理）→ 隔离 + 异步清理；
+                # 不复用 _cancel_event（其 unload 后永久 set）。
+                self._quarantine_worker(generation)
+                raise
+            except TimeoutError:
+                logger.warning(
+                    "[LocalModel] invoke_for_connection timed out (req_id=%s connection=%s); quarantining worker.",
+                    req_id,
+                    resolved_connection.connection_id,
+                )
+                self._quarantine_worker(generation)
+                raise
 
-        # lazy-import: AdapterResponse 仅 TYPE_CHECKING 导入（services.ai_service
-        # 组合根反向依赖本模块，顶层运行时导入会成环）；成功路径运行时构造，
-        # 判定用例（场景①）首次命中该路径时暴露 NameError，故函数内延迟导入。
-        from core.model_management_types import AdapterResponse
+            # lazy-import: AdapterResponse 仅 TYPE_CHECKING 导入（services.ai_service
+            # 组合根反向依赖本模块，顶层运行时导入会成环）；成功路径运行时构造，
+            # 判定用例（场景①）首次命中该路径时暴露 NameError，故函数内延迟导入。
+            from core.model_management_types import AdapterResponse
 
-        return AdapterResponse(
-            content=output,
-            usage=None,
-            actual_model=_model_tag_of(model_path),
-            metadata={},
-        )
+            return AdapterResponse(
+                content=output,
+                usage=None,
+                actual_model=_model_tag_of(model_path),
+                metadata={},
+            )
 
     def unload_model(self, *, force: bool = False):
         """Free memory by terminating the worker subprocess and resetting state.
