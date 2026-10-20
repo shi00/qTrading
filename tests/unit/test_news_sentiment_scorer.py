@@ -330,6 +330,35 @@ class TestScoreTextsBatchSplitting:
         assert all(row is not None for row in out)
 
 
+class TestScoreTextsConcurrencySerialization:
+    """R02 回归：并发 score_texts 经 loop-local 锁全程串行——共享队列的
+    请求-响应段（_score_chunk）不得交错（交错即互吞响应的根因）。"""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_score_texts_do_not_interleave(self):
+        mgr = _make_mgr()
+        mgr._ensure_ready = AsyncMock(return_value=_head("linear"))
+        counters = {"active": 0, "max_active": 0}
+
+        async def fake_chunk(chunk, *, timeout_s, generation):
+            counters["active"] += 1
+            counters["max_active"] = max(counters["max_active"], counters["active"])
+            await asyncio.sleep(0.02)
+            counters["active"] -= 1
+            return (np.zeros((len(chunk), _EMBEDDING_DIM), dtype=np.float32), {})
+
+        mgr._score_chunk = fake_chunk
+        results = await asyncio.gather(
+            mgr.score_texts(["a", "b"]),
+            mgr.score_texts(["c", "d"]),
+        )
+        assert all(r is not None for r in results)
+        first = results[0]
+        assert first is not None
+        assert all(row is not None for row in first)
+        assert counters["max_active"] == 1, "并发 score_texts 在打分段交错——互吞响应回归"
+
+
 # --------------------------------------------------------------------------- #
 # 管理单例：单块请求与响应配对
 # --------------------------------------------------------------------------- #
