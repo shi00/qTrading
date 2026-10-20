@@ -885,16 +885,18 @@ class AIStrategyMixin:
                 try:
                     admission = await evaluate_legacy_admission()
                 except Exception as e:
-                    # 准入读取失败与三入口「分派失败降级旧链」同语义：fail-open
-                    # 继续旧链（CancelledError 继承 BaseException 不被捕获，R2）。
+                    # F05 fail-closed：准入读取失败不得伪装为 allowed 继续旧链——
+                    # 授权状态未知时静默放行即把「未知」伪装成「允许」（R21）。
+                    # 以 read_failed 落入下方停接分支安静跳过该股（CancelledError
+                    # 继承 BaseException 不被捕获，R2）。
                     log_classified(
                         logger,
                         e,
                         "llm",
-                        "[AIStrategyMixin] legacy admission read failed, continuing legacy (%s): %s",
+                        "[AIStrategyMixin] legacy admission read failed, blocking candidate (%s): %s",
                         exc_info=True,
                     )
-                    admission = "allowed"
+                    admission = "read_failed"
                 if admission != "allowed":
                     logger.info(
                         "[AIStrategyMixin] Legacy AI dispatch stopped (admission=%s), skipping candidate %s",

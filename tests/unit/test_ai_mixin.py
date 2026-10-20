@@ -50,6 +50,19 @@ def _mock_ai_external_acknowledged_default_true():
 
 
 @pytest.fixture(autouse=True)
+def _legacy_admission_allowed(monkeypatch):
+    """旧链批量测试前提显式化（F05 fail-closed）：准入读取必须成功且为 allowed
+    （pending 未开启迁移）才走旧链——读取异常现在安静停接，不再 fail-open。"""
+    from services.ai_service import scenario_dispatch
+
+    config_service = MagicMock()
+    config_service.get_snapshot = AsyncMock(
+        return_value=MagicMock(migration_state="pending", migration_transition=None, scenario_routes=())
+    )
+    monkeypatch.setattr(scenario_dispatch, "_new_config_service", lambda: config_service)
+
+
+@pytest.fixture(autouse=True)
 def _mock_news_fetcher_network():
     """单测不得触发真实新闻抓取（消除跨用例的 pandas 全局选项竞态）。
 
