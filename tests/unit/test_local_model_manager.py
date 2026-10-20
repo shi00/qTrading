@@ -5,6 +5,7 @@
 
 import asyncio
 import multiprocessing
+import os
 import queue
 import time
 from pathlib import Path
@@ -462,6 +463,9 @@ class TestPersistentWorkerModelReuse:
             mgr._worker_ready = True
             mgr._model_path = "/path/to/model.gguf"
             mgr._model_stat = (0, 0)
+            # F25 复用口径：快路径需核实 proc 存活
+            mgr._worker_proc = MagicMock(spec=_RealProcess)
+            mgr._worker_proc.is_alive.return_value = True
             mgr._last_config = {
                 "n_threads": 4,
                 "n_batch": 1024,
@@ -1109,6 +1113,15 @@ class TestCancelEventInterruptsInference:
             mgr = LocalModelManager()
             mgr._worker_ready = True
             mgr._model_path = "/fake/model.gguf"
+            # F25 复用口径：快路径身份核对 = 路径 + stat + core_config + proc 存活
+            mgr._model_stat = (0, 0)
+            mgr._last_config = {
+                "n_threads": 4,
+                "n_batch": 1024,
+                "n_ctx": 4096,
+                "n_gpu_layers": 0,
+                "flash_attn": True,
+            }
             mgr._worker_proc = MagicMock(spec=_RealProcess)
             mgr._worker_proc.is_alive.return_value = True
             mgr._request_queue = MagicMock(spec=queue.Queue)
@@ -2646,3 +2659,318 @@ class TestInvokeForConnection:
                 assert mgr._await_worker_ready.await_args.kwargs["check_cancel_event"] is False
                 assert mgr._inflight == {}
                 assert mgr._worker_state == "idle"
+
+
+_CORE_CFG = {"n_threads": 4, "n_batch": 1024, "n_ctx": 4096, "n_gpu_layers": 0, "flash_attn": True}
+
+
+class TestWorkerIdentityConsistency:
+    """F25 回归：worker 复用身份必须与当前 generation 实际加载产物一致。
+
+    离线替身（不加载真实模型）：真实 ``_ensure_worker_impl``（multiprocessing
+    Process/Queue 替身）+ 真实 ``_await_worker_ready``（result 队列喂 ready），
+    覆盖 A→B→A、纯统一链复用、同路径换产物/换参数重载、旧链与统一链交错。
+    """
+
+    @staticmethod
+    def _write_model(tmp_path, name: str, payload: bytes = b"GGUF-fake") -> str:
+        p = tmp_path / name
+        p.write_bytes(payload)
+        return str(p)
+
+    async def _spawn_and_ready(self, mgr: LocalModelManager, model_path: str, core_config: dict) -> MagicMock:
+        """以真实 impl + 真实 ready 等待走一遍 spawn→ready（一次完整 respawn）。
+
+        返回 Process 构造类 mock（供断言 spawn 次数）；ready 响应的 generation
+        动态取 spawn 后的 ``_worker_generation``，与生产配对语义一致。
+        """
+        with (
+            patch.object(mgr, "_shutdown_worker_locked"),
+            patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
+            patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+        ):
+            mock_req_q = MagicMock(spec=queue.Queue)
+            mock_res_q = MagicMock(spec=queue.Queue)
+            mock_res_q.get_nowait.side_effect = lambda: ("ready", model_path, mgr._worker_generation)
+            mock_queue_cls.side_effect = [mock_req_q, mock_res_q]
+            mock_proc = MagicMock(spec=_RealProcess)
+            mock_proc.is_alive.return_value = True
+            mock_proc_cls.return_value = mock_proc
+
+            assert mgr._ensure_worker_impl(model_path, core_config) is True
+            assert await mgr._await_worker_ready() is True
+        return mock_proc_cls
+
+    @pytest.mark.asyncio
+    async def test_aba_sequence_reloads_and_identity_follows_actual(self, tmp_path):
+        """报告主回归：旧链先载 A→统一链切 B→再请求 A，第三次必须 respawn
+        且身份回写为 A（修复前按残留的 A 身份复用实际加载 B 的 worker）。"""
+        path_a = self._write_model(tmp_path, "a.gguf", b"GGUF-model-a")
+        path_b = self._write_model(tmp_path, "b.gguf", b"GGUF-model-b")
+        mgr = LocalModelManager()
+
+        spawns = 0
+        spawns += (await self._spawn_and_ready(mgr, path_a, _CORE_CFG)).call_count  # 旧链载 A
+        assert mgr.get_loaded_model_path() == path_a
+
+        spawns += (await self._spawn_and_ready(mgr, path_b, _CORE_CFG)).call_count  # 统一链切 B
+        assert mgr.get_loaded_model_path() == path_b
+
+        spawns += (await self._spawn_and_ready(mgr, path_a, _CORE_CFG)).call_count  # 再请求 A
+        assert spawns == 3, "A→B→A 每次切换都必须 respawn，不得按残留身份复用"
+        assert mgr.get_loaded_model_path() == path_a
+        assert mgr._model_stat[0] == pytest.approx(os.stat(path_a).st_mtime)
+        assert mgr._last_config == _CORE_CFG
+
+    @pytest.mark.asyncio
+    async def test_unified_chain_same_model_spawns_once(self, tmp_path):
+        """纯统一链连续同模型同参数调用只 spawn 一次（修复前身份不回写，
+        每次调用都重载）。"""
+        model = self._write_model(tmp_path, "chat.gguf", b"GGUF-chat")
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            with patch("services.local_model_manager._validate_model_file", return_value=True):
+                mgr = LocalModelManager()
+                with (
+                    patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                    patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
+                    patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+                ):
+
+                    async def fake_run_async(task_type, fn, *a, **kw):
+                        return fn(*a, **kw)
+
+                    mock_tpm.return_value.run_async = fake_run_async
+                    mock_proc = MagicMock(spec=_RealProcess)
+                    mock_proc.is_alive.return_value = True
+                    mock_proc_cls.return_value = mock_proc
+
+                    pending: list[tuple] = []
+
+                    def _get_nowait():
+                        if not pending:
+                            raise queue.Empty
+                        item = pending.pop(0)
+                        if item[0] == "ready":
+                            return ("ready", item[1], mgr._worker_generation)
+                        return item
+
+                    mock_res_q = MagicMock(spec=queue.Queue)
+                    mock_res_q.get_nowait.side_effect = _get_nowait
+                    mock_req_q = MagicMock(spec=queue.Queue)
+                    mock_queue_cls.side_effect = [mock_req_q, mock_res_q]
+
+                    loop = asyncio.get_running_loop()
+                    deadline = loop.time() + 30.0
+                    conn = _conn(model=model)
+
+                    pending.extend([("ready", model), ("ok", 0, 1, "out-1")])
+                    resp1 = await mgr.invoke_for_connection(_req("p1", deadline), conn, deadline, _ctx())
+                    assert resp1.content == "out-1"
+                    assert mock_proc_cls.call_count == 1
+                    assert mgr.get_loaded_model_path() == model
+
+                    # 同模型同参数第二次调用：快路径复用，不再 spawn
+                    pending.extend([("ok", 1, 1, "out-2")])
+                    resp2 = await mgr.invoke_for_connection(_req("p2", deadline), conn, deadline, _ctx())
+                    assert resp2.content == "out-2"
+                    assert mock_proc_cls.call_count == 1
+                    assert mgr._last_config == _CORE_CFG
+                    assert resp2.actual_model == _model_tag_of(model)
+
+    @pytest.mark.asyncio
+    async def test_same_path_changed_artifact_reloads(self, tmp_path):
+        """同路径换产物（mtime 变化）：必须 respawn，不得按旧 stat 复用。"""
+        path = self._write_model(tmp_path, "model.gguf", b"GGUF-v1")
+        mgr = LocalModelManager()
+        await self._spawn_and_ready(mgr, path, _CORE_CFG)
+
+        os.utime(path, (200.0, 200.0))  # 模拟同路径产物被替换
+        spawns = (await self._spawn_and_ready(mgr, path, _CORE_CFG)).call_count
+        assert spawns == 1
+        assert mgr._model_stat[0] == pytest.approx(200.0)
+        assert mgr.get_loaded_model_path() == path
+
+    @pytest.mark.asyncio
+    async def test_same_path_changed_core_config_reloads(self, tmp_path):
+        """同路径换核心参数（n_ctx 热变）：必须 respawn 并回写新参数。"""
+        path = self._write_model(tmp_path, "model.gguf", b"GGUF-cfg")
+        cfg_b = {**_CORE_CFG, "n_ctx": 2048}
+        mgr = LocalModelManager()
+        await self._spawn_and_ready(mgr, path, _CORE_CFG)
+
+        spawns = (await self._spawn_and_ready(mgr, path, cfg_b)).call_count
+        assert spawns == 1
+        assert mgr._last_config == cfg_b
+
+    @pytest.mark.asyncio
+    async def test_load_model_does_not_reuse_dead_worker_identity(self, tmp_path):
+        """worker 静默死亡后 load_model 不得按残留身份早退谎报「已加载」。"""
+        path = self._write_model(tmp_path, "model.gguf", b"GGUF-dead")
+        mgr = LocalModelManager()
+        mgr._worker_ready = True
+        mgr._model_path = path
+        mgr._model_stat = (os.stat(path).st_mtime, os.stat(path).st_size)
+        mgr._last_config = _CORE_CFG
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
+        mgr._worker_proc.is_alive.return_value = False
+
+        with (
+            patch("services.local_model_manager._HAS_LLAMA_CPP", True),
+            patch("services.local_model_manager._validate_model_file", return_value=True),
+            patch.object(LocalModelManager, "_get_load_lock"),
+            patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+            patch("services.local_model_manager.ConfigHandler") as mock_ch,
+            patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)) as mock_ensure,
+            patch.object(mgr, "_await_worker_ready", return_value=True),
+        ):
+            mock_ch.get_typed.return_value = ""
+            mock_tpm.return_value.run_async = AsyncMock(return_value="sha")
+            assert await mgr.load_model(path, config=_CORE_CFG) is True
+            mock_ensure.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_load_model_does_not_reuse_quarantined_worker(self, tmp_path):
+        """quarantined 后 load_model 早退分支必须失效（与 impl 快路径同口径）。"""
+        path = self._write_model(tmp_path, "model.gguf", b"GGUF-quar")
+        mgr = LocalModelManager()
+        mgr._worker_ready = True
+        mgr._worker_state = "quarantined"
+        mgr._model_path = path
+        mgr._model_stat = (os.stat(path).st_mtime, os.stat(path).st_size)
+        mgr._last_config = _CORE_CFG
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
+        mgr._worker_proc.is_alive.return_value = True
+
+        with (
+            patch("services.local_model_manager._HAS_LLAMA_CPP", True),
+            patch("services.local_model_manager._validate_model_file", return_value=True),
+            patch.object(LocalModelManager, "_get_load_lock"),
+            patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+            patch("services.local_model_manager.ConfigHandler") as mock_ch,
+            patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)) as mock_ensure,
+            patch.object(mgr, "_await_worker_ready", return_value=True),
+        ):
+            mock_ch.get_typed.return_value = ""
+            mock_tpm.return_value.run_async = AsyncMock(return_value="sha")
+            assert await mgr.load_model(path, config=_CORE_CFG) is True
+            mock_ensure.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_legacy_run_inference_respawn_updates_identity(self, tmp_path):
+        """旧链视角回归：旧链已载 A 后 run_inference 切到 B，respawn 后身份
+        必须跟随实际加载回写为 B（修复前停留 A）。"""
+        path_a = self._write_model(tmp_path, "a.gguf", b"GGUF-a")
+        path_b = self._write_model(tmp_path, "b.gguf", b"GGUF-b")
+        mgr = LocalModelManager()
+        await self._spawn_and_ready(mgr, path_a, _CORE_CFG)  # 旧链先载 A（generation=1）
+
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            with (
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
+                patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+            ):
+
+                async def fake_run_async(task_type, fn, *a, **kw):
+                    return fn(*a, **kw)
+
+                mock_tpm.return_value.run_async = fake_run_async
+                mock_proc = MagicMock(spec=_RealProcess)
+                mock_proc.is_alive.return_value = True
+                mock_proc_cls.return_value = mock_proc
+                mock_req_q = MagicMock(spec=queue.Queue)
+                mock_res_q = MagicMock(spec=queue.Queue)
+                # respawn 后 generation=2；req_id 从 0 起计数
+                mock_res_q.get_nowait.side_effect = [("ready", path_b, 2), ("ok", 0, 2, "out-b")]
+                mock_queue_cls.side_effect = [mock_req_q, mock_res_q]
+                mock_ch.get_local_ai_config.return_value = {
+                    "local_model_path": path_b,
+                    "local_model_timeout": 30,
+                }
+
+                out = await mgr.run_inference("prompt")
+                assert out == "out-b"
+                assert mock_proc_cls.call_count == 1
+                assert mgr.get_loaded_model_path() == path_b
+                assert mgr._last_config == _CORE_CFG
+
+    @pytest.mark.asyncio
+    async def test_await_worker_ready_discards_stale_generation_then_submits_pending(self):
+        """ready 等待丢弃旧 generation 残留响应，仅当前 generation ready 提交
+        pending 身份（generation 过滤与身份提交严格配对）。"""
+        mgr = LocalModelManager()
+        mgr._worker_ready = False
+        mgr._pending_identity = ("pending-model.gguf", (1, 2), {"n_threads": 4})
+        mgr._result_queue = MagicMock(spec=queue.Queue)
+        # 旧 generation（999≠当前 0）ready 先到被丢弃，当前 generation ready 后到
+        mgr._result_queue.get_nowait.side_effect = [
+            ("ready", "stale.gguf", 999),
+            ("ready", "current.gguf", 0),
+        ]
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
+        mgr._worker_proc.is_alive.return_value = True
+
+        assert await mgr._await_worker_ready() is True
+        assert mgr._model_path == "pending-model.gguf"
+        assert mgr._model_stat == (1, 2)
+        assert mgr._last_config == {"n_threads": 4}
+        assert mgr._pending_identity is None
+
+    @pytest.mark.asyncio
+    async def test_await_worker_ready_malformed_result_fails_without_pending_commit(self):
+        """malformed ready 响应（非 3 元组）→ 失败且不提交 pending 身份。"""
+        mgr = LocalModelManager()
+        mgr._worker_ready = False
+        mgr._pending_identity = ("pending-model.gguf", (1, 2), {})
+        mgr._result_queue = MagicMock(spec=queue.Queue)
+        mgr._result_queue.get_nowait.side_effect = [("ready", "only-two-elements")]
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
+        mgr._worker_proc.is_alive.return_value = True
+
+        with patch.object(mgr, "_shutdown_worker"):
+            assert await mgr._await_worker_ready() is False
+        assert mgr._worker_ready is False
+        assert mgr._model_path == ""  # pending 未提交，身份不回写
+        assert mgr._pending_identity == ("pending-model.gguf", (1, 2), {})  # 残留无害（下次 spawn 覆盖）
+
+    @pytest.mark.asyncio
+    async def test_load_model_skips_integrity_check_when_stored_sha_lookup_fails(self, tmp_path):
+        """存量 sha 查询异常（配置存储故障）时跳过完整性校验，加载继续。"""
+        path = self._write_model(tmp_path, "model.gguf", b"GGUF-sha-err")
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("services.local_model_manager._validate_model_file", return_value=True),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+            ):
+                mock_ch.get_typed.side_effect = ValueError("config storage unavailable")
+                mock_ch.save_config = MagicMock()
+                mock_tpm.return_value.run_async = AsyncMock(return_value="sha-value")
+                assert await mgr.load_model(path, config=_CORE_CFG) is True
+                assert mgr._model_sha256 == "sha-value"
+
+    @pytest.mark.asyncio
+    async def test_load_model_skips_persist_when_sha_empty(self, tmp_path):
+        """sha 计算失败（空指纹）时跳过完整性校验与持久化，不阻塞加载。"""
+        path = self._write_model(tmp_path, "model.gguf", b"GGUF-sha-empty")
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("services.local_model_manager._validate_model_file", return_value=True),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", new=AsyncMock(return_value=True)),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+            ):
+                mock_ch.get_typed.return_value = ""
+                mock_ch.save_config = MagicMock()
+                mock_tpm.return_value.run_async = AsyncMock(return_value="")
+                assert await mgr.load_model(path, config=_CORE_CFG) is True
+                mock_ch.save_config.assert_not_called()
+                assert mgr._model_sha256 == ""
