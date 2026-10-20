@@ -17,11 +17,13 @@ from utils.error_classifier import log_classified
 from utils.sanitizers import DataSanitizer
 from utils.scheduler_service import SchedulerService
 from core.i18n import I18n
+from core.model_management_types import InferenceAdapter, ensure_inference_adapter
 
 # review01-A3: EmbeddedPgStartupScenario 下沉到 core.startup_types（纯类型），此处 re-export 兼容旧引用
 from core.startup_types import EmbeddedPgStartupScenario
 
 if TYPE_CHECKING:
+    from core.model_management_types import AdapterResponse, AttemptContext, InferenceRequest, ResolvedConnection
     from utils.config_models import AppConfig
 
 logger = logging.getLogger(__name__)
@@ -58,22 +60,53 @@ def _ai_usage_dao_provider() -> Any:
     return getattr(CacheManager(), "ai_usage_dao", None)
 
 
-def _build_default_adapters() -> dict[str, Any]:
-    """适配器协议注入（D7）：litellm 单连接 / 本地 GGUF 统一 invoke。"""
+class _LiteLLMChatAdapter:
+    """``litellm_chat`` 适配器（D7）：薄委托 AIService 单连接入口，惰性解析单例。"""
 
-    async def litellm_adapter(request, resolved_connection, deadline, attempt_context):
+    async def invoke(
+        self,
+        request: InferenceRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+    ) -> AdapterResponse:
         from services.ai_service import AIService
 
         return await AIService()._litellm.invoke_single_connection(
             request, resolved_connection, deadline, attempt_context
         )
 
-    async def gguf_adapter(request, resolved_connection, deadline, attempt_context):
+
+class _GGUFAdapter:
+    """``gguf_chat`` / ``gguf_sentiment`` 适配器（D7）：薄委托 LocalModelManager 单连接入口。"""
+
+    async def invoke(
+        self,
+        request: InferenceRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+    ) -> AdapterResponse:
         from services.local_model_manager import LocalModelManager
 
         return await LocalModelManager().invoke_for_connection(request, resolved_connection, deadline, attempt_context)
 
-    return {"litellm_chat": litellm_adapter, "gguf_chat": gguf_adapter, "gguf_sentiment": gguf_adapter}
+
+def _build_default_adapters() -> dict[str, InferenceAdapter]:
+    """适配器协议注入（D7）：litellm 单连接 / 本地 GGUF 统一 invoke（检视 F02）。
+
+    统一为 :class:`InferenceAdapter` 对象协议（可调用 ``.invoke``），组装边界逐项
+    校验——不再存在「函数 / 对象」两种隐式调用规则并存，错误形状在组装期
+    TypeError 快速失败，而非执行期 AttributeError 被误判为模型故障重试。
+    """
+    adapters: dict[str, InferenceAdapter] = {
+        "litellm_chat": _LiteLLMChatAdapter(),
+        "gguf_chat": _GGUFAdapter(),
+        "gguf_sentiment": _GGUFAdapter(),
+    }
+    for kind, adapter in adapters.items():
+        ensure_inference_adapter(kind, adapter)
+    return adapters
 
 
 def assemble_scheduling_services() -> dict[str, Any]:
