@@ -17,8 +17,12 @@ anchor 化控件。test_*.py 不直接 import EIDS（封装边界，方案 §7.2
 import asyncio
 import logging
 import time
+from collections.abc import Mapping, Sequence
+from io import BytesIO
 
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+import numpy as np
+from PIL import Image
+from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from core.i18n import I18n
 from tests.e2e.helpers.anchor_page import AnchorPage, retry_until_triggered
@@ -39,6 +43,94 @@ _NAV_EIDS: dict[str, Eid] = {
     "nav_settings": EIDS.NAV.SETTINGS,
     "nav_watchlist": EIDS.NAV.WATCHLIST,
 }
+
+
+# ============================================================================
+# 像素级渲染断言（拦截「语义树完整但未绘制」类缺陷）
+#
+# AI 大脑空白 BUG 教训：TabBarView 布局 NaN 沿父链传染时，CanvasKit 的
+# <flt-semantics> 语义 DOM 与 paint 管线解耦——语义树仍完整、anchor 可见性
+# 断言全绿，但画布一笔未画。本组断言用 Playwright 截图（合成器输出，WebGL
+# 内容亦可捕获，规避 canvas getImageData 的 preserveDrawingBuffer 限制）做
+# 像素统计，直接验证 paint 管线输出。
+# ============================================================================
+
+
+def _pixel_diff_ratio(image_bytes: bytes, *, sample_inset: int = 4, diff_threshold: int = 24) -> float:
+    """统计截图中与背景采样色差异超阈值的像素占比（纯像素计算，可单测）。
+
+    背景色取区域四角内缩 ``sample_inset`` 像素处 4 个采样点的中位数：区域
+    空白时四角与全域同色（占比≈0），正常绘制时文字/控件使占比显著非零。
+
+    Args:
+        image_bytes: PNG 截图字节流。
+        sample_inset: 背景采样点相对区域四角的内缩像素数。
+        diff_threshold: 判定「非背景」的 RGB 通道最大差异阈值。
+    """
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    arr = np.asarray(img, dtype=np.int16)
+    h, w = arr.shape[:2]
+    corners = np.stack(
+        [
+            arr[sample_inset, sample_inset],
+            arr[sample_inset, w - sample_inset - 1],
+            arr[h - sample_inset - 1, sample_inset],
+            arr[h - sample_inset - 1, w - sample_inset - 1],
+        ]
+    )
+    bg = np.median(corners, axis=0)
+    diff = np.abs(arr - bg).max(axis=-1)
+    return float((diff > diff_threshold).mean())
+
+
+async def assert_boxes_region_renders(
+    page: Page,
+    boxes: Sequence[Mapping[str, float]],
+    *,
+    min_ratio: float = 0.02,
+    settle_ms: int = 400,
+    message: str = "region",
+) -> None:
+    """断言锚点联合包围盒区域真实绘制：非背景像素占比 ≥ ``min_ratio``。
+
+    Args:
+        page: Playwright Page（FletPage.page 的原生 page）。
+        boxes: 锚点 bounding box 列表（``_identifier_box`` 返回格式）。
+        min_ratio: 非背景像素占比下限。
+        settle_ms: 截图前等待渲染稳定的毫秒数。
+        message: 失败信息前缀（定位是哪个页面区域）。
+
+    Raises:
+        AssertionError: 区域过小无法统计，或非背景像素占比低于阈值（语义树
+            可能完整但 paint 管线未渲染）。
+    """
+    if not boxes:
+        raise AssertionError(f"{message}: 未提供任何锚点 box")
+    x0 = min(b["x"] for b in boxes)
+    y0 = min(b["y"] for b in boxes)
+    x1 = max(b["x"] + b["width"] for b in boxes)
+    y1 = max(b["y"] + b["height"] for b in boxes)
+    vp = page.viewport_size or {"width": 1280, "height": 720}
+    left = max(x0 - 8.0, 0.0)
+    top = max(y0 - 8.0, 0.0)
+    clip = {
+        "x": left,
+        "y": top,
+        "width": min(x1 + 8.0, vp["width"]) - left,
+        "height": min(y1 + 8.0, vp["height"]) - top,
+    }
+    if clip["width"] < 16 or clip["height"] < 16:
+        raise AssertionError(f"{message}: 断言区域过小 {clip}，无法做像素统计")
+    await page.wait_for_timeout(settle_ms)
+    shot = await page.screenshot(clip=clip)
+    ratio = _pixel_diff_ratio(shot)
+    if ratio < min_ratio:
+        raise AssertionError(
+            f"{message}: 区域疑似未绘制（非背景像素占比 {ratio:.4f} < {min_ratio}）。"
+            "语义树可能完整但 paint 管线未渲染（布局 NaN / 绘制崩溃），"
+            "参见 docs/flet/v1-api-constraints.md「ft.TabBarView 禁止置于 "
+            "scrollable 容器」约束条目。"
+        )
 
 
 class App:
@@ -481,6 +573,42 @@ class ModelManagementPage:
         await self.ap.expect_visible(EIDS.MODEL.USE_ORIGIN_FILTER, timeout_ms=timeout_ms)
         await self.ap.expect_visible(EIDS.MODEL.USE_EXPORT, timeout_ms=timeout_ms)
         await self.ap.expect_visible(EIDS.MODEL.USE_ENTER_MONTHLY, timeout_ms=timeout_ms)
+
+    async def expect_renders_pixels(
+        self,
+        role: str,
+        *,
+        min_ratio: float = 0.02,
+        settle_ms: int = 400,
+        timeout_ms: int = TIMEOUTS.INTERACTION,
+    ) -> None:
+        """像素级断言：三页签栏 + ``role`` 子页首个交互锚点联合区域非空白。
+
+        AI 大脑空白 BUG 回归守护：布局 NaN 传染时语义树完整（anchor 可见性
+        断言全绿），本断言对锚点联合包围盒截图统计非背景像素占比，直接验证
+        paint 管线输出（详见 ``assert_boxes_region_renders``）。
+        """
+        anchors: list[Eid] = [
+            EIDS.MODEL.tab("connection"),
+            EIDS.MODEL.tab("routes"),
+            EIDS.MODEL.tab("usage"),
+        ]
+        if role == self.TAB_CONNECTION:
+            anchors.append(EIDS.MODEL.SEARCH_INPUT)
+        elif role == self.TAB_ROUTES:
+            anchors.append(EIDS.MODEL.scenario_tab("news_annotation"))
+        elif role == self.TAB_USAGE:
+            anchors.append(EIDS.MODEL.USE_ORIGIN_FILTER)
+        else:
+            raise ValueError(f"unknown model tab role: {role}")
+        boxes = [await self.ap._identifier_box(eid, timeout_ms) for eid in anchors]  # noqa: SLF001  # 包内复用私有 box 解析
+        await assert_boxes_region_renders(
+            self.page.page,
+            boxes,
+            min_ratio=min_ratio,
+            settle_ms=settle_ms,
+            message=f"AI 大脑「模型管理」{role} 页签区域",
+        )
 
     # --- 「模型连接」页 ---
     async def search_connections(self, query: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
