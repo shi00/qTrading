@@ -1204,7 +1204,7 @@ class TestSchedulingServicesAssembly:
         import app.bootstrap as bootstrap_module
 
         monkeypatch.setattr(bootstrap_module, "_scheduling_services", None)
-        monkeypatch.setattr(bootstrap_module, "_pending_scheduling_coordinator", None)
+        monkeypatch.setattr(bootstrap_module, "_pending_scheduling_coordinators", [])
 
     def test_assemble_returns_three_services(self):
         """D9：组装返回 Recorder / Compatibility / Executor 三服务，get 访问同一对象。"""
@@ -1231,21 +1231,71 @@ class TestSchedulingServicesAssembly:
             timeout_s=5.0,
         )
 
-    def test_register_after_assemble_attaches_directly(self):
-        """多 session 重入：服务已组装时直接挂载当期 coordinator。"""
+    def test_multi_session_serial_rebind_attaches_new_recorder(self):
+        """F40 回归：session A 组装退出后 session B 串行重入，B 的 coordinator 必须
+        挂上 B 代新 Recorder，而非上一代（已 close 的）A 代 Recorder。"""
         import app.bootstrap as bootstrap_module
 
-        services = bootstrap_module.assemble_scheduling_services()
-        coordinator = MagicMock()
-        bootstrap_module.register_scheduling_cleanup(coordinator)
-        coordinator.register_cleanup_callback.assert_called_once_with(
+        coordinator_a = MagicMock()
+        bootstrap_module.register_scheduling_cleanup(coordinator_a)
+        services_a = bootstrap_module.assemble_scheduling_services()
+        coordinator_a.register_cleanup_callback.assert_called_once_with(
             "Step 5c: usage recorder close",
-            services["recorder"].aclose,
+            services_a["recorder"].aclose,
             critical=True,
             timeout_s=5.0,
         )
 
-    def test_pending_cleared_after_attach_no_duplicate(self):
+        # session B 重入：register 时三服务仍指向 A 代（尚未被 B 的 assemble 替换）
+        coordinator_b = MagicMock()
+        bootstrap_module.register_scheduling_cleanup(coordinator_b)
+        coordinator_b.register_cleanup_callback.assert_not_called()
+
+        services_b = bootstrap_module.assemble_scheduling_services()
+        assert services_b is not services_a
+        coordinator_b.register_cleanup_callback.assert_called_once_with(
+            "Step 5c: usage recorder close",
+            services_b["recorder"].aclose,
+            critical=True,
+            timeout_s=5.0,
+        )
+
+    def test_register_without_assemble_never_attaches(self):
+        """F40：register 后没有发生 assemble（启动在组装前失败 / services_initialized
+        跳过），coordinator 不挂任何清理回调——此时 Recorder 也不存在，无泄漏。"""
+        import app.bootstrap as bootstrap_module
+
+        coordinator = MagicMock()
+        bootstrap_module.register_scheduling_cleanup(coordinator)
+        coordinator.register_cleanup_callback.assert_not_called()
+
+    def test_interleaved_register_before_first_assemble_attaches_current(self):
+        """F40 交错窗口（NOTE(lazy) 记录形态）：B.register 早于 A.assemble 时，
+        A、B 均由 A 代 assemble 消费（挂 A 代 Recorder）；B 代 Recorder 由进程
+        退出兜底——本测试固化该已知残留行为，防止无意识回归。"""
+        import app.bootstrap as bootstrap_module
+
+        coordinator_a = MagicMock()
+        coordinator_b = MagicMock()
+        bootstrap_module.register_scheduling_cleanup(coordinator_a)
+        bootstrap_module.register_scheduling_cleanup(coordinator_b)
+
+        services_a = bootstrap_module.assemble_scheduling_services()
+        # 精确断言：步骤名 / recorder 绑定身份 / critical 与超时参数；
+        # 绑定方法每次访问生成新对象，用 __self__ 比对 Recorder 实例身份
+        for coordinator in (coordinator_a, coordinator_b):
+            assert coordinator.register_cleanup_callback.call_count == 1
+            call = coordinator.register_cleanup_callback.call_args
+            assert call.args[0] == "Step 5c: usage recorder close"
+            assert call.args[1].__self__ is services_a["recorder"]
+            assert call.kwargs.get("critical") is True
+            assert call.kwargs.get("timeout_s") == 5.0
+
+        bootstrap_module.assemble_scheduling_services()
+        # B 代 assemble 时 pending 已空，B 不再重复挂载
+        assert coordinator_b.register_cleanup_callback.call_count == 1
+
+    def test_pending_list_cleared_after_drain_no_duplicate(self):
         """pending 补挂一次后清空；assemble 重入不重复注册。"""
         import app.bootstrap as bootstrap_module
 
@@ -1254,10 +1304,11 @@ class TestSchedulingServicesAssembly:
         bootstrap_module.assemble_scheduling_services()
         bootstrap_module.assemble_scheduling_services()
         assert coordinator.register_cleanup_callback.call_count == 1
-        assert bootstrap_module._pending_scheduling_coordinator is None
+        assert bootstrap_module._pending_scheduling_coordinators == []
 
-    def test_register_noop_when_recorder_missing(self):
-        """组装结果缺 recorder（异常兜底形态）时不挂载，不伪装注册成功。"""
+    def test_drain_noop_when_recorder_missing(self):
+        """组装结果缺 recorder（异常兜底形态）时不挂载、不伪装注册成功，
+        且 pending 条目按已消费处理（不残留反复尝试）。"""
         import app.bootstrap as bootstrap_module
 
         bootstrap_module._scheduling_services = {
@@ -1266,8 +1317,10 @@ class TestSchedulingServicesAssembly:
             "executor": MagicMock(),
         }
         coordinator = MagicMock()
-        bootstrap_module.register_scheduling_cleanup(coordinator)
+        bootstrap_module._pending_scheduling_coordinators.append(coordinator)
+        bootstrap_module._drain_pending_scheduling_coordinators()
         coordinator.register_cleanup_callback.assert_not_called()
+        assert bootstrap_module._pending_scheduling_coordinators == []
 
     @pytest.mark.asyncio
     async def test_initialize_services_recovers_expired_owners(self):

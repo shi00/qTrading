@@ -779,3 +779,109 @@ class TestDispose:
         assert st.editor_open is False
         assert st.selected_connection_id is None
         assert vm.disposed is True
+
+    def test_dispose_resets_test_state(self, vm):
+        """F40：单次测试挂起中被 dispose 后，test_state 不残留 TEST_RUNNING。"""
+        vm.start_add()
+        vm._set_state(test_state="running")
+
+        vm.dispose()
+
+        assert vm.state.test_state == "idle"
+
+
+# --- F40：dispose 管理在途任务（cancellable 取消 / committing 放行） ---
+
+
+class TestDisposeInflightTasks:
+    """F40 回归：页面卸载（dispose）取消在途测试/加载任务；提交中的保存放行。"""
+
+    @pytest.mark.asyncio
+    async def test_dispose_cancels_inflight_test(self):
+        """单次测试挂起在 begin_synthetic_test 时页面卸载 → 任务被取消（不再继续烧凭据）。"""
+        import asyncio
+
+        # test() 前置要求 scenario_executor 非 None（否则提前返回 TEST_FAILED），
+        # 故直接构造带 executor 的 VM（默认 vm fixture 不注入 executor）。
+        vm = _make_vm(_make_service(), scenario_executor=MagicMock())
+        vm.start_add()
+        vm.update_name("New Conn")
+        vm.update_model("gpt-4o")
+        vm.update_provider("openai")
+        vm.update_api_base("https://api.example.com/v1")
+        svc = vm._service
+        gate = asyncio.Event()
+        release = asyncio.Event()
+
+        async def hang_on_gate(*args, **kwargs):
+            gate.set()
+            await release.wait()
+            raise AssertionError("cancelled test must not reach executor result")
+
+        svc.begin_synthetic_test = AsyncMock(side_effect=hang_on_gate)
+
+        task = asyncio.create_task(vm.test())
+        await gate.wait()  # 测试已挂起（登记完成）
+        vm.dispose()
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled()
+        svc.begin_synthetic_test.assert_awaited_once()  # 确认挂起发生在测试入口而非提前返回
+
+    @pytest.mark.asyncio
+    async def test_dispose_leaves_committing_save_running(self, filled_litellm_draft):
+        """保存已进入提交（save_draft 挂起中）页面卸载 → 不取消，写流程自然完成落库。"""
+        import asyncio
+
+        vm = filled_litellm_draft
+        svc = vm._service
+        gate = asyncio.Event()
+        release = asyncio.Event()
+
+        async def hang_on_save(*args, **kwargs):
+            gate.set()
+            await release.wait()
+            return ConfigurationSaveOutcome(status="committed", current_revision=2, committed_revision=2)
+
+        svc.save_draft = AsyncMock(side_effect=hang_on_save)
+
+        task = asyncio.create_task(vm.save())
+        await gate.wait()  # save_draft 已挂起（committing 阶段）
+        vm.dispose()
+
+        release.set()
+        assert await task is True  # 未被取消，提交完成
+        assert not task.cancelled()
+        svc.save_draft.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_dispose_cancels_inflight_save_before_commit(self, filled_litellm_draft):
+        """保存仍在凭据准备阶段（未进入提交）页面卸载 → 任务被取消（安全窗口）。"""
+        import asyncio
+
+        vm = filled_litellm_draft
+        # prepare_credential_version 仅在凭据非空时被调用（_resolve_credential 分支），
+        # 必须显式填入凭据才能挂起在 cancellable 阶段。
+        vm.update_credential("sk-new-key")
+        svc = vm._service
+        gate = asyncio.Event()
+        release = asyncio.Event()
+
+        async def hang_on_credential(*args, **kwargs):
+            gate.set()
+            await release.wait()
+            return ("keyring:new", "v-new")
+
+        svc.prepare_credential_version = AsyncMock(side_effect=hang_on_credential)
+
+        task = asyncio.create_task(vm.save())
+        await gate.wait()  # 凭据准备挂起（cancellable 阶段）
+        vm.dispose()
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled()
+        svc.save_draft.assert_not_awaited()  # 从未进入提交阶段

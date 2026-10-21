@@ -424,6 +424,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
 
     async def load(self) -> None:
         """新鲜读取已提交配置快照并映射为行 / 摘要（§11.1）。"""
+        self._track_inflight_cancellable()  # F40：只读加载，页面卸载可安全取消
         try:
             await self._refresh_snapshot()
         except asyncio.CancelledError:
@@ -690,6 +691,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         """提交草稿（CAS）：三态处理 + revision 冲突保留草稿 + commit_unknown 读盘恢复入口。"""
         if self._state.save_state == SAVE_SAVING:
             return False
+        self._track_inflight_cancellable()  # F40：凭据准备阶段可安全取消
         errors = self._validate_draft()
         if errors:
             self._set_state(
@@ -707,6 +709,9 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             connection_payload = self._draft_to_connection_payload(draft, credential_ref, credential_version)
             connection_payload["connection_revision"] = self._next_connection_revision(connection_payload)
             payload = self._build_payload(connection_payload)
+            # F40：进入提交阶段——dispose 不再取消本任务（写可能经线程池最终落库，
+            # 取消后宣称未提交即掩盖事实；CancelledError 传播不写任何状态，磁盘为 SSOT）。
+            self._mark_inflight_committing()
             outcome = await self._service.save_draft(payload, self._state.config_revision, operation_id)
         except asyncio.CancelledError:
             raise  # R2
@@ -765,6 +770,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         """回执恢复：按相同锁顺序重读磁盘确认提交结果（§5.1）。"""
         if not self._state.commit_unknown_pending or self._pending_operation_id is None:
             return False
+        self._track_inflight_cancellable()  # F40：回执恢复只读确认，可安全取消
         try:
             outcome = await self._service.resolve_save_outcome(self._pending_operation_id)
         except asyncio.CancelledError:
@@ -815,6 +821,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         """未保存连接的单次测试：不提交连接 / 场景 / 业务授权，不写 security_state。"""
         if self._state.test_state == TEST_RUNNING:
             return False
+        self._track_inflight_cancellable()  # F40：单次测试无持久化语义，页面卸载可安全取消
         errors = self._validate_draft()
         if errors:
             self._set_state(
@@ -992,7 +999,9 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         scope_version: int = 1,
     ) -> bool:
         operation_id = str(uuid.uuid4())
+        self._track_inflight_cancellable()  # F40：授权请求发起前可安全取消
         try:
+            self._mark_inflight_committing()
             outcome = await self._service.grant_egress(
                 connection_id,
                 target_fingerprint,
@@ -1015,7 +1024,9 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
 
     async def revoke_egress(self, grant_id: str) -> bool:
         operation_id = str(uuid.uuid4())
+        self._track_inflight_cancellable()  # F40：撤销请求发起前可安全取消
         try:
+            self._mark_inflight_committing()
             outcome = await self._service.revoke_egress(grant_id, self._state.config_revision, operation_id)
         except asyncio.CancelledError:
             raise  # R2
@@ -1050,13 +1061,20 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
     # ------------------------------------------------------------------
 
     def dispose(self) -> None:
-        """清理敏感草稿（凭据 / gguf 路径不残留内存），随后执行可观察协议关闭。"""
+        """清理敏感草稿（凭据 / gguf 路径不残留内存），随后执行可观察协议关闭。
+
+        F40：基类 dispose 会取消 cancellable 在途任务（单次测试 / 加载 / 凭据准备），
+        committing 任务（已进入提交的保存 / 授权）放行自然完成——取消后宣称未提交
+        会掩盖线程池写最终落库的事实；回执恢复（commit_unknown）已清，恢复线索以
+        磁盘 SSOT 为准，下次进入页面 load() 重读。
+        """
         self._state = replace(
             self._state,
             draft=ModelConnectionDraft(),
             editor_open=False,
             selected_connection_id=None,
             commit_unknown_pending=False,
+            test_state=TEST_IDLE,
         )
         self._pending_operation_id = None
         super().dispose()

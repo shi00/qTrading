@@ -46,10 +46,14 @@ _embedded_pg_url_file_atexit_registered = False
 # per-session 组装覆盖（initialize_services 重入时重建），shutdown 回调经
 # register_scheduling_cleanup 挂到当期 coordinator。
 _scheduling_services: dict[str, Any] | None = None
-# S3（D8）：register 早于 assemble 的时序兼容——application._run_session 在
-# controller.start() 前注册 coordinator，而 assemble 在 initialize_services 内才执行；
-# 未组装时记 pending，assemble 完成后自动补挂，避免停机回调静默丢失。
-_pending_scheduling_coordinator: Any = None
+# F40：register 早于 assemble 的时序兼容（含多 session 串行重入）——
+# application._run_session 在 controller.start() 前注册 coordinator，而 assemble 在
+# initialize_services 内才执行；register 一律记入 pending 列表，由其 register 之后
+# 的第一次 assemble（即本 session 自己的组装）消费并挂上该次组装的 Recorder。
+# 不再保留「已组装直接挂当期」分支：多 session 串行重入时该分支会把第二 session 的
+# coordinator 绑到上一代（已 close 的）Recorder，且第二 session 组装换新后无补挂——
+# 第二 session 关闭旧 A 而新 B 无人关闭（F40 缺陷根因）。
+_pending_scheduling_coordinators: list[Any] = []
 
 
 def _ai_usage_dao_provider() -> Any:
@@ -134,11 +138,9 @@ def assemble_scheduling_services() -> dict[str, Any]:
     from services.ai_service.scenario_dispatch import set_scheduling_services_provider
 
     set_scheduling_services_provider(lambda: _scheduling_services)
-    # S3（D8）：补挂 register_scheduling_cleanup 记下的 pending coordinator
-    global _pending_scheduling_coordinator
-    if _pending_scheduling_coordinator is not None:
-        _attach_scheduling_cleanup(_pending_scheduling_coordinator)
-        _pending_scheduling_coordinator = None
+    # F40：消费 register_scheduling_cleanup 记下的全部 pending coordinator，
+    # 逐个挂上本次组装的 Recorder（见模块级 _pending_scheduling_coordinators 注释）。
+    _drain_pending_scheduling_coordinators()
     return _scheduling_services
 
 
@@ -147,29 +149,43 @@ def get_scheduling_services() -> dict[str, Any] | None:
     return _scheduling_services
 
 
+def _drain_pending_scheduling_coordinators() -> None:
+    """把 pending coordinator 全部挂到当期组装结果（F40）。
+
+    NOTE(lazy): 深度交错窗口（session B 的 register 早于 session A 的 assemble，随后
+    B 也完成组装）下 A、B 两个 coordinator 都会挂上 A 代 Recorder，B 代 Recorder 由
+    进程退出兜底回收（UsageRecorder.aclose 幂等、无系统资源句柄，泄漏仅限内存）.
+    ceiling: 现实中该窗口要求两 session 的 register/assemble 深度交叉，串行与一般
+    并发时序下不可达. upgrade: 若多 session 并发启动成为产品形态，须把 coordinator
+    归属下沉到 per-session 上下文（如 StartupController 携带 coordinator 传入
+    initialize_services）后删除 pending 机制.
+    """
+    global _pending_scheduling_coordinators
+    if not _pending_scheduling_coordinators:
+        return
+    pending, _pending_scheduling_coordinators = _pending_scheduling_coordinators, []
+    recorder = (_scheduling_services or {}).get("recorder")
+    if recorder is None:
+        # recorder 缺失（异常兜底形态）不挂载、不伪装注册成功；
+        # 条目按已消费处理，避免后续 assemble 反复尝试挂同一缺失形态。
+        return
+    for coordinator in pending:
+        coordinator.register_cleanup_callback(
+            "Step 5c: usage recorder close", recorder.aclose, critical=True, timeout_s=5.0
+        )
+
+
 def register_scheduling_cleanup(coordinator: Any) -> None:
     """把 Recorder 收敛注册为动态停机步骤（S3 D8：Step 5b 后、Step 6 前）。
 
-    时序兼容：application._run_session 在 controller.start() 之前调用本函数，
-    而 assemble_scheduling_services 在 initialize_services（controller.start 内）
-    才执行——服务未组装时记 pending coordinator，assemble 完成后自动补挂；
-    已组装（多 session 重入）则直接挂载。
+    F40 时序兼容：application._run_session 在 controller.start() 之前调用本函数，
+    而 assemble_scheduling_services 在 initialize_services（controller.start 内）才
+    执行——本函数一律记 pending，由 register 之后的第一次 assemble（即本 session
+    自己的组装）消费并挂上该次组装的 Recorder。已组装时不直接挂当期 Recorder：
+    多 session 串行重入时当期可能是上一代（即将被本 session 组装替换）的 Recorder，
+    直接挂会让第二 session 关闭旧代而新代无人关闭。
     """
-    global _pending_scheduling_coordinator
-    if _scheduling_services is None:
-        _pending_scheduling_coordinator = coordinator
-        return
-    _attach_scheduling_cleanup(coordinator)
-
-
-def _attach_scheduling_cleanup(coordinator: Any) -> None:
-    """从当期组装结果取 Recorder，注册为 coordinator 的动态停机步骤。"""
-    recorder = (_scheduling_services or {}).get("recorder")
-    if recorder is None:
-        return
-    coordinator.register_cleanup_callback(
-        "Step 5c: usage recorder close", recorder.aclose, critical=True, timeout_s=5.0
-    )
+    _pending_scheduling_coordinators.append(coordinator)
 
 
 class InitResult(TypedDict):
