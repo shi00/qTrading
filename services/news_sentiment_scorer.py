@@ -455,6 +455,9 @@ class NewsSentimentScorer:
             self._req_counter = itertools.count()
             self._model_path: str = ""
             self._paths_stat: tuple = (0, 0)
+            # R06-D1: worker 持有产物的指纹（model+tokenizer 两文件的 (mtime, size)），
+            # 参与 _ensure_worker_impl 复用判定——同路径换产物必须 respawn（F25 同型）。
+            self._worker_stat: tuple = ((0, 0), (0, 0))
             self._core_signature: tuple[int, int] = (0, 0)
             self._head: dict[str, Any] | None = None
             self._clock = clock or time.monotonic
@@ -659,6 +662,7 @@ class NewsSentimentScorer:
         self._shutdown_worker(force=force)
         self._model_path = ""
         self._paths_stat = (0, 0)
+        self._worker_stat = ((0, 0), (0, 0))
         self._core_signature = (0, 0)
         self._head = None
         logger.info("[NewsSentiment] Scoring model unloaded (worker terminated).")
@@ -672,11 +676,16 @@ class NewsSentimentScorer:
             int(core_config.get("max_length", _DEFAULT_MAX_LENGTH)),
         )
         with self._worker_lock:
+            # R06-D1: 复用判定含 worker 持有产物的 stat（model+tokenizer）——
+            # 同路径但产物被替换（热更新）时必须 respawn，不得按旧指纹复用
+            # （与 LMM F25「路径 + stat + 核心参数」同口径；stat 微秒级，可接受）。
+            worker_stat = self._stat_of(model_path, tokenizer_path)
             if (
                 self._worker_proc is not None
                 and self._worker_proc.is_alive()
                 and self._worker_ready
                 and self._model_path == model_path
+                and self._worker_stat == worker_stat
                 and self._core_signature == signature
                 # quarantined：worker 状态未知（取消/超时后可能仍在推理），
                 # 快路径失效，走完整 shutdown+respawn 自愈（与 LMM 对抗轮 E-1 同型）。
@@ -690,6 +699,9 @@ class NewsSentimentScorer:
             self._worker_generation += 1
             generation = self._worker_generation
             self._core_signature = signature
+            # respawn 后立即记录本 generation 的产物指纹；ready 成功前快路径被
+            # _worker_ready=False 拦截，立即写安全（与 _core_signature 同语义）。
+            self._worker_stat = worker_stat
 
             self._request_queue = multiprocessing.Queue()
             self._result_queue = multiprocessing.Queue()
@@ -811,7 +823,10 @@ class NewsSentimentScorer:
         """确保 worker 就绪并返回分类头（失败返回 None）。
 
         加载链：文件校验 → head 加载校验（stat 变化时重载）→ 启动/复用 worker →
-        等待 ready。任一步失败返回 None，不抛异常（CancelledError 传播，R2）。
+        仅 respawn 后等待 fresh ready（R06-D1：复用判定已含产物 stat，复用即
+        已 ready；worker 仅启动时投递一次 ready，对复用 worker 等待必然等满
+        ready_timeout 并误杀健康 worker）。任一步失败返回 None，不抛异常
+        （CancelledError 传播，R2）。
         调用方（``score_texts`` / ``score_for_connection``）须已持有 loop-local
         串行锁；本方法不自取锁（asyncio.Lock 不可重入，锁粒度见 ``_get_lock``
         docstring）。
@@ -859,8 +874,13 @@ class NewsSentimentScorer:
             if not started:
                 logger.error("[NewsSentiment] Scoring worker failed to start.")
                 return None
-            if not await self._await_worker_ready(timeout=max(0.0, ready_timeout)):
-                return None
+            # R06-D1: 仅 respawn 后等待 ready（_shutdown_worker_locked 置
+            # _worker_ready=False；复用路径复用判定已保证 _worker_ready=True）。
+            # 不变量：复用 ⟹ 已 ready ⟹ 跳过等待；重启 ⟹ 等 fresh ready
+            # （与 LMM run_inference / invoke_for_connection 的守卫同型）。
+            if not self._worker_ready:
+                if not await self._await_worker_ready(timeout=max(0.0, ready_timeout)):
+                    return None
 
             self._model_path = paths["model_path"]
             self._paths_stat = current_stat
