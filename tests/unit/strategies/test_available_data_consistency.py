@@ -29,6 +29,20 @@ from strategies.strategy_prompts import STRATEGY_PROMPTS, FORBIDDEN_STATIC_HEADE
 
 pytestmark = pytest.mark.unit
 
+
+@pytest.fixture(autouse=True)
+def _legacy_admission_allowed(monkeypatch):
+    """旧链测试前提显式化（F05 fail-closed）：准入读取必须成功且为 allowed
+    （pending 未开启迁移）才走旧链——读取异常现在阻断旧链，不再 fail-open。"""
+    from services.ai_service import scenario_dispatch
+
+    config_service = MagicMock()
+    config_service.get_snapshot = AsyncMock(
+        return_value=MagicMock(migration_state="pending", migration_transition=None, scenario_routes=())
+    )
+    monkeypatch.setattr(scenario_dispatch, "_new_config_service", lambda: config_service)
+
+
 # v5→修订点5：命名常量，用于辅助扫描编号式/项目符号式数据枚举
 ENUMERATION_PATTERN = re.compile(
     r"(?:[\d]+[\.、)]\s*(?!\s*若)(.{2,20})(?:数据|指标|信息|材料))"

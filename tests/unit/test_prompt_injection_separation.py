@@ -11,13 +11,28 @@ These tests validate BEHAVIOR, not source code text.
 # 测试行为由测试用例本身验证。
 
 import contextlib
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from strategies.strategy_prompts import _UNIVERSAL_RULES, get_base_prompt
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _legacy_admission_allowed(monkeypatch):
+    """旧链测试前提显式化（F05 fail-closed）：准入读取必须成功且为 allowed
+    （pending 未开启迁移）才走旧链——读取异常现在安静停接，不再 fail-open。
+    测试环境配置文件不存在触发 ConfigFreshReadError -> read_failed，
+    analyze_stock 直接抛 LegacyDispatchBlockedError，导致用例失败。"""
+    from services.ai_service import scenario_dispatch
+
+    config_service = MagicMock()
+    config_service.get_snapshot = AsyncMock(
+        return_value=MagicMock(migration_state="pending", migration_transition=None, scenario_routes=())
+    )
+    monkeypatch.setattr(scenario_dispatch, "_new_config_service", lambda: config_service)
 
 
 def _make_mock_service():
