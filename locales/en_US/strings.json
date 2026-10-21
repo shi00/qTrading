@@ -992,6 +992,7 @@
     "wizard_step4_title": "Auto-Update",
     "wizard_step4_desc": "Recommended: Auto-update after market close.",
     "wizard_schedule_note": "* Requires app running in background",
+    "wizard_schedule_save_failed": "Failed to save schedule settings. Your input was kept; please try again.",
     "wizard_btn_finish": "Finish",
     "wizard_step5_title": "🎉 Setup Complete!",
     "wizard_step5_desc": "You are ready to use the screener.",

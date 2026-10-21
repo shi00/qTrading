@@ -858,6 +858,7 @@
     "wizard_step4_title": "设置自动更新",
     "wizard_step4_desc": "建议在每个交易日收盘后自动更新数据。\n程序将在后台静默更新，不会打扰您的使用。",
     "wizard_schedule_note": "* 需要程序在后台运行",
+    "wizard_schedule_save_failed": "计划配置保存失败，当前输入已保留，请重试",
     "wizard_btn_finish": "完成配置",
     "wizard_step5_title": "🎉 配置完成！",
     "wizard_step5_desc": "您已完成所有初始配置。\n现在可以开始使用智能选股功能了！",

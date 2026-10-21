@@ -968,12 +968,16 @@ def OnboardingWizard(
 
     async def _next_step() -> None:
         UILogger.log_action("OnboardingWizard", "Click", f"next_step={state.current_step}")
+        step_id = STEP_CONFIGS[state.current_step].id
         # S5 §11.6: 模型阶段子步骤「下一步」只校验/导航（返回保留草稿，不提交）；
         # 末子步骤(3)「保存并继续」才经 fn_validate_model_scenario 原子提交本阶段全部差异。
-        if STEP_CONFIGS[state.current_step].id == "model_scenario" and model_substep < 3:
+        if step_id == "model_scenario" and model_substep < 3:
             set_model_substep(model_substep + 1)
             return
-        await onboarding_vm.next_step()
+        advanced = await onboarding_vm.next_step()
+        # UIR-F02-001: 计划配置落盘失败时 VM 返回 False 并停留 schedule 步，须给用户可见反馈。
+        if not advanced and step_id == "schedule":
+            _show_snack(I18n.get("wizard_schedule_save_failed"), AppColors.ERROR)
 
     async def _prev_step() -> None:
         UILogger.log_action("OnboardingWizard", "Click", f"prev_step={state.current_step}")

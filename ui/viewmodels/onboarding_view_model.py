@@ -361,26 +361,33 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
     def invalidate_step(self, step_id: str):
         self._step_validated[step_id] = False
 
-    async def next_step(self):
+    async def next_step(self) -> bool:
+        """推进到下一步（含末步完成回调）。
+
+        Returns:
+            True 已推进 / 末步完成回调已执行; False 停留当前步（校验或持久化失败、
+            欢迎步未确认风险提示）。
+        """
         config = STEP_CONFIGS[self._state.current_step]
 
         # UX-09 / MAJOR-01: 欢迎步须先勾选投资风险提示确认；未勾选时不前进
         # （导航按钮同时置 disabled，此处为与 disabled 无关的程序化守卫）。
         if config.id == "welcome" and not self._state.risk_acknowledged:
             logger.warning("[OnboardingVM] Risk disclaimer not acknowledged; blocking next from welcome step")
-            return
+            return False
 
         if config.validate_before_next:
             if not await self.validate_and_persist_current_step():
-                return
+                return False
 
         if config.id == "complete":
             if self.on_complete:
                 await self.on_complete()
-            return
+            return True
 
         if self._state.current_step < len(STEP_CONFIGS) - 1:
             self.current_step = self._state.current_step + 1
+        return True
 
     async def prev_step(self):
         config = STEP_CONFIGS[self._state.current_step]
@@ -449,7 +456,7 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         self._set_state(schedule_time=time_str, normalized_schedule_time=time_str)
 
         try:
-            await ThreadPoolManager().run_async(
+            saved = await ThreadPoolManager().run_async(
                 TaskType.IO,
                 ConfigHandler.save_config,
                 {
@@ -457,7 +464,8 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
                     "auto_update_time": time_str,
                 },
             )
-            return True
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as e:
             logger.error(
                 "[OnboardingVM] Save schedule failed: %s",
@@ -465,6 +473,13 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
                 exc_info=True,
             )
             return False
+
+        # UIR-F02-001: ConfigHandler.save_config 在「配置不可读 / 校验失败 / 原子写失败」
+        # 时返回 False 而不抛异常；未检查布尔返回值会把落盘失败当作验证成功。
+        if not saved:
+            logger.warning("[OnboardingVM] ConfigHandler.save_config returned False for schedule settings")
+            return False
+        return True
 
     def set_schedule_state(self, enabled: bool, time_str: str):
         self._schedule_enabled = enabled
