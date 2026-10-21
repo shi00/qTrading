@@ -303,10 +303,18 @@ class TestSave:
         assert expected_revision == 1
         # save_draft 期望完整 model_management 域，连接草稿合并在 connections 列表内
         assert payload["schema_version"] == 1
-        assert payload["migration_state"] == "active"
         new_conn = next(c for c in payload["connections"] if c["name"] == "New Conn")
         assert new_conn["connection_id"] == st.selected_connection_id
         assert st.message is not None
+
+    async def test_save_payload_excludes_migration_subdomain(self, vm, filled_litellm_draft):
+        """F07：迁移子域由 begin/seal/activate 专用命令独占，连接草稿 payload 不携带。"""
+        await vm.load()
+        await vm.save()
+
+        payload, _revision, _op = vm._service.save_draft.await_args.args  # noqa: SLF001
+        assert "migration_state" not in payload
+        assert "migration_transition" not in payload
 
     async def test_save_appends_new_connection_and_preserves_other_domains(self):
         svc = _make_service(

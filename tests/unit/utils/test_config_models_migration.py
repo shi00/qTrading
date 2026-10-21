@@ -3,7 +3,8 @@
 覆盖 reviews/s6_plan.md §2「config_models」行：
 - MigrationTransitionConfig / LegacySealConfig 校验（非法 phase / epoch<1 / month 格式 /
   extra forbid / 同月唯一）；
-- 旧数据 migration_transition=None 兼容与 dict 自动校验收紧。
+- 旧数据 migration_transition=None 兼容与 dict 自动校验收紧；
+- F07 合法跃迁保护：active 须伴随 sealed 屏障（active+None / active+draining 拒绝）。
 """
 
 from __future__ import annotations
@@ -94,3 +95,40 @@ class TestModelManagementMigrationField:
         with pytest.raises(ValidationError) as excinfo:
             AppConfig.model_validate({"model_management": {"migration_transition": _valid_transition(phase="bogus")}})
         assert "phase" in str(excinfo.value)
+
+
+class TestMigrationActiveStateGuard:
+    """F07：active 只能经专用 activate 命令从 sealed 跃迁落出（屏障保留作审计）。
+
+    草稿直写 / 手改配置落出 active+None 或 active+draining 的非法态在 schema
+    层即被拒绝（fail-closed），不依赖 UI「恰好不在迁移时保存」维持不变量。
+    """
+
+    def test_active_without_transition_rejected(self):
+        with pytest.raises(ValidationError) as excinfo:
+            ModelManagementConfig.model_validate({"migration_state": "active", "migration_transition": None})
+        assert "active 须存在迁移屏障" in str(excinfo.value)
+
+    def test_active_with_draining_transition_rejected(self):
+        with pytest.raises(ValidationError) as excinfo:
+            ModelManagementConfig.model_validate(
+                {"migration_state": "active", "migration_transition": _valid_transition(phase="draining")}
+            )
+        assert "phase=sealed" in str(excinfo.value)
+
+    def test_active_with_sealed_transition_accepted(self):
+        mm = ModelManagementConfig.model_validate(
+            {"migration_state": "active", "migration_transition": _valid_transition(phase="sealed")}
+        )
+        assert mm.migration_state == "active"
+        assert mm.migration_transition is not None
+        assert mm.migration_transition.phase == "sealed"
+
+    @pytest.mark.parametrize("phase", [None, "draining", "sealed"], ids=["none", "draining", "sealed"])
+    def test_pending_state_unaffected(self, phase):
+        """pending 状态不受守卫影响：无屏障 / draining / sealed 均为合法中间态。"""
+        payload: dict = {"migration_state": "pending"}
+        if phase is not None:
+            payload["migration_transition"] = _valid_transition(phase=phase)
+        mm = ModelManagementConfig.model_validate(payload)
+        assert mm.migration_state == "pending"

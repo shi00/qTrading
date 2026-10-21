@@ -106,9 +106,14 @@ class ConfigHandler:
         operation_id: str,
         *,
         update_security_state: bool = False,
+        update_migration_state: bool = False,
     ):
         return storage.compare_and_save_model_management(
-            expected_revision, payload, operation_id, update_security_state=update_security_state
+            expected_revision,
+            payload,
+            operation_id,
+            update_security_state=update_security_state,
+            update_migration_state=update_migration_state,
         )
 
     @staticmethod

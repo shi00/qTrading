@@ -416,6 +416,20 @@ class ModelManagementConfig(BaseModel):
     migration_transition: MigrationTransitionConfig | None = None
 
     @model_validator(mode="after")
+    def _validate_migration_subdomain(self) -> ModelManagementConfig:
+        """F07 合法跃迁保护：active 只能经专用 activate 命令从 sealed 跃迁落出，
+        且 activate 保留屏障作审计——「已激活却无屏障」或「激活时屏障未封存」
+        均为非法态（草稿直写 / 手改配置即被 schema 拒绝，fail-closed）。"""
+        if self.migration_state == "active":
+            if self.migration_transition is None:
+                raise ValueError("migration_state=active 须存在迁移屏障（activate 保留屏障作审计）")
+            if self.migration_transition.phase != "sealed":
+                raise ValueError(
+                    f"migration_state=active 时屏障须已封存（phase=sealed），当前 {self.migration_transition.phase!r}"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _validate_references(self) -> ModelManagementConfig:
         connection_ids = [c.connection_id for c in self.connections]
         if len(connection_ids) != len(set(connection_ids)):

@@ -129,7 +129,8 @@ class ModelConfigurationService:
         expected_revision: int,
         operation_id: str,
     ) -> ConfigurationSaveOutcome:
-        """保存草稿：CAS 提交；安全子域以磁盘现值为准（§5.3 草稿不能改安全状态）。"""
+        """保存草稿：CAS 提交；安全子域与迁移子域均以磁盘现值为准（§5.3 草稿
+        不能改安全状态；F07 迁移子域由 begin / seal / activate 专用命令独占）。"""
 
         def _save() -> ModelManagementSaveResult:
             return cfg.ConfigHandler.compare_and_save_model_management(
@@ -284,7 +285,7 @@ class ModelConfigurationService:
                     # sealed 不可回退：幂等重写屏障数据不变（epoch / transition_id 保持）
                     mm["migration_transition"] = transition
                     return cfg.ConfigHandler.compare_and_save_model_management(
-                        expected_revision, mm, operation_id, update_security_state=False
+                        expected_revision, mm, operation_id, update_security_state=False, update_migration_state=True
                     )
                 if (
                     not _lease_expired(transition.get("lease_expires_at"))
@@ -309,7 +310,7 @@ class ModelConfigurationService:
                     "legacy_seals": [],
                 }
             return cfg.ConfigHandler.compare_and_save_model_management(
-                expected_revision, mm, operation_id, update_security_state=False
+                expected_revision, mm, operation_id, update_security_state=False, update_migration_state=True
             )
 
         return _outcome_from_cas(await ThreadPoolManager().run_async(TaskType.IO, _begin), expected_revision)
@@ -366,7 +367,7 @@ class ModelConfigurationService:
             transition["phase"] = "sealed"
             mm["migration_transition"] = transition
             return cfg.ConfigHandler.compare_and_save_model_management(
-                expected_revision, mm, operation_id, update_security_state=False
+                expected_revision, mm, operation_id, update_security_state=False, update_migration_state=True
             )
 
         return _outcome_from_cas(await ThreadPoolManager().run_async(TaskType.IO, _seal), expected_revision)
@@ -393,7 +394,7 @@ class ModelConfigurationService:
                 raise MigrationTransitionError(f"phase={raw.get('phase')!r} 未封存，禁止 activate")
             mm["migration_state"] = "active"
             return cfg.ConfigHandler.compare_and_save_model_management(
-                expected_revision, mm, operation_id, update_security_state=False
+                expected_revision, mm, operation_id, update_security_state=False, update_migration_state=True
             )
 
         return _outcome_from_cas(await ThreadPoolManager().run_async(TaskType.IO, _activate), expected_revision)

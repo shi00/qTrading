@@ -264,8 +264,17 @@ class TestCompareAndSave:
         payload = self._payload(isolated_config)
         payload["migration_state"] = "bogus_state"
 
+        # 草稿路径：注入的非法迁移状态被 F07 剥离（回填磁盘现值），连接保存不受牵连
         result = cfg_mod.ConfigHandler.compare_and_save_model_management(payload["config_revision"], payload, "op-bad")
+        assert result.status == "committed"
+        raw = _read_raw_config(isolated_config)
+        assert raw["model_management"]["migration_state"] == "pending"
 
+        # 迁移命令路径（update_migration_state=True）：payload 迁移子域原样校验，非法值被 schema 拒绝
+        current = _read_raw_config(isolated_config)["model_management"]["config_revision"]
+        result = cfg_mod.ConfigHandler.compare_and_save_model_management(
+            current, payload, "op-bad-cmd", update_migration_state=True
+        )
         assert result.status == "not_committed"
         assert result.committed_revision is None
 
@@ -653,3 +662,102 @@ class TestDraftSecurityStrip:
         # 磁盘保持损坏原样：grant 未被洗白落盘，revision 未推进
         assert "security_state" not in raw["model_management"]
         assert raw["model_management"]["config_revision"] == 1
+
+
+_DRAINING_TRANSITION: dict = {
+    "transition_id": "t-f07",
+    "owner_session_id": "owner-1",
+    "transition_epoch": 2,
+    "phase": "draining",
+    "lease_expires_at": "2099-01-01T00:00:00+00:00",
+    "source_fingerprint": "fp-f07",
+    "legacy_seals": [{"month": "2026-10", "legacy_seal_id": "seal-1", "sealed_at": "2026-10-19T00:00:00+00:00"}],
+}
+
+
+class TestDraftMigrationStrip:
+    """F07：迁移子域由迁移专用命令独占——普通草稿保存不删屏障、不改状态。
+
+    修复前 VM 草稿 payload 不含 ``migration_transition``，CAS 以 payload 整域
+    替换 model_management，draining/sealed 屏障被一次普通保存清掉（pending 的
+    旧链准入可重新变 allowed）；payload 自带 ``migration_state="active"`` 还可
+    绕过专用 seal/activate 流程。
+    """
+
+    def _mm_with_transition(self, config_file: Path, *, phase: str = "draining") -> dict:
+        cfg_mod.ConfigHandler.ensure_defaults()
+        raw = _read_raw_config(config_file)
+        raw["model_management"]["migration_transition"] = {**_DRAINING_TRANSITION, "phase": phase}
+        _write_raw_config(config_file, raw)
+        return dict(cfg_mod.ConfigHandler.load_config()["model_management"])
+
+    def test_draft_save_preserves_disk_transition(self, isolated_config):
+        """begin/seal 后普通草稿保存：payload 不带迁移键，磁盘屏障原样保留。"""
+        disk_mm = self._mm_with_transition(isolated_config, phase="sealed")
+        payload = dict(disk_mm)
+        payload.pop("migration_transition", None)  # 模拟真实 VM 草稿 payload（不含迁移子域）
+        payload.pop("last_config_commit", None)
+        expected = payload["config_revision"]
+
+        result = cfg_mod.ConfigHandler.compare_and_save_model_management(expected, payload, "op-f07-draft")
+
+        assert result.status == "committed"
+        raw = _read_raw_config(isolated_config)
+        transition = raw["model_management"]["migration_transition"]
+        assert transition["phase"] == "sealed"
+        assert transition["transition_id"] == _DRAINING_TRANSITION["transition_id"]
+        assert transition["transition_epoch"] == _DRAINING_TRANSITION["transition_epoch"]
+        assert transition["legacy_seals"] == _DRAINING_TRANSITION["legacy_seals"]
+        assert raw["model_management"]["migration_state"] == "pending"
+
+    def test_draft_payload_cannot_overwrite_migration_subdomain(self, isolated_config):
+        """草稿 payload 自带 active / 伪屏障：被剥离，落盘为磁盘现值。"""
+        disk_mm = self._mm_with_transition(isolated_config)  # draining
+        payload = dict(disk_mm)
+        payload["migration_state"] = "active"  # 攻击形态：草稿直写 active 绕过 activate
+        payload["migration_transition"] = {**_DRAINING_TRANSITION, "phase": "sealed", "transition_epoch": 99}
+        payload.pop("last_config_commit", None)
+
+        result = cfg_mod.ConfigHandler.compare_and_save_model_management(
+            payload["config_revision"], payload, "op-f07-smuggle"
+        )
+
+        assert result.status == "committed"
+        raw = _read_raw_config(isolated_config)
+        assert raw["model_management"]["migration_state"] == "pending"
+        transition = raw["model_management"]["migration_transition"]
+        assert transition["phase"] == "draining"
+        assert transition["transition_epoch"] == _DRAINING_TRANSITION["transition_epoch"]
+
+    def test_draft_save_on_missing_migration_subdomain_falls_back_to_defaults(self, isolated_config):
+        """磁盘无迁移子域（首次初始化）：草稿保存落出明确初始态 pending / 无屏障。"""
+        payload = AppConfig().model_dump()["model_management"]
+        payload.pop("migration_state", None)
+        payload.pop("migration_transition", None)
+
+        result = cfg_mod.ConfigHandler.compare_and_save_model_management(1, payload, "op-f07-init")
+
+        assert result.status == "committed"
+        raw = _read_raw_config(isolated_config)
+        assert raw["model_management"]["migration_state"] == "pending"
+        assert raw["model_management"]["migration_transition"] is None
+
+    def test_migration_command_path_submits_migration_subdomain(self, isolated_config):
+        """update_migration_state=True（迁移命令专用）：payload 迁移子域原样提交。"""
+        disk_mm = self._mm_with_transition(isolated_config)
+        payload = dict(disk_mm)
+        payload["migration_state"] = "pending"
+        payload["migration_transition"] = {**_DRAINING_TRANSITION, "phase": "sealed"}
+        payload.pop("last_config_commit", None)
+
+        result = cfg_mod.ConfigHandler.compare_and_save_model_management(
+            payload["config_revision"], payload, "op-f07-cmd", update_security_state=False, update_migration_state=True
+        )
+
+        assert result.status == "committed"
+        raw = _read_raw_config(isolated_config)
+        assert raw["model_management"]["migration_transition"]["phase"] == "sealed"
+        assert (
+            raw["model_management"]["migration_transition"]["transition_epoch"]
+            == (_DRAINING_TRANSITION["transition_epoch"])
+        )

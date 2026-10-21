@@ -449,12 +449,22 @@ class TestPayloadBuilders:
 
         assert payload["schema_version"] == 1
         assert payload["config_revision"] == 5
-        assert payload["migration_state"] == "active"
         assert [c["connection_id"] for c in payload["connections"]] == ["conn-a", "conn-b"]
         assert payload["usage_policy"] == {"monthly_cny_limit": None, "detail_retention_days": 180}
         routes = {r["scenario_id"]: r["candidates"] for r in payload["scenario_routes"]}
         assert routes["stock_analysis"] == ["conn-a"]  # 当前场景用草稿
         assert routes["news_annotation"] == []  # 其余用已提交值
+
+    @pytest.mark.asyncio
+    async def test_build_payload_excludes_migration_subdomain(self):
+        """F07：迁移子域由 begin/seal/activate 专用命令独占，草稿 payload 不携带。"""
+        vm, _ = _make_vm(_snapshot())
+        await vm.load()
+
+        payload = vm.build_payload("stock_analysis")
+
+        assert "migration_state" not in payload
+        assert "migration_transition" not in payload
 
     @pytest.mark.asyncio
     async def test_build_payload_without_draft_uses_committed(self):

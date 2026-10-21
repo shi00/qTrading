@@ -228,7 +228,6 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         self._undo: _PendingUndo | None = None
         # 原始快照元数据（用于重建 CAS payload，不进 state）
         self._raw_connections: tuple[Mapping[str, Any], ...] = ()
-        self._migration_state = "pending"
         self._usage_policy: Mapping[str, Any] = {}
         self._state = ModelRoutesState()
         self._init_mixin_fields()
@@ -284,7 +283,6 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         drafts = _build_drafts(snapshot.scenario_routes)
         options = tuple(_option_from_mapping(c) for c in snapshot.connections)
         self._config_revision = snapshot.config_revision
-        self._migration_state = snapshot.migration_state
         self._raw_connections = snapshot.connections
         self._usage_policy = snapshot.usage_policy
         self._undo = None
@@ -475,7 +473,11 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         return [_route_to_payload(route) for route in self._state.routes]
 
     def build_payload(self, scenario_id: str) -> dict[str, Any]:
-        """重建 ``model_management`` payload：当前场景用草稿，其余用已提交值。"""
+        """重建 ``model_management`` payload：当前场景用草稿，其余用已提交值。
+
+        迁移子域（migration_state / migration_transition）不入草稿 payload，
+        由迁移专用命令独占、CAS 以磁盘现值回填（F07）。
+        """
         committed = {r.scenario_id: r for r in self._state.committed_routes}
         routes: list[dict[str, Any]] = []
         for sid in SCENARIO_IDS:
@@ -492,7 +494,6 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         return {
             "schema_version": 1,
             "config_revision": self._config_revision,
-            "migration_state": self._migration_state,
             "connections": [dict(c) for c in self._raw_connections],
             "scenario_routes": routes,
             "usage_policy": dict(self._usage_policy),

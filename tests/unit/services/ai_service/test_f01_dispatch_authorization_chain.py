@@ -101,12 +101,37 @@ def _request() -> InferenceRequest:
     )
 
 
+async def _advance_to_active(service: ModelConfigurationService) -> None:
+    """F07：经真实迁移命令链把迁移状态推进到合法激活态（active + sealed 屏障）。
+
+    新链场景路由要求 ``migration_state == "active"``；schema 拒绝无屏障的裸
+    active，且草稿通道不携带迁移键，故须走 begin → seal → activate 生产路径。
+    """
+
+    def _rev() -> int:
+        return cfg_mod.ConfigHandler.read_model_management_fresh()["model_management"]["config_revision"]
+
+    outcome = await service.begin_migration(_rev(), "op-f01-begin", "owner-f01")
+    assert outcome.status == "committed"
+    outcome = await service.seal_legacy(_rev(), "op-f01-seal", {"2026-01": "seal-f01"}, "owner-f01")
+    assert outcome.status == "committed"
+    outcome = await service.activate(_rev(), "op-f01-activate")
+    assert outcome.status == "committed"
+
+
 async def _setup_config(service: ModelConfigurationService, candidates: list[str]) -> None:
-    """写两连接（远程 litellm_chat 混合大小写 api_base + 本地 gguf_chat）并启用场景路由。"""
+    """写两连接（远程 litellm_chat 混合大小写 api_base + 本地 gguf_chat）并启用场景路由。
+
+    F07：迁移子域由迁移专用命令独占——草稿 payload 不携带迁移键（普通保存
+    无条件剥离）；新链场景路由要求 ``migration_state == "active"``，故草稿提交后
+    经真实迁移命令链 begin → seal → activate 推进到合法激活态（active + sealed
+    屏障，schema 拒绝无屏障的裸 active）。
+    """
     fresh = cfg_mod.ConfigHandler.read_model_management_fresh()
     mm = dict(fresh["model_management"])
     expected = mm["config_revision"]
-    mm["migration_state"] = "active"
+    mm.pop("migration_state", None)
+    mm.pop("migration_transition", None)
     mm["connections"] = [
         {
             "connection_id": _REMOTE_CONN,
@@ -133,6 +158,7 @@ async def _setup_config(service: ModelConfigurationService, candidates: list[str
     route["candidates"] = list(candidates)
     outcome = await service.save_draft(mm, expected, "op-f01-setup")
     assert outcome.status == "committed"
+    await _advance_to_active(service)
 
 
 async def _grant(service: ModelConfigurationService, connection_id: str, target: str, purpose: str) -> None:
@@ -339,7 +365,8 @@ class TestLocalChainAuthorization:
         fresh = cfg_mod.ConfigHandler.read_model_management_fresh()
         mm = dict(fresh["model_management"])
         expected = mm["config_revision"]
-        mm["migration_state"] = "active"
+        mm.pop("migration_state", None)
+        mm.pop("migration_transition", None)
         mm["connections"] = [
             {
                 "connection_id": _LOCAL_CONN,
@@ -358,6 +385,7 @@ class TestLocalChainAuthorization:
         route["candidates"] = [_LOCAL_CONN]
         outcome = await service.save_draft(mm, expected, "op-f01-local-cred")
         assert outcome.status == "committed"
+        await _advance_to_active(service)
 
         revoke = await service.revoke_credential(
             credential_version="cred-v1",
