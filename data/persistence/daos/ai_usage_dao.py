@@ -1,14 +1,21 @@
 """AI 用量账本 DAO（S3，ADR-0014 §9.2/§10，模型统一.md 三表账本）。
 
-锁与一致性契约（方案 D2~D4）：
+锁与一致性契约（方案 D2~D4 + F23 owner/epoch fencing 贯穿账本写入口）：
 - **advisory 月锁**：``pg_advisory_xact_lock(NAMESPACE, YYYYMM)`` 两键，事务级；
   归属月 = Asia/Shanghai 下 invocation 开始月；
-- **锁序**：月锁先行（全部预算/结算变更经同月锁键串行化）；锁内 try_reserve /
-  release_reservation 为「invocation → …」，settle_attempt_usage 为
-  「attempt（FOR UPDATE）→ invocation（F22 预留转换）→ 月汇总」，同类按主键序；
-- **owner 条件写入**：所有变更带 owner_session_id / owner_epoch /
+- **锁序**：月锁先行（全部预算/结算/reservations 变更经同月锁键串行化）；锁内
+  try_reserve / mark_dispatched / release_reservation 为「invocation → …」，
+  settle_attempt_usage 为「attempt（FOR UPDATE）→ invocation（F22 预留转换）→
+  月汇总」，同类按主键序；
+- **owner 条件写入（F23 fencing）**：所有变更带 owner_session_id / owner_epoch /
   owner_lease_expires_at > (now() AT TIME ZONE 'UTC') 三条件，rowcount=0 即失权
   （时间列统一 naive UTC 墙钟，now() 经 AT TIME ZONE 'UTC' 归一，与 session 时区无关）；
+  且每个写入口的推进必须存在经授权入口建立的持久事实背书，受影响行数贯穿检查：
+  try_reserve 返回前检查 rowcount（失权不返回非持久预留）；mark_dispatched 要求
+  目标预留存在且为 reserved（错误预留 ID 零派发）；insert_attempt 经
+  INSERT ... SELECT 门控（owner 身份强门 / 租约有效性弱门）；settle_attempt_usage
+  缺行补记要求活跃预留背书（attempt 行已存在时经 usage_revision 幂等推进 =
+  迟到真实消费的合法恢复补记通道，不盲目拒绝真实迟到事实）；
 - **迟到差额幂等**：attempt 用量按 usage_revision 单调推进（旧修订不覆盖新修订），
   差额整体计入月汇总，月汇总 revision 用 GREATEST 保持单调（R22）；
 - 无 FK 约束（D1），三表逻辑关联。
@@ -39,6 +46,11 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 # settled（结算同事务转换，_settle_reservation）/ released（人工解除）。
 # 终态：settled / released 均不再占用预算。
 _ACTIVE_RESERVATION_STATES: Final[tuple[str, ...]] = ("reserved", "dispatched", "held_unconfirmed")
+
+# owner 在世正常占用状态（F23 展示口径，§11.5 相邻展示语义）：预算摘要的「有效预留」列
+# 仅计两态且租约有效；held_unconfirmed 独立进「未确认」列——两列不相交，不重复展示
+# （与预算门 _read_active_reservations_sum 的保守全活跃口径相区分）。
+_LEASED_RESERVATION_STATES: Final[tuple[str, ...]] = ("reserved", "dispatched")
 
 # advisory 锁固定命名空间（"AIUS" ASCII 编码低 32 位，全局唯一语义，勿改）
 _ADVISORY_LOCK_NAMESPACE: Final[int] = 0x4149_5553
@@ -192,7 +204,9 @@ FROM ai_usage_monthly
 WHERE month = :month AND aggregation_scope = :scope
 """
 
-# 有效预留：归属月内、租约未过期的活跃预留金额合计（与 D3 口径一致）。
+# 有效预留（预算摘要展示列，F23 口径）：owner 在世正常占用（reserved / dispatched
+# 且租约未过期）金额合计；held_unconfirmed 不在此列（独立进「未确认」列，两列不相交）。
+# 注意与预算门 _read_active_reservations_sum 相区分：预算门为保守全活跃口径（三态 + OR 形态）。
 _MONTH_EFFECTIVE_RESERVED_SQL: Final[str] = """
 SELECT SUM((elem->>'amount_cny')::numeric)
 FROM ai_invocation, jsonb_array_elements(reservations) AS elem
@@ -342,6 +356,11 @@ class AIUsageDao(BaseDao):
         """预留预算：余额足够才追加唯一 reservation_id，返回 None = 余额不足。
 
         usage_only（amount_cny=None）不占预算，直接登记预留（金额 NULL）。
+
+        F23 fencing：末尾 owner 条件 UPDATE 的受影响行数贯穿检查——rowcount=0
+        （owner 失权：租约过期 / 已被接管 / owner 身份不匹配）时返回 None，
+        **不返回非持久预留**（修复前失权仍返回预留对象，调用方误以为预留成功）。
+        返回 None = 余额不足 **或** owner 失权，调用方统一按「不可派发」处置（D5）。
         """
         self._check_engine(context="ai_usage.try_reserve")
         async with self._guarded_begin() as conn:
@@ -399,7 +418,7 @@ class AIUsageDao(BaseDao):
                 owner_session_id=owner_session_id,
                 owner_epoch=owner_epoch,
             )
-            await conn.execute(
+            result = await conn.execute(
                 sa.text(
                     """
                     UPDATE ai_invocation
@@ -418,6 +437,9 @@ class AIUsageDao(BaseDao):
                     "owner_epoch": owner_epoch,
                 },
             )
+            # F23：rowcount=0 即 owner 失权（预留未持久化），不返回非持久预留
+            if not result.rowcount or result.rowcount < 1:
+                return None
             return reservation
 
     async def _read_month_committed_usage(self, conn: Any, month: str) -> Decimal:
@@ -464,13 +486,19 @@ class AIUsageDao(BaseDao):
         return settled + legacy
 
     async def _read_active_reservations_sum(self, conn: Any, month: str) -> Decimal:
-        """该月归属的预算有效占用合计（D3 + F22 口径）。
+        """该月归属的预算有效占用合计（D3 + F22 口径 + F23 失权语义确认）。
 
         F22 修正：owner 租约条件仅约束 ``reserved`` / ``dispatched``（owner 在世时的
         正常占用）；``held_unconfirmed`` 是崩溃/失权后「结果未知」的费用占用，**不受
         租约是否过期影响、持续占用预算**，直到明确处置（``released`` 人工解除 /
         ``settled`` 结算确认）——过期 owner 的未确认金额不得从有效占用中消失
         （展示「未确认」列不能代替预算保护）。
+
+        F23 失权语义确认（reserved + 过期租约）：fencing 贯穿后失权 owner 的
+        ``reserved`` 预留**永不可再推进**（mark/settle 背书全拒、预留未消费），
+        其退出预算占用是正确的事实零释放（无超支）；owner 同 session 重入
+        claim 后该预留因租约恢复重新计入——方向为**保守多占**（可能误拒新预留，
+        不可能超支），可接受且自愈（重入后经 mark→settle 正常核销）。
 
         归属月按 created_at（Asia/Shanghai 月界）判定，与 D2 归属月口径一致。
 
@@ -523,10 +551,26 @@ class AIUsageDao(BaseDao):
 
         仅分配派发身份，不建立实际尝试记录（ai_attempt 行由 ``insert_attempt``
         在真正进入适配器执行时建立）。
-        返回 False = owner 失权（rowcount=0），调用方不得继续派发。
+
+        F23 fencing：
+        - 入口先取 invocation 归属月 advisory 月锁（与 try_reserve /
+          release_reservation / settle 同键串行化）——本方法的 reservations
+          jsonb_agg 是全量重写，无月锁时与月锁内的追加/转换交错存在丢失更新
+          风险（F22 遗留①），统一写入口后消除；
+        - UPDATE 带 EXISTS 守卫：``reservation_id`` 非 None 时要求目标预留存在
+          且 state='reserved'（错误预留 ID / 已派发 / 已终态 → rowcount=0 →
+          False，**错误预留 ID 零派发**）；``reservation_id`` 为 None（usage_only
+          无预留）时仅 owner 三条件。
+
+        返回 False = owner 失权或预留不存在/状态不符，调用方不得继续派发（D5）。
         """
         self._check_engine(context="ai_usage.mark_dispatched")
         async with self._guarded_begin() as conn:
+            lock_key = await self._invocation_month_key(conn, invocation_id)
+            await conn.execute(
+                sa.text("SELECT pg_advisory_xact_lock(:ns, :lock_key)"),
+                {"ns": _ADVISORY_LOCK_NAMESPACE, "lock_key": lock_key},
+            )
             result = await conn.execute(
                 sa.text(
                     """
@@ -546,6 +590,14 @@ class AIUsageDao(BaseDao):
                       AND owner_session_id = :owner_session_id
                       AND owner_epoch = :owner_epoch
                       AND owner_lease_expires_at > (now() AT TIME ZONE 'UTC')
+                      AND (
+                            :reservation_id IS NULL
+                            OR EXISTS (
+                                SELECT 1 FROM jsonb_array_elements(reservations) AS e
+                                WHERE e->>'reservation_id' = :reservation_id
+                                  AND e->>'state' = 'reserved'
+                            )
+                          )
                     """
                 ),
                 {
@@ -565,27 +617,48 @@ class AIUsageDao(BaseDao):
         invocation_id: str,
         configured_model: str,
         attempt_row: dict[str, Any] | None = None,
-    ) -> None:
+        owner_session_id: str | None = None,
+        owner_epoch: int | None = None,
+    ) -> bool:
         """建立实际尝试记录（方案 §6.2 步骤 4：真正进入适配器执行时）。
 
         ``ON CONFLICT DO NOTHING``：同 attempt_id 重试沿用已绑定身份，不重建
         （重试共用同一 attempt_id，方案 §6.2 步骤 4「不重新生成」）。
+
+        F23 fencing：INSERT 改 ``INSERT ... SELECT ... FROM ai_invocation`` 门控
+        形态——invocation 行不存在、owner 租约过期、或 owner 身份不符时不建行
+        （失权 owner 不得建立新的 attempt 事实）：
+        - ``owner_session_id`` / ``owner_epoch`` 齐传 = **owner 身份强门**（三条件
+          比对 invocation 当前 owner；调用方接线后启用）；
+        - 缺省（均 None）= **租约有效性弱门**（仅要求 invocation 存在活跃 owner
+          租约；向后兼容既有调用，残余窗口移交 R03 统一 fence 设计接线）。
+
+        返回 True = 新建行或幂等沿用已存在行（重试场景）；False = owner 门拒绝
+        （行未建立），调用方按 persisted=False 降级（费用型已被 mark_dispatched
+        拦截，usage_only 降级继续执行）。
         """
         self._check_engine(context="ai_usage.insert_attempt")
         row = attempt_row or {}
         async with self._guarded_begin() as conn:
-            await conn.execute(
+            result = await conn.execute(
                 sa.text(
                     """
                     INSERT INTO ai_attempt (
                         attempt_id, invocation_id, task_id, candidate_index, retry_index,
                         connection_id, connection_revision, adapter_kind, configured_model,
                         security_revision, reservation_id, status
-                    ) VALUES (
+                    )
+                    SELECT
                         :attempt_id, :invocation_id, :task_id, :candidate_index, :retry_index,
                         :connection_id, :connection_revision, :adapter_kind, :configured_model,
                         :security_revision, :reservation_id, 'dispatched'
-                    )
+                    FROM ai_invocation i
+                    WHERE i.invocation_id = :invocation_id
+                      AND i.owner_lease_expires_at > (now() AT TIME ZONE 'UTC')
+                      AND (
+                            (:owner_session_id IS NULL AND :owner_epoch IS NULL)
+                            OR (i.owner_session_id = :owner_session_id AND i.owner_epoch = :owner_epoch)
+                          )
                     ON CONFLICT (attempt_id) DO NOTHING
                     """
                 ),
@@ -601,8 +674,21 @@ class AIUsageDao(BaseDao):
                     "configured_model": configured_model,
                     "security_revision": row.get("security_revision", 0),
                     "reservation_id": row.get("reservation_id"),
+                    "owner_session_id": owner_session_id,
+                    "owner_epoch": owner_epoch,
                 },
             )
+            if result.rowcount and result.rowcount > 0:
+                return True
+            # rowcount=0：区分「幂等沿用已存在行」与「owner 门拒绝（未建行）」——
+            # attempt 行只增不删，已存在即此前已建立（沿用其绑定身份）
+            existing = (
+                await conn.execute(
+                    sa.text("SELECT 1 FROM ai_attempt WHERE attempt_id = :attempt_id"),
+                    {"attempt_id": attempt_id},
+                )
+            ).fetchone()
+            return existing is not None
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def claim_invocation(
@@ -840,6 +926,14 @@ class AIUsageDao(BaseDao):
         或不存在）幂等跳过（rowcount=0，不影响结算推进语义）。
         ``reservation_id`` 为 None（未接入预留的调用链）不执行转换，行为与既有
         完全一致。
+
+        F23 fencing（缺行补记背书）：attempt 行缺失时的直接插终态改为
+        ``INSERT ... SELECT ... FROM ai_invocation`` 门控——仅当
+        ``reservation_id`` 非 None 且该预留仍在活跃集（reserved / dispatched /
+        held_unconfirmed，经授权入口 try_reserve 建立的持久事实）时才允许补记；
+        无背书（``reservation_id`` 缺省 / 预留不存在 / 已终态）不插行、不计费、
+        返回 False——失权 owner 不得凭空建立 attempt 事实。attempt 行已存在的
+        迟到修订不受影响（revision 幂等推进 = 合法恢复补记真实消费的通道）。
         """
         self._check_engine(context="ai_usage.settle_attempt_usage")
         async with self._guarded_begin() as conn:
@@ -863,8 +957,10 @@ class AIUsageDao(BaseDao):
             ).fetchone()
 
             if row is None:
-                # attempt 行缺失（mark_dispatched 从未落库）：直接插入终态
-                await self._insert_terminal_attempt(
+                # attempt 行缺失（mark_dispatched 从未落库）：有活跃预留背书才插终态
+                # （F23 fencing：无背书 = 失权 owner 凭空造账路径，拒绝并返回 False；
+                # 预算口径由预留自身占用兜底，人工经未确认详情处置）
+                inserted = await self._insert_terminal_attempt(
                     conn,
                     attempt_id=attempt_id,
                     invocation_id=invocation_id,
@@ -888,7 +984,10 @@ class AIUsageDao(BaseDao):
                     text_count=text_count,
                     usage_window_expires_at=usage_window_expires_at,
                     usage_fingerprint=usage_fingerprint,
+                    reservation_id=reservation_id,
                 )
+                if not inserted:
+                    return False
                 old_accounted_cost = Decimal("0")
                 should_account = True
             else:
@@ -1029,8 +1128,18 @@ class AIUsageDao(BaseDao):
             },
         )
 
-    async def _insert_terminal_attempt(self, conn: Any, **kwargs: Any) -> None:
-        await conn.execute(
+    async def _insert_terminal_attempt(self, conn: Any, **kwargs: Any) -> bool:
+        """缺行补记终态 attempt（F23 门控）：仅当活跃预留背书命中时插入。
+
+        ``INSERT ... SELECT ... FROM ai_invocation`` + EXISTS 守卫：
+        ``reservation_id`` 非 None 且该预留仍在活跃集（经授权入口 try_reserve
+        建立的持久事实）才插入——invocation 行不存在 / 预留不存在 / 已终态
+        （settled / released）→ SELECT 0 行 → 返回 False（不插行，调用方不推进）。
+        与 insert_attempt 同样 ``ON CONFLICT DO NOTHING``（并发 insert_attempt
+        抢建时幂等让位；rowcount=0 但行已存在时本方法返回 False 属可接受——
+        该路径下费用由抢占方事务推进）。
+        """
+        result = await conn.execute(
             sa.text(
                 """
                 INSERT INTO ai_attempt (
@@ -1041,7 +1150,8 @@ class AIUsageDao(BaseDao):
                     cache_write_tokens, output_tokens, encoder_input_tokens, text_count,
                     usage_status, usage_revision, accounted_usage_revision,
                     usage_fingerprint, usage_window_expires_at, cost_cny
-                ) VALUES (
+                )
+                SELECT
                     :attempt_id, :invocation_id, :task_id, :candidate_index, :retry_index,
                     :connection_id, :connection_revision, :adapter_kind, :configured_model,
                     :actual_model, :security_revision, :status, :error_code, :duration_ms,
@@ -1049,7 +1159,15 @@ class AIUsageDao(BaseDao):
                     :cache_write_tokens, :output_tokens, :encoder_input_tokens, :text_count,
                     :usage_status, :usage_revision, :usage_revision,
                     :usage_fingerprint, :usage_window_expires_at, :cost_cny
-                )
+                FROM ai_invocation i
+                WHERE i.invocation_id = :invocation_id
+                  AND :reservation_id IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM jsonb_array_elements(i.reservations) AS e
+                      WHERE e->>'reservation_id' = :reservation_id
+                        AND e->>'state' = ANY(CAST(:active_states AS text[]))
+                  )
+                ON CONFLICT (attempt_id) DO NOTHING
                 """
             ),
             {
@@ -1079,8 +1197,11 @@ class AIUsageDao(BaseDao):
                 "usage_fingerprint": kwargs.get("usage_fingerprint"),
                 "usage_window_expires_at": kwargs.get("usage_window_expires_at"),
                 "cost_cny": kwargs["cost_cny"],
+                "reservation_id": kwargs.get("reservation_id"),
+                "active_states": list(_ACTIVE_RESERVATION_STATES),
             },
         )
+        return bool(result.rowcount and result.rowcount > 0)
 
     @staticmethod
     def _usage_update_params(**kwargs: Any) -> dict[str, Any]:
@@ -1421,10 +1542,15 @@ class AIUsageDao(BaseDao):
         - ``known_cny``：已结算费用（月汇总 scenario scope 合计）+ legacy 汇总
           （app_state ``ai_cost:{YYYYMM}``，分→元）；两者皆无数据 → ``None``
           （未知禁伪零，R21）。
-        - ``effective_reserved_cny``：有效预留（租约未过期活跃预留金额合计）；
-          无预留 → ``0``（事实零，非未知）。
+        - ``effective_reserved_cny``：有效预留 = owner 在世正常占用
+          （``reserved`` / ``dispatched`` 且租约有效，F23 展示口径）；无 → ``0``
+          （事实零，非未知）。
         - ``unconfirmed_reserved_cny``：未确认预留（``held_unconfirmed``，不受租约
           影响，需人工处置）；无 → ``0``。
+
+        F23：两列不相交（held_unconfirmed 不再同现于「有效预留」——F22 遗留③
+        相邻展示语义），与预算门 ``_read_active_reservations_sum`` 的保守全活跃
+        口径（三态含租约 OR 形态）相区分：预算门保护不放宽，展示列语义不重叠。
         """
         self._check_engine(context="ai_usage.read_budget_summary")
         month_start, next_month_start = _month_utc_bounds(month)
@@ -1436,7 +1562,9 @@ class AIUsageDao(BaseDao):
                 await conn.execute(
                     sa.text(_MONTH_EFFECTIVE_RESERVED_SQL),
                     {
-                        "states": list(_ACTIVE_RESERVATION_STATES),
+                        # F23 展示口径：仅 owner 在世正常占用两态（held_unconfirmed
+                        # 独立进「未确认」列，两列不相交）
+                        "states": list(_LEASED_RESERVATION_STATES),
                         "month_start": month_start,
                         "next_month_start": next_month_start,
                     },
