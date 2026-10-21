@@ -1231,3 +1231,192 @@ class TestSilentExceptDebugLog:
             )
 
         assert any("throttle cancel old handle failed" in r.getMessage() for r in caplog.records)
+
+
+# ============================================================
+# F40：在途任务登记与 dispose 取消语义
+# ============================================================
+
+
+class TestInflightTaskLifecycle:
+    """F40：dispose 取消 cancellable 在途任务、放行 committing 任务。"""
+
+    @pytest.mark.asyncio
+    async def test_dispose_cancels_cancellable_task(self):
+        """页面卸载（dispose）取消 cancellable 在途任务（单次测试 / 加载语义）。"""
+        import asyncio
+
+        vm = _DefaultVM()
+        release = asyncio.Event()
+
+        async def blocking_command():
+            vm._track_inflight_cancellable()
+            await release.wait()  # 模拟测试/加载挂起中
+            return "done"
+
+        task = asyncio.create_task(blocking_command())
+        await asyncio.sleep(0)  # 让任务执行到挂起点并完成登记
+        assert task in vm._notifier._inflight_tasks
+
+        vm.dispose()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled()
+        await asyncio.sleep(0)  # done callback 执行后登记表清空
+        assert task not in vm._notifier._inflight_tasks
+
+    @pytest.mark.asyncio
+    async def test_dispose_leaves_committing_task_running(self):
+        """已进入提交（committing）的任务 dispose 放行：不被取消、自然完成落库。"""
+        import asyncio
+
+        vm = _DefaultVM()
+        gate = asyncio.Event()
+        release = asyncio.Event()
+
+        async def committing_command():
+            vm._track_inflight_cancellable()
+            await asyncio.sleep(0)
+            vm._mark_inflight_committing()  # 已发出 service 写调用
+            gate.set()
+            await release.wait()
+            return "committed"
+
+        task = asyncio.create_task(committing_command())
+        await gate.wait()  # 确保 task 已真正进入 committing 阶段
+        vm.dispose()
+
+        release.set()
+        assert await task == "committed"  # 未被取消，写流程跑完
+        assert not task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_dispose_cancels_unmarked_only_when_cancellable(self):
+        """混合在途：cancellable 取消、committing 放行（同一 VM 多任务）。"""
+        import asyncio
+
+        vm = _DefaultVM()
+        gate = asyncio.Event()
+        release = asyncio.Event()
+
+        async def cancellable_cmd():
+            vm._track_inflight_cancellable()
+            await release.wait()
+
+        async def committing_cmd():
+            vm._track_inflight_cancellable()
+            await asyncio.sleep(0)
+            vm._mark_inflight_committing()  # 未经独立 track 直接升级
+            gate.set()
+            await release.wait()
+            return "ok"
+
+        task_c = asyncio.create_task(cancellable_cmd())
+        task_w = asyncio.create_task(committing_cmd())
+        await gate.wait()  # task_w 已进入 committing
+        vm.dispose()
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task_c
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task_c.cancelled()
+        release.set()
+        assert await task_w == "ok"
+
+    @pytest.mark.asyncio
+    async def test_track_idempotent_no_duplicate_callback(self):
+        """重复 track 同一任务不重复登记（done 清理仅一次语义）。"""
+        import asyncio
+
+        vm = _DefaultVM()
+
+        async def cmd():
+            vm._track_inflight_cancellable()
+            vm._track_inflight_cancellable()
+
+        await asyncio.create_task(cmd())
+        await asyncio.sleep(0)  # 让 done callback 调度执行
+        assert vm._notifier._inflight_tasks == {}  # done 后自动清理，无泄漏
+
+    @pytest.mark.asyncio
+    async def test_completed_task_auto_evicted(self):
+        """任务完成后自动从登记表移除（done callback），无内存泄漏。"""
+        import asyncio
+
+        vm = _DefaultVM()
+
+        async def cmd():
+            vm._track_inflight_cancellable()
+            await asyncio.sleep(0)
+
+        task = asyncio.create_task(cmd())
+        await task
+        await asyncio.sleep(0)  # 让 done callback 调度执行
+        assert vm._notifier._inflight_tasks == {}
+
+    def test_track_outside_task_context_is_noop(self):
+        """无运行中 task 的同步上下文（如渲染期误调）静默跳过，不抛异常。"""
+        vm = _DefaultVM()
+        vm._track_inflight_cancellable()  # 无 asyncio task 上下文
+        assert vm._notifier._inflight_tasks == {}
+
+    @pytest.mark.asyncio
+    async def test_dispose_from_other_thread_cancels_via_threadsafe(self):
+        """非 loop 线程 dispose → cancel 经 call_soon_threadsafe 投递回 VM loop（F40 跨线程路径）。"""
+        import asyncio
+        import threading
+
+        vm = _DefaultVM()
+        started = asyncio.Event()
+
+        async def cmd():
+            # 绑定 _main_loop（模拟 subscribe 捕获；门面委托为 _get_loop_or_none）
+            assert vm._get_loop_or_none() is not None
+            vm._track_inflight_cancellable()
+            started.set()
+            await asyncio.sleep(3600)
+
+        task = asyncio.create_task(cmd())
+        await started.wait()
+
+        disposed = threading.Event()
+
+        def other_thread_dispose():
+            vm.dispose()  # 非 loop 线程调用
+            disposed.set()
+
+        t = threading.Thread(target=other_thread_dispose)
+        t.start()
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task  # 取消经 threadsafe 投递后在本 loop 生效
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled()
+        t.join(timeout=5)
+        assert disposed.is_set()
+        assert task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_dispose_with_bound_loop_cancels_directly(self):
+        """loop 线程内 dispose 且 _main_loop 已绑定 → running is captured_loop 直接取消。"""
+        import asyncio
+
+        vm = _DefaultVM()
+        assert vm._get_loop_or_none() is not None  # 绑定 _main_loop
+
+        started = asyncio.Event()
+
+        async def cmd():
+            vm._track_inflight_cancellable()
+            started.set()
+            await asyncio.sleep(3600)
+
+        task = asyncio.create_task(cmd())
+        await started.wait()
+        vm.dispose()  # 同线程、在 loop 上下文内
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled()

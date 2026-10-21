@@ -39,6 +39,12 @@ logger = logging.getLogger(__name__)
 
 _MAX_PENDING = 1000  # deque 上限，无 loop 场景下 OOM 防护
 
+# F40：在途任务阶段标记。cancellable = 结果无持久化语义，dispose 可安全取消；
+# committing = 已进入提交（service 写调用已发出），dispose 必须放行自然完成——
+# 直接取消会让 UI 侧「宣称未提交」而线程池写线程可能最终落库（磁盘才是 SSOT）。
+_INFLIGHT_CANCELLABLE = "cancellable"
+_INFLIGHT_COMMITTING = "committing"
+
 T = TypeVar("T")
 
 
@@ -62,6 +68,9 @@ class ViewModelNotifier[T]:
         self._disposed = False
         self._pending_notify_handle: object | None = None
         self._pending_notifications: deque = deque(maxlen=_MAX_PENDING)
+        # F40：在途任务登记（task → phase）。写入与 done callback 均在任务的 loop
+        # 线程串行执行；dispose 快照经 _shutdown_lock 保护。
+        self._inflight_tasks: dict[asyncio.Task, str] = {}
         # CON-03: 单调序号（_notify_seq 分配全序 / _delivered_seq 已送达上界 /
         # _last_queued_seq 已排队上界），用于跨线程过期快照丢弃。
         self._notify_seq = 0
@@ -181,11 +190,80 @@ class ViewModelNotifier[T]:
 
         self._dispatch_notification_impl(subs_snapshot, state_snapshot, loop_captured, owner_tid_captured, my_seq)
 
+    # ------------------------------------------------------------------
+    # 在途任务管理（F40）：dispose 取消 cancellable、放行 committing
+    # ------------------------------------------------------------------
+
+    def _ensure_tracked(self, task: asyncio.Task, phase: str) -> None:
+        """登记任务（幂等）：已登记仅升级 phase，未登记插入并挂 done 自动清理。"""
+        if task not in self._inflight_tasks:
+            self._inflight_tasks[task] = phase
+            task.add_done_callback(lambda t: self._inflight_tasks.pop(t, None))
+        elif self._inflight_tasks[task] != phase and phase == _INFLIGHT_COMMITTING:
+            self._inflight_tasks[task] = _INFLIGHT_COMMITTING
+
+    def track_inflight_cancellable(self) -> None:
+        """登记当前 task 为 cancellable（无运行中 task / loop 的上下文静默跳过）。
+
+        命令入口调用；页面卸载（dispose）时该任务被取消。幂等：重复登记不重复挂 callback。
+        """
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            return  # 无 running loop（同步渲染期等）无从登记，也无须取消
+        if task is None:
+            return
+        self._ensure_tracked(task, _INFLIGHT_CANCELLABLE)
+
+    def mark_inflight_committing(self) -> None:
+        """把当前 task 升级为 committing（F40 语义分层：dispose 放行不取消）。
+
+        未 track 的任务（如宿主直 await 提交协程）也登记为 committing，保证任何
+        已进入提交阶段的任务都不会被 dispose 取消——取消写线程后宣称未提交即
+        掩盖「线程池写可能最终落库」的事实（磁盘 SSOT，取消不宣称结果）。
+        """
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            return
+        if task is None:
+            return
+        self._ensure_tracked(task, _INFLIGHT_COMMITTING)
+
+    def _cancel_inflight_on_dispose(self, captured_loop: asyncio.AbstractEventLoop | None) -> None:
+        """dispose 的取消投递（锁外执行）：取消 cancellable，committing 放行。
+
+        直接 cancel 仅当当前线程正运行 VM loop（``running is captured_loop``）；
+        ``captured_loop is None``（未绑定 loop 的测试/宿主直驱场景）时任务必在当前
+        线程 loop 内被 track，退化为「当前线程有运行中 loop 即直接取消」。否则经
+        ``call_soon_threadsafe`` 投递避免 ``Task.cancel`` 的跨线程竞争；loop 缺失
+        （disposed 前从未捕获且当前无 running loop）或已关闭时跳过取消——任务自然
+        完成或随 loop 终结，不构成泄漏。CancelledError 由任务自身调用链 raise
+        （R2），本方法不吞取消。
+        """
+        if not self._inflight_tasks:
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        direct = running is not None and (captured_loop is None or running is captured_loop)
+        for task, phase in list(self._inflight_tasks.items()):
+            if phase != _INFLIGHT_CANCELLABLE or task.done():
+                continue
+            if direct:
+                task.cancel()
+            elif captured_loop is not None and captured_loop.is_running():
+                try:
+                    captured_loop.call_soon_threadsafe(task.cancel)
+                except RuntimeError:
+                    logger.debug("[ViewModelNotifier] dispose inflight cancel skipped (loop closed)", exc_info=True)
+
     def dispose(self) -> None:
         """清理资源（三步原子关闭协议）。
 
         1. shutdown_lock 临界区：_disposed=True，取 subs/pending 快照，清 subs/deque，断 loop
-        2. 锁外：cancel pending notify handle
+        2. 锁外：cancel pending notify handle + 取消 cancellable 在途任务（F40）
         3. 调用宿主扩展点 _on_after_dispose(subs_snapshot, captured_loop)
 
         幂等：即使宿主已置 _disposed 仍需完成清理（基础操作均幂等）。
@@ -208,6 +286,10 @@ class ViewModelNotifier[T]:
                 cast(Any, captured_handle).cancel()
             except Exception:
                 logger.debug("[ViewModelNotifier] dispose cancel handle failed", exc_info=True)
+
+        # F40：取消 cancellable 在途任务（committing 放行自然完成）。
+        # captured_loop 在锁内先取快照，判定不依赖已清空的 _main_loop/_owner_tid。
+        self._cancel_inflight_on_dispose(captured_loop)
 
         self._on_after_dispose(subs_snapshot, pending_snapshot, captured_loop)
 
@@ -483,6 +565,14 @@ class ObservableViewModelMixin[T]:
 
     def dispose(self) -> None:
         self._notifier.dispose()
+
+    def _track_inflight_cancellable(self) -> None:
+        """登记当前 task 为 cancellable（F40：dispose 时取消；见 ViewModelNotifier）。"""
+        self._notifier.track_inflight_cancellable()
+
+    def _mark_inflight_committing(self) -> None:
+        """把当前 task 升级为 committing（F40：dispose 放行不取消；见 ViewModelNotifier）。"""
+        self._notifier.mark_inflight_committing()
 
     def _get_loop_or_none(self) -> asyncio.AbstractEventLoop | None:
         return self._notifier.get_loop_or_none()
