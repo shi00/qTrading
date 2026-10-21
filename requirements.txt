@@ -43,7 +43,7 @@ bs4==0.0.2
     # via tushare
 cachetools==7.2.0
     # via astockscreener (pyproject.toml)
-certifi==2026.7.22
+certifi==2026.10.19
     # via
     #   curl-cffi
     #   httpcore
@@ -215,7 +215,7 @@ pandas==3.0.6
     #   tushare
 pandas-market-calendars==5.4.0
     # via astockscreener (pyproject.toml)
-pillow==12.3.0
+pillow==13.0.0
     # via astockscreener (pyproject.toml)
 polars==1.44.2
     # via astockscreener (pyproject.toml)
