@@ -868,12 +868,26 @@ class TestFormatExceptionContract:
     若未来需要更宽松的处理, 应作为独立变更评审.
     """
 
-    def test_key_error_swallowed_returns_template(self):
+    def test_key_error_swallowed_returns_template(self, caplog):
         I18n.initialize()
         # screener_done 模板: "筛选完成，共 {count} 只股票"
-        # 故意不传 count, 触发 KeyError
+        # 传入非空但与模板不匹配的 kwargs, 确保进入 template.format(**kwargs),
+        # 因缺少 count 抛 KeyError 并被吞没
+        template = I18n._get_strings(I18n.current_locale())["screener_done"]
+        with caplog.at_level(logging.WARNING, logger="core.i18n"):
+            result = I18n.get("screener_done", wrong_key="x")
+        assert result == template, "KeyError 应被吞没, 返回原模板"
+        assert "{count}" in result
+        # 日志为确实进入 except KeyError 分支的直接证据
+        assert "Missing format arg" in caplog.text
+        assert "'count'" in caplog.text
+
+    def test_no_kwargs_returns_template_verbatim(self):
+        """不传 kwargs 时不进入格式化分支, 原样返回模板."""
+        I18n.initialize()
         result = I18n.get("screener_done")
-        assert "{count}" in result, "KeyError 应被吞没, 返回原模板"
+        assert result == I18n._get_strings(I18n.current_locale())["screener_done"]
+        assert "{count}" in result
 
     def test_index_error_not_swallowed(self):
         """模板含位置参数 {0} 但 kwargs 未提供时, IndexError 应传播."""
