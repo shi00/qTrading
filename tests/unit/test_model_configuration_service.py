@@ -228,6 +228,7 @@ class TestEgressGrantAndAuthorize:
             target_fingerprint="https://api.deepseek.com:443",
             purpose="stock_analysis",
             scope_version=1,
+            credential_version=None,
             attempt_id="att-1",
         )
         assert permit.security_revision == 1
@@ -245,6 +246,7 @@ class TestEgressGrantAndAuthorize:
                 target_fingerprint="https://other.example.com:443",
                 purpose="stock_analysis",
                 scope_version=1,
+                credential_version=None,
                 attempt_id="att-2",
             )
 
@@ -269,6 +271,7 @@ class TestEgressGrantAndAuthorize:
                 target_fingerprint="https://api.deepseek.com:443",
                 purpose="news_annotation",
                 scope_version=1,
+                credential_version=None,
                 attempt_id="att-3",
             )
 
@@ -307,6 +310,7 @@ class TestEgressGrantAndAuthorize:
                 target_fingerprint="https://api.deepseek.com:443",
                 purpose="stock_analysis",
                 scope_version=1,
+                credential_version=None,
                 attempt_id="att-4",
             )
 
@@ -350,6 +354,7 @@ class TestEgressGrantAndAuthorize:
                 target_fingerprint="https://api.deepseek.com:443",
                 purpose="stock_analysis",
                 scope_version=1,
+                credential_version=None,
                 attempt_id="att-f08",
             )
 
@@ -387,8 +392,123 @@ class TestEgressGrantAndAuthorize:
                 target_fingerprint="https://api.deepseek.com:443",
                 purpose="stock_analysis",
                 scope_version=1,
+                credential_version="cred-v1",
                 attempt_id="att-5",
             )
+
+
+class TestAuthorizeCredentialVersionBinding:
+    """F06 回归：撤销校验绑定实际执行版本（快照冻结），而非磁盘当前连接版本。"""
+
+    @pytest.mark.asyncio
+    async def test_revoked_frozen_version_rejected_even_when_disk_rotated(self, service):
+        """F06 主场景：v1 快照 → 磁盘切 v2 → 撤销 v1 → 旧快照申请新许可必须拒绝。
+
+        修复前：authorize_attempt 查磁盘当前连接版本（v2，未撤销）→ 错误放行，
+        已撤销的 v1 凭据仍会出站。
+        """
+        mm = _load_mm()
+        expected = mm["config_revision"]
+        conn = _base_connection(CONN_A, "https://api.deepseek.com")
+        conn["credential_version"] = "cred-v2"  # 磁盘已轮换到 v2
+        mm["connections"] = [conn]
+        await service.save_draft(mm, expected, "op-f06-0")
+        await service.grant_egress(
+            connection_id=CONN_A,
+            target_fingerprint="https://api.deepseek.com:443",
+            purpose="stock_analysis",
+            scope_version=1,
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-f06-1",
+        )
+        revoke_outcome = await service.revoke_credential(
+            credential_version="cred-v1",
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-f06-2",
+        )
+        assert revoke_outcome.status == "committed"
+
+        with pytest.raises(PermissionError, match="凭据版本已撤销"):
+            await service.authorize_attempt(
+                connection_id=CONN_A,
+                target_fingerprint="https://api.deepseek.com:443",
+                purpose="stock_analysis",
+                scope_version=1,
+                credential_version="cred-v1",  # 旧快照冻结的实际执行版本
+                attempt_id="att-f06-1",
+            )
+
+    @pytest.mark.asyncio
+    async def test_unrevoked_frozen_version_permitted_when_disk_version_revoked(self, service):
+        """v2 不受误伤（反向）：磁盘 v2 已撤销，未撤销的 v1 快照仍获许可。
+
+        许可的撤销断言只针对实际执行版本；磁盘其他版本的撤销状态不参与判定。
+        """
+        mm = _load_mm()
+        expected = mm["config_revision"]
+        conn = _base_connection(CONN_A, "https://api.deepseek.com")
+        conn["credential_version"] = "cred-v2"
+        mm["connections"] = [conn]
+        await service.save_draft(mm, expected, "op-f06-3")
+        await service.grant_egress(
+            connection_id=CONN_A,
+            target_fingerprint="https://api.deepseek.com:443",
+            purpose="stock_analysis",
+            scope_version=1,
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-f06-4",
+        )
+        revoke_outcome = await service.revoke_credential(
+            credential_version="cred-v2",
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-f06-5",
+        )
+        assert revoke_outcome.status == "committed"
+
+        permit = await service.authorize_attempt(
+            connection_id=CONN_A,
+            target_fingerprint="https://api.deepseek.com:443",
+            purpose="stock_analysis",
+            scope_version=1,
+            credential_version="cred-v1",  # 旧快照冻结，未撤销
+            attempt_id="att-f06-2",
+        )
+        assert permit.credential_version == "cred-v1"
+        assert permit.connection_id == CONN_A
+
+    @pytest.mark.asyncio
+    async def test_none_version_skips_credential_revocation_check(self, service):
+        """无版本化凭据（ref 缺失 / env: 形态）无撤销校验对象：grant 命中即许可。"""
+        mm = _load_mm()
+        expected = mm["config_revision"]
+        conn = _base_connection(CONN_A, "https://api.deepseek.com")
+        conn["credential_version"] = "cred-v2"
+        mm["connections"] = [conn]
+        await service.save_draft(mm, expected, "op-f06-6")
+        await service.grant_egress(
+            connection_id=CONN_A,
+            target_fingerprint="https://api.deepseek.com:443",
+            purpose="stock_analysis",
+            scope_version=1,
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-f06-7",
+        )
+        revoke_outcome = await service.revoke_credential(
+            credential_version="cred-v2",
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-f06-8",
+        )
+        assert revoke_outcome.status == "committed"
+
+        permit = await service.authorize_attempt(
+            connection_id=CONN_A,
+            target_fingerprint="https://api.deepseek.com:443",
+            purpose="stock_analysis",
+            scope_version=1,
+            credential_version=None,
+            attempt_id="att-f06-3",
+        )
+        assert permit.credential_version is None
 
 
 class TestSyntheticTestContext:
@@ -424,6 +544,7 @@ class TestSyntheticTestContext:
                 target_fingerprint="http://127.0.0.1:8000:8000",
                 purpose="stock_analysis",
                 scope_version=1,
+                credential_version=None,
                 attempt_id="att-6",
             )
 

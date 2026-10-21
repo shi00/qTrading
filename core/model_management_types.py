@@ -178,12 +178,19 @@ class AttemptContext:
 
 @dataclass(frozen=True, slots=True)
 class AttemptPermit:
-    """单次尝试许可：取得即尝试开始的线性化点，不能用于后续排队 / 重试 / 备用。"""
+    """单次尝试许可：取得即尝试开始的线性化点，不能用于后续排队 / 重试 / 备用。
+
+    F06：许可绑定实际执行对象——``credential_version`` 为撤销校验所依据的
+    快照冻结凭据版本（与出站解析 ``credential_ref`` 同源：
+    ``keyring:model-connection-{credential_version}``）；``None`` 表示
+    无版本化凭据（ref 缺失或 ``env:`` 形态），无撤销校验对象。
+    """
 
     attempt_id: str
     connection_id: str
     security_revision: int
     granted_at: str
+    credential_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

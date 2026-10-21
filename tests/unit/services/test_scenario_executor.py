@@ -186,6 +186,10 @@ class TestHappyPath:
         assert len(result.outputs) == 1
         config_service = executor._config_service
         config_service.authorize_attempt.assert_awaited_once()
+        # F06：许可请求绑定快照冻结的实际执行凭据版本（非磁盘现值）
+        authorize_args = config_service.authorize_attempt.await_args.args
+        assert authorize_args[0] == "conn-remote"
+        assert authorize_args[4] == "v1"
         # observe 在适配器返回后被同步转移（D6）：校验观察内容归属性与用量来源
         assert recorder.observe_usage.call_count == 1
         obs_arg = recorder.observe_usage.call_args.args[0]

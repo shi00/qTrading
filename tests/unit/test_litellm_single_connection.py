@@ -381,7 +381,8 @@ class TestInvokeSingleConnection:
     async def test_credential_env_resolved_into_api_key(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("QTR_INVOKE_KEY", "sk-invoke")
         client = LiteLLMClient(MagicMock())
-        conn = _connection(credential_ref="env:QTR_INVOKE_KEY", credential_version="v1")
+        # env: 形态凭据无版本化租约语义（F06：version 必须为 None）
+        conn = _connection(credential_ref="env:QTR_INVOKE_KEY", credential_version=None)
         with (
             patch("services.ai_service._ensure_litellm_loaded", return_value=True),
             patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
@@ -536,3 +537,62 @@ class TestSingleConnectionNoHiddenRetry:
             resolve_credential("keyring:model-connection-leak")
         assert "sk-super-secret-value" not in str(excinfo.value)
         assert os.environ.get("QTR_NO_RETRY_KEY") != "sk-test-local-endpoint"
+
+
+# ---------------------------------------------------------------------------
+# invoke_single_connection 解析租约一致性（F06）
+# ---------------------------------------------------------------------------
+class TestInvokeCredentialLease:
+    """F06：版本化凭据的 credential_ref 必须由 credential_version 派生，否则零出站拒绝。
+
+    闭环「许可校验的版本 == 实际解析目标」：许可侧绑定实际执行版本（F06），
+    出站侧校验 ref 与该版本同源（keyring:model-connection-{version}，
+    与 ModelConfigurationService.prepare_credential_version 生成形态一致）。
+    """
+
+    async def test_lease_mismatch_refuses_outbound(self):
+        """ref 与 version 不同源（数据损坏 / ref 被偷换）→ ValueError，零 keyring 读、零出站。"""
+        client = LiteLLMClient(MagicMock())
+        conn = _connection(credential_ref="keyring:item", credential_version="v1")
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+        ):
+            with pytest.raises(ValueError) as exc_info:
+                await client.invoke_single_connection(_request(), conn, _request().deadline, _attempt_context())
+        assert "Credential ref does not match versioned lease" in str(exc_info.value)
+        assert "v1" in str(exc_info.value)
+        mock_ac.assert_not_awaited()
+
+    async def test_lease_match_resolves_and_dispatches(self):
+        """ref 与 version 同源（keyring:model-connection-{version}）→ 正常解析出站。"""
+        import utils.config_handler as cfg
+
+        cfg.keyring.set_password(cfg.KEYRING_SERVICE_NAME, "model-connection-v1", "sk-lease-test")
+        client = LiteLLMClient(MagicMock())
+        conn = _connection(credential_ref="keyring:model-connection-v1", credential_version="v1")
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+        ):
+            mock_ac.return_value = _fake_response()
+            response = await client.invoke_single_connection(_request(), conn, _request().deadline, _attempt_context())
+
+        assert response.content == "ok"
+        assert mock_ac.await_args.kwargs["api_key"] == "sk-lease-test"
+
+    async def test_version_none_skips_lease_check(self):
+        """version=None（ref 缺失 / env: / 旧手工项）无租约语义，不触发一致性校验。"""
+        import utils.config_handler as cfg
+
+        cfg.keyring.set_password(cfg.KEYRING_SERVICE_NAME, "legacy-item", "sk-legacy-test")
+        client = LiteLLMClient(MagicMock())
+        conn = _connection(credential_ref="keyring:legacy-item", credential_version=None)
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+        ):
+            mock_ac.return_value = _fake_response()
+            await client.invoke_single_connection(_request(), conn, _request().deadline, _attempt_context())
+
+        assert mock_ac.await_args.kwargs["api_key"] == "sk-legacy-test"
