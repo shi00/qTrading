@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from utils.constants import TUSHARE_POINT_TIERS
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION
@@ -138,6 +139,39 @@ class CapabilityEvidenceConfig(BaseModel):
     artifact_digest: str | None = None
 
 
+# 金额字段绝对值上界：拦截 "1e999999" 类巨型指数串（可解析且 is_finite 为 True，
+# 但持久化后会毒化下游 Decimal 预算判定与 PG numeric 写入）。真实计费场景
+# （百万 token 单价 / 人民币月软预算 / 汇率）远低于该值。
+_AMOUNT_MAX_ABS: Final[Decimal] = Decimal("1e15")
+
+
+def _validate_decimal_amount(value: Any) -> Any:
+    """金额字段（十进制字符串）统一校验（R05 缺陷 D1）。
+
+    None 直通；str 须可解析为有限、非负且不超过上界的十进制数；其他类型拒绝。
+    校验失败抛 ValueError（由 pydantic 转为 ValidationError），在持久化边界拦截
+    "abc" / "-5" / NaN / ±Infinity / "1e999999" / "1,000" 等垃圾金额串毒化下游
+    Decimal 计算。只校验不改写：原样返回输入字符串，保持磁盘事实源与 CAS
+    payload 指纹语义不变。
+    """
+    if value is None:
+        return value
+    if not isinstance(value, str):
+        raise ValueError("金额字段必须为十进制数字字符串或 null")
+    try:
+        amount = Decimal(value.strip())
+    except InvalidOperation:
+        raise ValueError("金额无法解析为十进制数") from None
+    # is_finite 必须先于大小比较：sNaN 参与比较运算会抛 decimal.InvalidOperation
+    if not amount.is_finite():
+        raise ValueError("金额必须为有限十进制数（禁止 NaN / Infinity）")
+    if amount < 0:
+        raise ValueError("金额必须为非负数")
+    if amount > _AMOUNT_MAX_ABS:
+        raise ValueError("金额超出允许上限 1e15")
+    return value
+
+
 class BillingConfig(BaseModel):
     """连接计量（§3.1 / §9.1）：mode 必须由用户选择，无默认「免费」。
 
@@ -157,6 +191,19 @@ class BillingConfig(BaseModel):
     encoder_price_per_m: str | None = None
     fx_to_cny: str | None = None
     price_effective_at: str | None = None
+
+    @field_validator(
+        "input_price_per_m",
+        "output_price_per_m",
+        "cache_read_price_per_m",
+        "cache_write_price_per_m",
+        "encoder_price_per_m",
+        "fx_to_cny",
+        mode="before",
+    )
+    @classmethod
+    def _validate_amount_fields(cls, v: Any) -> Any:
+        return _validate_decimal_amount(v)
 
 
 class ModelConnectionConfig(BaseModel):
@@ -224,6 +271,11 @@ class UsagePolicyConfig(BaseModel):
 
     monthly_cny_limit: str | None = None
     detail_retention_days: int = Field(default=180, ge=1)
+
+    @field_validator("monthly_cny_limit", mode="before")
+    @classmethod
+    def _validate_monthly_cny_limit(cls, v: Any) -> Any:
+        return _validate_decimal_amount(v)
 
 
 class EgressGrantConfig(BaseModel):
