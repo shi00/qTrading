@@ -662,18 +662,19 @@ class TestSchedulerI18nKeys:
             assert val != key, f"I18n key '{key}' should have a zh_CN translation"
 
     def test_concept_sync_i18n_keys_exist_in_en_us(self):
-        I18n._locale = "en_US"
-        I18n._initialized = False
-        I18n._strings_cache = {}
-        keys = [
-            "sched_concept_sync_progress",
-            "sched_concept_sync_task_name",
-            "sched_concept_sync_task_type",
-            "sched_concept_sync_done",
-        ]
-        for key in keys:
+        # SUP-I18N-001: 经公开初始化 API 显式设定英文 locale。直接赋值私有状态时，
+        # I18n.get 会走无参 initialize() 回落 DEFAULT_LOCALE(zh_CN)，断言实际验证的是中文资源。
+        I18n.initialize("en_US")
+        assert I18n.current_locale() == "en_US"
+        expected = {
+            "sched_concept_sync_progress": "Syncing concept data...",
+            "sched_concept_sync_task_name": "Concept Data Sync",
+            "sched_concept_sync_task_type": "Concept Sync",
+            "sched_concept_sync_done": "Concept data sync complete",
+        }
+        for key, expected_text in expected.items():
             val = I18n.get(key)
-            assert val != key, f"I18n key '{key}' should have an en_US translation"
+            assert val == expected_text, f"I18n key '{key}' en_US 译文不符: {val!r}"
 
 
 class TestI18nDebugModeStrictInit:
