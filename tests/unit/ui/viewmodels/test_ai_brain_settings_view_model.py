@@ -38,8 +38,7 @@ def mock_config_handler():
         m.get_ai_news_prompt.return_value = "default news prompt"
         m.is_ai_local_only_mode.return_value = False
         m.save_config.return_value = True
-        m.save_ai_system_prompt.return_value = True
-        m.set_ai_news_prompt.return_value = True
+        m.save_ai_tuning_and_prompts.return_value = True
         yield m
 
 
@@ -114,11 +113,12 @@ class TestSaveAiSettingsStateMachine:
             result = await vm.save_ai_settings()
         assert result is True
         assert vm.state.save_state == "success"
-        mock_config_handler.save_config.assert_called_once_with(
-            {"ai_max_candidates": 30, "strategy_min_turnover": 2.0, "ai_local_only_mode": False}
+        # T3: 调优参数 + prompts 合并为单次原子保存调用（五参数一次提交）
+        mock_config_handler.save_ai_tuning_and_prompts.assert_called_once_with(
+            30, 2.0, False, "default prompt", "default news prompt"
         )
-        mock_config_handler.save_ai_system_prompt.assert_called_once_with("default prompt")
-        mock_config_handler.set_ai_news_prompt.assert_called_once_with("default news prompt")
+        # VM 不再绕过组合入口直接写盘（三次独立写链路已废弃）
+        mock_config_handler.save_config.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_save_validation_failure_returns_error_state(self, mock_config_handler, mock_thread_pool):
@@ -131,11 +131,14 @@ class TestSaveAiSettingsStateMachine:
 
     @pytest.mark.asyncio
     async def test_save_persist_failure_returns_error_state(self, mock_config_handler, mock_thread_pool):
-        mock_config_handler.save_config.return_value = False
+        # T3: 组合入口返回 False（prompt 校验失败 / 磁盘损坏 fail-closed）→ 整体未提交
+        mock_config_handler.save_ai_tuning_and_prompts.return_value = False
         vm = _make_vm(mock_config_handler)
         result = await vm.save_ai_settings()
         assert result is False
         assert vm.state.save_state == "error"
+        # 无部分成功：不存在绕过组合入口的直接写盘
+        mock_config_handler.save_config.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_save_io_exception_returns_error_state(self, mock_config_handler, mock_thread_pool):
@@ -160,7 +163,7 @@ class TestSaveAiSettingsStateMachine:
         vm._state = replace(vm._state, save_state="saving")
         result = await vm.save_ai_settings()
         assert result is False
-        mock_config_handler.save_config.assert_not_called()
+        mock_config_handler.save_ai_tuning_and_prompts.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_save_exception_sanitizes_sensitive_path_in_log(self, mock_config_handler, mock_thread_pool, caplog):

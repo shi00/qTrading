@@ -10,7 +10,7 @@
    - 3 个 event handler 的 page 可用/None 早返回
    - _do_save_ai_settings:
      * 验证失败 (max_cand/min_turn 范围 / prompt 注入)
-     * 保存失败 (ConfigHandler.save_config / save_ai_system_prompt / set_ai_news_prompt)
+     * 保存失败 (ConfigHandler.save_ai_tuning_and_prompts 单次原子保存返回 False)
      * 成功分支 (show_snack settings_snack_ai_saved)
      * 异常路径 (普通 Exception / system 级 Exception / CancelledError)
 
@@ -427,8 +427,7 @@ def _patch_ai_brain_common_mocks(mod, monkeypatch) -> dict:
     mock_config.get_ai_news_prompt.return_value = "default news"
     mock_config.is_ai_local_only_mode.return_value = False
     mock_config.save_config.return_value = True
-    mock_config.save_ai_system_prompt.return_value = True
-    mock_config.set_ai_news_prompt.return_value = True
+    mock_config.save_ai_tuning_and_prompts.return_value = True
     monkeypatch.setattr("ui.viewmodels.ai_brain_settings_view_model.ConfigHandler", mock_config)
 
     # --- Mock ThreadPoolManager (run_async 同步执行 func) ---
@@ -735,7 +734,7 @@ class TestDoSaveAISettingsValidationPhase(_TriggerSaveMixin):
         handler, args, _ = self._trigger_save(env)
         asyncio.run(handler(*args))
 
-        env["mock_config"].save_config.assert_not_called()
+        env["mock_config"].save_ai_tuning_and_prompts.assert_not_called()
         env["show_snack"].assert_called_once_with("i18n[settings_save_failed]", color=AppColors.ERROR)
 
     def test_min_turn_out_of_range_lower(self, ai_brain_tab_env) -> None:
@@ -745,7 +744,7 @@ class TestDoSaveAISettingsValidationPhase(_TriggerSaveMixin):
         handler, args, _ = self._trigger_save(env)
         asyncio.run(handler(*args))
 
-        env["mock_config"].save_config.assert_not_called()
+        env["mock_config"].save_ai_tuning_and_prompts.assert_not_called()
         env["show_snack"].assert_called_once_with("i18n[settings_save_failed]", color=AppColors.ERROR)
 
     def test_ai_prompt_validation_fails(self, ai_brain_tab_env) -> None:
@@ -755,7 +754,7 @@ class TestDoSaveAISettingsValidationPhase(_TriggerSaveMixin):
         handler, args, _ = self._trigger_save(env)
         asyncio.run(handler(*args))
 
-        env["mock_config"].save_config.assert_not_called()
+        env["mock_config"].save_ai_tuning_and_prompts.assert_not_called()
         env["show_snack"].assert_called_once_with("i18n[prompt_err_injection]", color=AppColors.WARNING)
 
     def test_news_prompt_validation_fails(self, ai_brain_tab_env) -> None:
@@ -765,7 +764,7 @@ class TestDoSaveAISettingsValidationPhase(_TriggerSaveMixin):
         handler, args, _ = self._trigger_save(env)
         asyncio.run(handler(*args))
 
-        env["mock_config"].save_config.assert_not_called()
+        env["mock_config"].save_ai_tuning_and_prompts.assert_not_called()
         env["show_snack"].assert_called_once_with("i18n[prompt_err_injection]", color=AppColors.WARNING)
 
     def test_max_cand_value_error_path(self, ai_brain_tab_env) -> None:
@@ -775,7 +774,7 @@ class TestDoSaveAISettingsValidationPhase(_TriggerSaveMixin):
         handler, args, _ = self._trigger_save(env)
         asyncio.run(handler(*args))
 
-        env["mock_config"].save_config.assert_not_called()
+        env["mock_config"].save_ai_tuning_and_prompts.assert_not_called()
         env["show_snack"].assert_called_once_with("i18n[settings_save_failed]", color=AppColors.ERROR)
 
     def test_empty_fields_path(self, ai_brain_tab_env) -> None:
@@ -786,7 +785,7 @@ class TestDoSaveAISettingsValidationPhase(_TriggerSaveMixin):
         handler, args, _ = self._trigger_save(env)
         asyncio.run(handler(*args))
 
-        env["mock_config"].save_config.assert_not_called()
+        env["mock_config"].save_ai_tuning_and_prompts.assert_not_called()
         env["show_snack"].assert_called_once_with("i18n[settings_save_failed]", color=AppColors.ERROR)
 
 
@@ -796,42 +795,26 @@ class TestDoSaveAISettingsValidationPhase(_TriggerSaveMixin):
 
 
 class TestDoSaveAISettingsSaveFailedPhase(_TriggerSaveMixin):
-    """_do_save_ai_settings 保存失败各分支: show_snack(settings_save_failed)。"""
+    """_do_save_ai_settings 保存失败分支: show_snack(settings_save_failed)。
 
-    def test_config_handler_save_config_returns_false(self, ai_brain_tab_env) -> None:
-        """ConfigHandler.save_config 返回 False → save_state=ERROR → show_snack。"""
+    T3: 调优参数与 prompts 合并为单次原子保存 (save_ai_tuning_and_prompts)，
+    原三步独立写（save_config / save_ai_system_prompt / set_ai_news_prompt）
+    的分步失败分支已随链路收敛——任一失败均表现为组合入口返回 False，
+    整体未提交，不存在部分成功。
+    """
+
+    def test_config_handler_save_returns_false(self, ai_brain_tab_env) -> None:
+        """组合入口返回 False（磁盘损坏 fail-closed / prompt 校验失败）→ show_snack，整体未提交。"""
         env = ai_brain_tab_env
-        env["mock_config"].save_config.return_value = False
+        env["mock_config"].save_ai_tuning_and_prompts.return_value = False
         handler, args, _ = self._trigger_save(env)
         asyncio.run(handler(*args))
 
-        env["mock_config"].save_config.assert_called_once_with(
-            {
-                "ai_max_candidates": 30,
-                "strategy_min_turnover": 2.0,
-                "ai_local_only_mode": False,
-            }
+        env["mock_config"].save_ai_tuning_and_prompts.assert_called_once_with(
+            30, 2.0, False, "default prompt", "default news"
         )
-        env["show_snack"].assert_called_once_with("i18n[settings_save_failed]", color=AppColors.ERROR)
-
-    def test_config_handler_save_ai_system_prompt_returns_false(self, ai_brain_tab_env) -> None:
-        """ConfigHandler.save_ai_system_prompt 返回 False → show_snack。"""
-        env = ai_brain_tab_env
-        env["mock_config"].save_ai_system_prompt.return_value = False
-        handler, args, _ = self._trigger_save(env)
-        asyncio.run(handler(*args))
-
-        env["mock_config"].save_ai_system_prompt.assert_called_once_with("default prompt")
-        env["show_snack"].assert_called_once_with("i18n[settings_save_failed]", color=AppColors.ERROR)
-
-    def test_config_handler_set_ai_news_prompt_returns_false(self, ai_brain_tab_env) -> None:
-        """ConfigHandler.set_ai_news_prompt 返回 False → show_snack。"""
-        env = ai_brain_tab_env
-        env["mock_config"].set_ai_news_prompt.return_value = False
-        handler, args, _ = self._trigger_save(env)
-        asyncio.run(handler(*args))
-
-        env["mock_config"].set_ai_news_prompt.assert_called_once_with("default news")
+        # T3: 无部分成功——VM 不再绕过组合入口直接写盘
+        env["mock_config"].save_config.assert_not_called()
         env["show_snack"].assert_called_once_with("i18n[settings_save_failed]", color=AppColors.ERROR)
 
 
@@ -900,9 +883,9 @@ class TestDoSaveAISettingsExceptionPhase(_TriggerSaveMixin):
         env["show_snack"].assert_called_once_with("i18n[settings_snack_ai_error]", color=AppColors.ERROR)
 
     def test_config_handler_exception_marks_error(self, ai_brain_tab_env) -> None:
-        """ConfigHandler.save_config 抛 Exception → VM 内部兜底 → save_state=ERROR → show_snack。"""
+        """ConfigHandler.save_ai_tuning_and_prompts 抛 Exception → VM 内部兜底 → save_state=ERROR → show_snack。"""
         env = ai_brain_tab_env
-        env["mock_config"].save_config.side_effect = RuntimeError("save_config boom")
+        env["mock_config"].save_ai_tuning_and_prompts.side_effect = RuntimeError("save_config boom")
         handler, args, _ = self._trigger_save(env)
         asyncio.run(handler(*args))
 

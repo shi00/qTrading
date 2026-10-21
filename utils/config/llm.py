@@ -357,6 +357,46 @@ def set_ai_news_prompt(prompt):
     return cfg.ConfigHandler.save_config({"ai_news_prompt": prompt})
 
 
+def save_ai_tuning_and_prompts(
+    max_candidates: int,
+    min_turnover: float,
+    local_only: bool,
+    ai_prompt: str,
+    news_prompt: str,
+) -> bool:
+    """原子保存 AI 调优参数与提示词 (T3)。
+
+    调优参数 (ai_max_candidates / strategy_min_turnover / ai_local_only_mode)
+    与双 prompt (ai_system_prompt / ai_news_prompt) 合并为**单次**
+    ``save_config`` 调用（单次调用自身原子：锁内读盘→合并→单次原子写），
+    替换原「三次独立写」链路——原先任一步失败即提前返回，已写步骤不回滚、
+    无部分提交标记，配置处于半更新状态（R21 邻域：部分成功被伪装成已保存）。
+
+    prompt 校验/清洗语义与 :func:`save_ai_system_prompt` / :func:`set_ai_news_prompt`
+    一致：非空时 validate + sanitize，校验失败返回 False 且 **整体未提交**
+    （save_config 未被调用，含调优参数在内的所有键均不落盘）。
+
+    Returns:
+        True 全部保存成功; False 整体未提交 (prompt 校验失败 / 磁盘不可读或
+        安全子域损坏 fail-closed / 原子写失败)。
+    """
+    payload: dict[str, object] = {
+        "ai_max_candidates": max_candidates,
+        "strategy_min_turnover": min_turnover,
+        "ai_local_only_mode": local_only,
+    }
+    from utils.prompt_guard import sanitize_prompt, validate_prompt
+
+    for key, prompt in (("ai_system_prompt", ai_prompt), ("ai_news_prompt", news_prompt)):
+        if prompt:
+            is_valid, _ = validate_prompt(prompt)
+            if not is_valid:
+                return False
+            prompt = sanitize_prompt(prompt)
+        payload[key] = prompt
+    return cfg.ConfigHandler.save_config(payload)
+
+
 def get_strategy_presets(strategy_key: str) -> dict[str, dict]:
     """获取策略的已保存参数预设 (Task 4.1).
 
