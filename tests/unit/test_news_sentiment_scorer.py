@@ -6,6 +6,8 @@
 import asyncio
 import multiprocessing
 import queue
+from contextlib import contextmanager
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -608,8 +610,56 @@ class TestEnsureWorkerImpl:
         mgr._worker_ready = True
         mgr._model_path = "model.gguf"
         mgr._core_signature = (_DEFAULT_N_THREADS, _DEFAULT_MAX_LENGTH)
+        # R06-D1: 文件不存在 → stat (0,0)，与初始指纹一致；显式声明复用前提
+        mgr._worker_stat = mgr._stat_of("model.gguf", "tokenizer.json")
 
         assert mgr._ensure_worker_impl("model.gguf", "tokenizer.json", {}) is True
+
+    def test_reuse_requires_worker_stat_match(self, tmp_path):
+        # R06-D1: 同路径同签名但产物 stat 变化（热替换）→ 不得复用，必须 respawn
+        model = tmp_path / "model.gguf"
+        model.write_bytes(b"GGUF")
+        tok = tmp_path / "tokenizer.json"
+        tok.write_text("{}")
+        mgr = _make_mgr()
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
+        mgr._worker_proc.is_alive.return_value = True
+        mgr._worker_ready = True
+        mgr._model_path = str(model)
+        mgr._core_signature = (_DEFAULT_N_THREADS, _DEFAULT_MAX_LENGTH)
+        mgr._worker_stat = ((0.0, 0), (0.0, 0))  # 过期指纹
+
+        with (
+            patch.object(mgr, "_shutdown_worker_locked") as sw,
+            patch("services.news_sentiment_scorer.multiprocessing.Process") as mock_proc_cls,
+            patch("services.news_sentiment_scorer.multiprocessing.Queue"),
+        ):
+            mock_proc = MagicMock(spec=_RealProcess)
+            mock_proc.is_alive.return_value = True
+            mock_proc_cls.return_value = mock_proc
+
+            assert mgr._ensure_worker_impl(str(model), str(tok), {}) is True
+            sw.assert_called_once_with()
+
+    def test_respawn_records_worker_stat(self, tmp_path):
+        # R06-D1: respawn 后 _worker_stat 记录传入 model+tokenizer 的 (mtime, size)
+        model = tmp_path / "model.gguf"
+        model.write_bytes(b"GGUF")
+        tok = tmp_path / "tokenizer.json"
+        tok.write_text("{}")
+        mgr = _make_mgr()
+        with (
+            patch.object(mgr, "_shutdown_worker_locked"),
+            patch("services.news_sentiment_scorer.multiprocessing.Process") as mock_proc_cls,
+            patch("services.news_sentiment_scorer.multiprocessing.Queue"),
+        ):
+            mock_proc = MagicMock(spec=_RealProcess)
+            mock_proc.is_alive.return_value = True
+            mock_proc_cls.return_value = mock_proc
+            assert mgr._ensure_worker_impl(str(model), str(tok), {}) is True
+        expected = mgr._stat_of(str(model), str(tok))
+        assert mgr._worker_stat == expected
+        assert expected != ((0, 0), (0, 0))  # 真实文件 stat 非零（防断言空转）
 
     def test_restarts_when_model_path_changed(self):
         mgr = _make_mgr()
@@ -841,6 +891,7 @@ class TestUnloadModel:
         proc.kill.assert_not_called()
         assert mgr._model_path == ""
         assert mgr._paths_stat == (0, 0)
+        assert mgr._worker_stat == ((0, 0), (0, 0))
         assert mgr._core_signature == (0, 0)
         assert mgr._head is None
         assert mgr._worker_proc is None
@@ -1167,3 +1218,198 @@ def _make_switch_files(tmp_path):
     tokenizer_b = tmp_path / "tokenizer_b.json"
     tokenizer_b.write_text("{}")
     return model_a, model_b, head_a_path, head_b_path, tokenizer_a, tokenizer_b
+
+
+# --------------------------------------------------------------------------- #
+# R06-D1 产物热替换场景（scorer 侧 F25 同型回归）
+# --------------------------------------------------------------------------- #
+def _make_hot_files(tmp_path):
+    """热替换场景三文件（model GGUF 前缀过真实校验 + npz head + tokenizer）。"""
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF" + b"payload")
+    head_path = tmp_path / "head.npz"
+    _write_npz(head_path, "linear")
+    tokenizer = tmp_path / "tokenizer.json"
+    tokenizer.write_text("{}")
+    return model, head_path, tokenizer
+
+
+def _hot_paths(model, head_path, tokenizer) -> dict[str, str]:
+    return {"model_path": str(model), "head_path": str(head_path), "tokenizer_path": str(tokenizer)}
+
+
+@contextmanager
+def _hot_swap_env(mgr: NewsSentimentScorer):
+    """热替换场景公共环境：可选依赖旗标置位 + 线程池同步 offload +
+    子进程替身（禁真实 llama.cpp 依赖，与既有测试同口径）。"""
+    with (
+        patch("services.news_sentiment_scorer._HAS_LLAMA_CPP", True),
+        patch("services.news_sentiment_scorer._HAS_TOKENIZERS", True),
+        patch("services.news_sentiment_scorer.ThreadPoolManager") as mock_tpm,
+        patch("services.news_sentiment_scorer.multiprocessing.Process") as mock_proc_cls,
+        patch("services.news_sentiment_scorer.multiprocessing.Queue") as mock_queue_cls,
+    ):
+        mock_tpm.return_value.run_async = _sync_run_async
+        mock_proc = MagicMock(spec=_RealProcess)
+        mock_proc.is_alive.return_value = True
+        mock_proc_cls.return_value = mock_proc
+        yield mock_proc_cls, mock_queue_cls
+
+
+async def _sync_run_async(task_type: Any, fn, *args, **kwargs):
+    """ThreadPoolManager.run_async 替身：同步执行 fn（单测内无需真实线程池）。"""
+    return fn(*args, **kwargs)
+
+
+def _install_ready_wait(mgr: NewsSentimentScorer) -> AsyncMock:
+    """_await_worker_ready 替身：按真实成功语义置位 ready 状态并计数。"""
+    wait = AsyncMock(return_value=True)
+
+    async def _side_effect(*args, **kwargs):
+        mgr._worker_ready = True
+        mgr._worker_state = "idle"
+        return True
+
+    wait.side_effect = _side_effect
+    return wait
+
+
+class TestArtifactHotSwap:
+    """R06-D1 产物热替换：不变量「复用 ⟹ 已 ready ⟹ 跳过等待；重启 ⟹ 等
+    fresh ready」（与 LMM F25 守卫同型）。
+
+    缺陷回归：复用判定不含产物 stat 时，产物热替换后复用 worker 却无条件等
+    ready（worker 仅启动时投递一次 ready）→ 等满 ready_timeout → 误杀健康
+    worker → 整批打分返回 None。
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_change_reuses_worker_and_skips_ready_wait(self, tmp_path):
+        model, head_path, tokenizer = _make_hot_files(tmp_path)
+        mgr = _make_mgr()
+        with _hot_swap_env(mgr) as (mock_proc_cls, mock_queue_cls):
+            with patch.object(mgr, "_await_worker_ready", _install_ready_wait(mgr)) as wait:
+                head = await mgr._ensure_ready(_hot_paths(model, head_path, tokenizer), core_config=mgr._core_config())
+            assert head is not None
+            assert mock_proc_cls.call_count == 1
+            assert wait.call_count == 1
+
+            # 产物无替换：快路径直接命中（不 spawn / 不等待 / 不误杀健康 worker）
+            with (
+                patch.object(mgr, "_await_worker_ready", AsyncMock()) as aw2,
+                patch.object(mgr, "_shutdown_worker") as sw,
+            ):
+                head2 = await mgr._ensure_ready(_hot_paths(model, head_path, tokenizer), core_config=mgr._core_config())
+            assert head2 is not None
+            aw2.assert_not_called()
+            sw.assert_not_called()
+            assert mock_proc_cls.call_count == 1
+
+            # 快路径失效（head 引用丢失）但产物未变：_ensure_worker_impl 复用
+            # （复用判定含 _worker_stat + _worker_ready）→ 跳过 ready 等待（修复核心：
+            # 复用 worker 永不再发 ready，无条件等待必等满超时并误杀健康 worker）
+            mgr._head = None
+            with (
+                patch.object(mgr, "_await_worker_ready", AsyncMock()) as aw3,
+                patch.object(mgr, "_shutdown_worker") as sw3,
+            ):
+                head3 = await mgr._ensure_ready(_hot_paths(model, head_path, tokenizer), core_config=mgr._core_config())
+            assert head3 is not None
+            aw3.assert_not_called()
+            sw3.assert_not_called()
+            assert mock_proc_cls.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_head_only_change_reuses_worker_and_reloads_head(self, tmp_path):
+        model, head_path, tokenizer = _make_hot_files(tmp_path)
+        mgr = _make_mgr()
+        with _hot_swap_env(mgr) as (mock_proc_cls, mock_queue_cls):
+            with patch.object(mgr, "_await_worker_ready", _install_ready_wait(mgr)):
+                head = await mgr._ensure_ready(_hot_paths(model, head_path, tokenizer), core_config=mgr._core_config())
+            assert head is not None and head["mode"] == "linear"
+
+            # head-only 热替换（linear→bert，尺寸必然变化）：复用 worker + 重载 head，
+            # 不 respawn、不等 ready（head 为父进程产物，worker 不持有）
+            _write_npz(head_path, "bert")
+            with (
+                patch.object(mgr, "_await_worker_ready", AsyncMock()) as aw2,
+                patch.object(mgr, "_shutdown_worker") as sw,
+            ):
+                head2 = await mgr._ensure_ready(_hot_paths(model, head_path, tokenizer), core_config=mgr._core_config())
+            assert head2 is not None and head2["mode"] == "bert"
+            aw2.assert_not_called()
+            sw.assert_not_called()
+            assert mock_proc_cls.call_count == 1
+            assert mgr._paths_stat == mgr._stat_of(str(model), str(head_path), str(tokenizer))
+
+    @pytest.mark.asyncio
+    async def test_model_only_change_restarts_and_awaits_fresh_ready(self, tmp_path):
+        model, head_path, tokenizer = _make_hot_files(tmp_path)
+        mgr = _make_mgr()
+        with _hot_swap_env(mgr) as (mock_proc_cls, mock_queue_cls):
+            with patch.object(mgr, "_await_worker_ready", _install_ready_wait(mgr)):
+                assert (
+                    await mgr._ensure_ready(_hot_paths(model, head_path, tokenizer), core_config=mgr._core_config())
+                    is not None
+                )
+
+            # model-only 热替换（追加字节改 size）：respawn + 等 fresh ready
+            with model.open("ab") as f:
+                f.write(b"-hot")
+            with patch.object(mgr, "_await_worker_ready", _install_ready_wait(mgr)) as aw2:
+                assert (
+                    await mgr._ensure_ready(_hot_paths(model, head_path, tokenizer), core_config=mgr._core_config())
+                    is not None
+                )
+            assert mock_proc_cls.call_count == 2
+            assert aw2.call_count == 1
+            assert mgr._worker_generation == 2  # 首次 spawn=1，产物替换 respawn=2
+
+    @pytest.mark.asyncio
+    async def test_tokenizer_only_change_restarts_and_awaits_fresh_ready(self, tmp_path):
+        model, head_path, tokenizer = _make_hot_files(tmp_path)
+        mgr = _make_mgr()
+        with _hot_swap_env(mgr) as (mock_proc_cls, mock_queue_cls):
+            with patch.object(mgr, "_await_worker_ready", _install_ready_wait(mgr)):
+                assert (
+                    await mgr._ensure_ready(_hot_paths(model, head_path, tokenizer), core_config=mgr._core_config())
+                    is not None
+                )
+
+            # tokenizer-only 热替换：tokenizer 由 worker 持有 → respawn + 等 fresh ready
+            with tokenizer.open("a", encoding="utf-8") as f:
+                f.write(" ")
+            with patch.object(mgr, "_await_worker_ready", _install_ready_wait(mgr)) as aw2:
+                assert (
+                    await mgr._ensure_ready(_hot_paths(model, head_path, tokenizer), core_config=mgr._core_config())
+                    is not None
+                )
+            assert mock_proc_cls.call_count == 2
+            assert aw2.call_count == 1
+            assert mgr._worker_generation == 2  # 首次 spawn=1，产物替换 respawn=2
+
+    @pytest.mark.asyncio
+    async def test_score_texts_survives_head_hot_swap(self, tmp_path):
+        """R06-D1 主回归（业务入口）：head 热替换后 score_texts 仍正常返回结果。
+        修复前：复用 worker 等满 ready_timeout → 误杀健康 worker → 整批 None。"""
+        model, head_path, tokenizer = _make_hot_files(tmp_path)
+        # score_texts 经 _resolve_paths() 读配置取路径，须注入真实文件路径
+        mgr = _make_mgr(_config(model_path=str(model), head_path=str(head_path), tokenizer_path=str(tokenizer)))
+
+        async def fake_chunk(chunk, *, timeout_s, generation):
+            return (np.zeros((len(chunk), _EMBEDDING_DIM), dtype=np.float32), {})
+
+        mgr._score_chunk = fake_chunk
+        with _hot_swap_env(mgr) as (mock_proc_cls, mock_queue_cls):
+            with patch.object(mgr, "_await_worker_ready", _install_ready_wait(mgr)):
+                out1 = await mgr.score_texts(["利好公告"])
+            assert out1 is not None and all(row is not None for row in out1)
+            assert mock_proc_cls.call_count == 1
+
+            _write_npz(head_path, "bert")
+            with patch.object(mgr, "_await_worker_ready", AsyncMock()) as aw2:
+                out2 = await mgr.score_texts(["利好公告"])
+            assert out2 is not None and all(row is not None for row in out2)
+            aw2.assert_not_called()
+            assert mock_proc_cls.call_count == 1  # head-only 不 respawn
+            assert mgr.model_tag is not None
