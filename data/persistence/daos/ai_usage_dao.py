@@ -26,6 +26,7 @@
 
 import datetime
 import json
+import logging
 import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
@@ -38,7 +39,10 @@ from core.model_management_types import (
     BudgetReservation,
     NormalizedLLMUsage,
 )
+from utils.config_models import validate_decimal_amount
 from utils.log_decorators import PerfThreshold, log_async_operation
+
+logger = logging.getLogger(__name__)
 
 # 预留有效状态（D3 + F22 预算占用口径）：reserved / dispatched 为 owner 在世的
 # 正常占用（受 owner 租约约束）；held_unconfirmed 为崩溃/失权后「结果未知」占用，
@@ -249,13 +253,25 @@ _LEGACY_MONTH_COST_SQL: Final[str] = "SELECT config_value FROM app_state WHERE c
 def parse_legacy_cents(raw: Any) -> Decimal:
     """legacy app_state ``ai_cost:{YYYYMM}`` 值（分）→ 元 Decimal（D3）。
 
-    非/坏值一律 0（legacy 汇总缺失不阻断预留，也不伪装为已知成本）。
+    非/坏值一律 0（legacy 汇总缺失不阻断预留，也不伪装为已知成本）；
+    R05 D4：解析结果非有限（NaN / ±Infinity，含 ``is_finite`` 为 False 的 sNaN 查询）
+    与解析/换算失败（非法字符、巨数 quantize 精度溢出）均回零，并经 ``logger.warning``
+    明确降级（修复前坏值回零完全不可观测、NaN 直接毒化预算摘要）。
     """
     if raw is None:
         return Decimal("0")
     try:
-        return (Decimal(str(raw)) / Decimal(100)).quantize(Decimal("0.01"))
+        cents = Decimal(str(raw))
     except (InvalidOperation, ValueError, ArithmeticError):
+        logger.warning("[ai_usage_dao] legacy 月成本值解析失败，按 0 降级（R05 D4 可观测）: raw=%r", raw)
+        return Decimal("0")
+    if not cents.is_finite():
+        logger.warning("[ai_usage_dao] legacy 月成本值非有限（NaN/Infinity），按 0 降级（R05 D4）: raw=%r", raw)
+        return Decimal("0")
+    try:
+        return (cents / Decimal(100)).quantize(Decimal("0.01"))
+    except (InvalidOperation, ArithmeticError):
+        logger.warning("[ai_usage_dao] legacy 月成本值换算失败，按 0 降级（R05 D4 可观测）: raw=%r", raw)
         return Decimal("0")
 
 
@@ -301,14 +317,56 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
+def _finite_non_negative_or_zero(value: Decimal, *, context: str) -> Decimal:
+    """读数容错（R05 D2 存量闭环）：非有限（NaN / ±Infinity）或负值 → ``Decimal("0")``。
+
+    预算门 / 展示列的 SUM 读数来源含 D1 validator 生效前的历史 jsonb 垃圾预留
+    （``NaN`` / ``-Infinity`` / 负金额）与 D3 校验生效前的历史月汇总负 delta——
+    新写入已被入口契约拦截，存量垃圾按「事实零」降级 + warning 可观测：
+    负占用无事实意义（clamp 0 为事实修正），NaN 无法参与预算判定（降级放行，
+    方向为预算门保守性损失，见调用方 NOTE(lazy)）。
+    """
+    if value.is_finite() and value >= 0:
+        return value
+    logger.warning("[ai_usage_dao] %s 读数非有限/负值（存量垃圾容错），按事实零降级: %s", context, value)
+    return Decimal("0")
+
+
 def _decimal_or_zero(row: Any) -> Decimal:
-    """``fetchone`` 结果为 None / NULL / 坏值时返回 ``Decimal("0")``（事实零）。"""
+    """``fetchone`` 结果为 None / NULL / 坏值时返回 ``Decimal("0")``（事实零）。
+
+    R05 D5：解析结果为 NaN（历史 jsonb 垃圾经 ``::numeric`` 入 SUM 传播）或
+    非有限 / 负值时同样按事实零降级（修复前 NaN 直接透出毒化预算摘要展示）。
+    """
     if row is None or row[0] is None:
         return Decimal("0")
     try:
-        return Decimal(str(row[0]))
+        parsed = Decimal(str(row[0]))
     except (InvalidOperation, ValueError, ArithmeticError):
+        logger.warning("[ai_usage_dao] 预算摘要读数解析失败，按 0 降级（R05 D5 可观测）: %r", row[0])
         return Decimal("0")
+    return _finite_non_negative_or_zero(parsed, context="read_budget_summary")
+
+
+def _checked_amount(value: str | float | int | Decimal | None, *, field: str) -> str | None:
+    """金额入参契约校验（R05 D2/D3）：违规 raise ValueError（契约化 fail-fast）。
+
+    None 直通（usage_only / 无金额语义）；str / int / float / Decimal 统一经
+    D1 唯一校验正本 ``validate_decimal_amount``（可解析 + 有限 + 非负 + ≤1e15）——
+    不在 DAO 侧重写解析规则。数值类型先归一为最短往返十进制串（``str(float)``
+    为 repr 最短表示，避免 ``Decimal(float)`` 二进制全长展开入 numeric 列的
+    精度噪音）。校验独立于预算判定短路：``budget_limit_cny=None`` 时同样生效。
+    返回归一化后的十进制字符串（None 直通），调用方以返回值参与后续计算与持久化。
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    try:
+        validate_decimal_amount(value)
+    except ValueError as e:
+        raise ValueError(f"{field}: {e}") from None
+    return value
 
 
 def _reservation_to_jsonb(r: BudgetReservation) -> dict[str, Any]:
@@ -345,8 +403,8 @@ class AIUsageDao(BaseDao):
         attempt_id: str | None,
         candidate_index: int,
         retry_index: int,
-        amount_cny: str | None,
-        budget_limit_cny: str | None,
+        amount_cny: str | float | int | Decimal | None,
+        budget_limit_cny: str | float | int | Decimal | None,
         budget_policy_snapshot: dict[str, Any] | None,
         owner_session_id: str,
         owner_epoch: int,
@@ -357,12 +415,21 @@ class AIUsageDao(BaseDao):
 
         usage_only（amount_cny=None）不占预算，直接登记预留（金额 NULL）。
 
+        R05 D2 金额契约：入口显式校验 ``amount_cny`` / ``budget_limit_cny``
+        （None 直通；可解析 + 有限 + 非负 + ≤1e15），违规 raise ValueError——
+        校验先于事务与 F23 fencing 判定（先输入合法性，再走租约/失权路径），
+        且独立于预算判定短路（``budget_limit_cny=None`` 时同样生效），拦截
+        负预留（降低 SUM 占用）/ ±Infinity / NaN（毒化预算判定或 SUM）。
+
         F23 fencing：末尾 owner 条件 UPDATE 的受影响行数贯穿检查——rowcount=0
         （owner 失权：租约过期 / 已被接管 / owner 身份不匹配）时返回 None，
         **不返回非持久预留**（修复前失权仍返回预留对象，调用方误以为预留成功）。
         返回 None = 余额不足 **或** owner 失权，调用方统一按「不可派发」处置（D5）。
         """
         self._check_engine(context="ai_usage.try_reserve")
+        # R05 D2：金额契约校验（先于事务开启，坏输入零 DB 副作用 fail-fast）
+        amount_cny = _checked_amount(amount_cny, field="amount_cny")
+        budget_limit_cny = _checked_amount(budget_limit_cny, field="budget_limit_cny")
         async with self._guarded_begin() as conn:
             # 1) advisory 月锁（D2：两键，事务级）
             await conn.execute(
@@ -412,7 +479,7 @@ class AIUsageDao(BaseDao):
                 task_id=task_id,
                 candidate_index=candidate_index,
                 retry_index=retry_index,
-                amount_cny=str(amount_cny) if amount_cny is not None else None,
+                amount_cny=amount_cny,
                 state="reserved",
                 attempt_id=attempt_id,
                 owner_session_id=owner_session_id,
@@ -474,6 +541,9 @@ class AIUsageDao(BaseDao):
                 settled = Decimal(str(row[0]))
             except (InvalidOperation, ValueError, ArithmeticError):
                 settled = Decimal("0")
+        # R05 D2/D3 存量闭环：D3 校验生效前的历史负 delta / 垃圾值可毒化已结算 SUM，
+        # 非有限/负读数按事实零降级（与 _read_active_reservations_sum 同一容错语义）
+        settled = _finite_non_negative_or_zero(settled, context="month_committed_usage")
 
         legacy_row = (
             # 0015 迁移后 app_state 列名为 config_key / config_value（R17 保留字重命名）
@@ -532,7 +602,14 @@ class AIUsageDao(BaseDao):
                 },
             )
         ).fetchone()
-        return Decimal(str(row[0])) if row is not None else Decimal("0")
+        # NOTE(lazy): 存量垃圾容错在 SUM 结果级 clamp（非有限/负 → 0），未做 SQL 逐元素
+        # 过滤——单条 NaN 垃圾经 numeric SUM 传播会使全月占用读数失效（NaN → 0 放行，
+        # 预算门保守性损失）。ceiling: 仅影响 D1 validator 生效前写入的历史 jsonb 垃圾
+        # 预留（新写入已被 _checked_amount 拦截，垃圾只减不增）；垃圾预留经 settled /
+        # released 处置后自愈。upgrade: 观测到 warning 日志持续出现或垃圾引发实际超支时，
+        # 改为 SQL 侧逐元素合法性过滤后再 SUM。
+        raw_sum = Decimal(str(row[0])) if row is not None else Decimal("0")
+        return _finite_non_negative_or_zero(raw_sum, context="active_reservations_sum")
 
     # ------------------------------------------------------------------
     # 派发绑定与 owner 恢复（D4，§9.2）
@@ -892,7 +969,7 @@ class AIUsageDao(BaseDao):
         usage_revision: int,
         error_code: str | None,
         duration_ms: float | None,
-        cost_cny: str | None,
+        cost_cny: str | float | int | Decimal | None,
         actual_model: str | None,
         connection_id: str,
         connection_revision: int,
@@ -934,8 +1011,17 @@ class AIUsageDao(BaseDao):
         无背书（``reservation_id`` 缺省 / 预留不存在 / 已终态）不插行、不计费、
         返回 False——失权 owner 不得凭空建立 attempt 事实。attempt 行已存在的
         迟到修订不受影响（revision 幂等推进 = 合法恢复补记真实消费的通道）。
+
+        R05 D3 金额契约：入口显式校验 ``cost_cny``（None 直通；可解析 + 有限 +
+        非负 + ≤1e15），违规 raise ValueError——先于事务与 F23 背书判定；
+        数值入参归一为最短往返十进制串后参与持久化（修复前生产链路经
+        ``dict[str, Any]`` metadata 传入 float，``Decimal(float)`` 二进制全长
+        展开入 numeric 列）。负值拒绝：成本非负；负 delta 仅应来自同 attempt
+        迟到修订差值（本方法内部按差额计算，不在入参侧构造）。
         """
         self._check_engine(context="ai_usage.settle_attempt_usage")
+        # R05 D3：金额契约校验 + float→str 归一化（先于事务，坏输入零 DB 副作用）
+        cost_cny = _checked_amount(cost_cny, field="cost_cny")
         async with self._guarded_begin() as conn:
             await conn.execute(
                 sa.text("SELECT pg_advisory_xact_lock(:ns, :lock_key)"),
@@ -1306,8 +1392,17 @@ class AIUsageDao(BaseDao):
         task_id: str | None = None,
         connection_id: str | None = None,
     ) -> None:
-        """月汇总差额独立应用（R22 单调水位；乱序写入断言最大值由集成测试覆盖）。"""
+        """月汇总差额独立应用（R22 单调水位；乱序写入断言最大值由集成测试覆盖）。
+
+        R05 D3 金额契约：公开入口拒负/非有限/超上界 ``cost_cny_delta``（raise
+        ValueError）——负 delta 仅应来自同 attempt 迟到修订差值（settle 内部
+        计算），独立调用方不得构造负差额直接减已结算费用。
+        """
         self._check_engine(context="ai_usage.apply_monthly_delta")
+        checked = _checked_amount(cost_cny_delta, field="cost_cny_delta")
+        if checked is None:
+            raise ValueError("cost_cny_delta: 月汇总差额不可为 null（须为有限非负 Decimal）")
+        cost_cny_delta = Decimal(checked)
         async with self._guarded_begin() as conn:
             await self._upsert_monthly_delta(
                 conn,
@@ -1588,7 +1683,10 @@ class AIUsageDao(BaseDao):
         if settled is None and legacy_raw is None:
             known: Decimal | None = None
         else:
-            known = (Decimal(str(settled)) if settled is not None else Decimal("0")) + parse_legacy_cents(legacy_raw)
+            settled_dec = Decimal(str(settled)) if settled is not None else Decimal("0")
+            # R05 D5 存量闭环：D3 校验生效前历史垃圾可经 SUM 透出，非有限/负按事实零降级
+            settled_dec = _finite_non_negative_or_zero(settled_dec, context="budget_summary_known")
+            known = settled_dec + parse_legacy_cents(legacy_raw)
 
         return {
             "month": month,

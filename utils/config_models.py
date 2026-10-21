@@ -172,6 +172,11 @@ def _validate_decimal_amount(value: Any) -> Any:
     return value
 
 
+# 公共校验入口（R05 D1/D2/D3）：config 持久化边界与 data 层账本 DAO 写入口共用
+# 同一解析与边界规则（唯一正本），消费侧不得重写金额解析语义。
+validate_decimal_amount = _validate_decimal_amount
+
+
 class BillingConfig(BaseModel):
     """连接计量（§3.1 / §9.1）：mode 必须由用户选择，无默认「免费」。
 

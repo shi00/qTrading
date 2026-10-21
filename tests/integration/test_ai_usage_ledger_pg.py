@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 from contextlib import ExitStack
 from decimal import Decimal
 
@@ -145,7 +146,7 @@ def _make_settle_kwargs(
     *,
     month: str | None = None,
     usage_revision: int = 1,
-    cost_cny: str = "0.50",
+    cost_cny: str | float = "0.50",
     connection_id: str = "conn-itest",
     scenario_id: str = "scn-itest",
     succeeded: bool = True,
@@ -854,3 +855,165 @@ class TestF23OwnerFencing:
             ).fetchone()
         assert usage_row is not None
         assert Decimal(str(usage_row[0])) == Decimal("0.20"), "补记的实际消费必须计入月汇总"
+
+
+class TestAmountGuardContract:
+    """场景 8（R05 D2/D3/D5）：金额入参契约与存量垃圾读数容错的端到端行为。
+
+    单测以 mock 断言 SQL 语义；本类在真实 PG 上验证：
+    - 垃圾金额（负数 / NaN / 非法字符）入口契约化 ValueError，零落库；
+    - 历史 jsonb 垃圾预留（validator 生效前写入）不再毒化预算门（crash → 容错降级）；
+    - float cost 归一化落库无二进制噪音（相邻移交）。
+    """
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_reserve_rejects_garbage_amount_with_zero_side_effect(self, ledger_dao: AIUsageDao):
+        """D2：负预留入口即拒（ValueError），invocation 不落库（校验先于事务与 fencing）。"""
+        with pytest.raises(ValueError, match="amount_cny: 金额必须为非负数"):
+            await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-d2-neg", amount="-5.00"))
+        assert ledger_dao.engine is not None
+        async with ledger_dao.engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT 1 FROM ai_invocation WHERE invocation_id = :iid"),
+                    {"iid": "inv-d2-neg"},
+                )
+            ).fetchone()
+        assert row is None, "契约拒绝必须发生在事务开启前（零落库）"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_reserve_rejects_nan_and_infinity_amount(self, ledger_dao: AIUsageDao):
+        """D2：NaN / -Infinity 静默接受路径已封死（契约化 ValueError）。"""
+        for bad in ("NaN", "-Infinity", "sNaN", "1e999999"):
+            with pytest.raises(ValueError, match="amount_cny"):
+                await ledger_dao.try_reserve(**_make_reserve_kwargs(f"inv-d2-{bad}", amount=bad))
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_settle_rejects_garbage_cost_zero_side_effect(self, ledger_dao: AIUsageDao):
+        """D3：settle 垃圾 cost 入口即拒（先于 F23 背书判定），月汇总零推进。"""
+        month = _current_month()
+        with pytest.raises(ValueError, match="cost_cny: 金额必须为非负数"):
+            await ledger_dao.settle_attempt_usage(**_make_settle_kwargs("att-d3-neg", month=month, cost_cny="-0.01"))
+        with pytest.raises(ValueError, match="cost_cny"):
+            await ledger_dao.settle_attempt_usage(**_make_settle_kwargs("att-d3-nan", month=month, cost_cny="NaN"))
+        assert ledger_dao.engine is not None
+        async with ledger_dao.engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT 1 FROM ai_usage_monthly "
+                        "WHERE month = :m AND aggregation_scope = :s AND grouping_key = :g"
+                    ),
+                    {"m": month, "s": SCOPE_SCENARIO, "g": "scn-itest"},
+                )
+            ).fetchone()
+        assert row is None, "契约拒绝不得推进月汇总"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_apply_monthly_delta_rejects_negative_delta(self, ledger_dao: AIUsageDao):
+        """D3：公开入口负差额直接拒绝（负 delta 不得减已结算费用）。"""
+        month = _current_month()
+        with pytest.raises(ValueError, match="cost_cny_delta: 金额必须为非负数"):
+            await ledger_dao.apply_monthly_delta(
+                month=month,
+                aggregation_scope=SCOPE_SCENARIO,
+                grouping_key="scn-itest",
+                scenario_id="scn-itest",
+                trigger="manual",
+                invocation_count=1,
+                attempt_count=1,
+                cost_cny_delta=Decimal("-0.50"),
+            )
+        with pytest.raises(ValueError, match="cost_cny_delta"):
+            await ledger_dao.apply_monthly_delta(
+                month=month,
+                aggregation_scope=SCOPE_SCENARIO,
+                grouping_key="scn-itest",
+                scenario_id="scn-itest",
+                trigger="manual",
+                invocation_count=1,
+                attempt_count=1,
+                cost_cny_delta=Decimal("NaN"),
+            )
+
+    async def _seed_garbage_reservation(self, dao: AIUsageDao, invocation_id: str, amount_text: str) -> None:
+        """手工写入 D1 validator 生效前的历史形态垃圾预留（amount_cny 任意文本）。
+
+        owner 三元组对齐 ``_make_reserve_kwargs``（``sess-owner`` / epoch 1 / 有效租约）：
+        后续 try_reserve 须凭同一 owner 通过 F23 fencing 把新预留追加进该行，
+        预算门 SUM 读数才会包含垃圾元素（owner 失配则 rowcount=0 直接失权，用例失真）。
+        """
+        lease = _utcnow_naive() + datetime.timedelta(hours=1)
+        reservations = json.dumps(
+            [
+                {
+                    "reservation_id": f"res-{invocation_id}",
+                    "task_id": "task-garbage",
+                    "candidate_index": 0,
+                    "retry_index": 0,
+                    "amount_cny": amount_text,
+                    "state": "reserved",
+                    "attempt_id": None,
+                    "owner_session_id": "sess-owner",
+                    "owner_epoch": 1,
+                }
+            ],
+            ensure_ascii=False,
+        )
+        assert dao.engine is not None
+        async with dao.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO ai_invocation (
+                        invocation_id, scenario_id, trigger, owner_session_id,
+                        owner_epoch, owner_lease_expires_at, reservations
+                    ) VALUES (
+                        :iid, 'scn-itest', 'manual', 'sess-owner',
+                        1, :lease, CAST(:res AS jsonb)
+                    )
+                    """
+                ),
+                {"iid": invocation_id, "lease": lease, "res": reservations},
+            )
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_stale_nan_reservation_degrades_budget_gate_instead_of_crash(self, ledger_dao: AIUsageDao):
+        """D2 存量闭环：历史 'NaN' 预留毒化 SUM（修复前 InvalidOperation crash）→
+        预算门按事实零降级，新预留照常获准（不 crash、不误拒）。"""
+        await self._seed_garbage_reservation(ledger_dao, "inv-garbage-nan", "NaN")
+        # 修复前：SUM(numeric) 含 NaN → Decimal 比较 InvalidOperation 未捕获 crash
+        granted = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-after-nan", amount="0.50"))
+        assert granted is not None, "存量 NaN 垃圾应按事实零降级放行，而非 crash/误拒"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_stale_negative_reservation_clamped_not_credited(self, ledger_dao: AIUsageDao):
+        """D2 存量闭环：历史负预留降低 SUM 占用（修复前预算门失守）→ clamp 0。"""
+        await self._seed_garbage_reservation(ledger_dao, "inv-garbage-neg", "-5.00")
+        # SUM = -5.00 → clamp 0 → 0.90 ≤ 1.00 获准；负占用不得「归还」预算额度
+        granted = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-after-neg", amount="0.90"))
+        assert granted is not None, "负预留 clamp 后预算门按事实零计算，不 crash 也不放大额度"
+
+        # 交叉验证：负占用确未归还——合法预留 0.90 后，再预留 0.20 超预算被拒
+        blocked = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-after-neg-2", amount="0.20"))
+        assert blocked is None, "clamp 语义不得放大预算额度（0.90 已占用 + 0.20 > 1.00）"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_settle_float_cost_persists_without_binary_noise(self, ledger_dao: AIUsageDao):
+        """相邻移交：float cost 归一为最短往返串落库（修复前 Decimal(float) 全长展开
+        入 numeric 列——PG 无精度 numeric 原样存储 55 位二进制噪音，读回 ≠ 0.50）。"""
+        rid = await _seed_backing_reservation(ledger_dao, "att-d3-float")
+        settled = await ledger_dao.settle_attempt_usage(
+            **{**_make_settle_kwargs("att-d3-float", month=_current_month(), cost_cny=0.5), "reservation_id": rid}
+        )
+        assert settled is True
+        assert ledger_dao.engine is not None
+        async with ledger_dao.engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT cost_cny FROM ai_attempt WHERE attempt_id = :aid"),
+                    {"aid": "att-d3-float"},
+                )
+            ).fetchone()
+        assert row is not None
+        assert Decimal(str(row[0])) == Decimal("0.50"), "费用落库必须为规范十进制值"
