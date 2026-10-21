@@ -51,6 +51,11 @@ _WINDOW_DAYS = 30
 _EVIDENCE_LIMIT = 12
 # 单条 quoteable_text 上限（§9.1）
 _QUOTEABLE_MAX_LEN = 500
+# F39 冻结对齐最大重试轮数。NOTE(lazy): 对齐耗尽降级为未冻结路径（等价修复前行为，不劣化），
+# 仅在多轮读取窗口内连续发生配置保存时可达（人工保存为低频瞬时操作，常态第 1 轮收敛）.
+# ceiling: 连续 3 个读取窗口各命中一次保存（实际不可达）. upgrade: 若引入程序化高频配置写入
+# （自动化同步/批量导入）导致保存不再是低频人工操作，须改为冲突重试/失败语义.
+_FROZEN_ALIGN_ATTEMPTS = 3
 
 
 def _new_config_service() -> typing.Any:
@@ -108,8 +113,24 @@ class NewsInsightService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _analysis_profile() -> str:
-        """不含凭据的分析输入指纹（§7.2 §11；S4 §4.4 unified 化）。
+    async def _read_snapshot_or_none() -> typing.Any:
+        """读取统一配置快照；读取失败返回 None（不伪装 unified，R21）。
+
+        F05 移交观察项评估（读取失败回退旧链指纹）：保留既有降级语义——该回退仅决定
+        缓存指纹，不决定传输授权（执行侧准入已 fail-closed）；冻结路径下读取失败进入
+        ``_freeze_profile_and_dispatch`` 重试环，瞬时故障大概率恢复，不在本会话改为阻断。
+        """
+        try:
+            return await _new_config_service().get_snapshot()
+        except asyncio.CancelledError:
+            raise  # R2：取消必须传播
+        except Exception as e:
+            log_classified(logger, e, "general", "[NewsInsight] read mm snapshot failed (%s): %s")
+            return None
+
+    @staticmethod
+    def _analysis_profile_from_snapshot(snapshot: typing.Any) -> str:
+        """从冻结快照计算分析输入指纹（§7.2 §11；S4 §4.4 unified 化；F39 纯函数化）。
 
         migration_state=active → unified 指纹：news_risk 场景路由（有序候选 +
         task_routes）+ 候选连接的推理相关字段（adapter_kind / provider / model /
@@ -117,16 +138,10 @@ class NewsInsightService:
         security_revision 的规范化 JSON SHA-256（sort_keys + 紧凑分隔符）。
         **排除**显示名 / 价格（billing）/ last_validation / connection_revision
         ——仅改名称或价格不失效缓存；模型 / 地址 / 产物 / 候选序变化 → 新指纹。
-
-        非 active（pending 期间旧链生产）/ 快照读取失败 / 无 news_risk 路由 →
+        非 active（pending 期间旧链生产）/ 快照读取失败（None）/ 无 news_risk 路由 →
         旧链文本指纹（``cloud:provider/model,local:name``），不伪装（R21）。
         """
-        try:
-            snapshot = await _new_config_service().get_snapshot()
-        except asyncio.CancelledError:
-            raise  # R2：取消必须传播
-        except Exception as e:
-            log_classified(logger, e, "general", "[NewsInsight] read mm snapshot failed (%s): %s")
+        if snapshot is None:
             return NewsInsightService._legacy_analysis_profile()
         if getattr(snapshot, "migration_state", None) != "active":
             return NewsInsightService._legacy_analysis_profile()
@@ -167,6 +182,44 @@ class NewsInsightService:
         }
         canonical = json.dumps(profile_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    async def _analysis_profile() -> str:
+        """独立读取并计算分析输入指纹（兼容入口；主流程经冻结方法保证同版）。"""
+        snapshot = await NewsInsightService._read_snapshot_or_none()
+        return NewsInsightService._analysis_profile_from_snapshot(snapshot)
+
+    @staticmethod
+    async def _freeze_profile_and_dispatch() -> tuple[str, bool, typing.Any]:
+        """F39：单点冻结「配置指纹 + 分派结果」，保证缓存键与实际推理同版。
+
+        编排层先后两次独立读盘（指纹快照 / ``resolve_executor`` 内部快照）之间若保存
+        配置，B 模型结果会写入 A 指纹的缓存键（错误模型身份复用）。修复：读取后以
+        ``config_revision`` 对齐断言（CAS 单调语义下同 revision 即同内容），不一致
+        有限重试；``dispatch=None``（新链未命中）时指纹域（连接/路由字段）与准入域
+        （迁移状态）不相交且 admission 非 allowed 即 raise 不落库，直接冻结。
+
+        返回 ``(analysis_profile, dispatch_frozen, frozen_dispatch)``；
+        ``dispatch_frozen=False``（重试耗尽）时执行侧保持既有自行解析语义（等价修复
+        前行为，warning 留痕；NOTE(lazy) 见模块常量处）。
+        """
+        from services.ai_service.scenario_dispatch import resolve_executor  # lazy-import: 同层分派延迟加载
+
+        profile = NewsInsightService._legacy_analysis_profile()
+        for _attempt in range(_FROZEN_ALIGN_ATTEMPTS):
+            snapshot = await NewsInsightService._read_snapshot_or_none()
+            profile = NewsInsightService._analysis_profile_from_snapshot(snapshot)
+            dispatch = await resolve_executor("news_risk")
+            if dispatch is None:
+                return profile, True, None
+            if snapshot is not None and snapshot.config_revision == dispatch.snapshot.config_revision:
+                return profile, True, dispatch
+            # 指纹快照与分派快照不同版：两次读取间发生保存——重读对齐（常态 1 轮收敛）
+        logger.warning(
+            "[NewsInsight] frozen dispatch align exhausted after %s attempts, fallback to unfrozen dispatch",
+            _FROZEN_ALIGN_ATTEMPTS,
+        )
+        return profile, False, None
 
     @staticmethod
     def _legacy_analysis_profile() -> str:
@@ -514,7 +567,9 @@ class NewsInsightService:
         await self._maybe_cancel(cancel_event)
 
         content_hashes = [ev.content_hash or "" for ev in evidence]
-        analysis_profile = await self._analysis_profile()
+        # F39：单点冻结「配置指纹 + 分派结果」——缓存键与实际推理同版（防两次读盘间
+        # 保存配置导致 B 模型结果写入 A 指纹缓存键）。
+        analysis_profile, dispatch_frozen, frozen_dispatch = await self._freeze_profile_and_dispatch()
         input_hash = self._build_input_hash(ts_code, start_cst, end_cst, content_hashes, analysis_profile)
 
         # 无有效证据 → no_evidence（§10.3），不持久化、不调用 AI。
@@ -577,6 +632,8 @@ class NewsInsightService:
             evidence=evidence,
             coverage=coverage,
             analysis_profile=analysis_profile,
+            dispatch_frozen=dispatch_frozen,
+            frozen_dispatch=frozen_dispatch,
         )
         result = await self.ai.analyze_news_risk(request)  # CancelledError 由 _chat_completion 传播（R2）
 
