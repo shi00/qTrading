@@ -725,6 +725,38 @@ async def test_select_option_retries_click_when_menu_not_collapsed(monkeypatch: 
 
 
 @pytest.mark.asyncio
+async def test_select_option_clicks_relocated_option_after_timeout_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """C8 超时门回归：settle 等待耗尽 timeout 预算后，重定位到的可点击选项仍须点击。
+
+    CI run 39577733551（Linux）实证：面板外选项触发的一次落空滚轮，其 settle 等待
+    在慢机上耗时超过 1s 预算（实测 1.5s）。若在循环末尾判超时，会丢弃刚刚重定位
+    且已落入面板的句柄并误报 never within；超时只应禁止「继续滚动」，不得禁止
+    「识别已可点击的句柄」。
+    """
+    ap, page = _make_ap()
+    residual = _FakeHandle(
+        box={"x": 300.0, "y": 700.0, "width": 200.0, "height": 36.0},
+        panel_box=dict(_PANEL_UPPER_BOX),
+    )
+    inside = _FakeHandle(
+        box={"x": 300.0, "y": 400.0, "width": 200.0, "height": 36.0},
+        panel_box=dict(_PANEL_UPPER_BOX),
+    )
+    _stub_select_option(ap, residual)
+    ap._find_option_element = AsyncMock(side_effect=[residual, inside])  # type: ignore[method-assign]
+    # settle 上限放大到 2s + 单调时钟按读取次数前进：确定性复现「一次 settle 就
+    # 耗尽 1s 预算」，测试不实等。
+    monkeypatch.setattr(anchor_page, "_OPTION_SCROLL_SETTLE_TIMEOUT_MS", 2000)
+    monkeypatch.setattr(anchor_page, "time", _FakeClock())
+
+    await ap.select_option(_COMPLEX, "stock_basic", timeout_ms=1000)
+
+    assert page.mouse.wheels, "面板外选项仍须先经物理滚轮"
+    assert residual._visible, "残留 rect 不得被点击"
+    assert not inside._visible, "超时后重定位到的可点击句柄仍须点击，不得误报 never within"
+
+
+@pytest.mark.asyncio
 async def test_select_option_skips_scroll_without_viewport() -> None:
     """C8：无 viewport_size（极早期页面）时跳过面板锚定滚动，不误伤既有点击路径。"""
     ap, page = _make_ap()
