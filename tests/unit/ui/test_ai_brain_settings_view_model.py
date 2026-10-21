@@ -35,8 +35,7 @@ def mock_config_handler():
         ch.get_ai_news_prompt.return_value = ""
         ch.is_ai_local_only_mode.return_value = False
         ch.save_config.return_value = True
-        ch.save_ai_system_prompt.return_value = True
-        ch.set_ai_news_prompt.return_value = True
+        ch.save_ai_tuning_and_prompts.return_value = True
         yield ch
 
 
@@ -104,5 +103,6 @@ class TestAiLocalOnlyMode:
         vm.set_ai_local_only_mode(True)
         with _patch_save_deps():
             assert await vm.save_ai_settings() is True
-        call_data = mock_config_handler.save_config.call_args.args[0]
-        assert call_data["ai_local_only_mode"] is True
+        # T3: 调优参数 + prompts 合并为单次原子保存调用, local_only 为第 3 个位置参数
+        call_args = mock_config_handler.save_ai_tuning_and_prompts.call_args.args
+        assert call_args[2] is True

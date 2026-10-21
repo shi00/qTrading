@@ -306,6 +306,10 @@ class ConfigHandler:
         return llm.set_ai_news_prompt(prompt)
 
     @staticmethod
+    def save_ai_tuning_and_prompts(max_candidates, min_turnover, local_only, ai_prompt, news_prompt):
+        return llm.save_ai_tuning_and_prompts(max_candidates, min_turnover, local_only, ai_prompt, news_prompt)
+
+    @staticmethod
     def get_strategy_presets(strategy_key: str) -> dict[str, dict]:
         return llm.get_strategy_presets(strategy_key)
 

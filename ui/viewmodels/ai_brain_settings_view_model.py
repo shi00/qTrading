@@ -138,9 +138,10 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
         链路:
         1. **验证**: 校验 max_candidates / min_turnover 范围
         2. **持久化**:
-           - ConfigHandler.save_config({ai_max_candidates, strategy_min_turnover, ai_local_only_mode})
-           - ConfigHandler.save_ai_system_prompt(...)
-           - ConfigHandler.set_ai_news_prompt(...)
+           - ConfigHandler.save_ai_tuning_and_prompts(...)
+           调优参数与 prompts 合并为单次原子 save_config (T3)：
+           prompt 校验失败或磁盘写入失败时整体未提交，不存在
+           部分成功（原三次独立写链路已废弃）。
            （同步阻塞 IO 经 ThreadPoolManager IO 池执行, R16）
         3. **重载**: AIService().reload_config()
 
@@ -170,18 +171,12 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             local_only = self._state.ai_local_only_mode
 
             def _save_configs_sync() -> bool:
-                """调优参数 + prompts 保存, 在 IO 线程池执行 (R16)。"""
-                if not ConfigHandler.save_config(
-                    {
-                        "ai_max_candidates": max_cand,
-                        "strategy_min_turnover": min_turn,
-                        "ai_local_only_mode": local_only,
-                    }
-                ):
-                    return False
-                if not ConfigHandler.save_ai_system_prompt(ai_prompt):
-                    return False
-                return ConfigHandler.set_ai_news_prompt(news_prompt)
+                """调优参数 + prompts 单次原子保存, 在 IO 线程池执行 (R16, T3)。
+
+                任一 prompt 校验失败或 save_config 失败时整体未提交,
+                不存在部分成功 (R21 邻域: 部分成功不得伪装成已保存)。
+                """
+                return ConfigHandler.save_ai_tuning_and_prompts(max_cand, min_turn, local_only, ai_prompt, news_prompt)
 
             success = await ThreadPoolManager().run_async(TaskType.IO, _save_configs_sync)
             if not success:
