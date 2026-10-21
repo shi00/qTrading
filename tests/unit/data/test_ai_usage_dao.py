@@ -1098,3 +1098,281 @@ class TestLegacySeal:
         with pytest.raises(EngineDisposedError, match="Engine disposed"):
             await dao.seal_legacy_month(month="2026-10", owner_session_id="o", owner_epoch=1)
         assert conn.calls == []
+
+
+class TestAmountContractD2D3:
+    """金额入参契约（R05 D2/D3）：垃圾值契约化 ValueError，先于事务/fencing，独立于预算短路。"""
+
+    @pytest.mark.parametrize(
+        ("bad_amount", "expected_msg"),
+        [
+            ("-5.00", "金额必须为非负数"),
+            ("-Infinity", "金额必须为有限十进制数（禁止 NaN / Infinity）"),
+            ("Infinity", "金额必须为有限十进制数（禁止 NaN / Infinity）"),
+            ("NaN", "金额必须为有限十进制数（禁止 NaN / Infinity）"),
+            ("sNaN", "金额必须为有限十进制数（禁止 NaN / Infinity）"),
+            ("abc", "金额无法解析为十进制数"),
+            ("1e999999", "金额超出允许上限 1e15"),
+            ("1,000", "金额无法解析为十进制数"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_try_reserve_rejects_garbage_amount_before_transaction(self, bad_amount: str, expected_msg: str):
+        """D2：垃圾 amount_cny 入口即拒（ValueError 契约化），零 SQL 副作用（先于 fencing）。"""
+        conn = _CaptureConn(results=[])
+        dao = _dao(conn)
+        with pytest.raises(ValueError, match=f"amount_cny: {expected_msg}") as exc_info:
+            await dao.try_reserve(**_reserve_kwargs(amount_cny=bad_amount))
+        # 精确异常属性断言：字段名前缀 + validator 正本消息（非裸 ValueError）
+        assert "amount_cny" in str(exc_info.value)
+        assert conn.calls == []
+
+    @pytest.mark.parametrize(
+        "bad_budget",
+        ["-1.00", "NaN", "-Infinity", "abc", "1e999999"],
+    )
+    @pytest.mark.asyncio
+    async def test_try_reserve_rejects_garbage_budget_limit(self, bad_budget: str):
+        """D2：budget_limit_cny 垃圾同样入口即拒（与 amount 校验对称）。"""
+        conn = _CaptureConn(results=[])
+        dao = _dao(conn)
+        with pytest.raises(ValueError, match="budget_limit_cny"):
+            await dao.try_reserve(**_reserve_kwargs(budget_limit_cny=bad_budget))
+        assert conn.calls == []
+
+    @pytest.mark.asyncio
+    async def test_try_reserve_validates_amount_even_when_budget_is_none(self):
+        """D2：校验独立于预算判定短路——budget=None 时垃圾 amount 仍拒（修复前静默入库）。"""
+        conn = _CaptureConn(results=[])
+        dao = _dao(conn)
+        with pytest.raises(ValueError, match="amount_cny: 金额必须为非负数"):
+            await dao.try_reserve(**_reserve_kwargs(amount_cny="-5.00", budget_limit_cny=None))
+        assert conn.calls == []
+
+    @pytest.mark.asyncio
+    async def test_try_reserve_accepts_legal_amount_variants(self):
+        """D2 回归：合法 str / Decimal / int / float 全接受，Decimal 归一为规范十进制串。"""
+        conn = _CaptureConn(results=[None, None, (Decimal("0.00"),), ("res-1",), (Decimal("0.00"),), 1])
+        dao = _dao(conn)
+        reservation = await dao.try_reserve(**_reserve_kwargs(amount_cny=Decimal("0.05")))
+        assert reservation is not None
+        assert reservation.amount_cny == "0.05"  # Decimal → 最短往返十进制串，无噪音
+
+        conn2 = _CaptureConn(results=[None, None, (Decimal("0.00"),), ("res-1",), (Decimal("0.00"),), 1])
+        dao2 = _dao(conn2)
+        reservation2 = await dao2.try_reserve(**_reserve_kwargs(amount_cny="0.05"))
+        assert reservation2 is not None
+        assert reservation2.amount_cny == "0.05"
+
+    @pytest.mark.asyncio
+    async def test_try_reserve_usage_only_none_amount_passes(self):
+        """D2：None 直通（usage_only 无金额语义），不触发校验。"""
+        conn = _CaptureConn(results=[None, None, 1])
+        dao = _dao(conn)
+        reservation = await dao.try_reserve(**_reserve_kwargs(amount_cny=None, budget_limit_cny=None))
+        assert reservation is not None
+        assert reservation.amount_cny is None
+
+    @pytest.mark.parametrize(
+        ("bad_cost", "expected_msg"),
+        [
+            ("-0.01", "金额必须为非负数"),
+            ("NaN", "金额必须为有限十进制数（禁止 NaN / Infinity）"),
+            ("-Infinity", "金额必须为有限十进制数（禁止 NaN / Infinity）"),
+            ("bad", "金额无法解析为十进制数"),
+            ("1e999999", "金额超出允许上限 1e15"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_settle_rejects_garbage_cost_before_transaction(self, bad_cost: str, expected_msg: str):
+        """D3：垃圾 cost_cny 入口即拒（先于事务与 F23 背书判定），零 SQL 副作用。"""
+        conn = _CaptureConn(results=[])
+        dao = _dao(conn)
+        with pytest.raises(ValueError, match=f"cost_cny: {expected_msg}"):
+            await dao.settle_attempt_usage(**_settle_kwargs(cost_cny=bad_cost))
+        assert conn.calls == []
+
+    @pytest.mark.asyncio
+    async def test_settle_normalizes_float_cost_to_shortest_decimal_string(self):
+        """相邻移交：float cost（pricing.estimate_cost 链路）归一为最短往返串入 SQL，
+        修复前 Decimal(float) 二进制全长展开入 numeric 列（精度噪音）。"""
+        conn = _CaptureConn(results=[None, (0, Decimal("0.02")), None, None, None])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(**_settle_kwargs(cost_cny=0.05))
+        assert result is True
+        update_sql, update_params = conn.calls[2]
+        assert "UPDATE ai_attempt" in update_sql
+        assert update_params["cost_cny"] == "0.05"  # str(0.05) 最短往返，非 0.05000000000000000277...
+        upserts = [params for _sql, params in conn.calls[3:]]
+        assert all(Decimal(p["cost_cny"]) == Decimal("0.03") for p in upserts)  # 差额 0.05-0.02
+
+    @pytest.mark.asyncio
+    async def test_settle_late_revision_negative_delta_still_accounts(self):
+        """迟到修订合法通道保持：修订成本降低（0.05 → 0.03）产生负差额，
+        必须照常推进月汇总（负 delta 仅拒绝于 apply_monthly_delta 公开入口，
+        settle 内部差额不受 D3 入参校验影响）。"""
+        conn = _CaptureConn(results=[None, (1, Decimal("0.05")), None, None, None])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(**_settle_kwargs(cost_cny="0.03", usage_revision=2))
+        assert result is True
+        upserts = [params for _sql, params in conn.calls[3:]]
+        assert len(upserts) == 2  # noqa: weak-assertion 语句数即语义：两 scope 各推进一次
+        assert all(Decimal(p["cost_cny"]) == Decimal("-0.02") for p in upserts)
+
+    @pytest.mark.parametrize(
+        ("bad_delta", "expected_msg"),
+        [
+            (Decimal("-0.01"), "金额必须为非负数"),
+            (Decimal("NaN"), "金额必须为有限十进制数（禁止 NaN / Infinity）"),
+            (Decimal("-Infinity"), "金额必须为有限十进制数（禁止 NaN / Infinity）"),
+            (Decimal("1e999999"), "金额超出允许上限 1e15"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_apply_monthly_delta_rejects_garbage_delta(self, bad_delta: Decimal, expected_msg: str):
+        """D3：公开入口拒负/非有限/超上界差额（负 delta 不得直接减已结算费用）。"""
+        conn = _CaptureConn(results=[])
+        dao = _dao(conn)
+        with pytest.raises(ValueError, match=f"cost_cny_delta: {expected_msg}"):
+            await dao.apply_monthly_delta(
+                month="202610",
+                aggregation_scope="scenario",
+                grouping_key="news_sentiment",
+                scenario_id="news_sentiment",
+                trigger="manual",
+                invocation_count=1,
+                attempt_count=1,
+                cost_cny_delta=bad_delta,
+            )
+        assert conn.calls == []
+
+
+class TestLegacyParseObservabilityD4:
+    """legacy 值解析（R05 D4）：NaN / ±Infinity 回零 + 坏值降级 warning 可观测。"""
+
+    @pytest.mark.parametrize("raw", ["NaN", "sNaN", "-Infinity", "Infinity"])
+    def test_parse_legacy_cents_non_finite_returns_zero(self, raw: str):
+        """D4：非有限值回零（修复前 'NaN' 解析为 NaN 毒化预算摘要）。"""
+        assert parse_legacy_cents(raw) == Decimal("0")
+
+    def test_parse_legacy_cents_huge_exponent_returns_zero(self):
+        """巨数串解析成功但 quantize 精度溢出 → 回零（不抛）。"""
+        assert parse_legacy_cents("1e999") == Decimal("0")
+
+    def test_parse_legacy_cents_legal_values_unchanged(self):
+        """D4 回归：合法分值解析不受影响。"""
+        assert parse_legacy_cents("150") == Decimal("1.50")
+        assert parse_legacy_cents(150) == Decimal("1.50")
+        assert parse_legacy_cents("12345") == Decimal("123.45")
+        assert parse_legacy_cents(None) == Decimal("0")
+
+    @pytest.mark.parametrize("raw", ["not-a-number", "NaN", "1e999"])
+    def test_parse_legacy_cents_degradation_logged(self, raw: str, caplog: pytest.LogCaptureFixture):
+        """D4：坏值回零必须 warning 可观测（修复前完全静默）。None 缺键不告警。"""
+        import logging as _logging
+
+        with caplog.at_level(_logging.WARNING, logger="data.persistence.daos.ai_usage_dao"):
+            assert parse_legacy_cents(raw) == Decimal("0")
+        assert any("legacy 月成本值" in r.message and r.levelno == _logging.WARNING for r in caplog.records)
+
+    def test_parse_legacy_cents_none_no_warning(self, caplog: pytest.LogCaptureFixture):
+        """None（缺键）是「无数据」非坏值：回零但不告警。"""
+        import logging as _logging
+
+        with caplog.at_level(_logging.WARNING, logger="data.persistence.daos.ai_usage_dao"):
+            assert parse_legacy_cents(None) == Decimal("0")
+        assert not any("legacy 月成本值" in r.message for r in caplog.records)
+
+
+class TestDecimalOrZeroD5:
+    """预算摘要读数（R05 D5）：NaN / ±Infinity / 负值 → 事实零。"""
+
+    def test_nan_row_returns_zero(self):
+        from data.persistence.daos.ai_usage_dao import _decimal_or_zero
+
+        assert _decimal_or_zero((Decimal("NaN"),)) == Decimal("0")
+
+    def test_infinity_row_returns_zero(self):
+        from data.persistence.daos.ai_usage_dao import _decimal_or_zero
+
+        assert _decimal_or_zero((Decimal("-Infinity"),)) == Decimal("0")
+        assert _decimal_or_zero((Decimal("Infinity"),)) == Decimal("0")
+
+    def test_negative_row_returns_zero(self):
+        from data.persistence.daos.ai_usage_dao import _decimal_or_zero
+
+        assert _decimal_or_zero((Decimal("-5.00"),)) == Decimal("0")
+
+    def test_none_and_legal_rows_unchanged(self):
+        from data.persistence.daos.ai_usage_dao import _decimal_or_zero
+
+        assert _decimal_or_zero(None) == Decimal("0")
+        assert _decimal_or_zero((None,)) == Decimal("0")
+        assert _decimal_or_zero((Decimal("1.25"),)) == Decimal("1.25")
+
+    def test_degradation_logged(self, caplog: pytest.LogCaptureFixture):
+        import logging as _logging
+
+        from data.persistence.daos.ai_usage_dao import _decimal_or_zero
+
+        with caplog.at_level(_logging.WARNING, logger="data.persistence.daos.ai_usage_dao"):
+            _decimal_or_zero((Decimal("NaN"),))
+        assert any("按事实零降级" in r.message for r in caplog.records)
+
+
+class TestStaleGarbageTolerance:
+    """存量垃圾读数容错（R05 D2 存量闭环）：D1 validator 生效前写入的历史 jsonb
+    垃圾预留 / D3 生效前历史负 delta，SUM 读数非有限/负 → 事实零 + warning。"""
+
+    @pytest.mark.asyncio
+    async def test_active_reservations_nan_sum_clamped_to_zero(self, caplog: pytest.LogCaptureFixture):
+        """历史 jsonb 'NaN' 预留经 ::numeric 入 SUM 传播 → NaN：预算门按 0 降级，不 crash。"""
+        import logging as _logging
+
+        conn = _CaptureConn(results=[(Decimal("NaN"),)])
+        dao = _dao(conn)
+        with caplog.at_level(_logging.WARNING, logger="data.persistence.daos.ai_usage_dao"):
+            got = await dao._read_active_reservations_sum(conn, "202610")
+        assert got == Decimal("0")
+        assert any("active_reservations_sum" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_active_reservations_negative_sum_clamped_to_zero(self):
+        """历史负金额预留（降低 SUM 占用）→ clamp 0（负占用无事实意义）。"""
+        conn = _CaptureConn(results=[(Decimal("-5.00"),)])
+        got = await _dao(conn)._read_active_reservations_sum(conn, "202610")
+        assert got == Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_active_reservations_legal_sum_unchanged(self):
+        """D2 回归：合法 SUM 读数不受容错影响。"""
+        conn = _CaptureConn(results=[(Decimal("0.75"),)])
+        got = await _dao(conn)._read_active_reservations_sum(conn, "202610")
+        assert got == Decimal("0.75")
+
+    @pytest.mark.asyncio
+    async def test_committed_usage_negative_sum_clamped_to_zero(self, caplog: pytest.LogCaptureFixture):
+        """D3 存量闭环：历史负 delta 毒化的已结算 SUM → clamp 0 + warning。"""
+        import logging as _logging
+
+        conn = _CaptureConn(results=[(Decimal("-1.00"),), None])
+        dao = _dao(conn)
+        with caplog.at_level(_logging.WARNING, logger="data.persistence.daos.ai_usage_dao"):
+            got = await dao._read_month_committed_usage(conn, "202610")
+        assert got == Decimal("0")  # settled clamp 0 + legacy 缺键 0
+        assert any("month_committed_usage" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_budget_summary_known_garbage_settled_clamped(self):
+        """D5 存量闭环：known_cny 的 settled SUM 垃圾 → 事实零（legacy 合法部分保留）。"""
+        conn = _QueueConn(
+            [
+                _StubResult(one=(Decimal("NaN"),)),  # known settled SUM（垃圾）
+                _StubResult(one=(None,)),  # effective reserved
+                _StubResult(one=(None,)),  # unconfirmed reserved
+                _StubResult(one=("150",)),  # legacy（合法，1.50 元）
+            ]
+        )
+        dao = _dao(conn)
+        summary = await dao.read_budget_summary(month="202610")
+        assert summary["known_cny"] == Decimal("1.50")  # settled 降级 0 + legacy 1.50
