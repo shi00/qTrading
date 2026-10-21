@@ -662,7 +662,7 @@ class TestSchedulerI18nKeys:
             assert val != key, f"I18n key '{key}' should have a zh_CN translation"
 
     def test_concept_sync_i18n_keys_exist_in_en_us(self):
-        # SUP-I18N-001: 经公开初始化 API 显式设定英文 locale。直接赋值私有状态时，
+        # sup-i18n-001: 经公开初始化 API 显式设定英文 locale。直接赋值私有状态时，
         # I18n.get 会走无参 initialize() 回落 DEFAULT_LOCALE(zh_CN)，断言实际验证的是中文资源。
         I18n.initialize("en_US")
         assert I18n.current_locale() == "en_US"
