@@ -565,3 +565,91 @@ class TestCompareAndSaveSecurityCorruption:
         raw = _read_raw_config(isolated_config)
         assert raw["model_management"]["schema_version"] == 1
         assert raw["model_management"]["security_state"]["security_revision"] == 0
+
+
+class TestDraftSecurityStrip:
+    """F09：草稿路径无条件剥离输入安全子域——首次初始化只落明确空安全态。
+
+    修复前保护条件要求磁盘已有 ``security_state``，无文件 / 旧配置首次提交时
+    payload 自带 grants 直通 schema 落盘，普通草稿入口即可写入授权事实
+    （schema 引用校验只约束引用有效性，不证明授权来自安全命令）。
+    """
+
+    _CONNECTION_ID = "11111111-1111-4111-8111-111111111111"
+
+    def _payload_with_grant(self) -> dict:
+        """合法连接 + 引用该连接的自带 grant（攻击形态：草稿自带授权）。"""
+        payload = AppConfig().model_dump()["model_management"]
+        payload["connections"] = [
+            {
+                "connection_id": self._CONNECTION_ID,
+                "name": "官方 API",
+                "adapter_kind": "litellm_chat",
+                "provider": "deepseek",
+                "model": "deepseek-chat",
+                "billing": {"mode": "usage_only", "pricing_unit": "llm_tokens"},
+            }
+        ]
+        payload["security_state"] = {
+            "security_revision": 9,
+            "grants": [
+                {
+                    "grant_id": "g-smuggled",
+                    "connection_id": self._CONNECTION_ID,
+                    "target_fingerprint": "https://api.deepseek.com:443",
+                    "purpose": "stock_analysis",
+                    "scope_version": 1,
+                    "confirmed_at": "2026-01-01T00:00:00+00:00",
+                    "revoked_at": None,
+                }
+            ],
+            "revoked_credential_versions": [],
+        }
+        return payload
+
+    def test_draft_on_missing_file_strips_payload_grants(self, isolated_config):
+        """无文件首次提交：合法连接正常写入，自带 grant 不得写入。"""
+        assert not isolated_config.exists()
+
+        result = cfg_mod.ConfigHandler.compare_and_save_model_management(
+            1, self._payload_with_grant(), "op-f09-init", update_security_state=False
+        )
+
+        assert result.status == "committed"
+        raw = _read_raw_config(isolated_config)
+        security = raw["model_management"]["security_state"]
+        # 首次合法初始化落出明确空安全状态（三键齐备，R21 语义：空 ≠ 伪装合法值）
+        assert security["security_revision"] == 0
+        assert security["grants"] == []
+        assert security["revoked_credential_versions"] == []
+        # 连接本身不受剥离影响
+        assert raw["model_management"]["connections"][0]["connection_id"] == self._CONNECTION_ID
+
+    def test_draft_on_legacy_config_without_domain_strips_payload_grants(self, isolated_config):
+        """旧配置无 model_management 域：草稿自带 grant 同样不得写入。"""
+        _write_raw_config(isolated_config, {"llm_provider": "deepseek", "llm_model": "deepseek-v4-flash"})
+
+        result = cfg_mod.ConfigHandler.compare_and_save_model_management(
+            1, self._payload_with_grant(), "op-f09-legacy", update_security_state=False
+        )
+
+        assert result.status == "committed"
+        raw = _read_raw_config(isolated_config)
+        assert raw["model_management"]["security_state"]["security_revision"] == 0
+        assert raw["model_management"]["security_state"]["grants"] == []
+        # 旧配置无关键保留
+        assert raw["llm_provider"] == "deepseek"
+
+    def test_draft_on_legacy_domain_without_security_keys_rejected(self, isolated_config):
+        """旧 mm 域缺安全键：F08 判结构损坏 → not_committed，磁盘保持原样。"""
+        _write_raw_config(isolated_config, {"model_management": {"schema_version": 1, "config_revision": 1}})
+
+        result = cfg_mod.ConfigHandler.compare_and_save_model_management(
+            1, self._payload_with_grant(), "op-f09-corrupt", update_security_state=False
+        )
+
+        assert result.status == "not_committed"
+        raw = _read_raw_config(isolated_config)
+        # 磁盘保持损坏原样：grant 未被洗白落盘，revision 未推进
+        assert "security_state" not in raw["model_management"]
+        assert raw["model_management"]["config_revision"] == 1
