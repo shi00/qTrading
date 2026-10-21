@@ -44,10 +44,15 @@ def _as_box(box: Mapping[str, Any]) -> dict[str, float]:
 
 
 # C8 面板锚定滚动的收敛参数：最多 12 次尝试 × 每次 ≤600px，覆盖 25+ 项长菜单；
-# 单次步幅 clamp ±600 避免滚轮过冲；滚动后 150ms 等待菜单重渲染稳定。
+# 单次步幅 clamp ±600 避免滚轮过冲；滚动后自适应等待（轮询选项 bbox 变化，50ms 步进、
+# 500ms 上限），避免 CI 高负载下固定等待早于菜单重渲染结束 → 对同一残留 rect 重复
+# wheel（相同 delta 累加）造成过冲甚至震荡。连续 2 轮 rect 未变即判定菜单无响应
+# （已到滚动边界或 wheel 未命中面板），提前抛错而非空转 12 次。
 _OPTION_SCROLL_MAX_ATTEMPTS = 12
 _OPTION_SCROLL_STEP_PX = 600.0
-_OPTION_SCROLL_SETTLE_MS = 150
+_OPTION_SCROLL_SETTLE_POLL_MS = 50
+_OPTION_SCROLL_SETTLE_TIMEOUT_MS = 500
+_OPTION_SCROLL_STALL_LIMIT = 2
 
 # 菜单滚动视口节点的识别判据（probe6 实证）：Flet M3 DropdownMenu 路由的滚动视口
 # 在语义 DOM 中是选项节点的最近 ``flt-semantics[role=group]`` 祖先，其 rect 即可
@@ -55,7 +60,6 @@ _OPTION_SCROLL_SETTLE_MS = 150
 # overflow 属性，**不得**以 ``overflow-y: scroll`` 等 style 判据识别。滚出面板的
 # 选项语义 rect 是列表内容坐标残留（可能仍落在视口内），直接 force 点击命中渲染
 # 在该坐标的其他元素——可点性必须以面板而非视口为门。
-_MENU_PANEL_MAX_ANCESTORS = 8
 
 
 def _box_contains(region: Mapping[str, Any], box: Mapping[str, float], *, margin: float = 0.0) -> bool:
@@ -66,6 +70,19 @@ def _box_contains(region: Mapping[str, Any], box: Mapping[str, float], *, margin
         and box["x"] + box["width"] <= region["x"] + region["width"] + margin
         and box["y"] + box["height"] <= region["y"] + region["height"] + margin
     )
+
+
+def _clip_to_viewport(region: Mapping[str, Any], width: float, height: float) -> dict[str, float]:
+    """把可点区域裁剪到视口内（可点区域 = 面板 ∩ 视口）。
+
+    Playwright ``mouse.click`` 对视口外坐标静默丢弃（Flutter 收不到 tap），故面板
+    越出视口时，落在越界部分的选项即使「在面板内」也不可点击。
+    """
+    left = max(region["x"], 0.0)
+    top = max(region["y"], 0.0)
+    right = min(region["x"] + region["width"], width)
+    bottom = min(region["y"] + region["height"], height)
+    return {"x": left, "y": top, "width": max(right - left, 0.0), "height": max(bottom - top, 0.0)}
 
 
 async def retry_until_triggered(
@@ -338,16 +355,23 @@ class AnchorPage:
         )
         return option_handle.as_element()
 
-    async def _find_menu_panel_box(self, option_element: Any, option_height: float) -> dict[str, float] | None:
-        """从选项节点祖先链定位菜单滚动视口面板（C8 的 wheel 锚点与可点门数据源）。
+    async def _find_menu_panel_box(
+        self, option_element: Any, option_height: float
+    ) -> tuple[dict[str, float] | None, bool]:
+        """从选项节点祖先链定位菜单滚动视口面板，返回 ``(panel_box, probe_ok)``。
 
         probe6 实证：面板是选项的最近 ``flt-semantics[role=group]`` 祖先，rect
         （如 ``[229,621] × [8,892]``）覆盖全部已渲染选项，且 wheel 在面板内任意
         位置均可精确滚动菜单（受滚动边界钳制）；滚出面板的选项 rect 是残留坐标，
         elementFromPoint 亦命中的是语义 DOM 残留节点而非渲染位置——面板 rect 是
-        唯一可靠的「可点区域」来源。面板高度必须容得下选项（``option_height``）
-        以排除误配同链上的其他 group 容器；菜单内容不溢出（无滚动）时该节点不
-        存在或与视口等价，返回 None，调用方退回视口判据。
+        唯一可靠的「可点区域」来源。面板高度必须容得下选项（``option_height``）：
+        高度不足的 group 只可能是更内层的包装容器，**继续向上扫描**而非中止
+        （否则会漏掉外层滚动视口并退回视口判据）。菜单内容不溢出（无滚动）时
+        该节点不存在，``panel_box`` 为 None 且 ``probe_ok=True``，调用方退回视口判据。
+
+        ``probe_ok=False`` 表示探针本身失败（句柄随菜单重渲染失效等）。调用方
+        **不得**把「探测失败」当作「无面板」退回视口判据——那会让视口内的残留
+        rect 直接通过包含判据并误点（fail-open），须重取句柄后重试。
         """
         try:
             box = await option_element.evaluate(
@@ -356,9 +380,9 @@ class AnchorPage:
                     for (let i = 0; i < 8 && p; i++) {
                         if (p.tagName === 'FLT-SEMANTICS' && p.getAttribute('role') === 'group') {
                             const r = p.getBoundingClientRect();
-                            return r.width > 0 && r.height >= minHeight
-                                ? {x: r.x, y: r.y, width: r.width, height: r.height}
-                                : null;
+                            if (r.width > 0 && r.height >= minHeight) {
+                                return {x: r.x, y: r.y, width: r.width, height: r.height};
+                            }
                         }
                         p = p.parentElement;
                     }
@@ -366,11 +390,11 @@ class AnchorPage:
                 }""",
                 option_height,
             )
-        except Exception:  # noqa: BLE001  # handle 随菜单重渲染失效属预期，按无面板退回视口判据
-            return None
+        except Exception:  # noqa: BLE001  # handle 随菜单重渲染失效属预期，交由调用方重取句柄重试
+            return None, False
         if isinstance(box, dict) and {"x", "y", "width", "height"} <= set(box):
-            return {k: float(v) for k, v in box.items()}  # type: ignore[union-attr]
-        return None
+            return _as_box(box), True
+        return None, True
 
     async def _scroll_menu_option_into_view(
         self,
@@ -385,14 +409,17 @@ class AnchorPage:
         滚动视口面板的选项 rect 残留在视口内/外任意位置，此时 ``force`` 点击该
         rect 命中的是渲染在该坐标的其他元素（误选相邻项/关菜单，CI run
         39387686968 实证：test_table_viewer_switch 切 stock_basic 误选
-        macro_economy）。可点区域 = 面板（``_find_menu_panel_box``），面板未识别
+        macro_economy）。可点区域 = 面板 ∩ 视口（``_find_menu_panel_box`` +
+        ``_clip_to_viewport``；面板越出视口的部分点击会被静默丢弃）；面板未识别
         时退回视口（菜单内容不溢出时二者等价）。
 
         流程：选项 rect 完全落入可点区域 → 直接返回；否则以面板中心为锚点物理
         滚轮——wheel 打在面板外不滚动菜单（CI run 39404271425 实证 clamp 到视口
         边缘 y=0 后 12 次空转；probe4-6 实证锚点落在水平方向面板外同样空转），
-        面板内任意位置均可精确滚动 ±step（probe3 实证，受滚动边界钳制）。每轮
-        重新定位选项与面板，耗尽仍不可点击即抛错，不静默点击面板外坐标。
+        面板内任意位置均可精确滚动 ±step（probe3 实证，受滚动边界钳制）。滚轮后
+        自适应等待 bbox 变化（不固定 150ms），连续 2 轮无变化即判菜单无响应提前
+        抛错。面板探针失败时不退回视口判据（fail-open 会误点残留 rect），重取
+        句柄后重试。耗尽仍不可点击即抛错，不静默点击面板外坐标。
         """
         viewport = self.page.viewport_size
         if not viewport:
@@ -401,6 +428,7 @@ class AnchorPage:
         vw = float(viewport["width"])
         current = option_element
         deadline = time.monotonic() + self._tm(timeout_ms) / 1000
+        stall_count = 0
 
         for _ in range(_OPTION_SCROLL_MAX_ATTEMPTS):
             try:
@@ -408,10 +436,28 @@ class AnchorPage:
             except Exception:  # noqa: BLE001  # handle 随菜单重渲染失效属预期，按无 bbox 走兜底
                 raw_box = None
             panel_box: dict[str, float] | None = None
+            probe_ok = True
             if raw_box and raw_box["width"] > 0 and raw_box["height"] > 0:
-                panel_box = await self._find_menu_panel_box(current, float(raw_box["height"]))
+                panel_box, probe_ok = await self._find_menu_panel_box(current, float(raw_box["height"]))
+            if not probe_ok:
+                # 探测失败 ≠ 无面板：重取句柄后重试，绝不退回视口判据静默点击残留 rect。
+                fresh = await self._find_option_element(option_text, eid_str)
+                if fresh:
+                    current = fresh
+                if time.monotonic() >= deadline:
+                    break
+                await self.page.wait_for_timeout(_OPTION_SCROLL_SETTLE_POLL_MS)
+                continue
 
-            region = panel_box if panel_box else {"x": 0.0, "y": 0.0, "width": vw, "height": vh}
+            region = (
+                _clip_to_viewport(panel_box, vw, vh) if panel_box else {"x": 0.0, "y": 0.0, "width": vw, "height": vh}
+            )
+            if region["width"] <= 0 or region["height"] <= 0:
+                # 面板完全在视口外（如展开动画中）：任何点击都会静默丢弃，等重渲染再试。
+                if time.monotonic() >= deadline:
+                    break
+                await self.page.wait_for_timeout(_OPTION_SCROLL_SETTLE_POLL_MS)
+                continue
             if raw_box and _box_contains(region, _as_box(raw_box), margin=2.0):
                 return current
 
@@ -426,17 +472,52 @@ class AnchorPage:
                 await self.page.mouse.wheel(0, delta)
             else:
                 await self.page.mouse.wheel(0, _OPTION_SCROLL_STEP_PX)
-            await self.page.wait_for_timeout(_OPTION_SCROLL_SETTLE_MS)
 
-            fresh = await self._find_option_element(option_text, eid_str)
-            if fresh:
-                current = fresh
+            moved, handle_alive = await self._wait_option_settled(current, before_box=raw_box)
+            if moved:
+                stall_count = 0
+            else:
+                stall_count += 1
+                if stall_count >= _OPTION_SCROLL_STALL_LIMIT:
+                    break
+
+            # 仅在选项 rect 未变化 / 句柄失效 / 无 bbox 时重定位：rect 已变化说明菜单
+            # 正常响应，同一句柄下一轮可直接复用，避免每轮全文档重查。
+            if raw_box is None or not handle_alive or not moved:
+                fresh = await self._find_option_element(option_text, eid_str)
+                if fresh:
+                    current = fresh
             if time.monotonic() >= deadline:
                 break
 
         raise RuntimeError(
             f"AnchorPage.select_option: option {option_text!r} never within clickable menu panel (dropdown={eid_str!r})"
         )
+
+    async def _wait_option_settled(
+        self, option_element: Any, *, before_box: Mapping[str, Any] | None
+    ) -> tuple[bool, bool]:
+        """滚轮后自适应等待菜单重渲染，返回 ``(是否观察到 rect 变化, 句柄是否仍可用)``。
+
+        固定等待（原 150ms）在 CI 高负载下可能早于菜单重渲染结束，下一轮会以同一
+        残留 rect 再算一次相同 delta，两次滚轮累加导致过冲甚至来回震荡；改为轮询
+        bbox 变化即可在菜单响应后立即返回，未响应则在 ``_OPTION_SCROLL_SETTLE_TIMEOUT_MS``
+        上限后交由调用方判 stall。
+        """
+        settle_deadline = time.monotonic() + _OPTION_SCROLL_SETTLE_TIMEOUT_MS / 1000
+        while time.monotonic() < settle_deadline:
+            await self.page.wait_for_timeout(_OPTION_SCROLL_SETTLE_POLL_MS)
+            try:
+                after = await option_element.bounding_box()
+            except Exception:  # noqa: BLE001  # 句柄失效即视为状态已变化，调用方重取句柄
+                return True, False
+            if after is None:
+                return True, False
+            if before_box is None:
+                return True, True
+            if abs(after["x"] - before_box["x"]) > 0.5 or abs(after["y"] - before_box["y"]) > 0.5:
+                return True, True
+        return False, True
 
     async def select_option(
         self,
@@ -474,14 +555,19 @@ class AnchorPage:
         - C7 (选中值校验): 已撤销。CanvasKit 下收合态 Dropdown 的 identifier 节点
               textContent 为纯 EID，显示值不在语义 DOM 中（本地 dump 实证），无
               事后校验数据源；误选防护由 C8 的「仅点击面板内渲染目标」在事前保证。
-        - C8 (面板锚定滚动): 选项 rect 未完全落入菜单滚动视口面板时，以面板中心
-              为锚点经物理滚轮滚入面板再点击。滚出面板的选项语义 rect 是列表内容
-              坐标残留（可能仍落在视口内），直接 force 点击命中渲染在该坐标的其他
-              元素（CI run 39387686968 实证: test_table_viewer_switch 切 stock_basic
-              误选 macro_economy）；wheel 打在面板外不滚动菜单（CI run 39404271425
-              实证 clamp 到视口边缘后 12 次空转 → never within viewport）。面板经
-              选项祖先链 style 含 ``overflow-y: scroll`` 的 group 节点识别（本地
-              probe3 实证）；面板未识别时退回视口判据（菜单内容不溢出时二者等价）。
+        - C8 (面板锚定滚动): 选项 rect 未完全落入「可点区域」时，以可点区域中心
+              为锚点经物理滚轮滚入面板再点击。可点区域 = 菜单面板 ∩ 视口：滚出面板
+              的选项语义 rect 是列表内容坐标残留（可能仍落在视口内），直接 force
+              点击命中渲染在该坐标的其他元素（CI run 39387686968 实证:
+              test_table_viewer_switch 切 stock_basic 误选 macro_economy）；而面板
+              越出视口的部分点击会被 Playwright 静默丢弃。wheel 打在面板外不滚动
+              菜单（CI run 39404271425 实证 clamp 到视口边缘后 12 次空转 →
+              never within viewport）。面板经选项祖先链最近的
+              ``flt-semantics[role=group]`` 节点识别（本地 probe6 实证；其 style 为
+              ``overflow: hidden``，Flutter 自绘滚动不更新 DOM overflow，**不得**以
+              ``overflow-y: scroll`` 类 style 判据识别——probe3 曾据此误读）。面板
+              探针失败时 fail-closed 重取句柄重试，不退回视口判据静默点击残留 rect；
+              面板未识别时退回视口判据（菜单内容不溢出时二者等价）。
         - 收合确认 (坑点 6 步骤级重试): 空等 2s + ``retry_until_triggered`` 确认
               菜单收合, 选择未落地即抛明确错误, 不静默返回.
         """
@@ -563,7 +649,11 @@ class AnchorPage:
                     await self.page.wait_for_timeout(150)
                     fresh_elem = await self._find_option_element(option_text, eid_str)
                     if fresh_elem:
-                        option_element = fresh_elem
+                        # 重渲染后的句柄必须重新过 C8 门：残留 rect 直接 force 点击
+                        # 面板外坐标会命中渲染在该坐标的其他元素（误选相邻项）。
+                        option_element = await self._scroll_menu_option_into_view(
+                            fresh_elem, option_text, eid_str, timeout_ms
+                        )
                         continue
                 raise
 
@@ -577,6 +667,9 @@ class AnchorPage:
             fresh_elem = await self._find_option_element(option_text, eid_str)
             if fresh_elem:
                 option_element = fresh_elem
+            # 重试面对的是重渲染后的菜单：残留 rect 必须重新过 C8 门再点击，否则
+            # force 点击面板外坐标会命中渲染在该坐标的其他元素（误选相邻项）。
+            option_element = await self._scroll_menu_option_into_view(option_element, option_text, eid_str, timeout_ms)
             await option_element.click(force=True)
 
         async def _menu_closed() -> bool:

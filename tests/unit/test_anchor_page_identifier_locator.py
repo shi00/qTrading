@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.e2e.helpers import anchor_page
 from tests.e2e.helpers.anchor_page import AnchorPage
 from ui.testing.e2e_ids import EIDS
 
@@ -145,7 +146,7 @@ class _FakeHandle:
 
     ``box`` 供 C8 面板锚定滚动读取 bbox：默认完全在视口内（900 高视口），
     显式传 ``None`` 模拟句柄随重渲染瞬时失效（bounding_box 返回 None）。
-    ``panel_box`` 模拟选项祖先链 ``overflow-y: scroll`` group 节点的面板 rect
+    ``panel_box`` 模拟选项祖先链最近的 ``flt-semantics[role=group]`` 节点面板 rect
     （默认 None = 未识别面板 → C8 退回视口判据）。
     """
 
@@ -158,6 +159,7 @@ class _FakeHandle:
         self.box = box
         self.panel_box = panel_box
         self.evaluate_calls = 0
+        self.scripts: list[str] = []
 
     async def click(self, force: bool = False) -> None:
         self._visible = False
@@ -169,8 +171,9 @@ class _FakeHandle:
         return self.box
 
     async def evaluate(self, script: str, arg: Any = None) -> dict[str, float] | None:
-        # C8 面板识别探针（祖先链 overflow-y: scroll group 节点 rect）
+        # C8 面板识别探针（选项祖先链 role=group 节点 rect）
         self.evaluate_calls += 1
+        self.scripts.append(script)
         return self.panel_box
 
 
@@ -488,6 +491,8 @@ async def test_is_checked_false_when_not_checked(value: str | None) -> None:
 
 # probe3 实测面板 rect（1400×900 视口，本地实证 [229,621] × [8,892]）
 _PANEL_BOX: dict[str, float] = {"x": 229.0, "y": 8.0, "width": 392.0, "height": 884.0}
+# 面板只占视口上半部分：构造「选项在视口内但落在面板外」的残留 rect 场景
+_PANEL_UPPER_BOX: dict[str, float] = {"x": 229.0, "y": 200.0, "width": 392.0, "height": 300.0}
 
 
 @pytest.mark.asyncio
@@ -548,6 +553,86 @@ async def test_select_option_wheels_at_panel_center_when_option_out_of_panel() -
 
 
 @pytest.mark.asyncio
+async def test_select_option_wheels_when_option_in_viewport_but_out_of_panel() -> None:
+    """C8 回归（面板判据严于视口）：选项 rect 在视口内但落在面板外 → 仍须滚动。
+
+    这正是误选相邻项的原始场景：残留 rect 落在视口内，只按视口判据会直接 force
+    点击，命中渲染在该坐标的其他元素，必须改以面板为门。
+    """
+    ap, page = _make_ap()
+    residual = _FakeHandle(
+        box={"x": 300.0, "y": 700.0, "width": 200.0, "height": 36.0},
+        panel_box=dict(_PANEL_UPPER_BOX),
+    )
+    inside = _FakeHandle(
+        box={"x": 300.0, "y": 400.0, "width": 200.0, "height": 36.0},
+        panel_box=dict(_PANEL_UPPER_BOX),
+    )
+    _stub_select_option(ap, residual)
+    ap._find_option_element = AsyncMock(side_effect=[residual, inside])  # type: ignore[method-assign]
+
+    await ap.select_option(_COMPLEX, "stock_basic", timeout_ms=1000)
+
+    # wheel 锚点 = 面板中心 (229+392/2, 200+300/2) = (425, 350)
+    assert page.mouse.moves[-1] == (425.0, 350.0), "视口内但面板外的残留 rect 不得直接点击"
+    assert page.mouse.wheels, "面板外选项须经物理滚轮滚入面板"
+    assert residual._visible, "残留 rect 不得被点击"
+    assert not inside._visible, "滚入面板后应点击重定位的句柄"
+
+
+class _ProbeFailingHandle(_FakeHandle):
+    """面板探针抛错（句柄随菜单重渲染失效）的选项句柄。"""
+
+    async def evaluate(self, script: str, arg: Any = None) -> dict[str, float] | None:
+        self.evaluate_calls += 1
+        self.scripts.append(script)
+        raise RuntimeError("handle detached during panel probe")
+
+
+@pytest.mark.asyncio
+async def test_select_option_fails_closed_when_panel_probe_errors() -> None:
+    """C8 fail-closed：探针异常 ≠ 无面板，不得退回视口判据点击残留 rect。"""
+    ap, page = _make_ap()
+    stale = _ProbeFailingHandle(box={"x": 300.0, "y": 700.0, "width": 200.0, "height": 36.0})
+    fresh = _FakeHandle(
+        box={"x": 300.0, "y": 400.0, "width": 200.0, "height": 36.0},
+        panel_box=dict(_PANEL_BOX),
+    )
+    _stub_select_option(ap, stale)
+    ap._find_option_element = AsyncMock(side_effect=[stale, fresh])  # type: ignore[method-assign]
+
+    await ap.select_option(_COMPLEX, "stock_basic", timeout_ms=1000)
+
+    assert page.mouse.wheels == [], "探测失败应重取句柄，不得按视口判据静默点击残留 rect"
+    assert stale._visible, "探针失败的残留 rect 不得被点击"
+    assert not fresh._visible, "重取句柄后应正常点击"
+
+
+@pytest.mark.asyncio
+async def test_menu_panel_probe_js_uses_role_group_and_scans_upward() -> None:
+    """C8 探针判据回归：role=group 祖先 + 高度不足继续上溯 + 无 overflow style 判据。
+
+    probe3 曾以 ``overflow-y: scroll`` 识别面板（probe6 证伪：Flutter 自绘滚动不更新
+    DOM overflow，实际 style 为 ``overflow: hidden``）；探针不得回退该判据。
+    """
+    ap, _page = _make_ap()
+    handle = _FakeHandle(
+        box={"x": 300.0, "y": 400.0, "width": 200.0, "height": 36.0},
+        panel_box=dict(_PANEL_BOX),
+    )
+    _stub_select_option(ap, handle)
+
+    await ap.select_option(_COMPLEX, "代码", timeout_ms=1000)
+
+    assert handle.scripts, "面板识别必须执行祖先链探针"
+    script = handle.scripts[0]
+    assert "getAttribute('role') === 'group'" in script
+    assert "overflow" not in script, "不得以 overflow style 判据识别面板（probe6 证伪）"
+    assert "r.height >= minHeight" in script, "面板高度必须容得下选项（排除内层包装容器）"
+    assert "for (let i = 0; i < 8 && p; i++)" in script, "高度不足的祖先须继续上溯，不得中止扫描"
+
+
+@pytest.mark.asyncio
 async def test_select_option_scrolls_out_of_view_option_into_viewport() -> None:
     """C8（面板未识别退化视口判据）：选项在视口外 → 物理滚轮向下滚动 → 重定位再点击。"""
     ap, page = _make_ap()
@@ -591,20 +676,19 @@ async def test_select_option_raises_when_option_never_within_panel() -> None:
 
 
 class _StubbornHandle:
-    """模拟点击被吞：前 stubborn_reads 次 is_visible 仍 True（菜单不收合），此后 False。"""
+    """模拟首次点击被吞：第一次 click 后菜单仍展开，重试 click 后才收合。"""
 
-    def __init__(self, stubborn_reads: int) -> None:
-        self._remaining = stubborn_reads
+    def __init__(self) -> None:
+        self.clicks = 0
+        self._visible = True
 
     async def click(self, force: bool = False) -> None:
-        # 点击后最多再顽固 1 次（重试 attempt 内首查仍可见 → 下一次收合）
-        self._remaining = min(self._remaining, 1)
+        self.clicks += 1
+        if self.clicks >= 2:
+            self._visible = False
 
     async def is_visible(self) -> bool:
-        if self._remaining <= 0:
-            return False
-        self._remaining -= 1
-        return True
+        return self._visible
 
     async def bounding_box(self) -> dict[str, float] | None:
         return _DEFAULT_HANDLE_BOX
@@ -613,16 +697,30 @@ class _StubbornHandle:
         return None  # 面板未识别 → C8 退回视口判据
 
 
+class _FakeClock:
+    """单调时钟 stub：每次读取前进 0.1s，使时间窗口按调用次数确定收敛。"""
+
+    def __init__(self) -> None:
+        self._now = 0.0
+
+    def monotonic(self) -> float:
+        self._now += 0.1
+        return self._now
+
+
 @pytest.mark.asyncio
-async def test_select_option_retries_click_when_menu_not_collapsed() -> None:
-    """收合确认（坑点 6）：主点击被吞菜单不收合 → 空等耗尽走 retry_until_triggered
-    重试点击，确认收合后正常返回（while-else 分支覆盖）。"""
+async def test_select_option_retries_click_when_menu_not_collapsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """收合确认（坑点 6）：首次点击被吞菜单不收合 → 空等耗尽走 retry_until_triggered
+    重试点击，确认收合后正常返回（while-else 的 else 分支覆盖）。"""
     ap, _page = _make_ap()
-    handle = _StubbornHandle(stubborn_reads=30)  # > 空等窗口 2s / 100ms 轮询数，确保走 else 分支
+    handle = _StubbornHandle()
     _stub_select_option(ap, handle)
+    # 单调时钟按读取次数前进：2s 空等窗口在 20 次轮询内确定耗尽，测试不实等 2s
+    monkeypatch.setattr(anchor_page, "time", _FakeClock())
 
     await ap.select_option(_COMPLEX, "代码", timeout_ms=1000)
 
+    assert handle.clicks == 2, "空等耗尽后必须走 retry 重试点击一次"
     assert not await handle.is_visible(), "重试点击后菜单应收合"
 
 

@@ -45,7 +45,7 @@ class _FakeHandle:
         return {"x": 500.0, "y": 400.0, "width": 200.0, "height": 36.0}
 
     async def evaluate(self, script: str, arg: Any = None) -> dict[str, float] | None:
-        # C8 面板识别探针（祖先链 overflow-y: scroll group 节点 rect）：
+        # C8 面板识别探针（选项祖先链最近的 flt-semantics[role=group] 节点 rect）：
         # 默认未识别面板（返回 None → 退回视口判据），panel_box 场景回显面板 rect
         return self.panel_box
 
