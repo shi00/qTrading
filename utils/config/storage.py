@@ -529,12 +529,17 @@ def compare_and_save_model_management(
     config_revision+1 与 last_config_commit 回执随同一次 os.replace 落盘。
     结果明确前不自动重试、不轮换凭据、不回滚（由调用方决定下一步）。
 
-    update_security_state=False（save_draft 草稿路径）：安全子域以磁盘现值为准，
-    payload 携带的安全键被忽略（草稿不能修改 security_state）。
+    update_security_state=False（save_draft 草稿路径）：payload 携带的安全键被
+    无条件剥离（草稿不能修改 security_state）；磁盘已有安全域时回填磁盘现值，
+    首次合法初始化（磁盘无安全域）交由 schema 默认值落出明确空安全状态
+    （零修订 / 空 grants / 空撤销）。
     update_security_state=True（安全命令专用路径）：payload 安全子域原样提交。
 
     F08：磁盘上已初始化的安全子域存在结构损坏（安全键缺失等）时确定不提交
     （not_committed），禁止把损坏经 Pydantic 默认值洗白为合法空安全态后落盘。
+
+    F09：剥离不依赖磁盘已有安全域——无文件 / 旧配置首次初始化时 payload 自带
+    grants 同样不得经草稿入口写入（授权只能来自安全命令）。
     """
     _migrate_config_location()
     try:
@@ -567,8 +572,13 @@ def compare_and_save_model_management(
                     return ModelManagementSaveResult(status="revision_conflict", current_revision=current_revision)
 
                 merged_mm = copy.deepcopy(payload)
-                if not update_security_state and isinstance(disk_mm, dict) and "security_state" in disk_mm:
-                    merged_mm["security_state"] = copy.deepcopy(disk_mm["security_state"])
+                if not update_security_state:
+                    # F09：草稿路径无条件剥离输入安全子域（授权只能经安全命令修改），
+                    # 不依赖磁盘已有安全域；磁盘已有安全域时以磁盘现值为准，首次合法
+                    # 初始化（磁盘无安全域）保持缺失，由 schema 默认值落出明确空安全态。
+                    merged_mm.pop("security_state", None)
+                    if isinstance(disk_mm, dict) and "security_state" in disk_mm:
+                        merged_mm["security_state"] = copy.deepcopy(disk_mm["security_state"])
 
                 committed_revision = current_revision + 1
                 merged_mm["config_revision"] = committed_revision
