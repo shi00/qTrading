@@ -994,3 +994,156 @@ class TestAnalyze:
         )
         asyncio.run(svc.analyze("000001.SZ", regenerate=True))
         ai.analyze_news_risk.assert_awaited_once()
+
+
+# --- F39 冻结分派（profile 与执行共用同版配置） ---
+
+
+def _f39_unified_snapshot(revision: int, security_revision: int = 3) -> MagicMock:
+    """构造 active 态 unified 快照（含 news_risk 路由与候选连接），config_revision 可变。"""
+    snap = MagicMock()
+    snap.migration_state = "active"
+    snap.config_revision = revision
+    snap.security_revision = security_revision
+    snap.connections = (
+        {
+            "connection_id": "c1",
+            "adapter_kind": "litellm_chat",
+            "provider": "deepseek",
+            "model": "chat",
+            "api_base": "https://api.example.com",
+            "credential_version": "v1",
+            "context_window": 8192,
+            "adapter_options": {"temperature": 0.2},
+        },
+    )
+    snap.scenario_routes = (
+        {
+            "scenario_id": "news_risk",
+            "enabled": True,
+            "candidates": ["c1"],
+            "task_routes": {},
+        },
+    )
+    return snap
+
+
+def _f39_dispatch(revision: int) -> MagicMock:
+    dispatch = MagicMock()
+    dispatch.snapshot.config_revision = revision
+    return dispatch
+
+
+def _install_f39(monkeypatch, snapshots: list[MagicMock], dispatches: list[MagicMock | None]):
+    """安装冻结测试双读取锚：快照序列 + resolve_executor 返回序列。"""
+    fake = MagicMock()
+    fake.get_snapshot = AsyncMock(side_effect=snapshots)
+    monkeypatch.setattr(module, "_new_config_service", lambda: fake)
+    from services.ai_service import scenario_dispatch
+
+    monkeypatch.setattr(scenario_dispatch, "resolve_executor", AsyncMock(side_effect=dispatches))
+
+
+class TestFreezeProfileAndDispatch:
+    """F39：_freeze_profile_and_dispatch 对齐 / 重试 / 降级 / 取消传播。"""
+
+    @pytest.mark.asyncio
+    async def test_aligned_returns_frozen_dispatch_and_unified_profile(self, monkeypatch):
+        snapshot = _f39_unified_snapshot(revision=5)
+        dispatch = _f39_dispatch(revision=5)
+        _install_f39(monkeypatch, [snapshot], [dispatch])
+        profile, frozen, fd = await NewsInsightService._freeze_profile_and_dispatch()
+        assert frozen is True
+        assert fd is dispatch
+        assert profile == NewsInsightService._analysis_profile_from_snapshot(snapshot)
+
+    @pytest.mark.asyncio
+    async def test_revision_mismatch_retries_and_aligns(self, monkeypatch):
+        """报告竞争场景回归：第 1 轮指纹快照(rev=1)与分派快照(rev=2)不同版（两次读取间
+        保存配置），重试后第 2 轮同版 → 冻结，指纹取第 2 轮快照（与执行同版）。"""
+        snap_a = _f39_unified_snapshot(revision=1, security_revision=3)
+        snap_b = _f39_unified_snapshot(revision=2, security_revision=4)
+        _install_f39(monkeypatch, [snap_a, snap_b], [_f39_dispatch(revision=2), _f39_dispatch(revision=2)])
+        profile, frozen, fd = await NewsInsightService._freeze_profile_and_dispatch()
+        assert frozen is True
+        assert fd is not None
+        assert fd.snapshot.config_revision == 2
+        assert profile == NewsInsightService._analysis_profile_from_snapshot(snap_b)
+
+    @pytest.mark.asyncio
+    async def test_align_exhausted_falls_back_unfrozen(self, monkeypatch):
+        snapshots = [_f39_unified_snapshot(revision=r) for r in (1, 2, 3)]
+        dispatches = [_f39_dispatch(revision=r + 10) for r in (1, 2, 3)]
+        _install_f39(monkeypatch, snapshots, dispatches)
+        _profile, frozen, fd = await NewsInsightService._freeze_profile_and_dispatch()
+        assert frozen is False
+        assert fd is None
+
+    @pytest.mark.asyncio
+    async def test_dispatch_none_frozen_for_legacy_domain(self, monkeypatch):
+        """新链未命中（dispatch=None）：指纹域与准入域不相交，直接冻结为旧链。"""
+        snapshot = _f39_unified_snapshot(revision=5)
+        _install_f39(monkeypatch, [snapshot], [None])
+        profile, frozen, fd = await NewsInsightService._freeze_profile_and_dispatch()
+        assert frozen is True
+        assert fd is None
+        assert profile == NewsInsightService._analysis_profile_from_snapshot(snapshot)
+
+    @pytest.mark.asyncio
+    async def test_snapshot_read_failure_with_no_dispatch_frozen_legacy_profile(self, monkeypatch):
+        """快照读取失败 + 新链未命中 → 旧链文本指纹 + 冻结（不伪装 unified，R21）。"""
+        boom = MagicMock()
+        boom.get_snapshot = AsyncMock(side_effect=RuntimeError("io"))
+        monkeypatch.setattr(module, "_new_config_service", lambda: boom)
+        from services.ai_service import scenario_dispatch
+
+        monkeypatch.setattr(scenario_dispatch, "resolve_executor", AsyncMock(return_value=None))
+        monkeypatch.setattr(ConfigHandler, "get_llm_config", lambda: {"provider": "deepseek", "model": "chat"})
+        monkeypatch.setattr(ConfigHandler, "get_setting", lambda key, default=None: None)
+        profile, frozen, fd = await NewsInsightService._freeze_profile_and_dispatch()
+        assert frozen is True
+        assert fd is None
+        assert profile == "cloud:deepseek/chat"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self, monkeypatch):
+        """R2：冻结环内取消必须传播。"""
+        boom = MagicMock()
+        boom.get_snapshot = AsyncMock(side_effect=asyncio.CancelledError())
+        monkeypatch.setattr(module, "_new_config_service", lambda: boom)
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await NewsInsightService._freeze_profile_and_dispatch()
+        # R2 强断言：CancelledError 类型原样传播，未被包装/替换（excinfo.type 身份校验）。
+        assert excinfo.type is asyncio.CancelledError
+
+
+class TestAnalyzeFrozenDispatchCarried:
+    """F39 集成：analyze 经冻结方法取指纹并把冻结载荷随请求传给 AI 入口。"""
+
+    def test_request_carries_frozen_load(self, monkeypatch):
+        snapshot = _f39_unified_snapshot(revision=5)
+        dispatch = _f39_dispatch(revision=5)
+        _install_f39(monkeypatch, [snapshot], [dispatch])
+        ai = _make_ai()
+        svc, _dao, _unused_ai = _make_svc_with_fake_load(
+            monkeypatch, ai=ai, evidence=[EvidenceDocument(news_id=1, content_hash="h")]
+        )
+        asyncio.run(svc.analyze("000001.SZ"))
+        ai.analyze_news_risk.assert_awaited_once()
+        request = ai.analyze_news_risk.await_args.args[0]
+        assert request.dispatch_frozen is True
+        assert request.frozen_dispatch is dispatch
+        assert request.analysis_profile == NewsInsightService._analysis_profile_from_snapshot(snapshot)
+
+    def test_request_carries_unfrozen_after_exhaustion(self, monkeypatch):
+        snapshots = [_f39_unified_snapshot(revision=r) for r in (1, 2, 3)]
+        dispatches = [_f39_dispatch(revision=r + 10) for r in (1, 2, 3)]
+        _install_f39(monkeypatch, snapshots, dispatches)
+        ai = _make_ai()
+        svc, _dao, _unused_ai = _make_svc_with_fake_load(
+            monkeypatch, ai=ai, evidence=[EvidenceDocument(news_id=1, content_hash="h")]
+        )
+        asyncio.run(svc.analyze("000001.SZ"))
+        request = ai.analyze_news_risk.await_args.args[0]
+        assert request.dispatch_frozen is False
+        assert request.frozen_dispatch is None

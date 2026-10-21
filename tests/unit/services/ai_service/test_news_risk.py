@@ -664,3 +664,109 @@ class TestAnalyzeNewsRiskScenarioChain:
             await analyzer.analyze_news_risk(_request())
         # R2 强断言：CancelledError 类型原样传播，未被包装/替换（excinfo.type 身份校验）。
         assert excinfo.type is asyncio.CancelledError
+
+
+class TestAnalyzeNewsRiskFrozenDispatch:
+    """F39：冻结分派载荷消费（编排层单点冻结随 request 携带，执行侧不再自行分派读盘）。"""
+
+    @pytest.mark.asyncio
+    async def test_frozen_dispatch_executes_scenario_directly(self):
+        """冻结新链 dispatch → 直接走 Executor，不再调用 _resolve_news_risk_dispatch。"""
+        dispatch = TestAnalyzeNewsRiskScenarioChain._make_dispatch(
+            TestAnalyzeNewsRiskScenarioChain._exec_result(
+                "succeeded", output=TestAnalyzeNewsRiskScenarioChain._validated_output()
+            )
+        )
+        svc = _service_stub()
+        analyzer = _analyzer(svc)
+        request = _request()
+        request.dispatch_frozen = True
+        request.frozen_dispatch = dispatch
+        with patch(
+            "services.ai_service.news_risk._resolve_news_risk_dispatch",
+            AsyncMock(side_effect=AssertionError("frozen path must not self-resolve dispatch")),
+        ) as resolve_mock:
+            result = await analyzer.analyze_news_risk(request)
+        resolve_mock.assert_not_awaited()
+        dispatch.executor.execute.assert_awaited_once()
+        svc._chat_completion.assert_not_awaited()
+        assert result.analysis_status == "analyzed_with_events"
+
+    @pytest.mark.asyncio
+    async def test_frozen_legacy_dispatch_runs_fresh_admission(self):
+        """冻结旧链域（frozen_dispatch=None）→ 仅准入新鲜判定，不再调 resolve_executor。"""
+        svc = _service_stub()
+        analyzer = _analyzer(svc)
+        request = _request()
+        request.dispatch_frozen = True
+        request.frozen_dispatch = None
+        with (
+            patch(
+                "services.ai_service.scenario_dispatch.evaluate_legacy_admission",
+                AsyncMock(return_value="allowed"),
+            ),
+            patch(
+                "services.ai_service.scenario_dispatch.resolve_executor",
+                AsyncMock(side_effect=AssertionError("frozen legacy must not re-resolve dispatch")),
+            ),
+        ):
+            result = await analyzer.analyze_news_risk(request)
+        svc._chat_completion.assert_awaited_once()
+        assert result.analysis_status == "analyzed_with_events"
+        assert result.execution_metadata is None
+
+    @pytest.mark.asyncio
+    async def test_frozen_legacy_admission_blocked_zero_egress(self):
+        """冻结旧链 + 准入 draining_stop → LegacyDispatchBlockedError，零旧链传输（R21）。"""
+        svc = _service_stub()
+        analyzer = _analyzer(svc)
+        request = _request()
+        request.dispatch_frozen = True
+        request.frozen_dispatch = None
+        with (
+            patch(
+                "services.ai_service.scenario_dispatch.evaluate_legacy_admission",
+                AsyncMock(return_value="draining_stop"),
+            ),
+            pytest.raises(LegacyDispatchBlockedError) as excinfo,
+        ):
+            await analyzer.analyze_news_risk(request)
+        assert excinfo.value.admission == "draining_stop"
+        svc._chat_completion.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_frozen_legacy_admission_read_failed_fail_closed(self):
+        """F05 fail-closed 保留：冻结旧链准入读取异常 → read_failed 阻断传出。"""
+        svc = _service_stub()
+        analyzer = _analyzer(svc)
+        request = _request()
+        request.dispatch_frozen = True
+        request.frozen_dispatch = None
+        with (
+            patch(
+                "services.ai_service.scenario_dispatch.evaluate_legacy_admission",
+                AsyncMock(side_effect=RuntimeError("io")),
+            ),
+            pytest.raises(LegacyDispatchBlockedError) as excinfo,
+        ):
+            await analyzer.analyze_news_risk(request)
+        assert excinfo.value.admission == "read_failed"
+        svc._chat_completion.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unfrozen_request_keeps_self_dispatch(self):
+        """dispatch_frozen=False（E2E fake / 旧调用默认）→ 既有自行分派路径不变。"""
+        dispatch = TestAnalyzeNewsRiskScenarioChain._make_dispatch(
+            TestAnalyzeNewsRiskScenarioChain._exec_result(
+                "succeeded", output=TestAnalyzeNewsRiskScenarioChain._validated_output()
+            )
+        )
+        svc = _service_stub()
+        analyzer = _analyzer(svc)
+        with patch(
+            "services.ai_service.news_risk._resolve_news_risk_dispatch",
+            AsyncMock(return_value=dispatch),
+        ):
+            result = await analyzer.analyze_news_risk(_request())
+        dispatch.executor.execute.assert_awaited_once()
+        assert result.analysis_status == "analyzed_with_events"

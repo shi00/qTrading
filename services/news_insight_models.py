@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import datetime
+import typing
 from dataclasses import dataclass, field
 
 # Prompt/schema 版本：参与 input_hash (§11)。变更事件 schema / 首版 Prompt 时递增。
@@ -82,6 +83,14 @@ class NewsInsightRequest:
     coverage: dict = field(default_factory=dict)
     analysis_profile: str = ""
     prompt_version: str = NEWS_RISK_PROMPT_VERSION
+    # F39 冻结分派载荷：``dispatch_frozen=True`` 时 ``frozen_dispatch`` 为编排层
+    # 冻结的分派结果（``ScenarioDispatch`` 或 None=新链未命中/旧链域），分析子模块
+    # 不再自行分派读盘——保证缓存指纹（``analysis_profile``）与实际推理同版；
+    # 默认 False = 未冻结（既有自行分派语义，E2E fake / 旧调用零破坏）。
+    # 类型说明：``ScenarioDispatch | None``（scenario_dispatch 位于同层 ai_service，
+    # 此处仅 typing.Any 承载，避免 models 反向感知执行域细节）。
+    dispatch_frozen: bool = False
+    frozen_dispatch: typing.Any = None
 
 
 @dataclass
