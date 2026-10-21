@@ -956,6 +956,37 @@ def ModelManagementPanel(
 
     selected_tab, set_selected_tab = ft.use_state(_TAB_CONNECTIONS)
 
+    # 三个子页内容全量构造、条件渲染当前页（tab_pages[selected_tab]）。
+    # BUG 修复：此处原使用 ft.TabBarView(expand=True)，但其 Flutter 侧是 page-view
+    # viewport，要求有界主轴约束；本 panel 处于 AIBrainTab 的
+    # Column(scroll=AUTO)（子项主轴约束无界）内，page-view 布局崩溃产生 NaN 并沿
+    # 父链传染，导致 AI 大脑整层不绘制、hit test 失效（语义树仍完整，E2E 无法拦截；
+    # 桌面客户端 release 模式吞掉布局异常，仅 UIA 呈现 Infinity 矩形）。
+    # 故改为普通 Column 条件渲染：仅渲染当前选中页，切换由 set_selected_tab 驱动
+    # 重渲染完成，TabBar 视觉/交互与 E2E 锚点全部保留。
+    tab_pages = [
+        ft.Column(
+            [_build_connections_view(conn_state, connections_vm, compact=compact)],
+            scroll=ft.ScrollMode.AUTO,
+        ),
+        ft.Column(
+            [_build_routes_view(routes_state, routes_vm, connections_vm, compact=compact)],
+            scroll=ft.ScrollMode.AUTO,
+        ),
+        ft.Column(
+            [
+                _build_usage_view(
+                    usage_state,
+                    usage_vm,
+                    conn_state.connections,
+                    file_picker,
+                    show_snack_callback,
+                )
+            ],
+            scroll=ft.ScrollMode.AUTO,
+        ),
+    ]
+
     # V1 三件套：selected_index/on_change 在 ft.Tabs 上（ft.TabBar 无这两个参数）。
     tabs = ft.Tabs(
         length=3,
@@ -988,31 +1019,7 @@ def ModelManagementPanel(
                         ),
                     ]
                 ),
-                ft.TabBarView(
-                    expand=True,
-                    controls=[
-                        ft.Column(
-                            [_build_connections_view(conn_state, connections_vm, compact=compact)],
-                            scroll=ft.ScrollMode.AUTO,
-                        ),
-                        ft.Column(
-                            [_build_routes_view(routes_state, routes_vm, connections_vm, compact=compact)],
-                            scroll=ft.ScrollMode.AUTO,
-                        ),
-                        ft.Column(
-                            [
-                                _build_usage_view(
-                                    usage_state,
-                                    usage_vm,
-                                    conn_state.connections,
-                                    file_picker,
-                                    show_snack_callback,
-                                )
-                            ],
-                            scroll=ft.ScrollMode.AUTO,
-                        ),
-                    ],
-                ),
+                tab_pages[selected_tab],
             ],
         ),
     )

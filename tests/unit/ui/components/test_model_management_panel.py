@@ -14,8 +14,10 @@
   桌面经线程池写路径，C-1）。
 """
 
+import ast
 import asyncio
 import datetime as dt
+import inspect
 from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
@@ -25,9 +27,10 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import flet as ft
 import pytest
+from flet.components.component import Component
 
 from core.i18n import Message
-from tests.unit.ui.component_renderer import FakePage
+from tests.unit.ui.component_renderer import FakePage, make_component, render_once, run_mount_effects
 from ui.components import model_management_panel as panel_module
 from ui.components.model_management_panel import (
     _build_attempts,
@@ -51,12 +54,14 @@ from ui.viewmodels.model_connections_view_model import (
     ConnectionRow,
     ConnectionsSummary,
     ModelConnectionsState,
+    ModelConnectionsViewModel,
 )
-from ui.viewmodels.model_routes_view_model import ModelRoutesState
+from ui.viewmodels.model_routes_view_model import ModelRoutesState, ModelRoutesViewModel
 from ui.viewmodels.model_usage_view_model import (
     ORIGIN_TEST,
     BudgetSummary,
     ModelUsageState,
+    ModelUsageViewModel,
     UsageFilters,
 )
 
@@ -759,6 +764,94 @@ class TestBuildSummaryRow:
         assert len(row.controls) == 5
 
 
+class TestModelManagementPanelRuntime:
+    """ModelManagementPanel 组件运行时渲染（TabBarView → 条件渲染修复的行为级验证）。
+
+    既有测试均针对模块级纯函数与 AST 静态守卫；本类驱动组件函数体真实执行，
+    覆盖 tab_pages 条件渲染结构与页签切换重渲染行为（CI diff-coverage L957 缺口）。
+    """
+
+    @staticmethod
+    def _resolve_tree(control: Any) -> Any:
+        """递归解析 flet 复合组件：@ft.component 函数组件（如 DashboardCard）调用
+        返回 Component 包装，经 render_once 驱动至真实控件树。"""
+        while isinstance(control, Component):
+            control = render_once(control)
+        return control
+
+    @classmethod
+    def _find_control(cls, root: Any, ty: type) -> Any:
+        """在控件树中递归查找指定类型的首个实例（遍历 controls 与 content 两条链）。"""
+        if isinstance(root, ty):
+            return root
+        children: list[Any] = list(getattr(root, "controls", None) or [])
+        content = getattr(root, "content", None)
+        if content is not None:
+            children.append(content)
+        for child in children:
+            found = cls._find_control(child, ty)
+            if found is not None:
+                return found
+        return None
+
+    @classmethod
+    def _render_panel(cls, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any]:
+        """构造三个 VM 并驱动一次组件渲染（page 置 None 使 file-picker effect 走 noop 分支）。
+
+        Returns:
+            (component, tabs)：组件实例与渲染树中的 ft.Tabs 控件。
+        """
+        monkeypatch.setattr(panel_module, "_get_page", lambda: None)
+        component = make_component(
+            panel_module.ModelManagementPanel,
+            connections_vm=ModelConnectionsViewModel(MagicMock()),
+            routes_vm=ModelRoutesViewModel(MagicMock()),
+            usage_vm=ModelUsageViewModel(),
+            show_snack_callback=MagicMock(),
+            compact=False,
+        )
+        run_mount_effects(component, page=FakePage())
+        root = cls._resolve_tree(render_once(component))
+        tabs = cls._find_control(root, ft.Tabs)
+        assert tabs is not None, "渲染树中未找到 ft.Tabs"
+        return component, tabs
+
+    def test_renders_tabbar_with_single_conditional_page(self, monkeypatch: pytest.MonkeyPatch):
+        """修复结构：Tabs(content=[TabBar, 当前页])，无 TabBarView，默认选中连接页。"""
+        _, tabs = self._render_panel(monkeypatch)
+        assert tabs.selected_index == panel_module._TAB_CONNECTIONS
+        content = tabs.content
+        assert isinstance(content, ft.Column)
+        # 条件渲染：TabBar + 仅当前选中页，无 TabBarView（运行时级，与 AST 静态守卫互补）
+        assert len(content.controls) == 2
+        tab_bar, current_page = content.controls
+        assert isinstance(tab_bar, ft.TabBar)
+        assert len(tab_bar.tabs) == 3
+        assert not any(isinstance(c, ft.TabBarView) for c in content.controls)
+        assert isinstance(current_page, ft.Column)
+        assert current_page.scroll == ft.ScrollMode.AUTO
+
+    def test_tab_switch_rerenders_selected_page(self, monkeypatch: pytest.MonkeyPatch):
+        """on_change 驱动 set_selected_tab 重渲染：单页条件切换、无 TabBarView。"""
+        component, tabs = self._render_panel(monkeypatch)
+        content = tabs.content
+        assert isinstance(content, ft.Column)
+        page_before = content.controls[1]
+        # 模拟选中「场景配置」页签：控件 selected_index 已变，on_change 事件携带其值
+        tabs.selected_index = panel_module._TAB_ROUTES
+        tabs.on_change(SimpleNamespace(control=tabs))
+        root = self._resolve_tree(render_once(component))
+        tabs2 = self._find_control(root, ft.Tabs)
+        assert tabs2 is not None
+        assert tabs2.selected_index == panel_module._TAB_ROUTES
+        content2 = tabs2.content
+        assert isinstance(content2, ft.Column)
+        assert len(content2.controls) == 2
+        # 条件渲染：当前页为新构造的 routes 页（对象已替换），TabBarView 仍不存在
+        assert content2.controls[1] is not page_before
+        assert not any(isinstance(c, ft.TabBarView) for c in content2.controls)
+
+
 class TestBuildConnectionEditor:
     def _editor(self, monkeypatch, *, commit_unknown_pending: bool):
         form_mock = MagicMock(return_value=ft.Text("form-stub"))
@@ -863,3 +956,32 @@ class TestUsageViewRetentionAndMessage:
             _usage_state(message=Message("model_usage_export_ready")), MagicMock(), [], None, MagicMock()
         )
         assert I18n.get("model_usage_export_ready") in _texts(view)
+
+
+class TestTabsStructureGuard:
+    """防回归守护：panel 页签结构禁止使用 ft.TabBarView（AI 大脑空白 BUG）。
+
+    BUG 现场：panel 曾用 ``ft.TabBarView(expand=True)`` 承载三个子页，而宿主
+    AIBrainTab 根为 ``Column(scroll=AUTO)``（scrollable 列表的子项主轴约束无界）。
+    TabBarView 的 Flutter 侧 page-view viewport 在无界主轴约束下布局崩溃产生
+    NaN 并沿父链传染，导致 AI 大脑整层不绘制、hit test 失效；语义树仍完整
+    （CanvasKit E2E 语义断言无法拦截），桌面客户端 release 模式吞掉布局异常，
+    仅 UIA 呈现 Infinity 矩形。修复为条件渲染（``tab_pages[selected_tab]``）。
+
+    断言用 AST 调用点扫描（注释/docstring 不进 AST），避免源码注释中的
+    「ft.TabBarView」字样误命中。
+    """
+
+    def test_panel_source_must_not_use_tabbar_view(self):
+        src = inspect.getsource(panel_module)
+        tree = ast.parse(src)
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "TabBarView"
+        ]
+        assert not calls, (
+            "model_management_panel 禁止使用 ft.TabBarView：其 Flutter 侧 page-view "
+            "viewport 在宿主 scrollable Column（无界主轴约束）下布局崩溃，NaN 传染"
+            "导致整层不绘制。子页切换请用条件渲染（tab_pages[selected_tab]）。"
+        )

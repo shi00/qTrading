@@ -10,7 +10,10 @@
    dispatched 过期转 held_unconfirmed / epoch 递增后旧 owner 条件写入失权；
 3. ``TestLateDeltaIdempotency``：迟到差额幂等整体推进 + R22 乱序水位取最大；
 4. ``TestTwoScopesIsolation``：scenario / connection 两 scope 汇总行独立不相加（§10）；
-5. ``TestConcurrentMixedOpsNoDeadlock``：同月锁序并发无死锁（D2）。
+5. ``TestConcurrentMixedOpsNoDeadlock``：同月锁序并发无死锁（D2）；
+6. ``TestF22ReservationLifecycle``：预留状态机三条回归链的预算闭环（F22）；
+7. ``TestF23OwnerFencing``：owner/epoch fencing 贯穿账本写入口（F23）——
+   失权 owner 四入口全拒绝 / 错误预留 ID 零派发 / 合法恢复凭活跃预留补记。
 
 依赖与隔离策略对齐 test_embedded_pg_dao_rw.py：
 - ``real_embedded_pg``（conftest session fixture，真实 sidecar PG）
@@ -192,6 +195,17 @@ async def _fetch_reservations(dao: AIUsageDao, invocation_id: str) -> list[dict]
     return list(row[0])
 
 
+async def _seed_backing_reservation(dao: AIUsageDao, attempt_id: str) -> str:
+    """为缺行结算登记活跃预留背书（F23 fencing）。
+
+    invocation_id 对齐 ``_make_settle_kwargs`` 约定（``f"inv-{attempt_id}"``）；
+    金额 0.00 不挤占用例自身的预算口径。返回 reservation_id。
+    """
+    reserved = await dao.try_reserve(**_make_reserve_kwargs(f"inv-{attempt_id}", amount="0.00"))
+    assert reserved is not None, f"背书预留登记失败: inv-{attempt_id}"
+    return reserved.reservation_id
+
+
 class TestConcurrentTryReserve:
     """场景 1（D3）：并发 try_reserve 预算内仅一个获准；三口径余额。"""
 
@@ -209,8 +223,9 @@ class TestConcurrentTryReserve:
     async def test_reserve_blocked_by_settled_usage(self, ledger_dao: AIUsageDao):
         """已结算口径：settle 0.80 后，预算 1.00 内预留 0.50 拒绝、0.20 获准。"""
         month = _current_month()
+        rid = await _seed_backing_reservation(ledger_dao, "att-settled")
         settled = await ledger_dao.settle_attempt_usage(
-            **_make_settle_kwargs("att-settled", month=month, cost_cny="0.80")
+            **{**_make_settle_kwargs("att-settled", month=month, cost_cny="0.80"), "reservation_id": rid}
         )
         assert settled is True
 
@@ -360,11 +375,18 @@ class TestLateDeltaIdempotency:
     async def test_late_revision_accounts_delta_not_total(self, ledger_dao: AIUsageDao, clean_ledger: CacheManager):
         """rev=1 cost 0.50 → rev=2 cost 0.70：月汇总推进差额 0.20 至 0.70（非累计 1.20）。"""
         month = _current_month()
+        rid = await _seed_backing_reservation(ledger_dao, "att-delta")
         assert await ledger_dao.settle_attempt_usage(
-            **_make_settle_kwargs("att-delta", month=month, usage_revision=1, cost_cny="0.50")
+            **{
+                **_make_settle_kwargs("att-delta", month=month, usage_revision=1, cost_cny="0.50"),
+                "reservation_id": rid,
+            }
         )
         assert await ledger_dao.settle_attempt_usage(
-            **_make_settle_kwargs("att-delta", month=month, usage_revision=2, cost_cny="0.70")
+            **{
+                **_make_settle_kwargs("att-delta", month=month, usage_revision=2, cost_cny="0.70"),
+                "reservation_id": rid,
+            }
         )
 
         assert clean_ledger.engine is not None
@@ -385,14 +407,24 @@ class TestLateDeltaIdempotency:
     async def test_repeated_and_out_of_order_settle_ignored(self, ledger_dao: AIUsageDao):
         """重复 settle（同 rev）与乱序 settle（旧 rev）均不推进。"""
         month = _current_month()
+        rid = await _seed_backing_reservation(ledger_dao, "att-idem")
         assert await ledger_dao.settle_attempt_usage(
-            **_make_settle_kwargs("att-idem", month=month, usage_revision=2, cost_cny="0.70")
+            **{
+                **_make_settle_kwargs("att-idem", month=month, usage_revision=2, cost_cny="0.70"),
+                "reservation_id": rid,
+            }
         )
         assert not await ledger_dao.settle_attempt_usage(
-            **_make_settle_kwargs("att-idem", month=month, usage_revision=2, cost_cny="0.70")
+            **{
+                **_make_settle_kwargs("att-idem", month=month, usage_revision=2, cost_cny="0.70"),
+                "reservation_id": rid,
+            }
         ), "同修订重复结算应返回 False"
         assert not await ledger_dao.settle_attempt_usage(
-            **_make_settle_kwargs("att-idem", month=month, usage_revision=1, cost_cny="0.30")
+            **{
+                **_make_settle_kwargs("att-idem", month=month, usage_revision=1, cost_cny="0.30"),
+                "reservation_id": rid,
+            }
         ), "旧修订乱序结算应返回 False"
 
     @pytest.mark.asyncio(loop_scope="session")
@@ -448,15 +480,23 @@ class TestTwoScopesIsolation:
     async def test_scopes_are_separate_rows(self, ledger_dao: AIUsageDao, clean_ledger: CacheManager):
         """同一 scenario 两次结算（不同 connection）：scenario 1 行聚合，connection 2 行独立。"""
         month = _current_month()
+        rid1 = await _seed_backing_reservation(ledger_dao, "att-scope-1")
         assert await ledger_dao.settle_attempt_usage(
-            **_make_settle_kwargs(
-                "att-scope-1", month=month, cost_cny="0.40", connection_id="conn-a", scenario_id="scn-scope"
-            )
+            **{
+                **_make_settle_kwargs(
+                    "att-scope-1", month=month, cost_cny="0.40", connection_id="conn-a", scenario_id="scn-scope"
+                ),
+                "reservation_id": rid1,
+            }
         )
+        rid2 = await _seed_backing_reservation(ledger_dao, "att-scope-2")
         assert await ledger_dao.settle_attempt_usage(
-            **_make_settle_kwargs(
-                "att-scope-2", month=month, cost_cny="0.60", connection_id="conn-b", scenario_id="scn-scope"
-            )
+            **{
+                **_make_settle_kwargs(
+                    "att-scope-2", month=month, cost_cny="0.60", connection_id="conn-b", scenario_id="scn-scope"
+                ),
+                "reservation_id": rid2,
+            }
         )
 
         assert clean_ledger.engine is not None
@@ -495,8 +535,12 @@ class TestTwoScopesIsolation:
     async def test_read_month_usage_filters_by_scope(self, ledger_dao: AIUsageDao):
         """read_month_usage 按 scope 筛选：互不串行。"""
         month = _current_month()
+        rid = await _seed_backing_reservation(ledger_dao, "att-read-1")
         assert await ledger_dao.settle_attempt_usage(
-            **_make_settle_kwargs("att-read-1", month=month, cost_cny="0.40", connection_id="conn-read")
+            **{
+                **_make_settle_kwargs("att-read-1", month=month, cost_cny="0.40", connection_id="conn-read"),
+                "reservation_id": rid,
+            }
         )
 
         scenario_rows = await ledger_dao.read_month_usage(month=month, aggregation_scope=SCOPE_SCENARIO)
@@ -516,12 +560,20 @@ class TestConcurrentMixedOpsNoDeadlock:
         """8 个并发任务（4 预留 + 4 结算）在锁序约束下全部完成，汇总账目正确。"""
         month = _current_month()
 
+        # F23：缺行结算需活跃预留背书（先串行登记 0.00 预留，再进入并发阶段）
+        rids = [await _seed_backing_reservation(ledger_dao, f"att-mixed-{i}") for i in range(4)]
+
         reserve_tasks = [
             ledger_dao.try_reserve(**_make_reserve_kwargs(f"inv-mixed-{i}", amount="0.10")) for i in range(4)
         ]
         settle_tasks = [
             ledger_dao.settle_attempt_usage(
-                **_make_settle_kwargs(f"att-mixed-{i}", month=month, cost_cny="0.10", connection_id=f"conn-mixed-{i}")
+                **{
+                    **_make_settle_kwargs(
+                        f"att-mixed-{i}", month=month, cost_cny="0.10", connection_id=f"conn-mixed-{i}"
+                    ),
+                    "reservation_id": rids[i],
+                }
             )
             for i in range(4)
         ]
@@ -543,3 +595,262 @@ class TestConcurrentMixedOpsNoDeadlock:
         assert row is not None
         assert int(row[0]) == 1
         assert Decimal(str(row[1])) == Decimal("0.10")
+
+
+class TestF22ReservationLifecycle:
+    """场景 6（F22）：预留状态机三条回归链的预算闭环（真实 PG 行为契约）。
+
+    修复前：结算后预留停留 dispatched（与已结算费用双占）；owner 租约过期后
+    held_unconfirmed 从预算有效占用中消失。修复后：结算同事务将对应预留转为
+    settled；held_unconfirmed 持续占用直到明确处置（released / settled）。
+
+    链 1 预留→派发→结算：settle 带 reservation_id → 转 settled → 不再双占；
+    链 2 崩溃→过期恢复：recover 转 held_unconfirmed → 持续占用预算；
+    链 3 手动解除：release_reservation → released → 预算释放。
+    """
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_settle_converts_reservation_and_avoids_double_count(self, ledger_dao: AIUsageDao):
+        """链 1：结算同事务转换预留；结算后旧预留不再占用（再预留不双计）。"""
+        reserved = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f22-a", amount="0.50"))
+        assert reserved is not None
+        assert await ledger_dao.mark_dispatched(
+            invocation_id="inv-f22-a",
+            reservation_id=reserved.reservation_id,
+            owner_session_id="sess-owner",
+            owner_epoch=1,
+        )
+
+        settle_kwargs = {
+            **_make_settle_kwargs("att-f22-a", month=_current_month(), cost_cny="0.50"),
+            "invocation_id": "inv-f22-a",
+            "reservation_id": reserved.reservation_id,
+        }
+        assert await ledger_dao.settle_attempt_usage(**settle_kwargs)
+
+        reservations = await _fetch_reservations(ledger_dao, "inv-f22-a")
+        assert reservations[0]["state"] == "settled"
+        assert reservations[0]["settled_attempt_id"] == "att-f22-a"
+
+        # 修复前：used 0.50 + 旧 dispatched 0.50 + 新 0.50 = 1.50 > 1.00 拒绝（双占）
+        # 修复后：used 0.50 + settled 0 占用 + 新 0.50 = 1.00 ≤ 1.00 获准
+        again = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f22-a-2", amount="0.50"))
+        assert again is not None, "结算转换后旧预留不得继续占用（双占窗口应消除）"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_held_unconfirmed_keeps_budget_after_owner_expiry(self, ledger_dao: AIUsageDao):
+        """链 2：崩溃→过期恢复→held_unconfirmed 持续占用，过期 owner 不释放占用。"""
+        reserved = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f22-b", amount="0.80"))
+        assert reserved is not None
+        assert await ledger_dao.mark_dispatched(
+            invocation_id="inv-f22-b",
+            reservation_id=reserved.reservation_id,
+            owner_session_id="sess-owner",
+            owner_epoch=1,
+        )
+
+        assert ledger_dao.engine is not None
+        async with ledger_dao.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE ai_invocation SET owner_lease_expires_at = :past WHERE invocation_id = :iid"),
+                {"past": _utcnow_naive() - datetime.timedelta(hours=1), "iid": "inv-f22-b"},
+            )
+        assert await ledger_dao.recover_expired_owners() == 1
+        reservations = await _fetch_reservations(ledger_dao, "inv-f22-b")
+        assert reservations[0]["state"] == "held_unconfirmed"
+
+        # 修复前：行级租约条件把过期 owner 的 0.80 从预算占用中过滤掉 → 0.50 获准（缺陷）
+        # 修复后：held_unconfirmed 持续占用 → 0.80 + 0.50 > 1.00 拒绝
+        blocked = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f22-b-2", amount="0.50"))
+        assert blocked is None, "过期 owner 的未确认预留必须持续占用预算"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_manual_release_frees_budget(self, ledger_dao: AIUsageDao):
+        """链 3：人工解除 held_unconfirmed → released → 预算占用释放。"""
+        reserved = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f22-c", amount="0.80"))
+        assert reserved is not None
+        assert await ledger_dao.mark_dispatched(
+            invocation_id="inv-f22-c",
+            reservation_id=reserved.reservation_id,
+            owner_session_id="sess-owner",
+            owner_epoch=1,
+        )
+
+        assert ledger_dao.engine is not None
+        async with ledger_dao.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE ai_invocation SET owner_lease_expires_at = :past WHERE invocation_id = :iid"),
+                {"past": _utcnow_naive() - datetime.timedelta(hours=1), "iid": "inv-f22-c"},
+            )
+        assert await ledger_dao.recover_expired_owners() == 1
+        assert await ledger_dao.release_reservation(reservation_id=reserved.reservation_id)
+        reservations = await _fetch_reservations(ledger_dao, "inv-f22-c")
+        assert reservations[0]["state"] == "released"
+
+        # released 不在活跃集合 → 占用释放 → 0.80 ≤ 1.00 获准
+        freed = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f22-c-2", amount="0.80"))
+        assert freed is not None, "人工解除后预算占用应释放"
+
+
+class TestF23OwnerFencing:
+    """场景 7（F23）：owner/epoch fencing 贯穿账本写入口的行为契约。
+
+    修复前缺陷：try_reserve 不检查 owner 条件 UPDATE rowcount（失权仍返回非持久
+    预留）；mark_dispatched 仅凭 owner 条件更新行数（错误预留 ID 误判派发成功）；
+    insert_attempt 无 owner/epoch 条件（失权可建立 attempt 事实）；settle 缺行
+    无条件插行（无背书的凭空消费事实）。
+
+    回归目标：A 过期 → B claim → A 的 reserve / begin / mark / settle 都不能
+    任意推进；错误预留 ID 零派发；合法恢复仍能补记实际消费。
+    """
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_stale_owner_all_entries_fenced_after_claim(self, ledger_dao: AIUsageDao):
+        """A 失权后四入口全拒绝：reserve / insert_attempt / mark_dispatched / settle 缺行。"""
+        # A 建立 invocation（带预留），随后租约过期、B claim 接管（epoch 递增）
+        assert await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f23-a", amount="0.10")) is not None
+        assert ledger_dao.engine is not None
+        async with ledger_dao.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE ai_invocation SET owner_lease_expires_at = :past WHERE invocation_id = :iid"),
+                {"past": _utcnow_naive() - datetime.timedelta(hours=1), "iid": "inv-f23-a"},
+            )
+        assert (
+            await ledger_dao.claim_invocation(
+                invocation_id="inv-f23-a",
+                owner_session_id="sess-b",
+                lease_expires_at=_utcnow_naive() + datetime.timedelta(hours=1),
+            )
+            is not None
+        )
+
+        # 1) A 的 try_reserve：owner 条件 UPDATE rowcount=0 → None（预留未持久化）
+        stale_reserve = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f23-a", amount="0.10"))
+        assert stale_reserve is None, "失权 owner 的预留必须拒绝（不返回非持久预留）"
+
+        # 2) A 的 insert_attempt：owner 身份强门不匹配 → False（不建 attempt 行）
+        assert not await ledger_dao.insert_attempt(
+            attempt_id="att-f23-stale",
+            invocation_id="inv-f23-a",
+            configured_model="gpt-itest",
+            owner_session_id="sess-owner",
+            owner_epoch=1,
+        ), "失权 owner 不得建立 attempt 行"
+
+        # 3) A 的 mark_dispatched：owner 三条件失权 → False（零派发）
+        assert not await ledger_dao.mark_dispatched(
+            invocation_id="inv-f23-a",
+            reservation_id="res-inv-f23-a",
+            owner_session_id="sess-owner",
+            owner_epoch=1,
+        ), "失权 owner 的派发绑定必须拒绝"
+
+        # 4) A 的缺行结算（无预留背书的不存在 invocation）→ False（不得凭空建立事实）
+        assert not await ledger_dao.settle_attempt_usage(
+            **_make_settle_kwargs("att-f23-noback", month=_current_month(), cost_cny="0.10")
+        ), "无预留背书的缺行结算必须拒绝（fail-closed）"
+
+        # 失权写入均未落地：预留仍为 A 原始 reserved、无 attempt 行、无月汇总费用
+        reservations = await _fetch_reservations(ledger_dao, "inv-f23-a")
+        assert [r["state"] for r in reservations] == ["reserved"], "失权写入不得改写预留状态"
+        month = _current_month()
+        async with ledger_dao.engine.begin() as conn:
+            attempt_row = (
+                await conn.execute(
+                    text("SELECT 1 FROM ai_attempt WHERE attempt_id = :aid"),
+                    {"aid": "att-f23-stale"},
+                )
+            ).fetchone()
+            usage_row = (
+                await conn.execute(
+                    text(
+                        "SELECT cost_cny FROM ai_usage_monthly "
+                        "WHERE month = :m AND aggregation_scope = :s AND grouping_key = :g"
+                    ),
+                    {"m": month, "s": SCOPE_SCENARIO, "g": "scn-itest"},
+                )
+            ).fetchone()
+        assert attempt_row is None, "失权 insert_attempt 不得建立 attempt 行"
+        assert usage_row is None, "失权写入不得推进月汇总费用"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_wrong_reservation_id_never_dispatches(self, ledger_dao: AIUsageDao):
+        """错误预留 ID 零派发：EXISTS 守卫不命中 → False，任何预留状态不得改写。"""
+        reserved = await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f23-b", amount="0.20"))
+        assert reserved is not None
+
+        wrong = await ledger_dao.mark_dispatched(
+            invocation_id="inv-f23-b",
+            reservation_id="res-nonexistent",
+            owner_session_id="sess-owner",
+            owner_epoch=1,
+        )
+        assert wrong is False, "错误预留 ID 必须零派发（修复前仅凭 owner 条件 rowcount=1 误判成功）"
+        reservations = await _fetch_reservations(ledger_dao, "inv-f23-b")
+        assert reservations[0]["state"] == "reserved", "错误预留 ID 不得改写任何预留状态"
+
+        correct = await ledger_dao.mark_dispatched(
+            invocation_id="inv-f23-b",
+            reservation_id=reserved.reservation_id,
+            owner_session_id="sess-owner",
+            owner_epoch=1,
+        )
+        assert correct is True
+        reservations = await _fetch_reservations(ledger_dao, "inv-f23-b")
+        assert reservations[0]["state"] == "dispatched"
+
+        # 已 dispatched 的预留重复派发（同 ID）→ 非 reserved → EXISTS 不命中 → False
+        repeat = await ledger_dao.mark_dispatched(
+            invocation_id="inv-f23-b",
+            reservation_id=reserved.reservation_id,
+            owner_session_id="sess-owner",
+            owner_epoch=1,
+        )
+        assert repeat is False, "已派发预留不得重复派发（状态守卫）"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_recovery_settle_with_active_reservation_records_usage(self, ledger_dao: AIUsageDao):
+        """合法恢复补记：B 认领后凭活跃预留背书补记实际消费（不盲目拒绝真实迟到事实）。"""
+        assert await ledger_dao.try_reserve(**_make_reserve_kwargs("inv-f23-c", amount="0.30")) is not None
+
+        # 崩溃恢复：租约过期 → B claim 接管（attempt 行从未建立）
+        assert ledger_dao.engine is not None
+        async with ledger_dao.engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE ai_invocation SET owner_lease_expires_at = :past WHERE invocation_id = :iid"),
+                {"past": _utcnow_naive() - datetime.timedelta(hours=1), "iid": "inv-f23-c"},
+            )
+        assert (
+            await ledger_dao.claim_invocation(
+                invocation_id="inv-f23-c",
+                owner_session_id="sess-b",
+                lease_expires_at=_utcnow_naive() + datetime.timedelta(hours=1),
+            )
+            is not None
+        )
+
+        # B 以活跃预留背书补记实际消费（缺行结算唯一合法通道）
+        settle_kwargs = {
+            **_make_settle_kwargs("att-f23-c", month=_current_month(), cost_cny="0.20"),
+            "invocation_id": "inv-f23-c",
+            "reservation_id": "res-inv-f23-c",
+        }
+        assert await ledger_dao.settle_attempt_usage(**settle_kwargs), "活跃预留背书的补记结算必须成功"
+
+        # 预留同事务转换为 settled + attempt 行落库 + 费用计入月汇总
+        reservations = await _fetch_reservations(ledger_dao, "inv-f23-c")
+        assert reservations[0]["state"] == "settled"
+        assert reservations[0]["settled_attempt_id"] == "att-f23-c"
+        month = _current_month()
+        async with ledger_dao.engine.begin() as conn:
+            usage_row = (
+                await conn.execute(
+                    text(
+                        "SELECT cost_cny FROM ai_usage_monthly "
+                        "WHERE month = :m AND aggregation_scope = :s AND grouping_key = :g"
+                    ),
+                    {"m": month, "s": SCOPE_SCENARIO, "g": "scn-itest"},
+                )
+            ).fetchone()
+        assert usage_row is not None
+        assert Decimal(str(usage_row[0])) == Decimal("0.20"), "补记的实际消费必须计入月汇总"

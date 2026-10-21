@@ -311,6 +311,49 @@ class TestEgressGrantAndAuthorize:
             )
 
     @pytest.mark.asyncio
+    async def test_authorize_fails_closed_when_revocation_key_dropped(self, service, isolated_config):
+        """F08 端到端：真实撤销后仅删磁盘撤销列表键（grants 存活），许可必须失败关闭。
+
+        缺陷形态：Pydantic 把缺失的 revoked_credential_versions 补成空列表 →
+        撤销事实被消除 + grant 仍匹配 → 许可被错误放行。
+        """
+        mm = _load_mm()
+        expected = mm["config_revision"]
+        mm["connections"] = [_base_connection(CONN_A, "https://api.deepseek.com")]
+        await service.save_draft(mm, expected, "op-f08-0")
+        outcome = await service.grant_egress(
+            connection_id=CONN_A,
+            target_fingerprint="https://api.deepseek.com:443",
+            purpose="stock_analysis",
+            scope_version=1,
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-f08-1",
+        )
+        assert outcome.status == "committed"
+        revoke_outcome = await service.revoke_credential(
+            credential_version="v-old",
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-f08-2",
+        )
+        assert revoke_outcome.status == "committed"
+
+        # 模拟「合法 JSON 的部分字段丢失」：仅删除撤销列表键，grants 原样保留
+        raw = _read_raw(isolated_config)
+        del raw["model_management"]["security_state"]["revoked_credential_versions"]
+        _write_raw(isolated_config, raw)
+
+        from utils.config.storage import ConfigFreshReadError
+
+        with pytest.raises(ConfigFreshReadError, match="security subdomain corruption"):
+            await service.authorize_attempt(
+                connection_id=CONN_A,
+                target_fingerprint="https://api.deepseek.com:443",
+                purpose="stock_analysis",
+                scope_version=1,
+                attempt_id="att-f08",
+            )
+
+    @pytest.mark.asyncio
     async def test_revoke_credential_blocks_new_permits(self, service):
         """MM-02：版本撤销立即阻止后续新许可。"""
         mm = _load_mm()

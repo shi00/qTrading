@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 # ---------------------------------------------------------------------------
 # 异常契约
@@ -49,6 +49,10 @@ class LegacyDispatchBlockedError(RuntimeError):
     ``admission`` 取 ``evaluate_legacy_admission`` 的判定值
     （``"draining_stop"`` / ``"refused"``），调用方按「AI 功能明确不可用」处置，
     不得降级伪装成功（R21）。
+
+    F05 fail-closed 扩展值 ``"read_failed"``：分派 / 准入配置读取过程异常
+    （配置损坏、锁失败、IO 超时等）时授权状态未知，三入口 helper 与批量
+    准入以该值阻断旧链并传出（``from`` 原始读取异常），不降级放行。
     """
 
     def __init__(self, admission: str, message: str | None = None) -> None:
@@ -224,6 +228,39 @@ class AdapterResponse:
     usage: NormalizedLLMUsage | None
     actual_model: str | None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+class InferenceAdapter(Protocol):
+    """统一推理适配器协议（§6.1，检视 F02）：ScenarioExecutor 消费的唯一适配器形状。
+
+    结构化协议（无需显式继承）：组装方（app 组合根 / 测试替身）只需提供带
+    ``invoke`` 方法的对象即可；注册裸函数为适配器即违反本协议，由
+    :func:`ensure_inference_adapter` 在组装期拒绝（而非执行期 AttributeError）。
+    """
+
+    async def invoke(
+        self,
+        request: InferenceRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+    ) -> AdapterResponse: ...
+
+
+def ensure_inference_adapter(kind: str, adapter: object) -> None:
+    """组装期协议校验（检视 F02）：``adapter`` 缺可调用 ``.invoke`` 即 TypeError。
+
+    供适配器工厂（bootstrap 组合根）与 ScenarioExecutor 注入点共用同一校验语义，
+    杜绝「函数 / 对象」两种隐式调用规则并存。
+
+    Raises:
+        TypeError: 适配器不满足 :class:`InferenceAdapter` 协议。
+    """
+    if not callable(getattr(adapter, "invoke", None)):
+        raise TypeError(
+            f"adapter for kind {kind!r} violates InferenceAdapter protocol "
+            f"(missing callable .invoke): {type(adapter).__name__}"
+        )
 
 
 @dataclass(frozen=True, slots=True)

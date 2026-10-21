@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -259,6 +259,22 @@ class ModelSecurityStateConfig(BaseModel):
     revoked_credential_versions: list[RevokedCredentialConfig] = []
 
 
+# MM 域 schema 当前版本（§3.4）。MM 域自引入（4f5752e7）即携带该标记，磁盘上
+# 已初始化域缺失该键视为字段丢失而非旧版本数据（F08 fail closed 判定依据）。
+MODEL_MANAGEMENT_SCHEMA_VERSION: Final = 1
+# 安全子域必备键（§4.3）：三键齐备才构成可判定的授权事实源；缺任一键即结构损坏。
+_SECURITY_SUBDOMAIN_KEYS: Final = ("security_revision", "grants", "revoked_credential_versions")
+
+
+class SecurityStateCorruptionError(ValueError):
+    """已初始化安全子域的结构损坏（F08）。
+
+    与「合法初始化 / 旧版本迁移」的区分见 :func:`validate_security_subdomain_integrity`；
+    判定为损坏时调用方必须失败关闭，禁止以 Pydantic 默认值补出空撤销 / 空授权 /
+    零修订（R21「缺失值伪装」的安全态变体）。
+    """
+
+
 class LastConfigCommitConfig(BaseModel):
     """§5.1 提交回执：与配置同一次 os.replace 落盘，不含秘密。"""
 
@@ -322,6 +338,9 @@ class ModelManagementConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # 注意：Literal 参数须为字面量（pyright reportInvalidTypeForm），无法引用下方
+    # MODEL_MANAGEMENT_SCHEMA_VERSION 常量；两者一致性由单测守护
+    # （test_model_management_config.py::TestSecuritySubdomainIntegrity）。
     schema_version: Literal[1] = 1
     config_revision: int = Field(default=1, ge=1)
     migration_state: Literal["pending", "active"] = "pending"
@@ -354,6 +373,56 @@ class ModelManagementConfig(BaseModel):
             if grant.connection_id not in known:
                 raise ValueError(f"grant {grant.grant_id} 引用不存在的连接: {grant.connection_id}")
         return self
+
+
+def _ensure_security_state_dict_complete(raw_security_state: object) -> None:
+    """校验 security_state 子域形态完整（dict 且三键齐备），损坏即抛错。"""
+    if not isinstance(raw_security_state, dict):
+        raise SecurityStateCorruptionError("security_state 缺失或非对象形态，判定为已初始化安全子域的结构损坏")
+    missing = [key for key in _SECURITY_SUBDOMAIN_KEYS if key not in raw_security_state]
+    if missing:
+        raise SecurityStateCorruptionError(f"security_state 缺失安全键 {missing}，判定为已初始化安全子域的结构损坏")
+
+
+def validate_security_subdomain_integrity(raw_model_management: object) -> None:
+    """F08：区分「合法初始化 / 旧版本迁移」与「已初始化安全子域的结构损坏」。
+
+    Pydantic 模型对缺失的 ``security_state`` 子字段会补默认值（零修订 / 空
+    grants / 空撤销列表），导致「合法 JSON 的部分安全字段丢失」被洗白为合法的
+    空安全态；本入口在 schema 校验之前按磁盘原始形态判定，损坏时抛出
+    :class:`SecurityStateCorruptionError`，调用方必须失败关闭。
+
+    判定表（raw 为磁盘 ``model_management`` 域原始形态）：
+
+    - ``None``（域缺失）：合法初始化前状态，放行（由默认值初始化）；
+    - 非 dict：结构损坏；
+    - ``schema_version`` 缺失 / 非整数（含 bool）：结构损坏（MM 域自引入即携带
+      版本标记，缺失即字段丢失，不存在无标记的历史数据）；
+    - ``schema_version`` 小于当前版本：合法旧版本数据，放行（交由迁移处理；
+      当前仅 v1，无实际数据，分支为迁移语义预留）；
+    - ``schema_version`` 大于当前版本：放行（交由 ``Literal`` schema 拒绝）；
+    - 等于当前版本：``security_state`` 必须存在且为 dict 且三键齐备，否则损坏。
+
+    Args:
+        raw_model_management: 磁盘读取的 ``model_management`` 域原始形态。
+
+    Raises:
+        SecurityStateCorruptionError: 已初始化安全子域结构损坏时。
+    """
+    if raw_model_management is None:
+        return
+    if not isinstance(raw_model_management, dict):
+        raise SecurityStateCorruptionError("model_management 域非对象形态，判定为安全子域结构损坏")
+    raw_version = raw_model_management.get("schema_version")
+    if isinstance(raw_version, bool) or not isinstance(raw_version, int):
+        # 仅报类型名不回显原始值：磁盘内容不可信，防超长值进入日志（R9 邻域）。
+        raise SecurityStateCorruptionError(
+            f"schema_version 缺失或非整数（{type(raw_version).__name__}），判定为已初始化安全子域的结构损坏"
+        )
+    if raw_version != MODEL_MANAGEMENT_SCHEMA_VERSION:
+        # 小于当前版本交由迁移处理；大于当前版本交由 Literal schema 拒绝（fail closed）。
+        return
+    _ensure_security_state_dict_complete(raw_model_management.get("security_state"))
 
 
 def model_management_payload_fingerprint(payload: dict[str, Any]) -> str:

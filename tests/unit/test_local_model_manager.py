@@ -2974,3 +2974,95 @@ class TestWorkerIdentityConsistency:
                 assert await mgr.load_model(path, config=_CORE_CFG) is True
                 mock_ch.save_config.assert_not_called()
                 assert mgr._model_sha256 == ""
+
+
+# --------------------------------------------------------------------------- #
+# R02 回归：三条 worker 操作链全程持同一把 loop-local 操作锁
+# （跨连接 semaphore 不能隔离进程单例共享的请求/结果队列；无锁时并发轮询
+# 循环互吞对方响应 → 双双超时并 quarantine 误杀 healthy worker）
+# --------------------------------------------------------------------------- #
+class TestR02OpLockSerialization:
+    """并发 invoke / legacy-unified 交错 / 取消释放锁的离线回归（无真实子进程）。"""
+
+    @staticmethod
+    def _make_serializable_mgr() -> tuple[LocalModelManager, dict]:
+        mgr = LocalModelManager()
+        mgr._worker_ready = True
+        mgr._ensure_worker = AsyncMock(return_value=True)
+        counters = {"active": 0, "max_active": 0}
+
+        async def fake_dispatch(**kwargs):
+            counters["active"] += 1
+            counters["max_active"] = max(counters["max_active"], counters["active"])
+            await asyncio.sleep(0.02)
+            counters["active"] -= 1
+            return "legacy-out" if kwargs["invocation_id"] == "legacy" else f"out-{kwargs['req_id']}"
+
+        mgr._dispatch_and_collect = fake_dispatch
+        return mgr, counters
+
+    @pytest.mark.asyncio
+    async def test_concurrent_invokes_serialized(self):
+        """双连接并发 invoke_for_connection：dispatch 全程不重叠（max_active == 1）。"""
+        with (
+            patch("services.local_model_manager._HAS_LLAMA_CPP", True),
+            patch("services.local_model_manager._validate_model_file", return_value=True),
+        ):
+            mgr, counters = self._make_serializable_mgr()
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 30.0
+            resp_a, resp_b = await asyncio.gather(
+                mgr.invoke_for_connection(_req("A", deadline), _conn(connection_id="conn-a"), deadline, _ctx("inv-a")),
+                mgr.invoke_for_connection(_req("B", deadline), _conn(connection_id="conn-b"), deadline, _ctx("inv-b")),
+            )
+            assert resp_a.content == "out-0"
+            assert resp_b.content == "out-1"
+            assert counters["max_active"] == 1, "并发调用在 dispatch 段交错——互吞响应回归"
+
+    @pytest.mark.asyncio
+    async def test_legacy_and_unified_serialized(self):
+        """legacy run_inference 与统一链 invoke_for_connection 互斥（同一把锁）。"""
+        with (
+            patch("services.local_model_manager._HAS_LLAMA_CPP", True),
+            patch("services.local_model_manager._validate_model_file", return_value=True),
+        ):
+            mgr, counters = self._make_serializable_mgr()
+            with patch("services.local_model_manager.ConfigHandler") as mock_ch:
+                mock_ch.get_local_ai_config.return_value = {"local_model_path": _conn().model}
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 30.0
+                legacy_out, unified_out = await asyncio.gather(
+                    mgr.run_inference("legacy prompt"),
+                    mgr.invoke_for_connection(_req("x", deadline), _conn(), deadline, _ctx()),
+                )
+            assert legacy_out == "legacy-out"
+            assert unified_out.content.startswith("out-")
+            assert counters["max_active"] == 1, "legacy 与统一链在 dispatch 段交错——互吞响应回归"
+
+    @pytest.mark.asyncio
+    async def test_lock_released_on_cancel(self):
+        """取消（R2）传播后锁随 async with 释放：后续请求不被永久卡死。"""
+        with (
+            patch("services.local_model_manager._HAS_LLAMA_CPP", True),
+            patch("services.local_model_manager._validate_model_file", return_value=True),
+        ):
+            mgr, _ = self._make_serializable_mgr()
+            mgr._dispatch_and_collect = AsyncMock(side_effect=asyncio.CancelledError())
+            # 清理任务 no-op：防止后台 cleanup 把 _worker_ready 置 False 触发真实
+            # ready 等待（与判定用例场景①同模式）
+            mgr._shutdown_worker = MagicMock()
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 30.0
+            conn = _conn()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await mgr.invoke_for_connection(_req("A", deadline), conn, deadline, _ctx())
+            assert type(exc_info.value) is asyncio.CancelledError
+
+            # 取消后锁已释放：B 正常完成（若锁泄漏此步将超时）
+            mgr._dispatch_and_collect = AsyncMock(return_value="B-out")
+            resp = await asyncio.wait_for(
+                mgr.invoke_for_connection(_req("B", deadline), conn, deadline, _ctx()),
+                timeout=5.0,
+            )
+            assert resp.content == "B-out"
+            mgr._cancel_cleanup_task()

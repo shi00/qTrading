@@ -184,6 +184,7 @@ def ScreenerView():
 - `ft.run(before_main=...)` 属可选优化，YAGNI，暂不强制。
 - async 窗口/控件方法必须 `await`。
 - 命令式 `@ft.control`/`@dataclass` + `did_mount`/`will_unmount` 写法新代码禁止（已重写为 `@ft.component` + `use_effect(setup, dependencies, cleanup)`，命令式控件已删除）；例外清单见本文末。
+- **`ft.TabBarView` 禁止置于 scrollable 容器（无界主轴约束）内**：TabBarView 的 Flutter 侧是 page-view viewport，要求有界主轴约束；作为 `Column(scroll=AUTO)` / `ListView` 等可滚动容器的直接子级时布局崩溃产生 NaN 并沿父链传染，整层不绘制且 hit test 失效（语义树仍完整，E2E 语义断言无法拦截；桌面客户端 release 模式吞掉布局异常，仅 UIA 呈现 Infinity 矩形）。需要页签内容切换时用 `ft.TabBar` + 条件渲染（仅渲染当前选中页）替代，见 `ui/components/model_management_panel.py` 的 `tab_pages[selected_tab]` 模式（契约测试：`tests/unit/ui/components/test_model_management_panel.py` 的 `TestTabsStructureGuard`）。
 
 ### 7. 样式 Token 使用规范（字号 / 图标 / 间距 / 宽度）
 

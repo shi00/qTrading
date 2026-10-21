@@ -6,7 +6,9 @@
 - legacy 汇总解析：app_state ``ai_cost:{YYYYMM}`` 分 → 元 Decimal（D3）；
 - R22：月汇总写入 SQL 用 GREATEST 保持单调；
 - 预算不足返回 None（不抛异常、不伪装成功）；
-- legacy 封口（S6 D1/D5）：首封冻结基线快照 / 重封幂等同 seal_id / 读接口 / advisory 月锁。
+- legacy 封口（S6 D1/D5）：首封冻结基线快照 / 重封幂等同 seal_id / 读接口 / advisory 月锁；
+- F23 fencing：owner 失权不返回非持久预留 / 错误预留 ID 零派发 / 失权不建 attempt 行 /
+  缺行结算须活跃预留背书 / mark_dispatched 统一月锁写入口。
 """
 
 import datetime
@@ -119,10 +121,12 @@ def _settle_kwargs(**overrides):
 class TestTryReserveSqlSemantics:
     @pytest.mark.asyncio
     async def test_advisory_lock_two_keys_present(self):
-        # 序列：advisory(None) → INSERT invocation(None) → SUM((0,)) → app_state(("res-1",))
-        conn = _CaptureConn(results=[None, None, (Decimal("0.00"),), ("res-1",)])
+        # 序列：advisory(None) → INSERT invocation(None) → SUM settled((0,)) → app_state(("res-1",))
+        #       → SUM in-flight((0,)) → UPDATE(1)
+        conn = _CaptureConn(results=[None, None, (Decimal("0.00"),), ("res-1",), (Decimal("0.00"),), 1])
         dao = _dao(conn)
-        await dao.try_reserve(**_reserve_kwargs())
+        reservation = await dao.try_reserve(**_reserve_kwargs())
+        assert reservation is not None
         all_sql = "\n".join(sql for sql, _ in conn.calls)
         assert "pg_advisory_xact_lock" in all_sql
 
@@ -136,7 +140,7 @@ class TestTryReserveSqlSemantics:
 
     @pytest.mark.asyncio
     async def test_reservation_granted_returns_budget_reservation(self):
-        conn = _CaptureConn(results=[None, None, (Decimal("0.00"),), ("res-1",)])
+        conn = _CaptureConn(results=[None, None, (Decimal("0.00"),), ("res-1",), (Decimal("0.00"),), 1])
         dao = _dao(conn)
         reservation = await dao.try_reserve(**_reserve_kwargs())
         assert reservation is not None
@@ -144,12 +148,25 @@ class TestTryReserveSqlSemantics:
         assert reservation.amount_cny == "0.05"
         assert reservation.state in ("reserved", "dispatched")
 
+    @pytest.mark.asyncio
+    async def test_expired_owner_reserve_returns_none_not_transient_grant(self):
+        """F23 fencing：owner 条件 UPDATE rowcount=0（失权）→ None，不返回非持久预留。
+
+        预算检查通过但 invocation 已被新 owner 接管（owner_session_id 不匹配）：
+        预留未持久化，必须返回 None——修复前返回预留对象（调用方误以为预留成功）。
+        """
+        conn = _CaptureConn(results=[None, None, (Decimal("0.00"),), None, (Decimal("0.00"),), 0])
+        dao = _dao(conn)
+        reservation = await dao.try_reserve(**_reserve_kwargs())
+        assert reservation is None, "失权 owner 的预留 UPDATE rowcount=0 不得返回预留对象"
+
 
 class TestOwnerConditionalWrites:
     @pytest.mark.asyncio
     async def test_mark_dispatched_where_owner_epoch_lease(self):
         """派发绑定仅更新预留状态（不建 attempt 行，方案 §6.2 步骤 3）；owner 三条件齐全。"""
-        conn = _CaptureConn(results=[1])
+        # F23 后序列：created_at 查询(None) → advisory(None) → UPDATE(1)
+        conn = _CaptureConn(results=[None, None, 1])
         dao = _dao(conn)
         granted = await dao.mark_dispatched(
             invocation_id="inv-1",
@@ -162,26 +179,82 @@ class TestOwnerConditionalWrites:
         assert "owner_epoch" in all_sql
         assert "owner_lease_expires_at" in all_sql
         assert "owner_session_id" in all_sql
-        # 派发绑定不得建立 attempt 行（单一 UPDATE 语句）
-        assert len(conn.calls) == 1  # noqa: weak-assertion 语句数即语义：派发绑定必须且只能是单条 UPDATE（多语句即建了 attempt 行）
+        # 派发绑定不得建立 attempt 行（月键读 + advisory 锁 + 单条 UPDATE）
+        assert len(conn.calls) == 3  # noqa: weak-assertion 语句数即语义：月键/月锁/UPDATE，多语句即建了 attempt 行
         assert "INSERT INTO ai_attempt" not in all_sql
+
+    @pytest.mark.asyncio
+    async def test_mark_dispatched_takes_month_lock_and_reservation_guard(self):
+        """F23 fencing：mark 先取归属月 advisory 锁（统一 reservations 写入口），
+        UPDATE 带 EXISTS 守卫（目标预留存在且 state='reserved'）。"""
+        conn = _CaptureConn(results=[None, None, 1])
+        dao = _dao(conn)
+        await dao.mark_dispatched(
+            invocation_id="inv-1",
+            reservation_id="res-1",
+            owner_session_id="owner-1",
+            owner_epoch=1,
+        )
+        assert "pg_advisory_xact_lock" in conn.calls[1][0], "mark_dispatched 必须经归属月 advisory 锁"
+        update_sql = conn.calls[2][0]
+        assert ":reservation_id IS NULL" in update_sql, "usage_only（rid=None）路径仅 owner 条件"
+        assert "EXISTS" in update_sql
+        assert "e->>'state' = 'reserved'" in update_sql, "错误预留 ID / 非 reserved 状态必须零派发"
 
     @pytest.mark.asyncio
     async def test_insert_attempt_dispatched_idempotent(self):
         """attempt 行建立（§6.2 步骤 4：真正进入执行时）：status=dispatched + ON CONFLICT DO NOTHING。"""
-        conn = _CaptureConn(results=[None])
+        conn = _CaptureConn(results=[1])
         dao = _dao(conn)
-        await dao.insert_attempt(
+        created = await dao.insert_attempt(
             attempt_id="att-1",
             invocation_id="inv-1",
             configured_model="glm-4-air",
             attempt_row={"task_id": "sentiment", "candidate_index": 0, "connection_id": "conn-1"},
         )
-        sql, _params = conn.calls[0]
+        assert created is True
+        sql, params = conn.calls[0]
         assert "INSERT INTO ai_attempt" in sql
         assert "ON CONFLICT (attempt_id) DO NOTHING" in sql
         # status 为 SQL 字面量 'dispatched'（进入执行即派发态，settle 时推进终态）
         assert "'dispatched'" in sql
+        # F23：INSERT ... SELECT 门控（invocation 存在 + 租约有效 + owner 门）
+        assert "FROM ai_invocation" in sql
+        assert "owner_lease_expires_at > (now() AT TIME ZONE 'UTC')" in sql
+        assert ":owner_session_id IS NULL" in sql
+        assert params["owner_session_id"] is None and params["owner_epoch"] is None
+
+    @pytest.mark.asyncio
+    async def test_insert_attempt_owner_strong_gate_params_bound(self):
+        """F23 owner 强门：owner_session_id/owner_epoch 齐传时与 invocation 当前 owner 比对。"""
+        conn = _CaptureConn(results=[1])
+        dao = _dao(conn)
+        created = await dao.insert_attempt(
+            attempt_id="att-1",
+            invocation_id="inv-1",
+            configured_model="glm-4-air",
+            owner_session_id="owner-1",
+            owner_epoch=2,
+        )
+        assert created is True
+        _sql, params = conn.calls[0]
+        assert params["owner_session_id"] == "owner-1"
+        assert params["owner_epoch"] == 2
+        assert "i.owner_session_id = :owner_session_id" in conn.calls[0][0]
+
+    @pytest.mark.asyncio
+    async def test_insert_attempt_rowcount_zero_distinguishes_idempotent_from_rejected(self):
+        """rowcount=0 时二次查询区分：已存在行 = 幂等沿用 True；不存在 = owner 门拒绝 False。"""
+        # 幂等沿用：INSERT 冲突忽略（rowcount=0）→ 二次 SELECT 命中
+        conn = _CaptureConn(results=[0, (1,)])
+        dao = _dao(conn)
+        assert await dao.insert_attempt(attempt_id="att-1", invocation_id="inv-1", configured_model="m") is True
+        # owner 门拒绝：INSERT 未命中（rowcount=0）→ 二次 SELECT 无行
+        conn2 = _CaptureConn(results=[0, None])
+        dao2 = _dao(conn2)
+        assert await dao2.insert_attempt(attempt_id="att-2", invocation_id="inv-1", configured_model="m") is False
+        followup_sql = conn2.calls[1][0]
+        assert "SELECT 1 FROM ai_attempt" in followup_sql
 
     @pytest.mark.asyncio
     async def test_recovered_owner_bumps_epoch(self):
@@ -271,24 +344,157 @@ class TestSettleAttemptUsage:
         assert "accounted_usage_revision" in conn.calls[1][0]  # 第二条即修订水位查询
 
     @pytest.mark.asyncio
-    async def test_settle_missing_attempt_inserts_terminal_row(self):
-        """attempt 行缺失（mark_dispatched 从未落库）：直接插入终态，usage=None 不伪装用量。"""
-        # 序列：lock(0) → SELECT FOR UPDATE(1, None) → INSERT 终态(2) → upsert×2(3,4)
-        conn = _CaptureConn(results=[None, None, None, None])
+    async def test_settle_missing_attempt_without_backing_returns_false(self):
+        """F23 fencing：attempt 行缺失且无活跃预留背书（rid 缺省）→ 不插行不计费，返回 False。
+
+        失权 owner 不得凭空建立 attempt 事实；无预留背书的缺行结算拒绝（fail-closed）。
+        """
+        # 序列：lock(0) → SELECT FOR UPDATE(行缺失) → INSERT...SELECT(0 行，未命中背书)
+        conn = _CaptureConn(results=[None, None, 0])
         dao = _dao(conn)
         result = await dao.settle_attempt_usage(
             **_settle_kwargs(status="failed", usage=None, usage_revision=1, cost_cny=None)
         )
-        assert result is True
-        insert_sql, insert_params = conn.calls[2]
+        assert result is False
+        assert len(conn.calls) == 3  # noqa: weak-assertion 语句数即语义：拒绝路径仅 lock/SELECT/门控 INSERT
+        insert_sql = conn.calls[2][0]
         assert "INSERT INTO ai_attempt" in insert_sql
-        assert insert_params["status"] == "failed"
-        assert insert_params["cost_cny"] is None
-        assert insert_params["input_total_tokens"] is None  # usage=None → 各用量列 NULL
-        # 失败不计 succeeded
-        upserts = [params for _sql, params in conn.calls[3:]]
-        assert len(upserts) == 2
-        assert all(p["succeeded_count"] == 0 for p in upserts)
+        assert ":reservation_id IS NOT NULL" in insert_sql, "缺行补记必须要求活跃预留背书"
+        assert "EXISTS" in insert_sql
+        assert "jsonb_array_elements(i.reservations)" in insert_sql
+        # 无月汇总推进（拒绝即不计费）
+        assert all("ai_usage_monthly" not in sql for sql, _ in conn.calls)
+
+    @pytest.mark.asyncio
+    async def test_settle_missing_attempt_with_active_reservation_records_usage(self):
+        """F23 合法恢复补记：缺行 + 活跃预留背书（rid 命中）→ 插终态行 + 计费 + 预留转换。
+
+        B 认领后持预留 reservation_id 补记实际消费（不盲目拒绝真实迟到事实）。
+        """
+        # 序列：lock(None) → SELECT FOR UPDATE(None) → INSERT...SELECT(1) → 预留转换(1) → upsert×2
+        conn = _CaptureConn(results=[None, None, 1, 1, None, None])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(
+            **_settle_kwargs(status="failed", usage=None, usage_revision=1, cost_cny=None, reservation_id="res-1")
+        )
+        assert result is True
+        assert len(conn.calls) == 6  # noqa: weak-assertion 语句数即语义：lock/SELECT/插行/预留转换/upsert×2
+        _insert_sql, insert_params = conn.calls[2]
+        assert insert_params["reservation_id"] == "res-1"
+        assert set(insert_params["active_states"]) == {"reserved", "dispatched", "held_unconfirmed"}
+        trans_sql, trans_params = conn.calls[3]
+        assert "UPDATE ai_invocation" in trans_sql
+        assert trans_params["settled_attempt_id"] == "att-1"
+
+
+class TestSettleReservationTransition:
+    """F22 回归链 1（预留→派发→结算）：结算同事务内预留转 settled，消除双占。
+
+    状态机：reserved → dispatched → settled（正常链）；held_unconfirmed → settled
+    （崩溃恢复后结算确认）；转换幂等（已终态 rowcount=0 跳过）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_settle_with_reservation_converts_active_to_settled(self):
+        """带 reservation_id 结算：UPDATE attempt 后、月汇总前，同事务执行预留转换。"""
+        # 序列：lock → SELECT FOR UPDATE((0, 0.02)) → UPDATE attempt → 预留转换 → upsert×2 = 6 条
+        conn = _CaptureConn(results=[None, (0, Decimal("0.02")), None, 1, None, None])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(**_settle_kwargs(reservation_id="res-1"))
+        assert result is True
+        assert len(conn.calls) == 6  # noqa: weak-assertion 语句数即语义：lock/SELECT/UPDATE/预留转换/upsert×2
+        trans_sql, trans_params = conn.calls[3]
+        assert "UPDATE ai_invocation" in trans_sql
+        assert "jsonb_agg" in trans_sql  # 保留其余元素（不删除历史）
+        assert "jsonb_build_object" in trans_sql
+        assert "'settled'" in trans_sql
+        assert "EXISTS" in trans_sql  # 幂等守卫：无活跃目标元素时不改写（防空数组置 NULL）
+        assert trans_params["reservation_id"] == "res-1"
+        assert trans_params["settled_attempt_id"] == "att-1"
+        assert trans_params["invocation_id"] == "inv-1"
+        assert set(trans_params["active_states"]) == {"reserved", "dispatched", "held_unconfirmed"}
+        assert isinstance(trans_params["settled_at"], str)
+        # 转换在月汇总 upsert 之前且同一事务（费用落账与预留退出原子生效）
+        assert "ai_usage_monthly" in conn.calls[4][0]
+        assert "ai_usage_monthly" in conn.calls[5][0]
+
+    @pytest.mark.asyncio
+    async def test_settle_without_reservation_keeps_legacy_flow(self):
+        """不带 reservation_id（未接入预留的调用链）：不执行转换，行为与既有一致。"""
+        conn = _CaptureConn(results=[None, (0, Decimal("0.02")), None, None, None])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(**_settle_kwargs())
+        assert result is True
+        assert len(conn.calls) == 5  # noqa: weak-assertion 语句数即语义：无预留转换语句
+        assert all("UPDATE ai_invocation" not in sql for sql, _ in conn.calls)
+
+    @pytest.mark.asyncio
+    async def test_settle_missing_attempt_branch_also_converts_reservation(self):
+        """attempt 行缺失（直接插终态）分支同样必须转换预留：费用落账即预留退出。"""
+        # 序列：lock → SELECT FOR UPDATE(None) → INSERT...SELECT 门控命中(1) → 预留转换(1) → upsert×2 = 6 条
+        conn = _CaptureConn(results=[None, None, 1, 1, None, None])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(
+            **_settle_kwargs(status="failed", usage=None, usage_revision=1, cost_cny=None, reservation_id="res-1")
+        )
+        assert result is True
+        assert len(conn.calls) == 6  # noqa: weak-assertion 语句数即语义：insert 分支同样带预留转换
+        trans_sql, trans_params = conn.calls[3]
+        assert "UPDATE ai_invocation" in trans_sql
+        assert trans_params["settled_attempt_id"] == "att-1"
+        assert trans_params["reservation_id"] == "res-1"
+
+    @pytest.mark.asyncio
+    async def test_stale_revision_skips_reservation_transition(self):
+        """旧修订（本次无推进）不触发预留转换：预留已在前次成功结算时转换（幂等）。"""
+        conn = _CaptureConn(results=[None, (3, Decimal("0.02"))])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(**_settle_kwargs(usage_revision=2, reservation_id="res-1"))
+        assert result is False
+        assert len(conn.calls) == 2  # noqa: weak-assertion 语句数即语义：仅 lock + 修订水位查询
+        assert all("UPDATE ai_invocation" not in sql for sql, _ in conn.calls)
+
+    @pytest.mark.asyncio
+    async def test_terminal_states_not_in_active_states(self):
+        """F22 回归链 3（手动解除）预算面：settled / released 均不占用预算（状态常量）。"""
+        from data.persistence.daos.ai_usage_dao import _ACTIVE_RESERVATION_STATES
+
+        assert "settled" not in _ACTIVE_RESERVATION_STATES
+        assert "released" not in _ACTIVE_RESERVATION_STATES
+
+
+class TestActiveReservationsBudgetGate:
+    """F22 回归链 2（崩溃→过期恢复）：预算有效占用口径。
+
+    修复前 _read_active_reservations_sum 的行级租约条件把「过期 owner 的
+    held_unconfirmed」一并过滤——未确认金额从预算占用中消失；修复后
+    held_unconfirmed 分支不受租约约束（OR 形态），reserved / dispatched 仍受约束。
+    """
+
+    @pytest.mark.asyncio
+    async def test_held_unconfirmed_counts_beyond_expired_lease(self):
+        """过期 owner 的 held_unconfirmed 0.80 持续占用：预算 1.00 内再预留 0.50 应拒绝。"""
+        # 序列：lock → INSERT → SUM settled((0,)) → legacy app_state(None) → SUM in-flight((0.80,)) → UPDATE(0)
+        conn = _CaptureConn(results=[None, None, (Decimal("0.00"),), None, (Decimal("0.80"),), 0])
+        dao = _dao(conn)
+        reservation = await dao.try_reserve(**_reserve_kwargs(amount_cny="0.50", budget_limit_cny="1.00"))
+        assert reservation is None  # 0.80（未确认持续占用）+ 0.50 > 1.00
+        sum_sql = next(sql for sql, _ in conn.calls if "jsonb_array_elements(reservations)" in sql)
+        # held_unconfirmed 分支独立于租约条件（OR 形态），过期不失占
+        assert "elem->>'state' = 'held_unconfirmed'" in sum_sql
+        assert "OR owner_lease_expires_at > (now() AT TIME ZONE 'UTC')" in sum_sql
+
+    @pytest.mark.asyncio
+    async def test_active_states_still_lease_gated_in_sum_sql(self):
+        """reserved / dispatched 仍受 owner 租约条件约束（D3 语义不扩大）。"""
+        conn = _CaptureConn(results=[None, None, (Decimal("0.00"),), None, (Decimal("0.00"),), 1])
+        dao = _dao(conn)
+        await dao.try_reserve(**_reserve_kwargs())
+        sum_sql = next(sql for sql, _ in conn.calls if "jsonb_array_elements(reservations)" in sql)
+        assert "elem->>'state' = ANY(CAST(:states AS text[]))" in sum_sql
+        # 活跃状态集合仍由 _ACTIVE_RESERVATION_STATES 参数化（含租约门控的 reserved/dispatched）
+        states_sql = [params for sql, params in conn.calls if "jsonb_array_elements(reservations)" in sql][0]
+        assert set(states_sql["states"]) == {"reserved", "dispatched", "held_unconfirmed"}
 
 
 class TestRecoverAndClose:
@@ -332,7 +538,7 @@ class TestTryReserveBudgetBranches:
     async def test_usage_only_skips_budget_check(self):
         """usage_only（amount_cny=None）不占预算：无余额查询，直接登记预留。"""
         kwargs = _reserve_kwargs(amount_cny=None, budget_limit_cny=None)
-        conn = _CaptureConn(results=[None, None, None])  # lock → INSERT → UPDATE
+        conn = _CaptureConn(results=[None, None, 1])  # lock → INSERT → UPDATE(rowcount=1 持久预留)
         dao = _dao(conn)
         reservation = await dao.try_reserve(**kwargs)
         assert reservation is not None
@@ -346,8 +552,8 @@ class TestTryReserveBudgetBranches:
     @pytest.mark.asyncio
     async def test_month_committed_null_sum_falls_back_to_legacy(self):
         """SUM 返回 NULL → settled 保持 0，legacy 分值参与预算口径。"""
-        # 序列：lock → INSERT → SUM((None,)) → app_state(("500",))
-        conn = _CaptureConn(results=[None, None, (None,), ("500",)])
+        # 序列：lock → INSERT → SUM((None,)) → app_state(("500",)) → SUM in-flight((0,)) → UPDATE(1)
+        conn = _CaptureConn(results=[None, None, (None,), ("500",), (Decimal("0.00"),), 1])
         dao = _dao(conn)
         reservation = await dao.try_reserve(**_reserve_kwargs(amount_cny="0.05", budget_limit_cny="10.00"))
         assert reservation is not None  # used 0 + legacy 5.00 + 0.05 < 10.00
@@ -356,7 +562,7 @@ class TestTryReserveBudgetBranches:
     @pytest.mark.asyncio
     async def test_month_committed_bad_sum_treated_as_zero(self):
         """SUM 返回坏值 → Decimal 解析异常 → 0（不阻断预留、不伪装成本）。"""
-        conn = _CaptureConn(results=[None, None, ("garbage",), None])
+        conn = _CaptureConn(results=[None, None, ("garbage",), None, (Decimal("0.00"),), 1])
         dao = _dao(conn)
         reservation = await dao.try_reserve(**_reserve_kwargs(amount_cny="0.05", budget_limit_cny="10.00"))
         assert reservation is not None
@@ -401,8 +607,8 @@ class TestTryReserveBudgetAllScopeAggregation:
     @pytest.mark.asyncio
     async def test_reserve_granted_when_all_scenarios_within_limit(self):
         """三场景已结算合计 60，当前场景再预留 30、限额 100 → 总口径内获准。"""
-        # 序列：lock(None) → INSERT(None) → SUM 全场景((60.00,)) → app_state(None)
-        conn = _CaptureConn(results=[None, None, (Decimal("60.00"),), None])
+        # 序列：lock(None) → INSERT(None) → SUM 全场景((60.00,)) → app_state(None) → SUM in-flight((0,)) → UPDATE(1)
+        conn = _CaptureConn(results=[None, None, (Decimal("60.00"),), None, (Decimal("0.00"),), 1])
         dao = _dao(conn)
         reservation = await dao.try_reserve(
             **_reserve_kwargs(scenario_id="news_sentiment", amount_cny="30", budget_limit_cny="100")
@@ -416,8 +622,8 @@ class TestTryReserveBudgetAllScopeAggregation:
         若 legacy 被按场景重复计入（N 次），90 + 5N + 4 > 100（N≥2）即拒绝——
         获准本身证明 legacy 恰加一次；再断言 app_state 查询恰好 1 次。
         """
-        # 序列：lock(None) → INSERT(None) → SUM 全场景((90.00,)) → app_state(("500",))
-        conn = _CaptureConn(results=[None, None, (Decimal("90.00"),), ("500",)])
+        # 序列：lock(None) → INSERT(None) → SUM 全场景((90.00,)) → app_state(("500",)) → SUM in-flight((0,)) → UPDATE(1)
+        conn = _CaptureConn(results=[None, None, (Decimal("90.00"),), ("500",), (Decimal("0.00"),), 1])
         dao = _dao(conn)
         reservation = await dao.try_reserve(
             **_reserve_kwargs(scenario_id="news_risk", amount_cny="4", budget_limit_cny="100")
@@ -430,7 +636,7 @@ class TestTryReserveBudgetAllScopeAggregation:
     @pytest.mark.asyncio
     async def test_budget_sum_sql_has_no_grouping_key_filter(self):
         """预算 SUM 查询不得按当前场景 grouping_key 过滤（params 仅 month/scope）。"""
-        conn = _CaptureConn(results=[None, None, (Decimal("0.00"),), None])
+        conn = _CaptureConn(results=[None, None, (Decimal("0.00"),), None, (Decimal("0.00"),), 1])
         dao = _dao(conn)
         await dao.try_reserve(**_reserve_kwargs())
         sum_calls = [(sql, params) for sql, params in conn.calls if "ai_usage_monthly" in sql]
@@ -712,6 +918,29 @@ class TestReadBudgetSummary:
         # unconfirmed 查询 SQL 指明 held_unconfirmed
         unconfirmed_sql = conn.calls[2][0]
         assert "held_unconfirmed" in unconfirmed_sql
+
+    @pytest.mark.asyncio
+    async def test_effective_column_excludes_held_unconfirmed(self):
+        """F23 展示口径（F22 遗留③）：有效预留列仅 owner 在世正常占用两态，
+        与「未确认」列（held_unconfirmed 字面量）不相交，同笔金额不重复展示。"""
+        conn = _QueueConn(
+            [
+                _StubResult(one=(None,)),
+                _StubResult(one=(None,)),
+                _StubResult(one=(None,)),
+                _StubResult(one=None),
+            ]
+        )
+        dao = _dao(conn)
+        await dao.read_budget_summary(month="202610")
+        effective_sql, effective_params = conn.calls[1]
+        assert "owner_lease_expires_at > (now() AT TIME ZONE 'UTC')" in effective_sql
+        assert set(effective_params["states"]) == {"reserved", "dispatched"}
+        assert "held_unconfirmed" not in effective_params["states"]
+        # 未确认列独立查询且不受租约约束（需人工处置，§10.3）
+        unconfirmed_sql = conn.calls[2][0]
+        assert "held_unconfirmed" in unconfirmed_sql
+        assert "owner_lease_expires_at" not in unconfirmed_sql
 
 
 class TestReleaseReservation:

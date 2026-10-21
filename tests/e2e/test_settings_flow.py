@@ -48,6 +48,30 @@ async def test_ai_brain_model_management_tabs(e2e_page):
     await mp.expect_connection_view()
 
 
+@pytest.mark.xdist_group("settings_e2e")
+async def test_ai_brain_model_management_renders_pixels(e2e_page):
+    """像素级回归：AI 大脑「模型管理」页签区域必须真实绘制（非仅语义完整）。
+
+    BUG 现场：TabBarView(page-view) 在宿主 AIBrainTab 的 scrollable Column
+    （无界主轴约束）下布局崩溃产生 NaN 沿父链传染，AI 大脑整层不绘制且
+    hit test 失效；语义树仍完整——``test_ai_brain_model_management_tabs`` 的
+    anchor 可见性断言全绿，无法拦截。本用例对锚点联合包围盒截图统计非背景
+    像素占比，直接验证 paint 管线输出（修复 = TabBarView → 条件渲染单页，
+    见 model_management_panel.py 注释与 v1-api-constraints.md 约束条目）。
+    """
+    mp = ModelManagementPage(e2e_page)
+    await mp.open()
+
+    # 默认「模型连接」页：语义就绪后断言区域真实绘制。
+    await mp.expect_connection_view()
+    await mp.expect_renders_pixels(mp.TAB_CONNECTION)
+
+    # 切「场景配置」页后同样断言（页签切换后的重渲染路径）。
+    await mp.select_tab(mp.TAB_ROUTES)
+    await mp.expect_routes_view()
+    await mp.expect_renders_pixels(mp.TAB_ROUTES)
+
+
 @pytest.mark.mutates_config
 async def test_settings_language_switch(e2e_page):
     """D4: 设置页语言切换后 UI 文本更新。
