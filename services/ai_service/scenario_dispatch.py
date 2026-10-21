@@ -11,6 +11,10 @@ ExecutionSnapshot 返回分派上下文；任一条件不满足返回 None（调
 同请求单轨（§14.2-6）：分派点唯一且在入口处，一次请求只走一条链；
 不同请求按分派时点状态各自选择。
 
+F01 分派授权身份：候选携带规范化外发目标与场景用途，快照授权范围版本取
+security_state.scope_version（独立于 security_revision）；Executor 逐次
+authorize_attempt 时按连接 adapter_kind 声明 requires_egress_grant。
+
 S6 D6 旧链准入（读入口）：``resolve_executor`` 未命中（走旧链前）由三入口
 helper 调 :func:`evaluate_legacy_admission` 新鲜读迁移期状态判定旧链放行——
 ``active`` → ``refused``、无 transition → ``allowed``、``draining`` →
@@ -29,7 +33,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
-from core.model_management_types import ExecutionSnapshot
+from core.model_management_types import ExecutionSnapshot, normalize_egress_target
 
 # S4 prompt/schema 契约版本（§13.1 business_contract_versions：task_id → 版本）。
 # 三入口 prompt/schema 变更时递增；news_annotation 拆分 topic / sentiment 两任务。
@@ -95,6 +99,17 @@ async def resolve_executor(scenario_id: str) -> ScenarioDispatch | None:
     if route is None or not route.get("enabled") or not route.get("candidates"):
         return None
 
+    # F01 分派授权身份：候选携带规范化外发目标（本地连接 / 非法 api_base → None，
+    # 诚实表示「无外发目标」，R21）与场景用途（purpose 域即 scenario_id，§4.3
+    # 「新闻专用情绪使用 news_annotation」）；Executor 按连接 adapter_kind 决定
+    # 是否要求 egress grant。授权范围版本取安全状态自身 scope_version（独立于
+    # security_revision，F01）。
+    connection_targets = {
+        str(c["connection_id"]): normalize_egress_target(c.get("api_base"))
+        for c in mm_snapshot.connections
+        if isinstance(c, Mapping) and c.get("connection_id") is not None
+    }
+
     # scenario_routes.candidates 为有序 connection_id 列表，转 Executor 契约形态；
     # S4 无预算预留（S5 接入）：reservation_id=None + 无 budget 金额 → D5 usage_only 语义。
     candidates = tuple(
@@ -105,6 +120,8 @@ async def resolve_executor(scenario_id: str) -> ScenarioDispatch | None:
             "reservation_id": None,
             "owner_session_id": "",
             "owner_epoch": 0,
+            "target_fingerprint": connection_targets.get(str(conn_id)),
+            "purpose": scenario_id,
         }
         for index, conn_id in enumerate(route["candidates"])
     )
@@ -122,7 +139,7 @@ async def resolve_executor(scenario_id: str) -> ScenarioDispatch | None:
         ),
         connections=mm_snapshot.connections,
         business_contract_versions=dict(_TASK_CONTRACT_VERSIONS),
-        security_scope_version=mm_snapshot.security_revision,
+        security_scope_version=mm_snapshot.security_scope_version,
         created_at=mm_snapshot.created_at,
     )
     return ScenarioDispatch(

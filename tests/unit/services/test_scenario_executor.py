@@ -187,14 +187,49 @@ class TestHappyPath:
         config_service = executor._config_service
         config_service.authorize_attempt.assert_awaited_once()
         # F06：许可请求绑定快照冻结的实际执行凭据版本（非磁盘现值）
+        # F01：目标 / 用途取候选携带的分派授权身份；远程连接要求 egress grant
         authorize_args = config_service.authorize_attempt.await_args.args
         assert authorize_args[0] == "conn-remote"
+        assert authorize_args[1] == "fp-1"
+        assert authorize_args[2] == "sentiment"
         assert authorize_args[4] == "v1"
+        assert config_service.authorize_attempt.await_args.kwargs["requires_egress_grant"] is True
         # observe 在适配器返回后被同步转移（D6）：校验观察内容归属性与用量来源
         assert recorder.observe_usage.call_count == 1
         obs_arg = recorder.observe_usage.call_args.args[0]
         assert obs_arg.invocation_id == "inv-1"
         assert obs_arg.usage is not None and obs_arg.usage.input_total_tokens == 10
+
+    @pytest.mark.asyncio
+    async def test_local_connection_skips_egress_grant_requirement(self):
+        """F01：本地 gguf 连接不外发，authorize 按真实执行位置声明免 egress grant。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(
+            adapter, recorder, validate=_validator_ok, adapters={"litellm_chat": adapter, "gguf_chat": adapter}
+        )
+        local_conn = replace(_remote_conn("conn-local"), adapter_kind="gguf_chat")
+        result = await executor.execute(
+            _request(),
+            _snapshot((_candidate(0, "conn-local"),), (local_conn,)),
+            _validator_ok,
+        )
+        assert result.status == "succeeded"
+        kwargs = executor._config_service.authorize_attempt.await_args.kwargs
+        assert kwargs["requires_egress_grant"] is False
+
+    @pytest.mark.asyncio
+    async def test_observation_security_revision_from_permit(self):
+        """F01：落账 security_revision 取许可线性化点修订，不再混用快照 scope 版本。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        executor._config_service.authorize_attempt = AsyncMock(
+            return_value=MagicMock(attempt_id="att-x", security_revision=41, granted_at="t")
+        )
+        await executor.execute(_request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok)
+        obs_arg = recorder.observe_usage.call_args.args[0]
+        assert obs_arg.metadata["security_revision"] == 41
 
     @pytest.mark.asyncio
     async def test_authorize_failure_rejects_candidate(self):

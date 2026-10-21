@@ -38,6 +38,7 @@ from core.model_management_types import (
     NormalizedLLMUsage,
     ResolvedConnection,
     ScenarioExecutionResult,
+    adapter_kind_requires_egress,
     ensure_inference_adapter,
 )
 from utils.loop_local import get_loop_local
@@ -259,15 +260,19 @@ class ScenarioExecutor:
             # 许可线性化（§4.3 / 方案 §6.2 步骤 3「再逐次调用 authorize_attempt」）：
             # 每次尝试单独授权，不预发下一次重试的许可；失败即拒绝切换，不重试。
             # F06：credential_version 传快照冻结连接的实际执行版本（与下方
-            # effective_connection 出站解析同源），撤销校验绑定执行对象而非磁盘现值
+            # effective_connection 出站解析同源），撤销校验绑定执行对象而非磁盘现值。
+            # F01：目标 / 用途取候选携带的分派授权身份（``or ""`` 防 str(None)）；
+            # requires_egress_grant 按真实执行位置声明（litellm_chat 出站需 grant，
+            # gguf_* 设备内本地模型不外发免 grant，凭据撤销等安全检查保留）。
             try:
                 permit = await self._config_service.authorize_attempt(
                     connection.connection_id,
-                    str(cand.get("target_fingerprint", "")),
-                    str(cand.get("purpose", "")),
+                    str(cand.get("target_fingerprint") or ""),
+                    str(cand.get("purpose") or ""),
                     snapshot.security_scope_version,
                     connection.credential_version,
                     attempt_id,
+                    requires_egress_grant=adapter_kind_requires_egress(connection.adapter_kind),
                 )
             except asyncio.CancelledError:
                 raise
@@ -318,8 +323,12 @@ class ScenarioExecutor:
                     await self._backoff(e, request, clock)
                 continue
 
-            # D6：适配器返回后立即同步转移用量（幂等按 attempt_id）
-            self._recorder.observe_usage(_observation_from(request, cand, connection, snapshot, attempt_id, response))
+            # D6：适配器返回后立即同步转移用量（幂等按 attempt_id）；
+            # security_revision 取许可线性化点的真实修订（F01：快照携带的
+            # security_scope_version 是授权范围版本，不得混作安全修订落账）
+            self._recorder.observe_usage(
+                _observation_from(request, cand, connection, attempt_id, response, permit.security_revision)
+            )
 
             try:
                 validated = validate_output(response)
@@ -482,9 +491,9 @@ def _observation_from(
     request: InferenceRequest,
     cand: Mapping[str, Any],
     connection: ResolvedConnection,
-    snapshot: ExecutionSnapshot,
     attempt_id: str,
     response: AdapterResponse,
+    security_revision: int,
 ) -> Any:
     from services.ai_service.usage_recorder import AttemptUsageObservation
 
@@ -493,7 +502,7 @@ def _observation_from(
         invocation_id=request.invocation_id,
         usage=response.usage,
         actual_model=response.actual_model,
-        metadata=_metadata(request, cand, connection, snapshot, response),
+        metadata=_metadata(request, cand, connection, response, security_revision),
     )
 
 
@@ -522,8 +531,8 @@ def _metadata(
     request: InferenceRequest,
     cand: Mapping[str, Any],
     connection: ResolvedConnection,
-    snapshot: ExecutionSnapshot,
     response: AdapterResponse,
+    security_revision: int,
 ) -> dict[str, Any]:
     now_cst = datetime.now(UTC) + _CST_OFFSET
     return {
@@ -537,7 +546,8 @@ def _metadata(
         "trigger": str(cand.get("trigger", "manual")),
         "candidate_index": int(cand.get("candidate_index", 0)),
         "retry_index": int(cand.get("retry_index", 0)),
-        "security_revision": snapshot.security_scope_version,
+        # F01：许可线性化点的安全修订（permit），不再混用快照授权范围版本
+        "security_revision": security_revision,
         "month": f"{now_cst.year}{now_cst.month:02d}",
         "run_id": request.run_id,
     }
