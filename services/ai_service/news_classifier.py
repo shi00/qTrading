@@ -646,8 +646,10 @@ async def _resolve_news_annotation_dispatch() -> ScenarioDispatch | None:
 
     S6 D6 旧链准入：分派未命中时经 ``evaluate_legacy_admission`` 判定迁移期放行——
     draining / sealed / active raise :class:`LegacyDispatchBlockedError`（在 try 外
-    raise，不落入分派异常的降级旧链分支，R21 不伪装成功）；分派 / 准入读取过程异常
-    （如配置损坏）仍降级旧链（既有行为），封口期写入由 tracker 写入口二次拦截。
+    raise，不落入分派异常的降级旧链分支，R21 不伪装成功）。F05 fail-closed：分派 /
+    准入读取过程异常（如配置损坏、CAS 锁失败、IO 超时）以 ``admission="read_failed"``
+    阻断旧链并传出——读取失败等于授权状态未知，降级旧链即把「未知」伪装成「允许」，
+    在 active / sealed 期间放行旧外发（R21 缺失值伪装的传输面变体）。
     """
     from services.ai_service.scenario_dispatch import evaluate_legacy_admission, resolve_executor
 
@@ -659,14 +661,15 @@ async def _resolve_news_annotation_dispatch() -> ScenarioDispatch | None:
     except asyncio.CancelledError:
         raise
     except Exception as e:
+        # F05 fail-closed：读取失败不得降级旧链授权语义（原 fail-open 行为已移除）。
         log_classified(
             logger,
             e,
             "llm",
-            "[AIService] Classify | scenario dispatch failed, falling back to legacy (%s): %s",
+            "[AIService] Classify | scenario dispatch read failed, blocking legacy (%s): %s",
             exc_info=True,
         )
-        return None
+        raise LegacyDispatchBlockedError("read_failed") from e
     # S6 D6：准入停接在 try 外 raise——「AI 功能明确不可用」必须传出，不得降级旧链。
     if admission != "allowed":
         raise LegacyDispatchBlockedError(admission)

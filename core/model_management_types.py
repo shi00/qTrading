@@ -49,6 +49,10 @@ class LegacyDispatchBlockedError(RuntimeError):
     ``admission`` 取 ``evaluate_legacy_admission`` 的判定值
     （``"draining_stop"`` / ``"refused"``），调用方按「AI 功能明确不可用」处置，
     不得降级伪装成功（R21）。
+
+    F05 fail-closed 扩展值 ``"read_failed"``：分派 / 准入配置读取过程异常
+    （配置损坏、锁失败、IO 超时等）时授权状态未知，三入口 helper 与批量
+    准入以该值阻断旧链并传出（``from`` 原始读取异常），不降级放行。
     """
 
     def __init__(self, admission: str, message: str | None = None) -> None:

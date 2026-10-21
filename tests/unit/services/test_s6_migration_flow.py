@@ -25,7 +25,11 @@ import pytest
 from sqlalchemy.dialects import postgresql
 
 import utils.config_handler as cfg_mod
-from core.model_management_types import LegacyDispatchBlockedError, LegacySealedError
+from core.model_management_types import (
+    LegacyDispatchBlockedError,
+    LegacySealedError,
+    ModelConfigurationCorruptError,
+)
 from data.persistence.daos.ai_usage_dao import AIUsageDao
 from services.ai_service.news_classifier import _resolve_news_annotation_dispatch
 from services.ai_service.news_risk import _resolve_news_risk_dispatch
@@ -515,6 +519,46 @@ class TestThreeEntryHelpers:
         assert dispatch is not None
         assert svc.get_snapshot.await_count == 1  # admission 未评估（命中即返回）
 
+    @pytest.mark.asyncio
+    async def test_read_failure_blocks_legacy_fail_closed(self, monkeypatch):
+        """F05 fail-closed：分派点读取异常（配置损坏）授权状态未知 → read_failed
+        阻断旧链并保留原始异常因果链，不降级返回 None（R21 不伪装成功）。"""
+        broken_service = MagicMock()
+        broken_service.get_snapshot = AsyncMock(side_effect=ModelConfigurationCorruptError("corrupt mm config"))
+        monkeypatch.setattr("services.ai_service.scenario_dispatch._new_config_service", lambda: broken_service)
+        for helper in self._HELPERS:
+            with pytest.raises(LegacyDispatchBlockedError) as excinfo:
+                await helper()
+            assert excinfo.value.admission == "read_failed"
+            assert isinstance(excinfo.value.__cause__, ModelConfigurationCorruptError)
+
+    @pytest.mark.asyncio
+    async def test_admission_read_failure_after_dispatch_miss_blocks_legacy(self, monkeypatch):
+        """F05 反例（读取部分成功）：分派未命中（executor 已注册、pending 无路由）后
+        准入读取抛异常 → read_failed 阻断，不得落入降级旧链分支。"""
+        from services.ai_service import scenario_dispatch
+
+        snap_ok = MagicMock(migration_state="pending", migration_transition=None, scenario_routes=())
+        call_seq = {"n": 0}
+
+        async def _get_snapshot():
+            call_seq["n"] += 1
+            if call_seq["n"] % 2 == 0:  # 每个 helper 的第二次读取（准入）抛异常
+                raise ModelConfigurationCorruptError("corrupt on admission read")
+            return snap_ok
+
+        svc = MagicMock()
+        svc.get_snapshot = _get_snapshot
+        monkeypatch.setattr("services.ai_service.scenario_dispatch._new_config_service", lambda: svc)
+        monkeypatch.setattr(
+            "services.ai_service.scenario_dispatch._scheduling_services_provider",
+            lambda: {"executor": MagicMock()},
+        )
+        for helper in self._HELPERS:
+            with pytest.raises(LegacyDispatchBlockedError) as excinfo:
+                await helper()
+            assert excinfo.value.admission == "read_failed"
+
 
 # ---------------------------------------------------------------------------
 # tracker 写入口（s6_plan §2 tracker 行）
@@ -663,14 +707,15 @@ class TestAiMixinLoopQuietStop:
         assert "admission=draining_stop" in caplog.text  # 停接日志携带 admission
 
     @pytest.mark.asyncio
-    async def test_admission_read_failure_fails_open(
+    async def test_admission_read_failure_fail_closed(
         self,
         isolated_config,
         monkeypatch,
         caplog,
     ):
-        """admission 读取异常 fail-open：与三入口「分派失败降级旧链」同语义，
-        继续走旧链分析（不停接、不触发 on_card_error）；CancelledError 不被吞（R2）。"""
+        """F05 fail-closed：admission 读取异常（配置损坏等）授权状态未知，不得伪装为
+        allowed 继续旧链——analyze_one 安静停接（_mixin_analyze_single 不被调用、
+        不触发 on_card_error，对齐 draining/refused 行为）；CancelledError 不被吞（R2）。"""
         import logging
 
         from strategies.ai_mixin import AIStrategyMixin
@@ -711,7 +756,8 @@ class TestAiMixinLoopQuietStop:
 
             result = await s.run_ai_analysis(candidates, context)
 
-        assert analyze_single.await_count == 2  # fail-open：每股继续走旧链分析
-        assert card_errors == []  # 读取失败不转化为卡片错误
-        assert "ai_score" in result.columns  # 旧链分析结果正常聚合
-        assert "legacy admission read failed" in caplog.text  # 降级日志可观测
+        analyze_single.assert_not_awaited()  # fail-closed：读取失败期间零旧链传输
+        assert card_errors == []  # 安静停接，不触发 on_card_error
+        assert len(result) == 2  # final_rows 为空 → 退回原始候选集
+        assert "admission=read_failed" in caplog.text  # 停接日志携带 read_failed 语义
+        assert "legacy admission read failed, blocking candidate" in caplog.text  # 阻断日志可观测

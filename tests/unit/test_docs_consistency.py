@@ -5847,7 +5847,7 @@ class TestGovernanceIdGenericForm:
         )
 
     def test_exempt_prefixes_and_report_forms_not_reported(self, tmp_path, monkeypatch):
-        """豁免不误报：外部编号体系（ADR/EX/CVE/UTF/SHA）+ 检视协议 ID（CHECK）+ 报告发现编号（M9-010/F-09/L111-134）."""
+        """豁免不误报：外部编号体系（ADR/EX/CVE/PYSEC/UTF/SHA）+ 检视协议 ID（CHECK）+ 报告发现编号（M9-010/F-09/L111-134）."""
         from check_docs_consistency import check_governance_id_glossary
 
         gov_dir = tmp_path / "docs" / "governance"
@@ -5858,7 +5858,7 @@ class TestGovernanceIdGenericForm:
         )
         claude = tmp_path / "CLAUDE.md"
         claude.write_text(
-            "见 ADR-0002 / EX-0001 / CVE-2025 / UTF-8 / SHA-256 / CHECK-01 / M9-010 / F-09 / L111-134\n",
+            "见 ADR-0002 / EX-0001 / CVE-2025 / PYSEC-2026 / UTF-8 / SHA-256 / CHECK-01 / M9-010 / F-09 / L111-134\n",
             encoding="utf-8",
         )
 
