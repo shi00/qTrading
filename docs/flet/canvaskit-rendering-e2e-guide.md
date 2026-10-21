@@ -164,6 +164,48 @@ PoC 在锁定 Flet 版本 + CanvasKit 上实测 `Semantics(identifier=…)` 的 
   tap），表现为「点击无效、目标永不展开」。`AnchorPage.select_option` 与
   `SettingsPage.click_tushare_verify` 均在点击前显式 `scroll_into_view` 并重新取 bbox 规避。
 
+### 坑点 9：长菜单面板外选项 force 点击误选相邻项 + wheel 打在面板外不滚动菜单（CI run 39387686968 / 39404271425 实证）
+- **根因**：Flet Dropdown 菜单项 25+ 时（如数据探索的表下拉），排序靠后的选项渲染在
+  **菜单滚动视口面板之外**（trace 实证：菜单展开 25+ 项，`stock_basic` 按字母序在面板外）。
+  CanvasKit 下选项语义 rect 是**列表内容坐标**：滚出面板的选项 rect 残留在视口内/外任意
+  位置（看似"仍在视口内"），`force=True` 点击该残留 rect 命中的是**渲染在该坐标的其他
+  元素**（实证：切 `stock_basic` 误选 `macro_economy`）；`document.elementFromPoint`
+  命中的也是语义 DOM 残留节点而非渲染位置，**不能用作可点性门**。
+- **wheel 位置条件（CI run 39404271425 实证）**：wheel 仅在**面板内**任意位置可精确滚动
+  菜单（±step、受滚动边界钳制、无惯性）；打在面板外（如 clamp 到视口边缘 y=0/899，
+  而面板为 `[229,621] × [8,892]`）**不滚动菜单**——旧实现以视口为锚点导致 12 次空转
+  `never within viewport`。拖拽滚动无效；键盘导航的高亮移动在语义树不可辨，不可依赖。
+- **面板识别（本地 probe6 实证 + 数学验证 `screen_y = panel_top + natural_y - scroll`）**：
+  菜单滚动视口在语义 DOM 中是选项节点的**最近 `flt-semantics[role=group]` 祖先**，
+  rect 即可点击面板边界（1400×900 视口实测 `[229,621] × [8,892]`）。**不得以
+  style 判据识别**——其 style 为 `overflow: hidden`，Flutter 自绘滚动不更新 DOM
+  overflow 属性（probe3 曾误读为 `overflow-y: scroll`，probe6 完整 dump 祖先链
+  style 证伪）；面板高度须容得下选项以排除同链其他 group 容器。菜单内容不溢出
+  （无滚动）时退回视口判据（二者等价）。
+- **菜单初始滚动位置对准当前选中项**（probe4-8 实证）：展开时列表滚动定位到当前
+  选中项，非选中项可能 rect 在面板外远处（如选中 stock_basic 时 daily_quotes
+  rect y=-828），任何下拉都可能触发 C8 滚动路径，并非只有"长菜单排序靠后选项"。
+- **后果（两层）**：
+  1. 命中错误选项后菜单**正常收合**——既有防御（N=3 重试防 option not found、收合确认
+     防点击被吞、TABLE_READY 消失→重现防未加载）全部通过，因为它们只能证明「某次选择
+     落地」，不能证明「选中了目标项」；
+  2. 错误选项在种子库无数据 → 空状态 → 下游文本断言（`000001.SZ`）30s 超时，报错方向
+     与根因完全脱节（表象在断言，病灶在 select_option）。
+- **规程**（`AnchorPage.select_option` C8 面板锚定滚动；C7 选中值校验已撤销）：
+  - **C8 面板锚定滚动**：点击前检查选项 bbox，未完全落入**面板**（面板未识别时退回
+    视口）先经物理滚轮 `page.mouse.wheel`（与坑点 8 同源，严禁 DOM scrollIntoView）
+    把选项滚入面板；**wheel 锚点必须是面板中心**（非视口中心/边缘）；滚动触发 Flet
+    菜单重渲染，原 ElementHandle 可能失效，每轮滚动后重新 `_find_option_element`
+    定位并重探面板；步幅按 bbox 中心与面板中心差值计算并 clamp ±600 防过冲，无 bbox
+    时兜底 +600；耗尽（12 次尝试 × deadline）抛 `never within clickable menu panel`，
+    不静默点击面板外坐标。
+  - **C7 已撤销（勿复活）**：CanvasKit 下**收合态** Dropdown 的 identifier 节点
+    textContent 为**纯 EID**，显示值不在语义 DOM 中（本地 dump 实证），事后校验无
+    数据源；误选防护由 C8 的「仅点击面板内渲染目标」在**事前**保证。
+  - 经验：下拉类交互的防御必须锚定「可点击的**真实渲染区域**」（面板 rect），而非
+    语义节点 bbox 或视口几何——CanvasKit 语义坐标与渲染位置解耦，残留 rect 一切
+    "看起来在视口内" 的判据都是假象。
+
 ---
 
 ## 4. E2E 锚点 (EIDS + AnchorKind) 分类速查表

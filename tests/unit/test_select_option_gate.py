@@ -29,8 +29,9 @@ _FILTER_COL_DROPDOWN: tuple[str, AnchorKind] = ("e2e.data.filter_col_dropdown", 
 class _FakeHandle:
     """模拟 ElementHandle：click 后模拟 on_select 触发 → 菜单收合。"""
 
-    def __init__(self) -> None:
+    def __init__(self, panel_box: dict[str, float] | None = None) -> None:
         self._visible = True
+        self.panel_box = panel_box
 
     async def click(self, force: bool = False) -> None:
         # 选择落地 → Material Dropdown 收合，选项节点不可见/移除
@@ -38,6 +39,15 @@ class _FakeHandle:
 
     async def is_visible(self) -> bool:
         return self._visible
+
+    async def bounding_box(self) -> dict[str, float]:
+        # C8 面板锚定滚动读取的 bbox：默认完全在视口内（900 高视口）→ 无需滚动
+        return {"x": 500.0, "y": 400.0, "width": 200.0, "height": 36.0}
+
+    async def evaluate(self, script: str, arg: Any = None) -> dict[str, float] | None:
+        # C8 面板识别探针（选项祖先链最近的 flt-semantics[role=group] 节点 rect）：
+        # 默认未识别面板（返回 None → 退回视口判据），panel_box 场景回显面板 rect
+        return self.panel_box
 
 
 class _FakeMouse:
@@ -63,6 +73,8 @@ class _FakePage:
         self.mouse = _FakeMouse()
         self.keyboard = _FakeKeyboard()
         self.wait_for_timeout = AsyncMock()
+        # C8 面板锚定滚动读取的视口尺寸（与 test_anchor_page_identifier_locator 一致）
+        self.viewport_size = {"width": 1400, "height": 900}
 
     async def evaluate(self, script: str, arg: Any = None) -> None:
         return None
