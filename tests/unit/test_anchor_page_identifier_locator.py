@@ -8,21 +8,23 @@
   与真实 input bbox 不一致）。
 - identifier 是唯一定位通道：不得出现任何启发式选择器（aria 后缀 / textContent
   前缀 / role 过滤），也不存在 legacy 回退路径。
-- C7/C8（select_option）：菜单收合后选中值校验 + 视口外选项物理滚轮内化
-  （CI run 39387686968 回归：长菜单排序靠后选项 force 点击误选相邻项 →
-  下游断言 30s 超时且无明确报错方向）。
+- C7/C8（select_option）：C7 选中值校验已撤销（CanvasKit 收合态显示值不在语义
+  DOM，无事后校验数据源）；C8 面板锚定滚动——滚出菜单滚动视口面板的选项语义
+  rect 是残留坐标，force 点击命中渲染在该坐标的其他元素（CI run 39387686968
+  实证：长菜单切 stock_basic 误选 macro_economy → 下游断言 30s 超时且无明确
+  报错方向），wheel 打在面板外不滚动菜单（CI run 39404271425 实证 12 次空转）。
 
 用最小 stub 替换 Playwright Page / FletPage，不依赖真实浏览器。
 """
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
-from tests.e2e.helpers.anchor_page import AnchorPage, _display_matches_option
+from tests.e2e.helpers.anchor_page import AnchorPage
 from ui.testing.e2e_ids import EIDS
 
 pytestmark = pytest.mark.unit
@@ -141,13 +143,21 @@ _DEFAULT_HANDLE_BOX: dict[str, float] = {"x": 500.0, "y": 400.0, "width": 200.0,
 class _FakeHandle:
     """模拟下拉选项 ElementHandle：click 后菜单收合。
 
-    ``box`` 供 C8 视口内化滚动读取 bbox：默认完全在视口内（900 高视口），
+    ``box`` 供 C8 面板锚定滚动读取 bbox：默认完全在视口内（900 高视口），
     显式传 ``None`` 模拟句柄随重渲染瞬时失效（bounding_box 返回 None）。
+    ``panel_box`` 模拟选项祖先链 ``overflow-y: scroll`` group 节点的面板 rect
+    （默认 None = 未识别面板 → C8 退回视口判据）。
     """
 
-    def __init__(self, box: dict[str, float] | None = _DEFAULT_HANDLE_BOX) -> None:
+    def __init__(
+        self,
+        box: dict[str, float] | None = _DEFAULT_HANDLE_BOX,
+        panel_box: dict[str, float] | None = None,
+    ) -> None:
         self._visible = True
         self.box = box
+        self.panel_box = panel_box
+        self.evaluate_calls = 0
 
     async def click(self, force: bool = False) -> None:
         self._visible = False
@@ -158,13 +168,16 @@ class _FakeHandle:
     async def bounding_box(self) -> dict[str, float] | None:
         return self.box
 
+    async def evaluate(self, script: str, arg: Any = None) -> dict[str, float] | None:
+        # C8 面板识别探针（祖先链 overflow-y: scroll group 节点 rect）
+        self.evaluate_calls += 1
+        return self.panel_box
+
 
 def _stub_select_option(ap: AnchorPage, handle: _FakeHandle | _StubbornHandle) -> AsyncMock:
     """打桩 select_option 依赖的定位/状态方法（选项面板仍走文本匹配，见矩阵 #13-#14）。
 
     返回 `_find_option_element` 的 mock，供断言选项定位通道。
-    C7 校验的显示值动态回显 find mock 最后一次定位的 option_text（模拟「选中项
-    即目标项」的正常收合路径）；mismatch 场景由用例自行覆盖该 stub。
     """
     find_mock = AsyncMock(return_value=handle)
     ap._read_expanded_by_identifier = AsyncMock(side_effect=[None, None])  # type: ignore[method-assign]
@@ -173,14 +186,6 @@ def _stub_select_option(ap: AnchorPage, handle: _FakeHandle | _StubbornHandle) -
     ap._identifier_node_box = AsyncMock(  # type: ignore[method-assign]
         return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0}
     )
-
-    async def _echo_find_target(_eid: str) -> str:
-        # C7 校验发生在选项定位之后，await_args 必非 None；动态读取以兼容用例重绑定 find mock
-        calls = cast(Any, ap._find_option_element).await_args
-        assert calls is not None, "C7 校验前必须已完成选项定位"
-        return str(calls.args[0])
-
-    ap._read_dropdown_display_value = AsyncMock(side_effect=_echo_find_target)  # type: ignore[method-assign]
     return find_mock
 
 
@@ -474,84 +479,20 @@ async def test_is_checked_false_when_not_checked(value: str | None) -> None:
 
 
 # ----------------------------------------------------------------
-# C7/C8: select_option 选中值校验 + 视口内化滚动
-# （CI run 39387686968：长菜单视口外选项 force 点击误选相邻项 macro_economy
-#   → 空状态污染下游断言 '000001.SZ' 30s 超时且无明确报错方向）
+# C8: select_option 面板锚定滚动
+# （CI run 39387686968：滚出菜单滚动视口面板的选项 rect 是残留坐标，force 点击
+#   误选相邻项 macro_economy → 空状态污染下游断言 '000001.SZ' 30s 超时；
+#   CI run 39404271425：wheel 打在面板外不滚动菜单 → 12 次空转 never within viewport）
 # ----------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("display", "option_text", "expected"),
-    [
-        ("stock_basic", "stock_basic", True),  # prio 1 精确
-        ("index_daily\n备注", "index_daily", True),  # prio 2 前缀换行
-        ("index_daily (日均线)", "index_daily", True),  # prio 3 别名
-        ("ts_code (代码)", "代码", True),  # prio 3：FILTER_COL 合法路径（传别名 key）
-        ("index_dailybaseline", "index_daily", False),  # prio 4 裸子串拒绝
-        ("macro_economy (宏观经济数据)", "stock_basic", False),  # 误选场景
-        ("", "stock_basic", False),  # 空显示值
-        (None, "stock_basic", False),  # 无显示值
-        ("stock_basic", "", False),  # 空选项文本
-    ],
-    ids=[
-        "exact",
-        "prefix-newline",
-        "alias",
-        "alias-filter-col",
-        "bare-substring-rejected",
-        "wrong-option",
-        "empty-display",
-        "none-display",
-        "empty-option",
-    ],
-)
-def test_display_matches_option(display: str | None, option_text: str, expected: bool) -> None:
-    """C7 判据：接受 matchPrio 1/2/3 形态、拒绝裸子串（index_daily ≠ index_dailybaseline）。"""
-    assert _display_matches_option(display, option_text) is expected
-
-
-@pytest.mark.asyncio
-async def test_select_option_value_mismatch_raises() -> None:
-    """C7：菜单正常收合但显示值非目标项（误选相邻选项）→ 显式抛 mismatch，不静默污染下游。"""
-    ap, _page = _make_ap()
-    handle = _FakeHandle()
-    _stub_select_option(ap, handle)
-    ap._read_dropdown_display_value = AsyncMock(  # type: ignore[method-assign]
-        return_value="macro_economy (宏观经济数据)"
-    )
-
-    with pytest.raises(RuntimeError, match="selected value mismatch"):
-        await ap.select_option(_COMPLEX, "stock_basic", timeout_ms=1000)
-
-
-@pytest.mark.asyncio
-async def test_select_option_confirms_display_value_matches_option_text() -> None:
-    """C7：收合后显示值与目标选项匹配（动态回显 find 定位的 option_text）→ 正常通过。"""
-    ap, _page = _make_ap()
-    handle = _FakeHandle()
-    _stub_select_option(ap, handle)
-
-    await ap.select_option(_COMPLEX, "代码", timeout_ms=1000)
-
-    ap._read_dropdown_display_value.assert_awaited()  # type: ignore[attr-defined]
-
-
-@pytest.mark.asyncio
-async def test_read_dropdown_display_value_returns_none_without_dom() -> None:
-    """C7 数据源：真身经 evaluate 读 identifier 节点，DOM 无节点/非字符串返回 None。"""
-    ap, page = _make_ap()
-
-    assert await ap._read_dropdown_display_value("e2e.screener.strategy_dropdown") is None
-    script, arg = page.evaluates[0]
-    assert "flt-semantics-identifier" in script
-    # 前缀剥离必须以完整 EID 为锚（EID 自身含 "."，按首个 "." 切分会把 EID 主体误剥）
-    assert "startsWith(args.label" in script
-    assert arg == {"label": "e2e.screener.strategy_dropdown"}
+# probe3 实测面板 rect（1400×900 视口，本地实证 [229,621] × [8,892]）
+_PANEL_BOX: dict[str, float] = {"x": 229.0, "y": 8.0, "width": 392.0, "height": 884.0}
 
 
 @pytest.mark.asyncio
 async def test_select_option_scroll_noop_when_option_already_in_viewport() -> None:
-    """C8：选项 bbox 已完全在视口内 → 不产生物理滚轮（不干扰菜单滚动状态）。"""
+    """C8（面板未识别退化视口判据）：选项 bbox 已完全在视口内 → 不产生物理滚轮。"""
     ap, page = _make_ap()
     handle = _FakeHandle()
     _stub_select_option(ap, handle)
@@ -562,8 +503,53 @@ async def test_select_option_scroll_noop_when_option_already_in_viewport() -> No
 
 
 @pytest.mark.asyncio
+async def test_select_option_no_wheel_when_option_within_panel() -> None:
+    """C8 门守护：面板已识别且选项 rect 完全落入面板 → 不滚动、面板探针已执行。
+
+    面板判据严于视口判据：rect 落在视口内但超出面板的残留 rect 同样不可点击。
+    """
+    ap, page = _make_ap()
+    handle = _FakeHandle(
+        box={"x": 300.0, "y": 400.0, "width": 200.0, "height": 36.0},
+        panel_box=dict(_PANEL_BOX),
+    )
+    _stub_select_option(ap, handle)
+
+    await ap.select_option(_COMPLEX, "代码", timeout_ms=1000)
+
+    assert page.mouse.wheels == [], "面板内选项不得触发滚轮操作"
+    assert handle.evaluate_calls >= 1, "面板内判据必须先经面板识别探针"
+
+
+@pytest.mark.asyncio
+async def test_select_option_wheels_at_panel_center_when_option_out_of_panel() -> None:
+    """C8 核心行为：选项 rect 在面板外 → wheel 锚点必须是面板中心（非视口边缘）。
+
+    CI run 39404271425 根因：wheel clamp 到视口边缘（y=0/899）落在面板外，
+    菜单不响应滚轮 → 12 次空转 → never within viewport。面板内任意位置
+    （含中心）均可精确滚动菜单（probe3 实证）。
+    """
+    ap, page = _make_ap()
+    outside = _FakeHandle(
+        box={"x": 300.0, "y": 950.0, "width": 200.0, "height": 36.0},
+        panel_box=dict(_PANEL_BOX),
+    )
+    inside = _FakeHandle(box={"x": 300.0, "y": 400.0, "width": 200.0, "height": 36.0})
+    _stub_select_option(ap, outside)
+    ap._find_option_element = AsyncMock(side_effect=[outside, inside])  # type: ignore[method-assign]
+
+    await ap.select_option(_COMPLEX, "stock_basic", timeout_ms=1000)
+
+    # wheel 锚点 = 面板中心 (229+392/2, 8+884/2) = (425, 450)
+    assert page.mouse.moves[-1] == (425.0, 450.0), "wheel 必须打在面板中心而非视口边缘"
+    # delta = 950+18-450 = 518（选项在面板下方 → 向下滚动）
+    assert page.mouse.wheels[0] == (0.0, 518.0)
+    assert not inside._visible, "滚入面板后应点击重定位的句柄"
+
+
+@pytest.mark.asyncio
 async def test_select_option_scrolls_out_of_view_option_into_viewport() -> None:
-    """C8：选项在视口外（长菜单排序靠后）→ 物理滚轮向下滚动 → 重定位视口内句柄再点击。"""
+    """C8（面板未识别退化视口判据）：选项在视口外 → 物理滚轮向下滚动 → 重定位再点击。"""
     ap, page = _make_ap()
     outside = _FakeHandle(box={"x": 100.0, "y": 950.0, "width": 200.0, "height": 36.0})
     inside = _FakeHandle()
@@ -578,8 +564,8 @@ async def test_select_option_scrolls_out_of_view_option_into_viewport() -> None:
 
 
 @pytest.mark.asyncio
-async def test_select_option_scroll_falls_back_to_dropdown_anchor_without_bbox() -> None:
-    """C8：选项句柄瞬时无 bbox（重渲染失效）→ 以 Dropdown 框下方为承载面兜底滚动。"""
+async def test_select_option_scroll_falls_back_to_viewport_center_without_bbox() -> None:
+    """C8：选项句柄瞬时无 bbox（重渲染失效）→ 以视口中心为锚点兜底 wheel +step。"""
     ap, page = _make_ap()
     bad = _FakeHandle(box=None)
     good = _FakeHandle()
@@ -588,19 +574,19 @@ async def test_select_option_scroll_falls_back_to_dropdown_anchor_without_bbox()
 
     await ap.select_option(_COMPLEX, "stock_basic", timeout_ms=1000)
 
-    assert page.mouse.wheels, "无 bbox 选项须走 Dropdown 承载面兜底滚动"
+    assert page.mouse.wheels, "无 bbox 选项须走视口中心锚点兜底滚动"
     assert page.mouse.wheels[0][1] > 0
     assert not good._visible
 
 
 @pytest.mark.asyncio
-async def test_select_option_raises_when_option_never_within_viewport() -> None:
-    """C8：滚动耗尽仍无法入视口 → 显式抛错，不静默点击视口外坐标。"""
+async def test_select_option_raises_when_option_never_within_panel() -> None:
+    """C8：滚动耗尽仍无法入可点区域 → 显式抛错，不静默点击面板外坐标。"""
     ap, _page = _make_ap()
     handle = _FakeHandle(box={"x": 100.0, "y": 950.0, "width": 200.0, "height": 36.0})
     _stub_select_option(ap, handle)
 
-    with pytest.raises(RuntimeError, match="never within viewport"):
+    with pytest.raises(RuntimeError, match="never within"):
         await ap.select_option(_COMPLEX, "stock_basic", timeout_ms=1000)
 
 
@@ -623,11 +609,14 @@ class _StubbornHandle:
     async def bounding_box(self) -> dict[str, float] | None:
         return _DEFAULT_HANDLE_BOX
 
+    async def evaluate(self, script: str, arg: Any = None) -> None:
+        return None  # 面板未识别 → C8 退回视口判据
+
 
 @pytest.mark.asyncio
 async def test_select_option_retries_click_when_menu_not_collapsed() -> None:
     """收合确认（坑点 6）：主点击被吞菜单不收合 → 空等耗尽走 retry_until_triggered
-    重试点击，确认收合后再过 C7 校验（while-else 分支覆盖）。"""
+    重试点击，确认收合后正常返回（while-else 分支覆盖）。"""
     ap, _page = _make_ap()
     handle = _StubbornHandle(stubborn_reads=30)  # > 空等窗口 2s / 100ms 轮询数，确保走 else 分支
     _stub_select_option(ap, handle)
@@ -639,7 +628,7 @@ async def test_select_option_retries_click_when_menu_not_collapsed() -> None:
 
 @pytest.mark.asyncio
 async def test_select_option_skips_scroll_without_viewport() -> None:
-    """C8：无 viewport_size（极早期页面）时跳过滚动内化，不误伤既有点击路径。"""
+    """C8：无 viewport_size（极早期页面）时跳过面板锚定滚动，不误伤既有点击路径。"""
     ap, page = _make_ap()
     handle = _FakeHandle()
     _stub_select_option(ap, handle)

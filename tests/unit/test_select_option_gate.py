@@ -29,8 +29,9 @@ _FILTER_COL_DROPDOWN: tuple[str, AnchorKind] = ("e2e.data.filter_col_dropdown", 
 class _FakeHandle:
     """模拟 ElementHandle：click 后模拟 on_select 触发 → 菜单收合。"""
 
-    def __init__(self) -> None:
+    def __init__(self, panel_box: dict[str, float] | None = None) -> None:
         self._visible = True
+        self.panel_box = panel_box
 
     async def click(self, force: bool = False) -> None:
         # 选择落地 → Material Dropdown 收合，选项节点不可见/移除
@@ -40,8 +41,13 @@ class _FakeHandle:
         return self._visible
 
     async def bounding_box(self) -> dict[str, float]:
-        # C8 视口内化滚动读取的 bbox：默认完全在视口内（900 高视口）→ 滚动 no-op
+        # C8 面板锚定滚动读取的 bbox：默认完全在视口内（900 高视口）→ 无需滚动
         return {"x": 500.0, "y": 400.0, "width": 200.0, "height": 36.0}
+
+    async def evaluate(self, script: str, arg: Any = None) -> dict[str, float] | None:
+        # C8 面板识别探针（祖先链 overflow-y: scroll group 节点 rect）：
+        # 默认未识别面板（返回 None → 退回视口判据），panel_box 场景回显面板 rect
+        return self.panel_box
 
 
 class _FakeMouse:
@@ -67,7 +73,7 @@ class _FakePage:
         self.mouse = _FakeMouse()
         self.keyboard = _FakeKeyboard()
         self.wait_for_timeout = AsyncMock()
-        # C8 视口内化滚动读取的视口尺寸（与 test_anchor_page_identifier_locator 一致）
+        # C8 面板锚定滚动读取的视口尺寸（与 test_anchor_page_identifier_locator 一致）
         self.viewport_size = {"width": 1400, "height": 900}
 
     async def evaluate(self, script: str, arg: Any = None) -> None:
@@ -93,11 +99,6 @@ def _stub_expanded(ap: AnchorPage, values: list[str | None]) -> None:
     ap._read_expanded_by_identifier = AsyncMock(side_effect=values)
 
 
-def _stub_display_value(ap: AnchorPage, option_text: str) -> None:
-    """C7 选中值校验打桩：显示值回显目标选项（模拟「选中项即目标项」的正常落地）。"""
-    ap._read_dropdown_display_value = AsyncMock(return_value=option_text)  # type: ignore[method-assign]
-
-
 def _expand_locator_mock(ap: AnchorPage) -> AsyncMock:
     """返回展开下拉用的定位桩（identifier 唯一路径 → _identifier_node_box）。"""
     return ap._identifier_node_box  # type: ignore[return-value]
@@ -116,7 +117,6 @@ async def _run_select_option(ap: AnchorPage, expanded_values: list[str | None]) 
     ap._find_option_element = AsyncMock(return_value=handle)
     ap.scroll_into_view = AsyncMock()
     ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
-    _stub_display_value(ap, "代码")
     await ap.select_option(_FILTER_COL_DROPDOWN, "代码", timeout_ms=1000)
     return handle
 
@@ -145,7 +145,6 @@ async def test_select_option_menu_already_open_uses_preselect(ap: AnchorPage) ->
     _stub_expanded(ap, ["true", "true"])
     ap._find_option_element = AsyncMock(return_value=handle)
     ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
-    _stub_display_value(ap, "代码")
     await ap.select_option(_FILTER_COL_DROPDOWN, "代码", timeout_ms=1000)
 
     # 展开态残留 → 先 Escape 收合
@@ -179,7 +178,6 @@ async def test_select_option_scrolls_into_view_before_click(ap: AnchorPage) -> N
     ap.scroll_into_view = AsyncMock(side_effect=_scroll)
     ap._identifier_node_box = AsyncMock(side_effect=_box)
     ap._find_option_element = AsyncMock(return_value=handle)
-    _stub_display_value(ap, "代码")
 
     await ap.select_option(_FILTER_COL_DROPDOWN, "代码", timeout_ms=1000)
 
