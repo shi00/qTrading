@@ -37,6 +37,8 @@ from services.ai_service.scenario_dispatch import evaluate_legacy_admission, res
 from services.ai_service.stock_analysis import _resolve_stock_analysis_dispatch
 from services.ai_service.usage_tracker import AIUsageTracker
 from services.model_configuration_service import ModelConfigurationService
+from ui.viewmodels.model_connections_view_model import ModelConnectionsViewModel
+from ui.viewmodels.model_routes_view_model import ModelRoutesViewModel
 from utils.config_models import ModelManagementSaveResult
 
 pytestmark = pytest.mark.unit
@@ -761,3 +763,95 @@ class TestAiMixinLoopQuietStop:
         assert len(result) == 2  # final_rows 为空 → 退回原始候选集
         assert "admission=read_failed" in caplog.text  # 停接日志携带 read_failed 语义
         assert "legacy admission read failed, blocking candidate" in caplog.text  # 阻断日志可观测
+
+
+# ---------------------------------------------------------------------------
+# F07：草稿保存不删迁移屏障、不改迁移状态（真实两 VM + 真实服务 + 真实 CAS）
+# ---------------------------------------------------------------------------
+
+
+class TestDraftSavePreservesMigrationSubdomain:
+    """F07 回归：真实两 VM 在 begin/seal 后保存，transition 不变；草稿 active 被拒。
+
+    修复前两 VM 草稿 payload 不含 ``migration_transition``，CAS 整域替换把
+    draining/sealed 屏障清掉（pending 的旧链准入可重新变 allowed）；payload 自带
+    ``migration_state="active"`` 还可绕过专用 seal/activate 流程。修复后迁移子域
+    由 begin/seal/activate 专用命令独占，CAS 草稿路径剥离回填磁盘现值。
+    """
+
+    _SEAL_ID = "seal-f07"
+
+    async def _begin_and_seal(self, config_service: ModelConfigurationService) -> dict[str, Any]:
+        outcome = await config_service.begin_migration(_load_mm()["config_revision"], "op-f07-begin", "owner-f07")
+        assert outcome.status == "committed"
+        outcome = await config_service.seal_legacy(
+            _load_mm()["config_revision"], "op-f07-seal", {_MONTH_ISO: self._SEAL_ID}, "owner-f07"
+        )
+        assert outcome.status == "committed"
+        return _load_mm()
+
+    @pytest.mark.asyncio
+    async def test_connections_vm_save_after_begin_and_seal_keeps_transition(self, config_service):
+        sealed = await self._begin_and_seal(config_service)
+        transition = sealed["migration_transition"]
+
+        vm = ModelConnectionsViewModel(config_service)
+        await vm.load()
+        vm.start_add()
+        vm.update_name("F07 连接")
+        vm.update_model("deepseek-chat")
+        vm.update_provider("deepseek")
+        assert await vm.save() is True
+
+        fresh = _load_mm()
+        assert fresh["migration_transition"] == transition  # 屏障逐键不变（draining→sealed 保留作审计）
+        assert fresh["migration_state"] == "pending"
+        assert fresh["config_revision"] == sealed["config_revision"] + 1
+
+    @pytest.mark.asyncio
+    async def test_routes_vm_save_after_begin_and_seal_keeps_transition(self, config_service):
+        sealed = await self._begin_and_seal(config_service)
+        transition = sealed["migration_transition"]
+
+        vm = ModelRoutesViewModel(config_service)
+        await vm.load()
+        await vm.save_current_scenario()
+
+        fresh = _load_mm()
+        assert fresh["migration_transition"] == transition
+        assert fresh["migration_state"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_draft_with_smuggled_active_state_is_stripped(self, config_service):
+        """草稿 payload 自带 migration_state=active + draining 伪屏障：CAS 剥离回填，
+        落盘仍 pending + 磁盘 sealed 屏障。"""
+        await self._begin_and_seal(config_service)
+        disk_mm = _load_mm()
+        payload = dict(disk_mm)
+        payload["migration_state"] = "active"  # 攻击形态：绕过 activate
+        payload["migration_transition"] = {**disk_mm["migration_transition"], "phase": "draining"}
+        payload.pop("last_config_commit", None)
+
+        outcome = await config_service.save_draft(payload, disk_mm["config_revision"], "op-f07-smuggle")
+        assert outcome.status == "committed"
+
+        fresh = _load_mm()
+        assert fresh["migration_state"] == "pending"
+        assert fresh["migration_transition"]["phase"] == "sealed"  # 磁盘屏障保持
+
+    @pytest.mark.asyncio
+    async def test_draft_with_active_state_on_clean_disk_never_activates(self, config_service):
+        """无屏障磁盘（pending+None）：草稿直写 active 落盘仍 pending，不落出非法态。"""
+        disk_mm = _load_mm()
+        assert disk_mm["migration_state"] == "pending"
+        assert disk_mm["migration_transition"] is None
+        payload = dict(disk_mm)
+        payload["migration_state"] = "active"
+        payload.pop("last_config_commit", None)
+
+        outcome = await config_service.save_draft(payload, disk_mm["config_revision"], "op-f07-active-clean")
+        assert outcome.status == "committed"
+
+        fresh = _load_mm()
+        assert fresh["migration_state"] == "pending"
+        assert fresh["migration_transition"] is None

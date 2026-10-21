@@ -276,7 +276,6 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         # 原始快照元数据（用于重建 CAS payload：save_draft 期望完整 model_management
         # 域，非单连接 dict；见 _build_payload）
         self._raw_routes: tuple[Mapping[str, Any], ...] = ()
-        self._migration_state: str = "pending"
         self._usage_policy: Mapping[str, Any] = {}
         # 目标级外发授权（§4.3）：授权摘要事实源；常规草稿路径不可写，仅安全命令刷新
         self._raw_grants: tuple[Mapping[str, Any], ...] = ()
@@ -441,7 +440,6 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         snapshot = await self._service.get_snapshot()
         self._raw_connections = snapshot.connections
         self._raw_routes = snapshot.scenario_routes
-        self._migration_state = snapshot.migration_state
         self._usage_policy = snapshot.usage_policy
         self._raw_grants = snapshot.security_grants
         self._ref_counts = self._count_refs(snapshot)
@@ -649,10 +647,11 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         """重建完整 ``model_management`` CAS payload（§5.1）。
 
         ``save_draft`` 期望完整 model_management 域（connections / scenario_routes /
-        usage_policy / migration_state / schema_version），故把当前连接草稿合并进
-        已提交连接的 ``connections`` 列表（同 ``connection_id`` 覆盖、否则追加），
-        其余域沿快照已提交值；``security_state`` 由 ConfigHandler CAS 以磁盘现值保留
-        （草稿不能改安全状态，§5.3）。
+        usage_policy / schema_version），故把当前连接草稿合并进已提交连接的
+        ``connections`` 列表（同 ``connection_id`` 覆盖、否则追加），其余域沿快照
+        已提交值；``security_state`` 由 ConfigHandler CAS 以磁盘现值保留（草稿不能
+        改安全状态，§5.3）；迁移子域（migration_state / migration_transition）同样
+        不入草稿 payload，由迁移专用命令独占、CAS 以磁盘现值回填（F07）。
         """
         cid = str(connection_payload.get("connection_id", ""))
         connections = [dict(c) for c in self._raw_connections]
@@ -667,7 +666,6 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         return {
             "schema_version": 1,
             "config_revision": self._state.config_revision,
-            "migration_state": self._migration_state,
             "connections": connections,
             "scenario_routes": [dict(r) for r in self._raw_routes],
             "usage_policy": dict(self._usage_policy),

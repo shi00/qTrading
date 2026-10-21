@@ -85,9 +85,23 @@ def _expire_lease_on_disk(isolated_config: Path) -> None:
 
 
 def _set_active_state_on_disk(isolated_config: Path) -> None:
-    """把磁盘 migration_state 改为 active（D7 active 不受限用例）。"""
+    """把磁盘改为 active（D7 active 不受限用例）。
+
+    F07：active 只能经 activate 从 sealed 跃迁落出且屏障保留作审计——测试数据
+    对齐 activate 后的真实落盘形态（active + sealed 屏障），active+None 会被
+    schema 合法跃迁守卫拒绝。
+    """
     raw = _read_raw(isolated_config)
     raw["model_management"]["migration_state"] = "active"
+    raw["model_management"]["migration_transition"] = {
+        "transition_id": "t-active",
+        "owner_session_id": "owner-1",
+        "transition_epoch": 1,
+        "phase": "sealed",
+        "lease_expires_at": "2099-01-01T00:00:00+00:00",
+        "source_fingerprint": "fp",
+        "legacy_seals": [],
+    }
     _write_raw(isolated_config, raw)
     cfg_mod.ConfigHandler._clear_cache()
 
@@ -116,10 +130,23 @@ class TestSaveDraft:
 
     @pytest.mark.asyncio
     async def test_save_draft_invalid_payload_not_committed(self, service):
+        """非迁移字段非法 payload 仍 fail-closed：schema 校验拒绝 → not_committed。"""
         mm = _load_mm()
-        mm["migration_state"] = "bogus"
+        mm["schema_version"] = 0  # Literal[1] 非法（CAS revision 比对用磁盘现值，不受影响）
         outcome = await service.save_draft(mm, mm["config_revision"], "op-bad")
         assert outcome.status == "not_committed"
+
+    @pytest.mark.asyncio
+    async def test_save_draft_smuggled_migration_state_is_stripped(self, service):
+        """F07：草稿注入非法迁移状态被 CAS 剥离（回填磁盘现值），提交不受牵连。"""
+        mm = _load_mm()
+        expected = mm["config_revision"]
+        mm["migration_state"] = "bogus"
+
+        outcome = await service.save_draft(mm, expected, "op-f07-bogus")
+
+        assert outcome.status == "committed"
+        assert _load_mm()["migration_state"] == "pending"
 
     @pytest.mark.asyncio
     async def test_save_draft_preserves_disk_security_state(self, service):

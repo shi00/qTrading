@@ -577,6 +577,7 @@ def compare_and_save_model_management(
     operation_id: str,
     *,
     update_security_state: bool = False,
+    update_migration_state: bool = False,
 ) -> ModelManagementSaveResult:
     """CAS 保存 model_management 域（§5.2）。
 
@@ -589,6 +590,15 @@ def compare_and_save_model_management(
     首次合法初始化（磁盘无安全域）交由 schema 默认值落出明确空安全状态
     （零修订 / 空 grants / 空撤销）。
     update_security_state=True（安全命令专用路径）：payload 安全子域原样提交。
+
+    F07：迁移子域（migration_state / migration_transition）由迁移专用命令独占
+    （begin_migration / seal_legacy / activate，须传 update_migration_state=True）。
+    update_migration_state=False（草稿 / 安全命令路径）：payload 携带的迁移键被
+    无条件剥离（普通保存不得修改迁移状态、不得删除切换屏障）；磁盘已有迁移
+    子域时回填磁盘现值——否则 draining/sealed 屏障会被一次普通草稿保存清掉，
+    pending 的旧链准入可重新变 allowed；首次初始化（磁盘无迁移子域）交由
+    schema 默认值落出明确初始态（pending / 无屏障）。
+    update_migration_state=True（迁移命令专用路径）：payload 迁移子域原样提交。
 
     F08：磁盘上已初始化的安全子域存在结构损坏（安全键缺失等）时确定不提交
     （not_committed），禁止把损坏经 Pydantic 默认值洗白为合法空安全态后落盘。
@@ -634,6 +644,19 @@ def compare_and_save_model_management(
                     merged_mm.pop("security_state", None)
                     if isinstance(disk_mm, dict) and "security_state" in disk_mm:
                         merged_mm["security_state"] = copy.deepcopy(disk_mm["security_state"])
+                if not update_migration_state:
+                    # F07：迁移子域由迁移专用命令独占——普通保存（草稿 / 安全命令）
+                    # 无条件剥离输入迁移键，磁盘已有迁移子域时回填磁盘现值，
+                    # 防止 draining/sealed 屏障被普通保存清掉或 pending 被草稿改写；
+                    # 首次初始化（磁盘无迁移子域）保持缺失，由 schema 默认值落出
+                    # 明确初始态（pending / 无屏障）。
+                    merged_mm.pop("migration_state", None)
+                    merged_mm.pop("migration_transition", None)
+                    if isinstance(disk_mm, dict):
+                        if "migration_state" in disk_mm:
+                            merged_mm["migration_state"] = copy.deepcopy(disk_mm["migration_state"])
+                        if "migration_transition" in disk_mm:
+                            merged_mm["migration_transition"] = copy.deepcopy(disk_mm["migration_transition"])
 
                 committed_revision = current_revision + 1
                 merged_mm["config_revision"] = committed_revision

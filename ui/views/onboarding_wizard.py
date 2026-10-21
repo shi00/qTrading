@@ -109,8 +109,10 @@ async def _commit_model_stage(
     """模型阶段「保存并继续」: 原子提交本阶段全部差异 (§11.6)。
 
     宿主合并两 VM 的草稿为**完整** ``model_management`` payload（含 schema_version /
-    config_revision / migration_state / usage_policy），单次经 ``config_service.save_draft``
+    config_revision / usage_policy），单次经 ``config_service.save_draft``
     提交连接草稿与全部场景路由草稿，避免两次非原子写。子步骤「下一步」只导航（不提交）。
+    迁移子域（migration_state / migration_transition）不入草稿 payload，由迁移
+    专用命令独占、CAS 以磁盘现值回填（F07）。
 
     Returns:
         True 提交成功（committed）; False 冲突 / 失败 / 结果未知。
