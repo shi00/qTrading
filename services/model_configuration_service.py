@@ -109,6 +109,9 @@ class ModelConfigurationService:
                 scenario_routes=tuple(MappingProxyType(r) for r in mm["scenario_routes"]),
                 usage_policy=MappingProxyType(mm["usage_policy"]),
                 security_revision=mm["security_state"]["security_revision"],
+                # F01：授权范围版本独立于 security_revision（磁盘缺键 → schema 默认 1，
+                # 与旧配置及 UI grant 创建默认同域）
+                security_scope_version=int(mm["security_state"].get("scope_version", 1)),
                 security_grants=tuple(MappingProxyType(g) for g in mm["security_state"]["grants"]),
                 migration_transition=MappingProxyType(transition) if transition is not None else None,
                 created_at=_utc_now_iso(),
@@ -407,6 +410,8 @@ class ModelConfigurationService:
         scope_version: int,
         credential_version: str | None,
         attempt_id: str,
+        *,
+        requires_egress_grant: bool = True,
     ) -> AttemptPermit:
         """逐次安全许可（MM-01/MM-02）：新鲜读取 security_state，撤销 / 缺失即拒绝。
 
@@ -418,6 +423,12 @@ class ModelConfigurationService:
         磁盘当前连接版本：快照与磁盘可能已轮换（v1 快照 → 切 v2 → 撤销 v1），
         检查磁盘现值会让已撤销版本继续出站。``None`` 表示无版本化凭据
         （ref 缺失或 ``env:`` 形态），无撤销校验对象。
+
+        F01：``requires_egress_grant`` 按真实执行位置声明——``litellm_chat``
+        （网络出站）必须存在目标级 grant 严格匹配；设备内本地模型（``gguf_*``，
+        不产生外发）免 grant 匹配，但仍校验连接存在与凭据撤销。默认 ``True``
+        （安全默认：未声明本地的调用一律要求外发授权）。空用途 / 外发缺目标
+        一律拒绝（授权服务拒绝空身份是正确安全行为，不因本地路径放宽）。
         """
 
         def _authorize() -> AttemptPermit:
@@ -434,20 +445,28 @@ class ModelConfigurationService:
                 if any(r["credential_version"] == credential_version for r in security["revoked_credential_versions"]):
                     raise PermissionError(f"凭据版本已撤销，拒绝发放许可: {credential_version}")
 
-            # 目标级 grant：同连接、同目标、同用途、当前 scope_version 且未撤销（MM-01）
-            matched = any(
-                g["connection_id"] == connection_id
-                and g["target_fingerprint"] == target_fingerprint
-                and g["purpose"] == purpose
-                and g["scope_version"] == scope_version
-                and g["revoked_at"] is None
-                for g in security["grants"]
-            )
-            if not matched:
-                raise PermissionError(
-                    f"无匹配外发授权（connection={connection_id}, purpose={purpose}, "
-                    f"scope_version={scope_version}），拒绝发放许可"
+            # F01：空身份拒绝（用途是许可的审计身份，外发目标缺失即无法匹配授权）
+            if not purpose:
+                raise PermissionError("用途缺失（purpose 为空），拒绝发放许可")
+
+            if requires_egress_grant:
+                if not target_fingerprint:
+                    raise PermissionError(f"外发目标缺失（target_fingerprint 为空），拒绝发放许可: {connection_id}")
+
+                # 目标级 grant：同连接、同目标、同用途、当前 scope_version 且未撤销（MM-01）
+                matched = any(
+                    g["connection_id"] == connection_id
+                    and g["target_fingerprint"] == target_fingerprint
+                    and g["purpose"] == purpose
+                    and g["scope_version"] == scope_version
+                    and g["revoked_at"] is None
+                    for g in security["grants"]
                 )
+                if not matched:
+                    raise PermissionError(
+                        f"无匹配外发授权（connection={connection_id}, purpose={purpose}, "
+                        f"scope_version={scope_version}），拒绝发放许可"
+                    )
 
             return AttemptPermit(
                 attempt_id=attempt_id,

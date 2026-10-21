@@ -6,6 +6,8 @@
 - 场景路由 disabled / 候选为空 → None；
 - 全条件满足 → 返回 ScenarioDispatch（executor + 冻结快照 + 路由元数据），
   快照仅含该场景路由、candidates 形态对齐 Executor 契约、连接全量透传；
+- F01 分派授权身份：候选携带规范化外发目标（本地 / 缺失 → None）与场景用途，
+  快照 scope 版本取安全状态 scope_version（独立于 security_revision）；
 - R1：services 层不 import app，调度服务经注册点注入（bootstrap app→services）。
 """
 
@@ -28,7 +30,10 @@ def _mm_snapshot(migration_state: str = "active", enabled: bool = True, candidat
         snapshot_id=str(uuid.uuid4()),
         config_revision=7,
         migration_state=migration_state,
-        connections=({"connection_id": "conn-1", "adapter_kind": "litellm_chat"},),
+        connections=(
+            {"connection_id": "conn-1", "adapter_kind": "litellm_chat", "api_base": "https://API.Example.com/v1"},
+            {"connection_id": "conn-local", "adapter_kind": "gguf_chat"},
+        ),
         scenario_routes=(
             {
                 "scenario_id": _SCENARIO_ID,
@@ -41,6 +46,7 @@ def _mm_snapshot(migration_state: str = "active", enabled: bool = True, candidat
         ),
         usage_policy={},
         security_revision=5,
+        security_scope_version=1,
         created_at="2026-10-16T00:00:00Z",
     )
 
@@ -114,12 +120,34 @@ async def test_dispatch_built_when_all_conditions_met(monkeypatch):
     assert [c["candidate_index"] for c in route["candidates"]] == [0, 1]
     assert all(c["task_id"] == _SCENARIO_ID for c in route["candidates"])
     assert all(c["reservation_id"] is None for c in route["candidates"])
+    # F01 分派授权身份：远程候选携带规范化外发目标（host 小写 + 显式端口 + 完整 path），
+    # 用途即场景 id；快照中不存在的连接诚实置 None（不臆造目标，R21）
+    by_conn = {c["connection_id"]: c for c in route["candidates"]}
+    assert by_conn["conn-1"]["target_fingerprint"] == "https://api.example.com:443/v1"
+    assert by_conn["conn-1"]["purpose"] == _SCENARIO_ID
+    assert by_conn["conn-2"]["target_fingerprint"] is None
+    assert by_conn["conn-2"]["purpose"] == _SCENARIO_ID
     # 连接全量透传 + 快照归属字段
     assert snap.connections == mm.connections
     assert snap.config_revision == 7
-    assert snap.security_scope_version == 5
+    # F01：快照 scope 版本取安全状态 scope_version，独立于 security_revision（5）
+    assert snap.security_scope_version == 1
+    assert mm.security_revision == 5
     # 契约版本按 task_id 携带
     assert set(snap.business_contract_versions) >= {"topic", "sentiment"}
+
+
+async def test_dispatch_local_connection_target_none(monkeypatch):
+    """F01：本地 gguf 连接无外发目标，候选 target_fingerprint 诚实为 None。"""
+    mm = _mm_snapshot(candidates=["conn-local"])
+    _patch_env(monkeypatch, mm, {"executor": MagicMock()})
+
+    dispatch = await scenario_dispatch.resolve_executor(_SCENARIO_ID)
+
+    assert dispatch is not None
+    candidate = dispatch.snapshot.routes[0]["candidates"][0]
+    assert candidate["target_fingerprint"] is None
+    assert candidate["purpose"] == _SCENARIO_ID
 
 
 async def test_provider_injection_roundtrip():

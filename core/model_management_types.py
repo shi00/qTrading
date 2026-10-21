@@ -15,7 +15,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Final, Literal, Protocol
+from urllib.parse import urlsplit
 
 # ---------------------------------------------------------------------------
 # 异常契约
@@ -113,6 +114,11 @@ class ModelManagementSnapshot:
     # 目标级外发授权 grant（§4.3）：设置与向导的「场景检查区」共用授权摘要的事实源；
     # 仅承载展示所需的非敏感字段（目标指纹 / 用途 / 撤销时间），不含任何秘密。
     security_grants: tuple[Mapping[str, Any], ...] = ()
+    # 当前授权范围版本（§4.3 grant.scope_version 同域，F01）：安全状态自身的范围
+    # 世代，独立于 security_revision（后者随每次安全命令递增，与「范围是否匹配」
+    # 无关）。分派快照冻结该值供 authorize_attempt 匹配 grant；范围轮转命令
+    # （未来交付）递增它使旧世代 grant 全部失配。
+    security_scope_version: int = 1
     # §12.2 切换屏障只读视图（S6 D2）：draining / sealed 迁移期状态；None = 未开启迁移
     migration_transition: Mapping[str, Any] | None = None
 
@@ -268,6 +274,59 @@ def ensure_inference_adapter(kind: str, adapter: object) -> None:
             f"adapter for kind {kind!r} violates InferenceAdapter protocol "
             f"(missing callable .invoke): {type(adapter).__name__}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 外发目标与执行位置（§4.3，F01 分派授权身份的规范来源）
+# ---------------------------------------------------------------------------
+
+# 会真实外发数据的适配器类型（§4.3：HTTP 目标即使在局域网也需匹配已确认目标）；
+# gguf_* 为设备内本地模型，不产生网络出站。
+EGRESS_ADAPTER_KINDS: Final[tuple[str, ...]] = ("litellm_chat",)
+
+
+def adapter_kind_requires_egress(adapter_kind: str) -> bool:
+    """该适配器类型的执行是否产生网络外发（F01：许可按真实执行位置要求 egress grant）。"""
+
+    return adapter_kind in EGRESS_ADAPTER_KINDS
+
+
+def normalize_egress_target(api_base: object) -> str | None:
+    """规范化外发目标（§4.3 canonical）：scheme / host 小写、IDNA host、显式有效端口、完整 base path。
+
+    拒绝 userinfo / query / fragment（明确非法目标）；``api_base`` 缺失、无 http(s) scheme、
+    host 非法或端口越界一律返回 ``None``——不臆造目标（R21）。
+
+    注意：ui/viewmodels/model_connections_view_model.py 暂持同实现副本（本函数为
+    canonical 正本；该文件由并行会话占用暂禁改，后续统一为 import 本函数）。
+    """
+    if not isinstance(api_base, str):
+        return None
+    raw = api_base.strip()
+    if not raw:
+        return None
+    try:
+        parts = urlsplit(raw)
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https"):
+        return None
+    if parts.username or parts.password or parts.query or parts.fragment:
+        return None
+    host = parts.hostname
+    if not host:
+        return None
+    try:
+        host = host.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    if not 0 < port <= 65535:
+        return None
+    return f"{scheme}://{host}:{port}{parts.path.rstrip('/')}"
 
 
 @dataclass(frozen=True, slots=True)

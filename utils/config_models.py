@@ -307,6 +307,11 @@ class ModelSecurityStateConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     security_revision: int = Field(default=0, ge=0)
+    # 当前授权范围版本（F01）：grant.scope_version 的「当前」参照值，独立于
+    # security_revision（后者随每次安全命令递增，不代表范围世代）。范围轮转
+    # 命令（未来交付）递增它使旧世代 grant 全部失配；旧磁盘缺键默认 1，与
+    # UI grant 创建默认同域。
+    scope_version: int = Field(default=1, ge=1)
     grants: list[EgressGrantConfig] = []
     revoked_credential_versions: list[RevokedCredentialConfig] = []
 

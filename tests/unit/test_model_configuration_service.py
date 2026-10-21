@@ -511,6 +511,150 @@ class TestAuthorizeCredentialVersionBinding:
         assert permit.credential_version is None
 
 
+class TestAuthorizeEgressRequirement:
+    """F01：许可按真实执行位置决定是否要求 egress grant；空身份显式拒绝。"""
+
+    @pytest.mark.asyncio
+    async def test_local_connection_permitted_without_egress_grant(self, service):
+        """本地 gguf 连接不产生外发：无任何 grant 仍发放许可（设备内模型不被阻止）。"""
+        mm = _load_mm()
+        expected = mm["config_revision"]
+        mm["connections"] = [_base_connection(CONN_A, None, adapter_kind="gguf_chat")]
+        await service.save_draft(mm, expected, "op-f01-0")
+
+        permit = await service.authorize_attempt(
+            connection_id=CONN_A,
+            target_fingerprint="",
+            purpose="stock_analysis",
+            scope_version=1,
+            credential_version=None,
+            attempt_id="att-f01-1",
+            requires_egress_grant=False,
+        )
+        assert permit.connection_id == CONN_A
+
+    @pytest.mark.asyncio
+    async def test_local_connection_revoked_credential_still_rejected(self, service):
+        """F01 本地仍检查其他安全状态：免 egress grant 不豁免凭据撤销校验。"""
+        mm = _load_mm()
+        expected = mm["config_revision"]
+        conn = _base_connection(CONN_A, None, adapter_kind="gguf_chat")
+        conn["credential_version"] = "cred-loc-1"
+        mm["connections"] = [conn]
+        await service.save_draft(mm, expected, "op-f01-2")
+        outcome = await service.revoke_credential(
+            credential_version="cred-loc-1",
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-f01-3",
+        )
+        assert outcome.status == "committed"
+
+        with pytest.raises(PermissionError, match="凭据版本已撤销"):
+            await service.authorize_attempt(
+                connection_id=CONN_A,
+                target_fingerprint="",
+                purpose="stock_analysis",
+                scope_version=1,
+                credential_version="cred-loc-1",
+                attempt_id="att-f01-4",
+                requires_egress_grant=False,
+            )
+
+    @pytest.mark.asyncio
+    async def test_egress_missing_target_rejected(self, service):
+        """外发执行缺目标身份即拒绝（不依赖 grant 无匹配的间接拒绝）。"""
+        mm = _load_mm()
+        expected = mm["config_revision"]
+        mm["connections"] = [_base_connection(CONN_A, "https://api.deepseek.com")]
+        await service.save_draft(mm, expected, "op-f01-6")
+
+        with pytest.raises(PermissionError, match="外发目标缺失"):
+            await service.authorize_attempt(
+                connection_id=CONN_A,
+                target_fingerprint="",
+                purpose="stock_analysis",
+                scope_version=1,
+                credential_version=None,
+                attempt_id="att-f01-7",
+            )
+
+    @pytest.mark.asyncio
+    async def test_empty_purpose_rejected_even_for_local(self, service):
+        """空用途一律拒绝（含本地路径）：用途是许可的审计身份，不因免 grant 放宽。"""
+        mm = _load_mm()
+        expected = mm["config_revision"]
+        mm["connections"] = [_base_connection(CONN_A, None, adapter_kind="gguf_chat")]
+        await service.save_draft(mm, expected, "op-f01-8")
+
+        with pytest.raises(PermissionError, match="用途缺失"):
+            await service.authorize_attempt(
+                connection_id=CONN_A,
+                target_fingerprint="",
+                purpose="",
+                scope_version=1,
+                credential_version=None,
+                attempt_id="att-f01-9",
+                requires_egress_grant=False,
+            )
+
+    @pytest.mark.asyncio
+    async def test_egress_scope_version_mismatch_rejected(self, service):
+        """P11 对齐：范围版本不匹配的 grant 不授权（空参数 / 错范围被拒语义保持）。"""
+        mm = _load_mm()
+        expected = mm["config_revision"]
+        mm["connections"] = [_base_connection(CONN_A, "https://api.deepseek.com")]
+        await service.save_draft(mm, expected, "op-f01-10")
+        await service.grant_egress(
+            connection_id=CONN_A,
+            target_fingerprint="https://api.deepseek.com:443",
+            purpose="stock_analysis",
+            scope_version=1,
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-f01-11",
+        )
+
+        with pytest.raises(PermissionError, match="无匹配外发授权"):
+            await service.authorize_attempt(
+                connection_id=CONN_A,
+                target_fingerprint="https://api.deepseek.com:443",
+                purpose="stock_analysis",
+                scope_version=2,
+                credential_version=None,
+                attempt_id="att-f01-12",
+            )
+
+    @pytest.mark.asyncio
+    async def test_snapshot_scope_version_independent_of_security_revision(self, service, isolated_config):
+        """F01：快照 scope 版本取 security_state.scope_version；旧磁盘缺键默认 1，
+        与 security_revision（随安全命令递增）相互独立。"""
+        mm = _load_mm()
+        expected = mm["config_revision"]
+        mm["connections"] = [_base_connection(CONN_A, "https://api.deepseek.com")]
+        await service.save_draft(mm, expected, "op-f01-14")
+        await service.grant_egress(
+            connection_id=CONN_A,
+            target_fingerprint="https://api.deepseek.com:443",
+            purpose="stock_analysis",
+            scope_version=1,
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-f01-15",
+        )
+
+        snapshot = await service.get_snapshot()
+        assert snapshot.security_revision == 1  # 一次安全命令
+        assert snapshot.security_scope_version == 1  # 范围世代不变
+
+        # 旧版本磁盘形态：安全子域无 scope_version 键 → 读取默认 1（不视为损坏）
+        raw = _read_raw(isolated_config)
+        raw["model_management"]["security_state"].pop("scope_version", None)
+        _write_raw(isolated_config, raw)
+        cfg_mod.ConfigHandler._clear_cache()
+
+        legacy_snapshot = await service.get_snapshot()
+        assert legacy_snapshot.security_revision == 1
+        assert legacy_snapshot.security_scope_version == 1
+
+
 class TestSyntheticTestContext:
     @pytest.mark.asyncio
     async def test_begin_synthetic_test_freezes_draft_without_persist(self, service):
