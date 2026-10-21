@@ -420,6 +420,11 @@ class AnchorPage:
         自适应等待 bbox 变化（不固定 150ms），连续 2 轮无变化即判菜单无响应提前
         抛错。面板探针失败时不退回视口判据（fail-open 会误点残留 rect），重取
         句柄后重试。耗尽仍不可点击即抛错，不静默点击面板外坐标。
+
+        超时门位于**包含判据之后、滚轮之前**：一次落空滚轮的 settle 等待本身可
+        耗尽 timeout 预算（CI Linux run 39577733551 实证 1.5s > 1s），若按「循环
+        末尾判超时」处理，会丢弃刚刚重定位且已落入可点区域的句柄而误报 never
+        within。故超时只禁止「继续滚动」，不禁止「识别已可点击的句柄」。
         """
         viewport = self.page.viewport_size
         if not viewport:
@@ -461,6 +466,12 @@ class AnchorPage:
             if raw_box and _box_contains(region, _as_box(raw_box), margin=2.0):
                 return current
 
+            # 超时只禁止继续滚动，不禁止识别已可点击的句柄：上一轮 settle 等待可能
+            # 已耗尽预算，此时重定位到的选项若已落入可点区域，下一轮包含判据会
+            # 立即返回，不得因超时误报 never within。
+            if time.monotonic() >= deadline:
+                break
+
             # wheel 锚点 = 可点区域中心（面板中心 / 退化视口中心）。
             anchor_x = min(max(region["x"] + region["width"] / 2, 0.0), vw - 1.0)
             anchor_y = min(max(region["y"] + region["height"] / 2, 0.0), vh - 1.0)
@@ -487,8 +498,6 @@ class AnchorPage:
                 fresh = await self._find_option_element(option_text, eid_str)
                 if fresh:
                     current = fresh
-            if time.monotonic() >= deadline:
-                break
 
         raise RuntimeError(
             f"AnchorPage.select_option: option {option_text!r} never within clickable menu panel (dropdown={eid_str!r})"
