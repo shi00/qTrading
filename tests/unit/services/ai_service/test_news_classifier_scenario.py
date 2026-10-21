@@ -23,7 +23,6 @@ from core.model_management_types import (
     ModelOutputValidationError,
     NormalizedLLMUsage,
     ScenarioExecutionResult,
-    ValidatedBusinessOutput,
 )
 from services.ai_service import scenario_dispatch
 from services.ai_service.news_classifier import (
@@ -31,6 +30,7 @@ from services.ai_service.news_classifier import (
     NewsClassifier,
     _validate_bundled_output,
 )
+from services.ai_service.scenario_executor import ScenarioOutput
 
 pytestmark = pytest.mark.unit
 
@@ -72,7 +72,8 @@ def _succeeded_result(content: str) -> ScenarioExecutionResult:
         invocation_id="inv-1",
         status="succeeded",
         outputs=(
-            ValidatedBusinessOutput(
+            # F03：预制形态与 Executor 真实成功出口一致（ScenarioOutput，非裸对象）
+            ScenarioOutput(
                 output=json.loads(content),
                 metadata={"actual_model": "glm-4-air", "connection_id": "conn-1", "connection_revision": 2},
             ),
@@ -312,7 +313,7 @@ async def test_dedicated_topic_and_sentiment_both_success(monkeypatch):
             scenario_id=_SCENARIO_ID,
             invocation_id="inv-2",
             status="succeeded",
-            outputs=(ValidatedBusinessOutput(output={"sentiment": "Negative"}),),
+            outputs=(ScenarioOutput(output={"sentiment": "Negative"}),),
             candidate_decisions=(
                 CandidateDecision(
                     task_id="sentiment",
@@ -352,7 +353,7 @@ async def test_dedicated_topic_fail_sentiment_kept(monkeypatch):
                 scenario_id=_SCENARIO_ID,
                 invocation_id="inv-2",
                 status="succeeded",
-                outputs=(ValidatedBusinessOutput(output={"sentiment": "Neutral"}),),
+                outputs=(ScenarioOutput(output={"sentiment": "Neutral"}),),
                 candidate_decisions=(),
                 actual_usage=(),
             ),
@@ -415,7 +416,7 @@ async def test_dedicated_sentiment_uses_subroute_candidates(monkeypatch):
             scenario_id=_SCENARIO_ID,
             invocation_id="inv-2",
             status="succeeded",
-            outputs=(ValidatedBusinessOutput(output={"sentiment": "Negative"}),),
+            outputs=(ScenarioOutput(output={"sentiment": "Negative"}),),
             candidate_decisions=(),
             actual_usage=(),
         ),

@@ -18,7 +18,7 @@ import json
 import logging
 import uuid
 from dataclasses import replace as dataclass_replace
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 from core.model_management_types import (
     AdapterResponse,
@@ -28,6 +28,7 @@ from core.model_management_types import (
     ScenarioExecutionResult,
     ValidatedBusinessOutput,
 )
+from services.ai_service.scenario_executor import ScenarioOutput
 from utils.config_models import NEWS_CATEGORY_MAP
 from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -370,8 +371,10 @@ class NewsClassifier:
         if exec_result.status != "succeeded" or not exec_result.outputs:
             return self._scenario_failure_result("bundled", invocation_id, dispatch, None, exec_result)
 
-        output = dict(exec_result.outputs[0].output)
-        meta = exec_result.outputs[0].metadata
+        # F03：经公共输出类型 ScenarioOutput 读取（Executor 成功出口唯一生产形态）
+        first = cast(ScenarioOutput, exec_result.outputs[0])
+        output = dict(first.output)
+        meta = first.metadata
         result = self._parse_news_result(dict(output))
         # 情绪以校验规范化结果为准（_parse_news_result 的默认 Neutral 仅补缺失键，
         # 不会覆盖显式 None；此处显式覆盖确保 None 语义不被回填，R21）
@@ -471,13 +474,14 @@ class NewsClassifier:
         }
         bundled_sentiment: str | None = None
         if topic_result is not None:
+            # F03：经公共输出类型 ScenarioOutput 读取（Executor 成功出口唯一生产形态）
             base_meta = self._scenario_execution_metadata(
-                topic_result, invocation_id, dispatch, topic_result.outputs[0].metadata
+                topic_result, invocation_id, dispatch, cast(ScenarioOutput, topic_result.outputs[0]).metadata
             )
 
         # 组装：主题结果（可能失败）+ 情绪结果（可能失败）
         if topic_result is not None:
-            output = dict(topic_result.outputs[0].output)
+            output = dict(cast(ScenarioOutput, topic_result.outputs[0]).output)
             result = self._parse_news_result(dict(output))
             # 主题响应若携带合法联合情绪（validator 捕获），暂存供显式降级复用（D3）。
             bundled_sentiment = output.get("sentiment")
@@ -494,7 +498,7 @@ class NewsClassifier:
             }
 
         if sentiment_result is not None:
-            result["sentiment"] = sentiment_result.outputs[0].output.get("sentiment")
+            result["sentiment"] = cast(ScenarioOutput, sentiment_result.outputs[0]).output.get("sentiment")
             result["sentiment_status"] = "success"
             adapter_kind = self._sentiment_adapter_kind(dispatch, sentiment_result)
             result["sentiment_source"] = "dedicated:gguf" if adapter_kind else "dedicated:llm"
@@ -504,7 +508,7 @@ class NewsClassifier:
                     sentiment_result,
                     base_meta["invocation_id"],
                     dispatch,
-                    sentiment_result.outputs[0].metadata,
+                    cast(ScenarioOutput, sentiment_result.outputs[0]).metadata,
                 )
         elif self._sentiment_failure_kind(sentiment_error) == "unavailable" and bundled_sentiment in _SENTIMENT_ENUM:
             # D3（检视修复）：专用链整体不可用 + 已有合法联合情绪 → 显式降级复用

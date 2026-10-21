@@ -31,7 +31,7 @@ from core.model_management_types import (
     ValidatedBusinessOutput,
 )
 from core.model_management_types import PersistenceOutcome
-from services.ai_service.scenario_executor import ScenarioExecutor
+from services.ai_service.scenario_executor import ScenarioExecutor, ScenarioOutput
 
 pytestmark = pytest.mark.unit
 
@@ -184,6 +184,21 @@ class TestHappyPath:
         )
         assert result.status == "succeeded"
         assert len(result.outputs) == 1
+        # F03：成功出口唯一生产形态为 ScenarioOutput（Mapping 兼容 + 属性协议）
+        first = result.outputs[0]
+        assert isinstance(first, ScenarioOutput)
+        assert first.output == {"label": "中性"}
+        assert dict(first) == {"output": {"label": "中性"}, "metadata": first.metadata}
+        # Mapping 视图仅两键：未知键显式 KeyError（不伪装缺失，R21 邻域语义）
+        with pytest.raises(KeyError) as exc_info:
+            first["unknown_key"]
+        assert exc_info.value.args[0] == "unknown_key"
+        # F03：程序生成溯源保留（模型身份 / 连接身份 / 许可安全修订），模型输出不可伪造
+        assert first.metadata["actual_model"] == "glm-4-air"
+        assert first.metadata["connection_id"] == "conn-remote"
+        assert first.metadata["configured_model"] == "glm-4-air"
+        assert first.metadata["scenario_id"] == "news_sentiment"
+        assert first.metadata["security_revision"] == 1
         config_service = executor._config_service
         config_service.authorize_attempt.assert_awaited_once()
         # F06：许可请求绑定快照冻结的实际执行凭据版本（非磁盘现值）
@@ -199,6 +214,29 @@ class TestHappyPath:
         obs_arg = recorder.observe_usage.call_args.args[0]
         assert obs_arg.invocation_id == "inv-1"
         assert obs_arg.usage is not None and obs_arg.usage.input_total_tokens == 10
+
+    @pytest.mark.asyncio
+    async def test_success_output_merges_validator_metadata_and_provenance(self):
+        """F03：校验器 metadata（模型身份等）不丢，Executor 程序溯源为权威（同键覆盖）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        validator = MagicMock(
+            return_value=ValidatedBusinessOutput(
+                output={"label": "利好"}, metadata={"actual_model": "glm-4-air", "adapter_extra": "x"}
+            )
+        )
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), validator
+        )
+        first = result.outputs[0]
+        assert isinstance(first, ScenarioOutput)
+        # 校验器独有键保留；Executor 溯源键存在；重叠键（actual_model）同源一致
+        assert first.metadata["adapter_extra"] == "x"
+        assert first.metadata["actual_model"] == "glm-4-air"
+        assert first.metadata["connection_id"] == "conn-remote"
+        assert "security_revision" in first.metadata
+        assert "run_id" in first.metadata
 
     @pytest.mark.asyncio
     async def test_local_connection_skips_egress_grant_requirement(self):

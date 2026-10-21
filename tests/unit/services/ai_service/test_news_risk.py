@@ -435,16 +435,14 @@ class TestAnalyzeNewsRiskScenarioChain:
 
     @staticmethod
     def _exec_result(status, output=None, decisions=None, actual_usage=()):
-        from core.model_management_types import (
-            CandidateDecision,
-            ScenarioExecutionResult,
-            ValidatedBusinessOutput,
-        )
+        from core.model_management_types import CandidateDecision, ScenarioExecutionResult
+        from services.ai_service.scenario_executor import ScenarioOutput
 
         outputs = ()
         if output is not None:
             outputs = (
-                ValidatedBusinessOutput(
+                # F03：预制形态与 Executor 真实成功出口一致（ScenarioOutput，非裸对象）
+                ScenarioOutput(
                     output=output,
                     metadata={"actual_model": "m-1", "connection_revision": 5},
                 ),

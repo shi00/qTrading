@@ -21,7 +21,7 @@ import logging
 import os
 import re
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import httpx
 import pandas as pd
@@ -37,6 +37,7 @@ from core.model_management_types import (
 from services.ai_service.labels import filter_available_labels
 from services.ai_service.litellm_client import AIServiceUnavailableError, DEFAULT_ANALYSIS_TIMEOUT
 from services.ai_service.output import validate_ai_analysis_response
+from services.ai_service.scenario_executor import ScenarioOutput
 from services.ai_service.token_budget import _apply_context_budget
 from services.local_model_manager import LocalInferenceTimeoutError
 from utils.error_classifier import log_classified
@@ -832,8 +833,10 @@ class StockAnalysisService:
                 ),
             }
 
-        output = dict(exec_result.outputs[0].output)
-        meta = exec_result.outputs[0].metadata
+        # F03：经公共输出类型 ScenarioOutput 读取（Executor 成功出口唯一生产形态）
+        first = cast(ScenarioOutput, exec_result.outputs[0])
+        output = dict(first.output)
+        meta = first.metadata
         if learning_meta is not None:
             # D4-M3 可追溯：随该股结果回传注入元数据（与旧链分支同语义）。
             output["learning_context_meta"] = learning_meta
