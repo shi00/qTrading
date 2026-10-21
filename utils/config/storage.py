@@ -317,7 +317,15 @@ def ensure_defaults():
 
     Uses the cross-process file lock and write lock for the entire
     read-modify-write cycle (§5.1: 文件锁 → RWLock，锁内重读磁盘，防止 TOCTOU
-    与跨进程覆盖)。磁盘损坏时保留既有启动修复语义（重建默认）。
+    与跨进程覆盖)。
+
+    F10：磁盘损坏 / 暂不可读时中止补全与清理（不写盘、不动缓存），保留损坏原件
+    字节供用户手工恢复——与 save_config 的「损坏拒写」语义对齐，禁止从空 dict
+    重建默认覆盖现场（会连带丢失连接凭据、撤销事实与迁移上下文）。
+
+    F08 边界（划归 F10）：磁盘 JSON 合法但已初始化 ``model_management`` 安全子域
+    结构损坏（缺安全三键）时同样中止——深合并会把缺失的 ``security_state`` 补成
+    默认空安全态（零修订 / 空 grants / 空撤销）洗白后落盘，违反 fail closed。
     """
     _migrate_config_location()
     try:
@@ -325,15 +333,25 @@ def ensure_defaults():
             with cfg.ConfigHandler._lock.gen_wlock():
                 data, err = _read_disk_dict()
                 if err is not None:
-                    cfg.logger.warning(
-                        "[ConfigHandler] Config file unreadable, rebuilding from defaults: %s",
+                    cfg.logger.error(
+                        "[ConfigHandler] Config file unreadable, keeping file untouched"
+                        " (skipping defaults/cleanup): %s",
                         err,
                     )
-                    current_config = {}
-                elif data is None:
+                    return
+                if data is None:
                     current_config = {}
                 else:
                     current_config = data
+                    try:
+                        validate_security_subdomain_integrity(current_config.get("model_management"))
+                    except SecurityStateCorruptionError as e:
+                        cfg.logger.error(
+                            "[ConfigHandler] ensure_defaults: security subdomain corruption,"
+                            " aborting to avoid whitewash: %s",
+                            DataSanitizer.sanitize_error(e),
+                        )
+                        return
 
                 dirty = False
 
@@ -398,6 +416,20 @@ def load_config():
                     # 此处仅做读时内存迁移（不落盘：读锁下不可再取写锁保存，避免死锁）；
                     # 持久化由 ensure_defaults（写锁）及后续 save_config 复用归一化后的缓存完成。
                     _normalize_ai_external_acknowledged(raw_data)
+                    # F10：与 F08 同一损坏语义——已初始化安全子域结构损坏时禁止把
+                    # Pydantic 默认值补出的空安全态装入缓存（缓存命中路径不再校验，
+                    # 不变量改为「所有缓存写入点均已校验或中止」）。此处沿用本函数对
+                    # ValidationError 的既有降级语义（显式记日志 + 落默认缓存，不写回
+                    # 磁盘）；安全关键消费方按契约走 read_model_management_fresh（fail closed）。
+                    try:
+                        validate_security_subdomain_integrity(raw_data.get("model_management"))
+                    except SecurityStateCorruptionError as e:
+                        cfg.logger.error(
+                            "[ConfigHandler] Config security subdomain corruption, using defaults (file preserved): %s",
+                            DataSanitizer.sanitize_error(e),
+                        )
+                        cfg.ConfigHandler._config_cache = get_default_config()
+                        return cfg.ConfigHandler._config_cache.copy()
                     validated = AppConfig.model_validate(raw_data)
                     cfg.ConfigHandler._config_cache = validated.model_dump()
                     return cfg.ConfigHandler._config_cache.copy()
@@ -487,6 +519,18 @@ def save_config(config_data, replace=False):
                         )
                         return False
                     if data is not None:
+                        # F08/F10 纵深拦截：磁盘安全子域已初始化但结构损坏时中止，
+                        # 禁止经 model_validate 默认值补全洗白后落盘（JSON 损坏已由
+                        # 上方 err 分支拒写，此处补齐「合法 JSON + 结构损坏」的拒写面）。
+                        try:
+                            validate_security_subdomain_integrity(data.get("model_management"))
+                        except SecurityStateCorruptionError as e:
+                            cfg.logger.error(
+                                "[ConfigHandler] save_config: security subdomain corruption,"
+                                " aborting to avoid whitewash: %s",
+                                DataSanitizer.sanitize_error(e),
+                            )
+                            return False
                         # AI-04/SEC-01: 磁盘基底与 load_config 对称，先归一化旧形态，
                         # 否则 model_validate 因类型不符抛 ValidationError → 静默 False。
                         _normalize_ai_external_acknowledged(data)
@@ -496,6 +540,17 @@ def save_config(config_data, replace=False):
                     else:
                         current_config = {}
                     current_config.update(config_data)
+                    # F09 遗留①纵深拦截：合并结果的安全子域仍须结构完整——普通
+                    # save_config 按契约不得携带 model_management 域（该域只走 CAS），
+                    # 调用方若经此入口带入部分安全子域，禁止以 Pydantic 默认值洗白落盘。
+                    try:
+                        validate_security_subdomain_integrity(current_config.get("model_management"))
+                    except SecurityStateCorruptionError as e:
+                        cfg.logger.error(
+                            "[ConfigHandler] save_config: merged security subdomain incomplete, aborting: %s",
+                            DataSanitizer.sanitize_error(e),
+                        )
+                        return False
 
                 try:
                     validated = AppConfig.model_validate(current_config)
