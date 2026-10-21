@@ -612,6 +612,21 @@ class AppConfig(BaseModel):
     no_proxy_domains: list[str] = []
     ts_token: str = ""
 
+    # F10 / §12.1 迁移期保留：旧版新闻情绪打分七键，仍被 services/news_sentiment_scorer.py
+    # （_read_config）与 services/model_configuration_service.py（迁移预览 §12.1）消费。
+    # 登记前 ensure_defaults 把它们当未知键清理，导致旧配置在迁移预览前丢失情绪配置。
+    # 数值默认与 scorer 运行时回退一致（utils 不得 import services，两处需人工对齐；
+    # 消费端 get_typed 另有回退兜底，scorer 运行时再 clamp）。刻意不加 ge/gt 约束：
+    # 为旧盘值引入 ValidationError 会使整份配置回退默认（AI-04 教训）。
+    # 版本化迁移（模型管理迁移 §12.1）确认后由迁移负责清理，届时本区块整体移除。
+    news_sentiment_enabled: bool = False
+    news_sentiment_model_path: str = ""
+    news_sentiment_head_path: str = ""
+    news_sentiment_tokenizer_path: str = ""
+    news_sentiment_n_threads: int = 6
+    news_sentiment_max_length: int = 128
+    news_sentiment_timeout_s: float = 30.0
+
     sync_integrity: SyncIntegrityConfig = SyncIntegrityConfig()
 
     # 统一模型管理唯一持久域（reviews/模型统一.md §3.4，S1 交付）。

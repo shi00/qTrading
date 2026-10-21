@@ -10,7 +10,7 @@
 
 **统一模型管理配置域（S1，ADR-0014 / reviews/模型统一.md §5）**：`model_management` 域的保存与读取有独立契约，普通键的 `save_config` 不适用于该域：
 
-- **锁顺序固定「跨进程文件锁 → RWLock」**（`utils/config/storage.py` `_config_file_lock`，filelock 锁文件 `CONFIG_FILE.lock`）：`save_config` / `ensure_defaults` / `compare_and_save_model_management` 全部走该顺序，锁内重读磁盘为基底，不用旧缓存整字典覆盖新内容；磁盘损坏时中止保存返回 `False`，不以空基底覆盖。
+- **锁顺序固定「跨进程文件锁 → RWLock」**（`utils/config/storage.py` `_config_file_lock`，filelock 锁文件 `CONFIG_FILE.lock`）：`save_config` / `ensure_defaults` / `compare_and_save_model_management` 全部走该顺序，锁内重读磁盘为基底，不用旧缓存整字典覆盖新内容；磁盘损坏时中止保存返回 `False`（`ensure_defaults` 同样中止补全/清理，保留损坏原件不重建默认，F10），不以空基底覆盖。已初始化安全子域结构损坏（F08 语义）在 `save_config`（基底与合并结果纵深拦截）/ `ensure_defaults` / `load_config` 缓存装载处同样拒绝，禁止经 Pydantic 默认值洗白为空安全态。
 - **CAS 保存**：`compare_and_save_model_management(expected_revision, payload, operation_id, *, update_security_state=False)`——revision 不符返回 `revision_conflict`；成功时 `config_revision+1` 与 `last_config_commit` 回执（operation_id / committed_revision / 非敏感指纹 / 时间戳）随同一次 `os.replace` 落盘。结果明确前不自动重试、不轮换凭据、不回滚。
 - **安全子域保护**：`update_security_state=False`（草稿路径）时 payload 的 `security_state` 被磁盘现值替换；安全子域只经 `ModelConfigurationService.grant_egress / revoke_egress / revoke_credential` 专用命令修改（`security_revision` 单调递增，安全命令同时递增 `config_revision`）。
 - **新鲜读取**：`read_model_management_fresh()` 按相同锁顺序重读磁盘、校验后刷新缓存并返回深拷贝；磁盘损坏 / 校验失败抛 `ConfigFreshReadError`（禁止静默落默认）。快照创建与 `authorize_attempt` 必须用此入口，不走 `load_config()` 缓存命中路径。

@@ -666,6 +666,176 @@ class TestConfigHandlerEnsureDefaults:
             mock_save.assert_not_called()
 
 
+class TestF10StartupPreserveCorruption:
+    """F10 回归：启动补全损坏不写 + 旧情绪七键保留。
+
+    - 坏文件（JSON 损坏 / 根非对象）调用 ensure_defaults 后字节不变，禁止从空 dict 重建默认；
+    - 已初始化安全子域结构损坏（F08 语义）时中止，禁止深合并把缺失 security_state
+      洗白为空安全态落盘；
+    - 真实旧文件依次「启动补全 → scorer 替身读取 → 迁移预览替身读取」，七项值保持；
+    - 缺文件首次初始化仍正常落默认；load_config / save_config 同一损坏语义对齐。
+    """
+
+    @pytest.fixture()
+    def isolated_config(self, tmp_path):
+        config_file = tmp_path / "user_settings.json"
+        with (
+            patch.object(cfg_mod, "CONFIG_FILE", str(config_file)),
+            patch.object(cfg_mod.ConfigHandler, "_config_cache", None),
+        ):
+            yield config_file
+
+    @staticmethod
+    def _legacy_sentiment_keys():
+        """旧版七键及典型盘值（timeout_s 以 int 落盘的历史形态）。"""
+        return {
+            "news_sentiment_enabled": True,
+            "news_sentiment_model_path": "D:/models/finbert.gguf",
+            "news_sentiment_head_path": "D:/models/head.npz",
+            "news_sentiment_tokenizer_path": "D:/models/tokenizer.json",
+            "news_sentiment_n_threads": 4,
+            "news_sentiment_max_length": 256,
+            "news_sentiment_timeout_s": 45,
+        }
+
+    # 配置键 → 消费端替身结果键（scorer/预览产物均为语义短键，与真实消费端同形）
+    _CONSUMER_KEY_ALIASES = {
+        "news_sentiment_enabled": "enabled",
+        "news_sentiment_model_path": "model_path",
+        "news_sentiment_head_path": "head_path",
+        "news_sentiment_tokenizer_path": "tokenizer_path",
+        "news_sentiment_n_threads": "n_threads",
+        "news_sentiment_max_length": "max_length",
+        "news_sentiment_timeout_s": "timeout_s",
+    }
+
+    def _scorer_read_standins(self):
+        """scorer 替身：与 services/news_sentiment_scorer.py::_read_config 同型取值。"""
+        return {
+            "enabled": cfg_mod.ConfigHandler.get_typed("news_sentiment_enabled", bool, False),
+            "model_path": cfg_mod.ConfigHandler.get_typed("news_sentiment_model_path", str, ""),
+            "head_path": cfg_mod.ConfigHandler.get_typed("news_sentiment_head_path", str, ""),
+            "tokenizer_path": cfg_mod.ConfigHandler.get_typed("news_sentiment_tokenizer_path", str, ""),
+            "n_threads": cfg_mod.ConfigHandler.get_typed("news_sentiment_n_threads", int, 6),
+            "max_length": cfg_mod.ConfigHandler.get_typed("news_sentiment_max_length", int, 128),
+            "timeout_s": cfg_mod.ConfigHandler.get_typed("news_sentiment_timeout_s", float, 30.0),
+        }
+
+    def _migration_preview_standins(self):
+        """迁移预览替身：与 services/model_configuration_service.py 七键映射同型取值。"""
+        loaded = cfg_mod.ConfigHandler.load_config()
+        return {
+            "enabled": bool(loaded.get("news_sentiment_enabled", False)),
+            "model_path": loaded.get("news_sentiment_model_path"),
+            "head_path": loaded.get("news_sentiment_head_path"),
+            "tokenizer_path": loaded.get("news_sentiment_tokenizer_path"),
+            "n_threads": loaded.get("news_sentiment_n_threads"),
+            "max_length": loaded.get("news_sentiment_max_length"),
+            "timeout_s": loaded.get("news_sentiment_timeout_s"),
+        }
+
+    def test_default_config_registers_legacy_sentiment_keys(self):
+        """七键已登记进 AppConfig 默认导出（ensure_defaults 不再当未知键清理的前提）。"""
+        for key in self._legacy_sentiment_keys():
+            assert key in cfg_mod.ConfigHandler.DEFAULT_CONFIG
+
+    def test_corrupt_file_bytes_unchanged_after_ensure_defaults(self, isolated_config):
+        """F10 核心回归：坏文件调用后字节不变，缓存不落默认重建值。"""
+        isolated_config.write_bytes(b'{"llm_provider": "deep", "ts_tok')
+        before = isolated_config.read_bytes()
+        cfg_mod.ConfigHandler.ensure_defaults()
+        assert isolated_config.read_bytes() == before
+        assert cfg_mod.ConfigHandler._config_cache is None
+
+    def test_root_not_object_preserved_after_ensure_defaults(self, isolated_config):
+        """根非对象（合法 JSON 数组）同样按损坏处理，字节不变。"""
+        isolated_config.write_bytes(b'["not", "an", "object"]')
+        before = isolated_config.read_bytes()
+        cfg_mod.ConfigHandler.ensure_defaults()
+        assert isolated_config.read_bytes() == before
+
+    def test_security_subdomain_corruption_aborts_ensure_defaults(self, isolated_config):
+        """F08→F10 边界：v1 域缺 security_state 时中止，禁止深合并补默认洗白落盘。"""
+        raw = {"llm_provider": "deepseek", "model_management": {"schema_version": 1, "config_revision": 5}}
+        isolated_config.write_text(json.dumps(raw), encoding="utf-8")
+        before = isolated_config.read_bytes()
+        cfg_mod.ConfigHandler.ensure_defaults()
+        assert isolated_config.read_bytes() == before
+        after = json.loads(isolated_config.read_text(encoding="utf-8"))
+        assert after["model_management"]["config_revision"] == 5
+        assert "security_state" not in after["model_management"]
+
+    def test_ensure_defaults_preserves_legacy_sentiment_keys(self, isolated_config):
+        """旧文件含七键时启动补全后盘面值保持（不再被未知键清理删除）。"""
+        isolated_config.write_text(
+            json.dumps({"llm_provider": "deepseek", **self._legacy_sentiment_keys()}), encoding="utf-8"
+        )
+        cfg_mod.ConfigHandler.ensure_defaults()
+        raw = json.loads(isolated_config.read_text(encoding="utf-8"))
+        for key, val in self._legacy_sentiment_keys().items():
+            assert raw[key] == val
+
+    def test_legacy_file_startup_scorer_preview_values_preserved(self, isolated_config):
+        """核心回归：真实旧文件依次启动补全 → scorer 替身 → 预览替身，七项值保持。"""
+        isolated_config.write_text(
+            json.dumps({"llm_provider": "deepseek", **self._legacy_sentiment_keys()}), encoding="utf-8"
+        )
+        cfg_mod.ConfigHandler.ensure_defaults()
+        scorer_vals = self._scorer_read_standins()
+        preview_vals = self._migration_preview_standins()
+        for key, val in self._legacy_sentiment_keys().items():
+            consumer_key = self._CONSUMER_KEY_ALIASES[key]
+            assert scorer_vals[consumer_key] == val, f"scorer 替身读取失真: {key}"
+            assert preview_vals[consumer_key] == val, f"迁移预览替身读取失真: {key}"
+
+    def test_first_run_initialization_still_writes_defaults(self, isolated_config):
+        """缺文件首次初始化不受影响：正常落默认（含 mm 域与七键默认）。"""
+        assert not isolated_config.exists()
+        cfg_mod.ConfigHandler.ensure_defaults()
+        raw = json.loads(isolated_config.read_text(encoding="utf-8"))
+        assert raw["model_management"]["schema_version"] == 1
+        assert raw["news_sentiment_enabled"] is False
+        assert raw["news_sentiment_n_threads"] == 6
+
+    def test_load_config_defaults_on_security_corruption_file_preserved(self, isolated_config):
+        """load_config 磁盘路径安全域损坏：显式落默认缓存，不写回磁盘、不洗白盘面。"""
+        raw = {"llm_provider": "openai", "model_management": {"schema_version": 1, "config_revision": 2}}
+        isolated_config.write_text(json.dumps(raw), encoding="utf-8")
+        before = isolated_config.read_bytes()
+        loaded = cfg_mod.ConfigHandler.load_config()
+        # 回退默认（非盘面洗白值：config_revision 保持默认 1 而非盘上 2）
+        assert loaded["llm_provider"] == "deepseek"
+        assert loaded["model_management"]["config_revision"] == 1
+        assert isolated_config.read_bytes() == before
+
+    def test_save_config_aborts_on_security_corrupted_disk(self, isolated_config):
+        """save_config 纵深拦截①：合法 JSON + 安全域结构损坏 → 拒写，盘面不变。"""
+        raw = {"llm_provider": "deepseek", "model_management": {"schema_version": 1, "config_revision": 2}}
+        isolated_config.write_text(json.dumps(raw), encoding="utf-8")
+        before = isolated_config.read_bytes()
+        assert cfg_mod.ConfigHandler.save_config({"log_level": "DEBUG"}) is False
+        assert isolated_config.read_bytes() == before
+
+    def test_save_config_aborts_on_partial_mm_in_merge_payload(self, isolated_config):
+        """save_config 纵深拦截②（F09 遗留①）：合并携带部分安全子域 → 拒写。"""
+        isolated_config.write_text(json.dumps({"llm_provider": "deepseek"}), encoding="utf-8")
+        before = isolated_config.read_bytes()
+        partial_mm = {"model_management": {"schema_version": 1, "config_revision": 9}}
+        assert cfg_mod.ConfigHandler.save_config(partial_mm) is False
+        assert isolated_config.read_bytes() == before
+
+    def test_save_config_persists_normal_keys_with_legacy_sentiment_values(self, isolated_config):
+        """正常旧文件（含七键）普通保存仍成功，七键往返不丢。"""
+        isolated_config.write_text(
+            json.dumps({"llm_provider": "deepseek", **self._legacy_sentiment_keys()}), encoding="utf-8"
+        )
+        assert cfg_mod.ConfigHandler.save_config({"log_level": "DEBUG"}) is True
+        raw = json.loads(isolated_config.read_text(encoding="utf-8"))
+        assert raw["log_level"] == "DEBUG"
+        for key, val in self._legacy_sentiment_keys().items():
+            assert raw[key] == val
+
+
 class TestConfigHandlerGetTokenKeyringMigration:
     @patch.object(cfg_mod.keyring, "get_password", return_value=None)
     @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"ts_token": "encrypted_val"})
@@ -2254,22 +2424,26 @@ class TestConfigReviewFixes:
             warning_calls = [c for c in mock_logger.warning.call_args_list if "is_embedded_mode" in c[0][0]]
             assert len(warning_calls) >= 1
 
-    # === F9: ensure_defaults 配置文件损坏加日志 ===
+    # === F9/F10: ensure_defaults 配置文件损坏加日志且保留原件 ===
 
-    def test_ensure_defaults_logs_warning_on_corrupted_config(self, tmp_path):
-        """F9: 配置文件损坏时 ensure_defaults 记录 warning"""
+    def test_ensure_defaults_logs_and_preserves_corrupted_config(self, tmp_path):
+        """F9/F10: 配置文件损坏时 ensure_defaults 记录日志且不重建（字节不变、不写盘）"""
         corrupted_file = tmp_path / "corrupted.json"
         corrupted_file.write_text("{ invalid json", encoding="utf-8")
         cfg_mod.ConfigHandler._clear_cache()
         with (
             patch.object(cfg_mod, "CONFIG_FILE", str(corrupted_file)),
             patch.object(cfg_mod, "logger") as mock_logger,
-            patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=True),
+            patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=True) as mock_save,
             patch.object(cfg_mod.ConfigHandler, "_migrate_custom_models_credentials", return_value=False),
         ):
             cfg_mod.ConfigHandler.ensure_defaults()
-            warning_calls = [c for c in mock_logger.warning.call_args_list if "unreadable" in c[0][0]]
-            assert len(warning_calls) >= 1
+            error_calls = [c for c in mock_logger.error.call_args_list if "unreadable" in c[0][0]]
+            assert len(error_calls) >= 1
+            # F10: 损坏不写——不得从空 dict 重建默认覆盖现场
+            mock_save.assert_not_called()
+            assert corrupted_file.read_text(encoding="utf-8") == "{ invalid json"
+            assert cfg_mod.ConfigHandler._config_cache is None
         cfg_mod.ConfigHandler._clear_cache()
 
     # === F12: set_local_ai_timeout 返回 save_config 结果 ===
