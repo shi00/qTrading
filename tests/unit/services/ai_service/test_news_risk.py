@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from core.errors import AIPolicyNotAcknowledgedError
 from core.i18n import Message
+from core.model_management_types import LegacyDispatchBlockedError
 from services.ai_service import AIService
 from services.ai_service.news_risk import (
     RiskEvent,
@@ -30,6 +31,19 @@ from services.ai_service.news_risk import (
 from services.news_insight_models import EvidenceDocument, NewsInsightRequest
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _legacy_admission_allowed(monkeypatch):
+    """旧链测试前提显式化（F05 fail-closed）：分派/准入读取必须成功且为 allowed
+    （pending 未开启迁移）才走旧链——读取异常现在阻断旧链，不再 fail-open。"""
+    from services.ai_service import scenario_dispatch
+
+    config_service = MagicMock()
+    config_service.get_snapshot = AsyncMock(
+        return_value=MagicMock(migration_state="pending", migration_transition=None, scenario_routes=())
+    )
+    monkeypatch.setattr(scenario_dispatch, "_new_config_service", lambda: config_service)
 
 
 def _evidence(news_id=1, text="公司发布公告称经营正常") -> EvidenceDocument:
@@ -604,18 +618,21 @@ class TestAnalyzeNewsRiskScenarioChain:
         assert result.execution_metadata["ai_status"] == "failed"
 
     @pytest.mark.asyncio
-    async def test_dispatch_error_falls_back_to_legacy(self):
-        """分派过程异常（如配置损坏）→ 分派函数内部降级旧链（_chat_completion 被调），不伪装（R21）。"""
+    async def test_dispatch_error_blocks_legacy_fail_closed(self):
+        """F05 fail-closed：分派过程异常（如配置损坏）→ read_failed 阻断传出，
+        零旧链传输（_chat_completion 不被调），不再降级旧链（R21 不伪装成功）。"""
         svc = _service_stub()
         analyzer = _analyzer(svc)
-        with patch(
-            "services.ai_service.scenario_dispatch.resolve_executor",
-            AsyncMock(side_effect=RuntimeError("config corrupt")),
+        with (
+            patch(
+                "services.ai_service.scenario_dispatch.resolve_executor",
+                AsyncMock(side_effect=RuntimeError("config corrupt")),
+            ),
+            pytest.raises(LegacyDispatchBlockedError) as excinfo,
         ):
-            result = await analyzer.analyze_news_risk(_request())
-        svc._chat_completion.assert_awaited_once()
-        assert result.analysis_status == "analyzed_with_events"
-        assert result.execution_metadata is None  # 旧链无新链元数据
+            await analyzer.analyze_news_risk(_request())
+        assert excinfo.value.admission == "read_failed"
+        svc._chat_completion.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_dispatch_none_falls_back_to_legacy(self):
