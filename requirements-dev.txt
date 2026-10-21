@@ -65,7 +65,7 @@ cachetools==7.2.0
     #   py-key-value-aio
 caio==0.12.4
     # via aiofile
-certifi==2026.7.22
+certifi==2026.10.19
     # via
     #   curl-cffi
     #   httpcore
@@ -336,7 +336,7 @@ pandas-stubs==3.0.5.260914
     # via astockscreener (pyproject.toml)
 pathable==0.6.0
     # via jsonschema-path
-pillow==12.3.0
+pillow==13.0.0
     # via astockscreener (pyproject.toml)
 pip==26.2.1
     # via pip-api
@@ -601,7 +601,7 @@ urllib3==2.8.0
     #   akshare
     #   botocore
     #   requests
-uv==0.12.18
+uv==0.13.4
     # via astockscreener (pyproject.toml)
 uvicorn==0.53.0
     # via

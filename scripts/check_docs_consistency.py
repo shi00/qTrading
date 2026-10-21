@@ -3432,8 +3432,8 @@ _GOVERNANCE_ID_REFERENCE_PATTERNS: tuple[re.Pattern[str], ...] = (
     _REVIEW_ID_PATTERN,
 )
 # 豁免前缀（封闭集合，非本项目治理 ID 命名空间）：
-#   - ADR / EX / CVE：架构决策记录编号（check_adr_index_completeness 守护）、架构例外 ID
-#     （exceptions.yml + GDR-01 双向引用守护）、安全公告编号（SECURITY.md 引用）；
+#   - ADR / EX / CVE / PYSEC：架构决策记录编号（check_adr_index_completeness 守护）、架构例外 ID
+#     （exceptions.yml + GDR-01 双向引用守护）、安全公告编号（SECURITY.md 引用；CVE=NVD，PYSEC=OSV/PyPI）；
 #   - UTF / SHA / AES / TLS / RFC / ISO / HTTP / HTTPS / SQL / FIPS / PCI / IEEE / ANSI / ASCII：
 #     行业标准与规范代号；
 #   - SAFE / INPUT / MODE / ROUND1 / ROUND2 / ROUND3 / STOP / FIND / EVID / SEV / OUT / CHECK：
@@ -3443,6 +3443,7 @@ _GOVERNANCE_ID_EXEMPT_PREFIXES: frozenset[str] = frozenset(
         "ADR",
         "EX",
         "CVE",
+        "PYSEC",
         "UTF",
         "SHA",
         "AES",

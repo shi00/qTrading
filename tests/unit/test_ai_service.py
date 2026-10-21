@@ -24,6 +24,20 @@ from services.ai_service.news_risk import RiskOutput
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _legacy_admission_allowed(monkeypatch):
+    """旧链测试前提显式化（F05 fail-closed）：分派/准入读取必须成功且为 allowed
+    （pending 未开启迁移）才走旧链——读取异常现在阻断旧链，不再 fail-open。
+    自行 mock 分派环境的场景链测试会覆盖此设置，互不冲突。"""
+    from services.ai_service import scenario_dispatch
+
+    config_service = MagicMock()
+    config_service.get_snapshot = AsyncMock(
+        return_value=MagicMock(migration_state="pending", migration_transition=None, scenario_routes=())
+    )
+    monkeypatch.setattr(scenario_dispatch, "_new_config_service", lambda: config_service)
+
+
 def _make_svc_with_cloud():
     """Factory: create AIService with cloud provider pre-configured.
 
