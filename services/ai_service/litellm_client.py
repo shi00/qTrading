@@ -825,7 +825,8 @@ class LiteLLMClient:
         - ``asyncio.CancelledError`` 始终传播（R2），不包装。
 
         Raises:
-            ValueError: adapter_kind 非 litellm_chat / credential_ref 形态非法。
+            ValueError: adapter_kind 非 litellm_chat / credential_ref 形态非法 /
+                版本化凭据 ref 与 credential_version 租约不同源（F06，零出站拒绝）。
             TimeoutError: dispatch 前 deadline 已耗尽。
             RuntimeError: litellm 不可用 / keyring 读取失败。
         """
@@ -868,6 +869,19 @@ class LiteLLMClient:
 
         # R16：keyring 为同步 IO，凭据解析 offload 线程池（None 亦走同路径，
         # 语义为「解析即得无凭据」而非跳过解析）。
+        # F06：解析租约一致性——版本化凭据的 ref 必须由 credential_version 派生
+        # （形态与 ModelConfigurationService.prepare_credential_version 生成侧
+        # ``keyring:model-connection-{version}`` 同源），否则许可校验的版本与实际
+        # 解析目标不同源（快照数据损坏 / ref 被偷换），fail-closed 拒绝出站
+        # （零 keyring 读、零网络）。version=None（ref 缺失 / env: / 旧手工项）
+        # 无租约语义，不校验。
+        if resolved_connection.credential_version is not None:
+            expected_ref = f"keyring:model-connection-{resolved_connection.credential_version}"
+            if resolved_connection.credential_ref != expected_ref:
+                raise ValueError(
+                    "Credential ref does not match versioned lease "
+                    f"(version={resolved_connection.credential_version}), refusing outbound dispatch"
+                )
         api_key = await ThreadPoolManager().run_async(
             TaskType.IO, resolve_credential, resolved_connection.credential_ref
         )

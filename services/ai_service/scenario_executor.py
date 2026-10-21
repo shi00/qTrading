@@ -257,13 +257,16 @@ class ScenarioExecutor:
                 break
 
             # 许可线性化（§4.3 / 方案 §6.2 步骤 3「再逐次调用 authorize_attempt」）：
-            # 每次尝试单独授权，不预发下一次重试的许可；失败即拒绝切换，不重试
+            # 每次尝试单独授权，不预发下一次重试的许可；失败即拒绝切换，不重试。
+            # F06：credential_version 传快照冻结连接的实际执行版本（与下方
+            # effective_connection 出站解析同源），撤销校验绑定执行对象而非磁盘现值
             try:
                 permit = await self._config_service.authorize_attempt(
                     connection.connection_id,
                     str(cand.get("target_fingerprint", "")),
                     str(cand.get("purpose", "")),
                     snapshot.security_scope_version,
+                    connection.credential_version,
                     attempt_id,
                 )
             except asyncio.CancelledError:

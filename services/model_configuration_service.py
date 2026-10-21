@@ -405,12 +405,19 @@ class ModelConfigurationService:
         target_fingerprint: str,
         purpose: str,
         scope_version: int,
+        credential_version: str | None,
         attempt_id: str,
     ) -> AttemptPermit:
         """逐次安全许可（MM-01/MM-02）：新鲜读取 security_state，撤销 / 缺失即拒绝。
 
         许可取得是尝试开始的线性化点；安全状态读取 / 校验失败禁止发放许可，
         不用旧缓存、默认值或冻结快照放行。
+
+        F06：凭据版本撤销校验绑定**实际执行对象**——``credential_version`` 为
+        快照冻结连接的版本（出站解析 ``credential_ref`` 即由该版本派生），而非
+        磁盘当前连接版本：快照与磁盘可能已轮换（v1 快照 → 切 v2 → 撤销 v1），
+        检查磁盘现值会让已撤销版本继续出站。``None`` 表示无版本化凭据
+        （ref 缺失或 ``env:`` 形态），无撤销校验对象。
         """
 
         def _authorize() -> AttemptPermit:
@@ -422,11 +429,10 @@ class ModelConfigurationService:
             if connection is None:
                 raise PermissionError(f"连接不存在: {connection_id}")
 
-            # 凭据版本撤销立即阻止新许可（MM-02）
-            cred_version = connection.get("credential_version")
-            if cred_version is not None:
-                if any(r["credential_version"] == cred_version for r in security["revoked_credential_versions"]):
-                    raise PermissionError(f"凭据版本已撤销，拒绝发放许可: {cred_version}")
+            # 凭据版本撤销立即阻止新许可（MM-02）：校验对象为实际执行版本（F06）
+            if credential_version is not None:
+                if any(r["credential_version"] == credential_version for r in security["revoked_credential_versions"]):
+                    raise PermissionError(f"凭据版本已撤销，拒绝发放许可: {credential_version}")
 
             # 目标级 grant：同连接、同目标、同用途、当前 scope_version 且未撤销（MM-01）
             matched = any(
@@ -448,6 +454,7 @@ class ModelConfigurationService:
                 connection_id=connection_id,
                 security_revision=security["security_revision"],
                 granted_at=_utc_now_iso(),
+                credential_version=credential_version,
             )
 
         return await ThreadPoolManager().run_async(TaskType.IO, _authorize)
