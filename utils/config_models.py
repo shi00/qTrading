@@ -516,9 +516,11 @@ class ModelManagementSaveResult:
     - revision_conflict: expected_revision 与磁盘不符（确定未提交，旧配置仍有效）
     - not_committed: 替换前确定失败（校验失败 / 写盘失败），旧配置仍有效
     - lock_timeout: 跨进程文件锁等待超时（确定未提交）
+    - commit_unknown: os.replace 成功后故障，同锁顺序读回凭回执也无法证明提交
+      结果（F11）——可能已提交，不得据以重试 / 轮换凭据 / 回滚
     """
 
-    status: Literal["committed", "revision_conflict", "not_committed", "lock_timeout"]
+    status: Literal["committed", "revision_conflict", "not_committed", "lock_timeout", "commit_unknown"]
     current_revision: int | None = None
     committed_revision: int | None = None
     last_config_commit: dict[str, Any] | None = None

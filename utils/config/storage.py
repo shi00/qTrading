@@ -605,8 +605,17 @@ def compare_and_save_model_management(
 
     F09：剥离不依赖磁盘已有安全域——无文件 / 旧配置首次初始化时 payload 自带
     grants 同样不得经草稿入口写入（授权只能来自安全命令）。
+
+    F11：提交三态按阶段区分——写前故障确定未提交（not_committed，零写）；
+    os.replace 成功后（缓存更新 / 结果构造 / 锁退出）故障不得据异常推断未提交，
+    总异常分支按相同锁顺序读回磁盘凭回执确认：回执 operation_id 匹配即
+    committed，无法证明则 commit_unknown（可能已提交，调用方不得据此重试 /
+    轮换凭据 / 回滚）。
     """
     _migrate_config_location()
+    # F11：操作身份在进入写路径前保留，替换后故障的读回确认不依赖写路径中的变量状态
+    confirm_operation_id = operation_id
+    replaced = False
     try:
         with _config_file_lock():
             with cfg.ConfigHandler._lock.gen_wlock():
@@ -682,6 +691,8 @@ def compare_and_save_model_management(
                 final_config = validated.model_dump()
                 if not cfg.ConfigHandler._save_json_atomically(final_config, cfg.CONFIG_FILE):
                     return ModelManagementSaveResult(status="not_committed", current_revision=current_revision)
+                # F11：os.replace 已完成，此后故障进入读回确认分支（不臆断未提交）
+                replaced = True
                 cfg.ConfigHandler._config_cache = final_config
                 return ModelManagementSaveResult(
                     status="committed",
@@ -694,6 +705,9 @@ def compare_and_save_model_management(
     # NOTE(lazy): 配置管理整体兜底避免单点失败阻断流程. ceiling: 配置管理内部逻辑不应抛异常. upgrade: 配置管理内部统一走 classify_error.
     except Exception as e:
         cfg.logger.error("compare_and_save_model_management failed: %s", DataSanitizer.sanitize_error(e))
+        if replaced:
+            # F11：替换已成功，异常不构成未提交证据——同锁顺序读回凭回执裁决
+            return _confirm_commit_after_replace(confirm_operation_id)
         return ModelManagementSaveResult(status="not_committed")
 
 
@@ -724,6 +738,46 @@ def read_model_management_fresh() -> dict:
             fresh = validated.model_dump()
             cfg.ConfigHandler._config_cache = fresh
             return copy.deepcopy(fresh)
+
+
+def _confirm_commit_after_replace(operation_id: str) -> ModelManagementSaveResult:
+    """F11：os.replace 成功后故障的提交结果确认（同锁顺序「文件锁 → RWLock」读回）。
+
+    调用时机为 CAS 主流程已退出全部锁（异常传播使 with 释放），此处经
+    :func:`read_model_management_fresh` 重新按固定锁顺序新鲜读取：回执
+    ``last_config_commit.operation_id`` 与本次操作身份匹配即确认 committed
+    （fresh read 校验通过并刷新缓存）；磁盘不可读 / 锁超时 / 回执已被后续
+    写入替换均属无法证明，保守返回 commit_unknown——不得据异常推断未提交，
+    由调用方经 resolve_save_outcome 恢复或保守处置（不自动重试 / 轮换凭据 /
+    回滚）。CancelledError 为 BaseException 子类，不被 except Exception 捕获，
+    始终传播（R2）。
+    """
+    try:
+        fresh = read_model_management_fresh()
+    except Exception as e:
+        cfg.logger.error(
+            "[ConfigHandler] compare_and_save: post-replace confirmation unreadable: %s",
+            DataSanitizer.sanitize_error(e),
+        )
+        return ModelManagementSaveResult(status="commit_unknown")
+    mm = fresh.get("model_management")
+    if not isinstance(mm, dict):
+        return ModelManagementSaveResult(status="commit_unknown")
+    receipt = mm.get("last_config_commit")
+    if not (isinstance(receipt, dict) and receipt.get("operation_id") == operation_id):
+        # 回执缺失 / 非对象 / 已被后续提交覆写：不能证明本次提交结果
+        return ModelManagementSaveResult(status="commit_unknown", current_revision=mm.get("config_revision"))
+    try:
+        committed_revision = int(mm["config_revision"])
+    except (KeyError, TypeError, ValueError):
+        return ModelManagementSaveResult(status="commit_unknown")
+    receipt_revision = receipt.get("committed_revision")
+    return ModelManagementSaveResult(
+        status="committed",
+        current_revision=committed_revision,
+        committed_revision=int(receipt_revision) if isinstance(receipt_revision, int) else committed_revision,
+        last_config_commit=receipt,
+    )
 
 
 def _persist_migration(update: dict, migration_name: str) -> bool:

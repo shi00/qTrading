@@ -64,7 +64,7 @@ def _payload_fingerprint(payload: dict[str, Any]) -> str:
 
 
 def _outcome_from_cas(result: ModelManagementSaveResult, expected_revision: int) -> ConfigurationSaveOutcome:
-    """ConfigHandler 层四态转译服务层三态（R1：utils 不导入 services，转译在本层）。"""
+    """ConfigHandler 层状态转译服务层三态（R1：utils 不导入 services，转译在本层）。"""
     if result.status == "committed":
         return ConfigurationSaveOutcome(
             status="committed",
@@ -76,6 +76,9 @@ def _outcome_from_cas(result: ModelManagementSaveResult, expected_revision: int)
         raise ModelConfigurationConflictError(
             expected_revision=expected_revision, current_revision=result.current_revision
         )
+    if result.status == "commit_unknown":
+        # F11：替换成功后故障且读回无法证明——不臆断未提交，交调用方 resolve_save_outcome 恢复
+        return ConfigurationSaveOutcome(status="commit_unknown", current_revision=result.current_revision)
     # not_committed / lock_timeout：替换前确定失败，旧配置仍有效
     return ConfigurationSaveOutcome(status="not_committed", current_revision=result.current_revision)
 

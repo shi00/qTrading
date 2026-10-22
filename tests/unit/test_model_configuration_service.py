@@ -21,7 +21,8 @@ from core.model_management_types import (
     MigrationTransitionError,
     ModelConfigurationConflictError,
 )
-from services.model_configuration_service import ModelConfigurationService
+from services.model_configuration_service import ModelConfigurationService, _outcome_from_cas
+from utils.config_models import ModelManagementSaveResult
 import utils.config_handler as cfg_mod
 
 CONN_A = "11111111-1111-4111-8111-111111111111"
@@ -161,6 +162,26 @@ class TestSaveDraft:
         assert outcome.status == "committed"
         fresh = _load_mm()
         assert fresh["security_state"]["security_revision"] == 0
+
+
+class TestOutcomeFromCas:
+    """F11：CAS 五态 → 服务层三态转译，commit_unknown 必须可表达（不臆断未提交）。"""
+
+    def test_commit_unknown_passthrough_without_revision(self):
+        outcome = _outcome_from_cas(ModelManagementSaveResult(status="commit_unknown"), expected_revision=1)
+
+        assert outcome.status == "commit_unknown"
+        assert outcome.current_revision is None
+
+    def test_commit_unknown_carries_current_revision(self):
+        outcome = _outcome_from_cas(
+            ModelManagementSaveResult(status="commit_unknown", current_revision=7), expected_revision=1
+        )
+
+        assert outcome.status == "commit_unknown"
+        assert outcome.current_revision == 7
+        assert outcome.committed_revision is None
+        assert outcome.last_config_commit is None
 
 
 class TestResolveOutcome:
