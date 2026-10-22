@@ -903,10 +903,11 @@ class TestOnboardingVMSync:
 
     async def test_start_sync_success_advances(self, sync_vm, mock_data_processor, snapshots):
         sync_vm.current_step = 4  # data_sync step
-        sync_vm.next_step = AsyncMock()
         with patch("ui.viewmodels.onboarding_view_model.asyncio.sleep", new_callable=AsyncMock):
             await sync_vm.start_sync(quick=True)
-        sync_vm.next_step.assert_awaited_once()
+        # UIR-F02-002: 同步成功走专用完成过渡，只推进 data_sync(4) → schedule(5)。
+        assert sync_vm.current_step == 5
+        sync_vm.on_complete.assert_not_awaited()
         assert any(
             s.sync_progress == 1.0
             and s.sync_progress_message is not None
@@ -918,18 +919,17 @@ class TestOnboardingVMSync:
         """sync_in_progress must transition exactly twice on success: True at start, False in finally.
         Before the fix, it was 3 transitions (start + manual end + finally end)."""
         sync_vm.current_step = 4
-        sync_vm.next_step = AsyncMock()
         with patch("ui.viewmodels.onboarding_view_model.asyncio.sleep", new_callable=AsyncMock):
             await sync_vm.start_sync(quick=True)
+        assert sync_vm.current_step == 5
         # 2 transitions: False→True at start, True→False in finally
         transitions = _count_transitions(snapshots, lambda s: s.sync_in_progress, initial=False)
         assert transitions == 2
 
     async def test_start_sync_cancelled_result(self, sync_vm, mock_data_processor, snapshots):
         mock_data_processor.initialize_system = AsyncMock(return_value=False)
-        sync_vm.next_step = AsyncMock()
         await sync_vm.start_sync(quick=True)
-        sync_vm.next_step.assert_not_awaited()
+        assert sync_vm.current_step == 0
         assert any(
             s.sync_progress == 0.0
             and s.sync_progress_message is not None
@@ -999,6 +999,183 @@ class TestOnboardingVMSync:
             and s.sync_progress_message.key == "wizard_status_init"
             for s in snapshots
         )
+
+
+# =====================================================================
+# Test: Sync step ownership (UIR-F02-002)
+# =====================================================================
+
+_SLEEP_PATCH = "ui.viewmodels.onboarding_view_model.asyncio.sleep"
+
+
+class _ControlledSync:
+    """确定性同步闸门：每次 initialize_system 用独立 started/released Event 控制时序。
+
+    不使用 sleep 拼时序：测试显式等待 started，再显式释放 release，由事件循环驱动。
+    """
+
+    def __init__(self, runs: int) -> None:
+        self.started = [asyncio.Event() for _ in range(runs)]
+        self.release = [asyncio.Event() for _ in range(runs)]
+        self.calls = 0
+        self.stop = AsyncMock()
+
+    async def initialize_system(self, **kwargs) -> bool:
+        index = self.calls
+        self.calls += 1
+        self.started[index].set()
+        await self.release[index].wait()
+        return True
+
+
+class TestOnboardingVMSyncOwnership:
+    """UIR-F02-002: 同步进行中留在本步；同步成功仅由仍占有 data_sync 步的运行推进。"""
+
+    @staticmethod
+    def _install_gate(bound_vm, runs: int = 1) -> _ControlledSync:
+        gate = _ControlledSync(runs)
+        bound_vm._data_processor = gate
+        bound_vm.current_step = 4  # data_sync step
+        return gate
+
+    async def test_manual_next_step_blocked_while_sync_in_progress(self, bound_vm, mock_config_handler):
+        """a) 同步在途时手动 next_step 必须被拒：仍为 4 且不落盘计划。"""
+        gate = self._install_gate(bound_vm)
+        task = asyncio.create_task(bound_vm.start_sync(quick=True))
+        try:
+            await gate.started[0].wait()
+            assert bound_vm.sync_in_progress is True
+
+            assert await bound_vm.next_step() is False
+            assert bound_vm.current_step == 4
+            assert bound_vm.state.current_step == 4
+            mock_config_handler.save_config.assert_not_called()
+        finally:
+            with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+                gate.release[0].set()
+                await task
+
+    async def test_skip_sync_blocked_while_sync_in_progress(self, bound_vm, mock_config_handler):
+        """同步中「稍后」不得绕过守卫换步（按钮同时 disabled）。"""
+        gate = self._install_gate(bound_vm)
+        task = asyncio.create_task(bound_vm.start_sync(quick=True))
+        try:
+            await gate.started[0].wait()
+
+            await bound_vm.skip_sync()
+
+            assert bound_vm.current_step == 4
+            assert bound_vm.state.sync_progress_message is not None
+            assert bound_vm.state.sync_progress_message.key != "wizard_status_skip"
+            mock_config_handler.save_config.assert_not_called()
+        finally:
+            with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+                gate.release[0].set()
+                await task
+
+    async def test_success_advances_only_to_schedule(self, bound_vm, mock_config_handler):
+        """b) 释放同步成功：只到 5（schedule），不得跳到 6 或触发 on_complete。"""
+        gate = self._install_gate(bound_vm)
+        task = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate.started[0].wait()
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate.release[0].set()
+            await task
+
+        assert bound_vm.current_step == 5
+        assert bound_vm.state.current_step == 5
+        assert bound_vm.sync_in_progress is False
+        bound_vm.on_complete.assert_not_awaited()
+        mock_config_handler.save_config.assert_not_called()
+
+    async def test_stale_completion_ignored_after_step_change(self, bound_vm, mock_config_handler):
+        """c) 同步成功前用户已换步：旧结果不提交计划、不进入 6。"""
+        gate = self._install_gate(bound_vm)
+        task = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate.started[0].wait()
+
+        bound_vm.current_step = 5  # 用户已离开 data_sync 步
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate.release[0].set()
+            await task
+
+        assert bound_vm.current_step == 5
+        assert bound_vm.state.current_step == 5
+        bound_vm.on_complete.assert_not_awaited()
+        mock_config_handler.save_config.assert_not_called()
+
+    async def test_completion_ignored_after_cancel(self, bound_vm, mock_config_handler):
+        """d) 取消同步后旧完成结果到达：不跳转、不留忙碌标记。"""
+        gate = self._install_gate(bound_vm)
+        task = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate.started[0].wait()
+
+        await bound_vm.cancel_sync()
+        assert bound_vm.sync_in_progress is False
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate.release[0].set()
+            await task
+
+        assert bound_vm.current_step == 4
+        assert bound_vm.state.current_step == 4
+        assert bound_vm.sync_in_progress is False
+        bound_vm.on_complete.assert_not_awaited()
+
+    async def test_older_generation_completion_ignored(self, bound_vm, mock_config_handler):
+        """e) 连续两次同步：旧 generation 的完成结果不生效，也不清除新运行的忙碌标记。"""
+        gate = self._install_gate(bound_vm, runs=2)
+        first = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate.started[0].wait()
+        second = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate.started[1].wait()
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate.release[0].set()
+            await first
+
+            assert bound_vm.current_step == 4
+            assert bound_vm.state.current_step == 4
+            assert bound_vm.sync_in_progress is True
+
+            gate.release[1].set()
+            await second
+
+        assert bound_vm.current_step == 5
+        assert bound_vm.state.current_step == 5
+        assert bound_vm.sync_in_progress is False
+        bound_vm.on_complete.assert_not_awaited()
+
+    async def test_completion_after_dispose_does_not_navigate(self, bound_vm, mock_config_handler):
+        """卸载（dispose）后迟到结果不得导航（state 已重置，回调已清空）。"""
+        gate = self._install_gate(bound_vm)
+        task = asyncio.create_task(bound_vm.start_sync(quick=True))
+        await gate.started[0].wait()
+
+        bound_vm.dispose()
+
+        with patch(_SLEEP_PATCH, new_callable=AsyncMock):
+            gate.release[0].set()
+            await task
+
+        assert bound_vm.current_step == 0
+        assert bound_vm.on_complete is None
+        mock_config_handler.save_config.assert_not_called()
+
+    async def test_manual_skip_and_next_still_work_when_not_syncing(self, bound_vm):
+        """f) 未开始同步时「稍后 / 下一步」仍可跳过 data_sync 步。"""
+        bound_vm.current_step = 4
+        await bound_vm.skip_sync()
+        assert bound_vm.current_step == 5
+        assert bound_vm.state.sync_progress_message is not None
+        assert bound_vm.state.sync_progress_message.key == "wizard_status_skip"
+
+        bound_vm.current_step = 4
+        assert await bound_vm.next_step() is True
+        assert bound_vm.current_step == 5
+        bound_vm.on_complete.assert_not_awaited()
 
 
 # =====================================================================

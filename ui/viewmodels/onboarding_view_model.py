@@ -173,6 +173,11 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         # UIR-F02-003: 最近一次成功落盘的（开关, 规范化时间）快照。schedule 步的验证缓存
         # 只允许覆盖「与该快照完全相同的草稿」；草稿有任一字段变化时必须重新校验并落盘。
         self._persisted_schedule: tuple[bool, str] | None = None
+        # UIR-F02-002: 同步归属令牌。_sync_generation 在每次启动同步 / 取消同步 / dispose 时
+        # 递增，旧运行的迟到结果因令牌不匹配而作废；_nav_epoch 在每次步骤实际变化时递增，
+        # 用于判断发起同步的那次运行是否仍「占有」data_sync 步（含离开后又返回）。
+        self._sync_generation: int = 0
+        self._nav_epoch: int = 0
 
         # --- Panel operation callbacks (View injects, View→VM function) ---
         self.fn_validate_database: Callable[[], Awaitable[bool]] | None = None
@@ -224,6 +229,9 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
 
     @current_step.setter
     def current_step(self, value: int) -> None:
+        # UIR-F02-002: 记录每次真实换步，作为「同步是否仍占有发起步」的确定性判据。
+        if value != self._state.current_step:
+            self._nav_epoch += 1
         self._set_state(current_step=value)
 
     @property
@@ -342,6 +350,8 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
             logger.warning(
                 "[OnboardingVM] dispose() called while sync in progress; callbacks cleared, DataProcessor will self-complete"
             )
+        # UIR-F02-002: 卸载后任何在途同步的迟到结果都不得再导航，递增令牌使其作废。
+        self._sync_generation += 1
         # 取消可能正在进行的本地模型验证 (sync classmethod, safe no-op if no active verification)
         from services.local_model_manager import LocalModelManager
 
@@ -368,10 +378,21 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
     async def next_step(self) -> bool:
         """推进到下一步（含末步完成回调）。
 
+        UIR-F02-002: 同步进行中禁止手动前进，避免用户在校验/落盘与同步结果之间
+        换步后仍被迟到结果推进（同步自身的完成过渡走 ``_complete_sync_success``，
+        不经过本命令，故不会被本守卫挡住）。
+
         Returns:
-            True 已推进 / 末步完成回调已执行; False 停留当前步（校验或持久化失败、
-            欢迎步未确认风险提示）。
+            True 已推进 / 末步完成回调已执行; False 停留当前步（同步进行中、校验或
+            持久化失败、欢迎步未确认风险提示）。
         """
+        if self._state.sync_in_progress:
+            logger.warning("[OnboardingVM] Manual next_step blocked while sync in progress")
+            return False
+        return await self._advance_current_step()
+
+    async def _advance_current_step(self) -> bool:
+        """按当前步配置执行校验并推进（内部导航出口，不含同步忙碌守卫）。"""
         config = STEP_CONFIGS[self._state.current_step]
 
         # UX-09 / MAJOR-01: 欢迎步须先勾选投资风险提示确认；未勾选时不前进
@@ -575,6 +596,12 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
 
     async def start_sync(self, quick: bool = False):
         ensure_correlation_id()
+        # UIR-F02-002: 本次运行令牌 + 发起时所在步/换步序号。只有该次同步仍占有
+        # data_sync 步（未被取消、未被新一轮同步顶替、未手动换步、未卸载）时才推进。
+        self._sync_generation += 1
+        run_id = self._sync_generation
+        origin_step = self._state.current_step
+        origin_epoch = self._nav_epoch
         self._set_state(
             sync_in_progress=True,
             sync_progress=0.0,
@@ -601,7 +628,7 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
                     sync_progress_message=Message("wizard_status_done"),
                 )
                 await asyncio.sleep(1)
-                await self.next_step()
+                await self._complete_sync_success(run_id, origin_step, origin_epoch)
             else:
                 self._set_state(
                     sync_progress=0.0,
@@ -621,9 +648,34 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
                 ),
             )
         finally:
-            self._set_state(sync_in_progress=False)
+            # 旧运行不得清除新一轮同步的忙碌标记（否则新同步期间 UI 会重新放行前进）。
+            if run_id == self._sync_generation:
+                self._set_state(sync_in_progress=False)
+
+    async def _complete_sync_success(self, run_id: int, origin_step: int, origin_epoch: int) -> None:
+        """同步成功后的专用完成过渡（UIR-F02-002）。
+
+        仅在「发起该次同步的运行仍是当前运行」且「仍占有发起时的 data_sync 步」时推进
+        （正常路径 data_sync(4) → schedule(5)）。取消 / 新一轮同步 / 手动换步 / 卸载后
+        的迟到结果一律丢弃，不导航、不提交计划。
+        """
+        if run_id != self._sync_generation:
+            logger.info(
+                "[OnboardingVM] Discarding stale sync completion (run=%d, current=%d)",
+                run_id,
+                self._sync_generation,
+            )
+            return
+        if self._nav_epoch != origin_epoch or self._state.current_step != origin_step:
+            logger.info("[OnboardingVM] Sync completion discarded: data_sync step no longer owned")
+            return
+        if STEP_CONFIGS[origin_step].id != "data_sync":
+            return
+        await self._advance_current_step()
 
     async def cancel_sync(self):
+        # UIR-F02-002: 取消即作废在途运行，避免其迟到成功结果推进步骤。
+        self._sync_generation += 1
         try:
             if self._data_processor:
                 await self._data_processor.stop()
@@ -641,6 +693,11 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
             self._set_state(sync_in_progress=False)
 
     async def skip_sync(self):
+        # UIR-F02-002: 同步进行中「稍后」不生效（按钮同时 disabled），避免绕过 next_step
+        # 守卫换步；未开始同步时语义不变（可跳过 data_sync 步）。
+        if self._state.sync_in_progress:
+            logger.warning("[OnboardingVM] skip_sync blocked while sync in progress")
+            return
         self._set_state(
             sync_progress=0.0,
             sync_progress_message=Message("wizard_status_skip"),

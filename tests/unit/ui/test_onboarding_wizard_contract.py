@@ -1689,3 +1689,42 @@ class TestWizardScheduleCacheInvalidation:
         buttons[0].on_click(MagicMock())  # type: ignore[reportCallIssue]  # Flet stub declares on_click as 0-arg, but runtime passes event
 
         fake_vm.next_step.assert_awaited_once_with()
+
+
+# ============================================================================
+# UIR-F02-002: data_sync 步同步中禁用公共「下一步」
+# ============================================================================
+
+
+class TestWizardDataSyncNextDisabled:
+    """同步进行中公共「下一步」必须禁用（与「上一步」同口径）。"""
+
+    def _render_step4(self, mock_onboarding_vms, sync_in_progress: bool):
+        from ui.views.onboarding_wizard import OnboardingWizard
+
+        fake_vm = mock_onboarding_vms["onboarding"]
+        fake_vm._state = replace(fake_vm._state, current_step=4, sync_in_progress=sync_in_progress)
+        component = make_component(OnboardingWizard)
+        page = _make_fake_page()
+        run_mount_effects(component, page)
+        return render_once(component)
+
+    def _next_button(self, container) -> ft.Button:
+        from ui.i18n import I18n
+
+        buttons = [
+            c
+            for c in _collect_controls(container)
+            if isinstance(c, ft.Button) and c.content == I18n.get("wizard_btn_next")
+        ]
+        assert len(buttons) == 1, f"data_sync 步应恰有 1 个 NEXT 按钮, 实际 {len(buttons)}"
+        return buttons[0]
+
+    def test_next_disabled_while_sync_in_progress(self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms):
+        """g) 同步中 footer「下一步」disabled=True。"""
+        result = self._render_step4(mock_onboarding_vms, sync_in_progress=True)
+        assert self._next_button(result).disabled is True
+
+    def test_next_enabled_when_sync_not_in_progress(self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms):
+        result = self._render_step4(mock_onboarding_vms, sync_in_progress=False)
+        assert self._next_button(result).disabled is False
