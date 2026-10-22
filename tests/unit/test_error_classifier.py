@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from core.errors import AppError, ErrorInfo
+from core.errors import AIPolicyNotAcknowledgedError, AppError, ErrorInfo
 from core.i18n import Message
 from utils.error_classifier import (
     classify_error,
@@ -983,6 +983,31 @@ class TestClassifyErrorAppError:
         e = AppError(ErrorInfo(code="network", message_key="llm_err_network"))
         assert e.info.code == "network"
         assert isinstance(e.to_error_info(), dict)
+
+    def test_app_error_retryable_true_maps_to_should_retry(self):
+        # CORE-02: AppError 自带的可重试声明必须映射为 failover 消费点读取的
+        # should_retry，否则 retryable=True 子类的重试语义在 failover 路径静默失效。
+        e = AppError(ErrorInfo(code="rate_limit", message_key="llm_err_rate_limit", retryable=True))
+        result = classify_error(e)
+        assert result["should_retry"] is True
+        assert result["retryable"] is True
+
+    def test_app_error_retryable_false_maps_to_should_retry_false(self):
+        # CORE-02: retryable=False（ErrorInfo 缺省）→ should_retry 显式 False，
+        # 与改动前 should_retry 缺省 False 的 failover 行为完全一致。
+        e = AppError(ErrorInfo(code="strategy_param_invalid", message_key="common_err_unknown"))
+        result = classify_error(e)
+        assert result["should_retry"] is False
+        assert "retryable" not in result
+
+    def test_app_policy_not_acknowledged_error_should_retry_false(self):
+        # CORE-02: 现有子类行为不变——AIPolicyNotAcknowledgedError（SEC-01 门控，
+        # 设计为非可重试）retryable 缺省 False，failover 路径仍以 should_retry=False
+        # 直接上报，不做跨 provider 空转重试。
+        e = AIPolicyNotAcknowledgedError(Message("ai_external_acknowledgment_prompt"))
+        result = classify_error(e, context="llm")
+        assert result["should_retry"] is False
+        assert "retryable" not in result
 
 
 class TestClassifyErrorFallbackDebugLog:
