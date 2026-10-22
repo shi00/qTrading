@@ -27,6 +27,7 @@ import logging
 import os
 import threading
 import time
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
@@ -103,6 +104,9 @@ from utils.loop_local import del_loop_local, get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer as DataSanitizer
 from utils.singleton_registry import register_singleton
+
+if TYPE_CHECKING:
+    from services.ai_service.scenario_dispatch import ScenarioDispatch
 
 logger = logging.getLogger(__name__)
 
@@ -508,6 +512,7 @@ class AIService:
         capital_labels: list[str] | None = None,
         history_labels: list[str] | None = None,
         learning_strategy_name: str | None = None,
+        scenario_dispatch: "ScenarioDispatch | None" = None,
     ) -> dict | None:
         """委托 StockAnalysisService.analyze_stock（保留显式签名）。"""
         self._ensure_subservices()
@@ -531,6 +536,7 @@ class AIService:
             capital_labels=capital_labels,
             history_labels=history_labels,
             learning_strategy_name=learning_strategy_name,
+            scenario_dispatch=scenario_dispatch,
         )
 
     # ------------------------------------------------------------------

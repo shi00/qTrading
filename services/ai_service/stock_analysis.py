@@ -30,7 +30,6 @@ from core.errors import AIBudgetError
 from core.model_management_types import (
     AdapterResponse,
     InferenceRequest,
-    LegacyDispatchBlockedError,
     ModelOutputValidationError,
     ValidatedBusinessOutput,
 )
@@ -129,36 +128,17 @@ def _validate_analysis_output(response: AdapterResponse) -> ValidatedBusinessOut
 async def _resolve_stock_analysis_dispatch() -> ScenarioDispatch | None:
     """stock_analysis 场景分派（s4_plan §3.1）：任一条件不满足 → None 走旧链。
 
-    S6 D6 旧链准入：分派未命中时经 ``evaluate_legacy_admission`` 判定迁移期放行——
-    draining / sealed / active raise :class:`LegacyDispatchBlockedError`（在 try 外
-    raise，不落入分派异常的降级旧链分支，R21 不伪装成功）。F05 fail-closed：分派 /
-    准入读取过程异常（如配置损坏、CAS 锁失败、IO 超时）以 ``admission="read_failed"``
-    阻断旧链并传出——读取失败等于授权状态未知，降级旧链即把「未知」伪装成「允许」，
-    在 active / sealed 期间放行旧外发（R21 缺失值伪装的传输面变体）。
+    委托 :func:`scenario_dispatch.resolve_analysis_track`（F04 语义单源）：分派命中
+    返回新轨上下文；未命中且准入非 allowed（draining / sealed / active）raise
+    :class:`LegacyDispatchBlockedError`（在 try 外 raise，不落入分派异常的降级旧链
+    分支，R21 不伪装成功）；分派 / 准入读取异常（F05 fail-closed）以
+    ``admission="read_failed"`` 阻断旧链并传出——读取失败等于授权状态未知，降级
+    旧链即把「未知」伪装成「允许」，在 active / sealed 期间放行旧外发（R21）。
+    保留本函数作为测试 monkeypatch 锚（test_ai_service / test_s6_migration_flow）。
     """
-    from services.ai_service.scenario_dispatch import evaluate_legacy_admission, resolve_executor
+    from services.ai_service.scenario_dispatch import resolve_analysis_track
 
-    try:
-        dispatch = await resolve_executor("stock_analysis")
-        if dispatch is not None:
-            return dispatch
-        admission = await evaluate_legacy_admission()
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        # F05 fail-closed：读取失败不得降级旧链授权语义（原 fail-open 行为已移除）。
-        log_classified(
-            logger,
-            e,
-            "llm",
-            "[AIService] Analyze | scenario dispatch read failed, blocking legacy (%s): %s",
-            exc_info=True,
-        )
-        raise LegacyDispatchBlockedError("read_failed") from e
-    # S6 D6：准入停接在 try 外 raise——「AI 功能明确不可用」必须传出，不得降级旧链。
-    if admission != "allowed":
-        raise LegacyDispatchBlockedError(admission)
-    return None
+    return await resolve_analysis_track()
 
 
 class StockAnalysisService:
@@ -199,10 +179,16 @@ class StockAnalysisService:
         capital_labels: list[str] | None = None,
         history_labels: list[str] | None = None,
         learning_strategy_name: str | None = None,
+        scenario_dispatch: ScenarioDispatch | None = None,
     ) -> dict | None:
         """
         Analyze a single stock using the LLM (Cloud default, can support others).
         Requires 'llm_model' to be configured.
+
+        ``scenario_dispatch``：调用方（策略批量入口，F04）在批次开始时经
+        :func:`scenario_dispatch.resolve_analysis_track` 判定并冻结的执行轨道快照；
+        非 ``None`` 时整批复用（同请求单轨 §14.2-6，批次中途配置变化不混版），
+        ``None`` 时由本方法自行新鲜分派（单股直连 / retry 等独立请求）。
 
         ``learning_strategy_name``：调用方策略的 ``name_key``，非空时仅取同策略的
         few-shot 学习样本（与 save_results 写入的 strategy_name 口径对齐），避免在
@@ -223,7 +209,8 @@ class StockAnalysisService:
         # 候选资格 / 输入预算 / 实际目标授权由 Executor + ExecutionSnapshot 承担，
         # 合格设备内 GGUF 或兼容 API 均可用（禁止外发策略由授权链路自带）；
         # 旧链分支保留 unsupported 提前拒绝（pending 期间生产语义不变，S6 退役）。
-        dispatch = await _resolve_stock_analysis_dispatch()
+        # F04：调用方传入批次冻结快照时直接复用，不再逐股新鲜分派（不混版）。
+        dispatch = scenario_dispatch if scenario_dispatch is not None else await _resolve_stock_analysis_dispatch()
 
         # MAJOR-04（review09-24 维度04）：个股深度分析仅接入云端 LLM 路径，本地模型
         # 不参与该路径（新闻分类等另有本地优先路径）。云端不可用（含「仅本地模式」）时

@@ -43,6 +43,27 @@ def _mock_ai_external_acknowledged_default_true():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _legacy_admission_allowed(monkeypatch):
+    """旧链批量测试前提显式化（F05 fail-closed，与 tests/unit/test_f04_batch_track.py 同构）。
+
+    F04 批次入口（resolve_analysis_track）与逐股旧链准入（evaluate_legacy_admission）
+    均经 ``scenario_dispatch._new_config_service`` 新鲜读磁盘配置；集成测试会话的
+    CONFIG_FILE 指向不存在的临时文件（tests/conftest.py 仅重定向路径），不 mock 该锚
+    会触发 fail-closed（ConfigFreshReadError → read_failed → legacy_stopped），
+    本文件验证的旧轨行为契约（disable_ai / ack / news as_of / learning as_of）无从到达。
+    本 fixture 显式提供真实运行态前提：配置可读且 migration pending（未开启迁移）→
+    旧轨 allowed。专门测试阻断/新轨的用例在用例内覆盖本打桩。
+    """
+    from services.ai_service import scenario_dispatch
+
+    config_service = MagicMock()
+    config_service.get_snapshot = AsyncMock(
+        return_value=MagicMock(migration_state="pending", migration_transition=None, scenario_routes=())
+    )
+    monkeypatch.setattr(scenario_dispatch, "_new_config_service", lambda: config_service)
+
+
 @pytest_asyncio.fixture(loop_scope="function")
 async def db_cache():
     """Create CacheManager instance with function-loop engine.

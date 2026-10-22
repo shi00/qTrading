@@ -29,11 +29,20 @@ R1 合规：本模块与三入口同在 services 层，不 import ``app.bootstra
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
-from core.model_management_types import ExecutionSnapshot, normalize_egress_target
+from core.model_management_types import (
+    ExecutionSnapshot,
+    LegacyDispatchBlockedError,
+    normalize_egress_target,
+)
+from utils.error_classifier import log_classified
+
+logger = logging.getLogger(__name__)
 
 # S4 prompt/schema 契约版本（§13.1 business_contract_versions：task_id → 版本）。
 # 三入口 prompt/schema 变更时递增；news_annotation 拆分 topic / sentiment 两任务。
@@ -149,6 +158,47 @@ async def resolve_executor(scenario_id: str) -> ScenarioDispatch | None:
         total_timeout_seconds=float(route.get("total_timeout_seconds", 60)),
         task_routes=route.get("task_routes") or {},
     )
+
+
+async def resolve_analysis_track() -> ScenarioDispatch | None:
+    """stock_analysis 场景执行轨道判定（F04）：分派命中返回新轨上下文，否则旧轨放行或阻断。
+
+    - ``resolve_executor("stock_analysis")`` 命中（统一调度链 active 且场景路由启用）
+      → 返回 :class:`ScenarioDispatch`（调用方应冻结该快照贯穿整次运行，同请求单轨
+      §14.2-6，批次中途配置变化不混版）；
+    - 未命中且 ``evaluate_legacy_admission() == "allowed"`` → 返回 ``None``（旧轨，
+      调用方应用旧云端 / 旧链准入 guard）；
+    - 未命中且准入为 ``draining_stop`` / ``refused`` → raise :class:`LegacyDispatchBlockedError`
+      （AI 功能明确不可用必须传出，不得降级伪装成功，R21）；
+    - 分派 / 准入读取过程异常（F05 fail-closed）→ raise ``LegacyDispatchBlockedError("read_failed")``
+      ——读取失败等于授权状态未知，降级旧链即把「未知」伪装成「允许」（R21）。
+
+    供单股分派 helper（``stock_analysis._resolve_stock_analysis_dispatch``）与策略
+    批量入口（``strategies.ai_mixin``，strategies→services 为合法方向 R1）共用，
+    语义单源。
+    """
+
+    try:
+        dispatch = await resolve_executor("stock_analysis")
+        if dispatch is not None:
+            return dispatch
+        admission = await evaluate_legacy_admission()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        # F05 fail-closed：读取失败不得降级旧链授权语义（原 fail-open 行为已移除）。
+        log_classified(
+            logger,
+            e,
+            "llm",
+            "[ScenarioDispatch] analysis track read failed, blocking legacy (%s): %s",
+            exc_info=True,
+        )
+        raise LegacyDispatchBlockedError("read_failed") from e
+    # S6 D6：准入停接在 try 外 raise——「AI 功能明确不可用」必须传出，不得降级旧链。
+    if admission != "allowed":
+        raise LegacyDispatchBlockedError(admission)
+    return None
 
 
 # S6 D6 旧链准入判定值域：allowed=旧链照常 / draining_stop=排水期停接 / refused=拒绝。

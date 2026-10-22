@@ -715,9 +715,11 @@ class TestAiMixinLoopQuietStop:
         monkeypatch,
         caplog,
     ):
-        """F05 fail-closed：admission 读取异常（配置损坏等）授权状态未知，不得伪装为
-        allowed 继续旧链——analyze_one 安静停接（_mixin_analyze_single 不被调用、
-        不触发 on_card_error，对齐 draining/refused 行为）；CancelledError 不被吞（R2）。"""
+        """F05 fail-closed（F04 升级承载层）：admission 读取异常（配置损坏等）授权
+        状态未知，不得伪装为 allowed 继续旧链——批次入口 resolve_analysis_track 以
+        read_failed 阻断，候选逐行显式标记 legacy_stopped（不静默丢弃、不伪装成
+        筛选结果，R21）；_mixin_analyze_single 不被调用、零旧链传输；
+        CancelledError 不被吞（R2）。"""
         import logging
 
         from strategies.ai_mixin import AIStrategyMixin
@@ -759,10 +761,12 @@ class TestAiMixinLoopQuietStop:
             result = await s.run_ai_analysis(candidates, context)
 
         analyze_single.assert_not_awaited()  # fail-closed：读取失败期间零旧链传输
-        assert card_errors == []  # 安静停接，不触发 on_card_error
-        assert len(result) == 2  # final_rows 为空 → 退回原始候选集
+        assert card_errors == []  # 停接不触发 on_card_error
+        # F04：全量行保留且显式标记（比静默退回候选集更强的 R21 语义）
+        assert len(result) == 2
+        assert (result["ai_status"] == "legacy_stopped").all()
+        assert result["ai_score"].isna().all()
         assert "admission=read_failed" in caplog.text  # 停接日志携带 read_failed 语义
-        assert "legacy admission read failed, blocking candidate" in caplog.text  # 阻断日志可观测
 
 
 # ---------------------------------------------------------------------------
