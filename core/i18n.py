@@ -44,7 +44,9 @@ class I18n:
     _listeners: list | None = None
     _initialized: bool = False
     _strings_cache: ClassVar[dict] = {}
-    _missing_keys: ClassVar[set] = set()
+    # CORE-04: 缺失 key 按 locale 隔离（locale → {key, ...}），
+    # 防止 A locale 先记录的缺失吞掉 B locale 对同一 key 的后续告警。
+    _missing_keys: ClassVar[dict[str, set[str]]] = {}
     _locales_dir: Path | None = None
 
     @classmethod
@@ -144,10 +146,25 @@ class I18n:
 
         target_locale = locale if locale else cls._locale
         normalized_locale = LOCALE_MAP.get(target_locale, target_locale)
+        if normalized_locale not in SUPPORTED_LOCALES:
+            # CORE-04: get 的 locale 参数同样过支持白名单（与 set_locale 语义对齐：
+            # 非法输入记 warning 并保持当前 locale；区别于 initialize 的 DEFAULT 回退，
+            # 渲染场景回退 default 会让非默认语言用户看到错误语言）。
+            # 原行为：未支持 locale 静默得到空 dict，所有 key 缺失返回原文。
+            # i18n locale 为静态配置值、非敏感数据；命中 CodeQL maybePrivate 命名启发式误报
+            # codeql[py/clear-text-logging-sensitive-data]
+            logger.warning(
+                "[I18n] Unsupported locale '%s' in get, falling back to current locale '%s'",
+                target_locale,
+                cls._locale,
+            )
+            normalized_locale = cls._locale
         locale_map = cls._get_strings(normalized_locale)
 
         if key not in locale_map:
-            if key not in cls._missing_keys:
+            # CORE-04: 缺失记录按实际使用的 locale 隔离，跨 locale 告警不互吞。
+            missing_keys_for_locale = cls._missing_keys.setdefault(normalized_locale, set())
+            if key not in missing_keys_for_locale:
                 if default is not None:
                     logger.debug(
                         "[I18n] Using default fallback '%s' for missing key: '%s' (Locale: %s)",
@@ -165,7 +182,7 @@ class I18n:
                         key,
                         normalized_locale,
                     )
-                cls._missing_keys.add(key)
+                missing_keys_for_locale.add(key)
             return default if default is not None else key
 
         template = locale_map[key]

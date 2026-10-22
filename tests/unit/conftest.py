@@ -253,9 +253,9 @@ def _reset_i18n_state():
     saved_listeners = list(I18n._listeners) if I18n._listeners else None
     I18n._locale = DEFAULT_LOCALE
     I18n._initialized = True
-    I18n._missing_keys = set()
+    I18n._missing_keys = {}
     yield
     I18n._locale = DEFAULT_LOCALE
     I18n._initialized = True
     I18n._listeners = saved_listeners
-    I18n._missing_keys = set()
+    I18n._missing_keys = {}
