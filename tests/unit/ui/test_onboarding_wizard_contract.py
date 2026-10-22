@@ -1547,6 +1547,62 @@ class TestOnboardingWizardComponentBody:
         time_field.on_submit(MagicMock())  # type: ignore[reportCallIssue, reason: Flet stub declares on_submit as 0-arg, but runtime passes event]
         fake_vm.next_step.assert_awaited_once_with()
 
+    def test_step5_schedule_save_failure_shows_error_toast(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_onboarding_vms,
+        monkeypatch,
+    ):
+        """UIR-F02-001: 计划配置落盘失败 (next_step 返回 False) → 停留并显示错误 toast。"""
+        from unittest.mock import AsyncMock
+
+        import ui.views.onboarding_wizard as wizard_mod
+
+        monkeypatch.setattr(wizard_mod.I18n, "get", lambda key, **kwargs: key)
+        fake_vm = mock_onboarding_vms["onboarding"]
+        fake_vm._state = replace(fake_vm._state, current_step=5)
+        fake_vm.next_step = AsyncMock(return_value=False)
+
+        component = make_component(wizard_mod.OnboardingWizard)
+        page = _make_fake_page()
+        run_mount_effects(component, page)
+        result = render_once(component)
+
+        time_fields = [c for c in _collect_controls(result) if isinstance(c, ft.TextField)]
+        assert len(time_fields) == 1
+        time_fields[0].on_submit(MagicMock())  # type: ignore[reportCallIssue]  # Flet stub declares on_submit as 0-arg, but runtime passes event
+
+        fake_vm.next_step.assert_awaited_once_with()
+        page.toast.show.assert_called_once_with("wizard_schedule_save_failed", "error")
+
+    def test_step5_schedule_save_success_no_error_toast(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_onboarding_vms,
+    ):
+        """UIR-F02-001: 保存成功 (next_step 返回 True) 时不显示错误 toast。"""
+        from unittest.mock import AsyncMock
+
+        from ui.views.onboarding_wizard import OnboardingWizard
+
+        fake_vm = mock_onboarding_vms["onboarding"]
+        fake_vm._state = replace(fake_vm._state, current_step=5)
+        fake_vm.next_step = AsyncMock(return_value=True)
+
+        component = make_component(OnboardingWizard)
+        page = _make_fake_page()
+        run_mount_effects(component, page)
+        result = render_once(component)
+
+        time_fields = [c for c in _collect_controls(result) if isinstance(c, ft.TextField)]
+        assert len(time_fields) == 1
+        time_fields[0].on_submit(MagicMock())  # type: ignore[reportCallIssue]  # Flet stub declares on_submit as 0-arg, but runtime passes event
+
+        fake_vm.next_step.assert_awaited_once_with()
+        page.toast.show.assert_not_called()
+
     def test_show_snack_with_no_page(self, monkeypatch):
         """_show_snack 在 page 不可用时安全降级（不抛异常）。"""
         from ui.views.onboarding_wizard import _show_snack

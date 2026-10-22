@@ -3,6 +3,7 @@
 TDD RED phase: these tests define the expected ViewModel contract.
 """
 
+import asyncio
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
@@ -465,6 +466,120 @@ class TestOnboardingVMScheduleValidation:
         result = await bound_vm.validate_and_persist_current_step()
         assert result is False
         assert not bound_vm.is_step_validated("schedule")
+
+    async def test_save_config_exception_blocks_next_step(self, bound_vm, mock_config_handler):
+        """UIR-F02-001: 落盘异常时 next_step 返回 False 并停留 schedule 步。"""
+        self._setup_schedule_vm(bound_vm, mock_config_handler)
+        mock_config_handler.save_config = MagicMock(side_effect=RuntimeError("disk full"))
+        result = await bound_vm.next_step()
+        assert result is False
+        assert bound_vm.current_step == 5
+        assert bound_vm.state.current_step == 5
+        assert bound_vm.is_step_validated("schedule") is False
+
+    async def test_save_config_false_blocks_next_step(self, bound_vm, mock_config_handler):
+        """UIR-F02-001: save_config 返回 False（不抛异常）时不得当作验证成功前进。
+
+        ConfigHandler.save_config 在配置不可读 / AppConfig 校验失败 / 原子写失败时
+        返回 False 而不抛异常；VM 必须检查布尔返回值，停留 schedule 步且不缓存验证。
+        """
+        self._setup_schedule_vm(bound_vm, mock_config_handler)
+        mock_config_handler.save_config = MagicMock(return_value=False)
+
+        result = await bound_vm.next_step()
+
+        assert result is False
+        assert bound_vm.current_step == 5
+        assert bound_vm.state.current_step == 5
+        assert bound_vm.is_step_validated("schedule") is False
+        mock_config_handler.save_config.assert_called_once_with(
+            {
+                "auto_update_enabled": True,
+                "auto_update_time": "16:30",
+            }
+        )
+
+    async def test_save_config_true_advances_to_complete(self, bound_vm, mock_config_handler, snapshots):
+        """UIR-F02-001: save_config 返回 True 时正常前进到 complete 步并缓存验证。"""
+        self._setup_schedule_vm(bound_vm, mock_config_handler)
+        mock_config_handler.save_config = MagicMock(return_value=True)
+
+        result = await bound_vm.next_step()
+
+        assert result is True
+        assert bound_vm.current_step == 6
+        assert bound_vm.state.current_step == 6
+        assert bound_vm.is_step_validated("schedule") is True
+        assert any(s.current_step == 6 for s in snapshots)
+
+    async def test_retry_after_failure_advances(self, bound_vm, mock_config_handler):
+        """落盘失败后再次提交（重试）成功才前进：失败不得留下成功缓存。"""
+        self._setup_schedule_vm(bound_vm, mock_config_handler)
+        mock_config_handler.save_config = MagicMock(return_value=False)
+
+        assert await bound_vm.next_step() is False
+        assert bound_vm.current_step == 5
+        assert bound_vm.is_step_validated("schedule") is False
+
+        mock_config_handler.save_config = MagicMock(return_value=True)
+        assert await bound_vm.next_step() is True
+        assert bound_vm.current_step == 6
+        assert bound_vm.is_step_validated("schedule") is True
+
+    async def test_invalid_time_normalized_payload_and_advances(self, bound_vm, mock_config_handler):
+        """非法时间仍归一化为 16:30 落盘，并正常前进（归一化行为不变）。"""
+        self._setup_schedule_vm(bound_vm, mock_config_handler)
+        mock_config_handler.save_config = MagicMock(return_value=True)
+        bound_vm.set_schedule_state(enabled=True, time_str="25:99")
+
+        result = await bound_vm.next_step()
+
+        assert result is True
+        assert bound_vm._schedule_time == "16:30"
+        assert bound_vm.state.normalized_schedule_time == "16:30"
+        assert bound_vm.current_step == 6
+        mock_config_handler.save_config.assert_called_once_with(
+            {
+                "auto_update_enabled": True,
+                "auto_update_time": "16:30",
+            }
+        )
+
+    async def test_cancelled_error_propagates_and_stays_on_schedule(self, bound_vm):
+        """R2: 落盘 await 被取消时 CancelledError 必须向外传播，不得当作失败吞没。"""
+        bound_vm.current_step = 5
+        bound_vm.set_schedule_state(enabled=True, time_str="16:30")
+        with patch("ui.viewmodels.onboarding_view_model.ThreadPoolManager") as tp_cls:
+            tp_cls.return_value.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await bound_vm.next_step()
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert bound_vm.current_step == 5
+        assert bound_vm.is_step_validated("schedule") is False
+        assert bound_vm.validation_in_progress is False
+
+    async def test_save_config_false_keeps_corrupt_config_untouched(self, bound_vm, tmp_path, monkeypatch):
+        """UIR-F02-001: 真实 save_config 在配置不可读时返回 False，且不覆盖损坏现场。
+
+        用临时配置文件模拟磁盘损坏：保存必须失败、schedule 步停留，文件字节内容不变；
+        重试覆盖损坏配置现场被禁止。
+        """
+        import utils.config_handler as cfg
+
+        config_file = tmp_path / "user_settings.json"
+        corrupt_content = '{"auto_update_time": "08:00", BROKEN'
+        config_file.write_text(corrupt_content, encoding="utf-8")
+        monkeypatch.setattr(cfg, "CONFIG_FILE", str(config_file))
+
+        bound_vm.current_step = 5
+        bound_vm.set_schedule_state(enabled=True, time_str="09:15")
+
+        result = await bound_vm.next_step()
+
+        assert result is False
+        assert bound_vm.current_step == 5
+        assert bound_vm.is_step_validated("schedule") is False
+        assert config_file.read_text(encoding="utf-8") == corrupt_content
 
 
 # =====================================================================
