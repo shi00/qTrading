@@ -8,8 +8,11 @@ logger = logging.getLogger(__name__)
 
 MAX_PROMPT_LENGTH = 8000
 
-# Zero-width / invisible characters used to obfuscate injection patterns.
-# Kept separate from _normalize_unicode to avoid touching validated behavior.
+# 零宽/不可见字符清单唯一正本（UTILS-B-05）：validate_prompt 的归一化与
+# neutralize_external_text 的中和层共用同一清单。此前两处各自维护（校验层曾缺
+# \u2060/\u180e），注入文本夹带 \u2060（如 "ig\u2060nore previous instructions"）
+# 可残存零宽字符绕过注入正则，形成校验层弱于中和层的覆盖倒挂；现确认对齐后
+# 收敛为单点定义，防止清单再次漂移。
 _ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff\u00ad\u2060\u180e]")
 
 _INJECTION_PATTERNS = [
@@ -56,11 +59,12 @@ def _normalize_unicode(text: str) -> str:
     NFKC normalization converts:
     - Full-width Latin: ＩＧＮＯＲＥ → IGNORE
     - Compatibility characters: ﬁ → fi
-    - Zero-width characters are stripped separately.
+    - Zero-width characters are stripped via _ZERO_WIDTH_RE (shared with
+      neutralize_external_text, 见模块顶部对齐说明).
     """
     normalized = unicodedata.normalize("NFKC", text)
-    normalized = re.sub(r"[\u200b\u200c\u200d\ufeff\u00ad]", "", normalized)
-    return normalized
+    # 经 _ZERO_WIDTH_RE 统一剥除（含 \u2060/\u180e），与中和层同一清单（UTILS-B-05）
+    return _ZERO_WIDTH_RE.sub("", normalized)
 
 
 def validate_prompt(prompt: str) -> tuple[bool, str]:
