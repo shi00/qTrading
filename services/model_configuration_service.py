@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import datetime as dt
 import hashlib
@@ -32,6 +33,7 @@ from core.model_management_types import (
 )
 from utils import config_handler as cfg
 from utils.config_models import ModelManagementSaveResult
+from utils.loop_local import get_loop_local
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 _PURPOSES = ("news_annotation", "stock_analysis", "news_risk", "synthetic_test")
@@ -561,20 +563,38 @@ class ModelConfigurationService:
 
         同 operation_id 的安全重试复用该新引用，不重复创建版本（MM-12）；
         配置原子提交成功后才生效，not_committed 时调用方保留旧引用即可。
+
+        T4 并发幂等：检查（lease）-创建-登记（lease）整体处于 per-operation_id
+        锁内——查与写之间唯一的 await 点（keyring 线程池写入）期间，同 id 第二个
+        并发调用在锁上等待而非并行穿透检查，进锁后命中 lease 返回同一版本，
+        不重复创建 keyring 项。创建失败时 lease 未登记且锁随 ``async with`` 释放，
+        无占位残留，后续同 id 调用可重新创建。锁经 ``get_loop_local`` 绑定当前
+        事件循环（R11），锁内不触碰文件锁 / RWLock，不与既有锁顺序（F10）交互。
         """
-        existing = self._credential_leases.get(operation_id)
-        if existing is not None:
-            return existing
+        async with self._get_prepare_lock(operation_id):
+            existing = self._credential_leases.get(operation_id)
+            if existing is not None:
+                return existing
 
-        def _write() -> tuple[str, str]:
-            version = str(uuid.uuid4())
-            item = f"model-connection-{version}"
-            cfg.keyring.set_password(cfg.KEYRING_SERVICE_NAME, item, api_key)
-            return f"keyring:{item}", version
+            def _write() -> tuple[str, str]:
+                version = str(uuid.uuid4())
+                item = f"model-connection-{version}"
+                cfg.keyring.set_password(cfg.KEYRING_SERVICE_NAME, item, api_key)
+                return f"keyring:{item}", version
 
-        ref_version = await ThreadPoolManager().run_async(TaskType.IO, _write)
-        self._credential_leases[operation_id] = ref_version
-        return ref_version
+            ref_version = await ThreadPoolManager().run_async(TaskType.IO, _write)
+            self._credential_leases[operation_id] = ref_version
+            return ref_version
+
+    def _get_prepare_lock(self, operation_id: str) -> asyncio.Lock:
+        """按 operation_id 取绑定当前事件循环的准备锁（R11：loop-local，
+        不得作为类属性跨循环复用；同 task_manager 组锁的 dict 惰性创建先例）。"""
+        locks: dict[str, asyncio.Lock] = get_loop_local("model_config_prepare_locks", dict)
+        lock = locks.get(operation_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[operation_id] = lock
+        return lock
 
     # ------------------------------------------------------------------
     # 单次测试上下文（§4.4，MM-09：不写 grants、不改 config_revision、不落盘）

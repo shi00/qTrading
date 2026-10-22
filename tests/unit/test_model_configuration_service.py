@@ -8,9 +8,12 @@ D7 pending 费用型测试屏障。
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import datetime as dt
 import json
+import threading
+import time
 from pathlib import Path
 from types import MappingProxyType
 from unittest import mock
@@ -252,6 +255,88 @@ class TestCredentialVersioning:
         # ref 形如 keyring:<service>:<item>；keyring 中可读回
         _, item = ref.split(":", 1)
         assert keyring.get_password(cfg_mod.KEYRING_SERVICE_NAME, item) == "sk-secret"
+
+
+class _SlowKeyring:
+    """慢速 keyring fake：以线程内 sleep 放大 await 前查后写窗口，供并发用例真实并发。"""
+
+    def __init__(self, delay: float = 0.05, fail: bool = False) -> None:
+        self.write_count = 0
+        self._delay = delay
+        self._fail = fail
+        self._count_lock = threading.Lock()
+
+    def set_password(self, service_name: str, username: str, password: str) -> None:
+        time.sleep(self._delay)
+        with self._count_lock:
+            self.write_count += 1
+        if self._fail:
+            raise RuntimeError("keyring unavailable")
+
+
+class TestCredentialVersionConcurrency:
+    """T4：prepare_credential_version「await 前查后写」并发窗口的幂等回归。
+
+    修复前：首个调用在 keyring 线程池写入（await 点）期间，同 id 后续并发任务
+    全部穿透 lease 检查并各自创建版本（write_count > 1）；修复后 per-operation_id
+    锁串行化检查-创建-登记区间，只创建一次版本。
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_same_operation_id_creates_single_version(self, service, monkeypatch):
+        """同 operation_id 并发调用只创建一次版本：全部等待者返回同一 (ref, version)。"""
+        slow = _SlowKeyring(delay=0.05)
+        monkeypatch.setattr(cfg_mod, "keyring", slow)
+        calls = [asyncio.create_task(service.prepare_credential_version("op-conc", f"sk-{i}")) for i in range(8)]
+        results = await asyncio.gather(*calls)
+
+        assert len({ver for _, ver in results}) == 1
+        assert len({ref for ref, _ in results}) == 1
+        assert slow.write_count == 1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_different_operation_ids_not_serialized(self, service, monkeypatch):
+        """不同 operation_id 各持各锁：并发完成且版本互异（细粒度不互拖）。"""
+        slow = _SlowKeyring(delay=0.05)
+        monkeypatch.setattr(cfg_mod, "keyring", slow)
+        calls = [asyncio.create_task(service.prepare_credential_version(f"op-m{i}", f"sk-{i}")) for i in range(4)]
+        results = await asyncio.gather(*calls)
+
+        assert len({ver for _, ver in results}) == 4
+        assert slow.write_count == 4
+
+    @pytest.mark.asyncio
+    async def test_cancelled_waiter_propagates_and_lock_released(self, service, monkeypatch):
+        """R2：锁上等待被取消须传播 CancelledError，且锁不泄漏（后续同 id 可复用）。"""
+        monkeypatch.setattr(cfg_mod, "keyring", _SlowKeyring(delay=0.3))
+        first = asyncio.create_task(service.prepare_credential_version("op-cx", "sk-1"))
+        await asyncio.sleep(0.05)  # 让 first 进入锁内 await（keyring 写入中）
+        waiter = asyncio.create_task(service.prepare_credential_version("op-cx", "sk-2"))
+        await asyncio.sleep(0.05)  # 让 waiter 进入锁等待
+
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await waiter
+        assert exc_info.type is asyncio.CancelledError
+        assert waiter.cancelled()
+
+        ref, ver = await first
+        # 锁未随取消泄漏：后续同 id 调用立即命中 lease 复用同一版本
+        ref2, ver2 = await service.prepare_credential_version("op-cx", "sk-3")
+        assert ver2 == ver
+        assert ref2 == ref
+
+    @pytest.mark.asyncio
+    async def test_creation_failure_leaves_no_stale_lease(self, service, monkeypatch):
+        """失败路径：创建异常传播、lease 未登记、无占位残留，后续同 id 可重建。"""
+        monkeypatch.setattr(cfg_mod, "keyring", _SlowKeyring(delay=0.01, fail=True))
+        with pytest.raises(RuntimeError, match="keyring unavailable"):
+            await service.prepare_credential_version("op-cf", "sk-1")
+        assert service._credential_leases.get("op-cf") is None
+
+        monkeypatch.setattr(cfg_mod, "keyring", _SlowKeyring(delay=0.0))
+        ref, ver = await service.prepare_credential_version("op-cf", "sk-2")
+        assert service._credential_leases["op-cf"] == (ref, ver)
 
 
 class TestEgressGrantAndAuthorize:
