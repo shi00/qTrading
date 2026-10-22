@@ -10,11 +10,15 @@
   不再出现 adapter error: AttributeError；
 - 错误形状 adapter（裸函数 / 缺 .invoke 对象）注入 ScenarioExecutor 时组装期
   TypeError 快速失败（非执行期 AttributeError）。
+
+F24 回归：gguf_sentiment 不再误绑 LocalModelManager（聊天生成路径），改走
+专用情绪转译层 gguf_sentiment_adapter（端到端替身按底层入口分别计数断言）。
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -30,6 +34,8 @@ from core.model_management_types import (
     NormalizedLLMUsage,
     PersistenceOutcome,
     ResolvedConnection,
+    ScoredText,
+    ScoringOutcome,
     ValidatedBusinessOutput,
     ensure_inference_adapter,
 )
@@ -115,7 +121,9 @@ def _request() -> InferenceRequest:
         scenario_id="news_sentiment",
         task_id="sentiment",
         invocation_id="inv-1",
-        payload={"text": "测试新闻"},
+        # F24：gguf_sentiment 专用链 payload 契约为 texts: list[str]
+        # （litellm_chat / gguf_chat 不消费 payload，共用无影响）。
+        payload={"texts": ["测试新闻"]},
         deadline=1_000_000.0,
     )
 
@@ -171,14 +179,45 @@ def fake_transports(monkeypatch):
 
     class _FakeLocalModelManager:
         async def invoke_for_connection(self, request, resolved_connection, deadline, attempt_context):
-            calls[str(resolved_connection.adapter_kind)] += 1
+            # F24：固定计入 gguf_chat——若 gguf_sentiment 误绑 LMM（回归缺陷），
+            # calls["gguf_sentiment"] 保持 0，端到端计数断言即刻失败（fail-loud）。
+            calls["gguf_chat"] += 1
             return _response(resolved_connection.model)
 
+    class _FakeSentimentScorer:
+        """gguf_sentiment 底层替身：校验 texts 契约并返回固定成功终态。"""
+
+        async def score_for_connection(self, texts, resolved_connection, deadline, attempt_context):
+            calls["gguf_sentiment"] += 1
+            assert isinstance(texts, list) and all(isinstance(t, str) for t in texts)
+            return ScoringOutcome(
+                status="success",
+                results=(
+                    ScoredText(
+                        text_id="0",
+                        label="利好",
+                        probabilities=(0.1, 0.2, 0.7),
+                        score=0.6,
+                    ),
+                ),
+                reason=None,
+                usage=NormalizedLLMUsage(
+                    input_total_tokens=0,
+                    uncached_input_tokens=0,
+                    cache_read_tokens=None,
+                    cache_write_tokens=None,
+                    output_tokens=0,
+                ),
+                metadata={"texts": len(texts)},
+            )
+
     import services.ai_service as ai_service_pkg
+    import services.ai_service.gguf_sentiment_adapter as gguf_sentiment_module
     import services.local_model_manager as lmm_module
 
     monkeypatch.setattr(ai_service_pkg, "AIService", _FakeAIService)
     monkeypatch.setattr(lmm_module, "LocalModelManager", _FakeLocalModelManager)
+    monkeypatch.setattr(gguf_sentiment_module, "NewsSentimentScorer", _FakeSentimentScorer)
     return calls
 
 
@@ -219,7 +258,21 @@ class TestProductionAdaptersEndToEnd:
         # F03：成功出口唯一生产形态为 ScenarioOutput（业务载荷 + 程序生成溯源，非裸 dict）
         first = result.outputs[0]
         assert isinstance(first, ScenarioOutput)
-        assert first.output == {"output": "ok"}
+        if kind == "gguf_sentiment":
+            # F24：content 承载 ScoringOutcome JSON（results 含 confidence 数值协议）
+            payload = json.loads(first.output["output"])
+            assert payload["status"] == "success"
+            assert payload["results"] == [
+                {
+                    "text_id": "0",
+                    "label": "利好",
+                    "probabilities": [0.1, 0.2, 0.7],
+                    "score": 0.6,
+                    "confidence": 0.7,
+                }
+            ]
+        else:
+            assert first.output == {"output": "ok"}
         assert first.metadata["actual_model"]
         assert first.metadata["connection_id"] == "conn-1"
 

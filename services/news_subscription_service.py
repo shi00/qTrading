@@ -581,14 +581,17 @@ class NewsSubscriptionService:
                         # None，R21），执行器之后不再打分（NewsSentimentScorer 直调移除，
                         # GGUF 情绪走 dedicated 路由经 Executor 调度）；LLM 未校准置信度
                         # 不填数值列（§2.4），成功组整组原子语义由 save_market_news 承载。
+                        # F24 断裂 4：GGUF dedicated 成功链 ai_result 携带编码器真实
+                        # 数值与产物身份（sentiment_score/conf/model），透传落库不再
+                        # 无条件清空；LLM/bundled/reuse 链无这些键 → 归 None（R21）。
                         exec_meta = ai_result["execution_metadata"]
                         normalized = CacheManager.normalize_news_item(
                             {
                                 **item,
                                 "sentiment": ai_result.get("sentiment"),
-                                "sentiment_score": None,
-                                "sentiment_conf": None,
-                                "sentiment_model": None,
+                                "sentiment_score": ai_result.get("sentiment_score"),
+                                "sentiment_conf": ai_result.get("sentiment_conf"),
+                                "sentiment_model": ai_result.get("sentiment_model"),
                             },
                             default_source="CLS",
                         )
