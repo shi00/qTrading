@@ -178,6 +178,14 @@ class I18n:
                 # codeql[py/clear-text-logging-sensitive-data]
                 logger.warning("[I18n] Missing format arg for '%s': %s", key, e)
                 return template
+            except (IndexError, ValueError) as e:
+                # CORE-03: 模板含位置占位符（{} / {0}）或混合规格时 str.format 抛 IndexError，
+                # 模板语法损坏（如未闭合的 {）抛 ValueError，均为模板/参数不匹配的开发期
+                # 配置错误，与 KeyError 同样降级返回原模板，不向调用方传播异常。
+                # i18n key 为静态翻译键、非敏感数据；命中 CodeQL maybePrivate 命名启发式（如 "billing"）误报
+                # codeql[py/clear-text-logging-sensitive-data]
+                logger.warning("[I18n] Invalid template or format spec for '%s': %s", key, e)
+                return template
         return template
 
     @classmethod

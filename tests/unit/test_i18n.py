@@ -858,15 +858,19 @@ class TestListenerIterationDefense:
 
 
 class TestFormatExceptionContract:
-    """core-004: 明确 I18n.get 的 format 异常处理契约.
+    """core-004 / CORE-03: 明确 I18n.get 的 format 异常处理契约.
 
-    设计决策:
-    - KeyError (模板含 {name} 但 kwargs 未提供 name): 已吞没, 返回原模板
-    - 其他 format 异常 (IndexError/ValueError): 不吞没, 向调用方传播
+    设计决策 (CORE-03 反转原 core-004 的"仅吞 KeyError"决策):
+    - KeyError (模板含 {name} 但 kwargs 未提供 name): 吞没, 返回原模板
+    - IndexError / ValueError (模板含位置占位符 {} / {0}、混合规格或语法损坏):
+      同样吞没, 返回原模板并记 warning, 不向调用方传播
 
-    理由: i18n 模板来自开发者控制的 JSON 文件, 非 KeyError 异常通常是
-    模板配置错误 (如 {{{} 损坏语法), 应在开发阶段暴露而非静默吞没.
-    若未来需要更宽松的处理, 应作为独立变更评审.
+    理由: i18n 模板来自开发者控制的 JSON 文件, 三类异常同为模板/参数不匹配
+    的配置错误; 传播会把 UI 渲染路径炸掉, 降级返回原模板可保持界面可用,
+    且 warning 日志可在开发期暴露问题. 当前 locales/ 下无危险形态模板,
+    本契约针对未来新增模板的防御 (新增模板无自动拦截).
+
+    若未来需要更宽松/更严格的处理, 应作为独立变更评审.
     """
 
     def test_key_error_swallowed_returns_template(self, caplog):
@@ -890,22 +894,46 @@ class TestFormatExceptionContract:
         assert result == I18n._get_strings(I18n.current_locale())["screener_done"]
         assert "{count}" in result
 
-    def test_index_error_not_swallowed(self):
-        """模板含位置参数 {0} 但 kwargs 未提供时, IndexError 应传播."""
+    def test_auto_positional_placeholder_swallowed_returns_template(self, caplog):
+        """CORE-03: 模板含自动编号占位符 {} 但 kwargs 均为命名参数时,
+        IndexError 应被吞没并返回原模板 (原行为: IndexError 传播炸掉调用方)."""
+        I18n.initialize()
+        I18n._strings_cache["zh_CN"] = {"test_auto_pos": "Hello {}"}
+        with caplog.at_level(logging.WARNING, logger="core.i18n"):
+            result = I18n.get("test_auto_pos", name="Alice")
+        assert result == "Hello {}", "IndexError 应被吞没, 返回原模板"
+        assert "Invalid template or format spec" in caplog.text
+
+    def test_mixed_spec_placeholder_swallowed_returns_template(self, caplog):
+        """CORE-03: 模板混合位置占位符 {} 与命名占位符 {name} 时吞没."""
+        I18n.initialize()
+        I18n._strings_cache["zh_CN"] = {"test_mixed": "Mix {} {name}"}
+        with caplog.at_level(logging.WARNING, logger="core.i18n"):
+            result = I18n.get("test_mixed", name="Alice")
+        assert result == "Mix {} {name}", "混合规格 IndexError 应被吞没, 返回原模板"
+        assert "Invalid template or format spec" in caplog.text
+
+    def test_index_error_swallowed(self, caplog):
+        """CORE-03 反转 core-004: 模板含位置参数 {0} 但 kwargs 未提供时,
+        IndexError 应被吞没并返回原模板, 不再传播."""
         I18n.initialize()
         # 构造一个含位置参数的缓存模板
         I18n._strings_cache["zh_CN"] = {"test_pos": "Hello {0}"}
-        # 直接调用会触发 IndexError (str.format 不接受 **kwargs 中的 0)
-        with pytest.raises(IndexError, match="Replacement index 0 out of range"):
-            I18n.get("test_pos", name="Alice")
+        with caplog.at_level(logging.WARNING, logger="core.i18n"):
+            result = I18n.get("test_pos", name="Alice")
+        assert result == "Hello {0}", "IndexError 应被吞没, 返回原模板"
+        assert "Invalid template or format spec" in caplog.text
 
-    def test_value_error_not_swallowed(self):
-        """模板语法错误 (如未闭合的 {) 应传播 ValueError."""
+    def test_value_error_swallowed(self, caplog):
+        """CORE-03 反转 core-004: 模板语法错误 (如未闭合的 {) 应吞没
+        ValueError 并返回原模板, 不再传播."""
         I18n.initialize()
         # 构造一个格式错误的模板: 未闭合的 {
         I18n._strings_cache["zh_CN"] = {"test_bad": "Hello {"}
-        with pytest.raises(ValueError, match=r"Single '\{' encountered"):
-            I18n.get("test_bad", name="Alice")
+        with caplog.at_level(logging.WARNING, logger="core.i18n"):
+            result = I18n.get("test_bad", name="Alice")
+        assert result == "Hello {", "ValueError 应被吞没, 返回原模板"
+        assert "Invalid template or format spec" in caplog.text
 
     def test_valid_format_with_kwargs_returns_formatted(self):
         """正常 format 应返回格式化后的字符串."""
