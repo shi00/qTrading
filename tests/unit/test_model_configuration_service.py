@@ -8,6 +8,7 @@ D7 pending 费用型测试屏障。
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import json
 from pathlib import Path
@@ -21,7 +22,12 @@ from core.model_management_types import (
     MigrationTransitionError,
     ModelConfigurationConflictError,
 )
-from services.model_configuration_service import ModelConfigurationService, _outcome_from_cas
+from services.model_configuration_service import (
+    ModelConfigurationService,
+    _FrozenMapping,
+    _freeze_value,
+    _outcome_from_cas,
+)
 from utils.config_models import ModelManagementSaveResult
 import utils.config_handler as cfg_mod
 
@@ -1004,6 +1010,145 @@ class TestSnapshotMigrationTransition:
         assert isinstance(view, MappingProxyType)
         assert view["phase"] == "draining"
         assert view["transition_epoch"] == 1
+
+
+class TestSnapshotDeepFreeze:
+    """F38：发布快照递归冻结——嵌套容器写入必须失败，序列化语义保持。"""
+
+    @pytest.mark.asyncio
+    async def test_snapshot_nested_writes_fail(self, service):
+        """P12 回归：真实服务产出的 candidates / adapter_options 嵌套写入一律失败。"""
+        mm = _load_mm()
+        expected = mm["config_revision"]
+        mm["connections"] = [
+            {
+                **_base_connection(CONN_A, "https://api.deepseek.com"),
+                "adapter_options": {"temperature": 0.7, "extra": {"nested_key": [1, 2]}},
+            }
+        ]
+        mm["scenario_routes"] = [
+            {
+                "scenario_id": "news_annotation",
+                "enabled": True,
+                "candidates": [CONN_A],
+                "total_timeout_seconds": 60,
+                "task_routes": {
+                    "sentiment": {"mode": "bundled", "candidates": [CONN_A], "reuse_bundled_sentiment": True}
+                },
+            }
+        ]
+        await service.save_draft(mm, expected, "op-f38-1")
+
+        snapshot = await service.get_snapshot()
+        connection = snapshot.connections[0]
+        route = snapshot.scenario_routes[0]
+        assert connection["adapter_options"]["extra"]["nested_key"] == (1, 2)  # list → 冻结项 tuple
+        assert route["candidates"] == (CONN_A,)
+
+        with pytest.raises(TypeError, match="read-only"):
+            connection["adapter_options"]["temperature"] = 1.0
+        with pytest.raises(TypeError, match="read-only"):
+            connection["adapter_options"]["extra"]["nested_key"] = 1
+        with pytest.raises(AttributeError, match="no attribute 'append'"):
+            route["candidates"].append(CONN_B)
+        with pytest.raises(TypeError, match="read-only"):
+            route["task_routes"]["sentiment"]["mode"] = "dedicated"
+        with pytest.raises(TypeError, match="does not support item assignment"):
+            snapshot.usage_policy["any_key"] = 1
+
+    @pytest.mark.asyncio
+    async def test_snapshot_transition_nested_seals_frozen(self, service):
+        """migration_transition.legacy_seals 嵌套叶子同获只读契约（顶层契约不变）。"""
+        mm = _load_mm()
+        await service.begin_migration(mm["config_revision"], "op-f38-2", "owner-a")
+        await service.seal_legacy(_load_mm()["config_revision"], "op-f38-3", {"2026-10": "seal-f38"}, "owner-a")
+
+        snapshot = await service.get_snapshot()
+        transition = snapshot.migration_transition
+        assert transition is not None
+        assert isinstance(transition, MappingProxyType)
+        assert transition["legacy_seals"][0]["month"] == "2026-10"
+        with pytest.raises(TypeError, match="does not support item assignment"):
+            transition["phase"] = "sealed"  # type: ignore[reportIndexIssue]  # F38 被测契约：mappingproxy 顶层写入必须失败
+        with pytest.raises(AttributeError, match="no attribute 'append'"):
+            transition["legacy_seals"].append({"month": "2026-11"})
+        with pytest.raises(TypeError, match="read-only"):
+            transition["legacy_seals"][0]["sealed_at"] = "tampered"
+
+    @pytest.mark.asyncio
+    async def test_snapshot_frozen_payload_survives_cas_roundtrip(self, service):
+        """序列化语义保持：快照冻结容器经消费方 dict() 浅拷贝重建 payload 后，
+        deepcopy / 回执指纹 / Pydantic 校验全链路兼容，save_draft 落盘内容不变。"""
+        mm = _load_mm()
+        expected = mm["config_revision"]
+        connection = {
+            **_base_connection(CONN_A, "https://api.deepseek.com"),
+            "adapter_options": {"temperature": 0.7, "extra": {"nested_key": [1, 2]}},
+        }
+        mm["connections"] = [connection]
+        await service.save_draft(mm, expected, "op-f38-4")
+
+        snapshot = await service.get_snapshot()
+        # 模拟消费方（UI VM _build_payload）dict() 浅拷贝重建 CAS payload
+        payload = {
+            "schema_version": 1,
+            "config_revision": snapshot.config_revision,
+            "connections": [dict(c) for c in snapshot.connections],
+            "scenario_routes": [dict(r) for r in snapshot.scenario_routes],
+            "usage_policy": dict(snapshot.usage_policy),
+        }
+        deep_copied = copy.deepcopy(payload)  # storage 层对 payload 的既有处理必须兼容
+        assert isinstance(deep_copied["connections"][0]["adapter_options"], _FrozenMapping)
+
+        outcome = await service.save_draft(payload, snapshot.config_revision, "op-f38-5")
+        assert outcome.status == "committed"
+
+        fresh = dict(cfg_mod.ConfigHandler.read_model_management_fresh()["model_management"])
+        assert fresh["connections"][0]["adapter_options"] == connection["adapter_options"]
+        assert isinstance(fresh["connections"][0]["adapter_options"], dict)  # 落盘还原 plain dict
+
+    def test_frozen_mapping_blocks_all_mutation_entrypoints(self):
+        """_FrozenMapping 全部变更入口封禁；读语义与内容相等性保持。"""
+        frozen = _freeze_value({"a": 1, "b": [1], "c": {"d": 2}})
+        assert isinstance(frozen, _FrozenMapping)
+        with pytest.raises(TypeError, match="read-only"):
+            frozen["a"] = 2
+        with pytest.raises(TypeError, match="read-only"):
+            del frozen["a"]
+        with pytest.raises(TypeError, match="read-only"):
+            frozen.clear()
+        with pytest.raises(TypeError, match="read-only"):
+            frozen.pop("a")
+        with pytest.raises(TypeError, match="read-only"):
+            frozen.popitem()
+        with pytest.raises(TypeError, match="read-only"):
+            frozen.setdefault("z", 1)
+        with pytest.raises(TypeError, match="read-only"):
+            frozen.update({"z": 1})
+        with pytest.raises(TypeError, match="read-only"):
+            frozen |= {"z": 1}
+        assert frozen == {"a": 1, "b": (1,), "c": {"d": 2}}
+        assert frozen["b"] == (1,)
+
+    def test_frozen_mapping_copy_semantics(self):
+        """deepcopy / copy 保型保内容（CAS payload deepcopy 依赖此语义）。"""
+        frozen = _freeze_value({"a": {"b": [1]}})
+        duplicated = copy.deepcopy(frozen)
+        assert isinstance(duplicated, _FrozenMapping)
+        assert duplicated == frozen
+        assert isinstance(duplicated["a"], _FrozenMapping)
+        assert duplicated["a"]["b"] == (1,)
+        shallow = copy.copy(frozen)
+        assert isinstance(shallow, _FrozenMapping)
+        assert shallow == frozen
+
+    def test_freeze_value_passthrough_scalars(self):
+        """标量与其余类型原样透传（冻结只约束容器）；tuple 输入逐项冻结。"""
+        assert _freeze_value("text") == "text"
+        assert _freeze_value(3) == 3
+        assert _freeze_value(1.5) == 1.5
+        assert _freeze_value(None) is None
+        assert _freeze_value(("x", ["y"])) == ("x", ("y",))
 
 
 class TestPendingFeeTestBarrier:
