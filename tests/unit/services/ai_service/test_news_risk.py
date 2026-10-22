@@ -12,16 +12,22 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from core.errors import AIPolicyNotAcknowledgedError
 from core.i18n import Message
-from core.model_management_types import LegacyDispatchBlockedError
+from core.model_management_types import (
+    AdapterResponse,
+    LegacyDispatchBlockedError,
+    ModelOutputValidationError,
+)
 from services.ai_service import AIService
 from services.ai_service.news_risk import (
     RiskEvent,
+    RiskOutput,
     RiskQuote,
     NewsRiskAnalyzer,
     aggregate_risk_level,
@@ -219,6 +225,26 @@ class TestAggregateRiskLevel:
         assert aggregate_risk_level([{"severity": "low"}, {"severity": "critical"}, {"severity": "high"}]) == "critical"
 
 
+# --- RiskOutput schema（F28）---
+
+
+class TestRiskOutputSchema:
+    def test_missing_events_key_rejected(self):
+        """F28：缺 events 字段整体判失败，不得默认空列表后被归类为可靠无事件。"""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError) as excinfo:
+            RiskOutput.model_validate({"summary": "x"})
+        assert excinfo.value.errors()[0]["loc"] == ("events",)
+        assert excinfo.value.errors()[0]["type"] == "missing"
+
+    def test_explicit_empty_events_valid(self):
+        """F28：显式 events=[] 仍是合法输出（合法无事件语义保留，prompt 规则 5）。"""
+        parsed = RiskOutput.model_validate({"summary": "无重大风险", "events": []})
+        assert parsed.events == []
+        assert parsed.summary == "无重大风险"
+
+
 # --- prompt 构造 ---
 
 
@@ -407,6 +433,69 @@ class TestProcessRaw:
         result = await analyzer.analyze_news_risk(_request(evidence=[_evidence(news_id=1, text="公告")]))
         assert result.analysis_status == "failed"
         assert result.evidence_news_ids == [1]
+
+    def test_missing_events_key_raises(self):
+        """F28：模型只回 {}（缺 events 字段）→ ValidationError，不默认为可靠无事件。"""
+        from pydantic import ValidationError
+
+        req = _request(evidence=[_evidence()])
+        with pytest.raises(ValidationError) as excinfo:
+            _analyzer()._process_raw({"summary": "x"}, req, "local")
+        assert excinfo.value.errors()[0]["loc"] == ("events",)
+
+    def test_all_events_dropped_raises(self):
+        """F28：模型输出了事件但全部因无效引用被剔除 → ModelOutputValidationError
+        （ValueError 子类，旧链捕获 → failed；新链由 Executor 切候选），不伪装无事件。"""
+        req = _request(evidence=[_evidence(news_id=1, text="公告")])
+        raw = {
+            "summary": "风险提示",
+            "events": [_valid_raw()["events"][0] | {"evidence_quotes": [{"news_id": 999, "quote": "公告"}]}],
+        }
+        with pytest.raises(ModelOutputValidationError) as excinfo:
+            _analyzer()._process_raw(raw, req, "local")
+        assert "all 1 events dropped" in excinfo.value.args[0]
+
+    @pytest.mark.asyncio
+    async def test_direct_all_dropped_maps_failed(self):
+        """end-to-end：_chat_completion 返回全无效引用事件 → analyze_news_risk 判 failed
+        （不进 SUCCESS_STATUS，不缓存为可靠无风险）。"""
+        svc = AIService.__new__(AIService)
+
+        async def chat(messages, **kwargs):
+            return {
+                "summary": "风险提示",
+                "events": [_valid_raw()["events"][0] | {"evidence_quotes": [{"news_id": 999, "quote": "公告"}]}],
+            }
+
+        svc._chat_completion = AsyncMock(side_effect=chat)
+        analyzer = _analyzer(svc)
+        result = await analyzer.analyze_news_risk(_request(evidence=[_evidence(news_id=1, text="公告")]))
+        assert result.analysis_status == "failed"
+        assert result.events == []
+        assert result.risk_level is None
+        assert result.confidence is None
+
+    def test_partial_drop_keeps_quality_hint(self):
+        """F28：部分事件被剔除 → analyzed_with_events + events_dropped 保留剔除原因。"""
+        req = _request(evidence=[_evidence(news_id=1, text="公告")])
+        good = _valid_raw()["events"][0]
+        bad = good | {"evidence_quotes": [{"news_id": 999, "quote": "公告"}]}
+        raw = {"summary": "风险提示", "events": [bad, good]}
+        result = _analyzer()._process_raw(raw, req, "local")
+        assert result.analysis_status == "analyzed_with_events"
+        assert len(result.events) == 1
+        assert result.events_dropped is not None
+        assert len(result.events_dropped) == 1
+        assert result.events_dropped[0]["drop_reason"] == "no_valid_evidence_quote"
+        assert result.events_dropped[0]["event_type"] == "litigation"
+
+    def test_explicit_empty_events_no_hint(self):
+        """F28：显式 events=[] → analyzed_no_event 且无质量提示（events_dropped is None）。"""
+        req = _request(evidence=[_evidence()])
+        raw = {"summary": "无重大风险", "events": []}
+        result = _analyzer()._process_raw(raw, req, "local")
+        assert result.analysis_status == "analyzed_no_event"
+        assert result.events_dropped is None
 
 
 class TestAnalyzeNewsRiskScenarioChain:
@@ -662,6 +751,20 @@ class TestAnalyzeNewsRiskScenarioChain:
             await analyzer.analyze_news_risk(_request())
         # R2 强断言：CancelledError 类型原样传播，未被包装/替换（excinfo.type 身份校验）。
         assert excinfo.type is asyncio.CancelledError
+
+    def test_scenario_validator_all_dropped_raises(self):
+        """F28：新链校验器对「全部事件因无效引用被剔除」抛 ModelOutputValidationError
+        （Executor 捕获后按失败表格切换候选，不产出可靠无事件）。"""
+        req = _request(evidence=[_evidence(news_id=1, text="公告")])
+        raw = {
+            "summary": "风险提示",
+            "events": [_valid_raw()["events"][0] | {"evidence_quotes": [{"news_id": 999, "quote": "公告"}]}],
+        }
+        validator = _analyzer()._make_scenario_validator(req)
+        response = AdapterResponse(content=json.dumps(raw), usage=None, actual_model="m-1")
+        with pytest.raises(ModelOutputValidationError) as excinfo:
+            validator(response)
+        assert "all 1 events dropped" in excinfo.value.args[0]
 
 
 class TestAnalyzeNewsRiskFrozenDispatch:

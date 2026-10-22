@@ -113,3 +113,5 @@ class NewsInsightResult:
     prompt_version: str
     # S4 统一场景链（s4_plan §4.1）：程序构造的执行元数据（8 键），旧链为 None。
     execution_metadata: dict | None = None
+    # F28：部分事件因证据校验无效被剔除的质量提示（保留剔除原因溯源）；无剔除为 None（R21）。
+    events_dropped: list[dict] | None = None
