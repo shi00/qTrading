@@ -127,6 +127,33 @@ def _reset_embedded_db_url():
 
 
 @pytest.fixture(autouse=True)
+def _reset_scheduling_services_provider():
+    """Reset 统一模型调度 provider 与 bootstrap 组装结果（R7 测试状态污染）。
+
+    ``app.bootstrap.initialize_services`` 会真实调用 ``assemble_scheduling_services``，
+    它把组装结果写入 ``app.bootstrap._scheduling_services`` 并把 provider 注册到
+    ``services.ai_service.scenario_dispatch`` 的进程级模块全局（非 singleton_registry
+    管理）。不隔离时，同 worker 后续依赖「新链未组装」基线的用例（如 news_insight
+    的 ``resolve_executor`` 路径）会读到真实配置快照，在无配置文件环境抛
+    ``ConfigFreshReadError``。此处前后复位，保证每个测试从「未组装」基线开始。
+    """
+    import sys
+
+    from services.ai_service import scenario_dispatch
+
+    bootstrap_module = sys.modules.get("app.bootstrap")
+
+    def _reset() -> None:
+        scenario_dispatch.set_scheduling_services_provider(None)
+        if bootstrap_module is not None:
+            bootstrap_module.__dict__["_scheduling_services"] = None
+
+    _reset()
+    yield
+    _reset()
+
+
+@pytest.fixture(autouse=True)
 def _reset_metadata_manager_cache():
     """Reset MetaDataManager._alias_cache before and after each unit test.
 
