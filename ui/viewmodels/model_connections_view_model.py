@@ -27,7 +27,6 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Final
-from urllib.parse import urlsplit
 
 from core.model_management_types import (
     ConfigurationSaveOutcome,
@@ -37,6 +36,7 @@ from core.model_management_types import (
     ModelManagementSnapshot,
     SyntheticTestConsent,
     SyntheticTestContext,
+    normalize_egress_target,
 )
 from services.model_configuration_service import ModelConfigurationService
 from ui.viewmodels import Message
@@ -103,39 +103,6 @@ def _revision_fingerprint(connection: Mapping[str, Any]) -> dict[str, Any]:
     else:
         fingerprint["billing"] = billing
     return fingerprint
-
-
-def normalize_egress_target(api_base: str | None) -> str | None:
-    """规范化外发目标（§4.3）：scheme / host 小写、IDNA host、显式有效端口、完整 base path。
-
-    拒绝 userinfo / query / fragment（明确非法目标）；``api_base`` 缺失、无 http(s) scheme、
-    host 非法或端口越界一律返回 ``None``——不臆造目标（R21）。
-    """
-    raw = (api_base or "").strip()
-    if not raw:
-        return None
-    try:
-        parts = urlsplit(raw)
-        port = parts.port
-    except ValueError:
-        return None
-    scheme = parts.scheme.lower()
-    if scheme not in ("http", "https"):
-        return None
-    if parts.username or parts.password or parts.query or parts.fragment:
-        return None
-    host = parts.hostname
-    if not host:
-        return None
-    try:
-        host = host.encode("idna").decode("ascii").lower()
-    except UnicodeError:
-        return None
-    if port is None:
-        port = 443 if scheme == "https" else 80
-    if not 0 < port <= 65535:
-        return None
-    return f"{scheme}://{host}:{port}{parts.path.rstrip('/')}"
 
 
 def _utc_now_iso() -> str:

@@ -23,6 +23,10 @@ class TestNormalizeEgressTarget:
             ("https://api.example.com:443/", "https://api.example.com:443"),
             # IDNA：非 ASCII host 转 punycode
             ("https://例子.example.com/v1", "https://xn--fsqu00a.example.com:443/v1"),
+            # IPv6 字面量（T1）：方括号重组 + 跳过 IDNA（urlsplit hostname 已去括号并小写）
+            ("http://[::1]:8080/v1", "http://[::1]:8080/v1"),
+            ("https://[2001:DB8::1]", "https://[2001:db8::1]:443"),
+            ("http://[::ffff:127.0.0.1]:8080/", "http://[::ffff:127.0.0.1]:8080"),
         ],
     )
     def test_canonical_forms(self, api_base: str, expected: str):
@@ -45,6 +49,8 @@ class TestNormalizeEgressTarget:
             "https://api.example.com:70000",  # 端口上界越界
             "https://api.example.com:notaport",  # 端口非法（urlsplit .port ValueError）
             "https://a..example.com",  # 空 label（IDNA UnicodeError）
+            "http://[foo]",  # bracketed 非 IP 字面量（urlsplit ValueError）
+            "http://[::1]:notaport",  # IPv6 字面量 + 非法端口
         ],
     )
     def test_invalid_forms_return_none(self, api_base):

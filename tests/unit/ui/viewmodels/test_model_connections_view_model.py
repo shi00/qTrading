@@ -632,6 +632,13 @@ class TestEgressQueries:
         await vm.load()
         assert vm.connection_target("c1") == "https://api.openai.com:443/v1"
 
+    async def test_connection_target_ipv6_literal_is_bracketed(self):
+        """T1：VM 统一 import core 正本后，IPv6 字面量带方括号且跳过 IDNA。"""
+        svc = _make_service(_snapshot(connections=(_conn(connection_id="c1", api_base="http://[::1]:8080/v1"),)))
+        vm = _make_vm(svc)
+        await vm.load()
+        assert vm.connection_target("c1") == "http://[::1]:8080/v1"
+
     async def test_connection_target_local_adapter_is_none(self):
         svc = _make_service(
             _snapshot(connections=(_conn(connection_id="c1", adapter_kind="gguf_sentiment", api_base=None),))
