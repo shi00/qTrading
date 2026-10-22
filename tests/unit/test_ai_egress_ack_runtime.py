@@ -33,6 +33,21 @@ from utils.egress_ack import collect_cloud_ack_providers, is_egress_acknowledged
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _legacy_admission_allowed(monkeypatch):
+    """旧链批量测试前提显式化（F05 fail-closed / F04 轨道判定）：准入读取必须
+    成功且为 allowed（pending 未开启迁移）才进入旧轨 ack guard——否则测试环境
+    配置读取失败会以 read_failed 在批次入口停接（legacy_stopped），到不了本文件
+    被测的 ack guard 分支。"""
+    from services.ai_service import scenario_dispatch
+
+    config_service = MagicMock()
+    config_service.get_snapshot = AsyncMock(
+        return_value=MagicMock(migration_state="pending", migration_transition=None, scenario_routes=())
+    )
+    monkeypatch.setattr(scenario_dispatch, "_new_config_service", lambda: config_service)
+
+
 def _make_mock_dp() -> MagicMock:
     dp = MagicMock()
     dp.cache = MagicMock()

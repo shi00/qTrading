@@ -321,6 +321,7 @@
     "ai_egress_preview_news": "公开新闻摘要（经净化处理）",
     "ai_external_acknowledgment_checkbox": "我已知悉：使用云端 AI 会将候选股行情/财务指标/新闻与提示词发送至所选云端供应商",
     "ai_progress_init": "初始化 AI 分析引擎...",
+    "ai_legacy_dispatch_stopped": "模型配置迁移期 AI 调度已停接（旧链已排水/封存或配置不可读），本次仅展示数学筛选结果",
     "ai_budget_exceeded": "本月 AI 成本已达预算上限，已暂停 AI 分析",
     "ai_budget_unpriced_prompt": "本月存在无法计价的 AI 调用，预算护栏可能对这些调用失效；是否继续？",
     "ai_budget_unpriced_dialog_title": "存在无法计价的 AI 调用",

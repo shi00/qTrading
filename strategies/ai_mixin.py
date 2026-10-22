@@ -21,7 +21,7 @@ import logging
 import sys
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from cachetools import TTLCache
@@ -51,6 +51,9 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.technical_analysis import TechnicalAnalysis
 from utils.time_utils import get_now, to_yyyymmdd_str
+
+if TYPE_CHECKING:
+    from services.ai_service.scenario_dispatch import ScenarioDispatch
 
 logger = logging.getLogger(__name__)
 
@@ -384,87 +387,123 @@ class AIStrategyMixin:
             else:
                 ui_prompt_override = sanitize_prompt(ui_prompt_override)
 
-        # --- Guard: AI Available? ---
-        if not ai_client.is_cloud_available():
-            # MAJOR-04（review09-24 维度04）：区分「仅本地模式」（用户主动选择，
-            # 能力边界：个股深度分析需云端 LLM，本地模型仅支撑新闻分类等）与「云端
-            # 未配置」，前者提示能力边界而非「未配置」，避免误导（README 同步修正）。
-            local_only = ConfigHandler.is_ai_local_only_mode()
-            notice_key = "ai_local_only_capability_boundary" if local_only else "ai_not_configured"
+        # --- F04: 批次入口先定执行轨道并冻结 run 快照（同请求单轨，模型统一.md §14.2-6）---
+        # 旧云端可用性与旧链准入 guard 仅对旧轨（None）应用：统一调度链 active 且场景
+        # 路由启用时走新轨（ExecutionSnapshot 由 Executor 承担候选资格与授权），若仍套
+        # 旧链 guard，仅配置统一连接的用户（无旧链 api_key）或 active 停接会把全部候选
+        # 安静丢弃（结果变少而非明显异常）。分派/准入读取失败 fail-closed（F05）以
+        # read_failed 阻断——明确不可用必须显式标记，不得伪装成筛选结果（R21）。
+        from core.model_management_types import LegacyDispatchBlockedError  # lazy-import
+        from services.ai_service.scenario_dispatch import resolve_analysis_track  # lazy-import
+
+        batch_dispatch: ScenarioDispatch | None
+        try:
+            batch_dispatch = await resolve_analysis_track()
+        except asyncio.CancelledError:
+            raise
+        except LegacyDispatchBlockedError as e:
+            # 分派/准入明确阻断（draining_stop / refused / read_failed）：AI 功能
+            # 明确不可用——逐行显式标记而非静默丢弃，下游可区分「AI 未跑」与
+            # 「AI 已跑」（R21：不把不可用伪装成无候选；review_manager 对该状态
+            # 不入库，与 policy_not_acknowledged 同语义）。
             logger.info(
-                "[AIStrategyMixin] AI cloud unavailable (local_only=%s) — returning math-only results",
-                local_only,
+                "[AIStrategyMixin] AI dispatch stopped at batch entry (admission=%s) — marking candidates legacy_stopped",
+                e.admission,
             )
-            # SC-02: 未配置 LLM 属"AI 有效不运行"，向 warnings 声明风险检查缺失。
+            # SC-02: AI 未运行，向 warnings 声明风险检查缺失。
             self._note_ai_risk_check_skipped(context)
             if on_progress:
-                on_progress(
-                    0,
-                    0,
-                    Message(notice_key),
-                )
-            return candidates_df
-
-        # --- Guard: AI External Data Acknowledged? (D5-1 / AI-04 / SEC-01) ---
-        # run_ai_analysis 是云端专用路径：上方 is_cloud_available() 已保证走到此处必已
-        # 配置云端 LLM 的 api_key。本地模型（数据不出本机）无需外发确认——若用户未配云端
-        # 或仅配本地，已在 is_cloud_available 提前返回，因此本 guard 仅需按 provider 校验：
-        # 更换 provider 后新 provider 无确认记录 → 未确认；外发范围版本升级后旧确认自动失效
-        # （SEC-01，scope_version 不满足）→ 同样需重新确认，满足 UN-07。
-        current_provider = ConfigHandler.get_llm_provider()
-        ack_request = context.get("on_ai_egress_ack_request")
-        # SEC-01 复核修复: 确认对象 = 主 provider + failover 不同 provider（主失败时
-        # 自动切换到 fallback，若 fallback 未确认则数据外发给未授权对象——授权语义
-        # 漂移）。任一未确认即触发运行时确认或跳过，与单 provider 语义保持一致。
-        ack_providers = collect_cloud_ack_providers(current_provider)
-        if not all(ConfigHandler.is_ai_external_acknowledged(provider=p) for p in ack_providers):
-            # SEC-01 gap3: 若调用方注入了运行时确认回调（UI），则构造真实 prompt 预览并
-            # 请求用户确认；确认通过后持久化全部确认对象 provider+scope 版本并继续执行。
-            # 否则（无确认能力，如夜间/无 UI 调度）回落为直接跳过，确保未经确认绝不发起
-            # 云端请求。
-            if ack_request is not None:
-                try:
-                    preview = _build_egress_prompt_preview(candidates_df, context, providers=ack_providers)
-                    if await ack_request(preview, current_provider):
-                        for p in ack_providers:
-                            ConfigHandler.set_ai_external_acknowledged(provider=p, acknowledged=True)
-                        logger.info(
-                            "[AIStrategyMixin] AI external data policy acknowledged at runtime for providers=%s",
-                            ack_providers,
-                        )
-                    else:
-                        logger.info(
-                            "[AIStrategyMixin] User declined AI external data policy for provider=%s — skipping AI analysis",
-                            current_provider,
-                        )
-                        if on_progress:
-                            on_progress(0, 0, Message("ai_external_acknowledgment_declined"))
-                        return candidates_df.assign(ai_score=None, ai_status="policy_not_acknowledged")
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    log_classified(
-                        logger,
-                        e,
-                        "llm",
-                        "[AIStrategyMixin] Runtime egress ack request failed (%s: %s) — falling back to skip",
-                    )
-                    return candidates_df.assign(ai_score=None, ai_status="policy_not_acknowledged")
-            else:
+                on_progress(0, 0, Message("ai_legacy_dispatch_stopped"))
+            return candidates_df.assign(
+                ai_score=None,
+                ai_status="legacy_stopped",
+            )
+        if batch_dispatch is None:
+            # --- 旧轨 guard：AI Available?（新轨不经旧云端，无此约束）---
+            if not ai_client.is_cloud_available():
+                # MAJOR-04（review09-24 维度04）：区分「仅本地模式」（用户主动选择，
+                # 能力边界：个股深度分析需云端 LLM，本地模型仅支撑新闻分类等）与「云端
+                # 未配置」，前者提示能力边界而非「未配置」，避免误导（README 同步修正）。
+                local_only = ConfigHandler.is_ai_local_only_mode()
+                notice_key = "ai_local_only_capability_boundary" if local_only else "ai_not_configured"
                 logger.info(
-                    "[AIStrategyMixin] AI external data policy not acknowledged for provider=%s — skipping AI analysis (no external requests initiated)",
-                    current_provider,
+                    "[AIStrategyMixin] AI cloud unavailable (local_only=%s) — returning math-only results",
+                    local_only,
                 )
+                # SC-02: 未配置 LLM 属"AI 有效不运行"，向 warnings 声明风险检查缺失。
+                self._note_ai_risk_check_skipped(context)
                 if on_progress:
-                    on_progress(0, 0, Message("ai_external_acknowledgment_prompt"))
-                # 政策未确认时返回带状态标记的结果行（与其他 AI 路径同构）：
-                # ai_status="policy_not_acknowledged" 让下游能区分"政策未确认"与
-                # "AI 分析失败"；review_manager 对非 "analyzed" 状态不写库，
-                # 避免未经确认的候选结果污染 AI 学习闭环数据。
-                return candidates_df.assign(
-                    ai_score=None,
-                    ai_status="policy_not_acknowledged",
-                )
+                    on_progress(
+                        0,
+                        0,
+                        Message(notice_key),
+                    )
+                return candidates_df
+
+        # --- 旧轨 guard: AI External Data Acknowledged? (D5-1 / AI-04 / SEC-01) ---
+        # 仅旧轨应用：新轨外发授权由 ExecutionSnapshot.security_scope_version +
+        # Executor 逐次 authorize_attempt 承担（F01），不经旧链 provider 确认。
+        # run_ai_analysis 旧轨是云端专用路径：上方 is_cloud_available() 已保证走到
+        # 此处必已配置云端 LLM 的 api_key。本地模型（数据不出本机）无需外发确认——
+        # 若用户未配云端或仅配本地，已在 is_cloud_available 提前返回，因此本 guard
+        # 仅需按 provider 校验：更换 provider 后新 provider 无确认记录 → 未确认；
+        # 外发范围版本升级后旧确认自动失效（SEC-01，scope_version 不满足）→ 同样需
+        # 重新确认，满足 UN-07。
+        if batch_dispatch is None:
+            current_provider = ConfigHandler.get_llm_provider()
+            ack_request = context.get("on_ai_egress_ack_request")
+            # SEC-01 复核修复: 确认对象 = 主 provider + failover 不同 provider（主失败时
+            # 自动切换到 fallback，若 fallback 未确认则数据外发给未授权对象——授权语义
+            # 漂移）。任一未确认即触发运行时确认或跳过，与单 provider 语义保持一致。
+            ack_providers = collect_cloud_ack_providers(current_provider)
+            if not all(ConfigHandler.is_ai_external_acknowledged(provider=p) for p in ack_providers):
+                # SEC-01 gap3: 若调用方注入了运行时确认回调（UI），则构造真实 prompt 预览并
+                # 请求用户确认；确认通过后持久化全部确认对象 provider+scope 版本并继续执行。
+                # 否则（无确认能力，如夜间/无 UI 调度）回落为直接跳过，确保未经确认绝不发起
+                # 云端请求。
+                if ack_request is not None:
+                    try:
+                        preview = _build_egress_prompt_preview(candidates_df, context, providers=ack_providers)
+                        if await ack_request(preview, current_provider):
+                            for p in ack_providers:
+                                ConfigHandler.set_ai_external_acknowledged(provider=p, acknowledged=True)
+                            logger.info(
+                                "[AIStrategyMixin] AI external data policy acknowledged at runtime for providers=%s",
+                                ack_providers,
+                            )
+                        else:
+                            logger.info(
+                                "[AIStrategyMixin] User declined AI external data policy for provider=%s — skipping AI analysis",
+                                current_provider,
+                            )
+                            if on_progress:
+                                on_progress(0, 0, Message("ai_external_acknowledgment_declined"))
+                            return candidates_df.assign(ai_score=None, ai_status="policy_not_acknowledged")
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        log_classified(
+                            logger,
+                            e,
+                            "llm",
+                            "[AIStrategyMixin] Runtime egress ack request failed (%s: %s) — falling back to skip",
+                        )
+                        return candidates_df.assign(ai_score=None, ai_status="policy_not_acknowledged")
+                else:
+                    logger.info(
+                        "[AIStrategyMixin] AI external data policy not acknowledged for provider=%s — skipping AI analysis (no external requests initiated)",
+                        current_provider,
+                    )
+                    if on_progress:
+                        on_progress(0, 0, Message("ai_external_acknowledgment_prompt"))
+                    # 政策未确认时返回带状态标记的结果行（与其他 AI 路径同构）：
+                    # ai_status="policy_not_acknowledged" 让下游能区分"政策未确认"与
+                    # "AI 分析失败"；review_manager 对非 "analyzed" 状态不写库，
+                    # 避免未经确认的候选结果污染 AI 学习闭环数据。
+                    return candidates_df.assign(
+                        ai_score=None,
+                        ai_status="policy_not_acknowledged",
+                    )
 
         # --- Guard: DataProcessor Available? ---
         if dp is None:
@@ -876,34 +915,37 @@ class AIStrategyMixin:
             async with screening_sem:
                 if dp and dp.is_cancelled():
                     return None  # 已取消，不触发 on_card_error
-                # S6 D6 批量循环收敛（在途停接）：每股新鲜读旧链准入，非 allowed
-                # 安静停接（不触发 on_card_error 噪音，对齐「已许可调用跑完、
-                # 后续停接」语义）。strategies→services 为合法方向（R1）。
-                from services.ai_service.scenario_dispatch import evaluate_legacy_admission  # lazy-import
+                # S6 D6 批量循环收敛（在途停接）：仅旧轨（批次入口冻结 batch_dispatch
+                # 为 None）每股新鲜读旧链准入，非 allowed 安静停接（不触发
+                # on_card_error 噪音，对齐「已许可调用跑完、后续停接」语义）；
+                # 新轨走批次冻结快照，不经旧链准入（F04：否则 active 下全部候选
+                # 被安静丢弃）。strategies→services 为合法方向（R1）。
+                if batch_dispatch is None:
+                    from services.ai_service.scenario_dispatch import evaluate_legacy_admission  # lazy-import
 
-                # NOTE(lazy): 每股一次配置新鲜读。ceiling: 批量 N 股 × ~1ms 文件读，且并发上限受限（默认 semaphore）。upgrade: 用户可感知批量卡顿时引入秒级只读快照缓存。
-                try:
-                    admission = await evaluate_legacy_admission()
-                except Exception as e:
-                    # F05 fail-closed：准入读取失败不得伪装为 allowed 继续旧链——
-                    # 授权状态未知时静默放行即把「未知」伪装成「允许」（R21）。
-                    # 以 read_failed 落入下方停接分支安静跳过该股（CancelledError
-                    # 继承 BaseException 不被捕获，R2）。
-                    log_classified(
-                        logger,
-                        e,
-                        "llm",
-                        "[AIStrategyMixin] legacy admission read failed, blocking candidate (%s): %s",
-                        exc_info=True,
-                    )
-                    admission = "read_failed"
-                if admission != "allowed":
-                    logger.info(
-                        "[AIStrategyMixin] Legacy AI dispatch stopped (admission=%s), skipping candidate %s",
-                        admission,
-                        row_data.get("ts_code", "?"),
-                    )
-                    return None
+                    # NOTE(lazy): 每股一次配置新鲜读。ceiling: 批量 N 股 × ~1ms 文件读，且并发上限受限（默认 semaphore）。upgrade: 用户可感知批量卡顿时引入秒级只读快照缓存。
+                    try:
+                        admission = await evaluate_legacy_admission()
+                    except Exception as e:
+                        # F05 fail-closed：准入读取失败不得伪装为 allowed 继续旧链——
+                        # 授权状态未知时静默放行即把「未知」伪装成「允许」（R21）。
+                        # 以 read_failed 落入下方停接分支安静跳过该股（CancelledError
+                        # 继承 BaseException 不被捕获，R2）。
+                        log_classified(
+                            logger,
+                            e,
+                            "llm",
+                            "[AIStrategyMixin] legacy admission read failed, blocking candidate (%s): %s",
+                            exc_info=True,
+                        )
+                        admission = "read_failed"
+                    if admission != "allowed":
+                        logger.info(
+                            "[AIStrategyMixin] Legacy AI dispatch stopped (admission=%s), skipping candidate %s",
+                            admission,
+                            row_data.get("ts_code", "?"),
+                        )
+                        return None
                 stock_name = row_data.get("name", row_data.get("ts_code", "?"))
                 on_chunk = on_stream_start(stock_name) if on_stream_start else None
                 if on_card_start:
@@ -938,6 +980,9 @@ class AIStrategyMixin:
                         news=news_list,
                         ui_prompt_override=ui_prompt_override,
                         vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.7),
+                        # F04: 传递批次冻结快照（新轨整批复用；旧轨为 None 时
+                        # analyze_stock 自行新鲜分派），批次中途配置变化不混版。
+                        scenario_dispatch=batch_dispatch,
                     )
                     if res is None:
                         # UX-2.3: 软失败（_mixin_analyze_single 内部已日志）
@@ -1636,6 +1681,7 @@ class AIStrategyMixin:
         news: list | None = None,
         ui_prompt_override: str | None = None,
         vol_ratio_threshold: float = 1.7,
+        scenario_dispatch: "ScenarioDispatch | None" = None,
     ):
         """
         Analyze a single stock. Fetches history, tech indicators, news,
@@ -1650,6 +1696,9 @@ class AIStrategyMixin:
             history_df: Optional pre-fetched history DataFrame.
             news: Optional pre-fetched news list.
             ui_prompt_override: Optional user-provided prompt override.
+            scenario_dispatch: Optional batch-frozen scenario dispatch snapshot
+                (F04: passed through to ``analyze_stock`` so the whole batch shares
+                one ExecutionSnapshot; ``None`` lets analyze_stock self-dispatch).
         """
         try:
             ts_code = row["ts_code"]
@@ -1830,6 +1879,7 @@ class AIStrategyMixin:
                 capital_labels=capital_labels,
                 history_labels=history_labels,
                 learning_strategy_name=getattr(self, "name_key", None),
+                scenario_dispatch=scenario_dispatch,
             )
             return ai_result
 

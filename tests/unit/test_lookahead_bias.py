@@ -49,6 +49,10 @@ def test_ai_mixin_falls_back_to_latest_when_context_none():
     assert result is None
 
 
+@patch(
+    "services.ai_service.scenario_dispatch.resolve_analysis_track",
+    new=AsyncMock(return_value=None),
+)
 @patch("strategies.ai_mixin.AIService")
 @patch("strategies.ai_mixin.NewsFetcher")
 @patch("strategies.ai_mixin.I18n")
@@ -91,6 +95,10 @@ async def test_capital_data_uses_context_trade_date(mock_i18n, mock_news, mock_a
     dp.get_latest_trade_date.assert_not_awaited()
 
 
+@patch(
+    "services.ai_service.scenario_dispatch.resolve_analysis_track",
+    new=AsyncMock(return_value=None),
+)
 @patch("strategies.ai_mixin.AIService")
 @patch("strategies.ai_mixin.NewsFetcher")
 @patch("strategies.ai_mixin.I18n")
@@ -143,6 +151,10 @@ def test_normalize_trade_date_handles_various_types():
     assert AIStrategyMixin._normalize_trade_date_for_cache("") is None
 
 
+@patch(
+    "services.ai_service.scenario_dispatch.resolve_analysis_track",
+    new=AsyncMock(return_value=None),
+)
 @patch("strategies.ai_mixin.AIService")
 @patch("strategies.ai_mixin.NewsFetcher")
 @patch("strategies.ai_mixin.I18n")
@@ -196,6 +208,10 @@ async def test_kline_history_end_date_aligned_with_context_trade_date(mock_i18n,
         )
 
 
+@patch(
+    "services.ai_service.scenario_dispatch.resolve_analysis_track",
+    new=AsyncMock(return_value=None),
+)
 @patch("strategies.ai_mixin.AIService")
 @patch("strategies.ai_mixin.NewsFetcher")
 @patch("strategies.ai_mixin.I18n")
@@ -237,6 +253,10 @@ async def test_kline_history_cache_key_includes_trade_date(mock_i18n, mock_news,
     assert "20240315" in str(cache_key), f"S-2: cache_key must include trade_date, got {cache_key}"
 
 
+@patch(
+    "services.ai_service.scenario_dispatch.resolve_analysis_track",
+    new=AsyncMock(return_value=None),
+)
 @patch("strategies.ai_mixin.AIService")
 @patch("strategies.ai_mixin.NewsFetcher")
 @patch("strategies.ai_mixin.I18n")
