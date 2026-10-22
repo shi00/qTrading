@@ -170,6 +170,9 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         self._step_validated: dict[str, bool] = {}
         self._schedule_enabled: bool = True
         self._schedule_time: str = "16:30"
+        # UIR-F02-003: 最近一次成功落盘的（开关, 规范化时间）快照。schedule 步的验证缓存
+        # 只允许覆盖「与该快照完全相同的草稿」；草稿有任一字段变化时必须重新校验并落盘。
+        self._persisted_schedule: tuple[bool, str] | None = None
 
         # --- Panel operation callbacks (View injects, View→VM function) ---
         self.fn_validate_database: Callable[[], Awaitable[bool]] | None = None
@@ -352,6 +355,7 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         self.on_complete = None
         self._subscribers.clear()
         self._step_validated.clear()
+        self._persisted_schedule = None
         self._state = OnboardingState()
 
     # ------------------------------------------------------------------
@@ -409,8 +413,15 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         ensure_correlation_id()
         config = STEP_CONFIGS[self._state.current_step]
 
+        # UIR-F02-003: schedule 步的验证缓存只能覆盖「与最近一次成功落盘完全相同的草稿」。
+        # 必须在缓存短路之前把 View 局部草稿推送进 VM（从 complete 返回时不会触发输入
+        # on_change，缓存仍为 True），再按规范化草稿快照比对；草稿有变更则重新校验并落盘。
+        if config.id == "schedule" and self.fn_push_schedule_state:
+            self.fn_push_schedule_state()
+
         if self._step_validated.get(config.id, False):
-            return True
+            if config.id != "schedule" or self._persisted_schedule == self._schedule_draft_snapshot():
+                return True
 
         validators: dict[str, Callable[[], Awaitable[bool]] | None] = {
             "database": self.fn_validate_database,
@@ -436,21 +447,9 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
             self._set_validation_in_progress(False)
 
     async def _validate_and_save_schedule(self) -> bool:
-        if self.fn_push_schedule_state:
-            self.fn_push_schedule_state()
-
-        time_str = self._schedule_time.strip()
+        # 草稿推送已上移到 validate_and_persist_current_step 的缓存短路之前（UIR-F02-003）。
+        time_str = self._normalize_schedule_time(self._schedule_time)
         enabled = self._schedule_enabled
-
-        if not re.match(r"^\d{1,2}:\d{2}$", time_str):
-            time_str = "16:30"
-        else:
-            try:
-                hours, minutes = map(int, time_str.split(":"))
-                if not (0 <= hours <= 23 and 0 <= minutes <= 59):
-                    time_str = "16:30"
-            except ValueError:
-                time_str = "16:30"
 
         self._schedule_time = time_str
         self._set_state(schedule_time=time_str, normalized_schedule_time=time_str)
@@ -479,7 +478,27 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         if not saved:
             logger.warning("[OnboardingVM] ConfigHandler.save_config returned False for schedule settings")
             return False
+        # 仅在真正落盘成功后更新快照：失败重试时草稿快照与已落盘值不一致，必须重写。
+        self._persisted_schedule = (enabled, time_str)
         return True
+
+    @staticmethod
+    def _normalize_schedule_time(time_str: str) -> str:
+        """规范化 HH:MM 草稿：格式非法或数值越界回退默认 ``16:30``。"""
+        time_str = time_str.strip()
+        if not re.match(r"^\d{1,2}:\d{2}$", time_str):
+            return "16:30"
+        try:
+            hours, minutes = map(int, time_str.split(":"))
+        except ValueError:
+            return "16:30"
+        if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+            return "16:30"
+        return time_str
+
+    def _schedule_draft_snapshot(self) -> tuple[bool, str]:
+        """当前草稿的规范化快照，用于与最近一次成功落盘值比对。"""
+        return (self._schedule_enabled, self._normalize_schedule_time(self._schedule_time))
 
     def set_schedule_state(self, enabled: bool, time_str: str):
         self._schedule_enabled = enabled

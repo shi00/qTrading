@@ -1054,6 +1054,16 @@ def OnboardingWizard(
         if page is not None:
             page.run_task(_do_language_change, new_locale)
 
+    # UIR-F02-003: 计划草稿变更即失效验证缓存（与 database 步同范式），确保完成页
+    # 返回后修改开关/时间不会被「已验证」短路跳过落盘；未改值时缓存保持有效（幂等）。
+    def _on_schedule_enabled_change(value: bool) -> None:
+        set_schedule_enabled(value)
+        onboarding_vm.invalidate_step("schedule")
+
+    def _on_schedule_time_change(value: str) -> None:
+        set_schedule_time(value)
+        onboarding_vm.invalidate_step("schedule")
+
     def _on_card_hover(idx: int) -> Callable[[ft.ControlEvent], None]:
         def _hover(e: ft.ControlEvent) -> None:
             set_hovered_card(idx if e.data == "true" else -1)
@@ -1186,9 +1196,9 @@ def OnboardingWizard(
     elif step == 5:
         step_content = _build_schedule_step(
             schedule_enabled,
-            lambda v: set_schedule_enabled(v),
+            _on_schedule_enabled_change,
             schedule_time,
-            lambda v: set_schedule_time(v),
+            _on_schedule_time_change,
             _on_next,  # UX-09: schedule 时间输入 Enter 提交 = 下一步
         )
     else:
