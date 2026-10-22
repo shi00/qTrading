@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from core.i18n import Message
@@ -49,6 +49,8 @@ class ScenarioRouteDraft:
     """单个场景的路由草稿（可编辑副本，与已提交快照分离）。
 
     候选为连接 id 的有序元组；空候选合法（空列表合法保存，§3.2）。
+    F14：独立情绪候选与执行参数入模（覆盖全部可编辑任务字段，
+    草稿↔payload 往返不再有损；committed 场景不经有损草稿往返重建）。
     """
 
     scenario_id: str
@@ -60,6 +62,8 @@ class ScenarioRouteDraft:
     route_revision: int = 1
     sentiment_mode: str = "bundled"
     reuse_bundled_sentiment: bool = True
+    sentiment_candidates: tuple[str, ...] = ()
+    execution_options: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,7 +119,7 @@ class _PendingUndo:
 
 
 def _draft_from_mapping(mapping: Mapping[str, Any]) -> ScenarioRouteDraft:
-    """已提交场景路由 Mapping → 草稿。"""
+    """已提交场景路由 Mapping → 草稿（F14：全字段捕获，往返无损）。"""
     task_routes = mapping.get("task_routes") or {}
     sentiment = task_routes.get("sentiment") or {}
     return ScenarioRouteDraft(
@@ -128,6 +132,8 @@ def _draft_from_mapping(mapping: Mapping[str, Any]) -> ScenarioRouteDraft:
         route_revision=int(mapping.get("route_revision", 1)),
         sentiment_mode=str(sentiment.get("mode", "bundled")),
         reuse_bundled_sentiment=bool(sentiment.get("reuse_bundled_sentiment", True)),
+        sentiment_candidates=tuple(str(c) for c in (sentiment.get("candidates") or ())),
+        execution_options=dict(mapping.get("execution_options") or {}),
     )
 
 
@@ -198,25 +204,50 @@ def _replace_route(
 
 
 def _route_to_payload(route: ScenarioRouteDraft) -> dict[str, Any]:
-    """草稿 → 持久 schema 形态的 route dict（``ScenarioRouteConfig`` 字段）。"""
+    """草稿 → 持久 schema 形态的 route dict（``ScenarioRouteConfig`` 字段）。
+
+    F14：独立情绪候选与执行参数按草稿实值发出（不再强制情绪用主候选 / options={}）。
+    """
     task_routes: dict[str, Any] = {}
     if route.scenario_id == "news_annotation":
         task_routes["sentiment"] = {
             "mode": route.sentiment_mode,
-            "candidates": list(route.candidates),
+            "candidates": list(route.sentiment_candidates),
             "reuse_bundled_sentiment": route.reuse_bundled_sentiment,
         }
     return {
         "scenario_id": route.scenario_id,
         "enabled": route.enabled,
         "candidates": list(route.candidates),
-        "execution_options": {},
+        "execution_options": dict(route.execution_options),
         "total_timeout_seconds": route.total_timeout_seconds,
         "transient_retries": route.transient_retries,
         "fallback_enabled": route.fallback_enabled,
         "route_revision": route.route_revision,
         "task_routes": task_routes,
     }
+
+
+def _semantic_equal(a: ScenarioRouteDraft, b: ScenarioRouteDraft) -> bool:
+    """除 route_revision 外的全部可编辑任务字段逐项比较（F14 revision 语义判据）。"""
+    return (
+        a.enabled == b.enabled
+        and a.candidates == b.candidates
+        and a.execution_options == b.execution_options
+        and a.total_timeout_seconds == b.total_timeout_seconds
+        and a.transient_retries == b.transient_retries
+        and a.fallback_enabled == b.fallback_enabled
+        and a.sentiment_mode == b.sentiment_mode
+        and a.sentiment_candidates == b.sentiment_candidates
+        and a.reuse_bundled_sentiment == b.reuse_bundled_sentiment
+    )
+
+
+def _semantic_route_for_save(route: ScenarioRouteDraft, committed: ScenarioRouteDraft | None) -> ScenarioRouteDraft:
+    """语义相对已提交基线变化才递增 route_revision（F14）；无变化保持原值不篡改。"""
+    if committed is None or _semantic_equal(route, committed):
+        return route
+    return replace(route, route_revision=committed.route_revision + 1)
 
 
 class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
@@ -426,7 +457,8 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
 
         self._absorb_revision(outcome)
         if outcome.status == "committed":
-            committed = _replace_route(self._state.committed_routes, scenario_id, route)
+            # F14：回写含语义递增后的 route_revision，保证后续保存从新基线单调递增
+            committed = _replace_route(self._state.committed_routes, scenario_id, self._save_route_for(scenario_id))
             self._undo = None
             self._set_state(
                 committed_routes=committed,
@@ -468,15 +500,35 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         if new_revision is not None:
             self._config_revision = new_revision
 
+    def _save_route_for(self, scenario_id: str) -> ScenarioRouteDraft:
+        """当前场景草稿的「保存形态」：语义相对已提交基线变化时递增 route_revision。
+
+        草稿不存在时回退已提交行（调用方保证场景存在，防御性兜底）。
+        """
+        draft = _route_by_id(self._state.routes, scenario_id)
+        if draft is None:
+            draft = _route_by_id(self._state.committed_routes, scenario_id)
+        committed = _route_by_id(self._state.committed_routes, scenario_id)
+        return _semantic_route_for_save(draft, committed) if draft is not None else _default_draft(scenario_id)
+
     def all_routes_payload(self) -> list[dict[str, Any]]:
-        """全部场景草稿序列化（§11.6 向导原子提交本阶段全部差异）。"""
-        return [_route_to_payload(route) for route in self._state.routes]
+        """全部场景草稿序列化（§11.6 向导原子提交本阶段全部差异）。
+
+        F14：每行按语义变化递增 route_revision，未编辑场景保持原 revision。
+        """
+        committed = {r.scenario_id: r for r in self._state.committed_routes}
+        return [
+            _route_to_payload(_semantic_route_for_save(route, committed.get(route.scenario_id)))
+            for route in self._state.routes
+        ]
 
     def build_payload(self, scenario_id: str) -> dict[str, Any]:
         """重建 ``model_management`` payload：当前场景用草稿，其余用已提交值。
 
         迁移子域（migration_state / migration_transition）不入草稿 payload，
         由迁移专用命令独占、CAS 以磁盘现值回填（F07）。
+        F14：其余场景经无损草稿模型序列化（独立情绪候选 / 执行参数保留），
+        当前场景语义变化递增 route_revision。
         """
         committed = {r.scenario_id: r for r in self._state.committed_routes}
         routes: list[dict[str, Any]] = []
@@ -485,12 +537,11 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
             if route is None:
                 continue
             routes.append(_route_to_payload(route))
-        # 用当前场景草稿覆盖对应行（只提交当前场景）
-        draft = _route_by_id(self._state.routes, scenario_id)
-        if draft is not None:
-            routes = [  # 保持 SCENARIO_IDS 稳定顺序
-                _route_to_payload(draft) if r["scenario_id"] == scenario_id else r for r in routes
-            ]
+        # 用当前场景草稿覆盖对应行（只提交当前场景；F14 语义递增 revision）
+        save_route = self._save_route_for(scenario_id)
+        routes = [  # 保持 SCENARIO_IDS 稳定顺序
+            _route_to_payload(save_route) if r["scenario_id"] == scenario_id else r for r in routes
+        ]
         return {
             "schema_version": 1,
             "config_revision": self._config_revision,
