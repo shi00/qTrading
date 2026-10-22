@@ -297,8 +297,10 @@ def normalize_egress_target(api_base: object) -> str | None:
     拒绝 userinfo / query / fragment（明确非法目标）；``api_base`` 缺失、无 http(s) scheme、
     host 非法或端口越界一律返回 ``None``——不臆造目标（R21）。
 
-    注意：ui/viewmodels/model_connections_view_model.py 暂持同实现副本（本函数为
-    canonical 正本；该文件由并行会话占用暂禁改，后续统一为 import 本函数）。
+    IPv6 字面量（T1）：host 含 ``:`` 时按 RFC 3986 §3.2.2 以方括号重组（``urlsplit().hostname``
+    已去括号并小写），且跳过 IDNA——IDNA 仅适用域名标签，对 IP 字面量无意义，
+    对非 ASCII 垃圾还会伪造 punycode「域名」身份。非法 bracketed host 由
+    ``urlsplit`` 校验拒绝（ValueError → ``None``）。
     """
     if not isinstance(api_base, str):
         return None
@@ -318,10 +320,13 @@ def normalize_egress_target(api_base: object) -> str | None:
     host = parts.hostname
     if not host:
         return None
-    try:
-        host = host.encode("idna").decode("ascii").lower()
-    except UnicodeError:
-        return None
+    if ":" in host:
+        host = f"[{host}]"
+    else:
+        try:
+            host = host.encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            return None
     if port is None:
         port = 443 if scheme == "https" else 80
     if not 0 < port <= 65535:
