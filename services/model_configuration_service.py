@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -17,6 +18,7 @@ import re
 import socket
 import uuid
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 from core.model_management_types import (
@@ -36,6 +38,71 @@ _PURPOSES = ("news_annotation", "stock_analysis", "news_risk", "synthetic_test")
 
 # legacy 封口月份格式（S6 D4）：与 LegacySealConfig.month 正则一致，服务侧先行校验给出精确错误
 _MONTH_SEAL_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+class _FrozenMapping(dict):
+    """嵌套层只读 dict（F38 运行快照契约）：任何变更入口一律 TypeError。
+
+    刻意选 dict 子类而非 MappingProxyType：嵌套冻结容器会随消费方 ``dict()``
+    浅拷贝进入 CAS 保存 payload，而 storage 层对 payload 做 ``copy.deepcopy``
+    与 ``json.dumps``（回执指纹）——mappingproxy 两者均不支持（deepcopy 抛
+    cannot pickle、json 抛 TypeError）；dict 子类对 deepcopy / json / Pydantic
+    校验原生兼容，仅封禁变更面，磁盘 JSON 内容与指纹语义不变。
+    """
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        raise TypeError("frozen snapshot mapping is read-only")
+
+    def __delitem__(self, key: Any) -> None:
+        raise TypeError("frozen snapshot mapping is read-only")
+
+    def clear(self) -> None:
+        raise TypeError("frozen snapshot mapping is read-only")
+
+    def pop(self, *args: Any, **kwargs: Any) -> Any:
+        raise TypeError("frozen snapshot mapping is read-only")
+
+    def popitem(self) -> tuple[Any, Any]:
+        raise TypeError("frozen snapshot mapping is read-only")
+
+    def setdefault(self, *args: Any, **kwargs: Any) -> Any:
+        raise TypeError("frozen snapshot mapping is read-only")
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        raise TypeError("frozen snapshot mapping is read-only")
+
+    def __ior__(self, other: Any) -> _FrozenMapping:
+        raise TypeError("frozen snapshot mapping is read-only")
+
+    def __copy__(self) -> _FrozenMapping:
+        return _FrozenMapping(self)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> _FrozenMapping:
+        return _FrozenMapping(copy.deepcopy(dict(self), memo))
+
+
+def _freeze_value(value: Any) -> Any:
+    """递归冻结快照叶子（F38）：dict → :class:`_FrozenMapping`，list → 冻结项 tuple。
+
+    标量与其余类型原样透传；tuple 容器本身已不可变，仅逐项冻结。
+    """
+    if isinstance(value, dict):
+        return _FrozenMapping((key, _freeze_value(item)) for key, item in value.items())
+    if isinstance(value, list):
+        return tuple(_freeze_value(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_value(item) for item in value)
+    return value
+
+
+def _freeze_view(mapping: Mapping[str, Any]) -> Mapping[str, Any]:
+    """顶层只读视图 + 嵌套叶子递归冻结（F38）。
+
+    顶层保持既有 MappingProxyType 契约（只读语义与现有测试锚不变）；
+    嵌套 dict / list 递归冻结，使 candidates、adapter_options、capabilities、
+    legacy_seals 等嵌套叶子同获「发布后不可变」的运行快照契约。
+    """
+    return MappingProxyType({key: _freeze_value(item) for key, item in mapping.items()})
 
 
 def _utc_now_iso() -> str:
@@ -96,11 +163,14 @@ class ModelConfigurationService:
     # ------------------------------------------------------------------
 
     async def get_snapshot(self) -> ModelManagementSnapshot:
-        """新鲜读取并冻结已提交非敏感配置快照（§5.1：不经 load_config 缓存命中路径）。"""
+        """新鲜读取并冻结已提交非敏感配置快照（§5.1：不经 load_config 缓存命中路径）。
+
+        F38：冻结为递归语义——嵌套 dict / list（candidates、adapter_options、
+        capabilities、legacy_seals 等）同获只读契约，嵌套写入一律失败；
+        顶层仍为 MappingProxyType（契约不变）。
+        """
 
         def _read() -> ModelManagementSnapshot:
-            from types import MappingProxyType
-
             fresh = cfg.ConfigHandler.read_model_management_fresh()
             mm = fresh["model_management"]
             transition = mm.get("migration_transition")
@@ -108,15 +178,15 @@ class ModelConfigurationService:
                 snapshot_id=str(uuid.uuid4()),
                 config_revision=mm["config_revision"],
                 migration_state=mm["migration_state"],
-                connections=tuple(MappingProxyType(c) for c in mm["connections"]),
-                scenario_routes=tuple(MappingProxyType(r) for r in mm["scenario_routes"]),
-                usage_policy=MappingProxyType(mm["usage_policy"]),
+                connections=tuple(_freeze_view(c) for c in mm["connections"]),
+                scenario_routes=tuple(_freeze_view(r) for r in mm["scenario_routes"]),
+                usage_policy=_freeze_view(mm["usage_policy"]),
                 security_revision=mm["security_state"]["security_revision"],
                 # F01：授权范围版本独立于 security_revision（磁盘缺键 → schema 默认 1，
                 # 与旧配置及 UI grant 创建默认同域）
                 security_scope_version=int(mm["security_state"].get("scope_version", 1)),
-                security_grants=tuple(MappingProxyType(g) for g in mm["security_state"]["grants"]),
-                migration_transition=MappingProxyType(transition) if transition is not None else None,
+                security_grants=tuple(_freeze_view(g) for g in mm["security_state"]["grants"]),
+                migration_transition=_freeze_view(transition) if transition is not None else None,
                 created_at=_utc_now_iso(),
             )
 
