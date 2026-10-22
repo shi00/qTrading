@@ -21,7 +21,7 @@ import logging
 import re
 import unicodedata
 import uuid
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -33,6 +33,7 @@ from core.model_management_types import (
     ModelOutputValidationError,
     ValidatedBusinessOutput,
 )
+from services.ai_service.scenario_executor import ScenarioOutput
 from services.ai_service.stock_analysis import _scenario_ai_status
 from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -617,8 +618,10 @@ class NewsRiskAnalyzer:
                 ),
             )
 
-        output = exec_result.outputs[0].output
-        meta = dict(exec_result.outputs[0].metadata)
+        # F03：经公共输出类型 ScenarioOutput 读取（Executor 成功出口唯一生产形态）
+        first = cast(ScenarioOutput, exec_result.outputs[0])
+        output = first.output
+        meta = dict(first.metadata)
         connection_id = next(
             (d.connection_id for d in exec_result.candidate_decisions if d.decision == "succeeded"),
             None,

@@ -33,7 +33,7 @@ from core.model_management_types import (
     ValidatedBusinessOutput,
     ensure_inference_adapter,
 )
-from services.ai_service.scenario_executor import ScenarioExecutor
+from services.ai_service.scenario_executor import ScenarioExecutor, ScenarioOutput
 
 pytestmark = pytest.mark.unit
 
@@ -216,7 +216,12 @@ class TestProductionAdaptersEndToEnd:
         assert result.status == "succeeded"
         assert fake_transports[kind] == 1
         assert all("AttributeError" not in decision.reason for decision in result.candidate_decisions)
-        assert result.outputs == ({"output": "ok"},)
+        # F03：成功出口唯一生产形态为 ScenarioOutput（业务载荷 + 程序生成溯源，非裸 dict）
+        first = result.outputs[0]
+        assert isinstance(first, ScenarioOutput)
+        assert first.output == {"output": "ok"}
+        assert first.metadata["actual_model"]
+        assert first.metadata["connection_id"] == "conn-1"
 
 
 class TestMalformedAdapterRejectedAtAssembly:

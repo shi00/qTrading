@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal, cast
@@ -364,7 +364,18 @@ class ScenarioExecutor:
                 status="succeeded",
                 reason="ok",
                 outputs=(
-                    dict(validated.output) if isinstance(validated.output, Mapping) else {"output": validated.output},
+                    # F03：统一公共输出类型 ScenarioOutput——保留校验器 metadata
+                    # （actual_model 等模型身份）与程序生成溯源（连接身份 /
+                    # security_revision 等，Executor 侧权威，后置覆盖同源键）。
+                    ScenarioOutput(
+                        output=dict(validated.output)
+                        if isinstance(validated.output, Mapping)
+                        else {"output": validated.output},
+                        metadata={
+                            **dict(validated.metadata),
+                            **_metadata(request, cand, connection, response, permit.security_revision),
+                        },
+                    ),
                 ),
                 usages=usage_tuple,
             )
@@ -471,6 +482,37 @@ def _resolve_connection(raw: Mapping[str, Any]) -> ResolvedConnection:
         credential_ref=raw.get("credential_ref"),
         credential_version=raw.get("credential_version"),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioOutput(Mapping[str, Any]):
+    """场景成功输出的公共契约（F03）：Executor 唯一生产出口，消费者按此类型读取。
+
+    - ``output``：校验通过的业务载荷（Mapping）；
+    - ``metadata``：程序生成溯源（连接身份 / actual_model / security_revision 等，
+      模型输出不可伪造）+ 校验器携带的适配器元数据合并。
+
+    实现 Mapping 视图（仅 ``output`` / ``metadata`` 两键）以兼容
+    ``ScenarioExecutionResult.outputs`` 的 ``Mapping[str, Any]`` 声明
+    （core 公共类型禁改），同时保留消费者属性访问协议。
+    """
+
+    output: Mapping[str, Any]
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "output":
+            return self.output
+        if key == "metadata":
+            return self.metadata
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        yield "output"
+        yield "metadata"
+
+    def __len__(self) -> int:
+        return 2
 
 
 @dataclass(frozen=True, slots=True)
