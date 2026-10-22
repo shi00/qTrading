@@ -825,6 +825,11 @@ class LiteLLMClient:
         - ``asyncio.CancelledError`` 始终传播（R2），不包装。
 
         Raises:
+            AIPolicyNotAcknowledgedError: SEC-01 外发知情确认未通过（R06-D3：统一链
+                四场景 stock_analysis / news_annotation / news_risk / synthetic_test
+                全部收敛到本出口，未确认即零出站拒绝；stock_analysis 已有
+                run_ai_analysis 入口确认，此处为出口兜底纵深防御，其余三场景以本
+                检查为唯一 SEC-01 边界）。
             ValueError: adapter_kind 非 litellm_chat / credential_ref 形态非法 /
                 版本化凭据 ref 与 credential_version 租约不同源（F06，零出站拒绝）。
             TimeoutError: dispatch 前 deadline 已耗尽。
@@ -833,6 +838,22 @@ class LiteLLMClient:
         if resolved_connection.adapter_kind != "litellm_chat":
             raise ValueError(
                 f"invoke_single_connection requires adapter_kind='litellm_chat', got {resolved_connection.adapter_kind!r}"
+            )
+
+        # SEC-01（R06-D3）：统一链云出口知情确认门控，置于凭据解析 / litellm 加载 /
+        # 网络之前（零 keyring 读、零 import、零出站的最早 fail-closed 点）。异常与
+        # i18n key 与旧链门控（_chat_completion / _router_failover）同源，语义为
+        # 非可重试策略阻断（调用方按策略拒绝降级，不重试不切换可修复语义）。
+        if not is_egress_acknowledged():
+            logger.warning(
+                "[AIService] UnifiedChain | Egress policy not acknowledged — refusing "
+                "cloud inference for scenario '%s' (no external requests initiated)",
+                request.scenario_id,
+            )
+            raise AIPolicyNotAcknowledgedError(
+                Message("ai_external_acknowledgment_prompt"),
+                detail="Unified chain cloud egress requires user acknowledgment (SEC-01); "
+                "no external request was initiated.",
             )
 
         import services.ai_service as _ai
@@ -909,6 +930,26 @@ class LiteLLMClient:
         # S4（§8.1）：JSON mode 经 payload 透传（旧链 _chat_completion 同语义）
         if payload.get("json_mode"):
             request_params["response_format"] = {"type": "json_object"}
+
+        # SEC-03（R06-D2）：统一链云出口接既有 EgressAudit（审计状态栏消费同一账本，
+        # 禁止平行账本）。dispatch 前按意图记录一次，destination 用真实发送的
+        # litellm_model（含 provider 前缀，语义同旧链 effective model 单点解析），
+        # category 用场景 id（stock_analysis / news_annotation / news_risk /
+        # synthetic_test，比旧链 analysis/news 二值更精确）；不记录 prompt 内容本身
+        # （防二次泄露）。审计失败不阻断 AI 主流程（R2：CancelledError 必须传播）。
+        try:
+            from utils.egress_audit import EgressAudit
+
+            await EgressAudit().record(
+                destination=f"llm:{litellm_model}",
+                category=request.scenario_id,
+                item_count=len(messages),
+                payload_size_bytes=sum(len(m.get("content") or "") for m in messages),
+            )
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception:
+            pass
 
         from utils.proxy_manager import ProxyManager
 

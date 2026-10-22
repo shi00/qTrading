@@ -31,6 +31,21 @@ from core.model_management_types import (
     NormalizedLLMUsage,
 )
 from services.ai_service.litellm_client import normalize_litellm_usage, resolve_credential
+from utils.egress_audit import EgressAudit
+
+
+@pytest.fixture(autouse=True)
+def _ack_egress_and_isolate_audit(tmp_path):
+    """SEC-01 门控（R06-D3）：本文件验证单连接 HTTP 行为，非门控本身，默认视为已确认
+    （与 test_ai_egress_audit_integration.py 的 _ack_cloud_egress 同模式）。门控拒绝
+    语义由 test_r06_d23_unified_chain_egress.py 专项覆盖。
+    同时把 EgressAudit 落盘隔离到临时目录（R06-D2：统一链出口现已接审计账本，
+    防止测试 dispatch 写入真实用户数据目录的 egress_audit.jsonl）。
+    """
+    EgressAudit._reset_singleton()
+    EgressAudit._configure_for_tests(str(tmp_path / "egress_audit.jsonl"))
+    with patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True):
+        yield
 
 
 # ---------------------------------------------------------------------------
