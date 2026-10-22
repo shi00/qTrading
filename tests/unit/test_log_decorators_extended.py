@@ -366,6 +366,33 @@ class TestAsyncOperationLogger:
         assert "RuntimeError" in log_capture.text
         assert 'attempts": 3' in log_capture.text
 
+    @pytest.mark.asyncio
+    async def test_cancelled_logs_warning_not_error(self, log_capture):
+        """UTILS-B-04：块内任务被取消时应记 WARNING（cancelled）且 CancelledError
+        保持传播（R2 不吞没），不得误报 ERROR 污染错误信号。"""
+
+        async def _cancelled_inner():
+            async with AsyncOperationLogger("test_cancelled") as op:
+                op.add_metric("steps", 2)
+                await asyncio.sleep(10)
+
+        task = asyncio.create_task(_cancelled_inner())
+        await asyncio.sleep(0.05)  # 让内层任务进入 await 点
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await task
+        # 捕获的异常即 CancelledError 本体，任务确以取消态结束
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled() is True
+
+        text = log_capture.text
+        assert "[test_cancelled] cancelled" in text
+        # 已收集的 metrics 保留在取消日志中（诊断价值）
+        assert 'steps": 2' in text
+        # 不得出现 ERROR 级别记录，也不得走 failed 文案路径
+        assert not any(r.levelno == logging.ERROR for r in log_capture.records)
+        assert "[test_cancelled] failed" not in text
+
 
 class TestLogUiAction:
     """测试 log_ui_action 装饰器对同步/异步 UI 动作的日志记录。"""

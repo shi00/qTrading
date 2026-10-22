@@ -8,6 +8,7 @@
 - 异常追踪
 """
 
+import asyncio
 import functools
 import inspect
 import logging
@@ -479,6 +480,21 @@ class AsyncOperationLogger:
                 raise TypeError(f"Type {type(obj)} not serializable")
 
             metrics_str = f" | metrics: {json.dumps(self.metrics, default=_json_serial)}"
+
+        # 取消特判（UTILS-B-04）：async with 块内任务被取消时 CancelledError 会传入
+        # __aexit__，属于控制流信号而非故障；classify_severity 会将其归为 operational
+        # 走 ERROR 分支（含 exc_info），导致停机/任务取消污染错误信号。此处降级记
+        # WARNING 并 return False 保持取消传播（不吞没，R2）；正常完成（exc_type 为
+        # None）与真实异常路径不受影响。
+        if exc_type is not None and issubclass(exc_type, asyncio.CancelledError):
+            self.logger.warning(
+                "[%s] cancelled after %.1fs%s",
+                self.operation,
+                elapsed,
+                metrics_str,
+                stacklevel=2,
+            )
+            return False
 
         # 记录完成
         if exc_type is None:
