@@ -1256,7 +1256,11 @@ def OnboardingWizard(
                     on_click=safe_on_click(_on_next),
                     style=AppStyles.primary_button(),
                     # UX-09 / MAJOR-01: 欢迎步未勾选风险提示确认时禁用「下一步」。
-                    disabled=state.validation_in_progress or (config.id == "welcome" and not state.risk_acknowledged),
+                    # UIR-F02-002: data_sync 步同步进行中禁用「下一步」（与「上一步」同口径），
+                    # 防止手动换步后仍被迟到的同步结果推进。
+                    disabled=state.validation_in_progress
+                    or (config.id == "welcome" and not state.risk_acknowledged)
+                    or (config.id == "data_sync" and state.sync_in_progress),
                 ),
             )
         )
