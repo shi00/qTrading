@@ -387,6 +387,18 @@ class AIStrategyMixin:
             else:
                 ui_prompt_override = sanitize_prompt(ui_prompt_override)
 
+        # --- Guard: Backtest AI Disabled? ---
+        # 位于批次入口轨道判定之前：_disable_ai 是调用方显式禁用（AI 未被请求），
+        # 与「AI 被请求但不可用」（legacy_stopped）语义不同——禁用批次无需轨道
+        # 判定与配置读取，也不得因配置不可读被误标 legacy_stopped（R21 语义边界）。
+        if context.get("_disable_ai"):
+            logger.info(
+                "[AIStrategyMixin] AI disabled by backtest config — returning math-only results",
+            )
+            # SC-02: 回测关闭 AI 属"AI 有效不运行"，向 warnings 声明风险检查缺失。
+            self._note_ai_risk_check_skipped(context)
+            return candidates_df
+
         # --- F04: 批次入口先定执行轨道并冻结 run 快照（同请求单轨，模型统一.md §14.2-6）---
         # 旧云端可用性与旧链准入 guard 仅对旧轨（None）应用：统一调度链 active 且场景
         # 路由启用时走新轨（ExecutionSnapshot 由 Executor 承担候选资格与授权），若仍套
@@ -510,15 +522,6 @@ class AIStrategyMixin:
             logger.warning(
                 "[AIStrategyMixin] DataProcessor missing from context — returning math-only results",
             )
-            return candidates_df
-
-        # --- Guard: Backtest AI Disabled? ---
-        if context.get("_disable_ai"):
-            logger.info(
-                "[AIStrategyMixin] AI disabled by backtest config — returning math-only results",
-            )
-            # SC-02: 回测关闭 AI 属"AI 有效不运行"，向 warnings 声明风险检查缺失。
-            self._note_ai_risk_check_skipped(context)
             return candidates_df
 
         # --- Guard: 月度成本预算未超限 (AI-03 完整版) ---

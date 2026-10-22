@@ -219,6 +219,32 @@ class TestF04BatchTrackFreeze:
         assert "ai_status" not in result.columns
 
     @pytest.mark.asyncio
+    async def test_disable_ai_short_circuits_before_track_resolution(self):
+        """显式禁用（_disable_ai=True）在批次入口轨道判定之前短路：不执行轨道
+        判定/配置读取，identity 返回原候选——「禁用」（AI 未被请求）与
+        「不可用」（legacy_stopped）语义不同（R21 语义边界）。"""
+        s = _ConcreteStrategy()
+        dp = _make_mock_dp()
+        candidates = _make_candidates(2)
+        context = {"data_processor": dp, "_disable_ai": True}
+
+        async def forbidden_resolve_analysis_track():
+            raise AssertionError("显式禁用时不得执行批次入口轨道判定")
+
+        with (
+            patch("strategies.ai_mixin.AIService"),
+            patch(
+                "services.ai_service.scenario_dispatch.resolve_analysis_track",
+                new=forbidden_resolve_analysis_track,
+            ),
+        ):
+            result = await s.run_ai_analysis(candidates, context)
+
+        # identity 契约：原 df 原样返回，无 ai_status 标记列
+        assert result is candidates
+        assert "ai_status" not in result.columns
+
+    @pytest.mark.asyncio
     async def test_legacy_track_draining_stops_per_stock(self):
         """旧轨 draining 停接语义保留：批次已进入旧轨后逐股新鲜读准入，
         draining_stop 安静停接（不触发 on_card_error），无行丢失伪装。"""
