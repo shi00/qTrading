@@ -8,6 +8,8 @@
 - 末次移动 / 移除可撤销（单级）
 - 保存只提交当前场景（其它场景未保存草稿不动）
 - revision 冲突保留草稿
+- F14：路由往返保真（独立情绪候选 / 执行参数逐字段不变；
+  route_revision 仅语义变化递增，无变化保存不篡改）
 
 mock ``ModelConfigurationService``（非单例 DI），不触碰 ConfigHandler / flet。
 """
@@ -44,15 +46,24 @@ def _route_mapping(
     enabled: bool = False,
     timeout: int = 45,
     revision: int = 1,
+    sentiment_mode: str = "bundled",
+    sentiment_candidates: tuple[str, ...] | list[str] = (),
+    execution_options: dict | None = None,
 ) -> dict:
     task_routes: dict = {}
     if scenario_id == "news_annotation":
-        task_routes = {"sentiment": {"mode": "bundled", "candidates": [], "reuse_bundled_sentiment": True}}
+        task_routes = {
+            "sentiment": {
+                "mode": sentiment_mode,
+                "candidates": list(sentiment_candidates),
+                "reuse_bundled_sentiment": True,
+            }
+        }
     return {
         "scenario_id": scenario_id,
         "enabled": enabled,
         "candidates": list(candidates),
-        "execution_options": {},
+        "execution_options": dict(execution_options) if execution_options is not None else {},
         "total_timeout_seconds": timeout,
         "transient_retries": 1,
         "fallback_enabled": True,
@@ -356,6 +367,157 @@ class TestSave:
         assert vm.state.save_state == "commit_unknown"
         assert _route_candidates(vm, "news_annotation") == ("conn-a",)
         assert _committed_candidates(vm, "news_annotation") == ()
+
+
+# --- F14：路由往返保真 / route_revision 语义 ---
+
+
+def _news_dedicated_mapping() -> dict:
+    """P13 场景基线：新闻主题=聊天主候选、情绪独立候选=编码器、有执行参数。"""
+    return _route_mapping(
+        "news_annotation",
+        ("chat-a",),
+        timeout=45,
+        sentiment_mode="dedicated",
+        sentiment_candidates=("encoder-b",),
+        execution_options={"temperature": 0.2},
+    )
+
+
+class TestRouteRoundtripFidelity:
+    @pytest.mark.asyncio
+    async def test_save_stock_keeps_news_independent_sentiment_and_options(self):
+        """P13/F14 回归：编辑股票路由保存后，新闻独立情绪候选与执行参数逐字段不变。"""
+        vm, service = _make_vm(
+            _snapshot(
+                routes=[
+                    _news_dedicated_mapping(),
+                    _route_mapping("stock_analysis", (), timeout=180),
+                    _route_mapping("news_risk", (), timeout=90),
+                ]
+            )
+        )
+        await vm.load()
+        vm.select_scenario("stock_analysis")
+        vm.add_candidate("conn-a")
+
+        await vm.save_current_scenario()
+
+        assert vm.state.save_state == "committed"
+        payload = service.save_draft.await_args.args[0]
+        rows = {r["scenario_id"]: r for r in payload["scenario_routes"]}
+        news_row = rows["news_annotation"]
+        assert news_row["candidates"] == ["chat-a"]
+        assert news_row["task_routes"]["sentiment"]["mode"] == "dedicated"
+        assert news_row["task_routes"]["sentiment"]["candidates"] == ["encoder-b"]
+        assert news_row["execution_options"] == {"temperature": 0.2}
+        assert news_row["route_revision"] == 1  # 未编辑场景 revision 不被篡改
+
+    @pytest.mark.asyncio
+    async def test_draft_state_captures_independent_fields(self):
+        """加载后草稿模型携带独立情绪候选与执行参数（全字段捕获）。"""
+        vm, _ = _make_vm(
+            _snapshot(
+                routes=[
+                    _news_dedicated_mapping(),
+                    _route_mapping("stock_analysis", (), timeout=180),
+                    _route_mapping("news_risk", (), timeout=90),
+                ]
+            )
+        )
+        await vm.load()
+        news_draft = next(r for r in vm.state.routes if r.scenario_id == "news_annotation")
+        assert news_draft.sentiment_candidates == ("encoder-b",)
+        assert news_draft.execution_options == {"temperature": 0.2}
+        assert news_draft.sentiment_mode == "dedicated"
+        assert news_draft.candidates == ("chat-a",)
+
+    @pytest.mark.asyncio
+    async def test_save_news_keeps_own_independent_fields(self):
+        """编辑新闻场景主候选并保存：自身独立情绪候选与执行参数保留，revision 递增。"""
+        vm, service = _make_vm(
+            _snapshot(
+                routes=[
+                    _news_dedicated_mapping(),
+                    _route_mapping("stock_analysis", (), timeout=180),
+                    _route_mapping("news_risk", (), timeout=90),
+                ]
+            )
+        )
+        await vm.load()
+        vm.add_candidate("conn-b")  # 当前选中即 news_annotation
+
+        await vm.save_current_scenario()
+
+        assert vm.state.save_state == "committed"
+        payload = service.save_draft.await_args.args[0]
+        rows = {r["scenario_id"]: r for r in payload["scenario_routes"]}
+        news_row = rows["news_annotation"]
+        assert news_row["candidates"] == ["chat-a", "conn-b"]
+        assert news_row["task_routes"]["sentiment"]["candidates"] == ["encoder-b"]
+        assert news_row["execution_options"] == {"temperature": 0.2}
+        assert news_row["route_revision"] == 2  # 语义变化 → 基线 1 + 1
+
+    @pytest.mark.asyncio
+    async def test_route_revision_unchanged_when_no_semantic_change(self):
+        """无语义变化保存：route_revision 保持原值不篡改。"""
+        vm, service = _make_vm(_snapshot(config_revision=5))
+        await vm.load()
+
+        await vm.save_current_scenario()  # 未做任何编辑
+
+        assert vm.state.save_state == "committed"
+        payload = service.save_draft.await_args.args[0]
+        rows = {r["scenario_id"]: r["route_revision"] for r in payload["scenario_routes"]}
+        assert rows == {"news_annotation": 1, "stock_analysis": 1, "news_risk": 1}
+
+    @pytest.mark.asyncio
+    async def test_route_revision_increments_once_per_semantic_change(self):
+        """同一场景两次语义变化保存：revision 从更新后的基线单调递增（2 → 3）。"""
+        vm, service = _make_vm(_snapshot(config_revision=5))
+        await vm.load()
+        vm.add_candidate("conn-a")
+        await vm.save_current_scenario()
+        assert vm.state.save_state == "committed"
+
+        vm.add_candidate("conn-b")
+        await vm.save_current_scenario()
+
+        assert vm.state.save_state == "committed"
+        payload = service.save_draft.await_args.args[0]
+        rows = {r["scenario_id"]: r["route_revision"] for r in payload["scenario_routes"]}
+        assert rows["news_annotation"] == 3
+
+    @pytest.mark.asyncio
+    async def test_all_routes_payload_bumps_only_edited_scenarios(self):
+        """向导路径：all_routes_payload 仅对语义变化的场景递增 revision。"""
+        vm, _ = _make_vm(_snapshot())
+        await vm.load()
+        vm.select_scenario("stock_analysis")
+        vm.add_candidate("conn-a")
+
+        payload = vm.all_routes_payload()
+
+        rows = {r["scenario_id"]: r["route_revision"] for r in payload}
+        assert rows["stock_analysis"] == 2
+        assert rows["news_annotation"] == 1
+        assert rows["news_risk"] == 1
+        stock = next(r for r in payload if r["scenario_id"] == "stock_analysis")
+        assert stock["candidates"] == ["conn-a"]
+        assert stock["execution_options"] == {}
+
+    @pytest.mark.asyncio
+    async def test_committed_routes_absorb_incremented_revision(self):
+        """提交成功后 committed_routes 回写递增后的 revision（后续保存单调）。"""
+        vm, _ = _make_vm(_snapshot(config_revision=5))
+        await vm.load()
+        vm.add_candidate("conn-a")
+        await vm.save_current_scenario()
+        assert vm.state.save_state == "committed"
+
+        committed = {r.scenario_id: r for r in vm.state.committed_routes}
+        assert committed["news_annotation"].route_revision == 2
+        assert committed["news_annotation"].candidates == ("conn-a",)
 
 
 # --- risk binding / UI toggles ---
