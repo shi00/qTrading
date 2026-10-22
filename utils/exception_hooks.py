@@ -64,11 +64,13 @@ def _sys_excepthook(exctype: type[BaseException], value: BaseException, tb: Trac
         else:
             log_level = logger.error
         sanitized_msg = DataSanitizer.sanitize_error(value)  # type: ignore[arg-type]
+        # exc_info=True 在 sys.excepthook 上下文中取 sys.exc_info() 为空 (异常已完全 unwind),
+        # 会输出 "NoneType: None"; 必须显式传入签名中的 (exctype, value, tb) 记录真实堆栈。
         log_level(
             "[SysExcepthook] Unhandled exception in main thread: %s: %s",
             exctype.__name__,
             sanitized_msg,
-            exc_info=True,
+            exc_info=(exctype, value, tb),
         )
     # NOTE(lazy): 主线程钩子内兜底避免钩子自身崩溃导致系统失控. ceiling: 钩子内逻辑不应抛异常. upgrade: 钩子内部分类异常处理或移除兜底.
     except Exception as e:

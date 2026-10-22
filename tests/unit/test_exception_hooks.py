@@ -82,6 +82,28 @@ class TestSysExcepthook:
         assert any("SystemExit" in r.message for r in caplog.records)
 
 
+class TestSysExcepthookTraceback:
+    """测试 sys.excepthook 真实堆栈记录 (UTILS-B-01)"""
+
+    def test_exc_info_records_real_traceback(self, caplog: pytest.LogCaptureFixture) -> None:
+        """exc_info 应记录真实 traceback 而非 "NoneType: None".
+
+        CPython 在异常完全 unwind 后才调用 sys.excepthook, 此时 sys.exc_info() 为空,
+        exc_info=True 只会输出 "NoneType: None"; 显式传入 (exctype, value, tb) 应记录
+        含调用方帧的真实堆栈。"""
+        try:
+            raise ValueError("boom-traceback")
+        except ValueError:
+            tb = sys.exc_info()[2]
+            with caplog.at_level(logging.ERROR):
+                _sys_excepthook(ValueError, ValueError("boom-traceback"), tb)
+
+        assert "NoneType: None" not in caplog.text
+        # 真实栈帧应包含本测试函数名 (raise 所在帧), 证明堆栈来自传入的 tb 而非空 exc_info
+        assert "test_exc_info_records_real_traceback" in caplog.text
+        assert "ValueError: boom-traceback" in caplog.text
+
+
 class TestThreadingExcepthook:
     """测试 threading.excepthook 实现"""
 
