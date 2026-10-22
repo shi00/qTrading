@@ -21,6 +21,7 @@ from unittest import mock
 import pytest
 
 import utils.config_handler as cfg_mod
+from utils.config import storage as storage_mod
 from utils.config_models import (
     MODEL_MANAGEMENT_SCHEMA_VERSION,
     AppConfig,
@@ -662,6 +663,124 @@ class TestDraftSecurityStrip:
         # 磁盘保持损坏原样：grant 未被洗白落盘，revision 未推进
         assert "security_state" not in raw["model_management"]
         assert raw["model_management"]["config_revision"] == 1
+
+
+class TestCommitTriStateAfterReplace:
+    """F11：提交三态按阶段区分——替换后故障不得被报告为确定未提交。
+
+    故障阶段替身（schema 与原子文件系统均为替身，非实际磁盘故障测试）：
+    - P22 形态：os.replace 已成功落盘（磁盘 revision=N+1），缓存更新 / 结果
+      构造 / 锁退出阶段抛异常——修复前返回 not_committed（臆断未提交），
+      修复后同锁顺序读回凭回执裁决：匹配 → committed，无法证明 → commit_unknown。
+    - P23 对照：写前故障零写，仍返回 not_committed。
+    """
+
+    def _cas(self, monkeypatch, isolated_config, operation_id: str, explode_first_result: bool):
+        """执行一次真实落盘的 CAS；explode_first_result 时首个结果构造抛异常。"""
+        cfg_mod.ConfigHandler.ensure_defaults()
+        payload = dict(cfg_mod.ConfigHandler.load_config()["model_management"])
+        expected = payload["config_revision"]
+        if explode_first_result:
+            real_result = storage_mod.ModelManagementSaveResult
+            state = {"exploded": False}
+
+            def flaky_result(*args, **kwargs):
+                if not state["exploded"]:
+                    state["exploded"] = True
+                    raise RuntimeError("simulated post-replace fault")
+                return real_result(*args, **kwargs)
+
+            monkeypatch.setattr(storage_mod, "ModelManagementSaveResult", flaky_result)
+
+        return cfg_mod.ConfigHandler.compare_and_save_model_management(expected, payload, operation_id), expected
+
+    def test_post_replace_fault_confirms_committed_by_receipt(self, isolated_config, monkeypatch):
+        """P22：替换成功后异常 + 回执匹配 → committed（不臆断未提交），缓存同步。"""
+        result, expected = self._cas(monkeypatch, isolated_config, "op-f11a", explode_first_result=True)
+
+        assert result.status == "committed"
+        assert result.committed_revision == expected + 1
+        assert result.current_revision == expected + 1
+        assert result.last_config_commit is not None
+        assert result.last_config_commit["operation_id"] == "op-f11a"
+        # 磁盘确实已提交且缓存已随读回确认刷新
+        raw = _read_raw_config(isolated_config)
+        assert raw["model_management"]["config_revision"] == expected + 1
+        assert raw["model_management"]["last_config_commit"]["operation_id"] == "op-f11a"
+        reloaded = cfg_mod.ConfigHandler.load_config()
+        assert reloaded["model_management"]["config_revision"] == expected + 1
+
+    def test_post_replace_fault_unknown_when_confirmation_read_fails(self, isolated_config, monkeypatch):
+        """P22：替换成功后异常 + 确认阶段读盘失败 → commit_unknown（无法证明）。"""
+
+        def fail_read():
+            return None, "simulated disk unreadable"
+
+        real_result = storage_mod.ModelManagementSaveResult
+        state = {"exploded": False}
+
+        def explode_then_break_read(*args, **kwargs):
+            if not state["exploded"]:
+                state["exploded"] = True
+                # 读失败替身在替换成功后安装：CAS 主流程读 / 写 / 确认前读不受影响
+                monkeypatch.setattr(storage_mod, "_read_disk_dict", fail_read)
+                raise RuntimeError("simulated post-replace fault")
+            return real_result(*args, **kwargs)
+
+        monkeypatch.setattr(storage_mod, "ModelManagementSaveResult", explode_then_break_read)
+        result, expected = self._cas(monkeypatch, isolated_config, "op-f11b", explode_first_result=False)
+
+        assert result.status == "commit_unknown"
+        assert result.current_revision is None
+        # os.replace 已发生：磁盘仍是新内容（unknown ≠ 未提交证据）
+        raw = _read_raw_config(isolated_config)
+        assert raw["model_management"]["config_revision"] == expected + 1
+        assert raw["model_management"]["last_config_commit"]["operation_id"] == "op-f11b"
+
+    def test_post_replace_fault_unknown_when_receipt_overwritten(self, isolated_config, monkeypatch):
+        """P22：替换成功后异常 + 回执已被后续提交覆写 → commit_unknown。"""
+        cfg_mod.ConfigHandler.ensure_defaults()
+        payload = dict(cfg_mod.ConfigHandler.load_config()["model_management"])
+        expected = payload["config_revision"]
+        real_result = storage_mod.ModelManagementSaveResult
+        state = {"exploded": False}
+
+        def overwrite_then_explode(*args, **kwargs):
+            if not state["exploded"]:
+                state["exploded"] = True
+                # 模拟后续提交在结果返回前覆写回执（另一进程 op-later 已提交）
+                raw = _read_raw_config(isolated_config)
+                raw["model_management"]["last_config_commit"]["operation_id"] = "op-later"
+                _write_raw_config(isolated_config, raw)
+                raise RuntimeError("simulated post-replace fault with receipt overwritten")
+            return real_result(*args, **kwargs)
+
+        monkeypatch.setattr(storage_mod, "ModelManagementSaveResult", overwrite_then_explode)
+
+        result = cfg_mod.ConfigHandler.compare_and_save_model_management(expected, payload, "op-f11c")
+
+        assert result.status == "commit_unknown"
+        assert result.current_revision == expected + 1
+        assert result.committed_revision is None
+
+    def test_pre_replace_fault_zero_write_still_not_committed(self, isolated_config, monkeypatch):
+        """P23 对照：写前故障（意外异常）零写，仍返回 not_committed。"""
+        cfg_mod.ConfigHandler.ensure_defaults()
+        before = _read_raw_config(isolated_config)
+        payload = dict(before["model_management"])
+
+        def unexpected_corruption(raw_model_management):
+            raise RuntimeError("simulated pre-replace unexpected fault")
+
+        # patch 置于 ensure_defaults / 读取之后：三入口同样走该校验，避免干扰现场准备
+        monkeypatch.setattr(storage_mod, "validate_security_subdomain_integrity", unexpected_corruption)
+
+        result = cfg_mod.ConfigHandler.compare_and_save_model_management(payload["config_revision"], payload, "op-f11d")
+
+        assert result.status == "not_committed"
+        assert result.committed_revision is None
+        # 写前故障零写：磁盘保持原样
+        assert _read_raw_config(isolated_config) == before
 
 
 _DRAINING_TRANSITION: dict = {
