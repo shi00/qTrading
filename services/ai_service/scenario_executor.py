@@ -8,7 +8,8 @@
 - **执行序**：冷却检查 → 连接并发许可（排队计入 deadline）→ mark_dispatched 绑定
   派发身份（不建 attempt 行）→ 逐次 authorize_attempt（每次尝试单独授权，不预发
   下一次重试的许可）→ begin_attempt 建立实际尝试记录 → 适配器执行；不在安全许可
-  后再排队（§4.3）；
+  后再排队（§4.3）；F26 连接资格门控（禁用 / 已确认不支持任务，按冻结快照证据）
+  先于冷却检查——派发前淘汰不合格候选（决策记录 rejected + 原因）；
 - **重试**：同候选默认 1 次、上限 2 次（构造可调），退避 1/2s 与适配器
   Retry-After 取大，并 clamp 至剩余 deadline；
 - **D5 降级**：有限额费用型在账本不可用（mark_dispatched persisted=False）时
@@ -111,9 +112,10 @@ class ScenarioExecutor:
 
         route = next((r for r in snapshot.routes if r.get("scenario_id") == request.scenario_id), None)
         connections_by_id: dict[str, ResolvedConnection] = {}
+        eligibility_by_id: dict[str, _ConnectionEligibility] = {}
         for raw in snapshot.connections:
             try:
-                resolved = _resolve_connection(raw)
+                resolved, eligibility = _resolve_connection(raw)
             except (KeyError, TypeError, ValueError) as e:
                 logger.warning(
                     "[ScenarioExecutor] snapshot connection malformed (%s): %s",
@@ -122,6 +124,7 @@ class ScenarioExecutor:
                 )
                 continue
             connections_by_id[resolved.connection_id] = resolved
+            eligibility_by_id[resolved.connection_id] = eligibility
         decisions: list[CandidateDecision] = []
 
         if route is None:
@@ -151,6 +154,23 @@ class ScenarioExecutor:
                         connection_id=cand.get("connection_id"),
                         decision="rejected",
                         reason="connection not found in snapshot",
+                    )
+                )
+                continue
+
+            # F26 连接资格门控：派发前按冻结快照证据核实启用 / 任务适用性——
+            # 禁用或已确认不支持该任务的连接不派发（零副作用：不取信号量、不绑
+            # 派发身份、不授权）；原因随决策记录不静默（R21）；unknown 等未确认
+            # 状态不门控（按既有确认政策处理），UI 保留不适用项不代表允许执行。
+            ineligibility = _ineligibility_reason(eligibility_by_id[connection.connection_id], request.task_id)
+            if ineligibility is not None:
+                decisions.append(
+                    CandidateDecision(
+                        task_id=str(cand.get("task_id", "")),
+                        candidate_index=int(cand.get("candidate_index", 0)),
+                        connection_id=connection.connection_id,
+                        decision="rejected",
+                        reason=ineligibility,
                     )
                 )
                 continue
@@ -460,16 +480,26 @@ class ScenarioExecutor:
         )
 
 
-def _resolve_connection(raw: Mapping[str, Any]) -> ResolvedConnection:
-    """快照连接定义（mapping，S2 快照契约）→ ResolvedConnection。
+def _resolve_connection(raw: Mapping[str, Any]) -> tuple[ResolvedConnection, _ConnectionEligibility]:
+    """快照连接定义（mapping，S2 快照契约）→ (ResolvedConnection, 资格证据)。
 
     必需字段（connection_id / connection_revision / adapter_kind / model）缺失即抛
     KeyError / ValueError（缺失不伪装，R21 邻域语义），由调用方降级 rejected。
+
+    F26 资格证据（``enabled`` / ``capabilities``）随同一解析点提取，不再丢弃：
+    防御性解析（非 Mapping / 缺 ``support`` 键的证据条目按无证据处理，视为
+    unknown，不门控）；``enabled`` 缺键取 schema 默认 True（与改动前行为一致）。
     """
     adapter_kind = str(raw["adapter_kind"])
     if adapter_kind not in ("litellm_chat", "gguf_chat", "gguf_sentiment"):
         raise ValueError(f"unknown adapter_kind: {adapter_kind}")
-    return ResolvedConnection(
+    capabilities: dict[str, str] = {}
+    capabilities_raw = raw.get("capabilities")
+    if isinstance(capabilities_raw, Mapping):
+        for evidence_task_id, evidence in capabilities_raw.items():
+            if isinstance(evidence, Mapping) and evidence.get("support") is not None:
+                capabilities[str(evidence_task_id)] = str(evidence["support"])
+    resolved = ResolvedConnection(
         connection_id=str(raw["connection_id"]),
         connection_revision=int(raw["connection_revision"]),
         adapter_kind=cast(Literal["litellm_chat", "gguf_chat", "gguf_sentiment"], adapter_kind),
@@ -482,6 +512,33 @@ def _resolve_connection(raw: Mapping[str, Any]) -> ResolvedConnection:
         credential_ref=raw.get("credential_ref"),
         credential_version=raw.get("credential_version"),
     )
+    return resolved, _ConnectionEligibility(enabled=bool(raw.get("enabled", True)), capabilities=capabilities)
+
+
+def _ineligibility_reason(eligibility: _ConnectionEligibility, task_id: str) -> str | None:
+    """连接资格门控判定（F26）：不合格返回原因，合格返回 None。
+
+    仅「已确认」资格事实构成门控：``enabled=False``（用户停用）或该任务能力
+    ``support == "unsupported"``（已确认不支持）；证据缺失 / unknown 等未确认
+    状态不门控（不得未经契约一概禁用，按既有确认政策处理）。
+    """
+    if not eligibility.enabled:
+        return "connection disabled in snapshot"
+    if eligibility.capabilities.get(task_id) == "unsupported":
+        return f"connection unsupported for task {task_id}"
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class _ConnectionEligibility:
+    """冻结连接资格证据（F26）：快照连接映射的启用状态 + 任务能力支持状态。
+
+    仅承载解析后的「已确认」资格事实：``enabled=False`` 或任务能力
+    ``support == "unsupported"`` 才构成派发门控；无证据即 unknown 语义（不门控）。
+    """
+
+    enabled: bool
+    capabilities: Mapping[str, str]
 
 
 @dataclass(frozen=True, slots=True)
