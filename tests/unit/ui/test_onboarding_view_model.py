@@ -583,6 +583,183 @@ class TestOnboardingVMScheduleValidation:
 
 
 # =====================================================================
+# Test: Schedule validation cache invalidation (UIR-F02-003)
+# =====================================================================
+
+
+class TestOnboardingVMScheduleCacheInvalidation:
+    """UIR-F02-003: 完成页返回后修改计划草稿必须重新校验并落盘。
+
+    缓存只允许覆盖「与最近一次成功落盘完全相同的草稿」；未改值时保持幂等（不重复写盘）。
+    """
+
+    @staticmethod
+    def _bind_view_draft(bound_vm, draft: dict[str, object]) -> None:
+        """模拟 View 注入的 fn_push_schedule_state：把当前局部草稿推给 VM。"""
+        bound_vm.fn_push_schedule_state = MagicMock(
+            side_effect=lambda: bound_vm.set_schedule_state(
+                enabled=bool(draft["enabled"]),
+                time_str=str(draft["time"]),
+            )
+        )
+
+    def _setup(self, bound_vm, mock_config_handler, draft: dict[str, object]):
+        bound_vm.current_step = 5  # schedule step
+        mock_config_handler.save_config = MagicMock(return_value=True)
+        self._bind_view_draft(bound_vm, draft)
+        return bound_vm
+
+    def _edit_draft(self, bound_vm, draft: dict[str, object], *, invalidate: bool, **changes: object) -> None:
+        """按 View 语义修改草稿：更新局部草稿，并按需触发 on_change 缓存失效。"""
+        draft.update(changes)
+        if invalidate:
+            bound_vm.invalidate_step("schedule")
+
+    async def test_time_change_after_complete_return_resaves_latest_value(self, bound_vm, mock_config_handler):
+        """完成页返回后（未触发 change 回调）改时间：仍按草稿快照差异重新落盘。"""
+        draft: dict[str, object] = {"enabled": True, "time": "08:00"}
+        self._setup(bound_vm, mock_config_handler, draft)
+
+        assert await bound_vm.next_step() is True
+        assert bound_vm.current_step == 6
+        mock_config_handler.save_config.assert_called_once_with(
+            {"auto_update_enabled": True, "auto_update_time": "08:00"}
+        )
+
+        await bound_vm.prev_step()
+        assert bound_vm.current_step == 5
+        assert bound_vm.is_step_validated("schedule") is True  # 返回不失效，缓存仍命中
+
+        self._edit_draft(bound_vm, draft, invalidate=False, time="09:00")
+
+        assert await bound_vm.next_step() is True
+        assert bound_vm.current_step == 6
+        assert mock_config_handler.save_config.call_count == 2
+        assert mock_config_handler.save_config.call_args.args[0] == {
+            "auto_update_enabled": True,
+            "auto_update_time": "09:00",
+        }
+
+    async def test_enabled_change_after_complete_return_resaves_latest_value(self, bound_vm, mock_config_handler):
+        """只改开关（时间不变）也必须重新落盘，payload 反映最新开关值。"""
+        draft: dict[str, object] = {"enabled": True, "time": "16:30"}
+        self._setup(bound_vm, mock_config_handler, draft)
+
+        assert await bound_vm.next_step() is True
+        assert bound_vm.current_step == 6
+
+        await bound_vm.prev_step()
+        self._edit_draft(bound_vm, draft, invalidate=True, enabled=False)
+
+        assert await bound_vm.next_step() is True
+        assert bound_vm.current_step == 6
+        assert mock_config_handler.save_config.call_count == 2
+        assert mock_config_handler.save_config.call_args.args[0] == {
+            "auto_update_enabled": False,
+            "auto_update_time": "16:30",
+        }
+
+    async def test_time_change_after_complete_return_resaves_when_cache_invalidated(
+        self, bound_vm, mock_config_handler
+    ):
+        """View on_change 失效缓存后改时间：重新校验并落盘最新值。"""
+        draft: dict[str, object] = {"enabled": True, "time": "08:00"}
+        self._setup(bound_vm, mock_config_handler, draft)
+
+        assert await bound_vm.next_step() is True
+        await bound_vm.prev_step()
+        self._edit_draft(bound_vm, draft, invalidate=True, time="09:00")
+        assert bound_vm.is_step_validated("schedule") is False
+
+        assert await bound_vm.next_step() is True
+        assert bound_vm.current_step == 6
+        assert mock_config_handler.save_config.call_count == 2
+        assert mock_config_handler.save_config.call_args.args[0] == {
+            "auto_update_enabled": True,
+            "auto_update_time": "09:00",
+        }
+
+    async def test_unchanged_draft_after_complete_return_skips_second_write(self, bound_vm, mock_config_handler):
+        """未改值：缓存命中且草稿快照一致，不产生第二次写盘；草稿仍在缓存短路前推送。"""
+        draft: dict[str, object] = {"enabled": True, "time": "08:00"}
+        self._setup(bound_vm, mock_config_handler, draft)
+
+        assert await bound_vm.next_step() is True
+        await bound_vm.prev_step()
+        assert await bound_vm.next_step() is True
+
+        assert bound_vm.current_step == 6
+        assert mock_config_handler.save_config.call_count == 1
+        assert bound_vm.fn_push_schedule_state.call_count == 2
+        assert bound_vm.is_step_validated("schedule") is True
+
+    async def test_second_save_false_stays_on_schedule_and_not_validated(self, bound_vm, mock_config_handler):
+        """第二次落盘返回 False：停留 schedule 步，不缓存成功。"""
+        draft: dict[str, object] = {"enabled": True, "time": "08:00"}
+        self._setup(bound_vm, mock_config_handler, draft)
+
+        assert await bound_vm.next_step() is True
+        await bound_vm.prev_step()
+        self._edit_draft(bound_vm, draft, invalidate=True, time="09:00")
+        mock_config_handler.save_config = MagicMock(return_value=False)
+
+        assert await bound_vm.next_step() is False
+        assert bound_vm.current_step == 5
+        assert bound_vm.is_step_validated("schedule") is False
+        assert mock_config_handler.save_config.call_count == 1
+        assert mock_config_handler.save_config.call_args.args[0] == {
+            "auto_update_enabled": True,
+            "auto_update_time": "09:00",
+        }
+
+    async def test_second_save_exception_stays_on_schedule_and_not_validated(self, bound_vm, mock_config_handler):
+        """第二次落盘抛异常：停留 schedule 步，不缓存成功。"""
+        draft: dict[str, object] = {"enabled": True, "time": "08:00"}
+        self._setup(bound_vm, mock_config_handler, draft)
+
+        assert await bound_vm.next_step() is True
+        await bound_vm.prev_step()
+        self._edit_draft(bound_vm, draft, invalidate=True, time="09:00")
+        mock_config_handler.save_config = MagicMock(side_effect=RuntimeError("disk full"))
+
+        assert await bound_vm.next_step() is False
+        assert bound_vm.current_step == 5
+        assert bound_vm.is_step_validated("schedule") is False
+
+    async def test_failed_second_save_retry_writes_latest_draft(self, bound_vm, mock_config_handler):
+        """第二次失败后重试：草稿快照未更新，重试必须再次写盘并前进。"""
+        draft: dict[str, object] = {"enabled": True, "time": "08:00"}
+        self._setup(bound_vm, mock_config_handler, draft)
+
+        assert await bound_vm.next_step() is True
+        await bound_vm.prev_step()
+        self._edit_draft(bound_vm, draft, invalidate=True, time="09:00")
+        mock_config_handler.save_config = MagicMock(return_value=False)
+        assert await bound_vm.next_step() is False
+
+        mock_config_handler.save_config = MagicMock(return_value=True)
+        assert await bound_vm.next_step() is True
+        assert bound_vm.current_step == 6
+        assert mock_config_handler.save_config.call_count == 1
+        assert mock_config_handler.save_config.call_args.args[0] == {
+            "auto_update_enabled": True,
+            "auto_update_time": "09:00",
+        }
+
+    def test_persisted_schedule_snapshot_not_shared_across_instances(self, vm, mock_config_handler):
+        """缓存快照为实例私有：新向导实例既无验证缓存也无落盘快照（不跨实例泄漏）。"""
+        assert vm._persisted_schedule is None
+        vm.current_step = 5
+        vm._persisted_schedule = (True, "08:00")
+        vm._step_validated["schedule"] = True
+        vm.dispose()
+
+        fresh = OnboardingViewModel()
+        assert fresh._persisted_schedule is None
+        assert fresh.is_step_validated("schedule") is False
+
+
+# =====================================================================
 # Test: Language Save
 # =====================================================================
 

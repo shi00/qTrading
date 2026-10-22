@@ -707,6 +707,8 @@ class _FakeOnboardingViewModel:
         self._subscribers: list[Any] = []
         self.dispose_called: bool = False
         self.bind_called: bool = False
+        #: UIR-F02-003: 记录 View 触发的验证缓存失效步骤。
+        self.invalidated_steps: list[str] = []
         # 异步方法需返回 awaitable（event handler 通过 page.run_task 调用）
         self.next_step = AsyncMock()
         self.prev_step = AsyncMock()
@@ -736,8 +738,8 @@ class _FakeOnboardingViewModel:
     def bind(self, **kwargs: Any) -> None:  # noqa: ARG002
         self.bind_called = True
 
-    def invalidate_step(self, step_id: str) -> None:  # noqa: ARG002
-        pass
+    def invalidate_step(self, step_id: str) -> None:
+        self.invalidated_steps.append(step_id)
 
     def set_schedule_state(self, *, enabled: bool, time_str: str) -> None:  # noqa: ARG002
         pass
@@ -1613,3 +1615,77 @@ class TestOnboardingWizardComponentBody:
         _context_page.set(None)
         # 不抛异常即覆盖 page=None 降级路径
         _show_snack("test message", "#FF0000")
+
+
+# ============================================================================
+# UIR-F02-003: schedule 草稿变更失效验证缓存（View 联动）
+# ============================================================================
+
+
+class TestWizardScheduleCacheInvalidation:
+    """计划草稿输入 on_change 必须失效 schedule 验证缓存，避免完成页返回后跳过落盘。"""
+
+    def _render_step5(self, mock_onboarding_vms):
+        from ui.views.onboarding_wizard import OnboardingWizard
+
+        fake_vm = mock_onboarding_vms["onboarding"]
+        fake_vm._state = replace(fake_vm._state, current_step=5)
+        component = make_component(OnboardingWizard)
+        page = _make_fake_page()
+        run_mount_effects(component, page)
+        return fake_vm, render_once(component)
+
+    def test_schedule_checkbox_change_invalidates_validation_cache(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_onboarding_vms,
+    ):
+        """开关 on_change → set 局部草稿 + invalidate_step("schedule")。"""
+        fake_vm, result = self._render_step5(mock_onboarding_vms)
+        checkboxes = [c for c in _collect_controls(result) if isinstance(c, ft.Checkbox)]
+        assert len(checkboxes) == 1
+
+        event = MagicMock()
+        event.control.value = False
+        checkboxes[0].on_change(event)  # type: ignore[reportCallIssue]  # Flet stub declares on_change as 0-arg, but runtime passes event
+
+        assert fake_vm.invalidated_steps == ["schedule"]
+
+    def test_schedule_time_change_invalidates_validation_cache(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_onboarding_vms,
+    ):
+        """时间 on_change → set 局部草稿 + invalidate_step("schedule")。"""
+        fake_vm, result = self._render_step5(mock_onboarding_vms)
+        time_fields = [c for c in _collect_controls(result) if isinstance(c, ft.TextField)]
+        assert len(time_fields) == 1
+
+        event = MagicMock()
+        event.control.value = "09:00"
+        time_fields[0].on_change(event)  # type: ignore[reportCallIssue]  # Flet stub declares on_change as 0-arg, but runtime passes event
+
+        assert fake_vm.invalidated_steps == ["schedule"]
+
+    def test_schedule_next_button_triggers_same_next_step_command(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_onboarding_vms,
+    ):
+        """「完成」按钮与时间输入 Enter 走同一命令（vm.next_step）。"""
+        from ui.i18n import I18n
+
+        fake_vm, result = self._render_step5(mock_onboarding_vms)
+        buttons = [
+            c
+            for c in _collect_controls(result)
+            if isinstance(c, ft.Button) and c.content == I18n.get("wizard_btn_finish")
+        ]
+        assert len(buttons) == 1
+
+        buttons[0].on_click(MagicMock())  # type: ignore[reportCallIssue]  # Flet stub declares on_click as 0-arg, but runtime passes event
+
+        fake_vm.next_step.assert_awaited_once_with()
