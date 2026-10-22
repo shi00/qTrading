@@ -10,7 +10,9 @@
 - CancelledError 始终传播（R2），不包装为失败；
 - deadline 耗尽停止遍历；
 - 有限额费用型在 mark_dispatched persisted=False 时禁止派发（D5）；
-- 并发上限：同连接 concurrency_limit=1 时并发 execute 串行。
+- 并发上限：同连接 concurrency_limit=1 时并发 execute 串行；
+- F26 连接资格门控：禁用 / 已确认不支持任务的连接派发前淘汰（零调用 +
+  rejected + 原因），unknown / 证据缺失不门控。
 """
 
 import asyncio
@@ -62,8 +64,10 @@ def _candidate(index: int, connection_id: str, task_id: str = "sentiment") -> di
     }
 
 
-def _snapshot(candidates: tuple[dict, ...], connections: tuple[ResolvedConnection, ...]) -> ExecutionSnapshot:
-    # 快照 connections 契约为 mapping（S2 快照形态），经 asdict 模拟生产序列化形态
+def _snapshot(candidates: tuple[dict, ...], connections: tuple[ResolvedConnection | dict, ...]) -> ExecutionSnapshot:
+    # 快照 connections 契约为 mapping（S2 快照形态），经 asdict 模拟生产序列化形态；
+    # F26：允许直接传入携带资格证据（enabled / capabilities）的原始 mapping。
+    serialized = tuple(dataclasses.asdict(c) if isinstance(c, ResolvedConnection) else dict(c) for c in connections)
     return ExecutionSnapshot(
         snapshot_id="snap-1",
         run_id=None,
@@ -75,7 +79,7 @@ def _snapshot(candidates: tuple[dict, ...], connections: tuple[ResolvedConnectio
                 "candidates": candidates,
             },
         ),
-        connections=tuple(dataclasses.asdict(c) for c in connections),
+        connections=serialized,
         business_contract_versions={"sentiment": "v1"},
         security_scope_version=1,
         created_at="2026-10-16T00:00:00Z",
@@ -540,3 +544,150 @@ def _adapter_always_fail() -> MagicMock:
 
     adapter.invoke = AsyncMock(side_effect=_invoke)
     return adapter
+
+
+def _raw_connection(
+    connection_id: str = "conn-remote",
+    *,
+    enabled: bool = True,
+    capabilities: dict | None = None,
+) -> dict:
+    """F26：携带资格证据的快照连接 mapping（S2 生产序列化形态 + 资格字段）。"""
+    raw = dataclasses.asdict(_remote_conn(connection_id))
+    raw["enabled"] = enabled
+    if capabilities is not None:
+        raw["capabilities"] = capabilities
+    return raw
+
+
+class TestEligibilityGate:
+    """F26 连接资格门控：派发前按冻结快照证据淘汰禁用 / 已确认不支持任务的连接。
+
+    回归基线（检视 P03）：在放行许可替身（authorize 全放行）下，真实 Executor
+    不得调用 disabled+unsupported 连接。
+    """
+
+    @pytest.mark.asyncio
+    async def test_disabled_connection_not_dispatched(self):
+        """禁用连接零调用：不授权、不绑定派发身份、不执行，决策记录 rejected + 原因。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot((_candidate(0, "conn-remote"),), (_raw_connection(enabled=False),)),
+            _validator_ok,
+        )
+        adapter.invoke.assert_not_awaited()
+        executor._config_service.authorize_attempt.assert_not_awaited()
+        recorder.mark_dispatched.assert_not_awaited()
+        assert result.status == "failed"
+        assert not result.outputs
+        assert len(result.candidate_decisions) == 1
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert decision.reason == "connection disabled in snapshot"
+        assert decision.connection_id == "conn-remote"
+
+    @pytest.mark.asyncio
+    async def test_unsupported_task_not_dispatched(self):
+        """已确认不支持该任务的连接零调用，原因随决策记录（R21 不静默）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_candidate(0, "conn-remote"),),
+                (_raw_connection(capabilities={"sentiment": {"support": "unsupported", "source": "validation"}}),),
+            ),
+            _validator_ok,
+        )
+        adapter.invoke.assert_not_awaited()
+        recorder.mark_dispatched.assert_not_awaited()
+        assert result.status == "failed"
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert decision.reason == "connection unsupported for task sentiment"
+
+    @pytest.mark.asyncio
+    async def test_unknown_capability_still_dispatched(self):
+        """unknown 状态不门控（既有确认政策）：连接照常派发执行成功。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_candidate(0, "conn-remote"),),
+                (_raw_connection(capabilities={"sentiment": {"support": "unknown", "source": "user_declaration"}}),),
+            ),
+            _validator_ok,
+        )
+        adapter.invoke.assert_awaited_once()
+        assert result.status == "succeeded"
+
+    @pytest.mark.asyncio
+    async def test_other_task_unsupported_does_not_gate(self):
+        """任务能力按请求任务核对：其他任务 unsupported 不影响本任务派发。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_candidate(0, "conn-remote"),),
+                (_raw_connection(capabilities={"analysis": {"support": "unsupported"}}),),
+            ),
+            _validator_ok,
+        )
+        adapter.invoke.assert_awaited_once()
+        assert result.status == "succeeded"
+
+    @pytest.mark.asyncio
+    async def test_malformed_capability_evidence_ignored(self):
+        """畸形证据（非 Mapping 证据 / 缺 support 键）按无证据处理，不门控不伪装。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_candidate(0, "conn-remote"),),
+                (_raw_connection(capabilities={"sentiment": "unsupported", "topic": {"source": "validation"}}),),
+            ),
+            _validator_ok,
+        )
+        adapter.invoke.assert_awaited_once()
+        assert result.status == "succeeded"
+
+    @pytest.mark.asyncio
+    async def test_ineligible_first_candidate_switches_to_next(self):
+        """首候选禁用被拒后切换下一候选：rejected 与 succeeded 决策并存。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_candidate(0, "conn-disabled"), _candidate(1, "conn-remote")),
+                (_raw_connection("conn-disabled", enabled=False), _raw_connection()),
+            ),
+            _validator_ok,
+        )
+        assert result.status == "succeeded"
+        decisions = result.candidate_decisions
+        assert [d.decision for d in decisions] == ["rejected", "succeeded"]
+        assert decisions[0].reason == "connection disabled in snapshot"
+
+    @pytest.mark.asyncio
+    async def test_connection_without_evidence_fields_unchanged(self):
+        """无资格字段的连接（存量快照形态）行为不变：enabled 缺键按启用不门控。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        adapter.invoke.assert_awaited_once()
+        assert result.status == "succeeded"
