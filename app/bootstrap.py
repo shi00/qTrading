@@ -82,7 +82,7 @@ class _LiteLLMChatAdapter:
 
 
 class _GGUFAdapter:
-    """``gguf_chat`` / ``gguf_sentiment`` 适配器（D7）：薄委托 LocalModelManager 单连接入口。"""
+    """``gguf_chat`` 适配器（D7）：薄委托 LocalModelManager 单连接入口。"""
 
     async def invoke(
         self,
@@ -96,6 +96,27 @@ class _GGUFAdapter:
         return await LocalModelManager().invoke_for_connection(request, resolved_connection, deadline, attempt_context)
 
 
+class _GGUFSentimentAdapter:
+    """``gguf_sentiment`` 适配器（F24 断裂 1 修复）：薄委托专用情绪转译层。
+
+    检视 F24：gguf_sentiment 曾误绑 LocalModelManager.invoke_for_connection（聊天
+    生成路径，把编码器模型当聊天模型跑），专用转译层 gguf_sentiment_adapter
+    从未接线。本类仅补齐对象协议外壳，转译语义由
+    :func:`services.ai_service.gguf_sentiment_adapter.invoke` 单点承载。
+    """
+
+    async def invoke(
+        self,
+        request: InferenceRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+    ) -> AdapterResponse:
+        from services.ai_service.gguf_sentiment_adapter import invoke as invoke_sentiment
+
+        return await invoke_sentiment(request, resolved_connection, deadline, attempt_context)
+
+
 def _build_default_adapters() -> dict[str, InferenceAdapter]:
     """适配器协议注入（D7）：litellm 单连接 / 本地 GGUF 统一 invoke（检视 F02）。
 
@@ -106,7 +127,7 @@ def _build_default_adapters() -> dict[str, InferenceAdapter]:
     adapters: dict[str, InferenceAdapter] = {
         "litellm_chat": _LiteLLMChatAdapter(),
         "gguf_chat": _GGUFAdapter(),
-        "gguf_sentiment": _GGUFAdapter(),
+        "gguf_sentiment": _GGUFSentimentAdapter(),
     }
     for kind, adapter in adapters.items():
         ensure_inference_adapter(kind, adapter)

@@ -1100,6 +1100,84 @@ class TestScenarioChainWiring:
         assert "error" not in am
 
     @pytest.mark.asyncio
+    async def test_new_chain_gguf_numbers_passthrough(self, svc):
+        """F24 断裂 4：GGUF dedicated 成功链数值三列透传落库，不再无条件清空。
+
+        ai_result 携带编码器真实数值与产物身份（NewsClassifier 校验器产出），
+        订阅层原样透传 → normalize → save 载荷；analysis_metadata 数值状态与
+        DAO sentiment_applied=True 原子分支语义保持一致。
+        """
+        saved, classify, mock_score = await self._run_with_classify(
+            svc,
+            {"content": "央行发布新政策", "time": "2024-01-01"},
+            {
+                "category_L1": "macro_policy",
+                "category_L2": "",
+                "category": "政策",
+                "emoji": "🏛️",
+                "sentiment": "Positive",
+                "sentiment_score": 0.6,
+                "sentiment_conf": 0.7,
+                "sentiment_model": "finbert2-base",
+                "sentiment_status": "success",
+                "sentiment_source": "dedicated:gguf",
+                "execution_metadata": {
+                    "invocation_id": "inv-gguf",
+                    "route_revision": 2,
+                    "connection_id": "conn-9",
+                    "connection_revision": 1,
+                    "actual_model": "finbert2-base",
+                    "usage_status": "reported",
+                },
+            },
+        )
+        classify.assert_called_once_with("央行发布新政策")
+        mock_score.assert_not_awaited()  # 执行器之后不再打分（数值来自编码器校验器）
+        assert saved["sentiment"] == "Positive"
+        assert saved["sentiment_score"] == 0.6
+        assert saved["sentiment_conf"] == 0.7
+        assert saved["sentiment_model"] == "finbert2-base"
+        am = saved["analysis_metadata"]
+        assert am["sentiment_applied"] is True
+        assert am["sentiment_status"] == "success"
+        assert am["sentiment_source"] == "dedicated:gguf"
+        assert am["connection_id"] == "conn-9"
+        assert am["actual_model"] == "finbert2-base"
+
+    @pytest.mark.asyncio
+    async def test_new_chain_gguf_partial_numbers_kept(self, svc):
+        """F24：GGUF partial 链有效条目数值照常落库，状态透传不伪装 success（R21）。"""
+        saved, _, mock_score = await self._run_with_classify(
+            svc,
+            {"content": "震荡整理", "time": "2024-01-01"},
+            {
+                "category": "unknown",
+                "sentiment": "Neutral",
+                "sentiment_score": None,
+                "sentiment_conf": None,
+                "sentiment_model": "finbert2-base",
+                "sentiment_status": "partial",
+                "sentiment_source": "dedicated:gguf",
+                "execution_metadata": {
+                    "invocation_id": "inv-gguf-partial",
+                    "route_revision": 2,
+                    "connection_id": "conn-9",
+                    "connection_revision": 1,
+                    "actual_model": "finbert2-base",
+                    "usage_status": "reported",
+                },
+            },
+        )
+        mock_score.assert_not_awaited()
+        assert saved["sentiment"] == "Neutral"
+        assert saved["sentiment_score"] is None
+        assert saved["sentiment_conf"] is None
+        assert saved["sentiment_model"] == "finbert2-base"
+        am = saved["analysis_metadata"]
+        assert am["sentiment_applied"] is True
+        assert am["sentiment_status"] == "partial"
+
+    @pytest.mark.asyncio
     async def test_new_chain_failure_group_kept_via_dao_branch(self, svc):
         """新链全失败：sentiment_applied=False（旧成功组由 DAO 条件分支保留）+ error 通道。"""
         saved, _, mock_score = await self._run_with_classify(

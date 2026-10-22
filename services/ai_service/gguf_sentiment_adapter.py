@@ -35,16 +35,25 @@ if TYPE_CHECKING:
 
 
 def _serialize_results(results: tuple[ScoredText, ...]) -> list[dict[str, Any]]:
-    """ScoredText 元组 → JSON 安全 dict 列表（tuple → list；None 保持 null，R21）。"""
-    return [
-        {
-            "text_id": r.text_id,
-            "label": r.label,
-            "probabilities": list(r.probabilities) if r.probabilities is not None else None,
-            "score": r.score,
-        }
-        for r in results
-    ]
+    """ScoredText 元组 → JSON 安全 dict 列表（tuple → list；None 保持 null，R21）。
+
+    F24 断裂 3 数值协议：``confidence`` = max(probabilities)（与 scorer
+    ``apply_head_and_score`` 的 confidence 口径一致），随 label/score 一起
+    承载编码器真实数值与产物身份，业务侧（news_classifier 校验器）无需重复推导。
+    """
+    serialized: list[dict[str, Any]] = []
+    for r in results:
+        confidence = max(r.probabilities) if r.probabilities is not None else None
+        serialized.append(
+            {
+                "text_id": r.text_id,
+                "label": r.label,
+                "probabilities": list(r.probabilities) if r.probabilities is not None else None,
+                "score": r.score,
+                "confidence": confidence,
+            }
+        )
+    return serialized
 
 
 def _outcome_to_response(outcome: ScoringOutcome, model_path: str) -> AdapterResponse:

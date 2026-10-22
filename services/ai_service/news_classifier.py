@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import uuid
 from dataclasses import replace as dataclass_replace
 from typing import TYPE_CHECKING, Any, Final, cast
@@ -45,6 +46,11 @@ NEWS_TEXT_MAX_LEN = 500
 # S4（§8.1）：情绪取值契约与存量入库 code 一致（news_subscription_service
 # _LLM_SENTIMENT_CODES / MarketNews.sentiment 列），严格大小写；非法/缺失归 None（R21）。
 _SENTIMENT_ENUM: Final[tuple[str, ...]] = ("Positive", "Neutral", "Negative")
+
+# F24 断裂 3：GGUF 专用情绪链 label → 入库 code 映射。与 news_subscription_service
+# _SENTIMENT_LABEL_TO_CODE 同契约（scorer head.npz 标签序 _LABELS_REQUIRED 为唯一事实源）；
+# 不跨模块 import（news_subscription_service 顶层 import AIService，反向引入会成环）。
+_GGUF_LABEL_TO_CODE: Final[dict[str, str]] = {"利好": "Positive", "中性": "Neutral", "利空": "Negative"}
 
 # bundled 联合 prompt 的情绪输出要求（附加在主题 prompt 之后，一次请求同时产出主题+情绪）。
 _BUNDLED_SENTIMENT_INSTRUCTION: Final[str] = (
@@ -96,8 +102,27 @@ def _validate_bundled_output(response: AdapterResponse) -> ValidatedBusinessOutp
     return ValidatedBusinessOutput(output=output, metadata=metadata)
 
 
-def _validate_sentiment_output(response: AdapterResponse) -> ValidatedBusinessOutput:
-    """dedicated 情绪子任务输出校验（task_id="sentiment"）：无效输出抛错切换候选。"""
+def _finite_float(value: object) -> float | None:
+    """数值列协议归一（F24）：有限 int/float → float；缺失/坏值/NaN/Inf → None（R21）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _validate_gguf_sentiment_output(response: AdapterResponse) -> ValidatedBusinessOutput:
+    """GGUF 专用情绪协议校验（F24 断裂 3）：adapter 的 status/results JSON → 业务输出。
+
+    - 仅接受 ``status ∈ {"success", "partial"}``（其余终态 adapter 已转译为异常，
+      到达即契约破坏，抛错切换候选）；
+    - 按 ``text_id="0"`` 取本请求（单文本）条目；条目缺失 / label 缺失或未知 →
+      :class:`ModelOutputValidationError`（Executor 切换候选；全候选耗尽 →
+      unavailable → 情绪缺失，R21 不伪装）；
+    - score / confidence 经 :func:`_finite_float` 归一（坏值归 None，不因数值列
+      坏而丢弃有效 label；合法中性/零分不误报缺失）；
+    - ``sentiment_model`` 取 adapter 产出身份（actual_model = 模型文件 stem tag，
+      与 sentiment 数值同源，产物溯源不丢）。
+    """
     content = response.content
     if not content:
         raise ModelOutputValidationError("sentiment output: empty content")
@@ -107,6 +132,60 @@ def _validate_sentiment_output(response: AdapterResponse) -> ValidatedBusinessOu
         raise ModelOutputValidationError(f"sentiment output: invalid json ({type(e).__name__})") from e
     if not isinstance(raw, dict):
         raise ModelOutputValidationError("sentiment output: non-dict payload")
+
+    status = raw.get("status")
+    if status not in ("success", "partial"):
+        raise ModelOutputValidationError(f"sentiment output: invalid status ({status!r})")
+
+    results = raw.get("results")
+    if not isinstance(results, list) or not results:
+        raise ModelOutputValidationError("sentiment output: results missing or empty")
+
+    entry = next((r for r in results if isinstance(r, dict) and r.get("text_id") == "0"), results[0])
+    if not isinstance(entry, dict):
+        raise ModelOutputValidationError("sentiment output: result entry is not an object")
+
+    raw_label = entry.get("label")
+    code = _GGUF_LABEL_TO_CODE.get(raw_label) if isinstance(raw_label, str) else None
+    if code is None:
+        raise ModelOutputValidationError(f"sentiment output: invalid label ({raw_label!r})")
+
+    metadata = {"actual_model": response.actual_model, **dict(response.metadata)}
+    return ValidatedBusinessOutput(
+        output={
+            "sentiment": code,
+            "sentiment_score": _finite_float(entry.get("score")),
+            # confidence 为 adapter 协议字段（max(probabilities) 口径，与 scorer
+            # apply_head_and_score 一致），校验器消费产物、不重复推导。
+            "sentiment_conf": _finite_float(entry.get("confidence")),
+            "sentiment_model": response.actual_model,
+            "sentiment_status": status,
+        },
+        metadata=metadata,
+    )
+
+
+def _validate_sentiment_output(response: AdapterResponse) -> ValidatedBusinessOutput:
+    """dedicated 情绪子任务输出校验（task_id="sentiment"）：无效输出抛错切换候选。
+
+    F24 双协议分流（同一 sentiment 子路由候选可混排 litellm_chat / gguf_sentiment，
+    校验器按 AdapterResponse.content 结构区分）：
+    - GGUF 专用协议（含 ``results`` 键）→ :func:`_validate_gguf_sentiment_output`；
+    - 聊天 LLM 协议（顶层 ``sentiment`` 白名单值）→ 原逻辑不变（缺失即抛，
+      LLM 无校准数值，score/conf/model 三列不产出）。
+    """
+    content = response.content
+    if not content:
+        raise ModelOutputValidationError("sentiment output: empty content")
+    try:
+        raw = json.loads(content)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise ModelOutputValidationError(f"sentiment output: invalid json ({type(e).__name__})") from e
+    if not isinstance(raw, dict):
+        raise ModelOutputValidationError("sentiment output: non-dict payload")
+
+    if "results" in raw:
+        return _validate_gguf_sentiment_output(response)
 
     sentiment = raw.get("sentiment")
     if sentiment not in _SENTIMENT_ENUM:
@@ -456,6 +535,9 @@ class NewsClassifier:
             payload={
                 "system_prompt": _SENTIMENT_DEDICATED_SYSTEM,
                 "prompt": text,
+                # F24 断裂 2：gguf_sentiment 候选要求 texts 协议（专用 adapter 校验），
+                # litellm_chat 候选忽略该键；单请求单文本，text_id="0"。
+                "texts": [text],
                 "json_mode": True,
             },
             deadline=loop.time() + dispatch.total_timeout_seconds,
@@ -498,8 +580,15 @@ class NewsClassifier:
             }
 
         if sentiment_result is not None:
-            result["sentiment"] = cast(ScenarioOutput, sentiment_result.outputs[0]).output.get("sentiment")
-            result["sentiment_status"] = "success"
+            # F24 断裂 4：GGUF 专用链 output 额外携带数值三列与部分失败状态
+            # （校验器产出）；LLM 链 output 仅 sentiment → 数值列缺失归 None
+            # （LLM 无校准数值，R21 不填 0）。partial 状态透传（部分失败不伪装成功）。
+            sentiment_output = dict(cast(ScenarioOutput, sentiment_result.outputs[0]).output)
+            result["sentiment"] = sentiment_output.get("sentiment")
+            result["sentiment_score"] = sentiment_output.get("sentiment_score")
+            result["sentiment_conf"] = sentiment_output.get("sentiment_conf")
+            result["sentiment_model"] = sentiment_output.get("sentiment_model")
+            result["sentiment_status"] = sentiment_output.get("sentiment_status") or "success"
             adapter_kind = self._sentiment_adapter_kind(dispatch, sentiment_result)
             result["sentiment_source"] = "dedicated:gguf" if adapter_kind else "dedicated:llm"
             # 主 execution_metadata 以情绪任务身份补充连接信息（主题失败时为情绪身份）

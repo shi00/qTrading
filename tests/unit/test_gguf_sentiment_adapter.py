@@ -114,6 +114,7 @@ class TestOutcomeToResponse:
             "label": "利好",
             "probabilities": [0.1, 0.2, 0.7],
             "score": 0.6,
+            "confidence": 0.7,
         }
 
     def test_partial_keeps_status(self):
@@ -136,8 +137,15 @@ class TestOutcomeToResponse:
         )
         response = _outcome_to_response(outcome, "models/finbert2-base.gguf")
         payload = json.loads(response.content)
-        assert payload["results"][0] == {"text_id": "0", "label": None, "probabilities": None, "score": None}
+        assert payload["results"][0] == {
+            "text_id": "0",
+            "label": None,
+            "probabilities": None,
+            "score": None,
+            "confidence": None,
+        }
         assert payload["results"][1]["probabilities"] == [0.5, 0.4, 0.1]
+        assert payload["results"][1]["confidence"] == 0.5
 
     def test_timeout_raises_timeout_error(self):
         from services.ai_service.gguf_sentiment_adapter import _outcome_to_response

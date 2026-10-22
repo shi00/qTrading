@@ -29,6 +29,8 @@ from services.ai_service.news_classifier import (
     NEWS_TEXT_MAX_LEN,
     NewsClassifier,
     _validate_bundled_output,
+    _validate_gguf_sentiment_output,
+    _validate_sentiment_output,
 )
 from services.ai_service.scenario_executor import ScenarioOutput
 
@@ -133,8 +135,13 @@ def _dispatch(mode: str = "bundled", sentiment_candidates: list[str] | None = No
     return dispatch
 
 
-def _patch_env(monkeypatch, dispatch: MagicMock | None):
-    """patch 分派环境：provider + config service。"""
+def _patch_env(monkeypatch, dispatch: MagicMock | None, connections: tuple | None = None):
+    """patch 分派环境：provider + config service。
+
+    connections（F24）：可选覆盖快照连接定义——dedicated gguf 全链路用例需为
+    情绪候选连接声明 adapter_kind="gguf_sentiment"（_sentiment_adapter_kind
+    据此判定 sentiment_source）；默认保持原连接形态，存量用例不受影响。
+    """
 
     svc = {"executor": dispatch.executor} if dispatch is not None else None
     scenario_dispatch.set_scheduling_services_provider(lambda: svc)
@@ -148,7 +155,7 @@ def _patch_env(monkeypatch, dispatch: MagicMock | None):
             config_revision=7,
             migration_state="active" if dispatch is not None else "pending",
             migration_transition=None,
-            connections=({"connection_id": "conn-1"},),
+            connections=connections if connections is not None else ({"connection_id": "conn-1"},),
             scenario_routes=(
                 {
                     "scenario_id": _SCENARIO_ID,
@@ -210,6 +217,156 @@ def test_validate_output_topic_invalid_raises(content):
         _validate_bundled_output(_adapter_response(content))
     # 强断言：三类拒绝（empty/invalid json/L1 白名单外）均以 "bundled output:" 前缀承载原因。
     assert str(excinfo.value).startswith("bundled output:")
+
+
+# ---------------------------------------------------------------------------
+# F24：GGUF 专用情绪协议校验（_validate_gguf_sentiment_output）
+# ---------------------------------------------------------------------------
+
+
+def _gguf_content(status: str = "success", results: list | None = None) -> str:
+    """构造 gguf_sentiment adapter 的 content JSON（status/results 协议）。"""
+    if results is None:
+        results = [
+            {
+                "text_id": "0",
+                "label": "利好",
+                "probabilities": [0.1, 0.2, 0.7],
+                "score": 0.6,
+                "confidence": 0.7,
+            }
+        ]
+    return json.dumps({"status": status, "results": results}, ensure_ascii=False)
+
+
+def test_validate_gguf_output_positive_with_numbers():
+    """利好 → Positive，score/conf/model 数值协议透传（F24 断裂 3 修复）。"""
+    out = _validate_gguf_sentiment_output(_adapter_response(_gguf_content()))
+    assert out.output == {
+        "sentiment": "Positive",
+        "sentiment_score": 0.6,
+        "sentiment_conf": 0.7,
+        "sentiment_model": "glm-4-air",
+        "sentiment_status": "success",
+    }
+    assert out.metadata["actual_model"] == "glm-4-air"
+
+
+def test_validate_gguf_output_neutral_zero_score_kept():
+    """合法中性 / 零分保留：score=0.0 是业务合法值，不误报缺失（R21 反例）。"""
+    out = _validate_gguf_sentiment_output(
+        _adapter_response(
+            _gguf_content(
+                results=[
+                    {"text_id": "0", "label": "中性", "probabilities": [0.2, 0.6, 0.2], "score": 0.0, "confidence": 0.6}
+                ]
+            )
+        )
+    )
+    assert out.output["sentiment"] == "Neutral"
+    assert out.output["sentiment_score"] == 0.0
+    assert out.output["sentiment_conf"] == 0.6
+
+
+def test_validate_gguf_output_partial_status_transparent():
+    """partial 终态透传（部分失败不伪装成功），仍按 text_id=0 取条目。"""
+    out = _validate_gguf_sentiment_output(
+        _adapter_response(
+            _gguf_content(
+                status="partial",
+                results=[
+                    {
+                        "text_id": "0",
+                        "label": "利空",
+                        "probabilities": [0.7, 0.2, 0.1],
+                        "score": -0.6,
+                        "confidence": 0.7,
+                    }
+                ],
+            )
+        )
+    )
+    assert out.output["sentiment"] == "Negative"
+    assert out.output["sentiment_score"] == -0.6
+    assert out.output["sentiment_status"] == "partial"
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), "0.6", None, True])
+def test_validate_gguf_output_bad_number_none_keeps_label(bad):
+    """数值坏值（NaN/Inf/类型坏/缺失/bool）归 None，不因数值列坏而丢弃有效 label（R21）。"""
+    out = _validate_gguf_sentiment_output(
+        _adapter_response(
+            _gguf_content(
+                results=[
+                    {"text_id": "0", "label": "利好", "probabilities": [0.1, 0.2, 0.7], "score": bad, "confidence": bad}
+                ]
+            )
+        )
+    )
+    assert out.output["sentiment"] == "Positive"
+    assert out.output["sentiment_score"] is None
+    assert out.output["sentiment_conf"] is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        "not-json",
+        "[1, 2]",
+        json.dumps({"status": "unavailable", "results": [{"text_id": "0", "label": "利好"}]}),
+        json.dumps({"status": "success"}),
+        json.dumps({"status": "success", "results": []}),
+        json.dumps({"status": "success", "results": [{"text_id": "0", "label": "上涨", "score": 0.6}]}),
+        json.dumps({"status": "success", "results": [{"text_id": "0", "score": 0.6}]}),
+    ],
+    ids=[
+        "empty-content",
+        "invalid-json",
+        "non-dict-payload",
+        "invalid-status",
+        "results-missing",
+        "results-empty",
+        "unknown-label",
+        "label-missing",
+    ],
+)
+def test_validate_gguf_output_invalid_raises(content):
+    """契约破坏（status/results/label 不合法）→ 抛错切候选，错误以 "sentiment output:" 前缀承载。"""
+    with pytest.raises(ModelOutputValidationError) as excinfo:
+        _validate_gguf_sentiment_output(_adapter_response(content))
+    assert str(excinfo.value).startswith("sentiment output:")
+
+
+def test_validate_sentiment_output_dual_protocol_routing():
+    """双协议分流：LLM 顶层 sentiment 协议不经 GGUF 分支（results 键缺失即原逻辑）。"""
+    out = _validate_sentiment_output(_adapter_response(json.dumps({"sentiment": "Negative"})))
+    assert out.output == {"sentiment": "Negative"}
+
+
+def test_validate_gguf_output_non_dict_entry_raises():
+    """results 含非对象条目且无 text_id=0 兜底 → 抛错切候选（对抗性：fallback 也须是 dict）。"""
+    content = json.dumps({"status": "success", "results": [1, 2]})
+    with pytest.raises(ModelOutputValidationError) as excinfo:
+        _validate_gguf_sentiment_output(_adapter_response(content))
+    assert str(excinfo.value) == "sentiment output: result entry is not an object"
+
+
+def test_validate_gguf_output_selects_text_id_zero():
+    """多批次混排按 text_id=0 取本请求条目（单请求单文本契约），不取其他批次。"""
+    content = json.dumps(
+        {
+            "status": "success",
+            "results": [
+                {"text_id": "1", "label": "利空", "probabilities": [0.7, 0.2, 0.1], "score": -0.6, "confidence": 0.7},
+                {"text_id": "0", "label": "利好", "probabilities": [0.1, 0.2, 0.7], "score": 0.6, "confidence": 0.7},
+            ],
+        },
+        ensure_ascii=False,
+    )
+    out = _validate_gguf_sentiment_output(_adapter_response(content))
+    assert out.output["sentiment"] == "Positive"
+    assert out.output["sentiment_score"] == 0.6
 
 
 # ---------------------------------------------------------------------------
@@ -522,3 +679,127 @@ async def test_dedicated_invalid_joint_sentiment_not_reused(monkeypatch):
 
     assert result["sentiment"] is None
     assert result["sentiment_status"] == "unavailable"
+
+
+# ---------------------------------------------------------------------------
+# F24：dedicated gguf_sentiment 全链路（断裂 2 payload 协议 + 数值透传）
+# ---------------------------------------------------------------------------
+
+
+async def test_dedicated_gguf_full_chain_numbers_passthrough(monkeypatch):
+    """F24：dedicated gguf_sentiment 候选——payload texts 协议 + 五键数值透传 + gguf 溯源。
+
+    断裂 2：sentiment 请求 payload 携带 texts: [text]（gguf_sentiment adapter
+    校验该键；litellm_chat 候选忽略）；断裂 3/4：校验器产出的数值三列与
+    sentiment_status 经 ScenarioOutput 透传到 classify_news 结果。
+    """
+    dispatch = _patch_env(
+        monkeypatch,
+        _dispatch(mode="dedicated"),
+        connections=(
+            {"connection_id": "conn-1"},
+            {"connection_id": "conn-9", "adapter_kind": "gguf_sentiment"},
+        ),
+    )
+    classifier, _svc = _service()
+
+    dispatch.executor.execute = AsyncMock(
+        side_effect=[
+            _succeeded_result(_bundled_json(sentiment=None)),  # topic 请求（纯主题 prompt）
+            ScenarioExecutionResult(
+                scenario_id=_SCENARIO_ID,
+                invocation_id="inv-2",
+                status="succeeded",
+                outputs=(
+                    ScenarioOutput(
+                        output={
+                            "sentiment": "Positive",
+                            "sentiment_score": 0.6,
+                            "sentiment_conf": 0.7,
+                            "sentiment_model": "finbert2-base",
+                            "sentiment_status": "success",
+                        },
+                        metadata={"actual_model": "finbert2-base"},
+                    ),
+                ),
+                candidate_decisions=(
+                    CandidateDecision(
+                        task_id="sentiment",
+                        candidate_index=0,
+                        connection_id="conn-9",
+                        decision="succeeded",
+                        reason="ok",
+                    ),
+                ),
+                actual_usage=(),
+            ),
+        ]
+    )
+
+    result = await classifier.classify_news("央行宣布降准")
+
+    assert dispatch.executor.execute.await_count == 2
+    sentiment_req = dispatch.executor.execute.await_args_list[1].args[0]
+    # 断裂 2：payload texts 协议（gguf_sentiment adapter 校验入口）
+    assert sentiment_req.payload["texts"] == ["央行宣布降准"]
+    # 数值三列 + 状态 + 溯源透传（断裂 3/4）
+    assert result["sentiment"] == "Positive"
+    assert result["sentiment_score"] == 0.6
+    assert result["sentiment_conf"] == 0.7
+    assert result["sentiment_model"] == "finbert2-base"
+    assert result["sentiment_status"] == "success"
+    assert result["sentiment_source"] == "dedicated:gguf"
+
+
+async def test_dedicated_gguf_partial_numbers_kept(monkeypatch):
+    """F24：partial 状态下有效条目数值照常透传，状态不伪装 success（部分失败诚实呈现）。"""
+    dispatch = _patch_env(
+        monkeypatch,
+        _dispatch(mode="dedicated"),
+        connections=(
+            {"connection_id": "conn-1"},
+            {"connection_id": "conn-9", "adapter_kind": "gguf_sentiment"},
+        ),
+    )
+    classifier, _svc = _service()
+
+    dispatch.executor.execute = AsyncMock(
+        side_effect=[
+            _succeeded_result(_bundled_json(sentiment=None)),
+            ScenarioExecutionResult(
+                scenario_id=_SCENARIO_ID,
+                invocation_id="inv-2",
+                status="succeeded",
+                outputs=(
+                    ScenarioOutput(
+                        output={
+                            "sentiment": "Neutral",
+                            "sentiment_score": None,
+                            "sentiment_conf": None,
+                            "sentiment_model": "finbert2-base",
+                            "sentiment_status": "partial",
+                        },
+                        metadata={"actual_model": "finbert2-base"},
+                    ),
+                ),
+                candidate_decisions=(
+                    CandidateDecision(
+                        task_id="sentiment",
+                        candidate_index=0,
+                        connection_id="conn-9",
+                        decision="succeeded",
+                        reason="ok",
+                    ),
+                ),
+                actual_usage=(),
+            ),
+        ]
+    )
+
+    result = await classifier.classify_news("央行宣布降准")
+
+    assert result["sentiment"] == "Neutral"
+    assert result["sentiment_score"] is None
+    assert result["sentiment_conf"] is None
+    assert result["sentiment_status"] == "partial"
+    assert result["sentiment_source"] == "dedicated:gguf"
