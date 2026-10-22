@@ -74,8 +74,11 @@ def _sys_excepthook(exctype: type[BaseException], value: BaseException, tb: Trac
         )
     # NOTE(lazy): 主线程钩子内兜底避免钩子自身崩溃导致系统失控. ceiling: 钩子内逻辑不应抛异常. upgrade: 钩子内部分类异常处理或移除兜底.
     except Exception as e:
-        sys.__excepthook__(exctype, value, tb)
-        print(f"[CRITICAL] Exception hook failed: {value} (hook error: {e})", file=sys.stderr)
+        # R9: 兜底输出同样须经脱敏, 防止原始异常消息中的凭证/PII 明文泄露到 stderr;
+        # 先 str() 再脱敏 (sanitize_error 内部同为 str() 后纯正则替换, 语义无损且类型匹配)。
+        # 不再转调 sys.__excepthook__: 其会明文渲染原始异常, 同为兜底路径的泄露点。
+        sanitized_value = DataSanitizer.sanitize_error(str(value))
+        print(f"[CRITICAL] Exception hook failed: {sanitized_value} (hook error: {e})", file=sys.stderr)
 
 
 def _threading_excepthook(args: threading.ExceptHookArgs) -> None:
@@ -103,8 +106,11 @@ def _threading_excepthook(args: threading.ExceptHookArgs) -> None:
         )
     # NOTE(lazy): 线程钩子内兜底避免钩子自身崩溃. ceiling: 钩子内逻辑不应抛异常. upgrade: 钩子内部分类异常处理或移除兜底.
     except Exception as e:
+        # R9: 兜底输出同样须经脱敏, 防止原始异常消息中的凭证/PII 明文泄露到 stderr;
+        # exc_value 可能为 None, str() 先转 (str(None) == "None") 保证类型匹配。
+        sanitized_value = DataSanitizer.sanitize_error(str(args.exc_value))
         print(
-            f"[CRITICAL] ThreadingExcepthook failed: {args.exc_value} (hook error: {e})",
+            f"[CRITICAL] ThreadingExcepthook failed: {sanitized_value} (hook error: {e})",
             file=sys.stderr,
         )
 
@@ -195,7 +201,10 @@ def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -
             logger.critical("[AsyncioHandler] Event loop error (no exception): %s", message)
     # NOTE(lazy): asyncio 钩子内兜底避免钩子自身崩溃. ceiling: 钩子内逻辑不应抛异常. upgrade: 钩子内部分类异常处理或移除兜底.
     except Exception as e:
-        print(f"[CRITICAL] AsyncioHandler failed: {context} (hook error: {e})", file=sys.stderr)
+        # R9: 兜底输出同样须经脱敏, 防止原始异常消息中的凭证/PII 明文泄露到 stderr;
+        # context 为 dict, 先 str() 展开再走统一脱敏正则。
+        sanitized_context = DataSanitizer.sanitize_error(str(context))
+        print(f"[CRITICAL] AsyncioHandler failed: {sanitized_context} (hook error: {e})", file=sys.stderr)
 
 
 def install_global_exception_hooks(loop: asyncio.AbstractEventLoop | None = None) -> None:
