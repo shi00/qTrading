@@ -150,7 +150,9 @@ class RiskOutput(BaseModel):
     """LLM 风险分析整体输出。"""
 
     summary: str | None = None
-    events: list[RiskEvent] = Field(default_factory=list)
+    # F28：events 必填——缺字段不得默认空列表后被归类为「可靠无事件」；显式 ``[]``
+    # 仍是合法无事件（prompt 规则 5 的合同内输出）。
+    events: list[RiskEvent]
 
 
 def normalize_quote_text(text: str | None) -> str:
@@ -308,6 +310,7 @@ class NewsRiskAnalyzer:
         model_id: str | None,
         evidence_news_ids: list[int],
         execution_metadata: dict | None = None,
+        events_dropped: list[dict] | None = None,
     ) -> NewsInsightResult:
         return NewsInsightResult(
             analysis_status=analysis_status,
@@ -321,6 +324,7 @@ class NewsRiskAnalyzer:
             analysis_profile=request.analysis_profile,
             prompt_version=request.prompt_version,
             execution_metadata=execution_metadata,
+            events_dropped=events_dropped,
         )
 
     @staticmethod
@@ -328,11 +332,18 @@ class NewsRiskAnalyzer:
         """RiskOutput pydantic 解析 + 证据引用校验（s4_plan §4.1：Executor 校验器与旧链共用）。
 
         枚举 / schema 非法由 pydantic 整体判失败（抛 ValidationError）；证据引用级非法
-        逐条剔除（validate_events）。返回 ``{"summary", "events"}`` 中间结构。
+        逐条剔除（validate_events）。F28：模型输出了事件但全部因无效引用被剔除时，校验
+        损失不得伪装为「可靠无事件」——抛 :class:`ModelOutputValidationError` 整体判失败
+        （旧链捕获 → failed；新链由 Executor 按失败表格切换候选）。返回
+        ``{"summary", "events", "dropped"}`` 中间结构，dropped 保留剔除原因供质量提示。
         """
         parsed = RiskOutput.model_validate(raw)
-        valid_events, _dropped = validate_events(parsed.events, request.evidence)
-        return {"summary": parsed.summary, "events": valid_events}
+        valid_events, dropped = validate_events(parsed.events, request.evidence)
+        if not valid_events and parsed.events:
+            raise ModelOutputValidationError(
+                f"risk output: all {len(parsed.events)} events dropped (no_valid_evidence_quote)"
+            )
+        return {"summary": parsed.summary, "events": valid_events, "dropped": dropped}
 
     def _finalize(
         self,
@@ -341,14 +352,21 @@ class NewsRiskAnalyzer:
         model_id: str | None,
         execution_metadata: dict | None = None,
     ) -> NewsInsightResult:
-        """后处理（两链共用）：summary 清洗 + 分类 + 驱动置信度 + 确定性聚合。"""
+        """后处理（两链共用）：summary 清洗 + 分类 + 驱动置信度 + 确定性聚合。
+
+        F28：部分事件被证据校验剔除时在结果上保留 ``events_dropped`` 质量提示（剔除
+        原因随结果透出，R21 不把「已剔除」伪装成「无信息」）；全无效引用已在
+        ``_parse_and_validate`` 整体判失败，不再到达此处。
+        """
         from services.ai_service.output import _sanitize_free_text
 
         summary = _sanitize_free_text(validated["summary"]) if validated.get("summary") else None
         valid_events = validated["events"]
+        dropped = validated.get("dropped") or []
         evidence_ids = [ev.news_id for ev in request.evidence]
 
-        # 无有效事件 → analyzed_no_event，risk_level 保持 None（R21）
+        # 无有效事件 → analyzed_no_event，risk_level 保持 None（R21）。全无效引用已在
+        # _parse_and_validate 抛出，此分支仅达「显式 events=[]」的合法无事件。
         if not valid_events:
             return self._result(
                 request,
@@ -361,6 +379,14 @@ class NewsRiskAnalyzer:
                 execution_metadata=execution_metadata,
             )
 
+        if dropped:
+            # F28 部分剔除质量提示：日志只含计数与代码，不含 fact/quote 文本（R9）。
+            logger.warning(
+                "[NewsRisk] %d event(s) dropped for invalid evidence quotes (%s), %d kept",
+                len(dropped),
+                request.ts_code,
+                len(valid_events),
+            )
         # 股票级置信度取驱动风险等级（最高严重程度）事件的置信度
         risk_level = aggregate_risk_level(valid_events)
         driving_conf = next(
@@ -376,10 +402,11 @@ class NewsRiskAnalyzer:
             model_id=model_id,
             evidence_news_ids=evidence_ids,
             execution_metadata=execution_metadata,
+            events_dropped=dropped or None,
         )
 
     def _process_raw(self, raw: dict, request: NewsInsightRequest, model_id: str | None) -> NewsInsightResult:
-        """旧链处理入口：结构校验 + 证据过滤 + 后处理（保持既有行为不变）。"""
+        """旧链处理入口：结构校验 + 证据过滤 + 后处理（F28：缺字段 / 全无效引用判失败）。"""
         return self._finalize(self._parse_and_validate(raw, request), request, model_id)
 
     @log_async_operation(operation_name="analyze_news_risk", threshold_ms=PerfThreshold.AI_INFERENCE)
@@ -505,8 +532,9 @@ class NewsRiskAnalyzer:
         """构造 Executor 校验器：RiskOutput pydantic 解析 + 证据引用校验（复用既有逻辑）。
 
         闭包捕获 request（证据校验需本次输入证据集）；AdapterResponse.content 为空 /
-        JSON 不可解析 / 非 dict / pydantic 校验失败 → :class:`ModelOutputValidationError`
-        （Executor 按失败表格切换候选）。
+        JSON 不可解析 / 非 dict → :class:`ModelOutputValidationError`；pydantic 校验失败
+        与 F28「全部事件因无效引用被剔除」同样按校验失败传出（Executor 按失败表格切换
+        候选）。
         """
 
         def _validate(response: AdapterResponse) -> ValidatedBusinessOutput:
