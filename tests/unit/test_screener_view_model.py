@@ -515,7 +515,7 @@ class TestScreenerViewModelStockFilter:
 
 
 class TestExportReentryGuard:
-    """P-SCREENER-1: 导出连点守卫 — try_begin_export 幂等互斥 + end_export 复位."""
+    """P-SCREENER-01: 导出连点守卫 — try_begin_export 幂等互斥 + end_export 复位."""
 
     def test_try_begin_export_mutual_exclusion(self, vm):
         assert vm.try_begin_export() is True  # 首次置位成功

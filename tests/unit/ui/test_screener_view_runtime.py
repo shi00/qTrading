@@ -487,14 +487,14 @@ class _FakeScreenerViewModel:
         return self._current_page_data is not None and not self._current_page_data.empty
 
     def try_begin_export(self) -> bool:
-        """P-SCREENER-1: Mock vm.try_begin_export (连点守卫, 与生产 VM 行为一致)."""
+        """P-SCREENER-01: Mock vm.try_begin_export (连点守卫, 与生产 VM 行为一致)."""
         if self._state.is_exporting:
             return False
         self._set_state(is_exporting=True)
         return True
 
     def end_export(self) -> None:
-        """P-SCREENER-1: Mock vm.end_export (复位导出标志)."""
+        """P-SCREENER-01: Mock vm.end_export (复位导出标志)."""
         self._set_state(is_exporting=False)
 
     def change_page_size(self, new_size: int) -> None:

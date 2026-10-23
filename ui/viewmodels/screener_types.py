@@ -260,7 +260,7 @@ class ScreenerState:
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
     # UX-2.3: 重试中标志，View 派生 run_disabled 禁用主运行按钮
     is_retrying: bool = False
-    # 导出进行中标志（P-SCREENER-1: 连点守卫 + 按钮禁用反馈）。CSV/Excel 共享互斥：
+    # 导出进行中标志（P-SCREENER-01: 连点守卫 + 按钮禁用反馈）。CSV/Excel 共享互斥：
     # 同一 _full_results 序列化，任一格式导出期间两按钮均禁用。
     is_exporting: bool = False
     # UX-04 (P2-01): 股票代码过滤 (ts_code 子串匹配, 空串=不过滤; 深链/手动输入两来源)

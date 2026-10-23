@@ -1254,7 +1254,7 @@ async def _execute_screener_export(
 ) -> None:
     """Export current results to CSV or Excel.
 
-    连点守卫 (P-SCREENER-1): 经 ``vm.try_begin_export()`` 幂等置位, 导出进行中
+    连点守卫 (P-SCREENER-01): 经 ``vm.try_begin_export()`` 幂等置位, 导出进行中
     的重复点击直接返回; 成功置位后整体 try/finally 经 ``vm.end_export()`` 复位,
     异常/取消路径 (CancelledError 传播) 均不残留 ``state.is_exporting=True``。
 

@@ -37,7 +37,7 @@ class ExportMixin:
         return self._full_results is not None and not self._full_results.empty
 
     def try_begin_export(self) -> bool:
-        """进入导出临界区 (P-SCREENER-1: 连点守卫)。
+        """进入导出临界区 (P-SCREENER-01: 连点守卫)。
 
         Returns:
             bool: True 表示成功置位可执行导出; False 表示已有导出进行中, 调用方直接返回。
