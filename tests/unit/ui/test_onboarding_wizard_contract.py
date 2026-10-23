@@ -377,7 +377,11 @@ class TestWizardWelcomeRiskAck:
     def test_risk_ack_change_forwards_checked_value_to_vm(
         self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms
     ):
-        """勾选框 on_change 经 page.run_task 调用 VM 命令并透传勾选值 (R16 异步调度)。"""
+        """勾选框 on_change 经 page.run_task 调用 _persist_risk_ack 并透传勾选值 (R16 异步调度)。
+
+        P-ONB-01: 调度目标改为模块级 _persist_risk_ack（消费 VM 返回值 + 失败 snack），
+        VM 命令与勾选值的透传由 args[1]/args[2] 断言。
+        """
         result = self._render_welcome(mock_onboarding_vms, False)
         checkbox = next(c for c in _collect_controls(result) if isinstance(c, ft.Checkbox))
         fake_page = MagicMock(name="page")
@@ -389,8 +393,11 @@ class TestWizardWelcomeRiskAck:
             on_change(event)
         assert fake_page.run_task.call_count == 1
         args = fake_page.run_task.call_args.args
-        assert args[0] == mock_onboarding_vms["onboarding"].update_risk_disclaimer_acknowledged
-        assert args[1] is True
+        from ui.views.onboarding_wizard import _persist_risk_ack
+
+        assert args[0] is _persist_risk_ack
+        assert args[1] is mock_onboarding_vms["onboarding"]
+        assert args[2] is True
 
     def test_risk_label_click_toggles_live_vm_state(self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms):
         """点击 label 取反 VM 实时勾选态（未勾选 → 提交 True）。"""
@@ -409,7 +416,7 @@ class TestWizardWelcomeRiskAck:
         with patch("ui.views.onboarding_wizard._get_page", return_value=fake_page):
             on_tap(MagicMock())
         assert fake_page.run_task.call_count == 1
-        assert fake_page.run_task.call_args.args[1] is True
+        assert fake_page.run_task.call_args.args[2] is True
 
     def test_risk_handlers_noop_without_page(self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms):
         """无 page 上下文（离屏渲染）时两个 handler 均安全 no-op。"""
@@ -419,6 +426,32 @@ class TestWizardWelcomeRiskAck:
         with patch("ui.views.onboarding_wizard._get_page", return_value=None):
             on_change(MagicMock())
         assert mock_onboarding_vms["onboarding"].update_risk_disclaimer_acknowledged.call_count == 0
+
+    async def test_persist_risk_ack_failure_shows_error_snack(
+        self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms
+    ):
+        """P-ONB-01: VM 命令返回 False（保存失败）时经 _show_snack 反馈错误。"""
+        import ui.views.onboarding_wizard as wizard_mod
+        from ui.i18n import I18n
+
+        fake_vm = mock_onboarding_vms["onboarding"]
+        fake_vm.update_risk_disclaimer_acknowledged = AsyncMock(return_value=False)
+        fake_page = MagicMock(name="page")
+        with patch.object(wizard_mod, "_get_page", return_value=fake_page):
+            await wizard_mod._persist_risk_ack(fake_vm, True)
+        fake_page.toast.show.assert_called_once_with(I18n.get("sys_snack_save_err"), "error")
+
+    async def test_persist_risk_ack_success_no_snack(self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms):
+        """P-ONB-01: VM 命令返回 True（保存成功）时不弹 snack。"""
+        import ui.views.onboarding_wizard as wizard_mod
+
+        fake_vm = mock_onboarding_vms["onboarding"]
+        fake_vm.update_risk_disclaimer_acknowledged = AsyncMock(return_value=True)
+        fake_page = MagicMock(name="page")
+        with patch.object(wizard_mod, "_get_page", return_value=fake_page):
+            await wizard_mod._persist_risk_ack(fake_vm, True)
+        fake_vm.update_risk_disclaimer_acknowledged.assert_awaited_once_with(True)
+        fake_page.toast.show.assert_not_called()
 
 
 # ============================================================================
