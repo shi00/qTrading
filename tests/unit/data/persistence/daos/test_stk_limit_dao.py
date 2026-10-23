@@ -1,6 +1,8 @@
 """Phase 2G：StkLimitDao 单元测试（仅数据层，不注入 AI）。"""
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 
+import datetime
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,6 +17,7 @@ pytestmark = pytest.mark.unit
 def _make_dao() -> StkLimitDao:
     dao = StkLimitDao(MagicMock(spec=AsyncEngine))
     dao._save_upsert = AsyncMock(return_value=5)
+    dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
     return dao
 
 
@@ -84,3 +87,52 @@ class TestSaveStkLimit:
         await dao.save_stk_limit(df)
         df_passed = dao._save_upsert.call_args.args[0]
         assert "limit_type" in df_passed.columns
+
+
+class TestGetStkLimitRange:
+    """区间涨跌停查询（回测撮合层契约）：between 谓词 + DAT-26 边界归一化 + 结果透传。"""
+
+    @pytest.mark.asyncio
+    async def test_range_normalizes_yyyymmdd_strings_to_date(self):
+        """8 位 YYYYMMDD 串经 _to_db_date 归一化为 date 对象后再绑定（asyncpg 兼容）。"""
+        dao = _make_dao()
+        await dao.get_stk_limit_range("20240601", "20240614")
+        dao._read_db_select.assert_awaited_once()
+        stmt = dao._read_db_select.call_args[0][0]
+        sql_str = str(stmt)
+        assert "BETWEEN" in sql_str
+        values = list(stmt.compile().params.values())
+        assert values == [datetime.date(2024, 6, 1), datetime.date(2024, 6, 14)]
+
+    @pytest.mark.asyncio
+    async def test_range_accepts_date_objects(self):
+        """date 对象输入行为不变（归一化幂等）。"""
+        dao = _make_dao()
+        await dao.get_stk_limit_range(datetime.date(2024, 6, 1), datetime.date(2024, 6, 14))
+        stmt = dao._read_db_select.call_args[0][0]
+        values = list(stmt.compile().params.values())
+        assert values == [datetime.date(2024, 6, 1), datetime.date(2024, 6, 14)]
+
+    @pytest.mark.asyncio
+    async def test_range_returns_dataframe_passthrough(self):
+        """查询结果原样透传给调用方（回测撮合层按缺失告警，DAO 不改写）。"""
+        dao = _make_dao()
+        expected = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [datetime.date(2024, 6, 14)],
+                "up_limit": [10.45],
+                "down_limit": [8.55],
+            }
+        )
+        dao._read_db_select = AsyncMock(return_value=expected)
+        result = await dao.get_stk_limit_range("20240601", "20240614")
+        assert result is expected
+
+    @pytest.mark.asyncio
+    async def test_range_returns_none_passthrough(self):
+        """_read_db_select 返回 None 时透传 None（调用方 limit_data_absent 告警分支依赖）。"""
+        dao = _make_dao()
+        dao._read_db_select = AsyncMock(return_value=None)
+        result = await dao.get_stk_limit_range("20240601", "20240614")
+        assert result is None

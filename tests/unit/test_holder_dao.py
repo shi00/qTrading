@@ -3,6 +3,8 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
+
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 import pandas as pd
@@ -91,6 +93,22 @@ class TestCalculateHolderChanges:
         dao = _make_dao()
         dao._write_db = AsyncMock(side_effect=DatabaseQueryError("db write failed"))
         with pytest.raises(DatabaseQueryError):
+            await dao._calculate_holder_changes(["000001.SZ"])
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        """R2: _write_db 抛 asyncio.CancelledError 必须原样传播（优雅停机），不可吞为 warning。"""
+        dao = _make_dao()
+        dao._write_db = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await dao._calculate_holder_changes(["000001.SZ"])
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_propagates(self):
+        """R5: _write_db 抛 EngineDisposedError 必须原样传播，不可吞为 warning。"""
+        dao = _make_dao()
+        dao._write_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
             await dao._calculate_holder_changes(["000001.SZ"])
 
 

@@ -3,11 +3,15 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
+import datetime
+
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.daos.macro_dao import MacroDao
 
 pytestmark = pytest.mark.unit
@@ -205,3 +209,90 @@ class TestMacroDaoGetShiborLatestWithAsOfDate:
         dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"record_date": ["20240615"], "on_rate": [1.5]}))
         result = await dao.get_shibor_latest(as_of_date=None)
         assert not result.empty
+
+
+class TestMacroDaoAsOfDateNormalization:
+    """DAT-26 一致性：as_of_date 8 位 YYYYMMDD 串必须在 DAO 边界归一化为 date 对象。
+
+    回归背景（review08-M08-F1）：get_shibor_latest / get_macro_economy_latest 此前
+    未做 _to_db_date 归一化，SA asyncpg dialect 对 Date 列 bind_processor 为空透传，
+    asyncpg date codec 仅接受 date 对象——上游 ai_mixin 经
+    _normalize_trade_date_for_cache 传入 8 位串时参数编码失败，异常被 except
+    Exception 降级为空 DataFrame，宏观/Shibor AI 上下文静默失效。
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_shibor_latest_normalizes_yyyymmdd_string(self):
+        dao = MacroDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"record_date": ["20240101"], "on_rate": [1.5]}))
+        result = await dao.get_shibor_latest(as_of_date="20240115")
+        assert not result.empty
+        stmt = dao._read_db_select.call_args[0][0]
+        # limit 的行数在默认方言 compile 下也是绑定参数（int），故只提取 date 形参断言
+        date_values = [v for v in stmt.compile().params.values() if isinstance(v, datetime.date)]
+        assert date_values == [datetime.date(2024, 1, 15)]
+
+    @pytest.mark.asyncio
+    async def test_get_shibor_latest_keeps_none_unbound(self):
+        """as_of_date=None 不产生日期绑定参数（不限制时间窗）。"""
+        dao = MacroDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"record_date": ["20240101"], "on_rate": [1.5]}))
+        await dao.get_shibor_latest(as_of_date=None)
+        stmt = dao._read_db_select.call_args[0][0]
+        assert "record_date <=" not in str(stmt)
+        assert not [v for v in stmt.compile().params.values() if isinstance(v, datetime.date)]
+
+    @pytest.mark.asyncio
+    async def test_get_macro_economy_latest_normalizes_yyyymmdd_string(self):
+        dao = MacroDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"period": ["202312"], "m2": [90]}))
+        result = await dao.get_macro_economy_latest(as_of_date="20240115")
+        assert not result.empty
+        stmt = dao._read_db_select.call_args[0][0]
+        sql_str = str(stmt)
+        assert "publish_date <=" in sql_str
+        assert "publish_date IS NOT NULL" in sql_str
+        date_values = [v for v in stmt.compile().params.values() if isinstance(v, datetime.date)]
+        assert date_values == [datetime.date(2024, 1, 15)]
+
+    @pytest.mark.asyncio
+    async def test_get_macro_economy_latest_accepts_date_object(self):
+        """date 对象输入行为不变（归一化幂等）。"""
+        dao = MacroDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"period": ["202312"], "m2": [90]}))
+        await dao.get_macro_economy_latest(as_of_date=datetime.date(2024, 1, 15))
+        stmt = dao._read_db_select.call_args[0][0]
+        date_values = [v for v in stmt.compile().params.values() if isinstance(v, datetime.date)]
+        assert date_values == [datetime.date(2024, 1, 15)]
+
+
+class TestMacroDaoErrorPropagation:
+    """R2/R5：get_shibor_latest / get_macro_economy_latest 的取消与引擎停机信号必须传播。"""
+
+    @pytest.mark.asyncio
+    async def test_get_shibor_latest_propagates_cancelled_error(self):
+        dao = MacroDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await dao.get_shibor_latest()
+
+    @pytest.mark.asyncio
+    async def test_get_shibor_latest_propagates_engine_disposed(self):
+        dao = MacroDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_shibor_latest()
+
+    @pytest.mark.asyncio
+    async def test_get_macro_economy_latest_propagates_cancelled_error(self):
+        dao = MacroDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await dao.get_macro_economy_latest()
+
+    @pytest.mark.asyncio
+    async def test_get_macro_economy_latest_propagates_engine_disposed(self):
+        dao = MacroDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_macro_economy_latest()
