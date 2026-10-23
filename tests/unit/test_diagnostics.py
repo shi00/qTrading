@@ -484,3 +484,46 @@ async def test_diagnostics_export_log_read_exception(tmp_path):
         finally:
             if os.path.exists(zip_path):
                 os.remove(zip_path)
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_export_env_masks_personal_keys_and_paths(tmp_path, monkeypatch):
+    """UTILS-B-06：env 导出须脱敏个人类键与路径——诊断包不得明文携带
+    Windows 用户名与用户目录路径，与同函数日志全量脱敏口径一致（R9）。
+
+    三层断言：
+    ① 个人类键（USER* 系/LOGNAME/APPDATA）整体遮蔽为 ***（纯用户名无路径
+       特征，sanitize_paths 覆盖不到）；
+    ② 其余键值中的 Windows 路径替换为 <PATH>；
+    ③ 全包 json 串不含测试专属假用户名与假用户目录。
+    """
+    # 测试专属假值：不依赖真实环境用户名，避免断言受运行机器影响
+    fake_user = "johndoe_diagtester"
+    fake_profile = "C:\\Users\\johndoe_diagtester"
+    monkeypatch.setenv("USERNAME", fake_user)
+    monkeypatch.setenv("USERPROFILE", fake_profile)
+    monkeypatch.setenv("LOGNAME", fake_user)
+    monkeypatch.setenv("VIRTUAL_ENV", "D:\\venv\\johndoe_diagtester\\envs")
+    monkeypatch.setenv("APPDATA", f"{fake_profile}\\AppData\\Roaming")
+
+    _make_log_files(tmp_path)
+    with _patch_diagnostics_env(tmp_path):
+        zip_path = await SystemDiagnosticsCollector.export()
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                summary = json.loads(zf.read("diagnostics_summary.json").decode("utf-8"))
+                env = summary["system"]["env_variables"]
+                # ① 个人类键整体遮蔽
+                assert env["USERNAME"] == "***"
+                assert env["LOGNAME"] == "***"
+                assert env["USERPROFILE"] == "***"
+                assert env["APPDATA"] == "***"
+                # ② 其余键值路径脱敏为 <PATH>
+                assert env["VIRTUAL_ENV"] == "<PATH>"
+                # ③ 全包 json 不泄露假用户名与假用户目录
+                raw = zf.read("diagnostics_summary.json").decode("utf-8")
+                assert fake_user not in raw
+                assert fake_profile not in raw
+        finally:
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
