@@ -232,7 +232,11 @@ class SchedulerService:
             # 字典序与时间序一致），必须单调写（set_app_state_max，SQL GREATEST 保护），
             # 防止补偿任务与日更任务并发时 last-writer-wins 把水位写回旧日期。
             await set_app_state_max(engine, db_key, value or "")
-        self._persist_run_date(config_key, value)
+        # A-03: 配置缓存写含跨进程文件锁（filelock）+ 磁盘写，属同步阻塞 IO 段，
+        # 须经 ThreadPoolManager 提交（TaskType.IO），避免阻塞事件循环线程（R16 域，
+        # 对齐 _watch_config_changes 既有模式）。await 保证写完成后本协程才返回；
+        # worker 内异常经 await 传播，与原同步直调的异常路径一致。
+        await ThreadPoolManager().run_async(TaskType.IO, self._persist_run_date, config_key, value)
 
     async def _mark_daily_update_done_db(self, today_str: str):
         # REVIEW-06 TO-02: 内存侧同样单调（与 DB GREATEST 语义一致），防止并发下水位倒退。

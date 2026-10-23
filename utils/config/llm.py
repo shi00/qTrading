@@ -28,6 +28,11 @@ def save_llm_config(provider: str, model: str, base_url: str, api_key: str | Non
         provider, model, base_url: LLM 供应商/模型/URL。
         api_key: None 保持现有密钥，空字符串清除，非空更新。
         **kwargs: 扩展字段 (azure 的 api_version 等)。
+
+    env 覆盖语义（A-02）：环境变量 ``AI_API_KEY`` 存在时，keyring 写入/清除被
+    有意跳过（运行时凭据永远优先读 env），此时提交的 api_key **不会持久化**，
+    函数仍返回 True（provider/model/base_url 等非敏感字段照常落盘），并发出
+    warning 提示该降级——调用方应依赖日志而非返回值感知密钥未写入 keyring。
     """
     provider = provider.strip()
     model = model.strip()
@@ -109,6 +114,15 @@ def save_llm_config(provider: str, model: str, base_url: str, api_key: str | Non
                 )
             if not cfg.ConfigHandler.save_config({"ai_api_key": ""}):
                 return False
+        elif api_key and os.environ.get(cfg.ENV_FALLBACK_MAP["ai_api_key"]):
+            # A-02: env 覆盖时跳过 keyring 写入是有意设计（运行时永远读 env），
+            # 但须告警避免静默假报成功——用户提交的密钥实际未持久化。消息仅含
+            # 环境变量名，不含密钥明文（R9）。
+            cfg.logger.warning(
+                "API key not persisted to keyring: %s environment variable override is in effect "
+                "(the submitted key was skipped; env value takes precedence at runtime).",
+                cfg.ENV_FALLBACK_MAP["ai_api_key"],
+            )
 
     return True
 

@@ -13,6 +13,7 @@ from core.i18n import I18n, Message
 from data.sync.base import SyncResult
 from services.task_manager import EXCLUSIVE_GROUP_MARKET_SYNC, AppTask, TaskStatus
 from utils.scheduler_service import SchedulerService
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 pytestmark = pytest.mark.unit
 
@@ -186,6 +187,35 @@ class TestSchedulerServicePersistRunDateDb:
             mock_max.assert_not_called()
             warning_calls = [c for c in mock_warn.call_args_list]
             assert any("引擎已释放" in str(c.args[0]) for c in warning_calls)
+        svc._persist_run_date.assert_called_once_with("scheduler_last_daily_update", "20240620")
+
+    @pytest.mark.asyncio
+    async def test_config_write_submitted_to_thread_pool(self):
+        """A-03: 配置缓存写经 ThreadPoolManager.run_async(TaskType.IO) 提交（不在事件循环线程同步执行）。
+
+        用假 run_async 记录提交参数并断言：任务类型为 IO、被调函数为 _persist_run_date、
+        位置参数为 (config_key, value)；假替身同步代为执行以保证既有写语义（await 完成后返回）。
+        """
+        svc = _make_svc()
+        svc._persist_run_date = MagicMock()
+        recorded: dict = {}
+
+        async def _fake_run_async(self_pool, task_type, func, *args, **kwargs):
+            recorded["task_type"] = task_type
+            recorded["func"] = func
+            recorded["args"] = args
+            return func(*args, **kwargs)
+
+        with (
+            patch("data.persistence.engine_provider.get_engine", return_value=None),
+            patch.object(ThreadPoolManager, "run_async", _fake_run_async),
+        ):
+            await svc._persist_run_date_db("sched_last_daily_update", "scheduler_last_daily_update", "20240620")
+
+        assert recorded["task_type"] is TaskType.IO
+        assert recorded["func"] is svc._persist_run_date
+        assert recorded["args"] == ("scheduler_last_daily_update", "20240620")
+        # 假替身代为执行：写语义保持（await 完成后才返回）
         svc._persist_run_date.assert_called_once_with("scheduler_last_daily_update", "20240620")
 
 

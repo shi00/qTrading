@@ -1125,6 +1125,28 @@ class TestSaveLlmConfigEnvShortCircuit:
         # M2: 验证非敏感配置字段仍被持久化（环境变量短路仅保护 keyring，不跳过 save_config）
         mock_save.assert_called_once()
 
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.dict(cfg_mod.os.environ, {"AI_API_KEY": "env_key"}, clear=False)
+    @patch.object(cfg_mod.keyring, "set_password")
+    def test_nonempty_api_key_logs_warning_when_env_overrides(self, mock_set, mock_save):
+        """A-02: AI_API_KEY 覆盖生效时提交非空 api_key——密钥未持久化，仍返回 True，
+        但须发出 warning 告知该降级（避免静默假报保存成功）。消息含环境变量名、不含密钥明文。"""
+        with patch.object(cfg_mod, "logger") as mock_logger:
+            result = cfg_mod.ConfigHandler.save_llm_config(
+                provider="deepseek",
+                model="deepseek-v4-flash",
+                base_url="https://api.deepseek.com",
+                api_key="new_key",
+            )
+        assert result is True
+        mock_set.assert_not_called()
+        mock_save.assert_called_once()
+        warning_calls = [c for c in mock_logger.warning.call_args_list if "AI_API_KEY" in str(c.args)]
+        assert len(warning_calls) >= 1
+        assert any("not persisted" in str(c.args[0]) for c in warning_calls)
+        # R9: warning 不得携带提交的密钥明文
+        assert all("new_key" not in str(c) for c in mock_logger.warning.call_args_list)
+
 
 class TestGetLlmConfigCustomModelsIsolation:
     """R3-1: get_llm_config() must return a deep copy of custom_models,
