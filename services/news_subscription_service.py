@@ -33,6 +33,11 @@ _QUEUE_DRAIN_DEFAULT_S = 3.0  # stop_async 默认 drain 超时（默认参数值
 _PROCESSING_SLEEP_S = 5.0  # 处理循环异常后休眠间隔，避免紧密错误循环
 _FETCH_RESULT_TIMEOUT_S = 5.0  # 单次异步监听器结果等待上限
 _HOT_CONCEPT_TAG_TIMEOUT_S = 3.0  # 热概念打标监听器等待上限
+# M14-F1：轮询间隔失真回退默认值。写侧 KV 直写路径（save_config）绕过
+# AppConfig 的 ge=10 与 app_prefs 的 max(10) 钳制，0/负数会使 _poll_loop 的
+# asyncio.sleep 立即返回形成紧密循环（外部 API 请求风暴 + CPU 空转），非数值
+# 则抛 TypeError 使轮询协程静默死亡（fire-and-forget 无重启）。消费侧统一归一化。
+_NEWS_POLL_INTERVAL_DEFAULT_S: typing.Final[float] = 60.0
 
 # N3-5：打分器中文 label → market_news.sentiment 入库 code（NewsRow._coerce_sentiment /
 # news_feed._sentiment_style 按该取值契约着色）。label 未知按缺失处理（None，R21 不伪装）。
@@ -388,8 +393,15 @@ class NewsSubscriptionService:
         """Main polling loop"""
 
         while self._running:
-            # Read config dynamically
-            base_interval = ConfigHandler.get_config("news_poll_interval", 60)
+            # Read config dynamically（M14-F1：失真配置归一化——非数值/≤0 回退默认，
+            # 防紧密循环风暴与 TypeError 致轮询协程静默死亡）
+            raw_interval = ConfigHandler.get_config("news_poll_interval", 60)
+            try:
+                base_interval = float(raw_interval)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                base_interval = _NEWS_POLL_INTERVAL_DEFAULT_S
+            if base_interval <= 0:
+                base_interval = _NEWS_POLL_INTERVAL_DEFAULT_S
 
             # Fire and forget but track for cleanup and GC prevention.
             self._current_fetch_task = asyncio.create_task(self._safe_fetch_task())
@@ -398,7 +410,7 @@ class NewsSubscriptionService:
 
             # Simple error handling for the loop itself (unlikely to fail here)
             try:
-                await asyncio.sleep(base_interval)  # type: ignore[arg-type]
+                await asyncio.sleep(base_interval)
             except asyncio.CancelledError:
                 raise
 
@@ -783,18 +795,23 @@ class NewsSubscriptionService:
                         if self._last_news_time and current_time <= self._last_news_time:
                             continue
                         h = get_hash(item)
-                        if h not in self._seen_hashes:
-                            self._seen_hashes[h] = None
-                            if len(self._seen_hashes) > self._MAX_SEEN:
-                                self._seen_hashes.popitem(last=False)
+                        if h in self._seen_hashes:
+                            # M14-F2: 已见条目刷新 LRU 位置——长期重复推送的活跃条目
+                            # 不因未刷新而被误逐出，逐出后会重复入 AI 打分队列浪费配额
+                            # （DB 层 (content_hash, publish_time) UPSERT 幂等，仅耗资源）。
+                            self._seen_hashes.move_to_end(h)
+                            continue
+                        self._seen_hashes[h] = None
+                        if len(self._seen_hashes) > self._MAX_SEEN:
+                            self._seen_hashes.popitem(last=False)
 
-                            normalized = CacheManager.normalize_news_item(
-                                item,
-                                default_source="CLS",
-                            )
-                            await self.cache.market_dao.save_market_news(normalized)
+                        normalized = CacheManager.normalize_news_item(
+                            item,
+                            default_source="CLS",
+                        )
+                        await self.cache.market_dao.save_market_news(normalized)
 
-                            await self._safe_queue_put(item)  # type: ignore[misc]
+                        await self._safe_queue_put(item)  # type: ignore[misc]
 
                     latest_item = news_list[0]
                     new_time = latest_item.get("time", self._last_news_time)
@@ -817,73 +834,76 @@ class NewsSubscriptionService:
                     if self._last_news_time and current_time <= self._last_news_time:
                         continue
                     h = get_hash(item)
-                    if h not in self._seen_hashes:
-                        self._seen_hashes[h] = None
-                        if len(self._seen_hashes) > self._MAX_SEEN:
-                            self._seen_hashes.popitem(last=False)
-                        new_items_found = True
-                        new_items.append(item)
+                    if h in self._seen_hashes:
+                        # M14-F2: 同 initial sync——刷新 LRU 位置防活跃条目误逐出
+                        self._seen_hashes.move_to_end(h)
+                        continue
+                    self._seen_hashes[h] = None
+                    if len(self._seen_hashes) > self._MAX_SEEN:
+                        self._seen_hashes.popitem(last=False)
+                    new_items_found = True
+                    new_items.append(item)
 
-                        current_news_content = item.get("content", "")
-                        current_news_time = item.get("time", "")
-                        logger.info(
-                            "[NewsService] Found NEW update! Time: %s",
-                            current_news_time,
-                        )
+                    current_news_content = item.get("content", "")
+                    current_news_time = item.get("time", "")
+                    logger.info(
+                        "[NewsService] Found NEW update! Time: %s",
+                        current_news_time,
+                    )
 
-                        clean_content = current_news_content.strip()
-                        normalized = CacheManager.normalize_news_item(
-                            {
-                                "content": clean_content,
-                                "tags": "",
-                                "publish_time": current_news_time,
-                                "source": "CLS",
-                            },
-                        )
-                        await self.cache.market_dao.save_market_news(normalized, wait=True)
+                    clean_content = current_news_content.strip()
+                    normalized = CacheManager.normalize_news_item(
+                        {
+                            "content": clean_content,
+                            "tags": "",
+                            "publish_time": current_news_time,
+                            "source": "CLS",
+                        },
+                    )
+                    await self.cache.market_dao.save_market_news(normalized, wait=True)
 
-                        await self._safe_queue_put(item)  # type: ignore[misc]
+                    await self._safe_queue_put(item)  # type: ignore[misc]
 
-                        display_msg = clean_content
-                        enable_alerts = ConfigHandler.get_config("enable_news_alerts", True)
-                        if enable_alerts:
-                            for listener in list(self._alert_listeners):
-                                try:
-                                    raw = listener
-                                    while isinstance(raw, functools.partial):
-                                        raw = raw.func
-                                    if inspect.iscoroutinefunction(raw) or getattr(raw, "is_async", False):
-                                        result = listener(display_msg)
-                                        if inspect.isawaitable(result):
-                                            await asyncio.wait_for(result, timeout=_HOT_CONCEPT_TAG_TIMEOUT_S)
-                                        else:
-                                            logger.error(
-                                                "[NewsService] Alert listener %s marked async but returned non-awaitable; skipping.",
-                                                listener,
-                                            )
+                    display_msg = clean_content
+                    enable_alerts = ConfigHandler.get_config("enable_news_alerts", True)
+                    if enable_alerts:
+                        for listener in list(self._alert_listeners):
+                            try:
+                                raw = listener
+                                while isinstance(raw, functools.partial):
+                                    raw = raw.func
+                                if inspect.iscoroutinefunction(raw) or getattr(raw, "is_async", False):
+                                    result = listener(display_msg)
+                                    if inspect.isawaitable(result):
+                                        await asyncio.wait_for(result, timeout=_HOT_CONCEPT_TAG_TIMEOUT_S)
                                     else:
-                                        _l, _msg = listener, display_msg
-                                        await asyncio.wait_for(
-                                            ThreadPoolManager().run_async(TaskType.IO, _l, _msg),
-                                            timeout=_HOT_CONCEPT_TAG_TIMEOUT_S,
-                                        )
-                                except TimeoutError:
-                                    logger.warning("[NewsService] Alert listener %s timed out (3s)", listener)
-                                except Exception as e:
-                                    error_info = classify_error(e, context="general")
-                                    severity = classify_severity(e)
-                                    if severity == "system":
                                         logger.error(
-                                            "[NewsService] System-level error in alert listener: %s",
-                                            DataSanitizer.sanitize_error(e),
-                                            exc_info=True,
+                                            "[NewsService] Alert listener %s marked async but returned non-awaitable; skipping.",
+                                            listener,
                                         )
-                                        raise
-                                    logger.error(
-                                        "[NewsService] Alert listener error (code=%s): %s",
-                                        error_info["code"],
-                                        DataSanitizer.sanitize_error(e),
+                                else:
+                                    _l, _msg = listener, display_msg
+                                    await asyncio.wait_for(
+                                        ThreadPoolManager().run_async(TaskType.IO, _l, _msg),
+                                        timeout=_HOT_CONCEPT_TAG_TIMEOUT_S,
                                     )
+                            except TimeoutError:
+                                logger.warning("[NewsService] Alert listener %s timed out (3s)", listener)
+                            except Exception as e:
+                                error_info = classify_error(e, context="general")
+                                severity = classify_severity(e)
+                                if severity == "system":
+                                    logger.error(
+                                        "[NewsService] System-level error in alert listener: %s",
+                                        DataSanitizer.sanitize_error(e),
+                                        exc_info=True,
+                                    )
+                                    raise
+                                logger.error(
+                                    "[NewsService] Alert listener error (code=%s): %s",
+                                    error_info["code"],
+                                    DataSanitizer.sanitize_error(e),
+                                )
 
                 # 水位线单调性保护：CLS 偶发返回旧数据时不应倒退水位线
                 new_time = news_list[0].get("time", self._last_news_time)
