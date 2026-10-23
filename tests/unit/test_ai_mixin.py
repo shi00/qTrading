@@ -1047,6 +1047,56 @@ class TestRunAiAnalysis:
             dp.cache.quote_dao.get_northbound.assert_awaited_once_with(trade_date="20240118")
 
     @pytest.mark.asyncio
+    async def test_news_task_creation_failure_cancels_created_tasks(self):
+        """M16-F3: news task 创建中途异常时，已创建的 task 被 cancel 而非成为孤儿。
+
+        旧 dict comprehension 中途抛异常时已创建 task 引用随 comprehension 丢弃，
+        无人 cancel（短暂 HTTP 资源泄漏）。修复后逐个创建 + BaseException 清理。
+        外层 except Exception 吞掉普通异常继续执行（与既有降级语义一致），
+        CancelledError 经 BaseException 清理后仍向上传播（R2）。
+        """
+        s = ConcreteStrategy()
+        dp = MagicMock()
+        dp.is_cancelled = MagicMock(return_value=False)
+        dp.cache = MagicMock()
+        dp.cache.get_concepts = AsyncMock(return_value={})
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_top_inst_batch = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.prefetch_auxiliary_data = AsyncMock(return_value={})
+        context = {"data_processor": dp}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ", "600519.SH"], "name": ["A", "B"]})
+
+        created_tasks: list = []
+        real_create_task = asyncio.create_task
+
+        def fake_create_task(coro, **kwargs):
+            # 仅拦截 news 阶段的 bg_fetch_news 协程；batch 分析阶段
+            # （analyze_one）走真实 create_task 正常执行。
+            if coro.__name__ != "bg_fetch_news":
+                return real_create_task(coro, **kwargs)
+            if created_tasks:
+                coro.close()  # 防止 "coroutine was never awaited" 警告
+                raise RuntimeError("create_task exploded")
+            task = real_create_task(coro, **kwargs)
+            created_tasks.append(task)
+            return task
+
+        with (
+            patch("strategies.ai_mixin.AIService") as mock_ai,
+            patch("asyncio.create_task", side_effect=fake_create_task),
+        ):
+            mock_ai.return_value.is_cloud_available.return_value = True
+            # 普通异常被外层 except Exception 降级吞掉（不阻断批次），run 正常返回
+            await s.run_ai_analysis(candidates, context)
+
+        assert len(created_tasks) == 1
+        # F4-ST-001 finally 的 _cancel_orphan_news_tasks 已 await 清理 → cancelled
+        assert created_tasks[0].cancelled()
+
+    @pytest.mark.asyncio
     async def test_prefetches_stk_limit_once_for_near_window(self):
         """MAJOR-02：整批仅一次 stk_limit 区间查询，窗口为候选近 3 个交易日。"""
         s = ConcreteStrategy()

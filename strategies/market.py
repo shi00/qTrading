@@ -1,4 +1,5 @@
 import logging
+import math
 import typing
 
 import pandas as pd
@@ -10,7 +11,7 @@ from data.persistence.quality_gate import QualityTier
 from strategies.attribution import FilterAttribution, FilterCondition, RankAttribution, fnum
 from strategies.base_strategy import register_strategy
 from strategies.polars_base import PolarsBaseStrategy
-from strategies.utils import StrategyContext, threshold_in_data_unit
+from strategies.utils import StrategyContext, safe_float, threshold_in_data_unit
 from utils.error_classifier import classify_severity
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -321,7 +322,10 @@ class InstitutionalStrategy(PolarsBaseStrategy):
         net_amount 列单位为元（TOP_LIST_NET_AMOUNT_UNIT），除以 10000 换算为万元展示。
         """
         net = row.get("net_amount")
-        net_wan = round(float(net) / 10000, 1) if net not in (None, "") else "N/A"
+        # M16-F2: safe_float 把 NaN/非数值统一归一为 NaN 哨兵（R21：不把缺失值伪装成
+        # "nan 万元" 注入 AI prompt）；0/正数正常换算万元，NaN → "N/A"。
+        net_f = safe_float(net, default=float("nan"))
+        net_wan = "N/A" if math.isnan(net_f) else round(net_f / 10000, 1)
         return (
             f"该股票由龙虎榜机构席位策略筛选：当日机构专用席位净买入 {net_wan} 万元。\n"
             f"请评估该笔机构买入的性质：是长线配置资金建仓，还是游资借机构席位做短线接力？\n"
