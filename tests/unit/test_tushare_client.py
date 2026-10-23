@@ -4,6 +4,7 @@
 # 测试行为由测试用例本身验证。
 
 import asyncio
+import threading
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
@@ -95,6 +96,47 @@ class TestTushareClientInit:
                 mock_ch.get_tushare_point_tier.return_value = "points_5000"
                 TushareClient(token="new_token")
                 mock_core.assert_called_once_with("new_token")
+
+    def test_reinit_different_token_holds_lock_during_set_token_core(self):
+        """M11-F2: __init__ fast path 换 token 应在持有 self._lock 的临界区内调用 _set_token_core。
+
+        _set_token_core 契约要求调用方持 self._lock 保护 token/pro/限流器引用的
+        原子替换；未持锁时与 set_token_async 并发可撕裂错配（token=NEW_B 而 pro
+        仍指向 NEW_A 构建的实例）。断言事件顺序 lock_enter → core → lock_exit。
+        """
+        client = _make_client("old_token")
+        events: list[str] = []
+
+        class _InstrumentedLock:
+            def __enter__(self):
+                events.append("lock_enter")
+                return self
+
+            def __exit__(self, *exc):
+                events.append("lock_exit")
+                return False
+
+        client._lock = _InstrumentedLock()
+        real_core = client._set_token_core
+
+        def core_with_marker(tok):
+            events.append("core")
+            real_core(tok)
+
+        with patch.object(client, "_set_token_core", side_effect=core_with_marker):
+            with (
+                patch("data.external.tushare_client.ts") as mock_ts,
+                patch("data.external.tushare_client.ConfigHandler") as mock_ch,
+            ):
+                mock_ts.pro_api.return_value = MagicMock()
+                mock_ch.get_token.return_value = "old_token"
+                mock_ch.get_tushare_timeout.return_value = 30
+                mock_ch.get_request_max_retries.return_value = 3
+                mock_ch.get_tushare_point_tier.return_value = "points_5000"
+                TushareClient(token="new_token_reinit")
+
+        assert events == ["lock_enter", "core", "lock_exit"]
+        assert client.token == "new_token_reinit"
 
     def test_reinit_no_token_skips(self):
         """Reinit with no token should skip pro_api call."""
@@ -232,6 +274,33 @@ class TestTushareClientHandleApiCall:
             # (structured, catchable) instead of bare Exception when pro is None.
             with pytest.raises(TushareConfigError, match="Token not set"):
                 await client._handle_api_call(lambda: None)
+
+    @pytest.mark.asyncio
+    async def test_no_pro_max_retries_gt_1_raises_config_error_immediately(self):
+        """M11-F1: pro 未配置且 max_retries>1 时应立即抛 TushareConfigError（不重试、不 sleep）。
+
+        修复前：TushareConfigError 落入通用 except 被当作未知错误重试 N-1 次（每次 sleep 1s），
+        最终被归并为 RuntimeError("All N retries exhausted")，调用方无法统一捕获结构化错误
+        （与 _get_pro / get_trade_cal / _handle_probe_call 的 TushareConfigError 契约不一致）。
+        """
+        with (
+            patch("data.external.tushare_client.ts"),
+            patch("data.external.tushare_client.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_token.return_value = ""
+            mock_ch.get_tushare_timeout.return_value = 30
+            mock_ch.get_request_max_retries.return_value = 3
+            mock_ch.get_tushare_point_tier.return_value = "points_5000"
+            client = TushareClient()
+            client.max_retries = 3
+            mock_func = MagicMock()
+            with patch("data.external.tushare_client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                with pytest.raises(TushareConfigError, match="Token not set"):
+                    await client._handle_api_call(mock_func)
+            # 配置错误不可重试：不应发生任何退避 sleep
+            mock_sleep.assert_not_awaited()
+            # pro 检查先于 executor 调用：func 不应被执行
+            mock_func.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_success(self, tushare_client_mocks):
@@ -1227,6 +1296,26 @@ class TestTushareClientExecutorTimeout:
         with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
             with pytest.raises(RuntimeError, match="retries exhausted"):
                 await client._handle_api_call(MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_retry_exhausted_chains_original_error(self, tushare_client_mocks):
+        """M11-F3: 循环耗尽抛出的 RuntimeError 应经 from 链入最后一次原始异常（__cause__）。
+
+        rate_limit / network 路径在末次尝试失败后经 continue 出循环，若不链 cause，
+        原始错误（如 TimeoutError）对调用方完全不可见，仅能靠日志诊断。
+        """
+        client, _, _ = tushare_client_mocks
+        client.max_retries = 2
+
+        async def mock_wait_for(coro, timeout=None):
+            raise TimeoutError("read timed out")
+
+        with patch("data.external.tushare_client.asyncio.wait_for", side_effect=mock_wait_for):
+            with patch("data.external.tushare_client.asyncio.sleep", new_callable=AsyncMock):
+                with pytest.raises(RuntimeError, match="retries exhausted") as exc_info:
+                    await client._handle_api_call(MagicMock())
+        assert isinstance(exc_info.value.__cause__, TimeoutError)
+        assert "read timed out" in str(exc_info.value.__cause__)
 
 
 class TestIsTradingDayInvalidDate:
