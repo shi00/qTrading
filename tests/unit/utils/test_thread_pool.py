@@ -808,10 +808,15 @@ class TestThreadPoolManagerRunAsyncCancelSemantics:
         assert started.wait(timeout=10), "任务未在 worker 线程启动"
         try:
             task.cancel()
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as excinfo:
                 await task
         finally:
             release.set()  # 兜底：保证 worker 收尾，事件循环关闭前任务不悬挂
+        # 精确断言：await 抛出的就是取消请求的 CancelledError 本类（排除其他
+        # 异常被误捕获），且任务终态为 CANCELLED（取消作用于 await 本身，
+        # 而非 worker 侧异常退出）。
+        assert excinfo.type is asyncio.CancelledError
+        assert task.cancelled(), "await 取消后任务应处于 CANCELLED 状态"
         # await 已取消，但 worker 不受影响：最终完成并写出结果
         for _ in range(100):
             if "value" in result_box:
