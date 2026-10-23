@@ -11,6 +11,7 @@ import threading
 
 import pytest
 
+from utils import exception_hooks
 from utils.exception_hooks import (
     _asyncio_exception_handler,
     _format_task_stack,
@@ -80,6 +81,28 @@ class TestSysExcepthook:
             _sys_excepthook(SystemExit, SystemExit(1), None)
 
         assert any("SystemExit" in r.message for r in caplog.records)
+
+
+class TestSysExcepthookTraceback:
+    """测试 sys.excepthook 真实堆栈记录 (UTILS-B-01)"""
+
+    def test_exc_info_records_real_traceback(self, caplog: pytest.LogCaptureFixture) -> None:
+        """exc_info 应记录真实 traceback 而非 "NoneType: None".
+
+        CPython 在异常完全 unwind 后才调用 sys.excepthook, 此时 sys.exc_info() 为空,
+        exc_info=True 只会输出 "NoneType: None"; 显式传入 (exctype, value, tb) 应记录
+        含调用方帧的真实堆栈。"""
+        try:
+            raise ValueError("boom-traceback")
+        except ValueError:
+            tb = sys.exc_info()[2]
+            with caplog.at_level(logging.ERROR):
+                _sys_excepthook(ValueError, ValueError("boom-traceback"), tb)
+
+        assert "NoneType: None" not in caplog.text
+        # 真实栈帧应包含本测试函数名 (raise 所在帧), 证明堆栈来自传入的 tb 而非空 exc_info
+        assert "test_exc_info_records_real_traceback" in caplog.text
+        assert "ValueError: boom-traceback" in caplog.text
 
 
 class TestThreadingExcepthook:
@@ -336,6 +359,81 @@ class TestSanitization:
         messages = [r.message for r in caplog.records]
         combined = " ".join(messages)
         assert "password123" not in combined
+
+
+class _ExplodingLogger:
+    """正常路径依赖全部抛异常的假 logger, 用于触发钩子兜底路径"""
+
+    def critical(self, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("logger exploded")
+
+    def error(self, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("logger exploded")
+
+    def warning(self, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("logger exploded")
+
+    def info(self, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("logger exploded")
+
+    def debug(self, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("logger exploded")
+
+
+class TestFallbackSanitization:
+    """测试钩子自身失败兜底路径的脱敏 (UTILS-B-02, R9)"""
+
+    @staticmethod
+    def _explode(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("hook dependency exploded")
+
+    def test_sys_excepthook_fallback_sanitized(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """sys 钩子兜底输出 stderr 前应脱敏原始异常值 (且不再转调明文默认钩子)"""
+        monkeypatch.setattr(exception_hooks, "classify_severity", self._explode)
+        _sys_excepthook(ValueError, ValueError("request failed?api_key=sk-secret12345"), None)
+
+        stderr = capsys.readouterr().err
+        assert "sk-secret12345" not in stderr
+        assert "api_key=***" in stderr
+        assert "Exception hook failed" in stderr
+
+    def test_threading_excepthook_fallback_sanitized(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """threading 钩子兜底输出 stderr 前应脱敏原始异常值"""
+        monkeypatch.setattr(exception_hooks, "logger", _ExplodingLogger())
+        args = threading.ExceptHookArgs(
+            (ValueError, ValueError("token=abcdef12345 leaked"), None, threading.current_thread())
+        )
+        _threading_excepthook(args)
+
+        stderr = capsys.readouterr().err
+        assert "abcdef12345" not in stderr
+        assert "token=***" in stderr
+        assert "ThreadingExcepthook failed" in stderr
+
+    def test_asyncio_handler_fallback_sanitized(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """asyncio 钩子兜底输出 stderr 前应脱敏 context 内容"""
+        monkeypatch.setattr(exception_hooks, "logger", _ExplodingLogger())
+        # NOTE(lazy): Uses asyncio.new_event_loop() to create a loop for testing _asyncio_exception_handler. ceiling: Python 3.16 removes asyncio.new_event_loop. upgrade: When Python 3.16 is adopted, refactor to use asyncio.Runner or a loop_factory-based approach.
+        loop = asyncio.new_event_loop()
+        context = {
+            "exception": ValueError("connect failed?api_key=sk-secret12345"),
+            "message": "task failed",
+        }
+        try:
+            _asyncio_exception_handler(loop, context)
+        finally:
+            loop.close()
+
+        stderr = capsys.readouterr().err
+        assert "sk-secret12345" not in stderr
+        assert "api_key=***" in stderr
+        assert "AsyncioHandler failed" in stderr
 
 
 class TestInstallAndRestore:
