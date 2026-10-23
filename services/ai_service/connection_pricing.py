@@ -227,4 +227,3 @@ def compute_cost_cny(
         logger.warning("[connection_pricing] 成本计算结果非有限/负值，按不可计价处理: %s", cost)
         return None
     return str(cost.quantize(_COST_QUANTUM, rounding=ROUND_HALF_UP))
-
