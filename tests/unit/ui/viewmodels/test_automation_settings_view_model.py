@@ -263,3 +263,118 @@ class TestThreadPoolOffloadContract:
         assert mock_thread_pool.run_async.call_count == 1
         args, _ = mock_thread_pool.run_async.call_args
         assert args[0] is TaskType.IO
+
+
+# --- P-AUTO-01: save_* 返回前回读磁盘对齐 state (统一契约) ---
+
+
+class TestSaveRollbackStateAlignment:
+    """P-AUTO-01: save_auto_update_time/save_concept_time/save_nightly_prediction_time/
+    save_news_interval 返回前统一回读磁盘事实源对齐 state。
+
+    不变式: save_* 返回 False (写盘失败/IO 异常/并发早退/解析失败) 时, 对应 state
+    字段必须与磁盘 config 一致 — 消除 View 乐观更新残留导致的「UI 显示未生效值,
+    重启后跳变」漂移; 成功时回读值即落盘新值, state 与磁盘同样一致。
+    """
+
+    @pytest.mark.asyncio
+    async def test_auto_update_time_failure_rolls_back_state(self, mock_config_handler, mock_thread_pool):
+        mock_config_handler.save_config.return_value = False
+        vm = _make_vm(mock_config_handler)
+        vm.set_auto_time("18:00")  # 模拟 View 乐观更新
+        result = await vm.save_auto_update_time("18:00")
+        assert result is False
+        assert vm.state.auto_time == "16:30"  # 回读 getter (磁盘旧值)
+
+    @pytest.mark.asyncio
+    async def test_auto_update_time_io_exception_rolls_back_state(self, mock_config_handler, mock_thread_pool):
+        mock_thread_pool.run_async = AsyncMock(side_effect=RuntimeError("disk full"))
+        vm = _make_vm(mock_config_handler)
+        vm.set_auto_time("18:00")
+        result = await vm.save_auto_update_time("18:00")
+        assert result is False
+        assert vm.state.auto_time == "16:30"
+
+    @pytest.mark.asyncio
+    async def test_auto_update_time_reentry_rejected_rolls_back_state(self, mock_config_handler, mock_thread_pool):
+        vm = _make_vm(mock_config_handler)
+        vm._set_state(is_saving=True)  # 模拟并发保存进行中
+        vm.set_auto_time("18:00")  # 模拟 View 第二次乐观更新
+        result = await vm.save_auto_update_time("18:00")
+        assert result is False
+        assert vm.state.auto_time == "16:30"
+        mock_config_handler.save_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_auto_update_time_success_aligns_state_to_disk(self, mock_config_handler, mock_thread_pool):
+        # 模拟落盘后磁盘值已变为新值 (成功路径回读必为新值)
+        mock_config_handler.get_auto_update_time.return_value = "18:00"
+        vm = _make_vm(mock_config_handler)
+        result = await vm.save_auto_update_time("18:00")
+        assert result is True
+        assert vm.state.auto_time == "18:00"
+
+    @pytest.mark.asyncio
+    async def test_concept_time_failure_rolls_back_state(self, mock_config_handler, mock_thread_pool):
+        mock_config_handler.set_concept_schedule_time.return_value = False
+        vm = _make_vm(mock_config_handler)
+        vm.set_concept_time("17:00")
+        result = await vm.save_concept_time("17:00")
+        assert result is False
+        assert vm.state.concept_time == "20:00"
+
+    @pytest.mark.asyncio
+    async def test_nightly_prediction_time_failure_rolls_back_state(self, mock_config_handler, mock_thread_pool):
+        mock_config_handler.set_nightly_prediction_time.return_value = False
+        vm = _make_vm(mock_config_handler)
+        vm.set_nightly_prediction_time("21:00")
+        result = await vm.save_nightly_prediction_time("21:00")
+        assert result is False
+        assert vm.state.nightly_prediction_time == "20:30"
+
+    @pytest.mark.asyncio
+    async def test_nightly_prediction_time_success_aligns_state_to_disk(self, mock_config_handler, mock_thread_pool):
+        mock_config_handler.get_nightly_prediction_time.return_value = "21:00"
+        vm = _make_vm(mock_config_handler)
+        result = await vm.save_nightly_prediction_time("21:00")
+        assert result is True
+        assert vm.state.nightly_prediction_time == "21:00"
+
+    @pytest.mark.asyncio
+    async def test_news_interval_failure_rolls_back_state(self, mock_config_handler, mock_thread_pool):
+        mock_config_handler.save_config.return_value = False
+        vm = _make_vm(mock_config_handler)
+        vm.set_news_interval("300")
+        result = await vm.save_news_interval("300")
+        assert result is False
+        assert vm.state.news_interval == "60"
+
+    @pytest.mark.asyncio
+    async def test_news_interval_invalid_format_rolls_back_state(self, mock_config_handler, mock_thread_pool):
+        vm = _make_vm(mock_config_handler)
+        vm.set_news_interval("abc")
+        result = await vm.save_news_interval("abc")
+        assert result is False
+        assert vm.state.news_interval == "60"
+        mock_config_handler.save_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_news_interval_reentry_rejected_rolls_back_state(self, mock_config_handler, mock_thread_pool):
+        vm = _make_vm(mock_config_handler)
+        vm._set_state(is_saving=True)
+        vm.set_news_interval("300")
+        result = await vm.save_news_interval("300")
+        assert result is False
+        assert vm.state.news_interval == "60"
+        mock_config_handler.save_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_news_interval_success_aligns_state_to_disk(self, mock_config_handler, mock_thread_pool):
+        mock_config_handler.get_config.side_effect = lambda key, default=None: {
+            "enable_news_alerts": True,
+            "news_poll_interval": 300,
+        }.get(key, default)
+        vm = _make_vm(mock_config_handler)
+        result = await vm.save_news_interval("300")
+        assert result is True
+        assert vm.state.news_interval == "300"
