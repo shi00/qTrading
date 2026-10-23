@@ -1207,11 +1207,11 @@ class TestSchedulingServicesAssembly:
         monkeypatch.setattr(bootstrap_module, "_pending_scheduling_coordinators", [])
 
     def test_assemble_returns_three_services(self):
-        """D9：组装返回 Recorder / Compatibility / Executor 三服务，get 访问同一对象。"""
+        """D9：组装返回 Recorder / Compatibility / Executor 三服务 + F15 适配器表。"""
         import app.bootstrap as bootstrap_module
 
         services = bootstrap_module.assemble_scheduling_services()
-        assert set(services) == {"recorder", "compatibility", "executor"}
+        assert set(services) == {"recorder", "compatibility", "executor", "adapters"}
         assert bootstrap_module.get_scheduling_services() is services
 
     def test_register_before_assemble_pends_then_attaches_after(self):

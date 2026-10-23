@@ -148,13 +148,21 @@ def assemble_scheduling_services() -> dict[str, Any]:
 
     recorder = UsageRecorder(dao_provider=_ai_usage_dao_provider)
     compatibility = ModelCompatibilityService()
+    adapters = _build_default_adapters()
     executor = ScenarioExecutor(
         config_service=ModelConfigurationService(),
         recorder=recorder,
         compatibility=compatibility,
-        adapters=_build_default_adapters(),
+        adapters=adapters,
     )
-    _scheduling_services = {"recorder": recorder, "compatibility": compatibility, "executor": executor}
+    # F15：适配器表同时暴露给「模型连接」页单次测试（同一组合根组装，测试路径
+    # 直连适配器、不经 Executor 业务授权通道——测试 consent 与业务 grant 两通道）
+    _scheduling_services = {
+        "recorder": recorder,
+        "compatibility": compatibility,
+        "executor": executor,
+        "adapters": adapters,
+    }
     # S4（R1）：调度服务注入 services 层分派点（services 不 import app，app→services 合法方向）
     from services.ai_service.scenario_dispatch import set_scheduling_services_provider
 

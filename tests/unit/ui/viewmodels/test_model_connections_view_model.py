@@ -10,11 +10,12 @@ Mock ``ModelConfigurationService``（DI 注入），不连真实 DB / keyring / 
 - revision 冲突保留草稿
 - 凭据留空 ≠ 显式清除（不回显已存凭据）
 - adapter_kind 条件字段（litellm vs gguf）
-- test() 单次测试（begin_synthetic_test + 注入 ScenarioExecutor）
+- test() 单次测试（专用测试上下文：一次性消费 consent + 直连适配器，F15）
 - dispose() 清敏感草稿
 - R2 CancelledError 显式传播
 """
 
+import asyncio
 from dataclasses import FrozenInstanceError
 from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock
@@ -22,10 +23,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core.model_management_types import (
+    AdapterResponse,
+    AttemptContext,
     ConfigurationSaveOutcome,
+    InferenceRequest,
     ModelConfigurationConflictError,
     ModelManagementSnapshot,
-    ScenarioExecutionResult,
+    ResolvedConnection,
     SyntheticTestConsent,
     SyntheticTestContext,
 )
@@ -129,6 +133,7 @@ def _make_service(snapshot: ModelManagementSnapshot | None = None) -> MagicMock:
             deadline=999.0,
         )
     )
+    svc.consume_synthetic_test_consent = MagicMock(side_effect=lambda consent, **kwargs: consent)
     svc.grant_egress = AsyncMock(return_value=ConfigurationSaveOutcome(status="committed", current_revision=2))
     svc.revoke_egress = AsyncMock(return_value=ConfigurationSaveOutcome(status="committed", current_revision=2))
     return svc
@@ -725,25 +730,44 @@ class TestAdapterKindFields:
 # --- Test (single synthetic test) ---
 
 
-class TestSyntheticTest:
-    async def test_runs_begin_and_executor(self):
-        svc = _make_service()
-        executor = MagicMock()
-        executor.execute = AsyncMock(
-            return_value=ScenarioExecutionResult(
-                scenario_id="synthetic_test",
-                invocation_id="i1",
-                status="succeeded",
-                outputs=(),
-                candidate_decisions=(),
-                actual_usage=(),
-            )
+class _StubAdapter:
+    """单次测试适配器替身（InferenceAdapter 协议）：记录入参并返回协议响应。"""
+
+    def __init__(self, response: AdapterResponse | None = None, error: Exception | None = None) -> None:
+        self.response = (
+            response if response is not None else AdapterResponse(content="pong", usage=None, actual_model=None)
         )
-        vm = _make_vm(svc, scenario_executor=executor)
+        self.error = error
+        self.requests: list[InferenceRequest] = []
+        self.connections: list[ResolvedConnection] = []
+        self.attempt_contexts: list[AttemptContext] = []
+
+    async def invoke(
+        self,
+        request: InferenceRequest,
+        resolved_connection: ResolvedConnection,
+        deadline: float,
+        attempt_context: AttemptContext,
+    ) -> AdapterResponse:
+        self.requests.append(request)
+        self.connections.append(resolved_connection)
+        self.attempt_contexts.append(attempt_context)
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+class TestSyntheticTest:
+    async def test_unsaved_draft_runs_dedicated_test_path(self):
+        """未保存草稿可测：一次性消费 consent 后直连适配器；不落业务授权 / 不保存。"""
+        svc = _make_service()
+        adapter = _StubAdapter()
+        vm = _make_vm(svc, synthetic_adapters={"litellm_chat": adapter})
         vm.start_add()
         vm.update_name("Probe")
         vm.update_model("gpt-4o")
         vm.update_provider("openai")
+        vm.update_api_base("https://api.example.com/v1")
 
         ok = await vm.test()
 
@@ -753,15 +777,150 @@ class TestSyntheticTest:
         consent_call = svc.create_synthetic_test_consent.call_args
         assert consent_call.args[0] is svc.begin_synthetic_test.return_value
         assert set(consent_call.kwargs) == {"target_fingerprint", "deadline"}
-        executor.execute.assert_awaited_once()
+        # 一次性消费：绑定事实（consent 对象 + 草稿 payload + 目标指纹）交给许可消费者
+        consume_call = svc.consume_synthetic_test_consent.call_args
+        assert consume_call.args[0] is svc.create_synthetic_test_consent.return_value
+        assert consume_call.kwargs["target_fingerprint"] == consent_call.kwargs["target_fingerprint"]
+        assert consume_call.kwargs["draft_connection"]["model"] == "gpt-4o"
+        # 适配器直连：固定合成探针正文（常量 ping，无用户正文）
+        assert len(adapter.requests) == 1
+        assert adapter.requests[0].payload == {"prompt": "ping"}
+        assert adapter.requests[0].scenario_id == "synthetic_test"
+        assert adapter.requests[0].task_id == "model_connection_test"
+        # 无隐式持久化授权：不保存连接、不写业务 grant
+        svc.save_draft.assert_not_called()
+        svc.grant_egress.assert_not_called()
 
-    async def test_without_executor_degrades(self, vm):
+    async def test_gguf_sentiment_probe_payload_satisfies_adapter_protocol(self):
+        """gguf_sentiment 探针含 texts（适配器协议强制），空 payload 必然失败的反向回归。"""
+        svc = _make_service()
+        adapter = _StubAdapter()
+        vm = _make_vm(svc, synthetic_adapters={"gguf_sentiment": adapter})
+        vm.start_add()
+        vm.update_name("Probe")
+        vm.update_model("finbert-encoder")
+        vm.update_adapter_kind("gguf_sentiment")
+        # gguf_sentiment 静态校验强制三路径（encoder/head/tokenizer）
+        vm.update_encoder_model_path("models/encoder.gguf")
+        vm.update_head_path("models/head.onnx")
+        vm.update_tokenizer_path("models/tokenizer.json")
+
+        ok = await vm.test()
+
+        assert ok is True
+        assert len(adapter.requests) == 1
+        assert adapter.requests[0].payload == {"texts": ["ping"]}
+
+    def test_resolved_test_connection_rejects_unknown_kind(self):
+        """kind 域外拒绝（防御：payload 由校验后草稿构建，正常流程不可达）。"""
+        with pytest.raises(ValueError, match="unsupported adapter kind"):
+            ModelConnectionsViewModel._resolved_test_connection({"adapter_kind": "bogus"})
+
+    async def test_new_credential_participates_in_test(self):
+        """新填 credential 参与测试（临时版本化凭据），不使用落库旧值。"""
+        svc = _make_service()
+        adapter = _StubAdapter()
+        vm = _make_vm(svc, synthetic_adapters={"litellm_chat": adapter})
+        vm.start_add()
+        vm.update_name("Probe")
+        vm.update_model("gpt-4o")
+        vm.update_provider("openai")
+        vm.update_credential("sk-live-key")
+
+        ok = await vm.test()
+
+        assert ok is True
+        svc.prepare_credential_version.assert_awaited_once()
+        assert svc.prepare_credential_version.call_args.args[1] == "sk-live-key"
+        # 版本化凭据进入测试上下文与实际执行连接
+        assert svc.begin_synthetic_test.call_args.kwargs["credential_version"] == "v-new"
+        resolved = adapter.connections[0]
+        assert resolved.credential_ref == "keyring:new"
+        assert resolved.credential_version == "v-new"
+
+    async def test_blank_credential_uses_stored_version(self):
+        """留空凭据：编辑既有连接时以已存版本参与测试，不重复创建 keyring 项。"""
+        svc = _make_service(_snapshot(connections=(_conn(),)))
+        adapter = _StubAdapter()
+        vm = _make_vm(svc, synthetic_adapters={"litellm_chat": adapter})
+        await vm.load()
+        vm.edit("c1")
+
+        ok = await vm.test()
+
+        assert ok is True
+        svc.prepare_credential_version.assert_not_awaited()
+        resolved = adapter.connections[0]
+        assert resolved.credential_ref == "keyring:old"
+        assert resolved.credential_version == "v-old"
+
+    async def test_consume_rejection_fails_test(self):
+        """许可消费被拒（重放 / 绑定不符）→ 测试失败，不执行适配器。"""
+        svc = _make_service()
+        svc.consume_synthetic_test_consent = MagicMock(side_effect=PermissionError("单次测试许可无效或已消费"))
+        adapter = _StubAdapter()
+        vm = _make_vm(svc, synthetic_adapters={"litellm_chat": adapter})
+        vm.start_add()
+        vm.update_name("Probe")
+        vm.update_model("gpt-4o")
+
+        ok = await vm.test()
+
+        assert ok is False
+        assert vm.state.test_state == "failed"
+        assert adapter.requests == []
+
+    async def test_adapter_error_fails_test(self):
+        """适配器执行异常 → 测试失败（不伪装成功，R21）。"""
+        svc = _make_service()
+        adapter = _StubAdapter(error=RuntimeError("connection refused"))
+        vm = _make_vm(svc, synthetic_adapters={"litellm_chat": adapter})
+        vm.start_add()
+        vm.update_name("Probe")
+        vm.update_model("gpt-4o")
+
+        ok = await vm.test()
+
+        assert ok is False
+        assert vm.state.test_state == "failed"
+
+    async def test_missing_adapter_kind_fails_test(self):
+        """适配器表缺该 kind → 诚实失败（不伪装成功，R21）。"""
+        svc = _make_service()
+        adapter = _StubAdapter()
+        vm = _make_vm(svc, synthetic_adapters={"gguf_chat": adapter})
+        vm.start_add()
+        vm.update_name("Probe")
+        vm.update_model("gpt-4o")
+
+        ok = await vm.test()
+
+        assert ok is False
+        assert vm.state.test_state == "failed"
+        assert adapter.requests == []
+
+    async def test_without_adapters_degrades(self, vm):
         vm.start_add()
         vm.update_name("Probe")
         vm.update_model("gpt-4o")
         ok = await vm.test()
         assert ok is False
         assert vm.state.test_state == "failed"
+
+    async def test_cancelled_error_propagates(self):
+        """R2：取消显式传播，不吞没。"""
+        svc = _make_service()
+        svc.begin_synthetic_test = AsyncMock(side_effect=asyncio.CancelledError())
+        vm = _make_vm(svc, synthetic_adapters={"litellm_chat": _StubAdapter()})
+        vm.start_add()
+        vm.update_name("Probe")
+        vm.update_model("gpt-4o")
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await vm.test()
+        # 精确状态断言：取消发生在 begin（终态写入前），test_state 保持 running 不被改写
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert vm.state.test_state == "running"
 
 
 # --- Egress commands ---
@@ -1113,9 +1272,9 @@ class TestDisposeInflightTasks:
         """单次测试挂起在 begin_synthetic_test 时页面卸载 → 任务被取消（不再继续烧凭据）。"""
         import asyncio
 
-        # test() 前置要求 scenario_executor 非 None（否则提前返回 TEST_FAILED），
-        # 故直接构造带 executor 的 VM（默认 vm fixture 不注入 executor）。
-        vm = _make_vm(_make_service(), scenario_executor=MagicMock())
+        # test() 前置要求 synthetic_adapters 非 None（否则提前返回 TEST_FAILED），
+        # 故直接构造带适配器表的 VM（默认 vm fixture 不注入适配器表）。
+        vm = _make_vm(_make_service(), synthetic_adapters={"litellm_chat": _StubAdapter()})
         vm.start_add()
         vm.update_name("New Conn")
         vm.update_model("gpt-4o")

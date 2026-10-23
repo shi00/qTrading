@@ -12,6 +12,7 @@ import asyncio
 import copy
 import datetime as dt
 import json
+import socket
 import threading
 import time
 from pathlib import Path
@@ -24,6 +25,7 @@ from core.model_management_types import (
     ConfigurationSaveOutcome,
     MigrationTransitionError,
     ModelConfigurationConflictError,
+    SyntheticTestConsent,
 )
 from services.model_configuration_service import (
     ModelConfigurationService,
@@ -830,6 +832,149 @@ class TestSyntheticTestContext:
                 credential_version=None,
                 attempt_id="att-6",
             )
+
+    @pytest.mark.asyncio
+    async def test_business_entry_cannot_borrow_consent(self, service):
+        """F15：业务授权通道不能借用测试许可——authorize_attempt 被拒后许可仍可消费。"""
+        draft_conn = _base_connection(CONN_B, "http://127.0.0.1:8000/v1", adapter_kind="gguf_chat")
+        ctx = await service.begin_synthetic_test(draft_connection=draft_conn, task_id="news_annotation")
+        consent = service.create_synthetic_test_consent(
+            ctx, target_fingerprint="http://127.0.0.1:8000:8000", deadline=asyncio.get_running_loop().time() + 30.0
+        )
+
+        # 即使业务调用使用 synthetic_test 用途（与许可同键身份），许可也不进入业务通道
+        with pytest.raises(PermissionError, match="连接不存在"):
+            await service.authorize_attempt(
+                connection_id=CONN_B,
+                target_fingerprint="http://127.0.0.1:8000:8000",
+                purpose="synthetic_test",
+                scope_version=1,
+                credential_version=None,
+                attempt_id="att-f15-borrow",
+            )
+
+        # 业务借用未消费许可：受控测试入口仍可一次性消费
+        consumed = service.consume_synthetic_test_consent(
+            consent, draft_connection=draft_conn, target_fingerprint="http://127.0.0.1:8000:8000"
+        )
+        assert consumed is consent
+
+    @pytest.mark.asyncio
+    async def test_consent_consumed_exactly_once(self, service):
+        """F15：许可一次性消费——重放（二次出示）即拒绝。"""
+        draft_conn = _base_connection(CONN_B, "http://127.0.0.1:8000/v1", adapter_kind="gguf_chat")
+        ctx = await service.begin_synthetic_test(draft_connection=draft_conn, task_id="news_annotation")
+        consent = service.create_synthetic_test_consent(
+            ctx, target_fingerprint="http://127.0.0.1:8000:8000", deadline=asyncio.get_running_loop().time() + 30.0
+        )
+
+        consumed = service.consume_synthetic_test_consent(
+            consent, draft_connection=draft_conn, target_fingerprint="http://127.0.0.1:8000:8000"
+        )
+        assert consumed is consent
+
+        with pytest.raises(PermissionError, match="无效或已消费"):
+            service.consume_synthetic_test_consent(
+                consent, draft_connection=draft_conn, target_fingerprint="http://127.0.0.1:8000:8000"
+            )
+
+    @pytest.mark.asyncio
+    async def test_consent_rejects_target_mismatch(self, service):
+        """F15：换目标出示即拒（且许可已被出示烧毁，不可再消费）。"""
+        draft_conn = _base_connection(CONN_B, "http://127.0.0.1:8000/v1", adapter_kind="gguf_chat")
+        ctx = await service.begin_synthetic_test(draft_connection=draft_conn, task_id="news_annotation")
+        consent = service.create_synthetic_test_consent(
+            ctx, target_fingerprint="http://127.0.0.1:8000:8000", deadline=asyncio.get_running_loop().time() + 30.0
+        )
+
+        with pytest.raises(PermissionError, match="目标绑定不符"):
+            service.consume_synthetic_test_consent(
+                consent, draft_connection=draft_conn, target_fingerprint="http://other-host:443"
+            )
+        assert service._pending_synthetic_consents == {}
+
+    @pytest.mark.asyncio
+    async def test_consent_rejects_draft_mismatch(self, service):
+        """F15：换草稿出示即拒（草稿指纹按全 payload 重算，覆盖凭据与连接身份）。"""
+        draft_conn = _base_connection(CONN_B, "http://127.0.0.1:8000/v1", adapter_kind="gguf_chat")
+        ctx = await service.begin_synthetic_test(draft_connection=draft_conn, task_id="news_annotation")
+        consent = service.create_synthetic_test_consent(
+            ctx, target_fingerprint="http://127.0.0.1:8000:8000", deadline=asyncio.get_running_loop().time() + 30.0
+        )
+        other_draft = _base_connection(CONN_B, "http://127.0.0.1:9999/v1", adapter_kind="gguf_chat")
+
+        with pytest.raises(PermissionError, match="草稿绑定不符"):
+            service.consume_synthetic_test_consent(
+                consent, draft_connection=other_draft, target_fingerprint="http://127.0.0.1:8000:8000"
+            )
+
+    @pytest.mark.asyncio
+    async def test_consent_rejects_expired(self, service):
+        """F15：过期许可拒绝消费（deadline 为循环单调钟）。"""
+        draft_conn = _base_connection(CONN_B, "http://127.0.0.1:8000/v1", adapter_kind="gguf_chat")
+        ctx = await service.begin_synthetic_test(draft_connection=draft_conn, task_id="news_annotation")
+        consent = service.create_synthetic_test_consent(
+            ctx, target_fingerprint="http://127.0.0.1:8000:8000", deadline=asyncio.get_running_loop().time() - 1.0
+        )
+
+        with pytest.raises(PermissionError, match="已过期"):
+            service.consume_synthetic_test_consent(
+                consent, draft_connection=draft_conn, target_fingerprint="http://127.0.0.1:8000:8000"
+            )
+
+    @pytest.mark.asyncio
+    async def test_consent_rejects_unregistered(self, service):
+        """F15：非本服务登记的许可（伪造 / 异实例）拒绝消费。"""
+        forged = SyntheticTestConsent(
+            test_operation_id="forged-op",
+            host_identity=socket.gethostname(),
+            target_fingerprint="http://127.0.0.1:8000:8000",
+            draft_fingerprint="fp",
+            scope_version=1,
+            deadline=asyncio.get_running_loop().time() + 30.0,
+        )
+        draft_conn = _base_connection(CONN_B, "http://127.0.0.1:8000/v1", adapter_kind="gguf_chat")
+
+        with pytest.raises(PermissionError, match="无效或已消费"):
+            service.consume_synthetic_test_consent(
+                forged, draft_connection=draft_conn, target_fingerprint="http://127.0.0.1:8000:8000"
+            )
+
+    @pytest.mark.asyncio
+    async def test_consent_rejects_host_mismatch(self, service, monkeypatch):
+        """F15：登记许可被跨主机搬运后出示拒绝消费（consent 与登记主机绑定）。"""
+        draft_conn = _base_connection(CONN_B, "http://127.0.0.1:8000/v1", adapter_kind="gguf_chat")
+        ctx = await service.begin_synthetic_test(draft_connection=draft_conn, task_id="news_annotation")
+        consent = service.create_synthetic_test_consent(
+            ctx, target_fingerprint="http://127.0.0.1:8000:8000", deadline=asyncio.get_running_loop().time() + 30.0
+        )
+        # 跨主机搬运：出示时本机名与登记主机不符（非登记对象副本会先被 is 身份比对拒绝）
+        monkeypatch.setattr(socket, "gethostname", lambda: "other-host")
+
+        with pytest.raises(PermissionError, match="主机身份不符"):
+            service.consume_synthetic_test_consent(
+                consent, draft_connection=draft_conn, target_fingerprint="http://127.0.0.1:8000:8000"
+            )
+
+    @pytest.mark.asyncio
+    async def test_consent_consumption_does_not_persist(self, service):
+        """F15：许可消费纯内存——config_revision 与 grants 均不变（无隐式持久化授权）。"""
+        draft_conn = _base_connection(CONN_B, "http://127.0.0.1:8000/v1", adapter_kind="gguf_chat")
+        ctx = await service.begin_synthetic_test(draft_connection=draft_conn, task_id="news_annotation")
+        consent = service.create_synthetic_test_consent(
+            ctx, target_fingerprint="http://127.0.0.1:8000:8000", deadline=asyncio.get_running_loop().time() + 30.0
+        )
+        revision_before = _load_mm()["config_revision"]
+        grants_before = _load_mm()["security_state"]["grants"]
+        security_revision_before = _load_mm()["security_state"]["security_revision"]
+
+        service.consume_synthetic_test_consent(
+            consent, draft_connection=draft_conn, target_fingerprint="http://127.0.0.1:8000:8000"
+        )
+
+        assert _load_mm()["config_revision"] == revision_before
+        assert _load_mm()["security_state"]["grants"] == grants_before
+        assert _load_mm()["security_state"]["security_revision"] == security_revision_before
 
 
 class TestMigrationPreview:
