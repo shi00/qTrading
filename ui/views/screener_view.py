@@ -1254,6 +1254,10 @@ async def _execute_screener_export(
 ) -> None:
     """Export current results to CSV or Excel.
 
+    连点守卫 (P-SCREENER-01): 经 ``vm.try_begin_export()`` 幂等置位, 导出进行中
+    的重复点击直接返回; 成功置位后整体 try/finally 经 ``vm.end_export()`` 复位,
+    异常/取消路径 (CancelledError 传播) 均不残留 ``state.is_exporting=True``。
+
     Args:
         vm: ScreenerViewModel
         file_picker: FilePicker instance
@@ -1261,6 +1265,21 @@ async def _execute_screener_export(
         format_: "csv" or "excel"
     """
     UILogger.log_action("ScreenerView", "Click", f"btn_export_{format_}")
+    if not vm.try_begin_export():
+        return
+    try:
+        await _export_impl(vm, file_picker, page, format_)
+    finally:
+        vm.end_export()
+
+
+async def _export_impl(
+    vm: ScreenerViewModel,
+    file_picker: ft.FilePicker | None,
+    page: ft.Page | None,
+    format_: str,
+) -> None:
+    """导出执行体 (守卫临界区内的实现, 由 ``_execute_screener_export`` 包裹)."""
     df = vm.get_export_data()
     if df is None:
         if page is not None:
@@ -1908,7 +1927,7 @@ def _build_screener_control_card(
             content=I18n.get("screener_export"),
             icon=ft.Icons.DOWNLOAD,
             on_click=safe_on_click(handlers["on_export_csv_click"]),
-            disabled=export_btn_disabled,
+            disabled=export_btn_disabled or state.is_exporting,
             style=AppStyles.outline_button(),
             height=45,
         ),
@@ -1919,7 +1938,7 @@ def _build_screener_control_card(
             content=I18n.get("data_export_excel"),
             icon=ft.Icons.TABLE_VIEW,
             on_click=safe_on_click(handlers["on_export_excel_click"]),
-            disabled=export_btn_disabled,
+            disabled=export_btn_disabled or state.is_exporting,
             style=AppStyles.outline_button(),
             height=45,
         ),

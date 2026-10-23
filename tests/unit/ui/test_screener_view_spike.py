@@ -63,6 +63,8 @@ class FakeScreenerState:
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
     status_action_key: str | None = None
     is_retrying: bool = False
+    # P-SCREENER-01: 导出连点守卫标志 (镜像 ScreenerState.is_exporting, View 渲染期只读禁用导出按钮)
+    is_exporting: bool = False
     # UX-03: 空结果时可操作原因横幅 Message (镜像 ScreenerState.empty_message)
     empty_message: Message | None = None
     stock_filter: str = ""
