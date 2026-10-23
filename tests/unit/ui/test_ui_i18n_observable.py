@@ -29,14 +29,14 @@ def _reset_i18n_state():
     I18n._initialized = False
     I18n._locale = DEFAULT_LOCALE
     I18n._strings_cache = {}
-    I18n._missing_keys = set()
+    I18n._missing_keys = {}
     yield
     I18n._listeners = saved_listeners
     ui_i18n._i18n_state = None
     I18n._initialized = False
     I18n._locale = DEFAULT_LOCALE
     I18n._strings_cache = {}
-    I18n._missing_keys = set()
+    I18n._missing_keys = {}
 
 
 def test_get_observable_state_returns_singleton():

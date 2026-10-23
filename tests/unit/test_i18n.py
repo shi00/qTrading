@@ -26,7 +26,7 @@ def reset_i18n():
     I18n._initialized = False
     I18n._locale = DEFAULT_LOCALE
     I18n._strings_cache = {}
-    I18n._missing_keys = set()
+    I18n._missing_keys = {}
     I18n._locales_dir = None
     ui_i18n._i18n_state = None
     yield
@@ -34,7 +34,7 @@ def reset_i18n():
     I18n._initialized = False
     I18n._locale = DEFAULT_LOCALE
     I18n._strings_cache = {}
-    I18n._missing_keys = set()
+    I18n._missing_keys = {}
     I18n._locales_dir = saved_locales_dir
     ui_i18n._i18n_state = None
 
@@ -423,13 +423,14 @@ class TestI18nDynamicLoading:
 
     def test_missing_keys_are_deduplicated(self):
         I18n.initialize()
-        I18n._missing_keys = set()
+        I18n._missing_keys = {}
 
         I18n.get("missing_key_1")
         I18n.get("missing_key_1")
         I18n.get("missing_key_1")
 
         assert len(I18n._missing_keys) == 1
+        assert I18n._missing_keys[I18n.current_locale()] == {"missing_key_1"}
 
 
 class TestI18nEdgeCases:
@@ -858,15 +859,19 @@ class TestListenerIterationDefense:
 
 
 class TestFormatExceptionContract:
-    """core-004: 明确 I18n.get 的 format 异常处理契约.
+    """core-004 / CORE-03: 明确 I18n.get 的 format 异常处理契约.
 
-    设计决策:
-    - KeyError (模板含 {name} 但 kwargs 未提供 name): 已吞没, 返回原模板
-    - 其他 format 异常 (IndexError/ValueError): 不吞没, 向调用方传播
+    设计决策 (CORE-03 反转原 core-004 的"仅吞 KeyError"决策):
+    - KeyError (模板含 {name} 但 kwargs 未提供 name): 吞没, 返回原模板
+    - IndexError / ValueError (模板含位置占位符 {} / {0}、混合规格或语法损坏):
+      同样吞没, 返回原模板并记 warning, 不向调用方传播
 
-    理由: i18n 模板来自开发者控制的 JSON 文件, 非 KeyError 异常通常是
-    模板配置错误 (如 {{{} 损坏语法), 应在开发阶段暴露而非静默吞没.
-    若未来需要更宽松的处理, 应作为独立变更评审.
+    理由: i18n 模板来自开发者控制的 JSON 文件, 三类异常同为模板/参数不匹配
+    的配置错误; 传播会把 UI 渲染路径炸掉, 降级返回原模板可保持界面可用,
+    且 warning 日志可在开发期暴露问题. 当前 locales/ 下无危险形态模板,
+    本契约针对未来新增模板的防御 (新增模板无自动拦截).
+
+    若未来需要更宽松/更严格的处理, 应作为独立变更评审.
     """
 
     def test_key_error_swallowed_returns_template(self, caplog):
@@ -890,22 +895,49 @@ class TestFormatExceptionContract:
         assert result == I18n._get_strings(I18n.current_locale())["screener_done"]
         assert "{count}" in result
 
-    def test_index_error_not_swallowed(self):
-        """模板含位置参数 {0} 但 kwargs 未提供时, IndexError 应传播."""
+    def test_auto_positional_placeholder_swallowed_returns_template(self, caplog):
+        """CORE-03: 模板含自动编号占位符 {} 但 kwargs 均为命名参数时,
+        IndexError 应被吞没并返回原模板 (原行为: IndexError 传播炸掉调用方)."""
+        I18n.initialize()
+        I18n._strings_cache["zh_CN"] = {"test_auto_pos": "Hello {}"}
+        with caplog.at_level(logging.WARNING, logger="core.i18n"):
+            result = I18n.get("test_auto_pos", name="Alice")
+        assert result == "Hello {}", "IndexError 应被吞没, 返回原模板"
+        assert "Invalid template or format spec" in caplog.text
+        # 日志只输出 template 不输出 key：key 字面量命中 CodeQL maybePrivate 命名启发式，
+        # GitHub.com 不支持 inline suppression，输出 key 会重新触发 clear-text-logging 告警
+        assert "test_auto_pos" not in caplog.text
+
+    def test_mixed_spec_placeholder_swallowed_returns_template(self, caplog):
+        """CORE-03: 模板混合位置占位符 {} 与命名占位符 {name} 时吞没."""
+        I18n.initialize()
+        I18n._strings_cache["zh_CN"] = {"test_mixed": "Mix {} {name}"}
+        with caplog.at_level(logging.WARNING, logger="core.i18n"):
+            result = I18n.get("test_mixed", name="Alice")
+        assert result == "Mix {} {name}", "混合规格 IndexError 应被吞没, 返回原模板"
+        assert "Invalid template or format spec" in caplog.text
+
+    def test_index_error_swallowed(self, caplog):
+        """CORE-03 反转 core-004: 模板含位置参数 {0} 但 kwargs 未提供时,
+        IndexError 应被吞没并返回原模板, 不再传播."""
         I18n.initialize()
         # 构造一个含位置参数的缓存模板
         I18n._strings_cache["zh_CN"] = {"test_pos": "Hello {0}"}
-        # 直接调用会触发 IndexError (str.format 不接受 **kwargs 中的 0)
-        with pytest.raises(IndexError, match="Replacement index 0 out of range"):
-            I18n.get("test_pos", name="Alice")
+        with caplog.at_level(logging.WARNING, logger="core.i18n"):
+            result = I18n.get("test_pos", name="Alice")
+        assert result == "Hello {0}", "IndexError 应被吞没, 返回原模板"
+        assert "Invalid template or format spec" in caplog.text
 
-    def test_value_error_not_swallowed(self):
-        """模板语法错误 (如未闭合的 {) 应传播 ValueError."""
+    def test_value_error_swallowed(self, caplog):
+        """CORE-03 反转 core-004: 模板语法错误 (如未闭合的 {) 应吞没
+        ValueError 并返回原模板, 不再传播."""
         I18n.initialize()
         # 构造一个格式错误的模板: 未闭合的 {
         I18n._strings_cache["zh_CN"] = {"test_bad": "Hello {"}
-        with pytest.raises(ValueError, match=r"Single '\{' encountered"):
-            I18n.get("test_bad", name="Alice")
+        with caplog.at_level(logging.WARNING, logger="core.i18n"):
+            result = I18n.get("test_bad", name="Alice")
+        assert result == "Hello {", "ValueError 应被吞没, 返回原模板"
+        assert "Invalid template or format spec" in caplog.text
 
     def test_valid_format_with_kwargs_returns_formatted(self):
         """正常 format 应返回格式化后的字符串."""
@@ -913,3 +945,72 @@ class TestFormatExceptionContract:
         result = I18n.get("screener_done", count=42)
         assert "42" in result
         assert "{count}" not in result
+
+
+class TestGetLocaleWhitelistAndMissingKeysIsolation:
+    """CORE-04: get 的 locale 参数过支持白名单 + 缺失告警按 locale 隔离.
+
+    设计决策:
+    - 非法 locale 回退到当前 locale（与 set_locale 非法输入「保持当前」语义对齐；
+      区别于 initialize 的 DEFAULT 回退——渲染场景回退 default 会让非默认语言
+      用户看到错误语言）
+    - _missing_keys 改为 dict[locale, set[key]]，A locale 先记录的缺失不再
+      吞掉 B locale 对同一 key 的后续告警
+    """
+
+    def test_get_with_unsupported_locale_falls_back_to_current_locale(self):
+        """非法 locale 不再静默返回 key 原文，而是回退到当前 locale 的翻译."""
+        I18n.initialize("en_US")
+        result = I18n.get("app_title", locale="fr_FR")
+        assert result == "A-Share Intelligent Screener"
+
+    def test_get_with_unsupported_locale_falls_back_after_locale_switch(self):
+        """当前 locale 为 zh_CN 时，非法 locale 回退应得到中文翻译."""
+        I18n.initialize("zh_CN")
+        result = I18n.get("app_title", locale="fr_FR")
+        assert result == "A股智能选股助手"
+
+    def test_get_with_unsupported_locale_logs_warning(self, caplog):
+        """非法 locale 记 warning，与 initialize/set_locale 的告警行为对齐."""
+        I18n.initialize()
+        with caplog.at_level(logging.WARNING, logger="core.i18n"):
+            I18n.get("app_title", locale="fr_FR")
+        assert "Unsupported locale" in caplog.text
+        assert "fr_FR" in caplog.text
+
+    def test_get_with_short_code_locale_still_works(self, caplog):
+        """LOCALE_MAP 短码（en/zh）经映射后命中白名单，行为不变且无 warning."""
+        I18n.initialize()
+        with caplog.at_level(logging.WARNING, logger="core.i18n"):
+            result = I18n.get("app_title", locale="en")
+        assert result == "A-Share Intelligent Screener"
+        assert "Unsupported locale" not in caplog.text
+
+    def test_unsupported_locale_missing_key_recorded_under_fallback_locale(self):
+        """非法 locale 下缺 key 的告警记录应落在回退后的当前 locale 下."""
+        I18n.initialize("zh_CN")
+        I18n._missing_keys = {}
+
+        I18n.get("nonexistent_key_core04")
+        I18n.get("nonexistent_key_core04", locale="fr_FR")
+
+        # 两次都落到 zh_CN（第二次 fr_FR 回退到 zh_CN），同 locale 内去重
+        assert I18n._missing_keys == {"zh_CN": {"nonexistent_key_core04"}}
+
+    def test_missing_key_warning_not_swallowed_across_locales(self, caplog):
+        """A locale 记录的缺失不得吞掉 B locale 对同一 key 的后续告警."""
+        I18n.initialize("zh_CN")
+        I18n._missing_keys = {}
+
+        with caplog.at_level(logging.WARNING, logger="core.i18n"):
+            I18n.get("nonexistent_key_cross_locale")  # zh_CN 首次告警
+            I18n.get("nonexistent_key_cross_locale")  # zh_CN 去重，不告警
+            I18n.set_locale("en_US")
+            I18n.get("nonexistent_key_cross_locale")  # en_US 首次，必须再次告警
+
+        warnings = [r for r in caplog.records if "Missing translation" in r.message]
+        assert len(warnings) == 2, "跨 locale 的缺失告警不应互吞"
+        assert I18n._missing_keys == {
+            "zh_CN": {"nonexistent_key_cross_locale"},
+            "en_US": {"nonexistent_key_cross_locale"},
+        }
