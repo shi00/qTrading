@@ -99,6 +99,8 @@
     "news_time_unknown": "时间未知",
     "ai_generated_tag": "AI生成",
     "market_data_cached_at": "数据缓存于: {date}",
+    "market_data_mixed_dates": "数据日期: {date}（部分数据来自更早交易日）",
+    "home_card_as_of": "数据截至: {date}",
     "screener_title": "智能选股",
     "screener_strategies": "选股策略",
     "screener_run": "执行选股",
