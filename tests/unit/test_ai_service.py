@@ -20,6 +20,7 @@ from services.ai_service import (
     validate_ai_analysis_response,
 )
 from services.ai_service.news_risk import RiskOutput
+from services.ai_service.scenario_executor import ScenarioOutput
 
 pytestmark = pytest.mark.unit
 
@@ -1931,6 +1932,92 @@ class TestAIServiceAnalyzeStockCloudNotAvailable:
         assert result["error"] == I18n.get("ai_local_only_deep_analysis_unsupported")
 
 
+class TestAIServiceAnalyzeStockLocalOnlyNewTrack:
+    """R01-D1：新链 local-only 补位——深度分析仅云端路径（MAJOR-04），仅本地模式下
+    新轨 dispatch 命中也直接返回显式 unsupported，不进入 Executor 执行（场景语义
+    在此呈现，安全强制由 Executor 候选层门控兜底）。"""
+
+    @pytest.mark.asyncio
+    @patch("utils.config_handler.ConfigHandler.is_ai_local_only_mode", return_value=True)
+    @patch("services.ai_service.ConfigHandler")
+    async def test_new_track_local_only_returns_unsupported(self, mock_ch, _mock_local_only):
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.is_ai_local_only_mode.return_value = True
+        svc = AIService()
+        dispatch = MagicMock()
+        dispatch.executor.execute = AsyncMock()
+
+        async def fake_resolve():
+            return dispatch
+
+        with patch("services.ai_service.stock_analysis._resolve_stock_analysis_dispatch", new=fake_resolve):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+            )
+        assert isinstance(result, dict)
+        assert result["ai_status"] == "unsupported"
+        assert result["score"] is None
+        assert result["confidence"] is None
+        assert result["error"] == I18n.get("ai_local_only_deep_analysis_unsupported")
+        # 不进入 Executor 执行（场景级提前拒绝；候选层门控为兜底）
+        dispatch.executor.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("utils.config_handler.ConfigHandler.is_ai_local_only_mode", return_value=False)
+    @patch("services.ai_service.ConfigHandler")
+    async def test_new_track_local_only_off_proceeds_to_execution(self, mock_ch, _mock_local_only):
+        """local_only=False：新轨 dispatch 命中照常进入 Executor 执行（零回归）。"""
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
+        mock_ch.get_ai_model.return_value = "deepseek-v4-flash"
+        mock_ch.get_ai_api_key.return_value = "key"
+        mock_ch.get_ai_base_url.return_value = "http://api.test.com"
+        mock_ch.get_setting.return_value = False
+        mock_ch.is_ai_local_only_mode.return_value = False
+        svc = AIService()
+        exec_result = MagicMock()
+        exec_result.status = "succeeded"
+        exec_result.outputs = (
+            ScenarioOutput(
+                output={"score": 50, "summary": "ok"},
+                metadata={"connection_id": "conn-remote"},
+            ),
+        )
+        exec_result.candidate_decisions = ()
+        dispatch = MagicMock()
+        dispatch.executor.execute = AsyncMock(return_value=exec_result)
+        dispatch.total_timeout_seconds = 60.0
+
+        async def fake_resolve():
+            return dispatch
+
+        with patch("services.ai_service.stock_analysis._resolve_stock_analysis_dispatch", new=fake_resolve):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+            )
+        dispatch.executor.execute.assert_awaited_once()
+        # 进入 Executor 执行（非场景级提前 unsupported；失败语义由执行链产出）
+        assert result.get("ai_status") != "unsupported"
+        assert result["score"] == 50
+
+
 class TestAIServiceAnalyzeStockSuccess:
     @pytest.mark.asyncio
     @patch("services.ai_service.ConfigHandler")
@@ -2179,6 +2266,7 @@ class TestAnalyzeStockScenarioChain:
     async def test_dispatch_precedes_unsupported_check(self, mock_ch):
         """S4（s4_plan §3.1）：云端不可用时若新链分派命中 → 走 Executor，不返回 unsupported。"""
         mock_ch.get_setting.return_value = False
+        mock_ch.is_ai_local_only_mode.return_value = False  # R01-D1：显式关闭政策门控
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
         svc.is_cloud_available = MagicMock(return_value=False)  # 旧链会在此拒绝
@@ -2200,6 +2288,7 @@ class TestAnalyzeStockScenarioChain:
     async def test_scenario_success_program_metadata_overwrite(self, mock_ch):
         """程序状态覆写（s4_plan §3.1）：模型输出伪造 execution_metadata 被程序值覆盖。"""
         mock_ch.get_setting.return_value = False
+        mock_ch.is_ai_local_only_mode.return_value = False  # R01-D1：显式关闭政策门控
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
         svc.is_cloud_available = MagicMock(return_value=True)
@@ -2244,6 +2333,7 @@ class TestAnalyzeStockScenarioChain:
     async def test_scenario_payload_shape(self, mock_ch):
         """InferenceRequest 形状（s4_plan §3.1）：scenario/task/payload(system 合并+user+json_mode)。"""
         mock_ch.get_setting.return_value = False
+        mock_ch.is_ai_local_only_mode.return_value = False  # R01-D1：显式关闭政策门控
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
         svc.is_cloud_available = MagicMock(return_value=True)
@@ -2287,6 +2377,7 @@ class TestAnalyzeStockScenarioChain:
         from core.model_management_types import CandidateDecision, ScenarioExecutionResult
 
         mock_ch.get_setting.return_value = False
+        mock_ch.is_ai_local_only_mode.return_value = False  # R01-D1：显式关闭政策门控
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
         svc.is_cloud_available = MagicMock(return_value=True)
@@ -2326,6 +2417,7 @@ class TestAnalyzeStockScenarioChain:
     async def test_scenario_executor_exception_maps_failed(self, mock_ch):
         """executor.execute 抛异常 → ai_status=failed（错误脱敏）。"""
         mock_ch.get_setting.return_value = False
+        mock_ch.is_ai_local_only_mode.return_value = False  # R01-D1：显式关闭政策门控
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
         svc.is_cloud_available = MagicMock(return_value=True)

@@ -229,6 +229,18 @@ class StockAnalysisService:
                 "error": I18n.get(reason_key),
             }
 
+        # R01-D1：新链 local-only 补位——深度分析仅云端路径（MAJOR-04，本地模型不
+        # 参与该路径），仅本地模式下云端候选将由 Executor 候选层政策拒绝，此处直接
+        # 返回与旧链分支同款显式 unsupported（同 reason_key），不把能力边界伪装成
+        # 执行失败（R21）。分层：场景语义在此呈现，安全强制由候选层门控兜底。
+        if dispatch is not None and _ai.ConfigHandler.is_ai_local_only_mode():
+            return {
+                "ai_status": "unsupported",
+                "score": None,
+                "confidence": None,
+                "error": I18n.get("ai_local_only_deep_analysis_unsupported"),
+            }
+
         # Build Prompt
 
         # Format news
