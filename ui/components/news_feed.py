@@ -325,6 +325,35 @@ def _build_news_controls(
     return controls
 
 
+def _build_load_more_button(
+    is_loading_more: bool,
+    on_load_more_click: Callable[[ft.ControlEvent], None] | None,
+) -> ft.Container:
+    """构建「加载更多」按钮容器（纯函数）。
+
+    ``is_loading_more=True`` 时按钮置灰禁用并切换为加载中文案, 为用户提供忙碌反馈
+    (对齐 ScreenerView run_disabled 惯例); VM 侧 is_loading_more 早返守卫仍保留为兜底。
+    """
+    return ft.Container(
+        content=ft.Button(
+            content=ft.Text(
+                I18n.get("news_loading_more") if is_loading_more else I18n.get("news_load_more"),
+                color=AppColors.TEXT_ON_PRIMARY,
+            ),
+            style=ft.ButtonStyle(
+                bgcolor={ft.ControlState.DEFAULT: AppColors.PRIMARY},
+                shape=ft.RoundedRectangleBorder(radius=8),
+            ),
+            on_click=safe_on_click(on_load_more_click),
+            disabled=is_loading_more,
+            height=40,
+            width=AppStyles.CONTROL_WIDTH_SM,
+        ),
+        alignment=ft.Alignment.CENTER,
+        padding=ft.Padding.only(top=10, bottom=10),
+    )
+
+
 @ft.component
 def NewsFeed(
     news_rows: tuple[NewsRow, ...] = (),
@@ -332,6 +361,7 @@ def NewsFeed(
     on_load_more_click: Callable[[ft.ControlEvent], None] | None = None,
     on_view_stock: Callable[[str], None] | None = None,
     valid_stock_codes: frozenset[str] | None = None,
+    is_loading_more: bool = False,
 ) -> ft.Container:
     """News feed component (declarative).
 
@@ -352,6 +382,8 @@ def NewsFeed(
         on_view_stock: "查看个股"点击回调, 接收股票代码 (Task 8.1)
         valid_stock_codes: 有效股票代码集合 (stock_basic, 经 ViewModel 获取),
                    用于校验"查看个股"链接候选 (UX-09 MINOR-03); 为空时不生成链接
+        is_loading_more: "加载更多"请求进行中 — 按钮置灰禁用并显示加载中文案,
+                   为用户提供忙碌反馈 (对齐 ScreenerView run_disabled 惯例)
     """
     # Subscribe to i18n + theme changes (triggers auto-rerender)
     ft.use_state(get_observable_state)
@@ -396,27 +428,9 @@ def NewsFeed(
         valid_stock_codes=valid_stock_codes,
     )
 
-    # --- Load more button ---
+    # --- Load more button (is_loading_more 时置灰 + 加载中文案, 提供忙碌反馈) ---
     if has_more:
-        controls.append(
-            ft.Container(
-                content=ft.Button(
-                    content=ft.Text(
-                        I18n.get("news_load_more"),
-                        color=AppColors.TEXT_ON_PRIMARY,
-                    ),
-                    style=ft.ButtonStyle(
-                        bgcolor={ft.ControlState.DEFAULT: AppColors.PRIMARY},
-                        shape=ft.RoundedRectangleBorder(radius=8),
-                    ),
-                    on_click=safe_on_click(on_load_more_click),
-                    height=40,
-                    width=AppStyles.CONTROL_WIDTH_SM,
-                ),
-                alignment=ft.Alignment.CENTER,
-                padding=ft.Padding.only(top=10, bottom=10),
-            )
-        )
+        controls.append(_build_load_more_button(is_loading_more, on_load_more_click))
 
     # --- News list ---
     return ft.Container(
