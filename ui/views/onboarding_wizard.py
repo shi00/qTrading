@@ -101,6 +101,18 @@ async def _default_on_complete() -> None:
     pass
 
 
+async def _persist_risk_ack(vm: OnboardingViewModel, checked: bool) -> None:
+    """持久化欢迎步风险提示确认，失败时提示 (P-ONB-01)。
+
+    消费 VM 命令的 bool 返回值：保存失败（ConfigHandler 返回 False 或 IO 异常）
+    时 VM 已回读磁盘回滚 state，此处补充用户可感知的失败反馈，避免「勾选看似
+    生效实则未保存」。模块级纯函数（依赖注入 vm）便于单测直调。
+    """
+    ok = await vm.update_risk_disclaimer_acknowledged(checked)
+    if not ok:
+        _show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
+
+
 async def _commit_model_stage(
     connections_vm: ModelConnectionsViewModel,
     routes_vm: ModelRoutesViewModel,
@@ -1095,11 +1107,12 @@ def OnboardingWizard(
         return _hover
 
     # UX-09 / MAJOR-01: 欢迎步风险提示确认（勾选结果经 VM 持久化到 ConfigHandler）。
+    # P-ONB-01: 经 _persist_risk_ack 消费返回值，失败时 snack 反馈。
     def _on_risk_ack_change(e: ft.ControlEvent) -> None:
         checked = bool(get_control_value(e.control, ft.Checkbox)) if e.control else False
         page = _get_page()
         if page is not None:
-            page.run_task(onboarding_vm.update_risk_disclaimer_acknowledged, checked)
+            page.run_task(_persist_risk_ack, onboarding_vm, checked)
 
     def _on_risk_label_click(e: ft.ControlEvent) -> None:
         # 点击 label 等价于切换勾选：读 VM 实时状态取反（不用渲染闭包快照，
@@ -1107,7 +1120,8 @@ def OnboardingWizard(
         page = _get_page()
         if page is not None:
             page.run_task(
-                onboarding_vm.update_risk_disclaimer_acknowledged,
+                _persist_risk_ack,
+                onboarding_vm,
                 not onboarding_vm.state.risk_acknowledged,
             )
 

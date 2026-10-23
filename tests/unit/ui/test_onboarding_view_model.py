@@ -796,6 +796,8 @@ class TestOnboardingVMRiskDisclaimer:
 
     async def test_update_acknowledged_success_updates_state_and_persists(self, vm, mock_config_handler):
         mock_config_handler.set_risk_disclaimer_acknowledged = MagicMock(return_value=True)
+        # P-ONB-01: 成功路径回读磁盘 → 返回与新写入一致的 True。
+        mock_config_handler.is_risk_disclaimer_acknowledged = MagicMock(return_value=True)
         result = await vm.update_risk_disclaimer_acknowledged(True)
         assert result is True
         assert vm.state.risk_acknowledged is True
@@ -803,22 +805,48 @@ class TestOnboardingVMRiskDisclaimer:
 
     async def test_update_acknowledged_false_persists_false(self, vm, mock_config_handler):
         mock_config_handler.set_risk_disclaimer_acknowledged = MagicMock(return_value=True)
+        # P-ONB-01: 两次写盘各回读一次，读数依次为新值 True / False。
+        mock_config_handler.is_risk_disclaimer_acknowledged = MagicMock(side_effect=[True, False])
         await vm.update_risk_disclaimer_acknowledged(True)
         result = await vm.update_risk_disclaimer_acknowledged(False)
         assert result is True
         assert vm.state.risk_acknowledged is False
 
     async def test_update_acknowledged_returns_false_when_persist_fails(self, vm, mock_config_handler):
-        """ConfigHandler.set_risk_disclaimer_acknowledged 返回 False → 方法返回 False。"""
+        """ConfigHandler.set_risk_disclaimer_acknowledged 返回 False → 方法返回 False。
+
+        P-ONB-01: 失败路径回读磁盘（未被本次改写 → 旧值 False），state 回滚为 False，
+        保证「返回 False 时 state 与磁盘一致」，消除勾选残留漂移。
+        """
         mock_config_handler.set_risk_disclaimer_acknowledged = MagicMock(return_value=False)
+        mock_config_handler.is_risk_disclaimer_acknowledged = MagicMock(return_value=False)
         result = await vm.update_risk_disclaimer_acknowledged(True)
         assert result is False
+        assert vm.state.risk_acknowledged is False
 
     async def test_update_acknowledged_exception_returns_false(self, vm, mock_config_handler):
-        """持久化抛异常时返回 False 且不向外传播（R9 脱敏）。"""
+        """持久化抛异常时返回 False 且不向外传播（R9 脱敏）。
+
+        P-ONB-01: 异常路径同样回读磁盘回滚 state。
+        """
         mock_config_handler.set_risk_disclaimer_acknowledged = MagicMock(side_effect=RuntimeError("IO error"))
+        mock_config_handler.is_risk_disclaimer_acknowledged = MagicMock(return_value=False)
         result = await vm.update_risk_disclaimer_acknowledged(True)
         assert result is False
+        assert vm.state.risk_acknowledged is False
+
+    async def test_update_acknowledged_readback_aligns_state_to_disk_on_race(self, vm, mock_config_handler):
+        """P-ONB-01 竞态兜底：写盘成功但磁盘值已被并发请求覆盖时，state 以磁盘为准。
+
+        模拟连点竞态：本次写 True 成功（返回 True），但回读读到并发 False 请求
+        落盘后的值 → state 对齐为 False 而非残留 True。返回值仅表示「本次写盘
+        是否成功」，state 表示「磁盘当前值」，两者职责分离。
+        """
+        mock_config_handler.set_risk_disclaimer_acknowledged = MagicMock(return_value=True)
+        mock_config_handler.is_risk_disclaimer_acknowledged = MagicMock(return_value=False)
+        result = await vm.update_risk_disclaimer_acknowledged(True)
+        assert result is True
+        assert vm.state.risk_acknowledged is False
 
     async def test_update_acknowledged_cancelled_reraises(self, vm):
         """R2: asyncio.CancelledError 必须向外传播, 不得被 except Exception 吞没。
@@ -846,9 +874,16 @@ class TestOnboardingVMRiskDisclaimer:
 
     async def test_next_step_advances_welcome_when_acknowledged(self, bound_vm):
         """欢迎步勾选确认后 next_step 正常推进到数据库步。"""
-        with patch(
-            "ui.viewmodels.onboarding_view_model.ConfigHandler.set_risk_disclaimer_acknowledged",
-            return_value=True,
+        with (
+            patch(
+                "ui.viewmodels.onboarding_view_model.ConfigHandler.set_risk_disclaimer_acknowledged",
+                return_value=True,
+            ),
+            # P-ONB-01: 写盘成功后 VM 回读磁盘对齐 state，需同步 patch 读侧使其与写盘一致。
+            patch(
+                "ui.viewmodels.onboarding_view_model.ConfigHandler.is_risk_disclaimer_acknowledged",
+                return_value=True,
+            ),
         ):
             await bound_vm.update_risk_disclaimer_acknowledged(True)
         assert bound_vm.state.risk_acknowledged is True
