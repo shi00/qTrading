@@ -792,6 +792,12 @@ class TestBuildContentFunction:
         texts = _collect_all_texts(container)
         assert I18n.get("risk_disclaimer_notice") in texts
 
+    def test_price_pct_chip_positive_rendered(self):
+        """价格区涨跌幅 chip 渲染（_format_pct_change 接入 _build_content 集成路径）。"""
+        container = self._build({"ts_code": "000001.SZ", "close": 10.0, "pct_chg": 3.5})
+        texts = _collect_all_texts(container)
+        assert "+3.50%" in texts
+
 
 def _collect_markdown_controls(control, found):
     """Recursively collect ft.Markdown controls from the flet control tree."""
@@ -1275,6 +1281,72 @@ class TestFormatPctWithSign:
         from ui.components.stock_detail_dialog import _format_pct_with_sign
 
         assert _format_pct_with_sign(float("nan")) == "-"
+
+
+class TestFormatPctChange:
+    """_format_pct_change 价格区涨跌幅三态格式化测试 (R21)."""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_app_colors):
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def _call(self, val):
+        from ui.components.stock_detail_dialog import _format_pct_change
+
+        return _format_pct_change(val)
+
+    def test_none_returns_dash_neutral(self):
+        # 键缺失 (stock_data.get → None) → "-" 中性色，不伪装为 "0.00%"
+        text, color = self._call(None)
+        assert text == "-"
+        assert color == self.mock_ac.TEXT_SECONDARY
+
+    def test_nan_returns_dash_neutral(self):
+        text, color = self._call(float("nan"))
+        assert text == "-"
+        assert color == self.mock_ac.TEXT_SECONDARY
+
+    def test_non_numeric_string_returns_dash_neutral(self):
+        text, color = self._call("abc")
+        assert text == "-"
+        assert color == self.mock_ac.TEXT_SECONDARY
+
+    def test_tricky_int_returns_dash_neutral(self):
+        # _TrickyInt: is_valid_number 通过但 float() 抛 ValueError → 视为缺失（防御分支）
+        text, color = self._call(_TrickyInt(3))
+        assert text == "-"
+        assert color == self.mock_ac.TEXT_SECONDARY
+
+    def test_positive_value_up_red_with_sign(self):
+        text, color = self._call(3.5)
+        assert text == "+3.50%"
+        assert color == self.mock_ac.UP_RED
+
+    def test_negative_value_down_green_with_sign(self):
+        text, color = self._call(-2.1)
+        assert text == "-2.10%"
+        assert color == self.mock_ac.DOWN_GREEN
+
+    def test_zero_is_flat_neutral_not_down(self):
+        # 0 为合法平盘值: "0.00%" 中性色（不误标跌色，也不伪装涨跌语义）
+        text, color = self._call(0)
+        assert text == "0.00%"
+        assert color == self.mock_ac.TEXT_SECONDARY
+
+    def test_numeric_string_accepted(self):
+        # 数字字符串兼容（is_valid_number 对 "3.5" 返回 True）
+        text, color = self._call("3.5")
+        assert text == "+3.50%"
+        assert color == self.mock_ac.UP_RED
 
 
 class TestHasReviewValue:
