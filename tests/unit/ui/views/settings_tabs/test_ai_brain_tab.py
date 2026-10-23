@@ -484,7 +484,7 @@ def ai_brain_tab_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
     monkeypatch.setattr(mod, "EgressAuditViewModel", lambda *a, **kw: fake_egress_vm)
 
     # --- 工厂参数内的惰性服务解析 mock (避免真实服务构造) ---
-    monkeypatch.setattr(mod, "_scenario_executor_provider", lambda: None)
+    monkeypatch.setattr(mod, "_synthetic_adapters_provider", lambda: None)
     monkeypatch.setattr(mod, "_model_configuration_service", lambda: MagicMock())
 
     # --- 真实 AIBrainSettingsViewModel (状态驱动验证/保存) ---
@@ -1145,35 +1145,35 @@ class TestLoadConnectionsUsageSummary:
 
 
 class TestProviderLaziness:
-    """_scenario_executor_provider / _model_configuration_service 惰性导入与降级。"""
+    """_synthetic_adapters_provider / _model_configuration_service 惰性导入与降级。"""
 
-    def test_scenario_executor_returns_executor_when_assembled(self, monkeypatch) -> None:
+    def test_synthetic_adapters_returns_table_when_assembled(self, monkeypatch) -> None:
         import services.ai_service.scenario_dispatch as dispatch_module
 
-        executor = object()
-        monkeypatch.setattr(dispatch_module, "get_scheduling_services", lambda: {"executor": executor})
+        adapters = {"litellm_chat": object()}
+        monkeypatch.setattr(dispatch_module, "get_scheduling_services", lambda: {"adapters": adapters})
 
-        from ui.views.settings_tabs.ai_brain_tab import _scenario_executor_provider
+        from ui.views.settings_tabs.ai_brain_tab import _synthetic_adapters_provider
 
-        assert _scenario_executor_provider() is executor
+        assert _synthetic_adapters_provider() is adapters
 
-    def test_scenario_executor_returns_none_when_not_assembled(self, monkeypatch) -> None:
+    def test_synthetic_adapters_returns_none_when_not_assembled(self, monkeypatch) -> None:
         import services.ai_service.scenario_dispatch as dispatch_module
 
         monkeypatch.setattr(dispatch_module, "get_scheduling_services", lambda: None)
 
-        from ui.views.settings_tabs.ai_brain_tab import _scenario_executor_provider
+        from ui.views.settings_tabs.ai_brain_tab import _synthetic_adapters_provider
 
-        assert _scenario_executor_provider() is None
+        assert _synthetic_adapters_provider() is None
 
-    def test_scenario_executor_returns_none_when_key_missing(self, monkeypatch) -> None:
+    def test_synthetic_adapters_returns_none_when_key_missing(self, monkeypatch) -> None:
         import services.ai_service.scenario_dispatch as dispatch_module
 
         monkeypatch.setattr(dispatch_module, "get_scheduling_services", lambda: {})
 
-        from ui.views.settings_tabs.ai_brain_tab import _scenario_executor_provider
+        from ui.views.settings_tabs.ai_brain_tab import _synthetic_adapters_provider
 
-        assert _scenario_executor_provider() is None
+        assert _synthetic_adapters_provider() is None
 
     def test_model_configuration_service_constructed(self, monkeypatch) -> None:
         import services.model_configuration_service as mcs_module

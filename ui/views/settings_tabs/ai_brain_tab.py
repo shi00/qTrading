@@ -143,12 +143,16 @@ async def _load_connections_usage_summary() -> UsageCostSummary:
     return UsageCostSummary(known_cost_cny=str(known) if known is not None else None)
 
 
-def _scenario_executor_provider():
-    """单次测试执行器（S3 调度服务组装结果）；未组装时返回 None（测试降级）。"""
+def _synthetic_adapters_provider():
+    """单次测试适配器表（F15，S3 调度服务组装结果）；未组装时返回 None（测试降级）。
+
+    与业务 Executor 同一组合根组装，但测试路径直连适配器、不经 Executor 业务授权
+    通道（测试 consent 与业务 grant 两通道隔离）。
+    """
     from services.ai_service.scenario_dispatch import get_scheduling_services
 
     services = get_scheduling_services()
-    return services.get("executor") if services else None
+    return services.get("adapters") if services else None
 
 
 def _model_configuration_service():
@@ -187,7 +191,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     _conn_state, connections_vm = use_viewmodel(
         factory=lambda: ModelConnectionsViewModel(
             usage_summary_loader=_load_connections_usage_summary,
-            scenario_executor=_scenario_executor_provider(),
+            synthetic_adapters=_synthetic_adapters_provider(),
         )
     )
     _routes_state, routes_vm = use_viewmodel(factory=lambda: ModelRoutesViewModel(_model_configuration_service()))

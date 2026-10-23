@@ -159,6 +159,10 @@ class ModelConfigurationService:
         # 同 operation_id 的安全重试复用同一凭据版本（MM-12）：进程内租约映射，
         # 不持久化；服务实例销毁即释放（keyring 项由保守清理策略保留）。
         self._credential_leases: dict[str, tuple[str, str]] = {}
+        # F15：单次测试许可注册表（一次性消费事实源）：create 时登记、consume 时
+        # 出示即移除；实例级（服务非单例）且纯内存。业务授权通道 authorize_attempt
+        # 不读取本注册表——业务调用不能借用测试许可（业务 grant 与测试 consent 两通道）。
+        self._pending_synthetic_consents: dict[str, SyntheticTestConsent] = {}
 
     # ------------------------------------------------------------------
     # 读取
@@ -653,8 +657,12 @@ class ModelConfigurationService:
         deadline: float,
         scope_version: int = 1,
     ) -> SyntheticTestConsent:
-        """用户明确点击后生成单次操作许可：仅存于该测试上下文，不写 security_state。"""
-        return SyntheticTestConsent(
+        """用户明确点击后生成单次操作许可：仅存于该测试上下文，不写 security_state。
+
+        F15：许可同时登记进实例级注册表（``test_operation_id`` 键），仅本实例的
+        :meth:`consume_synthetic_test_consent` 可消费；业务授权通道不可见。
+        """
+        consent = SyntheticTestConsent(
             test_operation_id=ctx.test_operation_id,
             host_identity=ctx.host_identity,
             target_fingerprint=target_fingerprint,
@@ -662,6 +670,44 @@ class ModelConfigurationService:
             scope_version=scope_version,
             deadline=deadline,
         )
+        self._pending_synthetic_consents[consent.test_operation_id] = consent
+        return consent
+
+    def consume_synthetic_test_consent(
+        self,
+        consent: SyntheticTestConsent,
+        *,
+        draft_connection: Mapping[str, Any],
+        target_fingerprint: str,
+    ) -> SyntheticTestConsent:
+        """一次性消费单次测试许可（F15）：绑定目标与草稿身份，出示即失效。
+
+        - 一次性：任何出示（无论校验通过与否）即从注册表移除——重放 / 已消费许可
+          一律拒绝（消费即失效）；
+        - 绑定：目标指纹与草稿指纹须与许可登记值严格一致——草稿指纹按全 payload
+          重算（覆盖凭据与连接身份），换目标 / 换草稿即拒；
+        - 隔离与持久化：业务授权通道（authorize_attempt）不读取测试许可注册表，
+          业务调用不能借用；本方法不写配置、不写 grants（无隐式持久化授权）。
+
+        须在事件循环上调用（deadline 为循环单调钟）；``create_synthetic_test_consent``
+        与本方法之间不留 await 点即可保证出示事实即登记事实（无漂移窗口）。
+
+        Raises:
+            PermissionError: 许可未登记 / 已消费 / 身份非登记对象 / 主机不符 /
+                已过期 / 目标或草稿绑定不符。
+        """
+        pending = self._pending_synthetic_consents.pop(consent.test_operation_id, None)
+        if pending is None or pending is not consent:
+            raise PermissionError(f"单次测试许可无效或已消费: {consent.test_operation_id}")
+        if consent.host_identity != socket.gethostname():
+            raise PermissionError("单次测试许可主机身份不符，拒绝消费")
+        if asyncio.get_running_loop().time() > consent.deadline:
+            raise PermissionError("单次测试许可已过期，拒绝消费")
+        if target_fingerprint != consent.target_fingerprint:
+            raise PermissionError("单次测试许可目标绑定不符，拒绝消费")
+        if _payload_fingerprint(dict(draft_connection)) != consent.draft_fingerprint:
+            raise PermissionError("单次测试许可草稿绑定不符，拒绝消费")
+        return consent
 
     # ------------------------------------------------------------------
     # 迁移预览（§12.1：只读映射建议，needs_review 状态，不写配置）

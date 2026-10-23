@@ -23,23 +23,23 @@ R2：所有含 await 的方法显式 ``except asyncio.CancelledError: raise``。
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import logging
 import math
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Any, Final
+from typing import Any, Final, Literal, cast
 
 from core.model_management_types import (
+    AdapterResponse,
+    AttemptContext,
     ConfigurationSaveOutcome,
-    ExecutionSnapshot,
+    InferenceAdapter,
     InferenceRequest,
     ModelConfigurationConflictError,
     ModelManagementSnapshot,
-    SyntheticTestConsent,
-    SyntheticTestContext,
+    ResolvedConnection,
     adapter_kind_requires_egress,
     normalize_egress_target,
 )
@@ -74,6 +74,22 @@ TEST_FAILED = "failed"
 _TEST_SCENARIO_ID = "synthetic_test"
 _TEST_TASK_ID = "model_connection_test"
 _TEST_TIMEOUT_S = 30.0
+
+# 单次测试适配器 kind 域（与 utils.config_models.ADAPTER_KINDS 对齐；校验失败的
+# kind 不会到达此处——_validate_draft 已限定同域）
+_ADAPTER_KINDS: Final[tuple[str, ...]] = (ADAPTER_LITELLM, ADAPTER_GGUF_CHAT, ADAPTER_GGUF_SENTIMENT)
+
+# F15：单次测试的固定合成探针（可审计：常量正文、不含任何用户输入——连接身份经
+# ResolvedConnection 传递而非请求正文）。gguf_sentiment 适配器协议强制
+# texts: list[str]，空 payload 必然 ValueError（连接不可测）；chat 双适配器
+# 对空 payload 虽有默认合成正文，但统一最小探针以规避空 user 正文被部分
+# 云 provider 拒绝的风险。
+_TEST_PROBE_PROMPT: Final[str] = "ping"
+_TEST_PROBE_PAYLOADS: Final[dict[str, dict[str, Any]]] = {
+    ADAPTER_LITELLM: {"prompt": _TEST_PROBE_PROMPT},
+    ADAPTER_GGUF_CHAT: {"prompt": _TEST_PROBE_PROMPT},
+    ADAPTER_GGUF_SENTIMENT: {"texts": [_TEST_PROBE_PROMPT]},
+}
 
 # §3.1：「执行、凭据、能力或计费改变时单调递增；仅改显示名不改变推理指纹」。
 # 修订指纹只取影响执行 / 凭据 / 能力的字段（+ billing 受管子键），排除显示名与
@@ -129,15 +145,6 @@ def _format_timeout_text(value: Any) -> str:
         return ""
     number = float(value)
     return str(int(number)) if number.is_integer() else str(number)
-
-
-def _utc_now_iso() -> str:
-    return dt.datetime.now(dt.UTC).isoformat()
-
-
-def _identity_validator(response: Any) -> Any:
-    """单次测试的占位输出校验（真实业务校验由宿主注入的 Executor 责任链承担）。"""
-    return response
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +259,8 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
     """「模型连接」页 ViewModel（连接草稿 / 字段命令 / 静态检查 / 显式测试）。
 
     构造 DI：``ModelConfigurationService``（非单例可注入 mock）、可选 usage loader
-    （提供本月费用三字段）、可选 ``scenario_executor``（单次测试执行器，宿主注入）。
+    （提供本月费用三字段）、可选 ``synthetic_adapters``（单次测试适配器表，宿主
+    注入组合根同一组装——不经业务 Executor 授权通道，F15）。
     """
 
     def __init__(
@@ -260,11 +268,11 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         service: ModelConfigurationService | None = None,
         *,
         usage_summary_loader: Callable[[], Awaitable[UsageCostSummary]] | None = None,
-        scenario_executor: Any | None = None,
+        synthetic_adapters: Mapping[str, InferenceAdapter] | None = None,
     ) -> None:
         self._service = service if service is not None else ModelConfigurationService()
         self._usage_summary_loader = usage_summary_loader
-        self._scenario_executor = scenario_executor
+        self._synthetic_adapters = synthetic_adapters
         self._raw_connections: tuple[Mapping[str, Any], ...] = ()
         # 原始快照元数据（用于重建 CAS payload：save_draft 期望完整 model_management
         # 域，非单连接 dict；见 _build_payload）
@@ -962,11 +970,17 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             )
 
     # ------------------------------------------------------------------
-    # 单次测试（未保存连接）：begin_synthetic_test + 注入的 ScenarioExecutor
+    # 单次测试（未保存连接）：专用测试上下文一次性消费 consent，直连适配器
     # ------------------------------------------------------------------
 
     async def test(self) -> bool:
-        """未保存连接的单次测试：不提交连接 / 场景 / 业务授权，不写 security_state。"""
+        """未保存连接的单次测试：不提交连接 / 场景 / 业务授权，不写 security_state。
+
+        F15 专用测试上下文：单次测试许可（consent）由服务一次性消费——绑定目标 +
+        草稿身份（含新填临时凭据），不经业务 Executor 授权通道（业务 grant 不落盘，
+        业务调用不能借用）；合成请求为固定探针正文（无用户正文），校验走
+        AdapterResponse 统一协议。
+        """
         if self._state.test_state == TEST_RUNNING:
             return False
         self._track_inflight_cancellable()  # F40：单次测试无持久化语义，页面卸载可安全取消
@@ -978,32 +992,57 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
                 message=Message("model_connection_validation_failed"),
             )
             return False
-        if self._scenario_executor is None:
+        if not self._synthetic_adapters:
             self._set_state(test_state=TEST_FAILED, message=Message("model_connection_test_unavailable"))
             return False
 
         self._set_state(test_state=TEST_RUNNING, validation_errors=(), message=Message("model_connection_test_running"))
         try:
             draft = self._state.draft
-            payload = self._draft_to_connection_payload(draft, draft.credential_ref, draft.credential_version)
+            operation_id = str(uuid.uuid4())
+            # 新填凭据参与测试（临时版本化 keyring 项——适配器唯一认可的凭据通道，
+            # R10 认可存储；测试不提交配置，孤儿项与 save not_committed 租约同型）；
+            # 留空保持已存凭据，显式清除则无凭据执行
+            credential_ref, credential_version = await self._resolve_credential(draft, operation_id)
+            connection_payload = self._draft_to_connection_payload(draft, credential_ref, credential_version)
             ctx = await self._service.begin_synthetic_test(
-                payload, task_id=_TEST_TASK_ID, credential_version=draft.credential_version
+                connection_payload, task_id=_TEST_TASK_ID, credential_version=credential_version
             )
+            target_fingerprint = self._target_fingerprint(draft)
             consent = self._service.create_synthetic_test_consent(
-                ctx,
-                target_fingerprint=self._target_fingerprint(draft),
-                deadline=self._deadline(),
+                ctx, target_fingerprint=target_fingerprint, deadline=self._deadline()
             )
+            # 一次性消费：绑定目标 + 草稿（全 payload 指纹含凭据）；重放 / 换目标 /
+            # 换草稿即拒。create 与消费之间无 await，出示事实即登记事实（无漂移窗口）。
+            self._service.consume_synthetic_test_consent(
+                consent, draft_connection=connection_payload, target_fingerprint=target_fingerprint
+            )
+            adapter = self._synthetic_adapters.get(connection_payload["adapter_kind"])
+            if adapter is None:
+                raise LookupError(f"no synthetic adapter for kind {connection_payload['adapter_kind']!r}")
             request = InferenceRequest(
                 scenario_id=_TEST_SCENARIO_ID,
                 task_id=ctx.task_id,
                 invocation_id=ctx.invocation_id,
-                payload={},
+                payload=dict(
+                    _TEST_PROBE_PAYLOADS.get(connection_payload["adapter_kind"], {})
+                ),  # 固定合成探针（无用户正文）
                 deadline=consent.deadline,
             )
-            snapshot = self._build_test_snapshot(ctx, payload, consent)
-            result = await self._scenario_executor.execute(request, snapshot, _identity_validator)
-            succeeded = getattr(result, "status", None) == "succeeded"
+            response = await adapter.invoke(
+                request,
+                self._resolved_test_connection(connection_payload),
+                consent.deadline,
+                AttemptContext(
+                    owner_session_id="",
+                    owner_epoch=0,
+                    invocation_id=ctx.invocation_id,
+                    attempt_id=uuid.uuid4().hex,
+                ),
+            )
+            # 统一协议校验：单次测试消费 AdapterResponse 本体（无业务输出契约，
+            # 不复现校验器返回类型与消费者读取字段的错位——F15）
+            succeeded = isinstance(response, AdapterResponse)
             self._set_state(
                 test_state=TEST_SUCCESS if succeeded else TEST_FAILED,
                 message=Message("model_connection_test_success" if succeeded else "model_connection_test_failed"),
@@ -1036,45 +1075,26 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         )
 
     @staticmethod
-    def _build_test_snapshot(
-        ctx: SyntheticTestContext,
-        payload: Mapping[str, Any],
-        consent: SyntheticTestConsent,
-    ) -> ExecutionSnapshot:
-        candidate = MappingProxyType(
-            {
-                "task_id": ctx.task_id,
-                "candidate_index": 0,
-                "connection_id": ctx.draft_connection_id,
-                "target_fingerprint": consent.target_fingerprint,
-                "purpose": "synthetic_test",
-            }
-        )
-        route = MappingProxyType({"scenario_id": _TEST_SCENARIO_ID, "candidates": (candidate,)})
-        connection = MappingProxyType(
-            {
-                "connection_id": ctx.draft_connection_id,
-                "connection_revision": ctx.draft_connection_revision,
-                "adapter_kind": payload["adapter_kind"],
-                "provider": payload["provider"],
-                "model": payload["model"],
-                "api_base": payload["api_base"],
-                "adapter_options": dict(payload["adapter_options"]),
-                "context_window": payload["context_window"],
-                "concurrency_limit": payload["concurrency_limit"],
-                "credential_ref": payload["credential_ref"],
-                "credential_version": payload["credential_version"],
-            }
-        )
-        return ExecutionSnapshot(
-            snapshot_id=ctx.test_operation_id,
-            run_id=None,
-            config_revision=ctx.config_revision,
-            routes=(route,),
-            connections=(connection,),
-            business_contract_versions={_TEST_SCENARIO_ID: "1"},
-            security_scope_version=consent.scope_version,
-            created_at=_utc_now_iso(),
+    def _resolved_test_connection(payload: Mapping[str, Any]) -> ResolvedConnection:
+        """草稿连接 payload → ResolvedConnection（测试直连适配器，不经业务候选循环）。
+
+        payload 由本 VM 刚构建、形状已知，直接构造而非复用业务解析器的宽松容错。
+        """
+        kind = str(payload.get("adapter_kind", ""))
+        if kind not in _ADAPTER_KINDS:
+            raise ValueError(f"unsupported adapter kind: {kind!r}")
+        return ResolvedConnection(
+            connection_id=str(payload.get("connection_id", "")),
+            connection_revision=max(1, int(payload.get("connection_revision") or 1)),
+            adapter_kind=cast("Literal['litellm_chat', 'gguf_chat', 'gguf_sentiment']", kind),
+            provider=str(payload.get("provider") or ""),
+            model=str(payload.get("model") or ""),
+            api_base=payload.get("api_base") or None,
+            adapter_options=MappingProxyType(dict(payload.get("adapter_options") or {})),
+            context_window=payload.get("context_window"),
+            concurrency_limit=int(payload.get("concurrency_limit") or 1),
+            credential_ref=payload.get("credential_ref"),
+            credential_version=payload.get("credential_version"),
         )
 
     # ------------------------------------------------------------------
