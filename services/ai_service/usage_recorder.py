@@ -26,6 +26,7 @@ from core.model_management_types import (
     NormalizedLLMUsage,
     PersistenceOutcome,
 )
+from services.ai_service.connection_pricing import compute_cost_cny, pricing_from_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -310,13 +311,31 @@ class UsageRecorder:
     # ------------------------------------------------------------------
 
     async def submit_terminal(self, record: AttemptTerminalRecord) -> PersistenceOutcome:
-        """终态落账：usage 缺失标 unavailable（R21），顺带惰性扫描到期窗口。"""
+        """终态落账：usage 缺失标 unavailable（R21），顺带惰性扫描到期窗口。
+
+        F17：成本在此计算——usage 确定后按 metadata 携带的连接计价冻结快照
+        （executor 连接解析点冻结）经 ``connection_pricing.compute_cost_cny``
+        以 Decimal 计算，cost 与 usage 同源（观察时点计价会在重试场景与成功
+        attempt 的用量失配）。不可计价（usage_only / 配置缺失 / 单价或用量
+        未知）→ ``cost_cny=None``（未知语义直通，R21 禁止填 0 伪装）；唯一
+        合法零 = 价格事实为 0（免费，已知零）。
+        """
         obs = self._observations.get(record.attempt_id)
         usage = record.usage if record.usage is not None else (obs.usage if obs else None)
         actual_model = obs.actual_model if obs is not None else None
         metadata = dict(obs.metadata) if obs is not None else {}
         # 缺失不伪装：无用量即 unavailable，禁止填 0（R21）
         usage_status = "reported" if usage is not None else "unavailable"
+        # F17：按冻结计价快照 × 真实 usage 计算成本；无用量 → 不可计价（None）
+        cost_cny = (
+            compute_cost_cny(
+                pricing_from_metadata(metadata.get("pricing")),
+                usage,
+                encoder_input_tokens=metadata.get("encoder_input_tokens"),
+            )
+            if usage is not None
+            else None
+        )
         # 归属月缺失 = observe 未先行（编程契约违规），不进账本也不误报 DB 超时
         if not metadata.get("month"):
             logger.warning(
@@ -339,7 +358,7 @@ class UsageRecorder:
                     usage_revision=1,
                     error_code=record.error_code,
                     duration_ms=record.duration_ms,
-                    cost_cny=metadata.get("cost_cny"),
+                    cost_cny=cost_cny,
                     actual_model=actual_model,
                     connection_id=metadata.get("connection_id", ""),
                     connection_revision=int(metadata.get("connection_revision", 0)),

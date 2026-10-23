@@ -45,6 +45,11 @@ from core.model_management_types import (
     adapter_kind_requires_egress,
     ensure_inference_adapter,
 )
+from services.ai_service.connection_pricing import (
+    ConnectionPricing,
+    parse_connection_pricing,
+    pricing_snapshot_metadata,
+)
 from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 
@@ -136,6 +141,10 @@ class ScenarioExecutor:
         route = next((r for r in snapshot.routes if r.get("scenario_id") == request.scenario_id), None)
         connections_by_id: dict[str, ResolvedConnection] = {}
         eligibility_by_id: dict[str, _ConnectionEligibility] = {}
+        # F17 计价冻结快照（快照语义：普通保存只影响后续请求）：连接解析点随
+        # 资格证据一并提取 billing 计价块，不再丢弃；billing 缺失 / 畸形 →
+        # None（未知语义，不伪装 usage_only / 免费，R21）。
+        pricing_by_id: dict[str, ConnectionPricing | None] = {}
         for raw in snapshot.connections:
             try:
                 resolved, eligibility = _resolve_connection(raw)
@@ -146,6 +155,10 @@ class ScenarioExecutor:
                     type(e).__name__,
                 )
                 continue
+            billing = raw.get("billing") if isinstance(raw, Mapping) else None
+            pricing_by_id[resolved.connection_id] = parse_connection_pricing(
+                billing, connection_hint=resolved.connection_id
+            )
             connections_by_id[resolved.connection_id] = resolved
             eligibility_by_id[resolved.connection_id] = eligibility
         decisions: list[CandidateDecision] = []
@@ -352,6 +365,7 @@ class ScenarioExecutor:
                     reservation_id=reservation_id,
                     owner_session_id=owner_session_id,
                     owner_epoch=owner_epoch,
+                    pricing=pricing_by_id.get(connection.connection_id),
                 )
 
             if outcome.status == "succeeded":
@@ -397,6 +411,7 @@ class ScenarioExecutor:
         reservation_id: str | None,
         owner_session_id: str,
         owner_epoch: int,
+        pricing: ConnectionPricing | None,
     ) -> _CandidateOutcome:
         adapter = self._adapters.get(connection.adapter_kind)
         if adapter is None:
@@ -493,9 +508,11 @@ class ScenarioExecutor:
 
             # D6：适配器返回后立即同步转移用量（幂等按 attempt_id）；
             # security_revision 取许可线性化点的真实修订（F01：快照携带的
-            # security_scope_version 是授权范围版本，不得混作安全修订落账）
+            # security_scope_version 是授权范围版本，不得混作安全修订落账）。
+            # F17：metadata 携带计价冻结快照——成本在终态落账时点由 Recorder
+            # 按真实 usage 计算（cost 与 usage 同源，避免重试场景失配）。
             self._recorder.observe_usage(
-                _observation_from(request, cand, connection, attempt_id, response, permit.security_revision)
+                _observation_from(request, cand, connection, attempt_id, response, permit.security_revision, pricing)
             )
 
             try:
@@ -544,7 +561,7 @@ class ScenarioExecutor:
                         else {"output": validated.output},
                         metadata={
                             **dict(validated.metadata),
-                            **_metadata(request, cand, connection, response, permit.security_revision),
+                            **_metadata(request, cand, connection, response, permit.security_revision, pricing),
                         },
                     ),
                 ),
@@ -750,6 +767,7 @@ def _observation_from(
     attempt_id: str,
     response: AdapterResponse,
     security_revision: int,
+    pricing: ConnectionPricing | None = None,
 ) -> Any:
     from services.ai_service.usage_recorder import AttemptUsageObservation
 
@@ -758,7 +776,7 @@ def _observation_from(
         invocation_id=request.invocation_id,
         usage=response.usage,
         actual_model=response.actual_model,
-        metadata=_metadata(request, cand, connection, response, security_revision),
+        metadata=_metadata(request, cand, connection, response, security_revision, pricing),
     )
 
 
@@ -806,6 +824,7 @@ def _metadata(
     connection: ResolvedConnection,
     response: AdapterResponse,
     security_revision: int,
+    pricing: ConnectionPricing | None = None,
 ) -> dict[str, Any]:
     now_cst = datetime.now(UTC) + _CST_OFFSET
     return {
@@ -823,4 +842,9 @@ def _metadata(
         "security_revision": security_revision,
         "month": f"{now_cst.year}{now_cst.month:02d}",
         "run_id": request.run_id,
+        # F17：连接计价冻结快照（mode / pricing_unit / 价格来源 / 单价 / 汇率 /
+        # 生效时点，金额十进制字符串保精度）。成本不在此计算——由 Recorder 在
+        # 终态落账时点按真实 usage 经 connection_pricing.compute_cost_cny 计算
+        # （cost 与 usage 同源）；快照缺失 → None（未知语义留证，R21 不伪装）。
+        "pricing": pricing_snapshot_metadata(pricing),
     }

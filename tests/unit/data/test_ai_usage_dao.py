@@ -955,6 +955,7 @@ class TestReadBudgetSummary:
                 _StubResult(one=(Decimal("0.05"),)),  # 已知费用（月汇总 scenario scope）
                 _StubResult(one=(Decimal("0.10"),)),  # 有效预留
                 _StubResult(one=(Decimal("0.02"),)),  # 未确认预留
+                _StubResult(one=(0, 0, 0, 0)),  # F17 计价完整性
                 _StubResult(one=None),  # legacy app_state 无值
             ]
         )
@@ -973,6 +974,7 @@ class TestReadBudgetSummary:
                 _StubResult(one=(None,)),
                 _StubResult(one=(None,)),
                 _StubResult(one=(None,)),
+                _StubResult(one=(0, 0, 0, 0)),
                 _StubResult(one=None),
             ]
         )
@@ -984,12 +986,39 @@ class TestReadBudgetSummary:
         assert summary["unconfirmed_reserved_cny"] == Decimal("0")
 
     @pytest.mark.asyncio
+    async def test_pricing_integrity_free_and_unpriced_separate(self):
+        """F17 / R21：免费（cost 已知 0）与未计价（cost NULL 未知）分列，
+        未计价行给 input/output token 完整性。"""
+        conn = _QueueConn(
+            [
+                _StubResult(one=(None,)),
+                _StubResult(one=(None,)),
+                _StubResult(one=(None,)),
+                _StubResult(one=(2, 3, 150, 40)),  # unpriced=2 / free=3 / 未计价 token 完整性
+                _StubResult(one=None),
+            ]
+        )
+        dao = _dao(conn)
+        summary = await dao.read_budget_summary(month="202610")
+        assert summary["unpriced_attempts"] == 2
+        assert summary["free_attempts"] == 3
+        assert summary["unpriced_input_tokens"] == 150
+        assert summary["unpriced_output_tokens"] == 40
+        # 完整性查询按归属月过滤（invocation created_at 月界，D2 口径）
+        integrity_sql, integrity_params = conn.calls[3]
+        assert "ai_attempt" in integrity_sql
+        assert "cost_cny IS NULL" in integrity_sql
+        assert "cost_cny = 0" in integrity_sql
+        assert "month_start" in integrity_params and "next_month_start" in integrity_params
+
+    @pytest.mark.asyncio
     async def test_legacy_cents_included_in_known(self):
         conn = _QueueConn(
             [
                 _StubResult(one=(None,)),
                 _StubResult(one=(Decimal("0"),)),
                 _StubResult(one=(None,)),
+                _StubResult(one=(0, 0, 0, 0)),
                 _StubResult(one=("500",)),  # legacy 分 → 5.00 元
             ]
         )
@@ -1009,6 +1038,7 @@ class TestReadBudgetSummary:
                 _StubResult(one=(None,)),
                 _StubResult(one=(None,)),
                 _StubResult(one=(None,)),
+                _StubResult(one=(0, 0, 0, 0)),
                 _StubResult(one=None),
             ]
         )
@@ -1451,6 +1481,7 @@ class TestStaleGarbageTolerance:
                 _StubResult(one=(Decimal("NaN"),)),  # known settled SUM（垃圾）
                 _StubResult(one=(None,)),  # effective reserved
                 _StubResult(one=(None,)),  # unconfirmed reserved
+                _StubResult(one=(0, 0, 0, 0)),  # F17 计价完整性
                 _StubResult(one=("150",)),  # legacy（合法，1.50 元）
             ]
         )
