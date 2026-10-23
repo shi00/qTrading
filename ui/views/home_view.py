@@ -213,10 +213,9 @@ def HomeView(
     # --- 渲染 (直接从 state 读取, 无 dual-track) ---
 
     # Task 8.1: 数据缓存透明化 — stale 时显示「数据缓存于」明确告知用户当前为缓存快照
-    if state.market_stale:
-        date_text_value = I18n.get("market_data_cached_at").format(date=state.market_date)
-    else:
-        date_text_value = I18n.get("home_data_date").format(date=state.market_date)
+    # UIR-F03-002: 页头 i18n key 由 VM 依逐分量 as_of 派生 (混合日期 →
+    # market_data_mixed_dates)，View 只按当前 locale 渲染 key。
+    date_text_value = I18n.get(state.market_header_key).format(date=state.market_date)
 
     header = ft.Row(
         safe_controls(
@@ -260,6 +259,7 @@ def HomeView(
                     indices=state.market_indices,
                     hsgt=state.market_hsgt,
                     hot_concepts=state.market_hot_concepts,
+                    data_date=state.market_date,
                 ),
                 ft.Text(I18n.get("home_live_news"), size=AppStyles.FONT_SIZE_HEADLINE, weight=ft.FontWeight.BOLD),
                 NewsFeed(

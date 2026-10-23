@@ -263,6 +263,11 @@ class MarketDataService:
         results = list(results)
 
         data_stale = False
+        # UIR-F03-002: 逐分量 as_of 日期。初始为当次查询日期（date），
+        # 仅当该分量回退取到有效数据时才更新为 prev_str；分量无有效数据
+        # （回退仍空/失败/日历未知）置 None —— 不伪称存在任何交易日的数据（R21）。
+        indices_date: str | None = date
+        hsgt_date: str | None = date
         eval_date = latest_date or today_date
         indices_empty = isinstance(results[0], Exception) or all(
             d.get("value") == "-" for d in (results[0] if not isinstance(results[0], Exception) else [])
@@ -297,11 +302,24 @@ class MarketDataService:
                 fb_results = await gather_return_exceptions_propagating_cancel(fb_indices_task, fb_hsgt_task)
                 if indices_empty:
                     results[0] = fb_results[0]
+                    # UIR-F03-002: 回退结果有效才归属 prev_str；回退仍空/失败 → None
+                    fb_indices_valid = not isinstance(fb_results[0], Exception) and any(
+                        d.get("value") != "-" for d in fb_results[0]
+                    )
+                    indices_date = prev_str if fb_indices_valid else None
                 if hsgt_empty:
                     results[1] = fb_results[1]
+                    fb_hsgt_valid = not isinstance(fb_results[1], Exception) and fb_results[1].get("value") != "-"
+                    hsgt_date = prev_str if fb_hsgt_valid else None
                 data_stale = True
                 if indices_empty and hsgt_empty:
                     date = prev_str
+            else:
+                # UIR-F03-002: 日历未知/无前日 → 回退未发生，空分量无 as_of（不猜日期，R21）
+                if indices_empty:
+                    indices_date = None
+                if hsgt_empty:
+                    hsgt_date = None
 
         indices = (
             results[0]
@@ -329,6 +347,10 @@ class MarketDataService:
             "hsgt": hsgt,
             "hot_concepts": hot_concepts,
             "stale": data_stale,
+            # UIR-F03-002: 逐分量 as_of 交易日（str | None）。None = 该分量无有效数据
+            # 或日期未知；旧消费方按缺省键处理保持兼容。
+            "indices_date": indices_date,
+            "hsgt_date": hsgt_date,
         }
 
         await self._notify_listeners()

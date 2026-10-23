@@ -213,6 +213,120 @@ class TestHomeViewModelMarketData:
             assert result == mock_data
             assert len(vm.state.market_indices) == 1
 
+    @pytest.mark.asyncio
+    async def test_mixed_component_dates_header_key(self, vm):
+        """UIR-F03-002: 单分量回退 → 页头 key 为 market_data_mixed_dates, 行 as_of 分别归属."""
+        mock_data = {
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "80亿", "color": "GREEN", "sub": "净流出"},
+            "hot_concepts": [],
+            "date": "20260615",
+            "stale": True,
+            "indices_date": "20260615",
+            "hsgt_date": "20260614",
+        }
+
+        with patch("ui.viewmodels.home_view_model.MarketDataService") as mock_svc:
+            mock_svc.return_value.get_cached_data = MagicMock(return_value=mock_data)
+
+            await vm.load_market_data()
+
+            assert vm.state.market_header_key == "market_data_mixed_dates"
+            assert vm.state.market_indices_date == "20260615"
+            assert vm.state.market_hsgt_date == "20260614"
+            assert vm.state.market_stale is True
+            # 行级 as_of 填充
+            assert vm.state.market_indices[0].as_of == "20260615"
+            assert vm.state.market_hsgt.as_of == "20260614"
+
+    @pytest.mark.asyncio
+    async def test_swapped_mixed_component_dates_header_key(self, vm):
+        """UIR-F03-002 对称: 指数回退、北向当日 → 混合 key 依然命中, 归属互换."""
+        mock_data = {
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "80亿", "color": "GREEN", "sub": "净流出"},
+            "hot_concepts": [],
+            "date": "20260615",
+            "stale": True,
+            "indices_date": "20260614",
+            "hsgt_date": "20260615",
+        }
+
+        with patch("ui.viewmodels.home_view_model.MarketDataService") as mock_svc:
+            mock_svc.return_value.get_cached_data = MagicMock(return_value=mock_data)
+
+            await vm.load_market_data()
+
+            assert vm.state.market_header_key == "market_data_mixed_dates"
+            assert vm.state.market_indices_date == "20260614"
+            assert vm.state.market_hsgt_date == "20260615"
+
+    @pytest.mark.asyncio
+    async def test_stale_without_component_dates_falls_back_to_cached_at(self, vm):
+        """UIR-F03-002: 旧缓存无分量日期键 → as_of 为 None, 页头退回 cached_at (不判混合)."""
+        mock_data = {
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "100亿", "color": "RED", "sub": "净流入"},
+            "hot_concepts": [],
+            "date": "20260613",
+            "stale": True,
+        }
+
+        with patch("ui.viewmodels.home_view_model.MarketDataService") as mock_svc:
+            mock_svc.return_value.get_cached_data = MagicMock(return_value=mock_data)
+
+            await vm.load_market_data()
+
+            assert vm.state.market_header_key == "market_data_cached_at"
+            assert vm.state.market_indices_date is None
+            assert vm.state.market_hsgt_date is None
+            # 旧缓存 → 行 as_of 为 None, 不默认复制页头日期 (R21)
+            assert vm.state.market_indices[0].as_of is None
+            assert vm.state.market_hsgt.as_of is None
+
+    @pytest.mark.asyncio
+    async def test_stale_component_date_unknown_not_mixed(self, vm):
+        """UIR-F03-002: 回退仍空 (分量 as_of None) → 不伪称混合/更早, 退回 cached_at (R21)."""
+        mock_data = {
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "-", "color": "grey", "sub": "-"},
+            "hot_concepts": [],
+            "date": "20260615",
+            "stale": True,
+            "indices_date": "20260615",
+            "hsgt_date": None,
+        }
+
+        with patch("ui.viewmodels.home_view_model.MarketDataService") as mock_svc:
+            mock_svc.return_value.get_cached_data = MagicMock(return_value=mock_data)
+
+            await vm.load_market_data()
+
+            assert vm.state.market_header_key == "market_data_cached_at"
+            assert vm.state.market_hsgt_date is None
+
+    @pytest.mark.asyncio
+    async def test_fresh_data_header_key_and_matching_as_of(self, vm):
+        """UIR-F03-002: 新数据 (非 stale) → 页头 home_data_date, 分量日期与页头一致."""
+        mock_data = {
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "100亿", "color": "RED", "sub": "净流入"},
+            "hot_concepts": [],
+            "date": "20260615",
+            "stale": False,
+            "indices_date": "20260615",
+            "hsgt_date": "20260615",
+        }
+
+        with patch("ui.viewmodels.home_view_model.MarketDataService") as mock_svc:
+            mock_svc.return_value.get_cached_data = MagicMock(return_value=mock_data)
+
+            await vm.load_market_data()
+
+            assert vm.state.market_header_key == "home_data_date"
+            assert vm.state.market_indices_date == "20260615"
+            assert vm.state.market_hsgt_date == "20260615"
+
 
 class TestHomeViewModelNewsData:
     """测试新闻数据加载"""
@@ -370,6 +484,10 @@ class TestHomeViewModelStateManagement:
         assert vm.state.market_indices == ()
         assert vm.state.market_hsgt.value == "--"
         assert vm.state.market_hot_concepts == ()
+        # UIR-F03-002: 分量日期与页头 key 同步重置
+        assert vm.state.market_indices_date is None
+        assert vm.state.market_hsgt_date is None
+        assert vm.state.market_header_key == "home_data_date"
 
     @pytest.mark.asyncio
     async def test_on_news_service_update_new_item(self, vm):

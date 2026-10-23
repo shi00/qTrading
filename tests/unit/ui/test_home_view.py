@@ -43,6 +43,7 @@ from tests.unit.ui.component_renderer import (
     run_render_effects,
     run_unmount_effects,
 )
+from ui.viewmodels.home_view_model import _market_data_to_state_fields
 
 _HOME_VIEW_PATH = Path(__file__).parent.parent.parent.parent / "ui" / "views" / "home_view.py"
 
@@ -226,6 +227,10 @@ class _FakeHomeState:
     market_indices: tuple = ()
     market_hsgt: Any = None
     market_hot_concepts: tuple = ()
+    # UIR-F03-002: 逐分量 as_of + 页头 key (对齐 HomeState 新增 3 字段)
+    market_indices_date: Any = None
+    market_hsgt_date: Any = None
+    market_header_key: str = "home_data_date"
     # P1-3 批次 2: 三态字段 (对齐 HomeState 新增 4 字段)
     is_loading: bool = False
     has_market_data: bool = False
@@ -300,20 +305,15 @@ class _FakeHomeViewModel:
         self.method_calls.append("load_market_data")
         data = self.market_data_return
         if data:
-            self._set_state(
-                market_date=str(data.get("date", "--")),
-                market_stale=bool(data.get("stale", False)),
-            )
+            # UIR-F03-002: 复用真实转换函数, 保证页头 key/分量 as_of 派生与真 VM 一致
+            self._set_state(**_market_data_to_state_fields(data))
         return data
 
     async def get_cached_market_data(self) -> dict | None:
         self.method_calls.append("get_cached_market_data")
         data = self.cached_market_data_return
         if data:
-            self._set_state(
-                market_date=str(data.get("date", "--")),
-                market_stale=bool(data.get("stale", False)),
-            )
+            self._set_state(**_market_data_to_state_fields(data))
         return data
 
     async def refresh_news(self) -> tuple[pd.DataFrame | None, bool]:

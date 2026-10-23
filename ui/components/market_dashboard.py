@@ -66,12 +66,26 @@ def _has_hsgt_data(info: HsgtRow) -> bool:
     return _has_value(info.value)
 
 
-def _build_index_card(title_key: str, info: MarketIndexRow) -> ft.Container:
+def _as_of_label(as_of: str | None, data_date: str) -> str | None:
+    """UIR-F03-002: 分量 as_of 与页头主日期不同时返回日期提示文案, 否则 None.
+
+    - as_of 为 None (无数据/日期未知, 含旧缓存): 不渲染日期行 — 不伪称归属 (R21);
+    - as_of 与页头主日期一致: 页头已表达, 省略避免冗余;
+    - 仅单分量回退到更早交易日时展示 "数据截至: {date}"。
+    """
+    if not as_of or as_of == data_date:
+        return None
+    return I18n.get("home_card_as_of").format(date=as_of)
+
+
+def _build_index_card(title_key: str, info: MarketIndexRow, data_date: str = "--") -> ft.Container:
     """Build a single index card (SH/SZ/CYB) — pure function.
 
     UX-08: 无数据 (value 为占位符) 时渲染"暂无数据"占位并省略 change 行 —
     避免占位 '-' 与真实负值混淆 (报告 P2-08: 指数无数据仍渲染固定空卡).
     无数据卡仅标题+占位 (2 控件), 不强制等高 (报告"不误读"优先, YAGNI).
+
+    UIR-F03-002: 分量 as_of 与页头主日期不同时追加日期提示行 (单分量回退场景)。
     """
     style = AppStyles.dashboard_card()
     has_data = _has_index_data(info)
@@ -94,6 +108,18 @@ def _build_index_card(title_key: str, info: MarketIndexRow) -> ft.Container:
         if has_data
         else []
     )
+    as_of_text = _as_of_label(info.as_of, data_date)
+    as_of_controls = (
+        [
+            ft.Text(
+                as_of_text,
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=AppColors.TEXT_HINT,
+            )
+        ]
+        if as_of_text
+        else []
+    )
     column_controls: list[ft.Control] = [
         anchored(
             _KPI_EIDS[title_key],
@@ -106,6 +132,7 @@ def _build_index_card(title_key: str, info: MarketIndexRow) -> ft.Container:
         ),
         value_text,
         *change_controls,
+        *as_of_controls,
     ]
     return ft.Container(
         content=ft.Column(column_controls, spacing=5),
@@ -118,12 +145,14 @@ def _build_index_card(title_key: str, info: MarketIndexRow) -> ft.Container:
     )
 
 
-def _build_hsgt_card(info: HsgtRow) -> ft.Container:
+def _build_hsgt_card(info: HsgtRow, data_date: str = "--") -> ft.Container:
     """Build the northbound funds (HSGT) card — pure function.
 
     MINOR-12: 无数据 (value 为占位符, 与指数卡 _has_index_data 同款判定) 时
     渲染中性占位文案并省略 sub — 避免占位 "-" 被着色的"数值+流向"样式误读为
     真实净流入/流出 (报告 MINOR-12: 北向缺"无数据"分支). 有数据时按流向着色.
+
+    UIR-F03-002: 分量 as_of 与页头主日期不同时追加日期提示行 (单分量回退场景)。
     """
     style = AppStyles.dashboard_card()
     has_data = _has_hsgt_data(info)
@@ -145,6 +174,18 @@ def _build_hsgt_card(info: HsgtRow) -> ft.Container:
         if has_data
         else []
     )
+    as_of_text = _as_of_label(info.as_of, data_date)
+    as_of_controls = (
+        [
+            ft.Text(
+                as_of_text,
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=AppColors.TEXT_HINT,
+            )
+        ]
+        if as_of_text
+        else []
+    )
     return ft.Container(
         content=ft.Column(
             [
@@ -159,6 +200,7 @@ def _build_hsgt_card(info: HsgtRow) -> ft.Container:
                 ),
                 value_text,
                 *sub_controls,
+                *as_of_controls,
             ],
             spacing=5,
         ),
@@ -231,6 +273,7 @@ def MarketDashboard(
     indices: tuple[MarketIndexRow, ...] = (),
     hsgt: HsgtRow | None = None,
     hot_concepts: tuple[HotConceptRow, ...] = (),
+    data_date: str = "--",
 ) -> ft.Column:
     """Market Dashboard Component (declarative).
 
@@ -238,6 +281,9 @@ def MarketDashboard(
     and hot concepts. Data is pushed via props (replaces
     the old imperative data-push API). i18n/theme auto-rerender via
     ``ft.use_state`` subscription.
+
+    UIR-F03-002: ``data_date`` 为页头主批次日期, 用于判定分量 as_of 是否
+    需要在卡片内单独标注日期 (单分量回退到更早交易日时展示)。
 
     L771 合规: 接收 tuple[MarketIndexRow, ...] / HsgtRow / tuple[HotConceptRow, ...]
     替代 dict.
@@ -254,8 +300,8 @@ def MarketDashboard(
     index_cards: list[ft.Control] = []
     for i in range(3):
         info = indices[i] if i < len(indices) else MarketIndexRow()
-        index_cards.append(_build_index_card(index_titles[i], info))
-    index_cards.append(_build_hsgt_card(hsgt))
+        index_cards.append(_build_index_card(index_titles[i], info, data_date))
+    index_cards.append(_build_hsgt_card(hsgt, data_date))
 
     indices_row = ft.ResponsiveRow(index_cards, run_spacing=10)
 

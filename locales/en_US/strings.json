@@ -96,6 +96,8 @@
     "news_time_unknown": "Time unknown",
     "ai_generated_tag": "AI-Generated",
     "market_data_cached_at": "Data cached at: {date}",
+    "market_data_mixed_dates": "Data date: {date} (some components from an earlier trade date)",
+    "home_card_as_of": "As of: {date}",
     "screener_title": "Smart Screener",
     "screener_strategies": "Strategies",
     "screener_run": "Run Strategy",

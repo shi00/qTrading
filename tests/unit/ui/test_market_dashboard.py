@@ -351,6 +351,104 @@ class TestBuildHsgtCard:
         assert len(col.controls) == 3
 
 
+class TestAsOfLabel:
+    """UIR-F03-002: _as_of_label 纯函数测试 — 分量日期提示行的显示条件。"""
+
+    def test_none_as_of_returns_none(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """as_of None (无数据/日期未知/旧缓存) → 不渲染日期行 (R21 不伪称)."""
+        from ui.components.market_dashboard import _as_of_label
+
+        assert _as_of_label(None, "20260615") is None
+
+    def test_matching_date_returns_none(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """as_of 与页头主日期一致 → 页头已表达, 省略避免冗余."""
+        from ui.components.market_dashboard import _as_of_label
+
+        assert _as_of_label("20260615", "20260615") is None
+
+    def test_earlier_date_returns_formatted_label(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """as_of 早于页头主日期 (单分量回退) → 返回 '数据截至: {date}' 格式化文案."""
+        from ui.components.market_dashboard import _as_of_label
+        from ui.i18n import I18n
+
+        label = _as_of_label("20260614", "20260615")
+
+        assert label == I18n.get("home_card_as_of").format(date="20260614")
+
+    def test_empty_string_as_of_returns_none(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """as_of 空串 (脏值防御) → 视同未知, 不渲染."""
+        from ui.components.market_dashboard import _as_of_label
+
+        assert _as_of_label("", "20260615") is None
+
+
+class TestIndexCardAsOfRow:
+    """UIR-F03-002: 指数卡 as_of 日期行渲染条件。"""
+
+    def test_earlier_as_of_appends_date_row(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """as_of ≠ 页头日期 → 卡片追加第 4 控件 (日期提示行)."""
+        from ui.components.market_dashboard import _build_index_card
+        from ui.i18n import I18n
+        from ui.theme import AppColors, AppStyles
+
+        info = MarketIndexRow(value="3000.00", change="+1.00%", color="RED", as_of="20260614")
+        card = _build_index_card("home_index_sh", info, data_date="20260615")
+
+        col = card.content
+        assert len(col.controls) == 4
+        assert col.controls[3].value == I18n.get("home_card_as_of").format(date="20260614")
+        assert col.controls[3].size == AppStyles.FONT_SIZE_BODY_SM
+        assert col.controls[3].color == AppColors.TEXT_HINT
+
+    def test_matching_as_of_omits_date_row(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """as_of == 页头日期 → 仅 3 控件 (标题+值+涨跌), 无日期行."""
+        from ui.components.market_dashboard import _build_index_card
+
+        info = MarketIndexRow(value="3000.00", change="+1.00%", color="RED", as_of="20260615")
+        card = _build_index_card("home_index_sh", info, data_date="20260615")
+
+        col = card.content
+        assert len(col.controls) == 3
+
+    def test_none_as_of_omits_date_row(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """as_of None (旧缓存/无数据) → 无日期行 (R21 不伪称)."""
+        from ui.components.market_dashboard import _build_index_card
+
+        info = MarketIndexRow(value="3000.00", change="+1.00%", color="RED", as_of=None)
+        card = _build_index_card("home_index_sh", info, data_date="20260615")
+
+        col = card.content
+        assert len(col.controls) == 3
+
+
+class TestHsgtCardAsOfRow:
+    """UIR-F03-002: 北向卡 as_of 日期行渲染条件 (核心缺陷场景: 北向回退 D-1)。"""
+
+    def test_earlier_as_of_appends_date_row(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """北向回退 D-1 (as_of ≠ 页头日期) → 卡片追加日期提示行."""
+        from ui.components.market_dashboard import _build_hsgt_card
+        from ui.i18n import I18n
+        from ui.theme import AppColors
+
+        info = HsgtRow(value="80亿", sub="净流出", color="GREEN", as_of="20260614")
+        card = _build_hsgt_card(info, data_date="20260615")
+
+        col = card.content
+        assert len(col.controls) == 4
+        assert col.controls[3].value == I18n.get("home_card_as_of").format(date="20260614")
+        assert col.controls[3].color == AppColors.TEXT_HINT
+
+    def test_matching_as_of_omits_date_row(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """as_of == 页头日期 (双回退/新数据) → 无日期行, 保持 3 控件."""
+        from ui.components.market_dashboard import _build_hsgt_card
+
+        info = HsgtRow(value="80亿", sub="净流出", color="GREEN", as_of="20260615")
+        card = _build_hsgt_card(info, data_date="20260615")
+
+        col = card.content
+        assert len(col.controls) == 3
+
+
 class TestBuildConceptCard:
     """_build_concept_card 纯函数测试：验证热门概念卡片渲染。"""
 
@@ -513,6 +611,34 @@ class TestMarketDashboardBody:
         concepts_section = result.controls[2]
         concepts_row = concepts_section.controls[1]
         assert len(concepts_row.controls) == 2  # 2 concept cards
+
+    def test_mixed_component_dates_renders_as_of_row_on_fallback_card(
+        self, mock_i18n_state, mock_app_colors_state
+    ) -> None:
+        """UIR-F03-002 核心场景: 北向回退 D-1、指数当日 → 北向卡渲染日期行, 指数卡不渲染."""
+        from ui.components.market_dashboard import MarketDashboard
+        from ui.i18n import I18n
+
+        indices = (
+            MarketIndexRow(value="3000", change="+1%", color="RED", as_of="20260615"),
+            MarketIndexRow(value="10000", change="-0.5%", color="GREEN", as_of="20260615"),
+            MarketIndexRow(value="2000", change="+0.3%", color="RED", as_of="20260615"),
+        )
+        hsgt = HsgtRow(value="50亿", sub="净流入", color="RED", as_of="20260614")
+        component = make_component(MarketDashboard, indices=indices, hsgt=hsgt, hot_concepts=(), data_date="20260615")
+        run_mount_effects(component)
+        result = render_once(component)
+
+        indices_row = result.controls[0]
+        assert len(indices_row.controls) == 4
+        # 指数卡 (as_of == data_date): 3 控件, 无日期行
+        for i in range(3):
+            assert len(indices_row.controls[i].content.controls) == 3
+        # 北向卡 (as_of != data_date): 4 控件, 第 4 项为日期提示行
+        hsgt_card = indices_row.controls[3]
+        hsgt_col = hsgt_card.content
+        assert len(hsgt_col.controls) == 4
+        assert hsgt_col.controls[3].value == I18n.get("home_card_as_of").format(date="20260614")
 
     def test_empty_hot_concepts_shows_empty_hint(self, mock_i18n_state, mock_app_colors_state) -> None:
         """hot_concepts=() → 显示 empty 提示卡片。"""

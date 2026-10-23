@@ -43,6 +43,8 @@ class MarketIndexRow:
     value: str = "--"
     change: str = "--"
     color: str = ""
+    # UIR-F03-002: 该行数据所属交易日 (as_of)。None = 无数据或日期未知 (R21: 不伪称)。
+    as_of: str | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,8 @@ class HsgtRow:
     value: str = "--"
     color: str = ""
     sub: str = "--"
+    # UIR-F03-002: 该行数据所属交易日 (as_of)。None = 无数据或日期未知 (R21: 不伪称)。
+    as_of: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,14 @@ class HomeState:
     market_hot_concepts: tuple[HotConceptRow, ...] = ()
     market_date: str = "--"
     market_stale: bool = False
+    # UIR-F03-002: 逐分量 as_of 交易日。None = 该分量无有效数据或日期未知
+    # (旧缓存无该键同样归 None —— 不默认复制页头日期为已证实日期, R21)。
+    market_indices_date: str | None = None
+    market_hsgt_date: str | None = None
+    # UIR-F03-002: 页头 i18n key (VM 派生, View 按 locale 渲染)。
+    # 混合日期 → "market_data_mixed_dates"; stale 单一日期 → "market_data_cached_at";
+    # 新数据 → "home_data_date"。
+    market_header_key: str = "home_data_date"
     # P1-3 批次 2: 三态字段 (EmptyState/ErrorState/加载态)
     is_loading: bool = False
     has_market_data: bool = False
@@ -428,6 +440,9 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             market_hot_concepts=(),
             market_date="--",
             market_stale=False,
+            market_indices_date=None,  # UIR-F03-002: 分量日期同步重置
+            market_hsgt_date=None,
+            market_header_key="home_data_date",
             # P1-3 批次 2: 新增 4 字段
             is_loading=False,
             has_market_data=False,
@@ -516,28 +531,41 @@ def _df_to_news_rows(df: pd.DataFrame | None) -> tuple[NewsRow, ...]:
     )
 
 
+def _coerce_as_of(value: Any) -> str | None:
+    """UIR-F03-002: 规整逐分量 as_of 日期。
+
+    服务端契约: str (交易日) 或 None (无有效数据/未知)。非 str 脏值 (旧缓存
+    或异常来源) 一律归 None —— 不猜日期、不复制页头日期冒充分量归属 (R21)。
+    """
+    return value if isinstance(value, str) and value else None
+
+
 def _market_data_to_state_fields(data: dict) -> dict[str, Any]:
     """dict → HomeState 字段 dict (供 _set_state 使用).
 
     将 market_data dict 转换为 tuple[MarketIndexRow, ...] 等不可变字段.
     """
     indices = data.get("indices") or []
+    indices_as_of = _coerce_as_of(data.get("indices_date"))
     market_indices = tuple(
         MarketIndexRow(
             name=str(idx.get("name", "")),
             value=str(idx.get("value", "--")),
             change=str(idx.get("change", "--")),
             color=str(idx.get("color", "")),
+            as_of=indices_as_of,
         )
         for idx in indices
         if isinstance(idx, dict)
     )
 
     hsgt = data.get("hsgt") or {}
+    hsgt_as_of = _coerce_as_of(data.get("hsgt_date"))
     market_hsgt = HsgtRow(
         value=str(hsgt.get("value", "--")),
         color=str(hsgt.get("color", "")),
         sub=str(hsgt.get("sub", "--")),
+        as_of=hsgt_as_of,
     )
 
     hot_concepts = data.get("hot_concepts") or []
@@ -551,10 +579,24 @@ def _market_data_to_state_fields(data: dict) -> dict[str, Any]:
         if isinstance(item, dict)
     )
 
+    market_stale = bool(data.get("stale", False))
+    # UIR-F03-002: 页头 key 由 VM 派生。混合日期判定要求两分量 as_of 均已知
+    # (str) 且不等 —— 任一分量未知 (None) 不判混合, 回退到 stale 单一日期文案,
+    # 避免对缺失分量伪称"更早交易日" (R21)。
+    if market_stale and indices_as_of and hsgt_as_of and indices_as_of != hsgt_as_of:
+        header_key = "market_data_mixed_dates"
+    elif market_stale:
+        header_key = "market_data_cached_at"
+    else:
+        header_key = "home_data_date"
+
     return {
         "market_indices": market_indices,
         "market_hsgt": market_hsgt,
         "market_hot_concepts": market_hot_concepts,
         "market_date": str(data.get("date", "--")),
-        "market_stale": bool(data.get("stale", False)),
+        "market_stale": market_stale,
+        "market_indices_date": indices_as_of,
+        "market_hsgt_date": hsgt_as_of,
+        "market_header_key": header_key,
     }
