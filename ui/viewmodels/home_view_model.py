@@ -355,7 +355,9 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         竞态安全: await 后重新读取 self._state.news_rows 获取最新快照,
         包含 await 期间 _on_news_service_update 可能追加的 NEW_ITEM.
 
-        Returns: (new_batch_df, has_more) or (None, False)
+        Returns: (new_batch_df, has_more) or (None, 当前 has_more_news)。
+        取数失败 (batch 为 None) 时保持 has_more_news 原值 (与 refresh_news 的
+        None 语义一致): 单次 DB 抖动不永久关闭分页, 用户可重试加载更多。
         """
         if self._state.is_loading_more or not self._state.has_more_news:
             return None, self._state.has_more_news
@@ -372,20 +374,25 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
                 logger.info("[HomeVM] Load next page aborted due to generation change")
                 return None, False
 
-            if new_batch is not None and not new_batch.empty:
-                new_rows = _df_to_news_rows(new_batch)
-                # 关键: await 后重新读取 self._state.news_rows (最新快照)
-                # 可能被 _on_news_service_update(NEW_ITEM) 追加过
-                current_rows = self._state.news_rows
-                self._set_state(
-                    news_rows=current_rows + new_rows,
-                    news_page=next_page,
-                    has_more_news=len(new_batch) >= self.PAGE_SIZE,
-                )
-                return new_batch, len(new_batch) >= self.PAGE_SIZE
+            if new_batch is None:
+                # 取数失败: 保持 has_more_news 原值, 分页不因单次故障被永久关闭
+                # (与 refresh_news 中 "batch 为 None 时保持不变" 的语义一致)。
+                return None, self._state.has_more_news
 
-            self._set_state(has_more_news=False)
-            return pd.DataFrame(), False
+            if new_batch.empty:
+                self._set_state(has_more_news=False)
+                return pd.DataFrame(), False
+
+            new_rows = _df_to_news_rows(new_batch)
+            # 关键: await 后重新读取 self._state.news_rows (最新快照)
+            # 可能被 _on_news_service_update(NEW_ITEM) 追加过
+            current_rows = self._state.news_rows
+            self._set_state(
+                news_rows=current_rows + new_rows,
+                news_page=next_page,
+                has_more_news=len(new_batch) >= self.PAGE_SIZE,
+            )
+            return new_batch, len(new_batch) >= self.PAGE_SIZE
 
         finally:
             self._set_state(is_loading_more=False)

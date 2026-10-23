@@ -228,6 +228,7 @@ def HomeView(
                     ft.Icons.REFRESH,
                     on_click=safe_on_click(_refresh_clicked),
                     tooltip=I18n.get("home_refresh"),
+                    disabled=state.is_loading,  # 加载中置灰, 防止连点触发并发全量加载
                 ),
             ]
         ),
@@ -267,6 +268,7 @@ def HomeView(
                     on_load_more_click=typing.cast("Callable[[ft.ControlEvent], None]", _on_load_more_click),
                     on_view_stock=_on_view_stock,
                     valid_stock_codes=state.valid_stock_codes,
+                    is_loading_more=state.is_loading_more,
                 ),
             ]
         )

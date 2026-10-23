@@ -511,6 +511,47 @@ class TestHomeViewRuntime:
         assert isinstance(header.controls[0], ft.Text)  # title
         assert isinstance(header.controls[-1], ft.IconButton)  # refresh
 
+    def test_refresh_button_disabled_while_loading(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """P-HOME-1: is_loading=True 时刷新按钮置灰, 防止连点触发并发全量加载。"""
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        # 挂载 effect 的异步加载已同步完成 (is_loading 复位 False), 此处显式进入加载态
+        mock_home_vm._set_state(is_loading=True)
+        result = render_once(component)
+
+        header = result.content.controls[0]
+        refresh_btn = header.controls[-1]
+        assert isinstance(refresh_btn, ft.IconButton)
+        assert refresh_btn.disabled is True
+
+    def test_refresh_button_enabled_when_idle(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """P-HOME-1: 空闲态刷新按钮可用。"""
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        header = result.content.controls[0]
+        refresh_btn = header.controls[-1]
+        assert isinstance(refresh_btn, ft.IconButton)
+        assert refresh_btn.disabled is False
+
+    def test_newsfeed_receives_is_loading_more_prop(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """P-HOME-1: HomeView 将 state.is_loading_more 传递给 NewsFeed (源码契约)。
+
+        NewsFeed 按钮忙碌态本身由 test_news_feed.py::TestBuildLoadMoreButton 覆盖;
+        此处守护 View 侧的 props 传递接线, 防止回归断链。
+        """
+        source = Path(__file__).parent.parent.parent.parent / "ui" / "views" / "home_view.py"
+        content = source.read_text(encoding="utf-8")
+        assert "is_loading_more=state.is_loading_more" in content
+
     def test_render_includes_dashboard_and_news_section(
         self, mock_i18n_state, mock_app_colors_state, mock_home_vm
     ) -> None:

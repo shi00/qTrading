@@ -589,3 +589,68 @@ class TestTranslateTitleCode:
         with patch("ui.components.news_feed.I18n") as mock_en:
             mock_en.get.side_effect = lambda key, default=None, **kw: {"news_no_title": "No Title"}.get(key, key)
             assert _translate_title_code("no_title") == "No Title"
+
+
+# ---------------------------------------------------------------------------
+# Pure function tests: _build_load_more_button (加载更多忙碌反馈, P-HOME-1)
+# ---------------------------------------------------------------------------
+
+
+def _collect_buttons(control) -> list[ft.Button]:
+    """递归收集控件树中的 ft.Button。"""
+    buttons: list[ft.Button] = []
+    if isinstance(control, ft.Button):
+        buttons.append(control)
+    for attr in ("content", "controls"):
+        child = getattr(control, attr, None)
+        if isinstance(child, ft.Control):
+            buttons.extend(_collect_buttons(child))
+        elif isinstance(child, list):
+            for c in child:
+                if isinstance(c, ft.Control):
+                    buttons.extend(_collect_buttons(c))
+    return buttons
+
+
+class TestBuildLoadMoreButton:
+    """「加载更多」按钮忙碌反馈 (P-HOME-1): is_loading_more 时置灰 + 加载中文案。"""
+
+    @pytest.fixture(autouse=True)
+    def _mock_i18n(self):
+        with patch("ui.components.news_feed.I18n") as m:
+            m.get.side_effect = lambda key, default=None, **kw: default if default is not None else key
+            yield m
+
+    def _button(self, is_loading_more: bool) -> ft.Button:
+        from ui.components.news_feed import _build_load_more_button
+
+        container = _build_load_more_button(is_loading_more, None)
+        buttons = _collect_buttons(container)
+        assert len(buttons) == 1
+        return buttons[0]
+
+    def test_idle_state_enabled_with_load_more_text(self):
+        """空闲态: 按钮可用, 文案为 news_load_more。"""
+        btn = self._button(False)
+        assert btn.disabled is False
+        assert btn.content.value == "news_load_more"
+
+    def test_loading_state_disabled_with_loading_text(self):
+        """忙碌态: 按钮置灰禁用, 文案切换为 news_loading_more。"""
+        btn = self._button(True)
+        assert btn.disabled is True
+        assert btn.content.value == "news_loading_more"
+
+    def test_click_handler_passthrough(self):
+        """on_load_more_click 回调透传 (None → on_click 为 None)。"""
+        from ui.components.news_feed import _build_load_more_button
+
+        container = _build_load_more_button(False, None)
+        btn = _collect_buttons(container)[0]
+        assert btn.on_click is None
+
+    def test_component_passes_is_loading_more_prop(self):
+        """契约: NewsFeed 组件签名含 is_loading_more prop 且渲染时消费。"""
+        source = _code_source()
+        assert "is_loading_more: bool = False" in source
+        assert "_build_load_more_button(is_loading_more, on_load_more_click)" in source
