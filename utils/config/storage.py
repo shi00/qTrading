@@ -374,13 +374,19 @@ def ensure_defaults():
 
                 valid_keys = set(cfg.ConfigHandler.DEFAULT_CONFIG.keys())
                 existing_keys = list(current_config.keys())
+                removed_keys: list[str] = []
 
                 for key in existing_keys:
                     if key.startswith("ai_strategy_prompt_"):
                         continue
+                    if key.startswith("strategy_presets_"):
+                        # Task 4.1 策略预设为用户数据（动态键），与 ai_strategy_prompt_
+                        # 同语义：启动清理只针对废弃的固定配置键，不得删除用户资产。
+                        continue
                     if key not in valid_keys:
                         cfg.logger.info("Removing deprecated/unused config: %s", key)
                         current_config.pop(key)
+                        removed_keys.append(key)
                         dirty = True
 
                 if cfg.ConfigHandler._migrate_custom_models_credentials(current_config):
@@ -392,7 +398,7 @@ def ensure_defaults():
                         cfg.ConfigHandler._config_cache = current_config
                     cfg.logger.info(
                         "Configuration (defaults & cleanup) synchronized. Cleared deprecated keys: %s",
-                        set(existing_keys) - valid_keys,
+                        removed_keys,
                     )
 
     # NOTE(lazy): 配置管理整体兜底避免单点失败阻断流程. ceiling: 配置管理内部逻辑不应抛异常. upgrade: 配置管理内部统一走 classify_error.

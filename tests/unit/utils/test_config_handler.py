@@ -682,6 +682,10 @@ class TestF10StartupPreserveCorruption:
         with (
             patch.object(cfg_mod, "CONFIG_FILE", str(config_file)),
             patch.object(cfg_mod.ConfigHandler, "_config_cache", None),
+            # 声明外部覆盖：禁用 legacy 配置位置迁移（_migrate_config_location），
+            # 否则 APP_ROOT 旧 user_settings.json 被复制进测试文件，
+            # 破坏「缺文件首次初始化」用例（test_first_run_initialization_*）的语义。
+            patch.dict(os.environ, {"ASTOCK_CONFIG_FILE": str(config_file)}),
         ):
             yield config_file
 
@@ -834,6 +838,24 @@ class TestF10StartupPreserveCorruption:
         assert raw["log_level"] == "DEBUG"
         for key, val in self._legacy_sentiment_keys().items():
             assert raw[key] == val
+
+    def test_ensure_defaults_preserves_strategy_presets(self, isolated_config):
+        """策略预设（strategy_presets_* 动态键）为用户数据：启动清理不得删除。
+
+        回归：ensure_defaults 清理未知键时此前只豁免 ai_strategy_prompt_ 前缀，
+        strategy_presets_* 被当作废弃键清除，用户保存的策略预设每次启动即丢失。
+        """
+        presets = {"激进": {"rsi_threshold": 20}, "稳健": {"rsi_threshold": 35}}
+        isolated_config.write_text(
+            json.dumps({"llm_provider": "deepseek", "strategy_presets_oversold": presets}),
+            encoding="utf-8",
+        )
+        cfg_mod.ConfigHandler.ensure_defaults()
+        raw = json.loads(isolated_config.read_text(encoding="utf-8"))
+        assert raw["strategy_presets_oversold"] == presets
+        # 读路径同样保留（model_validate extra=allow 往返不丢）
+        cfg_mod.ConfigHandler._clear_cache()
+        assert cfg_mod.ConfigHandler.load_config()["strategy_presets_oversold"] == presets
 
 
 class TestConfigHandlerGetTokenKeyringMigration:

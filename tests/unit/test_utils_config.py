@@ -12,13 +12,17 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
-def isolated_config(tmp_path):
+def isolated_config(tmp_path, monkeypatch):
     import utils.config_handler as config_module
 
     unique_name = f"test_config_{uuid.uuid4().hex}.json"
     test_config_file = str(tmp_path / unique_name)
     original_config_file = config_module.CONFIG_FILE
     config_module.CONFIG_FILE = test_config_file
+    # 声明外部覆盖：_migrate_config_location 以 ASTOCK_CONFIG_FILE 判定「已覆盖」，
+    # 不声明时 APP_ROOT 下的 legacy user_settings.json 会被复制进测试文件，
+    # 破坏「配置文件不存在」语义（test_load_config_empty 等用例依赖该语义）。
+    monkeypatch.setenv("ASTOCK_CONFIG_FILE", test_config_file)
 
     ConfigHandler._clear_cache()
 
