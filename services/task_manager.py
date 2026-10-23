@@ -1284,11 +1284,20 @@ class TaskManager:
             return
         try:
             from data.cache.cache_manager import CacheManager
+            from data.persistence import engine_provider
             from data.persistence.models import TaskHistory
 
             cm = CacheManager()
+            # R5 守卫：引擎未初始化或已释放时跳过清理（best-effort 语义，避免在
+            # 僵尸引擎上操作或以 AttributeError 失真代替 EngineDisposedError 语义）。
+            # 显式传入 engine 引用查询（与 BaseDao._check_engine 的判活口径对齐），
+            # 不依赖 provider 全局受管引擎状态。
+            engine = cm.engine
+            if engine is None or engine_provider.is_disposed(engine):
+                logger.debug("[TaskManager] DB clear skipped: engine not initialized or disposed")
+                return
             stmt = TaskHistory.__table__.delete().where(TaskHistory.__table__.c.id.in_(task_ids))
-            async with cm.engine.begin() as conn:  # type: ignore[union-attr]
+            async with engine.begin() as conn:
                 await conn.execute(stmt)
         except asyncio.CancelledError:
             raise

@@ -1450,6 +1450,28 @@ class TestTaskManagerClearFinishedDb:
             await mgr._clear_finished_db(["id1", "id2"])
             mock_conn.execute.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_skips_when_engine_none(self):
+        """R5 守卫：engine 未初始化（None）时跳过清理，不触碰 begin()。"""
+        mgr = TaskManager()
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm.return_value.engine = None
+            await mgr._clear_finished_db(["id1"])  # 不应抛异常
+
+    @pytest.mark.asyncio
+    async def test_skips_when_engine_disposed(self):
+        """R5 守卫：引擎已释放（is_disposed True）时跳过清理，不在僵尸引擎上操作。"""
+        mgr = TaskManager()
+        mock_engine = MagicMock()
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.engine_provider.is_disposed", return_value=True) as mock_disposed,
+        ):
+            mock_cm.return_value.engine = mock_engine
+            await mgr._clear_finished_db(["id1"])  # 不应抛异常
+            mock_disposed.assert_called_once_with(mock_engine)
+            mock_engine.begin.assert_not_called()
+
 
 class TestTaskManagerQueuePersistSnapshot:
     def test_no_loop_drops(self):
