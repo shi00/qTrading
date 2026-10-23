@@ -265,11 +265,11 @@ class TestThreadPoolOffloadContract:
         assert args[0] is TaskType.IO
 
 
-# --- P-AUTO-1: save_* 返回前回读磁盘对齐 state (统一契约) ---
+# --- P-AUTO-01: save_* 返回前回读磁盘对齐 state (统一契约) ---
 
 
 class TestSaveRollbackStateAlignment:
-    """P-AUTO-1: save_auto_update_time/save_concept_time/save_nightly_prediction_time/
+    """P-AUTO-01: save_auto_update_time/save_concept_time/save_nightly_prediction_time/
     save_news_interval 返回前统一回读磁盘事实源对齐 state。
 
     不变式: save_* 返回 False (写盘失败/IO 异常/并发早退/解析失败) 时, 对应 state

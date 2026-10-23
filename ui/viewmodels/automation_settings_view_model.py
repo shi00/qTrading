@@ -140,7 +140,7 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
     async def save_auto_update_time(self, new_time: str) -> bool:
         """保存自动更新时间。
 
-        P-AUTO-1: 返回前统一回读磁盘对齐 state — 成功时写盘已同步完成, 读数必为
+        P-AUTO-01: 返回前统一回读磁盘对齐 state — 成功时写盘已同步完成, 读数必为
         新值; 失败/异常/并发早退时磁盘未被本次改写, 读数为旧值 → 回滚 View 的
         乐观更新, 保证「返回 False 时 state 与磁盘一致」, 消除 UI 显示未生效值
         的漂移 (重启后跳变)。
@@ -206,7 +206,7 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
     async def save_concept_time(self, new_time: str) -> bool:
         """保存概念同步任务时间。
 
-        P-AUTO-1: 返回前统一回读磁盘对齐 state (同 save_auto_update_time 契约)。
+        P-AUTO-01: 返回前统一回读磁盘对齐 state (同 save_auto_update_time 契约)。
         """
         if self._state.is_saving:
             self._set_state(concept_time=ConfigHandler.get_concept_schedule_time())
@@ -239,7 +239,7 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
     async def save_nightly_prediction_time(self, new_time: str) -> bool:
         """Task 7.3: 保存夜间 AI 预测时辰。
 
-        P-AUTO-1: 返回前统一回读磁盘对齐 state (同 save_auto_update_time 契约)。
+        P-AUTO-01: 返回前统一回读磁盘对齐 state (同 save_auto_update_time 契约)。
         """
         if self._state.is_saving:
             self._set_state(nightly_prediction_time=ConfigHandler.get_nightly_prediction_time())
@@ -302,7 +302,7 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
     async def save_news_interval(self, new_val: str) -> bool:
         """保存新闻拉取间隔 (秒, 字符串解析为 int)。
 
-        P-AUTO-1: 返回前统一回读磁盘对齐 state (同 save_auto_update_time 契约)。
+        P-AUTO-01: 返回前统一回读磁盘对齐 state (同 save_auto_update_time 契约)。
         """
         if self._state.is_saving:
             self._set_state(news_interval=str(ConfigHandler.get_config("news_poll_interval", 60)))
