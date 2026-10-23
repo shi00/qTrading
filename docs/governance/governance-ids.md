@@ -143,3 +143,4 @@
 | FT-07 | corpus_tag 支持范围与固定行数契约待决策（workflow 行数断言绑定 corpus-v1） | 模型微调流水线检视任务链（本地检视报告） | [finbert-train.yml](../../.github/workflows/finbert-train.yml) | 使用中 |
 | FT-08 | FinBERT 训练依赖锁定（accelerate/numpy/sentencepiece pin + Release note lineage 补全） | 模型微调流水线检视任务链（本地检视报告） | [finbert-train.yml](../../.github/workflows/finbert-train.yml) | 使用中 |
 | FT-09 | verify_finbert_gguf docstring 与产线 workflow 漂移修正（如实说明已集成 CI 一致性 Gate） | 模型微调流水线检视任务链（本地检视报告） | [verify_finbert_gguf.py](../../scripts/verify_finbert_gguf.py) | 使用中 |
+| CORE-02 | classify_error 的 AppError 分支将 `ErrorInfo.retryable` 显式映射为 failover 消费点（`_chat_completion_with_failover`）读取的 `should_retry`，避免未来 retryable=True 子类的重试语义在 failover 路径静默失效 | 本地检视报告（gitignored） | [error_classifier.py](../../utils/error_classifier.py) / [test_error_classifier.py](../../tests/unit/test_error_classifier.py) | 使用中 |
