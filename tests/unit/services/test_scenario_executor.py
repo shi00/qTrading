@@ -17,7 +17,7 @@
 
 import asyncio
 from dataclasses import replace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import dataclasses
 
@@ -691,3 +691,117 @@ class TestEligibilityGate:
         )
         adapter.invoke.assert_awaited_once()
         assert result.status == "succeeded"
+
+
+def _local_conn(connection_id: str = "conn-local") -> dict:
+    """R01-D1：设备内本地 kind（gguf_chat）快照连接 mapping（不外发，免 grant）。"""
+    raw = dataclasses.asdict(_remote_conn(connection_id))
+    raw["adapter_kind"] = "gguf_chat"
+    raw["provider"] = "local"
+    raw["api_base"] = None
+    return raw
+
+
+class TestLocalOnlyGate:
+    """R01-D1 local-only 政策门控：仅本地模式下需外发候选（adapter_kind_requires_egress）
+    派发前拒绝（零授权 / 零派发 / 零外发），本地 kind（gguf_*）照常执行；
+    local_only=False 行为与现状完全一致；配置切换下一次 execute 即时生效。
+    """
+
+    @pytest.mark.asyncio
+    async def test_local_only_rejects_egress_candidate(self):
+        """local_only=True：litellm_chat 候选零调用（不授权 / 不派发 / 不执行），
+        决策记录 rejected + policy 原因（R21 不静默）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok, local_only_mode_reader=lambda: True)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        adapter.invoke.assert_not_awaited()
+        executor._config_service.authorize_attempt.assert_not_awaited()
+        recorder.mark_dispatched.assert_not_awaited()
+        assert result.status == "failed"
+        assert not result.outputs
+        assert len(result.candidate_decisions) == 1
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert "policy" in decision.reason
+        assert decision.connection_id == "conn-remote"
+
+    @pytest.mark.asyncio
+    async def test_local_only_egress_rejected_then_local_kind_succeeds(self):
+        """local_only=True：混合候选下 litellm_chat 被拒后 gguf_chat 照常走完授权链
+        （本地 kind 免 grant 语义保留，F01），rejected 与 succeeded 决策并存。"""
+        remote_adapter = _adapter_ok()
+        local_adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(
+            remote_adapter,
+            recorder,
+            validate=_validator_ok,
+            adapters={"litellm_chat": remote_adapter, "gguf_chat": local_adapter},
+            local_only_mode_reader=lambda: True,
+        )
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_candidate(0, "conn-remote"), _candidate(1, "conn-local")),
+                (_remote_conn(), _local_conn()),
+            ),
+            _validator_ok,
+        )
+        remote_adapter.invoke.assert_not_awaited()
+        local_adapter.invoke.assert_awaited_once()
+        assert result.status == "succeeded"
+        decisions = result.candidate_decisions
+        assert [d.decision for d in decisions] == ["rejected", "succeeded"]
+        assert "policy" in decisions[0].reason
+        # F01：本地 kind 不要求 egress grant（禁外发经候选层淘汰实现，非 grant 语义）
+        authorize_kwargs = executor._config_service.authorize_attempt.await_args.kwargs
+        assert authorize_kwargs["requires_egress_grant"] is False
+
+    @pytest.mark.asyncio
+    async def test_local_only_false_zero_regression(self):
+        """local_only=False：litellm_chat 候选照常授权并执行成功（零回归）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok, local_only_mode_reader=lambda: False)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        adapter.invoke.assert_awaited_once()
+        assert result.status == "succeeded"
+        authorize_kwargs = executor._config_service.authorize_attempt.await_args.kwargs
+        assert authorize_kwargs["requires_egress_grant"] is True
+
+    @pytest.mark.asyncio
+    async def test_local_only_config_switch_takes_effect_next_execute(self):
+        """配置切换即时生效：同 executor 两次 execute 之间政策翻转，第二次按新值判定。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        reader_state = {"local_only": True}
+        executor = _executor(
+            adapter, recorder, validate=_validator_ok, local_only_mode_reader=lambda: reader_state["local_only"]
+        )
+        snapshot = _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),))
+        request = _request()
+
+        first = await executor.execute(request, snapshot, _validator_ok)
+        assert first.status == "failed"
+        adapter.invoke.assert_not_awaited()
+
+        reader_state["local_only"] = False
+        second = await executor.execute(request, snapshot, _validator_ok)
+        assert second.status == "succeeded"
+        adapter.invoke.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_default_reader_reads_config_without_caching(self):
+        """默认读取器经 ConfigHandler 新鲜读（R01-D1）：每次调用即时反映配置值。"""
+        from services.ai_service.scenario_executor import _default_local_only_mode_reader
+
+        with patch("utils.config_handler.ConfigHandler.is_ai_local_only_mode", return_value=True):
+            assert _default_local_only_mode_reader() is True
+        with patch("utils.config_handler.ConfigHandler.is_ai_local_only_mode", return_value=False):
+            assert _default_local_only_mode_reader() is False

@@ -58,6 +58,17 @@ _LOOP_STATE_KEY: Final[str] = "scenario_executor_state"
 _CST_OFFSET = timedelta(hours=8)
 
 
+def _default_local_only_mode_reader() -> bool:
+    """local-only 政策默认读取器（R01-D1）：新鲜读配置，不做任何缓存。
+
+    services → utils 为合法方向（R1，utils 横切叶子）；lazy import 避免顶层
+    加载配置模块。每次调用即时反映配置切换（禁止缓存陈旧配置）。
+    """
+    from utils.config_handler import ConfigHandler
+
+    return ConfigHandler.is_ai_local_only_mode()
+
+
 @dataclass(slots=True)
 class _LoopState:
     """Executor 逐事件循环状态（R11）：同连接信号量 + 冷却表。"""
@@ -80,6 +91,7 @@ class ScenarioExecutor:
         retry_attempts: int = 1,
         retry_max_attempts: int = 2,
         cooldown_seconds: float = 30.0,
+        local_only_mode_reader: Callable[[], bool] | None = None,
     ) -> None:
         self._config_service = config_service
         self._recorder = recorder
@@ -93,6 +105,9 @@ class ScenarioExecutor:
         self._clock = clock
         self._retry_attempts = max(0, min(retry_attempts, retry_max_attempts))
         self._cooldown_seconds = cooldown_seconds
+        # R01-D1：local-only 政策读取器（DI，与 clock 同风格）；默认经 ConfigHandler
+        # 新鲜读。不缓存返回值——政策判定每次 execute 重新读取。
+        self._local_only_mode_reader = local_only_mode_reader or _default_local_only_mode_reader
 
     # ------------------------------------------------------------------
     # 主入口
@@ -131,6 +146,9 @@ class ScenarioExecutor:
             return self._terminal(request, "failed", (), decisions, ())
 
         candidates: tuple[Mapping[str, Any], ...] = route.get("candidates", ())  # type: ignore[assignment]
+        # R01-D1：local-only 政策请求级新鲜读——每次 execute 读取一次（函数局部，
+        # 不落实例字段，配置切换下一次 execute 即时生效；同请求内判定一致不混版）。
+        local_only = self._local_only_mode_reader()
         for cand in candidates:
             remaining = request.deadline - clock()
             if remaining <= 0:
@@ -171,6 +189,25 @@ class ScenarioExecutor:
                         connection_id=connection.connection_id,
                         decision="rejected",
                         reason=ineligibility,
+                    )
+                )
+                continue
+
+            # R01-D1 local-only 政策门控（候选层强制，SEC-03 语义）：仅本地模式下需
+            # 外发的适配器候选（adapter_kind_requires_egress）派发前一律拒绝——不进
+            # 授权链，零授权 / 零派发 / 零外发副作用；设备内本地 kind（gguf_*）不受
+            # 此政策约束照常执行。与 F26 同点同模式（rejected + 原因记录，R21 不静默；
+            # reason 含 "policy" 供消费端映射 policy_blocked）。注意：候选的
+            # requires_egress_grant=False 仅代表「免 grant」，不构成「禁外发」——
+            # 禁外发必须在此候选层淘汰，不得以 grant 语义实现。
+            if local_only and adapter_kind_requires_egress(connection.adapter_kind):
+                decisions.append(
+                    CandidateDecision(
+                        task_id=str(cand.get("task_id", "")),
+                        candidate_index=int(cand.get("candidate_index", 0)),
+                        connection_id=connection.connection_id,
+                        decision="rejected",
+                        reason="local-only policy forbids egress candidate",
                     )
                 )
                 continue
