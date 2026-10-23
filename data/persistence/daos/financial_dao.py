@@ -583,7 +583,7 @@ class FinancialDao(BaseDao):
             raise
         except Exception as e:
             result["valid"] = False
-            result["error"] = str(e)
+            result["error"] = DataSanitizer.sanitize_error(e)
 
         return result
 

@@ -802,6 +802,15 @@ class TestVerifyStockFinancialIntegrity:
         assert "error" in result
 
     @pytest.mark.asyncio
+    async def test_exception_error_sanitized(self):
+        """R9: 异常消息写入 error 字段前必须经 DataSanitizer 脱敏。"""
+        dao = _make_dao()
+        dao._read_db = AsyncMock(side_effect=Exception("connect failed: password=SuperSecret123"))
+        result = await dao.verify_stock_financial_integrity("000001.SZ")
+        assert result["valid"] is False
+        assert "SuperSecret123" not in result["error"]
+
+    @pytest.mark.asyncio
     async def test_audit_exception(self):
         dao = _make_dao()
         call_count = 0
