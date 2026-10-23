@@ -161,25 +161,29 @@ def _format_forecast_section(df: pd.DataFrame) -> str:
     p_max = row.get("p_change_max")
 
     # end_date 为 Date 类型（季度末日期），转换为 "YYYYQN" 格式
-    quarter_str = str(end_date) if end_date is not None else I18n.get("ai_unknown")
-    try:
-        d = pd.to_datetime(str(end_date))
-        q = (d.month - 1) // 3 + 1
-        quarter_str = f"{d.year}Q{q}"
-    except (ValueError, TypeError):
-        logger.warning("[ai_context] Failed to parse forecast end_date to quarter: %r", end_date)
+    # M17-F9：end_date 为 NaT 时 pd.to_datetime("NaT") 返回 NaT 且 NaT.month 为 nan
+    # （不抛异常），try 块会把占位值覆盖为 "nanQnan"；故 NaT/None 直接跳过 try 块。
+    quarter_str = I18n.get("ai_unknown")
+    if end_date is not None and not pd.isna(end_date):
+        try:
+            d = pd.to_datetime(str(end_date))
+            q = (d.month - 1) // 3 + 1
+            quarter_str = f"{d.year}Q{q}"
+        except (ValueError, TypeError):
+            logger.warning("[ai_context] Failed to parse forecast end_date to quarter: %r", end_date)
 
     # 拼接预告幅度区间
     range_str = ""
     if p_min is not None and not pd.isna(p_min) and p_max is not None and not pd.isna(p_max):
         range_str = f" {float(p_min):.1f}%-{float(p_max):.1f}%"
 
-    # 公告日格式化为 YYYY-MM-DD
-    ann_str = str(ann_date) if ann_date is not None else I18n.get("ai_unknown")
-    try:
-        ann_str = pd.to_datetime(str(ann_date)).strftime("%Y-%m-%d")
-    except (ValueError, TypeError):
-        logger.warning("[ai_context] Failed to format forecast ann_date: %r", ann_date)
+    # 公告日格式化为 YYYY-MM-DD（M17-F9：NaT/NaN 同上拦截，降级 i18n 占位）
+    ann_str = I18n.get("ai_unknown")
+    if ann_date is not None and not pd.isna(ann_date):
+        try:
+            ann_str = pd.to_datetime(str(ann_date)).strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            logger.warning("[ai_context] Failed to format forecast ann_date: %r", ann_date)
 
     return (
         f"- {I18n.get('ai_forecast')}: {quarter_str} {forecast_type}{range_str}"
@@ -207,9 +211,13 @@ def _format_pledge_detail_section(df: pd.DataFrame) -> str:
     p_total_ratio = row.get("p_total_ratio")
 
     def _fmt_date(v):
+        # M17-F6：pd.NaT 是 datetime 子类实例，isinstance 判断会命中 NaT.strftime
+        # → ValueError（炸掉整个辅助文本）；None/NaN/NaT 统一先经 pd.isna 拦截降级 N/A。
+        if v is None or pd.isna(v):
+            return "N/A"
         if isinstance(v, (date, datetime)):
             return v.strftime("%Y-%m-%d")
-        return str(v) if v is not None and not pd.isna(v) else "N/A"
+        return str(v)
 
     parts: list[str] = []
     if pledge_amount is not None and not pd.isna(pledge_amount):
@@ -250,10 +258,16 @@ def _format_share_float_section(df: pd.DataFrame) -> str:
         float_date = row.get("float_date")
         float_share = row.get("float_share")
         float_ratio = row.get("float_ratio")
-        if isinstance(float_date, (date, datetime)):
-            date_str = float_date.strftime("%Y-%m-%d")
+        # M17-F6：float_date 为 NaT 时 isinstance 命中 datetime 子类 → NaT.strftime 抛
+        # ValueError；为 float NaN 时 str(nan) → "nan"。统一 pd.isna 拦截降级 N/A
+        # （与 _format_holder_trade_section 的 ann_date 防御同模式）。
+        if float_date is not None and not pd.isna(float_date):
+            if isinstance(float_date, (date, datetime)):
+                date_str = float_date.strftime("%Y-%m-%d")
+            else:
+                date_str = str(float_date)
         else:
-            date_str = str(float_date) if float_date is not None else "N/A"
+            date_str = "N/A"
         share_str = f"{float(float_share):.2f}" if float_share is not None and not pd.isna(float_share) else "N/A"
         ratio_str = f"（{float(float_ratio):.1f}%）" if float_ratio is not None and not pd.isna(float_ratio) else ""
         items.append(f"{date_str} 解禁 {share_str} 万股{ratio_str}")
@@ -314,13 +328,16 @@ def _format_express_section(df: pd.DataFrame) -> str:
     ann_date = row.get("ann_date")
 
     # end_date 为 Date 类型（季度末日期），转换为 "YYYYQN" 格式
-    quarter_str = str(end_date) if end_date is not None else I18n.get("ai_unknown")
-    try:
-        d = pd.to_datetime(str(end_date))
-        q = (d.month - 1) // 3 + 1
-        quarter_str = f"{d.year}Q{q}"
-    except (ValueError, TypeError):
-        logger.warning("[ai_context] Failed to parse express end_date to quarter: %r", end_date)
+    # M17-F9：NaT 时 pd.to_datetime("NaT") 返回 NaT 且 NaT.month 为 nan（不抛异常），
+    # try 块会把占位值覆盖为 "nanQnan"；故 NaT/None 直接跳过 try 块。
+    quarter_str = I18n.get("ai_unknown")
+    if end_date is not None and not pd.isna(end_date):
+        try:
+            d = pd.to_datetime(str(end_date))
+            q = (d.month - 1) // 3 + 1
+            quarter_str = f"{d.year}Q{q}"
+        except (ValueError, TypeError):
+            logger.warning("[ai_context] Failed to parse express end_date to quarter: %r", end_date)
 
     # 拼接营收/净利/扣非段落（单位转换：元 → 亿元）
     parts: list[str] = []
@@ -351,12 +368,13 @@ def _format_express_section(df: pd.DataFrame) -> str:
     if not parts:
         return ""
 
-    # 公告日格式化为 YYYY-MM-DD
-    ann_str = str(ann_date) if ann_date is not None else I18n.get("ai_unknown")
-    try:
-        ann_str = pd.to_datetime(str(ann_date)).strftime("%Y-%m-%d")
-    except (ValueError, TypeError):
-        logger.warning("[ai_context] Failed to format express ann_date: %r", ann_date)
+    # 公告日格式化为 YYYY-MM-DD（M17-F9：NaT/NaN 拦截，降级 i18n 占位）
+    ann_str = I18n.get("ai_unknown")
+    if ann_date is not None and not pd.isna(ann_date):
+        try:
+            ann_str = pd.to_datetime(str(ann_date)).strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            logger.warning("[ai_context] Failed to format express ann_date: %r", ann_date)
 
     return (
         f"- {I18n.get('ai_express')}: {quarter_str} {'、'.join(parts)}（{I18n.get('ai_express_ann_date')}: {ann_str}）"

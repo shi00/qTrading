@@ -1516,6 +1516,349 @@ class TestInvariant7PledgeBoundary:
         assert I18n.get("ai_pledge_ratio") not in result
 
 
+class TestNaNBoundaryGracefulDegradation:
+    """M17 检视修复：AI 上下文对 NaN/NaT/None/缺列必须优雅降级，禁止
+    "nan"/"NaT" 文案泄漏到 prompt 或因格式化异常炸掉整段/整篇上下文。
+    （正常值输出路径不受影响；异常路径由既有 TestInvariant3 覆盖。）"""
+
+    # ---------- F1: _build_stale_section 日期列脏数据 ----------
+
+    def test_stale_section_all_nat_date_column_no_crash(self):
+        """date_column 存在但全 NaT/None：stale 分支不得抛 ValueError，降级「未知」。"""
+        from strategies.ai_context.common import _build_stale_section
+
+        df = pd.DataFrame({"period": [pd.NaT, pd.NaT], "val": [1, 2]})
+        with patch(
+            "data.external.tushare_client.TushareClient.is_api_covered_by_tier",
+            return_value=False,
+        ):
+            result = _build_stale_section("cn_m", df, lambda _df: "- M2: 8.0%", date_column="period")
+        assert "数据停止更新" in result
+        assert "未知" in result
+        assert "- M2: 8.0%" in result
+
+    def test_stale_section_valid_date_keeps_formatted(self):
+        """日期列有效：正常渲染 YYYY-MM-DD（正常路径回归）。"""
+        from strategies.ai_context.common import _build_stale_section
+
+        df = pd.DataFrame({"period": [pd.Timestamp("2024-12-01")], "val": [1]})
+        with patch(
+            "data.external.tushare_client.TushareClient.is_api_covered_by_tier",
+            return_value=False,
+        ):
+            result = _build_stale_section("cn_m", df, lambda _df: "- M2: 8.0%", date_column="period")
+        assert "2024-12-01" in result
+        assert "- M2: 8.0%" in result
+
+    # ---------- F2/F3/F4/F10: auxiliary 各段 NaN/缺列 ----------
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_holders_missing_date_columns_degrade_gracefully(self):
+        """holders 缺日期列：修复前 KeyError 炸掉整个辅助文本（含已有效段落），
+        修复后仅跳过 holders 段，audit 段照常输出。"""
+        mixin = AIStrategyMixin()
+        _attach_cache(mixin, MagicMock())
+        mixin.cache.get_fina_audit = _async_return(
+            pd.DataFrame({"ts_code": ["000001.SZ"], "audit_result": ["标准无保留"]})
+        )
+        mixin.cache.get_fina_mainbz = _async_return(pd.DataFrame())
+        mixin.cache.get_dividend = _async_return(pd.DataFrame())
+        mixin.cache.get_pledge_stat = _async_return(pd.DataFrame())
+        mixin.cache.get_top10_holders = _async_return(pd.DataFrame({"holder_name": [None], "hold_ratio": [None]}))
+        mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
+        mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+        mixin.cache.get_express = _async_return(pd.DataFrame())
+
+        labels: list[str] = []
+        result_text, is_valid = await _build_auxiliary_data_text("000001.SZ", mixin.cache, labels_out=labels)
+        assert is_valid is True
+        assert I18n.get("ai_audit_opinion") in result_text
+        assert "nan" not in result_text.lower()
+        assert "ai_label_top_holder" not in labels
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_top_holder_nan_ratio_degrades_to_na(self):
+        """holder_name 有效但 hold_ratio NaN：行保留、占比降级 N/A，无 "nan" 泄漏。"""
+        mixin = AIStrategyMixin()
+        _attach_cache(mixin, MagicMock())
+        mixin.cache.get_fina_audit = _async_return(pd.DataFrame())
+        mixin.cache.get_fina_mainbz = _async_return(pd.DataFrame())
+        mixin.cache.get_dividend = _async_return(pd.DataFrame())
+        mixin.cache.get_pledge_stat = _async_return(pd.DataFrame())
+        mixin.cache.get_top10_holders = _async_return(
+            pd.DataFrame(
+                {
+                    "ann_date": ["20240101"],
+                    "holder_name": ["香港中央结算"],
+                    "hold_ratio": [float("nan")],
+                }
+            )
+        )
+        mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
+        mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+        mixin.cache.get_express = _async_return(pd.DataFrame())
+
+        labels: list[str] = []
+        result_text, is_valid = await _build_auxiliary_data_text("000001.SZ", mixin.cache, labels_out=labels)
+        assert is_valid is True
+        assert "香港中央结算" in result_text
+        assert "N/A" in result_text
+        assert "nan" not in result_text.lower()
+        assert "ai_label_top_holder" in labels
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_all_invalid_fields_no_crash_no_labels(self):
+        """audit/mainbz/dividend/holders/holdernumber 全部字段级无效（非空 df）：
+        各段优雅跳过，整体 ("", False)，不得经异常路径丢弃。"""
+        mixin = AIStrategyMixin()
+        _attach_cache(mixin, MagicMock())
+        mixin.cache.get_fina_audit = _async_return(pd.DataFrame({"audit_result": [None]}))
+        mixin.cache.get_fina_mainbz = _async_return(pd.DataFrame({"bz_item": ["白酒"], "bz_sales": [float("nan")]}))
+        mixin.cache.get_dividend = _async_return(pd.DataFrame({"end_date": [pd.NaT], "div_proc": [pd.NaT]}))
+        mixin.cache.get_pledge_stat = _async_return(pd.DataFrame({"pledge_ratio": [None]}))
+        mixin.cache.get_top10_holders = _async_return(
+            pd.DataFrame({"ann_date": [pd.NaT], "holder_name": [None], "hold_ratio": [None]})
+        )
+        mixin.cache.get_stk_holdernumber = _async_return(
+            pd.DataFrame({"holder_num": [float("nan")], "holder_num_ratio": [None]})
+        )
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
+        mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+        mixin.cache.get_express = _async_return(pd.DataFrame())
+
+        labels: list[str] = []
+        result = await _build_auxiliary_data_text("000001.SZ", mixin.cache, labels_out=labels)
+        assert result == ("", False)
+        assert labels == []
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_mainbz_nan_sales_row_skipped(self):
+        """主营构成单行 bz_sales NaN：跳过该行，有效行正常渲染占比，无 "nan"。"""
+        mixin = AIStrategyMixin()
+        _attach_cache(mixin, MagicMock())
+        mixin.cache.get_fina_audit = _async_return(pd.DataFrame())
+        mixin.cache.get_fina_mainbz = _async_return(
+            pd.DataFrame(
+                {
+                    "bz_item": ["缺失项", "白酒"],
+                    "bz_sales": [float("nan"), 1e9],
+                }
+            )
+        )
+        mixin.cache.get_dividend = _async_return(pd.DataFrame())
+        mixin.cache.get_pledge_stat = _async_return(pd.DataFrame())
+        mixin.cache.get_top10_holders = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
+        mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+        mixin.cache.get_express = _async_return(pd.DataFrame())
+
+        labels: list[str] = []
+        result_text, is_valid = await _build_auxiliary_data_text("000001.SZ", mixin.cache, labels_out=labels)
+        assert is_valid is True
+        assert "白酒" in result_text
+        assert "缺失项" not in result_text
+        assert "nan" not in result_text.lower()
+        assert "ai_label_main_business" in labels
+
+    # ---------- F5: macro shibor/LPR NaN/None ----------
+
+    @pytest.mark.asyncio
+    async def test_macro_shibor_nan_and_none_rates_no_crash_no_nan_text(self):
+        """shibor/LPR 全部费率字段为 NaN/None：段落跳过，无 "nan" 文本、不抛 TypeError。"""
+        mixin = AIStrategyMixin()
+        _attach_cache(mixin, MagicMock())
+        mixin.cache.get_macro_economy = _async_return(pd.DataFrame())
+        mixin.cache.get_shibor_latest = _async_return(
+            pd.DataFrame(
+                {
+                    "record_date": ["2024-01-01"],
+                    "on_rate": [float("nan")],
+                    "week_1": [None],
+                    "month_3": [float("nan")],
+                    "lpr_1y": [None],
+                    "lpr_5y": [float("nan")],
+                }
+            )
+        )
+
+        result = await _build_macro_context(mixin.cache)
+        assert result == ""
+        assert "nan" not in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_macro_shibor_valid_rates_rendered(self):
+        """shibor 费率有效：正常渲染（正常路径回归）。"""
+        mixin = AIStrategyMixin()
+        _attach_cache(mixin, MagicMock())
+        mixin.cache.get_macro_economy = _async_return(pd.DataFrame())
+        mixin.cache.get_shibor_latest = _async_return(
+            pd.DataFrame(
+                {
+                    "record_date": ["2024-01-01"],
+                    "on_rate": [1.72],
+                    "week_1": [1.80],
+                    "month_3": [2.10],
+                    "lpr_1y": [3.45],
+                    "lpr_5y": [3.95],
+                }
+            )
+        )
+
+        result = await _build_macro_context(mixin.cache)
+        assert "1.72%" in result
+        assert "3.45%" in result
+
+    # ---------- F6: share_float / pledge_detail NaT 日期 ----------
+
+    def test_share_float_section_nat_date_no_crash(self):
+        """float_date 为 NaT/NaN：isinstance(NaT, datetime) 为 True 会使原实现
+        NaT.strftime 抛 ValueError；修复后降级 N/A，不炸调用方。"""
+        from strategies.ai_context.financials import _format_share_float_section
+
+        df = pd.DataFrame(
+            {
+                "float_date": [pd.NaT, float("nan")],
+                "float_share": [1000.0, 500.0],
+                "float_ratio": [5.2, None],
+            }
+        )
+        result = _format_share_float_section(df)
+        assert I18n.get("ai_share_float") in result
+        assert "N/A 解禁 1000.00 万股" in result
+        assert "nan" not in result.lower()
+
+    def test_pledge_detail_section_nat_ann_date_no_crash(self):
+        """ann_date 为 NaT：_fmt_date 不得触发 NaT.strftime ValueError。"""
+        from strategies.ai_context.financials import _format_pledge_detail_section
+
+        df = pd.DataFrame(
+            {
+                "ann_date": [pd.NaT],
+                "holder_name": ["某股东"],
+                "pledge_amount": [500.0],
+                "holding_amount": [2321.99],
+                "pledged_amount": [2321.99],
+                "p_total_ratio": [5.2],
+            }
+        )
+        result = _format_pledge_detail_section(df)
+        assert I18n.get("ai_pledge_detail") in result
+        assert "N/A" in result
+        assert "nan" not in result.lower()
+
+    # ---------- F9: forecast/express NaT end_date/ann_date ----------
+
+    def test_forecast_section_nat_dates_no_nan(self):
+        """end_date/ann_date 为 NaT：降级 i18n 占位，不得输出 "nanQnan"/"NaT"。"""
+        from strategies.ai_context.financials import _format_forecast_section
+
+        df = pd.DataFrame({"end_date": [pd.NaT], "ann_date": [pd.NaT], "type": ["预增"]})
+        result = _format_forecast_section(df)
+        assert I18n.get("ai_forecast") in result
+        assert "预增" in result
+        assert "nan" not in result.lower()
+
+    def test_express_section_nat_dates_no_nan(self):
+        """express end_date/ann_date 为 NaT：同 forecast，降级占位不泄漏。"""
+        from strategies.ai_context.financials import _format_express_section
+
+        df = pd.DataFrame(
+            {
+                "end_date": [pd.NaT],
+                "ann_date": [pd.NaT],
+                "revenue": [5e9],
+                "yoy_sales": [25.0],
+                "n_income": [8e8],
+                "yoy_profit": [40.0],
+                "deduct_profit": [None],
+                "yoy_dedu_np": [None],
+            }
+        )
+        result = _format_express_section(df)
+        assert I18n.get("ai_express") in result
+        assert "50.00" in result
+        assert "nan" not in result.lower()
+
+    def test_forecast_section_valid_dates_rendered(self):
+        """有效日期正常渲染 YYYYQN / YYYY-MM-DD（正常路径回归）。"""
+        from strategies.ai_context.financials import _format_forecast_section
+
+        df = pd.DataFrame(
+            {
+                "end_date": [pd.Timestamp("2024-09-30")],
+                "ann_date": [pd.Timestamp("2024-10-15")],
+                "type": ["预增"],
+                "p_change_min": [50.0],
+                "p_change_max": [70.0],
+            }
+        )
+        result = _format_forecast_section(df)
+        assert "2024Q3" in result
+        assert "2024-10-15" in result
+        assert "50.0%-70.0%" in result
+
+    # ---------- F7: technical volume NaN ratio ----------
+
+    def test_technical_volume_nan_ratio_degrades_to_no_data(self):
+        """vol 尾 5 日全 NaN、尾 10 日部分有效：ratio 为 NaN 时降级 no_data，
+        不得误标「量能平稳」或输出 "nan" 比值。"""
+        import numpy as np
+
+        from strategies.ai_context.technical import _compute_technical_structure
+
+        n = 35
+        vols = [1e6] * (n - 5) + [float("nan")] * 5
+        df = pd.DataFrame(
+            {
+                "trade_date": pd.date_range("2024-01-01", periods=n, freq="B").strftime("%Y%m%d"),
+                "close": np.linspace(10, 15, n),
+                "high": np.linspace(10.5, 15.5, n),
+                "low": np.linspace(9.5, 14.5, n),
+                "open": np.linspace(10, 15, n),
+                "vol": vols,
+            }
+        )
+        result = _compute_technical_structure(df)
+        assert result["volume_trend"] == I18n.get("ai_vol_no_data")
+        assert "nan" not in result["volume_trend"].lower()
+
+    # ---------- F8: history 宏观窗口 / K 线 NaN close ----------
+
+    def test_history_nan_tail_no_nan_in_output(self):
+        """>60 行历史且尾行 close 为 NaN：宏观 CAGR/pct_all/pct_5d/MA20 乖离/
+        K 线 close 全部优雅降级，输出不含 "nan"。"""
+        import numpy as np
+
+        n = 70
+        closes = [10.0] * (n - 5) + [float("nan")] * 5
+        df = pd.DataFrame(
+            {
+                "trade_date": pd.date_range("2024-01-01", periods=n, freq="B").strftime("%Y%m%d"),
+                "close": closes,
+                "high": closes,
+                "low": closes,
+                "open": closes,
+            }
+        )
+        labels: list[str] = []
+        result = _build_history_text(df, ts_code="000001.SZ", stock_name="测试", labels_out=labels)
+        assert result != I18n.get("ai_history_extract_error")
+        assert I18n.get("ai_kline_header") in result
+        assert "nan" not in result.lower()
+        assert "ai_label_kline" in labels
+
+
 def _async_return(value):
     from unittest.mock import AsyncMock
 

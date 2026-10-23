@@ -182,12 +182,17 @@ def _build_history_text(
         macro_mdd = "N/A"
         if len(df) > 60:
             # Compute long-term CAGR and Max Drawdown on `df`
+            # F8(M17)：close 尾行 NaN 时 f"{nan:.1f}%" 输出 "nan%"（首行 NaN 已由
+            # `> 0` 拦截，尾行需显式 notna）；mdd 为 NaN/-Inf 时同样降级 N/A。
             first_close_macro = df["close"].iloc[0]
-            if first_close_macro > 0:
-                macro_cagr = f"{((df['close'].iloc[-1] / first_close_macro) - 1) * 100:.1f}%"
+            last_close_macro = df["close"].iloc[-1]
+            if first_close_macro > 0 and pd.notna(last_close_macro):
+                macro_cagr = f"{((last_close_macro / first_close_macro) - 1) * 100:.1f}%"
             roll_max = df["close"].cummax()
             drawdown = (df["close"] - roll_max) / roll_max
-            macro_mdd = f"{drawdown.min() * 100:.1f}%"
+            macro_mdd_val = drawdown.min()
+            if pd.notna(macro_mdd_val) and math.isfinite(macro_mdd_val):
+                macro_mdd = f"{macro_mdd_val * 100:.1f}%"
 
             # Slice for short-term K-line context
             df = df.tail(60).reset_index(drop=True)
@@ -207,17 +212,22 @@ def _build_history_text(
         has_pct_chg = "pct_chg" in df.columns
 
         # 2. Trend & Swing Factors (with division-by-zero guards)
+        # F8(M17)：current_close 为 NaN 时 f"{nan:+.2f}%" 输出 "+nan%"（首值/5日前值
+        # NaN 已由 `> 0` 拦截），显式 notna 拦截后降级 0.0（与 consec 的 NaN→0 口径一致）。
         first_close = close.iloc[0]
         fifth_ago_close = close.iloc[-5]
-        pct_all = ((close.iloc[-1] / first_close) - 1) * 100 if first_close > 0 else 0.0
-        pct_5d = ((close.iloc[-1] / fifth_ago_close) - 1) * 100 if fifth_ago_close > 0 else 0.0
+        current_close = close.iloc[-1]
+        pct_all = ((current_close / first_close) - 1) * 100 if first_close > 0 and pd.notna(current_close) else 0.0
+        pct_5d = (
+            ((current_close / fifth_ago_close) - 1) * 100 if fifth_ago_close > 0 and pd.notna(current_close) else 0.0
+        )
 
         # 20-Day MA Bias
         bias_str = "N/A (insufficient data)"
         if len(df) >= 20:
             ma20 = close.tail(20).mean()
-            if ma20 > 0:
-                bias = ((close.iloc[-1] - ma20) / ma20) * 100
+            if ma20 > 0 and pd.notna(current_close):
+                bias = ((current_close - ma20) / ma20) * 100
                 bias_str = f"{bias:+.2f}%"
 
         # Consecutive streaks (with NaN guard)
@@ -314,7 +324,9 @@ def _build_history_text(
                 d = td.strftime("%m%d")
             else:
                 d = str(td or "")[-4:]
-            c = f"{r.get('close', 0):.2f}"
+            # F8(M17)：close 为 NaN 时 f"{nan:.2f}" 输出 "nan" 到 K 线行，降级 N/A
+            c_val = r.get("close")
+            c = f"{c_val:.2f}" if c_val is not None and not pd.isna(c_val) else "N/A"
             p_val = r.get("pct_chg", 0)
             p = f"{p_val:+.2f}%" if not pd.isna(p_val) else "N/A"
             v_val = r.get("vol", 0)
