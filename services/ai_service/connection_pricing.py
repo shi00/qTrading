@@ -38,7 +38,7 @@ _COST_QUANTUM: Final[Decimal] = Decimal("0.0001")
 # 单价换算基数：单价按「每百万 token」申报（BillingConfig *_price_per_m 语义）。
 _TOKENS_PER_M: Final[Decimal] = Decimal(1_000_000)
 
-_BILLING_AMOUNT_FIELDS: Final[tuple[str, ...]] = (
+_PRICING_AMOUNT_FIELDS: Final[tuple[str, ...]] = (
     "input_price_per_m",
     "output_price_per_m",
     "cache_read_price_per_m",
@@ -99,7 +99,7 @@ def parse_connection_pricing(billing_raw: Any, *, connection_hint: str = "") -> 
         return None
     amounts = {
         field: _parse_amount(billing_raw.get(field), field=field, connection_hint=connection_hint)
-        for field in _BILLING_AMOUNT_FIELDS
+        for field in _PRICING_AMOUNT_FIELDS
     }
     return ConnectionPricing(
         mode=billing_raw.get("mode"),
@@ -148,7 +148,7 @@ def pricing_from_metadata(snapshot: Any) -> ConnectionPricing | None:
         return None
     amounts = {
         field: _parse_amount(snapshot.get(field), field=field, connection_hint="metadata")
-        for field in _BILLING_AMOUNT_FIELDS
+        for field in _PRICING_AMOUNT_FIELDS
     }
     return ConnectionPricing(
         mode=snapshot.get("mode"),
@@ -227,3 +227,4 @@ def compute_cost_cny(
         logger.warning("[connection_pricing] 成本计算结果非有限/负值，按不可计价处理: %s", cost)
         return None
     return str(cost.quantize(_COST_QUANTUM, rounding=ROUND_HALF_UP))
+
