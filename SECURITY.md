@@ -105,3 +105,4 @@ See [`.security/audit-allowlist.yml`](.security/audit-allowlist.yml) for details
 | 2026-06-18 | 升级 aiohttp 至 3.14.0 修复 CVE-2026-47265/CVE-2026-34993；litellm 升级传递依赖修复 |
 | 2026-10-21 | 升级 pillow 13.0.0（修复 8 个图像解析 CVE）、certifi 2026.10.19（PYSEC-2026-4320）、uv 0.13.4（PYSEC-2026-4321），恢复 pip-audit 门禁 |
 | 2026-10-23 | 升级 opentelemetry-api 1.45.1（修复 CVE-2026-114603 `TraceState.from_header` tracestate 解析正则回溯 DoS），恢复 pip-audit 门禁 |
+| 2026-10-23 | 升级 brotlicffi 1.2.1.0（修复 PYSEC-2026-4323 / CVE-2026-111497 Brotli 解码器越界写，CVSS 9.2 可 RCE），恢复 pip-audit 门禁 |

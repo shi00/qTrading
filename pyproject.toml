@@ -84,7 +84,7 @@ dev = [
     "flet-mcp==1.0.3",  # AI dev-time Flet API verification (CLAUDE.md §1.10); run via `python -c "from flet_mcp import mcp; mcp.run()"`; pinned == to align with flet main package (api.json is version-specific)
 ]
 optional = [
-    "brotlicffi>=1.2.0.2",
+    "brotlicffi>=1.2.1.0",  # Security: PYSEC-2026-4323 / CVE-2026-111497 (Brotli 解码器越界写, 可 RCE) fixed in 1.2.1.0
     "playwright>=1.63.0",  # E2E browser automation for Flet desktop tests
 ]
 sentiment = [
