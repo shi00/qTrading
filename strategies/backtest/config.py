@@ -253,6 +253,14 @@ class BacktestConfig:
             errors.append("initial_capital must be positive")
         if self.commission_rate < 0 or self.commission_rate > 0.01:
             errors.append("commission_rate should be between 0 and 1%")
+        if self.commission_min < 0:
+            errors.append("commission_min must be non-negative")
+        if self.stamp_duty_rate is not None and self.stamp_duty_rate < 0:
+            errors.append("stamp_duty_rate must be non-negative")
+        if self.transfer_fee_rate < 0:
+            errors.append("transfer_fee_rate must be non-negative")
+        if self.slippage_bps < 0:
+            errors.append("slippage_bps must be non-negative")
         if self.max_single_weight <= 0 or self.max_single_weight > 1:
             errors.append("max_single_weight must be in (0, 1]")
         if self.on_empty_signal not in ("liquidate", "hold"):

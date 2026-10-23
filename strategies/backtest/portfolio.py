@@ -647,10 +647,17 @@ class PortfolioSimulator:
                 "qfq_entry_price": qfq_entry_price,
             }
         else:
-            existing["volume"] += volume
+            new_volume = existing["volume"] + volume
+            # 按量加权平均入场价：最新批次价直接覆盖会使
+            # qfq_cost_basis（volume × qfq_entry_price）与持仓 pnl 展示在多批次加仓后失真
+            existing["entry_price"] = (
+                existing["entry_price"] * existing["volume"] + actual_price * volume
+            ) / new_volume
+            existing["qfq_entry_price"] = (
+                existing["qfq_entry_price"] * existing["volume"] + qfq_entry_price * volume
+            ) / new_volume
+            existing["volume"] = new_volume
             existing["cost_basis"] += cost.net_amount
-            existing["entry_price"] = actual_price
-            existing["qfq_entry_price"] = qfq_entry_price
 
         self.cash -= cost.net_amount
 

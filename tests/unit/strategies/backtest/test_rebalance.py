@@ -1462,6 +1462,24 @@ class TestDiffRebalance:
         assert sim.positions["000001.SZ"]["volume"] > 100
         assert sim.positions["000001.SZ"]["cost_basis"] > 1000.0
 
+    def test_buy_to_target_weighted_average_entry_price(self) -> None:
+        """M18-F1: 加仓后 entry_price/qfq_entry_price 按量加权平均（非最新批次价覆盖），
+        保证 volume × qfq_entry_price 与不含费累计成本一致、持仓 pnl 展示不失真。"""
+        sim, _config = self._make_simulator()
+        sim.cash = 50000.0
+        self._add_pos(sim, "000001.SZ", 100, 10.0)  # 首批：100 股@10
+        targets = {"000001.SZ": 10000.0}
+        quotes_by_code = {"000001.SZ": self._quote(date(2024, 1, 8), 20.0)}  # 二批：@20
+        sim._buy_to_target(date(2024, 1, 8), targets, quotes_by_code, budget=10000.0)
+        pos = sim.positions["000001.SZ"]
+        assert pos["volume"] > 100
+        second_volume = pos["volume"] - 100
+        expected = (10.0 * 100 + 20.0 * second_volume) / pos["volume"]
+        assert pos["entry_price"] == pytest.approx(expected)
+        assert pos["qfq_entry_price"] == pytest.approx(expected)
+        # 加权均价必然落在两批次价之间（排除"覆盖为 20"的旧行为）
+        assert 10.0 < pos["entry_price"] < 20.0
+
     def test_buy_to_target_lot_size_indivisible_attribution(self) -> None:
         """BT-05: 单笔预算不足一手 → 归因 lot_size_indivisible（非 insufficient_cash），
         并带 target_value / min_lot_cost 供用户判断差多少。"""
