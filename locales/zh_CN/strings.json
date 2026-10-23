@@ -2215,6 +2215,7 @@
     "model_routes_egress_revoke": "撤销授权",
     "model_routes_egress_section": "外发授权",
     "model_routes_egress_target": "目标：{target}",
+    "model_routes_egress_target_invalid": "外发目标无效或缺失，请检查连接地址",
     "model_routes_egress_task": "任务：{task}",
     "model_routes_egress_task_news_annotation": "新闻标注",
     "model_routes_egress_task_news_risk": "新闻风险评估",
