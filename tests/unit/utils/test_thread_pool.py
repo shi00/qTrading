@@ -772,3 +772,49 @@ class TestThreadPoolManagerReloadQueuedWork:
             assert done.wait(timeout=5), "旧池 shutdown 未在后台执行"
 
         assert [c.get("cancel_futures") for c in calls] == [False, False]
+
+
+class TestThreadPoolManagerRunAsyncCancelSemantics:
+    """run_async 取消语义守护（M04 检视补测，R19）。
+
+    run_async docstring 明确声明：取消 await 只取消等待（run_in_executor 返回的
+    Future 被取消），**不会终止 worker 线程中正在执行的同步函数**（concurrent.futures
+    固有语义）。此前该声明无测试锚定——若未来误改为「取消传播到 worker」，会在
+    任务面板取消/热重载场景与 D7-2 语义（排队工作不被取消）产生漂移，故补测固化。
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancel_await_does_not_kill_worker(self):
+        """取消 run_async 的 await 后，worker 线程中的同步函数仍执行完成。"""
+        mgr = ThreadPoolManager()
+        started = threading.Event()
+        release = threading.Event()
+        result_box: dict[str, str] = {}
+
+        def slow_task():
+            started.set()
+            release.wait(timeout=10)
+            result_box["value"] = "worker-completed-after-await-cancel"
+            return result_box["value"]
+
+        task = asyncio.ensure_future(mgr.run_async(TaskType.IO, slow_task))
+        # 协作式让出一轮：令 run_async 推进到 run_in_executor 提交点（提交在首个
+        # await 前同步发生）。若缺此让出，下方 started.wait() 会阻塞事件循环，
+        # task 永不被调度、worker 永不启动（既有 test_reload_config_queued_run_async_
+        # not_cancelled 同款编排）。
+        await asyncio.sleep(0)
+        # 确定性定序：等任务真正进入 worker 运行态，避免 cancel 抢在提交前命中
+        # ensure_future 自身导致弱断言。
+        assert started.wait(timeout=10), "任务未在 worker 线程启动"
+        try:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()  # 兜底：保证 worker 收尾，事件循环关闭前任务不悬挂
+        # await 已取消，但 worker 不受影响：最终完成并写出结果
+        for _ in range(100):
+            if "value" in result_box:
+                break
+            await asyncio.sleep(0.05)
+        assert result_box.get("value") == "worker-completed-after-await-cancel"
