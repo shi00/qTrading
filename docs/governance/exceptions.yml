@@ -238,3 +238,13 @@ exceptions:
     removal_trigger: "同 EX-0008（一并移除）。"
     verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0020）。"
     validity_criteria: "同 EX-0008：`utils/shutdown.py` 仍含 `# lazy-import:` 标注的指向 `services.news_sentiment_scorer` 的函数内导入（_step5b_stop_sentiment_scorer_sync），且关机编排仍未经 `app` 层注入。"
+  # EX-0021: utils/scheduler_service.py -> data.sync.base（启动性能优化，GDR-01 补录遗漏，UTILS-A-01 补登）
+  - id: EX-0021
+    rule_id: R1
+    paths: ["utils/scheduler_service.py"]
+    reason: "同 EX-0004：scheduler_service 剩余函数内 lazy import（_catchup_logic 构造 SyncResult 承载夜间补偿同步结果、推进幂等键），启动性能优化，review01-A2 已加 # lazy-import: 注释。GDR-01 补录时遗漏登记：data/sync/ 为命名空间包（无 __init__.py），grimp 不建模该子包，lint-imports 对该违规不报不拦（门禁盲区，技术债 P3-RedlineAuto-Grimp-Namespace-Blindspot）；UTILS-A-01 检视确认为真后补登。"
+    owner: 架构维护者
+    approved_by: 架构维护者（UTILS-A-01 修复）
+    removal_trigger: "同 EX-0004~EX-0007/EX-0019：daily/concept_sync 提交与 DB idempotency 状态改为经 app 层显式依赖注入后一并移除。"
+    verification: "lint-imports 'R1: utils must not import business layers' 契约 ignore_imports 守护（pyproject.toml 同名契约注释回指 EX-0021）。注：当前 grimp 3.17 不建模命名空间包 data/sync/，本条 ignore 无匹配，契约 unmatched_ignore_imports_alerting 已降为 warn（每次运行输出未匹配告警、不阻断）；实测补 __init__.py 仅恢复模块建模、导入边捕获仍未恢复（真实项目 3 次复测一致），拦截能力待 grimp 升级修复后生效，以 ignored 数 18→19 且未匹配告警消失为生效信号。"
+    validity_criteria: "`utils/scheduler_service.py` 的 `_catchup_logic` 仍含 `# lazy-import:` 标注的指向 `data.sync.base` 的函数内导入（L847），且 `app` 层尚未提供对应注入点。"

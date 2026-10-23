@@ -67,6 +67,7 @@
 | P2-BT05-QualityGate-Bypass | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计） | P2 | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或 review03 BT-05 第二步实施（实现 `evaluate_historical_window()` 区间质量评估）时 |
 | P3-TA-OSS05-DualImpl | 技术指标（RSI/MACD/KDJ）双实现分叉的 OSS-05 结论仅存于测试 docstring，未登记技术债（原著 reviews/ 已丢失） | P3 | ① 技术指标测试文件（`test_technical_analysis_equivalence.py`）被重构或拆分时；② 或双实现再次扩散（新增未经等价性断言覆盖的指标分支）时；③ 或指标语义变更时 |
 | P3-N54-Model-File-Trust-Boundary | 情绪模型文件（GGUF/head.npz）保存期仅轻量校验（GGUF 4 字节魔数 / head 结构与数值），不构成对文件内容的信任，来源由用户自担 | P3 | ① App 引入模型下载/分发渠道（文件来源不再由用户自备）时；② 或 GGUF/head 解析器漏洞（如 llama.cpp/np.load CVE）公开披露时；③ 或安全审计要求文件内容级校验（哈希白名单/签名）时 |
+| P3-RedlineAuto-Grimp-Namespace-Blindspot | import-linter/grimp 不建模命名空间包（`data/sync/` 无 `__init__.py`），指向该子包的 R1 违规处于门禁盲区（UTILS-A-01 实证） | P3 | ① grimp/import-linter 升级或补 `data/sync/__init__.py` 等建模手段使契约开始实际拦截时；② 或再次出现指向 `data.sync.*` 的未登记跨层 lazy import 新实例时 |
 
 ## 技术债清单
 
@@ -185,6 +186,20 @@ R1 由 import-linter 3 条契约（1 条 layers + 2 条 forbidden）守护；R4/
 **期望的最终解法**
 
 存量 ≤5 处或 2026-11-30 前将其转为 ERROR（与弱断言 baseline KPI 节奏一致）。upgrade 触发条件：存量清至 ≤5 处时在 `scripts/check_type_ignore_reason.py` 中翻转 WARNING→ERROR 并更新本条目为已解决。
+
+#### P3-RedlineAuto-Grimp-Namespace-Blindspot：import-linter/grimp 不建模命名空间包（`data/sync/` 无 `__init__.py`），指向该子包的 R1 违规处于门禁盲区（UTILS-A-01 实证）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-RedlineAuto-Grimp-Namespace-Blindspot** | import-linter/grimp 不建模命名空间包（`data/sync/` 无 `__init__.py`），指向该子包的 R1 违规处于门禁盲区（UTILS-A-01 实证） | ① grimp/import-linter 升级或补 `data/sync/__init__.py` 等建模手段使契约开始实际拦截时；② 或再次出现指向 `data.sync.*` 的未登记跨层 lazy import 新实例时 |
+
+**产生背景与现状**
+
+UTILS-A-01 检视发现：`utils/scheduler_service.py` 的 `_catchup_logic` 函数内 `from data.sync.base import SyncResult`（# lazy-import: 启动性能）属 utils→data 方向违规，此前未登记于 import-linter ignore_imports 白名单，lint-imports 仍 KEPT——根因是 `data/sync/` 目录无 `__init__.py`（PEP 420 命名空间包），grimp（3.17）构建导入图时不建模该子包，指向 `data.sync.*` 的导入既不会被判违规、也无法被 ignore 条目匹配。已补登记例外 EX-0021（pyproject.toml 注释回指，exceptions.yml 登记）；因该条 ignore 当前无匹配、import-linter 2.15 默认 error 会直接失败，"R1: utils must not import business layers" 契约的 `unmatched_ignore_imports_alerting` 已降为 warn（每次运行输出未匹配告警、不阻断）。已知代价：该契约其余存量条目失配（lazy import 已删但白名单未清理）时由报错降为告警，靠 exceptions.yml validity_criteria 人工复核兜底。本机实验补充观测：临时补 `data/sync/__init__.py` 后模块建模恢复（分析文件数与模块列表包含 data.sync.\*），但指向该子包模块的导入边捕获仍未恢复（真实项目 3 次运行一致；独立 scratch 实验出现一次可捕获的例外结果，行为未定型），即 grimp 对该目录的边捕获缺陷不止于命名空间包建模缺失。
+
+**期望的最终解法**
+
+使 import-linter/grimp 恢复对 `data/sync/` 子包的完整建模与导入边捕获（路径待定：升级 grimp 验证其命名空间包/边捕获行为是否修复，实测补 `__init__.py` 仅恢复模块建模、边捕获仍未恢复；或评估为 `data/sync/` 补 `__init__.py` 的等效建模方案，需评估模块加载副作用与潜在循环导入风险），使 ignore_imports 中指向 `data.sync.*` 的条目转入实际生效守护，并删除 "R1: utils must not import business layers" 契约的 `unmatched_ignore_imports_alerting = "warn"` 降级行、恢复默认 error。生效信号：lint-imports 输出 ignored 数 18→19 且「No matches for ignored import utils.scheduler_service -> data.sync.base」告警消失。upgrade 触发条件：① grimp/import-linter 升级或补 `data/sync/__init__.py` 等建模手段使契约开始实际拦截时；② 或再次出现指向 `data.sync.*` 的未登记跨层 lazy import 新实例时。
 
 ### Rust sidecar 与嵌入式 PostgreSQL
 
