@@ -361,6 +361,11 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
 
     async def check_health(self):
         """Start health check task."""
+        if self._state.health_checking:
+            # P-DS-1: VM 层实时重入守卫 — View 的 disabled=state.health_checking 为快照守卫,
+            # 存在同帧双击失效窗口; 拒绝后 task_id=None 只剩真实提交失败语义, 复位分支保持正确
+            self._emit_snack(Message("health_checking"), "info")
+            return
         self._set_state(health_checking=True)
 
         async def _run_health_check(task_id: str, **kwargs):
@@ -406,6 +411,11 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
 
     def execute_full_daily_sync(self):
         """Execute full daily sync (called by View after user confirms dialog)."""
+        if self._state.is_syncing:
+            # P-DS-1: VM 层实时重入守卫 — 重复触发直达 submit_task 时, unique_key 去重返回
+            # None 会被 task_id is None 分支误判为提交失败, 误清运行中任务的 busy 态
+            self._emit_snack(Message("ds_sync_in_progress"), "warning")
+            return
         self._set_sync_busy(True, "daily_sync")
 
         async def _daily_logic(task_id: str, **kwargs):
@@ -509,6 +519,11 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
 
     def execute_clear_cache(self):
         """Execute cache clear (called by View after user confirms)."""
+        if self._state.is_syncing:
+            # P-DS-1: VM 层实时重入守卫 — 与下方 running 检查互补: running 检查挡其他任务
+            # 并发清缓存, 本守卫挡自身/任一同步进行中的重复触发 (同帧双击兜底)
+            self._emit_snack(Message("ds_clear_cache_syncing"), "warning")
+            return
         running = [
             t
             for t in self._tm.get_all_tasks()
@@ -553,6 +568,12 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
 
     def execute_init_historical_data(self):
         """Execute historical data initialization (called by View after user confirms)."""
+        if self._state.is_syncing:
+            # P-DS-1: VM 层实时重入守卫 — 重复触发若直达 submit_task, unique_key 去重返回 None
+            # 会在 task_id is None 分支误置 init_sync_final_status=FAILED 并复位 is_syncing,
+            # 导致真实完成态被 _reset_init_sync 的 is_syncing 守卫吞掉 (UI 永久停在 FAILED)
+            self._emit_snack(Message("ds_sync_in_progress"), "warning")
+            return
         self._set_sync_busy(True, "system_init_sync")
         self._set_state(init_sync_cancellable=True, init_sync_running=True)
 

@@ -1339,3 +1339,50 @@ class TestDataSourceViewModelSchedulerStatus:
         bound_vm.handle_task_update([task])
 
         assert bound_vm.state.scheduler_jobs == (job,)
+
+
+class TestDataSourceViewModelReentryGuard:
+    """P-DS-1: VM 层实时重入守卫 — 任务进行中重复触发被拒绝, 不直达 submit_task。
+
+    根因: submit_task(unique_key=...) 去重返回 None 与「无事件循环」真实失败混在同一
+    返回值; 守卫缺失时重复触发会落入 task_id is None 分支:
+    - daily_sync/cache_clear: 误清运行中任务的 is_syncing (进度条/取消按钮消失)
+    - init: 误置 init_sync_final_status=FAILED 且真实完成态被 _reset_init_sync
+      的 is_syncing 守卫吞掉 (UI 永久停在 FAILED)
+    """
+
+    def test_full_daily_sync_rejected_when_syncing(self, bound_vm, snapshots, mock_task_manager):
+        """is_syncing=True 时 execute_full_daily_sync 拒绝: 不提交 + busy 保持 + snack。"""
+        bound_vm._set_sync_busy(True, "daily_sync")
+        bound_vm.execute_full_daily_sync()
+        mock_task_manager.submit_task.assert_not_called()
+        _assert_snack(bound_vm, snapshots, "ds_sync_in_progress", "warning")
+        assert bound_vm.state.is_syncing is True
+
+    def test_clear_cache_rejected_when_syncing(self, bound_vm, snapshots, mock_task_manager):
+        """is_syncing=True 时 execute_clear_cache 拒绝: 不提交 + busy 保持 + snack。"""
+        bound_vm._set_sync_busy(True, "cache_clear")
+        bound_vm.execute_clear_cache()
+        mock_task_manager.submit_task.assert_not_called()
+        _assert_snack(bound_vm, snapshots, "ds_clear_cache_syncing", "warning")
+        assert bound_vm.state.is_syncing is True
+
+    def test_init_historical_rejected_when_syncing_keeps_final_status(self, bound_vm, snapshots, mock_task_manager):
+        """is_syncing=True 时 execute_init_historical_data 拒绝且不改写运行中任务的终态。"""
+        bound_vm._set_sync_busy(True, "system_init_sync")
+        bound_vm._set_state(init_sync_cancellable=True, init_sync_running=True)
+        bound_vm.execute_init_historical_data()
+        mock_task_manager.submit_task.assert_not_called()
+        _assert_snack(bound_vm, snapshots, "ds_sync_in_progress", "warning")
+        # 误标 FAILED 回归断言: 重复触发不得把运行中的初始化改写为终态
+        assert bound_vm.state.init_sync_final_status is None
+        assert bound_vm.state.init_sync_running is True
+        assert bound_vm.state.is_syncing is True
+
+    async def test_check_health_rejected_when_checking(self, bound_vm, snapshots, mock_task_manager):
+        """health_checking=True 时 check_health 拒绝: 不提交 + 标志保持 + snack。"""
+        bound_vm._set_state(health_checking=True)
+        await bound_vm.check_health()
+        mock_task_manager.submit_task.assert_not_called()
+        _assert_snack(bound_vm, snapshots, "health_checking", "info")
+        assert bound_vm.state.health_checking is True
