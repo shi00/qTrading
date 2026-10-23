@@ -185,3 +185,51 @@ class TestSec03EgressAudit:
                 await _invoke()
 
         assert excinfo.type is asyncio.CancelledError  # R2: 取消必须传播而非吞没
+
+
+class TestNullContentJsonConvergence:
+    """content=None（tool_calls/reasoning 响应合法形态）→ 统一 ValueError 收敛。
+
+    修复前：json.loads(None) 抛 TypeError 绕过 "Invalid JSON response" 收敛——
+    ``_chat_completion`` 直接冒泡未分类异常；``_router_failover`` 落入外层
+    except Exception 经 classify_error 误分类（可能收敛为"所有供应商失败"并
+    触发无意义重试）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_json_mode_none_content_raises_value_error(self) -> None:
+        """_chat_completion（cloud + json_mode）：content=None → ValueError 而非 TypeError。"""
+        svc = MagicMock()
+        svc._chat_completion_litellm = AsyncMock(return_value={"content": None})
+        client = LiteLLMClient(svc)
+
+        with pytest.raises(ValueError, match="Invalid JSON response"):
+            await client._chat_completion(messages=[{"role": "user", "content": "hi"}], json_mode=True)
+
+    @pytest.mark.asyncio
+    async def test_router_failover_none_content_raises_value_error(self) -> None:
+        """_router_failover：Router 返回 content=None → ValueError 收敛，
+        不经外层 except 被误分类为供应商失败（should_retry=False 原样上抛）。"""
+        svc = MagicMock()
+        svc._litellm_config = {"model": "gpt-test"}
+        client = LiteLLMClient(svc)
+        router = MagicMock()
+        router.acompletion = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=None))],
+                model="gpt-test",
+                usage=None,
+            )
+        )
+        with (
+            patch(
+                "utils.config_handler.ConfigHandler.get_failover_config",
+                return_value={"primary": "openai/gpt-test", "fallbacks": []},
+            ),
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service._ensure_router_loaded", return_value=True),
+            patch("services.ai_service._litellm_router", router),
+            patch("services.ai_service.litellm_client._estimate_tokens", return_value=1),
+        ):
+            with pytest.raises(ValueError, match="Invalid JSON response"):
+                await client._router_failover(messages=[{"role": "user", "content": "hi"}])

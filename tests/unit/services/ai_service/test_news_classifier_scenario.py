@@ -601,6 +601,47 @@ async def test_dedicated_sentiment_uses_subroute_candidates(monkeypatch):
     assert sub_cand["budget_policy_snapshot"] == base_cand["budget_policy_snapshot"]
 
 
+async def test_dedicated_sentiment_candidates_carry_authorization_identity(monkeypatch):
+    """F01 授权链身份：sentiment 子路由候选必须携带 purpose 与规范化外发目标。
+
+    真实执行链 authorize_attempt 对空 purpose 无条件拒绝、外发候选空目标拒绝
+    （SEC-01 契约）；候选缺失授权身份将使 dedicated 情绪子任务全候选失败。
+    """
+    dispatch = _patch_env(
+        monkeypatch,
+        _dispatch(mode="dedicated"),
+        connections=(
+            {"connection_id": "conn-9", "api_base": "https://Sentinel.Example.COM"},
+            {"connection_id": "conn-local", "api_base": None},
+        ),
+    )
+    assert dispatch is not None
+    classifier, _svc = _service()
+
+    dispatch.executor.execute = AsyncMock(
+        side_effect=[
+            _succeeded_result(_bundled_json(sentiment=None)),
+            ScenarioExecutionResult(
+                scenario_id=_SCENARIO_ID,
+                invocation_id="inv-2",
+                status="succeeded",
+                outputs=(ScenarioOutput(output={"sentiment": "Neutral"}),),
+                candidate_decisions=(),
+                actual_usage=(),
+            ),
+        ]
+    )
+
+    result = await classifier.classify_news("央行宣布降准")
+
+    assert result["sentiment_source"] == "dedicated:llm"
+    cand = dispatch.executor.execute.await_args_list[1].args[1].routes[0]["candidates"][0]
+    assert cand["connection_id"] == "conn-9"
+    # 授权身份两键齐备：用途域 + 规范化目标（混合大小写 api_base 归一，与主路由同构）
+    assert cand["purpose"] == "news_annotation"
+    assert cand["target_fingerprint"] == "https://sentinel.example.com:443"
+
+
 async def test_no_sentiment_key_defaults_to_dedicated(monkeypatch):
     """D2：无 sentiment 键 → dedicated（方案 §2.1：bundled iff mode=="bundled"）。"""
     dispatch = _dispatch()
