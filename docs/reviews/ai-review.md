@@ -5,7 +5,7 @@
 >
 > **项目集成说明**：承接 [CLAUDE.md](../../CLAUDE.md) §1.8 决策树 + §5 索引；与 [docs/bug-fix/core-protocol.md](../bug-fix/core-protocol.md) 互补（检视针对变更质量，修复针对问题解决）。
 >
-> **既有结论**：动手检视前先查 [检视轮次索引](./README.md)——历史检视结论可一跳发现，避免重复给出已存在结论。
+> **既有结论**：动手检视前先查 [known-technical-debt.md](../debt/known-technical-debt.md) 中已登记的未关闭发现——历次检视的结论集中登记于此，避免重复给出已存在结论；检视报告与结论不入库，报告正文落根目录 `reviews/`（本地 gitignored）。
 >
 > **冲突优先级**：法律法规 > 已批准需求/契约 > 架构/API/数据契约 > 仓库规则/项目门禁 > 本协议。
 >

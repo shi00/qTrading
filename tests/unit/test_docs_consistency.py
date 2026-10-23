@@ -4118,48 +4118,6 @@ class TestRulesetMetadataConsistency:
         )
 
 
-class TestReviewsFindingsIndex:
-    """检视结论登记索引（GOV-04）契约测试。"""
-
-    def test_findings_index_passes_real_repo(self):
-        """真实仓库 findings 索引应通过（README 存在且被 reviews README 登记）。"""
-        from check_docs_consistency import check_reviews_findings_index, check_reviews_index_completeness
-
-        assert check_reviews_findings_index() == []
-        assert check_reviews_index_completeness() == []
-
-    def test_detects_unregistered_findings(self, tmp_path, monkeypatch):
-        """findings 下未登记结论文件 → check_reviews_findings_index() 报错。"""
-        from check_docs_consistency import check_reviews_findings_index
-
-        reviews_dir = tmp_path / "reviews"
-        findings_dir = reviews_dir / "findings"
-        findings_dir.mkdir(parents=True)
-        (findings_dir / "README.md").write_text(
-            "# Findings\n\n| 轮次 | 结论文件 | 状态 |\n|---|---|---|\n", encoding="utf-8"
-        )
-        (findings_dir / "review99.json").write_text("{}", encoding="utf-8")
-        monkeypatch.setattr("check_docs_consistency.REVIEWS_DOCS_DIR", reviews_dir)
-
-        errors = check_reviews_findings_index()
-        assert any("review99.json" in e and "未登记" in e for e in errors), f"应检出未登记结论文件, got: {errors}"
-
-    def test_detects_missing_findings_readme_registration(self, tmp_path, monkeypatch):
-        """reviews README 未登记 findings/README.md → check_reviews_index_completeness() 报错。"""
-        from check_docs_consistency import check_reviews_index_completeness
-
-        reviews_dir = tmp_path / "reviews"
-        findings_dir = reviews_dir / "findings"
-        findings_dir.mkdir(parents=True)
-        (findings_dir / "README.md").write_text("# Findings\n", encoding="utf-8")
-        (reviews_dir / "README.md").write_text("# Reviews\n\n没有登记 findings/README.md\n", encoding="utf-8")
-        monkeypatch.setattr("check_docs_consistency.REVIEWS_DOCS_DIR", reviews_dir)
-        monkeypatch.setattr("check_docs_consistency.REVIEWS_README_PATH", reviews_dir / "README.md")
-
-        errors = check_reviews_index_completeness()
-        assert any("findings/README.md" in e for e in errors), f"应检出 findings README 未登记, got: {errors}"
-
-
 class TestDecisionTreeMapping:
     """决策树与机器可读镜像逐行绑定一致（DOC-04）：CLAUDE.md §1.8 ↔ canonical-topics.yml.
 
@@ -5109,7 +5067,7 @@ class TestReviewsIndexCompleteness:
         )
 
     def test_detects_unregistered_review_report_doc_distinguished_message(self, tmp_path, monkeypatch):
-        """GDR-03: 日期前缀检视报告文件未登记时，应提示轮次表未登记与落根目录指引."""
+        """GDR-03: 日期前缀检视报告文件未登记时，应提示检视报告不得入库并指引落根目录."""
         from check_docs_consistency import check_reviews_index_completeness
 
         reviews_dir = tmp_path / "reviews"
@@ -5122,9 +5080,29 @@ class TestReviewsIndexCompleteness:
         monkeypatch.setattr("check_docs_consistency.REVIEWS_DOCS_DIR", reviews_dir)
 
         errors = check_reviews_index_completeness()
-        assert any("2026-09-08-scope.md" in e and "轮次表未登记顶层检视文件" in e for e in errors), (
-            f"应区分检视文件错误提示, got: {errors}"
+        assert any(
+            "2026-09-08-scope.md" in e and "未登记顶层检视文件" in e and "检视报告不得入库" in e for e in errors
+        ), f"应区分检视文件错误提示, got: {errors}"
+
+    def test_detects_tracked_findings_file(self, tmp_path, monkeypatch):
+        """findings/ 内文件被 git 跟踪 → 报错（废弃结论登记机制守卫）."""
+        from check_docs_consistency import check_reviews_index_completeness
+
+        reviews_dir = tmp_path / "reviews"
+        findings_dir = reviews_dir / "findings"
+        findings_dir.mkdir(parents=True)
+        (reviews_dir / "README.md").write_text("# Index\n", encoding="utf-8")
+        (findings_dir / "review09.md").write_text("# 本地结论\n", encoding="utf-8")
+
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_README_PATH", reviews_dir / "README.md")
+        monkeypatch.setattr("check_docs_consistency.REVIEWS_DOCS_DIR", reviews_dir)
+        monkeypatch.setattr(
+            "check_docs_consistency._git_tracked_files_under",
+            lambda _dir: ["docs/reviews/findings/review09.md"],
         )
+
+        errors = check_reviews_index_completeness()
+        assert any("review09.md" in e and "不得入库" in e for e in errors), f"应检出误入库的结论文件, got: {errors}"
 
     def test_detects_phantom_link(self, tmp_path, monkeypatch):
         """README 引用不存在的 docs/reviews/ 内文档 → 报错（幽灵链接）."""

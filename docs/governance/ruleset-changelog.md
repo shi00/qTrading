@@ -101,6 +101,6 @@ WARNING」的反模式）：
 
 `ruleset_version` 元数据块中 `review_triggers` 写明「检视报告发布时」复核。复核流程（GOV-07，规则性约定，不写日期快照）：
 
-1. 检视报告发布后，由**架构维护者**对照 `docs/reviews/README.md` 轮次表的「进行中」轮次与未关闭发现摘要，评估治理变更是否需要递增 `ruleset_version`；
+1. 检视报告发布后，由**架构维护者**对照 `docs/debt/known-technical-debt.md` 登记的未关闭发现（含历次检视迁入项），评估治理变更是否需要递增 `ruleset_version`；
 2. 若递增：按本文件「记录规则」在变更记录表顶部登记，并同步三方（CLAUDE.md / CONTRIBUTING.md / AGENTS.md）`last_reviewed`（须不早于本文件顶行变更日期，DS-05）与 `ruleset_version`；
-3. 动态状态（轮次进度、`last_reviewed` 现值、未关闭发现）由 `docs/reviews/README.md` 轮次表与三份治理文档元数据块单一承载，本段落不复制。
+3. 动态状态（`last_reviewed` 现值、未关闭发现与技术债）由 `docs/debt/known-technical-debt.md` 与三份治理文档元数据块单一承载，本段落不复制。

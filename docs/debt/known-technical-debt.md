@@ -65,6 +65,16 @@
 | P3-TA-OSS05-DualImpl | 技术指标（RSI/MACD/KDJ）双实现分叉的 OSS-05 结论仅存于测试 docstring，未登记技术债（原著 reviews/ 已丢失） | P3 | ① 技术指标测试文件（`test_technical_analysis_equivalence.py`）被重构或拆分时；② 或双实现再次扩散（新增未经等价性断言覆盖的指标分支）时；③ 或指标语义变更时 |
 | P3-N54-Model-File-Trust-Boundary | 情绪模型文件（GGUF/head.npz）保存期仅轻量校验（GGUF 4 字节魔数 / head 结构与数值），不构成对文件内容的信任，来源由用户自担 | P3 | ① App 引入模型下载/分发渠道（文件来源不再由用户自备）时；② 或 GGUF/head 解析器漏洞（如 llama.cpp/np.load CVE）公开披露时；③ 或安全审计要求文件内容级校验（哈希白名单/签名）时 |
 | P3-RedlineAuto-Grimp-Namespace-Blindspot | import-linter/grimp 不建模命名空间包（`data/sync/` 无 `__init__.py`），指向该子包的 R1 违规处于门禁盲区（UTILS-A-01 实证） | P3 | ① grimp/import-linter 升级或补 `data/sync/__init__.py` 等建模手段使契约开始实际拦截时；② 或再次出现指向 `data.sync.*` 的未登记跨层 lazy import 新实例时 |
+| P3-REV03-Dao-MaxRows | review03 C4：`_read_db`/`_read_db_select` 已提供 max_rows 安全阀，但多数全表扫描调用点未显式设置，数据增长后可能一次性载入全量 | P3 | ① `data/persistence/daos/` 再次新增未显式传 max_rows 的全表扫描调用点时；② 或出现因全量载入导致的内存/超时故障报告时；③ 或数据访问层重构时 |
+| P3-REV03-ScreeningHistory-SQLCore | review03 C7：screener_dao 查询仍有 f-string 拼列名 / ORDER BY（screening_history），非注入风险，待迁移 SQLAlchemy Core | P3 | ① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时 |
+| P3-REV03-DataDictionary-Columns | review03 C9：数据字典半数表 columns 为空，列级一致性仅由 ORM 兜底，待「删 columns / 补全」产品决策 | P3 | ① columns 为空条目导致实际列级校验漏检缺陷时；② 或数据字典被纳入新的门禁校验时 |
+| P2-REV06-External-SchemaValidation | review06 F9：外部数据（Tushare/Akshare）入库前缺行级 schema 校验，脏数据可静默影响选股决策 | P2 | ① 外部数据脏数据导致选股/回测结论异常的事故报告时；② 或新增外部数据源接入取数→入库链时（新链路必须配套校验） |
+| P3-REV06-Retry-CircuitBreaker | review06 F10：重试机制在外部服务故障时放大请求压力，建议加熔断/退避限流 | P3 | ① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时 |
+| P2-REV06-PromptGuard-StructuredBoundary | review06 F12：prompt 注入防御为正则黑名单，对新闻正文植入指令有固有局限，需结构化边界 + 输出侧交叉校验（ADR-0008 执行权边界为现行补偿控制） | P2 | ① 出现注入成功绕过 prompt_guard 的实例时；② 或新增外部文本进入 LLM 上下文的链路时 |
+| P2-REV06-LLMOutput-SchemaValidation | review06 F13：LLM 输出影响选股排序，仅校验部分字段，缺完整输出 schema 校验与 AI 免责声明 | P2 | ① LLM 坏输出未被校验拦截并流入排序/展示的事故时；② 或输出契约（core/prompt_base.py）字段扩展时；③ 或 AI 排序结果进入导出/分享链路时 |
+| P3-REV06-Restore-HeaderValidation | review06 F16：备份恢复路径仅做存在性检查，未校验 pg_dump magic header 与元信息展示 | P3 | ① 用户恢复损坏/伪造备份导致恢复失败或数据错乱的事故时；② 或备份恢复流程被重构时 |
+| P2-REV06-Backup-Encryption | review06 F19：数据库备份文件未加密，UI 缺「勿放共享目录」提示与可选加密备份 | P2 | ① 用户报告备份文件外泄或被第三方读取时；② 或备份功能被重构/导出链路扩展（如云同步）时 |
+| P3-REV08-Akshare-Fallback | review08 C1：Tushare 积分不足直接 skip 功能，akshare 免费同类接口（涨跌停池/龙虎榜/两融/北向/个股资金流）闲置未用；报告已深化为「补足而非替换」，需 ADR 定夺 | P3 | ① 用户报告 Tushare 积分不足导致功能缺失时；② 或前置条件满足（P2-REV06-External-SchemaValidation 关闭 + 候选接口联网可用性验证 + D3 结论）时；③ 或数据源接入架构调整时 |
 
 ## 技术债清单
 
@@ -634,6 +644,150 @@ OSS-05 双实现等价性研究结论（pandas 入口 vs Polars 表达式工厂�
 **期望的最终解法**
 
 本条目作为 OSS-05 结论的登记载体，随测试断言同步演进；测试文件重构时依本表确认识别到指正。upgrade 触发条件：① 技术指标测试文件（`test_technical_analysis_equivalence.py`）被重构或拆分时；② 或双实现再次扩散（新增未经等价性断言覆盖的指标分支）时；③ 或指标语义变更时。
+
+### 检视发现迁入（review03 / review06 / review08，2026-10-23）
+
+> 来源为历次检视的未关闭发现（原 `docs/reviews/findings/` 结论登记，GOV-04 机制于 2026-10-23 废弃，见 [ADR-0002](../adr/0002-document-layering.md) Errata）。原报告正文与证据片段不入库，本节仅承载一句话摘要与升级触发条件；F18（review06，sidecar 路径配置校验，低优先级）评估后不迁移。
+
+#### P3-REV03-Dao-MaxRows：review03 C4：`_read_db`/`_read_db_select` 已提供 max_rows 安全阀，但多数全表扫描调用点未显式设置，数据增长后可能一次性载入全量
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-REV03-Dao-MaxRows** | review03 C4：`_read_db`/`_read_db_select` 已提供 max_rows 安全阀，但多数全表扫描调用点未显式设置，数据增长后可能一次性载入全量 | ① `data/persistence/daos/` 再次新增未显式传 max_rows 的全表扫描调用点时；② 或出现因全量载入导致的内存/超时故障报告时；③ 或数据访问层重构时 |
+
+**产生背景与现状**
+
+review03（数据层与持久化，2026-09-02/03）发现：DAO 层读取方法已支持 `max_rows` 参数作为安全阀，但多数全表扫描调用点未显式传入，数据量增长后存在一次性载入全量的风险。修复状态为「部分」。
+
+**期望的最终解法**
+
+全部全表扫描调用点显式指定 `max_rows` 且无兜底无限制读取。upgrade 触发条件：① `data/persistence/daos/` 再次新增未显式传 max_rows 的全表扫描调用点时；② 或出现因全量载入导致的内存/超时故障报告时；③ 或数据访问层重构时。
+
+#### P3-REV03-ScreeningHistory-SQLCore：review03 C7：screener_dao 查询仍有 f-string 拼列名 / ORDER BY（screening_history），非注入风险，待迁移 SQLAlchemy Core
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-REV03-ScreeningHistory-SQLCore** | review03 C7：screener_dao 查询仍有 f-string 拼列名 / ORDER BY（screening_history），非注入风险，待迁移 SQLAlchemy Core | ① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时 |
+
+**产生背景与现状**
+
+review03（数据层与持久化，2026-09-02/03）发现：`data/persistence/daos/screener_dao.py` 的 `screening_history` 相关查询使用 f-string 拼接列名与 `ORDER BY` 子句。经评审确认非注入风险（列名来源受控），但与 R4 参数化方向不一致，待迁移 SQLAlchemy Core 统一。
+
+**期望的最终解法**
+
+`data/` 内 `screening_history` 相关查询迁移 SQLAlchemy Core，无 f-string 拼列名/`ORDER BY`。upgrade 触发条件：① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时。
+
+#### P3-REV03-DataDictionary-Columns：review03 C9：数据字典半数表 columns 为空，列级一致性仅由 ORM 兜底，待「删 columns / 补全」产品决策
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-REV03-DataDictionary-Columns** | review03 C9：数据字典半数表 columns 为空，列级一致性仅由 ORM 兜底，待「删 columns / 补全」产品决策 | ① columns 为空条目导致实际列级校验漏检缺陷时；② 或数据字典被纳入新的门禁校验时 |
+
+**产生背景与现状**
+
+review03（数据层与持久化，2026-09-02/03）发现：`data/data_dictionary.py` 中半数表的 `columns` 字段为空，列级一致性当前仅由 ORM 模型兜底。属产品决策事项（删除 `columns` 空条目或全量补全），未定夺前维持现状。
+
+**期望的最终解法**
+
+作出产品决策（删 `columns` 空表或全量补全）且执行完毕，或决策明确接受当期现状并记录。upgrade 触发条件：① columns 为空条目导致实际列级校验漏检缺陷时；② 或数据字典被纳入新的门禁校验时。
+
+#### P2-REV06-External-SchemaValidation：review06 F9：外部数据（Tushare/Akshare）入库前缺行级 schema 校验，脏数据可静默影响选股决策
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P2-REV06-External-SchemaValidation** | review06 F9：外部数据（Tushare/Akshare）入库前缺行级 schema 校验，脏数据可静默影响选股决策 | ① 外部数据脏数据导致选股/回测结论异常的事故报告时；② 或新增外部数据源接入取数→入库链时（新链路必须配套校验） |
+
+**产生背景与现状**
+
+review06（安全与供应链，2026-08-24）发现：外部数据入库路径未挂行级 schema 校验，上游接口返回脏数据时可静默入库并影响选股决策。该条是 review08 C1（akshare 补足方案）的前置依赖。
+
+**期望的最终解法**
+
+外部数据入库路径挂行级 schema 校验（非法行拒绝/隔离并告警），无未校验直写路径。upgrade 触发条件：① 外部数据脏数据导致选股/回测结论异常的事故报告时；② 或新增外部数据源接入取数→入库链时（新链路必须配套校验）。
+
+#### P3-REV06-Retry-CircuitBreaker：review06 F10：重试机制在外部服务故障时放大请求压力，建议加熔断/退避限流
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-REV06-Retry-CircuitBreaker** | review06 F10：重试机制在外部服务故障时放大请求压力，建议加熔断/退避限流 | ① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时 |
+
+**产生背景与现状**
+
+review06（安全与供应链，2026-08-24）发现：外部服务故障时重试机制会放大请求压力（重试风暴），建议引入熔断器或退避限流。
+
+**期望的最终解法**
+
+外部服务调用链加熔断/退避限流，故障时不无限重试放大 QPS（含 `tushare_client._handle_api_call` 连续失败短路计数）。upgrade 触发条件：① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时。
+
+#### P2-REV06-PromptGuard-StructuredBoundary：review06 F12：prompt 注入防御为正则黑名单，对新闻正文植入指令有固有局限，需结构化边界 + 输出侧交叉校验（ADR-0008 执行权边界为现行补偿控制）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P2-REV06-PromptGuard-StructuredBoundary** | review06 F12：prompt 注入防御为正则黑名单，对新闻正文植入指令有固有局限，需结构化边界 + 输出侧交叉校验（ADR-0008 执行权边界为现行补偿控制） | ① 出现注入成功绕过 prompt_guard 的实例时；② 或新增外部文本进入 LLM 上下文的链路时 |
+
+**产生背景与现状**
+
+review06（安全与供应链，2026-08-24）发现：`utils/prompt_guard.py` 为正则黑名单式防御，对新闻正文等外部文本中的植入指令有固有局限。现行补偿控制：ADR-0008 执行权边界（注入成功后果被限制在错误建议范围，不产生执行路径）+ 输出侧结构化校验，见 [ai-service.md](../patterns/ai-service.md)「Prompt 注入防御分层」。定级 P2 的依据：注入成功可使 AI 排序/建议**安静出错**（用户看到的选股结论受影响且不主动报错），符合 P2「结论可信度」判定；补偿控制只收窄后果范围，不消除该失效路径。
+
+**期望的最终解法**
+
+引入结构化边界（外部内容包裹为不可执行区域）+ 输出侧交叉校验，不再单靠正则黑名单。upgrade 触发条件：① 出现注入成功绕过 prompt_guard 的实例时；② 或新增外部文本进入 LLM 上下文的链路时。
+
+#### P2-REV06-LLMOutput-SchemaValidation：review06 F13：LLM 输出影响选股排序，仅校验部分字段，缺完整输出 schema 校验与 AI 免责声明
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P2-REV06-LLMOutput-SchemaValidation** | review06 F13：LLM 输出影响选股排序，仅校验部分字段，缺完整输出 schema 校验与 AI 免责声明 | ① LLM 坏输出未被校验拦截并流入排序/展示的事故时；② 或输出契约（core/prompt_base.py）字段扩展时；③ 或 AI 排序结果进入导出/分享链路时 |
+
+**产生背景与现状**
+
+review06（安全与供应链，2026-08-24）发现：LLM 输出会参与选股排序，但当前仅校验部分字段，缺完整输出 schema 校验，且 UI 对 AI 排序结果缺 AI 免责声明。当前职责边界见 [ai-service.md](../patterns/ai-service.md)「输出契约与校验边界」。
+
+**期望的最终解法**
+
+LLM 输出做完整 schema 校验，且 UI 对 AI 排序结果展示 AI 免责声明（非投资建议提示）。upgrade 触发条件：① LLM 坏输出未被校验拦截并流入排序/展示的事故时；② 或输出契约（core/prompt_base.py）字段扩展时；③ 或 AI 排序结果进入导出/分享链路时。
+
+#### P3-REV06-Restore-HeaderValidation：review06 F16：备份恢复路径仅做存在性检查，未校验 pg_dump magic header 与元信息展示
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-REV06-Restore-HeaderValidation** | review06 F16：备份恢复路径仅做存在性检查，未校验 pg_dump magic header 与元信息展示 | ① 用户恢复损坏/伪造备份导致恢复失败或数据错乱的事故时；② 或备份恢复流程被重构时 |
+
+**产生背景与现状**
+
+review06（安全与供应链，2026-08-24）发现：备份恢复路径仅做文件存在性检查，恢复损坏/伪造的备份文件时错误暴露晚、缺少版本/元信息预览。
+
+**期望的最终解法**
+
+恢复前校验 pg_dump 文件 magic header（`PGDMP`）并在 UI 展示版本/元信息。upgrade 触发条件：① 用户恢复损坏/伪造备份导致恢复失败或数据错乱的事故时；② 或备份恢复流程被重构时。
+
+#### P2-REV06-Backup-Encryption：review06 F19：数据库备份文件未加密，UI 缺「勿放共享目录」提示与可选加密备份
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P2-REV06-Backup-Encryption** | review06 F19：数据库备份文件未加密，UI 缺「勿放共享目录」提示与可选加密备份 | ① 用户报告备份文件外泄或被第三方读取时；② 或备份功能被重构/导出链路扩展（如云同步）时 |
+
+**产生背景与现状**
+
+review06（安全与供应链，2026-08-24）发现：数据库备份文件为明文，包含全部业务数据；用户将备份放入共享目录/云盘时存在隐私泄露风险，UI 缺少风险提示，也无可选加密备份能力。
+
+**期望的最终解法**
+
+UI 提供存储位置风险提示（勿放共享目录/云同步目录），并提供可选加密备份能力（任一启用即视为关闭）。upgrade 触发条件：① 用户报告备份文件外泄或被第三方读取时；② 或备份功能被重构/导出链路扩展（如云同步）时。
+
+#### P3-REV08-Akshare-Fallback：review08 C1：Tushare 积分不足直接 skip 功能，akshare 免费同类接口（涨跌停池/龙虎榜/两融/北向/个股资金流）闲置未用；报告已深化为「补足而非替换」，需 ADR 定夺
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-REV08-Akshare-Fallback** | review08 C1：Tushare 积分不足直接 skip 功能，akshare 免费同类接口（涨跌停池/龙虎榜/两融/北向/个股资金流）闲置未用；报告已深化为「补足而非替换」，需 ADR 定夺 | ① 用户报告 Tushare 积分不足导致功能缺失时；② 或前置条件满足（P2-REV06-External-SchemaValidation 关闭 + 候选接口联网可用性验证 + D3 结论）时；③ 或数据源接入架构调整时 |
+
+**产生背景与现状**
+
+review08（AKShare 开源组件复用专项，2026-09-23）发现：Tushare 积分不足时相关功能直接 skip，akshare 免费同类接口（涨跌停池/龙虎榜/两融/北向/个股资金流）闲置未用。检视报告已将方案深化为「补足而非替换」，需 ADR 定夺后再试点。
+
+**期望的最终解法**
+
+出 ADR 并完成试点（权限降级 → 切源 → 来源标注两侧可区分）。前置：P2-REV06-External-SchemaValidation（review06 F9）关闭 + 候选接口联网可用性验证 + D3 结论。upgrade 触发条件：① 用户报告 Tushare 积分不足导致功能缺失时；② 或前置条件满足时；③ 或数据源接入架构调整时。
 
 ## 已接受的权衡（Accepted Tradeoffs）
 

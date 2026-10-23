@@ -203,7 +203,7 @@
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
 
-规范层缺口的当前状态见 [docs/reviews/README.md](./docs/reviews/README.md) 轮次表中状态为「进行中」的行；代码层面的技术债与跟进记录见 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md)。
+规范层缺口与代码层面的技术债、跟进记录（含历次检视迁入的未关闭发现）统一见 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md)。
 
 > **有意识简化的代码现场标记**：对有意识的简化（如已知上限的权宜之计、推迟的优化），使用 `# NOTE(lazy):` 注释标记，格式为 `# NOTE(lazy): <简化内容>. ceiling: <已知上限>. upgrade: <升级触发条件>.`。三要素必须齐全。缺少 `upgrade` 的标记视为 **no-trigger 高风险**，PR 评审时必须补充升级触发条件或拒绝合并。积累到 3 处以上或 `upgrade` 条件触发时，应升级为 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) 中的技术债表格条目。可用代码搜索工具（IDE 搜索或跨平台脚本）汇集 `NOTE(lazy):` 标记。禁止用此标记掩盖真正的 TODO（应用 `# TODO:`）、业务逻辑简化、红线/模板/专项规范的省略。
 

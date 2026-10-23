@@ -1,8 +1,8 @@
 # 治理 ID 对照表 (Governance ID Glossary)
 
-> **目的**：CLAUDE.md / AGENTS.md / 脚本注释中高频出现治理 ID（`P2-07` / `DOC-04` / `review01-A2` / `GDR-06` 等），但指向的检视报告正文多为本地 gitignored 产物（见 [docs/reviews/README.md](../reviews/README.md)「路径说明」），新会话无法解析。本表提供「ID → 一句话含义」的对照，消除上下文噪声；读者无需解析即可理解条款，需要溯源时按表查询。
+> **目的**：CLAUDE.md / AGENTS.md / 脚本注释中高频出现治理 ID（`P2-07` / `DOC-04` / `review01-A2` / `GDR-06` 等），但指向的检视报告正文多为本地 gitignored 产物（见 [docs/reviews/README.md](../reviews/README.md) 目录职责边界），新会话无法解析。本表提供「ID → 一句话含义」的对照，消除上下文噪声；读者无需解析即可理解条款，需要溯源时按表查询。
 >
-> **状态取值**：`使用中`（当前文档引用）/ `历史`（仅出现在已归档轮次）。
+> **状态取值**：`使用中`（当前文档引用）/ `历史`（已废止或仅作溯源，不再被活文档作为约束引用）。
 >
 > **维护规则**：新增治理 ID 时必须在下方表格登记一行（由 `check_governance_id_glossary` 门禁守护受检治理文档中出现的 ID——`CHECKED_DOCS` 全集（排除 `CHANGELOG.md` 自动生成发布日志与 `Plans.md` 本地计划）加 `docs/governance/*.yml` 机器可读治理文件；`.py`（`scripts/` + `tests/`）扫描自 DS-02 起以 WARNING 渐进部署）。来源轮次不可考的标注「本地检视报告（gitignored）」，不臆造。
 >
@@ -31,10 +31,10 @@
 | DOC-11 | 文档索引全覆盖（docs/** 无孤儿文档） | 文档体系·AI 可执行性专项（DOC 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | DOC-13 | 孤儿治理文件纳入元数据/索引/白名单（AGENTS.md 收编） | 文档体系·AI 可执行性专项（DOC 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) / [ADR-0006](../adr/0006-override-agents-pure-pointer.md) | 使用中 |
 | GOV-01 | 宪法不得引用未登记例外（EX 引用必须落在注册表） | 文档体系检视（GOV 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
-| GOV-04 | 检视结论结构化登记（docs/reviews/findings/）：报告正文 gitignored 导致结论系统性丢失，结论 id/判据入库可溯源 | 文档体系检视（GOV 系列） | [findings/README.md](../reviews/findings/README.md) / [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
-| GOV-07 | ruleset-changelog 规则集复核状态为规则性约定（不写日期快照），动态状态由轮次表与三份治理文档承载 | 文档体系检视（GOV 系列） | [ruleset-changelog.md](./ruleset-changelog.md) | 使用中 |
+| GOV-04 | 检视结论结构化登记（docs/reviews/findings/）：报告正文 gitignored 导致结论系统性丢失，结论 id/判据入库可溯源（2026-10-23 废弃：结论不入库，未关闭发现迁 docs/debt/known-technical-debt.md 承载） | 文档体系检视（GOV 系列） | [ADR-0002](../adr/0002-document-layering.md) Errata / [known-technical-debt.md](../debt/known-technical-debt.md) | 历史 |
+| GOV-07 | ruleset-changelog 规则集复核状态为规则性约定（不写日期快照），动态状态由三份治理文档元数据与 docs/debt/known-technical-debt.md 承载 | 文档体系检视（GOV 系列） | [ruleset-changelog.md](./ruleset-changelog.md) | 使用中 |
 | GOV-10 | R20 报告模式补齐升级期限四要素（误报率阈值 / 复核期限 / 责任人 / 翻转触发），消除「无期限渐进部署永久停留 WARNING」反模式 | 文档体系检视（GOV 系列） | [ruleset-changelog.md](./ruleset-changelog.md)「R20 报告模式升级期限」 | 使用中 |
-| UX-07 | 全系统 UI/UX 专项审视轮次 | UX 专项检视 | [docs/reviews/README.md](../reviews/README.md) | 历史 |
+| UX-07 | 全系统 UI/UX 专项审视轮次（报告为本地 gitignored 产物，不入库，仅保留 ID 供溯源） | UX 专项检视 | [docs/reviews/README.md](../reviews/README.md) 方法论索引 | 历史 |
 | GDR-06 | 治理文档不得硬编码 Flet 补丁版本号（SHALL NOT `x.y.z` 形式） | 文档体系检视（GDR 系列，2026-09-08） | [CLAUDE.md](../../CLAUDE.md) §3.2 | 使用中 |
 | GDR-09 | 治理 ID 对新会话不可解析 → 建立对照表 + 体系入口声明 | 文档体系检视（GDR 系列，2026-09-08） | [governance-ids.md](./governance-ids.md) / [CLAUDE.md](../../CLAUDE.md) 头部 | 使用中 |
 | review01-A2 | 夜间预测编排下沉到 services/scheduled_jobs（消除 utils→strategies→services 循环） | review01 架构分层与依赖治理 | [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
@@ -48,7 +48,7 @@
 | GDR-10 | AGENTS.md 最小安全集排除非 INVARIANT 红线，R1/R16 已有独立自动化兜底故不收录 | 文档体系检视（GDR 系列，2026-09-08） | [0006-override-agents-pure-pointer.md](../adr/0006-override-agents-pure-pointer.md) | 使用中 |
 | GDR-12 | ADR 决策文档文件级索引完整性检查（CONTRIBUTING.md 登记全部 docs/adr/*.md） | 文档体系检视（GDR 系列，2026-09-08） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | GDR-13 | 书名号式章节引用一致性检查（`<文档路径>「<章节名>」`） | 文档体系检视（GDR 系列，2026-09-08） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
-| DOC-14 | 检视报告「发现清单」状态列随轮次表维护，不回溯改写已归档报告 | 文档体系·AI 可执行性专项（DOC 系列） | [docs/reviews/README.md](../reviews/README.md) | 使用中 |
+| DOC-14 | 检视报告的未关闭发现状态随 [known-technical-debt.md](../debt/known-technical-debt.md) 维护，不回溯改写已归档报告（2026-10-23 前为 reviews README 轮次表） | 文档体系·AI 可执行性专项（DOC 系列） | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | P0-1 | 单文件巨石结构违反渐进式披露原则，需分层治理 | 文档体系检视（P0 系列） | [0002-document-layering.md](../adr/0002-document-layering.md) | 使用中 |
 | P1-1 | 同 P0-1：单文件巨石结构问题 | 文档体系检视（P1 系列） | [0002-document-layering.md](../adr/0002-document-layering.md) | 使用中 |
 | P1-04 | UX-06 冷启动验证（生产模式全页构造 proxy 成本基线） | UX 专项检视 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
@@ -83,7 +83,7 @@
 | UIX-16 | 未引用 i18n key 的 ratchet baseline 门禁（基线计数只降不升） | 本地检视报告（gitignored） | [test_i18n_keys_completeness.py](../../tests/unit/test_i18n_keys_completeness.py) | 使用中 |
 | UIX-17 | VM locale remediation——placeholder 卡 error 的 i18n fallback，去硬编码中文默认值 | 本地检视报告（gitignored） | [test_uix_17_vm_locale_remediation.py](../../tests/unit/ui/viewmodels/test_uix_17_vm_locale_remediation.py) | 使用中 |
 | UIX-18 | e2e_ids.py 已声明 public 常量/方法未引用或未标注 `# reserved` 即报错 | 本地检视报告（gitignored） | [check_e2e_anchors.py](../../scripts/check_e2e_anchors.py) | 使用中 |
-| GDR-03 | 未登记的日期前缀检视报告文件须提示「轮次表未登记」并指引落根目录 | 文档体系检视（GDR 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
+| GDR-03 | 未登记的日期前缀检视报告文件须提示检视报告不得入库并指引落根目录 reviews/ | 文档体系检视（GDR 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | GDR-04 | requirement 主题正本存在且能被 `_extract_decision_tree_targets` 决策树提取 | 文档体系检视（GDR 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |
 | GDR-05 | 真实 redlines.yml 中 R9 的 enforcement 含 check_redlines.py 与安全扫描（N1/N4 断言） | 文档体系检视（GDR 系列） | [test_docs_consistency.py](../../tests/unit/test_docs_consistency.py) | 使用中 |
 | GDR-07 | `_GITIGNORED_ARTIFACT_DIRS` 仅含真实 gitignored 目录；EX 引用语料豁免目录 | 文档体系检视（GDR 系列） | [check_docs_consistency.py](../../scripts/check_docs_consistency.py) | 使用中 |

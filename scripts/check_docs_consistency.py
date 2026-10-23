@@ -34,7 +34,7 @@
    已登记例外必须被消费文档引用。
 17. 检视方法论文档登记检查（DOC-07）：docs/reviews/README.md 以文件级链接登记全部顶层
    方法论文档（ai-review / appendix / quality-dimensions / scenario-completeness），使检视
-   方法论与轮次清单一跳可达（结论正文落根 reviews/ 为本地 gitignored 产物，不入仓库）。
+   方法论对新会话一跳可达（检视报告不入库，正文落根 reviews/ 为本地 gitignored 产物）。
 18. core 模块清单完整性检查（GDR-11）：断言 CLAUDE.md §4.2 声明的 core/ 模块列表与实际
    core/*.py 文件一致。
 19. ADR 索引完整性检查（GDR-12）：校验 CONTRIBUTING.md 文件级登记全部 docs/adr/*.md
@@ -170,6 +170,7 @@ _GITIGNORED_ARTIFACT_DIRS: tuple[Path, ...] = (
     ROOT / "docs" / "plans" / "archive",
     ROOT / "docs" / "audit",
     ROOT / "docs" / "superpowers",
+    ROOT / "docs" / "reviews" / "findings",
 )
 
 # 兼容别名：保留 _LOCAL_ARTIFACT_DIRS 供外部或现有测试引用
@@ -265,6 +266,30 @@ def _git_tracked_md_files() -> list[Path] | None:
     if result.returncode != 0:
         return None
     return [ROOT / rel for rel in result.stdout.decode("utf-8", errors="replace").split("\0") if rel]
+
+
+def _git_tracked_files_under(directory: Path) -> list[str]:
+    """列出目录下被 git 跟踪的文件（相对仓库根的 posix 路径）。
+
+    目录不在 ROOT 内（测试注入临时仓库）或 git 不可用时返回空列表；由调用方
+    自行决定降级语义（仅用于「不得入库」类守卫，不做受检集来源）。
+    """
+    try:
+        rel_dir = directory.relative_to(ROOT)
+    except ValueError:
+        return []
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z", "--", rel_dir.as_posix()],
+            cwd=ROOT,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return []
+    if result.returncode != 0:
+        return []
+    return [rel for rel in result.stdout.decode("utf-8", errors="replace").split("\0") if rel]
 
 
 def _collect_checked_docs() -> list[Path]:
@@ -3046,7 +3071,7 @@ def check_docs_index_completeness() -> list[str]:
 # 无法要求「新增方法论文档必须被登记」。本检查仿 check_flet_hub_completeness，把 docs/reviews/
 # 顶层方法论文档的登记从「目录级覆盖」收紧到「README 文件级链接」，使新增方法论对新会话可达。
 # 仅枚举 docs/reviews/*.md 顶层文件（排除 README 自身与子目录）；子目录（review-profiles/、
-# evals/）由各自子 README 与 check_docs_index_completeness 兜底。轮次报告落根 reviews/
+# evals/）由各自子 README 与 check_docs_index_completeness 兜底。检视报告不入库，正文落根 reviews/
 # （gitignored 本地产物）不在仓库扫描范围。
 
 
@@ -3055,7 +3080,7 @@ def check_reviews_index_completeness() -> list[str]:
 
     确保 docs/reviews/README.md 以文件级链接登记全部顶层方法论文档
     （ai-review / appendix / quality-dimensions / scenario-completeness 等），
-    使「检视方法论 / 轮次清单」对新会话一跳可达（结论正文为本地 gitignored 产物，不入仓库）。
+    使检视方法论对新会话一跳可达（检视报告不入库，正文为本地 gitignored 产物）。
     """
     errors: list[str] = []
     if not REVIEWS_README_PATH.exists():
@@ -3092,62 +3117,38 @@ def check_reviews_index_completeness() -> list[str]:
             except ValueError:
                 continue  # 目标在 docs/reviews/ 外，跳过（如 ../../CLAUDE.md、../debt/...）
             if len(rel.parts) != 1:
-                # 仅统计顶层（`./xxx.md` 形式）引用；轮次表根 reviews/ 路径/子目录引用不纳入登记集
+                # 仅统计顶层（`./xxx.md` 形式）引用；根 reviews/ 路径/子目录引用不纳入登记集
                 continue
             url_basename = rel.name
             if url_basename.endswith(".md") and url_basename != "README.md":
                 referenced_files.add(url_basename)
 
-    # 未登记的顶层文档（按前缀区分方法论文档与轮次报告摘要）
+    # 未登记的顶层文档（按前缀区分方法论文档与误落的检视报告）
     for fname in sorted(actual_files - referenced_files):
         if re.match(r"^\d{4}-\d{2}-\d{2}", fname):
             errors.append(
-                f"检视文档登记: docs/reviews/README.md 轮次表未登记顶层检视文件 '{fname}'"
-                "（过程报告正文请落根目录 reviews/，如确需入库请在 README.md 登记）"
+                f"检视文档登记: docs/reviews/README.md 未登记顶层检视文件 '{fname}'"
+                "（检视报告不得入库，正文请落根目录 reviews/）"
             )
         else:
-            errors.append(f"检视方法论文档登记: docs/reviews/README.md 未登记顶层方法论文档 '{fname}'")
+            errors.append(
+                f"检视方法论文档登记: docs/reviews/README.md 未登记顶层方法论文档 '{fname}'"
+                "（若该文件实为检视报告/结论，不得入库，正文请落根目录 reviews/）"
+            )
     # 幽灵链接（README 引用不存在的 docs/reviews/ 内文档）
     for fname in sorted(referenced_files - actual_files):
         errors.append(f"检视方法论文档登记: docs/reviews/README.md 引用了不存在的文档 '{fname}'")
 
-    # GOV-04: 检视结论结构化登记索引（findings/README.md）须存在且被本 README 文件级登记
-    findings_readme = REVIEWS_DOCS_DIR / "findings" / "README.md"
-    if not findings_readme.exists():
-        errors.append("检视结论登记: docs/reviews/findings/README.md 不存在（GOV-04 结论结构化入库机制缺失）")
-    elif not any("./findings/README.md" in m.group(0) for m in _MD_LINK_PATTERN.finditer(readme_content)):
-        errors.append("检视方法论文档登记: docs/reviews/README.md 未登记 'findings/README.md'（GOV-04 结论索引）")
-    return errors
-
-
-def check_reviews_findings_index() -> list[str]:
-    """检查项：检视结论登记索引（GOV-04）。
-
-    docs/reviews/findings/ 下每个结论文件（*.json / *.md，排除 README.md 自身）必须被
-    findings/README.md 以文件级链接登记；README 引用不存在的结论文件即幽灵链接报错。
-    新增轮次结论未登记 → 新会话不可溯源，等同 GOV-04 结论丢失回归。
-    """
-    errors: list[str] = []
+    # 废弃机制守卫：docs/reviews/findings/（原 GOV-04 结论登记）内的文件不得入库。
+    # 本地文件可保留（.gitignore 已排除），但一旦被 git 跟踪即违反「检视结论与报告不入库」。
     findings_dir = REVIEWS_DOCS_DIR / "findings"
-    readme = findings_dir / "README.md"
-    if not findings_dir.is_dir() or not readme.exists():
-        # 目录缺失由 check_reviews_index_completeness 报告
-        return errors
-    readme_content = readme.read_text(encoding="utf-8")
-
-    suffixes = (".json", ".md")
-    actual = {p.name for p in findings_dir.glob("*") if p.is_file() and p.suffix in suffixes and p.name != "README.md"}
-    referenced = {
-        m.group(2).strip().split("/")[-1]
-        for m in _MD_LINK_PATTERN.finditer(readme_content)
-        if m.group(2).strip().endswith(suffixes)
-        and m.group(2).strip().split("/")[-1] != "README.md"
-        and not m.group(2).strip().startswith("../")
-    }
-    for fname in sorted(actual - referenced):
-        errors.append(f"检视结论登记: docs/reviews/findings/README.md 未登记结论文件 '{fname}'")
-    for fname in sorted(referenced - actual):
-        errors.append(f"检视结论登记: docs/reviews/findings/README.md 引用了不存在的结论文件 '{fname}'")
+    if findings_dir.is_dir():
+        tracked_findings = _git_tracked_files_under(findings_dir)
+        for rel in tracked_findings:
+            errors.append(
+                f"检视结论登记: '{rel}' 已被 git 跟踪（docs/reviews/findings/ 为已废弃机制，"
+                "检视结论与报告不得入库，正文请落根目录 reviews/，未关闭发现迁 docs/debt/known-technical-debt.md）"
+            )
     return errors
 
 
@@ -4270,7 +4271,6 @@ def main() -> int:
     all_errors.extend(check_canonical_docs_are_gated())
     all_errors.extend(check_docs_index_completeness())
     all_errors.extend(check_reviews_index_completeness())
-    all_errors.extend(check_reviews_findings_index())
     all_errors.extend(check_adr_index_completeness())
     all_errors.extend(check_scripts_index_completeness())
     all_errors.extend(check_governance_id_references())
@@ -4312,7 +4312,7 @@ def main() -> int:
         "pre-commit hook 数量 / hook 名称一致性 / workflow 枚举 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性 / "
         "红线总数散文一致性 / enforcement 字段映射一致性 / exceptions.yml 一致性 / 例外反向覆盖一致性 / canonical-topics.yml 一致性 / "
         "Flet 入口完整性 / AGENTS/CLAUDE 顶部生成区块一致性 / 人工评审红线自查清单生成区块一致性 / 规则集元数据一致性 / "
-        "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / 检视结论登记索引（GOV-04） / "
+        "决策树映射一致性 / canonical 路由一致性 / canonical 完成判定覆盖 / 文档索引全覆盖 / canonical 受检范围完整性 / 检视方法论文档登记 / "
         "治理 id 引用一致性 / core 模块清单完整性 / 治理 ID 对照表一致性 / 书名号章节引用一致性 / "
         "规则集变更日志版本一致 / ADR 索引完整性 / 脚本索引完整性 / 策略描述动态一致性 / "
         "Flet 徽章版本一致性 / 例外清单数量守卫 / 治理 ID 对义守卫 / "

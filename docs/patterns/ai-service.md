@@ -31,7 +31,7 @@
 - **输入声明 vs 输出校验职责边界**：
   - **Prompt 输入数据声明校验（策略/测试侧）**：`strategies/prompt_validator.py::validate_prompt_declarations`（配合 `DataDeclaration` / `get_declarations`）——仅校验 System Prompt 声明的数据源在当前库中是否真实可用，**不校验 LLM 响应内容**；坏数据声明用例归口该输入声明边界（如 `tests/unit/test_prompt_validator.py`），不得以输入声明校验替代输出响应校验。
   - **LLM 输出 schema 与归一化所有者（服务/策略侧）**：个股分析结论枚举与字段契约定义于 `core/prompt_base.py`（`CONCLUSION_LABEL_FIELD` / `CONCLUSION_LABELS` / `RECOMMENDATION_TO_CONCLUSION_LABEL`），响应边界校验、置信度归一化与自由文本清洗位于 `services/ai_service/output.py::validate_ai_analysis_response`（含 `VALID_RECOMMENDATIONS` 读兼容与 `_sanitize_free_text`），由 `services/ai_service/stock_analysis.py::StockAnalysisService.analyze_stock` 调用，并在策略侧经 `strategies/ai_mixin.py::AIStrategyMixin._build_result_row` 完成结果行组装与二次兜底；新闻分类输出解析、白名单校验（对照 `utils/config_models.py::NEWS_CATEGORY_MAP`）与层级兜底位于 `services/ai_service/news_classifier.py::NewsClassifier._parse_news_result`。坏模型响应用例须落在上述输出消费边界验证。
-- **已知缺口**：review06 的 F13 指出 LLM 输出影响选股排序，**仅校验部分字段，缺完整输出 schema 校验与 AI 免责声明**（见 [reviews/README.md](../reviews/README.md) 未关闭发现）。改动输出域时把模型输出视为**不可信输入**（对应 [ai-ml-llm.md](../reviews/review-profiles/ai-ml-llm.md) 检视要点），补齐 schema/边界/确定性校验，不得只校验展示字段。
+- **已知缺口**：review06 的 F13 指出 LLM 输出影响选股排序，**仅校验部分字段，缺完整输出 schema 校验与 AI 免责声明**（见 [known-technical-debt.md](../debt/known-technical-debt.md) P2-REV06-LLMOutput-SchemaValidation 条目）。改动输出域时把模型输出视为**不可信输入**（对应 [ai-ml-llm.md](../reviews/review-profiles/ai-ml-llm.md) 检视要点），补齐 schema/边界/确定性校验，不得只校验展示字段。
 
 ### 4. 外发边界与审计
 
@@ -51,7 +51,7 @@
 
 ### 5. Prompt 注入防御分层
 
-- `utils/prompt_guard.py` 为**正则黑名单式**防御，能力有限：能拦截已知指令形态，**挡不住新闻正文等外部文本中的植入指令**（review06 的 F12，见 [reviews/README.md](../reviews/README.md)）。
+- `utils/prompt_guard.py` 为**正则黑名单式**防御，能力有限：能拦截已知指令形态，**挡不住新闻正文等外部文本中的植入指令**（review06 的 F12，见 [known-technical-debt.md](../debt/known-technical-debt.md) P2-REV06-PromptGuard-StructuredBoundary 条目）。
 - **黑名单不是完整防御**：不要把 `prompt_guard` 当作充分防护；任何 AI 功能还须叠加 ADR-0008 的执行权边界（即使注入成功后果也被限制在错误建议范围）+ 输出侧结构化校验。新增 AI 功能在设计文档中须明确其输出仅用于展示，并通过测试验证无执行路径。
 
 ### 6. 本地新闻情绪打分（FinBERT 子进程，N3-2）
