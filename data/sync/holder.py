@@ -855,10 +855,31 @@ class HolderSyncStrategy(ISyncStrategy):
                 trade_dates = [start_date + datetime.timedelta(days=n) for n in range(day_count)]
 
             frames: list[pd.DataFrame] = []
+            # 对齐 _sync_pledge_stat 的 all_api_failed 模式：单日 API 失败不再让整批
+            # 直接 (-1, None)（与 _sync_top10_holders/_sync_members 的逐条错误隔离一致）；
+            # 仅当全部日期都失败时才上报失败等待重跑。
+            all_api_failed = True
             for day in trade_dates:
                 if self._cancelled:
                     break
-                df = await self.context.api.get_pledge_detail(ann_date=day.strftime("%Y%m%d"))
+                try:
+                    df = await self.context.api.get_pledge_detail(ann_date=day.strftime("%Y%m%d"))
+                except EngineDisposedError:
+                    raise
+                except Exception as e:
+                    severity = classify_severity(e, context="general")
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "[HolderSync] pledge_detail | API error for ann_date=%s (%s): %s",
+                        day.strftime("%Y%m%d"),
+                        exc_info=True,
+                    )
+                    if severity == "system":
+                        raise
+                    continue
+                all_api_failed = False
                 if df is not None and not df.empty:
                     if len(df) >= 1000:
                         logger.warning(
@@ -879,6 +900,10 @@ class HolderSyncStrategy(ISyncStrategy):
                     len(combined),
                 )
                 return len(combined), today
+
+            if all_api_failed:
+                logger.warning("[HolderSync] Table | ⚠️ pledge_detail: all API calls failed")
+                return -1, None
 
             logger.debug(
                 "[HolderSync] Table | pledge_detail ann_date %s~%s: no data",

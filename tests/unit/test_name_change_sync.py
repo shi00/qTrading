@@ -114,11 +114,16 @@ class TestNameChangeSyncErrors:
 
     @pytest.mark.asyncio
     async def test_engine_disposed_records_error(self):
-        """EngineDisposedError 记录 error 后返回（R5，不抛出）。"""
+        """EngineDisposedError 必须抛出或传播（R5 红线），并置 FAILED 后 re-raise。
+
+        与 concept/sw_industry/holder/macro/historical 的统一处理对齐；
+        旧实现吞掉异常返回伪 success 违反 R5，已修复。
+        """
         strategy = _make_strategy()
         strategy.context.api.get_namechange = AsyncMock(side_effect=EngineDisposedError("disposed"))
-        result = await strategy._run_impl()
-        assert result.errors == ["engine disposed"]
+        # R5 传播契约仅需验证异常类型穿透
+        with pytest.raises(EngineDisposedError):
+            await strategy._run_impl()
 
     @pytest.mark.asyncio
     async def test_permission_denied_records_skipped(self):
