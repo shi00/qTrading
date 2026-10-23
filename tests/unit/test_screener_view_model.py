@@ -514,6 +514,76 @@ class TestScreenerViewModelStockFilter:
         assert vm.has_export_data is False
 
 
+class TestExportReentryGuard:
+    """P-SCREENER-1: 导出连点守卫 — try_begin_export 幂等互斥 + end_export 复位."""
+
+    def test_try_begin_export_mutual_exclusion(self, vm):
+        assert vm.try_begin_export() is True  # 首次置位成功
+        assert vm.state.is_exporting is True
+        assert vm.try_begin_export() is False  # 未复位前重入被拒 (连点守卫)
+
+    def test_end_export_resets_and_reallows(self, vm):
+        vm.try_begin_export()
+        vm.end_export()
+        assert vm.state.is_exporting is False
+        assert vm.try_begin_export() is True  # 复位后可再次进入
+
+    @pytest.mark.asyncio
+    async def test_execute_export_rejects_concurrent_reentry(self, vm, monkeypatch):
+        """连点竞态回归: 并发两次导出仅执行一次导出体, 且结束后标志复位."""
+        from ui.views import screener_view as sv
+
+        impl_calls = 0
+
+        async def _fake_impl(_vm, _fp, _page, _fmt):
+            nonlocal impl_calls
+            impl_calls += 1
+            await asyncio.sleep(0.01)  # 模拟 CPU 序列化耗时窗口
+
+        monkeypatch.setattr(sv, "_export_impl", _fake_impl)
+        vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ"]})
+
+        await asyncio.gather(
+            sv._execute_screener_export(vm, None, None, "csv"),
+            sv._execute_screener_export(vm, None, None, "csv"),
+        )
+
+        assert impl_calls == 1  # 第二次连点被守卫拒绝
+        assert vm.state.is_exporting is False  # finally 复位无残留
+
+    @pytest.mark.asyncio
+    async def test_execute_export_resets_on_error(self, vm, monkeypatch):
+        """导出体抛异常: finally 复位标志, 异常传播不吞没."""
+        from ui.views import screener_view as sv
+
+        async def _boom(_vm, _fp, _page, _fmt):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(sv, "_export_impl", _boom)
+        vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ"]})
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await sv._execute_screener_export(vm, None, None, "csv")
+
+        assert vm.state.is_exporting is False
+
+    @pytest.mark.asyncio
+    async def test_execute_export_cancelled_propagates(self, vm, monkeypatch):
+        """R2: 取消经 finally 复位后继续传播, 不吞没."""
+        from ui.views import screener_view as sv
+
+        async def _cancel(_vm, _fp, _page, _fmt):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(sv, "_export_impl", _cancel)
+        vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ"]})
+
+        with pytest.raises(asyncio.CancelledError):
+            await sv._execute_screener_export(vm, None, None, "csv")
+
+        assert vm.state.is_exporting is False
+
+
 class TestScreenerViewModelSorting:
     @pytest.mark.asyncio
     async def test_sorting(self, vm):

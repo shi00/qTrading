@@ -2,9 +2,10 @@
 
 从 ``screener_view_model.py`` 按职责拆出：结果导出 CSV/Excel/bytes（``get_export_data``、
 ``export_results``/``export_results_excel``/``export_results_bytes``）、导出按钮判据
-``has_export_data``。
+``has_export_data``、导出进行中守卫（``try_begin_export``/``end_export``，状态
+``state.is_exporting`` 供 View 禁用按钮并防连点重入）。
 
-本 mixin 无独立状态，仅依赖宿主 VM 的 ``_full_results``；全部分支经
+本 mixin 无独立内部缓冲，仅依赖宿主 VM 的 ``_full_results``；全部分支经
 ``ThreadPoolManager.run_async(TaskType.CPU, ...)`` offload CPU 密集序列化 (R16)。
 """
 
@@ -12,9 +13,11 @@ from __future__ import annotations
 
 import io
 import logging
+from collections.abc import Callable
 
 import pandas as pd
 
+from ui.viewmodels.screener_types import ScreenerState
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -25,11 +28,29 @@ class ExportMixin:
     """导出职责（C3-7）。组合进 ``ScreenerViewModel``。"""
 
     _full_results: pd.DataFrame | None
+    _state: ScreenerState
+    _set_state: Callable[..., None]
 
     @property
     def has_export_data(self) -> bool:
         """UX-04: 全量结果非空判据 (导出按钮禁用用, 与过滤后 total_items 解耦)."""
         return self._full_results is not None and not self._full_results.empty
+
+    def try_begin_export(self) -> bool:
+        """进入导出临界区 (P-SCREENER-1: 连点守卫)。
+
+        Returns:
+            bool: True 表示成功置位可执行导出; False 表示已有导出进行中, 调用方直接返回。
+        成功置位后调用方 MUST 经 ``end_export()`` 复位 (含异常/取消路径)。
+        """
+        if self._state.is_exporting:
+            return False
+        self._set_state(is_exporting=True)
+        return True
+
+    def end_export(self) -> None:
+        """退出导出临界区, 复位 ``is_exporting`` (与 ``try_begin_export`` 配对)."""
+        self._set_state(is_exporting=False)
 
     def get_export_data(self):
         """Get the current results DataFrame for export"""
