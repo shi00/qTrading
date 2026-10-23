@@ -238,6 +238,8 @@ class _ModelIds:
     ADD_CONNECTION: Eid = ("e2e.model.add_connection", AnchorKind.INTERACTIVE)
     SEARCH_INPUT: Eid = ("e2e.model.search_input", AnchorKind.INPUT)
     STATUS_FILTER: Eid = ("e2e.model.status_filter", AnchorKind.COMPLEX)
+    # F30：面板头部「刷新快照」按钮（显式重基入口，保留未提交草稿）
+    PANEL_REFRESH: Eid = ("e2e.model.panel_refresh", AnchorKind.INTERACTIVE)
     EDITOR_PREV: Eid = ("e2e.model.editor_prev", AnchorKind.INTERACTIVE)
     EDITOR_NEXT: Eid = ("e2e.model.editor_next", AnchorKind.INTERACTIVE)
     EDITOR_TEST: Eid = ("e2e.model.editor_test", AnchorKind.INTERACTIVE)

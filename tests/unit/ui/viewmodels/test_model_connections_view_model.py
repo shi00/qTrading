@@ -1539,3 +1539,102 @@ class TestFormPayloadClosure:
 
         errors = vm.validate_draft()
         assert "model_connection_error_price_required" in errors
+
+
+# --- F30: 重基（rebase）---
+
+
+class TestRebaseSnapshot:
+    @pytest.mark.asyncio
+    async def test_rebase_updates_baseline_and_keeps_draft(self):
+        """场景域提交后重基：CAS revision 前移，编辑中的草稿逐字段保留（F30）。"""
+        svc = _make_service(_snapshot(revision=1, connections=(_conn(),), scenario_routes=(_route(),)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.edit("c1")
+        vm.update_name("Renamed")  # 草稿分叉
+        assert vm.state.dirty is True
+
+        svc.get_snapshot = AsyncMock(
+            return_value=_snapshot(
+                revision=6,
+                connections=(_conn(), _conn("c2", name="New Conn")),
+                scenario_routes=(_route(),),
+            )
+        )
+        ok = await vm.rebase_snapshot()
+
+        assert ok is True
+        # CAS 基线前移 + 行刷新（含新连接 c2）
+        assert vm.state.config_revision == 6
+        assert [r.connection_id for r in vm.state.connections] == ["c1", "c2"]
+        # 草稿保留：编辑器开、dirty、改名不丢（F30 回归标准——无丢草稿）
+        assert vm.state.editor_open is True
+        assert vm.state.dirty is True
+        assert vm.state.draft.name == "Renamed"
+
+    @pytest.mark.asyncio
+    async def test_rebase_resolves_conflict_to_idle(self):
+        svc = _make_service(_snapshot(revision=1, connections=(_conn(),)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.edit("c1")
+        vm.update_name("Renamed")
+        svc.save_draft = AsyncMock(side_effect=ModelConfigurationConflictError(5, 6))
+        await vm.save()
+        assert vm.state.save_state == "conflict"
+
+        svc.get_snapshot = AsyncMock(return_value=_snapshot(revision=6, connections=(_conn(),)))
+        ok = await vm.rebase_snapshot()
+
+        assert ok is True
+        assert vm.state.save_state == "idle"  # 冲突就地恢复（新基线可重试）
+        assert vm.state.message is None
+        assert vm.state.draft.name == "Renamed"  # 草稿保留
+
+    @pytest.mark.asyncio
+    async def test_rebase_keeps_validation_error_state(self):
+        """SAVE_ERROR 含验证失败语义，重基不清（R21：错误提示仍真实）。"""
+        svc = _make_service(_snapshot(revision=1, connections=(_conn(),)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.start_add()
+        vm.update_billing_mode("estimate_cost")  # 缺单价 → 验证失败
+        await vm.save()
+        assert vm.state.save_state == "error"
+        assert vm.state.validation_errors != ()
+
+        svc.get_snapshot = AsyncMock(return_value=_snapshot(revision=6, connections=(_conn(),)))
+        ok = await vm.rebase_snapshot()
+
+        assert ok is True
+        assert vm.state.save_state == "error"  # 不清验证失败态
+        assert vm.state.validation_errors != ()
+
+    @pytest.mark.asyncio
+    async def test_rebase_failure_returns_false_and_keeps_state(self):
+        svc = _make_service(_snapshot(revision=1, connections=(_conn(),)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.edit("c1")
+        before = vm.state
+        svc.get_snapshot = AsyncMock(side_effect=RuntimeError("boom"))
+
+        ok = await vm.rebase_snapshot()
+
+        assert ok is False  # 不伪装成功（R21）
+        assert vm.state is before
+
+    @pytest.mark.asyncio
+    async def test_rebase_r2_cancelled_error_propagates(self):
+        svc = _make_service(_snapshot(revision=1, connections=(_conn(),)))
+        vm = _make_vm(svc)
+        await vm.load()
+        before = vm.state
+        svc.get_snapshot = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await vm.rebase_snapshot()
+        assert isinstance(exc_info.value, asyncio.CancelledError)  # 显式断言取消类型
+        assert svc.get_snapshot.await_count == 1  # 取消发生在读快照中（非入口短路）
+        assert vm.state is before  # 取消未产生部分状态更新

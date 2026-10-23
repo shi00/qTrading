@@ -106,6 +106,10 @@ class ModelRoutesState:
     advanced_expanded: bool = False
     save_state: str = _SAVE_IDLE
     message: Message | None = None
+    #: 本 VM 提交完成序号（F30）：仅 save committed 时递增，供宿主 effect 检测
+    #: 「场景域已提交、连接 VM 需重基」（不用 config_revision——其在 not_committed /
+    #: commit_unknown 回执下也会经 _absorb_revision 更新，会虚假触发重基）。
+    commit_seq: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +254,35 @@ def _semantic_route_for_save(route: ScenarioRouteDraft, committed: ScenarioRoute
     return replace(route, route_revision=committed.route_revision + 1)
 
 
+def _rebase_drafts(
+    old_drafts: tuple[ScenarioRouteDraft, ...],
+    old_committed: tuple[ScenarioRouteDraft, ...],
+    new_committed: tuple[ScenarioRouteDraft, ...],
+) -> tuple[ScenarioRouteDraft, ...]:
+    """重基草稿（F30）：只前移基线，不覆盖用户正在编辑的分叉草稿。
+
+    - 已分叉草稿（语义字段相对旧基线不等）逐字段保留，仅保持场景 id 对齐；
+    - 未分叉草稿采用新基线行（含新 route_revision），避免基线前移后出现
+      「内容等于新基线却仍标脏」的幻影 dirty；
+    - 新基线缺失对应场景时（``new_committed`` 由 ``_build_drafts`` 生成、恒按
+      SCENARIO_IDS 补默认行，此为防御性兜底）同样采用新基线行。
+    """
+    old_committed_by_id = {r.scenario_id: r for r in old_committed}
+    new_committed_by_id = {r.scenario_id: r for r in new_committed}
+    rebased: list[ScenarioRouteDraft] = []
+    for draft in old_drafts:
+        new_base = new_committed_by_id.get(draft.scenario_id)
+        if new_base is None:
+            rebased.append(draft)
+            continue
+        old_base = old_committed_by_id.get(draft.scenario_id)
+        if old_base is not None and not _semantic_equal(draft, old_base):
+            rebased.append(draft)  # 已分叉：保留用户草稿
+        else:
+            rebased.append(new_base)  # 未分叉：随新基线（消幻影 dirty）
+    return tuple(rebased)
+
+
 class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
     """场景配置页签的 ViewModel（每场景独立草稿、候选引用、排序与撤销）。"""
 
@@ -326,6 +359,49 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
             save_state=_SAVE_IDLE,
             message=None,
         )
+
+    async def rebase_snapshot(self) -> bool:
+        """重基到最新已提交快照（F30：就地重基，保留未提交草稿）。
+
+        触发方：宿主协调 effect（连接域提交后）与面板手动刷新入口。语义：
+        - 只刷新 CAS 基线（``_config_revision`` / raw 元数据 / committed_routes）与
+          候选选择器选项，不覆盖用户正在编辑的分叉草稿（``_rebase_drafts``）；
+        - 冲突 / 失败态就地恢复（conflict / error → idle），commit_unknown 与 saving
+          不动（F31 回执语义与在途提交不受重基干扰）；
+        - 撤销记录清除（重基后撤销语义失效，非丢草稿）。
+
+        Returns:
+            ``True`` 表示重基成功；``False`` 表示读快照失败（不伪装成功，R21）。
+        """
+        self._track_inflight_cancellable()  # F40：只读刷新，页面卸载可安全取消
+        try:
+            snapshot: ModelManagementSnapshot = await self._service.get_snapshot()
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception:
+            return False
+
+        new_committed = _build_drafts(snapshot.scenario_routes)
+        rebased = _rebase_drafts(self._state.routes, self._state.committed_routes, new_committed)
+        options = tuple(_option_from_mapping(c) for c in snapshot.connections)
+        self._config_revision = snapshot.config_revision
+        self._raw_connections = snapshot.connections
+        self._usage_policy = snapshot.usage_policy
+        self._undo = None
+        changes: dict[str, Any] = {
+            "routes": rebased,
+            "committed_routes": new_committed,
+            "available_connections": options,
+            "dirty_counts": _compute_dirty_counts(rebased, new_committed),
+            "undo_available": False,
+        }
+        if self._state.save_state in (_SAVE_CONFLICT, _SAVE_ERROR):
+            # 冲突 / 失败态已由新基线解决（重试即以新 revision 提交）；saving /
+            # commit_unknown / committed 保留原状态机
+            changes["save_state"] = _SAVE_IDLE
+            changes["message"] = None
+        self._set_state(**changes)
+        return True
 
     # ------------------------------------------------------------------
     # 场景切换 / 选择器
@@ -466,6 +542,9 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
                 undo_available=False,
                 save_state=_SAVE_COMMITTED,
                 message=Message("model_routes_save_committed"),
+                # F30：提交完成序号递增，宿主 effect 检测后重基连接 VM（刷新其 _raw_routes，
+                # 防止下次连接保存以陈旧路由回退本次修订）
+                commit_seq=self._state.commit_seq + 1,
             )
         elif outcome.status == "commit_unknown":
             self._set_state(save_state=_SAVE_UNKNOWN, message=Message("model_routes_save_unknown"))
