@@ -5,16 +5,19 @@
 触账本（一律经 UsageRecorder）。
 
 关键契约（方案 §6.2 固定执行流程）：
-- **执行序**：冷却检查 → 连接并发许可（排队计入 deadline）→ mark_dispatched 绑定
-  派发身份（不建 attempt 行）→ 逐次 authorize_attempt（每次尝试单独授权，不预发
-  下一次重试的许可）→ begin_attempt 建立实际尝试记录 → 适配器执行；不在安全许可
-  后再排队（§4.3）；F26 连接资格门控（禁用 / 已确认不支持任务，按冻结快照证据）
-  先于冷却检查——派发前淘汰不合格候选（决策记录 rejected + 原因）；
+- **执行序**：父请求建立（F16，先于候选遍历——全候选被拒 / deadline 耗尽等
+  零尝试请求同样在请求页可查）→ 冷却检查 → 连接并发许可（排队计入 deadline）→
+  逐候选原子预算预留（F16，D3 月锁内 try_reserve）→ mark_dispatched 绑定
+  派发身份 → 逐次 authorize_attempt（每次尝试单独授权，不预发下一次重试的
+  许可）→ begin_attempt 建立实际尝试记录 → 适配器执行；不在安全许可后再排队
+  （§4.3）；F26 连接资格门控（禁用 / 已确认不支持任务，按冻结快照证据）先于
+  冷却检查——派发前淘汰不合格候选（决策记录 rejected + 原因）；
 - **重试**：同候选默认 1 次、上限 2 次（构造可调），退避 1/2s 与适配器
   Retry-After 取大，并 clamp 至剩余 deadline；
-- **D5 降级**：有限额费用型在账本不可用（mark_dispatched persisted=False）时
-  禁止派发；usage_only 允许进程内一次性派发身份；失败候选收敛错误提交终态
-  （§6.2 步骤 5）；
+- **D5 降级**：有限额费用型在预留被拒（余额不足 / owner 失权）或账本不可用
+  （try_reserve / mark_dispatched persisted=False）时零出站；usage_only 预留
+  或落账不可用时允许进程内一次性派发身份；失败候选收敛错误提交终态
+  （§6.2 步骤 5，F16：终态携带预留 ID 经 F22 转换 / F23 背书收敛预留）；
 - **R2**：CancelledError 始终传播，不包装为失败。
 """
 
@@ -56,6 +59,11 @@ _LOOP_STATE_KEY: Final[str] = "scenario_executor_state"
 
 # 归属月时区偏移：CST 无夏令时，固定 +8h（D2 Asia/Shanghai 口径）
 _CST_OFFSET = timedelta(hours=8)
+
+# owner 租约时长（F16，秒）：覆盖单请求 deadline（≤180s）+ 用量确认窗口（60s）
+# 的保守富余；租约过期的预留经 F23 语义自愈（失权 owner 预留不可再推进，
+# reserved 退出预算占用为正确的事实零释放，保守多占可接受）。
+_OWNER_LEASE_SECONDS: Final[float] = 900.0
 
 
 def _default_local_only_mode_reader() -> bool:
@@ -142,6 +150,31 @@ class ScenarioExecutor:
             eligibility_by_id[resolved.connection_id] = eligibility
         decisions: list[CandidateDecision] = []
 
+        # F16 父请求建立（先于候选遍历）：每请求一个 invocation（批次轨道每股 /
+        # 单次场景各产生父请求），全候选被门控拒绝 / deadline 耗尽等零尝试请求
+        # 同样在请求页可查（R21：失败不伪装为未发生）。owner 身份 per-invocation
+        # 生成（F23 fencing 最小身份），租约覆盖 deadline + 用量确认窗口。
+        now_cst = datetime.now(UTC) + _CST_OFFSET
+        owner_session_id = uuid.uuid4().hex
+        owner_epoch = 1
+        owner_lease_expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=_OWNER_LEASE_SECONDS)
+        month = f"{now_cst.year}{now_cst.month:02d}"
+        budget_policy_snapshot = _budget_policy_snapshot(route)
+        invocation_outcome = await self._recorder.ensure_invocation(
+            invocation_id=request.invocation_id,
+            scenario_id=request.scenario_id,
+            trigger="manual",
+            owner_session_id=owner_session_id,
+            owner_epoch=owner_epoch,
+            owner_lease_expires_at=owner_lease_expires_at,
+            budget_policy_snapshot=budget_policy_snapshot,
+        )
+        if not invocation_outcome.persisted:
+            logger.warning(
+                "[ScenarioExecutor] invocation row unavailable (%s); fee candidates will fail closed",
+                invocation_outcome.error_code,
+            )
+
         if route is None:
             return self._terminal(request, "failed", (), decisions, ())
 
@@ -225,6 +258,20 @@ class ScenarioExecutor:
                 )
                 continue
 
+            # F16 预留纪律：适配器缺失的候选在预留前淘汰（无法产生任何实际尝试，
+            # 预留只会造成保守多占）；与 F26 门控同思路（派发前淘汰，零预留副作用）。
+            if connection.adapter_kind not in self._adapters:
+                decisions.append(
+                    CandidateDecision(
+                        task_id=str(cand.get("task_id", "")),
+                        candidate_index=int(cand.get("candidate_index", 0)),
+                        connection_id=connection.connection_id,
+                        decision="rejected",
+                        reason=f"no adapter for kind {connection.adapter_kind}",
+                    )
+                )
+                continue
+
             attempt_id = uuid.uuid4().hex
             # 方案 §6.2 步骤 3：先取得连接并发许可（排队计入 deadline），再绑定派发，
             # 最后逐次 authorize_attempt——不在安全许可后再排队（步骤 4）
@@ -232,15 +279,57 @@ class ScenarioExecutor:
                 connection.connection_id, asyncio.Semaphore(max(1, connection.concurrency_limit))
             )
             async with semaphore:
-                # 派发绑定（D5）：有限额费用型在账本不可用时禁止派发
+                # F16 逐实际尝试原子预留（先于派发绑定，同一 reservation_id 贯穿
+                # 预留 → 派发 → 结算）：费用型候选带预算身份（dispatch 冻结），
+                # usage_only 候选登记 NULL 金额预留（不占预算）。
+                budget_amount = cand.get("budget_amount_cny")
+                reservation_token = uuid.uuid4().hex
+                reserve_outcome = await self._recorder.try_reserve(
+                    invocation_id=request.invocation_id,
+                    scenario_id=request.scenario_id,
+                    task_id=str(cand.get("task_id", request.task_id)),
+                    trigger="manual",
+                    month=month,
+                    reservation_id=reservation_token,
+                    attempt_id=attempt_id,
+                    candidate_index=int(cand.get("candidate_index", 0)),
+                    retry_index=0,
+                    amount_cny=budget_amount,
+                    budget_limit_cny=cand.get("budget_limit_cny"),
+                    budget_policy_snapshot=cand.get("budget_policy_snapshot"),
+                    owner_session_id=owner_session_id,
+                    owner_epoch=owner_epoch,
+                    owner_lease_expires_at=owner_lease_expires_at,
+                )
+                reservation_id: str | None = None
+                if reserve_outcome.persisted and reserve_outcome.reservation is not None:
+                    reservation_id = reservation_token
+                elif budget_amount is not None:
+                    # D5：费用型预留被拒（余额不足 / owner 失权）或账本不可用 →
+                    # 零出站（不降级外发）；原因随决策记录不静默（R21）
+                    decisions.append(
+                        CandidateDecision(
+                            task_id=str(cand.get("task_id", "")),
+                            candidate_index=int(cand.get("candidate_index", 0)),
+                            connection_id=connection.connection_id,
+                            decision="rejected",
+                            reason=f"budget reserve rejected: {reserve_outcome.error_code}",
+                        )
+                    )
+                    break
+                # usage_only：预留未持久化 → 降级进程内派发身份（reservation_id=None）
+
+                # 派发绑定（D5）：预留 reserved→dispatched（F23：错误预留 ID /
+                # owner 失权 rowcount=0）；有限额费用型 persisted=False 时禁止派发
                 dispatch_outcome = await self._recorder.mark_dispatched(
                     invocation_id=request.invocation_id,
-                    reservation_id=cand.get("reservation_id"),
-                    owner_session_id=str(cand.get("owner_session_id", "")),
-                    owner_epoch=int(cand.get("owner_epoch", 0)),
+                    reservation_id=reservation_id,
+                    owner_session_id=owner_session_id,
+                    owner_epoch=owner_epoch,
                 )
-                budget_amount = cand.get("budget_amount_cny")
                 if not dispatch_outcome.persisted and budget_amount is not None:
+                    # 预留成功但派发绑定失权 / 账本不可用：预留留 reserved，由
+                    # F23 租约语义自愈（保守多占，不伪装已释放），零出站
                     decisions.append(
                         CandidateDecision(
                             task_id=str(cand.get("task_id", "")),
@@ -253,7 +342,16 @@ class ScenarioExecutor:
                     break
 
                 outcome = await self._run_candidate(
-                    request, snapshot, connection, cand, attempt_id, clock, validate_output
+                    request,
+                    snapshot,
+                    connection,
+                    cand,
+                    attempt_id,
+                    clock,
+                    validate_output,
+                    reservation_id=reservation_id,
+                    owner_session_id=owner_session_id,
+                    owner_epoch=owner_epoch,
                 )
 
             if outcome.status == "succeeded":
@@ -295,6 +393,10 @@ class ScenarioExecutor:
         attempt_id: str,
         clock: Callable[[], float],
         validate_output: Callable[[AdapterResponse], Any],
+        *,
+        reservation_id: str | None,
+        owner_session_id: str,
+        owner_epoch: int,
     ) -> _CandidateOutcome:
         adapter = self._adapters.get(connection.adapter_kind)
         if adapter is None:
@@ -334,10 +436,16 @@ class ScenarioExecutor:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                reason = f"authorize failed: {type(e).__name__}"
+                if reservation_id is not None:
+                    # F16：预留已绑定派发（dispatched）而授权失败——无 attempt 行，
+                    # 提交 failed 终态经活跃预留背书补记（F23）并转换预留 settled，
+                    # 不留悬挂占用；usage_only（无预留）不补记，维持既有零副作用
+                    await self._submit_failed_terminal(request, attempt_id, reason, reservation_id)
                 return _CandidateOutcome(
                     status="failed",
                     decision_hint="rejected",
-                    reason=f"authorize failed: {type(e).__name__}",
+                    reason=reason,
                     outputs=(),
                     usages=(),
                 )
@@ -351,12 +459,15 @@ class ScenarioExecutor:
             effective_connection = replace(connection, adapter_options=compatibility.resolved_options)
 
             # 真正进入适配器执行前建立实际尝试记录（§6.2 步骤 4；幂等，重试不重建）。
-            # 落账失败降级继续执行（执行已授权开始，费用型此前已被 mark_dispatched 拦截）。
+            # 落账失败降级继续执行（执行已授权开始，费用型此前已被预留/派发门拦截）。
+            # F16：owner 齐传启用 F23 身份强门；attempt_row 携带预留 ID。
             begin_outcome = await self._recorder.begin_attempt(
                 attempt_id=attempt_id,
                 invocation_id=request.invocation_id,
                 configured_model=connection.model,
-                attempt_row=self._attempt_row(request, cand, connection, snapshot, permit),
+                attempt_row=self._attempt_row(request, cand, connection, snapshot, permit, reservation_id),
+                owner_session_id=owner_session_id,
+                owner_epoch=owner_epoch,
             )
             if not begin_outcome.persisted:
                 logger.warning(
@@ -365,8 +476,8 @@ class ScenarioExecutor:
                 )
 
             attempt_context = AttemptContext(
-                owner_session_id=str(cand.get("owner_session_id", "")),
-                owner_epoch=int(cand.get("owner_epoch", 0)),
+                owner_session_id=owner_session_id,
+                owner_epoch=owner_epoch,
                 invocation_id=request.invocation_id,
                 attempt_id=attempt_id,
             )
@@ -392,7 +503,9 @@ class ScenarioExecutor:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                await self._submit_failed_terminal(request, attempt_id, f"output validation failed: {type(e).__name__}")
+                await self._submit_failed_terminal(
+                    request, attempt_id, f"output validation failed: {type(e).__name__}", reservation_id
+                )
                 return _CandidateOutcome(
                     status="failed",
                     reason=f"output validation failed: {type(e).__name__}",
@@ -409,6 +522,7 @@ class ScenarioExecutor:
                     actual_model=response.actual_model,
                     status="succeeded",
                     error_code=None,
+                    reservation_id=reservation_id,
                 )
             )
             if not terminal.persisted:
@@ -438,7 +552,7 @@ class ScenarioExecutor:
             )
 
         # 重试耗尽 / 兼容失败：收敛错误提交终态（方案 §6.2 步骤 5），再切换候选
-        await self._submit_failed_terminal(request, attempt_id, last_reason)
+        await self._submit_failed_terminal(request, attempt_id, last_reason, reservation_id)
         return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
 
     async def _submit_failed_terminal(
@@ -446,10 +560,13 @@ class ScenarioExecutor:
         request: InferenceRequest,
         attempt_id: str,
         error_code: str,
+        reservation_id: str | None,
     ) -> None:
         """失败候选终态落账（§6.2 步骤 5「Executor 收敛错误并提交终态」）。
 
         用量缺失由 Recorder 标 unavailable（R21）；落账失败不阻断切换流程。
+        F16：预留 ID 贯穿终态——非 None 时结算经 F22 预留转换 / F23 活跃预留
+        背书补记收敛预留，不留悬挂占用；None（usage_only / 无预留）行为不变。
         """
         terminal = await self._recorder.submit_terminal(
             _terminal_record(
@@ -459,6 +576,7 @@ class ScenarioExecutor:
                 actual_model=None,
                 status="failed",
                 error_code=error_code,
+                reservation_id=reservation_id,
             )
         )
         if not terminal.persisted:
@@ -488,6 +606,7 @@ class ScenarioExecutor:
         connection: ResolvedConnection,
         snapshot: ExecutionSnapshot,
         permit: Any,
+        reservation_id: str | None,
     ) -> dict[str, Any]:
         return {
             "task_id": str(cand.get("task_id", request.task_id)),
@@ -497,6 +616,7 @@ class ScenarioExecutor:
             "connection_revision": connection.connection_revision,
             "adapter_kind": connection.adapter_kind,
             "security_revision": getattr(permit, "security_revision", 0),
+            "reservation_id": reservation_id,
         }
 
     def _terminal(
@@ -650,6 +770,7 @@ def _terminal_record(
     actual_model: str | None,
     status: str,
     error_code: str | None,
+    reservation_id: str | None = None,
 ) -> Any:
     from services.ai_service.usage_recorder import AttemptTerminalRecord
 
@@ -660,7 +781,23 @@ def _terminal_record(
         usage=usage,
         error_code=error_code,
         duration_ms=None,
+        reservation_id=reservation_id,
     )
+
+
+def _budget_policy_snapshot(route: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """父请求携带的预算政策快照（F16）：取路由候选冻结的预算身份（dispatch 层
+    统一冻结，整批同源一致）；路由缺失 / 候选为空 / 候选未携带 → ``None``
+    （usage_only 语义，不伪装政策存在，R21）。"""
+
+    if route is None:
+        return None
+    for cand in route.get("candidates") or ():
+        if isinstance(cand, Mapping):
+            snap = cand.get("budget_policy_snapshot")
+            if snap is not None:
+                return dict(snap)
+    return None
 
 
 def _metadata(

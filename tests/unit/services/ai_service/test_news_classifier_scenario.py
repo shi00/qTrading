@@ -593,6 +593,12 @@ async def test_dedicated_sentiment_uses_subroute_candidates(monkeypatch):
     assert sentiment_snap.connections == topic_call.args[1].connections
     # 主题请求仍走分派快照原路由
     assert [c["connection_id"] for c in topic_call.args[1].routes[0]["candidates"]] == ["conn-1"]
+    # F16：子快照候选继承主路由冻结的预算身份（同 dispatch 同政策）
+    base_cand = topic_call.args[1].routes[0]["candidates"][0]
+    sub_cand = route["candidates"][0]
+    assert sub_cand["budget_amount_cny"] == base_cand["budget_amount_cny"]
+    assert sub_cand["budget_limit_cny"] == base_cand["budget_limit_cny"]
+    assert sub_cand["budget_policy_snapshot"] == base_cand["budget_policy_snapshot"]
 
 
 async def test_no_sentiment_key_defaults_to_dedicated(monkeypatch):

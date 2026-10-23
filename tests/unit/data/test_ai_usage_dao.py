@@ -118,6 +118,87 @@ def _settle_kwargs(**overrides):
     return kwargs
 
 
+class TestCreateInvocation:
+    """F16 父请求建立（create_invocation）：upsert 幂等 + 参数化 + 快照序列化。"""
+
+    @pytest.mark.asyncio
+    async def test_create_invocation_upsert_returns_true(self):
+        conn = _CaptureConn(results=[1])
+        dao = _dao(conn)
+        assert (
+            await dao.create_invocation(
+                invocation_id="inv-1",
+                scenario_id="news_sentiment",
+                trigger="manual",
+                owner_session_id="owner-1",
+                owner_epoch=1,
+                owner_lease_expires_at=datetime.datetime(2026, 10, 16, 12, 0, 0),
+                budget_policy_snapshot={"monthly_cny_limit": "50.00"},
+            )
+            is True
+        )
+        sql, params = conn.calls[0]
+        assert "INSERT INTO ai_invocation" in sql
+        assert "ON CONFLICT (invocation_id) DO UPDATE" in sql
+        # R4：原生 SQL 命名参数（无 %s / f-string 拼接）
+        assert "%s" not in sql
+        assert params["invocation_id"] == "inv-1"
+        assert params["scenario_id"] == "news_sentiment"
+        assert params["trigger"] == "manual"
+        assert params["owner_session_id"] == "owner-1"
+        assert params["owner_epoch"] == 1
+        assert params["owner_lease_expires_at"] == datetime.datetime(2026, 10, 16, 12, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_create_invocation_snapshot_serialized_to_json(self):
+        conn = _CaptureConn(results=[1])
+        dao = _dao(conn)
+        await dao.create_invocation(
+            invocation_id="inv-1",
+            scenario_id="news_sentiment",
+            trigger="manual",
+            owner_session_id="owner-1",
+            owner_epoch=1,
+            owner_lease_expires_at=datetime.datetime(2026, 10, 16, 12, 0, 0),
+            budget_policy_snapshot={"monthly_cny_limit": "50.00"},
+        )
+        _, params = conn.calls[0]
+        assert json.loads(params["budget_policy_snapshot"]) == {"monthly_cny_limit": "50.00"}
+
+    @pytest.mark.asyncio
+    async def test_create_invocation_none_snapshot_binds_null(self):
+        """usage_only（无政策快照）→ NULL 参数（不伪装政策存在，R21）。"""
+        conn = _CaptureConn(results=[1])
+        dao = _dao(conn)
+        await dao.create_invocation(
+            invocation_id="inv-1",
+            scenario_id="news_sentiment",
+            trigger="manual",
+            owner_session_id="owner-1",
+            owner_epoch=1,
+            owner_lease_expires_at=datetime.datetime(2026, 10, 16, 12, 0, 0),
+            budget_policy_snapshot=None,
+        )
+        _, params = conn.calls[0]
+        assert params["budget_policy_snapshot"] is None
+
+    @pytest.mark.asyncio
+    async def test_create_invocation_rowcount_zero_returns_false(self):
+        conn = _CaptureConn(results=[0])
+        dao = _dao(conn)
+        assert (
+            await dao.create_invocation(
+                invocation_id="inv-1",
+                scenario_id="news_sentiment",
+                trigger="manual",
+                owner_session_id="owner-1",
+                owner_epoch=1,
+                owner_lease_expires_at=datetime.datetime(2026, 10, 16, 12, 0, 0),
+            )
+            is False
+        )
+
+
 class TestTryReserveSqlSemantics:
     @pytest.mark.asyncio
     async def test_advisory_lock_two_keys_present(self):

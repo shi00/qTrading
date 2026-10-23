@@ -19,6 +19,7 @@ from core.model_management_types import NormalizedLLMUsage, PersistenceOutcome
 from services.ai_service.usage_recorder import (
     AttemptTerminalRecord,
     AttemptUsageObservation,
+    ReservationOutcome,
     UsageRecorder,
 )
 
@@ -83,6 +84,126 @@ class TestObserveUsage:
         obs.metadata["connection_id"] = "tampered"
         assert stored["connection_id"] == "conn-remote"
         assert stored["month"] == "202610"
+
+
+class TestEnsureInvocation:
+    """F16 父请求建立包装：DAO 成功 / 账本不可用 / 异常收敛为 PersistenceOutcome。"""
+
+    @pytest.mark.asyncio
+    async def test_ensure_invocation_persists(self):
+        dao = _dao_mock()
+        dao.create_invocation = AsyncMock(return_value=True)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        outcome = await recorder.ensure_invocation(
+            invocation_id="inv-1",
+            scenario_id="news_sentiment",
+            trigger="manual",
+            owner_session_id="owner-1",
+            owner_epoch=1,
+            owner_lease_expires_at="2026-10-23T00:15:00",
+            budget_policy_snapshot={"monthly_cny_limit": "50.00"},
+        )
+        assert outcome == PersistenceOutcome(persisted=True, error_code=None)
+        kwargs = dao.create_invocation.await_args.kwargs
+        assert kwargs["invocation_id"] == "inv-1"
+        assert kwargs["budget_policy_snapshot"] == {"monthly_cny_limit": "50.00"}
+        assert kwargs["owner_session_id"] == "owner-1"
+
+    @pytest.mark.asyncio
+    async def test_ensure_invocation_dao_unavailable(self):
+        recorder = UsageRecorder(dao_provider=lambda: None)
+        outcome = await recorder.ensure_invocation(
+            invocation_id="inv-1",
+            scenario_id="news_sentiment",
+            trigger="manual",
+            owner_session_id="owner-1",
+            owner_epoch=1,
+            owner_lease_expires_at="2026-10-23T00:15:00",
+            budget_policy_snapshot=None,
+        )
+        assert outcome == PersistenceOutcome(persisted=False, error_code="DB_UNAVAILABLE")
+
+    @pytest.mark.asyncio
+    async def test_ensure_invocation_ledger_error_degrades(self):
+        dao = _dao_mock()
+        dao.create_invocation = AsyncMock(side_effect=RuntimeError("boom"))
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        outcome = await recorder.ensure_invocation(
+            invocation_id="inv-1",
+            scenario_id="news_sentiment",
+            trigger="manual",
+            owner_session_id="owner-1",
+            owner_epoch=1,
+            owner_lease_expires_at="2026-10-23T00:15:00",
+            budget_policy_snapshot=None,
+        )
+        assert outcome == PersistenceOutcome(persisted=False, error_code="DB_SETTLE_TIMEOUT")
+
+
+class TestTryReserve:
+    """F16 预算预留包装：DAO 三态（预留成功 / 被拒 / 不可用）映射 ReservationOutcome。"""
+
+    def _reserve_kwargs(self) -> dict:
+        return dict(
+            invocation_id="inv-1",
+            scenario_id="news_sentiment",
+            task_id="sentiment",
+            trigger="manual",
+            month="202610",
+            reservation_id="res-1",
+            attempt_id="att-1",
+            candidate_index=0,
+            retry_index=0,
+            amount_cny="0.00",
+            budget_limit_cny="50.00",
+            budget_policy_snapshot={"monthly_cny_limit": "50.00"},
+            owner_session_id="owner-1",
+            owner_epoch=1,
+            owner_lease_expires_at="2026-10-23T00:15:00",
+        )
+
+    @pytest.mark.asyncio
+    async def test_try_reserve_success_carries_reservation(self):
+        dao = _dao_mock()
+        reservation = MagicMock()
+        dao.try_reserve = AsyncMock(return_value=reservation)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        outcome = await recorder.try_reserve(**self._reserve_kwargs())
+        assert outcome == ReservationOutcome(persisted=True, error_code=None, reservation=reservation)
+        kwargs = dao.try_reserve.await_args.kwargs
+        # 预留租约与 owner 租约同源（Executor 单一租约语义）
+        assert kwargs["lease_expires_at"] == kwargs["owner_lease_expires_at"]
+        assert kwargs["amount_cny"] == "0.00"
+        assert kwargs["budget_limit_cny"] == "50.00"
+
+    @pytest.mark.asyncio
+    async def test_try_reserve_rejected_maps_to_reserve_rejected(self):
+        """DAO 返回 None（余额不足 / owner 失权）→ persisted=True + RESERVE_REJECTED。"""
+        dao = _dao_mock()
+        dao.try_reserve = AsyncMock(return_value=None)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        outcome = await recorder.try_reserve(**self._reserve_kwargs())
+        assert outcome == ReservationOutcome(persisted=True, error_code="RESERVE_REJECTED", reservation=None)
+
+    @pytest.mark.asyncio
+    async def test_try_reserve_dao_unavailable(self):
+        recorder = UsageRecorder(dao_provider=lambda: None)
+        outcome = await recorder.try_reserve(**self._reserve_kwargs())
+        assert outcome == ReservationOutcome(persisted=False, error_code="DB_UNAVAILABLE", reservation=None)
+
+    @pytest.mark.asyncio
+    async def test_try_reserve_usage_only_null_amount(self):
+        """usage_only（amount/limit 均 None）同样透传 DAO（NULL 金额预留，不占预算）。"""
+        dao = _dao_mock()
+        dao.try_reserve = AsyncMock(return_value=MagicMock())
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        kwargs = self._reserve_kwargs()
+        kwargs["amount_cny"] = None
+        kwargs["budget_limit_cny"] = None
+        kwargs["budget_policy_snapshot"] = None
+        outcome = await recorder.try_reserve(**kwargs)
+        assert outcome.persisted is True
+        assert outcome.reservation is not None
 
 
 class TestMarkDispatched:

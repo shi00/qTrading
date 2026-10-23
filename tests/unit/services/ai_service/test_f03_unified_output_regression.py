@@ -31,6 +31,7 @@ from services.ai_service.news_risk import NewsRiskAnalyzer
 from services.ai_service.scenario_dispatch import ScenarioDispatch
 from services.ai_service.scenario_executor import ScenarioExecutor
 from services.ai_service.stock_analysis import StockAnalysisService
+from services.ai_service.usage_recorder import ReservationOutcome
 from services.news_insight_models import EvidenceDocument, NewsInsightRequest
 
 pytestmark = pytest.mark.unit
@@ -48,6 +49,10 @@ def _real_executor(adapter_response: AdapterResponse) -> ScenarioExecutor:
     config_service.authorize_attempt = AsyncMock(return_value=MagicMock(security_revision=1))
     recorder = MagicMock()
     recorder.observe_usage = MagicMock()
+    recorder.ensure_invocation = AsyncMock(return_value=PersistenceOutcome(persisted=True, error_code=None))
+    recorder.try_reserve = AsyncMock(
+        return_value=ReservationOutcome(persisted=True, error_code=None, reservation=MagicMock())
+    )
     recorder.mark_dispatched = AsyncMock(return_value=PersistenceOutcome(persisted=True, error_code=None))
     recorder.begin_attempt = AsyncMock(return_value=PersistenceOutcome(persisted=True, error_code=None))
     recorder.submit_terminal = AsyncMock(return_value=PersistenceOutcome(persisted=True, error_code=None))

@@ -507,6 +507,11 @@ class NewsClassifier:
         loop = asyncio.get_running_loop()
         # D1（检视修复）：sentiment 子列表独立排序——用 task_routes.sentiment.candidates
         # 构造子路由快照（Executor 按 scenario_id 匹配路由），不经场景级候选。
+        # F16：预算身份继承主路由冻结值（同 dispatch 同政策，费用型判据一致），
+        # 不再以 reservation/owner 伪值占位（owner 由 Executor per-invocation 生成）。
+        base_route = dispatch.snapshot.routes[0]
+        base_candidates = base_route.get("candidates") or ()
+        base_budget = next(iter(base_candidates), {})
         sentiment_candidates = [str(cid) for cid in (sentiment_route.get("candidates") or [])]
         sentiment_snapshot = dataclass_replace(
             dispatch.snapshot,
@@ -519,9 +524,9 @@ class NewsClassifier:
                             "candidate_index": index,
                             "task_id": "sentiment",
                             "connection_id": conn_id,
-                            "reservation_id": None,
-                            "owner_session_id": "",
-                            "owner_epoch": 0,
+                            "budget_amount_cny": base_budget.get("budget_amount_cny"),
+                            "budget_limit_cny": base_budget.get("budget_limit_cny"),
+                            "budget_policy_snapshot": base_budget.get("budget_policy_snapshot"),
                         }
                         for index, conn_id in enumerate(sentiment_candidates)
                     ),

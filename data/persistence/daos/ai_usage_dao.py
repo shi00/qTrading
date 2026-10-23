@@ -387,6 +387,63 @@ class AIUsageDao(BaseDao):
     """三表账本访问对象：ai_invocation / ai_attempt / ai_usage_monthly。"""
 
     # ------------------------------------------------------------------
+    # 父请求建立（F16：场景链创建 invocation——三表父子账目的调用方纪律起点）
+    # ------------------------------------------------------------------
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    async def create_invocation(
+        self,
+        *,
+        invocation_id: str,
+        scenario_id: str,
+        trigger: str,
+        owner_session_id: str,
+        owner_epoch: int,
+        owner_lease_expires_at: datetime.datetime,
+        budget_policy_snapshot: dict[str, Any] | None = None,
+    ) -> bool:
+        """建立 / 幂等复用父请求行（F16，方案最小方案「场景入口创建父请求」）。
+
+        与 :meth:`try_reserve` 步骤 2 的 invocation upsert 同形态
+        （INSERT ... ON CONFLICT DO UPDATE 仅推进 updated_at，不覆盖既有 owner
+        身份）：先于候选遍历建立，使「全候选被门控拒绝 / deadline 耗尽」等
+        零尝试请求在请求页（以 invocation 为主表）同样可查（R21：失败不伪装
+        为未发生）。预留登记仍走 :meth:`try_reserve`，本方法不追加预留元素。
+
+        返回 True = 新建或幂等复用（upsert 命中即有行）。
+        """
+        self._check_engine(context="ai_usage.create_invocation")
+        async with self._guarded_begin() as conn:
+            result = await conn.execute(
+                sa.text(
+                    """
+                    INSERT INTO ai_invocation (
+                        invocation_id, scenario_id, trigger, budget_policy_snapshot,
+                        owner_session_id, owner_epoch, owner_lease_expires_at
+                    ) VALUES (
+                        :invocation_id, :scenario_id, :trigger,
+                        CAST(:budget_policy_snapshot AS jsonb),
+                        :owner_session_id, :owner_epoch, :owner_lease_expires_at
+                    )
+                    ON CONFLICT (invocation_id) DO UPDATE SET
+                        updated_at = (now() AT TIME ZONE 'UTC')
+                    """
+                ),
+                {
+                    "invocation_id": invocation_id,
+                    "scenario_id": scenario_id,
+                    "trigger": trigger,
+                    "budget_policy_snapshot": (
+                        json.dumps(budget_policy_snapshot, ensure_ascii=False) if budget_policy_snapshot else None
+                    ),
+                    "owner_session_id": owner_session_id,
+                    "owner_epoch": owner_epoch,
+                    "owner_lease_expires_at": owner_lease_expires_at,
+                },
+            )
+            return bool(result.rowcount and result.rowcount > 0)
+
+    # ------------------------------------------------------------------
     # 预算预留（D3，§9.2 try_reserve）
     # ------------------------------------------------------------------
 
