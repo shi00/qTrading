@@ -37,3 +37,18 @@ class TestMetaDataManagerLocaleIsolation:
 
         result_dict = MetaDataManager.get_raw_alias({"key": "val"}, "stock_basic")
         assert result_dict == {"key": "val"}
+
+    def test_get_raw_alias_handles_nested_unhashable_tuple(self):
+        """tuple 顶层被 is_hashable 判定为可哈希，但内嵌 list 使 cache_key 不可哈希，
+        须回退字符串键而非抛 TypeError（与顶层 unhashable 容错意图一致）。"""
+        MetaDataManager.invalidate_cache()
+        term = ("a", ["b"])
+        result = MetaDataManager.get_raw_alias(term, "stock_basic")
+        assert result == term
+
+    def test_get_raw_alias_handles_dict_with_unhashable_items(self):
+        """dict 的 value 含 dict（sorted 可排序但结果元组不可哈希）时不抛 TypeError。"""
+        MetaDataManager.invalidate_cache()
+        term = {"k": {"nested": 1}}
+        result = MetaDataManager.get_raw_alias(term, "stock_basic")
+        assert result == term
