@@ -10,6 +10,7 @@ import pytest
 import pandas as pd
 from unittest.mock import patch, MagicMock, AsyncMock
 
+from core.i18n import I18n
 from data.cache.cache_manager import CacheManager
 from data.domain_services.market_data_service import MarketDataService
 from utils.thread_pool import TaskType
@@ -157,11 +158,13 @@ class TestMarketDataServiceStopAsyncR2Propagation:
 
 
 class TestMarketDataServiceSafeFloat:
+    """_safe_float 契约（R21）：缺失/非法 → None，不折叠为 0.0；合法数值（含真实 0/负数）原样传递。"""
+
     def test_none(self):
-        assert MarketDataService._safe_float(None) == 0.0
+        assert MarketDataService._safe_float(None) is None
 
     def test_nan(self):
-        assert MarketDataService._safe_float(float("nan")) == 0.0
+        assert MarketDataService._safe_float(float("nan")) is None
 
     def test_valid_number(self):
         assert MarketDataService._safe_float(3.14) == 3.14
@@ -170,16 +173,19 @@ class TestMarketDataServiceSafeFloat:
         assert MarketDataService._safe_float("2.5") == 2.5
 
     def test_invalid_string(self):
-        assert MarketDataService._safe_float("abc") == 0.0
+        assert MarketDataService._safe_float("abc") is None
 
     def test_zero(self):
         assert MarketDataService._safe_float(0) == 0.0
 
     def test_inf(self):
-        assert MarketDataService._safe_float(float("inf")) == 0.0
+        assert MarketDataService._safe_float(float("inf")) is None
 
     def test_neg_inf(self):
-        assert MarketDataService._safe_float(float("-inf")) == 0.0
+        assert MarketDataService._safe_float(float("-inf")) is None
+
+    def test_negative_number(self):
+        assert MarketDataService._safe_float(-5.0) == -5.0
 
 
 class TestMarketDataServiceGetIndicesBatch:
@@ -281,7 +287,8 @@ class TestMarketDataServiceGetIndicesBatch:
         assert result[0]["color"] == "red"
 
     @pytest.mark.asyncio
-    async def test_nan_pct_chg_treated_as_zero(self):
+    async def test_nan_pct_chg_shows_dash_keeps_close(self):
+        """R21: pct_chg=NaN → change='-' 独立占位，合法 close 不被牵连为伪 0。"""
         svc = self._make_svc()
         df = pd.DataFrame(
             {
@@ -294,10 +301,13 @@ class TestMarketDataServiceGetIndicesBatch:
         codes = ["000001.SH"]
         result = await svc._get_indices_batch(codes, "20240614")
         assert len(result) == 1
+        assert result[0]["value"] == "3000.00"
+        assert result[0]["change"] == "-"
         assert result[0]["color"] == "grey"
 
     @pytest.mark.asyncio
-    async def test_none_pct_chg_treated_as_zero(self):
+    async def test_none_pct_chg_shows_dash_keeps_close(self):
+        """R21: pct_chg=None → change='-' 独立占位，合法 close 不被牵连为伪 0。"""
         svc = self._make_svc()
         df = pd.DataFrame(
             {
@@ -310,6 +320,79 @@ class TestMarketDataServiceGetIndicesBatch:
         codes = ["000001.SH"]
         result = await svc._get_indices_batch(codes, "20240614")
         assert len(result) == 1
+        assert result[0]["value"] == "3000.00"
+        assert result[0]["change"] == "-"
+        assert result[0]["color"] == "grey"
+
+    @pytest.mark.asyncio
+    async def test_none_close_returns_empty_card_not_pseudo_zero(self):
+        """R21: close=None → 整卡空态（value='-'），不产出伪 '0.00'。"""
+        svc = self._make_svc()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH"],
+                "pct_chg": [1.5],
+                "close": [None],
+            }
+        )
+        svc.cache.get_index_daily_range = AsyncMock(return_value=df)
+        codes = ["000001.SH"]
+        result = await svc._get_indices_batch(codes, "20240614")
+        assert len(result) == 1
+        assert result[0]["value"] == "-"
+        assert result[0]["change"] == "-"
+        assert result[0]["color"] == "grey"
+
+    @pytest.mark.asyncio
+    async def test_nan_close_returns_empty_card(self):
+        """R21: close=NaN → 整卡空态（value='-'）。"""
+        svc = self._make_svc()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH"],
+                "pct_chg": [-1.0],
+                "close": [float("nan")],
+            }
+        )
+        svc.cache.get_index_daily_range = AsyncMock(return_value=df)
+        codes = ["000001.SH"]
+        result = await svc._get_indices_batch(codes, "20240614")
+        assert len(result) == 1
+        assert result[0]["value"] == "-"
+        assert result[0]["change"] == "-"
+
+    @pytest.mark.asyncio
+    async def test_inf_close_returns_empty_card(self):
+        """R21: close=Inf 非有限数值 → 整卡空态。"""
+        svc = self._make_svc()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH"],
+                "pct_chg": [1.0],
+                "close": [float("inf")],
+            }
+        )
+        svc.cache.get_index_daily_range = AsyncMock(return_value=df)
+        codes = ["000001.SH"]
+        result = await svc._get_indices_batch(codes, "20240614")
+        assert result[0]["value"] == "-"
+
+    @pytest.mark.asyncio
+    async def test_zero_close_is_real_zero_not_missing(self):
+        """R21 反向不变量: close=0 是合法真实零 → value='0.00'（非空态）。"""
+        svc = self._make_svc()
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH"],
+                "pct_chg": [0.0],
+                "close": [0.0],
+            }
+        )
+        svc.cache.get_index_daily_range = AsyncMock(return_value=df)
+        codes = ["000001.SH"]
+        result = await svc._get_indices_batch(codes, "20240614")
+        assert result[0]["value"] == "0.00"
+        assert result[0]["change"] == "+0.00%"
         assert result[0]["color"] == "grey"
 
     @pytest.mark.asyncio
@@ -829,6 +912,68 @@ class TestMarketDataServiceGetHsgt:
                     "yuan",
                 )
                 assert result["color"] == "red"
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_none_north_money_returns_empty_card(self, mock_tc, mock_cache_cls, mock_api):
+        """R21: north_money=None → 空卡占位（value='-'），不伪装为 0 / 不误附「流出」。"""
+        mock_cache = MagicMock()
+        mock_cache_cls.return_value = mock_cache
+        df = pd.DataFrame({"north_money": [None]})
+        mock_cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=df)
+        svc = MarketDataService()
+        result = await svc._get_hsgt("20240614")
+        assert result["value"] == "-"
+        assert result["sub"] == "-"
+        assert result["color"] == "grey"
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_nan_north_money_returns_empty_card(self, mock_tc, mock_cache_cls, mock_api):
+        """R21: north_money=NaN → 空卡占位（value='-'）。"""
+        mock_cache = MagicMock()
+        mock_cache_cls.return_value = mock_cache
+        df = pd.DataFrame({"north_money": [float("nan")]})
+        mock_cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=df)
+        svc = MarketDataService()
+        result = await svc._get_hsgt("20240614")
+        assert result["value"] == "-"
+        assert result["sub"] == "-"
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_zero_north_money_is_real_zero_not_missing(self, mock_tc, mock_cache_cls, mock_api):
+        """R21 反向不变量: north_money=0 是合法真实零 → value='0万'（非空态）。"""
+        mock_cache = MagicMock()
+        mock_cache_cls.return_value = mock_cache
+        df = pd.DataFrame({"north_money": [0.0]})
+        mock_cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=df)
+        svc = MarketDataService()
+        result = await svc._get_hsgt("20240614")
+        assert result["value"] == f"0{I18n.get('unit_wan')}"
+        assert result["color"] == "grey"
+        assert result["value"] != "-"
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_negative_north_money_keeps_outflow(self, mock_tc, mock_cache_cls, mock_api):
+        """R21 反向不变量: north_money 负数（真实流出）保留 green 流向。"""
+        mock_cache = MagicMock()
+        mock_cache_cls.return_value = mock_cache
+        df = pd.DataFrame({"north_money": [-50.0]})
+        mock_cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=df)
+        svc = MarketDataService()
+        result = await svc._get_hsgt("20240614")
+        assert result["color"] == "green"
+        assert result["value"] != "-"
 
 
 class TestMarketDataServiceStartStop:

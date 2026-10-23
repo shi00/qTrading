@@ -396,11 +396,16 @@ class MarketDataService:
                 c = self._safe_float(row.get("pct_chg"))
                 v = self._safe_float(row.get("close"))
                 name_key = code_to_key.get(ts_code, "")
-                color = "red" if c > 0 else "green" if c < 0 else "grey"
+                if v is None:
+                    # R21: 主值缺失 → 整卡空态, 不产出伪 "0.00" (缺失 ≠ 0)
+                    result_map[ts_code] = MarketDataService._get_empty_index_data_static(name_key)
+                    continue
+                color = "red" if c is not None and c > 0 else "green" if c is not None and c < 0 else "grey"
                 result_map[ts_code] = {
                     "name": I18n.get(name_key),
                     "value": f"{v:.2f}",
-                    "change": f"{c:+.2f}%",
+                    # R21: 涨跌缺失独立显示 "-", 不冒充 "+0.00%", 也不牵连合法价格
+                    "change": f"{c:+.2f}%" if c is not None else "-",
                     "color": color,
                 }
 
@@ -440,6 +445,9 @@ class MarketDataService:
                     "Display conversion may be incorrect.",
                     unit,
                 )
+            if val is None:
+                # R21: north_money 缺失 → 空卡占位, 不伪装为 0 (更不会误附「流出」方向)
+                return MarketDataService._get_empty_hsgt_data_static()
             # north_money unit: 百万元 (1 Million CNY). >100 (=1亿) -> 亿 display.
             return {
                 "name": I18n.get("home_northbound"),
@@ -461,14 +469,18 @@ class MarketDataService:
         }
 
     @staticmethod
-    def _safe_float(val: typing.Any) -> float:
-        """Safely convert value to float, defaulting to 0.0 if None/NaN"""
+    def _safe_float(val: typing.Any) -> float | None:
+        """Safely convert value to a finite float, or None when missing/invalid (R21).
+
+        缺失（None/NaN/Inf/不可解析/缺列）返回 None，不折叠为 0.0 —— 缺失 ≠ 0；
+        真实 0 与合法负数原样传递，由调用方区分「无数据」与「数值为零」。
+        """
+        if val is None:
+            return None
         try:
-            if val is None:
-                return 0.0
             f = float(val)
-            if math.isnan(f) or math.isinf(f):
-                return 0.0
-            return f
         except (ValueError, TypeError):
-            return 0.0
+            return None
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return f
