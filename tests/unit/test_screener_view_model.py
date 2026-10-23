@@ -599,6 +599,23 @@ class TestScreenerViewModelSorting:
         assert not vm.state.sort_ascending
         assert vm._full_results.iloc[0]["A"] == 3
 
+    @pytest.mark.asyncio
+    async def test_concurrent_sorts_final_state_matches_last_click(self, vm):
+        """连点竞态回归 (P-SCREENER-2): 并发两次排序经 loop-local 锁串行化,
+        最终状态恒等于最后一次点击的排序意图 (表头指示与实际排序一致).
+        """
+        df = pd.DataFrame({"A": [3, 1, 2], "B": [30, 10, 20]})
+        vm._full_results = df
+
+        # 模拟快速连点两个列头: 先点 A 升序, 再点 B 降序
+        await asyncio.gather(vm.sort_data("A", True), vm.sort_data("B", False))
+
+        # 修复后: 第二次点击 (列 B 降序) 排队后基于最新数据执行, 最终状态一致
+        assert vm.state.sort_column == "B"
+        assert vm.state.sort_ascending is False
+        assert list(vm._full_results["B"]) == [30, 20, 10]
+        assert vm.state.loading is False
+
 
 class TestScreenerViewModelAIStreaming:
     @pytest.mark.asyncio
