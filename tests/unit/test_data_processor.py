@@ -5,12 +5,15 @@
 
 import asyncio
 import datetime
+import threading
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
 from core.i18n import Message
 from data.data_processor import DataProcessor
+from data.sync.base import SyncResult
 
 pytestmark = pytest.mark.unit
 
@@ -713,6 +716,105 @@ class TestDataProcessorSyncConcepts:
         dp.cache.stock_dao.overwrite_concepts.assert_not_called()
 
 
+class TestDataProcessorRunConceptSync:
+    """run_concept_sync 双策略编排：取消传播、成功聚合、异常隔离。"""
+
+    @staticmethod
+    def _ok_result() -> SyncResult:
+        return SyncResult(status="success")
+
+    @pytest.mark.asyncio
+    async def test_success_aggregates_both_strategies(self):
+        dp = _make_dp()
+        cancel_event = threading.Event()
+        with (
+            patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as mock_ak,
+            patch("data.sync.concept_sync.LimitListSyncStrategy") as mock_limit,
+        ):
+            mock_ak.return_value.run = AsyncMock(return_value=self._ok_result())
+            mock_limit.return_value.run = AsyncMock(return_value=self._ok_result())
+            result = await dp.run_concept_sync(task_id="t1", cancel_event=cancel_event)
+        assert result == "akshare=success | limit_list=success"
+        # 取消信号须传播到 SyncContext 供长任务轮询
+        assert dp.context.cancel_event is cancel_event
+        mock_ak.assert_called_once_with(dp.context)
+        mock_limit.assert_called_once_with(dp.context)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_event_skips_both_strategies(self):
+        dp = _make_dp()
+        cancel_event = threading.Event()
+        cancel_event.set()
+        with (
+            patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as mock_ak,
+            patch("data.sync.concept_sync.LimitListSyncStrategy") as mock_limit,
+        ):
+            result = await dp.run_concept_sync(task_id="t1", cancel_event=cancel_event)
+        assert result == "akshare=cancelled | limit_list=cancelled"
+        mock_ak.assert_not_called()
+        mock_limit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_strategy_failure_isolated_per_step(self):
+        dp = _make_dp()
+        dp.clear_cancel()
+        with (
+            patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as mock_ak,
+            patch("data.sync.concept_sync.LimitListSyncStrategy") as mock_limit,
+        ):
+            mock_ak.return_value.run = AsyncMock(side_effect=RuntimeError("akshare boom"))
+            mock_limit.return_value.run = AsyncMock(return_value=self._ok_result())
+            result = await dp.run_concept_sync(task_id="t1", cancel_event=None)
+        # 单步失败不阻断另一步（R2：CancelledError 不在此分支，RuntimeError 才隔离）
+        assert result == "akshare=failed | limit_list=success"
+
+    @pytest.mark.asyncio
+    async def test_limitlist_failure_isolated_per_step(self):
+        dp = _make_dp()
+        dp.clear_cancel()
+        with (
+            patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as mock_ak,
+            patch("data.sync.concept_sync.LimitListSyncStrategy") as mock_limit,
+        ):
+            mock_ak.return_value.run = AsyncMock(return_value=self._ok_result())
+            mock_limit.return_value.run = AsyncMock(side_effect=RuntimeError("limit boom"))
+            result = await dp.run_concept_sync(task_id="t1", cancel_event=None)
+        assert result == "akshare=success | limit_list=failed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("step", ["ak", "limit"])
+    async def test_cancelled_error_propagates_not_swallowed(self, step):
+        """R2：策略内 asyncio.CancelledError 必须原样传播，不得被异常隔离分支吞没"""
+        dp = _make_dp()
+        dp.clear_cancel()
+        cancelled_err = asyncio.CancelledError()
+        with (
+            patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as mock_ak,
+            patch("data.sync.concept_sync.LimitListSyncStrategy") as mock_limit,
+        ):
+            if step == "ak":
+                mock_ak.return_value.run = AsyncMock(side_effect=cancelled_err)
+                mock_limit.return_value.run = AsyncMock(return_value=self._ok_result())
+            else:
+                mock_ak.return_value.run = AsyncMock(return_value=self._ok_result())
+                mock_limit.return_value.run = AsyncMock(side_effect=cancelled_err)
+            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 契约仅验证 CancelledError 类型原样传播不被吞没，该异常无有意义属性可进一步 match
+                await dp.run_concept_sync(task_id="t1", cancel_event=None)
+
+    @pytest.mark.asyncio
+    async def test_internal_cancel_event_skips_strategies(self):
+        dp = _make_dp()
+        dp._get_cancel_event().set()
+        with (
+            patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as mock_ak,
+            patch("data.sync.concept_sync.LimitListSyncStrategy") as mock_limit,
+        ):
+            result = await dp.run_concept_sync(task_id="t1", cancel_event=None)
+        assert result == "akshare=cancelled | limit_list=cancelled"
+        mock_ak.assert_not_called()
+        mock_limit.assert_not_called()
+
+
 class TestDataProcessorInitData:
     @pytest.mark.asyncio
     async def test_init_data(self):
@@ -827,92 +929,6 @@ class TestDataProcessorPrepareMarketData:
         dp.sync_daily_market_snapshot.assert_not_awaited()
         assert mock_warn.call_count == 1
         assert "inline sync removed" in mock_warn.call_args.args[0]
-
-
-class TestDataProcessorGetMarketOverview:
-    @pytest.mark.asyncio
-    async def test_exception(self):
-        dp = _make_dp()
-        dp.trade_calendar = MagicMock()
-        dp.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
-        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
-            result = await dp.get_market_overview()
-            assert result is None
-
-    @pytest.mark.asyncio
-    async def test_batch_query_success(self):
-        dp = _make_dp()
-        dp.trade_calendar = MagicMock()
-        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        index_df = pd.DataFrame(
-            {
-                "ts_code": ["000001.SH", "399001.SZ", "399006.SZ"],
-                "pct_chg": [1.5, -2.0, 0.0],
-                "close": [3000.0, 10000.0, 2000.0],
-            }
-        )
-        dp.cache.get_index_daily_range = AsyncMock(return_value=index_df)
-        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
-        dp.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
-        with patch(
-            "data.data_processor.NewsFetcher.get_hot_concepts",
-            new_callable=AsyncMock,
-            return_value=[],
-        ):
-            with patch(
-                "data.data_processor.get_now",
-                return_value=datetime.datetime(2024, 6, 14),
-            ):
-                result = await dp.get_market_overview()
-        assert result is not None
-        assert len(result["indices"]) == 3
-        assert result["indices"][0]["color"] == "red"
-        assert result["indices"][1]["color"] == "green"
-        assert result["indices"][2]["color"] == "grey"
-        dp.cache.get_index_daily_range.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_cache_miss_falls_back_to_api(self):
-        dp = _make_dp()
-        dp.trade_calendar = MagicMock()
-        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        dp.cache.get_index_daily_range = AsyncMock(return_value=None)
-        api_df = pd.DataFrame(
-            {
-                "ts_code": ["000001.SH"],
-                "pct_chg": [0.5],
-                "close": [3100.0],
-            }
-        )
-        dp.api.get_index_daily = AsyncMock(return_value=api_df)
-        dp.cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=None)
-        dp.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
-        with patch(
-            "data.data_processor.NewsFetcher.get_hot_concepts",
-            new_callable=AsyncMock,
-            return_value=[],
-        ):
-            with patch(
-                "data.data_processor.get_now",
-                return_value=datetime.datetime(2024, 6, 14),
-            ):
-                result = await dp.get_market_overview()
-        assert result is not None
-        assert len(result["indices"]) == 3
-        assert result["indices"][0]["color"] == "red"
-        assert result["indices"][1]["color"] == "grey"
-        assert result["indices"][2]["color"] == "grey"
-        dp.api.get_index_daily.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_calendar_unavailable_returns_empty_dict(self):
-        """覆盖 L700-705: latest_date is None 时返回 {}"""
-        dp = _make_dp()
-        dp.trade_calendar = MagicMock()
-        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
-        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
-            result = await dp.get_market_overview()
-        assert result == {}
 
 
 class TestDataProcessorGetStockHistory:

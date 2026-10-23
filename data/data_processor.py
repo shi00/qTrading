@@ -9,7 +9,6 @@ import pandas as pd
 
 from data.cache.cache_manager import CacheManager
 from data.domain_services.trade_calendar_service import TradeCalendarService
-from data.external.news_fetcher import NewsFetcher
 from data.external.tushare_client import TushareClient
 from data.mixins.calendar_mixin import CalendarMixin
 from data.mixins.health_mixin import HealthCheckMixin
@@ -801,105 +800,6 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             )
 
         return today_date
-
-    async def get_market_overview(self):
-        """
-        Get market overview data for Home Screen.
-        Returns Indices (SH, SZ, CYB) and Northbound Money Flow.
-        优先从缓存获取，缓存无数据时调用 API。
-        Uses batch query for indices to reduce DB/API round trips.
-        """
-        try:
-            latest_date = await self.trade_calendar.get_latest_trade_date()
-            if latest_date is None:
-                logger.error(
-                    "[DataProcessor] get_market_overview | All calendar sources unavailable. Skipping.",
-                )
-                return {}
-            date = latest_date
-
-            INDICES_CONFIG = [
-                ("000001.SH", "home_index_sh"),
-                ("399001.SZ", "home_index_sz"),
-                ("399006.SZ", "home_index_cyb"),
-            ]
-
-            async def get_indices_batch():
-                codes = [code for code, _ in INDICES_CONFIG]
-                code_to_key = {code: key for code, key in INDICES_CONFIG}
-                date_str = date.strftime("%Y%m%d") if isinstance(date, datetime.date) else str(date)
-                df = await self.cache.get_index_daily_range(codes, start_date=date_str, end_date=date_str)
-
-                if df is None or df.empty:
-                    df = await self.api.get_index_daily(trade_date=date_str)
-
-                result_map: dict[str, dict] = {}
-                if df is not None and not df.empty:
-                    for ts_code in codes:
-                        row_df = df[df["ts_code"] == ts_code]
-                        if row_df.empty:
-                            continue
-                        row = row_df.iloc[0]
-                        c = row.get("pct_chg", 0)
-                        v = row.get("close", 0)
-                        name_key = code_to_key.get(ts_code, "")
-                        color = "red" if c > 0 else "green" if c < 0 else "grey"
-                        result_map[ts_code] = {
-                            "name": I18n.get(name_key),
-                            "value": f"{v:.2f}",
-                            "change": f"{c:+.2f}%",
-                            "color": color,
-                        }
-
-                indices = []
-                for code in codes:
-                    if code in result_map:
-                        indices.append(result_map[code])
-                    else:
-                        name_key = code_to_key.get(code, "")
-                        indices.append({"name": I18n.get(name_key), "value": "-", "change": "-", "color": "grey"})
-                return indices
-
-            async def get_hsgt():
-                df = await self.cache.market_dao.get_moneyflow_hsgt(trade_date=date)
-
-                if df is None or df.empty:
-                    df = await self.api.get_moneyflow_hsgt(trade_date=date)  # type: ignore[arg-type]
-
-                name = I18n.get("home_northbound")
-                if df is not None and not df.empty:
-                    val = float(df.iloc[0]["north_money"])
-                    val_str = (
-                        f"{val / 100:.2f}{I18n.get('unit_yi')}"
-                        if abs(val) > 100
-                        else f"{val * 100:.0f}{I18n.get('unit_wan')}"
-                    )
-                    sub_str = I18n.get("home_inflow") if val > 0 else I18n.get("home_outflow")
-                    return {"name": name, "value": val_str, "sub": sub_str}
-                return {"name": name, "value": "-", "sub": "-"}
-
-            hot_concepts_task = NewsFetcher.get_hot_concepts(limit=8)
-
-            results = await asyncio.gather(
-                get_indices_batch(),
-                get_hsgt(),
-                hot_concepts_task,
-            )
-
-            return {
-                "date": date,
-                "indices": results[0],
-                "hsgt": results[1],
-                "hot_concepts": results[2],
-            }
-
-        except Exception as e:
-            logger.error(
-                "[DataProcessor] Config | ❌ Unexpected error fetching market summary: %s",
-                safe_error(e),
-                exc_info=True,
-            )
-            return None
 
     async def get_screening_data(self, trade_date=None):
         return await self.cache.screener_dao.get_screening_data(trade_date)

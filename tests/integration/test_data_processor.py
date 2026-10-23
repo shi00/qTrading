@@ -1073,34 +1073,6 @@ class TestDataProcessor(unittest.TestCase):
     def test_close_resources(self):
         asyncio.run(self.async_test_close_resources())
 
-    # --- Market Overview with Cache ---
-
-    async def async_test_get_market_overview_uses_memory_cache(self):
-        """Verify get_market_overview works with TradeCalendarService"""
-
-        self.mock_cache.stock_dao.get_trade_cal.return_value = pd.DataFrame(
-            {"cal_date": ["20230101", "20230102"], "is_open": [1, 1]},
-        )
-
-        # Mock API methods to return valid DataFrames
-        mock_result_df = pd.DataFrame(
-            {"close": [3000], "pct_chg": [1.0], "north_money": [500]},
-        )
-        self.mock_api.get_index_daily = AsyncMock(return_value=mock_result_df)
-        self.mock_api.get_moneyflow_hsgt = AsyncMock(return_value=mock_result_df)
-
-        # get_market_overview should work without errors
-        # Mock NewsFetcher.get_hot_concepts to avoid real network calls (akshare)
-        # that cause worker crash in CI Linux environment
-        with patch(
-            "data.data_processor.NewsFetcher.get_hot_concepts",
-            new=AsyncMock(return_value=[]),
-        ):
-            await self.processor.get_market_overview()
-
-    def test_get_market_overview_uses_memory_cache(self):
-        asyncio.run(self.async_test_get_market_overview_uses_memory_cache())
-
     # --- Retry Mechanism ---
 
     async def async_test_retry_mechanism_logic(self):
