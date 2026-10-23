@@ -808,6 +808,22 @@ class TestBacktestResultPanelContract:
         assert "@ft.component" in content
         assert "def BacktestResultPanel(" in content
 
+    def test_trades_page_reset_on_new_result(self) -> None:
+        """P-BT-1: 新回测结果到达时翻页重置到第 1 页（use_effect 依赖 trades）。
+
+        声明式组件渲染逻辑由 Flet 框架保证，本测试按本文件契约守护范式
+        校验重置 effect 的关键结构存在且依赖正确，防止回退为无重置实现。
+        """
+        from pathlib import Path
+
+        panel_path = (
+            Path(__file__).parent.parent.parent.parent / "ui" / "components" / "backtest" / "backtest_result_panel.py"
+        )
+        content = panel_path.read_text(encoding="utf-8")
+
+        assert "ft.use_effect(_reset_trades_page, dependencies=[trades])" in content
+        assert "set_trades_page(0)" in content
+
     def test_uses_i18n_observable_state(self) -> None:
         """验证通过 ft.use_state(get_observable_state) 订阅 i18n 自动重渲染。"""
         from pathlib import Path
