@@ -40,6 +40,7 @@ from core.model_management_types import (
     ensure_inference_adapter,
 )
 from services.ai_service.scenario_executor import ScenarioExecutor, ScenarioOutput
+from services.ai_service.usage_recorder import ReservationOutcome
 
 pytestmark = pytest.mark.unit
 
@@ -144,6 +145,10 @@ def _executor(adapters: dict[str, Any]) -> ScenarioExecutor:
     )
     recorder = MagicMock()
     recorder.observe_usage = MagicMock()
+    recorder.ensure_invocation = AsyncMock(return_value=PersistenceOutcome(persisted=True, error_code=None))
+    recorder.try_reserve = AsyncMock(
+        return_value=ReservationOutcome(persisted=True, error_code=None, reservation=MagicMock())
+    )
     recorder.mark_dispatched = AsyncMock(return_value=PersistenceOutcome(persisted=True, error_code=None))
     recorder.begin_attempt = AsyncMock(return_value=PersistenceOutcome(persisted=True, error_code=None))
     recorder.submit_terminal = AsyncMock(return_value=PersistenceOutcome(persisted=True, error_code=None))

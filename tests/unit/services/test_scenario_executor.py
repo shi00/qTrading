@@ -12,7 +12,10 @@
 - 有限额费用型在 mark_dispatched persisted=False 时禁止派发（D5）；
 - 并发上限：同连接 concurrency_limit=1 时并发 execute 串行；
 - F26 连接资格门控：禁用 / 已确认不支持任务的连接派发前淘汰（零调用 +
-  rejected + 原因），unknown / 证据缺失不门控。
+  rejected + 原因），unknown / 证据缺失不门控；
+- F16 父请求与预算预留：invocation 先于候选遍历建立；逐候选 try_reserve →
+  mark_dispatched → authorize → begin_attempt 顺序；费用型预留被拒 / 账本
+  不可用零出站；usage_only 降级；预留 ID 贯穿 attempt_row / 终态。
 """
 
 import asyncio
@@ -34,6 +37,7 @@ from core.model_management_types import (
 )
 from core.model_management_types import PersistenceOutcome
 from services.ai_service.scenario_executor import ScenarioExecutor, ScenarioOutput
+from services.ai_service.usage_recorder import ReservationOutcome
 
 pytestmark = pytest.mark.unit
 
@@ -139,6 +143,16 @@ def _adapter_fail_then_ok(failures: int) -> MagicMock:
 def _recorder_mock(persisted: bool = True) -> MagicMock:
     recorder = MagicMock()
     recorder.observe_usage = MagicMock()
+    recorder.ensure_invocation = AsyncMock(
+        return_value=PersistenceOutcome(persisted=persisted, error_code=None if persisted else "DB_UNAVAILABLE")
+    )
+    recorder.try_reserve = AsyncMock(
+        return_value=ReservationOutcome(
+            persisted=persisted,
+            error_code=None if persisted else "DB_UNAVAILABLE",
+            reservation=MagicMock() if persisted else None,
+        )
+    )
     recorder.mark_dispatched = AsyncMock(
         return_value=PersistenceOutcome(persisted=persisted, error_code=None if persisted else "DB_UNAVAILABLE")
     )
@@ -149,6 +163,16 @@ def _recorder_mock(persisted: bool = True) -> MagicMock:
         return_value=PersistenceOutcome(persisted=persisted, error_code=None if persisted else "DB_UNAVAILABLE")
     )
     return recorder
+
+
+def _fee_candidate(index: int, connection_id: str, task_id: str = "sentiment") -> dict:
+    """费用型候选（F16）：dispatch 冻结的预算身份（月限额 "50.00"，amount 暂 "0.00"）。"""
+    return dict(
+        _candidate(index, connection_id, task_id),
+        budget_amount_cny="0.00",
+        budget_limit_cny="50.00",
+        budget_policy_snapshot={"monthly_cny_limit": "50.00"},
+    )
 
 
 def _executor(adapter, recorder, *, validate=None, **overrides) -> ScenarioExecutor:
@@ -418,20 +442,23 @@ class TestGuards:
 
     @pytest.mark.asyncio
     async def test_budget_dispatch_forbidden_when_persistence_lost(self):
-        """D5：有限额费用型在 mark_dispatched persisted=False 时禁止派发。"""
+        """D5：费用型在预留成功后 mark_dispatched persisted=False 时禁止派发（零出站）。"""
         adapter = _adapter_ok()
-        recorder = _recorder_mock(persisted=False)
+        recorder = _recorder_mock()
+        recorder.mark_dispatched = AsyncMock(
+            return_value=PersistenceOutcome(persisted=False, error_code="DB_UNAVAILABLE")
+        )
         executor = _executor(adapter, recorder, validate=_validator_ok)
         result = await executor.execute(
             _request(),
-            _snapshot(
-                (dict(_candidate(0, "conn-remote"), budget_amount_cny="0.05"),),
-                (_remote_conn(),),
-            ),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)),
             _validator_ok,
         )
         adapter.invoke.assert_not_awaited()
         assert result.status == "failed"
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert "budget dispatch forbidden" in decision.reason
 
     @pytest.mark.asyncio
     async def test_usage_only_persistence_lost_still_dispatches(self):
@@ -691,6 +718,262 @@ class TestEligibilityGate:
         )
         adapter.invoke.assert_awaited_once()
         assert result.status == "succeeded"
+
+
+class TestInvocationAndReservation:
+    """F16 父请求建立与逐实际尝试原子预留：调用面、顺序、预算门零出站、身份贯穿。"""
+
+    @pytest.mark.asyncio
+    async def test_invocation_established_first_with_owner_identity(self):
+        """invocation 先于候选遍历建立（零尝试请求亦可查），owner 身份齐传。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        await executor.execute(
+            _request(),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _validator_ok,
+        )
+        recorder.ensure_invocation.assert_awaited_once()
+        kwargs = recorder.ensure_invocation.await_args.kwargs
+        assert kwargs["invocation_id"] == "inv-1"
+        assert kwargs["scenario_id"] == "news_sentiment"
+        assert kwargs["trigger"] == "manual"
+        # F23 fencing 身份齐传：owner 会话非空、epoch 正数、租约为未来时刻
+        assert kwargs["owner_session_id"]
+        assert kwargs["owner_epoch"] >= 1
+        assert kwargs["owner_lease_expires_at"] is not None
+        # 预算政策快照取候选冻结值（dispatch 冻结语义）
+        assert kwargs["budget_policy_snapshot"] == {"monthly_cny_limit": "50.00"}
+        # 顺序：ensure_invocation 先于首个候选的 try_reserve
+        calls = [c[0] for c in recorder.mock_calls]
+        assert calls.index("ensure_invocation") < calls.index("try_reserve")
+
+    @pytest.mark.asyncio
+    async def test_invocation_established_with_empty_candidates(self):
+        """零候选请求同样建立父请求（失败也有记录，R21），无预留发生。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(_request(), _snapshot((), (_remote_conn(),)), _validator_ok)
+        assert result.status == "failed"
+        recorder.ensure_invocation.assert_awaited_once()
+        assert recorder.ensure_invocation.await_args.kwargs["budget_policy_snapshot"] is None
+        recorder.try_reserve.assert_not_awaited()
+        adapter.invoke.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reserve_precedes_dispatch_binding_with_owner(self):
+        """try_reserve → mark_dispatched 顺序；派发绑定携带预留 ID 与 owner 齐传（F23 强门）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        await executor.execute(
+            _request(),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _validator_ok,
+        )
+        calls = [c[0] for c in recorder.mock_calls]
+        assert calls.index("try_reserve") < calls.index("mark_dispatched")
+        reserve_kwargs = recorder.try_reserve.await_args.kwargs
+        assert reserve_kwargs["invocation_id"] == "inv-1"
+        assert reserve_kwargs["amount_cny"] == "0.00"
+        assert reserve_kwargs["budget_limit_cny"] == "50.00"
+        assert reserve_kwargs["owner_session_id"]
+        assert reserve_kwargs["owner_epoch"] >= 1
+        dispatch_kwargs = recorder.mark_dispatched.await_args.kwargs
+        assert dispatch_kwargs["reservation_id"] is not None
+        assert dispatch_kwargs["owner_session_id"] == reserve_kwargs["owner_session_id"]
+        assert dispatch_kwargs["owner_epoch"] == reserve_kwargs["owner_epoch"]
+
+    @pytest.mark.asyncio
+    async def test_fee_reserve_rejected_zero_egress(self):
+        """费用型预留被拒（余额不足 / owner 失权）→ rejected + break，零出站。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.try_reserve = AsyncMock(
+            return_value=ReservationOutcome(persisted=True, error_code="RESERVE_REJECTED", reservation=None)
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_fee_candidate(0, "conn-remote"), _candidate(1, "conn-b")), (_remote_conn(), _remote_conn("conn-b"))
+            ),
+            _validator_ok,
+        )
+        adapter.invoke.assert_not_awaited()
+        recorder.mark_dispatched.assert_not_awaited()
+        recorder.begin_attempt.assert_not_awaited()
+        recorder.try_reserve.assert_awaited_once()
+        assert result.status == "failed"
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert "budget reserve rejected" in decision.reason
+        assert "RESERVE_REJECTED" in decision.reason
+
+    @pytest.mark.asyncio
+    async def test_fee_reserve_db_unavailable_zero_egress(self):
+        """费用型账本不可用（try_reserve persisted=False）→ rejected + break，零出站。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.try_reserve = AsyncMock(
+            return_value=ReservationOutcome(persisted=False, error_code="DB_UNAVAILABLE", reservation=None)
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _validator_ok,
+        )
+        adapter.invoke.assert_not_awaited()
+        recorder.mark_dispatched.assert_not_awaited()
+        assert result.status == "failed"
+        assert "budget reserve rejected: DB_UNAVAILABLE" in result.candidate_decisions[0].reason
+
+    @pytest.mark.asyncio
+    async def test_usage_only_degrades_when_reserve_unavailable(self):
+        """usage_only 预留不可用 → 降级进程内派发身份（reservation_id=None）执行成功。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.try_reserve = AsyncMock(
+            return_value=ReservationOutcome(persisted=False, error_code="DB_UNAVAILABLE", reservation=None)
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        adapter.invoke.assert_awaited_once()
+        assert result.status == "succeeded"
+        # 降级派发：mark_dispatched 以 None 预留 + owner 齐传
+        dispatch_kwargs = recorder.mark_dispatched.await_args.kwargs
+        assert dispatch_kwargs["reservation_id"] is None
+        assert dispatch_kwargs["owner_session_id"]
+
+    @pytest.mark.asyncio
+    async def test_reservation_id_flows_through_attempt_row_and_terminal(self):
+        """费用型成功链路：预留 ID 贯穿 mark_dispatched → attempt_row → 终态（F22/F23）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _validator_ok,
+        )
+        assert result.status == "succeeded"
+        dispatched_id = recorder.mark_dispatched.await_args.kwargs["reservation_id"]
+        assert dispatched_id is not None
+        attempt_row = recorder.begin_attempt.await_args.kwargs["attempt_row"]
+        assert attempt_row["reservation_id"] == dispatched_id
+        # begin_attempt owner 齐传（F23 强门语义）
+        assert recorder.begin_attempt.await_args.kwargs["owner_session_id"]
+        assert recorder.begin_attempt.await_args.kwargs["owner_epoch"] >= 1
+        terminal_record = recorder.submit_terminal.await_args.args[0]
+        assert terminal_record.reservation_id == dispatched_id
+
+    @pytest.mark.asyncio
+    async def test_degraded_dispatch_terminal_carries_no_reservation(self):
+        """usage_only 预留不可用降级派发：终态 / attempt_row 预留 ID 为 None（无预留不伪装，R21）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.try_reserve = AsyncMock(
+            return_value=ReservationOutcome(persisted=False, error_code="DB_UNAVAILABLE", reservation=None)
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        assert result.status == "succeeded"
+        terminal_record = recorder.submit_terminal.await_args.args[0]
+        assert terminal_record.reservation_id is None
+        attempt_row = recorder.begin_attempt.await_args.kwargs["attempt_row"]
+        assert attempt_row["reservation_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_usage_only_reservation_id_flows_through_terminal(self):
+        """usage_only 预留成功（NULL 金额预留）：预留 ID 同样贯穿终态（全链路可追溯）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        assert result.status == "succeeded"
+        dispatched_id = recorder.mark_dispatched.await_args.kwargs["reservation_id"]
+        assert dispatched_id is not None
+        terminal_record = recorder.submit_terminal.await_args.args[0]
+        assert terminal_record.reservation_id == dispatched_id
+
+    @pytest.mark.asyncio
+    async def test_authorize_failure_with_reservation_converges_via_terminal(self):
+        """预留绑定后 authorize 失败：提交 failed 终态携带预留 ID（F23 背书收敛，不留悬挂）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        executor._config_service.authorize_attempt = AsyncMock(side_effect=PermissionError("revoked"))
+        result = await executor.execute(
+            _request(),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _validator_ok,
+        )
+        assert result.status == "failed"
+        recorder.mark_dispatched.assert_awaited_once()
+        dispatched_id = recorder.mark_dispatched.await_args.kwargs["reservation_id"]
+        assert dispatched_id is not None
+        recorder.submit_terminal.assert_awaited_once()
+        terminal_record = recorder.submit_terminal.await_args.args[0]
+        assert terminal_record.status == "failed"
+        assert terminal_record.reservation_id == dispatched_id
+        adapter.invoke.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_authorize_failure_after_degraded_dispatch_no_terminal(self):
+        """usage_only 降级派发（无预留）authorize 失败：无 attempt 行不补记，零副作用。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.try_reserve = AsyncMock(
+            return_value=ReservationOutcome(persisted=False, error_code="DB_UNAVAILABLE", reservation=None)
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        executor._config_service.authorize_attempt = AsyncMock(side_effect=PermissionError("revoked"))
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        assert result.status == "failed"
+        recorder.submit_terminal.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_authorize_failure_usage_only_with_reservation_converges(self):
+        """usage_only 预留成功后 authorize 失败：同样经活跃预留背书终态收敛（F23）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        executor._config_service.authorize_attempt = AsyncMock(side_effect=PermissionError("revoked"))
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        assert result.status == "failed"
+        recorder.submit_terminal.assert_awaited_once()
+        terminal_record = recorder.submit_terminal.await_args.args[0]
+        assert terminal_record.reservation_id is not None
+
+    @pytest.mark.asyncio
+    async def test_adapter_kind_mismatch_rejected_before_reserve(self):
+        """连接 adapter_kind 无适配器：rejected 决策且零预留 / 零派发。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok, adapters={"gguf_chat": adapter})
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        adapter.invoke.assert_not_awaited()
+        recorder.try_reserve.assert_not_awaited()
+        recorder.mark_dispatched.assert_not_awaited()
+        assert result.status == "failed"
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert decision.reason == "no adapter for kind litellm_chat"
 
 
 def _local_conn(connection_id: str = "conn-local") -> dict:

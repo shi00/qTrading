@@ -528,6 +528,55 @@ class TestHomeViewModelPagination:
         assert vm.state.has_more_news is False
 
     @pytest.mark.asyncio
+    async def test_load_next_page_fetch_failure_keeps_has_more(self, vm):
+        """取数失败 (batch 为 None) 时保持 has_more_news, 分页不被永久关闭。
+
+        修复 P-HOME-2: 原实现对 None 落入 has_more_news=False 分支, 单次 DB 抖动
+        即关闭「加载更多」; 与 refresh_news 的 None 语义 (保持不变) 对齐。
+        """
+        page1 = pd.DataFrame({"title": [f"新闻{i}" for i in range(20)]})
+
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=page1)
+
+        await vm.refresh_news()
+        assert vm.state.has_more_news is True
+
+        # 第二页取数失败 → 返回 None + 保持 has_more, 不写入 has_more_news=False
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=None)
+        result, has_more = await vm.load_next_page()
+
+        assert result is None
+        assert has_more is True
+        assert vm.state.has_more_news is True
+
+        # 恢复后可继续加载下一页
+        page2 = pd.DataFrame({"title": [f"新闻{i}" for i in range(20, 40)]})
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=page2)
+        result, has_more = await vm.load_next_page()
+
+        assert result is not None
+        assert has_more is True
+        assert vm.state.news_page == 1
+
+    @pytest.mark.asyncio
+    async def test_load_next_page_empty_closes_pagination(self, vm):
+        """第二页为空表时关闭分页 (真实无更多数据, 非故障)。"""
+        page1 = pd.DataFrame({"title": [f"新闻{i}" for i in range(20)]})
+
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=page1)
+
+        await vm.refresh_news()
+        assert vm.state.has_more_news is True
+
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=pd.DataFrame())
+        result, has_more = await vm.load_next_page()
+
+        assert result is not None
+        assert result.empty
+        assert has_more is False
+        assert vm.state.has_more_news is False
+
+    @pytest.mark.asyncio
     async def test_pagination_offset_calculation(self, vm):
         """分页偏移计算"""
         mock_news = pd.DataFrame({"title": ["test"]})

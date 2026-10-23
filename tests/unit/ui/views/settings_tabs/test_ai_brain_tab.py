@@ -23,7 +23,7 @@ import asyncio
 import inspect
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, NonCallableMagicMock, patch
 
 import flet as ft
 import pytest
@@ -34,6 +34,7 @@ from tests.unit.ui.component_renderer import (
     make_component,
     render_once,
     run_mount_effects,
+    run_render_effects,
     run_unmount_effects,
 )
 from ui.theme import AppColors
@@ -259,11 +260,23 @@ class TestModulePureFunctions:
 
 
 class _FakeVM:
-    """通用 fake VM (满足 use_viewmodel hook 契约) — 用于模型管理 / 数据出口 VM。"""
+    """通用 fake VM (满足 use_viewmodel hook 契约) — 用于模型管理 / 数据出口 VM。
+
+    F30: state 上显式提供 ``config_revision`` / ``commit_seq``（int），供宿主协调
+    effect 的 deps 比较可触发（NonCallableMagicMock 其余属性保持自动生成，现有测试
+    不受影响）。
+    """
 
     def __init__(self) -> None:
         self._subscribers: list[Any] = []
-        self.state = MagicMock()
+        # NonCallableMagicMock（F30）：flet use_state.set_state 对 callable 参数走
+        # updater 分支（new_value = fn(hook.value)），裸 MagicMock 会被当作状态更新
+        # 函数「调用」并污染 state hook，导致 deps 与真 state 脱钩、协调 effect 永不
+        # 触发。根对象必须不可调用；子属性仍自动生成 MagicMock，现有测试不受影响。
+        self.state = NonCallableMagicMock()
+        self.state.config_revision = 0
+        self.state.commit_seq = 0
+        self.rebase_calls: int = 0
         self.dispose_called: bool = False
 
     def subscribe(self, callback: Any) -> Any:
@@ -275,6 +288,12 @@ class _FakeVM:
 
         return _unsubscribe
 
+    def notify_state(self) -> None:
+        """把当前 state 推给 hook 订阅者（模拟 VM _set_state 通知，驱动 deps 变化）。"""
+        state = self.state
+        for callback in list(self._subscribers):
+            callback(state)
+
     def dispose(self) -> None:
         self.dispose_called = True
         self._subscribers.clear()
@@ -284,6 +303,11 @@ class _FakeVM:
 
     async def load_aggregates(self) -> None:
         return None
+
+    async def rebase_snapshot(self) -> bool:
+        """F30 宿主协调 effect 的调度目标（记录调用供 wiring 测试断言）。"""
+        self.rebase_calls += 1
+        return True
 
 
 def _make_fake_page() -> FakePage:
@@ -1184,3 +1208,71 @@ class TestProviderLaziness:
         from ui.views.settings_tabs.ai_brain_tab import _model_configuration_service
 
         assert _model_configuration_service() is service
+
+
+# ============================================================================
+# F30 宿主协调 effect：双 VM 提交事件 → 对侧 VM 重基
+# ============================================================================
+
+
+class TestHostRebaseCoordination:
+    """F30: 同屏连接与路由 VM 快照协调（deps 变化 → page.run_task 调度对侧 rebase）。"""
+
+    @staticmethod
+    def _scheduled(page: Any) -> list[Any]:
+        return [c.args[0] for c in page.run_task.call_args_list if c.args]
+
+    def test_mount_schedules_initial_rebase_for_both_vms(self, ai_brain_tab_env) -> None:
+        """挂载时两个协调 effect 各调度一次（deps 初始 0，幂等预载）。"""
+        env = ai_brain_tab_env
+        scheduled = self._scheduled(env["page"])
+        assert env["fake_routes_vm"].rebase_snapshot in scheduled
+        assert env["fake_conn_vm"].rebase_snapshot in scheduled
+
+    def test_connection_commit_triggers_routes_rebase(self, ai_brain_tab_env) -> None:
+        """连接域提交（config_revision 变化）→ 调度 routes_vm.rebase_snapshot。"""
+        env = ai_brain_tab_env
+        page = env["page"]
+        page.run_task.reset_mock()
+        conn_vm = env["fake_conn_vm"]
+
+        conn_vm.state.config_revision = 5  # 模拟连接保存 / 授权后快照前移
+        conn_vm.notify_state()
+        run_render_effects(env["component"])
+
+        scheduled = self._scheduled(page)
+        assert env["fake_routes_vm"].rebase_snapshot in scheduled
+        assert env["fake_conn_vm"].rebase_snapshot not in scheduled  # 自身事件不触发自身重基
+
+    def test_routes_commit_triggers_connections_rebase(self, ai_brain_tab_env) -> None:
+        """场景域提交（commit_seq 变化）→ 调度 connections_vm.rebase_snapshot。"""
+        env = ai_brain_tab_env
+        page = env["page"]
+        page.run_task.reset_mock()
+        routes_vm = env["fake_routes_vm"]
+
+        routes_vm.state.commit_seq = 1  # 模拟路由保存 committed
+        routes_vm.notify_state()
+        run_render_effects(env["component"])
+
+        scheduled = self._scheduled(page)
+        assert env["fake_conn_vm"].rebase_snapshot in scheduled
+        assert env["fake_routes_vm"].rebase_snapshot not in scheduled
+
+    def test_unrelated_state_change_does_not_trigger_rebase(self, ai_brain_tab_env) -> None:
+        """无关 state 变化（deps 值不变）不调度 rebase（避免冗余刷新）。"""
+        env = ai_brain_tab_env
+        page = env["page"]
+        page.run_task.reset_mock()
+
+        env["fake_conn_vm"].notify_state()  # revision / commit_seq 均未变
+        run_render_effects(env["component"])
+
+        scheduled = self._scheduled(page)
+        assert env["fake_routes_vm"].rebase_snapshot not in scheduled
+        assert env["fake_conn_vm"].rebase_snapshot not in scheduled
+
+    def test_rebase_scheduled_via_run_task_not_direct_call(self, ai_brain_tab_env) -> None:
+        """R16：协调 effect 经 page.run_task 调度（不阻塞渲染循环）。"""
+        env = ai_brain_tab_env
+        assert env["page"].run_task.call_count >= 2  # 挂载即调度 load + rebase

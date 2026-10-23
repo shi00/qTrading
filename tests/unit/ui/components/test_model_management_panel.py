@@ -985,3 +985,48 @@ class TestTabsStructureGuard:
             "viewport 在宿主 scrollable Column（无界主轴约束）下布局崩溃，NaN 传染"
             "导致整层不绘制。子页切换请用条件渲染（tab_pages[selected_tab]）。"
         )
+
+
+class TestRebaseAllAndNotify:
+    """F30 显式重基入口 ``_rebase_all_and_notify``（手动刷新快照）。
+
+    覆盖：全成功 / 部分失败 / 全失败的三态反馈（R21 不伪装成功）、
+    R2 CancelledError 显式传播。
+    """
+
+    @staticmethod
+    def _vm(ok: bool) -> MagicMock:
+        vm = MagicMock()
+        vm.rebase_snapshot = AsyncMock(return_value=ok)
+        return vm
+
+    async def test_all_success_shows_done_snack(self):
+        show_snack = MagicMock()
+        conn_vm, routes_vm = self._vm(True), self._vm(True)
+        await panel_module._rebase_all_and_notify(conn_vm, routes_vm, show_snack)
+        conn_vm.rebase_snapshot.assert_awaited_once()
+        routes_vm.rebase_snapshot.assert_awaited_once()
+        show_snack.assert_called_once_with(I18n.get("model_management_refresh_done"), color=AppColors.SUCCESS)
+
+    async def test_partial_failure_shows_failed_snack(self):
+        show_snack = MagicMock()
+        conn_vm, routes_vm = self._vm(True), self._vm(False)
+        await panel_module._rebase_all_and_notify(conn_vm, routes_vm, show_snack)
+        show_snack.assert_called_once_with(I18n.get("model_management_refresh_failed"), color=AppColors.ERROR)
+
+    async def test_all_failure_shows_failed_snack(self):
+        show_snack = MagicMock()
+        conn_vm, routes_vm = self._vm(False), self._vm(False)
+        await panel_module._rebase_all_and_notify(conn_vm, routes_vm, show_snack)
+        show_snack.assert_called_once_with(I18n.get("model_management_refresh_failed"), color=AppColors.ERROR)
+
+    async def test_cancelled_error_propagates(self):
+        show_snack = MagicMock()
+        conn_vm = MagicMock()
+        conn_vm.rebase_snapshot = AsyncMock(side_effect=asyncio.CancelledError())
+        routes_vm = self._vm(True)
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await panel_module._rebase_all_and_notify(conn_vm, routes_vm, show_snack)
+        assert isinstance(exc_info.value, asyncio.CancelledError)  # 显式断言取消类型
+        assert conn_vm.rebase_snapshot.await_count == 1  # 取消发生在首个 rebase 执行中（非入口短路）
+        assert show_snack.call_count == 0  # 取消路径不产生任何用户反馈

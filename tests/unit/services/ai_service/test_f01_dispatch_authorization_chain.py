@@ -31,6 +31,7 @@ from core.model_management_types import (
 from services.ai_service import scenario_dispatch
 from services.ai_service.model_compatibility import ModelCompatibilityService
 from services.ai_service.scenario_executor import ScenarioExecutor
+from services.ai_service.usage_recorder import ReservationOutcome
 from services.model_configuration_service import ModelConfigurationService
 
 pytestmark = pytest.mark.unit
@@ -80,6 +81,10 @@ class _OfflineAdapter:
 def _recorder_mock() -> MagicMock:
     recorder = MagicMock()
     recorder.observe_usage = MagicMock()
+    recorder.ensure_invocation = AsyncMock(return_value=PersistenceOutcome(persisted=True, error_code=None))
+    recorder.try_reserve = AsyncMock(
+        return_value=ReservationOutcome(persisted=True, error_code=None, reservation=MagicMock())
+    )
     recorder.mark_dispatched = AsyncMock(return_value=PersistenceOutcome(persisted=True, error_code=None))
     recorder.begin_attempt = AsyncMock(return_value=PersistenceOutcome(persisted=True, error_code=None))
     recorder.submit_terminal = AsyncMock(return_value=PersistenceOutcome(persisted=True, error_code=None))

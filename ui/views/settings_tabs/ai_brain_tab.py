@@ -188,13 +188,14 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     ft.use_state(AppColors.get_observable_state)
 
     # --- 模型管理三页签 VM (内部模式: factory 首次渲染调用一次, 卸载 dispose) ---
-    _conn_state, connections_vm = use_viewmodel(
+    # F30: conn_state.config_revision / routes_state.commit_seq 供宿主协调 effect 消费
+    conn_state, connections_vm = use_viewmodel(
         factory=lambda: ModelConnectionsViewModel(
             usage_summary_loader=_load_connections_usage_summary,
             synthetic_adapters=_synthetic_adapters_provider(),
         )
     )
-    _routes_state, routes_vm = use_viewmodel(factory=lambda: ModelRoutesViewModel(_model_configuration_service()))
+    routes_state, routes_vm = use_viewmodel(factory=lambda: ModelRoutesViewModel(_model_configuration_service()))
     _usage_state, usage_vm = use_viewmodel(
         factory=lambda: ModelUsageViewModel(
             dao_provider=_ai_usage_dao_provider,
@@ -225,6 +226,25 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
             page.run_task(egress_vm.load_aggregates)
 
     ft.use_effect(_trigger_load_egress, dependencies=[])
+
+    # --- F30 宿主协调：双 VM 快照重基（同屏交替保存不产生陈旧冲突） ---
+    # 连接域提交（保存 / 授权 / 撤销 / 回执恢复均递增 config_revision）→ 场景 VM 重基：
+    # 刷新 CAS 基线与候选选择器，保留未提交草稿。首渲染（revision=0）跑一次为幂等预载。
+    def _trigger_rebase_routes() -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(routes_vm.rebase_snapshot)
+
+    ft.use_effect(_trigger_rebase_routes, dependencies=[conn_state.config_revision])
+
+    # 场景域提交（仅 save committed 递增 commit_seq）→ 连接 VM 重基：刷新其 _raw_routes，
+    # 防止下次连接保存以陈旧路由回退路由修订（F30 核心危害）。
+    def _trigger_rebase_connections() -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(connections_vm.rebase_snapshot)
+
+    ft.use_effect(_trigger_rebase_connections, dependencies=[routes_state.commit_seq])
 
     # --- Pure UI state (VM state 是唯一真值源, 无 use_state 本地副本) ---
     # P1-4 批次 2: ConfirmDialog open_state (消费方驱动, 无 dirty state 检测 §0.5.11.1 #78)
