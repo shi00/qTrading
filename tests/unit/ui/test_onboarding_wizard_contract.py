@@ -379,7 +379,7 @@ class TestWizardWelcomeRiskAck:
     ):
         """勾选框 on_change 经 page.run_task 调用 _persist_risk_ack 并透传勾选值 (R16 异步调度)。
 
-        P-ONB-1: 调度目标改为模块级 _persist_risk_ack（消费 VM 返回值 + 失败 snack），
+        P-ONB-01: 调度目标改为模块级 _persist_risk_ack（消费 VM 返回值 + 失败 snack），
         VM 命令与勾选值的透传由 args[1]/args[2] 断言。
         """
         result = self._render_welcome(mock_onboarding_vms, False)
@@ -430,7 +430,7 @@ class TestWizardWelcomeRiskAck:
     async def test_persist_risk_ack_failure_shows_error_snack(
         self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms
     ):
-        """P-ONB-1: VM 命令返回 False（保存失败）时经 _show_snack 反馈错误。"""
+        """P-ONB-01: VM 命令返回 False（保存失败）时经 _show_snack 反馈错误。"""
         import ui.views.onboarding_wizard as wizard_mod
         from ui.i18n import I18n
 
@@ -442,7 +442,7 @@ class TestWizardWelcomeRiskAck:
         fake_page.toast.show.assert_called_once_with(I18n.get("sys_snack_save_err"), "error")
 
     async def test_persist_risk_ack_success_no_snack(self, mock_i18n_state, mock_app_colors_state, mock_onboarding_vms):
-        """P-ONB-1: VM 命令返回 True（保存成功）时不弹 snack。"""
+        """P-ONB-01: VM 命令返回 True（保存成功）时不弹 snack。"""
         import ui.views.onboarding_wizard as wizard_mod
 
         fake_vm = mock_onboarding_vms["onboarding"]

@@ -102,7 +102,7 @@ async def _default_on_complete() -> None:
 
 
 async def _persist_risk_ack(vm: OnboardingViewModel, checked: bool) -> None:
-    """持久化欢迎步风险提示确认，失败时提示 (P-ONB-1)。
+    """持久化欢迎步风险提示确认，失败时提示 (P-ONB-01)。
 
     消费 VM 命令的 bool 返回值：保存失败（ConfigHandler 返回 False 或 IO 异常）
     时 VM 已回读磁盘回滚 state，此处补充用户可感知的失败反馈，避免「勾选看似
@@ -1107,7 +1107,7 @@ def OnboardingWizard(
         return _hover
 
     # UX-09 / MAJOR-01: 欢迎步风险提示确认（勾选结果经 VM 持久化到 ConfigHandler）。
-    # P-ONB-1: 经 _persist_risk_ack 消费返回值，失败时 snack 反馈。
+    # P-ONB-01: 经 _persist_risk_ack 消费返回值，失败时 snack 反馈。
     def _on_risk_ack_change(e: ft.ControlEvent) -> None:
         checked = bool(get_control_value(e.control, ft.Checkbox)) if e.control else False
         page = _get_page()
