@@ -137,6 +137,14 @@ async def _commit_model_stage(
         payload = routes_vm.build_payload(routes_vm.state.selected_scenario)
         payload["connections"] = connections_vm.merged_connections(entry)
         payload["scenario_routes"] = routes_vm.all_routes_payload()
+        # F13 悬空校验：场景候选引用不在本阶段提交的连接集合（含草稿连接）→
+        # 拦截保存（引用悬空会在执行期不可解析，R21 不把不可用伪装为可用）。
+        known_ids = [str(c.get("connection_id")) for c in payload["connections"]]
+        unresolved = routes_vm.unresolved_candidates(known_ids)
+        if unresolved:
+            logger.warning("[OnboardingWizard] Model stage has unresolved candidates: %s", unresolved)
+            _show_snack(I18n.get("model_routes_unresolved_candidates"), AppColors.ERROR)
+            return False
         outcome = await config_service.save_draft(payload, payload["config_revision"], operation_id)
     except asyncio.CancelledError:
         raise  # R2: 必须传播
@@ -161,6 +169,13 @@ async def _commit_model_stage(
     # 提交成功后刷新两 VM 的已提交基线（防止返回本步时残留未保存徽标 / 陈旧行）。
     await connections_vm.load()
     await routes_vm.load()
+
+    # F13：首次配置自动激活（pending 且零 legacy 用量时 begin → seal → activate）。
+    # 「暂不用 AI」（无启用场景）静默返回 False 不告警；其余失败经 message 提示
+    # （激活失败不阻断向导前进——路由草稿已保存，用户可回设置页处置）。
+    activated = await routes_vm.activate_fresh_setup()
+    if not activated and routes_vm.state.message is not None:
+        _show_snack(_render_message(routes_vm.state.message), AppColors.WARNING)
     return True
 
 
@@ -904,6 +919,15 @@ def OnboardingWizard(
         page.run_task(_do_load)
 
     ft.use_effect(_load_model_vms_setup, dependencies=[])
+
+    # --- F13: 向导阶段内草稿连接注入 ---
+    # 模型阶段子步骤 3（场景与检查）时把连接草稿并入候选选择器（attach），
+    # 离开该子步骤 / 草稿清空即清除注入（None），候选选择器恒可引用本阶段录入的连接。
+    def _attach_wizard_draft_option() -> None:
+        on_route_substep = STEP_CONFIGS[state.current_step].id == "model_scenario" and model_substep >= 3
+        routes_vm.attach_in_wizard_option(connections_vm.wizard_draft_option() if on_route_substep else None)
+
+    ft.use_effect(_attach_wizard_draft_option, dependencies=[state.current_step, model_substep, _conn_state])
 
     # --- Sync normalized schedule time from VM to UI input ---
     def _sync_normalized_time() -> None:

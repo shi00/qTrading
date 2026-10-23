@@ -1234,6 +1234,62 @@ class TestMergedConnections:
         assert merged[-1] == {"connection_id": "c-new", "name": "Fresh"}
 
 
+class TestWizardDraftOption:
+    """F13：阶段内草稿注入形态（纯内存，供场景选择器 attach）。"""
+
+    async def test_empty_name_returns_none(self, vm):
+        await vm.load()
+        vm.start_add()
+        assert vm.wizard_draft_option() is None
+
+    async def test_named_draft_returns_option_shape(self, vm):
+        await vm.load()
+        vm.start_add()
+        vm.update_name("New Conn")
+        vm.update_model("gpt-4o")
+        vm.update_provider("openai")
+        vm.update_api_base("https://api.example.com/v1")
+
+        option = vm.wizard_draft_option()
+
+        assert option is not None
+        # 能力留空：草稿未经验证，选择器按 unknown 展示，不臆造支持态（R21）
+        assert set(option.keys()) == {
+            "connection_id",
+            "name",
+            "adapter_kind",
+            "provider",
+            "model",
+            "enabled",
+            "billing",
+            "connection_revision",
+        }
+        assert option["name"] == "New Conn"
+        assert option["adapter_kind"] == "litellm_chat"
+        assert option["provider"] == "openai"
+        assert option["model"] == "gpt-4o"
+        assert option["enabled"] is True
+        assert option["connection_revision"] == 1
+        assert option["connection_id"]  # 稳定非空标识
+
+    async def test_option_id_matches_draft_entry_id(self):
+        """注入候选 id 与提交时的连接 id 同源，提交后候选不悬空。"""
+        svc = _make_service()
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.start_add()
+        vm.update_name("New Conn")
+        vm.update_model("gpt-4o")
+        vm.update_provider("openai")
+        vm.update_credential("sk-new")
+
+        option = vm.wizard_draft_option()
+        entry = await vm.draft_connection_entry("op-1")
+
+        assert option is not None and entry is not None
+        assert option["connection_id"] == entry["connection_id"]
+
+
 # --- Dispose ---
 
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Mapping
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
 import pytest
@@ -63,6 +63,10 @@ class _FakeRoutesVM:
         self.move_down = MagicMock()
         self.undo_last_move = MagicMock()
         self.toggle_advanced = MagicMock()
+        # F13 草稿字段命令 + 一键激活（激活区渲染时引用，缺属性会 AttributeError）
+        self.set_route_enabled = MagicMock()
+        self.set_sentiment_mode = MagicMock()
+        self.activate_fresh_setup = AsyncMock(return_value=True)
 
     @property
     def state(self) -> ModelRoutesState:

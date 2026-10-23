@@ -102,6 +102,8 @@ def _snapshot(
     config_revision: int = 5,
     routes: list[dict] | None = None,
     connections: list[dict] | None = None,
+    migration_state: str = "active",
+    migration_transition: dict | None = None,
 ) -> ModelManagementSnapshot:
     if routes is None:
         routes = [
@@ -117,12 +119,13 @@ def _snapshot(
     return ModelManagementSnapshot(
         snapshot_id="snap-1",
         config_revision=config_revision,
-        migration_state="active",
+        migration_state=migration_state,
         connections=tuple(connections),
         scenario_routes=tuple(routes),
         usage_policy={"monthly_cny_limit": None, "detail_retention_days": 180},
         security_revision=1,
         created_at="2026-01-01T00:00:00+00:00",
+        migration_transition=migration_transition,
     )
 
 
@@ -802,3 +805,299 @@ class TestCommitSeq:
 
         assert vm.state.save_state == "error"  # not_committed 映射 error
         assert vm.state.commit_seq == 0  # 未提交不触发宿主重基
+
+
+# --- F13: 场景启用 / 情绪模式 / 向导注入 / 悬空校验 / 一键激活 ---
+
+
+def _pending_vm(
+    *,
+    snapshot: ModelManagementSnapshot | None = None,
+) -> tuple[ModelRoutesViewModel, MagicMock]:
+    """pending 未激活快照的 VM（F13 激活链路预置；service.activate_fresh_setup 可 mock）。"""
+    snap = snapshot or _snapshot(migration_state="pending")
+    return _make_vm(snap)
+
+
+def _wizard_option(connection_id: str = "conn-draft", *, name: str = "草稿连接") -> dict:
+    return {
+        "connection_id": connection_id,
+        "name": name,
+        "adapter_kind": "litellm_chat",
+        "provider": "openai",
+        "model": "gpt-x",
+        "enabled": True,
+        "billing": {"mode": "usage_only", "pricing_unit": "llm_tokens"},
+        "connection_revision": 1,
+    }
+
+
+def _option_ids(vm: ModelRoutesViewModel) -> tuple[str, ...]:
+    return tuple(o.connection_id for o in vm.state.available_connections)
+
+
+class TestLoadMigrationMirror:
+    @pytest.mark.asyncio
+    async def test_load_mirrors_migration_subdomain(self):
+        snap = _snapshot(
+            migration_state="pending",
+            migration_transition={"phase": "draining", "transition_id": "t-1"},
+        )
+        vm, _ = _make_vm(snap)
+        await vm.load()
+        assert vm.state.migration_state == "pending"
+        assert vm.state.migration_transition_phase == "draining"
+        assert vm.state.activation_in_progress is False
+
+    @pytest.mark.asyncio
+    async def test_load_without_transition_phase_none(self):
+        vm, _ = _make_vm(_snapshot(migration_state="pending"))
+        await vm.load()
+        assert vm.state.migration_transition_phase is None
+
+
+class TestSetRouteEnabled:
+    @pytest.mark.asyncio
+    async def test_toggle_updates_draft_not_committed(self):
+        vm, _ = _pending_vm()
+        await vm.load()
+        vm.set_route_enabled(True)
+        assert vm.current_draft().enabled is True
+        assert next(r for r in vm.state.committed_routes if r.scenario_id == "news_annotation").enabled is False
+        # enabled 不进 dirty 计数（徽标只反映候选差异）
+        assert dict(vm.state.dirty_counts)["news_annotation"] == 0
+
+    @pytest.mark.asyncio
+    async def test_same_value_noop(self):
+        vm, _ = _pending_vm()
+        await vm.load()
+        vm.set_route_enabled(False)
+        assert vm.current_draft().enabled is False
+
+    @pytest.mark.asyncio
+    async def test_enabled_included_in_save_revision_bump(self):
+        """F13：enabled 语义变化经 _semantic_route_for_save 在保存时递增 route_revision。"""
+        vm, _ = _pending_vm()
+        await vm.load()
+        vm.set_route_enabled(True)
+        payload = vm.build_payload("news_annotation")
+        route = next(r for r in payload["scenario_routes"] if r["scenario_id"] == "news_annotation")
+        assert route["enabled"] is True
+        assert route["route_revision"] == 2  # 默认 committed revision=1，语义变化 +1
+
+
+class TestSetSentimentMode:
+    @pytest.mark.asyncio
+    async def test_switch_mode_updates_draft(self):
+        vm, _ = _pending_vm()
+        await vm.load()
+        vm.set_sentiment_mode("dedicated")
+        assert vm.current_draft().sentiment_mode == "dedicated"
+
+    @pytest.mark.asyncio
+    async def test_non_news_scenario_noop(self):
+        vm, _ = _pending_vm()
+        await vm.load()
+        vm.select_scenario("stock_analysis")
+        vm.set_sentiment_mode("dedicated")
+        route = next(r for r in vm.state.routes if r.scenario_id == "stock_analysis")
+        assert route.sentiment_mode == "bundled"  # 默认值不动
+
+    @pytest.mark.asyncio
+    async def test_invalid_mode_noop(self):
+        vm, _ = _pending_vm()
+        await vm.load()
+        vm.set_sentiment_mode("turbo")
+        assert vm.current_draft().sentiment_mode == "bundled"
+
+
+class TestAttachInWizardOption:
+    @pytest.mark.asyncio
+    async def test_append_then_clear(self):
+        vm, _ = _pending_vm()
+        await vm.load()
+        vm.attach_in_wizard_option(_wizard_option())
+        assert "conn-draft" in _option_ids(vm)
+        vm.attach_in_wizard_option(None)
+        assert "conn-draft" not in _option_ids(vm)
+        assert vm.state.available_connections == vm.state.available_connections  # 快照选项不受影响
+
+    @pytest.mark.asyncio
+    async def test_clear_without_prior_noop(self):
+        vm, _ = _pending_vm()
+        await vm.load()
+        before = vm.state.available_connections
+        vm.attach_in_wizard_option(None)
+        assert vm.state.available_connections == before
+
+    @pytest.mark.asyncio
+    async def test_reinject_switch_replaces_prior(self):
+        vm, _ = _pending_vm()
+        await vm.load()
+        vm.attach_in_wizard_option(_wizard_option("conn-d1"))
+        vm.attach_in_wizard_option(_wizard_option("conn-d2"))
+        ids = _option_ids(vm)
+        assert "conn-d1" not in ids
+        assert "conn-d2" in ids
+
+    @pytest.mark.asyncio
+    async def test_same_id_refresh_keeps_shape_updated(self):
+        vm, _ = _pending_vm()
+        await vm.load()
+        vm.attach_in_wizard_option(_wizard_option("conn-d1", name="旧名"))
+        vm.attach_in_wizard_option(_wizard_option("conn-d1", name="新名"))
+        ids = _option_ids(vm)
+        assert ids.count("conn-d1") == 1
+        option = next(o for o in vm.state.available_connections if o.connection_id == "conn-d1")
+        assert option.name == "新名"
+
+    @pytest.mark.asyncio
+    async def test_shadow_restore_for_existing_snapshot_id(self):
+        """注入与快照同 id（编辑已有连接）→ 清除注入恢复快照形态，不误删选项。"""
+        vm, _ = _pending_vm()
+        await vm.load()
+        original = next(o for o in vm.state.available_connections if o.connection_id == "conn-b")
+        vm.attach_in_wizard_option(_wizard_option("conn-b", name="编辑中"))
+        injected = next(o for o in vm.state.available_connections if o.connection_id == "conn-b")
+        assert injected.name == "编辑中"
+        vm.attach_in_wizard_option(None)
+        restored = next(o for o in vm.state.available_connections if o.connection_id == "conn-b")
+        assert restored == original
+
+    @pytest.mark.asyncio
+    async def test_load_resets_injection(self):
+        vm, _ = _pending_vm()
+        await vm.load()
+        vm.attach_in_wizard_option(_wizard_option())
+        await vm.load()
+        assert "conn-draft" not in _option_ids(vm)
+
+
+class TestUnresolvedCandidates:
+    @pytest.mark.asyncio
+    async def test_filters_known_and_dedupes_preserving_order(self):
+        vm, _ = _pending_vm(
+            snapshot=_snapshot(
+                migration_state="pending",
+                routes=[
+                    _route_mapping("news_annotation", ("ghost-1", "conn-a")),
+                    _route_mapping("stock_analysis", ("conn-a", "ghost-1", "ghost-2")),
+                    _route_mapping("news_risk", ()),
+                ],
+            )
+        )
+        await vm.load()
+        unresolved = vm.unresolved_candidates(["conn-a", "conn-b"])
+        assert unresolved == ("ghost-1", "ghost-2")
+
+    @pytest.mark.asyncio
+    async def test_includes_disabled_scene_candidates(self):
+        """禁用场景的悬空候选同样检出（启用时阻断执行，保存前一律拦截）。"""
+        vm, _ = _pending_vm(
+            snapshot=_snapshot(
+                migration_state="pending",
+                routes=[
+                    _route_mapping("news_annotation", ()),
+                    _route_mapping("stock_analysis", ("ghost-x",), enabled=False),
+                    _route_mapping("news_risk", ()),
+                ],
+            )
+        )
+        await vm.load()
+        assert vm.unresolved_candidates([]) == ("ghost-x",)
+
+
+class TestActivateFreshSetup:
+    @pytest.mark.asyncio
+    async def test_already_active_returns_true_without_calling_service(self):
+        vm, service = _make_vm(_snapshot())  # 默认 active
+        await vm.load()
+        service.activate_fresh_setup = AsyncMock()
+        assert await vm.activate_fresh_setup() is True
+        service.activate_fresh_setup.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_enabled_scene_silent_false(self):
+        vm, service = _pending_vm()
+        await vm.load()
+        service.activate_fresh_setup = AsyncMock()
+        assert await vm.activate_fresh_setup() is False
+        assert vm.state.message is None  # 「暂不用 AI」合法静默，不告警
+        service.activate_fresh_setup.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sealed_barrier_passes_through_to_service(self):
+        """sealed 屏障态放行 service（编排断点续走 activate 自愈，不在 VM 拦截）。"""
+        vm, service = _pending_vm(
+            snapshot=_snapshot(
+                migration_state="pending",
+                migration_transition={"phase": "sealed", "transition_id": "t-1"},
+            )
+        )
+        await vm.load()
+        vm.add_candidate("conn-a")
+        vm.set_route_enabled(True)
+        service.activate_fresh_setup = AsyncMock(
+            return_value=ConfigurationSaveOutcome(status="committed", current_revision=6, committed_revision=6)
+        )
+        assert await vm.activate_fresh_setup() is True
+        service.activate_fresh_setup.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_committed_reload_and_true(self):
+        vm, service = _pending_vm()
+        await vm.load()
+        vm.add_candidate("conn-a")
+        vm.set_route_enabled(True)
+        service.activate_fresh_setup = AsyncMock(
+            return_value=ConfigurationSaveOutcome(status="committed", current_revision=6, committed_revision=6)
+        )
+        assert await vm.activate_fresh_setup() is True
+        service.activate_fresh_setup.assert_awaited_once()
+        assert vm.state.migration_state == "pending"  # load 重读 mock 快照（仍 pending，无碍激活成功语义）
+        assert vm.state.activation_in_progress is False
+
+    @pytest.mark.asyncio
+    async def test_conflict_false_with_message(self):
+        vm, service = _pending_vm()
+        await vm.load()
+        vm.add_candidate("conn-a")
+        vm.set_route_enabled(True)
+        service.activate_fresh_setup = AsyncMock(side_effect=ModelConfigurationConflictError(5, 6))
+        assert await vm.activate_fresh_setup() is False
+        assert vm.state.message is not None and vm.state.message.key == "model_routes_activation_conflict"
+        assert vm.state.activation_in_progress is False
+
+    @pytest.mark.asyncio
+    async def test_transition_error_false_with_message(self):
+        from core.model_management_types import MigrationTransitionError
+
+        vm, service = _pending_vm()
+        await vm.load()
+        vm.add_candidate("conn-a")
+        vm.set_route_enabled(True)
+        service.activate_fresh_setup = AsyncMock(side_effect=MigrationTransitionError("blocked"))
+        assert await vm.activate_fresh_setup() is False
+        assert vm.state.message is not None and vm.state.message.key == "model_routes_activation_blocked_transition"
+
+    @pytest.mark.asyncio
+    async def test_generic_error_false_with_message(self):
+        vm, service = _pending_vm()
+        await vm.load()
+        vm.add_candidate("conn-a")
+        vm.set_route_enabled(True)
+        service.activate_fresh_setup = AsyncMock(side_effect=RuntimeError("boom"))
+        assert await vm.activate_fresh_setup() is False
+        assert vm.state.message is not None and vm.state.message.key == "model_routes_activation_failed"
+
+    @pytest.mark.asyncio
+    async def test_not_committed_false_with_message(self):
+        vm, service = _pending_vm()
+        await vm.load()
+        vm.add_candidate("conn-a")
+        vm.set_route_enabled(True)
+        service.activate_fresh_setup = AsyncMock(
+            return_value=ConfigurationSaveOutcome(status="not_committed", current_revision=5)
+        )
+        assert await vm.activate_fresh_setup() is False
+        assert vm.state.message is not None and vm.state.message.key == "model_routes_save_not_committed"
