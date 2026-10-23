@@ -27,19 +27,6 @@ class TestMarketDataServiceInit:
         assert isinstance(svc._listeners, set)
 
 
-class TestMarketDataServiceFetchMarketData:
-    @pytest.mark.asyncio
-    @patch("data.domain_services.market_data_service.CacheManager")
-    async def test_fetch_market_data(self, mock_cm):
-        mock_cache = MagicMock()
-        mock_cm.return_value = mock_cache
-        svc = MarketDataService()
-        expected = {"key": "value"}
-        svc._fetch_market_data = AsyncMock(return_value=expected)
-        result = await svc._fetch_market_data()
-        assert result == expected
-
-
 class TestMarketDataServiceConfig:
     def test_indices_config(self):
         assert len(MarketDataService.INDICES_CONFIG) == 3

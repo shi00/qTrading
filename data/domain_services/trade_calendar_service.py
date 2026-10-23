@@ -92,6 +92,10 @@ async def get_effective_trade_date(processor: Any) -> datetime.date:
         try:
             latest = await cache.quote_dao.get_latest_trade_date()  # quote_dao: daily_quotes.MAX(trade_date)
             if latest is not None:
+                # M13-F4: datetime 是 date 的子类，须先判 datetime 归一为 date，
+                # 与第 1 级日历分支的归一化对称（避免带时间成分泄漏给调用方）。
+                if isinstance(latest, datetime.datetime):
+                    return latest.date()
                 if isinstance(latest, datetime.date):
                     return latest
                 return parse_date(str(latest))
@@ -244,7 +248,9 @@ class TradeCalendarService:
             return None
 
         try:
-            df = await self._api.get_trade_cal(start_date=start_date, end_date=end_date)
+            # M13-F1: TushareClient.get_trade_cal 签名为 str | None，调用点显式归一化
+            # （YYYYMMDD），不依赖 TushareApiWrapper 内部的 date 归一化兜底。
+            df = await self._api.get_trade_cal(start_date=self._to_str(start_date), end_date=self._to_str(end_date))
             if df is not None and not df.empty:
                 await self._ensure_data_persisted(df)
             return df
@@ -313,7 +319,8 @@ class TradeCalendarService:
                 return False
 
             # 2. 调 API 批量拉取完整日历（不带 is_open 过滤）
-            df = await self._api.get_trade_cal(start_date=start_obj, end_date=end_obj)  # type: ignore[arg-type]
+            # M13-F1: start_obj/end_obj 已判非 None，_to_str 必返 str（YYYYMMDD）
+            df = await self._api.get_trade_cal(start_date=self._to_str(start_obj), end_date=self._to_str(end_obj))
             if df is not None and not df.empty:
                 await self._ensure_data_persisted(df)
                 logger.info(
@@ -465,7 +472,7 @@ class TradeCalendarService:
                     dates = pd.to_datetime(trade_df["cal_date"]).dt.date.tolist()  # type: ignore[union-attr]
                     return sorted(dates)
 
-            offline_dates = self._offline.get_trade_dates(start_obj, end_obj)  # type: ignore[arg-type]
+            offline_dates = self._offline.get_trade_dates(start_obj, end_obj)
             if offline_dates:
                 return [parse_date(d).date() for d in offline_dates]
 
@@ -669,7 +676,7 @@ class TradeCalendarService:
         if dates_before:
             return dates_before[-1]
 
-        offline_dates = self._offline.get_trade_dates(lookback_start, date_obj)  # type: ignore[arg-type]
+        offline_dates = self._offline.get_trade_dates(lookback_start, date_obj)
         if offline_dates:
             offline_before = [parse_date(d).date() for d in offline_dates if parse_date(d).date() < date_obj]
             if offline_before:
@@ -708,7 +715,7 @@ class TradeCalendarService:
         if dates_after:
             return dates_after[0]
 
-        offline_dates = self._offline.get_trade_dates(date_obj, lookforward_end)  # type: ignore[arg-type]
+        offline_dates = self._offline.get_trade_dates(date_obj, lookforward_end)
         if offline_dates:
             offline_after = [parse_date(d).date() for d in offline_dates if parse_date(d).date() > date_obj]
             if offline_after:
@@ -815,10 +822,12 @@ class TradeCalendarService:
         优化: 合并为单次数据库查询，减少 IO 次数。
 
         Args:
-            ranges: 日期范围列表 [(start1, end1), (start2, end2), ...]
+            ranges: 日期范围列表 [(start1, end1), (start2, end2), ...]；
+                元素支持 date 或 YYYYMMDD/YYYY-MM-DD 字符串（与 get_trade_dates 同口径，
+                M13-F3：入口统一 _to_date 归一化，非法/逆序范围安全返回 [] 不抛 TypeError）。
 
         Returns:
-            Dict: {范围元组: 交易日列表}
+            Dict: {原始范围元组: 交易日列表}（键保持调用方原始输入）
 
         示例:
             >>> ranges = [(date(2024, 3, 1), date(2024, 3, 5)),
@@ -827,24 +836,31 @@ class TradeCalendarService:
             {(date(2024, 3, 1), date(2024, 3, 5)): [...],
              (date(2024, 3, 10), date(2024, 3, 15)): [...]}
         """
-        result = {}
+        result: dict = {}
 
         if not ranges:
             return result
 
-        all_dates = set()
-        for start, end in ranges:
-            all_dates.add(start)
-            all_dates.add(end)
+        normalized: list[tuple[tuple[Any, Any], datetime.date, datetime.date]] = []
+        for raw_start, raw_end in ranges:
+            raw_key = (raw_start, raw_end)
+            start_obj = self._to_date(raw_start)
+            end_obj = self._to_date(raw_end)
+            if start_obj is None or end_obj is None or start_obj > end_obj:
+                result[raw_key] = []
+                continue
+            normalized.append((raw_key, start_obj, end_obj))
 
-        min_date = min(all_dates)
-        max_date = max(all_dates)
+        if not normalized:
+            return result
+
+        min_date = min(start for _, start, _ in normalized)
+        max_date = max(end for _, _, end in normalized)
 
         all_trade_dates = await self.get_trade_dates(min_date, max_date)
 
-        for start, end in ranges:
-            range_dates = [d for d in all_trade_dates if start <= d <= end]
-            result[(start, end)] = range_dates
+        for raw_key, start_obj, end_obj in normalized:
+            result[raw_key] = [d for d in all_trade_dates if start_obj <= d <= end_obj]
 
         return result
 

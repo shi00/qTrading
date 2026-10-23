@@ -95,10 +95,13 @@ class OfflineCalendar:
             return False
 
     @staticmethod
-    def get_trade_dates(start_date: str | None, end_date: str | None):
+    def get_trade_dates(start_date: str | datetime.date | None, end_date: str | datetime.date | None):
         """
         Get list of trading dates between start and end (inclusive).
         Returns list of strings in YYYYMMDD format.
+
+        M13-F2: 接受 str 或 date（TradeCalendarService 内部流转 date，此前调用点
+        依赖 # type: ignore 压制类型不匹配；放宽签名后调用方 ignore 已移除）。
         """
         try:
             cal = OfflineCalendar.get_instance()
