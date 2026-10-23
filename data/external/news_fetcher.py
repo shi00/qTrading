@@ -864,8 +864,6 @@ class NewsFetcher:
                     DataSanitizer.sanitize_error(e),
                 )
                 if attempt < MAX_RETRIES - 1:
-                    import asyncio
-
                     await asyncio.sleep(RETRY_DELAY * (2**attempt))
 
         if not data_list:
