@@ -272,17 +272,28 @@ class EmbeddedPostgresService:
         并发契约：与 ``stop_sync`` 共享 ``cls._lock``，start/stop 互斥（详见类 docstring）。
         """
         # 快速路径：已启动直接返回（无锁，避免已启动场景的锁竞争）
-        if self._connection_info is not None and self._process is not None and self._process.poll() is None:
-            return self._connection_info
+        # M09-F1: 先取局部引用再 poll。原写法对 self._process 做两次独立属性读取，
+        # 与并发 stop 交错时第二次读取可能得到 None → None.poll() AttributeError。
+        proc = self._process
+        info = self._connection_info
+        if info is not None and proc is not None and proc.poll() is None:
+            return info
         # review03-C18: 与 stop_sync 共用 cls._lock（RLock）串行化状态变迁
         with self.__class__._lock:
-            # 双检锁：获取锁后再次检查（另一线程可能已启动完成）
-            if self._connection_info is not None and self._process is not None and self._process.poll() is None:
-                return self._connection_info
+            # 双检锁：获取锁后再次检查（另一线程可能已启动完成）；同样用局部引用防 TOCTOU
+            proc = self._process
+            info = self._connection_info
+            if info is not None and proc is not None and proc.poll() is None:
+                return info
             return self._start_sync_impl()
 
     def _start_sync_impl(self) -> ConnectionInfo:
         """实际启动逻辑（由 _start_sync 在 cls._lock 内调用）。"""
+        # M09-F2: 重启路径清理（sidecar 崩溃后 poll 非 None 再次 start）。
+        # 此处 _process 必为已退出进程（活进程在双检锁处已被快速路径拦截），
+        # kill/wait 为 no-op 或被捕获；关键是关闭上一次残留的 _stderr_file 句柄，
+        # 否则下方重新 open 会覆盖引用导致旧句柄泄漏。
+        self._cleanup_failed_start()
         # §17.6 #7: Popen 前校验 sidecar binary SHA256，防止版本混搭/损坏
         self._verify_sidecar_sha256()
 
@@ -355,11 +366,14 @@ class EmbeddedPostgresService:
         try:
             ready = json.loads(ready_line)
         except json.JSONDecodeError as exc:
+            # M09-F5: ready 行可能含 sidecar 输出的 url/password 等敏感片段，日志与异常消息
+            # 均经 sanitize_error 脱敏后再落盘（R9 纵深防御；密码未注册时模式匹配兜底）
+            sanitized_line = DataSanitizer.sanitize_error(ready_line)
             self._svc_logger.error(
-                "ready JSON parse failed: %s; line=%r", DataSanitizer.sanitize_error(exc), ready_line
+                "ready JSON parse failed: %s; line=%r", DataSanitizer.sanitize_error(exc), sanitized_line
             )
             self._cleanup_failed_start()
-            raise EmbeddedPostgresStartError(f"ready JSON parse failed: {exc}; line={ready_line!r}") from exc
+            raise EmbeddedPostgresStartError(f"ready JSON parse failed: {exc}; line={sanitized_line!r}") from exc
 
         if ready.get("schema") != _READY_SCHEMA:
             self._svc_logger.error("unexpected ready schema: %s", ready.get("schema"))
@@ -373,12 +387,18 @@ class EmbeddedPostgresService:
             self._svc_logger.error("unexpected ready status: %s", ready.get("status"))
             self._cleanup_failed_start()
             raise EmbeddedPostgresStartError(f"unexpected ready status: {ready.get('status')}")
-        port = int(ready.get("port", 0))
+        try:
+            port = int(ready.get("port", 0))
+            pid = int(ready.get("pid") or 0)
+        except (TypeError, ValueError) as exc:
+            # M09-F4: 核心字段 port/pid 非数值时转分类异常（原裸 ValueError 穿透）
+            self._svc_logger.error("invalid numeric field in ready JSON: %s", DataSanitizer.sanitize_error(exc))
+            self._cleanup_failed_start()
+            raise EmbeddedPostgresStartError(f"invalid numeric field in ready JSON: {exc}") from exc
         if port <= 0:
             self._svc_logger.error("invalid port in ready JSON: %s", port)
             self._cleanup_failed_start()
             raise EmbeddedPostgresStartError(f"invalid port in ready JSON: {port}")
-        pid = int(ready.get("pid") or 0)
         data_dir_str = str(ready.get("data_dir", str(self._data_dir)))
 
         try:
@@ -402,7 +422,14 @@ class EmbeddedPostgresService:
         # M4: 扩展字段从 ready JSON 解析（缺失字段使用 dataclass 默认值）
         postgres_version = str(ready.get("postgres_version", ""))
         host = str(ready.get("host", "")) or self._listen
-        sidecar_pid = int(ready.get("sidecar_pid", 0) or 0)
+        # M09-F4: sidecar_pid 为扩展字段，畸形时不杀健康进程，降级为默认 0
+        try:
+            sidecar_pid = int(ready.get("sidecar_pid", 0) or 0)
+        except (TypeError, ValueError):
+            self._svc_logger.warning(
+                "non-numeric sidecar_pid in ready JSON, fallback to 0: %r", ready.get("sidecar_pid")
+            )
+            sidecar_pid = 0
         password_source = str(ready.get("password_source", "")) or "password_file"
 
         self._connection_info = ConnectionInfo(
@@ -513,8 +540,13 @@ class EmbeddedPostgresService:
 
         try:
             expected_line = sha256_path.read_text(encoding="utf-8").strip()
-            # 标准格式："<hex>  <filename>"，取首个空白前部分
-            expected = expected_line.split()[0].lower()
+            # 标准格式："<hex>  <filename>"，取首个空白前部分；空文件视为损坏，跳过校验
+            # （M09-F3: 原 "".split()[0] 会 IndexError 穿透为未分类异常）
+            parts = expected_line.split()
+            if not parts:
+                self._svc_logger.warning("sha256 file empty, skip verification: %s", sha256_path)
+                return
+            expected = parts[0].lower()
         except OSError as exc:
             self._svc_logger.warning(
                 "sha256 file read failed, skip verification: %s", DataSanitizer.sanitize_error(exc)
