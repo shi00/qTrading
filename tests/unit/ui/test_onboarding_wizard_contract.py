@@ -487,6 +487,8 @@ class TestCommitModelStage:
         routes = _FakeModelRoutesViewModel(ModelRoutesState(selected_scenario="stock_analysis"))
         routes.payload_result = {"schema_version": 1, "config_revision": 7}
         routes.routes_result = [{"scenario_id": "stock_analysis", "candidates": []}]
+        # F13 悬空校验：默认无悬空候选（MagicMock 默认 truthy 会误触发拦截）
+        routes.unresolved_candidates = MagicMock(return_value=[])
         config_service = MagicMock(name="config_service")
         config_service.save_draft = AsyncMock(return_value=ConfigurationSaveOutcome(status=status))
         return connections, routes, config_service
@@ -867,6 +869,8 @@ class _FakeModelRoutesViewModel:
         self._subscribers: list[Any] = []
         self.dispose_called: bool = False
         self.load = AsyncMock()
+        #: F13 自动激活（committed 后宿主调用；默认成功且无告警消息）
+        self.activate_fresh_setup = AsyncMock(return_value=True)
         #: ``build_payload`` 返回的完整 payload 基底。
         self.payload_result: dict[str, Any] = {"schema_version": 1, "config_revision": 1}
         #: ``all_routes_payload`` 返回的全部场景草稿序列化。

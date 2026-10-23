@@ -18,9 +18,12 @@ import json
 import re
 import socket
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from decimal import Decimal
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Final
+
+import sqlalchemy as sa
 
 from core.model_management_types import (
     AttemptPermit,
@@ -31,15 +34,24 @@ from core.model_management_types import (
     SyntheticTestConsent,
     SyntheticTestContext,
 )
+from data.persistence.models import AppState
 from utils import config_handler as cfg
 from utils.config_models import ModelManagementSaveResult
 from utils.loop_local import get_loop_local
 from utils.thread_pool import TaskType, ThreadPoolManager
+from utils.time_utils import get_now
 
 _PURPOSES = ("news_annotation", "stock_analysis", "news_risk", "synthetic_test")
 
 # legacy 封口月份格式（S6 D4）：与 LegacySealConfig.month 正则一致，服务侧先行校验给出精确错误
 _MONTH_SEAL_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+# F13 激活编排：legacy 用量 app_state 键前缀（月键格式 f"{prefix}:{YYYYMM}"，与
+# services/ai_service/usage_tracker.py 的 month_key 系列函数一致；刻意不 import
+# 该模块避免 services 内部依赖重链，键名漂移由既有单测守护）。
+_LEGACY_COST_KEY_PREFIX: Final[str] = "ai_cost"
+_LEGACY_UNPRICED_CALLS_KEY_PREFIX: Final[str] = "ai_unpriced_calls"
+_LEGACY_UNPRICED_TOKENS_KEY_PREFIX: Final[str] = "ai_unpriced_tokens"
 
 
 class _FrozenMapping(dict):
@@ -152,10 +164,40 @@ def _outcome_from_cas(result: ModelManagementSaveResult, expected_revision: int)
     return ConfigurationSaveOutcome(status="not_committed", current_revision=result.current_revision)
 
 
+def _fresh_seal_baseline_is_zero(record: Mapping[str, Any]) -> bool:
+    """封口基线是否为零（F13 激活双保险）：全零才允许继续 activate。
+
+    ``cost_cny`` 为 DAO 侧「分 → 元」Decimal 字符串（``seal_legacy_month`` 产出）；
+    解析失败按非零处理（fail-closed，R21 不把未知伪装为零）；unpriced 计数须为
+    int 且非 bool（bool 是 int 子类，显式排除）且等于 0。
+    """
+    try:
+        cost_zero = Decimal(str(record.get("cost_cny"))) == 0
+    except (ArithmeticError, ValueError):
+        # Decimal(str(None)) 等非法形态 → InvalidOperation（ArithmeticError 子类）
+        return False
+    calls = record.get("unpriced_calls")
+    tokens = record.get("unpriced_tokens")
+    return (
+        cost_zero
+        and isinstance(calls, int)
+        and not isinstance(calls, bool)
+        and calls == 0
+        and isinstance(tokens, int)
+        and not isinstance(tokens, bool)
+        and tokens == 0
+    )
+
+
 class ModelConfigurationService:
     """统一模型配置 / 凭据 / 授权应用服务（非单例，DI 组装）。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        legacy_seal_dao: Any | None = None,
+        legacy_usage_reader: Callable[[dt.date], Awaitable[tuple[int, int, int]]] | None = None,
+    ) -> None:
         # 同 operation_id 的安全重试复用同一凭据版本（MM-12）：进程内租约映射，
         # 不持久化；服务实例销毁即释放（keyring 项由保守清理策略保留）。
         self._credential_leases: dict[str, tuple[str, str]] = {}
@@ -163,6 +205,12 @@ class ModelConfigurationService:
         # 出示即移除；实例级（服务非单例）且纯内存。业务授权通道 authorize_attempt
         # 不读取本注册表——业务调用不能借用测试许可（业务 grant 与测试 consent 两通道）。
         self._pending_synthetic_consents: dict[str, SyntheticTestConsent] = {}
+        # F13 激活编排可选 DI（默认 None → 运行时经 CacheManager 惰性解析；
+        # 测试经此注入 mock，避免真实 DB 依赖）：
+        # - legacy_seal_dao：``seal_legacy_month`` 载体的 AIUsageDao（鸭子类型）；
+        # - legacy_usage_reader：当月 legacy 用量读取器，返回 (cost_cents, unpriced_calls, unpriced_tokens)。
+        self._legacy_seal_dao: Any | None = legacy_seal_dao
+        self._legacy_usage_reader: Callable[[dt.date], Awaitable[tuple[int, int, int]]] | None = legacy_usage_reader
 
     # ------------------------------------------------------------------
     # 读取
@@ -477,6 +525,161 @@ class ModelConfigurationService:
             )
 
         return _outcome_from_cas(await ThreadPoolManager().run_async(TaskType.IO, _activate), expected_revision)
+
+    # ------------------------------------------------------------------
+    # 首次配置激活编排（F13：begin → seal → activate 一条链）
+    # ------------------------------------------------------------------
+
+    def _resolve_legacy_seal_dao(self) -> Any:
+        """解析 legacy 封口 DAO（F13）：DI 优先，否则经 CacheManager 惰性获取。
+
+        无法取得 DAO（engine 未初始化 / 属性缺失）时 fail-closed 抛
+        :class:`MigrationTransitionError`——封口是激活的硬前提，不得静默跳过（R21）。
+        """
+        if self._legacy_seal_dao is not None:
+            return self._legacy_seal_dao
+
+        from data.cache.cache_manager import (
+            CacheManager,
+        )  # lazy-import: CacheManager 依赖重链（引擎/DAO 全量注册），仅激活编排需要，函数体内导入避免模块级连锁
+
+        dao = getattr(CacheManager(), "ai_usage_dao", None)
+        if dao is None:
+            raise MigrationTransitionError("legacy seal dao unavailable: CacheManager engine not initialized")
+        return dao
+
+    async def _read_current_month_legacy_usage(self, when: dt.date) -> tuple[int, int, int]:
+        """读取当月 legacy 用量三计数 ``(cost_cents, unpriced_calls, unpriced_tokens)``。
+
+        DI 读取器优先（测试注入）；否则直查 ``app_state``：缺键 / 值为 None 按 0
+        （与 DAO ``_read_app_state_int`` 及 usage_tracker 读侧同口径）；非整数值按
+        0 并不阻断（封口基线复核仍 fail-closed 兜底）。async-native 查询不包线程池
+        （CLAUDE.md §3.2 澄清）。
+
+        Raises:
+            MigrationTransitionError: engine 不可用（fail-closed，激活前置读取失败
+                不得伪装为「无 legacy 用量」）。
+        """
+        if self._legacy_usage_reader is not None:
+            return await self._legacy_usage_reader(when)
+
+        from data.cache.cache_manager import (
+            CacheManager,
+        )  # lazy-import: 同 _resolve_legacy_seal_dao，避免模块级依赖重链
+
+        engine = CacheManager().engine
+        if engine is None:
+            raise MigrationTransitionError("legacy usage read failed: CacheManager engine not initialized")
+        keys = (
+            f"{_LEGACY_COST_KEY_PREFIX}:{when:%Y%m}",
+            f"{_LEGACY_UNPRICED_CALLS_KEY_PREFIX}:{when:%Y%m}",
+            f"{_LEGACY_UNPRICED_TOKENS_KEY_PREFIX}:{when:%Y%m}",
+        )
+        result = await engine.connect()
+        try:
+            stmt = sa.select(AppState.config_key, AppState.config_value).where(AppState.config_key.in_(keys))
+            rows = (await result.execute(stmt)).fetchall()
+        finally:
+            await result.close()
+        values: dict[str, str | None] = {str(k): v for k, v in rows}
+        counts: list[int] = []
+        for key in keys:
+            raw = values.get(key)
+            if raw is None:
+                counts.append(0)
+                continue
+            try:
+                counts.append(int(raw))
+            except (TypeError, ValueError):
+                counts.append(0)
+        return (counts[0], counts[1], counts[2])
+
+    async def activate_fresh_setup(
+        self,
+        expected_revision: int,
+        operation_id: str,
+        owner_session_id: str,
+        *,
+        when: dt.date | None = None,
+    ) -> ConfigurationSaveOutcome:
+        """首次配置激活编排（F13）：pending 且零 legacy 用量时 begin → seal → activate。
+
+        供「首次配置无法走到可用场景」的向导 / 设置页一键激活：全部预检通过后按
+        §12.2 迁移链依次执行，任一 CAS 中间态（not_committed / commit_unknown）
+        直接返回该结果交调用方处置（磁盘保持前一 phase，重试幂等：派生 operation_id
+        ``{operation_id}:begin`` / ``:seal`` 防回执串扰，恢复链 resolve_save_outcome
+        按 id 精确匹配）。
+
+        预检与断点续走（任一预检不满足即抛 :class:`MigrationTransitionError`，
+        不部分写入）：
+        - 快照 ``migration_state == "active"`` → 已激活，重复激活非法；
+        - ``migration_transition.phase == "sealed"`` → seal 步骤已 committed（唯一
+          生产写入点 :meth:`seal_legacy` 的 CAS 回执），**断点续走**：跳过 begin /
+          seal 直接 activate 收尾（sealed 后 legacy 写入被 :class:`LegacySealedError`
+          同事务阻断，无需重检用量）——seal 与 activate 间故障的残留态由此自愈，
+          不再要求调用方另寻「显式 activate」入口；
+        - 当月 legacy 用量非零（cost / calls / tokens 任一）→ 存在旧链在途用量，
+          禁止一键激活（须走排水流程）；
+        - 封口回执基线非零（TOCTOU 双保险）→ 预检与封口间出现写入，中止且不回滚
+          （保留 seal 行审计，由人工处置）。
+
+        Args:
+            expected_revision: 调用方持有的 config_revision（CAS 基准）。
+            operation_id: 本次编排根 operation_id（各步骤派生子 id）。
+            owner_session_id: 屏障 owner（seal 的 owner 校验一致）。
+            when: 封口月份锚（默认今天，与 AIUsageTracker 默认 clock 同口径）。
+
+        Returns:
+            各步骤 :class:`ConfigurationSaveOutcome`（最终为 activate 的结果）。
+        """
+
+        def _raise(message: str) -> MigrationTransitionError:
+            return MigrationTransitionError(f"activate_fresh_setup ({operation_id}): {message}")
+
+        # 封口月份锚取 CST 当日（utils.time_utils 统一时间源，防非东八区部署漂移）；
+        # 显式传入 when 时按调用方口径（测试注入）。
+        current = when or get_now().date()
+        snapshot = await self.get_snapshot()
+        if snapshot.migration_state == "active":
+            raise _raise("migration_state already active")
+        transition = snapshot.migration_transition
+        sealed_resumed = transition is not None and transition.get("phase") == "sealed"
+
+        revision = expected_revision
+        if sealed_resumed:
+            # 断点续走：seal 已落盘，仅剩 activate（不重检用量、不重开 begin/seal）
+            return await self.activate(revision, f"{operation_id}:activate")
+
+        cost_cents, unpriced_calls, unpriced_tokens = await self._read_current_month_legacy_usage(current)
+        if cost_cents != 0 or unpriced_calls != 0 or unpriced_tokens != 0:
+            raise _raise(
+                "current month legacy usage non-zero: "
+                f"cost_cents={cost_cents}, unpriced_calls={unpriced_calls}, unpriced_tokens={unpriced_tokens}"
+            )
+
+        begin_outcome = await self.begin_migration(revision, f"{operation_id}:begin", owner_session_id)
+        if begin_outcome.status != "committed":
+            return begin_outcome
+        revision = begin_outcome.committed_revision or revision
+
+        dao = self._resolve_legacy_seal_dao()
+        month = f"{current:%Y-%m}"
+        record = await dao.seal_legacy_month(month=month, owner_session_id=owner_session_id, owner_epoch=1)
+        if not isinstance(record, dict) or not record.get("seal_id") or not record.get("month"):
+            raise _raise(f"seal_legacy_month returned invalid record for {month}")
+        if not _fresh_seal_baseline_is_zero(record):
+            # 预检与封口间出现 legacy 写入（TOCTOU 双保险）：不回滚不静默，
+            # seal 行保留审计，由调用方显式处置。
+            raise _raise(f"seal baseline non-zero for {month}: cost_cny={record.get('cost_cny')!r}")
+
+        seal_outcome = await self.seal_legacy(
+            revision, f"{operation_id}:seal", {month: str(record["seal_id"])}, owner_session_id
+        )
+        if seal_outcome.status != "committed":
+            return seal_outcome
+        revision = seal_outcome.committed_revision or revision
+
+        return await self.activate(revision, f"{operation_id}:activate")
 
     # ------------------------------------------------------------------
     # 逐次许可（§4.3 authorize_attempt：线程池内配置文件锁重读，锁内无网络 IO）

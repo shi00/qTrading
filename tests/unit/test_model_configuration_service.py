@@ -1425,3 +1425,151 @@ class TestPendingFeeTestBarrier:
         draft = _base_connection(CONN_B, "https://api.deepseek.com")
         ctx = await service.begin_synthetic_test(draft_connection=draft, task_id="news_annotation")
         assert ctx.draft_connection_id == CONN_B
+
+
+def _zero_seal_record(month: str) -> dict:
+    """DAO ``seal_legacy_month`` 产出的零基线封口记录（对齐 ai_usage_dao 字段形态）。"""
+    return {
+        "seal_id": "seal-f13-zero",
+        "month": month,
+        "cost_cny": "0.000000",
+        "unpriced_calls": 0,
+        "unpriced_tokens": 0,
+        "last_writer_session_id": "owner-x",
+        "last_writer_epoch": 1,
+        "seal_version": 1,
+        "sealed_at": "2026-10-23T00:00:00+00:00",
+    }
+
+
+class TestActivateFreshSetup:
+    """F13 首次配置激活编排：预检 fail-closed + begin → seal → activate 一条链。"""
+
+    @pytest.mark.asyncio
+    async def test_success_chain_activates_and_seals_month(self, isolated_config):
+        """零 legacy 用量 + 零封口基线 → 全链提交，磁盘落 active + sealed 屏障。"""
+        zero_reader = mock.AsyncMock(return_value=(0, 0, 0))
+        dao = mock.Mock()
+        dao.seal_legacy_month = mock.AsyncMock(return_value=dict(_zero_seal_record("2026-10")))
+        svc = ModelConfigurationService(legacy_seal_dao=dao, legacy_usage_reader=zero_reader)
+        cfg_mod.ConfigHandler.ensure_defaults()
+        mm = _load_mm()
+
+        outcome = await svc.activate_fresh_setup(mm["config_revision"], "op-f13", "owner-x", when=dt.date(2026, 10, 23))
+
+        assert outcome.status == "committed"
+        raw = _read_raw(isolated_config)["model_management"]
+        assert raw["migration_state"] == "active"
+        assert raw["migration_transition"]["phase"] == "sealed"
+        assert {s["month"]: s["legacy_seal_id"] for s in raw["migration_transition"]["legacy_seals"]} == {
+            "2026-10": "seal-f13-zero"
+        }
+        dao.seal_legacy_month.assert_awaited_once_with(month="2026-10", owner_session_id="owner-x", owner_epoch=1)
+        zero_reader.assert_awaited_once_with(dt.date(2026, 10, 23))
+
+    @pytest.mark.asyncio
+    async def test_already_active_rejected(self, service, isolated_config):
+        """已 active → 重复一键激活非法（MigrationTransitionError），不触达 dao。"""
+        _set_active_state_on_disk(isolated_config)
+        with pytest.raises(MigrationTransitionError, match="already active"):
+            await service.activate_fresh_setup(1, "op-f13a", "owner-x")
+
+    @pytest.mark.asyncio
+    async def test_sealed_barrier_resumes_activate_only(self, service):
+        """pending + sealed 屏障 → 编排断点续走：跳过 begin/seal 直接 activate 收尾。
+
+        sealed 是 seal 步骤已 committed 的唯一证据（phase="sealed" 仅由 seal_legacy
+        落盘）；sealed 后 legacy 写入被 LegacySealedError 同事务阻断，无需重检用量。
+        """
+        mm = _load_mm()
+        await service.begin_migration(mm["config_revision"], "op-f13b1", "owner-a")
+        await service.seal_legacy(_load_mm()["config_revision"], "op-f13b2", {"2026-10": "seal-a"}, "owner-a")
+        current = _load_mm()["config_revision"]
+        with mock.patch.object(service, "begin_migration") as begin, mock.patch.object(service, "seal_legacy") as seal:
+            outcome = await service.activate_fresh_setup(current, "op-f13b3", "owner-b", when=dt.date(2026, 10, 23))
+        assert outcome.status == "committed"
+        begin.assert_not_awaited()
+        seal.assert_not_awaited()
+        fresh = _load_mm()
+        assert fresh["migration_state"] == "active"
+        assert fresh["migration_transition"]["phase"] == "sealed"  # transition 保留作审计
+
+    @pytest.mark.asyncio
+    async def test_sealed_barrier_resume_conflict_keeps_sealed(self, service):
+        """sealed 续走 activate CAS 冲突 → ConflictError（VM 映射提示），磁盘保持 sealed 可重试。"""
+        mm = _load_mm()
+        await service.begin_migration(mm["config_revision"], "op-f13b4", "owner-a")
+        await service.seal_legacy(_load_mm()["config_revision"], "op-f13b5", {"2026-10": "seal-a"}, "owner-a")
+        stale = _load_mm()["config_revision"] - 1  # 陈旧 revision → CAS 必失配
+        current = _load_mm()["config_revision"]
+        with pytest.raises(ModelConfigurationConflictError) as excinfo:
+            await service.activate_fresh_setup(stale, "op-f13b6", "owner-b", when=dt.date(2026, 10, 23))
+        assert excinfo.value.current_revision == current
+        fresh = _load_mm()
+        assert fresh["migration_state"] == "pending"
+        assert fresh["migration_transition"]["phase"] == "sealed"
+
+    @pytest.mark.asyncio
+    async def test_nonzero_legacy_usage_rejected_before_write(self, isolated_config):
+        """当月 legacy 用量非零（cost/calls/tokens 任一）→ 预检拒绝，磁盘零写入。"""
+        for reader_value in ((100, 0, 0), (0, 3, 0), (0, 0, 7)):
+            reader = mock.AsyncMock(return_value=reader_value)
+            dao = mock.Mock()
+            dao.seal_legacy_month = mock.AsyncMock()
+            svc = ModelConfigurationService(legacy_seal_dao=dao, legacy_usage_reader=reader)
+            cfg_mod.ConfigHandler.ensure_defaults()
+            mm = _load_mm()
+            with pytest.raises(MigrationTransitionError, match="legacy usage non-zero"):
+                await svc.activate_fresh_setup(mm["config_revision"], "op-f13c", "owner-x", when=dt.date(2026, 10, 23))
+            dao.seal_legacy_month.assert_not_awaited()
+            raw = _read_raw(isolated_config)["model_management"]
+            assert raw["migration_state"] == "pending"
+            assert raw["migration_transition"] is None
+
+    @pytest.mark.asyncio
+    async def test_engine_unavailable_fail_closed(self, isolated_config):
+        """无 DI 时 engine 不可用 → fail-closed（不把读取失败伪装为零用量）。"""
+        svc = ModelConfigurationService()
+        cfg_mod.ConfigHandler.ensure_defaults()
+        mm = _load_mm()
+        with mock.patch("data.cache.cache_manager.CacheManager") as fake_cm:
+            fake_cm.return_value = mock.Mock(engine=None)
+            with pytest.raises(MigrationTransitionError, match="engine not initialized"):
+                await svc.activate_fresh_setup(mm["config_revision"], "op-f13d", "owner-x", when=dt.date(2026, 10, 23))
+        raw = _read_raw(isolated_config)["model_management"]
+        assert raw["migration_transition"] is None
+
+    @pytest.mark.asyncio
+    async def test_nonzero_seal_baseline_rejected_after_seal(self, isolated_config):
+        """TOCTOU 双保险：封口回执基线非零 → 拒绝 activate，磁盘保持 draining（seal 行保留审计）。"""
+        zero_reader = mock.AsyncMock(return_value=(0, 0, 0))
+        dirty = dict(_zero_seal_record("2026-10"))
+        dirty["cost_cny"] = "1.500000"
+        dao = mock.Mock()
+        dao.seal_legacy_month = mock.AsyncMock(return_value=dirty)
+        svc = ModelConfigurationService(legacy_seal_dao=dao, legacy_usage_reader=zero_reader)
+        cfg_mod.ConfigHandler.ensure_defaults()
+        mm = _load_mm()
+
+        with pytest.raises(MigrationTransitionError, match="seal baseline non-zero"):
+            await svc.activate_fresh_setup(mm["config_revision"], "op-f13e", "owner-x", when=dt.date(2026, 10, 23))
+
+        raw = _read_raw(isolated_config)["model_management"]
+        assert raw["migration_state"] == "pending"
+        assert raw["migration_transition"]["phase"] == "draining"
+
+    @pytest.mark.asyncio
+    async def test_begin_not_committed_short_circuits(self, isolated_config):
+        """begin CAS not_committed → 原样返回该结果，不触达 dao / seal / activate。"""
+        zero_reader = mock.AsyncMock(return_value=(0, 0, 0))
+        dao = mock.Mock()
+        dao.seal_legacy_month = mock.AsyncMock()
+        svc = ModelConfigurationService(legacy_seal_dao=dao, legacy_usage_reader=zero_reader)
+        cfg_mod.ConfigHandler.ensure_defaults()
+        not_committed = ConfigurationSaveOutcome(status="not_committed", current_revision=5)
+        with mock.patch.object(svc, "begin_migration", mock.AsyncMock(return_value=not_committed)):
+            outcome = await svc.activate_fresh_setup(4, "op-f13f", "owner-x", when=dt.date(2026, 10, 23))
+        assert outcome.status == "not_committed"
+        dao.seal_legacy_month.assert_not_awaited()
+        raw = _read_raw(isolated_config)["model_management"]
+        assert raw["migration_transition"] is None

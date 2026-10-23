@@ -1215,6 +1215,29 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         merged.append(dict(entry))
         return merged
 
+    def wizard_draft_option(self) -> dict[str, Any] | None:
+        """当前草稿的候选选择器注入形态（F13，纯内存无 IO）。
+
+        草稿名称为空 → ``None``（本子步骤无可注入连接）；``capabilities`` 留空
+        （草稿未经验证，选择器按 unknown 展示，不臆造支持态）。``connection_id``
+        与 ``draft_connection_entry`` 同源（草稿稳定 id），注入后被引用的候选在
+        提交时不会悬空。
+        """
+        draft = self._state.draft
+        if not draft.name.strip():
+            return None
+        payload = self._draft_to_connection_payload(draft, None, None)
+        return {
+            "connection_id": str(payload["connection_id"]),
+            "name": str(payload["name"]),
+            "adapter_kind": str(payload["adapter_kind"]),
+            "provider": str(payload["provider"]),
+            "model": str(payload["model"]),
+            "enabled": bool(payload["enabled"]),
+            "billing": payload["billing"],
+            "connection_revision": int(payload["connection_revision"]),
+        }
+
     # ------------------------------------------------------------------
     # 外发授权命令（安全子域，§4.3）
     # ------------------------------------------------------------------

@@ -344,6 +344,13 @@ class _ModelIds:
         """
         return (f"{_ModelIds._CONNECTION_EDIT_PREFIX}.{connection_id}", AnchorKind.INTERACTIVE)
 
+    # --- F13 场景启用 / 情绪模式 / 一键激活 ---
+    # ROUTE_ENABLE 为 Switch 复合控件（对齐 STATUS_FILTER 先例，AnchorKind=COMPLEX）。
+    ROUTE_ENABLE: Eid = ("e2e.model.routes_enable", AnchorKind.COMPLEX)
+    SENTIMENT_MODE_BUNDLED: Eid = ("e2e.model.sentiment_mode_bundled", AnchorKind.INTERACTIVE)
+    SENTIMENT_MODE_DEDICATED: Eid = ("e2e.model.sentiment_mode_dedicated", AnchorKind.INTERACTIVE)
+    ACTIVATE_BUTTON: Eid = ("e2e.model.activate_button", AnchorKind.INTERACTIVE)
+
 
 class _TushareIds:
     """Tushare 配置面板 anchor 命名空间（设置 data tab 与 onboarding wizard 复用）。

@@ -18,13 +18,14 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 from core.i18n import Message
 from core.model_management_types import (
     ConfigurationSaveOutcome,
+    MigrationTransitionError,
     ModelConfigurationConflictError,
     ModelManagementSnapshot,
 )
@@ -42,6 +43,9 @@ _SAVE_COMMITTED = "committed"
 _SAVE_CONFLICT = "conflict"
 _SAVE_ERROR = "error"
 _SAVE_UNKNOWN = "commit_unknown"
+
+#: F13 新闻场景情绪模式合法域（与 utils.config_models 情绪 schema 对齐）。
+_SENTIMENT_MODES: tuple[str, str] = ("bundled", "dedicated")
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +114,10 @@ class ModelRoutesState:
     #: 「场景域已提交、连接 VM 需重基」（不用 config_revision——其在 not_committed /
     #: commit_unknown 回执下也会经 _absorb_revision 更新，会虚假触发重基）。
     commit_seq: int = 0
+    # F13 激活编排（只读镜像快照迁移子域；写入经 service 专用命令独占，F07）：
+    migration_state: str = "pending"
+    migration_transition_phase: str | None = None
+    activation_in_progress: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +298,10 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         self._service = service
         self._config_revision = 1
         self._undo: _PendingUndo | None = None
+        # F13 向导阶段内草稿连接注入追踪：注入项 id + 被其覆盖的既有选项（清除时恢复，
+        # 防止编辑已有连接场景下清除注入误删快照选项）。
+        self._wizard_option_id: str | None = None
+        self._wizard_option_shadow: ConnectionOption | None = None
         # 原始快照元数据（用于重建 CAS payload，不进 state）
         self._raw_connections: tuple[Mapping[str, Any], ...] = ()
         self._usage_policy: Mapping[str, Any] = {}
@@ -350,6 +362,10 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         self._raw_connections = snapshot.connections
         self._usage_policy = snapshot.usage_policy
         self._undo = None
+        # F13：load 重建快照选项列表，阶段内注入一并失效（重置追踪，不留恢复阴影）
+        self._wizard_option_id = None
+        self._wizard_option_shadow = None
+        transition = snapshot.migration_transition
         self._set_state(
             routes=drafts,
             committed_routes=drafts,
@@ -358,6 +374,9 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
             undo_available=False,
             save_state=_SAVE_IDLE,
             message=None,
+            migration_state=snapshot.migration_state,
+            migration_transition_phase=(str(transition.get("phase")) if transition is not None else None),
+            activation_in_progress=False,
         )
 
     async def rebase_snapshot(self) -> bool:
@@ -504,6 +523,112 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
         self._set_state(advanced_expanded=not self._state.advanced_expanded)
 
     # ------------------------------------------------------------------
+    # 场景启用 / 情绪模式（F13：草稿字段命令）
+    # ------------------------------------------------------------------
+
+    def set_route_enabled(self, enabled: bool) -> None:
+        """切换当前场景草稿启用态（同步命令，R16 安全）。
+
+        enabled 不进 dirty 计数（徽标只反映候选差异）；语义变化经
+        ``_semantic_route_for_save`` 在保存时递增 route_revision 一并落盘。
+        """
+        route = self.current_draft()
+        if route is None or route.enabled == enabled:
+            return
+        new_route = replace(route, enabled=enabled)
+        new_routes = _replace_route(self._state.routes, route.scenario_id, new_route)
+        self._set_state(
+            routes=new_routes,
+            dirty_counts=_compute_dirty_counts(new_routes, self._state.committed_routes),
+        )
+
+    def set_sentiment_mode(self, mode: str) -> None:
+        """切换新闻场景情绪模式（bundled / dedicated）；非新闻场景或同值 no-op。"""
+        route = self.current_draft()
+        if route is None or route.scenario_id != "news_annotation":
+            return
+        if mode not in _SENTIMENT_MODES or mode == route.sentiment_mode:
+            return
+        new_route = replace(route, sentiment_mode=mode)
+        new_routes = _replace_route(self._state.routes, route.scenario_id, new_route)
+        self._set_state(
+            routes=new_routes,
+            dirty_counts=_compute_dirty_counts(new_routes, self._state.committed_routes),
+        )
+
+    # ------------------------------------------------------------------
+    # 向导阶段内草稿连接注入 / 悬空校验（F13）
+    # ------------------------------------------------------------------
+
+    def attach_in_wizard_option(self, option: Mapping[str, Any] | None) -> None:
+        """注入向导当前子步骤的草稿连接为候选选项（幂等；None 清除注入）。
+
+        - 注入项仅进入 ``available_connections`` 供选择器引用，不影响已提交快照；
+        - 同 id 覆盖既有选项形态（编辑已有连接时草稿与快照同 id），被覆盖的原选项
+          记为 shadow，清除注入时恢复（防误删快照连接）；
+        - ``option=None``：prior_id 为 None 时 no-op（尚未注入过）；否则恢复 shadow
+          或移除注入项（子步骤切换 / 离开模型阶段即清除）；
+        - ``load()`` 重建快照选项并重置注入追踪。
+        """
+        prior_id = self._wizard_option_id
+        if option is None:
+            if prior_id is None:
+                return
+            shadow = self._wizard_option_shadow
+            self._wizard_option_id = None
+            self._wizard_option_shadow = None
+            if shadow is not None:
+                options = tuple(
+                    shadow if o.connection_id == shadow.connection_id else o for o in self._state.available_connections
+                )
+            else:
+                options = tuple(o for o in self._state.available_connections if o.connection_id != prior_id)
+            self._set_state(available_connections=options)
+            return
+
+        new_option = _option_from_mapping(dict(option))
+        if prior_id is not None and new_option.connection_id == prior_id:
+            # 同一注入的形态刷新（草稿字段编辑）：shadow 语义不变
+            options = tuple(
+                new_option if o.connection_id == new_option.connection_id else o
+                for o in self._state.available_connections
+            )
+            self._set_state(available_connections=options)
+            return
+
+        options = self._state.available_connections
+        if prior_id is not None:
+            # 切换注入项前先撤销上一次注入（恢复 shadow 或移除旧注入项）
+            old_shadow = self._wizard_option_shadow
+            if old_shadow is not None:
+                options = tuple(old_shadow if o.connection_id == old_shadow.connection_id else o for o in options)
+            else:
+                options = tuple(o for o in options if o.connection_id != prior_id)
+        shadow: ConnectionOption | None = None
+        if any(o.connection_id == new_option.connection_id for o in options):
+            shadow = next(o for o in options if o.connection_id == new_option.connection_id)
+            options = tuple(new_option if o.connection_id == new_option.connection_id else o for o in options)
+        else:
+            options = (*options, new_option)
+        self._wizard_option_id = new_option.connection_id
+        self._wizard_option_shadow = shadow
+        self._set_state(available_connections=options)
+
+    def unresolved_candidates(self, known_connection_ids: Iterable[str]) -> tuple[str, ...]:
+        """全部场景草稿候选中不在已知连接集合的 id（悬空校验，保序去重）。
+
+        覆盖全部场景（不区分 enabled）：禁用场景的悬空候选同样会在启用时阻断
+        执行，保存前一律拦截。
+        """
+        known = {str(c) for c in known_connection_ids}
+        unresolved: list[str] = []
+        for route in self._state.routes:
+            for connection_id in route.candidates:
+                if connection_id not in known and connection_id not in unresolved:
+                    unresolved.append(connection_id)
+        return tuple(unresolved)
+
+    # ------------------------------------------------------------------
     # 保存（只提交当前场景）
     # ------------------------------------------------------------------
 
@@ -550,6 +675,76 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
             self._set_state(save_state=_SAVE_UNKNOWN, message=Message("model_routes_save_unknown"))
         else:  # not_committed：旧配置仍有效，保留草稿
             self._set_state(save_state=_SAVE_ERROR, message=Message("model_routes_save_not_committed"))
+
+    # ------------------------------------------------------------------
+    # 首次配置一键激活（F13）
+    # ------------------------------------------------------------------
+
+    async def activate_fresh_setup(self) -> bool:
+        """一键激活迁移（F13）：service begin → seal → activate 编排的 VM 门面。
+
+        预检：已激活幂等返回 True；无启用场景（enabled 且有候选）为「暂不用 AI」
+        合法静默分支——返回 False 且 **message=None**（不告警）。sealed 屏障态
+        放行 service（编排断点续走 activate 自愈）；draining / 未知 phase 经
+        service 异常映射为 blocked 提示。
+
+        Returns:
+            True 已激活；False 未激活（原因经 message 反馈，静默分支为 None）。
+
+        Raises:
+            asyncio.CancelledError: 取消时显式 raise（R2）。
+        """
+        if self._state.migration_state == "active":
+            return True
+        if not any(r.enabled and r.candidates for r in self._state.routes):
+            self._set_state(message=None)
+            return False
+
+        self._set_state(
+            activation_in_progress=True,
+            message=Message("model_routes_activation_activating"),
+        )
+        try:
+            outcome = await self._service.activate_fresh_setup(
+                self._config_revision, str(uuid.uuid4()), str(uuid.uuid4())
+            )
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except ModelConfigurationConflictError:
+            self._set_state(
+                activation_in_progress=False,
+                message=Message("model_routes_activation_conflict"),
+            )
+            return False
+        except MigrationTransitionError:
+            self._set_state(
+                activation_in_progress=False,
+                message=Message("model_routes_activation_blocked_transition"),
+            )
+            return False
+        except Exception:
+            self._set_state(
+                activation_in_progress=False,
+                message=Message("model_routes_activation_failed"),
+            )
+            return False
+
+        self._absorb_revision(outcome)
+        if outcome.status == "committed":
+            self._set_state(activation_in_progress=False)
+            await self.load()  # 激活后刷新迁移子域镜像（migration_state → active）
+            return True
+        if outcome.status == "commit_unknown":
+            self._set_state(
+                activation_in_progress=False,
+                message=Message("model_routes_save_unknown"),
+            )
+            return False
+        self._set_state(
+            activation_in_progress=False,
+            message=Message("model_routes_save_not_committed"),
+        )
+        return False
 
     # ------------------------------------------------------------------
     # 内部

@@ -516,10 +516,34 @@ def _build_candidate_picker(
     )
 
 
-def _build_sentiment_section(draft: ScenarioRouteDraft, *, compact: bool) -> ft.Container:
-    """新闻场景独立情绪分区（引用候选；模式 bundled / dedicated）。"""
+def _build_sentiment_section(draft: ScenarioRouteDraft, vm: ModelRoutesViewModel, *, compact: bool) -> ft.Container:
+    """新闻场景独立情绪分区（引用候选；模式 bundled / dedicated 可切换，F13）。"""
     is_bundled = draft.sentiment_mode == "bundled"
     mode_text = I18n.get("model_routes_sentiment_bundled" if is_bundled else "model_routes_sentiment_dedicated")
+    mode_buttons = ft.Row(
+        [
+            anchored(
+                EIDS.MODEL.SENTIMENT_MODE_BUNDLED,
+                ft.Button(
+                    content=I18n.get("model_routes_sentiment_bundled"),
+                    key="sentiment_mode_bundled",
+                    style=AppStyles.primary_button() if is_bundled else AppStyles.secondary_button(),
+                    on_click=safe_on_click(_click(lambda: vm.set_sentiment_mode("bundled"))),
+                ),
+            ),
+            anchored(
+                EIDS.MODEL.SENTIMENT_MODE_DEDICATED,
+                ft.Button(
+                    content=I18n.get("model_routes_sentiment_dedicated"),
+                    key="sentiment_mode_dedicated",
+                    style=AppStyles.primary_button() if not is_bundled else AppStyles.secondary_button(),
+                    on_click=safe_on_click(_click(lambda: vm.set_sentiment_mode("dedicated"))),
+                ),
+            ),
+        ],
+        spacing=AppStyles.SPACING_XS,
+        wrap=True,
+    )
     refs: list[ft.Control] = [
         ft.Text(
             I18n.get("model_routes_sentiment_ref", index=i + 1),
@@ -553,6 +577,7 @@ def _build_sentiment_section(draft: ScenarioRouteDraft, *, compact: bool) -> ft.
                     color=AppColors.TEXT_PRIMARY,
                 ),
                 ft.Text(mode_text, key="sentiment_mode", size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.PRIMARY),
+                mode_buttons,
                 *refs,
                 ft.Text(reuse_text, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_HINT),
             ],
@@ -713,6 +738,88 @@ def _build_egress_summary(
 # ---------------------------------------------------------------------------
 
 
+def _build_activation_section(state: ModelRoutesState, vm: ModelRoutesViewModel) -> ft.Container:
+    """首次配置激活区（F13）：active 徽标 / 屏障提示 / 一键激活按钮 + hint。
+
+    - ``migration_state == "active"`` → 「已激活」徽标（无操作入口）；
+    - 存在未收敛迁移屏障（draining / 未知 phase）→ 显式提示（排水在途期间不提供
+      一键激活）；sealed 态放行按钮（service 编排对 sealed 断点续走 activate 自愈）；
+    - 其余 → 激活按钮（in_progress 禁用；无启用场景禁用并给行内提示，不告警弹层）。
+    """
+    if state.migration_state == "active":
+        return ft.Container(
+            key="activation_section",
+            content=ft.Row(
+                [
+                    ft.Text(
+                        I18n.get("model_routes_activation_status_active"),
+                        key="activation_status_active",
+                        size=AppStyles.FONT_SIZE_CAPTION,
+                        color=AppColors.SUCCESS,
+                    )
+                ],
+                spacing=AppStyles.SPACING_XS,
+            ),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            border=ft.Border.all(1, AppColors.BORDER),
+            border_radius=6,
+        )
+
+    if state.migration_transition_phase not in (None, "sealed"):
+        return ft.Container(
+            key="activation_section",
+            content=ft.Row(
+                [
+                    ft.Text(
+                        I18n.get("model_routes_activation_blocked_transition"),
+                        key="activation_blocked_transition",
+                        size=AppStyles.FONT_SIZE_CAPTION,
+                        color=AppColors.WARNING,
+                    )
+                ],
+                spacing=AppStyles.SPACING_XS,
+            ),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            border=ft.Border.all(1, AppColors.BORDER),
+            border_radius=6,
+        )
+
+    has_enabled_scene = any(r.enabled and r.candidates for r in state.routes)
+    button_label = I18n.get(
+        "model_routes_activation_in_progress" if state.activation_in_progress else "model_routes_activation_action"
+    )
+    body: list[ft.Control] = [
+        ft.Row(
+            [
+                anchored(
+                    EIDS.MODEL.ACTIVATE_BUTTON,
+                    ft.Button(
+                        content=button_label,
+                        key="activate_button",
+                        style=AppStyles.primary_button(),
+                        disabled=state.activation_in_progress or not has_enabled_scene,
+                        on_click=safe_on_click(_run_task_handler(vm.activate_fresh_setup)),
+                    ),
+                )
+            ],
+            spacing=AppStyles.SPACING_XS,
+        ),
+        ft.Text(
+            I18n.get("model_routes_no_enabled_scene" if not has_enabled_scene else "model_routes_activation_hint"),
+            key="activation_no_enabled_scene" if not has_enabled_scene else "activation_hint",
+            size=AppStyles.FONT_SIZE_CAPTION,
+            color=AppColors.TEXT_HINT,
+        ),
+    ]
+    return ft.Container(
+        key="activation_section",
+        content=ft.Column(body, spacing=AppStyles.SPACING_XS),
+        padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+        border=ft.Border.all(1, AppColors.BORDER),
+        border_radius=6,
+    )
+
+
 @ft.component
 def ScenarioRouteEditor(
     vm: ModelRoutesViewModel, egress_vm: ModelConnectionsViewModel, *, compact: bool = False
@@ -798,8 +905,29 @@ def ScenarioRouteEditor(
         on_click=safe_on_click(_click(vm.toggle_advanced)),
     )
 
+    # F13：标题行内嵌当前场景启用开关（草稿字段命令，R16 同步安全）。
+    title_row: list[ft.Control] = [
+        ft.Text(I18n.get("model_routes_title"), size=AppStyles.FONT_SIZE_TITLE, color=AppColors.TEXT_PRIMARY)
+    ]
+    if draft is not None:
+        title_row.append(
+            anchored(
+                EIDS.MODEL.ROUTE_ENABLE,
+                ft.Switch(
+                    label=I18n.get("model_routes_enable_scenario"),
+                    value=draft.enabled,
+                    active_color=AppColors.PRIMARY,
+                    on_change=safe_on_change(
+                        # on_change 事件中 e.control.value 已是点击后的新值（沿
+                        # database_tab / automation_tab 既有惯例），直接提交。
+                        lambda e: vm.set_route_enabled(bool(get_control_value(e.control, ft.Switch)))
+                    ),
+                ),
+            )
+        )
+
     children: list[ft.Control] = [
-        ft.Text(I18n.get("model_routes_title"), size=AppStyles.FONT_SIZE_TITLE, color=AppColors.TEXT_PRIMARY),
+        ft.Row(title_row, spacing=spacing, wrap=True),
         nav_row,
         ft.Column(candidate_rows, spacing=AppStyles.SPACING_SM),
         ft.Row(
@@ -818,8 +946,10 @@ def ScenarioRouteEditor(
     if state.candidate_picker_open:
         children.append(_build_candidate_picker(state, task_id, search, set_search, vm))
     if state.selected_scenario == "news_annotation" and draft is not None:
-        children.append(_build_sentiment_section(draft, compact=compact))
+        children.append(_build_sentiment_section(draft, vm, compact=compact))
     # 场景检查区（§4.3）：授权摘要——目标 / 任务 / 数据类别 + 授权 / 撤销。
     children.append(_build_egress_summary(draft, state.selected_scenario, egress_vm, compact=compact))
+    # F13 首次配置激活区：active 徽标 / 屏障提示 / 一键激活。
+    children.append(_build_activation_section(state, vm))
 
     return ft.Column(children, spacing=spacing)

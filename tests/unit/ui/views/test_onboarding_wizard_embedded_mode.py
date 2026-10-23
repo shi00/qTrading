@@ -14,10 +14,13 @@ import inspect
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from core.i18n import Message
+from core.model_management_types import ConfigurationSaveOutcome
+from ui.theme import AppColors
 from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 from ui.views import onboarding_wizard as wizard_module
 from ui.views.onboarding_wizard import (
@@ -208,3 +211,116 @@ class TestOnboardingWizardSourceContract:
         source = _read_source()
         # 守护: 不应出现 fn_validate_database=database_vm.save_config 直接绑定
         assert "fn_validate_database=database_vm.save_config" not in source
+
+
+# ============================================================================
+# F13: _commit_model_stage 模型阶段提交编排 (悬空拦截 / 自动激活 / 静默语义)
+# ============================================================================
+
+
+def _committed_outcome() -> ConfigurationSaveOutcome:
+    return ConfigurationSaveOutcome(
+        status="committed", current_revision=6, committed_revision=6, last_config_commit={"operation_id": "op-1"}
+    )
+
+
+def _make_connections_vm(*, entry: dict | None = None, draft_name: str = "") -> MagicMock:
+    vm = MagicMock()
+    vm.state.draft.name = draft_name
+    vm.validate_draft = MagicMock(return_value=[])
+    vm.draft_connection_entry = AsyncMock(return_value=entry)
+    vm.merged_connections = MagicMock(return_value=[entry] if entry is not None else [])
+    vm.load = AsyncMock()
+    return vm
+
+
+def _make_routes_vm(
+    *,
+    unresolved: tuple[str, ...] = (),
+    activate_result: bool = True,
+    message: Message | None = None,
+) -> MagicMock:
+    vm = MagicMock()
+    vm.state.selected_scenario = "news_annotation"
+    vm.state.message = message
+    vm.build_payload = MagicMock(
+        return_value={"schema_version": 1, "config_revision": 5, "usage_policy": {"monthly_cny_limit": None}}
+    )
+    vm.all_routes_payload = MagicMock(return_value=[])
+    vm.unresolved_candidates = MagicMock(return_value=list(unresolved))
+    vm.activate_fresh_setup = AsyncMock(return_value=activate_result)
+    vm.load = AsyncMock()
+    return vm
+
+
+def _make_config_service() -> MagicMock:
+    svc = MagicMock()
+    svc.save_draft = AsyncMock(return_value=_committed_outcome())
+    return svc
+
+
+class TestCommitModelStageF13:
+    """F13 模型阶段「保存并继续」编排行为契约。
+
+    mock 三 VM（DI 形态鸭子类型），不渲染向导组件、不触碰真实 service / keyring。
+    """
+
+    async def test_unresolved_candidates_reject_before_save(self) -> None:
+        """悬空候选：拦截保存（save_draft 不调用），不进入激活，snack 提示。"""
+        connections_vm = _make_connections_vm(entry={"connection_id": "c1"})
+        routes_vm = _make_routes_vm(unresolved=("conn-x",))
+        config_service = _make_config_service()
+
+        with patch.object(wizard_module, "_show_snack") as snack:
+            result = await wizard_module._commit_model_stage(connections_vm, routes_vm, config_service)
+
+        assert result is False
+        config_service.save_draft.assert_not_awaited()
+        routes_vm.activate_fresh_setup.assert_not_awaited()
+        assert snack.call_count == 1
+        assert snack.call_args.args[0]  # 提示文本非空
+        assert snack.call_args.args[1] == AppColors.ERROR  # 悬空拒绝为 ERROR 级
+
+    async def test_committed_triggers_auto_activation(self) -> None:
+        """提交成功：刷新两 VM 基线后自动激活，无告警。"""
+        connections_vm = _make_connections_vm(entry={"connection_id": "c1"})
+        routes_vm = _make_routes_vm(activate_result=True)
+        config_service = _make_config_service()
+
+        with patch.object(wizard_module, "_show_snack") as snack:
+            result = await wizard_module._commit_model_stage(connections_vm, routes_vm, config_service)
+
+        assert result is True
+        config_service.save_draft.assert_awaited_once()
+        routes_vm.activate_fresh_setup.assert_awaited_once()
+        connections_vm.load.assert_awaited_once()
+        routes_vm.load.assert_awaited_once()
+        snack.assert_not_called()
+
+    async def test_silent_when_no_enabled_scene(self) -> None:
+        """「暂不用 AI」（无启用场景）：activate 返回 False 且 message=None → 静默不告警。"""
+        connections_vm = _make_connections_vm()
+        routes_vm = _make_routes_vm(activate_result=False, message=None)
+        config_service = _make_config_service()
+
+        with patch.object(wizard_module, "_show_snack") as snack:
+            result = await wizard_module._commit_model_stage(connections_vm, routes_vm, config_service)
+
+        assert result is True
+        routes_vm.activate_fresh_setup.assert_awaited_once()
+        snack.assert_not_called()
+
+    async def test_activation_failure_shows_warning_but_completes(self) -> None:
+        """激活失败（message 非 None）：WARNING 提示但不阻断向导前进（路由草稿已保存）。"""
+        connections_vm = _make_connections_vm()
+        routes_vm = _make_routes_vm(activate_result=False, message=Message("model_routes_activation_failed"))
+        config_service = _make_config_service()
+
+        with patch.object(wizard_module, "_show_snack") as snack:
+            result = await wizard_module._commit_model_stage(connections_vm, routes_vm, config_service)
+
+        assert result is True
+        routes_vm.activate_fresh_setup.assert_awaited_once()
+        assert snack.call_count == 1
+        assert snack.call_args.args[0]  # 提示文本非空
+        assert snack.call_args.args[1] == AppColors.WARNING  # 激活失败不阻断前进，仅 WARNING
