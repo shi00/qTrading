@@ -29,14 +29,14 @@ def reset_i18n():
     I18n._initialized = False
     I18n._locale = "zh_CN"
     I18n._strings_cache = {}
-    I18n._missing_keys = set()
+    I18n._missing_keys = {}
     ui_i18n._i18n_state = None
     yield
     I18n._listeners = saved_listeners
     I18n._initialized = False
     I18n._locale = "zh_CN"
     I18n._strings_cache = {}
-    I18n._missing_keys = set()
+    I18n._missing_keys = {}
     ui_i18n._i18n_state = None
 
 

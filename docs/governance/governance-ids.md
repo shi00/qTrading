@@ -143,3 +143,5 @@
 | FT-07 | corpus_tag 支持范围与固定行数契约待决策（workflow 行数断言绑定 corpus-v1） | 模型微调流水线检视任务链（本地检视报告） | [finbert-train.yml](../../.github/workflows/finbert-train.yml) | 使用中 |
 | FT-08 | FinBERT 训练依赖锁定（accelerate/numpy/sentencepiece pin + Release note lineage 补全） | 模型微调流水线检视任务链（本地检视报告） | [finbert-train.yml](../../.github/workflows/finbert-train.yml) | 使用中 |
 | FT-09 | verify_finbert_gguf docstring 与产线 workflow 漂移修正（如实说明已集成 CI 一致性 Gate） | 模型微调流水线检视任务链（本地检视报告） | [verify_finbert_gguf.py](../../scripts/verify_finbert_gguf.py) | 使用中 |
+| CORE-03 | `I18n.get` format 异常容错扩展：IndexError/ValueError（位置占位符 `{}`/`{0}`/混合规格/语法损坏模板）与 KeyError 同样降级返回原模板并记 warning，不向调用方传播（反转原 core-004「仅吞 KeyError」契约） | i18n 健壮性巡检（本地检视报告 gitignored） | [i18n.py](../../core/i18n.py) / [test_i18n.py](../../tests/unit/test_i18n.py) | 使用中 |
+| CORE-04 | `I18n.get` 的 locale 参数过 `SUPPORTED_LOCALES` 白名单（非法 locale 记 warning 并回退当前 locale，与 `set_locale` 语义对齐）+ `_missing_keys` 按 locale 隔离（跨 locale 缺失告警不互吞） | i18n 健壮性巡检（本地检视报告 gitignored） | [i18n.py](../../core/i18n.py) / [test_i18n.py](../../tests/unit/test_i18n.py) | 使用中 |
