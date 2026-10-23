@@ -138,23 +138,37 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
             self._set_state(is_saving=False)
 
     async def save_auto_update_time(self, new_time: str) -> bool:
-        """保存自动更新时间。"""
+        """保存自动更新时间。
+
+        P-AUTO-1: 返回前统一回读磁盘对齐 state — 成功时写盘已同步完成, 读数必为
+        新值; 失败/异常/并发早退时磁盘未被本次改写, 读数为旧值 → 回滚 View 的
+        乐观更新, 保证「返回 False 时 state 与磁盘一致」, 消除 UI 显示未生效值
+        的漂移 (重启后跳变)。
+        """
         if self._state.is_saving:
+            self._set_state(auto_time=ConfigHandler.get_auto_update_time())
             return False
         self._set_state(is_saving=True)
         try:
-            await ThreadPoolManager().run_async(
+            success = await ThreadPoolManager().run_async(
                 TaskType.IO,
                 ConfigHandler.save_config,
                 {"auto_update_time": new_time},
             )
-            return True
+            if not success:
+                logger.warning(
+                    "[AutomationSettingsVM] save_config returned False for auto_update_time=%s",
+                    new_time,
+                )
+            self._set_state(auto_time=ConfigHandler.get_auto_update_time())
+            return success
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
             logger.error(
                 "[AutomationSettingsVM] schedule time save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
             )
+            self._set_state(auto_time=ConfigHandler.get_auto_update_time())
             return False
         finally:
             self._set_state(is_saving=False)
@@ -190,32 +204,45 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
             self._set_state(is_saving=False)
 
     async def save_concept_time(self, new_time: str) -> bool:
-        """保存概念同步任务时间。"""
+        """保存概念同步任务时间。
+
+        P-AUTO-1: 返回前统一回读磁盘对齐 state (同 save_auto_update_time 契约)。
+        """
         if self._state.is_saving:
+            self._set_state(concept_time=ConfigHandler.get_concept_schedule_time())
             return False
         self._set_state(is_saving=True)
         try:
-            await ThreadPoolManager().run_async(
+            success = await ThreadPoolManager().run_async(
                 TaskType.IO,
                 ConfigHandler.set_concept_schedule_time,
                 new_time,
             )
-            return True
+            if not success:
+                logger.warning(
+                    "[AutomationSettingsVM] set_concept_schedule_time returned False for time=%s",
+                    new_time,
+                )
+            self._set_state(concept_time=ConfigHandler.get_concept_schedule_time())
+            return success
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
             logger.error(
-                "[AutomationSettingsVM] concept time save failed: %s",
-                DataSanitizer.sanitize_error(ex),
-                exc_info=True,
+                "[AutomationSettingsVM] concept time save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
             )
+            self._set_state(concept_time=ConfigHandler.get_concept_schedule_time())
             return False
         finally:
             self._set_state(is_saving=False)
 
     async def save_nightly_prediction_time(self, new_time: str) -> bool:
-        """Task 7.3: 保存夜间 AI 预测时辰。"""
+        """Task 7.3: 保存夜间 AI 预测时辰。
+
+        P-AUTO-1: 返回前统一回读磁盘对齐 state (同 save_auto_update_time 契约)。
+        """
         if self._state.is_saving:
+            self._set_state(nightly_prediction_time=ConfigHandler.get_nightly_prediction_time())
             return False
         self._set_state(is_saving=True)
         try:
@@ -224,6 +251,12 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
                 ConfigHandler.set_nightly_prediction_time,
                 new_time,
             )
+            if not result:
+                logger.warning(
+                    "[AutomationSettingsVM] set_nightly_prediction_time returned False for time=%s",
+                    new_time,
+                )
+            self._set_state(nightly_prediction_time=ConfigHandler.get_nightly_prediction_time())
             return bool(result)
         except asyncio.CancelledError:
             raise  # R2
@@ -233,6 +266,7 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
                 DataSanitizer.sanitize_error(ex),
                 exc_info=True,
             )
+            self._set_state(nightly_prediction_time=ConfigHandler.get_nightly_prediction_time())
             return False
         finally:
             self._set_state(is_saving=False)
@@ -266,27 +300,40 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
             self._set_state(is_saving=False)
 
     async def save_news_interval(self, new_val: str) -> bool:
-        """保存新闻拉取间隔 (秒, 字符串解析为 int)。"""
+        """保存新闻拉取间隔 (秒, 字符串解析为 int)。
+
+        P-AUTO-1: 返回前统一回读磁盘对齐 state (同 save_auto_update_time 契约)。
+        """
         if self._state.is_saving:
+            self._set_state(news_interval=str(ConfigHandler.get_config("news_poll_interval", 60)))
             return False
         try:
             val = int(new_val)
         except (ValueError, TypeError):
+            # 解析失败时 View 已乐观更新 state, 同样回读磁盘对齐 (统一契约)
+            self._set_state(news_interval=str(ConfigHandler.get_config("news_poll_interval", 60)))
             return False
         self._set_state(is_saving=True)
         try:
-            await ThreadPoolManager().run_async(
+            success = await ThreadPoolManager().run_async(
                 TaskType.IO,
                 ConfigHandler.save_config,
                 {"news_poll_interval": val},
             )
-            return True
+            if not success:
+                logger.warning(
+                    "[AutomationSettingsVM] save_config returned False for news_poll_interval=%s",
+                    val,
+                )
+            self._set_state(news_interval=str(ConfigHandler.get_config("news_poll_interval", 60)))
+            return success
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
             logger.error(
                 "[AutomationSettingsVM] interval save failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True
             )
+            self._set_state(news_interval=str(ConfigHandler.get_config("news_poll_interval", 60)))
             return False
         finally:
             self._set_state(is_saving=False)
