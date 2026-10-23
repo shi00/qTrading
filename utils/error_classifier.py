@@ -220,7 +220,14 @@ def _has_status_code(error_str: str, *codes: str) -> bool:
 def classify_error(e: Exception, context: str = "general") -> dict:
     # review05-E3: AppError 携带结构化信息，语义无需事后推断，直接返回。
     if isinstance(e, AppError):
-        return e.to_error_info()
+        info = e.to_error_info()
+        # CORE-02: AppError 自带的可重试声明（retryable）优先于字符串匹配推断，
+        # 显式映射为 failover 消费点（_chat_completion_with_failover）读取的
+        # should_retry；否则未来 retryable=True 的 AppError 子类，其重试语义会在
+        # failover 路径静默失效（should_retry 缺省 False → 直接 raise 不重试）。
+        # 现有子类 retryable=False，映射后仍为 False，行为不变。
+        info["should_retry"] = bool(info.get("retryable", False))
+        return info
 
     error_str = str(e).lower()
     error_type = type(e).__name__
