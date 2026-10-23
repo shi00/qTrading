@@ -1091,6 +1091,58 @@ class TestHistoryTreeOffsetProgression:
             assert vm.state.history_tree.has_more is False  # len(df)=10 < 30
             assert vm.state.history_tree.offset == 10
 
+    @pytest.mark.asyncio
+    async def test_concurrent_load_more_does_not_duplicate_append(self, vm):
+        """连点「加载更多」竞态回归: 并发 append 任务经 loop-local 锁串行化, 不得重复 append 同一页.
+
+        修复前: 两任务均在锁外读旧 offset → 同页数据 append 两次 (历史树出现重复条目);
+        修复后: 第二任务排队等待, 锁内重读最新 offset → 取下一页/正确衔接。
+        """
+        import pandas as pd
+        from unittest.mock import AsyncMock
+
+        df_page1 = pd.DataFrame(
+            {
+                "run_id": [f"run-{i}" for i in range(30)],
+                "trade_date": ["20260801"] * 30,
+                "strategy_name": ["test_strategy"] * 30,
+                "cnt": [1] * 30,
+            }
+        )
+        df_page2 = pd.DataFrame(
+            {
+                "run_id": [f"run-{i}" for i in range(30, 60)],
+                "trade_date": ["20260802"] * 30,
+                "strategy_name": ["test_strategy"] * 30,
+                "cnt": [1] * 30,
+            }
+        )
+        empty_df = df_page1.iloc[0:0]
+
+        requested_offsets: list[int] = []
+
+        async def _fake_get_history_tree(*, offset: int = 0):
+            requested_offsets.append(offset)
+            return {0: df_page1, 30: df_page2}.get(offset, empty_df)
+
+        with patch("ui.viewmodels.history_mode_mixin.CacheManager") as mock_cache_cls:
+            mock_cache = mock_cache_cls.return_value
+            mock_cache.screener_dao.get_history_tree = AsyncMock(side_effect=_fake_get_history_tree)
+
+            # 初始加载 (append=False, offset: 0 → 30)
+            await vm.load_history_tree(append=False)
+            # 模拟连点: 并发两次 load_more
+            await asyncio.gather(vm.load_history_tree(append=True), vm.load_history_tree(append=True))
+
+        # 修复前第二个任务会再次以 offset=30 取数 (重复页); 修复后 offset 序列严格递增不重复
+        assert requested_offsets == [0, 30, 60]
+        # 合并行无重复 run_id (历史树不出现重复条目)
+        all_run_ids = [r.run_id for row in vm.state.history_tree.rows for r in row.strategies]
+        assert len(all_run_ids) == len(set(all_run_ids))
+        assert vm.state.history_tree.offset == 60
+        # 第二次 append 命中空页 → has_more=False
+        assert vm.state.history_tree.has_more is False
+
 
 class TestSaveResultsFailSanitization:
     """F1-A-2: save_results 失败时 reason 经 DataSanitizer.sanitize_error 脱敏."""

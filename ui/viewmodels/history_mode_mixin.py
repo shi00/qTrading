@@ -34,6 +34,7 @@ from ui.viewmodels.screener_types import (
     ScreenerState,
     StrategyRunRow,
 )
+from utils.loop_local import get_loop_local
 
 logger = logging.getLogger(__name__)
 
@@ -155,39 +156,46 @@ class HistoryModeMixin:
 
         Args:
             append: True 追加到现有 rows (load_more 路径); False 重置 rows (切换模式/初始加载).
-        """
-        cache = CacheManager()
-        offset = self._state.history_tree.offset if append else 0
-        df = await cache.screener_dao.get_history_tree(offset=offset)
-        if df is None or df.empty:
-            if not append:
-                # 重置 rows (切换到 HISTORY 模式后无数据)
-                self._set_state(
-                    history_tree=replace(
-                        self._state.history_tree,
-                        rows=(),
-                        offset=0,
-                        has_more=False,
-                    )
-                )
-            else:
-                # append 路径下无更多数据, 仅隐藏 load_more
-                self._set_state(history_tree=replace(self._state.history_tree, has_more=False))
-            return
 
-        new_rows = self._build_history_tree_rows(df)
-        if append:
-            merged_rows = self._state.history_tree.rows + new_rows
-        else:
-            merged_rows = new_rows
-        self._set_state(
-            history_tree=replace(
-                self._state.history_tree,
-                rows=merged_rows,
-                offset=offset + len(df),
-                has_more=len(df) >= 30,
+        并发守卫: loop-local 锁串行化 (R11, 与基座 ``_ensure_processor`` 同模式)。
+        连点「加载更多」时第二个任务排队等待, 锁内**重读**最新 offset 后再取数,
+        消除「两任务读同一旧 offset → 同页重复 append」竞态; CancelledError 经
+        ``async with`` 释放锁后正常传播 (R2)。
+        """
+        lock = get_loop_local("screener_vm_history_tree_lock", asyncio.Lock)
+        async with lock:
+            cache = CacheManager()
+            offset = self._state.history_tree.offset if append else 0
+            df = await cache.screener_dao.get_history_tree(offset=offset)
+            if df is None or df.empty:
+                if not append:
+                    # 重置 rows (切换到 HISTORY 模式后无数据)
+                    self._set_state(
+                        history_tree=replace(
+                            self._state.history_tree,
+                            rows=(),
+                            offset=0,
+                            has_more=False,
+                        )
+                    )
+                else:
+                    # append 路径下无更多数据, 仅隐藏 load_more
+                    self._set_state(history_tree=replace(self._state.history_tree, has_more=False))
+                return
+
+            new_rows = self._build_history_tree_rows(df)
+            if append:
+                merged_rows = self._state.history_tree.rows + new_rows
+            else:
+                merged_rows = new_rows
+            self._set_state(
+                history_tree=replace(
+                    self._state.history_tree,
+                    rows=merged_rows,
+                    offset=offset + len(df),
+                    has_more=len(df) >= 30,
+                )
             )
-        )
 
     @staticmethod
     def _build_history_tree_rows(df: pd.DataFrame) -> tuple[HistoryTreeRow, ...]:
