@@ -254,6 +254,12 @@ name = "R1: utils must not import business layers"
 type = "forbidden"
 source_modules = ["utils"]
 forbidden_modules = ["data", "services", "strategies", "ui", "app"]
+# unmatched_ignore_imports_alerting 降为 warn（UTILS-A-01）：EX-0021 指向的 data.sync.base 位于命名空间包
+# data/sync/（无 __init__.py），grimp 暂不建模该子包，该条 ignore 当前无匹配，默认 error 会使 lint-imports
+# 直接失败（门禁盲区，见技术债 P3-RedlineAuto-Grimp-Namespace-Blindspot）。warn 保留每次运行的可观测告警，
+# 盲区消除、条目开始匹配后告警自动消失，届时应删除本行恢复默认 error。代价：本契约其余存量条目失配
+# （对应 lazy import 已删除但白名单未清理）时亦由报错降为告警，由 exceptions.yml validity_criteria 人工复核兜底。
+unmatched_ignore_imports_alerting = "warn"
 ignore_imports = [
     # EX-0001 config_handler ↔ db_config_service 循环打破（A2 标注 lazy-import，保留）
     # review05-E11：该 lazy import 随按域拆分迁至 utils/config/db.py
@@ -274,6 +280,12 @@ ignore_imports = [
     "utils.scheduler_service -> data.persistence.engine_provider",
     # EX-0007
     "utils.scheduler_service -> services.task_manager",
+    # EX-0021 scheduler_service 补登记（UTILS-A-01）：_catchup_logic 函数内 from data.sync.base import SyncResult
+    # （# lazy-import: 启动性能），与 EX-0004~EX-0007/EX-0019 同因。GDR-01 补录时遗漏：data/sync/ 为命名空间包
+    # （无 __init__.py），grimp 不建模该子包，lint-imports 对该违规不报不拦（门禁盲区，见技术债
+    # P3-RedlineAuto-Grimp-Namespace-Blindspot）；待 grimp 修复建模（实测补 __init__.py 不恢复边捕获）后本条
+    # 生效，以 ignored 数 18→19 且未匹配告警消失为信号。
+    "utils.scheduler_service -> data.sync.base",
     # EX-0008 shutdown 关机步骤按需加载，避免模块加载即拉起全栈（A2 标注 lazy-import，保留）
     "utils.shutdown -> data.data_processor",
     # EX-0009
