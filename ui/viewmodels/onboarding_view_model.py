@@ -536,6 +536,11 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
         先即时更新 state（驱动勾选框与「下一步」按钮 disabled，避免受控 Checkbox
         视觉回退），再经 IO 线程池写入 ConfigHandler（R16）。
 
+        P-ONB-01: 返回前统一回读磁盘对齐 state — 成功时写盘已同步完成, 读数必为
+        新值; 失败/异常时磁盘未被本次改写, 读数为旧值 → 天然回滚乐观更新, 保证
+        「返回 False 时 state 与磁盘一致」, 消除勾选残留漂移 (重启后向导重新要求
+        勾选而 UI 仍显示已勾选)。连点竞态由并发路径各自回读兜底最终一致。
+
         Returns:
             True 保存成功; False 保存失败 (ConfigHandler 返回 False 或 IO 异常)。
         Raises:
@@ -551,8 +556,9 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
             )
             if not saved:
                 logger.warning("[OnboardingVM] set_risk_disclaimer_acknowledged returned False")
-                return False
-            return True
+            # P-ONB-01: 成功与失败路径统一回读磁盘对齐 state（失败时读数为旧值 → 回滚）。
+            self._set_state(risk_acknowledged=bool(ConfigHandler.is_risk_disclaimer_acknowledged()))
+            return bool(saved)
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
@@ -561,6 +567,7 @@ class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
                 DataSanitizer.sanitize_error(ex),
                 exc_info=True,
             )
+            self._set_state(risk_acknowledged=bool(ConfigHandler.is_risk_disclaimer_acknowledged()))
             return False
 
     async def save_language(self, new_locale: str) -> bool:
