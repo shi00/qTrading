@@ -811,6 +811,11 @@ class TestSyntheticTest:
         assert len(adapter.requests) == 1
         assert adapter.requests[0].payload == {"texts": ["ping"]}
 
+    def test_resolved_test_connection_rejects_unknown_kind(self):
+        """kind 域外拒绝（防御：payload 由校验后草稿构建，正常流程不可达）。"""
+        with pytest.raises(ValueError, match="unsupported adapter kind"):
+            ModelConnectionsViewModel._resolved_test_connection({"adapter_kind": "bogus"})
+
     async def test_new_credential_participates_in_test(self):
         """新填 credential 参与测试（临时版本化凭据），不使用落库旧值。"""
         svc = _make_service()

@@ -941,6 +941,22 @@ class TestSyntheticTestContext:
             )
 
     @pytest.mark.asyncio
+    async def test_consent_rejects_host_mismatch(self, service, monkeypatch):
+        """F15：登记许可被跨主机搬运后出示拒绝消费（consent 与登记主机绑定）。"""
+        draft_conn = _base_connection(CONN_B, "http://127.0.0.1:8000/v1", adapter_kind="gguf_chat")
+        ctx = await service.begin_synthetic_test(draft_connection=draft_conn, task_id="news_annotation")
+        consent = service.create_synthetic_test_consent(
+            ctx, target_fingerprint="http://127.0.0.1:8000:8000", deadline=asyncio.get_running_loop().time() + 30.0
+        )
+        # 跨主机搬运：出示时本机名与登记主机不符（非登记对象副本会先被 is 身份比对拒绝）
+        monkeypatch.setattr(socket, "gethostname", lambda: "other-host")
+
+        with pytest.raises(PermissionError, match="主机身份不符"):
+            service.consume_synthetic_test_consent(
+                consent, draft_connection=draft_conn, target_fingerprint="http://127.0.0.1:8000:8000"
+            )
+
+    @pytest.mark.asyncio
     async def test_consent_consumption_does_not_persist(self, service):
         """F15：许可消费纯内存——config_revision 与 grants 均不变（无隐式持久化授权）。"""
         draft_conn = _base_connection(CONN_B, "http://127.0.0.1:8000/v1", adapter_kind="gguf_chat")
