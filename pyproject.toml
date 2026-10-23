@@ -50,7 +50,7 @@ dependencies = [
     "keyring>=25.7.0",
     "cryptography>=50.0.1",  # Security: CVE-2026-69247 (PKCS#7 Bleichenbacher oracle) fixed in 50.0.0 -> 50.0.1
     "readerwriterlock>=1.0.9",
-    "filelock>=3.15.0",  # S1 统一模型管理：配置文件跨进程锁（§5.1）
+    "filelock>=4.2.1",  # S1 统一模型管理：配置文件跨进程锁（§5.1）; Security: CVE-2026-112940/112913/112907 fixed in 4.2.1
     "cachetools>=7.2.0",
     "pydantic>=2.13.5",
     "aiohttp>=3.14.4",  # Security: CVE-2026-111064/GHSA-2g87-pp6c-29x5/CVE-2026-111063 fixed in 3.14.4
@@ -81,6 +81,7 @@ dev = [
     "msgpack>=1.2.2",  # Security: GHSA-6v7p-g79w-8964 (Use After Free in Unpacker reuse)
     "pyjwt>=2.15.0",  # Security: CVE-2026-101918 (深层嵌套 JWT payload 触发未捕获 RecursionError -> 认证路径 DoS) fixed in 2.15.0; 传递依赖 flet-mcp -> fastmcp-slim -> mcp
     "import-linter>=2.15",  # Architecture guard: enforce R1 layered dependencies (CLAUDE.md §4.1)
+    "fastmcp>=4.1.2",  # Security: GHSA-7xgj-8392-5q4r (transform 后组件授权绕过，直呼路径跳过 AuthCheck) / GHSA-vqqp-x5qm-5qp4 (OAuth client credentials 缺 issuer 绑定致 client secret 泄漏) fixed in 4.1.2; 传递依赖 flet-mcp -> fastmcp -> fastmcp-slim
     "flet-mcp==1.0.3",  # AI dev-time Flet API verification (CLAUDE.md §1.10); run via `python -c "from flet_mcp import mcp; mcp.run()"`; pinned == to align with flet main package (api.json is version-specific)
 ]
 optional = [

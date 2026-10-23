@@ -79,7 +79,7 @@ exchange-calendars==4.13.2
     # via pandas-market-calendars
 fastuuid==0.14.0
     # via litellm
-filelock==4.0.1
+filelock==4.2.4
     # via
     #   astockscreener (pyproject.toml)
     #   huggingface-hub
