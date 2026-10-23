@@ -433,6 +433,184 @@ class TestResolveCommitUnknown:
         vm._service.resolve_save_outcome.assert_not_awaited()  # noqa: SLF001
 
 
+class TestSaveCancellationIdentity:
+    """F31：保存取消丢失恢复身份 / 旧回执覆盖新草稿 的回归。"""
+
+    async def test_save_cancelled_before_write_restores_idle_and_allows_resave(self, vm, filled_litellm_draft):
+        """写前取消：可证明未提交 → 恢复 idle 可再次保存，不留 SAVING 悬挂态。"""
+        import asyncio
+
+        # 录入新凭据使保存首个 await 落在凭据准备阶段（写前窗口）
+        vm.update_credential("sk-test-123")
+        vm._service.prepare_credential_version.side_effect = asyncio.CancelledError  # noqa: SLF001
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await vm.save()
+        assert exc_info.type is asyncio.CancelledError
+
+        st = vm.state
+        assert st.save_state == "idle"
+        assert st.commit_unknown_pending is False
+        assert st.editor_open is True
+        assert st.draft.name == "New Conn"
+        assert st.dirty is True
+        vm._service.save_draft.assert_not_awaited()  # noqa: SLF001
+        assert vm._pending_operation_id is None  # noqa: SLF001
+
+        # 恢复后可再次保存（不再被 SAVING guard 拒绝）
+        vm._service.prepare_credential_version.side_effect = None  # noqa: SLF001
+        assert await vm.save() is True
+        assert vm.state.save_state == "committed"
+
+    async def test_save_cancelled_after_write_registers_recoverable_receipt(self, vm, filled_litellm_draft):
+        """写后取消：落盘线程不随等待取消而停止 → commit_unknown 可查回执并恢复。"""
+        import asyncio
+
+        vm._service.save_draft.side_effect = asyncio.CancelledError  # noqa: SLF001
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await vm.save()
+        assert exc_info.type is asyncio.CancelledError
+
+        st = vm.state
+        assert st.save_state == "commit_unknown"
+        assert st.commit_unknown_pending is True
+        operation_id = vm._service.save_draft.await_args.args[2]  # noqa: SLF001
+        assert vm._pending_operation_id == operation_id  # noqa: SLF001
+
+        # 按 operation_id 查回执恢复（F11 语义），不臆造「未提交」
+        vm._service.resolve_save_outcome.return_value = ConfigurationSaveOutcome(  # noqa: SLF001
+            status="committed", current_revision=3
+        )
+        assert await vm.resolve_commit_unknown() is True
+        st = vm.state
+        assert st.save_state == "committed"
+        assert st.commit_unknown_pending is False
+        assert st.dirty is False
+
+    async def test_stale_committed_receipt_does_not_close_new_draft(self, vm, filled_litellm_draft):
+        """保存期间新增草稿：旧 committed 回执不清 dirty / 不关闭新编辑器。"""
+        snapshot_calls = {"count": 0}
+
+        async def reset_then_commit(payload, expected_revision, operation_id):
+            vm.start_add()  # 延迟提交期间新建草稿（换代）
+            snapshot_calls["count"] = vm._service.get_snapshot.await_count  # noqa: SLF001
+            return ConfigurationSaveOutcome(status="committed", current_revision=2, committed_revision=2)
+
+        vm._service.save_draft = AsyncMock(side_effect=reset_then_commit)  # noqa: SLF001
+        ok = await vm.save()
+
+        assert ok is False
+        st = vm.state
+        # 旧回执未作用于重置后的新草稿
+        assert st.editor_open is True
+        assert st.save_state == "idle"
+        assert st.selected_connection_id is None
+        assert st.draft.name == ""
+        assert st.dirty is False
+        assert st.commit_unknown_pending is False
+        # 磁盘已提交：仍刷新快照维持行 / CAS 基线新鲜
+        assert vm._service.get_snapshot.await_count > snapshot_calls["count"]  # noqa: SLF001
+
+    async def test_cancelled_committing_save_during_draft_reset_keeps_receipt_resolvable(
+        self, vm, filled_litellm_draft
+    ):
+        """写后取消 + 保存期间新建草稿：身份保留可恢复，恢复不作用于新草稿。"""
+        import asyncio
+
+        async def reset_then_cancel(payload, expected_revision, operation_id):
+            vm.start_add()
+            raise asyncio.CancelledError
+
+        vm._service.save_draft = AsyncMock(side_effect=reset_then_cancel)  # noqa: SLF001
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await vm.save()
+        assert exc_info.type is asyncio.CancelledError
+
+        st = vm.state
+        # save_state 归重置命令所有；未知结果以旗标 + 回执身份保留
+        assert st.save_state == "idle"
+        assert st.commit_unknown_pending is True
+        save_call = vm._service.save_draft.await_args  # noqa: SLF001
+        assert save_call is not None
+        operation_id = save_call.args[2]
+        assert vm._pending_operation_id == operation_id  # noqa: SLF001
+
+        vm._service.resolve_save_outcome.return_value = ConfigurationSaveOutcome(  # noqa: SLF001
+            status="committed", current_revision=3
+        )
+        assert await vm.resolve_commit_unknown() is True
+        st = vm.state
+        assert st.commit_unknown_pending is False
+        # 门控：确认结果不清新草稿 dirty / 不改新草稿 save_state
+        assert st.editor_open is True
+        assert st.save_state == "idle"
+        assert st.dirty is False
+
+    async def test_stale_error_receipt_does_not_clobber_new_draft(self, vm, filled_litellm_draft):
+        """保存期间新增草稿：旧保存的异常不把新草稿状态打成 SAVE_ERROR。"""
+        import asyncio
+
+        async def reset_then_fail(payload, expected_revision, operation_id):
+            vm.start_add()
+            raise RuntimeError("boom")
+
+        vm._service.save_draft = AsyncMock(side_effect=reset_then_fail)  # noqa: SLF001
+        ok = await vm.save()
+
+        assert ok is False
+        st = vm.state
+        assert st.save_state == "idle"
+        assert st.editor_open is True
+        assert st.commit_unknown_pending is False
+
+    async def test_stale_commit_unknown_receipt_keeps_receipt_resolvable(self, vm, filled_litellm_draft):
+        """保存期间新增草稿 + 回执 commit_unknown：身份保留可查，状态机不覆盖新草稿。"""
+
+        async def reset_then_unknown(payload, expected_revision, operation_id):
+            vm.start_add()
+            return ConfigurationSaveOutcome(status="commit_unknown")
+
+        vm._service.save_draft = AsyncMock(side_effect=reset_then_unknown)  # noqa: SLF001
+        ok = await vm.save()
+
+        assert ok is False
+        st = vm.state
+        # 结果未知：回执身份保留（save_state 归重置命令所有，仅挂旗标）
+        assert st.save_state == "idle"
+        assert st.commit_unknown_pending is True
+        assert st.editor_open is True
+        save_call = vm._service.save_draft.await_args  # noqa: SLF001
+        assert save_call is not None
+        operation_id = save_call.args[2]
+        assert vm._pending_operation_id == operation_id  # noqa: SLF001
+
+        # 门控恢复：确认 committed 不清新草稿 dirty / 不改新草稿 save_state
+        vm._service.resolve_save_outcome.return_value = ConfigurationSaveOutcome(  # noqa: SLF001
+            status="committed", current_revision=3
+        )
+        assert await vm.resolve_commit_unknown() is True
+        st = vm.state
+        assert st.commit_unknown_pending is False
+        assert st.editor_open is True
+        assert st.save_state == "idle"
+
+    async def test_stale_not_committed_receipt_does_not_touch_new_draft(self, vm, filled_litellm_draft):
+        """保存期间新增草稿 + 回执 not_committed：可证明未提交，状态归重置命令。"""
+
+        async def reset_then_not_committed(payload, expected_revision, operation_id):
+            vm.start_add()
+            return ConfigurationSaveOutcome(status="not_committed", current_revision=1)
+
+        vm._service.save_draft = AsyncMock(side_effect=reset_then_not_committed)  # noqa: SLF001
+        ok = await vm.save()
+
+        assert ok is False
+        st = vm.state
+        assert st.save_state == "idle"
+        assert st.editor_open is True
+        assert st.commit_unknown_pending is False
+        assert vm._pending_operation_id is None  # noqa: SLF001
+
+
 # --- Credential semantics ---
 
 

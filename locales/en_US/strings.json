@@ -346,6 +346,7 @@
     "ai_egress_preview_news": "Public news summaries (sanitized)",
     "ai_external_acknowledgment_checkbox": "I acknowledge: using cloud AI sends candidate quotes / financial metrics / news and prompts to the selected cloud provider",
     "ai_progress_init": "Initializing AI analysis engine...",
+    "ai_legacy_dispatch_stopped": "AI dispatch stopped during model configuration migration (legacy chain draining/sealed or config unreadable); showing math-only results",
     "ai_budget_exceeded": "Monthly AI cost budget reached. AI analysis paused",
     "ai_budget_unpriced_prompt": "Some AI calls this month cannot be priced; the budget guard may not cover them. Continue?",
     "ai_budget_unpriced_dialog_title": "Unpriced AI calls detected",

@@ -5,7 +5,7 @@
 
 import pytest
 import pandas as pd
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from data.persistence.quality_gate import QualityGateError, QualityTier
 from strategies.ai_strategy import AISelectionStrategy
@@ -111,6 +111,10 @@ class TestAISelectionStrategyFilter:
         assert len(result) == 80
 
     @pytest.mark.asyncio
+    @patch(
+        "services.ai_service.scenario_dispatch.resolve_analysis_track",
+        new=AsyncMock(return_value=None),
+    )
     @patch("strategies.ai_mixin.AIService")
     @patch("strategies.ai_strategy.ConfigHandler")
     async def test_api_not_configured(self, mock_ch, mock_ai_cls):
@@ -118,6 +122,7 @@ class TestAISelectionStrategyFilter:
 
         ai_mixin.run_ai_analysis 检查 is_cloud_available() 后返回原始 candidates,
         on_progress 提示 "ai_not_configured" (与 ai_mixin 路径统一).
+        F04: 批次入口先判轨道, 此处 mock 旧轨放行 (None) 以覆盖旧 guard 分支.
         """
         mock_ch.get_ai_max_candidates.return_value = 10
         mock_ch.get_strategy_min_turnover.return_value = 1.0

@@ -255,18 +255,33 @@ class ProxyManager:
 
     @staticmethod
     def get_requests_proxy_config() -> dict | None:
-        """
-        Return proxy configuration suitable for requests library.
+        """返回适用于 requests 库的代理配置。
+
+        requests 的 ``proxies`` dict 仅按 scheme 键（``http``/``https``/``all``）
+        匹配代理，``no_proxy`` 键不参与直连判定（UTILS-B-03：旧实现混入该键会让
+        调用方误以为 NO_PROXY 白名单生效，实际白名单域名仍会静默走代理），故本
+        方法只返回 scheme 代理键。
+
+        NO_PROXY 直连语义的两种正确用法：
+        1. 环境变量路径：requests 默认 ``trust_env=True``，会自行读取进程环境中
+           的 ``NO_PROXY``（``litellm_env_context()`` 会临时写入进程环境；
+           ``get_no_proxy_env_dict()`` 仅返回 env dict，须由调用方写入
+           ``os.environ`` 或传给子进程后才能被 requests 读到）；
+        2. 调用方自行判定：对具体请求目标主机调用
+           ``ProxyManager.should_bypass_proxy(hostname)`` 决定是否携带本配置，
+           直连主机不要传 proxies。
 
         Returns:
-            Dict with 'proxies' key for requests, or None if no proxy needed.
+            ``{"proxies": {"http": ..., "https": ...}}``（仅含环境中实际存在的
+            scheme 代理键），无代理时返回 None。
         """
         http_proxy, https_proxy = ProxyManager._resolve_proxy_env()
 
         if not http_proxy and not https_proxy:
             return None
 
-        proxies = {"no_proxy": ProxyManager.get_no_proxy_string()}
+        # 仅 scheme 代理键；NO_PROXY 语义不经此 dict 传递（见 docstring）
+        proxies: dict[str, str] = {}
         if http_proxy:
             proxies["http"] = http_proxy
         if https_proxy:

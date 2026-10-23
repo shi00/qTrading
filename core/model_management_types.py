@@ -280,15 +280,28 @@ def ensure_inference_adapter(kind: str, adapter: object) -> None:
 # 外发目标与执行位置（§4.3，F01 分派授权身份的规范来源）
 # ---------------------------------------------------------------------------
 
-# 会真实外发数据的适配器类型（§4.3：HTTP 目标即使在局域网也需匹配已确认目标）；
-# gguf_* 为设备内本地模型，不产生网络出站。
+# 会真实外发数据的适配器类型（§4.3：HTTP 目标即使在局域网也需匹配已确认目标），
+# 执行位置需 egress grant。
 EGRESS_ADAPTER_KINDS: Final[tuple[str, ...]] = ("litellm_chat",)
+# 已知设备内本地、不产生网络出站的适配器类型（gguf_*）：显式豁免清单，
+# 与 ResolvedConnection.adapter_kind 的 Literal 白名单一一对应。
+LOCAL_ADAPTER_KINDS: Final[tuple[str, ...]] = ("gguf_chat", "gguf_sentiment")
 
 
 def adapter_kind_requires_egress(adapter_kind: str) -> bool:
-    """该适配器类型的执行是否产生网络外发（F01：许可按真实执行位置要求 egress grant）。"""
+    """该适配器类型的执行是否产生网络外发（F01：许可按真实执行位置要求 egress grant）。
 
-    return adapter_kind in EGRESS_ADAPTER_KINDS
+    default-deny（fail-closed）三分支：已知出站 kind（EGRESS_ADAPTER_KINDS）
+    → True；已知本地 kind（LOCAL_ADAPTER_KINDS）→ False；未知 kind（含新增
+    未登记类型）→ True，一律要求 egress grant——新增外发类型漏登记时禁止
+    未授权外发；新增本地 kind 须显式登记 LOCAL_ADAPTER_KINDS 方可豁免。
+    """
+
+    if adapter_kind in EGRESS_ADAPTER_KINDS:
+        return True
+    # 仅显式登记的本地 kind 豁免；未知 kind 一并落入 default-deny
+    # （宁可多要求 grant，不可漏授权，fail-closed）。
+    return adapter_kind not in LOCAL_ADAPTER_KINDS
 
 
 def normalize_egress_target(api_base: object) -> str | None:

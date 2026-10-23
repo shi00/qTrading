@@ -2,10 +2,10 @@
 core — Architecture core layer (DDD).
 
 This package contains cross-cutting infrastructure shared by all layers
-(data, services, strategies, utils, ui) but must NOT depend on any of them
+(app, data, services, strategies, utils, ui) but must NOT depend on any of them
 in order to avoid circular dependencies and reverse dependencies.
 
-Dependency rule:  core ← data / services / strategies / utils / ui
+Dependency rule:  core ← app / data / services / strategies / utils / ui
 
     * core never imports from any other layer.
     * Any other layer may import from core (single-direction dependency).
@@ -18,5 +18,9 @@ Dependency rule:  core ← data / services / strategies / utils / ui
 See CLAUDE.md §4.2 (core layer isolation principle) for the rationale.
 
 Currently houses:
+    - errors: Structured exception base classes (AppError / ErrorInfo)
     - i18n: Internationalization (moved from ui/ to eliminate reverse dependency)
+    - model_management_types: Shared pure types for unified model management (ADR-0014)
+    - prompt_base: Prompt assets and dependency-free parsing logic
+    - startup_types: Pure startup flow types (Enum / dataclass)
 """

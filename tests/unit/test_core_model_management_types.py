@@ -6,9 +6,17 @@
 - :func:`adapter_kind_requires_egress` 执行位置判定。
 """
 
+from typing import get_args, get_type_hints
+
 import pytest
 
-from core.model_management_types import adapter_kind_requires_egress, normalize_egress_target
+from core.model_management_types import (
+    EGRESS_ADAPTER_KINDS,
+    LOCAL_ADAPTER_KINDS,
+    ResolvedConnection,
+    adapter_kind_requires_egress,
+    normalize_egress_target,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -62,11 +70,23 @@ class TestAdapterKindRequiresEgress:
     @pytest.mark.parametrize(
         ("adapter_kind", "expected"),
         [
-            ("litellm_chat", True),  # 网络出站
-            ("gguf_chat", False),  # 设备内本地
-            ("gguf_sentiment", False),  # 设备内本地
-            ("unknown_kind", False),  # 未知类型防御：不要求 grant（executor 侧无适配器先拒）
+            ("litellm_chat", True),  # 已知网络出站
+            ("gguf_chat", False),  # 已知设备内本地（显式豁免）
+            ("gguf_sentiment", False),  # 已知设备内本地（显式豁免）
+            ("unknown_kind", True),  # 未知类型 default-deny：要求 grant（fail-closed）
+            ("litellm_chat_v2", True),  # 未知变体同样 default-deny
+            ("", True),  # 空串按未知处理
         ],
     )
     def test_kind_table(self, adapter_kind: str, expected: bool):
         assert adapter_kind_requires_egress(adapter_kind) is expected
+
+    def test_kind_lists_disjoint(self):
+        """出站清单与本地豁免清单不得重叠（default-deny 三分支判定的前提）。"""
+        assert not (set(EGRESS_ADAPTER_KINDS) & set(LOCAL_ADAPTER_KINDS))
+
+    def test_known_kinds_registered(self):
+        """Literal 白名单每个 kind 必须登记到出站或本地清单之一（防新增 kind 漏登记）。"""
+        hints = get_type_hints(ResolvedConnection)
+        for kind in get_args(hints["adapter_kind"]):
+            assert kind in EGRESS_ADAPTER_KINDS or kind in LOCAL_ADAPTER_KINDS

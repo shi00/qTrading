@@ -243,12 +243,38 @@ class TestProxyManagerGetRequestsProxyConfig:
         ProxyManager._no_proxy_domains = {"tushare.pro"}
         ProxyManager._initialized = True
 
-        with patch.dict(os.environ, {"HTTPS_PROXY": "http://proxy:8080"}, clear=False):
+        # clear=True 隔离宿主环境的代理变量，避免键集合断言受宿主污染
+        with patch.dict(os.environ, {"HTTPS_PROXY": "http://proxy:8080"}, clear=True):
             result = ProxyManager.get_requests_proxy_config()
             assert result is not None
             assert "proxies" in result
-            assert "no_proxy" in result["proxies"]
-            assert "tushare.pro" in result["proxies"]["no_proxy"]
+            # UTILS-B-03：requests 仅按 scheme 键匹配 proxies，no_proxy 键无效不得返回
+            assert "no_proxy" not in result["proxies"]
+            assert set(result["proxies"]) == {"https"}
+
+    def test_proxies_keys_are_scheme_only(self):
+        """proxies dict 仅含 scheme 代理键，不含 no_proxy 等无效键（UTILS-B-03）。
+
+        requests 的 NO_PROXY 直连语义只来自环境变量（trust_env 默认读取）或调用方
+        经 should_bypass_proxy() 自行处理；混入 no_proxy 键会让白名单域名静默走代理。
+        """
+        ProxyManager._no_proxy_domains = {"tushare.pro"}
+        ProxyManager._initialized = True
+
+        with patch.dict(
+            os.environ,
+            {"HTTP_PROXY": "http://proxy:3128", "HTTPS_PROXY": "http://proxy:3128"},
+            clear=True,
+        ):
+            result = ProxyManager.get_requests_proxy_config()
+            assert result is not None
+            # 全量等值强断言：仅含 http/https 两个 scheme 代理键，值与环境一致
+            assert result == {
+                "proxies": {"http": "http://proxy:3128", "https": "http://proxy:3128"},
+            }
+            # UTILS-B-03：显式断言不含无效 no_proxy 键
+            assert "no_proxy" not in result["proxies"]
+            assert set(result["proxies"].keys()) == {"http", "https"}
 
 
 class TestProxyManagerMergesExistingEnv:
