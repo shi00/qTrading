@@ -30,11 +30,9 @@
 | P3-ExcStrategies-NoteLazy-Classify | strategies/ 层 except Exception 已标记 NOTE(lazy)（ceiling 动态化），待评估统一走 classify\_error | P3 | ① 策略层再次出现未分类 `except Exception` 的新实例时；② 或策略层异常处理被独立重构时 |
 | P3-ExcUtils-NoteLazy-Classify | utils/ 层 except Exception 已标记 NOTE(lazy)，待评估统一走 classify\_error | P3 | ① utils 层再次出现未分类 `except Exception` 的新实例时；② 或 utils 层异常处理被统一改造时 |
 | P3-RedlineAuto-Coverage-Partial | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20 报告模式、R22 部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | P3 | ① pre-commit / CI 检出红线违规新实例时；② 或事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）出现误报案例时 |
-| P3-TypeIgnores-Tests-HumanReason | tests/ 下非 attr-defined 的 # type: ignore 存量 226 处无 human reason（review07-G5 渐进升级） | P3 | 存量清至 ≤5 处时在 `scripts/check_type_ignore_reason.py` 中翻转 WARNING→ERROR 并更新本条目为已解决 |
 | P3-Rust-Coverage-D38 | Rust sidecar unit 覆盖率 run.rs 15.68% 未达行覆盖率目标 85%（D38，maint.rs/pgbin.rs 已达标） | P3 | ① `cargo llvm-cov` 覆盖率回归（run.rs 覆盖率下降或门禁失败）时；② 或 run.rs supervisor 可测路径被独立重构时 |
 | P3-E2E-Windows-Embedded-Timeout-Tight | E2E Tests (Windows) embedded 模式 step `timeout-minutes` 余量不足（embedded 模式 > 45 分钟 / 原 45 分钟 = 100% 占用） | P3 | ① E2E Tests (Windows) embedded 模式实际运行时间 ≥ 55 分钟（92% 占用 60 分钟 timeout）；② 或连续 3 次 PR 触发 E2E Tests (Windows) 超时；③ 或 E2E 测试总数增长 ≥ 20%（如新增 9 个测试） |
 | P2-Fi25-Rust-Injection-Missing | 失败注入场景 #25（数据页 checksum 错误）缺 Rust 集成测试 | P2 | ① sidecar 引入运行期 postgres 日志监控需求时；② 或数据页损坏问题在生产环境报告时 |
-| P3-App-ExcInfo-Traceback-Path-Leak | `exc_info=True` 的 traceback 文件路径未经 sanitize\_error 脱敏（合理设计决策，供未来评估） | P3 | ① 安全审计要求脱敏文件路径时；② 或引入自定义 logging Formatter 时 |
 | P3-App-SyncFunctions-In-Async-Bootstrap | `initialize_services` 中同步函数（preload\_aliases/validate\_failover/validate\_strategy\_tier）阻塞事件循环（合理设计决策） | P3 | ① 这些函数引入网络/磁盘 IO；② 或启动期 UI 响应延迟被用户感知时 |
 | P3-M4-DbMigrator-OrphanHeal-SingleChain-Assumption | `_heal_orphaned_revision` 假设严格线性单链迁移（已文档化设计限制） | P3 | 引入 Alembic 多分支（Multiple Heads）时 |
 | P3-M4-AppStateService-BroadExcept | `app_state_service.py:21,38` broad except 未接入 classify\_error（合理降级，一致性建议） | P3 | ① app state 升级为关键路径时；② 或该文件再次出现未分类 broad except 的新实例时 |
@@ -52,7 +50,6 @@
 | P3-M12-VirtualTable-ArrowSort-Indicator | #M12-020 可访问性：virtual\_table.py:214 ↑↓ 排序指示器 | P3 | ① 可访问性审计（[accessibility-baseline.md](../flet/accessibility-baseline.md) 复核）启动时；② 或 `virtual_table` 再次出现排序指示器相关可访问性缺陷报告时 |
 | P3-M12-TushareConfigPanel-Referrer-Code-In-Url | #M12-021 隐私：tushare\_config\_panel_view\_model.py:37 URL 含 referrer code | P3 | ① 隐私审计（外发 URL / 追踪参数复核）启动时；② 或该 VM 再次出现 URL 携带跟踪/推荐码的新实例时 |
 | P3-M12-ViewModels-Repeated-Singleton-Calls | #M12-022 性能：VM 中重复调用 TushareClient()/TaskManager() 等单例 | P3 | ① 该 VM 文件再次出现重复构造单例的新实例时；② 或 VM 性能审计中单例调用开销被量化超阈值时 |
-| P3-M12-FailoverConfigPanel-BtnSave-No-RunTask | #M12-023 一致性：failover\_config\_panel.py btn\_save 未通过 \_run\_task\_no\_args 提交 | P3 | ① 该控件再次出现未提交线程池的异步模式新实例时；② 或 ui 层异步模式统一（`_run_task_no_args` 推广）启动时 |
 | P3-M12-Views-Get-DataProcessor-Cross-Layer | #M12-025 MVVM 边界：data\_view\.py / data\_source\_tab.py View 获取 data\_processor 传子组件 | P3 | ① `ui/views` 或 `ui/components` 下再次出现 View 获取 data\_processor 传子组件的新实例时；② 或 ui 层 MVVM 迁移完成时 |
 | P3-M12-NewsFeed-Callback-Passes-ControlEvent | #M12-028 MVVM 边界：news\_feed.py:289 on\_load\_more\_click 传递 ControlEvent 而非业务数据 | P3 | ① 该文件再次出现回调传递 ControlEvent 而非业务数据的新实例时；② 或 ui 层 MVVM 迁移完成时 |
 | P3-M12-StockDetailDialog-BuildContent-No-Cover | #M12-031 测试覆盖：stock\_detail\_dialog.py:511 \_build\_content pragma: no cover | P3 | ① 该文件再次出现 `_build_content` 无覆盖分支的新实例时；② 或 per-file 覆盖率门禁要求该文件达阈值时 |
@@ -173,20 +170,6 @@ R1 由 import-linter 3 条契约（1 条 layers + 2 条 forbidden）守护；R4/
 
 事件处理器内同步 IO 检测暂缓。upgrade 触发条件：① pre-commit / CI 检出红线违规新实例时；② 或事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）出现误报案例时。
 
-#### P3-TypeIgnores-Tests-HumanReason：tests/ 下非 attr-defined 的 # type: ignore 存量 226 处无 human reason（review07-G5 渐进升级）
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-TypeIgnores-Tests-HumanReason** | tests/ 下非 attr-defined 的 # type: ignore 存量 226 处无 human reason（review07-G5 渐进升级） | 存量清至 ≤5 处时在 `scripts/check_type_ignore_reason.py` 中翻转 WARNING→ERROR 并更新本条目为已解决 |
-
-**产生背景与现状**
-
-宪法 R3（INVARIANT）要求 `# type: ignore` 带 \[error-code]（已强制）；报告 G5 务实版要求 tests/ 中 attr-defined 之外的类型压制带 human reason（mock 替身场景的 attr-defined 免于说明）。2026-09-04 复核：tests/ 共 327 处 `# type: ignore[x]`，其中 attr-defined 69 处（豁免）、非 attr-defined 258 处、其中无 human reason 226 处（arg-type 41 / method-assign 73 / union-attr 29 / misc 24 / untyped 18 / assignment 27 / 其余 14）。`scripts/check_type_ignore_reason.py` 已实现分级检查（生产 ERROR + tests WARNING），存量 >5 处故先 WARNING 不阻断，避免为 226 处机械补注（宪法 §1.4）。
-
-**期望的最终解法**
-
-存量 ≤5 处或 2026-11-30 前将其转为 ERROR（与弱断言 baseline KPI 节奏一致）。upgrade 触发条件：存量清至 ≤5 处时在 `scripts/check_type_ignore_reason.py` 中翻转 WARNING→ERROR 并更新本条目为已解决。
-
 #### P3-RedlineAuto-Grimp-Namespace-Blindspot：import-linter/grimp 不建模命名空间包（`data/sync/` 无 `__init__.py`），指向该子包的 R1 违规处于门禁盲区（UTILS-A-01 实证）
 
 | 级别 | 一句话 | upgrade 触发条件 |
@@ -303,20 +286,6 @@ PR #513 检视（第一轮）遗留观察级建议。`data/persistence/embedded_
 
 ### 其他 P3 债目
 
-#### P3-App-ExcInfo-Traceback-Path-Leak：`exc_info=True` 的 traceback 文件路径未经 sanitize\_error 脱敏（合理设计决策，供未来评估）
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-App-ExcInfo-Traceback-Path-Leak** | `exc_info=True` 的 traceback 文件路径未经 sanitize\_error 脱敏（合理设计决策，供未来评估） | ① 安全审计要求脱敏文件路径时；② 或引入自定义 logging Formatter 时 |
-
-**产生背景与现状**
-
-M3 模块化检视发现：`app/error_logging.py`（`log_exception_with_severity` 函数）与 `app/bootstrap.py` 8 处 `_log(..., exc_info=True)` 调用时，logging 模块从 `sys.exc_info()` 提取 traceback 附加到日志记录，traceback 含文件绝对路径（如 `D:\workspace\qTrading\app\bootstrap.py`）。`DataSanitizer.sanitize_error` 默认 `show_traceback=False`（已确认 `utils/sanitizers.py` 的 `DataSanitizer.sanitize_error` 默认值），只处理 exception 消息字符串，不处理 `exc_info` 附加的 traceback。检视结论：文件路径泄露不是 R9 红线违规（R9 定义为"明文 Token/API Key/密码/个人信息"，文件路径不属于这些类别）；`exc_info=True` 是调试必需的（traceback 对问题定位至关重要），当前实现是"调试可见性"与"信息泄露风险"之间的合理权衡。本次 M3 修复了 `detail=str(e)` → `DataSanitizer.sanitize_error(e)`（FIND-01），但未触及 `exc_info` 的 traceback 路径。相关文件：`app/error_logging.py`（`log_exception_with_severity` 函数）、`app/bootstrap.py`（`_log` 调用处）、`app/startup_controller.py`（`_init_services` 与 `skip` 方法）、`utils/sanitizers.py`（`DataSanitizer.sanitize_error` 的 `show_traceback` 默认值）。
-
-**期望的最终解法**
-
-如需统一脱敏 traceback 路径：① 自定义 logging Formatter（在日志输出层统一处理 traceback 路径脱敏）；② 或在 `sanitize_error` 中支持 `exc_info` 参数自动提取并脱敏 traceback。验收标准：① traceback 中的文件路径经脱敏后为 `<PATH>`；② 现有 `test_error_logging.py` 全过；③ 新增 traceback 路径脱敏单测。upgrade 触发条件：① 安全审计要求脱敏文件路径时；② 或引入自定义 logging Formatter 时。
-
 #### P3-App-SyncFunctions-In-Async-Bootstrap：`initialize_services` 中同步函数（preload\_aliases/validate\_failover/validate\_strategy\_tier）阻塞事件循环（合理设计决策）
 
 | 级别 | 一句话 | upgrade 触发条件 |
@@ -344,20 +313,6 @@ N5-4 模型分发裁定「首次使用由用户下载/选择文件」路线（�
 **期望的最终解法**
 
 不主动修复（当前威胁模型下轻量校验 + 子进程隔离 + 来源自担为合理权衡）。若升级为内容级信任需求：① 分发渠道内置时改哈希白名单或签名校验；② 解析器 CVE 披露时升级依赖版本并在校验链加内容级约束。验收标准：校验链单测覆盖新增约束；`ai-service.md` §6.1 同步。upgrade 触发条件见上表。
-
-#### P3-M12-FailoverConfigPanel-BtnSave-No-RunTask：#M12-023 一致性：failover\_config\_panel.py btn\_save 未通过 \_run\_task\_no\_args 提交
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-M12-FailoverConfigPanel-BtnSave-No-RunTask** | #M12-023 一致性：failover\_config\_panel.py btn\_save 未通过 \_run\_task\_no\_args 提交 | ① 该控件再次出现未提交线程池的异步模式新实例时；② 或 ui 层异步模式统一（`_run_task_no_args` 推广）启动时 |
-
-**产生背景与现状**
-
-M12 ui 表现层模块检视发现：`ui/components/config_panels/failover_config_panel.py` `btn_save` 未通过 `_run_task_no_args` 提交，与同模块其他按钮模式不一致。M12 未修复原因：修复需评估 btn\_save 是否需要异步提交，属行为变更。相关文件：`ui/components/config_panels/failover_config_panel.py`。
-
-**期望的最终解法**
-
-评估 btn\_save 是否需要 `_run_task_no_args` 提交。验收标准：① btn\_save 与同模块按钮模式一致；② 现有 `test_failover_config_panel*.py` 全过。upgrade 触发条件：① 该控件再次出现未提交线程池的异步模式新实例时；② 或 ui 层异步模式统一（`_run_task_no_args` 推广）启动时。
 
 #### P3-M12-StockDetailDialog-BuildContent-No-Cover：#M12-031 测试覆盖：stock\_detail\_dialog.py:511 \_build\_content pragma: no cover
 
