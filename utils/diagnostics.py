@@ -52,12 +52,15 @@ class SystemDiagnosticsCollector:
             # 脱敏口径不一致（R9）。补两层：
             # ① 个人类键（USER* 系/LOGNAME/APPDATA，见 _PERSONAL_ENV_KEY_MARKERS）
             #    整体遮蔽；
-            # ② 其余值经 sanitize_paths 将 Windows/Unix 路径统一替换为 <PATH>；
+            # ② 其余值经 sanitize_error 全量规则链脱敏（内含 Windows/Unix 路径
+            #    替换 <PATH>、URL 内嵌凭证 user:pass@ → user:***@、key=value、
+            #    Bearer、PII、裸 token 兜底）——仅用 sanitize_paths 会让
+            #    HTTP_PROXY 等含凭证的 env 值明文进入诊断包（R9 泄露向量）。
             #    PATH 等合法环境值的路径明细同步损失，诊断场景可接受。
             sanitized_env = {
                 k: "***"
                 if any(marker in k.lower() for marker in _PERSONAL_ENV_KEY_MARKERS)
-                else DataSanitizer.sanitize_paths(v)
+                else DataSanitizer.sanitize_error(v)
                 for k, v in sanitized_env.items()
             }
 

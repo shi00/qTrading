@@ -491,20 +491,24 @@ async def test_diagnostics_export_env_masks_personal_keys_and_paths(tmp_path, mo
     """UTILS-B-06：env 导出须脱敏个人类键与路径——诊断包不得明文携带
     Windows 用户名与用户目录路径，与同函数日志全量脱敏口径一致（R9）。
 
-    三层断言：
+    四层断言：
     ① 个人类键（USER* 系/LOGNAME/APPDATA）整体遮蔽为 ***（纯用户名无路径
        特征，sanitize_paths 覆盖不到）；
     ② 其余键值中的 Windows 路径替换为 <PATH>；
-    ③ 全包 json 串不含测试专属假用户名与假用户目录。
+    ③ 全包 json 串不含测试专属假用户名与假用户目录；
+    ④ URL 内嵌凭证（HTTP_PROXY 类）遮蔽为 user:***@（R9 泄露向量修复）。
     """
     # 测试专属假值：不依赖真实环境用户名，避免断言受运行机器影响
     fake_user = "johndoe_diagtester"
     fake_profile = "C:\\Users\\johndoe_diagtester"
+    fake_proxy_pass = "diagproxysecret9"
     monkeypatch.setenv("USERNAME", fake_user)
     monkeypatch.setenv("USERPROFILE", fake_profile)
     monkeypatch.setenv("LOGNAME", fake_user)
     monkeypatch.setenv("VIRTUAL_ENV", "D:\\venv\\johndoe_diagtester\\envs")
     monkeypatch.setenv("APPDATA", f"{fake_profile}\\AppData\\Roaming")
+    # R9：URL 内嵌凭证（如企业代理）不得明文进诊断包
+    monkeypatch.setenv("HTTP_PROXY", f"http://diaguser:{fake_proxy_pass}@proxy.corp:8080")
 
     _make_log_files(tmp_path)
     with _patch_diagnostics_env(tmp_path):
@@ -520,10 +524,15 @@ async def test_diagnostics_export_env_masks_personal_keys_and_paths(tmp_path, mo
                 assert env["APPDATA"] == "***"
                 # ② 其余键值路径脱敏为 <PATH>
                 assert env["VIRTUAL_ENV"] == "<PATH>"
+                # ④ URL 内嵌凭证脱敏（R9）：sanitize_dict 的 PII 邮箱规则先于
+                #    sanitize_error 的 URL_CREDENTIALS 生效，"pass@host" 整段被
+                #    视为邮箱替换为 ***，故 host 段一并消失（与 PII 全局口径一致）
+                assert env["HTTP_PROXY"] == "http://diaguser:***:8080"
                 # ③ 全包 json 不泄露假用户名与假用户目录
                 raw = zf.read("diagnostics_summary.json").decode("utf-8")
                 assert fake_user not in raw
                 assert fake_profile not in raw
+                assert fake_proxy_pass not in raw
         finally:
             if os.path.exists(zip_path):
                 os.remove(zip_path)

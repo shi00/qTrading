@@ -42,8 +42,10 @@ class OperationStats:
 class MetricsRegistry:
     """进程内运行时指标聚合注册表（线程安全）。
 
-    语义：``count`` 为操作总次数（含成功与失败），``error_count`` 为其中失败
-    次数（始终 ≤ count），``error_codes`` 提供错误码维度分布。
+    语义：``count`` 为操作总次数（含成功与失败），``error_count`` 为其中经
+    ``record`` 记录的失败次数（该路径下始终 ≤ count）；``record_error`` 独立
+    记录的错误事件（如 log_classified 按异常类型聚合）不计入 count，此时
+    ``error_count`` 可独立于 ``count`` 增长。``error_codes`` 提供错误码维度分布。
     """
 
     def __init__(self) -> None:
