@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import math
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -96,6 +97,14 @@ _BILLING_FINGERPRINT_FIELDS: Final[tuple[str, ...]] = (
     "encoder_price_per_m",
 )
 
+# F32：分类费用型计量单位（编码器输入 token 计价，与 model_connection_form.py 同判据）
+_PRICE_UNIT_ENCODER: Final[str] = "encoder_input_tokens"
+# F32：GGUF 连接的显式 n_ctx 默认（与 local_model_manager worker fallback 对齐）；
+# 落入 adapter_options 使兼容服务不再因缺失 n_ctx 拒绝合法本地配置。
+_DEFAULT_GGUF_N_CTX: Final[int] = 4096
+# F32：连接超时下限（秒）：落盘前 clamp（litellm/worker 侧负值或过小超时不可执行）
+_MIN_TIMEOUT_SECONDS: Final[float] = 1.0
+
 
 def _revision_fingerprint(connection: Mapping[str, Any]) -> dict[str, Any]:
     """连接的修订指纹（§3.1）：只含影响执行 / 凭据 / 能力的字段与受管计费子键。"""
@@ -106,6 +115,19 @@ def _revision_fingerprint(connection: Mapping[str, Any]) -> dict[str, Any]:
     else:
         fingerprint["billing"] = billing
     return fingerprint
+
+
+def _is_encoder_priced(draft: ModelConnectionDraft) -> bool:
+    """分类费用型判据：编码器 kind 或显式选择编码器计量单位（与表单显示一致）。"""
+    return draft.adapter_kind == ADAPTER_GGUF_SENTIMENT or draft.billing_unit == _PRICE_UNIT_ENCODER
+
+
+def _format_timeout_text(value: Any) -> str:
+    """``adapter_options["timeout"]`` → 草稿显示文本（整数值去尾；非法/缺失 → 空串，R21 不伪装）。"""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return ""
+    number = float(value)
+    return str(int(number)) if number.is_integer() else str(number)
 
 
 def _utc_now_iso() -> str:
@@ -514,6 +536,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             encoder_model_path=str(adapter_options.get("encoder_model_path") or ""),
             head_path=str(adapter_options.get("head_path") or ""),
             tokenizer_path=str(adapter_options.get("tokenizer_path") or ""),
+            timeout_seconds=_format_timeout_text(adapter_options.get("timeout")),
             connection_revision=max(1, int(raw.get("connection_revision") or 1)),
         )
 
@@ -538,8 +561,13 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             paths = (draft.encoder_model_path, draft.head_path, draft.tokenizer_path)
             if not all(p.strip() for p in paths):
                 errors.append("model_connection_error_gguf_paths_required")
-        if draft.billing_mode == "estimate_cost" and not draft.input_price_per_m.strip():
-            errors.append("model_connection_error_price_required")
+        if draft.billing_mode == "estimate_cost":
+            # F32：按计量单位判定必填单价（与表单显示同判据）：分类费用型只填 encoder 单价
+            if _is_encoder_priced(draft):
+                if not draft.encoder_price_per_m.strip():
+                    errors.append("model_connection_error_price_required")
+            elif not draft.input_price_per_m.strip():
+                errors.append("model_connection_error_price_required")
         return tuple(errors)
 
     # ------------------------------------------------------------------
@@ -592,6 +620,12 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             adapter_options["tokenizer_path"] = draft.tokenizer_path.strip()
         else:
             provider, api_base, model = draft.provider.strip(), draft.api_base.strip() or None, draft.model.strip()
+        timeout = self._to_float_or_none(draft.timeout_seconds)
+        if timeout is not None:
+            adapter_options["timeout"] = timeout
+        if draft.adapter_kind in (ADAPTER_GGUF_CHAT, ADAPTER_GGUF_SENTIMENT):
+            # F32：n_ctx 显式化落盘（磁盘已有合法值保留，缺失补默认），兼容服务不再因缺失拒绝
+            adapter_options["n_ctx"] = self._resolve_gguf_n_ctx(draft.connection_id)
         return {
             "connection_id": draft.connection_id or str(uuid.uuid4()),
             "name": draft.name.strip(),
@@ -612,12 +646,21 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
     @staticmethod
     def _billing_payload(draft: ModelConnectionDraft) -> dict[str, Any]:
         if draft.billing_mode == "estimate_cost":
+            if _is_encoder_priced(draft):
+                # F32：分类费用型（encoder 计量）——pricing_unit 与表单可见单价一致，缺失用 None（R21）
+                return {
+                    "mode": "estimate_cost",
+                    "pricing_unit": _PRICE_UNIT_ENCODER,
+                    "input_price_per_m": None,
+                    "output_price_per_m": None,
+                    "encoder_price_per_m": draft.encoder_price_per_m.strip() or None,
+                }
             return {
                 "mode": "estimate_cost",
                 "pricing_unit": draft.billing_unit,
                 "input_price_per_m": draft.input_price_per_m.strip() or None,
                 "output_price_per_m": draft.output_price_per_m.strip() or None,
-                "encoder_price_per_m": draft.encoder_price_per_m.strip() or None,
+                "encoder_price_per_m": None,
             }
         return {"mode": "usage_only", "pricing_unit": draft.billing_unit}
 
@@ -658,6 +701,28 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
             return int(text)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _to_float_or_none(value: str) -> float | None:
+        """超时秒数解析：空/非法/非有限（inf/nan 会破坏严格 JSON 往返）→ None（不伪装，R21）；不足下限 clamp 至 1.0s。"""
+        text = (value or "").strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number):
+            return None
+        return max(number, _MIN_TIMEOUT_SECONDS)
+
+    def _resolve_gguf_n_ctx(self, connection_id: str) -> int:
+        """GGUF ``n_ctx``：磁盘已有合法值保留（读取重开保真），缺失时显式默认落盘（可审计）。"""
+        raw = next((c for c in self._raw_connections if str(c.get("connection_id")) == connection_id), None)
+        n_ctx = ((raw or {}).get("adapter_options") or {}).get("n_ctx")
+        if isinstance(n_ctx, int) and not isinstance(n_ctx, bool) and n_ctx > 0:
+            return n_ctx
+        return _DEFAULT_GGUF_N_CTX
 
     # ------------------------------------------------------------------
     # 保存（三态）
