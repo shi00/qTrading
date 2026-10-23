@@ -601,7 +601,7 @@ class TestScreenerViewModelSorting:
 
     @pytest.mark.asyncio
     async def test_concurrent_sorts_final_state_matches_last_click(self, vm):
-        """连点竞态回归 (P-SCREENER-2): 并发两次排序经 loop-local 锁串行化,
+        """连点竞态回归 (P-SCREENER-02): 并发两次排序经 loop-local 锁串行化,
         最终状态恒等于最后一次点击的排序意图 (表头指示与实际排序一致).
         """
         df = pd.DataFrame({"A": [3, 1, 2], "B": [30, 10, 20]})

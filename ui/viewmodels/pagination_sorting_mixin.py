@@ -207,7 +207,7 @@ class PaginationSortingMixin:
     async def sort_data(self, column_key: str, ascending: bool | None = None):
         """Sort data using ThreadPool to avoid blocking UI.
 
-        并发守卫 (P-SCREENER-2): loop-local 锁串行化「set loading → await 排序 →
+        并发守卫 (P-SCREENER-02): loop-local 锁串行化「set loading → await 排序 →
         写回 + 单帧分页重算」全临界区 (R11, 与 ``load_history_tree`` 同模式)。
         快速连点表头时第二个任务排队等待, 锁内基于**最新** ``_full_results`` 排序,
         最终状态恒等于最后一次点击的排序意图; 消除乱序完成时「表头指示与实际
