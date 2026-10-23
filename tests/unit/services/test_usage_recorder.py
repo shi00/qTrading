@@ -363,6 +363,117 @@ class TestSubmitTerminal:
         dao.close_usage_window.assert_awaited()
 
 
+class TestSubmitTerminalCostCalculation:
+    """F17：终态落账时点按 metadata 携带的计价冻结快照 × 真实 usage 计算成本。
+
+    cost 与 usage 同源（record.usage 优先回退 obs.usage）；不可计价 → None
+    （R21 禁止 0 伪装）；唯一合法零 = 价格事实为 0（免费）。
+    """
+
+    _PRICING_META = {
+        "mode": "estimate_cost",
+        "pricing_unit": "llm_tokens",
+        "price_source": "user",
+        "input_price_per_m": "2.00",
+        "output_price_per_m": "8.00",
+        "cache_read_price_per_m": "1.00",
+        "cache_write_price_per_m": None,
+        "encoder_price_per_m": None,
+        "fx_to_cny": None,
+        "price_effective_at": None,
+    }
+
+    def _observe_with_pricing(self, recorder: UsageRecorder, **pricing_overrides) -> None:
+        metadata = {
+            "connection_id": "conn-remote",
+            "month": "202610",
+            "pricing": {**self._PRICING_META, **pricing_overrides},
+        }
+        recorder.observe_usage(
+            AttemptUsageObservation(
+                attempt_id="att-1",
+                invocation_id="inv-1",
+                usage=_usage(),
+                actual_model="glm-4-air",
+                metadata=metadata,
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_cost_computed_from_pricing_snapshot_and_usage(self):
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        self._observe_with_pricing(recorder)
+        await recorder.submit_terminal(_terminal())
+        kwargs = dao.settle_attempt_usage.await_args.kwargs
+        # _usage(): uncached=100 / cache_read=20 / output=15（input_total 的缓存
+        # 部分已单列，不重复计价）→ 100/1e6*2 + 20/1e6*1 + 15/1e6*8
+        # = 0.0002 + 0.00002 + 0.00012 = 0.00034 → HALF_UP 4 位 = 0.0003
+        assert kwargs["cost_cny"] == "0.0003"
+        assert kwargs["usage_status"] == "reported"
+
+    @pytest.mark.asyncio
+    async def test_free_price_zero_is_known_zero_not_none(self):
+        """价格事实为 0 → 已知零 "0.0000"（免费），非未知 None。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        self._observe_with_pricing(recorder, input_price_per_m="0", output_price_per_m="0", cache_read_price_per_m="0")
+        await recorder.submit_terminal(_terminal())
+        assert dao.settle_attempt_usage.await_args.kwargs["cost_cny"] == "0.0000"
+
+    @pytest.mark.asyncio
+    async def test_no_pricing_snapshot_yields_none_cost(self):
+        """billing 缺失（无计价快照）→ cost None（未知，不伪装 0）。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        await recorder.submit_terminal(_terminal())
+        assert dao.settle_attempt_usage.await_args.kwargs["cost_cny"] is None
+
+    @pytest.mark.asyncio
+    async def test_usage_only_mode_yields_none_cost(self):
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        self._observe_with_pricing(recorder, mode="usage_only")
+        await recorder.submit_terminal(_terminal())
+        assert dao.settle_attempt_usage.await_args.kwargs["cost_cny"] is None
+
+    @pytest.mark.asyncio
+    async def test_missing_price_yields_none_cost(self):
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        self._observe_with_pricing(recorder, output_price_per_m=None)
+        await recorder.submit_terminal(_terminal())
+        assert dao.settle_attempt_usage.await_args.kwargs["cost_cny"] is None
+
+    @pytest.mark.asyncio
+    async def test_failed_terminal_without_usage_yields_none_cost(self):
+        """失败终态（record 与观察均无用量）→ cost None + unavailable（R21）。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(
+            AttemptUsageObservation(
+                attempt_id="att-fail",
+                invocation_id="inv-1",
+                usage=None,
+                actual_model=None,
+                metadata={"connection_id": "conn-remote", "month": "202610", "pricing": dict(self._PRICING_META)},
+            )
+        )
+        record = AttemptTerminalRecord(
+            attempt_id="att-fail",
+            invocation_id="inv-1",
+            status="failed",
+            usage=None,
+            error_code="UPSTREAM_5XX",
+            duration_ms=1.0,
+        )
+        await recorder.submit_terminal(record)
+        kwargs = dao.settle_attempt_usage.await_args.kwargs
+        assert kwargs["cost_cny"] is None
+        assert kwargs["usage_status"] == "unavailable"
+
+
 class TestAclos:
     @pytest.mark.asyncio
     async def test_aclose_flushes_pending_and_idempotent(self):

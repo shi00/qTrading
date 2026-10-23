@@ -231,6 +231,25 @@ WHERE elem->>'state' = 'held_unconfirmed'
   AND created_at < :next_month_start
 """
 
+# 未计价完整性（F17，R21）：按归属月聚合 attempt 行的计价状态——
+# 「免费」（cost_cny 已知为 0，已计价）与「未计价」（cost_cny NULL：含
+# usage_only 不计费与 estimate_cost 未能计价，不区分原因，为未知下界）
+# 分列呈现，禁止把未知成本伪装为已知零。未计价行同时给 input/output token
+# 合计（完整性：未知成本对应的真实用量规模可见）。归属月按 invocation
+# created_at（Asia/Shanghai 月界，与 D2 口径一致）；legacy 尝试无 attempt 行，
+# 其未计价量由封口行（unpriced_calls/tokens）承载，不在此列。
+_MONTH_PRICING_INTEGRITY_SQL: Final[str] = """
+SELECT
+    COUNT(*) FILTER (WHERE a.cost_cny IS NULL)::int AS unpriced_attempts,
+    COUNT(*) FILTER (WHERE a.cost_cny IS NOT NULL AND a.cost_cny = 0)::int AS free_attempts,
+    COALESCE(SUM(a.input_total_tokens) FILTER (WHERE a.cost_cny IS NULL), 0)::bigint AS unpriced_input_tokens,
+    COALESCE(SUM(a.output_tokens) FILTER (WHERE a.cost_cny IS NULL), 0)::bigint AS unpriced_output_tokens
+FROM ai_attempt a
+JOIN ai_invocation i ON i.invocation_id = a.invocation_id
+WHERE i.created_at >= :month_start
+  AND i.created_at < :next_month_start
+"""
+
 # 未确认预留明细（§11.5「未确认详情」）：逐条 reservation_id / 子任务 / 金额 / 归属月，
 # 供使用记录页按条解除；仅择非敏感字段（不返回 UUID 之外的凭据 / 正文）。
 # **不按当前月过滤**：预留可能跨月仍停留 held_unconfirmed，若只查当前月则历史遗漏永远
@@ -1194,7 +1213,11 @@ class AIUsageDao(BaseDao):
                     attempt_id=attempt_id,
                 )
 
-            # 差额 = 本次成本 - 已计入成本，整体推进月汇总（迟到差额只计一次）
+            # 差额 = 本次成本 - 已计入成本，整体推进月汇总（迟到差额只计一次）。
+            # F17 / R21 语义：未计价（cost_cny None）按 0 差额推进属「已知费用口径」
+            # 的算术事实（月汇总只承载已知费用）；未知不以零伪装呈现——未计价
+            # 完整性由 attempt 行（cost NULL）与 read_budget_summary 的
+            # free/unpriced 派生列并列呈现，摘要不把未知渲染为已知零。
             new_cost = Decimal(cost_cny) if cost_cny is not None else Decimal("0")
             delta = new_cost - old_accounted_cost
             succeeded = status == "succeeded"
@@ -1693,7 +1716,8 @@ class AIUsageDao(BaseDao):
 
         - ``known_cny``：已结算费用（月汇总 scenario scope 合计）+ legacy 汇总
           （app_state ``ai_cost:{YYYYMM}``，分→元）；两者皆无数据 → ``None``
-          （未知禁伪零，R21）。
+          （未知禁伪零，R21）。月度限额为**本地软预算**（usage_policy 配置的
+          本地预警/拦截线），非供应商硬上限——供应商账单不受本预算约束。
         - ``effective_reserved_cny``：有效预留 = owner 在世正常占用
           （``reserved`` / ``dispatched`` 且租约有效，F23 展示口径）；无 → ``0``
           （事实零，非未知）。
@@ -1703,6 +1727,13 @@ class AIUsageDao(BaseDao):
         F23：两列不相交（held_unconfirmed 不再同现于「有效预留」——F22 遗留③
         相邻展示语义），与预算门 ``_read_active_reservations_sum`` 的保守全活跃
         口径（三态含租约 OR 形态）相区分：预算门保护不放宽，展示列语义不重叠。
+
+        F17 未计价完整性（R21）：``free_attempts``（cost 已知为 0 = 免费）与
+        ``unpriced_attempts``（cost NULL = 未计价，含 usage_only 不计费与
+        estimate_cost 未能计价，为未知下界）分列，另给未计价行的
+        ``unpriced_input_tokens`` / ``unpriced_output_tokens``（未知成本对应的
+        用量规模可见）——月汇总 ``cost_delta`` 对未计价 attempt 推进 0 属已知
+        费用口径的算术事实，未知不以零伪装呈现，完整性由本组派生列并列呈现。
         """
         self._check_engine(context="ai_usage.read_budget_summary")
         month_start, next_month_start = _month_utc_bounds(month)
@@ -1728,6 +1759,12 @@ class AIUsageDao(BaseDao):
                     {"month_start": month_start, "next_month_start": next_month_start},
                 )
             ).fetchone()
+            integrity_row = (
+                await conn.execute(
+                    sa.text(_MONTH_PRICING_INTEGRITY_SQL),
+                    {"month_start": month_start, "next_month_start": next_month_start},
+                )
+            ).fetchone()
             legacy_row = (
                 await conn.execute(
                     sa.text(_LEGACY_MONTH_COST_SQL),
@@ -1745,11 +1782,18 @@ class AIUsageDao(BaseDao):
             settled_dec = _finite_non_negative_or_zero(settled_dec, context="budget_summary_known")
             known = settled_dec + parse_legacy_cents(legacy_raw)
 
+        integrity = {
+            "unpriced_attempts": int(integrity_row[0]) if integrity_row is not None and integrity_row[0] else 0,
+            "free_attempts": int(integrity_row[1]) if integrity_row is not None and integrity_row[1] else 0,
+            "unpriced_input_tokens": int(integrity_row[2]) if integrity_row is not None and integrity_row[2] else 0,
+            "unpriced_output_tokens": int(integrity_row[3]) if integrity_row is not None and integrity_row[3] else 0,
+        }
         return {
             "month": month,
             "known_cny": known,
             "effective_reserved_cny": _decimal_or_zero(effective_row),
             "unconfirmed_reserved_cny": _decimal_or_zero(unconfirmed_row),
+            **integrity,
         }
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)

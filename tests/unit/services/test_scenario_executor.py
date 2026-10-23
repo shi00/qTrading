@@ -298,6 +298,72 @@ class TestHappyPath:
         assert obs_arg.metadata["security_revision"] == 41
 
     @pytest.mark.asyncio
+    async def test_billing_frozen_into_metadata_pricing_snapshot(self):
+        """F17：快照连接 billing 计价块在连接解析点冻结进 metadata（不再丢弃），
+        观察与成功输出同源携带（mode / 单位 / 来源 / 单价串 / 汇率 / 生效时点）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        billing = {
+            "mode": "estimate_cost",
+            "pricing_unit": "llm_tokens",
+            "price_source": "user",
+            "input_price_per_m": "2.00",
+            "output_price_per_m": "8.00",
+            "cache_read_price_per_m": "1.00",
+            "cache_write_price_per_m": None,
+            "encoder_price_per_m": None,
+            "fx_to_cny": "7.2",
+            "price_effective_at": "2026-10-01",
+        }
+        raw_conn = dict(dataclasses.asdict(_remote_conn()))
+        raw_conn["billing"] = billing
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (raw_conn,)), _validator_ok
+        )
+        assert result.status == "succeeded"
+        expected = {
+            "mode": "estimate_cost",
+            "pricing_unit": "llm_tokens",
+            "price_source": "user",
+            "input_price_per_m": "2.00",
+            "output_price_per_m": "8.00",
+            "cache_read_price_per_m": "1.00",
+            "fx_to_cny": "7.2",
+            "price_effective_at": "2026-10-01",
+        }
+        obs_arg = recorder.observe_usage.call_args.args[0]
+        pricing_meta = obs_arg.metadata["pricing"]
+        assert pricing_meta is not None
+        for key, value in expected.items():
+            assert pricing_meta[key] == value, key
+        first_output = result.outputs[0]
+        assert isinstance(first_output, ScenarioOutput)
+        assert first_output.metadata["pricing"] == pricing_meta
+
+    @pytest.mark.asyncio
+    async def test_billing_missing_yields_none_pricing_not_usage_only(self):
+        """F17 / R21：billing 缺失 → pricing None（未知语义），不伪装 usage_only。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        await executor.execute(_request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok)
+        obs_arg = recorder.observe_usage.call_args.args[0]
+        assert obs_arg.metadata["pricing"] is None
+
+    @pytest.mark.asyncio
+    async def test_billing_malformed_degrades_to_none_pricing(self):
+        """F17 / R21：billing 畸形（非 mapping）→ pricing None（未知），不伪装免费。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        raw_conn = dict(dataclasses.asdict(_remote_conn()))
+        raw_conn["billing"] = "junk"
+        await executor.execute(_request(), _snapshot((_candidate(0, "conn-remote"),), (raw_conn,)), _validator_ok)
+        obs_arg = recorder.observe_usage.call_args.args[0]
+        assert obs_arg.metadata["pricing"] is None
+
+    @pytest.mark.asyncio
     async def test_authorize_failure_rejects_candidate(self):
         adapter = _adapter_ok()
         recorder = _recorder_mock()

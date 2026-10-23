@@ -107,6 +107,8 @@ class _MemoryConn:
             return _QueryResult((str(total),))
         if "FROM ai_invocation" in sql:
             return _QueryResult((None,))  # 预留表空 → NULL 聚合
+        if "FROM ai_attempt" in sql and "FILTER" in sql:
+            return _QueryResult((0, 0, 0, 0))  # F17 计价完整性聚合：内存库无 attempt 行 → 全零
         raise AssertionError(f"内存库未预期的 SELECT: {sql}")
 
     def _insert(self, sql: str, p: dict[str, Any]) -> _QueryResult:
