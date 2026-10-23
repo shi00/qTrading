@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import typing
@@ -23,6 +24,7 @@ import pandas as pd
 from strategies.attribution import ATTRIBUTION_COLUMN
 from ui.viewmodels import Message
 from ui.viewmodels.screener_types import ScreenerRow, ScreenerState
+from utils.loop_local import get_loop_local
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -203,49 +205,59 @@ class PaginationSortingMixin:
         )
 
     async def sort_data(self, column_key: str, ascending: bool | None = None):
-        """Sort data using ThreadPool to avoid blocking UI"""
+        """Sort data using ThreadPool to avoid blocking UI.
+
+        并发守卫 (P-SCREENER-02): loop-local 锁串行化「set loading → await 排序 →
+        写回 + 单帧分页重算」全临界区 (R11, 与 ``load_history_tree`` 同模式)。
+        快速连点表头时第二个任务排队等待, 锁内基于**最新** ``_full_results`` 排序,
+        最终状态恒等于最后一次点击的排序意图; 消除乱序完成时「表头指示与实际
+        排序不符」竞态。``_full_results`` 写回与 ``_update_pagination`` 之间无
+        await (同步段不可分割), 排序中的翻页事件不会读到撕裂中间态。
+        CancelledError 经 ``async with`` 释放锁后正常传播 (R2)。
+        """
         if self._full_results is None or self._full_results.empty:
             return
+        lock = get_loop_local("screener_vm_sort_lock", asyncio.Lock)
+        async with lock:
+            if ascending is not None:
+                sort_column = column_key
+                sort_ascending = ascending
+            elif self._state.sort_column == column_key:
+                sort_ascending = not self._state.sort_ascending
+                sort_column = column_key
+            else:
+                sort_column = column_key
+                sort_ascending = True
 
-        if ascending is not None:
-            sort_column = column_key
-            sort_ascending = ascending
-        elif self._state.sort_column == column_key:
-            sort_ascending = not self._state.sort_ascending
-            sort_column = column_key
-        else:
-            sort_column = column_key
-            sort_ascending = True
+            self._set_state(loading=True)
 
-        self._set_state(loading=True)
+            try:
+                # Offload sorting to thread
+                sorted_df = await ThreadPoolManager().run_async(
+                    TaskType.CPU,
+                    self._sort_helper,
+                    self._full_results,
+                    column_key,
+                    sort_ascending,
+                )
 
-        try:
-            # Offload sorting to thread
-            sorted_df = await ThreadPoolManager().run_async(
-                TaskType.CPU,
-                self._sort_helper,
-                self._full_results,
-                column_key,
-                sort_ascending,
-            )
+                self._full_results = sorted_df
+                # C2b H1: 排序变更后经唯一 owner 单帧原子重算分页与当前页切片
+                # (第 2 轮对抗检视 M-1: 消除「loading=False + 旧未排序切片」陈旧中间帧)
+                self._update_pagination(
+                    page_no=1,
+                    sort_column=sort_column,
+                    sort_ascending=sort_ascending,
+                    loading=False,
+                )
 
-            self._full_results = sorted_df
-            # C2b H1: 排序变更后经唯一 owner 单帧原子重算分页与当前页切片
-            # (第 2 轮对抗检视 M-1: 消除「loading=False + 旧未排序切片」陈旧中间帧)
-            self._update_pagination(
-                page_no=1,
-                sort_column=sort_column,
-                sort_ascending=sort_ascending,
-                loading=False,
-            )
-
-        except Exception as e:
-            logger.error("Sort failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
-            self._set_state(
-                loading=False,
-                status_message=Message("screener_sort_failed"),
-                status_color="error",
-            )
+            except Exception as e:
+                logger.error("Sort failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+                self._set_state(
+                    loading=False,
+                    status_message=Message("screener_sort_failed"),
+                    status_color="error",
+                )
 
     @staticmethod
     def _sort_helper(df, col, ascending):

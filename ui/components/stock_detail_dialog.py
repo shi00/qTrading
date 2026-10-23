@@ -175,6 +175,30 @@ def _format_pct_with_sign(val) -> str:
     return f"{sign}{val_f:.2f}"
 
 
+def _format_pct_change(val) -> tuple[str, str]:
+    """价格区涨跌幅三态格式化 (纯函数).
+
+    R21: 缺失/NaN/非法数值 → ("-", 中性色), 不伪装为 "0.00%";
+    0 为合法平盘值 → ("0.00%", 中性色), 不误标跌色.
+    返回 (展示文本, 颜色 token): >0 涨色 / <0 跌色 / 其余中性色.
+    """
+    pct: float | None = None
+    if is_valid_number(val):
+        try:
+            pct = float(val)
+        except (ValueError, TypeError):
+            # int 子类 __float__ 抛错等非法场景 → 视为缺失（对齐 _format_val 防御口径）
+            pct = None
+    if pct is None:
+        return "-", AppColors.TEXT_SECONDARY
+    text = f"{_format_pct_with_sign(pct)}%"
+    if pct > 0:
+        return text, AppColors.UP_RED
+    if pct < 0:
+        return text, AppColors.DOWN_GREEN
+    return text, AppColors.TEXT_SECONDARY
+
+
 def _has_review_value(v) -> bool:
     """Task 4.3: 检查复盘值是否非空 (None/NaN/空字符串 → False)."""
     if v is None:
@@ -492,11 +516,9 @@ def _build_content(
 
     # Price section
     close = _format_val(stock_data, "close", I18n.get("unit_yuan"))
-    pct = stock_data.get("pct_chg", 0)
-    # Guard against NaN from raw DataFrame data
-    pct = float(pct) if is_valid_number(pct) else 0
-    pct_color = AppColors.UP_RED if pct > 0 else AppColors.DOWN_GREEN
-    pct_str = f"+{pct:.2f}%" if pct > 0 else f"{pct:.2f}%"
+    # R21: pct_chg 缺失/NaN → "-" 中性色（对齐同区 _format_val 缺失口径，不伪装为
+    # "0.00%"）；0 为合法平盘 → "0.00%" 中性色，不误标跌色。见 _format_pct_change。
+    pct_str, pct_color = _format_pct_change(stock_data.get("pct_chg"))
 
     price_section = ft.Column(
         [
