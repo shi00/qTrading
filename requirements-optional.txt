@@ -39,7 +39,7 @@ botocore==1.43.100
     # via
     #   boto3
     #   s3transfer
-brotlicffi==1.2.0.2
+brotlicffi==1.2.1.0
     # via astockscreener (pyproject.toml)
 bs4==0.0.2
     # via tushare
