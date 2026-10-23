@@ -119,7 +119,16 @@ async def test_dispatch_built_when_all_conditions_met(monkeypatch):
     assert [c["connection_id"] for c in route["candidates"]] == ["conn-1", "conn-2"]
     assert [c["candidate_index"] for c in route["candidates"]] == [0, 1]
     assert all(c["task_id"] == _SCENARIO_ID for c in route["candidates"])
-    assert all(c["reservation_id"] is None for c in route["candidates"])
+    # F16：usage_policy 未配置限额（fixture usage_policy={}）→ usage_only 预算身份
+    # 三 None（不伪装政策存在，R21）；owner / 派发身份不再以伪值占位（由 Executor
+    # per-invocation 生成），候选不携带 reservation/owner 键
+    assert all(c["budget_amount_cny"] is None for c in route["candidates"])
+    assert all(c["budget_limit_cny"] is None for c in route["candidates"])
+    assert all(c["budget_policy_snapshot"] is None for c in route["candidates"])
+    assert all(
+        "reservation_id" not in c and "owner_session_id" not in c and "owner_epoch" not in c
+        for c in route["candidates"]
+    )
     # F01 分派授权身份：远程候选携带规范化外发目标（host 小写 + 显式端口 + 完整 path），
     # 用途即场景 id；快照中不存在的连接诚实置 None（不臆造目标，R21）
     by_conn = {c["connection_id"]: c for c in route["candidates"]}
@@ -148,6 +157,25 @@ async def test_dispatch_local_connection_target_none(monkeypatch):
     candidate = dispatch.snapshot.routes[0]["candidates"][0]
     assert candidate["target_fingerprint"] is None
     assert candidate["purpose"] == _SCENARIO_ID
+
+
+async def test_dispatch_fee_candidates_with_monthly_limit(monkeypatch):
+    """F16：usage_policy 携带月度限额 → 费用型候选冻结预算身份（amount 暂 "0.00"，
+    F17 接入预估计价前不伪装单次成本 R21；预算门按已结算 + 在途 + 0 判定）。"""
+    mm = _mm_snapshot()
+    mm.usage_policy = {"monthly_cny_limit": "50.00"}
+    _patch_env(monkeypatch, mm, {"executor": MagicMock()})
+
+    dispatch = await scenario_dispatch.resolve_executor(_SCENARIO_ID)
+
+    assert dispatch is not None
+    route = dispatch.snapshot.routes[0]
+    for cand in route["candidates"]:
+        assert cand["budget_amount_cny"] == "0.00"
+        assert cand["budget_limit_cny"] == "50.00"
+        assert cand["budget_policy_snapshot"] == {"monthly_cny_limit": "50.00"}
+    # 父请求预算政策快照可由候选冻结值提取（executor 侧 _budget_policy_snapshot 消费）
+    assert route["candidates"][0]["budget_policy_snapshot"] is not None
 
 
 async def test_provider_injection_roundtrip():

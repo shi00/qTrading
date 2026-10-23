@@ -22,6 +22,7 @@ from collections.abc import Callable
 
 from data.persistence.daos.base_dao import EngineDisposedError
 from core.model_management_types import (
+    BudgetReservation,
     NormalizedLLMUsage,
     PersistenceOutcome,
 )
@@ -35,6 +36,25 @@ _DEFAULT_WINDOW_SECONDS = 60.0
 
 _DB_UNAVAILABLE = "DB_UNAVAILABLE"
 _DB_SETTLE_TIMEOUT = "DB_SETTLE_TIMEOUT"
+# 预留被拒（F16）：try_reserve 返回 None = 余额不足 **或** owner 失权（D2/D3+F23
+# 语义统一按「不可派发」处置，DAO 层不可区分，错误码合并表达）。
+_RESERVE_REJECTED = "RESERVE_REJECTED"
+
+
+@dataclass(frozen=True, slots=True)
+class ReservationOutcome:
+    """预算预留结果（F16）：封装 DAO ``try_reserve`` 的三态。
+
+    - ``persisted=True`` + ``reservation`` 非 None：预留成功（月锁内原子登记）；
+    - ``persisted=True`` + ``reservation=None``（``error_code=RESERVE_REJECTED``）：
+      预算门拒绝（余额不足）或 owner 失权（F23 rowcount 贯穿检查），调用方
+      统一按「不可派发」处置（D5：费用型零出站）；
+    - ``persisted=False``：账本不可用 / 超时（脱敏错误码），费用型同样零出站。
+    """
+
+    persisted: bool
+    error_code: str | None = None
+    reservation: BudgetReservation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +70,13 @@ class AttemptUsageObservation:
 
 @dataclass(frozen=True, slots=True)
 class AttemptTerminalRecord:
-    """尝试终态记录：由 Executor 收敛提交（§6.1）。"""
+    """尝试终态记录：由 Executor 收敛提交（§6.1）。
+
+    ``reservation_id``（F16）：该尝试绑定的预算预留 ID——非 None 时 DAO 结算
+    同事务将预留转换为 ``settled``（F22 预留转换），且 attempt 行缺失时的
+    补记以该活跃预留为背书（F23 fencing）；None = 无预留（usage_only 降级 /
+    预留未建立），结算行为与既有完全一致。
+    """
 
     attempt_id: str
     invocation_id: str
@@ -58,6 +84,7 @@ class AttemptTerminalRecord:
     usage: NormalizedLLMUsage | None
     error_code: str | None
     duration_ms: float | None
+    reservation_id: str | None = None
 
 
 class UsageRecorder:
@@ -118,6 +145,103 @@ class UsageRecorder:
         return view
 
     # ------------------------------------------------------------------
+    # 父请求建立与预算预留（F16：场景链父子账目入口）
+    # ------------------------------------------------------------------
+
+    async def ensure_invocation(
+        self,
+        *,
+        invocation_id: str,
+        scenario_id: str,
+        trigger: str,
+        owner_session_id: str,
+        owner_epoch: int,
+        owner_lease_expires_at: Any,
+        budget_policy_snapshot: dict[str, Any] | None,
+    ) -> PersistenceOutcome:
+        """建立 / 幂等复用父请求行（F16，先于候选遍历——零尝试请求亦可查）。
+
+        账本不可用 / 超时收敛为 ``persisted=False``（不伪装已建立，R21）；
+        费用型候选随后的预算预留同样失败 → 零派发（D5），语义自洽。
+        """
+
+        async def _run() -> bool:
+            dao = self._dao_provider()
+            if dao is None:
+                raise _DaoUnavailable()
+            return bool(
+                await dao.create_invocation(
+                    invocation_id=invocation_id,
+                    scenario_id=scenario_id,
+                    trigger=trigger,
+                    owner_session_id=owner_session_id,
+                    owner_epoch=owner_epoch,
+                    owner_lease_expires_at=owner_lease_expires_at,
+                    budget_policy_snapshot=budget_policy_snapshot,
+                )
+            )
+
+        return await self._guarded_outcome(_run, db_timeout_code=_DB_SETTLE_TIMEOUT)
+
+    async def try_reserve(
+        self,
+        *,
+        invocation_id: str,
+        scenario_id: str,
+        task_id: str,
+        trigger: str,
+        month: str,
+        reservation_id: str,
+        attempt_id: str | None,
+        candidate_index: int,
+        retry_index: int,
+        amount_cny: str | None,
+        budget_limit_cny: str | None,
+        budget_policy_snapshot: dict[str, Any] | None,
+        owner_session_id: str,
+        owner_epoch: int,
+        owner_lease_expires_at: Any,
+    ) -> ReservationOutcome:
+        """逐实际尝试原子预算预留（F16，D3 月锁内原子）。
+
+        ``amount_cny`` 非 None 且 ``budget_limit_cny`` 非 None 时执行预算门
+        判定（已结算 + 在途 + 本次 > 上限 → 拒绝）；两者均 None（usage_only）
+        时仅登记 NULL 金额预留（不占预算）。返回 :class:`ReservationOutcome`
+        三态（见其 docstring），调用方按费用型 / usage_only 各自语义处置。
+        """
+
+        async def _run() -> BudgetReservation | None:
+            dao = self._dao_provider()
+            if dao is None:
+                raise _DaoUnavailable()
+            return await dao.try_reserve(
+                invocation_id=invocation_id,
+                scenario_id=scenario_id,
+                task_id=task_id,
+                trigger=trigger,
+                month=month,
+                reservation_id=reservation_id,
+                attempt_id=attempt_id,
+                candidate_index=candidate_index,
+                retry_index=retry_index,
+                amount_cny=amount_cny,
+                budget_limit_cny=budget_limit_cny,
+                budget_policy_snapshot=budget_policy_snapshot,
+                owner_session_id=owner_session_id,
+                owner_epoch=owner_epoch,
+                owner_lease_expires_at=owner_lease_expires_at,
+                lease_expires_at=owner_lease_expires_at,
+            )
+
+        result = await self._guarded_run(_run, db_timeout_code=_DB_SETTLE_TIMEOUT)
+        if isinstance(result, _GuardedFailure):
+            return ReservationOutcome(persisted=False, error_code=result.error_code)
+        if result is None:
+            # F23：None = 余额不足或 owner 失权（不返回非持久预留），统一「不可派发」
+            return ReservationOutcome(persisted=True, error_code=_RESERVE_REJECTED, reservation=None)
+        return ReservationOutcome(persisted=True, error_code=None, reservation=result)
+
+    # ------------------------------------------------------------------
     # 派发绑定（D4 owner 条件写入的落账包装）
     # ------------------------------------------------------------------
 
@@ -154,11 +278,15 @@ class UsageRecorder:
         invocation_id: str,
         configured_model: str,
         attempt_row: dict[str, Any] | None = None,
+        owner_session_id: str | None = None,
+        owner_epoch: int | None = None,
     ) -> PersistenceOutcome:
         """建立实际尝试记录（方案 §6.2 步骤 4：真正进入适配器执行时调用）。
 
         幂等（ON CONFLICT DO NOTHING）：同 attempt_id 重试沿用已绑定身份。
-        失败降级 persisted=False（执行已授权开始，落账尽力而为，不阻断推理）。
+        ``owner_session_id`` / ``owner_epoch`` 齐传启用 F23 owner 身份强门
+        （失权 owner 不得建立新的 attempt 事实）；失败降级 persisted=False
+        （执行已授权开始，落账尽力而为，不阻断推理）。
         """
 
         async def _run() -> bool:
@@ -170,6 +298,8 @@ class UsageRecorder:
                 invocation_id=invocation_id,
                 configured_model=configured_model,
                 attempt_row=attempt_row,
+                owner_session_id=owner_session_id,
+                owner_epoch=owner_epoch,
             )
             return True
 
@@ -226,6 +356,7 @@ class UsageRecorder:
                     text_count=metadata.get("text_count"),
                     usage_window_expires_at=metadata.get("usage_window_expires_at"),
                     usage_fingerprint=metadata.get("usage_fingerprint"),
+                    reservation_id=record.reservation_id,
                 )
             )
 
@@ -271,22 +402,38 @@ class UsageRecorder:
     # 内部：受限落账 + 结果收敛
     # ------------------------------------------------------------------
 
-    async def _guarded_outcome(self, coro_factory: Callable[[], Any], *, db_timeout_code: str) -> PersistenceOutcome:
-        """限时执行 DAO 调用，异常/超时/不可用统一收敛为 PersistenceOutcome。"""
+    async def _guarded_run(self, coro_factory: Callable[[], Any], *, db_timeout_code: str) -> Any:
+        """限时执行 DAO 调用：成功返回原始值，失败返回 :class:`_GuardedFailure` 哨兵
+        （异常表单一来源，:meth:`_guarded_outcome` 与 :meth:`try_reserve` 共用）。"""
         try:
-            persisted = await asyncio.wait_for(coro_factory(), timeout=self._settle_timeout_s)
+            return await asyncio.wait_for(coro_factory(), timeout=self._settle_timeout_s)
         except asyncio.CancelledError:
             raise
         except _DaoUnavailable:
-            return PersistenceOutcome(persisted=False, error_code=_DB_UNAVAILABLE)
+            return _GuardedFailure(_DB_UNAVAILABLE)
         except EngineDisposedError:
-            return PersistenceOutcome(persisted=False, error_code=_DB_UNAVAILABLE)
+            return _GuardedFailure(_DB_UNAVAILABLE)
         except TimeoutError:
-            return PersistenceOutcome(persisted=False, error_code=db_timeout_code)
+            return _GuardedFailure(db_timeout_code)
         except Exception as e:
             logger.warning("[UsageRecorder] ledger write failed: %s", type(e).__name__)
-            return PersistenceOutcome(persisted=False, error_code=db_timeout_code)
-        return PersistenceOutcome(persisted=bool(persisted), error_code=None if persisted else "OWNER_LEASE_LOST")
+            return _GuardedFailure(db_timeout_code)
+
+    async def _guarded_outcome(self, coro_factory: Callable[[], Any], *, db_timeout_code: str) -> PersistenceOutcome:
+        """限时执行 DAO 调用，异常/超时/不可用统一收敛为 PersistenceOutcome。"""
+        result = await self._guarded_run(coro_factory, db_timeout_code=db_timeout_code)
+        if isinstance(result, _GuardedFailure):
+            return PersistenceOutcome(persisted=False, error_code=result.error_code)
+        return PersistenceOutcome(persisted=bool(result), error_code=None if result else "OWNER_LEASE_LOST")
+
+
+class _GuardedFailure:
+    """受限落账失败哨兵（内部）：携带脱敏错误码，与 DAO 成功返回值显式区分。"""
+
+    __slots__ = ("error_code",)
+
+    def __init__(self, error_code: str) -> None:
+        self.error_code = error_code
 
 
 class _DaoUnavailable(RuntimeError):
