@@ -199,9 +199,12 @@ class I18n:
                 # CORE-03: 模板含位置占位符（{} / {0}）或混合规格时 str.format 抛 IndexError，
                 # 模板语法损坏（如未闭合的 {）抛 ValueError，均为模板/参数不匹配的开发期
                 # 配置错误，与 KeyError 同样降级返回原模板，不向调用方传播异常。
-                # i18n key 为静态翻译键、非敏感数据；命中 CodeQL maybePrivate 命名启发式（如 "billing"）误报
-                # codeql[py/clear-text-logging-sensitive-data]
-                logger.warning("[I18n] Invalid template or format spec for '%s': %s", key, e)
+                # 日志输出 template 而非 key：key 由调用方传入，键名字面量（如含 "billing"）
+                # 命中 CodeQL maybePrivate 命名启发式触发 py/clear-text-logging-sensitive-data
+                # 告警；GitHub.com 不支持 SARIF inline suppression（codeql-action#1230，源码内
+                # `# codeql[...]` 注释不生效，历史告警均按 FP 手动 dismiss），故只输出无 taint
+                # 的模板文本（可全局搜索定位问题键）。
+                logger.warning("[I18n] Invalid template or format spec: '%s' (%s)", template, e)
                 return template
         return template
 

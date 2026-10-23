@@ -904,6 +904,9 @@ class TestFormatExceptionContract:
             result = I18n.get("test_auto_pos", name="Alice")
         assert result == "Hello {}", "IndexError 应被吞没, 返回原模板"
         assert "Invalid template or format spec" in caplog.text
+        # 日志只输出 template 不输出 key：key 字面量命中 CodeQL maybePrivate 命名启发式，
+        # GitHub.com 不支持 inline suppression，输出 key 会重新触发 clear-text-logging 告警
+        assert "test_auto_pos" not in caplog.text
 
     def test_mixed_spec_placeholder_swallowed_returns_template(self, caplog):
         """CORE-03: 模板混合位置占位符 {} 与命名占位符 {name} 时吞没."""
