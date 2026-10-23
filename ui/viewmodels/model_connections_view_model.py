@@ -969,6 +969,36 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
                 exc_info=True,
             )
 
+    async def rebase_snapshot(self) -> bool:
+        """重基到最新已提交快照（F30：就地重基，保留连接草稿）。
+
+        触发方：宿主协调 effect（场景域提交后）与面板手动刷新入口。
+        ``_refresh_snapshot`` 天然保留 draft / editor / validation_errors / dirty
+        （只更新 raw 元数据与行 / 摘要 / CAS revision），并在成功后把冲突态就地
+        恢复为 idle（新基线下重试保存即可）；SAVE_ERROR 不清——其含验证失败语义，
+        草稿未变时错误提示仍真实（R21）。核心作用：场景保存提交后刷新
+        ``_raw_routes``，防止下次连接保存以陈旧路由回退路由修订（F30）。
+
+        Returns:
+            ``True`` 表示重基成功；``False`` 表示读快照失败（不伪装成功，R21）。
+        """
+        self._track_inflight_cancellable()  # F40：只读刷新，页面卸载可安全取消
+        try:
+            await self._refresh_snapshot()
+        except asyncio.CancelledError:
+            raise  # R2
+        except Exception as ex:
+            logger.error(
+                "[ModelConnectionsVM] rebase snapshot failed: %s",
+                DataSanitizer.sanitize_error(ex),
+                exc_info=True,
+            )
+            return False
+        if self._state.save_state == SAVE_CONFLICT:
+            # 冲突已由新基线解决：恢复 idle 允许就地重试（草稿保留）
+            self._set_state(save_state=SAVE_IDLE, message=None)
+        return True
+
     # ------------------------------------------------------------------
     # 单次测试（未保存连接）：专用测试上下文一次性消费 consent，直连适配器
     # ------------------------------------------------------------------

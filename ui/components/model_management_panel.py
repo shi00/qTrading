@@ -250,6 +250,26 @@ async def _export_csv_and_notify(
         show_snack(I18n.get("model_usage_export_failed"), color=AppColors.ERROR)
 
 
+async def _rebase_all_and_notify(
+    connections_vm: ModelConnectionsViewModel,
+    routes_vm: ModelRoutesViewModel,
+    show_snack: Callable,
+) -> None:
+    """手动重基两 VM 快照（F30 显式刷新入口）：只前移基线，保留未提交草稿。
+
+    并发重基（两 VM 独立状态域，无共享可变状态）；任一失败即按失败反馈，
+    不伪装成功（R21）。R2: CancelledError 显式传播。
+    """
+    try:
+        ok_conn, ok_routes = await asyncio.gather(connections_vm.rebase_snapshot(), routes_vm.rebase_snapshot())
+    except asyncio.CancelledError:
+        raise  # R2
+    if ok_conn and ok_routes:
+        show_snack(I18n.get("model_management_refresh_done"), color=AppColors.SUCCESS)
+    else:
+        show_snack(I18n.get("model_management_refresh_failed"), color=AppColors.ERROR)
+
+
 def _fmt_decimal(value: Decimal | None) -> str:
     """Decimal 展示：缺失用「未知」而非 0（R21）。"""
     return f"{value:.2f}" if value is not None else I18n.get("model_usage_unknown")
@@ -1033,10 +1053,30 @@ def ModelManagementPanel(
                             I18n.get("model_management_title"),
                             title_key="model_management_title",
                         ),
-                        ft.Icon(
-                            ft.Icons.MODEL_TRAINING,
-                            size=AppStyles.FONT_SIZE_HEADLINE,
-                            color=AppColors.PRIMARY,
+                        ft.Row(
+                            [
+                                # F30：显式重基入口——手动刷新两 VM 快照（保留未提交草稿）
+                                anchored(
+                                    EIDS.MODEL.PANEL_REFRESH,
+                                    ft.IconButton(
+                                        icon=ft.Icons.REFRESH,
+                                        tooltip=I18n.get("model_management_refresh"),
+                                        icon_size=AppStyles.FONT_SIZE_HEADLINE,
+                                        icon_color=AppColors.PRIMARY,
+                                        on_click=safe_on_click(
+                                            _run_task_handler(
+                                                _rebase_all_and_notify, connections_vm, routes_vm, show_snack_callback
+                                            )
+                                        ),
+                                    ),
+                                ),
+                                ft.Icon(
+                                    ft.Icons.MODEL_TRAINING,
+                                    size=AppStyles.FONT_SIZE_HEADLINE,
+                                    color=AppColors.PRIMARY,
+                                ),
+                            ],
+                            spacing=AppStyles.SPACING_SM,
                         ),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,

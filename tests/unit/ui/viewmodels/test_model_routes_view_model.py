@@ -31,6 +31,7 @@ from ui.viewmodels.model_routes_view_model import (
     ModelRoutesState,
     ModelRoutesViewModel,
     ScenarioRouteDraft,
+    _rebase_drafts,
 )
 
 pytestmark = pytest.mark.unit
@@ -637,3 +638,167 @@ class TestPayloadBuilders:
 
         routes = {r["scenario_id"]: r["candidates"] for r in payload["scenario_routes"]}
         assert routes["stock_analysis"] == []
+
+
+# --- F30: 重基（rebase）语义 ---
+
+
+class TestRebaseDrafts:
+    """``_rebase_drafts`` 纯函数：未分叉草稿随新基线、已分叉草稿保留。"""
+
+    def test_undiverged_draft_follows_new_baseline(self):
+        old_committed = (ScenarioRouteDraft("s1", candidates=("a",), route_revision=1),)
+        new_committed = (ScenarioRouteDraft("s1", candidates=("a",), route_revision=3),)
+        rebased = _rebase_drafts(old_committed, old_committed, new_committed)
+        # 未分叉 → 采用新基线行（含新 route_revision，消幻影 dirty）
+        assert rebased[0] == new_committed[0]
+
+    def test_diverged_draft_is_kept(self):
+        old_committed = (ScenarioRouteDraft("s1", candidates=("a",), route_revision=1),)
+        new_committed = (ScenarioRouteDraft("s1", candidates=("a",), route_revision=3),)
+        diverged = ScenarioRouteDraft("s1", candidates=("a", "b"), route_revision=1)
+        rebased = _rebase_drafts((diverged,), old_committed, new_committed)
+        assert rebased[0] == diverged  # 已分叉 → 逐字段保留
+
+    def test_divergence_judged_semantically_not_by_revision(self):
+        """仅 route_revision 不同的草稿视为未分叉（revision 不参与语义比较，F14 判据）。"""
+        old_committed = (ScenarioRouteDraft("s1", candidates=("a",), route_revision=2),)
+        draft = ScenarioRouteDraft("s1", candidates=("a",), route_revision=9)
+        new_committed = (ScenarioRouteDraft("s1", candidates=("a",), route_revision=4),)
+        rebased = _rebase_drafts((draft,), old_committed, new_committed)
+        assert rebased[0] == new_committed[0]
+
+    def test_scenario_missing_in_new_committed_keeps_draft(self):
+        """新基线缺失对应场景（防御性兜底）：草稿保留。"""
+        old_committed = (ScenarioRouteDraft("s1", candidates=("a",)),)
+        rebased = _rebase_drafts(old_committed, old_committed, ())
+        assert rebased == old_committed
+
+
+class TestRebaseSnapshot:
+    @pytest.mark.asyncio
+    async def test_rebase_updates_cas_baseline_and_keeps_diverged_draft(self):
+        vm, service = _make_vm(_snapshot(config_revision=5))
+        await vm.load()
+        vm.select_scenario("stock_analysis")
+        vm.add_candidate("conn-a")  # 草稿分叉
+
+        service.get_snapshot = AsyncMock(return_value=_snapshot(config_revision=6))
+        ok = await vm.rebase_snapshot()
+
+        assert ok is True
+        # CAS 基线前移（经公开 payload 观察，不触私有成员）
+        assert vm.build_payload("stock_analysis")["config_revision"] == 6
+        # 已分叉草稿保留（连接域提交不丢路由草稿——F30 回归标准）
+        assert _route_candidates(vm, "stock_analysis") == ("conn-a",)
+        assert vm.state.dirty_counts == (("news_annotation", 0), ("stock_analysis", 1), ("news_risk", 0))
+
+    @pytest.mark.asyncio
+    async def test_rebase_undiverged_draft_no_phantom_dirty(self):
+        """未分叉草稿随新基线：基线前移后内容等于新基线，不标脏。"""
+        vm, service = _make_vm(_snapshot(config_revision=5))
+        await vm.load()
+        assert vm.state.dirty_counts == (("news_annotation", 0), ("stock_analysis", 0), ("news_risk", 0))
+
+        service.get_snapshot = AsyncMock(return_value=_snapshot(config_revision=6))
+        ok = await vm.rebase_snapshot()
+
+        assert ok is True
+        assert vm.state.routes == vm.state.committed_routes
+        assert all(count == 0 for _, count in vm.state.dirty_counts)
+
+    @pytest.mark.asyncio
+    async def test_rebase_resolves_conflict_to_idle(self):
+        vm, service = _make_vm(_snapshot(), save_error=ModelConfigurationConflictError(5, 6))
+        await vm.load()
+        vm.add_candidate("conn-a")
+        await vm.save_current_scenario()
+        assert vm.state.save_state == "conflict"
+
+        service.get_snapshot = AsyncMock(return_value=_snapshot(config_revision=6))
+        ok = await vm.rebase_snapshot()
+
+        assert ok is True
+        assert vm.state.save_state == "idle"
+        assert vm.state.message is None
+        assert _route_candidates(vm, "news_annotation") == ("conn-a",)  # 草稿保留，可直接重试
+
+    @pytest.mark.asyncio
+    async def test_rebase_keeps_commit_unknown(self):
+        """F31：commit_unknown 回执语义不被重基破坏。"""
+        outcome = ConfigurationSaveOutcome(status="commit_unknown", current_revision=5, committed_revision=None)
+        vm, service = _make_vm(_snapshot(), save_outcome=outcome)
+        await vm.load()
+        vm.add_candidate("conn-a")
+        await vm.save_current_scenario()
+        assert vm.state.save_state == "commit_unknown"
+
+        service.get_snapshot = AsyncMock(return_value=_snapshot(config_revision=6))
+        ok = await vm.rebase_snapshot()
+
+        assert ok is True
+        assert vm.state.save_state == "commit_unknown"
+        assert vm.state.message is not None
+
+    @pytest.mark.asyncio
+    async def test_rebase_failure_returns_false_and_keeps_state(self):
+        vm, service = _make_vm(_snapshot())
+        await vm.load()
+        before = vm.state
+        service.get_snapshot = AsyncMock(side_effect=RuntimeError("boom"))
+
+        ok = await vm.rebase_snapshot()
+
+        assert ok is False  # 不伪装成功（R21）
+        assert vm.state is before  # 状态未被破坏
+
+    @pytest.mark.asyncio
+    async def test_rebase_clears_undo_and_refreshes_options(self):
+        vm, service = _make_vm(_snapshot())
+        await vm.load()
+        vm.select_scenario("stock_analysis")
+        # 构造 undo：先加候选再移除
+        vm.add_candidate("conn-a")
+        vm.remove_candidate("conn-a")
+        assert vm.state.undo_available is True
+
+        new_snap = _snapshot(
+            config_revision=6,
+            connections=[_connection_mapping("conn-a", name="主连接", revision=4), _connection_mapping("conn-c")],
+        )
+        service.get_snapshot = AsyncMock(return_value=new_snap)
+        await vm.rebase_snapshot()
+
+        assert vm.state.undo_available is False  # 撤销记录清除（重基后撤销语义失效）
+        assert [o.connection_id for o in vm.state.available_connections] == ["conn-a", "conn-c"]  # 候选选择器刷新
+        assert vm.state.available_connections[0].connection_revision == 4
+
+
+class TestCommitSeq:
+    """F30：commit_seq 仅 committed 递增（宿主协调触发信号）。"""
+
+    @pytest.mark.asyncio
+    async def test_commit_seq_increments_on_committed(self):
+        vm, _ = _make_vm(_snapshot(), save_outcome=_committed_outcome())
+        await vm.load()
+        assert vm.state.commit_seq == 0
+        vm.select_scenario("stock_analysis")
+        vm.add_candidate("conn-a")
+
+        await vm.save_current_scenario()
+
+        assert vm.state.commit_seq == 1
+
+    @pytest.mark.asyncio
+    async def test_commit_seq_unchanged_on_not_committed(self):
+        outcome = ConfigurationSaveOutcome(
+            status="not_committed", current_revision=7, committed_revision=None, last_config_commit=None
+        )
+        vm, _ = _make_vm(_snapshot(), save_outcome=outcome)
+        await vm.load()
+        vm.add_candidate("conn-a")
+
+        await vm.save_current_scenario()
+
+        assert vm.state.save_state == "error"  # not_committed 映射 error
+        assert vm.state.commit_seq == 0  # 未提交不触发宿主重基
