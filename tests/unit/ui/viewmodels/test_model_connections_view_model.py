@@ -47,6 +47,7 @@ def _snapshot(
     connections: tuple[dict, ...] = (),
     scenario_routes: tuple[dict, ...] = (),
     security_grants: tuple[dict, ...] = (),
+    security_scope_version: int = 1,
 ) -> ModelManagementSnapshot:
     return ModelManagementSnapshot(
         snapshot_id="snap-1",
@@ -57,6 +58,7 @@ def _snapshot(
         usage_policy=MappingProxyType({}),
         security_revision=0,
         security_grants=tuple(MappingProxyType(g) for g in security_grants),
+        security_scope_version=security_scope_version,
         created_at="2026-10-19T00:00:00+00:00",
     )
 
@@ -68,7 +70,7 @@ def _conn(
     adapter_kind: str = "litellm_chat",
     enabled: bool = True,
     provider: str = "openai",
-    api_base: str = "https://api.openai.com/v1",
+    api_base: str | None = "https://api.openai.com/v1",
     credential_ref: str | None = "keyring:old",
     credential_version: str | None = "v-old",
     capabilities: dict | None = None,
@@ -791,6 +793,7 @@ def _grant(
     connection_id: str = "c1",
     purpose: str = "stock_analysis",
     target_fingerprint: str = "https://api.openai.com:443/v1",
+    scope_version: int = 1,
     confirmed_at: str = "2026-10-19T00:00:00+00:00",
     revoked_at: str | None = None,
 ) -> dict:
@@ -799,6 +802,7 @@ def _grant(
         "connection_id": connection_id,
         "target_fingerprint": target_fingerprint,
         "purpose": purpose,
+        "scope_version": scope_version,
         "confirmed_at": confirmed_at,
         "revoked_at": revoked_at,
     }
@@ -854,6 +858,120 @@ class TestEgressQueries:
         assert tuple(g["grant_id"] for g in active) == ("g1",)
         assert vm.grants_for("c2", "news_risk") == ()
         assert tuple(g["grant_id"] for g in vm.grants_for("c1", "news_risk")) == ("g2",)
+
+    async def test_grants_for_filters_mismatched_target(self):
+        """R07/T2：授权摘要按当前规范化目标筛选——grant 不属于当前目标不展示。
+
+        运行链路同构：grant.target_fingerprint 与 candidate.target_fingerprint
+        均为 normalize_egress_target 规范化目标（authorize_attempt 严格匹配）。
+        """
+        svc = _make_service(
+            _snapshot(
+                connections=(
+                    _conn(connection_id="c1", api_base="https://api.openai.com/v1"),
+                    _conn(connection_id="c2", api_base="https://relay.example.com/v1"),
+                ),
+                security_grants=(
+                    # c1 当前目标的有效 grant（展示）
+                    _grant(grant_id="g1", connection_id="c1", purpose="stock_analysis"),
+                    # c1 的旧目标 grant（api_base 改址前签发，不展示）
+                    _grant(
+                        grant_id="g2",
+                        connection_id="c1",
+                        purpose="stock_analysis",
+                        target_fingerprint="https://old.example.com:443/v1",
+                    ),
+                    # 同连接但冒充 c2 目标的 grant（同 id / 同用途、目标失配，不展示）
+                    _grant(
+                        grant_id="g3",
+                        connection_id="c1",
+                        purpose="stock_analysis",
+                        target_fingerprint="https://relay.example.com:443/v1",
+                    ),
+                ),
+            )
+        )
+        vm = _make_vm(svc)
+        await vm.load()
+
+        assert tuple(g["grant_id"] for g in vm.grants_for("c1", "stock_analysis")) == ("g1",)
+
+    async def test_grants_for_filters_stale_scope_version(self):
+        """R07/T2：授权摘要按当前授权范围世代筛选——旧世代 grant 不展示。"""
+        svc = _make_service(
+            _snapshot(
+                connections=(_conn(connection_id="c1"),),
+                security_grants=(
+                    # 当前世代（1）grant（展示）
+                    _grant(grant_id="g1", connection_id="c1", purpose="stock_analysis", scope_version=1),
+                    # 旧世代 grant（不展示）
+                    _grant(grant_id="g2", connection_id="c1", purpose="stock_analysis", scope_version=0),
+                    # 未来世代 grant（不展示）
+                    _grant(grant_id="g3", connection_id="c1", purpose="stock_analysis", scope_version=2),
+                    # 缺 scope_version 字段的旧数据（不展示，fail-closed）
+                    {
+                        "grant_id": "g4",
+                        "connection_id": "c1",
+                        "purpose": "stock_analysis",
+                        "target_fingerprint": "https://api.openai.com:443/v1",
+                        "confirmed_at": "2026-10-19T00:00:00+00:00",
+                        "revoked_at": None,
+                    },
+                ),
+            )
+        )
+        vm = _make_vm(svc)
+        await vm.load()
+
+        assert tuple(g["grant_id"] for g in vm.grants_for("c1", "stock_analysis")) == ("g1",)
+
+    async def test_grants_for_follows_current_scope_generation(self):
+        """快照 security_scope_version 轮转后，摘要随当前世代切换（联动）。"""
+        svc = _make_service(
+            _snapshot(
+                connections=(_conn(connection_id="c1"),),
+                security_grants=(_grant(grant_id="g1", connection_id="c1", purpose="stock_analysis", scope_version=2),),
+                security_scope_version=2,
+            )
+        )
+        vm = _make_vm(svc)
+        await vm.load()
+        assert tuple(g["grant_id"] for g in vm.grants_for("c1", "stock_analysis")) == ("g1",)
+
+    async def test_grants_for_local_connection_returns_empty(self):
+        """本地连接（无有效目标）返回空 tuple，诚实表示无有效授权（R21）。"""
+        svc = _make_service(
+            _snapshot(
+                connections=(_conn(connection_id="c1", adapter_kind="gguf_chat", api_base=None),),
+                security_grants=(_grant(grant_id="g1", connection_id="c1", purpose="stock_analysis"),),
+            )
+        )
+        vm = _make_vm(svc)
+        await vm.load()
+        assert vm.grants_for("c1", "stock_analysis") == ()
+
+    async def test_connection_requires_egress_by_adapter_kind(self):
+        """R07/T2：本地 / egress 判定一律经 core 正本 adapter_kind_requires_egress。"""
+        svc = _make_service(
+            _snapshot(
+                connections=(
+                    _conn(connection_id="c1", adapter_kind="litellm_chat"),
+                    _conn(connection_id="c2", adapter_kind="gguf_chat", api_base=None),
+                    _conn(connection_id="c3", adapter_kind="gguf_sentiment", api_base=None),
+                    _conn(connection_id="c4", adapter_kind="unknown_future_kind"),
+                ),
+            )
+        )
+        vm = _make_vm(svc)
+        await vm.load()
+
+        assert vm.connection_requires_egress("c1") is True
+        assert vm.connection_requires_egress("c2") is False
+        assert vm.connection_requires_egress("c3") is False
+        # fail-closed：未知 kind（含新增未登记类型）要求 egress
+        assert vm.connection_requires_egress("c4") is True
+        # fail-closed：连接不存在（未知身份）不放宽
+        assert vm.connection_requires_egress("missing") is True
 
 
 # --- Draft entry / merge（§11.6 向导原子提交公开入口） ---

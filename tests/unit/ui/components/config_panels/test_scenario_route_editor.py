@@ -103,9 +103,12 @@ class _FakeEgressVM:
     """模拟 ModelConnectionsViewModel 的授权摘要切片（外部 VM 模式契约）。
 
     满足 ``use_viewmodel(vm=)`` 契约（state / subscribe / dispose）；授权命令为
-    MagicMock 便于断言实参；``connection_target`` / ``grants_for`` 由构造参数注入，
-    模拟本地适配器（无外发目标 → None，R21 不臆造目标）与 HTTP 目标（规范化字符串
-    → 有 / 无 grant）。授权写副作用不进入本组件，故其余 VM 能力不模拟。
+    MagicMock 便于断言实参；``connection_target`` / ``grants_for`` /
+    ``connection_requires_egress`` 由构造参数注入，模拟本地适配器（无外发目标 →
+    None，R21 不臆造目标）与 HTTP 目标（规范化字符串 → 有 / 无 grant）。未显式
+    注入 ``requires_egress`` 的连接默认 False（本地语义，与既有用例一致）；真实
+    VM 对未知连接 / 未知 kind 为 fail-closed True（R07/T2），相关用例显式注入。
+    授权写副作用不进入本组件，故其余 VM 能力不模拟。
     """
 
     def __init__(
@@ -113,11 +116,13 @@ class _FakeEgressVM:
         *,
         targets: dict[str, str | None] | None = None,
         grants: dict[tuple[str, str], tuple[Mapping[str, Any], ...]] | None = None,
+        requires_egress: dict[str, bool] | None = None,
     ) -> None:
         self._state = object()  # 授权摘要不消费 egress state 字段，仅需非 None 快照
         self._subscribers: list[Any] = []
         self._targets = dict(targets or {})
         self._grants = dict(grants or {})
+        self._requires_egress = dict(requires_egress or {})
         self.grant_egress = MagicMock()
         self.revoke_egress = MagicMock()
 
@@ -139,6 +144,9 @@ class _FakeEgressVM:
 
     def connection_target(self, connection_id: str) -> str | None:
         return self._targets.get(connection_id)
+
+    def connection_requires_egress(self, connection_id: str) -> bool:
+        return self._requires_egress.get(connection_id, False)
 
     def grants_for(self, connection_id: str, purpose: str) -> tuple[Mapping[str, Any], ...]:
         return self._grants.get((connection_id, purpose), ())
@@ -476,7 +484,7 @@ class TestSentimentSection:
 # ============================================================================
 
 
-_EGRESS_KEY_PREFIXES = ("egress_local_", "egress_target_", "egress_grant_", "egress_revoke_")
+_EGRESS_KEY_PREFIXES = ("egress_local_", "egress_invalid_", "egress_target_", "egress_grant_", "egress_revoke_")
 
 
 def _egress_keys(root: Any) -> list[str]:
@@ -503,7 +511,10 @@ class TestEgressSummary:
     def test_local_target_renders_no_egress_action(self, mock_i18n_state, mock_app_colors_state) -> None:
         """本地适配器（无外发目标）只提示「不外发」，不渲染授权 / 撤销（R21 不臆造目标）。"""
         vm = _FakeRoutesVM(_make_state())
-        egress_vm = _FakeEgressVM(targets={"conn_a": "https://a.example:443", "conn_b": None, "conn_c": None})
+        egress_vm = _FakeEgressVM(
+            targets={"conn_a": "https://a.example:443", "conn_b": None, "conn_c": None},
+            requires_egress={"conn_b": False, "conn_c": False},
+        )
         root, _, _ = _render(vm, egress_vm)
         assert _find(root, "egress_local_conn_b").value == "model_routes_egress_local"
         assert _find(root, "egress_local_conn_c").value == "model_routes_egress_local"
@@ -511,6 +522,33 @@ class TestEgressSummary:
         assert _maybe_find(root, "egress_grant_conn_b") is None
         assert _maybe_find(root, "egress_revoke_conn_b") is None
         # HTTP 目标连接显示规范化目标，而非「不外发」。
+        assert _find(root, "egress_target_conn_a").value == "model_routes_egress_target"
+
+    def test_invalid_target_on_egress_kind_renders_invalid_not_local(
+        self, mock_i18n_state, mock_app_colors_state
+    ) -> None:
+        """R07/T2：egress kind 空目标 = 目标非法，显式标注而非伪装为本地（R21）。
+
+        egress kind（api 等，fail-closed 含未知 kind）目标非法时不渲染「不外发」
+        文案、不渲染任何授权操作（无目标可授权，发 grant 即伪造授权身份）。
+        """
+        vm = _FakeRoutesVM(_make_state())
+        egress_vm = _FakeEgressVM(
+            targets={"conn_a": "https://a.example:443", "conn_b": None, "conn_c": None},
+            requires_egress={"conn_b": True, "conn_c": True},
+        )
+        root, _, _ = _render(vm, egress_vm)
+        assert _find(root, "egress_invalid_conn_b").value == "model_routes_egress_target_invalid"
+        assert _find(root, "egress_invalid_conn_c").value == "model_routes_egress_target_invalid"
+        # 不得伪装为本地
+        assert _maybe_find(root, "egress_local_conn_b") is None
+        assert _maybe_find(root, "egress_local_conn_c") is None
+        # 无有效目标即无可授权对象，不渲染授权 / 撤销
+        for cid in ("conn_b", "conn_c"):
+            assert _maybe_find(root, f"egress_target_{cid}") is None
+            assert _maybe_find(root, f"egress_grant_{cid}") is None
+            assert _maybe_find(root, f"egress_revoke_{cid}") is None
+        # HTTP 目标连接不受影响
         assert _find(root, "egress_target_conn_a").value == "model_routes_egress_target"
 
     def test_ungranted_target_renders_grant_and_dispatches(self, mock_i18n_state, mock_app_colors_state) -> None:

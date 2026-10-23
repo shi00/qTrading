@@ -612,14 +612,27 @@ def _build_egress_summary(
     for connection_id in candidates:
         target = egress_vm.connection_target(connection_id)
         if target is None:
-            rows.append(
-                ft.Text(
-                    I18n.get("model_routes_egress_local"),
-                    key=f"egress_local_{connection_id}",
-                    size=AppStyles.FONT_SIZE_CAPTION,
-                    color=AppColors.TEXT_HINT,
+            # R07/T2：空目标按 adapter_kind 分流——本地 kind 合法不外发（R21 不臆造
+            # 目标）；egress kind（含未知 kind，fail-closed）空目标 = 目标非法，
+            # 显式标注，不得伪装成本地（否则用户误以为无需授权即可外发）。
+            if egress_vm.connection_requires_egress(connection_id):
+                rows.append(
+                    ft.Text(
+                        I18n.get("model_routes_egress_target_invalid"),
+                        key=f"egress_invalid_{connection_id}",
+                        size=AppStyles.FONT_SIZE_CAPTION,
+                        color=AppColors.WARNING,
+                    )
                 )
-            )
+            else:
+                rows.append(
+                    ft.Text(
+                        I18n.get("model_routes_egress_local"),
+                        key=f"egress_local_{connection_id}",
+                        size=AppStyles.FONT_SIZE_CAPTION,
+                        color=AppColors.TEXT_HINT,
+                    )
+                )
             continue
         grants = egress_vm.grants_for(connection_id, purpose)
         status_controls: list[ft.Control] = []

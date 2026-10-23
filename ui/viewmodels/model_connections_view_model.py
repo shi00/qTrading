@@ -40,6 +40,7 @@ from core.model_management_types import (
     ModelManagementSnapshot,
     SyntheticTestConsent,
     SyntheticTestContext,
+    adapter_kind_requires_egress,
     normalize_egress_target,
 )
 from services.model_configuration_service import ModelConfigurationService
@@ -271,6 +272,9 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         self._usage_policy: Mapping[str, Any] = {}
         # 目标级外发授权（§4.3）：授权摘要事实源；常规草稿路径不可写，仅安全命令刷新
         self._raw_grants: tuple[Mapping[str, Any], ...] = ()
+        # 当前授权范围世代（F01，grant.scope_version 同域）：grants_for 按「目标 +
+        # scope_version」双条件筛选，不展示旧世代 grant（R07/T2）
+        self._security_scope_version: int = 1
         self._ref_counts: dict[str, int] = {}
         self._pending_operation_id: str | None = None
         # F31：回执身份绑定的草稿代（登记时快照），供回执消费方校验草稿是否已重置
@@ -442,6 +446,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         self._raw_routes = snapshot.scenario_routes
         self._usage_policy = snapshot.usage_policy
         self._raw_grants = snapshot.security_grants
+        self._security_scope_version = snapshot.security_scope_version
         self._ref_counts = self._count_refs(snapshot)
         usage = UsageCostSummary()
         if self._usage_summary_loader is not None:
@@ -1079,20 +1084,50 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
     def connection_target(self, connection_id: str) -> str | None:
         """连接的规范化外发目标（§4.3）。
 
-        本地适配器（gguf，无 ``api_base``）不外发，返回 ``None``——组件据此不渲染授权
-        操作，不臆造目标（R21）。
+        ``None`` 是诚实表示（R21），两种语义由 :meth:`connection_requires_egress`
+        区分：本地适配器（gguf，无 ``api_base``）不外发，合法不渲染授权操作；
+        egress 适配器 ``api_base`` 空 / 非法时目标非法，摘要须显式标注而非伪装为
+        本地（R07/T2）。连接不存在同样返回 ``None``（臆造目标即伪造授权身份）。
         """
         raw = next((c for c in self._raw_connections if str(c.get("connection_id")) == connection_id), None)
         if raw is None:
             return None
         return normalize_egress_target(raw.get("api_base"))
 
+    def connection_requires_egress(self, connection_id: str) -> bool:
+        """连接的 adapter_kind 是否产生网络外发（core 正本 ``adapter_kind_requires_egress``）。
+
+        fail-closed：连接不存在（未知身份）或 adapter_kind 未登记本地豁免清单
+        一律 ``True``；本地 kind（``gguf_*``）``False``。授权摘要据此区分「合法
+        本地（不外发）」与「egress kind 目标非法」，空目标不得一律伪装为本地
+        （R07/T2，R21）。按当前快照连接即时计算，adapter_kind / connection_target
+        变更后重渲染即联动。
+        """
+        raw = next((c for c in self._raw_connections if str(c.get("connection_id")) == connection_id), None)
+        if raw is None:
+            return True
+        return adapter_kind_requires_egress(str(raw.get("adapter_kind", "")))
+
     def grants_for(self, connection_id: str, purpose: str) -> tuple[Mapping[str, Any], ...]:
-        """该连接在指定用途下当前有效的 grant（未撤销），供授权摘要展示（§4.3）。"""
+        """该连接在指定用途下当前有效的 grant（未撤销），供授权摘要展示（§4.3）。
+
+        按「当前规范化外发目标 + 当前授权范围世代（scope_version）」双条件筛选
+        （R07/T2），与运行链路授权匹配同构（authorize_attempt 严格匹配
+        ``target_fingerprint`` 与 ``scope_version``）：不属于当前目标或旧世代的
+        grant 不展示。无有效规范化目标（本地 / 目标非法）返回空 tuple——诚实表示
+        「无有效授权」，不伪装（R21）。
+        """
+        current_target = self.connection_target(connection_id)
+        if current_target is None:
+            return ()
         return tuple(
             g
             for g in self._raw_grants
-            if str(g.get("connection_id")) == connection_id and g.get("purpose") == purpose and not g.get("revoked_at")
+            if str(g.get("connection_id")) == connection_id
+            and g.get("purpose") == purpose
+            and g.get("target_fingerprint") == current_target
+            and g.get("scope_version") == self._security_scope_version
+            and not g.get("revoked_at")
         )
 
     # ------------------------------------------------------------------

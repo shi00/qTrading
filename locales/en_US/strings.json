@@ -2215,6 +2215,7 @@
     "model_routes_egress_revoke": "Revoke authorization",
     "model_routes_egress_section": "Egress authorization",
     "model_routes_egress_target": "Target: {target}",
+    "model_routes_egress_target_invalid": "Invalid or missing egress target; check the connection URL",
     "model_routes_egress_task": "Task: {task}",
     "model_routes_egress_task_news_annotation": "News annotation",
     "model_routes_egress_task_news_risk": "News risk assessment",
