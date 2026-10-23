@@ -29,6 +29,7 @@ from core.model_management_types import (
     SyntheticTestConsent,
     SyntheticTestContext,
 )
+from services.ai_service.model_compatibility import ModelCompatibilityService
 from ui.viewmodels.model_connections_view_model import (
     ModelConnectionsState,
     ModelConnectionsViewModel,
@@ -1078,3 +1079,186 @@ class TestDisposeInflightTasks:
         assert isinstance(exc_info.value, asyncio.CancelledError)
         assert task.cancelled()
         svc.save_draft.assert_not_awaited()  # 从未进入提交阶段
+
+
+# --- F32：表单映射闭合（timeout / n_ctx / 按计量单位验价） ---
+
+
+class TestFormPayloadClosure:
+    async def test_minimal_gguf_chat_payload_passes_real_compatibility(self):
+        """回归（P08 消除）：UI 必填最小 GGUF chat 即可执行——payload 带显式 n_ctx。
+
+        仅填表单可见必填项（名称 + 对话模型路径），落盘 payload 必须被真实兼容
+        函数（``ModelCompatibilityService.resolve_execution_params``）接受。
+        """
+        svc = _make_service()
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.start_add()
+        vm.update_name("Local Chat")
+        vm.update_adapter_kind("gguf_chat")
+        vm.update_dialog_model_path("dialog.gguf")
+
+        assert await vm.save() is True
+
+        conn = svc.save_draft.await_args.args[0]["connections"][0]
+        assert conn["adapter_options"]["n_ctx"] == 4096
+        decision = ModelCompatibilityService().resolve_execution_params(conn)
+        assert decision.compatible is True
+        assert decision.reason is None
+
+    async def test_minimal_gguf_sentiment_payload_passes_real_compatibility(self):
+        """回归（P08 消除）：UI 必填最小 GGUF sentiment（三路径）同样通过真实兼容函数。"""
+        svc = _make_service()
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.start_add()
+        vm.update_name("Local Sentiment")
+        vm.update_adapter_kind("gguf_sentiment")
+        vm.update_encoder_model_path("enc.gguf")
+        vm.update_head_path("head.npz")
+        vm.update_tokenizer_path("tok.json")
+
+        assert await vm.save() is True
+
+        conn = svc.save_draft.await_args.args[0]["connections"][0]
+        assert conn["adapter_options"]["n_ctx"] == 4096
+        decision = ModelCompatibilityService().resolve_execution_params(conn)
+        assert decision.compatible is True
+        assert decision.reason is None
+
+    async def test_existing_gguf_n_ctx_preserved_on_edit(self):
+        """读取重开保真：磁盘已有合法 n_ctx（如手配 2048）编辑保存不被默认值覆盖。"""
+        raw = _conn(connection_id="c1", adapter_kind="gguf_chat", api_base=None)
+        raw["adapter_options"] = {"dialog_model_path": "dialog.gguf", "n_ctx": 2048}
+        svc = _make_service(_snapshot(connections=(raw,)))
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.edit("c1")
+
+        assert await vm.save() is True
+
+        conn = svc.save_draft.await_args.args[0]["connections"][0]
+        assert conn["adapter_options"]["n_ctx"] == 2048
+
+    async def test_timeout_roundtrip_600_via_reload(self):
+        """回归：timeout=600 保存 → 重载草稿仍为 600 → 再保存仍进入 adapter_options["timeout"]。"""
+        svc = _make_service()
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.start_add()
+        vm.update_name("Cloud")
+        vm.update_model("gpt-4o")
+        vm.update_timeout_seconds("600")
+
+        assert await vm.save() is True
+
+        saved = dict(svc.save_draft.await_args.args[0]["connections"][0])
+        assert saved["adapter_options"]["timeout"] == 600.0
+
+        # 模拟磁盘回读重开（编辑既有连接）
+        svc2 = _make_service(_snapshot(connections=(saved,)))
+        vm2 = _make_vm(svc2)
+        await vm2.load()
+        vm2.edit(str(saved["connection_id"]))
+        assert vm2.state.draft.timeout_seconds == "600"
+
+        assert await vm2.save() is True
+        reloaded = svc2.save_draft.await_args.args[0]["connections"][0]
+        assert reloaded["adapter_options"]["timeout"] == 600.0
+
+    async def test_timeout_blank_not_written(self):
+        """R21：timeout 未填不伪装——adapter_options 不写入 timeout 键。"""
+        svc = _make_service()
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.start_add()
+        vm.update_name("Cloud")
+        vm.update_model("gpt-4o")
+
+        assert await vm.save() is True
+
+        conn = svc.save_draft.await_args.args[0]["connections"][0]
+        assert "timeout" not in conn["adapter_options"]
+
+    async def test_timeout_clamped_to_min(self):
+        """timeout 低于下限 clamp 至 1.0s（负值/零不可执行，落盘即有效值）。"""
+        svc = _make_service()
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.start_add()
+        vm.update_name("Cloud")
+        vm.update_model("gpt-4o")
+        vm.update_timeout_seconds("0.2")
+
+        assert await vm.save() is True
+
+        conn = svc.save_draft.await_args.args[0]["connections"][0]
+        assert conn["adapter_options"]["timeout"] == 1.0
+
+    @pytest.mark.parametrize("raw", ["inf", "nan", "abc", "-"])
+    async def test_timeout_non_finite_or_garbage_not_written(self, raw):
+        """非有限/非法输入不落盘（不伪装，R21；inf/nan 会破坏严格 JSON 往返）。"""
+        svc = _make_service()
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.start_add()
+        vm.update_name("Cloud")
+        vm.update_model("gpt-4o")
+        vm.update_timeout_seconds(raw)
+
+        assert await vm.save() is True
+
+        conn = svc.save_draft.await_args.args[0]["connections"][0]
+        assert "timeout" not in conn["adapter_options"]
+
+    async def test_encoder_price_only_required_for_encoder_unit(self):
+        """回归：分类费用型仅 encoder 单价可保存——不再要求 input 单价。"""
+        svc = _make_service()
+        vm = _make_vm(svc)
+        await vm.load()
+        vm.start_add()
+        vm.update_name("Local Sentiment")
+        vm.update_adapter_kind("gguf_sentiment")
+        vm.update_encoder_model_path("enc.gguf")
+        vm.update_head_path("head.npz")
+        vm.update_tokenizer_path("tok.json")
+        vm.update_billing_mode("estimate_cost")
+        vm.update_encoder_price("0.8")
+        # 不填 input_price_per_m
+
+        assert vm.validate_draft() == ()
+
+        assert await vm.save() is True
+        conn = svc.save_draft.await_args.args[0]["connections"][0]
+        assert conn["billing"]["pricing_unit"] == "encoder_input_tokens"
+        assert conn["billing"]["encoder_price_per_m"] == "0.8"
+        assert conn["billing"]["input_price_per_m"] is None
+
+    async def test_encoder_price_missing_still_required(self):
+        """分类费用型 estimate_cost 缺 encoder 单价仍拦截（不放松校验）。"""
+        vm = _make_vm(_make_service())
+        await vm.load()
+        vm.start_add()
+        vm.update_name("Local Sentiment")
+        vm.update_adapter_kind("gguf_sentiment")
+        vm.update_encoder_model_path("enc.gguf")
+        vm.update_head_path("head.npz")
+        vm.update_tokenizer_path("tok.json")
+        vm.update_billing_mode("estimate_cost")
+
+        errors = vm.validate_draft()
+        assert "model_connection_error_price_required" in errors
+
+    async def test_litellm_estimate_cost_requires_input_price(self):
+        """llm_tokens 计量路径不回归：estimate_cost 缺 input 单价仍拦截。"""
+        vm = _make_vm(_make_service())
+        await vm.load()
+        vm.start_add()
+        vm.update_name("Cloud")
+        vm.update_model("gpt-4o")
+        vm.update_billing_mode("estimate_cost")
+        vm.update_output_price("2.0")  # 只填输出价
+
+        errors = vm.validate_draft()
+        assert "model_connection_error_price_required" in errors
