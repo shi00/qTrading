@@ -192,6 +192,17 @@ class TestScreenerDaoGetScreeningData:
         assert dao._read_db.call_args.kwargs.get("max_rows") == screener_mod._MAX_SCREENING_RANGE_ROWS
         assert screener_mod._MAX_SCREENING_RANGE_ROWS == 1_500_000
 
+    @pytest.mark.asyncio
+    async def test_range_query_does_not_suppress_read_errors(self):
+        """R21: 区间预载读取失败必须传播，不得吞成空 DataFrame 伪装「区间无数据」。"""
+        from data.persistence.daos.base_dao import DatabaseQueryError
+
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(side_effect=DatabaseQueryError("read boom"))
+        with pytest.raises(DatabaseQueryError, match="read boom"):
+            await dao.get_fundamental_screening_data_range("20240601", "20240615")
+        assert dao._read_db.call_args.kwargs["suppress_errors"] is False
+
 
 class TestScreenerDaoGetPendingPredictions:
     @pytest.mark.asyncio

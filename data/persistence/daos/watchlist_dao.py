@@ -101,12 +101,20 @@ class WatchlistDao(BaseDao):
         return await self._write_db(sql, (ts_code,))
 
     async def get_watchlist(self) -> pd.DataFrame:
-        """查询全部关注列表（按 added_at desc）。"""
+        """查询全部关注列表（按 added_at desc）。
+
+        ``suppress_errors=False``（R21）：读取失败必须传播，不得伪装为「无关注记录」
+        （与 ``StockDao.get_ts_code_map`` 同一口径）——否则 DB 故障在 UI 上表现为
+        空列表，用户误判关注数据丢失。
+        """
         stmt = sa.select(Watchlist).order_by(Watchlist.added_at.desc())
-        return await self._read_db_select(stmt)
+        return await self._read_db_select(stmt, suppress_errors=False)
 
     async def is_in_watchlist(self, ts_code: str) -> bool:
-        """检查是否已关注。"""
+        """检查是否已关注。
+
+        ``suppress_errors=False``（R21）：读取失败传播，不伪装为「未关注」。
+        """
         stmt = sa.select(Watchlist.ts_code).where(Watchlist.ts_code == ts_code)
-        df = await self._read_db_select(stmt)
+        df = await self._read_db_select(stmt, suppress_errors=False)
         return not df.empty

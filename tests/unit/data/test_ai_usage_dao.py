@@ -283,6 +283,27 @@ class TestOwnerConditionalWrites:
         assert "e->>'state' = 'reserved'" in update_sql, "错误预留 ID / 非 reserved 状态必须零派发"
 
     @pytest.mark.asyncio
+    async def test_mark_dispatched_usage_only_keeps_empty_reservations(self):
+        """usage_only（reservation_id=None）全量重写不得把空 reservations 聚合成 NULL。
+
+        ``jsonb_agg`` 对空集返回 NULL，直写会违反 ``ai_invocation.reservations``
+        NOT NULL 约束（usage_only 预留未持久化时的降级派发路径）；
+        ``COALESCE(..., '[]'::jsonb)`` 保证空数组原样保留。
+        """
+        conn = _CaptureConn(results=[None, None, 1])
+        dao = _dao(conn)
+        granted = await dao.mark_dispatched(
+            invocation_id="inv-1",
+            reservation_id=None,
+            owner_session_id="owner-1",
+            owner_epoch=1,
+        )
+        assert granted is True
+        update_sql = " ".join(conn.calls[2][0].split())
+        assert "COALESCE(jsonb_agg(" in update_sql
+        assert "'[]'::jsonb" in update_sql
+
+    @pytest.mark.asyncio
     async def test_insert_attempt_dispatched_idempotent(self):
         """attempt 行建立（§6.2 步骤 4：真正进入执行时）：status=dispatched + ON CONFLICT DO NOTHING。"""
         conn = _CaptureConn(results=[1])
