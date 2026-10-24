@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 import asyncio
 
@@ -90,6 +92,18 @@ class TestGatherForShutdownCleanup:
 
         results = await gather_for_shutdown_cleanup(fail())
         assert isinstance(results[0], RuntimeError)
+
+    @pytest.mark.asyncio
+    async def test_cleanup_failure_log_is_sanitized(self, caplog):
+        """R9: 清理失败日志不得打印 exception 消息中的 URL 凭证明文。"""
+
+        async def fail():
+            raise RuntimeError("GET https://api.example.com/v1?token=abcdef1234567890 failed")
+
+        with caplog.at_level(logging.WARNING, logger="utils.async_utils"):
+            await gather_for_shutdown_cleanup(fail())
+        assert "abcdef1234567890" not in caplog.text
+        assert "token=***" in caplog.text
 
     @pytest.mark.asyncio
     async def test_mixed_cancel_and_exception(self):

@@ -511,6 +511,24 @@ class SchedulerService:
         # D7-3/MINOR-01: 数据就绪 + 当日未预测 + 已过预测时刻时补触发一次（每日至多一次）。
         await self._catch_up_nightly_prediction()
 
+    @staticmethod
+    def _parse_schedule_hm(value: object, default: tuple[int, int]) -> tuple[int, int]:
+        """解析 "HH:MM" 调度配置为 (hour, minute)，非法或越界值回落 default。
+
+        M02a: CronTrigger 对越界值（如 "25:99" / "24:00" / "16:-5"）抛 ValueError，
+        而 ``_schedule_jobs`` 在 ``start()`` 的 try 之外调用、bootstrap 捕获后回滚并
+        重新抛出——用户手改 user_settings.json 的调度时间即可让应用启动失败。
+        此处显式校验范围，保证调度时间配置永不阻断启动。
+        """
+        try:
+            hour_s, minute_s = str(value).split(":")
+            hour, minute = int(hour_s), int(minute_s)
+        except (ValueError, TypeError, AttributeError):
+            return default
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return default
+        return hour, minute
+
     def _schedule_jobs(self):
         """Register jobs with the scheduler"""
         # Only remove business jobs, NOT the config_watchdog
@@ -523,10 +541,7 @@ class SchedulerService:
         # 1. Daily Data Update Job
         # Get scheduled time from config or default to 16:30
         scheduled_time = ConfigHandler.get_auto_update_time() or "16:30"
-        try:
-            hour, minute = map(int, scheduled_time.split(":"))
-        except (ValueError, AttributeError):
-            hour, minute = 16, 30
+        hour, minute = self._parse_schedule_hm(scheduled_time, (16, 30))
 
         self.scheduler.add_job(
             self._run_daily_update,
@@ -539,10 +554,7 @@ class SchedulerService:
         # 2. Nightly AI Prediction Job
         # Task 7.3: 时辰从 ConfigHandler.get_nightly_prediction_time() 读取 (原硬编码 20:30)
         nightly_time = ConfigHandler.get_nightly_prediction_time() or "20:30"
-        try:
-            n_hour, n_minute = map(int, nightly_time.split(":"))
-        except (ValueError, TypeError, AttributeError):
-            n_hour, n_minute = 20, 30
+        n_hour, n_minute = self._parse_schedule_hm(nightly_time, (20, 30))
         # D7-3/MINOR-01: 与 cron 同源记录计划时刻，供看门狗谓词使用。
         self._nightly_hm = (n_hour, n_minute)
 
@@ -556,10 +568,7 @@ class SchedulerService:
 
         # 3. Concept Sync Job (Daily)
         concept_sync_time = ConfigHandler.get_concept_schedule_time() or "18:00"
-        try:
-            dh, dm = map(int, concept_sync_time.split(":"))
-        except (ValueError, TypeError, AttributeError):
-            dh, dm = 18, 0
+        dh, dm = self._parse_schedule_hm(concept_sync_time, (18, 0))
 
         self.scheduler.add_job(
             self._run_concept_sync,
