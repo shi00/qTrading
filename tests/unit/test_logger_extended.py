@@ -651,6 +651,19 @@ class TestFileHandlingMovedToListenerThread:
 
             stop_logging()
 
+    def test_stop_logging_closes_file_handlers(self, tmp_path):
+        """stop_logging 应关闭 listener 内的文件 handler，避免重复 setup 泄漏句柄（R7）。"""
+        from utils.logger import stop_logging
+
+        self._setup(tmp_path)
+        file_handlers = _listener_file_handlers()
+        assert len(file_handlers) == 3
+        assert all(h.stream is not None for h in file_handlers)
+
+        stop_logging()
+
+        assert all(h.stream is None for h in file_handlers)
+
 
 class TestQueueSanitization:
     """OSS G1：经 QueueHandler 链路写盘后脱敏仍生效（R9）。"""

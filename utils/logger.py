@@ -1,4 +1,5 @@
 import atexit
+import contextlib
 import copy
 import json
 import logging
@@ -331,9 +332,16 @@ def stop_logging() -> None:
     """
     global _FILE_QUEUE, _LISTENER
     if _LISTENER is not None:
+        listener = _LISTENER
         try:
-            _LISTENER.stop()
+            listener.stop()
         finally:
+            # QueueListener.stop() 只停止后台线程、不关闭 handler；重复 setup_logging
+            # （测试隔离/进程内重启）会累积未关闭的文件句柄，Windows 下还会锁定
+            # app.log/error.log 影响轮转与清理。此处按「先停线程、再关 handler」关闭。
+            for file_handler in listener.handlers:
+                with contextlib.suppress(Exception):
+                    file_handler.close()
             _LISTENER = None
             _FILE_QUEUE = None
     root = logging.getLogger()
