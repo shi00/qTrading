@@ -50,6 +50,8 @@ class TestNormalizeEgressTarget:
             "ftp://api.example.com",  # 非 http(s) scheme
             "api.example.com",  # 无 scheme
             "https://user@api.example.com",  # userinfo
+            "https://@api.example.com",  # userinfo（空用户名，username == ""）
+            "https://:@api.example.com",  # userinfo（空用户名 + 空密码）
             "https://user:pass@api.example.com",  # userinfo（含密码）
             "https://api.example.com/?x=1",  # query
             "https://api.example.com/v1#frag",  # fragment

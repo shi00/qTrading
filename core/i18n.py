@@ -43,7 +43,7 @@ class I18n:
     _locale: str = DEFAULT_LOCALE
     _listeners: list | None = None
     _initialized: bool = False
-    _strings_cache: ClassVar[dict] = {}
+    _strings_cache: ClassVar[dict[str, dict[str, str]]] = {}
     # CORE-04: 缺失 key 按 locale 隔离（locale → {key, ...}），
     # 防止 A locale 先记录的缺失吞掉 B locale 对同一 key 的后续告警。
     _missing_keys: ClassVar[dict[str, set[str]]] = {}
@@ -63,26 +63,48 @@ class I18n:
         return cls._locales_dir
 
     @classmethod
-    def _load_locale_file(cls, locale: str) -> dict:
+    def _load_locale_file(cls, locale: str) -> dict[str, str]:
         locale_folder = LOCALE_MAP.get(locale, locale)
         file_path = cls._get_locales_dir() / locale_folder / "strings.json"
 
+        # R9: 日志只记 locale 名，不输出绝对路径（可能含用户主目录/安装目录）。
         if not file_path.exists():
-            logger.warning("[I18n] Locale file not found: %s", file_path)
+            logger.warning("[I18n] Locale file not found for locale: %s", locale_folder)
             return {}
 
         try:
             with open(file_path, encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
         except json.JSONDecodeError as e:
-            logger.error("[I18n] Failed to parse locale file %s: %s", file_path, e)
+            logger.error("[I18n] Failed to parse locale file for %s: %s", locale_folder, e)
             return {}
         except Exception as e:
-            logger.error("[I18n] Failed to load locale file %s: %s", file_path, e)
+            # 异常消息可能回显绝对路径，仅记类型名。
+            logger.error("[I18n] Failed to load locale file for %s (%s)", locale_folder, type(e).__name__)
             return {}
 
+        # 资源结构契约：顶层必须是 JSON 对象且值必须是字符串（I18n.get 返回 str）。
+        # 非法条目按缺失处理并丢弃，避免向调用方返回 int/dict 等非 str 值，
+        # 或在 list 等非映射载荷上把 key 误判为已定义。
+        if not isinstance(data, dict):
+            logger.error(
+                "[I18n] Locale file for %s must contain a JSON object, got %s",
+                locale_folder,
+                type(data).__name__,
+            )
+            return {}
+        raw: dict[str, object] = data
+        invalid_count = sum(1 for value in raw.values() if not isinstance(value, str))
+        if invalid_count:
+            logger.error(
+                "[I18n] Dropped %d non-string translation value(s) for %s",
+                invalid_count,
+                locale_folder,
+            )
+        return {key: value for key, value in raw.items() if isinstance(value, str)}
+
     @classmethod
-    def _get_strings(cls, locale: str) -> dict:
+    def _get_strings(cls, locale: str) -> dict[str, str]:
         if locale not in cls._strings_cache:
             cls._strings_cache[locale] = cls._load_locale_file(locale)
         return cls._strings_cache[locale]

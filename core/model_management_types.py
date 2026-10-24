@@ -328,7 +328,9 @@ def normalize_egress_target(api_base: object) -> str | None:
     scheme = parts.scheme.lower()
     if scheme not in ("http", "https"):
         return None
-    if parts.username or parts.password or parts.query or parts.fragment:
+    # `username`/`password` 判空用 is not None：空 userinfo（如 `https://@host`）的
+    # 属性值为 `""` 而非 None，按 docstring「拒绝 userinfo」必须一并拒绝。
+    if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
         return None
     host = parts.hostname
     if not host:
