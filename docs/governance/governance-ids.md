@@ -41,6 +41,7 @@
 | review01-A6 | 两条 MAJOR 结构性循环通过依赖注入消除，不再靠延迟 import 压制 | review01 架构分层与依赖治理 | [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
 | review03-C11 | CacheManager↔BaseDao 循环由中立模块 engine_provider.py 切断 | review03 数据层与持久化 | [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
 | review08-D1 | 新闻抓取两公开方法去重：抽取 _fetch_stock_news_core 共享内核，publish_time 统一为 UTC tz-naive（消除 8h 口径偏差） | review08 数据层与外部依赖 | [news_fetcher.py](../../data/external/news_fetcher.py) | 使用中 |
+| review08-M08 | 宏观 DAO PIT 查询（get_shibor_latest / get_macro_economy_latest）as_of_date 经 _to_db_date 归一化，修复 asyncpg date 编码失败与 AI 宏观上下文静默降级 | review08 数据层与外部依赖（M08 宏观类） | [macro_dao.py](../../data/persistence/daos/macro_dao.py) | 使用中 |
 | D6-1 | utils/scheduler_service → data.domain_services.offline_calendar 日历降级例外（EX-0016） | 本地检视报告（gitignored） | [exceptions.yml](./exceptions.yml) EX-0016 | 使用中 |
 | D6-2 | 同 D6-1（D6-1/D6-2 日历降级修复） | 本地检视报告（gitignored） | [exceptions.yml](./exceptions.yml) EX-0016 | 使用中 |
 | GDR-01 | 补录 utils 横切叶子契约（"R1: utils must not import business layers"）ignore_imports 现存 19 条 R1 例外（EX-0001~EX-0016，含 D6-1/D6-2 日历降级 EX-0016；EX-0019 由 REVIEW-06 TO-04 增补；EX-0020 由 N3-3 优雅停机接入增补；EX-0021 由 UTILS-A-01 补登） | 文档体系检视（GDR 系列） | [exceptions.yml](./exceptions.yml) | 使用中 |

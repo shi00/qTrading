@@ -119,6 +119,12 @@ class MacroDao(BaseDao):
                 t.c.lpr_5y,
             ]
             stmt = sa.select(*cols)
+            # DAT-26: as_of_date（调用方以 8 位 YYYYMMDD 串传入，如 ai_mixin
+            # _normalize_trade_date_for_cache 的产物）在 DAO 边界显式归一化为 date
+            # 对象——SA asyncpg dialect 对 Date 列的 bind_processor 为空透传，
+            # asyncpg date codec 仅接受 date 对象，8 位串会编码失败并被下方
+            # except Exception 降级为空 DataFrame（宏观上下文静默失效）。
+            as_of_date = self._to_db_date(as_of_date)
             if as_of_date is not None:
                 stmt = stmt.where(t.c.record_date <= as_of_date)
             stmt = stmt.order_by(t.c.record_date.desc()).limit(1)
@@ -179,6 +185,9 @@ class MacroDao(BaseDao):
             # DAT-06: publish_date 与 ann_date 同构的可空 PIT 键，两分支显式排除 NULL，
             # 使「NULL 被剔除」成为明写规则，消除 as-of/非 as-of 口径差。
             stmt = stmt.where(t.c.publish_date.is_not(None))
+            # DAT-26: 同 get_shibor_latest——8 位 YYYYMMDD 串在 DAO 边界归一化为
+            # date 对象，避免 asyncpg date codec 编码失败导致回放静默失效。
+            as_of_date = self._to_db_date(as_of_date)
             if as_of_date is not None:
                 stmt = stmt.where(t.c.publish_date <= as_of_date)
             # 返回最多 2 行：月度行（m2/cpi/ppi）与 GDP 行（gdp_yoy/pi_yoy 等）
