@@ -200,6 +200,25 @@ class AIStrategyMixin:
         self._context_builders[name] = builder
         logger.debug("[AIStrategyMixin] Registered context builder: %s", name)
 
+    @staticmethod
+    def _resolve_ui_prompt_override(context: dict) -> str | None:
+        """读取并校验 UI 实时 prompt override（批量与单股重试共用，保证同口径）。
+
+        处理用户点击运行但 Flet textarea 未失焦的场景：读取 ``params.ai_system_prompt``，
+        经 ``prompt_guard.validate_prompt`` 校验失败时拒绝并回退 None（R21：拒绝时记录
+        警告日志，不静默使用无效 override）；校验通过经 ``sanitize_prompt`` 清洗后返回。
+        """
+        ui_prompt_override = context.get("params", {}).get("ai_system_prompt", None)
+        if not ui_prompt_override:
+            return None
+        from utils.prompt_guard import validate_prompt, sanitize_prompt
+
+        is_valid, warning = validate_prompt(ui_prompt_override)
+        if not is_valid:
+            logger.warning("[AIStrategyMixin] User prompt override rejected: %s", warning)
+            return None
+        return sanitize_prompt(ui_prompt_override)
+
     def _note_ai_risk_check_skipped(self, context: dict) -> None:
         """SC-02: AI 实际不运行时声明能力边界（复用 D3-4 warnings 通道）。
 
@@ -375,17 +394,7 @@ class AIStrategyMixin:
         self._ai_unpriced_acknowledged = False
 
         # Extract UI real-time prompt override (handles users clicking Run before blurring Flet textarea)
-        ui_prompt_override = context.get("params", {}).get("ai_system_prompt", None)
-
-        if ui_prompt_override:
-            from utils.prompt_guard import validate_prompt, sanitize_prompt
-
-            is_valid, warning = validate_prompt(ui_prompt_override)
-            if not is_valid:
-                logger.warning("[AIStrategyMixin] User prompt override rejected: %s", warning)
-                ui_prompt_override = None
-            else:
-                ui_prompt_override = sanitize_prompt(ui_prompt_override)
+        ui_prompt_override = self._resolve_ui_prompt_override(context)
 
         # --- Guard: Backtest AI Disabled? ---
         # 位于批次入口轨道判定之前：_disable_ai 是调用方显式禁用（AI 未被请求），
@@ -714,7 +723,23 @@ class AIStrategyMixin:
                         )
                         return [], False
 
-            news_tasks = {code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes}
+            # M16-F3: 逐个 create_task 而非 dict comprehension——创建中途异常/取消
+            # （含 CancelledError，R2）时已创建 task 的引用不会随 comprehension 丢弃，
+            # 显式 cancel 防孤儿 HTTP task 泄漏（F4-ST-001 同语义覆盖创建失败场景）；
+            # 并同步清空映射：analyze_one 对「code 不在 news_tasks」降级为无 news 继续
+            # 分析，若保留已取消 task 在映射中，await 它会触发 CancelledError re-raise
+            # 路径导致整批分析被取消（回归防护见 test_news_task_creation_failure_*）。
+            try:
+                for _code in all_ts_codes:
+                    news_tasks[_code] = asyncio.create_task(bg_fetch_news(_code))
+            except BaseException:
+                _pending = list(news_tasks.values())
+                news_tasks.clear()
+                for _t in _pending:
+                    _t.cancel()
+                if _pending:
+                    await asyncio.gather(*_pending, return_exceptions=True)
+                raise
         except Exception as e:
             log_classified(
                 logger,
@@ -1308,6 +1333,10 @@ class AIStrategyMixin:
                 prefetched,
                 history_df=hist_df,
                 news=news_list,
+                # D4-M2 配套（M16-F1）：重试与批量共用同一 prompt override 读取/校验，
+                # 批量分析应用了用户自定义系统 prompt 时，单股重试保持同口径（否则
+                # 同一批次内 AI 结论口径漂移）。
+                ui_prompt_override=self._resolve_ui_prompt_override(context),
                 vol_ratio_threshold=context.get("params", {}).get("vol_ratio_threshold", 1.7),
             )
             if res is None:

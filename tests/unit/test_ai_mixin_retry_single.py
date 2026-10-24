@@ -263,6 +263,75 @@ class TestRetrySingleSuccessPath:
             await s.retry_single("贵州茅台", context)
 
 
+class TestRetrySinglePromptOverride:
+    """M16-F1: retry_single 与批量路径共用 prompt override 读取/校验（口径一致）。
+
+    批量 run_ai_analysis 读取 context.params.ai_system_prompt 并经 prompt_guard
+    校验清洗后传入 _mixin_analyze_single；重试此前丢失该 override（回退默认
+    prompt），导致同批次 AI 结论口径漂移。修复后重试共用 _resolve_ui_prompt_override。
+    """
+
+    @pytest.mark.asyncio
+    async def test_prompt_override_passed_to_analyze_single(self):
+        s = ConcreteStrategy()
+        s._last_candidates_df = _make_candidates_df()
+        s._last_prefetched = _make_prefetched()
+        context = {
+            "data_processor": MagicMock(),
+            "params": {"ai_system_prompt": "自定义系统提示"},
+        }
+        analyze_single = AsyncMock(return_value={"score": 75, "summary": "ok"})
+
+        with (
+            patch("strategies.ai_mixin.AIService"),
+            patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
+            patch("utils.prompt_guard.sanitize_prompt", return_value="自定义系统提示[已清洗]") as mock_sanitize,
+            patch.object(s, "_mixin_analyze_single", new=analyze_single),
+        ):
+            await s.retry_single("贵州茅台", context)
+
+        mock_sanitize.assert_called_once_with("自定义系统提示")
+        assert analyze_single.call_args.kwargs["ui_prompt_override"] == "自定义系统提示[已清洗]"
+
+    @pytest.mark.asyncio
+    async def test_invalid_prompt_override_rejected_to_none(self):
+        s = ConcreteStrategy()
+        s._last_candidates_df = _make_candidates_df()
+        s._last_prefetched = _make_prefetched()
+        context = {
+            "data_processor": MagicMock(),
+            "params": {"ai_system_prompt": "恶意注入"},
+        }
+        analyze_single = AsyncMock(return_value={"score": 75, "summary": "ok"})
+
+        with (
+            patch("strategies.ai_mixin.AIService"),
+            patch("utils.prompt_guard.validate_prompt", return_value=(False, "unsafe")),
+            patch("utils.prompt_guard.sanitize_prompt") as mock_sanitize,
+            patch.object(s, "_mixin_analyze_single", new=analyze_single),
+        ):
+            await s.retry_single("贵州茅台", context)
+
+        mock_sanitize.assert_not_called()
+        assert analyze_single.call_args.kwargs["ui_prompt_override"] is None
+
+    @pytest.mark.asyncio
+    async def test_missing_params_passes_none(self):
+        s = ConcreteStrategy()
+        s._last_candidates_df = _make_candidates_df()
+        s._last_prefetched = _make_prefetched()
+        context = {"data_processor": MagicMock()}
+        analyze_single = AsyncMock(return_value={"score": 75, "summary": "ok"})
+
+        with (
+            patch("strategies.ai_mixin.AIService"),
+            patch.object(s, "_mixin_analyze_single", new=analyze_single),
+        ):
+            await s.retry_single("贵州茅台", context)
+
+        assert analyze_single.call_args.kwargs["ui_prompt_override"] is None
+
+
 class TestRetrySingleNewsTaskReuse:
     """L752-764: news_task 复用分支（cancelled/done/normal/none）。"""
 

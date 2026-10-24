@@ -460,6 +460,20 @@ class TestInstitutionalStrategy:
         text_missing = strategy.get_ai_context({"ts_code": "000001.SZ"})
         assert "N/A" in text_missing
 
+    def test_get_ai_context_nan_net_amount_shows_na(self) -> None:
+        """M16-F2：net_amount 为 NaN（LEFT JOIN 缺口常见）时不把 "nan" 泄漏进 AI prompt。
+
+        旧实现 ``net not in (None, "")`` 对 NaN 判真，输出 "净买入 nan 万元"；
+        修复后经 safe_float 归一为 "N/A"（R21：不把缺失值伪装成数值）。
+        """
+        strategy = InstitutionalStrategy()
+        text = strategy.get_ai_context({"net_amount": float("nan")})
+        assert "nan" not in text.lower()
+        assert "N/A" in text
+        # 非数值字符串同样归一为 N/A，不抛异常
+        text_bad = strategy.get_ai_context({"net_amount": "not-a-number"})
+        assert "N/A" in text_bad
+
     def test_get_parameters_returns_one_param(self) -> None:
         strategy = InstitutionalStrategy()
         params = strategy.get_parameters()
