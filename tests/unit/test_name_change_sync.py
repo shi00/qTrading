@@ -121,9 +121,9 @@ class TestNameChangeSyncErrors:
         """
         strategy = _make_strategy()
         strategy.context.api.get_namechange = AsyncMock(side_effect=EngineDisposedError("disposed"))
-        # R5 传播契约仅需验证异常类型穿透
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy._run_impl()
+        assert "disposed" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_permission_denied_records_skipped(self):
