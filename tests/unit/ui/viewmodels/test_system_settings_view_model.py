@@ -239,6 +239,16 @@ class TestSaveLogLevel:
         assert result is True
         mock_config_handler.set_log_level.assert_called_once_with("DEBUG")
 
+    @pytest.mark.asyncio
+    async def test_save_log_level_failure_returns_false(self, mock_config_handler, mock_thread_pool):
+        """落盘失败 (set_typed 返回 False) 时不伪装成功, 且不修改运行时日志级别。"""
+        mock_config_handler.set_log_level.return_value = False
+        with patch("utils.logger.update_log_level") as mock_update:
+            vm = _make_vm(mock_config_handler)
+            result = await vm.save_log_level("DEBUG")
+        assert result is False
+        mock_update.assert_not_called()
+
 
 # --- save_concurrency ---
 
