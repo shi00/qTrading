@@ -427,7 +427,13 @@ TABLE_DEFINITIONS = {
                 "columns": ["trade_date", "strategy_name", "ts_code", "run_id"],
             },
         ],
-        "indexes": ["idx_sh_date_strategy", "idx_sh_date_code", "idx_sh_prediction_result", "idx_sh_pending"],
+        "indexes": [
+            "idx_sh_date_strategy",
+            "idx_sh_date_code",
+            "idx_sh_prediction_result",
+            "idx_sh_pending",
+            "idx_sh_params_gin",
+        ],
     },
     "screening_thinking": {
         "alias": "tab_screening_thinking",
@@ -605,6 +611,11 @@ def validate_schema_definitions(strict: bool = False):
 
     logger = logging.getLogger(__name__)
 
+    # 严格门禁判定前置到 try 外：否则 try 内抛出的非 ValueError 异常（如导入/反射失败）
+    # 在 except 分支只能读到"未执行到赋值"的 is_strict，环境变量门禁（CI 用
+    # STRICT_SCHEMA_GATE=1）会静默降级为仅记录日志。
+    is_strict = strict or os.environ.get("STRICT_SCHEMA_GATE") == "1"
+
     try:
         from data.persistence.models import Base
 
@@ -634,7 +645,6 @@ def validate_schema_definitions(strict: bool = False):
             len(db_tables),
         )
 
-        is_strict = strict or os.environ.get("STRICT_SCHEMA_GATE") == "1"
         if is_strict and errors:
             raise ValueError("Schema inconsistencies found:\n" + "\n".join(errors))
 
@@ -643,5 +653,5 @@ def validate_schema_definitions(strict: bool = False):
         raise
     except Exception as e:
         logger.error("[DataDict] ORM validation failed: %s", safe_error(e))
-        if strict:
+        if is_strict:
             raise

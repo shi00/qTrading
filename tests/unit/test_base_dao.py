@@ -1204,6 +1204,40 @@ class TestComputedColsFromMetadata:
         assert "ts_code" in cols, "PK col should remain"
 
 
+class TestGetModelColumnsExcludeSemantics:
+    """get_model_columns 的 exclude 与默认时间戳排除必须取并集。
+
+    回归：`save_pledge_stat` 只传 exclude={"ann_date"}，旧实现用调用方集合整体替换
+    默认排除集，导致 updated_at/created_at 进入 upsert 列表，缺失时填 None，
+    覆盖 server_default 使插入行时间戳为 NULL。
+    """
+
+    def test_explicit_exclude_unions_with_default_timestamps(self):
+        from data.persistence.models import PledgeStat, get_model_columns
+
+        cols = set(get_model_columns(PledgeStat, exclude={"ann_date"}))
+        assert "ann_date" not in cols, "调用方 exclude 列必须被排除"
+        assert "updated_at" not in cols, "默认排除的 updated_at 不应因显式 exclude 而回流"
+        assert "created_at" not in cols, "默认排除的 created_at 不应因显式 exclude 而回流"
+        assert "ts_code" in cols
+
+    def test_empty_exclude_keeps_default_timestamps(self):
+        from data.persistence.models import PledgeStat, get_model_columns
+
+        cols = set(get_model_columns(PledgeStat, exclude=set()))
+        assert "updated_at" not in cols
+        assert "created_at" not in cols
+
+    def test_explicit_exclude_can_exclude_extra_columns(self):
+        from data.persistence.models import ScreeningHistory, get_model_columns
+
+        cols = set(get_model_columns(ScreeningHistory, exclude={"id", "updated_at", "created_at"}))
+        assert "id" not in cols
+        assert "updated_at" not in cols
+        assert "created_at" not in cols
+        assert "run_id" in cols
+
+
 class TestAiScoreColumnType:
     def test_ai_score_is_numeric(self):
         import sqlalchemy as sa

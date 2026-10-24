@@ -259,6 +259,25 @@ class TestValidateSchemaDefinitionsStrict:
         validate_schema_definitions(strict=True)
 
 
+@patch.dict(os.environ, {"STRICT_SCHEMA_GATE": "1"})
+class TestValidateSchemaDefinitionsStrictEnv:
+    """环境变量严格门禁（CI 使用）必须对非 ValueError 异常同样上抛。"""
+
+    @patch("data.persistence.models.Base")
+    def test_strict_env_raises_on_orm_validation_failure(self, mock_base):
+        mock_base.metadata.tables.keys.side_effect = RuntimeError("simulated reflection failure")
+
+        with pytest.raises(RuntimeError, match="simulated reflection failure"):
+            validate_schema_definitions()
+
+    @patch("data.persistence.models.Base")
+    def test_strict_env_raises_on_import_error(self, mock_base):
+        mock_base.metadata.tables.keys.side_effect = ImportError("simulated import failure")
+
+        with pytest.raises(ImportError, match="simulated import failure"):
+            validate_schema_definitions()
+
+
 class TestDataDictionaryConstants:
     def test_common_columns_has_ts_code(self):
         assert "ts_code" in COMMON_COLUMNS

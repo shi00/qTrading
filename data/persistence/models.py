@@ -1148,9 +1148,12 @@ class AiUsageMonthly(Base):
 
 
 def get_model_columns(model_class: type, exclude: set[str] | None = None) -> list[str]:
-    exclude = exclude or {"updated_at", "created_at"}
+    # 默认排除的时间戳列与调用方 exclude 取并集（而非整体替换）：仅传 exclude={"ann_date"}
+    # 的 DAO（如 save_pledge_stat）曾把 updated_at/created_at 也写进 upsert 列表，
+    # 缺失时填 None，覆盖 server_default 导致插入行时间戳为 NULL。
+    excluded = {"updated_at", "created_at"} | (exclude or set())
     return [
-        c.name for c in model_class.__table__.columns if c.name not in exclude and not c.info.get("computed", False)
+        c.name for c in model_class.__table__.columns if c.name not in excluded and not c.info.get("computed", False)
     ]
 
 
