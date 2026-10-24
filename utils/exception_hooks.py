@@ -145,7 +145,10 @@ def _format_task_stack(context: dict) -> str:
                 pass
     if hasattr(obj, "get_stack"):
         for frame in obj.get_stack():
-            fname = frame.f_code.co_filename
+            # R9：栈帧文件名是完整路径（含系统用户名等个人信息）。stack_hint 作为消息
+            # 文本由 logger.critical 记录，不经过 _SanitizingFormatter.formatException 的
+            # 路径脱敏，须在此显式经 sanitize_paths 处理（与异常堆栈口径一致）。
+            fname = DataSanitizer.sanitize_paths(frame.f_code.co_filename)
             lineno = frame.f_lineno
             qualname = frame.f_code.co_qualname
             lines.append(f'  File "{fname}", line {lineno}, in {qualname}')

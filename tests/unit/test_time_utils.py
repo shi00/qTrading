@@ -126,6 +126,26 @@ class TestToYyyymmddStr:
         assert to_yyyymmdd_str(None) is None
         assert to_yyyymmdd_str("") is None
 
+    def test_iso_t_separator_normalized(self):
+        """ISO-8601 'T' 分隔形式应归一为 YYYYMMDD（旧实现返回原始串，to_date 再报错）。"""
+        assert to_yyyymmdd_str("2024-03-15T10:00:00") == "20240315"
+        assert to_yyyymmdd_str("2024-03-15T10:00:00+08:00") == "20240315"
+
+
+class TestParseDateIso:
+    def test_iso_t_naive_becomes_cst(self):
+        result = parse_date("2024-03-15T10:00:00")
+        assert result.hour == 10
+        assert result.tzinfo is not None
+        assert result.utcoffset() == datetime.timedelta(hours=8)
+
+    def test_iso_t_with_offset_converted_to_cst(self):
+        """带 +00:00 偏移的 ISO 时间应换算到 CST（00:30 UTC -> 08:30 CST）。"""
+        result = parse_date("2024-03-15T00:30:00+00:00")
+        assert result.hour == 8
+        assert result.minute == 30
+        assert result.utcoffset() == datetime.timedelta(hours=8)
+
 
 class TestToDate:
     def test_datetime_input(self):

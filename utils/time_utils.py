@@ -26,6 +26,12 @@ def parse_date(date_input, fmt="%Y%m%d") -> datetime.datetime:
     if isinstance(date_input, datetime.date):
         return datetime.datetime.combine(date_input, datetime.time()).replace(tzinfo=CST_TZ)
     date_str = str(date_input)
+    # ISO-8601 的 "T" 分隔形式（如 2024-03-15T10:00:00、带 +08:00 偏移）无法由下方
+    # 按长度选出的 strptime 格式解析：旧实现直接抛 ValueError，导致 to_yyyymmdd_str
+    # 回退返回原始串（非 YYYYMMDD），to_date 再以 "Unsupported date value" 报错。
+    if "T" in date_str:
+        parsed = datetime.datetime.fromisoformat(date_str)
+        return parsed.replace(tzinfo=CST_TZ) if parsed.tzinfo is None else parsed.astimezone(CST_TZ)
     if len(date_str) == 19 and "-" in date_str:
         fmt = "%Y-%m-%d %H:%M:%S"
     elif len(date_str) == 10 and "-" in date_str:

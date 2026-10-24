@@ -315,6 +315,27 @@ class TestFormatTaskStack:
 
         asyncio.run(_run())
 
+    def test_frame_file_paths_sanitized(self) -> None:
+        """栈帧文件路径须脱敏为 <PATH>（R9：stack_hint 作为消息文本不经过 formatException）。"""
+
+        class _FakeCode:
+            co_filename = r"C:\Users\alice\project\app.py"
+            co_qualname = "mod.func"
+
+        class _FakeFrame:
+            f_code = _FakeCode()
+            f_lineno = 7
+
+        class _FakeTask:
+            def get_stack(self):
+                return [_FakeFrame()]
+
+        hint = _format_task_stack({"task": _FakeTask()})
+        assert "<PATH>" in hint
+        assert "alice" not in hint
+        assert "app.py" not in hint
+        assert "mod.func" in hint
+
     def test_cancelled_error_from_exception_does_not_escape(self) -> None:
         """obj.exception() 抛 CancelledError 时不应逃逸钩子 (防护竞态窗口).
 
