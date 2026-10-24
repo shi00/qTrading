@@ -18,6 +18,7 @@ import logging
 from dataclasses import dataclass, field
 
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,10 @@ class EgressAuditViewModel(ObservableViewModelMixin[EgressAuditState]):
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:
-            logger.debug("[EgressAuditVM] Failed to load egress aggregates: %s", ex)
+            logger.debug(
+                "[EgressAuditVM] Failed to load egress aggregates: %s",
+                DataSanitizer.sanitize_error(ex),  # R9: 扫描异常可能含用户目录路径
+            )
             self._set_state(
                 today_rows=[],
                 month_rows=[],

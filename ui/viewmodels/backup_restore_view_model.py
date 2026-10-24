@@ -104,7 +104,10 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
         - 异常时设 error_message (R2: CancelledError 自动透传)
         """
         if output_path.exists():  # noqa: ASYNC240  # 备份前一次性存在性探测，防误覆盖（非交互热路径）
-            logger.warning("[BackupRestoreVM] backup file already exists, skip: %s", output_path)
+            logger.warning(
+                "[BackupRestoreVM] backup file already exists, skip: %s",
+                DataSanitizer.sanitize_error(str(output_path)),  # R9: 路径可能含用户名等敏感信息
+            )
             self._set_state(
                 error_message=Message("backup_failed"),
                 is_backing_up=False,
@@ -140,7 +143,10 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
         - 清空之前的 error_message
         """
         if not input_path.exists():  # noqa: ASYNC240  # restore 前一次性存在性校验（非交互热路径）
-            logger.warning("[BackupRestoreVM] restore file not found: %s", input_path)
+            logger.warning(
+                "[BackupRestoreVM] restore file not found: %s",
+                DataSanitizer.sanitize_error(str(input_path)),  # R9: 路径可能含用户名等敏感信息
+            )
             self._set_state(
                 error_message=Message("restore_failed"),
                 confirm_state="idle",

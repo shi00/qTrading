@@ -546,19 +546,27 @@ class TestDataSourceViewModelFullDailySync:
         assert bound_vm.state.active_key is None
 
     async def test_daily_sync_permission_summary_exception_logged_as_debug(
-        self, bound_vm, snapshots, mock_processor, mock_task_manager, mock_cache
+        self, bound_vm, snapshots, mock_processor, mock_task_manager, mock_cache, caplog
     ):
         """L405-406: get_sync_status 抛普通 Exception 时降级为 debug 日志, 不影响主流程."""
+        import logging
+
         mock_processor.run_daily_update = AsyncMock(return_value=SyncResult(added=10))
-        mock_cache.sync_dao.get_sync_status = AsyncMock(side_effect=RuntimeError("sync_status query failed"))
+        mock_cache.sync_dao.get_sync_status = AsyncMock(
+            side_effect=RuntimeError("query failed: postgresql://user:leaked_pw@db:5432/astock")
+        )
 
         bound_vm.execute_full_daily_sync()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
-        await factory(task_id="task_123")
+        with caplog.at_level(logging.DEBUG, logger="ui.viewmodels.data_source_view_model"):
+            await factory(task_id="task_123")
 
         # 主流程不应被中断, 仍发射成功 snack
         _assert_snack(bound_vm, snapshots, "snack_full_sync_done_simple", "success")
         assert bound_vm.state.is_syncing is False
+        # R9: debug 日志中的 DB 异常消息经 DataSanitizer 脱敏, 连接串凭证不泄露
+        assert "leaked_pw" not in caplog.text
+        assert "user:***@db" in caplog.text
 
     async def test_daily_sync_partial_optional_emits_warning_snack(
         self, bound_vm, snapshots, mock_processor, mock_task_manager, mock_cache
