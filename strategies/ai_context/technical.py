@@ -73,7 +73,11 @@ def _compute_technical_structure(history_df, vol_ratio_threshold: float = 1.7) -
             vol_10d = df["vol"].tail(10).mean()
             if vol_10d > 0:
                 vol_ratio = vol_5d / vol_10d
-                if vol_ratio < 0.7:
+                # F7(M17)：vol 尾 5 日全 NaN 时 vol_ratio 为 NaN，NaN 不满足任何比较
+                # 分支会误落入「量能平稳」并输出 "nan" 比值；显式降级为无数据占位。
+                if pd.isna(vol_ratio):
+                    result["volume_trend"] = I18n.get("ai_vol_no_data")
+                elif vol_ratio < 0.7:
                     result["volume_trend"] = (
                         f"{I18n.get('ai_vol_shrink')} ({I18n.get('ai_5d_10d_ratio')}: {vol_ratio:.2f})"
                     )

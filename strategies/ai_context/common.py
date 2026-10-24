@@ -37,8 +37,14 @@ def _build_stale_section(
 
     client = TushareClient()
     if not client.is_api_covered_by_tier(api_name):
-        last_update = (
-            pd.to_datetime(df[date_column].max()).strftime("%Y-%m-%d") if date_column in df.columns else "未知"
-        )
+        # M17-F1：date_column 列存在但全 NaN/None（或含非法值）时 max() 为 NaT/None，
+        # pd.to_datetime(...).strftime 会抛 ValueError 并炸掉整段子段落（调用方外层
+        # except 会丢弃全部段落）。errors="coerce" + pd.notna 双防御保证 stale 分支
+        # 永不因日期列脏数据抛错，优雅降级为「未知」。
+        last_update = "未知"
+        if date_column in df.columns:
+            max_dt = pd.to_datetime(df[date_column].max(), errors="coerce")
+            if pd.notna(max_dt):
+                last_update = max_dt.strftime("%Y-%m-%d")
         return f"【数据停止更新，最后更新：{last_update}】\n" + formatter(df)
     return formatter(df)

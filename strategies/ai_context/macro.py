@@ -133,16 +133,19 @@ async def _build_macro_context(cache: typing.Any, as_of_date: str | None = None)
             shibor_latest = shibor.iloc[0]
 
             shibor_lines: list[str] = []
+            # M17-F5：shibor_daily 数值列缺失记为 NaN（is not None 拦不住，f"{nan:.2f}%"
+            # 会输出 "nan%"），object 列缺失记为 None（f"{None:.2f}" 抛 TypeError 会炸掉
+            # 整个宏观文本）。与其他段落（m2/cpi/ppi/gdp 用 pd.notna）对齐，统一 pd.notna 防御。
             on_rate = shibor_latest.get("on_rate")
-            if on_rate is not None:
+            if pd.notna(on_rate):
                 shibor_lines.append(f"- {I18n.get('macro_shibor_overnight')}: {on_rate:.2f}%")
 
             w1_rate = shibor_latest.get("week_1")
-            if w1_rate is not None:
+            if pd.notna(w1_rate):
                 shibor_lines.append(f"- {I18n.get('macro_shibor_1w')}: {w1_rate:.2f}%")
 
             m3_rate = shibor_latest.get("month_3")
-            if m3_rate is not None:
+            if pd.notna(m3_rate):
                 shibor_lines.append(f"- {I18n.get('macro_shibor_3m')}: {m3_rate:.2f}%")
 
             if shibor_lines:
@@ -163,11 +166,11 @@ async def _build_macro_context(cache: typing.Any, as_of_date: str | None = None)
             # shibor_lpr 在 points_120 覆盖内，正常注入（无 stale 标注）
             lpr_lines: list[str] = []
             lpr_1y = shibor_latest.get("lpr_1y")
-            if lpr_1y is not None:
+            if pd.notna(lpr_1y):
                 lpr_lines.append(f"- {I18n.get('macro_lpr_1y')}: {lpr_1y:.2f}%")
 
             lpr_5y = shibor_latest.get("lpr_5y")
-            if lpr_5y is not None:
+            if pd.notna(lpr_5y):
                 lpr_lines.append(f"- {I18n.get('macro_lpr_5y')}: {lpr_5y:.2f}%")
 
             if lpr_lines:

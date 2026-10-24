@@ -59,12 +59,14 @@ async def _build_auxiliary_data_text(
             audit_df = await cache.get_fina_audit(ts_code, as_of_date=as_of_date)
 
         if audit_df is not None and not audit_df.empty:
-            latest_audit = audit_df.iloc[0]
-            audit_result = latest_audit.get("audit_result", I18n.get("ai_unknown"))
-            lines.append(f"- {I18n.get('ai_audit_opinion')}: {audit_result}")
-            has_data = True
-            if labels_out is not None:
-                labels_out.append("ai_label_audit")
+            # M17-F10：audit_result 为 None/NaN/空串时该行无信息量（输出「审计意见: nan」
+            # 或「未知」均为噪音），跳过该段而非注入占位文案。
+            audit_result = audit_df.iloc[0].get("audit_result")
+            if audit_result is not None and not pd.isna(audit_result) and str(audit_result).strip():
+                lines.append(f"- {I18n.get('ai_audit_opinion')}: {audit_result}")
+                has_data = True
+                if labels_out is not None:
+                    labels_out.append("ai_label_audit")
 
         if prefetched and ts_code in prefetched and "mainbz" in prefetched[ts_code]:
             top_business = prefetched[ts_code]["mainbz"]
@@ -73,16 +75,23 @@ async def _build_auxiliary_data_text(
         if top_business is not None and not top_business.empty:
             total_sales = top_business["bz_sales"].sum()
             if total_sales > 0:
+                # M17-F4：bz_sales 为 NaN/非正的行占比无意义（f"{nan:.1f}%" 会输出 "nan%"），
+                # 跳过该行；bz_item 缺失时用 i18n 占位而非 str(nan)。全部无效时不注入空段落。
                 biz_items = []
                 for row in top_business.head(3).to_dict("records"):
-                    bz_name = row.get("bz_item", I18n.get("ai_unknown"))
-                    bz_sales = row.get("bz_sales", 0)
-                    ratio = (bz_sales / total_sales * 100) if total_sales > 0 else 0
+                    bz_sales = row.get("bz_sales")
+                    if bz_sales is None or pd.isna(bz_sales) or bz_sales <= 0:
+                        continue
+                    bz_name = row.get("bz_item")
+                    if bz_name is None or pd.isna(bz_name):
+                        bz_name = I18n.get("ai_unknown")
+                    ratio = bz_sales / total_sales * 100
                     biz_items.append(f"{bz_name}({ratio:.1f}%)")
-                lines.append(f"- {I18n.get('ai_main_business')}: {', '.join(biz_items)}")
-                has_data = True
-                if labels_out is not None:
-                    labels_out.append("ai_label_main_business")
+                if biz_items:
+                    lines.append(f"- {I18n.get('ai_main_business')}: {', '.join(biz_items)}")
+                    has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_main_business")
 
         if prefetched and ts_code in prefetched and "dividend" in prefetched[ts_code]:
             dividend_df = prefetched[ts_code]["dividend"]
@@ -90,16 +99,20 @@ async def _build_auxiliary_data_text(
             dividend_df = await cache.get_dividend(ts_code, as_of_date=as_of_date)
 
         if dividend_df is not None and not dividend_df.empty:
-            recent_div = dividend_df.head(3)
+            # M17-F10：end_date/div_proc 任一缺失的记录无法构成有意义的分红描述
+            # （str(nan)[:4] → "nan年度nan"），跳过该条目；全部无效时不注入段落。
             div_items = []
-            for row in recent_div.to_dict("records"):
-                end_date = str(row.get("end_date", ""))[:4]
-                div_proc = row.get("div_proc", "")
-                div_items.append(f"{end_date}{I18n.get('ai_year_suffix')}{div_proc}")
-            lines.append(f"- {I18n.get('ai_recent_dividend')}: {', '.join(div_items)}")
-            has_data = True
-            if labels_out is not None:
-                labels_out.append("ai_label_dividend")
+            for row in dividend_df.head(3).to_dict("records"):
+                end_date = row.get("end_date")
+                div_proc = row.get("div_proc")
+                if end_date is None or pd.isna(end_date) or div_proc is None or pd.isna(div_proc):
+                    continue
+                div_items.append(f"{str(end_date)[:4]}{I18n.get('ai_year_suffix')}{div_proc}")
+            if div_items:
+                lines.append(f"- {I18n.get('ai_recent_dividend')}: {', '.join(div_items)}")
+                has_data = True
+                if labels_out is not None:
+                    labels_out.append("ai_label_dividend")
 
         if prefetched and ts_code in prefetched and "pledge" in prefetched[ts_code]:
             pledge_df = prefetched[ts_code]["pledge"]
@@ -181,19 +194,33 @@ async def _build_auxiliary_data_text(
             holders_df = await cache.get_top10_holders(ts_code, as_of_date=as_of_date)
 
         if holders_df is not None and not holders_df.empty:
+            # M17-F2/F10：ann_date/end_date 均缺失或全 NaN 时无法定位「最新期」
+            # （缺列时原实现 KeyError 会炸掉整个辅助文本；全 NaN 时 NaN==NaN 恒 False
+            # 过滤结果为空），两者都属「无法判定 as-of」，跳过该段而非崩溃。
             if "ann_date" in holders_df.columns and holders_df["ann_date"].notna().any():
                 latest_holders = holders_df[holders_df["ann_date"] == holders_df["ann_date"].max()]
-            else:
+            elif "end_date" in holders_df.columns:
                 latest_holders = holders_df[holders_df["end_date"] == holders_df["end_date"].max()]
+            else:
+                latest_holders = holders_df.head(0)
             if not latest_holders.empty:
-                top_holder = latest_holders.iloc[0].get("holder_name", I18n.get("ai_unknown"))
-                top_ratio = latest_holders.iloc[0].get("hold_ratio", 0)
-                lines.append(
-                    f"- {I18n.get('ai_top_holder')}: {top_holder} ({I18n.get('ai_holder_share')}{top_ratio:.2f}%)"
-                )
-                has_data = True
-                if labels_out is not None:
-                    labels_out.append("ai_label_top_holder")
+                # M17-F2：holder_name/hold_ratio 为 NaN 时 str(nan)/f"{nan:.2f}%" 会输出
+                # "nan" 文案；字段缺失时 get() 默认值不会生效（键存在值为 NaN）。
+                # 任一字段有效即保留该行，无效字段降级为 N/A；两者皆无信息量则跳过。
+                top_row = latest_holders.iloc[0]
+                top_holder = top_row.get("holder_name")
+                top_ratio = top_row.get("hold_ratio")
+                holder_valid = top_holder is not None and pd.notna(top_holder)
+                ratio_valid = top_ratio is not None and pd.notna(top_ratio)
+                if holder_valid or ratio_valid:
+                    holder_str = str(top_holder) if holder_valid else "N/A"
+                    ratio_str = f"{top_ratio:.2f}%" if ratio_valid else "N/A"
+                    lines.append(
+                        f"- {I18n.get('ai_top_holder')}: {holder_str} ({I18n.get('ai_holder_share')}{ratio_str})"
+                    )
+                    has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_top_holder")
 
         if prefetched and ts_code in prefetched and "holdernumber" in prefetched[ts_code]:
             holder_num = prefetched[ts_code]["holdernumber"]
@@ -207,7 +234,10 @@ async def _build_auxiliary_data_text(
                 latest = holder_num.iloc[0]
             curr_num = latest.get("holder_num", 0)
             change_pct = latest.get("holder_num_ratio")
-            if curr_num:
+            # M17-F3：curr_num 为 NaN 时原 `if curr_num:` 因 NaN 为 truthy 而进入
+            # int(nan) → ValueError，炸掉整个辅助文本；显式 notna + >0 拦截（0 与
+            # 原语义一致：无户数为 0 不展示）。
+            if pd.notna(curr_num) and curr_num > 0:
                 if change_pct is not None and not pd.isna(change_pct):
                     if change_pct < -5:
                         trend = f"↓ {I18n.get('ai_holder_concentrate')}"
