@@ -272,27 +272,31 @@ class TestMacroDaoErrorPropagation:
     @pytest.mark.asyncio
     async def test_get_shibor_latest_propagates_cancelled_error(self):
         dao = MacroDao(MagicMock(spec=AsyncEngine))
-        dao._read_db_select = AsyncMock(side_effect=asyncio.CancelledError())
-        with pytest.raises(asyncio.CancelledError):
+        cancel_err = asyncio.CancelledError()
+        dao._read_db_select = AsyncMock(side_effect=cancel_err)
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await dao.get_shibor_latest()
+        assert exc_info.value is cancel_err  # R2: 取消信号必须原样传播同一实例，不可吞没或包装
 
     @pytest.mark.asyncio
     async def test_get_shibor_latest_propagates_engine_disposed(self):
         dao = MacroDao(MagicMock(spec=AsyncEngine))
         dao._read_db_select = AsyncMock(side_effect=EngineDisposedError("disposed"))
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError, match="disposed"):
             await dao.get_shibor_latest()
 
     @pytest.mark.asyncio
     async def test_get_macro_economy_latest_propagates_cancelled_error(self):
         dao = MacroDao(MagicMock(spec=AsyncEngine))
-        dao._read_db_select = AsyncMock(side_effect=asyncio.CancelledError())
-        with pytest.raises(asyncio.CancelledError):
+        cancel_err = asyncio.CancelledError()
+        dao._read_db_select = AsyncMock(side_effect=cancel_err)
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await dao.get_macro_economy_latest()
+        assert exc_info.value is cancel_err  # R2: 取消信号必须原样传播同一实例，不可吞没或包装
 
     @pytest.mark.asyncio
     async def test_get_macro_economy_latest_propagates_engine_disposed(self):
         dao = MacroDao(MagicMock(spec=AsyncEngine))
         dao._read_db_select = AsyncMock(side_effect=EngineDisposedError("disposed"))
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError, match="disposed"):
             await dao.get_macro_economy_latest()
