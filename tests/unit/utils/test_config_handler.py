@@ -857,6 +857,31 @@ class TestF10StartupPreserveCorruption:
         cfg_mod.ConfigHandler._clear_cache()
         assert cfg_mod.ConfigHandler.load_config()["strategy_presets_oversold"] == presets
 
+    def test_ensure_defaults_preserves_runtime_extension_keys(self, isolated_config):
+        """运行期扩展键（非 AppConfig 字段）跨启动保留，不得被未知键清理删除。
+
+        回归：ensure_defaults 仅豁免 ai_strategy_prompt_ / strategy_presets_ 前缀；
+        ai_news_max_concurrent / llm_recent_selections / local_model_sha256(_path)
+        经 AppConfig extra="allow" 落盘但不在 DEFAULT_CONFIG 键集内，每次启动即被清除
+        （AI 新闻并发设置、最近模型选择记录、本地模型完整性基线随之丢失）。
+        """
+        runtime_keys = {
+            "ai_news_max_concurrent": 3,
+            "llm_recent_selections": [{"provider": "deepseek", "model": "deepseek-chat"}],
+            "local_model_sha256": "abc123",
+            "local_model_sha256_path": "D:/models/qwen.gguf",
+        }
+        isolated_config.write_text(
+            json.dumps({"llm_provider": "deepseek", **runtime_keys, "obsolete_deprecated_key": 1}),
+            encoding="utf-8",
+        )
+        cfg_mod.ConfigHandler.ensure_defaults()
+        raw = json.loads(isolated_config.read_text(encoding="utf-8"))
+        for key, val in runtime_keys.items():
+            assert raw[key] == val, f"运行期扩展键被启动清理误删: {key}"
+        # 清理语义不失效：真正的未知/废弃键仍被移除
+        assert "obsolete_deprecated_key" not in raw
+
 
 class TestConfigHandlerGetTokenKeyringMigration:
     @patch.object(cfg_mod.keyring, "get_password", return_value=None)
@@ -2980,6 +3005,41 @@ class TestConfigHandlerStrategyPresets:
         """预设字段类型非法时删除 → 返回 False (防御性)"""
         result = ConfigHandler.delete_strategy_preset("value_strategy", "任何")
         assert result is False
+
+    # --- 缓存引用隔离（深拷贝回归） ---
+
+    def test_get_presets_returns_deep_copy(self):
+        """读路径返回深拷贝：调用方改动不得污染 load_config 的嵌套引用。"""
+        loaded = {"strategy_presets_value_strategy": {"a": {"pe": 1}}}
+        with patch.object(cfg_mod.ConfigHandler, "load_config", return_value=loaded):
+            presets = ConfigHandler.get_strategy_presets("value_strategy")
+            presets["a"]["pe"] = 999
+            presets["b"] = {"pe": 2}
+        assert loaded["strategy_presets_value_strategy"] == {"a": {"pe": 1}}
+
+    def test_save_preset_failure_does_not_mutate_loaded_config(self):
+        """保存失败时不得原地污染缓存中的嵌套预设（半提交回归）。
+
+        回归：load_config 仅顶层浅拷贝，嵌套 dict 与配置缓存共享引用；此前
+        save_strategy_preset 直接修改该引用，save_config 失败后缓存残留未落盘的新预设。
+        """
+        loaded = {"strategy_presets_value_strategy": {"a": {"pe": 1}}}
+        with (
+            patch.object(cfg_mod.ConfigHandler, "load_config", return_value=loaded),
+            patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False),
+        ):
+            assert ConfigHandler.save_strategy_preset("value_strategy", "b", {"pe": 2}) is False
+        assert loaded["strategy_presets_value_strategy"] == {"a": {"pe": 1}}
+
+    def test_delete_preset_failure_does_not_mutate_loaded_config(self):
+        """删除保存失败时缓存中的嵌套预设保持原值（半提交回归）。"""
+        loaded = {"strategy_presets_value_strategy": {"a": {"pe": 1}, "b": {"pe": 2}}}
+        with (
+            patch.object(cfg_mod.ConfigHandler, "load_config", return_value=loaded),
+            patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False),
+        ):
+            assert ConfigHandler.delete_strategy_preset("value_strategy", "a") is False
+        assert loaded["strategy_presets_value_strategy"] == {"a": {"pe": 1}, "b": {"pe": 2}}
 
     # --- ① 保存→切策略→载入→参数还原 (跨策略隔离) ---
 

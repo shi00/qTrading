@@ -35,6 +35,19 @@ from utils.sanitizers import DataSanitizer
 # 跨进程配置文件锁等待上限（§5.1：锁等待有界，超时显示可重试错误）。
 _CONFIG_FILE_LOCK_TIMEOUT_SECONDS = 10.0
 
+# 运行期扩展键（非 AppConfig 显式字段，经 extra="allow" 落盘）保留集。
+# 这些键由业务模块在运行期写入并跨重启读取，属于用户设置 / 本地完整性基线，
+# 启动清理不得按「未知键」删除——否则每次启动都会被清空（配置静默丢失）。
+# 新增同类运行期键时须在此登记，或改为登记进 AppConfig（使其成为 DEFAULT_CONFIG 键）。
+_PRESERVED_RUNTIME_CONFIG_KEYS: frozenset[str] = frozenset(
+    {
+        "ai_news_max_concurrent",  # utils/config/llm.py：AI 新闻并发上限
+        "llm_recent_selections",  # utils/llm_providers.py：最近模型选择记录
+        "local_model_sha256",  # services/local_model_manager.py：本地模型完整性基线
+        "local_model_sha256_path",  # services/local_model_manager.py：基线对应模型路径
+    }
+)
+
 
 class ConfigFreshReadError(RuntimeError):
     """新鲜读取时磁盘损坏 / 不可读 / 校验失败（§5.1：禁止静默落默认）。"""
@@ -382,6 +395,10 @@ def ensure_defaults():
                     if key.startswith("strategy_presets_"):
                         # Task 4.1 策略预设为用户数据（动态键），与 ai_strategy_prompt_
                         # 同语义：启动清理只针对废弃的固定配置键，不得删除用户资产。
+                        continue
+                    if key in _PRESERVED_RUNTIME_CONFIG_KEYS:
+                        # 运行期扩展键（非 AppConfig 字段）同样属用户数据/完整性基线，
+                        # 启动清理不得删除，否则每次启动即丢失（见上方常量注释）。
                         continue
                     if key not in valid_keys:
                         cfg.logger.info("Removing deprecated/unused config: %s", key)
