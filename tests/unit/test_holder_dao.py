@@ -99,16 +99,18 @@ class TestCalculateHolderChanges:
     async def test_cancelled_error_propagates(self):
         """R2: _write_db 抛 asyncio.CancelledError 必须原样传播（优雅停机），不可吞为 warning。"""
         dao = _make_dao()
-        dao._write_db = AsyncMock(side_effect=asyncio.CancelledError())
-        with pytest.raises(asyncio.CancelledError):
+        cancel_err = asyncio.CancelledError()
+        dao._write_db = AsyncMock(side_effect=cancel_err)
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await dao._calculate_holder_changes(["000001.SZ"])
+        assert exc_info.value is cancel_err  # R2: 取消信号必须原样传播同一实例，不可吞没或包装
 
     @pytest.mark.asyncio
     async def test_engine_disposed_propagates(self):
         """R5: _write_db 抛 EngineDisposedError 必须原样传播，不可吞为 warning。"""
         dao = _make_dao()
         dao._write_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError, match="disposed"):
             await dao._calculate_holder_changes(["000001.SZ"])
 
 
