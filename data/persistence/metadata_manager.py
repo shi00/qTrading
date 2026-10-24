@@ -96,15 +96,22 @@ class MetaDataManager:
 
         locale = I18n.current_locale()
         is_hashable = isinstance(term, (str, int, float, tuple)) or term is None
-        term_key = (
-            term
-            if is_hashable
-            else (
-                tuple(term)
-                if isinstance(term, list)
-                else (tuple(sorted(term.items())) if isinstance(term, dict) else str(term))
+        try:
+            term_key = (
+                term
+                if is_hashable
+                else (
+                    tuple(term)
+                    if isinstance(term, list)
+                    else (tuple(sorted(term.items())) if isinstance(term, dict) else str(term))
+                )
             )
-        )
+            hash(term_key)
+        except TypeError:
+            # 嵌套不可哈希元素（含 list 的 tuple / value 含 dict 的 dict / 混合类型 key 的
+            # dict）会让 cache_key 抛 TypeError，统一回退字符串键（与顶层 unhashable
+            # 的容错意图一致，见 test_get_raw_alias_handles_unhashable_term）。
+            term_key = str(term)
         cache_key = ("raw", context_table, term_key, locale)
 
         with cls._lock:

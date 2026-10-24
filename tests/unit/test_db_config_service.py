@@ -260,6 +260,14 @@ class TestDatabaseExists:
 
 class TestCreateDatabase:
     @pytest.mark.asyncio
+    async def test_name_too_long_rejected_before_connect(self):
+        """数据库名超过 PostgreSQL 标识符上限（63 字符）→ 拒绝且不发起连接。"""
+        with patch("data.persistence.db_config_service.asyncpg.connect") as mock_connect:
+            ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "a" * 64)
+        assert ok is False
+        mock_connect.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_duplicate_database_error(self):
         with patch(
             "data.persistence.db_config_service.asyncpg.connect",
