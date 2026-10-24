@@ -923,3 +923,20 @@ class TestEmbeddedPostgresServiceCoverageGapFill:
             service._verify_sidecar_sha256()
 
         EmbeddedPostgresService._reset_singleton()
+
+    def test_verify_sha256_skips_on_empty_sha256_file(self, tmp_path: Path) -> None:
+        """M09-F3: .sha256 文件存在但为空（或纯空白）→ 跳过校验 + WARNING，不抛 IndexError。"""
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        service = _make_service(tmp_path)
+        sha256_path = service._sidecar_binary.with_suffix(service._sidecar_binary.suffix + ".sha256")
+        sha256_path.write_text("", encoding="utf-8")
+
+        # 修复前 "".split()[0] 会 IndexError；修复后应跳过校验不抛异常
+        service._verify_sidecar_sha256()
+
+        # 纯空白文件同样跳过
+        sha256_path.write_text("   \n\t  ", encoding="utf-8")
+        service._verify_sidecar_sha256()
+
+        EmbeddedPostgresService._reset_singleton()

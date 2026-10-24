@@ -749,6 +749,120 @@ class TestEmbeddedPostgresServiceStart:
         finally:
             await service.stop()
 
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_restart_after_sidecar_death_closes_stale_stderr_file(self, fake_paths) -> None:
+        """M09-F2: sidecar 崩溃后再次 start（重启路径）→ 上一次的 _stderr_file 句柄被关闭。
+
+        回归验证：重启路径 _start_sync_impl 开头调 _cleanup_failed_start()，
+        关闭残留 stderr 归档句柄后再打开新句柄，避免旧句柄被覆盖引用而泄漏。
+        """
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        try:
+
+            def popen_factory(cmd, **kwargs):
+                inst = _FakePopen(cmd, **kwargs)
+                inst.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+                runtime_dir = fake_paths["data_dir"].parent / "runtime"
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                (runtime_dir / "password").write_text("mock_pg_password_55432", encoding="utf-8")
+                return inst
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                await service.start()
+                stale_file = service._stderr_file
+                assert stale_file is not None, "首次 start 后 _stderr_file 应为已打开句柄"
+
+                # 模拟 sidecar 崩溃退出（poll 返回非 None）
+                first_fake = _FakePopen.instances[0]
+                first_fake.set_poll(1)
+
+                # 重启路径：再次 start 应清理残留（关闭旧句柄）并成功启动
+                info = await service.start()
+                assert info.port == FAKE_READY["port"]
+                # 关键断言：旧句柄已被关闭（修复前被覆盖引用，永不关闭 → 泄漏）
+                assert stale_file.closed, "M09-F2: 重启路径必须关闭上一次残留的 _stderr_file 句柄"
+                assert service._stderr_file is not None and service._stderr_file is not stale_file
+                # 旧的已死 fake 进程应被清理（kill 兜底）
+                assert first_fake._kill_calls >= 1
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_rejects_non_numeric_port(self, fake_paths) -> None:
+        """M09-F4: ready JSON port 非数值 → EmbeddedPostgresStartError（非裸 ValueError）。"""
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        try:
+            invalid_ready = dict(FAKE_READY)
+            invalid_ready["port"] = "not-a-number"
+
+            def popen_factory(cmd, **kwargs):
+                inst = _FakePopen(cmd, **kwargs)
+                inst.set_stdout_line(json.dumps(invalid_ready) + "\n")
+                return inst
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                with pytest.raises(EmbeddedPostgresStartError, match="invalid numeric field"):
+                    await service.start()
+                # 启动失败必须清理子进程
+                assert any(inst._kill_calls > 0 for inst in _FakePopen.instances)
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_tolerates_non_numeric_sidecar_pid(self, fake_paths) -> None:
+        """M09-F4: sidecar_pid 扩展字段非数值 → 降级为 0，不杀健康进程、start 成功。"""
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        try:
+            ready = dict(FAKE_READY)
+            ready["sidecar_pid"] = "garbage"
+
+            def popen_factory(cmd, **kwargs):
+                inst = _FakePopen(cmd, **kwargs)
+                inst.set_stdout_line(json.dumps(ready) + "\n")
+                runtime_dir = fake_paths["data_dir"].parent / "runtime"
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                (runtime_dir / "password").write_text("mock_pg_password_55432", encoding="utf-8")
+                return inst
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                info = await service.start()
+                assert info.port == FAKE_READY["port"]
+                assert info.sidecar_pid == 0
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_redacts_secrets_in_non_json_ready_line(self, fake_paths) -> None:
+        """M09-F5: ready 行非 JSON 且含已注册密码 → 异常消息中密码被脱敏。"""
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        try:
+            DataSanitizer.register_secret("mock_pg_password_55432")
+
+            def popen_factory(cmd, **kwargs):
+                inst = _FakePopen(cmd, **kwargs)
+                inst.set_stdout_line('truncated output password=mock_pg_password_55432 port=55432"\n')
+                return inst
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                with pytest.raises(EmbeddedPostgresStartError) as exc_info:
+                    await service.start()
+                assert "mock_pg_password_55432" not in str(exc_info.value), (
+                    f"M09-F5: 异常消息泄露明文密码: {exc_info.value}"
+                )
+                assert "JSON parse failed" in str(exc_info.value)
+        finally:
+            await service.stop()
+
 
 # =============================================================================
 # TestEmbeddedPostgresServiceStop: 1 TDD + 10 stop 行为测试 = 11 个
