@@ -416,11 +416,14 @@ def get_strategy_presets(strategy_key: str) -> dict[str, dict]:
 
     Returns:
         dict: {preset_name: params_dict}, 无预设时返回空 dict.
+
+    返回深拷贝：``load_config`` 只做顶层浅拷贝，嵌套 dict 与配置缓存共享引用，
+    直接返回会让调用方（或内部写路径）原地修改污染缓存。
     """
     config = cfg.ConfigHandler.load_config()
     key = f"strategy_presets_{strategy_key}"
     presets = config.get(key, {})
-    return presets if isinstance(presets, dict) else {}
+    return copy.deepcopy(presets) if isinstance(presets, dict) else {}
 
 
 def save_strategy_preset(strategy_key: str, name: str, params: dict) -> bool:
@@ -428,12 +431,14 @@ def save_strategy_preset(strategy_key: str, name: str, params: dict) -> bool:
 
     Returns:
         bool: 保存成功返回 True.
+
+    修改前深拷贝：保存失败（磁盘损坏 / 锁超时等）时缓存必须保持原值，
+    不得留下「内存已改、磁盘未改」的半提交状态。
     """
     config = cfg.ConfigHandler.load_config()
     key = f"strategy_presets_{strategy_key}"
-    presets = config.get(key, {})
-    if not isinstance(presets, dict):
-        presets = {}
+    raw_presets = config.get(key, {})
+    presets = copy.deepcopy(raw_presets) if isinstance(raw_presets, dict) else {}
     presets[name] = params
     return cfg.ConfigHandler.save_config({key: presets})
 
@@ -443,11 +448,14 @@ def delete_strategy_preset(strategy_key: str, name: str) -> bool:
 
     Returns:
         bool: 删除成功 (预设存在) 返回 True, 不存在返回 False.
+
+    同 ``save_strategy_preset``：修改前深拷贝，保存失败时缓存不被污染。
     """
     config = cfg.ConfigHandler.load_config()
     key = f"strategy_presets_{strategy_key}"
-    presets = config.get(key, {})
-    if not isinstance(presets, dict) or name not in presets:
+    raw_presets = config.get(key, {})
+    presets = copy.deepcopy(raw_presets) if isinstance(raw_presets, dict) else {}
+    if name not in presets:
         return False
     del presets[name]
     return cfg.ConfigHandler.save_config({key: presets})
