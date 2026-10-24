@@ -439,9 +439,7 @@ class TestLayer1Layer2NameSeparation:
         _, layer2 = self._classify_appcolors_attrs()
         # 排除 TABLE_GRID_V/TABLE_GRID_H 等别名 (load_theme 中手动同步)
         aliases = {"TABLE_GRID_V", "TABLE_GRID_H"}
-        # TABLE_ROW_HOVER 4 主题 preset 补值属于批次 3 P2-8, 批次 1 暂排除
-        pending_batch3 = {"TABLE_ROW_HOVER"}
-        layer2_non_alias = layer2 - aliases - pending_batch3
+        layer2_non_alias = layer2 - aliases
         for theme in (ThemeName.DARK, ThemeName.LIGHT, ThemeName.NAVY, ThemeName.DRACULA):
             preset_keys = set(CUSTOM_COLOR_PRESETS[theme].keys())
             missing = layer2_non_alias - preset_keys
@@ -607,10 +605,14 @@ class TestF06BusinessTextContrast:
         assert CUSTOM_COLOR_PRESETS[ThemeName.DARK]["INFO"] != "#2979FF"
 
     def test_appcolors_defaults_sync_dark_preset(self):
-        """AppColors 类属性默认值必须与 DARK preset 同步 (DARK 是 _reset_singleton 复位基线)。"""
+        """AppColors 类属性默认值必须与 DARK preset 全量同步 (DARK 是 _reset_singleton 复位基线)。"""
         dark = CUSTOM_COLOR_PRESETS[ThemeName.DARK]
-        assert dark["UP_RED"] == AppColors.UP_RED
-        assert dark["INFO"] == AppColors.INFO
+        mismatched = {
+            key: (getattr(AppColors, key), expected)
+            for key, expected in dark.items()
+            if getattr(AppColors, key) != expected
+        }
+        assert not mismatched, f"AppColors 默认值与 DARK preset 不一致: {mismatched}"
 
     @pytest.mark.parametrize(
         ("theme", "up", "down"),

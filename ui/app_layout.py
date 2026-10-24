@@ -335,7 +335,7 @@ def _build_nav_destinations(running_count: int = 0) -> list[ft.NavigationRailDes
     return destinations
 
 
-def _build_nav_badge_icon(icon: str, running_count: int) -> ft.Stack:
+def _build_nav_badge_icon(icon: ft.IconData, running_count: int) -> ft.Stack:
     """构造带运行中任务数角标的 nav_tasks icon (Phase 6.1, FR-UX-006).
 
     ``ft.Badge`` 在 NavigationRailDestination 上无 ``badge`` 属性可挂载,
@@ -343,36 +343,33 @@ def _build_nav_badge_icon(icon: str, running_count: int) -> ft.Stack:
     99, 超过显示 "99+"。
 
     Args:
-        icon: 基础 icon 名称 (ft.Icons.FORMAT_LIST_BULLETED_OUTLINED 等)。
+        icon: 基础 icon (ft.Icons.FORMAT_LIST_BULLETED_OUTLINED 等)。
         running_count: RUNNING 状态任务数 (>0 由调用方保证)。
     """
     badge_text = str(running_count) if running_count <= 99 else "99+"  # pragma: no cover
     # 数字宽度自适应: 1 位数 16px, 2 位数/99+ 用 22px
     badge_w = 16 if len(badge_text) == 1 else 22  # pragma: no cover
-    return ft.Stack(  # pragma: no cover
-        [
-            ft.Icon(icon, size=AppStyles.FONT_SIZE_LG),
-            ft.Container(
-                content=ft.Text(
-                    badge_text,
-                    size=AppStyles.FONT_SIZE_CAPTION,
-                    color=AppColors.ON_ERROR,
-                    text_align=ft.TextAlign.CENTER,
-                    weight=ft.FontWeight.BOLD,
-                ),
-                width=badge_w,
-                height=16,
-                border_radius=8,
-                bgcolor=AppColors.ERROR,
-                alignment=ft.Alignment.CENTER,
-                left=12,
-                top=-2,
-                padding=ft.Padding.symmetric(horizontal=2, vertical=0),
+    controls: list[ft.Control] = [
+        ft.Icon(icon, size=AppStyles.FONT_SIZE_LG),
+        ft.Container(
+            content=ft.Text(
+                badge_text,
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.ON_ERROR,
+                text_align=ft.TextAlign.CENTER,
+                weight=ft.FontWeight.BOLD,
             ),
-        ],
-        width=24,
-        height=24,
-    )
+            width=badge_w,
+            height=16,
+            border_radius=8,
+            bgcolor=AppColors.ERROR,
+            alignment=ft.Alignment.CENTER,
+            left=12,
+            top=-2,
+            padding=ft.Padding.symmetric(horizontal=2, vertical=0),
+        ),
+    ]
+    return ft.Stack(controls, width=24, height=24)  # pragma: no cover
 
 
 @ft.component
@@ -437,6 +434,8 @@ def AppLayout() -> ft.Container:
     # 经 holder 每渲染刷新引用, 键盘回调始终派发到最新闭包 (避免 stale current_tab)。
     shortcut_dispatch_holder: Any = ft.use_ref(None)
     nav_toggle_holder: Any = ft.use_ref(None)
+    # holder 持有安装时的 page: cleanup 阶段 ft.context.page 不可用时不漏清键盘回调
+    keyboard_page_holder: Any = ft.use_ref(None)
 
     def _dispatch_shortcut(action: str) -> None:
         """执行 shell 级快捷键动作 (每次渲染重建, 闭包捕获最新 state / 控件)。"""
@@ -468,11 +467,13 @@ def AppLayout() -> ft.Container:
         page = _get_page()
         if page is None:
             return
+        keyboard_page_holder.current = page
         page.on_keyboard_event = _on_keyboard
         page.schedule_update()
 
     def _cleanup_keyboard() -> None:
-        page = _get_page()
+        page = keyboard_page_holder.current
+        keyboard_page_holder.current = None
         if page is not None:
             page.on_keyboard_event = None
             page.schedule_update()
@@ -582,7 +583,10 @@ def AppLayout() -> ft.Container:
         page.pubsub.subscribe_topic(TOPIC_NAVIGATE, _on_navigate)
 
     def _cleanup_navigate() -> None:
-        page = _get_page()
+        # 用订阅时捕获的 page 退订: cleanup 阶段 ft.context.page 可能不可用,
+        # 仅靠 _get_page() 会漏退订, 使 handler 残留在 PubSubHub。
+        page = navigate_page_holder.current
+        navigate_page_holder.current = None
         if page is not None:
             page.pubsub.unsubscribe_topic(TOPIC_NAVIGATE)
 

@@ -67,6 +67,24 @@ def _reset_pending_prefill() -> Iterator[None]:
     _pending_prefill.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_cache_cleared_state() -> Iterator[None]:
+    """每测前后丢弃 CacheClearedState 单例（含其 Observable 订阅者），R7 测试隔离。
+
+    声明式组件经 ``ft.use_state(get_cache_cleared_state)`` 订阅该模块级单例，
+    测试挂载组件后不卸载会让订阅者随单例残留到后续测试；随后
+    ``notify_cache_cleared()`` 在无 page 上下文的测试中触发订阅者回调即抛
+    ``RuntimeError: The context is not associated with any page``。
+    本目录是唯一使用该信号源（订阅 + 通知）的测试范围，故隔离就近落在
+    ``tests/unit/ui/conftest.py``，不扩散到 ``tests/unit/conftest.py``。
+    """
+    from ui.cache_cleared_state import _reset_state_for_test
+
+    _reset_state_for_test()
+    yield
+    _reset_state_for_test()
+
+
 # 注：_reset_context_page fixture 已提升到 tests/conftest.py 项目根，覆盖所有目录
 # （含 tests/unit/test_main_prepare_db_retry.py 等非 ui/ 目录调用 attach_fake_page 的场景）。
 

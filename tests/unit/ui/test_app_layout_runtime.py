@@ -743,6 +743,32 @@ class TestCleanupNavigate:
         page.pubsub.unsubscribe_topic.assert_called_once_with(env["mod"].TOPIC_NAVIGATE)
 
 
+class TestCleanupUsesSubscriptionPage:
+    """cleanup 须使用订阅时捕获的 page, 不依赖卸载时的 ft.context.page."""
+
+    def test_navigate_cleanup_unsubscribes_without_page_context(self, app_layout_env) -> None:
+        """卸载时 _get_page() 返回 None → 仍用 holder 退订 TOPIC_NAVIGATE."""
+        env = app_layout_env
+        page = env["page"]
+        page.pubsub.unsubscribe_topic.reset_mock()
+
+        with patch("ui.app_layout._get_page", return_value=None):
+            run_unmount_effects(env["component"])
+
+        page.pubsub.unsubscribe_topic.assert_called_once_with(env["mod"].TOPIC_NAVIGATE)
+
+    def test_keyboard_cleanup_clears_handler_without_page_context(self, app_layout_env) -> None:
+        """卸载时 _get_page() 返回 None → 仍用 holder 清除 page.on_keyboard_event."""
+        env = app_layout_env
+        page = env["page"]
+        assert callable(page.on_keyboard_event), "挂载后应安装键盘回调"
+
+        with patch("ui.app_layout._get_page", return_value=None):
+            run_unmount_effects(env["component"])
+
+        assert page.on_keyboard_event is None, "卸载后应清除键盘回调"
+
+
 # ============================================================================
 # UX-01: _parse_navigate_message 纯函数测试 (导航深链协议 "<tab>[:<subtab>]")
 # ============================================================================

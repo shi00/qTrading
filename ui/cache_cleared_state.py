@@ -54,7 +54,21 @@ def notify_cache_cleared() -> None:
     """通知一次缓存清除事件 (发送方直连, 替代原 pubsub broadcast).
 
     就地递增 ``seq``, 触发所有已订阅组件的重渲染. 操作仅 ``state.seq += 1``,
-    无 raise 路径. 原发送语义经 ``state.cache_cleared_version`` 去重后触发
+    无 raise 路径. 发送方在触发前以持久化 ``cache_cleared_version`` 去重
     (见 data_source_view_model), 语义不变.
     """
     get_cache_cleared_state().seq += 1
+
+
+def _reset_state_for_test() -> None:
+    """测试隔离：丢弃当前单例（连带其 Observable 订阅者）。
+
+    声明式组件经 ``ft.use_state(get_cache_cleared_state)`` 订阅模块级 Observable
+    单例；单元测试挂载组件后不卸载, 残留的 ``ObservableSubscription`` 会随单例
+    泄漏到后续测试, 使 ``notify_cache_cleared`` 在无 page 上下文时抛
+    ``RuntimeError: The context is not associated with any page``。
+    重置为 None 后旧实例连同订阅者一起被丢弃（R7, 与
+    ``ui.egress_status_state._reset_state_for_test`` 惯例一致）。
+    """
+    global _cache_cleared_state
+    _cache_cleared_state = None
