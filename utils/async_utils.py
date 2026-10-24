@@ -16,6 +16,8 @@ import logging
 from collections.abc import Awaitable
 from typing import Any
 
+from utils.sanitizers import DataSanitizer
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,5 +52,10 @@ async def gather_for_shutdown_cleanup(*coros: Awaitable[Any]) -> list[Any]:
     results = await asyncio.gather(*coros, return_exceptions=True)
     for r in results:
         if isinstance(r, Exception) and not isinstance(r, asyncio.CancelledError):
-            logger.warning("[ShutdownCleanup] Task failed during cleanup: %s", r)
+            # R9: 清理任务的异常可能来自 DB / HTTP 调用，其消息可能含凭证或 URL 参数，
+            # 必须先经 DataSanitizer 脱敏再写日志。
+            logger.warning(
+                "[ShutdownCleanup] Task failed during cleanup: %s",
+                DataSanitizer.sanitize_error(r),
+            )
     return results

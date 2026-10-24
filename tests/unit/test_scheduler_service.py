@@ -882,6 +882,46 @@ class TestScheduleJobsInvalidTime:
         svc._schedule_jobs()
         assert svc.scheduler.get_job("daily_update") is not None  # noqa: weak-assertion APScheduler job 注册存在性，trigger 配置由专项测试覆盖
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("16:30", (16, 30)),
+            ("0:00", (0, 0)),
+            ("23:59", (23, 59)),
+            ("25:99", (16, 30)),
+            ("24:00", (16, 30)),
+            ("16:-5", (16, 30)),
+            ("16:60", (16, 30)),
+            ("", (16, 30)),
+            ("16:30:00", (16, 30)),
+            ("invalid", (16, 30)),
+            (None, (16, 30)),
+        ],
+    )
+    def test_parse_schedule_hm_bounds(self, value, expected):
+        """M02a P2: 越界/畸形调度配置一律回落默认（CronTrigger 对越界值抛 ValueError）。"""
+        assert SchedulerService._parse_schedule_hm(value, (16, 30)) == expected
+
+    @patch("utils.scheduler_service.ConfigHandler")
+    def test_out_of_range_times_do_not_break_scheduling(self, mock_ch):
+        """M02a P2: "25:99"/"24:00"/"16:-5" 不得令 _schedule_jobs 抛异常（否则应用启动失败）。"""
+        mock_ch.get_setting.return_value = None
+        mock_ch.get_auto_update_time.return_value = "25:99"
+        mock_ch.get_concept_schedule_time.return_value = "24:00"
+        mock_ch.get_nightly_prediction_time.return_value = "16:-5"
+        svc = SchedulerService()
+        svc._schedule_jobs()  # 不得抛 ValueError
+
+        daily_job = svc.scheduler.get_job("daily_update")
+        concept_job = svc.scheduler.get_job("concept_sync_daily_refresh")
+        assert daily_job is not None
+        assert concept_job is not None
+        assert "16" in str(next(f for f in daily_job.trigger.fields if f.name == "hour"))
+        assert "30" in str(next(f for f in daily_job.trigger.fields if f.name == "minute"))
+        assert "18" in str(next(f for f in concept_job.trigger.fields if f.name == "hour"))
+        # 看门狗谓词与 cron 同源缓存，须同步回落默认
+        assert svc._nightly_hm == (20, 30)
+
     @patch("utils.scheduler_service.ConfigHandler")
     def test_none_concept_sync_time(self, mock_ch):
         mock_ch.get_setting.return_value = None
