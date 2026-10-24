@@ -192,6 +192,48 @@ class TestBacktestReport:
         stats = report.format_monthly_stats(empty_result)
         assert I18n.get("report_no_monthly_stats") in stats
 
+    def test_format_monthly_stats_none_benchmark_renders_na(self, backtest_result: BacktestResult) -> None:
+        """M18-F3: 基准该月无数据（None，如基准指数全区间缺行）渲染 N/A，
+        不得伪装成 0.00%（与 BT-04「None=未测量≠0」语义衔接）。"""
+        result = dataclasses.replace(
+            backtest_result,
+            period_stats=pl.DataFrame(
+                {
+                    "year_month": ["2024-01"],
+                    "monthly_return": [0.01],
+                    "benchmark_return": [None],
+                    "excess_return": [None],
+                    "start_nav": [100.0],
+                    "end_nav": [101.0],
+                }
+            ),
+        )
+        stats = BacktestReport().format_monthly_stats(result)
+        assert "2024-01" in stats
+        assert "1.00%" in stats
+        assert "N/A" in stats
+        # 月度收益与基准/超额列均不得出现 0.00%（None 不再被抹平为 0）
+        assert "0.00%" not in stats
+
+    def test_format_monthly_stats_zero_return_still_renders_zero(self, backtest_result: BacktestResult) -> None:
+        """M18-F3 对照：真实 0.0 收益仍渲染 0.00%，None 与 0 语义不混淆。"""
+        result = dataclasses.replace(
+            backtest_result,
+            period_stats=pl.DataFrame(
+                {
+                    "year_month": ["2024-01"],
+                    "monthly_return": [0.0],
+                    "benchmark_return": [0.0],
+                    "excess_return": [0.0],
+                    "start_nav": [100.0],
+                    "end_nav": [100.0],
+                }
+            ),
+        )
+        stats = BacktestReport().format_monthly_stats(result)
+        assert "0.00%" in stats
+        assert "N/A" not in stats
+
     def test_format_trade_summary(self, backtest_result: BacktestResult) -> None:
         report = BacktestReport()
         trade_summary = report.format_trade_summary(backtest_result)

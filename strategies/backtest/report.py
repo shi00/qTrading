@@ -71,10 +71,14 @@ class BacktestReport:
         lines = [header, sep]
         for row in result.period_stats.iter_rows(named=True):
             period = row.get("year_month", "N/A")
-            ret = row.get("monthly_return", 0.0) or 0.0
-            bench = row.get("benchmark_return", 0.0) or 0.0
-            excess = row.get("excess_return", 0.0) or 0.0
-            lines.append(f"{period:<12}{ret:>9.2%}{bench:>11.2%}{excess:>11.2%}")
+            ret = row.get("monthly_return")
+            bench = row.get("benchmark_return")
+            excess = row.get("excess_return")
+            # None（该月无数据，如基准全缺失）渲染 N/A，不伪装成 0.00%
+            ret_str = "N/A".rjust(9) if ret is None else f"{ret:>9.2%}"
+            bench_str = "N/A".rjust(11) if bench is None else f"{bench:>11.2%}"
+            excess_str = "N/A".rjust(11) if excess is None else f"{excess:>11.2%}"
+            lines.append(f"{period:<12}{ret_str}{bench_str}{excess_str}")
         return "\n".join(lines)
 
     def format_trade_summary(self, result: BacktestResult) -> str:

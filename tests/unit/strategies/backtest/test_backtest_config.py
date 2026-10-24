@@ -124,6 +124,38 @@ class TestBacktestConfigValidation:
             assert len(errors) == 1
             assert "initial_capital must be positive" in errors[0]
 
+    def test_validate_negative_cost_params_rejected(self) -> None:
+        """M18-F2: 负费率参数（commission_min/stamp_duty_rate/transfer_fee_rate/slippage_bps）
+        必须在 validate() 拦截——负滑点/负印花税经 get_cost_config 透传后会造成
+        买入返现、收益虚增等资金类计算失真。"""
+        cases: list[tuple[str, dict]] = [
+            ("commission_min must be non-negative", {"commission_min": -1.0}),
+            ("stamp_duty_rate must be non-negative", {"stamp_duty_rate": -0.001}),
+            ("transfer_fee_rate must be non-negative", {"transfer_fee_rate": -1e-5}),
+            ("slippage_bps must be non-negative", {"slippage_bps": -5.0}),
+        ]
+        for expected_msg, kwargs in cases:
+            config = BacktestConfig(
+                start_date=date(2023, 1, 1),
+                end_date=date(2023, 12, 31),
+                **kwargs,
+            )
+            errors = config.validate()
+            assert len(errors) == 1, f"kwargs={kwargs} 应只触发一条校验错误"
+            assert expected_msg in errors[0]
+
+    def test_validate_zero_cost_params_accepted(self) -> None:
+        """零费率是合法配置（无摩擦回测），不得被负值校验误伤。"""
+        config = BacktestConfig(
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31),
+            commission_min=0.0,
+            stamp_duty_rate=0.0,
+            transfer_fee_rate=0.0,
+            slippage_bps=0.0,
+        )
+        assert config.validate() == []
+
     def test_validate_preload_max_days_zero(self) -> None:
         config = BacktestConfig(
             start_date=date(2023, 1, 1),
