@@ -713,7 +713,8 @@ class AIUsageDao(BaseDao):
         - UPDATE 带 EXISTS 守卫：``reservation_id`` 非 None 时要求目标预留存在
           且 state='reserved'（错误预留 ID / 已派发 / 已终态 → rowcount=0 →
           False，**错误预留 ID 零派发**）；``reservation_id`` 为 None（usage_only
-          无预留）时仅 owner 三条件。
+          无预留）时仅 owner 三条件，空 ``reservations`` 经 COALESCE 原样保留为
+          空数组（``jsonb_agg`` 对空集返回 NULL，直写会违反 NOT NULL 约束）。
 
         返回 False = owner 失权或预留不存在/状态不符，调用方不得继续派发（D5）。
         """
@@ -729,13 +730,13 @@ class AIUsageDao(BaseDao):
                     """
                     UPDATE ai_invocation
                     SET reservations = (
-                            SELECT jsonb_agg(
+                            SELECT COALESCE(jsonb_agg(
                                 CASE
                                     WHEN elem->>'reservation_id' = :reservation_id
                                         THEN jsonb_set(elem, '{state}', '"dispatched"')
                                     ELSE elem
                                 END
-                            )
+                            ), '[]'::jsonb)
                             FROM jsonb_array_elements(reservations) AS elem
                         ),
                         updated_at = (now() AT TIME ZONE 'UTC')

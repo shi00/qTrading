@@ -174,3 +174,31 @@ class TestIsInWatchlist:
         dao = _make_dao()
         dao._read_db_select.return_value = pd.DataFrame()
         assert await dao.is_in_watchlist("000001.SZ") is False
+
+
+class TestReadErrorsNotDisguisedAsEmpty:
+    """R21: 读取失败不得伪装为「无关注记录 / 未关注」（与 StockDao.get_ts_code_map 同口径）。"""
+
+    @pytest.mark.asyncio
+    async def test_get_watchlist_requests_non_suppressed_read(self):
+        dao = _make_dao()
+        await dao.get_watchlist()
+        assert dao._read_db_select.call_args.kwargs["suppress_errors"] is False
+
+    @pytest.mark.asyncio
+    async def test_is_in_watchlist_requests_non_suppressed_read(self):
+        dao = _make_dao()
+        await dao.is_in_watchlist("000001.SZ")
+        assert dao._read_db_select.call_args.kwargs["suppress_errors"] is False
+
+    @pytest.mark.asyncio
+    async def test_read_failure_propagates(self):
+        """DB 读取失败向调用方传播（不返回空列表 / False 伪装成功）。"""
+        from data.persistence.daos.base_dao import DatabaseQueryError
+
+        dao = _make_dao()
+        dao._read_db_select = AsyncMock(side_effect=DatabaseQueryError("read boom"))
+        with pytest.raises(DatabaseQueryError, match="read boom"):
+            await dao.get_watchlist()
+        with pytest.raises(DatabaseQueryError, match="read boom"):
+            await dao.is_in_watchlist("000001.SZ")

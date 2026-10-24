@@ -614,11 +614,19 @@ class ScreenerDao(BaseDao):
         )
 
     async def get_fundamental_screening_data_range(self, start_date: str, end_date: str, max_rows: int | None = None):
+        """区间全集预载（max_rows 护栏下推 SQL LIMIT）。
+
+        ``suppress_errors=False``：与单日版 ``get_fundamental_screening_data`` 同口径
+        （R21）——DB 读取失败必须传播，不得吞成空 DataFrame 让回测把「查询失败」
+        伪装成「区间无数据」（调用方 ``BacktestDataProvider`` 以
+        ``gather(return_exceptions=True)`` 收集异常并显式降级逐日查询）。
+        """
         sql = self._build_screening_sql_range(require_close=False)
         return await self._read_db(
             sql,
             (self._to_db_date(start_date), self._to_db_date(end_date)),
             max_rows=max_rows if max_rows is not None else _MAX_SCREENING_RANGE_ROWS,
+            suppress_errors=False,
         )
 
     # --- Review Manager Methods ---
