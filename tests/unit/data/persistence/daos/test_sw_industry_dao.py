@@ -406,7 +406,19 @@ class TestGetNameAsOf:
         assert "start_date <= $2" in sql_arg
         assert "end_date" in sql_arg
         params_arg = dao._read_db.call_args.args[1]
-        assert params_arg == ("000001.SZ", "2021-01-01")
+        # DAT-26：DAO 边界把 as-of 日期归一为 date 对象（asyncpg DATE 列拒绝字符串）
+        assert params_arg == ("000001.SZ", datetime.date(2021, 1, 1))
+
+    @pytest.mark.asyncio
+    async def test_eight_digit_as_of_date_normalized_to_date(self):
+        """8 位 YYYYMMDD 串必须归一为 date 对象（DAT-26，base helper 已统一归一）。"""
+        dao = _make_name_history_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"name": ["平安银行"]}))
+
+        await dao.get_name_as_of("000001.SZ", "20210101")
+
+        params_arg = dao._read_db.call_args.args[1]
+        assert params_arg == ("000001.SZ", datetime.date(2021, 1, 1))
 
     @pytest.mark.asyncio
     async def test_none_df_result_returns_none(self):

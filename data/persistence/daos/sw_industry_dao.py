@@ -187,7 +187,7 @@ class StockNameHistoryDao(BaseDao):
                 ORDER BY start_date DESC
                 LIMIT 1
                 """,
-                (ts_code, as_of),
+                (ts_code, self._to_db_date(as_of)),
             )
         except asyncio.CancelledError:
             raise

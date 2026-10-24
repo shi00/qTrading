@@ -89,7 +89,10 @@ class TestGetShareFloatUpcomingBatch:
 
     @pytest.mark.asyncio
     async def test_with_as_of_date_passes_params(self):
-        """as_of_date 非空时 params_fn 返回 [start_date, end_date]，end_date = start_date + days。"""
+        """as_of_date 非空时 params_fn 返回 [start_date, end_date, start_date]。
+
+        第三参数为公告时点上界（PIT/R24）：ann_date <= as_of_date。
+        """
         dao = _make_dao()
         expected = pd.DataFrame({"ts_code": ["000001.SZ"], "float_date": [datetime.date(2024, 8, 15)]})
         dao.chunked_in_query = AsyncMock(return_value=expected)
@@ -98,15 +101,22 @@ class TestGetShareFloatUpcomingBatch:
 
         pd.testing.assert_frame_equal(result, expected)
         dao.chunked_in_query.assert_awaited_once()
-        call_kwargs = dao.chunked_in_query.call_args.kwargs
-        params_fn = call_kwargs["params_fn"]
-        start_date, end_date = params_fn(["000001.SZ"])
+        call_args = dao.chunked_in_query.call_args
+        params_fn = call_args.kwargs["params_fn"]
+        start_date, end_date, ann_upper_bound = params_fn(["000001.SZ"])
         assert start_date == datetime.date(2024, 6, 1)
         assert end_date == datetime.date(2024, 8, 30)
+        assert ann_upper_bound == datetime.date(2024, 6, 1)
+        # SQL 模板必须含 ann_date 上界过滤，且用 $N 占位符（R4）
+        # placeholders="$1"、chunk_len=1、start_idx=2 → float_date $3/$4、ann_date $5
+        sql_template = call_args.args[1]
+        sql = sql_template("$1", 1, 2)
+        assert "ann_date <= $5" in sql
+        assert "%s" not in sql
 
     @pytest.mark.asyncio
     async def test_without_as_of_date_uses_today(self):
-        """as_of_date 为 None 时使用今天作为 start_date，params_fn 仍返回 [start_date, end_date]。"""
+        """as_of_date 为 None 时以今天为起点与公告上界，params_fn 返回 3 个参数。"""
         dao = _make_dao()
         expected = pd.DataFrame({"ts_code": ["000001.SZ"]})
         dao.chunked_in_query = AsyncMock(return_value=expected)
@@ -117,10 +127,11 @@ class TestGetShareFloatUpcomingBatch:
         dao.chunked_in_query.assert_awaited_once()
         call_kwargs = dao.chunked_in_query.call_args.kwargs
         params_fn = call_kwargs["params_fn"]
-        start_date, end_date = params_fn(["000001.SZ"])
+        start_date, end_date, ann_upper_bound = params_fn(["000001.SZ"])
         today = get_now().date()
         assert start_date == today
         assert end_date == today + datetime.timedelta(days=90)
+        assert ann_upper_bound == today
 
     @pytest.mark.asyncio
     async def test_exception_returns_empty_df(self):

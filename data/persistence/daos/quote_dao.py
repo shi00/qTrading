@@ -46,6 +46,23 @@ LOW_FREQUENCY_TABLES = {"limit_list", "suspend_d", "top_list", "top_inst", "bloc
 # 也不予豁免，防止"已尝试水位"式豁免退化后把 dense 缺口伪装成合法空（R21 精神）。
 _DENSE_TABLES = frozenset({"daily_quotes", "daily_indicators"})
 
+# get_daily_quotes 空池（ts_code_list == []）早返时的固定列，与 SELECT 列表一致，
+# 保证下游按列名取值时不因空表缺列而 KeyError。
+_DAILY_QUOTES_COLUMNS = (
+    "ts_code",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "pre_close",
+    "change",
+    "pct_chg",
+    "vol",
+    "amount",
+    "adj_factor",
+)
+
 # review09-24 dim05 MAJOR-04：stock_basic 新鲜度阈值（自然日）。质量评分的理论股票数完全
 # 派生自 stock_basic，该表陈旧超过此天数时在 issues 中标注"理论股票数可能偏低"。
 _STOCK_BASIC_STALENESS_MAX_DAYS = 7
@@ -484,6 +501,9 @@ class QuoteDao(BaseDao):
         - ts_code_list 分块分支：chunked_in_query 各块内 SQL 虽逐块排序，但
           ``pd.concat(ignore_index=True)`` 不保证跨块全局有序，故须在 concat 后
           由方法内 ``sort_values(["ts_code", "trade_date"])`` 统一排序。
+
+        ``ts_code_list == []``（显式空池）按「无匹配代码」处理，直接返回带固定列的
+        空表，不降级为不带 ts_code 过滤的全市场直查。
         """
         sql = "SELECT ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor FROM daily_quotes WHERE 1=1"
         params = []
@@ -504,7 +524,11 @@ class QuoteDao(BaseDao):
             params.append(ed)
             idx += 1
 
-        if ts_code_list:
+        if ts_code_list is not None:
+            # 空池（调用方传入 []）必须返回空表：若降级为直查分支，会去掉 ts_code
+            # 过滤并物化全市场行情（可能 OOM，且把无关股票返回给调用方）。
+            if not ts_code_list:
+                return attach_daily_quotes_column_units(pd.DataFrame(columns=list(_DAILY_QUOTES_COLUMNS)))
             sql_template = sql + " AND ts_code IN ({placeholders})"
             df = await self.chunked_in_query(
                 self._read_db,
@@ -996,10 +1020,14 @@ class QuoteDao(BaseDao):
             if tbl is None or "trade_date" not in tbl.c:
                 logger.warning("[QuoteDao] Table '%s' not in metadata or missing trade_date column", table_name)
                 return {}
+            # DAT-26: SQLAlchemy Core 文本参数类型为 DATE 时 asyncpg 拒绝 8 位 YYYYMMDD 字符串，
+            # 必须在 DAO 边界显式归一为 date，否则查询失败被吞成 {}（质量评分误判为无数据）。
+            start = self._to_db_date(start_date)
+            end = self._to_db_date(end_date)
             stmt = (
                 sa.select(tbl.c.trade_date, sa.func.count().label("cnt"))
                 .select_from(tbl)
-                .where(tbl.c.trade_date.between(start_date, end_date))
+                .where(tbl.c.trade_date.between(start, end))
                 .group_by(tbl.c.trade_date)
             )
             df = await self._read_db_select(stmt)
@@ -1049,6 +1077,10 @@ class QuoteDao(BaseDao):
         if not tables:
             return result
 
+        # DAT-26: 与 get_bulk_table_counts 同口径，先在 DAO 边界归一日期形参再绑定。
+        start = self._to_db_date(start_date)
+        end = self._to_db_date(end_date)
+
         allowed_tables = set(_get_default_synced_tables())
         metadata = Base.metadata
         union_parts = []
@@ -1068,7 +1100,7 @@ class QuoteDao(BaseDao):
                     sa.func.count().label("cnt"),
                 )
                 .select_from(tbl)
-                .where(tbl.c.trade_date.between(start_date, end_date))
+                .where(tbl.c.trade_date.between(start, end))
                 .group_by(tbl.c.trade_date)
             )
             union_parts.append(part)
@@ -1315,9 +1347,12 @@ class QuoteDao(BaseDao):
             logger.warning("[QuoteDao] Table 'sync_empty_days' not in metadata, skip empty-day exemption")
             return {}
         try:
+            # DAT-26: DATE 列不接受 8 位 YYYYMMDD 字符串绑定（asyncpg 严格类型）。
+            start = self._to_db_date(start_date)
+            end = self._to_db_date(end_date)
             stmt = sa.select(tbl.c.table_name, tbl.c.trade_date).where(
                 tbl.c.table_name.in_(list(tables)),
-                tbl.c.trade_date.between(start_date, end_date),
+                tbl.c.trade_date.between(start, end),
             )
             df = await self._read_db_select(stmt)
             if df is None or df.empty:
