@@ -1072,7 +1072,10 @@ class LiteLLMClient:
                     response_format={"type": "json_object"} if json_mode else None,
                     response_schema=response_schema if (json_mode and response_schema is not None) else None,
                 )
-                response_content = result["content"]
+                # `or ""`：message.content 为 None（tool_calls/reasoning 响应合法形态）
+                # 时，None 直传会让下游 json.loads 抛 TypeError 绕过 "Invalid JSON"
+                # 收敛语义；归一为空串后统一走 JSONDecodeError → ValueError 收敛。
+                response_content = result["content"] or ""
                 llm_metadata = {k: v for k, v in result.items() if k != "content"}
 
         # --- Post-Processing (JSON Parsing) ---
@@ -1312,7 +1315,11 @@ class LiteLLMClient:
                 # 解析后必须回填——下游 _accumulate_usage 在本层之后消费 usage/cost/model，
                 # 丢弃即把真实云端消耗呈现为零（R21 回归）。
                 llm_metadata = {k: v for k, v in result.items() if k != "content"}
-                response_content = result["content"]
+                # `or ""`：与 _chat_completion 同源——content 为 None（tool_calls
+                # 响应形态）时 json.loads(None) 的 TypeError 会落入本方法外层
+                # except Exception 被 classify_error 误分类（可能收敛为"所有供应商
+                # 失败"并触发无意义重试）；归一为空串后统一 ValueError 收敛。
+                response_content = result["content"] or ""
                 if json_mode:
                     try:
                         parsed = json.loads(response_content)

@@ -28,6 +28,7 @@ from core.model_management_types import (
     ModelOutputValidationError,
     ScenarioExecutionResult,
     ValidatedBusinessOutput,
+    normalize_egress_target,
 )
 from services.ai_service.scenario_executor import ScenarioOutput
 from utils.config_models import NEWS_CATEGORY_MAP
@@ -513,6 +514,14 @@ class NewsClassifier:
         base_candidates = base_route.get("candidates") or ()
         base_budget = next(iter(base_candidates), {})
         sentiment_candidates = [str(cid) for cid in (sentiment_route.get("candidates") or [])]
+        # F01 授权链身份：候选必须携带 purpose（场景用途域）与规范化外发目标，
+        # 与主路由分派（scenario_dispatch.resolve_executor 的 connection_targets）
+        # 同构；缺失即被 authorize_attempt 拒绝（空 purpose 无条件拒绝、远程候选
+        # 空目标拒绝），dedicated 情绪子任务将全候选失败。
+        egress_targets = {
+            str(c.get("connection_id")): normalize_egress_target(c.get("api_base"))
+            for c in dispatch.snapshot.connections
+        }
         sentiment_snapshot = dataclass_replace(
             dispatch.snapshot,
             routes=(
@@ -527,6 +536,8 @@ class NewsClassifier:
                             "budget_amount_cny": base_budget.get("budget_amount_cny"),
                             "budget_limit_cny": base_budget.get("budget_limit_cny"),
                             "budget_policy_snapshot": base_budget.get("budget_policy_snapshot"),
+                            "target_fingerprint": egress_targets.get(conn_id),
+                            "purpose": "news_annotation",
                         }
                         for index, conn_id in enumerate(sentiment_candidates)
                     ),
