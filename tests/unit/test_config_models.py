@@ -349,6 +349,9 @@ class TestLoadConfigWithValidation:
     def test_missing_file_returns_defaults(self, monkeypatch, tmp_path):
         config_file = str(tmp_path / "nonexistent.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
+        # 声明外部覆盖：禁用 legacy 配置位置迁移（_migrate_config_location），
+        # 否则 APP_ROOT 旧 user_settings.json 被复制进测试文件，破坏「缺文件」语义。
+        monkeypatch.setenv("ASTOCK_CONFIG_FILE", config_file)
         ConfigHandler._clear_cache()
         result = ConfigHandler.load_config_with_validation()
         assert result.is_valid is True

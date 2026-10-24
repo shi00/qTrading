@@ -13,6 +13,24 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _isolated_config_file(tmp_path, monkeypatch):
+    """配置文件隔离到 tmp：本组测试直接写盘，禁止污染真实用户配置。
+
+    同时声明 ASTOCK_CONFIG_FILE 外部覆盖，禁用 legacy 配置位置迁移
+    （_migrate_config_location），防止 APP_ROOT 旧 user_settings.json
+    被复制进测试文件。
+    """
+    import utils.config_handler as config_module
+
+    config_file = str(tmp_path / "lock_test_settings.json")
+    monkeypatch.setattr(config_module, "CONFIG_FILE", config_file)
+    monkeypatch.setenv("ASTOCK_CONFIG_FILE", config_file)
+    ConfigHandler._clear_cache()
+    yield
+    ConfigHandler._clear_cache()
+
+
 class TestConfigThreadSafety:
     """测试配置处理器的线程安全性"""
 
