@@ -557,6 +557,35 @@ class TestSliderInputTextInput:
 
         callback.assert_called_once_with(10.0)
 
+    @pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "infinity", "NaN"])
+    def test_non_finite_text_input_restores_value(
+        self,
+        mock_app_colors_state,
+        raw: str,
+    ) -> None:
+        """非有限输入（nan/±inf）→ float() 可解析但不上抛，恢复当前值。
+
+        回归：NaN 经 _snap_to_step 与 min/max 比较恒 False 会意外收敛到
+        max_val 并上抛（静默写入边界极值），须与 "abc" 同口径恢复。
+        """
+        callback = MagicMock()
+        component = make_component(
+            SliderInput,
+            value=50.0,
+            min_val=0,
+            max_val=100,
+            step=10.0,
+            on_change=callback,
+        )
+        run_mount_effects(component)
+        result = render_once(component)
+        text_field = _find_control(result, ft.TextField)
+
+        _invoke(text_field.on_blur, _make_event(raw))
+
+        callback.assert_not_called()
+        assert _find_control(_rerender(component), ft.TextField).value == "50"
+
 
 class TestSliderInputControlledSync:
     """D1 受控语义：父级 value 驱动 draft（use_effect deps 同步）。"""

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 
 import flet as ft
@@ -119,6 +120,12 @@ def SliderInput(
         try:
             parsed = float(text)
         except ValueError:
+            set_draft(formatter(value))
+            return
+        if not math.isfinite(parsed):
+            # "inf"/"nan" 等非有限值：float() 可解析但非合法输入。若放行，
+            # NaN 与 min/max 比较恒 False 会经 _snap_to_step 意外收敛到 max_val
+            # 并上抛（静默写入边界极值）；此处与 "abc" 同口径恢复当前值。
             set_draft(formatter(value))
             return
         new_val = _snap_to_step(parsed, min_val, max_val, step)
