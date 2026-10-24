@@ -1931,3 +1931,92 @@ class TestProcessingQueueLoopLocal:
         assert svc.processing_queue is mock_q
         svc.processing_queue = None
         assert svc.processing_queue is None
+
+
+# ---------------------------------------------------------------------------
+# M14-F1: _poll_loop 轮询间隔归一化
+# ---------------------------------------------------------------------------
+
+
+class TestPollIntervalNormalization:
+    """M14-F1: _poll_loop 对失真 news_poll_interval 配置的归一化。
+
+    写侧 KV 直写（save_config）绕过 AppConfig(app_prefs) 的 ge=10 下界钳制，
+    0/负数会使 asyncio.sleep 立即返回形成紧密轮询（外部 API 请求风暴 + CPU
+    空转），非数值则抛 TypeError 使轮询协程静默死亡（fire-and-forget 无重启）。
+    消费侧统一回退默认 60s。
+    """
+
+    @staticmethod
+    def _make_hooks(svc, raw_values):
+        """构造驱动 _poll_loop 两轮的 fake 配置/sleep，返回 (slept, hooks)。"""
+        slept: list[float] = []
+        real_sleep = asyncio.sleep
+        raw_iter = iter(raw_values)
+
+        def fake_get_config(key, default=None):
+            assert key == "news_poll_interval"
+            return next(raw_iter, default)
+
+        async def fake_sleep(seconds):
+            slept.append(seconds)
+            svc._running = False  # 第一轮 sleep 后置停，驱动循环退出
+            await real_sleep(0)  # 让 create_task 的 fetch 任务得到调度
+
+        return slept, fake_get_config, fake_sleep
+
+    @pytest.mark.asyncio
+    async def test_zero_interval_falls_back_to_default(self, svc):
+        """poll_interval=0（紧密循环风险）应回退默认 60s。"""
+        slept, fake_get_config, fake_sleep = self._make_hooks(svc, [0])
+        with (
+            patch("services.news_subscription_service.ConfigHandler.get_config", side_effect=fake_get_config),
+            patch("services.news_subscription_service.asyncio.sleep", side_effect=fake_sleep),
+            patch.object(svc, "_fetch_and_notify", AsyncMock()),
+        ):
+            svc._running = True
+            await svc._poll_loop()
+        assert len(slept) == 1
+        assert slept[0] == 60.0
+
+    @pytest.mark.asyncio
+    async def test_negative_interval_falls_back_to_default(self, svc):
+        """poll_interval 为负数应回退默认 60s。"""
+        slept, fake_get_config, fake_sleep = self._make_hooks(svc, [-5])
+        with (
+            patch("services.news_subscription_service.ConfigHandler.get_config", side_effect=fake_get_config),
+            patch("services.news_subscription_service.asyncio.sleep", side_effect=fake_sleep),
+            patch.object(svc, "_fetch_and_notify", AsyncMock()),
+        ):
+            svc._running = True
+            await svc._poll_loop()
+        assert len(slept) == 1
+        assert slept[0] == 60.0
+
+    @pytest.mark.asyncio
+    async def test_non_numeric_interval_falls_back_to_default(self, svc):
+        """poll_interval 非数值（KV 直写脏数据）应回退默认 60s 而非抛 TypeError。"""
+        slept, fake_get_config, fake_sleep = self._make_hooks(svc, ["abc"])
+        with (
+            patch("services.news_subscription_service.ConfigHandler.get_config", side_effect=fake_get_config),
+            patch("services.news_subscription_service.asyncio.sleep", side_effect=fake_sleep),
+            patch.object(svc, "_fetch_and_notify", AsyncMock()),
+        ):
+            svc._running = True
+            await svc._poll_loop()
+        assert len(slept) == 1
+        assert slept[0] == 60.0
+
+    @pytest.mark.asyncio
+    async def test_valid_numeric_interval_passthrough(self, svc):
+        """正常数值配置应原样生效（int 30 → sleep 30.0），不受归一化影响。"""
+        slept, fake_get_config, fake_sleep = self._make_hooks(svc, [30])
+        with (
+            patch("services.news_subscription_service.ConfigHandler.get_config", side_effect=fake_get_config),
+            patch("services.news_subscription_service.asyncio.sleep", side_effect=fake_sleep),
+            patch.object(svc, "_fetch_and_notify", AsyncMock()),
+        ):
+            svc._running = True
+            await svc._poll_loop()
+        assert len(slept) == 1
+        assert slept[0] == 30.0
