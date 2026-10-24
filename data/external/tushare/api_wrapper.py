@@ -129,6 +129,9 @@ class TushareApiWrapper:
         # 若 set_token/reload_rate_limiters 在 await 期间替换 self.client._rate_limiter，则 consume 在旧 limiter、
         # on_success/reduce_rate 在新 limiter，破坏限流语义（B1+B17 竞态修复）。
         global_limiter = self.client._rate_limiter
+        # M11-F3：记录最后一次错误，循环耗尽后的 RuntimeError 经 from 链入 __cause__，
+        # 避免 rate_limit / network 路径末次失败经 continue 出循环后原始异常丢失。
+        last_error: Exception | None = None
 
         for i in range(self.client.max_retries):
             # 两段消费：全局 _rate_limiter 始终先消费，per-API limiter 额外收紧
@@ -166,6 +169,13 @@ class TushareApiWrapper:
 
                 return result
             except Exception as e:
+                last_error = e
+                # M11-F1：配置型错误（token 未配置）不可重试——立即 raise 保留结构化语义，
+                # 与 _get_pro / get_trade_cal / _handle_probe_call 契约一致；否则 max_retries>1
+                # 时会先重试 N 次（每次 sleep 1s）再被归并为 RuntimeError，调用方无法统一捕获。
+                if isinstance(e, TushareConfigError):
+                    raise
+
                 from utils.error_classifier import classify_error, classify_severity
 
                 error_msg = str(e)
@@ -307,7 +317,9 @@ class TushareApiWrapper:
                     raise
 
                 await asyncio.sleep(1)
-        raise RuntimeError(f"[tushare_api] All {self.client.max_retries} retries exhausted for {api_name}")
+        raise RuntimeError(
+            f"[tushare_api] All {self.client.max_retries} retries exhausted for {api_name}"
+        ) from last_error
 
     @log_async_operation(
         operation_name="TushareClient._handle_api_call_paginated",

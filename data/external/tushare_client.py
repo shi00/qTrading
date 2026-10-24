@@ -410,8 +410,11 @@ class TushareClient:
                 # 在 async 上下文（已有运行 loop）或无 loop 同步上下文中均会抛 RuntimeError，
                 # 导致 bootstrap / scheduler_service → DataProcessor → refresh_token 链路回归。
                 # _token_invalid 直接原子写（False）：__init__ 路径不与 _handle_api_call 并发。
-                self._set_token_core(token)
-                self._token_invalid = False
+                # 持 self._lock 调用（M11-F2）：_set_token_core 契约要求调用方持锁以保护
+                # token / pro / 限流器引用的原子替换，避免与 set_token_async 并发时撕裂错配。
+                with self._lock:
+                    self._set_token_core(token)
+                    self._token_invalid = False
             return
 
         with self._lock:
