@@ -46,15 +46,20 @@ _LOT_SCALE = 10_000.0  # 手 → 万手
 
 
 def is_valid_number(val: Any) -> bool:
-    """判断 val 是否为有效（非 NaN）数值。"""
+    """判断 val 是否为有效（非 NaN、非 ±inf）数值。
+
+    ±inf 不是合法业务值（上游除零/溢出等异常产物），放行会经格式化伪装为
+    "inf亿"/"inf%" 这类看似合法的展示（违背 R21 缺失/非法不伪装精神），
+    与 NaN 同口径返回 False。
+    """
     if val is None:
         return False
     if isinstance(val, float):
-        return not math.isnan(val)
+        return math.isfinite(val)
     if isinstance(val, int):
         return True
     try:
-        return not math.isnan(float(val))
+        return math.isfinite(float(val))
     except (TypeError, ValueError):
         return False
 

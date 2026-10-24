@@ -19,6 +19,7 @@
 import asyncio
 import concurrent.futures
 import inspect
+import threading
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -375,6 +376,32 @@ class TestShowBehavior:
         ids = [t.id for t in state.toasts]
         assert len(ids) == 3
         assert len(set(ids)) == 3  # 唯一
+
+    def test_show_and_remove_thread_safety_consistency(self):
+        """并发 show + remove 读改写不丢更新（show 与 _remove_toast 同锁保护）。
+
+        回归：_remove_toast 原先无锁过滤列表，与并发 show 的读改写交错会
+        丢失移除期间新增的 toast（旧快照覆盖）。barrier 最大化交错概率；
+        并发 show 超过 MAX_TOAST_COUNT 按最旧裁剪，最终数量 = MAX（若锁
+        失效导致读改写丢更新，len 将小于 MAX 暴露丢失）。
+        """
+        page = self._make_page()
+        manager = ToastManager(page)
+        threads = 16
+        barrier = threading.Barrier(threads)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as pool:
+            futures = [pool.submit(lambda i=i: (barrier.wait(), manager.show(f"m{i}"))) for i in range(threads)]
+            for fut in futures:
+                fut.result(timeout=10)
+
+        state = get_global_state()
+        assert len(state.toasts) == min(threads, ToastManager.MAX_TOAST_COUNT)
+
+        first_id = state.toasts[0].id
+        tm_module._remove_toast(first_id)
+        state = get_global_state()
+        assert len(state.toasts) == min(threads, ToastManager.MAX_TOAST_COUNT) - 1
+        assert all(t.id != first_id for t in state.toasts)
 
 
 # ============================================================================

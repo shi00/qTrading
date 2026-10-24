@@ -132,6 +132,15 @@ class TestBoundaries:
         assert format_vol(None) == "-"
         assert format_metadata_cell("amount", None) == "-"
 
+    def test_infinite_returns_dash_not_inf_display(self):
+        """±inf 非合法业务值（上游异常产物），与 NaN 同口径 "-"（R21 不伪装 "inf亿"）。"""
+        assert is_valid_number(float("inf")) is False
+        assert is_valid_number(float("-inf")) is False
+        assert format_amount(float("inf")) == "-"
+        assert format_mv(float("-inf")) == "-"
+        assert format_pct("t1_pct", float("inf")) == "-"
+        assert format_metadata_cell("amount", float("inf")) == "-"
+
     def test_zero_is_valid_value(self):
         assert format_amount(0) == "0.00亿"
         assert format_vol(0) == "0.0万手"

@@ -285,9 +285,15 @@ def show(
 
 
 def _remove_toast(toast_id: int) -> None:
-    """从队列移除指定 toast（供 ToastCard dismiss 回调）。"""
-    state = get_global_state()
-    state.toasts = [t for t in state.toasts if t.id != toast_id]
+    """从队列移除指定 toast（供 ToastCard dismiss 回调）。
+
+    与 ``show()`` 同以 ``_mutation_lock`` 保护读改写原子性：show 可从任意线程
+    调用（page.toast.show 是跨线程公开入口），无锁过滤列表会与并发 show 的
+    读改写交错丢更新（如移除期间新增的 toast 被旧快照覆盖）。
+    """
+    with _mutation_lock:
+        state = get_global_state()
+        state.toasts = [t for t in state.toasts if t.id != toast_id]
 
 
 async def stop_all() -> None:
@@ -375,8 +381,8 @@ def ToastManagerView() -> ft.Container:
     state = get_global_state()
 
     def _on_dismiss(toast_id: int) -> None:
-        """ToastCard dismiss 回调：从队列移除。"""
-        get_global_state().toasts = [t for t in get_global_state().toasts if t.id != toast_id]
+        """ToastCard dismiss 回调：从队列移除（委托模块级 _remove_toast，与 show 同锁）。"""
+        _remove_toast(toast_id)
 
     return ft.Container(
         content=ft.Column(
