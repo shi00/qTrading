@@ -370,7 +370,10 @@ class MarketDataService:
                     while isinstance(unwrapped, functools.partial):
                         unwrapped = unwrapped.func
 
-                    if asyncio.iscoroutinefunction(unwrapped):
+                    # Python 3.16 将移除 asyncio.iscoroutinefunction，统一用 inspect 版本
+                    # （Python 3.14 下前者触发 DeprecationWarning，被 warning 配置升格为异常，
+                    # 曾导致所有 listener 通知静默失败）
+                    if inspect.iscoroutinefunction(unwrapped):
                         # async listener: 在事件循环线程执行（Flet set_state 必须在主线程）
                         # 加超时防止单个 listener 卡死阻塞整个 fetch 周期
                         await asyncio.wait_for(listener(), timeout=10.0)

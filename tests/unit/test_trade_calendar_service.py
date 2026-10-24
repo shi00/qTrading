@@ -136,6 +136,14 @@ class TestFetchFromApiAndPersist:
         result = await svc._fetch_from_api_and_persist(datetime.date(2024, 6, 14), datetime.date(2024, 6, 14))
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_api_receives_yyyymmdd_string(self):
+        """M13-F1: API 补齐调用点显式归一化 date → YYYYMMDD 字符串（不依赖 wrapper 内部兜底）。"""
+        df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        svc = _make_service(api_return=df)
+        await svc._fetch_from_api_and_persist(datetime.date(2024, 6, 14), datetime.date(2024, 6, 14))
+        svc._api.get_trade_cal.assert_called_once_with(start_date="20240614", end_date="20240614")
+
 
 class TestEnsureCalendarRange:
     @pytest.mark.asyncio
@@ -178,6 +186,15 @@ class TestEnsureCalendarRange:
         svc._api.get_trade_cal = AsyncMock(side_effect=Exception("API error"))
         result = await svc.ensure_calendar_range("20240601", "20240630")
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_api_receives_yyyymmdd_string(self):
+        """M13-F1: 批量补齐调用点显式归一化 date → YYYYMMDD 字符串。"""
+        df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        svc = _make_service(api_return=df)
+        result = await svc.ensure_calendar_range(datetime.date(2024, 6, 1), datetime.date(2024, 6, 30))
+        assert result is True
+        svc._api.get_trade_cal.assert_called_once_with(start_date="20240601", end_date="20240630")
 
 
 class TestIsTradingDay:
@@ -703,6 +720,30 @@ class TestGetTradeDatesBatch:
         result = await svc.get_trade_dates_batch(ranges)
         assert len(result) == 2
 
+    @pytest.mark.asyncio
+    async def test_str_ranges_normalized(self):
+        """M13-F3: ranges 元素为 str 时归一化处理（与 get_trade_dates 同口径），键保持原始输入。"""
+        df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        svc = _make_service(cache_return=df)
+        result = await svc.get_trade_dates_batch([("20240610", "20240620")])
+        assert result == {("20240610", "20240620"): [datetime.date(2024, 6, 14)]}
+
+    @pytest.mark.asyncio
+    async def test_invalid_range_returns_empty_list(self):
+        """M13-F3: 非法/逆序范围安全跳过（值为 []），不抛 TypeError。"""
+        svc = _make_service(cache_return=None)
+        result = await svc.get_trade_dates_batch([(None, "20240614"), ("20240620", "20240610")])
+        assert result == {(None, "20240614"): [], ("20240620", "20240610"): []}
+
+    @pytest.mark.asyncio
+    async def test_mixed_valid_and_invalid_ranges(self):
+        """M13-F3: 合法与非法范围混用时，仅合法范围查询，非法范围独立返回 []。"""
+        df = pd.DataFrame({"cal_date": ["20240614"], "is_open": [1]})
+        svc = _make_service(cache_return=df)
+        result = await svc.get_trade_dates_batch([("20240610", "20240620"), (None, "20240630")])
+        assert result[("20240610", "20240620")] == [datetime.date(2024, 6, 14)]
+        assert result[(None, "20240630")] == []
+
 
 class TestClearCache:
     def test_clear(self):
@@ -742,6 +783,16 @@ class TestGetEffectiveTradeDate:
 
         proc = self._proc(calendar_date=datetime.datetime(2024, 6, 14, 15, 0))
         assert await get_effective_trade_date(proc) == datetime.date(2024, 6, 14)
+
+    @pytest.mark.asyncio
+    async def test_l2_datetime_normalized(self):
+        """M13-F4: L2 quote_dao 返回 datetime 时归一为 date（与 L1 分支对称，datetime 是 date 子类）。"""
+        from data.domain_services.trade_calendar_service import get_effective_trade_date
+
+        proc = self._proc(calendar_date=None, synced_date=datetime.datetime(2024, 6, 14, 15, 0))
+        result = await get_effective_trade_date(proc)
+        assert result == datetime.date(2024, 6, 14)
+        assert type(result) is datetime.date
 
     @pytest.mark.asyncio
     async def test_l1_none_falls_back_to_synced(self):

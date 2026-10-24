@@ -208,3 +208,19 @@ class TestOfflineCalendarGetTradeDates:
         with patch("data.domain_services.offline_calendar.get_calendar", return_value=mock_cal):
             result = OfflineCalendar.get_trade_dates("2024-01-01", "2024-01-05")
             assert result == []
+
+    def test_get_trade_dates_accepts_date_objects(self):
+        """M13-F2: get_trade_dates 接受 date 对象（TradeCalendarService 内部传 date，
+        此前调用点依赖 # type: ignore 压制；签名放宽后 date 为一等合法输入）。"""
+        from data.domain_services.offline_calendar import OfflineCalendar
+
+        OfflineCalendar._calendar = None
+
+        import pandas as pd
+
+        mock_cal = MagicMock()
+        mock_cal.valid_days.return_value = pd.DatetimeIndex(["2024-01-02", "2024-01-03"])
+
+        with patch("data.domain_services.offline_calendar.get_calendar", return_value=mock_cal):
+            result = OfflineCalendar.get_trade_dates(datetime.date(2024, 1, 1), datetime.date(2024, 1, 5))
+            assert result == ["20240102", "20240103"]
