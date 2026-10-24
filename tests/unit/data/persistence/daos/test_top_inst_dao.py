@@ -101,7 +101,13 @@ class TestGetTopInstBatch:
 
         pd.testing.assert_frame_equal(result, expected)
         dao.chunked_in_query.assert_awaited_once()
-        call_kwargs = dao.chunked_in_query.call_args.kwargs
+        call_args = dao.chunked_in_query.call_args
+        sql_template = call_args.args[1]
+        # DISTINCT ON 确定性（DAT-09）：net_buy DESC 必须显式 NULLS LAST，
+        # 否则 PostgreSQL DESC 默认 NULLS FIRST 会选到 net_buy 为空的席位行。
+        sql = sql_template("$1", 2, 2)
+        assert "net_buy DESC NULLS LAST" in sql
+        call_kwargs = call_args.kwargs
         # params_fn 应返回 [as_of_date]（DAT-26: DAO 边界统一 date 对象）
         params_fn = call_kwargs["params_fn"]
         assert params_fn(["000001.SZ"]) == [datetime.date(2024, 6, 14)]
@@ -117,8 +123,11 @@ class TestGetTopInstBatch:
 
         pd.testing.assert_frame_equal(result, expected)
         dao.chunked_in_query.assert_awaited_once()
-        call_kwargs = dao.chunked_in_query.call_args.kwargs
+        call_args = dao.chunked_in_query.call_args
+        call_kwargs = call_args.kwargs
         assert "params_fn" not in call_kwargs
+        # 无 as-of 分支同样需要 NULLS LAST 保证 DISTINCT ON 的确定性
+        assert "net_buy DESC NULLS LAST" in call_args.args[1]
 
     @pytest.mark.asyncio
     async def test_get_top_inst_batch_exception_returns_empty_df(self):

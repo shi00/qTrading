@@ -186,6 +186,26 @@ class TestBacktestDAO:
         assert "executed_at" not in columns, "executed_at 应由 DB server_default 生成, 不应被 None 覆盖"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("non_finite", [float("inf"), float("-inf"), float("nan")])
+    async def test_save_result_normalizes_non_finite_profit_factor(
+        self,
+        dao: BacktestDAO,
+        backtest_result: BacktestResult,
+        non_finite: float,
+    ) -> None:
+        """非有限 profit_factor（+inf/-inf/NaN）统一归一为 None，避免写入有限数值列失败。"""
+        result_dict = _result_to_dict(backtest_result)
+        metrics = dict(backtest_result.metrics)
+        metrics["profit_factor"] = non_finite
+        result_dict["metrics"] = metrics
+        dao._save_upsert = AsyncMock(return_value=1)
+
+        await dao.save_result(result_dict)
+
+        df_arg = dao._save_upsert.call_args.args[0]
+        assert pd.isna(df_arg["profit_factor"].iloc[0])
+
+    @pytest.mark.asyncio
     async def test_get_result_found(self, dao: BacktestDAO) -> None:
         mock_df = pd.DataFrame(
             {

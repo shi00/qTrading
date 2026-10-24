@@ -562,6 +562,26 @@ class TestDat06AnnDateNotNullPredicates:
         assert "ann_date <=" not in sql
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("as_of_date", ["2024-07-01", None])
+    async def test_top10_holders_order_null_ratio_last(self, as_of_date):
+        """hold_ratio 可空：DESC 排序须显式 NULLS LAST，否则 NULL 行会排在已知比例之前。"""
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        await dao.get_top10_holders("000001.SZ", as_of_date=as_of_date)
+        sql = dao._read_db.call_args[0][0]
+        assert "hold_ratio DESC NULLS LAST" in sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("as_of_date", ["2024-07-01", None])
+    async def test_top10_holders_batch_order_null_ratio_last(self, as_of_date):
+        """DISTINCT ON 选「比例最大行」：NULL 比例行不得因 DESC 默认 NULLS FIRST 抢选。"""
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        await dao.get_top10_holders_batch(["000001.SZ"], as_of_date=as_of_date)
+        sql = dao._read_db.call_args[0][0]
+        assert "hold_ratio DESC NULLS LAST" in sql
+
+    @pytest.mark.asyncio
     async def test_get_stk_holdernumber_batch_as_of(self):
         dao = _make_dao()
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "holder_num": [100], "rn": [1]}))

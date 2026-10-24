@@ -54,7 +54,7 @@ class TopInstDao(BaseDao):
                         FROM top_inst
                         WHERE ts_code IN ({placeholders})
                           AND trade_date <= ${start_idx + chunk_len}
-                        ORDER BY ts_code, trade_date DESC, net_buy DESC
+                        ORDER BY ts_code, trade_date DESC, net_buy DESC NULLS LAST
                         """
                     ),
                     lambda chunk: [as_of],
@@ -66,7 +66,7 @@ class TopInstDao(BaseDao):
                     sell, sell_rate, net_buy, reason
                 FROM top_inst
                 WHERE ts_code IN ({placeholders})
-                ORDER BY ts_code, trade_date DESC, net_buy DESC
+                ORDER BY ts_code, trade_date DESC, net_buy DESC NULLS LAST
                 """,
                 None,
             )

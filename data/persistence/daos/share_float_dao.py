@@ -52,6 +52,12 @@ class ShareFloatDao(BaseDao):
                 None 时使用今天。
             days: 前瞻天数，仅返回 float_date <= as_of_date + days 的记录。
 
+        PIT（R24）：as_of_date 同时作为公告时点上界——只返回
+        ``ann_date <= as_of_date`` 的解禁记录，排除当时尚未公告（公告日晚于决策日）的
+        计划，避免「未来才知道的解禁」进入历史决策；ann_date 为空的记录无法判定
+        公告时点，同样排除。as_of_date 为 None（实时视图）时以今天为上界，等价于
+        「只含截至今日已公告」的记录。
+
         Returns:
             DataFrame，包含所有匹配的解禁记录，按 ts_code, float_date 排序。
         """
@@ -75,10 +81,11 @@ class ShareFloatDao(BaseDao):
                     WHERE ts_code IN ({placeholders})
                       AND float_date >= ${start_idx + chunk_len}
                       AND float_date <= ${start_idx + chunk_len + 1}
+                      AND ann_date <= ${start_idx + chunk_len + 2}
                     ORDER BY ts_code, float_date
                     """
                 ),
-                lambda chunk: [start_date, end_date],
+                lambda chunk: [start_date, end_date, start_date],
             )
 
         return await self._batch_get_with_as_of_date(

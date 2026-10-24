@@ -111,7 +111,7 @@ class HolderDao(BaseDao):
                            hold_ratio, hold_float_ratio, hold_change, holder_type
                     FROM top10_holders
                     WHERE ts_code = $1 AND ann_date IS NOT NULL AND ann_date <= $2
-                    ORDER BY end_date DESC, hold_ratio DESC
+                    ORDER BY end_date DESC, hold_ratio DESC NULLS LAST
                     LIMIT 20
                     """,
                     (ts_code, self._to_db_date(as_of_date)),
@@ -123,7 +123,7 @@ class HolderDao(BaseDao):
                            hold_ratio, hold_float_ratio, hold_change, holder_type
                     FROM top10_holders
                     WHERE ts_code = $1 AND ann_date IS NOT NULL
-                    ORDER BY end_date DESC, hold_ratio DESC
+                    ORDER BY end_date DESC, hold_ratio DESC NULLS LAST
                     LIMIT 20
                     """,
                     (ts_code,),
@@ -192,7 +192,7 @@ class HolderDao(BaseDao):
                         WHERE ts_code IN ({placeholders})
                           AND ann_date IS NOT NULL
                           AND ann_date <= ${ann_date_param}
-                        ORDER BY ts_code, end_date DESC, hold_ratio DESC
+                        ORDER BY ts_code, end_date DESC, hold_ratio DESC NULLS LAST
                     """
 
                 return (sql_template_fn, lambda chunk: [as_of])
@@ -203,7 +203,7 @@ class HolderDao(BaseDao):
                 FROM top10_holders
                 WHERE ts_code IN ({placeholders})
                   AND ann_date IS NOT NULL
-                ORDER BY ts_code, end_date DESC, hold_ratio DESC
+                ORDER BY ts_code, end_date DESC, hold_ratio DESC NULLS LAST
                 """,
                 None,
             )

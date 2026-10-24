@@ -93,6 +93,33 @@ class TestQuoteDaoGetDailyQuotes:
         assert isinstance(result, pd.DataFrame) and "ts_code" in result.columns
 
     @pytest.mark.asyncio
+    async def test_empty_code_list_returns_empty_without_query(self):
+        """显式空池 ts_code_list=[] 必须返回空表，不得降级为不带 ts_code 过滤的全市场直查。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        dao.chunked_in_query = AsyncMock()
+
+        result = await dao.get_daily_quotes(ts_code_list=[])
+
+        assert result.empty
+        assert list(result.columns) == [
+            "ts_code",
+            "trade_date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "pre_close",
+            "change",
+            "pct_chg",
+            "vol",
+            "amount",
+            "adj_factor",
+        ]
+        dao._read_db.assert_not_awaited()
+        dao.chunked_in_query.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_code_list_branch_sorts(self):
         """证伪 D3-M5: ts_code_list 分支 concat 后必须按 (ts_code, trade_date) 升序返回。
 
@@ -753,6 +780,11 @@ class TestQuoteDaoGetBulkTableCounts:
             result = await dao.get_bulk_table_counts("daily_quotes", "20240615", "20240615")
             assert len(result) > 0
 
+        # DAT-26：8 位 YYYYMMDD 串必须在 DAO 边界归一为 date 对象后绑定（asyncpg DATE 严格类型）
+        stmt_arg = dao._read_db_select.call_args.args[0]
+        bound_params = list(stmt_arg.compile().params.values())
+        assert bound_params == [datetime.date(2024, 6, 15), datetime.date(2024, 6, 15)]
+
     @pytest.mark.asyncio
     async def test_invalid_table(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
@@ -801,6 +833,10 @@ class TestQuoteDaoGetBulkTableCountsMulti:
             "daily_quotes": {datetime.date(2024, 6, 15): 100, datetime.date(2024, 6, 14): 90},
             "daily_indicators": {datetime.date(2024, 6, 15): 80},
         }
+        # DAT-26：UNION ALL 各分支的日期绑定参数均为 date 对象（literal 表名为 str，排除）
+        stmt_arg = dao._read_db_select.call_args.args[0]
+        bound_dates = [v for v in stmt_arg.compile().params.values() if isinstance(v, datetime.date)]
+        assert bound_dates == [datetime.date(2024, 6, 14), datetime.date(2024, 6, 15)] * 2
 
     @pytest.mark.asyncio
     async def test_invalid_and_missing_tables_isolated(self):
@@ -1142,6 +1178,10 @@ class TestQuoteDaoGetEmptyDaysMap:
             "moneyflow_daily": {datetime.date(2024, 6, 14), datetime.date(2024, 6, 15)},
             "moneyflow_hsgt": {datetime.date(2024, 6, 15)},
         }
+        # DAT-26：窗口上下界以 date 对象绑定（8 位 YYYYMMDD 串不可直接绑 DATE 列）
+        stmt_arg = dao._read_db_select.call_args.args[0]
+        bound_params = list(stmt_arg.compile().params.values())
+        assert bound_params[-2:] == [datetime.date(2024, 6, 14), datetime.date(2024, 6, 15)]
 
     @pytest.mark.asyncio
     async def test_returns_empty_on_query_failure(self):

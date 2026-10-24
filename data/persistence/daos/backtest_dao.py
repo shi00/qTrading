@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import math
 from typing import Any
 
 import pandas as pd
@@ -76,7 +77,9 @@ class BacktestDAO(BaseDao):
         profit_factor = metrics.get("profit_factor")
         if profit_factor is not None and not isinstance(profit_factor, (int, float)):
             profit_factor = None
-        if profit_factor is not None and profit_factor == float("inf"):
+        # 非有限值（+inf/-inf/NaN）无法写入 Finite 数值列，统一归一为 None（缺失，
+        # R21 不伪装）；原实现仅处理 +inf，-inf/NaN 会触发 DB 写入失败。
+        if profit_factor is not None and not math.isfinite(profit_factor):
             profit_factor = None
 
         df = pd.DataFrame(
