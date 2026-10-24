@@ -510,13 +510,19 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
         try:
             status = await self.cache.sync_dao.get_sync_status("financial_reports")
-            if status is None or not isinstance(status, dict) or not status.get("last_sync_date"):
+            # NaT 在 pandas 中为真值，仅用 not 判定会把「未同步」误判为「已同步」。
+            if status is None or not isinstance(status, dict):
+                return True, I18n.get("status_never_synced")
+            last_sync_raw = status.get("last_sync_date")
+            if last_sync_raw is None or pd.isna(last_sync_raw):
                 return True, I18n.get("status_never_synced")
 
-            last_sync = status.get("last_sync_date")
-            if isinstance(last_sync, str):
-                last_sync = parse_date(last_sync)
-            days_since = (get_now() - last_sync.replace(tzinfo=None)).days  # type: ignore[union-attr]
+            # sync_status.last_sync_date 为 DATE 列，get_sync_status 经 DataFrame 透传后
+            # 可能是 datetime.date / pandas.Timestamp / str；统一经 parse_date 归一为
+            # aware datetime，再去 tzinfo 相减（get_now() 为 CST aware），避免
+            # date.replace(tzinfo=) 的 TypeError 被下方 except 吞成「永远需要同步」。
+            last_sync = parse_date(last_sync_raw)
+            days_since = (get_now().replace(tzinfo=None) - last_sync.replace(tzinfo=None)).days
 
             if days_since >= 30:
                 return True, I18n.get("status_days_ago", days=days_since)
@@ -701,7 +707,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                         had_fetch_failures = True
                         logger.warning(
                             "[DataProcessor] Sync Concepts | ⚠️ Subtask failed: %s",
-                            r,
+                            safe_error(r),
                         )
                     elif isinstance(r, pd.DataFrame):
                         # 空响应视为该概念取数不确定（R21），不得据此认定"该概念无成分"

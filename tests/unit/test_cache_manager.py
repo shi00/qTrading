@@ -30,6 +30,7 @@ from data.persistence.daos.sw_industry_dao import (
 )
 from data.persistence.daos.express_dao import ExpressDao
 from data.persistence.daos.watchlist_dao import WatchlistDao
+from data.persistence.daos.base_dao import EngineDisposedError
 
 pytestmark = pytest.mark.unit
 
@@ -378,6 +379,29 @@ class TestCacheManagerClose:
             mock_gll.return_value.set = MagicMock()
             await mgr.close()
             assert mgr._disposed is True
+            mock_engine.dispose.assert_called_once_with()
+            assert mgr.engine is None
+
+    @pytest.mark.asyncio
+    async def test_close_retries_dispose_when_engine_left_alive(self):
+        """上次 dispose 中途抛错后 _disposed=True 但 engine 仍存活，再次 close() 必须重试释放。"""
+        mgr = _make_mgr()
+        mock_engine = MagicMock()
+        mock_engine.dispose = AsyncMock()
+        mgr._disposed = True  # 模拟上次 close 失败后的残留状态
+        mgr.engine = mock_engine
+        mgr._engine_manager.engine = mock_engine
+        with (
+            patch("utils.loop_local.get_loop_local") as mock_gll,
+            patch("utils.loop_local.del_loop_local"),
+            patch("data.persistence.daos.base_dao.BaseDao._get_maintenance_event") as mock_evt,
+        ):
+            mock_evt.return_value = MagicMock()
+            mock_evt.return_value.set = MagicMock()
+            mock_gll.return_value = MagicMock()
+            mock_gll.return_value.is_set = MagicMock(return_value=True)
+            mock_gll.return_value.set = MagicMock()
+            await mgr.close()
             mock_engine.dispose.assert_called_once_with()
             assert mgr.engine is None
 
@@ -756,6 +780,36 @@ class TestCacheManagerCheckComprehensiveHealth:
             assert result["global_trade_days"] == 0
 
     @pytest.mark.asyncio
+    async def test_health_check_active_stock_count_failure_is_unknown_not_full(self):
+        """R21：活跃股票数查询失败时基线未知，不得以 1 兜底使覆盖率伪造成 100%。"""
+        mgr = _make_mgr()
+        mgr.stock_dao.get_active_stock_count = AsyncMock(side_effect=Exception("count failed"))
+        mgr.quote_dao.get_date_range = AsyncMock(return_value=(None, None))
+
+        mock_conn = self._make_health_conn()  # count scalar = 50
+        mock_engine_ctx, _ = _make_async_engine_ctx(mock_conn)
+        mgr.engine = MagicMock()
+        mgr.engine.connect = MagicMock(return_value=mock_engine_ctx)
+
+        with (
+            patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock),
+            patch(
+                "data.cache.cache_manager.TABLE_DEFINITIONS",
+                {
+                    "daily_quotes": {
+                        "type": "stock",
+                        "quality_config": {"monitor": True},
+                        "sync_config": {"keys": ["ts_code"]},
+                    },
+                },
+            ),
+        ):
+            result = await mgr.check_comprehensive_health()
+
+        assert result["total_stocks"] == 0
+        assert result["tables"]["daily_quotes"]["ratio"] == 0.0
+
+    @pytest.mark.asyncio
     async def test_health_check_baseline_calc_failure(self):
         """P3-M5-ClassifyError-System-Gap: count_trade_days 抛异常时走 classify_severity 分支 (L681)。
 
@@ -892,6 +946,42 @@ class TestCacheManagerCheckComprehensiveHealth:
         ):
             with pytest.raises(EngineDisposedError, match="Engine disposed during check"):
                 await mgr.check_comprehensive_health()
+
+    @pytest.mark.asyncio
+    async def test_health_check_engine_disposed_message_is_sanitized(self):
+        """R9：EngineDisposedError 消息随异常上抛，不得携带原始异常中的 token 明文。"""
+        mgr = _make_mgr()
+        mgr.stock_dao.get_active_stock_count = AsyncMock(return_value=100)
+        mgr.quote_dao.get_date_range = AsyncMock(return_value=(None, None))
+
+        mock_conn = MagicMock()
+        mock_conn.execution_options = AsyncMock(return_value=mock_conn)
+        mock_conn.execute = AsyncMock(
+            side_effect=Exception("connection was closed token=abcdef123456789"),
+        )
+
+        mock_engine_ctx, _ = _make_async_engine_ctx(mock_conn)
+        mgr.engine = MagicMock()
+        mgr.engine.connect = MagicMock(return_value=mock_engine_ctx)
+
+        with (
+            patch.object(CacheManager, "wait_for_maintenance", new_callable=AsyncMock),
+            patch(
+                "data.cache.cache_manager.TABLE_DEFINITIONS",
+                {
+                    "daily_quotes": {
+                        "type": "stock",
+                        "quality_config": {"monitor": True},
+                        "sync_config": {"keys": ["ts_code"], "date_col": "trade_date"},
+                    },
+                },
+            ),
+        ):
+            with pytest.raises(EngineDisposedError) as exc_info:
+                await mgr.check_comprehensive_health()
+
+        assert "abcdef123456789" not in str(exc_info.value)
+        assert "Engine disposed during check" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_health_check_engine_disposed_propagates_through_gather(self):
@@ -1045,6 +1135,17 @@ class TestCacheManagerCheckTableHasData:
             result = await mgr.check_table_has_data("daily_quotes")
             assert result is False
 
+    @pytest.mark.asyncio
+    async def test_disposed_engine_propagates_not_false(self):
+        """R5：引擎已释放时不得把 EngineDisposedError 吞成 False（伪装成「表无数据」）。"""
+        mgr = _make_mgr()
+        mgr._disposed = True
+
+        with patch("data.persistence.daos.quote_dao._SAFE_TABLE_NAMES", {"daily_quotes"}):
+            with pytest.raises(EngineDisposedError) as exc_info:
+                await mgr.check_table_has_data("daily_quotes")
+        assert str(exc_info.value) == "CacheManager disposed during check_table_has_data"
+
 
 class TestCacheManagerGetConnectionString:
     """连接串获取逻辑（review01-A4 Step2 移入 EngineManager）。"""
@@ -1181,6 +1282,16 @@ class TestCacheManagerPrefetchAuxiliaryData:
         assert "000001.SZ" in result
         assert "dividend" in result["000001.SZ"]
         assert "audit" not in result["000001.SZ"]
+
+    @pytest.mark.asyncio
+    async def test_prefetch_engine_disposed_propagates(self):
+        """R5：引擎已释放时不得降级为「该辅助表无数据」，必须向上传播。"""
+        mgr = _make_mgr()
+        mgr.financial_dao.get_fina_audit_batch = AsyncMock(side_effect=EngineDisposedError("disposed"))
+
+        with pytest.raises(EngineDisposedError) as exc_info:
+            await mgr.prefetch_auxiliary_data(["000001.SZ"])
+        assert str(exc_info.value) == "disposed"
 
     @pytest.mark.asyncio
     async def test_prefetch_auxiliary_data_missing_ts_code_column(self):
@@ -1633,6 +1744,11 @@ class TestCacheManagerNormalizeNewsItem:
         item = {"content": "  test  "}
         result = CacheManager.normalize_news_item(item)
         assert result["content"] == "test"
+
+    def test_content_none_normalized_to_empty(self):
+        """外部源可能给出 content=None（仅标题条目），不得因 None.strip() 中断入库。"""
+        result = CacheManager.normalize_news_item({"content": None})
+        assert result["content"] == ""
 
     def test_sentiment_passthrough(self):
         """N3-5：item 带 sentiment 时透传入库 code。"""
