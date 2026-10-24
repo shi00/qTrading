@@ -156,6 +156,43 @@ def test_bridge_notify_calls_dispatch_when_bound():
     assert bridge.state == StartupState.INIT_FAILED
 
 
+def test_startup_view_syncs_context_when_state_unchanged(mock_i18n, mock_i18n_state, mock_app_colors_state):
+    """回归: dispatch 绑定前 state 未变但 context 已变时, mount effect 仍须同步快照.
+
+    controller 可能在 page.render 调度 effect 之后、dispatch 绑定之前 notify:
+    state 仍为 LOADING, 但 context 已带 embedded_pg_scenario。仅比较 state 会丢失
+    该变更, 首启文案退化为普通启动文案。
+    """
+    from tests.unit.ui.component_renderer import (
+        FakePage,
+        attach_fake_page,
+        make_component,
+        render_once,
+    )
+
+    bridge = _StartupBridge()
+    component = make_component(StartupView, MagicMock(spec=StartupController), bridge, MagicMock())
+    page = FakePage()
+    page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+    attach_fake_page(component, page)
+
+    with patch("ui.startup_views.I18n", mock_i18n):
+        # 1) 初始渲染: state/context hook 取默认快照 (dispatch 尚未绑定)
+        render_once(component)
+        # 2) controller 在 effect 执行前 notify: state 不变, 仅 context 变化
+        bridge.notify(
+            StartupState.LOADING,
+            StartupContext(embedded_pg_scenario=EmbeddedPgStartupScenario.FIRST_RUN),
+        )
+        # 3) mount effect 绑定 dispatch, 必须同步 context 变更
+        component._state.mounted = True
+        component._run_mount_effects()
+        view = render_once(component)
+
+    text_values = {t.value for t in _find_controls(view, ft.Text)}
+    assert "startup_embedded_pg_first_run_title" in text_values, "context 变更须同步到组件 state"
+
+
 # --- 纯函数构建器 ---
 
 
@@ -969,6 +1006,19 @@ def test_build_error_view_engine_missing(mock_i18n):
     texts = _find_controls(view, ft.Text)
     text_values = {t.value for t in texts if hasattr(t, "value")}
     assert "error_db_engine_missing" in text_values
+
+
+def test_build_error_view_sanitizes_detail(mock_i18n):
+    """R9: 错误视图 detail 须二次脱敏, 禁止渲染未脱敏凭证原文."""
+    context = StartupContext(error="db_init_failed", detail="connection failed password=supersecret123")
+    with (
+        patch("ui.startup_views.I18n", mock_i18n),
+        patch("ui.startup_views._get_localized_detail", side_effect=lambda d: d),
+    ):
+        view = _build_error_view(context, MagicMock(), MagicMock(), MagicMock())
+    text_values = {t.value for t in _find_controls(view, ft.Text)}
+    assert not any("supersecret123" in (v or "") for v in text_values), "凭证原文不得渲染"
+    assert any("password=***" in (v or "") for v in text_values), "detail 应经 DataSanitizer 脱敏"
 
 
 def test_build_onboarding_view(mock_controller):

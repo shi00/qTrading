@@ -612,6 +612,9 @@ def _build_error_view(
 ) -> ft.Container:
     """构造启动错误视图 (db_init_failed / db_engine_missing / task_manager_init_failed)."""
     error = context.error or ""
+    # R9: detail 二次脱敏 (与升级失败对话框一致, 禁止渲染未脱敏异常原文)
+    localized_detail = _get_localized_detail(context.detail or "")
+    safe_detail = DataSanitizer.sanitize_error(localized_detail) if localized_detail else ""
     return ft.Container(
         content=ft.Column(
             safe_controls(
@@ -625,7 +628,7 @@ def _build_error_view(
                         weight=ft.FontWeight.BOLD,
                     ),
                     ft.Text(
-                        _get_localized_detail(context.detail or "")[:200],
+                        safe_detail[:200],
                         color=AppColors.ERROR,
                         size=AppStyles.FONT_SIZE_LG,
                     ),
@@ -695,10 +698,11 @@ def StartupView(
             set_context(new_ctx)
 
         bridge.dispatch = _dispatch
-        # 同步 dispatch 绑定前可能已发生的状态变更:
+        # 同步 dispatch 绑定前可能已发生的状态/上下文变更:
         # page.render() 调度 effects 但不同步执行, controller.start() (async)
-        # 可能在 dispatch 绑定前调 bridge.notify 导致状态丢失。
-        if bridge.state != state:
+        # 可能在 dispatch 绑定前调 bridge.notify 导致状态丢失。context 也可能单独变化
+        # (如 LOADING 期间写入 embedded_pg_scenario), 仅比较 state 会丢失该变更。
+        if bridge.state != state or bridge.context != context:
             _dispatch(bridge.state, bridge.context)
 
     def _cleanup_bridge() -> None:

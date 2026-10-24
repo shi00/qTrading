@@ -53,6 +53,19 @@ class TestCacheClearedState:
         s = CacheClearedState()
         assert s.seq == 0
 
+    def test_reset_state_for_test_discards_singleton(self) -> None:
+        """_reset_state_for_test 丢弃单例 (连同订阅者), 后续取回新实例 (R7)."""
+        from ui.cache_cleared_state import _reset_state_for_test, get_cache_cleared_state
+
+        s1 = get_cache_cleared_state()
+        subscriber_calls: list[int] = []
+        s1.subscribe(lambda *a, **kw: subscriber_calls.append(1))
+        _reset_state_for_test()
+        s2 = get_cache_cleared_state()
+        assert s2 is not s1
+        assert s2.seq == 0
+        assert subscriber_calls == []
+
 
 class TestNotifyCacheClearedSubscription:
     """notify_cache_cleared → 订阅回调可被触发 (Observable 语义)."""
