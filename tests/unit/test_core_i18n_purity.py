@@ -7,6 +7,7 @@ ui/i18n.py (对齐 AppColors 在 ui/theme.py 的合规模式), core 层仅保留
 """
 
 import ast
+import logging
 import pathlib
 
 import pytest
@@ -107,3 +108,55 @@ def test_core_i18n_get_locales_dir_falls_back_when_meipass_is_none(
     monkeypatch.setattr(I18n, "_locales_dir", None)
 
     assert I18n._get_locales_dir() == tmp_path / "locales"
+
+
+class TestCoreI18nResourceContract:
+    """运行时 locale 资源契约（M01 检视）。
+
+    仓库内 JSON 完整性由 test_i18n.py 守护；本类守护「资源被损坏/手工改写后」的
+    降级语义：不向调用方返回非 str 值、不在 list 载荷上误报命中、不把绝对路径写入日志（R9）。
+    """
+
+    @staticmethod
+    def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path):
+        from core.i18n import I18n
+
+        monkeypatch.setattr(I18n, "_locales_dir", tmp_path)
+        monkeypatch.setattr(I18n, "_strings_cache", {})
+        monkeypatch.setattr(I18n, "_missing_keys", {})
+        monkeypatch.setattr(I18n, "_initialized", True)
+        monkeypatch.setattr(I18n, "_locale", "zh_CN")
+        return I18n
+
+    @staticmethod
+    def _write_locale(tmp_path: pathlib.Path, payload: str) -> None:
+        locale_dir = tmp_path / "zh_CN"
+        locale_dir.mkdir()
+        (locale_dir / "strings.json").write_text(payload, encoding="utf-8")
+
+    def test_non_string_translation_values_are_treated_as_missing(self, monkeypatch, tmp_path):
+        I18n = self._isolate(monkeypatch, tmp_path)
+        self._write_locale(tmp_path, '{"good": "OK", "bad": 123, "nested": {"k": "v"}}')
+
+        assert I18n.get("good") == "OK"
+        # 非字符串值不得穿透 I18n.get 的 -> str 契约
+        assert I18n.get("bad") == "bad"
+        assert I18n.get("nested") == "nested"
+
+    def test_non_object_payload_is_treated_as_empty(self, monkeypatch, tmp_path):
+        I18n = self._isolate(monkeypatch, tmp_path)
+        self._write_locale(tmp_path, '["app_title"]')
+
+        # list 载荷不得被当作映射命中（baseline 下 `in` 误判为 True）
+        assert I18n.has("app_title") is False
+        assert I18n.get("app_title") == "app_title"
+
+    def test_missing_locale_log_does_not_leak_absolute_path(self, monkeypatch, tmp_path, caplog):
+        I18n = self._isolate(monkeypatch, tmp_path)
+
+        with caplog.at_level(logging.WARNING, logger="core.i18n"):
+            assert I18n._load_locale_file("zh_CN") == {}
+
+        assert "zh_CN" in caplog.text
+        # R9: 绝对路径（含用户主目录/安装目录）不得进入日志
+        assert str(tmp_path) not in caplog.text
