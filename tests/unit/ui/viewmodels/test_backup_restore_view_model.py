@@ -366,3 +366,43 @@ class TestVMi18nContract:
         assert msg is not None
         assert "path" in msg.params
         assert msg.params["path"] == mock_dump_result.output_path
+
+
+# --- R9: 日志中的用户路径脱敏 ---
+
+
+class TestLogPathSanitization:
+    """R9: warning 日志中的用户路径经 DataSanitizer 脱敏 (对齐 database_status VM 同模式)."""
+
+    @pytest.mark.asyncio
+    async def test_start_backup_logs_sanitized_path(self, vm, mock_maintenance_service, caplog):
+        """output_path 已存在时的 warning 日志不得泄露原始路径."""
+        import logging
+
+        sensitive_path = Path("C:\\Users\\secret\\backup.dump")
+        with (
+            patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True),
+            caplog.at_level(logging.WARNING, logger="ui.viewmodels.backup_restore_view_model"),
+        ):
+            await vm.start_backup(sensitive_path)
+
+        mock_maintenance_service.dump.assert_not_called()
+        assert "C:\\Users\\secret" not in caplog.text
+        assert "<PATH>" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_start_restore_wizard_logs_sanitized_path(self, vm, caplog):
+        """input_path 不存在时的 warning 日志不得泄露原始路径."""
+        import logging
+
+        sensitive_path = Path("C:\\Users\\secret\\backup.dump")
+        with (
+            patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False),
+            caplog.at_level(logging.WARNING, logger="ui.viewmodels.backup_restore_view_model"),
+        ):
+            await vm.start_restore_wizard(sensitive_path)
+
+        assert vm.state.confirm_state == "idle"
+        assert vm.state.restore_path is None
+        assert "C:\\Users\\secret" not in caplog.text
+        assert "<PATH>" in caplog.text

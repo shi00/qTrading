@@ -451,7 +451,10 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 except asyncio.CancelledError:
                     raise
                 except Exception as perm_err:
-                    logger.debug("[DataSourceVM] skipped_permission summary failed: %s", perm_err)
+                    logger.debug(
+                        "[DataSourceVM] skipped_permission summary failed: %s",
+                        DataSanitizer.sanitize_error(perm_err),  # R9: DB 异常可能含连接信息
+                    )
                 # D1-2 补缺：完整性以 SyncResult.is_complete 为准。UI 完整日更新不再把
                 # "关键表失败"（quotes/basic 任一失败）误报为完整成功——单关键表失败策略
                 # 因 S8 错误隔离仍返回 True，故必须显式检查 failed_critical_tables 并给降级提示。
@@ -541,8 +544,8 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 self._emit_snack(Message("ds_cache_cleared"), "success")
                 self._emit_cache_cleared()
                 return Message("ds_cache_clear_done")
-            except Exception as ex:
-                classify_error(ex, context="general")
+            except Exception:
+                # 无需分类：清缓存失败统一提示 ds_clean_fail 后重抛（TaskManager 记录终止态）
                 self._emit_snack(
                     Message("ds_clean_fail"),
                     "error",

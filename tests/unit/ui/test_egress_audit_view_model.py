@@ -76,21 +76,27 @@ class TestLoadAggregates:
         assert vm.state.session_count == 0
 
     @pytest.mark.asyncio
-    async def test_exception_degrades_to_empty(self, monkeypatch) -> None:
+    async def test_exception_degrades_to_empty(self, monkeypatch, caplog):
         audit = EgressAudit()
         monkeypatch.setattr(
             audit,
             "get_aggregates",
-            AsyncMock(side_effect=OSError("jsonl unreadable")),
+            AsyncMock(side_effect=OSError("jsonl unreadable: C:\\Users\\secret\\egress.jsonl")),
         )
 
         vm = _make_vm()
-        await vm.load_aggregates()  # 不抛异常
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="ui.viewmodels.egress_audit_view_model"):
+            await vm.load_aggregates()  # 不抛异常
 
         assert vm.state.loaded is False
         assert vm.state.today_rows == []
         assert vm.state.month_rows == []
         assert vm.state.session_count == 0
+        # R9: debug 日志中的异常消息经 DataSanitizer 脱敏, 原始路径不泄露
+        assert "C:\\Users\\secret" not in caplog.text
+        assert "<PATH>" in caplog.text
 
     @pytest.mark.asyncio
     async def test_cancelled_error_propagates(self, monkeypatch) -> None:
