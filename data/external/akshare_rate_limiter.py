@@ -13,15 +13,12 @@ sync/async 混用安全性（``TokenBucket`` 类 docstring 的补充论证）：
   ``consume`` 不依赖事件循环（IO 线程无 running loop，内置守卫放行同步阻塞）。
 """
 
-import threading
-
 from utils.rate_limiter import TokenBucket
 
 # 1 QPS, capacity 2 — 与 AkshareConceptClient 原配置一致（东财/巨潮公开接口软限制）。
 AKSHARE_RATE_LIMIT_PER_SEC: float = 1.0
 AKSHARE_RATE_LIMIT_CAPACITY: float = 2.0
 
-_lock = threading.Lock()
 _limiter: TokenBucket = TokenBucket(
     start_tokens=AKSHARE_RATE_LIMIT_CAPACITY,
     capacity=AKSHARE_RATE_LIMIT_CAPACITY,

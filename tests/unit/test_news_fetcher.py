@@ -1125,6 +1125,32 @@ class TestUsMajorMovesLookAheadGuard:
         assert result == ""
 
 
+class TestLookAheadGuard:
+    """get_stock_news / get_latest_global_news 的 as_of look-ahead 防护（与 TestUsMajorMovesLookAheadGuard 对齐）。"""
+
+    @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_get_latest_global_news_historical_as_of_short_circuits(self, mock_get):
+        """历史 as_of → 不发起任何网络请求直接返回 []（短路发生在 CLS 调用前）。"""
+        base_time = datetime.datetime(2024, 6, 14, 10, 0, 0).replace(tzinfo=CST_TZ)
+        historical = base_time.date() - datetime.timedelta(days=1)
+        with patch("data.external.news_fetcher.get_now", return_value=base_time):
+            result = await NewsFetcher.get_latest_global_news(as_of=historical)
+        assert result == []
+        mock_get.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_get_stock_news_historical_as_of_short_circuits(self, mock_tpm):
+        """历史 as_of → 不提交线程池任务直接返回 []（短路发生在 IO 调度前）。"""
+        base_time = datetime.datetime(2024, 6, 14, 10, 0, 0).replace(tzinfo=CST_TZ)
+        historical = base_time.date() - datetime.timedelta(days=1)
+        with patch("data.external.news_fetcher.get_now", return_value=base_time):
+            result = await NewsFetcher.get_stock_news("000001.SZ", as_of=historical)
+        assert result == []
+        mock_tpm.assert_not_called()
+
+
 class TestGetHotConceptsTimeout:
     @pytest.mark.asyncio
     @patch("httpx.AsyncClient")
