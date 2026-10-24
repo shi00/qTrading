@@ -79,9 +79,12 @@ class NameChangeSyncStrategy(ISyncStrategy):
                 len(result.errors),
             )
         except EngineDisposedError:
+            # R5：EngineDisposedError 必须抛出或传播（禁止在已释放引擎上继续/伪成功），
+            # 与 concept/sw_industry/holder/macro/historical 的统一处理对齐。
             logger.warning("[NameChangeSync] Engine disposed, stopping sync.")
-            result.errors.append("engine disposed")
-            return result
+            result.status = SyncStatus.FAILED.value
+            result.errors.append("Engine disposed during sync")
+            raise
         except asyncio.CancelledError:
             raise
         except TushareAPIPermissionError:

@@ -164,6 +164,10 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             if severity == "system":
                 raise
             result.errors.append(f"SwIndustry Classify: {safe_error(e)}")
+            # S16 同模式：recoverable/operational 失败必须标记 partial，
+            # 避免「有错误但 status=success」误导消费方（对齐 _sync_members 循环分支）。
+            if result.status not in ("failed", "cancelled"):
+                result.status = SyncStatus.PARTIAL.value
             return pd.DataFrame()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -313,6 +317,10 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             if severity == "system":
                 raise
             result.errors.append(f"SwIndustry Members: {safe_error(e)}")
+            # S16 同模式：recoverable/operational 失败必须标记 partial，
+            # 避免「有错误但 status=success」误导消费方（对齐 _sync_classify 分支）。
+            if result.status not in ("failed", "cancelled"):
+                result.status = SyncStatus.PARTIAL.value
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _record_skipped_permission(self, table_name: str) -> None:

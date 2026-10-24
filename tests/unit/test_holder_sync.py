@@ -725,6 +725,36 @@ class TestHolderSyncPledgeDetail:
         ctx.cache.save_pledge_detail.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_partial_day_failure_continues(self):
+        """单日 API 失败不中断整批：其余日期数据仍保存（逐条错误隔离，对齐 top10/members）。"""
+        good_df = pd.DataFrame({"ts_code": ["000001.SZ"], "ann_date": [datetime.date(2024, 6, 28)]})
+        ctx = self._make_ctx_with_trade_dates([datetime.date(2024, 6, 27), datetime.date(2024, 6, 28)])
+        ctx.api.get_pledge_detail = AsyncMock(side_effect=[Exception("day1 down"), good_df])
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 30))
+
+        count, date = await strategy._sync_pledge_detail()
+
+        assert count == 1
+        assert date == datetime.date(2024, 6, 30)
+        assert ctx.api.get_pledge_detail.await_count == 2
+        ctx.cache.save_pledge_detail.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_all_days_failed_returns_failure(self):
+        """全部日期 API 失败：返回 (-1, None) 等待整批重跑（对齐 _sync_pledge_stat）。"""
+        ctx = self._make_ctx_with_trade_dates([datetime.date(2024, 6, 27), datetime.date(2024, 6, 28)])
+        ctx.api.get_pledge_detail = AsyncMock(side_effect=Exception("api down"))
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 30))
+
+        count, date = await strategy._sync_pledge_detail()
+
+        assert count == -1
+        assert date is None
+        ctx.cache.save_pledge_detail.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_falls_back_to_natural_days_without_calendar(self):
         """交易日历不可用时回退自然日循环（processor 为 None）。"""
         ctx = MagicMock()

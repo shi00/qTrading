@@ -8,7 +8,7 @@ import pandas as pd
 
 from core.i18n import Message
 from data.sync.financial import FinancialSyncStrategy
-from data.sync.base import SyncResult
+from data.sync.base import SyncResult, SyncStatus
 from data.persistence.daos.base_dao import EngineDisposedError
 from utils.time_utils import get_now
 
@@ -2298,6 +2298,8 @@ class TestIncrementalBatchStatus:
         assert len(status_calls) >= 1
         failed_calls = [c for c in status_calls if c.kwargs.get("status") == "failed"]
         assert len(failed_calls) >= 1
+        # S17 同模式：当日失败必须反映到 SyncResult（partial），不再伪装 success
+        assert result.status == SyncStatus.PARTIAL.value
 
     @pytest.mark.asyncio
     async def test_batch_partial_failure_status_partial(self):
@@ -2347,6 +2349,8 @@ class TestIncrementalBatchStatus:
         assert len(status_calls) >= 1
         partial_calls = [c for c in status_calls if c.kwargs.get("status") == "partial"]
         assert len(partial_calls) >= 1
+        # S17 同模式：部分失败必须反映到 SyncResult（partial），不再伪装 success
+        assert result.status == SyncStatus.PARTIAL.value
 
     @pytest.mark.asyncio
     async def test_batch_all_success_no_status_override(self):

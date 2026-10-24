@@ -17,7 +17,7 @@ from data.sync.macro import (
     _compute_gdp_publish_date,
     _latest_quarter_before,
 )
-from data.sync.base import SyncContext, SyncResult
+from data.sync.base import SyncContext, SyncResult, SyncStatus
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.domain_services.trade_calendar_service import TradeDateUnavailableError
 from data.external.tushare_client import TushareAPIPermissionError
@@ -1608,6 +1608,73 @@ class TestMacroSyncPartialFailure:
         assert result.added >= 5
         # Sync should not be marked as fully failed
         assert result.status != "failed"
+
+
+class TestMacroSubSyncOuterPartialStatus:
+    """S18 同模式补全覆盖：子方法外层 recoverable 失败必须标记 partial，不再伪装 success。"""
+
+    @pytest.mark.asyncio
+    async def test_monthly_generic_error_marks_partial(self):
+        """_sync_macro_monthly 外层 recoverable 失败：errors 追加且 status=partial。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_macro_data = AsyncMock(side_effect=RuntimeError("Macro API error"))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_macro_latest_date = AsyncMock(return_value=None)
+
+        result = SyncResult()
+        await strategy._sync_macro_monthly(result)
+
+        assert result.status == SyncStatus.PARTIAL.value
+        assert any("Macro Monthly" in e for e in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_shibor_generic_error_marks_partial(self):
+        """_sync_shibor_daily 外层 recoverable 失败：errors 追加且 status=partial。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_shibor = AsyncMock(side_effect=RuntimeError("shibor down"))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        ctx.processor = MagicMock()
+        ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 6, 14)])
+
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            result = SyncResult()
+            await strategy._sync_shibor_daily(result)
+
+        assert result.status == SyncStatus.PARTIAL.value
+        assert any("Shibor" in e for e in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_index_weights_outer_error_marks_partial(self):
+        """_sync_index_weights 外层（批次末尾状态写入）失败：errors 追加且 status=partial。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.sync_dao.update_sync_status = AsyncMock(side_effect=RuntimeError("db down"))
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value="2024-05-01")
+        ctx.cache.market_dao.save_index_weights = AsyncMock(return_value=3)
+        ctx.api = MagicMock()
+        ctx.api.get_index_weight = AsyncMock(return_value=pd.DataFrame({"con_code": ["000001.SZ"]}))
+        strategy = MacroSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+
+        result = SyncResult()
+        await strategy._sync_index_weights(result)
+
+        assert result.status == SyncStatus.PARTIAL.value
+        assert any("IndexWeight" in e for e in result.errors)
 
 
 class TestLprWeekendPersistence:

@@ -12,7 +12,7 @@ import time
 import pandas as pd
 
 from data.constants import FINANCIAL_BATCH_TABLES, FINANCIAL_REPORT_SCHEMA_COLS, SYNC_RESULT_SKIPPED_PERMISSION
-from data.sync.base import ISyncStrategy, SyncResult, _get_seasonal_adjustments, _is_peak_disclosure_season
+from data.sync.base import ISyncStrategy, SyncResult, SyncStatus, _get_seasonal_adjustments, _is_peak_disclosure_season
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
 from core.i18n import Message
@@ -659,6 +659,15 @@ class FinancialSyncStrategy(ISyncStrategy):
                     day_date,
                     day_saved,
                 )
+
+            # S17 同模式：当日 fetch/save 失败必须反映到 SyncResult，
+            # 避免「sync_status 表已记 failed/partial 但 SyncResult 仍 success」
+            # 导致调用方与调度器误判本次同步完全成功。不覆盖更严重的终态。
+            if day_has_error and result_accumulator.status not in (
+                SyncStatus.FAILED.value,
+                SyncStatus.CANCELLED.value,
+            ):
+                result_accumulator.status = SyncStatus.PARTIAL.value
 
             if progress_callback:
                 progress_callback(0, 0, Message("progress_sync_done", {"day": day_str}))

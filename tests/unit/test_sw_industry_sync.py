@@ -365,6 +365,8 @@ class TestSyncClassifyExceptions:
 
         assert result_df.empty
         assert any("SwIndustry Classify" in err for err in result.errors)
+        # S16 同模式：recoverable 失败必须标记 partial，不再伪装 success
+        assert result.status == SyncStatus.PARTIAL.value
         warning_logs = [r for r in caplog.records if "Classify" in r.message]
         assert len(warning_logs) == 1
 
@@ -521,6 +523,23 @@ class TestSyncMembersPartialFailure:
         assert "801010.SI" in result.errors[0]
         strategy.member_dao.save_sw_industry_member.assert_awaited_once()
         assert result.added == 1
+
+    @pytest.mark.asyncio
+    async def test_outer_generic_exception_marks_partial(self):
+        """外层 save/status 写入失败（非 system 级）：errors 追加且 status=partial（S16 同模式）。"""
+        ctx = _make_ctx()
+        strategy = _wire_strategy(ctx, member_count=1)
+        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L3"]})
+        ctx.api.get_index_member_all = AsyncMock(return_value=_make_member_df("801010.SI"))
+        # save 成功但批次末尾的 update_sync_status 抛非 system 异常 → 走 _sync_members 外层 except
+        ctx.cache.sync_dao.update_sync_status = AsyncMock(side_effect=RuntimeError("db down"))
+
+        with patch.object(strategy, "_check_cancelled", return_value=False):
+            result = SyncResult()
+            await strategy._sync_members(result, classify_df)
+
+        assert result.status == SyncStatus.PARTIAL.value
+        assert any("SwIndustry Members" in err for err in result.errors)
 
 
 class TestRecordSkippedPermission:
