@@ -251,6 +251,15 @@ class TestSaveNewsInterval:
         assert result is False
         mock_config_handler.save_config.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_save_clamps_below_minimum_to_10(self, mock_config_handler, mock_thread_pool):
+        """M14-F1 成对写侧钳制: KV 直写 (save_config) 绕过 app_prefs max(10) 下界,
+        低于 10s 的间隔落盘时须钳制为 10 (防高频轮询)。"""
+        vm = _make_vm(mock_config_handler)
+        result = await vm.save_news_interval("5")
+        assert result is True
+        mock_config_handler.save_config.assert_called_once_with({"news_poll_interval": 10})
+
 
 # --- ThreadPoolManager 调用契约 (R16) ---
 

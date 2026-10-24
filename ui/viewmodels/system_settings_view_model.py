@@ -361,7 +361,12 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
             return False
         self._set_state(is_saving=True)
         try:
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_log_level, new_level)
+            success = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_log_level, new_level)
+            if not success:
+                # 与 save_language/save_theme 同契约: set_typed 返回 False (校验/落盘失败)
+                # 时不得伪装成功, 运行时级别保持与磁盘一致 (避免重启后回退漂移)。
+                logger.warning("[SystemSettingsVM] set_log_level returned False for level=%s", new_level)
+                return False
             from utils.logger import update_log_level
 
             update_log_level(new_level)

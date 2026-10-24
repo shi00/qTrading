@@ -313,6 +313,10 @@ class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsSta
             # 解析失败时 View 已乐观更新 state, 同样回读磁盘对齐 (统一契约)
             self._set_state(news_interval=str(ConfigHandler.get_config("news_poll_interval", 60)))
             return False
+        # M14-F1 成对写侧防御: 本路径 KV 直写 (save_config) 绕过 app_prefs
+        # set_news_poll_interval 的 max(10) 钳制; 1-9s 正数会绕过消费侧 <=0
+        # 回退直接生效为高频轮询, 故写侧补同值下界 (消费侧保留失真兜底)。
+        val = max(10, val)
         self._set_state(is_saving=True)
         try:
             success = await ThreadPoolManager().run_async(
