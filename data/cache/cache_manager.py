@@ -201,7 +201,9 @@ class CacheManager:
         logger.debug("[CacheManager] State | Disposing engine...")
         # P2 并发保护 #M5-010/#M5-011：避免并发 close() 重复 dispose
         async with self._init_lock:
-            if self._disposed:
+            # 上次 dispose 若中途抛错，_disposed 已置 True 但 engine 仍存活；此时必须
+            # 重试释放，否则 early-return 会让引擎/连接池泄漏到进程退出（atexit 亦跳过）。
+            if self._disposed and self.engine is None:
                 return
             # R5 修复 #M5-001：与 clear_all_cache 对称，先 clear 事件阻塞后续查询进入 DAO 路径
             self._maintenance_event.clear()
@@ -277,7 +279,9 @@ class CacheManager:
                 publish_time = typing.cast(datetime.datetime, to_utc_for_db(get_now()))
 
         return {
-            "content": item.get("content", "").strip(),
+            # 外部新闻源可能给出 content=None（仅标题条目），None.strip() 会抛
+            # AttributeError 中断整批入库；归一为空串后由调用方/DB 约束处理。
+            "content": (item.get("content") or "").strip(),
             "tags": item.get("tags", ""),
             "publish_time": publish_time,
             "source": item.get("source", default_source),
@@ -513,11 +517,23 @@ class CacheManager:
             self.stock_dao.get_active_stock_count(),
             self.quote_dao.get_date_range(),
         )
-        total_stocks = (total_stocks_result if not isinstance(total_stocks_result, BaseException) else None) or 1
+        # R21：活跃股票数查询失败时基线为「未知」，不得以 1 兜底——否则任一有数据的
+        # 股票表 ratio = min(1.0, cnt/1) 恒为 1.0，健康报告会把未知基线伪装成全覆盖。
+        # 以 0 表示基线不可用，_check_single_table 对 total_stocks <= 0 统一给 ratio=0
+        # （未知 ≠ 健康），供上层保守判定。
+        if isinstance(total_stocks_result, BaseException):
+            logger.warning(
+                "[CacheManager] Health | ⚠️ Active stock count query failed (non-fatal): %s",
+                # gather 封装已重抛 CancelledError，剩余 BaseException 实为 Exception
+                safe_error(typing.cast(Exception, total_stocks_result)),
+            )
+            total_stocks = 0
+        else:
+            total_stocks = total_stocks_result
         if isinstance(date_range_result, BaseException):
             logger.warning(
                 "[CacheManager] Health | ⚠️ Date range query failed (non-fatal): %s",
-                safe_error(date_range_result),
+                safe_error(typing.cast(Exception, date_range_result)),
             )
         logger.debug(
             "[CacheManager] Health | Active stocks baseline: %s",
@@ -745,8 +761,10 @@ class CacheManager:
                 # 抛出 EngineDisposedError 以触发上层调用方异常处理，
                 # 避免静默降级为"表不健康"误导健康报告。
                 if classified["code"] == "interrupted":
+                    # R9：异常消息会随 EngineDisposedError 上抛至日志/UI，原始 e 可能含
+                    # DSN/凭证明文，须经 safe_error 脱敏后再拼接。
                     raise EngineDisposedError(
-                        f"[CacheManager] Health | Engine disposed during check for table {table}: {e}"
+                        f"[CacheManager] Health | Engine disposed during check for table {table}: {safe_error(e)}"
                     ) from e
                 if classified["code"] == "not_found":
                     logger.warning(
@@ -1033,6 +1051,9 @@ class CacheManager:
         ]
         batch_results = {}
         for key, raw in zip(batch_keys, gather_results, strict=False):
+            # R5：引擎已释放必须优先传播，不得降级为「该辅助表无数据」误导下游。
+            if isinstance(raw, EngineDisposedError):
+                raise raw
             if isinstance(raw, Exception):
                 logger.warning("[CacheManager] prefetch_auxiliary_data: %s query failed: %s", key, safe_error(raw))
                 batch_results[key] = None
@@ -1115,6 +1136,10 @@ class CacheManager:
             async with self.engine.connect() as conn:
                 result = await conn.execute(sa.select(1).select_from(tbl).limit(1))
                 return result.first() is not None
+        except EngineDisposedError:
+            # R5：已释放引擎不得降级为「表无数据」（False），须向上传播供调用方
+            # 区分「关机中」与「确实为空表」。
+            raise
         except Exception as e:
             # P3-M5-ClassifyError-System-Gap: 接入 classify_severity 统一分类
             severity = classify_severity(e, "db")

@@ -5,6 +5,7 @@
 
 import asyncio
 import datetime
+import logging
 import threading
 
 import pytest
@@ -203,6 +204,51 @@ class TestDataProcessorShouldSyncFinancials:
         ):
             result, reason = await dp.should_sync_financials()
             assert result is False
+
+    @pytest.mark.asyncio
+    async def test_recent_sync_with_aware_now(self):
+        """生产路径 get_now() 为 CST aware：不得因 aware - naive 抛 TypeError 而误判需同步。"""
+        dp = _make_dp()
+        recent = datetime.datetime(2024, 6, 15, 10, 30, 0) - datetime.timedelta(days=5)
+        dp.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": recent.strftime("%Y-%m-%d")})
+        with patch(
+            "data.data_processor.get_now",
+            return_value=datetime.datetime(2024, 6, 15, 10, 30, 0, tzinfo=datetime.UTC),
+        ):
+            result, _reason = await dp.should_sync_financials()
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_recent_sync_with_date_object(self):
+        """sync_status.last_sync_date 为 DATE 列，生产返回 datetime.date，不得 TypeError 误判需同步。"""
+        dp = _make_dp()
+        dp.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": datetime.date(2024, 6, 10)})
+        with patch(
+            "data.data_processor.get_now",
+            return_value=datetime.datetime(2024, 6, 15, 10, 30, 0, tzinfo=datetime.UTC),
+        ):
+            result, _reason = await dp.should_sync_financials()
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_recent_sync_with_timestamp(self):
+        """DataFrame 透传可能给出 pandas.Timestamp，须归一后正常计算天数差。"""
+        dp = _make_dp()
+        dp.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": pd.Timestamp("2024-06-10")})
+        with patch(
+            "data.data_processor.get_now",
+            return_value=datetime.datetime(2024, 6, 15, 10, 30, 0, tzinfo=datetime.UTC),
+        ):
+            result, _reason = await dp.should_sync_financials()
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_nat_last_sync_means_never_synced(self):
+        """NULL last_sync_date 经 DataFrame 透传为 NaT（真值），必须判为从未同步。"""
+        dp = _make_dp()
+        dp.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": pd.NaT})
+        result, _reason = await dp.should_sync_financials()
+        assert result is True
 
     @pytest.mark.asyncio
     async def test_old_sync(self):
@@ -420,6 +466,22 @@ class TestDataProcessorSyncConcepts:
         saved_df = dp.cache.stock_dao.save_concepts.call_args.args[0]
         assert saved_df["concept_id"].tolist() == ["TS_TS1"]
         dp.cache.stock_dao.overwrite_concepts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_subtask_failure_log_is_sanitized(self, caplog):
+        """R9：子任务异常消息入日志前必须脱敏，不得输出明文 token。"""
+        dp = _make_dp()
+        dp.api.get_concept_list = AsyncMock(return_value=pd.DataFrame({"code": ["TS1"]}))
+
+        async def _detail(_c):
+            raise RuntimeError("concept auth failed token=abcdef123456789")
+
+        dp.api.get_concept_detail_by_id = AsyncMock(side_effect=_detail)
+        dp.clear_cancel()
+        with caplog.at_level(logging.WARNING):
+            result = await dp.sync_concepts()
+        assert result == 0
+        assert "abcdef123456789" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_empty_concept_response_treated_as_uncertain(self):
