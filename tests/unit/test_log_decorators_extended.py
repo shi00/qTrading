@@ -269,6 +269,30 @@ class TestTrackPerformance:
 
         assert "took" in log_capture.text
 
+    def test_sync_function_records_metrics(self, log_capture):
+        """sync 成功路径应同步记录进程内运行时指标（与 async 分支对齐，review05-E19）。
+
+        用专属 op_name + 前后差值断言，避免依赖 metrics_registry 全局状态与测试顺序。
+        """
+        from utils.metrics import metrics_registry
+
+        op_name = "sync_perf_metrics_probe"
+        baseline = metrics_registry.snapshot().get(op_name)
+        baseline_count = baseline.count if baseline else 0
+        baseline_error_count = baseline.error_count if baseline else 0
+
+        @track_performance(threshold_ms=10_000, operation_name=op_name)
+        def sync_fast():
+            return 42
+
+        assert sync_fast() == 42
+
+        snapshot = metrics_registry.snapshot().get(op_name)
+        assert snapshot is not None, "sync 成功路径应记录 metrics"
+        assert snapshot.count == baseline_count + 1
+        assert snapshot.error_count == baseline_error_count
+        assert snapshot.max_ms >= 0.0
+
     @pytest.mark.asyncio
     async def test_track_performance_async_exception_logs_elapsed(self, log_capture):
         """async 异常路径应记录 ERROR 级别日志，消息含耗时（after 关键字）与异常类型，并重新抛出。"""

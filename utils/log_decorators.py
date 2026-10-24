@@ -403,6 +403,12 @@ def track_performance(
             elapsed = time.perf_counter() - start_time
             elapsed_ms = elapsed * 1000
 
+            # 记录成功到进程内运行时指标（review05-E19），与 async 分支对齐，
+            # 避免同步操作耗时在 diagnostics metrics 快照中缺失。
+            from utils.metrics import metrics_registry
+
+            metrics_registry.record(op_name, elapsed_ms)
+
             if elapsed_ms > threshold_ms:
                 target_logger.log(
                     level,
