@@ -1,6 +1,6 @@
 # Security Policy
 
-<!-- NOTE: 本文件的「Supported Versions」表由 release-please 在发版时自动同步版本号（见 release-please-config.json 的 extra-files）。手动修改版本号会被下次发版覆盖。 -->
+<!-- NOTE: The "Supported Versions" table is maintained manually at each release and verified in CI by `scripts/verify_versions.py` (check 5), which requires the row to match the major.minor of pyproject.toml. SECURITY.md is listed in release-please-config.json extra-files, but its generic updater needs an `x-release-please-version` marker, which this file does not use, and a wildcard row such as `0.10.x` cannot be rewritten automatically. Update the table by hand when the supported major.minor changes. -->
 
 ## Supported Versions
 
@@ -33,11 +33,15 @@ Please include the following information in your report:
 - Potential impact
 - Suggested fix (if any)
 
+**Do not include real API tokens, database passwords, personal data, or other secrets in your report.** Redact them or replace them with placeholders; if a value must be shown, use a revoked or dummy one.
+
 ### Response Timeline
 
 - **Initial Response**: Within 48 hours
 - **Status Update**: Within 7 days
 - **Resolution Target**: Critical vulnerabilities within 30 days
+
+These timelines are best-effort targets, not contractual guarantees.
 
 ### Disclosure Policy
 
@@ -53,32 +57,32 @@ AStockScreener implements the following security measures:
 
 - API keys and tokens are stored securely using `keyring` (OS-level credential storage)
 - Fallback encryption using AES-GCM for environments without keyring support
-- No hardcoded secrets in source code
+- No hardcoded secrets are allowed in source code (enforced by secret scanning and pre-commit red-line checks)
 
 ### Tushare Token Security
 
-- Tushare token 通过系统 Keyring 加密存储，无 Keyring 环境回退到 AES-GCM 加密文件，不入数据库。
-- `TushareClient` 的所有日志与异常消息中，token 必须经 `DataSanitizer` 脱敏后才输出（对应 CLAUDE.md §3.1 R9 红线）。
-- token 认证失败时触发全局熔断（`_token_invalid` 标志置 True），所有 API 调用 fast-fail，避免无效 token 在日志中重复刷屏。
-- `set_token()` 重置熔断标志并刷新 SDK 全局状态；token 更新路径不记录明文 token 到任何日志通道。
-- 静态守护：`scripts/check_redlines.py` 的 `check_R_tushare_token_log` 检查 `data/external/tushare_client.py` 中是否存在直接打印 token 的 logger 调用。
+- The Tushare token is stored encrypted in the OS keyring; on systems without a working keyring it falls back to an AES-GCM-encrypted file and is never written to the database.
+- All logs and exception messages from `TushareClient` pass the token through `DataSanitizer` before output (CLAUDE.md §3.1, rule R9).
+- When token authentication fails, a global circuit breaker is armed (`_token_invalid` set to `True`) and all API calls fail fast, preventing repeated logging of the invalid token.
+- `set_token()` / `set_token_async()` reset the circuit breaker and refresh the SDK's global state; the token update path never writes the plaintext token to any log channel.
+- Static guard: `check_R_tushare_token_log` in `scripts/check_redlines.py` verifies that `data/external/tushare_client.py` contains no logger call that prints the token directly.
 
 ### Data Protection
 
 - Database credentials are never logged
 - Sensitive data is sanitized in logs using `DataSanitizer`
-- Local cache is protected from unauthorized access
+- Cache directories are not exposed to untrusted users; access control relies on OS-level user permissions
 
 ### CI/CD Security
 
-- All GitHub Actions are pinned to specific commit SHAs
+- GitHub Actions are pinned to specific commit SHAs, except `dtolnay/rust-toolchain`, which follows the upstream `stable` tag
 - CodeQL analysis for security vulnerabilities
 - Gitleaks scanning for secret detection
 - Dependency vulnerability scanning with pip-audit (source: PyPI)
 - SLSA build provenance attestation for releases
 - SBOM (Software Bill of Materials) for each release
 
-### Security Contacts
+## Security Contacts
 
 - **Primary**: louis2sin@gmail.com
 
@@ -93,7 +97,7 @@ AStockScreener implements the following security measures:
 
 ### diskcache (CVE-2025-69872)
 
-`diskcache` 为传递依赖（非应用直接使用，源码无 `import diskcache`），仅出现在 `requirements*.txt` 与 `.security/audit-allowlist.yml`。该包存在 pickle 反序列化漏洞，因应用不反序列化不可信输入，风险可控，通过 allowlist 跟踪。
+`diskcache` is a transitive dependency (not used directly; the source contains no `import diskcache`) and appears only in `requirements*.txt` and `.security/audit-allowlist.yml`. The package is affected by a pickle deserialization vulnerability; because the application never deserializes untrusted input, the risk is contained and tracked through the allowlist.
 
 See [`.security/audit-allowlist.yml`](.security/audit-allowlist.yml) for details.
 
@@ -102,7 +106,7 @@ See [`.security/audit-allowlist.yml`](.security/audit-allowlist.yml) for details
 | Date | Description |
 |------|-------------|
 | 2026-05-22 | Initial security policy; implemented CodeQL, Gitleaks, SBOM, and attestation |
-| 2026-06-18 | 升级 aiohttp 至 3.14.0 修复 CVE-2026-47265/CVE-2026-34993；litellm 升级传递依赖修复 |
-| 2026-10-21 | 升级 pillow 13.0.0（修复 8 个图像解析 CVE）、certifi 2026.10.19（PYSEC-2026-4320）、uv 0.13.4（PYSEC-2026-4321），恢复 pip-audit 门禁 |
-| 2026-10-23 | 升级 opentelemetry-api 1.45.1（修复 CVE-2026-114603 `TraceState.from_header` tracestate 解析正则回溯 DoS），恢复 pip-audit 门禁 |
-| 2026-10-23 | 升级 brotlicffi 1.2.1.0（修复 PYSEC-2026-4323 / CVE-2026-111497 Brotli 解码器越界写，CVSS 9.2 可 RCE），恢复 pip-audit 门禁 |
+| 2026-06-18 | Upgrade aiohttp to 3.14.0 (fixes CVE-2026-47265 / CVE-2026-34993); litellm transitive dependency upgrade |
+| 2026-10-21 | Upgrade pillow to 13.0.0 (fixes 8 image-parsing CVEs), certifi to 2026.10.19 (PYSEC-2026-4320), and uv to 0.13.4 (PYSEC-2026-4321); restored the pip-audit gate |
+| 2026-10-23 | Upgrade opentelemetry-api to 1.45.1 (fixes CVE-2026-114603, regex backtracking DoS in `TraceState.from_header` tracestate parsing); restored the pip-audit gate |
+| 2026-10-23 | Upgrade brotlicffi to 1.2.1.0 (fixes PYSEC-2026-4323 / CVE-2026-111497, out-of-bounds write in the Brotli decoder, CVSS 9.2, RCE); restored the pip-audit gate |
