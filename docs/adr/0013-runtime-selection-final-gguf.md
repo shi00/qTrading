@@ -126,4 +126,10 @@ GGUF（`.gguf` + `head.npz`），GGUF 产线任务（脚本固化 / `finbert-tra
   docs/adr/ 小节按 GDR-12 文件级登记，`check_docs_consistency.py` PASS
 - ADR-0012 原条款处已加内联修订标注，原文保持可读，历史未重写
 
+## Errata / 勘误
+
+> 2026-10-25 核对
+
+Context 与 Decision §2 引用的两份 PoC 留档（`ai_models/finbert2-sentiment-onnx-poc.verify.json`、`ai_models/finbert2-sentiment-openvino-poc.verify.json`）为**本地未入库产物**（`ai_models/` 目录不入版本控制），当前工作区已不存在（该目录仅保留模型权重）。复评时若需以本文的度量口径与基线为对照，必须重新运行 PoC 生成报告，不得假定留档仍在；判据阈值（概率差 <0.02、单条 P95 ≤30ms、标签一致率 ≥99%、人工验证集不一致 ≤1 条）与同机 GGUF 基线 14.30ms 仍以本文文字为准。
+
 _最小验证命令：_ `python scripts/check_docs_consistency.py` + `python -m pytest tests/unit/test_docs_consistency.py`。

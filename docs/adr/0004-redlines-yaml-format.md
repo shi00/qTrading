@@ -8,7 +8,7 @@
 
 ADR-0003 决定落地红线 R1~R18 机器可读映射，需要选择 `docs/governance/redlines.yml` 的文件格式。候选格式：
 
-- **YAML**：人类可读性强，支持注释，广泛用于配置（GitHub Actions / pre-commit / k8x 等）
+- **YAML**：人类可读性强，支持注释，广泛用于配置（GitHub Actions / pre-commit / k8s 等）
 - **JSON**：机器可读性强，但人类可读性差（无注释、引号多），Python stdlib 原生 `json` 支持
 - **TOML**：人类可读性强，但表结构表达力弱于 YAML（嵌套数组表格语法繁琐），Python 3.11+ stdlib `tomllib` 支持（仅读）
 
@@ -48,3 +48,7 @@ ADR-0003 决定落地红线 R1~R18 机器可读映射，需要选择 `docs/gover
 > 2026-07-23 补充
 
 ADR-0004 Decision 第 4 点提及「新增 `pyyaml` 依赖」，但 `pyproject.toml` 未直接声明 `pyyaml`。实际情况：`pyyaml` 作为 `pre-commit` / `uv` 等工具的 transitive dependency 被间接安装，`scripts/check_redlines.py` 通过 `import yaml` 直接使用。本 ADR 不修正 Decision 文本（保留历史决策依据），但补充说明：若未来 `pre-commit` / `uv` 移除 `pyyaml` 依赖，需在 `pyproject.toml` 显式声明 `pyyaml`。
+
+> 2026-10-25 补充
+
+Decision 理由 3 与 Alternatives 所述「字段固定（5 个）」为决策时点（2026-07-17）快照。现行 `redlines.yml` 已扩展 `automation_coverage` / `rule_type` 及可选 `checks` / `self_check` 字段，字段正本以该文件头部「字段说明」为准；`pyyaml==6.0.3` 现已在 `requirements*.txt` 锁文件中固定版本随依赖安装，但 `pyproject.toml` 仍未直接声明（与上方 2026-07-23 Errata 一致）。

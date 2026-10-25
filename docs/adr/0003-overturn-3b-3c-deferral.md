@@ -57,3 +57,7 @@ Decision 3 中"docs/debt/known-technical-debt.md 第一条 P3 条目更新为「
 当前 `docs/debt/known-technical-debt.md` 第一条 P3 条目为"strategies/ 层 except Exception 已标记 NOTE(lazy)"，与本 ADR 决策无直接关联。读者如需查阅 doc-lint 历史决策记录，请直接阅读本 ADR 与 ADR-0005，无需在 `known-technical-debt.md` 中查找。
 
 本勘误仅说明引用失效原因，不修改 Decision 3 原文（遵守 ADR append-only 不可变性原则）。
+
+> 2026-10-25 补充
+
+Decision 1 所述 `redlines.yml` 字段为决策时点（2026-07-17）快照（5 个字段）。现行 schema 已扩展：新增 `automation_coverage`（ADR-0005 / 2026-08-13 Errata 演进）、`rule_type`（P2-11），以及可选的 `checks` / `self_check`；红线范围亦由 R1~R18 扩展至 R1~R24。字段与编号正本一律以 `docs/governance/redlines.yml` 为准，本文正文保留历史快照不改。
