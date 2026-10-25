@@ -98,3 +98,7 @@ N6~N8 不变量规则演进：引入 `automation_coverage: full|partial|none` �
 本次变更同步更新了 `_check_enforcement_invariants()` 函数实现（上方不变量概览表保留原始决策记录，当前实现以本 Errata 为准）。契约测试 `TestEnforcementMapping` 已同步更新覆盖新规则。
 
 **已知设计冗余**：N6/N8 演进后与 `check_redlines_yaml_consistency()` 的 check 2b（`automation_coverage` 与 `human_review_required` 一致性校验）执行相同检查，构成 defense-in-depth 冗余。N7 仍保留独特价值（检查 enforcement 文本中的 `待实现`/`暂缓` 关键词与 `automation_coverage` 的一致性）。接受此冗余以降低单点移除风险。
+
+> 2026-10-25 补充
+
+Consequences 段「新增 9 个不变量的维护负担」与 Decision 第 1 点「校验 8 个不变量（N1~N8；原 N9 已删除）」不一致：N9 删除后实际维护 8 个不变量，`check_enforcement_mapping()` 与 `TestEnforcementMapping` 均已按 N1~N8 落地。原文保留作为决策记录，维护口径以 Decision 与 2026-08-13 Errata 的现行实现为准。
