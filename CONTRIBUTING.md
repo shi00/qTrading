@@ -8,7 +8,7 @@
 > **元数据**（P2-07 统一格式，与 CLAUDE.md 规则集版本一致）：
 > - owner: 架构维护者
 > - ruleset_version: 1.9.0（与 CLAUDE.md 同步，规则集版本变更时递增）
-> - last_reviewed: 2026-09-24
+> - last_reviewed: 2026-10-25
 > - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 人类贡献流程、最小命令入口、实现规范手册索引
 > - supersedes: 无
@@ -94,7 +94,7 @@
 ### 提交前自检
 
 1. 确保所有测试通过（单元、集成、E2E 视变更范围）
-2. 确保代码覆盖率达标（整体 ≥ 85% 为本地目标，单文件 ≥ 80% 与 diff coverage ≥80% 为 CI 强制；分层单文件阈值与 advisory 状态见 [testing.md](./docs/guides/testing.md)）
+2. 确保代码覆盖率达标（整体 ≥ 85% 由 `pyproject.toml` 的 `fail_under` 强制，本地与 CI 均生效；单文件 ≥ 80% 与 diff coverage ≥80% 为 CI 强制；分层单文件阈值与 advisory 状态见 [testing.md](./docs/guides/testing.md)）
 3. 运行 `pre-commit run --all-files`
 4. 更新相关文档（README / CLAUDE.md / CONTRIBUTING.md / SECURITY.md 视变更范围）
 
@@ -258,7 +258,7 @@ python main.py
 |---------|----------|
 | 仅 Markdown/治理文档 | `python scripts/check_docs_consistency.py` + 相关文档契约测试（`python -m pytest tests/unit/test_docs_consistency.py`）；若修改 redlines/schema/policy，再运行对应治理测试；无需无差别运行 pyright、业务单测和 E2E |
 | 仅 `ui/` | ruff + pyright + `tests/unit/ui/` |
-| `data/` DAO/模型 | 上述 + `tests/integration/`（需 DB）+ 若涉 schema 则 `alembic check` |
+| `data/` DAO/模型 | ruff + pyright + `tests/unit/` + `tests/integration/`（需 DB）+ 若涉 schema 则 `alembic check` |
 | `strategies/` | ruff + pyright + `tests/unit/` 对应策略用例 |
 | 依赖变更 | 编辑 `pyproject.toml` → pre-commit 自动同步 `requirements*.txt`（依赖审计由 CI Security Audit 步骤执行） |
 
@@ -275,7 +275,7 @@ python main.py
 
 我们使用以下工具确保代码质量：
 
-- **Ruff**: Lint 和格式化（规则 `F, E, W, UP, B, SIM, BLE`，忽略 `E501, E402, SIM102, SIM105, SIM108, SIM117, BLE001`）
+- **Ruff**: Lint 和格式化（规则 `F, E, W, UP, B, SIM, BLE, ASYNC, DTZ, RUF`，忽略 `E501, E402, SIM102, SIM105, SIM108, SIM117, BLE001, RUF001, RUF002, RUF003, ASYNC109, RUF102`；`tests/**`、`scripts/**` 另有 per-file ignores，见 `pyproject.toml`）
 - **Pyright**: 静态类型检查（`basic` 模式，配置见 `pyrightconfig.json`）
 - **pytest**: 测试框架
 
@@ -425,7 +425,7 @@ CLAUDE.md §1.2 保留的「最小实现」硬规则，其完整方法论为 6 �
 | **UI 框架** | Flet V1（版本见 [`pyproject.toml`](./pyproject.toml)，含 `flet` / `flet-desktop` / `flet-charts` / `flet-code-editor` / `flet-mcp` 五包；Flet V1 已稳定发布，Flutter 驱动桌面应用，dataclass 控件 + 单线程 async UI 模型） |
 | **计算引擎** | Polars (策略层向量化) + Pandas (DAO 层 / 数据同步层) |
 | **数据库** | PostgreSQL 16.14.0 + SQLAlchemy 2.0 (asyncpg) |
-| **数据迁移** | Alembic (自动检测、幂等迁移、CI 强制验证 upgrade → downgrade → upgrade) |
+| **数据迁移** | Alembic (自动检测、幂等迁移、CI 强制验证 upgrade → check → downgrade → upgrade) |
 | **AI 推理** | LiteLLM (多家云端供应商统一网关) / llama-cpp-python (本地 GGUF) |
 | **数据源** | Tushare Pro (核心) + Akshare (补充) |
 | **任务调度** | APScheduler + 自研 `TaskManager` (优先级、持久化、UI 通知) |
@@ -437,11 +437,13 @@ CLAUDE.md §1.2 保留的「最小实现」硬规则，其完整方法论为 6 �
 
 ### 完整目录结构
 
-CLAUDE.md §4.1 仅保留分层架构的依赖方向与禁止反向依赖规则，本节给出完整目录树：
+CLAUDE.md §4.1 仅保留分层架构的依赖方向与禁止反向依赖规则，本节目录按该节层序（自外向内）排列（`utils/` 为横切关注点），给出完整目录树：
 
 ```text
-core/             ← 架构核心层 (基础类型、异常定义、i18n、Prompt 模板，不依赖任何其他层)
 app/              ← 引导层 (bootstrap: 启动初始化、服务编排，仅 main.py 调用)
+ui/               ← 表现层 (MVVM: Views + ViewModels + Components + Theme + i18n 桥接)
+strategies/       ← 策略层 (选股策略、AI 策略混入、Polars 向量化基类、Prompt 模板)
+services/         ← 应用服务层 (AI 服务、任务管理器、本地模型管理、新闻订阅服务、回测服务、内置 PG 维护服务)
 data/             ← 数据层 (DAO、同步策略、外部数据源、领域服务、缓存管理)
   ├── cache/             缓存管理器 (CacheManager 单例，DAO 统一入口、引擎管理)
   ├── persistence/       持久化 (DAOs、ORM 模型、数据库管理/迁移/配置、质量门控、配置/状态/元数据/复盘服务、内置 PostgreSQL 引擎 embedded_postgres/)
@@ -452,9 +454,7 @@ data/             ← 数据层 (DAO、同步策略、外部数据源、领域�
   ├── data_processor.py  数据处理与日历服务 (DataProcessor 单例)
   ├── data_dictionary.py 数据字典 (表定义与元数据配置)
   └── constants.py       数据层常量定义
-services/         ← 应用服务层 (AI 服务、任务管理器、本地模型管理、新闻订阅服务、回测服务、内置 PG 维护服务)
-strategies/       ← 策略层 (选股策略、AI 策略混入、Polars 向量化基类、Prompt 模板)
-ui/               ← 表现层 (MVVM: Views + ViewModels + Components + Theme + i18n 桥接)
+core/             ← 架构核心层 (基础类型、异常定义、i18n、Prompt 模板，不依赖任何其他层)
 utils/            ← 工具层 (配置、安全、线程池、限流、日志、调度、代理、性能监控)
 tests/            ← 测试目录 (unit/ 单元测试, integration/ 集成测试, e2e/ 端到端测试)
 scripts/          ← 工具脚本 (覆盖率检查、安全审计、依赖同步等)
@@ -554,7 +554,7 @@ hooks/            ← 本地 Git/工具钩子脚本
   | 生产代码带 `[error-code]`（human reason 可选） | 通过 |
   | `tests/` 裸 `# type: ignore`（含裸 ignore 加理由） | ERROR，阻断（R3 为 INVARIANT，与生产同判；G5 豁免仅限带码 `attr-defined` 的理由要求，不豁免裸 ignore） |
   | `tests/` `# type: ignore[attr-defined]`（mock 替身场景） | 通过，豁免 human reason |
-  | `tests/` 其他 `[error-code]` 无 human reason | WARNING，不阻断（建议 `# type: ignore[code]  # <原因>`；存量 ≤5 处或 2026-11-30 前转 ERROR，见技术债 P3-TypeIgnores-Tests-HumanReason） |
+  | `tests/` 其他 `[error-code]` 无 human reason | WARNING，不阻断（建议 `# type: ignore[code]  # <原因>`；存量 ≤5 处或 2026-11-30 前转 ERROR，存量策略见 `scripts/check_type_ignore_reason.py` 文件头） |
   | `tests/` 其他 `[error-code]` 带 human reason | 通过 |
 
   覆盖边界：触发面为 pre-commit `type-ignore-reason` hook（本地 staged 文件；CI 经 `pre-commit run --all-files` 全量触发，hook 清单见 [ci-cd.md「Pre-commit Hooks」](./docs/guides/ci-cd.md#pre-commit-hooks)）；脚本按 `# type: ignore` 规范形态匹配（`type:` 与 `ignore` 间至多一个空白，不覆盖多空白变体）；入口仅处理 `.py`（hook 声明含 `.pyi`，但入口过滤后不检查，仓库当前亦无自有 `.pyi`）。
@@ -656,7 +656,7 @@ except Exception as e:
 
 > 本节已迁移到 [docs/guides/testing.md](./docs/guides/testing.md)。
 >
-> 覆盖率源（事实源 [`pyproject.toml`](./pyproject.toml) `[tool.coverage.run] source`）：`core`, `app`, `data`, `services`, `strategies`, `utils`, `ui`, `config`, `main`（排除 `tests/`, `scripts/`, `data/tiktoken_cache/`）。整体覆盖率 ≥ 85% 为本地目标（`fail_under`，CI 未启用）；单文件 ≥ 80% 由 `scripts/check_per_file_coverage.py` 强制检查；diff coverage ≥80% 由 CI `scripts/check_diff_coverage.py` 强制。
+> 覆盖率源（事实源 [`pyproject.toml`](./pyproject.toml) `[tool.coverage.run] source`）：`core`, `data`, `services`, `strategies`, `utils`, `ui`, `app`, `config`, `main`（omit `tests/`, `scripts/`, `data/tiktoken_cache/`、`main.py`）。整体覆盖率 ≥ 85% 由 `[tool.coverage.report]` 的 `fail_under` 强制，本地与 CI 均生效（CI 未显式传 `--cov-fail-under`，pytest-cov 自动继承该配置）；单文件 ≥ 80% 由 `scripts/check_per_file_coverage.py` 强制检查；diff coverage ≥80% 由 CI `scripts/check_diff_coverage.py` 强制。
 
 ## CI/CD 流水线与门禁
 
@@ -758,7 +758,7 @@ except Exception as e:
 
 ### docs/reviews/ — AI 代码检视指南
 
-- [ai-review.md](./docs/reviews/ai-review.md) — 核心协议（51 条稳定规则 ID：SAFE/INPUT/MODE/ROUND1-3/STOP/FIND/EVID/SEV/OUT/CHECK）
+- [ai-review.md](./docs/reviews/ai-review.md) — 核心协议（52 条稳定规则 ID：SAFE/INPUT/MODE/ROUND1-3/STOP/FIND/EVID/SEV/OUT/CHECK）
 - [review-profiles/](./docs/reviews/review-profiles/) — 9 个专项 Profile（Web/API、前端/移动、消息/管道、数据库/迁移、CLI/IaC、库/SDK、第三方/RPA、AI/ML/LLM、项目 Profile）
 - [quality-dimensions.md](./docs/reviews/quality-dimensions.md) — 11 个通用质量维度详细要点
 - [scenario-completeness.md](./docs/reviews/scenario-completeness.md) — 场景完整性与遗漏方法

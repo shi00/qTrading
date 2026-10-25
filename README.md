@@ -34,7 +34,7 @@ Bronze（可用性）→ Silver（连续性/时效性）→ Gold（跨源一致�
 
 ### 🔒 隐私优先设计
 - **本地 AI 推理**：支持 GGUF 模型运行本地推理（当前用于新闻分类等辅助功能），配合「仅本地模式」可禁用全部云端调用；**AI 个股深度分析（AI 选股 L2）仅支持云端 LLM，仅本地模式下不可用**。含智能内存卸载、并发锁、推理超时熔断。
-- **全本地存储**：流水、报告、配置存于本地 PostgreSQL。
+- **全本地存储**：流水与报告存于本地 PostgreSQL；应用配置存于本地 `user_settings.json`。
 - **安全凭证**：Token 用系统 Keyring 或 AES-GCM 加密存储，密钥自动备份恢复。
 
 ### 🎨 现代桌面交互
@@ -77,9 +77,9 @@ qTrading/
 ├── data/           # 数据层：缓存、领域服务、外部数据源、DAO、同步策略、数据质量
 ├── strategies/     # 策略层：超跌反弹/基本面/市场突破/AI 策略 + 向量化回测框架
 ├── services/       # 服务层：AI 网关、任务调度、本地模型、新闻洞察、内置 PG 维护
-├── ui/             # 表现层 (MVVM)：7 标签页（市场/选股/回测/数据/任务/设置/自选股）、组件、视图模型
+├── ui/             # 表现层 (MVVM)：7 标签页（市场概览/关注列表/智能选股/回测/任务中心/数据中心/系统设置）、组件、视图模型
 ├── utils/          # 工具层：配置/安全/线程池/限流/优雅退出
-├── tests/          # 测试层：单元 + 集成测试（资产索引见 docs/guides/testing.md）
+├── tests/          # 测试层：单元 + 集成 + E2E 测试（资产索引见 docs/guides/testing.md）
 ├── alembic/        # 数据库迁移版本脚本与环境配置
 ├── locales/        # 国际化资源（中/英）
 ├── assets/         # 静态资源
@@ -163,11 +163,15 @@ git clone https://github.com/shi00/qTrading.git
 cd qTrading
 
 # 推荐使用 uv
-uv venv && .venv\Scripts\activate   # Windows
+uv venv
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # Linux / macOS
 uv pip install -r requirements.txt
 
 # 或使用 pip
-python -m venv .venv && .venv\Scripts\activate
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # Linux / macOS
 pip install -r requirements.txt
 ```
 
@@ -175,10 +179,11 @@ pip install -r requirements.txt
 
 qTrading 提供两种模式：
 
-- **内置模式（默认，推荐新用户）**：应用自带 PostgreSQL 16.14.0 sidecar，首次启动自动准备本地数据库，零配置。
-- **外置模式（高级）**：连接自建的 PostgreSQL 16.14.0+，在 `.env` 或环境变量配置 `DATABASE_URL`：
+- **内置模式（默认，推荐新用户）**：内置版发行安装包自带 PostgreSQL 16.14.0 sidecar，首次启动自动准备本地数据库，零配置。源码运行时需先准备 sidecar 二进制（`cargo build --release` 后置于 `sidecars/qtrading-pg-sidecar[.exe]`，或配置 `embedded_pg_sidecar_path`，详见 [how-to](docs/guides/how-to.md) §10.2）。
+- **外置模式（高级）**：连接自建的 PostgreSQL 16.14.0+，需同时设置 `QTRADING_DATABASE_MODE=external` 与 `DATABASE_URL`（`.env` 或环境变量）：
 
 ```bash
+QTRADING_DATABASE_MODE=external
 DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/astock_screener
 ```
 
@@ -200,13 +205,14 @@ python main.py
 
 ## 🧪 测试
 
-双层测试金字塔：单元测试 + 集成测试（数量随开发演进，统计见 [docs/guides/testing.md](docs/guides/testing.md) 或用 `pytest --collect-only -q`）。CI 强制 **单文件 ≥80% + diff coverage ≥80%**；**整体 ≥85% 为本地目标**（`pyproject.toml` 的 `fail_under = 85` 未在 CI 路径启用）。
+三层测试金字塔：单元测试 + 集成测试 + E2E（数量随开发演进，统计见 [docs/guides/testing.md](docs/guides/testing.md) 或用 `python -m pytest --collect-only -q`）。集成测试需可连接的 PostgreSQL 测试库（默认 `test_astock`），E2E 需 sidecar/前端测试环境（含 Playwright），详见 [docs/guides/testing.md](docs/guides/testing.md)。CI 强制 **单文件 ≥80% + diff coverage ≥80%**；**整体 ≥85% 为本地目标**（`pyproject.toml` 的 `fail_under = 85` 未在 CI 路径启用）。
 
 ```bash
-# 全部 / 单元 / 集成
+# 全部 / 单元 / 集成 / E2E
 python -m pytest tests/ -v
 python -m pytest tests/unit/ -v
 python -m pytest tests/integration/ -v
+python -m pytest tests/e2e/ -v
 
 # 覆盖率
 python -m pytest tests/ --cov --cov-report=term-missing --cov-fail-under=85
@@ -216,6 +222,7 @@ python -m pytest tests/ --cov --cov-report=term-missing --cov-fail-under=85
 |------|------|----------|
 | **Unit** | `tests/unit/` | 纯逻辑：AI 服务、策略、DAO、配置、工具类、边界条件、回测模块 |
 | **Integration** | `tests/integration/` | 组件协作：数据同步、迁移、回顾系统、任务调度、回测全流程 |
+| **E2E** | `tests/e2e/` | 端到端：Flet UI、embedded 启动、Onboarding 流程 |
 
 | 覆盖维度 | 说明 |
 |----------|------|
@@ -241,6 +248,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
 ### 多供应商 LLM 网关
 
 ```python
+from services.ai_service import AIService
 from utils.llm_providers import LLM_PROVIDERS
 
 # 10 家云端供应商 + 自定义统一配置
@@ -251,19 +259,23 @@ params = AIService._build_litellm_params(llm_config, messages)
 ### 向量化回测框架
 
 ```python
-from strategies.backtest.engine import VectorBacktestEngine
+from datetime import date
+
+from data.cache.cache_manager import CacheManager
 from strategies.backtest.config import BacktestConfig
+from strategies.backtest.engine import VectorBacktestEngine
 
 config = BacktestConfig(
-    start_date="2023-01-01",
-    end_date="2024-01-01",
+    start_date=date(2023, 1, 1),
+    end_date=date(2024, 1, 1),
     initial_capital=1_000_000,
     commission_rate=0.0003,
-    slippage=0.001,
+    slippage_model="fixed_bps",
+    slippage_bps=10,  # 0.1%
 )
-result = await VectorBacktestEngine(config).run(strategy, data_provider)
-print(f"Sharpe: {result.metrics.sharpe_ratio:.2f}")
-print(f"Max Drawdown: {result.metrics.max_drawdown:.2%}")
+result = await VectorBacktestEngine(CacheManager(), config).run(strategy)
+print(f"Sharpe: {result.metrics.get('sharpe_ratio')}")
+print(f"Max Drawdown: {result.metrics['max_drawdown']:.2%}")
 ```
 
 ### AI 回顾闭环
@@ -281,6 +293,9 @@ await rm.run_review()
 ## 🔧 开发指南
 
 ```bash
+# 安装开发依赖（Ruff / Pyright / pytest 等）
+uv pip install -r requirements-dev.txt   # 或 pip install -r requirements-dev.txt
+
 # 代码检查 / 格式化 (Ruff)
 python -m ruff check .
 python -m ruff format .
@@ -309,4 +324,4 @@ pip install pre-commit && pre-commit install
 
 ---
 
-*Powered by Local AI & High-Performance Quant Logic | Built with ❤️*
+*Powered by Local AI & High-Performance Quant Logic | Built with ❤️*
