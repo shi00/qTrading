@@ -5,8 +5,9 @@
 > - owner: 架构维护者
 > - ruleset_version: 1.9.0（规则集版本，与 CLAUDE.md 同步，规则变更时递增）
 > - last_reviewed: 2026-09-24（与 CLAUDE.md 同步）
-> - review_triggers: 红线新增/变更、Flet 升级、检视报告发布时
+> - review_triggers: 红线新增/变更、架构边界调整、Flet 升级、检视报告发布时
 > - canonical_for: 跨工具红线最小安全集（导出镜像，非语义正本）
+> - supersedes: 无
 
 本文件为跨工具自动加载的规则入口（P3-03）。**修改任何代码前先读 [CLAUDE.md](./CLAUDE.md)（项目宪法）§3 红线与 §1.8 任务路由，再按该路由展开必读文件；未读取前只做只读调查。**
 
