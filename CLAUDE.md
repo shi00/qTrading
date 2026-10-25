@@ -13,7 +13,7 @@
 
 ## 本次会话必须遵守（最高优先级摘要）
 
-> 仅列不可逾越的底线；完整红线表见 §3.1，机器可读正本见 [redlines.yml](./docs/governance/redlines.yml)。**本摘要为提示，非冗余正本**，语义以 §3.1 与 `redlines.yml` 为准；下方红线分组清单由 `scripts/check_docs_consistency.py` 从 `redlines.yml` 生成守护，勿手工修改生成区块。
+> 仅列不可逾越的底线；完整红线表见 §3.1，机器可读正本见 [redlines.yml](./docs/governance/redlines.yml)。**本摘要为提示，非正本**，语义以 §3.1 与 `redlines.yml` 为准；下方红线分组清单由 `scripts/check_docs_consistency.py` 从 `redlines.yml` 生成守护，勿手工修改生成区块。
 >
 <!-- generated:claude-executive -->
 > - **不可豁免安全不变量（INVARIANT，先读后写）**：R2 异常吞没 · R3 模糊压制 · R4 SQL 注入 · R7 测试状态污染 · R9 敏感信息泄露 · R10 硬编码密钥
@@ -86,7 +86,8 @@
 | 新增/修改回测 | [docs/patterns/backtest-correctness.md](./docs/patterns/backtest-correctness.md)（回测正确性正本；含回测配置流程与结论可信度边界路由） <!-- route: backtest --> |
 | 新增测试 / E2E 测试 | [docs/guides/testing.md](./docs/guides/testing.md) <!-- route: testing,e2e-testing --> |
 | Git 操作 / worktree / 创建 PR / 创建 Issue | [docs/guides/git-workflow.md](./docs/guides/git-workflow.md) <!-- route: git --> |
-| 内置 PostgreSQL 离线维护 / 数据恢复 | [docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」](./docs/guides/how-to.md#9-内置-postgresql-离线维护) <!-- route: embedded-pg,maintenance --> |
+| 内置 PostgreSQL 离线维护 / 数据恢复 | [docs/guides/how-to.md「9. 内置 PostgreSQL 离线维护」](./docs/guides/how-to.md#9-内置-postgresql-离线维护) <!-- route: embedded-pg --> |
+| 运行期排障 / 维护类问题 | [docs/guides/how-to.md「12. 运行期排障」](./docs/guides/how-to.md#12-运行期排障) <!-- route: maintenance --> |
 | 架构设计 / 公共契约 / 跨层范式 | [docs/adr/0001-record-architecture-decisions.md](./docs/adr/0001-record-architecture-decisions.md) <!-- route: architecture-design --> |
 | 修改治理文档 / 规则（CLAUDE / AGENTS / CONTRIBUTING / docs/**） | [docs/adr/0002-document-layering.md](./docs/adr/0002-document-layering.md) <!-- route: governance-docs --> |
 | 未列出的任务类型（纯重构 / 依赖升级 / 日志可观测性 / 功能下线 / 模块删除等） | 先读 §3 红线 + §4 架构边界；再按改动**实际触及的层**选最接近的 canonical 入口，并在回复中说明所选入口与理由 <!-- route: fallback --> |
@@ -163,7 +164,7 @@
 | R23 | **裸 UI token** | UI 层裸 `ft.Colors` 色值引用与裸字号数值（如 `ft.Text(size=13)`）必须改用 ui/theme.py 定义的 token：颜色用 `AppColors`（如 `AppColors.UP_RED`），字号等用 `AppStyles`（`FONT_SIZE_*` 等） | pre-commit（check_redlines.py） |
 | R24 | **时点正确性** | 任何进入策略或回测的数据，其取数时点不得晚于被决策的交易日；使用「当前快照」类维度（行业分类、指数成分、股票池、财报最新值）参与历史区间计算即违规，必须改用带生效日期的维度表，或显式声明为「当期近似」并在结果中标注 | pre-commit 报告模式（check_redlines.py）+ 仅人工评审；升级期限与翻转触发见 docs/governance/ruleset-changelog.md「R24 报告模式升级期限」（2026-12-31） |
 
-> **红线自动化现状**：各红线的守护函数与覆盖维度见 [docs/governance/redlines.yml](./docs/governance/redlines.yml) 的 `enforcement` / `checks` / `automation_coverage` 字段；无自动化的红线（标注 `仅人工评审`）**须逐条回答下方自查清单**（判据正本为 `redlines.yml` 的 `self_check` 字段，把「自查」从态度变为可勾选清单），**且无自动拦截（`automation_coverage: none` 或仅报告模式）且影响产品结论的红线（R21、R24）须经独立会话复核**（见 [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) 的 ROUND3-05）；R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。
+> **红线自动化现状**：各红线的守护函数与覆盖维度见 [docs/governance/redlines.yml](./docs/governance/redlines.yml) 的 `enforcement` / `checks` / `automation_coverage` 字段；无自动化的红线（标注 `仅人工评审`）**须逐条回答下方自查清单**（判据正本为 `redlines.yml` 的 `self_check` 字段，把「自查」从态度变为可勾选清单），**且无自动拦截（`automation_coverage: none` 或仅报告模式）且影响产品结论的红线（R20、R21、R24）须经独立会话复核**（见 [docs/reviews/ai-review.md](./docs/reviews/ai-review.md) 的 ROUND3-05）；R18 的 worktree 隔离检测为人工评审，AI 助手在开始特性/重构任务前应主动声明并使用 git worktree 隔离开发，确保主工作区整洁。
 
 <!-- generated:redlines-self-check -->
 > **人工评审红线可执行自查清单**（判据正本为 `redlines.yml` 的 `self_check` 字段：R5 / R17 / R21；逐条回答后再交付；R18 有独立执行决策树，见下方）：
@@ -213,7 +214,7 @@
 
 ### 4.1 分层架构
 
-分层为 `core/` (架构核心) → `app/` (引导层) → `data/` (数据层) → `services/` (应用服务) → `strategies/` (策略层) → `ui/` (表现层)，`utils/` 为横切关注点。完整目录树见 CONTRIBUTING.md「完整目录结构」。
+分层自外向内为 `app/` (引导层) → `ui/` (表现层) → `strategies/` (策略层) → `services/` (应用服务) → `data/` (数据层) → `core/` (架构核心)，`utils/` 为横切关注点。完整目录树见 CONTRIBUTING.md「完整目录结构」。
 
 **依赖规则 (严格单向):**
 
