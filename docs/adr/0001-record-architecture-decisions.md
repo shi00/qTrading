@@ -45,6 +45,14 @@ AStockScreener 项目随演进积累了一系列架构决策（文档体系分�
 
 ADR-0001 与 ADR-0003 同日决策（2026-07-17），ADR-0003 推翻 CONTRIBUTING.md 历史「3b 不做」决策。ADR-0001 作为 ADR 机制首条记录，与 ADR-0003 同批次编排落地。
 
+> 2026-10-25 勘误
+
+Decision 4 示例称「ADR-0003 推翻 CONTRIBUTING.md 中『3b/3c 不做』决策」，范围表述有误：ADR-0003 当时的 Decision 1 仅推翻 3b，Decision 2 明确「维持 3c 决策」（3c 仍不做）；3c 随后由同日决策的 ADR-0005（Decision 1「部分推翻 ADR-0003 的 3c 决策」）推翻。ADR-0003 现 Status 原文为 `Partial Superseded by ADR-0005 (3c portion only; 3b portion remains valid)`。本勘误仅更正示例范围，不修改 Decision 原文。
+
+> 2026-10-25 补充
+
+Decision 2 的「五段」为最小内容模板；现行 ADR（ADR-0002 ~ ADR-0015）头部均含 `Date` / `Owner`，另有可选 `Supersedes`（部分 ADR 用 `Partial Supersedes`），正文可按需追加 `Errata`（本文件即含此节），均不改变五段最小集。部分推翻在 Status 中注明范围，原文分别为：ADR-0002 为 `Partial Superseded by ADR-0005 (3c portion only) and ADR-0006 (AGENTS.md pointer portion)`；ADR-0003 为 `Partial Superseded by ADR-0005 (3c portion only; 3b portion remains valid)`；ADR-0011 为 `Superseded by ADR-0014（部分替代：…）`。
+
 ---
 
 ## 完成判定（canonical 入口）
