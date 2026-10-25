@@ -8,7 +8,7 @@
 
 `ConfigHandler` 使用读写锁 (`rwlock.RWLockFair`) 保护并发访问。敏感信息优先使用 `keyring`，降级到 AES-GCM 加密文件 (`utils/security_utils.py`)。
 
-**统一模型管理配置域（S1，ADR-0014 / reviews/模型统一.md §5）**：`model_management` 域的保存与读取有独立契约，普通键的 `save_config` 不适用于该域：
+**统一模型管理配置域（S1，[ADR-0014](../adr/0014-unified-model-scheduling.md) / 本地未入库设计稿 `reviews/模型统一.md` §5；该设计稿当前工作区已不存在，契约以本段与 ADR-0014 为准）**：`model_management` 域的保存与读取有独立契约，普通键的 `save_config` 不适用于该域：
 
 - **锁顺序固定「跨进程文件锁 → RWLock」**（`utils/config/storage.py` `_config_file_lock`，filelock 锁文件 `CONFIG_FILE.lock`）：`save_config` / `ensure_defaults` / `compare_and_save_model_management` 全部走该顺序，锁内重读磁盘为基底，不用旧缓存整字典覆盖新内容；磁盘损坏时中止保存返回 `False`（`ensure_defaults` 同样中止补全/清理，保留损坏原件不重建默认，F10），不以空基底覆盖。已初始化安全子域结构损坏（F08 语义）在 `save_config`（基底与合并结果纵深拦截）/ `ensure_defaults` / `load_config` 缓存装载处同样拒绝，禁止经 Pydantic 默认值洗白为空安全态。
 - **CAS 保存**：`compare_and_save_model_management(expected_revision, payload, operation_id, *, update_security_state=False)`——revision 不符返回 `revision_conflict`；成功时 `config_revision+1` 与 `last_config_commit` 回执（operation_id / committed_revision / 非敏感指纹 / 时间戳）随同一次 `os.replace` 落盘。结果明确前不自动重试、不轮换凭据、不回滚。
@@ -51,7 +51,7 @@
 - `TaskType.CPU`：**仅适用于释放 Python GIL 的密集计算**（如 Polars 表达式、NumPy 数组计算、C 扩展等）。
 - **纯 Python 密集循环**：纯 Python 循环在线程池内会产生严重 GIL 争抢，不仅无法利用多核，还会争抢事件循环线程导致 UI 卡顿。桌面应用模型下不引入多进程池（避免进程间序列化开销与打包复杂度）；**所有 CPU 密集型计算必须改用 Polars 向量化表达**。
 
-**热重载语义（D7-2）**：线程池配置热重载（`ThreadPoolManager.reload_config`）**不取消在途排队工作**——旧池以 `cancel_futures=False` 关闭，已排队、尚未启动的工作在旧池内自然执行完，新提交走新池；只有停机路径（`ThreadPoolManager.shutdown()` 与 reload 中「swap 前检测到停机」的早退分支）才用 `cancel_futures=True` 取消排队工作，两条路径语义必须分离。原因：取消排队工作会经 `loop.run_in_executor` 的 Future 链接把等待它的协程一并取消（`CancelledError`，R2 上抛），使运行中的同步任务 / 夜间预测被误判为「用户取消」终止（reviews/09-24/07.md §2 MAJOR-02）。
+**热重载语义（D7-2）**：线程池配置热重载（`ThreadPoolManager.reload_config`）**不取消在途排队工作**——旧池以 `cancel_futures=False` 关闭，已排队、尚未启动的工作在旧池内自然执行完，新提交走新池；只有停机路径（`ThreadPoolManager.shutdown()` 与 reload 中「swap 前检测到停机」的早退分支）才用 `cancel_futures=True` 取消排队工作，两条路径语义必须分离。原因：取消排队工作会经 `loop.run_in_executor` 的 Future 链接把等待它的协程一并取消（`CancelledError`，R2 上抛），使运行中的同步任务 / 夜间预测被误判为「用户取消」终止（检视报告 09-24 批次 §2 MAJOR-02；该报告本地未入库、当前工作区仅存 01~05，结论以本段与 `utils/thread_pool.py` 的 D7-2 注释为准）。
 
 ### 金额/数量列阈值比较（R20）
 
