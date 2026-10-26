@@ -6,6 +6,10 @@
   失败/超时/引擎不可用一律降级为 ``persisted=False`` + 脱敏错误码，缺失不伪装（R21）；
 - 60s 用量窗口惰性扫描（无后台 timer）：``submit_terminal`` 顺带关闭到期窗口，
   ``aclose`` 兜底全量 flush；
+- F20：``submit_terminal`` 落账失败（persisted=False）不丢弃观察——可恢复失败
+  （账本不可用 / 超时）的终态记录进入**有界内存重试队列**，挂靠后续成功落账
+  与 ``aclose`` 重放（成功或确认不可恢复才移除，防双计由 DAO usage_revision
+  水位兜底）；``aclose`` 停机前全量 flush（失败如实告警，R21 不伪装已结算）；
 - ``dao_provider`` 惰性解析账本 DAO（engine 未就绪 → ``DB_UNAVAILABLE``）。
 
 用量落账不阻塞推理主链路：所有 DAO 异常在本层收敛为 PersistenceOutcome。
@@ -16,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 from collections.abc import Callable
@@ -40,6 +45,19 @@ _DB_SETTLE_TIMEOUT = "DB_SETTLE_TIMEOUT"
 # 预留被拒（F16）：try_reserve 返回 None = 余额不足 **或** owner 失权（D2/D3+F23
 # 语义统一按「不可派发」处置，DAO 层不可区分，错误码合并表达）。
 _RESERVE_REJECTED = "RESERVE_REJECTED"
+
+# F20：可恢复失败错误码（保留重放）。其余错误码确认为不可恢复——
+# METADATA_INCOMPLETE：重放无新元数据来源（观察 / 记录不可变）；
+# OWNER_LEASE_LOST：DAO 返回 False = 旧修订或已结算（事实已在账本）或缺行
+# 无活跃预留背书（F23 确定性拒绝），重放结果不变。
+_RETAINABLE_ERROR_CODES = frozenset({_DB_UNAVAILABLE, _DB_SETTLE_TIMEOUT})
+# F20：结算失败重试队列上限（有界内存；溢出 FIFO 逐出最旧并如实告警，R21）
+_MAX_PENDING_SETTLE = 64
+# F20：单次挂靠重放上限（无后台 timer，D6；限制单次 submit_terminal 追加延迟）
+_MAX_DRAIN_PER_SWEEP = 8
+# F20：重放指数退避（2s 起 ×2 递增，上限 30s；防止账本抖动时高频无效重试）
+_RETRY_BACKOFF_BASE_S = 2.0
+_RETRY_BACKOFF_CAP_S = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +114,20 @@ class AttemptTerminalRecord:
     metadata: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingSettle:
+    """F20 结算失败保留条目：原始终态记录 + 重试退避状态（不可变快照）。
+
+    ``record`` 保留 executor 提交的原始终态（含 reservation_id），重放语义与
+    首次提交完全一致；``attempts`` 驱动指数退避；``next_retry_at`` 为下次重放
+    的单调时刻（重放仅处理到期条目）。
+    """
+
+    record: AttemptTerminalRecord
+    attempts: int
+    next_retry_at: float
+
+
 class UsageRecorder:
     """用量落账边界（DI 单实例；owner Task 强引用由 Executor 侧持有）。"""
 
@@ -106,15 +138,19 @@ class UsageRecorder:
         clock: Callable[[], float] = time.monotonic,
         settle_timeout_s: float = _DEFAULT_SETTLE_TIMEOUT_S,
         window_seconds: float = _DEFAULT_WINDOW_SECONDS,
+        max_pending_settle: int = _MAX_PENDING_SETTLE,
     ) -> None:
         self._dao_provider = dao_provider
         self._clock = clock
         self._settle_timeout_s = settle_timeout_s
         self._window_seconds = window_seconds
+        self._max_pending_settle = max_pending_settle
         # attempt_id → 不可变用量快照（幂等：首次 observe 生效）
         self._observations: dict[str, AttemptUsageObservation] = {}
         # attempt_id → 窗口到期单调时刻（惰性扫描用）
         self._windows: dict[str, float] = {}
+        # F20：结算失败保留队列（插入序 = 首次失败序，FIFO 逐出最旧）
+        self._pending_settle: OrderedDict[str, _PendingSettle] = OrderedDict()
         self._closed = False
 
     # ------------------------------------------------------------------
@@ -329,6 +365,42 @@ class UsageRecorder:
         attempt 的用量失配）。不可计价（usage_only / 配置缺失 / 单价或用量
         未知）→ ``cost_cny=None``（未知语义直通，R21 禁止填 0 伪装）；唯一
         合法零 = 价格事实为 0（免费，已知零）。
+
+        F20：落账失败（persisted=False）不丢弃观察——可恢复失败（账本不可用 /
+        超时）进入有界重试队列待重放；不可恢复失败（METADATA_INCOMPLETE /
+        OWNER_LEASE_LOST）确认丢弃并如实告警。返回值语义不变（R21 诚实）。
+        """
+        outcome = await self._settle_record(record)
+        if outcome.persisted:
+            self._observations.pop(record.attempt_id, None)
+            # F20：同 attempt 迟到重提交成功（如 F19 executor 幂等重提交）→
+            # 保留条目一并清除（事实已落账，无需重放）
+            self._pending_settle.pop(record.attempt_id, None)
+        elif outcome.error_code in _RETAINABLE_ERROR_CODES:
+            self._retain(record)
+        else:
+            # F20：不可恢复失败确认丢弃（原实现无条件 pop 观察即丢数据）——
+            # 重试无新事实来源（METADATA_INCOMPLETE）或事实已在账本（
+            # OWNER_LEASE_LOST = DAO False = 旧修订或已结算 / 无背书确定性拒绝）
+            self._observations.pop(record.attempt_id, None)
+            logger.warning(
+                "[UsageRecorder] terminal settle not recoverable (%s), dropping observation attempt=%s...",
+                outcome.error_code,
+                record.attempt_id[:8],
+            )
+        # 终态进入用量确认窗口（未 observe 的直接登记），随后惰性扫描到期项
+        self._windows.setdefault(record.attempt_id, self._clock() + self._window_seconds)
+        # F20：本次落账成功 = 账本刚证明可达，顺带重放历史失败条目（无后台 timer，D6）
+        if outcome.persisted and self._pending_settle:
+            await self._drain_pending_settle()
+        await self._scan_expired_windows()
+        return outcome
+
+    async def _settle_record(self, record: AttemptTerminalRecord) -> PersistenceOutcome:
+        """单条终态结算（F20 自 submit_terminal 提取，供失败重放 / 停机 flush 复用）。
+
+        无副作用：不触碰观察缓冲 / 窗口登记 / 重试队列，仅执行 DAO 结算调用并
+        收敛结果；观察元数据仍为权威来源。
         """
         obs = self._observations.get(record.attempt_id)
         usage = record.usage if record.usage is not None else (obs.usage if obs else None)
@@ -397,20 +469,69 @@ class UsageRecorder:
                 )
             )
 
-        outcome = await self._guarded_outcome(_run, db_timeout_code=_DB_SETTLE_TIMEOUT)
-        # 终态进入用量确认窗口（未 observe 的直接登记），随后惰性扫描到期项
-        self._windows.setdefault(record.attempt_id, self._clock() + self._window_seconds)
-        await self._scan_expired_windows()
-        self._observations.pop(record.attempt_id, None)
-        return outcome
+        return await self._guarded_outcome(_run, db_timeout_code=_DB_SETTLE_TIMEOUT)
 
-    async def _scan_expired_windows(self) -> None:
-        """惰性扫描：关闭到期用量窗口（无后台 timer，D6）。"""
+    def _retain(self, record: AttemptTerminalRecord) -> None:
+        """F20 结算失败条目入有限重试队列（溢出 FIFO 逐出最旧并如实告警，R21）。
+
+        同 attempt 重复失败（如 F19 幂等重提交同样失败）沿用既有条目的失败
+        次数推进退避，不重复占位。
+        """
+        existing = self._pending_settle.get(record.attempt_id)
+        attempts = 1 if existing is None else existing.attempts + 1
+        if existing is None:
+            while self._pending_settle and len(self._pending_settle) >= self._max_pending_settle:
+                evicted_id, _evicted = self._pending_settle.popitem(last=False)
+                self._observations.pop(evicted_id, None)
+                logger.warning(
+                    "[UsageRecorder] settle retry queue full (%d): dropping oldest unresolved usage fact attempt=%s...",
+                    self._max_pending_settle,
+                    evicted_id[:8],
+                )
+        backoff = min(_RETRY_BACKOFF_BASE_S * (2 ** (attempts - 1)), _RETRY_BACKOFF_CAP_S)
+        self._pending_settle[record.attempt_id] = _PendingSettle(
+            record=record,
+            attempts=attempts,
+            next_retry_at=self._clock() + backoff,
+        )
+
+    async def _drain_pending_settle(self) -> None:
+        """F20 顺带重放：重试队列中退避到期的条目逐条重试（无后台 timer，D6）。
+
+        取消安全（R2）：不预先移除条目——CancelledError 中途到达时未处理条目
+        保留在队列；并发 / 重复重放由 DAO usage_revision 水位幂等兜底（F19 防双计）。
+        """
+        # NOTE(lazy): 重放挂靠成功落账而非独立后台任务（与 D6 无后台 timer 惯例一致）.
+        # ceiling: 单轮 _MAX_DRAIN_PER_SWEEP 条 × settle_timeout_s，且仅在当前落账刚成功的时刻发生；
+        # 当前记录先于重放落定，取消仅中断重放（条目保留）.
+        # upgrade: 实测落账延迟影响推理链路 P95 或取消清理超时率上升时，改为独立后台任务重放.
+        now = self._clock()
+        due = [aid for aid, pending in self._pending_settle.items() if pending.next_retry_at <= now]
+        for attempt_id in due[:_MAX_DRAIN_PER_SWEEP]:
+            pending = self._pending_settle.get(attempt_id)
+            if pending is None:
+                continue
+            outcome = await self._settle_record(pending.record)
+            if outcome.persisted:
+                self._pending_settle.pop(attempt_id, None)
+                self._observations.pop(attempt_id, None)
+            else:
+                self._retain(pending.record)
+
+    async def _scan_expired_windows(self, *, force: bool = False) -> None:
+        """惰性扫描：关闭到期用量窗口（无后台 timer，D6）。
+
+        ``force=True``（aclose 停机兜底）：关闭全部剩余窗口——停机后无迟到修订
+        来源，窗口登记随内存清空，不收口将永久滞留为未关闭。
+        """
         dao = self._dao_provider()
         if dao is None:
             return
         now = self._clock()
-        expired = [aid for aid, expires_at in self._windows.items() if expires_at <= now]
+        if force:
+            expired = list(self._windows)
+        else:
+            expired = [aid for aid, expires_at in self._windows.items() if expires_at <= now]
         for attempt_id in expired:
             self._windows.pop(attempt_id, None)
             try:
@@ -421,19 +542,80 @@ class UsageRecorder:
                 logger.warning("[UsageRecorder] close_usage_window failed: %s", type(e).__name__)
 
     # ------------------------------------------------------------------
-    # 关闭兜底（D6：aclose 幂等）
+    # 关闭兜底（D6：aclose 幂等；F20 停机前全量 flush）
     # ------------------------------------------------------------------
 
     async def aclose(self) -> None:
-        """停机兜底：清空观察缓冲与窗口登记（幂等；不抛账本异常）。"""
+        """停机兜底（F20）：全量 flush 未落账事实后再清理缓冲（幂等；尽力而为）。
+
+        失败如实告警不吞没（R21——不伪装成已结算，未落账事实随清理释放前留痕）；
+        CancelledError 传播不吞（R2——cleanup 回调 5s 预算取消时，未落账条目保留
+        在内存缓冲，不静默销毁；二次 aclose 幂等分支清理）。
+        """
         if self._closed:
             self._observations.clear()
+            self._pending_settle.clear()
             self._windows.clear()
             return
         self._closed = True
-        await self._scan_expired_windows()
+        await self._flush_before_close()
         self._observations.clear()
+        self._pending_settle.clear()
         self._windows.clear()
+
+    async def _flush_before_close(self) -> None:
+        """停机前全量 flush（F20），顺序：
+
+        ① 重放保留队列——原始终态记录（status / reservation_id 语义最完整）；
+        ② 从未提交终态的观察合成 ``cancelled`` 终态补交——用量已观察 = 消费事实，
+          停机中断 = 未完成事实，均非伪装（R21）；无预留转换（reservation_id
+          不可知，预留经租约到期退出）；
+        ③ 强制关闭全部剩余用量窗口（停机后无迟到修订来源）。
+        """
+        for attempt_id, pending in list(self._pending_settle.items()):
+            outcome = await self._settle_record(pending.record)
+            if outcome.persisted:
+                self._pending_settle.pop(attempt_id, None)
+                self._observations.pop(attempt_id, None)
+            else:
+                logger.warning(
+                    "[UsageRecorder] aclose flush: retained settle still failed (%s), "
+                    "usage fact dropped at shutdown attempt=%s...",
+                    outcome.error_code,
+                    attempt_id[:8],
+                )
+        for attempt_id, obs in list(self._observations.items()):
+            if attempt_id in self._pending_settle:
+                # ① 已对原始终态记录尽力重放且失败——不覆盖为合成 cancelled 二次结算
+                continue
+            if not obs.metadata.get("month"):
+                logger.warning(
+                    "[UsageRecorder] aclose flush: observation without month metadata, "
+                    "usage fact dropped at shutdown attempt=%s...",
+                    attempt_id[:8],
+                )
+                continue
+            record = AttemptTerminalRecord(
+                attempt_id=obs.attempt_id,
+                invocation_id=obs.invocation_id,
+                status="cancelled",
+                usage=obs.usage,
+                error_code=None,
+                duration_ms=None,
+                actual_model=obs.actual_model,
+                metadata=dict(obs.metadata),
+            )
+            outcome = await self._settle_record(record)
+            if outcome.persisted:
+                self._observations.pop(attempt_id, None)
+            else:
+                logger.warning(
+                    "[UsageRecorder] aclose flush: observation settle failed (%s), "
+                    "usage fact dropped at shutdown attempt=%s...",
+                    outcome.error_code,
+                    attempt_id[:8],
+                )
+        await self._scan_expired_windows(force=True)
 
     # ------------------------------------------------------------------
     # 内部：受限落账 + 结果收敛
