@@ -194,7 +194,16 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             tables = await self._tp.run_async(TaskType.CPU, self._db.get_all_tables)
             if not tables:
                 logger.warning("[DataExplorerVM] DB 无可用表或连接失败，不进入已加载态")
-                self._set_state(tables_list=(), tables_loaded=False, current_table="")
+                # M-UI-16: 空表/连接失败须显式进入错误态 — get_all_tables 将连接失败吞为
+                # []（data_explorer_query_client.get_all_tables except 分支），VM 仅凭空
+                # 列表无法区分「空库」与「连接失败」，但两者用户均无法自救，须呈现
+                # ErrorState(retry) 而非落到 View 兜底 loading 占位（否则永久转圈假象）。
+                self._set_state(
+                    tables_list=(),
+                    tables_loaded=False,
+                    current_table="",
+                    error_message=Message("data_err_load_schema", {}),
+                )
                 return ()
             current_table = "stock_basic" if "stock_basic" in tables else tables[0]
             self._set_state(

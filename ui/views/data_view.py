@@ -507,10 +507,16 @@ def TableViewerTab(
     #   - _load_initial_table 消费 tables_loaded=True, 调用 load_table_schema/query_data
     #     修改的 table_columns/rows/total_rows 不在依赖中, 不会触发自身重调度.
     async def _load_schema_and_data() -> None:
-        if state.is_loading:
+        # M-UI-16: 重读最新 snapshot 消除 stale closure — _do_table_change 在 set_table
+        # 修改 VM current_table 后调用本协程, 闭包捕获的渲染期 state.current_table 仍为
+        # 旧表, 导致 load_table_schema(旧表) 与 query_data()（VM 内部读新表）schema/数据
+        # 错位（列头为旧表、单元格全 None 占位）。对齐 SQLConsoleTab._run_query 的
+        # vm.state 重读模式 (race safety)。
+        s = vm.state
+        if s.is_loading:
             return
         try:
-            await vm.load_table_schema(state.current_table)
+            await vm.load_table_schema(s.current_table)
             await vm.query_data()
         except asyncio.CancelledError:
             raise  # R2: 必须传播
@@ -723,12 +729,25 @@ def TableViewerTab(
         if page is not None:
             page.run_task(_do_refresh)
 
-    def _on_retry_load() -> None:
-        """ErrorState on_retry: 清除错误 + 重新加载 schema (P1-3 批次 2)."""
+    async def _do_retry_load() -> None:
+        """ErrorState retry: 完整重载链（M-UI-16）。
+
+        覆盖两类错误场景：
+        - tables_loaded=False（init_tables 空表/连接失败）: _init_tables 重载表列表,
+          成功后 tables_loaded=True → effect 依赖变化重调度 _load_initial_table 加载数据;
+        - tables_loaded=True（schema/data 加载失败）: _load_initial_table 内部
+          _load_schema_and_data 重载当前表数据。
+        两个协程各自幂等守卫（快照判定直接跳过），顺序执行无竞态。
+        """
         vm.clear_error()
+        await _init_tables()
+        await _load_initial_table()
+
+    def _on_retry_load() -> None:
+        """ErrorState on_retry: 清除错误 + 完整重载 (P1-3 批次 2 / M-UI-16)."""
         page = _get_page()
         if page is not None:
-            page.run_task(_load_schema_and_data)
+            page.run_task(_do_retry_load)
 
     def _on_sort(col_id: str, new_asc: bool) -> None:
         try:
@@ -1029,7 +1048,9 @@ def SQLConsoleTab(state: DataExplorerState, vm: DataExplorerViewModel) -> ft.Col
 
     # --- 异步 handler (R2: except Exception 不捕获 CancelledError) ---
     async def _run_query(e: ft.ControlEvent) -> None:
-        if not sql_text:
+        # M-UI-16: strip 守卫 — VM execute_sql 对空白 SQL 直接 return 不写 state,
+        # 若放行会残留上次查询的 sql_success/rows 显示为本次结果（误导）。
+        if not sql_text.strip():
             return
         UILogger.log_action("SQLConsoleTab", "Click", "btn_run_query")
         set_status_text(I18n.get("data_status_executing"))
@@ -1055,8 +1076,10 @@ def SQLConsoleTab(state: DataExplorerState, vm: DataExplorerViewModel) -> ft.Col
                         set_status_text(I18n.get("data_sql_success").format(time=elapsed, rows=row_count))
                     set_status_color(AppColors.SUCCESS)
                 else:
-                    set_status_text(I18n.get("data_sql_error"))
-                    set_status_color(AppColors.ERROR)
+                    # M-UI-16: 成功但 0 行 ≠ 执行错误 — 空结果与失败态区分,
+                    # 复用 data_sql_error 会误导用户以为 SQL 写错。
+                    set_status_text(I18n.get("data_sql_success_empty").format(time=elapsed))
+                    set_status_color(AppColors.SUCCESS)
             else:
                 # D6: 渲染 VM 产出的 SqlErrorInfo(key, params) + 脱敏原文折叠展示
                 err = s.sql_error

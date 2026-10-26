@@ -495,6 +495,7 @@
     "data_sql_result": "Results",
     "data_sql_ready": "Ready",
     "data_sql_success": "Success ({time:.3f}s). Returned {rows} rows.",
+    "data_sql_success_empty": "Success ({time:.3f}s). No matching rows.",
     "data_sql_success_truncated": "Success ({time:.3f}s). Showing first {limit} rows (Total {rows}).",
     "data_sql_error": "Execution Error",
     "data_sql_error_detail": "Error Detail",

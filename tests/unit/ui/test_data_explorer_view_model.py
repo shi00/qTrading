@@ -225,6 +225,9 @@ class TestInitTables:
         assert vm.state.tables_list == ()
         # 空表/连接失败时不进入"已加载"状态，避免下游误用已加载表进行后续操作
         assert vm.state.tables_loaded is False
+        # M-UI-16: 空表/连接失败须显式进入错误态（View 呈现 ErrorState+retry），
+        # 禁止落到兜底 loading 占位导致 UI 永久转圈假象
+        assert vm.state.error_message is not None
 
 
 class TestInitTablesErrors:
