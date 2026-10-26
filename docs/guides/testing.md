@@ -12,13 +12,13 @@
 
 ### 测试资产地图
 
-> 仓库测试资产共 **495 个 `.py`**（`tests/` 递归计数，不含 `__init__.py` 外的 fixture/工具）。本节是测试资产的可发现索引：先查"去哪个目录、按什么关键词、用什么 fixture"，再着手写，避免重复造轮子（§3.2 复用优先）。entry-level 运行命令见「marker → 运行命令」表；E2E / embedded 完整前置见「集成与 E2E 环境」小节。
+> 仓库测试资产规模约 **530 个 `.py`**（`tests/` 递归计数，不含 `__init__.py` 及 conftest/fixture/builders 等辅助文件；数字为时点快照、随开发增长漂移，以实测为准）。本节是测试资产的可发现索引：先查"去哪个目录、按什么关键词、用什么 fixture"，再着手写，避免重复造轮子（§3.2 复用优先）。entry-level 运行命令见「marker → 运行命令」表；E2E / embedded 完整前置见 [how-to.md「10. 运行 embedded 模式真实 sidecar 测试」](../guides/how-to.md#10-运行-embedded-模式真实-sidecar-测试)。
 
 #### 测试目录 → 覆盖对象 → 如何定位
 
 | 测试目录（glob） | 覆盖对象 | 如何定位（关键词 / glob） | 新增用例入该目录的条件 |
 |---|---|---|---|
-| `tests/unit/test_*.py`（顶层，约 210 个文件） | 各层纯逻辑单测 + **治理/文档门禁**（见下） | `tests/unit/test_<主题>.py`；按类名如 `test_no_cancelled_error_swallow.py`（R2）/ `test_no_class_attr_asyncio_primitives.py`（R11）/ `test_architecture_boundaries.py`（R1）/ `test_redline_checks.py` / `test_data_dictionary_alignment.py`（R12）/ `test_cache_manager_dao_registry.py`（R13）/ `test_r8_enforcement.py`（R8）/ `test_i18n_*.py` | 不依赖真实 DB / 外部服务，用 mock 隔离即归此域；门禁 / 脚本 / 工具类变更的配套测试必放此 |
+| `tests/unit/test_*.py`（顶层，约 240 个文件） | 各层纯逻辑单测 + **治理/文档门禁**（见下） | `tests/unit/test_<主题>.py`；按类名如 `test_no_cancelled_error_swallow.py`（R2）/ `test_no_class_attr_asyncio_primitives.py`（R11）/ `test_architecture_boundaries.py`（R1）/ `test_redline_checks.py` / `test_data_dictionary_alignment.py`（R12）/ `test_cache_manager_dao_registry.py`（R13）/ `test_r8_enforcement.py`（R8）/ `test_i18n_*.py` | 不依赖真实 DB / 外部服务，用 mock 隔离即归此域；门禁 / 脚本 / 工具类变更的配套测试必放此 |
 | `tests/unit/strategies/` | 策略类（`strategies/`） | `strategies/`、`backtest/` 等子目录 | 单测断言 `required_quality_tier` + `_filter_logic`（Polars 夹具） |
 | `tests/unit/data/` + `persistence/` + `daos/` + `data/domain_services/` + `data/persistence/daos/` | `data/` 层：DAO / 数据清洗 / 域服务 | `tests/unit/data/**`、`tests/unit/daos/**`、`tests/unit/persistence/**` | 用 mock engine / mock TushareClient 隔离真实 IO（sync/DAO 顶层单测如 `test_holder_sync.py` 亦在此域） |
 | `tests/unit/services/` + `ai_service/` | `services/` 层：应用服务 / AI 服务 / 编排 | `tests/unit/services/**`、`services/ai_service/` | 服务单测；涉及 is_refresh 生命周期 / 轮询编排 |
@@ -87,7 +87,7 @@
 
 > [!NOTE]
 > 覆盖率阈值的单一事实源位于 `pyproject.toml`。
-> - **整体覆盖率**：具体数值见 `pyproject.toml` 中的 `fail_under`（目前为 ≥ 85%）。**CI 不强制整体 85%**——`ci_cd.yml` 的 pytest 未传 `--cov-fail-under`，`fail_under=85` 仅在本地命令生效；CI 强制的是下方单文件 ≥80% 与 diff coverage ≥80%
+> - **整体覆盖率**：具体数值见 `pyproject.toml` 中的 `fail_under`（目前为 ≥ 85%）。**CI 同样强制整体 85%**——`ci_cd.yml` 的 pytest 虽未显式传 `--cov-fail-under`，但 pytest-cov 会继承 coverage 配置的 `fail_under=85`，整体覆盖率不足时该 job 失败；CI 另强制下方单文件 ≥80% 与 diff coverage ≥80%
 > - **单文件覆盖率**：具体数值见 `pyproject.toml` 中的 `per_file_minimum`（目前为 ≥ 80%，由 `scripts/check_per_file_coverage.py` 强制检查）
 > - **分层单文件覆盖率**：`services/`、`strategies/`、`data/` 单文件阈值 ≥ 90%，`ui/` ≥ 85%（`pyproject.toml` `per_file_minimum_by_path`，最长前缀匹配，未匹配目录仍按默认 ≥ 80%）；当前 `enforce_layered=false` 为 advisory 报告模式（`scripts/check_per_file_coverage.py --report` 输出，CI「Report Layered Coverage」step），不阻断；补齐分层覆盖率后翻转强制
 > - **覆盖率源**：`core`, `app`, `data`, `services`, `strategies`, `utils`, `ui`, `config`, `main`（排除 `tests/`, `scripts/`, `data/tiktoken_cache/`）
@@ -237,7 +237,7 @@ def test_market_trend_filter_selects_in_range():
 ## 完成判定（canonical 入口）
 
 - 新测试已按对应「测试编写模板」落地（DAO / ViewModel / 异步取消 / 策略），未发明未对齐的非标准写法
-- 覆盖率达标（单文件 ≥ 80% 与 diff coverage ≥80% 为 CI 强制；整体 ≥ 85% 为本地目标；分层阈值为 advisory）
+- 覆盖率达标（单文件 ≥ 80%、diff coverage ≥80% 与整体 ≥ 85% 均为 CI 强制；分层阈值为 advisory）
 - E2E 用例按要求串行/网络隔离（Windows skipif 等既有约定）依从
 
 _最小验证命令：_ `ruff` + `pyright` + 对应 `tests/unit/`/`tests/integration/`；
