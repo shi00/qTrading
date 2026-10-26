@@ -99,10 +99,16 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
     async def start_backup(self, output_path: Path) -> None:
         """手动备份: 调用 ``dump(output_path)`` 更新 state.
 
+        - 重复点击守卫: ``is_backing_up`` 为 True 时跳过 (与 test_connection/save_config
+          同模式; UI 层 disabled 与重渲染间存在双击窗口, 同秒默认时间戳路径相同,
+          并发 dump 会写同一文件导致备份损坏)
         - 备份文件覆盖保护: ``output_path.exists()`` 时不执行 (避免误覆盖)
-        - 调用前清空 error_message / backup_success_message
+        - 调用前清空 error_message / backup_success_message / backup_path (旧路径残留)
         - 异常时设 error_message (R2: CancelledError 自动透传)
         """
+        if self._state.is_backing_up:
+            logger.debug("[BackupRestoreVM] start_backup skipped, backup in progress")
+            return
         if output_path.exists():  # noqa: ASYNC240  # 备份前一次性存在性探测，防误覆盖（非交互热路径）
             logger.warning(
                 "[BackupRestoreVM] backup file already exists, skip: %s",
@@ -115,6 +121,7 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
             return
         self._set_state(
             is_backing_up=True,
+            backup_path=None,
             progress_message=Message("backup_in_progress"),
             error_message=None,
             backup_success_message=None,

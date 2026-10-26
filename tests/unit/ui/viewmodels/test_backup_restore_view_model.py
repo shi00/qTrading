@@ -160,6 +160,43 @@ class TestStartBackup:
         assert vm.state.error_message is None
         assert vm.state.backup_success_message is not None
 
+    @pytest.mark.asyncio
+    async def test_start_backup_skip_when_already_backing_up(self, vm, mock_maintenance_service):
+        """is_backing_up=True 时跳过 (重复点击守卫), 不并发调用 dump.
+
+        M-UI-13: UI 层 disabled 与重渲染间存在双击窗口, 同秒默认时间戳路径相同,
+        VM 级守卫防止两个 dump 并发写同一文件导致备份损坏.
+        """
+        vm._set_state(is_backing_up=True)
+        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False):
+            await vm.start_backup(Path("/tmp/backup.dump"))
+        mock_maintenance_service.dump.assert_not_called()
+        assert vm.state.is_backing_up is True
+        assert vm.state.error_message is None
+
+    @pytest.mark.asyncio
+    async def test_start_backup_clears_stale_backup_path_on_start(self, vm, mock_maintenance_service):
+        """备份开始时清空上次备份路径 (backup_path=None), 完成后写入新路径."""
+        import asyncio
+
+        vm._set_state(backup_path="/tmp/stale.dump")
+        release = asyncio.Event()
+        captured_during_backup: list[str | None] = []
+
+        async def slow_dump(_output_path: Path):
+            captured_during_backup.append(vm.state.backup_path)
+            await release.wait()
+            return MagicMock(output_path="/tmp/new.dump", file_size=100, exit_code=0)
+
+        mock_maintenance_service.dump = AsyncMock(side_effect=slow_dump)
+        task = asyncio.create_task(vm.start_backup(Path("/tmp/new.dump")))
+        await asyncio.sleep(0)  # 让 start_backup 执行到 slow_dump 内部
+        assert vm.state.is_backing_up is True
+        assert captured_during_backup == [None]
+        release.set()
+        await task
+        assert vm.state.backup_path == "/tmp/new.dump"
+
 
 # --- start_restore_wizard ---
 

@@ -591,12 +591,13 @@ class TestBackupRestorePanelStateRendering:
         assert "backup_in_progress" in text_values
 
     def test_renders_backup_path_when_set(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """backup_path 非 None 时渲染备份路径文本 (db_status_data_dir)."""
+        """backup_path 非 None 时渲染备份路径文本 (backup_file_path, M-UI-13: 不再复用 db_status_data_dir)."""
         state = BackupRestoreState(backup_path="/tmp/backup.dump")
         _, _, result, _ = _render_panel_with_state(state)
         ctrls = _walk_controls(result)
         text_values = [getattr(c, "value", None) for c in ctrls if isinstance(c, ft.Text)]
-        assert "db_status_data_dir" in text_values
+        assert "backup_file_path" in text_values
+        assert "db_status_data_dir" not in text_values
 
     def test_renders_backup_success_message(self, mock_i18n_state, mock_app_colors_state) -> None:
         """backup_success_message 非 None 时渲染翻译文本."""

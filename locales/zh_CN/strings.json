@@ -784,6 +784,7 @@
     "restore_step2_confirm": "Step 2: 确认恢复",
     "backup_in_progress": "正在备份...",
     "backup_success": "备份成功: {path}",
+    "backup_file_path": "备份文件: {path}",
     "backup_failed": "备份失败",
     "restore_failed": "恢复失败",
     "restore_confirm_title": "确认恢复",
