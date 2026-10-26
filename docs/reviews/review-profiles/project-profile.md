@@ -20,7 +20,7 @@
 
 ### 独立会话复核（无自动拦截且影响产品结论的红线）
 
-**无自动拦截**（`automation_coverage: none`，或自动化仅报告模式 warning、不阻断退出码）**且影响产品结论**的红线（R21、R24（R24 见 [ruleset-changelog.md](../../governance/ruleset-changelog.md)，由并行单元新增）），除按上述判据自查外，**须经独立会话复核**：新开一个上下文，只提供 diff 与判据（`redlines.yml` 的 `self_check` / 上方追查步骤），**不提供实现理由与自评结论**，由该会话独立判定是否命中。这是 AI 工作流中唯一近似「第二双眼睛」的可行机制（被约束者自评等于无约束），规则正本与体例见 [ai-review.md](../ai-review.md) 的 ROUND3-05。
+**无自动拦截**（`automation_coverage: none`，或自动化仅报告模式 warning、不阻断退出码）**且影响产品结论**的红线（R20、R21、R24；三条报告模式的升级期限与翻转触发见 [ruleset-changelog.md](../../governance/ruleset-changelog.md)），除按上述判据自查外，**须经独立会话复核**：新开一个上下文，只提供 diff 与判据（`redlines.yml` 的 `self_check` / 上方追查步骤），**不提供实现理由与自评结论**，由该会话独立判定是否命中。这是 AI 工作流中唯一近似「第二双眼睛」的可行机制（被约束者自评等于无约束），规则正本与体例见 [ai-review.md](../ai-review.md) 的 ROUND3-05。
 
 ### R5 僵尸引擎操作
 1. 调用链追溯：对改动新增/触及的 DAO 或维护方法，从方法入口追到首次碰 `self.engine` 的读/写点，确认其先经 `BaseDao._check_engine()`（`data/persistence/daos/base_dao.py:116`）检查——该方法调 `engine_provider.is_disposed()`（`data/persistence/engine_provider.py:70`）判定，disposed 时抛 `EngineDisposedError`（`base_dao.py:29`）。
