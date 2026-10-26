@@ -75,7 +75,18 @@ class _QueueHandler(QueueHandler):
     """
 
     def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
-        return copy.copy(record)
+        # correlation_id 是 ContextVar，QueueListener 后台线程不继承调用线程/task 的
+        # context；其上的 CorrelationFilter 会读到 None 并把 record 覆盖为 "-"，导致
+        # 文件日志（app/error/latest）关联 ID 恒失效（S5-3 追踪目的落空）。在入队前
+        # （仍在调用线程 context 内）将当前值固化到 record 拷贝，随队列携带到
+        # listener 线程；CorrelationFilter 对已携带值的 record 不再覆盖。
+        from utils.correlation import (
+            correlation_id,
+        )  # lazy-import: 与 setup_logging 内 CorrelationFilter 同源，避免模块加载序依赖
+
+        new_record = copy.copy(record)
+        new_record.correlation_id = correlation_id.get() or "-"
+        return new_record
 
 
 class JSONFormatter(_SanitizingFormatter):

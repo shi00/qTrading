@@ -727,6 +727,76 @@ class TestQueueSanitization:
         assert not _listener_file_handlers()  # listener 已回收，QueueHandler 已从 root 移除
 
 
+class TestQueueCorrelationPropagation:
+    """correlation_id 经 QueueHandler 链路传播到文件日志（UTILS-B-07）。
+
+    QueueListener 后台线程不继承调用线程的 contextvars，CorrelationFilter 在该线程
+    执行时读 ContextVar 恒为 None；修复后由 _QueueHandler.prepare 在入队线程固化
+    值到 record，文件日志的关联 ID 不再恒为 "-"。
+    """
+
+    def test_file_log_carries_correlation_id(self, tmp_path):
+        from utils.correlation import set_correlation_id, clear_correlation_id
+
+        log_dir = str(tmp_path / "test_logs")
+        with (
+            patch("utils.logger.LOG_DIR", log_dir),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
+        ):
+            setup_logging("queue_corr_test")
+            logger = get_logger()
+            clear_correlation_id()
+            # 字面量用小写：避免大写连字符数字形态被治理 ID 门禁（check_governance_id_glossary）误识别
+            set_correlation_id("cid-e2e-42")
+            try:
+                logger.info("corr_e2e_marker_9001")
+            finally:
+                clear_correlation_id()
+        flush_logging()
+
+        content = (tmp_path / "test_logs" / "app.log").read_text(encoding="utf-8")
+        matching = [sl for sl in content.splitlines() if "corr_e2e_marker_9001" in sl]
+        assert len(matching) == 1
+        assert "[cid-e2e-42]" in matching[0]
+
+        # R7：停掉 listener，避免其文件句柄指向 tmp_path 残留到后续用例
+        from utils.logger import stop_logging
+
+        stop_logging()
+
+    def test_queue_handler_prepare_fixes_correlation_id(self):
+        """prepare 应在当前上下文把 correlation_id 固化到 record 拷贝，不改原 record。"""
+        import queue as queue_mod
+
+        import utils.logger as _ul
+        from utils.correlation import clear_correlation_id, set_correlation_id
+
+        handler = _ul._QueueHandler(queue_mod.Queue())
+
+        clear_correlation_id()
+        set_correlation_id("cid-prepare-1")
+        try:
+            record = logging.LogRecord("test", logging.INFO, "", 0, "msg", (), None)
+            prepared = handler.prepare(record)
+            assert prepared.correlation_id == "cid-prepare-1"
+            # 原 record 不被污染（浅拷贝语义）
+            assert not hasattr(record, "correlation_id")
+            # 无 correlation_id 时回退 "-"
+            clear_correlation_id()
+            prepared_none = handler.prepare(logging.LogRecord("test", logging.INFO, "", 0, "msg", (), None))
+            assert prepared_none.correlation_id == "-"
+        finally:
+            clear_correlation_id()
+        # 拷贝语义与 stdlib 契约一致：返回新对象
+        record2 = logging.LogRecord("test", logging.INFO, "", 0, "msg", (), None)
+        assert handler.prepare(record2) is not record2
+
+
 class TestLoggingListenerLifecycle:
     """OSS G1：listener 线程生命周期正确，多次 configure + stop 无线程泄漏（R7）。"""
 
