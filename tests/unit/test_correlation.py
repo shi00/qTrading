@@ -114,6 +114,20 @@ class TestCorrelationId:
 
         clear_correlation_id()
 
+    def test_correlation_filter_preserves_existing_record_value(self):
+        """CorrelationFilter 不得覆盖 record 上已携带的 correlation_id。
+
+        _QueueHandler.prepare 在入队线程把 ContextVar 值固化到 record；QueueListener
+        后台线程的 filter 不继承 contextvars，若无条件覆盖会把正确值冲成 "-"。
+        """
+        from utils.correlation import CorrelationFilter
+
+        filt = CorrelationFilter()
+        record = logging.LogRecord("test", logging.INFO, "", 0, "msg", (), None)
+        record.correlation_id = "fixed-by-producer"
+        assert filt.filter(record) is True
+        assert record.correlation_id == "fixed-by-producer"
+
     def test_ensure_correlation_id_generates_when_none(self):
         """ensure_correlation_id should generate a new ID when none exists"""
         from utils.correlation import (

@@ -66,6 +66,12 @@ class CorrelationFilter:
     """
 
     def filter(self, record):
+        # record 已携带 correlation_id 时（如 _QueueHandler.prepare 在入队线程固化）
+        # 不再覆盖：filter 可能在与产生日志不同的线程/上下文执行（QueueListener 后台
+        # 线程不继承 contextvars），此时 ContextVar 读到的是错误上下文的值，会把已
+        # 固化的正确关联 ID 冲掉。仅对裸 record 回退到当前上下文读取。
+        if hasattr(record, "correlation_id"):
+            return True
         cid = correlation_id.get()
         record.correlation_id = cid or "-"
         return True
