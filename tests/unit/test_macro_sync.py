@@ -842,16 +842,14 @@ class TestMacroMergeIndicator:
 
 
 class TestMacroMergeMacroData:
-    @patch("data.sync.macro.MacroDao")
-    def test_all_none(self, mock_dao):
+    def test_all_none(self):
         ctx = MagicMock(spec=SyncContext)
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
         result = MacroSyncStrategy._merge_macro_data(None, None, None)
         assert result is None
 
-    @patch("data.sync.macro.MacroDao")
-    def test_m2_only(self, mock_dao):
+    def test_m2_only(self):
         ctx = MagicMock(spec=SyncContext)
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
@@ -860,8 +858,7 @@ class TestMacroMergeMacroData:
         assert result is not None
         assert "m2" in result.columns
 
-    @patch("data.sync.macro.MacroDao")
-    def test_merge_all(self, mock_dao):
+    def test_merge_all(self):
         ctx = MagicMock(spec=SyncContext)
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
@@ -874,8 +871,7 @@ class TestMacroMergeMacroData:
         assert "cpi" in result.columns
         assert "ppi" in result.columns
 
-    @patch("data.sync.macro.MacroDao")
-    def test_no_period_column(self, mock_dao):
+    def test_no_period_column(self):
         ctx = MagicMock(spec=SyncContext)
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
@@ -886,8 +882,7 @@ class TestMacroMergeMacroData:
 
 class TestMacroSyncStrategyRun:
     @pytest.mark.asyncio
-    @patch("data.sync.macro.MacroDao")
-    async def test_run_cancelled_after_monthly(self, mock_dao):
+    async def test_run_cancelled_after_monthly(self):
         ctx = MagicMock(spec=SyncContext)
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
@@ -903,8 +898,7 @@ class TestMacroSyncStrategyRun:
         assert isinstance(result, SyncResult)
 
     @pytest.mark.asyncio
-    @patch("data.sync.macro.MacroDao")
-    async def test_run_exception(self, mock_dao):
+    async def test_run_exception(self):
         ctx = MagicMock(spec=SyncContext)
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
@@ -923,8 +917,7 @@ class TestMacroSyncStrategyRun:
 
 class TestMacroSyncStrategySyncIndexWeights:
     @pytest.mark.asyncio
-    @patch("data.sync.macro.MacroDao")
-    async def test_index_weights_already_uptodate(self, mock_dao):
+    async def test_index_weights_already_uptodate(self):
         import datetime
 
         ctx = MagicMock(spec=SyncContext)
@@ -943,8 +936,7 @@ class TestMacroSyncStrategySyncIndexWeights:
 
 class TestMacroSyncStrategySyncShibor:
     @pytest.mark.asyncio
-    @patch("data.sync.macro.MacroDao")
-    async def test_shibor_already_uptodate(self, mock_dao):
+    async def test_shibor_already_uptodate(self):
         ctx = MagicMock(spec=SyncContext)
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
@@ -960,8 +952,7 @@ class TestMacroSyncStrategySyncShibor:
 
     @pytest.mark.asyncio
     @patch("utils.config_handler.ConfigHandler")
-    @patch("data.sync.macro.MacroDao")
-    async def test_shibor_no_latest(self, mock_dao, mock_ch):
+    async def test_shibor_no_latest(self, mock_ch):
         mock_ch.get_init_history_years.return_value = 1
         ctx = MagicMock(spec=SyncContext)
         ctx.cache = MagicMock()

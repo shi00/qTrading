@@ -209,7 +209,15 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                     if self._check_cancelled(result):
                         return result
                 tasks.append(sync_one_board(str(row["板块名称"]), str(row["板块代码"])))
-            await gather_return_exceptions_propagating_cancel(*tasks)
+            board_results = await gather_return_exceptions_propagating_cancel(*tasks)
+            # M-DATA-11/D1: sync_one_board 对 EngineDisposedError 与系统级异常
+            # （severity==system，logger.critical 后 raise）会 re-raise，经 gather 封装转为
+            # 返回值；不回检将被静默丢弃——R5 传播中断，且 failed_boards 不含该板块、
+            # records 落库照常执行，形成假 success。统一重抛，由 _run_impl 既有 except
+            # 分支接管终态。
+            for _raised in board_results:
+                if isinstance(_raised, BaseException):
+                    raise _raised
 
             if self._check_cancelled(result):
                 return result

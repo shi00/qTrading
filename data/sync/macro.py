@@ -7,7 +7,6 @@ import typing
 import pandas as pd
 
 from data.constants import MAJOR_INDICES
-from data.persistence.daos.macro_dao import MacroDao
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.error_classifier import classify_severity, log_classified
 from utils.time_utils import get_now, parse_date
@@ -162,7 +161,10 @@ class MacroSyncStrategy(ISyncStrategy):
 
     def __init__(self, context: typing.Any):
         super().__init__(context)
-        self.dao = MacroDao(context.cache.engine)
+        # M-DATA-11/D3: 复用 CacheManager 注册的 macro_dao（R13），不再自建实例。
+        # 自建 DAO 持有创建时的 engine 引用且不在 DaoRegistry.sync_engines 同步清单内，
+        # 引擎重建（onboarding 后建引擎/DB 重配置）后将永久指向过期引擎。
+        self.dao = context.cache.macro_dao
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_effective_trade_date(self) -> datetime.date:

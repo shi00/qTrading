@@ -12,7 +12,14 @@ import time
 import pandas as pd
 
 from data.constants import FINANCIAL_BATCH_TABLES, FINANCIAL_REPORT_SCHEMA_COLS, SYNC_RESULT_SKIPPED_PERMISSION
-from data.sync.base import ISyncStrategy, SyncResult, SyncStatus, _get_seasonal_adjustments, _is_peak_disclosure_season
+from data.sync.base import (
+    ISyncStrategy,
+    SyncResult,
+    SyncStatus,
+    _get_seasonal_adjustments,
+    _is_peak_disclosure_season,
+    safe_error,
+)
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
 from core.i18n import Message
@@ -209,6 +216,8 @@ class FinancialSyncStrategy(ISyncStrategy):
         # Local accumulators for aux tables (NOT self variables to avoid AttributeError)
         total_mainbz_rows = 0
         total_audit_rows = 0
+        # M-DATA-11/D1: 可恢复失败股票计数，批次结束后反映到 SyncResult（S17 同模式）
+        failed_stock_count = 0
         _counter_lock = get_loop_local("financial_counter_lock", asyncio.Lock)
 
         # Force Logic: Reset sync status for resume
@@ -309,7 +318,7 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         # Inner processing function
         async def process_one_stock(ts_code):
-            nonlocal completed_count, total_mainbz_rows, total_audit_rows
+            nonlocal completed_count, total_mainbz_rows, total_audit_rows, failed_stock_count
             if self._shutdown_event.is_set():
                 return
 
@@ -333,6 +342,14 @@ class FinancialSyncStrategy(ISyncStrategy):
                             total_mainbz_rows += aux_counts["mainbz"]
                             total_audit_rows += aux_counts["audit"]
 
+                        # M-DATA-11/D1: fetch 内部对 recoverable 失败降级返回
+                        # (None/部分df, core_failed=True)，此非合法空数据。计入失败
+                        # 并按「incomplete, pending retry」处理：不保存残缺数据、
+                        # 不标记完成，允许下次重试补全。
+                        if aux_counts.get("core_failed"):
+                            has_error = True
+                            failed_stock_count += 1
+
                         if df_merged is not None and not df_merged.empty:
                             for col in FINANCIAL_REPORT_SCHEMA_COLS:
                                 if col not in df_merged.columns:
@@ -355,6 +372,10 @@ class FinancialSyncStrategy(ISyncStrategy):
                         )
                         if severity == "system":
                             raise
+                        # M-DATA-11/D1: recoverable/operational 失败计入 failed_stock_count，
+                        # 由批次结束后统一反映到 SyncResult（S17 增量同模式），避免
+                        # 「有失败但 status=success」假终态。
+                        failed_stock_count += 1
 
                     if self._shutdown_event.is_set():
                         return
@@ -396,6 +417,9 @@ class FinancialSyncStrategy(ISyncStrategy):
                 )
                 if severity == "system":
                     raise
+                # M-DATA-11/D1: 内层 try 之外的 save/进度阶段 recoverable 失败
+                # 同样计入 failed_stock_count，避免「save 失败仅记日志无痕」。
+                failed_stock_count += 1
 
             # Per-stock progress update (advance progress bar for processed stocks)
             if processed:
@@ -427,13 +451,29 @@ class FinancialSyncStrategy(ISyncStrategy):
 
             try:
                 stock_results = await gather_return_exceptions_propagating_cancel(*tasks)
-                # R5: 显式传播 EngineDisposedError，避免被静默吞没
+                # R5: 显式传播 EngineDisposedError，避免被静默吞没。
+                # M-DATA-11/D1: process_one_stock 对系统级异常（severity==system 与
+                # AttributeError/NameError/TypeError/ImportError 编程错误）会 re-raise，
+                # 经 gather 封装转为返回值；旧实现仅回检 EngineDisposedError，其余系统级
+                # 异常被静默丢弃（失败无痕、result_accumulator 保持 success 假终态）。
+                # 对齐 historical.sync_daily_market_snapshot 的统一回检：BaseException 一律重抛。
                 for sr in stock_results:
-                    if isinstance(sr, EngineDisposedError):
+                    if isinstance(sr, BaseException):
                         raise sr
             finally:
                 with self._tasks_lock:
                     self._active_tasks.difference_update(tasks)
+
+        # M-DATA-11/D1: 批次结束后把可恢复失败反映到 SyncResult（S17 增量同模式），
+        # 避免「失败股票仅记日志但 result_accumulator 恒 success」。不覆盖更严重终态。
+        if failed_stock_count > 0 and result_accumulator.status not in (
+            SyncStatus.FAILED.value,
+            SyncStatus.CANCELLED.value,
+        ):
+            result_accumulator.status = SyncStatus.PARTIAL.value
+            result_accumulator.errors.append(
+                f"FinancialSync: {failed_stock_count}/{total_stocks} stock(s) failed during full sync"
+            )
 
         # Batch phase: corporate actions sync (serial, AFTER stock loop to avoid API contention)
         logger.debug(
@@ -464,7 +504,24 @@ class FinancialSyncStrategy(ISyncStrategy):
                 pct = 80 + int(current / max(total, 1) * 20)
                 progress_callback(pct, 100, msg)
 
-        await self._sync_corporate_actions_by_date(all_dates, batch_progress)
+        await self._sync_corporate_actions_by_date(all_dates, batch_progress, result_accumulator=result_accumulator)
+
+        # M-DATA-11/D4: 全量完成后写 financial_reports 同步状态。旧实现从不写该表
+        # sync_status：a) _run_impl 增量分支（依赖 last_sync_date 存在）对新装用户永不可达，
+        # 每次都退化为全量遍历；b) should_sync_financials 的 30 天/财报季节流判定失效。
+        # record_count 记完成股票数（全量以股票为处理单元，非行数口径）；有失败记 partial
+        # （partial 不推进 last_data_date，下次增量窗口将覆盖当日重试，UPSERT 幂等）。
+        _full_status = (
+            SyncStatus.PARTIAL.value
+            if failed_stock_count > 0 or result_accumulator.status == SyncStatus.PARTIAL.value
+            else "success"
+        )
+        await self.context.cache.sync_dao.update_sync_status(
+            "financial_reports",
+            today,
+            result_accumulator.added,
+            status=_full_status,
+        )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _run_incremental_sync(
@@ -483,16 +540,27 @@ class FinancialSyncStrategy(ISyncStrategy):
         total_audit_rows = 0
 
         status = await self.context.cache.sync_dao.get_sync_status("financial_reports")
-        last_sync_str = status.get("last_sync_date")
+        # M-DATA-11/D2: 增量窗口起点改用 last_data_date（业务数据水位）。update_sync_status
+        # 将 last_sync_date 无条件写为当前墙钟时间（failed 日也推进），按它起算会使全失败
+        # 披露日被永久跳过（下方全失败分支「不推进以便下次重试」的意图，实际依赖
+        # last_data_date 的 failed/partial 不推进语义才成立）。last_data_date 缺失时回退
+        # last_sync_date（兼容存量记录），两者皆缺由解析失败分支回退 30 天窗口。
+        # 副作用：partial 日不推进 last_data_date，下次增量重复覆盖该日——UPSERT 幂等，
+        # 以重复拉取换取失败部分重试（正确性优先）。
+        _window_raw = status.get("last_data_date") if status else None
+        if _window_raw is None or pd.isna(_window_raw):
+            _window_raw = status.get("last_sync_date") if status else None
+        last_sync_str = _window_raw
 
         try:
             if isinstance(last_sync_str, datetime.datetime):
                 last_sync_dt = last_sync_str
             else:
-                last_sync_dt = datetime.datetime.strptime(  # noqa: DTZ007  DB 落库时间戳为 UTC naive，读回仅做日期窗口计算，无时区归属需求
-                    last_sync_str,
-                    "%Y-%m-%d %H:%M:%S",
-                )
+                # M-DATA-11/D2: last_data_date 为 DATE 列，经 DataFrame 透传后可能是
+                # datetime.date / pandas.Timestamp / str；统一经 parse_date 归一为
+                # aware datetime（与 data_processor.should_sync_financials 同口径），
+                # 避免 strptime 单一格式对 date 对象抛 TypeError 被吞成 30 天回退。
+                last_sync_dt = parse_date(last_sync_str)
             start_date_dt = last_sync_dt + datetime.timedelta(days=1)
         except EngineDisposedError:
             raise
@@ -674,7 +742,7 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         # --- Step 2: Batch Sync Corporate Actions (O(Time) Optimization) ---
         # Sync Forecasts, Dividends, etc. by date
-        await self._sync_corporate_actions_by_date(dates_to_sync)
+        await self._sync_corporate_actions_by_date(dates_to_sync, result_accumulator=result_accumulator)
 
         # Update sync status for aux tables (after all stocks processed)
         today = get_now().date()
@@ -701,6 +769,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         self,
         dates: list[str],
         progress_callback=None,
+        result_accumulator: SyncResult | None = None,
     ):
         """
         Batch sync corporate actions (Forecast, Dividend, etc.) by date.
@@ -805,6 +874,16 @@ class FinancialSyncStrategy(ISyncStrategy):
                     raise gr
                 if isinstance(gr, Exception):
                     logger.warning("[FinancialSync] Batch table sync failed for date %s: %s", d, gr, exc_info=True)
+                    # M-DATA-11/D1: 批次表失败必须反映到 SyncResult（增量 day_has_error
+                    # 同模式），否则 corporate actions 失败后调用方仍看到 success 假终态。
+                    if result_accumulator is not None and result_accumulator.status not in (
+                        SyncStatus.FAILED.value,
+                        SyncStatus.CANCELLED.value,
+                    ):
+                        result_accumulator.status = SyncStatus.PARTIAL.value
+                        result_accumulator.errors.append(
+                            f"FinancialSync corporate actions failed on {d}: {safe_error(gr)}"
+                        )
 
             # Report progress every 10 days
             if progress_callback and (i + 1) % 10 == 0:
@@ -831,7 +910,8 @@ class FinancialSyncStrategy(ISyncStrategy):
     ) -> tuple:
         """
         Helper: Fetch and merge Income, Balance Sheet, Cashflow, and Financial Indicators.
-        Returns: (merged_df, aux_counts) where aux_counts = {"mainbz": 0, "audit": 0}
+        Returns: (merged_df, aux_counts) where aux_counts = {"mainbz": 0, "audit": 0,
+        "core_failed": bool}；core_failed=True 表示 core 表 recoverable 失败（非合法空数据）。
         """
         api = self.context.api
 
@@ -937,8 +1017,18 @@ class FinancialSyncStrategy(ISyncStrategy):
             # EngineDisposedError 作为普通异常保留在 results 中。若不显式 re-raise，
             # 后续 isinstance(r, int) 检查会静默吞没为 aux_counts=0 / core 降级跳过，
             # 违反 R5 僵尸引擎操作红线。
+            # M-DATA-11/D1: system 级异常（如 MemoryError）与非 Exception 的
+            # BaseException 同样必须传播，不得吞成 core 降级 warning / aux_counts=0，
+            # 否则调用方无法区分「合法空数据」与「系统级失败」，失败计数与批次
+            # 边界回检均失效。
             for r in results:
+                if not isinstance(r, BaseException):
+                    continue
                 if isinstance(r, EngineDisposedError):
+                    raise r
+                if not isinstance(r, Exception):
+                    raise r
+                if classify_severity(r, context="general") == "system":
                     raise r
 
             # Unpack Core Results
@@ -946,6 +1036,11 @@ class FinancialSyncStrategy(ISyncStrategy):
             df_inc, df_bal, df_fina, df_cf = results[0], results[1], results[2], results[3]
 
             core_names = ["income", "balance", "indicator", "cashflow"]
+            # M-DATA-11/D1: recoverable 失败降级保留（其余 core 表数据仍可合并），
+            # 但必须以 core_failed 标记传给调用方——返回 (None/部分df, core_failed=True)
+            # 区别于「合法空数据」，由 process_one_stock 计入失败（pending retry）。
+            # system 级已在上方回检中传播，不会到达此处。
+            core_failed = False
             for name, result in zip(core_names, results[:4], strict=False):
                 if isinstance(result, Exception):
                     logger.warning(
@@ -954,11 +1049,13 @@ class FinancialSyncStrategy(ISyncStrategy):
                         ts_code,
                         result,
                     )
+                    core_failed = True
 
             # Return aux counts as dict (for caller to accumulate)
             aux_counts = {
                 "mainbz": results[4] if isinstance(results[4], int) else 0,
                 "audit": results[5] if isinstance(results[5], int) else 0,
+                "core_failed": core_failed,
             }
             for aux_name, aux_idx in [("mainbz", 4), ("audit", 5)]:
                 if isinstance(results[aux_idx], Exception):
@@ -1022,7 +1119,9 @@ class FinancialSyncStrategy(ISyncStrategy):
             )
             if severity == "system":
                 raise
-            return None, aux_counts
+            # M-DATA-11/D1: merge 阶段 recoverable 失败同样以 core_failed 标记返回，
+            # 避免「合并失败」被调用方当作合法空数据。
+            return None, {**aux_counts, "core_failed": True}
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def repair_financial_data(self, ts_codes, progress_callback=None) -> int:
