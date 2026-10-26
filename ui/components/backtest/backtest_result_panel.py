@@ -951,7 +951,7 @@ def BacktestResultPanel(
     trades_page, set_trades_page = ft.use_state(0)
     selected_tab, set_selected_tab = ft.use_state(0)
 
-    # P-BT-1: 新回测结果 (trades 引用变化) → 翻页重置到第 1 页。
+    # BT-10: 新回测结果 (trades 引用变化) → 翻页重置到第 1 页。
     # 否则旧翻页位置对行数变少的新结果越界 (start > total_rows) → 空表格 + 页码错乱
     # (如 "151-80 / 80")。行数不变时残留页码仍落在有效区间, 无越界危害。
     def _reset_trades_page() -> None:
