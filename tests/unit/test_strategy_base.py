@@ -703,6 +703,15 @@ class TestUtils(unittest.TestCase):
     def test_safe_float_custom_default(self):
         self.assertEqual(safe_float(None, -1.0), -1.0)
 
+    def test_safe_float_inf(self):
+        self.assertEqual(safe_float(float("inf")), 0.0)
+
+    def test_safe_float_negative_inf(self):
+        self.assertEqual(safe_float(float("-inf")), 0.0)
+
+    def test_safe_float_inf_none_default(self):
+        self.assertIsNone(safe_float(float("inf"), default=None))
+
     def test_fmt_val_normal(self):
         self.assertEqual(fmt_val(3.14), "3.14")
 
@@ -714,6 +723,12 @@ class TestUtils(unittest.TestCase):
 
     def test_fmt_val_nan(self):
         self.assertEqual(fmt_val(float("nan")), "N/A")
+
+    def test_fmt_val_inf(self):
+        self.assertEqual(fmt_val(float("inf")), "N/A")
+
+    def test_fmt_val_negative_inf(self):
+        self.assertEqual(fmt_val(float("-inf")), "N/A")
 
     def test_fmt_val_string(self):
         self.assertEqual(fmt_val("abc"), "N/A")

@@ -15,7 +15,7 @@ def safe_float(val, default=0.0):
         return default
     try:
         fval = float(val)
-        return default if math.isnan(fval) else fval
+        return default if math.isnan(fval) or math.isinf(fval) else fval
     except (ValueError, TypeError):
         return default
 
@@ -25,7 +25,7 @@ def fmt_val(val, fmt_spec=".2f", suffix=""):
         return "N/A"
     try:
         fval = float(val)
-        if math.isnan(fval):
+        if math.isnan(fval) or math.isinf(fval):
             return "N/A"
         if fval == int(fval) and not suffix:
             return str(int(fval))
