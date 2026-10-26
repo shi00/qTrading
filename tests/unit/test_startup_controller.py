@@ -1,5 +1,7 @@
 """Unit tests for StartupController — zero Flet mocks, pure business logic."""
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -249,6 +251,60 @@ class TestStartupRetry:
         mock_init.assert_awaited_once()
         assert ctrl.state == StartupState.READY
 
+    @pytest.mark.asyncio
+    async def test_retry_reentry_guard_ignores_duplicate(self, controller):
+        """M-UI-04 (M-APP-01 复核裁定扩展): Retry 防重入.
+
+        首次调用成功后 state 已 transition 到 READY；重渲染 patch 下发前的
+        双击窗口内第二次调用应被忽略，不再触发 initialize_services
+        （避免并发重入击穿 services_initialized 幂等保护）。
+        """
+        ctrl, transitions = controller
+        ctrl._state = StartupState.INIT_FAILED
+
+        with patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init:
+            mock_init.return_value = {"success": True, "error": None, "detail": None}
+            await ctrl.retry()
+            # 模拟双击窗口内的第二次点击（state 已非 INIT_FAILED）
+            await ctrl.retry()
+
+        mock_init.assert_awaited_once()
+        assert ctrl.state == StartupState.READY
+        assert [s for s, _ in transitions].count(StartupState.LOADING) == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_concurrent_double_click_inits_once(self, controller):
+        """并发双击（gather 模拟）：第二次调用到达时 state 已 LOADING，被守卫忽略.
+
+        精确复现竞态窗口：首个 retry 经 _init_services 同步段 transition 到
+        LOADING 后在 initialize_services 处挂起，第二个 retry 启动时守卫拦截。
+        """
+        ctrl, _ = controller
+        ctrl._state = StartupState.INIT_FAILED
+
+        async def slow_init(*args, **kwargs):
+            await asyncio.sleep(0)  # 模拟 initialize_services 挂起，制造重入窗口
+            return {"success": True, "error": None, "detail": None}
+
+        with patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init:
+            mock_init.side_effect = slow_init
+            await asyncio.gather(ctrl.retry(), ctrl.retry())
+
+        mock_init.assert_awaited_once()
+        assert ctrl.state == StartupState.READY
+
+    @pytest.mark.asyncio
+    async def test_retry_ignored_when_not_in_init_failed_state(self, controller):
+        """非 INIT_FAILED 状态（如 READY/LOADING）下调用直接忽略."""
+        ctrl, _ = controller
+        ctrl._state = StartupState.READY
+
+        with patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init:
+            await ctrl.retry()
+
+        mock_init.assert_not_awaited()
+        assert ctrl.state == StartupState.READY
+
 
 class TestStartupReconfigure:
     @pytest.mark.asyncio
@@ -272,6 +328,7 @@ class TestStartupReconfigure:
     async def test_reconfigure_resets_services_initialized(self, controller):
         """review01-A9: reconfigure 重置 per-session 初始化状态，允许重新初始化。"""
         ctrl, _ = controller
+        ctrl._state = StartupState.INIT_FAILED  # Reconfigure 按钮仅在 INIT_FAILED 渲染
         ctrl._services_initialized = True  # 模拟已初始化
 
         with (
@@ -331,6 +388,72 @@ class TestStartupReconfigure:
         assert transitions[-1][1].detail is not None
         # cache_manager.close 仍应被调用
         cache_manager.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reconfigure_reentry_guard_ignores_duplicate(self, controller):
+        """M-UI-04 (M-APP-01 复核裁定扩展): Reconfigure 防重入.
+
+        首次调用同步段已 transition 到 LOADING；双击窗口内第二次调用应被
+        忽略，避免重复 close DB / 重置 onboarding 标志。
+        """
+        ctrl, transitions = controller
+        ctrl._state = StartupState.INIT_FAILED
+
+        with (
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
+            patch("utils.config_handler.ConfigHandler"),
+        ):
+            mock_tpm.return_value.run_async = AsyncMock()
+            await ctrl.reconfigure()
+            # 模拟双击窗口内的第二次点击（state 已非 INIT_FAILED）
+            await ctrl.reconfigure()
+
+        ctrl._cache_manager.close.assert_awaited_once()
+        mock_tpm.return_value.run_async.assert_awaited_once()
+        assert ctrl.state == StartupState.NEED_ONBOARDING
+        assert [s for s, _ in transitions].count(StartupState.LOADING) == 1
+
+    @pytest.mark.asyncio
+    async def test_reconfigure_concurrent_double_click_closes_once(self, controller):
+        """并发双击（gather 模拟）：第二次调用到达时 state 已 LOADING，被守卫忽略.
+
+        精确复现竞态窗口：首个 reconfigure 同步段 transition 到 LOADING 后在
+        close 处挂起，第二个 reconfigure 启动时守卫拦截。
+        """
+        ctrl, _ = controller
+        ctrl._state = StartupState.INIT_FAILED
+
+        async def slow_close():
+            await asyncio.sleep(0)  # 模拟 close 挂起，制造重入窗口
+            return None
+
+        with (
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
+            patch("utils.config_handler.ConfigHandler"),
+        ):
+            mock_tpm.return_value.run_async = AsyncMock()
+            ctrl._cache_manager.close.side_effect = slow_close
+            await asyncio.gather(ctrl.reconfigure(), ctrl.reconfigure())
+
+        ctrl._cache_manager.close.assert_awaited_once()
+        mock_tpm.return_value.run_async.assert_awaited_once()
+        assert ctrl.state == StartupState.NEED_ONBOARDING
+
+    @pytest.mark.asyncio
+    async def test_reconfigure_ignored_when_not_in_init_failed_state(self, controller):
+        """非 INIT_FAILED 状态（如 READY/NEED_ONBOARDING）下调用直接忽略."""
+        ctrl, _ = controller
+        ctrl._state = StartupState.READY
+
+        with (
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
+            patch("utils.config_handler.ConfigHandler"),
+        ):
+            mock_tpm.return_value.run_async = AsyncMock()
+            await ctrl.reconfigure()
+
+        ctrl._cache_manager.close.assert_not_awaited()
+        assert ctrl.state == StartupState.READY
 
 
 class TestStartupSkip:
