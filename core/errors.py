@@ -160,3 +160,34 @@ class AIPolicyNotAcknowledgedError(AppError):
             ),
             detail,
         )
+
+
+class AIContentRefusedError(AppError):
+    """AI 生成被 provider 内容安全策略拒绝（F27 策略终态信号）。
+
+    两个来源收敛到本异常：① ``litellm_client.invoke_single_connection`` 从云响应
+    提取到 refusal 字段 / ``finish_reason == "content_filter"``（响应级拒绝）；
+    ② provider 以 SDK 异常表达的内容策略拒绝由 ``classify_error`` 的
+    ``content_policy`` 码承载（Executor 侧等价终止）。
+
+    设计为**不可重试且不可换候选绕过**的策略终态：模型 / 供应商已明确拒绝生成，
+    重发或更换候选属安全绕过（F27）；``retryable=False`` 经 ``classify_error``
+    透传（``should_retry=False``），ScenarioExecutor 按终止类中断整个候选遍历。
+
+    覆盖边界（R21 诚实声明）：识别的是 OpenAI 兼容 chat completions 响应模式的
+    ``message.refusal`` 与 ``finish_reason``（OpenAI / Azure 及 LiteLLM 归一化透传
+    该模式的 provider）；Anthropic / Gemini 等原生拒绝块格式（如 Gemini
+    ``promptFeedback.blockReason``）未在本异常的提取范围内，未核验的 provider
+    格式不伪装已覆盖。
+    """
+
+    def __init__(self, message: Message, detail: str = "") -> None:
+        self.message = message
+        super().__init__(
+            ErrorInfo(
+                code="content_policy",
+                message_key=message.key,
+                format_args=dict(message.params),
+            ),
+            detail,
+        )

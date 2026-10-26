@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from core.errors import AIConfigError, AIPolicyNotAcknowledgedError
+from core.errors import AIConfigError, AIContentRefusedError, AIPolicyNotAcknowledgedError
 from core.i18n import Message
 from core.model_management_types import (
     AdapterResponse,
@@ -830,6 +830,9 @@ class LiteLLMClient:
                 全部收敛到本出口，未确认即零出站拒绝；stock_analysis 已有
                 run_ai_analysis 入口确认，此处为出口兜底纵深防御，其余三场景以本
                 检查为唯一 SEC-01 边界）。
+            AIContentRefusedError: F27 云响应内容安全拒绝（``message.refusal`` /
+                ``finish_reason == "content_filter"``）提炼为策略终态——Executor
+                据此终止整个候选遍历，禁止重试与换候选绕过（覆盖边界见提取点注释）。
             ValueError: adapter_kind 非 litellm_chat / credential_ref 形态非法 /
                 版本化凭据 ref 与 credential_version 租约不同源（F06，零出站拒绝）。
             TimeoutError: dispatch 前 deadline 已耗尽。
@@ -956,7 +959,34 @@ class LiteLLMClient:
         with ProxyManager.litellm_env_context():
             response = await _ai.acompletion(**request_params)
 
-        content = response.choices[0].message.content  # type: ignore[union-attr]
+        # F27 内容安全拒绝提取（云响应 → 策略终态信号）：只读 content 会把 refusal /
+        # content_filter 伪装成「无输出」，Executor 将按输出非法类切换候选绕过安全
+        # 拒绝。此处将拒绝信号提炼为 AIContentRefusedError（策略终态，Executor 终止
+        # 整个候选遍历，禁止重试与换候选绕过）。
+        # 覆盖边界（R21 诚实声明）：识别 OpenAI 兼容 chat completions 响应模式的
+        # ``message.refusal`` 与 ``finish_reason == "content_filter"``（OpenAI / Azure
+        # 及 LiteLLM 归一化透传该模式的 provider；SDK 层内容策略异常
+        # ContentPolicyViolationError 由 Executor 异常分类承载）；Anthropic / Gemini
+        # 等原生拒绝块格式（如 Gemini promptFeedback.blockReason）未核验、不伪装
+        # 已覆盖。Retry-After 同理仅承诺数值形态（见 Executor _backoff）。
+        choice = response.choices[0]
+        message = choice.message  # type: ignore[union-attr]
+        content = message.content  # type: ignore[union-attr]
+        refusal = getattr(message, "refusal", None)
+        finish_reason = getattr(choice, "finish_reason", None)
+        if (isinstance(refusal, str) and refusal.strip()) or finish_reason == "content_filter":
+            logger.warning(
+                "[AIService] UnifiedChain | Content refused by provider policy "
+                "(refusal=%s, finish_reason=%s) — raising terminal refusal for scenario '%s'",
+                bool(refusal),
+                finish_reason,
+                request.scenario_id,
+            )
+            raise AIContentRefusedError(
+                Message("llm_err_content_policy"),
+                detail="Provider content policy refusal extracted from non-streaming response "
+                "(message.refusal / finish_reason=content_filter).",
+            )
         usage = normalize_litellm_usage(getattr(response, "usage", None))
         return AdapterResponse(
             content=content,
