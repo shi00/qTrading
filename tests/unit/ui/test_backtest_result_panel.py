@@ -809,7 +809,7 @@ class TestBacktestResultPanelContract:
         assert "def BacktestResultPanel(" in content
 
     def test_trades_page_reset_on_new_result(self) -> None:
-        """P-BT-01: 新回测结果到达时翻页重置到第 1 页（use_effect 依赖 trades）。
+        """BT-10: 新回测结果到达时翻页重置到第 1 页（use_effect 依赖 trades）。
 
         声明式组件渲染逻辑由 Flet 框架保证，本测试按本文件契约守护范式
         校验重置 effect 的关键结构存在且依赖正确，防止回退为无重置实现。
