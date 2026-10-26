@@ -302,6 +302,13 @@ def _migrate_config_location() -> None:
     仅在未用 ``ASTOCK_CONFIG_FILE`` 覆盖（即 CONFIG_FILE 为默认用户数据目录路径）、
     新文件缺失、旧文件存在时复制一次；迁移后**保留源文件**，防降级安装失效。
     惰性在读写入口触发，避免 import 副作用；幂等，重复调用为 no-op。
+
+    R04：目标存在性检查（锁内重查）与复制全程持有跨进程文件锁（与
+    save_config / compare_and_save_model_management 同一把锁），防止「本进程
+    检查通过后、复制落地前，他进程已完成新提交」的交错把新配置用旧副本覆盖
+    回退；复制经临时文件 + ``os.replace`` 原子生效，不留半截目标文件。锁等待
+    超时按幂等迁移语义警告跳过（下次入口再试）；仅取文件锁、不持 RWLock，
+    调用点均在取 RWLock 之前，不改变「文件锁 → RWLock」锁顺序。
     """
     if os.environ.get("ASTOCK_CONFIG_FILE"):
         return
@@ -311,18 +318,34 @@ def _migrate_config_location() -> None:
     source = cfg._CONFIG_FILE_LEGACY
     if not os.path.exists(source):
         return
+    tmp_file = target + ".migrate.tmp"
     try:
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        # 字节级复制，保留原始内容与注释格式（一次性迁移，非热路径）。
-        import shutil
+        with _config_file_lock():
+            # R04：锁内重查——他进程可能已在快速路径检查后完成迁移或写入新提交，
+            # 此时不得用旧副本覆盖。
+            if os.path.exists(target):
+                return
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            # 字节级复制到临时文件后原子替换，保留原始内容与注释格式
+            # （一次性迁移，非热路径）。
+            import shutil
 
-        shutil.copy2(source, target)
-        cfg.logger.info("[ConfigHandler] Migrated user settings to %s", target)
+            shutil.copy2(source, tmp_file)
+            os.replace(tmp_file, target)
+            cfg.logger.info("[ConfigHandler] Migrated user settings to %s", target)
+    except ConfigFileLockTimeoutError as e:
+        cfg.logger.warning(
+            "[ConfigHandler] Config location migration skipped (file lock busy), will retry on next entry: %s",
+            DataSanitizer.sanitize_error(e),
+        )
     except OSError as e:
         cfg.logger.warning(
             "[ConfigHandler] Config migration from legacy path skipped: %s",
             DataSanitizer.sanitize_error(e),
         )
+        if os.path.exists(tmp_file):
+            with contextlib.suppress(OSError):
+                os.remove(tmp_file)
 
 
 def ensure_defaults():
