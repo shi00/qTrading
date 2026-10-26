@@ -354,6 +354,45 @@ class TestSubmitTerminal:
         dao.settle_attempt_usage.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_submit_without_observation_falls_back_to_record_metadata(self):
+        """F18：无观察终态回退记录自带元数据——失败事实与预留收敛可达账本。
+
+        适配器异常 / 授权失败路径没有 observe 先行，终态携带 month / retry_index
+        等结算参数即可进账本（usage 缺失仍标 unavailable，R21 不伪装）。
+        """
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        record = AttemptTerminalRecord(
+            attempt_id="att-fail",
+            invocation_id="inv-1",
+            status="failed",
+            usage=None,
+            error_code="adapter error: RuntimeError",
+            duration_ms=None,
+            reservation_id="res-1",
+            metadata={
+                "connection_id": "conn-remote",
+                "connection_revision": 1,
+                "adapter_kind": "litellm_chat",
+                "scenario_id": "news_sentiment",
+                "task_id": "sentiment",
+                "candidate_index": 0,
+                "retry_index": 0,
+                "security_revision": 1,
+                "month": "202610",
+            },
+        )
+        outcome = await recorder.submit_terminal(record)
+        assert outcome == PersistenceOutcome(persisted=True, error_code=None)
+        kwargs = dao.settle_attempt_usage.await_args.kwargs
+        assert kwargs["status"] == "failed"
+        assert kwargs["usage_status"] == "unavailable"  # R21：无用量不填 0
+        assert kwargs["retry_index"] == 0
+        assert kwargs["month"] == "202610"
+        assert kwargs["reservation_id"] == "res-1"
+        assert kwargs["cost_cny"] is None
+
+    @pytest.mark.asyncio
     async def test_lazy_window_scan_closes_expired(self):
         dao = _dao_mock()
         recorder = UsageRecorder(dao_provider=lambda: dao, window_seconds=0.0)

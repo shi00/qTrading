@@ -446,6 +446,21 @@ class TestSettleAttemptUsage:
         assert "accounted_usage_revision" in conn.calls[1][0]  # 第二条即修订水位查询
 
     @pytest.mark.asyncio
+    async def test_settle_same_revision_replay_returns_false(self):
+        """F18 持久化重放幂等：同一次写账以相同 usage_revision 重放 → 不重复计费。
+
+        外部真实重试是新的 attempt 身份（逐尝试独立行）；同 attempt 的落账重放
+        （网络重试 / F23 恢复补记竞态）由修订水位拦截，月汇总零推进。
+        """
+        # 序列：lock(None) → SELECT FOR UPDATE((2, 0.05))——已入账修订=本次重放修订
+        conn = _CaptureConn(results=[None, (2, Decimal("0.05"))])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(**_settle_kwargs(usage_revision=2))
+        assert result is False
+        assert len(conn.calls) == 2  # noqa: weak-assertion 语句数即语义：重放仅 lock+修订查询，无 UPDATE/月汇总
+        assert all("ai_usage_monthly" not in sql for sql, _ in conn.calls)
+
+    @pytest.mark.asyncio
     async def test_settle_missing_attempt_without_backing_returns_false(self):
         """F23 fencing：attempt 行缺失且无活跃预留背书（rid 缺省）→ 不插行不计费，返回 False。
 
