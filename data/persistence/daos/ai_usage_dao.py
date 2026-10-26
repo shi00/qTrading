@@ -776,8 +776,9 @@ class AIUsageDao(BaseDao):
     ) -> bool:
         """建立实际尝试记录（方案 §6.2 步骤 4：真正进入适配器执行时）。
 
-        ``ON CONFLICT DO NOTHING``：同 attempt_id 重试沿用已绑定身份，不重建
-        （重试共用同一 attempt_id，方案 §6.2 步骤 4「不重新生成」）。
+        ``ON CONFLICT DO NOTHING``：同一次写账的持久化重放沿用已绑定身份，不重建；
+        外部真实重试（新的实际调用）不是数据库重放，由调用方生成新 attempt 身份
+        并携带递增 retry_index（F18），不得共用同一 attempt_id。
 
         F23 fencing：INSERT 改 ``INSERT ... SELECT ... FROM ai_invocation`` 门控
         形态——invocation 行不存在、owner 租约过期、或 owner 身份不符时不建行
@@ -787,7 +788,7 @@ class AIUsageDao(BaseDao):
         - 缺省（均 None）= **租约有效性弱门**（仅要求 invocation 存在活跃 owner
           租约；向后兼容既有调用，残余窗口移交 R03 统一 fence 设计接线）。
 
-        返回 True = 新建行或幂等沿用已存在行（重试场景）；False = owner 门拒绝
+        返回 True = 新建行或幂等沿用已存在行（持久化重放场景）；False = owner 门拒绝
         （行未建立），调用方按 persisted=False 降级（费用型已被 mark_dispatched
         拦截，usage_only 降级继续执行）。
         """

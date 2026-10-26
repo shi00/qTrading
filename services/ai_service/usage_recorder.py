@@ -77,6 +77,12 @@ class AttemptTerminalRecord:
     同事务将预留转换为 ``settled``（F22 预留转换），且 attempt 行缺失时的
     补记以该活跃预留为背书（F23 fencing）；None = 无预留（usage_only 降级 /
     预留未建立），结算行为与既有完全一致。
+
+    ``metadata``（F18）：无用量观察（obs 缺失）终态的落账元数据回退来源——
+    适配器异常 / 授权失败等失败路径没有 ``observe_usage`` 先行，终态需自带
+    归属月 / retry_index / 连接身份等结算参数，否则被 METADATA_INCOMPLETE
+    守卫阻断，该次尝试的失败事实与预留收敛不可达账本。有观察时观察元数据
+    仍为权威（本字段内容与其同源一致）。
     """
 
     attempt_id: str
@@ -86,6 +92,8 @@ class AttemptTerminalRecord:
     error_code: str | None
     duration_ms: float | None
     reservation_id: str | None = None
+    actual_model: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class UsageRecorder:
@@ -284,7 +292,9 @@ class UsageRecorder:
     ) -> PersistenceOutcome:
         """建立实际尝试记录（方案 §6.2 步骤 4：真正进入适配器执行时调用）。
 
-        幂等（ON CONFLICT DO NOTHING）：同 attempt_id 重试沿用已绑定身份。
+        幂等（ON CONFLICT DO NOTHING）：同一次写账的持久化重放沿用已绑定身份；
+        外部真实重试（新的实际调用）由调用方生成新 attempt 身份（F18），
+        不共用。
         ``owner_session_id`` / ``owner_epoch`` 齐传启用 F23 owner 身份强门
         （失权 owner 不得建立新的 attempt 事实）；失败降级 persisted=False
         （执行已授权开始，落账尽力而为，不阻断推理）。
@@ -322,8 +332,16 @@ class UsageRecorder:
         """
         obs = self._observations.get(record.attempt_id)
         usage = record.usage if record.usage is not None else (obs.usage if obs else None)
-        actual_model = obs.actual_model if obs is not None else None
-        metadata = dict(obs.metadata) if obs is not None else {}
+        if obs is not None:
+            # 观察元数据为权威（适配器返回前同步转移的不可变快照）
+            actual_model = obs.actual_model
+            metadata = dict(obs.metadata)
+        else:
+            # F18：无观察终态（适配器异常 / 授权失败等失败路径）回退记录自带
+            # 元数据——失败事实与预留收敛仍可达账本，不再被 METADATA_INCOMPLETE
+            # 阻断（字段缺省 None 时行为与既有一致：仍按缺失拦截）
+            actual_model = record.actual_model
+            metadata = dict(record.metadata) if record.metadata is not None else {}
         # 缺失不伪装：无用量即 unavailable，禁止填 0（R21）
         usage_status = "reported" if usage is not None else "unavailable"
         # F17：按冻结计价快照 × 真实 usage 计算成本；无用量 → 不可计价（None）

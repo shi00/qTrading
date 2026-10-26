@@ -1154,3 +1154,219 @@ class TestLocalOnlyGate:
             assert _default_local_only_mode_reader() is True
         with patch("utils.config_handler.ConfigHandler.is_ai_local_only_mode", return_value=False):
             assert _default_local_only_mode_reader() is False
+
+
+class TestPerAttemptIdentity:
+    """F18 逐真实尝试独立身份：外部重试 = 新 attempt / reservation + retry_index
+    递增；持久化重放沿用该次身份（DAO 幂等承载，不在本层）。
+
+    P05 缺陷回归基线：超时→成功应有两条事实——调用 2 次、attempt 2 条、
+    retry_indices=[0, 1]（修复前：唯一 attempt、retry_index 恒 0、冲突忽略
+    吞掉第二次调用事实）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_retry_generates_per_attempt_identity(self):
+        """超时→成功：两次真实调用各自独立 attempt/reservation，retry_index=[0,1]。"""
+        adapter = _adapter_fail_then_ok(failures=1)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        assert result.status == "succeeded"
+        assert adapter._invoke_calls["n"] == 2
+
+        # 两次真实尝试：独立 attempt_id（不共用），retry_index 逐尝试递增（R22 序）
+        begin_calls = recorder.begin_attempt.await_args_list
+        assert len(begin_calls) == 2
+        attempt_ids = [call.kwargs["attempt_id"] for call in begin_calls]
+        assert attempt_ids[0] != attempt_ids[1]
+        assert [call.kwargs["attempt_row"]["retry_index"] for call in begin_calls] == [0, 1]
+
+        # 逐真实尝试独立预留： reservation_id 唯一且 retry_index 同步递增
+        reserve_calls = recorder.try_reserve.await_args_list
+        assert len(reserve_calls) == 2
+        reservation_ids = [call.kwargs["reservation_id"] for call in reserve_calls]
+        assert len(set(reservation_ids)) == 2
+        assert [call.kwargs["retry_index"] for call in reserve_calls] == [0, 1]
+        assert [call.kwargs["attempt_id"] for call in reserve_calls] == attempt_ids
+        assert len({call.kwargs["reservation_id"] for call in recorder.mark_dispatched.await_args_list}) == 2
+
+        # 终态逐尝试独立：首条 failed（该次预留绑定），末条 succeeded（该次预留绑定）
+        terminal_calls = recorder.submit_terminal.await_args_list
+        assert len(terminal_calls) == 2
+        first_record, second_record = (call.args[0] for call in terminal_calls)
+        assert first_record.status == "failed"
+        assert first_record.attempt_id == attempt_ids[0]
+        assert first_record.reservation_id == reservation_ids[0]
+        assert second_record.status == "succeeded"
+        assert second_record.attempt_id == attempt_ids[1]
+        assert second_record.reservation_id == reservation_ids[1]
+
+    @pytest.mark.asyncio
+    async def test_failed_attempt_terminal_carries_metadata_for_ledger(self):
+        """失败尝试终态自带落账元数据（归属月 / retry_index），预留收敛可达账本。"""
+        adapter = _adapter_fail_then_ok(failures=1)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        await executor.execute(_request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok)
+        first_record = recorder.submit_terminal.await_args_list[0].args[0]
+        assert first_record.status == "failed"
+        assert first_record.usage is None
+        assert "adapter error" in first_record.error_code
+        # 无观察（适配器异常）终态必须自带元数据：否则被 METADATA_INCOMPLETE
+        # 阻断，该次失败事实与预留 settled 转换不可达账本
+        assert first_record.metadata is not None
+        assert first_record.metadata["month"]
+        assert first_record.metadata["retry_index"] == 0
+        assert first_record.metadata["scenario_id"] == "news_sentiment"
+        assert first_record.metadata["connection_id"] == "conn-remote"
+        assert first_record.metadata["actual_model"] is None  # R21：未知不伪装
+
+    @pytest.mark.asyncio
+    async def test_success_retry_observation_metadata_retry_index(self):
+        """成功尝试的用量观察元数据携带该次 retry_index（终态计费按次归属）。"""
+        adapter = _adapter_fail_then_ok(failures=1)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        await executor.execute(_request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok)
+        observations = [call.args[0] for call in recorder.observe_usage.call_args_list]
+        assert len(observations) == 1
+        assert observations[0].metadata["retry_index"] == 1
+        # attempt 行同源携带该次 retry_index（两次尝试 [0, 1]，成功者为第二次）
+        begin_rows = [call.kwargs["attempt_row"] for call in recorder.begin_attempt.await_args_list]
+        assert [row["retry_index"] for row in begin_rows] == [0, 1]
+
+    @pytest.mark.asyncio
+    async def test_fee_reserve_rejected_on_retry_halts_candidates(self):
+        """重试轮预留被拒（预算/owner invocation 级事实）→ 中断整个候选遍历。"""
+        adapter = _adapter_always_fail()
+        recorder = _recorder_mock()
+        recorder.try_reserve = AsyncMock(
+            side_effect=[
+                ReservationOutcome(persisted=True, error_code=None, reservation=MagicMock()),
+                ReservationOutcome(persisted=True, error_code="RESERVE_REJECTED", reservation=None),
+            ]
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_fee_candidate(0, "conn-remote"), _candidate(1, "conn-b")), (_remote_conn(), _remote_conn("conn-b"))
+            ),
+            _validator_ok,
+        )
+        assert result.status == "failed"
+        # 首尝试已出站失败，重试轮预留被拒即中断：第二候选零预留零派发
+        assert recorder.try_reserve.await_count == 2
+        recorder.mark_dispatched.assert_awaited_once()
+        adapter.invoke.assert_awaited_once()
+        decisions = result.candidate_decisions
+        assert len(decisions) == 1
+        assert decisions[0].decision == "rejected"
+        assert "budget reserve rejected" in decisions[0].reason
+        # 首尝试失败事实即时收敛（该次预留结算），无悬挂
+        assert recorder.submit_terminal.await_count == 1
+        assert recorder.submit_terminal.await_args.args[0].status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_fee_dispatch_forbidden_halts_second_candidate(self):
+        """派发绑定失权（费用型）中断整个候选遍历：第二候选零预留。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        recorder.mark_dispatched = AsyncMock(
+            return_value=PersistenceOutcome(persisted=False, error_code="DB_UNAVAILABLE")
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_fee_candidate(0, "conn-remote"), _candidate(1, "conn-b")), (_remote_conn(), _remote_conn("conn-b"))
+            ),
+            _validator_ok,
+        )
+        assert result.status == "failed"
+        recorder.try_reserve.assert_awaited_once()
+        adapter.invoke.assert_not_awaited()
+        assert len(result.candidate_decisions) == 1
+        assert "budget dispatch forbidden" in result.candidate_decisions[0].reason
+
+    @pytest.mark.asyncio
+    async def test_deadline_mid_retry_leaves_no_pending_reservation(self):
+        """重试轮前 deadline 耗尽：不建立新预留，首尝试失败事实已即时收敛。"""
+        adapter = MagicMock()
+        clock_state = {"t": 0.0}
+
+        async def _invoke(*args, **kwargs):
+            clock_state["t"] = 1_000_000.0  # 本次真实调用后 deadline 耗尽
+            raise RuntimeError("upstream timeout")
+
+        adapter.invoke = AsyncMock(side_effect=_invoke)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok, clock=lambda: clock_state["t"])
+        result = await executor.execute(
+            _request(deadline=1_000_000.0),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _validator_ok,
+        )
+        assert result.status == "failed"
+        # 候选决策原因 = 停止重试的真实原因（deadline 耗尽，与既有语义一致）
+        assert result.candidate_decisions[0].reason == "deadline exhausted"
+        # 仅首尝试建立事实：一次调用、一次预留、一次 begin、一次失败终态；
+        # 重试轮 deadline 检查先于新预留创建，无未结算悬挂
+        adapter.invoke.assert_awaited_once()
+        recorder.try_reserve.assert_awaited_once()
+        recorder.begin_attempt.assert_awaited_once()
+        recorder.submit_terminal.assert_awaited_once()
+        failed_record = recorder.submit_terminal.await_args.args[0]
+        assert failed_record.status == "failed"
+        assert "adapter error" in failed_record.error_code  # 失败事实即时收敛，不被顶替
+
+    @pytest.mark.asyncio
+    async def test_incompatible_attempt_settles_its_reservation(self):
+        """兼容失败（authorize 后、begin 前）即时提交 failed 终态结算该次预留。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        executor._compatibility.resolve_execution_params = MagicMock(
+            return_value=MagicMock(compatible=False, reason="unsupported param", resolved_options={})
+        )
+        result = await executor.execute(
+            _request(), _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        assert result.status == "failed"
+        adapter.invoke.assert_not_awaited()
+        recorder.begin_attempt.assert_not_awaited()
+        # 该次尝试已预留 / 派发，失败终态经活跃预留背书收敛（F23），不留悬挂
+        terminal_record = recorder.submit_terminal.await_args.args[0]
+        assert terminal_record.status == "failed"
+        assert "incompatible" in terminal_record.error_code
+        assert terminal_record.reservation_id == recorder.mark_dispatched.await_args.kwargs["reservation_id"]
+        assert terminal_record.metadata is not None
+        assert terminal_record.metadata["month"]
+
+    @pytest.mark.asyncio
+    async def test_usage_only_retry_reserve_recovery(self):
+        """usage_only 首尝试预留降级后，重试轮可重新预留（逐尝试独立降级判定）。"""
+        adapter = _adapter_fail_then_ok(failures=1)
+        recorder = _recorder_mock()
+        recorder.try_reserve = AsyncMock(
+            side_effect=[
+                ReservationOutcome(persisted=False, error_code="DB_UNAVAILABLE", reservation=None),
+                ReservationOutcome(persisted=True, error_code=None, reservation=MagicMock()),
+            ]
+        )
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        assert result.status == "succeeded"
+        assert adapter._invoke_calls["n"] == 2
+        # 首尝试进程内降级派发（预留 None），重试轮预留恢复成功并贯穿终态
+        dispatch_ids = [call.kwargs["reservation_id"] for call in recorder.mark_dispatched.await_args_list]
+        assert dispatch_ids[0] is None
+        assert dispatch_ids[1] is not None
+        terminal_records = [call.args[0] for call in recorder.submit_terminal.await_args_list]
+        assert terminal_records[0].reservation_id is None
+        assert terminal_records[1].reservation_id == dispatch_ids[1]
