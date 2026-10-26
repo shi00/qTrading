@@ -218,9 +218,19 @@ def build_day_news_section(state: SentimentIndexState) -> ft.Control:
             spacing=6,
         )
     elif not state.day_news:
-        body = ft.Text(
-            I18n.get("sentiment_index_no_news"), size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY
-        )
+        # 明细加载失败（message 非空）→ 渲染错误提示，不伪装「暂无新闻」
+        # （R21 精神：已知失败不得渲染为无信息；message 生命周期由 VM 管理，
+        # select_day 展开/收起均重置为 None，无残留误渲染）。
+        if state.message is not None:
+            body: ft.Control = ft.Text(
+                I18n.get(state.message.key, **(state.message.params or {})),
+                size=AppStyles.FONT_SIZE_BODY_SM,
+                color=AppColors.TEXT_SECONDARY,
+            )
+        else:
+            body = ft.Text(
+                I18n.get("sentiment_index_no_news"), size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY
+            )
     else:
         body = ft.Column([build_news_row(n) for n in state.day_news], spacing=4)
     return ft.Column([header, body], spacing=4)
