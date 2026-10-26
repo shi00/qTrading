@@ -7,7 +7,8 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from itertools import pairwise
 from typing import TYPE_CHECKING
 
 import polars as pl
@@ -31,6 +32,13 @@ if TYPE_CHECKING:
     from strategies.base_strategy import BaseStrategy
 
 logger = logging.getLogger(__name__)
+
+
+# A 股相邻交易日最大自然日间隔：历史最长连休（2023/2024 年春节、国庆中秋连休
+# 8 天叠加前后周末）实测 gap 达 11 天（如 2024-02-08 → 2024-02-19）。取 12 天
+# 为容差：端点缩进或相邻间隔不超此窗口视为休市正常形态（请求端点落在周末/
+# 节假日），超过才判定日历覆盖不足（真实缺失），避免周末回测必误报 unreliable。
+_MAX_HOLIDAY_GAP_DAYS = 12
 
 
 def _range_preload_warning_meta(w: str) -> tuple[str, str]:
@@ -132,6 +140,12 @@ class VectorBacktestEngine:
             progress_callback(0.0, Message("backtest_progress_loading"))
 
         trade_dates = await self._get_trade_dates()
+        # M-STRAT-04: 交易日历覆盖检测（M-DATA-12 D2-7 消费点核实）。日历序列可能
+        # 缺失交易日（数据源覆盖不足 / 离线日历可信区间截断），静默接受会让
+        # BacktestResult.config 展示区间与实际模拟区间不一致（R21：已知缩窄伪装成
+        # 完整区间）；端点休市缩进属预期形态不告警，真实缺失产出
+        # trade_dates_truncated 告警（data_quality → unreliable）。
+        trade_dates_warning = self._check_trade_dates_coverage(trade_dates)
 
         if progress_callback:
             progress_callback(0.1, Message("backtest_progress_running_strategy"))
@@ -219,6 +233,8 @@ class VectorBacktestEngine:
         # 按来源显式归类，常规撮合事件已不在 sim_warnings 中（portfolio 层移除），
         # 剩余 sim_warnings 为真实异常（stale-estimate）→ data_quality。
         all_warnings: list[str | DataWarning] = list(quote_warnings)
+        if trade_dates_warning is not None:
+            all_warnings.append(trade_dates_warning)
         for w in sim_warnings:
             all_warnings.append(
                 DataWarning(
@@ -344,6 +360,58 @@ class VectorBacktestEngine:
         if not trade_dates:
             raise ValueError("No trade dates found in the specified range")
         return trade_dates
+
+    def _check_trade_dates_coverage(self, trade_dates: list[date]) -> DataWarning | None:
+        """交易日历返回序列与请求区间的一致性校验（M-STRAT-04 检视，M-DATA-12 D2-7 消费点）。
+
+        TradeCalendarService 的日历序列可能因数据源覆盖不足（DB 未同步到近期 /
+        API 补齐失败）或离线日历可信区间截断（D2-7）而缺失交易日。判定区分两类
+        形态（ROUND3-05 复核：端点容差防误报）：
+        - 预期内缩进：请求端点落在周末/节假日（如 DatePicker 默认 end=today 的
+          周末形态），首个/末个交易日与请求端点的缩进不超最长连休窗口 → 不告警；
+        - 真实覆盖不足：端点缩进超窗口，或相邻交易日间隔超窗口（中间整段缺失；
+          无外部参照时小缺口与连休不可区分，由 evaluate_range_quality 的行情
+          缺口评估互补）→ 产出 ``trade_dates_truncated`` 告警。
+        静默接受真实缺失会让 BacktestResult.config 展示区间与实际模拟区间不一致
+        （R21：已知缩窄伪装成完整区间），按告警降级继续回测（无需显式失败）。
+        """
+        start, end = self.config.start_date, self.config.end_date
+        first, last = trade_dates[0], trade_dates[-1]
+        tolerance = timedelta(days=_MAX_HOLIDAY_GAP_DAYS)
+        # first/last 早于请求端点（覆盖更宽）时差值为负，自然不触发
+        start_truncated = first - start > tolerance
+        end_truncated = end - last > tolerance
+        # 相邻交易日最大间隔（自然日）：单元素序列无间隔（default=0）
+        max_gap = max(((b - a).days for a, b in pairwise(trade_dates)), default=0)
+        middle_gap = max_gap > _MAX_HOLIDAY_GAP_DAYS
+
+        if not (start_truncated or end_truncated or middle_gap):
+            return None
+
+        reasons: list[str] = []
+        if start_truncated:
+            reasons.append(
+                f"起端缺失：首个交易日 {first.isoformat()} 距请求起点 {start.isoformat()} "
+                f"超过 {_MAX_HOLIDAY_GAP_DAYS} 天容差"
+            )
+        if end_truncated:
+            reasons.append(
+                f"末端缺失：最后交易日 {last.isoformat()} 距请求终点 {end.isoformat()} "
+                f"超过 {_MAX_HOLIDAY_GAP_DAYS} 天容差"
+            )
+        if middle_gap:
+            reasons.append(f"中间缺口：相邻交易日最大间隔 {max_gap} 天超过 {_MAX_HOLIDAY_GAP_DAYS} 天容差")
+
+        return DataWarning(
+            warning_type="trade_dates_truncated",
+            start_date=first.strftime("%Y%m%d"),
+            end_date=last.strftime("%Y%m%d"),
+            affected_stock_count=0,
+            error_message=(
+                "；".join(reasons) + f"。回测实际模拟区间 {first.isoformat()}~{last.isoformat()}，以告警内区间为准"
+                "（日历数据源覆盖不足或离线可信区间截断）。"
+            ),
+        )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _load_quotes(

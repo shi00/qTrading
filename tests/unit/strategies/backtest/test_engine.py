@@ -11,7 +11,7 @@ import pytest
 
 from data.domain_services.offline_calendar import OfflineCalendar
 from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
-from strategies.backtest.config import BacktestConfig, DataWarning
+from strategies.backtest.config import BacktestConfig, DataWarning, WarningCategory
 from strategies.backtest.engine import VectorBacktestEngine, _compute_real_score_ratio
 
 
@@ -790,6 +790,202 @@ class TestGetTradeDates:
         with patch.object(OfflineCalendar, "get_trade_dates", return_value=[]):
             with pytest.raises(ValueError, match="No trade dates found"):
                 await engine._get_trade_dates()
+
+
+class TestCheckTradeDatesCoverage:
+    """M-DATA-12 D2-7 消费点：日历真实覆盖不足产出 trade_dates_truncated 告警。
+
+    端点落在周末/节假日的预期内缩进不得告警（ROUND3-05 复核：原「任一端窄于
+    请求区间即告警」在 end=周六 / start=节假日时误报，经 backtest_view_model
+    的 _assess_credibility 把正常回测判为 unreliable）；端点缩进或相邻间隔
+    超过最长连休窗口（12 天）才判定真实缺失（R21：已知缩窄伪装成完整区间）。
+    """
+
+    @staticmethod
+    def _make_engine(start: date, end: date) -> "VectorBacktestEngine":
+        config = BacktestConfig(start_date=start, end_date=end)
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        return engine
+
+    def test_exact_trade_day_endpoints_returns_none(self):
+        """端点即交易日且完整覆盖：不告警。"""
+        engine = self._make_engine(date(2024, 1, 1), date(2024, 1, 5))
+
+        assert engine._check_trade_dates_coverage([date(2024, 1, 1), date(2024, 1, 5)]) is None
+
+    def test_end_on_weekend_returns_none(self):
+        """复核场景1：end=周六，日历完整覆盖至周五——预期内缩进，不告警。"""
+        engine = self._make_engine(date(2024, 1, 2), date(2024, 1, 6))
+
+        assert engine._check_trade_dates_coverage([date(2024, 1, 2), date(2024, 1, 5)]) is None
+
+    def test_start_on_holiday_returns_none(self):
+        """复核场景2：start=元旦（休市），首个交易日顺延——预期内缩进，不告警。"""
+        engine = self._make_engine(date(2024, 1, 1), date(2024, 1, 5))
+
+        assert engine._check_trade_dates_coverage([date(2024, 1, 2), date(2024, 1, 5)]) is None
+
+    def test_spring_festival_shape_returns_none(self):
+        """2024 春节真实形态：最后交易日 02-08 → 首个交易日 02-19（gap=11 天），
+        起端缩进 7 天、末端缩进 10 天，全部在最长连休窗口内，不告警。"""
+        engine = self._make_engine(date(2024, 2, 1), date(2024, 2, 29))
+
+        assert engine._check_trade_dates_coverage([date(2024, 2, 8), date(2024, 2, 19)]) is None
+
+    def test_indent_at_tolerance_boundary_returns_none(self):
+        """起端缩进恰为容差 12 天、相邻间隔恰为 12 天：边界内（仅 > 容差才告警）。"""
+        engine = self._make_engine(date(2024, 1, 1), date(2024, 1, 31))
+
+        assert engine._check_trade_dates_coverage([date(2024, 1, 13), date(2024, 1, 25)]) is None
+
+    def test_single_trade_date_within_tolerance_returns_none(self):
+        """单交易日序列（区间内仅一日）无相邻间隔，两端缩进均在容差内。"""
+        engine = self._make_engine(date(2024, 1, 1), date(2024, 1, 20))
+
+        assert engine._check_trade_dates_coverage([date(2024, 1, 10)]) is None
+
+    def test_start_truncated_beyond_tolerance_returns_warning(self):
+        """起端缩进 19 天（远超连休窗口）：真实覆盖不足，告警并记录实际模拟区间。"""
+        engine = self._make_engine(date(2024, 1, 1), date(2024, 1, 31))
+
+        warning = engine._check_trade_dates_coverage([date(2024, 1, 20), date(2024, 1, 31)])
+
+        assert warning is not None
+        assert warning.warning_type == "trade_dates_truncated"
+        assert warning.category == WarningCategory.DATA_QUALITY
+        # 告警区间为实际模拟区间（日历返回首末交易日），非请求区间
+        assert warning.start_date == "20240120"
+        assert warning.end_date == "20240131"
+        assert "2024-01-20" in warning.error_message
+
+    def test_end_truncated_beyond_tolerance_returns_warning(self):
+        """末端截断（离线可信区间截断 D2-7 典型形态，缩进 21 天）：告警。"""
+        engine = self._make_engine(date(2024, 1, 1), date(2024, 1, 31))
+
+        warning = engine._check_trade_dates_coverage([date(2024, 1, 2), date(2024, 1, 10)])
+
+        assert warning is not None
+        assert warning.warning_type == "trade_dates_truncated"
+        assert warning.category == WarningCategory.DATA_QUALITY
+        assert warning.start_date == "20240102"
+        assert warning.end_date == "20240110"
+
+    def test_middle_gap_returns_warning(self):
+        """复核场景3 对照：中间整段缺失（相邻间隔 14/15 天 > 12 天容差），告警。"""
+        engine = self._make_engine(date(2024, 1, 1), date(2024, 1, 31))
+
+        warning = engine._check_trade_dates_coverage([date(2024, 1, 2), date(2024, 1, 16), date(2024, 1, 31)])
+
+        assert warning is not None
+        assert warning.warning_type == "trade_dates_truncated"
+        assert warning.category == WarningCategory.DATA_QUALITY
+        # 端点均在容差内，仅中间缺口触发
+        assert "中间缺口" in warning.error_message
+
+    def test_wider_coverage_returns_none(self):
+        """日历覆盖宽于请求区间（两端越界、间隔正常）不算缩窄。"""
+        engine = self._make_engine(date(2024, 1, 8), date(2024, 1, 12))
+
+        assert engine._check_trade_dates_coverage([date(2024, 1, 5), date(2024, 1, 15)]) is None
+
+
+class TestRunTradeDatesTruncatedWarning:
+    """engine.run 将 trade_dates_truncated 告警并入 BacktestResult.data_warnings。"""
+
+    async def _run(self, monkeypatch, *, trade_dates: list[date], end_date: date = date(2024, 1, 5)):
+        from strategies.backtest.metrics import BacktestMetrics
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=end_date)
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = MagicMock()
+
+        dp = MagicMock()
+        dp.range_preload_warnings = []
+        dp.get_stock_meta = AsyncMock(return_value={})
+        engine.data_provider = dp
+        engine.strategy_adapter = MagicMock()
+
+        empty_signals = pl.DataFrame({"ts_code": [], "trade_date": [], "signal_rank": []})
+
+        monkeypatch.setattr(engine, "_get_trade_dates", AsyncMock(return_value=trade_dates))
+        monkeypatch.setattr(engine, "_load_benchmark", AsyncMock(return_value=(pl.DataFrame(), None)))
+        monkeypatch.setattr(engine, "_generate_signals", AsyncMock(return_value=empty_signals))
+        monkeypatch.setattr(engine, "_load_quotes", AsyncMock(return_value=(pl.DataFrame(), [])))
+        monkeypatch.setattr(
+            engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), [], 0))
+        )
+        monkeypatch.setattr(
+            engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [], []))
+        )
+        monkeypatch.setattr(engine, "_calc_benchmark_returns", MagicMock(return_value=(pl.DataFrame(), None)))
+        monkeypatch.setattr(engine, "_calc_period_stats", MagicMock(return_value={}))
+        # nav/日收益长度须与 trade_dates 对齐（中间缺口用例为 3 个交易日），
+        # 否则 run() 组装 nav_curve DataFrame 时列高不一致触发 ShapeError。
+        monkeypatch.setattr(
+            BacktestMetrics,
+            "calc_nav_curve",
+            MagicMock(side_effect=lambda positions, capital, tds: pl.Series([0.0] * len(tds), dtype=pl.Float64)),
+        )
+        monkeypatch.setattr(
+            BacktestMetrics,
+            "calc_daily_returns",
+            MagicMock(side_effect=lambda nav: pl.Series([0.0] * nav.len(), dtype=pl.Float64)),
+        )
+        monkeypatch.setattr(BacktestMetrics, "calc_all_metrics", MagicMock(return_value={}))
+        monkeypatch.setattr(BacktestMetrics, "calc_investment_metrics", MagicMock(return_value={}))
+
+        strategy = MagicMock()
+        strategy.name = "mock_strategy"
+
+        return await engine.run(strategy=strategy)
+
+    @pytest.mark.asyncio
+    async def test_appends_warning_when_end_truncated(self, monkeypatch):
+        """末端截断（缩进 21 天，远超连休窗口）时，data_warnings 携带 trade_dates_truncated（data_quality）。"""
+        result = await self._run(
+            monkeypatch, trade_dates=[date(2024, 1, 2), date(2024, 1, 10)], end_date=date(2024, 1, 31)
+        )
+
+        truncated = [
+            w for w in result.data_warnings if isinstance(w, DataWarning) and w.warning_type == "trade_dates_truncated"
+        ]
+        assert len(truncated) == 1
+        assert truncated[0].category == WarningCategory.DATA_QUALITY
+        assert str(truncated[0]).startswith("[trade_dates_truncated]")
+
+    @pytest.mark.asyncio
+    async def test_appends_warning_when_middle_gap(self, monkeypatch):
+        """中间整段缺失（相邻间隔 > 容差）也触发告警（真实缺口对照）。"""
+        result = await self._run(
+            monkeypatch,
+            trade_dates=[date(2024, 1, 2), date(2024, 1, 16), date(2024, 1, 31)],
+            end_date=date(2024, 1, 31),
+        )
+
+        truncated = [
+            w for w in result.data_warnings if isinstance(w, DataWarning) and w.warning_type == "trade_dates_truncated"
+        ]
+        assert len(truncated) == 1
+        assert "中间缺口" in truncated[0].error_message
+
+    @pytest.mark.asyncio
+    async def test_omits_warning_when_full_coverage(self, monkeypatch):
+        """日历区间完整覆盖请求区间时，data_warnings 不含该通道警告。"""
+        result = await self._run(monkeypatch, trade_dates=[date(2024, 1, 1), date(2024, 1, 5)])
+
+        assert not any(str(w).startswith("[trade_dates_truncated]") for w in result.data_warnings)
+
+    @pytest.mark.asyncio
+    async def test_omits_warning_when_end_on_weekend(self, monkeypatch):
+        """复核场景1 run 级防御：end=周六（DatePicker 默认 end=today 的常态），
+        日历完整覆盖至周五，不得误报 unreliable。"""
+        result = await self._run(
+            monkeypatch, trade_dates=[date(2024, 1, 2), date(2024, 1, 5)], end_date=date(2024, 1, 6)
+        )
+
+        assert not any(str(w).startswith("[trade_dates_truncated]") for w in result.data_warnings)
 
 
 class TestLoadQuotes:
