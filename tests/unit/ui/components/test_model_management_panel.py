@@ -8,7 +8,8 @@
 - ``_build_usage_filters``：七类过滤（日期起止 / 场景 / 子任务 / 连接 / 来源 / 终态 / 费用状态，
   共 8 个控件），连接下拉取已提交连接（名称优先，缺失回退 id）。
 - ``_select_filter_handler`` / ``_date_filter_handler``：下拉 / 日期输入的过滤更新语义
-  （``all`` → None；半截或非法日期不改动；合法日期按 Asia/Shanghai → naive UTC 边界换算）。
+  （``all`` → None；半截或非法日期不改动；合法日期按 Asia/Shanghai → naive UTC 边界换算）；
+  F35：合法变化经 ``_submit_filter_task`` → ``page.run_task(vm.set_filter, ...)`` 提交异步重载。
 - ``_parse_date_filter`` / ``_format_date_filter``：本地日期与 ``created_at`` 墙钟边界往返。
 - ``_build_usage_view`` / ``_export_csv_and_notify``：CSV 导出真实落盘（web 走 ``src_bytes``，
   桌面经线程池写路径，C-1）。
@@ -241,54 +242,92 @@ class TestUsageFilters:
 
 
 class TestFilterHandlers:
-    def test_select_filter_all_maps_to_none(self):
+    def test_select_filter_all_maps_to_none(self, monkeypatch):
+        page = MagicMock(name="page")
+        monkeypatch.setattr(panel_module, "_get_page", lambda: page)
         vm = MagicMock()
         handler = _select_filter_handler(vm, "terminal_status")
         event = MagicMock()
         event.control = ft.Dropdown(value="all")
         handler(event)
-        vm.set_filter.assert_called_once_with(terminal_status=None)
+        page.run_task.assert_called_once_with(vm.set_filter, terminal_status=None)
 
-    def test_select_filter_value_passthrough(self):
+    def test_select_filter_value_passthrough(self, monkeypatch):
+        page = MagicMock(name="page")
+        monkeypatch.setattr(panel_module, "_get_page", lambda: page)
         vm = MagicMock()
         handler = _select_filter_handler(vm, "cost_status")
         event = MagicMock()
         event.control = ft.Dropdown(value="unknown")
         handler(event)
-        vm.set_filter.assert_called_once_with(cost_status="unknown")
+        page.run_task.assert_called_once_with(vm.set_filter, cost_status="unknown")
 
-    def test_date_filter_incomplete_input_no_op(self):
+    def test_select_filter_without_page_context_skips(self, monkeypatch):
+        """F35：无页面上下文（单元测试）不提交任务，也不触达 VM。"""
+        monkeypatch.setattr(panel_module, "_get_page", lambda: None)
+        vm = MagicMock()
+        handler = _select_filter_handler(vm, "origin")
+        event = MagicMock()
+        event.control = ft.Dropdown(value="test")
+        handler(event)
+        vm.set_filter.assert_not_called()
+
+    def test_date_filter_incomplete_input_no_op(self, monkeypatch):
+        page = MagicMock(name="page")
+        monkeypatch.setattr(panel_module, "_get_page", lambda: page)
         vm = MagicMock()
         handler = _date_filter_handler(vm, "start", end_of_day=False)
         event = MagicMock()
         event.control = ft.TextField(value="2026-1")
         handler(event)
-        vm.set_filter.assert_not_called()
+        page.run_task.assert_not_called()
 
-    def test_date_filter_invalid_date_no_op(self):
+    def test_date_filter_invalid_date_no_op(self, monkeypatch):
+        page = MagicMock(name="page")
+        monkeypatch.setattr(panel_module, "_get_page", lambda: page)
         vm = MagicMock()
         handler = _date_filter_handler(vm, "start", end_of_day=False)
         event = MagicMock()
         event.control = ft.TextField(value="2026-13-40")
         handler(event)
-        vm.set_filter.assert_not_called()
+        page.run_task.assert_not_called()
 
-    def test_date_filter_empty_clears(self):
+    def test_date_filter_empty_clears(self, monkeypatch):
+        page = MagicMock(name="page")
+        monkeypatch.setattr(panel_module, "_get_page", lambda: page)
         vm = MagicMock()
         handler = _date_filter_handler(vm, "start", end_of_day=False)
         event = MagicMock()
         event.control = ft.TextField(value="")
         handler(event)
-        vm.set_filter.assert_called_once_with(start=None)
+        page.run_task.assert_called_once_with(vm.set_filter, start=None)
 
-    def test_date_filter_valid_start_converts_to_utc(self):
+    def test_date_filter_valid_start_converts_to_utc(self, monkeypatch):
+        page = MagicMock(name="page")
+        monkeypatch.setattr(panel_module, "_get_page", lambda: page)
         vm = MagicMock()
         handler = _date_filter_handler(vm, "start", end_of_day=False)
         event = MagicMock()
         event.control = ft.TextField(value="2026-10-19")
         handler(event)
         # 2026-10-19 00:00 Asia/Shanghai（UTC+8）→ 2026-10-18T16:00 naive UTC
-        vm.set_filter.assert_called_once_with(start=dt.datetime(2026, 10, 18, 16, 0, 0))
+        page.run_task.assert_called_once_with(vm.set_filter, start=dt.datetime(2026, 10, 18, 16, 0, 0))
+
+
+class TestSubmitFilterTask:
+    def test_submits_set_filter_via_run_task(self, monkeypatch):
+        """F35：筛选变化经 ``page.run_task(vm.set_filter, **changes)`` 提交异步重载。"""
+        page = MagicMock(name="page")
+        monkeypatch.setattr(panel_module, "_get_page", lambda: page)
+        vm = MagicMock()
+        panel_module._submit_filter_task(vm, scenario_id="stock_analysis")
+        page.run_task.assert_called_once_with(vm.set_filter, scenario_id="stock_analysis")
+
+    def test_noop_without_page_context(self, monkeypatch):
+        monkeypatch.setattr(panel_module, "_get_page", lambda: None)
+        vm = MagicMock()
+        panel_module._submit_filter_task(vm, scenario_id="stock_analysis")
+        vm.set_filter.assert_not_called()
 
 
 class TestDateBoundaryConversions:

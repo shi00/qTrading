@@ -14,7 +14,10 @@
 - 解除未确认预留为宿主副作用，经可选注入的 handler 完成——未注入时明确降级
   （不伪装成功，R21）；CSV 文本落盘经 ``write_csv`` 走 IO 线程池（R16）；
 - R2：含 ``await`` 的方法 ``except asyncio.CancelledError: raise``，不被 Exception 吞没；
-- R16：DAO 调用为 async native，不重复包线程池。
+- R16：DAO 调用为 async native，不重复包线程池；
+- F35：load / expand 以请求代次隔离乱序响应——响应写入前校验代次，旧代次响应
+  （含失败降级）一律丢弃；筛选变化（``set_filter``）统一异步重载并立即清空旧
+  结果，界面不展示与新条件不符的陈旧数据。
 """
 
 from __future__ import annotations
@@ -130,6 +133,11 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         self._detail_retention_days = int(detail_retention_days)
         self._month_provider = month_provider
         self._state = ModelUsageState()
+        # F35：请求代次（沿 watchlist/_search_generation 范式）。load 按发起顺序建立
+        # 全序，响应写入前校验代次——筛选 / 翻页触发的更新请求使在途旧请求失效。
+        self._load_generation: int = 0
+        # F35：展开代次。set_filter 清空展开时推进，在途旧展开响应不回填新条件界面。
+        self._expand_generation: int = 0
         self._init_mixin_fields()
 
     # ------------------------------------------------------------------
@@ -137,7 +145,13 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
     # ------------------------------------------------------------------
 
     async def load(self) -> None:
-        """按当前过滤与页读取请求页与预算摘要；DAO 不可用 / 失败均降级为消息。"""
+        """按当前过滤与页读取请求页与预算摘要；DAO 不可用 / 失败均降级为消息。
+
+        F35：发起时登记请求代次，响应（含失败降级）写入前校验——筛选 / 翻页触发的
+        更新请求会使在途旧请求失效，旧代次响应一律丢弃，不覆盖新条件结果。
+        """
+        self._load_generation += 1
+        generation = self._load_generation
         self._set_state(retention_exceeded=self._compute_retention_exceeded())
         dao = self._resolve_dao()
         if dao is None:
@@ -163,11 +177,18 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except ValueError:
+            if generation != self._load_generation:
+                return  # 旧代次：不得覆盖当前消息
             self._set_state(message=Message("model_usage_filter_invalid"), requests=(), total=0)
             return
         except Exception:
+            if generation != self._load_generation:
+                return  # 旧代次：不得覆盖当前消息
             self._set_state(message=Message("model_usage_load_failed"))
             return
+
+        if generation != self._load_generation:
+            return  # 旧代次响应：拒绝写入，保留最新请求的结果
 
         self._set_state(
             requests=tuple(rows),
@@ -185,10 +206,13 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
     # 过滤
     # ------------------------------------------------------------------
 
-    def set_filter(self, **changes: Any) -> None:
-        """更新过滤字段（仅接受 ``UsageFilters`` 字段）；任何过滤变化重置到第 0 页。
+    async def set_filter(self, **changes: Any) -> None:
+        """更新过滤字段并统一异步重载（F35：筛选变化即查询，不残留陈旧结果）。
 
-        非法 ``origin`` 立即 ``raise ValueError``（不静默放宽）。
+        仅接受 ``UsageFilters`` 字段；任何过滤变化重置到第 0 页，并立即清空请求
+        列表 / 总数 / 展开明细（重载完成前不展示与新条件不符的旧数据），随后
+        ``await self.load()`` 重载——在途旧 load 经代次校验自动失效。非法
+        ``origin`` 立即 ``raise ValueError``（不静默放宽）。
         """
         updates = {k: v for k, v in changes.items() if k in _USAGE_FILTER_FIELDS}
         if not updates:
@@ -197,13 +221,18 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         if origin is not None and origin not in (ORIGIN_TEST, ORIGIN_BUSINESS):
             raise ValueError(f"unknown origin filter: {origin!r}")
         new_filters = replace(self._state.filters, **updates)
+        # 推进展开代次使在途展开响应失效（展开明细随筛选清空，不回填旧条件）。
+        self._expand_generation += 1
         self._set_state(
             filters=new_filters,
             page=0,
+            requests=(),
+            total=0,
             expanded_id=None,
             attempts=(),
             retention_exceeded=self._compute_retention_exceeded(new_filters.start),
         )
+        await self.load()
 
     # ------------------------------------------------------------------
     # 分页
@@ -228,10 +257,16 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
     # ------------------------------------------------------------------
 
     async def expand(self, request_id: str) -> None:
-        """展开 / 折叠某请求的有序尝试明细（含跳过行，标「未执行」）。"""
+        """展开 / 折叠某请求的有序尝试明细（含跳过行，标「未执行」）。
+
+        F35：发起时登记展开代次，响应（含失败降级）写入前校验——筛选变化清空
+        展开后，在途旧展开响应不得回填新条件界面。
+        """
         if self._state.expanded_id == request_id:
             self._set_state(expanded_id=None, attempts=())
             return
+        self._expand_generation += 1
+        generation = self._expand_generation
         dao = self._resolve_dao()
         if dao is None:
             self._set_state(message=Message("model_usage_dao_unavailable"))
@@ -241,8 +276,12 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception:
+            if generation != self._expand_generation:
+                return  # 旧代次：不得覆盖当前消息
             self._set_state(message=Message("model_usage_expand_failed"))
             return
+        if generation != self._expand_generation:
+            return  # 旧代次展开响应：拒绝写入
         self._set_state(expanded_id=request_id, attempts=tuple(attempts))
 
     # ------------------------------------------------------------------

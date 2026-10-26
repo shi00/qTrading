@@ -3,7 +3,9 @@
 覆盖（R19）：
 - load 读取请求页 + 预算摘要，字段进入不可变 state；
 - dao 不可用降级（不伪装成功、不抛）；
-- set_filter 重置分页并清空展开；非法 origin 显式失败；
+- set_filter 重置分页、清空展开与旧结果并统一异步重载（F35）；非法 origin 显式失败；
+- F35 请求代次隔离：两个 load 逆序完成保留最新请求结果；旧代次失败降级不覆盖；
+  在途展开响应在筛选变化后不回填；重载在途时翻页 no-op（旧 total 路径已被统一重载取代）；
 - next/prev 分页（50/页，边界 no-op）；
 - expand 加载有序尝试并可折叠；
 - release_unconfirmed_reservation 未注入释放器时降级；注入后刷新摘要；
@@ -20,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -136,33 +139,191 @@ async def test_set_filter_resets_page_and_clears_expansion():
     assert vm.state.page == 1
     await vm.expand("inv-1")
     assert vm.state.expanded_id == "inv-1"
-    vm.set_filter(scenario_id="stock_analysis")
+    await vm.set_filter(scenario_id="stock_analysis")
     assert vm.state.page == 0
     assert vm.state.expanded_id is None
     assert vm.state.attempts == ()
     assert vm.state.filters.scenario_id == "stock_analysis"
 
 
-def test_set_filter_unknown_origin_raises():
+@pytest.mark.asyncio
+async def test_set_filter_unknown_origin_raises():
     vm = _vm(_dao())
-    with pytest.raises(ValueError, match="unknown origin filter"):
-        vm.set_filter(origin="bogus")
+    with pytest.raises(ValueError) as exc_info:
+        await vm.set_filter(origin="bogus")
+    assert exc_info.type is ValueError
+    assert "unknown origin filter" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
-async def test_set_filter_forwards_terminal_and_cost_status_to_dao():
+async def test_set_filter_triggers_reload_forwarding_to_dao():
+    """F35：筛选变化统一异步重载（真实事件链路不再依赖调用方手动 load）。"""
+    dao = _dao()
+    vm = _vm(dao)
+    await vm.load()
+    assert dao.read_request_page.await_count == 1
+
+    await vm.set_filter(terminal_status="cancelled", cost_status="partial")
+
+    assert dao.read_request_page.await_count == 2
+    kwargs = dao.read_request_page.await_args.kwargs
+    assert kwargs["terminal_status"] == "cancelled"
+    assert kwargs["cost_status"] == "partial"
+    assert vm.state.filters.terminal_status == "cancelled"
+    assert vm.state.filters.cost_status == "partial"
+
+
+# ---------------------------------------------------------------------------
+# F35：请求代次隔离（乱序响应 / 清空旧结果 / 翻页边界）
+# ---------------------------------------------------------------------------
+
+
+def _install_gated_read(dao: MagicMock, gate: asyncio.Event, rows: list[dict], total: int) -> None:
+    """把 ``read_request_page`` 换为受 ``gate`` 控制的读取（放行前挂起，模拟在途请求）。"""
+
+    async def _read(**_kwargs: Any) -> tuple[list[dict], int]:
+        await gate.wait()
+        return (rows, total)
+
+    dao.read_request_page = _read
+
+
+@pytest.mark.asyncio
+async def test_set_filter_clears_stale_requests_while_reload_in_flight():
+    """F35：筛选变化立即清空旧结果（重载完成前不展示与新条件不符的陈旧数据）。"""
+    dao = _dao(rows=[{"invocation_id": "inv-old"}], total=1)
+    vm = _vm(dao)
+    await vm.load()
+    assert vm.state.requests != ()
+
+    gate = asyncio.Event()
+    _install_gated_read(dao, gate, rows=[{"invocation_id": "inv-new"}], total=2)
+    reload_task = asyncio.create_task(vm.set_filter(scenario_id="stock_analysis"))
+    await asyncio.sleep(0)  # 让 set_filter 同步段（清空 + 发起重载）执行到首个 await
+
+    assert vm.state.requests == ()
+    assert vm.state.total == 0
+    assert vm.state.page == 0
+    assert vm.state.filters.scenario_id == "stock_analysis"
+
+    gate.set()
+    await reload_task
+    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-new"]
+    assert vm.state.total == 2
+
+
+@pytest.mark.asyncio
+async def test_out_of_order_load_responses_keep_latest_request_result():
+    """F35：两个 load 逆序完成（旧筛选响应后到），最终 state 为最新请求结果。"""
     dao = _dao()
     vm = _vm(dao)
     await vm.load()
 
-    vm.set_filter(terminal_status="cancelled", cost_status="partial")
+    old_gate = asyncio.Event()
+    new_gate = asyncio.Event()
+    _install_gated_read(dao, old_gate, rows=[{"invocation_id": "inv-old"}], total=1)
+    old_task = asyncio.create_task(vm.set_filter(scenario_id="news_annotation"))
+    await asyncio.sleep(0)  # 旧请求已发出并挂起
 
-    assert vm.state.filters.terminal_status == "cancelled"
-    assert vm.state.filters.cost_status == "partial"
+    _install_gated_read(dao, new_gate, rows=[{"invocation_id": "inv-new"}], total=2)
+    new_task = asyncio.create_task(vm.set_filter(scenario_id="stock_analysis"))
+    await asyncio.sleep(0)  # 新请求已发出并挂起
+
+    old_gate.set()  # 逆序：先放行旧请求响应
+    await old_task
+    assert vm.state.requests == ()  # 旧代次响应被拒，保持清空态
+    assert vm.state.filters.scenario_id == "stock_analysis"
+
+    new_gate.set()
+    await new_task
+    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-new"]
+    assert vm.state.total == 2
+
+
+@pytest.mark.asyncio
+async def test_stale_load_failure_does_not_overwrite_newer_state():
+    """F35：旧代次失败降级不覆盖新代次的消息与结果。"""
+    dao = _dao()
+    vm = _vm(dao)
     await vm.load()
-    kwargs = dao.read_request_page.await_args.kwargs
-    assert kwargs["terminal_status"] == "cancelled"
-    assert kwargs["cost_status"] == "partial"
+
+    old_gate = asyncio.Event()
+
+    async def _old_read(**_kwargs: Any) -> tuple[list[dict], int]:
+        await old_gate.wait()
+        raise RuntimeError("stale boom")
+
+    dao.read_request_page = _old_read
+    old_task = asyncio.create_task(vm.set_filter(scenario_id="news_annotation"))
+    await asyncio.sleep(0)  # 旧请求已发出并挂起
+
+    async def _new_read(**_kwargs: Any) -> tuple[list[dict], int]:
+        return ([{"invocation_id": "inv-new"}], 2)
+
+    dao.read_request_page = _new_read
+    await vm.set_filter(scenario_id="stock_analysis")  # 新请求立即完成
+    assert vm.state.message is None
+    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-new"]
+
+    old_gate.set()  # 旧请求失败响应后到
+    await old_task
+    assert vm.state.message is None  # 旧代次失败不覆盖
+    assert [r["invocation_id"] for r in vm.state.requests] == ["inv-new"]
+
+
+@pytest.mark.asyncio
+async def test_stale_expand_response_discarded_after_filter_change():
+    """F35：筛选变化清空展开后，在途旧展开响应不得回填新条件界面。"""
+    dao = _dao(attempts=[{"kind": "old-attempt"}])
+    vm = _vm(dao)
+    await vm.load()
+
+    gate = asyncio.Event()
+
+    async def _gated_attempts(**_kwargs: Any) -> list[dict]:
+        await gate.wait()
+        return [{"kind": "old-attempt"}]
+
+    dao.read_request_attempts = _gated_attempts
+    expand_task = asyncio.create_task(vm.expand("inv-old"))
+    await asyncio.sleep(0)
+    assert vm.state.expanded_id is None  # 尚未返回
+
+    await vm.set_filter(scenario_id="stock_analysis")  # 清空展开并重载
+    assert vm.state.expanded_id is None
+    assert vm.state.attempts == ()
+
+    gate.set()  # 旧展开响应后到
+    await expand_task
+    assert vm.state.expanded_id is None
+    assert vm.state.attempts == ()
+
+
+@pytest.mark.asyncio
+async def test_next_page_noop_while_reload_in_flight_then_works_after():
+    """F35：重载在途（total=0）时翻页 no-op；重载完成后按新 total 正常翻页。"""
+    dao = _dao(rows=[{"invocation_id": "inv-old"}], total=60)
+    vm = _vm(dao)
+    await vm.load()
+    assert vm.state.total == 60
+
+    gate = asyncio.Event()
+    _install_gated_read(dao, gate, rows=[{"invocation_id": "inv-new"}], total=60)
+    reload_task = asyncio.create_task(vm.set_filter(origin="business"))
+    await asyncio.sleep(0)
+    assert vm.state.total == 0
+
+    await vm.next_page()  # 在途：no-op（不再依赖旧 total 触发刷新）
+    assert vm.state.page == 0
+
+    gate.set()
+    await reload_task
+    assert vm.state.total == 60
+
+    dao.read_request_page = AsyncMock(return_value=([{"invocation_id": "inv-p1"}], 60))
+    await vm.next_page()
+    assert vm.state.page == 1
+    assert dao.read_request_page.await_args.kwargs["offset"] == PAGE_SIZE
 
 
 @pytest.mark.asyncio
@@ -239,9 +400,10 @@ def test_enter_monthly_summary_sets_mode_and_granularity():
     assert vm.state.export_granularity == "monthly_summary"
 
 
-def test_retention_exceeded_when_start_before_cutoff():
+@pytest.mark.asyncio
+async def test_retention_exceeded_when_start_before_cutoff():
     vm = _vm(_dao(), retention_days=180)
-    vm.set_filter(start=dt.datetime(2020, 1, 1))
+    await vm.set_filter(start=dt.datetime(2020, 1, 1))
     assert vm.state.retention_exceeded is True
 
 
