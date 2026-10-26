@@ -120,6 +120,8 @@ class OfflineCalendar:
                 logger.warning(
                     "[OfflineCalendar] get_trade_dates end %s beyond trusted interval (%s), truncated (D2-7)",
                     end_date,
+                    # 可信区间上界为硬编码日期常量、非敏感数据；命中 CodeQL maybeSecret 命名启发式（"trusted" 子串）误报
+                    # codeql[py/clear-text-logging-sensitive-data]
                     _OFFLINE_TRUSTED_UNTIL,
                 )
                 end_date = _OFFLINE_TRUSTED_UNTIL
@@ -127,6 +129,8 @@ class OfflineCalendar:
                 logger.warning(
                     "[OfflineCalendar] get_trade_dates start %s beyond trusted interval (%s), returning [] (D2-7)",
                     start_date,
+                    # 可信区间上界为硬编码日期常量、非敏感数据；命中 CodeQL maybeSecret 命名启发式（"trusted" 子串）误报
+                    # codeql[py/clear-text-logging-sensitive-data]
                     _OFFLINE_TRUSTED_UNTIL,
                 )
                 return []
