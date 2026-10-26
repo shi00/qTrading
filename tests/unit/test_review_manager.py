@@ -362,6 +362,50 @@ class TestReviewManagerRunReview:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
+    async def test_run_review_propagates_engine_disposed_from_row_loop(self, mock_cm, mock_tc):
+        """R5 一致性：引擎运行中途释放时，循环内基准窗口解析抛出的
+        EngineDisposedError 必须上抛，不得被逐条吞成 error 日志后以
+        「Updated 0 records」静默成功返回（复盘 job 需感知复盘失败）。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        # 6 个交易日行情：T+5（0620）成熟 → 走到基准窗口解析（_window_index_pct）
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"] * 6,
+                    "trade_date": ["20240615", "20240616", "20240617", "20240618", "20240619", "20240620"],
+                    "close": [10.0, 10.5, 10.6, 10.7, 10.8, 10.9],
+                    "open": [10.0] * 6,
+                    "pct_chg": [1.0] * 6,
+                }
+            )
+        )
+        rm._resolve_benchmark = AsyncMock(return_value="000300.SH")
+        rm._prefetch_benchmark_caches = AsyncMock(return_value=({}, {}))
+        rm._prefetch_limit_up_cache = AsyncMock(return_value={})
+        rm._window_index_pct = AsyncMock(side_effect=EngineDisposedError("[test] Engine disposed"))
+        rm._update_result = AsyncMock()
+
+        with pytest.raises(EngineDisposedError):
+            await rm.run_review()
+        rm._update_result.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
     async def test_with_pending_no_ai_score_updates_result(self, mock_cm, mock_tc):
         """BIZ-01: 纯数学/无 AI 记录（ai_score=None）同样进入复盘推进，不因缺 AI 分数被跳过。"""
         mock_cache = MagicMock()

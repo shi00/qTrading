@@ -3856,6 +3856,59 @@ class TestSaveUpsertCoerceGate:
         assert any("日期字段无法解析已置 NULL" in r.message for r in caplog.records)
         assert WriteQuality().is_degraded("test_table") is True
 
+    @pytest.mark.asyncio
+    async def test_failed_write_keeps_previous_coerce_stats(self):
+        """写入失败不得以未落库的本次尝试覆盖上次成功统计（record_write 时序）。
+
+        record_write 为「最近一次写入」覆盖式语义；若在 SQL 执行前登记，
+        失败尝试（coerced=0）会清除该表已有的降级信号，健康门控在 24h 窗口内
+        把「脏数据写入失败」误判为「最近写入干净」。修复后仅在执行成功路径登记。"""
+        mock_engine = MagicMock()
+        mock_conn = AsyncMock()
+        mock_table = MagicMock()
+        mock_col_id = MagicMock()
+        mock_col_id.name = "id"
+        mock_col_id.info = {}
+        mock_table.columns = [mock_col_id]
+        mock_table.c = {"id": mock_col_id}
+
+        dao = BaseDao(mock_engine)
+        # 预置上次成功写入的降级统计（rows=100, coerced=10 → ratio=0.1）
+        WriteQuality().record_write("test_table", rows=100, coerced_rows=10)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.models.Base.metadata") as mock_meta,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+            patch("data.persistence.daos.base_dao.pg_insert") as mock_pg,
+        ):
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            mock_meta.tables = {"test_table": mock_table}
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            # 本次尝试无 coerce（若被错误登记将覆盖为 ratio=0）
+            mock_tpm_instance.run_async = AsyncMock(return_value=([{"id": 1}], {}))
+            mock_stmt = MagicMock()
+            mock_pg.return_value = mock_stmt
+            mock_stmt.excluded = MagicMock()
+            mock_stmt.on_conflict_do_update.return_value = mock_stmt
+            mock_conn.execute = AsyncMock(side_effect=RuntimeError("db down"))
+
+            # 共享连接分支 suppress_errors 被忽略（P1-3），SQL 失败必须传播
+            # （_save_upsert shared-conn 分支裸 raise 原始异常）
+            with pytest.raises(RuntimeError, match="db down"):
+                await dao._save_upsert(
+                    pd.DataFrame({"id": [1]}),
+                    "test_table",
+                    ["id"],
+                    ["id"],
+                    conn=mock_conn,
+                )
+
+        # 上次成功统计未被失败尝试覆盖：降级信号保留
+        assert WriteQuality().get_coerce_ratio("test_table") == pytest.approx(0.1)
+        assert WriteQuality().is_degraded("test_table") is True
+
 
 def _count_real_null(records: list[dict[str, Any]]) -> int:
     """统计真正的 NaN/NaT 残留（None 不为 NULL，不计入）。"""
