@@ -132,6 +132,11 @@ class VectorBacktestEngine:
             progress_callback(0.0, Message("backtest_progress_loading"))
 
         trade_dates = await self._get_trade_dates()
+        # M-STRAT-04: 交易日历区间缩窄检测（M-DATA-12 D2-7 消费点核实）。日历序列可能
+        # 窄于请求区间（数据源覆盖不足 / 离线日历可信区间截断），静默接受会让
+        # BacktestResult.config 展示区间与实际模拟区间不一致（R21：已知缩窄伪装成
+        # 完整区间），故产出 trade_dates_truncated 告警（data_quality → unreliable）。
+        trade_dates_warning = self._check_trade_dates_coverage(trade_dates)
 
         if progress_callback:
             progress_callback(0.1, Message("backtest_progress_running_strategy"))
@@ -219,6 +224,8 @@ class VectorBacktestEngine:
         # 按来源显式归类，常规撮合事件已不在 sim_warnings 中（portfolio 层移除），
         # 剩余 sim_warnings 为真实异常（stale-estimate）→ data_quality。
         all_warnings: list[str | DataWarning] = list(quote_warnings)
+        if trade_dates_warning is not None:
+            all_warnings.append(trade_dates_warning)
         for w in sim_warnings:
             all_warnings.append(
                 DataWarning(
@@ -344,6 +351,32 @@ class VectorBacktestEngine:
         if not trade_dates:
             raise ValueError("No trade dates found in the specified range")
         return trade_dates
+
+    def _check_trade_dates_coverage(self, trade_dates: list[date]) -> DataWarning | None:
+        """交易日历返回区间与请求区间的一致性校验（M-STRAT-04 检视，M-DATA-12 D2-7 消费点）。
+
+        TradeCalendarService 的日历序列可能窄于请求区间：数据源覆盖不足
+        （DB 未同步到近期 / API 补齐失败），或离线日历可信区间截断（D2-7，
+        M-DATA-12 将 get_trade_dates 超界外推改为截断/空后此路径更显性）。
+        静默接受会让 BacktestResult.config 展示区间与实际模拟区间不一致
+        （R21：已知缩窄伪装成完整区间），故缩窄时产出
+        ``trade_dates_truncated`` 告警（data_quality → unreliable），按告警
+        降级继续回测（区间仍可产出有价值结论，无需显式失败）。
+        """
+        first, last = trade_dates[0], trade_dates[-1]
+        if first > self.config.start_date or last < self.config.end_date:
+            return DataWarning(
+                warning_type="trade_dates_truncated",
+                start_date=first.strftime("%Y%m%d"),
+                end_date=last.strftime("%Y%m%d"),
+                affected_stock_count=0,
+                error_message=(
+                    f"交易日历返回区间 {first.isoformat()}~{last.isoformat()} 窄于请求区间 "
+                    f"{self.config.start_date.isoformat()}~{self.config.end_date.isoformat()}，"
+                    "回测实际模拟区间以告警内区间为准（日历数据源覆盖不足或离线可信区间截断）。"
+                ),
+            )
+        return None
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _load_quotes(

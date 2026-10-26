@@ -36,6 +36,9 @@ class DataWarning:
         "preload_range_too_wide",
         "range_preload_failed",
         "range_preload_error",
+        # 交易日历返回区间窄于请求区间（数据源覆盖不足 / 离线日历可信区间截断，
+        # D2-7 / M-DATA-12 语义）：实际模拟区间与 config 展示区间不一致，必须显式告警。
+        "trade_dates_truncated",
         # R24 当期近似：区间回放的退市整理期排除口径使用当前名称/delist_date 快照，
         # name-history 缺覆盖时可能存在前视（screener_dao._delisting_flag_expr）。
         "delisting_asof_approximation",
@@ -112,6 +115,7 @@ class WarningCategory:
         "preload_range_too_wide": "performance_path",
         "range_preload_failed": "performance_path",
         "range_preload_error": "performance_path",
+        "trade_dates_truncated": "data_quality",
         "delisting_asof_approximation": "asof_approximation",
     }
     # fail-closed 历史异常关键词白名单：无 [type] 前缀的真实异常一定能兜底归类，

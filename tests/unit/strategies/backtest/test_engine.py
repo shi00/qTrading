@@ -11,7 +11,7 @@ import pytest
 
 from data.domain_services.offline_calendar import OfflineCalendar
 from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
-from strategies.backtest.config import BacktestConfig, DataWarning
+from strategies.backtest.config import BacktestConfig, DataWarning, WarningCategory
 from strategies.backtest.engine import VectorBacktestEngine, _compute_real_score_ratio
 
 
@@ -790,6 +790,137 @@ class TestGetTradeDates:
         with patch.object(OfflineCalendar, "get_trade_dates", return_value=[]):
             with pytest.raises(ValueError, match="No trade dates found"):
                 await engine._get_trade_dates()
+
+
+class TestCheckTradeDatesCoverage:
+    """M-DATA-12 D2-7 消费点：日历返回区间窄于请求区间时产出 trade_dates_truncated 告警。
+
+    静默接受缩窄区间会让 BacktestResult.config 展示区间与实际模拟区间不一致
+    （R21：已知缩窄伪装成完整区间），故缩窄必须显式告警（data_quality → unreliable）。
+    """
+
+    @staticmethod
+    def _make_engine(start: date, end: date) -> "VectorBacktestEngine":
+        config = BacktestConfig(start_date=start, end_date=end)
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        return engine
+
+    def test_both_ends_truncated_returns_warning(self):
+        engine = self._make_engine(date(2024, 1, 1), date(2024, 1, 31))
+
+        warning = engine._check_trade_dates_coverage([date(2024, 1, 3), date(2024, 1, 30)])
+
+        assert warning is not None
+        assert warning.warning_type == "trade_dates_truncated"
+        assert warning.category == WarningCategory.DATA_QUALITY
+        # 告警区间用 %Y%m%d（与 _load_quotes 告警口径一致），实际模拟区间以此为准
+        assert warning.start_date == "20240103"
+        assert warning.end_date == "20240130"
+        # 告警消息内嵌请求区间与实际区间，供报告端解释缩窄原因
+        assert "2024-01-03" in warning.error_message
+        assert "2024-01-30" in warning.error_message
+
+    def test_start_truncated_returns_warning(self):
+        engine = self._make_engine(date(2024, 1, 1), date(2024, 1, 31))
+
+        warning = engine._check_trade_dates_coverage([date(2024, 1, 5), date(2024, 1, 31)])
+
+        assert warning is not None
+        assert warning.warning_type == "trade_dates_truncated"
+        assert warning.category == WarningCategory.DATA_QUALITY
+        assert warning.start_date == "20240105"
+        # 末端完整覆盖：告警末端应等于请求末端
+        assert warning.end_date == "20240131"
+
+    def test_end_truncated_returns_warning(self):
+        """离线可信区间截断（D2-7）典型形态：末端被截断。"""
+        engine = self._make_engine(date(2024, 1, 1), date(2024, 1, 31))
+
+        warning = engine._check_trade_dates_coverage([date(2024, 1, 2), date(2024, 1, 30)])
+
+        assert warning is not None
+        assert warning.warning_type == "trade_dates_truncated"
+        assert warning.category == WarningCategory.DATA_QUALITY
+        # 告警区间为实际模拟区间（日历返回首末交易日），非请求区间
+        assert warning.start_date == "20240102"
+        assert warning.end_date == "20240130"
+
+    def test_full_coverage_returns_none(self):
+        engine = self._make_engine(date(2024, 1, 1), date(2024, 1, 31))
+
+        assert engine._check_trade_dates_coverage([date(2024, 1, 1), date(2024, 1, 31)]) is None
+
+    def test_wider_coverage_returns_none(self):
+        """日历覆盖宽于请求区间（两端越界）不算缩窄。"""
+        engine = self._make_engine(date(2024, 1, 5), date(2024, 1, 20))
+
+        assert engine._check_trade_dates_coverage([date(2024, 1, 1), date(2024, 1, 31)]) is None
+
+
+class TestRunTradeDatesTruncatedWarning:
+    """engine.run 将 trade_dates_truncated 告警并入 BacktestResult.data_warnings。"""
+
+    async def _run(self, monkeypatch, *, trade_dates: list[date]):
+        from strategies.backtest.metrics import BacktestMetrics
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 5))
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = MagicMock()
+
+        dp = MagicMock()
+        dp.range_preload_warnings = []
+        dp.get_stock_meta = AsyncMock(return_value={})
+        engine.data_provider = dp
+        engine.strategy_adapter = MagicMock()
+
+        empty_signals = pl.DataFrame({"ts_code": [], "trade_date": [], "signal_rank": []})
+
+        monkeypatch.setattr(engine, "_get_trade_dates", AsyncMock(return_value=trade_dates))
+        monkeypatch.setattr(engine, "_load_benchmark", AsyncMock(return_value=(pl.DataFrame(), None)))
+        monkeypatch.setattr(engine, "_generate_signals", AsyncMock(return_value=empty_signals))
+        monkeypatch.setattr(engine, "_load_quotes", AsyncMock(return_value=(pl.DataFrame(), [])))
+        monkeypatch.setattr(
+            engine, "_simulate_trades", MagicMock(return_value=(pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), [], 0))
+        )
+        monkeypatch.setattr(
+            engine, "_calc_ic_series", MagicMock(return_value=(pl.Series([], dtype=pl.Float64), [], []))
+        )
+        monkeypatch.setattr(engine, "_calc_benchmark_returns", MagicMock(return_value=(pl.DataFrame(), None)))
+        monkeypatch.setattr(engine, "_calc_period_stats", MagicMock(return_value={}))
+        monkeypatch.setattr(
+            BacktestMetrics, "calc_nav_curve", MagicMock(return_value=pl.Series([0.0, 0.0], dtype=pl.Float64))
+        )
+        monkeypatch.setattr(
+            BacktestMetrics, "calc_daily_returns", MagicMock(return_value=pl.Series([0.0, 0.0], dtype=pl.Float64))
+        )
+        monkeypatch.setattr(BacktestMetrics, "calc_all_metrics", MagicMock(return_value={}))
+        monkeypatch.setattr(BacktestMetrics, "calc_investment_metrics", MagicMock(return_value={}))
+
+        strategy = MagicMock()
+        strategy.name = "mock_strategy"
+
+        return await engine.run(strategy=strategy)
+
+    @pytest.mark.asyncio
+    async def test_appends_warning_when_truncated(self, monkeypatch):
+        """日历返回区间窄于请求区间时，data_warnings 携带 trade_dates_truncated（data_quality）。"""
+        result = await self._run(monkeypatch, trade_dates=[date(2024, 1, 2), date(2024, 1, 3)])
+
+        truncated = [
+            w for w in result.data_warnings if isinstance(w, DataWarning) and w.warning_type == "trade_dates_truncated"
+        ]
+        assert len(truncated) == 1
+        assert truncated[0].category == WarningCategory.DATA_QUALITY
+        assert str(truncated[0]).startswith("[trade_dates_truncated]")
+
+    @pytest.mark.asyncio
+    async def test_omits_warning_when_full_coverage(self, monkeypatch):
+        """日历区间完整覆盖请求区间时，data_warnings 不含该通道警告。"""
+        result = await self._run(monkeypatch, trade_dates=[date(2024, 1, 1), date(2024, 1, 5)])
+
+        assert not any(str(w).startswith("[trade_dates_truncated]") for w in result.data_warnings)
 
 
 class TestLoadQuotes:
