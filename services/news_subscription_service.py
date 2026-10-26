@@ -199,8 +199,11 @@ class NewsSubscriptionService:
             self._alert_listeners = set()  # Special listeners for popups (controlled by config)
             self._listener_errors: dict = {}  # M9-001: 显式初始化，消除延迟创建异味
 
+            # M-SVC-04：poll 任务显式引用（stop() 快照旧会话任务以供延迟清理回收，
+            # 防止 stop() → start() 序列中旧 poll_loop 因 _running 复位失效而复活）
             self._current_fetch_task = None
             self._processing_task = None
+            self._poll_task = None
 
             # P2-R4: Content hash dedup (LRU-style) to catch duplicates across restarts
             self._seen_hashes: OrderedDict[str, None] = OrderedDict()
@@ -331,6 +334,63 @@ class NewsSubscriptionService:
 
         logger.info("[NewsService] Stopped news polling service (async graceful)")
 
+    async def _cancel_and_wait(self, task: typing.Any, timeout: float) -> None:
+        """取消任务并限时等待其退出。
+
+        仅当本协程被外部取消时传播 CancelledError（R2）；任务自身的主动取消
+        合理吞没（与 :meth:`stop_async` 的既有语义一致）。
+        """
+        if task.done():
+            return
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=timeout)
+        except asyncio.CancelledError:
+            # R2: 延迟清理被外部取消时必须传播；task 被主动取消时吞没合理
+            current = asyncio.current_task()
+            if current is not None and current.cancelling() > 0:
+                raise
+        except TimeoutError:
+            pass
+
+    async def _finalize_stop(
+        self,
+        poll_task: asyncio.Task | None,
+        fetch_task: asyncio.Task | None,
+        processing_task: asyncio.Task | None,
+        queue: asyncio.Queue | None,
+        drain_timeout: float = _QUEUE_DRAIN_DEFAULT_S,
+    ) -> None:
+        """stop() 的延迟清理协程：仅处理快照传入的旧会话状态，不重读实例属性。
+
+        M-SVC-04 竞态修复：stop() 为 fire-and-forget（同步返回后调度本协程）。
+        若延迟清理恢复执行时重读 ``self._processing_task`` / ``self._running``
+        等实例属性，``stop()`` 后立即 ``start()`` 的合法序列会被误杀——取消新
+        会话任务、复位 ``_running`` 与水位线，后台任务全灭。故本协程只操作入参
+        快照；实例状态复位仅在无新会话运行（``not self._running``）时执行。
+
+        EX-0017 豁免语义不变：本协程仍是应用服务层轮询的优雅停止路径（drain
+        队列 + 限时等待），不涉及 disposed 引擎上的数据库操作（R5）。
+        """
+        if poll_task is not None:
+            await self._cancel_and_wait(poll_task, drain_timeout)
+        if fetch_task is not None:
+            await self._cancel_and_wait(fetch_task, drain_timeout)
+        if queue is not None:
+            try:
+                await asyncio.wait_for(queue.join(), timeout=drain_timeout)
+            except TimeoutError:
+                logger.warning("[NewsService] stop_async drain timeout, remaining queue size=%s", queue.qsize())
+        if processing_task is not None:
+            await self._cancel_and_wait(processing_task, drain_timeout)
+        # 状态复位仅在无新会话运行时执行，防止复位 stop() → start() 序列中新
+        # 会话的首次同步水位线（R22：水位线不因延迟清理倒退）
+        if not self._running:
+            self._last_news_time = None
+            self._last_news_content = None
+            self._queue_active = False
+            self._custom_queue = None
+
     async def start(self):
         """
         Start the subscription service.
@@ -347,6 +407,7 @@ class NewsSubscriptionService:
         self._custom_queue = None
 
         poll_task = asyncio.create_task(self._poll_loop())
+        self._poll_task = poll_task
         self._background_tasks.add(poll_task)
         poll_task.add_done_callback(self._background_tasks.discard)
 
@@ -359,30 +420,46 @@ class NewsSubscriptionService:
     def stop(self):
         """Stop the news subscription service.
 
-        Schedules stop_async() and returns immediately. The scheduled task
-        is tracked in _background_tasks to prevent GC.
+        Schedules the delayed finalize coroutine and returns immediately. The
+        scheduled task is tracked in _background_tasks to prevent GC.
 
         Note: For guaranteed cleanup (e.g. during shutdown), use
         ``await stop_async()`` instead.
+
+        M-SVC-04 竞态修复：本方法在同步段快照当前会话的全部异步状态（poll /
+        fetch / processing 任务与队列）并立即让出实例引用，延迟清理协程
+        (:meth:`_finalize_stop`) 只操作快照、不重读实例属性——否则 ``stop()``
+        后立即 ``start()`` 的合法序列会被延迟清理误杀（取消新会话任务、复位
+        ``_running``，后台任务全灭）。
         """
         if not self._running:
             return
         self._running = False
 
-        if self._current_fetch_task and not self._current_fetch_task.done():
-            self._current_fetch_task.cancel()
+        # 快照旧会话异步状态并让出实例引用（此后 start() 可安全重建新会话）
+        poll_task = self._poll_task
+        fetch_task = self._current_fetch_task
+        processing_task = self._processing_task
+        queue = self.processing_queue
+        self._poll_task = None
+        self._current_fetch_task = None
+        self._processing_task = None
+
+        # fetch 立即取消（止损）；其余交给延迟清理
+        if fetch_task is not None and not fetch_task.done():
+            fetch_task.cancel()
 
         try:
             loop = asyncio.get_running_loop()
             if loop.is_running():
-                task = loop.create_task(self.stop_async())
+                task = loop.create_task(self._finalize_stop(poll_task, fetch_task, processing_task, queue))
                 self._background_tasks.add(task)
                 task.add_done_callback(self._background_tasks.discard)
-                logger.debug("[NewsService] stop() scheduled stop_async for graceful drain")
+                logger.debug("[NewsService] stop() scheduled delayed finalize for graceful drain")
         except RuntimeError:
-            if self._processing_task and not self._processing_task.done():
-                self._processing_task.cancel()
-            self._processing_task = None
+            # 无运行事件循环（同步上下文）：无延迟清理可调度，就地取消处理任务
+            if processing_task is not None and not processing_task.done():
+                processing_task.cancel()
             self._last_news_time = None
             self._last_news_content = None
 

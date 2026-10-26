@@ -1148,6 +1148,105 @@ class TestNewsSubscriptionServiceStopWithRunningLoop:
         assert svc._running is False
 
 
+class TestNewsSubscriptionStopStartRace:
+    """M-SVC-04 竞态回归：stop() 的延迟清理不得误杀 stop() 后立即 start() 的新会话。
+
+    根因（修复前）：stop() 调度 stop_async() 作延迟清理，该协程恢复执行时全程
+    重读实例属性（``self._processing_task`` / ``self._running``）——stop() 后
+    立即 start() 的合法序列会被取消新会话任务并把 ``_running`` 复位，后台任务
+    全灭。修复：stop() 同步段快照旧会话状态，延迟清理只操作快照
+    （:meth:`NewsSubscriptionService._finalize_stop`）。
+    """
+
+    @staticmethod
+    async def _settle():
+        """让出控制权使延迟清理协程执行完毕。"""
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+
+    @staticmethod
+    async def _cleanup(*tasks):
+        for t in tasks:
+            t.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await t
+
+    @pytest.mark.asyncio
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    async def test_stop_then_start_keeps_new_session_alive(self, mock_cache, mock_ai):
+        svc = NewsSubscriptionService()
+        svc._running = True
+        svc.processing_queue = None
+        old_poll = asyncio.create_task(asyncio.sleep(100))
+        old_processing = asyncio.create_task(asyncio.sleep(100))
+        svc._poll_task = old_poll
+        svc._processing_task = old_processing
+        svc._current_fetch_task = None
+
+        svc.stop()
+        # 模拟 start() 立即重建的新会话（start() 自身行为由既有测试覆盖）
+        svc._running = True
+        new_poll = asyncio.create_task(asyncio.sleep(100))
+        new_processing = asyncio.create_task(asyncio.sleep(100))
+        svc._poll_task = new_poll
+        svc._processing_task = new_processing
+
+        await self._settle()
+
+        assert svc._running is True  # 新会话运行状态未被延迟清理复位
+        assert not new_poll.done()  # 新 poll 任务未被误杀
+        assert not new_processing.done()  # 新 processing 任务未被误杀
+        assert old_poll.done()  # 旧会话任务被延迟清理回收
+        assert old_processing.done()
+
+        await self._cleanup(new_poll, new_processing)
+
+    @pytest.mark.asyncio
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    async def test_stop_then_start_preserves_last_news_watermark(self, mock_cache, mock_ai):
+        """stop() → start() 序列中延迟清理不得复位新会话水位线（R22 不倒退）。"""
+        svc = NewsSubscriptionService()
+        svc._running = True
+        svc.processing_queue = None
+        svc._poll_task = asyncio.create_task(asyncio.sleep(100))
+        svc._processing_task = asyncio.create_task(asyncio.sleep(100))
+        svc._current_fetch_task = None
+
+        svc.stop()
+        svc._running = True  # 模拟 start() 重启
+        svc._last_news_time = "10:00"  # 新会话已建立水位线
+        svc._last_news_content = "new"
+
+        await self._settle()
+
+        assert svc._last_news_time == "10:00"
+        assert svc._last_news_content == "new"
+
+    @pytest.mark.asyncio
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    async def test_stop_cleans_up_old_poll_task(self, mock_cache, mock_ai):
+        """常规 stop()（无 restart）延迟清理回收旧 poll 任务，防复活双轮询。"""
+        svc = NewsSubscriptionService()
+        svc._running = True
+        svc.processing_queue = None
+        old_poll = asyncio.create_task(asyncio.sleep(100))
+        svc._poll_task = old_poll
+        svc._processing_task = None
+        svc._current_fetch_task = None
+
+        svc.stop()
+        await self._settle()
+
+        assert old_poll.done()
+        assert svc._running is False
+        # 常规 stop（无新会话）复位水位线，与 stop_async 语义一致
+        assert svc._last_news_time is None
+        assert svc._last_news_content is None
+
+
 class TestNewsSubscriptionServicePollLoop:
     @pytest.mark.asyncio
     @patch("services.news_subscription_service.AIService")
