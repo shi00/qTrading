@@ -8,15 +8,25 @@
 - EngineDisposedError 传播为 persisted=False；
 - 60s 窗口惰性扫描：submit_terminal 顺带关闭到期窗口；
 - aclose 兜底 flush 且二次调用幂等。
+
+覆盖（F20 结算失败保全 + 停机 flush）：
+- 结算失败保留观察与终态记录（不再以「内存清空」为正确断言），账本恢复后重放移除；
+- 重放走 DAO usage_revision 水位（usage_revision 不变），不与 F19 防双计语义冲突；
+- 不可恢复错误（METADATA_INCOMPLETE / OWNER_LEASE_LOST = 已结算或旧修订）确认丢弃；
+- 保留队列有界（溢出 FIFO 逐出最旧 + 告警），账本持续不可达时不立即重放；
+- aclose 全量 flush：保留条目原始重放 / 无终态观察合成 cancelled 补交 / 全窗口收口；
+- aclose flush 失败不抛且如实告警（R21），CancelledError 传播（R2）。
 """
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from core.model_management_types import NormalizedLLMUsage, PersistenceOutcome
 from services.ai_service.usage_recorder import (
+    _RETRY_BACKOFF_BASE_S,
     AttemptTerminalRecord,
     AttemptUsageObservation,
     ReservationOutcome,
@@ -530,3 +540,231 @@ class TestAclos:
         recorder.observe_usage(_observation("att-1"))
         await recorder.aclose()
         assert recorder.pending_observation_count() == 0
+
+
+class TestSubmitTerminalRetention:
+    """F20：结算失败保全——可恢复失败保留观察与终态记录供重放，不再以
+    「内存清空」为结算失败场景的正确断言；重试成功或确认不可恢复后才移除。"""
+
+    @pytest.mark.asyncio
+    async def test_recoverable_failure_retains_observation_for_replay(self):
+        dao = _dao_mock()
+        dao.settle_attempt_usage = AsyncMock(side_effect=RuntimeError("boom"))
+        now = 0.0
+        recorder = UsageRecorder(dao_provider=lambda: dao, clock=lambda: now)
+        recorder.observe_usage(_observation("att-1"))
+        outcome = await recorder.submit_terminal(_terminal("att-1"))
+        assert outcome == PersistenceOutcome(persisted=False, error_code="DB_SETTLE_TIMEOUT")
+        # 观察不丢弃（保留供恢复重放），且不做立即重试（账本大概率仍不可达）
+        assert recorder.pending_observation_count() == 1
+        assert dao.settle_attempt_usage.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_no_immediate_replay_while_ledger_down(self):
+        dao = _dao_mock()
+        dao.settle_attempt_usage = AsyncMock(side_effect=RuntimeError("boom"))
+        now = 0.0
+        recorder = UsageRecorder(dao_provider=lambda: dao, clock=lambda: now)
+        recorder.observe_usage(_observation("att-1"))
+        await recorder.submit_terminal(_terminal("att-1"))
+        recorder.observe_usage(_observation("att-2"))
+        await recorder.submit_terminal(_terminal("att-2"))
+        # 账本持续不可达：两次提交各自失败，无重放叠加
+        assert dao.settle_attempt_usage.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_replay_respects_backoff_window(self):
+        dao = _dao_mock()
+        dao.settle_attempt_usage = AsyncMock(side_effect=[RuntimeError("boom"), True])
+        now = 0.0
+        recorder = UsageRecorder(dao_provider=lambda: dao, clock=lambda: now)
+        recorder.observe_usage(_observation("att-1"))
+        assert (await recorder.submit_terminal(_terminal("att-1"))).persisted is False
+        # 退避未到期（now 仍为 0）：新落账成功不触发未到期条目的重放
+        recorder.observe_usage(_observation("att-2"))
+        assert (await recorder.submit_terminal(_terminal("att-2"))).persisted is True
+        assert dao.settle_attempt_usage.await_count == 2
+        assert recorder.pending_observation_count() == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_succeeds_after_ledger_recovery_and_evicts_entry(self):
+        dao = _dao_mock()
+        dao.settle_attempt_usage = AsyncMock(side_effect=[RuntimeError("boom"), True, True])
+        now = 0.0
+        recorder = UsageRecorder(dao_provider=lambda: dao, clock=lambda: now)
+        recorder.observe_usage(_observation("att-1"))
+        assert (await recorder.submit_terminal(_terminal("att-1"))).persisted is False
+        now = _RETRY_BACKOFF_BASE_S  # 推进退避到期
+        # 新终态成功落账 = 账本可达 → 顺带重放保留条目
+        recorder.observe_usage(_observation("att-2"))
+        assert (await recorder.submit_terminal(_terminal("att-2"))).persisted is True
+        assert dao.settle_attempt_usage.await_count == 3
+        replay_kwargs = dao.settle_attempt_usage.await_args_list[2].kwargs
+        assert replay_kwargs["attempt_id"] == "att-1"
+        assert replay_kwargs["status"] == "succeeded"
+        # F19 防双计兼容：重放 usage_revision 不变（水位幂等由 DAO 兜底）
+        assert replay_kwargs["usage_revision"] == 1
+        assert recorder.pending_observation_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_duplicate_late_success_clears_retained_entry(self):
+        """executor 幂等重提交同 attempt 终态成功 → 保留条目与观察一并清除。"""
+        dao = _dao_mock()
+        dao.settle_attempt_usage = AsyncMock(side_effect=[RuntimeError("boom"), True])
+        now = 0.0
+        recorder = UsageRecorder(dao_provider=lambda: dao, clock=lambda: now)
+        recorder.observe_usage(_observation("att-1"))
+        assert (await recorder.submit_terminal(_terminal("att-1"))).persisted is False
+        now = 10.0
+        assert (await recorder.submit_terminal(_terminal("att-1"))).persisted is True
+        assert recorder.pending_observation_count() == 0
+        # 队列已空：后续成功落账不产生额外重放调用
+        now = 60.0
+        recorder.observe_usage(_observation("att-2"))
+        await recorder.submit_terminal(_terminal("att-2"))
+        assert dao.settle_attempt_usage.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_unrecoverable_lease_lost_drops_observation(self):
+        """OWNER_LEASE_LOST（DAO False = 旧修订或已结算 / 无背书拒绝）确认丢弃。"""
+        dao = _dao_mock()
+        dao.settle_attempt_usage = AsyncMock(return_value=False)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        outcome = await recorder.submit_terminal(_terminal("att-1"))
+        assert outcome == PersistenceOutcome(persisted=False, error_code="OWNER_LEASE_LOST")
+        assert recorder.pending_observation_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_observation_without_month_metadata_dropped_not_retained(self):
+        """METADATA_INCOMPLETE（观察缺归属月）重试无新事实来源 → 确认丢弃。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(
+            AttemptUsageObservation(
+                attempt_id="att-nomonth",
+                invocation_id="inv-1",
+                usage=_usage(),
+                actual_model="glm-4-air",
+                metadata={"connection_id": "conn-remote"},  # 缺 month
+            )
+        )
+        outcome = await recorder.submit_terminal(_terminal("att-nomonth"))
+        assert outcome == PersistenceOutcome(persisted=False, error_code="METADATA_INCOMPLETE")
+        assert recorder.pending_observation_count() == 0
+
+
+class TestPendingSettleQueueBounded:
+    """F20：保留队列有界——溢出 FIFO 逐出最旧并如实告警（R21 不静默丢弃）。"""
+
+    @pytest.mark.asyncio
+    async def test_queue_overflow_evicts_oldest_with_warning(self, caplog):
+        dao = _dao_mock()
+        dao.settle_attempt_usage = AsyncMock(side_effect=[RuntimeError("boom")] * 3 + [True, True, True])
+        now = 0.0
+        recorder = UsageRecorder(dao_provider=lambda: dao, clock=lambda: now, max_pending_settle=2)
+        with caplog.at_level(logging.WARNING):
+            for i in range(3):
+                aid = f"att-{i}"
+                recorder.observe_usage(_observation(aid))
+                await recorder.submit_terminal(_terminal(aid))
+        # 队列上限 2：最早的 att-0 被逐出（观察一并清除），告警如实记录
+        assert recorder.pending_observation_count() == 2
+        assert "dropping oldest unresolved usage fact" in caplog.text
+        # 账本恢复后仅重放保留的 att-1 / att-2，被逐出的 att-0 不再重放
+        now = 60.0
+        recorder.observe_usage(_observation("att-3"))
+        assert (await recorder.submit_terminal(_terminal("att-3"))).persisted is True
+        called_ids = [call.kwargs["attempt_id"] for call in dao.settle_attempt_usage.await_args_list]
+        assert called_ids.count("att-0") == 1  # 仅首次失败调用，无重放
+        assert called_ids.count("att-1") == 2  # 失败 + 重放成功
+        assert called_ids.count("att-2") == 2
+        assert dao.settle_attempt_usage.await_count == 6
+        assert recorder.pending_observation_count() == 0
+
+
+class TestAcloseFlushF20:
+    """F20：aclose 停机前全量 flush——失败不吞没（R21），取消传播（R2）。"""
+
+    @pytest.mark.asyncio
+    async def test_aclose_flushes_retained_queue_with_original_record(self):
+        dao = _dao_mock()
+        dao.settle_attempt_usage = AsyncMock(side_effect=[RuntimeError("boom"), True])
+        now = 0.0
+        recorder = UsageRecorder(dao_provider=lambda: dao, clock=lambda: now)
+        recorder.observe_usage(_observation("att-1"))
+        assert (await recorder.submit_terminal(_terminal("att-1"))).persisted is False
+        await recorder.aclose()
+        # 保留条目以原始终态记录重放（status=succeeded，非合成 cancelled）
+        assert dao.settle_attempt_usage.await_count == 2
+        replay_kwargs = dao.settle_attempt_usage.await_args_list[1].kwargs
+        assert replay_kwargs["attempt_id"] == "att-1"
+        assert replay_kwargs["status"] == "succeeded"
+        assert recorder.pending_observation_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_aclose_submits_unsettled_observation_as_cancelled(self):
+        """从未提交终态的观察：停机合成 cancelled 终态补交（用量事实不丢，R21）。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        await recorder.aclose()
+        dao.settle_attempt_usage.assert_awaited_once()
+        kwargs = dao.settle_attempt_usage.await_args.kwargs
+        assert kwargs["attempt_id"] == "att-1"
+        assert kwargs["status"] == "cancelled"
+        assert kwargs["usage_status"] == "reported"  # 用量已观察 = 消费事实
+        assert kwargs["usage"] is not None
+        assert kwargs["month"] == "202610"
+        assert recorder.pending_observation_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_aclose_skips_synthesized_settle_when_original_replay_failed(self):
+        """原始终态记录重放失败时不覆盖为合成 cancelled（同 attempt 不二次结算）。"""
+        dao = _dao_mock()
+        dao.settle_attempt_usage = AsyncMock(side_effect=RuntimeError("boom"))
+        now = 0.0
+        recorder = UsageRecorder(dao_provider=lambda: dao, clock=lambda: now)
+        recorder.observe_usage(_observation("att-1"))
+        assert (await recorder.submit_terminal(_terminal("att-1"))).persisted is False
+        await recorder.aclose()
+        # 恰好两次：submit 首次失败 + ① 原始记录重放失败；② 不合成 cancelled 三次结算
+        assert dao.settle_attempt_usage.await_count == 2
+        assert all(call.kwargs["status"] == "succeeded" for call in dao.settle_attempt_usage.await_args_list)
+
+    @pytest.mark.asyncio
+    async def test_aclose_flush_failure_does_not_raise_and_warns(self, caplog):
+        """停机 flush 失败：尽力而为，失败事实告警不吞没（R21），不抛账本异常。"""
+        dao = _dao_mock()
+        dao.settle_attempt_usage = AsyncMock(side_effect=RuntimeError("boom"))
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        with caplog.at_level(logging.WARNING):
+            await recorder.aclose()  # 不抛
+        assert "usage fact dropped at shutdown" in caplog.text
+        assert recorder.pending_observation_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_aclose_closes_all_remaining_windows(self):
+        """停机后无迟到修订来源：未到期窗口强制收口，不滞留为未关闭。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao, window_seconds=3600.0)
+        recorder.observe_usage(_observation("att-1"))
+        await recorder.aclose()
+        dao.close_usage_window.assert_awaited_once_with(attempt_id="att-1")
+
+    @pytest.mark.asyncio
+    async def test_aclose_cancelled_error_propagates(self):
+        """R2：停机 flush 被 cleanup 预算取消时 CancelledError 传播，不吞没。"""
+        dao = _dao_mock()
+
+        async def _cancel(*args, **kwargs):
+            raise asyncio.CancelledError
+
+        dao.settle_attempt_usage = AsyncMock(side_effect=_cancel)
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion 强断言在 with 块外（CancelledError 传播后验证留存）
+            await recorder.aclose()
+        # R2 语义：取消中断 flush，条目留存内存不静默销毁（可经下次停机 flush 重试）
+        assert recorder.pending_observation_count() == 1
