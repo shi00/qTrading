@@ -455,6 +455,16 @@ class TestWarningCategory:
             == "asof_approximation"
         )
 
+    def test_trade_dates_truncated_category_and_persist_round_trip(self) -> None:
+        """M-STRAT-04: 交易日历缩窄告警 → data_quality（unreliable 链路）。
+
+        兼容结构化 DataWarning 与经持久化 round-trip 的 '[trade_dates_truncated] ...'
+        落库串（__str__ 序列化后 category_of 解析），保证告警的可信度元数据不因
+        落库边界丢失（R21 BT-03：已知不可信不得伪装成无信息）。
+        """
+        assert _dw("trade_dates_truncated").category == "data_quality"
+        assert WarningCategory.category_of(str(_dw("trade_dates_truncated"))) == "data_quality"
+
     def test_to_persist_serializes_datawarning_as_str(self) -> None:
         """to_persist_dict 对 DataWarning 统一按 str(w) 落库，保留 [type] 前缀。"""
         result = _make_result(data_warnings=(_dw("suspend_data_absent"),))
