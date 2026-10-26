@@ -102,10 +102,37 @@ class OfflineCalendar:
 
         M13-F2: 接受 str 或 date（TradeCalendarService 内部流转 date，此前调用点
         依赖 # type: ignore 压制类型不匹配；放宽签名后调用方 ignore 已移除）。
+
+        D2-7: 与 :meth:`is_trading_day` 的可信区间三态语义对齐——超出
+        ``_OFFLINE_TRUSTED_UNTIL`` 的区间段**截断而非外推**（离线库对未来调休/节假日
+        不预测，绝不猜测）；``start`` 已超出可信区间时返回空列表。``end`` 缺省时同样
+        收紧到可信区间上界，不无限外推。
         """
         try:
             cal = OfflineCalendar.get_instance()
             if cal is None:
+                return []
+
+            if end_date is None:
+                # end 缺省：收紧到可信区间上界（D2-7），避免 valid_days 外推到日历终点
+                end_date = _OFFLINE_TRUSTED_UNTIL
+            elif pd.Timestamp(end_date).date() > _OFFLINE_TRUSTED_UNTIL:
+                logger.warning(
+                    "[OfflineCalendar] get_trade_dates end %s beyond trusted interval (%s), truncated (D2-7)",
+                    end_date,
+                    # 可信区间上界为硬编码日期常量、非敏感数据；命中 CodeQL maybeSecret 命名启发式（"trusted" 子串）误报
+                    # codeql[py/clear-text-logging-sensitive-data]
+                    _OFFLINE_TRUSTED_UNTIL,
+                )
+                end_date = _OFFLINE_TRUSTED_UNTIL
+            if start_date is not None and pd.Timestamp(start_date).date() > _OFFLINE_TRUSTED_UNTIL:
+                logger.warning(
+                    "[OfflineCalendar] get_trade_dates start %s beyond trusted interval (%s), returning [] (D2-7)",
+                    start_date,
+                    # 可信区间上界为硬编码日期常量、非敏感数据；命中 CodeQL maybeSecret 命名启发式（"trusted" 子串）误报
+                    # codeql[py/clear-text-logging-sensitive-data]
+                    _OFFLINE_TRUSTED_UNTIL,
+                )
                 return []
 
             # Convert to Timestamps

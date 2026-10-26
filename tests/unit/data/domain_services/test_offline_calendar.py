@@ -224,3 +224,78 @@ class TestOfflineCalendarGetTradeDates:
         with patch("data.domain_services.offline_calendar.get_calendar", return_value=mock_cal):
             result = OfflineCalendar.get_trade_dates(datetime.date(2024, 1, 1), datetime.date(2024, 1, 5))
             assert result == ["20240102", "20240103"]
+
+    def test_get_trade_dates_start_beyond_trusted_returns_empty(self):
+        """D2-7: start 超出可信区间 → 返回空，绝不外推猜测（与 is_trading_day 三态语义对齐）。"""
+        from data.domain_services.offline_calendar import OfflineCalendar
+
+        OfflineCalendar._calendar = None
+
+        mock_cal = MagicMock()
+        with (
+            patch(
+                "data.domain_services.offline_calendar.get_calendar",
+                return_value=mock_cal,
+            ),
+            patch(
+                "data.domain_services.offline_calendar._OFFLINE_TRUSTED_UNTIL",
+                datetime.date(2024, 6, 30),
+            ),
+        ):
+            result = OfflineCalendar.get_trade_dates(datetime.date(2024, 7, 1), datetime.date(2024, 7, 10))
+
+        assert result == []
+        mock_cal.valid_days.assert_not_called()
+
+    def test_get_trade_dates_end_beyond_trusted_truncated(self):
+        """D2-7: end 超出可信区间 → 截断到可信区间上界，离线库不预测未来调休/节假日。"""
+        from data.domain_services.offline_calendar import OfflineCalendar
+
+        OfflineCalendar._calendar = None
+
+        import pandas as pd
+
+        mock_cal = MagicMock()
+        mock_cal.valid_days.return_value = pd.DatetimeIndex(["2024-06-28"])
+
+        with (
+            patch(
+                "data.domain_services.offline_calendar.get_calendar",
+                return_value=mock_cal,
+            ),
+            patch(
+                "data.domain_services.offline_calendar._OFFLINE_TRUSTED_UNTIL",
+                datetime.date(2024, 6, 30),
+            ),
+        ):
+            result = OfflineCalendar.get_trade_dates(datetime.date(2024, 6, 1), datetime.date(2024, 7, 15))
+
+        assert result == ["20240628"]
+        _, kwargs = mock_cal.valid_days.call_args
+        assert pd.Timestamp(kwargs["end_date"]).date() == datetime.date(2024, 6, 30)
+
+    def test_get_trade_dates_end_none_tightened_to_trusted(self):
+        """D2-7: end 缺省 → 收紧到可信区间上界，不外推到日历终点。"""
+        from data.domain_services.offline_calendar import OfflineCalendar
+
+        OfflineCalendar._calendar = None
+
+        import pandas as pd
+
+        mock_cal = MagicMock()
+        mock_cal.valid_days.return_value = pd.DatetimeIndex([])
+
+        with (
+            patch(
+                "data.domain_services.offline_calendar.get_calendar",
+                return_value=mock_cal,
+            ),
+            patch(
+                "data.domain_services.offline_calendar._OFFLINE_TRUSTED_UNTIL",
+                datetime.date(2024, 6, 30),
+            ),
+        ):
+            OfflineCalendar.get_trade_dates(datetime.date(2024, 6, 1), None)
+
+        _, kwargs = mock_cal.valid_days.call_args
+        assert pd.Timestamp(kwargs["end_date"]).date() == datetime.date(2024, 6, 30)
