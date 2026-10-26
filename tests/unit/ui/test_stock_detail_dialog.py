@@ -750,13 +750,13 @@ class TestBuildContentFunction:
         container = self._build({"ts_code": "000001.SZ"})
         assert isinstance(container, ft.Container)
 
-    def test_ai_score_invalid_string_falls_back_to_zero(self):
-        # ai_score="not_a_number" → float() raises ValueError → score_val=0
+    def test_ai_score_invalid_string_treated_as_missing(self):
+        # ai_score="not_a_number" → is_valid_number=False → score_val=None（徽章不渲染，R21）
         container = self._build({"ai_reason": "test", "ai_score": "not_a_number"})
         assert isinstance(container, ft.Container)
 
     def test_ai_score_none_with_ai_reason(self):
-        # ai_score=None → score_val=0 (else 分支)
+        # ai_score=None → score_val=None（徽章不渲染；reason 有值 → 区块仍渲染）
         container = self._build({"ai_reason": "test", "ai_score": None})
         assert isinstance(container, ft.Container)
 
@@ -797,6 +797,51 @@ class TestBuildContentFunction:
         container = self._build({"ts_code": "000001.SZ", "close": 10.0, "pct_chg": 3.5})
         texts = _collect_all_texts(container)
         assert "+3.50%" in texts
+
+    # --- M-UI-08 R21 缺失值伪装：AI 区块与 list_date 的 NaN/缺失守卫 ---
+
+    def test_ai_score_nan_badge_not_rendered(self):
+        """ai_score=NaN → 不渲染评分徽章，缺失不伪装为 "nan" 红标（R21）。"""
+        container = self._build({"ai_reason": "r", "ai_score": float("nan")})
+        texts = _collect_all_texts(container)
+        # AI 区块仍渲染（reason 有值），但评分徽章缺失且无裸露 "nan" 值
+        # （精确匹配：避免 detail_sec_financial 等 key 的 "nan" 子串误伤）
+        assert "detail_ai_analysis" in texts
+        assert not any("detail_ai_score_prefix" in t for t in texts)
+        assert "nan" not in [t.strip().lower() for t in texts]
+
+    def test_ai_score_nan_only_no_reason_section_hidden(self):
+        """仅 ai_score=NaN 且无 reason → 整个 AI 区块不渲染（R21）。"""
+        container = self._build({"ts_code": "000001.SZ", "ai_score": float("nan")})
+        texts = _collect_all_texts(container)
+        assert "detail_ai_analysis" not in texts
+        assert not any("detail_ai_score_prefix" in t for t in texts)
+
+    def test_ai_reason_nan_shows_placeholder_not_nan(self):
+        """ai_reason=NaN → Markdown 渲染 i18n 占位，不裸露 "nan"（R21）。"""
+        container = self._build({"ai_reason": float("nan"), "ai_score": 85})
+        texts = _collect_all_texts(container)
+        assert "detail_ai_analysis" in texts  # score 有效 → 区块仍渲染
+        assert "nan" not in [t.strip().lower() for t in texts]
+        found: list = []
+        _collect_markdown_controls(container, found)
+        # mock_i18n.get 返回 key 本身：占位 Markdown value 应为 detail_ai_no_analysis
+        assert any(md.value == "detail_ai_no_analysis" for md in found)
+        assert all(str(md.value).strip().lower() != "nan" for md in found)
+
+    def test_thinking_nan_not_rendered(self):
+        """thinking=NaN → 思维链折叠区不渲染（不向 Markdown 传 NaN，R21）。"""
+        container = self._build({"ai_reason": "r", "thinking": float("nan")})
+        found: list = []
+        _collect_markdown_controls(container, found)
+        # 仅 ai_reason 一个 Markdown，thinking 的 Markdown 不存在
+        assert len(found) == 1
+
+    def test_list_date_nan_shows_dash(self):
+        """list_date=NaN → "-"，不裸露 "nan"（R21）。"""
+        container = self._build({"ts_code": "000001.SZ", "list_date": float("nan")})
+        texts = _collect_all_texts(container)
+        assert "nan" not in [t.strip().lower() for t in texts]
 
 
 def _collect_markdown_controls(control, found):

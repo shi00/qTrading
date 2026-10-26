@@ -659,7 +659,9 @@ def _build_content(
                     _build_industry_chips(stock_data),
                     _info_chip(
                         I18n.get("detail_list_date"),
-                        str(stock_data.get("list_date", "-")),
+                        # R21: list_date 缺失/NaN/空串 → "-"，不裸露 "nan"
+                        # （DataFrame 行转 dict 后 NULL 常为 NaN；复用 _industry_text 缺失口径）
+                        _industry_text(stock_data, "list_date"),
                     ),
                 ],
             ),
@@ -671,14 +673,30 @@ def _build_content(
     ai_reason = stock_data.get("ai_reason")
     ai_score = stock_data.get("ai_score")
 
-    if ai_reason or ai_score:
-        try:
-            score_val = float(ai_score) if ai_score is not None else 0
-        except (ValueError, TypeError):
-            score_val = 0
+    # R21: ai_score 缺失/NaN/非数值 → 不渲染评分徽章（score_val=None）。live 模式
+    # DataFrame 行与历史 JSONB 均可产出 NaN（未分析字段普遍为 NaN），旧实现
+    # float(nan) 不抛错且 nan 比较恒 False，徽章会裸露 "nan" 并落入 ERROR 红标，
+    # 把缺失评分伪装成低分；对齐本模块 _format_val 的 is_valid_number 缺失口径。
+    score_val: float | None = float(ai_score) if ai_score is not None and is_valid_number(ai_score) else None
 
-        score_color = (
-            AppColors.SUCCESS if score_val >= 80 else (AppColors.WARNING if score_val >= 60 else AppColors.ERROR)
+    if _has_review_value(ai_reason) or score_val is not None:
+        score_badge = (
+            ft.Container(
+                content=ft.Text(
+                    f"{I18n.get('detail_ai_score_prefix')}{score_val}",
+                    color=AppColors.TEXT_ON_PRIMARY,
+                    weight=ft.FontWeight.BOLD,
+                ),
+                bgcolor=(
+                    AppColors.SUCCESS
+                    if score_val >= 80
+                    else (AppColors.WARNING if score_val >= 60 else AppColors.ERROR)
+                ),
+                padding=ft.Padding.symmetric(horizontal=10, vertical=5),
+                border_radius=12,
+            )
+            if score_val is not None
+            else ft.Container()
         )
 
         ai_section = ft.Column(
@@ -694,25 +712,15 @@ def _build_content(
                             color=AppColors.ACCENT,
                         ),
                         ft.Container(expand=True),
-                        ft.Container(
-                            content=ft.Text(
-                                f"{I18n.get('detail_ai_score_prefix')}{score_val}",
-                                color=AppColors.TEXT_ON_PRIMARY,
-                                weight=ft.FontWeight.BOLD,
-                            ),
-                            bgcolor=score_color,
-                            padding=ft.Padding.symmetric(horizontal=10, vertical=5),
-                            border_radius=12,
-                        )
-                        if ai_score is not None
-                        else ft.Container(),
+                        score_badge,
                     ],
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 ft.Divider(height=10, color=AppColors.DIVIDER),
                 ft.Container(
                     content=ft.Markdown(
-                        str(ai_reason) if ai_reason else I18n.get("detail_ai_no_analysis"),
+                        # R21: ai_reason 缺失/NaN/空串 → i18n 占位，不裸露 "nan"
+                        str(ai_reason) if _has_review_value(ai_reason) else I18n.get("detail_ai_no_analysis"),
                         extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
                         selectable=True,
                         on_tap_link=safe_open_url,
@@ -732,10 +740,8 @@ def _build_content(
                     controls=[
                         ft.Container(
                             content=ft.Markdown(
-                                stock_data.get(
-                                    "thinking",
-                                    I18n.get("detail_ai_no_thinking"),
-                                ),
+                                # R21: thinking 缺失/NaN → 不渲染折叠区（守卫见下方条件）
+                                stock_data.get("thinking", I18n.get("detail_ai_no_thinking")),
                                 extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
                                 selectable=True,
                                 on_tap_link=safe_open_url,
@@ -747,7 +753,7 @@ def _build_content(
                         ),
                     ],
                 )
-                if stock_data.get("thinking")
+                if _has_review_value(stock_data.get("thinking"))
                 else ft.Container(),
             ],
         )
