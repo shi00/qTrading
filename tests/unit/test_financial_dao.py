@@ -670,6 +670,27 @@ class TestGetFinaMainbz:
         sql = dao._read_db.call_args[0][0]
         assert "ann_date <=" not in sql
 
+    @pytest.mark.asyncio
+    async def test_limit_confined_to_latest_period(self):
+        """最新期行数不足 LIMIT 10 时不得混入次新报告期行（与 batch 版 DENSE_RANK dr=1 语义对齐）。"""
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "bz_item": ["主营业务"],
+                }
+            )
+        )
+        await dao.get_fina_mainbz("000001.SZ")
+        sql = dao._read_db.call_args[0][0]
+        assert "DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC)" in sql
+        assert "sub.dr = 1" in sql
+        await dao.get_fina_mainbz("000001.SZ", as_of_date="20240701")
+        sql_as_of = dao._read_db.call_args[0][0]
+        assert "DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC)" in sql_as_of
+        assert "sub.dr = 1" in sql_as_of
+
 
 class TestGetFinaMainbzBatch:
     @pytest.mark.asyncio
