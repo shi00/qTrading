@@ -375,7 +375,7 @@ class TestEmbeddedPostgresServiceStart:
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_start_rejects_invalid_json(self, fake_paths) -> None:
-        """stdout 返回非 JSON → raise EmbeddedPostgresStartError + kill 子进程。"""
+        """stdout 返回非 JSON → raise EmbeddedPostgresStartError + 清理子进程（MD13-01 graceful 路径）。"""
         from data.persistence.embedded_postgres import service as svc_module
         from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
 
@@ -390,8 +390,8 @@ class TestEmbeddedPostgresServiceStart:
             with patch.object(svc_module.subprocess, "Popen", popen_factory):
                 with pytest.raises(EmbeddedPostgresStartError, match="JSON parse failed"):
                     await service.start()
-                # 验证 kill 被调（_cleanup_failed_start 触发）
-                assert any(inst._kill_calls > 0 for inst in _FakePopen.instances)
+                # MD13-01: _cleanup_failed_start 先关 stdin 触发 graceful，wait 成功则无需 kill
+                assert any(inst.stdin.closed and inst._wait_calls > 0 for inst in _FakePopen.instances)
         finally:
             await service.stop()
 
@@ -528,8 +528,8 @@ class TestEmbeddedPostgresServiceStart:
             await service.stop()
 
     @pytest.mark.asyncio(loop_scope="function")
-    async def test_start_kills_child_on_failure(self, fake_paths) -> None:
-        """解析失败时 Popen.kill 被调用。"""
+    async def test_start_cleans_up_child_on_failure(self, fake_paths) -> None:
+        """解析失败时子进程被清理（MD13-01: graceful 关 stdin + wait，成功则不 kill）。"""
         from data.persistence.embedded_postgres import service as svc_module
         from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
 
@@ -544,8 +544,39 @@ class TestEmbeddedPostgresServiceStart:
             with patch.object(svc_module.subprocess, "Popen", popen_factory):
                 with pytest.raises(EmbeddedPostgresStartError, match="JSON parse failed"):
                     await service.start()
-                # kill 应该被 _cleanup_failed_start 调用
-                assert any(inst._kill_calls > 0 for inst in _FakePopen.instances)
+                # MD13-01: _cleanup_failed_start 关 stdin + graceful wait；fake wait 立即成功 → 无 kill
+                fake = _FakePopen.instances[-1]
+                assert fake.stdin.closed
+                assert fake._wait_calls >= 1
+                assert fake._kill_calls == 0
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_cleanup_kills_after_graceful_timeout(self, fake_paths) -> None:
+        """MD13-01: graceful wait 超时（sidecar 无响应）→ kill 兜底 + 二次 wait。"""
+        import subprocess
+
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        try:
+
+            def popen_factory(cmd, **kwargs):
+                inst = _FakePopen(cmd, **kwargs)
+                inst.set_stdout_line("not a json\n")
+                # 第一次 wait（graceful）抛超时 → kill → 第二次 wait 成功返回 0
+                inst.set_wait_side_effect(subprocess.TimeoutExpired(cmd=["fake"], timeout=5))
+                return inst
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                with pytest.raises(EmbeddedPostgresStartError, match="JSON parse failed"):
+                    await service.start()
+                fake = _FakePopen.instances[-1]
+                assert fake.stdin.closed, "kill 兜底前必须已关 stdin（触发 sidecar graceful 契约）"
+                assert fake._kill_calls == 1
+                assert fake._wait_calls == 2
         finally:
             await service.stop()
 
@@ -784,8 +815,9 @@ class TestEmbeddedPostgresServiceStart:
                 # 关键断言：旧句柄已被关闭（修复前被覆盖引用，永不关闭 → 泄漏）
                 assert stale_file.closed, "M09-F2: 重启路径必须关闭上一次残留的 _stderr_file 句柄"
                 assert service._stderr_file is not None and service._stderr_file is not stale_file
-                # 旧的已死 fake 进程应被清理（kill 兜底）
-                assert first_fake._kill_calls >= 1
+                # 旧的已死 fake 进程应被清理（MD13-01: graceful 关 stdin + wait；已死进程 wait 立即返回，无 kill）
+                assert first_fake.stdin.closed
+                assert first_fake._wait_calls >= 1
         finally:
             await service.stop()
 
@@ -808,8 +840,8 @@ class TestEmbeddedPostgresServiceStart:
             with patch.object(svc_module.subprocess, "Popen", popen_factory):
                 with pytest.raises(EmbeddedPostgresStartError, match="invalid numeric field"):
                     await service.start()
-                # 启动失败必须清理子进程
-                assert any(inst._kill_calls > 0 for inst in _FakePopen.instances)
+                # 启动失败必须清理子进程（MD13-01: graceful 关 stdin + wait）
+                assert any(inst.stdin.closed and inst._wait_calls > 0 for inst in _FakePopen.instances)
         finally:
             await service.stop()
 

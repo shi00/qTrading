@@ -162,9 +162,10 @@ class TestProtocolVersionMismatch:
                 # 验证含 reinstall 提示（§17.6 #33 核心要求）
                 assert "reinstall" in error_msg.lower(), f"期望错误信息含 'reinstall' 提示，实际：{error_msg}"
 
-            # 验证子进程被 kill 清理
+            # 验证子进程被清理（MD13-01: graceful 关 stdin + wait；wait 成功则无 kill）
             assert len(_FakePopen.instances) == 1
-            assert _FakePopen.instances[0]._kill_calls >= 1, "期望子进程被 kill 清理，实际 kill 未被调用"
+            assert _FakePopen.instances[0].stdin.closed, "期望清理时已关 stdin（触发 sidecar graceful 契约）"
+            assert _FakePopen.instances[0]._wait_calls >= 1, "期望子进程被 wait 清理，实际 wait 未被调用"
         finally:
             await service.stop()
             EmbeddedPostgresService._reset_singleton()

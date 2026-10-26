@@ -45,6 +45,11 @@ class EmbeddedPostgresStartError(RuntimeError):
 
 _READY_SCHEMA = "qtrading.embedded_postgres.run.ready.v1"
 
+# MD13-01（检视 07）：启动失败清理时 stdin EOF graceful 窗口（秒）。
+# sidecar supervise 契约为 stdin EOF → graceful stop（连带优雅停止 postgres，§7.3），
+# 窗口须覆盖 PG checkpoint + 退出；超时才 kill 兜底。
+_CLEANUP_GRACEFUL_TIMEOUT_S = 5.0
+
 # F5（检视 06）：Windows 内侧车以 DPAPI 加密 password 文件。该 ASCII 前缀标记加密格式。
 # 无前缀的文件按明文读（Unix，或 Windows 升级前的旧文件）。
 _EMBEDDED_PW_DPAPI_PREFIX = "PGPW2:"
@@ -629,16 +634,23 @@ class EmbeddedPostgresService:
             return ""
 
     def _cleanup_failed_start(self) -> None:
-        """启动失败时清理子进程与文件句柄。"""
+        """启动失败时清理子进程与文件句柄。
+
+        MD13-01（检视 07）：进程存活时先关 stdin 触发 sidecar supervise 的
+        stdin EOF graceful stop（连带优雅停止 postgres），短超时未退出再 kill 兜底
+        ——kill 仅终止 sidecar 包装进程，postgres 会孤儿化占用 PGDATA，
+        导致下次启动报 exit=50（already_running）。
+        """
         if self._process is not None:
-            try:
-                self._process.kill()
-            except Exception as e:  # subprocess kill fallback on failed start
-                logger.debug("cleanup_failed_start kill fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
-            try:
-                self._process.wait(timeout=5)
-            except Exception as e:  # subprocess wait fallback on failed start
-                logger.debug("cleanup_failed_start wait fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+            proc = self._process
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.close()
+                except Exception as e:  # stdin close fallback on failed start
+                    logger.debug(
+                        "cleanup_failed_start stdin close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True
+                    )
+            self._terminate_after_graceful(proc)
             self._process = None
         self._connection_info = None
         if self._stderr_file is not None:
@@ -647,6 +659,27 @@ class EmbeddedPostgresService:
             except Exception as e:  # file close fallback on failed start
                 logger.debug("cleanup_failed_start close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             self._stderr_file = None
+
+    def _terminate_after_graceful(self, proc: subprocess.Popen[str]) -> None:
+        """等待 stdin EOF graceful 停止短超时后 kill 兜底，确保子进程终止。
+
+        进程已退出时 ``wait`` 立即返回，不触发 kill（等价原清理行为）。
+        """
+        try:
+            proc.wait(timeout=_CLEANUP_GRACEFUL_TIMEOUT_S)
+            return
+        except subprocess.TimeoutExpired:
+            self._svc_logger.warning("sidecar cleanup graceful timeout after %ss, killing", _CLEANUP_GRACEFUL_TIMEOUT_S)
+        except Exception as e:  # subprocess wait fallback on failed start
+            logger.debug("cleanup_failed_start wait fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+        try:
+            proc.kill()
+        except Exception as e:  # subprocess kill fallback on failed start
+            logger.debug("cleanup_failed_start kill fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+        try:
+            proc.wait(timeout=5)
+        except Exception as e:  # subprocess wait fallback on failed start
+            logger.debug("cleanup_failed_start wait fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
     @log_async_operation(
         operation_name="embedded_pg_stop",

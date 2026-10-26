@@ -256,10 +256,11 @@ class TestFi05ReadyTimeout:
                     with pytest.raises(EmbeddedPostgresStartError, match="exited before ready"):
                         await service.start()
 
-                # 验证子进程被 kill（_cleanup_failed_start 调 kill + wait）
+                # 验证子进程被清理（MD13-01: graceful 关 stdin + wait；wait 成功则无 kill）
                 assert len(_FakePopen.instances) == 1
                 fake = _FakePopen.instances[0]
-                assert fake._kill_calls >= 1, f"期望 kill 至少调用 1 次，实际：{fake._kill_calls}"
+                assert fake.stdin.closed, f"期望 stdin 已关闭（触发 sidecar graceful 契约），实际：{fake.stdin.closed}"
+                assert fake._wait_calls >= 1, f"期望 wait 至少调用 1 次，实际：{fake._wait_calls}"
         finally:
             await service.stop()
 
@@ -287,10 +288,11 @@ class TestFi06ReadyJsonInvalid:
                     with pytest.raises(EmbeddedPostgresStartError, match="ready JSON parse failed"):
                         await service.start()
 
-                # 验证子进程被 kill
+                # 验证子进程被清理（MD13-01: graceful 关 stdin + wait）
                 assert len(_FakePopen.instances) == 1
                 fake = _FakePopen.instances[0]
-                assert fake._kill_calls >= 1, f"期望 kill 至少调用 1 次，实际：{fake._kill_calls}"
+                assert fake.stdin.closed, f"期望 stdin 已关闭，实际：{fake.stdin.closed}"
+                assert fake._wait_calls >= 1, f"期望 wait 至少调用 1 次，实际：{fake._wait_calls}"
         finally:
             await service.stop()
 
@@ -319,10 +321,11 @@ class TestFi07PasswordFileMissing:
                     with pytest.raises(EmbeddedPostgresStartError, match="password_file not found"):
                         await service.start()
 
-                # 验证子进程被 kill
+                # 验证子进程被清理（MD13-01: graceful 关 stdin + wait）
                 assert len(_FakePopen.instances) == 1
                 fake = _FakePopen.instances[0]
-                assert fake._kill_calls >= 1, f"期望 kill 至少调用 1 次，实际：{fake._kill_calls}"
+                assert fake.stdin.closed, f"期望 stdin 已关闭，实际：{fake.stdin.closed}"
+                assert fake._wait_calls >= 1, f"期望 wait 至少调用 1 次，实际：{fake._wait_calls}"
         finally:
             await service.stop()
 
