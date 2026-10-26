@@ -3,6 +3,8 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import math
+
 import pandas as pd
 import pytest
 
@@ -230,3 +232,50 @@ class TestGenerateKlineChartData:
         assert result.spots[0].open == 10.0
         assert result.spots[1].open == 20.0
         assert result.spots[2].open == 30.0
+
+
+class TestKlineChartDataNanBoundary:
+    """NaN 边界防护 (M-UI-03): OHLC/Volume 含 NaN 的行整行剔除, 不污染 spots 与轴范围。"""
+
+    def test_partial_nan_ohlc_row_dropped(self):
+        """单行 low 为 NaN → 该行剔除, spots 数量减少且轴范围不含 NaN。"""
+        df = _make_ohlcv_df(n=5)
+        df.loc[2, "low"] = float("nan")
+        result = generate_kline_chart_data(df)
+        assert len(result.spots) == 4
+        assert not math.isnan(result.min_y)
+        assert not math.isnan(result.max_y)
+
+    def test_all_nan_ohlc_raises(self):
+        """OHLC 全 NaN → 无可绘制行, 显式拒绝渲染 (与空表同口径)。"""
+        df = _make_ohlcv_df(n=3)
+        df["low"] = float("nan")
+        with pytest.raises(ValueError, match="valid OHLC"):
+            generate_kline_chart_data(df)
+
+    def test_nan_volume_row_dropped_keeps_groups_aligned(self):
+        """Volume NaN 的行整行剔除, spots 与 volume_groups 保持一一对应。"""
+        df = _make_ohlcv_df(n=5)
+        df.loc[1, "vol"] = float("nan")
+        result = generate_kline_chart_data(df)
+        assert len(result.spots) == 4
+        assert len(result.volume_groups) == 4
+        assert not math.isnan(result.max_volume)
+
+    def test_flat_prices_y_range_still_positive(self):
+        """单行一字板 (OHLC 全等) → Y 轴范围经 padding 撑开, 不退化为零范围。"""
+        dates = pd.bdate_range("2024-01-02", periods=1)
+        df = pd.DataFrame(
+            {
+                "trade_date": dates,
+                "open": [10.0],
+                "high": [10.0],
+                "low": [10.0],
+                "close": [10.0],
+                "vol": [1000],
+            }
+        )
+        result = generate_kline_chart_data(df)
+        assert result.max_y > result.min_y
+        assert not math.isnan(result.min_y)
+        assert not math.isnan(result.max_y)

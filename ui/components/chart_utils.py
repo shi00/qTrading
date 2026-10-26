@@ -82,7 +82,17 @@ def generate_kline_chart_data(
         if col not in chart_df.columns:
             raise ValueError(f"DataFrame missing required column: {col}")
 
+    # NaN 防护: OHLC 任一列含 NaN 的行既无法绘制 (NaN 会进入 spots), 也会经
+    # min/max 污染 Y 轴范围, 与空表同样拒绝静默渲染, 统一剔除后再判空。
+    chart_df = chart_df.dropna(subset=["Open", "High", "Low", "Close"])
+    if chart_df.empty:
+        raise ValueError("DataFrame has no valid OHLC rows (all NaN) — cannot render chart")
+
     has_volume = bool("Volume" in chart_df.columns and chart_df["Volume"].sum() > 0)
+    if has_volume:
+        # 成交量 NaN 的行会使 BarChartRod.to_y 为 NaN (成交量副图同受 NaN 污染),
+        # 且缺失成交量不应伪装为 0, 一并整行剔除保持 spots/volume_groups 对齐。
+        chart_df = chart_df.dropna(subset=["Volume"])
 
     # ── 2. Moving Averages ───────────────────────────────────────
     # NOTE(lazy): MA 均线暂不在图表上绘制 (Stack+LineChart 坐标对齐复杂度高),
@@ -164,7 +174,12 @@ def generate_kline_chart_data(
     # ── 4. Compute axis ranges ───────────────────────────────────
     min_y = float(chart_df["Low"].min())
     max_y = float(chart_df["High"].max())
-    y_padding = (max_y - min_y) * 0.05
+    if max_y > min_y:
+        y_padding = (max_y - min_y) * 0.05
+    else:
+        # 单行/一字板等 OHLC 全等场景: 零范围 Y 轴交由图表缩放存在除零风险,
+        # 按价格 5% (价格退化到 0 时取 1.0) 撑开最小可视区间。
+        y_padding = abs(max_y) * 0.05 or 1.0
     min_y -= y_padding
     max_y += y_padding
 
