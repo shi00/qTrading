@@ -764,7 +764,9 @@ class TestAcloseFlushF20:
         dao.settle_attempt_usage = AsyncMock(side_effect=_cancel)
         recorder = UsageRecorder(dao_provider=lambda: dao)
         recorder.observe_usage(_observation("att-1"))
-        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion 强断言在 with 块外（CancelledError 传播后验证留存）
+        with pytest.raises(asyncio.CancelledError) as excinfo:
             await recorder.aclose()
-        # R2 语义：取消中断 flush，条目留存内存不静默销毁（可经下次停机 flush 重试）
+        # R2 语义：精确断言取消类型传播不吞没；取消中断 flush，
+        # 条目留存内存不静默销毁（可经下次停机 flush 重试）
+        assert excinfo.type is asyncio.CancelledError
         assert recorder.pending_observation_count() == 1
