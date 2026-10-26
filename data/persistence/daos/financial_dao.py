@@ -423,14 +423,24 @@ class FinancialDao(BaseDao):
         return await self._batch_get_with_as_of_date(sql_fn, ts_codes, as_of_date, "Failed to get forecast batch")
 
     async def get_fina_mainbz(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
+        """单只股票最新报告期的主营构成（期内按 bz_sales DESC 取前 10）。
+
+        仅返回最新报告期（DENSE_RANK dr=1），与 get_fina_mainbz_batch 语义一致：
+        最新期行数不足 LIMIT 10 时不得混入次新报告期行——消费方（AI 上下文
+        top_business）对返回行整体求和作占比分母，跨期混合会使分母与占比失真。
+        """
         try:
             if as_of_date is not None:
                 df = await self._read_db(
                     """
                     SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
-                    FROM fina_mainbz
-                    WHERE ts_code = $1 AND ann_date IS NOT NULL AND ann_date <= $2
-                    ORDER BY end_date DESC, bz_sales DESC
+                    FROM (
+                        SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
+                        FROM fina_mainbz
+                        WHERE ts_code = $1 AND ann_date IS NOT NULL AND ann_date <= $2
+                    ) sub
+                    WHERE sub.dr = 1
+                    ORDER BY bz_sales DESC
                     LIMIT 10
                     """,
                     (ts_code, self._to_db_date(as_of_date)),
@@ -439,9 +449,13 @@ class FinancialDao(BaseDao):
                 df = await self._read_db(
                     """
                     SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
-                    FROM fina_mainbz
-                    WHERE ts_code = $1 AND ann_date IS NOT NULL
-                    ORDER BY end_date DESC, bz_sales DESC
+                    FROM (
+                        SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
+                        FROM fina_mainbz
+                        WHERE ts_code = $1 AND ann_date IS NOT NULL
+                    ) sub
+                    WHERE sub.dr = 1
+                    ORDER BY bz_sales DESC
                     LIMIT 10
                     """,
                     (ts_code,),
