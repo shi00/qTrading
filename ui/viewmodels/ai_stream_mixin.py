@@ -34,6 +34,7 @@ from ui.viewmodels.screener_types import (
     StreamCard,
     _MAX_LOG_CARDS,
 )
+from utils.loop_local import get_loop_local
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -514,72 +515,82 @@ class AIStreamMixin:
                     logger.warning("[ScreenerVM] Cannot schedule flush: no running loop; sync flush skipped")
 
     async def _flush_ai_buffer(self):
-        """Flush buffer to main DataFrame"""
+        """Flush buffer to main DataFrame.
+
+        M-UI-05: 全数据临界区纳入 ``screener_vm_results_lock``（与 ``sort_data``/
+        ``load_history_data`` 同锁）。flush 对 ``_full_results`` 的「读 → concat →
+        写回 → 排序 → 写回」跨多个 await, 若不与排序互斥, 并发写回交错会以旧数据
+        覆盖本批 AI 结果行（丢失更新, UI 永久缺行）。锁内 await 线程池与
+        ``sort_data`` 同模式, 单锁无嵌套, 无死锁; CancelledError 经 ``async with``
+        释放锁后正常传播 (R2)。
+        """
         try:
-            if not self._ai_buffer:
-                return
-            # U-3 fix: Race guard - save buffer to discarded_buffer if user has switched to history mode
-            if self._state.mode != "REALTIME":
-                self._discarded_buffer.extend(self._ai_buffer)
+            lock = get_loop_local("screener_vm_results_lock", asyncio.Lock)
+            async with lock:
+                if not self._ai_buffer:
+                    return
+                # U-3 fix: Race guard - save buffer to discarded_buffer if user has switched to history mode
+                if self._state.mode != "REALTIME":
+                    self._discarded_buffer.extend(self._ai_buffer)
+                    self._ai_buffer = []
+                    self._flush_pending = False
+                    logger.debug(
+                        "[ScreenerVM] Saved %s items to discarded_buffer during HISTORY mode",
+                        len(self._discarded_buffer),
+                    )
+                    return
+
+                # Swap buffer to process safely
+                current_batch = self._ai_buffer
                 self._ai_buffer = []
-                self._flush_pending = False
-                logger.debug(
-                    "[ScreenerVM] Saved %s items to discarded_buffer during HISTORY mode",
-                    len(self._discarded_buffer),
-                )
-                return
 
-            # Swap buffer to process safely
-            current_batch = self._ai_buffer
-            self._ai_buffer = []
+                new_df = pd.DataFrame(current_batch)
 
-            new_df = pd.DataFrame(current_batch)
+                # Offload Concatenation
+                if self._full_results is None or self._full_results.empty:
+                    self._full_results = new_df
+                else:
+                    # Append
+                    self._full_results = await ThreadPoolManager().run_async(
+                        TaskType.CPU,
+                        pd.concat,
+                        [self._full_results, new_df],
+                        ignore_index=True,
+                    )
 
-            # Offload Concatenation
-            if self._full_results is None or self._full_results.empty:
-                self._full_results = new_df
-            else:
-                # Append
-                self._full_results = await ThreadPoolManager().run_async(
-                    TaskType.CPU,
-                    pd.concat,
-                    [self._full_results, new_df],
-                    ignore_index=True,
-                )
+                # Sort by Score (Best on top)
+                if "ai_score" in self._full_results.columns:
+                    self._full_results = await ThreadPoolManager().run_async(
+                        TaskType.CPU,
+                        self._sort_helper,
+                        self._full_results,
+                        "ai_score",
+                        False,
+                    )
 
-            # Sort by Score (Best on top)
-            if "ai_score" in self._full_results.columns:
-                self._full_results = await ThreadPoolManager().run_async(
-                    TaskType.CPU,
-                    self._sort_helper,
-                    self._full_results,
-                    "ai_score",
-                    False,
-                )
+                    # Pin ai_score and ai_reason to the front (after name)
+                    # Ensure ai_reason column exists (some AI results may only return score)
+                    if "ai_reason" not in typing.cast("pd.DataFrame", self._full_results).columns:
+                        typing.cast("pd.DataFrame", self._full_results)["ai_reason"] = ""
+                    cols = list(self._full_results.columns)  # type: ignore[untyped]
+                    # Remove if exists
+                    if "ai_score" in cols:
+                        cols.remove("ai_score")
+                    if "ai_reason" in cols:
+                        cols.remove("ai_reason")
 
-                # Pin ai_score and ai_reason to the front (after name)
-                # Ensure ai_reason column exists (some AI results may only return score)
-                if "ai_reason" not in typing.cast("pd.DataFrame", self._full_results).columns:
-                    typing.cast("pd.DataFrame", self._full_results)["ai_reason"] = ""
-                cols = list(self._full_results.columns)  # type: ignore[untyped]
-                # Remove if exists
-                if "ai_score" in cols:
-                    cols.remove("ai_score")
-                if "ai_reason" in cols:
-                    cols.remove("ai_reason")
+                    # Find insertion index (after 'name', or else at idx 1)
+                    insert_idx = cols.index("name") + 1 if "name" in cols else 1
 
-                # Find insertion index (after 'name', or else at idx 1)
-                insert_idx = cols.index("name") + 1 if "name" in cols else 1
+                    # Insert back
+                    cols.insert(insert_idx, "ai_score")
+                    cols.insert(insert_idx + 1, "ai_reason")
 
-                # Insert back
-                cols.insert(insert_idx, "ai_score")
-                cols.insert(insert_idx + 1, "ai_reason")
+                    self._full_results = self._full_results[cols]  # type: ignore[untyped]
+                # C2b H1: 数据内容变更后经唯一 owner 原子产出分页元数据 + 当前页切片
+                self._update_pagination()
 
-                self._full_results = self._full_results[cols]  # type: ignore[untyped]
-            # C2b H1: 数据内容变更后经唯一 owner 原子产出分页元数据 + 当前页切片
-            self._update_pagination()
-
-            self._last_ai_update = time.time()
+                self._last_ai_update = time.time()
 
         except Exception as e:
             logger.error("Error flushing AI buffer: %s", DataSanitizer.sanitize_error(e), exc_info=True)

@@ -207,17 +207,20 @@ class PaginationSortingMixin:
     async def sort_data(self, column_key: str, ascending: bool | None = None):
         """Sort data using ThreadPool to avoid blocking UI.
 
-        并发守卫 (P-SCREENER-02): loop-local 锁串行化「set loading → await 排序 →
+        并发守卫 (P-SCREENER-02 + M-UI-05): loop-local 锁串行化「set loading → await 排序 →
         写回 + 单帧分页重算」全临界区 (R11, 与 ``load_history_tree`` 同模式)。
         快速连点表头时第二个任务排队等待, 锁内基于**最新** ``_full_results`` 排序,
         最终状态恒等于最后一次点击的排序意图; 消除乱序完成时「表头指示与实际
-        排序不符」竞态。``_full_results`` 写回与 ``_update_pagination`` 之间无
+        排序不符」竞态。M-UI-05: 锁 key 扩展为 ``screener_vm_results_lock``, 与
+        ``_flush_ai_buffer`` / ``load_history_data`` 共用 —— 三者对 ``_full_results``
+        的跨 await 写点必须互斥, 否则并发写回交错构成丢失更新 (旧数据排序写回覆盖
+        流式批次/历史载入)。``_full_results`` 写回与 ``_update_pagination`` 之间无
         await (同步段不可分割), 排序中的翻页事件不会读到撕裂中间态。
         CancelledError 经 ``async with`` 释放锁后正常传播 (R2)。
         """
         if self._full_results is None or self._full_results.empty:
             return
-        lock = get_loop_local("screener_vm_sort_lock", asyncio.Lock)
+        lock = get_loop_local("screener_vm_results_lock", asyncio.Lock)
         async with lock:
             if ascending is not None:
                 sort_column = column_key
