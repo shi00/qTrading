@@ -37,6 +37,7 @@ import sqlalchemy as sa
 from data.persistence.daos.base_dao import BaseDao
 from core.model_management_types import (
     BudgetReservation,
+    MigrationTransitionError,
     NormalizedLLMUsage,
 )
 from utils.config_models import validate_decimal_amount
@@ -1844,6 +1845,7 @@ class AIUsageDao(BaseDao):
         month: str,
         owner_session_id: str,
         owner_epoch: int,
+        owner_lease_expires_at: datetime.datetime | None = None,
     ) -> dict[str, Any] | None:
         """封存 legacy 月累计（S6 D5）：冻结基线快照写入 AppState 封口行，幂等。
 
@@ -1852,6 +1854,16 @@ class AIUsageDao(BaseDao):
         ``ai_unpriced_calls/tokens:{YYYYMM}``（缺键 = 0）后写封口 JSON。封口后
         app_state 旧键不再修改（基线冻结），旧链写入由 D6 tracker 写入口拒绝。
         ``month`` 接受 ``YYYY-MM`` / ``YYYYMM``；记录 ``month`` 字段统一 YYYY-MM。
+
+        R03-D1 owner/lease fencing（F23 同语义：齐传 = 强门 / 缺省 = 弱门）：
+        ``owner_lease_expires_at`` 传值时为**租约有效性强门**——advisory 月锁内
+        ``now(UTC) >= lease`` 即抛 :class:`MigrationTransitionError`（失租 owner
+        不得**新建**封口行，R21 诚实失败不静默吞没）；``None``（缺省）为弱门——
+        不做租约校验，仅将 owner 身份如实记入 ``last_writer_session_id`` /
+        ``last_writer_epoch`` 审计字段（向后兼容既有调用方）。幂等分支先于 fence：
+        封口行只增不改，已有记录的幂等读取不构成失租写入，最终翻 phase 由
+        services 侧 ``seal_legacy`` 的 owner/epoch/lease fence 把守。naive 值按
+        UTC 解释（屏障写入侧 ``now(UTC).isoformat()`` 同源）。
 
         R5：入口 ``_check_engine`` 守卫引擎状态。
         """
@@ -1866,6 +1878,17 @@ class AIUsageDao(BaseDao):
             existing = await self._read_app_state_value(conn, seal_key)
             if existing is not None:
                 return json.loads(existing)
+
+            if owner_lease_expires_at is not None:
+                lease = owner_lease_expires_at
+                if lease.tzinfo is None:
+                    lease = lease.replace(tzinfo=datetime.UTC)
+                if datetime.datetime.now(datetime.UTC) >= lease:
+                    raise MigrationTransitionError(
+                        "ai_usage.seal_legacy_month 拒绝封口: owner 租约已过期 "
+                        f"(owner={owner_session_id!r}, epoch={owner_epoch}, "
+                        f"lease={owner_lease_expires_at.isoformat()})，须先接管 / 续租迁移屏障"
+                    )
 
             cost_cny = parse_legacy_cents(await self._read_app_state_value(conn, f"{_LEGACY_COST_KEY_PREFIX}{compact}"))
             unpriced_calls = await self._read_app_state_int(conn, f"{_LEGACY_UNPRICED_CALLS_KEY_PREFIX}{compact}")
