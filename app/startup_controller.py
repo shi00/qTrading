@@ -153,11 +153,39 @@ class StartupController:
     # --- User actions (called by renderer button callbacks) ---
 
     async def retry(self):
-        """User clicked Retry on the error page."""
+        """User clicked Retry on the error page.
+
+        M-UI-04 (M-APP-01 复核裁定扩展): INIT_FAILED 页 Retry 防重入守卫，与
+        ``onboarding_complete`` 同根因——``_transition(LOADING)`` 的 set_state
+        重渲染存在异步间隙，双击窗口内第二次调用被本守卫忽略，避免
+        ``initialize_services`` 并发重入击穿 ``services_initialized`` 幂等保护
+        （TaskManager.init_db 不幂等、auto_probe_task 重复创建，见
+        app/bootstrap.py 幂等说明）。事件循环单线程串行保证守卫读取与
+        ``_transition`` 写入无竞态。
+        """
+        if self._state != StartupState.INIT_FAILED:
+            logger.warning(
+                "[Startup] retry ignored in state %s (re-entry guard)",
+                self._state,
+            )
+            return
         await self._init_services()
 
     async def reconfigure(self):
-        """User clicked Reconfigure: close DB, reset onboarding, show wizard."""
+        """User clicked Reconfigure: close DB, reset onboarding, show wizard.
+
+        M-UI-04 (M-APP-01 复核裁定扩展): INIT_FAILED 页 Reconfigure 防重入守卫，
+        与 ``retry``/``onboarding_complete`` 同根因——首次调用同步段已
+        transition 到 LOADING，双击窗口内第二次调用被本守卫忽略，避免重复
+        close DB / 重置 onboarding 标志。事件循环单线程串行保证守卫读取与
+        ``_transition`` 写入无竞态。
+        """
+        if self._state != StartupState.INIT_FAILED:
+            logger.warning(
+                "[Startup] reconfigure ignored in state %s (re-entry guard)",
+                self._state,
+            )
+            return
         self._transition(StartupState.LOADING)
         await self._cache_manager.close()
         # review01-A9: per-session 重置初始化状态（替代 bootstrap 模块级 flag），
