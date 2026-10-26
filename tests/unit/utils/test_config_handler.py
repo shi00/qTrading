@@ -1,6 +1,7 @@
 from unittest.mock import patch, MagicMock
 import json
 import os
+import shutil
 
 from utils import config_handler as cfg_mod
 from utils.config_handler import ConfigHandler
@@ -3649,3 +3650,132 @@ class TestMigrateConfigLocation:
             with patch.object(cfg_mod, "_CONFIG_FILE_LEGACY", str(tmp_path / "missing.json")):
                 storage_mod._migrate_config_location()
         assert not target.exists()
+
+    def test_migration_holds_file_lock(self, monkeypatch, tmp_path):
+        """R04：迁移复制全程持有跨进程文件锁——持锁期间他进程抢同一锁必须超时。"""
+        import filelock
+
+        from utils.config import storage as storage_mod
+
+        monkeypatch.delenv("ASTOCK_CONFIG_FILE", raising=False)
+        legacy = tmp_path / "legacy.json"
+        target = tmp_path / "user_settings.json"
+        legacy.write_text('{"log_level": "INFO"}', encoding="utf-8")
+
+        observed: list[str] = []
+        real_copy2 = shutil.copy2
+
+        def copy2_probe(src, dst, **kwargs):
+            # 迁移持锁期间，另一实例以非阻塞方式抢同一锁文件必须失败（Timeout）
+            probe = filelock.FileLock(f"{target}.lock", timeout=0)
+            try:
+                probe.acquire()
+                observed.append("acquired")
+            except filelock.Timeout:
+                observed.append("timeout")
+            finally:
+                if probe.is_locked:
+                    probe.release()
+            return real_copy2(src, dst, **kwargs)
+
+        with patch.object(cfg_mod, "CONFIG_FILE", str(target)):
+            with patch.object(cfg_mod, "_CONFIG_FILE_LEGACY", str(legacy)):
+                with patch("shutil.copy2", copy2_probe):
+                    storage_mod._migrate_config_location()
+
+        assert observed == ["timeout"]
+        assert target.exists()
+
+    def test_recheck_under_lock_skips_when_target_appears(self, monkeypatch, tmp_path):
+        """R04：快速路径检查后、锁内重查前目标被他进程写入新提交 → 不迁移不覆盖。"""
+        import filelock
+
+        from utils.config import storage as storage_mod
+
+        monkeypatch.delenv("ASTOCK_CONFIG_FILE", raising=False)
+        legacy = tmp_path / "legacy.json"
+        target = tmp_path / "user_settings.json"
+        legacy.write_text('{"marker": "OLD-legacy"}', encoding="utf-8")
+
+        real_file_lock = filelock.FileLock
+
+        class CommitThenLock(real_file_lock):
+            """acquire 成功瞬间模拟他进程落盘新提交（B 检查后、重查前的交错）。"""
+
+            def acquire(self, *args, **kwargs):
+                acquired = super().acquire(*args, **kwargs)
+                target.write_text('{"marker": "NEW-from-A"}', encoding="utf-8")
+                return acquired
+
+        with patch.object(cfg_mod, "CONFIG_FILE", str(target)):
+            with patch.object(cfg_mod, "_CONFIG_FILE_LEGACY", str(legacy)):
+                monkeypatch.setattr(storage_mod.filelock, "FileLock", CommitThenLock)
+                storage_mod._migrate_config_location()
+
+        # 旧 legacy 副本不得覆盖他进程已提交的新配置
+        assert target.read_text(encoding="utf-8") == '{"marker": "NEW-from-A"}'
+
+    def test_atomic_migration_no_tmp_leftover(self, monkeypatch, tmp_path):
+        """R04：迁移经临时文件 + os.replace 原子生效，成功后不残留 .migrate.tmp。"""
+        from utils.config import storage as storage_mod
+
+        monkeypatch.delenv("ASTOCK_CONFIG_FILE", raising=False)
+        legacy = tmp_path / "legacy.json"
+        target = tmp_path / "user_settings.json"
+        legacy.write_text('{"log_level": "INFO"}', encoding="utf-8")
+
+        with patch.object(cfg_mod, "CONFIG_FILE", str(target)):
+            with patch.object(cfg_mod, "_CONFIG_FILE_LEGACY", str(legacy)):
+                storage_mod._migrate_config_location()
+
+        assert target.read_text(encoding="utf-8") == '{"log_level": "INFO"}'
+        assert legacy.exists()
+        assert not (tmp_path / "user_settings.json.migrate.tmp").exists()
+
+    def test_lock_timeout_skips_migration_idempotently(self, monkeypatch, tmp_path):
+        """R04：文件锁等待超时按幂等迁移语义警告跳过，不抛异常、不写目标。"""
+        import filelock
+
+        from utils.config import storage as storage_mod
+
+        monkeypatch.delenv("ASTOCK_CONFIG_FILE", raising=False)
+        legacy = tmp_path / "legacy.json"
+        target = tmp_path / "user_settings.json"
+        legacy.write_text('{"log_level": "INFO"}', encoding="utf-8")
+
+        real_file_lock = filelock.FileLock
+
+        class AlwaysTimeoutLock(real_file_lock):
+            def acquire(self, *args, **kwargs):
+                raise filelock.Timeout(self.lock_file)
+
+        with patch.object(cfg_mod, "CONFIG_FILE", str(target)):
+            with patch.object(cfg_mod, "_CONFIG_FILE_LEGACY", str(legacy)):
+                monkeypatch.setattr(storage_mod.filelock, "FileLock", AlwaysTimeoutLock)
+                # 锁超时不向外传播（迁移失败不阻断读写入口）
+                storage_mod._migrate_config_location()
+
+        assert not target.exists()
+
+    def test_copy_failure_cleans_tmp_and_keeps_target_absent(self, monkeypatch, tmp_path):
+        """R04：复制失败（OSError）时警告跳过，清理临时文件，目标不被半截写入。"""
+        from utils.config import storage as storage_mod
+
+        monkeypatch.delenv("ASTOCK_CONFIG_FILE", raising=False)
+        legacy = tmp_path / "legacy.json"
+        target = tmp_path / "user_settings.json"
+        tmp_file = tmp_path / "user_settings.json.migrate.tmp"
+        legacy.write_text('{"log_level": "INFO"}', encoding="utf-8")
+
+        def failing_copy2(src, dst, **kwargs):
+            # 模拟 copy2 中途失败且已残留半截临时文件
+            tmp_file.write_text("{partial", encoding="utf-8")
+            raise PermissionError(13, "denied")
+
+        with patch.object(cfg_mod, "CONFIG_FILE", str(target)):
+            with patch.object(cfg_mod, "_CONFIG_FILE_LEGACY", str(legacy)):
+                with patch("shutil.copy2", failing_copy2):
+                    storage_mod._migrate_config_location()
+
+        assert not target.exists()
+        assert not tmp_file.exists()
