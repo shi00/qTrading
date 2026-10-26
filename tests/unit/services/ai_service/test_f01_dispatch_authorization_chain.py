@@ -118,7 +118,7 @@ async def _advance_to_active(service: ModelConfigurationService) -> None:
 
     outcome = await service.begin_migration(_rev(), "op-f01-begin", "owner-f01")
     assert outcome.status == "committed"
-    outcome = await service.seal_legacy(_rev(), "op-f01-seal", {"2026-01": "seal-f01"}, "owner-f01")
+    outcome = await service.seal_legacy(_rev(), "op-f01-seal", {"2026-01": "seal-f01"}, "owner-f01", 1)
     assert outcome.status == "committed"
     outcome = await service.activate(_rev(), "op-f01-activate")
     assert outcome.status == "committed"

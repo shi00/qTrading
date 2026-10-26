@@ -28,6 +28,7 @@ import utils.config_handler as cfg_mod
 from core.model_management_types import (
     LegacyDispatchBlockedError,
     LegacySealedError,
+    MigrationTransitionError,
     ModelConfigurationCorruptError,
 )
 from data.persistence.daos.ai_usage_dao import AIUsageDao
@@ -321,7 +322,7 @@ class TestS6CutoverFullStateMachine:
         assert record["cost_cny"] == "3.80"  # 380 分 → 元 Decimal 字符串
         assert json.loads(memory_db.app_state[f"ai_legacy_seal:{_MONTH_COMPACT}"]) == record
         outcome = await config_service.seal_legacy(
-            _load_mm()["config_revision"], "op-seal", {_MONTH_ISO: record["seal_id"]}, "owner-1"
+            _load_mm()["config_revision"], "op-seal", {_MONTH_ISO: record["seal_id"]}, "owner-1", 1
         )
         assert outcome.status == "committed"
         assert _load_mm()["migration_transition"]["phase"] == "sealed"
@@ -380,7 +381,7 @@ class TestActivateFailureRecovery:
         await config_service.begin_migration(_load_mm()["config_revision"], "op-begin", "owner-1")
         record = await dao.seal_legacy_month(month=_MONTH_ISO, owner_session_id="owner-1", owner_epoch=1)
         await config_service.seal_legacy(
-            _load_mm()["config_revision"], "op-seal", {_MONTH_ISO: record["seal_id"]}, "owner-1"
+            _load_mm()["config_revision"], "op-seal", {_MONTH_ISO: record["seal_id"]}, "owner-1", 1
         )
 
         real_cas = cfg_mod.ConfigHandler.compare_and_save_model_management
@@ -421,6 +422,68 @@ class TestActivateFailureRecovery:
         outcome = await config_service.activate(_load_mm()["config_revision"], "op-activate-retry")
         assert outcome.status == "committed"
         assert _load_mm()["migration_state"] == "active"
+
+
+# ---------------------------------------------------------------------------
+# R03-D1：seal_legacy_month owner/lease fencing（齐传 = 强门 / 缺省 = 弱门）
+# ---------------------------------------------------------------------------
+
+
+class TestLegacySealLeaseFence:
+    @pytest.mark.asyncio
+    async def test_seal_month_with_valid_lease_writes_record(self, dao, memory_db):
+        """租约有效强门：正常封口落盘，last_writer_* 审计字段如实记录。"""
+        lease = datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=300)
+        record = await dao.seal_legacy_month(
+            month=_MONTH_ISO, owner_session_id="owner-1", owner_epoch=2, owner_lease_expires_at=lease
+        )
+        assert record is not None
+        assert record["month"] == _MONTH_ISO
+        assert record["last_writer_session_id"] == "owner-1"
+        assert record["last_writer_epoch"] == 2
+        assert json.loads(memory_db.app_state[f"ai_legacy_seal:{_MONTH_COMPACT}"]) == record
+
+    @pytest.mark.asyncio
+    async def test_seal_month_expired_lease_rejected_no_write(self, dao, memory_db):
+        """失租强门：租约过期 owner 不得新建封口行（R21 诚实失败，app_state 零写入）。"""
+        expired = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=1)
+        with pytest.raises(MigrationTransitionError, match="租约已过期"):
+            await dao.seal_legacy_month(
+                month=_MONTH_ISO, owner_session_id="owner-1", owner_epoch=1, owner_lease_expires_at=expired
+            )
+        assert not any(k.startswith("ai_legacy_seal:") for k in memory_db.app_state)
+
+    @pytest.mark.asyncio
+    async def test_seal_month_naive_lease_interpreted_as_utc(self, dao, memory_db):
+        """naive lease 按 UTC 解释（与屏障写入侧 now(UTC).isoformat() 同源）→ 过期同样拒绝。"""
+        expired_naive = datetime.datetime.now(datetime.UTC).replace(tzinfo=None) - datetime.timedelta(seconds=1)
+        with pytest.raises(MigrationTransitionError, match="租约已过期"):
+            await dao.seal_legacy_month(
+                month=_MONTH_ISO, owner_session_id="owner-1", owner_epoch=1, owner_lease_expires_at=expired_naive
+            )
+        assert not any(k.startswith("ai_legacy_seal:") for k in memory_db.app_state)
+
+    @pytest.mark.asyncio
+    async def test_seal_month_lease_none_is_weak_gate(self, dao, memory_db):
+        """弱门（缺省 None）：不校验租约，仅记录 last_writer_* 审计（向后兼容既有调用方）。"""
+        record = await dao.seal_legacy_month(month=_MONTH_ISO, owner_session_id="owner-1", owner_epoch=1)
+        assert record is not None
+        assert record["last_writer_session_id"] == "owner-1"
+        assert record["last_writer_epoch"] == 1
+
+    @pytest.mark.asyncio
+    async def test_seal_month_existing_record_idempotent_even_expired_lease(self, dao, memory_db):
+        """幂等分支先于 fence：封口行只增不改，既有记录幂等读取不构成失租写入。"""
+        lease = datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=300)
+        first = await dao.seal_legacy_month(
+            month=_MONTH_ISO, owner_session_id="owner-1", owner_epoch=1, owner_lease_expires_at=lease
+        )
+        expired = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=1)
+        again = await dao.seal_legacy_month(
+            month=_MONTH_ISO, owner_session_id="owner-2", owner_epoch=9, owner_lease_expires_at=expired
+        )
+        assert again == first
+        assert json.loads(memory_db.app_state[f"ai_legacy_seal:{_MONTH_COMPACT}"]) == first
 
 
 # ---------------------------------------------------------------------------
@@ -791,7 +854,7 @@ class TestDraftSavePreservesMigrationSubdomain:
         outcome = await config_service.begin_migration(_load_mm()["config_revision"], "op-f07-begin", "owner-f07")
         assert outcome.status == "committed"
         outcome = await config_service.seal_legacy(
-            _load_mm()["config_revision"], "op-f07-seal", {_MONTH_ISO: self._SEAL_ID}, "owner-f07"
+            _load_mm()["config_revision"], "op-f07-seal", {_MONTH_ISO: self._SEAL_ID}, "owner-f07", 1
         )
         assert outcome.status == "committed"
         return _load_mm()

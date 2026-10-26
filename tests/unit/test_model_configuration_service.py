@@ -31,7 +31,9 @@ from services.model_configuration_service import (
     ModelConfigurationService,
     _FrozenMapping,
     _freeze_value,
+    _lease_expired,
     _outcome_from_cas,
+    _parse_utc_lease,
 )
 from utils.config_models import ModelManagementSaveResult
 import utils.config_handler as cfg_mod
@@ -1087,7 +1089,7 @@ class TestMigrationBegin:
         """D4 begin：已 sealed → 幂等返回，屏障数据不变（sealed 不可回退）。"""
         mm = _load_mm()
         await service.begin_migration(mm["config_revision"], "op-m8", "owner-a")
-        await service.seal_legacy(_load_mm()["config_revision"], "op-m9", {"2026-10": "seal-x"}, "owner-a")
+        await service.seal_legacy(_load_mm()["config_revision"], "op-m9", {"2026-10": "seal-x"}, "owner-a", 1)
         sealed = _fresh_transition()
         outcome = await service.begin_migration(_load_mm()["config_revision"], "op-m10", "owner-b")
         assert outcome.status == "committed"
@@ -1103,25 +1105,25 @@ class TestMigrationSeal:
     async def test_seal_without_transition_rejected(self, service):
         """D4 seal：未取得屏障 → MigrationTransitionError。"""
         with pytest.raises(MigrationTransitionError, match="未取得迁移屏障"):
-            await service.seal_legacy(_load_mm()["config_revision"], "op-s0", {"2026-10": "s"}, "owner-a")
+            await service.seal_legacy(_load_mm()["config_revision"], "op-s0", {"2026-10": "s"}, "owner-a", 1)
 
     @pytest.mark.asyncio
     async def test_seal_empty_month_seals_value_error(self, service):
         """D4 seal：month_seals 非空（缺月不自动补）。"""
         with pytest.raises(ValueError, match="不能为空"):
-            await service.seal_legacy(_load_mm()["config_revision"], "op-s1", {}, "owner-a")
+            await service.seal_legacy(_load_mm()["config_revision"], "op-s1", {}, "owner-a", 1)
 
     @pytest.mark.asyncio
     async def test_seal_bad_month_format_value_error(self, service):
         """D4 seal：month 形如 YYYY-MM。"""
         with pytest.raises(ValueError, match="YYYY-MM"):
-            await service.seal_legacy(_load_mm()["config_revision"], "op-s2", {"202610": "s"}, "owner-a")
+            await service.seal_legacy(_load_mm()["config_revision"], "op-s2", {"202610": "s"}, "owner-a", 1)
 
     @pytest.mark.asyncio
     async def test_seal_empty_seal_id_value_error(self, service):
         """D4 seal：seal_id 非空。"""
         with pytest.raises(ValueError, match="seal_id 不能为空"):
-            await service.seal_legacy(_load_mm()["config_revision"], "op-s3", {"2026-10": ""}, "owner-a")
+            await service.seal_legacy(_load_mm()["config_revision"], "op-s3", {"2026-10": ""}, "owner-a", 1)
 
     @pytest.mark.asyncio
     async def test_seal_non_owner_rejected(self, service):
@@ -1129,14 +1131,14 @@ class TestMigrationSeal:
         mm = _load_mm()
         await service.begin_migration(mm["config_revision"], "op-s15", "owner-a")
         with pytest.raises(MigrationTransitionError, match="仅限屏障 owner"):
-            await service.seal_legacy(_load_mm()["config_revision"], "op-s16", {"2026-10": "seal-a"}, "owner-b")
+            await service.seal_legacy(_load_mm()["config_revision"], "op-s16", {"2026-10": "seal-a"}, "owner-b", 1)
 
     @pytest.mark.asyncio
     async def test_seal_draining_to_sealed_merges(self, service):
         """D4 seal：draining + month_seals → sealed，legacy_seals 合并写入。"""
         mm = _load_mm()
         await service.begin_migration(mm["config_revision"], "op-s4", "owner-a")
-        outcome = await service.seal_legacy(_load_mm()["config_revision"], "op-s5", {"2026-10": "seal-a"}, "owner-a")
+        outcome = await service.seal_legacy(_load_mm()["config_revision"], "op-s5", {"2026-10": "seal-a"}, "owner-a", 1)
         assert outcome.status == "committed"
         transition = _fresh_transition()
         assert transition["phase"] == "sealed"
@@ -1150,9 +1152,9 @@ class TestMigrationSeal:
         """D4 seal：同月同 seal_id 幂等（保留原 sealed_at），phase 保持 sealed。"""
         mm = _load_mm()
         await service.begin_migration(mm["config_revision"], "op-s6", "owner-a")
-        await service.seal_legacy(_load_mm()["config_revision"], "op-s7", {"2026-10": "seal-a"}, "owner-a")
+        await service.seal_legacy(_load_mm()["config_revision"], "op-s7", {"2026-10": "seal-a"}, "owner-a", 1)
         first = _fresh_transition()["legacy_seals"][0]
-        outcome = await service.seal_legacy(_load_mm()["config_revision"], "op-s8", {"2026-10": "seal-a"}, "owner-a")
+        outcome = await service.seal_legacy(_load_mm()["config_revision"], "op-s8", {"2026-10": "seal-a"}, "owner-a", 1)
         assert outcome.status == "committed"
         assert _fresh_transition()["legacy_seals"] == [first]
 
@@ -1161,9 +1163,9 @@ class TestMigrationSeal:
         """D4 seal：同月异 seal_id 拒绝（MigrationTransitionError），磁盘保持原封口。"""
         mm = _load_mm()
         await service.begin_migration(mm["config_revision"], "op-s9", "owner-a")
-        await service.seal_legacy(_load_mm()["config_revision"], "op-s10", {"2026-10": "seal-a"}, "owner-a")
+        await service.seal_legacy(_load_mm()["config_revision"], "op-s10", {"2026-10": "seal-a"}, "owner-a", 1)
         with pytest.raises(MigrationTransitionError, match="不同 seal_id"):
-            await service.seal_legacy(_load_mm()["config_revision"], "op-s11", {"2026-10": "seal-b"}, "owner-a")
+            await service.seal_legacy(_load_mm()["config_revision"], "op-s11", {"2026-10": "seal-b"}, "owner-a", 1)
         transition = _fresh_transition()
         assert transition["phase"] == "sealed"
         assert transition["legacy_seals"][0]["legacy_seal_id"] == "seal-a"
@@ -1173,8 +1175,10 @@ class TestMigrationSeal:
         """Q4 跨月封口：sealed 后新月按同规则追加，phase 保持 sealed。"""
         mm = _load_mm()
         await service.begin_migration(mm["config_revision"], "op-s12", "owner-a")
-        await service.seal_legacy(_load_mm()["config_revision"], "op-s13", {"2026-10": "seal-a"}, "owner-a")
-        outcome = await service.seal_legacy(_load_mm()["config_revision"], "op-s14", {"2026-11": "seal-b"}, "owner-a")
+        await service.seal_legacy(_load_mm()["config_revision"], "op-s13", {"2026-10": "seal-a"}, "owner-a", 1)
+        outcome = await service.seal_legacy(
+            _load_mm()["config_revision"], "op-s14", {"2026-11": "seal-b"}, "owner-a", 1
+        )
         assert outcome.status == "committed"
         transition = _fresh_transition()
         assert transition["phase"] == "sealed"
@@ -1182,6 +1186,59 @@ class TestMigrationSeal:
             "2026-10": "seal-a",
             "2026-11": "seal-b",
         }
+
+    @pytest.mark.asyncio
+    async def test_seal_stale_epoch_rejected(self, service, isolated_config):
+        """R03-D1 seal：旧 epoch 封口拒绝——A 失租被接管 / 续租推进 epoch 后，旧 in-flight 封口不得落盘。"""
+        mm = _load_mm()
+        await service.begin_migration(mm["config_revision"], "op-s17", "owner-a")
+        await service.begin_migration(_load_mm()["config_revision"], "op-s18", "owner-a")  # 同 owner 续租 epoch→2
+        with pytest.raises(MigrationTransitionError, match="epoch 与屏障不一致"):
+            await service.seal_legacy(_load_mm()["config_revision"], "op-s19", {"2026-10": "seal-a"}, "owner-a", 1)
+        transition = _fresh_transition()
+        assert transition["phase"] == "draining"  # 磁盘保持未封存
+        assert transition["legacy_seals"] == []
+        # 以现值 epoch 重试（调用方重新 begin 后的正常路径）→ 成功
+        outcome = await service.seal_legacy(
+            _load_mm()["config_revision"], "op-s20", {"2026-10": "seal-a"}, "owner-a", 2
+        )
+        assert outcome.status == "committed"
+
+    @pytest.mark.asyncio
+    async def test_seal_expired_lease_rejected_before_takeover(self, service, isolated_config):
+        """R03-D1 seal：owner 失租（租约过期、尚无人接管）不得封口——修复前仅校验 owner 相等即可写入。"""
+        mm = _load_mm()
+        await service.begin_migration(mm["config_revision"], "op-s21", "owner-a")
+        _expire_lease_on_disk(isolated_config)
+        with pytest.raises(MigrationTransitionError, match="租约已过期"):
+            await service.seal_legacy(_load_mm()["config_revision"], "op-s22", {"2026-10": "seal-a"}, "owner-a", 1)
+        transition = _fresh_transition()
+        assert transition["phase"] == "draining"
+        assert transition["legacy_seals"] == []
+
+    @pytest.mark.asyncio
+    async def test_seal_append_after_sealed_with_expired_lease_allowed(self, service, isolated_config):
+        """R03-D1 seal：sealed 终态屏障豁免租约校验（begin 幂等分支不续租）——owner/epoch 仍须一致。"""
+        mm = _load_mm()
+        await service.begin_migration(mm["config_revision"], "op-s23", "owner-a")
+        await service.seal_legacy(_load_mm()["config_revision"], "op-s24", {"2026-10": "seal-a"}, "owner-a", 1)
+        _expire_lease_on_disk(isolated_config)
+        outcome = await service.seal_legacy(
+            _load_mm()["config_revision"], "op-s25", {"2026-11": "seal-b"}, "owner-a", 1
+        )
+        assert outcome.status == "committed"
+        transition = _fresh_transition()
+        assert transition["phase"] == "sealed"
+        assert {s["month"]: s["legacy_seal_id"] for s in transition["legacy_seals"]} == {
+            "2026-10": "seal-a",
+            "2026-11": "seal-b",
+        }
+
+    @pytest.mark.asyncio
+    async def test_seal_non_int_epoch_value_error(self, service):
+        """R03-D1 seal：owner_epoch 非 int（bool 为 int 子类，显式排除）→ ValueError fail-fast。"""
+        with pytest.raises(ValueError, match="owner_epoch 须为 int"):
+            await service.seal_legacy(_load_mm()["config_revision"], "op-s26", {"2026-10": "s"}, "owner-a", True)
 
 
 class TestMigrationActivate:
@@ -1205,7 +1262,7 @@ class TestMigrationActivate:
         """D4 activate：sealed → active；transition 保留作审计。"""
         mm = _load_mm()
         await service.begin_migration(mm["config_revision"], "op-a3", "owner-a")
-        await service.seal_legacy(_load_mm()["config_revision"], "op-a4", {"2026-10": "seal-a"}, "owner-a")
+        await service.seal_legacy(_load_mm()["config_revision"], "op-a4", {"2026-10": "seal-a"}, "owner-a", 1)
         sealed = _fresh_transition()
         outcome = await service.activate(_load_mm()["config_revision"], "op-a5")
         assert outcome.status == "committed"
@@ -1218,7 +1275,7 @@ class TestMigrationActivate:
         """CAS revision 冲突：磁盘保持 sealed，ModelConfigurationConflictError 携带 current_revision。"""
         mm = _load_mm()
         await service.begin_migration(mm["config_revision"], "op-a6", "owner-a")
-        await service.seal_legacy(_load_mm()["config_revision"], "op-a7", {"2026-10": "seal-a"}, "owner-a")
+        await service.seal_legacy(_load_mm()["config_revision"], "op-a7", {"2026-10": "seal-a"}, "owner-a", 1)
         current = _load_mm()["config_revision"]
         with pytest.raises(ModelConfigurationConflictError) as excinfo:
             await service.activate(current - 1, "op-a8")
@@ -1291,7 +1348,7 @@ class TestSnapshotDeepFreeze:
         """migration_transition.legacy_seals 嵌套叶子同获只读契约（顶层契约不变）。"""
         mm = _load_mm()
         await service.begin_migration(mm["config_revision"], "op-f38-2", "owner-a")
-        await service.seal_legacy(_load_mm()["config_revision"], "op-f38-3", {"2026-10": "seal-f38"}, "owner-a")
+        await service.seal_legacy(_load_mm()["config_revision"], "op-f38-3", {"2026-10": "seal-f38"}, "owner-a", 1)
 
         snapshot = await service.get_snapshot()
         transition = snapshot.migration_transition
@@ -1442,6 +1499,34 @@ def _zero_seal_record(month: str) -> dict:
     }
 
 
+class TestLeaseParsingHelpers:
+    """R03-D1 fence 锚解析辅助（R03-D1 补测）：fail-closed 语义逐分支锚定。"""
+
+    def test_parse_utc_lease_missing_or_non_str_raises(self):
+        """租约缺失 / 非 str → MigrationTransitionError（不得伪装为租约有效放行封口）。"""
+        with pytest.raises(MigrationTransitionError, match="缺失或非法"):
+            _parse_utc_lease(None)
+        with pytest.raises(MigrationTransitionError, match="缺失或非法"):
+            _parse_utc_lease("")
+        with pytest.raises(MigrationTransitionError, match="缺失或非法"):
+            _parse_utc_lease(123)
+
+    def test_parse_utc_lease_invalid_format_raises(self):
+        """非 ISO 文本 → MigrationTransitionError（fail-closed，坏锚不静默）。"""
+        with pytest.raises(MigrationTransitionError, match="格式非法"):
+            _parse_utc_lease("not-an-iso-timestamp")
+
+    def test_parse_utc_lease_naive_interpreted_as_utc(self):
+        """naive 值按 UTC 解释（与屏障写入侧 now(UTC).isoformat() 同源口径）。"""
+        parsed = _parse_utc_lease("2026-01-02T03:04:05")
+        assert parsed.tzinfo is dt.UTC
+        assert parsed == dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.UTC)
+
+    def test_lease_expired_parse_failure_counts_as_expired(self):
+        """_lease_expired 保守降级：坏数据按已过期处理（不无限续权，接管方以合法租约覆写）。"""
+        assert _lease_expired("not-an-iso-timestamp") is True
+
+
 class TestActivateFreshSetup:
     """F13 首次配置激活编排：预检 fail-closed + begin → seal → activate 一条链。"""
 
@@ -1464,8 +1549,103 @@ class TestActivateFreshSetup:
         assert {s["month"]: s["legacy_seal_id"] for s in raw["migration_transition"]["legacy_seals"]} == {
             "2026-10": "seal-f13-zero"
         }
-        dao.seal_legacy_month.assert_awaited_once_with(month="2026-10", owner_session_id="owner-x", owner_epoch=1)
+        # R03-D1：seal_legacy_month 强门三参齐传（owner/epoch/lease，lease 取 begin 后屏障现值）
+        dao.seal_legacy_month.assert_awaited_once()
+        call_kwargs = dao.seal_legacy_month.await_args.kwargs
+        assert call_kwargs["month"] == "2026-10"
+        assert call_kwargs["owner_session_id"] == "owner-x"
+        assert call_kwargs["owner_epoch"] == 1
+        assert call_kwargs["owner_lease_expires_at"].tzinfo is not None
+        assert call_kwargs["owner_lease_expires_at"] > dt.datetime.now(dt.UTC)
         zero_reader.assert_awaited_once_with(dt.date(2026, 10, 23))
+
+    @pytest.mark.asyncio
+    async def test_transition_owner_mismatch_after_begin_rejected(self, isolated_config):
+        """R03-D1 编排防御纵深：begin 与 fence 锚重读之间屏障被异 owner 接管 → 诚实失败，dao 零调用。"""
+        zero_reader = mock.AsyncMock(return_value=(0, 0, 0))
+        dao = mock.Mock()
+        dao.seal_legacy_month = mock.AsyncMock()
+        svc = ModelConfigurationService(legacy_seal_dao=dao, legacy_usage_reader=zero_reader)
+        cfg_mod.ConfigHandler.ensure_defaults()
+        # 预置异 owner draining 屏障并 mock begin 返回 committed（模拟 begin 与重读之间被接管）
+        raw = _read_raw(isolated_config)
+        raw["model_management"]["migration_transition"] = {
+            "transition_id": "t-hijack",
+            "owner_session_id": "owner-hijack",
+            "transition_epoch": 2,
+            "phase": "draining",
+            "lease_expires_at": "2099-01-01T00:00:00+00:00",
+            "source_fingerprint": "fp",
+            "legacy_seals": [],
+        }
+        _write_raw(isolated_config, raw)
+        cfg_mod.ConfigHandler._clear_cache()
+        committed = ConfigurationSaveOutcome(status="committed", current_revision=7, committed_revision=7)
+        with mock.patch.object(svc, "begin_migration", mock.AsyncMock(return_value=committed)):
+            with pytest.raises(MigrationTransitionError, match="owner mismatch after begin"):
+                await svc.activate_fresh_setup(6, "op-f13g", "owner-x", when=dt.date(2026, 10, 23))
+        dao.seal_legacy_month.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_transition_epoch_invalid_after_begin_rejected(self, isolated_config):
+        """R03-D1 编排防御纵深：fence 锚 epoch 非 int（bool 同样排除）→ 诚实失败，dao 零调用。
+
+        pydantic 边界（MigrationTransitionConfig.transition_epoch: int ge=1）已拦截磁盘坏值，
+        该分支为快照伪造/解析层演化场景的纵深防御——经 mock 快照直接锚定分支本身。
+        """
+        zero_reader = mock.AsyncMock(return_value=(0, 0, 0))
+        dao = mock.Mock()
+        dao.seal_legacy_month = mock.AsyncMock()
+        svc = ModelConfigurationService(legacy_seal_dao=dao, legacy_usage_reader=zero_reader)
+        cfg_mod.ConfigHandler.ensure_defaults()
+        forged = mock.Mock()
+        forged.migration_state = "pending"
+        forged.migration_transition = {
+            "transition_id": "t-bad-epoch",
+            "owner_session_id": "owner-x",
+            "transition_epoch": "2",  # 非 int（pydantic 之外注入的伪造快照）
+            "phase": "draining",
+            "lease_expires_at": "2099-01-01T00:00:00+00:00",
+            "source_fingerprint": "fp",
+            "legacy_seals": [],
+        }
+        committed = ConfigurationSaveOutcome(status="committed", current_revision=7, committed_revision=7)
+        with (
+            mock.patch.object(svc, "get_snapshot", mock.AsyncMock(return_value=forged)),
+            mock.patch.object(svc, "begin_migration", mock.AsyncMock(return_value=committed)),
+        ):
+            with pytest.raises(MigrationTransitionError, match="invalid transition_epoch after begin"):
+                await svc.activate_fresh_setup(6, "op-f13h", "owner-x", when=dt.date(2026, 10, 23))
+        dao.seal_legacy_month.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_transition_lease_invalid_after_begin_rejected(self, isolated_config):
+        """R03-D1 编排防御纵深：begin 后重读屏障 lease 坏值（非 ISO）→ 诚实失败，dao 零调用。
+
+        lease_expires_at 为 str 字段（pydantic 不校验 ISO 格式），磁盘注入即真实可达。
+        """
+        zero_reader = mock.AsyncMock(return_value=(0, 0, 0))
+        dao = mock.Mock()
+        dao.seal_legacy_month = mock.AsyncMock()
+        svc = ModelConfigurationService(legacy_seal_dao=dao, legacy_usage_reader=zero_reader)
+        cfg_mod.ConfigHandler.ensure_defaults()
+        raw = _read_raw(isolated_config)
+        raw["model_management"]["migration_transition"] = {
+            "transition_id": "t-bad-lease",
+            "owner_session_id": "owner-x",
+            "transition_epoch": 2,
+            "phase": "draining",
+            "lease_expires_at": "garbage-lease",  # 非 ISO 文本：fail-closed
+            "source_fingerprint": "fp",
+            "legacy_seals": [],
+        }
+        _write_raw(isolated_config, raw)
+        cfg_mod.ConfigHandler._clear_cache()
+        committed = ConfigurationSaveOutcome(status="committed", current_revision=7, committed_revision=7)
+        with mock.patch.object(svc, "begin_migration", mock.AsyncMock(return_value=committed)):
+            with pytest.raises(MigrationTransitionError, match="invalid lease_expires_at after begin"):
+                await svc.activate_fresh_setup(6, "op-f13i", "owner-x", when=dt.date(2026, 10, 23))
+        dao.seal_legacy_month.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_already_active_rejected(self, service, isolated_config):
@@ -1483,7 +1663,7 @@ class TestActivateFreshSetup:
         """
         mm = _load_mm()
         await service.begin_migration(mm["config_revision"], "op-f13b1", "owner-a")
-        await service.seal_legacy(_load_mm()["config_revision"], "op-f13b2", {"2026-10": "seal-a"}, "owner-a")
+        await service.seal_legacy(_load_mm()["config_revision"], "op-f13b2", {"2026-10": "seal-a"}, "owner-a", 1)
         current = _load_mm()["config_revision"]
         with mock.patch.object(service, "begin_migration") as begin, mock.patch.object(service, "seal_legacy") as seal:
             outcome = await service.activate_fresh_setup(current, "op-f13b3", "owner-b", when=dt.date(2026, 10, 23))
@@ -1499,7 +1679,7 @@ class TestActivateFreshSetup:
         """sealed 续走 activate CAS 冲突 → ConflictError（VM 映射提示），磁盘保持 sealed 可重试。"""
         mm = _load_mm()
         await service.begin_migration(mm["config_revision"], "op-f13b4", "owner-a")
-        await service.seal_legacy(_load_mm()["config_revision"], "op-f13b5", {"2026-10": "seal-a"}, "owner-a")
+        await service.seal_legacy(_load_mm()["config_revision"], "op-f13b5", {"2026-10": "seal-a"}, "owner-a", 1)
         stale = _load_mm()["config_revision"] - 1  # 陈旧 revision → CAS 必失配
         current = _load_mm()["config_revision"]
         with pytest.raises(ModelConfigurationConflictError) as excinfo:

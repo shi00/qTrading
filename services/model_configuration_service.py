@@ -123,6 +123,24 @@ def _utc_now_iso() -> str:
     return dt.datetime.now(dt.UTC).isoformat()
 
 
+def _parse_utc_lease(lease_expires_at: Any) -> dt.datetime:
+    """解析屏障租约到期时刻（ISO 文本 → datetime，R03-D1 fence 锚）。
+
+    naive 值按 UTC 解释（与屏障写入侧 ``now(UTC).isoformat()`` 同源）；缺失 /
+    非法文本抛 :class:`MigrationTransitionError`（fail-closed：fence 锚坏数据
+    不得伪装为「租约有效」放行封口，R21）。
+    """
+    if not isinstance(lease_expires_at, str) or not lease_expires_at:
+        raise MigrationTransitionError(f"屏障租约缺失或非法，禁止封口: {lease_expires_at!r}")
+    try:
+        expires = dt.datetime.fromisoformat(lease_expires_at)
+    except ValueError as exc:
+        raise MigrationTransitionError(f"屏障租约格式非法，禁止封口: {lease_expires_at!r}") from exc
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=dt.UTC)
+    return expires
+
+
 def _lease_expired(lease_expires_at: Any) -> bool:
     """迁移租约过期判定（S6 D4）：``now(UTC) >= lease_expires_at`` 解析值即过期。
 
@@ -131,11 +149,9 @@ def _lease_expired(lease_expires_at: Any) -> bool:
     if not isinstance(lease_expires_at, str) or not lease_expires_at:
         return True
     try:
-        expires = dt.datetime.fromisoformat(lease_expires_at)
-    except ValueError:
+        expires = _parse_utc_lease(lease_expires_at)
+    except MigrationTransitionError:
         return True
-    if expires.tzinfo is None:
-        expires = expires.replace(tzinfo=dt.UTC)
     return dt.datetime.now(dt.UTC) >= expires
 
 
@@ -448,6 +464,7 @@ class ModelConfigurationService:
         operation_id: str,
         month_seals: Mapping[str, str],
         owner_session_id: str,
+        owner_epoch: int,
     ) -> ConfigurationSaveOutcome:
         """封存 legacy 累计并翻 sealed（§12.2）：phase 必须 draining 或 sealed 幂等。
 
@@ -455,6 +472,15 @@ class ModelConfigurationService:
         须先经 begin 接管（租约过期）后才能封口，防止其他进程绕过排水收敛直接封存
         （MM-10「两进程旧批次收敛」）。sealed 状态追加跨月封口时 owner 须与屏障
         记录一致（接管后 owner 已变更，以现值为准）。
+
+        R03-D1 owner/lease fencing（与 F23 账本写入口同语义）：
+        - ``owner_epoch`` 须与屏障当前 ``transition_epoch`` 一致——旧 epoch（失租
+          期间被接管 / 续租推进过）的 in-flight 封口请求一律拒绝，epoch 变化后
+          调用方必须重新 begin 并以现值重试；
+        - ``phase=draining`` 时屏障租约须未过期（``_lease_expired``）——owner 失租
+          （租约过期而尚未被接管）期间不得继续封口，须先 begin 接管 / 续租；
+        - ``phase=sealed`` 豁免租约校验：sealed 是终态屏障（begin 幂等分支不再续租），
+          追加跨月封口是终态内的幂等合并，owner / epoch 校验仍然生效。
 
         调用顺序契约：调用方先逐月 ``AIUsageDao.seal_legacy_month`` 取 seal_id，
         再一次性本方法全量封口（缺月不自动补，须显式提供）。month_seals 非空、
@@ -469,6 +495,8 @@ class ModelConfigurationService:
                 raise ValueError(f"month 形如 YYYY-MM: {month!r}")
             if not seal_id:
                 raise ValueError(f"seal_id 不能为空: month={month!r}")
+        if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool):
+            raise ValueError(f"owner_epoch 须为 int: {owner_epoch!r}")
 
         def _seal() -> ModelManagementSaveResult:
             fresh = cfg.ConfigHandler.read_model_management_fresh()
@@ -480,6 +508,18 @@ class ModelConfigurationService:
             if transition.get("owner_session_id") != owner_session_id:
                 raise MigrationTransitionError(
                     f"seal_legacy 仅限屏障 owner 调用: owner={transition.get('owner_session_id')!r}"
+                )
+            current_epoch = transition.get("transition_epoch")
+            if not isinstance(current_epoch, int) or isinstance(current_epoch, bool) or current_epoch != owner_epoch:
+                raise MigrationTransitionError(
+                    "seal_legacy epoch 与屏障不一致，禁止旧 epoch 封口: "
+                    f"transition_epoch={current_epoch!r} != owner_epoch={owner_epoch!r}"
+                    "（失租被接管 / 续租后须重新 begin 并以现值重试）"
+                )
+            if transition.get("phase") != "sealed" and _lease_expired(transition.get("lease_expires_at")):
+                raise MigrationTransitionError(
+                    "seal_legacy 屏障租约已过期，禁止封口（owner 失租期间不得推进 sealed，"
+                    "须先 begin_migration 接管 / 续租）"
                 )
             existing: dict[str, dict[str, Any]] = {s["month"]: dict(s) for s in transition.get("legacy_seals", [])}
             for month, seal_id in month_seals.items():
@@ -662,9 +702,28 @@ class ModelConfigurationService:
             return begin_outcome
         revision = begin_outcome.committed_revision or revision
 
+        # R03-D1 fence 锚：begin 提交后重读屏障现值（owner / epoch / lease），以磁盘
+        # 真实状态（而非调用方假设）作为封口链 fence 依据；owner 不一致说明 begin 与
+        # 重读之间屏障已被他方接管（防御纵深，诚实失败不冒名续走，R21）。
+        anchor = (await self.get_snapshot()).migration_transition
+        if anchor is None or anchor.get("owner_session_id") != owner_session_id:
+            raise _raise("migration transition owner mismatch after begin")
+        anchor_epoch = anchor.get("transition_epoch")
+        if not isinstance(anchor_epoch, int) or isinstance(anchor_epoch, bool):
+            raise _raise(f"invalid transition_epoch after begin: {anchor_epoch!r}")
+        try:
+            anchor_lease = _parse_utc_lease(anchor.get("lease_expires_at"))
+        except MigrationTransitionError as exc:
+            raise _raise(f"invalid lease_expires_at after begin: {anchor.get('lease_expires_at')!r}") from exc
+
         dao = self._resolve_legacy_seal_dao()
         month = f"{current:%Y-%m}"
-        record = await dao.seal_legacy_month(month=month, owner_session_id=owner_session_id, owner_epoch=1)
+        record = await dao.seal_legacy_month(
+            month=month,
+            owner_session_id=owner_session_id,
+            owner_epoch=anchor_epoch,
+            owner_lease_expires_at=anchor_lease,
+        )
         if not isinstance(record, dict) or not record.get("seal_id") or not record.get("month"):
             raise _raise(f"seal_legacy_month returned invalid record for {month}")
         if not _fresh_seal_baseline_is_zero(record):
@@ -673,7 +732,7 @@ class ModelConfigurationService:
             raise _raise(f"seal baseline non-zero for {month}: cost_cny={record.get('cost_cny')!r}")
 
         seal_outcome = await self.seal_legacy(
-            revision, f"{operation_id}:seal", {month: str(record["seal_id"])}, owner_session_id
+            revision, f"{operation_id}:seal", {month: str(record["seal_id"])}, owner_session_id, anchor_epoch
         )
         if seal_outcome.status != "committed":
             return seal_outcome
