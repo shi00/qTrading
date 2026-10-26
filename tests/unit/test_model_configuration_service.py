@@ -31,7 +31,9 @@ from services.model_configuration_service import (
     ModelConfigurationService,
     _FrozenMapping,
     _freeze_value,
+    _lease_expired,
     _outcome_from_cas,
+    _parse_utc_lease,
 )
 from utils.config_models import ModelManagementSaveResult
 import utils.config_handler as cfg_mod
@@ -1497,6 +1499,34 @@ def _zero_seal_record(month: str) -> dict:
     }
 
 
+class TestLeaseParsingHelpers:
+    """R03-D1 fence 锚解析辅助（R03-D1 补测）：fail-closed 语义逐分支锚定。"""
+
+    def test_parse_utc_lease_missing_or_non_str_raises(self):
+        """租约缺失 / 非 str → MigrationTransitionError（不得伪装为租约有效放行封口）。"""
+        with pytest.raises(MigrationTransitionError, match="缺失或非法"):
+            _parse_utc_lease(None)
+        with pytest.raises(MigrationTransitionError, match="缺失或非法"):
+            _parse_utc_lease("")
+        with pytest.raises(MigrationTransitionError, match="缺失或非法"):
+            _parse_utc_lease(123)
+
+    def test_parse_utc_lease_invalid_format_raises(self):
+        """非 ISO 文本 → MigrationTransitionError（fail-closed，坏锚不静默）。"""
+        with pytest.raises(MigrationTransitionError, match="格式非法"):
+            _parse_utc_lease("not-an-iso-timestamp")
+
+    def test_parse_utc_lease_naive_interpreted_as_utc(self):
+        """naive 值按 UTC 解释（与屏障写入侧 now(UTC).isoformat() 同源口径）。"""
+        parsed = _parse_utc_lease("2026-01-02T03:04:05")
+        assert parsed.tzinfo is dt.UTC
+        assert parsed == dt.datetime(2026, 1, 2, 3, 4, 5, tzinfo=dt.UTC)
+
+    def test_lease_expired_parse_failure_counts_as_expired(self):
+        """_lease_expired 保守降级：坏数据按已过期处理（不无限续权，接管方以合法租约覆写）。"""
+        assert _lease_expired("not-an-iso-timestamp") is True
+
+
 class TestActivateFreshSetup:
     """F13 首次配置激活编排：预检 fail-closed + begin → seal → activate 一条链。"""
 
@@ -1554,6 +1584,67 @@ class TestActivateFreshSetup:
         with mock.patch.object(svc, "begin_migration", mock.AsyncMock(return_value=committed)):
             with pytest.raises(MigrationTransitionError, match="owner mismatch after begin"):
                 await svc.activate_fresh_setup(6, "op-f13g", "owner-x", when=dt.date(2026, 10, 23))
+        dao.seal_legacy_month.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_transition_epoch_invalid_after_begin_rejected(self, isolated_config):
+        """R03-D1 编排防御纵深：fence 锚 epoch 非 int（bool 同样排除）→ 诚实失败，dao 零调用。
+
+        pydantic 边界（MigrationTransitionConfig.transition_epoch: int ge=1）已拦截磁盘坏值，
+        该分支为快照伪造/解析层演化场景的纵深防御——经 mock 快照直接锚定分支本身。
+        """
+        zero_reader = mock.AsyncMock(return_value=(0, 0, 0))
+        dao = mock.Mock()
+        dao.seal_legacy_month = mock.AsyncMock()
+        svc = ModelConfigurationService(legacy_seal_dao=dao, legacy_usage_reader=zero_reader)
+        cfg_mod.ConfigHandler.ensure_defaults()
+        forged = mock.Mock()
+        forged.migration_state = "pending"
+        forged.migration_transition = {
+            "transition_id": "t-bad-epoch",
+            "owner_session_id": "owner-x",
+            "transition_epoch": "2",  # 非 int（pydantic 之外注入的伪造快照）
+            "phase": "draining",
+            "lease_expires_at": "2099-01-01T00:00:00+00:00",
+            "source_fingerprint": "fp",
+            "legacy_seals": [],
+        }
+        committed = ConfigurationSaveOutcome(status="committed", current_revision=7, committed_revision=7)
+        with (
+            mock.patch.object(svc, "get_snapshot", mock.AsyncMock(return_value=forged)),
+            mock.patch.object(svc, "begin_migration", mock.AsyncMock(return_value=committed)),
+        ):
+            with pytest.raises(MigrationTransitionError, match="invalid transition_epoch after begin"):
+                await svc.activate_fresh_setup(6, "op-f13h", "owner-x", when=dt.date(2026, 10, 23))
+        dao.seal_legacy_month.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_transition_lease_invalid_after_begin_rejected(self, isolated_config):
+        """R03-D1 编排防御纵深：begin 后重读屏障 lease 坏值（非 ISO）→ 诚实失败，dao 零调用。
+
+        lease_expires_at 为 str 字段（pydantic 不校验 ISO 格式），磁盘注入即真实可达。
+        """
+        zero_reader = mock.AsyncMock(return_value=(0, 0, 0))
+        dao = mock.Mock()
+        dao.seal_legacy_month = mock.AsyncMock()
+        svc = ModelConfigurationService(legacy_seal_dao=dao, legacy_usage_reader=zero_reader)
+        cfg_mod.ConfigHandler.ensure_defaults()
+        raw = _read_raw(isolated_config)
+        raw["model_management"]["migration_transition"] = {
+            "transition_id": "t-bad-lease",
+            "owner_session_id": "owner-x",
+            "transition_epoch": 2,
+            "phase": "draining",
+            "lease_expires_at": "garbage-lease",  # 非 ISO 文本：fail-closed
+            "source_fingerprint": "fp",
+            "legacy_seals": [],
+        }
+        _write_raw(isolated_config, raw)
+        cfg_mod.ConfigHandler._clear_cache()
+        committed = ConfigurationSaveOutcome(status="committed", current_revision=7, committed_revision=7)
+        with mock.patch.object(svc, "begin_migration", mock.AsyncMock(return_value=committed)):
+            with pytest.raises(MigrationTransitionError, match="invalid lease_expires_at after begin"):
+                await svc.activate_fresh_setup(6, "op-f13i", "owner-x", when=dt.date(2026, 10, 23))
         dao.seal_legacy_month.assert_not_awaited()
 
     @pytest.mark.asyncio
