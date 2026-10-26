@@ -238,10 +238,11 @@ class TestEmbeddedPostgresServiceCoverage:
                 with pytest.raises(EmbeddedPostgresStartError, match="unexpected ready schema"):
                     await service.start()
 
-                # 验证子进程被 kill（_cleanup_failed_start 调用）
+                # 验证子进程被清理（MD13-01: graceful 关 stdin + wait；wait 成功则无 kill）
                 assert len(_FakePopen.instances) == 1
                 fake = _FakePopen.instances[0]
-                assert fake._kill_calls >= 1
+                assert fake.stdin.closed
+                assert fake._wait_calls >= 1
         finally:
             await service.stop()
             svc_module.EmbeddedPostgresService._reset_singleton()
@@ -271,10 +272,11 @@ class TestEmbeddedPostgresServiceCoverage:
                 with pytest.raises(EmbeddedPostgresStartError, match="password_file read failed"):
                     await service.start()
 
-                # 验证子进程被 kill
+                # 验证子进程被清理（MD13-01: graceful 关 stdin + wait）
                 assert len(_FakePopen.instances) == 1
                 fake = _FakePopen.instances[0]
-                assert fake._kill_calls >= 1
+                assert fake.stdin.closed
+                assert fake._wait_calls >= 1
         finally:
             await service.stop()
             svc_module.EmbeddedPostgresService._reset_singleton()
@@ -426,14 +428,18 @@ class TestEmbeddedPostgresServiceExceptionFallbacks:
         )
 
     def test_cleanup_failed_start_handles_kill_error(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        """_cleanup_failed_start 中 Popen.kill 抛 OSError → 不抛异常，记 logger.debug。"""
+        """_cleanup_failed_start 中 graceful 超时后 Popen.kill 抛 OSError → 不抛异常，记 logger.debug。
+
+        MD13-01: 先 graceful wait（超时）→ kill 兜底（抛 OSError）→ 二次 wait 成功。
+        """
+        import subprocess
         from unittest.mock import MagicMock
 
         service = self._make_service(tmp_path)
-        # 构造 mock proc，kill 抛 OSError，wait 正常返回 0
+        # 第一次 wait（graceful）抛 TimeoutExpired → kill 抛 OSError → 第二次 wait 正常返回 0
         mock_proc = MagicMock()
         mock_proc.kill.side_effect = OSError("kill failed")
-        mock_proc.wait.return_value = 0
+        mock_proc.wait.side_effect = [subprocess.TimeoutExpired(cmd=["fake"], timeout=5), 0]
         service._process = mock_proc
 
         with caplog.at_level(logging.DEBUG, logger="qtrading.embedded_postgres"):
@@ -445,6 +451,30 @@ class TestEmbeddedPostgresServiceExceptionFallbacks:
         # 验证 logger.debug 被调用
         assert any("cleanup_failed_start kill fallback" in r.message for r in caplog.records), (
             f"期望 DEBUG 日志含 'cleanup_failed_start kill fallback'，实际：{[r.message for r in caplog.records]}"
+        )
+
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_cleanup_failed_start_handles_stdin_close_error(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """_cleanup_failed_start 中 proc.stdin.close 抛 OSError → 不抛异常，记 logger.debug（MD13-01）。"""
+        from unittest.mock import MagicMock
+
+        service = self._make_service(tmp_path)
+        mock_proc = MagicMock()
+        mock_proc.stdin.close.side_effect = OSError("stdin close failed")
+        mock_proc.wait.return_value = 0
+        service._process = mock_proc
+
+        with caplog.at_level(logging.DEBUG, logger="qtrading.embedded_postgres"):
+            service._cleanup_failed_start()
+
+        assert service._process is None
+        assert any("cleanup_failed_start stdin close fallback" in r.message for r in caplog.records), (
+            f"期望 DEBUG 日志含 'cleanup_failed_start stdin close fallback'，实际：{[r.message for r in caplog.records]}"
         )
 
         from data.persistence.embedded_postgres.service import EmbeddedPostgresService

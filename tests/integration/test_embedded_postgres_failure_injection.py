@@ -199,9 +199,10 @@ class TestFi01SidecarExit11InitdbFailed:
                 with pytest.raises(EmbeddedPostgresStartError, match="initdb failed"):
                     await service.start()
 
-            # 验证子进程被 kill（_cleanup_failed_start 调用）
+            # 验证子进程被清理（MD13-01: graceful 关 stdin + wait；已退出进程无需 kill）
             assert len(_FakePopen.instances) == 1
-            assert _FakePopen.instances[0]._kill_calls >= 1
+            assert _FakePopen.instances[0].stdin.closed
+            assert _FakePopen.instances[0]._wait_calls >= 1
         finally:
             await service.stop()
             EmbeddedPostgresService._reset_singleton()
@@ -231,7 +232,8 @@ class TestFi05PgdataLockExit50:
                     await service.start()
 
             assert len(_FakePopen.instances) == 1
-            assert _FakePopen.instances[0]._kill_calls >= 1
+            assert _FakePopen.instances[0].stdin.closed
+            assert _FakePopen.instances[0]._wait_calls >= 1
         finally:
             await service.stop()
             EmbeddedPostgresService._reset_singleton()
@@ -261,7 +263,8 @@ class TestFi06DiskFullExit15:
                     await service.start()
 
             assert len(_FakePopen.instances) == 1
-            assert _FakePopen.instances[0]._kill_calls >= 1
+            assert _FakePopen.instances[0].stdin.closed
+            assert _FakePopen.instances[0]._wait_calls >= 1
         finally:
             await service.stop()
             EmbeddedPostgresService._reset_singleton()
