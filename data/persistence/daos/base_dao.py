@@ -809,9 +809,6 @@ class BaseDao:
                 total_coerced,
                 coerce_stats,
             )
-        # DAT-03: 登记表级日期 coerce 率，供数据质量门控判定该表是否降级
-        WriteQuality().record_write(table_name, rows=len(df), coerced_rows=total_coerced)
-
         # DAT-01: 线程池 await 是另一处状态可变边界，执行 SQL 前必须复查引擎。
         self._check_engine(context="upsert:post-prepare")
 
@@ -868,6 +865,17 @@ class BaseDao:
                             chunk = records[i : i + _UPSERT_CHUNK_SIZE]
                             await tx_conn.execute(stmt, chunk)
                             total_written += len(chunk)
+
+            # DAT-03: 登记表级日期 coerce 率，供数据质量门控判定该表是否降级。
+            # 仅在 SQL 执行成功后登记：record_write 为"最近一次写入"覆盖式语义，
+            # 若在执行前登记，写入失败（含 suppress_errors 吞错路径）会用未落库的
+            # 本次尝试覆盖上次成功统计——coerced=0 时会清除该表已有的降级信号，
+            # coerced>0 时会对仍是上次干净数据的表误报降级。
+            # NOTE(lazy): 共享事务连接（is_shared_conn）分支下 SQL 执行成功≠调用方
+            # 事务最终 commit，极端回滚场景统计仍可能超前于落库事实. ceiling: 单次
+            # 失败统计的 24h 过期窗口（WRITE_COERCE_MAX_AGE_SEC）自愈. upgrade: 出现
+            # 依赖该统计做强一致裁决的消费方时，改为事务 commit 后登记.
+            WriteQuality().record_write(table_name, rows=len(df), coerced_rows=total_coerced)
 
             elapsed = (time.perf_counter() - start_time) * 1000
             if elapsed > PerfThreshold.DAO_UPSERT_MS:

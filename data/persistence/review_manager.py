@@ -481,6 +481,13 @@ class ReviewManager:
                         t5_pct if t5_pct is not None else "N/A",
                     )
 
+            except EngineDisposedError:
+                # R5 一致性：disposed 引擎不可恢复，必须上抛避免被吞没——否则引擎运行
+                # 中途释放时，循环内 _resolve_index_quote 抛出的 EngineDisposedError
+                # 会被逐条吞成 error 日志，run_review 以"Completed. Updated 0 records"
+                # 静默成功返回，调用方（复盘 job）无法感知复盘失败（与
+                # _batch_update_results / _resolve_benchmark 的既有 R5 上抛模式对齐）。
+                raise
             except Exception as e:
                 logger.error("[Review] Error reviewing %s: %s", ts_code, safe_error(e))
 
