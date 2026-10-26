@@ -19,6 +19,7 @@ from data.sync.base import SyncResult
 from services.task_manager import TaskManager, TaskStatus
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceViewModel, HealthResultRow
+from utils.config.secrets import SaveOutcome
 from utils.scheduler_service import ScheduledJobStatus, SchedulerService
 
 pytestmark = pytest.mark.unit
@@ -903,7 +904,9 @@ class TestDataSourceViewModelSaveToken:
         with (
             patch("ui.viewmodels.data_source_view_model.TushareClient") as mock_tc,
             patch("ui.viewmodels.data_source_view_model.ThreadPoolManager") as mock_tpm,
+            patch("ui.viewmodels.data_source_view_model.ConfigHandler") as mock_ch,
         ):
+            mock_ch.save_token.return_value = SaveOutcome.SAVED
             mock_tc.return_value.set_token_async = AsyncMock(return_value=True)
             mock_tc.return_value.probe_api_capabilities = AsyncMock()
 
@@ -912,7 +915,10 @@ class TestDataSourceViewModelSaveToken:
                 return func(*args, **kwargs)
 
             mock_tpm.return_value.run_async = _fake_run_async
-            await bound_vm.save_tushare_token("abc123")
+            outcome = await bound_vm.save_tushare_token("abc123")
+            # D8-2 语义透传: 持久化成功返回 SAVED (M-UI-12/M1)
+            assert outcome is SaveOutcome.SAVED
+            mock_ch.save_token.assert_called_once_with("abc123")
             mock_tc.assert_called_once_with()
             # 回归：save_tushare_token 必须 await 异步 set_token_async（同步 set_token 在
             # 工作线程 _loop 未捕获时会抛 RuntimeError），不得调用同步 set_token。
@@ -921,6 +927,54 @@ class TestDataSourceViewModelSaveToken:
             # set_token_async 返回 True（token 变更、cache 清空）时需重建 capability cache，
             # 与 verify_token 对齐契约，避免 tier 预筛基于空 cache 降级。
             mock_tc.return_value.probe_api_capabilities.assert_awaited_once()
+
+    async def test_overridden_by_env_still_applies_session(self, bound_vm):
+        """D8-2: OVERRIDDEN_BY_ENV 时会话内仍生效 (set_token_async), outcome 透传给 View。"""
+        with (
+            patch("ui.viewmodels.data_source_view_model.TushareClient") as mock_tc,
+            patch("ui.viewmodels.data_source_view_model.ThreadPoolManager") as mock_tpm,
+            patch("ui.viewmodels.data_source_view_model.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.save_token.return_value = SaveOutcome.OVERRIDDEN_BY_ENV
+            mock_tc.return_value.set_token_async = AsyncMock(return_value=False)
+
+            async def _fake_run_async(task_type, func, *args, **kwargs):
+                return func(*args, **kwargs)
+
+            mock_tpm.return_value.run_async = _fake_run_async
+            outcome = await bound_vm.save_tushare_token("abc123")
+            assert outcome is SaveOutcome.OVERRIDDEN_BY_ENV
+            mock_tc.return_value.set_token_async.assert_awaited_once_with("abc123")
+
+    async def test_no_secure_store_aborts_session_update(self, bound_vm):
+        """D8-3: FAILED_NO_SECURE_STORE 时中止会话内更新 (不调 set_token_async)。"""
+        with (
+            patch("ui.viewmodels.data_source_view_model.TushareClient") as mock_tc,
+            patch("ui.viewmodels.data_source_view_model.ThreadPoolManager") as mock_tpm,
+            patch("ui.viewmodels.data_source_view_model.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.save_token.return_value = SaveOutcome.FAILED_NO_SECURE_STORE
+
+            async def _fake_run_async(task_type, func, *args, **kwargs):
+                return func(*args, **kwargs)
+
+            mock_tpm.return_value.run_async = _fake_run_async
+            outcome = await bound_vm.save_tushare_token("abc123")
+            assert outcome is SaveOutcome.FAILED_NO_SECURE_STORE
+            # TushareClient 被 patch 为 MagicMock (非 AsyncMock), 用 assert_not_called 等价断言
+            mock_tc.return_value.set_token_async.assert_not_called()
+            mock_tc.return_value.probe_api_capabilities.assert_not_called()
+
+    async def test_empty_token_returns_failed(self, bound_vm):
+        """空 token 防御分支返回 FAILED (View 层已有即时反馈, 此处不触达 IO)。"""
+        with (
+            patch("ui.viewmodels.data_source_view_model.TushareClient") as mock_tc,
+            patch("ui.viewmodels.data_source_view_model.ThreadPoolManager") as mock_tpm,
+        ):
+            outcome = await bound_vm.save_tushare_token("   ")
+            assert outcome is SaveOutcome.FAILED
+            mock_tpm.return_value.run_async.assert_not_called()
+            mock_tc.assert_not_called()
 
     async def test_skips_empty_token(self, bound_vm):
         await bound_vm.save_tushare_token("  ")

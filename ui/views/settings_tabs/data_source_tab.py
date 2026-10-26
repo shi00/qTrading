@@ -55,6 +55,7 @@ from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelView
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
+from utils.config.secrets import SaveOutcome
 from utils.app_env import is_e2e_mode
 
 logger = logging.getLogger(__name__)
@@ -855,6 +856,10 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         def _on_save(config: dict) -> None:
             token = config.get("token", "").strip()
             if not token:
+                # 空 token 保存给即时反馈 (与 verify_token 的 tushare_token_required 提示对齐),
+                # 不静默吞掉点击 (M-UI-12/M2)。
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("tushare_token_required"), color=AppColors.WARNING)
                 return
             page = _get_page()
             if page is not None:
@@ -890,7 +895,23 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     # --- Async handlers (R2: except Exception 不捕获 CancelledError) ---
     async def _do_tushare_save(token: str) -> None:
         try:
-            await vm.save_tushare_token(token)
+            outcome = await vm.save_tushare_token(token)
+            # D8-2/D8-3: save_token 三态语义透传 (与 verify_token 一致, M-UI-12/M1),
+            # OVERRIDDEN_BY_ENV / FAILED_NO_SECURE_STORE / FAILED 不得显示为「保存成功」。
+            if outcome is SaveOutcome.FAILED_NO_SECURE_STORE:
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("secrets_save_failed_no_store"), color=AppColors.ERROR)
+                return
+            if outcome is SaveOutcome.OVERRIDDEN_BY_ENV:
+                if show_snack_callback:
+                    show_snack_callback(
+                        I18n.get("secrets_save_overridden", env_var="TS_TOKEN"), color=AppColors.WARNING
+                    )
+                return
+            if outcome is SaveOutcome.FAILED:
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+                return
             if show_snack_callback:
                 show_snack_callback(I18n.get("settings_msg_saved"), color=AppColors.SUCCESS)
         except asyncio.CancelledError:

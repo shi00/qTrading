@@ -564,6 +564,7 @@ from tests.unit.ui.component_renderer import (  # noqa: E402
 
 from ui.viewmodels import Message  # noqa: E402
 from ui.viewmodels.data_source_view_model import HealthResultRow, SnackRow  # noqa: E402
+from utils.config.secrets import SaveOutcome  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -651,8 +652,10 @@ class _FakeDataSourceViewModel:
         """Return a mock data processor for HealthScanDialog construction."""
         return MagicMock()
 
-    async def save_tushare_token(self, token: str) -> None:
+    async def save_tushare_token(self, token: str) -> SaveOutcome:
         self.method_calls.append(("save_tushare_token", {"token": token}))
+        # D8-2 语义透传契约 (M-UI-12/M1): 与真实 VM 一致返回 SaveOutcome
+        return SaveOutcome.SAVED
 
     async def set_history_years(self, years: int) -> None:
         self.method_calls.append(("set_history_years", {"years": years}))
@@ -2384,18 +2387,66 @@ class TestDataSourceTabCoverageBranches:
     def test_tushare_on_save_ignores_empty_token(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """_on_save token="" → early return (不触发 _do_tushare_save)。"""
+        """_on_save token="" → 即时 warning snack + early return (不触发 _do_tushare_save, M-UI-12/M2)。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         fake_vm, fake_tushare_vm = _patch_data_source_vms(monkeypatch)
+        snack_cb = MagicMock()
         page = _make_fake_page()
-        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
         _mount(component, page=page)
         on_save = fake_tushare_vm._init_kwargs.get("on_save")
         assert on_save is not None
         on_save({"token": "  "})  # 空白 token strip 后为空
         calls = [c[0] for c in fake_vm.method_calls]
         assert "save_tushare_token" not in calls
+        # M-UI-12/M2: 空 token 保存须有用户反馈, 不得静默吞掉点击
+        assert "tushare_token_required" in snack_cb.call_args[0][0]
+
+    def test_tushare_on_save_overridden_by_env_shows_warning(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """D8-2: OVERRIDDEN_BY_ENV → warning snack (secrets_save_overridden), 不假报「保存成功」。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, fake_tushare_vm = _patch_data_source_vms(monkeypatch)
+
+        async def _save_outcome(token: str) -> SaveOutcome:
+            fake_vm.method_calls.append(("save_tushare_token", {"token": token}))
+            return SaveOutcome.OVERRIDDEN_BY_ENV
+
+        fake_vm.save_tushare_token = _save_outcome
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        _mount(component, page=page)
+        on_save = fake_tushare_vm._init_kwargs.get("on_save")
+        assert on_save is not None
+        on_save({"token": "test_token"})
+        assert "save_tushare_token" in [c[0] for c in fake_vm.method_calls]
+        assert "secrets_save_overridden" in snack_cb.call_args[0][0]
+
+    def test_tushare_on_save_no_secure_store_shows_error(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """D8-3: FAILED_NO_SECURE_STORE → error snack (secrets_save_failed_no_store)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, fake_tushare_vm = _patch_data_source_vms(monkeypatch)
+
+        async def _save_outcome(token: str) -> SaveOutcome:
+            fake_vm.method_calls.append(("save_tushare_token", {"token": token}))
+            return SaveOutcome.FAILED_NO_SECURE_STORE
+
+        fake_vm.save_tushare_token = _save_outcome
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        _mount(component, page=page)
+        on_save = fake_tushare_vm._init_kwargs.get("on_save")
+        assert on_save is not None
+        on_save({"token": "test_token"})
+        assert "secrets_save_failed_no_store" in snack_cb.call_args[0][0]
 
     def test_tushare_on_save_handles_exception(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch

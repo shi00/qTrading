@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from utils.config.secrets import SaveOutcome
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error
 from utils.loop_local import get_loop_local
@@ -678,19 +679,28 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         """
         return ConfigHandler.get_init_history_years()
 
-    async def save_tushare_token(self, token: str) -> None:
+    async def save_tushare_token(self, token: str) -> SaveOutcome:
         """异步保存 Tushare token 到配置并更新客户端 (R16: IO offload via ThreadPoolManager).
 
         Phase 3.1: 从 View 下沉 (原 View 用 ThreadPoolManager.run_async 包 sync VM 方法).
+
+        D8-2/D8-3 语义透传 (与 TushareConfigPanelViewModel.verify_token 对齐):
+        - OVERRIDDEN_BY_ENV: TS_TOKEN 环境变量存在, 持久化不生效 (重启后回退),
+          会话内仍经 set_token_async 生效; View 须以 warning 提示而非「保存成功」。
+        - FAILED_NO_SECURE_STORE: 本机无 keyring/加密环境, token 未持久化,
+          中止会话内更新 (与 verify_token 一致: 未安全持久化的 token 继续更新无意义)。
+        View 按 SaveOutcome 区分反馈, 不得将后两者渲染为「保存成功」。
         """
         token = token.strip()
         if not token:
-            return
+            return SaveOutcome.FAILED
         # keyring.set_password + save_config 均为同步 IO，15s 兜底防 keyring 后端卡死
-        await asyncio.wait_for(
+        outcome: SaveOutcome = await asyncio.wait_for(
             ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_token, token),
             timeout=15,
         )
+        if outcome is SaveOutcome.FAILED_NO_SECURE_STORE:
+            return outcome
         # TushareClient 在事件循环线程构造并 await set_token_async：同步包装器 set_token
         # 依赖已捕获的 _loop，若在工作线程构造（_loop=None）会抛 RuntimeError。
         # set_token_async 仅重建 pro_api/限流器（无网络 IO），不违反 R16。
@@ -701,6 +711,7 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         # 探测失败使保存流程中断。
         if needs_probe:
             await client.probe_api_capabilities()
+        return outcome
 
     async def set_history_years(self, years: int) -> None:
         """异步保存历史年限配置 (R16: IO offload via ThreadPoolManager).
