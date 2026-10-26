@@ -13,7 +13,10 @@ MAX_PROMPT_LENGTH = 8000
 # \u2060/\u180e），注入文本夹带 \u2060（如 "ig\u2060nore previous instructions"）
 # 可残存零宽字符绕过注入正则，形成校验层弱于中和层的覆盖倒挂；现确认对齐后
 # 收敛为单点定义，防止清单再次漂移。
-_ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff\u00ad\u2060\u180e]")
+# \u2061-\u2064（FUNCTION APPLICATION / INVISIBLE TIMES / INVISIBLE SEPARATOR /
+# INVISIBLE PLUS）为数学排版专用不可见 Format 字符，NFKC 不剥除（Cf 类别保留），
+# 夹带注入短语（如 "ig\u2061nore"）可同时绕过校验层与中和层，故纳入同一清单。
+_ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff\u00ad\u2060-\u2064\u180e]")
 
 _INJECTION_PATTERNS = [
     re.compile(
@@ -63,7 +66,7 @@ def _normalize_unicode(text: str) -> str:
       neutralize_external_text, 见模块顶部对齐说明).
     """
     normalized = unicodedata.normalize("NFKC", text)
-    # 经 _ZERO_WIDTH_RE 统一剥除（含 \u2060/\u180e），与中和层同一清单（UTILS-B-05）
+    # 经 _ZERO_WIDTH_RE 统一剥除（含 \u2060-\u2064/\u180e），与中和层同一清单（UTILS-B-05）
     return _ZERO_WIDTH_RE.sub("", normalized)
 
 
