@@ -227,7 +227,21 @@ class StartupController:
             self._on_exit()
 
     async def onboarding_complete(self):
-        """Onboarding wizard finished: init services."""
+        """Onboarding wizard finished: init services.
+
+        M-UI-04 (UI-15 移交深验): complete 步重复点击防重入守卫。首次调用经
+        ``_init_services`` 同步段 transition 到 LOADING；重渲染 patch 下发前的
+        双击窗口内第二次调用被本守卫忽略，避免 ``initialize_services`` 并发
+        重入击穿 ``services_initialized`` 幂等保护（TaskManager.init_db 不幂等、
+        auto_probe_task 重复创建，见 app/bootstrap.py 幂等说明）。
+        事件循环单线程串行保证守卫读取与 ``_transition`` 写入无竞态。
+        """
+        if self._state != StartupState.NEED_ONBOARDING:
+            logger.warning(
+                "[Startup] onboarding_complete ignored in state %s (re-entry guard)",
+                self._state,
+            )
+            return
         await self._init_services()
 
 

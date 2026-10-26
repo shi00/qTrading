@@ -471,6 +471,39 @@ class TestStartupOnboardingComplete:
         mock_init.assert_awaited_once()
         assert ctrl.state == StartupState.READY
 
+    @pytest.mark.asyncio
+    async def test_onboarding_complete_reentry_guard_ignores_duplicate(self, controller):
+        """M-UI-04 (UI-15 移交深验): complete 步重复点击防重入.
+
+        首次调用后 state 已 transition 到 LOADING（_init_services 同步段）；
+        重渲染 patch 下发前的双击窗口内第二次调用应被忽略，不再触发
+        initialize_services（避免并发重入击穿 services_initialized 幂等保护）。
+        """
+        ctrl, transitions = controller
+        ctrl._state = StartupState.NEED_ONBOARDING
+
+        with patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init:
+            mock_init.return_value = {"success": True, "error": None, "detail": None}
+            await ctrl.onboarding_complete()
+            # 模拟双击窗口内的第二次点击（state 已是 LOADING）
+            await ctrl.onboarding_complete()
+
+        mock_init.assert_awaited_once()
+        assert ctrl.state == StartupState.READY
+        assert [s for s, _ in transitions].count(StartupState.LOADING) == 1
+
+    @pytest.mark.asyncio
+    async def test_onboarding_complete_ignored_when_not_in_onboarding_state(self, controller):
+        """非 NEED_ONBOARDING 状态（如 READY/LOADING）下调用直接忽略."""
+        ctrl, _ = controller
+        ctrl._state = StartupState.READY
+
+        with patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init:
+            await ctrl.onboarding_complete()
+
+        mock_init.assert_not_awaited()
+        assert ctrl.state == StartupState.READY
+
 
 class TestStartupEmbeddedPgScenario:
     """UX 改进 spec §启动侧方案 A：embedded_pg_scenario 传递与跨状态保留."""
