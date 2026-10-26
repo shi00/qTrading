@@ -733,8 +733,8 @@ class TradeCalendarService:
         获取最近的交易日。
 
         规则:
-        - 当前时间 < 15:00 → 返回上一个交易日
-        - 当前时间 >= 15:00 → 返回今天 (如果是交易日) 或上一个交易日
+        - 当前时间 < 16:00 (MARKET_CLOSE_HOUR) → 返回上一个交易日
+        - 当前时间 >= 16:00 (MARKET_CLOSE_HOUR) → 返回今天 (如果是交易日) 或上一个交易日
 
         Args:
             allow_fallback: If True, falls back to weekday heuristic when

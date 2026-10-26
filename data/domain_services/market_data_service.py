@@ -276,8 +276,8 @@ class MarketDataService:
             not isinstance(results[1], Exception) and results[1].get("value") == "-"
         )
         # MKT-002: Data readiness fallback.
-        # ``get_latest_trade_date()`` uses MARKET_CLOSE_HOUR (15:00) to decide
-        # whether "today" is the latest trade date. Between 15:00 and the
+        # ``get_latest_trade_date()`` uses MARKET_CLOSE_HOUR (16) to decide
+        # whether "today" is the latest trade date. Between 16:00 and the
         # completion of data ingestion, querying today's data returns empty.
         # This block detects that gap (indices/hsgt empty on the latest trade
         # date) and transparently falls back to the previous trade date. The
