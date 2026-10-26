@@ -623,12 +623,20 @@ def _build_scan_result(result: QualityScanResult, on_init_data: Callable[[], Non
     avg_cont = result.avg_continuity
 
     color = AppColors.SUCCESS if score > 80 else (AppColors.WARNING if score > 50 else AppColors.ERROR)
-    avg_fundamental = result.avg_fundamental or 0
-    fundamental_color = (
-        AppColors.SUCCESS
-        if avg_fundamental > 0.7
-        else (AppColors.WARNING if avg_fundamental > 0.5 else AppColors.ERROR)
-    )
+    # M-UI-11 检视修复 (R21): avg_fundamental=None 表示「未计算」(data 层 fast-path
+    # 语义, VM frozen 字段保留 None), 不得伪装为业务合法值 0.0% + ERROR 红色误导
+    # 用户为「基本面数据最差」; 改为中性色显示「未计算」文案。
+    avg_fundamental = result.avg_fundamental
+    if avg_fundamental is None:
+        fundamental_text: str = I18n.get("health_fundamental_not_computed")
+        fundamental_color = AppColors.TEXT_HINT
+    else:
+        fundamental_text = f"{avg_fundamental * 100:.1f}%"
+        fundamental_color = (
+            AppColors.SUCCESS
+            if avg_fundamental > 0.7
+            else (AppColors.WARNING if avg_fundamental > 0.5 else AppColors.ERROR)
+        )
     fin_recency_ok = result.fin_recency_ok
 
     result_controls: list[ft.Control] = [
@@ -713,7 +721,7 @@ def _build_scan_result(result: QualityScanResult, on_init_data: Callable[[], Non
                             color=AppColors.TEXT_SECONDARY,
                         ),
                         ft.Text(
-                            f"{avg_fundamental * 100:.1f}%",
+                            fundamental_text,
                             size=AppStyles.FONT_SIZE_TITLE,
                             weight=ft.FontWeight.BOLD,
                             color=fundamental_color,

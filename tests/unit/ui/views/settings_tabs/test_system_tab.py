@@ -1660,6 +1660,41 @@ class TestFieldOnBlurValidation:
         assert _find_text_field_by_label(env, "settings_db_pool").error == "i18n[sys_err_out_of_range_fmt]"
         assert _find_text_field_by_label(env, "settings_db_overflow").error is None
 
+    def test_db_pool_multi_fields_invalid_same_batch_all_errors_shown(self, system_tab_env) -> None:
+        """M-UI-11 回归: 单次失焦校验中多个字段同时非法 → 每个非法字段均显示 error。
+
+        原实现 _set_field_error 基于渲染闭包旧快照构造新 dict, _commit_db_pool 在
+        同一事件回调内连续三次 set_field_errors 时后写覆盖先写, 先前字段的错误
+        标记被静默丢弃 (仅保留最后一个非法字段的 error)。
+        """
+        env = system_tab_env
+        _set_field_value(env, "settings_db_pool", "0")  # 越界 (< DB_POOL_MIN)
+        _set_field_value(env, "settings_db_overflow", "abc")  # 非数字
+        _set_field_value(env, "settings_db_timeout", "")  # 空
+        env["page"].run_task.reset_mock()
+
+        _invoke(_find_text_field_by_label(env, "settings_db_pool").on_blur, _make_event())
+
+        assert not env["page"].run_task.called
+        _rerender(env)
+        assert _find_text_field_by_label(env, "settings_db_pool").error == "i18n[sys_err_out_of_range_fmt]"
+        assert _find_text_field_by_label(env, "settings_db_overflow").error == "i18n[sys_snack_num_fmt]"
+        assert _find_text_field_by_label(env, "settings_db_timeout").error == "i18n[sys_field_required]"
+
+    def test_thread_pool_multi_fields_invalid_same_batch_all_errors_shown(self, system_tab_env) -> None:
+        """M-UI-11 回归: thread_pool 组两字段同时非法 → 两个字段均显示 error。"""
+        env = system_tab_env
+        _set_field_value(env, "sys_pool_io", "0")  # 越界 (< IO_WORKERS_MIN)
+        _set_field_value(env, "sys_pool_cpu", "x")  # 非数字
+        env["page"].run_task.reset_mock()
+
+        _invoke(_find_text_field_by_label(env, "sys_pool_io").on_blur, _make_event())
+
+        assert not env["page"].run_task.called
+        _rerender(env)
+        assert _find_text_field_by_label(env, "sys_pool_io").error == "i18n[sys_err_out_of_range_fmt]"
+        assert _find_text_field_by_label(env, "sys_pool_cpu").error == "i18n[sys_snack_num_fmt]"
+
     def test_no_proxy_blur_dispatches_save(self, system_tab_env) -> None:
         """no_proxy (无范围校验) 失焦即保存, 值原样传入。"""
         env = system_tab_env

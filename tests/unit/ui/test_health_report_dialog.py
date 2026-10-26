@@ -728,6 +728,33 @@ class TestBuildScanResultExtended:
         fundamental_value = fundamental_row.controls[0].controls[1]
         assert fundamental_value.color == self.mock_ac.ERROR
 
+    def test_none_avg_fundamental_shows_not_computed(self):
+        """M-UI-11 回归 (R21): avg_fundamental=None 表示「未计算」, 不得伪装为 0.0%。
+
+        data 层 fast-path 无法计算基本面完整度时返回 None (VM frozen 字段保留),
+        View 渲染为中性 TEXT_HINT 色「未计算」文案, 而非业务合法值 0.0% + ERROR 红。
+        """
+        from ui.components.health_report_dialog import _build_scan_result
+
+        result = QualityScanResult(score=90, tier=3, avg_lag=1, avg_continuity=0.95, avg_fundamental=None)
+        column = _build_scan_result(result)
+        fundamental_row = column.controls[-1]
+        fundamental_value = fundamental_row.controls[0].controls[1]
+        # mock_i18n.get 返回 key 本身
+        assert fundamental_value.value == "health_fundamental_not_computed"
+        assert fundamental_value.color == self.mock_ac.TEXT_HINT
+
+    def test_zero_avg_fundamental_still_uses_error_color(self):
+        """显式 0.0 (已计算且为 0) 与 None (未计算) 语义区分: 0.0 仍渲染 0.0% + ERROR。"""
+        from ui.components.health_report_dialog import _build_scan_result
+
+        result = QualityScanResult(score=30, tier=1, avg_lag=30, avg_continuity=0.5, avg_fundamental=0.0)
+        column = _build_scan_result(result)
+        fundamental_row = column.controls[-1]
+        fundamental_value = fundamental_row.controls[0].controls[1]
+        assert fundamental_value.value == "0.0%"
+        assert fundamental_value.color == self.mock_ac.ERROR
+
     def test_fin_recency_ok_true_shows_check(self):
         """fin_recency_ok=True 时显示 CHECK icon (SUCCESS 色) (P2-7: ✓ → ft.Icon)。"""
         from ui.components.health_report_dialog import _build_scan_result
