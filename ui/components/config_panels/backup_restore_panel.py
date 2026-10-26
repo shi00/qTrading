@@ -221,7 +221,7 @@ def BackupRestorePanel() -> ft.Container:
         disabled=state.is_backing_up,
     )
 
-    backup_path_text = I18n.get("db_status_data_dir", path=state.backup_path) if state.backup_path is not None else ""
+    backup_path_text = I18n.get("backup_file_path", path=state.backup_path) if state.backup_path is not None else ""
     backup_path_ctrl = ft.Text(
         backup_path_text,
         size=AppStyles.FONT_SIZE_BODY_SM,

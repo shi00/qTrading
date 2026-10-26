@@ -924,6 +924,7 @@
     "restore_step2_confirm": "Step 2: Confirm restore",
     "backup_in_progress": "Backing up...",
     "backup_success": "Backup success: {path}",
+    "backup_file_path": "Backup file: {path}",
     "backup_failed": "Backup failed",
     "restore_failed": "Restore failed",
     "restore_confirm_title": "Confirm Restore",
