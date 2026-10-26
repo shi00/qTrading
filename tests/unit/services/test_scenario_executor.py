@@ -8,6 +8,10 @@
 - validate_output 失败按失败表格切换；
 - 同候选重试：默认 1 次（首次 + 1 重试 = 2 次调用）、上限 2 次；
 - CancelledError 始终传播（R2），不包装为失败；
+- F19 取消边界受限清理：取消时提交 cancelled 终态（不停留 dispatched）——
+  外发已开始不携带预留 ID（R21 收费未知不记 settled），外发未开始携带预留
+  token（F23 背书 + settled）；在途终态幂等重提交；清理失败 / 超时不阻断传播；
+- F19 归属元数据派发时点固化（month 冻结，不事后重算）；
 - deadline 耗尽停止遍历；
 - 有限额费用型在 mark_dispatched persisted=False 时禁止派发（D5）；
 - 并发上限：同连接 concurrency_limit=1 时并发 execute 串行；
@@ -20,6 +24,8 @@
 
 import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import dataclasses
@@ -472,8 +478,177 @@ class TestGuards:
             await executor.execute(
                 _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
             )
-        # 取消路径不得把该 attempt 落为失败终态（CancelledError 非业务失败）
-        recorder.submit_terminal.assert_not_awaited()
+        # F19：取消边界受限清理提交 cancelled 终态（非 failed，不吞取消）——
+        # attempt 不再永久停留 dispatched（可区分超时 / 取消 / 失败 / 仍运行）
+        recorder.submit_terminal.assert_awaited_once()
+        record = recorder.submit_terminal.await_args.args[0]
+        assert record.status == "cancelled"
+        assert record.error_code == "CANCELLED"
+        # R21：用量缺失标 unavailable 语义（usage=None，不填 0 伪装）
+        assert record.usage is None
+        assert record.actual_model is None
+        # F19③：终态携带派发时点固化的审计元数据（归属月 / retry_index / 连接身份）
+        assert record.metadata["month"]
+        assert record.metadata["retry_index"] == 0
+        assert record.metadata["connection_id"] == "conn-remote"
+        assert record.metadata["task_id"] == "sentiment"
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_outbound_carries_no_reservation(self):
+        """F19② 收费未知收敛：外发已开始（适配器调用中取消）→ 无法证明是否已被
+        上游消费 → cancelled 终态不携带预留 ID（R21 禁止记 settled 伪装费用确定），
+        预留经 F23 租约到期自愈 held_unconfirmed（「结果未知」占用，人工处置）。"""
+        adapter = MagicMock()
+
+        async def _cancel(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        adapter.invoke = AsyncMock(side_effect=_cancel)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2
+            await executor.execute(
+                _request(), _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+            )
+        record = recorder.submit_terminal.await_args.args[0]
+        assert record.status == "cancelled"
+        assert record.reservation_id is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_before_outbound_carries_reservation_token(self):
+        """F19②：外发未开始（authorize 中取消）→ 零消费可证 → cancelled 终态携带
+        预留 token（F23 背书补记缺失 attempt 行 + 预留同事务 settled，费用确定为
+        零口径），取消仍裸传播（R2）。"""
+        adapter = _adapter_ok()
+
+        async def _cancel(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        executor._config_service.authorize_attempt = AsyncMock(side_effect=_cancel)
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2
+            await executor.execute(
+                _request(), _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+            )
+        recorder.submit_terminal.assert_awaited_once()
+        record = recorder.submit_terminal.await_args.args[0]
+        assert record.status == "cancelled"
+        # 外发未开始 → 携带预留 token（可证零消费，settled 语义合法）
+        assert record.reservation_id is not None
+        # 派发时点固化的审计元数据贯穿取消终态
+        assert record.metadata["retry_index"] == 0
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_failed_terminal_resubmits_pending(self):
+        """F19：取消打断在途终态提交 → 取消边界幂等重提交同一记录
+        （DAO revision 水位保证已提交场景不双计），取消仍裸传播（R2）。"""
+        adapter = MagicMock()
+        submit_calls: list[Any] = []
+
+        async def _fail_invoke(*args, **kwargs):
+            raise RuntimeError("upstream 5xx")
+
+        async def _submit_first_cancel_then_persist(record):
+            submit_calls.append(record)
+            if len(submit_calls) == 1:
+                raise asyncio.CancelledError()  # 模拟取消打断失败终态提交
+            return PersistenceOutcome(persisted=True, error_code=None)
+
+        adapter.invoke = AsyncMock(side_effect=_fail_invoke)
+        recorder = _recorder_mock()
+        recorder.submit_terminal = AsyncMock(side_effect=_submit_first_cancel_then_persist)
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2
+            await executor.execute(
+                _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+            )
+        # 首次提交被取消打断 + 清理幂等重提交同一记录
+        assert recorder.submit_terminal.await_count == 2
+        assert submit_calls[0] is submit_calls[1]
+        assert submit_calls[1].status == "failed"
+        assert submit_calls[1].reservation_id is not None
+
+    @pytest.mark.asyncio
+    async def test_cancel_cleanup_failure_does_not_block_propagation(self):
+        """F19：清理提交失败（账本异常）仅降级日志，CancelledError 仍裸传播（R2）。"""
+        adapter = MagicMock()
+
+        async def _cancel(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        adapter.invoke = AsyncMock(side_effect=_cancel)
+        recorder = _recorder_mock()
+        recorder.submit_terminal = AsyncMock(side_effect=RuntimeError("ledger exploded"))
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2
+            await executor.execute(
+                _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+            )
+
+    @pytest.mark.asyncio
+    async def test_cancel_cleanup_timeout_does_not_block_propagation(self):
+        """F19：清理提交超时（短超时受限清理）不阻断取消传播（R2）。"""
+        adapter = MagicMock()
+
+        async def _cancel(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        async def _slow_submit(*args, **kwargs):
+            await asyncio.sleep(5.0)
+
+        adapter.invoke = AsyncMock(side_effect=_cancel)
+        recorder = _recorder_mock()
+        recorder.submit_terminal = AsyncMock(side_effect=_slow_submit)
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        with patch("services.ai_service.scenario_executor._CANCEL_CLEANUP_TIMEOUT_S", 0.05):
+            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2
+                await executor.execute(
+                    _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+                )
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_concluded_terminal_skips_cleanup(self):
+        """F19：终态已落账后退避期取消 → 无需收敛（不再提交终态），裸传播（R2）。"""
+        adapter = MagicMock()
+
+        async def _fail_invoke(*args, **kwargs):
+            raise RuntimeError("upstream 5xx")
+
+        adapter.invoke = AsyncMock(side_effect=_fail_invoke)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        # 首次失败终态已即时落账（F18），退避 sleep 期间任务取消 → concluded=True
+        task = asyncio.ensure_future(
+            executor.execute(_request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok)
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2
+            await task
+        # 首次失败终态一次 + 清理不追加（concluded 跳过）
+        assert recorder.submit_terminal.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_terminal_metadata_month_frozen_at_dispatch(self):
+        """F19③ 归属元数据派发时点固化：month 取 execute 起点冻结值贯穿观察与
+        终态，不依赖事后重算（月界不漂移，与预留归属月同源）。"""
+        fixed_now = datetime(2026, 1, 31, 15, 59, 0, tzinfo=UTC)  # CST 2026-01-31 23:59
+        fake_datetime = MagicMock()
+        fake_datetime.now.return_value = fixed_now
+        adapter = _adapter_fail_then_ok(failures=99)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        with patch("services.ai_service.scenario_executor.datetime", fake_datetime):
+            result = await executor.execute(
+                _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+            )
+        assert result.status == "failed"
+        # 两次尝试（retry_index 0/1）的失败终态归属月均为派发时点冻结值
+        months = [call.args[0].metadata["month"] for call in recorder.submit_terminal.await_args_list]
+        assert months == ["202601", "202601"]
+        retry_indices = [call.args[0].metadata["retry_index"] for call in recorder.submit_terminal.await_args_list]
+        assert retry_indices == [0, 1]
 
     @pytest.mark.asyncio
     async def test_deadline_exhaustion_stops(self):

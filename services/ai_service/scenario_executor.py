@@ -21,7 +21,10 @@
   （try_reserve / mark_dispatched persisted=False）时零出站；usage_only 预留
   或落账不可用时允许进程内一次性派发身份；失败候选收敛错误提交终态
   （§6.2 步骤 5，F16：终态携带预留 ID 经 F22 转换 / F23 背书收敛预留）；
-- **R2**：CancelledError 始终传播，不包装为失败。
+- **R2**：CancelledError 始终传播，不包装为失败；取消传播边界先经受限清理
+  （F19）：尽力提交 cancelled 终态或幂等重提交在途终态（短超时，提交失败仅记
+  日志）后 re-raise——attempt 不再永久停留 dispatched；外发已开始的取消按
+  收费未知收敛（不结算预留，经 F23 租约到期自愈 held_unconfirmed）。
 """
 
 from __future__ import annotations
@@ -72,6 +75,12 @@ _CST_OFFSET = timedelta(hours=8)
 # 的保守富余；租约过期的预留经 F23 语义自愈（失权 owner 预留不可再推进，
 # reserved 退出预算占用为正确的事实零释放，保守多占可接受）。
 _OWNER_LEASE_SECONDS: Final[float] = 900.0
+
+# F19：取消边界清理的终态提交短超时（秒）——受限清理不得拖延取消传播；超时
+# 放弃提交（外发已开始时预留经 F23 租约到期自愈 held_unconfirmed 兜底）。
+_CANCEL_CLEANUP_TIMEOUT_S: Final[float] = 2.0
+# F19：取消终态错误码（与超时 / 失败 / 仍运行可区分的账本事实）
+_CANCELLED_ERROR_CODE: Final[str] = "CANCELLED"
 
 
 def _default_local_only_mode_reader() -> bool:
@@ -394,255 +403,260 @@ class ScenarioExecutor:
             # 持久化重放沿用该次身份，由 DAO 幂等（ON CONFLICT DO NOTHING /
             # usage_revision 水位）承载，不在本层重试。
             attempt_id = uuid.uuid4().hex
-
-            # F16 逐实际尝试原子预留（每次真实尝试独立预留，预留 ↔ attempt 生命
-            # 周期对齐：该次终态同事务结算该次预留）：费用型候选带预算身份
-            # （dispatch 冻结），usage_only 候选登记 NULL 金额预留（不占预算）。
-            # 前次失败尝试的预留已随其 failed 终态 settled 退出在途占用，预算
-            # 门逐尝试独立判定，无跨尝试双计。
             reservation_token = uuid.uuid4().hex
-            reserve_outcome = await self._recorder.try_reserve(
-                invocation_id=request.invocation_id,
-                scenario_id=request.scenario_id,
-                task_id=str(cand.get("task_id", request.task_id)),
-                trigger="manual",
-                month=month,
-                reservation_id=reservation_token,
-                attempt_id=attempt_id,
-                candidate_index=int(cand.get("candidate_index", 0)),
-                retry_index=retry_index,
-                amount_cny=budget_amount,
-                budget_limit_cny=cand.get("budget_limit_cny"),
-                budget_policy_snapshot=cand.get("budget_policy_snapshot"),
-                owner_session_id=owner_session_id,
-                owner_epoch=owner_epoch,
-                owner_lease_expires_at=owner_lease_expires_at,
-            )
-            reservation_id: str | None = None
-            if reserve_outcome.persisted and reserve_outcome.reservation is not None:
-                reservation_id = reservation_token
-            elif budget_amount is not None:
-                # D5：费用型预留被拒（余额不足 / owner 失权）或账本不可用 →
-                # 零出站（不降级外发）；原因随决策记录不静默（R21）。预算 /
-                # owner 为 invocation 级事实，切换候选无济 → 中断整个候选遍历。
-                return _CandidateOutcome(
-                    status="failed",
-                    decision_hint="rejected",
-                    reason=f"budget reserve rejected: {reserve_outcome.error_code}",
-                    outputs=(),
-                    usages=(),
-                    halt_candidates=True,
-                )
-            # usage_only：预留未持久化 → 降级进程内派发身份（reservation_id=None）
+            # F19③：派发时点固化审计元数据——归属月（execute 起点冻结值，月界
+            # 不漂移）/ retry_index / 连接身份 / 计价冻结快照在预留前构建，观察与
+            # 终态（含取消清理）一律携带本份（copy 增量），不依赖事后重算；
+            # security_revision 于 authorize 线性化点就位。
+            attempt_metadata = _metadata(request, cand, connection, None, 0, pricing, retry_index, month=month)
+            # F19：单次尝试的终态收敛状态（取消边界清理依据）
+            ledger = _AttemptLedgerState()
+            # F19②：外发事实起点——adapter.invoke 开始后消费不可证明（收费未知语义分界）
+            outbound_started = False
 
-            # 派发绑定（D5）：预留 reserved→dispatched（F23：错误预留 ID /
-            # owner 失权 rowcount=0）；有限额费用型 persisted=False 时禁止派发
-            dispatch_outcome = await self._recorder.mark_dispatched(
-                invocation_id=request.invocation_id,
-                reservation_id=reservation_id,
-                owner_session_id=owner_session_id,
-                owner_epoch=owner_epoch,
-            )
-            if not dispatch_outcome.persisted and budget_amount is not None:
-                # 预留成功但派发绑定失权 / 账本不可用：预留留 reserved，由
-                # F23 租约语义自愈（保守多占，不伪装已释放），零出站
-                return _CandidateOutcome(
-                    status="failed",
-                    decision_hint="rejected",
-                    reason=f"budget dispatch forbidden: {dispatch_outcome.error_code}",
-                    outputs=(),
-                    usages=(),
-                    halt_candidates=True,
-                )
-
-            # 许可线性化（§4.3 / 方案 §6.2 步骤 3「再逐次调用 authorize_attempt」）：
-            # 每次尝试单独授权，不预发下一次重试的许可；失败即拒绝切换，不重试。
-            # F06：credential_version 传快照冻结连接的实际执行版本（与下方
-            # effective_connection 出站解析同源），撤销校验绑定执行对象而非磁盘现值。
-            # F01：目标 / 用途取候选携带的分派授权身份（``or ""`` 防 str(None)）；
-            # requires_egress_grant 按真实执行位置声明（litellm_chat 出站需 grant，
-            # gguf_* 设备内本地模型不外发免 grant，凭据撤销等安全检查保留）。
             try:
-                permit = await self._config_service.authorize_attempt(
-                    connection.connection_id,
-                    str(cand.get("target_fingerprint") or ""),
-                    str(cand.get("purpose") or ""),
-                    snapshot.security_scope_version,
-                    connection.credential_version,
-                    attempt_id,
-                    requires_egress_grant=adapter_kind_requires_egress(connection.adapter_kind),
+                # F16 逐实际尝试原子预留（每次真实尝试独立预留，预留 ↔ attempt 生命
+                # 周期对齐：该次终态同事务结算该次预留）：费用型候选带预算身份
+                # （dispatch 冻结），usage_only 候选登记 NULL 金额预留（不占预算）。
+                # 前次失败尝试的预留已随其 failed 终态 settled 退出在途占用，预算
+                # 门逐尝试独立判定，无跨尝试双计。
+                reserve_outcome = await self._recorder.try_reserve(
+                    invocation_id=request.invocation_id,
+                    scenario_id=request.scenario_id,
+                    task_id=str(cand.get("task_id", request.task_id)),
+                    trigger="manual",
+                    month=month,
+                    reservation_id=reservation_token,
+                    attempt_id=attempt_id,
+                    candidate_index=int(cand.get("candidate_index", 0)),
+                    retry_index=retry_index,
+                    amount_cny=budget_amount,
+                    budget_limit_cny=cand.get("budget_limit_cny"),
+                    budget_policy_snapshot=cand.get("budget_policy_snapshot"),
+                    owner_session_id=owner_session_id,
+                    owner_epoch=owner_epoch,
+                    owner_lease_expires_at=owner_lease_expires_at,
                 )
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                reason = f"authorize failed: {type(e).__name__}"
-                if reservation_id is not None:
-                    # F16：预留已绑定派发（dispatched）而授权失败——无 attempt 行，
-                    # 提交 failed 终态经活跃预留背书补记（F23）并转换预留 settled，
-                    # 不留悬挂占用；usage_only（无预留）不补记，维持既有零副作用
-                    await self._submit_failed_terminal(
-                        request,
-                        attempt_id,
-                        reason,
-                        reservation_id,
-                        cand=cand,
-                        connection=connection,
-                        pricing=pricing,
-                        retry_index=retry_index,
+                reservation_id: str | None = None
+                if reserve_outcome.persisted and reserve_outcome.reservation is not None:
+                    reservation_id = reservation_token
+                elif budget_amount is not None:
+                    # D5：费用型预留被拒（余额不足 / owner 失权）或账本不可用 →
+                    # 零出站（不降级外发）；原因随决策记录不静默（R21）。预算 /
+                    # owner 为 invocation 级事实，切换候选无济 → 中断整个候选遍历。
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=f"budget reserve rejected: {reserve_outcome.error_code}",
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
                     )
-                return _CandidateOutcome(
-                    status="failed",
-                    decision_hint="rejected",
-                    reason=reason,
-                    outputs=(),
-                    usages=(),
-                )
+                # usage_only：预留未持久化 → 降级进程内派发身份（reservation_id=None）
 
-            compatibility = self._compatibility.resolve_execution_params(
-                {"adapter_kind": connection.adapter_kind, "adapter_options": dict(connection.adapter_options)}
-            )
-            if not compatibility.compatible:
-                last_reason = f"incompatible: {compatibility.reason}"
-                if reservation_id is not None:
-                    # 本次尝试已预留 / 派发，失败终态即时收敛（结算该次预留）
+                # 派发绑定（D5）：预留 reserved→dispatched（F23：错误预留 ID /
+                # owner 失权 rowcount=0）；有限额费用型 persisted=False 时禁止派发
+                dispatch_outcome = await self._recorder.mark_dispatched(
+                    invocation_id=request.invocation_id,
+                    reservation_id=reservation_id,
+                    owner_session_id=owner_session_id,
+                    owner_epoch=owner_epoch,
+                )
+                if not dispatch_outcome.persisted and budget_amount is not None:
+                    # 预留成功但派发绑定失权 / 账本不可用：预留留 reserved，由
+                    # F23 租约语义自愈（保守多占，不伪装已释放），零出站
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=f"budget dispatch forbidden: {dispatch_outcome.error_code}",
+                        outputs=(),
+                        usages=(),
+                        halt_candidates=True,
+                    )
+
+                # 许可线性化（§4.3 / 方案 §6.2 步骤 3「再逐次调用 authorize_attempt」）：
+                # 每次尝试单独授权，不预发下一次重试的许可；失败即拒绝切换，不重试。
+                # F06：credential_version 传快照冻结连接的实际执行版本（与下方
+                # effective_connection 出站解析同源），撤销校验绑定执行对象而非磁盘现值。
+                # F01：目标 / 用途取候选携带的分派授权身份（``or ""`` 防 str(None)）；
+                # requires_egress_grant 按真实执行位置声明（litellm_chat 出站需 grant，
+                # gguf_* 设备内本地模型不外发免 grant，凭据撤销等安全检查保留）。
+                # R2：CancelledError 不被 except Exception 捕获（BaseException），
+                # 直接传播至本迭代取消边界。
+                try:
+                    permit = await self._config_service.authorize_attempt(
+                        connection.connection_id,
+                        str(cand.get("target_fingerprint") or ""),
+                        str(cand.get("purpose") or ""),
+                        snapshot.security_scope_version,
+                        connection.credential_version,
+                        attempt_id,
+                        requires_egress_grant=adapter_kind_requires_egress(connection.adapter_kind),
+                    )
+                except Exception as e:
+                    reason = f"authorize failed: {type(e).__name__}"
+                    if reservation_id is not None:
+                        # F16：预留已绑定派发（dispatched）而授权失败——无 attempt 行，
+                        # 提交 failed 终态经活跃预留背书补记（F23）并转换预留 settled，
+                        # 不留悬挂占用；usage_only（无预留）不补记，维持既有零副作用
+                        await self._submit_failed_terminal(
+                            request,
+                            attempt_id,
+                            reason,
+                            reservation_id,
+                            metadata=attempt_metadata,
+                            ledger=ledger,
+                        )
+                    return _CandidateOutcome(
+                        status="failed",
+                        decision_hint="rejected",
+                        reason=reason,
+                        outputs=(),
+                        usages=(),
+                    )
+                # F19③：许可线性化点的安全修订固化进审计元数据（F01：permit 权威）
+                attempt_metadata["security_revision"] = getattr(permit, "security_revision", 0)
+
+                compatibility = self._compatibility.resolve_execution_params(
+                    {"adapter_kind": connection.adapter_kind, "adapter_options": dict(connection.adapter_options)}
+                )
+                if not compatibility.compatible:
+                    last_reason = f"incompatible: {compatibility.reason}"
+                    if reservation_id is not None:
+                        # 本次尝试已预留 / 派发，失败终态即时收敛（结算该次预留）
+                        await self._submit_failed_terminal(
+                            request,
+                            attempt_id,
+                            last_reason,
+                            reservation_id,
+                            metadata=attempt_metadata,
+                            ledger=ledger,
+                        )
+                    break
+                effective_connection = replace(connection, adapter_options=compatibility.resolved_options)
+
+                # 真正进入适配器执行前建立实际尝试记录（§6.2 步骤 4）。F18：每次真实
+                # 尝试独立 attempt 行（携带该次 retry_index）；同一次写账的持久化重放
+                # 沿用该次身份（幂等，不重建）。落账失败降级继续执行（执行已授权开始，
+                # 费用型此前已被预留/派发门拦截）。F16：owner 齐传启用 F23 身份强门；
+                # attempt_row 携带预留 ID。
+                begin_outcome = await self._recorder.begin_attempt(
+                    attempt_id=attempt_id,
+                    invocation_id=request.invocation_id,
+                    configured_model=connection.model,
+                    attempt_row=self._attempt_row(
+                        request, cand, connection, snapshot, permit, reservation_id, retry_index
+                    ),
+                    owner_session_id=owner_session_id,
+                    owner_epoch=owner_epoch,
+                )
+                if not begin_outcome.persisted:
+                    logger.warning(
+                        "[ScenarioExecutor] attempt row unavailable (%s), continuing in-memory execution",
+                        begin_outcome.error_code,
+                    )
+
+                attempt_context = AttemptContext(
+                    owner_session_id=owner_session_id,
+                    owner_epoch=owner_epoch,
+                    invocation_id=request.invocation_id,
+                    attempt_id=attempt_id,
+                )
+                # F19②：外发事实起点（await 表达式即视为外发已发起，此后取消时
+                # 无法证明是否已被上游消费）
+                outbound_started = True
+                try:
+                    response = await adapter.invoke(request, effective_connection, request.deadline, attempt_context)
+                except Exception as e:
+                    last_reason = f"adapter error: {type(e).__name__}"
+                    # F18：失败尝试即时收敛（结算该次预留 + 记失败事实，R21 不静默），
+                    # 再退避重试——迟到响应在适配器层被丢弃，无第二次观察通道，费用
+                    # 未知以 None 承载（R21 禁止填 0 伪装）。
                     await self._submit_failed_terminal(
                         request,
                         attempt_id,
                         last_reason,
                         reservation_id,
-                        cand=cand,
-                        connection=connection,
-                        pricing=pricing,
-                        retry_index=retry_index,
-                        security_revision=getattr(permit, "security_revision", 0),
+                        metadata=attempt_metadata,
+                        ledger=ledger,
                     )
-                break
-            effective_connection = replace(connection, adapter_options=compatibility.resolved_options)
+                    if retry_index < total_attempts - 1:
+                        await self._backoff(e, request, clock)
+                    continue
 
-            # 真正进入适配器执行前建立实际尝试记录（§6.2 步骤 4）。F18：每次真实
-            # 尝试独立 attempt 行（携带该次 retry_index）；同一次写账的持久化重放
-            # 沿用该次身份（幂等，不重建）。落账失败降级继续执行（执行已授权开始，
-            # 费用型此前已被预留/派发门拦截）。F16：owner 齐传启用 F23 身份强门；
-            # attempt_row 携带预留 ID。
-            begin_outcome = await self._recorder.begin_attempt(
-                attempt_id=attempt_id,
-                invocation_id=request.invocation_id,
-                configured_model=connection.model,
-                attempt_row=self._attempt_row(request, cand, connection, snapshot, permit, reservation_id, retry_index),
-                owner_session_id=owner_session_id,
-                owner_epoch=owner_epoch,
-            )
-            if not begin_outcome.persisted:
-                logger.warning(
-                    "[ScenarioExecutor] attempt row unavailable (%s), continuing in-memory execution",
-                    begin_outcome.error_code,
-                )
+                # D6：适配器返回后立即同步转移用量（幂等按 attempt_id）；
+                # security_revision 取许可线性化点的真实修订（F01：快照携带的
+                # security_scope_version 是授权范围版本，不得混作安全修订落账）。
+                # F17：metadata 携带计价冻结快照——成本在终态落账时点由 Recorder
+                # 按真实 usage 计算（cost 与 usage 同源，避免重试场景失配）。
+                # F19③：actual_model 为响应事实（增量覆盖派发时点固化元数据）。
+                attempt_metadata = {**attempt_metadata, "actual_model": response.actual_model}
+                self._recorder.observe_usage(_observation_from(request, attempt_id, response, attempt_metadata))
 
-            attempt_context = AttemptContext(
-                owner_session_id=owner_session_id,
-                owner_epoch=owner_epoch,
-                invocation_id=request.invocation_id,
-                attempt_id=attempt_id,
-            )
-            try:
-                response = await adapter.invoke(request, effective_connection, request.deadline, attempt_context)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                last_reason = f"adapter error: {type(e).__name__}"
-                # F18：失败尝试即时收敛（结算该次预留 + 记失败事实，R21 不静默），
-                # 再退避重试——迟到响应在适配器层被丢弃，无第二次观察通道，费用
-                # 未知以 None 承载（R21 禁止填 0 伪装）。
-                await self._submit_failed_terminal(
-                    request,
-                    attempt_id,
-                    last_reason,
-                    reservation_id,
-                    cand=cand,
-                    connection=connection,
-                    pricing=pricing,
-                    retry_index=retry_index,
-                    security_revision=getattr(permit, "security_revision", 0),
-                )
-                if retry_index < total_attempts - 1:
-                    await self._backoff(e, request, clock)
-                continue
+                try:
+                    validated = validate_output(response)
+                except Exception as e:
+                    await self._submit_failed_terminal(
+                        request,
+                        attempt_id,
+                        f"output validation failed: {type(e).__name__}",
+                        reservation_id,
+                        metadata=attempt_metadata,
+                        ledger=ledger,
+                    )
+                    return _CandidateOutcome(
+                        status="failed",
+                        reason=f"output validation failed: {type(e).__name__}",
+                        outputs=(),
+                        usages=(),
+                    )
 
-            # D6：适配器返回后立即同步转移用量（幂等按 attempt_id）；
-            # security_revision 取许可线性化点的真实修订（F01：快照携带的
-            # security_scope_version 是授权范围版本，不得混作安全修订落账）。
-            # F17：metadata 携带计价冻结快照——成本在终态落账时点由 Recorder
-            # 按真实 usage 计算（cost 与 usage 同源，避免重试场景失配）。
-            attempt_metadata = _metadata(
-                request, cand, connection, response, permit.security_revision, pricing, retry_index
-            )
-            self._recorder.observe_usage(
-                _observation_from(
-                    request, cand, connection, attempt_id, response, permit.security_revision, pricing, retry_index
-                )
-            )
-
-            try:
-                validated = validate_output(response)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                await self._submit_failed_terminal(
-                    request,
-                    attempt_id,
-                    f"output validation failed: {type(e).__name__}",
-                    reservation_id,
-                    cand=cand,
-                    connection=connection,
-                    pricing=pricing,
-                    retry_index=retry_index,
-                    security_revision=getattr(permit, "security_revision", 0),
+                usage_tuple = (response.usage,) if response.usage is not None else ()
+                await self._submit_terminal_logged(
+                    _terminal_record(
+                        request,
+                        attempt_id,
+                        usage=response.usage,
+                        actual_model=response.actual_model,
+                        status="succeeded",
+                        error_code=None,
+                        reservation_id=reservation_id,
+                        metadata=attempt_metadata,
+                    ),
+                    ledger,
                 )
                 return _CandidateOutcome(
-                    status="failed",
-                    reason=f"output validation failed: {type(e).__name__}",
-                    outputs=(),
-                    usages=(),
-                )
-
-            usage_tuple = (response.usage,) if response.usage is not None else ()
-            terminal = await self._recorder.submit_terminal(
-                _terminal_record(
-                    request,
-                    attempt_id,
-                    usage=response.usage,
-                    actual_model=response.actual_model,
                     status="succeeded",
-                    error_code=None,
-                    reservation_id=reservation_id,
+                    reason="ok",
+                    outputs=(
+                        # F03：统一公共输出类型 ScenarioOutput——保留校验器 metadata
+                        # （actual_model 等模型身份）与程序生成溯源（连接身份 /
+                        # security_revision 等，Executor 侧权威，后置覆盖同源键）。
+                        ScenarioOutput(
+                            output=dict(validated.output)
+                            if isinstance(validated.output, Mapping)
+                            else {"output": validated.output},
+                            metadata={
+                                **dict(validated.metadata),
+                                **attempt_metadata,
+                            },
+                        ),
+                    ),
+                    usages=usage_tuple,
+                )
+            except asyncio.CancelledError:
+                # F19：取消传播边界的受限清理——尽力收敛终态（cancelled 终态或在途
+                # 终态幂等重提交，短超时）后必须 re-raise（R2 不吞取消；提交失败
+                # 不阻断取消传播）。attempt 不再永久停留 dispatched。
+                await self._cleanup_on_cancel(
+                    request,
+                    attempt_id=attempt_id,
+                    reservation_token=reservation_token,
+                    outbound_started=outbound_started,
+                    ledger=ledger,
                     metadata=attempt_metadata,
                 )
-            )
-            if not terminal.persisted:
-                # D5：usage_only 允许进程内一次性派发身份（persisted=False 不阻断）
-                logger.info(
-                    "[ScenarioExecutor] terminal ledger unavailable (%s), in-memory dispatch identity kept",
-                    terminal.error_code,
-                )
-            return _CandidateOutcome(
-                status="succeeded",
-                reason="ok",
-                outputs=(
-                    # F03：统一公共输出类型 ScenarioOutput——保留校验器 metadata
-                    # （actual_model 等模型身份）与程序生成溯源（连接身份 /
-                    # security_revision 等，Executor 侧权威，后置覆盖同源键）。
-                    ScenarioOutput(
-                        output=dict(validated.output)
-                        if isinstance(validated.output, Mapping)
-                        else {"output": validated.output},
-                        metadata={
-                            **dict(validated.metadata),
-                            **attempt_metadata,
-                        },
-                    ),
-                ),
-                usages=usage_tuple,
-            )
+                raise
 
         return _CandidateOutcome(status="failed", reason=last_reason, outputs=(), usages=())
 
@@ -653,21 +667,19 @@ class ScenarioExecutor:
         error_code: str,
         reservation_id: str | None,
         *,
-        cand: Mapping[str, Any],
-        connection: ResolvedConnection,
-        pricing: ConnectionPricing | None,
-        retry_index: int,
-        security_revision: int = 0,
+        metadata: dict[str, Any],
+        ledger: _AttemptLedgerState,
     ) -> None:
         """失败尝试终态落账（§6.2 步骤 5「Executor 收敛错误并提交终态」）。
 
         用量缺失由 Recorder 标 unavailable（R21）；落账失败不阻断切换流程。
         F16：预留 ID 贯穿终态——非 None 时结算经 F22 预留转换 / F23 活跃预留
         背书补记收敛预留，不留悬挂占用；None（usage_only / 无预留）行为不变。
-        F18：失败路径无用量观察先行，终态自带落账元数据（归属月 / retry_index /
-        连接身份），使失败事实与预留收敛可达账本（Recorder 回退读取）。
+        F18/F19：终态携带派发时点固化的审计元数据（归属月 / retry_index /
+        连接身份），经 ledger 登记在途引用——提交被取消打断时由取消边界幂等
+        重提交（F19 受限清理）。
         """
-        terminal = await self._recorder.submit_terminal(
+        await self._submit_terminal_logged(
             _terminal_record(
                 request,
                 attempt_id,
@@ -676,14 +688,74 @@ class ScenarioExecutor:
                 status="failed",
                 error_code=error_code,
                 reservation_id=reservation_id,
-                metadata=_metadata(request, cand, connection, None, security_revision, pricing, retry_index),
-            )
+                metadata=dict(metadata),
+            ),
+            ledger,
         )
-        if not terminal.persisted:
-            logger.info(
-                "[ScenarioExecutor] failed-attempt terminal not persisted (%s)",
-                terminal.error_code,
+
+    async def _submit_terminal_logged(self, record: Any, ledger: _AttemptLedgerState) -> None:
+        """终态落账（尽力而为，§6.2 步骤 5）：不持久化仅记日志，不阻断执行流。
+
+        F19：记录登记进 ledger——提交被取消打断（CancelledError 传播）时由
+        取消边界幂等重提交（DAO revision 水位保证不双计）；持久化成功即收敛
+        完成（清 pending），此后取消无需再收敛该尝试。
+        """
+        ledger.pending = record
+        outcome = await self._recorder.submit_terminal(record)
+        if outcome.persisted:
+            ledger.concluded = True
+            ledger.pending = None
+        else:
+            logger.info("[ScenarioExecutor] terminal not persisted (%s)", outcome.error_code)
+
+    async def _cleanup_on_cancel(
+        self,
+        request: InferenceRequest,
+        *,
+        attempt_id: str,
+        reservation_token: str,
+        outbound_started: bool,
+        ledger: _AttemptLedgerState,
+        metadata: dict[str, Any],
+    ) -> None:
+        """取消传播边界的受限清理（F19）：尽力收敛终态后由调用方 re-raise。
+
+        R2：不吞取消——本方法不捕获 CancelledError（清理期间二次取消直接
+        传播，让位于取消语义）；非取消失败（短超时 / 账本不可用）仅记日志，
+        不阻断取消传播。
+
+        终态收敛语义（R21 收费未知不伪装确定终态）：
+        - 该尝试终态已落账 → 无需收敛（revision 水位下重提交亦无推进）；
+        - 在途终态（提交被取消打断）→ 短超时幂等重提交原记录；
+        - 否则提交 cancelled 终态（usage 缺失标 unavailable，actual_model=None）：
+          外发未开始（可证零消费）→ 携带预留 token，F23 背书补记缺失 attempt 行
+          且预留同事务 settled（费用确定为零口径）；外发已开始（无法证明是否已
+          被上游消费）→ 不携带预留 ID（R21：禁止记 settled 伪装费用确定），预留
+          留 dispatched 经 F23 租约到期自愈为 held_unconfirmed（「结果未知」占用，
+          人工处置）——对齐 F11 commit_unknown「无法证明即标注未知」精神。
+        """
+        if ledger.concluded:
+            return
+        record = ledger.pending
+        if record is None:
+            record = _terminal_record(
+                request,
+                attempt_id,
+                usage=None,
+                actual_model=None,
+                status="cancelled",
+                error_code=_CANCELLED_ERROR_CODE,
+                reservation_id=None if outbound_started else reservation_token,
+                metadata=dict(metadata),
             )
+        try:
+            outcome = await asyncio.wait_for(self._recorder.submit_terminal(record), timeout=_CANCEL_CLEANUP_TIMEOUT_S)
+            if not outcome.persisted:
+                logger.info("[ScenarioExecutor] cancel-cleanup terminal not persisted (%s)", outcome.error_code)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # 提交失败不阻断取消传播（R2：受限清理让位于取消）
+            logger.warning("[ScenarioExecutor] cancel-cleanup terminal not submitted: %s", type(e).__name__)
 
     async def _backoff(self, error: Exception, request: InferenceRequest, clock: Callable[[], float]) -> None:
         """退避 1/2s 与 Retry-After 取大，clamp 至剩余 deadline（方案 D7）。"""
@@ -849,15 +921,24 @@ class _CandidateOutcome:
     halt_candidates: bool = False
 
 
+@dataclass(slots=True)
+class _AttemptLedgerState:
+    """单次尝试的终态收敛状态（F19，取消边界清理依据；逐尝试新建，无共享可变态）。
+
+    ``pending``：最后构建、尚未确认持久化的终态记录——提交被取消打断时由
+    取消边界幂等重提交（DAO revision 水位保证不双计）；``concluded``：终态
+    已持久化，此后取消无需再收敛该尝试（与 pending 互斥维护：持久化即清空）。
+    """
+
+    pending: Any = None
+    concluded: bool = False
+
+
 def _observation_from(
     request: InferenceRequest,
-    cand: Mapping[str, Any],
-    connection: ResolvedConnection,
     attempt_id: str,
     response: AdapterResponse,
-    security_revision: int,
-    pricing: ConnectionPricing | None = None,
-    retry_index: int = 0,
+    metadata: dict[str, Any],
 ) -> Any:
     from services.ai_service.usage_recorder import AttemptUsageObservation
 
@@ -866,7 +947,7 @@ def _observation_from(
         invocation_id=request.invocation_id,
         usage=response.usage,
         actual_model=response.actual_model,
-        metadata=_metadata(request, cand, connection, response, security_revision, pricing, retry_index),
+        metadata=metadata,
     )
 
 
@@ -918,6 +999,8 @@ def _metadata(
     security_revision: int,
     pricing: ConnectionPricing | None = None,
     retry_index: int = 0,
+    *,
+    month: str,
 ) -> dict[str, Any]:
     """落账元数据（归属月 / 连接身份 / 计价冻结快照 / retry_index）。
 
@@ -925,8 +1008,10 @@ def _metadata(
     （dispatch 冻结候选从不携带该键，恒 0）；``response`` 允许 None——失败
     路径（适配器异常 / 授权失败）无响应可观察，``actual_model=None``
     （未知不伪装，R21），元数据供无观察终态回退落账。
+    F19③：``month`` 为必传参数（execute 起点冻结值），不再于本函数内重算
+    系统时间——观察 / 失败终态 / 取消终态的归属月与预留归属月同源（月界不
+    漂移），审计字段在派发时点固化，不依赖事后重算。
     """
-    now_cst = datetime.now(UTC) + _CST_OFFSET
     return {
         "connection_id": connection.connection_id,
         "connection_revision": connection.connection_revision,
@@ -940,7 +1025,7 @@ def _metadata(
         "retry_index": retry_index,
         # F01：许可线性化点的安全修订（permit），不再混用快照授权范围版本
         "security_revision": security_revision,
-        "month": f"{now_cst.year}{now_cst.month:02d}",
+        "month": month,
         "run_id": request.run_id,
         # F17：连接计价冻结快照（mode / pricing_unit / 价格来源 / 单价 / 汇率 /
         # 生效时点，金额十进制字符串保精度）。成本不在此计算——由 Recorder 在
