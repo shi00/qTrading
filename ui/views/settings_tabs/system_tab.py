@@ -286,12 +286,24 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     advanced_expanded, set_advanced_expanded = ft.use_state(False)
 
     def _set_field_error(error_key: str, err_key: str | None) -> None:
-        """设置/清除某字段的校验错误 (仅在变化时 set_state, 避免多余重渲染)。"""
-        if err_key is None:
-            if error_key in field_errors:
-                set_field_errors({k: v for k, v in field_errors.items() if k != error_key})
-        elif field_errors.get(error_key) != err_key:
-            set_field_errors({**field_errors, error_key: err_key})
+        """设置/清除某字段的校验错误 (仅在变化时 set_state, 避免多余重渲染)。
+
+        M-UI-11 检视修复: 改用 Flet use_state 的 updater 函数基于最新值合并。
+        原实现基于渲染闭包捕获的旧 ``field_errors`` 快照构造新 dict, 同一批次
+        连续多次写入 (如 _commit_db_pool 单次失焦校验 pool/overflow/timeout 三个
+        字段) 时后写覆盖先写, 先前字段的错误标记被静默丢弃。
+        """
+
+        def _apply(prev: dict[str, str]) -> dict[str, str]:
+            if err_key is None:
+                if error_key not in prev:
+                    return prev
+                return {k: v for k, v in prev.items() if k != error_key}
+            if prev.get(error_key) == err_key:
+                return prev
+            return {**prev, error_key: err_key}
+
+        set_field_errors(_apply)
 
     def _make_change_handler(error_key: str, setter: Callable) -> Callable:
         """构造 on_change 处理器: 写入 VM state 并清除该字段错误标记。"""

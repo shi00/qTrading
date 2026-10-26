@@ -1171,6 +1171,7 @@
     "health_days": "Days",
     "health_sample_size": "Sample Size",
     "health_fundamental_completeness": "Fundamental Completeness",
+    "health_fundamental_not_computed": "Not computed",
     "health_fin_recency": "Fin. Recency",
     "scan_title": "Deep Scan Progress",
     "health_coverage": "Coverage & Freshness",
