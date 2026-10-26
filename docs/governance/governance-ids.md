@@ -134,7 +134,7 @@
 | SYNC-01 | 水位线（checkpoint）写入非单调，断点续传水位可能回退——催生 R22 单调性红线 | business-review-2026-09-11（业务检视） | [redlines.yml](./redlines.yml) R22 | 使用中 |
 | FULLMOUNT-1 | F07 生产挂载 E2E 首跑阻塞缺陷：btn_jump_backtest 导航链路 RuntimeError（context not associated with a running event loop），场景①②暂 skip 待修复 | flet-review F07（生产挂载场景池 E2E 首跑） | [test_production_mount.py](../../tests/e2e/test_production_mount.py) | 使用中 |
 | CG-1 | FinBERT 新闻情绪模型微调产线 CI 化：训练与 GGUF 导出脚本固化（train_finbert + export_finbert_gguf，固化 reviews/新闻达标模型微调.md §5/§6，TDD 配套单测） | FinBERT 模型产线 CI 化任务链（本地任务计划） | [train_finbert.py](../../scripts/train_finbert.py) / [export_finbert_gguf.py](../../scripts/export_finbert_gguf.py) / [ci-cd.md](../guides/ci-cd.md) | 使用中 |
-| CG-3 | FinBERT 产线 CI 接线：finbert-train workflow 安装 torch/transformers（不进 pyproject 主依赖）并调用 CG-1 脚本 | FinBERT 模型产线 CI 化任务链（本地任务计划，待实施） | [ci-cd.md](../guides/ci-cd.md) | 使用中 |
+| CG-3 | FinBERT 产线 CI 接线：finbert-train workflow 安装 torch/transformers（不进 pyproject 主依赖）并调用 CG-1 脚本 | FinBERT 模型产线 CI 化任务链（本地任务计划） | [finbert-train.yml](../../.github/workflows/finbert-train.yml) / [ci-cd.md](../guides/ci-cd.md) | 使用中 |
 | FT-01 | 模型微调产线 Release 缺运行时必需 tokenizer.json：复核确认 CG-4 文档路线（获取步骤 + 基座 revision 锚定 + 保存校验链）实质满足，无真实缺陷残留 | 模型微调流水线检视任务链（本地检视报告） | [how-to.md](../guides/how-to.md) / [ai-service.md](../patterns/ai-service.md) | 使用中 |
 | FT-02 | FinBERT 产线是否设模型效果硬门槛待决策（dev/test macro-F1 仅记录于 Release note，无准入拦截） | 模型微调流水线检视任务链（本地检视报告） | [finbert-train.yml](../../.github/workflows/finbert-train.yml) | 使用中 |
 | FT-03 | Laya 人工抽检 Gate 覆盖率上下文：evaluate_gate 并列输出 gold_count/unmatched_count/illegal_count/coverage（PASS 语义与 Gate 适用范围不变） | 模型微调流水线检视任务链（本地检视报告） | [laya_annotator.py](../../scripts/laya_annotator.py) | 使用中 |
