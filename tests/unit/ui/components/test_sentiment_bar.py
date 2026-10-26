@@ -20,7 +20,7 @@ from pathlib import Path
 import flet as ft
 import pytest
 
-from core.i18n import I18n
+from core.i18n import I18n, Message
 from ui.components.sentiment_bar import (
     STRONG_SENTIMENT_THRESHOLD,
     build_day_bar,
@@ -228,6 +228,36 @@ def test_build_strip_selected_day_shows_detail():
     assert "2026-10-12" in (header_text.value or "")
     body = detail_section.controls[1]
     assert isinstance(body, ft.Column) and len(body.controls) == 1  # 1 条明细行
+
+
+def test_build_day_news_detail_error_shows_message_not_no_news():
+    """明细加载失败（message 非空、day_news 空）→ 渲染错误提示而非「暂无新闻」。
+
+    R21 精神：已知失败不得伪装为无信息（DB 故障 ≠ 该日无新闻）。
+    """
+    state = SentimentIndexState(
+        phase=PHASE_READY,
+        points=(_point(index=0.5),),
+        selected_day=DAY,
+        day_news=(),
+        message=Message("sentiment_index_err", params={"ts_code": "600519.SH"}),
+    )
+    control = build_sentiment_strip(state, on_select_day=None)
+    detail_section = control.controls[2]  # build_day_news_section
+    body = detail_section.controls[1]
+    assert isinstance(body, ft.Text)
+    assert "加载失败" in (body.value or "")  # 渲染了 sentiment_index_err 错误文案
+    assert I18n.get("sentiment_index_no_news") not in (body.value or "")  # 非「该日无已打分新闻」伪装
+
+
+def test_build_day_news_empty_without_message_shows_no_news():
+    """真无新闻（message=None、day_news 空）→ 保持「该日无已打分新闻」文案，不受修复影响。"""
+    state = SentimentIndexState(phase=PHASE_READY, points=(_point(index=0.5),), selected_day=DAY, day_news=())
+    control = build_sentiment_strip(state, on_select_day=None)
+    detail_section = control.controls[2]
+    body = detail_section.controls[1]
+    assert isinstance(body, ft.Text)
+    assert body.value == I18n.get("sentiment_index_no_news")
 
 
 # --- i18n key 中英对称 ---
