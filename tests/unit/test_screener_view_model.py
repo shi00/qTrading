@@ -697,6 +697,24 @@ class TestScreenerViewModelAIStreaming:
         assert snapshots[-1].total_items == 1
         assert len(snapshots[-1].current_page_rows) == 1
 
+    @pytest.mark.asyncio
+    async def test_flush_concurrent_with_sort_no_batch_loss(self, vm):
+        """M-UI-05: flush 与 sort_data 并发不丢流式批次 (丢失更新回归).
+
+        修复前: flush 对 _full_results 的「concat → 写回 → 排序 → 写回」与 sort_data
+        的「排序 → 写回」不互斥, 并发交错时旧数据的排序写回覆盖本批 AI 结果行,
+        UI 永久缺行。修复后: 两写点经 screener_vm_results_lock 互斥, 行数守恒。
+        """
+        vm._full_results = pd.DataFrame({"name": ["A1", "A2"], "ai_score": [50.0, 40.0], "other": [1, 2]})
+        vm._main_loop = asyncio.get_running_loop()
+
+        # 直接注 buffer, 绕开 _on_ai_result_stream 的自动 flush 调度 (聚焦 sort 交错面)
+        vm._ai_buffer.append({"name": "S1", "ai_score": 90.0})
+
+        await asyncio.gather(vm._flush_ai_buffer(), vm.sort_data("other", True))
+
+        assert set(vm._full_results["name"]) == {"A1", "A2", "S1"}, "并发排序不得丢失流式批次行"
+
 
 class TestScreenerViewModelExport:
     def test_get_export_data_none_when_empty(self, vm):
@@ -1841,6 +1859,43 @@ class TestLoadHistoryData:
                 await vm.load_history_data("20260906")
 
         assert vm.state.loading is False  # 异常路径仍复位 loading
+
+    @pytest.mark.asyncio
+    async def test_load_discarded_when_mode_switched_during_await(self, vm):
+        """M-UI-05: DAO await 期间用户切回 REALTIME, 迟到的历史写回必须丢弃 (丢失更新回归).
+
+        修复前: load_history_data 在 DAO await 后无条件写 _full_results, 用户切回实时态
+        后迟到的历史数据覆盖 switch_to_realtime 刚恢复的实时快照 (历史数据污染实时表格)。
+        修复后: mode guard 检测加载前后 mode 不一致即丢弃并复位 loading。
+        """
+        history_df = pd.DataFrame({"ts_code": ["000001.SZ", "600000.SH"], "ai_score": [1.0, 2.0]})
+        vm._full_results = pd.DataFrame({"ts_code": ["300750.SZ"], "ai_score": [9.0]})
+
+        def _dao_during_mode_switch(*args, **kwargs):
+            vm.switch_to_realtime()  # 模拟 DAO await 期间用户切回实时态
+            return history_df
+
+        with self._patch_cache(history_df, side_effect=_dao_during_mode_switch):
+            vm.switch_to_history()  # 生产路径: 先切 HISTORY 再加载
+            await vm.load_history_data("20260906")
+
+        assert set(vm._full_results["ts_code"]) == {"300750.SZ"}, "迟到的历史写回不得污染实时数据"
+        assert vm.state.loading is False
+
+    @pytest.mark.asyncio
+    async def test_load_concurrent_with_sort_keeps_history_rows(self, vm):
+        """M-UI-05: load_history_data 与 sort_data 并发不丢历史行 (丢失更新回归).
+
+        修复前: sort_data 的旧数据排序写回若落在 load 的「DAO await → 写回」之后,
+        会覆盖刚载入的历史数据 (历史行永久丢失)。
+        修复后: 同锁互斥, 任一完成序下历史行守恒 (sort 先到则因空表 early-return,
+        load 写回; load 先到则 sort 锁内基于最新历史数据排序)。
+        """
+        history_df = pd.DataFrame({"ts_code": ["000001.SZ", "600000.SH"], "ai_score": [1.0, 2.0]})
+        with self._patch_cache(history_df):
+            await asyncio.gather(vm.load_history_data("20260906"), vm.sort_data("ai_score", True))
+
+        assert set(vm._full_results["ts_code"]) == {"000001.SZ", "600000.SH"}, "并发排序不得丢失历史行"
 
 
 class TestLoadHistoryExecWarningsRestore:

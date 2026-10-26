@@ -264,40 +264,58 @@ class HistoryModeMixin:
         """Load historical screening records for a specific run_id, or fall back to trade_date/strategy_name.
 
         Task 3.2: VM 内聚 loading 管理 (View 不再 set_progress_visible).
+
+        M-UI-05: 全流程纳入 ``screener_vm_results_lock``（与 ``sort_data``/
+        ``_flush_ai_buffer`` 同锁）—— DAO await 期间用户排序/流式 flush 可能交错写
+        ``_full_results``, 旧数据的排序写回会覆盖本方法刚载入的历史数据（丢失更新）;
+        同锁互斥后写点串行化。锁内 await DB 与 ``sort_data`` 同模式, 单锁无嵌套,
+        无死锁; CancelledError 经 ``async with`` 释放锁后正常传播 (R2)。
         """
-        self._set_state(loading=True)
-        try:
-            cache = CacheManager()
-            df = await cache.screener_dao.get_history_records(trade_date, strategy_name, run_id)
-            if df is not None and not df.empty:
-                self._full_results = df
-            else:
-                self._full_results = pd.DataFrame()
-            if df is not None and not df.empty and "ai_score" in df.columns:
-                sort_column = "ai_score"
-            else:
-                sort_column = None
-            # CRITICAL-02 (R21/BT-03): 从落库记录还原执行期 warnings，替代原先的
-            # ``warnings=()``——后者把「已知不可信」渲染成「无警告」。列为 NULL 的
-            # 存量记录走「未记录执行上下文」哨兵分支（见 _restore_exec_warnings）。
-            restored_warnings = self._restore_exec_warnings(df)
-            # C2b H1: 数据内容变更后经唯一 owner 单帧原子产出分页元数据 + 当前页切片,
-            # 避免「loading=False + 旧表格 + 旧 total」陈旧帧 (M-1)。
-            # UX-03: 历史记录无「实时候选池/收窄」上下文, 防御性清空态原因。
-            self._update_pagination(
-                page_no=1,
-                loading=False,
-                sort_column=sort_column,
-                sort_ascending=False,
-                empty_message=None,
-                warnings=restored_warnings,
-            )
-        except asyncio.CancelledError:
-            self._set_state(loading=False)
-            raise
-        except Exception:
-            self._set_state(loading=False)
-            raise
+        lock = get_loop_local("screener_vm_results_lock", asyncio.Lock)
+        async with lock:
+            # M-UI-05: await 前 mode 快照 —— guard 语义为「加载期间 mode 不得切换」,
+            # 不强制 HISTORY 前置 (mode 不变的直接调用/测试路径仍合法)。
+            mode_at_start = self._state.mode
+            self._set_state(loading=True)
+            try:
+                cache = CacheManager()
+                df = await cache.screener_dao.get_history_records(trade_date, strategy_name, run_id)
+                # M-UI-05: mode guard —— await 期间用户切换模式（如切回 REALTIME）时丢弃
+                # 结果并复位 loading, 防止迟到的历史载入写回覆盖 switch_to_realtime 刚
+                # 恢复的实时快照（历史数据污染实时表格）。loading 已被切换路径置过,
+                # 此处幂等复位。
+                if self._state.mode != mode_at_start:
+                    self._set_state(loading=False)
+                    return
+                if df is not None and not df.empty:
+                    self._full_results = df
+                else:
+                    self._full_results = pd.DataFrame()
+                if df is not None and not df.empty and "ai_score" in df.columns:
+                    sort_column = "ai_score"
+                else:
+                    sort_column = None
+                # CRITICAL-02 (R21/BT-03): 从落库记录还原执行期 warnings，替代原先的
+                # ``warnings=()``——后者把「已知不可信」渲染成「无警告」。列为 NULL 的
+                # 存量记录走「未记录执行上下文」哨兵分支（见 _restore_exec_warnings）。
+                restored_warnings = self._restore_exec_warnings(df)
+                # C2b H1: 数据内容变更后经唯一 owner 单帧原子产出分页元数据 + 当前页切片,
+                # 避免「loading=False + 旧表格 + 旧 total」陈旧帧 (M-1)。
+                # UX-03: 历史记录无「实时候选池/收窄」上下文, 防御性清空态原因。
+                self._update_pagination(
+                    page_no=1,
+                    loading=False,
+                    sort_column=sort_column,
+                    sort_ascending=False,
+                    empty_message=None,
+                    warnings=restored_warnings,
+                )
+            except asyncio.CancelledError:
+                self._set_state(loading=False)
+                raise
+            except Exception:
+                self._set_state(loading=False)
+                raise
 
     @staticmethod
     def _restore_exec_warnings(records_df: pd.DataFrame | None) -> tuple[Message, ...]:
