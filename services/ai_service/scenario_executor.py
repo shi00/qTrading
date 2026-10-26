@@ -404,6 +404,10 @@ class ScenarioExecutor:
             # usage_revision 水位）承载，不在本层重试。
             attempt_id = uuid.uuid4().hex
             reservation_token = uuid.uuid4().hex
+            # F34：尝试起点计时（预留 / 派发 / 授权 / 执行全程计入尝试耗时），
+            # 终态构造时点为终点——duration_ms 不再恒 None（R21：未知留 None，
+            # 但本路径耗时恒可知，恒为真实值）。
+            attempt_started_at = clock()
             # F19③：派发时点固化审计元数据——归属月（execute 起点冻结值，月界
             # 不漂移）/ retry_index / 连接身份 / 计价冻结快照在预留前构建，观察与
             # 终态（含取消清理）一律携带本份（copy 增量），不依赖事后重算；
@@ -423,7 +427,7 @@ class ScenarioExecutor:
                 reserve_outcome = await self._recorder.try_reserve(
                     invocation_id=request.invocation_id,
                     scenario_id=request.scenario_id,
-                    task_id=str(cand.get("task_id", request.task_id)),
+                    task_id=str(request.task_id),
                     trigger="manual",
                     month=month,
                     reservation_id=reservation_token,
@@ -506,6 +510,7 @@ class ScenarioExecutor:
                             reservation_id,
                             metadata=attempt_metadata,
                             ledger=ledger,
+                            duration_ms=_elapsed_ms(clock, attempt_started_at),
                         )
                     return _CandidateOutcome(
                         status="failed",
@@ -531,6 +536,7 @@ class ScenarioExecutor:
                             reservation_id,
                             metadata=attempt_metadata,
                             ledger=ledger,
+                            duration_ms=_elapsed_ms(clock, attempt_started_at),
                         )
                     break
                 effective_connection = replace(connection, adapter_options=compatibility.resolved_options)
@@ -579,6 +585,7 @@ class ScenarioExecutor:
                         reservation_id,
                         metadata=attempt_metadata,
                         ledger=ledger,
+                        duration_ms=_elapsed_ms(clock, attempt_started_at),
                     )
                     if retry_index < total_attempts - 1:
                         await self._backoff(e, request, clock)
@@ -603,6 +610,7 @@ class ScenarioExecutor:
                         reservation_id,
                         metadata=attempt_metadata,
                         ledger=ledger,
+                        duration_ms=_elapsed_ms(clock, attempt_started_at),
                     )
                     return _CandidateOutcome(
                         status="failed",
@@ -622,6 +630,7 @@ class ScenarioExecutor:
                         error_code=None,
                         reservation_id=reservation_id,
                         metadata=attempt_metadata,
+                        duration_ms=_elapsed_ms(clock, attempt_started_at),
                     ),
                     ledger,
                 )
@@ -655,6 +664,7 @@ class ScenarioExecutor:
                     outbound_started=outbound_started,
                     ledger=ledger,
                     metadata=attempt_metadata,
+                    duration_ms=_elapsed_ms(clock, attempt_started_at),
                 )
                 raise
 
@@ -669,6 +679,7 @@ class ScenarioExecutor:
         *,
         metadata: dict[str, Any],
         ledger: _AttemptLedgerState,
+        duration_ms: float | None = None,
     ) -> None:
         """失败尝试终态落账（§6.2 步骤 5「Executor 收敛错误并提交终态」）。
 
@@ -677,7 +688,8 @@ class ScenarioExecutor:
         背书补记收敛预留，不留悬挂占用；None（usage_only / 无预留）行为不变。
         F18/F19：终态携带派发时点固化的审计元数据（归属月 / retry_index /
         连接身份），经 ledger 登记在途引用——提交被取消打断时由取消边界幂等
-        重提交（F19 受限清理）。
+        重提交（F19 受限清理）。F34：``duration_ms`` 为该次尝试真实耗时
+        （尝试起点 → 终态构造）。
         """
         await self._submit_terminal_logged(
             _terminal_record(
@@ -689,6 +701,7 @@ class ScenarioExecutor:
                 error_code=error_code,
                 reservation_id=reservation_id,
                 metadata=dict(metadata),
+                duration_ms=duration_ms,
             ),
             ledger,
         )
@@ -717,6 +730,7 @@ class ScenarioExecutor:
         outbound_started: bool,
         ledger: _AttemptLedgerState,
         metadata: dict[str, Any],
+        duration_ms: float | None = None,
     ) -> None:
         """取消传播边界的受限清理（F19）：尽力收敛终态后由调用方 re-raise。
 
@@ -738,6 +752,8 @@ class ScenarioExecutor:
             return
         record = ledger.pending
         if record is None:
+            # F34：新建 cancelled 终态携带该次尝试真实耗时；在途重提交沿用原
+            # 记录构造时点的耗时（终态确定时点，不虚增清理等待时长）
             record = _terminal_record(
                 request,
                 attempt_id,
@@ -747,6 +763,7 @@ class ScenarioExecutor:
                 error_code=_CANCELLED_ERROR_CODE,
                 reservation_id=None if outbound_started else reservation_token,
                 metadata=dict(metadata),
+                duration_ms=duration_ms,
             )
         try:
             outcome = await asyncio.wait_for(self._recorder.submit_terminal(record), timeout=_CANCEL_CLEANUP_TIMEOUT_S)
@@ -782,7 +799,9 @@ class ScenarioExecutor:
         retry_index: int,
     ) -> dict[str, Any]:
         return {
-            "task_id": str(cand.get("task_id", request.task_id)),
+            # F34：真实子任务标识（request.task_id），与终态元数据 / 预留同源——
+            # 候选携带的 task_id 是分派器 scene ID 占位，不落账
+            "task_id": str(request.task_id),
             "candidate_index": int(cand.get("candidate_index", 0)),
             # F18：该次真实尝试的序号（逐尝试递增），不再固定 0
             "retry_index": retry_index,
@@ -961,6 +980,7 @@ def _terminal_record(
     error_code: str | None,
     reservation_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    duration_ms: float | None = None,
 ) -> Any:
     from services.ai_service.usage_recorder import AttemptTerminalRecord
 
@@ -970,10 +990,15 @@ def _terminal_record(
         status=status,
         usage=usage,
         error_code=error_code,
-        duration_ms=None,
+        duration_ms=duration_ms,
         reservation_id=reservation_id,
         metadata=metadata,
     )
+
+
+def _elapsed_ms(clock: Callable[[], float], started_at: float) -> float:
+    """尝试真实耗时（毫秒）：尝试起点 → 终态构造时点（F34，clock 单调非负）。"""
+    return (clock() - started_at) * 1000.0
 
 
 def _budget_policy_snapshot(route: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -1011,6 +1036,9 @@ def _metadata(
     F19③：``month`` 为必传参数（execute 起点冻结值），不再于本函数内重算
     系统时间——观察 / 失败终态 / 取消终态的归属月与预留归属月同源（月界不
     漂移），审计字段在派发时点固化，不依赖事后重算。
+    F34：``task_id`` 取请求的真实子任务标识（``request.task_id``）——候选携带
+    的 ``task_id`` 是分派器冻结的 scene ID 占位（scenario_dispatch 以
+    scenario_id 填充），不落账；预留 / attempt 行 / 终态元数据三处同源。
     """
     return {
         "connection_id": connection.connection_id,
@@ -1019,7 +1047,7 @@ def _metadata(
         "configured_model": connection.model,
         "actual_model": response.actual_model if response is not None else None,
         "scenario_id": request.scenario_id,
-        "task_id": str(cand.get("task_id", request.task_id)),
+        "task_id": str(request.task_id),
         "trigger": str(cand.get("trigger", "manual")),
         "candidate_index": int(cand.get("candidate_index", 0)),
         "retry_index": retry_index,

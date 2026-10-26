@@ -408,8 +408,8 @@ class TestSettleAttemptUsage:
     @pytest.mark.asyncio
     async def test_settle_existing_attempt_updates_and_rolls_both_scopes(self):
         """终态落账（D6）：attempt 修订单调推进 + 差额整体计入两 scope 月汇总。"""
-        # 序列：lock(None) → SELECT FOR UPDATE((0, 0.02)) → UPDATE(None) → upsert×2(None)
-        conn = _CaptureConn(results=[None, (0, Decimal("0.02")), None, None, None])
+        # 序列：lock(None) → SELECT FOR UPDATE((0, 0.02, succeeded, True)) → UPDATE(None) → upsert×2(None)
+        conn = _CaptureConn(results=[None, (0, Decimal("0.02"), "succeeded", True), None, None, None])
         dao = _dao(conn)
         result = await dao.settle_attempt_usage(**_settle_kwargs())
         assert result is True
@@ -429,16 +429,20 @@ class TestSettleAttemptUsage:
         assert len(scenario) == 1 and len(connection) == 1
         assert Decimal(scenario[0]["cost_cny"]) == Decimal("0.03")
         assert scenario[0]["succeeded_count"] == 1
-        assert scenario[0]["invocation_count"] == 0  # settle 不动 invocation 计数
-        # connection scope：scenario/task 维度置 None（§10 两 scope 不相加不混算）
+        # F34：accounted=0 首次结算跃迁 → attempt/invocation 各 +1
+        assert scenario[0]["attempt_count"] == 1
+        assert scenario[0]["invocation_count"] == 1
+        # connection scope：scenario/task 维度置 None（§10 两 scope 不相加不混算）；
+        # invocation_count 维持 0（一次请求可跨多连接，invocation 语义不混算）
         assert connection[0]["scenario_id"] is None
         assert connection[0]["task_id"] is None
         assert connection[0]["connection_id"] == "conn-1"
+        assert connection[0]["invocation_count"] == 0
 
     @pytest.mark.asyncio
     async def test_settle_stale_revision_returns_false(self):
         """迟到旧修订不覆盖新修订（R22 水位语义）：不 UPDATE、不计费。"""
-        conn = _CaptureConn(results=[None, (3, Decimal("0.02"))])
+        conn = _CaptureConn(results=[None, (3, Decimal("0.02"), "succeeded", False)])
         dao = _dao(conn)
         result = await dao.settle_attempt_usage(**_settle_kwargs(usage_revision=2))
         assert result is False
@@ -452,8 +456,8 @@ class TestSettleAttemptUsage:
         外部真实重试是新的 attempt 身份（逐尝试独立行）；同 attempt 的落账重放
         （网络重试 / F23 恢复补记竞态）由修订水位拦截，月汇总零推进。
         """
-        # 序列：lock(None) → SELECT FOR UPDATE((2, 0.05))——已入账修订=本次重放修订
-        conn = _CaptureConn(results=[None, (2, Decimal("0.05"))])
+        # 序列：lock(None) → SELECT FOR UPDATE((2, 0.05, succeeded, False))——已入账修订=本次重放修订
+        conn = _CaptureConn(results=[None, (2, Decimal("0.05"), "succeeded", False)])
         dao = _dao(conn)
         result = await dao.settle_attempt_usage(**_settle_kwargs(usage_revision=2))
         assert result is False
@@ -466,15 +470,15 @@ class TestSettleAttemptUsage:
 
         失权 owner 不得凭空建立 attempt 事实；无预留背书的缺行结算拒绝（fail-closed）。
         """
-        # 序列：lock(0) → SELECT FOR UPDATE(行缺失) → INSERT...SELECT(0 行，未命中背书)
-        conn = _CaptureConn(results=[None, None, 0])
+        # 序列：lock(0) → SELECT FOR UPDATE(行缺失) → invocation 首结判定(True) → INSERT...SELECT(0 行，未命中背书)
+        conn = _CaptureConn(results=[None, None, (True,), 0])
         dao = _dao(conn)
         result = await dao.settle_attempt_usage(
             **_settle_kwargs(status="failed", usage=None, usage_revision=1, cost_cny=None)
         )
         assert result is False
-        assert len(conn.calls) == 3  # noqa: weak-assertion 语句数即语义：拒绝路径仅 lock/SELECT/门控 INSERT
-        insert_sql = conn.calls[2][0]
+        assert len(conn.calls) == 4  # noqa: weak-assertion 语句数即语义：拒绝路径 lock/SELECT/首结判定/门控 INSERT
+        insert_sql = conn.calls[3][0]
         assert "INSERT INTO ai_attempt" in insert_sql
         assert ":reservation_id IS NOT NULL" in insert_sql, "缺行补记必须要求活跃预留背书"
         assert "EXISTS" in insert_sql
@@ -488,20 +492,131 @@ class TestSettleAttemptUsage:
 
         B 认领后持预留 reservation_id 补记实际消费（不盲目拒绝真实迟到事实）。
         """
-        # 序列：lock(None) → SELECT FOR UPDATE(None) → INSERT...SELECT(1) → 预留转换(1) → upsert×2
-        conn = _CaptureConn(results=[None, None, 1, 1, None, None])
+        # 序列：lock(None) → SELECT FOR UPDATE(None) → 首结判定(True) → INSERT...SELECT(1) → 预留转换(1) → upsert×2
+        conn = _CaptureConn(results=[None, None, (True,), 1, 1, None, None])
         dao = _dao(conn)
         result = await dao.settle_attempt_usage(
             **_settle_kwargs(status="failed", usage=None, usage_revision=1, cost_cny=None, reservation_id="res-1")
         )
         assert result is True
-        assert len(conn.calls) == 6  # noqa: weak-assertion 语句数即语义：lock/SELECT/插行/预留转换/upsert×2
-        _insert_sql, insert_params = conn.calls[2]
+        assert len(conn.calls) == 7  # noqa: weak-assertion 语句数即语义：lock/SELECT/首结判定/插行/预留转换/upsert×2
+        _insert_sql, insert_params = conn.calls[3]
         assert insert_params["reservation_id"] == "res-1"
         assert set(insert_params["active_states"]) == {"reserved", "dispatched", "held_unconfirmed"}
-        trans_sql, trans_params = conn.calls[3]
+        trans_sql, trans_params = conn.calls[4]
         assert "UPDATE ai_invocation" in trans_sql
         assert trans_params["settled_attempt_id"] == "att-1"
+
+
+class TestSettleCountingProjection:
+    """F34 计数跃迁投影：attempt/invocation 仅首次结算 +1，迟到修订只更新值；
+    succeeded 按状态跃迁差额保持真投影；乱序修订下计数不重复、不回退（R22 用例）。"""
+
+    @pytest.mark.asyncio
+    async def test_first_settlement_failed_counts_attempt_not_succeeded(self):
+        """首次结算（accounted=0）failed 终态：attempt/invocation +1，succeeded 0。"""
+        # 序列：lock → SELECT((0, 0, failed, True)) → UPDATE → upsert×2
+        conn = _CaptureConn(results=[None, (0, Decimal("0"), "failed", True), None, None, None])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(
+            **_settle_kwargs(status="failed", usage=None, usage_revision=1, cost_cny=None)
+        )
+        assert result is True
+        upserts = [params for _sql, params in conn.calls[3:]]
+        scenario = [p for p in upserts if p["grouping_key"] == "news_sentiment"][0]
+        assert scenario["attempt_count"] == 1
+        assert scenario["succeeded_count"] == 0
+        assert scenario["invocation_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_late_revision_same_status_never_recounts(self):
+        """迟到修订（accounted=2 → revision=3）同状态：只推进成本差额，三计数全 0。"""
+        conn = _CaptureConn(results=[None, (2, Decimal("0.02"), "succeeded", False), None, None, None])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(**_settle_kwargs(usage_revision=3, cost_cny="0.05"))
+        assert result is True
+        upserts = [params for _sql, params in conn.calls[3:]]
+        scenario = [p for p in upserts if p["grouping_key"] == "news_sentiment"][0]
+        # 修正前缺陷：每个新 revision 重复 +1 → 一次调用被计成多次
+        assert scenario["attempt_count"] == 0
+        assert scenario["succeeded_count"] == 0
+        assert scenario["invocation_count"] == 0
+        assert Decimal(scenario["cost_cny"]) == Decimal("0.03")  # 值仍更新（差额语义不变）
+
+    @pytest.mark.asyncio
+    async def test_late_revision_status_transition_corrects_succeeded_projection(self):
+        """迟到修订状态跃迁：failed→succeeded 差额 +1 / succeeded→failed 差额 −1（真投影修正）。"""
+        # failed → succeeded：+1
+        conn = _CaptureConn(results=[None, (2, Decimal("0.02"), "failed", False), None, None, None])
+        dao = _dao(conn)
+        await dao.settle_attempt_usage(**_settle_kwargs(usage_revision=3, cost_cny="0.05"))
+        upserts = [params for _sql, params in conn.calls[3:]]
+        assert all(p["succeeded_count"] == 1 for p in upserts)
+        assert all(p["attempt_count"] == 0 and p["invocation_count"] == 0 for p in upserts)
+        # succeeded → failed：−1
+        conn2 = _CaptureConn(results=[None, (2, Decimal("0.05"), "succeeded", False), None, None, None])
+        dao2 = _dao(conn2)
+        await dao2.settle_attempt_usage(**_settle_kwargs(status="failed", usage=None, usage_revision=3, cost_cny=None))
+        upserts2 = [params for _sql, params in conn2.calls[3:]]
+        assert all(p["succeeded_count"] == -1 for p in upserts2)
+
+    @pytest.mark.asyncio
+    async def test_out_of_order_revisions_count_exactly_once(self):
+        """R22 乱序写入：rev3 先结算（首次跃迁计数），rev2 后到被水位拦截——
+        计数恰一次、无第二次月汇总推进、水位不回退。"""
+        # 第一次：rev3 首次结算（accounted=0）；第二次调用序列追加在后
+        # （lock(None) → SELECT((3, …, False))——首次结算后水位 3，乱序 rev2 被拦截）
+        conn = _CaptureConn(
+            results=[
+                None,
+                (0, Decimal("0"), "succeeded", True),
+                None,
+                None,
+                None,
+                None,
+                (3, Decimal("0.05"), "succeeded", False),
+            ]
+        )
+        dao = _dao(conn)
+        first = await dao.settle_attempt_usage(**_settle_kwargs(usage_revision=3, cost_cny="0.05"))
+        assert first is True
+        # 第二次：rev2 乱序迟到 → 旧修订拦截（2 <= 3）
+        second = await dao.settle_attempt_usage(**_settle_kwargs(usage_revision=2, cost_cny="0.01"))
+        assert second is False
+        # 仅第一次结算产生月汇总（共 2 条 upsert），scenario scope 计数跃迁恰一次
+        upserts = [params for sql, params in conn.calls if "ai_usage_monthly" in sql]
+        assert len(upserts) == 2  # noqa: weak-assertion 乱序修订不产生第二次推进
+        scenario_upsert = [p for p in upserts if p["grouping_key"] == "news_sentiment"][0]
+        assert scenario_upsert["attempt_count"] == 1 and scenario_upsert["invocation_count"] == 1
+        assert all(p["usage_revision"] == 3 for p in upserts)  # GREATEST 水位输入为最大修订
+
+    @pytest.mark.asyncio
+    async def test_sibling_attempt_settled_skips_invocation_count(self):
+        """同 invocation 兄弟 attempt 已结算（invocation_first=False）：仅 attempt +1，
+        invocation 不重复计数（F18 逐尝试结算 → 请求数恰一次）。"""
+        conn = _CaptureConn(results=[None, (0, Decimal("0"), "succeeded", False), None, None, None])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(**_settle_kwargs())
+        assert result is True
+        upserts = [params for _sql, params in conn.calls[3:]]
+        scenario = [p for p in upserts if p["grouping_key"] == "news_sentiment"][0]
+        assert scenario["attempt_count"] == 1
+        assert scenario["invocation_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_backfill_with_sibling_settled_keeps_invocation_count_zero(self):
+        """F23 缺行补记 + 兄弟 attempt 已结算：补记 attempt 计数 +1，invocation 保持 0。"""
+        # 序列：lock → SELECT(None) → 首结判定(False) → INSERT...SELECT(1) → 预留转换(1) → upsert×2
+        conn = _CaptureConn(results=[None, None, (False,), 1, 1, None, None])
+        dao = _dao(conn)
+        result = await dao.settle_attempt_usage(
+            **_settle_kwargs(status="failed", usage=None, usage_revision=1, cost_cny=None, reservation_id="res-1")
+        )
+        assert result is True
+        upserts = [params for _sql, params in conn.calls[5:]]
+        scenario = [p for p in upserts if p["grouping_key"] == "news_sentiment"][0]
+        assert scenario["attempt_count"] == 1
+        assert scenario["invocation_count"] == 0
 
 
 class TestSettleReservationTransition:
@@ -514,8 +629,8 @@ class TestSettleReservationTransition:
     @pytest.mark.asyncio
     async def test_settle_with_reservation_converts_active_to_settled(self):
         """带 reservation_id 结算：UPDATE attempt 后、月汇总前，同事务执行预留转换。"""
-        # 序列：lock → SELECT FOR UPDATE((0, 0.02)) → UPDATE attempt → 预留转换 → upsert×2 = 6 条
-        conn = _CaptureConn(results=[None, (0, Decimal("0.02")), None, 1, None, None])
+        # 序列：lock → SELECT FOR UPDATE((0, 0.02, succeeded, True)) → UPDATE attempt → 预留转换 → upsert×2 = 6 条
+        conn = _CaptureConn(results=[None, (0, Decimal("0.02"), "succeeded", True), None, 1, None, None])
         dao = _dao(conn)
         result = await dao.settle_attempt_usage(**_settle_kwargs(reservation_id="res-1"))
         assert result is True
@@ -538,7 +653,7 @@ class TestSettleReservationTransition:
     @pytest.mark.asyncio
     async def test_settle_without_reservation_keeps_legacy_flow(self):
         """不带 reservation_id（未接入预留的调用链）：不执行转换，行为与既有一致。"""
-        conn = _CaptureConn(results=[None, (0, Decimal("0.02")), None, None, None])
+        conn = _CaptureConn(results=[None, (0, Decimal("0.02"), "succeeded", True), None, None, None])
         dao = _dao(conn)
         result = await dao.settle_attempt_usage(**_settle_kwargs())
         assert result is True
@@ -548,15 +663,15 @@ class TestSettleReservationTransition:
     @pytest.mark.asyncio
     async def test_settle_missing_attempt_branch_also_converts_reservation(self):
         """attempt 行缺失（直接插终态）分支同样必须转换预留：费用落账即预留退出。"""
-        # 序列：lock → SELECT FOR UPDATE(None) → INSERT...SELECT 门控命中(1) → 预留转换(1) → upsert×2 = 6 条
-        conn = _CaptureConn(results=[None, None, 1, 1, None, None])
+        # 序列：lock → SELECT FOR UPDATE(None) → 首结判定(True) → INSERT...SELECT 门控命中(1) → 预留转换(1) → upsert×2 = 7 条
+        conn = _CaptureConn(results=[None, None, (True,), 1, 1, None, None])
         dao = _dao(conn)
         result = await dao.settle_attempt_usage(
             **_settle_kwargs(status="failed", usage=None, usage_revision=1, cost_cny=None, reservation_id="res-1")
         )
         assert result is True
-        assert len(conn.calls) == 6  # noqa: weak-assertion 语句数即语义：insert 分支同样带预留转换
-        trans_sql, trans_params = conn.calls[3]
+        assert len(conn.calls) == 7  # noqa: weak-assertion 语句数即语义：insert 分支同样带预留转换
+        trans_sql, trans_params = conn.calls[4]
         assert "UPDATE ai_invocation" in trans_sql
         assert trans_params["settled_attempt_id"] == "att-1"
         assert trans_params["reservation_id"] == "res-1"
@@ -564,7 +679,7 @@ class TestSettleReservationTransition:
     @pytest.mark.asyncio
     async def test_stale_revision_skips_reservation_transition(self):
         """旧修订（本次无推进）不触发预留转换：预留已在前次成功结算时转换（幂等）。"""
-        conn = _CaptureConn(results=[None, (3, Decimal("0.02"))])
+        conn = _CaptureConn(results=[None, (3, Decimal("0.02"), "succeeded", False)])
         dao = _dao(conn)
         result = await dao.settle_attempt_usage(**_settle_kwargs(usage_revision=2, reservation_id="res-1"))
         assert result is False
@@ -1343,7 +1458,7 @@ class TestAmountContractD2D3:
     async def test_settle_normalizes_float_cost_to_shortest_decimal_string(self):
         """相邻移交：float cost（pricing.estimate_cost 链路）归一为最短往返串入 SQL，
         修复前 Decimal(float) 二进制全长展开入 numeric 列（精度噪音）。"""
-        conn = _CaptureConn(results=[None, (0, Decimal("0.02")), None, None, None])
+        conn = _CaptureConn(results=[None, (0, Decimal("0.02"), "succeeded", True), None, None, None])
         dao = _dao(conn)
         result = await dao.settle_attempt_usage(**_settle_kwargs(cost_cny=0.05))
         assert result is True
@@ -1358,7 +1473,7 @@ class TestAmountContractD2D3:
         """迟到修订合法通道保持：修订成本降低（0.05 → 0.03）产生负差额，
         必须照常推进月汇总（负 delta 仅拒绝于 apply_monthly_delta 公开入口，
         settle 内部差额不受 D3 入参校验影响）。"""
-        conn = _CaptureConn(results=[None, (1, Decimal("0.05")), None, None, None])
+        conn = _CaptureConn(results=[None, (1, Decimal("0.05"), "succeeded", False), None, None, None])
         dao = _dao(conn)
         result = await dao.settle_attempt_usage(**_settle_kwargs(cost_cny="0.03", usage_revision=2))
         assert result is True

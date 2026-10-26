@@ -1066,12 +1066,29 @@ class AIUsageDao(BaseDao):
         text_count: int | None = None,
         usage_window_expires_at: datetime.datetime | None = None,
         usage_fingerprint: str | None = None,
-        invocation_count_delta: int = 0,
     ) -> bool:
         """终态落账：attempt 修订单调推进，差额整体计入月汇总（两 scope）。
 
         幂等：usage_revision <= accounted_usage_revision 时不重复计费（迟到差额
         只推进一次）；返回 False = 本次无推进（旧修订或已结算）。
+
+        计数跃迁投影（F34）：月汇总三个计数列按「首次结算跃迁」推进，迟到修订
+        只更新值不重复计数——
+        - ``attempt_count``：仅首次结算 +1（判定 = attempt 行缺失补记，或
+          ``accounted_usage_revision == 0``；``insert_attempt`` 落 0，
+          ``_insert_terminal_attempt`` 与计数同事务同写，不变量
+          「accounted > 0 ⟺ 已计过数」成立，无需额外标记列）；
+        - ``succeeded_count``：首次结算按终态 +1/0；迟到修订按状态跃迁差额修正
+          （failed→succeeded +1 / succeeded→failed −1 / 其余 0），使该列始终是
+          「当前已入账终态为 succeeded 的 attempt 数」的真实投影（修正不是重复
+          计数；差额与状态同事务原子写，不会击穿非负下界）；
+        - ``invocation_count``：仅 SCOPE_SCENARIO 且该 invocation 首个 attempt
+          结算时 +1（同事务 ``NOT EXISTS`` 其他 accounted > 0 的兄弟 attempt
+          判定；同 invocation 归属月冻结一致，月 advisory 锁串行化保证无竞态；
+          零尝试请求无结算不计入月汇总，但 invocation 行本身已由
+          ensure_invocation 持久化可查——R21 不伪装未发生）。SCOPE_CONNECTION
+          维持 0（一次请求可跨多连接，invocation 语义不混算）。
+        ``GREATEST`` 水位与成本差额语义不变。
 
         预留转换（F22）：``reservation_id`` 非 None 且本次结算推进时，**同一事务内**
         将对应预留从活跃状态（reserved / dispatched / held_unconfirmed）转为
@@ -1106,14 +1123,22 @@ class AIUsageDao(BaseDao):
                 sa.text("SELECT pg_advisory_xact_lock(:ns, :lock_key)"),
                 {"ns": _ADVISORY_LOCK_NAMESPACE, "lock_key": month_to_lock_key(month)},
             )
-            # 旧修订不覆盖新修订（水位语义，R22）
+            # 旧修订不覆盖新修订（水位语义，R22）；同时取已入账终态状态与
+            # 「本 invocation 首个结算 attempt」判定（F34 计数跃迁投影）——
+            # 子查询经 idx_ai_attempt_invocation 索引，仅读不加锁，无碍 FOR UPDATE。
             row = (
                 await conn.execute(
                     sa.text(
                         """
-                        SELECT accounted_usage_revision, cost_cny
-                        FROM ai_attempt
-                        WHERE attempt_id = :attempt_id
+                        SELECT a.accounted_usage_revision, a.cost_cny, a.status,
+                               NOT EXISTS (
+                                   SELECT 1 FROM ai_attempt other
+                                   WHERE other.invocation_id = a.invocation_id
+                                     AND other.attempt_id <> a.attempt_id
+                                     AND other.accounted_usage_revision > 0
+                               )
+                        FROM ai_attempt a
+                        WHERE a.attempt_id = :attempt_id
                         FOR UPDATE
                         """
                     ),
@@ -1125,6 +1150,23 @@ class AIUsageDao(BaseDao):
                 # attempt 行缺失（mark_dispatched 从未落库）：有活跃预留背书才插终态
                 # （F23 fencing：无背书 = 失权 owner 凭空造账路径，拒绝并返回 False；
                 # 预算口径由预留自身占用兜底，人工经未确认详情处置）
+                invocation_first = bool(
+                    (
+                        await conn.execute(
+                            sa.text(
+                                """
+                                SELECT NOT EXISTS (
+                                    SELECT 1 FROM ai_attempt
+                                    WHERE invocation_id = :invocation_id
+                                      AND attempt_id <> :attempt_id
+                                      AND accounted_usage_revision > 0
+                                )
+                                """
+                            ),
+                            {"invocation_id": invocation_id, "attempt_id": attempt_id},
+                        )
+                    ).fetchone()[0]
+                )
                 inserted = await self._insert_terminal_attempt(
                     conn,
                     attempt_id=attempt_id,
@@ -1154,12 +1196,19 @@ class AIUsageDao(BaseDao):
                 if not inserted:
                     return False
                 old_accounted_cost = Decimal("0")
+                old_status: str | None = None
+                first_settlement = True
                 should_account = True
             else:
                 accounted_rev = int(row[0] or 0)
                 if usage_revision <= accounted_rev:
                     return False
                 old_accounted_cost = Decimal(str(row[1])) if row[1] is not None else Decimal("0")
+                old_status = row[2]
+                invocation_first = bool(row[3])
+                # F34：accounted == 0 = 该 attempt 从未结算（insert_attempt 落 0），
+                # 本次为首次结算跃迁；> 0 = 迟到修订（只更新值，不重复计数）。
+                first_settlement = accounted_rev == 0
                 await conn.execute(
                     sa.text(
                         """
@@ -1224,6 +1273,14 @@ class AIUsageDao(BaseDao):
             new_cost = Decimal(cost_cny) if cost_cny is not None else Decimal("0")
             delta = new_cost - old_accounted_cost
             succeeded = status == "succeeded"
+            # F34 计数跃迁投影：attempt/invocation 仅首次结算 +1；succeeded 首次按
+            # 终态、迟到修订按状态跃迁差额修正（保持「当前已入账 succeeded」真投影）。
+            attempt_count_delta = 1 if first_settlement else 0
+            if first_settlement:
+                succeeded_delta = 1 if succeeded else 0
+            else:
+                succeeded_delta = (1 if succeeded else 0) - (1 if old_status == "succeeded" else 0)
+            invocation_count_delta = 1 if (first_settlement and invocation_first) else 0
             for scope, grouping_key in (
                 (SCOPE_SCENARIO, scenario_id),
                 (SCOPE_CONNECTION, connection_id),
@@ -1238,8 +1295,8 @@ class AIUsageDao(BaseDao):
                     task_id=task_id,
                     connection_id=connection_id,
                     invocation_count_delta=invocation_count_delta if scope == SCOPE_SCENARIO else 0,
-                    attempt_count_delta=1,
-                    succeeded_delta=1 if succeeded else 0,
+                    attempt_count_delta=attempt_count_delta,
+                    succeeded_delta=succeeded_delta,
                     cost_delta=delta,
                     usage_revision=usage_revision,
                 )
