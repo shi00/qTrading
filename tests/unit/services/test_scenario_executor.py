@@ -12,6 +12,8 @@
   外发已开始不携带预留 ID（R21 收费未知不记 settled），外发未开始携带预留
   token（F23 背书 + settled）；在途终态幂等重提交；清理失败 / 超时不阻断传播；
 - F19 归属元数据派发时点固化（month 冻结，不事后重算）；
+- F34 落账元数据：task_id 用请求真实子任务标识（非分派器 scene ID 占位）、
+  终态携带真实尝试耗时（预留 / attempt 行 / 元数据同源）；
 - deadline 耗尽停止遍历；
 - 有限额费用型在 mark_dispatched persisted=False 时禁止派发（D5）；
 - 并发上限：同连接 concurrency_limit=1 时并发 execute 串行；
@@ -1545,3 +1547,81 @@ class TestPerAttemptIdentity:
         terminal_records = [call.args[0] for call in recorder.submit_terminal.await_args_list]
         assert terminal_records[0].reservation_id is None
         assert terminal_records[1].reservation_id == dispatch_ids[1]
+
+
+class TestF34TaskIdAndDuration:
+    """F34：落账 task_id 用请求的真实子任务标识（非分派器 scene ID 占位）；
+    终态携带真实尝试耗时（尝试起点 → 终态构造），不再恒 None。"""
+
+    @pytest.mark.asyncio
+    async def test_terminal_metadata_task_id_uses_request_task_not_scene_id(self):
+        """候选携带 task_id="news_sentiment"（分派器 scene ID 占位，scenario_dispatch
+        以 scenario_id 填充），request.task_id="sentiment"（真实子任务标识）——
+        终态元数据 / 预留 / attempt 行三处同源取 request.task_id。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        # 显式构造 scene ID ≠ task_id 的候选（生产形态：dispatch 冻结 task_id=scenario_id）
+        cand = dict(_candidate(0, "conn-remote"), task_id="news_sentiment")
+        await executor.execute(_request(), _snapshot((cand,), (_remote_conn(),)), _validator_ok)
+        record = recorder.submit_terminal.await_args.args[0]
+        assert record.metadata["task_id"] == "sentiment"
+        assert record.metadata["task_id"] != "news_sentiment"  # scene ID 占位不落账
+        assert recorder.try_reserve.await_args.kwargs["task_id"] == "sentiment"
+        assert recorder.begin_attempt.await_args.kwargs["attempt_row"]["task_id"] == "sentiment"
+
+    @pytest.mark.asyncio
+    async def test_reserve_month_same_source_as_terminal_metadata(self):
+        """归属月同源核对（F19 剩余缺口收口）：预留 month 与终态元数据 month
+        同取 execute 起点冻结值（调度入口与尝试入口口径一致）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        await executor.execute(_request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok)
+        reserve_month = recorder.try_reserve.await_args.kwargs["month"]
+        terminal = recorder.submit_terminal.await_args.args[0]
+        assert terminal.metadata["month"] == reserve_month
+        assert reserve_month  # 冻结值非空（YYYYMM 由 execute 入口生成）
+
+    @pytest.mark.asyncio
+    async def test_success_terminal_carries_real_duration(self):
+        """成功终态 duration_ms 为真实耗时（> 0，非恒 None）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        await executor.execute(_request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok)
+        record = recorder.submit_terminal.await_args.args[0]
+        assert record.duration_ms is not None
+        assert record.duration_ms > 0
+
+    @pytest.mark.asyncio
+    async def test_failed_terminal_carries_real_duration(self):
+        """失败终态（适配器异常）同样携带真实耗时；重试轮独立计时。"""
+        adapter = _adapter_fail_then_ok(failures=1)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        await executor.execute(_request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok)
+        records = [call.args[0] for call in recorder.submit_terminal.await_args_list]
+        assert records[0].status == "failed"
+        assert records[0].duration_ms is not None and records[0].duration_ms > 0
+        assert records[1].status == "succeeded"
+        assert records[1].duration_ms is not None and records[1].duration_ms > 0
+
+    @pytest.mark.asyncio
+    async def test_cancelled_terminal_carries_real_duration(self):
+        """取消终态（F19 受限清理新建记录）携带取消时点的真实耗时。"""
+        adapter = MagicMock()
+
+        async def _cancel(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        adapter.invoke = AsyncMock(side_effect=_cancel)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2
+            await executor.execute(
+                _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+            )
+        record = recorder.submit_terminal.await_args.args[0]
+        assert record.status == "cancelled"
+        assert record.duration_ms is not None and record.duration_ms > 0

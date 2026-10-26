@@ -179,7 +179,6 @@ def _make_settle_kwargs(
         "retry_index": 0,
         "security_revision": 1,
         "month": month or _current_month(),
-        "invocation_count_delta": 1,
     }
 
 
