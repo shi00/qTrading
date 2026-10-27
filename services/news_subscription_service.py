@@ -707,9 +707,19 @@ class NewsSubscriptionService:
 
                     await self.cache.market_dao.save_market_news(normalized, wait=True)
 
+                    # UIR-F04-002：落库成功后事件携带稳定身份 + 本次落库的规范化情绪/标签。
+                    # 身份 = (content, publish_time)，与 market_news 唯一键 (content_hash,
+                    # publish_time) 等价（content_hash 为 content 的 sha256）；情绪缺失保持
+                    # None（R21），由 VM 保留 DB 已保留的旧成功值，不得据此清空。
+                    event_publish_time = normalized.get("publish_time")
                     await self._notify_listeners(
                         update_type=NewsUpdateType.TAG_UPDATE,
-                        data={"content": content, "tags": tags},
+                        data={
+                            "content": str(normalized.get("content") or content).strip(),
+                            "publish_time": str(event_publish_time) if event_publish_time else "",
+                            "tags": tags,
+                            "sentiment": normalized.get("sentiment"),
+                        },
                     )
 
                 self.processing_queue.task_done()  # type: ignore[union-attr]

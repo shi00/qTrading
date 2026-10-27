@@ -828,6 +828,109 @@ class TestProcessingLoop:
         assert saved["sentiment_conf"] == 0.9
         assert saved["sentiment_model"] == "finbert2-news-q8_0"
 
+    @staticmethod
+    async def _run_one_item_capture_notify(svc, item, payload):
+        """处理单条 item（真实 normalize 链），返回 (save 载荷, notify mock)。"""
+        svc._running = True
+        svc.processing_queue = asyncio.Queue(maxsize=1)
+        svc.processing_queue.put_nowait(item)
+        notify = AsyncMock()
+        with (
+            patch.object(svc, "_generate_tags", AsyncMock(return_value="AI_macro")),
+            patch.object(svc, "_score_sentiment_result", AsyncMock(return_value=payload)),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=RealCacheManager.normalize_news_item,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", AsyncMock()) as mock_save,
+            patch.object(svc, "_notify_listeners", notify),
+        ):
+            task = asyncio.create_task(svc._processing_loop())
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        return mock_save.call_args[0][0], notify
+
+    @pytest.mark.asyncio
+    async def test_tag_update_payload_carries_identity_sentiment_and_tags(self, svc):
+        """UIR-F04-002：成功落库后的 TAG_UPDATE 携带稳定身份 + 规范化情绪/标签。"""
+        saved, notify = await self._run_one_item_capture_notify(
+            svc,
+            {"content": "紫金矿业发现金矿", "time": "2024-01-01 10:00:00"},
+            {
+                "sentiment": "Positive",
+                "sentiment_score": 0.8,
+                "sentiment_conf": 0.9,
+                "sentiment_model": "finbert2-news-q8_0",
+            },
+        )
+        notify.assert_awaited_once()
+        assert notify.await_args is not None
+        kwargs = notify.await_args.kwargs
+        assert kwargs["update_type"] == NewsUpdateType.TAG_UPDATE
+        data = kwargs["data"]
+        assert data["content"] == saved["content"] == "紫金矿业发现金矿"
+        # 身份 = (content, publish_time)，与 DB 唯一键 (content_hash, publish_time) 等价；
+        # publish_time 为 normalize 后的 UTC tz-naive 字符串（UIR-F04-005 口径）。
+        assert data["publish_time"] == str(saved["publish_time"]) == "2024-01-01 02:00:00"
+        assert data["tags"] == "AI_macro"
+        assert data["sentiment"] == "Positive"
+
+    @pytest.mark.asyncio
+    async def test_tag_update_payload_keeps_missing_sentiment_none(self, svc):
+        """R21：本次分析无有效情绪 → payload sentiment=None（不伪装为中性）。"""
+        _, notify = await self._run_one_item_capture_notify(
+            svc,
+            {"content": "普通新闻", "time": "2024-01-01 10:00:00"},
+            {"sentiment": None, "sentiment_score": None, "sentiment_conf": None, "sentiment_model": None},
+        )
+        assert notify.await_args is not None
+        assert notify.await_args.kwargs["data"]["sentiment"] is None
+
+    @pytest.mark.asyncio
+    async def test_save_failure_does_not_emit_tag_update(self, svc):
+        """DB 落库失败 → 不得发送成功更新事件（旧情绪组保持）。"""
+        svc._running = True
+        svc.processing_queue = asyncio.Queue(maxsize=1)
+        svc.processing_queue.put_nowait({"content": "test news", "time": "2024-01-01 10:00:00"})
+        notify = AsyncMock()
+
+        async def failing_save(*_args, **_kwargs):
+            raise RuntimeError("db unavailable")
+
+        with (
+            patch.object(svc, "_generate_tags", AsyncMock(return_value="tag")),
+            patch.object(
+                svc,
+                "_score_sentiment_result",
+                AsyncMock(
+                    return_value={
+                        "sentiment": "Positive",
+                        "sentiment_score": None,
+                        "sentiment_conf": None,
+                        "sentiment_model": None,
+                    }
+                ),
+            ),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=RealCacheManager.normalize_news_item,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", failing_save),
+            patch.object(svc, "_notify_listeners", notify),
+        ):
+            task = asyncio.create_task(svc._processing_loop())
+            await asyncio.sleep(0.2)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        notify.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_unscored_path_persists_none_columns(self, svc):
         """N5-2/R21：未打分路径三数值列为 None，不伪装（R21 不填 0）。"""
