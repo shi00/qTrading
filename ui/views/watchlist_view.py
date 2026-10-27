@@ -222,6 +222,8 @@ def WatchlistView(
     # --- 加载关注列表 (active 时) ---
     async def _load_effect() -> None:
         if not active:
+            # UIR-F06-001：切页离开时显式失效在途列表请求，避免返回后旧快照回填
+            vm.invalidate_load()
             return
         await vm.load_watchlist()
 

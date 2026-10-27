@@ -103,6 +103,9 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
         self._state: WatchlistState = WatchlistState()
         # F03: 搜索请求代次；仅当前代次可写 state（隔离乱序响应/关闭回填）。
         self._search_generation: int = 0
+        # UIR-F06-001: 列表加载请求代次；仅当前代次可提交 rows/error/loading，
+        # 旧快照不得覆盖成功 mutation 刷新后的新列表（与搜索代次相互独立）。
+        self._load_generation: int = 0
         self._init_mixin_fields()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -112,22 +115,39 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
         UX-09 MAJOR-04：加载行后按 ts_code 批量补最新价 / 涨跌幅 / AI 评分；
         行情查询失败降级为「无行情」（对应列显示「—」），不影响列表本身加载。
 
+        UIR-F06-001：以实例字段 ``_load_generation`` 做列表请求代次隔离——进入即推进
+        代次取得所有权，只有与当前代次相等的请求（成功/异常/取消路径）才允许提交
+        rows / load_error / loading；被更新加载或 mutation 刷新取代的旧请求，其迟到
+        响应一律不写 state（避免旧快照覆盖已成功写入后的新列表）。
+
         Returns:
-            成功加载（含空表）返回 True；已分类的普通异常返回 False。
-            ``CancelledError`` 清理 loading 后重新抛出（R2），不编码为返回值。
+            成功加载（含空表）且仍为当前代次返回 True；已被更新代次取代返回 False
+            （未提交任何 state）；已分类的普通异常返回 False。
+            ``CancelledError`` 仅当前代次清理 loading 后重新抛出（R2），不编码为返回值。
         """
+        self._load_generation += 1
+        generation = self._load_generation
         self._set_state(is_loading=True, load_error=None, load_error_detail=None)
         try:
             df = await self.cache.get_watchlist()
+            if generation != self._load_generation:
+                return False  # 旧代次：不得覆盖当前 rows/error/loading
             rows = _df_to_watchlist_rows(df)
             quotes = await self.detail_service.load_watchlist_quotes([r.ts_code for r in rows])
+            if generation != self._load_generation:
+                return False  # 行情查询期间被更新请求取代，丢弃本快照
             self._set_state(watchlist_rows=_merge_quotes(rows, quotes), is_loading=False)
             return True
         except asyncio.CancelledError:
-            self._set_state(is_loading=False)
+            if generation == self._load_generation:
+                self._set_state(is_loading=False)
             raise
         except Exception as e:
-            _handle_error(e, "load_watchlist", self)
+            if generation == self._load_generation:
+                _handle_error(e, "load_watchlist", self)
+            else:
+                # 旧代次异常只按规范脱敏记录，不覆盖当前请求的 rows/error/loading
+                _handle_error(e, "load_watchlist", self, write_state=False)
             return False
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -232,9 +252,18 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
             search_error=None,
         )
 
+    def invalidate_load(self) -> None:
+        """使在途列表加载失效（切页离开时调用，UIR-F06-001）。
+
+        仅推进列表代次，不修改 rows/error/loading——在途请求恢复后按代次丢弃，
+        避免用户切页后旧快照回填；与搜索代次 ``_search_generation`` 相互独立。
+        """
+        self._load_generation += 1
+
     def dispose(self) -> None:
-        """清理资源（F03：dispose 使在途搜索代次失效，禁止卸载后回填旧结果）。"""
+        """清理资源（F03/UIR-F06-001：dispose 使在途搜索与列表请求代次失效）。"""
         self._search_generation += 1
+        self._load_generation += 1
         super().dispose()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
