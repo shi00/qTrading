@@ -128,6 +128,24 @@ def _build_evidence_list(evidence: tuple[EvidenceItem, ...]) -> ft.Control:
     return ft.Column(items, spacing=6)
 
 
+def _build_evidence_region(state: NewsInsightState) -> ft.Control:
+    """降级/错误态共用取证区：来源覆盖 + 原始证据列表（各渲染一次）。
+
+    空覆盖/空证据返回空 ``Container``，保持明确空态、不虚构来源（R21）。
+    """
+    blocks: list[ft.Control] = []
+    if state.coverage:
+        blocks.append(_build_coverage(state.coverage))
+    if state.evidence:
+        blocks.append(
+            ft.Text(I18n.get("news_insight_evidence_title"), size=AppStyles.FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD)
+        )
+        blocks.append(_build_evidence_list(state.evidence))
+    if not blocks:
+        return ft.Container()
+    return ft.Column(blocks, spacing=8)
+
+
 def _build_event_card(event: RiskEvent, is_expanded: bool, on_toggle) -> ft.Control:
     """单条风险事件卡片（点击展开事实/影响推断/不确定性/来源引用）。"""
     color = severity_color(event.severity)
@@ -303,6 +321,55 @@ def _build_event_cards(state: NewsInsightState, expanded_idx: int, on_toggle) ->
     return ft.Column(rows, spacing=6)
 
 
+def _build_degraded_body(state: NewsInsightState, on_retry: Callable[[], None] | None) -> ft.Control:
+    """degraded（仅证据降级）：提示消息 + 单个重试按钮 + 取证区。
+
+    不自动重试付费调用、不新增生成按钮；取证区为空时不虚构来源。
+    """
+    rows: list[ft.Control] = []
+    rows.append(ft.Text(_translate_message(state.message)))
+    if on_retry is not None:
+        rows.append(
+            anchored(
+                EIDS.NEWS_RISK.RETRY_BUTTON,
+                ft.OutlinedButton(I18n.get("news_insight_retry_btn"), on_click=lambda _e: on_retry()),
+            )
+        )
+    rows.append(_build_evidence_region(state))
+    return ft.Column(rows, spacing=8)
+
+
+def _build_evidence_phase_body(
+    state: NewsInsightState,
+    on_generate: Callable[[], None] | None,
+    on_retry: Callable[[], None] | None,
+) -> ft.Control:
+    """evidence_ready / error / idle 共用：消息 + 重试（error）+ 取证/证据 + 生成（evidence_ready）。"""
+    rows: list[ft.Control] = []
+    if state.message is not None:
+        msg = ft.Text(_translate_message(state.message), color=AppColors.TEXT_SECONDARY)
+        rows.append(anchored(EIDS.NEWS_RISK.ERROR, msg) if state.phase == PHASE_ERROR else msg)
+    if state.phase == PHASE_ERROR:
+        if on_retry is not None:
+            rows.append(
+                anchored(
+                    EIDS.NEWS_RISK.RETRY_BUTTON,
+                    ft.OutlinedButton(I18n.get("news_insight_retry_btn"), on_click=lambda _e: on_retry()),
+                )
+            )
+        rows.append(_build_evidence_region(state))
+    else:
+        rows.append(_build_evidence_list(state.evidence))
+    if state.phase == PHASE_EVIDENCE_READY and on_generate is not None:
+        rows.append(
+            anchored(
+                EIDS.NEWS_RISK.GENERATE_BUTTON,
+                ft.FilledButton(I18n.get("news_insight_generate_btn"), on_click=lambda _e: on_generate()),
+            )
+        )
+    return ft.Column(rows, spacing=8)
+
+
 @ft.component
 def NewsInsightPanel(
     news_state: NewsInsightState,
@@ -350,37 +417,9 @@ def NewsInsightPanel(
     elif phase == PHASE_READY:
         body = _build_ready(news_state, _build_event_cards(news_state, expanded_idx, _toggle_event), sentiment_state)
     elif phase == PHASE_DEGRADED:
-        rows: list[ft.Control] = []
-        rows.append(ft.Text(_translate_message(news_state.message)))
-        if news_on_retry is not None:
-            rows.append(
-                anchored(
-                    EIDS.NEWS_RISK.RETRY_BUTTON,
-                    ft.OutlinedButton(I18n.get("news_insight_retry_btn"), on_click=lambda _e: news_on_retry()),
-                )
-            )
-        body = ft.Column(rows, spacing=8)
+        body = _build_degraded_body(news_state, news_on_retry)
     else:  # evidence_ready / error / idle
-        rows: list[ft.Control] = []
-        if news_state.message is not None:
-            msg = ft.Text(_translate_message(news_state.message), color=AppColors.TEXT_SECONDARY)
-            rows.append(anchored(EIDS.NEWS_RISK.ERROR, msg) if phase == PHASE_ERROR else msg)
-        if phase == PHASE_ERROR and news_on_retry is not None:
-            rows.append(
-                anchored(
-                    EIDS.NEWS_RISK.RETRY_BUTTON,
-                    ft.OutlinedButton(I18n.get("news_insight_retry_btn"), on_click=lambda _e: news_on_retry()),
-                )
-            )
-        rows.append(_build_evidence_list(news_state.evidence))
-        if phase == PHASE_EVIDENCE_READY and news_on_generate is not None:
-            rows.append(
-                anchored(
-                    EIDS.NEWS_RISK.GENERATE_BUTTON,
-                    ft.FilledButton(I18n.get("news_insight_generate_btn"), on_click=lambda _e: news_on_generate()),
-                )
-            )
-        body = ft.Column(rows, spacing=8)
+        body = _build_evidence_phase_body(news_state, news_on_generate, news_on_retry)
 
     return ft.Container(
         content=ft.Column(
