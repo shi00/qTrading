@@ -287,10 +287,32 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             content = str(data.get("content", "") or "")
             tags = str(data.get("tags", "") or "")
             if content:
-                # 遍历 tuple 更新匹配项 (同步, O(n))
-                updated = tuple(
-                    replace(row, tags=tags) if row.content == content else row for row in self._state.news_rows
-                )
+                publish_time = str(data.get("publish_time", "") or "")
+                # UIR-F04-002：本次事件携带的规范化情绪；None = 本次分析无有效情绪
+                # （DB 旧成功组保留），不得用它清空当前行（R21 缺失不伪装）。
+                incoming_sentiment = _coerce_sentiment(data.get("sentiment"))
+                if publish_time:
+                    # 稳定身份 = (content, publish_time)，仅更新目标新闻行并重算衍生标记。
+                    updated = tuple(
+                        replace(
+                            row,
+                            tags=tags,
+                            is_ai_tagged=_detect_ai_tagged(tags, row.source),
+                            sentiment=incoming_sentiment if incoming_sentiment is not None else row.sentiment,
+                        )
+                        if row.content == content and row.publish_time == publish_time
+                        else row
+                        for row in self._state.news_rows
+                    )
+                else:
+                    # 兼容旧「仅 content+tags」事件（无身份）：仅更新 tags 与衍生标记，
+                    # 不猜测情绪（无法区分同正文不同时间的旧协议限制）。
+                    updated = tuple(
+                        replace(row, tags=tags, is_ai_tagged=_detect_ai_tagged(tags, row.source))
+                        if row.content == content
+                        else row
+                        for row in self._state.news_rows
+                    )
                 if updated != self._state.news_rows:
                     self._set_state(news_rows=updated)
         elif update_type == NewsUpdateType.INITIAL:
