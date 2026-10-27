@@ -1894,6 +1894,298 @@ class TestFetchAndNotify:
         assert len(svc._seen_hashes) <= svc._MAX_SEEN
 
 
+class TestFetchAndNotifyBatchWindow:
+    """UIR-F04-001：稳定轮询消费水位之后的完整有界窗口，不丢批量/同秒消息。"""
+
+    WATERMARK_T0 = "2024-01-01 09:00:00"
+
+    @staticmethod
+    def _normalize(item, default_source=None):
+        return dict(item)
+
+    @pytest.mark.asyncio
+    async def test_regular_poll_saves_every_item_after_watermark(self, svc):
+        """Given t0 水位与 A@t1/B@t2，常规 poll 应保存并排队两条，水位推进到 t2。"""
+        svc._last_news_time = self.WATERMARK_T0
+        svc._last_news_content = "old"
+        news_items = [
+            {"content": "B", "time": "2024-01-01 11:00:00"},
+            {"content": "A", "time": "2024-01-01 10:00:00"},
+        ]
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        fetch_mock = AsyncMock(return_value=news_items)
+        saved: list[str] = []
+        queued: list[str] = []
+        notify_args: list[tuple] = []
+
+        async def mock_save(item, wait=False):
+            saved.append(item.get("content", ""))
+
+        async def mock_put(item):
+            queued.append(item.get("content", ""))
+
+        async def mock_notify(update_type=None, data=None, **kwargs):
+            notify_args.append((update_type, data))
+
+        with (
+            patch("data.external.news_fetcher.NewsFetcher.get_latest_global_news", fetch_mock),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=self._normalize,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", mock_save),
+            patch.object(svc, "_notify_listeners", mock_notify),
+            patch.object(svc, "_safe_queue_put", mock_put),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+        ):
+            await svc._fetch_and_notify()
+
+        fetch_call = fetch_mock.await_args
+        assert fetch_call is not None
+        assert fetch_call.kwargs["limit"] >= 2
+        assert saved == ["A", "B"]
+        assert queued == ["A", "B"]
+        assert svc._last_news_time == "2024-01-01 11:00:00"
+        new_item_calls = [(ut, data) for ut, data in notify_args if ut == NewsUpdateType.NEW_ITEM]
+        assert len(new_item_calls) == 1
+        assert [item["content"] for item in new_item_calls[0][1]] == ["A", "B"]
+
+    @pytest.mark.asyncio
+    async def test_second_poll_does_not_reprocess_or_renotify(self, svc):
+        """再次 poll 同一窗口不得重复保存/入队/NEW_ITEM。"""
+        svc._last_news_time = self.WATERMARK_T0
+        news_items = [
+            {"content": "B", "time": "2024-01-01 11:00:00"},
+            {"content": "A", "time": "2024-01-01 10:00:00"},
+        ]
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        fetch_mock = AsyncMock(return_value=news_items)
+        saved: list[str] = []
+        queued: list[str] = []
+        notify_args: list[tuple] = []
+
+        async def mock_save(item, wait=False):
+            saved.append(item.get("content", ""))
+
+        async def mock_put(item):
+            queued.append(item.get("content", ""))
+
+        async def mock_notify(update_type=None, data=None, **kwargs):
+            notify_args.append((update_type, data))
+
+        with (
+            patch("data.external.news_fetcher.NewsFetcher.get_latest_global_news", fetch_mock),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=self._normalize,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", mock_save),
+            patch.object(svc, "_notify_listeners", mock_notify),
+            patch.object(svc, "_safe_queue_put", mock_put),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+        ):
+            await svc._fetch_and_notify()
+            saved.clear()
+            queued.clear()
+            notify_args.clear()
+            await svc._fetch_and_notify()
+
+        assert saved == []
+        assert queued == []
+        assert not any(ut == NewsUpdateType.NEW_ITEM for ut, _ in notify_args)
+        assert svc._last_news_time == "2024-01-01 11:00:00"
+
+    @pytest.mark.asyncio
+    async def test_save_failure_does_not_advance_watermark_or_poison_dedup(self, svc):
+        """A 保存失败时水位不得越过 A；A 不得被标记为已见，下一次 poll 可重试。"""
+        svc._last_news_time = self.WATERMARK_T0
+        news_items = [
+            {"content": "B", "time": "2024-01-01 11:00:00"},
+            {"content": "A", "time": "2024-01-01 10:00:00"},
+        ]
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        failing = {"A"}
+        saved: list[str] = []
+        queued: list[str] = []
+
+        async def mock_save(item, wait=False):
+            content = item.get("content", "")
+            if content in failing:
+                raise RuntimeError("db unavailable")
+            saved.append(content)
+
+        async def mock_put(item):
+            queued.append(item.get("content", ""))
+
+        with (
+            patch(
+                "data.external.news_fetcher.NewsFetcher.get_latest_global_news",
+                AsyncMock(return_value=news_items),
+            ),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=self._normalize,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", mock_save),
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+            patch.object(svc, "_safe_queue_put", mock_put),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+        ):
+            await svc._fetch_and_notify()
+            assert svc._last_news_time == self.WATERMARK_T0
+            assert saved == []
+            assert queued == []
+
+            failing.clear()
+            await svc._fetch_and_notify()
+
+        assert saved == ["A", "B"]
+        assert queued == ["A", "B"]
+        assert svc._last_news_time == "2024-01-01 11:00:00"
+
+    @pytest.mark.asyncio
+    async def test_same_second_items_are_not_dropped(self, svc):
+        """同秒多条：首次 poll 全部保存；水位同秒的新条目在下一次 poll 仍能入库。"""
+        svc._last_news_time = self.WATERMARK_T0
+        first_batch = [
+            {"content": "B", "time": "2024-01-01 10:00:00"},
+            {"content": "A", "time": "2024-01-01 10:00:00"},
+        ]
+        second_batch = [
+            {"content": "C", "time": "2024-01-01 10:00:00"},
+            {"content": "B", "time": "2024-01-01 10:00:00"},
+            {"content": "A", "time": "2024-01-01 10:00:00"},
+        ]
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        fetch_mock = AsyncMock(return_value=first_batch)
+        saved: list[str] = []
+        queued: list[str] = []
+
+        async def mock_save(item, wait=False):
+            saved.append(item.get("content", ""))
+
+        async def mock_put(item):
+            queued.append(item.get("content", ""))
+
+        with (
+            patch("data.external.news_fetcher.NewsFetcher.get_latest_global_news", fetch_mock),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=self._normalize,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", mock_save),
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+            patch.object(svc, "_safe_queue_put", mock_put),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+        ):
+            await svc._fetch_and_notify()
+            assert saved == ["A", "B"]
+            assert svc._last_news_time == "2024-01-01 10:00:00"
+
+            saved.clear()
+            queued.clear()
+            fetch_mock.return_value = second_batch
+            await svc._fetch_and_notify()
+
+        assert saved == ["C"]
+        assert queued == ["C"]
+        assert svc._last_news_time == "2024-01-01 10:00:00"
+
+    @pytest.mark.asyncio
+    async def test_saturated_window_after_watermark_logs_gap(self, svc, caplog):
+        """窗口打满且最旧项仍晚于旧水位时，必须显式 gap 告警并保留补拉声明。"""
+        import logging
+
+        svc._last_news_time = self.WATERMARK_T0
+        news_items = [{"content": f"n{i}", "time": f"2024-01-01 10:{i:02d}:00"} for i in range(20, 0, -1)]
+        svc.processing_queue = asyncio.Queue(maxsize=30)
+        fetch_mock = AsyncMock(return_value=news_items)
+        saved: list[str] = []
+
+        async def mock_save(item, wait=False):
+            saved.append(item.get("content", ""))
+
+        with (
+            patch("data.external.news_fetcher.NewsFetcher.get_latest_global_news", fetch_mock),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=self._normalize,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", mock_save),
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+            patch.object(svc, "_safe_queue_put", AsyncMock()),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+            caplog.at_level(logging.WARNING, logger="services.news_subscription_service"),
+        ):
+            await svc._fetch_and_notify()
+
+        fetch_call = fetch_mock.await_args
+        assert fetch_call is not None
+        assert fetch_call.kwargs["limit"] == len(news_items)
+        assert len(saved) == len(news_items)
+        assert svc._last_news_time == "2024-01-01 10:20:00"
+        gap_logs = [r.message for r in caplog.records if "gap" in r.message.lower()]
+        assert len(gap_logs) == 1
+        assert "backfill" in gap_logs[0].lower()
+
+    @pytest.mark.asyncio
+    async def test_saturated_window_with_overlap_does_not_warn_gap(self, svc, caplog):
+        """窗口打满但最旧项已覆盖旧水位（连续窗口）时不得误报 gap。"""
+        import logging
+
+        svc._last_news_time = "2024-01-01 10:01:00"
+        news_items = [{"content": f"n{i}", "time": f"2024-01-01 10:{i:02d}:00"} for i in range(20, 0, -1)]
+        svc.processing_queue = asyncio.Queue(maxsize=30)
+
+        with (
+            patch(
+                "data.external.news_fetcher.NewsFetcher.get_latest_global_news",
+                AsyncMock(return_value=news_items),
+            ),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=self._normalize,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", AsyncMock()),
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+            patch.object(svc, "_safe_queue_put", AsyncMock()),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+            caplog.at_level(logging.WARNING, logger="services.news_subscription_service"),
+        ):
+            await svc._fetch_and_notify()
+
+        assert not any("gap" in r.message.lower() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_from_save_propagates(self, svc):
+        """保存期间 CancelledError 必须向上传播（R2），且水位不推进。"""
+        svc._last_news_time = self.WATERMARK_T0
+        news_items = [{"content": "A", "time": "2024-01-01 10:00:00"}]
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+
+        async def mock_save(item, wait=False):
+            raise asyncio.CancelledError()
+
+        with (
+            patch(
+                "data.external.news_fetcher.NewsFetcher.get_latest_global_news",
+                AsyncMock(return_value=news_items),
+            ),
+            patch(
+                "services.news_subscription_service.CacheManager.normalize_news_item",
+                side_effect=self._normalize,
+            ),
+            patch.object(svc.cache.market_dao, "save_market_news", mock_save),
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+            patch.object(svc, "_safe_queue_put", AsyncMock()),
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=True),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await svc._fetch_and_notify()
+
+        assert svc._last_news_time == self.WATERMARK_T0
+
+
 class TestProcessingQueueLoopLocal:
     """CON-07: processing_queue property resolves dynamically to current loop."""
 
