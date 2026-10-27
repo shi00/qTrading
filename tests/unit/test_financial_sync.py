@@ -1494,7 +1494,7 @@ class TestFinancialSyncFetchDegradation:
 
     @pytest.mark.asyncio
     async def test_all_core_tables_raise_returns_none(self):
-        """所有 core 表抛异常 → 返回 (None, aux_counts)。"""
+        """所有 core 表抛异常 → 返回 (None, aux_counts)，且 core_failed=True（M-DATA-11/D1）。"""
         ctx = make_ctx()
         ctx.api.get_income = AsyncMock(side_effect=RuntimeError("fail"))
         ctx.api.get_balancesheet = AsyncMock(side_effect=RuntimeError("fail"))
@@ -1503,11 +1503,13 @@ class TestFinancialSyncFetchDegradation:
         strategy = FinancialSyncStrategy(ctx)
         df, aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
         assert df is None
-        assert aux == {"mainbz": 0, "audit": 0}
+        assert aux["mainbz"] == 0
+        assert aux["audit"] == 0
+        assert aux["core_failed"] is True
 
     @pytest.mark.asyncio
     async def test_merge_failure_enters_outer_exception(self):
-        """merge 时抛异常（缺 end_date 列）应进入外层 except 返回 None。"""
+        """merge 时抛异常（缺 end_date 列）应进入外层 except 返回 None，core_failed=True。"""
         ctx = make_ctx()
         # income 有数据但缺 end_date 列 → _dedup_financial_df sort_values("end_date") 抛 KeyError
         ctx.api.get_income = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "revenue": [100.0]}))
@@ -1517,7 +1519,9 @@ class TestFinancialSyncFetchDegradation:
         strategy = FinancialSyncStrategy(ctx)
         df, aux = await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
         assert df is None
-        assert aux == {"mainbz": 0, "audit": 0}
+        assert aux["mainbz"] == 0
+        assert aux["audit"] == 0
+        assert aux["core_failed"] is True
 
     @pytest.mark.asyncio
     async def test_aux_table_permission_error_returns_zero(self):
@@ -2378,3 +2382,105 @@ class TestIncrementalBatchStatus:
         # 默认调用不传 status kwarg
         no_status_calls = [c for c in status_calls if "status" not in c.kwargs]
         assert len(no_status_calls) >= 1
+
+
+class TestFinancialSyncFullSyncResultReflection:
+    """M-DATA-11/D1+D4: 全量批次失败反映到 SyncResult + 全量完成写 sync_status。"""
+
+    @pytest.mark.asyncio
+    async def test_full_sync_recoverable_failure_marks_partial(self):
+        """D1: 全量单股可恢复失败（severity=operational，任务内不 raise）计入
+        failed_stock_count，批次结束后 result_accumulator 标记 partial + errors 汇总，
+        不再「有失败但 status=success」假终态。"""
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(side_effect=RuntimeError("API failed"))
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+        assert result.status == SyncStatus.PARTIAL.value
+        assert any("failed during full sync" in e for e in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_full_sync_all_success_stays_success(self):
+        """D1: 无失败时全量 result 保持 success（不影响正常路径）。"""
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+        assert result.status == SyncStatus.SUCCESS.value
+
+    @pytest.mark.asyncio
+    async def test_full_sync_system_error_propagates(self):
+        """D1: 全量任务系统级异常（MemoryError→severity=system）经 gather 边界
+        回检 BaseException 重抛，不再静默丢弃（旧行为仅回检 EngineDisposedError，
+        其余系统级异常无痕消失且 result 保持 success）。"""
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(side_effect=MemoryError("oom"))
+        strategy = FinancialSyncStrategy(ctx)
+        with pytest.raises(MemoryError):
+            await strategy.run(force=True)
+
+    @pytest.mark.asyncio
+    async def test_full_sync_writes_financial_reports_status_success(self):
+        """D4: 全量完成后写 financial_reports sync_status（status=success）。
+        旧实现从不写该表：_run_impl 增量分支（依赖 last_sync_date 存在）对新装用户
+        永不可达，should_sync_financials 节流判定失效。"""
+        ctx = make_ctx()
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+        assert result is not None
+        fr_calls = [
+            c for c in ctx.cache.sync_dao.update_sync_status.await_args_list if c.args[0] == "financial_reports"
+        ]
+        assert len(fr_calls) == 1
+        assert fr_calls[0].kwargs.get("status") == "success"
+
+    @pytest.mark.asyncio
+    async def test_full_sync_failure_writes_partial_status(self):
+        """D4: 全量有失败股票时写 status=partial（update_sync_status 对 partial 不推进
+        last_data_date，下次增量窗口覆盖当日重试，UPSERT 幂等）。"""
+        ctx = make_ctx()
+        ctx.api.get_income = AsyncMock(side_effect=RuntimeError("API failed"))
+        strategy = FinancialSyncStrategy(ctx)
+        await strategy.run(force=True)
+        fr_calls = [
+            c for c in ctx.cache.sync_dao.update_sync_status.await_args_list if c.args[0] == "financial_reports"
+        ]
+        assert len(fr_calls) == 1
+        assert fr_calls[0].kwargs.get("status") == "partial"
+
+
+class TestFinancialSyncIncrementalWindowBasis:
+    """M-DATA-11/D2: 增量窗口起点改用 last_data_date（业务水位）而非 last_sync_date（墙钟）。"""
+
+    @pytest.mark.asyncio
+    async def test_window_uses_last_data_date_over_wallclock_sync_date(self):
+        """全失败披露日场景：update_sync_status 把 last_sync_date 无条件推进为当前墙钟
+        （now），而 failed 不推进 last_data_date（停在昨天）。旧逻辑按 last_sync_date
+        起算 → 窗口为空 → 失败披露日永久漏同步；新逻辑从 last_data_date+1 起算 →
+        窗口含今天 → get_disclosure_date 必须被调用。"""
+        ctx = make_ctx()
+        now = get_now()
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(
+            return_value={
+                "last_sync_date": now,  # 墙钟已被失败日推进到 now
+                "last_data_date": (now - datetime.timedelta(days=1)).date(),  # 业务水位停在昨天
+            }
+        )
+        ctx.api.get_disclosure_date = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run()
+        assert result is not None
+        # 窗口含今天（last_data_date=昨天 + 1 = 今天）→ disclosure_date 被调用
+        ctx.api.get_disclosure_date.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_window_falls_back_to_last_sync_date_when_no_data_date(self):
+        """last_data_date 缺失（存量记录 / 旧版本写入）时回退 last_sync_date，保持旧行为。"""
+        ctx = make_ctx()
+        now = get_now()
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": now})
+        ctx.api.get_disclosure_date = AsyncMock(return_value=None)
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run()
+        assert result is not None
+        # 回退 last_sync_date=今天 → 窗口为空（今天+1 > 今天）→ 早返回
+        ctx.api.get_disclosure_date.assert_not_awaited()

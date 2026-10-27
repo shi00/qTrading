@@ -18,7 +18,6 @@ import logging
 from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
 from data.external.tushare_client import TushareAPIPermissionError
 from data.persistence.daos.base_dao import EngineDisposedError
-from data.persistence.daos.sw_industry_dao import StockNameHistoryDao
 from utils.error_classifier import classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
@@ -38,7 +37,10 @@ class NameChangeSyncStrategy(ISyncStrategy):
 
     def __init__(self, context):
         super().__init__(context)
-        self.dao = StockNameHistoryDao(context.cache.engine)
+        # M-DATA-11/D3: 复用 CacheManager 注册的 stock_name_history_dao（R13），不再自建。
+        # 自建 DAO 持有创建时的 engine 引用且不在 DaoRegistry.sync_engines 同步清单内，
+        # 引擎重建（onboarding 后建引擎/DB 重配置）后将永久指向过期引擎。
+        self.dao = context.cache.stock_name_history_dao
 
     @log_async_operation(
         operation_name="NameChangeSyncStrategy.run",

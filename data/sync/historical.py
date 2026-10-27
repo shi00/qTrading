@@ -624,7 +624,15 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 self._active_tasks.update(tasks)
 
             try:
-                await gather_return_exceptions_propagating_cancel(*tasks)
+                batch_results = await gather_return_exceptions_propagating_cancel(*tasks)
+                # M-DATA-11/D1: sync_one_day 对 EngineDisposedError 与系统级异常
+                # （severity==system）会 re-raise，经 gather 封装转为返回值；不回检将被静默
+                # 丢弃——EngineDisposedError 传播中断违反 R5，系统级失败无痕且该日不进
+                # failed_dates 无法重试。对齐 sync_daily_market_snapshot 内层 fetch 的统一
+                # 回检模式：BaseException 一律重抛，由 _run_impl 既有异常分支接管终态。
+                for _raised in batch_results:
+                    if isinstance(_raised, BaseException):
+                        raise _raised
             finally:
                 with self._tasks_lock:
                     self._active_tasks.difference_update(tasks)
@@ -881,7 +889,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 valid = [r for r in results if isinstance(r, pd.DataFrame) and not r.empty]
                 if valid:
                     return ("index", pd.concat(valid, ignore_index=True), None)
-                return ("index", None, None)
+                # M-DATA-11/D6: 全空属「合法空」（与 fetch_wrapper 成功返回空 DataFrame 的
+                # 语义一致）。旧实现返回 None 会被 save_if_ok 的 df-is-None 分支误归类为
+                # FETCH_FAILED，把「当日无指数数据」伪装成取数失败（R21 精神）。
+                return ("index", pd.DataFrame(), None)
             except EngineDisposedError:
                 raise
             except Exception as e:

@@ -411,10 +411,14 @@ class TestAKShareConceptSync:
         assert isinstance(exc_info.value, _asyncio.CancelledError)
 
     @pytest.mark.asyncio
-    async def test_engine_disposed_in_constituents_skips_retry(self):
-        """覆盖 concept_sync.py:117-118：sync_one_board 内部 constituents 拉取抛 EngineDisposedError 时，
-        except EngineDisposedError 分支直接 raise（不进入 except Exception 重试逻辑），
-        由 gather_return_exceptions_propagating_cancel 捕获为返回值，不传播到外层。
+    async def test_engine_disposed_in_constituents_propagates(self):
+        """M-DATA-11/D1（R5 语义修正）：sync_one_board 内部 constituents 拉取抛
+        EngineDisposedError 时，except EngineDisposedError 分支直接 raise（不进入
+        except Exception 重试逻辑），经 gather_return_exceptions_propagating_cancel
+        转为返回值后，批次边界回检 BaseException 统一重抛。
+
+        旧实现批次边界不回检返回值，EngineDisposedError 被静默丢弃、result 保持
+        success——违反 R5「已释放时抛出或传播」要求，已修复为 fail-loud。
 
         验证：get_concept_constituents 每板只调用 1 次（非 3 次重试），upsert 不执行。
         """
@@ -428,10 +432,11 @@ class TestAKShareConceptSync:
         client.get_concept_constituents = AsyncMock(side_effect=EngineDisposedError())
 
         strategy = AKShareConceptSyncStrategy(ctx)
-        result = await strategy.run()
+        # M-DATA-11: 批次边界回检 BaseException → EngineDisposedError 必须传播（R5）
+        with pytest.raises(EngineDisposedError) as exc_info:
+            await strategy.run()
+        assert isinstance(exc_info.value, EngineDisposedError)
 
-        # EngineDisposedError 被 gather 捕获为返回值，不传播到外层 except
-        assert result.status == SyncStatus.SUCCESS.value
         # 关键验证：每板只调用 1 次（EngineDisposedError 不进入重试逻辑）
         # _make_concept_list_df() 返回 2 个板块，所以应调用 2 次（非 6 次）
         assert client.get_concept_constituents.call_count == 2

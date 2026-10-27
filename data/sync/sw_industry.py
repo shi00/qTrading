@@ -18,7 +18,6 @@ import pandas as pd
 from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
 from data.external.tushare_client import TushareAPIPermissionError
 from data.persistence.daos.base_dao import EngineDisposedError
-from data.persistence.daos.sw_industry_dao import SwIndustryClassifyDao, SwIndustryMemberDao
 from utils.error_classifier import classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
@@ -56,9 +55,11 @@ class SwIndustrySyncStrategy(ISyncStrategy):
 
     def __init__(self, context: typing.Any):
         super().__init__(context)
-        engine = context.cache.engine
-        self.classify_dao = SwIndustryClassifyDao(engine)
-        self.member_dao = SwIndustryMemberDao(engine)
+        # M-DATA-11/D3: 复用 CacheManager 注册的 sw_industry_* DAO（R13），不再自建实例。
+        # 自建 DAO 持有创建时的 engine 引用且不在 DaoRegistry.sync_engines 同步清单内，
+        # 引擎重建（onboarding 后建引擎/DB 重配置）后将永久指向过期引擎。
+        self.classify_dao = context.cache.sw_industry_classify_dao
+        self.member_dao = context.cache.sw_industry_member_dao
 
     @log_async_operation(
         operation_name="SwIndustrySyncStrategy.run",
