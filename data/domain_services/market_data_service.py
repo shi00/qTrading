@@ -300,6 +300,8 @@ class MarketDataService:
                 fb_indices_task = self._get_indices_batch(index_codes, prev_str) if indices_empty else asyncio.sleep(0)
                 fb_hsgt_task = self._get_hsgt(prev_str) if hsgt_empty else asyncio.sleep(0)
                 fb_results = await gather_return_exceptions_propagating_cancel(fb_indices_task, fb_hsgt_task)
+                fb_indices_valid = False
+                fb_hsgt_valid = False
                 if indices_empty:
                     results[0] = fb_results[0]
                     # UIR-F03-002: 回退结果有效才归属 prev_str；回退仍空/失败 → None
@@ -311,8 +313,12 @@ class MarketDataService:
                     results[1] = fb_results[1]
                     fb_hsgt_valid = not isinstance(fb_results[1], Exception) and fb_results[1].get("value") != "-"
                     hsgt_date = prev_str if fb_hsgt_valid else None
-                data_stale = True
-                if indices_empty and hsgt_empty:
+                # UIR-F03-002: 回退成功才把整批标记为“前日快照”（方案 b）；
+                # 回退仍空/失败不伪装为缓存数据（方案 d / R21）。
+                if (indices_empty and fb_indices_valid) or (hsgt_empty and fb_hsgt_valid):
+                    data_stale = True
+                # 页头日期仅当两个分量都回退有效时改为前日（整批快照确实来自前日）。
+                if indices_empty and hsgt_empty and fb_indices_valid and fb_hsgt_valid:
                     date = prev_str
             else:
                 # UIR-F03-002: 日历未知/无前日 → 回退未发生，空分量无 as_of（不猜日期，R21）

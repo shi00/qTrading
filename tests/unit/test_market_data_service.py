@@ -937,7 +937,8 @@ class TestMarketDataServiceFetchMarketDataIntegration:
 
         cached_data = svc.get_cached_data()
         assert cached_data is not None
-        assert cached_data["stale"] is True
+        # 北向回退仍空 → 无有效回退，不置 stale（方案 b：回退成功才更新状态）
+        assert cached_data["stale"] is False
         # 指数当日成功 → 归当日
         assert cached_data["indices_date"] == "20260615"
         # 北向回退仍空 → as_of 为 None, 不伪称前日数据 (R21)
@@ -951,7 +952,7 @@ class TestMarketDataServiceFetchMarketDataIntegration:
     @patch("data.domain_services.market_data_service.CacheManager")
     @patch("data.domain_services.market_data_service.TradeCalendarService")
     async def test_fetch_full_fallback_still_empty_dates_none(self, mock_tc_cls, mock_cm_cls, mock_api_cls, mock_news):
-        """UIR-F03-002 边界: 双空且回退仍空 → 两分量 as_of 均为 None (R21 不伪称前日数据)."""
+        """UIR-F03-002 边界: 双空且回退仍空 → 两分量 as_of 均 None, 页头不伪称前日 (R21)."""
         import datetime
 
         mock_cache = MagicMock()
@@ -986,11 +987,65 @@ class TestMarketDataServiceFetchMarketDataIntegration:
 
         cached_data = svc.get_cached_data()
         assert cached_data is not None
-        assert cached_data["stale"] is True
-        # 既有行为: 双空回退时页头 date 更新为 prev_str (test_fetch_full_fallback_updates_date 锁定)
-        assert cached_data["date"] == "20260613"
+        # 两分量回退均无有效数据 → 无有效回退，不置 stale（方案 b）
+        assert cached_data["stale"] is False
+        # 双空但回退无效 → 页头保持原查询日期，不声称“数据缓存于前日”（方案 d）
+        assert cached_data["date"] == "20260615"
         # UIR-F03-002: 两分量回退均无有效数据 → as_of 均为 None, 不伪称 (R21)
         assert cached_data["indices_date"] is None
+        assert cached_data["hsgt_date"] is None
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.NewsFetcher")
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_fetch_full_fallback_partial_valid_keeps_query_date(
+        self, mock_tc_cls, mock_cm_cls, mock_api_cls, mock_news
+    ):
+        """UIR-F03-002 边界: 双空但仅指数回退有效 → stale 置位, 页头保持原查询日期."""
+        import datetime
+
+        mock_cache = MagicMock()
+        mock_cm_cls.return_value = mock_cache
+        mock_tc = MagicMock()
+        mock_tc_cls.return_value = mock_tc
+
+        svc = MarketDataService()
+        svc.cache = mock_cache
+        svc.api = mock_api_cls.return_value
+
+        today = datetime.date(2026, 6, 15)
+        yesterday = datetime.date(2026, 6, 13)
+
+        mock_cal = MagicMock()
+        mock_cal.get_latest_trade_date = AsyncMock(return_value=today)
+        mock_cal.get_prev_trade_date = AsyncMock(return_value=yesterday)
+        svc.trade_calendar = mock_cal
+
+        indices_yesterday = [{"name": "SH", "value": "3000.00", "change": "+1.00%", "color": "red"}]
+
+        async def fake_get_indices_batch(codes, date_str):
+            if date_str == "20260613":
+                return indices_yesterday
+            return [{"name": "SH", "value": "-", "change": "-", "color": "grey"}]
+
+        async def fake_get_hsgt(date_str):
+            return MarketDataService._get_empty_hsgt_data_static()
+
+        svc._get_indices_batch = AsyncMock(side_effect=fake_get_indices_batch)
+        svc._get_hsgt = AsyncMock(side_effect=fake_get_hsgt)
+        mock_news.get_hot_concepts = AsyncMock(return_value=[])
+
+        await svc._fetch_market_data()
+
+        cached_data = svc.get_cached_data()
+        assert cached_data is not None
+        # 指数回退有效 → 置 stale（方案 b）
+        assert cached_data["stale"] is True
+        # 北向回退无效 → 页头保持原查询日期，不更新为 prev_str（方案 d）
+        assert cached_data["date"] == "20260615"
+        assert cached_data["indices_date"] == "20260613"
         assert cached_data["hsgt_date"] is None
 
 
