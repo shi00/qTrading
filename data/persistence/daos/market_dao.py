@@ -330,7 +330,20 @@ class MarketDao(BaseDao):
         offset: int = 0,
         min_publish_time: typing.Any = None,
         home_filter: bool = True,
+        cursor_publish_time: typing.Any = None,
+        cursor_id: int | None = None,
     ):
+        """读取首页快讯（稳定 ``(publish_time, id)`` 倒序 + 可选 keyset 游标）。
+
+        UIR-F04-004：仅按 ``publish_time`` 排序时同发布时间次序不确定，且 OFFSET
+        分页在头部插入新行后整体位移，导致已展示新闻重复。改用 ``(publish_time,
+        id)`` 复合倒序配合向后游标：``publish_time < 游标时间 OR (publish_time =
+        游标时间 AND id < 游标 id)``，新头部插入不影响已取窗口，每条新闻至多一次。
+
+        ``cursor_publish_time`` 与 ``cursor_id`` 须成对传入；只传其一时退回
+        offset 语义（兼容旧调用方）。
+        """
+        use_cursor = cursor_publish_time is not None and cursor_id is not None
         sql = "SELECT * FROM market_news WHERE 1=1"
         params = []
         idx = 1
@@ -344,7 +357,20 @@ class MarketDao(BaseDao):
             sql += " AND (source_kind = $" + str(idx) + " OR source_kind IS NULL)"
             params.append("telegraph")
             idx += 1
-        sql += " ORDER BY publish_time DESC LIMIT $" + str(idx) + " OFFSET $" + str(idx + 1)
+        if use_cursor:
+            # 复合游标严格向后（不含边界行）：同发布时间靠 id 打破平局，无重复/无漂移。
+            sql += (
+                " AND (publish_time < $"
+                + str(idx)
+                + " OR (publish_time = $"
+                + str(idx + 1)
+                + " AND id < $"
+                + str(idx + 2)
+                + "))"
+            )
+            params.extend([cursor_publish_time, cursor_publish_time, cursor_id])
+            idx += 3
+        sql += " ORDER BY publish_time DESC, id DESC LIMIT $" + str(idx) + " OFFSET $" + str(idx + 1)
         params.extend([limit, offset])
         return await self._read_db(sql, params)
 

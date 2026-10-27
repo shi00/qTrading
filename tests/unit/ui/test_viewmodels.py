@@ -251,7 +251,7 @@ class TestHomeViewModelLoadNextPage:
         home_vm._set_state(is_loading_more=False, has_more_news=True)
         home_vm._load_generation = 1
 
-        async def _bump_gen(page):
+        async def _bump_gen(page, cursor=None):
             home_vm._load_generation = 99
 
         with patch.object(home_vm, "_fetch_news_batch", side_effect=_bump_gen):

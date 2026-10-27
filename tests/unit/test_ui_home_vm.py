@@ -1012,6 +1012,199 @@ class TestNewsRowSentimentWiring:
         assert _coerce_sentiment(" Positive ") == "Positive"
 
 
+class _FakeCursorNewsDao:
+    """按 keyset 语义模拟 market_news 读取（publish_time DESC, id DESC）。"""
+
+    def __init__(self, rows: list[dict]):
+        self.rows = list(rows)
+        self.calls: list[dict] = []
+
+    async def get_market_news(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        cursor_publish_time=None,
+        cursor_id=None,
+    ) -> pd.DataFrame:
+        self.calls.append(
+            {
+                "limit": limit,
+                "offset": offset,
+                "cursor_publish_time": cursor_publish_time,
+                "cursor_id": cursor_id,
+            }
+        )
+        if cursor_publish_time is None:
+            return pd.DataFrame(self.rows[offset : offset + limit])
+        cursor_time = pd.to_datetime(cursor_publish_time).to_pydatetime()
+        out: list[dict] = []
+        for row in self.rows:
+            row_time = pd.to_datetime(row["publish_time"]).to_pydatetime()
+            if row_time < cursor_time or (row_time == cursor_time and row["id"] < cursor_id):
+                out.append(row)
+            if len(out) >= limit:
+                break
+        return pd.DataFrame(out)
+
+
+def _news_rows_n(n: int) -> list[dict]:
+    """构造 n 条按时间倒序、id 递减的新闻行（id=n..1）。"""
+    return [{"id": i, "publish_time": f"2026-10-27 10:{i:02d}:00", "content": f"news{i}"} for i in range(n, 0, -1)]
+
+
+class TestHomeViewModelCursorPagination:
+    """UIR-F04-004: 实时前插后继续分页不得重复已展示新闻。"""
+
+    @pytest.fixture
+    def vm(self):
+        vm = HomeViewModel()
+        vm.processor = MagicMock()
+        vm.processor.cache = MagicMock()
+        return vm
+
+    @pytest.mark.asyncio
+    async def test_new_head_push_then_more_keeps_each_id_once(self, vm):
+        """21 条稳定 id：先取 20 → 新头部推送 → 再取更多，最终每 id 一次且旧尾可达。"""
+        dao = _FakeCursorNewsDao(_news_rows_n(21))
+        vm.processor.cache.market_dao = dao
+
+        await vm.refresh_news()
+        assert len(vm.state.news_rows) == 20
+
+        # 新头部入库（id=22）并实时推送
+        dao.rows.insert(0, {"id": 22, "publish_time": "2026-10-27 10:22:00", "content": "news22"})
+        from services.news_subscription_service import NewsUpdateType
+
+        await vm._on_news_service_update(
+            NewsUpdateType.NEW_ITEM,
+            [{"content": "news22", "time": "2026-10-27 10:22:00"}],
+        )
+        assert len(vm.state.news_rows) == 21
+
+        await vm.load_next_page()
+
+        rows = vm.state.news_rows
+        ids = [r.news_id for r in rows if r.news_id is not None]
+        assert len(ids) == len(set(ids)) == 21
+        assert ids[0] == 21  # 旧 20 条未丢失
+        assert rows[-1].news_id == 1  # 旧尾项可达
+        assert len(rows) == 22
+        # 无 (publish_time, content) 重复项
+        keys = [(r.publish_time, r.content) for r in rows]
+        assert len(keys) == len(set(keys))
+        # 游标以旧尾 (id=2) 为界，不受新头部影响；offset 不再参与
+        last_call = dao.calls[-1]
+        assert last_call["cursor_id"] == 2
+        assert last_call["offset"] == 0
+
+    @pytest.mark.asyncio
+    async def test_duplicate_push_is_idempotent(self, vm):
+        """同一实时消息重复推送只保留一条。"""
+        from services.news_subscription_service import NewsUpdateType
+
+        item = {"content": "dup", "time": "2026-10-27 10:00:00"}
+        await vm._on_news_service_update(NewsUpdateType.NEW_ITEM, [item])
+        await vm._on_news_service_update(NewsUpdateType.NEW_ITEM, [item])
+
+        assert len(vm.state.news_rows) == 1
+
+    @pytest.mark.asyncio
+    async def test_push_matching_fetched_row_not_duplicated(self, vm):
+        """推送项随后出现在已展示列表中（同时间同正文）不重复。"""
+        dao = _FakeCursorNewsDao(_news_rows_n(20))
+        vm.processor.cache.market_dao = dao
+        await vm.refresh_news()
+        assert len(vm.state.news_rows) == 20
+
+        from services.news_subscription_service import NewsUpdateType
+
+        await vm._on_news_service_update(
+            NewsUpdateType.NEW_ITEM,
+            [{"content": "news5", "time": "2026-10-27 10:05:00"}],
+        )
+        assert len(vm.state.news_rows) == 20
+
+    @pytest.mark.asyncio
+    async def test_same_publish_time_distinct_ids_both_kept(self, vm):
+        """同一发布时间、不同 id 是不同新闻，不得合并。"""
+        dao = _FakeCursorNewsDao(
+            [
+                {"id": 3, "publish_time": "2026-10-27 10:00:00", "content": "a"},
+                {"id": 2, "publish_time": "2026-10-27 10:00:00", "content": "b"},
+            ]
+        )
+        vm.processor.cache.market_dao = dao
+        await vm.refresh_news()
+        assert [r.news_id for r in vm.state.news_rows] == [3, 2]
+
+    @pytest.mark.asyncio
+    async def test_pagination_failure_retry_does_not_skip(self, vm):
+        """分页失败不推进游标；重试从同一游标继续，不跳项。"""
+        dao = _FakeCursorNewsDao(_news_rows_n(21))
+        vm.processor.cache.market_dao = dao
+        await vm.refresh_news()
+        cursor_before = vm._news_cursor
+
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(side_effect=RuntimeError("db down"))
+        result, has_more = await vm.load_next_page()
+        assert result is None
+        assert has_more is True
+        assert vm._news_cursor == cursor_before
+        assert len(vm.state.news_rows) == 20
+
+        # 恢复后重试: 必须从同一游标继续 (替换为未打桩的新 DAO 实例)
+        vm.processor.cache.market_dao = _FakeCursorNewsDao(_news_rows_n(21))
+        await vm.load_next_page()
+        assert len(vm.state.news_rows) == 21
+        assert vm.state.news_rows[-1].news_id == 1
+
+    @pytest.mark.asyncio
+    async def test_cancelled_pagination_preserves_rows_and_cursor(self, vm):
+        """R2: 取消传播，且不推进游标、不改写列表。"""
+        dao = _FakeCursorNewsDao(_news_rows_n(21))
+        vm.processor.cache.market_dao = dao
+        await vm.refresh_news()
+        rows_before = vm.state.news_rows
+        cursor_before = vm._news_cursor
+
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await vm.load_next_page()
+
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert vm.state.news_rows == rows_before
+        assert vm._news_cursor == cursor_before
+        assert vm.state.is_loading_more is False
+
+    @pytest.mark.asyncio
+    async def test_refresh_resets_cursor_to_new_boundary(self, vm):
+        """跨刷新游标重置：旧游标不得被新数据沿用。"""
+        dao = _FakeCursorNewsDao(_news_rows_n(21))
+        vm.processor.cache.market_dao = dao
+        await vm.refresh_news()
+        await vm.load_next_page()
+        assert vm._news_cursor is not None
+
+        dao.rows = _news_rows_n(25)
+        await vm.refresh_news()
+        await vm.load_next_page()
+
+        last_call = dao.calls[-1]
+        assert last_call["cursor_id"] == 6  # 25..6 为第一页，旧尾 id=6
+        assert len(vm.state.news_rows) == 25
+        assert vm.state.news_rows[-1].news_id == 1
+
+    @pytest.mark.asyncio
+    async def test_clear_state_resets_cursor(self, vm):
+        dao = _FakeCursorNewsDao(_news_rows_n(21))
+        vm.processor.cache.market_dao = dao
+        await vm.refresh_news()
+        assert vm._news_cursor is not None
+
+        vm.clear_state()
+        assert vm._news_cursor is None
+
+
 class TestEnsureValidStockCodes:
     """UX-09 MINOR-03: _ensure_valid_stock_codes 加载有效代码集合 (源自 stock_basic)."""
 

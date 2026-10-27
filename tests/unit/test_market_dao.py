@@ -916,6 +916,64 @@ class TestMarketDaoUpdateMarketNewsAnalysis:
         assert executed == []
 
 
+class TestMarketDaoGetMarketNewsStableCursor:
+    """UIR-F04-004: get_market_news 稳定排序 + (publish_time, id) keyset 游标。"""
+
+    @pytest.mark.asyncio
+    async def test_order_by_stable_composite(self):
+        """同一 publish_time 必须有 id 次序，否则分页边界不确定。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
+        await dao.get_market_news(limit=10)
+        sql, params = dao._read_db.call_args.args
+        assert "ORDER BY publish_time DESC, id DESC" in sql
+        assert sql.count("$") == len(params)
+
+    @pytest.mark.asyncio
+    async def test_keyset_cursor_binds_time_and_id(self):
+        """游标条件以 $n 参数绑定（R4），并回落到 offset=0 的向后窗口。"""
+        cursor_time = datetime.datetime(2026, 10, 27, 10, 0, 0)
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_market_news(limit=20, cursor_publish_time=cursor_time, cursor_id=7)
+        sql, params = dao._read_db.call_args.args
+        assert "publish_time < $" in sql
+        assert "id < $" in sql
+        assert cursor_time in params
+        assert 7 in params
+        assert params[-2:] == [20, 0]
+        assert sql.count("$") == len(params)
+
+    @pytest.mark.asyncio
+    async def test_cursor_with_home_filter_keeps_placeholders_bound(self):
+        """home_filter 与游标组合时占位符编号连续、参数全绑定（R4）。"""
+        cursor_time = datetime.datetime(2026, 10, 27, 10, 0, 0)
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_market_news(
+            limit=20,
+            min_publish_time="2026-10-01",
+            cursor_publish_time=cursor_time,
+            cursor_id=7,
+        )
+        sql, params = dao._read_db.call_args.args
+        assert "source_kind = $" in sql
+        assert sql.count("$") == len(params)
+        assert params[:2] == ["2026-10-01", "telegraph"]
+        assert params[2:4] == [cursor_time, cursor_time]
+        assert params[4] == 7
+
+    @pytest.mark.asyncio
+    async def test_cursor_id_only_ignored(self):
+        """仅传 id 不构成游标（口径不完整），退回 offset 语义。"""
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_market_news(limit=20, cursor_id=7)
+        sql, params = dao._read_db.call_args.args
+        assert "id < $" not in sql
+        assert 7 not in params
+
+
 class TestMarketDaoGetNewsRiskBrief:
     @pytest.mark.asyncio
     async def test_empty_returns_none(self):
