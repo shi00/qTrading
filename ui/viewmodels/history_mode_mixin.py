@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -60,6 +62,38 @@ _REVIEW_STATS_REQUIRED_COLUMNS = frozenset(
 
 # BIZ-04 第二层: AI 归因 DAO 产出所需列 = 复盘统计列 + has_ai 分组列（同上安全降级）。
 _AI_ATTRIBUTION_REQUIRED_COLUMNS = _REVIEW_STATS_REQUIRED_COLUMNS | frozenset({"has_ai"})
+
+
+def _is_missing_scalar(value: object) -> bool:
+    """标量缺失判定（``None`` 或 NaN）——用于区分「有 run_id」与「缺失」。"""
+    return value is None or (isinstance(value, float) and math.isnan(value))
+
+
+def _history_run_source(run_id: object, trade_date: object, strategy_name: object) -> tuple:
+    """行级「运行来源」标识（UIR-F09-003），作为跨运行去重的分组键。
+
+    - 优先真实 ``run_id``（``("run", run_id)``）；
+    - 旧记录缺 run_id 时退回 ``(trade_date, strategy_name)`` 哨兵组（``("ds", .., ..)``）——
+      不伪造精确运行来源；
+    - 二者皆缺 → 单一 ``("unknown",)`` 组。
+
+    来源标识使「不同源警告保留 run 标识」而「同 run 重复行不刷屏」（组内去重）。
+    """
+    if not _is_missing_scalar(run_id):
+        return ("run", str(run_id))
+    if not _is_missing_scalar(trade_date) or not _is_missing_scalar(strategy_name):
+        td = "" if _is_missing_scalar(trade_date) else str(trade_date)
+        sn = "" if _is_missing_scalar(strategy_name) else str(strategy_name)
+        return ("ds", td, sn)
+    return ("unknown",)
+
+
+def _canonical_params_key(params: dict) -> str:
+    """Message params 的规范化去重键（键序无关；非可 JSON 序列化值退化为 str）。"""
+    try:
+        return json.dumps(params, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return repr(sorted(params.items(), key=lambda kv: str(kv[0])))
 
 
 class HistoryModeMixin:
@@ -319,23 +353,64 @@ class HistoryModeMixin:
 
     @staticmethod
     def _restore_exec_warnings(records_df: pd.DataFrame | None) -> tuple[Message, ...]:
-        """从历史记录还原执行期 warnings（CRITICAL-02，R21/BT-03）。
+        """从历史记录还原执行期 warnings（CRITICAL-02，R21/BT-03；UIR-F09-003 多运行聚合）。
 
         - 记录含 ``exec_warnings`` 列且存在非 NULL 值：还原为 Message 元组
-          （空数组 → 空元组，表示「已记录且无警告」，与 NULL 语义不同）；
-        - 列为 NULL / 列缺失（存量记录，或结果经由不落该列的历史路径产生）：
-          返回「未记录执行上下文」哨兵，**不得**渲染成「无警告」；
+          （空数组 → 该来源「已记录且无警告」，与 NULL「未记录」语义不同）；
+        - **扫描全部行并按运行来源聚合**：来源优先真实 ``run_id``，旧记录退回
+          ``(trade_date, strategy_name)`` 哨兵组（见 ``_history_run_source``）。任一被展示
+          来源有已知 warning 或未知上下文，结果即不为空——不得因首行为 ``[]`` 提前终止
+          而丢弃后续运行的警告（旧实现遇首个可反序列化值即 ``return``，会整体清空横幅）。
+        - 去重：同来源内以规范化 ``key + params`` 去重（同 run 重复行不刷屏）；不同来源不去重
+          （保留 run 标识）。
+        - 任一来源上下文缺失（NULL / 非法 JSON / 非数组）→ 追加「未记录执行上下文」哨兵
+          （已知不可信不得伪装成无警告）；同来源既有已记录又有缺失值时按保守并集处理并记诊断。
         - 无记录（空 df）：返回空元组（无结果可展示，避免产生误导性横幅）。
         """
         if records_df is None or records_df.empty:
             return ()
         if "exec_warnings" not in records_df.columns:
+            # 列缺失（存量记录，或历史路径未落该列）：全部行均无执行上下文。
             return (Message("screener_history_exec_context_unrecorded"),)
-        for value in records_df["exec_warnings"].tolist():
-            restored = deserialize_exec_warnings(value)
-            if restored is not None:
-                return restored
-        return (Message("screener_history_exec_context_unrecorded"),)
+
+        warning_values = records_df["exec_warnings"].tolist()
+        row_count = len(warning_values)
+        run_ids = records_df["run_id"].tolist() if "run_id" in records_df.columns else [None] * row_count
+        trade_dates = records_df["trade_date"].tolist() if "trade_date" in records_df.columns else [None] * row_count
+        strategy_names = (
+            records_df["strategy_name"].tolist() if "strategy_name" in records_df.columns else [None] * row_count
+        )
+
+        ordered: list[Message] = []
+        seen: set[tuple] = set()
+        recorded_sources: set[tuple] = set()
+        unrecorded_sources: set[tuple] = set()
+        for idx, raw in enumerate(warning_values):
+            source = _history_run_source(run_ids[idx], trade_dates[idx], strategy_names[idx])
+            restored = deserialize_exec_warnings(raw)
+            if restored is None:
+                # NULL / 非法 JSON / 非数组：该来源上下文未知，不得丢弃为「干净」。
+                unrecorded_sources.add(source)
+                continue
+            recorded_sources.add(source)
+            for msg in restored:
+                dedup_key = (source, msg.key, _canonical_params_key(msg.params))
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+                ordered.append(msg)
+
+        inconsistent = recorded_sources & unrecorded_sources
+        if inconsistent:
+            # 同来源既记录又缺失：保守并集（保留已知警告 + 保留未记录哨兵）；仅记来源数量，
+            # 不打印 run_id（避免无谓标识外泄，R9）。
+            logger.warning(
+                "[ScreenerVM] 存在 %d 个运行来源的 exec_warnings 记录/缺失不一致，按保守并集处理",
+                len(inconsistent),
+            )
+        if unrecorded_sources:
+            ordered.append(Message("screener_history_exec_context_unrecorded"))
+        return tuple(ordered)
 
     async def load_strategy_stats(self) -> None:
         """加载复盘聚合统计到 state.strategy_stats (UX-05, T3).
