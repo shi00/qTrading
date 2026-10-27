@@ -30,6 +30,7 @@ from services.task_manager import TaskManager
 from ui.viewmodels import Message
 from ui.viewmodels.screener_types import (
     LogEntry,
+    RealtimeSnapshot,
     ScreenerState,
     StreamCard,
     _MAX_LOG_CARDS,
@@ -173,6 +174,10 @@ class AIStreamMixin:
     _ai_buffer: list[dict]
     _discarded_buffer: list[dict]
     _stream_buffers: dict[str, dict]
+    # UIR-F09-002: 数据集修订号（_full_results 被整体替换时递增，供排序写回判定过期）
+    # 与实时快照（HISTORY 模式下容纳后台完成的运行结果，切回实时消费）。
+    _dataset_revision: int
+    _realtime_snapshot: RealtimeSnapshot | None
     _last_ai_update: float
     _flush_pending: bool
     _background_tasks: set[asyncio.Task]
@@ -599,6 +604,55 @@ class AIStreamMixin:
 
     # --- Strategy execution orchestration (TaskManager) ---
 
+    def _commit_realtime_results(
+        self,
+        result_df: pd.DataFrame,
+        *,
+        warnings: tuple[Message, ...] = (),
+        empty_message: Message | None = None,
+        **status_changes,
+    ) -> None:
+        """UIR-F09-002: 实时运行结果的统一提交入口（按 mode 决定写入位置）。
+
+        目标不变量：「只有当前模式拥有可见数据的所有权」。运行可能在后端继续、而用户已
+        切到 HISTORY —— 此时运行结果**不得**覆盖历史表。因此：
+
+        - ``mode == "REALTIME"``：结果作为可见表 ``_full_results`` 提交，经唯一 owner 单帧
+          原子产出分页 / 警告 / 空态 / 运行状态（``_update_pagination`` 的 ``**changes``）；
+        - 否则（HISTORY）：不触碰可见表，改以 ``replace`` 更新
+          ``_realtime_snapshot.full_results``（保留快照其余字段：页码 / 排序 / 空态 / 警告），
+          使 ``switch_to_realtime`` 恢复时消费到最新运行结果；仅将运行状态（loading / status）
+          经 ``_set_state`` 上报，**不**注入历史表的 warnings / empty_message。
+        - 两种模式均清空 ``_ai_buffer`` / ``_discarded_buffer``：result_df 为本次运行的权威
+          结果（已含全部行），残留缓冲若在切回实时后再 flush 会与结果表重复追加（重复行）。
+
+        Args:
+            result_df: 本次运行的权威结果表（成功为结果、空态为空表）。
+            warnings: 随结果展示的业务警告（仅 REALTIME 生效）。
+            empty_message: 结果空态原因（仅 REALTIME 生效）。
+            **status_changes: 运行状态变更（如 loading / status_message / status_color /
+                status_action_key），两种模式均生效。
+        """
+        if self._state.mode == "REALTIME":
+            self._full_results = result_df
+            self._dataset_revision += 1
+            self._ai_buffer = []
+            self._discarded_buffer = []
+            self._update_pagination(
+                page_no=1,
+                warnings=warnings,
+                empty_message=empty_message,
+                **status_changes,
+            )
+        else:
+            snap = self._realtime_snapshot
+            if snap is not None:
+                self._realtime_snapshot = replace(snap, full_results=result_df, ai_buffer=[])
+            self._ai_buffer = []
+            self._discarded_buffer = []
+            if status_changes:
+                self._set_state(**status_changes)
+
     async def run_strategy(
         self,
         strategy_key: str,
@@ -782,7 +836,6 @@ class AIStreamMixin:
                 )
 
                 if result_df is not None and not result_df.empty:
-                    self._full_results = result_df
                     # UX-03 (影响反馈): 筛选真实输入 (基本面策略 fundamentals / 其余 screening_data)
                     # 是本次策略的输入; 结果非空且明显收窄时, 向 D3-4 警告通道追加
                     # 「候选从 N 收窄至 M」横幅, 让参数实际效力立即可见, 使任何单位/阈值错位
@@ -800,11 +853,13 @@ class AIStreamMixin:
                         strategy_warnings = (*strategy_warnings, ai_failed_msg)
                     # 成功路径显式清空态原因 (防上一轮「无匹配」残留污染本轮),
                     # 本轮有结果由表格承载, 空态原因仅空结果时设置 (下方分支)。
-                    self._update_pagination(page_no=1, warnings=strategy_warnings, empty_message=None)
+                    # UIR-F09-002: 经模式感知统一提交入口 —— HISTORY 下运行在后台完成时
+                    # 只更新实时快照, 不覆盖历史表 (仅 REALTIME 才写可见表)。
+                    self._commit_realtime_results(result_df, warnings=strategy_warnings, empty_message=None)
 
                     # Task 3.3: save_results 失败不再落入 screener_exec_error.
-                    # 结果已写入 _full_results 照常上屏, 状态栏提示「未保存：原因」.
-                    # trade_date 缺失属于程序错误 (context 协议违规), 仍 raise.
+                    # 结果已提交（REALTIME 上屏 / HISTORY 入实时快照）照常可查看,
+                    # 状态栏提示「未保存：原因」. trade_date 缺失属于程序错误 (context 协议违规), 仍 raise.
                     save_failed_reason: str | None = None
                     # CRITICAL-03: 预置 0，使 save_results=False 时不产生未绑定引用；
                     # 该分支另有显式状态支，不依赖此预置值做「未保存」判定。
@@ -903,7 +958,6 @@ class AIStreamMixin:
                         )
                     return Message("task_screening_success", {"count": len(result_df)})
 
-                self._full_results = pd.DataFrame()
                 # UX-03 (空态原因): 走到此分支说明筛选前有真实候选输入 (452 已兜底非空),
                 # 但当前条件下无匹配 —— 在结果区空态提示「共考虑 N 只候选, 可调低条件」,
                 # 区分于「无数据」(需先同步), 避免用户误判「这个参数没用 / 软件有 bug」。
@@ -920,15 +974,17 @@ class AIStreamMixin:
                         Message("screener_nomatch", {"total": candidate_total}) if candidate_total > 0 else None
                     )
                 # C2b H1: 无结果退出路径经唯一 owner 单帧原子产出 (空切片 + loading=False + 提示),
-                # 避免分两帧触发重复通知 (第 3 轮对抗检视)
-                self._update_pagination(
-                    page_no=1,
+                # 避免分两帧触发重复通知 (第 3 轮对抗检视)。
+                # UIR-F09-002: 经模式感知统一提交入口 —— HISTORY 下只更新实时快照为「空结果」,
+                # 不覆盖历史表; 运行状态 (loading/status) 两种模式皆上报。
+                self._commit_realtime_results(
+                    pd.DataFrame(),
+                    warnings=strategy_warnings,
+                    empty_message=empty_message,
                     loading=False,
                     status_message=Message("screener_no_results"),
                     status_color="warning",
                     status_action_key=None,
-                    warnings=strategy_warnings,
-                    empty_message=empty_message,
                 )
                 return Message("screener_no_results")
 

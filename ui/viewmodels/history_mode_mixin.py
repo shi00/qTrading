@@ -108,6 +108,12 @@ class HistoryModeMixin:
     _set_state: Callable[..., None]
     _update_pagination: Callable[..., None]
     cancel_retry: Callable[[], None]
+    # UIR-F09-002: 历史请求代次（仅由 load_history_data 发起时递增，用于判定「是否有更新的
+    # 历史请求在途」并据此决定 loading 归属）/ 数据集修订号（模式切换或 _full_results 被整体
+    # 替换时递增，用于判定历史响应 / 排序写回的数据集身份是否过期）/ 销毁标志（宿主 VM 共享）。
+    _history_request_seq: int
+    _dataset_revision: int
+    _disposed: bool
 
     def switch_to_history(self):
         """Switch to HISTORY mode, snapshot current realtime state."""
@@ -116,6 +122,10 @@ class HistoryModeMixin:
         # UX-2.3: 切换到历史模式前若有正在进行的单股重试，取消并重置占位卡
         # 避免后台重试结束后无处回调、切回实时态时卡片永久停留在 is_analyzing
         self.cancel_retry()
+        # UIR-F09-002: 推进数据集修订号 —— 使在途历史响应 / 排序写回判定为过期（数据集身份
+        # 已变更，迟到响应不得写回 HISTORY 表）。注意：不推进 _history_request_seq，该序号
+        # 仅标识「在途历史请求」，模式切换无更新请求，故迟到响应不应误判为「被新请求取代」。
+        self._dataset_revision += 1
         # Snapshot realtime state
         self._realtime_snapshot = RealtimeSnapshot(
             full_results=self._full_results,
@@ -152,6 +162,10 @@ class HistoryModeMixin:
         """Switch back to REALTIME mode, restore snapshot."""
         if self._state.mode == "REALTIME":
             return
+        # UIR-F09-002: 推进数据集修订号 —— 使在途历史响应 / 排序写回判定为过期，返回实时后
+        # 历史迟到响应不得覆盖 switch_to_realtime 刚恢复的实时快照。同 switch_to_history，
+        # 不推进 _history_request_seq（避免迟到响应误判为「被新请求取代」而不复位 loading）。
+        self._dataset_revision += 1
         # Restore snapshot
         snap = self._realtime_snapshot
         if snap is not None:
@@ -299,57 +313,94 @@ class HistoryModeMixin:
 
         Task 3.2: VM 内聚 loading 管理 (View 不再 set_progress_visible).
 
-        M-UI-05: 全流程纳入 ``screener_vm_results_lock``（与 ``sort_data``/
-        ``_flush_ai_buffer`` 同锁）—— DAO await 期间用户排序/流式 flush 可能交错写
-        ``_full_results``, 旧数据的排序写回会覆盖本方法刚载入的历史数据（丢失更新）;
-        同锁互斥后写点串行化。锁内 await DB 与 ``sort_data`` 同模式, 单锁无嵌套,
-        无死锁; CancelledError 经 ``async with`` 释放锁后正常传播 (R2)。
+        UIR-F09-002: 结果所有权 / 请求代次保护 —— 目标不变量「`(mode, dataset_owner,
+        request_generation)` 一致才可提交可见数据」：
+        1. 方法入口（任何 await 之前）同步递增 ``_history_request_seq``（仅标识「在途历史
+           请求」，用于 loading 归属）并捕获本次起始 mode 与 ``_dataset_revision``
+           （数据集身份）；mode switch（``switch_to_history`` / ``switch_to_realtime``）推进
+           ``_dataset_revision``，使在途响应的数据集身份过期；
+        2. DAO await 于锁外执行（慢查询不阻塞排序 / 流式 flush）；仅「校验 + 写回」临界区
+           纳入 ``screener_vm_results_lock``（与 ``sort_data`` / ``_flush_ai_buffer`` 同锁，
+           R11），并在锁内二次核对，消除等待锁期间的竞态；
+        3. await 返回后核对「是否有更新历史请求在途」/ 数据集修订号 / disposed，任一不符即
+           判定过期响应，**不改任何可见状态**（数据 / 标签 / 警告 / 分页皆不动），杜绝「A 慢
+           B 快 → A 迟到覆盖 B」与「历史迟到覆盖实时表」；
+        4. 标签与成功数据**同帧提交**（`_update_pagination` 一次落 label + warnings + 切片），
+           保证状态标签与可见数据一致。
+        CancelledError / Exception 仅在本次仍为最新请求时复位 loading；过期判定路径仅在
+        「无更新历史请求接管」时复位 loading（模式切换 / 数据集替换 / 销毁场景无更新请求，
+        需复位避免 loading 卡死；被更新请求取代时不得清其 loading）。CancelledError 照常传播 (R2)。
         """
+        # 1. 代次 / 身份捕获（同步段，无 await，单线程事件循环内原子）
+        self._history_request_seq += 1
+        request_seq = self._history_request_seq
+        mode_at_start = self._state.mode
+        revision_at_start = self._dataset_revision
+        self._set_state(loading=True)
+        try:
+            cache = CacheManager()
+            # 2. DAO await 于锁外执行
+            df = await cache.screener_dao.get_history_records(trade_date, strategy_name, run_id)
+        except asyncio.CancelledError:
+            # 仅当本次仍为当前请求时复位 loading，避免清掉更新请求的 loading (R2 传播取消)
+            if request_seq == self._history_request_seq:
+                self._set_state(loading=False)
+            raise
+        except Exception:
+            if request_seq == self._history_request_seq:
+                self._set_state(loading=False)
+            raise
+
+        # 3. 过期判定：有更新的历史请求在途 / 数据集身份已变 / VM 已销毁 → 丢弃，不改任何可见状态
+        superseded = request_seq != self._history_request_seq
+        dataset_changed = revision_at_start != self._dataset_revision
+        if superseded or dataset_changed or self._disposed:
+            # 仅当无更新的历史请求接管 loading 时复位自身 loading（A 失败/过期不得清 B 的 loading）；
+            # 模式切换 / 数据集替换 / 销毁场景无更新历史请求，需复位避免 loading 卡死。
+            if not superseded:
+                self._set_state(loading=False)
+            return
+
         lock = get_loop_local("screener_vm_results_lock", asyncio.Lock)
         async with lock:
-            # M-UI-05: await 前 mode 快照 —— guard 语义为「加载期间 mode 不得切换」,
-            # 不强制 HISTORY 前置 (mode 不变的直接调用/测试路径仍合法)。
-            mode_at_start = self._state.mode
-            self._set_state(loading=True)
-            try:
-                cache = CacheManager()
-                df = await cache.screener_dao.get_history_records(trade_date, strategy_name, run_id)
-                # M-UI-05: mode guard —— await 期间用户切换模式（如切回 REALTIME）时丢弃
-                # 结果并复位 loading, 防止迟到的历史载入写回覆盖 switch_to_realtime 刚
-                # 恢复的实时快照（历史数据污染实时表格）。loading 已被切换路径置过,
-                # 此处幂等复位。
-                if self._state.mode != mode_at_start:
+            # 3b. 等待锁期间可能又发起新请求 / 切换模式 / 数据被整体替换 → 二次核对，过期即静默丢弃；
+            # 仅当仍为最新历史请求（无更新请求接管 loading）时复位自身 loading。
+            if (
+                request_seq != self._history_request_seq
+                or self._state.mode != mode_at_start
+                or revision_at_start != self._dataset_revision
+            ):
+                if request_seq == self._history_request_seq:
                     self._set_state(loading=False)
-                    return
-                if df is not None and not df.empty:
-                    self._full_results = df
-                else:
-                    self._full_results = pd.DataFrame()
-                if df is not None and not df.empty and "ai_score" in df.columns:
-                    sort_column = "ai_score"
-                else:
-                    sort_column = None
-                # CRITICAL-02 (R21/BT-03): 从落库记录还原执行期 warnings，替代原先的
-                # ``warnings=()``——后者把「已知不可信」渲染成「无警告」。列为 NULL 的
-                # 存量记录走「未记录执行上下文」哨兵分支（见 _restore_exec_warnings）。
-                restored_warnings = self._restore_exec_warnings(df)
-                # C2b H1: 数据内容变更后经唯一 owner 单帧原子产出分页元数据 + 当前页切片,
-                # 避免「loading=False + 旧表格 + 旧 total」陈旧帧 (M-1)。
-                # UX-03: 历史记录无「实时候选池/收窄」上下文, 防御性清空态原因。
-                self._update_pagination(
-                    page_no=1,
-                    loading=False,
-                    sort_column=sort_column,
-                    sort_ascending=False,
-                    empty_message=None,
-                    warnings=restored_warnings,
-                )
-            except asyncio.CancelledError:
-                self._set_state(loading=False)
-                raise
-            except Exception:
-                self._set_state(loading=False)
-                raise
+                return
+            if df is not None and not df.empty:
+                self._full_results = df
+            else:
+                self._full_results = pd.DataFrame()
+            # 数据集身份已变更：推进修订号使在途排序写回判定为过期
+            self._dataset_revision += 1
+            if df is not None and not df.empty and "ai_score" in df.columns:
+                sort_column = "ai_score"
+            else:
+                sort_column = None
+            # CRITICAL-02 (R21/BT-03): 从落库记录还原执行期 warnings，替代原先的
+            # ``warnings=()``——后者把「已知不可信」渲染成「无警告」。列为 NULL 的
+            # 存量记录走「未记录执行上下文」哨兵分支（见 _restore_exec_warnings）。
+            restored_warnings = self._restore_exec_warnings(df)
+            # 4. C2b H1: 数据内容变更后经唯一 owner 单帧原子产出分页元数据 + 当前页切片 +
+            # 查看状态标签, 避免「loading=False + 旧表格 + 旧 total」陈旧帧 (M-1) 与
+            # 「新标签 + 旧数据」不一致。UX-03: 历史记录无实时收窄上下文, 防御性清空态原因。
+            self._update_pagination(
+                page_no=1,
+                loading=False,
+                sort_column=sort_column,
+                sort_ascending=False,
+                empty_message=None,
+                warnings=restored_warnings,
+                status_message=self._history_viewing_message(trade_date, strategy_name, run_id),
+                status_color="info",
+                status_action_key=None,
+            )
 
     @staticmethod
     def _restore_exec_warnings(records_df: pd.DataFrame | None) -> tuple[Message, ...]:
@@ -442,6 +493,26 @@ class HistoryModeMixin:
             return
         self._set_state(ai_attribution=compute_ai_attribution_stats(df))
 
+    @staticmethod
+    def _history_viewing_message(
+        date_str: str,
+        strategy_name: str | None = None,
+        run_id: str | None = None,
+    ) -> Message:
+        """构造「历史查看」状态 Message (UIR-F09-002: 供 set_history_viewing_status 与
+        load_history_data 同帧提交复用, 保证标签与成功数据一致).
+
+        接收 raw ``strategy_name`` (i18n key) 和 ``run_id``; VM 不感知 locale (§3.2),
+        View 渲染时通过 ``_render_status_message`` 翻译 ``label_key`` 后缀 params。
+        """
+        if run_id:
+            params: dict = {"date": date_str, "label": f"#{run_id[:8]}"}
+        elif strategy_name:
+            params = {"date": date_str, "label_key": strategy_name}
+        else:
+            params = {"date": date_str, "label_key": "screener_all_strategies"}
+        return Message("screener_history_viewing", params)
+
     def set_history_viewing_status(
         self,
         date_str: str,
@@ -454,19 +525,16 @@ class HistoryModeMixin:
         VM 不感知 locale (§3.2), View 渲染时通过 ``_render_status_message`` 翻译
         ``label_key`` 后缀 params 为当前 locale 字符串.
 
+        注：本方法仅设置「立即/乐观」标签；``load_history_data`` 成功提交时会以同一
+        Message 与可见数据**同帧**再落一次 (UIR-F09-002)，过期响应不改标签。
+
         Args:
             date_str: 已格式化的日期字符串 (如 "2024-12-27")
             strategy_name: raw 策略名 i18n key (如 "strategy_oversold_name"), None 表示无策略
             run_id: 运行 ID, 优先于 strategy_name 显示 (locale-independent, 直接存入 label)
         """
-        if run_id:
-            params: dict = {"date": date_str, "label": f"#{run_id[:8]}"}
-        elif strategy_name:
-            params = {"date": date_str, "label_key": strategy_name}
-        else:
-            params = {"date": date_str, "label_key": "screener_all_strategies"}
         self._set_state(
-            status_message=Message("screener_history_viewing", params),
+            status_message=self._history_viewing_message(date_str, strategy_name, run_id),
             status_color="info",
             status_action_key=None,
         )
