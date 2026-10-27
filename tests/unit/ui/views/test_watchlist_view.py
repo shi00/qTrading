@@ -21,7 +21,12 @@ from flet.components.component import Component
 
 from ui.components.stock_detail_dialog import _build_title
 from ui.viewmodels import Message
-from ui.viewmodels.watchlist_view_model import WatchlistMutationResult, WatchlistRow, WatchlistState
+from ui.viewmodels.watchlist_view_model import (
+    DetailOpenResult,
+    WatchlistMutationResult,
+    WatchlistRow,
+    WatchlistState,
+)
 from ui.views.watchlist_view import (
     GITHUB_ISSUES_URL,
     WatchlistView,
@@ -53,6 +58,8 @@ class _FakeWatchlistViewModel:
         self.remove_result: WatchlistMutationResult = WatchlistMutationResult("applied")
         # View 渲染详情对话框时读取 vm.detail_service 作为 data_processor（duck-typed）。
         self.detail_service: Any = MagicMock(name="StockDetailService")
+        # UIR-F10-002: 可覆盖详情请求返回结果（None=按行推导 opened/failed）。
+        self.detail_open_result: DetailOpenResult | None = None
 
     @property
     def state(self) -> WatchlistState:
@@ -101,16 +108,21 @@ class _FakeWatchlistViewModel:
     async def clear_search(self) -> None:
         self.method_calls.append(("clear_search", {}))
 
-    async def open_stock_detail(self, ts_code: str) -> bool:
-        """UX-09 MAJOR-04: 模拟按代码取数成功并写入详情快照（name 回退行内股票名）。"""
+    async def open_stock_detail(self, ts_code: str) -> DetailOpenResult:
+        """UX-09 MAJOR-04: 模拟按代码取数成功并写入详情快照（name 回退行内股票名）。
+
+        UIR-F10-002: 返回三态结果；``detail_open_result`` 可覆盖以模拟 ``superseded``。
+        """
         self.method_calls.append(("open_stock_detail", {"ts_code": ts_code}))
+        if self.detail_open_result is not None:
+            return self.detail_open_result
         row = next((r for r in self._state.watchlist_rows if r.ts_code == ts_code), None)
         if row is None or not ts_code:
-            return False
+            return "failed"
         self._set_state(
             detail_stock_data=MappingProxyType({"ts_code": ts_code, "name": row.stock_name or ts_code, "close": 12.34})
         )
-        return True
+        return "opened"
 
     def close_stock_detail(self) -> None:
         self.method_calls.append(("close_stock_detail", {}))
@@ -730,6 +742,43 @@ class TestWatchlistViewViewStock:
         _click_icon_button(view_buttons[0])
 
         assert any("watchlist_detail_failed" in msg for msg, _ in toast_calls)
+        _rerender(component)
+        assert mock_watchlist_vm.captured_detail_kwargs.get("open_state") is None  # 未渲染详情对话框
+
+    def test_superseded_result_does_not_show_failure_toast(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """UIR-F10-002: VM 返回 superseded（请求已被取代）时不弹失败 toast、不渲染弹窗。"""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+
+        rows = (_make_row(ts_code="000001.SZ", stock_name="平安银行"),)
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
+        mock_watchlist_vm.detail_open_result = "superseded"
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        toast_calls: list[tuple[str, str]] = []
+        page.toast.show.side_effect = lambda msg, msg_type="info": toast_calls.append((msg, msg_type))
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        view_buttons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.SEARCH_OUTLINED
+        ]
+        assert len(view_buttons) == 1
+
+        _click_icon_button(view_buttons[0])
+
+        # 过期请求不得触发失败 toast
+        assert not any("watchlist_detail_failed" in msg for msg, _ in toast_calls)
         _rerender(component)
         assert mock_watchlist_vm.captured_detail_kwargs.get("open_state") is None  # 未渲染详情对话框
 

@@ -509,7 +509,7 @@ class TestOpenStockDetail:
         mock_cache.get_latest_quotes_bulk.return_value = _make_detail_df()
         mock_cache.get_stock_basic_bulk.return_value = _make_detail_df()
         result = await vm.open_stock_detail("000001.SZ")
-        assert result is True
+        assert result == "opened"
         assert vm.state.detail_stock_data is not None
         assert vm.state.detail_stock_data["ts_code"] == "000001.SZ"
         assert vm.state.detail_stock_data["name"] == "平安银行"
@@ -518,23 +518,23 @@ class TestOpenStockDetail:
     async def test_open_stock_detail_does_not_require_watchlist_row_but_falls_back_name(self, vm, mock_cache):
         """未在关注行内也能打开（不依赖列表），name 缺失时回退空（服务层回退 ts_code）。"""
         result = await vm.open_stock_detail("600519.SH")
-        assert result is True
+        assert result == "opened"
         assert vm.state.detail_stock_data is not None
         assert vm.state.detail_stock_data["ts_code"] == "600519.SH"
         # 无 basic 数据且无自选行 → name 回退为 ts_code（服务层 fallback_name or code）
         assert vm.state.detail_stock_data["name"] == "600519.SH"
 
     @pytest.mark.asyncio
-    async def test_open_stock_detail_empty_code_returns_false(self, vm, mock_cache):
-        assert await vm.open_stock_detail("") is False
-        assert await vm.open_stock_detail("   ") is False
+    async def test_open_stock_detail_empty_code_returns_failed(self, vm, mock_cache):
+        assert await vm.open_stock_detail("") == "failed"
+        assert await vm.open_stock_detail("   ") == "failed"
         assert vm.state.detail_stock_data is None
 
     @pytest.mark.asyncio
-    async def test_open_stock_detail_service_failure_returns_false(self, vm, mock_cache):
+    async def test_open_stock_detail_service_failure_returns_failed(self, vm, mock_cache):
         mock_cache.get_latest_quotes_bulk.side_effect = RuntimeError("db error")
         result = await vm.open_stock_detail("000001.SZ")
-        assert result is False
+        assert result == "failed"
         assert vm.state.detail_stock_data is None
         # 不得污染列表错误通道
         assert vm.state.load_error is None
@@ -558,6 +558,145 @@ class TestCloseStockDetail:
 
     def test_default_detail_state_is_none(self, vm):
         assert vm.state.detail_stock_data is None
+
+
+# --- UIR-F10-002: open_stock_detail 请求代次隔离（乱序响应/关闭回填不得改写详情） ---
+
+
+class TestOpenStockDetailGenerationIsolation:
+    """UIR-F10-002：仅最新且未关闭的详情请求可写 detail_stock_data（打开弹窗）。"""
+
+    @pytest.mark.asyncio
+    async def test_stale_success_does_not_override_newer(self, vm, mock_cache):
+        """Given A 闩锁、B 立即成功；When 先开 B 再放 A；Then state 代码仍 B。"""
+        started_a = asyncio.Event()
+        gate_a = asyncio.Event()
+
+        async def _load(code: str, fallback_name: str = "") -> dict:
+            if code == "A":
+                started_a.set()
+                await gate_a.wait()
+                return {"ts_code": "A", "name": "股票A"}
+            return {"ts_code": "B", "name": "股票B"}
+
+        vm.detail_service.load_stock_detail = AsyncMock(side_effect=_load)
+
+        task_a = asyncio.create_task(vm.open_stock_detail("A"))
+        await started_a.wait()
+        assert await vm.open_stock_detail("B") == "opened"
+        assert vm.state.detail_stock_data is not None
+        assert vm.state.detail_stock_data["ts_code"] == "B"
+
+        gate_a.set()
+        assert await task_a == "superseded"  # 迟到 A 被取代，不得覆盖 B
+        assert vm.state.detail_stock_data is not None
+        assert vm.state.detail_stock_data["ts_code"] == "B"
+
+    @pytest.mark.asyncio
+    async def test_close_discards_stale_success(self, vm, mock_cache):
+        """Given 关闭 B（在途 A）后放 A；Then state 仍 None（不重开弹窗）。"""
+        started_a = asyncio.Event()
+        gate_a = asyncio.Event()
+
+        async def _load(code: str, fallback_name: str = "") -> dict:
+            started_a.set()
+            await gate_a.wait()
+            return {"ts_code": code, "name": "X"}
+
+        vm.detail_service.load_stock_detail = AsyncMock(side_effect=_load)
+
+        task_a = asyncio.create_task(vm.open_stock_detail("A"))
+        await started_a.wait()
+        vm.close_stock_detail()
+        gate_a.set()
+        assert await task_a == "superseded"
+        assert vm.state.detail_stock_data is None
+
+    @pytest.mark.asyncio
+    async def test_stale_failure_returns_superseded_and_keeps_newer(self, vm, mock_cache):
+        """Given 旧 A 错误；Then 返回 superseded（不触发当前失败提示），state 仍 B。"""
+        started_a = asyncio.Event()
+        gate_a = asyncio.Event()
+
+        async def _load(code: str, fallback_name: str = "") -> dict:
+            if code == "A":
+                started_a.set()
+                await gate_a.wait()
+                raise RuntimeError("stale db error at /home/user/secret")
+            return {"ts_code": "B", "name": "股票B"}
+
+        vm.detail_service.load_stock_detail = AsyncMock(side_effect=_load)
+
+        task_a = asyncio.create_task(vm.open_stock_detail("A"))
+        await started_a.wait()
+        assert await vm.open_stock_detail("B") == "opened"
+        gate_a.set()
+        assert await task_a == "superseded"
+        assert vm.state.detail_stock_data is not None
+        assert vm.state.detail_stock_data["ts_code"] == "B"
+
+    @pytest.mark.asyncio
+    async def test_current_failure_returns_failed(self, vm, mock_cache):
+        """当前代次请求取数失败 → failed（调用方提示失败），不写 state。"""
+        vm.detail_service.load_stock_detail = AsyncMock(side_effect=RuntimeError("db error"))
+        assert await vm.open_stock_detail("000001.SZ") == "failed"
+        assert vm.state.detail_stock_data is None
+
+    @pytest.mark.asyncio
+    async def test_same_code_newer_request_supersedes_earlier(self, vm, mock_cache):
+        """A/B 同码：后发请求为当前代次，先发迟到请求被取代（不覆盖新结果）。"""
+        started_first = asyncio.Event()
+        gate_first = asyncio.Event()
+        calls = 0
+
+        async def _load(code: str, fallback_name: str = "") -> dict:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started_first.set()
+                await gate_first.wait()
+            return {"ts_code": code, "name": "股票"}
+
+        vm.detail_service.load_stock_detail = AsyncMock(side_effect=_load)
+
+        first = asyncio.create_task(vm.open_stock_detail("000001.SZ"))
+        await started_first.wait()
+        assert await vm.open_stock_detail("000001.SZ") == "opened"
+        gate_first.set()
+        assert await first == "superseded"
+        assert vm.state.detail_stock_data is not None
+        assert vm.state.detail_stock_data["ts_code"] == "000001.SZ"
+
+    @pytest.mark.asyncio
+    async def test_dispose_invalidates_in_flight_detail(self, vm, mock_cache):
+        """dispose 推进详情代次：在途响应不再提交/重开弹窗。"""
+        started_a = asyncio.Event()
+        gate_a = asyncio.Event()
+
+        async def _load(code: str, fallback_name: str = "") -> dict:
+            started_a.set()
+            await gate_a.wait()
+            return {"ts_code": code, "name": "X"}
+
+        vm.detail_service.load_stock_detail = AsyncMock(side_effect=_load)
+
+        task_a = asyncio.create_task(vm.open_stock_detail("A"))
+        await started_a.wait()
+        vm.dispose()
+        gate_a.set()
+        assert await task_a == "superseded"
+        assert vm.state.detail_stock_data is None
+
+    @pytest.mark.asyncio
+    async def test_reopen_after_close_works(self, vm, mock_cache):
+        """关闭后再重新打开：新请求为当前代次，正常写入（不被关闭代次永久阻断）。"""
+        vm.detail_service.load_stock_detail = AsyncMock(return_value={"ts_code": "000001.SZ", "name": "平安银行"})
+        assert await vm.open_stock_detail("000001.SZ") == "opened"
+        vm.close_stock_detail()
+        assert vm.state.detail_stock_data is None
+        assert await vm.open_stock_detail("000001.SZ") == "opened"
+        assert vm.state.detail_stock_data is not None
+        assert vm.state.detail_stock_data["ts_code"] == "000001.SZ"
 
 
 # --- F01: load_watchlist 返回值语义（成功/空表=True，异常=False） ---

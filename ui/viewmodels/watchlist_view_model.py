@@ -88,6 +88,13 @@ class WatchlistState:
     detail_stock_data: Mapping[str, Any] | None = None
 
 
+# UIR-F10-002：详情请求代次结果（三态，供调用方区分「已失效」与「失败」）。
+# - ``opened``：本次请求为当前代次且成功写入详情（打开弹窗）；
+# - ``failed``：本次请求为当前代次但取数失败（含空代码）→ 调用方提示失败；
+# - ``superseded``：请求已被更新的打开动作 / 关闭 / dispose 取代 → 调用方不得提示失败。
+DetailOpenResult = Literal["opened", "failed", "superseded"]
+
+
 class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
     """关注列表 ViewModel (V1 声明式范式).
 
@@ -106,6 +113,9 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
         # UIR-F06-001: 列表加载请求代次；仅当前代次可提交 rows/error/loading，
         # 旧快照不得覆盖成功 mutation 刷新后的新列表（与搜索代次相互独立）。
         self._load_generation: int = 0
+        # UIR-F10-002: 详情请求代次；仅当前代次可写 detail_stock_data（隔离乱序响应
+        # 与关闭/dispose 回填；与搜索/列表代次相互独立）。
+        self._detail_generation: int = 0
         self._init_mixin_fields()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -261,41 +271,57 @@ class WatchlistViewModel(ObservableViewModelMixin[WatchlistState]):
         self._load_generation += 1
 
     def dispose(self) -> None:
-        """清理资源（F03/UIR-F06-001：dispose 使在途搜索与列表请求代次失效）。"""
+        """清理资源（F03/UIR-F06-001/UIR-F10-002：dispose 使在途搜索/列表/详情请求代次失效）。"""
         self._search_generation += 1
         self._load_generation += 1
+        self._detail_generation += 1
         super().dispose()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
-    async def open_stock_detail(self, ts_code: str) -> bool:
+    async def open_stock_detail(self, ts_code: str) -> DetailOpenResult:
         """按 ts_code 打开个股详情（UX-09 MAJOR-04：不依赖当前选股结果集）。
 
-        取数成功后写入 ``state.detail_stock_data``（不可变映射）并返回 True；
-        取数失败或 ts_code 为空返回 False（不写 ``load_error``——避免列表被
-        ErrorState 整体替换）。``name`` 缺失时以自选行内股票名回退。
+        取数成功后写入 ``state.detail_stock_data``（不可变映射）并返回 ``opened``；
+        ``name`` 缺失时以自选行内股票名回退（服务层再回退 ts_code）。
+
+        UIR-F10-002：以实例字段 ``_detail_generation`` 做请求代次隔离——进入即推进
+        代次取得本次详情意图的所有权，只有与当前代次相等的请求才允许写 state；
+        被更新的打开动作、``close_stock_detail`` 或 ``dispose`` 取代的旧请求，其迟到
+        响应（成功/失败均）一律返回 ``superseded`` 且不写 state（避免旧股覆盖新股、
+        关闭后弹窗复现）。空代码 / 取数失败 / 服务返回 ``None`` 且仍为当前代次时返回
+        ``failed``（调用方提示失败）；``CancelledError`` 继续传播（R2）。
         """
         code = (ts_code or "").strip()
         if not code:
-            return False
+            return "failed"
+        self._detail_generation += 1
+        generation = self._detail_generation
         fallback_name = next((r.stock_name for r in self._state.watchlist_rows if r.ts_code == code), "")
         try:
             data = await self.detail_service.load_stock_detail(code, fallback_name=fallback_name)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(
-                "[WatchlistVM] open_stock_detail failed: %s",
-                DataSanitizer.sanitize_error(e),
-                exc_info=True,
-            )
-            return False
+            sanitized = DataSanitizer.sanitize_error(e)
+            if generation == self._detail_generation:
+                logger.error("[WatchlistVM] open_stock_detail failed: %s", sanitized, exc_info=True)
+                return "failed"
+            # 过期请求异常只按规范脱敏记录，不写 state、不触发调用方失败提示
+            logger.warning("[WatchlistVM] stale open_stock_detail failed: %s", sanitized, exc_info=True)
+            return "superseded"
+        if generation != self._detail_generation:
+            return "superseded"  # 已被更新请求/关闭取代，丢弃迟到结果
         if data is None:
-            return False
+            return "failed"
         self._set_state(detail_stock_data=MappingProxyType(dict(data)))
-        return True
+        return "opened"
 
     def close_stock_detail(self) -> None:
-        """关闭个股详情（清空 ``state.detail_stock_data``，使对话框从控件树移除）。"""
+        """关闭个股详情（清空 ``state.detail_stock_data``，使对话框从控件树移除）。
+
+        UIR-F10-002：先推进详情代次使所有在途详情请求失效，避免关闭后旧响应回填重开弹窗。
+        """
+        self._detail_generation += 1
         self._set_state(detail_stock_data=None)
 
 
