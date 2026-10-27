@@ -386,7 +386,9 @@ def _build_evidence_phase_body(
             )
         rows.append(_build_evidence_region(state))
     else:
-        rows.append(_build_evidence_list(state.evidence))
+        # UIR-F05-001（残余）：evidence_ready（详情默认态）与 error/degraded 一致渲染
+        # 来源覆盖 + 证据列表；空 coverage/evidence 时该区域为空容器，不虚构来源（R21）。
+        rows.append(_build_evidence_region(state))
     if state.phase == PHASE_EVIDENCE_READY and on_generate is not None:
         rows.append(
             anchored(
