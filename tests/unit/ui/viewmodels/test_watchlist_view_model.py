@@ -333,6 +333,23 @@ class TestSearchStocks:
         assert vm.state.is_searching is False
         assert vm.state.load_error is None
 
+    @pytest.mark.asyncio
+    async def test_search_stocks_sets_search_error_on_database_query_error(self, vm, mock_cache):
+        """UIR-F06-002: DAO 抛 DatabaseQueryError 时走既有 search_error 通道。
+
+        与「真实无匹配结果」（空 DataFrame → 空候选、无错误）必须可区分：
+        查询故障不得被呈现为「无结果」。
+        """
+        from data.persistence.daos.base_dao import DatabaseQueryError
+
+        mock_cache.search_stocks.side_effect = DatabaseQueryError("Database read failed: db down")
+        await vm.search_stocks("平安")
+        assert vm.state.search_error is not None
+        assert isinstance(vm.state.search_error, Message)
+        assert vm.state.search_results == ()
+        assert vm.state.is_searching is False
+        assert vm.state.load_error is None
+
 
 # --- clear_search ---
 
@@ -793,3 +810,191 @@ class TestSearchGenerationIsolation:
         await task_a
         # dispose 后旧响应不得回填候选结果
         assert vm.state.search_results == ()
+
+
+# --- UIR-F06-001: load_watchlist 请求代次隔离 ---
+
+
+def _watchlist_df(codes: list[tuple[str, str]]) -> pd.DataFrame:
+    """按 (ts_code, stock_name) 列表构造关注列表 DataFrame（空列表返回空表）。"""
+    return pd.DataFrame(
+        {
+            "ts_code": [c[0] for c in codes],
+            "stock_name": [c[1] for c in codes],
+            "added_at": ["2026-07-29 10:00:00"] * len(codes),
+            "note": [""] * len(codes),
+        }
+    )
+
+
+class TestLoadGenerationIsolation:
+    """UIR-F06-001：仅当前列表请求可提交 rows/error/loading。"""
+
+    @pytest.mark.asyncio
+    async def test_stale_load_does_not_override_mutation_refresh(self, vm, mock_cache):
+        """a) 旧 load 被闩锁挂住 → 添加 B 完成新 load → 放行旧 load，rows 保持 [A, B]。"""
+        rows_db: list[tuple[str, str]] = [("000001.SZ", "平安银行")]
+        started = asyncio.Event()
+        gate = asyncio.Event()
+        calls = 0
+
+        async def _get_watchlist() -> pd.DataFrame:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                snapshot = list(rows_db)  # 旧请求读取时的快照（此时尚无 B）
+                started.set()
+                await gate.wait()
+                return _watchlist_df(snapshot)
+            return _watchlist_df(list(rows_db))
+
+        async def _add(ts_code: str, stock_name: str, note: str | None = None) -> int:
+            rows_db.append((ts_code, stock_name))
+            return 1
+
+        mock_cache.get_watchlist.side_effect = _get_watchlist
+        mock_cache.add_to_watchlist.side_effect = _add
+
+        stale_task = asyncio.create_task(vm.load_watchlist())
+        await started.wait()
+        result = await vm.add_to_watchlist("600000.SH", "浦发银行")
+        assert result.status == "applied"
+        assert [r.ts_code for r in vm.state.watchlist_rows] == ["000001.SZ", "600000.SH"]
+
+        gate.set()
+        assert await stale_task is False  # 旧代次被取代，未提交任何 state
+        assert [r.ts_code for r in vm.state.watchlist_rows] == ["000001.SZ", "600000.SH"]
+        assert vm.state.load_error is None
+        assert vm.state.is_loading is False
+
+    @pytest.mark.asyncio
+    async def test_stale_failure_does_not_override_newer_success(self, vm, mock_cache):
+        """b) 旧 load 失败晚到 → 不覆盖新 load 的成功结果与 error 通道。"""
+        started = asyncio.Event()
+        gate = asyncio.Event()
+        calls = 0
+
+        async def _get_watchlist() -> pd.DataFrame:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                await gate.wait()
+                raise RuntimeError("stale db error at /home/user/secret")
+            return _make_watchlist_df()
+
+        mock_cache.get_watchlist.side_effect = _get_watchlist
+        stale_task = asyncio.create_task(vm.load_watchlist())
+        await started.wait()
+        assert await vm.load_watchlist() is True
+        assert len(vm.state.watchlist_rows) == 2
+
+        gate.set()
+        assert await stale_task is False
+        assert vm.state.load_error is None
+        assert vm.state.load_error_detail is None
+        assert len(vm.state.watchlist_rows) == 2
+        assert vm.state.is_loading is False
+
+    @pytest.mark.asyncio
+    async def test_stale_cancel_does_not_clear_newer_loading(self, vm, mock_cache):
+        """c) 旧请求取消 → 不清除新请求 loading，且 CancelledError 继续传播（R2）。"""
+        old_started = asyncio.Event()
+        old_gate = asyncio.Event()
+        new_started = asyncio.Event()
+        new_gate = asyncio.Event()
+        calls = 0
+
+        async def _get_watchlist() -> pd.DataFrame:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                old_started.set()
+                await old_gate.wait()
+                return pd.DataFrame()
+            new_started.set()
+            await new_gate.wait()
+            return _make_watchlist_df()
+
+        mock_cache.get_watchlist.side_effect = _get_watchlist
+        stale_task = asyncio.create_task(vm.load_watchlist())
+        await old_started.wait()
+        newer_task = asyncio.create_task(vm.load_watchlist())
+        await new_started.wait()
+        assert vm.state.is_loading is True
+
+        stale_task.cancel()
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion CancelledError 传播契约：raises 即验证，VM 不得吞没取消信号
+            await stale_task
+        assert vm.state.is_loading is True  # 旧取消不得清除新请求的 loading
+
+        new_gate.set()
+        assert await newer_task is True
+        assert vm.state.is_loading is False
+
+    @pytest.mark.asyncio
+    async def test_stale_snapshot_does_not_resurrect_removed_row(self, vm, mock_cache):
+        """d) remove 完成新刷新后，旧快照不得复活已删除行。"""
+        rows_db: list[tuple[str, str]] = [("000001.SZ", "平安银行"), ("600000.SH", "浦发银行")]
+        started = asyncio.Event()
+        gate = asyncio.Event()
+        calls = 0
+
+        async def _get_watchlist() -> pd.DataFrame:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                snapshot = list(rows_db)
+                started.set()
+                await gate.wait()
+                return _watchlist_df(snapshot)
+            return _watchlist_df(list(rows_db))
+
+        async def _remove(ts_code: str) -> int:
+            rows_db[:] = [r for r in rows_db if r[0] != ts_code]
+            return 1
+
+        mock_cache.get_watchlist.side_effect = _get_watchlist
+        mock_cache.remove_from_watchlist.side_effect = _remove
+
+        stale_task = asyncio.create_task(vm.load_watchlist())
+        await started.wait()
+        result = await vm.remove_from_watchlist("000001.SZ")
+        assert result.status == "applied"
+        assert [r.ts_code for r in vm.state.watchlist_rows] == ["600000.SH"]
+
+        gate.set()
+        assert await stale_task is False
+        assert [r.ts_code for r in vm.state.watchlist_rows] == ["600000.SH"]
+        assert vm.state.load_error is None
+        assert vm.state.is_loading is False
+
+    @pytest.mark.asyncio
+    async def test_dispose_invalidates_in_flight_load(self, vm, mock_cache):
+        """e) dispose 后旧响应不得回填。"""
+        mock_cache.get_watchlist.return_value = _watchlist_df([("000001.SZ", "平安银行")])
+        assert await vm.load_watchlist() is True
+        rows_before = vm.state.watchlist_rows
+
+        started = asyncio.Event()
+        gate = asyncio.Event()
+        calls = 0
+
+        async def _get_watchlist() -> pd.DataFrame:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                await gate.wait()
+                return _watchlist_df([("600519.SH", "贵州茅台")])
+            return _watchlist_df([("000001.SZ", "平安银行")])
+
+        # 首次加载已用 return_value 完成；在途加载改用 side_effect 闩锁。
+        mock_cache.get_watchlist.side_effect = _get_watchlist
+
+        inflight = asyncio.create_task(vm.load_watchlist())
+        await started.wait()
+        vm.dispose()
+        gate.set()
+        assert await inflight is False  # dispose 推进代次，旧响应不再提交
+        assert vm.state.watchlist_rows == rows_before

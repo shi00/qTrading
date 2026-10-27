@@ -164,6 +164,116 @@ class TestMatchNewsToStock:
         assert match_news_to_stock(text, self._candidates()) == ["600519.SH"]
 
 
+# ---------- 裸代码的金额/数量语境（UIR-F04-006） ----------
+class TestBareCodeAmountContext:
+    """紧邻金额/数量单位的裸 6 位数字是数值，不是股票代码证据。"""
+
+    def _candidates(self):
+        return [
+            {"ts_code": "600519.SH", "name": "贵州茅台"},
+            {"ts_code": "601318.SH", "name": "中国平安"},
+        ]
+
+    def test_amount_only_without_company_name_not_matched(self):
+        """仅「公司拟募集600519万元」且无公司名：不关联 600519。"""
+        assert match_news_to_stock("公司拟募集600519万元", self._candidates()) == []
+
+    def test_full_code_with_same_amount_still_matched_once(self):
+        """明确代码与同值金额并存时仍按完整代码关联一次。"""
+        assert match_news_to_stock("600519.SH拟募集600519万元", self._candidates()) == ["600519.SH"]
+
+    @pytest.mark.parametrize(
+        "unit",
+        [
+            "元",
+            "万元",
+            "亿元",
+            "千元",
+            "百万元",
+            "千万元",
+            "股",
+            "万股",
+            "亿股",
+            "千股",
+            "手",
+            "万手",
+            "份",
+            "张",
+            "吨",
+            "公斤",
+            "块钱",
+        ],
+    )
+    def test_cn_unit_adjacent_rejected(self, unit):
+        assert match_news_to_stock(f"公司拟募集600519{unit}", self._candidates()) == []
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "公司拟募集600519 万元",
+            "公司拟募集600519\u3000万元",
+            "公司拟募集600519 股",
+            "公司拟募集600519\t手",
+        ],
+    )
+    def test_whitespace_forms_rejected(self, text):
+        assert match_news_to_stock(text, self._candidates()) == []
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "公司拟募集600519，万元",
+            "公司拟募集600519, 万元",
+            "（600519万元）",
+            "公司拟募集600519万元（含税）",
+            "公司拟募集600519.00元",
+            "公司拟募集600519.5亿元",
+            "公司拟募集600519.00",
+        ],
+    )
+    def test_punctuation_and_decimal_forms_rejected(self, text):
+        assert match_news_to_stock(text, self._candidates()) == []
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "raised 600519 yuan",
+            "reported 600519 USD",
+            "issued 600519 shares",
+            "traded 600519 lots",
+            "spent 600519 million",
+        ],
+    )
+    def test_en_unit_adjacent_rejected(self, text):
+        assert match_news_to_stock(text, self._candidates()) == []
+
+    @pytest.mark.parametrize(
+        "text",
+        ["$600519", "¥600519", "￥600519", "US$600519", "HK$600519 上市", "人民币600519", "RMB600519"],
+    )
+    def test_currency_prefix_rejected(self, text):
+        assert match_news_to_stock(text, self._candidates()) == []
+
+    def test_multiple_numbers_judged_per_token(self):
+        """逐 token 判定：600519 后接金额单位被拒，601318 为正常指代仍关联。"""
+        assert match_news_to_stock("拟募集600519万元，601318发布公告", self._candidates()) == ["601318.SH"]
+
+    def test_both_numbers_as_amounts_rejected(self):
+        assert match_news_to_stock("拟投入600519万元与601318元", self._candidates()) == []
+
+    def test_same_token_legit_occurrence_elsewhere_kept(self):
+        """同一数值另有非计量语境出现时仍保留（不因某处金额片段整体否决）。"""
+        assert match_news_to_stock("拟募集600519万元，另见公司600519", self._candidates()) == ["600519.SH"]
+
+    def test_legit_bare_code_forms_preserved(self):
+        """既有合法裸代码指代保持兼容（股票/股权/代码前缀/空格分隔）。"""
+        assert match_news_to_stock("600519股票今日涨停", self._candidates()) == ["600519.SH"]
+        assert match_news_to_stock("600519股权转让", self._candidates()) == ["600519.SH"]
+        assert match_news_to_stock("600519只在主板上市", self._candidates()) == ["600519.SH"]
+        assert match_news_to_stock("代码600519，公告发布", self._candidates()) == ["600519.SH"]
+        assert match_news_to_stock("公司宣布 600519 相关事项", self._candidates()) == ["600519.SH"]
+
+
 # ---------- 标题标准化 ----------
 class TestNormalizeTitle:
     def test_lowercase_and_collapse_whitespace(self):

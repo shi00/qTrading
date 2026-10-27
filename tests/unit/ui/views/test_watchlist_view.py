@@ -84,6 +84,9 @@ class _FakeWatchlistViewModel:
         self.method_calls.append(("load_watchlist", {}))
         return self.load_result
 
+    def invalidate_load(self) -> None:
+        self.method_calls.append(("invalidate_load", {}))
+
     async def remove_from_watchlist(self, ts_code: str) -> WatchlistMutationResult:
         self.method_calls.append(("remove_from_watchlist", {"ts_code": ts_code}))
         return self.remove_result
@@ -808,6 +811,17 @@ class TestWatchlistViewLoadEffect:
         run_mount_effects(component)
 
         assert ("load_watchlist", {}) not in mock_watchlist_vm.method_calls
+
+    def test_invalidate_load_called_when_inactive(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """UIR-F06-001：切页离开（active=False）显式失效在途列表请求。"""
+        from tests.unit.ui.component_renderer import make_component, run_mount_effects
+
+        component = make_component(WatchlistView, active=False)
+        run_mount_effects(component)
+
+        assert ("invalidate_load", {}) in mock_watchlist_vm.method_calls
 
 
 class TestWatchlistViewRemoveCallback:

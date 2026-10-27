@@ -39,6 +39,10 @@ _HOT_CONCEPT_TAG_TIMEOUT_S = 3.0  # 热概念打标监听器等待上限
 # 则抛 TypeError 使轮询协程静默死亡（fire-and-forget 无重启）。消费侧统一归一化。
 _NEWS_POLL_INTERVAL_DEFAULT_S: typing.Final[float] = 60.0
 
+# UIR-F04-001：常规轮询与初始同步共用同一有界窗口。只取最新 1 条会把两次轮询
+# 之间的其它消息永久跳过（水位越过未处理项），因此按有界批次消费水位之后的全部消息。
+_NEWS_FETCH_BATCH_LIMIT: typing.Final[int] = 20
+
 # N3-5：打分器中文 label → market_news.sentiment 入库 code（NewsRow._coerce_sentiment /
 # news_feed._sentiment_style 按该取值契约着色）。label 未知按缺失处理（None，R21 不伪装）。
 _SENTIMENT_LABEL_TO_CODE = {"利好": "Positive", "中性": "Neutral", "利空": "Negative"}
@@ -703,9 +707,19 @@ class NewsSubscriptionService:
 
                     await self.cache.market_dao.save_market_news(normalized, wait=True)
 
+                    # UIR-F04-002：落库成功后事件携带稳定身份 + 本次落库的规范化情绪/标签。
+                    # 身份 = (content, publish_time)，与 market_news 唯一键 (content_hash,
+                    # publish_time) 等价（content_hash 为 content 的 sha256）；情绪缺失保持
+                    # None（R21），由 VM 保留 DB 已保留的旧成功值，不得据此清空。
+                    event_publish_time = normalized.get("publish_time")
                     await self._notify_listeners(
                         update_type=NewsUpdateType.TAG_UPDATE,
-                        data={"content": content, "tags": tags},
+                        data={
+                            "content": str(normalized.get("content") or content).strip(),
+                            "publish_time": str(event_publish_time) if event_publish_time else "",
+                            "tags": tags,
+                            "sentiment": normalized.get("sentiment"),
+                        },
                     )
 
                 self.processing_queue.task_done()  # type: ignore[union-attr]
@@ -843,7 +857,7 @@ class NewsSubscriptionService:
                 from data.external.news_fetcher import NewsFetcher
 
                 is_initial_sync = self._last_news_time is None
-                fetch_limit = 20 if is_initial_sync else 1
+                fetch_limit = _NEWS_FETCH_BATCH_LIMIT
 
                 news_list = await NewsFetcher.get_latest_global_news(limit=fetch_limit)
 
@@ -878,15 +892,18 @@ class NewsSubscriptionService:
                             # （DB 层 (content_hash, publish_time) UPSERT 幂等，仅耗资源）。
                             self._seen_hashes.move_to_end(h)
                             continue
-                        self._seen_hashes[h] = None
-                        if len(self._seen_hashes) > self._MAX_SEEN:
-                            self._seen_hashes.popitem(last=False)
 
                         normalized = CacheManager.normalize_news_item(
                             item,
                             default_source="CLS",
                         )
                         await self.cache.market_dao.save_market_news(normalized)
+
+                        # UIR-F04-001：仅在持久化成功后标记已见；保存失败项不得被去重
+                        # 表吞掉，否则下一次轮询会跳过它而水位继续前进。
+                        self._seen_hashes[h] = None
+                        if len(self._seen_hashes) > self._MAX_SEEN:
+                            self._seen_hashes.popitem(last=False)
 
                         await self._safe_queue_put(item)  # type: ignore[misc]
 
@@ -904,20 +921,40 @@ class NewsSubscriptionService:
                     await self._notify_listeners(update_type=NewsUpdateType.INITIAL)
                     return
 
+                old_watermark = self._last_news_time
                 new_items_found = False
                 new_items = []
+
+                # UIR-F04-001：窗口打满且最旧项仍晚于旧水位，说明两次轮询之间的
+                # 消息可能已滑出供应商窗口（中间存在无法证明完整的 gap）。显式告警，
+                # 不无声声称已完整消费；补拉需要供应商分页（当前未实现）。
+                oldest_time = news_list[-1].get("time", "")
+                if (
+                    old_watermark is not None
+                    and len(news_list) >= fetch_limit
+                    and oldest_time
+                    and oldest_time > old_watermark
+                ):
+                    logger.warning(
+                        "[NewsService] Poll window saturated (%d items): oldest fetched item %s is newer "
+                        "than watermark %s; messages in the gap may be missing (backfill requires "
+                        "provider pagination).",
+                        len(news_list),
+                        oldest_time,
+                        old_watermark,
+                    )
+
                 for item in reversed(news_list):
                     current_time = item.get("time", "")
-                    if self._last_news_time and current_time <= self._last_news_time:
+                    # UIR-F04-001：同秒条目不能仅凭时间字符串比较丢弃。严格晚于水位
+                    # 的条目直接处理；等秒条目放行后由 hash 去重判定是否已持久化。
+                    if old_watermark and current_time < old_watermark:
                         continue
                     h = get_hash(item)
                     if h in self._seen_hashes:
                         # M14-F2: 同 initial sync——刷新 LRU 位置防活跃条目误逐出
                         self._seen_hashes.move_to_end(h)
                         continue
-                    self._seen_hashes[h] = None
-                    if len(self._seen_hashes) > self._MAX_SEEN:
-                        self._seen_hashes.popitem(last=False)
                     new_items_found = True
                     new_items.append(item)
 
@@ -938,6 +975,12 @@ class NewsSubscriptionService:
                         },
                     )
                     await self.cache.market_dao.save_market_news(normalized, wait=True)
+
+                    # UIR-F04-001：持久化成功后才标记已见，保存失败项可由下次轮询重试；
+                    # 水位仅在整批循环无异常结束后推进，不会被失败项越过。
+                    self._seen_hashes[h] = None
+                    if len(self._seen_hashes) > self._MAX_SEEN:
+                        self._seen_hashes.popitem(last=False)
 
                     await self._safe_queue_put(item)  # type: ignore[misc]
 
@@ -982,9 +1025,10 @@ class NewsSubscriptionService:
                                     DataSanitizer.sanitize_error(e),
                                 )
 
-                # 水位线单调性保护：CLS 偶发返回旧数据时不应倒退水位线
+                # 水位线单调性保护：CLS 偶发返回旧数据时不应倒退水位线。
+                # 此处仅在整批处理无异常结束后执行（失败项已中止上方循环）。
                 new_time = news_list[0].get("time", self._last_news_time)
-                if not self._last_news_time or (new_time and new_time > self._last_news_time):
+                if new_time and (self._last_news_time is None or new_time > self._last_news_time):
                     self._last_news_time = new_time
 
                 if new_items_found:

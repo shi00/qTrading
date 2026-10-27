@@ -3,6 +3,7 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
 import datetime
 import re
 
@@ -490,6 +491,45 @@ class TestSearchStocks:
         # 关键词去除首尾空白后进入参数化查询
         assert "%平安%" in compiled
         assert "%  平安  %" not in compiled
+
+    @pytest.mark.asyncio
+    async def test_requests_non_suppressed_read(self):
+        """UIR-F06-002: 必须以 suppress_errors=False 查询，禁止把故障吞成空结果。"""
+        dao = _make_dao()
+        dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
+        await dao.search_stocks("平安")
+        assert dao._read_db_select.call_args.kwargs["suppress_errors"] is False
+
+    @pytest.mark.asyncio
+    async def test_read_failure_propagates_not_empty_df(self):
+        """UIR-F06-002: 真实 DAO 读取故障（mock engine 抛普通异常）→ DatabaseQueryError。
+
+        回归点：默认 suppress_errors=True 会把查询故障吞成空 DataFrame，VM 的
+        search_error 通道收不到错误，用户把「查询故障」误读为「无匹配结果」
+        （R21 缺失值伪装）。
+        """
+        from data.persistence.daos.base_dao import DatabaseQueryError
+
+        dao = _make_dao()
+        conn = MagicMock()
+        conn.execute = AsyncMock(side_effect=RuntimeError("invalid input syntax for type integer"))
+        conn.__aenter__ = AsyncMock(return_value=conn)
+        conn.__aexit__ = AsyncMock(return_value=False)
+        dao.engine.connect = MagicMock(return_value=conn)
+        with pytest.raises(DatabaseQueryError, match="Database read failed"):
+            await dao.search_stocks("平安")
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        """R2: 查询被取消时必须传播，不得降级为空结果。"""
+        dao = _make_dao()
+        conn = MagicMock()
+        conn.execute = AsyncMock(side_effect=asyncio.CancelledError())
+        conn.__aenter__ = AsyncMock(return_value=conn)
+        conn.__aexit__ = AsyncMock(return_value=False)
+        dao.engine.connect = MagicMock(return_value=conn)
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion CancelledError 传播契约：raises 即验证，DAO 不得吞没取消信号
+            await dao.search_stocks("平安")
 
 
 class TestStockBasicHealthSummary:

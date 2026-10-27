@@ -65,9 +65,64 @@ def _ts_code_exchange(code: str) -> str | None:
     return exchange if exchange in _EXCHANGES else None
 
 
+# 裸 6 位数字的计量语境（UIR-F04-006 明文契约）：该数字是金额/数量而非股票代码。
+# 「股」后接 票/价/权/东 属股票指代（如「600519股票」），不算单位；
+# 刻意不收「只/头/台/套/辆/个」等与常见字词连读的单字单位（如「600519只在主板上市」）。
+_CN_AMOUNT_UNITS = (
+    "亿元|千万元|百万元|万元|千元|元|亿|万|"
+    "亿股|万股|千股|万手|万吨|手|股(?![票价权东])|份|张|吨|公斤|千克|克|"
+    "米|公里|平方米|平米|立方米|千瓦时|兆瓦|桶|箱|瓶|袋|件|笔|户|"
+    "块钱|美元|港元|港币|欧元|日元|人民币"
+)
+_EN_AMOUNT_UNITS = r"yuan|rmb|cny|usd|hkd|eur|jpy|dollars?|shares?|lots?|tons?|kg|million|billion|thousand"
+# 数字之后：可选小数尾数 + 可选空白/逗号/右括号引号 + 单位
+_AMOUNT_TAIL_RE = re.compile(
+    rf"(?:\s*[.．]\d+)?[\s,，)）】」』”’\"']*(?:{_CN_AMOUNT_UNITS}|(?:{_EN_AMOUNT_UNITS})\b)",
+    re.IGNORECASE,
+)
+# 数字之前紧邻的货币符号/币种（如 ``$600519`` / ``人民币600519``）
+_AMOUNT_PREFIX_RE = re.compile(
+    r"(?:US\$|HK\$|RMB|CNY|USD|HKD|EUR|JPY|[¥￥$]|人民币|美元|港元|港币)\s*$",
+    re.IGNORECASE,
+)
+# 数字后直接接小数位：是数值（如 ``600519.00``），不是股票代码
+_DECIMAL_TAIL_RE = re.compile(r"[.．]\d+")
+
+
+def _is_measurement_context(text: str, start: int, token: str) -> bool:
+    """裸数字是否处于金额/数量计量语境（前后紧邻判定，单位清单见 ``_bare_code_tokens``）。"""
+    end = start + len(token)
+    if _AMOUNT_PREFIX_RE.search(text, 0, start):
+        return True
+    if _DECIMAL_TAIL_RE.match(text, end):
+        return True
+    return _AMOUNT_TAIL_RE.match(text, end) is not None
+
+
 def _bare_code_tokens(text: str) -> set[str]:
-    """从文本提取满足边界约束的裸 6 位数字 token。"""
-    return set(_BARE_CODE_RE.findall(text or ""))
+    """从文本提取可作为股票代码证据的裸 6 位数字 token（逐 token 按位置判定）。
+
+    拒绝紧邻的金额/数量计量语境（裸数字是数值，不是股票引用）：
+      - 金额单位：元、千元、万元、百万元、千万元、亿元、亿、万、块钱、美元、港元、港币、
+        欧元、日元、人民币、RMB、CNY、USD、HKD、EUR、JPY、yuan、dollar(s)、
+        thousand、million、billion；
+      - 数量单位：股、万股、亿股、千股、手、万手、份、张、吨、万吨、公斤、千克、克、
+        米、公里、平方米、平米、立方米、千瓦时、兆瓦、桶、箱、瓶、袋、件、笔、户、
+        share(s)、lot(s)、ton(s)、kg；
+      - 前缀货币符号/币种：``$`` / ``¥`` / ``￥`` / ``US$`` / ``HK$`` / 人民币 / 美元 / 港元；
+      - 数字与单位之间允许空白、逗号、右括号/引号，并允许小数尾数（如 ``600519.00 元``）；
+      - 数字后直接接小数位（如 ``600519.00``）视为数值，即使后面没有单位。
+
+    逐 token 判定：同一文本出现多处同值数字时，只要有一处不在计量语境即保留；
+    ``600519股票`` / ``600519股权`` 等股票指代保持兼容；本函数不删除既有合法裸代码支持。
+    """
+    src = text or ""
+    tokens: set[str] = set()
+    for match in _BARE_CODE_RE.finditer(src):
+        token = match.group()
+        if not _is_measurement_context(src, match.start(), token):
+            tokens.add(token)
+    return tokens
 
 
 def _unique_ts_suffixes(candidates: list[dict]) -> dict[str, str]:
@@ -89,7 +144,8 @@ def match_news_to_stock(news_text: str | None, candidates: list[dict]) -> list[s
       1. 完整股票代码：``SH600519`` / ``600519.SH`` 等（大小写不敏感）；前缀形式
          须与候选 ts_code 的交易所一致，缺后缀/未知交易所的候选不猜测交易所；
       2. 裸 6 位：满足 ``(?<![0-9A-Za-z])\\d{6}(?![0-9A-Za-z])`` 且非日期段/连续数字，
-         且落在候选股 ts_code 池；
+         且落在候选股 ts_code 池；紧邻金额/数量单位的数值不是代码证据（单位清单与
+         位置判定契约见 :func:`_bare_code_tokens` 文档串）；
       3. 公司全称（>= 4 汉字）直接出现在文本；
       4. 简称在候选池唯一且 >= 3 汉字才直接匹配（歧义简称不关联）。
     """

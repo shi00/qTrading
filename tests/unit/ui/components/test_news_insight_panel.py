@@ -17,9 +17,11 @@ from core.i18n import I18n
 from ui.components.news_insight_panel import (
     NewsInsightState,
     _build_coverage,
+    _build_degraded_body,
     _build_event_card,
     _build_event_cards,
     _build_evidence_list,
+    _build_evidence_phase_body,
     _build_ready,
     coverage_source_label_key,
     risk_level_label_key,
@@ -388,6 +390,95 @@ def test_translate_message_formats_params():
     text = _translate_message(Message("news_insight_err_evidence", params={"ts_code": "000001.SZ"}))
     assert isinstance(text, str)
     assert "000001.SZ" in text
+
+
+# --- degraded / error 取证区（UIR-F05-001） ---
+
+
+def _iter_controls(control):
+    """递归收集控件树（content / controls）中所有控件。"""
+    yield control
+    content = getattr(control, "content", None)
+    if content is not None:
+        yield from _iter_controls(content)
+    for child in getattr(control, "controls", None) or []:
+        yield from _iter_controls(child)
+
+
+def _degraded_state(*, evidence=(), coverage=()):
+    from ui.viewmodels import Message
+
+    return NewsInsightState(
+        phase="degraded",
+        ts_code="000001.SZ",
+        message=Message("news_insight_degraded", params={"status": "evidence_only"}),
+        evidence=evidence,
+        coverage=coverage,
+    )
+
+
+def _evidence_and_coverage():
+    from ui.viewmodels.news_insight_types import EvidenceItem, SourceCoverage
+
+    evidence = (
+        EvidenceItem(
+            news_id=1,
+            source="巨潮资讯",
+            title="某公司公告",
+            quoteable_text="公告正文摘录",
+            publish_time="2026-09-01 10:00",
+        ),
+    )
+    coverage = (SourceCoverage(source="announcement", status="ok", fetched=1, adopted=1),)
+    return evidence, coverage
+
+
+def test_build_degraded_body_renders_evidence_and_coverage_once():
+    """degraded：非空证据展示标题/摘录/覆盖，仅一个重试按钮，不出现"无风险"表述。"""
+    evidence, coverage = _evidence_and_coverage()
+    body = _build_degraded_body(_degraded_state(evidence=evidence, coverage=coverage), on_retry=lambda: None)
+
+    values = [v for v in _iter_text_values(body) if isinstance(v, str)]
+    joined = "\n".join(values)
+    assert joined.count("某公司公告") == 1
+    assert joined.count("公告正文摘录") == 1
+    assert joined.count("公告: 正常") == 1
+    assert "分析降级" in joined
+    assert "无风险" not in joined
+
+    retry_buttons = [c for c in _iter_controls(body) if isinstance(c, ft.OutlinedButton)]
+    assert len(retry_buttons) == 1
+    assert not [c for c in _iter_controls(body) if isinstance(c, ft.FilledButton)]
+
+
+def test_build_degraded_body_empty_evidence_has_no_fabricated_sources():
+    """degraded 空证据/空覆盖：只显示降级消息与重试，不虚构来源或证据标题。"""
+    body = _build_degraded_body(_degraded_state(), on_retry=lambda: None)
+
+    values = [v for v in _iter_text_values(body) if isinstance(v, str)]
+    assert values == [I18n.get("news_insight_degraded", status="evidence_only")]
+    assert len([c for c in _iter_controls(body) if isinstance(c, ft.OutlinedButton)]) == 1
+
+
+def test_build_evidence_phase_body_error_renders_coverage_and_evidence_once():
+    """error：覆盖与证据各出现一次，重试按钮唯一。"""
+    from ui.viewmodels import Message
+
+    evidence, coverage = _evidence_and_coverage()
+    state = NewsInsightState(
+        phase="error",
+        ts_code="000001.SZ",
+        message=Message("news_insight_analysis_failed", params={"status": "failed"}),
+        evidence=evidence,
+        coverage=coverage,
+    )
+    body = _build_evidence_phase_body(state, None, lambda: None)
+
+    joined = "\n".join(v for v in _iter_text_values(body) if isinstance(v, str))
+    assert joined.count("某公司公告") == 1
+    assert joined.count("公告正文摘录") == 1
+    assert joined.count("公告: 正常") == 1
+    assert len([c for c in _iter_controls(body) if isinstance(c, ft.OutlinedButton)]) == 1
 
 
 # --- i18n 中英对称守护（防漏翻译） ---
