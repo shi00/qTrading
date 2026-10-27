@@ -850,3 +850,28 @@ async def test_dedicated_gguf_partial_numbers_kept(monkeypatch):
     assert result["sentiment_conf"] is None
     assert result["sentiment_status"] == "partial"
     assert result["sentiment_source"] == "dedicated:gguf"
+
+
+async def test_dedicated_sentiment_shares_frozen_deadline(monkeypatch):
+    """F29：dedicated 情绪子任务与主题共享同一入口冻结绝对 deadline。
+
+    原实现另起完整 ``total_timeout_seconds``——主题 + 情绪两子任务各得一份总额度
+    时限；修复后情绪复用主题的冻结截止，总时限不翻倍。
+    """
+    dispatch = _patch_env(monkeypatch, _dispatch(mode="dedicated"))
+    classifier, _svc = _service()
+
+    dispatch.executor.execute = AsyncMock(
+        side_effect=[
+            _succeeded_result(_bundled_json(sentiment=None)),
+            _failed_result(),
+        ]
+    )
+
+    await classifier.classify_news("央行宣布降准")
+
+    topic_call, sentiment_call = dispatch.executor.execute.await_args_list
+    assert topic_call.args[0].task_id == "topic"
+    assert sentiment_call.args[0].task_id == "sentiment"
+    # 同一冻结绝对截止（单调时钟值，非各任务独立起算的超时秒数）
+    assert sentiment_call.args[0].deadline == topic_call.args[0].deadline

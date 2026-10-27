@@ -505,7 +505,6 @@ class NewsClassifier:
         )
         topic_result, topic_error = await self._execute_scenario_task(topic_request, dispatch, _validate_bundled_output)
 
-        loop = asyncio.get_running_loop()
         # D1（检视修复）：sentiment 子列表独立排序——用 task_routes.sentiment.candidates
         # 构造子路由快照（Executor 按 scenario_id 匹配路由），不经场景级候选。
         # F16：预算身份继承主路由冻结值（同 dispatch 同政策，费用型判据一致），
@@ -556,7 +555,10 @@ class NewsClassifier:
                 "texts": [text],
                 "json_mode": True,
             },
-            deadline=loop.time() + dispatch.total_timeout_seconds,
+            # F29：情绪子任务与主题共享同一入口冻结绝对 deadline（原实现另起完整
+            # total_timeout_seconds，两子任务各得一份总额度时限）；主题耗时侵蚀后
+            # 情绪按剩余预算执行，总时限不翻倍。
+            deadline=deadline,
         )
         sentiment_result, sentiment_error = await self._execute_scenario_task(
             sentiment_request, dispatch, _validate_sentiment_output, snapshot=sentiment_snapshot

@@ -49,9 +49,12 @@ from core.model_management_types import PersistenceOutcome
 from services.ai_service.scenario_executor import (
     ScenarioExecutor,
     ScenarioOutput,
+    _LOOP_STATE_KEY,
+    _LoopState,
     _classify_adapter_failure,
 )
 from services.ai_service.usage_recorder import ReservationOutcome
+from utils.loop_local import get_loop_local
 
 pytestmark = pytest.mark.unit
 
@@ -1926,3 +1929,85 @@ class TestF27RoutePolicy:
         # 默认策略：首次失败 + 1 重试成功（非法键值未被消费为策略）
         assert adapter._invoke_calls["n"] == 2
         assert result.status == "succeeded"
+
+
+class TestF29DeadlineEnforcement:
+    """F29 deadline 全程覆盖：排队等待受请求级冻结绝对 deadline 约束。
+
+    语义基线：``request.deadline`` 为入口冻结的单调绝对截止；连接并发许可的
+    排队等待同样消耗该预算——超时候选记 skipped 并收敛整个候选遍历（排队不得
+    无限等待，过期后不得再做新准备启动出站）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_queued_permit_exceeds_deadline_skips_candidate(self):
+        """许可排队超时：skipped + 原因记录，零预留零适配器调用，许可不泄漏。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        fake_now = 1000.0
+        executor = _executor(adapter, recorder, validate=_validator_ok, clock=lambda: fake_now)
+        # 预占同连接并发许可（loop-local state，R11）：Executor 排队将阻塞至 deadline 耗尽
+        state = get_loop_local(_LOOP_STATE_KEY, _LoopState)
+        permit = asyncio.Semaphore(1)
+        await permit.acquire()
+        state.semaphores["conn-remote"] = permit
+        request = _request(deadline=fake_now + 0.05)
+
+        result = await executor.execute(
+            request, _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(concurrency=1),)), _validator_ok
+        )
+
+        assert result.status == "failed"
+        assert len(result.candidate_decisions) == 1
+        assert result.candidate_decisions[0].decision == "skipped"
+        assert result.candidate_decisions[0].reason == "deadline exhausted waiting for connection permit"
+        # 零副作用：未预留、未派发、未执行适配器（过期后不得新出站）
+        recorder.try_reserve.assert_not_awaited()
+        adapter.invoke.assert_not_awaited()
+        # 许可未被排队者获得（wait_for 超时不泄漏 acquire）
+        assert permit.locked() is True
+
+    @pytest.mark.asyncio
+    async def test_queued_permit_timeout_breaks_remaining_candidates(self):
+        """许可排队超时收敛整个遍历（break）：后续候选不再产生决策。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        fake_now = 1000.0
+        executor = _executor(adapter, recorder, validate=_validator_ok, clock=lambda: fake_now)
+        state = get_loop_local(_LOOP_STATE_KEY, _LoopState)
+        permit = asyncio.Semaphore(1)
+        await permit.acquire()
+        state.semaphores["conn-remote"] = permit
+        request = _request(deadline=fake_now + 0.05)
+
+        result = await executor.execute(
+            request,
+            _snapshot(
+                (_candidate(0, "conn-remote"), _candidate(1, "conn-remote")),
+                (_remote_conn(concurrency=1),),
+            ),
+            _validator_ok,
+        )
+
+        # break 语义：仅首个候选有决策（continue 会使第二候选重复排队并再记 skipped）
+        assert len(result.candidate_decisions) == 1
+        assert result.candidate_decisions[0].decision == "skipped"
+
+    @pytest.mark.asyncio
+    async def test_permit_wait_with_budget_executes_and_releases(self):
+        """预算充足时排队正常通过：执行成功且许可释放（finally 语义，不泄漏）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok, clock=lambda: 1000.0)
+        state = get_loop_local(_LOOP_STATE_KEY, _LoopState)
+        permit = asyncio.Semaphore(1)
+        state.semaphores["conn-remote"] = permit
+
+        result = await executor.execute(
+            _request(deadline=1030.0),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(concurrency=1),)),
+            _validator_ok,
+        )
+
+        assert result.status == "succeeded"
+        assert permit.locked() is False
