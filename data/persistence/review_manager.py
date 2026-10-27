@@ -101,11 +101,14 @@ def _parse_filter_attribution(raw: typing.Any) -> dict[str, typing.Any] | None:
     return None
 
 
-# D2-4: 复权持仓期收益率唯一正本，供 run_review（T+1/T+5 内联）与
-# backfill_horizon_returns（T+5 延迟回填）共用，避免复权口径复制。
-# ret = (close_tN/adj_tN) ÷ (close_t0/adj_t0) − 1；复权基准 adj_ref 在比率中抵消，
-# 结果与基准选择无关（基准免疫）；除权日因 adj 变化自动校正（D2-3）。
-# 无 adj_factor（存量数据/测试替身）时回退原始 close 比率，保持向后兼容。
+# D2-4/UIR-F09-001: 复权持仓期收益率唯一正本，供 run_review（T+1/T+5 内联）与
+# backfill_horizon_returns（T+5 延迟回填）、backfill_t1_returns 共用，避免复权口径复制。
+# 复权正本契约（utils/qfq.py:qfq_ratio_expr 与 VectorBacktestEngine._apply_qfq 一致）：
+#   复权价 = raw_price × adj_factor / base_adj_factor（factor 为乘子，非倒数）。
+# 故持仓期收益 ret = (close_tN × adj_tN) / (open_t1 × adj_t1) − 1：base_adj_factor 在
+# 比率中抵消，结果与复权基准选择无关（基准免疫）；除权日因 adj 变化自动校正（D2-3）。
+# 有效性守卫先于除法：缺因子（tn/basis adj 缺失或非正）与 0/负/非有限价格一律返回 None，
+# 不产出伪合法回报。无 adj_factor 列（存量数据/测试替身）时回退原始 close 比率，保持向后兼容。
 def _qfq_return_pct(
     tn_ser: pd.Series,
     basis_close: float,
@@ -114,16 +117,18 @@ def _qfq_return_pct(
 ) -> float | None:
     tn_close_raw = tn_ser.get("close")
     tn_close = float(tn_close_raw) if bool(pd.notna(tn_close_raw)) else None
-    if tn_close is None:
+    if tn_close is None or not math.isfinite(tn_close) or tn_close <= 0:
+        return None
+    if basis_close is None or not math.isfinite(basis_close) or basis_close <= 0:
         return None
     if has_adj_factor:
         tn_adj_raw = tn_ser.get("adj_factor")
         tn_adj = float(tn_adj_raw) if bool(pd.notna(tn_adj_raw)) else None
-        if tn_adj is None or tn_adj == 0:
+        if tn_adj is None or not math.isfinite(tn_adj) or tn_adj <= 0:
             return None
-        if basis_adj is None or basis_adj == 0:
+        if basis_adj is None or not math.isfinite(basis_adj) or basis_adj <= 0:
             return None
-        return (tn_close / tn_adj) / (basis_close / basis_adj) - 1.0
+        return (tn_close * tn_adj) / (basis_close * basis_adj) - 1.0
     return (tn_close / basis_close) - 1.0
 
 

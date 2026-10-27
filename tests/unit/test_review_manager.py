@@ -3262,9 +3262,9 @@ class TestReviewManagerQfqAdjustedReturn:
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
     async def test_t5_uses_adjusted_price_over_ex_right(self, mock_cm, mock_tc):
-        """20240612 除权（10 送 10：价格 10→5，adj 1.0→0.5）。
+        """20240612 除权（10 送 10：价格 10→5，adj 1.0→2.0，因子为乘法升幅）。
 
-        裸 close 累计 T+5 = 5.4/10-1 = -46%（假性暴跌）；复权后 = (5.4/0.5)/(10/1.0)-1 = +8%。
+        裸 close 累计 T+5 = 5.4/10-1 = -46%（假性暴跌）；复权后 = (5.4×2)/(10×1.0)-1 = +8%。
         断言 t1_pct=5% / t5_pct=+8%，证明除权被复权价校正。
         """
         mock_cache = MagicMock()
@@ -3289,7 +3289,7 @@ class TestReviewManagerQfqAdjustedReturn:
                 "close": [10.0, 10.5, 5.25, 5.3, 5.35, 5.4],
                 "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
                 "pct_chg": [1.0, 5.0, -50.0, 0.95, 0.94, 0.93],
-                "adj_factor": [1.0, 1.0, 0.5, 0.5, 0.5, 0.5],
+                "adj_factor": [1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
@@ -3327,7 +3327,7 @@ class TestReviewManagerQfqAdjustedReturn:
                 }
             )
         )
-        # T+1=20240611 除权：close 10→5（腰斩），adj 1.0→0.5（10 送 10）。真实持有收益 0%。
+        # T+1=20240611 除权：close 10→5（腰斩），adj 1.0→2.0（10 送 10）。真实持有收益 0%。
         quotes = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ", "000001.SZ"],
@@ -3335,7 +3335,7 @@ class TestReviewManagerQfqAdjustedReturn:
                 "close": [10.0, 5.0],
                 "open": [10.0, 5.0],
                 "pct_chg": [1.0, -50.0],
-                "adj_factor": [1.0, 0.5],
+                "adj_factor": [1.0, 2.0],
             }
         )
         mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
@@ -3344,8 +3344,57 @@ class TestReviewManagerQfqAdjustedReturn:
         await rm.run_review()
         rm._update_result.assert_called_once()
         args = rm._update_result.call_args
-        # (5.0/0.5)/(10.0/1.0)-1 = 0 → 真实持有收益 0%（非 -50%）
+        # (5.0×2.0)/(5.0×2.0)-1 = 0 → 真实持有收益 0%（非 -50%）
         assert args[0][1] == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_t5_ex_right_flat_benchmark_alpha_and_label(self, mock_cm, mock_tc):
+        """UIR-F09-001 GWT：除权窗口 T5=+8.0%，平基准（指数窗口 0%）→ Alpha=+8.0、label=WIN。
+
+        Given T+1 open=10（factor=1.0）→ T+5 close=5.4（factor=2.0，10 送 10 除权），
+        When 跑 run_review，Then 个股 T+5=+8.0%，平基准 Alpha=+8.0，标 WIN。
+        """
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240610"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        quotes = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 6,
+                "trade_date": ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617"],
+                "close": [10.0, 10.0, 5.0, 5.0, 5.0, 5.4],
+                "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
+                "pct_chg": [1.0, 0.0, -50.0, 0.0, 0.0, 8.0],
+                "adj_factor": [1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
+            }
+        )
+        mock_cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes)
+        # 平基准：指数窗口首尾同为 100 → 0%
+        mock_cache.quote_dao.get_index_daily = AsyncMock(
+            return_value=pd.DataFrame({"open": [100.0], "close": [100.0], "pct_chg": [0.0]})
+        )
+        rm._update_result = AsyncMock()
+        await rm.run_review()
+        rm._update_result.assert_called_once()
+        args = rm._update_result.call_args
+        # (5.4×2.0)/(10.0×1.0)-1 = +8.0%
+        assert args.kwargs["t5_pct"] == pytest.approx(8.0)
+        # alpha = 个股 % − 基准 %（百分点）；平基准 → 8.0
+        assert args.kwargs["alpha"] == pytest.approx(8.0)
+        assert args[0][2] == "WIN"
 
 
 class TestReviewManagerSuspendProtection:
@@ -4108,6 +4157,56 @@ class TestQfqReturnPct:
 
         ser = pd.Series({"close": 10.5, "adj_factor": 1.0})
         assert _qfq_return_pct(ser, basis_close=10.0, basis_adj=0.0, has_adj_factor=True) is None
+
+    @staticmethod
+    def test_ex_right_gwt_multiplication_contract():
+        """UIR-F09-001 GWT：Given 10/1.0 → 5.4/2.0，
+        Then (close_N×factor_N)/(open_T1×factor_T1)-1 == +8%（乘法口径，非倒数 −73%）。"""
+        from data.persistence.review_manager import _qfq_return_pct
+
+        ser = pd.Series({"close": 5.4, "adj_factor": 2.0})
+        assert _qfq_return_pct(ser, basis_close=10.0, basis_adj=1.0, has_adj_factor=True) == pytest.approx(0.08)
+
+    @staticmethod
+    def test_factor_unchanged_matches_raw_ratio():
+        """因子全程不变（无除权）→ 复权收益退化为原始 close 比率（factor 抵消）。"""
+        from data.persistence.review_manager import _qfq_return_pct
+
+        ser = pd.Series({"close": 11.0, "adj_factor": 1.3})
+        assert _qfq_return_pct(ser, basis_close=10.0, basis_adj=1.3, has_adj_factor=True) == pytest.approx(0.10)
+
+    @staticmethod
+    def test_cross_equivalent_with_qfq_ratio_series():
+        """交叉断言（UIR-F09-001）：与 utils.qfq.qfq_ratio_series 正本乘法复权口径同窗收益相等，
+        防同库同字段两条链口径相反。"""
+        from data.persistence.review_manager import _qfq_return_pct
+        from utils.qfq import qfq_ratio_series
+
+        adj_factors = pd.Series([1.0, 2.0])
+        ratio = qfq_ratio_series(adj_factors, ref="first")
+        assert ratio is not None
+        basis_open, tn_close = 10.0, 5.4
+        qfq_ret = (tn_close * float(ratio.iloc[1])) / (basis_open * float(ratio.iloc[0])) - 1.0
+        helper_ret = _qfq_return_pct(
+            pd.Series({"close": tn_close, "adj_factor": float(adj_factors.iloc[1])}),
+            basis_close=basis_open,
+            basis_adj=float(adj_factors.iloc[0]),
+            has_adj_factor=True,
+        )
+        assert helper_ret == pytest.approx(qfq_ret)
+        assert helper_ret == pytest.approx(0.08)
+
+    @staticmethod
+    def test_zero_negative_or_nonfinite_price_returns_none():
+        """0/负/非有限价格一律拒绝产生回报（有效性守卫先于除法；含基准价非法）。"""
+        from data.persistence.review_manager import _qfq_return_pct
+
+        for bad_close in (0.0, -1.0, float("inf"), float("-inf")):
+            ser = pd.Series({"close": bad_close, "adj_factor": 1.0})
+            assert _qfq_return_pct(ser, basis_close=10.0, basis_adj=1.0, has_adj_factor=True) is None
+        ok = pd.Series({"close": 11.0, "adj_factor": 1.0})
+        assert _qfq_return_pct(ok, basis_close=0.0, basis_adj=1.0, has_adj_factor=True) is None
+        assert _qfq_return_pct(ok, basis_close=-10.0, basis_adj=1.0, has_adj_factor=True) is None
 
 
 class TestReviewManagerMarketCalendar:
