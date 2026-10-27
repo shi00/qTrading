@@ -611,3 +611,71 @@ class TestInvokeCredentialLease:
             await client.invoke_single_connection(_request(), conn, _request().deadline, _attempt_context())
 
         assert mock_ac.await_args.kwargs["api_key"] == "sk-legacy-test"
+
+
+# ---------------------------------------------------------------------------
+# F29：凭据解析（同步 keyring offload）后的出站前 deadline 重核
+# ---------------------------------------------------------------------------
+class TestF29DeadlineRecheckAfterCredential:
+    """凭据解析耗时不受 deadline 预算约束——出站前重核剩余预算并重新裁剪 httpx 超时。
+
+    回归证据：慢凭据（解析耗时超过剩余预算）不得触发新出站（零出站）；
+    凭据解析真实消耗预算后，httpx 总超时须按解析后剩余重新裁剪（禁止沿用
+    解析前的 stale 预算）。
+    """
+
+    def _mock_thread_pool(self, resolve_side_effect):
+        """替身 ThreadPoolManager：run_async 直接执行慢凭据解析协程。"""
+        mock_tpm = MagicMock()
+
+        async def _run_async(_task_type, fn, *args, **kwargs):
+            await resolve_side_effect()
+            return fn(*args, **kwargs)
+
+        mock_tpm.return_value.run_async = AsyncMock(side_effect=_run_async)
+        return mock_tpm
+
+    async def test_credential_resolution_exhausts_deadline_zero_outbound(self):
+        """慢凭据耗尽剩余预算 → TimeoutError，零出站（零审计，与 dispatch 前检查一致）。"""
+        client = LiteLLMClient(MagicMock())
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 0.05
+        request = _request(deadline=deadline)
+
+        async def _slow_keyring():
+            await asyncio.sleep(0.2)  # 解析耗时超过剩余预算（0.2 > 0.05）
+
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.litellm_client.ThreadPoolManager", new=self._mock_thread_pool(_slow_keyring)),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+        ):
+            with pytest.raises(TimeoutError) as exc_info:
+                await client.invoke_single_connection(request, _connection(), request.deadline, _attempt_context())
+        assert type(exc_info.value) is TimeoutError
+        mock_ac.assert_not_awaited()
+
+    async def test_credential_resolution_reclamps_http_timeout(self):
+        """凭据解析真实消耗预算后，httpx 总超时按解析后剩余重新裁剪。"""
+        client = LiteLLMClient(MagicMock())
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 0.6
+        request = _request(deadline=deadline)
+
+        async def _keyring_with_cost():
+            await asyncio.sleep(0.2)  # 解析真实消耗 0.2s 预算
+
+        with (
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch(
+                "services.ai_service.litellm_client.ThreadPoolManager", new=self._mock_thread_pool(_keyring_with_cost)
+            ),
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
+        ):
+            mock_ac.return_value = _fake_response()
+            await client.invoke_single_connection(request, _connection(), request.deadline, _attempt_context())
+
+        timeout = mock_ac.await_args.kwargs["timeout"]
+        assert isinstance(timeout, httpx.Timeout)
+        # 解析前 stale 预算 ≈ 0.6；解析消耗 0.2s 后重裁剪 → read ≤ 0.4
+        assert timeout.read is not None and timeout.read <= 0.4

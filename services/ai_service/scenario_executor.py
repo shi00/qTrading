@@ -345,11 +345,28 @@ class ScenarioExecutor:
                 continue
 
             # 方案 §6.2 步骤 3：先取得连接并发许可（排队计入 deadline），再绑定派发，
-            # 最后逐次 authorize_attempt——不在安全许可后再排队（步骤 4）
+            # 最后逐次 authorize_attempt——不在安全许可后再排队（步骤 4）。
+            # F29：排队等待同样受请求级冻结绝对 deadline 约束——按剩余预算 wait_for
+            # 等待许可，超时候选记 skipped 并收敛遍历（排队不得无限等待，过期后不得
+            # 再做新准备启动出站）；超时点先于 _run_candidate（无 attempt 状态，
+            # 与 F19 取消收敛正交），CancelledError 不捕获始终传播（R2）。
             semaphore = state.semaphores.setdefault(
                 connection.connection_id, asyncio.Semaphore(max(1, connection.concurrency_limit))
             )
-            async with semaphore:
+            try:
+                await asyncio.wait_for(semaphore.acquire(), timeout=max(0.0, request.deadline - clock()))
+            except TimeoutError:
+                decisions.append(
+                    CandidateDecision(
+                        task_id=str(cand.get("task_id", "")),
+                        candidate_index=int(cand.get("candidate_index", 0)),
+                        connection_id=connection.connection_id,
+                        decision="skipped",
+                        reason="deadline exhausted waiting for connection permit",
+                    )
+                )
+                break
+            try:
                 # F18：预留 / 派发绑定 / 授权 / 执行均按真实尝试粒度在重试循环内
                 # 逐次进行（每次真实尝试独立身份），见 _run_candidate。
                 outcome = await self._run_candidate(
@@ -366,6 +383,8 @@ class ScenarioExecutor:
                     pricing=pricing_by_id.get(connection.connection_id),
                     total_attempts=total_attempts,
                 )
+            finally:
+                semaphore.release()
 
             if outcome.status == "succeeded":
                 decisions.append(

@@ -910,6 +910,15 @@ class LiteLLMClient:
             TaskType.IO, resolve_credential, resolved_connection.credential_ref
         )
 
+        # F29：凭据解析（同步 keyring offload）耗时不受 deadline 预算约束——出站前
+        # 重核剩余预算，耗尽即拒绝（零出站零审计，与上方 dispatch 前快速失败一致）；
+        # httpx 总超时按解析后剩余重新裁剪，禁止沿用解析前计算的 stale 预算
+        # （慢凭据不得侵占出站时限，总时限 = 入口冻结 deadline 全程有效）。
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError("Deadline exhausted after credential resolution, refusing outbound dispatch.")
+        timeout_val = min(adapter_timeout, remaining)
+
         messages = [
             {"role": "system", "content": str(payload.get("system_prompt", _DEFAULT_INVOKE_SYSTEM_PROMPT))},
             {"role": "user", "content": str(payload.get("prompt", ""))},
