@@ -16,6 +16,7 @@
 """
 
 import asyncio
+import datetime
 import functools
 import hashlib
 import logging
@@ -834,6 +835,13 @@ class TestProcessingLoop:
         assert saved["sentiment_score"] is None
         assert saved["sentiment_conf"] is None
         assert saved["sentiment_model"] is None
+
+    @pytest.mark.asyncio
+    async def test_fetched_cst_string_persists_utc_tz_naive(self, svc):
+        """UIR-F04-005：生产链 CST 10:00 字符串 → normalize → 落库绑定 02:00 UTC tz-naive。"""
+        saved = await self._run_one_item(svc, {"content": "盘面快讯", "time": "2026-10-12 10:00:00"}, None)
+        assert saved["publish_time"] == datetime.datetime(2026, 10, 12, 2, 0, 0)
+        assert saved["publish_time"].tzinfo is None
 
     @staticmethod
     async def _run_one_item_llm_fallback(svc, item, scorer_results, classify_result):
@@ -2020,3 +2028,60 @@ class TestPollIntervalNormalization:
             await svc._poll_loop()
         assert len(slept) == 1
         assert slept[0] == 30.0
+
+
+# ---------------------------------------------------------------------------
+# UIR-F04-005: CST 源时刻 → UTC 落库 → 情绪窗口/交易日归属
+# ---------------------------------------------------------------------------
+
+
+class TestNewsPublishTimeTradeDayChain:
+    """真实 normalize 链 + assign_trade_day：CST 源时刻不得发生 8 小时偏移。"""
+
+    @staticmethod
+    def _stored(cst_str: str) -> datetime.datetime:
+        normalized = RealCacheManager.normalize_news_item({"content": "x", "time": cst_str})
+        publish_time = normalized["publish_time"]
+        assert isinstance(publish_time, datetime.datetime)
+        return publish_time
+
+    def test_cst_1400_visible_at_same_day_query_and_assigned_same_day(self):
+        """Given 源站 2026-10-12 14:00 CST；When 当日 14:00 CST 查询；Then 可见且归当日。"""
+        from services.news_sentiment_index_service import assign_trade_day
+        from utils.time_utils import CST_TZ, from_utc_to_cst, to_utc_for_db
+
+        stored = self._stored("2026-10-12 14:00:00")
+        query_upper_cst = datetime.datetime(2026, 10, 12, 14, 0)
+        query_upper_utc = to_utc_for_db(query_upper_cst)
+        assert query_upper_utc is not None
+        assert stored <= query_upper_utc
+        assert from_utc_to_cst(stored) == query_upper_cst.replace(tzinfo=CST_TZ)
+        trade_days = [datetime.date(2026, 10, 9), datetime.date(2026, 10, 12), datetime.date(2026, 10, 13)]
+        assert assign_trade_day(stored, trade_days) == datetime.date(2026, 10, 12)
+
+    def test_cst_1500_assigned_next_trade_day(self):
+        """Given 15:00 CST；When 归属交易日；Then 归次一交易日（不因 UTC 偏移误归当日）。"""
+        from services.news_sentiment_index_service import assign_trade_day
+
+        stored = self._stored("2026-10-12 15:00:00")
+        trade_days = [datetime.date(2026, 10, 12), datetime.date(2026, 10, 13)]
+        assert assign_trade_day(stored, trade_days) == datetime.date(2026, 10, 13)
+
+    def test_cst_weekend_assigned_next_trade_day(self):
+        """Given 周六 2026-10-17 10:00 CST；When 归属交易日；Then 归下周一 2026-10-19。"""
+        from services.news_sentiment_index_service import assign_trade_day
+
+        stored = self._stored("2026-10-17 10:00:00")
+        trade_days = [datetime.date(2026, 10, 16), datetime.date(2026, 10, 19)]
+        assert assign_trade_day(stored, trade_days) == datetime.date(2026, 10, 19)
+
+    def test_cst_0030_stored_previous_utc_date_but_assigned_same_cst_day(self):
+        """Given 2026-10-12 00:30 CST；Then 落库 2026-10-11 16:30 UTC-naive，但归属仍是 10-12。"""
+        from services.news_sentiment_index_service import assign_trade_day
+        from utils.time_utils import CST_TZ, from_utc_to_cst
+
+        stored = self._stored("2026-10-12 00:30:00")
+        assert stored == datetime.datetime(2026, 10, 11, 16, 30, 0)
+        assert from_utc_to_cst(stored) == datetime.datetime(2026, 10, 12, 0, 30, tzinfo=CST_TZ)
+        trade_days = [datetime.date(2026, 10, 9), datetime.date(2026, 10, 12)]
+        assert assign_trade_day(stored, trade_days) == datetime.date(2026, 10, 12)
