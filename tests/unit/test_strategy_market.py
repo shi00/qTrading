@@ -818,3 +818,32 @@ class TestPrepareScreeningContextWiresFlow(unittest.TestCase):
         assert hasattr(data_processor.DataProcessor, "prepare_screening_context"), (
             "DataProcessor should have prepare_screening_context method"
         )
+
+
+class TestVolumeBreakoutExcludeStFrozenValue(unittest.TestCase):
+    """UIR-F07-001: 策略层消费 context['exclude_st'] —— 提交时刻冻结的 False 必须让 ST 行
+    参与筛选（数据层已按同一冻结值准备票池，策略层不得再以其他时点值隐式剔除）。"""
+
+    def setUp(self):
+        self.strategy = VolumeBreakoutStrategy()
+        # S(000002.SZ) 为 ST，N(000001.SZ) 非 ST，两股均满足放量突破条件。
+        self.df = pd.DataFrame(
+            [
+                {"ts_code": "000001.SZ", "name": "正常股N", "pct_chg": 5.0, "turnover_rate": 8.0, "is_st": False},
+                {"ts_code": "000002.SZ", "name": "风险警示S", "pct_chg": 4.0, "turnover_rate": 6.0, "is_st": True},
+            ]
+        )
+
+    def test_exclude_st_false_keeps_st_row(self):
+        ctx = {"params": {"pct_chg_min": 2, "pct_chg_max": 7, "turnover_min": 3}, "exclude_st": False}
+        lf = self.strategy._apply_exclude_st(pl.from_pandas(self.df).lazy(), ctx)
+        codes = lf.collect()["ts_code"].to_list()
+        self.assertIn("000001.SZ", codes)
+        self.assertIn("000002.SZ", codes)  # ST 行参与
+
+    def test_exclude_st_true_excludes_st_row(self):
+        ctx = {"params": {"pct_chg_min": 2, "pct_chg_max": 7, "turnover_min": 3}, "exclude_st": True}
+        lf = self.strategy._apply_exclude_st(pl.from_pandas(self.df).lazy(), ctx)
+        codes = lf.collect()["ts_code"].to_list()
+        self.assertIn("000001.SZ", codes)
+        self.assertNotIn("000002.SZ", codes)  # ST 行被剔除

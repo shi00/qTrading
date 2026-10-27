@@ -1657,3 +1657,117 @@ class TestEgressAckBridge:
         # 无待决确认时 resolve 不抛错（View 过期事件防护）
         vm.resolve_ai_egress_ack(True)
         assert vm.state.pending_egress_ack_preview == ""
+
+
+# --- UIR-F07-001: 运行配置在提交时刻冻结（提交后编辑不得影响已提交任务）---
+
+
+async def _drive_run_with_edit_during_pause(vm, *, submitted: bool, edited_to: bool) -> tuple[list, dict, dict]:
+    """提交 ``exclude_st=submitted`` 的筛选，在被 Event 暂停的数据准备期间把草稿改为
+    ``edited_to``，返回 (两次数据获取收到的 exclude_st 列表, 策略收到的 context, save_results kwargs)。
+
+    首次 ``get_strategy_data`` 返回空 dict 以触发 ``init_data`` 重试分支（覆盖两次调用）。
+    """
+    import datetime as dt
+    from unittest.mock import AsyncMock
+
+    from services.task_manager import TaskManager
+
+    captured: dict = {}
+
+    class _RecordingStrategy:
+        name_key = "strategy_test"
+        requires_fundamental_coverage = False
+
+        def filter(self, ctx):
+            captured["context"] = ctx
+            return pd.DataFrame({"ts_code": ["S.SZ", "N.SZ"], "name": ["ST股", "正常股"]})
+
+    vm.strategy_mgr.get_strategy.return_value = _RecordingStrategy()
+
+    valid_ctx = {
+        "screening_data": pd.DataFrame({"ts_code": ["S.SZ", "N.SZ"]}),
+        "trade_date": dt.date(2026, 7, 29),
+    }
+    calls: list = []
+
+    async def _get_strategy_data(*, exclude_st=True):
+        calls.append(exclude_st)
+        return {} if len(calls) == 1 else valid_ctx
+
+    vm.data_processor.get_strategy_data = _get_strategy_data
+    vm.data_processor.init_data = AsyncMock()
+
+    save_kwargs: dict = {}
+
+    async def _save(*args, **kwargs):
+        save_kwargs.update(kwargs)
+        return 2
+
+    vm.review_mgr.save_results = _save
+
+    # 用 Event 暂停懒初始化/数据准备，模拟「提交后、任务等待期间」用户编辑草稿。
+    gate = asyncio.Event()
+
+    async def _ensure():
+        await gate.wait()
+        return vm.data_processor
+
+    vm._ensure_processor = _ensure
+
+    holder, _sync_submit = _build_sync_submit_task_holder()
+    with (
+        patch.object(TaskManager, "submit_task", side_effect=_sync_submit),
+        patch.object(TaskManager, "update_progress"),
+    ):
+        vm.set_exclude_st(submitted)
+        await vm.run_strategy("test_strategy", exclude_st=vm.state.exclude_st)
+        assert holder.task is not None
+        await asyncio.sleep(0)  # 让 _execute_screening 运行至 gate.wait()
+        vm.set_exclude_st(edited_to)  # 运行中编辑草稿
+        gate.set()
+        await holder.task
+
+    return calls, captured["context"], save_kwargs
+
+
+class TestRunConfigFrozenAtSubmit:
+    """UIR-F07-001: 本次运行的 exclude_st 只在提交时确定，运行中编辑不影响已提交任务。"""
+
+    @pytest.mark.asyncio
+    async def test_false_submitted_true_edited_still_uses_false(self, vm):
+        """提交 exclude_st=False，运行中改 True：数据准备/策略/快照仍全为 False，草稿保持 True。"""
+        calls, context, save_kwargs = await _drive_run_with_edit_during_pause(vm, submitted=False, edited_to=True)
+        # 两次数据获取（含 init_data 重试分支）均收到提交时刻的 False
+        assert calls == [False, False]
+        # 策略 context 与提交一致
+        assert context["exclude_st"] is False
+        # 本次运行快照以独立全局配置子对象记录冻结值
+        assert save_kwargs["params_snapshot"]["global_config"] == {"exclude_st": False}
+        # 运行中编辑只影响草稿，不影响已提交任务
+        assert vm.state.exclude_st is True
+
+    @pytest.mark.asyncio
+    async def test_true_submitted_false_edited_still_uses_true(self, vm):
+        """反方向：提交 exclude_st=True，运行中改 False：仍全为 True，草稿保持 False。"""
+        calls, context, save_kwargs = await _drive_run_with_edit_during_pause(vm, submitted=True, edited_to=False)
+        assert calls == [True, True]
+        assert context["exclude_st"] is True
+        assert save_kwargs["params_snapshot"]["global_config"] == {"exclude_st": True}
+        assert vm.state.exclude_st is False
+
+    @pytest.mark.asyncio
+    async def test_new_run_after_edit_uses_new_value(self, vm):
+        """冻结只作用于单次运行：编辑后新提交的任务才使用新值。"""
+        calls_first, context_first, _ = await _drive_run_with_edit_during_pause(vm, submitted=False, edited_to=True)
+        assert calls_first == [False, False]
+        assert context_first["exclude_st"] is False
+
+        # 释放上次运行占用（该测试未触发 TaskManager 终态订阅），再以新值提交
+        vm._on_tasks_updated([])
+        calls_second, context_second, save_second = await _drive_run_with_edit_during_pause(
+            vm, submitted=True, edited_to=True
+        )
+        assert calls_second == [True, True]
+        assert context_second["exclude_st"] is True
+        assert save_second["params_snapshot"]["global_config"] == {"exclude_st": True}
