@@ -265,18 +265,34 @@ class CacheManager:
 
     @staticmethod
     def normalize_news_item(item: dict, default_source: str = "CLS"):
-        """Normalize news item dictionary for DB Insertion"""
+        """Normalize news item dictionary for DB Insertion.
+
+        publish_time 输入契约（UIR-F04-005，market_news.publish_time 为 UTC tz-naive 列）：
+        - None / 无法解析：取当前时刻并以 ``to_utc_for_db`` 转 UTC tz-naive；
+        - str：源站时刻串按 **CST（Asia/Shanghai）** 解释，经 ``to_utc_for_db`` 一次规范化为
+          UTC tz-naive（aware 串按其自身时区换算）；
+        - aware datetime：按其自身时区经 ``to_utc_for_db`` 规范化；
+        - naive datetime：视为**已规范化的 UTC tz-naive** 输入，原样透传，禁止二次转换。
+        """
         publish_time = item.get("time", item.get("publish_time"))
         if publish_time is None:
             # H1 举一反三 fix: 与 server_default=now() 时区一致，写库使用 UTC tz-naive
             publish_time = typing.cast(datetime.datetime, to_utc_for_db(get_now()))
         elif isinstance(publish_time, str):
             try:
-                publish_time = pd.to_datetime(publish_time).to_pydatetime()
+                parsed = pd.to_datetime(publish_time).to_pydatetime()
             except (ValueError, TypeError) as e:
                 logger.debug("[CacheManager] Failed to parse publish_time '%s': %s", publish_time, safe_error(e))
                 # H1 举一反三 fix: 与 server_default=now() 时区一致，写库使用 UTC tz-naive
                 publish_time = typing.cast(datetime.datetime, to_utc_for_db(get_now()))
+            else:
+                # UIR-F04-005: 源站字符串为 CST 本地时刻，此处一次规范化为 UTC tz-naive；
+                # 漏转会让情绪窗口/交易日归属整体偏移 8 小时。
+                publish_time = typing.cast(datetime.datetime, to_utc_for_db(parsed))
+        elif isinstance(publish_time, datetime.datetime) and publish_time.tzinfo is not None:
+            # UIR-F04-005: aware 输入按自身时区规范化；naive 输入走上面的
+            # 「已规范化 UTC tz-naive」契约直通，避免二次减 8 小时。
+            publish_time = typing.cast(datetime.datetime, to_utc_for_db(publish_time))
 
         return {
             # 外部新闻源可能给出 content=None（仅标题条目），None.strip() 会抛

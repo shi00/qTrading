@@ -27,7 +27,7 @@ from ui.components.flet_type_helpers import safe_on_click
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.home_view_model import NewsRow
-from utils.time_utils import get_now
+from utils.time_utils import from_utc_to_cst, get_now
 
 # 情感着色数据源：入库 ``market_news.sentiment``（见 ``NewsRow.sentiment``），
 # 由 ``_sentiment_style`` 归一后决定颜色；缺失/未知一律中性（R21：不做关键词猜测）。
@@ -135,22 +135,20 @@ NEWS_DATE_TODAY_KEY = "news_date_today"
 
 
 def _parse_publish_time(time_str: str) -> datetime.datetime | None:
-    """解析 publish_time 字符串为 datetime；缺失/无法解析返回 None。
+    """解析 publish_time 字符串为 CST datetime；缺失/无法解析返回 None。
 
     兼容 DB 返回的 ``YYYY-MM-DD HH:MM:SS``（含 pandas.Timestamp 字符串化）
-    与 ISO ``T`` 分隔形态；不臆造时区（``market_news.publish_time`` 为无时区列）。
+    与 ISO ``T`` 分隔形态。``market_news.publish_time`` 为 **UTC tz-naive** 列
+    （入库前经 ``to_utc_for_db``，UIR-F04-005），故无时区字面值按 UTC 解释后
+    转 CST，保证展示时刻与日期分组不早 8 小时；aware 输入按其自身时区换算。
     """
-    # NOTE(lazy): 直接按 publish_time 字面日期/HH:MM 展示与分组，不做 UTC→CST 换算。
-    # ceiling: 写库路径把源站 CST 文本经 to_utc_for_db 转为 UTC tz-naive，故 DB 字面时间为 UTC；
-    #   与 get_now() 的 CST "今日" 在 CST 00:00–07:59 窗口存在日期/时刻偏移（沿用既有展示口径，
-    #   修复前 time_str[-8:] 亦为 UTC 原值，非本次引入）。
-    # upgrade: 当首页快讯需与 CST 展示严格对齐，或出现跨时区分组投诉时，改用 from_utc_to_cst 换算后再格式化/分组。
     if not time_str:
         return None
     try:
-        return datetime.datetime.fromisoformat(time_str)
+        parsed = datetime.datetime.fromisoformat(time_str)
     except (ValueError, TypeError):
         return None
+    return from_utc_to_cst(parsed)
 
 
 def _format_news_time(time_str: str, today: datetime.date) -> str:

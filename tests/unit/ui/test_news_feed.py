@@ -380,14 +380,15 @@ class TestFormatNewsTime:
 
         from ui.components.news_feed import _format_news_time
 
-        assert _format_news_time("2024-06-15 10:30:00", date(2024, 6, 15)) == "10:30"
+        # UIR-F04-005：DB 字面时间为 UTC tz-naive，展示须转 CST（02:30 UTC → 10:30 CST）
+        assert _format_news_time("2024-06-15 02:30:00", date(2024, 6, 15)) == "10:30"
 
     def test_non_today_news_shows_mm_dd_hhmm(self):
         from datetime import date
 
         from ui.components.news_feed import _format_news_time
 
-        assert _format_news_time("2024-06-15 10:30:00", date(2024, 6, 16)) == "06-15 10:30"
+        assert _format_news_time("2024-06-15 02:30:00", date(2024, 6, 16)) == "06-15 10:30"
 
     def test_cross_year_news_shows_mm_dd_hhmm(self):
         """跨年新闻仍按需求显示 MM-DD HH:MM（年份歧义由分隔条承担）。"""
@@ -395,7 +396,17 @@ class TestFormatNewsTime:
 
         from ui.components.news_feed import _format_news_time
 
-        assert _format_news_time("2024-12-31 23:59:00", date(2025, 1, 1)) == "12-31 23:59"
+        # 15:59 UTC → 23:59 CST（仍属 2024-12-31）
+        assert _format_news_time("2024-12-31 15:59:00", date(2025, 1, 1)) == "12-31 23:59"
+
+    def test_cst_midnight_crossing_shows_next_cst_date(self):
+        """UIR-F04-005：16:30 UTC（前一日）→ 次日 00:30 CST，展示与分组按 CST 不早 8 小时。"""
+        from datetime import date
+
+        from ui.components.news_feed import _format_news_time
+
+        assert _format_news_time("2026-10-11 16:30:00", date(2026, 10, 13)) == "10-12 00:30"
+        assert _format_news_time("2026-10-11 16:30:00", date(2026, 10, 12)) == "00:30"
 
     def test_empty_time_returns_unknown(self):
         from datetime import date
@@ -419,7 +430,7 @@ class TestFormatNewsTime:
 
         from ui.components.news_feed import _build_news_item
 
-        row = NewsRow(content="Test", publish_time="2024-06-15 10:30:00")
+        row = NewsRow(content="Test", publish_time="2024-06-15 02:30:00")
         item = _build_news_item(row, "0", today=date(2024, 6, 15))
         texts = _collect_text_values(item)
         assert "10:30" in texts
@@ -431,10 +442,20 @@ class TestFormatNewsTime:
 
         from ui.components.news_feed import _build_news_item
 
-        row = NewsRow(content="Test", publish_time="2024-06-15 10:30:00")
+        row = NewsRow(content="Test", publish_time="2024-06-15 02:30:00")
         item = _build_news_item(row, "0", today=date(2024, 6, 16))
         texts = _collect_text_values(item)
         assert "06-15 10:30" in texts
+
+    def test_feed_displays_cst_1000_for_utc_0200(self):
+        """UIR-F04-005：源站 10:00 CST 入库为 02:00 UTC，Feed 须显示 10:00。"""
+        from datetime import date
+
+        from ui.components.news_feed import _build_news_item
+
+        row = NewsRow(content="Test", publish_time="2026-10-12 02:00:00")
+        item = _build_news_item(row, "0", today=date(2026, 10, 12))
+        assert "10:00" in _collect_text_values(item)
 
 
 # ---------------------------------------------------------------------------
@@ -463,8 +484,8 @@ class TestDateSeparator:
         from ui.components.news_feed import _build_news_controls
 
         rows = (
-            self._row("2024-06-15 10:30:00"),
-            self._row("2024-06-15 09:00:00"),
+            self._row("2024-06-15 02:30:00"),
+            self._row("2024-06-15 01:00:00"),
         )
         controls = _build_news_controls(rows, date(2024, 6, 16))
         assert self._separator_keys(controls) == ["news-date-2024-06-15"]
@@ -476,8 +497,8 @@ class TestDateSeparator:
         from ui.components.news_feed import _build_news_controls
 
         rows = (
-            self._row("2024-06-16 10:30:00"),
-            self._row("2024-06-15 23:59:00"),
+            self._row("2024-06-16 02:30:00"),
+            self._row("2024-06-15 02:00:00"),
         )
         controls = _build_news_controls(rows, date(2024, 6, 16))
         assert self._separator_keys(controls) == ["news-date-2024-06-16", "news-date-2024-06-15"]
@@ -511,9 +532,9 @@ class TestDateSeparator:
         from ui.components.news_feed import _build_news_controls
 
         rows = (
-            self._row("2024-06-16 10:30:00"),
+            self._row("2024-06-16 02:30:00"),
             self._row(""),
-            self._row("2024-06-15 09:00:00"),
+            self._row("2024-06-15 01:00:00"),
         )
         controls = _build_news_controls(rows, date(2024, 6, 16))
         # 缺失时间的行不触发分组变化（归入上一组），仅两个有效日期各一条分隔条

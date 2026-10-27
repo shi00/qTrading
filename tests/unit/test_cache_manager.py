@@ -1783,6 +1783,35 @@ class TestCacheManagerNormalizeNewsItem:
         assert result["sentiment_conf"] is None
         assert result["sentiment_model"] is None
 
+    def test_cst_string_normalized_to_utc_tz_naive(self):
+        """UIR-F04-005：源站 CST 10:00 字符串 → 入库绑定 02:00 UTC tz-naive（仅一次换算）。"""
+        result = CacheManager.normalize_news_item({"content": "test", "time": "2026-10-12 10:00:00"})
+        assert result["publish_time"] == datetime.datetime(2026, 10, 12, 2, 0, 0)
+        assert result["publish_time"].tzinfo is None
+
+    def test_aware_utc_input_normalized_by_own_timezone(self):
+        """UIR-F04-005：aware UTC 输入按自身时区规范化为 UTC tz-naive。"""
+        aware = datetime.datetime(2026, 10, 12, 2, 0, tzinfo=datetime.UTC)
+        result = CacheManager.normalize_news_item({"content": "test", "publish_time": aware})
+        assert result["publish_time"] == datetime.datetime(2026, 10, 12, 2, 0, 0)
+        assert result["publish_time"].tzinfo is None
+
+    def test_aware_cst_input_normalized_by_own_timezone(self):
+        """UIR-F04-005：aware CST 输入按自身时区规范化（10:00 CST → 02:00 UTC）。"""
+        from utils.time_utils import CST_TZ
+
+        aware = datetime.datetime(2026, 10, 12, 10, 0, tzinfo=CST_TZ)
+        result = CacheManager.normalize_news_item({"content": "test", "publish_time": aware})
+        assert result["publish_time"] == datetime.datetime(2026, 10, 12, 2, 0, 0)
+        assert result["publish_time"].tzinfo is None
+
+    def test_normalized_naive_datetime_not_converted_again(self):
+        """UIR-F04-005：已规范化 UTC-naive datetime 输入契约 → 透传，不二次减 8 小时。"""
+        already_normalized = datetime.datetime(2026, 10, 12, 2, 0, 0)
+        result = CacheManager.normalize_news_item({"content": "test", "publish_time": already_normalized})
+        assert result["publish_time"] == already_normalized
+        assert result["publish_time"].tzinfo is None
+
 
 class TestCacheManagerSanitizeUrl:
     """URL 脱敏逻辑（review01-A4 Step2 移入 EngineManager.sanitize_url 静态方法）。"""
