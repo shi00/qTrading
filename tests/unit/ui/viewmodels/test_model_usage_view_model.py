@@ -11,6 +11,9 @@
 - release_unconfirmed_reservation 未注入释放器时降级；注入后刷新摘要；
 - enter_monthly_summary 切月汇总模式；
 - export_csv detail / monthly_summary 两种粒度；
+- F37 导出范围：page 仅当前页、all 经 DAO 公开分页入口稳定遍历全集（offset 顺序、
+  页不足提前终止、DAO 不可用 / 失败、过滤快照抗中途筛选变化、消息代次守卫）；
+  导出行含 invocation_id；月汇总导出对齐查看月、摘要缺失空单元格（R21）；
 - 超出保留期标记；
 - R2：CancelledError 传播。
 
@@ -28,6 +31,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ui.viewmodels.model_usage_view_model import (
+    EXPORT_SCOPE_ALL,
+    EXPORT_SCOPE_PAGE,
+    ORIGIN_TEST,
     PAGE_SIZE,
     BudgetSummary,
     ModelUsageState,
@@ -773,3 +779,209 @@ def test_state_defaults_are_frozen_and_tuple():
     assert isinstance(state.filters, UsageFilters)
     assert isinstance(state.budget_summary, BudgetSummary)
     assert state.message is None
+
+
+# ---------------------------------------------------------------------------
+# F37：CSV 导出范围（当前页 / 全部筛选结果）+ 请求身份 + 月汇总对齐查看月
+# ---------------------------------------------------------------------------
+
+
+def test_set_export_scope_updates_state_and_rejects_unknown():
+    vm = _vm(_dao())
+    assert vm.state.export_scope == EXPORT_SCOPE_PAGE
+    vm.set_export_scope(EXPORT_SCOPE_ALL)
+    assert vm.state.export_scope == EXPORT_SCOPE_ALL
+    with pytest.raises(ValueError) as exc_info:
+        vm.set_export_scope("bogus")
+    assert "unknown export scope" in str(exc_info.value)
+    assert vm.state.export_scope == EXPORT_SCOPE_ALL  # 非法值不改状态
+
+
+@pytest.mark.asyncio
+async def test_export_csv_detail_includes_invocation_id():
+    """F37 请求身份：导出行含 invocation_id 列（首列）。"""
+    rows = [{"invocation_id": "inv-9", "scenario_id": "stock_analysis", "is_test": True}]
+    vm = _vm(_dao(rows=rows, total=1))
+    await vm.load()
+    text = await vm.export_csv()
+    header = text.splitlines()[0].split(",")
+    assert header[0] == "invocation_id"
+    assert "inv-9" in text
+    assert ORIGIN_TEST in text
+
+
+@pytest.mark.asyncio
+async def test_export_csv_page_scope_exports_only_loaded_page_without_dao_refetch():
+    """scope=page 仅导出当前已加载页（不隐式宣称全集），且不再触达 DAO。"""
+    rows = [{"invocation_id": "inv-1"}, {"invocation_id": "inv-2"}]
+    dao = _dao(rows=rows, total=120)
+    vm = _vm(dao)
+    await vm.load()
+    dao.read_request_page = AsyncMock(return_value=([], 120))
+    text = await vm.export_csv()
+    assert "inv-1" in text and "inv-2" in text
+    dao.read_request_page.assert_not_awaited()
+    assert len(text.splitlines()) == 3  # 表头 + 2 行
+
+
+def _paged_read(dao: MagicMock, pages: list[list[dict]], total: int, *, offsets: list[int]) -> None:
+    """把 ``read_request_page`` 换为按调用顺序返回给定页的伪实现（记录 offset）。"""
+
+    async def _read(**kwargs: Any) -> tuple[list[dict], int]:
+        offsets.append(int(kwargs["offset"]))
+        idx = len(offsets) - 1
+        if idx >= len(pages):
+            return ([], total)
+        return (pages[idx], total)
+
+    dao.read_request_page = _read
+
+
+@pytest.mark.asyncio
+async def test_export_csv_all_scope_paginates_full_filtered_set():
+    """F37：scope=all 稳定分页遍历全集（120=50+50+20），不受当前页影响。"""
+    pages = [
+        [{"invocation_id": f"inv-{i:03d}"} for i in range(50)],
+        [{"invocation_id": f"inv-{i:03d}"} for i in range(50, 100)],
+        [{"invocation_id": f"inv-{i:03d}"} for i in range(100, 120)],
+    ]
+    dao = _dao()
+    offsets: list[int] = []
+    _paged_read(dao, pages, total=120, offsets=offsets)
+    vm = _vm(dao)
+    await vm.load()  # 首页正常加载（第 1 次 DAO 调用）
+    await vm.next_page()  # 翻到第 2 页（第 2 次调用）
+    assert vm.state.page == 1
+
+    offsets.clear()  # 只统计导出期间的遍历
+    vm.set_export_scope(EXPORT_SCOPE_ALL)
+    text = await vm.export_csv()
+
+    assert offsets == [0, PAGE_SIZE, 2 * PAGE_SIZE]  # 页序固定从 0 起，不受当前页影响
+    lines = text.splitlines()
+    assert len(lines) == 121  # 表头 + 120 行
+    assert "inv-000" in text and "inv-119" in text
+
+
+@pytest.mark.asyncio
+async def test_export_csv_all_scope_stops_on_short_page_or_empty_page():
+    """收缩数据 / total 与实际页不符：短页按行数前进、空页终止，不跳页不死循环。"""
+    pages = [
+        [{"invocation_id": f"inv-{i}"} for i in range(50)],
+        [{"invocation_id": f"inv-{i}"} for i in range(50, 55)],  # 声明 total=120 但实际只有 55 行
+        [],  # 若继续拉取则返回空页
+    ]
+    dao = _dao()
+    offsets: list[int] = []
+    _paged_read(dao, pages, total=120, offsets=offsets)
+    vm = _vm(dao)
+    vm.set_export_scope(EXPORT_SCOPE_ALL)
+    text = await vm.export_csv()
+    assert offsets == [0, PAGE_SIZE, PAGE_SIZE + 5]  # 空页后终止（不因 total 未满足而无限循环）
+    # 第 2 页短页（5 行）后 offset 按实际行数前进到 55（非 +50 跳页），第 3 页空页终止
+    assert len(offsets) == 3
+    lines = text.splitlines()
+    assert len(lines) == 56  # 表头 + 55 行（实际数据，非 total 宣称的 120）
+
+
+@pytest.mark.asyncio
+async def test_export_csv_all_scope_dao_unavailable_raises_with_message():
+    """scope=all 且 DAO 不可用：显式消息 + 抛错由 View 呈现失败，不返回部分文本（R21）。"""
+    vm = _vm(None)
+    vm.set_export_scope(EXPORT_SCOPE_ALL)
+    with pytest.raises(RuntimeError) as exc_info:
+        await vm.export_csv()
+    assert "dao" in str(exc_info.value).lower()
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_dao_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_export_csv_all_scope_dao_error_propagates():
+    """DAO 读取失败沿既有降级边界向上传播（面板呈现「导出失败」），无部分文本。"""
+    dao = _dao()
+    dao.read_request_page = AsyncMock(side_effect=RuntimeError("db boom"))
+    vm = _vm(dao)
+    vm.set_export_scope(EXPORT_SCOPE_ALL)
+    with pytest.raises(RuntimeError) as exc_info:
+        await vm.export_csv()
+    assert "db boom" in str(exc_info.value)
+    assert vm.state.message is None  # 失败路径不写 export_ready（不伪装成功，R21）
+
+
+@pytest.mark.asyncio
+async def test_export_csv_all_scope_uses_filter_snapshot_when_filter_changes_mid_flight():
+    """对抗（F37）：导出途中筛选变化，本次导出仍按发起时过滤快照完成，口径不混；
+    中途重载使请求代次前移，就绪消息被守卫抑制、不覆盖新加载结果的消息。"""
+    calls: list[dict] = []
+
+    async def _read(**kwargs: Any) -> tuple[list[dict], int]:
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            # 导出首页读取在途期间，用户改筛选（触发 set_filter → load → 第 2 次调用）
+            await vm.set_filter(scenario_id="news_annotation")
+            return ([{"invocation_id": "inv-x"}], 1)
+        raise RuntimeError("reload boom")  # 中途 set_filter 的 load 失败
+
+    dao = _dao()
+    dao.read_request_page = _read
+    vm = _vm(dao)
+    vm.set_export_scope(EXPORT_SCOPE_ALL)
+
+    text = await vm.export_csv()
+
+    assert calls[0]["scenario_id"] is None  # 导出用发起时快照口径
+    assert calls[1]["scenario_id"] == "news_annotation"  # 中途重载是新口径
+    assert "inv-x" in text  # 导出按快照口径完成
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_load_failed"  # export_ready 未覆盖失败消息
+
+
+@pytest.mark.asyncio
+async def test_export_csv_monthly_summary_uses_viewed_month():
+    """F36 移交（F37 落地）：月汇总导出对齐查看月——切换历史月后导出该月数据，不混当前月。"""
+    history_summary = {
+        "month": "202512",
+        "known_cny": Decimal("0.50"),
+        "effective_reserved_cny": Decimal("0"),
+        "unconfirmed_reserved_cny": Decimal("0"),
+    }
+
+    async def _summary_by_month(month: str) -> dict:
+        if month == "202512":
+            return history_summary
+        return {
+            "month": "202601",
+            "known_cny": Decimal("0.05"),
+            "effective_reserved_cny": Decimal("0.10"),
+            "unconfirmed_reserved_cny": Decimal("0.02"),
+        }
+
+    dao = _dao()
+    dao.read_budget_summary = _summary_by_month
+    vm = _vm(dao)
+    await vm.enter_monthly_summary()  # 默认查看当前月 202601
+    await vm.select_summary_month("2025-12")  # 切到历史月 202512
+
+    text = await vm.export_csv()
+
+    data_row = text.splitlines()[1]
+    assert "202512" in data_row
+    assert "0.50" in data_row
+    assert "0.05" not in data_row and "202601" not in data_row  # 不混当前月
+
+
+@pytest.mark.asyncio
+async def test_export_csv_monthly_summary_missing_budget_writes_empty_cells():
+    """R21：月汇总摘要未就绪（读取失败）→ 全空单元格，不以 0 伪装。"""
+    dao = _dao()
+    dao.read_budget_summary = AsyncMock(side_effect=RuntimeError("summary boom"))
+    vm = _vm(dao)
+    await vm.enter_monthly_summary()  # 读取失败降级，summary_budget 仍为 None
+    assert vm.state.summary_budget is None
+
+    text = await vm.export_csv()
+
+    cells = text.splitlines()[1].split(",")
+    assert cells[0] == "202601"  # 查看月仍在（不为空月伪装数据）
+    assert cells[1] == "" and cells[2] == "" and cells[3] == ""

@@ -23,6 +23,10 @@
 - F36：月汇总与预算录入分离——「录入月度预算」经宿主注入的 reader / saver
   读写配置软预算（不伪装成功）；月汇总视图按查看月真实读取，历史月数据以
   月汇总代次隔离，不被当前月替代。
+- F37：CSV 导出范围二选一（当前页 / 全部筛选结果）——``all`` 经 DAO 公开
+  分页入口稳定遍历（页序固定从 0 起，不受当前页影响），构建前快照粒度 /
+  范围 / 过滤条件；导出行保留请求身份（``invocation_id``）；未知费用空值
+  （R21）；月汇总导出对齐查看月（随 ``summary_month``，不混当前月）。
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ import csv
 import datetime as dt
 import io
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, fields, replace
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -53,6 +57,10 @@ ORIGIN_BUSINESS = "business"
 
 EXPORT_DETAIL = "detail"
 EXPORT_MONTHLY_SUMMARY = "monthly_summary"
+
+#: 明细导出范围（F37）：``page`` 仅当前已加载页；``all`` 全部筛选结果。
+EXPORT_SCOPE_PAGE = "page"
+EXPORT_SCOPE_ALL = "all"
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +109,8 @@ class ModelUsageState:
     retention_exceeded: bool = False
     monthly_summary_mode: bool = False
     export_granularity: str = EXPORT_DETAIL
+    # F37：明细导出范围（page=当前已加载页 / all=全部筛选结果）
+    export_scope: str = EXPORT_SCOPE_PAGE
     # F36：预算录入（草稿为输入框值；limit 未设 None / 读取失败 unknown 分离，R21）
     budget_draft: str = ""
     monthly_limit_cny: Decimal | None = None
@@ -125,6 +135,67 @@ def _write_csv_text(filepath: str, text: str) -> None:
     """同步写入 UTF-8-SIG CSV 文本（经 IO 线程池提交，R16 不在事件循环内执行）。"""
     with open(filepath, "w", encoding="utf-8-sig", newline="") as handle:
         handle.write(text)
+
+
+def _build_detail_csv(rows: Iterable[dict[str, Any]]) -> str:
+    """明细 CSV（F37）：首列 ``invocation_id`` 保留请求身份；未知费用空值（R21）。
+
+    行集由调用方声明（当前页或全部筛选结果），本函数不感知范围语义。
+    attempt 级身份在请求页粒度不可得（一请求一行，尝试明细经
+    ``read_request_attempts`` 在展开视图单独读取），不虚构该列。
+    """
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [
+            "invocation_id",
+            "created_at",
+            "scenario_id",
+            "trigger",
+            "origin",
+            "terminal_status",
+            "cost_status",
+            "task_summary",
+            "total_duration_ms",
+            "known_cost_cny",
+        ]
+    )
+    for row in rows:
+        writer.writerow(
+            [
+                _csv_cell(row.get("invocation_id")),
+                _csv_cell(row.get("created_at")),
+                _csv_cell(row.get("scenario_id")),
+                _csv_cell(row.get("trigger")),
+                ORIGIN_TEST if row.get("is_test") else ORIGIN_BUSINESS,
+                _csv_cell(row.get("terminal_status")),
+                _csv_cell(row.get("cost_status")),
+                _csv_cell(row.get("task_summary")),
+                _csv_cell(row.get("total_duration_ms")),
+                _csv_cell(row.get("known_cost_cny")),
+            ]
+        )
+    return buf.getvalue()
+
+
+def _build_monthly_summary_csv(month: str, summary: BudgetSummary | None) -> str:
+    """月汇总 CSV（F37 对齐查看月）：month / 摘要均取查看月快照，不混当前月。
+
+    摘要未就绪（``None``）→ 全空单元格（未知不伪装为 0，R21）。
+    """
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["month", "known_cny", "effective_reserved_cny", "unconfirmed_reserved_cny"])
+    s = summary if summary is not None else BudgetSummary()
+    writer.writerow(
+        [
+            _csv_cell(month),
+            _csv_cell(s.known_cny),
+            _csv_cell(s.effective_reserved_cny),
+            _csv_cell(s.unconfirmed_reserved_cny),
+        ]
+    )
+    return buf.getvalue()
 
 
 _MONTH_TEXT_RE = re.compile(r"^(\d{4})-?(\d{2})$")
@@ -478,10 +549,39 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         self._set_state(month_draft=str(text or ""))
 
     async def export_csv(self) -> str:
-        """按当前导出粒度构建 CSV 文本并标记就绪（文本落盘另有 ``write_csv``）。"""
-        text = self._build_csv()
-        self._set_state(message=Message("model_usage_export_ready"))
+        """按当前导出粒度与范围构建 CSV 文本（文本落盘另有 ``write_csv``）。
+
+        F37 范围语义（detail 粒度）：``page`` 仅导出当前已加载页（不再隐式宣称
+        完整筛选集）；``all`` 经 DAO 公开分页入口稳定遍历当前筛选全集（页序固定
+        从 0 起，不受当前页影响）。构建（``all`` 含 async 读取）前快照粒度 /
+        范围 / 过滤条件，构建途中视图切换（进出月汇总、筛选 / 翻页重载）不改变
+        本次导出口径；就绪消息仅在期间无更新加载（请求代次未前移）时写入，
+        不覆盖新条件结果的消息。DAO 不可用（``all``）显式抛错由 View 呈现失败，
+        不返回部分文本伪装成功（R21）；DAO 读取失败沿既有降级边界
+        （``_export_csv_and_notify``）向上传播。
+        """
+        granularity = self._state.export_granularity
+        scope = self._state.export_scope
+        generation = self._load_generation
+        if granularity == EXPORT_MONTHLY_SUMMARY:
+            text = _build_monthly_summary_csv(self._state.summary_month, self._state.summary_budget)
+        elif scope == EXPORT_SCOPE_ALL:
+            text = _build_detail_csv(await self._fetch_all_filtered_requests(self._state.filters))
+        else:
+            text = _build_detail_csv(self._state.requests)
+        if generation == self._load_generation:
+            self._set_state(message=Message("model_usage_export_ready"))
         return text
+
+    def set_export_scope(self, scope: str) -> None:
+        """记录明细导出范围选择（F37，纯状态同步命令，on_change 直调）。
+
+        仅接受 ``page``（当前已加载页）/ ``all``（全部筛选结果）；未知值
+        ``raise ValueError``（不静默放宽，沿 ``set_filter`` origin 先例）。
+        """
+        if scope not in (EXPORT_SCOPE_PAGE, EXPORT_SCOPE_ALL):
+            raise ValueError(f"unknown export scope: {scope!r}")
+        self._set_state(export_scope=scope)
 
     async def write_csv(self, filepath: str, text: str) -> None:
         """将 ``export_csv`` 构建的 CSV 文本落盘（桌面路径）。
@@ -541,6 +641,42 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
             return None
         return self._dao_provider()
 
+    async def _fetch_all_filtered_requests(self, filters: UsageFilters) -> tuple[dict[str, Any], ...]:
+        """稳定分页遍历当前筛选全集（F37，只消费 DAO 公开分页入口，不改 DAO）。
+
+        页序固定从 0 起、按 ``PAGE_SIZE`` 前进，不受当前页 / 翻页影响；过滤条件
+        由调用方传入（``export_csv`` 构建起点的快照），遍历途中筛选变化不改变
+        本次导出口径。offset 按页实际行数前进：数据在遍历期间被清理（收缩）时
+        不跳页；遍历期间新写入的数据不保证纳入（offset 分页无稳定快照游标，
+        DAO 未提供 keyset 入口，如实声明而非暗示完整快照）。不捕获异常：
+        ``asyncio.CancelledError`` 自然传播（R2），读取失败由 View 既有降级边界
+        （``_export_csv_and_notify``）呈现。
+        """
+        dao = self._resolve_dao()
+        if dao is None:
+            self._set_state(message=Message("model_usage_dao_unavailable"))
+            raise RuntimeError("export scope 'all' requires ai usage dao")
+        collected: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            rows, total = await dao.read_request_page(
+                start=filters.start,
+                end=filters.end,
+                scenario_id=filters.scenario_id,
+                task_id=filters.task_id,
+                connection_id=filters.connection_id,
+                origin=filters.origin,
+                terminal_status=filters.terminal_status,
+                cost_status=filters.cost_status,
+                limit=PAGE_SIZE,
+                offset=offset,
+            )
+            collected.extend(rows)
+            offset += len(rows)
+            if not rows or offset >= int(total):
+                break
+        return tuple(collected)
+
     def _current_month(self) -> str:
         if self._month_provider is not None:
             return self._month_provider()
@@ -555,47 +691,3 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
             return False
         cutoff = get_now().date() - dt.timedelta(days=self._detail_retention_days)
         return start.date() < cutoff
-
-    def _build_csv(self) -> str:
-        buf = io.StringIO()
-        writer = csv.writer(buf)
-        if self._state.export_granularity == EXPORT_MONTHLY_SUMMARY:
-            writer.writerow(["month", "known_cny", "effective_reserved_cny", "unconfirmed_reserved_cny"])
-            summary = self._state.budget_summary
-            writer.writerow(
-                [
-                    self._current_month(),
-                    _csv_cell(summary.known_cny),
-                    _csv_cell(summary.effective_reserved_cny),
-                    _csv_cell(summary.unconfirmed_reserved_cny),
-                ]
-            )
-        else:
-            writer.writerow(
-                [
-                    "created_at",
-                    "scenario_id",
-                    "trigger",
-                    "origin",
-                    "terminal_status",
-                    "cost_status",
-                    "task_summary",
-                    "total_duration_ms",
-                    "known_cost_cny",
-                ]
-            )
-            for row in self._state.requests:
-                writer.writerow(
-                    [
-                        _csv_cell(row.get("created_at")),
-                        _csv_cell(row.get("scenario_id")),
-                        _csv_cell(row.get("trigger")),
-                        ORIGIN_TEST if row.get("is_test") else ORIGIN_BUSINESS,
-                        _csv_cell(row.get("terminal_status")),
-                        _csv_cell(row.get("cost_status")),
-                        _csv_cell(row.get("task_summary")),
-                        _csv_cell(row.get("total_duration_ms")),
-                        _csv_cell(row.get("known_cost_cny")),
-                    ]
-                )
-        return buf.getvalue()

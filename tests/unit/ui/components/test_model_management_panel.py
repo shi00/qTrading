@@ -59,6 +59,9 @@ from ui.viewmodels.model_connections_view_model import (
 )
 from ui.viewmodels.model_routes_view_model import ModelRoutesState, ModelRoutesViewModel
 from ui.viewmodels.model_usage_view_model import (
+    EXPORT_MONTHLY_SUMMARY,
+    EXPORT_SCOPE_ALL,
+    EXPORT_SCOPE_PAGE,
     ORIGIN_TEST,
     BudgetSummary,
     ModelUsageState,
@@ -434,6 +437,49 @@ class TestUsageView:
         assert I18n.get("model_usage_unknown") in panel_module._month_row_text({"scenario_id": None})
         assert "-" in panel_module._month_row_text({"scenario_id": "s"})  # trigger 缺失
 
+    def test_scope_dropdown_rendered_and_bound(self):
+        """F37：明细视图渲染导出范围下拉（当前页 / 全部筛选结果），选择经同步命令写入 VM。"""
+        vm = MagicMock()
+        view = _build_usage_view(_usage_state(export_scope=EXPORT_SCOPE_ALL), vm, [], None, MagicMock())
+        export_row = view.controls[2]  # 导出行（[0] 预算摘要、[1] 过滤、[2] 导出行）
+        dropdowns = [c for c in _walk_controls(export_row) if isinstance(c, ft.Dropdown)]
+        assert len(dropdowns) == 1
+        dd = dropdowns[0]
+        assert dd.value == EXPORT_SCOPE_ALL  # 回显 state
+        assert {o.key for o in dd.options} == {EXPORT_SCOPE_PAGE, EXPORT_SCOPE_ALL}
+        event = MagicMock()
+        event.control = ft.Dropdown(value=EXPORT_SCOPE_PAGE)
+        handler = cast("Callable[[ft.ControlEvent], None]", dd.on_select)
+        handler(event)
+        vm.set_export_scope.assert_called_once_with(EXPORT_SCOPE_PAGE)
+
+    def test_monthly_mode_hides_scope_dropdown(self):
+        """F37：月汇总模式无导出范围选择（月汇总导出与明细范围无关）。"""
+        view = _build_usage_view(_usage_state(monthly_summary_mode=True), MagicMock(), [], None, MagicMock())
+        dropdowns = [c for c in _walk_controls(view) if isinstance(c, ft.Dropdown)]
+        assert dropdowns == []
+
+
+class TestExportFilename:
+    def test_page_scope_token_uses_page_number(self):
+        name = panel_module._export_filename(_usage_state(page=2))
+        assert name.startswith("ai_usage_page3_")
+        assert name.endswith(".csv")
+
+    def test_all_scope_token(self):
+        name = panel_module._export_filename(_usage_state(export_scope=EXPORT_SCOPE_ALL))
+        assert name.startswith("ai_usage_all_")
+
+    def test_monthly_scope_token_carries_viewed_month(self):
+        name = panel_module._export_filename(
+            _usage_state(export_granularity=EXPORT_MONTHLY_SUMMARY, summary_month="202512")
+        )
+        assert name.startswith("ai_usage_monthly_202512_")
+
+    def test_monthly_without_month_marks_unknown(self):
+        name = panel_module._export_filename(_usage_state(export_granularity=EXPORT_MONTHLY_SUMMARY))
+        assert name.startswith("ai_usage_monthly_unknown_")
+
 
 def _fake_page(*, web: bool) -> FakePage:
     page = FakePage()
@@ -442,6 +488,24 @@ def _fake_page(*, web: bool) -> FakePage:
 
 
 class TestExportCsvAndNotify:
+    @pytest.mark.asyncio
+    async def test_desktop_export_filename_encodes_scope(self):
+        """F37：导出文件名经 VM state 编码范围（all），导出结果可辨识口径。"""
+        vm = MagicMock()
+        vm.export_csv = AsyncMock(return_value="csv-body")
+        vm.state = _usage_state(export_scope=EXPORT_SCOPE_ALL)
+        picker = MagicMock()
+        picker.save_file = AsyncMock(return_value="/tmp/out.csv")
+        page = _fake_page(web=False)
+        show_snack = MagicMock()
+
+        with patch.object(panel_module, "_get_page", return_value=page):
+            await _export_csv_and_notify(vm, picker, show_snack)
+
+        file_name = picker.save_file.await_args.kwargs["file_name"]
+        assert file_name.startswith("ai_usage_all_")
+        assert file_name.endswith(".csv")
+
     @pytest.mark.asyncio
     async def test_web_export_passes_src_bytes(self):
         vm = MagicMock()
