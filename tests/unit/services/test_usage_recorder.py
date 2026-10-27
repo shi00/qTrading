@@ -16,9 +16,20 @@
 - 保留队列有界（溢出 FIFO 逐出最旧 + 告警），账本持续不可达时不立即重放；
 - aclose 全量 flush：保留条目原始重放 / 无终态观察合成 cancelled 补交 / 全窗口收口；
 - aclose flush 失败不抛且如实告警（R21），CancelledError 传播（R2）。
+
+覆盖（F33 迟到修订窗口：修订单调推进 + 窗口身份持久化 + 确认关闭才移除）：
+- observe 修订接收（revision > 水位覆盖快照 + 推进水位），重复 / 乱序旧修订幂等忽略
+  （R22：乱序写入最终值为最大值）；
+- 结算 usage_revision 不再固定 1——按修订水位推进；无新修订的幂等重提交水位不变
+  （F19 防双计兼容）；
+- 窗口截止（usage_window_expires_at）由 Recorder 真实计算持久化（naive UTC，
+  修复前 metadata 透传恒 None → DAO 关闭条件对 NULL 永不成立）；
+- 窗口扫描改 DAO 批量收口：确认关闭才移除内存扫描项（失败保留下轮重试），
+  未到期项保留（截止已持久化，跨重启由下次启动批量收口按期关闭）。
 """
 
 import asyncio
+import datetime
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
@@ -46,13 +57,37 @@ def _usage() -> NormalizedLLMUsage:
     )
 
 
-def _observation(attempt_id: str = "att-1") -> AttemptUsageObservation:
+def _revised_usage() -> NormalizedLLMUsage:
+    """F33 修订后的用量快照（与 _usage() 可区分的 token 计数）。"""
+    return NormalizedLLMUsage(
+        input_total_tokens=200,
+        uncached_input_tokens=180,
+        cache_read_tokens=20,
+        cache_write_tokens=None,
+        output_tokens=30,
+    )
+
+
+def _observation(attempt_id: str = "att-1", usage_revision: int = 1) -> AttemptUsageObservation:
     return AttemptUsageObservation(
         attempt_id=attempt_id,
         invocation_id="inv-1",
         usage=_usage(),
         actual_model="glm-4-air",
         metadata={"connection_id": "conn-remote", "month": "202610"},
+        usage_revision=usage_revision,
+    )
+
+
+def _revised_observation(attempt_id: str = "att-1", usage_revision: int = 2) -> AttemptUsageObservation:
+    """F33 修订观察：用量快照与首次观察可区分。"""
+    return AttemptUsageObservation(
+        attempt_id=attempt_id,
+        invocation_id="inv-1",
+        usage=_revised_usage(),
+        actual_model="glm-4-air",
+        metadata={"connection_id": "conn-remote", "month": "202610"},
+        usage_revision=usage_revision,
     )
 
 
@@ -72,6 +107,7 @@ def _dao_mock() -> MagicMock:
     dao.settle_attempt_usage = AsyncMock(return_value=True)
     dao.mark_dispatched = AsyncMock(return_value=True)
     dao.close_usage_window = AsyncMock(return_value=True)
+    dao.close_expired_usage_windows = AsyncMock(return_value=1)
     return dao
 
 
@@ -408,8 +444,8 @@ class TestSubmitTerminal:
         recorder = UsageRecorder(dao_provider=lambda: dao, window_seconds=0.0)
         recorder.observe_usage(_observation("att-1"))
         await recorder.submit_terminal(_terminal("att-1"))
-        # window_seconds=0 → 立即到期；submit_terminal 顺带惰性扫描应关闭该窗口
-        dao.close_usage_window.assert_awaited()
+        # window_seconds=0 → 立即到期；submit_terminal 顺带惰性批量收口应触发
+        dao.close_expired_usage_windows.assert_awaited()
 
 
 class TestSubmitTerminalCostCalculation:
@@ -745,13 +781,14 @@ class TestAcloseFlushF20:
         assert recorder.pending_observation_count() == 0
 
     @pytest.mark.asyncio
-    async def test_aclose_closes_all_remaining_windows(self):
-        """停机后无迟到修订来源：未到期窗口强制收口，不滞留为未关闭。"""
+    async def test_aclose_sweeps_windows_and_unexpired_persisted(self):
+        """F33：停机批量收口到期窗口；未到期窗口截止已持久化，跨重启由下次
+        启动的惰性批量收口按期关闭（不再滞留未关闭，也不强制提前关闭）。"""
         dao = _dao_mock()
         recorder = UsageRecorder(dao_provider=lambda: dao, window_seconds=3600.0)
         recorder.observe_usage(_observation("att-1"))
         await recorder.aclose()
-        dao.close_usage_window.assert_awaited_once_with(attempt_id="att-1")
+        dao.close_expired_usage_windows.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_aclose_cancelled_error_propagates(self):
@@ -770,3 +807,142 @@ class TestAcloseFlushF20:
         # 条目留存内存不静默销毁（可经下次停机 flush 重试）
         assert excinfo.type is asyncio.CancelledError
         assert recorder.pending_observation_count() == 1
+
+
+class TestRevisionAdvancement:
+    """F33：窗口内迟到修订单调推进——observe 修订接收 / 结算 revision 水位 /
+    重复与乱序幂等（R22 最终值为最大值）/ 幂等重提交水位不变（F19 兼容）。"""
+
+    @pytest.mark.asyncio
+    async def test_first_settle_uses_revision_one(self):
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        await recorder.submit_terminal(_terminal("att-1"))
+        assert dao.settle_attempt_usage.await_args.kwargs["usage_revision"] == 1
+
+    @pytest.mark.asyncio
+    async def test_revision_observation_advances_settlement(self):
+        """窗口内修订观察（revision > 水位）被接收：重提交以新水位 + 修订 usage 结算。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        await recorder.submit_terminal(_terminal("att-1"))
+        recorder.observe_usage(_revised_observation("att-1", usage_revision=2))
+        await recorder.submit_terminal(_terminal("att-1"))
+        second = dao.settle_attempt_usage.await_args_list[1].kwargs
+        assert second["usage_revision"] == 2
+        # 修订快照权威（record 为修订前终态，其 usage 是旧事实）
+        assert second["usage"] is not None
+        assert second["usage"].input_total_tokens == 200
+
+    @pytest.mark.asyncio
+    async def test_duplicate_revision_ignored(self):
+        """同 revision 重复观察幂等忽略：水位不重复推进（防双计前置守卫）。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        recorder.observe_usage(_revised_observation("att-1", usage_revision=2))
+        recorder.observe_usage(_revised_observation("att-1", usage_revision=2))
+        # 重复修订不产生重复条目：仅 1 份修订快照
+        assert recorder.pending_observation_count() == 1
+        await recorder.submit_terminal(_terminal("att-1"))
+        assert dao.settle_attempt_usage.await_args.kwargs["usage_revision"] == 2
+
+    @pytest.mark.asyncio
+    async def test_out_of_order_revision_keeps_max(self):
+        """R22：乱序修订（rev3 先到、rev2 后到）不回退——最终值为最大修订。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        await recorder.submit_terminal(_terminal("att-1"))
+        recorder.observe_usage(_revised_observation("att-1", usage_revision=3))
+        recorder.observe_usage(_revised_observation("att-1", usage_revision=2))
+        # 快照保持 rev3 内容（乱序旧修订不覆盖最新事实）
+        stored = recorder.observed_usage("att-1")
+        assert stored is not None
+        assert stored["usage"] is not None
+        assert stored["usage"].input_total_tokens == 200
+        await recorder.submit_terminal(_terminal("att-1"))
+        revisions = [c.kwargs["usage_revision"] for c in dao.settle_attempt_usage.await_args_list]
+        assert revisions == [1, 3]
+
+    @pytest.mark.asyncio
+    async def test_idempotent_resubmit_keeps_revision(self):
+        """F19 防双计兼容：无新修订的幂等重提交水位不变（重放 revision 恒同）。
+
+        重提交形态与 executor F18 一致：record 自带结算元数据（观察已随首次
+        成功移除），结算走 record-only 回退路径，revision 取持久水位（仍 1）。
+        """
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        await recorder.submit_terminal(_terminal("att-1"))
+        replay_record = AttemptTerminalRecord(
+            attempt_id="att-1",
+            invocation_id="inv-1",
+            status="succeeded",
+            usage=_usage(),
+            error_code=None,
+            duration_ms=123.4,
+            metadata={"connection_id": "conn-remote", "month": "202610"},
+        )
+        await recorder.submit_terminal(replay_record)
+        revisions = [c.kwargs["usage_revision"] for c in dao.settle_attempt_usage.await_args_list]
+        assert revisions == [1, 1]
+
+    @pytest.mark.asyncio
+    async def test_window_expires_at_persisted_naive_utc(self):
+        """F33：窗口截止真实持久化（修复前 metadata 透传恒 None → 永久未关闭）。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-1"))
+        await recorder.submit_terminal(_terminal("att-1"))
+        expires = dao.settle_attempt_usage.await_args.kwargs["usage_window_expires_at"]
+        assert expires is not None
+        assert isinstance(expires, datetime.datetime)
+        assert expires.tzinfo is None  # naive UTC，与 DAO 侧 now() AT TIME ZONE 'UTC' 同域
+
+
+class TestUsageWindowScanF33:
+    """F33：窗口扫描批量收口——确认关闭才移除扫描项；未到期项保留；
+    重启后内存登记已失时由首次落账触发的批量收口恢复扫描。"""
+
+    @pytest.mark.asyncio
+    async def test_expired_window_removed_after_confirmed_close(self):
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao, window_seconds=0.0)
+        recorder.observe_usage(_observation("att-1"))
+        await recorder.submit_terminal(_terminal("att-1"))
+        dao.close_expired_usage_windows.assert_awaited()
+        # 确认关闭（SQL 成功）后内存扫描项移除
+        assert recorder._windows == {}
+
+    @pytest.mark.asyncio
+    async def test_scan_failure_keeps_window_entry_for_retry(self):
+        """收口失败不移除扫描项（修复前先 pop 后 close，失败即永久滞留未关闭）。"""
+        dao = _dao_mock()
+        dao.close_expired_usage_windows = AsyncMock(side_effect=RuntimeError("boom"))
+        recorder = UsageRecorder(dao_provider=lambda: dao, window_seconds=0.0)
+        recorder.observe_usage(_observation("att-1"))
+        await recorder.submit_terminal(_terminal("att-1"))
+        assert "att-1" in recorder._windows
+
+    @pytest.mark.asyncio
+    async def test_unexpired_window_kept_until_expiry(self):
+        """保护期内窗口不提前关闭：内存项保留，截止已持久化跨重启按期收口。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao, window_seconds=3600.0)
+        recorder.observe_usage(_observation("att-1"))
+        await recorder.submit_terminal(_terminal("att-1"))
+        assert "att-1" in recorder._windows
+
+    @pytest.mark.asyncio
+    async def test_restarted_recorder_recovers_pending_windows(self):
+        """重启后恢复扫描：新实例（内存登记已失）首次落账即触发批量收口，
+        DAO 层按持久化截止关闭全部到期未关闭行（含 NULL 历史行兜底）。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        recorder.observe_usage(_observation("att-new"))
+        await recorder.submit_terminal(_terminal("att-new"))
+        dao.close_expired_usage_windows.assert_awaited_once()

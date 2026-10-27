@@ -1639,3 +1639,38 @@ class TestStaleGarbageTolerance:
         dao = _dao(conn)
         summary = await dao.read_budget_summary(month="202610")
         assert summary["known_cny"] == Decimal("1.50")  # settled 降级 0 + legacy 1.50
+
+
+class TestCloseUsageWindowsF33:
+    """F33：窗口关闭语义修复——NULL 截止历史行兜底 + 批量恢复收口。
+
+    修复前缺陷：``close_usage_window`` 的到期条件 ``usage_window_expires_at <= now()``
+    对 NULL 恒不成立（修复前 Recorder 未持久化截止，全库行 expires 恒 NULL），
+    窗口永久滞留未关闭；且无批量收口入口，重启后内存登记已失时无法恢复扫描。
+    """
+
+    @pytest.mark.asyncio
+    async def test_close_usage_window_null_expiry_fallback(self):
+        """NULL 截止（修复前未持久化窗口身份的历史行）按已过期兜底关闭。"""
+        conn = _CaptureConn(results=[1])
+        dao = _dao(conn)
+        assert await dao.close_usage_window(attempt_id="att-1") is True
+        sql = conn.calls[0][0]
+        assert "UPDATE ai_attempt" in sql
+        assert "usage_window_closed_at IS NULL" in sql
+        # NULL 兜底 OR 分支：历史行不再因 expires IS NULL 永不命中
+        assert "usage_window_expires_at IS NULL OR usage_window_expires_at <= (now() AT TIME ZONE 'UTC')" in sql
+
+    @pytest.mark.asyncio
+    async def test_close_expired_usage_windows_batch_sweep(self):
+        """批量收口：无 attempt 过滤（覆盖重启遗留与全部到期行），返回关闭行数。"""
+        conn = _CaptureConn(results=[3])
+        dao = _dao(conn)
+        closed = await dao.close_expired_usage_windows()
+        assert closed == 3
+        sql = conn.calls[0][0]
+        assert "UPDATE ai_attempt" in sql
+        assert "usage_window_closed_at IS NULL" in sql
+        assert "usage_window_expires_at IS NULL OR usage_window_expires_at <= (now() AT TIME ZONE 'UTC')" in sql
+        # 批量语义：不带逐项 attempt 过滤（Recorder 确认关闭后才移除内存扫描项）
+        assert "attempt_id = :attempt_id" not in sql

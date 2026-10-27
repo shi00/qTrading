@@ -1562,7 +1562,11 @@ class AIUsageDao(BaseDao):
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def close_usage_window(self, *, attempt_id: str) -> bool:
-        """惰性窗口关闭：submit_terminal 顺带扫描到期 attempt（D6）。"""
+        """惰性窗口关闭：submit_terminal 顺带扫描到期 attempt（D6）。
+
+        F33：到期条件对 NULL 截止兜底成立——历史行（截止未持久化的修复前数据）
+        窗口语义从未生效，按已过期关闭，不再永久滞留未关闭。
+        """
         self._check_engine(context="ai_usage.close_usage_window")
         async with self._guarded_begin() as conn:
             result = await conn.execute(
@@ -1572,12 +1576,34 @@ class AIUsageDao(BaseDao):
                     SET usage_window_closed_at = (now() AT TIME ZONE 'UTC'), updated_at = (now() AT TIME ZONE 'UTC')
                     WHERE attempt_id = :attempt_id
                       AND usage_window_closed_at IS NULL
-                      AND usage_window_expires_at <= (now() AT TIME ZONE 'UTC')
+                      AND (usage_window_expires_at IS NULL OR usage_window_expires_at <= (now() AT TIME ZONE 'UTC'))
                     """
                 ),
                 {"attempt_id": attempt_id},
             )
             return bool(result.rowcount and result.rowcount > 0)
+
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
+    async def close_expired_usage_windows(self) -> int:
+        """批量收口全部到期未关闭窗口（F33 恢复扫描：重启后内存登记已失，
+        经本方法一次关闭所有到期未关闭行——含修复前 NULL 截止的历史行兜底）。
+
+        Recorder 惰性挂靠调用（无后台 timer，D6）：确认关闭（SQL 成功执行）
+        后才移除内存扫描项；失败由调用方保留扫描项下轮重试。
+        """
+        self._check_engine(context="ai_usage.close_expired_usage_windows")
+        async with self._guarded_begin() as conn:
+            result = await conn.execute(
+                sa.text(
+                    """
+                    UPDATE ai_attempt
+                    SET usage_window_closed_at = (now() AT TIME ZONE 'UTC'), updated_at = (now() AT TIME ZONE 'UTC')
+                    WHERE usage_window_closed_at IS NULL
+                      AND (usage_window_expires_at IS NULL OR usage_window_expires_at <= (now() AT TIME ZONE 'UTC'))
+                    """
+                ),
+            )
+            return int(result.rowcount or 0)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def read_month_usage(self, *, month: str, aggregation_scope: str) -> list[dict[str, Any]]:

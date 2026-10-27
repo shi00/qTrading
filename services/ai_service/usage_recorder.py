@@ -2,10 +2,16 @@
 
 职责：Executor 与账本 DAO 之间的唯一落账边界——
 - ``observe_usage``：适配器返回前同步转移不可变用量快照，按 attempt_id 幂等；
+  F33 修订语义：同 attempt 后续观察携带更大 ``usage_revision`` 时作为修订接收
+  （覆盖快照 + 推进水位 + 刷新窗口），重复 / 乱序旧修订（revision ≤ 水位）幂等忽略；
 - ``mark_dispatched`` / ``submit_terminal``：每次落账 ``wait_for`` 限时（默认 5s），
   失败/超时/引擎不可用一律降级为 ``persisted=False`` + 脱敏错误码，缺失不伪装（R21）；
-- 60s 用量窗口惰性扫描（无后台 timer）：``submit_terminal`` 顺带关闭到期窗口，
-  ``aclose`` 兜底全量 flush；
+- F33：``usage_revision`` 不再固定 1——结算按 per-attempt 修订水位推进（窗口内
+  新修订经 DAO 水位差额落账，不双计），窗口截止（``usage_window_expires_at``）
+  由本层真实计算持久化（修复前恒 None，DAO 关闭条件对 NULL 永不成立）；
+- 60s 用量窗口惰性扫描（无后台 timer）：``submit_terminal`` 顺带批量收口到期窗口
+  （DAO ``close_expired_usage_windows``，含重启后遗留与 NULL 历史行兜底），
+  **确认关闭才移除内存扫描项**（收口失败保留下轮重试）；
 - F20：``submit_terminal`` 落账失败（persisted=False）不丢弃观察——可恢复失败
   （账本不可用 / 超时）的终态记录进入**有界内存重试队列**，挂靠后续成功落账
   与 ``aclose`` 重放（成功或确认不可恢复才移除，防双计由 DAO usage_revision
@@ -18,6 +24,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import time
 from collections import OrderedDict
@@ -60,6 +67,12 @@ _RETRY_BACKOFF_BASE_S = 2.0
 _RETRY_BACKOFF_CAP_S = 30.0
 
 
+def _naive_utc_now() -> datetime.datetime:
+    """F33：窗口截止域时钟缺省实现——naive UTC 墙钟（与 DAO 侧
+    ``now() AT TIME ZONE 'UTC'`` 同域，时间列统一 naive UTC 惯例）。"""
+    return datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+
+
 @dataclass(frozen=True, slots=True)
 class ReservationOutcome:
     """预算预留结果（F16）：封装 DAO ``try_reserve`` 的三态。
@@ -78,13 +91,19 @@ class ReservationOutcome:
 
 @dataclass(frozen=True, slots=True)
 class AttemptUsageObservation:
-    """一次尝试的用量观察（适配器返回前同步转移的不可变快照）。"""
+    """一次尝试的用量观察（适配器返回前同步转移的不可变快照）。
+
+    ``usage_revision``（F33）：修订序号——首次观察缺省 1；窗口内迟到修订由
+    修订源显式递增（2, 3, ...），Recorder 按 per-attempt 水位单调接收（R22），
+    重复 / 乱序旧修订（≤ 水位）幂等忽略，防双计由 DAO 既有 revision 水位兜底。
+    """
 
     attempt_id: str
     invocation_id: str
     usage: NormalizedLLMUsage | None
     actual_model: str | None
     metadata: dict[str, Any]
+    usage_revision: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,27 +158,41 @@ class UsageRecorder:
         settle_timeout_s: float = _DEFAULT_SETTLE_TIMEOUT_S,
         window_seconds: float = _DEFAULT_WINDOW_SECONDS,
         max_pending_settle: int = _MAX_PENDING_SETTLE,
+        wall_clock: Callable[[], datetime.datetime] | None = None,
     ) -> None:
         self._dao_provider = dao_provider
         self._clock = clock
         self._settle_timeout_s = settle_timeout_s
         self._window_seconds = window_seconds
         self._max_pending_settle = max_pending_settle
-        # attempt_id → 不可变用量快照（幂等：首次 observe 生效）
+        # F33：窗口截止域时钟（naive UTC 墙钟，与 DAO 侧 now() AT TIME ZONE 'UTC'
+        # 同域）——内存扫描判定与持久化截止（usage_window_expires_at）判定一致，
+        # 避免 monotonic / 墙钟跨域导致「内存已到期而 DB 未关闭」的滞留偏差。
+        self._wall_clock: Callable[[], datetime.datetime] = wall_clock if wall_clock is not None else _naive_utc_now
+        # attempt_id → 不可变用量快照（首次观察建档；修订观察经水位单调覆盖）
         self._observations: dict[str, AttemptUsageObservation] = {}
-        # attempt_id → 窗口到期单调时刻（惰性扫描用）
-        self._windows: dict[str, float] = {}
+        # F33：attempt_id → 修订水位（R22 单调；结算 revision 依此推进，不再固定 1）
+        self._revision_watermarks: dict[str, int] = {}
+        # attempt_id → 窗口到期墙钟时刻（惰性扫描用；F33 起与持久化截止同域）
+        self._windows: dict[str, datetime.datetime] = {}
         # F20：结算失败保留队列（插入序 = 首次失败序，FIFO 逐出最旧）
         self._pending_settle: OrderedDict[str, _PendingSettle] = OrderedDict()
         self._closed = False
 
     # ------------------------------------------------------------------
-    # 用量观察（D6：同步转移、按 attempt_id 幂等）
+    # 用量观察（D6：同步转移；F33 修订按水位单调接收）
     # ------------------------------------------------------------------
 
     def observe_usage(self, observation: AttemptUsageObservation) -> None:
-        """适配器返回前同步持有用量快照；同 attempt_id 首次观察生效。"""
-        if observation.attempt_id in self._observations:
+        """适配器返回前同步持有用量快照。
+
+        F33 修订语义：同 attempt 首次观察建档；后续观察携带更大
+        ``usage_revision`` 时作为修订接收（覆盖快照 + 推进水位 + 刷新窗口）；
+        重复 / 乱序旧修订（revision ≤ 水位）幂等忽略——不回退已接收的最新事实
+        （R22：水位写入单调，乱序最终值保持最大）。
+        """
+        watermark = self._revision_watermarks.get(observation.attempt_id)
+        if watermark is not None and observation.usage_revision <= watermark:
             return
         # 浅拷贝 metadata：转移后调用方修改原 mapping 不影响已观察数据
         self._observations[observation.attempt_id] = AttemptUsageObservation(
@@ -168,8 +201,11 @@ class UsageRecorder:
             usage=observation.usage,
             actual_model=observation.actual_model,
             metadata=dict(observation.metadata),
+            usage_revision=observation.usage_revision,
         )
-        self._windows[observation.attempt_id] = self._clock() + self._window_seconds
+        self._revision_watermarks[observation.attempt_id] = observation.usage_revision
+        # 首次建档与修订均登记 / 刷新确认窗口（修订后仍有完整确认期）
+        self._windows[observation.attempt_id] = self._wall_clock() + datetime.timedelta(seconds=self._window_seconds)
 
     def pending_observation_count(self) -> int:
         return len(self._observations)
@@ -388,8 +424,11 @@ class UsageRecorder:
                 outcome.error_code,
                 record.attempt_id[:8],
             )
-        # 终态进入用量确认窗口（未 observe 的直接登记），随后惰性扫描到期项
-        self._windows.setdefault(record.attempt_id, self._clock() + self._window_seconds)
+        # 终态进入用量确认窗口（未 observe 的直接登记；修订路径 observe 已刷新，
+        # setdefault 不重置），随后惰性批量收口到期项
+        self._windows.setdefault(
+            record.attempt_id, self._wall_clock() + datetime.timedelta(seconds=self._window_seconds)
+        )
         # F20：本次落账成功 = 账本刚证明可达，顺带重放历史失败条目（无后台 timer，D6）
         if outcome.persisted and self._pending_settle:
             await self._drain_pending_settle()
@@ -403,7 +442,13 @@ class UsageRecorder:
         收敛结果；观察元数据仍为权威来源。
         """
         obs = self._observations.get(record.attempt_id)
+        # F33：修订水位——存在修订（>1）时修订快照为权威 usage 来源（record 是
+        # 修订前提交的终态，其 usage 为旧事实）；无修订时 record 优先（F18/F19
+        # 幂等重提交语义不变，revision 恒 1 由 DAO 水位防双计）。
+        watermark = self._revision_watermarks.get(record.attempt_id, 0)
         usage = record.usage if record.usage is not None else (obs.usage if obs else None)
+        if obs is not None and watermark > 1 and obs.usage is not None:
+            usage = obs.usage
         if obs is not None:
             # 观察元数据为权威（适配器返回前同步转移的不可变快照）
             actual_model = obs.actual_model
@@ -445,7 +490,10 @@ class UsageRecorder:
                     status=record.status,
                     usage_status=usage_status,
                     usage=usage,
-                    usage_revision=1,
+                    # F33：按修订水位推进（不再固定 1）——窗口内新修订经 DAO
+                    # revision 水位差额落账；幂等重提交水位不变，防双计不变。
+                    # 无观察失败路径（水位 0）回落首结算语义 1。
+                    usage_revision=max(watermark, 1),
                     error_code=record.error_code,
                     duration_ms=record.duration_ms,
                     cost_cny=cost_cny,
@@ -463,7 +511,9 @@ class UsageRecorder:
                     month=metadata.get("month", ""),
                     encoder_input_tokens=metadata.get("encoder_input_tokens"),
                     text_count=metadata.get("text_count"),
-                    usage_window_expires_at=metadata.get("usage_window_expires_at"),
+                    # F33：窗口截止由本层真实计算持久化（修复前 metadata 透传恒
+                    # None → DAO 关闭条件对 NULL 永不成立，窗口永久滞留未关闭）
+                    usage_window_expires_at=self._wall_clock() + datetime.timedelta(seconds=self._window_seconds),
                     usage_fingerprint=metadata.get("usage_fingerprint"),
                     reservation_id=record.reservation_id,
                 )
@@ -518,28 +568,31 @@ class UsageRecorder:
             else:
                 self._retain(pending.record)
 
-    async def _scan_expired_windows(self, *, force: bool = False) -> None:
-        """惰性扫描：关闭到期用量窗口（无后台 timer，D6）。
+    async def _scan_expired_windows(self) -> None:
+        """惰性扫描：批量收口到期用量窗口（无后台 timer，D6）。
 
-        ``force=True``（aclose 停机兜底）：关闭全部剩余窗口——停机后无迟到修订
-        来源，窗口登记随内存清空，不收口将永久滞留为未关闭。
+        F33：改为 DAO 批量收口（``close_expired_usage_windows``）——单条 UPDATE
+        关闭**全部**到期未关闭窗口，同时覆盖重启后内存登记已失的遗留行与修复前
+        NULL 截止的历史行（恢复扫描语义）；**确认关闭（SQL 成功执行）才移除内存
+        到期项**，失败保留下轮重试（修复前先 pop 后 close，失败即永久滞留未关闭）。
+        内存窗口与持久化截止同域（墙钟），到期判定一致。
         """
         dao = self._dao_provider()
         if dao is None:
             return
-        now = self._clock()
-        if force:
-            expired = list(self._windows)
-        else:
-            expired = [aid for aid, expires_at in self._windows.items() if expires_at <= now]
-        for attempt_id in expired:
+        try:
+            await asyncio.wait_for(dao.close_expired_usage_windows(), timeout=self._settle_timeout_s)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("[UsageRecorder] close_expired_usage_windows failed: %s", type(e).__name__)
+            return
+        # 收口成功 = DB 侧所有到期未关闭行已确认关闭 → 移除内存已到期项
+        # （未到期项保留——保护期内的窗口不得提前关闭，其截止已持久化，
+        # 重启后仍由下次启动的批量收口按期关闭）
+        now = self._wall_clock()
+        for attempt_id in [aid for aid, expires_at in self._windows.items() if expires_at <= now]:
             self._windows.pop(attempt_id, None)
-            try:
-                await asyncio.wait_for(dao.close_usage_window(attempt_id=attempt_id), timeout=self._settle_timeout_s)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.warning("[UsageRecorder] close_usage_window failed: %s", type(e).__name__)
 
     # ------------------------------------------------------------------
     # 关闭兜底（D6：aclose 幂等；F20 停机前全量 flush）
@@ -570,7 +623,9 @@ class UsageRecorder:
         ② 从未提交终态的观察合成 ``cancelled`` 终态补交——用量已观察 = 消费事实，
           停机中断 = 未完成事实，均非伪装（R21）；无预留转换（reservation_id
           不可知，预留经租约到期退出）；
-        ③ 强制关闭全部剩余用量窗口（停机后无迟到修订来源）。
+        ③ 常规批量收口到期窗口（F33：未到期窗口的截止已持久化，跨重启由下次
+          启动的惰性批量收口按期关闭，不再永久滞留——原 force 强关未到期窗口
+          在 DAO expires 条件下本就不成立，行为等价且窗口保护跨重启延续）。
         """
         for attempt_id, pending in list(self._pending_settle.items()):
             outcome = await self._settle_record(pending.record)
@@ -615,7 +670,7 @@ class UsageRecorder:
                     outcome.error_code,
                     attempt_id[:8],
                 )
-        await self._scan_expired_windows(force=True)
+        await self._scan_expired_windows()
 
     # ------------------------------------------------------------------
     # 内部：受限落账 + 结果收敛
