@@ -1976,7 +1976,7 @@ class TestLoadHistoryExecWarningsRestore:
 
     @pytest.mark.asyncio
     async def test_all_strategies_aggregates_every_run_warning(self, vm):
-        """GWT-1: 同日两 run，首行 [] 不得清空横幅，后续 run 的警告必须保留。"""
+        """GWT 1: 同日两 run，首行 [] 不得清空横幅，后续 run 的警告必须保留。"""
         df = pd.DataFrame(
             {
                 "run_id": ["runA", "runB"],
@@ -1993,7 +1993,7 @@ class TestLoadHistoryExecWarningsRestore:
 
     @pytest.mark.asyncio
     async def test_all_strategies_row_order_equivalent(self, vm):
-        """GWT-2: 交换行序结果等价（集合不变）。"""
+        """GWT 2: 交换行序结果等价（集合不变）。"""
 
         def _df(order):
             values = {"runA": [], "runB": [{"key": "strategy_ai_risk_check_skipped", "params": {}}]}
@@ -2018,7 +2018,7 @@ class TestLoadHistoryExecWarningsRestore:
 
     @pytest.mark.asyncio
     async def test_all_strategies_empty_plus_null_marks_unrecorded(self, vm):
-        """GWT-3: 一个 run 为 []（已记录无警告）另一个为 NULL → 必须有「未记录」哨兵。"""
+        """GWT 3: 一个 run 为 []（已记录无警告）另一个为 NULL → 必须有「未记录」哨兵。"""
         df = pd.DataFrame(
             {
                 "run_id": ["runA", "runB"],
@@ -2035,7 +2035,7 @@ class TestLoadHistoryExecWarningsRestore:
 
     @pytest.mark.asyncio
     async def test_same_run_repeated_warning_shown_once(self, vm):
-        """GWT-4: 同一 run 的 100 行相同警告只显示一次（同 run 重复行不刷屏）。"""
+        """GWT 4: 同一 run 的 100 行相同警告只显示一次（同 run 重复行不刷屏）。"""
         warning = [{"key": "strategy_ai_risk_check_skipped", "params": {}}]
         df = pd.DataFrame(
             {
