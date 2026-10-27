@@ -115,3 +115,6 @@ class NewsInsightResult:
     execution_metadata: dict | None = None
     # F28：部分事件因证据校验无效被剔除的质量提示（保留剔除原因溯源）；无剔除为 None（R21）。
     events_dropped: list[dict] | None = None
+    # UIR-F05-003：快照真实生成时点（UTC-naive，与 DB DateTime(timezone=False) 同语义）。
+    # None 表示未记录（旧快照 / 未持久化的降级结果），禁止用读取时刻或 updated_at 填充（R21）。
+    generated_at: datetime.datetime | None = None

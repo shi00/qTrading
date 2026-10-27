@@ -177,6 +177,54 @@ def test_build_ready_with_events():
     assert isinstance(control, ft.Column)
 
 
+def test_build_ready_reused_shows_snapshot_time_and_cache_read():
+    """UIR-F05-003：复用态同时展示快照生成时间 t0 与本次缓存读取时间 t1。"""
+    state = NewsInsightState(
+        phase="ready",
+        ts_code="000001.SZ",
+        risk_level="high",
+        reused=True,
+        reuse_type="cache_hit",
+        analysis_time="2026-09-10 10:00",
+        cache_read_time="2026-09-16 12:30",
+    )
+    joined = "\n".join(_iter_text_values(_build_ready(state, ft.Column())))
+    assert "2026-09-10 10:00" in joined
+    assert "2026-09-16 12:30" in joined
+    assert I18n.get("news_insight_cache_read_time") in joined
+    assert I18n.get("news_insight_reused_badge") in joined
+
+
+def test_build_ready_missing_generated_at_shows_unrecorded():
+    """UIR-F05-003：快照生成时间缺失时显式「未记录」，不得以读取时刻冒充（R21）。"""
+    state = NewsInsightState(
+        phase="ready",
+        ts_code="000001.SZ",
+        risk_level="high",
+        reused=True,
+        analysis_time=None,
+        cache_read_time="2026-09-16 12:30",
+    )
+    joined = "\n".join(_iter_text_values(_build_ready(state, ft.Column())))
+    assert I18n.get("news_insight_gen_time_unknown") in joined
+    assert "2026-09-16 12:30" in joined
+
+
+def test_build_ready_non_reused_hides_cache_read_time():
+    """UIR-F05-003：非复用场景不渲染缓存读取时间标签。"""
+    state = NewsInsightState(
+        phase="ready",
+        ts_code="000001.SZ",
+        risk_level="high",
+        reused=False,
+        analysis_time="2026-09-16 12:30",
+        cache_read_time=None,
+    )
+    joined = "\n".join(_iter_text_values(_build_ready(state, ft.Column())))
+    assert "2026-09-16 12:30" in joined
+    assert I18n.get("news_insight_cache_read_time") not in joined
+
+
 def _iter_text_values(control) -> list:
     """递归收集控件树（content / controls）中所有 ft.Text.value。"""
     values: list = []
@@ -341,6 +389,8 @@ _PANEL_KEYS = {
     "news_insight_level_unknown",
     "news_insight_window_label",
     "news_insight_gen_time",
+    "news_insight_gen_time_unknown",
+    "news_insight_cache_read_time",
     "news_insight_reused_badge",
     "news_insight_coverage_fetched",
     "news_insight_coverage_ok",

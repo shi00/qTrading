@@ -17,6 +17,7 @@ import asyncio
 from dataclasses import FrozenInstanceError
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -42,12 +43,14 @@ def _make_result(
     risk_level: str | None = "high",
     confidence: int | None = 80,
     events=None,
+    generated_at: datetime | None = None,
 ) -> MagicMock:
     result = MagicMock()
     result.analysis_status = status
     result.risk_level = risk_level
     result.confidence = confidence
     result.summary = "示例摘要"
+    result.generated_at = generated_at
     result.events = events or [
         {
             "event_type": "litigation",
@@ -468,6 +471,59 @@ class TestWindowLabelError:
         await _drain(vm)
         assert vm.state.phase == PHASE_READY
         assert vm.state.window_label == "unknown"
+
+
+class TestGenerationTimeSemantics:
+    """UIR-F05-003：复用展示快照真实生成时点 t0，读取时刻 t1 独立字段。"""
+
+    T0 = datetime(2026, 9, 10, 2, 0, 0)  # UTC-naive（DB 语义）
+    T1 = datetime(2026, 9, 16, 12, 30, 0).replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    async def _generate_with(self, fake_service, monkeypatch, *, result, reused, reuse_type="none"):
+        fake_service.analyze = AsyncMock(
+            return_value=NewsInsightOutcome(result=result, reused=reused, reuse_type=reuse_type)
+        )
+        monkeypatch.setattr(utils.time_utils, "get_now", lambda: self.T1)
+        vm = NewsInsightViewModel(service=fake_service)
+        vm.select_stock("000001.SZ")
+        await _drain(vm)
+        vm.generate()
+        await _drain(vm)
+        assert vm.state.phase == PHASE_READY
+        return vm
+
+    async def test_reused_uses_snapshot_time_and_separate_read_time(self, fake_service, monkeypatch):
+        vm = await self._generate_with(
+            fake_service,
+            monkeypatch,
+            result=_make_result(generated_at=self.T0),
+            reused=True,
+            reuse_type="cache_hit",
+        )
+        assert vm.state.reused is True
+        assert vm.state.analysis_time == _fmt_time(self.T0) == "2026-09-10 10:00"
+        assert vm.state.cache_read_time == _fmt_time(self.T1) == "2026-09-16 12:30"
+
+    async def test_reused_without_generated_at_is_unrecorded(self, fake_service, monkeypatch):
+        """旧快照无 generated_at → None（未记录，R21），读取时刻不得冒充生成时间。"""
+        vm = await self._generate_with(
+            fake_service, monkeypatch, result=_make_result(generated_at=None), reused=True, reuse_type="cache_hit"
+        )
+        assert vm.state.reused is True
+        assert vm.state.analysis_time is None
+        assert vm.state.cache_read_time == _fmt_time(self.T1)
+
+    async def test_new_generation_without_generated_at_uses_now(self, fake_service, monkeypatch):
+        vm = await self._generate_with(fake_service, monkeypatch, result=_make_result(generated_at=None), reused=False)
+        assert vm.state.analysis_time == _fmt_time(self.T1)
+        assert vm.state.cache_read_time is None
+
+    async def test_new_generation_uses_recorded_generated_at(self, fake_service, monkeypatch):
+        vm = await self._generate_with(
+            fake_service, monkeypatch, result=_make_result(generated_at=self.T0), reused=False
+        )
+        assert vm.state.analysis_time == _fmt_time(self.T0)
+        assert vm.state.cache_read_time is None
 
 
 class TestNowStrError:

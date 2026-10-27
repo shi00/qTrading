@@ -419,6 +419,10 @@ class NewsRiskBrief(Base):
     model_id = Column(String, info={"null_protected": True})
     analysis_profile = Column(String(64), nullable=False)
     prompt_version = Column(String(32), nullable=False)
+    # UIR-F05-003：程序生成时点（UTC-naive，服务侧写入）。历史行保持 NULL（未记录 ≠ 当前时刻，R21）。
+    # 不声明 null_protected：成功刷新必须更新生成时点；failed 写入被条件 upsert 的 WHERE 拦截
+    # （既有成功快照不被覆盖），仅当既有行也是 failed 时才刷新本次尝试时点，语义正确。
+    generated_at = Column(DateTime(timezone=False), nullable=True)
     created_at = Column(DateTime(timezone=False), server_default=text("now()"), nullable=False)
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"), nullable=False)
 
