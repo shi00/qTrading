@@ -362,6 +362,43 @@ def _collect_text_values(control, acc: list[str] | None = None) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# UIR-F04-002: 更新后的 NewsRow 情绪/AI 标记渲染
+# ---------------------------------------------------------------------------
+
+
+class TestNewsItemSentimentRendering:
+    """UIR-F04-002：更新后的 NewsRow 情绪/AI 标记必须直接体现在 Feed 渲染。"""
+
+    @pytest.fixture(autouse=True)
+    def _mock_i18n(self):
+        with patch("ui.components.news_feed.I18n") as m:
+            m.get.side_effect = lambda key, default=None, **kw: default if default is not None else key
+            yield m
+
+    def _build(self, **row_kwargs):
+        from ui.components.news_feed import _build_news_item
+
+        row = NewsRow(content="news", publish_time="2024-06-15 10:30:00", **row_kwargs)
+        return _build_news_item(row, "0")
+
+    def test_positive_sentiment_uses_up_red_background(self):
+        item = self._build(sentiment="Positive")
+        assert item.bgcolor == ft.Colors.with_opacity(0.1, AppColors.UP_RED)
+
+    def test_negative_sentiment_uses_down_green_background(self):
+        item = self._build(sentiment="Negative")
+        assert item.bgcolor == ft.Colors.with_opacity(0.1, AppColors.DOWN_GREEN)
+
+    def test_missing_sentiment_renders_neutral(self):
+        item = self._build(sentiment=None)
+        assert item.bgcolor == AppColors.TRANSPARENT
+
+    def test_ai_tagged_row_renders_badge(self):
+        item = self._build(tags="AI_macro", is_ai_tagged=True)
+        assert "ai_generated_tag" in _collect_text_values(item)
+
+
+# ---------------------------------------------------------------------------
 # Pure function tests: 时间显示格式 (MINOR-01)
 # ---------------------------------------------------------------------------
 

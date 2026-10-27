@@ -537,6 +537,102 @@ class TestHomeViewModelStateManagement:
         assert vm.state.news_rows[0].tags == "new_tag"
 
     @pytest.mark.asyncio
+    async def test_tag_update_with_identity_updates_sentiment_and_ai_flag(self, vm):
+        """UIR-F04-002：按 (content, publish_time) 身份更新目标行的情绪与 AI 标记。"""
+        from services.news_subscription_service import NewsUpdateType
+
+        vm._set_state(
+            news_rows=(
+                NewsRow(content="same", tags="", publish_time="2024-01-01 02:00:00"),
+                NewsRow(content="same", tags="", publish_time="2024-01-01 03:00:00"),
+            )
+        )
+        refresh = AsyncMock()
+        vm.refresh_news = refresh
+
+        await vm._on_news_service_update(
+            NewsUpdateType.TAG_UPDATE,
+            {
+                "content": "same",
+                "publish_time": "2024-01-01 02:00:00",
+                "tags": "AI_macro",
+                "sentiment": "Positive",
+            },
+        )
+
+        assert vm.state.news_rows[0].tags == "AI_macro"
+        assert vm.state.news_rows[0].sentiment == "Positive"
+        assert vm.state.news_rows[0].is_ai_tagged is True
+        # 同正文不同时间：非目标行保持缺失/未打标
+        assert vm.state.news_rows[1].tags == ""
+        assert vm.state.news_rows[1].sentiment is None
+        assert vm.state.news_rows[1].is_ai_tagged is False
+        refresh.assert_not_awaited()  # 无需全量刷新
+
+    @pytest.mark.asyncio
+    async def test_tag_update_failure_none_does_not_clear_existing_sentiment(self, vm):
+        """R21：本次分析失败（sentiment=None）不得清空 DB 已保留的旧情绪。"""
+        from services.news_subscription_service import NewsUpdateType
+
+        vm._set_state(
+            news_rows=(
+                NewsRow(content="old", tags="old_tag", publish_time="2024-01-01 02:00:00", sentiment="Negative"),
+            )
+        )
+
+        await vm._on_news_service_update(
+            NewsUpdateType.TAG_UPDATE,
+            {
+                "content": "old",
+                "publish_time": "2024-01-01 02:00:00",
+                "tags": "new_tag",
+                "sentiment": None,
+            },
+        )
+
+        row = vm.state.news_rows[0]
+        assert row.tags == "new_tag"
+        assert row.sentiment == "Negative"
+
+    @pytest.mark.asyncio
+    async def test_tag_update_with_unknown_identity_is_ignored(self, vm):
+        """晚到/已刷新移除的分析：身份不匹配时不得误改任何行。"""
+        from services.news_subscription_service import NewsUpdateType
+
+        vm._set_state(news_rows=(NewsRow(content="same", publish_time="2024-01-01 02:00:00", sentiment=None),))
+        before = vm.state.news_rows
+
+        await vm._on_news_service_update(
+            NewsUpdateType.TAG_UPDATE,
+            {
+                "content": "same",
+                "publish_time": "2024-01-01 04:00:00",
+                "tags": "AI_macro",
+                "sentiment": "Positive",
+            },
+        )
+
+        assert vm.state.news_rows == before
+
+    @pytest.mark.asyncio
+    async def test_legacy_tag_update_without_identity_keeps_sentiment(self, vm):
+        """兼容旧「仅 tags」事件：仍按 content 更新 tags，情绪保持现状（不猜）。"""
+        from services.news_subscription_service import NewsUpdateType
+
+        vm._set_state(
+            news_rows=(
+                NewsRow(content="old", tags="old_tag", publish_time="2024-01-01 02:00:00", sentiment="Negative"),
+            )
+        )
+
+        await vm._on_news_service_update(NewsUpdateType.TAG_UPDATE, {"content": "old", "tags": "AI_macro"})
+
+        row = vm.state.news_rows[0]
+        assert row.tags == "AI_macro"
+        assert row.is_ai_tagged is True
+        assert row.sentiment == "Negative"
+
+    @pytest.mark.asyncio
     async def test_on_news_service_update_initial(self, vm):
         """INITIAL 事件: 触发 refresh_news 全量刷新"""
         from services.news_subscription_service import NewsUpdateType
