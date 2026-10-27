@@ -97,9 +97,9 @@ def _row(connection_id: str, name: str = "") -> ConnectionRow:
 
 
 def _release_rows(control: ft.Control) -> list[ft.Control]:
-    """取 budget 摘要列内除首个 chip 行外的 release 控件（含 hint + 每条按钮行）。"""
+    """取 budget 摘要列内除 chips 行与 F36 预算录入行外的 release 控件（含 hint + 每条按钮行）。"""
     assert isinstance(control, ft.Column)
-    return control.controls[1:]
+    return [c for c in control.controls[1:] if getattr(c, "key", None) != "usage_budget_edit_row"]
 
 
 class TestBudgetSummaryReleaseButton:
@@ -375,6 +375,64 @@ class TestUsageView:
         keys = [getattr(c, "key", None) for c in view.controls]
         assert "model_usage_monthly_mode_note" in keys
         assert all(not str(getattr(c, "key", "") or "").startswith("request_row_") for c in view.controls)
+
+    def test_detail_mode_renders_budget_edit_row(self):
+        """F36：明细模式预算摘要列含预算录入行（输入 + 保存 + 当前值回显）。"""
+        state = _usage_state(monthly_limit_cny=Decimal("100"), budget_draft="100")
+        vm = MagicMock()
+        view = _build_usage_view(state, vm, [], None, MagicMock())
+        budget_col = view.controls[0]
+        assert isinstance(budget_col, ft.Column)
+        keys = set(_collect_keys(budget_col))
+        assert "usage_budget_save" in keys
+        assert "usage_budget_edit_row" in keys
+        # 预算输入框回显草稿（anchored 非 E2E 模式直返原控件，TextField 无 key）
+        inputs = [c for c in _walk_controls(budget_col) if isinstance(c, ft.TextField)]
+        assert len(inputs) == 1
+        assert inputs[0].value == "100"
+        # 月汇总模式控件不在明细模式渲染
+        assert "usage_exit_monthly" not in keys
+        assert "usage_month_query" not in keys
+
+    def test_monthly_mode_renders_month_summary_section(self):
+        """F36：月汇总模式渲染返回 / 月份选择 / 查询区，不渲染明细模式控件。"""
+        vm = MagicMock()
+        state = _usage_state(
+            monthly_summary_mode=True,
+            summary_month="202601",
+            month_draft="202601",
+            summary_budget=BudgetSummary(known_cny=Decimal("0.50")),
+            monthly_rows=({"scenario_id": "stock_analysis", "trigger": "manual"},),
+        )
+        view = _build_usage_view(state, vm, [], None, MagicMock())
+        section = view.controls[0]
+        assert isinstance(section, ft.Column)
+        keys = set(_collect_keys(section))
+        assert "usage_exit_monthly" in keys
+        assert "usage_month_query" in keys
+        # 月份选择输入框回显查看月草稿
+        inputs = [c for c in _walk_controls(section) if isinstance(c, ft.TextField)]
+        assert len(inputs) == 1
+        assert inputs[0].value == "202601"
+        # 明细模式控件不在月汇总模式渲染（历史月不被当前月视图替代）
+        assert "usage_export" not in keys
+        assert "usage_budget_save" not in keys
+
+    def test_month_row_text_formats_fields(self):
+        """月汇总行文本：字段缺失显式「-」/「未知」，金额两位小数（R21）。"""
+        row = {
+            "scenario_id": "stock_analysis",
+            "trigger": "manual",
+            "invocation_count": 3,
+            "succeeded_count": 3,
+            "cost_cny": "0.5",
+        }
+        text = panel_module._month_row_text(row)
+        assert "stock_analysis" in text
+        assert "3" in text
+        assert "0.50" in text
+        assert I18n.get("model_usage_unknown") in panel_module._month_row_text({"scenario_id": None})
+        assert "-" in panel_module._month_row_text({"scenario_id": "s"})  # trigger 缺失
 
 
 def _fake_page(*, web: bool) -> FakePage:

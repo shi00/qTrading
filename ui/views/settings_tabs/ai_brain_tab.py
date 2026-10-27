@@ -21,7 +21,9 @@
 
 import asyncio
 import logging
+import uuid
 from collections.abc import Callable
+from decimal import Decimal
 
 import flet as ft
 
@@ -162,6 +164,52 @@ def _model_configuration_service():
     return ModelConfigurationService()
 
 
+async def _read_monthly_budget_limit() -> Decimal | None:
+    """读取月软预算限额（``usage_policy.monthly_cny_limit``，F36 宿主副作用）。
+
+    经 ModelConfigurationService 新鲜快照（CAS 同源，§5.1）读取；未设返回 None
+    （合法语义）；读取失败 raise（VM 记 unknown 显式「未知」，不以 None 伪装
+    「未设置」，R21）。快照读取已在服务内经线程池提交（R16）。
+    """
+    service = _model_configuration_service()
+    snapshot = await service.get_snapshot()
+    raw = snapshot.usage_policy.get("monthly_cny_limit")
+    if raw is None or str(raw).strip() == "":
+        return None
+    return Decimal(str(raw))
+
+
+async def _save_monthly_budget_limit(amount: Decimal | None) -> bool:
+    """保存月软预算限额（CAS 三态，F36 宿主副作用）：True=已提交，False=未提交。
+
+    payload 期望完整 model_management 域（connections / scenario_routes / usage_policy /
+    schema_version），其余域沿已提交快照值；安全子域与迁移子域由 CAS 以磁盘现值
+    保留（§5.3 / F07）。清除限额（``amount=None``）移除该键（未设语义）。
+    revision 冲突 / not_committed 返回 False（VM 提示重试，不自动重试）；
+    commit_unknown 凭回执确认一次（§5.1）后判定。R2: CancelledError 显式传播
+    （不捕获，由 VM 侧传播）。
+    """
+    service = _model_configuration_service()
+    snapshot = await service.get_snapshot()
+    usage_policy = dict(snapshot.usage_policy)
+    if amount is None:
+        usage_policy.pop("monthly_cny_limit", None)
+    else:
+        usage_policy["monthly_cny_limit"] = str(amount)
+    payload = {
+        "schema_version": 1,
+        "config_revision": snapshot.config_revision,
+        "connections": [dict(c) for c in snapshot.connections],
+        "scenario_routes": [dict(r) for r in snapshot.scenario_routes],
+        "usage_policy": usage_policy,
+    }
+    operation_id = str(uuid.uuid4())
+    outcome = await service.save_draft(payload, snapshot.config_revision, operation_id)
+    if outcome.status == "commit_unknown":
+        outcome = await service.resolve_save_outcome(operation_id)
+    return outcome.status == "committed"
+
+
 # ============================================================================
 # AIBrainTab
 # ============================================================================
@@ -200,6 +248,8 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         factory=lambda: ModelUsageViewModel(
             dao_provider=_ai_usage_dao_provider,
             reservation_releaser=_release_unconfirmed_reservation,
+            budget_limit_reader=_read_monthly_budget_limit,
+            budget_limit_saver=_save_monthly_budget_limit,
         )
     )
 

@@ -4,7 +4,9 @@
 - 请求列表分页（50/页）+ 同口径预算摘要；
 - 过滤（日期 / 场景 / 子任务 / 连接 / 业务·测试 / 终态 / 费用状态）；
 - 展开有序尝试与字段来源（跳过行标「未执行」，不返回虚构用量）；
-- 月汇总视图切换、超出保留期提示、CSV 导出。
+- 月度软预算录入（F36：保存 / 重开核对，配置域 ``usage_policy.monthly_cny_limit``）；
+- 历史月汇总视图（F36：真实读取查看月汇总数据、月份切换、返回明细）；
+- 超出保留期提示、CSV 导出。
 
 设计约束（CLAUDE.md §3.2 MVVM / docs/patterns/mvvm.md）：
 - 不 import flet、不感知 locale；state 为 frozen dataclass + tuple 容器；
@@ -18,6 +20,9 @@
 - F35：load / expand 以请求代次隔离乱序响应——响应写入前校验代次，旧代次响应
   （含失败降级）一律丢弃；筛选变化（``set_filter``）统一异步重载并立即清空旧
   结果，界面不展示与新条件不符的陈旧数据。
+- F36：月汇总与预算录入分离——「录入月度预算」经宿主注入的 reader / saver
+  读写配置软预算（不伪装成功）；月汇总视图按查看月真实读取，历史月数据以
+  月汇总代次隔离，不被当前月替代。
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ import asyncio
 import csv
 import datetime as dt
 import io
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, fields, replace
 from decimal import Decimal
@@ -95,6 +101,15 @@ class ModelUsageState:
     retention_exceeded: bool = False
     monthly_summary_mode: bool = False
     export_granularity: str = EXPORT_DETAIL
+    # F36：预算录入（草稿为输入框值；limit 未设 None / 读取失败 unknown 分离，R21）
+    budget_draft: str = ""
+    monthly_limit_cny: Decimal | None = None
+    monthly_limit_unknown: bool = False
+    # F36：历史月汇总（查看月与输入草稿分离；行 / 摘要均来自查看月读取结果）
+    summary_month: str = ""
+    month_draft: str = ""
+    monthly_rows: tuple[dict[str, Any], ...] = ()
+    summary_budget: BudgetSummary | None = None
     message: Message | None = None
 
 
@@ -112,12 +127,44 @@ def _write_csv_text(filepath: str, text: str) -> None:
         handle.write(text)
 
 
+_MONTH_TEXT_RE = re.compile(r"^(\d{4})-?(\d{2})$")
+
+
+def _normalize_month(text: str) -> str | None:
+    """月份输入归一化（F36）：YYYY-MM / YYYYMM → YYYYMM；非法返回 None。"""
+    match = _MONTH_TEXT_RE.match(str(text or "").strip())
+    if match is None:
+        return None
+    month = int(match.group(2))
+    if not 1 <= month <= 12:
+        return None
+    return f"{int(match.group(1)):04d}{month:02d}"
+
+
+def _format_limit_text(value: Decimal | None) -> str:
+    """预算限额输入框回显文本：未设 / 未知 → 空（「未设置 / 未知」由 View 独立展示，R21）。"""
+    return "" if value is None else str(value)
+
+
+def _parse_budget_amount(text: str) -> Decimal | None:
+    """预算金额解析（F36）：空 → None（清除限额）；非法（不可解析 / 负 / 非有限）→ ValueError。"""
+    raw = str(text or "").strip()
+    if raw == "":
+        return None
+    parsed = Decimal(raw)
+    if not parsed.is_finite() or parsed < 0:
+        raise ValueError(f"invalid budget amount: {raw!r}")
+    return parsed
+
+
 class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
     """「使用记录」页 ViewModel（请求分页 / 过滤 / 展开 / 预算 / 导出）。
 
     构造 DI：``dao_provider`` 惰性返回 ``AIUsageDao``（未就绪返回 None → 降级）；
     可选 ``reservation_releaser``（解除未确认预留的宿主副作用）；``detail_retention_days``
-    为明细保留天数（超出提示进入月汇总）；``month_provider`` 便于测试注入当前月。
+    为明细保留天数（超出提示进入月汇总）；``month_provider`` 便于测试注入当前月；
+    ``budget_limit_reader`` / ``budget_limit_saver``（F36：月度软预算限额读取与 CAS
+    保存，宿主经 ModelConfigurationService 实现）——未注入时预算录入明确降级。
     """
 
     def __init__(
@@ -127,17 +174,24 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         reservation_releaser: Callable[[str], Awaitable[Any]] | None = None,
         detail_retention_days: int = 180,
         month_provider: Callable[[], str] | None = None,
+        budget_limit_reader: Callable[[], Awaitable[Decimal | None]] | None = None,
+        budget_limit_saver: Callable[[Decimal | None], Awaitable[bool]] | None = None,
     ) -> None:
         self._dao_provider = dao_provider
         self._reservation_releaser = reservation_releaser
         self._detail_retention_days = int(detail_retention_days)
         self._month_provider = month_provider
+        self._budget_limit_reader = budget_limit_reader
+        self._budget_limit_saver = budget_limit_saver
         self._state = ModelUsageState()
         # F35：请求代次（沿 watchlist/_search_generation 范式）。load 按发起顺序建立
         # 全序，响应写入前校验代次——筛选 / 翻页触发的更新请求使在途旧请求失效。
         self._load_generation: int = 0
         # F35：展开代次。set_filter 清空展开时推进，在途旧展开响应不回填新条件界面。
         self._expand_generation: int = 0
+        # F36：月汇总代次。进入 / 切换查看月 / 返回明细时推进，在途旧月份响应
+        # （含失败降级）不回填——历史月数据不被其他月份（含当前月）替代。
+        self._summary_generation: int = 0
         self._init_mixin_fields()
 
     # ------------------------------------------------------------------
@@ -190,6 +244,20 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         if generation != self._load_generation:
             return  # 旧代次响应：拒绝写入，保留最新请求的结果
 
+        # F36：月度软预算限额（配置域，非账本）随 load 读取供回显核对；读取失败记
+        # unknown（View 显式「未知」），不以 None 伪装「未设置」（R21）。
+        limit: Decimal | None = None
+        limit_unknown = False
+        if self._budget_limit_reader is not None:
+            try:
+                limit = await self._budget_limit_reader()
+            except asyncio.CancelledError:
+                raise  # R2: 必须传播
+            except Exception:
+                if generation != self._load_generation:
+                    return  # 旧代次：不得覆盖当前消息
+                limit_unknown = True
+
         self._set_state(
             requests=tuple(rows),
             total=int(total),
@@ -199,7 +267,10 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
                 unconfirmed_reserved_cny=summary.get("unconfirmed_reserved_cny"),
             ),
             unconfirmed_reservations=tuple(unconfirmed),
-            message=None,
+            budget_draft=_format_limit_text(limit),
+            monthly_limit_cny=limit,
+            monthly_limit_unknown=limit_unknown,
+            message=Message("model_usage_limit_load_failed") if limit_unknown else None,
         )
 
     # ------------------------------------------------------------------
@@ -312,17 +383,99 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         self._set_state(message=Message("model_usage_release_done"))
 
     # ------------------------------------------------------------------
-    # 月汇总视图 + 导出
+    # 月度预算录入（F36）
     # ------------------------------------------------------------------
 
-    def enter_monthly_summary(self) -> None:
-        """归档切专用月汇总视图：整月粒度，禁不支持过滤。"""
+    def set_budget_draft(self, text: str) -> None:
+        """记录预算金额输入草稿（纯状态同步命令，on_change 直调，沿 set_search 先例）。"""
+        self._set_state(budget_draft=str(text or ""))
+
+    async def save_monthly_budget(self) -> None:
+        """录入月度软预算（F36）：解析草稿 → 经注入 saver CAS 保存 → 重载供重开核对。
+
+        保存去向为模型管理配置 ``usage_policy.monthly_cny_limit``（人民币月软预算，
+        三场景与测试共用，§9.2），非账本写入。空串清除限额（None=不设上限，R21
+        禁以 0 伪装）；非法金额（不可解析 / 负 / 非有限）不触达保存，显式消息。
+        未注入 saver 明确降级（不伪装成功）；保存失败（含 CAS 冲突 / 回执未确认）
+        如实反馈「未提交，请重试」，不自动重试。成功后 ``load()`` 重读限额与摘要，
+        输入框回显已保存值供核对。
+        """
+        saver = self._budget_limit_saver
+        if saver is None:
+            self._set_state(message=Message("model_usage_budget_save_unavailable"))
+            return
+        try:
+            amount = _parse_budget_amount(self._state.budget_draft)
+        except (ArithmeticError, ValueError):
+            self._set_state(message=Message("model_usage_budget_invalid"))
+            return
+        try:
+            committed = await saver(amount)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception:
+            self._set_state(message=Message("model_usage_budget_save_failed"))
+            return
+        if not committed:
+            self._set_state(message=Message("model_usage_budget_save_failed"))
+            return
+        await self.load()
+        self._set_state(message=Message("model_usage_budget_saved"))
+
+    # ------------------------------------------------------------------
+    # 历史月汇总视图 + 导出
+    # ------------------------------------------------------------------
+
+    async def enter_monthly_summary(self) -> None:
+        """进入历史月汇总视图（F36）：默认查看当前月并真实读取该月汇总数据。
+
+        整月粒度、禁不支持过滤（§11.5）；与预算录入分离。响应经月汇总代次校验，
+        在途旧月份响应不回填。
+        """
+        month = self._current_month()
+        self._summary_generation += 1
         self._set_state(
             monthly_summary_mode=True,
             export_granularity=EXPORT_MONTHLY_SUMMARY,
             expanded_id=None,
             attempts=(),
+            summary_month=month,
+            month_draft=month,
+            monthly_rows=(),
+            summary_budget=None,
         )
+        await self._load_month_summary()
+
+    async def select_summary_month(self, month_text: str | None = None) -> None:
+        """切换月汇总查看月份（F36）：YYYY-MM / YYYYMM 归一化为 YYYYMM。
+
+        缺省取输入草稿（View「查询」按钮无参调用）。非法输入显式消息（不改视图、
+        不查询）；合法输入清空旧月数据后按新月份读取——历史月数据不得被当前月替代。
+        """
+        raw = self._state.month_draft if month_text is None else month_text
+        normalized = _normalize_month(raw)
+        if normalized is None:
+            self._set_state(message=Message("model_usage_month_invalid"))
+            return
+        self._summary_generation += 1
+        self._set_state(summary_month=normalized, month_draft=normalized, monthly_rows=(), summary_budget=None)
+        await self._load_month_summary()
+
+    def exit_monthly_summary(self) -> None:
+        """返回请求明细视图（F36）：清空月汇总数据并复位导出粒度为明细。"""
+        self._summary_generation += 1
+        self._set_state(
+            monthly_summary_mode=False,
+            export_granularity=EXPORT_DETAIL,
+            summary_month="",
+            month_draft="",
+            monthly_rows=(),
+            summary_budget=None,
+        )
+
+    def set_month_draft(self, text: str) -> None:
+        """记录月汇总月份输入草稿（纯状态同步命令，on_change 直调）。"""
+        self._set_state(month_draft=str(text or ""))
 
     async def export_csv(self) -> str:
         """按当前导出粒度构建 CSV 文本并标记就绪（文本落盘另有 ``write_csv``）。"""
@@ -342,6 +495,46 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
+
+    async def _load_month_summary(self) -> None:
+        """读取当前查看月的预算摘要与场景粒度月汇总行（F36，S5 展示边界）。
+
+        R21：空结果由 View 显式「该月无汇总数据」，不以 0 伪装；响应（含失败
+        降级）写入前校验月汇总代次，旧月份响应一律丢弃。
+        """
+        generation = self._summary_generation
+        month = self._state.summary_month
+        if not month:
+            return
+        dao = self._resolve_dao()
+        if dao is None:
+            self._set_state(message=Message("model_usage_dao_unavailable"))
+            return
+        from data.persistence.daos.ai_usage_dao import (
+            SCOPE_SCENARIO,
+        )  # lazy-import: 保持模块加载轻量（同 TYPE_CHECKING 口径）
+
+        try:
+            summary = await dao.read_budget_summary(month=month)
+            rows = await dao.read_month_usage(month=month, aggregation_scope=SCOPE_SCENARIO)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception:
+            if generation != self._summary_generation:
+                return  # 旧代次：不得覆盖当前消息
+            self._set_state(message=Message("model_usage_month_load_failed"))
+            return
+        if generation != self._summary_generation:
+            return  # 旧代次响应：拒绝写入
+        self._set_state(
+            summary_budget=BudgetSummary(
+                known_cny=summary.get("known_cny"),
+                effective_reserved_cny=summary.get("effective_reserved_cny"),
+                unconfirmed_reserved_cny=summary.get("unconfirmed_reserved_cny"),
+            ),
+            monthly_rows=tuple(rows),
+            message=None,
+        )
 
     def _resolve_dao(self) -> AIUsageDao | None:
         if self._dao_provider is None:

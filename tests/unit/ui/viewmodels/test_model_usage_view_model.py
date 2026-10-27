@@ -47,6 +47,7 @@ def _dao(
     summary: dict | None = None,
     attempts: list[dict] | None = None,
     unconfirmed: list[dict] | None = None,
+    month_rows: list[dict] | None = None,
 ) -> MagicMock:
     dao = MagicMock()
     dao.read_request_page = AsyncMock(return_value=(rows or [], total))
@@ -61,6 +62,7 @@ def _dao(
         }
     )
     dao.read_unconfirmed_reservations = AsyncMock(return_value=unconfirmed or [])
+    dao.read_month_usage = AsyncMock(return_value=month_rows or [])
     return dao
 
 
@@ -69,12 +71,16 @@ def _vm(
     *,
     releaser=None,
     retention_days: int = 180,
+    reader=None,
+    saver=None,
 ) -> ModelUsageViewModel:
     return ModelUsageViewModel(
         dao_provider=(lambda: dao) if dao is not None else (lambda: None),
         reservation_releaser=releaser,
         detail_retention_days=retention_days,
         month_provider=lambda: "202601",
+        budget_limit_reader=reader,
+        budget_limit_saver=saver,
     )
 
 
@@ -393,11 +399,20 @@ async def test_release_success_refreshes_budget():
     assert dao.read_unconfirmed_reservations.await_count == 2
 
 
-def test_enter_monthly_summary_sets_mode_and_granularity():
-    vm = _vm(_dao())
-    vm.enter_monthly_summary()
+@pytest.mark.asyncio
+async def test_enter_monthly_summary_sets_mode_and_granularity():
+    """F36：进入月汇总视图即真实读取查看月（当前月）汇总数据。"""
+    dao = _dao()
+    vm = _vm(dao)
+    await vm.enter_monthly_summary()
     assert vm.state.monthly_summary_mode is True
     assert vm.state.export_granularity == "monthly_summary"
+    assert vm.state.summary_month == "202601"
+    assert vm.state.month_draft == "202601"
+    dao.read_month_usage.assert_awaited_once()
+    kwargs = dao.read_month_usage.await_args.kwargs
+    assert kwargs["month"] == "202601"
+    assert kwargs["aggregation_scope"] == "scenario"
 
 
 @pytest.mark.asyncio
@@ -424,10 +439,298 @@ async def test_export_csv_detail_granularity():
 async def test_export_csv_monthly_summary_granularity():
     vm = _vm(_dao())
     await vm.load()
-    vm.enter_monthly_summary()
+    await vm.enter_monthly_summary()
     text = await vm.export_csv()
     assert "known_cny" in text
     assert "0.05" in text
+
+
+# ---------------------------------------------------------------------------
+# F36：月度预算录入 + 历史月汇总（与当前月分离）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_enter_monthly_summary_fills_viewed_month_rows_and_budget():
+    """进入月汇总后行与摘要均来自查看月真实读取（F36：有数据可展示）。"""
+    month_rows = [
+        {
+            "month": "202601",
+            "scenario_id": "stock_analysis",
+            "trigger": "manual",
+            "invocation_count": 3,
+            "attempt_count": 4,
+            "succeeded_count": 3,
+            "cost_cny": Decimal("0.12"),
+        }
+    ]
+    dao = _dao(month_rows=month_rows)
+    vm = _vm(dao)
+    await vm.enter_monthly_summary()
+    assert vm.state.monthly_rows == tuple(month_rows)
+    assert vm.state.summary_budget is not None
+    assert vm.state.summary_budget.known_cny == Decimal("0.05")
+    assert vm.state.message is None
+
+
+@pytest.mark.asyncio
+async def test_select_summary_month_history_not_replaced_by_current():
+    """F36 核心：切换历史月后行与摘要来自该月读取，不被当前月数据替代。"""
+    history_rows = [
+        {
+            "month": "202512",
+            "scenario_id": "news_annotation",
+            "trigger": "scheduled",
+            "invocation_count": 9,
+            "attempt_count": 11,
+            "succeeded_count": 9,
+            "cost_cny": Decimal("0.50"),
+        }
+    ]
+    dao = _dao()
+    history_summary = {
+        "month": "202512",
+        "known_cny": Decimal("0.50"),
+        "effective_reserved_cny": Decimal("0"),
+        "unconfirmed_reserved_cny": Decimal("0"),
+    }
+
+    # 按月份分流：当前月返回默认摘要、历史月返回历史摘要
+    async def _summary_by_month(month: str) -> dict:
+        if month == "202512":
+            return history_summary
+        return {
+            "month": "202601",
+            "known_cny": Decimal("0.05"),
+            "effective_reserved_cny": Decimal("0.10"),
+            "unconfirmed_reserved_cny": Decimal("0.02"),
+        }
+
+    dao.read_budget_summary = _summary_by_month
+
+    async def _month_usage(*, month: str, aggregation_scope: str) -> list[dict]:
+        return history_rows if month == "202512" else []
+
+    dao.read_month_usage = _month_usage
+
+    vm = _vm(dao)
+    await vm.enter_monthly_summary()  # 当前月 202601
+    assert vm.state.monthly_rows == ()
+    await vm.select_summary_month("2025-12")
+    assert vm.state.summary_month == "202512"
+    assert vm.state.month_draft == "202512"
+    assert vm.state.monthly_rows == tuple(history_rows)
+    assert vm.state.summary_budget is not None
+    assert vm.state.summary_budget.known_cny == Decimal("0.50")  # 历史月摘要，非当前月 0.05
+
+
+@pytest.mark.asyncio
+async def test_select_summary_month_invalid_keeps_view():
+    """非法月份显式消息：不改视图、不查询、旧月数据保留。"""
+    dao = _dao(month_rows=[{"month": "202601", "scenario_id": "stock_analysis", "cost_cny": Decimal("0.12")}])
+    vm = _vm(dao)
+    await vm.enter_monthly_summary()
+    assert vm.state.monthly_rows != ()
+    await vm.select_summary_month("bogus-13")
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_month_invalid"
+    assert vm.state.summary_month == "202601"  # 查看月不变
+    assert vm.state.monthly_rows != ()  # 旧月数据不被清空
+    dao.read_month_usage.assert_awaited_once()  # 未发起第二次读取
+
+
+@pytest.mark.asyncio
+async def test_select_summary_month_accepts_compact_and_normalized_form():
+    """YYYY-MM 与 YYYYMM 两种输入均归一化为 YYYYMM。"""
+    dao = _dao()
+    vm = _vm(dao)
+    await vm.enter_monthly_summary()
+    vm.set_month_draft("202511")
+    await vm.select_summary_month()
+    assert vm.state.summary_month == "202511"
+    vm.set_month_draft("2025-10")
+    await vm.select_summary_month()
+    assert vm.state.summary_month == "202510"
+    assert dao.read_month_usage.await_args.kwargs["month"] == "202510"
+
+
+@pytest.mark.asyncio
+async def test_summary_generation_discards_stale_month_response():
+    """F36 代次隔离：历史月响应先到、当前月挂起响应后释放，旧月数据不回填。"""
+    dao = _dao()
+    vm = _vm(dao)
+
+    await vm.enter_monthly_summary()  # 当前月立即完成
+
+    gate = asyncio.Event()
+
+    async def _gated_month_usage(*, month: str, aggregation_scope: str) -> list[dict]:
+        if month == "202601":
+            await gate.wait()
+            return [{"month": "202601", "scenario_id": "stale"}]
+        return [{"month": "202512", "scenario_id": "fresh"}]
+
+    dao.read_month_usage = _gated_month_usage
+
+    stale_task = asyncio.create_task(vm.select_summary_month("202601"))
+    await asyncio.sleep(0)  # 旧月份（当前月）读取已发出并挂起
+
+    await vm.select_summary_month("2025-12")  # 新月份立即完成
+    assert [r["scenario_id"] for r in vm.state.monthly_rows] == ["fresh"]
+
+    gate.set()  # 旧月份响应后到
+    await stale_task
+    assert [r["scenario_id"] for r in vm.state.monthly_rows] == ["fresh"]  # 旧代次被拒
+
+
+@pytest.mark.asyncio
+async def test_exit_monthly_summary_resets_to_detail():
+    """返回明细：mode 复位、导出粒度回 detail、月汇总数据清空（对称性）。"""
+    dao = _dao()
+    vm = _vm(dao)
+    await vm.enter_monthly_summary()
+    assert vm.state.monthly_summary_mode is True
+    vm.exit_monthly_summary()
+    assert vm.state.monthly_summary_mode is False
+    assert vm.state.export_granularity == "detail"
+    assert vm.state.summary_month == ""
+    assert vm.state.month_draft == ""
+    assert vm.state.monthly_rows == ()
+    assert vm.state.summary_budget is None
+
+
+def test_set_month_draft_updates_draft_only():
+    vm = _vm(_dao())
+    vm.set_month_draft("2025-10")
+    assert vm.state.month_draft == "2025-10"
+    assert vm.state.summary_month == ""  # 草稿不影响查看月
+
+
+@pytest.mark.asyncio
+async def test_save_monthly_budget_invalid_amount_rejected():
+    """非法金额（不可解析 / 负数）不触达保存，显式消息（R21 不伪成功）。"""
+    for draft in ("abc", "-5"):
+        saver = AsyncMock(return_value=True)
+        vm = _vm(_dao(), saver=saver)
+        vm.set_budget_draft(draft)
+        await vm.save_monthly_budget()
+        assert vm.state.message is not None
+        assert vm.state.message.key == "model_usage_budget_invalid"
+        saver.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_save_monthly_budget_empty_clears_limit():
+    """空输入=清除限额：saver 收到 None（未设语义），不以 0 伪装（R21）。"""
+    saver = AsyncMock(return_value=True)
+    vm = _vm(_dao(), saver=saver)
+    vm.set_budget_draft("   ")
+    await vm.save_monthly_budget()
+    saver.assert_awaited_once_with(None)
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_budget_saved"
+
+
+@pytest.mark.asyncio
+async def test_save_monthly_budget_unavailable_without_saver():
+    vm = _vm(_dao())
+    vm.set_budget_draft("100")
+    await vm.save_monthly_budget()
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_budget_save_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_save_monthly_budget_not_committed_reports_retry():
+    """CAS 冲突 / not_committed：如实反馈「未提交，请重试」，不自动重试。"""
+    saver = AsyncMock(return_value=False)
+    vm = _vm(_dao(), saver=saver)
+    vm.set_budget_draft("100")
+    await vm.save_monthly_budget()
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_budget_save_failed"
+
+
+@pytest.mark.asyncio
+async def test_save_monthly_budget_saver_exception_reports_failure():
+    saver = AsyncMock(side_effect=RuntimeError("cas boom"))
+    vm = _vm(_dao(), saver=saver)
+    vm.set_budget_draft("100")
+    await vm.save_monthly_budget()
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_budget_save_failed"
+
+
+@pytest.mark.asyncio
+async def test_save_monthly_budget_success_reloads_and_echoes_limit():
+    """保存成功后 load 重读限额，输入框回显已保存值供重开核对。"""
+    dao = _dao()
+    saved: dict[str, Decimal | None] = {"limit": None}
+
+    async def _reader() -> Decimal | None:
+        return saved["limit"]
+
+    async def _saver(amount: Decimal | None) -> bool:
+        saved["limit"] = Decimal("100") if amount is not None else None
+        return True
+
+    vm = _vm(dao, reader=_reader, saver=_saver)
+    await vm.load()
+    assert vm.state.budget_draft == ""  # 未设限额 → 空草稿
+    assert vm.state.monthly_limit_cny is None
+
+    vm.set_budget_draft("100")
+    await vm.save_monthly_budget()
+
+    assert saved["limit"] == Decimal("100")
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_budget_saved"
+    assert vm.state.monthly_limit_cny == Decimal("100")
+    assert vm.state.budget_draft == "100"  # 重开核对回显
+    assert dao.read_request_page.await_count == 2  # 初始 load + 保存后重载
+
+
+@pytest.mark.asyncio
+async def test_load_reads_budget_limit_from_reader():
+    reader = AsyncMock(return_value=Decimal("88.5"))
+    vm = _vm(_dao(), reader=reader)
+    await vm.load()
+    assert vm.state.monthly_limit_cny == Decimal("88.5")
+    assert vm.state.budget_draft == "88.5"
+    assert vm.state.monthly_limit_unknown is False
+
+
+@pytest.mark.asyncio
+async def test_load_reader_failure_marks_unknown_not_unset():
+    """R21：限额读取失败显式「未知」，不以 None 伪装「未设置」。"""
+    reader = AsyncMock(side_effect=RuntimeError("config boom"))
+    vm = _vm(_dao(), reader=reader)
+    await vm.load()
+    assert vm.state.monthly_limit_unknown is True
+    assert vm.state.monthly_limit_cny is None
+    assert vm.state.message is not None
+    assert vm.state.message.key == "model_usage_limit_load_failed"
+
+
+@pytest.mark.asyncio
+async def test_load_cancelled_error_from_reader_propagates():
+    """R2：reader 的 CancelledError 显式传播，不被 Exception 分支吞没。"""
+    reader = AsyncMock(side_effect=asyncio.CancelledError())
+    vm = _vm(_dao(), reader=reader)
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await vm.load()
+    assert exc_info.type is asyncio.CancelledError
+
+
+@pytest.mark.asyncio
+async def test_save_monthly_budget_cancelled_error_propagates():
+    """R2：saver 的 CancelledError 显式传播，不被 Exception 分支吞没。"""
+    saver = AsyncMock(side_effect=asyncio.CancelledError())
+    vm = _vm(_dao(), saver=saver)
+    vm.set_budget_draft("100")
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await vm.save_monthly_budget()
+    assert exc_info.type is asyncio.CancelledError
 
 
 @pytest.mark.asyncio

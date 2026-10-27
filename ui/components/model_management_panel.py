@@ -615,10 +615,163 @@ def _build_budget_summary(state: ModelUsageState, vm: ModelUsageViewModel) -> ft
             wrap=True,
         )
     ]
+    # F36：月度软预算录入行（与历史月汇总分离）：金额输入 + 保存；当前值回显供重开核对。
+    controls.append(_build_budget_edit_row(state, vm))
     # B1（§10.3「未确认预留需先明确处理」）：解除入口不依赖「未确认金额 > 0」这一数值，
     # 否则金额为 None / 0 但存在 held_unconfirmed 明细时用户无法处置（被数值门控遮蔽）。
     controls.extend(_build_release_controls(state, vm))
     return ft.Column(controls, spacing=AppStyles.SPACING_XS)
+
+
+def _build_budget_edit_row(state: ModelUsageState, vm: ModelUsageViewModel) -> ft.Control:
+    """月度软预算录入行（F36）：金额输入 + 保存；当前值回显供重开核对。
+
+    未设限额显式「未设置」（空输入保存即清除限额）、读取失败显式「未知」，
+    均不以 0 伪装（R21）。金额经 VM 草稿状态承载（on_change 同步 setter，沿
+    ``set_search`` 先例），保存经 ``page.run_task(vm.save_monthly_budget)`` 提交（R16）。
+    """
+    if state.monthly_limit_unknown:
+        current_text = I18n.get("model_usage_unknown")
+    elif state.monthly_limit_cny is None:
+        current_text = I18n.get("model_usage_budget_limit_unset")
+    else:
+        current_text = f"{state.monthly_limit_cny:.2f} CNY"
+    return ft.Row(
+        [
+            ft.Text(
+                I18n.get("model_usage_budget_limit_label"),
+                size=AppStyles.FONT_SIZE_CAPTION,
+                color=AppColors.TEXT_SECONDARY,
+            ),
+            ft.Text(current_text, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_PRIMARY),
+            anchored(
+                EIDS.MODEL.USE_BUDGET_INPUT,
+                ft.TextField(
+                    value=state.budget_draft,
+                    hint_text=I18n.get("model_usage_budget_limit_hint"),
+                    tooltip=I18n.get("model_usage_budget_limit_hint"),
+                    width=AppStyles.CONTROL_WIDTH_SM,
+                    bgcolor=AppColors.INPUT_BG,
+                    color=AppColors.INPUT_TEXT,
+                    border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
+                    on_change=safe_on_change(lambda e: vm.set_budget_draft(get_control_value(e.control, ft.TextField))),
+                ),
+            ),
+            anchored(
+                EIDS.MODEL.USE_BUDGET_SAVE,
+                ft.TextButton(
+                    content=I18n.get("model_usage_budget_save"),
+                    icon=ft.Icons.SAVE,
+                    key="usage_budget_save",
+                    on_click=safe_on_click(_run_task_handler(vm.save_monthly_budget)),
+                ),
+            ),
+        ],
+        key="usage_budget_edit_row",
+        spacing=AppStyles.SPACING_SM,
+        wrap=True,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+
+def _month_cost_text(value: Any) -> str:
+    """月汇总行金额展示：缺失 → 「未知」（R21 不伪零）；数值统一两位小数。"""
+    if value is None:
+        return I18n.get("model_usage_unknown")
+    try:
+        return f"{Decimal(str(value)):.2f}"
+    except (ArithmeticError, ValueError):
+        return str(value)
+
+
+def _month_row_text(row: dict[str, Any]) -> str:
+    """月汇总场景行文本（F36）：场景 / 触发 / 请求 / 尝试 / 成功 / 已知费用。"""
+    return I18n.get(
+        "model_usage_month_row",
+        scenario=str(row.get("scenario_id") or row.get("grouping_key") or I18n.get("model_usage_unknown")),
+        trigger=str(row.get("trigger") or "-"),
+        invocations=str(row.get("invocation_count") if row.get("invocation_count") is not None else "-"),
+        attempts=str(row.get("attempt_count") if row.get("attempt_count") is not None else "-"),
+        succeeded=str(row.get("succeeded_count") if row.get("succeeded_count") is not None else "-"),
+        cost=_month_cost_text(row.get("cost_cny")),
+    )
+
+
+def _build_month_summary_section(state: ModelUsageState, vm: ModelUsageViewModel) -> ft.Control:
+    """历史月汇总视图（F36）：返回明细 + 月份选择 + 查看月摘要与场景行。
+
+    查看月独立于当前月：摘要（``summary_budget``）与行（``monthly_rows``）均来自
+    选中月份的真实读取结果，不由当前月数据替代（F36 核心语义）；空结果显式
+    「该月无汇总数据」（R21 不伪零）。
+    """
+    summary = state.summary_budget
+    chips: list[ft.Control] = []
+    if summary is not None:
+        chips = [
+            _summary_chip(I18n.get("model_usage_budget_known"), _fmt_decimal(summary.known_cny)),
+            _summary_chip(I18n.get("model_usage_budget_effective"), _fmt_decimal(summary.effective_reserved_cny)),
+            _summary_chip(I18n.get("model_usage_budget_unconfirmed"), _fmt_decimal(summary.unconfirmed_reserved_cny)),
+        ]
+    month_rows: list[ft.Control] = []
+    if state.monthly_rows:
+        for row in state.monthly_rows:
+            month_rows.append(
+                ft.Text(_month_row_text(row), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_SECONDARY)
+            )
+    else:
+        month_rows.append(_empty_text("model_usage_month_no_data"))
+    controls: list[ft.Control] = [
+        ft.Row(
+            [
+                anchored(
+                    EIDS.MODEL.USE_EXIT_MONTHLY,
+                    ft.TextButton(
+                        content=I18n.get("model_usage_exit_monthly"),
+                        icon=ft.Icons.ARROW_BACK,
+                        key="usage_exit_monthly",
+                        on_click=safe_on_click(_click(vm.exit_monthly_summary)),
+                    ),
+                ),
+                ft.Text(
+                    I18n.get("model_usage_month_pick_label"),
+                    size=AppStyles.FONT_SIZE_CAPTION,
+                    color=AppColors.TEXT_SECONDARY,
+                ),
+                anchored(
+                    EIDS.MODEL.USE_MONTH_PICK,
+                    ft.TextField(
+                        value=state.month_draft,
+                        hint_text=I18n.get("model_usage_month_pick_hint"),
+                        tooltip=I18n.get("model_usage_month_pick_hint"),
+                        width=AppStyles.CONTROL_WIDTH_SM,
+                        bgcolor=AppColors.INPUT_BG,
+                        color=AppColors.INPUT_TEXT,
+                        border=ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.INPUT_BORDER)),
+                        on_change=safe_on_change(
+                            lambda e: vm.set_month_draft(get_control_value(e.control, ft.TextField))
+                        ),
+                        on_submit=safe_on_click(_run_task_handler(vm.select_summary_month)),
+                    ),
+                ),
+                anchored(
+                    EIDS.MODEL.USE_MONTH_QUERY,
+                    ft.TextButton(
+                        content=I18n.get("model_usage_month_query"),
+                        icon=ft.Icons.SEARCH,
+                        key="usage_month_query",
+                        on_click=safe_on_click(_run_task_handler(vm.select_summary_month)),
+                    ),
+                ),
+            ],
+            spacing=AppStyles.SPACING_SM,
+            wrap=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+    ]
+    if chips:
+        controls.append(ft.Row(chips, spacing=AppStyles.SPACING_MD, wrap=True))
+    controls.extend(month_rows)
+    return ft.Column(controls, spacing=AppStyles.SPACING_SM)
 
 
 def _build_attempts(attempts: Sequence[dict[str, Any]]) -> list[ft.Control]:
@@ -913,39 +1066,50 @@ def _build_usage_view(
     file_picker: ft.FilePicker | None,
     show_snack: Callable,
 ) -> ft.Control:
-    controls: list[ft.Control] = [
-        _build_budget_summary(state, vm),
-        _build_usage_filters(state, vm, connections),
-        ft.Row(
-            [
-                anchored(
-                    EIDS.MODEL.USE_ENTER_MONTHLY,
-                    ft.TextButton(
-                        content=I18n.get("model_usage_enter_monthly"),
-                        key="usage_enter_monthly",
-                        on_click=safe_on_click(_click(vm.enter_monthly_summary)),
+    # F36：明细视图（预算录入 + 过滤 + 请求行）与历史月汇总视图分离——
+    # 月汇总模式只渲染月汇总区（返回 / 月份选择 / 查看月数据），不再渲染
+    # 当前月预算摘要与请求行，避免历史月数据被当前月替代（R21）。
+    controls: list[ft.Control] = []
+    if state.monthly_summary_mode:
+        controls.append(_build_month_summary_section(state, vm))
+    else:
+        controls.append(_build_budget_summary(state, vm))
+        controls.append(_build_usage_filters(state, vm, connections))
+        controls.append(
+            ft.Row(
+                [
+                    anchored(
+                        EIDS.MODEL.USE_ENTER_MONTHLY,
+                        ft.TextButton(
+                            content=I18n.get("model_usage_enter_monthly"),
+                            key="usage_enter_monthly",
+                            # enter_monthly_summary 为 async（F36：进入即加载查看月数据），
+                            # 经 page.run_task 提交（R16）。
+                            on_click=safe_on_click(_run_task_handler(vm.enter_monthly_summary)),
+                        ),
                     ),
-                ),
-                anchored(
-                    EIDS.MODEL.USE_EXPORT,
-                    ft.TextButton(
-                        content=I18n.get("model_usage_export"),
-                        icon=ft.Icons.DOWNLOAD,
-                        key="usage_export",
-                        on_click=safe_on_click(_run_task_handler(_export_csv_and_notify, vm, file_picker, show_snack)),
+                    anchored(
+                        EIDS.MODEL.USE_EXPORT,
+                        ft.TextButton(
+                            content=I18n.get("model_usage_export"),
+                            icon=ft.Icons.DOWNLOAD,
+                            key="usage_export",
+                            on_click=safe_on_click(
+                                _run_task_handler(_export_csv_and_notify, vm, file_picker, show_snack)
+                            ),
+                        ),
                     ),
-                ),
-            ],
-            spacing=AppStyles.SPACING_SM,
-            wrap=True,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        ),
-    ]
-    if state.retention_exceeded:
-        controls.append(_hint_text("model_usage_retention_hint"))
+                ],
+                spacing=AppStyles.SPACING_SM,
+                wrap=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
     if state.monthly_summary_mode:
         controls.append(_hint_text("model_usage_monthly_mode_note"))
     else:
+        if state.retention_exceeded:
+            controls.append(_hint_text("model_usage_retention_hint"))
         controls.extend(_build_request_rows(state, vm))
         controls.append(_build_pagination(state, vm))
     if state.message is not None:
