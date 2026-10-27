@@ -3480,6 +3480,7 @@ _REPORT_FINDING_PREFIXES: frozenset[str] = frozenset(
     {
         "AC",  # 前端/可访问性检视
         "AM",  # embedded PG 生命周期检视
+        "APP",  # app 层检视（M 系报告 app 域发现编号）
         "ARCH",
         "ASYNC",
         "BUG",
