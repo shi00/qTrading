@@ -6,6 +6,7 @@ Tests for HomeViewModel.
 """
 
 import asyncio
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -1110,7 +1111,12 @@ class TestHomeViewModelCursorPagination:
 
     @pytest.mark.asyncio
     async def test_push_matching_fetched_row_not_duplicated(self, vm):
-        """推送项随后出现在已展示列表中（同时间同正文）不重复。"""
+        """推送项随后出现在已展示列表中（同时间同正文）不重复。
+
+        UIR-F04-005 后 ``normalize_news_item`` 契约：字符串按 CST 解释转 UTC tz-naive，
+        naive datetime 视为已规范化的 UTC tz-naive 直通；DB 行同样是 UTC tz-naive。
+        故此处推送项用 naive datetime 表达「已与 DB 同口径」的时刻。
+        """
         dao = _FakeCursorNewsDao(_news_rows_n(20))
         vm.processor.cache.market_dao = dao
         await vm.refresh_news()
@@ -1120,7 +1126,7 @@ class TestHomeViewModelCursorPagination:
 
         await vm._on_news_service_update(
             NewsUpdateType.NEW_ITEM,
-            [{"content": "news5", "time": "2026-10-27 10:05:00"}],
+            [{"content": "news5", "publish_time": datetime(2026, 10, 27, 10, 5)}],
         )
         assert len(vm.state.news_rows) == 20
 
