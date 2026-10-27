@@ -1251,6 +1251,39 @@ class TestStockDetailDialogComponent:
         dialog.on_dismiss(None)
         on_close.assert_called_once_with()
 
+    def test_on_dismiss_invokes_sentiment_cancel(self, mock_i18n_state, mock_app_colors_state, monkeypatch):
+        """UIR-F10-003: 关闭详情时调用 sentiment_on_cancel 取消在途情绪任务（双任务槽）。"""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+        from ui.components import stock_detail_dialog as mod
+
+        mock_i18n = MagicMock()
+        mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        monkeypatch.setattr(mod, "I18n", mock_i18n)
+
+        sentiment_on_cancel = MagicMock()
+        component = make_component(
+            mod.StockDetailDialog,
+            stock_data={"ts_code": "000001.SZ", "name": "测试"},
+            data_processor=None,
+            page=None,
+            open_state=True,
+            on_close=MagicMock(),
+            sentiment_on_cancel=sentiment_on_cancel,
+        )
+        page = FakePage()
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        dialog = page._dialogs.controls[-1]
+        assert callable(dialog.on_dismiss)
+        dialog.on_dismiss(None)
+        sentiment_on_cancel.assert_called_once_with()
+
 
 # ---------------------------------------------------------------------------
 # Task 4.3 (FR-UX-005): 复盘区纯函数
