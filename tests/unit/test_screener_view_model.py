@@ -1972,6 +1972,156 @@ class TestLoadHistoryExecWarningsRestore:
         assert ScreenerViewModel._restore_exec_warnings(pd.DataFrame()) == ()
         assert ScreenerViewModel._restore_exec_warnings(None) == ()
 
+    # --- UIR-F09-003：全部策略合并多 run 时按运行来源聚合执行警告（R21） ---
+
+    @pytest.mark.asyncio
+    async def test_all_strategies_aggregates_every_run_warning(self, vm):
+        """GWT-1: 同日两 run，首行 [] 不得清空横幅，后续 run 的警告必须保留。"""
+        df = pd.DataFrame(
+            {
+                "run_id": ["runA", "runB"],
+                "trade_date": ["20260906", "20260906"],
+                "strategy_name": ["s1", "s2"],
+                "ai_score": [90, 80],
+                "exec_warnings": [[], [{"key": "strategy_ai_risk_check_skipped", "params": {}}]],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert [m.key for m in vm.state.warnings] == ["strategy_ai_risk_check_skipped"]
+
+    @pytest.mark.asyncio
+    async def test_all_strategies_row_order_equivalent(self, vm):
+        """GWT-2: 交换行序结果等价（集合不变）。"""
+
+        def _df(order):
+            values = {"runA": [], "runB": [{"key": "strategy_ai_risk_check_skipped", "params": {}}]}
+            return pd.DataFrame(
+                {
+                    "run_id": order,
+                    "trade_date": ["20260906"] * len(order),
+                    "strategy_name": ["s"] * len(order),
+                    "ai_score": [1] * len(order),
+                    "exec_warnings": [values[r] for r in order],
+                }
+            )
+
+        with self._patch_cache(_df(["runA", "runB"])):
+            await vm.load_history_data("20260906")
+        keys_ab = {m.key for m in vm.state.warnings}
+        with self._patch_cache(_df(["runB", "runA"])):
+            await vm.load_history_data("20260906")
+        keys_ba = {m.key for m in vm.state.warnings}
+
+        assert keys_ab == keys_ba == {"strategy_ai_risk_check_skipped"}
+
+    @pytest.mark.asyncio
+    async def test_all_strategies_empty_plus_null_marks_unrecorded(self, vm):
+        """GWT-3: 一个 run 为 []（已记录无警告）另一个为 NULL → 必须有「未记录」哨兵。"""
+        df = pd.DataFrame(
+            {
+                "run_id": ["runA", "runB"],
+                "trade_date": ["20260906", "20260906"],
+                "strategy_name": ["s1", "s2"],
+                "ai_score": [90, 80],
+                "exec_warnings": [[], None],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (Message("screener_history_exec_context_unrecorded"),)
+
+    @pytest.mark.asyncio
+    async def test_same_run_repeated_warning_shown_once(self, vm):
+        """GWT-4: 同一 run 的 100 行相同警告只显示一次（同 run 重复行不刷屏）。"""
+        warning = [{"key": "strategy_ai_risk_check_skipped", "params": {}}]
+        df = pd.DataFrame(
+            {
+                "run_id": ["runX"] * 100,
+                "trade_date": ["20260906"] * 100,
+                "strategy_name": ["s"] * 100,
+                "ai_score": list(range(100)),
+                "exec_warnings": [warning for _ in range(100)],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert [m.key for m in vm.state.warnings] == ["strategy_ai_risk_check_skipped"]
+
+    @pytest.mark.asyncio
+    async def test_different_runs_same_warning_retain_identity(self, vm):
+        """不同 run 的相同警告保留 run 标识（不跨来源合并）。"""
+        warning = [{"key": "strategy_ai_risk_check_skipped", "params": {}}]
+        df = pd.DataFrame(
+            {
+                "run_id": ["runA", "runB"],
+                "trade_date": ["20260906", "20260906"],
+                "strategy_name": ["s1", "s2"],
+                "ai_score": [90, 80],
+                "exec_warnings": [warning, list(warning)],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert [m.key for m in vm.state.warnings] == [
+            "strategy_ai_risk_check_skipped",
+            "strategy_ai_risk_check_skipped",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_same_run_inconsistent_is_conservative_union(self, vm):
+        """同 run 既记录又缺失 → 保守并集：保留已知警告 + 保留「未记录」哨兵。"""
+        df = pd.DataFrame(
+            {
+                "run_id": ["runA", "runA"],
+                "trade_date": ["20260906", "20260906"],
+                "strategy_name": ["s", "s"],
+                "ai_score": [90, 80],
+                "exec_warnings": [[{"key": "strategy_ai_risk_check_skipped", "params": {}}], None],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (
+            Message("strategy_ai_risk_check_skipped"),
+            Message("screener_history_exec_context_unrecorded"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_invalid_json_exec_warnings_marks_unrecorded(self, vm):
+        """非法 JSON 按「未知」处理，不得丢弃为「干净」（R21）。"""
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "ai_score": [80], "exec_warnings": ["{not-json"]})
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        assert vm.state.warnings == (Message("screener_history_exec_context_unrecorded"),)
+
+    @pytest.mark.asyncio
+    async def test_missing_run_id_uses_date_strategy_sentinel_group(self, vm):
+        """旧记录缺 run_id → 以 (trade_date, strategy_name) 哨兵组聚合（不伪造精确 run 来源）。"""
+        warning = [{"key": "strategy_ai_risk_check_skipped", "params": {}}]
+        df = pd.DataFrame(
+            {
+                "trade_date": ["20260906", "20260906", "20260907"],
+                "strategy_name": ["s1", "s1", "s2"],
+                "ai_score": [90, 80, 70],
+                "exec_warnings": [warning, list(warning), None],
+            }
+        )
+        with self._patch_cache(df):
+            await vm.load_history_data("20260906")
+
+        # 前两行同组去重为 1；第三行（缺 run_id 但 date/strategy 不同）为 NULL → 未记录哨兵。
+        assert vm.state.warnings == (
+            Message("strategy_ai_risk_check_skipped"),
+            Message("screener_history_exec_context_unrecorded"),
+        )
+
 
 class TestGetExportData:
     def test_returns_none_for_none_results(self, vm):
