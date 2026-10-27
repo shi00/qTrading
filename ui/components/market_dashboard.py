@@ -108,7 +108,8 @@ def _build_index_card(title_key: str, info: MarketIndexRow, data_date: str = "--
         if has_data
         else []
     )
-    as_of_text = _as_of_label(info.as_of, data_date)
+    # UIR-F03-002: 空卡（暂无数据）不渲染 as_of，避免「暂无数据 + 数据截至」自相矛盾（R21）。
+    as_of_text = _as_of_label(info.as_of, data_date) if has_data else None
     as_of_controls = (
         [
             ft.Text(
@@ -174,7 +175,8 @@ def _build_hsgt_card(info: HsgtRow, data_date: str = "--") -> ft.Container:
         if has_data
         else []
     )
-    as_of_text = _as_of_label(info.as_of, data_date)
+    # UIR-F03-002: 空卡（暂无数据）不渲染 as_of，避免「暂无数据 + 数据截至」自相矛盾（R21）。
+    as_of_text = _as_of_label(info.as_of, data_date) if has_data else None
     as_of_controls = (
         [
             ft.Text(

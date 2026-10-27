@@ -420,6 +420,19 @@ class TestIndexCardAsOfRow:
         col = card.content
         assert len(col.controls) == 3
 
+    def test_empty_card_omits_date_row(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """UIR-F03-002: 空卡即使 as_of 早于页头, 也不出现「暂无数据 + 数据截至」."""
+        from ui.components.market_dashboard import _build_index_card
+        from ui.i18n import I18n
+
+        info = MarketIndexRow(value="-", change="-", color="GREY", as_of="20260614")
+        card = _build_index_card("home_index_sh", info, data_date="20260615")
+
+        col = card.content
+        expected = I18n.get("home_card_as_of").format(date="20260614")
+        assert len(col.controls) == 2
+        assert all(getattr(c, "value", None) != expected for c in col.controls)
+
 
 class TestHsgtCardAsOfRow:
     """UIR-F03-002: 北向卡 as_of 日期行渲染条件 (核心缺陷场景: 北向回退 D-1)。"""
@@ -447,6 +460,19 @@ class TestHsgtCardAsOfRow:
 
         col = card.content
         assert len(col.controls) == 3
+
+    def test_empty_card_omits_date_row(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """UIR-F03-002: 空北向卡即使 as_of 早于页头, 也不出现「暂无数据 + 数据截至」."""
+        from ui.components.market_dashboard import _build_hsgt_card
+        from ui.i18n import I18n
+
+        info = HsgtRow(value="-", sub="-", color="GREY", as_of="20260614")
+        card = _build_hsgt_card(info, data_date="20260615")
+
+        col = card.content
+        expected = I18n.get("home_card_as_of").format(date="20260614")
+        assert len(col.controls) == 2
+        assert all(getattr(c, "value", None) != expected for c in col.controls)
 
 
 class TestBuildConceptCard:
