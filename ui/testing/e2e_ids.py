@@ -271,6 +271,11 @@ class _ModelIds:
     USE_ORIGIN_FILTER: Eid = ("e2e.model.use_origin_filter", AnchorKind.COMPLEX)
     USE_ENTER_MONTHLY: Eid = ("e2e.model.use_enter_monthly", AnchorKind.INTERACTIVE)
     USE_EXPORT: Eid = ("e2e.model.use_export", AnchorKind.INTERACTIVE)
+    USE_BUDGET_INPUT: Eid = ("e2e.model.use_budget_input", AnchorKind.INPUT)
+    USE_BUDGET_SAVE: Eid = ("e2e.model.use_budget_save", AnchorKind.INTERACTIVE)
+    USE_MONTH_PICK: Eid = ("e2e.model.use_month_pick", AnchorKind.INPUT)
+    USE_MONTH_QUERY: Eid = ("e2e.model.use_month_query", AnchorKind.INTERACTIVE)
+    USE_EXIT_MONTHLY: Eid = ("e2e.model.use_exit_monthly", AnchorKind.INTERACTIVE)
     USE_PREV_PAGE: Eid = ("e2e.model.use_prev_page", AnchorKind.INTERACTIVE)
     USE_NEXT_PAGE: Eid = ("e2e.model.use_next_page", AnchorKind.INTERACTIVE)
 
