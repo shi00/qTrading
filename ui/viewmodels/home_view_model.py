@@ -2,6 +2,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
@@ -33,6 +34,9 @@ class NewsRow:
     # 入库 market_news.sentiment 原值（如 "Positive"/"Neutral"/"Negative"）；
     # 缺失/不可解析时为 None，由 View 渲染为中性样式（R21：不靠本地关键词猜测填充）。
     sentiment: str | None = None
+    # UIR-F04-004: 稳定身份 market_news.id。实时推送项尚未回读 DB 时为 None，
+    # 此时以 (publish_time, content) 复合键参与幂等合并（不同时间同正文是合法新闻）。
+    news_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,9 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         # loading, 若共用一个代次会让进行中的 _load_data 收尾失效 (loading 卡 True)。
         self._load_generation = 0  # 新闻写回代次
         self._view_load_generation = 0  # 全量加载 (is_loading/load_error) 所有权代次
+        # UIR-F04-004: 向后 keyset 游标 (publish_time, id)，由已成功写入的最旧 DB 行推进；
+        # 失败/取消/代次失效均不推进，跨刷新由 refresh_news 重置。
+        self._news_cursor: tuple[datetime, int] | None = None
 
         # Mixin 字段初始化（跨线程修复）
         self._init_mixin_fields()
@@ -275,14 +282,20 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         竞态安全: tuple 不可变, _set_state 创建新 HomeState 实例.
         load_next_page 在 await 后重新读取 self._state.news_rows,
         获取最新快照, 不会丢失 NEW_ITEM 追加.
+
+        UIR-F04-004: NEW_ITEM 按稳定身份幂等前插 (id 优先, 推送项无 id 时用
+        (publish_time, content) 复合键), 重复推送不产生重复行.
         """
         from services.news_subscription_service import NewsUpdateType
 
         if update_type == NewsUpdateType.NEW_ITEM and data:
             new_rows = tuple(_news_item_to_row(item) for item in data)
             if new_rows:
-                # tuple 拼接 (同步, O(n), n 是当前新闻数量)
-                self._set_state(news_rows=new_rows + self._state.news_rows)
+                current_rows = self._state.news_rows
+                fresh_rows = _merge_news_rows(current_rows, new_rows)
+                if fresh_rows:
+                    # tuple 拼接 (同步, O(n), n 是当前新闻数量)
+                    self._set_state(news_rows=fresh_rows + current_rows)
         elif update_type == NewsUpdateType.TAG_UPDATE and data:
             content = str(data.get("content", "") or "")
             tags = str(data.get("tags", "") or "")
@@ -404,11 +417,15 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         has_more = self._state.has_more_news  # batch 为 None 时保持不变
         if batch is not None:
             if batch.empty:
+                # 空页 = 无新闻, 游标同步清空 (不残留指向旧窗口的边界)
+                self._news_cursor = None
                 self._set_state(news_rows=(), news_page=0, has_more_news=False, has_news_data=False)
                 has_more = False
             else:
                 new_rows = _df_to_news_rows(batch)
                 has_more = len(batch) >= self.PAGE_SIZE
+                # UIR-F04-004: 跨刷新重置游标到新首页最旧行, 旧游标不得沿用
+                self._news_cursor = _news_cursor_from_batch(batch)
                 self._set_state(
                     news_rows=new_rows,
                     news_page=0,
@@ -426,6 +443,10 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         竞态安全: await 后重新读取 self._state.news_rows 获取最新快照,
         包含 await 期间 _on_news_service_update 可能追加的 NEW_ITEM.
 
+        UIR-F04-004: 使用 (publish_time, id) 向后 keyset 游标而非 OFFSET，
+        新头部插入不会使窗口位移；合并按稳定身份幂等去重。游标仅在成功写回
+        后推进，失败/取消/代次失效均保持原游标，重试不跳项。
+
         Returns: (new_batch_df, has_more) or (None, 当前 has_more_news)。
         取数失败 (batch 为 None) 时保持 has_more_news 原值 (与 refresh_news 的
         None 语义一致): 单次 DB 抖动不永久关闭分页, 用户可重试加载更多。
@@ -435,10 +456,11 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
 
         self._set_state(is_loading_more=True)
         current_gen = self._load_generation
+        cursor = self._news_cursor
 
         try:
             next_page = self._state.news_page + 1
-            new_batch = await self._fetch_news_batch(next_page)
+            new_batch = await self._fetch_news_batch(next_page, cursor)
 
             # Check if generation changed (e.g. Refresh clicked while loading)
             if current_gen != self._load_generation:
@@ -458,8 +480,17 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             # 关键: await 后重新读取 self._state.news_rows (最新快照)
             # 可能被 _on_news_service_update(NEW_ITEM) 追加过
             current_rows = self._state.news_rows
+            batch_cursor = _news_cursor_from_batch(new_batch)
+            if batch_cursor is not None:
+                # 有稳定身份 (id) 才按身份幂等合并; 推送项若也落在本页窗口内不重复展示
+                fresh_rows = _merge_news_rows(current_rows, new_rows)
+                # 成功后推进游标到本页最旧 DB 行 (与是否有重复无关, 保证窗口向后)
+                self._news_cursor = batch_cursor
+            else:
+                # 无 id 的旧数据/测试替身无法建立不变量, 保持原追加语义
+                fresh_rows = new_rows
             self._set_state(
-                news_rows=current_rows + new_rows,
+                news_rows=current_rows + fresh_rows,
                 news_page=next_page,
                 has_more_news=len(new_batch) >= self.PAGE_SIZE,
             )
@@ -471,9 +502,22 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             if current_gen == self._load_generation:
                 self._set_state(is_loading_more=False)
 
-    async def _fetch_news_batch(self, page):
+    async def _fetch_news_batch(self, page, cursor: tuple[datetime, int] | None = None):
+        """取一页快讯。
+
+        UIR-F04-004: 传入 ``cursor=(publish_time, id)`` 时走向后 keyset 查询
+        (offset=0)；无游标 (首页/旧数据无 id 列) 时保留 OFFSET 调用兼容。
+        """
         try:
             processor = await self._ensure_processor()
+            if cursor is not None:
+                cursor_time, cursor_id = cursor
+                return await processor.cache.market_dao.get_market_news(
+                    limit=self.PAGE_SIZE,
+                    offset=0,
+                    cursor_publish_time=cursor_time,
+                    cursor_id=cursor_id,
+                )
             offset = page * self.PAGE_SIZE
             return await processor.cache.market_dao.get_market_news(
                 limit=self.PAGE_SIZE,
@@ -496,6 +540,8 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         """
         self._load_generation += 1
         self._view_load_generation += 1
+        # UIR-F04-004: 游标同步清空, 避免旧分页边界残留
+        self._news_cursor = None
         self._set_state(
             news_rows=(),
             news_page=0,
@@ -580,6 +626,22 @@ def _news_item_to_row(item: Any) -> NewsRow:
     )
 
 
+def _coerce_news_id(value: Any) -> int | None:
+    """规整 market_news.id 为 ``int | None``（缺失/NaN/不可解析 → None）。
+
+    稳定身份缺失不得用 0 等业务合法值顶替（R21），由调用方退化到
+    (publish_time, content) 复合键。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _df_to_news_rows(df: pd.DataFrame | None) -> tuple[NewsRow, ...]:
     """DataFrame → tuple[NewsRow, ...] (L771 合规)."""
     if df is None or df.empty:
@@ -592,9 +654,65 @@ def _df_to_news_rows(df: pd.DataFrame | None) -> tuple[NewsRow, ...]:
             publish_time=str(row.get("publish_time", "") or ""),
             is_ai_tagged=_detect_ai_tagged(str(row.get("tags", "") or ""), str(row.get("source", "") or "")),
             sentiment=_coerce_sentiment(row.get("sentiment")),
+            news_id=_coerce_news_id(row.get("id")),
         )
         for row in df.to_dict("records")
     )
+
+
+def _news_text_key(row: NewsRow) -> tuple[str, str] | None:
+    """无 id 行的退化身份键；正文为空时无法建立身份，返回 None（不去重）。"""
+    if not row.content:
+        return None
+    return (row.publish_time, row.content)
+
+
+def _merge_news_rows(existing: tuple[NewsRow, ...], incoming: tuple[NewsRow, ...]) -> tuple[NewsRow, ...]:
+    """按稳定身份返回 ``existing`` 中不存在的新行（UIR-F04-004 幂等合并）。
+
+    身份优先 ``market_news.id``；实时推送项尚未回读 DB (id=None) 时退化为
+    ``(publish_time, content)`` 复合键——不同时间同正文是合法新闻，故禁止
+    仅按 content 去重。空正文行无法建立身份，按原样保留。
+    """
+    seen_ids = {row.news_id for row in existing if row.news_id is not None}
+    seen_text = {key for row in existing if (key := _news_text_key(row)) is not None}
+    fresh: list[NewsRow] = []
+    for row in incoming:
+        if row.news_id is not None and row.news_id in seen_ids:
+            continue
+        text_key = _news_text_key(row)
+        if text_key is not None and text_key in seen_text:
+            continue
+        fresh.append(row)
+        if row.news_id is not None:
+            seen_ids.add(row.news_id)
+        if text_key is not None:
+            seen_text.add(text_key)
+    return tuple(fresh)
+
+
+def _news_cursor_from_batch(df: pd.DataFrame | None) -> tuple[datetime, int] | None:
+    """取批次最后一行（窗口最旧边界）的 ``(publish_time, id)`` 作为向后游标。
+
+    批次按 ``publish_time DESC, id DESC`` 排序，最后一行即当前窗口最旧行。
+    无 id 列（旧数据/测试替身）或时间不可解析时返回 None，调用方回退 OFFSET。
+    """
+    if df is None or df.empty:
+        return None
+    last = df.to_dict("records")[-1]
+    news_id = _coerce_news_id(last.get("id"))
+    if news_id is None:
+        return None
+    raw_time = last.get("publish_time")
+    if raw_time is None or raw_time == "":
+        return None
+    try:
+        parsed = pd.to_datetime(raw_time)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(parsed):
+        return None
+    return parsed.to_pydatetime(), news_id
 
 
 def _coerce_as_of(value: Any) -> str | None:
