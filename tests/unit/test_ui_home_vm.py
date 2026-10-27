@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
+from ui.viewmodels import Message
 from ui.viewmodels.home_view_model import HomeViewModel, MarketIndexRow, NewsRow
 
 pytestmark = pytest.mark.unit
@@ -421,7 +422,7 @@ class TestHomeViewModelNewsData:
 
     @pytest.mark.asyncio
     async def test_load_next_page_generation_change(self, vm):
-        """加载过程中刷新导致代际变更"""
+        """加载过程中代次变更: 旧分页结果被丢弃, 最终列表仍属刷新结果 (UIR-F04-003)."""
         page1 = pd.DataFrame(
             {
                 "title": [f"新闻{i}" for i in range(20)],
@@ -432,19 +433,37 @@ class TestHomeViewModelNewsData:
                 "title": [f"新闻{i}" for i in range(20, 40)],
             }
         )
+        gate = asyncio.Event()
+        started = asyncio.Event()
+        call_count = 0
 
-        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=page1)
+        async def fake_get(limit, offset):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return page1
+            started.set()
+            await gate.wait()
+            return page2
+
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(side_effect=fake_get)
 
         await vm.refresh_news()
 
-        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=page2)
-
         task = asyncio.create_task(vm.load_next_page())
+        await started.wait()
+        # 旧分页挂起期间发生刷新: 推进代次, 取代旧分页
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(return_value=page1)
+        await vm.refresh_news()
+        gate.set()
 
-        await asyncio.sleep(0.01)
-        vm._load_generation += 1
+        result, has_more = await task
 
-        await task
+        # 旧分页不得写回: 页仍为 0, 行仍为刷新结果
+        assert result is None
+        assert has_more is False
+        assert vm.state.news_page == 0
+        assert len(vm.state.news_rows) == 20
 
     @pytest.mark.asyncio
     async def test_fetch_news_batch_error(self, vm):
@@ -749,6 +768,197 @@ class TestHomeViewModelConcurrency:
         gen2 = vm._load_generation
 
         assert gen2 == gen1 + 1
+
+
+class TestHomeViewModelLoadGeneration:
+    """UIR-F04-003: 刷新/分页/清空/失活的写回代次与请求所有权.
+
+    不变量: 仅最新仍有效的刷新可改变 news_rows / has_more / loading;
+    清空或失活后旧结果永久失效; 旧失败不得覆盖新成功或清除新 loading。
+    """
+
+    @pytest.fixture
+    def vm(self):
+        vm = HomeViewModel()
+        vm.processor = MagicMock()
+        vm.processor.cache = MagicMock()
+        vm.processor.cache.stock_dao.get_ts_code_map = AsyncMock(return_value={})
+        vm.processor.cache.market_dao.get_market_news = AsyncMock()
+        return vm
+
+    @staticmethod
+    def _batch(prefix: str, count: int) -> pd.DataFrame:
+        return pd.DataFrame({"content": [f"{prefix}{i}" for i in range(count)]})
+
+    @pytest.mark.asyncio
+    async def test_double_refresh_latest_wins(self, vm):
+        """闩锁暂停刷新 A, B 先返回; 放行 A 后最终仍是 B 且 page=0."""
+        old_batch = self._batch("old", 20)
+        new_batch = self._batch("new", 5)
+        gate_a = asyncio.Event()
+        started_a = asyncio.Event()
+        call_count = 0
+
+        async def fake_get(limit, offset):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                started_a.set()
+                await gate_a.wait()
+                return old_batch
+            return new_batch
+
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(side_effect=fake_get)
+
+        task_a = asyncio.create_task(vm.refresh_news())
+        await started_a.wait()
+        # B 在 A 挂起期间完成
+        await vm.refresh_news()
+        gate_a.set()
+        await task_a
+
+        assert vm.state.news_page == 0
+        assert [row.content for row in vm.state.news_rows] == [f"new{i}" for i in range(5)]
+        assert vm.state.has_more_news is False
+
+    @pytest.mark.asyncio
+    async def test_clear_state_discards_inflight_refresh(self, vm):
+        """A 暂停后 clear_state; A 返回后列表仍空、has_more=False."""
+        old_batch = self._batch("old", 20)
+        gate_a = asyncio.Event()
+        started_a = asyncio.Event()
+
+        async def fake_get(limit, offset):
+            started_a.set()
+            await gate_a.wait()
+            return old_batch
+
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(side_effect=fake_get)
+
+        task = asyncio.create_task(vm.refresh_news())
+        await started_a.wait()
+        vm.clear_state()
+        gate_a.set()
+        await task
+
+        assert vm.state.news_rows == ()
+        assert vm.state.news_page == 0
+        assert vm.state.has_more_news is False
+        assert vm.state.has_news_data is False
+
+    @pytest.mark.asyncio
+    async def test_stale_refresh_failure_keeps_new_success(self, vm):
+        """旧刷新 A 失败 (batch=None) 不得覆盖新刷新 B 的成功结果."""
+        new_batch = self._batch("new", 5)
+        gate_a = asyncio.Event()
+        started_a = asyncio.Event()
+        call_count = 0
+
+        async def fake_get(limit, offset):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                started_a.set()
+                await gate_a.wait()
+                return None  # A 取数失败
+            return new_batch
+
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(side_effect=fake_get)
+
+        task_a = asyncio.create_task(vm.refresh_news())
+        await started_a.wait()
+        await vm.refresh_news()  # B 成功
+        gate_a.set()
+        await task_a
+
+        assert [row.content for row in vm.state.news_rows] == [f"new{i}" for i in range(5)]
+
+    @pytest.mark.asyncio
+    async def test_stale_pagination_does_not_clear_new_pagination_loading(self, vm):
+        """旧分页结果丢弃, 且其 finally 不得清除新分页的所有权 loading."""
+        page = self._batch("p", 20)
+        gate_a = asyncio.Event()
+        gate_b = asyncio.Event()
+        started_a = asyncio.Event()
+        started_b = asyncio.Event()
+        call_count = 0
+
+        async def fake_get(limit, offset):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:  # 首次刷新
+                return page
+            if call_count == 2:  # 旧分页
+                started_a.set()
+                await gate_a.wait()
+                return page
+            if call_count == 3:  # 新刷新取代旧分页
+                return page
+            started_b.set()  # 新分页
+            await gate_b.wait()
+            return page
+
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(side_effect=fake_get)
+
+        await vm.refresh_news()
+        assert vm.state.has_more_news is True
+
+        old_task = asyncio.create_task(vm.load_next_page())
+        await started_a.wait()
+
+        await vm.refresh_news()  # 新刷新: 旧分页代次失效, 重置 is_loading_more
+        assert vm.state.is_loading_more is False
+
+        new_task = asyncio.create_task(vm.load_next_page())
+        await started_b.wait()
+        assert vm.state.is_loading_more is True
+
+        gate_a.set()
+        await old_task
+        # 旧分页不得清除新分页的 loading, 也不得写回
+        assert vm.state.is_loading_more is True
+        assert vm.state.news_page == 0
+        assert len(vm.state.news_rows) == 20
+
+        gate_b.set()
+        await new_task
+        assert vm.state.is_loading_more is False
+        assert vm.state.news_page == 1
+        assert len(vm.state.news_rows) == 40
+
+    def test_old_load_cannot_clear_new_loading_or_set_error(self, vm):
+        """旧全量加载的 end_load 不得清除新请求 loading, 也不得写入旧错误."""
+        old_view_gen, _ = vm.begin_load()
+        new_view_gen, _ = vm.begin_load()
+
+        vm.end_load(old_view_gen, Message("home_load_failed_title", {}))
+        assert vm.state.is_loading is True
+        assert vm.state.load_error is None
+
+        vm.end_load(new_view_gen, None)
+        assert vm.state.is_loading is False
+        assert vm.state.load_error is None
+
+    def test_clear_state_invalidates_pending_end_load(self, vm):
+        """clear_state 后旧请求 end_load 不得回写错误."""
+        view_gen, _ = vm.begin_load()
+        vm.clear_state()
+        vm.end_load(view_gen, Message("home_load_failed_title", {}))
+        assert vm.state.is_loading is False
+        assert vm.state.load_error is None
+
+    @pytest.mark.asyncio
+    async def test_refresh_news_propagates_cancelled_error(self, vm):
+        """R2: 取数 CancelledError 必须传播, 不得被 generation 逻辑吞没."""
+        vm.processor.cache.market_dao.get_market_news = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await vm.refresh_news()
+
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        # 取消不写入任何结果 (写回前代次校验之外, 异常本身也不得落 state)
+        assert vm.state.news_rows == ()
+        vm.processor.cache.market_dao.get_market_news.assert_awaited_once()
 
 
 class TestNewsRowSentimentWiring:

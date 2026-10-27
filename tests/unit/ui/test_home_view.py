@@ -316,7 +316,18 @@ class _FakeHomeViewModel:
             self._set_state(**_market_data_to_state_fields(data))
         return data
 
-    async def refresh_news(self) -> tuple[pd.DataFrame | None, bool]:
+    def begin_load(self) -> tuple[int, int]:
+        """UIR-F04-003: Mock 全量加载入口, 返回 (view 代次, news 代次)."""
+        self.method_calls.append("begin_load")
+        self._set_state(is_loading=True, load_error=None, is_loading_more=False)
+        return (1, 1)
+
+    def end_load(self, view_generation: int, error: Any = None) -> None:
+        """UIR-F04-003: Mock 全量加载收尾 (归属由真实 VM 校验)."""
+        self.method_calls.append("end_load")
+        self._set_state(is_loading=False, load_error=error)
+
+    async def refresh_news(self, generation: int | None = None) -> tuple[pd.DataFrame | None, bool]:
         self.method_calls.append("refresh_news")
         return self.news_return
 
