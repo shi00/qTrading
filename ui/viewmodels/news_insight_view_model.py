@@ -75,6 +75,17 @@ def _result_generated_at_str(result) -> str:
     return _fmt_time(value)
 
 
+def _execution_metadata_to_pairs(metadata) -> tuple[tuple[str, str], ...] | None:
+    """执行元数据转不可变 (key, value) 对；非 dict / 无标量值 → None（未记录，R21）。
+
+    子值为 None 的键不携带（该子字段本身未记录），避免渲染成空串冒充已知值。
+    """
+    if not isinstance(metadata, dict) or not metadata:
+        return None
+    pairs = tuple(sorted((str(k), str(v)) for k, v in metadata.items() if isinstance(v, (str, int, float, bool))))
+    return pairs or None
+
+
 def _coverage_to_source(coverage: dict) -> tuple[SourceCoverage, ...]:
     """把服务层 coverage dict 转不可变 SourceCoverage tuple（announcement/news/telegraph）。"""
     out: list[SourceCoverage] = []
@@ -227,6 +238,8 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
             evidence=(),
             analysis_time=None,
             cache_read_time=None,
+            # 换股票即清空上一只股票的执行身份，避免陈旧元数据跨标串用（UIR-F05-002）
+            execution_metadata=None,
         )
         loop = self._get_loop_or_none()
         if loop is None:
@@ -332,6 +345,7 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
             window_label=self._window_label(),
             analysis_time=analysis_time,
             cache_read_time=cache_read_time,
+            execution_metadata=_execution_metadata_to_pairs(getattr(result, "execution_metadata", None)),
         )
 
     # ------------------------------------------------------------------

@@ -366,6 +366,29 @@ class TestRowToResult:
         assert NewsInsightService._row_to_result({"generated_at": None}, {}).generated_at is None
         assert NewsInsightService._row_to_result({"generated_at": pd.NaT}, {}).generated_at is None
 
+    def test_execution_metadata_restored_key_by_key(self):
+        """UIR-F05-002：快照行回读逐键还原 execution_metadata（不丢键、不改值）。"""
+        meta = {
+            "invocation_id": "abc123",
+            "route_revision": 3,
+            "connection_id": "conn-1",
+            "connection_revision": 7,
+            "actual_model": "gpt-x",
+            "usage_status": "reported",
+            "ai_status": "succeeded",
+            "config_revision": 12,
+        }
+        r = NewsInsightService._row_to_result({"execution_metadata": meta}, {})
+        assert r.execution_metadata == meta
+        assert set(r.execution_metadata or {}) == set(meta)
+
+    def test_execution_metadata_null_or_non_dict_become_none(self):
+        """历史 NULL / 非 dict 脏值 → None（未记录），不得推断或填默认（R21）。"""
+        assert NewsInsightService._row_to_result({}, {}).execution_metadata is None
+        assert NewsInsightService._row_to_result({"execution_metadata": None}, {}).execution_metadata is None
+        assert NewsInsightService._row_to_result({"execution_metadata": "bogus"}, {}).execution_metadata is None
+        assert NewsInsightService._row_to_result({"execution_metadata": [1, 2]}, {}).execution_metadata is None
+
     def test_full_row_passed_through(self):
         row = {
             "analysis_status": "analyzed_with_events",
@@ -728,6 +751,17 @@ class TestLoadEvidence:
 class TestPersist:
     """S4 §4.2：失败写入直接交 DAO 条件 upsert 裁决（去掉先查再写）。"""
 
+    EXEC_META = {
+        "invocation_id": "abc123",
+        "route_revision": 3,
+        "connection_id": "conn-1",
+        "connection_revision": 7,
+        "actual_model": "gpt-x",
+        "usage_status": "reported",
+        "ai_status": "succeeded",
+        "config_revision": 12,
+    }
+
     @staticmethod
     def _persist(dao, svc, status):
         result = _result(status)
@@ -776,6 +810,71 @@ class TestPersist:
 
         assert dao.save_news_risk_brief.await_args.args[0]["generated_at"] == t0
 
+    def test_success_persists_whitelisted_execution_metadata(self, caplog):
+        """UIR-F05-002：8 键程序元数据落库；伪造额外键剔除（不整包透传）。"""
+        dao = _make_dao()
+        dao.save_news_risk_brief = AsyncMock(return_value={"written": True, "kept_success": False})
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        result = _result("analyzed_with_events", execution_metadata=dict(self.EXEC_META, forged_key="x"))
+
+        asyncio.run(
+            svc._persist("000001.SZ", "h", datetime.datetime(2026, 9, 1), datetime.datetime(2026, 9, 10), result)
+        )
+
+        brief = dao.save_news_risk_brief.await_args.args[0]
+        assert brief["execution_metadata"] == self.EXEC_META
+        assert any("dropped unrecognized execution_metadata keys" in r.message for r in caplog.records)
+
+    def test_non_scalar_execution_metadata_value_dropped(self, caplog):
+        """非 JSON 标量值（datetime）不得裸塞 JSONB；剔除并 warning（键名入日志，值不入，R9）。"""
+        metadata = {**self.EXEC_META, "connection_id": datetime.datetime(2026, 9, 1, 2, 0, 0)}
+        dao = _make_dao()
+        dao.save_news_risk_brief = AsyncMock(return_value={"written": True, "kept_success": False})
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        result = _result("analyzed_with_events", execution_metadata=metadata)
+
+        asyncio.run(
+            svc._persist("000001.SZ", "h", datetime.datetime(2026, 9, 1), datetime.datetime(2026, 9, 10), result)
+        )
+
+        saved = dao.save_news_risk_brief.await_args.args[0]["execution_metadata"]
+        assert "connection_id" not in saved
+        assert saved["ai_status"] == "succeeded"
+        assert any("connection_id" in r.message for r in caplog.records)
+
+    def test_non_finite_float_execution_metadata_value_dropped(self, caplog):
+        """NaN/inf 非 JSON 可序列化值必须剔除，避免 JSONB 写入失败。"""
+        metadata = {**self.EXEC_META, "confidence_nan": float("nan"), "route_revision": float("inf")}
+        dao = _make_dao()
+        dao.save_news_risk_brief = AsyncMock(return_value={"written": True, "kept_success": False})
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        result = _result("analyzed_with_events", execution_metadata=metadata)
+
+        asyncio.run(
+            svc._persist("000001.SZ", "h", datetime.datetime(2026, 9, 1), datetime.datetime(2026, 9, 10), result)
+        )
+
+        saved = dao.save_news_risk_brief.await_args.args[0]["execution_metadata"]
+        assert "route_revision" not in saved
+        assert saved["ai_status"] == "succeeded"
+        assert any("route_revision" in r.message for r in caplog.records)
+
+    def test_legacy_chain_execution_metadata_none(self):
+        """旧链成功结果无执行元数据 → None（未记录，不伪装，R21）。"""
+        dao = _make_dao()
+        dao.save_news_risk_brief = AsyncMock(return_value={"written": True, "kept_success": False})
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        asyncio.run(
+            svc._persist(
+                "000001.SZ",
+                "h",
+                datetime.datetime(2026, 9, 1),
+                datetime.datetime(2026, 9, 10),
+                _result("analyzed_with_events"),
+            )
+        )
+        assert dao.save_news_risk_brief.await_args.args[0]["execution_metadata"] is None
+
     def test_failed_writes_via_conditional_upsert(self):
         """failed → 直接 save，由 DAO 条件 upsert 决定是否生效；不再先查。"""
         dao = _make_dao()
@@ -814,7 +913,12 @@ class TestPersist:
         dao.save_news_risk_brief.assert_not_awaited()
 
 
-def _result(status: str, evidence_ids=None, generated_at: datetime.datetime | None = None) -> NewsInsightResult:
+def _result(
+    status: str,
+    evidence_ids=None,
+    generated_at: datetime.datetime | None = None,
+    execution_metadata: dict | None = None,
+) -> NewsInsightResult:
     return NewsInsightResult(
         analysis_status=status,
         risk_level="high" if status in ("analyzed_with_events", "analyzed_no_event") else None,
@@ -827,6 +931,7 @@ def _result(status: str, evidence_ids=None, generated_at: datetime.datetime | No
         analysis_profile="p",
         prompt_version=NEWS_RISK_PROMPT_VERSION,
         generated_at=generated_at,
+        execution_metadata=execution_metadata,
     )
 
 
@@ -951,6 +1056,7 @@ class TestAnalyze:
             "evidence_news_ids": [1],
             "model_id": "local",
             "generated_at": t0,
+            "execution_metadata": {key: f"v-{key}" for key in TestPersist.EXEC_META},
         }
         dao = _make_dao()
         dao.get_news_risk_brief = AsyncMock(return_value=hit)
@@ -965,6 +1071,8 @@ class TestAnalyze:
         assert outcome.result.analysis_status == "analyzed_with_events"
         assert outcome.result.risk_level == "high"
         assert outcome.result.generated_at == t0
+        # UIR-F05-002：命中快照逐键回读执行元数据（不被复用路径丢弃）
+        assert outcome.result.execution_metadata == {key: f"v-{key}" for key in TestPersist.EXEC_META}
         ai.analyze_news_risk.assert_not_awaited()
         # cache_hit 不重复持久化
         dao.save_news_risk_brief.assert_not_awaited()
@@ -976,6 +1084,7 @@ class TestAnalyze:
             "risk_level": "high",
             "evidence_news_ids": [1],
             "generated_at": None,
+            "execution_metadata": None,
         }
         dao = _make_dao()
         dao.get_news_risk_brief = AsyncMock(return_value=hit)
@@ -985,6 +1094,8 @@ class TestAnalyze:
         outcome = asyncio.run(svc.analyze("000001.SZ"))
         assert outcome.reused is True
         assert outcome.result.generated_at is None
+        # UIR-F05-002/R21：旧行 NULL → None（未记录），不伪装成空元数据
+        assert outcome.result.execution_metadata is None
 
     def test_subset_reuse(self, monkeypatch):
         # UIR-F05-003：子集复用同样必须回读快照生成时点 t0。

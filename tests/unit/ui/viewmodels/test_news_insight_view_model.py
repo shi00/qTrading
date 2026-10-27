@@ -44,6 +44,7 @@ def _make_result(
     confidence: int | None = 80,
     events=None,
     generated_at: datetime | None = None,
+    execution_metadata: dict | None = None,
 ) -> MagicMock:
     result = MagicMock()
     result.analysis_status = status
@@ -51,6 +52,7 @@ def _make_result(
     result.confidence = confidence
     result.summary = "示例摘要"
     result.generated_at = generated_at
+    result.execution_metadata = execution_metadata
     result.events = events or [
         {
             "event_type": "litigation",
@@ -524,6 +526,59 @@ class TestGenerationTimeSemantics:
         )
         assert vm.state.analysis_time == _fmt_time(self.T0)
         assert vm.state.cache_read_time is None
+
+
+class TestExecutionMetadataState:
+    """UIR-F05-002：复用路径 state 携带同一执行元数据；缺失为 None（未记录，R21）。"""
+
+    META = {
+        "invocation_id": "inv-1",
+        "route_revision": 7,
+        "connection_id": "conn-1",
+        "connection_revision": 3,
+        "actual_model": "local-model",
+        "usage_status": "ok",
+        "ai_status": "success",
+        "config_revision": 11,
+    }
+
+    async def _generate_with(self, fake_service, *, result, reused, reuse_type="cache_hit"):
+        fake_service.analyze = AsyncMock(
+            return_value=NewsInsightOutcome(result=result, reused=reused, reuse_type=reuse_type)
+        )
+        vm = NewsInsightViewModel(service=fake_service)
+        vm.select_stock("000001.SZ")
+        await _drain(vm)
+        vm.generate()
+        await _drain(vm)
+        assert vm.state.phase == PHASE_READY
+        return vm
+
+    async def test_reused_carries_same_metadata(self, fake_service):
+        vm = await self._generate_with(fake_service, result=_make_result(execution_metadata=self.META), reused=True)
+        assert vm.state.reused is True
+        assert vm.state.execution_metadata is not None
+        assert dict(vm.state.execution_metadata) == {k: str(v) for k, v in self.META.items()}
+        # 不可变字段：按 key 排序的 (key, value) 对
+        assert list(vm.state.execution_metadata) == sorted(vm.state.execution_metadata)
+
+    async def test_missing_metadata_is_none(self, fake_service):
+        vm = await self._generate_with(fake_service, result=_make_result(execution_metadata=None), reused=True)
+        assert vm.state.execution_metadata is None
+
+    async def test_non_dict_metadata_is_none(self, fake_service):
+        """异常形状（非 dict）不得渲染为已知元数据（R21）。"""
+        vm = await self._generate_with(fake_service, result=_make_result(execution_metadata=[1, 2]), reused=True)
+        assert vm.state.execution_metadata is None
+
+    async def test_new_selection_clears_previous_metadata(self, fake_service):
+        """换股票即清空上一只股票的执行身份，避免跨标的串用陈旧元数据。"""
+        vm = await self._generate_with(fake_service, result=_make_result(execution_metadata=self.META), reused=True)
+        assert vm.state.execution_metadata is not None
+        vm.select_stock("000002.SZ")
+        await _drain(vm)
+        assert vm.state.phase == PHASE_EVIDENCE_READY
+        assert vm.state.execution_metadata is None
 
 
 class TestNowStrError:

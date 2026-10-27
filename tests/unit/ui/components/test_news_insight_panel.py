@@ -227,6 +227,31 @@ def test_build_ready_non_reused_hides_cache_read_time():
     assert I18n.get("news_insight_cache_read_time") not in joined
 
 
+def test_build_ready_exec_metadata_shows_identity_summary():
+    """UIR-F05-002：有执行元数据时以一行身份摘要展示（模型 · AI 状态 · 用量状态）。"""
+    state = NewsInsightState(
+        phase="ready",
+        ts_code="000001.SZ",
+        risk_level="high",
+        execution_metadata=(
+            ("actual_model", "local-model"),
+            ("ai_status", "success"),
+            ("usage_status", "ok"),
+        ),
+    )
+    joined = "\n".join(_iter_text_values(_build_ready(state, ft.Column())))
+    assert I18n.get("news_insight_exec_meta") in joined
+    assert "local-model · success · ok" in joined
+
+
+def test_build_ready_missing_exec_metadata_shows_unrecorded():
+    """UIR-F05-002/R21：元数据缺失显式「未记录」，不得省略成看似正常。"""
+    state = NewsInsightState(phase="ready", ts_code="000001.SZ", risk_level="high", execution_metadata=None)
+    joined = "\n".join(_iter_text_values(_build_ready(state, ft.Column())))
+    assert I18n.get("news_insight_exec_meta") in joined
+    assert I18n.get("news_insight_exec_meta_unknown") in joined
+
+
 def _iter_text_values(control) -> list:
     """递归收集控件树（content / controls）中所有 ft.Text.value。"""
     values: list = []
@@ -483,6 +508,8 @@ _PANEL_KEYS = {
     "news_insight_gen_time_unknown",
     "news_insight_cache_read_time",
     "news_insight_reused_badge",
+    "news_insight_exec_meta",
+    "news_insight_exec_meta_unknown",
     "news_insight_coverage_fetched",
     "news_insight_coverage_ok",
     "news_insight_coverage_db_error",

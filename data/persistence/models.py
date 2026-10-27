@@ -423,6 +423,15 @@ class NewsRiskBrief(Base):
     # 不声明 null_protected：成功刷新必须更新生成时点；failed 写入被条件 upsert 的 WHERE 拦截
     # （既有成功快照不被覆盖），仅当既有行也是 failed 时才刷新本次尝试时点，语义正确。
     generated_at = Column(DateTime(timezone=False), nullable=True)
+    # UIR-F05-002：S4 统一场景链程序构造的执行元数据（8 键白名单，服务层受控写入）。
+    # NULL 表示旧链/历史行未记录（R21，不伪装成「无异常」）。**不声明 null_protected**：
+    # 本列描述「当前存储的这一次分析」的身份，成功刷新必须随之覆盖；旧链成功写入的 None
+    # 必须清空既有场景链值，避免快照展示与本次分析不符的陈旧身份（与 screening_history
+    # 的 append-only 行语义不同：同一复合主键行会被成功刷新）。none_as_null=True 令 None
+    # 落为 SQL NULL 而非 JSON 'null'，与读取侧 None=未记录 的语义一致。
+    # info.i18n：显式登记列标签（col_execution_metadata 已由 screening_history 使用），
+    # 满足数据字典派生态「新增翻译须显式登记」契约（test_data_dictionary_derivation）。
+    execution_metadata = Column(JSONB(none_as_null=True), info={"i18n": "col_execution_metadata"})
     created_at = Column(DateTime(timezone=False), server_default=text("now()"), nullable=False)
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"), nullable=False)
 

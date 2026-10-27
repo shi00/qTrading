@@ -2113,6 +2113,8 @@
     "news_insight_window_label": "Analysis window",
     "news_insight_gen_time": "Generated at",
     "news_insight_gen_time_unknown": "Not recorded",
+    "news_insight_exec_meta": "Execution Metadata",
+    "news_insight_exec_meta_unknown": "Not recorded",
     "news_insight_cache_read_time": "Cache read at",
     "news_insight_reused_badge": "Using cached snapshot",
     "news_insight_coverage_fetched": "Fetched {count}",

@@ -20,6 +20,7 @@ import datetime
 import hashlib
 import json
 import logging
+import math
 import os
 import typing
 from dataclasses import dataclass
@@ -56,6 +57,22 @@ _QUOTEABLE_MAX_LEN = 500
 # ceiling: 连续 3 个读取窗口各命中一次保存（实际不可达）. upgrade: 若引入程序化高频配置写入
 # （自动化同步/批量导入）导致保存不再是低频人工操作，须改为冲突重试/失败语义.
 _FROZEN_ALIGN_ATTEMPTS = 3
+
+# UIR-F05-002：execution_metadata 受控白名单（正本为 services/ai_service/news_risk.py
+# ``_scenario_execution_metadata`` 的 8 键程序字段）。只落白名单键且值为 JSON 标量，
+# 未知键 / 非标量值一律剔除并 warning——不把模型输出或异常形状整包透传落库。
+_EXECUTION_METADATA_KEYS: typing.Final[frozenset[str]] = frozenset(
+    {
+        "invocation_id",
+        "route_revision",
+        "connection_id",
+        "connection_revision",
+        "actual_model",
+        "usage_status",
+        "ai_status",
+        "config_revision",
+    }
+)
 
 
 def _new_config_service() -> typing.Any:
@@ -284,11 +301,36 @@ class NewsInsightService:
             raise asyncio.CancelledError()
 
     @staticmethod
+    def _sanitize_execution_metadata(metadata: typing.Any) -> tuple[dict | None, list[str]]:
+        """按白名单提取 execution_metadata（键与值双受控），返回 ``(清洗结果, 被剔除键)``。
+
+        仅保留 8 个程序键的 JSON 标量值（str / int / float / bool / None）；未知键与非
+        标量值（datetime / 自定义对象 / 嵌套结构 / NaN、inf 等非有限浮点）一律剔除——模型
+        输出伪造的同名键或异常返回形状不得整包落库，也不得覆盖程序构造字段。清洗后为空
+        → None（未记录，R21）。``str`` 已覆盖 ``StrEnum``、``int`` 已覆盖 ``IntEnum``，
+        落库即可 JSON 序列化。
+        """
+        if not isinstance(metadata, dict):
+            return None, []
+        cleaned: dict[str, typing.Any] = {}
+        stripped: list[str] = []
+        for key, value in metadata.items():
+            if key not in _EXECUTION_METADATA_KEYS:
+                stripped.append(str(key))
+                continue
+            if value is None or isinstance(value, (str, int)) or (isinstance(value, float) and math.isfinite(value)):
+                cleaned[key] = value
+            else:
+                stripped.append(str(key))
+        return (cleaned or None), stripped
+
+    @staticmethod
     def _row_to_result(row: dict, coverage: dict) -> NewsInsightResult:
         """把持久化快照行还原为 NewsInsightResult（缓存/子集复用）。
 
         ``generated_at`` 保留快照生成时点的 UTC-naive 原始语义；旧行 NULL / pandas NaT
-        一律还原为 None（R21：未知不得伪装为读取时刻）。
+        一律还原为 None（R21：未知不得伪装为读取时刻）。``execution_metadata`` 同样按
+        原值恢复；历史 NULL / 非 dict 脏值还原为 None（未记录），不得用其他列推断或填默认。
         """
         generated_at = row.get("generated_at")
         # NaT 是 datetime 子类（isinstance 为 True），但其自比较为 True；同时拦截非 datetime 的脏值。
@@ -296,6 +338,9 @@ class NewsInsightService:
             not isinstance(generated_at, datetime.datetime) or generated_at != generated_at
         ):
             generated_at = None
+        execution_metadata = row.get("execution_metadata")
+        if not isinstance(execution_metadata, dict):
+            execution_metadata = None
         return NewsInsightResult(
             analysis_status=row.get("analysis_status") or "failed",
             risk_level=row.get("risk_level"),
@@ -308,6 +353,7 @@ class NewsInsightService:
             analysis_profile=row.get("analysis_profile") or "",
             prompt_version=row.get("prompt_version") or NEWS_RISK_PROMPT_VERSION,
             generated_at=generated_at,
+            execution_metadata=execution_metadata,
         )
 
     # ------------------------------------------------------------------
@@ -505,6 +551,9 @@ class NewsInsightService:
 
         UIR-F05-003：服务侧记录程序生成时点（UTC-naive）并回填到 ``result``。缓存/子集复用
         不走本方法，故快照的 ``generated_at`` 永不被读取时刻刷新。
+
+        UIR-F05-002：``execution_metadata`` 按 8 键白名单 + JSON 标量值受控提取；未知键
+        剔除并 warning（不静默丢弃、不整包落库）。旧链结果为 None → 落为 SQL NULL。
         """
         generated_at = result.generated_at
         if generated_at is not None and generated_at.tzinfo is not None:
@@ -512,6 +561,13 @@ class NewsInsightService:
         if generated_at is None:
             generated_at = to_utc_for_db(get_now())
         result.generated_at = generated_at
+        execution_metadata, stripped_keys = self._sanitize_execution_metadata(result.execution_metadata)
+        if stripped_keys:
+            logger.warning(
+                "[NewsInsight] dropped unrecognized execution_metadata keys (%s): %s",
+                ts_code,
+                ",".join(sorted(stripped_keys)),
+            )
         brief = {
             "ts_code": ts_code,
             "input_hash": input_hash,
@@ -528,6 +584,7 @@ class NewsInsightService:
             "analysis_profile": result.analysis_profile,
             "prompt_version": result.prompt_version,
             "generated_at": generated_at,
+            "execution_metadata": execution_metadata,
         }
         if result.analysis_status in SUCCESS_STATUS:
             await self.dao.save_news_risk_brief(brief)
