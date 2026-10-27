@@ -485,7 +485,14 @@ class MarketDataService:
                 "value": f"{val / 100:.2f}{I18n.get('unit_yi')}"
                 if abs(val) > 100
                 else f"{val * 100:.0f}{I18n.get('unit_wan')}",
-                "sub": I18n.get("home_inflow") if val > 0 else I18n.get("home_outflow"),
+                # F03-001 残余: sub 与 color 对齐为三态 —— 零值 (持平) 不得落入「流出」分支。
+                "sub": (
+                    I18n.get("home_inflow")
+                    if val > 0
+                    else I18n.get("home_outflow")
+                    if val < 0
+                    else I18n.get("home_hsgt_flat")
+                ),
                 "color": "red" if val > 0 else "green" if val < 0 else "grey",
             }
         return MarketDataService._get_empty_hsgt_data_static()

@@ -1177,6 +1177,23 @@ class TestMarketDataServiceGetHsgt:
     @patch("data.domain_services.market_data_service.TushareClient")
     @patch("data.domain_services.market_data_service.CacheManager")
     @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_zero_north_money_shows_flat_sub(self, mock_tc, mock_cache_cls, mock_api):
+        """F03-001 残余: north_money=0 (持平) → sub 三态为「持平」, 不误显示「流出」。"""
+        mock_cache = MagicMock()
+        mock_cache_cls.return_value = mock_cache
+        df = pd.DataFrame({"north_money": [0.0]})
+        mock_cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=df)
+        svc = MarketDataService()
+        result = await svc._get_hsgt("20240614")
+        assert result["sub"] == I18n.get("home_hsgt_flat")
+        assert result["sub"] != I18n.get("home_outflow")
+        assert result["color"] == "grey"
+        assert result["value"] != "-"
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
     async def test_negative_north_money_keeps_outflow(self, mock_tc, mock_cache_cls, mock_api):
         """R21 反向不变量: north_money 负数（真实流出）保留 green 流向。"""
         mock_cache = MagicMock()

@@ -329,6 +329,32 @@ class TestHomeViewModelMarketData:
             assert vm.state.market_indices_date == "20260615"
             assert vm.state.market_hsgt_date == "20260615"
 
+    @pytest.mark.asyncio
+    async def test_single_component_fallback_header_date_tracks_success(self, vm):
+        """F03-002 残余: D 日双空 + 单分量回退 (另一分量 as_of None) →
+        页头日期须为实际取到数据的交易日 D-1, 不能仍标名义日 D (R21/R24)。"""
+        mock_data = {
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "-", "color": "grey", "sub": "-"},
+            "hot_concepts": [],
+            "date": "20260615",
+            "stale": True,
+            "indices_date": "20260614",
+            "hsgt_date": None,
+        }
+
+        with patch("ui.viewmodels.home_view_model.MarketDataService") as mock_svc:
+            mock_svc.return_value.get_cached_data = MagicMock(return_value=mock_data)
+
+            await vm.load_market_data()
+
+            # 页头日期 = 实际成功取数的交易日 (D-1), 不再显示名义日 D
+            assert vm.state.market_date == "20260614"
+            assert vm.state.market_header_key == "market_data_cached_at"
+            # 成功分量 as_of 与页头一致 → 卡片无需再追加「数据截至」行
+            assert vm.state.market_indices[0].as_of == "20260614"
+            assert vm.state.market_hsgt.as_of is None
+
 
 class TestHomeViewModelNewsData:
     """测试新闻数据加载"""

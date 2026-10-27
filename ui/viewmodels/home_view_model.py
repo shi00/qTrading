@@ -796,11 +796,19 @@ def _market_data_to_state_fields(data: dict) -> dict[str, Any]:
     else:
         header_key = "home_data_date"
 
+    # F03-002 残余: 页头日期派生自「实际成功取到数据的交易日」, 而非名义日。
+    # 回退只向后 (as_of ∈ {D, D-1}), 取已知分量 as_of 中最新者; 仅在
+    # 「单分量回退且另一分量无数据 (as_of None)」时与名义日不同, 消除页头标 D
+    # 而成功卡实为 D-1 的自相矛盾 (R21 不伪称 / R24 时点口径与实际一致)。
+    # 两分量 as_of 均未知 (旧缓存/全失败) 无从派生, 退回名义日 (不臆造)。
+    known_as_of = [d for d in (indices_as_of, hsgt_as_of) if d]
+    market_date = max(known_as_of) if known_as_of else str(data.get("date", "--"))
+
     return {
         "market_indices": market_indices,
         "market_hsgt": market_hsgt,
         "market_hot_concepts": market_hot_concepts,
-        "market_date": str(data.get("date", "--")),
+        "market_date": market_date,
         "market_stale": market_stale,
         "market_indices_date": indices_as_of,
         "market_hsgt_date": hsgt_as_of,
