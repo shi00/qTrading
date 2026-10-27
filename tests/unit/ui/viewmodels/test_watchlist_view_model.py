@@ -333,6 +333,23 @@ class TestSearchStocks:
         assert vm.state.is_searching is False
         assert vm.state.load_error is None
 
+    @pytest.mark.asyncio
+    async def test_search_stocks_sets_search_error_on_database_query_error(self, vm, mock_cache):
+        """UIR-F06-002: DAO 抛 DatabaseQueryError 时走既有 search_error 通道。
+
+        与「真实无匹配结果」（空 DataFrame → 空候选、无错误）必须可区分：
+        查询故障不得被呈现为「无结果」。
+        """
+        from data.persistence.daos.base_dao import DatabaseQueryError
+
+        mock_cache.search_stocks.side_effect = DatabaseQueryError("Database read failed: db down")
+        await vm.search_stocks("平安")
+        assert vm.state.search_error is not None
+        assert isinstance(vm.state.search_error, Message)
+        assert vm.state.search_results == ()
+        assert vm.state.is_searching is False
+        assert vm.state.load_error is None
+
 
 # --- clear_search ---
 

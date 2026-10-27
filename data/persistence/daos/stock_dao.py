@@ -136,6 +136,12 @@ class StockDao(BaseDao):
 
         供关注列表「添加关注」搜索框使用；keyword 为空或全空白返回空 DataFrame。
         SQLAlchemy ilike 参数化查询（R4：参数经绑定，无字符串拼接注入风险）。
+
+        显式传 ``suppress_errors=False``（UIR-F06-002）：DB 普通查询故障必须传播为
+        ``DatabaseQueryError``，不得吞成空 DataFrame——否则 ViewModel 的
+        ``search_error`` 通道收不到错误，用户把「查询故障」误读为「无匹配结果」
+        （R21 缺失值伪装）。``CancelledError`` 与 ``EngineDisposedError`` 仍由
+        ``_read_db_select`` 原样传播（R2 / R5），不在此处捕获。
         """
         keyword = (keyword or "").strip()
         if not keyword:
@@ -154,7 +160,7 @@ class StockDao(BaseDao):
             .order_by(StockBasic.ts_code)
             .limit(limit)
         )
-        return await self._read_db_select(stmt)
+        return await self._read_db_select(stmt, suppress_errors=False)
 
     async def get_stock_basic_bulk(self, ts_codes: list[str]) -> pd.DataFrame:
         """批量取多只股票的基础信息（ts_code/name/industry/list_date，UX-09 MAJOR-04）。
