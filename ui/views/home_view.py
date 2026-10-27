@@ -129,19 +129,20 @@ def HomeView(
     # --- Data loading ---
 
     async def _load_data() -> None:
-        # P1-3 批次 2: 包装 set_loading/set_load_error 实现加载态/错误态
-        vm.set_loading(True)
-        vm.set_load_error(None)
+        # P1-3 批次 2: 加载态/错误态. UIR-F04-003: 代次在命令入口分配,
+        # 收尾经 end_load 校验所有权 (旧请求不清新 loading、不写旧错误).
+        view_generation, news_generation = vm.begin_load()
+        load_error: Message | None = None
         try:
             await vm.load_market_data()
-            await vm.refresh_news()
+            await vm.refresh_news(news_generation)
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as exc:
             logger.error("[HomeView] Load failed: %s", DataSanitizer.sanitize_error(exc))
-            vm.set_load_error(Message("home_load_failed_title", {}))
+            load_error = Message("home_load_failed_title", {})
         finally:
-            vm.set_loading(False)
+            vm.end_load(view_generation, load_error)
 
     async def _init_and_load() -> None:
         if not active:

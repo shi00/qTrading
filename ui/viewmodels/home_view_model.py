@@ -130,8 +130,12 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         # (stock_basic 每日同步, 变更频率低), 避免每次刷新重复读库。
         self._valid_stock_codes: frozenset[str] | None = None
 
-        # Concurrency Control
-        self._load_generation = 0  # Prevent race conditions
+        # Concurrency Control (UIR-F04-003)
+        # 两个独立代次: 新闻写回 (refresh/pagination) 与全量加载所有权
+        # (is_loading/load_error)。后台 INITIAL 刷新会推进新闻代次但不持有
+        # loading, 若共用一个代次会让进行中的 _load_data 收尾失效 (loading 卡 True)。
+        self._load_generation = 0  # 新闻写回代次
+        self._view_load_generation = 0  # 全量加载 (is_loading/load_error) 所有权代次
 
         # Mixin 字段初始化（跨线程修复）
         self._init_mixin_fields()
@@ -206,7 +210,12 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         不替代 dispose(): dispose() 为组件真正卸载时调用, 额外清订阅者; stop() 仅退订
         service listener。HomeView 常驻 app_layout 的 ft.Stack 永不卸载, 失活时必须
         经本方法退订, 否则被新闻/行情 push 反复重渲染 (详见 Plans.md 根因)。
+
+        UIR-F04-003: 失活后旧刷新的新闻结果永久无效, 故推进新闻代次; 不推进
+        loading 所有权代次——在途 _load_data 仍需正常收尾 is_loading, 避免失活
+        期间残留 loading=True (重激活时 _init_and_load 会重新 begin_load)。
         """
+        self._load_generation += 1
         try:
             NewsSubscriptionService().remove_listener(self._on_news_service_update)
             MarketDataService().remove_listener(self._on_market_service_update)
@@ -218,7 +227,13 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             )
 
     def dispose(self) -> None:
-        """覆盖 dispose: 移除 service listener, 再清订阅者。"""
+        """覆盖 dispose: 移除 service listener, 再清订阅者.
+
+        UIR-F04-003: 推进两个代次, 使 dispose 后在途请求的新闻写回与
+        loading/error 收尾全部失效 (notifier 已 disposed 时 _set_state 亦为 no-op)。
+        """
+        self._load_generation += 1
+        self._view_load_generation += 1
         try:
             NewsSubscriptionService().remove_listener(self._on_news_service_update)
             MarketDataService().remove_listener(self._on_market_service_update)
@@ -331,16 +346,60 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             self._set_state(**_market_data_to_state_fields(data), has_market_data=True)
         return data
 
-    async def refresh_news(self):
+    def begin_load(self) -> tuple[int, int]:
+        """开始一次全量加载, 在命令入口分配代次 (UIR-F04-003)。
+
+        代次必须在「用户点击/挂载触发」时分配, 而不是在 ``refresh_news`` 的
+        await 之后——否则 ``load_market_data`` 耗时差异会让后发起的请求拿到
+        更旧代次, 导致旧数据覆盖新数据 (DAO 返回顺序 ≠ 用户意图顺序)。
+
+        Returns:
+            (view_generation, news_generation): View 在 finally 中把
+            view_generation 传给 :meth:`end_load` 收尾 loading/error;
+            news_generation 透传给 :meth:`refresh_news`, 由新闻写回校验。
+        """
+        self._view_load_generation += 1
+        self._load_generation += 1
+        # 新加载取代在途分页: 旧分页代次失效, 其 finally 不再清 is_loading_more
+        self._set_state(is_loading=True, load_error=None, is_loading_more=False)
+        return self._view_load_generation, self._load_generation
+
+    def end_load(self, view_generation: int, error: Message | None = None) -> None:
+        """结束全量加载: 仅当前有效加载可写回 is_loading/load_error (UIR-F04-003)。
+
+        旧请求 (被新加载/clear_state/dispose 推进代次) 的收尾为 no-op,
+        既不清除新请求的 loading, 也不写入过期的错误。
+        """
+        if view_generation != self._view_load_generation:
+            return
+        self._set_state(is_loading=False, load_error=error)
+
+    async def refresh_news(self, generation: int | None = None):
         """
         Full refresh of news (Page 0).
         Updates state.news_rows directly (无 dual-track).
         Returns: (DataFrame, has_more) — 保留返回值兼容测试
+
+        Args:
+            generation: ``begin_load`` 分配的新闻代次。为 None 时 (后台 INITIAL
+                刷新/独立调用) 在入口自增并分配。所有 await 之后与写回之前
+                校验代次, 晚到的旧结果直接丢弃 (UIR-F04-003)。
         """
-        self._load_generation += 1  # Invalidate pending loads
+        if generation is None:
+            self._load_generation += 1  # Invalidate pending loads
+            generation = self._load_generation
+            # 旧分页代次已失效且不会再清 loading, 由本次刷新重置 (防卡死)
+            self._set_state(is_loading_more=False)
+        elif generation != self._load_generation:
+            return None, False
+
         # UX-09 MINOR-03: 加载有效代码集合, 供新闻「查看个股」链接校验 (失败降级为空, 不阻断刷新)
         await self._ensure_valid_stock_codes()
+        if generation != self._load_generation:
+            return None, False
         batch = await self._fetch_news_batch(0)
+        if generation != self._load_generation:
+            return None, False
 
         has_more = self._state.has_more_news  # batch 为 None 时保持不变
         if batch is not None:
@@ -407,7 +466,10 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             return new_batch, len(new_batch) >= self.PAGE_SIZE
 
         finally:
-            self._set_state(is_loading_more=False)
+            # UIR-F04-003: 只有所属请求可清 loading; 代次已失效的旧分页不得
+            # 清除后继 (新刷新/新分页) 的所有权 loading。
+            if current_gen == self._load_generation:
+                self._set_state(is_loading_more=False)
 
     async def _fetch_news_batch(self, page):
         try:
@@ -429,7 +491,11 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
 
         P1-3 批次 2: 扩展重置 is_loading_more (修复 bug: 原 clear_state 不重置导致卡在 True)
         + 新增的 is_loading/has_market_data/has_news_data/load_error 字段。
+
+        UIR-F04-003: 清空后旧刷新/分页的结果与收尾永久失效, 故先推进两个代次。
         """
+        self._load_generation += 1
+        self._view_load_generation += 1
         self._set_state(
             news_rows=(),
             news_page=0,
