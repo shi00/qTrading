@@ -481,6 +481,39 @@ def test_build_evidence_phase_body_error_renders_coverage_and_evidence_once():
     assert len([c for c in _iter_controls(body) if isinstance(c, ft.OutlinedButton)]) == 1
 
 
+def test_build_evidence_phase_body_evidence_ready_renders_coverage():
+    """UIR-F05-001（残余）：evidence_ready 详情默认态与 error/degraded 一致渲染来源覆盖。
+
+    详情态 coverage 必有值，用户打开详情须能看到覆盖度，不得仅渲染证据列表。
+    """
+    evidence, coverage = _evidence_and_coverage()
+    state = NewsInsightState(
+        phase="evidence_ready",
+        ts_code="000001.SZ",
+        evidence=evidence,
+        coverage=coverage,
+    )
+    body = _build_evidence_phase_body(state, lambda: None, None)
+
+    joined = "\n".join(v for v in _iter_text_values(body) if isinstance(v, str))
+    assert joined.count("公告: 正常") == 1  # 覆盖度渲染（修复后）
+    assert joined.count("某公司公告") == 1
+    assert joined.count("公告正文摘录") == 1
+    # evidence_ready 专属生成按钮存在，且无重试按钮
+    assert len([c for c in _iter_controls(body) if isinstance(c, ft.FilledButton)]) == 1
+    assert not [c for c in _iter_controls(body) if isinstance(c, ft.OutlinedButton)]
+
+
+def test_build_evidence_phase_body_evidence_ready_empty_has_no_fabricated_sources():
+    """evidence_ready 空 coverage/evidence：不虚构来源（R21），仅保留生成按钮。"""
+    state = NewsInsightState(phase="evidence_ready", ts_code="000001.SZ")
+    body = _build_evidence_phase_body(state, lambda: None, None)
+
+    values = [v for v in _iter_text_values(body) if isinstance(v, str)]
+    assert values == []
+    assert len([c for c in _iter_controls(body) if isinstance(c, ft.FilledButton)]) == 1
+
+
 # --- i18n 中英对称守护（防漏翻译） ---
 
 _PANEL_KEYS = {
