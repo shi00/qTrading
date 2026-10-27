@@ -46,6 +46,9 @@ from ui.viewmodels.model_connections_view_model import (
 )
 from ui.viewmodels.model_routes_view_model import ModelRoutesState, ModelRoutesViewModel
 from ui.viewmodels.model_usage_view_model import (
+    EXPORT_MONTHLY_SUMMARY,
+    EXPORT_SCOPE_ALL,
+    EXPORT_SCOPE_PAGE,
     PAGE_SIZE,
     ModelUsageState,
     ModelUsageViewModel,
@@ -203,13 +206,27 @@ def _parse_date_filter(value: str, *, end_of_day: bool) -> dt.datetime | None:
     return local.astimezone(dt.UTC).replace(tzinfo=None)
 
 
+def _export_filename(state: ModelUsageState) -> str:
+    """导出文件名（F37）：可辨识范围与月份——明细按页 / 全部，月汇总带查看月。"""
+    timestamp = get_now().strftime("%Y%m%d_%H%M%S")
+    if state.export_granularity == EXPORT_MONTHLY_SUMMARY:
+        scope_token = f"monthly_{state.summary_month or 'unknown'}"
+    elif state.export_scope == EXPORT_SCOPE_ALL:
+        scope_token = "all"
+    else:
+        scope_token = f"page{state.page + 1}"
+    return f"ai_usage_{scope_token}_{timestamp}.csv"
+
+
 async def _export_csv_and_notify(
     vm: ModelUsageViewModel, file_picker: ft.FilePicker | None, show_snack: Callable
 ) -> None:
     """导出脱敏 CSV 并真实落盘（沿 screener_view 范式：web 走 ``src_bytes``，桌面写路径）。
 
-    VM 的 ``export_csv`` 构建文本、``write_csv`` 负责桌面落盘（§11.2：写盘副作用归 VM，
-    View 只做 FilePicker）；web 路径经 ``save_file(src_bytes=...)`` 不落盘。
+    VM 的 ``export_csv`` 构建文本（F37：范围/月份快照在 VM 侧）、``write_csv``
+    负责桌面落盘（§11.2：写盘副作用归 VM，View 只做 FilePicker）；web 路径经
+    ``save_file(src_bytes=...)`` 不落盘。文件名经 ``_export_filename`` 编码范围
+    与查看月，导出结果可辨识口径。
     """
     try:
         csv_text = await vm.export_csv()
@@ -223,7 +240,7 @@ async def _export_csv_and_notify(
     if file_picker is None or page is None:
         return
     _sync_file_picker_service(page, file_picker, True)
-    filename = f"ai_usage_{get_now().strftime('%Y%m%d_%H%M%S')}.csv"
+    filename = _export_filename(vm.state)
     try:
         if page.web:
             await file_picker.save_file(
@@ -1086,6 +1103,32 @@ def _build_usage_view(
                             # enter_monthly_summary 为 async（F36：进入即加载查看月数据），
                             # 经 page.run_task 提交（R16）。
                             on_click=safe_on_click(_run_task_handler(vm.enter_monthly_summary)),
+                        ),
+                    ),
+                    # F37：导出范围选择（当前页 / 全部筛选结果），范围进文件名可辨识。
+                    ft.Text(
+                        I18n.get("model_usage_export_scope_label"),
+                        size=AppStyles.FONT_SIZE_CAPTION,
+                        color=AppColors.TEXT_SECONDARY,
+                    ),
+                    anchored(
+                        EIDS.MODEL.USE_EXPORT_SCOPE,
+                        ft.Dropdown(
+                            value=state.export_scope,
+                            width=AppStyles.CONTROL_WIDTH_SM,
+                            options=[
+                                ft.dropdown.Option(
+                                    key=EXPORT_SCOPE_PAGE,
+                                    text=I18n.get("model_usage_export_scope_page"),
+                                ),
+                                ft.dropdown.Option(
+                                    key=EXPORT_SCOPE_ALL,
+                                    text=I18n.get("model_usage_export_scope_all"),
+                                ),
+                            ],
+                            on_select=safe_on_change(
+                                lambda e: vm.set_export_scope(get_control_value(e.control, ft.Dropdown))
+                            ),
                         ),
                     ),
                     anchored(
