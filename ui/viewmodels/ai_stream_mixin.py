@@ -30,6 +30,7 @@ from services.task_manager import TaskManager
 from ui.viewmodels import Message
 from ui.viewmodels.screener_types import (
     LogEntry,
+    RealtimeSnapshot,
     ScreenerState,
     StreamCard,
     _MAX_LOG_CARDS,
@@ -173,6 +174,10 @@ class AIStreamMixin:
     _ai_buffer: list[dict]
     _discarded_buffer: list[dict]
     _stream_buffers: dict[str, dict]
+    # UIR-F09-002: 数据集修订号（_full_results 被整体替换时递增，供排序写回判定过期）
+    # 与实时快照（HISTORY 模式下容纳后台完成的运行结果，切回实时消费）。
+    _dataset_revision: int
+    _realtime_snapshot: RealtimeSnapshot | None
     _last_ai_update: float
     _flush_pending: bool
     _background_tasks: set[asyncio.Task]
@@ -599,6 +604,55 @@ class AIStreamMixin:
 
     # --- Strategy execution orchestration (TaskManager) ---
 
+    def _commit_realtime_results(
+        self,
+        result_df: pd.DataFrame,
+        *,
+        warnings: tuple[Message, ...] = (),
+        empty_message: Message | None = None,
+        **status_changes,
+    ) -> None:
+        """UIR-F09-002: 实时运行结果的统一提交入口（按 mode 决定写入位置）。
+
+        目标不变量：「只有当前模式拥有可见数据的所有权」。运行可能在后端继续、而用户已
+        切到 HISTORY —— 此时运行结果**不得**覆盖历史表。因此：
+
+        - ``mode == "REALTIME"``：结果作为可见表 ``_full_results`` 提交，经唯一 owner 单帧
+          原子产出分页 / 警告 / 空态 / 运行状态（``_update_pagination`` 的 ``**changes``）；
+        - 否则（HISTORY）：不触碰可见表，改以 ``replace`` 更新
+          ``_realtime_snapshot.full_results``（保留快照其余字段：页码 / 排序 / 空态 / 警告），
+          使 ``switch_to_realtime`` 恢复时消费到最新运行结果；仅将运行状态（loading / status）
+          经 ``_set_state`` 上报，**不**注入历史表的 warnings / empty_message。
+        - 两种模式均清空 ``_ai_buffer`` / ``_discarded_buffer``：result_df 为本次运行的权威
+          结果（已含全部行），残留缓冲若在切回实时后再 flush 会与结果表重复追加（重复行）。
+
+        Args:
+            result_df: 本次运行的权威结果表（成功为结果、空态为空表）。
+            warnings: 随结果展示的业务警告（仅 REALTIME 生效）。
+            empty_message: 结果空态原因（仅 REALTIME 生效）。
+            **status_changes: 运行状态变更（如 loading / status_message / status_color /
+                status_action_key），两种模式均生效。
+        """
+        if self._state.mode == "REALTIME":
+            self._full_results = result_df
+            self._dataset_revision += 1
+            self._ai_buffer = []
+            self._discarded_buffer = []
+            self._update_pagination(
+                page_no=1,
+                warnings=warnings,
+                empty_message=empty_message,
+                **status_changes,
+            )
+        else:
+            snap = self._realtime_snapshot
+            if snap is not None:
+                self._realtime_snapshot = replace(snap, full_results=result_df, ai_buffer=[])
+            self._ai_buffer = []
+            self._discarded_buffer = []
+            if status_changes:
+                self._set_state(**status_changes)
+
     async def run_strategy(
         self,
         strategy_key: str,
@@ -637,6 +691,16 @@ class AIStreamMixin:
             )
             return
 
+        # UIR-F07-001: 冻结本次运行的全局筛选配置（提交时刻值）。运行中用户编辑 VM 草稿
+        # （如切换「排除 ST」）不得影响已提交任务——数据准备、策略 context 与结果快照必须
+        # 消费同一份冻结值，否则同一提交参数会因提交后编辑产生不同票池。此处无 await，
+        # 值即调用方传入（提交瞬间）的 exclude_st/params；每次 run_strategy 各自捕获，
+        # 故懒初始化/init_data 重试/取消后重跑各取各自快照。
+        _run_config: dict[str, Any] = {
+            "exclude_st": bool(exclude_st),
+            "params": dict(params) if params else {},
+        }
+
         # Define the inner coroutine for the task manager
         async def _execute_screening(task_id: str, **kwargs):
             try:
@@ -648,9 +712,9 @@ class AIStreamMixin:
                     0.05,
                     Message("task_loading_data"),
                 )
-                # DS-02: ST 排除开关经 VM 状态透传（读 _state.exclude_st，缺失回退 True 安全默认）
-                _exclude_st = getattr(self._state, "exclude_st", True)
-                context = await dp.get_strategy_data(exclude_st=_exclude_st)
+                # UIR-F07-001: 数据准备消费提交时刻冻结的 exclude_st（不再读 _state，
+                # 提交后编辑开关不得改变本次票池）；init_data 重试分支同样用冻结值。
+                context = await dp.get_strategy_data(exclude_st=_run_config["exclude_st"])
                 if not context:
                     TaskManager().update_progress(
                         task_id,
@@ -658,7 +722,7 @@ class AIStreamMixin:
                         Message("task_cache_empty_init"),
                     )
                     await dp.init_data()
-                    context = await dp.get_strategy_data(exclude_st=_exclude_st)
+                    context = await dp.get_strategy_data(exclude_st=_run_config["exclude_st"])
 
                 if not context or "screening_data" not in context or context["screening_data"].empty:
                     raise RuntimeError("No valid screening data available")
@@ -688,9 +752,10 @@ class AIStreamMixin:
                         )
 
                 context["data_processor"] = dp
-                context["params"] = params or {}  # Dynamic strategy parameters from UI
-                # SC-01: 全局筛选设置（排除 ST/风险警示股，UI 开关）注入策略基类
-                context["exclude_st"] = exclude_st
+                context["params"] = _run_config["params"]  # Dynamic strategy parameters from UI
+                # SC-01: 全局筛选设置（排除 ST/风险警示股，UI 开关）注入策略基类。
+                # UIR-F07-001: 消费提交时刻冻结值（与数据准备同一份），不再读入参外的状态。
+                context["exclude_st"] = _run_config["exclude_st"]
 
                 # Setup AI Callbacks
                 # (Forward updates both to ViewModel local UI and Global TaskManager)
@@ -771,7 +836,6 @@ class AIStreamMixin:
                 )
 
                 if result_df is not None and not result_df.empty:
-                    self._full_results = result_df
                     # UX-03 (影响反馈): 筛选真实输入 (基本面策略 fundamentals / 其余 screening_data)
                     # 是本次策略的输入; 结果非空且明显收窄时, 向 D3-4 警告通道追加
                     # 「候选从 N 收窄至 M」横幅, 让参数实际效力立即可见, 使任何单位/阈值错位
@@ -789,11 +853,13 @@ class AIStreamMixin:
                         strategy_warnings = (*strategy_warnings, ai_failed_msg)
                     # 成功路径显式清空态原因 (防上一轮「无匹配」残留污染本轮),
                     # 本轮有结果由表格承载, 空态原因仅空结果时设置 (下方分支)。
-                    self._update_pagination(page_no=1, warnings=strategy_warnings, empty_message=None)
+                    # UIR-F09-002: 经模式感知统一提交入口 —— HISTORY 下运行在后台完成时
+                    # 只更新实时快照, 不覆盖历史表 (仅 REALTIME 才写可见表)。
+                    self._commit_realtime_results(result_df, warnings=strategy_warnings, empty_message=None)
 
                     # Task 3.3: save_results 失败不再落入 screener_exec_error.
-                    # 结果已写入 _full_results 照常上屏, 状态栏提示「未保存：原因」.
-                    # trade_date 缺失属于程序错误 (context 协议违规), 仍 raise.
+                    # 结果已提交（REALTIME 上屏 / HISTORY 入实时快照）照常可查看,
+                    # 状态栏提示「未保存：原因」. trade_date 缺失属于程序错误 (context 协议违规), 仍 raise.
                     save_failed_reason: str | None = None
                     # CRITICAL-03: 预置 0，使 save_results=False 时不产生未绑定引用；
                     # 该分支另有显式状态支，不依赖此预置值做「未保存」判定。
@@ -813,7 +879,12 @@ class AIStreamMixin:
                                 result_df,
                                 trade_date=analysis_trade_date,
                                 run_id=run_id,
-                                params_snapshot=params or {},
+                                params_snapshot={
+                                    **_run_config["params"],
+                                    # UIR-F07-001: 全局筛选配置以独立子对象落库（避免与策略参数
+                                    # 重名）；旧历史缺该键时须显示「未记录」，不得假定 True。
+                                    "global_config": {"exclude_st": _run_config["exclude_st"]},
+                                },
                                 # CRITICAL-02 (R21/BT-03): 执行期 warnings 随结果落库，
                                 # 避免历史回看把「已知不可信」渲染成「无信息」。传原始
                                 # 通道（list 或 None），不传含 UI 派生横幅的 strategy_warnings。
@@ -887,7 +958,6 @@ class AIStreamMixin:
                         )
                     return Message("task_screening_success", {"count": len(result_df)})
 
-                self._full_results = pd.DataFrame()
                 # UX-03 (空态原因): 走到此分支说明筛选前有真实候选输入 (452 已兜底非空),
                 # 但当前条件下无匹配 —— 在结果区空态提示「共考虑 N 只候选, 可调低条件」,
                 # 区分于「无数据」(需先同步), 避免用户误判「这个参数没用 / 软件有 bug」。
@@ -904,15 +974,17 @@ class AIStreamMixin:
                         Message("screener_nomatch", {"total": candidate_total}) if candidate_total > 0 else None
                     )
                 # C2b H1: 无结果退出路径经唯一 owner 单帧原子产出 (空切片 + loading=False + 提示),
-                # 避免分两帧触发重复通知 (第 3 轮对抗检视)
-                self._update_pagination(
-                    page_no=1,
+                # 避免分两帧触发重复通知 (第 3 轮对抗检视)。
+                # UIR-F09-002: 经模式感知统一提交入口 —— HISTORY 下只更新实时快照为「空结果」,
+                # 不覆盖历史表; 运行状态 (loading/status) 两种模式皆上报。
+                self._commit_realtime_results(
+                    pd.DataFrame(),
+                    warnings=strategy_warnings,
+                    empty_message=empty_message,
                     loading=False,
                     status_message=Message("screener_no_results"),
                     status_color="warning",
                     status_action_key=None,
-                    warnings=strategy_warnings,
-                    empty_message=empty_message,
                 )
                 return Message("screener_no_results")
 

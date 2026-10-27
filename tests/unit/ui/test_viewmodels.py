@@ -983,6 +983,44 @@ class TestScreenerViewModelRunStrategyExecution:
         assert isinstance(self.vm._full_results, pd.DataFrame)
         assert self.vm._full_results.empty
 
+    async def test_execute_screening_in_history_mode_updates_snapshot_only(self):
+        """UIR-F09-002 GWT#3：实时任务在 HISTORY 完成 → 历史表不变，快照更新，切回无重复流行。"""
+        strategy = self._make_strategy()
+        captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
+        self.mock_dp.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"a": [1]}),
+                "trade_date": "2026-05-16",
+            }
+        )
+        self.mock_rm.save_results = AsyncMock()
+
+        # 进入 HISTORY 并放置「历史可见表」
+        self.vm._full_results = pd.DataFrame({"ts_code": ["PRE.SZ"], "name": ["pre"]})
+        self.vm.switch_to_history()
+        history_df = pd.DataFrame({"ts_code": ["H.SZ"], "name": ["history"]})
+        self.vm._full_results = history_df
+        self.vm._update_pagination(page_no=1)
+        assert self.vm.state.mode == "HISTORY"
+
+        await captured_factory(task_id="task-123")
+
+        # 历史可见表未被运行结果覆盖
+        assert self.vm._full_results is history_df
+        assert self.vm._realtime_snapshot is not None
+        run_df = self.vm._realtime_snapshot.full_results
+        assert run_df is not None
+        assert len(run_df) == 1
+        # 快照 ai_buffer 被清空，防切回后 flush 造成重复行
+        assert self.vm._realtime_snapshot.ai_buffer == []
+        assert self.vm._ai_buffer == []
+        assert self.vm._discarded_buffer == []
+
+        # 切回实时消费运行结果，且无重复流行
+        self.vm.switch_to_realtime()
+        assert self.vm._full_results is run_df
+        assert len(self.vm._full_results) == 1
+
     async def test_execute_screening_sync_filter(self):
         strategy = self._make_strategy(is_async=False)
         captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
@@ -1278,6 +1316,96 @@ class TestScreenerViewModelLoadHistoryData:
             await screener_vm.load_history_data("2026-05-16", strategy_name="momentum", run_id="r1")
 
         cm_instance.screener_dao.get_history_records.assert_awaited_once_with("2026-05-16", "momentum", "r1")
+
+
+class TestScreenerViewModelResultOwnership:
+    """UIR-F09-002: 历史/实时结果所有权 —— 请求代次 + 数据集修订号守卫。
+
+    目标不变量：``(mode, dataset_owner, request_generation)`` 一致才可提交可见数据；
+    过期响应不得覆盖更新的历史请求结果，也不得覆盖切回实时后恢复的快照。
+    """
+
+    async def test_out_of_order_history_responses_keep_latest(self, screener_vm):
+        """Given A/B 两个可控请求，When B 先回 B1、A 后回 A1，Then 数据/标签/warnings 都保持 B。"""
+        df_a = pd.DataFrame({"ts_code": ["A.SZ"], "name": ["A"], "exec_warnings": ['[{"key": "warn_a"}]']})
+        df_b = pd.DataFrame({"ts_code": ["B.SZ"], "name": ["B"], "exec_warnings": ['[{"key": "warn_b"}]']})
+        loop = asyncio.get_running_loop()
+        fut_a = loop.create_future()
+        fut_b = loop.create_future()
+        pending = iter([fut_a, fut_b])
+
+        with patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM:
+            cm = MagicMock()
+            cm.screener_dao.get_history_records = MagicMock(side_effect=lambda *a, **k: next(pending))
+            MockCM.return_value = cm
+
+            task_a = asyncio.create_task(screener_vm.load_history_data("2026-05-16", run_id="runidAAA"))
+            await asyncio.sleep(0)
+            task_b = asyncio.create_task(screener_vm.load_history_data("2026-05-16", run_id="runidBBB"))
+            await asyncio.sleep(0)
+
+            fut_b.set_result(df_b)  # B 先返回
+            for _ in range(5):
+                await asyncio.sleep(0)
+            fut_a.set_result(df_a)  # A 后返回（应被丢弃）
+            await task_a
+            await task_b
+
+        assert screener_vm._full_results is df_b
+        assert screener_vm.state.status_message.params["label"] == "#runidBBB"
+        assert any(m.key == "warn_b" for m in screener_vm.state.warnings)
+        assert all(m.key != "warn_a" for m in screener_vm.state.warnings)
+
+    async def test_late_history_response_after_realtime_switch_is_discarded(self, screener_vm):
+        """Given A pending，When 切实时恢复 R 再释放 A，Then 表/导出仍 R，且 loading 复位。"""
+        df_r = pd.DataFrame({"ts_code": ["R.SZ"], "name": ["R"]})
+        screener_vm._full_results = df_r
+        screener_vm.switch_to_history()  # 快照 R，进入 HISTORY
+
+        fut_a = asyncio.get_running_loop().create_future()
+        with patch("ui.viewmodels.history_mode_mixin.CacheManager") as MockCM:
+            cm = MagicMock()
+            cm.screener_dao.get_history_records = MagicMock(return_value=fut_a)
+            MockCM.return_value = cm
+
+            task_a = asyncio.create_task(screener_vm.load_history_data("2026-05-16", run_id="runidAAA"))
+            await asyncio.sleep(0)
+            screener_vm.switch_to_realtime()  # 恢复 R
+            assert screener_vm._full_results is df_r
+
+            fut_a.set_result(pd.DataFrame({"ts_code": ["X.SZ"], "name": ["X"]}))
+            await task_a
+
+        assert screener_vm._full_results is df_r
+        assert screener_vm.get_export_data() is df_r
+        assert screener_vm.state.loading is False
+
+    async def test_sort_writeback_discarded_when_dataset_replaced(self, screener_vm):
+        """Given 排序 await 期间数据集被整体替换（修订号推进），Then 过期排序结果不写回。"""
+        screener_vm._full_results = pd.DataFrame({"a": [3, 1, 2]})
+        screener_vm._update_pagination()
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow_sort(*args, **kwargs):
+            started.set()
+            await release.wait()
+            return pd.DataFrame({"a": [1, 2, 3]})
+
+        with patch("ui.viewmodels.pagination_sorting_mixin.ThreadPoolManager") as MockTP:
+            MockTP.return_value.run_async = _slow_sort
+            task = asyncio.create_task(screener_vm.sort_data("a", ascending=True))
+            await started.wait()
+            # 模拟绕过锁的写者（运行完成 / 模式切换）：整体替换数据集并推进修订号
+            new_df = pd.DataFrame({"a": [9, 8, 7]})
+            screener_vm._full_results = new_df
+            screener_vm._dataset_revision += 1
+            release.set()
+            await task
+
+        assert screener_vm._full_results is new_df
+        assert screener_vm.state.loading is False
 
 
 class TestScreenerViewModelExportResults:
