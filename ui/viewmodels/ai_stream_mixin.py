@@ -637,6 +637,16 @@ class AIStreamMixin:
             )
             return
 
+        # UIR-F07-001: 冻结本次运行的全局筛选配置（提交时刻值）。运行中用户编辑 VM 草稿
+        # （如切换「排除 ST」）不得影响已提交任务——数据准备、策略 context 与结果快照必须
+        # 消费同一份冻结值，否则同一提交参数会因提交后编辑产生不同票池。此处无 await，
+        # 值即调用方传入（提交瞬间）的 exclude_st/params；每次 run_strategy 各自捕获，
+        # 故懒初始化/init_data 重试/取消后重跑各取各自快照。
+        _run_config: dict[str, Any] = {
+            "exclude_st": bool(exclude_st),
+            "params": dict(params) if params else {},
+        }
+
         # Define the inner coroutine for the task manager
         async def _execute_screening(task_id: str, **kwargs):
             try:
@@ -648,9 +658,9 @@ class AIStreamMixin:
                     0.05,
                     Message("task_loading_data"),
                 )
-                # DS-02: ST 排除开关经 VM 状态透传（读 _state.exclude_st，缺失回退 True 安全默认）
-                _exclude_st = getattr(self._state, "exclude_st", True)
-                context = await dp.get_strategy_data(exclude_st=_exclude_st)
+                # UIR-F07-001: 数据准备消费提交时刻冻结的 exclude_st（不再读 _state，
+                # 提交后编辑开关不得改变本次票池）；init_data 重试分支同样用冻结值。
+                context = await dp.get_strategy_data(exclude_st=_run_config["exclude_st"])
                 if not context:
                     TaskManager().update_progress(
                         task_id,
@@ -658,7 +668,7 @@ class AIStreamMixin:
                         Message("task_cache_empty_init"),
                     )
                     await dp.init_data()
-                    context = await dp.get_strategy_data(exclude_st=_exclude_st)
+                    context = await dp.get_strategy_data(exclude_st=_run_config["exclude_st"])
 
                 if not context or "screening_data" not in context or context["screening_data"].empty:
                     raise RuntimeError("No valid screening data available")
@@ -688,9 +698,10 @@ class AIStreamMixin:
                         )
 
                 context["data_processor"] = dp
-                context["params"] = params or {}  # Dynamic strategy parameters from UI
-                # SC-01: 全局筛选设置（排除 ST/风险警示股，UI 开关）注入策略基类
-                context["exclude_st"] = exclude_st
+                context["params"] = _run_config["params"]  # Dynamic strategy parameters from UI
+                # SC-01: 全局筛选设置（排除 ST/风险警示股，UI 开关）注入策略基类。
+                # UIR-F07-001: 消费提交时刻冻结值（与数据准备同一份），不再读入参外的状态。
+                context["exclude_st"] = _run_config["exclude_st"]
 
                 # Setup AI Callbacks
                 # (Forward updates both to ViewModel local UI and Global TaskManager)
@@ -813,7 +824,12 @@ class AIStreamMixin:
                                 result_df,
                                 trade_date=analysis_trade_date,
                                 run_id=run_id,
-                                params_snapshot=params or {},
+                                params_snapshot={
+                                    **_run_config["params"],
+                                    # UIR-F07-001: 全局筛选配置以独立子对象落库（避免与策略参数
+                                    # 重名）；旧历史缺该键时须显示「未记录」，不得假定 True。
+                                    "global_config": {"exclude_st": _run_config["exclude_st"]},
+                                },
                                 # CRITICAL-02 (R21/BT-03): 执行期 warnings 随结果落库，
                                 # 避免历史回看把「已知不可信」渲染成「无信息」。传原始
                                 # 通道（list 或 None），不传含 UI 派生横幅的 strategy_warnings。
