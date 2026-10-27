@@ -20,6 +20,7 @@ import flet as ft
 import pandas as pd
 import pytest
 
+from data.domain_services import compute_ai_attribution_stats, compute_strategy_review_stats
 from ui.theme import AppColors
 from ui.viewmodels.screener_view_model import ScreenerRow, ScreenerViewModel, StrategyDepRow
 from ui.viewmodels.watchlist_view_model import WatchlistMutationResult, WatchlistViewModel
@@ -28,12 +29,16 @@ from ui.views.screener_view import (
     _COVERAGE_GAP_RATIO,
     _HIDDEN_COLS,
     _SECTION_META,
+    _build_ai_attribution_section,
     _build_page_size_options,
+    _build_review_stats_section,
     _build_strategy_options,
     _build_table_data,
+    _ci_text,
     _coverage_gap_pct,
     _execute_add_to_watchlist,
     _format_cell_value,
+    _format_pct,
     _parse_num,
     _render_status_message,
     _resolve_group_title,
@@ -755,3 +760,174 @@ class TestExecuteAddToWatchlist:
         asyncio.run(_execute_add_to_watchlist(wl_vm, None, "000001.SZ", "平安银行"))
 
         assert wl_vm.calls == [("000001.SZ", "平安银行")]
+
+
+# ---------------------------------------------------------------------------
+# UIR-F09-004: 复盘汇总百分数不再二次放大 100 倍
+# 上游全链（DAO t5_pct/alpha → review_stats_service 均值 → View 侧栏）已是百分数/百分点
+# ---------------------------------------------------------------------------
+
+
+def _collect_texts(root: object) -> list[str]:
+    """递归收集控件树中所有 ft.Text 的 value（供侧栏文本联合断言）。"""
+    texts: list[str] = []
+    seen: set[int] = set()
+
+    def visit(node: object) -> None:
+        if node is None or id(node) in seen:
+            return
+        seen.add(id(node))
+        if isinstance(node, ft.Text):
+            texts.append(node.value)
+            return
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                visit(item)
+            return
+        if isinstance(node, ft.Control):
+            for value in vars(node).values():
+                visit(value)
+            # Flet 1.x 部分控件（Container / ExpansionTile 等）的字段值存于 `_values`
+            # 字典而非直接挂在 __dict__；两处都遍历以覆盖 title/subtitle/content/controls。
+            inner = vars(node).get("_values")
+            if isinstance(inner, dict):
+                for value in inner.values():
+                    visit(value)
+
+    visit(root)
+    return texts
+
+
+def _joined_texts(control: object) -> str:
+    return "\n".join(t for t in _collect_texts(control) if isinstance(t, str))
+
+
+def _dao_daily_row(
+    *,
+    strategy: str,
+    benchmark: str | None,
+    t5_mean: float | None,
+    alpha_mean: float | None,
+    win: int = 0,
+    loss: int = 0,
+    has_ai: bool | None = None,
+) -> dict:
+    """构建一行 DAO 日级聚合（get_strategy_review_stats / get_ai_attribution_stats 形状）。"""
+    row: dict = {
+        "trade_date": datetime.date(2026, 1, 1),
+        "strategy_name": strategy,
+        "benchmark_code": benchmark,
+        "daily_cnt": 1,
+        "t1_mean": 2.0,
+        "t1_n": 1,
+        "t5_mean": t5_mean,
+        "t5_n": (0 if t5_mean is None else 1),
+        "alpha_mean": alpha_mean,
+        "alpha_n": (0 if alpha_mean is None else 1),
+        "win_cnt": win,
+        "loss_cnt": loss,
+    }
+    if has_ai is not None:
+        row["has_ai"] = has_ai
+    return row
+
+
+class TestFormatPctUnit:
+    """UIR-F09-004: _format_pct 输入已是百分数，不再 ×100。"""
+
+    def test_none_returns_dash(self):
+        assert _format_pct(None) == "—"
+
+    def test_zero_not_masked(self):
+        """真实 0 显示 0.00%（R21: 不把 0 伪装成缺失，也不省略）。"""
+        assert _format_pct(0) == "0.00%"
+
+    def test_negative_keeps_sign(self):
+        assert _format_pct(-1.5) == "-1.50%"
+
+    def test_percentage_kept_as_is(self):
+        """回归: 旧实现 2.0 → 200.00%；修复后 2.0 → 2.00%。"""
+        assert _format_pct(2) == "2.00%"
+        assert _format_pct(1.5) == "1.50%"
+
+
+class TestCiTextUnit:
+    """UIR-F09-004: _ci_text 上下界为百分点，不再 ×100。"""
+
+    def test_bounds_as_percentage_points(self):
+        assert _ci_text(1, 2) == "[1.00%, 2.00%]"
+
+    def test_none_low_returns_dash(self):
+        assert _ci_text(None, 2) == "—"
+
+    def test_none_high_returns_dash(self):
+        assert _ci_text(1, None) == "—"
+
+
+class TestReviewStatsSectionPercentUnits:
+    """UIR-F09-004 联合断言: 统计服务 compute_* → View 两个历史侧栏文本单位一致。"""
+
+    def test_strategy_section_keeps_percentage_units(self):
+        """Given DAO 日聚合 t5_mean=2 / alpha_mean=1.5；When 构建策略汇总侧栏；
+        Then 文本含 2.00%/1.50% 且不含 200.00%/150.00%，win_rate=.6 仍为 60.0%。"""
+        df = pd.DataFrame(
+            [_dao_daily_row(strategy="s", benchmark="000300.SH", t5_mean=2.0, alpha_mean=1.5, win=6, loss=4)]
+        )
+        rows = compute_strategy_review_stats(df)
+        # 前置: 统计服务未改变量纲（同值透传）
+        assert rows[0].t5.mean == pytest.approx(2.0)
+        assert rows[0].alpha.mean == pytest.approx(1.5)
+
+        with patch("ui.views.screener_view.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, **params: key
+            joined = _joined_texts(_build_review_stats_section(rows))
+
+        assert "1.50%" in joined  # alpha 百分点
+        assert "2.00%" in joined  # t5 百分数
+        assert "60.0%" in joined  # win_rate 为分数 → 仍 ×100
+        assert "150.00%" not in joined
+        assert "200.00%" not in joined
+
+    def test_ai_attribution_section_keeps_percentage_units(self):
+        """AI 归因侧栏与策略汇总同口径（百分点不再 ×100，win_rate 分数仍 ×100）。"""
+        df = pd.DataFrame(
+            [
+                _dao_daily_row(
+                    strategy="s",
+                    benchmark="000300.SH",
+                    t5_mean=2.0,
+                    alpha_mean=1.5,
+                    win=6,
+                    loss=4,
+                    has_ai=True,
+                )
+            ]
+        )
+        rows = compute_ai_attribution_stats(df)
+        assert rows[0].alpha.mean == pytest.approx(1.5)
+
+        with patch("ui.views.screener_view.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, **params: key
+            joined = _joined_texts(_build_ai_attribution_section(rows))
+
+        assert "1.50%" in joined
+        assert "2.00%" in joined
+        assert "60.0%" in joined
+        assert "150.00%" not in joined
+        assert "200.00%" not in joined
+
+    def test_strategy_section_none_alpha_shows_dash(self):
+        """基准未知组（benchmark_code=None）不渲染 alpha 行（改显示「基准未知」文案），
+        但 T+5 仍按百分数渲染；缺失的 alpha 不会被伪装成 0.00%（R21）。"""
+        df = pd.DataFrame([_dao_daily_row(strategy="s", benchmark=None, t5_mean=2.0, alpha_mean=None)])
+        rows = compute_strategy_review_stats(df)
+        assert rows[0].benchmark_known is False
+        assert rows[0].alpha.mean is None
+
+        with patch("ui.views.screener_view.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, **params: key
+            joined = _joined_texts(_build_review_stats_section(rows))
+
+        # 基准未知组不渲染 alpha 行，但仍应显示 t5 的百分数
+        assert "2.00%" in joined
+        assert "0.00%" not in joined
