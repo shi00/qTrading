@@ -393,6 +393,7 @@
     "data_sql_result": "查询结果",
     "data_sql_ready": "就绪",
     "data_sql_success": "查询成功 (耗时 {time:.3f}s). 共返回 {rows} 行.",
+    "data_sql_success_empty": "查询成功 (耗时 {time:.3f}s). 无匹配结果.",
     "data_sql_success_truncated": "查询成功 (耗时 {time:.3f}s). 显示前 {limit} 行 (共 {rows} 行).",
     "data_sql_error": "执行错误",
     "data_sql_error_detail": "错误详情",

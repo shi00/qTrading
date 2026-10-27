@@ -2562,3 +2562,102 @@ class TestTableViewerTabClearFilter:
         calls = [name for name, _ in vm.method_calls]
         assert "clear_filter" in calls, "空态 CTA 应触发清除路径 (零参契约无 TypeError)"
         assert ("query_data", {"page": 1}) in vm.method_calls, "清除后应回到第 1 页重查询"
+
+
+class TestTableViewerTabRetryLoad:
+    """M-UI-16: ErrorState retry 完整重载链 (_do_retry_load) 两类错误场景。
+
+    retry 触发链: on_retry() → _on_retry_load → page.run_task(_do_retry_load)
+    (FakePage.run_task side_effect 同步执行协程) → clear_error + _init_tables + _load_initial_table。
+    """
+
+    @staticmethod
+    def _mount_with_error(monkeypatch: Any, **state_kwargs: Any) -> tuple[list[dict], Any]:
+        """挂载带 error_message 的 TableViewerTab, 返回 (captured, vm)。
+
+        遵循既有空态 CTA 断言范式: @ft.component 子组件在测试渲染中不被展开,
+        用 mock 捕获 ErrorState 调用参数以提取 on_retry 回调。
+        """
+        from ui.views import data_view as mod
+        from ui.views.data_view import TableViewerTab
+
+        captured: list[dict] = []
+
+        def _fake_error_state(**kwargs: Any) -> Any:
+            captured.append(kwargs)
+            return MagicMock(name="ErrorState")
+
+        monkeypatch.setattr(mod, "ErrorState", _fake_error_state)
+
+        vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(**state_kwargs))
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
+        _mount(component)
+        return captured, vm
+
+    @staticmethod
+    def _trigger_retry(captured: list[dict]) -> None:
+        """提取 ErrorState 的 on_retry 回调并触发 (零参契约)。"""
+        on_retry = next((c["on_retry"] for c in reversed(captured) if c.get("on_retry") is not None), None)
+        assert on_retry is not None, "error 态应渲染 ErrorState 并携带 on_retry 回调"
+        on_retry()
+
+    def test_retry_clears_error_and_reloads_tables(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """tables_loaded=False (init_tables 失败) 场景: retry → clear_error + init_tables 重载。
+
+        _load_initial_table 闭包捕获的渲染期快照 tables_loaded=False → effect 守卫 return,
+        schema/data 重载依赖 tables_loaded=True 后的 effect 重调度 (View docstring 语义),
+        故 load_table_schema 不应被调用。
+        """
+        captured, vm = self._mount_with_error(
+            monkeypatch,
+            tables_loaded=False,
+            error_message=Message("data_err_load_schema", {}),
+        )
+        init_before = sum(1 for name, _ in vm.method_calls if name == "init_tables")
+        assert init_before >= 1, "mount effect (_init_tables) 应已触发 init_tables"
+
+        self._trigger_retry(captured)
+
+        calls = [name for name, _ in vm.method_calls]
+        assert "clear_error" in calls, "retry 应先清除错误 (vm.clear_error)"
+        assert sum(1 for name, _ in vm.method_calls if name == "init_tables") == init_before + 1, (
+            "retry 应重载表列表 (_do_retry_load → _init_tables)"
+        )
+        assert "load_table_schema" not in calls, "tables_loaded 渲染期快照为 False 时 _load_initial_table 守卫 return"
+
+    def test_retry_reloads_schema_and_data_when_tables_loaded(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """tables_loaded=True (schema/data 加载失败) 场景: retry → clear_error + schema/data 重载。"""
+        captured, vm = self._mount_with_error(
+            monkeypatch,
+            tables_loaded=True,
+            error_message=Message("data_err_load_schema", {}),
+        )
+        schema_before = sum(1 for name, _ in vm.method_calls if name == "load_table_schema")
+        query_before = sum(1 for name, _ in vm.method_calls if name == "query_data")
+        fresh_before = sum(1 for name, _ in vm.method_calls if name == "load_data_freshness")
+        assert schema_before >= 1, "mount effect (_load_initial_table) 应已加载 schema"
+
+        self._trigger_retry(captured)
+
+        calls = [name for name, _ in vm.method_calls]
+        assert "clear_error" in calls, "retry 应先清除错误 (vm.clear_error)"
+        assert "init_tables" not in calls, "tables_loaded=True 时 _init_tables 守卫 return"
+        assert sum(1 for name, _ in vm.method_calls if name == "load_table_schema") == schema_before + 1, (
+            "retry 应重载当前表 schema"
+        )
+        assert sum(1 for name, _ in vm.method_calls if name == "query_data") == query_before + 1, "retry 应重查询数据"
+        assert sum(1 for name, _ in vm.method_calls if name == "load_data_freshness") == fresh_before + 1, (
+            "retry 应刷新数据新鲜度 (Phase 6.4)"
+        )
