@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import itertools
 import logging
 
@@ -64,6 +65,14 @@ def _fmt_time(dt) -> str:
     except Exception as e:
         logger.debug("[NewsInsightVM] format time failed: %s", DataSanitizer.sanitize_error(e))
         return ""
+
+
+def _result_generated_at_str(result) -> str:
+    """结果快照的生成时间展示串；缺失/NaT/非 datetime 返回空串（不伪造读取时刻，R21）。"""
+    value = getattr(result, "generated_at", None)
+    if not isinstance(value, datetime.datetime) or value != value:
+        return ""
+    return _fmt_time(value)
 
 
 def _coverage_to_source(coverage: dict) -> tuple[SourceCoverage, ...]:
@@ -217,6 +226,7 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
             message=None,
             evidence=(),
             analysis_time=None,
+            cache_read_time=None,
         )
         loop = self._get_loop_or_none()
         if loop is None:
@@ -299,6 +309,15 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
         else:  # evidence_only / no_evidence → degraded
             phase = PHASE_DEGRADED
             message = Message("news_insight_degraded", params={"status": status})
+        # UIR-F05-003：复用必须展示快照的真实生成时点（缺失=未记录），读取时刻独立呈现；
+        # 仅新生成才允许以当前时刻作为生成时点。
+        generated_at_text = _result_generated_at_str(result)
+        if reused:
+            analysis_time = generated_at_text or None
+            cache_read_time = self._now_str()
+        else:
+            analysis_time = generated_at_text or self._now_str()
+            cache_read_time = None
         self._set_state(
             phase=phase,
             risk_level=result.risk_level,
@@ -311,7 +330,8 @@ class NewsInsightViewModel(ObservableViewModelMixin[NewsInsightState]):
             coverage=_coverage_to_source(result.coverage or {}),
             message=message,
             window_label=self._window_label(),
-            analysis_time=self._now_str(),
+            analysis_time=analysis_time,
+            cache_read_time=cache_read_time,
         )
 
     # ------------------------------------------------------------------

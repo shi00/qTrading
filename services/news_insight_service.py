@@ -285,7 +285,17 @@ class NewsInsightService:
 
     @staticmethod
     def _row_to_result(row: dict, coverage: dict) -> NewsInsightResult:
-        """把持久化快照行还原为 NewsInsightResult（缓存/子集复用）。"""
+        """把持久化快照行还原为 NewsInsightResult（缓存/子集复用）。
+
+        ``generated_at`` 保留快照生成时点的 UTC-naive 原始语义；旧行 NULL / pandas NaT
+        一律还原为 None（R21：未知不得伪装为读取时刻）。
+        """
+        generated_at = row.get("generated_at")
+        # NaT 是 datetime 子类（isinstance 为 True），但其自比较为 True；同时拦截非 datetime 的脏值。
+        if generated_at is not None and (
+            not isinstance(generated_at, datetime.datetime) or generated_at != generated_at
+        ):
+            generated_at = None
         return NewsInsightResult(
             analysis_status=row.get("analysis_status") or "failed",
             risk_level=row.get("risk_level"),
@@ -297,6 +307,7 @@ class NewsInsightService:
             model_id=row.get("model_id"),
             analysis_profile=row.get("analysis_profile") or "",
             prompt_version=row.get("prompt_version") or NEWS_RISK_PROMPT_VERSION,
+            generated_at=generated_at,
         )
 
     # ------------------------------------------------------------------
@@ -491,7 +502,16 @@ class NewsInsightService:
         - failed → 直接 save（不再先查再写），由 DAO 条件 upsert 决定是否生效；
           消费返回的 ``kept_success`` 记录「既有成功快照保留」；
         - evidence_only / no_evidence：确定性/降级结果，不作为可缓存快照持久化。
+
+        UIR-F05-003：服务侧记录程序生成时点（UTC-naive）并回填到 ``result``。缓存/子集复用
+        不走本方法，故快照的 ``generated_at`` 永不被读取时刻刷新。
         """
+        generated_at = result.generated_at
+        if generated_at is not None and generated_at.tzinfo is not None:
+            generated_at = to_utc_for_db(generated_at)
+        if generated_at is None:
+            generated_at = to_utc_for_db(get_now())
+        result.generated_at = generated_at
         brief = {
             "ts_code": ts_code,
             "input_hash": input_hash,
@@ -507,6 +527,7 @@ class NewsInsightService:
             "model_id": result.model_id,
             "analysis_profile": result.analysis_profile,
             "prompt_version": result.prompt_version,
+            "generated_at": generated_at,
         }
         if result.analysis_status in SUCCESS_STATUS:
             await self.dao.save_news_risk_brief(brief)

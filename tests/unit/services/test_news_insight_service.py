@@ -353,6 +353,18 @@ class TestRowToResult:
         assert r.model_id is None
         assert r.analysis_profile == ""
         assert r.prompt_version == NEWS_RISK_PROMPT_VERSION
+        assert r.generated_at is None
+
+    def test_generated_at_restored_as_utc_naive(self):
+        """UIR-F05-003：回读保留快照生成时点（UTC-naive 原始语义）。"""
+        t0 = datetime.datetime(2026, 9, 1, 2, 0, 0)
+        r = NewsInsightService._row_to_result({"generated_at": t0}, {})
+        assert r.generated_at == t0
+
+    def test_generated_at_null_and_nat_become_none(self):
+        """旧快照 NULL / pandas NaT 必须为 None（未记录，不得伪装读取时刻，R21）。"""
+        assert NewsInsightService._row_to_result({"generated_at": None}, {}).generated_at is None
+        assert NewsInsightService._row_to_result({"generated_at": pd.NaT}, {}).generated_at is None
 
     def test_full_row_passed_through(self):
         row = {
@@ -731,6 +743,39 @@ class TestPersist:
         dao.save_news_risk_brief.assert_awaited_once()
         dao.get_news_risk_brief.assert_not_awaited()
 
+    def test_success_records_generated_at_utc_naive(self, monkeypatch):
+        """UIR-F05-003：新生成成功由服务侧记录生成时点（CST aware → UTC-naive 落库并回填 DTO）。"""
+        t0_cst = datetime.datetime(2026, 9, 1, 10, 0, 0).replace(tzinfo=CST)
+        monkeypatch.setattr(module, "get_now", lambda: t0_cst)
+        dao = _make_dao()
+        dao.save_news_risk_brief = AsyncMock(return_value={"written": True, "kept_success": False})
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        result = _result("analyzed_with_events")
+
+        asyncio.run(
+            svc._persist("000001.SZ", "h", datetime.datetime(2026, 9, 1), datetime.datetime(2026, 9, 10), result)
+        )
+
+        expected_utc_naive = datetime.datetime(2026, 9, 1, 2, 0, 0)
+        brief = dao.save_news_risk_brief.await_args.args[0]
+        assert brief["generated_at"] == expected_utc_naive
+        assert result.generated_at == expected_utc_naive
+
+    def test_existing_generated_at_not_overwritten_by_clock(self, monkeypatch):
+        """已有生成时点（如 AI 侧提供）必须原样落库，不被当前时钟刷新。"""
+        t0 = datetime.datetime(2026, 9, 1, 2, 0, 0)
+        monkeypatch.setattr(module, "get_now", lambda: datetime.datetime(2026, 9, 16, 12, 0, 0).replace(tzinfo=CST))
+        dao = _make_dao()
+        dao.save_news_risk_brief = AsyncMock(return_value={"written": True, "kept_success": False})
+        svc = NewsInsightService(market_dao=dao, ai_service=_make_ai())
+        result = _result("analyzed_with_events", generated_at=t0)
+
+        asyncio.run(
+            svc._persist("000001.SZ", "h", datetime.datetime(2026, 9, 1), datetime.datetime(2026, 9, 10), result)
+        )
+
+        assert dao.save_news_risk_brief.await_args.args[0]["generated_at"] == t0
+
     def test_failed_writes_via_conditional_upsert(self):
         """failed → 直接 save，由 DAO 条件 upsert 决定是否生效；不再先查。"""
         dao = _make_dao()
@@ -769,7 +814,7 @@ class TestPersist:
         dao.save_news_risk_brief.assert_not_awaited()
 
 
-def _result(status: str, evidence_ids=None) -> NewsInsightResult:
+def _result(status: str, evidence_ids=None, generated_at: datetime.datetime | None = None) -> NewsInsightResult:
     return NewsInsightResult(
         analysis_status=status,
         risk_level="high" if status in ("analyzed_with_events", "analyzed_no_event") else None,
@@ -781,6 +826,7 @@ def _result(status: str, evidence_ids=None) -> NewsInsightResult:
         model_id="m",
         analysis_profile="p",
         prompt_version=NEWS_RISK_PROMPT_VERSION,
+        generated_at=generated_at,
     )
 
 
@@ -894,6 +940,8 @@ class TestAnalyze:
         ai.analyze_news_risk.assert_not_awaited()
 
     def test_cache_hit(self, monkeypatch):
+        # UIR-F05-003：同输入命中必须回读快照真实生成时点 t0，不得用读取时刻替代。
+        t0 = datetime.datetime(2026, 9, 10, 2, 0, 0)
         hit = {
             "analysis_status": "analyzed_with_events",
             "risk_level": "high",
@@ -902,6 +950,32 @@ class TestAnalyze:
             "events": [{"severity": "high"}],
             "evidence_news_ids": [1],
             "model_id": "local",
+            "generated_at": t0,
+        }
+        dao = _make_dao()
+        dao.get_news_risk_brief = AsyncMock(return_value=hit)
+        svc, _, ai = _make_svc_with_fake_load(
+            monkeypatch, dao=dao, evidence=[EvidenceDocument(news_id=1, content_hash="h")]
+        )
+        # 读取时刻 t1 晚于生成时刻 t0：若实现用读取时刻，断言会失败。
+        monkeypatch.setattr(module, "get_now", lambda: datetime.datetime(2026, 9, 16, 12, 0, 0).replace(tzinfo=CST))
+        outcome = asyncio.run(svc.analyze("000001.SZ"))
+        assert outcome.reused is True
+        assert outcome.reuse_type == "cache_hit"
+        assert outcome.result.analysis_status == "analyzed_with_events"
+        assert outcome.result.risk_level == "high"
+        assert outcome.result.generated_at == t0
+        ai.analyze_news_risk.assert_not_awaited()
+        # cache_hit 不重复持久化
+        dao.save_news_risk_brief.assert_not_awaited()
+
+    def test_cache_hit_old_row_null_generated_at(self, monkeypatch):
+        """旧快照无 generated_at → None（未记录，R21），不得填充读取时刻。"""
+        hit = {
+            "analysis_status": "analyzed_with_events",
+            "risk_level": "high",
+            "evidence_news_ids": [1],
+            "generated_at": None,
         }
         dao = _make_dao()
         dao.get_news_risk_brief = AsyncMock(return_value=hit)
@@ -910,14 +984,11 @@ class TestAnalyze:
         )
         outcome = asyncio.run(svc.analyze("000001.SZ"))
         assert outcome.reused is True
-        assert outcome.reuse_type == "cache_hit"
-        assert outcome.result.analysis_status == "analyzed_with_events"
-        assert outcome.result.risk_level == "high"
-        ai.analyze_news_risk.assert_not_awaited()
-        # cache_hit 不重复持久化
-        dao.save_news_risk_brief.assert_not_awaited()
+        assert outcome.result.generated_at is None
 
     def test_subset_reuse(self, monkeypatch):
+        # UIR-F05-003：子集复用同样必须回读快照生成时点 t0。
+        t0 = datetime.datetime(2026, 9, 8, 6, 30, 0)
         latest = {
             "analysis_status": "analyzed_with_events",
             "risk_level": "medium",
@@ -926,6 +997,7 @@ class TestAnalyze:
             "events": [],
             "evidence_news_ids": [1, 2, 3],
             "model_id": "local",
+            "generated_at": t0,
         }
         dao = _make_dao()
         dao.get_news_risk_brief = AsyncMock(return_value=None)
@@ -940,6 +1012,7 @@ class TestAnalyze:
         assert outcome.reused is True
         assert outcome.reuse_type == "subset"
         assert outcome.result.summary == "更完整"
+        assert outcome.result.generated_at == t0
         ai.analyze_news_risk.assert_not_awaited()
 
     def test_no_subset_without_db_error(self, monkeypatch):
@@ -994,6 +1067,22 @@ class TestAnalyze:
         )
         asyncio.run(svc.analyze("000001.SZ", regenerate=True))
         ai.analyze_news_risk.assert_awaited_once()
+
+    def test_new_generation_records_current_time(self, monkeypatch):
+        """UIR-F05-003：新生成成功时记录程序生成时点 t0（UTC-naive），并写入落库 brief。"""
+        t0_cst = datetime.datetime(2026, 9, 16, 12, 30, 0).replace(tzinfo=CST)
+        monkeypatch.setattr(module, "get_now", lambda: t0_cst)
+        dao = _make_dao()
+        svc, _, ai = _make_svc_with_fake_load(
+            monkeypatch, dao=dao, evidence=[EvidenceDocument(news_id=1, content_hash="h")]
+        )
+        outcome = asyncio.run(svc.analyze("000001.SZ"))
+        ai.analyze_news_risk.assert_awaited_once()
+        assert outcome.reused is False
+        expected = datetime.datetime(2026, 9, 16, 4, 30, 0)
+        assert outcome.result.generated_at == expected
+        brief = dao.save_news_risk_brief.await_args.args[0]
+        assert brief["generated_at"] == expected
 
 
 # --- F39 冻结分派（profile 与执行共用同版配置） ---

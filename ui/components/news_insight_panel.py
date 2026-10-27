@@ -246,14 +246,15 @@ def _build_ready(
                 color=AppColors.TEXT_SECONDARY,
             )
         )
-    if state.analysis_time:
-        info_rows.append(
-            ft.Text(
-                f"{I18n.get('news_insight_gen_time')}: {state.analysis_time}",
-                size=AppStyles.FONT_SIZE_BODY_SM,
-                color=AppColors.TEXT_SECONDARY,
-            )
+    # UIR-F05-003：生成时间缺失时显式「未记录」，不得以读取时刻冒充；读取时间只在复用场景展示。
+    gen_time_text = state.analysis_time or I18n.get("news_insight_gen_time_unknown")
+    info_rows.append(
+        ft.Text(
+            f"{I18n.get('news_insight_gen_time')}: {gen_time_text}",
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.TEXT_SECONDARY,
         )
+    )
     if state.reused:
         info_rows.append(
             ft.Text(
@@ -262,6 +263,14 @@ def _build_ready(
                 color=AppColors.PRIMARY,
             )
         )
+        if state.cache_read_time:
+            info_rows.append(
+                ft.Text(
+                    f"{I18n.get('news_insight_cache_read_time')}: {state.cache_read_time}",
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_SECONDARY,
+                )
+            )
 
     children: list[ft.Control] = [
         ft.Column(info_rows, spacing=4),

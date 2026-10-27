@@ -106,7 +106,10 @@ class NewsInsightState:
     reuse_type: str = "none"
     # 窗口与覆盖（§12 必须显示）
     window_label: str = "unknown"
+    # 快照真实生成时间（CST 展示串）；None=未记录（R21，禁止用读取时刻伪造）
     analysis_time: str | None = None
+    # 复用场景的本次缓存读取时间（CST 展示串）；非复用为 None（UIR-F05-003）
+    cache_read_time: str | None = None
     coverage: tuple[SourceCoverage, ...] = ()
     # 证据列表（evidence_ready/degraded 时展示；无证据为空 tuple）
     evidence: tuple[EvidenceItem, ...] = ()
