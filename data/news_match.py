@@ -11,8 +11,8 @@
 import datetime
 import re
 
-# 完整股票代码 token：`SH600519` / `600519.SH` / `sh600519` 等
-_FULL_CODE_RE = re.compile(r"[A-Za-z]{2}\d{6}|\d{6}\.[A-Za-z]{1,3}")
+# 完整股票代码 token：`SH600519` / `600519.SH` / `sh600519` 等；前后不得紧邻字母数字
+_FULL_CODE_RE = re.compile(r"(?<![0-9A-Za-z])(?:[A-Za-z]{2}\d{6}|\d{6}\.[A-Za-z]{1,3})(?![0-9A-Za-z])")
 # 裸 6 位数字 token：前后不得紧邻字母数字（排除被其他数字/字母拼入的部分）
 _BARE_CODE_RE = re.compile(r"(?<![0-9A-Za-z])\d{6}(?![0-9A-Za-z])")
 _HANZI_RE = re.compile(r"[\u4e00-\u9fff]")
@@ -52,6 +52,19 @@ def _full_code_tokens(text: str) -> list[str]:
     return [t.upper() for t in _FULL_CODE_RE.findall(text or "")]
 
 
+# A 股交易所后缀（沪/深/北）；缺后缀或未知后缀的候选不猜测交易所
+_EXCHANGES = frozenset({"SH", "SZ", "BJ"})
+
+
+def _ts_code_exchange(code: str) -> str | None:
+    """从标准 ts_code 取交易所后缀（大写）；缺后缀或非 A 股交易所返回 None。"""
+    _, sep, exchange = code.partition(".")
+    if not sep:
+        return None
+    exchange = exchange.upper()
+    return exchange if exchange in _EXCHANGES else None
+
+
 def _bare_code_tokens(text: str) -> set[str]:
     """从文本提取满足边界约束的裸 6 位数字 token。"""
     return set(_BARE_CODE_RE.findall(text or ""))
@@ -73,7 +86,8 @@ def match_news_to_stock(news_text: str | None, candidates: list[dict]) -> list[s
 
     candidates: list[dict]，每项含 ``ts_code`` 与 ``name``（股票名/简称，可为空）。
     高精度规则（命中之一即关联）：
-      1. 完整股票代码：``SH600519`` / ``600519.SH`` 等（大小写不敏感），直接命中候选池；
+      1. 完整股票代码：``SH600519`` / ``600519.SH`` 等（大小写不敏感）；前缀形式
+         须与候选 ts_code 的交易所一致，缺后缀/未知交易所的候选不猜测交易所；
       2. 裸 6 位：满足 ``(?<![0-9A-Za-z])\\d{6}(?![0-9A-Za-z])`` 且非日期段/连续数字，
          且落在候选股 ts_code 池；
       3. 公司全称（>= 4 汉字）直接出现在文本；
@@ -101,11 +115,12 @@ def match_news_to_stock(news_text: str | None, candidates: list[dict]) -> list[s
         if not code:
             continue
         suffix = code.split(".")[0]
-        sh_code = "SH" + suffix
+        exchange = _ts_code_exchange(code)
+        prefix_code = f"{exchange}{suffix}" if exchange else None
         matched_by: str | None = None
 
-        # 1) 完整股票代码
-        if code.upper() in full_tokens or sh_code in full_tokens:
+        # 1) 完整股票代码：规范后缀形式，或与候选同交易所的前缀形式（大小写已归一）
+        if code.upper() in full_tokens or (prefix_code is not None and prefix_code in full_tokens):
             matched_by = "full_code"
         # 2) 裸 6 位（命中候选池 + 排除段）
         elif suffix in bare_tokens and suffix in suffix_to_code and not _is_excluded_number(suffix):

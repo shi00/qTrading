@@ -62,6 +62,44 @@ class TestMatchNewsToStock:
         assert match_news_to_stock("SH600519 发布公告", self._candidates()) == ["600519.SH"]
         assert match_news_to_stock("sh600519 公告", self._candidates()) == ["600519.SH"]
 
+    def test_full_code_prefix_form_sz(self):
+        """``SZ000651`` 前缀形式命中深市候选（交易所取自候选 ts_code）。"""
+        assert match_news_to_stock("SZ000651 发布业绩预告", self._candidates()) == ["000651.SZ"]
+
+    def test_full_code_prefix_form_sz_case_insensitive(self):
+        """``sz000651`` 小写前缀同样命中。"""
+        assert match_news_to_stock("sz000651 发布业绩预告", self._candidates()) == ["000651.SZ"]
+
+    def test_full_code_suffix_form_sz(self):
+        """深市后缀形式 ``000651.SZ`` 命中。"""
+        assert match_news_to_stock("000651.SZ 发布业绩预告", self._candidates()) == ["000651.SZ"]
+
+    def test_full_code_prefix_form_bj(self):
+        """北交所 ``BJ830799`` 前缀按候选交易所命中。"""
+        cands = [{"ts_code": "830799.BJ", "name": "艾融软件"}]
+        assert match_news_to_stock("BJ830799 发布公告", cands) == ["830799.BJ"]
+
+    def test_full_code_prefix_exchange_mismatch_not_matched(self):
+        """交易所不一致的完整前缀不得关联：SH000651 不关联 000651.SZ。"""
+        assert match_news_to_stock("SH000651 发布公告", [{"ts_code": "000651.SZ", "name": "格力电器"}]) == []
+        assert match_news_to_stock("SZ600519 发布公告", [{"ts_code": "600519.SH", "name": "贵州茅台"}]) == []
+
+    def test_full_code_invalid_or_missing_exchange_not_guessed(self):
+        """缺后缀/非法交易所候选不猜测交易所，前缀形式不命中。"""
+        assert match_news_to_stock("SH600519 发布公告", [{"ts_code": "600519", "name": "贵州茅台"}]) == []
+        assert match_news_to_stock("XX600519 发布公告", [{"ts_code": "600519.XX", "name": "贵州茅台"}]) == []
+
+    def test_full_code_prefix_overscan_not_matched(self):
+        """完整代码被更长数字/字母拼入时不视为完整 token。"""
+        cands = [{"ts_code": "000651.SZ", "name": "格力电器"}]
+        assert match_news_to_stock("SZ0006511 数据", cands) == []
+        assert match_news_to_stock("1SZ000651 数据", cands) == []
+
+    def test_multiple_codes_in_one_text_deduped(self):
+        """一条新闻含多个代码形式时，每只股票只返回一次。"""
+        text = "SZ000651 与 000651.SZ 同步公告，600519.SH 亦披露"
+        assert match_news_to_stock(text, self._candidates()) == ["600519.SH", "000651.SZ"]
+
     def test_bare_6digit_suffix_in_pool(self):
         """裸 6 位落在候选池直接命中。"""
         assert match_news_to_stock("公司宣布 600519 相关事项", self._candidates()) == ["600519.SH"]
