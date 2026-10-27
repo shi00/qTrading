@@ -18,7 +18,10 @@
    证明接入的是审计状态栏消费的同一 JSONL 事实源，非平行账本）——destination 用
    真实发送的 litellm_model（含 provider 前缀），category 用场景 id；
 4. SEC-03：审计降级（record 普通异常）不阻断 dispatch；
-5. R2：``EgressAudit.record`` 抛 ``CancelledError`` 必须传播（不吞没）。
+5. R2：``EgressAudit.record`` 抛 ``CancelledError`` 必须传播（不吞没）；
+6. F27：非流式响应的内容安全拒绝信号（``message.refusal`` /
+   ``finish_reason == "content_filter"``）提炼为 ``AIContentRefusedError``
+   策略终态（Executor 据此终止候选遍历，禁止重试与换候选绕过）。
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.errors import AIPolicyNotAcknowledgedError
+from core.errors import AIContentRefusedError, AIPolicyNotAcknowledgedError
 from core.model_management_types import InferenceRequest, ResolvedConnection
 from services.ai_service.litellm_client import LiteLLMClient
 from utils.egress_audit import EgressAudit
@@ -233,3 +236,81 @@ class TestNullContentJsonConvergence:
         ):
             with pytest.raises(ValueError, match="Invalid JSON response"):
                 await client._router_failover(messages=[{"role": "user", "content": "hi"}])
+
+
+class TestF27ContentRefusalExtraction:
+    """F27：非流式响应的内容安全拒绝信号提炼为策略终态异常（AIContentRefusedError）。
+
+    只读 content 会把 refusal / content_filter 伪装成「无输出」，Executor 将按
+    输出非法类切换候选绕过安全拒绝；本类验证拒绝信号在统一链出口即被提炼为终止
+    语义。覆盖边界（R21 诚实声明）：OpenAI 兼容响应模式（``message.refusal`` /
+    ``finish_reason == "content_filter"``）已核验；Anthropic / Gemini 原生拒绝
+    块等格式未核验、不伪装已覆盖（SDK 层 ContentPolicyViolationError 由 Executor
+    异常分类承载）。
+    """
+
+    @staticmethod
+    def _refusal_response(
+        *, refusal: str | None = "抱歉，该内容违反使用政策。", finish_reason: str | None = "stop"
+    ) -> SimpleNamespace:
+        message = SimpleNamespace(content=None, refusal=refusal)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=message, finish_reason=finish_reason)],
+            model="gpt-test",
+            usage=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_message_refusal_raises_terminal_refusal(self, _tmp_egress_path) -> None:
+        """message.refusal 非空白 → AIContentRefusedError（i18n key 与既有错误文案同源）。"""
+        request = _request()
+        with (
+            patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True),
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", AsyncMock(return_value=self._refusal_response())),
+        ):
+            with pytest.raises(AIContentRefusedError) as excinfo:
+                await LiteLLMClient(MagicMock()).invoke_single_connection(
+                    request, _connection(), request.deadline, MagicMock()
+                )
+        assert excinfo.type is AIContentRefusedError
+        assert excinfo.value.message.key == "llm_err_content_policy"
+
+    @pytest.mark.asyncio
+    async def test_content_filter_finish_reason_raises_terminal_refusal(self, _tmp_egress_path) -> None:
+        """finish_reason == "content_filter"（refusal 字段缺失的 provider 形态）→ 同样终止。"""
+        request = _request()
+        response = self._refusal_response(refusal=None, finish_reason="content_filter")
+        with (
+            patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True),
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", AsyncMock(return_value=response)),
+        ):
+            with pytest.raises(AIContentRefusedError) as excinfo:
+                await LiteLLMClient(MagicMock()).invoke_single_connection(
+                    request, _connection(), request.deadline, MagicMock()
+                )
+        assert excinfo.value.message.key == "llm_err_content_policy"
+
+    @pytest.mark.asyncio
+    async def test_blank_refusal_does_not_raise(self, _tmp_egress_path) -> None:
+        """空白 refusal（非真实拒绝）→ 不误判，走正常 content 提取路径。"""
+        request = _request()
+        response = self._refusal_response(refusal="   ", finish_reason="stop")
+        response.choices[0].message.content = "ok"
+        with (
+            patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True),
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", AsyncMock(return_value=response)),
+        ):
+            result = await LiteLLMClient(MagicMock()).invoke_single_connection(
+                request, _connection(), request.deadline, MagicMock()
+            )
+        assert result.content == "ok"
+
+    @pytest.mark.asyncio
+    async def test_response_without_refusal_field_regression(self, _tmp_egress_path) -> None:
+        """回归：无 refusal 属性的历史响应形态不受影响（getattr 缺省 None 不触发）。"""
+        with patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True):
+            response, _ = await _invoke()
+        assert response.content == "ok"

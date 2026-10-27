@@ -25,6 +25,20 @@
   （F19）：尽力提交 cancelled 终态或幂等重提交在途终态（短超时，提交失败仅记
   日志）后 re-raise——attempt 不再永久停留 dispatched；外发已开始的取消按
   收费未知收敛（不结算预留，经 F23 租约到期自愈 held_unconfirmed）。
+- **F27 异常分类**：适配器异常先分类后处置（终止判定先于重试判定，禁止先重试
+  再发现），四类判据见 :func:`_classify_adapter_failure`——① 终止类（内容安全
+  拒绝 ``CONTENT_REFUSED``）：提交策略终态并中断整个候选遍历（halt，禁止重试
+  与换候选绕过）；② 瞬态类：退避后同候选重试（消耗路由 ``transient_retries``
+  预算）；③ 输出非法类（validate_output 失败）：不重试，允许切换备用候选（与
+  内容安全拒绝严格区分）；④ 不重试可切换类（认证 / 配额 / 未知等
+  ``should_retry=False`` 判据）：不重试，允许切换候选。判据复用
+  ``classify_error(context="llm")`` 的结构化 ``should_retry`` / ``code``，
+  不散落 if-else；
+- **F27 路由策略传递**：路由冻结快照（ExecutionSnapshot.routes 条目）携带的
+  ``transient_retries``（int 0..2，零重试）与 ``fallback_enabled``（bool，禁
+  备用）在 Executor 消费生效——键缺失 / 非法时回退构造默认（分派侧未填充该键
+  的诚实缺省，不伪装策略存在，R21）；``fallback_enabled=False`` 只派发路由首
+  个候选，其余候选记 skipped（不静默）。
 """
 
 from __future__ import annotations
@@ -32,12 +46,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal, cast
-from collections.abc import Callable
 
+from core.errors import AIContentRefusedError
 from core.model_management_types import (
     AdapterResponse,
     AttemptContext,
@@ -57,13 +71,23 @@ from services.ai_service.connection_pricing import (
     pricing_snapshot_metadata,
 )
 from utils.loop_local import get_loop_local
+from utils.error_classifier import classify_error
 from utils.log_decorators import PerfThreshold, log_async_operation
 
 logger = logging.getLogger(__name__)
 
-# 重试退避（秒）：首次 1s、第二次 2s（方案 D7）
+# 重试退避（秒）：首次 1s、第二次 2s（方案 D7），随 retry_index 指数递增至封顶
 _RETRY_BACKOFF_BASE_S: Final[float] = 1.0
 _RETRY_BACKOFF_MAX_S: Final[float] = 2.0
+# F27：服务端 Retry-After 尊重上限（秒）——不再截断为退避基线，但须有上限保护
+# 防恶意 / 畸形大值（实际等待仍受剩余 deadline 二次 clamp）
+_RETRY_AFTER_CAP_S: Final[float] = 60.0
+
+# F27：内容安全拒绝的终态错误码 / 决策原因（与 _CANCELLED_ERROR_CODE 同风格，
+# 消费端按此稳定码映射，禁止重试与换候选绕过）
+_CONTENT_REFUSED_ERROR_CODE: Final[str] = "CONTENT_REFUSED"
+# F27：禁备用策略（fallback_enabled=False）下未派发候选的 skipped 原因
+_FALLBACK_DISABLED_REASON: Final[str] = "fallback disabled by route policy"
 
 # loop-local 键（R11）：Executor 逐循环状态（信号量 + 冷却表）
 _LOOP_STATE_KEY: Final[str] = "scenario_executor_state"
@@ -204,6 +228,29 @@ class ScenarioExecutor:
             return self._terminal(request, "failed", (), decisions, ())
 
         candidates: tuple[Mapping[str, Any], ...] = route.get("candidates", ())  # type: ignore[assignment]
+        # F27 路由策略（快照冻结语义）：分派侧保存的零重试 / 禁备用策略在消费端
+        # 生效；键缺失 / 非法回退构造默认（不伪装策略存在，R21）。
+        route_retries = _route_transient_retries(route)
+        # 路由策略重试预算与构造重试预算取小（_retry_attempts 已按构造上限 clamp）
+        total_attempts = (
+            self._retry_attempts if route_retries is None else min(route_retries, self._retry_attempts)
+        ) + 1
+        fallback_enabled = _route_fallback_enabled(route)
+        fallback_skipped: tuple[CandidateDecision, ...] = ()
+        if fallback_enabled is False and len(candidates) > 1:
+            # 禁备用（F27）：只派发路由首个候选；其余候选记 skipped（R21 不静默），
+            # 决策记录在遍历结果之后追加（保持「先实际遍历、后策略跳过」可读序）。
+            fallback_skipped = tuple(
+                CandidateDecision(
+                    task_id=str(cand.get("task_id", "")),
+                    candidate_index=int(cand.get("candidate_index", 0)),
+                    connection_id=cand.get("connection_id"),
+                    decision="skipped",
+                    reason=_FALLBACK_DISABLED_REASON,
+                )
+                for cand in candidates[1:]
+            )
+            candidates = candidates[:1]
         # R01-D1：local-only 政策请求级新鲜读——每次 execute 读取一次（函数局部，
         # 不落实例字段，配置切换下一次 execute 即时生效；同请求内判定一致不混版）。
         local_only = self._local_only_mode_reader()
@@ -317,6 +364,7 @@ class ScenarioExecutor:
                     owner_epoch=owner_epoch,
                     owner_lease_expires_at=owner_lease_expires_at,
                     pricing=pricing_by_id.get(connection.connection_id),
+                    total_attempts=total_attempts,
                 )
 
             if outcome.status == "succeeded":
@@ -329,7 +377,9 @@ class ScenarioExecutor:
                         reason="ok",
                     )
                 )
-                return self._terminal(request, "succeeded", outcome.outputs, decisions, outcome.usages)
+                return self._terminal(
+                    request, "succeeded", outcome.outputs, [*decisions, *fallback_skipped], outcome.usages
+                )
 
             if outcome.halt_candidates:
                 # D5：费用型预留被拒 / 派发绑定失权——invocation 级事实（预算耗尽 /
@@ -358,7 +408,7 @@ class ScenarioExecutor:
                 )
             )
 
-        return self._terminal(request, "failed", (), decisions, ())
+        return self._terminal(request, "failed", (), [*decisions, *fallback_skipped], ())
 
     # ------------------------------------------------------------------
     # 单候选执行（重试内循环）
@@ -378,6 +428,7 @@ class ScenarioExecutor:
         owner_epoch: int,
         owner_lease_expires_at: Any,
         pricing: ConnectionPricing | None,
+        total_attempts: int | None = None,
     ) -> _CandidateOutcome:
         adapter = self._adapters.get(connection.adapter_kind)
         if adapter is None:
@@ -392,8 +443,10 @@ class ScenarioExecutor:
 
         budget_amount = cand.get("budget_amount_cny")
         last_reason = "exhausted"
-        total_attempts = self._retry_attempts + 1
-        for retry_index in range(total_attempts):
+        # F27：尝试预算可由路由冻结快照的瞬态重试策略（transient_retries）驱动
+        # （execute 计算传入）；None 回退构造默认。
+        attempts = total_attempts if total_attempts is not None else self._retry_attempts + 1
+        for retry_index in range(attempts):
             if request.deadline - clock() <= 0:
                 last_reason = "deadline exhausted"
                 break
@@ -574,6 +627,35 @@ class ScenarioExecutor:
                 try:
                     response = await adapter.invoke(request, effective_connection, request.deadline, attempt_context)
                 except Exception as e:
+                    # F27：先分类后处置——终止判定（内容安全拒绝）先于重试判定，
+                    # 禁止先重试再发现。
+                    failure_class = _classify_adapter_failure(e)
+                    if failure_class == "content_refused":
+                        # 终止类：内容安全拒绝——提交策略终态（错误码 CONTENT_REFUSED）
+                        # 并中断整个候选遍历（halt），禁止重试与换候选绕过；不进连接
+                        # 冷却（内容侧而非连接侧故障，与 F18 halt 家族一致）。
+                        last_reason = _CONTENT_REFUSED_ERROR_CODE
+                        logger.warning(
+                            "[ScenarioExecutor] content refused by provider policy, "
+                            "halting candidate traversal (task=%s)",
+                            request.task_id,
+                        )
+                        await self._submit_failed_terminal(
+                            request,
+                            attempt_id,
+                            last_reason,
+                            reservation_id,
+                            metadata=attempt_metadata,
+                            ledger=ledger,
+                        )
+                        return _CandidateOutcome(
+                            status="failed",
+                            decision_hint="rejected",
+                            reason=last_reason,
+                            outputs=(),
+                            usages=(),
+                            halt_candidates=True,
+                        )
                     last_reason = f"adapter error: {type(e).__name__}"
                     # F18：失败尝试即时收敛（结算该次预留 + 记失败事实，R21 不静默），
                     # 再退避重试——迟到响应在适配器层被丢弃，无第二次观察通道，费用
@@ -587,9 +669,13 @@ class ScenarioExecutor:
                         ledger=ledger,
                         duration_ms=_elapsed_ms(clock, attempt_started_at),
                     )
-                    if retry_index < total_attempts - 1:
-                        await self._backoff(e, request, clock)
-                    continue
+                    if failure_class == "transient" and retry_index < attempts - 1:
+                        await self._backoff(e, request, clock, retry_index=retry_index)
+                        continue
+                    # 瞬态重试预算耗尽，或不重试可切换类（认证 / 配额 / 未知等
+                    # should_retry=False 判据，F27 保守不重试、不可一律重试）：结束
+                    # 本候选，交外层按结果切换 / 收敛。
+                    break
 
                 # D6：适配器返回后立即同步转移用量（幂等按 attempt_id）；
                 # security_revision 取许可线性化点的真实修订（F01：快照携带的
@@ -603,6 +689,9 @@ class ScenarioExecutor:
                 try:
                     validated = validate_output(response)
                 except Exception as e:
+                    # F27 输出非法类：响应合法返回但业务输出不合法——不重试同候选，
+                    # 允许切换备用候选（与内容安全拒绝的终止语义严格区分：输出非法
+                    # 是质量事实而非安全策略，换候选不构成绕过）。
                     await self._submit_failed_terminal(
                         request,
                         attempt_id,
@@ -774,13 +863,21 @@ class ScenarioExecutor:
         except Exception as e:  # 提交失败不阻断取消传播（R2：受限清理让位于取消）
             logger.warning("[ScenarioExecutor] cancel-cleanup terminal not submitted: %s", type(e).__name__)
 
-    async def _backoff(self, error: Exception, request: InferenceRequest, clock: Callable[[], float]) -> None:
-        """退避 1/2s 与 Retry-After 取大，clamp 至剩余 deadline（方案 D7）。"""
-        retry_after = getattr(error, "retry_after", None)
-        base = _RETRY_BACKOFF_BASE_S
-        if isinstance(retry_after, (int, float)) and retry_after > 0:
-            base = max(base, float(retry_after))
-        base = min(base, _RETRY_BACKOFF_MAX_S)
+    async def _backoff(
+        self, error: Exception, request: InferenceRequest, clock: Callable[[], float], *, retry_index: int = 0
+    ) -> None:
+        """退避契约（F27/方案 D7）：基线 1s/2s 随 retry_index 指数递增（封顶 2s），
+        与服务端 Retry-After 取大——Retry-After 不再截断为退避封顶（修复 429 等待
+        失真），尊重至 ``_RETRY_AFTER_CAP_S`` 上限（防恶意 / 畸形大值），最后仍
+        clamp 至剩余 deadline。
+
+        Retry-After 仅承诺数值（秒）与纯数字字符串形态（经
+        :func:`_parse_retry_after_seconds`）；HTTP-date 等未核验格式不伪装支持（R21）。
+        """
+        base = min(_RETRY_BACKOFF_BASE_S * (2**retry_index), _RETRY_BACKOFF_MAX_S)
+        retry_after = _parse_retry_after_seconds(getattr(error, "retry_after", None))
+        if retry_after is not None:
+            base = max(base, min(retry_after, _RETRY_AFTER_CAP_S))
         remaining = request.deadline - clock()
         await asyncio.sleep(max(0.0, min(base, remaining)))
 
@@ -877,6 +974,71 @@ def _ineligibility_reason(eligibility: _ConnectionEligibility, task_id: str) -> 
     if eligibility.capabilities.get(task_id) == "unsupported":
         return f"connection unsupported for task {task_id}"
     return None
+
+
+# F27 适配器异常分类（终止判定先于重试判定的判据正本；映射表式，不散落 if-else）
+_AdapterFailureClass = Literal["content_refused", "transient", "no_retry_switchable"]
+
+
+def _classify_adapter_failure(error: Exception) -> _AdapterFailureClass:
+    """适配器异常四类判据（F27）。
+
+    - ``content_refused``（终止类）：内容安全拒绝——``AIContentRefusedError``（云
+      响应 refusal / content_filter 提炼，litellm_client 产出）或
+      ``classify_error(context="llm")`` 判为 ``content_policy``（SDK 层内容策略
+      异常，如 LiteLLM ContentPolicyViolationError）。处置：策略终态 + 中断整个
+      候选遍历（禁止重试与换候选绕过）。
+    - ``transient``（瞬态类）：``classify_error`` 结构化 ``should_retry=True``
+      判据（429 / 5xx / 超时 / 网络类）。处置：退避后同候选重试。
+    - ``no_retry_switchable``（不重试可切换类）：认证 / 配额 / 模型不存在 /
+      未知等 ``should_retry=False`` 判据；输出非法（validate_output 失败走独立
+      路径）同属「不重试、可切换候选」且与内容安全拒绝严格区分。未知 provider
+      异常格式保守不重试（不可一律重试），未核验格式不伪装已覆盖（R21）。
+    """
+    if isinstance(error, AIContentRefusedError):
+        return "content_refused"
+    info = classify_error(error, context="llm")
+    if info.get("code") == "content_policy":
+        return "content_refused"
+    if bool(info.get("should_retry")):
+        return "transient"
+    return "no_retry_switchable"
+
+
+def _parse_retry_after_seconds(value: Any) -> float | None:
+    """解析适配器异常携带的 Retry-After（秒，F27）：数值与纯数字字符串；其余
+    （bool / 非正数 / HTTP-date 等未核验格式）返回 None——不伪装支持（R21）。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if value > 0 else None
+    if isinstance(value, str):
+        try:
+            parsed = float(value.strip())
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _route_transient_retries(route: Mapping[str, Any] | None) -> int | None:
+    """路由冻结快照的瞬态重试策略（F27）：0（零重试）..2；缺失 / 非法 → None
+    （回退构造默认，不伪装策略存在，R21）。bool 是 int 子类，显式排除。"""
+    if route is None:
+        return None
+    value = route.get("transient_retries")
+    if isinstance(value, bool) or not isinstance(value, int) or not (0 <= value <= 2):
+        return None
+    return value
+
+
+def _route_fallback_enabled(route: Mapping[str, Any] | None) -> bool | None:
+    """路由冻结快照的禁备用策略（F27）：True / False；缺失 / 非法 → None（回退
+    既有行为——允许切换候选）。"""
+    if route is None:
+        return None
+    value = route.get("fallback_enabled")
+    return value if isinstance(value, bool) else None
 
 
 @dataclass(frozen=True, slots=True)

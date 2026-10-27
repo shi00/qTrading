@@ -34,6 +34,8 @@ import dataclasses
 
 import pytest
 
+from core.errors import AIContentRefusedError
+from core.i18n import Message
 from core.model_management_types import (
     AdapterResponse,
     AttemptContext,
@@ -44,7 +46,11 @@ from core.model_management_types import (
     ValidatedBusinessOutput,
 )
 from core.model_management_types import PersistenceOutcome
-from services.ai_service.scenario_executor import ScenarioExecutor, ScenarioOutput
+from services.ai_service.scenario_executor import (
+    ScenarioExecutor,
+    ScenarioOutput,
+    _classify_adapter_failure,
+)
 from services.ai_service.usage_recorder import ReservationOutcome
 
 pytestmark = pytest.mark.unit
@@ -135,7 +141,9 @@ def _adapter_fail_then_ok(failures: int) -> MagicMock:
     async def _invoke(*args, **kwargs):
         calls["n"] += 1
         if calls["n"] <= failures:
-            raise RuntimeError("upstream 5xx")
+            # F27：瞬态替身须命中瞬态分类（TimeoutError → classify_error 应重试），
+            # 否则新分类下 RuntimeError 落入「不重试可切换」破坏重试语义用例。
+            raise TimeoutError("upstream timed out")
         return AdapterResponse(
             content="ok",
             usage=None,
@@ -615,7 +623,7 @@ class TestGuards:
         adapter = MagicMock()
 
         async def _fail_invoke(*args, **kwargs):
-            raise RuntimeError("upstream 5xx")
+            raise TimeoutError("upstream timed out")  # 瞬态：进入退避期后取消
 
         adapter.invoke = AsyncMock(side_effect=_fail_invoke)
         recorder = _recorder_mock()
@@ -810,7 +818,7 @@ def _adapter_always_fail() -> MagicMock:
     adapter = MagicMock()
 
     async def _invoke(*args, **kwargs):
-        raise RuntimeError("upstream 5xx")
+        raise TimeoutError("upstream timed out")  # 瞬态：重试耗尽路径用例依赖可重试分类
 
     adapter.invoke = AsyncMock(side_effect=_invoke)
     return adapter
@@ -1625,3 +1633,296 @@ class TestF34TaskIdAndDuration:
         record = recorder.submit_terminal.await_args.args[0]
         assert record.status == "cancelled"
         assert record.duration_ms is not None and record.duration_ms > 0
+
+
+# ====================================================================
+# F27 适配器异常四类分类 / 退避契约 / 路由策略
+# ====================================================================
+
+
+def _snapshot_with_route(route: dict, connections: tuple[ResolvedConnection | dict, ...]) -> ExecutionSnapshot:
+    """F27：自定义路由条目（可携带策略键）的快照构造（其余契约同 _snapshot）。"""
+    serialized = tuple(dataclasses.asdict(c) if isinstance(c, ResolvedConnection) else dict(c) for c in connections)
+    return ExecutionSnapshot(
+        snapshot_id="snap-1",
+        run_id=None,
+        config_revision=5,
+        routes=(route,),
+        connections=serialized,
+        business_contract_versions={"sentiment": "v1"},
+        security_scope_version=1,
+        created_at="2026-10-16T00:00:00Z",
+    )
+
+
+def _route(candidates: tuple[dict, ...], **policy: Any) -> dict:
+    route: dict[str, Any] = {"scenario_id": "news_sentiment", "route_revision": 1, "candidates": candidates}
+    route.update(policy)
+    return route
+
+
+class TestF27FailureClassification:
+    """F27 分类判据正本可测试性（映射表语义，不散落 if-else）与四类处置端到端。"""
+
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            pytest.param(
+                AIContentRefusedError(Message("llm_err_content_policy")),
+                "content_refused",
+                id="refusal-error-terminal",
+            ),
+            pytest.param(TimeoutError("upstream timed out"), "transient", id="timeout-transient"),
+            pytest.param(ConnectionError("connection reset"), "transient", id="network-transient"),
+            pytest.param(
+                RuntimeError("request rejected: content policy violation"),
+                "content_refused",
+                id="sdk-content-policy-terminal",
+            ),
+            pytest.param(
+                RuntimeError("insufficient_quota: billing hard limit"),
+                "no_retry_switchable",
+                id="quota-no-retry",
+            ),
+            pytest.param(RuntimeError("opaque provider failure"), "no_retry_switchable", id="unknown-conservative"),
+        ],
+    )
+    def test_classification_mapping(self, error: Exception, expected: str):
+        assert _classify_adapter_failure(error) == expected
+
+    @pytest.mark.asyncio
+    async def test_content_refused_is_terminal_no_retry_no_fallback(self):
+        """终止类：内容安全拒绝 → 单次调用即策略终态（不重试、不换候选绕过）。"""
+        adapter = MagicMock()
+
+        async def _invoke(*args, **kwargs):
+            raise AIContentRefusedError(Message("llm_err_content_policy"), detail="provider refusal")
+
+        adapter.invoke = AsyncMock(side_effect=_invoke)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot_with_route(
+                _route((_candidate(0, "conn-remote"), _candidate(1, "conn-remote-2"))),
+                (_remote_conn(), _remote_conn("conn-remote-2")),
+            ),
+            _validator_ok,
+        )
+        # invoke 仅 1 次 = 不重试 + 第二候选不遍历（同一适配器替身承载两候选）
+        adapter.invoke.assert_awaited_once()
+        assert result.status == "failed"
+        assert result.outputs == ()
+        # 策略终态决策：rejected + 稳定错误码（消费端按 CONTENT_REFUSED 映射）
+        assert len(result.candidate_decisions) == 1
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "rejected"
+        assert decision.reason == "CONTENT_REFUSED"
+        # 失败事实即时收敛（该次尝试 failed 终态，错误码为稳定码）
+        terminal_call = recorder.submit_terminal.await_args
+        assert terminal_call is not None
+        assert terminal_call.args[0].status == "failed"
+        assert terminal_call.args[0].error_code == "CONTENT_REFUSED"
+
+    @pytest.mark.asyncio
+    async def test_content_policy_code_via_classifier_halts_too(self):
+        """SDK 层内容策略异常（classify_error code=content_policy）同属终止类。"""
+        adapter = MagicMock()
+
+        async def _invoke(*args, **kwargs):
+            raise RuntimeError("request rejected: content policy violation")
+
+        adapter.invoke = AsyncMock(side_effect=_invoke)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+        adapter.invoke.assert_awaited_once()
+        assert result.candidate_decisions[0].reason == "CONTENT_REFUSED"
+
+    @pytest.mark.asyncio
+    async def test_no_retry_switchable_moves_to_next_candidate(self):
+        """不重试可切换类（未知异常保守不重试）→ 首候选单次失败即切换第二候选。"""
+        adapter = MagicMock()
+        calls: list[str] = []
+
+        async def _invoke(_req, conn, _deadline, _ctx):
+            calls.append(conn.connection_id)
+            if conn.connection_id == "conn-remote":
+                raise RuntimeError("opaque provider failure")
+            return AdapterResponse(content="ok", usage=None, actual_model="glm-4-air", metadata={})
+
+        adapter.invoke = AsyncMock(side_effect=_invoke)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot(
+                (_candidate(0, "conn-remote"), _candidate(1, "conn-remote-2")),
+                (_remote_conn(), _remote_conn("conn-remote-2")),
+            ),
+            _validator_ok,
+        )
+        assert result.status == "succeeded"
+        # 首候选仅 1 次调用（不重试），随后切换第二候选
+        assert calls == ["conn-remote", "conn-remote-2"]
+
+    @pytest.mark.asyncio
+    async def test_transient_exhausted_then_switches_candidate(self):
+        """瞬态类重试预算耗尽（默认 1 重试 = 2 次调用）→ 结束本候选并切换。"""
+        adapter = MagicMock()
+        calls: list[str] = []
+
+        async def _invoke(_req, conn, _deadline, _ctx):
+            calls.append(conn.connection_id)
+            if conn.connection_id == "conn-remote":
+                raise TimeoutError("upstream timed out")
+            return AdapterResponse(content="ok", usage=None, actual_model="glm-4-air", metadata={})
+
+        adapter.invoke = AsyncMock(side_effect=_invoke)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        with patch("services.ai_service.scenario_executor.asyncio.sleep", new=AsyncMock()):
+            result = await executor.execute(
+                _request(),
+                _snapshot(
+                    (_candidate(0, "conn-remote"), _candidate(1, "conn-remote-2")),
+                    (_remote_conn(), _remote_conn("conn-remote-2")),
+                ),
+                _validator_ok,
+            )
+        assert result.status == "succeeded"
+        assert calls.count("conn-remote") == 2  # 首尝试 + 1 重试（瞬态预算耗尽）
+        assert calls[-1] == "conn-remote-2"
+
+
+class TestF27BackoffContract:
+    """F27 退避契约：Retry-After 尊重（不截断为基线）+ 上限保护 + 基线指数 + deadline clamp。"""
+
+    @staticmethod
+    def _err(retry_after: Any) -> TimeoutError:
+        err = TimeoutError("upstream timed out")
+        if retry_after is not None:
+            err.retry_after = retry_after
+        return err
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("retry_after", "retry_index", "now", "deadline", "expected"),
+        [
+            pytest.param(5, 0, 0.0, 1_000_000.0, 5.0, id="respect-retry-after-over-base"),
+            pytest.param(9999, 0, 0.0, 1_000_000.0, 60.0, id="cap-malicious-value"),
+            pytest.param(60.0, 0, 0.0, 1_000_000.0, 60.0, id="cap-boundary-inclusive"),
+            pytest.param("2.5", 0, 0.0, 1_000_000.0, 2.5, id="numeric-string-honored"),
+            pytest.param(
+                "Wed, 21 Oct 2026 07:28:00 GMT", 0, 0.0, 1_000_000.0, 1.0, id="http-date-unverified-falls-back"
+            ),
+            pytest.param(0, 0, 0.0, 1_000_000.0, 1.0, id="non-positive-falls-back"),
+            pytest.param(True, 0, 0.0, 1_000_000.0, 1.0, id="bool-rejected"),
+            pytest.param(None, 1, 0.0, 1_000_000.0, 2.0, id="exponential-base-retry-index-1"),
+            pytest.param(None, 5, 0.0, 1_000_000.0, 2.0, id="exponential-base-capped-at-2"),
+            pytest.param(60, 0, 999_997.0, 1_000_000.0, 3.0, id="clamped-to-remaining-deadline"),
+        ],
+    )
+    async def test_backoff_sleep_duration(
+        self, retry_after: Any, retry_index: int, now: float, deadline: float, expected: float
+    ):
+        executor = _executor(_adapter_ok(), _recorder_mock(), validate=_validator_ok)
+        with patch("services.ai_service.scenario_executor.asyncio.sleep", new=AsyncMock()) as fake_sleep:
+            await executor._backoff(
+                self._err(retry_after), _request(deadline=deadline), lambda: now, retry_index=retry_index
+            )
+        fake_sleep.assert_awaited_once_with(expected)
+
+
+class TestF27RoutePolicy:
+    """F27 路由冻结快照策略消费：零重试 / 禁备用生效；键缺失 / 非法回退默认（R21）。"""
+
+    @pytest.mark.asyncio
+    async def test_zero_transient_retries_policy(self):
+        """路由保存零重试策略（transient_retries=0）：瞬态失败也不重试（仅 1 次调用）。"""
+        adapter = _adapter_fail_then_ok(failures=1)  # 首次瞬态失败、第二次本可成功
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot_with_route(_route((_candidate(0, "conn-remote"),), transient_retries=0), (_remote_conn(),)),
+            _validator_ok,
+        )
+        # 默认策略应为 2 次调用（首尝试 + 1 重试）；零重试生效 → 1 次
+        assert adapter._invoke_calls["n"] == 1
+        assert result.status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_fallback_disabled_dispatches_first_only_on_failure(self):
+        """禁备用策略：首候选失败耗尽后不切换，其余候选显式 skipped（不静默，R21）。"""
+        adapter = MagicMock()
+
+        async def _invoke(_req, conn, _deadline, _ctx):
+            raise TimeoutError("upstream timed out")
+
+        adapter.invoke = AsyncMock(side_effect=_invoke)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        with patch("services.ai_service.scenario_executor.asyncio.sleep", new=AsyncMock()):
+            result = await executor.execute(
+                _request(),
+                _snapshot_with_route(
+                    _route(
+                        (_candidate(0, "conn-remote"), _candidate(1, "conn-remote-2")),
+                        fallback_enabled=False,
+                    ),
+                    (_remote_conn(), _remote_conn("conn-remote-2")),
+                ),
+                _validator_ok,
+            )
+        calls = [call.args[1].connection_id for call in adapter.invoke.await_args_list]
+        assert calls == ["conn-remote", "conn-remote"]  # 只遍历首候选（默认重试预算）
+        assert result.status == "failed"
+        skipped = [d for d in result.candidate_decisions if d.decision == "skipped"]
+        assert len(skipped) == 1
+        assert skipped[0].candidate_index == 1
+        assert skipped[0].connection_id == "conn-remote-2"
+        assert skipped[0].reason == "fallback disabled by route policy"
+
+    @pytest.mark.asyncio
+    async def test_fallback_disabled_skips_remaining_on_success(self):
+        """禁备用策略：首候选成功也须显式 skipped 其余候选（成功 return 点同样追加）。"""
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot_with_route(
+                _route(
+                    (_candidate(0, "conn-remote"), _candidate(1, "conn-remote-2")),
+                    fallback_enabled=False,
+                ),
+                (_remote_conn(), _remote_conn("conn-remote-2")),
+            ),
+            _validator_ok,
+        )
+        assert result.status == "succeeded"
+        assert len(result.candidate_decisions) == 2
+        assert result.candidate_decisions[0].decision == "succeeded"
+        assert result.candidate_decisions[1].decision == "skipped"
+        assert result.candidate_decisions[1].reason == "fallback disabled by route policy"
+
+    @pytest.mark.asyncio
+    async def test_invalid_route_keys_fall_back_to_defaults(self):
+        """非法路由策略键（非 int / 非 bool）：回退构造默认，不伪装策略生效（R21）。"""
+        adapter = _adapter_fail_then_ok(failures=1)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(),
+            _snapshot_with_route(
+                _route((_candidate(0, "conn-remote"),), transient_retries="2", fallback_enabled="no"),
+                (_remote_conn(),),
+            ),
+            _validator_ok,
+        )
+        # 默认策略：首次失败 + 1 重试成功（非法键值未被消费为策略）
+        assert adapter._invoke_calls["n"] == 2
+        assert result.status == "succeeded"
