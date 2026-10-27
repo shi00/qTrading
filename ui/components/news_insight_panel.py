@@ -195,6 +195,15 @@ def _build_event_card(event: RiskEvent, is_expanded: bool, on_toggle) -> ft.Cont
     )
 
 
+def _exec_meta_summary(pairs: tuple[tuple[str, str], ...] | None) -> str:
+    """执行元数据身份摘要（模型 · AI 状态 · 用量状态）；未记录返回空串（调用方渲染「未记录」）。"""
+    if not pairs:
+        return ""
+    meta = dict(pairs)
+    parts = (meta.get("actual_model"), meta.get("ai_status"), meta.get("usage_status"))
+    return " · ".join(p for p in parts if p)
+
+
 def _build_ready(
     state: NewsInsightState, event_cards: ft.Control, sentiment_state: SentimentIndexState | None = None
 ) -> ft.Control:
@@ -233,6 +242,15 @@ def _build_ready(
     info_rows.append(
         ft.Text(
             f"{I18n.get('news_insight_gen_time')}: {gen_time_text}",
+            size=AppStyles.FONT_SIZE_BODY_SM,
+            color=AppColors.TEXT_SECONDARY,
+        )
+    )
+    # UIR-F05-002：执行元数据身份摘要；缺失时显式「未记录」，不得省略成「一切正常」（R21）。
+    exec_summary = _exec_meta_summary(state.execution_metadata) or I18n.get("news_insight_exec_meta_unknown")
+    info_rows.append(
+        ft.Text(
+            f"{I18n.get('news_insight_exec_meta')}: {exec_summary}",
             size=AppStyles.FONT_SIZE_BODY_SM,
             color=AppColors.TEXT_SECONDARY,
         )

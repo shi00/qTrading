@@ -110,6 +110,9 @@ class NewsInsightState:
     analysis_time: str | None = None
     # 复用场景的本次缓存读取时间（CST 展示串）；非复用为 None（UIR-F05-003）
     cache_read_time: str | None = None
+    # 本次分析的执行元数据（8 键白名单，按 key 排序的不可变 (key, value) 对）；
+    # None=未记录（旧链 / 历史快照，R21，不得渲染成「无异常」）。UIR-F05-002
+    execution_metadata: tuple[tuple[str, str], ...] | None = None
     coverage: tuple[SourceCoverage, ...] = ()
     # 证据列表（evidence_ready/degraded 时展示；无证据为空 tuple）
     evidence: tuple[EvidenceItem, ...] = ()
