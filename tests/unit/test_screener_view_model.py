@@ -937,7 +937,10 @@ class TestScreenerViewModelRunStrategy:
         assert passed_run_id is not None
         assert len(passed_run_id) == 16
         passed_params = call_kwargs.kwargs.get("params_snapshot")
-        assert passed_params == test_params
+        # UIR-F07-001: params_snapshot 契约扩展为「策略参数 + 提交时刻冻结的全局筛选配置子对象」。
+        # 原意图（策略参数完整透传：rsi_threshold/volume_ratio 等）保留；新增显式校验
+        # global_config.exclude_st。本用例未显式传 exclude_st，故为 run_strategy 默认冻结值 True。
+        assert passed_params == {**test_params, "global_config": {"exclude_st": True}}
 
     @pytest.mark.asyncio
     async def test_save_results_stores_i18n_key(self, vm):
