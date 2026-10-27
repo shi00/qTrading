@@ -963,8 +963,14 @@ def build_history_tree(
 
 
 def _format_pct(value: float | None) -> str:
-    """收益分位值 (0.0123 = 1.23%) 格式化; None 用占位符 '—'（R21 None 哨兵, 不伪装 0）。"""
-    return "—" if value is None else f"{value * 100:.2f}%"
+    """复盘汇总指标百分数格式化 (UIR-F09-004)。
+
+    输入值**已是百分数/百分点**：DAO ``screener_history.t5_pct`` 由 ``ReviewManager`` 写库时
+    ``round(ret * 100, 4)`` 落库（百分数），``alpha`` 为个股收益与基准收益两个百分数之差
+    （百分点），``review_stats_service`` 对其直接求日均值不改变量纲，故此处**不得再 ×100**
+    （否则 2.0 显示成 200.00%）。None 用占位符 '—'（R21 None 哨兵, 不伪装 0）。
+    """
+    return "—" if value is None else f"{value:.2f}%"
 
 
 def _grade_badge(grade: SampleGrade) -> ft.Control | None:
@@ -984,10 +990,14 @@ def _grade_badge(grade: SampleGrade) -> ft.Control | None:
 
 
 def _ci_text(lo: float | None, hi: float | None) -> str:
-    """t 分布 95% 置信区间文本; 任一端 None 表示无法计算 (n<30 或 std 无效)。"""
+    """t 分布 95% 置信区间文本（百分点，UIR-F09-004）。
+
+    上下界与均值同源（均基于百分数序列），已是百分点，故不再 ×100。任一端 None 表示
+    无法计算 (n<30 或 std 无效)，返回 '—'（R21）。
+    """
     if lo is None or hi is None:
         return "—"
-    return f"[{lo * 100:.2f}%, {hi * 100:.2f}%]"
+    return f"[{lo:.2f}%, {hi:.2f}%]"
 
 
 # RV-10: 覆盖缺口阈值——row_n / (avg_daily_count * n) 低于此值时即判定大量入选
