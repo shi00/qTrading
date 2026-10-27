@@ -153,14 +153,14 @@ def _enum_text(value: Any, mapping: dict[str, str], fallback_key: str) -> str:
     return I18n.get(key if key is not None else fallback_key)
 
 
-def _run_task_handler(coro_func: Callable, *args: Any) -> Callable[[ft.ControlEvent], None]:
+def _run_task_handler(coro_func: Callable, *args: Any, **kwargs: Any) -> Callable[[ft.ControlEvent], None]:
     """把异步命令包装为 on_click 处理器，经 ``page.run_task`` 提交（R16）。"""
 
     def _on_click(_e: ft.ControlEvent) -> None:
         try:
             page = ft.context.page
             if page is not None:
-                page.run_task(coro_func, *args)
+                page.run_task(coro_func, *args, **kwargs)
         except RuntimeError:
             logger.debug("[ModelManagementPanel] page unavailable for %s", getattr(coro_func, "__name__", coro_func))
 
@@ -758,18 +758,36 @@ def _build_pagination(state: ModelUsageState, vm: ModelUsageViewModel) -> ft.Con
     )
 
 
+def _submit_filter_task(vm: ModelUsageViewModel, **changes: Any) -> None:
+    """把筛选变化提交为异步重载任务（F35：事件 → ``vm.set_filter`` → 统一重载）。
+
+    R16：事件处理器内不 await，经 ``page.run_task`` 提交 ``set_filter`` 协程；
+    无页面上下文（单元测试）时跳过。
+    """
+    page = _get_page()
+    if page is None:
+        return
+    page.run_task(vm.set_filter, **changes)
+
+
 def _select_filter_handler(vm: ModelUsageViewModel, field: str) -> Callable[[ft.ControlEvent], None]:
-    """下拉过滤处理器工厂：``all`` 置 None，其余原样透传（非法值由 VM raise，不静默放宽）。"""
+    """下拉过滤处理器工厂：``all`` 置 None，其余原样透传（非法值由 VM raise，不静默放宽）。
+
+    F35：筛选变化经 ``_submit_filter_task`` 提交异步重载，不再只改控件状态。
+    """
 
     def _handler(e: ft.ControlEvent) -> None:
         value = get_control_value(e.control, ft.Dropdown)
-        vm.set_filter(**{field: None if value == _FILTER_ALL else value})
+        _submit_filter_task(vm, **{field: None if value == _FILTER_ALL else value})
 
     return _handler
 
 
 def _date_filter_handler(vm: ModelUsageViewModel, field: str, *, end_of_day: bool) -> Callable[[ft.ControlEvent], None]:
-    """日期过滤处理器工厂：仅当输入为完整合法日期或空值时更新过滤（半截 / 非法输入不改动）。"""
+    """日期过滤处理器工厂：仅当输入为完整合法日期或空值时更新过滤（半截 / 非法输入不改动）。
+
+    F35：合法输入经 ``_submit_filter_task`` 提交异步重载。
+    """
 
     def _handler(e: ft.ControlEvent) -> None:
         raw = (get_control_value(e.control, ft.TextField) or "").strip()
@@ -778,7 +796,7 @@ def _date_filter_handler(vm: ModelUsageViewModel, field: str, *, end_of_day: boo
         parsed = _parse_date_filter(raw, end_of_day=end_of_day)
         if raw and parsed is None:
             return  # 非法日期：不改变过滤
-        vm.set_filter(**{field: parsed})
+        _submit_filter_task(vm, **{field: parsed})
 
     return _handler
 
