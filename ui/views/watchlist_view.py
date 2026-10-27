@@ -312,15 +312,20 @@ def WatchlistView(
         set_confirm_open(True)
 
     async def _do_open_detail(ts_code: str) -> None:
-        """按 ts_code 拉取详情并按需提示失败 (R2: CancelledError 必须 raise)。"""
+        """按 ts_code 拉取详情并按需提示失败 (R2: CancelledError 必须 raise)。
+
+        UIR-F10-002：VM 返回 ``superseded``（请求已被更新的打开动作/关闭/dispose 取代）
+        时不得提示失败——仅 ``failed``（当前请求取数失败）才 toast，避免旧请求的迟到
+        结果误触发当前请求的失败提示。
+        """
         try:
-            ok = await vm.open_stock_detail(ts_code)
+            result = await vm.open_stock_detail(ts_code)
         except asyncio.CancelledError:
             raise
         except Exception as ex:
             logger.error("[WatchlistView] Open detail failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
-            ok = False
-        if not ok:
+            result = "failed"
+        if result == "failed":
             page = _get_page()
             if page is not None:
                 _show_toast(page, I18n.get("watchlist_detail_failed"), "error")
