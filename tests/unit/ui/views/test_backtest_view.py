@@ -124,6 +124,8 @@ class _FakeBacktestViewModel:
             delist_loss_amount: Any = 0.0
             # D1-m3: 与 BacktestState 同步 (退市清算回收率假设)
             delist_recovery_rate: Any = 0.3
+            # UIR-F11-004: 与 BacktestState 同步 (结果身份，成交分页按 run_id 重置)
+            run_id: Any = None
 
         self._state = _State()
         # D2: 模拟 VM 初始化装配策略 + 默认选中首个
@@ -674,12 +676,19 @@ class TestStatusRendering:
         fake_vm = env["fake_vm"]
         fake_metrics = (("sharpe_ratio", 1.2),)
         trade_mock = MagicMock(name="trade")
-        fake_vm._set_state(metrics=fake_metrics, trades=(trade_mock,), nav_curve=(1.0,), ic_series=(0.1,))
+        fake_vm._set_state(
+            metrics=fake_metrics,
+            trades=(trade_mock,),
+            run_id="run-42",
+            nav_curve=(1.0,),
+            ic_series=(0.1,),
+        )
         _rerender(env)
 
         env["mod"].BacktestResultPanel.assert_called_with(
             metrics=fake_metrics,
             trades=(trade_mock,),
+            run_id="run-42",
             nav_curve=(1.0,),
             nav_dates=(),
             benchmark_curve=(),
@@ -888,6 +897,7 @@ class TestBacktestViewErrorState:
             status_color="success",
             metrics=(("total_return", 0.1),),
             trades=(trade_mock,),
+            run_id="run-7",
         )
         _rerender(env)
 
@@ -898,6 +908,7 @@ class TestBacktestViewErrorState:
         mod.BacktestResultPanel.assert_called_with(
             metrics=(("total_return", 0.1),),
             trades=(trade_mock,),
+            run_id="run-7",
             nav_curve=(),
             nav_dates=(),
             benchmark_curve=(),
