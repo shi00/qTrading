@@ -657,6 +657,8 @@ class TestSchedulerI18nKeys:
             "sched_concept_sync_task_name",
             "sched_concept_sync_task_type",
             "sched_concept_sync_done",
+            "sched_concept_sync_partial",
+            "sched_concept_sync_failed",
         ]
         for key in keys:
             val = I18n.get(key)
@@ -672,6 +674,8 @@ class TestSchedulerI18nKeys:
             "sched_concept_sync_task_name": "Concept Data Sync",
             "sched_concept_sync_task_type": "Concept Sync",
             "sched_concept_sync_done": "Concept data sync complete",
+            "sched_concept_sync_partial": "Concept data sync incomplete ({sources}); not marked as done, will retry at next scheduled run",
+            "sched_concept_sync_failed": "Concept data sync failed ({sources}); not marked as done, will retry at next scheduled run",
         }
         for key, expected_text in expected.items():
             val = I18n.get(key)
