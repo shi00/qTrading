@@ -76,7 +76,7 @@ dev = [
     "ruff>=0.16.8,<0.17",  # UP-4.3 全库格式化升级：ruff 0.16 format 变更涉及全库 .py + .md，本 PR 独立消化格式 diff
     "pyright>=1.1.414",
     "pandas-stubs>=3.0.5.260914",
-    "uv>=0.13.4,<0.13.5",  # Security: PYSEC-2026-4321 (TLS verification against vendored webpki-roots missing post-quantum intermediates) fixed in 0.13.4
+    "uv>=0.13.6",  # Security: PYSEC-2026-4321 (TLS verification against vendored webpki-roots missing post-quantum intermediates) fixed in 0.13.4
     "pip-audit>=2.10.1",
     "hypothesis>=6.168.1,<6.169",
     "syrupy>=6.1.1",
@@ -85,7 +85,7 @@ dev = [
     "authlib>=1.9.1",  # Security: GHSA-6v38-4h7w-rj9h / GHSA-fch4-3c6x-j4gc / GHSA-7vr2-2fgp-9w7p / GHSA-c5mf-xmp2-59rc / GHSA-x4rv-c3wx-4cr8 fixed in 1.9.0（JWS 空签名、JWT bearer audience 校验、HMAC 算法混淆、ID token nonce 自禁用、JAR request_uri SSRF）; GHSA-8m4g-j4wp-wgcg (空 HMAC key 伪造 JWS/JWT 签名) fixed in 1.9.1; 传递依赖 fastmcp-slim
     "dnspython>=2.9.0",  # Security: GHSA-45c3-73f7-pv4m / CVE-2026-114605 (dns.name.from_wire_parser() 过度 CPU 消耗) fixed in 2.9.0; 传递依赖 email-validator
     "import-linter>=2.15",  # Architecture guard: enforce R1 layered dependencies (CLAUDE.md §4.1)
-    "fastmcp>=4.1.2,<4.1.4",  # Security: GHSA-7xgj-8392-5q4r (transform 后组件授权绕过，直呼路径跳过 AuthCheck) / GHSA-vqqp-x5qm-5qp4 (OAuth client credentials 缺 issuer 绑定致 client secret 泄漏) fixed in 4.1.2; 传递依赖 flet-mcp -> fastmcp -> fastmcp-slim
+    "fastmcp>=4.1.4",  # Security: GHSA-7xgj-8392-5q4r (transform 后组件授权绕过，直呼路径跳过 AuthCheck) / GHSA-vqqp-x5qm-5qp4 (OAuth client credentials 缺 issuer 绑定致 client secret 泄漏) fixed in 4.1.2; 传递依赖 flet-mcp -> fastmcp -> fastmcp-slim
     "flet-mcp==1.0.3",  # AI dev-time Flet API verification (CLAUDE.md §1.10); run via `python -c "from flet_mcp import mcp; mcp.run()"`; pinned == to align with flet main package (api.json is version-specific)
 ]
 optional = [
