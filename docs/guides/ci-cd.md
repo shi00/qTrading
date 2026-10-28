@@ -39,12 +39,16 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 1. 合并 release-please 生成的 Release PR：bump 版本号、更新 `CHANGELOG.md` 与 `.release-please-manifest.json`；
 2. **在该合并提交上立即推送同名 tag**：`git tag -a v<版本> -m "v<版本>" && git push origin v<版本>`（形如 `v0.11.0`，须与 `.release-please-manifest.json` 的版本一致，与 `release-please-config.json` 的 `include-v-in-tag: true` / `include-component-in-tag: false` 对齐）；
-3. tag 推送触发 `ci_cd.yml`（`push.tags: v*.*.*`）→ `build-windows` job → PyInstaller 打包 CPU/CUDA 两个变体 → smoke test → Inno Setup 制作安装包 → 安装包冒烟测试（`installer_smoke_crash_recovery.ps1` + `installer_smoke_running_app.ps1`，两步调用均校验退出码，任一失败即中断发布）；同时触发 release-only 的 `e2e-sidecar-real-smoke` job（真实 sidecar ready → migration → 主界面路径）→ `build-windows` 与 `e2e-sidecar-real-smoke` 均成功后才由 `release-windows` 创建 GitHub Release（任一失败即不发布；手动 `workflow_dispatch` 非 tag ref 仅构建产物，不创建 Release）。
+3. tag 推送触发 `ci_cd.yml`（`push.tags: v*.*.*`）→ `build-windows` job → PyInstaller 打包 CPU/CUDA 两个变体 → smoke test → Inno Setup 制作安装包 → 安装包冒烟测试（`installer_smoke_crash_recovery.ps1` + `installer_smoke_running_app.ps1`，两步调用均校验退出码，任一失败即中断发布）；同时触发 release-only 的 `e2e-sidecar-real-smoke` job（真实 sidecar ready → migration → 主界面路径）→ `build-windows` 与 `e2e-sidecar-real-smoke` 均成功后才由 `release-windows` 原子发布（任一失败即不发布；手动 `workflow_dispatch` 非 tag ref 仅构建产物，不创建 Release）。
+
+   `release-windows` 的原子发布分四步，全部通过才对外可见：① 本地校验下载到的 4 个变体资产（安装包 / `SHA256SUMS-<variant>.txt` / `sbom-<variant>.cdx.json`）齐全，且每个变体恰好 3 个文件，并以 `sha256sum` 复验安装包与清单中的摘要一致（`SHA256SUMS` 由 PowerShell `Get-FileHash | Format-List` 生成，不是 `sha256sum -c` 可解析的格式，故按 64 位十六进制摘要提取比对）；② 以 `draft: true` 创建（或复用同 tag 的）draft Release 并上传 12 个资产；③ 经 GitHub API 复验 draft 状态、`tag_name` 与触发 tag 一致、资产名单与 12 个预期文件完全一致，且每个资产的服务端 `digest`（`sha256:<hex>`）与本地文件实测摘要一致；④ 全部通过后才 `gh release edit <tag> --draft=false --latest` 转正式。本地校验失败时尚未创建 Release 对象；上传或复验失败时残留的只是 draft（仅写权限可见、不能被标记 latest），外部不会把它当作正式版本。
 
 **为什么必须人工推 tag**：`release-please.yml` 以 `skip-github-release: true` 运行，只产出 Release PR。release-please 默认用 `GITHUB_TOKEN` 创建 tag/Release，而 GitHub 规定由 `GITHUB_TOKEN` 触发的事件（`workflow_dispatch` / `repository_dispatch` 除外）不会再触发新的 workflow run，故 bot 创建的 tag 不会触发 `ci_cd.yml`，只会留下「Release 已存在但资产为 0」的空壳（历史 `v0.10.0` / `v0.10.1` 即此形态）。要改成自动发版须先在仓库侧配置 PAT/GitHub App token 并同步修订本文件，不得只改 workflow。
 
 - **tag 归属**：只有人工推送的 tag 会触发构建；若某版本 tag 已存在，禁止 `-f` 强推或删除重推（会改写既有 Release 的 tag 来源），改为提升版本号重走 Release PR。
-- **Release 正文**：由 `softprops/action-gh-release` 的 `generate_release_notes`（GitHub 自动变更摘要）生成；`CHANGELOG.md` 正文由 release-please 在 Release PR 中生成。两者不互相同步，属预期行为。
+- **失败重跑与幂等**：同一 tag 重跑时，若已存在 draft 则复用并覆盖同名资产（`overwrite_files: true`），重新校验后再发布；若已存在正式 Release 则直接失败，不覆盖、不重发（已发布资产的摘要可能已被下载方或校验记录引用，静默替换会造成不一致），需人工评估后显式删除再重跑。不采用「先 `gh release delete` 再重建」：该做法会删除既有 Release 记录及其 URL，对已发布版本更等同于未经授权的破坏性操作。
+- **latest 归属**：publish 时显式 `--latest`，保证正式版本被标记为 latest；GitHub API 规定 draft 与 prerelease 不能标记 latest，故 latest 只在发布动作内生效。
+- **Release 正文**：由 `softprops/action-gh-release` 的 `generate_release_notes`（GitHub 自动变更摘要）生成；`CHANGELOG.md` 正文由 release-please 在 Release PR 中生成。两者不互相同步，属预期行为。正文在 draft 创建时生成，publish 步骤只改 `draft` / `make_latest`、请求不含 body，故不会重写正文。
 - **切换后首个版本须验证**：合并下一个 Release PR → 推 tag → 确认新 Release 资产非空，且其后 release-please 仍能基于同名 tag 产出增量 changelog（条目不得重复或缺失）。
 - **历史空 Release 不自动补救**：`v0.10.0` / `v0.10.1` 等既有空 Release 保持原样，如需补资产另行人工评估。
 

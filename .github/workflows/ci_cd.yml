@@ -1716,15 +1716,183 @@ jobs:
           merge-multiple: false
           path: release-assets
 
-      - name: Create GitHub Release
+      - name: Verify downloaded release assets (before any Release is created)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 原子发布第 1 步：先校验 build-windows 上传的 4 个变体资产，全部通过才创建/更新
+          # draft Release。校验失败时尚未产生任何 Release 对象，最坏结果是「什么都没发生」。
+          variants=(cpu cuda embedded-cpu embedded-cuda)
+          for variant in "${variants[@]}"; do
+            dir="release-assets/release-assets-${variant}"
+            installer="AStockScreener-Setup-${variant}.exe"
+            sums="SHA256SUMS-${variant}.txt"
+            sbom="sbom-${variant}.cdx.json"
+            if [ ! -d "$dir" ]; then
+              echo "::error::missing artifact directory: $dir"
+              exit 1
+            fi
+            # 每个变体必须恰好 3 个文件（安装包 / SHA256SUMS / SBOM），多一个少一个都失败，
+            # 避免把残留或多余文件带进 draft。
+            expected=$(printf '%s\n' "$installer" "$sums" "$sbom" | sort)
+            actual=$(find "$dir" -maxdepth 1 -type f -printf '%f\n' | sort)
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::unexpected asset set in $dir"
+              echo "expected: $(printf '%s\n' "$expected" | paste -sd ',' -)"
+              echo "actual:   $(printf '%s\n' "$actual" | paste -sd ',' -)"
+              exit 1
+            fi
+            for file in "$installer" "$sums" "$sbom"; do
+              if [ ! -s "${dir}/${file}" ]; then
+                echo "::error::missing or empty release asset: ${dir}/${file}"
+                exit 1
+              fi
+            done
+            # SHA256SUMS 由 build-windows 用 PowerShell `Get-FileHash | Format-List` 生成
+            # （Algorithm/Hash/Path 三行），不是 `sha256sum -c` 可解析的「<hash>  <file>」格式，
+            # 故提取唯一 64 位十六进制摘要后与本地实测摘要比对。
+            mapfile -t digests < <(grep -oE '[0-9A-Fa-f]{64}' "${dir}/${sums}" || true)
+            if [ "${#digests[@]}" -ne 1 ]; then
+              echo "::error::${sums} must contain exactly one SHA256 digest (found ${#digests[@]})"
+              exit 1
+            fi
+            recorded="${digests[0],,}"
+            if ! grep -qF "$installer" "${dir}/${sums}"; then
+              echo "::error::${sums} does not reference ${installer}"
+              exit 1
+            fi
+            computed=$(sha256sum "${dir}/${installer}" | awk '{print $1}')
+            if [ "$computed" != "$recorded" ]; then
+              echo "::error::SHA256 mismatch for ${installer}: recorded=${recorded} computed=${computed}"
+              exit 1
+            fi
+          done
+          echo "All 4 variants verified: 12 assets present, installer SHA256 matches each SHA256SUMS."
+
+      - name: Check release state and tag lock (fail-closed)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # 原子发布第 2 步（幂等策略）：
+          #   - 同 tag 已有 draft：复用，后续覆盖同名资产并重新校验（用于失败重跑恢复）；
+          #   - 同 tag 已有正式 Release：直接失败，不改写、不重发（已发布资产的摘要可能
+          #     已被外部引用，静默替换会让既有下载/校验记录与页面资产不一致），需人工
+          #     评估后显式删除；不采用「先 gh release delete 再重建」的破坏性做法；
+          #   - 无 Release：稍后新建 draft。
+          # 同时确认远端 tag 存在，锁定本次 Release 的 tag 来源就是触发本次运行的 tag，
+          # 避免 target_commitish 默认值把 Release 建到别的 ref 上。
+          if ! gh api "repos/${GH_REPO}/git/ref/tags/${TAG}" --jq '.ref' >/dev/null; then
+            echo "::error::remote tag ${TAG} not found; refusing to create a release from a different ref."
+            exit 1
+          fi
+          err_file=$(mktemp)
+          if state=$(gh api "repos/${GH_REPO}/releases/tags/${TAG}" --jq '.draft' 2>"$err_file"); then
+            if [ "$state" != "true" ]; then
+              echo "::error::release ${TAG} is already published; refusing to overwrite a published release."
+              echo "::error::if replacement is truly intended, delete it manually first, then re-run."
+              exit 1
+            fi
+            echo "Existing draft release for ${TAG} found; it will be reused and its assets re-verified."
+          elif grep -q 'HTTP 404' "$err_file"; then
+            echo "No release exists for ${TAG}; a new draft will be created."
+          else
+            echo "::error::failed to query release state for ${TAG} (not a 404):"
+            cat "$err_file" >&2
+            exit 1
+          fi
+
+      - name: Create or reuse draft Release (assets uploaded, still unpublished)
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
+          # draft 对外不可见（仅写权限可见）、不能被标记 latest；失败时留下的只是这个
+          # draft，不会被外部当作正式版本。同名资产由 overwrite_files 覆盖（重跑恢复）。
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          prerelease: false
+          overwrite_files: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             release-assets/release-assets-cpu/*
             release-assets/release-assets-cuda/*
             release-assets/release-assets-embedded-cpu/*
             release-assets/release-assets-embedded-cuda/*
-          generate_release_notes: true
+
+      - name: Verify draft assets and SHA256 digests (gate before publish)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # 原子发布第 3 步：以 GitHub API 返回的 draft 为准再验一次（防止上传阶段
+          # 少传/错传/被同名旧资产顶替），全部通过才允许 publish。`digest` 是服务端
+          # 对落盘字节计算的 SHA256（格式 `sha256:<hex>`），与本地文件实测摘要一致才
+          # 说明上传内容未被改变。
+          release_json=$(gh api "repos/${GH_REPO}/releases/tags/${TAG}")
+          if [ "$(jq -r '.draft' <<<"$release_json")" != "true" ]; then
+            echo "::error::release ${TAG} is not a draft at verification time; refusing to continue."
+            exit 1
+          fi
+          actual_tag=$(jq -r '.tag_name' <<<"$release_json")
+          if [ "$actual_tag" != "$TAG" ]; then
+            echo "::error::release tag ${actual_tag} does not match ${TAG}."
+            exit 1
+          fi
+          variants=(cpu cuda embedded-cpu embedded-cuda)
+          expected_names=()
+          for variant in "${variants[@]}"; do
+            expected_names+=(
+              "AStockScreener-Setup-${variant}.exe"
+              "SHA256SUMS-${variant}.txt"
+              "sbom-${variant}.cdx.json"
+            )
+          done
+          expected=$(printf '%s\n' "${expected_names[@]}" | sort)
+          actual=$(jq -r '.assets[].name' <<<"$release_json" | sort)
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::draft asset set mismatch (expected 12 assets for 4 variants)"
+            diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
+            exit 1
+          fi
+          for variant in "${variants[@]}"; do
+            for file in \
+              "AStockScreener-Setup-${variant}.exe" \
+              "SHA256SUMS-${variant}.txt" \
+              "sbom-${variant}.cdx.json"; do
+              remote_digest=$(jq -r --arg name "$file" \
+                '.assets[] | select(.name == $name) | .digest // ""' <<<"$release_json")
+              if [ -z "$remote_digest" ]; then
+                echo "::error::asset ${file} has no server-side digest; cannot verify integrity."
+                exit 1
+              fi
+              local_digest="sha256:$(sha256sum "release-assets/release-assets-${variant}/${file}" | awk '{print $1}')"
+              if [ "$remote_digest" != "$local_digest" ]; then
+                echo "::error::digest mismatch for ${file}: remote=${remote_digest} local=${local_digest}"
+                exit 1
+              fi
+            done
+          done
+          echo "Draft ${TAG} verified: 12 assets, tag matches, every digest matches the local bytes."
+
+      - name: Publish draft Release as latest (verification passed)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # 原子发布第 4 步：一次 PATCH 完成 draft=false + make_latest=true（draft 与
+          # prerelease 均不能标记 latest，故 latest 必须在发布动作内生效）。请求不含
+          # body，generate_release_notes 生成的正文不会被改写。命令失败时 Release 仍是
+          # draft，外部仍不会把它当作正式版本。
+          gh release edit "$TAG" --draft=false --latest
 
   installer-smoke:
     # P3-CI-Installer-Smoke-Trigger + P3-CI-Installer-PowerShell-Syntax-Only 合并解决：
