@@ -836,9 +836,9 @@ class TestEmbeddedPostgresServiceCoverageGapFill:
         )
 
         service = _make_service(tmp_path)
-        # 写 .sha256 文件让校验进入读取 binary 阶段
+        # 写 .sha256 文件让校验进入读取 binary 阶段（UIR-F15-005 起格式须为 64 位 hex）
         sha256_path = service._sidecar_binary.with_suffix(service._sidecar_binary.suffix + ".sha256")
-        sha256_path.write_text("abcdef  fake", encoding="utf-8")
+        sha256_path.write_text(f"{'a' * 64}  fake", encoding="utf-8")
         # mock read_bytes 抛 OSError
         with patch.object(Path, "read_bytes", side_effect=OSError("disk read failed")):
             with pytest.raises(EmbeddedPostgresStartError, match="sidecar binary read failed during sha256"):
