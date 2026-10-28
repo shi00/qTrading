@@ -32,7 +32,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 ### 版本发布流程与 Release 管理
 
-发布流程: 打 `v*.*.*` tag → 触发 `build-windows` job → PyInstaller 打包 CPU/CUDA 两个变体 → smoke test → Inno Setup 制作安装包 → GitHub Release 发布。
+发布流程: 打 `v*.*.*` tag → 触发 `build-windows` job → PyInstaller 打包 CPU/CUDA 两个变体 → smoke test → Inno Setup 制作安装包；同时触发 release-only 的 `e2e-sidecar-real-smoke` job（真实 sidecar ready → migration → 主界面路径）→ `build-windows` 与 `e2e-sidecar-real-smoke` 均成功后才由 `release-windows` 创建 GitHub Release（任一失败即不发布；手动 `workflow_dispatch` 非 tag ref 仅构建产物，不创建 Release）。
 
 **其他 workflow**（`.github/workflows/` 下除 `ci_cd.yml` 主矩阵外的兜底流水线，由 `check_workflow_enum()` 门禁守护无遗漏）:
 - 前端流水线：文档 CI (`docs-ci.yml`)、Flet 前瞻验证 (`flet-nightly.yml`)、PostgreSQL sidecar Release (`sidecar.yml`)
