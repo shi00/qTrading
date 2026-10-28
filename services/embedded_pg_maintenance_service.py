@@ -405,6 +405,18 @@ class EmbeddedPgMaintenanceService:
             logger.info("[embedded_pg_maintenance] request_cancel: terminating active sidecar command")
         return True
 
+    @classmethod
+    def has_active_operation(cls) -> bool:
+        """是否存在在途的可取消 sidecar 命令（备份 dump）。
+
+        只读探测，不构造单例：供设置页判断「备份进行中禁止切换数据库模式」。
+        """
+        instance = cls._instance
+        if instance is None:
+            return False
+        with cls._lock:
+            return instance._active_proc is not None  # type: ignore[attr-defined]  # [reason: 单例 __init__ 已声明 _active_proc，但未作为类级注解]
+
     # ---- 错误分类 ----
 
     def _raise_for_exit_code(self, exit_code: int, stderr: str, command: str) -> None:

@@ -2485,13 +2485,16 @@ class TestConfigReviewFixes:
     @patch.dict(cfg_mod.os.environ, {"QTRADING_DATABASE_MODE": "embedded"}, clear=False)
     @patch.object(cfg_mod.ConfigHandler, "load_config", side_effect=RuntimeError("unexpected"))
     def test_is_embedded_mode_logs_warning_on_load_failure(self, mock_load):
-        """F8: load_config 失败时 is_embedded_mode 记录 warning 并返回 True（保持默认 embedded 模式）"""
+        """F8: load_config 失败时 is_embedded_mode 记录 warning 并返回 True（保持默认 embedded 模式）。
+
+        UIR-F15-001：判定已收敛到 resolve_database_mode 单一入口，warning 由该入口记录。
+        """
         with patch.object(cfg_mod, "logger") as mock_logger:
             result = cfg_mod.ConfigHandler.is_embedded_mode()
             # 与 QTRADING_DATABASE_MODE 默认 "embedded" 保持一致：
             # load_config 失败时返回 True，避免误判为 external 模式导致行为不一致
             assert result is True
-            warning_calls = [c for c in mock_logger.warning.call_args_list if "is_embedded_mode" in c[0][0]]
+            warning_calls = [c for c in mock_logger.warning.call_args_list if "resolve_database_mode" in c[0][0]]
             assert len(warning_calls) >= 1
 
     # === F9/F10: ensure_defaults 配置文件损坏加日志且保留原件 ===

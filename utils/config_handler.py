@@ -194,6 +194,14 @@ class ConfigHandler:
         return db.is_embedded_mode()
 
     @staticmethod
+    def resolve_database_mode(raw_config=None):
+        return db.resolve_database_mode(raw_config)
+
+    @staticmethod
+    def save_database_mode(mode) -> bool:
+        return db.save_database_mode(mode)
+
+    @staticmethod
     def get_db_url():
         return db.get_db_url()
 

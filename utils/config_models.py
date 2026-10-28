@@ -663,6 +663,14 @@ class AppConfig(BaseModel):
     embedded_pg_enabled: bool = Field(
         default=True, description="启用内嵌 PostgreSQL 模式（默认 True，与 QTRADING_DATABASE_MODE=embedded 默认值对齐）"
     )
+    # UIR-F15-001：用户在设置页选择的「下次启动模式」持久化偏好；
+    # 与 embedded_pg_enabled 同步写入。默认 None 表示「用户从未显式选择」，
+    # 升级路径必须回退 embedded_pg_enabled 推导，否则旧外置用户会被误拉回内置模式。
+    db_mode: str | None = Field(
+        default=None,
+        pattern="^(embedded|external)$",
+        description="用户选择的下次启动数据库模式（embedded/external），需重启生效；None 表示未显式选择",
+    )
     embedded_pg_sidecar_path: str = Field(
         default="", description="sidecar binary 绝对路径；空则按平台默认搜索（sidecars/qtrading-pg-sidecar[.exe]）"
     )

@@ -22,6 +22,7 @@ from dataclasses import dataclass, replace
 from data.persistence.db_config_service import ConnectionStatus, DatabaseConfigService
 from ui.viewmodels import Message
 from ui.viewmodels.config_panel_view_model_base import ConfigPanelViewModelBase
+from utils.config.db import DatabaseMode, DatabaseModeResolution
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, get_error_message_key
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -52,6 +53,8 @@ class DatabaseConfigState:
     status_message: Message | None = None
     status_type: str = "info"  # "success" / "error" / "warning" / "info"
     db_info: Message | None = None
+    # UIR-F15-001：当前生效模式 / 待生效模式（设置页身份展示的唯一数据源）
+    mode_resolution: DatabaseModeResolution | None = None
 
 
 class DatabaseConfigPanelViewModel(ConfigPanelViewModelBase[DatabaseConfigState]):
@@ -74,16 +77,28 @@ class DatabaseConfigPanelViewModel(ConfigPanelViewModelBase[DatabaseConfigState]
         on_change: Callable | None = None,
         on_loading_change: Callable[[bool], None] | None = None,
         load_password: bool = False,
+        activate_mode_on_save: bool = False,
     ):
         self._on_save_callback = on_save_callback
         self._on_test_success_callback = on_test_success_callback
         self._on_change = on_change
         self._on_loading_change = on_loading_change
         self._load_password = load_password
+        # UIR-F15-001：设置页保存外置配置即「切换为外置模式」，引导向导仅保存连接配置
+        self._activate_mode_on_save = activate_mode_on_save
         self._state = DatabaseConfigState()
         self._init_mixin_fields()
         # 同步初始化 state（从 ConfigHandler 加载配置）
         self._load_config_to_state()
+        # UIR-F15-001：冻结本进程启动时生效的模式，避免保存偏好后把「重启后生效」
+        # 误显示为「已生效」。
+        initial_resolution = self._state.mode_resolution
+        self._active_mode: DatabaseMode | None = (
+            initial_resolution.mode if isinstance(initial_resolution, DatabaseModeResolution) else None
+        )
+        self._active_source: str | None = (
+            initial_resolution.source if isinstance(initial_resolution, DatabaseModeResolution) else None
+        )
 
     # --- Config loading ---
 
@@ -98,7 +113,16 @@ class DatabaseConfigPanelViewModel(ConfigPanelViewModelBase[DatabaseConfigState]
             user=db_config.get("user", "postgres"),
             password=password or "",
             database=db_config.get("database", "astock"),
+            mode_resolution=self._resolve_mode(),
         )
+
+    @staticmethod
+    def _resolve_mode() -> DatabaseModeResolution | None:
+        try:
+            return ConfigHandler.resolve_database_mode()
+        except Exception as e:
+            logger.warning("[DatabaseConfigVM] resolve_database_mode failed: %s", DataSanitizer.sanitize_error(e))
+            return None
 
     # --- Mode / preference queries (View 通过 VM 访问, 避免直接 import ConfigHandler) ---
 
@@ -118,6 +142,66 @@ class DatabaseConfigPanelViewModel(ConfigPanelViewModelBase[DatabaseConfigState]
             asyncio.CancelledError: 取消时显式传播 (R2).
         """
         await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_config, {"db_show_advanced": value})
+
+    # --- Mode switching commands (UIR-F15-001) ---
+
+    def _mode_switch_block_reason(self, target: DatabaseMode) -> Message | None:
+        """返回禁止写入模式偏好原因；None 表示可写入。"""
+        resolution = self._state.mode_resolution
+        if resolution is not None and resolution.env_mode is not None and resolution.env_mode is not target:
+            return Message("settings_db_mode_env_forced", {"mode": resolution.env_mode.value})
+        if self._has_active_database_operation():
+            return Message("settings_db_mode_busy")
+        return None
+
+    @staticmethod
+    def _has_active_database_operation() -> bool:
+        """同步/迁移/备份进行中禁止切换模式（lazy import 避免 UI 层加载时依赖 services）。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceService
+        from services.task_manager import TaskManager, TaskStatus
+
+        if EmbeddedPgMaintenanceService.has_active_operation():
+            return True
+        return any(task.status in (TaskStatus.QUEUED, TaskStatus.RUNNING) for task in TaskManager().get_all_tasks())
+
+    def _refresh_mode_resolution(self) -> None:
+        resolution = self._resolve_mode()
+        if resolution is None:
+            return
+        if self._active_mode is not None:
+            # 保持「当前生效模式 = 进程启动模式」，只刷新 configured_mode（待生效偏好）
+            resolution = replace(resolution, mode=self._active_mode, source=self._active_source or "config")
+        self._set_state(mode_resolution=resolution)
+
+    async def _persist_database_mode(self, target: DatabaseMode) -> bool:
+        """持久化下次启动模式偏好（严格成功判定，失败不得报成功）。"""
+        blocked = self._mode_switch_block_reason(target)
+        if blocked is not None:
+            self._show_warning(blocked)
+            return False
+        saved = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_database_mode, target)
+        if saved is not True:
+            logger.error(
+                "[DatabaseConfigVM] save_database_mode(%s) returned %r; mode not persisted", target.value, saved
+            )
+            self._show_error(Message("settings_db_mode_save_failed"))
+            return False
+        self._refresh_mode_resolution()
+        return True
+
+    async def switch_to_embedded_mode(self) -> bool:
+        """切回内置 PostgreSQL 模式（重启后生效）。"""
+        if self._state.is_saving:
+            self._show_warning(Message("db_saving_in_progress"))
+            return False
+        if not await self._persist_database_mode(DatabaseMode.EMBEDDED):
+            return False
+        resolution = self._state.mode_resolution
+        if resolution is not None and resolution.restart_required:
+            self._show_success(Message("settings_db_mode_saved_restart"))
+        else:
+            self._show_success(Message("db_msg_saved"))
+        return True
 
     # --- Update commands ---
 
@@ -366,7 +450,17 @@ class DatabaseConfigPanelViewModel(ConfigPanelViewModelBase[DatabaseConfigState]
                 self._show_error(Message("db_save_failed"))
                 return False
 
-            self._show_success(Message("db_msg_saved"))
+            # UIR-F15-001：设置页保存外置配置即切换为外置模式（重启后生效）；
+            # 模式偏好写入失败必须报错，不得在配置已写后谎称已切换。
+            if self._activate_mode_on_save:
+                if not await self._persist_database_mode(DatabaseMode.EXTERNAL):
+                    return False
+
+            resolution = self._state.mode_resolution
+            if self._activate_mode_on_save and resolution is not None and resolution.restart_required:
+                self._show_success(Message("settings_db_mode_saved_restart"))
+            else:
+                self._show_success(Message("db_msg_saved"))
 
             if self._on_save_callback:
                 self._on_save_callback(config)

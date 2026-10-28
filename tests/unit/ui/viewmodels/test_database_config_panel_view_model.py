@@ -17,6 +17,7 @@ from ui.viewmodels.database_config_panel_view_model import (
     DatabaseConfigPanelViewModel,
     DatabaseConfigState,
 )
+from utils.config.db import DatabaseMode, DatabaseModeResolution
 from utils.thread_pool import TaskType
 
 pytestmark = pytest.mark.unit
@@ -64,6 +65,7 @@ def _make_vm(
     on_change: Callable | None = None,
     on_loading_change: Callable | None = None,
     load_password: bool = False,
+    activate_mode_on_save: bool = False,
 ) -> DatabaseConfigPanelViewModel:
     return DatabaseConfigPanelViewModel(
         on_save_callback=on_save_callback,
@@ -71,6 +73,7 @@ def _make_vm(
         on_change=on_change,
         on_loading_change=on_loading_change,
         load_password=load_password,
+        activate_mode_on_save=activate_mode_on_save,
     )
 
 
@@ -1049,3 +1052,149 @@ class TestSanitizeErrorAndCancelledError:
             mock_svc.test_connection = AsyncMock(side_effect=asyncio.CancelledError())
             with pytest.raises(asyncio.CancelledError):
                 await vm.save_config()
+
+
+# --- UIR-F15-001: 模式切换命令（保存下次启动模式 + 重启生效） ---
+
+
+def _success_result() -> MagicMock:
+    result = MagicMock()
+    result.status = ConnectionStatus.SUCCESS
+    result.message = "ok"
+    return result
+
+
+def _embedded_resolution() -> DatabaseModeResolution:
+    return DatabaseModeResolution(
+        mode=DatabaseMode.EMBEDDED,
+        source="config",
+        configured_mode=DatabaseMode.EMBEDDED,
+    )
+
+
+def _external_resolution(configured: DatabaseMode = DatabaseMode.EXTERNAL) -> DatabaseModeResolution:
+    return DatabaseModeResolution(
+        mode=DatabaseMode.EXTERNAL,
+        source="config",
+        configured_mode=configured,
+    )
+
+
+class TestModeSwitchCommands:
+    """保存外置配置即切换为外置模式；切回内置模式只写偏好、不热切换引擎。"""
+
+    @pytest.mark.asyncio
+    async def test_save_config_activates_external_mode(self, mock_config_handler, mock_thread_pool) -> None:
+        mock_config_handler.resolve_database_mode.side_effect = [
+            _embedded_resolution(),
+            _external_resolution(),
+        ]
+        mock_config_handler.save_database_mode.return_value = True
+        on_save = MagicMock()
+        vm = _make_vm(mock_config_handler, on_save_callback=on_save, activate_mode_on_save=True)
+
+        with (
+            patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc,
+            patch.object(DatabaseConfigPanelViewModel, "_has_active_database_operation", return_value=False),
+        ):
+            mock_svc.test_connection = AsyncMock(return_value=_success_result())
+            mock_svc.ensure_tables_exist = AsyncMock(return_value=(True, ""))
+
+            result = await vm.save_config()
+
+        assert result is True
+        mock_config_handler.save_database_mode.assert_called_once_with(DatabaseMode.EXTERNAL)
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == "settings_db_mode_saved_restart"
+        on_save.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_save_config_mode_persist_failure_is_not_success(self, mock_config_handler, mock_thread_pool) -> None:
+        """模式偏好写入失败（非 True）必须报错，不得在配置已写后谎称已切换。"""
+        mock_config_handler.resolve_database_mode.return_value = _embedded_resolution()
+        mock_config_handler.save_database_mode.return_value = False
+        on_save = MagicMock()
+        vm = _make_vm(mock_config_handler, on_save_callback=on_save, activate_mode_on_save=True)
+
+        with (
+            patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc,
+            patch.object(DatabaseConfigPanelViewModel, "_has_active_database_operation", return_value=False),
+        ):
+            mock_svc.test_connection = AsyncMock(return_value=_success_result())
+            mock_svc.ensure_tables_exist = AsyncMock(return_value=(True, ""))
+
+            result = await vm.save_config()
+
+        assert result is False
+        assert vm.state.status_type == "error"
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == "settings_db_mode_save_failed"
+        on_save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_save_config_without_activate_keeps_mode_untouched(
+        self, mock_config_handler, mock_thread_pool
+    ) -> None:
+        """引导向导等非设置页消费方仅保存连接配置，不改变模式偏好。"""
+        vm = _make_vm(mock_config_handler)
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(return_value=_success_result())
+            mock_svc.ensure_tables_exist = AsyncMock(return_value=(True, ""))
+
+            result = await vm.save_config()
+
+        assert result is True
+        mock_config_handler.save_database_mode.assert_not_called()
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == "db_msg_saved"
+
+    @pytest.mark.asyncio
+    async def test_switch_to_embedded_mode_persists_preference(self, mock_config_handler, mock_thread_pool) -> None:
+        mock_config_handler.resolve_database_mode.side_effect = [
+            _external_resolution(),
+            _external_resolution(configured=DatabaseMode.EMBEDDED),
+        ]
+        mock_config_handler.save_database_mode.return_value = True
+        vm = _make_vm(mock_config_handler)
+
+        with patch.object(DatabaseConfigPanelViewModel, "_has_active_database_operation", return_value=False):
+            result = await vm.switch_to_embedded_mode()
+
+        assert result is True
+        mock_config_handler.save_database_mode.assert_called_once_with(DatabaseMode.EMBEDDED)
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == "settings_db_mode_saved_restart"
+
+    @pytest.mark.asyncio
+    async def test_switch_to_embedded_blocked_by_env_mode(self, mock_config_handler, mock_thread_pool) -> None:
+        mock_config_handler.resolve_database_mode.return_value = DatabaseModeResolution(
+            mode=DatabaseMode.EMBEDDED,
+            source="env",
+            configured_mode=DatabaseMode.EMBEDDED,
+            env_mode=DatabaseMode.EXTERNAL,
+            conflict=True,
+        )
+        vm = _make_vm(mock_config_handler)
+
+        result = await vm.switch_to_embedded_mode()
+
+        assert result is False
+        mock_config_handler.save_database_mode.assert_not_called()
+        assert vm.state.status_type == "warning"
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == "settings_db_mode_env_forced"
+
+    @pytest.mark.asyncio
+    async def test_switch_to_embedded_blocked_when_database_busy(self, mock_config_handler, mock_thread_pool) -> None:
+        mock_config_handler.resolve_database_mode.return_value = _external_resolution()
+        vm = _make_vm(mock_config_handler)
+
+        with patch.object(DatabaseConfigPanelViewModel, "_has_active_database_operation", return_value=True):
+            result = await vm.switch_to_embedded_mode()
+
+        assert result is False
+        mock_config_handler.save_database_mode.assert_not_called()
+        assert vm.state.status_type == "warning"
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == "settings_db_mode_busy"

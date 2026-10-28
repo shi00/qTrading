@@ -27,6 +27,7 @@ from tests.unit.ui.component_renderer import (
     render_once,
     run_mount_effects,
 )
+from utils.config.db import DatabaseMode, DatabaseModeResolution
 
 pytestmark = pytest.mark.unit
 
@@ -36,11 +37,15 @@ class _FakeDatabaseVM:
 
     def __init__(self) -> None:
         self._subscribers: list[Any] = []
-        self.state = MagicMock()
+        # 真实 state（mode_resolution=None 时视图按内置模式渲染）
+        from ui.viewmodels.database_config_panel_view_model import DatabaseConfigState
+
+        self.state = DatabaseConfigState()
         self.reload_config = MagicMock()
         self.dispose_called = False
         self.load_show_advanced = MagicMock(return_value=False)
         self.save_show_advanced = AsyncMock()
+        self.switch_to_embedded_mode = AsyncMock(return_value=True)
 
     def subscribe(self, callback: Any) -> Any:
         self._subscribers.append(callback)
@@ -76,8 +81,11 @@ def _walk_controls(root: Any) -> list[Any]:
 def _render_tab(
     *,
     db_show_advanced: bool = False,
+    mode_resolution: Any = None,
 ) -> tuple[Any, dict[str, MagicMock], Any]:
     """渲染 DatabaseTab, 返回 (result, mock_components, component)。
+
+    mode_resolution: UIR-F15-001 模式身份（None 时按内置模式默认渲染）。
 
     mock_components 含:
         - embedded_status_card
@@ -95,6 +103,10 @@ def _render_tab(
 
     fake_vm = _FakeDatabaseVM()
     fake_vm.load_show_advanced.return_value = db_show_advanced
+    if mode_resolution is not None:
+        from ui.viewmodels.database_config_panel_view_model import DatabaseConfigState
+
+        fake_vm.state = DatabaseConfigState(mode_resolution=mode_resolution)
     mock_components: dict[str, MagicMock] = {}
 
     with (
@@ -225,6 +237,48 @@ class TestDatabaseTab3Panel:
         # 同时验证描述文本存在
         desc_texts = [t for t in texts if getattr(t, "value", None) and "sidecar" in str(t.value)]
         assert len(desc_texts) >= 1, "应渲染含'sidecar'的描述 Text 控件"
+
+
+class TestExternalModeRendering:
+    """UIR-F15-001: 外置模式下的面板组成与切回入口。"""
+
+    def test_external_mode_hides_embedded_panels_and_always_shows_form(
+        self, mock_i18n_state: Any, mock_app_colors_state: Any
+    ) -> None:
+        """外置模式：不渲染 sidecar 面板；高级开关关闭也展示外置连接表单。"""
+        result, mocks, _ = _render_tab(
+            db_show_advanced=False,
+            mode_resolution=DatabaseModeResolution(
+                mode=DatabaseMode.EXTERNAL,
+                source="config",
+                configured_mode=DatabaseMode.EXTERNAL,
+            ),
+        )
+
+        assert not mocks["embedded_status_card"].called, "外置模式不应渲染内置库状态卡"
+        assert not mocks["database_status_panel"].called, "外置模式不应渲染内置库状态面板"
+        assert not mocks["backup_restore_panel"].called, "外置模式不应渲染 sidecar 备份面板"
+        assert mocks["external_pg_form"].call_count >= 1, "外置模式必须可直接编辑连接配置"
+        # 非内置模式不展示高级模式开关
+        assert [c for c in _walk_controls(result) if isinstance(c, ft.Switch)] == []
+        # 环境未强制 → 提供切回内置入口
+        assert [c for c in _walk_controls(result) if isinstance(c, ft.Button)]
+
+    def test_switch_back_button_hidden_when_environment_forces_external(
+        self, mock_i18n_state: Any, mock_app_colors_state: Any
+    ) -> None:
+        """环境强制外置时写入偏好无法生效 → 不展示不可兑现的切回按钮。"""
+        result, _, _ = _render_tab(
+            mode_resolution=DatabaseModeResolution(
+                mode=DatabaseMode.EXTERNAL,
+                source="env",
+                configured_mode=DatabaseMode.EMBEDDED,
+                env_mode=DatabaseMode.EXTERNAL,
+                conflict=True,
+            ),
+        )
+
+        assert [c for c in _walk_controls(result) if isinstance(c, ft.Button)] == []
 
 
 # ============================================================================

@@ -953,3 +953,78 @@ async def test_prepare_database_runtime_frozen_without_sidecar_raises_when_maint
 
     with pytest.raises(EmbeddedPostgresStartError, match="sidecar binary not found"):
         await prepare_database_runtime()
+
+
+# --- UIR-F15-001: 设置页保存的模式偏好（db_mode）在重启后决定启动模式 ---
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_database_runtime_uses_persisted_external_mode(monkeypatch, tmp_path: Path) -> None:
+    """env 未设 + 设置页保存 db_mode=external → 不启动 sidecar（FR-DB-001 切换闭环）。"""
+    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+
+    from app.bootstrap import prepare_database_runtime
+
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.load_config",
+        staticmethod(lambda: _make_config_dict(db_mode="external", embedded_pg_enabled=False)),
+    )
+
+    from_config_calls: list[int] = []
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: from_config_calls.append(1) or MagicMock()),
+    )
+
+    result = await prepare_database_runtime()
+
+    assert result is None
+    assert from_config_calls == [], "db_mode=external 时不应启动内置 sidecar"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_database_runtime_uses_persisted_embedded_mode(monkeypatch, tmp_path: Path) -> None:
+    """env 未设 + 设置页保存 db_mode=embedded → 启动 sidecar 并返回 URL。"""
+    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+
+    from app.bootstrap import prepare_database_runtime
+    from data.persistence.embedded_postgres.protocol import ConnectionInfo
+
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.load_config",
+        staticmethod(lambda: _make_config_dict(db_mode="embedded", embedded_pg_enabled=True)),
+    )
+
+    fake_url = "postgresql+asyncpg://qtrading:mock_password_55432@127.0.0.1:55432/qtrading"
+    fake_info = ConnectionInfo(url=fake_url, port=55432, pid=12345, data_dir="/fake/pgdata")
+    mock_service = MagicMock()
+    mock_service.start = AsyncMock(return_value=fake_info)
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: mock_service),
+    )
+
+    result = await prepare_database_runtime()
+
+    assert result == fake_url
+
+
+def test_detect_scenario_skips_when_persisted_external_mode(monkeypatch) -> None:
+    """env 未设 + db_mode=external → detect 返回 None（不渲染内置库启动场景）。"""
+    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+
+    from app.bootstrap import detect_embedded_pg_startup_scenario
+    from utils.config_models import AppConfig
+
+    config = AppConfig.model_validate(_make_config_dict(db_mode="external", embedded_pg_enabled=False))
+
+    from_config_calls: list[int] = []
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: from_config_calls.append(1) or MagicMock()),
+    )
+
+    result = detect_embedded_pg_startup_scenario(config)
+
+    assert result is None
+    assert from_config_calls == []
