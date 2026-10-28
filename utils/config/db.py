@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import contextlib
+from dataclasses import dataclass
+from enum import StrEnum
 import os
 from pathlib import Path
 import re
@@ -18,6 +20,154 @@ from utils import config_handler as cfg
 from utils.sanitizers import DataSanitizer
 
 DEFAULTS = cfg.ConfigHandler.DEFAULT_CONFIG
+
+DATABASE_MODE_ENV = "QTRADING_DATABASE_MODE"
+
+
+class DatabaseMode(StrEnum):
+    """数据库模式（内置 sidecar / 外置 PostgreSQL）。"""
+
+    EMBEDDED = "embedded"
+    EXTERNAL = "external"
+
+
+@dataclass(frozen=True)
+class DatabaseModeResolution:
+    """数据库模式解析结果（启动期判定与设置页身份展示的唯一数据源）。
+
+    Attributes:
+        mode: 当前进程实际生效的模式（与 ``prepare_database_runtime`` 判定一致）。
+        source: 生效模式的决定来源——``env`` / ``config`` / ``fallback_standard_variant``。
+        configured_mode: 磁盘持久化的用户偏好模式（下次启动的期望模式）。
+        env_mode: 环境变量显式指定的模式；未设置或非法值为 ``None``。
+        conflict: 环境变量与生效模式不一致（环境强制覆盖了用户偏好）。
+        fallback_reason: 非用户偏好导致的降级原因（目前仅 ``standard_variant``）。
+    """
+
+    mode: DatabaseMode
+    source: str
+    configured_mode: DatabaseMode
+    env_mode: DatabaseMode | None = None
+    conflict: bool = False
+    fallback_reason: str | None = None
+
+    @property
+    def restart_required(self) -> bool:
+        """持久化偏好与当前生效模式不一致 → 需重启应用才能生效。"""
+        return self.configured_mode is not self.mode
+
+
+def _parse_mode(value: object) -> DatabaseMode | None:
+    raw = str(value or "").strip().lower()
+    for mode in DatabaseMode:
+        if raw == mode.value:
+            return mode
+    return None
+
+
+def _config_field(raw_config: Mapping[str, Any] | object | None, key: str, default: object = None) -> object:
+    if raw_config is None:
+        return default
+    if isinstance(raw_config, Mapping):
+        return raw_config.get(key, default)
+    return getattr(raw_config, key, default)
+
+
+def _explicit_env_mode() -> DatabaseMode | None:
+    """环境变量显式指定的模式；未设置/空/非法值视为未指定（保持默认 embedded）。"""
+    return _parse_mode(os.environ.get(DATABASE_MODE_ENV, ""))
+
+
+def _configured_mode(raw_config: Mapping[str, Any] | object | None) -> tuple[DatabaseMode, bool]:
+    """读取磁盘持久化模式，返回 ``(模式, 是否由显式 db_mode 键给出)``。
+
+    旧配置无 ``db_mode`` 键时按 ``embedded_pg_enabled`` 推导，避免升级后出现
+    「偏好内置 / 实际外置」的假冲突。
+    """
+    explicit = _parse_mode(_config_field(raw_config, "db_mode"))
+    if explicit is not None:
+        return explicit, True
+    enabled = bool(_config_field(raw_config, "embedded_pg_enabled", True))
+    return (DatabaseMode.EMBEDDED if enabled else DatabaseMode.EXTERNAL), False
+
+
+def resolve_database_mode(raw_config: Mapping[str, Any] | object | None = None) -> DatabaseModeResolution:
+    """解析数据库模式（R-B1 单一入口）。
+
+    优先级与 ``app.bootstrap.prepare_database_runtime`` 的真实启动判定保持一致：
+    1. ``QTRADING_DATABASE_MODE`` 显式设置时由环境变量决定（external 恒优先）；
+    2. 否则由持久化的 ``db_mode``（旧配置回退 ``embedded_pg_enabled``）决定；
+    3. ``embedded_pg_enabled=False`` 时内置库不启动（生效外置，且与偏好冲突时标记 conflict）；
+    4. 标准版 frozen 包（无内置 sidecar 二进制）自动降级外置（``fallback_reason``）。
+
+    Args:
+        raw_config: 已加载配置（Mapping 或 AppConfig）；None 时自行加载 ConfigHandler 配置。
+    """
+    if raw_config is None:
+        try:
+            raw_config = cfg.ConfigHandler.load_config()
+        except Exception as e:
+            cfg.logger.warning(
+                "[ConfigHandler] resolve_database_mode load_config failed: %s",
+                DataSanitizer.sanitize_error(e),
+            )
+            raw_config = None
+
+    enabled = bool(_config_field(raw_config, "embedded_pg_enabled", True))
+    configured, _explicit = _configured_mode(raw_config)
+    env_mode = _explicit_env_mode()
+
+    if env_mode is DatabaseMode.EXTERNAL:
+        return DatabaseModeResolution(
+            mode=DatabaseMode.EXTERNAL,
+            source="env",
+            configured_mode=configured,
+            env_mode=env_mode,
+            conflict=configured is DatabaseMode.EMBEDDED,
+        )
+
+    if not enabled:
+        return DatabaseModeResolution(
+            mode=DatabaseMode.EXTERNAL,
+            source="config",
+            configured_mode=configured,
+            env_mode=env_mode,
+            conflict=env_mode is DatabaseMode.EMBEDDED,
+        )
+
+    if env_mode is DatabaseMode.EMBEDDED:
+        return DatabaseModeResolution(
+            mode=DatabaseMode.EMBEDDED,
+            source="env",
+            configured_mode=configured,
+            env_mode=env_mode,
+            conflict=configured is DatabaseMode.EXTERNAL,
+        )
+
+    if configured is DatabaseMode.EXTERNAL:
+        return DatabaseModeResolution(
+            mode=DatabaseMode.EXTERNAL,
+            source="config",
+            configured_mode=configured,
+            env_mode=env_mode,
+        )
+
+    if is_frozen_standard_variant_without_sidecar(raw_config):
+        return DatabaseModeResolution(
+            mode=DatabaseMode.EXTERNAL,
+            source="fallback_standard_variant",
+            configured_mode=configured,
+            env_mode=env_mode,
+            conflict=False,
+            fallback_reason="standard_variant",
+        )
+
+    return DatabaseModeResolution(
+        mode=DatabaseMode.EMBEDDED,
+        source="config",
+        configured_mode=configured,
+        env_mode=env_mode,
+    )
 
 
 def set_embedded_db_url(url: str) -> None:
@@ -105,28 +255,31 @@ def is_frozen_standard_variant_without_sidecar(raw_config: Mapping[str, Any] | o
 
 
 def is_embedded_mode() -> bool:
-    """判断是否为 embedded PostgreSQL 模式（R-B1 单一入口点）。
+    """判断当前进程是否按内置 PostgreSQL 模式运行（R-B1 单一入口点）。
 
-    判定条件：
-    1. QTRADING_DATABASE_MODE == "embedded" AND AppConfig.embedded_pg_enabled == True
-    2. 非“无 bundled sidecar 的标准版 PyInstaller 发行包”（B01）
-    `.get()` default True 与 AppConfig.embedded_pg_enabled field default 保持一致。
+    判定统一委托 :func:`resolve_database_mode`，保证「设置页展示的模式」与
+    「启动期实际生效的模式」不会出现两套判定。
     """
-    mode = os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower()
-    if mode != "embedded":
-        return False
-    try:
-        raw_cfg = cfg.ConfigHandler.load_config()
-    except Exception as e:
-        cfg.logger.warning(
-            "[ConfigHandler] is_embedded_mode load_config failed: %s",
-            DataSanitizer.sanitize_error(e),
-        )
-        # 与 QTRADING_DATABASE_MODE 默认 "embedded" 保持一致
-        return not is_frozen_standard_variant_without_sidecar(None)
-    if not bool(raw_cfg.get("embedded_pg_enabled", True)):
-        return False
-    return not is_frozen_standard_variant_without_sidecar(raw_cfg)
+    return resolve_database_mode().mode is DatabaseMode.EMBEDDED
+
+
+def save_database_mode(mode: str | DatabaseMode) -> bool:
+    """持久化下一次启动希望使用的数据库模式（需重启应用后生效）。
+
+    ``db_mode`` 与 ``embedded_pg_enabled`` 同步写入，兼容仅读取
+    ``embedded_pg_enabled`` 的既有代码路径。返回严格布尔结果，调用方不得
+    把非 ``True`` 返回值当作保存成功。
+    """
+    normalized = mode if isinstance(mode, DatabaseMode) else _parse_mode(mode)
+    if normalized is None:
+        raise ValueError(f"unsupported database mode: {mode!r}")
+    saved = cfg.ConfigHandler.save_config(
+        {
+            "db_mode": normalized.value,
+            "embedded_pg_enabled": normalized is DatabaseMode.EMBEDDED,
+        }
+    )
+    return saved is True
 
 
 def get_db_url():

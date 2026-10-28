@@ -653,18 +653,6 @@ def mask_sensitive(value):
     return DataSanitizer.sanitize_token(value)
 
 
-def _is_frozen_standard_variant_without_sidecar(config: AppConfig) -> bool:
-    """判定当前是否为不含内置 PostgreSQL sidecar 二进制的标准版打包发行物（B01）。
-
-    委托 ``utils.config.db.is_frozen_standard_variant_without_sidecar`` 单一判定源（R-B1），
-    确保 ``prepare_database_runtime``、``detect_embedded_pg_startup_scenario`` 与
-    ``ConfigHandler.is_embedded_mode()`` 行为完全一致。
-    """
-    from utils.config.db import is_frozen_standard_variant_without_sidecar
-
-    return is_frozen_standard_variant_without_sidecar(config)
-
-
 async def prepare_database_runtime() -> str | None:
     """根据数据库模式准备运行时（Phase 2 §3.4）。
 
@@ -674,9 +662,10 @@ async def prepare_database_runtime() -> str | None:
 
     必须在 ``CacheManager()`` 之前调用（CacheManager 构造时建引擎）。
 
-    模式判定：``QTRADING_DATABASE_MODE`` 环境变量（embedded|external，默认 embedded）。
-    spec.md §3 不变量 1：默认 embedded 与产品契约"无需任何配置"对齐，
-    用户显式设 ``QTRADING_DATABASE_MODE=external`` 才进入 external 分支。
+    模式判定统一委托 ``utils.config.db.resolve_database_mode``（UIR-F15-001）：
+    环境变量 ``QTRADING_DATABASE_MODE`` 显式设置时优先，否则读取设置页持久化的
+    ``db_mode``（旧配置回退 ``embedded_pg_enabled``），标准版 frozen 包无 sidecar
+    时自动降级 external。默认仍是 embedded（spec.md §3 不变量 1）。
 
     Returns:
         embedded 模式且启动成功时返回 sidecar ``ConnectionInfo.url``；
@@ -688,36 +677,33 @@ async def prepare_database_runtime() -> str | None:
     """
     import os
 
-    mode = os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower()
-    if mode != "embedded":
-        # M5: mode=external 但 config.embedded_pg_enabled=True → 记 WARNING（用户可能误配置）
-        from utils.config_handler import ConfigHandler
-        from utils.config_models import AppConfig
-
-        config = AppConfig.model_validate(ConfigHandler.load_config())
-        if config.embedded_pg_enabled:
-            logger.warning(
-                "[Bootstrap] QTRADING_DATABASE_MODE=%s but embedded_pg_enabled=True; "
-                "embedded PostgreSQL service will NOT start (external mode takes precedence)",
-                mode,
-            )
-        return None
-
-    from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+    from utils.config.db import DatabaseMode, resolve_database_mode
     from utils.config_handler import ConfigHandler
     from utils.config_models import AppConfig
 
     config = AppConfig.model_validate(ConfigHandler.load_config())
-    if not config.embedded_pg_enabled:
-        logger.warning("[Bootstrap] QTRADING_DATABASE_MODE=embedded but embedded_pg_enabled=False; skip")
+    resolution = resolve_database_mode(config)
+
+    if resolution.mode is not DatabaseMode.EMBEDDED:
+        if resolution.env_mode is DatabaseMode.EXTERNAL and config.embedded_pg_enabled:
+            # M5: mode=external 但 config.embedded_pg_enabled=True → 记 WARNING（用户可能误配置）
+            logger.warning(
+                "[Bootstrap] QTRADING_DATABASE_MODE=%s but embedded_pg_enabled=True; "
+                "embedded PostgreSQL service will NOT start (external mode takes precedence)",
+                resolution.env_mode.value,
+            )
+        elif resolution.env_mode is DatabaseMode.EMBEDDED and not config.embedded_pg_enabled:
+            logger.warning("[Bootstrap] QTRADING_DATABASE_MODE=embedded but embedded_pg_enabled=False; skip")
+        elif resolution.fallback_reason == "standard_variant":
+            logger.info(
+                "[Bootstrap] Standard frozen build without bundled sidecar binary detected; "
+                "falling back to external database mode"
+            )
+        else:
+            logger.info("[Bootstrap] external database mode selected (source=%s)", resolution.source)
         return None
 
-    if _is_frozen_standard_variant_without_sidecar(config):
-        logger.info(
-            "[Bootstrap] Standard frozen build without bundled sidecar binary detected; "
-            "falling back to external database mode"
-        )
-        return None
+    from data.persistence.embedded_postgres.service import EmbeddedPostgresService
 
     # R-Arch-2/Ske-1：embedded 模式下若 DATABASE_URL 环境变量被外部误设，
     # ConfigHandler.get_db_url() Priority 1 会返回该值覆盖 embedded URL，
@@ -810,15 +796,13 @@ def detect_embedded_pg_startup_scenario(config: AppConfig) -> EmbeddedPgStartupS
     Returns:
         ``EmbeddedPgStartupScenario`` 枚举值；external 模式或未启用时返回 ``None``
     """
-    mode = os.environ.get("QTRADING_DATABASE_MODE", "embedded").lower()
-    if mode != "embedded":
-        logger.debug("[Bootstrap] detect skipped: QTRADING_DATABASE_MODE=%s (not embedded)", mode)
-        return None
-    if not config.embedded_pg_enabled:
-        logger.debug("[Bootstrap] detect skipped: embedded_pg_enabled=False")
-        return None
-    if _is_frozen_standard_variant_without_sidecar(config):
-        logger.debug("[Bootstrap] detect skipped: standard frozen build without bundled sidecar")
+    from utils.config.db import DatabaseMode, resolve_database_mode
+
+    resolution = resolve_database_mode(config)
+    if resolution.mode is not DatabaseMode.EMBEDDED:
+        logger.debug(
+            "[Bootstrap] detect skipped: database mode=%s (source=%s)", resolution.mode.value, resolution.source
+        )
         return None
 
     from data.persistence.embedded_postgres.service import EmbeddedPostgresService

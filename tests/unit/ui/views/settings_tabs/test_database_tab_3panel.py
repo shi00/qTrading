@@ -27,6 +27,7 @@ from tests.unit.ui.component_renderer import (
     render_once,
     run_mount_effects,
 )
+from utils.config.db import DatabaseMode, DatabaseModeResolution
 
 pytestmark = pytest.mark.unit
 
@@ -36,11 +37,15 @@ class _FakeDatabaseVM:
 
     def __init__(self) -> None:
         self._subscribers: list[Any] = []
-        self.state = MagicMock()
+        # 真实 state（mode_resolution=None 时视图按内置模式渲染）
+        from ui.viewmodels.database_config_panel_view_model import DatabaseConfigState
+
+        self.state = DatabaseConfigState()
         self.reload_config = MagicMock()
         self.dispose_called = False
         self.load_show_advanced = MagicMock(return_value=False)
         self.save_show_advanced = AsyncMock()
+        self.switch_to_embedded_mode = AsyncMock(return_value=True)
 
     def subscribe(self, callback: Any) -> Any:
         self._subscribers.append(callback)
@@ -76,8 +81,11 @@ def _walk_controls(root: Any) -> list[Any]:
 def _render_tab(
     *,
     db_show_advanced: bool = False,
+    mode_resolution: Any = None,
 ) -> tuple[Any, dict[str, MagicMock], Any]:
     """渲染 DatabaseTab, 返回 (result, mock_components, component)。
+
+    mode_resolution: UIR-F15-001 模式身份（None 时按内置模式默认渲染）。
 
     mock_components 含:
         - embedded_status_card
@@ -95,6 +103,10 @@ def _render_tab(
 
     fake_vm = _FakeDatabaseVM()
     fake_vm.load_show_advanced.return_value = db_show_advanced
+    if mode_resolution is not None:
+        from ui.viewmodels.database_config_panel_view_model import DatabaseConfigState
+
+        fake_vm.state = DatabaseConfigState(mode_resolution=mode_resolution)
     mock_components: dict[str, MagicMock] = {}
 
     with (
@@ -227,6 +239,48 @@ class TestDatabaseTab3Panel:
         assert len(desc_texts) >= 1, "应渲染含'sidecar'的描述 Text 控件"
 
 
+class TestExternalModeRendering:
+    """UIR-F15-001: 外置模式下的面板组成与切回入口。"""
+
+    def test_external_mode_hides_embedded_panels_and_always_shows_form(
+        self, mock_i18n_state: Any, mock_app_colors_state: Any
+    ) -> None:
+        """外置模式：不渲染 sidecar 面板；高级开关关闭也展示外置连接表单。"""
+        result, mocks, _ = _render_tab(
+            db_show_advanced=False,
+            mode_resolution=DatabaseModeResolution(
+                mode=DatabaseMode.EXTERNAL,
+                source="config",
+                configured_mode=DatabaseMode.EXTERNAL,
+            ),
+        )
+
+        assert not mocks["embedded_status_card"].called, "外置模式不应渲染内置库状态卡"
+        assert not mocks["database_status_panel"].called, "外置模式不应渲染内置库状态面板"
+        assert not mocks["backup_restore_panel"].called, "外置模式不应渲染 sidecar 备份面板"
+        assert mocks["external_pg_form"].call_count >= 1, "外置模式必须可直接编辑连接配置"
+        # 非内置模式不展示高级模式开关
+        assert [c for c in _walk_controls(result) if isinstance(c, ft.Switch)] == []
+        # 环境未强制 → 提供切回内置入口
+        assert [c for c in _walk_controls(result) if isinstance(c, ft.Button)]
+
+    def test_switch_back_button_hidden_when_environment_forces_external(
+        self, mock_i18n_state: Any, mock_app_colors_state: Any
+    ) -> None:
+        """环境强制外置时写入偏好无法生效 → 不展示不可兑现的切回按钮。"""
+        result, _, _ = _render_tab(
+            mode_resolution=DatabaseModeResolution(
+                mode=DatabaseMode.EXTERNAL,
+                source="env",
+                configured_mode=DatabaseMode.EMBEDDED,
+                env_mode=DatabaseMode.EXTERNAL,
+                conflict=True,
+            ),
+        )
+
+        assert [c for c in _walk_controls(result) if isinstance(c, ft.Button)] == []
+
+
 # ============================================================================
 # 模块级纯函数: _get_page + _do_save_show_advanced 异常路径
 # ============================================================================
@@ -357,3 +411,41 @@ class TestDoSaveShowAdvancedExceptionPath:
             # R2 红线: CancelledError 必须传播, 不能被 except Exception 吞没
             with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线测试仅验证异常传播, 无其他状态可断言
                 await handler(*handler_args)
+
+
+class TestModeSourceLabel:
+    """UIR-F15-001: 模式来源文案经字面量 key 映射（i18n 死键门禁可静态识别）。"""
+
+    def test_known_sources_pass_literal_i18n_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """三个已知来源必须各自命中对应 key 字面量，而非 f-string 拼接。"""
+        from ui.views.settings_tabs import database_tab as mod
+
+        called_keys: list[str] = []
+
+        def fake_get(key: str, *args: Any, **kwargs: Any) -> str:
+            called_keys.append(key)
+            return f"T:{key}"
+
+        monkeypatch.setattr(mod.I18n, "get", fake_get)
+
+        assert mod._mode_source_label("env") == "T:settings_db_mode_source_env"
+        assert mod._mode_source_label("config") == "T:settings_db_mode_source_config"
+        assert mod._mode_source_label("fallback_standard_variant") == (
+            "T:settings_db_mode_source_fallback_standard_variant"
+        )
+        assert called_keys == [
+            "settings_db_mode_source_env",
+            "settings_db_mode_source_config",
+            "settings_db_mode_source_fallback_standard_variant",
+        ]
+
+    def test_unknown_source_falls_back_to_raw_identifier(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """未知来源不得伪造文案，回退为原始标识且不查询 i18n。"""
+        from ui.views.settings_tabs import database_tab as mod
+
+        def fail_get(key: str, *args: Any, **kwargs: Any) -> str:
+            raise AssertionError(f"未知来源不应查询 i18n，实际查询了 {key}")
+
+        monkeypatch.setattr(mod.I18n, "get", fail_get)
+
+        assert mod._mode_source_label("future_value") == "future_value"
