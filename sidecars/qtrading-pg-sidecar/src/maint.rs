@@ -97,6 +97,9 @@ struct DoctorJson {
     lock_held: bool,
     postmaster_pid: Option<u32>,
     postgres_alive: bool,
+    /// 运行中实例的实际监听端口（来自 postmaster.pid，仅进程存活时取值）。
+    /// 未运行 / pid 残留 / 端口缺失或非法时为 null（未知），不回退到配置端口。
+    port: Option<u16>,
     stale_postmaster_pid: bool,
     cluster_state: Option<String>,
     control_data_readable: bool,
@@ -119,6 +122,18 @@ struct DoctorJson {
     /// §13.7.44 / §7.5 残留物扫描：兄弟目录中检测到的 `*.partial` 文件（dump 中断残留）。
     dump_partials: Vec<String>,
     issues: Vec<Issue>,
+}
+
+/// 运行中 postmaster 的监听端口（可信运行态）。
+///
+/// 仅当 PostgreSQL 进程实际存活时取 `postmaster.pid` 中记录的端口；
+/// 进程已死（pid 残留）、端口缺失或为 0 时返回 `None`（未知），
+/// 不回退到任何配置端口（调用方不得用外置配置补位）。
+fn runtime_port(pm: Option<&pgbin::PostmasterInfo>, postgres_alive: bool) -> Option<u16> {
+    if !postgres_alive {
+        return None;
+    }
+    pm.and_then(|i| i.port).filter(|p| *p > 0)
 }
 
 pub fn doctor(data_dir: &Path) -> Result<(), u8> {
@@ -198,6 +213,8 @@ pub fn doctor(data_dir: &Path) -> Result<(), u8> {
     // -- 进程与锁 --
     let pm = pgbin::read_postmaster_pid(&layout.data_dir);
     let postgres_alive = pm.as_ref().is_some_and(|i| pgbin::process_alive(i.pid));
+    // 实际监听端口只取可信运行态（进程存活时的 postmaster.pid），供 UI 状态面板展示
+    let port = runtime_port(pm.as_ref(), postgres_alive);
     let stale_postmaster_pid = pm.is_some() && !postgres_alive;
     if stale_postmaster_pid {
         issues.push(warning(
@@ -368,6 +385,7 @@ pub fn doctor(data_dir: &Path) -> Result<(), u8> {
         lock_held,
         postmaster_pid: pm.as_ref().map(|i| i.pid),
         postgres_alive,
+        port,
         stale_postmaster_pid,
         cluster_state: control.as_ref().map(|c| c.cluster_state.clone()),
         control_data_readable,
@@ -1087,6 +1105,32 @@ mod tests {
         std::fs::write(data_dir.join("random.txt"), "x").unwrap();
         assert!(doctor(&data_dir).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runtime_port_requires_alive_process_and_valid_port() {
+        let info = pgbin::PostmasterInfo {
+            pid: 1234,
+            port: Some(55432),
+        };
+        // 进程存活 → 取 postmaster.pid 端口
+        assert_eq!(runtime_port(Some(&info), true), Some(55432));
+        // 进程已死（pid 残留）→ 未知，不得沿用旧端口
+        assert_eq!(runtime_port(Some(&info), false), None);
+        // 无 postmaster.pid → 未知
+        assert_eq!(runtime_port(None, true), None);
+        // 端口缺失 → 未知
+        let no_port = pgbin::PostmasterInfo {
+            pid: 1234,
+            port: None,
+        };
+        assert_eq!(runtime_port(Some(&no_port), true), None);
+        // 端口 0（非法）→ 未知，不当作有效端口
+        let zero_port = pgbin::PostmasterInfo {
+            pid: 1234,
+            port: Some(0),
+        };
+        assert_eq!(runtime_port(Some(&zero_port), true), None);
     }
 
     #[tokio::test]

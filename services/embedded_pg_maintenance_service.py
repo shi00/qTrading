@@ -43,6 +43,17 @@ class EmbeddedPgMaintenanceError(RuntimeError):
     """sidecar 维护命令失败（非 0 退出 / JSON 解析失败 / schema 不匹配）。"""
 
 
+def _coerce_runtime_port(value: object) -> int | None:
+    """校验 doctor JSON 可选 ``port`` 字段：仅接受 1..65535 的整数。
+
+    旧版 sidecar 无该字段、字段为 null、类型非整数或越界时一律返回 ``None``（未知）。
+    ``None`` 表示「端口未知」，调用方不得用外置配置端口补位，也不得当作 0。
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 < value <= 65535 else None
+
+
 @dataclass(frozen=True, slots=True)
 class DoctorResult:
     """sidecar doctor 命令解析结果（对齐 sidecar maint.rs DoctorJson struct）。
@@ -61,6 +72,8 @@ class DoctorResult:
     missing_tools: list[str] = field(default_factory=list)
     lock_held: bool = False
     postgres_alive: bool = False
+    # 运行中实例的实际监听端口（sidecar v1+ 可选字段；旧版/未运行时为 None = 未知）
+    port: int | None = None
     state_file: str = "unknown"
     runtime_status: str | None = None
     last_start_error: str | None = None
@@ -456,6 +469,7 @@ class EmbeddedPgMaintenanceService:
             missing_tools=data.get("missing_tools", []),
             lock_held=data.get("lock_held", False),
             postgres_alive=data.get("postgres_alive", False),
+            port=_coerce_runtime_port(data.get("port")),
             state_file=data.get("state_file", "unknown"),
             runtime_status=data.get("runtime_status"),
             last_start_error=data.get("last_start_error"),

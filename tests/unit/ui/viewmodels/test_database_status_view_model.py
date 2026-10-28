@@ -30,11 +30,16 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture
 def mock_doctor_result():
-    """构造一个 running 状态的 DoctorResult mock。"""
+    """构造一个 running 状态的 DoctorResult mock。
+
+    UIR-F15-003: 内置实例以随机端口启动（此处 P=55432），与配置 db_port=5432 不同，
+    状态面板必须显示运行态端口而非配置端口。
+    """
     result = MagicMock()
     result.data_dir = "/fake/data"
     result.pg_version = 16
     result.postgres_alive = True
+    result.port = 55432
     result.state_file = "running"
     return result
 
@@ -112,8 +117,100 @@ class TestRefreshStatus:
         assert vm.state.is_running is True
         assert vm.state.pg_version == "16"
         assert vm.state.data_dir == "/fake/data"
-        assert vm.state.port == 5432
+        # UIR-F15-003: 显示运行态端口 P=55432，而非配置端口 Q=5432
+        assert vm.state.port == 55432
         assert vm.state.log_dir == "/fake/log_dir"
+
+    @pytest.mark.asyncio
+    async def test_refresh_status_port_from_runtime_not_config(self, vm, mock_doctor_result):
+        """配置 db_port=5432 但实例监听 55432 时，必须显示 55432（不得用配置补位）。"""
+        mock_doctor_result.port = 55432
+        await vm.refresh_status()
+        assert vm.state.port == 55432
+        assert vm.state.port != 5432
+
+    @pytest.mark.asyncio
+    async def test_refresh_status_port_unknown_when_old_sidecar(
+        self, mock_maintenance_service, mock_doctor_result, mock_config_dict
+    ):
+        """旧版 sidecar 无 port 字段（None）时显示未知，不得回退到配置端口 5432。"""
+        mock_doctor_result.port = None
+        with patch(
+            "ui.viewmodels.database_status_view_model.ConfigHandler.load_config",
+            return_value=mock_config_dict,
+        ):
+            vm = DatabaseStatusViewModel(maintenance_service=mock_maintenance_service)
+        await vm.refresh_status()
+        assert vm.state.is_running is True
+        assert vm.state.port is None
+
+    @pytest.mark.asyncio
+    async def test_refresh_status_port_cleared_when_stopped(
+        self, mock_maintenance_service, mock_doctor_result, mock_config_dict
+    ):
+        """实例已停止时端口未知（None），不沿用上次端口也不当作 0。"""
+        mock_doctor_result.postgres_alive = False
+        mock_doctor_result.port = 55432
+        with patch(
+            "ui.viewmodels.database_status_view_model.ConfigHandler.load_config",
+            return_value=mock_config_dict,
+        ):
+            vm = DatabaseStatusViewModel(maintenance_service=mock_maintenance_service)
+        await vm.refresh_status()
+        assert vm.state.is_running is False
+        assert vm.state.port is None
+
+    @pytest.mark.asyncio
+    async def test_refresh_status_latest_request_wins(self, mock_maintenance_service, mock_config_dict):
+        """并发刷新乱序返回时，只采纳最新一次请求的结果（旧端口不得覆盖新端口）。"""
+        import asyncio
+
+        old_result = MagicMock()
+        old_result.data_dir = "/fake/data"
+        old_result.pg_version = 16
+        old_result.postgres_alive = True
+        old_result.port = 55432
+        old_result.state_file = "running"
+
+        new_result = MagicMock()
+        new_result.data_dir = "/fake/data"
+        new_result.pg_version = 16
+        new_result.postgres_alive = True
+        new_result.port = 61000
+        new_result.state_file = "running"
+
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        calls = 0
+
+        async def fake_doctor():
+            nonlocal calls
+            index = calls
+            calls += 1
+            if index == 0:
+                first_started.set()
+                await release_first.wait()
+                return old_result
+            return new_result
+
+        mock_maintenance_service.doctor = AsyncMock(side_effect=fake_doctor)
+        with patch(
+            "ui.viewmodels.database_status_view_model.ConfigHandler.load_config",
+            return_value=mock_config_dict,
+        ):
+            vm = DatabaseStatusViewModel(maintenance_service=mock_maintenance_service)
+
+            first = asyncio.create_task(vm.refresh_status())
+            await first_started.wait()
+            second = asyncio.create_task(vm.refresh_status())
+            await second
+            assert vm.state.port == 61000
+
+            # 旧请求晚返回：不得用过期快照回退端口
+            release_first.set()
+            await first
+
+        assert vm.state.port == 61000
 
     @pytest.mark.asyncio
     async def test_refresh_status_running_message(self, vm):

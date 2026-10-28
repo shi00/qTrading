@@ -67,6 +67,7 @@ def _build_doctor_json(args):
         "missing_tools": [],
         "lock_held": False,
         "postgres_alive": True,
+        "port": 55432,
         "state_file": "running",
         "runtime_status": "running",
         "last_start_error": None,
