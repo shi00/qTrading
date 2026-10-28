@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
 from core.i18n import I18n, Message
-from data.sync.base import SyncResult
+from data.sync.base import SyncResult, SyncStatus
 from services.task_manager import EXCLUSIVE_GROUP_MARKET_SYNC, AppTask, TaskStatus
 from utils.scheduler_service import SchedulerService
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -2080,6 +2080,97 @@ class TestCatchupLogic:
         svc._mark_daily_update_done_db.assert_not_called()
         assert svc._last_update_date is None
         assert mock_dp_instance.sync_daily_market_snapshot.await_count == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("not_ready_reason", ["empty", "permission", "short_write"])
+    async def test_critical_not_ready_does_not_advance_watermark(self, not_ready_reason):
+        """UIR-F14-001 Given 关键表因 EMPTY / 权限拒绝 / 严格短写被登记为不可就绪
+        （同步层写入 failed_critical_tables），When 补偿逐日同步结束，
+        Then is_complete=False，水位不前移且记录失败退避。"""
+        svc = _make_svc()
+        calls = {"n": 0}
+
+        async def _sync(trade_date=None, sync_result=None):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                sync_result.failed_critical_tables.append("daily_quotes")
+
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.sync_daily_market_snapshot = AsyncMock(side_effect=_sync)
+        mock_tm_instance = MagicMock()
+        mock_tm_instance.update_progress.return_value = True
+        with (
+            patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 12, 0, 0)),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            patch("data.sync.base.SyncResult", return_value=SyncResult()),
+            patch("utils.scheduler_service.logger.warning"),
+        ):
+            svc._mark_daily_update_done_db = AsyncMock()
+            await svc._catchup_logic(
+                "task1",
+                [date(2024, 6, 12), date(2024, 6, 13), date(2024, 6, 14)],
+            )
+
+        svc._mark_daily_update_done_db.assert_not_called()
+        assert svc._last_update_date is None
+        assert svc._catchup_consecutive_failures == 1
+
+    @pytest.mark.asyncio
+    async def test_optional_sparse_empty_does_not_block_watermark(self):
+        """UIR-F14-001 Given 仅可选稀疏表登记失败/合法空，When 补偿全部成功，
+        Then is_complete=True，水位推进到最后一个遗漏交易日（合法空不影响完整性）。"""
+        svc = _make_svc()
+
+        async def _sync(trade_date=None, sync_result=None):
+            sync_result.failed_optional_tables.append("limit_list")
+
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.sync_daily_market_snapshot = AsyncMock(side_effect=_sync)
+        mock_tm_instance = MagicMock()
+        mock_tm_instance.update_progress.return_value = True
+        with (
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            patch("data.sync.base.SyncResult", return_value=SyncResult()),
+            patch("utils.scheduler_service.logger.warning"),
+        ):
+            svc._persist_run_date_db = AsyncMock()
+            await svc._catchup_logic("task1", [date(2024, 6, 12), date(2024, 6, 13)])
+
+        assert svc._last_update_date == "20240613"
+        svc._persist_run_date_db.assert_awaited_once_with(
+            "sched_last_daily_update",
+            "scheduler_last_daily_update",
+            "20240613",
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancelled_day_does_not_advance_watermark(self):
+        """UIR-F14-001 Given 单日同步因取消/停机中止（status=cancelled），When 补偿结束，
+        Then is_complete=False，水位不前移（取消不记成功）。"""
+        svc = _make_svc()
+
+        async def _sync(trade_date=None, sync_result=None):
+            sync_result.status = SyncStatus.CANCELLED.value
+
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.sync_daily_market_snapshot = AsyncMock(side_effect=_sync)
+        mock_tm_instance = MagicMock()
+        mock_tm_instance.update_progress.return_value = True
+        with (
+            patch("utils.scheduler_service.get_now", return_value=datetime(2024, 6, 15, 12, 0, 0)),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+            patch("data.sync.base.SyncResult", return_value=SyncResult()),
+            patch("utils.scheduler_service.logger.warning"),
+        ):
+            svc._mark_daily_update_done_db = AsyncMock()
+            await svc._catchup_logic("task1", [date(2024, 6, 12)])
+
+        svc._mark_daily_update_done_db.assert_not_called()
+        assert svc._last_update_date is None
+        assert svc._catchup_consecutive_failures == 1
 
 
 class TestOnJobMissedCatchup:

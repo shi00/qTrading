@@ -852,7 +852,7 @@ class SchedulerService:
         check_data_exists 缓存跳过，重复同步安全（天然续传）。逐日捕获异常（CancelledError
         重抛、其他异常记日志后继续），单日失败不中断整批。
         MAJOR-05: 幂等键的推进以「每一天都明确成功」为准，而非仅看共享 sync_result 的
-        is_complete——单日同步的系统级异常在失败表登记段（historical.py 的 _record_failed）
+        is_complete——单日同步的系统级异常在失败表登记段（historical.py 的 _record_not_ready）
         之前就重抛，该日「失败了却没记账」，只看 is_complete 会把未记账的失败日当成功。
         """
         from services.task_manager import TaskManager  # lazy-import: 启动性能
@@ -869,9 +869,10 @@ class SchedulerService:
         # 关键表仅其一失败时单日同步不抛异常（historical.py 仅两者都失败才 raise），故
         # 不能只按「无异常」判定成功；failed_critical_tables 批内只增不减、is_complete 单调，
         # 一旦为假即冻结，保证部分推进时水位不越过任何关键表失败日（R21/R22）。
-        # 已知边界（不在本次修复内，属报告 MINOR-02/MAJOR-02）：关键表因权限被拒时单日同步
-        # 同样不抛异常、也不登记失败表（SYNC_RESULT_SKIPPED_PERMISSION），本层无法区分该日的
-        # 「无数据」与「合法空」，仍会判为成功。
+        # UIR-F14-001：关键表因权限被拒（SYNC_RESULT_SKIPPED_PERMISSION）、关键表 EMPTY 或
+        # 严格短写（丢行 > 5%）现由同步层登记进 failed_critical_tables，本层经 is_complete
+        # 即可区分「不可就绪」与「完整成功」，不再把这些日子判为成功；可选稀疏表的合法空日
+        # 仍不影响完整性（由 sync_empty_days 登记）。
         failed_dates: list[datetime.date] = []
         contiguous_success_end: datetime.date | None = None
         for i, d in enumerate(missed_dates):
