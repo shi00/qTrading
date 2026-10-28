@@ -2,7 +2,9 @@ name: Renovate Dependency Update
 
 on:
   schedule:
-    - cron: '0 2 * * 1'
+    # UTC 周日 18:00 = 北京时间周一 02:00，落在 renovate.json（timezone=Asia/Shanghai）允许窗口内：
+    # "every weekend"（周末全天）与 "before 5am every weekday" / 锁维护 "before 5am on Monday" 均匹配。
+    - cron: '0 18 * * 0'
   workflow_dispatch:
     inputs:
       dry_run:
