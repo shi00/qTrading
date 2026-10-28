@@ -1,11 +1,13 @@
 """DAO for watchlist (用户关注列表, FR-UX-004, Task 4.2 / RV-05).
 
 支持 add/remove/get/is_in 四个核心操作。upsert by ts_code 保留首次加入日期。
-RV-05: add 时固化观察起点（最近交易日 + 复权收盘价），IS NULL 守卫只写一次。
+RV-05: add 时固化观察起点（最近交易日 + 复权基准乘积 close × adj_factor），
+IS NULL 守卫只写一次。
 """
 
 import datetime
 import logging
+import math
 
 import pandas as pd
 import sqlalchemy as sa
@@ -44,11 +46,14 @@ class WatchlistDao(BaseDao):
         基础三列语义不变：已存在时更新 stock_name/note，保留首次加入日期
         (added_at)。R8: 使用 _save_upsert 而非 _write_db(is_many=True)。
 
-        RV-05: 额外解析观察起点（该股在 daily_quotes 的最新交易日 + 复权收盘价
-        close/adj_factor，与 review_manager._qfq_return_pct 同口径），经 IS NULL
-        守卫一次性写入 added_trade_date/added_price。两步非原子：中断后起点
-        停留 NULL，由下次 add 的同守卫自愈；并发 add 时先者的起点胜出（等价）。
-        行情缺失（新上市未同步/已退市）时保持 NULL，不伪造（R21）。
+        RV-05: 额外解析观察起点（该股在 daily_quotes 的最新交易日 + 复权基准乘积
+        close × adj_factor），经 IS NULL 守卫一次性写入 added_trade_date/added_price。
+        乘积口径与 review_manager._qfq_return_pct 一致（复权因子为乘子，见
+        utils/qfq.py:qfq_ratio_expr）：消费方按
+        ``(close_t × adj_t) / added_price − 1`` 计算复权持仓期收益，分母即观察起点
+        乘积，base 因子自然抵消。两步非原子：中断后起点停留 NULL，由下次 add 的
+        同守卫自愈；并发 add 时先者的起点胜出（等价）。行情缺失（新上市未同步/
+        已退市）时保持 NULL，不伪造（R21）。
         """
         df = pd.DataFrame([{"ts_code": ts_code, "stock_name": stock_name, "note": note}])
         written = await self._save_upsert(
@@ -65,10 +70,15 @@ class WatchlistDao(BaseDao):
     async def _latest_quote(self, ts_code: str) -> tuple[datetime.date, float | None] | None:
         """解析该股最近行情作为观察起点（RV-05）。
 
-        返回 (trade_date, 复权收盘价)：adj_factor 缺失/为 0 时价格为 None
-        （交易日仍有效；未复权价与未来复权口径不可比，宁缺毋错）；无行情
-        记录时整体返回 None。查询走 daily_quotes 主键 (ts_code, trade_date)
-        前缀 + trade_date desc limit 1，单行开销。
+        返回 (trade_date, 复权基准乘积)：价格列存 ``close × adj_factor``——复权因子
+        是乘子（``utils/qfq.py:qfq_ratio_expr`` 的 ``复权价 = close × adj / base``），
+        故乘积之比即复权收益率之比，消费方
+        ``(close_t × adj_t) / added_price − 1`` 与 ``review_manager._qfq_return_pct``
+        完全同口径。adj_factor 缺失/为 0/非正/非有限时价格为 None（交易日仍有效；
+        未复权价与未来复权口径不可比，宁缺毋错，R21）；close 缺失/非正/非有限同样
+        不写价格（0 或负值会被下游当作合法分母）。无行情记录时整体返回 None。
+        查询走 daily_quotes 主键 (ts_code, trade_date) 前缀 + trade_date desc
+        limit 1，单行开销。
         """
         stmt = (
             sa.select(DailyQuotes.trade_date, DailyQuotes.close, DailyQuotes.adj_factor)
@@ -86,10 +96,12 @@ class WatchlistDao(BaseDao):
         price: float | None = None
         if close_raw is not None and bool(pd.notna(close_raw)):
             close = float(close_raw)
-            if adj_raw is not None and bool(pd.notna(adj_raw)):
+            if math.isfinite(close) and close > 0 and adj_raw is not None and bool(pd.notna(adj_raw)):
                 adj = float(adj_raw)
-                if adj != 0:
-                    price = close / adj
+                if math.isfinite(adj) and adj > 0:
+                    product = close * adj
+                    if math.isfinite(product):
+                        price = product
         return (trade_date, price)
 
     async def remove_from_watchlist(self, ts_code: str) -> int:
