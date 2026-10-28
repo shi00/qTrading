@@ -54,6 +54,15 @@ _CLEANUP_GRACEFUL_TIMEOUT_S = 5.0
 # 无前缀的文件按明文读（Unix，或 Windows 升级前的旧文件）。
 _EMBEDDED_PW_DPAPI_PREFIX = "PGPW2:"
 
+# UIR-F15-005：``<binary>.sha256`` 旁文件内容为 sha256sum 标准格式 ``<hex>  <filename>``，
+# hex 段按 64 位小写十六进制校验。
+_SHA256_HEX_CHARS = frozenset("0123456789abcdef")
+
+
+def _is_sha256_hex(value: str) -> bool:
+    """判断字符串是否为完整 sha256 十六进制摘要（64 位小写 hex）。"""
+    return len(value) == 64 and all(ch in _SHA256_HEX_CHARS for ch in value)
+
 
 def _unprotect_win32_blob(blob: bytes) -> bytes:  # pragma: no cover -- win-only
     """F5（检视 06）：Windows DPAPI 解密（CryptUnprotectData，绑定当前用户+机器）。
@@ -534,29 +543,62 @@ class EmbeddedPostgresService:
 
         读取 ``<sidecar_binary>.sha256`` 文件（每行格式：``<hex>  <filename>``），
         与 sidecar_binary 实际 SHA256 比对。不匹配则抛 EmbeddedPostgresStartError
-        提示重新安装。缺失 .sha256 文件时跳过校验（开发场景容错）。
+        提示重新安装。
+
+        UIR-F15-005：校验策略按运行模式显式区分——
+        - **打包（frozen）布局**：旁文件由 ``AStockScreener.spec`` 随 binary 同目录交付
+          （``_internal/sidecars/<exe>.sha256``），构建时按实际打包字节计算。旁文件
+          缺失/不可读/为空/格式非法一律视为发行物损坏，明确失败且不启动 sidecar；
+        - **源码开发模式**：未 cargo build 或未注入 ``SIDECAR_SHA256`` 时无旁文件属正常，
+          缺失/不可读时跳过校验（宽容），但文件存在且内容不合法仍按损坏失败。
         """
         import hashlib
 
+        packaged = bool(getattr(sys, "frozen", False))
         sha256_path = self._sidecar_binary.with_suffix(self._sidecar_binary.suffix + ".sha256")
         if not sha256_path.exists():
+            if packaged:
+                self._svc_logger.error("sha256 manifest missing in packaged build: %s", sha256_path)
+                raise EmbeddedPostgresStartError(
+                    f"sidecar sha256 manifest missing: {sha256_path}; "
+                    f"please reinstall qTrading to restore the bundled sidecar checksum"
+                )
             self._svc_logger.debug("sha256 file missing, skip verification: %s", sha256_path)
             return
 
         try:
             expected_line = sha256_path.read_text(encoding="utf-8").strip()
-            # 标准格式："<hex>  <filename>"，取首个空白前部分；空文件视为损坏，跳过校验
-            # （M09-F3: 原 "".split()[0] 会 IndexError 穿透为未分类异常）
-            parts = expected_line.split()
-            if not parts:
-                self._svc_logger.warning("sha256 file empty, skip verification: %s", sha256_path)
-                return
-            expected = parts[0].lower()
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
+            if packaged:
+                self._svc_logger.error(
+                    "sha256 manifest unreadable in packaged build: %s", DataSanitizer.sanitize_error(exc)
+                )
+                raise EmbeddedPostgresStartError(
+                    f"sidecar sha256 manifest unreadable: {DataSanitizer.sanitize_error(exc)}; "
+                    f"please reinstall qTrading"
+                ) from exc
             self._svc_logger.warning(
                 "sha256 file read failed, skip verification: %s", DataSanitizer.sanitize_error(exc)
             )
             return
+
+        # 标准格式："<hex>  <filename>"，取首个空白前部分
+        parts = expected_line.split()
+        expected = parts[0].lower() if parts else ""
+        if not _is_sha256_hex(expected):
+            if packaged:
+                self._svc_logger.error("sha256 manifest invalid in packaged build: %s", sha256_path)
+                raise EmbeddedPostgresStartError(
+                    f"sidecar sha256 manifest invalid (expected 64 hex chars at {sha256_path}); "
+                    f"please reinstall qTrading"
+                )
+            if not expected:
+                self._svc_logger.warning("sha256 file empty, skip verification: %s", sha256_path)
+                return
+            self._svc_logger.error("sidecar sha256 invalid: %r; please reinstall qTrading", expected[:16])
+            raise EmbeddedPostgresStartError(
+                f"sidecar sha256 invalid (expected 64 hex chars, got {expected[:8]!r}); please reinstall qTrading"
+            )
 
         try:
             actual = hashlib.sha256(self._sidecar_binary.read_bytes()).hexdigest().lower()

@@ -15,6 +15,7 @@ FAKE_READY JSON + 写 password 到 password_file + 等 stdin EOF 退出），通
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -1583,3 +1584,180 @@ class TestEmbeddedPasswordRead:
             with pytest.raises(EmbeddedPostgresStartError, match="DPAPI decrypt failed"):
                 _read_embedded_password(p, logging.getLogger("qtrading.embedded_postgres"))
         assert "DPAPI" in caplog.text
+
+
+# =============================================================================
+# UIR-F15-005: sidecar SHA256 旁文件校验（打包布局严格 / 源码开发宽容）
+# =============================================================================
+class TestEmbeddedPostgresServiceSidecarSha256:
+    """``_verify_sidecar_sha256`` 的 frozen 严格模式与源码开发宽容模式。
+
+    frozen 布局下旁文件缺失/不可读/为空/格式非法/摘要不匹配一律明确失败，
+    且失败发生在 Popen 之前（不启动 sidecar）。
+    """
+
+    @staticmethod
+    def _sha256_path(binary: Path) -> Path:
+        return binary.with_suffix(binary.suffix + ".sha256")
+
+    @classmethod
+    def _write_correct_side_file(cls, binary: Path) -> Path:
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        path = cls._sha256_path(binary)
+        path.write_text(f"{digest}  {binary.name}\n", encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _make_service(fake_paths, monkeypatch, *, frozen: bool):
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        monkeypatch.setattr("sys.frozen", frozen, raising=False)
+        EmbeddedPostgresService._reset_singleton()
+        return EmbeddedPostgresService(**fake_paths)
+
+    @staticmethod
+    def _popen_spy():
+        """记录 Popen 调用次数；失败态断言零调用。"""
+        calls = {"n": 0}
+
+        def _popen(*args, **kwargs):
+            calls["n"] += 1
+            return _FakePopen(*args, **kwargs)
+
+        return calls, _popen
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_frozen_missing_manifest_fails_before_popen(self, fake_paths, monkeypatch) -> None:
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        service = self._make_service(fake_paths, monkeypatch, frozen=True)
+        calls, popen_spy = self._popen_spy()
+        with patch.object(svc_module.subprocess, "Popen", popen_spy):
+            with pytest.raises(EmbeddedPostgresStartError, match="manifest missing"):
+                await service.start()
+        assert calls["n"] == 0
+        assert service._process is None
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_frozen_empty_manifest_fails_before_popen(self, fake_paths, monkeypatch) -> None:
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        service = self._make_service(fake_paths, monkeypatch, frozen=True)
+        self._sha256_path(fake_paths["sidecar_binary"]).write_text("  \n", encoding="utf-8")
+        calls, popen_spy = self._popen_spy()
+        with patch.object(svc_module.subprocess, "Popen", popen_spy):
+            with pytest.raises(EmbeddedPostgresStartError, match="manifest invalid"):
+                await service.start()
+        assert calls["n"] == 0
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_frozen_invalid_hash_fails_before_popen(self, fake_paths, monkeypatch) -> None:
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        service = self._make_service(fake_paths, monkeypatch, frozen=True)
+        self._sha256_path(fake_paths["sidecar_binary"]).write_text("z" * 64 + "  file\n", encoding="utf-8")
+        calls, popen_spy = self._popen_spy()
+        with patch.object(svc_module.subprocess, "Popen", popen_spy):
+            with pytest.raises(EmbeddedPostgresStartError, match="manifest invalid"):
+                await service.start()
+        assert calls["n"] == 0
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_frozen_unreadable_manifest_fails_before_popen(self, fake_paths, monkeypatch) -> None:
+        """旁文件路径为目录 → read_text 抛 OSError，打包布局下必须失败。"""
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        service = self._make_service(fake_paths, monkeypatch, frozen=True)
+        self._sha256_path(fake_paths["sidecar_binary"]).mkdir()
+        calls, popen_spy = self._popen_spy()
+        with patch.object(svc_module.subprocess, "Popen", popen_spy):
+            with pytest.raises(EmbeddedPostgresStartError, match="manifest unreadable"):
+                await service.start()
+        assert calls["n"] == 0
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_frozen_undecodable_manifest_fails_before_popen(self, fake_paths, monkeypatch) -> None:
+        """旁文件为非 UTF-8 字节 → UnicodeDecodeError 也必须转分类失败。"""
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        service = self._make_service(fake_paths, monkeypatch, frozen=True)
+        self._sha256_path(fake_paths["sidecar_binary"]).write_bytes(b"\xff\xfe\x00")
+        calls, popen_spy = self._popen_spy()
+        with patch.object(svc_module.subprocess, "Popen", popen_spy):
+            with pytest.raises(EmbeddedPostgresStartError, match="manifest unreadable"):
+                await service.start()
+        assert calls["n"] == 0
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_frozen_tampered_binary_fails_before_popen(self, fake_paths, monkeypatch) -> None:
+        """旁文件摘要正确，但 binary 被改一字节 → mismatch，且不启动 sidecar。"""
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        service = self._make_service(fake_paths, monkeypatch, frozen=True)
+        binary = fake_paths["sidecar_binary"]
+        self._write_correct_side_file(binary)
+        binary.write_bytes(binary.read_bytes() + b"#")
+        calls, popen_spy = self._popen_spy()
+        with patch.object(svc_module.subprocess, "Popen", popen_spy):
+            with pytest.raises(EmbeddedPostgresStartError, match="sha256 mismatch"):
+                await service.start()
+        assert calls["n"] == 0
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_frozen_matching_manifest_starts_sidecar(self, fake_paths, monkeypatch) -> None:
+        """旁文件摘要与 binary 一致 → 校验通过并正常启动（Popen 调用一次）。"""
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = self._make_service(fake_paths, monkeypatch, frozen=True)
+        self._write_correct_side_file(fake_paths["sidecar_binary"])
+        calls, popen_spy = self._popen_spy()
+
+        def popen_factory(cmd, **kwargs):
+            inst = popen_spy(cmd, **kwargs)
+            inst.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+            runtime_dir = fake_paths["data_dir"].parent / "runtime"
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            (runtime_dir / "password").write_text("mock_pg_password_55432", encoding="utf-8")
+            return inst
+
+        try:
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                info = await service.start()
+            assert info.port == FAKE_READY["port"]
+            assert calls["n"] == 1
+        finally:
+            await service.stop()
+
+    def test_dev_mode_missing_manifest_skips_verification(self, fake_paths, monkeypatch) -> None:
+        """源码开发模式（frozen=False）旁文件缺失属正常（未 cargo build），跳过校验。"""
+        service = self._make_service(fake_paths, monkeypatch, frozen=False)
+        service._verify_sidecar_sha256()  # 不抛异常
+
+    def test_dev_mode_empty_manifest_skips_verification(self, fake_paths, monkeypatch) -> None:
+        service = self._make_service(fake_paths, monkeypatch, frozen=False)
+        self._sha256_path(fake_paths["sidecar_binary"]).write_text("\n", encoding="utf-8")
+        service._verify_sidecar_sha256()  # 空文件在开发模式跳过
+
+    def test_dev_mode_mismatch_still_rejected(self, fake_paths, monkeypatch) -> None:
+        """开发模式旁文件存在但摘要不符 → 仍按损坏失败（不放宽真校验）。"""
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        service = self._make_service(fake_paths, monkeypatch, frozen=False)
+        self._sha256_path(fake_paths["sidecar_binary"]).write_text(f"{'0' * 64}  file\n", encoding="utf-8")
+        with pytest.raises(EmbeddedPostgresStartError, match="sha256 mismatch"):
+            service._verify_sidecar_sha256()
+
+    def test_dev_mode_invalid_hash_format_still_rejected(self, fake_paths, monkeypatch) -> None:
+        """开发模式旁文件非空但格式非法（非 64 位 hex）→ 仍按损坏失败。"""
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        service = self._make_service(fake_paths, monkeypatch, frozen=False)
+        self._sha256_path(fake_paths["sidecar_binary"]).write_text("abcdef  file\n", encoding="utf-8")
+        with pytest.raises(EmbeddedPostgresStartError, match="sidecar sha256 invalid"):
+            service._verify_sidecar_sha256()
