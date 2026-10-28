@@ -175,7 +175,8 @@ def _assess_credibility(
     严重性分级（MAJOR-01 决策⑤，对应真实数据结构按 category）：
     - data_warnings 中任一 DataWarning 的 category 为 data_quality 或 termination →
       unreliable（enrich 失败 / suspend|limit_data_absent / benchmark_data_absent|partial /
-      range_quality_gaps / stale-estimate / portfolio_wiped_out 爆仓）。
+      range_quality_gaps / range_quality_coverage_unverified（区间覆盖未核实） /
+      stale-estimate / portfolio_wiped_out 爆仓）。
     - failed_signal_dates 非空 → unreliable：策略在某交易日执行失败，曲线存在平坦段。
     - 仅 skipped_orders 非空（且无 data_quality/termination）→ degraded。
     - system（如持久化失败）→ 不升级级别，仅产出提示（结果正确性未受影响，
@@ -184,6 +185,8 @@ def _assess_credibility(
     - asof_approximation（R24 当期近似）→ 不计入可信度分级，由 caveats 通道单独
       标注「退市排除口径为当期近似，name-history 缺覆盖时可能前视」。
     - empty_signal_days > 0 → 次级提示，不独立驱动 degraded（决策⑦）。
+    - range_quality_coverage_unverified → 除计入 data_quality 汇总外，另产出专门提示
+      （UIR-F11-005：区间覆盖未知不得被通用汇总掩盖为「已检查通过」）。
 
     Returns:
         (credibility_level, warnings, skipped_order_count, failed_date_count)。
@@ -205,6 +208,10 @@ def _assess_credibility(
     if cat_counts["data_quality"]:
         msgs.append(Message("backtest_warn_data_quality", {"count": cat_counts["data_quality"]}))
         level = "unreliable"
+    # UIR-F11-005 / R21: 区间覆盖「未核实」是质量未知，不是性能提示，也不是「无缺口」；
+    # 除 data_quality 汇总外单独给出原因提示，避免用户把「没查到缺口」误读为「已检查通过」。
+    if _has_range_quality_unverified(result.data_warnings):
+        msgs.append(Message("backtest_warn_range_quality_unverified"))
     if cat_counts["termination"]:
         msgs.append(Message("backtest_warn_termination", {"count": cat_counts["termination"]}))
         level = "unreliable"
@@ -250,6 +257,29 @@ def _has_delisting_asof_approximation(data_warnings: Sequence[str | DataWarning]
     for w in data_warnings or ():
         if isinstance(w, DataWarning):
             if w.warning_type == _DELISTING_ASOF_WARNING_TYPE:
+                return True
+        elif isinstance(w, str) and w.startswith(prefix):
+            return True
+    return False
+
+
+# UIR-F11-005 / R21：区间覆盖未核实（质量未知）的告警类型（与
+# strategies.backtest.config.DataWarning.warning_type 一致）。
+_RANGE_QUALITY_UNVERIFIED_WARNING_TYPE = "range_quality_coverage_unverified"
+
+
+def _has_range_quality_unverified(data_warnings: Sequence[str | DataWarning]) -> bool:
+    """判定回测结果的区间覆盖是否**未核实**（UIR-F11-005，质量未知）。
+
+    兼容结构化 ``DataWarning``（引擎实时产出）与经持久化 round-trip 的字符串
+    ``"[range_quality_coverage_unverified] ..."``；命中时 VM 在结果横幅产出专门提示，
+    避免「未知」被通用 data_quality 汇总掩盖（R21：已知不可信不得伪装为无信息）。
+    存量旧结果无该记录时不伪造任何「当时已检查通过」的结论。
+    """
+    prefix = f"[{_RANGE_QUALITY_UNVERIFIED_WARNING_TYPE}]"
+    for w in data_warnings or ():
+        if isinstance(w, DataWarning):
+            if w.warning_type == _RANGE_QUALITY_UNVERIFIED_WARNING_TYPE:
                 return True
         elif isinstance(w, str) and w.startswith(prefix):
             return True

@@ -25,6 +25,11 @@ from data.persistence.daos.screener_dao import _MAX_SCREENING_RANGE_ROWS
 _SCREENING_ROWS_SAFETY_FACTOR = 1.5
 _SCREENING_MAX_RANGE_ROWS = 5_000_000
 
+# UIR-F11-005 / R21: 区间覆盖**未核实**（日历或轻量覆盖查询失败）的告警前缀。
+# 与「无缺口」（无告警）、「真实缺口」（[range_quality_gaps]）、「取消」（抛出）严格区分：
+# 未知状态经本信号显式告知，不得因「没查到缺口」而被渲染为「区间无缺口」。
+_RANGE_QUALITY_UNVERIFIED_TYPE = "range_quality_coverage_unverified"
+
 if TYPE_CHECKING:
     from data.cache.cache_manager import CacheManager
     from data.data_processor import DataProcessor
@@ -392,8 +397,11 @@ class BacktestDataProvider:
         - ``covered_dates``：screening_data 实际覆盖的日期键集合（"YYYYMMDD"）。为 None 时
           退化为一次轻量 ``SELECT DISTINCT trade_date``（daily_quotes），以 O(交易日数) 量级
           独立评估覆盖，与 preload_range 的 OOM 护栏解耦。
-        - 交易日历查询失败 / 轻量覆盖查询失败时保持默认 GOLD 代理（未知不降级、不伪装成
-          无缺口，R21 fail-closed）。
+        - 交易日历查询失败 / 轻量覆盖查询失败时保持默认 GOLD 代理，并写入
+          ``[range_quality_coverage_unverified]`` 告警（R21 fail-closed）：覆盖状态**未知**，
+          既不得伪装成「无缺口」，也不得伪造成「有缺口」；该信号经 engine 并入
+          ``BacktestResult.data_warnings`` → ``quality_json`` → UI 横幅，供用户识别
+          「区间质量未核」。``CancelledError`` 仍直接传播，不产生该信号（取消≠未知）。
         - 区间缺口只写入 ``_scan_missing_dates`` 与 ``[range_quality_gaps]`` 告警，恒 GOLD
           （D3-M2 残留修复：聚合降级会把「区间有缺口」放大为「整个区间每天都被拦截」）。
         """
@@ -408,11 +416,18 @@ class BacktestDataProvider:
         except asyncio.CancelledError:
             raise
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出交易日历查询异常. upgrade: 策略层重构时统一走 classify_error.
-        except Exception:
+        except Exception as e:
             logger.warning(
                 "[BacktestDataProvider] Range quality evaluation calendar lookup failed, "
                 "keep default GOLD quality proxy.",
                 exc_info=True,
+            )
+            # UIR-F11-005 / R21: 日历不可用 → 无法求出期望交易日全集，覆盖状态未知。
+            # 未知必须显式可见，不得因「没算出缺口」而被渲染为「区间无缺口」。
+            self._range_preload_warnings.append(
+                f"[{_RANGE_QUALITY_UNVERIFIED_TYPE}] {start_str}-{end_str}: "
+                f"交易日历查询失败（{DataSanitizer.sanitize_error(e)}），无法核对区间覆盖；"
+                "区间缺口状态未知（未核实）。"
             )
             return
 
@@ -423,10 +438,17 @@ class BacktestDataProvider:
             except asyncio.CancelledError:
                 raise
             # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出轻量覆盖查询异常. upgrade: 策略层重构时统一走 classify_error.
-            except Exception:
+            except Exception as e:
                 logger.warning(
                     "[BacktestDataProvider] Range quality coverage lookup failed, keep default GOLD quality proxy.",
                     exc_info=True,
+                )
+                # UIR-F11-005 / R21: 覆盖查询失败 → 逐日读取虽可继续，但区间是否有缺口
+                # 无从得知；必须随结果/quality_json/UI 横幅保留该「质量未知」信号。
+                self._range_preload_warnings.append(
+                    f"[{_RANGE_QUALITY_UNVERIFIED_TYPE}] {start_str}-{end_str}: "
+                    f"区间覆盖查询失败（{DataSanitizer.sanitize_error(e)}），screening_data 覆盖未核实；"
+                    "区间缺口状态未知（未核实）。"
                 )
                 return
 

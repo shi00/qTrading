@@ -465,6 +465,20 @@ class TestWarningCategory:
         assert _dw("trade_dates_truncated").category == "data_quality"
         assert WarningCategory.category_of(str(_dw("trade_dates_truncated"))) == "data_quality"
 
+    def test_range_quality_unverified_category_and_persist_round_trip(self) -> None:
+        """UIR-F11-005 / R21: 区间覆盖未核实 → data_quality（未知按不可信处理）。
+
+        兼容结构化 DataWarning 与经持久化 round-trip 的 '[range_quality_coverage_unverified] ...'
+        字符串：质量未知信号不得在落库边界丢失（R21 BT-03）。
+        """
+        assert _dw("range_quality_coverage_unverified").category == "data_quality"
+        assert WarningCategory.category_of(str(_dw("range_quality_coverage_unverified"))) == "data_quality"
+        # quality_json 落库：未知信号必须实际出现在持久化载荷中（不得在落库边界丢失）
+        persisted = _make_result(data_warnings=(_dw("range_quality_coverage_unverified"),)).to_persist_dict()
+        assert any(
+            w.startswith("[range_quality_coverage_unverified]") for w in persisted["quality_json"]["data_warnings"]
+        )
+
     def test_to_persist_serializes_datawarning_as_str(self) -> None:
         """to_persist_dict 对 DataWarning 统一按 str(w) 落库，保留 [type] 前缀。"""
         result = _make_result(data_warnings=(_dw("suspend_data_absent"),))

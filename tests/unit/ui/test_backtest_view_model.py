@@ -805,6 +805,54 @@ class TestBacktestViewModelRunBacktest:
         assert vm2.state.credibility_level == "unreliable"
 
     @pytest.mark.asyncio
+    async def test_range_quality_unverified_marks_unreliable_and_emits_reason(self):
+        """UIR-F11-005 / R21: 区间覆盖未核实（质量未知）→ unreliable，且横幅给出专门原因。
+
+        覆盖两条来源：引擎实时产出的结构化 DataWarning、经 quality_json 落库回读的
+        字符串（round-trip）；JSON 的「未核实」不得被通用 data_quality 汇总掩盖。
+        """
+        from strategies.backtest.config import DataWarning
+
+        vm = await self._exec_backtest(
+            self._result_with(
+                data_warnings=(
+                    DataWarning(
+                        warning_type="range_quality_coverage_unverified",
+                        start_date="2024-01-01",
+                        end_date="2024-12-31",
+                        affected_stock_count=0,
+                        error_message="区间覆盖查询失败",
+                    ),
+                )
+            )
+        )
+        assert vm.state.credibility_level == "unreliable"
+        assert vm.state.warnings == (
+            Message("backtest_warn_data_quality", {"count": 1}),
+            Message("backtest_warn_range_quality_unverified"),
+        )
+
+        # 持久化 round-trip：quality_json 落库为字符串，回读后仍须保留「质量未核」
+        vm2 = await self._exec_backtest(
+            self._result_with(data_warnings=("[range_quality_coverage_unverified] 2024-01-01-2024-12-31: 覆盖未核实",))
+        )
+        assert vm2.state.credibility_level == "unreliable"
+        assert vm2.state.warnings == (
+            Message("backtest_warn_data_quality", {"count": 1}),
+            Message("backtest_warn_range_quality_unverified"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_real_range_gaps_do_not_claim_unverified(self):
+        """UIR-F11-005: 真实缺口（覆盖已核实）只报缺口，不得叠加「质量未核实」提示。"""
+        vm = await self._exec_backtest(
+            self._result_with(data_warnings=("[range_quality_gaps] 2024-01-02-2024-01-03: 1 of 2",))
+        )
+
+        assert vm.state.credibility_level == "unreliable"
+        assert Message("backtest_warn_range_quality_unverified") not in vm.state.warnings
+
+    @pytest.mark.asyncio
     async def test_benchmark_absent_marks_unreliable(self):
         """MAJOR-01 验证方式②: 基准缺失判 unreliable。
 
