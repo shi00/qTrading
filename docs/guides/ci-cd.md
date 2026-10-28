@@ -31,6 +31,8 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 > **fork PR 的 secretless 路径**：`pull_request` 事件来自 fork 时 GitHub 不注入仓库 secrets（仅只读 `GITHUB_TOKEN`）。`ci-checks` 依赖 `CI_PG_PASSWORD`（postgres service 容器 + integration 测试）与 `CODECOV_TOKEN`，secret 为空会使 service 容器在初始化阶段失败且不可提前拦截；`update-requirements` 依赖 `PAT_FOR_CI` 与 `contents: write` 回推分支，fork PR 下既无 secret 也无写权限。故这两个 job 对 fork PR 显式跳过（状态为 skipped，不代表通过），其验证与 requirements 同步由维护者审阅后以在库分支重跑再合并。其余 PR 触发 job（`ci-checks-windows` / `e2e-tests-windows` / `embedded-tests` / `installer-smoke` / `requirements-drift`）不依赖仓库 secret，保持对 fork PR 运行。
 
+> **requirements 机器人协作规则（依赖升级期间）**：`requirements-drift` 检出漂移后由 `update-requirements` 创建 `chore/auto-requirements-sync` PR。依赖全量升级的各 Phase PR 在途期间，该 bot PR 只读不改：若其 diff 与本 Phase 目标版本一致，先合入 bot PR 再 rebase 本 PR；否则关闭该 bot PR，待 Phase 合并后由 bot 重新生成。任何 Phase PR 合并后须复跑 `requirements-drift`（上游当日发版会使 main 变红），变红时按同一规则处理，不得在业务 PR 中顺带升级无关包。
+
 > **Python 3.14 状态说明**：完整测试矩阵（Code Quality & Tests、Windows E2E、Windows Build 等）仅运行 Python `3.13`（稳定基线）。Python `3.14` 当前依赖已支持（`litellm>=1.101.0` 的 `Requires-Python` 为 `<3.15, >=3.10`），`lint-fast` job 将 `3.14` 作为 experimental 矩阵项前瞻验证（仅跑 `ruff check` + `ruff format --check`，不安装项目依赖；矩阵配置见 [已知架构技术债](../debt/known-technical-debt.md) 相关条目）。
 
 ### 版本发布流程与 Release 管理
@@ -120,6 +122,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 | `scripts/export_finbert_gguf.py` | FinBERT GGUF 导出流水线（CG-1；分类头 → head.npz + 编码器 f16（发布产物，Q8_0 量化已移除）；llama.cpp 对齐 tag v0.3.0 见脚本 docstring；`--dry-run` 预检；需 finbert 离线环境） | 手动 / CI（`finbert-train.yml`）/ 维护 | 不阻断 |
 | `scripts/patch_llama_cpp_pre_registry.py` | llama.cpp pre-tokenizer 登记补丁（FinBERT2-base chkhsh 上游全版本未登记；幂等注入已识别的 bert-bge-large 登记项——运行时强制外部分词，pre 名仅元数据；锚点缺失/重复注入拒绝） | CI（`finbert-train.yml`）/ 手动 | 不阻断 |
 | `scripts/compute_training_fingerprint.py` | FinBERT 训练指纹计算与指纹驱动发布路由（ADR-0015 内容寻址去重；stdlib 运行，F3 复用链当前 stdlib-only）：对语料 sums + 产线脚本白名单（显式枚举，含自举）+ workflow 全文 + 基座 revision + llama.cpp commit 计算 canonical 指纹，与最新 `finbert-gguf-v*` Release 随附 `fingerprint.json` 对比，输入无变化即拒绝重训（省 1~3h）；`route` 于装依赖前 fail-fast，`verify-corpus-anchor` 作 F2 语料锚断言（实际下载的 SHA256SUMS.txt 与指纹锚一致）；退出码 0=放行/1=输入无变化/2=错误（fail-closed） | CI（`finbert-train.yml` 指纹路由 + 语料锚断言）/ 手动 | 阻断 Release（skip 拒绝重复训练 / fail-closed 阻断训练） |
+| `scripts/upgrade_golden_snapshot.py` | 依赖升级金标准快照（D0.2）：用完全离线的合成冻结快照（freeze_date=2025-12-31）重跑 5 个策略场景 + 1 次回测，比对/覆写 `tests/fixtures/upgrade_golden/expected`；`--check` 一致退出 0、差异退出 1、输入异常退出 2；`--update` 重建 expected；`--generate-inputs` 确定性重建 inputs | 手动（依赖全量升级前后各跑一次） | 不阻断 |
 
 ### 数据库迁移
 

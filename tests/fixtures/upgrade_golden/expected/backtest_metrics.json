@@ -1,0 +1,21 @@
+{
+  "annualized_return": null,
+  "avg_invested_pct": 0.12401689536123237,
+  "calmar_ratio": null,
+  "cash_drag_days": 20,
+  "empty_signal_days": 0,
+  "ic_ir": null,
+  "ic_mean": null,
+  "ic_median_n": null,
+  "ic_valid_days": 0.0,
+  "information_ratio": 10.032292192904183,
+  "max_drawdown": 0.0047106528893149325,
+  "min_invested_pct": 0.0,
+  "profit_factor": 1.0506629323688557,
+  "sharpe_ratio": -0.9511980571758267,
+  "total_return": 0.0004360976699100405,
+  "total_trades": 21,
+  "tracking_error": 0.03651038399297709,
+  "volatility": 0.015050882542952374,
+  "win_rate": 0.4
+}
