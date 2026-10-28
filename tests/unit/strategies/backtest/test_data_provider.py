@@ -1668,3 +1668,58 @@ class TestBacktestDelistingAsOfApproximation:
         await provider.build_context(date(2024, 1, 2))
 
         assert provider.delisting_flag_seen is True
+
+
+class TestDefaultHistoryContext:
+    """UIR-F11-001: 未注入 data_processor 时默认装配最小历史数据上下文（cache + 日历）。"""
+
+    def test_default_provider_builds_cache_and_calendar_context(self) -> None:
+        cache = MagicMock()
+        provider = BacktestDataProvider(cache)
+        ctx = provider.history_context
+        assert ctx.cache is cache
+        assert ctx.trade_calendar is not None
+        assert ctx.trade_calendar._api is None
+        assert provider._quality_proxy.cache is cache
+        assert provider._quality_proxy.trade_calendar is ctx.trade_calendar
+
+    def test_explicit_processor_is_kept_as_history_context(self) -> None:
+        cache, processor = MagicMock(), MagicMock()
+        provider = BacktestDataProvider(cache, data_processor=processor)
+        assert provider.history_context is processor
+        assert provider._quality_proxy._delegate is processor
+
+    def test_explicit_trade_calendar_is_injected(self) -> None:
+        cache, calendar = MagicMock(), MagicMock()
+        provider = BacktestDataProvider(cache, trade_calendar=calendar)
+        assert provider.history_context.cache is cache
+        assert provider.history_context.trade_calendar is calendar
+
+    def test_validate_history_capabilities_passes_for_default_path(self) -> None:
+        BacktestDataProvider(MagicMock()).validate_history_capabilities()
+
+    def test_validate_history_capabilities_rejects_incomplete_processor(self) -> None:
+        class _IncompleteProcessor:
+            cache = MagicMock()
+
+        provider = BacktestDataProvider(MagicMock(), data_processor=_IncompleteProcessor())
+        with pytest.raises(ValueError, match="trade_calendar"):
+            provider.validate_history_capabilities()
+
+    @pytest.mark.asyncio
+    async def test_build_context_exposes_history_capabilities(self) -> None:
+        cache = MagicMock()
+        cache.screener_dao.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        context = await provider.build_context(date(2024, 6, 14))
+
+        dp = context.get("data_processor")
+        assert dp.cache is cache
+        assert dp.trade_calendar is provider.history_context.trade_calendar

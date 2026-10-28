@@ -114,6 +114,26 @@ class TestBacktestViewModel:
             mock_engine_cls.assert_called_once()
             assert engine is mock_engine_cls.return_value
 
+    def test_default_engine_factory_provides_history_context_for_optional_strategies(self):
+        """UIR-F11-001: 默认 UI 路径（data_processor=None）须具备 cache/calendar 历史能力。
+
+        oversold 等可选策略在历史窗口取数前即访问 dp.trade_calendar / dp.cache，
+        默认路径不得退化为无 delegate 的质量代理（否则 AttributeError）。
+        """
+        vm = BacktestViewModel()
+        cache = MagicMock()
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 3, 1))
+        assert vm.service._engine_factory is not None
+
+        engine = vm.service._engine_factory(cache, config, None)
+
+        ctx = engine.data_provider.history_context
+        assert ctx.cache is cache
+        assert ctx.trade_calendar is not None
+        assert ctx.trade_calendar._api is None  # 无 live API（离线/仅 DB 两级）
+        assert engine.trade_calendar is ctx.trade_calendar
+        engine.data_provider.validate_history_capabilities()
+
     def test_dispose(self):
         """测试资源清理。"""
         vm = BacktestViewModel()

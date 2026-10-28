@@ -386,6 +386,9 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             def _default_engine_factory(cache, config, data_processor):
                 from strategies.backtest.engine import VectorBacktestEngine
 
+                # UIR-F11-001: 默认路径 data_processor 为 None 时，由 BacktestDataProvider
+                # 以已初始化的 cache + TradeCalendarService(cache, None) 组装最小历史数据
+                # 上下文（无网络/无外部客户端），供 oversold 等可选策略取历史窗口。
                 return VectorBacktestEngine(cache, config, data_processor=data_processor)
 
             def _default_strategy_lookup(strategy_key):
