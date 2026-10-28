@@ -847,6 +847,8 @@
     "init_step_5": "步骤 5/6: 同步 AI 核心数据 (宏观/股东)",
     "init_step_6": "步骤 6/6: 数据健康检查",
     "init_sync_concepts": "同步概念板块数据...",
+    "init_sync_sw_industry": "同步申万行业分类与成分...",
+    "init_sync_name_change": "同步股票名称变更历史...",
     "init_sync_macro": "同步宏观数据...",
     "init_sync_holders": "同步股东数据...",
     "init_step_5_done": "AI 数据同步完成",

@@ -988,6 +988,8 @@
     "init_step_6": "Step 6/6: Health Check",
     "init_step_complete": "✅ Initialization Complete",
     "init_sync_concepts": "Syncing Concepts...",
+    "init_sync_sw_industry": "Syncing SW industry classification & members...",
+    "init_sync_name_change": "Syncing stock name-change history...",
     "init_sync_macro": "Syncing Macro Data...",
     "init_sync_holders": "Syncing Holder Data...",
     "init_step_5_done": "AI Data Sync Done",
