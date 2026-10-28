@@ -51,6 +51,21 @@ _DENSE_TABLES = frozenset({"daily_quotes", "daily_indicators"})
 # 单一真相源在 data/constants.py。
 _WATERMARK_KEY_PREFIX = WATERMARK_KEY_PREFIXES[0]
 
+# UIR-F14-001：单日快照「完整性」判定的结果状态分类（SyncResult.is_complete 的数据源）。
+# 关键表（quotes/basic）在每个交易日必有数据且有权限，故 EMPTY（fetch 成功但无数据）、
+# SKIPPED_PERMISSION（无权限，等效于无数据）与取数/落库失败一律视为「本日不可就绪」——
+# 否则会让空数据或权限被拒的交易日被判为完整，调度器据此推进水位并放行夜间预测
+# （R21：已知不可信不得伪装为完整成功）。
+_CRITICAL_NOT_READY_STATUSES = (
+    SYNC_RESULT_FETCH_FAILED,
+    SYNC_RESULT_SAVE_FAILED,
+    SYNC_RESULT_EMPTY,
+    SYNC_RESULT_SKIPPED_PERMISSION,
+)
+# 可选表（稀疏事件表）只把真实取数/落库失败记为失败：其「合法空日」由 sync_empty_days
+# 按 (表, 日) 登记，不得误判为不完整；权限不可用仅降级到 sync_status=skipped_permission。
+_OPTIONAL_FAILED_STATUSES = (SYNC_RESULT_FETCH_FAILED, SYNC_RESULT_SAVE_FAILED)
+
 
 class _FailureWindow:
     """并发友好的滑动窗口失败率熔断判据（D1-3）。
@@ -774,13 +789,24 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         if failed_dates:
             result.errors.append(f"{len(failed_dates)} dates failed after retries")
-            result.status = "partial"
+            # UIR-F14-001：取消/停机中止的批次不得被降级为 partial。取消可能发生在关键表
+            # 已成功之后（可选表段），此时 failed_critical_tables 为空，若把 status 置为
+            # partial，is_complete 会误判为 True（半途中止被当成完整成功）。保持
+            # cancelled/failed 主导，is_complete 对该二者恒为假。
+            if result.status not in (SyncStatus.FAILED, SyncStatus.CANCELLED):
+                result.status = SyncStatus.PARTIAL.value
 
         if result.status == "failed":
             pass  # Already logged by CircuitBreaker ERROR above
         elif result.status == "partial":
             logger.warning(
                 "[HistoricalSync] Run | ⚠️ Partial. Days=%s, FailedDates=%s",
+                result.days_processed,
+                len(failed_dates),
+            )
+        elif result.status == SyncStatus.CANCELLED.value:
+            logger.warning(
+                "[HistoricalSync] Run | ⏹️ Cancelled. Days=%s, FailedDates=%s",
                 result.days_processed,
                 len(failed_dates),
             )
@@ -816,10 +842,21 @@ class HistoricalSyncStrategy(ISyncStrategy):
         if trade_date is not None:
             trade_date = to_date(trade_date)
 
+        def _abort_not_ready(reason: str) -> bool:
+            """取消/停机使本日快照未执行或半途中止：不得记为「当日完整成功」。
+
+            返回 False 供调用方按未成功处理；并向调用方传入的 SyncResult 标记
+            ``cancelled``（``SyncResult.is_complete`` 对 cancelled/failed 恒为假），
+            使调度器不推进水位、不放行夜间预测（FR-UX-006；R21：未知不可伪装为完整）。
+            """
+            if sync_result is not None:
+                sync_result.status = SyncStatus.CANCELLED.value
+            logger.debug("[HistoricalSync] DaySync | Aborted %s for %s", reason, trade_date)
+            return False
+
         # S2: 入口取消检查，避免取消后仍启动 14+ IO
         if self._shutdown_event.is_set():
-            logger.debug("[HistoricalSync] DaySync | Shutdown signaled before sync for %s", trade_date)
-            return False
+            return _abort_not_ready("(shutdown signaled before sync)")
 
         # Check cache (Test compatibility & Efficiency)
         if not force:
@@ -925,8 +962,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 raise _raised
         # S2: fetch 完成后检查取消信号，避免取消后仍执行 14+ DB 写入
         if self._shutdown_event.is_set():
-            logger.debug("[HistoricalSync] DaySync | Shutdown signaled after fetch for %s", trade_date)
-            return False
+            return _abort_not_ready("(shutdown signaled after fetch)")
         # Parse results: Map key -> (data, error_type)
         # error_type can be: None, "permission_denied", or Exception
         data_map = {k: v for k, v, e in results_list}
@@ -1089,8 +1125,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         await asyncio.sleep(0)
         # S2: critical 表 save 完成后检查取消信号
         if self._shutdown_event.is_set():
-            logger.debug("[HistoricalSync] DaySync | Shutdown after critical saves for %s", trade_date)
-            return False
+            return _abort_not_ready("(shutdown signaled after critical saves)")
 
         # 4. Others (Non-critical, can fail silently or log)
         limit_result = await save_if_ok("limit", cache.quote_dao.save_limit_list)
@@ -1103,8 +1138,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         await asyncio.sleep(0)
         # S2: 非关键表 save 中间检查取消信号
         if self._shutdown_event.is_set():
-            logger.debug("[HistoricalSync] DaySync | Shutdown during non-critical saves for %s", trade_date)
-            return False
+            return _abort_not_ready("(shutdown signaled during non-critical saves)")
         block_result = await save_if_ok("block", cache.quote_dao.save_block_trade)
         mf_result = await save_if_ok("mf", cache.quote_dao.save_moneyflow)
         await asyncio.sleep(0)
@@ -1116,8 +1150,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         await asyncio.sleep(0)
         # S2: northbound 处理前检查取消信号
         if self._shutdown_event.is_set():
-            logger.debug("[HistoricalSync] DaySync | Shutdown before northbound for %s", trade_date)
-            return False
+            return _abort_not_ready("(shutdown signaled before northbound)")
 
         north_result = {"saved": None, "fetched": 0, "success": False}
         try:
@@ -1222,7 +1255,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     table_name,
                 )
 
-        def verify_data_integrity(key: str, result_data: typing.Any, strict: bool = False):
+        def verify_data_integrity(
+            key: str,
+            result_data: typing.Any,
+            strict: bool = False,
+            table: str | None = None,
+        ):
             if not isinstance(result_data, dict):
                 return
             saved = result_data.get("saved")
@@ -1239,18 +1277,24 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     # instead of just warning, so downstream consumers can react.
                     if strict and saved < fetched * 0.95:
                         sync_result.status = SyncStatus.PARTIAL.value
+                        # UIR-F14-001: 仅置 PARTIAL 时 is_complete 仍为 True，调度器会推进
+                        # 水位并放行夜间预测（用残缺行情出结论）。严格短写同样属「本日
+                        # 不可就绪」，须登记到关键表清单（只增不减，R21/R22）。
+                        if table is not None and table not in sync_result.failed_critical_tables:
+                            sync_result.failed_critical_tables.append(table)
                         logger.warning(
                             "[HistoricalSync] DaySync | ⚠️ Strict mode: %s data loss > 5%% "
-                            "(saved=%s, fetched=%s), marking sync_result as PARTIAL",
+                            "(saved=%s, fetched=%s), marking sync_result as PARTIAL%s",
                             key,
                             saved,
                             fetched,
+                            f" and {table} not ready" if table is not None else "",
                         )
 
         await safe_update_status("daily_quotes", quotes_rows, trade_date)
-        verify_data_integrity("quotes", quotes_rows, strict=True)
+        verify_data_integrity("quotes", quotes_rows, strict=True, table="daily_quotes")
         await safe_update_status("daily_indicators", basic_rows, trade_date)
-        verify_data_integrity("basic", basic_rows)
+        verify_data_integrity("basic", basic_rows, strict=True, table="daily_indicators")
         await safe_update_status("moneyflow_daily", mf_result, trade_date)
         verify_data_integrity("mf", mf_result)
         await safe_update_status("northbound_holding", north_result, trade_date)
@@ -1298,14 +1342,23 @@ class HistoricalSyncStrategy(ISyncStrategy):
         # 显式表名→结果变量映射（不用 locals().get(key+"_result")——变量名不统一，hsgt_flow≠hsgt）。
         # append 段为同步无 await 的尾部块，asyncio 下单任务整段执行不交错，逐项去重即幂等。
         if sync_result is not None:
-            failed_statuses = (SYNC_RESULT_FETCH_FAILED, SYNC_RESULT_SAVE_FAILED)
 
-            def _record_failed(target: list[str], rows: dict, table: str):
-                if rows.get("result_status") in failed_statuses and table not in target:
+            def _record_not_ready(
+                target: list[str],
+                rows: dict,
+                table: str,
+                statuses: tuple[str, ...],
+            ):
+                if rows.get("result_status") in statuses and table not in target:
                     target.append(table)
 
             for table, rows in {"daily_quotes": quotes_rows, "daily_indicators": basic_rows}.items():
-                _record_failed(sync_result.failed_critical_tables, rows, table)
+                _record_not_ready(
+                    sync_result.failed_critical_tables,
+                    rows,
+                    table,
+                    _CRITICAL_NOT_READY_STATUSES,
+                )
             for table, rows in {
                 "limit_list": limit_result,
                 "suspend_d": suspend_result,
@@ -1320,7 +1373,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 "index_dailybasic": index_basic_result,
                 "stk_limit": stk_limit_result,
             }.items():
-                _record_failed(sync_result.failed_optional_tables, rows, table)
+                _record_not_ready(
+                    sync_result.failed_optional_tables,
+                    rows,
+                    table,
+                    _OPTIONAL_FAILED_STATUSES,
+                )
 
             # D1-4: 累加实际落库行数（各表 saved>0）。saved 为 None 表示 fetch/save 失败，跳过不计。
             # 空提交（sparse 表合法无数据 / 权限跳过）saved==0，不污染计数。

@@ -774,7 +774,9 @@ class TestHistoricalSyncDailySnapshotExtended:
     async def test_verify_data_integrity_strict_loss_above_threshold_marks_partial(
         self,
     ):
-        """strict=True with data loss > 5% must flag status as PARTIAL."""
+        """Given 关键表抓 20 行只落 18 行（丢行 10% > 5%），When 单日快照完成，
+        Then 状态为 PARTIAL、daily_quotes 进入 failed_critical_tables 且 is_complete=False
+        （UIR-F14-001：严格短写不得被判为当日完整成功）。"""
         ctx = make_ctx()
         # fetched=20 rows, saved=18 rows → 10% loss (> 5%) → PARTIAL
         ctx.api.get_daily_quotes = AsyncMock(
@@ -793,6 +795,8 @@ class TestHistoricalSyncDailySnapshotExtended:
         sr = SyncResult()
         await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
         assert sr.status == SyncStatus.PARTIAL.value
+        assert sr.failed_critical_tables == ["daily_quotes"]
+        assert sr.is_complete is False
 
     @pytest.mark.asyncio
     async def test_verify_data_integrity_strict_loss_below_threshold_stays_success(
@@ -1030,6 +1034,47 @@ class TestDailySnapshotCompleteness:
         assert result is True
         assert sr.rows_written == 20  # limit save 失败不计入
         assert "limit_list" in sr.failed_optional_tables
+
+    @pytest.mark.asyncio
+    async def test_critical_empty_marks_not_ready(self):
+        """UIR-F14-001 Given 关键表 quotes 返回空（每交易日必有数据），When 单日快照完成，
+        Then daily_quotes 进入 failed_critical_tables 且 is_complete=False（EMPTY 不得伪装完整）。"""
+        ctx = make_ctx()
+        ctx.api.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert result is True  # 单关键表不可就绪不 raise（S8 错误隔离）
+        assert sr.failed_critical_tables == ["daily_quotes"]
+        assert sr.is_complete is False
+
+    @pytest.mark.asyncio
+    async def test_critical_permission_denied_marks_not_ready(self):
+        """UIR-F14-001 Given 关键表 quotes 因权限被拒（SKIPPED_PERMISSION），When 单日快照完成，
+        Then daily_quotes 进入 failed_critical_tables 且 is_complete=False（无权限≠合法空）。"""
+        from data.external.tushare_client import TushareAPIPermissionError
+
+        ctx = make_ctx()
+        ctx.api.get_daily_quotes = AsyncMock(side_effect=TushareAPIPermissionError("daily_quotes", "no permission"))
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert result is True
+        assert sr.failed_critical_tables == ["daily_quotes"]
+        assert sr.is_complete is False
+
+    @pytest.mark.asyncio
+    async def test_optional_sparse_empty_does_not_affect_completeness(self):
+        """UIR-F14-001 Given 可选稀疏表（limit/suspend/moneyflow 等）合法空日、关键表完整，
+        When 单日快照完成，Then 可选表不进入失败清单且 is_complete=True（合法空≠不完整）。"""
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert result is True
+        assert sr.failed_optional_tables == []
+        assert sr.failed_critical_tables == []
+        assert sr.is_complete is True
 
 
 class TestHistoricalSyncConstants:
@@ -1356,6 +1401,29 @@ class TestHistoricalSyncRunDeepBranches:
         assert len(result.errors) > 0
 
     @pytest.mark.asyncio
+    async def test_cancelled_batch_not_downgraded_to_partial(self):
+        """UIR-F14-001 Given 单日同步因取消/停机中止（返回 False 且 status=cancelled），
+        When 批处理收集到 failed_dates，Then 整体状态保持 cancelled 而非降级为 partial，
+        is_complete=False（否则关键表已成功的半途中止会被误判为完整）。"""
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+
+        async def aborted_day(trade_date=None, force=False, sync_result=None, **kwargs):
+            if sync_result is not None:
+                sync_result.status = SyncStatus.CANCELLED.value
+            return False
+
+        strategy.sync_daily_market_snapshot = AsyncMock(side_effect=aborted_day)
+        result = SyncResult()
+        with (
+            patch("utils.config_handler.ConfigHandler.get_sync_retry_count", return_value=0),
+            patch("data.sync.historical.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await strategy._run_historical_sync(1, None, result)
+        assert result.status == SyncStatus.CANCELLED.value
+        assert result.is_complete is False
+
+    @pytest.mark.asyncio
     async def test_smart_retry(self):
         ctx = make_ctx()
         call_count = 0
@@ -1568,13 +1636,17 @@ class TestSyncDailyMarketSnapshotCancellation:
 
     @pytest.mark.asyncio
     async def test_shutdown_at_entry_returns_false(self):
-        """入口检查取消信号，返回 False，不执行任何 IO"""
+        """入口检查取消信号，返回 False，不执行任何 IO；
+        UIR-F14-001：并向调用方 SyncResult 标记 cancelled，is_complete=False（取消不记成功）。"""
         ctx = make_ctx()
         strategy = HistoricalSyncStrategy(ctx)
         strategy._shutdown_event.set()
-        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        sr = SyncResult()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
         assert result is False
         ctx.api.get_daily_quotes.assert_not_awaited()
+        assert sr.status == SyncStatus.CANCELLED.value
+        assert sr.is_complete is False
 
     @pytest.mark.asyncio
     async def test_shutdown_after_fetch_returns_false(self):
@@ -1596,7 +1668,9 @@ class TestSyncDailyMarketSnapshotCancellation:
 
     @pytest.mark.asyncio
     async def test_shutdown_after_critical_saves_returns_false(self):
-        """critical 表 save 完成后检查取消信号，返回 False，不执行非 critical save"""
+        """critical 表 save 完成后检查取消信号，返回 False，不执行非 critical save；
+        UIR-F14-001：关键表虽已成功（failed_critical_tables 为空）仍须标记 cancelled，
+        is_complete=False——半途中止不得被当成当日完整成功。"""
         ctx = make_ctx()
         strategy = HistoricalSyncStrategy(ctx)
 
@@ -1605,9 +1679,13 @@ class TestSyncDailyMarketSnapshotCancellation:
             return 10
 
         ctx.cache.market_dao.save_daily_indicators = AsyncMock(side_effect=set_shutdown_after_basic)
-        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+        sr = SyncResult()
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
         assert result is False
         ctx.cache.quote_dao.save_limit_list.assert_not_awaited()
+        assert sr.failed_critical_tables == []
+        assert sr.status == SyncStatus.CANCELLED.value
+        assert sr.is_complete is False
 
     @pytest.mark.asyncio
     async def test_shutdown_before_northbound_returns_false(self):

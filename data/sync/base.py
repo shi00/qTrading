@@ -166,7 +166,19 @@ class SyncResult:
 
     @property
     def is_complete(self) -> bool:
-        """关键表全部成功才算完整。调度器幂等键必须以此为准，而非 not errors。"""
+        """关键表全部成功且整体状态未被判定为失败/取消，才算「当日完整成功」。
+
+        调度器幂等键（水位 `_last_update_date`）必须以此为准，而非 not errors：
+        - ``failed_critical_tables`` 由同步层登记「未执行 / 权限不可用 / 取数失败 /
+          落库失败 / 严格短写（关键表丢行 > 5%）」等不可就绪状态
+          （见 ``HistoricalSyncStrategy.sync_daily_market_snapshot``）；
+        - 可选稀疏表的**合法空日**不进入该列表（由 ``sync_empty_days`` 精确登记），
+          故不影响完整性；
+        - 整体 ``cancelled`` / ``failed`` 的批次不构成完整成功（R21：已知不可信不得
+          伪装为完整；R22：水位不得跨洞推进）。
+        """
+        if self.status in (SyncStatus.FAILED, SyncStatus.CANCELLED):
+            return False
         return not self.failed_critical_tables
 
     def merge(self, other: SyncResult):
