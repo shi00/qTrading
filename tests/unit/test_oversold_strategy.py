@@ -14,6 +14,7 @@ import pytest
 
 from data.persistence.quality_gate import QualityGateError, QualityTier
 from strategies.ai_mixin import PreFetchedContext
+from strategies.backtest.data_provider import BacktestDataProvider
 from strategies.oversold_strategy import OversoldStrategy, _compute_rsi_filter
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -1410,6 +1411,73 @@ async def test_math_filter_no_history_warning_when_bars_sufficient():
 
     assert result.empty
     assert context.get("warnings") is None
+
+
+def _make_default_path_cache(signal_date, history_pdf, start_date):
+    """UIR-F11-001: 构造默认回测路径所需的 CacheManager 替身（无外部 API）。
+
+    覆盖 BacktestDataProvider.build_context 的本地 DAO 调用面 + oversold 历史窗口取数。
+    """
+    cache = MagicMock()
+    cache.screener_dao.get_screening_data = AsyncMock(
+        return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0], "is_tradable": [True]})
+    )
+    cache.screener_dao.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+    cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+    cache.quote_dao.get_daily_quotes = AsyncMock(return_value=history_pdf)
+    cache.stock_dao.get_start_date_by_trade_days = AsyncMock(return_value=start_date)
+    return cache
+
+
+async def test_default_path_oversold_math_filter_uses_cache_and_calendar():
+    """UIR-F11-001: 默认回测路径（data_processor=None）下 oversold 能取历史窗口并出信号。
+
+    provider 未注入 DataProcessor 时须以 cache + TradeCalendarService(cache, None)
+    组装最小历史上下文；否则 _math_filter 在取数前访问 dp.cache / dp.trade_calendar
+    会抛 AttributeError，回测在历史窗口前即失败。
+    """
+    signal_date = datetime.date(2024, 6, 14)
+    history_pdf = _make_long_history_pdf(200, signal_date)
+    history_pdf.loc[history_pdf.index[-1], "vol"] = 50_000.0  # 末日放量满足量比门槛
+    cache = _make_default_path_cache(signal_date, history_pdf, datetime.date(2024, 1, 15))
+
+    provider = BacktestDataProvider(cache)  # data_processor=None → 默认历史上下文
+    context = await provider.build_context(signal_date)
+
+    result = await OversoldStrategy()._math_filter(context, 14, 30, 1.5)
+
+    dp = context.get("data_processor")
+    assert dp is not None
+    assert dp.cache is cache
+    assert dp.trade_calendar is provider.history_context.trade_calendar
+    assert dp.trade_calendar._api is None  # 无 live API（DB + 离线两级）
+    cache.stock_dao.get_start_date_by_trade_days.assert_awaited_once_with(signal_date, 120)
+    kwargs = cache.quote_dao.get_daily_quotes.await_args.kwargs
+    assert kwargs["end_date"] == signal_date
+    assert kwargs["ts_code_list"] == ["000001.SZ"]
+    assert not result.empty
+    assert result["ts_code"].tolist() == ["000001.SZ"]
+
+
+async def test_calendar_unavailable_yields_explicit_insufficient_history_warning():
+    """日历无法确定窗口起点（返回 None）时，默认路径须显式归因「历史不足」而非静默无匹配。"""
+    signal_date = datetime.date(2024, 6, 14)
+    history_pdf = _make_long_history_pdf(30, signal_date)  # 30 < period*5
+    cache = _make_default_path_cache(signal_date, history_pdf, None)
+
+    provider = BacktestDataProvider(cache)
+    context = await provider.build_context(signal_date)
+
+    result = await OversoldStrategy()._math_filter(context, 14, 30, 1.5)
+
+    assert result.empty
+    assert context.get("_metadata", {}).get("calendar_fallback") is True
+    keys = [w.key for w in context.get("warnings", [])]
+    assert "strategy_oversold_insufficient_history" in keys
 
 
 if __name__ == "__main__":

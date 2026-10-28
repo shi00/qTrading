@@ -118,8 +118,9 @@ class VectorBacktestEngine:
         # None 表示停牌信息不可得（查询失败/无数据），simulator 退化为统一按停牌处理。
         self._suspended_keys: set[tuple[str, date]] | None = None
         # D4-8：优先复用策略层同一 TradeCalendarService（DB → API → 离线三级降级），
-        # 消除回测层直接查 DB 的第二套日历通路；无 data_processor 时留空，_get_trade_dates 懒构造。
-        self.trade_calendar = getattr(data_processor, "trade_calendar", None)
+        # 消除回测层直接查 DB 的第二套日历通路；UIR-F11-001：无 data_processor 时
+        # provider 已用 cache 组装无网络（DB + 离线）的默认日历，直接复用避免重复构造。
+        self.trade_calendar = getattr(self.data_provider.history_context, "trade_calendar", None)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run(
@@ -135,6 +136,10 @@ class VectorBacktestEngine:
         errors = self.config.validate()
         if errors:
             raise ValueError(f"Invalid backtest config: {errors}")
+
+        # UIR-F11-001: 运行前校验历史数据上下文能力（cache / trade_calendar）。
+        # 缺失时明确拒绝，而非让策略在历史窗口取数前抛 AttributeError 或静默空信号。
+        self.data_provider.validate_history_capabilities()
 
         if progress_callback:
             progress_callback(0.0, Message("backtest_progress_loading"))
