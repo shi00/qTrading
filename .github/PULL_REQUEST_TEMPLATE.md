@@ -34,7 +34,7 @@ Relates to #XXX
 - [ ] 集成测试：DAO/Service层链路验证
 - [ ] E2E（`tests/e2e/`，Flet + pytest；本地可用 `run_e2e_local.py`）：UI流程验证，无超时/断言失败
 - [ ] 静态检查：ruff + pyright 无报错
-- [ ] CI 流水线（PR 触发 job：lint-fast / ci-checks / ci-checks-windows / e2e-tests-windows / embedded-tests / requirements-drift 全部通过；installer-smoke 仅 installer.iss 或 scripts/*installer* 变更时执行 ISCC；build-windows 仅在 tag 推送（`v*.*.*`）或手动触发时运行，PR 阶段不存在 build job）
+- [ ] CI 流水线（PR 触发 job：lint-fast / ci-checks / ci-checks-windows / e2e-tests-windows / embedded-tests / requirements-drift 全部通过；installer-smoke 仅 installer.iss 或 scripts/*installer* 变更时执行 ISCC；build-windows 仅在 tag 推送（`v*.*.*`）或手动触发时运行，PR 阶段不存在 build job；仅 `.pre-commit-config.yaml` 变更的 PR 不触发主 CI，由 `precommit-config-ci.yml` 的 `precommit-config-smoke` 执行 `pre-commit validate-config` + `pre-commit run --all-files`）
 
 ### 手动验证
 <!-- 下列各项同样按三态规则填写：与本 PR 变更范围无关的项标「N/A：<原因>」，不删行，便于评审逐条核对 -->

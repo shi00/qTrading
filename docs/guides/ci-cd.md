@@ -36,6 +36,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 **其他 workflow**（`.github/workflows/` 下除 `ci_cd.yml` 主矩阵外的兜底流水线，由 `check_workflow_enum()` 门禁守护无遗漏）:
 - 前端流水线：文档 CI (`docs-ci.yml`)、Flet 前瞻验证 (`flet-nightly.yml`)、PostgreSQL sidecar Release (`sidecar.yml`)
+- 配置流水线：pre-commit 配置 PR 冒烟 (`precommit-config-ci.yml`)，仅 PR 修改 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml)（或该 workflow 自身）时执行 `pre-commit validate-config` + `pre-commit run --all-files`，不引入 PG service / 迁移 / 测试
 - 安全流水线：CodeQL 静态安全分析 (`codeql.yml`)、密钥泄露扫描 (`gitleaks.yml`)、OpenSSF Scorecard 安全评分 (`scorecard.yml`)
 - 依赖与发布：依赖更新机器人（自托管 Renovate workflow (`renovate.yml`)，每周日 18:00 UTC（北京时间周一 02:00）定时 + 手动触发，运行时刻落在 `renovate.json` 允许更新窗口内，配置见 [`.github/renovate.json`](../../.github/renovate.json)；Python/JS 依赖由其接管，GitHub Actions 生态由 [`.github/dependabot.yml`](../../.github/dependabot.yml) 承接，分工在两侧配置注释中声明。Python 漏洞另由 CI `run_pip_audit.py` 扫描）、自动化 Release PR (`release-please.yml`)
 - 模型产线：FinBERT GGUF 训练/导出/Gate/发布流水线 (`finbert-train.yml`)，仅 `workflow_dispatch` 手动触发（输入 `model_version` 可选（留空自动取最新 Release minor+1 并探测 tag 空位）+ `corpus_tag`（默认 `corpus-v1`）+ `force_retrain`（默认 false））——指纹路由（ADR-0015 内容寻址去重：装依赖前对语料 sums + 产线脚本白名单 + workflow 全文 + 基座 revision + llama.cpp commit 计算 canonical 指纹，与最新 `finbert-gguf-v*` Release 随附 `fingerprint.json` 对比，输入无变化即拒绝重训）→ 语料下载校验（SHA256 全量 + manifest 校验（FT-07：行数/digest 期望值取自 corpus Release 随附 manifest，替代硬编码；legacy corpus-v1 经显式登记兜底并声明未做 manifest 校验）+ F2 语料锚断言（ADR-0015：实际下载的 SHA256SUMS.txt 必须与指纹锚一致，错位即 fail-fast））→ 固定 seed 训练 → GGUF 导出（llama.cpp 工具链 v0.3.0）→ 一致性 Gate（N0-3 四判据）→ 通过后发布 Release `finbert-gguf-v{model_version}`（note 含训练语料 lineage 与训练指纹（ADR-0015）；`fingerprint.json` 随 Release 分发，供下轮训练作去重基线）；训练依赖（torch CPU / transformers）临时安装在 job 内、不进 pyproject（ADR-0012 修订经 ADR-0013 承载）。与主 CI 隔离：concurrency 分组 `finbert-train`（`cancel-in-progress: false`），发布 tag `finbert-gguf-v*` 不匹配主 CI `v*.*.*` tag 过滤；产线机制总览正本见 [finbert-pipeline.md](./finbert-pipeline.md)
@@ -55,6 +56,8 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 - 依赖与一致性：`pip-compile-core` · `pip-compile-dev` · `pip-compile-optional` · `verify-versions` · `docs-consistency` · `redline-check`
 
 > hook 数量与名称以 `.pre-commit-config.yaml` 为唯一正本，本清单由 `check_precommit_hook_names()` 门禁守护名称级一致（配置新增/删除 hook 时须同步本枚举）。
+
+> **配置改动的合并前验证**：`.pre-commit-config.yaml` 不在 `ci_cd.yml` 的 `pull_request.paths` 白名单内，仅改该文件的 PR 不触发主 CI，hook entry / 独立环境依赖 / 文件选择规则的缺陷会延迟到 main push 才暴露。该文件因此由独立轻量 workflow `precommit-config-ci.yml` 承接（`pre-commit validate-config` + `pre-commit run --all-files` 实际执行全部 hook，不含 PG service / 迁移 / 单测）；不把该文件并入 `ci_cd.yml` 白名单，是为避免单文件配置 PR 拉起整套主流水线（其测试覆盖对配置改动零增量）。`docs-ci.yml` 虽也监听该文件，但只跑文档一致性脚本与契约测试，不执行 hook 本体。配置与业务代码同时变更的 PR 会由主 CI 与本 workflow 各跑一次 hooks，属已知的有限重复。
 
 ### 工程脚本清单
 
