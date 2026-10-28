@@ -28,9 +28,9 @@ jobs:
   precommit-config-smoke:
     name: Pre-commit Config Smoke
     runs-on: ubuntu-latest
-    # 25 分钟预算：依赖安装（含 llama-cpp-python 源码编译）约 5~10 分钟，`run --all-files`
-    # 的 pyright 全量扫描 + 3 次 pip-compile 约 5 分钟；超时即失败暴露，不放宽到主 CI 量级。
-    timeout-minutes: 25
+    # 15 分钟预算：本 workflow 首次真实运行（run 40653567480）含依赖安装 + 全量 hooks 共 2 分 32 秒，
+    # 留约 6 倍余量应对冷缓存；超时即失败暴露，不放大到主 CI 量级。
+    timeout-minutes: 15
     permissions:
       contents: read
 
