@@ -1,0 +1,14 @@
+{
+  "data_source": "确定性合成（synthetic）",
+  "freeze_date": "2025-12-31",
+  "generated_by": "python scripts/upgrade_golden_snapshot.py --generate-inputs",
+  "history_trading_days": 130,
+  "sha256": {
+    "history_quotes.parquet": "b4a92c55eb31d9f8e2ef55aa277656600ade53dfa8051f5b2f197ee85ddb502a",
+    "market_snapshot.parquet": "1c1c08fb5669d1c9c066ab81e313d49d5a2a9376907190d496297e051bf566c1",
+    "trade_calendar.parquet": "831c3917959a4bebe81da9e8cfdabfdfed6aa93008bf85d5487ddebdc0b5cb4a",
+    "universe.csv": "fcfa10a2eaa2496a04ecbe7a59c94bdf28a4416928498bada92f794b3cbb91a0"
+  },
+  "synthetic_statement": "本目录全部数据均为脚本按固定随机种子合成的冻结快照（freeze_date=2025-12-31），不包含真实市场数据，也不读取系统日期/数据库/Keyring/网络。",
+  "universe_size": 40
+}

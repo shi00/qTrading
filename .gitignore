@@ -143,6 +143,11 @@ ruff_diff.txt
 *.gguf
 # N5-4: 情绪模型分类头产物（ai_models/** 归档，不进仓库/安装包）
 *.npz
+# 例外：依赖升级金标准快照 fixture（D0.2）——固定票池 CSV 与离线 parquet 输入/期望输出须入库，
+# 作为升级前后结果等价判定（R24 冻结交易日）的唯一数据源
+!tests/fixtures/upgrade_golden/inputs/*.csv
+!tests/fixtures/upgrade_golden/inputs/*.parquet
+!tests/fixtures/upgrade_golden/expected/*.csv
 
 # 5. E2E test diagnostics
 e2e-artifacts/
