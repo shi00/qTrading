@@ -4,7 +4,7 @@ aiofile==3.12.3
     # via py-key-value-aio
 aiohappyeyeballs==2.7.1
     # via aiohttp
-aiohttp==3.14.4
+aiohttp==3.14.5
     # via
     #   astockscreener (pyproject.toml)
     #   litellm
@@ -63,7 +63,7 @@ bs4==0.0.2
     # via tushare
 cachecontrol==0.14.4
     # via pip-audit
-cachetools==7.2.0
+cachetools==7.2.6
     # via
     #   astockscreener (pyproject.toml)
     #   py-key-value-aio
@@ -94,7 +94,7 @@ colorama==0.4.6 ; sys_platform == 'win32'
     #   tqdm
 coverage==7.16.1
     # via pytest-cov
-cryptography==50.0.1
+cryptography==50.0.2
     # via
     #   astockscreener (pyproject.toml)
     #   authlib
@@ -299,7 +299,7 @@ multidict==6.9.1
     #   yarl
 nodeenv==1.10.0
     # via pyright
-numpy==2.5.3
+numpy==2.5.4
     # via
     #   astockscreener (pyproject.toml)
     #   exchange-calendars
@@ -385,7 +385,7 @@ pyarrow==25.0.1
     # via astockscreener (pyproject.toml)
 pycparser==3.0 ; implementation_name != 'PyPy'
     # via cffi
-pydantic==2.13.5
+pydantic==2.14.1
     # via
     #   astockscreener (pyproject.toml)
     #   fastmcp-slim
@@ -395,7 +395,7 @@ pydantic==2.13.5
     #   openai
     #   openapi-pydantic
     #   pydantic-settings
-pydantic-core==2.46.5
+pydantic-core==2.50.1
     # via pydantic
 pydantic-settings==2.15.0
     # via
@@ -453,7 +453,7 @@ python-dateutil==2.9.0.post0
     # via
     #   botocore
     #   pandas
-python-dotenv==1.2.3
+python-dotenv==1.2.4
     # via
     #   astockscreener (pyproject.toml)
     #   fastmcp-slim
@@ -472,7 +472,7 @@ pyyaml==6.0.3
     #   fastmcp-slim
     #   huggingface-hub
     #   jsonschema-path
-readerwriterlock==1.0.9
+readerwriterlock==1.0.10
     # via astockscreener (pyproject.toml)
 referencing==0.37.0
     # via
@@ -594,7 +594,7 @@ typing-inspection==0.4.4
     #   mcp
     #   pydantic
     #   pydantic-settings
-tzdata==2026.4
+tzdata==2026.6
     # via
     #   astockscreener (pyproject.toml)
     #   exchange-calendars
