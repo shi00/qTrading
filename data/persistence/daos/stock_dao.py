@@ -402,7 +402,12 @@ class StockDao(BaseDao):
         return result
 
     async def get_concept_count(self):
-        """Get total count of stock concept mappings (excluding LIMIT_ pseudo-concepts, review08-D3)."""
+        """Get total count of stock concept mappings (excluding LIMIT_ pseudo-concepts, review08-D3).
+
+        R5（UIR-F15-004）：引擎已释放时 ``EngineDisposedError`` 必须原样传播，
+        不得降级为 ``COUNT=0``——否则健康消费者会把「生命周期故障」误读为
+        「概念 0 条」。合法空表仍返回 0；其余 DB 异常保留既有降级契约。
+        """
         try:
             df = await self._read_db(
                 "SELECT COUNT(*) as cnt FROM stock_concepts WHERE concept_id NOT LIKE $1",
@@ -413,8 +418,10 @@ class StockDao(BaseDao):
             return 0
         except asyncio.CancelledError:
             raise
+        except EngineDisposedError:
+            raise
         except Exception as exc:
-            logger.debug("[StockDao] get_concept_count failed: %s", exc)
+            logger.debug("[StockDao] get_concept_count failed: %s", safe_error(exc))
             return 0
 
     @log_async_operation(
