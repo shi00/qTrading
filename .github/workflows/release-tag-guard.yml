@@ -1,0 +1,234 @@
+name: Release Tag Guard
+
+# 发版链为「合并 Release PR → 人工推送 v<版本> tag → ci_cd.yml 的 push.tags 触发打包发布」。
+# 合并 Release PR 后若忘记推 tag，构建链不会启动，而 release-please 已把新版本写入
+# `.release-please-manifest.json`，后续版本定位会持续失准（它以为新版本已发布）。
+# 本 workflow 只做日检提醒：main 上声明的版本缺少对应 tag 时开/追加 Issue。
+#
+# 明确不做的事：
+# 1. 不创建、不推送 tag。GITHUB_TOKEN 创建的 tag 事件不会触发 ci_cd.yml（GitHub 递归触发
+#    防护），对既有 tag 强推或删除重推又会改写既有 Release 的 tag 来源（见
+#    docs/guides/ci-cd.md「版本发布流程与 Release 管理」）。
+# 2. 不挂 pull_request：fork PR 无 issues 写权限，且 PR 阶段 manifest 尚未合并，无意义。
+# 3. 不加入主 CI 必跑路径（ci_cd.yml 的 paths 白名单也不含本文件），避免抬高 PR 成本。
+#
+# 不检查「tag 存在但 Release 被删除 / 资产为 0」：资产由 tag 触发的 build-windows /
+# release-windows 异步产出，tag 刚推送的数小时内资产为 0 属正常中间态；历史 v0.10.0 /
+# v0.10.1 空 Release 按文档保持原样、不自动补救。日检做该判定会稳定误报。
+on:
+  schedule:
+    # 每天 01:00 UTC（北京时间 09:00），错开主 CI flaky 检测（02:00 UTC）与 Flet 日检（03:00 UTC）
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: release-tag-guard
+  cancel-in-progress: false
+
+jobs:
+  check-declared-version-tag:
+    name: Check declared version tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      # 只需 manifest / config 与远端 ref 查询，不需要历史；不拉取 tag 到本地。
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Resolve declared versions and tag state
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+
+          SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+          manifest_path = pathlib.Path(".release-please-manifest.json")
+          config_path = pathlib.Path("release-please-config.json")
+
+          result = {"warnings": [], "entries": []}
+
+
+          def ls_remote(tag):
+              """返回 (tag_exists, error)；网络/权限失败时 tag_exists=None，避免误报为缺失。"""
+              proc = subprocess.run(
+                  ["git", "ls-remote", "--tags", "--refs", "origin", f"refs/tags/{tag}"],
+                  capture_output=True,
+                  text=True,
+                  check=False,
+                  # 凭据失效时不得停在交互式提示上（Actions 无 TTY，会一直等到 job 超时）。
+                  env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+              )
+              if proc.returncode != 0:
+                  # R9：失败信息可能回显含凭据的远端 URL，落日志前去掉 user:pass@ 段。
+                  message = proc.stderr.strip().replace("\n", " | ")
+                  detail = re.sub(r"//[^\s/@]+:[^\s/@]+@", "//***@", message)[:500]
+                  return None, f"git ls-remote failed (exit {proc.returncode})" + (f": {detail}" if detail else "")
+              return bool(proc.stdout.strip()), None
+
+
+          try:
+              manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          except (OSError, ValueError) as exc:
+              result["warnings"].append(f"无法读取 {manifest_path}: {exc}")
+              manifest = None
+
+          if manifest is not None and (not isinstance(manifest, dict) or not manifest):
+              result["warnings"].append(f"{manifest_path} 不是非空对象，无法确定声明版本")
+              manifest = None
+
+          if manifest is not None:
+              try:
+                  config = json.loads(config_path.read_text(encoding="utf-8"))
+              except (OSError, ValueError) as exc:
+                  # 配置只用于校验 tag 形式假设，读不到不影响「缺失判定」本身。
+                  result["warnings"].append(f"无法读取 {config_path}（仅影响 tag 形式校验）: {exc}")
+                  config = {}
+              packages = config.get("packages") if isinstance(config, dict) else None
+              if not isinstance(packages, dict):
+                  packages = {}
+
+              for package, version in sorted(manifest.items()):
+                  entry = {"package": package, "version": None, "tag": None, "tag_exists": None}
+
+                  package_config = packages.get(package)
+                  if not isinstance(package_config, dict):
+                      package_config = {}
+                  # tag 形式假设：本检查按 v<version> 查询（与 ci_cd.yml 的 push.tags 'v*.*.*' 一致）。
+                  # 配置若改成不含 v 前缀 / 含组件名，tag 名会变化，必须显式告警，不能静默按旧形式判定。
+                  if package_config.get("include-v-in-tag") is False:
+                      result["warnings"].append(
+                          f"package '{package}' 的 include-v-in-tag=false，tag 可能不含 v 前缀；本检查仍按 v<version> 判定"
+                      )
+                  if package_config.get("include-component-in-tag") is True:
+                      result["warnings"].append(
+                          f"package '{package}' 的 include-component-in-tag=true，tag 可能含组件名；本检查仍按 v<version> 判定"
+                      )
+
+                  # manifest 值的形态不符合可解析 semver 时无法可靠构造 tag：只告警并跳过，
+                  # 不猜 tag 名（避免把「字段缺失」误报成「tag 缺失」）。
+                  if not isinstance(version, str) or not SEMVER.match(version.strip()):
+                      entry["error"] = f"声明版本缺失或不是合法 semver: {version!r}"
+                      result["entries"].append(entry)
+                      continue
+
+                  version = version.strip()
+                  entry["version"] = version
+                  entry["tag"] = f"v{version}"
+                  entry["tag_exists"], entry["error"] = ls_remote(entry["tag"])
+                  result["entries"].append(entry)
+
+          target = pathlib.Path(os.environ["RUNNER_TEMP"]) / "release-tag-guard.json"
+          target.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+          PY
+
+      - name: Report missing tags as issue
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const decisionsPath = path.join(process.env.RUNNER_TEMP || '', 'release-tag-guard.json');
+            const decisions = JSON.parse(fs.readFileSync(decisionsPath, 'utf8'));
+            const { owner, repo } = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const runLine = `- Run: ${runUrl} (trigger: \`${context.eventName}\`, commit: \`${context.sha}\`)`;
+
+            for (const warning of decisions.warnings) {
+              core.warning(`Release tag guard: ${warning}`);
+            }
+            for (const entry of decisions.entries) {
+              if (entry.error) {
+                core.warning(`Release tag guard: package '${entry.package}' skipped: ${entry.error}`);
+              } else if (entry.tag_exists) {
+                core.info(`Release tag guard: ${entry.tag} exists (package '${entry.package}').`);
+              }
+            }
+
+            const missing = decisions.entries.filter((entry) => entry.tag_exists === false);
+            if (missing.length === 0) {
+              core.info('Release tag guard: all declared versions have tags; nothing to report.');
+              return;
+            }
+
+            for (const entry of missing) {
+              // 去重键 = 稳定标题（含版本号、不含 runId）：同一版本只保留一个待办 Issue，
+              // 后续日检追加评论。去重只用标题、不叠加 label：仓库无专用 label，向 create 传
+              // 未知 label 可能被忽略或报错，会让去重键静默失效。
+              const title = `Release tag missing: ${entry.tag}`;
+              try {
+                // 分页遍历全部 open issue（issues 接口会返回 PR，必须排除）；
+                // 不能只取第一页 100 条，否则 open issue 超过 100 时去重失效。
+                const openIssues = await github.paginate(
+                  github.rest.issues.listForRepo.endpoint.merge({
+                    owner,
+                    repo,
+                    state: 'open',
+                    per_page: 100
+                  })
+                );
+                const found = openIssues.find(
+                  (issue) => !issue.pull_request && issue.title === title
+                );
+                // 只对 open Issue 去重：Issue 被人工关闭后再次缺失按新建处理，保留人工关闭语义（不自动重开）。
+                if (found) {
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: found.number,
+                    body: `该版本 tag 仍缺失（同一版本只追加评论，不重复建单）。\n\n${runLine}`
+                  });
+                  core.info(`Appended run record to existing issue: ${found.html_url}`);
+                  continue;
+                }
+
+                const body = [
+                  '## 发版 tag 缺失',
+                  '',
+                  `- **声明版本**：\`${entry.version}\``,
+                  `- **来源**：\`.release-please-manifest.json\` 中 package \`${entry.package}\` 的值`,
+                  `- **期望 tag**：\`${entry.tag}\`（与 \`ci_cd.yml\` 的 \`push.tags: v*.*.*\` 一致）`,
+                  `- **判定**：\`git ls-remote --tags --refs origin refs/tags/${entry.tag}\` 无输出`,
+                  '',
+                  '### 需要人工执行（在 Release PR 的合并提交上）',
+                  '',
+                  '```bash',
+                  `git tag -a ${entry.tag} -m "${entry.tag}"`,
+                  `git push origin ${entry.tag}`,
+                  '```',
+                  '',
+                  'tag 推送后由 `ci_cd.yml` 的 `push.tags` 触发打包与 Release 发布（见 `docs/guides/ci-cd.md`「版本发布流程与 Release 管理」）。',
+                  '',
+                  '### 注意',
+                  '',
+                  '- 本 workflow **只提醒，不创建/推送 tag**：`GITHUB_TOKEN` 创建的 tag 不会触发 `ci_cd.yml`；对既有 tag 强推或删除重推会改写既有 Release 的 tag 来源。',
+                  '- 若 tag 实际已存在，说明远端与 `.release-please-manifest.json` 不一致，请先核对（如本地未 fetch、推送到了其他远端）。',
+                  '- tag 推送后可关闭本 Issue（下一次日检不会再提醒该版本）。',
+                  '- 若发版本就有意延后，可关闭本 Issue；下一次日检仍缺失时会新建（保留人工关闭语义）。',
+                  '',
+                  runLine,
+                  ''
+                ].join('\n');
+
+                const created = await github.rest.issues.create({ owner, repo, title, body });
+                core.info(`Created issue: ${created.data.html_url}`);
+              } catch (error) {
+                // 建单是提醒辅助动作：失败不得改变 workflow 结论，但必须留痕（不得静默吞掉）。
+                core.warning(`Failed to create/update issue '${title}': ${error.message}`);
+              }
+            }
