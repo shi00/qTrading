@@ -2054,6 +2054,17 @@ class TestRangePreloadWarningMeta:
         assert wtype == "range_quality_gaps"
         assert category == "data_quality"
 
+    def test_range_quality_unverified_maps_to_data_quality(self):
+        """UIR-F11-005: 区间覆盖未核实（质量未知）→ data_quality（未知不等于无缺口，
+        不得落入慢路径 performance_path 提示）。"""
+        from strategies.backtest.engine import _range_preload_warning_meta
+
+        wtype, category = _range_preload_warning_meta(
+            "[range_quality_coverage_unverified] 2024-01-01-2025-02-04: 覆盖查询失败"
+        )
+        assert wtype == "range_quality_coverage_unverified"
+        assert category == "data_quality"
+
     def test_slow_path_variants_map_to_performance_path(self):
         from strategies.backtest.engine import _range_preload_warning_meta
 
