@@ -1675,7 +1675,11 @@ jobs:
 
   release-windows:
     name: Create GitHub Release
-    needs: build-windows
+    # 发布必须同时等待 release-only 的真实 sidecar smoke（SUP-CI-002）：该 job 失败时
+    # 本 job 因 needs 未全成功而跳过，避免“同次 workflow 红色但 Release 已发布”。
+    # e2e-sidecar-real-smoke 与 build-windows 在 tag 场景均会执行；workflow_dispatch
+    # 非 tag ref 下 smoke 被 skip，而本 job 的 if 同为 tag-only，同样跳过，不会误发布。
+    needs: [build-windows, e2e-sidecar-real-smoke]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
