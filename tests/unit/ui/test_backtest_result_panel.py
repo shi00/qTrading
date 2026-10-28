@@ -13,6 +13,7 @@
 # 测试行为由测试用例本身验证。
 
 from datetime import date, datetime
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import flet as ft
@@ -22,6 +23,7 @@ import pytest
 
 from strategies.backtest.config import BacktestConfig, BacktestResult
 from ui.components.backtest.backtest_result_panel import (
+    BacktestResultPanel,
     _build_chart_summary,
     _build_empty_content,
     _build_ic_chart,
@@ -42,11 +44,14 @@ from ui.components.backtest.backtest_result_panel import (
     _invested_warning,
     _metric_card,
     _profit_factor_card,
+    _resolve_trades_page,
     _sample_tick_indices,
 )
 from ui.i18n import I18n
 from ui.theme import AppColors
-from ui.viewmodels.backtest_view_model import _to_period_stats_rows, _to_trade_rows
+from ui.viewmodels.backtest_view_model import TradeRow, _to_period_stats_rows, _to_trade_rows
+
+from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
 
 pytestmark = pytest.mark.unit
 
@@ -538,12 +543,12 @@ class TestBuildTradesTable:
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
 
-    def test_trades_pagination_prev_page_calls_setter(self, sample_result: BacktestResult) -> None:
+    def test_trades_pagination_prev_page_calls_setter(self) -> None:
         """分页 prev_button on_click 调用 set_trades_page(page-1)。"""
         set_trades_page = MagicMock()
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_trades_table(_to_trade_rows(sample_result.trades), 1, set_trades_page)
+            container = _build_trades_table(_make_trades(51), 1, set_trades_page)
 
         # pagination 是 Column 的第 2 个控件（DataTable 后）
         pagination = container.content.controls[1]
@@ -563,6 +568,196 @@ class TestBuildTradesTable:
         pagination = container.content.controls[1]
         prev_btn = pagination.controls[0]
         assert prev_btn.disabled is True
+
+
+def _make_trades(count: int, prefix: str = "OLD") -> tuple[TradeRow, ...]:
+    """构造 count 条可区分来源的成交记录（ts_code 前缀标识所属结果）。"""
+    return tuple(
+        TradeRow(
+            trade_date=f"2024-01-{(i % 28) + 1:02d}",
+            ts_code=f"{prefix}{i:05d}.SZ",
+            action="buy" if i % 2 == 0 else "sell",
+            price=10.0 + i,
+            volume=1000 + i,
+            realized_pnl=0.0 if i % 2 == 0 else 100.0,
+        )
+        for i in range(count)
+    )
+
+
+def _walk_controls(control: object) -> list[object]:
+    """递归收集控件树内所有控件（支持 content / controls / tabs）。"""
+    found: list[object] = [control]
+    content = getattr(control, "content", None)
+    if content is not None:
+        found.extend(_walk_controls(content))
+    for child in getattr(control, "controls", None) or []:
+        found.extend(_walk_controls(child))
+    for tab in getattr(control, "tabs", None) or []:
+        found.extend(_walk_controls(tab))
+    return found
+
+
+def _trades_view(tree: object) -> tuple[ft.DataTable, ft.IconButton, ft.IconButton, ft.Text]:
+    """从渲染树提取成交表 + 上一页/下一页按钮 + 页码文案。"""
+    controls = _walk_controls(tree)
+    tables = [c for c in controls if isinstance(c, ft.DataTable) and len(c.columns) == 6]
+    assert tables, "渲染树中未找到成交明细表"
+    prev_btns = [c for c in controls if isinstance(c, ft.IconButton) and c.icon == ft.Icons.NAVIGATE_BEFORE]
+    next_btns = [c for c in controls if isinstance(c, ft.IconButton) and c.icon == ft.Icons.NAVIGATE_NEXT]
+    # 页码文案形如 "1-50 / 101"：仅由数字、短横、空格与斜杠组成。
+    page_texts = [
+        c
+        for c in controls
+        if isinstance(c, ft.Text)
+        and isinstance(c.value, str)
+        and " / " in c.value
+        and c.value.replace("-", "").replace(" ", "").replace("/", "").isdigit()
+    ]
+    assert len(prev_btns) == 1 and len(next_btns) == 1, "翻页按钮数量异常"
+    assert len(page_texts) == 1, f"页码文案数量异常: {[t.value for t in page_texts]}"
+    return tables[0], prev_btns[0], next_btns[0], page_texts[0]
+
+
+def _mount_panel(trades: tuple[TradeRow, ...], run_id: str | None) -> Any:
+    """挂载 BacktestResultPanel（带非空指标以渲染结果区）。"""
+    component = make_component(
+        BacktestResultPanel,
+        metrics=(("total_return", 0.1),),
+        trades=trades,
+        run_id=run_id,
+    )
+    run_mount_effects(component)
+    return component
+
+
+def _first_row_code(table: ft.DataTable) -> str | None:
+    return table.rows[0].cells[1].content.value
+
+
+def _invoke(handler: Any, *args: Any) -> None:
+    """调用 Flet 事件回调（stub 声明 0 参且可为 None，运行时接收 ControlEvent）。"""
+    handler(*args)
+
+
+class TestResolveTradesPage:
+    """UIR-F11-004: 渲染前页码 clamp（切片/按钮/文案同帧一致）。"""
+
+    @pytest.mark.parametrize(
+        ("trades_page", "total_rows", "expected"),
+        [
+            (0, 0, 0),
+            (2, 0, 0),
+            (0, 1, 0),
+            (3, 1, 0),
+            (0, 50, 0),
+            (2, 50, 0),
+            (0, 51, 0),
+            (1, 51, 1),
+            (5, 51, 1),
+            (2, 101, 2),
+            (99, 101, 2),
+            (-1, 101, 0),
+        ],
+    )
+    def test_clamped_to_last_page(self, trades_page: int, total_rows: int, expected: int) -> None:
+        assert _resolve_trades_page(trades_page, total_rows) == expected
+
+
+class TestTradesPageAcrossResults:
+    """UIR-F11-004: 结果身份变化时翻页复位，且首帧不越界。"""
+
+    def test_101_to_10_first_frame_is_clamped(self, mock_i18n_state: object, mock_app_colors_state: object) -> None:
+        """101 条翻到第 3 页 → props 更新为 10 条：首帧即 1-10/10，上一页禁用。"""
+        component = _mount_panel(_make_trades(101), "run-a")
+        for _ in range(2):
+            _, _, next_btn, _ = _trades_view(render_once(component))
+            _invoke(next_btn.on_click, MagicMock())
+        _, prev_btn, next_btn, page_text = _trades_view(render_once(component))
+        assert page_text.value == "101-101 / 101"
+        assert next_btn.disabled is True
+
+        component.kwargs["trades"] = _make_trades(10, "NEW")
+        component.kwargs["run_id"] = "run-b"
+        table, prev_btn, next_btn, page_text = _trades_view(render_once(component))
+        # 首帧（effect 执行前）已夹取到第 1 页，切片/文案/按钮一致。
+        assert page_text.value == "1-10 / 10"
+        assert prev_btn.disabled is True
+        assert next_btn.disabled is True
+        assert len(table.rows) == 10
+        assert _first_row_code(table) == "NEW00000.SZ"
+
+    def test_101_to_51_first_frame_clamped_then_reset(
+        self, mock_i18n_state: object, mock_app_colors_state: object
+    ) -> None:
+        """101 条第 3 页 → 51 条：首帧落在有效末页，effect 后复位到第 1 页。"""
+        component = _mount_panel(_make_trades(101), "run-a")
+        for _ in range(2):
+            _, _, next_btn, _ = _trades_view(render_once(component))
+            _invoke(next_btn.on_click, MagicMock())
+
+        component.kwargs["trades"] = _make_trades(51, "NEW")
+        component.kwargs["run_id"] = "run-b"
+        _, prev_btn, next_btn, page_text = _trades_view(render_once(component))
+        assert page_text.value == "51-51 / 51"
+        assert prev_btn.disabled is False
+        assert next_btn.disabled is True
+
+        component._run_render_effects()
+        _, prev_btn, _, page_text = _trades_view(render_once(component))
+        assert page_text.value == "1-50 / 51"
+        assert prev_btn.disabled is True
+
+    def test_51_to_empty_to_101_resets(self, mock_i18n_state: object, mock_app_colors_state: object) -> None:
+        """51 条第 2 页 → 空结果（run_id None）→ 101 条新结果：从第 1 页开始。"""
+        component = _mount_panel(_make_trades(51), "run-a")
+        _, _, next_btn, _ = _trades_view(render_once(component))
+        _invoke(next_btn.on_click, MagicMock())
+        _, _, _, page_text = _trades_view(render_once(component))
+        assert page_text.value == "51-51 / 51"
+
+        component.kwargs["trades"] = ()
+        component.kwargs["run_id"] = None
+        render_once(component)  # 空结果帧
+        component._run_render_effects()
+
+        component.kwargs["trades"] = _make_trades(101, "NEW")
+        component.kwargs["run_id"] = "run-c"
+        table, prev_btn, _, page_text = _trades_view(render_once(component))
+        assert page_text.value == "1-50 / 101"
+        assert prev_btn.disabled is True
+        assert _first_row_code(table) == "NEW00000.SZ"
+
+    def test_same_count_different_run_resets(self, mock_i18n_state: object, mock_app_colors_state: object) -> None:
+        """两次条数相同但 run_id 不同：不得因条数相同保留旧页。"""
+        component = _mount_panel(_make_trades(101), "run-a")
+        for _ in range(2):
+            _, _, next_btn, _ = _trades_view(render_once(component))
+            _invoke(next_btn.on_click, MagicMock())
+        _, _, _, page_text = _trades_view(render_once(component))
+        assert page_text.value == "101-101 / 101"
+
+        component.kwargs["trades"] = _make_trades(101, "NEW")
+        component.kwargs["run_id"] = "run-b"
+        render_once(component)  # 新结果首帧（同条数，页码仍合法）
+        component._run_render_effects()
+        table, prev_btn, _, page_text = _trades_view(render_once(component))
+        assert page_text.value == "1-50 / 101"
+        assert prev_btn.disabled is True
+        assert _first_row_code(table) == "NEW00000.SZ"
+
+    def test_same_run_rerender_keeps_valid_page(self, mock_i18n_state: object, mock_app_colors_state: object) -> None:
+        """同一 run 的重渲染（如 locale/theme 切换）不回到第 1 页。"""
+        component = _mount_panel(_make_trades(101), "run-a")
+        _, _, next_btn, _ = _trades_view(render_once(component))
+        _invoke(next_btn.on_click, MagicMock())
+        _, _, _, page_text = _trades_view(render_once(component))
+        assert page_text.value == "51-100 / 101"
+
+        component._run_render_effects()
+        _, prev_btn, _, page_text = _trades_view(render_once(component))
+        assert page_text.value == "51-100 / 101"
+        assert prev_btn.disabled is False
 
 
 class TestBuildIcChart:
@@ -835,10 +1030,11 @@ class TestBacktestResultPanelContract:
         assert "def BacktestResultPanel(" in content
 
     def test_trades_page_reset_on_new_result(self) -> None:
-        """BT-10: 新回测结果到达时翻页重置到第 1 页（use_effect 依赖 trades）。
+        """UIR-F11-004: 新回测结果到达时翻页重置到第 1 页（use_effect 依赖 run_id）。
 
         声明式组件渲染逻辑由 Flet 框架保证，本测试按本文件契约守护范式
-        校验重置 effect 的关键结构存在且依赖正确，防止回退为无重置实现。
+        校验重置 effect 的关键结构存在且依赖结果身份（非条数/引用推断），
+        防止回退为无重置实现。
         """
         from pathlib import Path
 
@@ -847,8 +1043,9 @@ class TestBacktestResultPanelContract:
         )
         content = panel_path.read_text(encoding="utf-8")
 
-        assert "ft.use_effect(_reset_trades_page, dependencies=[trades])" in content
+        assert "ft.use_effect(_reset_trades_page, dependencies=[run_id])" in content
         assert "set_trades_page(0)" in content
+        assert "_resolve_trades_page(trades_page, total_rows)" in content
 
     def test_uses_i18n_observable_state(self) -> None:
         """验证通过 ft.use_state(get_observable_state) 订阅 i18n 自动重渲染。"""
