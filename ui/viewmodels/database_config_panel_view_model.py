@@ -345,7 +345,7 @@ class DatabaseConfigPanelViewModel(ConfigPanelViewModelBase[DatabaseConfigState]
                 self._show_error(self._raw_message(msg))
                 return False
 
-            await ThreadPoolManager().run_async(
+            saved = await ThreadPoolManager().run_async(
                 TaskType.IO,
                 ConfigHandler.save_db_config,
                 host=config["host"],
@@ -354,6 +354,17 @@ class DatabaseConfigPanelViewModel(ConfigPanelViewModelBase[DatabaseConfigState]
                 password=config["password"],
                 database=config["database"],
             )
+
+            # UIR-F15-002: 必须严格 is True 才报成功。save_db_config 在配置文件写入失败或
+            # 密码安全存储失败时返回 False（含「普通字段已写、密码未写」的部分写入），
+            # 吞掉返回值会造成假成功：重启后配置丢失，或目标/凭据不配套。
+            if saved is not True:
+                logger.error(
+                    "[DatabaseConfigVM] save_db_config returned %r; configuration not persisted",
+                    saved,
+                )
+                self._show_error(Message("db_save_failed"))
+                return False
 
             self._show_success(Message("db_msg_saved"))
 

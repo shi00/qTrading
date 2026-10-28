@@ -1377,3 +1377,172 @@ class TestPartitionByLookupEquivalence:
         assert by_code.get("MISSING") is None
         missing_filter = df.filter(pl.col("ts_code") == "MISSING")
         assert missing_filter.is_empty()
+
+
+class TestAdjustedUnitsContract:
+    """UIR-F11-002：复权单位（账面）与名义股数（真实成交）的换算契约。
+
+    复权价不是真实成交价——整手、费用、参与率必须用名义价 × 名义股数；
+    账面持仓/NAV 仍以复权单位 × 复权价计价，二者靠 qfq_ratio 互换。
+    """
+
+    @staticmethod
+    def _make_simulator(
+        *,
+        initial_capital: float = 1_000_000.0,
+        cash_reserve_pct: float = 0.0,
+        cost_config: TransactionCostConfig | None = None,
+    ) -> PortfolioSimulator:
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            initial_capital=initial_capital,
+            max_position_count=1,
+            cash_reserve_pct=cash_reserve_pct,
+            max_single_weight=1.0,
+        )
+        return PortfolioSimulator(config, TransactionCostModel(cost_config or TransactionCostConfig(slippage_bps=0.0)))
+
+    @staticmethod
+    def _quote(raw_price: float, qfq_ratio: float | None, *, avg_daily_volume: float | None = None) -> pl.DataFrame:
+        columns: dict = {
+            "ts_code": ["000001.SZ"],
+            "raw_open": [raw_price],
+            "raw_close": [raw_price],
+            "qfq_open": [raw_price * (qfq_ratio or 1.0)],
+            "qfq_close": [raw_price * (qfq_ratio or 1.0)],
+            "qfq_ratio": [qfq_ratio],
+            "is_tradable": [True],
+        }
+        if avg_daily_volume is not None:
+            columns["avg_daily_volume"] = [avg_daily_volume]
+        return pl.DataFrame(columns)
+
+    def test_lot_rounding_uses_raw_price_and_nominal_shares(self) -> None:
+        """GWT：raw=10、ratio=2、目标 1500 → 成交 100 名义股、gross=1000。
+
+        旧实现按 qfq 价 20 取整得 0 股（lot_size_indivisible），把可成交的 100 股误判为买不起。
+        """
+        simulator = self._make_simulator(initial_capital=1_500.0)
+        signals = pl.DataFrame({"ts_code": ["000001.SZ"], "signal_rank": [1.0]})
+
+        simulator.process_day(date(2024, 1, 2), signals, self._quote(10.0, 2.0), is_rebalance=True)
+
+        trades = simulator.get_results()[0]
+        buy = trades.filter(pl.col("action") == "buy")
+        assert not buy.is_empty()
+        assert buy["volume"][0] == 100
+        assert buy["price"][0] == pytest.approx(10.0)
+        assert buy["gross_amount"][0] == pytest.approx(1_000.0)
+        # 口径标记：新结果的 volume 是名义股数；历史结果无该列（复权单位）
+        assert buy["volume_unit"][0] == "nominal_shares"
+
+        skipped = simulator.get_results()[2]
+        assert skipped.is_empty()
+
+        # 账面仍是复权单位：100 名义股 / ratio 2 = 50 复权单位，市值 50×20=1000
+        pos = simulator.positions["000001.SZ"]
+        assert pos["volume"] == pytest.approx(50.0)
+        detail = simulator.get_results()[1].row(-1, named=True)["positions"]["000001.SZ"]
+        assert detail["adjusted_units"] == pytest.approx(50.0)
+        assert detail["volume"] == pytest.approx(100.0)
+        assert detail["market_value"] == pytest.approx(1_000.0)
+
+    def test_nominal_shares_and_cashflow_invariant_to_normalization_base(
+        self,
+    ) -> None:
+        """相同 raw 路径、不同归一化基准（ratio 1 vs 2）→ 名义股数与人民币现金流一致。"""
+        signals = pl.DataFrame({"ts_code": ["000001.SZ"], "signal_rank": [1.0]})
+
+        ratio_one = self._make_simulator(cash_reserve_pct=0.1)
+        ratio_one.process_day(date(2024, 1, 2), signals, self._quote(10.0, 1.0), is_rebalance=True)
+
+        ratio_two = self._make_simulator(cash_reserve_pct=0.1)
+        ratio_two.process_day(date(2024, 1, 2), signals, self._quote(10.0, 2.0), is_rebalance=True)
+
+        buy_one = ratio_one.get_results()[0].filter(pl.col("action") == "buy").row(0, named=True)
+        buy_two = ratio_two.get_results()[0].filter(pl.col("action") == "buy").row(0, named=True)
+
+        assert buy_one["volume"] == buy_two["volume"]
+        assert buy_one["price"] == pytest.approx(buy_two["price"])
+        assert buy_one["gross_amount"] == pytest.approx(buy_two["gross_amount"])
+        assert buy_one["net_amount"] == pytest.approx(buy_two["net_amount"])
+        assert ratio_one.cash == pytest.approx(ratio_two.cash)
+
+        # 复权单位随基准不同，但市值（真实金额）一致
+        pos_one = ratio_one.get_results()[1].row(-1, named=True)["positions"]["000001.SZ"]
+        pos_two = ratio_two.get_results()[1].row(-1, named=True)["positions"]["000001.SZ"]
+        assert pos_one["adjusted_units"] == pytest.approx(pos_two["adjusted_units"] * 2)
+        assert pos_one["market_value"] == pytest.approx(pos_two["market_value"])
+
+    def test_slippage_participation_uses_nominal_shares(self) -> None:
+        """参与率分母是名义股数：名义均量 10000、成交 100 股 → participation=0.01。
+
+        volume_ratio 模型下 slippage = 5bps × (1 + 0.01×10) = 55bps。
+        若误用复权单位（ratio=2 → 50），参与率减半，滑点会被系统性低估。
+        """
+        cost_config = TransactionCostConfig(slippage_model="volume_ratio", slippage_bps=5.0)
+        simulator = self._make_simulator(initial_capital=1_500.0, cost_config=cost_config)
+        signals = pl.DataFrame({"ts_code": ["000001.SZ"], "signal_rank": [1.0]})
+
+        simulator.process_day(
+            date(2024, 1, 2),
+            signals,
+            self._quote(10.0, 2.0, avg_daily_volume=10_000.0),
+            is_rebalance=True,
+        )
+
+        buy = simulator.get_results()[0].filter(pl.col("action") == "buy")
+        assert not buy.is_empty()
+        assert buy["volume"][0] == 100
+        expected_price = 10.0 * (1 + 5.0 / 10000 * (1 + (100 / 10_000) * 10))
+        assert buy["price"][0] == pytest.approx(expected_price, rel=1e-9)
+
+    def test_missing_ratio_skips_instead_of_faking_one(self) -> None:
+        """ratio 缺失时跳过撮合（reason=missing_qfq_ratio），不伪造 ratio=1 成交（R21）。"""
+        simulator = self._make_simulator(cash_reserve_pct=0.1)
+        signals = pl.DataFrame({"ts_code": ["000001.SZ"], "signal_rank": [1.0]})
+        initial_cash = simulator.cash
+
+        simulator.process_day(date(2024, 1, 2), signals, self._quote(10.0, None), is_rebalance=True)
+
+        assert simulator.positions == {}
+        assert simulator.cash == initial_cash
+        skipped = simulator.get_results()[2]
+        missing = skipped.filter(pl.col("reason") == "missing_qfq_ratio")
+        assert len(missing) == 1
+        assert missing["direction"][0] == "buy"
+
+    def test_partial_sell_after_buy_uses_nominal_shares_and_min_commission(self) -> None:
+        """买入 200 名义股（ratio=2）后部分减持 100 股：成交与费用按真实人民币金额。
+
+        最低佣金以名义成交额判定；若误用 qfq 价或复权单位，费用基准会失真。
+        """
+        cost_config = TransactionCostConfig(slippage_bps=0.0)
+        cost_model = TransactionCostModel(cost_config)
+        simulator = self._make_simulator(cost_config=cost_config)
+
+        buy_quote = self._quote(10.0, 2.0)
+        simulator._buy_to_target(date(2024, 1, 2), {"000001.SZ": 2_000.0}, {"000001.SZ": buy_quote}, 2_000.0)
+
+        buy = simulator.get_results()[0].filter(pl.col("action") == "buy")
+        assert buy["volume"][0] == 200
+        assert buy["price"][0] == pytest.approx(10.0)
+        buy_cost = cost_model.calculate(price=10.0, volume=200, is_buy=True, trade_date=date(2024, 1, 2))
+        assert buy["net_amount"][0] == pytest.approx(buy_cost.net_amount)
+        assert buy_cost.commission == pytest.approx(5.0)  # 2000 元成交额触发最低佣金
+        cash_after_buy = simulator.cash
+
+        simulator._sell_position_to_value(date(2024, 1, 3), "000001.SZ", self._quote(10.0, 2.0), 1_000.0)
+
+        sell = simulator.get_results()[0].filter(pl.col("action") == "sell")
+        assert sell["volume"][0] == 100  # 名义股数（真实可卖股数）
+        assert sell["price"][0] == pytest.approx(10.0)  # 成交价用名义价（raw）
+        sell_cost = cost_model.calculate(price=10.0, volume=100, is_buy=False, trade_date=date(2024, 1, 3))
+        assert sell["net_amount"][0] == pytest.approx(sell_cost.net_amount)
+        assert sell_cost.commission == pytest.approx(5.0)
+
+        # 现金为真实人民币口径：与复权归一化基准无关
+        assert simulator.cash == pytest.approx(cash_after_buy + sell_cost.net_amount)
+        # 剩余 100 名义股 = 50 复权单位（ratio=2）
+        assert simulator.positions["000001.SZ"]["volume"] == pytest.approx(50.0)

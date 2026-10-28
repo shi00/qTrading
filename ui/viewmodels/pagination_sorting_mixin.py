@@ -57,6 +57,8 @@ class PaginationSortingMixin:
     _state: ScreenerState
     _full_results: pd.DataFrame | None
     _set_state: Callable[..., None]
+    # UIR-F09-002: 数据集修订号（_full_results 被整体替换时递增，宿主 VM 共享成员）。
+    _dataset_revision: int
 
     def _update_pagination(self, page_size: int | None = None, page_no: int | None = None, **changes) -> None:
         """Recompute pagination fields in state, then notify via _set_state.
@@ -234,15 +236,27 @@ class PaginationSortingMixin:
 
             self._set_state(loading=True)
 
+            # UIR-F09-002: 捕获（数据集引用 + 修订号）同一同步时刻的快照。修订号在
+            # await 期间被整体替换数据的写者（运行完成 / 模式切换绕过本锁）推进时，
+            # 本次排序结果基于陈旧数据集，须丢弃写回，避免覆盖新数据。
+            source_df = self._full_results
+            revision_at_start = self._dataset_revision
+
             try:
                 # Offload sorting to thread
                 sorted_df = await ThreadPoolManager().run_async(
                     TaskType.CPU,
                     self._sort_helper,
-                    self._full_results,
+                    source_df,
                     column_key,
                     sort_ascending,
                 )
+
+                if revision_at_start != self._dataset_revision:
+                    # 数据集已在 await 期间被替换 → 本次写回过期，不改任何可见状态
+                    # （只复位本任务占用的 loading；不清更新请求的 loading）。
+                    self._set_state(loading=False)
+                    return
 
                 self._full_results = sorted_df
                 # C2b H1: 排序变更后经唯一 owner 单帧原子重算分页与当前页切片

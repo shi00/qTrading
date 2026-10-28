@@ -925,6 +925,166 @@ class TestExecuteSQLSeverity:
         assert vm.state.sql_is_executing is False
 
 
+class _GatedDB:
+    """可控完成顺序的假 DB: 按表名 gate 挂起 schema/count, 用于模拟乱序返回。"""
+
+    def __init__(self) -> None:
+        self.schema_gates: dict[str, asyncio.Event] = {}
+        self.count_gates: dict[str, asyncio.Event] = {}
+        self.closed = False
+
+    async def get_table_schema(self, table_name: str):
+        gate = self.schema_gates.get(table_name)
+        if gate is not None:
+            await gate.wait()
+        return [{"name": f"{table_name}_col", "type": "TEXT"}]
+
+    async def get_table_count(self, tbl, filters):
+        gate = self.count_gates.get(tbl)
+        if gate is not None:
+            await gate.wait()
+        return 1
+
+    async def query_table(self, tbl, page, page_size, filters, sort, asc):
+        return pd.DataFrame({f"{tbl}_col": [tbl]})
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def gated_db():
+    return _GatedDB()
+
+
+@pytest.fixture
+def gated_tp():
+    """ThreadPoolManager mock: 真跑 async 假 DB, 便于用 Event 控制完成顺序。"""
+    tp = MagicMock()
+
+    async def _run_async(task_type, func, *args, **kwargs):
+        result = func() if isinstance(func, functools.partial) else func(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    tp.run_async = AsyncMock(side_effect=_run_async)
+    return tp
+
+
+class TestTableGenerationGuard:
+    """M-UI-16 复核: 切表代次 — 旧表晚到的 schema/数据不得覆盖新表状态."""
+
+    async def test_stale_schema_does_not_overwrite_new_table_columns(self, gated_db, gated_tp):
+        """A→B 乱序返回: A 的 schema 晚于 B 返回时不得覆盖 B 的列头."""
+        vm = DataExplorerViewModel(db_manager=gated_db, thread_pool=gated_tp)
+        gated_db.schema_gates["stock_basic"] = asyncio.Event()
+        gated_db.schema_gates["daily_quotes"] = asyncio.Event()
+
+        stale = asyncio.create_task(vm.load_table_schema("stock_basic"))
+        await asyncio.sleep(0)
+        vm.set_table("daily_quotes")
+        fresh = asyncio.create_task(vm.load_table_schema("daily_quotes"))
+        await asyncio.sleep(0)
+
+        # 新表先返回, 旧表后返回
+        gated_db.schema_gates["daily_quotes"].set()
+        await asyncio.sleep(0)
+        gated_db.schema_gates["stock_basic"].set()
+        await asyncio.gather(stale, fresh)
+
+        assert vm.state.current_table == "daily_quotes"
+        assert vm.state.table_columns == ("daily_quotes_col",)
+
+    async def test_stale_schema_error_does_not_pollute_new_table(self, gated_db, gated_tp):
+        """旧代次 schema 失败不得在新表上留下 error_message."""
+        vm = DataExplorerViewModel(db_manager=gated_db, thread_pool=gated_tp)
+        gate = asyncio.Event()
+        original_schema = gated_db.get_table_schema
+
+        async def _conditional_schema(table_name: str):
+            # 仅旧表挂起后失败, 新表正常返回 — 否则新表也会被 gate 阻塞而死锁
+            if table_name == "stock_basic":
+                await gate.wait()
+                raise RuntimeError("stale schema boom")
+            return await original_schema(table_name)
+
+        gated_db.get_table_schema = _conditional_schema  # type: ignore[method-assign]  # 假 DB 局部替换以模拟旧代次失败
+
+        stale = asyncio.create_task(vm.load_table_schema("stock_basic"))
+        await asyncio.sleep(0)
+        vm.set_table("daily_quotes")
+        await vm.load_table_schema("daily_quotes")
+        gate.set()
+        await stale
+
+        assert vm.state.table_columns == ("daily_quotes_col",)
+        assert vm.state.error_message is None
+
+    async def test_stale_query_result_not_written_after_switch(self, gated_db, gated_tp):
+        """A 的查询在切到 B 后返回: 不得把 A 的数据写进 B 的状态."""
+        vm = DataExplorerViewModel(db_manager=gated_db, thread_pool=gated_tp)
+        await vm.load_table_schema("stock_basic")
+        gated_db.count_gates["stock_basic"] = asyncio.Event()
+
+        stale = asyncio.create_task(vm.query_data())
+        await asyncio.sleep(0)
+        vm.set_table("daily_quotes")
+        vm.reset_table_state()
+        await vm.load_table_schema("daily_quotes")
+        await vm.query_data()
+
+        gated_db.count_gates["stock_basic"].set()
+        await stale
+
+        assert vm.state.current_table == "daily_quotes"
+        assert vm.state.table_columns == ("daily_quotes_col",)
+        assert [row.values for row in vm.state.table_rows] == [("daily_quotes",)]
+
+    async def test_new_generation_query_not_blocked_by_stale_loading(self, gated_db, gated_tp):
+        """旧代次仍持有 is_loading 时, 切表后的新代次查询不得被静默丢弃."""
+        vm = DataExplorerViewModel(db_manager=gated_db, thread_pool=gated_tp)
+        gated_db.count_gates["stock_basic"] = asyncio.Event()
+
+        stale = asyncio.create_task(vm.query_data())
+        await asyncio.sleep(0)
+        assert vm.state.is_loading is True
+
+        vm.set_table("daily_quotes")
+        await vm.load_table_schema("daily_quotes")
+        df = await vm.query_data()
+
+        assert not df.empty
+        assert [row.values for row in vm.state.table_rows] == [("daily_quotes",)]
+
+        gated_db.count_gates["stock_basic"].set()
+        await stale
+        assert vm.state.is_loading is False
+        assert [row.values for row in vm.state.table_rows] == [("daily_quotes",)]
+
+    async def test_stale_query_does_not_clear_new_generation_loading(self, gated_db, gated_tp):
+        """旧代次查询收尾不得关闭新代次查询的 is_loading."""
+        vm = DataExplorerViewModel(db_manager=gated_db, thread_pool=gated_tp)
+        gated_db.count_gates["stock_basic"] = asyncio.Event()
+        gated_db.count_gates["daily_quotes"] = asyncio.Event()
+
+        stale = asyncio.create_task(vm.query_data())
+        await asyncio.sleep(0)
+        vm.set_table("daily_quotes")
+        await vm.load_table_schema("daily_quotes")
+        fresh = asyncio.create_task(vm.query_data())
+        await asyncio.sleep(0)
+        assert vm.state.is_loading is True
+
+        gated_db.count_gates["stock_basic"].set()
+        await stale
+        assert vm.state.is_loading is True
+
+        gated_db.count_gates["daily_quotes"].set()
+        await fresh
+        assert vm.state.is_loading is False
+
+
 class TestWriteExcel:
     async def test_write_excel_calls_to_excel_with_correct_args(self, vm, mock_tp):
         """write_excel 通过 ThreadPoolManager 调用 df.to_excel(filepath, index=False, engine='openpyxl') (R16)."""

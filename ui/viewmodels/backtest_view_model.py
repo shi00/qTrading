@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -106,20 +107,38 @@ def _to_trade_rows(trades_df: Any) -> tuple[TradeRow, ...]:
     )
 
 
-def _to_period_stats_rows(period_df: Any) -> tuple[tuple[str, float, float, float], ...]:
+def _optional_ratio(value: Any) -> float | None:
+    """月表收益映射：缺失（None / NaN / inf）保持 None，有效 0.0 保持 0.0。
+
+    R21: 引擎在基准整月缺失时显式置 None（BT-04），此处不得回填 0 —— 否则
+    「未测量」会被渲染成「恰好零收益」，与真实 0 无法区分。旧历史数据缺列
+    （``r.get`` 得 None）或携带 NaN 的快照同样按缺失处理。
+    """
+    if value is None:
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _to_period_stats_rows(
+    period_df: Any,
+) -> tuple[tuple[str, float | None, float | None, float | None], ...]:
     """BacktestResult.period_stats (pl.DataFrame) → 渲染行 (D11 拆解).
 
     行 = (year_month, monthly_return, benchmark_return, excess_return), 均为原始值,
-    View 渲染时格式化百分比.
+    View 渲染时格式化百分比. 收益三项缺失时保持 None（R21），由 View 渲染 N/A.
     """
     if period_df is None or period_df.is_empty():
         return ()
     return tuple(
         (
-            str(r.get("year_month", "")),
-            float(r.get("monthly_return", 0) or 0),
-            float(r.get("benchmark_return", 0) or 0),
-            float(r.get("excess_return", 0) or 0),
+            str(r.get("year_month", "") or ""),
+            _optional_ratio(r.get("monthly_return")),
+            _optional_ratio(r.get("benchmark_return")),
+            _optional_ratio(r.get("excess_return")),
         )
         for r in period_df.iter_rows(named=True)
     )
@@ -323,12 +342,13 @@ class BacktestState:
     # - metrics: (key, value) 键值对序列 (result.metrics 为 dict[str, float])
     # - trades: 成交记录 (分页渲染)
     # - nav_curve / ic_series: 图表点序列
-    # - period_stats: 月收益表行 (year_month, monthly_return, benchmark_return, excess_return)
+    # - period_stats: 月收益表行 (year_month, monthly_return, benchmark_return, excess_return);
+    #   收益三项可为 None（该月基准缺失/未测量，R21：不得回填 0），View 渲染 N/A
     metrics: tuple[tuple[str, float], ...] = ()
     trades: tuple[TradeRow, ...] = ()
     nav_curve: tuple[float, ...] = ()
     ic_series: tuple[float, ...] = ()
-    period_stats: tuple[tuple[str, float, float, float], ...] = ()
+    period_stats: tuple[tuple[str, float | None, float | None, float | None], ...] = ()
     # 已脱敏的错误详情 (Task 11.4): run_backtest 失败时由 DataSanitizer.sanitize_error 产出
     error_detail: str | None = None
     # 净值曲线横轴日期 (``%Y-%m-%d`` 字符串) / 基准相对净值曲线 / IC 横轴日期
@@ -386,6 +406,9 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             def _default_engine_factory(cache, config, data_processor):
                 from strategies.backtest.engine import VectorBacktestEngine
 
+                # UIR-F11-001: 默认路径 data_processor 为 None 时，由 BacktestDataProvider
+                # 以已初始化的 cache + TradeCalendarService(cache, None) 组装最小历史数据
+                # 上下文（无网络/无外部客户端），供 oversold 等可选策略取历史窗口。
                 return VectorBacktestEngine(cache, config, data_processor=data_processor)
 
             def _default_strategy_lookup(strategy_key):

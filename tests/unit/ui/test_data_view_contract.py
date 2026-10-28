@@ -1316,6 +1316,14 @@ class TestTableViewerTabEventHandlers:
         assert "load_table_schema" in calls
         assert "query_data" in calls
 
+        # M-UI-16 复核: 加载的必须是新表 — 仅断言方法名无法发现「schema 仍取旧表」
+        # 的闭包回归; _load_schema_and_data 须从 vm.state 重读快照而不是渲染闭包。
+        schema_calls = [kwargs for name, kwargs in vm.method_calls if name == "load_table_schema"]
+        assert schema_calls[-1]["table_name"] == "daily_quotes"
+        # 挂载时首次加载发生在 set_table 之前, 故比较「最后一次」schema 调用
+        schema_idxs = [i for i, name in enumerate(calls) if name == "load_table_schema"]
+        assert schema_idxs[-1] > calls.index("set_table"), "latest load_table_schema must follow set_table"
+
     def test_on_query_click_triggers_set_filter_and_query(
         self,
         mock_i18n_state,
@@ -2330,13 +2338,15 @@ class TestTableViewerTabAsyncErrorPaths:
 class TestSQLConsoleTabAsyncErrorPaths:
     """SQLConsoleTab _run_query 异常路径: 空成功结果 + CancelledError 传播 (R2)。"""
 
-    def test_run_query_success_with_empty_df_sets_error_status(
+    def test_run_query_success_with_empty_df_sets_success_empty_status(
         self,
         mock_i18n_state,
         mock_app_colors_state,
         mock_metadata,
     ):
-        """_run_query: success=True 但 df 为空 → 设置错误状态 (data_sql_error)。"""
+        """_run_query: success=True 但 0 行 → 成功空态 (data_sql_success_empty + SUCCESS 色), 非错误态。"""
+        from ui.i18n import I18n
+        from ui.theme import AppColors
         from ui.views.data_view import SQLConsoleTab
 
         vm = _FakeDataExplorerViewModel()
@@ -2354,9 +2364,71 @@ class TestSQLConsoleTabAsyncErrorPaths:
 
         coro = btn_run.on_click(MagicMock())
         _run_async_coro(coro)
+        result = render_once(component)
 
         calls = [c[0] for c in vm.method_calls]
         assert "execute_sql" in calls
+
+        # data_sql_success_empty 文案前缀 (去掉 {time} 占位符, 与实际耗时无关)
+        empty_success_prefix = I18n.get("data_sql_success_empty").split("{time")[0]
+        status_texts = [
+            c
+            for c in _find_by_type(result, ft.Text)
+            if (getattr(c, "value", "") or "").startswith(empty_success_prefix)
+        ]
+        assert len(status_texts) == 1, "成功零行应渲染 data_sql_success_empty 状态文案"
+        assert status_texts[0].color == AppColors.SUCCESS, "成功零行应以 SUCCESS 色呈现, 不得复用错误色"
+        assert not [
+            c for c in _find_by_type(result, ft.Text) if (getattr(c, "value", "") or "") == I18n.get("data_sql_error")
+        ]
+
+    def test_run_query_success_empty_after_failure_clears_previous_detail(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+    ):
+        """连续查询: 上次失败详情 → 本次成功 0 行, 状态切成功空态且错误详情隐藏。"""
+        from ui.i18n import I18n
+        from ui.views.data_view import SQLConsoleTab
+
+        vm = _FakeDataExplorerViewModel()
+        vm._sql_result = {"success": False, "data": None, "error": "syntax error near FROM"}
+        component = make_component(SQLConsoleTab, state=vm.state, vm=vm)
+        page = _make_fake_page()
+        result, page = _mount(component, page=page)
+
+        outlined_btns = _find_by_type(result, ft.OutlinedButton)
+        outlined_btns[0].on_click(MagicMock())
+
+        result = render_once(component)
+        _run_async_coro(_find_by_type(result, ft.Button)[0].on_click(MagicMock()))
+        result = render_once(component)
+        # 前置条件: 失败查询后承载错误详情的容器可见
+        detail_containers = [
+            c for c in _find_by_type(result, ft.Container) if isinstance(getattr(c, "content", None), ft.ExpansionTile)
+        ]
+        assert len(detail_containers) == 1 and detail_containers[0].visible is True, (
+            "前置条件: 失败查询应展示错误详情容器"
+        )
+
+        vm._sql_result = {"success": True, "data": pd.DataFrame(), "error": None}
+        _run_async_coro(_find_by_type(result, ft.Button)[0].on_click(MagicMock()))
+        result = render_once(component)
+
+        # 本次成功零行 → 上次失败的错误详情不得残留
+        detail_containers = [
+            c for c in _find_by_type(result, ft.Container) if isinstance(getattr(c, "content", None), ft.ExpansionTile)
+        ]
+        assert len(detail_containers) == 1 and detail_containers[0].visible is False, (
+            "本次成功零行后不得沿用上次失败的错误详情"
+        )
+        empty_success_prefix = I18n.get("data_sql_success_empty").split("{time")[0]
+        assert [
+            c
+            for c in _find_by_type(result, ft.Text)
+            if (getattr(c, "value", "") or "").startswith(empty_success_prefix)
+        ], "本次成功零行应渲染 data_sql_success_empty 状态文案"
 
     def test_run_query_propagates_cancelled_error(
         self,

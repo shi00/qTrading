@@ -865,6 +865,7 @@
     "db_saving_in_progress": "Configuration save in progress, please wait...",
     "db_msg_success": "Connection successful",
     "db_msg_saved": "Configuration saved",
+    "db_save_failed": "Failed to save configuration. Please check that the config file and credential store are writable.",
     "db_msg_not_found": "Database does not exist",
     "db_msg_not_found_create": "Database not found. Will create on save.",
     "db_err_format": "Error",
