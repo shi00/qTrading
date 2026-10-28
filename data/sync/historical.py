@@ -128,6 +128,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
         super().__init__(context)
         self._tasks_lock = threading.Lock()
         self._active_tasks = set()
+        # UIR-F14-006: 执行轮次计数。取消信号只对发起它的那一轮有效，故仅当无并发
+        # 旧轮次（本实例是新一轮唯一执行者）时才复位上一轮遗留的取消状态。
+        self._run_state_lock = threading.Lock()
+        self._active_runs = 0
 
     @property
     def _shutdown_event(self):
@@ -150,6 +154,28 @@ class HistoricalSyncStrategy(ISyncStrategy):
             for task in self._active_tasks:
                 if not task.done():
                     task.cancel()
+
+    def _begin_execution_round(self) -> bool:
+        """登记一次执行轮次；返回 True 表示此前无并发轮次（本实例属新一轮）。
+
+        UIR-F14-006：`_cancelled` 是实例级标志（`DataProcessor.request_cancel` 对所有策略
+        置位），若不区分轮次，取消后同会话再次初始化会被旧标志立即判定 cancelled，首批
+        行情不再补抓。以轮次计数判定归属：只有上一轮已退出时才允许复位，旧轮仍在运行时
+        不得清除其取消意图（避免「粗暴清除其他仍运行任务的取消信号」）。
+        """
+        with self._run_state_lock:
+            is_new_round = self._active_runs == 0
+            self._active_runs += 1
+            return is_new_round
+
+    def _end_execution_round(self) -> None:
+        with self._run_state_lock:
+            self._active_runs = max(0, self._active_runs - 1)
+
+    def _is_execution_active(self) -> bool:
+        """当前是否有活动的历史同步 run 轮次（独立单日同步不登记轮次）。"""
+        with self._run_state_lock:
+            return self._active_runs > 0
 
     @staticmethod
     def _completed_dates(cached_dates_per_table: dict[str, set]) -> set:
@@ -192,7 +218,24 @@ class HistoricalSyncStrategy(ISyncStrategy):
         Main entry point for historical sync.
         Note: Cancellation is handled via cancel() method called by DataProcessor.request_cancel()
         """
-        self._shutdown_event.clear()
+        is_new_round = self._begin_execution_round()
+        try:
+            if is_new_round:
+                # UIR-F14-006：上一轮已退出，上一轮收到的取消信号随之失效；复位避免
+                # 取消后同会话再次初始化被旧 `_cancelled` 直接判定 cancelled。
+                # 旧轮仍在运行时（is_new_round=False）不复位，保留其仍生效的取消意图。
+                self._cancelled = False
+                self._shutdown_event.clear()
+            return await self._run_round(days, progress_callback)
+        finally:
+            self._end_execution_round()
+
+    async def _run_round(
+        self,
+        days: int,
+        progress_callback: typing.Callable | None,
+    ) -> SyncResult:
+        """执行单轮历史同步并汇聚质量报告；取消/失败终态由本轮结果承载（R2 不吞取消）。"""
         result = SyncResult()
 
         try:
@@ -277,7 +320,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
         to ensure the date range covers enough trading days.
         """
         # Reset any loop-local cancellation state so direct calls remain reusable.
-        self._shutdown_event.clear()
+        # UIR-F14-006：仅在无活动轮次（直接调用本方法、未经 run 包装）时复位；经 run
+        # 驱动时轮次边界已按归属判定复位，此处不得清除并发旧轮次仍生效的取消信号。
+        if not self._is_execution_active():
+            self._cancelled = False
+            self._shutdown_event.clear()
 
         end_date = await self._get_effective_trade_date()
         calendar_days = int(days * _CALENDAR_DAY_MULTIPLIER) + _CALENDAR_DAY_BUFFER
@@ -774,7 +821,15 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     with self._tasks_lock:
                         self._active_tasks.update(r_tasks)
                     try:
-                        await gather_return_exceptions_propagating_cancel(*r_tasks)
+                        retry_results = await gather_return_exceptions_propagating_cancel(*r_tasks)
+                        # UIR-F14-005: retry_one 对 EngineDisposedError 与系统级异常
+                        # （severity==system）会 re-raise，经 gather 封装转为返回值；不回检
+                        # 将被静默丢弃——R5 传播中断、系统级失败不改变终态，且重试阶段累积的
+                        # 水位仍会在循环结束后 flush。与主批次路径同模式统一重抛，由 _run_impl
+                        # 既有异常分支接管终态（不在此 flush 水位，单调自愈）。
+                        for _raised in retry_results:
+                            if isinstance(_raised, BaseException):
+                                raise _raised
                     finally:
                         with self._tasks_lock:
                             self._active_tasks.difference_update(r_tasks)
@@ -853,6 +908,13 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 sync_result.status = SyncStatus.CANCELLED.value
             logger.debug("[HistoricalSync] DaySync | Aborted %s for %s", reason, trade_date)
             return False
+
+        # UIR-F14-006：独立单日调用（无活动 run 轮次）时，上一轮遗留的取消状态已失效，
+        # 须复位，否则取消后同会话的日更会在入口永久 abort。run 内部调用时 active>0，
+        # 不得复位——那会清除仍在生效的取消信号。
+        if not self._is_execution_active():
+            self._cancelled = False
+            self._shutdown_event.clear()
 
         # S2: 入口取消检查，避免取消后仍启动 14+ IO
         if self._shutdown_event.is_set():

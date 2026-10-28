@@ -85,6 +85,26 @@ async def test_rebuild_none_report_raises_init_sync_error(monkeypatch: pytest.Mo
     assert exc_info.value.args[0].key == "ds_init_fail_generic"
 
 
+async def test_rebuild_degraded_base_dimension_is_retryable(monkeypatch: pytest.MonkeyPatch):
+    """UIR-F14-002：基础维度（申万行业/名称历史）降级时 initialization 返回 None，
+    重建工厂转为可重试 InitSyncError，不宣称初始化完成。"""
+
+    def initialize_impl(progress_callback=None, **kwargs):
+        if progress_callback is not None:
+            progress_callback(1, 100, Message("init_sync_sw_industry"))
+            progress_callback(9, 100, Message("init_sync_name_change"))
+        return None
+
+    _install_fake_processor(monkeypatch, initialize_impl)
+    # 任务仍 RUNNING：进度被接受，才能走到「报告为 None」的降级分支
+    monkeypatch.setattr(TaskManager, "update_progress", lambda self, *a, **k: True)
+
+    with pytest.raises(InitSyncError) as exc_info:
+        await task_rebuild._rebuild_init_historical_sync("task-1", **SAMPLE_KWARGS)
+
+    assert exc_info.value.args[0].key == "ds_init_fail_generic"
+
+
 async def test_rebuild_progress_rejected_raises_cancelled(monkeypatch: pytest.MonkeyPatch):
     """进度上报被 TaskManager 拒绝（任务已取消/终止）→ 抛 CancelledError (R2)。"""
 

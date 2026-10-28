@@ -33,6 +33,11 @@ def _make_dp():
         dp.cache.init_db = AsyncMock()
         # review09-24 MAJOR-06: sync_concepts 写入前拼接 TS_ 前缀，MagicMock 属性需显式赋 str
         dp.cache.stock_dao.TS_CONCEPT_PREFIX = "TS_"
+        # UIR-F14-002: initialize_system 在 Step 1 尾部显式触发基础维度同步
+        # （申万行业分类/成员、名称变更历史）。默认打桩为成功空结果，避免真实策略在
+        # MagicMock 缓存上走网络/DAO 分支；需断言真实写入的用例再替换为真实策略。
+        dp.strategies["sw_industry"].run = AsyncMock(return_value=SyncResult())
+        dp.strategies["name_change"].run = AsyncMock(return_value=SyncResult())
     return dp
 
 
@@ -1647,6 +1652,70 @@ class TestDataProcessorInitializeSystem:
             assert result is None
 
     @pytest.mark.asyncio
+    async def test_historical_cancelled_not_reported_complete(self):
+        """UIR-F14-006: 历史同步被判定 cancelled 时不得继续上报 init_step_complete。"""
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="cancelled", errors=[]))
+        dp.strategies["financial"].run = AsyncMock(return_value=MagicMock(status="completed", added=10))
+        dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
+        progress: list = []
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(
+                progress_callback=lambda c, t, m: progress.append((c, t, m)),
+            )
+
+        assert result is None
+        assert not any(m.key == "init_step_complete" for c, t, m in progress)
+        dp.strategies["financial"].run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_partial_sync_not_reported_complete(self):
+        """UIR-F14-006: partial 表示部分关键表未就绪，最终不得伪装为完整完成（R21），
+        但仍继续后续步骤以尽量补齐数据。"""
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["historical"].run = AsyncMock(
+            return_value=MagicMock(status="partial", errors=[], warnings=["20240614: gap"]),
+        )
+        dp.strategies["financial"].run = AsyncMock(return_value=MagicMock(status="completed", added=10))
+        dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
+        progress: list = []
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(
+                progress_callback=lambda c, t, m: progress.append((c, t, m)),
+            )
+
+        assert result is None
+        assert not any(m.key == "init_step_complete" for c, t, m in progress)
+        # 后续步骤仍执行（尽量补齐），仅终态不报完成
+        dp.strategies["financial"].run.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_cancelled_after_step1(self):
         dp = _make_dp()
         dp.sync_stock_basic = AsyncMock(return_value=5)
@@ -1714,6 +1783,274 @@ class TestDataProcessorInitializeSystem:
             result = await dp.initialize_system(quick=True)
             assert result is not None
         assert call_order.index("init_db") < call_order.index("sync_stock_basic")
+
+    @pytest.mark.asyncio
+    async def test_base_dimensions_synced_after_stock_basic_with_fixed_samples(self):
+        """UIR-F14-002：Given 空库且接口合法，When 完整初始化，
+        Then stock_basic 之后两策略各执行一次，三表按固定样本 UPSERT。"""
+        from data.sync.name_change import NameChangeSyncStrategy
+        from data.sync.sw_industry import SwIndustrySyncStrategy
+
+        dp = _make_dp()
+        call_order: list[str] = []
+
+        async def _stock_basic():
+            call_order.append("stock_basic")
+            return 5
+
+        dp.sync_stock_basic = AsyncMock(side_effect=_stock_basic)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["financial"].run = AsyncMock(return_value=MagicMock(status="completed", added=10))
+        dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+
+        classify_df = pd.DataFrame(
+            {
+                "index_code": ["801010.SI", "801020.SI", "850531.SI"],
+                "index_name": ["农林牧渔", "基础化工", "养殖业"],
+                "sw_level": ["L1", "L2", "L3"],
+            }
+        )
+        member_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "600519.SH"],
+                "l3_code": ["850531.SI", "850531.SI"],
+                "l1_code": ["110000", "110000"],
+                "l2_code": ["110100", "110100"],
+                "l2_name": ["种植业", "种植业"],
+                "in_date": ["2020-01-01", "2021-06-30"],
+                "name": ["平安银行", "贵州茅台"],
+            }
+        )
+        name_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "600519.SH"],
+                "name": ["平安银行", "贵州茅台"],
+                "start_date": ["2010-01-01", "2001-08-27"],
+                "end_date": [None, None],
+                "ann_date": ["2010-06-29", "2001-08-27"],
+                "change_reason": ["", ""],
+            }
+        )
+
+        async def _classify(level, src=None):
+            # 3 个 level 依次调用，仅首个记录执行顺序；按 level 返回对应分类行
+            if not call_order or call_order[-1] != "sw_industry":
+                call_order.append("sw_industry")
+            return classify_df[classify_df["sw_level"] == level]
+
+        async def _namechange():
+            call_order.append("name_change")
+            return name_df
+
+        dp.context.api.get_index_classify = AsyncMock(side_effect=_classify)
+        dp.context.api.get_index_member_all = AsyncMock(return_value=member_df)
+        dp.context.api.get_namechange = AsyncMock(side_effect=_namechange)
+        dp.cache.sw_industry_classify_dao.save_sw_industry_classify = AsyncMock(return_value=3)
+        dp.cache.sw_industry_member_dao.save_sw_industry_member = AsyncMock(return_value=2)
+        dp.cache.stock_name_history_dao.save_stock_name_history = AsyncMock(return_value=2)
+        dp.cache.sync_dao.update_sync_status = AsyncMock(return_value=None)
+
+        dp.strategies["sw_industry"] = SwIndustrySyncStrategy(dp.context)
+        dp.strategies["name_change"] = NameChangeSyncStrategy(dp.context)
+        dp.clear_cancel()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system()
+
+        assert result == {"tier": 3}
+        assert call_order == ["stock_basic", "sw_industry", "name_change"]
+        # 两策略各执行一次（行业：3 个 level + 1 个 L3 成分；名称变更：1 次全量拉取）
+        assert dp.context.api.get_index_classify.await_count == 3
+        assert dp.context.api.get_namechange.await_count == 1
+
+        classify_saved = dp.cache.sw_industry_classify_dao.save_sw_industry_classify.await_args.args[0]
+        assert sorted(classify_saved["index_code"].tolist()) == ["801010.SI", "801020.SI", "850531.SI"]
+        assert sorted(classify_saved["sw_level"].tolist()) == ["L1", "L2", "L3"]
+
+        member_saved = dp.cache.sw_industry_member_dao.save_sw_industry_member.await_args.args[0]
+        assert member_saved["ts_code"].tolist() == ["000001.SZ", "600519.SH"]
+        assert member_saved["in_date"].tolist() == ["2020-01-01", "2021-06-30"]
+
+        name_saved = dp.cache.stock_name_history_dao.save_stock_name_history.await_args.args[0]
+        assert name_saved["ts_code"].tolist() == ["000001.SZ", "600519.SH"]
+        assert name_saved["start_date"].tolist() == ["2010-01-01", "2001-08-27"]
+
+    @pytest.mark.asyncio
+    async def test_quick_mode_also_syncs_base_dimensions(self):
+        """UIR-F14-002：quick 模式显式执行基础维度同步（断言各一次）。"""
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(quick=True)
+
+        assert result == {"tier": 3}
+        dp.strategies["sw_industry"].run.assert_awaited_once()
+        dp.strategies["name_change"].run.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_base_dimension_permission_denied_degrades_visibly(self):
+        """UIR-F14-002：权限不足 → sync_status 记 skipped_permission、终态不报完成（R21），
+        但继续后续步骤。"""
+        from data.external.tushare_client import TushareAPIPermissionError
+        from data.sync.name_change import NameChangeSyncStrategy
+        from data.sync.sw_industry import SwIndustrySyncStrategy
+
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.context.api.get_index_classify = AsyncMock(
+            side_effect=TushareAPIPermissionError("index_classify", "no permission"),
+        )
+        dp.context.api.get_namechange = AsyncMock(
+            side_effect=TushareAPIPermissionError("namechange", "no permission"),
+        )
+        dp.cache.sync_dao.update_sync_status = AsyncMock(return_value=None)
+        dp.strategies["sw_industry"] = SwIndustrySyncStrategy(dp.context)
+        dp.strategies["name_change"] = NameChangeSyncStrategy(dp.context)
+        dp.clear_cancel()
+        progress: list = []
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(
+                quick=True,
+                progress_callback=lambda c, t, m: progress.append((c, t, m)),
+            )
+
+        assert result is None
+        assert not any(m.key == "init_step_complete" for c, t, m in progress)
+        skipped_tables = {
+            call.args[0]
+            for call in dp.cache.sync_dao.update_sync_status.await_args_list
+            if call.kwargs.get("status") == "skipped_permission"
+        }
+        assert skipped_tables == {"sw_industry_classify", "stock_name_history"}
+        # 降级不中断后续步骤（健康检查仍执行，尽量补齐数据）
+        dp.check_data_health.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_base_dimension_partial_continues_but_not_complete(self):
+        """UIR-F14-002：申万行业部分失败（partial）不中断名称变更同步，
+        但终态不得上报完成（R21）。"""
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["sw_industry"].run = AsyncMock(
+            return_value=SyncResult(status="partial", errors=["member l3_code=850531.SI: timeout"]),
+        )
+        dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
+        progress: list = []
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(
+                quick=True,
+                progress_callback=lambda c, t, m: progress.append((c, t, m)),
+            )
+
+        assert result is None
+        assert not any(m.key == "init_step_complete" for c, t, m in progress)
+        dp.strategies["name_change"].run.assert_awaited_once()
+        dp.check_data_health.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_base_dimension_cancel_aborts_before_name_change(self):
+        """UIR-F14-002：基础维度同步中取消 → 立即返回 None，不继续后续策略。"""
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.clear_cancel()
+
+        async def _cancel_during_sw():
+            dp._get_cancel_event().set()
+            return SyncResult()
+
+        dp.strategies["sw_industry"].run = AsyncMock(side_effect=_cancel_during_sw)
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            result = await dp.initialize_system()
+
+        assert result is None
+        dp.strategies["name_change"].run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_base_dimension_failure_can_be_reentered_idempotently(self):
+        """UIR-F14-002：失败后重入同一初始化路径仍执行两策略（UPSERT 幂等补填）。"""
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            first = await dp.initialize_system(quick=True)
+            second = await dp.initialize_system(quick=True)
+
+        assert first == {"tier": 3}
+        assert second == {"tier": 3}
+        assert dp.strategies["sw_industry"].run.await_count == 2
+        assert dp.strategies["name_change"].run.await_count == 2
+
+    def test_base_dimension_strategies_bind_cache_registered_daos(self):
+        """UIR-F14-002：DAO 取自 CacheManager 注册实例（引擎重建时 sync_engines 可同步），
+        不得自建（R13/R5 同一路径）。"""
+        dp = _make_dp()
+        assert dp.strategies["sw_industry"].classify_dao is dp.cache.sw_industry_classify_dao
+        assert dp.strategies["sw_industry"].member_dao is dp.cache.sw_industry_member_dao
+        assert dp.strategies["name_change"].dao is dp.cache.stock_name_history_dao
 
 
 class TestDataProcessorCancelControl:
