@@ -35,7 +35,18 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 ### 版本发布流程与 Release 管理
 
-发布流程: 打 `v*.*.*` tag → 触发 `build-windows` job → PyInstaller 打包 CPU/CUDA 两个变体 → smoke test → Inno Setup 制作安装包；同时触发 release-only 的 `e2e-sidecar-real-smoke` job（真实 sidecar ready → migration → 主界面路径）→ `build-windows` 与 `e2e-sidecar-real-smoke` 均成功后才由 `release-windows` 创建 GitHub Release（任一失败即不发布；手动 `workflow_dispatch` 非 tag ref 仅构建产物，不创建 Release）。
+发布流程（人工推 tag，release-please 只出 Release PR，不建 tag/Release）:
+
+1. 合并 release-please 生成的 Release PR：bump 版本号、更新 `CHANGELOG.md` 与 `.release-please-manifest.json`；
+2. **在该合并提交上立即推送同名 tag**：`git tag -a v<版本> -m "v<版本>" && git push origin v<版本>`（形如 `v0.11.0`，须与 `.release-please-manifest.json` 的版本一致，与 `release-please-config.json` 的 `include-v-in-tag: true` / `include-component-in-tag: false` 对齐）；
+3. tag 推送触发 `ci_cd.yml`（`push.tags: v*.*.*`）→ `build-windows` job → PyInstaller 打包 CPU/CUDA 两个变体 → smoke test → Inno Setup 制作安装包；同时触发 release-only 的 `e2e-sidecar-real-smoke` job（真实 sidecar ready → migration → 主界面路径）→ `build-windows` 与 `e2e-sidecar-real-smoke` 均成功后才由 `release-windows` 创建 GitHub Release（任一失败即不发布；手动 `workflow_dispatch` 非 tag ref 仅构建产物，不创建 Release）。
+
+**为什么必须人工推 tag**：`release-please.yml` 以 `skip-github-release: true` 运行，只产出 Release PR。release-please 默认用 `GITHUB_TOKEN` 创建 tag/Release，而 GitHub 规定由 `GITHUB_TOKEN` 触发的事件（`workflow_dispatch` / `repository_dispatch` 除外）不会再触发新的 workflow run，故 bot 创建的 tag 不会触发 `ci_cd.yml`，只会留下「Release 已存在但资产为 0」的空壳（历史 `v0.10.0` / `v0.10.1` 即此形态）。要改成自动发版须先在仓库侧配置 PAT/GitHub App token 并同步修订本文件，不得只改 workflow。
+
+- **tag 归属**：只有人工推送的 tag 会触发构建；若某版本 tag 已存在，禁止 `-f` 强推或删除重推（会改写既有 Release 的 tag 来源），改为提升版本号重走 Release PR。
+- **Release 正文**：由 `softprops/action-gh-release` 的 `generate_release_notes`（GitHub 自动变更摘要）生成；`CHANGELOG.md` 正文由 release-please 在 Release PR 中生成。两者不互相同步，属预期行为。
+- **切换后首个版本须验证**：合并下一个 Release PR → 推 tag → 确认新 Release 资产非空，且其后 release-please 仍能基于同名 tag 产出增量 changelog（条目不得重复或缺失）。
+- **历史空 Release 不自动补救**：`v0.10.0` / `v0.10.1` 等既有空 Release 保持原样，如需补资产另行人工评估。
 
 **其他 workflow**（`.github/workflows/` 下除 `ci_cd.yml` 主矩阵外的兜底流水线，由 `check_workflow_enum()` 门禁守护无遗漏）:
 - 前端流水线：文档 CI (`docs-ci.yml`)、Flet 前瞻验证 (`flet-nightly.yml`)、PostgreSQL sidecar Release (`sidecar.yml`)

@@ -17,3 +17,13 @@ jobs:
     steps:
       - name: Generate Release PR
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
+        with:
+          # 只产出 Release PR（bump 版本号 + CHANGELOG），不创建 tag/Release。
+          # 默认用 GITHUB_TOKEN 建 Release/tag，而该类事件不会再触发 ci_cd.yml
+          # （GitHub 递归触发防护），结果只会留下「有 Release 无安装包」的空壳。
+          # 发版由维护者在 Release PR 合并提交上人工推送 v*.*.* tag 触发打包。
+          # 行为依据：action.yml input skip-github-release（"do not try to tag releases"，
+          # 默认 false）+ manifest config schema skip-github-release（"Skip tagging GitHub
+          # releases for this package"）。注意 skip 后 release-please 仍要求版本已被打 tag，
+          # 故本仓库以 ci_cd.yml 的 push.tags 作为既有打 tag 基础设施。
+          skip-github-release: true
