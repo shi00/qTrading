@@ -28,6 +28,17 @@ logger = logging.getLogger(__name__)
 
 _NOTIFY_THROTTLE_S = 0.2
 
+# UIR-F12-002: 清理由「内存移除 + 异步 DELETE」两段组成，若无屏障，清理瞬间仍在队列/
+# 在途的旧快照会在 DELETE 之后以 ON CONFLICT 无冲突的方式重建旧行（重启后记录复活）。
+# 屏障 = 按 task_id 的墓碑集合：清理时同步登记，所有迟到的持久化写入在真正写库前被拒；
+# DELETE 执行前等待该 ID 的在途写归零，保证「先删后写」不会发生。墓碑保留一个容量上限，
+# 仅淘汰已确认删除的项（未确认删除的墓碑不可淘汰，否则迟到写可绕过硬删）。
+_MAX_DELETION_TOMBSTONES = 1000
+# DELETE 前等待在途写结束的上限；超时即视为本次持久清理未完成（保留待重试项），
+# 绝不在 loop 上同步等待。
+_DELETION_BARRIER_WAIT_S = 5.0
+_DELETION_BARRIER_POLL_S = 0.01
+
 # Marker for serialized Message in DB string columns (Task 3.1)
 _MSG_MARKER = "__i18n_msg__"
 
@@ -261,6 +272,13 @@ class TaskManager:
             # LIFE-02: 持久化单调序号。每次生成快照时经 _persist_counter_lock 分配并自增，
             # 保证同任务多次写入的 persist_seq 严格递增，乱序到达时可由 SQL WHERE 守卫丢弃旧值。
             self._persist_seq_counter = 0
+            # UIR-F12-002: 清理屏障状态。_tombstones 拒绝迟到快照；_pending_db_deletions
+            # 保存尚未确认删除的 ID（下一次清理会重试，失败不当作持久清理成功）；
+            # _inflight_persist 统计已进入写库阶段的快照，DELETE 前须等其归零。
+            self._tombstones: OrderedDict[str, None] = OrderedDict()
+            self._pending_db_deletions: set[str] = set()
+            self._inflight_persist: dict[str, int] = {}
+            self._barrier_lock = threading.Lock()
             self._semaphore_needs_reset: bool = False
 
             self.__class__._initialized = True
@@ -713,9 +731,11 @@ class TaskManager:
         history_to_clear = [h.id for h in self._history if h.status in TERMINAL_STATUSES]
         self._history = [h for h in self._history if h.status not in TERMINAL_STATUSES]
         all_clear_ids = list(delete_set | set(history_to_clear))
-        # DB cleanup
-        if all_clear_ids:
-            self._schedule_coro(self._clear_finished_db(all_clear_ids))
+        # UIR-F12-002: 先同步立墓碑（含历史未确认删除项），阻断该 ID 的迟到/在途旧快照，
+        # 再由独立协程等待在途写归零后执行 DELETE；DELETE 失败保留待重试项，不报成功。
+        delete_ids = self._register_deletion_barrier(all_clear_ids)
+        if delete_ids:
+            self._schedule_coro(self._clear_finished_db(delete_ids))
         self._notify_subscribers()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -1085,6 +1105,61 @@ class TaskManager:
             self._persist_seq_counter += 1
             return self._persist_seq_counter
 
+    def _register_deletion_barrier(self, task_ids: list[str]) -> list[str]:
+        """UIR-F12-002: 登记清理墓碑，并返回本次应执行的 DELETE 全量 ID。
+
+        在 ``_clear_finished_impl`` 中同步调用（loop 线程、无 await），因此从「内存移除」
+        到「墓碑生效」之间不存在让新快照漏过的窗口。返回值包含历史遗留的未确认删除项，
+        使 DELETE 失败后可在下一次清理重试（失败不当作持久清理成功）。
+        """
+        with self._barrier_lock:
+            for tid in task_ids:
+                self._tombstones[tid] = None
+                self._tombstones.move_to_end(tid)
+            if len(self._tombstones) > _MAX_DELETION_TOMBSTONES:
+                excess = len(self._tombstones) - _MAX_DELETION_TOMBSTONES
+                # 仅淘汰已确认删除的墓碑；未确认项必须保留，否则迟到写可绕过屏障重建行
+                removable = [tid for tid in self._tombstones if tid not in self._pending_db_deletions]
+                for tid in removable[:excess]:
+                    del self._tombstones[tid]
+            self._pending_db_deletions.update(task_ids)
+            return sorted(self._pending_db_deletions)
+
+    def _begin_inflight_persist(self, task_id: str) -> bool:
+        """UIR-F12-002: 写库准入闸门；已立墓碑的 ID 拒绝旧快照（返回 False）。"""
+        with self._barrier_lock:
+            if task_id in self._tombstones:
+                return False
+            self._inflight_persist[task_id] = self._inflight_persist.get(task_id, 0) + 1
+            return True
+
+    def _end_inflight_persist(self, task_id: str) -> None:
+        with self._barrier_lock:
+            remaining = self._inflight_persist.get(task_id, 0) - 1
+            if remaining > 0:
+                self._inflight_persist[task_id] = remaining
+            else:
+                self._inflight_persist.pop(task_id, None)
+
+    def _has_inflight_persist(self, task_ids: list[str]) -> bool:
+        with self._barrier_lock:
+            return any(self._inflight_persist.get(tid, 0) > 0 for tid in task_ids)
+
+    async def _wait_inflight_persist(self, task_ids: list[str]) -> bool:
+        """等待目标 ID 的在途快照写库结束；超时返回 False（不阻塞事件循环）。"""
+        deadline = _time.monotonic() + _DELETION_BARRIER_WAIT_S
+        while self._has_inflight_persist(task_ids):
+            if _time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(_DELETION_BARRIER_POLL_S)
+        return True
+
+    def _mark_db_deleted(self, task_ids: list[str]) -> None:
+        """DELETE 已提交后才把 ID 从未确认集合移除（墓碑保留以拒绝迟到写）。"""
+        with self._barrier_lock:
+            for tid in task_ids:
+                self._pending_db_deletions.discard(tid)
+
     def _persist_task(self, task: AppTask):
         """Fire-and-forget async write to DB. Snapshots values at call time
         to prevent race conditions with later state mutations."""
@@ -1230,38 +1305,47 @@ class TaskManager:
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _persist_snapshot(self, params: tuple):
         """Write a pre-captured snapshot tuple to DB."""
+        task_id = params[0]
+        # UIR-F12-002: 写库准入闸门。已清理（墓碑）的 ID 拒绝旧快照，避免 ON CONFLICT
+        # 在 DELETE 之后重建旧行；计入在途计数供 DELETE 等待，保证删除晚于已开始的写。
+        if not self._begin_inflight_persist(task_id):
+            logger.debug("[TaskManager] Persist dropped: task %s has been cleared (deletion barrier)", task_id)
+            return
         try:
-            from data.cache.cache_manager import CacheManager
+            try:
+                from data.cache.cache_manager import CacheManager
 
-            cache = CacheManager._instance
-            if cache is None:
-                logger.debug("[TaskManager] Persist skipped: CacheManager not initialized.")
-                return
-            sql = (
-                "INSERT INTO task_history "
-                "(id, name, task_type, status, progress, description, error, result, "
-                "created_at, started_at, completed_at, unique_key, factory_key, retry_kwargs, "
-                "persist_seq) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) "
-                "ON CONFLICT (id) DO UPDATE SET "
-                "name=EXCLUDED.name, task_type=EXCLUDED.task_type, status=EXCLUDED.status, "
-                "progress=EXCLUDED.progress, description=EXCLUDED.description, error=EXCLUDED.error, "
-                "result=EXCLUDED.result, started_at=EXCLUDED.started_at, completed_at=EXCLUDED.completed_at, "
-                "unique_key=EXCLUDED.unique_key, factory_key=EXCLUDED.factory_key, "
-                "retry_kwargs=EXCLUDED.retry_kwargs, persist_seq=EXCLUDED.persist_seq "
-                "WHERE task_history.persist_seq < EXCLUDED.persist_seq"
-            )
-            await cache.write_db(sql, params)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log_classified(
-                logger,
-                e,
-                "general",
-                "[TaskManager] Persist failed, non-critical (%s): %s",
-                exc_info=True,
-            )
+                cache = CacheManager._instance
+                if cache is None:
+                    logger.debug("[TaskManager] Persist skipped: CacheManager not initialized.")
+                    return
+                sql = (
+                    "INSERT INTO task_history "
+                    "(id, name, task_type, status, progress, description, error, result, "
+                    "created_at, started_at, completed_at, unique_key, factory_key, retry_kwargs, "
+                    "persist_seq) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) "
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    "name=EXCLUDED.name, task_type=EXCLUDED.task_type, status=EXCLUDED.status, "
+                    "progress=EXCLUDED.progress, description=EXCLUDED.description, error=EXCLUDED.error, "
+                    "result=EXCLUDED.result, started_at=EXCLUDED.started_at, completed_at=EXCLUDED.completed_at, "
+                    "unique_key=EXCLUDED.unique_key, factory_key=EXCLUDED.factory_key, "
+                    "retry_kwargs=EXCLUDED.retry_kwargs, persist_seq=EXCLUDED.persist_seq "
+                    "WHERE task_history.persist_seq < EXCLUDED.persist_seq"
+                )
+                await cache.write_db(sql, params)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log_classified(
+                    logger,
+                    e,
+                    "general",
+                    "[TaskManager] Persist failed, non-critical (%s): %s",
+                    exc_info=True,
+                )
+        finally:
+            self._end_inflight_persist(task_id)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _persist_task_async(self, task: AppTask):
@@ -1286,10 +1370,24 @@ class TaskManager:
         await self._persist_snapshot(params)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def _clear_finished_db(self, task_ids: list):
-        """Delete specific tasks from DB using SQLAlchemy Core."""
+    async def _clear_finished_db(self, task_ids: list) -> bool:
+        """Delete specific tasks from DB using SQLAlchemy Core.
+
+        UIR-F12-002: 返回 True 仅当 DELETE 已提交（持久清理成功）。引擎不可用、等待在途
+        写过超时或写库异常均返回 False，并保留 ID 在 ``_pending_db_deletions`` 供下一次
+        清理重试——失败不得被当作持久清理成功。墓碑在 DELETE 前已生效，故等待期间不会
+        有新写入进入；等待用异步 sleep，不阻塞事件循环。
+        """
         if not task_ids:
-            return
+            return True
+        # 幂等登记：直接调用路径（非 _clear_finished_impl）同样受屏障保护
+        targets = self._register_deletion_barrier(list(task_ids))
+        if not await self._wait_inflight_persist(targets):
+            logger.warning(
+                "[TaskManager] DB clear postponed: %s task(s) still have in-flight persistence writes; will retry on next clear",
+                len(targets),
+            )
+            return False
         try:
             from data.cache.cache_manager import CacheManager
             from data.persistence import engine_provider
@@ -1302,9 +1400,12 @@ class TaskManager:
             # 不依赖 provider 全局受管引擎状态。
             engine = cm.engine
             if engine is None or engine_provider.is_disposed(engine):
-                logger.debug("[TaskManager] DB clear skipped: engine not initialized or disposed")
-                return
-            stmt = TaskHistory.__table__.delete().where(TaskHistory.__table__.c.id.in_(task_ids))
+                logger.warning(
+                    "[TaskManager] DB clear skipped: engine not initialized or disposed; %s task(s) remain in DB and will retry on next clear",
+                    len(targets),
+                )
+                return False
+            stmt = TaskHistory.__table__.delete().where(TaskHistory.__table__.c.id.in_(targets))
             async with engine.begin() as conn:
                 await conn.execute(stmt)
         except asyncio.CancelledError:
@@ -1317,3 +1418,10 @@ class TaskManager:
                 "[TaskManager] DB clear failed, non-critical (%s): %s",
                 exc_info=True,
             )
+            logger.warning(
+                "[TaskManager] DB clear failed: %s task(s) remain in DB and will retry on next clear",
+                len(targets),
+            )
+            return False
+        self._mark_db_deleted(targets)
+        return True
