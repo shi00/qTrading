@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import inspect
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -747,6 +748,46 @@ class TestTableViewerTabComponentBody:
 
         rings = _find_by_type(result, ft.ProgressRing)
         assert len(rings) > 0
+
+    def test_mount_shows_error_state_over_stale_rows(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        monkeypatch,
+    ):
+        """UIR-F13-002: error_message 优先于表格/空态 — 失败时渲染 ErrorState 而非旧行/「无数据」。
+
+        遵循既有范式: @ft.component 子组件在测试渲染中不被展开, 用 mock 捕获 ErrorState 调用参数。
+        """
+        from ui.views import data_view as mod
+        from ui.views.data_view import TableViewerTab
+
+        captured: list[dict] = []
+
+        def _fake_error_state(**kwargs: Any) -> Any:
+            captured.append(kwargs)
+            return MagicMock(name="ErrorState")
+
+        monkeypatch.setattr(mod, "ErrorState", _fake_error_state)
+
+        vm = _FakeDataExplorerViewModel(
+            state=_FakeDataExplorerState(
+                table_columns=("ts_code",),
+                table_rows=(TableRow(values=("STALE_ROW",)),),
+                total_rows=0,
+                error_message=Message("db_err_timeout", {}),
+                tables_loaded=True,
+            )
+        )
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
+        result, _ = _mount(component)
+
+        assert captured, "失败态应渲染 ErrorState"
+        assert captured[-1]["on_retry"] is not None, "ErrorState 应携带重试回调"
+        assert len(_find_by_type(result, ft.ProgressRing)) == 0, "失败态不应停留在 loading"
+        texts = [getattr(t, "value", None) for t in _find_by_type(result, ft.Text)]
+        assert "STALE_ROW" not in texts, "失败态不得继续显示旧查询结果"
 
     def test_mount_shows_empty_filter_result_when_filter_applied(
         self,
@@ -2328,6 +2369,41 @@ class TestTableViewerTabAsyncErrorPaths:
 
         toast_args = page.toast.show.call_args
         assert toast_args[0][1] == "error"
+
+    def test_export_query_failure_shows_fail_toast_and_writes_no_file(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        tmp_path,
+    ):
+        """UIR-F13-002: vm.export_data 失败 → 「导出失败」toast, 不提示「无可导出数据」, 不写文件。"""
+        from ui.views.data_view import TableViewerTab
+
+        vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
+        vm.export_data = AsyncMock(side_effect=RuntimeError("db connection lost"))  # type: ignore[method-assign]
+        vm.write_csv = AsyncMock(return_value=None)
+        component = make_component(TableViewerTab, state=vm.state, vm=vm)
+        page = _make_fake_page()
+        result, page = _mount(component, page=page)
+
+        filepath = str(tmp_path / "should_not_exist.csv")
+        save_file = AsyncMock(return_value=filepath)
+        for svc in page.services:
+            if isinstance(svc, ft.FilePicker):
+                svc.save_file = save_file  # type: ignore[method-assign]
+                break
+
+        popup_menus = _find_by_type(result, ft.PopupMenuButton)
+        page.toast.show.reset_mock()  # 隔离 mount 期加载路径已产生的 toast
+        popup_menus[0].items[0].on_click(MagicMock())
+
+        toast_args = page.toast.show.call_args
+        assert toast_args[0][1] == "error", "导出失败应提示错误"
+        # 失败不得落到「无可导出数据」分支, 也不得进入保存/写入流程
+        save_file.assert_not_called()
+        vm.write_csv.assert_not_called()
+        assert not os.path.exists(filepath), "导出失败不得写出文件"
 
 
 # ============================================================================
