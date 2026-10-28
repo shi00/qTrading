@@ -824,6 +824,81 @@ class TestSaveConfigEdgeCases:
         assert vm.state.status_type == "error"
 
     @pytest.mark.asyncio
+    async def test_save_config_persist_failure_returns_false(self, mock_config_handler, mock_thread_pool):
+        """UIR-F15-002: save_db_config=False 不得报成功（错误态、无 success 回调、is_saving 复原）。"""
+        on_save = MagicMock()
+        vm = _make_vm(mock_config_handler, on_save_callback=on_save)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+
+        mock_result = MagicMock()
+        mock_result.status = ConnectionStatus.SUCCESS
+        mock_result.message = "ok"
+        mock_config_handler.save_db_config.return_value = False
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(return_value=mock_result)
+            mock_svc.ensure_tables_exist = AsyncMock(return_value=(True, ""))
+            result = await vm.save_config()
+
+        assert result is False
+        assert vm.state.status_type == "error"
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == "db_save_failed"
+        assert vm.state.is_saving is False
+        on_save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_save_config_non_bool_persist_result_is_failure(self, mock_config_handler, mock_thread_pool):
+        """UIR-F15-002: save_db_config 返回非 True（None/MagicMock）时必须按失败处理。"""
+        vm = _make_vm(mock_config_handler)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+
+        mock_result = MagicMock()
+        mock_result.status = ConnectionStatus.SUCCESS
+        mock_result.message = "ok"
+        mock_config_handler.save_db_config.return_value = None
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(return_value=mock_result)
+            mock_svc.ensure_tables_exist = AsyncMock(return_value=(True, ""))
+            result = await vm.save_config()
+
+        assert result is False
+        assert vm.state.status_type == "error"
+        assert vm.state.is_saving is False
+
+    @pytest.mark.asyncio
+    async def test_save_config_cancelled_during_persist_propagates(self, mock_config_handler, mock_thread_pool):
+        """R2: 持久化 await 抛 CancelledError 时必须传播，且 is_saving 在 finally 复原。"""
+        vm = _make_vm(mock_config_handler)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+
+        mock_result = MagicMock()
+        mock_result.status = ConnectionStatus.SUCCESS
+        mock_result.message = "ok"
+        mock_thread_pool.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(return_value=mock_result)
+            mock_svc.ensure_tables_exist = AsyncMock(return_value=(True, ""))
+            with pytest.raises(asyncio.CancelledError):
+                await vm.save_config()
+
+        assert vm.state.is_saving is False
+
+    @pytest.mark.asyncio
     async def test_save_config_exception(self, mock_config_handler, mock_thread_pool):
         """save_config 流程抛通用 Exception 时分类错误并返回 False。"""
         vm = _make_vm(mock_config_handler)
