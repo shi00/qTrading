@@ -37,6 +37,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 **其他 workflow**（`.github/workflows/` 下除 `ci_cd.yml` 主矩阵外的兜底流水线，由 `check_workflow_enum()` 门禁守护无遗漏）:
 - 前端流水线：文档 CI (`docs-ci.yml`)、Flet 前瞻验证 (`flet-nightly.yml`)、PostgreSQL sidecar Release (`sidecar.yml`)
+- 配置流水线：pre-commit 配置 PR 冒烟 (`precommit-config-ci.yml`)，仅 PR 修改 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml)（或该 workflow 自身）时执行 `pre-commit validate-config` + `pre-commit run --all-files`，不引入 PG service / 迁移 / 测试
 - 安全流水线：CodeQL 静态安全分析 (`codeql.yml`)、密钥泄露扫描 (`gitleaks.yml`)、OpenSSF Scorecard 安全评分 (`scorecard.yml`)
 - 依赖与发布：依赖更新机器人（自托管 Renovate workflow (`renovate.yml`)，每周日 18:00 UTC（北京时间周一 02:00）定时 + 手动触发，运行时刻落在 `renovate.json` 允许更新窗口内，配置见 [`.github/renovate.json`](../../.github/renovate.json)；Python/JS 依赖由其接管，GitHub Actions 生态由 [`.github/dependabot.yml`](../../.github/dependabot.yml) 承接，分工在两侧配置注释中声明。Python 漏洞另由 CI `run_pip_audit.py` 扫描）、自动化 Release PR (`release-please.yml`)
 > **Flet 日检失败建单去重（`flet-nightly.yml`）**：失败时以稳定标题 `Flet nightly compatibility check failed` 分页检索 open Issue（兼容历史 `... (<runId>)` 旧标题、排除 PR），命中则把本次 run 追加为评论，未命中则新建；Issue 被人工关闭后再次失败按新建处理（保留人工关闭语义，不自动重开）。该 workflow 只有一个失败信号（单 job `failure()`），故单一稳定标题即去重键；将来若拆出多个失败类别，须把类别并入标题。去重键只用标题（不叠加 label，避免未预置 label 导致键静默失效）。建单/追加失败或查询失败仅记 `core.warning` 并跳过建单（失败 run 本身在 Actions 页面可见），不改变 workflow 结论。
@@ -57,6 +58,8 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 - 依赖与一致性：`pip-compile-core` · `pip-compile-dev` · `pip-compile-optional` · `verify-versions` · `docs-consistency` · `redline-check`
 
 > hook 数量与名称以 `.pre-commit-config.yaml` 为唯一正本，本清单由 `check_precommit_hook_names()` 门禁守护名称级一致（配置新增/删除 hook 时须同步本枚举）。
+
+> **配置改动的合并前验证**：`.pre-commit-config.yaml` 不在 `ci_cd.yml` 的 `pull_request.paths` 白名单内，仅改该文件的 PR 不触发主 CI，hook entry / 独立环境依赖 / 文件选择规则的缺陷会延迟到 main push 才暴露。该文件因此由独立轻量 workflow `precommit-config-ci.yml` 承接（`pre-commit validate-config` + `pre-commit run --all-files` 实际执行全部 hook，不含 PG service / 迁移 / 单测）；不把该文件并入 `ci_cd.yml` 白名单，是为避免单文件配置 PR 拉起整套主流水线（其测试覆盖对配置改动零增量）。`docs-ci.yml` 虽也监听该文件，但只跑文档一致性脚本与契约测试，不执行 hook 本体。配置与业务代码同时变更的 PR 会由主 CI 与本 workflow 各跑一次 hooks，属已知的有限重复。
 
 ### 工程脚本清单
 
