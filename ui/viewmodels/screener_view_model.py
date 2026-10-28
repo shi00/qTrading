@@ -105,6 +105,12 @@ class ScreenerViewModel(
 
         # Internal mutable data (双轨制, not in state)
         self._full_results: pd.DataFrame | None = None
+        # UIR-F09-002: 结果所有权守卫 —— _history_request_seq 标识在途历史请求代次
+        # （load_history_data 发起与模式切换时递增，过期响应不得写回）；
+        # _dataset_revision 标识 _full_results 数据集身份（被整体替换时递增，供
+        # sort_data 等在 await 期间的写回判定过期）。均为 VM 内存态（无 DB 迁移）。
+        self._history_request_seq: int = 0
+        self._dataset_revision: int = 0
         self._ai_buffer: list[dict] = []
         self._discarded_buffer: list[dict] = []  # U-3 fix: buffer for discarded items during HISTORY mode
         self._last_ai_update = 0.0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 from core.i18n import I18n, translate_strategy_name
 from strategies.backtest.config import BacktestResult
@@ -8,6 +9,23 @@ from strategies.backtest.metrics import PROFIT_THRESHOLD
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
+
+
+def _format_optional_pct(value: float | None, width: int) -> str:
+    """月表百分比单元：None / NaN / inf 渲染 N/A，不伪装成 0.00%（R21）。
+
+    引擎在基准整月缺失时显式置 None（BT-04）；旧历史/畸形快照可能携带 NaN，
+    一并按「未测量」处理，避免导出报告与 UI 月表口径不一致。
+    """
+    if value is None:
+        return "N/A".rjust(width)
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return "N/A".rjust(width)
+    if not math.isfinite(num):
+        return "N/A".rjust(width)
+    return f"{num:>{width}.2%}"
 
 
 class BacktestReport:
@@ -70,14 +88,14 @@ class BacktestReport:
         sep = "-" * len(header)
         lines = [header, sep]
         for row in result.period_stats.iter_rows(named=True):
-            period = row.get("year_month", "N/A")
+            period = row.get("year_month", "N/A") or "N/A"
             ret = row.get("monthly_return")
             bench = row.get("benchmark_return")
             excess = row.get("excess_return")
             # None（该月无数据，如基准全缺失）渲染 N/A，不伪装成 0.00%
-            ret_str = "N/A".rjust(9) if ret is None else f"{ret:>9.2%}"
-            bench_str = "N/A".rjust(11) if bench is None else f"{bench:>11.2%}"
-            excess_str = "N/A".rjust(11) if excess is None else f"{excess:>11.2%}"
+            ret_str = _format_optional_pct(ret, 9)
+            bench_str = _format_optional_pct(bench, 11)
+            excess_str = _format_optional_pct(excess, 11)
             lines.append(f"{period:<12}{ret_str}{bench_str}{excess_str}")
         return "\n".join(lines)
 

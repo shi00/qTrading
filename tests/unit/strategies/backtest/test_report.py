@@ -234,6 +234,26 @@ class TestBacktestReport:
         assert "0.00%" in stats
         assert "N/A" not in stats
 
+    def test_format_monthly_stats_non_finite_renders_na(self, backtest_result: BacktestResult) -> None:
+        """UIR-F11-003: NaN/inf（畸形/旧历史快照）与 None 同口径渲染 N/A，不得输出 nan%。"""
+        result = dataclasses.replace(
+            backtest_result,
+            period_stats=pl.DataFrame(
+                {
+                    "year_month": ["2024-01"],
+                    "monthly_return": [float("nan")],
+                    "benchmark_return": [float("inf")],
+                    "excess_return": [None],
+                    "start_nav": [100.0],
+                    "end_nav": [101.0],
+                }
+            ),
+        )
+        stats = BacktestReport().format_monthly_stats(result)
+        assert "nan%" not in stats
+        assert "inf%" not in stats
+        assert "N/A" in stats
+
     def test_format_trade_summary(self, backtest_result: BacktestResult) -> None:
         report = BacktestReport()
         trade_summary = report.format_trade_summary(backtest_result)

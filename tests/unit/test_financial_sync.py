@@ -1872,20 +1872,13 @@ class TestFinancialSyncEngineDisposedExtended:
 
     @pytest.mark.asyncio
     async def test_engine_disposed_in_incremental_date_parse(self):
-        """R5: _run_incremental_sync 日期解析中 EngineDisposedError 传播。
+        """R5: 增量同步前置的 sync_status 查询抛 EngineDisposedError 时必须传播。
 
-        通过让 get_sync_status 返回的对象在 + timedelta 时抛 EngineDisposedError,
-        覆盖 534 行的 except EngineDisposedError: raise 路径。
+        UIR-F14-004 后增量窗口起点取自 app_state 检查点，不再对 last_sync_date 做
+        `+ timedelta` 运算，故改由 get_sync_status 直接抛出覆盖 R5 传播路径。
         """
         ctx = make_ctx()
-
-        # 构造一个 last_sync_date, 使 last_sync_dt + timedelta 触发 EngineDisposedError
-        class _DisposedDate(datetime.datetime):
-            def __add__(self, other):
-                raise EngineDisposedError("disposed")
-
-        disposed_dt = _DisposedDate(2024, 6, 1)
-        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": disposed_dt})
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(side_effect=EngineDisposedError("disposed"))
         ctx.api.get_disclosure_date = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
         with pytest.raises(EngineDisposedError):
@@ -2483,4 +2476,275 @@ class TestFinancialSyncIncrementalWindowBasis:
         result = await strategy.run()
         assert result is not None
         # 回退 last_sync_date=今天 → 窗口为空（今天+1 > 今天）→ 早返回
+        ctx.api.get_disclosure_date.assert_not_awaited()
+
+
+class _FakeAppStateStore:
+    """UIR-F14-004: app_state 的进程内替身（get / 覆盖写 / 单调 max 写）。"""
+
+    def __init__(self, initial: dict[str, str] | None = None):
+        self.values: dict[str, str] = dict(initial or {})
+        self.max_writes: list[tuple[str, str]] = []
+
+    async def get(self, engine, key):
+        return self.values.get(key)
+
+    async def set(self, engine, key, value):
+        self.values[key] = value
+
+    async def set_max(self, engine, key, value):
+        self.max_writes.append((key, value))
+        current = self.values.get(key)
+        if current is None or current < value:
+            self.values[key] = value
+
+
+def _patch_app_state(store: _FakeAppStateStore):
+    return patch.multiple(
+        "data.sync.financial",
+        get_app_state=store.get,
+        set_app_state=store.set,
+        set_app_state_max=store.set_max,
+    )
+
+
+def _wire_per_stock_core_apis(ctx):
+    """四个 core 表按请求 ts_code 返回数据，便于区分不同标的。"""
+
+    def per_stock(**kwargs):
+        return pd.DataFrame(
+            {
+                "ts_code": [kwargs["ts_code"]],
+                "end_date": [kwargs.get("period") or "20240930"],
+                "ann_date": ["20241020"],
+                "revenue": [100.0],
+            }
+        )
+
+    ctx.api.get_income = AsyncMock(side_effect=per_stock)
+    ctx.api.get_balancesheet = AsyncMock(side_effect=per_stock)
+    ctx.api.get_fina_indicator = AsyncMock(side_effect=per_stock)
+    ctx.api.get_cashflow = AsyncMock(side_effect=per_stock)
+
+
+def _financial_status_calls(ctx, day=None):
+    calls = [c for c in ctx.cache.sync_dao.update_sync_status.await_args_list if c.args[0] == "financial_reports"]
+    if day is not None:
+        calls = [c for c in calls if c.args[1] == day]
+    return calls
+
+
+class TestFinancialDisclosureCheckpoint:
+    """UIR-F14-004/R21/R22: 披露检查点只跨过「已解决」的披露日。"""
+
+    @pytest.mark.asyncio
+    async def test_failed_target_stays_pending_across_rounds_until_recovered(self):
+        """19 日 A 超时、20 日 B 成功：连续两轮后 19 日 A 仍待补且不宣称完整，
+        A 恢复后才跨过 19 日，B 不被误删（UPSERT 幂等重写）。"""
+        from data.sync.financial import _load_pending_disclosure_targets
+
+        ctx = make_ctx()
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": datetime.datetime(2024, 10, 18)})
+        _wire_per_stock_core_apis(ctx)
+
+        a_failing = {"value": True}
+        a_attempts = {"count": 0}
+        saved_codes: list[str] = []
+
+        async def save(df):
+            ts_code = df["ts_code"].iloc[0]
+            if ts_code == "000001.SZ":
+                a_attempts["count"] += 1
+                if a_failing["value"]:
+                    raise TimeoutError("simulated timeout for 000001.SZ")
+            saved_codes.append(ts_code)
+            return len(df)
+
+        ctx.cache.financial_dao.save_financial_reports = AsyncMock(side_effect=save)
+
+        def disclosure(date=None, **kwargs):
+            if date == "20241019":
+                return pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240930"]})
+            if date == "20241020":
+                return pd.DataFrame({"ts_code": ["000002.SZ"], "end_date": ["20240930"]})
+            return None
+
+        ctx.api.get_disclosure_date = AsyncMock(side_effect=disclosure)
+        store = _FakeAppStateStore({"financial_disclosure_checkpoint": "20241018"})
+        strategy = FinancialSyncStrategy(ctx)
+
+        def run_at(moment: datetime.datetime):
+            return patch("data.sync.financial.get_now", return_value=moment)
+
+        # 第一轮：19 日 A 超时，20 日 B 成功
+        with _patch_app_state(store), run_at(datetime.datetime(2024, 10, 21, 16, 0)):
+            result1 = await strategy.run()
+        expected_pending = {"20241019": {("000001.SZ", "20240930")}}
+        assert _load_pending_disclosure_targets(store.values.get("financial_disclosure_pending")) == expected_pending
+        assert store.values["financial_disclosure_checkpoint"] == "20241018"
+        assert result1.status == SyncStatus.PARTIAL.value
+        assert "000001.SZ" not in saved_codes
+        assert "000002.SZ" in saved_codes
+        day19_calls = _financial_status_calls(ctx, datetime.date(2024, 10, 19))
+        assert any(c.kwargs.get("status") == "failed" for c in day19_calls)
+        day20_calls = _financial_status_calls(ctx, datetime.date(2024, 10, 20))
+        assert day20_calls and "status" not in day20_calls[0].kwargs
+
+        # 第二轮：A 仍失败，检查点不得跨过 19 日，pending 依旧保留
+        ctx.cache.sync_dao.update_sync_status.reset_mock()
+        with _patch_app_state(store), run_at(datetime.datetime(2024, 10, 22, 16, 0)):
+            result2 = await strategy.run()
+        assert _load_pending_disclosure_targets(store.values.get("financial_disclosure_pending")) == expected_pending
+        assert store.values["financial_disclosure_checkpoint"] == "20241018"
+        assert result2.status == SyncStatus.PARTIAL.value
+        assert a_attempts["count"] == 2
+
+        # 第三轮：A 恢复 → 19 日解决后检查点才能推进到当天，pending 清空
+        a_failing["value"] = False
+        ctx.cache.sync_dao.update_sync_status.reset_mock()
+        b_saves_before = saved_codes.count("000002.SZ")
+        with _patch_app_state(store), run_at(datetime.datetime(2024, 10, 23, 16, 0)):
+            result3 = await strategy.run()
+        assert store.values["financial_disclosure_checkpoint"] == "20241023"
+        assert _load_pending_disclosure_targets(store.values.get("financial_disclosure_pending")) == {}
+        assert result3.status == SyncStatus.SUCCESS.value
+        assert "000001.SZ" in saved_codes
+        # B 在下一轮被幂等重写而非删除
+        assert saved_codes.count("000002.SZ") > b_saves_before
+        day19_success = _financial_status_calls(ctx, datetime.date(2024, 10, 19))
+        assert day19_success and "status" not in day19_success[0].kwargs
+
+    @pytest.mark.asyncio
+    async def test_empty_payload_is_not_failure_and_checkpoint_advances(self):
+        """合法空数据（未披露/无报告）不写 pending、不标记失败，检查点正常推进。"""
+        from data.sync.financial import _load_pending_disclosure_targets
+
+        ctx = make_ctx()
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": datetime.datetime(2024, 10, 18)})
+        ctx.api.get_disclosure_date = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240930"]})
+        )
+        empty = pd.DataFrame()
+        ctx.api.get_income = AsyncMock(return_value=empty)
+        ctx.api.get_balancesheet = AsyncMock(return_value=empty)
+        ctx.api.get_fina_indicator = AsyncMock(return_value=empty)
+        ctx.api.get_cashflow = AsyncMock(return_value=empty)
+        store = _FakeAppStateStore({"financial_disclosure_checkpoint": "20241018"})
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            result = await strategy.run()
+
+        assert result.status == SyncStatus.SUCCESS.value
+        ctx.cache.financial_dao.save_financial_reports.assert_not_awaited()
+        assert _load_pending_disclosure_targets(store.values.get("financial_disclosure_pending")) == {}
+        assert store.values["financial_disclosure_checkpoint"] == "20241021"
+        day19_calls = _financial_status_calls(ctx, datetime.date(2024, 10, 19))
+        assert day19_calls and day19_calls[0].args[2] == 0
+        assert "status" not in day19_calls[0].kwargs
+
+    @pytest.mark.asyncio
+    async def test_core_partial_failure_keeps_target_pending_without_saving(self):
+        """部分 core 表失败不得落库残缺数据，target 保持 pending 且检查点不推进。"""
+        from data.sync.financial import _load_pending_disclosure_targets
+
+        ctx = make_ctx()
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": datetime.datetime(2024, 10, 18)})
+        _wire_per_stock_core_apis(ctx)
+        ctx.api.get_income = AsyncMock(side_effect=RuntimeError("income failed"))
+
+        def disclosure(date=None, **kwargs):
+            if date == "20241019":
+                return pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240930"]})
+            return None
+
+        ctx.api.get_disclosure_date = AsyncMock(side_effect=disclosure)
+        store = _FakeAppStateStore({"financial_disclosure_checkpoint": "20241018"})
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 20, 16)),
+        ):
+            result = await strategy.run()
+
+        ctx.cache.financial_dao.save_financial_reports.assert_not_awaited()
+        assert _load_pending_disclosure_targets(store.values.get("financial_disclosure_pending")) == {
+            "20241019": {("000001.SZ", "20240930")}
+        }
+        assert store.values["financial_disclosure_checkpoint"] == "20241018"
+        assert result.status == SyncStatus.PARTIAL.value
+        day19_calls = _financial_status_calls(ctx, datetime.date(2024, 10, 19))
+        assert any(c.kwargs.get("status") == "failed" for c in day19_calls)
+
+    @pytest.mark.asyncio
+    async def test_zero_row_save_is_treated_as_unresolved(self):
+        """非空载荷却零落库（表未注册/主键缺失返回 0）不得宣称完成，保持 pending。"""
+        from data.sync.financial import _load_pending_disclosure_targets
+
+        ctx = make_ctx()
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": datetime.datetime(2024, 10, 18)})
+        _wire_per_stock_core_apis(ctx)
+
+        def disclosure(date=None, **kwargs):
+            if date == "20241019":
+                return pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240930"]})
+            return None
+
+        ctx.api.get_disclosure_date = AsyncMock(side_effect=disclosure)
+        ctx.cache.financial_dao.save_financial_reports = AsyncMock(return_value=0)
+        store = _FakeAppStateStore({"financial_disclosure_checkpoint": "20241018"})
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 20, 16)),
+        ):
+            result = await strategy.run()
+
+        assert _load_pending_disclosure_targets(store.values.get("financial_disclosure_pending")) == {
+            "20241019": {("000001.SZ", "20240930")}
+        }
+        assert store.values["financial_disclosure_checkpoint"] == "20241018"
+        assert result.status == SyncStatus.PARTIAL.value
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_without_checkpoint_backfills_recent_window(self):
+        """升级/新建无检查点时不以 last_sync_date 作为完成水位，至少回看固定历史窗口。"""
+        from data.sync.financial import _LEGACY_DISCLOSURE_BACKFILL_DAYS
+
+        ctx = make_ctx()
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": datetime.datetime(2024, 1, 1)})
+        ctx.api.get_disclosure_date = AsyncMock(return_value=None)
+        store = _FakeAppStateStore()
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            await strategy.run()
+
+        assert ctx.api.get_disclosure_date.await_count == _LEGACY_DISCLOSURE_BACKFILL_DAYS + 1
+        assert store.values["financial_disclosure_checkpoint"] == "20241021"
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_never_regresses_when_ahead_of_clock(self):
+        """R22: 已持久检查点领先于当前时钟时不得回退（窗口为空则直接早返回）。"""
+        ctx = make_ctx()
+        ctx.cache.sync_dao.get_sync_status = AsyncMock(return_value={"last_sync_date": datetime.datetime(2024, 10, 18)})
+        ctx.api.get_disclosure_date = AsyncMock(return_value=None)
+        store = _FakeAppStateStore({"financial_disclosure_checkpoint": "20241025"})
+        strategy = FinancialSyncStrategy(ctx)
+
+        with (
+            _patch_app_state(store),
+            patch("data.sync.financial.get_now", return_value=datetime.datetime(2024, 10, 21, 16)),
+        ):
+            await strategy.run()
+
+        assert store.values["financial_disclosure_checkpoint"] == "20241025"
         ctx.api.get_disclosure_date.assert_not_awaited()

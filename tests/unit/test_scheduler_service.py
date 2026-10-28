@@ -11,6 +11,7 @@ from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
 from core.i18n import I18n, Message
 from data.sync.base import SyncResult, SyncStatus
+from data.sync.concept_sync import ConceptSyncResult
 from services.task_manager import EXCLUSIVE_GROUP_MARKET_SYNC, AppTask, TaskStatus
 from utils.scheduler_service import SchedulerService
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -1457,10 +1458,11 @@ class TestConceptSyncLogicClosure:
     async def test_concept_sync_logic_closure(self):
         svc = _make_svc()
         mock_dp = MagicMock()
-        mock_dp.run_concept_sync = AsyncMock()
+        mock_dp.run_concept_sync = AsyncMock(return_value=SyncResult(status="success"))
         mock_tm = MagicMock()
         sentinel_cancel_event = MagicMock()
         mock_tm.get_cancel_event.return_value = sentinel_cancel_event
+        mock_tm.update_progress.return_value = True
         now_val = datetime(2024, 6, 15, 10, 0)
 
         with (
@@ -1470,10 +1472,12 @@ class TestConceptSyncLogicClosure:
             patch("services.task_manager.TaskManager", return_value=mock_tm),
         ):
             mock_ch.is_concept_schedule_enabled.return_value = True
+            svc._persist_run_date_db = AsyncMock()
             await svc._run_concept_sync()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             result_msg = await factory("test_task")
             assert isinstance(result_msg, Message)
+            assert result_msg.key == "sched_concept_sync_done"
             # 验证通过 get_cancel_event 访问器获取取消事件（而非穿透 _cancel_event）
             mock_tm.get_cancel_event.assert_called_once_with("test_task")
             # 验证 run_concept_sync 被调用且仅同步免费数据源（无 LLM 分支）
@@ -1481,6 +1485,115 @@ class TestConceptSyncLogicClosure:
             assert "manual_trigger" not in call_kwargs
             # 验证 cancel_event 被正确传递给 run_concept_sync（P0-2 取消链路）
             assert call_kwargs.get("cancel_event") is sentinel_cancel_event
+            # UIR-F14-003: 所需来源全部完成 → 推进水位并持久化
+            assert svc._last_concept_sync_date == "20240615"
+            svc._persist_run_date_db.assert_awaited_once_with(
+                "sched_last_concept_sync",
+                "scheduler_last_concept_sync",
+                "20240615",
+            )
+
+    @pytest.mark.asyncio
+    async def test_incomplete_does_not_advance_watermark_and_reruns(self):
+        """UIR-F14-003: AKShare failed + 停写清理成功 → 不推进成功日期、任务显式 partial。"""
+        svc = _make_svc()
+        partial_result = ConceptSyncResult(
+            sources={"akshare": "failed", "limit_list": "success"},
+            failed_sources=["akshare"],
+            status="partial",
+        )
+        mock_dp = MagicMock()
+        mock_dp.run_concept_sync = AsyncMock(return_value=partial_result)
+        mock_tm = MagicMock()
+        mock_tm.get_cancel_event.return_value = MagicMock()
+        mock_tm.update_progress.return_value = True
+        now_val = datetime(2024, 6, 15, 10, 0)
+
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.get_now", return_value=now_val),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+        ):
+            mock_ch.is_concept_schedule_enabled.return_value = True
+            svc._persist_run_date_db = AsyncMock()
+            await svc._run_concept_sync()
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+            result_msg = await factory("test_task")
+
+            assert result_msg.key == "sched_concept_sync_partial"
+            assert result_msg.params["sources"] == "akshare=failed | limit_list=success"
+            assert svc._last_concept_sync_date is None
+            svc._persist_run_date_db.assert_not_awaited()
+            assert "concept_sync_daily_refresh" in svc._job_last_failure_reason
+
+            # 同日重跑：水位未推进 → already-done 守卫不跳过，再次提交任务重试失败源
+            await svc._run_concept_sync()
+            assert mock_tm.submit_task.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_failed_status_uses_failed_message(self):
+        """全部来源失败 → 任务显式 failed（不得呈现为完成），且不推进水位。"""
+        svc = _make_svc()
+        failed_result = ConceptSyncResult(
+            sources={"akshare": "failed", "limit_list": "failed"},
+            failed_sources=["akshare", "limit_list"],
+            status="failed",
+        )
+        mock_dp = MagicMock()
+        mock_dp.run_concept_sync = AsyncMock(return_value=failed_result)
+        mock_tm = MagicMock()
+        mock_tm.get_cancel_event.return_value = MagicMock()
+        mock_tm.update_progress.return_value = True
+        now_val = datetime(2024, 6, 15, 10, 0)
+
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.get_now", return_value=now_val),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+        ):
+            mock_ch.is_concept_schedule_enabled.return_value = True
+            svc._persist_run_date_db = AsyncMock()
+            await svc._run_concept_sync()
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+            result_msg = await factory("test_task")
+
+            assert result_msg.key == "sched_concept_sync_failed"
+            assert svc._last_concept_sync_date is None
+            svc._persist_run_date_db.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_result_raises_and_does_not_mark_done(self):
+        """取消不标 done：cancelled 终态向 TaskManager 传播 CancelledError，水位不推进。"""
+        svc = _make_svc()
+        cancelled_result = ConceptSyncResult(
+            sources={"akshare": "cancelled", "limit_list": "cancelled"},
+            failed_sources=["akshare", "limit_list"],
+            status="cancelled",
+        )
+        mock_dp = MagicMock()
+        mock_dp.run_concept_sync = AsyncMock(return_value=cancelled_result)
+        mock_tm = MagicMock()
+        mock_tm.get_cancel_event.return_value = MagicMock()
+        mock_tm.update_progress.return_value = True
+        now_val = datetime(2024, 6, 15, 10, 0)
+
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.get_now", return_value=now_val),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+        ):
+            mock_ch.is_concept_schedule_enabled.return_value = True
+            svc._persist_run_date_db = AsyncMock()
+            await svc._run_concept_sync()
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+            with pytest.raises(asyncio.CancelledError):
+                await factory("test_task")
+
+            assert svc._last_concept_sync_date is None
+            svc._persist_run_date_db.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_t8_update_progress_false_raises_cancelled(self):

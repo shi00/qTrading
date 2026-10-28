@@ -14,7 +14,8 @@ import asyncio
 import logging
 import time
 import typing
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 
 from data.external.akshare_concept_client import AkshareConceptClient
 from data.external.tushare_client import TushareAPIPermissionError
@@ -26,6 +27,64 @@ from utils.error_classifier import classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 
 logger = logging.getLogger(__name__)
+
+# 概念同步门面的来源标识（调度器水位判据与任务结果呈现共用，避免散落字符串）。
+CONCEPT_SOURCE_AKSHARE = "akshare"
+CONCEPT_SOURCE_LIMIT_LIST = "limit_list"
+
+# 「所需来源」判据：AKShare 提供板块成分（唯一概念映射数据源），其完成是核心项；
+# LimitList 自 review08-D3 起停写 LIMIT_ 概念，其「清理完成且不再写入」即视为完成。
+# 两者任一失败都不得把当日标记为成功（否则失败源当日不再重试）；判据落在
+# ``ConceptSyncResult.failed_sources`` 上，任一来源非 success 即登记为未完成。
+
+# 状态聚合优先级：cancelled > failed > partial > success（与 SyncResult.merge 一致）。
+_CONCEPT_STATUS_PRIORITY: tuple[str, ...] = (
+    SyncStatus.CANCELLED.value,
+    SyncStatus.FAILED.value,
+    SyncStatus.PARTIAL.value,
+    SyncStatus.SUCCESS.value,
+)
+
+
+def aggregate_concept_status(statuses: Iterable[str]) -> str:
+    """按 cancelled > failed > partial > success 聚合整体状态。
+
+    failed 优先于 partial：任一来源整源失败即按 failed 呈现，避免部分成功掩盖失败。
+    """
+    values = set(statuses)
+    for candidate in _CONCEPT_STATUS_PRIORITY:
+        if candidate in values:
+            return candidate
+    return SyncStatus.SUCCESS.value
+
+
+@dataclass
+class ConceptSyncResult:
+    """概念同步门面的结构化结果（按来源聚合，替代原「字符串摘要」返回值）。
+
+    调度器以此判定是否推进 ``_last_concept_sync_date``：
+    - ``is_complete`` 仅在所需来源全部 success 时为真（R21：partial/failed/cancelled
+      一律不伪装为完整；R22：水位不得跨洞推进）；
+    - ``failed_sources`` 显式列出未完成来源，供任务结果与状态面板呈现；
+    - ``to_summary()`` 保留 "akshare=failed | limit_list=success" 的可读摘要。
+    """
+
+    sources: dict[str, str] = field(default_factory=dict)
+    failed_sources: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    added: int = 0
+    status: str = SyncStatus.SUCCESS.value
+
+    @property
+    def is_complete(self) -> bool:
+        """所需来源全部完成（success）才为 True。"""
+        return self.status == SyncStatus.SUCCESS.value and not self.failed_sources
+
+    def to_summary(self) -> str:
+        """来源状态摘要（如 ``akshare=failed | limit_list=success``）。"""
+        return " | ".join(f"{name}={status}" for name, status in self.sources.items())
+
 
 # Concurrency / retry tuning for AKShare concept sync.
 _AKSHARE_CONCURRENCY = 3

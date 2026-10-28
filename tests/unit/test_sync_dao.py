@@ -96,6 +96,33 @@ class TestSyncDaoUpdateSyncStatus:
         call_args = dao._write_db.call_args[0][1]
         assert call_args[5] == SYNC_RESULT_FETCH_FAILED
 
+    @pytest.mark.asyncio
+    async def test_partial_status_is_recorded_without_claiming_completion(self):
+        """UIR-F14-004 检查点语义：partial/failed 写入只记最近尝试（last_sync_date），
+        业务水位 last_data_date 仅由 success/empty/skipped_permission 推进。
+
+        DAO 无法直接执行 SQL，故断言：① 写入参数保留 partial 状态与 fetch_failed 结果；
+        ② 更新语句中 last_data_date 的推进仅限已完成状态，partial/failed 不推进。
+        """
+        dao = SyncDao(MagicMock())
+        dao._write_db = AsyncMock(return_value=1)
+        await dao.update_sync_status("financial_reports", "20241019", 3, status="partial")
+        sql, params = dao._write_db.call_args[0]
+        assert params[4] == "partial"
+        assert params[5] == SYNC_RESULT_FETCH_FAILED
+        # 已有记录时 last_data_date 只在完成状态下推进
+        assert "\"last_data_date\"=CASE WHEN excluded.\"status\" IN ('success','empty','skipped_permission')" in sql
+
+    @pytest.mark.asyncio
+    async def test_failed_status_with_records_still_not_complete(self):
+        """失败但仍有部分记录时不得以 record_count>0 宣称 HAS_DATA 完成。"""
+        dao = SyncDao(MagicMock())
+        dao._write_db = AsyncMock(return_value=1)
+        await dao.update_sync_status("financial_reports", "20241019", 5, status="failed")
+        params = dao._write_db.call_args[0][1]
+        assert params[4] == "failed"
+        assert params[5] == SYNC_RESULT_FETCH_FAILED
+
 
 class TestSyncDaoGetCompletedStep4Stocks:
     @pytest.mark.asyncio

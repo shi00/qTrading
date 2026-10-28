@@ -51,6 +51,18 @@ def _get_color_for_value(value: float) -> str:
     return AppColors.TEXT_PRIMARY
 
 
+def _format_pct(value: float | None) -> str:
+    """月表收益文本：None（该月未测量/基准缺失）渲染 N/A，不伪装成 0.00%（R21）。"""
+    return "N/A" if value is None else f"{value * 100:.2f}%"
+
+
+def _pct_color(value: float | None) -> str:
+    """月表涨跌颜色：None 走中性次要色且不参与 >/< 比较（缺失≠零收益）。"""
+    if value is None:
+        return AppColors.TEXT_SECONDARY
+    return _get_color_for_value(value)
+
+
 def _get_color_for_sharpe(sharpe: float) -> str:
     if sharpe >= 1.5:
         return AppColors.SUCCESS
@@ -769,7 +781,7 @@ def _build_chart_summary(
 
 
 def _build_monthly_table(
-    period_stats: tuple[tuple[str, float, float, float], ...],
+    period_stats: tuple[tuple[str, float | None, float | None, float | None], ...],
 ) -> ft.Container:
     if not period_stats:
         return ft.Container(
@@ -787,18 +799,19 @@ def _build_monthly_table(
 
     rows = []
     for year_month, monthly_ret, bench_ret, excess in period_stats:
-        ret_color = (
-            AppColors.SUCCESS if monthly_ret > 0 else AppColors.ERROR if monthly_ret < 0 else AppColors.TEXT_PRIMARY
-        )
-        excess_color = AppColors.SUCCESS if excess > 0 else AppColors.ERROR if excess < 0 else AppColors.TEXT_PRIMARY
-
         rows.append(
             ft.DataRow(
                 cells=[
                     ft.DataCell(ft.Text(year_month, color=AppColors.TEXT_PRIMARY)),
-                    ft.DataCell(ft.Text(f"{monthly_ret * 100:.2f}%", color=ret_color)),
-                    ft.DataCell(ft.Text(f"{bench_ret * 100:.2f}%", color=AppColors.TEXT_PRIMARY)),
-                    ft.DataCell(ft.Text(f"{excess * 100:.2f}%", color=excess_color)),
+                    ft.DataCell(ft.Text(_format_pct(monthly_ret), color=_pct_color(monthly_ret))),
+                    # 基准列固定中性色；缺失（None）走次要色以区分「未测量」与「零涨跌」
+                    ft.DataCell(
+                        ft.Text(
+                            _format_pct(bench_ret),
+                            color=AppColors.TEXT_PRIMARY if bench_ret is not None else AppColors.TEXT_SECONDARY,
+                        )
+                    ),
+                    ft.DataCell(ft.Text(_format_pct(excess), color=_pct_color(excess))),
                 ]
             )
         )
@@ -825,7 +838,7 @@ def _build_content(
     benchmark_curve: tuple[float, ...],
     ic_series: tuple[float, ...],
     ic_dates: tuple[str, ...],
-    period_stats: tuple[tuple[str, float, float, float], ...],
+    period_stats: tuple[tuple[str, float | None, float | None, float | None], ...],
     strategy_name: str | None,
     benchmark_name: str | None,
     real_score_ratio: float,
@@ -922,7 +935,7 @@ def BacktestResultPanel(
     benchmark_curve: tuple[float, ...] = (),
     ic_series: tuple[float, ...] = (),
     ic_dates: tuple[str, ...] = (),
-    period_stats: tuple[tuple[str, float, float, float], ...] = (),
+    period_stats: tuple[tuple[str, float | None, float | None, float | None], ...] = (),
     strategy_name: str | None = None,
     benchmark_name: str | None = None,
     real_score_ratio: float = 1.0,
