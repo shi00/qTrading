@@ -1972,6 +1972,7 @@
     "backtest_credibility_degraded": "This backtest has data limitations; interpret the results with the warnings below",
     "backtest_credibility_unreliable": "This backtest is unreliable; the metrics below should not be used as decision basis",
     "backtest_warn_data_quality": "{count} data quality issue(s) detected (missing suspension/price-limit data, missing benchmark, range gaps, stale valuation); results may be distorted",
+    "backtest_warn_range_quality_unverified": "Range data coverage could not be verified (trade calendar or coverage query failed); missing trading days in the backtest range are unknown. Treat this range as \"quality unverified\"; results may be distorted by gaps",
     "backtest_warn_termination": "{count} termination event(s) (e.g. portfolio wiped out); return and risk metrics may be severely distorted",
     "backtest_warn_perf_path": "{count} performance-path notice(s) (e.g. range preload too wide/failed); affects run performance only, not result correctness",
     "backtest_warn_persist_failed": "Backtest result failed to save ({count}); this result exists only in the current session and cannot be restored after closing or refreshing",

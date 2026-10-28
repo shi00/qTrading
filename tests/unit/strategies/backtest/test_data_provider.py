@@ -9,6 +9,7 @@
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import asyncio
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock
 
@@ -862,7 +863,12 @@ class TestBacktestQualityProxy:
 
     @pytest.mark.asyncio
     async def test_preload_calendar_failure_keeps_gold(self, _autouse_mock_trade_calendar) -> None:
-        """D3-M2: 日历查询失败（非 CancelledError）→ 保持默认 GOLD、missing 空，preload 数据仍成功。"""
+        """D3-M2 + UIR-F11-005: 日历查询失败 → 保持默认 GOLD、missing 空，数据仍预载成功。
+
+        UIR-F11-005 / R21：日历不可用即无法核对区间覆盖（质量未知），必须写入
+        ``[range_quality_coverage_unverified]`` 告警而非仅记日志，否则 VM 会把未知
+        渲染为「无问题」。
+        """
         from data.persistence.quality_gate import QualityTier
 
         _autouse_mock_trade_calendar.side_effect = RuntimeError("calendar boom")
@@ -892,6 +898,11 @@ class TestBacktestQualityProxy:
         assert provider._quality_proxy._scan_missing_dates == frozenset()
         assert isinstance(provider._preloaded, dict)
         assert "20240102" in provider._preloaded["screening_data"]
+        # UIR-F11-005: 日历失败 → 覆盖未核实必须显式可见（质量未知）
+        unverified = [w for w in provider.range_preload_warnings if w.startswith("[range_quality_coverage_unverified]")]
+        assert len(unverified) == 1
+        assert "20240102-20240103" in unverified[0]
+        assert "区间缺口状态未知" in unverified[0]
 
     @pytest.mark.asyncio
     async def test_preload_empty_screening_data_reports_all_missing(self) -> None:
@@ -957,10 +968,17 @@ class TestBacktestQualityProxy:
         assert provider._quality_proxy._scan_missing_dates == frozenset({"20240105", "20240108"})
         # 轻量覆盖查询与预载解耦，确实被调用（宽区间亦评估缺口）
         cache.quote_dao.get_quote_trade_dates.assert_awaited_once_with(date(2024, 1, 1), date(2025, 2, 4))
+        # UIR-F11-005: 覆盖核实成功且有真实缺口 → 只报缺口，不得叠加「未核实」
+        assert not any(w.startswith("[range_quality_coverage_unverified]") for w in provider.range_preload_warnings)
 
     @pytest.mark.asyncio
     async def test_wide_range_coverage_query_failure_keeps_default_gold(self) -> None:
-        """BT-03 MAJOR-02/R21: 宽区间轻量覆盖查询失败 → 保持默认 GOLD（未知不伪装成无缺口）。"""
+        """BT-03 MAJOR-02 + UIR-F11-005/R21: 宽区间轻量覆盖查询失败 → 保持默认 GOLD，
+        且必须写入「区间覆盖未核实」信号（未知不得伪装成无缺口，也不得只记日志）。
+
+        Given 宽区间 + 有效交易日 + 逐日行情可正常读取，仅轻量覆盖查询失败；
+        Then 结果的 warnings 中带 quality-unknown 类型与原因，供 engine/quality_json/UI 横幅保留。
+        """
         cache = MagicMock()
         cache.quote_dao.get_quote_trade_dates = AsyncMock(side_effect=Exception("db down"))
 
@@ -971,6 +989,41 @@ class TestBacktestQualityProxy:
         # 查询失败 → 未知，不产生虚假缺口告警，也不因未知而崩溃
         assert not any(w.startswith("[range_quality_gaps]") for w in provider.range_preload_warnings)
         assert provider._quality_proxy._scan_missing_dates == frozenset()
+        # UIR-F11-005: 质量未知必须显式可见（类型前缀 + 区间 + 原因）
+        unverified = [w for w in provider.range_preload_warnings if w.startswith("[range_quality_coverage_unverified]")]
+        assert len(unverified) == 1
+        assert "20240101-20250204" in unverified[0]
+        assert "区间覆盖查询失败" in unverified[0]
+        assert "未核实" in unverified[0]
+
+    @pytest.mark.asyncio
+    async def test_wide_range_coverage_failure_sanitizes_secret(self) -> None:
+        """UIR-F11-005 / R9: 覆盖查询异常含明文密码 → 质量未知告警文本必须已脱敏。"""
+        secret_password = "supersecretpass123456"
+        cache = MagicMock()
+        cache.quote_dao.get_quote_trade_dates = AsyncMock(
+            side_effect=Exception(f"postgresql://dbuser:{secret_password}@host:5432/mydb")
+        )
+
+        provider = BacktestDataProvider(cache)
+        await provider.preload_range(date(2024, 1, 1), date(2025, 2, 4))
+
+        unverified = [w for w in provider.range_preload_warnings if w.startswith("[range_quality_coverage_unverified]")]
+        assert len(unverified) == 1
+        assert secret_password not in unverified[0]
+
+    @pytest.mark.asyncio
+    async def test_wide_range_coverage_cancelled_propagates_without_unverified(self) -> None:
+        """UIR-F11-005 / R2: 覆盖查询被取消 → CancelledError 传播，且不产出「质量未知」
+        信号（取消 ≠ 未知；取消路径由上层终止，不得伪装为质量结论）。"""
+        cache = MagicMock()
+        cache.quote_dao.get_quote_trade_dates = AsyncMock(side_effect=asyncio.CancelledError())
+
+        provider = BacktestDataProvider(cache)
+        with pytest.raises(asyncio.CancelledError):
+            await provider.preload_range(date(2024, 1, 1), date(2025, 2, 4))
+
+        assert not any(w.startswith("[range_quality_coverage_unverified]") for w in provider.range_preload_warnings)
 
     @pytest.mark.asyncio
     async def test_gap_day_build_context_empty_screening_full_on_other_days(self) -> None:

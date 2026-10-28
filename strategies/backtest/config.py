@@ -33,6 +33,9 @@ class DataWarning:
         # 由 portfolio/engine 历史字符串类型化的真实 type（MAJOR-01）。
         "stale_estimate",
         "range_quality_gaps",
+        # UIR-F11-005 / R21：区间覆盖**未核实**（交易日历或轻量覆盖查询失败）。
+        # 质量未知 ≠ 无缺口，不得被渲染为「已检查通过」。
+        "range_quality_coverage_unverified",
         "preload_range_too_wide",
         "range_preload_failed",
         "range_preload_error",
@@ -49,7 +52,8 @@ class DataWarning:
     error_message: str
     # MAJOR-01: 告警类型化维度（决策①）。
     # - data_quality：enrich 失败 / 停牌·涨跌停数据缺失 / 基准缺失·部分缺失 /
-    #   区间缺口 range_quality_gaps / 长期旧价估值 stale-estimate → unreliable。
+    #   区间缺口 range_quality_gaps / 区间覆盖未核实 range_quality_coverage_unverified
+    #   （UIR-F11-005，未知按不可信处理） / 长期旧价估值 stale-estimate → unreliable。
     # - termination：portfolio_wiped_out（爆仓）→ unreliable。
     # - performance_path：preload_range_too_wide / range_preload_failed /
     #   range_preload_error（慢路径）→ 仅提示，不升级级别。
@@ -112,6 +116,8 @@ class WarningCategory:
         "portfolio_wiped_out": "termination",
         "stale_estimate": "data_quality",
         "range_quality_gaps": "data_quality",
+        # UIR-F11-005：区间覆盖未核实（未知）→ data_quality（fail-closed：未知按不可信处理）。
+        "range_quality_coverage_unverified": "data_quality",
         "preload_range_too_wide": "performance_path",
         "range_preload_failed": "performance_path",
         "range_preload_error": "performance_path",

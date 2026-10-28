@@ -45,11 +45,15 @@ def _range_preload_warning_meta(w: str) -> tuple[str, str]:
     """MAJOR-01 决策③：将 range_preload_warnings 字符串映射为 (warning_type, category)。
 
     - ``[range_quality_gaps]``（区间缺口）→ data_quality（unreliable）。
+    - ``[range_quality_coverage_unverified]``（UIR-F11-005：区间覆盖未核实，质量未知）
+      → data_quality：未知不等于「无缺口」，不得降级为 performance_path 提示。
     - 其余（preload_range_too_wide / range_preload_failed / range_preload_error，慢路径）
       → performance_path（仅提示，不升级级别）。
     """
     if w.startswith("[range_quality_gaps]"):
         return "range_quality_gaps", WarningCategory.DATA_QUALITY
+    if w.startswith("[range_quality_coverage_unverified]"):
+        return "range_quality_coverage_unverified", WarningCategory.DATA_QUALITY
     if w.startswith("range_preload_failed"):
         return "range_preload_failed", WarningCategory.PERFORMANCE_PATH
     if w.startswith("range_preload_error"):
@@ -255,8 +259,9 @@ class VectorBacktestEngine:
         # backtest_view_model 的 `unreliable` 判定，让相对指标降级在 UI 可见。
         if benchmark_warning is not None:
             all_warnings.append(benchmark_warning)
-        # D3-M4 + MAJOR-01 决策③: 区间预载降级按前缀拆分——
-        # [range_quality_gaps]（区间缺口）→ data_quality（unreliable）；
+        # D3-M4 + MAJOR-01 决策③ + UIR-F11-005: 区间预载降级按前缀拆分——
+        # [range_quality_gaps]（区间缺口）/[range_quality_coverage_unverified]（覆盖未核实，
+        # 质量未知）→ data_quality（unreliable）；
         # preload_range_too_wide/range_preload_failed/range_preload_error（慢路径）→
         # performance_path（仅提示，不升级级别）。经 str(w) 落库时保留原 [type] 前缀。
         for w in self.data_provider.range_preload_warnings:
