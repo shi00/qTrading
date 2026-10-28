@@ -1,0 +1,26 @@
+name: Required Check Probe
+
+# 临时探针工作流：验证 required status check 对 skipped 结论的判定语义。
+# 验证完成后随探针分支一并删除，不得合入 main。
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/required-check-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  always_run:
+    name: always_run
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo probe-run
+
+  skipped_probe:
+    name: skipped_probe
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo never
