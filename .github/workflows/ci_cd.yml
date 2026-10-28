@@ -1633,8 +1633,22 @@ jobs:
             exit 1
           }
           Write-Host "Running installer smoke tests (crash_recovery + running_app, P1-12)..."
+          # 子脚本以 powershell 5.1 运行, 其非 0 退出不会抛异常; 必须显式校验
+          # $LASTEXITCODE, 否则前一个脚本失败会被后一个脚本的 0 退出码覆盖.
           & powershell -File scripts/installer_smoke_crash_recovery.ps1 -InstallerPath $installerPath
+          $crashRecoveryExitCode = $LASTEXITCODE
+          if ($crashRecoveryExitCode -ne 0) {
+            Write-Error "installer_smoke_crash_recovery.ps1 failed with exit code $crashRecoveryExitCode"
+            exit $crashRecoveryExitCode
+          }
+          Write-Host "✅ installer_smoke_crash_recovery.ps1 passed"
           & powershell -File scripts/installer_smoke_running_app.ps1 -InstallerPath $installerPath
+          $runningAppExitCode = $LASTEXITCODE
+          if ($runningAppExitCode -ne 0) {
+            Write-Error "installer_smoke_running_app.ps1 failed with exit code $runningAppExitCode"
+            exit $runningAppExitCode
+          }
+          Write-Host "✅ installer_smoke_running_app.ps1 passed"
 
       - name: Generate SHA256SUMS
         shell: pwsh
