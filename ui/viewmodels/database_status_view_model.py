@@ -50,7 +50,8 @@ class DatabaseStatusState:
 
     与 DatabaseConfigPanelViewModel.DatabaseConfigState 字段不同 (R-A6 新 VM),
     仅含状态显示所需字段，不含 host/port/user/password 等表单字段。
-    port 字段从 AppConfig.db_port 读取 (embedded 模式复用 db_port)。
+    port 字段来自 doctor 报告的内置实例实际监听端口（运行态，UIR-F15-003）：
+    未运行或端口未知时为 None，不使用 AppConfig.db_port 补位。
     """
 
     is_running: bool = False
@@ -87,6 +88,8 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
     def __init__(self, maintenance_service: EmbeddedPgMaintenanceService | None = None) -> None:
         self._state = DatabaseStatusState()
         self._maintenance_service = maintenance_service
+        # 刷新代际：并发/乱序刷新时只采纳最新一次请求的结果（避免旧快照覆盖新状态）
+        self._refresh_generation = 0
         self._init_mixin_fields()
 
     def _get_maintenance_service(self) -> EmbeddedPgMaintenanceService:
@@ -100,11 +103,17 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
     async def refresh_status(self) -> None:
         """调用 doctor() 刷新数据库状态，更新 state。
 
-        - doctor() 返回 data_dir / pg_version / postgres_alive
-        - log_dir / port 从 AppConfig 解析
+        - doctor() 返回 data_dir / pg_version / postgres_alive / port
+        - port 取内置实例实际监听端口（运行态）：内置服务以随机端口启动，与
+          AppConfig.db_port 无对应关系（UIR-F15-003）；未运行或 doctor 未提供
+          （旧版 sidecar）时为 None（未知），不得用外置配置端口补位
+        - log_dir 从 AppConfig 解析
         - doctor 已是 async，不需 ThreadPoolManager 包裹
+        - 并发刷新按代际只采纳最新请求结果（旧请求晚返回不覆盖新状态）
         - 异常时设 error state (R2: CancelledError 自动透传，except Exception 不捕获 BaseException)
         """
+        self._refresh_generation += 1
+        generation = self._refresh_generation
         self._set_state(is_refreshing=True)
         try:
             svc = self._get_maintenance_service()
@@ -113,13 +122,17 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
             config_raw = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.load_config)
             config = AppConfig.model_validate(config_raw)
             log_dir = self._resolve_log_dir(config)
-            port = config.db_port
-            pg_version = str(result.pg_version) if result.pg_version is not None else None
             is_running = result.postgres_alive
+            # 端口只信运行态（doctor 已在进程存活时才回填 postmaster.pid 端口）
+            port = result.port if is_running else None
+            pg_version = str(result.pg_version) if result.pg_version is not None else None
             status_msg = Message(
                 "db_status_running" if is_running else "db_status_stopped",
             )
             status_type = "success" if is_running else "warning"
+            if generation != self._refresh_generation:
+                # 已有更新的刷新请求在途/完成，丢弃本次过期快照
+                return
             self._set_state(
                 is_running=is_running,
                 pg_version=pg_version,
@@ -137,6 +150,8 @@ class DatabaseStatusViewModel(ObservableViewModelMixin[DatabaseStatusState]):
                 DataSanitizer.sanitize_error(exc),
                 exc_info=True,
             )
+            if generation != self._refresh_generation:
+                return
             self._set_state(
                 is_refreshing=False,
                 status_type="error",

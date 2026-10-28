@@ -40,6 +40,8 @@ MOCK_DOCTOR_JSON: dict[str, object] = {
     "lock_held": False,
     "postmaster_pid": 12345,
     "postgres_alive": True,
+    # UIR-F15-003: 运行中实例的实际监听端口（随机端口，与配置端口无关）
+    "port": 55432,
     "stale_postmaster_pid": False,
     "cluster_state": "shut down",
     "control_data_readable": True,
@@ -135,6 +137,7 @@ class TestEmbeddedPgMaintenanceServiceDoctor:
         assert result.version_match is True
         assert result.install_dir_complete is True
         assert result.postgres_alive is True
+        assert result.port == 55432
         assert result.issues == []
         assert result.runtime_status == "running"
         assert result.last_start_error is None
@@ -179,6 +182,29 @@ class TestEmbeddedPgMaintenanceServiceDoctor:
 
         assert result.restore_residuals == []
         assert result.dump_partials == []
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_doctor_backward_compat_missing_port(self, maintenance_service) -> None:
+        """旧版 sidecar 无 port 字段时解析为 None（未知），不伪造端口。"""
+        mock_old = dict(MOCK_DOCTOR_JSON)
+        del mock_old["port"]
+
+        with _patch_run_async(0, json.dumps(mock_old)):
+            result = await maintenance_service.doctor()
+
+        assert result.port is None
+
+    @pytest.mark.parametrize("bad_port", [0, -1, 65536, True, "55432", None])
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_doctor_rejects_invalid_port(self, maintenance_service, bad_port: object) -> None:
+        """端口越界/类型非法/为 null 时解析为 None（未知），不当作 0 或有效端口。"""
+        mock_bad = dict(MOCK_DOCTOR_JSON)
+        mock_bad["port"] = bad_port
+
+        with _patch_run_async(0, json.dumps(mock_bad)):
+            result = await maintenance_service.doctor()
+
+        assert result.port is None
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_doctor_schema_mismatch_raises_error(self, maintenance_service) -> None:

@@ -52,6 +52,11 @@ fn test_random_port_start() {
     let st = status_json(&data_dir);
     assert_eq!(st["port"], ready["port"]);
 
+    // doctor 报告的实际监听端口与 ready 一致（UIR-F15-003：状态面板端口来自运行态）
+    let doc = doctor_json(&data_dir);
+    assert_eq!(doc["postgres_alive"], true);
+    assert_eq!(doc["port"], ready["port"]);
+
     cleanup_sidecar(&mut child, &data_dir);
 }
 
@@ -276,6 +281,8 @@ fn test_doctor_independent_run() {
     let doc = doctor_json(&data_dir);
     assert_eq!(doc["initialized"], false);
     assert!(doc["issues"].is_array());
+    // 未运行时端口未知（不得以配置端口补位）
+    assert!(doc["port"].is_null());
 }
 
 /// 10. 维护命令锁拒绝（qTrading 运行时）（§17.2 场景 10/§17.6 #5）。
