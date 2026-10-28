@@ -1720,6 +1720,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      pull-requests: read
 
     steps:
       - name: Checkout Code
@@ -1730,22 +1731,46 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          set -euo pipefail
           # 二次精准过滤：仅当 PR 修改 installer.iss 或 scripts/*installer* 时跑 ISCC
           # 避免 scripts/ 下非 installer 脚本修改触发无意义 ISCC 编译
-          if [ -z "$PR_NUMBER" ]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-            exit 0
+          #
+          # 分页：gh api --paginate 跟随 Link: rel="next" 读取全部 PR 变更文件（每页 per_page=100），
+          # --jq 按页应用于每个 JSON 数组；不使用 --slurp（会变成页数组的数组，与 .[].filename 不匹配）。
+          # 失败语义（fail-closed）：token 缺失 / API 非 2xx / 响应解析失败都必须显式失败，
+          # 不得回落为 skip=true（否则 ISCC 校验会被静默跳过）。
+          if [ -z "${PR_NUMBER:-}" ]; then
+            echo "::error::PR_NUMBER is empty; cannot list PR files."
+            exit 1
           fi
-          FILES=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER/files?per_page=100" \
-            | jq -r '.[].filename')
-          if echo "$FILES" | grep -E '^installer\.iss$|^scripts/.*installer.*'; then
-            echo "skip=false" >> $GITHUB_OUTPUT
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::GH_TOKEN is empty; cannot list PR files."
+            exit 1
+          fi
+          if ! FILES=$(gh api --paginate --jq '.[].filename' \
+            "repos/${GH_REPO}/pulls/${PR_NUMBER}/files?per_page=100"); then
+            echo "::error::failed to list PR files (gh api exited non-zero); refusing to skip ISCC smoke."
+            exit 1
+          fi
+          FILE_COUNT=0
+          if [ -n "$FILES" ]; then
+            FILE_COUNT=$(printf '%s\n' "$FILES" | wc -l | tr -d '[:space:]')
+          fi
+          # GitHub 的 PR files 接口最多返回 3000 个文件；触达上限时无法保证检测完整，按失败处理。
+          if [ "$FILE_COUNT" -ge 3000 ]; then
+            echo "::error::PR file list reached the GitHub API cap (3000); installer detection may be incomplete."
+            exit 1
+          fi
+          # 用 here-string 而非管道传入 grep，避免 pipefail 下 grep 提前退出触发 SIGPIPE 误判。
+          if grep -Eq '^installer\.iss$|^scripts/.*installer.*' <<< "$FILES"; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "Installer-related changes detected."
+            grep -E '^installer\.iss$|^scripts/.*installer.*' <<< "$FILES"
           else
-            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "No installer-related changes, skipping ISCC smoke."
           fi
 
