@@ -30,10 +30,10 @@ dependencies = [
     "flet-code-editor==1.0.3",
     "tushare==1.4.29",
     "akshare==1.18.97",
-    "requests>=2.34.0,<2.35",
-    "httpx>=0.28.0,<0.29",
+    "requests>=2.34.2",
+    "httpx>=0.28.1",
     "urllib3>=2.8.0",
-    "numpy>=2.5.3,<2.6",
+    "numpy>=2.5.4",
     "pandas>=3.0.6,<3.1",  # 长期上界：pandas-stubs 未跟进 3.1（见 Plans §0.2-A2）
     "polars>=1.44.2,<2",
     "pyarrow>=25.0.1,<26",
@@ -47,19 +47,19 @@ dependencies = [
     "litellm>=1.102.2,<1.103",  # Security: GHSA-7hp6-4w63-5g45 / CVE-2026-114612 (internal_user 伪造 admin 凭据提权至 proxy_admin，并可经 MCP stdio 执行命令) fixed in 1.102.2; 约束 openai<3.0.0,>=2.20.0（阻断 openai 3.x 越级）; Python 3.14 support (<3.15, >=3.10); aiohttp CVE-2026-47265/CVE-2026-34993 fixed via transitive dep
     "llama-cpp-python>=0.3.35,<0.3.36",
     "apscheduler>=3.11.3",
-    "tzdata>=2026.4,<2026.5",
-    "python-dotenv>=1.2.3,<1.3",
+    "tzdata>=2026.6",
+    "python-dotenv>=1.2.4",
     "keyring>=25.7.0",
-    "cryptography>=50.0.1,<51",  # Security: CVE-2026-69247 (PKCS#7 Bleichenbacher oracle) fixed in 50.0.0 -> 50.0.1
-    "readerwriterlock>=1.0.9,<1.1",
-    "filelock>=4.2.1",  # S1 统一模型管理：配置文件跨进程锁（§5.1）; Security: CVE-2026-112940/112913/112907 fixed in 4.2.1
-    "cachetools>=7.2.0,<7.3",
-    "pydantic>=2.13.5,<2.15",
-    "aiohttp>=3.14.4,<3.15",  # Security: CVE-2026-111064/GHSA-2g87-pp6c-29x5/CVE-2026-111063 fixed in 3.14.4
+    "cryptography>=50.0.2",  # Security: CVE-2026-69247 (PKCS#7 Bleichenbacher oracle) fixed in 50.0.0 -> 50.0.1
+    "readerwriterlock>=1.0.10",
+    "filelock>=4.2.4",  # S1 统一模型管理：配置文件跨进程锁（§5.1）; Security: CVE-2026-112940/112913/112907 fixed in 4.2.1
+    "cachetools>=7.2.6",
+    "pydantic>=2.14.1",
+    "aiohttp>=3.14.5",  # Security: CVE-2026-111064/GHSA-2g87-pp6c-29x5/CVE-2026-111063 fixed in 3.14.4
     "pillow>=13.0.0",  # Security: CVE-2026-112395/112397/112400/112404/112895/112896/112897/112899 (image parsing DoS / OOB read / uninitialized memory) fixed in 13.0.0; PYSEC-2026-2253~2257 fixed in 12.3.0
     "soupsieve>=2.9.0,<3",  # Security: CVE-2026-85999/86000 (ReDoS) fixed in 2.9.0; transitive via beautifulsoup4 (akshare/bs4)
     "oauthlib>=4.0.0",  # Security: CVE-2026-49265 (PKCE timing side-channel, CWE-208) fixed in 4.0.0; transitive via flet (flet requires oauthlib>=3.2.2)
-    "tenacity>=9,<10",  # S2 统一模型管理（ADR-0014）：S3 ScenarioExecutor 单连接重试策略消费
+    "tenacity>=9.2.1,<10",  # S2 统一模型管理（ADR-0014）：S3 ScenarioExecutor 单连接重试策略消费
 ]
 
 [project.optional-dependencies]
@@ -77,11 +77,11 @@ dev = [
     "pyright>=1.1.414",
     "pandas-stubs>=3.0.5.260914",
     "uv>=0.13.4,<0.13.5",  # Security: PYSEC-2026-4321 (TLS verification against vendored webpki-roots missing post-quantum intermediates) fixed in 0.13.4
-    "pip-audit>=2.10.0",
+    "pip-audit>=2.10.1",
     "hypothesis>=6.168.1,<6.169",
     "syrupy>=6.1.1",
-    "msgpack>=1.2.3",  # Security: GHSA-6v7p-g79w-8964 (Use After Free in Unpacker reuse) fixed in 1.2.1; GHSA-j586-36cw-2gc2 / CVE-2026-114613 (strict_map_key 校验失败路径内存泄漏 + Unpacker 悬垂引用 UAF) fixed in 1.2.3
-    "pyjwt>=2.15.0",  # Security: CVE-2026-101918 (深层嵌套 JWT payload 触发未捕获 RecursionError -> 认证路径 DoS) fixed in 2.15.0; 传递依赖 flet-mcp -> fastmcp-slim -> mcp
+    "msgpack>=1.2.4",  # Security: GHSA-6v7p-g79w-8964 (Use After Free in Unpacker reuse) fixed in 1.2.1; GHSA-j586-36cw-2gc2 / CVE-2026-114613 (strict_map_key 校验失败路径内存泄漏 + Unpacker 悬垂引用 UAF) fixed in 1.2.3
+    "pyjwt>=2.15.1",  # Security: CVE-2026-101918 (深层嵌套 JWT payload 触发未捕获 RecursionError -> 认证路径 DoS) fixed in 2.15.0; 传递依赖 flet-mcp -> fastmcp-slim -> mcp
     "authlib>=1.9.1",  # Security: GHSA-6v38-4h7w-rj9h / GHSA-fch4-3c6x-j4gc / GHSA-7vr2-2fgp-9w7p / GHSA-c5mf-xmp2-59rc / GHSA-x4rv-c3wx-4cr8 fixed in 1.9.0（JWS 空签名、JWT bearer audience 校验、HMAC 算法混淆、ID token nonce 自禁用、JAR request_uri SSRF）; GHSA-8m4g-j4wp-wgcg (空 HMAC key 伪造 JWS/JWT 签名) fixed in 1.9.1; 传递依赖 fastmcp-slim
     "dnspython>=2.9.0",  # Security: GHSA-45c3-73f7-pv4m / CVE-2026-114605 (dns.name.from_wire_parser() 过度 CPU 消耗) fixed in 2.9.0; 传递依赖 email-validator
     "import-linter>=2.15",  # Architecture guard: enforce R1 layered dependencies (CLAUDE.md §4.1)
