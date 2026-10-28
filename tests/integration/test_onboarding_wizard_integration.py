@@ -140,7 +140,7 @@ class TestOnboardingDBIntegration:
                 new_callable=AsyncMock,
                 return_value=None,
             ),
-            patch("utils.config_handler.ConfigHandler.save_db_config") as mock_save_db_config,
+            patch("utils.config_handler.ConfigHandler.save_db_config", return_value=True) as mock_save_db_config,
         ):
             await onboarding_vm.next_step()
 

@@ -725,6 +725,7 @@
     "db_saving_in_progress": "配置保存正在进行中，请稍候...",
     "db_msg_success": "连接成功",
     "db_msg_saved": "配置已保存",
+    "db_save_failed": "配置保存失败，请检查配置文件和凭据存储是否可写",
     "db_msg_not_found": "数据库不存在",
     "db_msg_not_found_create": "未找到数据库，将在保存时自动创建",
     "db_err_format": "错误",
