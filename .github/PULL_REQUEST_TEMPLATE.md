@@ -94,6 +94,7 @@ Relates to #XXX
 - [ ] 测试断言避免弱断言（裸布尔 / `Mock.assert_called*` / 仅验证异常类型 / `print` 替代断言等，判据见 `scripts/scan_weak_assertions.py`），使用精确断言
 - [ ] 所有 `# type: ignore` 均带 `[error-code]` 注释（R3 红线）
 - [ ] 所有 `# NOTE(lazy):` 标记含三要素（简化内容 / ceiling / upgrade）
+- [ ] 发布提醒：若本 PR 合并会推进 `.release-please-manifest.json` 的声明版本（即 Release PR），合并后立即在该合并提交上人工推送 `v<版本>` tag（不推则发版链不触发；日检 `release-tag-guard.yml` 会开 Issue 提醒，workflow 不自动建/推 tag）；非 Release PR 标「N/A：未推进声明版本」
 
 ## 👀 评审重点提示
 <!-- 告诉评审人重点检查模块、风险点、容易忽略的链路 -->
