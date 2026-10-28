@@ -1,0 +1,19 @@
+name: Path Gated Probe
+
+# 临时探针工作流：验证「workflow 因 paths 过滤未触发时，required check 处于 Pending」。
+# 该文件只存在于 probe/target-base 基准分支，验证完成后随探针分支一并删除。
+on:
+  pull_request:
+    branches: [probe/target-base]
+    paths:
+      - 'README.md'
+
+permissions:
+  contents: read
+
+jobs:
+  path_gated:
+    name: path_gated
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo should-not-run
