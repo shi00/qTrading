@@ -1571,6 +1571,82 @@ class TestHistoricalSyncRunDeepBranches:
         assert result is not None
 
 
+class TestHistoricalSyncBatchSystemFailurePropagation:
+    """UIR-F14-005: 主批次与重试批次都必须回检 gather 返回值，系统级异常一律传播。
+
+    旧实现仅回检主批次 `batch_results`，重试批次 `r_tasks` 的 gather 返回值被丢弃：
+    retry_one 内 `severity == "system"` 与 EngineDisposedError 的 re-raise 被 collect 后
+    静默吞没，系统级失败既不改变终态、也不阻止重试阶段水位 flush，最终仍返回 success。
+    """
+
+    @staticmethod
+    def _strategy_with_snapshot_failure(exc, *, fail_main_batch: bool):
+        ctx = make_ctx()
+        ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=["20240614"])
+        strategy = HistoricalSyncStrategy(ctx)
+        calls = {"n": 0}
+        captured: dict[str, SyncResult] = {}
+
+        async def snapshot(trade_date=None, force=False, sync_result=None, **kwargs):
+            calls["n"] += 1
+            if sync_result is not None:
+                captured["result"] = sync_result
+            if fail_main_batch:
+                raise exc
+            if calls["n"] == 1:
+                # 主批次可恢复失败 → 该日进入 failed_dates，触发后续重试批次
+                return False
+            raise exc
+
+        strategy.sync_daily_market_snapshot = AsyncMock(side_effect=snapshot)
+        return strategy, calls, captured
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc",
+        [MemoryError("simulated oom"), EngineDisposedError("engine disposed")],
+        ids=["memory_error", "engine_disposed"],
+    )
+    async def test_main_batch_system_failure_propagates(self, exc):
+        strategy, calls, _captured = self._strategy_with_snapshot_failure(exc, fail_main_batch=True)
+        with (
+            patch("utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy", return_value=1),
+            patch("utils.config_handler.ConfigHandler.get_sync_retry_count", return_value=0),
+            patch("data.sync.historical.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            with pytest.raises(type(exc)) as exc_info:
+                await strategy._run_impl(days=1)
+        assert exc_info.value is exc
+        # 系统级失败必须中断主批次，而不是被 gather 吞成普通返回值
+        assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc",
+        [MemoryError("simulated oom"), EngineDisposedError("engine disposed")],
+        ids=["memory_error", "engine_disposed"],
+    )
+    async def test_retry_batch_system_failure_propagates(self, exc):
+        strategy, calls, captured = self._strategy_with_snapshot_failure(exc, fail_main_batch=False)
+        with (
+            patch("utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy", return_value=1),
+            patch("utils.config_handler.ConfigHandler.get_sync_retry_count", return_value=2),
+            patch("data.sync.historical.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            # 修复前：重试批次异常被静默丢弃 → 返回 SyncResult(status="success")
+            with pytest.raises(type(exc)) as exc_info:
+                await strategy._run_impl(days=1)
+        # 传播的必须是子任务抛出的原始异常，而非无关错误
+        assert exc_info.value is exc
+        # 主批次失败 1 次 + 重试批次抛出 1 次，未进入第二轮重试
+        assert calls["n"] == 2
+        # EngineDisposedError 由 _run_impl 既有分支置 FAILED 后重抛（R5）；
+        # MemoryError 由 _run_impl 的 system 分支重抛，不返回 success，
+        # TaskManager 捕获后置任务终态 FAILED。
+        if isinstance(exc, EngineDisposedError):
+            assert captured["result"].status == SyncStatus.FAILED.value
+
+
 class TestHistoricalSyncRunEngineDisposedError:
     """R5 举一反三 fix: EngineDisposedError 必须 raise 让调用方感知，不可 swallow"""
 

@@ -774,7 +774,15 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     with self._tasks_lock:
                         self._active_tasks.update(r_tasks)
                     try:
-                        await gather_return_exceptions_propagating_cancel(*r_tasks)
+                        retry_results = await gather_return_exceptions_propagating_cancel(*r_tasks)
+                        # UIR-F14-005: retry_one 对 EngineDisposedError 与系统级异常
+                        # （severity==system）会 re-raise，经 gather 封装转为返回值；不回检
+                        # 将被静默丢弃——R5 传播中断、系统级失败不改变终态，且重试阶段累积的
+                        # 水位仍会在循环结束后 flush。与主批次路径同模式统一重抛，由 _run_impl
+                        # 既有异常分支接管终态（不在此 flush 水位，单调自愈）。
+                        for _raised in retry_results:
+                            if isinstance(_raised, BaseException):
+                                raise _raised
                     finally:
                         with self._tasks_lock:
                             self._active_tasks.difference_update(r_tasks)
