@@ -7,7 +7,9 @@ Create Date: 2026-09-21 00:00:00.000000
 RV-05: 关注列表无加入时价格——「关注以来收益」无法回答（added_at 是自然时间戳，
 无对应交易日定义）。新增两列在加入关注时一次性写入（IS NULL 守卫，之后只读）：
 - ``added_trade_date``：加入时对应交易日（daily_quotes 该股最新交易日）。
-- ``added_price``：该交易日复权收盘价（close/adj_factor，与 _qfq_return_pct 同口径）。
+- ``added_price``：该交易日复权基准乘积 ``close × adj_factor``（复权因子为乘子，
+  与 ``review_manager._qfq_return_pct`` 的乘积口径一致；本迁移落地时曾按倒数口径
+  ``close / adj_factor`` 写入，已由 0044 改为乘积口径并重算存量值）。
 
 存量记录两列为 NULL（表示观察起点未知，消费方按「无法计算」处理，R21 不伪造）。
 """

@@ -4,8 +4,9 @@
 - R4: asyncpg 原生查询用 $1 占位符（非 %s）
 - R8: 批量写入用 _save_upsert
 - R12/R13: 表与 DAO 已注册（由 pre-commit check_redlines.py 守护，本测试覆盖行为）
-- RV-05: add 时固化观察起点（最近交易日 + 复权收盘价 close/adj_factor），
+- RV-05: add 时固化观察起点（最近交易日 + 复权基准乘积 close × adj_factor），
   IS NULL 守卫只写一次；行情缺失保持 NULL（R21 不伪造）
+- UIR-F09-005: 复权因子按乘子（乘积）口径，与 review_manager._qfq_return_pct 一致
 """
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 
@@ -17,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.daos.watchlist_dao import WatchlistDao
+from data.persistence.review_manager import _qfq_return_pct
 
 pytestmark = pytest.mark.unit
 
@@ -30,7 +32,7 @@ def _make_dao() -> WatchlistDao:
     return dao
 
 
-def _quote_df(trade_date: datetime.date, close: float, adj: float | None) -> pd.DataFrame:
+def _quote_df(trade_date: datetime.date, close: float | None, adj: float | None) -> pd.DataFrame:
     """构造 _latest_quote 查询的返回 df（单行最近行情）。"""
     return pd.DataFrame({"trade_date": [trade_date], "close": [close], "adj_factor": [adj]})
 
@@ -68,11 +70,11 @@ class TestAddToWatchlist:
 
 
 class TestAddToWatchlistObservationOrigin:
-    """RV-05: add 时固化观察起点（只写一次守卫 + 复权口径 + R21 不伪造）。"""
+    """RV-05: add 时固化观察起点（只写一次守卫 + 复权乘积口径 + R21 不伪造）。"""
 
     @pytest.mark.asyncio
     async def test_add_pins_origin_when_quote_available(self):
-        """行情可得：固化 (最近交易日, close/adj_factor 复权价)，UPDATE 带 IS NULL 守卫。"""
+        """行情可得：固化 (最近交易日, close × adj_factor 乘积)，UPDATE 带 IS NULL 守卫。"""
         dao = _make_dao()
         dao._read_db_select.return_value = _quote_df(datetime.date(2026, 9, 19), 10.0, 2.0)
         result = await dao.add_to_watchlist("000001.SZ", "平安银行")
@@ -84,7 +86,19 @@ class TestAddToWatchlistObservationOrigin:
         params = dao._write_db.call_args.args[1]
         assert params[0] == "000001.SZ"
         assert params[1] == datetime.date(2026, 9, 19)
-        assert params[2] == pytest.approx(5.0)  # 10.0 / 2.0（复权口径同 _qfq_return_pct）
+        assert params[2] == pytest.approx(20.0)  # 10.0 × 2.0（乘子口径，非倒数 5.0）
+
+    @pytest.mark.asyncio
+    async def test_added_price_matches_qfq_return_pct_product_caliber(self):
+        """消费方用 (close_t × adj_t) / added_price − 1 与 _qfq_return_pct 数值一致。"""
+        dao = _make_dao()
+        dao._read_db_select.return_value = _quote_df(datetime.date(2026, 9, 19), 10.0, 2.0)
+        await dao.add_to_watchlist("000001.SZ", "平安银行")
+        added_price = dao._write_db.call_args.args[1][2]
+        assert added_price == pytest.approx(20.0)
+        tn_row = pd.Series({"close": 12.0, "adj_factor": 2.2})
+        expected = _qfq_return_pct(tn_row, 10.0, 2.0, has_adj_factor=True)
+        assert expected == pytest.approx((12.0 * 2.2) / added_price - 1.0)
 
     @pytest.mark.asyncio
     async def test_add_with_missing_adj_factor_pins_date_only(self):
@@ -97,14 +111,38 @@ class TestAddToWatchlistObservationOrigin:
         assert params[1] == datetime.date(2026, 9, 19)
         assert params[2] is None
 
+    @pytest.mark.parametrize("adj", [0.0, -2.0, float("nan"), float("inf")])
     @pytest.mark.asyncio
-    async def test_add_with_zero_adj_factor_pins_date_only(self):
-        """adj_factor 为 0（脏数据）：除零防御，价格 NULL。"""
+    async def test_add_with_invalid_adj_factor_pins_date_only(self, adj: float):
+        """adj_factor 为 0/负/NaN/inf（脏数据）：不写乘积，价格 NULL（R21）。"""
         dao = _make_dao()
-        dao._read_db_select.return_value = _quote_df(datetime.date(2026, 9, 19), 10.0, 0.0)
+        dao._read_db_select.return_value = _quote_df(datetime.date(2026, 9, 19), 10.0, adj)
         await dao.add_to_watchlist("000001.SZ", "平安银行")
+        assert dao._write_db.await_count == 1
         params = dao._write_db.call_args.args[1]
+        assert params[1] == datetime.date(2026, 9, 19)
         assert params[2] is None
+
+    @pytest.mark.parametrize("close", [None, float("nan"), 0.0, -5.0, float("inf")])
+    @pytest.mark.asyncio
+    async def test_add_with_invalid_close_pins_date_only(self, close: float | None):
+        """close 缺失/为 0/负/NaN/inf：不写价格（0 或负值会被下游当作合法分母，R21）。"""
+        dao = _make_dao()
+        dao._read_db_select.return_value = _quote_df(datetime.date(2026, 9, 19), close, 2.0)
+        await dao.add_to_watchlist("000001.SZ", "平安银行")
+        assert dao._write_db.await_count == 1
+        params = dao._write_db.call_args.args[1]
+        assert params[1] == datetime.date(2026, 9, 19)
+        assert params[2] is None
+
+    @pytest.mark.asyncio
+    async def test_add_large_product_is_not_clamped(self):
+        """乘积可超旧 Numeric(12,6) 上限（1e6 量级），DAO 不裁剪、不伪造（列已宽化到 N(24,6)）。"""
+        dao = _make_dao()
+        dao._read_db_select.return_value = _quote_df(datetime.date(2026, 9, 19), 2600.0, 400.0)
+        await dao.add_to_watchlist("600519.SH", "贵州茅台")
+        params = dao._write_db.call_args.args[1]
+        assert params[2] == pytest.approx(1_040_000.0)
 
     @pytest.mark.asyncio
     async def test_add_without_quote_skips_pin(self):
@@ -129,7 +167,15 @@ class TestAddToWatchlistObservationOrigin:
         await dao.add_to_watchlist("000001.SZ", "平安银行")
         params = dao._write_db.call_args.args[1]
         assert params[1] == datetime.date(2026, 9, 19)
-        assert params[2] == pytest.approx(5.0)
+        assert params[2] == pytest.approx(20.0)
+
+    @pytest.mark.parametrize("empty", [pd.DataFrame(), None])
+    @pytest.mark.asyncio
+    async def test_latest_quote_returns_none_without_rows(self, empty):
+        """空表/读取无结果：_latest_quote 返回 None（不构造假的观察起点）。"""
+        dao = _make_dao()
+        dao._read_db_select.return_value = empty
+        assert await dao._latest_quote("000001.SZ") is None
 
 
 class TestRemoveFromWatchlist:
