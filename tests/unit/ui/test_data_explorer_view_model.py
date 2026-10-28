@@ -861,6 +861,72 @@ class TestQueryDataSeverity:
         assert vm.state.is_loading is False
 
 
+class TestQueryDataFailureComposition:
+    """UIR-F13-002: 计数与读行一次性提交, 失败整次失败且不把旧结果/0 行当成功。"""
+
+    async def test_count_ok_but_rows_fail_fails_whole_query(self, vm, mock_db):
+        """count=10 成功但读行失败: 不写 total_rows=10, 清空旧行并发布可本地化错误。"""
+        vm._set_state(
+            table_columns=("ts_code",),
+            table_rows=(TableRow(values=("stale",)),),
+            total_rows=99,
+        )
+        mock_db.get_table_count.return_value = 10
+        mock_db.query_table.side_effect = RuntimeError("query timeout")
+
+        result = await vm.query_data()
+
+        assert result.empty
+        assert vm.state.total_rows == 0  # 不得把 10 行当作已加载成功
+        assert vm.state.table_rows == ()  # 旧结果不得留在「失败」态
+        assert vm.state.error_message is not None
+        assert vm.state.error_message.key == "db_err_timeout"
+        assert vm.state.is_loading is False
+
+    async def test_count_failure_fails_whole_query_without_reading_rows(self, vm, mock_db):
+        """计数失败即整次失败: 不再读行, 清空旧结果并发布错误。"""
+        vm._set_state(
+            table_columns=("ts_code",),
+            table_rows=(TableRow(values=("stale",)),),
+            total_rows=99,
+        )
+        mock_db.get_table_count.side_effect = RuntimeError("permission denied for table stock_basic")
+        result = await vm.query_data()
+
+        assert result.empty
+        mock_db.query_table.assert_not_called()
+        assert vm.state.error_message is not None
+        assert vm.state.table_rows == ()  # 旧结果不得留在「失败」态
+        assert vm.state.total_rows == 0
+
+    async def test_empty_table_is_success_not_error(self, vm, mock_db):
+        """合法空表 (count=0, 空 DataFrame) 保持成功语义, 不产生错误态。"""
+        vm._set_state(table_columns=("ts_code",), error_message=Message("db_err_timeout", {}))
+        mock_db.get_table_count.return_value = 0
+        mock_db.query_table.return_value = pd.DataFrame()
+
+        result = await vm.query_data()
+
+        assert result.empty
+        assert vm.state.total_rows == 0
+        assert vm.state.table_rows == ()
+        assert vm.state.error_message is None  # 成功查询清除了旧错误
+
+    async def test_retry_success_clears_error_and_replaces_rows(self, vm, mock_db):
+        """重试成功: 清除旧错误并写入新结果。"""
+        vm._set_state(error_message=Message("db_err_timeout", {}), table_rows=())
+        mock_db.get_table_count.return_value = 1
+        mock_db.query_table.return_value = pd.DataFrame({"ts_code": ["000001.SZ"]})
+        vm._set_state(table_columns=("ts_code",))
+
+        result = await vm.query_data()
+
+        assert len(result) == 1
+        assert vm.state.error_message is None
+        assert vm.state.total_rows == 1
+        assert vm.state.table_rows[0].values == ("000001.SZ",)
+
+
 class TestQueryCountSeverity:
     async def test_operational_error_returns_zero(self, vm, mock_db):
         """operational 严重度异常返回 0 并设置 error_message。"""
@@ -884,19 +950,20 @@ class TestQueryCountSeverity:
 
 
 class TestExportDataSeverity:
-    async def test_operational_error_returns_empty_df(self, vm, mock_db):
-        """operational 严重度异常返回空 DataFrame 并设置 error_message。"""
+    async def test_operational_error_propagates(self, vm, mock_db):
+        """UIR-F13-002: operational 异常必须向上传播, 不得返回空 DataFrame 冒充「无可导出数据」。"""
         mock_db.query_table.side_effect = RuntimeError("unknown boom")
-        result = await vm.export_data()
-        assert result.empty
-        assert vm.state.error_message is not None
+        with pytest.raises(RuntimeError, match="unknown boom"):
+            await vm.export_data()
+        # 导出命令不改变表格区状态 (失败由 View toast 反馈)
+        assert vm.state.error_message is None
 
-    async def test_recoverable_error_returns_empty_df(self, vm, mock_db):
-        """recoverable 严重度异常(timeout)返回空 DataFrame 并设置 error_message。"""
+    async def test_recoverable_error_propagates(self, vm, mock_db):
+        """UIR-F13-002: recoverable 异常(timeout)同样向上传播。"""
         mock_db.query_table.side_effect = RuntimeError("query timeout")
-        result = await vm.export_data()
-        assert result.empty
-        assert vm.state.error_message is not None
+        with pytest.raises(RuntimeError, match="query timeout"):
+            await vm.export_data()
+        assert vm.state.error_message is None
 
     async def test_system_error_propagates(self, vm, mock_db):
         """system 严重度异常(PermissionError)必须抛出。"""
