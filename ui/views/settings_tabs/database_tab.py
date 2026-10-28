@@ -34,6 +34,22 @@ from utils.config.db import DatabaseMode, DatabaseModeResolution
 
 logger = logging.getLogger(__name__)
 
+# UIR-F15-001：模式来源 → i18n key 的显式字面量映射。
+# 不用 f-string 拼接：AST 静态扫描（i18n 死键门禁）只能识别字面量引用，动态拼接会被
+# 判定为死键；且映射集中后，locale 键被删改时可在同一处核对（未知来源回退裸来源串，
+# 与改造前行为一致）。
+_MODE_SOURCE_I18N_KEYS: dict[str, str] = {
+    "env": "settings_db_mode_source_env",
+    "config": "settings_db_mode_source_config",
+    "fallback_standard_variant": "settings_db_mode_source_fallback_standard_variant",
+}
+
+
+def _mode_source_label(source: str) -> str:
+    """把模式来源标识翻译为可读文案；未知来源回退为原始标识（不伪造文案）。"""
+    key = _MODE_SOURCE_I18N_KEYS.get(source)
+    return I18n.get(key) if key is not None else source
+
 
 def _get_page() -> ft.Page | None:
     """安全获取 ``ft.context.page``, 未在渲染上下文时返回 None。"""
@@ -145,7 +161,7 @@ def DatabaseTab(show_snack_callback: Callable) -> ft.Container:
             I18n.get(
                 "settings_db_mode_current",
                 mode=_mode_label(resolution.mode),
-                source=I18n.get(f"settings_db_mode_source_{resolution.source}", resolution.source),
+                source=_mode_source_label(resolution.source),
             ),
             size=AppStyles.FONT_SIZE_BODY,
             color=AppColors.TEXT_PRIMARY,

@@ -411,3 +411,41 @@ class TestDoSaveShowAdvancedExceptionPath:
             # R2 红线: CancelledError 必须传播, 不能被 except Exception 吞没
             with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线测试仅验证异常传播, 无其他状态可断言
                 await handler(*handler_args)
+
+
+class TestModeSourceLabel:
+    """UIR-F15-001: 模式来源文案经字面量 key 映射（i18n 死键门禁可静态识别）。"""
+
+    def test_known_sources_pass_literal_i18n_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """三个已知来源必须各自命中对应 key 字面量，而非 f-string 拼接。"""
+        from ui.views.settings_tabs import database_tab as mod
+
+        called_keys: list[str] = []
+
+        def fake_get(key: str, *args: Any, **kwargs: Any) -> str:
+            called_keys.append(key)
+            return f"T:{key}"
+
+        monkeypatch.setattr(mod.I18n, "get", fake_get)
+
+        assert mod._mode_source_label("env") == "T:settings_db_mode_source_env"
+        assert mod._mode_source_label("config") == "T:settings_db_mode_source_config"
+        assert mod._mode_source_label("fallback_standard_variant") == (
+            "T:settings_db_mode_source_fallback_standard_variant"
+        )
+        assert called_keys == [
+            "settings_db_mode_source_env",
+            "settings_db_mode_source_config",
+            "settings_db_mode_source_fallback_standard_variant",
+        ]
+
+    def test_unknown_source_falls_back_to_raw_identifier(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """未知来源不得伪造文案，回退为原始标识且不查询 i18n。"""
+        from ui.views.settings_tabs import database_tab as mod
+
+        def fail_get(key: str, *args: Any, **kwargs: Any) -> str:
+            raise AssertionError(f"未知来源不应查询 i18n，实际查询了 {key}")
+
+        monkeypatch.setattr(mod.I18n, "get", fail_get)
+
+        assert mod._mode_source_label("future_value") == "future_value"
