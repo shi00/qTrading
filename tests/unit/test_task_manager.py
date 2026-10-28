@@ -3,6 +3,8 @@ import datetime
 import inspect
 import logging
 import threading
+from types import SimpleNamespace
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -1471,6 +1473,202 @@ class TestTaskManagerClearFinishedDb:
             await mgr._clear_finished_db(["id1"])  # 不应抛异常
             mock_disposed.assert_called_once_with(mock_engine)
             mock_engine.begin.assert_not_called()
+
+
+class _BarrierFakeDb:
+    """UIR-F12-002 最小 task_history 替身：记录 upsert/DELETE 语义与提交顺序。"""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, str] = {}
+        self.ops: list[tuple[str, object]] = []
+        self.gate = asyncio.Event()  # 闸门：延迟目标 ID 的 upsert 进入提交阶段
+        self.write_started = asyncio.Event()
+        self.fail_delete = False
+        self.engine: object = None
+
+    async def write_db(self, sql, params, **_kwargs):
+        if sql.startswith("INSERT INTO task_history"):
+            task_id = params[0]
+            self.write_started.set()
+            await self.gate.wait()
+            self.rows[task_id] = params[3]
+            self.ops.append(("upsert", task_id))
+
+    async def read_db(self, _sql, *_args, **_kwargs):
+        return pd.DataFrame([{"id": tid, "status": status} for tid, status in self.rows.items()])
+
+
+class _BarrierFakeConn:
+    def __init__(self, db: _BarrierFakeDb) -> None:
+        self._db = db
+
+    async def execute(self, targets):
+        ids = tuple(targets)
+        if self._db.fail_delete:
+            raise RuntimeError("delete failed")
+        self._db.ops.append(("delete", ids))
+        for tid in ids:
+            self._db.rows.pop(tid, None)
+
+
+class _BarrierFakeBegin:
+    def __init__(self, db: _BarrierFakeDb) -> None:
+        self._db = db
+
+    async def __aenter__(self):
+        return _BarrierFakeConn(self._db)
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+class _BarrierFakeEngine:
+    def __init__(self, db: _BarrierFakeDb) -> None:
+        self._db = db
+
+    def begin(self):
+        return _BarrierFakeBegin(self._db)
+
+
+def _patch_task_history_ids():
+    """把 TaskHistory 的 delete 语句替换为「目标 ID 元组」，供假 engine 消费。"""
+    fake_th = SimpleNamespace(
+        __table__=SimpleNamespace(
+            c=SimpleNamespace(id=SimpleNamespace(in_=lambda ids: tuple(ids))),
+            delete=lambda: SimpleNamespace(where=lambda cond: cond),
+        )
+    )
+    return patch("data.persistence.models.TaskHistory", fake_th)
+
+
+class TestTaskManagerDeletionBarrier:
+    """UIR-F12-002: 清理屏障——已清理 ID 的迟到/在途快照不得重建 DB 行。"""
+
+    @pytest.mark.asyncio
+    async def test_delayed_terminal_upsert_cannot_resurrect_after_clear(self):
+        """Given 同 ID 终态 upsert 被闸门延迟，When 清理并释放闸门，Then 零行且重载无此 ID。"""
+        mgr = TaskManager()
+        mgr._db_ready = True
+        mgr._loop = asyncio.get_running_loop()
+        db = _BarrierFakeDb()
+        db.engine = _BarrierFakeEngine(db)
+
+        done = AppTask(name="done", status=TaskStatus.COMPLETED)
+        active = AppTask(name="active", status=TaskStatus.RUNNING)
+        mgr._tasks = {done.id: done, active.id: active}
+        db.rows[done.id] = "RUNNING"  # 清理前该 ID 已有落库行
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            _patch_task_history_ids(),
+        ):
+            mock_cm._instance = db
+            mock_cm.return_value = db
+            inflight = asyncio.create_task(
+                mgr._persist_snapshot(
+                    (done.id, "n", "t", "COMPLETED", 1.0, "", "", None, None, None, None, None, None, None, 1)
+                )
+            )
+            await db.write_started.wait()
+
+            delete_tasks: list[asyncio.Task] = []
+
+            def _run_now(coro, on_drop=None):
+                delete_tasks.append(asyncio.create_task(coro))
+                return True
+
+            with patch.object(mgr, "_schedule_coro", side_effect=_run_now):
+                mgr._clear_finished_impl()
+            assert done.id not in mgr._tasks
+            assert active.id in mgr._tasks
+            await asyncio.sleep(0.02)
+            # 在途 upsert 未结束前 DELETE 不得提交（否则旧行先删后写、复活）
+            assert db.rows[done.id] == "RUNNING"
+
+            db.gate.set()
+            await inflight
+            await asyncio.gather(*delete_tasks)
+
+        # 提交顺序：先 upsert 后 delete；最终零行；活动任务未被删
+        assert db.ops[0] == ("upsert", done.id)
+        assert db.ops[1] == ("delete", (done.id,))
+        assert done.id not in db.rows
+        assert active.id not in mgr._tombstones
+
+        # 迟到快照（如 CANCELLED runner 收尾）同样被墓碑拒绝
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            _patch_task_history_ids(),
+        ):
+            mock_cm._instance = db
+            await mgr._persist_snapshot(
+                (done.id, "n", "t", "CANCELLED", 0.5, "", "", None, None, None, None, None, None, None, 2)
+            )
+        assert done.id not in db.rows
+
+        # 重新加载（init_db）仍无该 ID
+        TaskManager._reset_singleton()
+        reloaded = TaskManager()
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm2:
+            mock_cm2._instance = db
+            mock_cm2.return_value = db
+            await reloaded.init_db()
+        assert all(h.id != done.id for h in reloaded._history)
+
+    @pytest.mark.asyncio
+    async def test_active_task_id_is_not_deleted(self):
+        """清理只删除终态 ID，活动任务 ID 不进墓碑也不进 DELETE 列表。"""
+        mgr = TaskManager()
+        mgr._loop = asyncio.get_running_loop()
+        active = AppTask(name="active", status=TaskStatus.RUNNING)
+        done = AppTask(name="done", status=TaskStatus.COMPLETED)
+        mgr._tasks = {active.id: active, done.id: done}
+
+        recorded: list[str] = []
+
+        async def _fake_clear(ids):
+            recorded.extend(ids)
+            return True
+
+        with patch.object(mgr, "_clear_finished_db", _fake_clear):
+            mgr._clear_finished_impl()
+            await asyncio.sleep(0.05)
+
+        assert recorded == [done.id]
+        assert active.id in mgr._tasks
+        assert active.id not in mgr._tombstones
+
+    @pytest.mark.asyncio
+    async def test_delete_failure_is_not_reported_as_success_and_is_retried(self):
+        """DELETE 失败返回 False 并保留待重试项；恢复后同一 ID 可再次清理成功。"""
+        mgr = TaskManager()
+        db = _BarrierFakeDb()
+        db.engine = _BarrierFakeEngine(db)
+        db.rows["t1"] = "COMPLETED"
+        db.fail_delete = True
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            _patch_task_history_ids(),
+        ):
+            mock_cm.return_value = db
+            result = await mgr._clear_finished_db(["t1"])
+
+        assert result is False  # 不得当作持久清理成功
+        assert "t1" in mgr._pending_db_deletions
+        assert db.rows["t1"] == "COMPLETED"
+
+        db.fail_delete = False
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            _patch_task_history_ids(),
+        ):
+            mock_cm.return_value = db
+            result = await mgr._clear_finished_db(["t1"])
+
+        assert result is True
+        assert "t1" not in mgr._pending_db_deletions
+        assert "t1" not in db.rows
 
 
 class TestTaskManagerQueuePersistSnapshot:
