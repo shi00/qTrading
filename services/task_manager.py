@@ -235,7 +235,9 @@ class TaskManager:
                 return
 
             self._tasks: dict[str, AppTask] = {}
-            self._active_keys: set[str] = set()  # Thread-safe dedup for unique_key
+            # UIR-F12-001: unique_key → 持有该占位的 task_id。只判「键是否存在」会让旧任务
+            # （A 取消或被清理）的迟到释放抹掉同键新任务（B）的占位，故释放前必须核对 owner。
+            self._active_keys: dict[str, str] = {}
             self._active_keys_lock = threading.Lock()
             self._finished_order: OrderedDict[str, datetime.datetime] = OrderedDict()
             self._subscribers: list[Callable[[list[AppTask]], None]] = []
@@ -267,6 +269,19 @@ class TaskManager:
     def _get_active_task_count(self) -> int:
         """Count active tasks that are either running or queued (holding or waiting for semaphore)."""
         return sum(1 for t in self._tasks.values() if t.status in (TaskStatus.RUNNING, TaskStatus.QUEUED))
+
+    def _release_active_key(self, unique_key: str | None, task_id: str) -> None:
+        """UIR-F12-001: 仅当 unique_key 的持有者仍是 task_id 时释放占位。
+
+        占位读取与删除在同一线程锁内完成：旧任务 A 取消/清理/runner 收尾时，同键新任务 B
+        可能已接管占位，无条件 discard 会把 B 的占位抹掉，使第三次同键提交被接纳。owner
+        不匹配即说明该占位不属于当前任务，保持不动。
+        """
+        if not unique_key:
+            return
+        with self._active_keys_lock:
+            if self._active_keys.get(unique_key) == task_id:
+                del self._active_keys[unique_key]
 
     @contextlib.asynccontextmanager
     async def _acquire_task_slot(self, task: AppTask):
@@ -449,7 +464,19 @@ class TaskManager:
 
         D7-5: ``exclusive_group`` 指定共享互斥分组（如 ``EXCLUSIVE_GROUP_MARKET_SYNC``），
         同组任务串行执行、跨组与未分组任务不受影响；仅进程内有效，不持久化。
+
+        UIR-F12-001: ``_active_keys`` 记录持有占位的 task_id；提交时登记本任务为 owner，
+        释放时由 ``_release_active_key`` 核对 owner，避免旧任务的迟到清理释放新任务占位。
         """
+        task = AppTask(name=name, task_type=task_type, cancellable=cancellable)
+        task.unique_key = unique_key
+        task.factory_key = factory_key
+        task.exclusive_group = exclusive_group
+        task._coroutine_gen = lambda t=task: coroutine_factory(task_id=t.id, **kwargs)
+        # Phase 6.2: Store original factory + kwargs for retry_task (FR-UX-006)
+        task._coroutine_factory = coroutine_factory
+        task._coroutine_kwargs = dict(kwargs)
+
         # Synchronous dedup via _active_keys (thread-safe, O(1))
         if unique_key:
             with self._active_keys_lock:
@@ -460,26 +487,15 @@ class TaskManager:
                         unique_key,
                     )
                     return None
-                self._active_keys.add(unique_key)
-
-        task = AppTask(name=name, task_type=task_type, cancellable=cancellable)
-        task.unique_key = unique_key
-        task.factory_key = factory_key
-        task.exclusive_group = exclusive_group
-        task._coroutine_gen = lambda t=task: coroutine_factory(task_id=t.id, **kwargs)
-        # Phase 6.2: Store original factory + kwargs for retry_task (FR-UX-006)
-        task._coroutine_factory = coroutine_factory
-        task._coroutine_kwargs = dict(kwargs)
+                self._active_keys[unique_key] = task.id
 
         from utils.correlation import get_correlation_id as _get_cid
 
         task.correlation_id = _get_cid()
 
         if not (self._loop and self._loop.is_running()):
-            # Rollback dedup key
-            if unique_key:
-                with self._active_keys_lock:
-                    self._active_keys.discard(unique_key)
+            # Rollback dedup key (only if this task still owns it)
+            self._release_active_key(unique_key, task.id)
             logger.error(
                 "[TaskManager] Cannot submit task '%s': no event loop captured.",
                 name,
@@ -501,9 +517,7 @@ class TaskManager:
         if task.status == TaskStatus.CANCELLED:
             logger.debug("[TaskManager] Task [%s] already cancelled, skipping launch", task.id)
             # Release dedup key since _task_runner won't run for this task
-            if task.unique_key:
-                with self._active_keys_lock:
-                    self._active_keys.discard(task.unique_key)
+            self._release_active_key(task.unique_key, task.id)
             return
 
         # Note: _cancel_event will be created lazily in _task_runner.
@@ -623,10 +637,8 @@ class TaskManager:
         task.status = TaskStatus.CANCELLED
         task.description = Message("task_cancelled_desc")
 
-        # Release dedup key so same unique_key can be resubmitted
-        if task.unique_key:
-            with self._active_keys_lock:
-                self._active_keys.discard(task.unique_key)
+        # Release dedup key so same unique_key can be resubmitted (owner 校验防止误释放新任务占位)
+        self._release_active_key(task.unique_key, task.id)
 
         if task._cancel_event:
             task._cancel_event.set()
@@ -670,7 +682,8 @@ class TaskManager:
             return None
         # Reuse original unique_key (LIFE-01): blocks a concurrent re-push from another
         # submission path that shares the same key (e.g. data-source page "开始同步").
-        # safe: the terminal task's key is no longer in _active_keys (released on finish).
+        # UIR-F12-001: 原任务的键只在其为 owner 时才被释放，若同键已被其它活动任务持有，
+        # submit_task 会判为重复并返回 None（去重契约不被旧任务的迟到清理破坏）。
         return self.submit_task(
             name=task.name,
             task_type=task.task_type,
@@ -689,10 +702,8 @@ class TaskManager:
         to_delete = [tid for tid, t in self._tasks.items() if t.status in TERMINAL_STATUSES]
         for tid in to_delete:
             task = self._tasks[tid]
-            # Safety-net: release dedup key if not already discarded
-            if task.unique_key:
-                with self._active_keys_lock:
-                    self._active_keys.discard(task.unique_key)
+            # Safety-net: release dedup key if this task still owns it (UIR-F12-001)
+            self._release_active_key(task.unique_key, task.id)
             del self._tasks[tid]
             # Release finished-order slot if still tracked (stale keys would
             # otherwise falsely occupy the _MAX_FINISHED_HISTORY cap)
@@ -727,10 +738,8 @@ class TaskManager:
             task.status = TaskStatus.CANCELLED
             task.description = Message("task_cancelled_desc")
             task.completed_at = get_now()
-            # Release dedup key so same unique_key can be resubmitted
-            if task.unique_key:
-                with self._active_keys_lock:
-                    self._active_keys.discard(task.unique_key)
+            # Release dedup key so same unique_key can be resubmitted (owner 校验)
+            self._release_active_key(task.unique_key, task.id)
             if task._cancel_event:
                 task._cancel_event.set()
             if task._asyncio_task and not task._asyncio_task.done():
@@ -781,7 +790,8 @@ class TaskManager:
 
         # Clear any keys from tasks submitted via call_soon_threadsafe but not
         # yet enqueued (shutdown race window). Safe since no new submissions
-        # can arrive after this point.
+        # can arrive after this point. UIR-F12-001: 这是唯一的无条件清空点（停机屏障），
+        # 其余释放路径均经 _release_active_key 的 owner 校验。
         with self._active_keys_lock:
             self._active_keys.clear()
 
@@ -919,10 +929,8 @@ class TaskManager:
             task._asyncio_task = None
             if task.completed_at is None:
                 task.completed_at = get_now()
-            # Release dedup key so same unique_key can be resubmitted
-            if task.unique_key:
-                with self._active_keys_lock:
-                    self._active_keys.discard(task.unique_key)
+            # Release dedup key so same unique_key can be resubmitted (owner 校验，UIR-F12-001)
+            self._release_active_key(task.unique_key, task.id)
             self._persist_task(task)
             self._notify_subscribers()
             self._evict_on_complete(task.id)
