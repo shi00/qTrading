@@ -143,26 +143,56 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const title = `Flet nightly compatibility check failed (${context.runId})`;
-            // 查找现有 open issue 同标题，避免重复创建
-            const existing = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              per_page: 100
-            });
-            const found = existing.data.find(issue => issue.title === title);
-            if (found) {
-              core.info(`Issue already exists: ${found.html_url}`);
-              return;
-            }
+            // 去重键 = 稳定标题（不含 runId）：持续故障只保留一个待办 Issue，后续 run 追加评论。
+            // 本 workflow 只有一个失败信号（唯一 job flet-compatibility-check 的 failure()），
+            // 故单一标题即可区分失败类别；若将来拆出多个 job / 多个失败类别，必须把类别并入标题，
+            // 否则不同类别会被错误地合并到同一 Issue。
+            const STABLE_TITLE = 'Flet nightly compatibility check failed';
+            // 去重键只用标题、不叠加 label：仓库未保证预置专用 label，向 create 传未知 label
+            // 可能被忽略或报错，会使去重键静默失效；本 workflow 只有一个失败信号，稳定标题足以唯一标识。
+            // 兼容历史标题 `... failed (<runId>)`：旧逻辑按 run 建单留下的 open Issue 仍能命中，
+            // 无需人工收口；新逻辑一律创建并匹配不带 runId 的稳定标题。
+            const TITLE_PATTERN = /^Flet nightly compatibility check failed( \(\d+\))?$/;
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             // 从 pyproject.toml 读取 pinned flet 版本
             const fs = require('fs');
-            const pyproject = fs.readFileSync('pyproject.toml', 'utf8');
-            const match = pyproject.match(/["']flet==([^"']+)["']/);
-            const fletVersion = match ? match[1] : 'unknown';
-            const body = `## Flet Nightly Compatibility Check Failed
+            let fletVersion = 'unknown';
+            try {
+              const pyproject = fs.readFileSync('pyproject.toml', 'utf8');
+              const match = pyproject.match(/["']flet==([^"']+)["']/);
+              if (match) {
+                fletVersion = match[1];
+              }
+            } catch (error) {
+              core.warning(`Cannot read pinned flet version from pyproject.toml: ${error.message}`);
+            }
+            const runLine = `- Run: ${runUrl} (trigger: \`${context.eventName}\`, commit: \`${context.sha}\`, pinned: \`flet==${fletVersion}\`)`;
+            try {
+              // 分页遍历全部 open issue（issues 接口会返回 PR，必须排除）；
+              // 不能只取第一页 100 条，否则 open issue 超过 100 时去重失效。
+              const openIssues = await github.paginate(
+                github.rest.issues.listForRepo.endpoint.merge({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  state: 'open',
+                  per_page: 100
+                })
+              );
+              const found = openIssues.find(
+                issue => !issue.pull_request && TITLE_PATTERN.test(issue.title)
+              );
+              // 只对 open Issue 去重：Issue 被人工关闭后再次失败按新建处理，保留人工关闭语义（不自动重开）。
+              if (found) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: found.number,
+                  body: `Another nightly run failed:\n\n${runLine}\n\nSee the run log for which step failed.`
+                });
+                core.info(`Appended run record to existing issue: ${found.html_url}`);
+                return;
+              }
+              const body = `## Flet Nightly Compatibility Check Failed
 
             **Workflow run**: ${runUrl}
             **Triggered by**: ${context.eventName}
@@ -174,11 +204,18 @@ jobs:
 
             ### Context
             This nightly job runs contract tests (anchor unit + screener anchor smoke) and one anchor E2E (navigation) to guard Flet compatibility before minor/patch upgrade candidates arrive.
+
+            ### Subsequent failures
+            Later nightly runs failing for the same reason are appended to this issue as comments instead of opening new issues. If this issue is closed, the next failing run opens a new one.
             `;
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: title,
-              body: body
-            });
-            core.info(`Created issue: ${title}`);
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: STABLE_TITLE,
+                body: body
+              });
+              core.info(`Created issue: ${created.data.html_url}`);
+            } catch (error) {
+              // 建单是排障辅助动作：失败不得改变 workflow 结论，但必须留痕（不得静默吞掉）。
+              core.warning(`Failed to create/update nightly failure issue: ${error.message}`);
+            }
