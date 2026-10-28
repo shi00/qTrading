@@ -1661,6 +1661,15 @@ class TestCacheManagerDelegations:
         assert result == 100
 
     @pytest.mark.asyncio
+    async def test_get_concept_count_propagates_engine_disposed(self):
+        """UIR-F15-004：CacheManager 只转发，不得把生命周期故障改写成 COUNT=0。"""
+        mgr = self._make_mgr()
+        mgr.stock_dao.get_concept_count = AsyncMock(side_effect=EngineDisposedError("Engine disposed, read rejected."))
+        with pytest.raises(EngineDisposedError, match="Engine disposed, read rejected\\."):
+            await mgr.get_concept_count()
+        mgr.stock_dao.get_concept_count.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
     async def test_get_incomplete_financial_stocks(self):
         mgr = self._make_mgr()
         mgr.financial_dao.get_incomplete_financial_stocks = AsyncMock(return_value=set())

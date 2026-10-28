@@ -443,9 +443,41 @@ class TestGetConceptCount:
 
     @pytest.mark.asyncio
     async def test_exception(self):
+        """普通 DB 异常仍降级为 0（既有契约），但生命周期故障不得走此分支（见下）。"""
         dao = _make_dao()
         dao._read_db = AsyncMock(side_effect=Exception("db error"))
         assert await dao.get_concept_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_zero_count_is_zero(self):
+        """合法 COUNT=0（空表）必须返回 0，不得抛异常。"""
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"cnt": [0]}))
+        assert await dao.get_concept_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_disposed_engine_propagates(self):
+        """UIR-F15-004 / R5：引擎已释放时 EngineDisposedError 必须原样传播。
+
+        Given 已标记 disposed 的注入 engine；
+        When 经真实 BaseDao._read_db 守卫调用 get_concept_count；
+        Then 原异常传播，且不得伪造 COUNT=0、不得建立连接。
+        """
+        from data.persistence import engine_provider
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        engine_provider.reset_engine_provider()
+        mock_engine = MagicMock()
+        dao = StockDao(mock_engine)
+        engine_provider.set_engine(mock_engine)
+        engine_provider.mark_disposed(True)
+        try:
+            with pytest.raises(EngineDisposedError, match="Engine disposed"):
+                await dao.get_concept_count()
+        finally:
+            engine_provider.reset_engine_provider()
+
+        mock_engine.connect.assert_not_called()
 
 
 class TestSearchStocks:
