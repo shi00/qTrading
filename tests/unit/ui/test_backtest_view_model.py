@@ -15,13 +15,16 @@ import pytest
 from data.constants import DEFAULT_BENCHMARK_INDEX
 from services.task_manager import TaskManager
 from strategies.backtest.config import BacktestConfig, DataWarning
+from strategies.backtest.engine import VectorBacktestEngine
 from ui.viewmodels import Message
 from ui.viewmodels.backtest_view_model import (
     BacktestState,
     BacktestViewModel,
     TradeRow,
     _build_benchmark_curve,
+    _optional_ratio,
     _to_date_strings,
+    _to_period_stats_rows,
     consume_pending_prefill,
     set_pending_prefill,
 )
@@ -1296,6 +1299,91 @@ class TestBacktestViewModelRunBacktest:
         # F3-11: 失败路径显式终态 progress=0.0（清空避免 UI 残留文案）
         assert vm.state.progress == 0.0
         assert vm.state.progress_message is None
+
+    # --- UIR-F11-003: 月表缺失值不得在 VM 映射时伪装成 0 ---
+
+    @staticmethod
+    def _engine_for_period_stats() -> VectorBacktestEngine:
+        """构造仅用于 _calc_period_stats/_calc_benchmark_returns 的引擎（不启动回测）。"""
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 31))
+        return engine
+
+    def test_period_stats_rows_keep_none_benchmark_and_excess(self):
+        """Given monthly=.1、benchmark/excess=None → state 两项保持 None（不填 0）。"""
+        period_df = pl.DataFrame(
+            {
+                "year_month": ["2024-01"],
+                "monthly_return": [0.1],
+                "benchmark_return": [None],
+                "excess_return": [None],
+            },
+            schema_overrides={"benchmark_return": pl.Float64, "excess_return": pl.Float64},
+        )
+
+        rows = _to_period_stats_rows(period_df)
+
+        assert rows == (("2024-01", 0.1, None, None),)
+
+    def test_period_stats_rows_keep_real_zero(self):
+        """基准/超额真实为 0 → 映射仍为 0.0（不得与缺失混淆）。"""
+        period_df = pl.DataFrame(
+            {
+                "year_month": ["2024-01"],
+                "monthly_return": [0.0],
+                "benchmark_return": [0.0],
+                "excess_return": [0.0],
+            }
+        )
+
+        rows = _to_period_stats_rows(period_df)
+
+        assert rows == (("2024-01", 0.0, 0.0, 0.0),)
+        assert all(v is not None for v in rows[0][1:])
+
+    def test_optional_ratio_rejects_non_finite(self):
+        """NaN/inf 视为未测量 → None；有效数值与 0 原样保留。"""
+        assert _optional_ratio(None) is None
+        assert _optional_ratio(float("nan")) is None
+        assert _optional_ratio(float("inf")) is None
+        assert _optional_ratio("bad") is None
+        assert _optional_ratio(0.0) == 0.0
+        assert _optional_ratio(0.25) == pytest.approx(0.25)
+
+    def test_period_stats_rows_old_history_missing_columns(self):
+        """旧历史缺 benchmark/excess 列 → None（不得因 r.get 默认 0 伪装零收益）。"""
+        period_df = pl.DataFrame({"year_month": ["2024-01"], "monthly_return": [0.1]})
+
+        rows = _to_period_stats_rows(period_df)
+
+        assert rows == (("2024-01", 0.1, None, None),)
+
+    @pytest.mark.asyncio
+    async def test_engine_missing_benchmark_month_survives_to_state_with_warning(self):
+        """真实引擎整月基准缺失 → 月表 None 贯穿到 state，且全局告警仍为 unreliable。"""
+        engine = self._engine_for_period_stats()
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        bench_returns, warning = engine._calc_benchmark_returns(pl.DataFrame(), trade_dates)
+        assert warning is not None
+        assert warning.warning_type == "benchmark_data_absent"
+
+        period_df = engine._calc_period_stats(
+            pl.Series([1.0, 1.05]),
+            pl.Series([0.0, 0.05]),
+            bench_returns,
+            trade_dates,
+        )
+        result = self._result_with(period_stats=period_df, data_warnings=(warning,))
+
+        vm = await self._exec_backtest_with_strategy(MagicMock(supports_ai=False), result=result)
+
+        year_month, monthly, bench, excess = vm.state.period_stats[0]
+        assert year_month == "2024-01"
+        assert monthly == pytest.approx(0.05)
+        assert bench is None, "整月基准缺失不得在 VM 映射时变为 0.0"
+        assert excess is None
+        assert vm.state.credibility_level == "unreliable"
+        assert Message("backtest_warn_data_quality", {"count": 1}) in vm.state.warnings
 
 
 class TestBacktestViewModelCoverageGaps:
