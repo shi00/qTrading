@@ -3623,6 +3623,7 @@ _REPORT_FINDING_SHARED_IDS: frozenset[str] = frozenset(
         "UX-004",
         "UX-005",
         "UX-006",
+        "UX-007",
         "UX-02",
         "UX-03",
         "UX-08",
