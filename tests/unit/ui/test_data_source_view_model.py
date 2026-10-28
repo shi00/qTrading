@@ -770,6 +770,35 @@ class TestDataSourceViewModelInitHistorical:
 
         assert any(s.init_sync_final_status == TaskStatus.CANCELLED for s in snapshots)
 
+    async def test_cancel_then_resubmit_reaches_completed(self, bound_vm, snapshots, mock_processor, mock_task_manager):
+        """UIR-F14-006: 取消（任务中心 CANCELLED）后同一 VM 重提，终态须为 COMPLETED，
+        旧轮取消信号不得让新一轮被误判取消。"""
+        mock_processor.initialize_system = AsyncMock(
+            side_effect=asyncio.CancelledError("task cancelled by user (initialize_system)")
+        )
+        bound_vm.execute_init_historical_data()
+        factory1 = _capture_coroutine_factory(mock_task_manager.submit_task)
+        with pytest.raises(asyncio.CancelledError, match="initialize_system"):
+            await factory1(task_id="task_123")
+
+        # 任务中心广播终止态：CANCELLED
+        task = MagicMock()
+        task.id = "task_123"
+        task.status = TaskStatus.CANCELLED
+        bound_vm.handle_task_update([task])
+        assert bound_vm.state.init_sync_final_status == TaskStatus.CANCELLED
+        assert bound_vm.state.is_syncing is False
+
+        # 同 VM 再次提交 → COMPLETED
+        mock_processor.initialize_system = AsyncMock(return_value={"success": True})
+        mock_task_manager.submit_task.return_value = "task_456"
+        bound_vm.execute_init_historical_data()
+        factory2 = _capture_coroutine_factory(mock_task_manager.submit_task)
+        await factory2(task_id="task_456")
+
+        assert bound_vm.state.init_sync_final_status == TaskStatus.COMPLETED
+        assert bound_vm.state.is_syncing is False
+
     async def test_init_none_report_raises_init_sync_error(
         self, bound_vm, snapshots, mock_processor, mock_task_manager
     ):

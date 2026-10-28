@@ -512,12 +512,17 @@ class TestHistoricalSyncRunExtended:
 
     @pytest.mark.asyncio
     async def test_run_cancelled_flag_after_success(self):
+        """轮内收到取消（UIR-F14-006：新一轮入口会复位上一轮遗留标志，故须在轮内设置），
+        即使同步体已跑完，轮末仍须把终态降级为 cancelled。"""
         ctx = make_ctx()
         strategy = HistoricalSyncStrategy(ctx)
-        with patch.object(strategy, "_run_historical_sync"):
+
+        async def _flag_cancelled_mid_round(*args, **kwargs):
             strategy._cancelled = True
+
+        with patch.object(strategy, "_run_historical_sync", side_effect=_flag_cancelled_mid_round):
             result = await strategy.run(days=5)
-            assert result.status == "cancelled"
+        assert result.status == "cancelled"
 
     @pytest.mark.asyncio
     async def test_run_quality_scores_with_issues(self):
@@ -1713,12 +1718,20 @@ class TestSyncDailyMarketSnapshotCancellation:
     @pytest.mark.asyncio
     async def test_shutdown_at_entry_returns_false(self):
         """入口检查取消信号，返回 False，不执行任何 IO；
-        UIR-F14-001：并向调用方 SyncResult 标记 cancelled，is_complete=False（取消不记成功）。"""
+        UIR-F14-001：并向调用方 SyncResult 标记 cancelled，is_complete=False（取消不记成功）。
+
+        UIR-F14-006：取消信号只在其所属轮次内有效，独立调用会复位上一轮遗留状态；故本
+        用例显式登记活动轮次（等价 run 内部经 sync_one_day 调用）后再取消，验证入口拦截。
+        """
         ctx = make_ctx()
         strategy = HistoricalSyncStrategy(ctx)
-        strategy._shutdown_event.set()
-        sr = SyncResult()
-        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        strategy._begin_execution_round()
+        try:
+            strategy.cancel()
+            sr = SyncResult()
+            result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        finally:
+            strategy._end_execution_round()
         assert result is False
         ctx.api.get_daily_quotes.assert_not_awaited()
         assert sr.status == SyncStatus.CANCELLED.value
@@ -2168,3 +2181,73 @@ class TestHistoricalSyncEmptyDays:
             by_table[call.args[0]] = call.args[1]
         assert by_table["moneyflow_daily"] == [datetime.date(2024, 6, 14)]
         assert by_table["northbound_holding"] == [datetime.date(2024, 6, 14)]
+
+
+class TestHistoricalSyncCancellationRound:
+    """UIR-F14-006：取消信号只对发起它的那一轮有效。
+
+    `DataProcessor.request_cancel` 会对全部策略置 `_cancelled=True`，若同实例下一轮
+    不复位，取消后再次初始化会在首批 `_check_cancelled` 立即返回 cancelled，行情不再
+    补抓。以下用例均使用真实 `cancel()`（不 mock strategy.cancel），验证轮次归属判定。
+    """
+
+    @pytest.mark.asyncio
+    async def test_new_round_after_previous_cancelled_refetches_once(self):
+        """Given 同一 historical 实例已被取消且旧轮已退出（仅一个未缓存日期），
+        When 再次初始化，Then 该日抓取恰好一次且不因旧 `_cancelled` 被判 cancelled。"""
+        ctx = make_ctx()
+        ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=["20240614"])
+        ctx.cache.quote_dao.check_data_exists = AsyncMock(return_value=False)
+        strategy = HistoricalSyncStrategy(ctx)
+
+        strategy.cancel()  # 真实取消：等价 request_cancel 后旧轮次已退出
+        assert strategy._cancelled is True
+
+        result = await strategy.run(days=1)
+
+        assert result.status != "cancelled"
+        assert ctx.api.get_daily_quotes.await_count == 1
+        assert strategy._cancelled is False
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_new_round_reports_cancelled(self):
+        """Given 新一轮运行中再次收到取消，When 轮次结束，Then 明确 CANCELLED 而非 COMPLETED。"""
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+
+        async def _cancel_mid_round(days, progress_callback, result):
+            strategy.cancel()
+
+        with patch.object(strategy, "_run_historical_sync", side_effect=_cancel_mid_round):
+            result = await strategy.run(days=1)
+
+        assert result.status == "cancelled"
+        assert result.is_complete is False
+
+    @pytest.mark.asyncio
+    async def test_previous_round_still_running_keeps_cancel_signal(self):
+        """Given 旧轮尚未退出（已有活动轮次），When 新轮进入，Then 不得清除旧轮取消意图。"""
+        ctx = make_ctx()
+        strategy = HistoricalSyncStrategy(ctx)
+        strategy._cancelled = True
+        strategy._active_runs = 1  # 模拟旧轮仍在执行
+
+        result = await strategy.run(days=1)
+
+        assert result.status == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_daily_snapshot_recovers_after_cancel(self):
+        """Given 独立单日同步入口收到过取消，When 旧轮已退出后再次单日同步，
+        Then 复位取消状态并正常抓取（否则同会话日更会永久在入口 abort）。"""
+        ctx = make_ctx()
+        ctx.cache.quote_dao.check_data_exists = AsyncMock(return_value=False)
+        strategy = HistoricalSyncStrategy(ctx)
+
+        strategy.cancel()
+
+        ok = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14))
+
+        assert ok is True
+        assert strategy._cancelled is False
+        ctx.api.get_daily_quotes.assert_awaited_once()

@@ -13,7 +13,7 @@ from data.external.tushare_client import TushareClient
 from data.mixins.calendar_mixin import CalendarMixin
 from data.mixins.health_mixin import HealthCheckMixin
 from data.persistence.daos.base_dao import EngineDisposedError
-from data.sync.base import SyncContext, safe_error
+from data.sync.base import SyncContext, SyncStatus, safe_error
 from data.sync.financial import FinancialSyncStrategy
 from data.sync.historical import HistoricalSyncStrategy
 from data.sync.holder import HolderSyncStrategy
@@ -858,6 +858,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         # For quick mode, redistribute weights (skip steps 3 & 4)
         STEP_WEIGHTS = [10, 10, 0, 0, 50, 30] if quick else [1, 1, 45, 38, 10, 5]
         current_step = 0
+        # UIR-F14-006: 记录「未完整成功」的步骤（cancelled 已直接返回 None）。partial
+        # 表示部分关键表未就绪，继续走完后续步骤尽量补数据，但最终不得上报完成。
+        degraded_steps: list[str] = []
 
         def report_step(step_num, sub_progress=0, sub_total=1, sub_msg: Message | str | None = ""):
             """Report progress with weighted calculation."""
@@ -931,12 +934,26 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     days=trade_days,
                     progress_callback=step3_callback,
                 )
-                if history_result and history_result.status == "failed":
+                if history_result and history_result.status == SyncStatus.FAILED.value:
                     logger.error(
                         "[DataProcessor] Init | ❌ Historical daily sync encountered errors: %s",
                         history_result.errors,
                     )
                     return None
+                if history_result and history_result.status == SyncStatus.CANCELLED.value:
+                    # UIR-F14-006: 取消不得当作成功完成。用户主动取消由下方 is_cancelled()
+                    # 先行拦截；此处覆盖「策略轮次被判定 cancelled 但 processor 取消信号已清」
+                    # 的残留场景（旧 `_cancelled` 未复位的历史版本或并发旧轮未退出）。
+                    logger.warning(
+                        "[DataProcessor] Init | ⏹️ Historical sync cancelled; init not reported as complete.",
+                    )
+                    return None
+                if history_result and history_result.status == SyncStatus.PARTIAL.value:
+                    degraded_steps.append("historical")
+                    logger.warning(
+                        "[DataProcessor] Init | ⚠️ Historical sync partial (%s); continuing, final status degraded.",
+                        history_result.warnings,
+                    )
                 if self.is_cancelled():
                     return None
 
@@ -949,12 +966,24 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 financial_result = await self.sync_comprehensive_fundamentals(
                     progress_callback=step4_callback,
                 )
-                if financial_result and financial_result.status == "failed":
+                if financial_result and financial_result.status == SyncStatus.FAILED.value:
                     logger.error(
                         "[DataProcessor] Init | ❌ Financial sync encountered errors: %s",
                         financial_result.errors,
                     )
                     return None
+                if financial_result and financial_result.status == SyncStatus.CANCELLED.value:
+                    # UIR-F14-006: 同 Step 3，取消不得当作成功完成。
+                    logger.warning(
+                        "[DataProcessor] Init | ⏹️ Financial sync cancelled; init not reported as complete.",
+                    )
+                    return None
+                if financial_result and financial_result.status == SyncStatus.PARTIAL.value:
+                    degraded_steps.append("financial")
+                    logger.warning(
+                        "[DataProcessor] Init | ⚠️ Financial sync partial (%s); continuing, final status degraded.",
+                        financial_result.warnings,
+                    )
                 if self.is_cancelled():
                     return None
 
@@ -985,6 +1014,15 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             # ===== Step 6: Health Check (5%) =====
             report_step(6)
             result = await self.check_data_health()
+
+            # UIR-F14-006: partial 属「部分关键表未就绪」，不得上报 init_step_complete
+            # 伪装为完整完成（R21）。返回 None 让上层按未完成处理并允许重试补齐。
+            if degraded_steps:
+                logger.warning(
+                    "[DataProcessor] Init | ⚠️ Completed with degraded sync steps: %s",
+                    ", ".join(degraded_steps),
+                )
+                return None
 
             # Report completion
             if progress_callback:
