@@ -1316,6 +1316,14 @@ class TestTableViewerTabEventHandlers:
         assert "load_table_schema" in calls
         assert "query_data" in calls
 
+        # M-UI-16 复核: 加载的必须是新表 — 仅断言方法名无法发现「schema 仍取旧表」
+        # 的闭包回归; _load_schema_and_data 须从 vm.state 重读快照而不是渲染闭包。
+        schema_calls = [kwargs for name, kwargs in vm.method_calls if name == "load_table_schema"]
+        assert schema_calls[-1]["table_name"] == "daily_quotes"
+        # 挂载时首次加载发生在 set_table 之前, 故比较「最后一次」schema 调用
+        schema_idxs = [i for i, name in enumerate(calls) if name == "load_table_schema"]
+        assert schema_idxs[-1] > calls.index("set_table"), "latest load_table_schema must follow set_table"
+
     def test_on_query_click_triggers_set_filter_and_query(
         self,
         mock_i18n_state,
