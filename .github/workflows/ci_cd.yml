@@ -1260,9 +1260,11 @@ jobs:
   update-requirements:
     name: Update requirements*.txt
     needs: requirements-drift
-    # Dependabot 发起的 PR 不被注入 PAT_FOR_CI secret（GitHub Actions 平台安全限制），
-    # 若检测到 drift 会因 token 为空导致 create-pull-request 失败，故对 Dependabot 触发跳过。
-    if: needs.requirements-drift.outputs.drift == 'true' && github.actor != 'dependabot[bot]'
+    # Dependabot 发起的 PR 与普通 fork PR 均不被注入 PAT_FOR_CI secret（GitHub Actions 平台安全限制）。
+    # 本 job 还依赖 contents: write / pull-requests: write 回推分支，而 fork PR 的 GITHUB_TOKEN 被降级为只读，
+    # 故两种触发下既无 secret 也无写权限，若运行会因 token 为空 / 推送被拒而失败（skip 而非失真绿灯）。
+    # 因此保留 drift=true 前置条件不变，仅在事件维度补 fork 守卫：fork PR 由维护者在库分支重跑该流程。
+    if: needs.requirements-drift.outputs.drift == 'true' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: windows-latest
     timeout-minutes: 30
     permissions:
