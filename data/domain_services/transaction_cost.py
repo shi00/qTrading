@@ -153,7 +153,7 @@ class TransactionCostModel:
     def calculate(
         self,
         price: float,
-        volume: int,
+        volume: float,
         is_buy: bool,
         avg_daily_volume: float | None = None,
         trade_date: date | None = None,
@@ -209,7 +209,7 @@ class TransactionCostModel:
     def _calc_slippage_pct(
         self,
         price: float,
-        volume: int,
+        volume: float,
         is_buy: bool,
         avg_daily_volume: float | None,
     ) -> float:

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date
 
 import polars as pl
@@ -153,7 +154,10 @@ class PortfolioSimulator:
             if quote is not None and not quote.is_empty():
                 px = self._exec_price(quote)
             else:
-                px = self._last_known_prices.get(ts_code, float(pos.get("entry_price", 0.0)))
+                # 账面单位是复权单位，兜底价必须同口径（qfq），不能用名义入场价 entry_price
+                px = self._last_known_prices.get(
+                    ts_code, float(pos.get("qfq_entry_price", pos.get("entry_price", 0.0)))
+                )
             current_values[ts_code] = pos["volume"] * px
 
         total_assets = self.cash + sum(current_values.values())
@@ -267,7 +271,7 @@ class PortfolioSimulator:
                     "ts_code": ts_code,
                     "direction": "sell",
                     "reason": "no_quote",
-                    "intended_volume": pos["volume"],
+                    "intended_volume": self._reported_volume(pos),
                 }
             )
             return
@@ -280,7 +284,7 @@ class PortfolioSimulator:
                     "ts_code": ts_code,
                     "direction": "sell",
                     "reason": "suspended",
-                    "intended_volume": pos["volume"],
+                    "intended_volume": self._reported_volume(pos, quote),
                 }
             )
             return
@@ -294,13 +298,29 @@ class PortfolioSimulator:
                         "ts_code": ts_code,
                         "direction": "sell",
                         "reason": "down_limit",
-                        "intended_volume": pos["volume"],
+                        "intended_volume": self._reported_volume(pos, quote),
                     }
                 )
                 return
 
-        exit_price = self._exec_price(quote)
-        volume = pos["volume"]
+        # UIR-F11-002: 账面 volume 是复权单位，成交与参与率必须换算为名义股数，
+        # 成交价用名义价（raw），二者乘积与复权口径金额一致。
+        ratio = self._qfq_ratio(quote)
+        nominal_shares = self._nominal_shares(pos["volume"], ratio)
+        if nominal_shares is None:
+            self.skipped_list.append(
+                {
+                    "trade_date": exec_date,
+                    "ts_code": ts_code,
+                    "direction": "sell",
+                    "reason": "missing_qfq_ratio",
+                    "intended_volume": None,
+                }
+            )
+            return
+
+        exit_price = self._exec_nominal_price(quote)
+        volume = nominal_shares
 
         cost = self.cost_model.calculate(
             price=exit_price,
@@ -363,7 +383,7 @@ class PortfolioSimulator:
                     "ts_code": ts_code,
                     "direction": "sell",
                     "reason": "no_quote",
-                    "intended_volume": pos["volume"],
+                    "intended_volume": self._reported_volume(pos),
                 }
             )
             return
@@ -376,7 +396,7 @@ class PortfolioSimulator:
                     "ts_code": ts_code,
                     "direction": "sell",
                     "reason": "suspended",
-                    "intended_volume": pos["volume"],
+                    "intended_volume": self._reported_volume(pos, quote),
                 }
             )
             return
@@ -390,13 +410,27 @@ class PortfolioSimulator:
                         "ts_code": ts_code,
                         "direction": "sell",
                         "reason": "down_limit",
-                        "intended_volume": pos["volume"],
+                        "intended_volume": self._reported_volume(pos, quote),
                     }
                 )
                 return
 
-        exit_price = self._exec_price(quote)
-        current_value = pos["volume"] * exit_price
+        ratio = self._qfq_ratio(quote)
+        nominal_total = self._nominal_shares(pos["volume"], ratio)
+        if nominal_total is None:
+            self.skipped_list.append(
+                {
+                    "trade_date": exec_date,
+                    "ts_code": ts_code,
+                    "direction": "sell",
+                    "reason": "missing_qfq_ratio",
+                    "intended_volume": None,
+                }
+            )
+            return
+
+        exit_price = self._exec_nominal_price(quote)
+        current_value = pos["volume"] * self._exec_price(quote)
         sell_value = max(current_value - target_value, 0.0)
 
         # BT-08: A 股整手限制是单向的——买入必须 100 股整数倍，卖出允许零股。
@@ -404,13 +438,14 @@ class PortfolioSimulator:
         # 会把「无需减持」与「减持量不足一手」两种语义合并 fallthrough 到全额清仓，
         # 一笔本应减持 60 股的微调可能变成清仓全部持仓。修复后卖出取整取消、零股
         # 可卖出；volume<=0（无需减持或减持不足 1 股市值）时直接跳过，不再误清仓。
+        # UIR-F11-002: 减持量按名义股数（真实可卖股数）取整。
         volume = int(sell_value / exit_price)
 
         if volume <= 0:
             return  # 无需减持（sell_value<=0）或减持不足 1 股，不做任何动作
 
         # 减持量达到/超过现有持仓 → 复用 _sell_position 全额清仓（含记账）
-        if volume >= pos["volume"]:
+        if volume >= nominal_total:
             self._sell_position(exec_date, ts_code, pos, quote)
             return
 
@@ -423,7 +458,8 @@ class PortfolioSimulator:
             trade_date=exec_date,
         )
         actual_exit_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else exit_price
-        sell_fraction = volume / pos["volume"]
+        # 名义股数占比与复权单位占比相同（同一 ratio），可直接用于摊销
+        sell_fraction = volume / nominal_total
         allocated_cost = pos["cost_basis"] * sell_fraction
         realized_pnl = cost.net_amount - allocated_cost
 
@@ -443,7 +479,7 @@ class PortfolioSimulator:
             }
         )
 
-        pos["volume"] -= volume
+        pos["volume"] *= 1.0 - sell_fraction
         pos["cost_basis"] -= allocated_cost
         self.cash += cost.net_amount
 
@@ -536,14 +572,28 @@ class PortfolioSimulator:
                     continue
 
             # D4-1: 差异化调仓买入同样统一使用 qfq 复权口径，避免除权交易日虚假损益。
+            # UIR-F11-002: 复权价不是真实成交价——整手与费用按名义价/名义股数计算，
+            # 再按 ratio 换算为复权单位记账，账面市值仍用 qfq 口径。
+            raw_entry_price = self._exec_nominal_price(quote)
             qfq_entry_price = self._exec_price(quote)
 
-            if qfq_entry_price <= 0:
+            if raw_entry_price <= 0 or qfq_entry_price <= 0:
                 _record_skip(ts_code, "invalid_price", 0)
                 continue
 
             target_value = delta_value
-            volume = int(target_value / qfq_entry_price / 100) * 100
+            ratio = self._qfq_ratio(quote)
+            if ratio is None:
+                # 不伪造 ratio=1（R21）：复权因子不可得与未除权是两件事
+                _record_skip(
+                    ts_code,
+                    "missing_qfq_ratio",
+                    0,
+                    {"target_value": target_value, "min_lot_cost": raw_entry_price * 100},
+                )
+                continue
+
+            volume = int(target_value / raw_entry_price / 100) * 100
             if volume <= 0:
                 # BT-05: 归因改对——单笔预算不足一手，与现金余额无关。
                 # min_lot_cost 让用户一眼看出差多少（target_value / min_lot_cost 不足一手）。
@@ -551,20 +601,31 @@ class PortfolioSimulator:
                     ts_code,
                     "lot_size_indivisible",
                     0,
-                    {"target_value": target_value, "min_lot_cost": qfq_entry_price * 100},
+                    {"target_value": target_value, "min_lot_cost": raw_entry_price * 100},
                 )
                 lot_indivisible_budget += target_value
                 lot_indivisible_count += 1
                 continue
 
             cost = self.cost_model.calculate(
-                price=qfq_entry_price,
+                price=raw_entry_price,
                 volume=volume,
                 is_buy=True,
                 avg_daily_volume=self._get_avg_daily_volume(quote),
                 trade_date=exec_date,
             )
-            actual_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else qfq_entry_price
+            # 名义整手按「目标金额/名义价」向下取整后，费用可能把总支出顶过现金余额
+            # （尤其 cash_reserve=0 的全仓场景）；此时少买一手而不是整笔跳过。
+            if cost.net_amount > self.cash and volume >= 200:
+                volume -= 100
+                cost = self.cost_model.calculate(
+                    price=raw_entry_price,
+                    volume=volume,
+                    is_buy=True,
+                    avg_daily_volume=self._get_avg_daily_volume(quote),
+                    trade_date=exec_date,
+                )
+            actual_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else raw_entry_price
 
             if cost.net_amount > self.cash:
                 _record_skip(ts_code, "insufficient_cash", volume)
@@ -575,8 +636,9 @@ class PortfolioSimulator:
                 ts_code,
                 actual_price,
                 qfq_entry_price,
-                volume,
+                volume / ratio,
                 cost,
+                nominal_shares=volume,
             )
             spent_by_code[ts_code] += cost.net_amount
 
@@ -614,12 +676,15 @@ class PortfolioSimulator:
         qfq_entry_price: float,
         volume: float,
         cost,
+        nominal_shares: float,
     ) -> None:
         """将一笔买入记入 trades_list 与 positions，并扣减现金（BT-05 抽取，供两遍分配复用）。
 
         Args:
-            actual_price: 滑点调整后的执行价（trades 记录用）。
+            actual_price: 滑点调整后的名义（raw）执行价（trades 记录用）。
             qfq_entry_price: qfq 复权买入价（持仓估值口径用，D4-1 与 BT-01 语义）。
+            volume: 复权单位（adjusted_units），内部持仓账本口径。
+            nominal_shares: 实际成交名义股数（真实可交易股数），trades 对外口径。
         """
         self.trades_list.append(
             {
@@ -628,7 +693,7 @@ class PortfolioSimulator:
                 "action": "buy",
                 "exit_reason": None,
                 "price": actual_price,
-                "volume": volume,
+                "volume": nominal_shares,
                 "gross_amount": cost.gross_amount,
                 "total_cost": cost.total_cost,
                 "net_amount": cost.net_amount,
@@ -700,29 +765,43 @@ class PortfolioSimulator:
                     continue
 
             qfq_entry_price = self._exec_price(quote)
-            if qfq_entry_price <= 0:
+            raw_entry_price = self._exec_nominal_price(quote)
+            if raw_entry_price <= 0 or qfq_entry_price <= 0:
                 continue
 
             # 缺口 = 目标金额 - 第一遍已投入；已满额标的跳过，避免二次超买。
             gap = buy_targets[ts_code] - spent_by_code.get(ts_code, 0.0)
             if gap <= 0:
                 continue
-            volume = int(min(gap, remaining_budget) / qfq_entry_price / 100) * 100
+
+            # UIR-F11-002: 整手按名义价/名义股数计算，记账再换算回复权单位。
+            ratio = self._qfq_ratio(quote)
+            if ratio is None:
+                continue
+            volume = int(min(gap, remaining_budget) / raw_entry_price / 100) * 100
             if volume <= 0:
                 continue
 
             cost = self.cost_model.calculate(
-                price=qfq_entry_price,
+                price=raw_entry_price,
                 volume=volume,
                 is_buy=True,
                 avg_daily_volume=self._get_avg_daily_volume(quote),
                 trade_date=exec_date,
             )
-            actual_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else qfq_entry_price
+            actual_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else raw_entry_price
             if cost.net_amount > self.cash:
                 continue
 
-            self._apply_buy(exec_date, ts_code, actual_price, qfq_entry_price, volume, cost)
+            self._apply_buy(
+                exec_date,
+                ts_code,
+                actual_price,
+                qfq_entry_price,
+                volume / ratio,
+                cost,
+                nominal_shares=volume,
+            )
             spent_by_code[ts_code] += cost.net_amount
             remaining_budget -= cost.net_amount
             reallocated_count += 1
@@ -789,15 +868,24 @@ class PortfolioSimulator:
                     "ts_code": ts_code,
                     "direction": "sell",
                     "reason": "no_quote",
-                    "intended_volume": pos["volume"],
+                    "intended_volume": self._reported_volume(pos),
                 }
             )
             return
 
-        volume = pos["volume"]
         recovery = self.config.delist_recovery_rate
-        recover_price = last_price * recovery
-        full_proceeds = last_price * volume  # 全额变现所得（对比基准，仅用于损失统计）
+        recover_price_qfq = last_price * recovery
+        full_proceeds = last_price * pos["volume"]  # 全额变现所得（对比基准，仅用于损失统计）
+
+        # UIR-F11-002: 有 last_ratio 时按名义价 × 名义股数结算与上报；无 ratio 时
+        # 退回复权口径（价格 × 复权单位，金额等价），不伪造 ratio=1。
+        last_ratio = pos.get("last_ratio")
+        if last_ratio is not None and last_ratio > 0:
+            volume = pos["volume"] * last_ratio
+            recover_price = recover_price_qfq / last_ratio
+        else:
+            volume = pos["volume"]
+            recover_price = recover_price_qfq
 
         cost = self.cost_model.calculate(
             price=recover_price,
@@ -846,6 +934,11 @@ class PortfolioSimulator:
         - 除权日 NAV 不跳变（qfq 价格连续）
 
         交易成本和 realized_pnl 也保持 qfq 口径，NAV 代表复权总收益。
+
+        UIR-F11-002: 账面持仓 volume 是复权单位（adjusted_units），对外上报的
+        ``volume`` 为名义股数（adjusted_units × ratio，真实可交易股数），
+        ``raw_market_value`` = 名义股数 × raw_close（真实人民币市值，与 qfq 市值等价）；
+        内部复权单位单独以 ``adjusted_units`` 暴露，避免两种口径混用。
         """
         total_value = self.cash
         positions_detail: dict[str, dict] = {}
@@ -862,13 +955,19 @@ class PortfolioSimulator:
                 self._last_known_prices[ts_code] = qfq_close
                 # D1-C1: 恢复交易则复位连续估值天数计数（仅统计连续停牌段）
                 self._stale_estimate_days[ts_code] = 0
+                ratio = self._qfq_ratio(quote)
+                if ratio is not None:
+                    pos["last_ratio"] = ratio
+                nominal_shares = self._nominal_shares(pos["volume"], ratio)
+                raw_close = float(quote.select("raw_close").item())
                 qfq_market_value = pos["volume"] * qfq_close
-                raw_market_value = pos["volume"] * float(quote.select("raw_close").item())
+                raw_market_value = nominal_shares * raw_close if nominal_shares is not None else None
                 total_value += qfq_market_value
                 qfq_entry_price = pos.get("qfq_entry_price", pos["entry_price"])
                 qfq_cost_basis = pos["volume"] * qfq_entry_price
                 positions_detail[ts_code] = {
-                    "volume": pos["volume"],
+                    "volume": nominal_shares,
+                    "adjusted_units": pos["volume"],
                     "market_value": qfq_market_value,
                     "raw_market_value": raw_market_value,
                     "pnl": qfq_market_value - qfq_cost_basis,
@@ -881,7 +980,8 @@ class PortfolioSimulator:
                     qfq_entry_price = pos.get("qfq_entry_price", pos["entry_price"])
                     qfq_cost_basis = pos["volume"] * qfq_entry_price
                     positions_detail[ts_code] = {
-                        "volume": pos["volume"],
+                        "volume": self._reported_volume(pos),
+                        "adjusted_units": pos["volume"],
                         "market_value": estimated_value,
                         "raw_market_value": None,
                         "pnl": estimated_value - qfq_cost_basis,
@@ -919,8 +1019,19 @@ class PortfolioSimulator:
     def get_results(
         self,
     ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str], int]:
+        """返回 (trades, positions, skipped_orders, warnings, empty_signal_days)。
+
+        UIR-F11-002 口径标记：trades 的 ``volume`` 是名义股数（真实可交易股数），
+        以常量列 ``volume_unit='nominal_shares'`` 显式标注；历史落库结果无该列，
+        其 ``volume`` 为复权单位，不得当作真实股数重解释。
+        """
+        trades_df = (
+            pl.DataFrame(self.trades_list).with_columns(pl.lit("nominal_shares").alias("volume_unit"))
+            if self.trades_list
+            else pl.DataFrame()
+        )
         return (
-            pl.DataFrame(self.trades_list) if self.trades_list else pl.DataFrame(),
+            trades_df,
             pl.DataFrame(self.positions_list),
             pl.DataFrame(self.skipped_list) if self.skipped_list else pl.DataFrame(),
             self.warnings,
@@ -943,6 +1054,57 @@ class PortfolioSimulator:
         if self.config.execution_price == "next_close":
             return float(quote.select("raw_close").item())
         return float(quote.select("raw_open").item())
+
+    def _qfq_ratio(self, quote: pl.DataFrame) -> float | None:
+        """返回行情行的复权换算系数 ratio（qfq_price = raw_price × ratio）。
+
+        UIR-F11-002：复权价不是真实成交价。名义股数（真实可交易股数）与复权单位
+        （adjusted_units，账面持仓/NAV 口径）通过 ratio 互换：``adjusted_units = nominal_shares / ratio``。
+        整手取整、费用、滑点参与率一律用名义股数，账面市值仍用复权单位，二者靠本方法换算。
+
+        数据来源优先级：
+        1. ``qfq_ratio`` 列（``engine._apply_qfq`` 在 adj_factor 可用时逐行输出）；
+        2. 缺列时按 qfq/raw 执行价推导（调用方手工构造行情时两列同基准）。
+
+        ratio 缺失/非正/非有限时返回 None：调用方必须跳过撮合，**不得伪造 1**
+        ——「复权因子不可得」与「未除权」是两件事（R21）。
+        """
+        if "qfq_ratio" in quote.columns:
+            ratio_val = quote.select("qfq_ratio").item()
+            if ratio_val is None:
+                return None
+            try:
+                ratio = float(ratio_val)
+            except (TypeError, ValueError):
+                return None
+            return ratio if math.isfinite(ratio) and ratio > 0 else None
+
+        raw_price = self._exec_nominal_price(quote)
+        qfq_price = self._exec_price(quote)
+        if raw_price <= 0 or qfq_price <= 0:
+            return None
+        ratio = qfq_price / raw_price
+        return ratio if math.isfinite(ratio) and ratio > 0 else None
+
+    @staticmethod
+    def _nominal_shares(adjusted_units: float, ratio: float | None) -> float | None:
+        """复权单位 → 名义股数；ratio 不可得时返回 None（不伪造 1）。"""
+        if ratio is None:
+            return None
+        return adjusted_units * ratio
+
+    def _reported_volume(self, pos: dict, quote: pl.DataFrame | None = None) -> float | None:
+        """持仓对外上报的股数（名义股数）。
+
+        有当日报价时用当日 ratio；无报价（停牌/退市）退回持仓最近记录的 ratio
+        （``_record_daily_positions`` 每日写入 ``last_ratio``）。两者都不可得时返回 None，
+        不以复权单位冒充名义股数（R21）。
+        """
+        if quote is not None and not quote.is_empty():
+            ratio = self._qfq_ratio(quote)
+        else:
+            ratio = pos.get("last_ratio")
+        return self._nominal_shares(pos["volume"], ratio)
 
     @staticmethod
     def _get_avg_daily_volume(quote: pl.DataFrame) -> float | None:
