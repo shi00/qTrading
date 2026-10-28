@@ -438,6 +438,7 @@ class TestBacktestViewModelRunBacktest:
         vm = BacktestViewModel()
         mock_result = MagicMock()
         mock_result.duration_ms = 1500
+        mock_result.run_id = "run-success"  # UIR-F11-004: 结果稳定身份透传到 state
         mock_result.metrics = {"sharpe_ratio": 1.5, "total_return": 0.1}
         mock_result.trades = pl.DataFrame()
         mock_result.period_stats = pl.DataFrame()
@@ -656,10 +657,13 @@ class TestBacktestViewModelRunBacktest:
 
         assert captured_factory is not None
         assert vm.state.is_running is True
+        # UIR-F11-004: 新一轮回测起始清空上一轮结果身份
+        assert vm.state.run_id is None
 
         execution_result = await captured_factory(task_id="task_123")
 
         assert vm.state.metrics == (("sharpe_ratio", 1.5), ("total_return", 0.1))
+        assert vm.state.run_id == "run-success"
         assert vm.state.nav_curve == (1.0, 1.1)
         assert vm.state.ic_series == (0.1, 0.2)
         # 横轴日期与基准曲线正确透传/构造

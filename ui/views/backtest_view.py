@@ -409,6 +409,7 @@ def BacktestView(active: bool = True, prefill_request: int | None = None) -> ft.
         result_panel = BacktestResultPanel(
             metrics=state.metrics,
             trades=state.trades,
+            run_id=state.run_id,
             nav_curve=state.nav_curve,
             nav_dates=state.nav_dates,
             benchmark_curve=state.benchmark_curve,
