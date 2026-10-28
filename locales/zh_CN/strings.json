@@ -81,6 +81,8 @@
     "sched_concept_sync_task_name": "概念数据同步",
     "sched_concept_sync_task_type": "概念同步",
     "sched_concept_sync_done": "概念数据同步完成",
+    "sched_concept_sync_partial": "概念数据同步未完成（{sources}），本次未记为已完成，将于下次调度重试",
+    "sched_concept_sync_failed": "概念数据同步失败（{sources}），本次未记为已完成，将于下次调度重试",
     "sched_task_catchup": "遗漏交易日补偿同步（{days} 天）",
     "sched_catchup_progress": "正在补偿同步交易日 {date}...",
     "sched_catchup_done": "补偿同步完成：共补 {days} 个交易日",

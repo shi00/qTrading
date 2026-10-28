@@ -80,6 +80,8 @@
     "sched_concept_sync_task_name": "Concept Data Sync",
     "sched_concept_sync_task_type": "Concept Sync",
     "sched_concept_sync_done": "Concept data sync complete",
+    "sched_concept_sync_partial": "Concept data sync incomplete ({sources}); not marked as done, will retry at next scheduled run",
+    "sched_concept_sync_failed": "Concept data sync failed ({sources}); not marked as done, will retry at next scheduled run",
     "sched_task_catchup": "Missed trading day catch-up sync ({days} days)",
     "sched_catchup_progress": "Catching up trading day {date}...",
     "sched_catchup_done": "Catch-up complete: {days} trading day(s) synced",

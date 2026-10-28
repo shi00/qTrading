@@ -399,6 +399,8 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             changes: dict[str, Any] = {
                 "total_rows": count,
                 "table_rows": _df_to_table_rows(df, columns),
+                # UIR-F13-002: 重试成功后清除上一次失败遗留的错误态
+                "error_message": None,
             }
             if page is not None:
                 changes["current_page"] = page
@@ -423,11 +425,15 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             else:
                 logger.error("[DataExplorerVM] Operational error in query_data: %s", safe_error(e), exc_info=True)
             if generation == self._table_generation:
+                # UIR-F13-002: 计数成功但读行失败也整次失败（不写 total_rows），并清空旧结果 +
+                # 发布可本地化错误，避免把「执行失败」渲染成「表无数据/筛选无结果」。
                 self._set_state(
                     error_message=Message(
                         error_info.get("message_key", "common_err_unknown"),
                         error_info.get("format_args") or {},
-                    )
+                    ),
+                    table_rows=(),
+                    total_rows=0,
                 )
             return pd.DataFrame()
         finally:
@@ -485,7 +491,14 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def export_data(self, current_page_only: bool = True):
-        """Export table data for CSV download."""
+        """Export table data for CSV download.
+
+        Raises:
+            asyncio.CancelledError: 取消时传播 (R2)
+            Exception: 读行失败时向上传播，由 View 提示「导出失败」。**不得返回空 DataFrame**
+                冒充「无可导出数据」（UIR-F13-002：导出失败与合法空表是两种不同结论）。
+                导出命令不改变表格区已有状态（失败仅由 View 的 toast 反馈）。
+        """
         ensure_correlation_id()
         if self._disposed:
             return pd.DataFrame()
@@ -526,13 +539,9 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
                 )
             else:
                 logger.error("[DataExplorerVM] Operational error in export_data: %s", safe_error(e), exc_info=True)
-            self._set_state(
-                error_message=Message(
-                    error_info.get("message_key", "common_err_unknown"),
-                    error_info.get("format_args") or {},
-                )
-            )
-            return pd.DataFrame()
+            # UIR-F13-002: 失败不得返回空 DataFrame（View 会误报「无可导出数据」），
+            # 原样传播给 View 的导出错误提示；表格区状态保持不变。
+            raise
 
     async def write_csv(self, df: pd.DataFrame, filepath: str) -> None:
         """将 DataFrame 写入 CSV 文件 (CPU 密集操作, 下沉到 VM 以符合 MVVM 契约).

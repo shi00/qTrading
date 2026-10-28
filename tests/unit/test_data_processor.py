@@ -801,7 +801,8 @@ class TestDataProcessorRunConceptSync:
             mock_ak.return_value.run = AsyncMock(return_value=self._ok_result())
             mock_limit.return_value.run = AsyncMock(return_value=self._ok_result())
             result = await dp.run_concept_sync(task_id="t1", cancel_event=cancel_event)
-        assert result == "akshare=success | limit_list=success"
+        assert result.to_summary() == "akshare=success | limit_list=success"
+        assert result.is_complete is True
         # 取消信号须传播到 SyncContext 供长任务轮询
         assert dp.context.cancel_event is cancel_event
         mock_ak.assert_called_once_with(dp.context)
@@ -817,7 +818,8 @@ class TestDataProcessorRunConceptSync:
             patch("data.sync.concept_sync.LimitListSyncStrategy") as mock_limit,
         ):
             result = await dp.run_concept_sync(task_id="t1", cancel_event=cancel_event)
-        assert result == "akshare=cancelled | limit_list=cancelled"
+        assert result.status == "cancelled"
+        assert result.to_summary() == "akshare=cancelled | limit_list=cancelled"
         mock_ak.assert_not_called()
         mock_limit.assert_not_called()
 
@@ -828,12 +830,15 @@ class TestDataProcessorRunConceptSync:
         with (
             patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as mock_ak,
             patch("data.sync.concept_sync.LimitListSyncStrategy") as mock_limit,
+            patch("data.data_processor._CONCEPT_SOURCE_RETRY_DELAY_SECONDS", 0.0),
         ):
             mock_ak.return_value.run = AsyncMock(side_effect=RuntimeError("akshare boom"))
             mock_limit.return_value.run = AsyncMock(return_value=self._ok_result())
             result = await dp.run_concept_sync(task_id="t1", cancel_event=None)
         # 单步失败不阻断另一步（R2：CancelledError 不在此分支，RuntimeError 才隔离）
-        assert result == "akshare=failed | limit_list=success"
+        assert result.status == "failed"
+        assert result.to_summary() == "akshare=failed | limit_list=success"
+        assert result.is_complete is False
 
     @pytest.mark.asyncio
     async def test_limitlist_failure_isolated_per_step(self):
@@ -842,11 +847,13 @@ class TestDataProcessorRunConceptSync:
         with (
             patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as mock_ak,
             patch("data.sync.concept_sync.LimitListSyncStrategy") as mock_limit,
+            patch("data.data_processor._CONCEPT_SOURCE_RETRY_DELAY_SECONDS", 0.0),
         ):
             mock_ak.return_value.run = AsyncMock(return_value=self._ok_result())
             mock_limit.return_value.run = AsyncMock(side_effect=RuntimeError("limit boom"))
             result = await dp.run_concept_sync(task_id="t1", cancel_event=None)
-        assert result == "akshare=success | limit_list=failed"
+        assert result.status == "failed"
+        assert result.to_summary() == "akshare=success | limit_list=failed"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("step", ["ak", "limit"])
@@ -877,7 +884,8 @@ class TestDataProcessorRunConceptSync:
             patch("data.sync.concept_sync.LimitListSyncStrategy") as mock_limit,
         ):
             result = await dp.run_concept_sync(task_id="t1", cancel_event=None)
-        assert result == "akshare=cancelled | limit_list=cancelled"
+        assert result.status == "cancelled"
+        assert result.to_summary() == "akshare=cancelled | limit_list=cancelled"
         mock_ak.assert_not_called()
         mock_limit.assert_not_called()
 

@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
+import hashlib
 import os
+import tempfile
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, get_package_paths
@@ -65,15 +67,31 @@ binaries = collect_dynamic_libs("llama_cpp")
 # PyInstaller 不参与 Rust 编译，仅打包已存在的 binary 到 _internal/sidecars/ 下。
 # EmbeddedPostgresService.from_config 在 frozen 模式下从 sys._MEIPASS / "sidecars" 解析（P4-8）。
 # 缺失时跳过：开发环境未编译 sidecar 也能构建普通发行物（installer.iss standard variant 不打包 sidecar）。
+#
+# UIR-F15-005：运行前完整性校验（EmbeddedPostgresService._verify_sidecar_sha256）要求
+# 交付与 binary **同目录同名**的 ``<exe>.sha256``。构建时按实际打包的字节计算摘要
+# （不依赖 release 资产 ``sha256sums-<target>.txt`` 的命名与清单格式），旁文件与 binary
+# 一并收集到 ``_internal/sidecars/``；installer.iss 递归收集该目录并安装到
+# ``{app}\_internal\sidecars\``。binary 以原字节复制（strip=False / upx=False），
+# 故旁文件摘要即安装后 binary 的实际摘要。
+def _stage_sidecar_with_sha256(binary_path: Path) -> None:
+    binaries.append((str(binary_path), "sidecars"))
+    stage_dir = Path(tempfile.mkdtemp(prefix="qtrading-sidecar-sha-"))
+    side_file = stage_dir / f"{binary_path.name}.sha256"
+    digest = hashlib.sha256(binary_path.read_bytes()).hexdigest()
+    side_file.write_text(f"{digest}  {binary_path.name}\n", encoding="utf-8")
+    datas.append((str(side_file), "sidecars"))
+
+
 _sidecar_exe_name = "qtrading-pg-sidecar.exe" if os.name == "nt" else "qtrading-pg-sidecar"
 _sidecar_src = project_root / "sidecars" / "qtrading-pg-sidecar" / "target" / "release" / _sidecar_exe_name
 if _sidecar_src.exists():
-    binaries += [(str(_sidecar_src), "sidecars")]
+    _stage_sidecar_with_sha256(_sidecar_src)
 else:
     # 开发环境兜底：尝试 sidecars/qtrading-pg-sidecar/{exe_name}（cargo 输出软链接或本地构建）
     _sidecar_alt = project_root / "sidecars" / "qtrading-pg-sidecar" / _sidecar_exe_name
     if _sidecar_alt.exists():
-        binaries += [(str(_sidecar_alt), "sidecars")]
+        _stage_sidecar_with_sha256(_sidecar_alt)
 
 excludes = [
     "tkinter",

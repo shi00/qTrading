@@ -4,6 +4,8 @@ import logging
 import os
 import threading
 import weakref
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -13,7 +15,7 @@ from data.external.tushare_client import TushareClient
 from data.mixins.calendar_mixin import CalendarMixin
 from data.mixins.health_mixin import HealthCheckMixin
 from data.persistence.daos.base_dao import EngineDisposedError
-from data.sync.base import SyncContext, SyncStatus, safe_error
+from data.sync.base import ISyncStrategy, SyncContext, SyncResult, SyncStatus, safe_error
 from data.sync.financial import FinancialSyncStrategy
 from data.sync.historical import HistoricalSyncStrategy
 from data.sync.holder import HolderSyncStrategy
@@ -28,10 +30,18 @@ from utils.loop_local import del_loop_local, get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date, to_yyyymmdd_str
 
+if TYPE_CHECKING:
+    from data.sync.concept_sync import ConceptSyncResult
+
 logger = logging.getLogger(__name__)
 
 
 from utils.singleton_registry import register_singleton
+
+# UIR-F14-003: 概念来源整源失败后的受控重试（一次、退避），仅覆盖网络瞬时故障。
+# 与 TaskManager ``unique_key="concept_sync"`` 同键去重共同保证不并发、不紧密循环。
+_CONCEPT_SOURCE_MAX_ATTEMPTS = 2
+_CONCEPT_SOURCE_RETRY_DELAY_SECONDS = 2.0
 
 
 async def _await_cancel_aware(awaitable, cancel_check):
@@ -427,23 +437,29 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         task_id: str | None = None,
         cancel_event: threading.Event | None = None,
         **kwargs,
-    ) -> str:
+    ) -> "ConceptSyncResult":
         """Orchestrate concept sync from the retained sources.
 
         Executes two strategies in sequence:
         1. AKShareConceptSyncStrategy — East-Money concept boards
-        2. LimitListSyncStrategy — Tushare limit_list
+        2. LimitListSyncStrategy — Tushare limit_list（review08-D3 起停写，仅做清理）
 
         Args:
             task_id: Optional task identifier for logging.
             cancel_event: Optional threading.Event for cancellation signaling.
 
         Returns:
-            Summary string, e.g. "akshare=success | limit_list=success".
+            ``ConceptSyncResult``（按来源聚合的结构化结果）。调用方必须以
+            ``is_complete``（所需来源全部 success）判定当日是否成功，禁止仅凭
+            「未抛异常/返回非空」即认定成功（UIR-F14-003）。
         """
         from data.sync.concept_sync import (
+            CONCEPT_SOURCE_AKSHARE,
+            CONCEPT_SOURCE_LIMIT_LIST,
             AKShareConceptSyncStrategy,
+            ConceptSyncResult,
             LimitListSyncStrategy,
+            aggregate_concept_status,
         )
 
         # Propagate cancel_event to context so that long-running strategies
@@ -456,35 +472,97 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 return True
             return cancel_event is not None and hasattr(cancel_event, "is_set") and cancel_event.is_set()
 
-        parts: list[str] = []
+        specs = (
+            (CONCEPT_SOURCE_AKSHARE, AKShareConceptSyncStrategy),
+            (CONCEPT_SOURCE_LIMIT_LIST, LimitListSyncStrategy),
+        )
+        result = ConceptSyncResult()
 
-        # Step 1: AKShare concept boards
         if _cancelled():
-            parts.append("akshare=cancelled")
-        else:
+            # 取消不吞（R2）：未启动任何来源即以 cancelled 终态返回，调用方不得推进水位。
+            for name, _strategy_cls in specs:
+                result.sources[name] = SyncStatus.CANCELLED.value
+                result.failed_sources.append(name)
+            result.status = SyncStatus.CANCELLED.value
+            return result
+
+        statuses: list[str] = []
+        for index, (name, strategy_cls) in enumerate(specs):
+            if _cancelled():
+                result.sources[name] = SyncStatus.CANCELLED.value
+                result.failed_sources.append(name)
+                statuses.append(SyncStatus.CANCELLED.value)
+                continue
+
+            status, source_result = await self._run_concept_source(name, strategy_cls, _cancelled)
+            result.sources[name] = status
+            statuses.append(status)
+            if status != SyncStatus.SUCCESS.value:
+                result.failed_sources.append(name)
+            if source_result is not None:
+                result.added += source_result.added or 0
+                result.errors.extend(source_result.errors)
+                result.warnings.extend(source_result.warnings)
+
+            if status == SyncStatus.CANCELLED.value:
+                # 已取消则不再启动剩余来源，未执行来源显式登记为 cancelled（R2）。
+                for rest_name, _rest_cls in specs[index + 1 :]:
+                    result.sources[rest_name] = SyncStatus.CANCELLED.value
+                    result.failed_sources.append(rest_name)
+                    statuses.append(SyncStatus.CANCELLED.value)
+                break
+
+        result.status = aggregate_concept_status(statuses)
+        logger.info("[DataProcessor] ConceptSync | done | %s", result.to_summary())
+        return result
+
+    async def _run_concept_source(
+        self,
+        name: str,
+        strategy_cls: type[ISyncStrategy],
+        is_cancelled: Callable[[], bool],
+    ) -> tuple[str, SyncResult | None]:
+        """执行单个概念来源；整源失败做一次退避重试（仅覆盖网络瞬时故障）。
+
+        取消（R2）与引擎已释放（R5）不重试、直接向上传播；重试窗口内收到取消信号
+        则返回 cancelled 终态，由调用方登记为未完成。
+        """
+        for attempt in range(_CONCEPT_SOURCE_MAX_ATTEMPTS):
+            if is_cancelled():
+                return SyncStatus.CANCELLED.value, None
             try:
-                r = await AKShareConceptSyncStrategy(self.context).run()
-                parts.append(f"akshare={r.status}")
+                source_result = await strategy_cls(self.context).run()
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
-                logger.error("[DataProcessor] ConceptSync | AKShare failed: %s", safe_error(e), exc_info=True)
-                parts.append("akshare=failed")
-
-        # Step 2: LimitList
-        if _cancelled():
-            parts.append("limit_list=cancelled")
-        else:
-            try:
-                r = await LimitListSyncStrategy(self.context).run()
-                parts.append(f"limit_list={r.status}")
-            except asyncio.CancelledError:
+            except EngineDisposedError:
                 raise
             except Exception as e:
-                logger.error("[DataProcessor] ConceptSync | LimitList failed: %s", safe_error(e), exc_info=True)
-                parts.append("limit_list=failed")
+                logger.error(
+                    "[DataProcessor] ConceptSync | %s failed (attempt %d/%d): %s",
+                    name,
+                    attempt + 1,
+                    _CONCEPT_SOURCE_MAX_ATTEMPTS,
+                    safe_error(e),
+                    exc_info=True,
+                )
+                if attempt + 1 < _CONCEPT_SOURCE_MAX_ATTEMPTS and not is_cancelled():
+                    await asyncio.sleep(_CONCEPT_SOURCE_RETRY_DELAY_SECONDS)
+                    continue
+                return SyncStatus.FAILED.value, None
 
-        return " | ".join(parts)
+            status = getattr(source_result, "status", SyncStatus.FAILED.value)
+            # 仅整源 failed 重试；partial（部分板块失败）保留显式缺口，交由下次调度重跑。
+            if status == SyncStatus.FAILED.value and attempt + 1 < _CONCEPT_SOURCE_MAX_ATTEMPTS and not is_cancelled():
+                logger.warning(
+                    "[DataProcessor] ConceptSync | %s reported failed, retrying once after %.1fs",
+                    name,
+                    _CONCEPT_SOURCE_RETRY_DELAY_SECONDS,
+                )
+                await asyncio.sleep(_CONCEPT_SOURCE_RETRY_DELAY_SECONDS)
+                continue
+            return status, source_result
+
+        return SyncStatus.FAILED.value, None
 
     # ==========================================
     # Core Logic (Business/Orchestration)
