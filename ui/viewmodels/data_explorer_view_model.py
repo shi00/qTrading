@@ -136,6 +136,12 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
 
         # Internal state (frozen snapshot)
         self._state = DataExplorerState()
+        # M-UI-16 复核: 切表代次。load_table_schema/query_data 在 await 前登记代次,
+        # 回执只有代次仍匹配时才写回 state — 旧表（旧代次）晚到的 schema/数据不得覆盖新表
+        # (修复 A→B→C 乱序返回导致「列头为旧表、单元格全 None」)。_loading_generation
+        # 记录 is_loading 的持有代次, 使旧代次收尾不得清掉新代次的加载态。
+        self._table_generation: int = 0
+        self._loading_generation: int | None = None
         self._init_mixin_fields()
 
     def _set_state(self, **changes: Any) -> None:
@@ -198,6 +204,7 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
                 # []（data_explorer_query_client.get_all_tables except 分支），VM 仅凭空
                 # 列表无法区分「空库」与「连接失败」，但两者用户均无法自救，须呈现
                 # ErrorState(retry) 而非落到 View 兜底 loading 占位（否则永久转圈假象）。
+                self._advance_table_generation_if_changed("")
                 self._set_state(
                     tables_list=(),
                     tables_loaded=False,
@@ -206,6 +213,7 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
                 )
                 return ()
             current_table = "stock_basic" if "stock_basic" in tables else tables[0]
+            self._advance_table_generation_if_changed(current_table)
             self._set_state(
                 tables_list=tuple(tables),
                 tables_loaded=True,
@@ -284,8 +292,18 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         ensure_correlation_id()
         if self._disposed:
             return []
+        generation = self._table_generation
         try:
             schema = await self._tp.run_async(TaskType.CPU, self._db.get_table_schema, table_name)
+            if generation != self._table_generation:
+                # M-UI-16 复核: 旧代次 schema 不得写回 (否则新表沿用旧表列头 → 单元格全 None)
+                logger.debug(
+                    "[DataExplorerVM] Discard stale schema for table=%s (generation %d -> %d).",
+                    table_name,
+                    generation,
+                    self._table_generation,
+                )
+                return schema
             new_columns = [col["name"] for col in schema]
             new_numeric = self._detect_numeric_cols(schema)
             self._set_state(
@@ -315,12 +333,13 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
                 logger.error(
                     "[DataExplorerVM] Operational error in load_table_schema: %s", safe_error(e), exc_info=True
                 )
-            self._set_state(
-                error_message=Message(
-                    error_info.get("message_key", "common_err_unknown"),
-                    error_info.get("format_args") or {},
+            if generation == self._table_generation:
+                self._set_state(
+                    error_message=Message(
+                        error_info.get("message_key", "common_err_unknown"),
+                        error_info.get("format_args") or {},
+                    )
                 )
-            )
             return []
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -340,9 +359,14 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         ensure_correlation_id()
         if self._disposed:
             return pd.DataFrame()
-        if self._state.is_loading:
+        generation = self._table_generation
+        # 同代次已有查询在途时拒绝重复请求; 旧代次仍持有 is_loading 时不得阻塞新代次
+        # (否则切表后新表数据永不加载)。is_loading 由外部置位 (_loading_generation 为 None)
+        # 时仍按在途处理, 保持既有并发守卫语义。
+        if self._state.is_loading and self._loading_generation in (None, generation):
             return pd.DataFrame()
 
+        self._loading_generation = generation
         self._set_state(is_loading=True)
         try:
             tbl = table_name or self._state.current_table
@@ -360,6 +384,15 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
                 TaskType.CPU,
                 functools.partial(self._db.query_table, tbl, pg, self._state.page_size, flt, sort, asc),
             )
+            if generation != self._table_generation:
+                # M-UI-16 复核: 旧代次数据不得写回 (切表后新表状态不可被旧表查询结果覆盖)
+                logger.debug(
+                    "[DataExplorerVM] Discard stale query result for table=%s (generation %d -> %d).",
+                    tbl,
+                    generation,
+                    self._table_generation,
+                )
+                return df
             # 声明式: 数据写入 state.table_rows (L771 合规, tuple[Row, ...])
             # 重读 self._state 拿最新 snapshot 避免 await 期间竞态 (race safety)
             columns = self._state.table_columns
@@ -389,15 +422,19 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
                 )
             else:
                 logger.error("[DataExplorerVM] Operational error in query_data: %s", safe_error(e), exc_info=True)
-            self._set_state(
-                error_message=Message(
-                    error_info.get("message_key", "common_err_unknown"),
-                    error_info.get("format_args") or {},
+            if generation == self._table_generation:
+                self._set_state(
+                    error_message=Message(
+                        error_info.get("message_key", "common_err_unknown"),
+                        error_info.get("format_args") or {},
+                    )
                 )
-            )
             return pd.DataFrame()
         finally:
-            self._set_state(is_loading=False)
+            # 仅持有 is_loading 的代次可清加载态, 避免旧代次收尾关闭新代次的 loading
+            if self._loading_generation == generation:
+                self._loading_generation = None
+                self._set_state(is_loading=False)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def query_count(
@@ -663,8 +700,14 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             return
         self._set_state(sort_col_index=col_index, sort_asc=ascending)
 
+    def _advance_table_generation_if_changed(self, table_name: str) -> None:
+        """当前表变化时推进切表代次, 使在途旧表回执失效 (M-UI-16 复核)。"""
+        if table_name != self._state.current_table:
+            self._table_generation += 1
+
     def set_table(self, table_name: str) -> None:
         """Set the current table name(View 调用,替代直接属性写入)。"""
+        self._advance_table_generation_if_changed(table_name)
         self._set_state(current_table=table_name)
 
     def mark_tables_stale(self) -> None:
