@@ -21,6 +21,7 @@ from flet.components.component import Component
 
 from ui.components.stock_detail_dialog import _build_title
 from ui.viewmodels import Message
+from ui.viewmodels.sentiment_index_types import SentimentIndexState
 from ui.viewmodels.watchlist_view_model import (
     DetailOpenResult,
     WatchlistMutationResult,
@@ -127,6 +128,44 @@ class _FakeWatchlistViewModel:
     def close_stock_detail(self) -> None:
         self.method_calls.append(("close_stock_detail", {}))
         self._set_state(detail_stock_data=None)
+
+
+class _FakeSentimentViewModel:
+    """满足 ``use_viewmodel`` 契约的 fake 情绪 VM（UIR-F10-003，不加载真实服务）。"""
+
+    def __init__(self) -> None:
+        self._state: SentimentIndexState = SentimentIndexState()
+        self._subscribers: list[Any] = []
+        self.dispose_called: bool = False
+        self.select_stock_calls: list[tuple[str | None, str | None]] = []
+        self.select_day_calls: list[Any] = []
+        self.cancel_calls: int = 0
+
+    @property
+    def state(self) -> SentimentIndexState:
+        return self._state
+
+    def subscribe(self, callback: Any) -> Any:
+        self._subscribers.append(callback)
+
+        def _unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return _unsubscribe
+
+    def select_stock(self, ts_code: str | None, stock_name: str | None = None) -> None:
+        self.select_stock_calls.append((ts_code, stock_name))
+
+    def select_day(self, day: Any) -> None:
+        self.select_day_calls.append(day)
+
+    def cancel(self) -> None:
+        self.cancel_calls += 1
+
+    def dispose(self) -> None:
+        self.dispose_called = True
+        self._subscribers.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +363,7 @@ class TestBuildWatchlistRow:
         assert any(v.strip() == "000001.SZ" for v in sub_texts)
 
     def test_watchlist_row_renders_view_button(self) -> None:
-        """UX-04: on_view 传入时渲染 SEARCH_OUTLINED 查看按钮 (删除按钮前), 回调绑定 ts_code."""
+        """UX-04: on_view 传入时渲染 SEARCH_OUTLINED 查看按钮 (删除按钮前), 回调绑定 ts_code + 展示名."""
         row = _make_row()
         on_remove = MagicMock()
         on_view = MagicMock()
@@ -336,7 +375,8 @@ class TestBuildWatchlistRow:
         view_button = icon_buttons[0]
         assert view_button.icon == ft.Icons.SEARCH_OUTLINED
         _click_icon_button(view_button)
-        on_view.assert_called_once_with("000001.SZ")
+        # UIR-F10-003: 回调携带 (ts_code, 展示名) 以驱动情绪 VM
+        on_view.assert_called_once_with("000001.SZ", "平安银行")
 
     def test_build_row_without_on_view_no_button(self) -> None:
         """UX-04: on_view=None (默认) → 无查看按钮, 仅删除按钮 (位置参数兼容守护)."""
@@ -434,6 +474,11 @@ def mock_watchlist_vm(monkeypatch):
 
     monkeypatch.setattr(watchlist_view_module, "StockDetailDialog", _fake_detail_dialog)
     fake_vm.captured_detail_kwargs = captured_detail_kwargs  # type: ignore[attr-defined]  # [reason: 测试桩动态挂载捕获 dict, 非 VM 契约属性]
+
+    # UIR-F10-003: 注入 fake 情绪 VM，替代真实 SentimentIndexViewModel（避免触发真实取数服务）。
+    fake_sent_vm = _FakeSentimentViewModel()
+    monkeypatch.setattr(watchlist_view_module, "SentimentIndexViewModel", lambda: fake_sent_vm)
+    fake_vm.fake_sent_vm = fake_sent_vm  # type: ignore[attr-defined]  # [reason: 测试桩动态挂载 fake 情绪 VM, 非 VM 契约属性]
 
     return fake_vm
 
@@ -836,6 +881,109 @@ class TestWatchlistViewViewStock:
         assert callable(on_close)
         on_close()
         assert mock_watchlist_vm.state.detail_stock_data is None
+
+    def test_view_stock_selects_sentiment_with_code_and_name(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """UIR-F10-003 / FR-UX-007: 自选打开详情时情绪 VM 收到 (ts_code, 名称)。
+
+        GWT: Given 不运行任何策略、自选 A(000001.SZ/平安银行)；When 查看 A；
+        Then 情绪 VM 收到 A/名称，弹窗含对应 state 与 select_day/cancel 命令。
+        """
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+
+        rows = (_make_row(ts_code="000001.SZ", stock_name="平安银行"),)
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        view_buttons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.SEARCH_OUTLINED
+        ]
+        _click_icon_button(view_buttons[0])
+
+        sent_vm = mock_watchlist_vm.fake_sent_vm
+        assert sent_vm.select_stock_calls == [("000001.SZ", "平安银行")]
+
+        _rerender(component)
+        kwargs = mock_watchlist_vm.captured_detail_kwargs
+        # 情绪 state 与命令已接线（弹窗条件渲染 SentimentBar 依赖 sentiment_state 非 None）
+        assert kwargs.get("sentiment_state") is sent_vm.state
+        assert kwargs.get("sentiment_on_select_day") == sent_vm.select_day
+        assert kwargs.get("sentiment_on_cancel") == sent_vm.cancel
+
+    def test_view_stock_failed_does_not_select_sentiment(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """UIR-F10-003: 详情取数失败（failed）不发情绪请求（不渲染弹窗）。"""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+
+        rows = (_make_row(ts_code="000001.SZ", stock_name="平安银行"),)
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
+        mock_watchlist_vm.detail_open_result = "failed"
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.toast = MagicMock()  # type: ignore[attr-defined]  # [reason: ToastManager 由 application.py 挂载到 page.toast]
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        view_buttons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.SEARCH_OUTLINED
+        ]
+        _click_icon_button(view_buttons[0])
+
+        assert mock_watchlist_vm.fake_sent_vm.select_stock_calls == []
+        _rerender(component)
+        assert mock_watchlist_vm.captured_detail_kwargs.get("open_state") is None
+
+    def test_view_stock_superseded_does_not_select_sentiment(
+        self, mock_watchlist_vm, mock_i18n_for_view, mock_i18n_state, mock_app_colors_state
+    ):
+        """UIR-F10-003 + F10-002: 过期请求（superseded）既不发情绪请求也不渲染弹窗。"""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+
+        rows = (_make_row(ts_code="000001.SZ", stock_name="平安银行"),)
+        mock_watchlist_vm._state = WatchlistState(watchlist_rows=rows, is_loading=False)
+        mock_watchlist_vm.detail_open_result = "superseded"
+        component = make_component(WatchlistView, active=True)
+        page = FakePage()
+        page.run_task = lambda func, *args, **kwargs: asyncio.run(func(*args, **kwargs))  # type: ignore[assignment]
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        view_buttons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.SEARCH_OUTLINED
+        ]
+        _click_icon_button(view_buttons[0])
+
+        assert mock_watchlist_vm.fake_sent_vm.select_stock_calls == []
+        _rerender(component)
+        assert mock_watchlist_vm.captured_detail_kwargs.get("open_state") is None
 
 
 class TestWatchlistViewLoadEffect:

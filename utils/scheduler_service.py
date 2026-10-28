@@ -251,6 +251,17 @@ class SchedulerService:
         self._last_pred_date = max(self._last_pred_date or "", today_str)
         await self._persist_run_date_db(_DB_KEY_NIGHTLY_PREDICTION, _CFG_LAST_NIGHTLY_PREDICTION, today_str)
 
+    async def _mark_concept_sync_done_db(self, today_str: str):
+        """UIR-F14-003: 仅在「所需来源全部完成」时推进概念同步幂等水位。
+
+        内存侧单调（R22，同 daily/nightly 标记方法），DB 由 ``_persist_run_date_db``
+        经 ``set_app_state_max`` 的 GREATEST 保护写；成功推进同时清除失败原因，
+        避免状态面板残留旧失败（D7-6）。
+        """
+        self._last_concept_sync_date = max(self._last_concept_sync_date or "", today_str)
+        self._job_last_failure_reason.pop("concept_sync_daily_refresh", None)
+        await self._persist_run_date_db(_DB_KEY_CONCEPT_SYNC, _CFG_LAST_CONCEPT_SYNC, today_str)
+
     def start(self):
         """Start the scheduler"""
         if self.scheduler.running:
@@ -852,7 +863,7 @@ class SchedulerService:
         check_data_exists 缓存跳过，重复同步安全（天然续传）。逐日捕获异常（CancelledError
         重抛、其他异常记日志后继续），单日失败不中断整批。
         MAJOR-05: 幂等键的推进以「每一天都明确成功」为准，而非仅看共享 sync_result 的
-        is_complete——单日同步的系统级异常在失败表登记段（historical.py 的 _record_failed）
+        is_complete——单日同步的系统级异常在失败表登记段（historical.py 的 _record_not_ready）
         之前就重抛，该日「失败了却没记账」，只看 is_complete 会把未记账的失败日当成功。
         """
         from services.task_manager import TaskManager  # lazy-import: 启动性能
@@ -869,9 +880,10 @@ class SchedulerService:
         # 关键表仅其一失败时单日同步不抛异常（historical.py 仅两者都失败才 raise），故
         # 不能只按「无异常」判定成功；failed_critical_tables 批内只增不减、is_complete 单调，
         # 一旦为假即冻结，保证部分推进时水位不越过任何关键表失败日（R21/R22）。
-        # 已知边界（不在本次修复内，属报告 MINOR-02/MAJOR-02）：关键表因权限被拒时单日同步
-        # 同样不抛异常、也不登记失败表（SYNC_RESULT_SKIPPED_PERMISSION），本层无法区分该日的
-        # 「无数据」与「合法空」，仍会判为成功。
+        # UIR-F14-001：关键表因权限被拒（SYNC_RESULT_SKIPPED_PERMISSION）、关键表 EMPTY 或
+        # 严格短写（丢行 > 5%）现由同步层登记进 failed_critical_tables，本层经 is_complete
+        # 即可区分「不可就绪」与「完整成功」，不再把这些日子判为成功；可选稀疏表的合法空日
+        # 仍不影响完整性（由 sync_empty_days 登记）。
         failed_dates: list[datetime.date] = []
         contiguous_success_end: datetime.date | None = None
         for i, d in enumerate(missed_dates):
@@ -1100,14 +1112,37 @@ class SchedulerService:
             if not tm.update_progress(task_id, 0.05, Message("sched_concept_sync_progress")):
                 raise asyncio.CancelledError("task cancelled by scheduler (update_progress returned False)")
             # Scheduled run: 仅同步免费数据源（AKShare 东财 + Tushare 涨停）
-            await processor.run_concept_sync(
+            result = await processor.run_concept_sync(
                 task_id=task_id,
                 cancel_event=cancel_event,
             )
-            # REVIEW-06 TO-02: 内存侧单调（同 daily/nightly 标记方法）
-            self._last_concept_sync_date = max(self._last_concept_sync_date or "", today_str)
-            await self._persist_run_date_db(_DB_KEY_CONCEPT_SYNC, _CFG_LAST_CONCEPT_SYNC, today_str)
-            return Message("sched_concept_sync_done")
+            # UIR-F14-003: 门面返回结构化来源结果，禁止「未抛异常即视为成功」。
+            # 「所需源完成」判据以 result.is_complete 为准（AKShare 成分 + LIMIT_ 停写清理
+            # 均完成才算当日成功）；partial/failed 不推进水位，使下次触发重试失败源。
+            status = getattr(result, "status", None)
+            if status == "cancelled":
+                # 取消不吞（R2）：不推进水位，向 TaskManager 传播取消（任务不标 done）。
+                raise asyncio.CancelledError("concept sync cancelled before completion")
+            if getattr(result, "is_complete", False):
+                await self._mark_concept_sync_done_db(today_str)
+                return Message("sched_concept_sync_done")
+
+            summary_fn = getattr(result, "to_summary", None)
+            summary = summary_fn() if callable(summary_fn) else str(result)
+            failed_sources = list(getattr(result, "failed_sources", []) or [])
+            logger.warning(
+                "[Scheduler] Concept sync NOT complete (status=%s, failed_sources=%s, summary=%s), "
+                "NOT marking done; will retry on next trigger",
+                status,
+                failed_sources,
+                summary,
+            )
+            # D7-6: 显式记录失败原因（脱敏，R9），供调度状态面板呈现；水位不推进即保留重试机会。
+            self._job_last_failure_reason["concept_sync_daily_refresh"] = DataSanitizer.sanitize_error(
+                f"status={status}; {summary}"
+            )
+            message_key = "sched_concept_sync_failed" if status == "failed" else "sched_concept_sync_partial"
+            return Message(message_key, {"sources": summary})
 
         # D6-5: 检查返回值为 None 的两种情形（去重命中/无事件循环），日志在 TaskManager
         # 内已分别记录，此处仅从调度器视角告警，交由 D6-1 补偿机制兜底。

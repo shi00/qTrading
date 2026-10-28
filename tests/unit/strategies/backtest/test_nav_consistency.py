@@ -99,9 +99,11 @@ class TestNavQfqConsistency:
         cost_model: TransactionCostModel,
     ) -> None:
         """
-        total_value 不应等于 cash + raw_market_value。
+        total_value 不应等于 cash + 复权单位 × 原始价（混用单位）。
 
-        当 raw != qfq 时，验证 total_value 使用 qfq 口径。
+        当 raw != qfq 时，验证 total_value 使用 qfq 口径；UIR-F11-002 后
+        名义股数 × raw_close 与复权单位 × qfq_close 等价，故用「复权单位 × raw」
+        这一混用单位口径作为反例。
         """
         simulator = PortfolioSimulator(config, cost_model)
 
@@ -135,10 +137,10 @@ class TestNavQfqConsistency:
         cash = last_record["cash"]
         positions_detail = last_record["positions"]
 
-        raw_mv_sum = sum(p["raw_market_value"] for p in positions_detail.values())
-        raw_based_total = cash + raw_mv_sum
+        mixed_unit_mv_sum = sum(p["adjusted_units"] * 20.5 for p in positions_detail.values())
+        mixed_unit_total = cash + mixed_unit_mv_sum
 
-        assert total_value != pytest.approx(raw_based_total, rel=0.1)
+        assert total_value != pytest.approx(mixed_unit_total, rel=0.1)
 
 
 class TestExRightNavNoJump:
@@ -340,18 +342,19 @@ class TestQfqPnlCalculation:
         assert not positions_df.is_empty()
 
         buy_trade = trades_df.row(0, named=True)
-        volume = buy_trade["volume"]
-        qfq_entry_price = 8.0
-        qfq_cost_basis = volume * qfq_entry_price
-
         last_position = positions_df.row(-1, named=True)
         positions_detail = last_position["positions"]
 
         if "000001.SZ" in positions_detail:
             pos_detail = positions_detail["000001.SZ"]
+            # UIR-F11-002: trades.volume 是名义股数，成本基价用复权单位（adjusted_units）
+            qfq_entry_price = 8.0
+            qfq_cost_basis = pos_detail["adjusted_units"] * qfq_entry_price
             expected_pnl = pos_detail["market_value"] - qfq_cost_basis
 
             assert pos_detail["pnl"] == pytest.approx(expected_pnl, rel=1e-6)
+            # 名义股数 × 名义价与复权单位 × 复权价等价
+            assert buy_trade["volume"] == pytest.approx(pos_detail["adjusted_units"] * (8.0 / 10.0), rel=1e-9)
 
     def test_pnl_reflects_real_return(
         self,
@@ -769,16 +772,22 @@ class TestNavNoJumpOnEntry:
 
         simulator.process_day(date(2024, 1, 2), signals, quotes, is_rebalance=True)
 
-        volume = int(1_000_000.0 / 22.0 / 100) * 100
+        # UIR-F11-002: 成交按名义价（raw_close=20）× 名义股数计价，
+        # 与账面复权单位 × qfq_close 等价；整手按名义价取整。
+        trades = simulator.get_results()[0]
+        buy_trades = trades.filter(pl.col("action") == "buy")
+        assert not buy_trades.is_empty()
+        volume = int(buy_trades["volume"][0])
+        assert volume > 0
+        assert volume % 100 == 0
+
         cost = cost_model.calculate(
-            price=22.0,
+            price=20.0,
             volume=volume,
             is_buy=True,
             trade_date=date(2024, 1, 2),
         )
         expected_transaction_cost = cost.net_amount - cost.gross_amount
-
-        assert volume > 0
 
         positions = simulator.get_results()[1]
         last = positions.row(-1, named=True)
@@ -848,18 +857,16 @@ class TestNavNoJumpOnEntry:
         assert not sell_trades.is_empty()
         sell_net = float(sell_trades["net_amount"][0])
 
-        # 买、卖均按 qfq 价结算：买支出 = 12*vol + buy_fee，卖收入 = 12*vol - sell_fee
+        # UIR-F11-002: 买、卖均按名义价（raw_close=10）× 名义股数结算；
+        # 名义价 × 名义股数 = 复权价 × 复权单位，故现金仍保持 qfq 口径。
         expected_buy_net = cost_model.calculate(
-            price=12.0, volume=volume, is_buy=True, trade_date=date(2024, 1, 2)
+            price=10.0, volume=volume, is_buy=True, trade_date=date(2024, 1, 2)
         ).net_amount
         expected_sell_net = cost_model.calculate(
-            price=12.0, volume=volume, is_buy=False, trade_date=date(2024, 1, 3)
+            price=10.0, volume=volume, is_buy=False, trade_date=date(2024, 1, 3)
         ).net_amount
 
         assert buy_net == pytest.approx(expected_buy_net, rel=1e-9)
         assert sell_net == pytest.approx(expected_sell_net, rel=1e-9)
         # 同价 round-trip 后现金回到本金 - 双边成本
-        assert simulator.cash == pytest.approx(
-            1_000_000.0 - (expected_buy_net - 12.0 * volume) - (12.0 * volume - expected_sell_net),
-            rel=1e-9,
-        )
+        assert simulator.cash == pytest.approx(1_000_000.0 - expected_buy_net + expected_sell_net, rel=1e-9)

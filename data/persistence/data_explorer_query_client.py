@@ -160,6 +160,15 @@ class DataExplorerQueryClient:
             table_name (str): Name of the table.
             filters (list): List of filter tuples (column, operator, value).
                             Example: [('ts_code', '=', '000001.SZ')]
+
+        Returns:
+            int: 合法空表/无匹配过滤返回 0。
+
+        Raises:
+            ValueError: 表名不在库表白名单内。
+            Exception: 计数查询执行失败（断连 / 无 SELECT 权限 / 列或参数不匹配等）原样向上
+                传播，由调用方经 ``classify_error(context="db")`` 分类。**不得以 0 冒充
+                「空表」**：0 行与执行失败对用户是两种完全不同的结论（UIR-F13-002）。
         """
         self._ensure_engine()
         try:
@@ -176,7 +185,7 @@ class DataExplorerQueryClient:
                 return result.scalar() or 0
         except Exception as e:
             logger.error("Error counting rows for %s: %s", table_name, safe_error(e))
-            return 0
+            raise
 
     def get_latest_trade_date(self) -> str | None:
         """Get the latest trade_date from daily_quotes (Phase 6.4, FR-UX-006).
@@ -247,7 +256,13 @@ class DataExplorerQueryClient:
         All SQL is built via SQLAlchemy Core — zero f-string concatenation.
 
         Returns:
-            pd.DataFrame: DataFrame containing the result rows.
+            pd.DataFrame: DataFrame containing the result rows (合法空表/无匹配过滤为空表)。
+
+        Raises:
+            ValueError: 表名不在库表白名单内。
+            Exception: 读行查询执行失败（断连 / 无 SELECT 权限 / 列或参数不匹配等）原样向上
+                传播，由调用方经 ``classify_error(context="db")`` 分类。**不得以空 DataFrame
+                冒充「无数据」**：空结果与执行失败对用户是两种完全不同的结论（UIR-F13-002）。
         """
         self._ensure_engine()
         try:
@@ -292,7 +307,7 @@ class DataExplorerQueryClient:
 
         except Exception as e:
             logger.error("Error querying table %s: %s", table_name, safe_error(e))
-            return pd.DataFrame()
+            raise
 
     def execute_sql(self, sql_query: typing.Any):
         """

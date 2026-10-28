@@ -203,10 +203,34 @@ class TestGetTableCount:
             assert result == 50
 
     def test_exception(self):
+        """UIR-F13-002: 执行失败必须传播，不得 return 0 冒充空表。"""
         dm = _make_dm()
         with patch.object(dm, "_validate_table_name", side_effect=Exception("error")):
-            result = dm.get_table_count("invalid")
-            assert result == 0
+            with pytest.raises(Exception, match="error"):
+                dm.get_table_count("invalid")
+
+    def test_execute_failure_propagates(self):
+        """已建 engine 后的执行错误（无 SELECT 权限/断连）原样传播而非返回 0。"""
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = RuntimeError("permission denied for table stock_basic")
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        with patch.object(dm, "_validate_table_name"):
+            with pytest.raises(RuntimeError, match="permission denied"):
+                dm.get_table_count("stock_basic")
+
+    def test_empty_table_returns_zero(self):
+        """合法空表（COUNT 返回 0/None）仍返回 0。"""
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.scalar.return_value = None
+        mock_conn.execute.return_value = mock_result
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        with patch.object(dm, "_validate_table_name"):
+            assert dm.get_table_count("stock_basic") == 0
 
 
 class TestValidateTableName:
@@ -431,10 +455,25 @@ class TestQueryTable:
             assert isinstance(result, pd.DataFrame)
 
     def test_exception(self):
+        """UIR-F13-002: 执行失败必须传播，不得返回空 DataFrame 冒充无数据。"""
         dm = _make_dm()
         with patch.object(dm, "_validate_table_name", side_effect=Exception("error")):
-            result = dm.query_table("invalid")
-            assert result.empty
+            with pytest.raises(Exception, match="error"):
+                dm.query_table("invalid")
+
+    def test_fetch_failure_propagates(self):
+        """读行失败（列/参数不匹配等）原样传播而非返回空 DataFrame。"""
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = RuntimeError("column does not exist")
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        with (
+            patch.object(dm, "_validate_table_name"),
+            patch.object(dm, "get_table_schema", return_value=[{"name": "ts_code"}]),
+        ):
+            with pytest.raises(RuntimeError, match="does not exist"):
+                dm.query_table("stock_basic")
 
 
 class TestExecuteSql:

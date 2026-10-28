@@ -77,8 +77,9 @@ class TestDataExplorerQueryClient(TestDatabaseBase):
         self.assertIn("Only SELECT", result.get("error", ""))
 
     def test_validate_table_name_security(self):
-        df = self.db_manager.query_table("invalid_table")
-        self.assertTrue(df.empty)
+        # UIR-F13-002: 非法表名属执行失败, 必须传播而非返回空 DataFrame 冒充「无数据」
+        with self.assertRaises(ValueError):
+            self.db_manager.query_table("invalid_table")
 
     async def test_execute_sql_memory_limit(self):
         async with self._ddl_engine.begin() as conn:

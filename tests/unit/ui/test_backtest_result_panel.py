@@ -769,6 +769,32 @@ class TestBuildMonthlyTable:
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
 
+    def test_missing_benchmark_and_excess_render_na_not_zero(self) -> None:
+        """UIR-F11-003: 基准/超额缺失（None）→ 单元格 N/A + 中性色，不得渲染 0.00%。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_monthly_table((("2024-01", 0.1, None, None),))
+
+        table = container.content
+        assert isinstance(table, ft.DataTable)
+        texts = [cell.content for cell in table.rows[0].cells if isinstance(cell.content, ft.Text)]
+        assert [t.value for t in texts] == ["2024-01", "10.00%", "N/A", "N/A"]
+        assert texts[2].color == AppColors.TEXT_SECONDARY
+        assert texts[3].color == AppColors.TEXT_SECONDARY
+
+    def test_real_zero_benchmark_and_excess_render_zero_percent(self) -> None:
+        """真实 0 收益仍渲染 0.00%（缺失与零值可区分，且零值不误判涨跌色）。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_monthly_table((("2024-01", 0.0, 0.0, 0.0),))
+
+        table = container.content
+        assert isinstance(table, ft.DataTable)
+        texts = [cell.content for cell in table.rows[0].cells if isinstance(cell.content, ft.Text)]
+        assert [t.value for t in texts] == ["2024-01", "0.00%", "0.00%", "0.00%"]
+        assert texts[1].color == AppColors.TEXT_PRIMARY
+        assert texts[3].color == AppColors.TEXT_PRIMARY
+
 
 class TestBacktestResultPanelContract:
     """契约守护测试：声明式组件禁止命令式模式。"""

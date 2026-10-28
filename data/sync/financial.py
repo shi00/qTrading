@@ -5,6 +5,7 @@ Handles comprehensive fundamentals, incremental updates, and data repair.
 
 import asyncio
 import datetime
+import json
 import logging
 import threading
 import time
@@ -20,6 +21,7 @@ from data.sync.base import (
     _is_peak_disclosure_season,
     safe_error,
 )
+from data.persistence.app_state_service import get_app_state, set_app_state, set_app_state_max
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
 from core.i18n import Message
@@ -37,6 +39,92 @@ logger = logging.getLogger(__name__)
 # 嵌套循环可运行数小时不响应取消信号，违反 2s 红线。改用 time.monotonic()
 # 时间维度测量，参考 data/sync/sw_industry.py 模式。
 _CANCEL_CHECK_INTERVAL_SECONDS = 2.0
+
+# UIR-F14-004: 增量披露同步检查点。
+# - 检查点为「连续成功披露日」（YYYYMMDD），只在早于该日的全部披露目标均已解决
+#   （成功或合法空）后单调推进，经 set_app_state_max 保证 R22 水位单调；
+# - pending 为「未解决披露目标」集合（按披露日分组），失败/取消未处理的目标持久化后
+#   在后续轮次优先重试，避免被后续成功日跨过；
+# - last_sync_date 仅作遥测（最近尝试时间），不再作为增量窗口完成水位。
+_FINANCIAL_DISCLOSURE_CHECKPOINT_KEY = "financial_disclosure_checkpoint"
+_FINANCIAL_DISCLOSURE_PENDING_KEY = "financial_disclosure_pending"
+# 无检查点（升级/新建）时选定的历史补抓窗口，避免沿用「最近尝试时间」直接跳过旧失败日。
+_LEGACY_DISCLOSURE_BACKFILL_DAYS = 30
+
+
+def _parse_disclosure_checkpoint(raw) -> datetime.date | None:
+    """Parse the persisted contiguous-complete disclosure checkpoint (YYYYMMDD)."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return datetime.datetime.strptime(raw.strip(), "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
+    except ValueError:
+        logger.warning("[FinancialSync] Checkpoint | Invalid disclosure checkpoint %r, ignoring.", raw)
+        return None
+
+
+def _parse_disclosure_day(day: str) -> datetime.date | None:
+    try:
+        return datetime.datetime.strptime(day, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_pending_disclosure_targets(raw) -> dict[str, set[tuple[str, str]]]:
+    """Load unresolved disclosure targets: {YYYYMMDD: {(ts_code, period), ...}}.
+
+    Invalid/legacy payloads degrade to an empty set (fail-open: the day is re-fetched
+    from the checkpoint, so no completed day is skipped).
+    """
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("[FinancialSync] Checkpoint | Invalid pending disclosure payload, resetting to empty.")
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    pending: dict[str, set[tuple[str, str]]] = {}
+    for day, entries in payload.items():
+        if not isinstance(day, str) or not isinstance(entries, list) or _parse_disclosure_day(day) is None:
+            continue
+        targets = {
+            (entry["ts_code"], entry["period"])
+            for entry in entries
+            if isinstance(entry, dict)
+            and isinstance(entry.get("ts_code"), str)
+            and isinstance(entry.get("period"), str)
+        }
+        if targets:
+            pending[day] = targets
+    return pending
+
+
+def _dump_pending_disclosure_targets(pending: dict[str, set[tuple[str, str]]]) -> str:
+    return json.dumps(
+        {
+            day: [{"ts_code": code, "period": period} for code, period in sorted(targets)]
+            for day, targets in sorted(pending.items())
+        },
+        ensure_ascii=False,
+    )
+
+
+def _status_data_date(status: dict | None) -> datetime.date | None:
+    """Business water level from sync_status: last_data_date, fallback last_sync_date."""
+    if not status:
+        return None
+    raw = status.get("last_data_date")
+    if raw is None or pd.isna(raw):
+        raw = status.get("last_sync_date")
+    if raw is None or pd.isna(raw):
+        return None
+    try:
+        return parse_date(raw).date()
+    except (TypeError, ValueError):
+        logger.warning("[FinancialSync] Checkpoint | Failed to parse sync status date %r, using backfill window.", raw)
+        return None
 
 
 def _dedup_financial_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -531,6 +619,12 @@ class FinancialSyncStrategy(ISyncStrategy):
     ):
         """
         Incremental Sync: Query disclosure date.
+
+        UIR-F14-004/R21/R22: 增量窗口起点为「连续成功披露日」检查点（app_state），
+        而非最近尝试时间（last_sync_date 仅作遥测）。逐 target 显式返回
+        success/empty/failed；失败或取消未处理的目标写入 pending 集合并在后续轮次
+        优先重试。检查点仅当早于候选日的全部披露目标均已解决后才单调推进，因此
+        任一失败日不会被后续成功日跨过。
         """
         if self._shutdown_event.is_set():
             return
@@ -539,58 +633,45 @@ class FinancialSyncStrategy(ISyncStrategy):
         total_mainbz_rows = 0
         total_audit_rows = 0
 
+        engine = getattr(self.context.cache, "engine", None)
         status = await self.context.cache.sync_dao.get_sync_status("financial_reports")
-        # M-DATA-11/D2: 增量窗口起点改用 last_data_date（业务数据水位）。update_sync_status
-        # 将 last_sync_date 无条件写为当前墙钟时间（failed 日也推进），按它起算会使全失败
-        # 披露日被永久跳过（下方全失败分支「不推进以便下次重试」的意图，实际依赖
-        # last_data_date 的 failed/partial 不推进语义才成立）。last_data_date 缺失时回退
-        # last_sync_date（兼容存量记录），两者皆缺由解析失败分支回退 30 天窗口。
-        # 副作用：partial 日不推进 last_data_date，下次增量重复覆盖该日——UPSERT 幂等，
-        # 以重复拉取换取失败部分重试（正确性优先）。
-        _window_raw = status.get("last_data_date") if status else None
-        if _window_raw is None or pd.isna(_window_raw):
-            _window_raw = status.get("last_sync_date") if status else None
-        last_sync_str = _window_raw
+        checkpoint = _parse_disclosure_checkpoint(await get_app_state(engine, _FINANCIAL_DISCLOSURE_CHECKPOINT_KEY))
+        pending = _load_pending_disclosure_targets(await get_app_state(engine, _FINANCIAL_DISCLOSURE_PENDING_KEY))
 
-        try:
-            if isinstance(last_sync_str, datetime.datetime):
-                last_sync_dt = last_sync_str
+        today_date = get_now().date()
+        if checkpoint is not None:
+            window_start = checkpoint + datetime.timedelta(days=1)
+        else:
+            # 无检查点（升级/新建）：以 sync_status 的业务水位选窗口，但至少回看固定
+            # 历史窗口，避免沿用「最近尝试时间」语义直接跳过旧失败披露日。
+            backfill_floor = today_date - datetime.timedelta(days=_LEGACY_DISCLOSURE_BACKFILL_DAYS)
+            legacy_date = _status_data_date(status)
+            if legacy_date is not None and legacy_date + datetime.timedelta(days=1) > backfill_floor:
+                window_start = legacy_date + datetime.timedelta(days=1)
             else:
-                # M-DATA-11/D2: last_data_date 为 DATE 列，经 DataFrame 透传后可能是
-                # datetime.date / pandas.Timestamp / str；统一经 parse_date 归一为
-                # aware datetime（与 data_processor.should_sync_financials 同口径），
-                # 避免 strptime 单一格式对 date 对象抛 TypeError 被吞成 30 天回退。
-                last_sync_dt = parse_date(last_sync_str)
-            start_date_dt = last_sync_dt + datetime.timedelta(days=1)
-        except EngineDisposedError:
-            raise
-        except Exception as e:
-            severity = classify_severity(e, context="general")
-            log_classified(
-                logger,
-                e,
-                "general",
-                "[FinancialSync] Date parse | Failed to parse last_sync_date, using 30-day fallback (%s): %s",
-                exc_info=True,
-            )
-            if severity == "system":
-                raise
-            start_date_dt = get_now() - datetime.timedelta(days=30)
+                if legacy_date is not None:
+                    logger.warning(
+                        "[FinancialSync] Checkpoint | No disclosure checkpoint and legacy data date %s is stale; "
+                        "backfilling last %s days.",
+                        legacy_date,
+                        _LEGACY_DISCLOSURE_BACKFILL_DAYS,
+                    )
+                window_start = backfill_floor
 
-        today_dt = get_now()
-        dates_to_sync = []
-        curr = start_date_dt
-        while curr.date() <= today_dt.date():
-            dates_to_sync.append(curr.strftime("%Y%m%d"))
-            curr += datetime.timedelta(days=1)
+        window_days: list[datetime.date] = []
+        curr_date = window_start
+        while curr_date <= today_date:
+            window_days.append(curr_date)
+            curr_date += datetime.timedelta(days=1)
 
-        if not dates_to_sync:
+        pending_days = {d for d in (_parse_disclosure_day(day) for day in pending) if d is not None}
+        days_to_process = sorted(set(window_days) | pending_days)
+        if not days_to_process:
             logger.debug("[FinancialSync] Incremental | Data already up-to-date")
             return
 
+        dates_to_sync = [day.strftime("%Y%m%d") for day in days_to_process]
         total_saved = 0
-        total_mainbz_rows = 0
-        total_audit_rows = 0
 
         concurrency_factor, delay_multiplier = _get_seasonal_adjustments()
         base_concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
@@ -608,137 +689,236 @@ class FinancialSyncStrategy(ISyncStrategy):
             )
 
         semaphore = asyncio.Semaphore(adjusted_concurrency)
+        # Incremental 半批：使用 sync_batch_size // 2 降低 429 风险（高峰期披露密集，单日 target 量大）。
+        _BATCH_SIZE = max(5, ConfigHandler.get_sync_batch_size() // 2)
+
+        async def sync_one_target(ts_code: str, period: str) -> dict:
+            """Fetch/save one disclosure target; returns explicit success/empty/failed."""
+            result = {"status": "failed", "saved": 0, "mainbz": 0, "audit": 0}
+
+            async with semaphore:
+                try:
+                    await asyncio.sleep(adjusted_delay)
+                    df, aux_counts = await self._fetch_comprehensive_financial_data(
+                        ts_code,
+                        period=period,
+                    )
+
+                    result["mainbz"] = aux_counts["mainbz"]
+                    result["audit"] = aux_counts["audit"]
+
+                    if aux_counts.get("core_failed"):
+                        # 部分 core 表失败不得当全字段完整：不落库残缺数据，保留待重试。
+                        logger.warning(
+                            "[FinancialSync] Incremental | Core tables incomplete for %s period=%s; pending retry.",
+                            ts_code,
+                            period,
+                        )
+                        return result
+
+                    if df is not None and not df.empty:
+                        for col in FINANCIAL_REPORT_SCHEMA_COLS:
+                            if col not in df.columns:
+                                df[col] = None
+
+                        count = await self.context.cache.financial_dao.save_financial_reports(
+                            df[FINANCIAL_REPORT_SCHEMA_COLS],
+                        )
+                        # 事务/保存成功后才算解决；保存异常由下方 except 归为 failed。
+                        # 非空载荷却零落库（如表未注册/主键缺失返回 0）视为未解决，不宣称完整。
+                        if isinstance(count, int) and count > 0:
+                            result["saved"] = count
+                            result["status"] = "success"
+                        else:
+                            logger.warning(
+                                "[FinancialSync] Incremental | Save persisted no rows for %s period=%s; pending retry.",
+                                ts_code,
+                                period,
+                            )
+                    else:
+                        # 取数成功且无数据：合法空（未披露/无报告），与失败严格区分。
+                        result["status"] = "empty"
+                except EngineDisposedError:
+                    raise
+                except Exception as e:
+                    severity = classify_severity(e, context="general")
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "[FinancialSync] Incremental | Failed (%s): %s for %s period=%s",
+                        ts_code,
+                        period,
+                        exc_info=True,
+                    )
+                    if severity == "system":
+                        raise
+
+            return result
 
         # M7.6: day 循环转时间维度取消检查（每 2s），参考 sw_industry.py 模式。
         # 旧实现每迭代检查，快速迭代时冗余开销；慢迭代（单日 5-30s）时不影响响应。
         last_cancel_check = time.monotonic()
-        for day_str in dates_to_sync:
-            now = time.monotonic()
-            if now - last_cancel_check >= _CANCEL_CHECK_INTERVAL_SECONDS:
-                last_cancel_check = now
-                if self._shutdown_event.is_set():
-                    logger.debug("[FinancialSync] Incremental | Cancelled during day loop.")
-                    break
+        # 本轮已处理但未解决的披露日，用于阻止检查点跨过失败日。
+        blocking_days: set[datetime.date] = set()
+        pending_dirty = False
 
-            df_disclosure = await self.context.api.get_disclosure_date(date=day_str)
+        try:
+            for day in days_to_process:
+                now = time.monotonic()
+                if now - last_cancel_check >= _CANCEL_CHECK_INTERVAL_SECONDS:
+                    last_cancel_check = now
+                    if self._shutdown_event.is_set():
+                        logger.debug("[FinancialSync] Incremental | Cancelled during day loop.")
+                        break
 
-            if df_disclosure is None or df_disclosure.empty:
-                continue
+                day_str = day.strftime("%Y%m%d")
+                day_targets: list[tuple[str, str]] = []
+                seen_targets: set[tuple[str, str]] = set()
+                # pending 目标优先重试，不受当日披露清单变化影响。
+                for ts_code, period in sorted(pending.get(day_str, set())):
+                    if (ts_code, period) not in seen_targets:
+                        seen_targets.add((ts_code, period))
+                        day_targets.append((ts_code, period))
 
-            target_list = df_disclosure[["ts_code", "end_date"]].drop_duplicates().to_dict("records")
-            if not target_list:
-                continue
-
-            async def sync_one_target(item):
-                ts_code = item["ts_code"]
-                period = item["end_date"]
-                result = {"saved": 0, "mainbz": 0, "audit": 0}
-
-                async with semaphore:
-                    try:
-                        await asyncio.sleep(adjusted_delay)
-                        df, aux_counts = await self._fetch_comprehensive_financial_data(
-                            ts_code,
-                            period=period,
-                        )
-
-                        result["mainbz"] = aux_counts["mainbz"]
-                        result["audit"] = aux_counts["audit"]
-
-                        if df is not None and not df.empty:
-                            for col in FINANCIAL_REPORT_SCHEMA_COLS:
-                                if col not in df.columns:
-                                    df[col] = None
-
-                            count = await self.context.cache.financial_dao.save_financial_reports(
-                                df[FINANCIAL_REPORT_SCHEMA_COLS],
-                            )
-                            if count > 0:
-                                result["saved"] = count
-                    except EngineDisposedError:
-                        raise
-                    except Exception as e:
-                        severity = classify_severity(e, context="general")
-                        log_classified(
-                            logger,
-                            e,
-                            "general",
-                            "[FinancialSync] Incremental | Failed (%s): %s for %s period=%s",
-                            ts_code,
-                            period,
-                            exc_info=True,
-                        )
-                        if severity == "system":
-                            raise
-
-                return result
-
-            day_saved = 0
-            day_has_error = False
-            # Incremental 半批：使用 sync_batch_size // 2 降低 429 风险（高峰期披露密集，单日 target 量大）。
-            _BATCH_SIZE = max(5, ConfigHandler.get_sync_batch_size() // 2)
-            for batch_start in range(0, len(target_list), _BATCH_SIZE):
-                # M7.4: 内层 batch 循环补 _shutdown_event.is_set() 检查。旧实现
-                # 5-10s/batch 无检查，cancel 信号 set 后仍处理所有 batch，违反 2s
-                # 响应约束。参考 _run_full_sync L478 模式。
-                if self._shutdown_event.is_set():
-                    logger.debug(
-                        "[FinancialSync] Incremental | Cancelled during batch loop at batch_start=%s",
-                        batch_start,
+                disclosure_failed = False
+                try:
+                    df_disclosure = await self.context.api.get_disclosure_date(date=day_str)
+                except EngineDisposedError:
+                    raise
+                except Exception as e:
+                    severity = classify_severity(e, context="general")
+                    log_classified(
+                        logger,
+                        e,
+                        "general",
+                        "[FinancialSync] Incremental | Disclosure fetch failed (%s): %s for %s",
+                        day_str,
+                        exc_info=True,
                     )
-                    break
+                    if severity == "system":
+                        raise
+                    disclosure_failed = True
+                    df_disclosure = None
 
-                batch_targets = target_list[batch_start : batch_start + _BATCH_SIZE]
-                batch = [sync_one_target(item) for item in batch_targets]
-                batch_results = await gather_return_exceptions_propagating_cancel(*batch)
-                for r in batch_results:
-                    # R5: EngineDisposedError 必须优先传播，不作为普通 batch 失败
-                    if isinstance(r, EngineDisposedError):
-                        raise r
-                    if isinstance(r, Exception):
-                        logger.warning("[FinancialSync] Batch task failed: %s", r)
-                        day_has_error = True
-                        continue
-                    day_saved += r["saved"]  # type: ignore[index]
-                    total_saved += r["saved"]  # type: ignore[index]
-                    total_mainbz_rows += r["mainbz"]  # type: ignore[index]
-                    total_audit_rows += r["audit"]  # type: ignore[index]
+                if df_disclosure is not None and not df_disclosure.empty:
+                    for item in df_disclosure[["ts_code", "end_date"]].drop_duplicates().to_dict("records"):
+                        pair = (item["ts_code"], item["end_date"])
+                        if not all(isinstance(v, str) for v in pair):
+                            # 残缺披露行无法构成可解析的待补目标，跳过以免污染 pending。
+                            logger.warning("[FinancialSync] Incremental | Skip malformed disclosure row: %s", item)
+                            continue
+                        if pair not in seen_targets:
+                            seen_targets.add(pair)
+                            day_targets.append(pair)
 
-            day_date = datetime.datetime.strptime(day_str, "%Y%m%d").date()  # noqa: DTZ007  YYYYMMDD 业务日期字符串无时区语义
-            if day_has_error and day_saved == 0:
-                # 全部失败：标记 failed，不推进 last_sync_date 以便下次重试
-                await self.context.cache.sync_dao.update_sync_status(
-                    "financial_reports",
-                    day_date,
-                    0,
-                    status="failed",
+                day_saved = 0
+                attempted: set[tuple[str, str]] = set()
+                failed_targets: set[tuple[str, str]] = set()
+
+                for batch_start in range(0, len(day_targets), _BATCH_SIZE):
+                    # M7.4: 内层 batch 循环补 _shutdown_event.is_set() 检查。
+                    if self._shutdown_event.is_set():
+                        logger.debug(
+                            "[FinancialSync] Incremental | Cancelled during batch loop at batch_start=%s",
+                            batch_start,
+                        )
+                        break
+
+                    batch_targets = day_targets[batch_start : batch_start + _BATCH_SIZE]
+                    batch = [sync_one_target(ts_code, period) for ts_code, period in batch_targets]
+                    batch_results = await gather_return_exceptions_propagating_cancel(*batch)
+                    for (ts_code, period), r in zip(batch_targets, batch_results, strict=False):
+                        attempted.add((ts_code, period))
+                        # R5: EngineDisposedError 必须优先传播，不作为普通 batch 失败
+                        if isinstance(r, EngineDisposedError):
+                            raise r
+                        if isinstance(r, Exception):
+                            logger.warning("[FinancialSync] Batch task failed: %s", r)
+                            failed_targets.add((ts_code, period))
+                            continue
+                        if r["status"] == "failed":
+                            failed_targets.add((ts_code, period))
+                            continue
+                        day_saved += r["saved"]  # type: ignore[index]
+                        total_saved += r["saved"]  # type: ignore[index]
+                        total_mainbz_rows += r["mainbz"]  # type: ignore[index]
+                        total_audit_rows += r["audit"]  # type: ignore[index]
+
+                # 取消导致未处理的目标同样保留为 pending，避免下次被检查点跨过。
+                unresolved = failed_targets | (set(day_targets) - attempted)
+                if unresolved:
+                    pending[day_str] = unresolved
+                    pending_dirty = True
+                elif day_str in pending:
+                    pending.pop(day_str, None)
+                    pending_dirty = True
+
+                pending_days = {d for d in (_parse_disclosure_day(key) for key in pending) if d is not None}
+
+                day_has_error = disclosure_failed or bool(unresolved)
+                if day_has_error and day_saved == 0:
+                    # 全部失败/未完成：标记 failed；检查点不推进，下次重试
+                    await self.context.cache.sync_dao.update_sync_status(
+                        "financial_reports",
+                        day,
+                        0,
+                        status="failed",
+                    )
+                elif day_has_error:
+                    # 部分失败：标记 partial；检查点不推进，pending 目标下次重试
+                    await self.context.cache.sync_dao.update_sync_status(
+                        "financial_reports",
+                        day,
+                        day_saved,
+                        status="partial",
+                    )
+                else:
+                    await self.context.cache.sync_dao.update_sync_status(
+                        "financial_reports",
+                        day,
+                        day_saved,
+                    )
+
+                # 检查点仅在「早于该日的所有披露目标均已解决」时推进（R22 单调写）。
+                if day_has_error:
+                    blocking_days.add(day)
+                else:
+                    blocking_days.discard(day)
+                    if not any(d <= day for d in blocking_days) and not any(d <= day for d in pending_days):
+                        await set_app_state_max(
+                            engine,
+                            _FINANCIAL_DISCLOSURE_CHECKPOINT_KEY,
+                            day_str,
+                        )
+
+                if pending_dirty:
+                    await set_app_state(
+                        engine,
+                        _FINANCIAL_DISCLOSURE_PENDING_KEY,
+                        _dump_pending_disclosure_targets(pending),
+                    )
+                    pending_dirty = False
+
+                # S17 同模式：当日 fetch/save 失败必须反映到 SyncResult，
+                # 避免「sync_status 表已记 failed/partial 但 SyncResult 仍 success」
+                # 导致调用方与调度器误判本次同步完全成功。不覆盖更严重的终态。
+                if day_has_error and result_accumulator.status not in (
+                    SyncStatus.FAILED.value,
+                    SyncStatus.CANCELLED.value,
+                ):
+                    result_accumulator.status = SyncStatus.PARTIAL.value
+
+                if progress_callback:
+                    progress_callback(0, 0, Message("progress_sync_done", {"day": day_str}))
+        finally:
+            # 取消/异常时也持久化已知未解决目标（检查点未推进，下次从该日重试）。
+            if pending_dirty:
+                await set_app_state(
+                    engine,
+                    _FINANCIAL_DISCLOSURE_PENDING_KEY,
+                    _dump_pending_disclosure_targets(pending),
                 )
-            elif day_has_error:
-                # 部分失败：标记 partial，仍推进 last_sync_date
-                await self.context.cache.sync_dao.update_sync_status(
-                    "financial_reports",
-                    day_date,
-                    day_saved,
-                    status="partial",
-                )
-            else:
-                await self.context.cache.sync_dao.update_sync_status(
-                    "financial_reports",
-                    day_date,
-                    day_saved,
-                )
-
-            # S17 同模式：当日 fetch/save 失败必须反映到 SyncResult，
-            # 避免「sync_status 表已记 failed/partial 但 SyncResult 仍 success」
-            # 导致调用方与调度器误判本次同步完全成功。不覆盖更严重的终态。
-            if day_has_error and result_accumulator.status not in (
-                SyncStatus.FAILED.value,
-                SyncStatus.CANCELLED.value,
-            ):
-                result_accumulator.status = SyncStatus.PARTIAL.value
-
-            if progress_callback:
-                progress_callback(0, 0, Message("progress_sync_done", {"day": day_str}))
 
         # --- Step 2: Batch Sync Corporate Actions (O(Time) Optimization) ---
         # Sync Forecasts, Dividends, etc. by date

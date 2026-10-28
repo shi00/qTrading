@@ -367,7 +367,7 @@ class TestTaskManagerSubmitTask:
             unique_key="unique_key_1",
         )
         manager._tasks = {"existing_task": task1}
-        manager._active_keys.add("unique_key_1")
+        manager._active_keys["unique_key_1"] = task1.id
 
         async def dummy_coro(task_id):
             return "done"

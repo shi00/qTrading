@@ -32,6 +32,42 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# UIR-F11-001: 默认回测路径（未注入 data_processor）必须具备的最小历史数据能力。
+# 缺失时在引擎运行前明确拒绝，避免策略在历史窗口取数前抛 AttributeError、
+# 或（fail_fast=False 时）被吞成「无信号」（R21：能力缺失不得伪装成无匹配）。
+_REQUIRED_HISTORY_CAPABILITIES = ("cache", "trade_calendar")
+
+
+class HistoryDataContext:
+    """默认回测路径的最小历史数据上下文（替代实盘 DataProcessor 的数据访问面）。
+
+    仅暴露策略在历史回放中需要的两项只读能力：
+
+    - ``cache``：本地 DAO 访问（行情/辅助表等）；
+    - ``trade_calendar``：``TradeCalendarService(cache, None)``（DB + 离线日历两级，
+      不引入 live API），由引擎/策略按信号日回溯历史窗口。
+
+    刻意不提供实盘快照与质量等级语义：区间质量门控由 ``_BacktestQualityProxy`` 承担，
+    快照类策略也不会被迫走实盘 ``DataProcessor``（UIR-F11-001）。
+    """
+
+    def __init__(self, cache: CacheManager, trade_calendar: Any):
+        self.cache = cache
+        self.trade_calendar = trade_calendar
+
+
+def _build_history_context(cache: CacheManager, trade_calendar: Any = None) -> HistoryDataContext:
+    """为未注入 data_processor 的回测路径构造无网络的历史数据上下文。
+
+    ``TradeCalendarService.__init__`` 仅做依赖注入（无 I/O），故可在 provider 构造期
+    安全创建；日历查询本身按需访问本地 DB 与离线日历。
+    """
+    if trade_calendar is None:
+        from data.domain_services.trade_calendar_service import TradeCalendarService
+
+        trade_calendar = TradeCalendarService(cache, None)
+    return HistoryDataContext(cache, trade_calendar)
+
 
 class _BacktestQualityProxy:
     """回测场景下的 DataProcessor 质量代理。
@@ -44,12 +80,13 @@ class _BacktestQualityProxy:
        若聚合降级 BRONZE 会在 `_check_tier` 逐日消费时把整个区间的每一天都拦截。
        `_scan_missing_dates` 以 frozenset 承载缺口日，供 quality_gate._check_tier
        的连续窗口契约消费（D2-9）与 range_quality_gaps 警告展示。
-    2. 其余属性/方法经 `__getattr__` 委托给注入的 data_processor（若有），
-       保证策略访问 `context["data_processor"]` 的数据能力（cache / trade_calendar /
-       get_screening_data / get_latest_trade_date / is_cancelled 等）不被破坏。
+    2. 其余属性/方法经 `__getattr__` 委托给注入的 delegate，保证策略访问
+       `context["data_processor"]` 的数据能力不被破坏。delegate 由 provider 装配：
+       显式注入时为真实 DataProcessor，未注入时为 `HistoryDataContext`
+       （cache + trade_calendar，UIR-F11-001）。
 
-    无 delegate（未注入 data_processor 的纯数据预载场景）时退化为仅含质量字段的
-    纯代理，与历史行为一致。
+    仅当直接构造且 `delegate=None`（纯质量字段代理）时退化为无数据能力，
+    该形态只用于单测断言，生产路径恒有 delegate。
 
     BT-03 MAJOR-02：区间缺口评估已从 preload_range 拆出为 `evaluate_range_quality`，
     由 preload_range 在**所有路径**（成功预载 / 宽区间跳过 / 预载失败逐日降级）统一调用，
@@ -58,7 +95,7 @@ class _BacktestQualityProxy:
 
     def __init__(
         self,
-        delegate: DataProcessor | None = None,
+        delegate: DataProcessor | HistoryDataContext | None = None,
         tier: QualityTier = QualityTier.GOLD,
         missing_dates: frozenset[str] = frozenset(),
     ):
@@ -75,8 +112,8 @@ class _BacktestQualityProxy:
         self._quality_tier_by_table: dict[str, int] | None = None
 
     def __getattr__(self, name: str) -> Any:
-        # 仅当普通实例属性不存在时被调用：委托给真实 data_processor，
-        # 保持策略对 context processor 的数据访问能力（非质量字段）。
+        # 仅当普通实例属性不存在时被调用：委托给 provider 装配的 delegate
+        # （真实 processor 或默认最小历史上下文），保持策略的数据访问能力（非质量字段）。
         if self._delegate is not None:
             return getattr(self._delegate, name)
         raise AttributeError(name)
@@ -98,14 +135,22 @@ class BacktestDataProvider:
         cache: CacheManager,
         data_processor: DataProcessor | None = None,
         preload_max_days: int = 366,
+        trade_calendar: Any = None,
     ):
         self.cache = cache
         self.data_processor = data_processor
+        # UIR-F11-001: 未注入 data_processor 的默认路径（UI/独立回测）不再退化为
+        # 「无数据能力代理」——以 cache + TradeCalendarService(cache, None) 组装最小
+        # 历史上下文，保证 oversold 等依赖 cache/trade_calendar 的可选策略可运行。
+        # 显式注入 data_processor 时保持原样（完整数据能力由调用方负责）。
+        self._history_context = (
+            data_processor if data_processor is not None else _build_history_context(cache, trade_calendar)
+        )
         # D3-M2: 恒创建回测区间质量代理，不再因注入 data_processor 而置 None。
-        # 有注入时 delegate=真实 processor（策略经 __getattr__ 委托访问其数据能力），
-        # 无注入时退化为纯质量字段代理。preload_range 成功后按区间缺口写入
-        # `_scan_missing_dates`（等级恒 GOLD，缺口不降级，见 preload_range 注释）。
-        self._quality_proxy = _BacktestQualityProxy(delegate=data_processor)
+        # delegate: 有注入时为真实 processor，无注入时为上述最小历史上下文。
+        # preload_range 成功后按区间缺口写入 `_scan_missing_dates`
+        # （等级恒 GOLD，缺口不降级，见 preload_range 注释）。
+        self._quality_proxy = _BacktestQualityProxy(delegate=self._history_context)
         self._preloaded: dict | None = None
         self.preload_max_days = preload_max_days
         # D3-M4: 本次回测区间预载的降级警告（区间超限 / 范围预载失败 / 护栏超限），
@@ -118,6 +163,11 @@ class BacktestDataProvider:
         # 仅在近似「已生效」时由 engine 产出 delisting_asof_approximation 告警并在结果中
         # 标注（R24「显式声明并在结果中标注」）。
         self._saw_delisting_flagged = False
+
+    @property
+    def history_context(self) -> Any:
+        """策略可见的历史数据上下文（显式注入的 processor 或默认 cache/calendar 上下文）。"""
+        return self._history_context
 
     @property
     def range_preload_warnings(self) -> list[str]:
@@ -133,6 +183,24 @@ class BacktestDataProvider:
         """
         return self._saw_delisting_flagged
 
+    def validate_history_capabilities(self) -> None:
+        """运行前校验历史数据上下文具备策略所需的最小能力（UIR-F11-001）。
+
+        默认路径的上下文恒含 ``cache`` / ``trade_calendar``；显式注入不完整
+        processor（缺少其一）时在此明确拒绝，避免策略在历史窗口取数前抛
+        AttributeError 或在 ``fail_fast=False`` 下被吞成「无信号」（R21）。
+        """
+        missing = [
+            name for name in _REQUIRED_HISTORY_CAPABILITIES if getattr(self._history_context, name, None) is None
+        ]
+        if missing:
+            raise ValueError(
+                "Backtest data context lacks required history capabilities: "
+                + ", ".join(missing)
+                + ". Inject a complete DataProcessor (cache + trade_calendar), or leave "
+                "data_processor=None to use the built-in cache/calendar history context."
+            )
+
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def preload_range(self, start_date: date, end_date: date):
         """一次性预取整个回测区间的各类数据到内存中，提升回测速度"""
@@ -141,7 +209,7 @@ class BacktestDataProvider:
         # 每次预载重置区间质量代理与降级警告列表，避免跨多次 preload_range 调用累积旧状态
         # （含区间超限早退路径：无论是否预载，本次评测都以全新状态开始，不残留上次区间判定）。
         self._range_preload_warnings = []
-        self._quality_proxy = _BacktestQualityProxy(delegate=self.data_processor)
+        self._quality_proxy = _BacktestQualityProxy(delegate=self._history_context)
         # 兼容处理输入参数类型并转为 date 对象
         from datetime import datetime
 
@@ -364,7 +432,7 @@ class BacktestDataProvider:
 
         missing = frozenset(sorted(expected_dates - covered_dates))
         self._quality_proxy = _BacktestQualityProxy(
-            delegate=self.data_processor,
+            delegate=self._history_context,
             tier=QualityTier.GOLD,
             missing_dates=missing,
         )

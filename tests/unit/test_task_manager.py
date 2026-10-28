@@ -398,7 +398,7 @@ class TestTaskManagerSubmitTask:
         existing = AppTask(name="existing", unique_key="sync_1")
         existing.status = TaskStatus.RUNNING
         mgr._tasks[existing.id] = existing
-        mgr._active_keys.add("sync_1")
+        mgr._active_keys["sync_1"] = existing.id
         result = mgr.submit_task("new", "System", lambda **kw: None, unique_key="sync_1")
         assert result is None
 
@@ -1667,7 +1667,7 @@ class TestTaskManagerRegisterAndRunCancelled:
         mgr = TaskManager()
         t = AppTask(name="test", status=TaskStatus.CANCELLED, unique_key="dup_key")
         mgr._tasks[t.id] = t
-        mgr._active_keys.add("dup_key")
+        mgr._active_keys["dup_key"] = t.id
         mgr._register_and_run(t)
         assert "dup_key" not in mgr._active_keys
 
@@ -1679,7 +1679,7 @@ class TestTaskManagerClearFinishedImplExtras:
         mgr = TaskManager()
         t = AppTask(name="done", status=TaskStatus.COMPLETED, unique_key="key_a")
         mgr._tasks[t.id] = t
-        mgr._active_keys.add("key_a")
+        mgr._active_keys["key_a"] = t.id
         mock_sched = MagicMock(side_effect=lambda coro, *a, **kw: coro.close() if hasattr(coro, "close") else None)
         with patch.object(mgr, "_schedule_coro", mock_sched):
             mgr._clear_finished_impl()
@@ -1729,7 +1729,7 @@ class TestTaskManagerCancelAllRunningAsyncFast:
         t = AppTask(name="running", status=TaskStatus.RUNNING, unique_key="k1")
         t._cancel_event = threading.Event()
         mgr._tasks[t.id] = t
-        mgr._active_keys.add("k1")
+        mgr._active_keys["k1"] = t.id
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = MagicMock()
             mock_cm._instance.write_db = AsyncMock()
@@ -1817,7 +1817,7 @@ class TestTaskRunnerFinallyDedupRelease:
             t._cancel_event = threading.Event()
             t._coroutine_gen = lambda: asyncio.sleep(0)
             mgr._tasks[t.id] = t
-            mgr._active_keys.add("fin_key")
+            mgr._active_keys["fin_key"] = t.id
             with (
                 patch.object(mgr, "_persist_task"),
                 patch.object(mgr, "_notify_subscribers"),
@@ -1825,6 +1825,164 @@ class TestTaskRunnerFinallyDedupRelease:
             ):
                 await mgr._task_runner(t.id)
             assert "fin_key" not in mgr._active_keys
+
+
+class TestUniqueKeyOwnership:
+    """UIR-F12-001: unique_key 占位与持有 task_id 绑定，释放必须 owner 匹配。
+
+    旧实现 `_active_keys: set[str]` 只判键是否存在：A 取消后同键 B 已接管，A 的迟到
+    finally / 清理仍会 discard 掉 B 的占位，使第三次同键提交被错误接纳。
+    """
+
+    @staticmethod
+    def _loop_stub() -> MagicMock:
+        """可控事件循环替身：call_soon_threadsafe 同步执行入队回调（确定性交错）。"""
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        loop.call_soon_threadsafe.side_effect = lambda fn: fn()
+        return loop
+
+    def test_cancel_releases_own_key(self):
+        mgr = TaskManager()
+        t = AppTask(name="a", status=TaskStatus.RUNNING, cancellable=True, unique_key="k")
+        t._cancel_event = threading.Event()
+        mgr._tasks[t.id] = t
+        mgr._active_keys["k"] = t.id
+        with patch.object(mgr, "_persist_task"), patch.object(mgr, "_notify_subscribers"):
+            mgr._cancel_task_impl(t.id)
+        assert t.status == TaskStatus.CANCELLED
+        assert "k" not in mgr._active_keys
+
+    def test_cancel_keeps_key_owned_by_other_task(self):
+        mgr = TaskManager()
+        t = AppTask(name="a", status=TaskStatus.RUNNING, cancellable=True, unique_key="k")
+        t._cancel_event = threading.Event()
+        mgr._tasks[t.id] = t
+        mgr._active_keys["k"] = "replacement_task_id"
+        with patch.object(mgr, "_persist_task"), patch.object(mgr, "_notify_subscribers"):
+            mgr._cancel_task_impl(t.id)
+        assert mgr._active_keys["k"] == "replacement_task_id"
+
+    def test_register_and_run_cancelled_keeps_key_owned_by_other_task(self):
+        mgr = TaskManager()
+        t = AppTask(name="a", status=TaskStatus.CANCELLED, unique_key="k")
+        mgr._tasks[t.id] = t
+        mgr._active_keys["k"] = "replacement_task_id"
+        mgr._register_and_run(t)
+        assert mgr._active_keys["k"] == "replacement_task_id"
+
+    def test_clear_finished_keeps_key_owned_by_active_task(self):
+        """A 已完成、同键 B 仍在运行时清理 A，不得释放 B 的占位。"""
+        mgr = TaskManager()
+        done = AppTask(name="a", status=TaskStatus.COMPLETED, unique_key="k")
+        active = AppTask(name="b", status=TaskStatus.RUNNING, unique_key="k")
+        mgr._tasks[done.id] = done
+        mgr._tasks[active.id] = active
+        mgr._active_keys["k"] = active.id
+        mock_sched = MagicMock(side_effect=lambda coro, *a, **kw: coro.close() if hasattr(coro, "close") else None)
+        with patch.object(mgr, "_schedule_coro", mock_sched), patch.object(mgr, "_notify_subscribers"):
+            mgr._clear_finished_impl()
+        assert done.id not in mgr._tasks
+        assert mgr._active_keys["k"] == active.id
+
+    @pytest.mark.asyncio
+    async def test_runner_finally_keeps_key_owned_by_other_task(self):
+        """A 的 runner finally 迟到执行时，B 已接管同键 → 保持 B 的占位。"""
+        mgr = TaskManager()
+        t = AppTask(name="a", unique_key="k", cancellable=True)
+        t._cancel_event = threading.Event()
+        t._coroutine_gen = lambda: asyncio.sleep(0)
+        mgr._tasks[t.id] = t
+        mgr._active_keys["k"] = "replacement_task_id"
+        with (
+            patch.object(mgr, "_get_semaphore", return_value=asyncio.Semaphore(1)),
+            patch.object(mgr, "_persist_task"),
+            patch.object(mgr, "_notify_subscribers"),
+            patch.object(mgr, "_evict_on_complete"),
+        ):
+            await mgr._task_runner(t.id)
+        assert mgr._active_keys["k"] == "replacement_task_id"
+
+    def test_cancel_resubmit_third_submit_rejected(self):
+        """Given A 取消后同键 B 接管 / When 第三次同键提交 / Then 返回 None（B 占位不被 A 清理释放）。"""
+        mgr = TaskManager()
+        mgr._loop = self._loop_stub()
+        with (
+            patch.object(mgr, "_register_and_run"),
+            patch.object(mgr, "_persist_task"),
+            patch.object(mgr, "_notify_subscribers"),
+        ):
+            a_id = mgr.submit_task("a", "System", MagicMock(), cancellable=True, unique_key="k")
+            assert a_id is not None
+            mgr._tasks[a_id]._cancel_event = threading.Event()
+            mgr._cancel_task_impl(a_id)
+            assert "k" not in mgr._active_keys
+
+            b_id = mgr.submit_task("b", "System", MagicMock(), cancellable=True, unique_key="k")
+            assert isinstance(b_id, str) and b_id != a_id
+            assert mgr._active_keys["k"] == b_id
+
+            c_id = mgr.submit_task("c", "System", MagicMock(), cancellable=True, unique_key="k")
+            assert c_id is None
+
+            # A 的迟到清理（clear_finished）也不得释放 B 的占位
+            mock_sched = MagicMock(side_effect=lambda coro, *a, **kw: coro.close() if hasattr(coro, "close") else None)
+            with patch.object(mgr, "_schedule_coro", mock_sched):
+                mgr._clear_finished_impl()
+            assert mgr._active_keys["k"] == b_id
+
+    @pytest.mark.asyncio
+    async def test_submit_allowed_after_owner_completes(self):
+        """Given B 持有同键并正常完成 / When 再次同键提交 / Then 允许提交。"""
+        mgr = TaskManager()
+        mgr._loop = self._loop_stub()
+        with patch.object(mgr, "_register_and_run"):
+            b_id = mgr.submit_task("b", "System", MagicMock(), cancellable=True, unique_key="k")
+        assert isinstance(b_id, str)
+        assert mgr._active_keys["k"] == b_id
+
+        task = mgr._tasks[b_id]
+        task._cancel_event = threading.Event()
+        task._coroutine_gen = lambda: asyncio.sleep(0)
+        with (
+            patch.object(mgr, "_get_semaphore", return_value=asyncio.Semaphore(1)),
+            patch.object(mgr, "_persist_task"),
+            patch.object(mgr, "_notify_subscribers"),
+            patch.object(mgr, "_evict_on_complete"),
+        ):
+            await mgr._task_runner(b_id)
+        assert task.status == TaskStatus.COMPLETED
+        assert "k" not in mgr._active_keys
+
+        with patch.object(mgr, "_register_and_run"):
+            c_id = mgr.submit_task("c", "System", MagicMock(), cancellable=True, unique_key="k")
+        assert isinstance(c_id, str)
+
+    def test_concurrent_submit_same_key_only_one_owner(self):
+        """并发提交同键：仅一个被接纳，占位 owner 即该任务。"""
+        mgr = TaskManager()
+        loop = MagicMock()
+        loop.is_running.return_value = True  # 不真正入队，避免跨线程写 _tasks
+        mgr._loop = loop
+        results: list[str | None] = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(8)
+
+        def _submit():
+            barrier.wait()
+            result = mgr.submit_task("x", "System", MagicMock(), unique_key="k")
+            with lock:
+                results.append(result)
+
+        threads = [threading.Thread(target=_submit) for _ in range(8)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+
+        accepted = [r for r in results if r is not None]
+        assert len(accepted) == 1
+        assert mgr._active_keys["k"] == accepted[0]
 
 
 class TestTaskManagerInitDbWithHistory:

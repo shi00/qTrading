@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pandas as pd
 
-from data.sync.base import ISyncStrategy, SyncContext, SyncResult, safe_error
+from data.sync.base import ISyncStrategy, SyncContext, SyncResult, SyncStatus, safe_error
 import pytest
 
 
@@ -176,7 +176,7 @@ class TestSyncResult:
 
 
 class TestSyncResultCompleteness:
-    """D1-2: is_complete 语义 —— 仅关键表无失败才算完整。"""
+    """D1-2/UIR-F14-001: is_complete 语义 —— 关键表无失败且整体状态非 failed/cancelled 才完整。"""
 
     def test_empty_is_complete_true(self):
         assert SyncResult().is_complete is True
@@ -192,6 +192,22 @@ class TestSyncResultCompleteness:
     def test_critical_failure_overrides_not_errors(self):
         """is_complete 以 failed_critical_tables 为准，而非 not errors。"""
         r = SyncResult(errors=["some error"], failed_critical_tables=["daily_quotes"])
+        assert r.is_complete is False
+
+    def test_failed_status_not_complete(self):
+        """UIR-F14-001: 整体 failed（如熔断/日历不可用）即便关键表清单为空也不算完整。"""
+        r = SyncResult(status=SyncStatus.FAILED.value)
+        assert r.is_complete is False
+
+    def test_cancelled_status_not_complete(self):
+        """UIR-F14-001: 取消/停机中止的批次不算完整——防止半途中止被当成功推进水位。"""
+        r = SyncResult(status=SyncStatus.CANCELLED.value)
+        assert r.is_complete is False
+
+    def test_cancelled_status_with_no_critical_tables_not_complete(self):
+        """UIR-F14-001: 取消发生在关键表已成功之后（failed_critical_tables 为空）仍不完整。"""
+        r = SyncResult(status=SyncStatus.CANCELLED.value, failed_optional_tables=["limit_list"])
+        assert r.failed_critical_tables == []
         assert r.is_complete is False
 
 

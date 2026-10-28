@@ -668,13 +668,13 @@ class TestPnlAfterExDividend:
         stock_pos = pos_detail["000001.SZ"]
         qfq_mv = stock_pos["market_value"]
 
-        buy_trade = trades.filter(pl.col("action") == "buy")
-        volume = int(buy_trade["volume"][0])
+        adjusted_units = stock_pos["adjusted_units"]
         qfq_entry_price = float(quotes_df.filter(pl.col("trade_date") == date(2024, 1, 2)).select("qfq_open").item())
-        qfq_cost_basis = volume * qfq_entry_price
+        qfq_cost_basis = adjusted_units * qfq_entry_price
 
         expected_pnl = qfq_mv - qfq_cost_basis
-        buggy_raw_pnl = stock_pos["raw_market_value"] - qfq_cost_basis
+        # UIR-F11-002: 「复权单位 × raw 价」是混用单位的错误口径（名义股数 × raw 才与 qfq 等价）
+        buggy_raw_pnl = adjusted_units * 5.1 - qfq_cost_basis
         assert stock_pos["pnl"] == pytest.approx(expected_pnl, rel=1e-4)
         assert stock_pos["pnl"] != pytest.approx(buggy_raw_pnl, rel=1e-2)
 

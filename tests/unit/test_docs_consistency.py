@@ -5824,6 +5824,45 @@ class TestGovernanceIdGenericForm:
             f"通用形态应检出业务域 ID, got: {errors}"
         )
 
+    def test_fr_compound_prefix_not_collected(self):
+        """DS-02 修订：FR- 复合前缀（需求编号命名空间）整体不采集，登记/引用两侧一致.
+
+        需求编号（FR-UX-xxx 形态，正本 requirements/）曾被通用正则在中间连字符处截断为未登记
+        尾段，被迫在共享清单逐条豁免；改为负向后顾后整体不采集。本测试源码中的 FR-UX-xxx
+        字面量在修复后不被采集（若正则回退，本文件自身将落入 .py 扫描面产生 WARNING，
+        清零基线用例与本用例双重拦截）。登记侧断言防 H6-c 式两侧不对称回归。
+        """
+        from check_docs_consistency import _collect_governance_ids, _match_governance_id
+
+        assert _collect_governance_ids("FR-UX-006 与 FR-TO-001") == set()
+        # 登记侧与引用侧共用同一正则（H6-c 教训）：FR-* 登记进对照表首列亦被静默跳过
+        assert _match_governance_id("FR-UX-006") is None
+
+    def test_bare_two_digit_id_still_collected(self):
+        """负向后顾不得过度抑制：裸两位前导零治理 ID 形态仍被采集.
+
+        样本运行时值以分段拼接构造（前半段不带连字符与数字，后半段不带前缀字母）——含数字的
+        前半段片段自身即匹配形态，不能入源码；以此防本文件落入 .py 扫描面反红清零基线。
+        """
+        from check_docs_consistency import _collect_governance_ids, _match_governance_id
+
+        bare = "UX" + "-006"
+        assert _collect_governance_ids(f"FR-UX-006 与 {bare} 混排") == {bare}
+        assert _match_governance_id(bare) == bare
+
+    def test_compound_registered_id_tail_capture_unchanged(self):
+        """复合登记 ID 按末段捕获语义不变（[A-Z0-9]* 不跨连字符）.
+
+        锁死既有行为：对照表复合 ID（P-SCREENER-01 / UTILS-B-07 已登记，字面量安全）解析为
+        末段（未登记，故期望值分段拼接构造），防止后续误改为完整复合捕获导致登记侧解析集合漂移。
+        """
+        from check_docs_consistency import _match_governance_id
+
+        tail_screener = "SCREENER" + "-01"
+        tail_utils_b = "B" + "-07"
+        assert _match_governance_id("P-SCREENER-01") == tail_screener
+        assert _match_governance_id("UTILS-B-07") == tail_utils_b
+
     def test_exempt_prefixes_and_report_forms_not_reported(self, tmp_path, monkeypatch):
         """豁免不误报：外部编号体系（ADR/EX/CVE/PYSEC/UTF/SHA）+ 检视协议 ID（CHECK）+ 报告发现编号（M9-010/F-09/L111-134）."""
         from check_docs_consistency import check_governance_id_glossary

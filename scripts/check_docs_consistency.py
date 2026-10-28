@@ -3422,7 +3422,13 @@ def check_core_modules_completeness() -> list[str]:
 # 命名空间——业务域 ID（BT/AI/DAT/DATA/SYNC/CON 等）全部落在白名单外，等效于「出现即必须登记」
 # 的门禁对它们不生效。改为通用形态（大写字母前缀 + 短横 + 数字）+ 显式豁免清单（外部编号体系
 # 与检视协议内部规则 ID，均为封闭集合，不随项目治理命名空间增长）。
-_GOVERNANCE_ID_PATTERN = re.compile(r"(?<![A-Za-z0-9])([A-Z][A-Z0-9]*-\d+)(?![A-Za-z0-9])")
+# FR- 复合前缀（需求编号 FR-UX-xxx，正本 requirements/，文档扫描面已整体排除）为非治理命名空间：
+# 负向后顾 (?<!FR-) 使需求编号整体不采集——否则正则在中间连字符处截断出 UX-00x 形态的未登记
+# 尾段，被迫逐条豁免且与两位前导零治理 ID 数值撞车、人工难辨。登记/引用两侧共用本正则
+# （H6-c 教训）：FR-* 形态若被登记进对照表首列会被静默跳过而非报错（有意为之，需求编号不属
+# 治理命名空间）。已知宽松边角：任意以 FR- 结尾的更长前缀（XFR-UX-xxx）与两节误写
+# （FR-UX-0x，实为治理 ID 缺一节）同样不采集。
+_GOVERNANCE_ID_PATTERN = re.compile(r"(?<![A-Za-z0-9])(?<!FR-)([A-Z][A-Z0-9]*-\d+)(?![A-Za-z0-9])")
 # review 系列形态（review01-A2 / review03-C11 / review05-E18）：小写 review 前缀 + 轮次号 + 短横 +
 # 字母数字后缀。通用形态要求大写前缀，无法匹配该形态——H6-c 复核发现其在「对照表登记」与「文档引用」
 # 两侧同时漏匹配（净零报错），review 系列 ID 实质失去门禁覆盖（旧白名单 `review\d+-[A-Za-z0-9]+`
@@ -3618,11 +3624,6 @@ _REPORT_FINDING_SHARED_IDS: frozenset[str] = frozenset(
         "TO-02",
         "TO-03",
         "TO-05",
-        "UX-001",
-        "UX-003",
-        "UX-004",
-        "UX-005",
-        "UX-006",
         "UX-02",
         "UX-03",
         "UX-08",
