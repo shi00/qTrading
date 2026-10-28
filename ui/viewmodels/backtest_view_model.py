@@ -346,6 +346,9 @@ class BacktestState:
     #   收益三项可为 None（该月基准缺失/未测量，R21：不得回填 0），View 渲染 N/A
     metrics: tuple[tuple[str, float], ...] = ()
     trades: tuple[TradeRow, ...] = ()
+    # UIR-F11-004: 当前展示结果的稳定身份（BacktestResult.run_id）。
+    # 结果替换/清空时变化，供结果面板在身份变化时重置翻页；不得用条数相同推断同一次运行。
+    run_id: str | None = None
     nav_curve: tuple[float, ...] = ()
     ic_series: tuple[float, ...] = ()
     period_stats: tuple[tuple[str, float | None, float | None, float | None], ...] = ()
@@ -595,6 +598,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
             status_color="info",
             metrics=(),
             trades=(),
+            run_id=None,
             nav_curve=(),
             ic_series=(),
             period_stats=(),
@@ -671,6 +675,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                 self._set_state(
                     metrics=tuple(result.metrics.items()),
                     trades=_to_trade_rows(result.trades),
+                    run_id=result.run_id,
                     nav_curve=tuple(float(v) for v in nav_values),
                     ic_series=tuple(float(v) for v in result.ic_series.to_list()),
                     period_stats=_to_period_stats_rows(result.period_stats),

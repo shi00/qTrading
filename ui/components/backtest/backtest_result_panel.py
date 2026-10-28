@@ -578,6 +578,17 @@ def _build_nav_chart(
     return container
 
 
+def _resolve_trades_page(trades_page: int, total_rows: int, page_size: int = _TRADES_PAGE_SIZE) -> int:
+    """UIR-F11-004: 渲染前把当前页夹取到 ``[0, last_page]``。
+
+    结果条数变少（新结果/清空）后组件本地 ``use_state`` 可能仍停留在旧页，
+    切片/按钮/页码必须基于同一有效页计算，避免首帧渲染 ``100:10`` 的空表格
+    与 ``"101-10 / 10"`` 错误文案。
+    """
+    total_pages = max(1, (total_rows + page_size - 1) // page_size)
+    return min(max(trades_page, 0), total_pages - 1)
+
+
 def _build_trades_table(
     trades: tuple[TradeRow, ...],
     trades_page: int,
@@ -592,7 +603,8 @@ def _build_trades_table(
 
     total_rows = len(trades)
     total_pages = max(1, (total_rows + _TRADES_PAGE_SIZE - 1) // _TRADES_PAGE_SIZE)
-    start = trades_page * _TRADES_PAGE_SIZE
+    effective_page = _resolve_trades_page(trades_page, total_rows)
+    start = effective_page * _TRADES_PAGE_SIZE
     end = min(start + _TRADES_PAGE_SIZE, total_rows)
 
     columns = [
@@ -631,26 +643,26 @@ def _build_trades_table(
     )
 
     def _prev_page(e):
-        if trades_page > 0:
-            set_trades_page(trades_page - 1)
+        if effective_page > 0:
+            set_trades_page(effective_page - 1)
 
     def _next_page(e):
-        if trades_page < total_pages - 1:
-            set_trades_page(trades_page + 1)
+        if effective_page < total_pages - 1:
+            set_trades_page(effective_page + 1)
 
     pagination = ft.Row(
         [
             ft.IconButton(
                 ft.Icons.NAVIGATE_BEFORE,
                 on_click=_prev_page,
-                disabled=trades_page == 0,
+                disabled=effective_page == 0,
                 tooltip=I18n.get("common_prev_page"),
             ),
             page_info,
             ft.IconButton(
                 ft.Icons.NAVIGATE_NEXT,
                 on_click=_next_page,
-                disabled=trades_page >= total_pages - 1,
+                disabled=effective_page >= total_pages - 1,
                 tooltip=I18n.get("common_next_page"),
             ),
         ],
@@ -930,6 +942,7 @@ def _build_content(
 def BacktestResultPanel(
     metrics: tuple[tuple[str, float], ...] = (),
     trades: tuple[TradeRow, ...] = (),
+    run_id: str | None = None,
     nav_curve: tuple[float, ...] = (),
     nav_dates: tuple[str, ...] = (),
     benchmark_curve: tuple[float, ...] = (),
@@ -954,6 +967,8 @@ def BacktestResultPanel(
     Args:
         metrics/trades/nav_curve/ic_series/period_stats: BacktestState 渲染就绪字段
             （D11 拆解，源自 BacktestResult；全部为空时显示空状态）
+        run_id: 当前展示结果的稳定身份（BacktestResult.run_id）。身份变化即视为
+            新结果/空结果，翻页重置到第 1 页；不得用条数相同推断同一次运行。
         nav_dates/benchmark_curve/ic_dates/strategy_name/benchmark_name:
             图表语境素材（日期横轴/基准曲线/文本摘要数据来源）。
     """
@@ -964,13 +979,14 @@ def BacktestResultPanel(
     trades_page, set_trades_page = ft.use_state(0)
     selected_tab, set_selected_tab = ft.use_state(0)
 
-    # BT-10: 新回测结果 (trades 引用变化) → 翻页重置到第 1 页。
-    # 否则旧翻页位置对行数变少的新结果越界 (start > total_rows) → 空表格 + 页码错乱
-    # (如 "151-80 / 80")。行数不变时残留页码仍落在有效区间, 无越界危害。
+    # UIR-F11-004: 按结果身份（run_id）重置翻页。旧实现依赖 trades 引用相等，
+    # 两次条数相同但不同的运行不会重置；且 effect 异步执行，首帧可能越界。
+    # 首帧越界由 _build_trades_table 内的 _resolve_trades_page clamp 兜底，
+    # 本 effect 负责把本地页码真正复位，后续翻页从第 1 页开始。
     def _reset_trades_page() -> None:
         set_trades_page(0)
 
-    ft.use_effect(_reset_trades_page, dependencies=[trades])
+    ft.use_effect(_reset_trades_page, dependencies=[run_id])
 
     if not metrics and not trades and not nav_curve:
         content = _build_empty_content()
