@@ -5,6 +5,10 @@
   「查看」按 ts_code **直接打开个股详情对话框**（``StockDetailDialog``），
   不再依赖当前选股结果集（原实现发 ``screener:{ts_code}`` 事件到选股页过滤
   当前结果，未运行策略时必然落到空表）。
+- UIR-F10-003：详情接入 FR-UX-007 情绪柱——本页经 ``use_viewmodel`` 持有
+  ``SentimentIndexViewModel``，成功打开详情后以当前 ts_code/名称发 ``select_stock``，
+  并向 ``StockDetailDialog`` 传 state / 选日 / 取消三组 sentiment props（复用现有
+  ``SentimentBar``，不复制算法/服务）。
 - VM 通过 ``use_viewmodel(factory=lambda: WatchlistViewModel())`` 内部模式消费
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
 - 异步操作通过 ``page.run_task`` 调度 (R16); CancelledError 必须 raise (R2)
@@ -24,6 +28,7 @@ from ui.components.watchlist_add_dialog import WatchlistAddDialog
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
+from ui.viewmodels.sentiment_index_view_model import SentimentIndexViewModel
 from ui.viewmodels.watchlist_view_model import WatchlistMutationResult, WatchlistRow, WatchlistViewModel
 from utils.sanitizers import DataSanitizer
 
@@ -114,13 +119,14 @@ def _quote_cell(label: str, value: str, color: str | None = None) -> ft.Column:
 def _build_watchlist_row(
     row: WatchlistRow,
     on_remove: typing.Callable[[str], None],
-    on_view: typing.Callable[[str], None] | None = None,
+    on_view: typing.Callable[[str, str], None] | None = None,
 ) -> ft.Container:
     """构建单行关注列表项 (股票名 + 代码 + 加入日期 + 备注 + 行情列 + 查看/移除按钮).
 
     UX-09 MAJOR-04: 渲染最新价 / 涨跌幅 / AI 评分三列（缺失显示「—」，R21）；
     ``on_view`` 传入时在删除按钮前渲染「查看个股」按钮 (SEARCH_OUTLINED,
-    描边风格对齐 DELETE_OUTLINE); None 时不渲染 (位置参数兼容).
+    描边风格对齐 DELETE_OUTLINE), 回调接收 (``ts_code``, 展示名)；None 时不渲染
+    (位置参数兼容). 展示名与标题口径一致 (stock_name 优先, 空则 ts_code)。
     """
     name = row.stock_name or row.ts_code
     sub_parts = [row.ts_code]
@@ -175,7 +181,7 @@ def _build_watchlist_row(
                             icon=ft.Icons.SEARCH_OUTLINED,
                             icon_color=AppColors.TEXT_SECONDARY,
                             tooltip=I18n.get("watchlist_view_stock"),
-                            on_click=lambda _e: on_view(row.ts_code),
+                            on_click=lambda _e: on_view(row.ts_code, name),
                         )
                     ]
                     if on_view is not None
@@ -205,6 +211,9 @@ def WatchlistView(
         active: 是否为当前激活视图 (控制是否加载数据)
     """
     state, vm = use_viewmodel(factory=lambda: WatchlistViewModel())
+    # UIR-F10-003：本页情绪 VM（N5-3/FR-UX-007）。经 use_viewmodel 持有，命令与 state
+    # 与选股页同源（不复制算法/服务）；卸载时 hook 自动 dispose（取消在途任务）。
+    sent_state, sent_vm = use_viewmodel(factory=lambda: SentimentIndexViewModel())
 
     # i18n / theme 订阅
     ft.use_state(get_observable_state)
@@ -311,12 +320,16 @@ def WatchlistView(
         set_pending_remove_ts_code(ts_code)
         set_confirm_open(True)
 
-    async def _do_open_detail(ts_code: str) -> None:
+    async def _do_open_detail(ts_code: str, stock_name: str) -> None:
         """按 ts_code 拉取详情并按需提示失败 (R2: CancelledError 必须 raise)。
 
         UIR-F10-002：VM 返回 ``superseded``（请求已被更新的打开动作/关闭/dispose 取代）
         时不得提示失败——仅 ``failed``（当前请求取数失败）才 toast，避免旧请求的迟到
         结果误触发当前请求的失败提示。
+
+        UIR-F10-003：仅当详情**有效打开**（``opened``）后，才以当前 ts_code/名称向本页
+        情绪 VM 发 ``select_stock``（切股时 VM 自行取消旧任务）；``failed``/``superseded``
+        不发请求，避免为未展示的股票加载情绪。
         """
         try:
             result = await vm.open_stock_detail(ts_code)
@@ -325,21 +338,24 @@ def WatchlistView(
         except Exception as ex:
             logger.error("[WatchlistView] Open detail failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             result = "failed"
-        if result == "failed":
+        if result == "opened":
+            sent_vm.select_stock(ts_code, stock_name)
+        elif result == "failed":
             page = _get_page()
             if page is not None:
                 _show_toast(page, I18n.get("watchlist_detail_failed"), "error")
 
-    def _on_view_stock(ts_code: str) -> None:
+    def _on_view_stock(ts_code: str, stock_name: str) -> None:
         """UX-09 MAJOR-04: 行「查看」— 按 ts_code 直接打开个股详情对话框.
 
         不再发 ``screener:{ts_code}`` 事件到选股页过滤当前结果集（未运行策略时
         必然落到空表），改为经 VM 按代码取数后由 ``StockDetailDialog`` 渲染。
+        ``stock_name`` 用于详情成功打开后驱动情绪 VM 的展示名。
         """
         page = _get_page()
         if page is None:
             return
-        page.run_task(_do_open_detail, ts_code)
+        page.run_task(_do_open_detail, ts_code, stock_name)
 
     def _do_confirm_remove() -> None:
         """ConfirmDialog on_confirm: 执行删除并关闭对话框。"""
@@ -432,6 +448,11 @@ def WatchlistView(
             page=_get_page(),
             open_state=True,
             on_close=vm.close_stock_detail,
+            # UIR-F10-003：FR-UX-007 情绪柱——与选股宿主同源接线（state + 选日 + 取消）。
+            # 关闭时 StockDetailDialog._close 调 sentiment_on_cancel 取消在途任务。
+            sentiment_state=sent_state,
+            sentiment_on_select_day=sent_vm.select_day,
+            sentiment_on_cancel=sent_vm.cancel,
         )
 
     return ft.Container(
