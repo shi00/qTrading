@@ -13,6 +13,28 @@
   * 默认阈值 1.5 → 1.7（保持等价筛选力度），`param_vol_ratio_threshold` 文案同步说明口径
   * 口径变更：量比语义与回测引擎 `_compute_avg_daily_volume` 一致，历史回测结果将变化
 
+## [0.11.2](https://github.com/shi00/qTrading/compare/v0.11.1...v0.11.2) (2026-10-29)
+
+
+### Bug Fixes
+
+* **ci:** CUDA 变体安装 VS 集成子包并放行 MSVC 19.44 ([#1645](https://github.com/shi00/qTrading/issues/1645)) ([7a6057a](https://github.com/shi00/qTrading/commit/7a6057ae28902da2dea2413e3c69a06a6448d8df))
+* **ci:** CUDA 变体改用 Jimver/cuda-toolkit 安装 ([#1641](https://github.com/shi00/qTrading/issues/1641)) ([f07e97f](https://github.com/shi00/qTrading/commit/f07e97fad7749d1e7727509e6e58788353c604fb))
+* **ci:** CUDA 变体隔离 uv 构建缓存 ([#1647](https://github.com/shi00/qTrading/issues/1647)) ([6f2cd70](https://github.com/shi00/qTrading/commit/6f2cd700850a690bce4b7f7942547e7d8f61a2d7))
+* **ci:** CUDA 构建改用 12.4（MSVC 19.44 STL1002 断言要求 &gt;= 12.4） ([#1649](https://github.com/shi00/qTrading/issues/1649)) ([16aafdc](https://github.com/shi00/qTrading/commit/16aafdc83bb9750ceb84509ac7ed2bf0b9579276))
+* **ci:** 安装包冒烟脚本隔离用户数据目录并补齐失败诊断 ([#1643](https://github.com/shi00/qTrading/issues/1643)) ([b32a4e5](https://github.com/shi00/qTrading/commit/b32a4e5a9b50e10262c55de881b62334e6aabdc5))
+
+
+### Miscellaneous
+
+* **deps:** akshare 1.18.97→1.20.2、soupsieve 2.9.2→3.0.4、tokenizers→0.23.3（D3.3） ([#1640](https://github.com/shi00/qTrading/issues/1640)) ([822799b](https://github.com/shi00/qTrading/commit/822799bd469e63abab068f44d9b3c116a2414cb9))
+* **deps:** fastapi&lt;0.145 上界落库 + Flet E2E 离线资源核验（D6.2） ([#1648](https://github.com/shi00/qTrading/issues/1648)) ([5fbe80f](https://github.com/shi00/qTrading/commit/5fbe80f46dc7e5bb4abaab32b29e77097d281641))
+* **deps:** flet 1.0.3-&gt;1.0.5（五包锁步）+ CI flet-web pin 同步（D6.1） ([085530a](https://github.com/shi00/qTrading/commit/085530a2999024f3413ba4f78db5d20a6ac2dffb))
+* **deps:** Flet 1.0.5 核验清单与 PyInstaller 打包验证（D6.3） ([#1650](https://github.com/shi00/qTrading/issues/1650)) ([fd9d827](https://github.com/shi00/qTrading/commit/fd9d827d85e804bf46e4d0a5d00447ebdd67edc6))
+* **deps:** polars 1.44.2-&gt;2.1.0（D4.1/D4.2/D4.3） ([#1642](https://github.com/shi00/qTrading/issues/1642)) ([593683a](https://github.com/shi00/qTrading/commit/593683aad8a20a12fca112dfc99ce175e75c59bb))
+* **deps:** pyarrow 25.0.1→26.0.0、pandas_market_calendars 5.4.0→5.5.0（D3.2） ([#1638](https://github.com/shi00/qTrading/issues/1638)) ([44e2a4c](https://github.com/shi00/qTrading/commit/44e2a4c82100be657e0b50caf843d8d4701500e2))
+* **deps:** sqlalchemy 2.0.54-&gt;2.1.6 + asyncpg 0.32.0 + alembic 1.20.1（D5.1） ([6b89518](https://github.com/shi00/qTrading/commit/6b89518f937a59202f7ec0a85cdaa86eb24de668))
+
 ## [0.11.1](https://github.com/shi00/qTrading/compare/v0.11.0...v0.11.1) (2026-10-29)
 
 
