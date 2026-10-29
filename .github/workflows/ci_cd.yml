@@ -1505,12 +1505,32 @@ jobs:
 
       - name: Verify llama-cpp-python CUDA backend DLLs (CUDA variants only)
         if: contains(matrix.variant, 'cuda')
+        # 不能用 `import llama_cpp` 做断言：CUDA 版 llama.dll 在 import 期即被 ctypes 加载，
+        # runner 上没有 CUDA 运行时（cudart64_12.dll / cublas64_12.dll 需用户本机安装），
+        # 会抛 "Could not find module ... llama.dll (or one of its dependencies)"，
+        # 使断言在检查 lib 目录前就失败（run 40888569612 即如此，此时 CUDA 编译实际已成功）。
+        # 故改用 find_spec 只解析包目录，并打印 lib 全部 DLL 作为证据。
+        # 断言按语义而非文件名：llama-cpp-python 的 llama.cpp 版本可能把 CUDA 后端静态链进
+        # llama.dll（此时 lib 下无 *cuda*.dll），故同时接受「lib 下有 *cuda*.dll」或
+        # 「llama.dll 的导入表引用 cudart64_12/cublas64_12/cublasLt64_12」两种形态。
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          python -c "import pathlib, sys, llama_cpp; lib_dir = pathlib.Path(llama_cpp.__file__).resolve().parent / 'lib'; cuda_dlls = list(lib_dir.glob('*cuda*.dll')); print('Found CUDA DLLs:', [p.name for p in cuda_dlls]); sys.exit(0 if cuda_dlls else 1)"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "B03: No CUDA backend DLL (*cuda*.dll) found in llama_cpp/lib for variant ${{ matrix.variant }}!"
+          $pkgDir = python -c "import importlib.util; print(importlib.util.find_spec('llama_cpp').submodule_search_locations[0])"
+          Write-Host "llama_cpp package dir: $pkgDir"
+          $libDir = Join-Path $pkgDir "lib"
+          Get-ChildItem $libDir | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+          $cudaDlls = @(Get-ChildItem $libDir -Filter "*cuda*.dll")
+          Write-Host "Found CUDA DLLs: $($cudaDlls.Name -join ',')"
+          $linked = $false
+          $llamaDll = Join-Path $libDir "llama.dll"
+          if (Test-Path $llamaDll) {
+            $ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($llamaDll))
+            $linked = $ascii.Contains("cudart64_12.dll") -or $ascii.Contains("cublas64_12.dll") -or $ascii.Contains("cublasLt64_12.dll")
+            Write-Host "llama.dll references CUDA runtime DLLs: $linked"
+          }
+          if ($cudaDlls.Count -eq 0 -and -not $linked) {
+            Write-Error "B03: no CUDA backend evidence in $libDir for variant ${{ matrix.variant }} (no *cuda*.dll and llama.dll does not import CUDA runtime)!"
             exit 1
           }
 
