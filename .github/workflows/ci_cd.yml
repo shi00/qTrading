@@ -1383,7 +1383,10 @@ jobs:
     # "No CUDA toolset found."，llama-cpp-python CUDA 后端源码编译失败（B03 随之误报
     # ModuleNotFoundError）。升级 CUDA Toolkit 版本且确认其支持新镜像 VS 版本后才可解除锁定。
     runs-on: windows-2022
-    timeout-minutes: 60
+    # CUDA 变体需 ~40 分钟源码编译 llama-cpp-python（CPU 变体走缓存），叠加 CUDA Toolkit
+    # 安装耗时波动（实测 12.4 安装单次可达 26 分钟）后 60 分钟会超时取消
+    # （run 40902860461 的 embedded-cuda 即在 60 分钟整点被取消），故放宽到 120 分钟。
+    timeout-minutes: 120
     permissions:
       contents: read
       id-token: write
