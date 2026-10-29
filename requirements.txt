@@ -10,7 +10,7 @@ aiosignal==1.4.0
     # via aiohttp
 akracer==0.0.14 ; sys_platform == 'linux'
     # via akshare
-akshare==1.18.97
+akshare==1.20.2
     # via astockscreener (pyproject.toml)
 alembic==1.20.0
     # via astockscreener (pyproject.toml)
@@ -295,7 +295,7 @@ six==1.17.0
     #   repath
 sniffio==1.3.1
     # via openai
-soupsieve==2.9.2
+soupsieve==3.0.4
     # via
     #   astockscreener (pyproject.toml)
     #   beautifulsoup4

@@ -13,6 +13,7 @@ Design notes:
   in the decorator, so it propagates naturally (R2).
 """
 
+import importlib
 import logging
 import threading
 from typing import Any
@@ -115,12 +116,16 @@ class AkshareConceptClient:
         is intentional and differs from the review08-B3 anti-pattern: B3 coupled
         four layers of internals and degraded *silently* to the (correct-by-luck)
         value it wanted; here we depend on a single internal symbol, and
-        ``pyproject.toml`` pins ``akshare==1.18.97``. A structure change only
+        ``pyproject.toml`` pins ``akshare==1.20.2``. A structure change only
         breaks the cache-clear (logged at WARNING), never silently corrupts the
         fetched data.
+
+        akshare 1.20 起该模块自 ``akshare.stock`` 迁移至 ``akshare.stock.board``
+        （1.18.x 的旧路径已不存在）。该路径属 akshare 私有实现，故经
+        ``importlib`` 动态解析：静态 import 会把私有模块升级成类型检查期的硬依赖。
         """
         try:
-            import akshare.stock.stock_board_concept_em as _em
+            _em = importlib.import_module("akshare.stock.board.stock_board_concept_em")
 
             # 必须经 getattr 取 "__stock_board_concept_name_em"：在类方法内直接写
             # ``_em.__stock_board_concept_name_em`` 会被 Python name-mangle 成
