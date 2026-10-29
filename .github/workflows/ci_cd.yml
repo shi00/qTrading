@@ -10,23 +10,10 @@ on:
       - 'LICENSE'
   pull_request:
     branches: [ "main" ]
-    paths:
-      - '**.py'
-      - 'requirements*.txt'
-      - 'requirements*.in'
-      - 'pyproject.toml'
-      - 'pyrightconfig.json'
-      - 'alembic.ini'
-      - 'alembic/**'
-      - 'AStockScreener.spec'
-      - 'installer.iss'
-      - 'locales/**'
-      - 'assets/**'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'tests/**'
-      - 'scripts/**'
-      - '.github/workflows/ci_cd.yml'
+    # 不使用 paths 过滤：main 的 required status check 是聚合门禁 CI Gate，
+    # 若 paths 未命中则本 workflow 根本不触发，该 check 永久停在 Pending 并阻塞合并。
+    # 变更是否属于代码类由 Changes job（scripts/classify_changed_paths.py）在运行时判定，
+    # 非代码 PR 只跑轻量 job，重型 job 跳过（见各 job 的 needs / if）。
   merge_group:
     branches: [ "main" ]
   workflow_dispatch:
@@ -45,29 +32,100 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  lint-fast:
-    name: Fast Lint Check (${{ matrix.python-version }})
+  # 变更分类：判断本次 PR 是否触及代码类路径，决定重型 job 是否执行。
+  # 非 PR 事件、fork PR、API/脚本异常一律 code=true（fail-closed），保证不会因分类失败而漏跑验证。
+  changes:
+    name: Changes
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.13', '3.14']
-        include:
-          - python-version: '3.14'
-            experimental: true
-    continue-on-error: ${{ matrix.experimental || false }}
+      pull-requests: read
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Setup Python ${{ matrix.python-version }}
+      - name: Classify changed paths
+        id: classify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_NAME: ${{ github.event_name }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "- 事件 \`$EVENT_NAME\`：非 PR，按代码变更处理" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$IS_FORK" = "true" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "- fork PR：无法可靠分类，按代码变更处理（fail-closed）" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          files="$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename')"
+          count="$(printf '%s\n' "$files" | grep -c . || true)"
+          if [ "$count" -ge 3000 ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "- 变更文件数 $count 达到 API 分页上限 3000，按代码变更处理（fail-closed）" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          result="$(printf '%s\n' "$files" | python scripts/classify_changed_paths.py)"
+          echo "$result" >> "$GITHUB_OUTPUT"
+          echo "- 变更文件数 $count，分类结果 \`$result\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # 稳定基线 lint（Python 3.13）：聚合门禁 CI Gate 只依赖本 job，结果语义确定。
+  lint-fast:
+    name: Fast Lint Check (3.13)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Setup Python 3.13
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install Ruff
+        run: pip install ruff==0.16.7
+
+      - name: Ruff Lint Check
+        run: ruff check .
+
+      - name: Ruff Format Check
+        run: ruff format --check .
+
+  # 实验性 lint（Python 3.14）：前瞻验证，允许失败。
+  # 独立成 job 而非 lint-fast 的 matrix 项：job 级 continue-on-error 会让 needs.lint-fast.result
+  # 的取值不确定（实验项失败是否污染聚合结果），而 CI Gate 依赖该聚合结果判定门禁，
+  # 故将其拆出，使 lint-fast 仅供稳定基线使用。
+  lint-fast-experimental:
+    name: Fast Lint Check (3.14)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Setup Python 3.14
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.14'
           cache: 'pip'
 
       - name: Install Ruff
@@ -81,7 +139,7 @@ jobs:
 
   ci-checks:
     name: Code Quality & Tests (Linux, Python ${{ matrix.python-version }})
-    needs: lint-fast
+    needs: [lint-fast, changes]
     # Dependabot 发起的 PR 与普通 fork PR 均不被注入仓库 secrets（GitHub Actions 平台安全限制，仅提供只读 GITHUB_TOKEN）。
     # 本 job 依赖 CI_PG_PASSWORD（postgres 服务容器 + integration 测试）与 CODECOV_TOKEN，
     # secret 为空会导致 postgres 容器在 service 初始化阶段启动失败（见 run 31780083379）；service 先于步骤启动，
@@ -89,7 +147,8 @@ jobs:
     # 故两种情况均跳过本 job（跳过显示为 skipped，不冒充通过）：fork PR 的 Linux 质量验证由维护者审阅后
     # 以在库分支重跑再合并（受控路径）；Dependabot 侧为 actions 依赖升级，与业务测试无关。
     # 非 PR 事件（push / tag / merge_group / workflow_dispatch）pull_request 上下文为空，条件按事件名放行。
-    if: github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    # changes.outputs.code：非代码类 PR（仅文档等）跳过重型套件；非 PR 事件由 changes job 输出 true。
+    if: needs.changes.outputs.code == 'true' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -295,7 +354,8 @@ jobs:
 
   e2e-tests-windows:
     name: E2E Tests (Windows)
-    needs: lint-fast
+    needs: [lint-fast, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     # E2E Tests embedded 模式实际运行时间：PR #291 改用 embedded 模式后，
     # sidecar 构建 + PG 16 initdb + 44 个 E2E 测试总时长 > 45 分钟（run 30183636080 在 45 分钟 timeout 时被取消）。
@@ -475,7 +535,8 @@ jobs:
 
   ci-checks-windows:
     name: Code Quality & Unit Tests (Windows)
-    needs: lint-fast
+    needs: [lint-fast, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     timeout-minutes: 45
     permissions:
@@ -615,7 +676,8 @@ jobs:
 
   embedded-tests:
     name: Embedded PG Tests (${{ matrix.os }})
-    needs: lint-fast
+    needs: [lint-fast, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
@@ -1218,13 +1280,15 @@ jobs:
 
   requirements-drift:
     name: Detect requirements drift
+    needs: changes
     runs-on: windows-latest
     timeout-minutes: 5
     permissions:
       contents: read
     outputs:
       drift: ${{ steps.check-drift.outputs.drift }}
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    # PR 事件仅对代码类变更运行；push main / 手动触发保持全量（依赖漂移与改动范围无关）。
+    if: (github.event_name == 'pull_request' && needs.changes.outputs.code == 'true') || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
 
     steps:
       - name: Checkout Code
@@ -1897,12 +1961,14 @@ jobs:
   installer-smoke:
     # P3-CI-Installer-Smoke-Trigger + P3-CI-Installer-PowerShell-Syntax-Only 合并解决：
     # PR 阶段验证 installer.iss 的 ISCC 编译通过性，避免缺陷延迟到 release tag 阶段才暴露。
-    # 顶层 pull_request.paths 已限制 workflow 触发范围（含 installer.iss + scripts/**），
-    # 此处二次精准过滤：仅当 PR 修改 installer.iss 或 scripts/*installer* 时跑 ISCC 编译。
+    # 顶层 pull_request 已不设 paths 过滤（required check 要求 workflow 必触发），
+    # 代码类判定由 changes job 完成；此处再按 PR 事件 + 代码类变更做二次过滤，
+    # job 内部仍有 fail-closed 的「Detect installer changes」步骤：仅当 PR 修改 installer.iss
+    # 或 scripts/*installer* 时跑 ISCC 编译。
     # 不生成 release artifact（不接入 actions/upload-artifact），仅验证编译通过。
     name: Installer ISCC Smoke Test
-    needs: lint-fast
-    if: github.event_name == 'pull_request'
+    needs: [lint-fast, changes]
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     timeout-minutes: 10
     permissions:
@@ -2034,3 +2100,93 @@ jobs:
 
       - name: Detect flaky tests (advisory)
         run: python scripts/detect_flaky.py
+
+  # 聚合门禁：main 分支的 required status check（与 docs-ci.yml 的 Docs Consistency Check 并列）。
+  # 独立的聚合 job 而非直接 required 各矩阵 job 的原因：
+  #   ① 矩阵 job 改名会让 required check 永久停在 Pending（自锁）；
+  #   ② needs 链上游失败会让下游 skipped，而 skipped 在 required check 中视为通过，
+  #      直接 required 单个 job 会形成「上游失败 → 下游 skipped → 门禁绿灯」的假门禁。
+  # 本 job 用 needs.*.result 显式校验，只放行明确允许的跳过。
+  ci-gate:
+    name: CI Gate
+    needs: [changes, lint-fast, ci-checks, ci-checks-windows, e2e-tests-windows, embedded-tests, installer-smoke]
+    # merge_group 一并覆盖：工作流已声明 merge_group 触发，若只在本 job 限定 pull_request，
+    # 启用 merge queue 后 merge group commit 上不会产生 CI Gate，required check 将永久 Pending。
+    if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Evaluate required jobs
+        env:
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ACTOR: ${{ github.actor }}
+          CODE: ${{ needs.changes.outputs.code }}
+          CHANGES: ${{ needs.changes.result }}
+          LINT: ${{ needs.lint-fast.result }}
+          LINUX: ${{ needs.ci-checks.result }}
+          WINDOWS: ${{ needs.ci-checks-windows.result }}
+          E2E: ${{ needs.e2e-tests-windows.result }}
+          EMBEDDED: ${{ needs.embedded-tests.result }}
+          INSTALLER: ${{ needs.installer-smoke.result }}
+        run: |
+          set -euo pipefail
+          fail=0
+          {
+            echo "## CI Gate"
+            echo ""
+            echo "变更分类 \`code=${CODE:-unknown}\`，actor \`${ACTOR}\`，fork PR \`${IS_FORK:-false}\`"
+            echo ""
+            echo "| job | result | 判定 |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          check_required() {
+            local name="$1" result="$2" allow_skipped="$3"
+            if [ "$result" = "success" ]; then
+              echo "| $name | $result | ok |" >> "$GITHUB_STEP_SUMMARY"
+            elif [ "$result" = "skipped" ] && [ "$allow_skipped" = "true" ]; then
+              echo "| $name | $result | ok（允许跳过） |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| $name | $result | **FAIL** |" >> "$GITHUB_STEP_SUMMARY"
+              fail=1
+            fi
+          }
+
+          # 分类与稳定基线 lint 对任何 PR 都必须真正执行成功。
+          check_required "Changes" "$CHANGES" false
+          check_required "Fast Lint Check (3.13)" "$LINT" false
+
+          if [ "$CODE" = "false" ]; then
+            # 非代码类 PR：重型 job 按设计跳过，允许 skipped；出现 failure 仍判不通过。
+            check_required "Code Quality & Tests (Linux)" "$LINUX" true
+            check_required "Code Quality & Unit Tests (Windows)" "$WINDOWS" true
+            check_required "E2E Tests (Windows)" "$E2E" true
+            check_required "Embedded PG Tests" "$EMBEDDED" true
+            check_required "Installer ISCC Smoke Test" "$INSTALLER" true
+          else
+            # 代码类 PR：Linux 套件只有在 dependabot 或 fork PR（无 secrets，平台限制）时才允许跳过，
+            # 其余平台必须真实通过。
+            linux_allow_skipped=false
+            if [ "$ACTOR" = "dependabot[bot]" ] || [ "$IS_FORK" = "true" ]; then
+              linux_allow_skipped=true
+            fi
+            check_required "Code Quality & Tests (Linux)" "$LINUX" "$linux_allow_skipped"
+            check_required "Code Quality & Unit Tests (Windows)" "$WINDOWS" false
+            check_required "E2E Tests (Windows)" "$E2E" false
+            check_required "Embedded PG Tests" "$EMBEDDED" false
+            # installer-smoke 仅 installer 相关变更才实际执行，job 内已有 fail-closed 的变更检测。
+            check_required "Installer ISCC Smoke Test" "$INSTALLER" true
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**CI Gate 不通过**" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::CI Gate 不通过：存在失败或非预期跳过的 job（详见 step summary）"
+            exit 1
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**CI Gate 通过**" >> "$GITHUB_STEP_SUMMARY"
+
