@@ -75,7 +75,6 @@
 | P3-REV06-Restore-HeaderValidation | review06 F16：备份恢复路径仅做存在性检查，未校验 pg_dump magic header 与元信息展示 | P3 | ① 用户恢复损坏/伪造备份导致恢复失败或数据错乱的事故时；② 或备份恢复流程被重构时 |
 | P2-REV06-Backup-Encryption | review06 F19：数据库备份文件未加密，UI 缺「勿放共享目录」提示与可选加密备份 | P2 | ① 用户报告备份文件外泄或被第三方读取时；② 或备份功能被重构/导出链路扩展（如云同步）时 |
 | P3-REV08-Akshare-Fallback | review08 C1：Tushare 积分不足直接 skip 功能，akshare 免费同类接口（涨跌停池/龙虎榜/两融/北向/个股资金流）闲置未用；报告已深化为「补足而非替换」，需 ADR 定夺 | P3 | ① 用户报告 Tushare 积分不足导致功能缺失时；② 或前置条件满足（P2-REV06-External-SchemaValidation 关闭 + 候选接口联网可用性验证 + D3 结论）时；③ 或数据源接入架构调整时 |
-| P3-Deps-PytestBenchmark-Removed | pytest-benchmark 5.3.0 依赖 pytest 私有属性 `Node._nodeid`，pytest 9.2.0 将内部 nodeid 重构为 `NodeId` 后不兼容（`AttributeError`），已移除该依赖，PRF-07 基准改用 `time.perf_counter` 自计时 | P3 | ① 需要多轮统计/跨 commit 对比（`--benchmark-compare`）等 benchmark 能力时；② 或上游发布含 PR #323 修复的版本时；③ 或 pytest 引入公开的计时/基准插件钩子时 |
 
 ## 技术债清单
 
@@ -440,20 +439,6 @@ PR #291 触发 Windows 单测 CI 超时调查发现：main 分支最近一次成
 **期望的最终解法**
 
 长期优化方案（任选其一或组合）：① 用 `pytest --durations=20` 识别 main 分支最慢的 20 个测试并优化（如 mock 重型 IO、减少 fixture 重复初始化）；② 将 `tests/unit/` 拆分为 2-3 个并行 job（如按 `tests/unit/data/`、`tests/unit/ui/`、`tests/unit/strategies/` 等目录拆分），缩短 wall clock；③ 将 `pyproject.toml` 中 `--dist=loadgroup` 切换为 `--dist=loadscope` 减少跨 worker fixture 重复初始化开销。验收标准：① main 分支 Windows 单测实际运行时间 ≤ 12 分钟（余量 ≥ 8 分钟 / \~40%）；② 拆分 job 后各 job wall clock ≤ 8 分钟；③ 现有测试全过且无新增 flaky。upgrade 触发条件：① Windows 单测实际运行时间 ≥ 18 分钟（90% 占用 20 分钟 timeout）；② 或连续 3 次 PR 触发 Windows 单测超时；③ 或单测总数增长 ≥ 20%（如新增 2000 个测试）。
-
-#### P3-Deps-PytestBenchmark-Removed：pytest-benchmark 5.3.0 依赖 pytest 私有属性 `Node._nodeid`，pytest 9.2.0 重构后不兼容，已移除该依赖
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-Deps-PytestBenchmark-Removed** | pytest-benchmark 5.3.0 依赖 pytest 私有属性 `Node._nodeid`，pytest 9.2.0 将内部 nodeid 重构为 `NodeId` 后不兼容（`AttributeError`），已移除该依赖，PRF-07 基准改用 `time.perf_counter` 自计时 | ① 需要多轮统计/跨 commit 对比（`--benchmark-compare`）等 benchmark 能力时；② 或上游发布含 PR #323 修复的版本时；③ 或 pytest 引入公开的计时/基准插件钩子时 |
-
-**产生背景与现状**
-
-依赖全量升级 D2.2 将 `pytest` 从 9.1.1 升到 9.2.0。pytest 9.2.0（changelog `#14758`）把内部 node id 改为结构化 `NodeId` dataclass，公开的 `nodeid: str` 保持不变，但私有属性 `Node._nodeid` 随之移除（pytest 视私有 API 不在兼容承诺内，故未列入 9.2.0 的 breaking changes）。`pytest-benchmark` 5.3.0（PyPI 最新）仍引用 `_nodeid`，触发 `AttributeError: 'Function' object has no attribute '_nodeid'`（上游 [issue #321](https://github.com/ionelmc/pytest-benchmark/issues/321)；修复 [PR #323](https://github.com/ionelmc/pytest-benchmark/pull/323) 已提交但未合并发版）。**决策**：移除 `pytest-benchmark` 依赖而非回 pin pytest 9.1（不依赖第三方私有 API，与社区建议一致；conftest 补 `_nodeid` 属私有 API monkeypatch，同样不采用）。**现状**：`tests/unit/test_base_dao_perf.py` 改用标准库 `time.perf_counter`——预热 1 次 + 3 轮取均值，xdist 全量跑自动退至 2 万行小帧，定向 `-n0 -s` 才用 20 万行基准尺寸并输出可比单次耗时；只记录耗时、不设硬阈值（阈值校准由 PRF-07-5 的 `PerfThreshold` 承担）。相关文件：`tests/unit/test_base_dao_perf.py`、`pyproject.toml`（dev 依赖）、`.gitignore`（移除 `.benchmarks/`）。
-
-**期望的最终解法**
-
-① 上游发布含 PR #323 的版本后，复评是否装回 `pytest-benchmark` 并恢复 `--benchmark-autosave` / `--benchmark-compare` 的跨 commit 对比能力；② 若上游长期不发版，则引入独立基准脚本（`scripts/` 下用 `perf_counter` 采集并写入 JSON 基线）承载趋势对比，避免把第三方插件夹具绑定进单测。验收标准：基准能产出跨 commit 可比的统计且全量单测保持全绿。
 
 ### UI 表现层（MVVM/单例/可访问性）
 
