@@ -13,6 +13,21 @@
   * 默认阈值 1.5 → 1.7（保持等价筛选力度），`param_vol_ratio_threshold` 文案同步说明口径
   * 口径变更：量比语义与回测引擎 `_compute_avg_daily_volume` 一致，历史回测结果将变化
 
+## [0.11.1](https://github.com/shi00/qTrading/compare/v0.11.0...v0.11.1) (2026-10-29)
+
+
+### Miscellaneous
+
+* **deps:** pandas&lt;3.1 转长期上界并登记 pandas-stubs 滞后（D3.1） ([#1635](https://github.com/shi00/qTrading/issues/1635)) ([163b615](https://github.com/shi00/qTrading/commit/163b61546fc53577e22b49efdcf0d6b03f7d76cd))
+* **deps:** playwright 1.63.0→1.64.1（D2.3） ([#1632](https://github.com/shi00/qTrading/issues/1632)) ([cc326fb](https://github.com/shi00/qTrading/commit/cc326fbe3fbec4e3e3a5939dea3993dec7189711))
+
+
+### Documentation
+
+* **ci:** 发版流程补充 Release PR 标签切换步骤 ([#1637](https://github.com/shi00/qTrading/issues/1637)) ([87afabb](https://github.com/shi00/qTrading/commit/87afabb3e323ef0965d14ce7c25dee7f86d62bcf))
+* **ci:** 发版流程补充 SECURITY.md 支持版本表同步步骤 ([#1634](https://github.com/shi00/qTrading/issues/1634)) ([5c7c82b](https://github.com/shi00/qTrading/commit/5c7c82b81f71cd71494e4517292d516326758764))
+* **security:** SECURITY.md 支持版本表更新至 0.11.x ([#1633](https://github.com/shi00/qTrading/issues/1633)) ([c003035](https://github.com/shi00/qTrading/commit/c003035f5cbcf4ee17818ca67fec8c9d7afd10cb))
+
 ## [0.11.0](https://github.com/shi00/qTrading/compare/v0.10.1...v0.11.0) (2026-10-29)
 
 
