@@ -92,7 +92,7 @@ optional = [
     "playwright>=1.64.1",  # E2E browser automation for Flet desktop tests
 ]
 sentiment = [
-    "tokenizers>=0.23.3,<0.24",  # 新闻情绪打分（N3-2）：HF tokenizers 分词兜底（NOTE(lazy) 可选功能栈）
+    "tokenizers>=0.23.3,<1",  # 新闻情绪打分（N3-2）：HF tokenizers 分词兜底（NOTE(lazy) 可选功能栈）
 ]
 
 [tool.ruff]
