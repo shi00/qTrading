@@ -89,7 +89,7 @@ dev = [
 ]
 optional = [
     "brotlicffi>=1.2.1.0",  # Security: PYSEC-2026-4323 / CVE-2026-111497 (Brotli 解码器越界写, 可 RCE) fixed in 1.2.1.0
-    "playwright>=1.63.0,<1.64",  # E2E browser automation for Flet desktop tests
+    "playwright>=1.64.1",  # E2E browser automation for Flet desktop tests
 ]
 sentiment = [
     "tokenizers>=0.15,<0.24",  # 新闻情绪打分（N3-2）：HF tokenizers 分词兜底（NOTE(lazy) 可选功能栈）
