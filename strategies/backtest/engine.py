@@ -1062,8 +1062,10 @@ class VectorBacktestEngine:
             bm = bm.with_columns(pl.col("trade_date").str.replace_all("-", "").str.to_date("%Y%m%d"))
 
         # 构建 trade_dates DataFrame 并 join；缺失日产生 null，不填充
+        # D4.2: 返回值按行位置与 trade_dates 对齐（下游 _calc_period_stats 按位置拼接），
+        # Polars 2.x 起 join 不再默认保证左表行序，故显式 maintain_order="left" 固化该契约。
         trade_dates_df = pl.DataFrame({"trade_date": trade_dates})
-        joined = trade_dates_df.join(bm, on="trade_date", how="left")
+        joined = trade_dates_df.join(bm, on="trade_date", how="left", maintain_order="left")
         returns = joined["pct_chg"] / 100
 
         missing = int(joined["pct_chg"].null_count())
