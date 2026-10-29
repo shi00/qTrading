@@ -1438,11 +1438,15 @@ jobs:
         # CUDA 12.1 installer 默认带 driver，在 Windows runner 上装 driver 会触发重启/蓝屏）。
         # 子包名须与 CUDA 12.1 安装指南 Table 3 一致（NVRTC 为 nvrtc/nvrtc_dev，无 "cuda_" 前缀；
         # cuda_nvrtc 是 12.4+ 才有的名字，传入无效子包名会使 installer 整体失败 0xE0E00019）。
+        # 另须装 visual_studio_integration（NVIDIA 的 VS 集成子包，action 会自动补 `_12.1` 后缀）：
+        # scikit-build-core 在 runner 上使用 "Visual Studio 17 2022" 生成器，CMake 经 MSBuild 查找
+        # CMAKE_VS_PLATFORM_TOOLSET_CUDA，缺该集成时 CMakeDetermineCompilerId 直接报
+        # "No CUDA toolset found."（nvcc 存在且 `nvcc --version` 正常并不代表 VS 集成已装齐）。
         uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d  # v0.2.36
         with:
           cuda: '12.1.1'
           method: 'network'
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "nvrtc", "nvrtc_dev"]'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "nvrtc", "nvrtc_dev", "visual_studio_integration"]'
           use-github-cache: false
 
       - name: Verify CUDA Toolkit (CUDA variants only)
@@ -1471,7 +1475,9 @@ jobs:
           # abetlen 预编译 wheel 已无法匹配 Python 3.13 + llama-cpp-python 0.3.35
           # （abl wheel 最高 cp312 + 0.3.4），故 v0.3.35 起切换到此源码编译路径。
           if ("${{ matrix.backend }}" -eq "cuda") {
-            $env:CMAKE_ARGS = "-DGGML_CUDA=on"
+            # CUDA 12.1 的 nvcc 仅支持 MSVC 192x/193x，而 windows-2022 镜像只带 VS 2022 14.4x（cl 19.44），
+            # nvcc 的 host_config.h 在编译期硬性 #error 拒绝该版本，故显式放行（NVIDIA 称 use at your own risk）。
+            $env:CMAKE_ARGS = "-DGGML_CUDA=on -DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler"
             # 安装步骤只把 CUDA 目录写进 GITHUB_PATH / 系统 PATH，当前 shell 可能未刷新；显式追加确保 cmake 找到 nvcc
             $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin"
             if (Test-Path $cudaBin) {
