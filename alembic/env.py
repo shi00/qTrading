@@ -23,6 +23,7 @@ from sqlalchemy.engine import Connection
 import config
 from alembic import context
 from data.persistence.models import Base
+from utils.db_utils import to_async_db_url, to_sync_db_url
 
 alembic_config = context.config
 
@@ -74,8 +75,10 @@ def get_database_url() -> str:
 
 
 db_url = get_database_url()
-sync_db_url = db_url.replace("+asyncpg", "") if db_url else ""
-async_db_url = db_url if "+asyncpg" in db_url else db_url.replace("postgresql://", "postgresql+asyncpg://")
+# SQLAlchemy 2.1 起光秃 postgresql:// 默认驱动为 psycopg 3；同步路径（offline 迁移、
+# alembic check）依赖 psycopg2-binary，故显式规范化两侧 driver。
+sync_db_url = to_sync_db_url(db_url) if db_url else ""
+async_db_url = to_async_db_url(db_url) if db_url else ""
 # Use attributes instead of set_main_option to avoid ConfigParser interpolation
 # issues with URL-encoded special characters like '%40' (URL-encoded '@')
 # This is consistent with db_migrator.py's approach

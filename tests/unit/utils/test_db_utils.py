@@ -1,6 +1,29 @@
 # tests/unit/utils/test_db_utils.py
 from unittest.mock import patch
-from utils.db_utils import get_db_pool_config
+from utils.db_utils import get_db_pool_config, to_async_db_url, to_sync_db_url
+
+
+def test_to_sync_db_url_converts_asyncpg_url():
+    """D5.1: asyncpg URL 必须显式规范为 psycopg2（SQLAlchemy 2.1 默认 driver 改为 psycopg 3）。"""
+    assert to_sync_db_url("postgresql+asyncpg://u:p@h:5432/d") == "postgresql+psycopg2://u:p@h:5432/d"
+
+
+def test_to_sync_db_url_converts_bare_postgresql_url():
+    """裸 postgresql:// 在 2.1 下会走 psycopg3，须补 +psycopg2 才不会 ModuleNotFoundError。"""
+    assert to_sync_db_url("postgresql://u:p@h:5432/d") == "postgresql+psycopg2://u:p@h:5432/d"
+
+
+def test_to_sync_db_url_leaves_sync_and_non_postgres_dsn_untouched():
+    """已带 +psycopg2 或非 PostgreSQL DSN 不得被改写。"""
+    assert to_sync_db_url("postgresql+psycopg2://u:p@h:5432/d") == "postgresql+psycopg2://u:p@h:5432/d"
+    assert to_sync_db_url("sqlite:///tmp.db") == "sqlite:///tmp.db"
+
+
+def test_to_async_db_url_converts_sync_and_bare_url():
+    """Alembic env 需把同步/裸 URL 反推为 asyncpg URL。"""
+    assert to_async_db_url("postgresql+psycopg2://u:p@h:5432/d") == "postgresql+asyncpg://u:p@h:5432/d"
+    assert to_async_db_url("postgresql://u:p@h:5432/d") == "postgresql+asyncpg://u:p@h:5432/d"
+    assert to_async_db_url("postgresql+asyncpg://u:p@h:5432/d") == "postgresql+asyncpg://u:p@h:5432/d"
 
 
 def test_get_db_pool_config_returns_configured_values():

@@ -39,10 +39,10 @@ dependencies = [
     "pyarrow>=26.0.0",
     "pandas_market_calendars>=5.5.0",
     "openpyxl>=3.1.5",  # Excel export engine for pandas.DataFrame.to_excel()
-    "asyncpg>=0.31.0,<0.32",
+    "asyncpg>=0.32.0",
     "psycopg2-binary>=2.9.13",
-    "sqlalchemy>=2.0.54,<2.1",  # <2.1: 防 2.1.0 发布后 requirements-drift 自动拉到 major 破坏版本
-    "alembic>=1.20.0,<1.21",
+    "sqlalchemy[asyncio]>=2.1.6,<2.2",  # [asyncio]: greenlet 显式化（异步方言运行期必需）；<2.2: 防 2.2 破坏版本
+    "alembic>=1.20.1,<1.21",
     "sqlparse>=0.6.0",
     "litellm>=1.102.2,<1.103",  # Security: GHSA-7hp6-4w63-5g45 / CVE-2026-114612 (internal_user 伪造 admin 凭据提权至 proxy_admin，并可经 MCP stdio 执行命令) fixed in 1.102.2; 约束 openai<3.0.0,>=2.20.0（阻断 openai 3.x 越级）; Python 3.14 support (<3.15, >=3.10); aiohttp CVE-2026-47265/CVE-2026-34993 fixed via transitive dep
     "llama-cpp-python>=0.3.35,<0.3.36",

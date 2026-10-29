@@ -12,7 +12,7 @@ akracer==0.0.14 ; sys_platform == 'linux'
     # via akshare
 akshare==1.20.2
     # via astockscreener (pyproject.toml)
-alembic==1.20.0
+alembic==1.20.1
     # via astockscreener (pyproject.toml)
 annotated-types==0.8.0
     # via pydantic
@@ -22,7 +22,7 @@ anyio==4.15.1
     #   openai
 apscheduler==3.11.3
     # via astockscreener (pyproject.toml)
-asyncpg==0.31.0
+asyncpg==0.32.0
     # via astockscreener (pyproject.toml)
 attrs==26.1.0
     # via
@@ -308,7 +308,7 @@ soupsieve==3.0.4
     # via
     #   astockscreener (pyproject.toml)
     #   beautifulsoup4
-sqlalchemy==2.0.54
+sqlalchemy==2.1.6
     # via
     #   astockscreener (pyproject.toml)
     #   alembic

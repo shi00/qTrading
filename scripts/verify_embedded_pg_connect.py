@@ -49,6 +49,11 @@ def _readline_with_timeout(stream, timeout: float) -> str:
         raise TimeoutError(f"sidecar ready line not received within {timeout}s") from exc
 
 
+def _to_sync_sqlalchemy_url(url: str) -> str:
+    """SQLAlchemy 2.1 起光秃 postgresql:// 默认驱动为 psycopg 3，而本脚本同步路径只装 psycopg2-binary。"""
+    return url.replace("postgresql://", "postgresql+psycopg2://", 1)
+
+
 def step_select1_psycopg2(url: str) -> None:
     import psycopg2
 
@@ -61,7 +66,7 @@ def step_select1_psycopg2(url: str) -> None:
 def step_select1_sqlalchemy_sync(url: str) -> None:
     from sqlalchemy import create_engine, text
 
-    engine = create_engine(url)
+    engine = create_engine(_to_sync_sqlalchemy_url(url))
     with engine.connect() as conn:
         assert conn.execute(text("SELECT 1")).scalar() == 1
     engine.dispose()
@@ -98,7 +103,7 @@ def step_alembic_upgrade_head(repo_root: Path, url: str) -> str:
     cfg.attributes["database_url"] = url
     command.upgrade(cfg, "head")
 
-    engine = create_engine(url)
+    engine = create_engine(_to_sync_sqlalchemy_url(url))
     with engine.connect() as conn:
         head = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
     engine.dispose()
@@ -126,13 +131,13 @@ def step_dump_restore(install_dir: Path, url: str, work_dir: Path) -> None:
     assert dump_file.exists() and dump_file.stat().st_size > 0, "pg_dump produced empty file"
     # createdb 不接受 conninfo URL（第二位置参数是 DESCRIPTION，会误连默认 5432 并挂起密码提示），
     # 改用 SQLAlchemy AUTOCOMMIT 建库
-    engine = create_engine(f"{base_url}/postgres", isolation_level="AUTOCOMMIT")
+    engine = create_engine(_to_sync_sqlalchemy_url(f"{base_url}/postgres"), isolation_level="AUTOCOMMIT")
     with engine.connect() as conn:
         conn.execute(text("CREATE DATABASE qtrading_rt"))
     engine.dispose()
     subprocess.run([str(pg_restore), "-d", rt_url, str(dump_file)], check=True, timeout=180)
 
-    engine = create_engine(rt_url)
+    engine = create_engine(_to_sync_sqlalchemy_url(rt_url))
     with engine.connect() as conn:
         table_count = conn.execute(
             text("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'")

@@ -9,7 +9,7 @@ import sqlparse
 
 from data.sync.base import safe_error
 from utils.config_handler import ConfigHandler
-from utils.db_utils import get_db_pool_config
+from utils.db_utils import get_db_pool_config, to_sync_db_url
 from utils.df_normalize import normalize_decimal_columns
 
 logger = logging.getLogger(__name__)
@@ -94,7 +94,7 @@ class DataExplorerQueryClient:
                 if not db_url_async:
                     raise RuntimeError("Database URL is not configured. Please complete the onboarding wizard first.")
 
-                db_url_sync = db_url_async.replace("+asyncpg", "")
+                db_url_sync = to_sync_db_url(db_url_async)
                 pool_config = get_db_pool_config()
 
                 DataExplorerQueryClient._shared_engine = sa.create_engine(

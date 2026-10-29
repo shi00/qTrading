@@ -78,6 +78,7 @@ async def test_restart_in_external_mode_skips_sidecar_and_points_engines_to_targ
     assert EngineManager().get_connection_string() == EXTERNAL_URL
 
     # 浏览 engine：DataExplorerQueryClient 使用同一 URL（同步驱动）建共享引擎
+    # D5.1: 同步 driver 显式 +psycopg2（SQLAlchemy 2.1 裸 postgresql:// 默认走 psycopg 3）
     from data.persistence import data_explorer_query_client as deq
 
     created_urls: list[str] = []
@@ -90,4 +91,4 @@ async def test_restart_in_external_mode_skips_sidecar_and_points_engines_to_targ
 
     deq.DataExplorerQueryClient()._ensure_engine()
 
-    assert created_urls == [EXTERNAL_URL.replace("+asyncpg", "")]
+    assert created_urls == [EXTERNAL_URL.replace("+asyncpg", "+psycopg2")]

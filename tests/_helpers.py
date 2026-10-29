@@ -210,6 +210,7 @@ def build_db_urls(params: dict, db_name: str) -> tuple[str, str]:
     """
     # URL-encode password to handle special characters like '@', ':', '/' etc.
     encoded_pwd = quote_plus(params["password"]) if params.get("password") else ""
-    sync_url = f"postgresql://{params['user']}:{encoded_pwd}@{params['host']}:{params['port']}/{db_name}"
+    # D5.1: SQLAlchemy 2.1 起裸 postgresql:// 默认驱动为 psycopg3，同步路径显式 +psycopg2。
+    sync_url = f"postgresql+psycopg2://{params['user']}:{encoded_pwd}@{params['host']}:{params['port']}/{db_name}"
     async_url = f"postgresql+asyncpg://{params['user']}:{encoded_pwd}@{params['host']}:{params['port']}/{db_name}"
     return sync_url, async_url

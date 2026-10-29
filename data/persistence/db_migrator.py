@@ -21,6 +21,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from alembic import command
 from data.sync.base import safe_error
+from utils.db_utils import to_sync_db_url
 from utils.error_classifier import log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -208,10 +209,14 @@ class DatabaseMigrator:
             raise RuntimeError("Database engine does not expose a URL for Alembic migration.")
 
         if isinstance(engine_url, URL):
-            driver_name = engine_url.drivername.replace("+asyncpg", "")
+            # SQLAlchemy 2.1 起光秃 postgresql:// 默认驱动为 psycopg 3，同步迁移路径
+            # 依赖 psycopg2-binary，故显式落到 +psycopg2。
+            driver_name = engine_url.drivername.replace("postgresql+asyncpg", "postgresql+psycopg2")
+            if driver_name == "postgresql":
+                driver_name = "postgresql+psycopg2"
             return engine_url.set(drivername=driver_name).render_as_string(hide_password=False)
 
-        return str(engine_url).replace("+asyncpg", "")
+        return to_sync_db_url(str(engine_url))
 
     @classmethod
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)

@@ -97,7 +97,8 @@ def metadata_db_engine(pg_params):
     asyncio.run(_create_db())
 
     # Create engine and tables
-    db_url = f"postgresql://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
+    # D5.1: SQLAlchemy 2.1 起裸 postgresql:// 默认驱动为 psycopg3，同步路径显式 +psycopg2。
+    db_url = f"postgresql+psycopg2://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
     engine = create_engine(db_url)
     Base.metadata.create_all(engine)
 
@@ -140,8 +141,9 @@ def alembic_db_engine(pg_params):
 
     # Create engine and run Alembic migration
     # URL-encode password to handle special characters like '@', ':', '/' etc.
+    # D5.1: 同步 engine 显式 +psycopg2（SQLAlchemy 2.1 默认 driver 改为 psycopg 3）。
     encoded_pwd = quote_plus(params["password"]) if params.get("password") else ""
-    db_url = f"postgresql://{params['user']}:{encoded_pwd}@{params['host']}:{params['port']}/{db_name}"
+    db_url = f"postgresql+psycopg2://{params['user']}:{encoded_pwd}@{params['host']}:{params['port']}/{db_name}"
     engine = create_engine(db_url)
 
     # 统一使用 override_db_url 覆盖 DB URL（P2-4）
