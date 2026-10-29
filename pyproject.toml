@@ -24,10 +24,10 @@ classifiers = [
 # 临时上界（D0.1，2026-10 依赖全量升级基线）：把「>= 无上界」的隐式漂移改为显式单点跃迁。
 # 每条上界在其升级任务中同 PR 移除，生命周期表见 docs/plans/Plans-202610-dependency-upgrade.md §2.1。
 dependencies = [
-    "flet==1.0.3",
-    "flet-desktop==1.0.3",
-    "flet-charts==1.0.3",
-    "flet-code-editor==1.0.3",
+    "flet==1.0.5",
+    "flet-desktop==1.0.5",
+    "flet-charts==1.0.5",
+    "flet-code-editor==1.0.5",
     "tushare==1.4.29",
     "akshare==1.20.2",
     "requests>=2.34.2",
@@ -85,7 +85,7 @@ dev = [
     "dnspython>=2.9.0",  # Security: GHSA-45c3-73f7-pv4m / CVE-2026-114605 (dns.name.from_wire_parser() 过度 CPU 消耗) fixed in 2.9.0; 传递依赖 email-validator
     "import-linter>=2.15",  # Architecture guard: enforce R1 layered dependencies (CLAUDE.md §4.1)
     "fastmcp>=4.1.4",  # Security: GHSA-7xgj-8392-5q4r (transform 后组件授权绕过，直呼路径跳过 AuthCheck) / GHSA-vqqp-x5qm-5qp4 (OAuth client credentials 缺 issuer 绑定致 client secret 泄漏) fixed in 4.1.2; 传递依赖 flet-mcp -> fastmcp -> fastmcp-slim
-    "flet-mcp==1.0.3",  # AI dev-time Flet API verification (CLAUDE.md §1.10); run via `python -c "from flet_mcp import mcp; mcp.run()"`; pinned == to align with flet main package (api.json is version-specific)
+    "flet-mcp==1.0.5",  # AI dev-time Flet API verification (CLAUDE.md §1.10); run via `python -c "from flet_mcp import mcp; mcp.run()"`; pinned == to align with flet main package (api.json is version-specific)
 ]
 optional = [
     "brotlicffi>=1.2.1.0",  # Security: PYSEC-2026-4323 / CVE-2026-111497 (Brotli 解码器越界写, 可 RCE) fixed in 1.2.1.0
