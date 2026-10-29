@@ -75,6 +75,7 @@
 | P3-REV06-Restore-HeaderValidation | review06 F16：备份恢复路径仅做存在性检查，未校验 pg_dump magic header 与元信息展示 | P3 | ① 用户恢复损坏/伪造备份导致恢复失败或数据错乱的事故时；② 或备份恢复流程被重构时 |
 | P2-REV06-Backup-Encryption | review06 F19：数据库备份文件未加密，UI 缺「勿放共享目录」提示与可选加密备份 | P2 | ① 用户报告备份文件外泄或被第三方读取时；② 或备份功能被重构/导出链路扩展（如云同步）时 |
 | P3-REV08-Akshare-Fallback | review08 C1：Tushare 积分不足直接 skip 功能，akshare 免费同类接口（涨跌停池/龙虎榜/两融/北向/个股资金流）闲置未用；报告已深化为「补足而非替换」，需 ADR 定夺 | P3 | ① 用户报告 Tushare 积分不足导致功能缺失时；② 或前置条件满足（P2-REV06-External-SchemaValidation 关闭 + 候选接口联网可用性验证 + D3 结论）时；③ 或数据源接入架构调整时 |
+| P3-Deps-PandasStubs-Lag | pandas 长期锁定 `<3.1`：pandas-stubs 最新 3.0.5.260914 未覆盖 pandas 3.1.0 类型面，升级会造成 stubs 与运行时版本错位 | P3 | ① pandas-stubs 发布 3.1.x（或覆盖 pandas 3.1 类型面的版本）时；② 或 pyright 在 pandas 3.1 上出现必须升级 stubs 才能消除的错误时 |
 
 ## 技术债清单
 
@@ -393,6 +394,22 @@ review02 B12 已实现第 1 步（data\_version memo 缓存，消除无谓重算
 **期望的最终解法**
 
 将格式化逻辑迁移至 VM 层，View 仅做数据到控件的映射。验收标准：① `_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 迁至 VM，state 携带渲染就绪数据；② 现有 `test_screener_view_runtime.py` / `test_screener_view_model.py` 全过；③ screener\_view 渲染路径无重复格式化。upgrade 触发条件：① report04 D9（AI 流式更新重建机制重构）合并时；② 或 `screener_view` 再次因格式化逻辑内联出现缺陷时。
+
+#### P3-Deps-PandasStubs-Lag：pandas 长期锁定 `<3.1`（pandas-stubs 未覆盖 pandas 3.1 类型面）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-Deps-PandasStubs-Lag** | pandas 长期锁定 `>=3.0.6,<3.1`：pandas-stubs 最新 3.0.5.260914 未覆盖 pandas 3.1.0 类型面，升级会造成 stubs 与运行时版本错位 | ① pandas-stubs 发布 3.1.x（或覆盖 pandas 3.1 类型面的版本）时；② 或 pyright 在 pandas 3.1 上出现必须升级 stubs 才能消除的错误时 |
+
+**Owner**：架构维护者（复核触发器：pandas 升级任务启动 / pandas-stubs 发版 / `pyright` 因 pandas 类型报错）
+
+**产生背景与现状**
+
+D3.1 依赖升级评估（2026-10-29）：pandas 3.1.0 已发布，但 pandas-stubs 最新仍为 3.0.5.260914，未覆盖 pandas 3.1 的类型面。项目 `pyproject.toml` 声明 `pandas-stubs>=3.0.5.260914` 并以 `pyright` 0 errors 为门禁，强行升级 pandas 会引入 stubs 与实际运行时版本错位的类型噪声，无法维持该门禁。故 `pandas<3.1` 由升级期的临时上界转为**长期上界**，声明处以注释注明理由。
+
+**期望的最终解法**
+
+pandas-stubs 发布覆盖 pandas 3.1 的版本后，同 PR 提升 `pandas` 与 `pandas-stubs`，并在 CI 确认 `pyright` 0 errors 与回测金标准一致。验收标准：① `pyproject.toml` 移除 `pandas<3.1` 上界且 `pandas-stubs` 声明同步；② `pyright` 0 errors；③ `python scripts/upgrade_golden_snapshot.py --check` 输出 `SAME`。upgrade 触发条件：① pandas-stubs 发布 3.1.x（或覆盖 pandas 3.1 类型面的版本）时；② 或 pyright 在 pandas 3.1 上出现必须升级 stubs 才能消除的错误时。
 
 ### 数据库迁移与循环依赖
 
