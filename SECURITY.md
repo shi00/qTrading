@@ -1,13 +1,13 @@
 # Security Policy
 
-<!-- NOTE: The "Supported Versions" table is maintained manually at each release and verified in CI by `scripts/verify_versions.py` (check 5), which requires the row to match the major.minor of pyproject.toml. SECURITY.md is listed in release-please-config.json extra-files, but its generic updater needs an `x-release-please-version` marker, which this file does not use, and a wildcard row such as `0.10.x` cannot be rewritten automatically. Update the table by hand when the supported major.minor changes. -->
+<!-- NOTE: The "Supported Versions" table is maintained manually at each release and verified in CI by `scripts/verify_versions.py` (check 5), which requires the row to match the major.minor of pyproject.toml. SECURITY.md is listed in release-please-config.json extra-files, but its generic updater needs an `x-release-please-version` marker, which this file does not use, and a wildcard row such as `0.11.x` cannot be rewritten automatically. Update the table by hand when the supported major.minor changes. -->
 
 ## Supported Versions
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.10.x  | :white_check_mark: |
-| < 0.10  | :x:                |
+| 0.11.x  | :white_check_mark: |
+| < 0.11  | :x:                |
 
 ## Reporting a Vulnerability
 
