@@ -1485,6 +1485,11 @@ jobs:
             }
             Write-Host "CMAKE_ARGS=$env:CMAKE_ARGS"
             nvcc --version
+            # uv 的构建缓存（setup-uv 从 GitHub Actions cache 恢复，键只取 requirements 哈希）
+            # 不区分 CMAKE_ARGS：CUDA 变体会直接复用 CPU 变体编出的 llama-cpp-python wheel，
+            # lib 下没有 *cuda*.dll（B03 校验失败），且 CUDA wheel 反向写回也会污染 CPU 变体。
+            # 故为 CUDA 变体指向独立缓存目录，强制从 sdist 重新编译且不写回共享缓存。
+            $env:UV_CACHE_DIR = "$env:UV_CACHE_DIR-cuda"
           }
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt
