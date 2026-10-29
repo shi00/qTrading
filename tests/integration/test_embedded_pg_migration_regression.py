@@ -66,8 +66,9 @@ async def _get_table_names(url: str) -> set[str]:
 class TestEmbeddedPgMigrationRegression:
     """embedded PG Alembic 迁移回归测试。
 
-    env.py 自动将 ``postgresql+asyncpg://`` URL 转为 ``postgresql://`` sync URL
-    （alembic/env.py:69），因此 ``make_alembic_cfg(info.url)`` 直接传入 async URL 即可。
+    env.py 自动将 ``postgresql+asyncpg://`` URL 规范为 ``postgresql+psycopg2://``
+    同步 URL（D5.1：SQLAlchemy 2.1 裸 postgresql:// 默认 driver 为 psycopg 3），
+    因此 ``make_alembic_cfg(info.url)`` 直接传入 async URL 即可。
     """
 
     @pytest.mark.asyncio(loop_scope="session")

@@ -5,6 +5,7 @@ import typing
 
 import pandas as pd
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import distinct_on
 
 from data.constants import (
     REVIEW_STATUS_COMPLETED,
@@ -441,7 +442,7 @@ class ScreenerDao(BaseDao):
             )
             # RV-03: DISTINCT ON (trade_date, strategy_name, ts_code) ORDER BY ... id DESC
             # （id 单调 = 最近一次运行；DISTINCT ON 要求 ORDER BY 列在 select list，故含 id）
-            .distinct(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code)
+            .ext(distinct_on(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code))
             .order_by(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code, sh.c.id.desc())
             .subquery("latest_review_stats")
         )
@@ -501,7 +502,7 @@ class ScreenerDao(BaseDao):
             )
             # RV-03: DISTINCT ON ... ORDER BY ... id DESC（id 单调 = 最近一次运行；
             # DISTINCT ON 要求 ORDER BY 列在 select list，故含 id）
-            .distinct(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code)
+            .ext(distinct_on(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code))
             .order_by(sh.c.trade_date, sh.c.strategy_name, sh.c.ts_code, sh.c.id.desc())
             .subquery("latest_ai_attribution")
         )
@@ -950,7 +951,7 @@ class ScreenerDao(BaseDao):
                 # prediction_result+alpha 过滤，但无 ai_score，须显式排除避免污染 few-shot）。
                 t.c.ai_score.isnot(None),
             )
-            .distinct(t.c.trade_date, t.c.strategy_name, t.c.ts_code)
+            .ext(distinct_on(t.c.trade_date, t.c.strategy_name, t.c.ts_code))
             .order_by(t.c.trade_date, t.c.strategy_name, t.c.ts_code, t.c.id.desc())
             .subquery("latest_learning")
         )

@@ -157,7 +157,7 @@ class TestSyncDatabaseUrl:
 
         result = DatabaseMigrator._get_sync_database_url(mock_engine)
 
-        assert result == "postgresql://user:pass@localhost:5432/app_db"
+        assert result == "postgresql+psycopg2://user:pass@localhost:5432/app_db"
 
     def test_converts_sqlalchemy_url_without_hiding_password(self):
         mock_engine = MagicMock()
@@ -172,7 +172,7 @@ class TestSyncDatabaseUrl:
 
         result = DatabaseMigrator._get_sync_database_url(mock_engine)
 
-        assert result == "postgresql://user:secret@localhost:5432/app_db"
+        assert result == "postgresql+psycopg2://user:secret@localhost:5432/app_db"
 
     def test_raises_when_engine_has_no_url(self):
         mock_engine = MagicMock()
@@ -416,8 +416,8 @@ class TestRunAlembicUpgradeConfig:
                             await DatabaseMigrator._run_alembic_upgrade(mock_engine)
 
         # Verify that database_url is set in attributes (new implementation)
-        # The URL should have +asyncpg removed
-        assert captured_cfg.attributes["database_url"] == "postgresql://user:pass@localhost:5432/target_db"
+        # D5.1: 同步路径必须显式 +psycopg2（SQLAlchemy 2.1 裸 postgresql:// 默认走 psycopg 3）
+        assert captured_cfg.attributes["database_url"] == "postgresql+psycopg2://user:pass@localhost:5432/target_db"
         # Verify configure_logger is set to False
         assert captured_cfg.attributes["configure_logger"] is False
         mock_upgrade.assert_called_once_with(captured_cfg, "head")

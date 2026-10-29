@@ -77,4 +77,8 @@ DB_URL = os.environ.get("DATABASE_URL") or None
 
 # Synchronous connection URL (for DataExplorerQueryClient read-only queries)
 # Safe handling: DB_URL_SYNC is None when DB_URL is None
-DB_URL_SYNC = DB_URL.replace("+asyncpg", "") if DB_URL else None
+# 必须显式 +psycopg2：SQLAlchemy 2.1 起光秃 postgresql:// 的默认驱动为 psycopg 3，
+# 项目同步路径只依赖 psycopg2-binary，裸 URL 会抛 ModuleNotFoundError: psycopg。
+DB_URL_SYNC = (
+    DB_URL.replace("+asyncpg", "+psycopg2").replace("postgresql://", "postgresql+psycopg2://") if DB_URL else None
+)
