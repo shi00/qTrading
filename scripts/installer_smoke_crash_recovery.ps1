@@ -15,6 +15,10 @@ Set-StrictMode -Version Latest
 # ---- 路径常量 ----
 $AppInstallDir = Join-Path $env:LOCALAPPDATA "Programs\AStockScreener"
 $AppExePath = Join-Path $AppInstallDir "AStockScreener.exe"
+# 用户数据根目录：嵌入 PG 数据（postgres\16\data）与 sidecar 日志（postgres-logs）
+$UserDataRoot = Join-Path $env:LOCALAPPDATA "qTrading"
+# 主程序日志目录（utils/logger.py 的 LOG_DIR）
+$AppLogDir = Join-Path $env:LOCALAPPDATA "AStockScreener\logs"
 
 # ---- 工具函数 ----
 function Write-Step([string]$msg) { Write-Host "`n[STEP] $msg" -ForegroundColor Cyan }
@@ -33,6 +37,34 @@ function Wait-SidecarReady([int]$TimeoutSec = 60) {
         $elapsed += 2
     }
     return $false
+}
+
+function Write-Diagnostics([string]$reason) {
+    Write-Host "`n[DIAG] $reason" -ForegroundColor Yellow
+    $sidecarDir = Join-Path $AppInstallDir "_internal\sidecars"
+    if (Test-Path $sidecarDir) {
+        Write-Host "[DIAG] sidecar dir: $sidecarDir"
+        Get-ChildItem $sidecarDir -Recurse -Force -ErrorAction SilentlyContinue |
+            Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+    } else {
+        Write-Host "[DIAG] sidecar dir missing: $sidecarDir"
+    }
+    $logs = @()
+    if (Test-Path $AppLogDir) {
+        $logs += Get-ChildItem $AppLogDir -Filter *.log -ErrorAction SilentlyContinue
+    }
+    $pgLogDir = Join-Path $UserDataRoot "postgres-logs"
+    if (Test-Path $pgLogDir) {
+        $logs += Get-ChildItem $pgLogDir -Filter *.log -ErrorAction SilentlyContinue
+    }
+    if ($logs.Count -gt 0) {
+        foreach ($log in $logs) {
+            Write-Host "----- $($log.FullName) (tail 60) -----"
+            Get-Content $log.FullName -Tail 60 -ErrorAction SilentlyContinue | Write-Host
+        }
+    } else {
+        Write-Host "[DIAG] no log files under $AppLogDir or $pgLogDir"
+    }
 }
 
 function Stop-QtradingGraceful {
@@ -70,6 +102,12 @@ try {
     if (Test-Path $AppInstallDir) {
         Remove-Item -Recurse -Force $AppInstallDir -ErrorAction SilentlyContinue
     }
+    # 同一 job 的前置步骤 `Smoke Test - Cold Start` 会用同一用户数据目录启动 dist 版 exe 并被强杀，
+    # 留下未完成 initdb 的 postgres 数据目录；若不清理，安装包启动时 sidecar 无法就绪。
+    # 本脚本验证的是「全新安装 → 崩溃恢复」，必须从干净用户数据目录开始。
+    if (Test-Path $UserDataRoot) {
+        Remove-Item -Recurse -Force $UserDataRoot -ErrorAction SilentlyContinue
+    }
     Write-Ok "Environment cleaned"
 
     # STEP 2: 安装 embedded variant
@@ -82,6 +120,11 @@ try {
     Write-Step "3. Start qTrading & wait for sidecar ready"
     $proc = Start-Process -FilePath $AppExePath -PassThru
     $ready = Wait-SidecarReady -TimeoutSec 60
+    if (-not $ready) {
+        # 主进程存活但 sidecar 未出现：dump 安装的 sidecar 文件与主程序/sidecar 日志便于定位
+        # （主程序若在启动阶段抛 EmbeddedPostgresStartError 会停在 PreInitErrorView，不写 stdout）
+        Write-Diagnostics "sidecar not ready within 60s after app start"
+    }
     Assert-True $ready "Sidecar process started"
 
     # STEP 4: 记录 sidecar 与 postgres 进程
