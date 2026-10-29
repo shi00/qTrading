@@ -19,11 +19,14 @@ jobs:
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
         with:
           # 只产出 Release PR（bump 版本号 + CHANGELOG），不创建 tag/Release。
-          # 默认用 GITHUB_TOKEN 建 Release/tag，而该类事件不会再触发 ci_cd.yml
-          # （GitHub 递归触发防护），结果只会留下「有 Release 无安装包」的空壳。
+          # 使用 fine-grained PAT（secret RELEASE_PLEASE_TOKEN）而非默认 GITHUB_TOKEN：
+          # GITHUB_TOKEN 创建的 PR 不会触发 pull_request workflow（GitHub 递归触发防护），
+          # 一旦 main 启用 required status checks，Release PR 的 check 会永久停在 Pending；
+          # PAT 触发的事件会正常创建 workflow run，使 Release PR 同样进入 CI 并被门禁覆盖。
           # 发版由维护者在 Release PR 合并提交上人工推送 v*.*.* tag 触发打包。
           # 行为依据：action.yml input skip-github-release（"do not try to tag releases"，
           # 默认 false）+ manifest config schema skip-github-release（"Skip tagging GitHub
           # releases for this package"）。注意 skip 后 release-please 仍要求版本已被打 tag，
           # 故本仓库以 ci_cd.yml 的 push.tags 作为既有打 tag 基础设施。
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           skip-github-release: true
