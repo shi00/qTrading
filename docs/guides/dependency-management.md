@@ -16,7 +16,7 @@
 
 1. **只编辑 `pyproject.toml`**：运行时依赖加到 `[project] dependencies`，开发依赖加到 `[project.optional-dependencies] dev`，可选依赖加到 `[project.optional-dependencies] optional`。**禁止手改 `requirements*.txt`**。
 2. **`requirements*.txt` 由 pre-commit 自动重新编译**：提交时本地 pre-commit 的三个 hook（`pip-compile-core` / `pip-compile-dev` / `pip-compile-optional`）会用 `uv pip compile` 同步生成 `requirements.txt` / `requirements-dev.txt` / `requirements-optional.txt`。需要提交前本地立即生效时可手动编译（见 how-to.md 对应小节，命令形如 `uv pip compile --universal --no-emit-index-url [--extra dev] pyproject.toml -o <output.txt>`）。
-3. **本地验证**：在已激活的 `.venv` 内 `uv pip install -r requirements.txt -r requirements-dev.txt` 同步安装，随后跑 `ruff check .` + pyright + 相关测试；依赖安全由 CI 的 `scripts/run_pip_audit.py`（pip-audit）扫描三个 `requirements*.txt` 并按 `.security/audit-allowlist.yml` 白名单判定（详见 [ci-cd.md](./ci-cd.md) 的 Security Audit job）。
+3. **本地验证**：在已激活的 `.venv` 内**按 CI 顺序逐份安装**——`uv pip install -r requirements.txt` → `-r requirements-optional.txt` → `-r requirements-dev.txt`；三份文件对同一依赖可能锁定不同版本（如 `starlette` 在 core/optional 与 dev 三次编译时点不同），合并成单次解析会因版本互斥直接失败（`unsatisfiable`），逐份安装与 CI 行为一致。随后跑 `ruff check .` + pyright + 相关测试；依赖安全由 CI 的 `scripts/run_pip_audit.py`（pip-audit）扫描三个 `requirements*.txt` 并按 `.security/audit-allowlist.yml` 白名单判定（详见 [ci-cd.md](./ci-cd.md) 的 Security Audit job）。
 
 ### PyInstaller 打包
 

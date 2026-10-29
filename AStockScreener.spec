@@ -18,8 +18,10 @@ datas = [
 # flet 包内 icons.json（material/cupertino）通过 PEP 562 __getattr__ 懒加载，
 # PyInstaller 静态分析无法发现，需显式收集。flet 包数据文件仅 5 个（2 json + 2 pyi + 1 typed），全收集无副作用。
 datas += collect_data_files("flet")
-# flet_code_editor 包内 Flutter 资源文件（语法高亮配置、CodeMirror 基础主题等），
-# PyInstaller 静态分析无法发现，需显式收集。
+# flet_code_editor：历史版本包内含 Flutter 资源文件（语法高亮配置、CodeMirror 基础主题等），
+# PyInstaller 静态分析无法发现，故显式收集。当前锁定版本实测 collect_data_files("flet_code_editor")
+# 返回 0 个文件（包内仅 __init__.py / code_editor.py / types.py），该行退化为无副作用防御性收集：
+# 保留以兼容未来版本重新附带资源，每次 Flet 升级后复核返回值即可（D6.3 复核记录）。
 datas += collect_data_files("flet_code_editor")
 # akshare 包内数据文件（calendar.json 交易日历 + 5 个加密/解密 .js + 1 个 .zip + 1 个 .json），
 # 运行时通过 cons.get_calendar() 等函数读取，PyInstaller 静态分析无法发现，全收集（8 文件）。
