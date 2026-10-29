@@ -125,16 +125,12 @@ class TestConceptListCacheInvalidation:
     """
 
     def _install_fake_em_module(self, monkeypatch: pytest.MonkeyPatch, em: object) -> None:
-        """让 ``_clear_concept_list_cache`` 的 ``import ... as _em`` 命中 fake.
+        """让 ``_clear_concept_list_cache`` 的 ``importlib.import_module`` 命中 fake.
 
-        ``import akshare.stock.stock_board_concept_em as _em`` 绑定的是父包
-        ``akshare.stock`` 的 ``stock_board_concept_em`` 属性（而非 sys.modules 键），
-        因此须替换该属性；sys.modules 叶子键一并覆盖保持一致。测试后自动还原。
+        ``_clear_concept_list_cache`` 经 ``importlib.import_module`` 动态解析私有模块，
+        该函数优先返回 ``sys.modules`` 中的条目，故只需覆盖模块键；测试后自动还原。
         """
-        import akshare.stock as _stock_mod
-
-        monkeypatch.setattr(_stock_mod, "stock_board_concept_em", em)
-        monkeypatch.setitem(sys.modules, "akshare.stock.stock_board_concept_em", em)
+        monkeypatch.setitem(sys.modules, "akshare.stock.board.stock_board_concept_em", em)
 
     @pytest.mark.asyncio
     async def test_second_call_refetches_after_cache_clear(self, client_with_mocks, monkeypatch):
