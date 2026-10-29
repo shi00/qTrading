@@ -503,7 +503,7 @@ rpds-py==2026.6.3
     # via
     #   jsonschema
     #   referencing
-ruff==0.16.8
+ruff==0.17.3
     # via astockscreener (pyproject.toml)
 s3transfer==0.19.2
     # via boto3
