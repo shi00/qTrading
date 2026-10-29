@@ -217,9 +217,9 @@ pandas-market-calendars==5.5.0
     # via astockscreener (pyproject.toml)
 pillow==13.0.0
     # via astockscreener (pyproject.toml)
-polars==1.44.2
+polars==2.1.0
     # via astockscreener (pyproject.toml)
-polars-runtime-32==1.44.2
+polars-runtime-32==2.1.0
     # via polars
 propcache==0.5.4
     # via
