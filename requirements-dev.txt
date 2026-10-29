@@ -337,7 +337,7 @@ pandas==3.0.6
     #   exchange-calendars
     #   pandas-market-calendars
     #   tushare
-pandas-market-calendars==5.4.0
+pandas-market-calendars==5.5.0
     # via astockscreener (pyproject.toml)
 pandas-stubs==3.0.5.260914
     # via astockscreener (pyproject.toml)
@@ -377,7 +377,7 @@ py-mini-racer==0.6.0 ; sys_platform == 'linux'
     # via akshare
 py-serializable==2.1.0
     # via cyclonedx-python-lib
-pyarrow==25.0.1
+pyarrow==26.0.0
     # via astockscreener (pyproject.toml)
 pycparser==3.0 ; implementation_name != 'PyPy'
     # via cffi
