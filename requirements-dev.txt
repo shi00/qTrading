@@ -198,7 +198,7 @@ httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'
     # via httpx2
 huggingface-hub==1.32.0
     # via tokenizers
-hypothesis==6.168.1
+hypothesis==6.170.13
     # via astockscreener (pyproject.toml)
 idna==3.20
     # via
@@ -371,8 +371,6 @@ propcache==0.5.4
     #   yarl
 psycopg2-binary==2.9.13
     # via astockscreener (pyproject.toml)
-py-cpuinfo2==10.1.1
-    # via pytest-benchmark
 py-key-value-aio==0.4.6
     # via fastmcp-slim
 py-mini-racer==0.6.0 ; sys_platform == 'linux'
@@ -416,11 +414,10 @@ pyperclip==1.11.0
     # via fastmcp-slim
 pyright==1.1.414
     # via astockscreener (pyproject.toml)
-pytest==9.1.1
+pytest==9.2.0
     # via
     #   astockscreener (pyproject.toml)
     #   pytest-asyncio
-    #   pytest-benchmark
     #   pytest-cov
     #   pytest-json-report
     #   pytest-metadata
@@ -429,9 +426,7 @@ pytest==9.1.1
     #   pytest-timeout
     #   pytest-xdist
     #   syrupy
-pytest-asyncio==1.4.0
-    # via astockscreener (pyproject.toml)
-pytest-benchmark==5.3.0
+pytest-asyncio==1.4.1
     # via astockscreener (pyproject.toml)
 pytest-cov==7.1.0
     # via astockscreener (pyproject.toml)

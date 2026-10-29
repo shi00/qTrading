@@ -64,13 +64,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9.1.1,<9.2",
-    "pytest-asyncio>=1.4.0,<1.4.1",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1",
     "pytest-cov>=7.1.0",
-    "pytest-xdist>=3.5.0",
+    "pytest-xdist>=3.8.0",
     "pytest-rerunfailures>=16.7",
     "pytest-randomly>=5.0.0",
-    "pytest-benchmark>=5.0.0",  # PRF-07: 写库热路径 _prepare_records 性能定基（xdist 激活时自动禁用测量，定向 -n0 运行）
     "pytest-timeout>=2.4.0",  # Diagnose CI integration test hang (xdist worker deadlock); 2.5.0 在 PyPI 被 yanked（accidental breaking change），2.4.0 为可用最新稳定
     "pytest-json-report>=1.5.0",  # JSON report for scripts/detect_flaky.py
     "ruff>=0.17.3",  # UP-4.3 全库格式化升级：ruff 0.16 format 变更涉及全库 .py + .md，本 PR 独立消化格式 diff
@@ -78,7 +77,7 @@ dev = [
     "pandas-stubs>=3.0.5.260914",
     "uv>=0.13.6",  # Security: PYSEC-2026-4321 (TLS verification against vendored webpki-roots missing post-quantum intermediates) fixed in 0.13.4
     "pip-audit>=2.10.1",
-    "hypothesis>=6.168.1,<6.169",
+    "hypothesis>=6.170.12",
     "syrupy>=6.1.1",
     "msgpack>=1.2.4",  # Security: GHSA-6v7p-g79w-8964 (Use After Free in Unpacker reuse) fixed in 1.2.1; GHSA-j586-36cw-2gc2 / CVE-2026-114613 (strict_map_key 校验失败路径内存泄漏 + Unpacker 悬垂引用 UAF) fixed in 1.2.3
     "pyjwt>=2.15.1",  # Security: CVE-2026-101918 (深层嵌套 JWT payload 触发未捕获 RecursionError -> 认证路径 DoS) fixed in 2.15.0; 传递依赖 flet-mcp -> fastmcp-slim -> mcp
