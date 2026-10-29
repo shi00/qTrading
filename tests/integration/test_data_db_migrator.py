@@ -563,7 +563,8 @@ class TestConcurrentMigration:
     async def test_concurrent_init_db_one_at_old_revision(self, concurrent_db_engine):
         """One engine at old revision, another fresh, both upgrade concurrently."""
         async_url, db_name = concurrent_db_engine
-        sync_url = async_url.replace("+asyncpg", "")
+        # D5.1: 同步 engine 显式 +psycopg2（SQLAlchemy 2.1 裸 postgresql:// 默认 driver 为 psycopg 3）
+        sync_url = async_url.replace("+asyncpg", "+psycopg2")
 
         # First, migrate to 0001 only
         engine1 = create_test_engine(async_url)
@@ -697,7 +698,8 @@ class TestMigrationInterruptionRecovery:
             # 1. DROP SCHEMA public CASCADE (removes all tables including alembic_version)
             # 2. CREATE SCHEMA public
             # 3. init_db(force=True, auto_migrate=True) - rebuilds everything
-            sync_url = str(engine.url).replace("+asyncpg", "")
+            # D5.1: 同步 URL 显式 +psycopg2（SQLAlchemy 2.1 裸 postgresql:// 默认 driver 为 psycopg 3）
+            sync_url = str(engine.url).replace("+asyncpg", "+psycopg2")
             with override_db_url(sync_url):
                 await cm.clear_all_cache()
 
