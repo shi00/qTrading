@@ -1379,7 +1379,7 @@ jobs:
     needs: [ci-checks, ci-checks-windows, e2e-tests-windows, embedded-tests]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     # 锁定 windows-2022（VS 2022）：windows-latest 已滚动迁移到 VS 2026（GitHub 2026-05 公告），
-    # 而 CUDA 12.1 nvcc 仅支持 MSVC 192x/193x（VS 2019/2022），在 VS 2026 上 CMake 报
+    # 而 CUDA 12.4 nvcc 仅支持 MSVC 192x/193x（VS 2019/2022），在 VS 2026 上 CMake 报
     # "No CUDA toolset found."，llama-cpp-python CUDA 后端源码编译失败（B03 随之误报
     # ModuleNotFoundError）。升级 CUDA Toolkit 版本且确认其支持新镜像 VS 版本后才可解除锁定。
     runs-on: windows-2022
@@ -1435,16 +1435,21 @@ jobs:
         # 原 `winget install Nvidia.CUDA` 步骤报 "The term 'winget' is not recognized"。
         # 改用 Jimver/cuda-toolkit：直接下载 NVIDIA 官方 network installer，并按 sub-packages
         # 生成 `-s <子包>_<主>.<次> ... -n` 参数（与原 `--override` 等价，跳过 Display.Driver：
-        # CUDA 12.1 installer 默认带 driver，在 Windows runner 上装 driver 会触发重启/蓝屏）。
-        # 子包名须与 CUDA 12.1 安装指南 Table 3 一致（NVRTC 为 nvrtc/nvrtc_dev，无 "cuda_" 前缀；
-        # cuda_nvrtc 是 12.4+ 才有的名字，传入无效子包名会使 installer 整体失败 0xE0E00019）。
-        # 另须装 visual_studio_integration（NVIDIA 的 VS 集成子包，action 会自动补 `_12.1` 后缀）：
+        # CUDA installer 默认带 driver，在 Windows runner 上装 driver 会触发重启/蓝屏）。
+        # 子包名须与 CUDA 12.4 安装指南 Table 2 一致（NVRTC 为 nvrtc/nvrtc_dev，无 "cuda_" 前缀；
+        # 传入无效子包名会使 installer 整体失败 0xE0E00019）。
+        # 版本选 12.4（非 12.1）：MSVC 19.40+ 自带的 STL 在 yvals_core.h 中硬断言 CUDA >= 12.4
+        # （`error STL1002: Unexpected compiler version, expected CUDA 12.4 or newer.`），
+        # 而 windows-2022 镜像只带 VS 2022 14.44（MSVC 19.44），12.1/12.3 的 CUDA 编译必然失败
+        # （该断言属 MSVC STL 自身，nvcc 的 -allow-unsupported-compiler 无法绕过）。
+        # 12.4 是 CUDA 12.x minor version compatibility 区间内满足该断言的最低版本，不抬高用户驱动门槛。
+        # 另须装 visual_studio_integration（NVIDIA 的 VS 集成子包，action 会自动补 `_12.4` 后缀）：
         # scikit-build-core 在 runner 上使用 "Visual Studio 17 2022" 生成器，CMake 经 MSBuild 查找
         # CMAKE_VS_PLATFORM_TOOLSET_CUDA，缺该集成时 CMakeDetermineCompilerId 直接报
         # "No CUDA toolset found."（nvcc 存在且 `nvcc --version` 正常并不代表 VS 集成已装齐）。
         uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d  # v0.2.36
         with:
-          cuda: '12.1.1'
+          cuda: '12.4.1'
           method: 'network'
           sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "nvrtc", "nvrtc_dev", "visual_studio_integration"]'
           use-github-cache: false
@@ -1454,13 +1459,13 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # CUDA 默认装到 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1
-          $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin"
+          # CUDA 默认装到 C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4
+          $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin"
           if (-not (Test-Path (Join-Path $cudaBin "nvcc.exe"))) {
             # 失败时 dump NVIDIA installer 日志便于定位（静默安装失败默认无输出）
             Get-ChildItem "$env:ProgramData\NVIDIA Corporation" -Recurse -Filter *.log -ErrorAction SilentlyContinue |
               ForEach-Object { Write-Host "----- $($_.FullName) -----"; Get-Content $_.FullName -Tail 80 -ErrorAction SilentlyContinue }
-            Write-Error "CUDA Toolkit 12.1 (nvcc.exe) not found at $cudaBin after install"
+            Write-Error "CUDA Toolkit 12.4 (nvcc.exe) not found at $cudaBin after install"
             exit 1
           }
           & (Join-Path $cudaBin "nvcc.exe") --version
@@ -1475,11 +1480,13 @@ jobs:
           # abetlen 预编译 wheel 已无法匹配 Python 3.13 + llama-cpp-python 0.3.35
           # （abl wheel 最高 cp312 + 0.3.4），故 v0.3.35 起切换到此源码编译路径。
           if ("${{ matrix.backend }}" -eq "cuda") {
-            # CUDA 12.1 的 nvcc 仅支持 MSVC 192x/193x，而 windows-2022 镜像只带 VS 2022 14.4x（cl 19.44），
-            # nvcc 的 host_config.h 在编译期硬性 #error 拒绝该版本，故显式放行（NVIDIA 称 use at your own risk）。
+            # CUDA 12.4 的 nvcc 官方白名单仍是 MSVC 193x，而 windows-2022 镜像只带 VS 2022 14.44（cl 19.44，
+            # MSVC 1944），nvcc 的 host_config.h 在编译期硬性 #error 拒绝该版本，故显式放行
+            # （NVIDIA 称 use at your own risk）。注意：此放行只越过 nvcc 的 host compiler 白名单，
+            # MSVC STL 的 "expected CUDA 12.4 or newer"（STL1002）由上面的 CUDA 12.4 版本满足。
             $env:CMAKE_ARGS = "-DGGML_CUDA=on -DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler"
             # 安装步骤只把 CUDA 目录写进 GITHUB_PATH / 系统 PATH，当前 shell 可能未刷新；显式追加确保 cmake 找到 nvcc
-            $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin"
+            $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin"
             if (Test-Path $cudaBin) {
               $env:Path = "$cudaBin;$env:Path"
             }
