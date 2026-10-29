@@ -18,7 +18,11 @@
 
 GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量门禁包括：
 
-1. **Fast Ruff Check & Format** (`lint-fast` job)：matrix 含 Python `3.13` 与 `3.14`，其中 `3.14` 标记 `experimental: true` 并 `continue-on-error`（**Python 3.14 仅在 `lint-fast` job 中作为 experimental 矩阵项运行**，仅跑 `ruff check` + `ruff format --check`，不安装项目依赖）
+> **PR 触发范围与 required 门禁**：`ci_cd.yml` 的 `pull_request` 不再设置 `paths` 白名单。main 分支的 required status check 是聚合 job `CI Gate`（另有 `docs-ci.yml` 的 `Docs Consistency Check`），而 workflow 未触发时该 check 会永久停在 Pending 并阻塞合并。变更是否属于代码类改由 `Changes` job 在运行时判定（`scripts/classify_changed_paths.py`，规则与迁移前的 `pull_request.paths` 白名单一致）：非代码类 PR 只跑 `Changes` 与 `lint-fast`，重型 job 依 `needs.changes.outputs.code` 跳过。`CI Gate` 在 `if: always()` 下用 `needs.*.result` 显式校验（`pull_request` 与 `merge_group` 事件均运行，后者为 merge queue 预留），只放行明确允许的跳过（非代码类 PR 的重型 job、dependabot/fork PR 的 `ci-checks`），上游失败导致的 skipped 一律判不通过，避免「上游失败 → 下游跳过 → 门禁绿灯」。分类所用 GitHub API 失败、fork PR 或变更文件触达 3000 上限时一律按代码类处理（fail-closed）。
+>
+> **main 分支合并策略（PR-only）**：main 由规则集 `main-required-checks` 保护——required checks 为 `CI Gate` 与 `Docs Consistency Check`，并启用 `pull_request` 规则（required approving review 数为 0，即必须经 PR 合并）；直推 main 被禁止，管理员通过 `bypass_mode: pull_request` 获得的是「PR 合并时可绕过 checks」的能力，不是直推许可。
+
+1. **Fast Ruff Check & Format** (`lint-fast` job，Python `3.13` 稳定基线) 与 **实验性 lint** (`lint-fast-experimental` job，Python `3.14`，`continue-on-error` 允许失败)：两者均仅跑 `ruff check` + `ruff format --check`，不安装项目依赖。稳定基线拆成独立 job 而非同一 matrix，是为了让聚合门禁依赖的 `needs.lint-fast.result` 语义确定（实验项失败不得污染稳定基线结论）
 2. **Pre-commit Hooks** (Ruff、格式化、裸 `type: ignore`、requirements 同步、版本一致性、文档一致性、红线自动化、import-linter 架构守护；hook 数量见 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml))
 3. **Security Audit** (`scripts/run_pip_audit.py`，扫描 `requirements.txt`、`requirements-optional.txt`、`requirements-dev.txt`，使用 `.security/audit-allowlist.yml`)
 4. **Pyright Type Check** (版本见 `ci_cd.yml`，`continue-on-error: false`)
@@ -33,7 +37,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 > **requirements 机器人协作规则（依赖升级期间）**：`requirements-drift` 检出漂移后由 `update-requirements` 创建 `chore/auto-requirements-sync` PR。依赖全量升级的各 Phase PR 在途期间，该 bot PR 只读不改：若其 diff 与本 Phase 目标版本一致，先合入 bot PR 再 rebase 本 PR；否则关闭该 bot PR，待 Phase 合并后由 bot 重新生成。任何 Phase PR 合并后须复跑 `requirements-drift`（上游当日发版会使 main 变红），变红时按同一规则处理，不得在业务 PR 中顺带升级无关包。
 
-> **Python 3.14 状态说明**：完整测试矩阵（Code Quality & Tests、Windows E2E、Windows Build 等）仅运行 Python `3.13`（稳定基线）。Python `3.14` 当前依赖已支持（`litellm>=1.101.0` 的 `Requires-Python` 为 `<3.15, >=3.10`），`lint-fast` job 将 `3.14` 作为 experimental 矩阵项前瞻验证（仅跑 `ruff check` + `ruff format --check`，不安装项目依赖；矩阵配置见 [已知架构技术债](../debt/known-technical-debt.md) 相关条目）。
+> **Python 3.14 状态说明**：完整测试矩阵（Code Quality & Tests、Windows E2E、Windows Build 等）仅运行 Python `3.13`（稳定基线）。Python `3.14` 当前依赖已支持（`litellm>=1.101.0` 的 `Requires-Python` 为 `<3.15, >=3.10`），`lint-fast-experimental` job 以 `continue-on-error` 前瞻验证（仅跑 `ruff check` + `ruff format --check`，不安装项目依赖；相关技术债见 [已知架构技术债](../debt/known-technical-debt.md)）。
 
 ### 版本发布流程与 Release 管理
 
@@ -57,7 +61,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 - **历史空 Release 不自动补救**：`v0.10.0` / `v0.10.1` 等既有空 Release 保持原样，如需补资产另行人工评估。
 
 **其他 workflow**（`.github/workflows/` 下除 `ci_cd.yml` 主矩阵外的兜底流水线，由 `check_workflow_enum()` 门禁守护无遗漏）:
-- 前端流水线：文档 CI (`docs-ci.yml`)、Flet 前瞻验证 (`flet-nightly.yml`)、PostgreSQL sidecar Release (`sidecar.yml`)
+- 前端流水线：文档 CI (`docs-ci.yml`，对所有 PR 运行、不设 paths 过滤，其 `Docs Consistency Check` 是 main 的 required check；否则未命中 paths 时 check 会停在 Pending)、Flet 前瞻验证 (`flet-nightly.yml`)、PostgreSQL sidecar Release (`sidecar.yml`)
 - 配置流水线：pre-commit 配置 PR 冒烟 (`precommit-config-ci.yml`)，仅 PR 修改 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml)（或该 workflow 自身）时执行 `pre-commit validate-config` + `pre-commit run --all-files`，不引入 PG service / 迁移 / 测试
 - 安全流水线：CodeQL 静态安全分析 (`codeql.yml`)、密钥泄露扫描 (`gitleaks.yml`)、OpenSSF Scorecard 安全评分 (`scorecard.yml`)
 - 发版提醒：发版 tag 缺失日检 (`release-tag-guard.yml`)，每日 01:00 UTC（北京时间 09:00，错开主 CI flaky 检测 02:00 UTC 与 Flet 日检 03:00 UTC）+ 手动触发；读取 `.release-please-manifest.json` 的声明版本，用 `git ls-remote --tags --refs origin refs/tags/v<版本>` 判定 tag 是否缺失，缺失时以稳定标题 `Release tag missing: v<版本>` 分页检索 open Issue（排除 PR）→ 命中追加评论、未命中新建（Issue 被关闭后再次缺失按新建处理）；去重键只用标题（仓库无专用 label）；manifest 版本缺失/非法或 `git ls-remote` 失败只记 `core.warning` 并跳过，建单失败同样只 warning，不改变日检结论；**只提醒，不创建/推送 tag**（`GITHUB_TOKEN` 创建的 tag 不会触发 `ci_cd.yml`，强推/删除重推会改写既有 Release 的 tag 来源）；不挂 `pull_request`（fork PR 无 issues 写权限），不进主 CI 必跑路径
@@ -81,7 +85,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 > hook 数量与名称以 `.pre-commit-config.yaml` 为唯一正本，本清单由 `check_precommit_hook_names()` 门禁守护名称级一致（配置新增/删除 hook 时须同步本枚举）。
 
-> **配置改动的合并前验证**：`.pre-commit-config.yaml` 不在 `ci_cd.yml` 的 `pull_request.paths` 白名单内，仅改该文件的 PR 不触发主 CI，hook entry / 独立环境依赖 / 文件选择规则的缺陷会延迟到 main push 才暴露。该文件因此由独立轻量 workflow `precommit-config-ci.yml` 承接（`pre-commit validate-config` + `pre-commit run --all-files` 实际执行全部 hook，不含 PG service / 迁移 / 单测）；不把该文件并入 `ci_cd.yml` 白名单，是为避免单文件配置 PR 拉起整套主流水线（其测试覆盖对配置改动零增量）。`docs-ci.yml` 虽也监听该文件，但只跑文档一致性脚本与契约测试，不执行 hook 本体。配置与业务代码同时变更的 PR 会由主 CI 与本 workflow 各跑一次 hooks，属已知的有限重复。
+> **配置改动的合并前验证**：`.pre-commit-config.yaml` 不属于代码类变更（`Changes` job 分类为 `code=false`），仅改该文件的 PR 主 CI 只跑变更分类与快速 lint（均为轻量 job），不会拉起重型流水线，hook entry / 独立环境依赖 / 文件选择规则的缺陷会延迟到 main push 才暴露。该文件因此由独立轻量 workflow `precommit-config-ci.yml` 承接（`pre-commit validate-config` + `pre-commit run --all-files` 实际执行全部 hook，不含 PG service / 迁移 / 单测）；不把该文件计入代码类变更，是为避免单文件配置 PR 拉起整套主流水线（其测试覆盖对配置改动零增量）。`docs-ci.yml` 也会运行（`Docs Consistency Check` 为 required check），但只跑文档一致性脚本与契约测试，不执行 hook 本体。配置与业务代码同时变更的 PR 会由主 CI 与本 workflow 各跑一次 hooks，属已知的有限重复。
 
 ### 工程脚本清单
 
@@ -103,6 +107,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 | `scripts/scan_weak_assertions.py` | CI 弱断言全量扫描 | CI weak assertions step | 阻断 |
 | `scripts/check_diff_coverage.py` | PR 变更行覆盖率（R19 diff-coverage） | CI `check_diff_coverage`（strict 80%） | 阻断 |
 | `scripts/check_per_file_coverage.py` | 单文件覆盖率（分层阈值 D37） | CI coverage step（`--report` 为 advisory） | 阻断（`--report` 不阻断） |
+| `scripts/classify_changed_paths.py` | PR 变更文件代码类分类（`Changes` job 据此决定重型 job 是否执行；规则与迁移前的 `pull_request.paths` 白名单一致，API 失败/fork PR 由 workflow 按 fail-closed 兜底） | CI `Changes` job | 阻断（分类结果决定 `CI Gate` 判定） |
 | `scripts/detect_flaky.py` | 重复运行 pytest 定位 flaky 测试 nodeid | CI（报告）+ 手动 | 不阻断 |
 | `scripts/generate_sidecar_manifest.py` | qtrading-pg-sidecar Release manifest 生成 | CI `sidecar.yml` | 阻断（release 时） |
 | `scripts/prototype_business_redlines.py` | R20/R21/R22 AST 可行性原型（人工评审辅助） | 手动 | 不阻断 |

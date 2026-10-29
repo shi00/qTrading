@@ -34,7 +34,7 @@ Relates to #XXX
 - [ ] 集成测试：DAO/Service层链路验证
 - [ ] E2E（`tests/e2e/`，Flet + pytest；本地可用 `run_e2e_local.py`）：UI流程验证，无超时/断言失败
 - [ ] 静态检查：ruff + pyright 无报错
-- [ ] CI 流水线（PR 触发 job：lint-fast / ci-checks / ci-checks-windows / e2e-tests-windows / embedded-tests / requirements-drift 全部通过；installer-smoke 仅 installer.iss 或 scripts/*installer* 变更时执行 ISCC；build-windows 仅在 tag 推送（`v*.*.*`）或手动触发时运行，PR 阶段不存在 build job；仅 `.pre-commit-config.yaml` 变更的 PR 不触发主 CI，由 `precommit-config-ci.yml` 的 `precommit-config-smoke` 执行 `pre-commit validate-config` + `pre-commit run --all-files`）
+- [ ] CI 流水线（`CI Gate` 与 `Docs Consistency Check` 是 main 的 required check，PR 必须两者通过：`Changes` / `lint-fast` 恒需通过；代码类变更（`changes` 分类 `code=true`）还需 `ci-checks` / `ci-checks-windows` / `e2e-tests-windows` / `embedded-tests` 全部通过，`installer-smoke` 仅 installer.iss 或 scripts/*installer* 变更时执行 ISCC，`requirements-drift` 随之运行；非代码类 PR 只跑 `Changes` + `lint-fast`，重型 job 按分类跳过；build-windows 仅在 tag 推送（`v*.*.*`）或手动触发时运行，PR 阶段不存在 build job；仅 `.pre-commit-config.yaml` 变更的 PR 属非代码类，主 CI 不跑重型 job，另由 `precommit-config-ci.yml` 的 `precommit-config-smoke` 执行 `pre-commit validate-config` + `pre-commit run --all-files`）
 
 ### 手动验证
 <!-- 下列各项同样按三态规则填写：与本 PR 变更范围无关的项标「N/A：<原因>」，不删行，便于评审逐条核对 -->
@@ -44,19 +44,19 @@ Relates to #XXX
 - [ ] UI 变更附前后截图/GIF（无 UI 变更写「N/A：<原因>」）
 
 <!-- 四类填写实例（勾选组合与 .github/workflows/ci_cd.yml 实际 job 触发条件一致）：
-① 纯文档 PR（仅 docs/**、*.md 等 Markdown 类路径，均不在 pull_request paths 白名单 → pull_request 事件不触发主 CI，0 个 job 运行；merge_group 无 paths 过滤，入队时仍跑全套 CI）：
-   单元测试 N/A（无 Python 变更；最小子集为 scripts/check_docs_consistency.py + tests/unit/test_docs_consistency.py，本地运行）
-   集成测试 / E2E / CI 流水线 N/A（PR 事件不触发；E2E 针对 UI 流程）· 静态检查 N/A（ruff/pyright 不覆盖 Markdown）
+① 纯文档 PR（仅 docs/**、*.md 等 Markdown 类路径 → `Changes` 分类 `code=false`：主 CI 只跑 `Changes` + `lint-fast`，`ci-checks` / Windows / E2E / embedded 等重型 job 跳过；`CI Gate` 与 `Docs Consistency Check` 仍运行且须通过）：
+   单元测试 N/A（无 Python 变更；最小子集为 scripts/check_docs_consistency.py + tests/unit/test_docs_consistency.py，本地运行且由 Docs Consistency Check 在 CI 执行）
+   集成测试 / E2E N/A（重型 job 按分类跳过；E2E 针对 UI 流程）· 静态检查 N/A（ruff/pyright 不覆盖 Markdown，但 lint-fast 仍会通过）
    手动验证各项 N/A；自检清单中 ruff/pyright 行写「N/A：纯文档改动按最小验证子集不要求」；pre-commit 行如实标注（纯文档改动至少应让 docs-consistency hook 通过）
-② DAO PR（data/ DAO/模型，含 alembic 迁移；**.py 与 alembic/** 均在白名单 → 主 CI 全套触发）：
+② DAO PR（data/ DAO/模型，含 alembic 迁移；**.py 与 alembic/** 分类为代码类 → 主 CI 全套触发）：
    单元测试 [x]（CI ci-checks）· 集成测试 [x]（CI ci-checks「Run Integration Tests」）· E2E [x]（CI e2e-tests-windows）
    静态检查 [x]（lint-fast + ci-checks Pyright）· CI 流水线 [x]（PR 触发 job 全绿；build 不适用于 PR 阶段）
    手动验证：数据库迁移回滚 [x]（CI「Verify Alembic Migrations」含 downgrade base → upgrade head 回归；本地 alembic upgrade head + alembic check）；本地完整启动/边界场景逐项标 [x] 或「N/A：<原因>」，不得留空；UI 截图 N/A（无 UI 变更）
-③ UI PR（ui/ 模块；**.py 在白名单 → 主 CI 全套触发）：
+③ UI PR（ui/ 模块；**.py 分类为代码类 → 主 CI 全套触发）：
    单元测试 [x]（tests/unit/ui/）· 集成测试 N/A（无 DAO/Service 链路变更；CI ci-checks 中集成测试照常执行并作为门禁，非本 PR 验证目标）
    E2E [x]（CI e2e-tests-windows，UI 流程为其核心验证目标）· 静态检查 [x] · CI 流水线 [x]（build 不适用于 PR 阶段）
    手动验证：本地完整启动 [x]（正向流程）· UI 前后截图 [x] · 迁移回滚 N/A（无 DDL 变更）
-④ 普通代码 PR（strategies/services 等 .py；**.py 在白名单 → 主 CI 全套触发）：
+④ 普通代码 PR（strategies/services 等 .py；**.py 分类为代码类 → 主 CI 全套触发）：
    单元测试 [x]（对应策略/服务用例）· 集成测试 N/A（未触及 DAO/Service 持久层；若触及改按②组合填写）· E2E [x]（CI e2e-tests-windows，PR 门禁必跑）
    静态检查 [x] · CI 流水线 [x]（build 不适用于 PR 阶段）
    手动验证：边界场景 [x]（本地验证，另有单测覆盖）；本地完整启动/迁移回滚/UI 截图按影响面逐项标「N/A：<原因>」，不得留空
