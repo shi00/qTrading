@@ -96,12 +96,13 @@
      uv pip compile --universal --no-emit-index-url --extra dev pyproject.toml -o requirements-dev.txt
      uv pip compile --universal --no-emit-index-url --extra optional pyproject.toml -o requirements-optional.txt
      ```
-3. **本地安装新依赖**：在已激活的 `.venv` 内运行以下命令将编译后的依赖同步到本地环境：
+3. **本地安装新依赖**：在已激活的 `.venv` 内**按 CI 顺序逐份安装**（不要合并成一条命令）：
    ```bash
-   uv pip install -r requirements.txt -r requirements-dev.txt
-   # 如需可选功能：
+   uv pip install -r requirements.txt
    uv pip install -r requirements-optional.txt
+   uv pip install -r requirements-dev.txt
    ```
+   三份文件由三次独立的 `uv pip compile` 生成，同一依赖在不同文件里可能锁定不同版本（如 `starlette`），合并为单次解析会因版本互斥直接报 `unsatisfiable`；逐份安装与 CI 的安装顺序一致，后装入文件会覆盖先装入的同名包。
    `--system`（安装到系统 Python）仅用于 CI 或特殊环境，常规本地开发一律在 `.venv` 内安装。
 
 ### 7. 新增回测配置

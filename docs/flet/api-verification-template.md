@@ -47,6 +47,31 @@
 
 ## 历史核验记录
 
+### Flet 1.0.4/1.0.5 patch 升级核验 @ 1.0 系列 (2026-10-29)
+
+- **API**: V1 声明式 API（`use_dialog` / `Dropdown.on_select` / `use_effect(cleanup=)` / `Router`/`Route` / `DialogControl` 子类族）+ flet_charts / flet_code_editor / flet-mcp（同版本锁定）+ E2E 离线资源与语义树契约
+- **锁定版本**: Flet 1.0.5（pyproject.toml 实际锁定；flet/flet-desktop/flet-charts/flet-code-editor/flet-mcp 五包同版本 1.0.3 → 1.0.5，flet-web CI pin 同步）
+- **核验来源**:
+  - 官方 CHANGELOG（GitHub Release `v1.0.4` / `v1.0.5`）: 均为 patch 升级，无 Python API 面破坏性变更。v1.0.5 唯一改动为修复 Flet Web 在 FastAPI 0.145+ 下无法启动（`openapi_prefix` 参数被移除，flet-dev/flet#6984、PR #6988）——与本批次 D6.2 取证一致（该版本 `flet_web/fastapi/flet_fastapi.py` 已改为 `root_path=root_path or openapi_prefix`，不再向 `FastAPI.__init__` 传该参数）。v1.0.4 要点全部为构建/PWA/平台修复（`--pwa-short-name`、ARM64 Flutter SDK、Linux 透明窗口、Windows HDR/外接显示器、`flet run` inotify 上限告警、Windows-on-ARM 的 `flet-web` 不再拉 `uvicorn[standard]`），不触及本项目使用的 API 面。
+  - 1.0.5 wheel 静态取证（§1 清单逐项）: `use_dialog(dialog: DialogControl | None = None)` 签名与 1.0.3 一致；`Dropdown.on_select` 存在且 `on_change` 不存在；`use_effect(setup, dependencies=None, cleanup=None)` 显式 `cleanup=` 关键字；`Router`/`Route` 导出；`DialogControl` 及 `AlertDialog`/`DatePicker`/`TimePicker`/`SnackBar`/`Banner`/`BottomSheet` 均导出；`use_viewmodel` 非 flet 导出（项目 `ui/hooks.py` 自实现，不受升级影响）
+  - 项目运行期验证（flet-mcp 1.0.5）: `flet_mcp.mcp.name == "flet-mcp"` 可加载；`ApiStore.get('Dropdown', query='on_select')` 的 events 仅含 `on_select`；`enum_member_names('Icons')` 含 `DELETE`/`ARROW_BACK`；`pip list` 实测 `flet` / `flet-desktop` / `flet-charts` / `flet-code-editor` / `flet-mcp` / `flet-web` 六包均为 1.0.5
+  - 项目单元测试（Flet 1.0.5 实跑）: Flet 契约专项 `test_flet_0_86_v1_api_compat.py` + `test_flet_0_86_private_api_compat.py` + `test_flet_0_86_charts_compat.py` **53 passed**；`tests/unit/ui/test_anchor.py` **60 passed**；`tests/unit/test_anchor_page_identifier_locator.py` **38 passed**（三组分别串行执行）
+  - PyInstaller 打包验证（本地 Windows）: `pyinstaller AStockScreener.spec` 构建成功；`dist\AStockScreener\AStockScreener.exe --smoke-test` 退出码 0、耗时 8.5s、输出 `AStockScreener smoke check OK`；产物 `_internal/flet/` 内含 `icons.json` + `cupertino_icons.json`，证明 `collect_data_files("flet")` 覆盖新版本懒加载图标资源。同批实测 `collect_data_files("flet_code_editor")` 返回 0 文件（包内仅 `.py`），`AStockScreener.spec` 该行注释已按实测更正为防御性收集
+  - E2E 资源验证（承接 D6.2）: engineRevision 升级前后一致（`0cd610717bde95fd88343c64f81c11ba4e5c0010`），canvaskit 无需重新同步；`main.dart.js` 仍引用 `@rive-app/flutter-native-wasm` 且 4 个 rive 本地资源齐全；字体缓存 `sync_e2e_fonts.py` 输出 `[OK] 字体缓存完整`（下载 0 / 跳过 103 / 总计 116）；flet-web 仍设置 `Cross-Origin-Embedder-Policy: require-corp` → `e2e_browser` 启动参数不变
+  - **本地未运行（交由 CI 与后续 UI 回归批次验证，不得视为已通过）**: `ruff`/`ruff format`/`pyright`、`tests/unit/` 全量、E2E 全量
+- **项目结论**: 继续使用
+  - 理由: 1.0.4/1.0.5 为 patch 升级且官方 changelog 确认零 Python API 面变更；§1 静态取证逐项通过；契约与锚点专项单测全绿；E2E 离线资源零漂移（engineRevision 未变）；打包产物可启动。1.0.3 核验结论在 1.0.5 下保持成立。
+- **需更新文件**:
+  - [x] pyproject.toml (flet 五包 1.0.3 → 1.0.5)
+  - [x] .github/workflows/ci_cd.yml / flet-nightly.yml (flet-web pin ×5)
+  - [x] pyproject.toml + requirements*.txt (`fastapi<0.145` 上界落库)
+  - [x] AStockScreener.spec (flet_code_editor 数据收集注释按实测更正)
+  - [x] docs/flet/api-verification-template.md (本核验记录)
+  - [x] docs/flet/project-differences.md (最后验证日期 → 2026-10-29)
+  - [x] docs/flet/mcp-usage.md (§6 验证日期 → 2026-10-29)
+  - [x] docs/guides/dependency-management.md + docs/guides/how-to.md (本地安装改为 CI 顺序逐份安装)
+- **核验人**: AI 助手 (Flet 1.0.5 升级批次)
+
 ### Flet 1.0.3 patch 升级核验 @ 1.0 系列 (2026-10-02)
 
 - **API**: V1 声明式 API + 私有 API + flet_charts API + flet-mcp（同版本锁定）+ `Semantics.identifier`（延续 1.0.2 引入的锚点通道，本次不改生产渲染）
