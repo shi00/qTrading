@@ -43,7 +43,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 发布流程（人工推 tag，release-please 只出 Release PR，不建 tag/Release）:
 
-1. 合并 release-please 生成的 Release PR：bump 版本号、更新 `CHANGELOG.md` 与 `.release-please-manifest.json`；
+1. 合并 release-please 生成的 Release PR：bump 版本号、更新 `CHANGELOG.md` 与 `.release-please-manifest.json`。**合并前须在同一 PR 分支手改 `SECURITY.md` 的 Supported Versions 表**（如 `0.11.x` / `< 0.11`）：release-please 的通用 updater 无法改写通配行，而 `Docs Consistency Check` 是 main 的 required check，不改则该 check 在 Release PR 上必然失败，只能靠 admin bypass 合并；若后续 release-please 重跑覆盖了这次手改，补一次即可；
 2. **在该合并提交上立即推送同名 tag**：`git tag -a v<版本> -m "v<版本>" && git push origin v<版本>`（形如 `v0.11.0`，须与 `.release-please-manifest.json` 的版本一致，与 `release-please-config.json` 的 `include-v-in-tag: true` / `include-component-in-tag: false` 对齐）；
 3. tag 推送触发 `ci_cd.yml`（`push.tags: v*.*.*`）→ `build-windows` job → PyInstaller 打包 CPU/CUDA 两个变体 → smoke test → Inno Setup 制作安装包 → 安装包冒烟测试（`installer_smoke_crash_recovery.ps1` + `installer_smoke_running_app.ps1`，两步调用均校验退出码，任一失败即中断发布）；同时触发 release-only 的 `e2e-sidecar-real-smoke` job（真实 sidecar ready → migration → 主界面路径）→ `build-windows` 与 `e2e-sidecar-real-smoke` 均成功后才由 `release-windows` 原子发布（任一失败即不发布；手动 `workflow_dispatch` 非 tag ref 仅构建产物，不创建 Release）。
 
