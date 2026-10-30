@@ -21,6 +21,7 @@ concurrency / news_concurrency / cost limit / 月度成本 / 新闻情绪打分�
 
 import asyncio
 import inspect
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, NonCallableMagicMock, patch
@@ -1146,6 +1147,41 @@ class TestLoadConnectionsUsageSummary:
 
         result = asyncio.run(mod._load_connections_usage_summary())
         assert result == UsageCostSummary()
+
+    def test_all_unpriced_month_sets_unpriced_count_and_no_zero_cost(self, monkeypatch) -> None:
+        """UIR-F19-002：全未计价月 known 置 None（未知），未计价 chip 计数可渲染。"""
+        import ui.views.settings_tabs.ai_brain_tab as mod
+
+        dao = self._make_dao({"known_cny": 0, "unpriced_attempts": 5, "free_attempts": 0})
+        monkeypatch.setattr(mod, "_ai_usage_dao_provider", lambda: dao)
+
+        result = asyncio.run(mod._load_connections_usage_summary())
+        assert result.known_cost_cny is None
+        assert result.unpriced_count == 5
+        assert result.unknown_cost_count is None
+
+    def test_partially_priced_month_keeps_known_and_unpriced_count(self, monkeypatch) -> None:
+        """UIR-F19-002：部分计价同时给出已知金额与未计价计数。"""
+        import ui.views.settings_tabs.ai_brain_tab as mod
+
+        dao = self._make_dao({"known_cny": Decimal("1.50"), "unpriced_attempts": 2, "free_attempts": 0})
+        monkeypatch.setattr(mod, "_ai_usage_dao_provider", lambda: dao)
+
+        result = asyncio.run(mod._load_connections_usage_summary())
+        assert result.known_cost_cny == "1.50"
+        assert result.unpriced_count == 2
+        assert result.unknown_cost_count is None
+
+    def test_fully_priced_free_month_reports_zero_cost(self, monkeypatch) -> None:
+        """UIR-F19-002：免费月（已计价且零）是事实零，known 保留 0 且无未计价计数。"""
+        import ui.views.settings_tabs.ai_brain_tab as mod
+
+        dao = self._make_dao({"known_cny": 0, "unpriced_attempts": 0, "free_attempts": 3})
+        monkeypatch.setattr(mod, "_ai_usage_dao_provider", lambda: dao)
+
+        result = asyncio.run(mod._load_connections_usage_summary())
+        assert result.known_cost_cny == "0"
+        assert result.unpriced_count is None
 
     def test_dao_exception_degrades_to_empty_summary(self, monkeypatch) -> None:
         from ui.viewmodels.model_connections_view_model import UsageCostSummary

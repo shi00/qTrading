@@ -50,8 +50,14 @@ from ui.viewmodels.model_usage_view_model import (
     EXPORT_SCOPE_ALL,
     EXPORT_SCOPE_PAGE,
     PAGE_SIZE,
+    PRICING_STATUS_ALL_UNPRICED,
+    PRICING_STATUS_EMPTY,
+    PRICING_STATUS_KNOWN,
+    PRICING_STATUS_PARTIAL,
+    BudgetSummary,
     ModelUsageState,
     ModelUsageViewModel,
+    month_pricing_status,
 )
 from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
@@ -103,12 +109,12 @@ _TERMINAL_FILTER_KEYS: dict[str, str] = {
     "unknown": "model_usage_terminal_unknown",
 }
 
-#: 费用状态过滤选项（DAO 派生列枚举）。
+#: 费用状态过滤选项（DAO 派生列枚举；未计价单一判据 = cost_cny IS NULL，
+#: 不再区分 usage 不可用与计价失败，故无独立 unknown 选项）。
 _COST_FILTER_KEYS: dict[str, str] = {
     "known": "model_usage_cost_known",
     "partial": "model_usage_cost_partial",
     "unpriced": "model_usage_cost_unpriced",
-    "unknown": "model_usage_cost_unknown",
 }
 
 #: 尝试行状态 → i18n key（``ai_attempt.status``：dispatched / succeeded / failed / cancelled）。
@@ -301,6 +307,34 @@ def _summary_chip(label: str, value: str) -> ft.Control:
         spacing=AppStyles.SPACING_XS,
         tight=True,
     )
+
+
+def _known_cost_text(summary: BudgetSummary) -> str:
+    """月度已知费用 chip 文本（R21）：全未计价 / 无数据 → 「未知」，不显示伪零 0.00。"""
+    status = month_pricing_status(summary)
+    if status in (PRICING_STATUS_ALL_UNPRICED, PRICING_STATUS_EMPTY):
+        return I18n.get("model_usage_cost_unknown")
+    return _fmt_decimal(summary.known_cny)
+
+
+def _pricing_integrity_chips(summary: BudgetSummary) -> list[ft.Control]:
+    """未计价完整性 chip（F17）：未计价尝试数 + 对应 token 规模；无未计价 → 不渲染。"""
+    unpriced = summary.unpriced_attempts
+    if unpriced is None or unpriced <= 0:
+        return []
+    chips = [
+        _summary_chip(I18n.get("model_usage_budget_unpriced_attempts"), str(unpriced)),
+    ]
+    tokens_in = summary.unpriced_input_tokens
+    tokens_out = summary.unpriced_output_tokens
+    if (tokens_in or 0) > 0 or (tokens_out or 0) > 0:
+        chips.append(
+            _summary_chip(
+                I18n.get("model_usage_budget_unpriced_tokens"),
+                f"{tokens_in or 0} / {tokens_out or 0}",
+            )
+        )
+    return chips
 
 
 def _hint_text(key: str) -> ft.Control:
@@ -619,15 +653,15 @@ def _build_release_controls(state: ModelUsageState, vm: ModelUsageViewModel) -> 
 
 def _build_budget_summary(state: ModelUsageState, vm: ModelUsageViewModel) -> ft.Control:
     budget = state.budget_summary
+    chips: list[ft.Control] = [
+        _summary_chip(I18n.get("model_usage_budget_known"), _known_cost_text(budget)),
+        _summary_chip(I18n.get("model_usage_budget_effective"), _fmt_decimal(budget.effective_reserved_cny)),
+        _summary_chip(I18n.get("model_usage_budget_unconfirmed"), _fmt_decimal(budget.unconfirmed_reserved_cny)),
+    ]
+    chips.extend(_pricing_integrity_chips(budget))
     controls: list[ft.Control] = [
         ft.Row(
-            [
-                _summary_chip(I18n.get("model_usage_budget_known"), _fmt_decimal(budget.known_cny)),
-                _summary_chip(I18n.get("model_usage_budget_effective"), _fmt_decimal(budget.effective_reserved_cny)),
-                _summary_chip(
-                    I18n.get("model_usage_budget_unconfirmed"), _fmt_decimal(budget.unconfirmed_reserved_cny)
-                ),
-            ],
+            chips,
             spacing=AppStyles.SPACING_MD,
             wrap=True,
         )
@@ -691,18 +725,31 @@ def _build_budget_edit_row(state: ModelUsageState, vm: ModelUsageViewModel) -> f
     )
 
 
-def _month_cost_text(value: Any) -> str:
-    """月汇总行金额展示：缺失 → 「未知」（R21 不伪零）；数值统一两位小数。"""
+def _month_cost_text(value: Any, pricing_status: str = PRICING_STATUS_KNOWN) -> str:
+    """月汇总行金额展示（R21）：
+
+    - 全部未计价 / 无数据 → 「费用未知」，不显示伪零 ``0.00``；
+    - 部分计价 → 已知金额 + 「未计价」提示，未知部分不并入已知；
+    - 已计价（含免费 ``cost=0``）→ 两位小数金额（免费是事实零，可显示）。
+    """
+    if pricing_status in (PRICING_STATUS_ALL_UNPRICED, PRICING_STATUS_EMPTY):
+        return I18n.get("model_usage_cost_unknown")
     if value is None:
         return I18n.get("model_usage_unknown")
     try:
-        return f"{Decimal(str(value)):.2f}"
+        amount = f"{Decimal(str(value)):.2f} CNY"
     except (ArithmeticError, ValueError):
         return str(value)
+    if pricing_status == PRICING_STATUS_PARTIAL:
+        return I18n.get("model_usage_month_cost_partial", known=amount)
+    return amount
 
 
-def _month_row_text(row: dict[str, Any]) -> str:
-    """月汇总场景行文本（F36）：场景 / 触发 / 请求 / 尝试 / 成功 / 已知费用。"""
+def _month_row_text(row: dict[str, Any], summary: BudgetSummary | None = None) -> str:
+    """月汇总场景行文本（F36）：场景 / 触发 / 请求 / 尝试 / 成功 / 已知费用。
+
+    ``summary`` 为该查看月的计价完整性快照；缺省（无元数据）按行内金额原值展示。
+    """
     return I18n.get(
         "model_usage_month_row",
         scenario=str(row.get("scenario_id") or row.get("grouping_key") or I18n.get("model_usage_unknown")),
@@ -710,7 +757,7 @@ def _month_row_text(row: dict[str, Any]) -> str:
         invocations=str(row.get("invocation_count") if row.get("invocation_count") is not None else "-"),
         attempts=str(row.get("attempt_count") if row.get("attempt_count") is not None else "-"),
         succeeded=str(row.get("succeeded_count") if row.get("succeeded_count") is not None else "-"),
-        cost=_month_cost_text(row.get("cost_cny")),
+        cost=_month_cost_text(row.get("cost_cny"), month_pricing_status(summary)),
     )
 
 
@@ -725,15 +772,16 @@ def _build_month_summary_section(state: ModelUsageState, vm: ModelUsageViewModel
     chips: list[ft.Control] = []
     if summary is not None:
         chips = [
-            _summary_chip(I18n.get("model_usage_budget_known"), _fmt_decimal(summary.known_cny)),
+            _summary_chip(I18n.get("model_usage_budget_known"), _known_cost_text(summary)),
             _summary_chip(I18n.get("model_usage_budget_effective"), _fmt_decimal(summary.effective_reserved_cny)),
             _summary_chip(I18n.get("model_usage_budget_unconfirmed"), _fmt_decimal(summary.unconfirmed_reserved_cny)),
         ]
+        chips.extend(_pricing_integrity_chips(summary))
     month_rows: list[ft.Control] = []
     if state.monthly_rows:
         for row in state.monthly_rows:
             month_rows.append(
-                ft.Text(_month_row_text(row), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_SECONDARY)
+                ft.Text(_month_row_text(row, summary), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_SECONDARY)
             )
     else:
         month_rows.append(_empty_text("model_usage_month_no_data"))

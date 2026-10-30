@@ -23,7 +23,9 @@ mock ``AIUsageDao``（经 provider 注入），不触碰 engine / flet。
 from __future__ import annotations
 
 import asyncio
+import csv
 import datetime as dt
+import io
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -35,11 +37,17 @@ from ui.viewmodels.model_usage_view_model import (
     EXPORT_SCOPE_PAGE,
     ORIGIN_TEST,
     PAGE_SIZE,
+    PRICING_STATUS_ALL_UNPRICED,
+    PRICING_STATUS_EMPTY,
+    PRICING_STATUS_FREE,
+    PRICING_STATUS_KNOWN,
+    PRICING_STATUS_PARTIAL,
     BudgetSummary,
     ModelUsageState,
     ModelUsageViewModel,
     UsageFilters,
     _write_csv_text,
+    month_pricing_status,
 )
 from utils.thread_pool import TaskType
 
@@ -105,6 +113,97 @@ async def test_load_populates_requests_total_and_budget():
     dao.read_request_page.assert_awaited_once()
     kwargs = dao.read_request_page.await_args.kwargs
     assert kwargs["limit"] == PAGE_SIZE and kwargs["offset"] == 0
+
+
+@pytest.mark.asyncio
+async def test_load_and_month_summary_propagate_pricing_integrity():
+    """UIR-F19-002：DAO 未计价完整性字段必须进入 VM state（不得静默丢弃，R21）。"""
+    summary = {
+        "month": "202601",
+        "known_cny": Decimal("0"),
+        "effective_reserved_cny": Decimal("0.10"),
+        "unconfirmed_reserved_cny": Decimal("0"),
+        "unpriced_attempts": 4,
+        "free_attempts": 0,
+        "unpriced_input_tokens": 1200,
+        "unpriced_output_tokens": 300,
+    }
+    dao = _dao(summary=summary)
+    vm = _vm(dao)
+    await vm.load()
+    budget = vm.state.budget_summary
+    assert budget.unpriced_attempts == 4
+    assert budget.free_attempts == 0
+    assert budget.unpriced_input_tokens == 1200
+    assert budget.unpriced_output_tokens == 300
+
+    await vm.enter_monthly_summary()
+    month_budget = vm.state.summary_budget
+    assert month_budget is not None
+    assert month_budget.unpriced_attempts == 4
+    assert month_budget.free_attempts == 0
+    assert month_budget.unpriced_input_tokens == 1200
+    assert month_budget.unpriced_output_tokens == 300
+
+
+@pytest.mark.parametrize(
+    ("summary", "expected"),
+    [
+        (None, PRICING_STATUS_KNOWN),
+        (BudgetSummary(), PRICING_STATUS_EMPTY),
+        (BudgetSummary(known_cny=Decimal("0.50")), PRICING_STATUS_KNOWN),
+        (
+            BudgetSummary(known_cny=Decimal("0.50"), unpriced_attempts=2, free_attempts=0),
+            PRICING_STATUS_PARTIAL,
+        ),
+        (
+            BudgetSummary(known_cny=Decimal("0"), unpriced_attempts=2, free_attempts=0),
+            PRICING_STATUS_ALL_UNPRICED,
+        ),
+        (
+            BudgetSummary(known_cny=Decimal("0"), unpriced_attempts=1, free_attempts=1),
+            PRICING_STATUS_PARTIAL,
+        ),
+        (
+            BudgetSummary(known_cny=Decimal("0"), unpriced_attempts=0, free_attempts=2),
+            PRICING_STATUS_FREE,
+        ),
+        (
+            BudgetSummary(known_cny=Decimal("1.00"), unpriced_attempts=0, free_attempts=1),
+            PRICING_STATUS_KNOWN,
+        ),
+    ],
+)
+def test_month_pricing_status_distinguishes_free_partial_and_unknown(summary, expected):
+    """三态判定（R21）：免费 0 可显示，未计价 0 不得伪装为免费/已知。"""
+    assert month_pricing_status(summary) == expected
+
+
+@pytest.mark.asyncio
+async def test_export_monthly_summary_all_unpriced_does_not_export_zero():
+    """UIR-F19-002：全未计价月导出 known_cny 留空 + 显式完整性列，不导出伪零。"""
+    summary = {
+        "month": "202601",
+        "known_cny": Decimal("0"),
+        "effective_reserved_cny": Decimal("0"),
+        "unconfirmed_reserved_cny": Decimal("0"),
+        "unpriced_attempts": 3,
+        "free_attempts": 0,
+        "unpriced_input_tokens": 800,
+        "unpriced_output_tokens": 200,
+    }
+    vm = _vm(_dao(summary=summary))
+    await vm.load()
+    await vm.enter_monthly_summary()
+    rows = list(csv.reader(io.StringIO(await vm.export_csv())))
+    header, data = rows[0], rows[1]
+    record = dict(zip(header, data, strict=True))
+    assert record["known_cny"] == ""
+    assert record["pricing_status"] == PRICING_STATUS_ALL_UNPRICED
+    assert record["unpriced_attempts"] == "3"
+    assert record["free_attempts"] == "0"
+    assert record["unpriced_input_tokens"] == "800"
+    assert record["unpriced_output_tokens"] == "200"
 
 
 @pytest.mark.asyncio

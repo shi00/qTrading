@@ -85,6 +85,9 @@ SCOPE_CONNECTION: Final[str] = "connection"
 
 # 请求页派生查询：invocation LEFT JOIN 尝试聚合（a）与候选决策聚合（d）。
 # 连接 / 子任务过滤经 EXISTS（一个请求一行，天然去重，§11.5）。
+# 未计价单一判据 = ``a.cost_cny IS NULL``（与 ``_MONTH_PRICING_INTEGRITY_SQL`` 一致）：
+# 无 usage（usage_status='unavailable'）与有 usage 但计价失败（cost_status 原记 unknown）
+# 同属「成本未知」，不因原因不同而漏计；存量 attempt 行无需迁移（派生列即时重算）。
 _REQUEST_PAGE_SELECT_SQL: Final[str] = """
 SELECT
     r.invocation_id,
@@ -109,9 +112,8 @@ SELECT
     END AS terminal_status,
     CASE
         WHEN r.attempt_count = 0 THEN NULL
-        WHEN r.priced_attempts = r.attempt_count THEN 'known'
-        WHEN r.priced_attempts = 0 AND r.unpriced_attempts = r.attempt_count THEN 'unpriced'
-        WHEN r.priced_attempts = 0 THEN 'unknown'
+        WHEN r.unpriced_attempts = r.attempt_count THEN 'unpriced'
+        WHEN r.unpriced_attempts = 0 THEN 'known'
         ELSE 'partial'
     END AS cost_status
 FROM (
@@ -145,7 +147,7 @@ FROM (
             COUNT(*) FILTER (WHERE a.status = 'cancelled')::int AS cancelled_attempts,
             COUNT(*) FILTER (WHERE a.status = 'dispatched')::int AS dispatched_attempts,
             COUNT(*) FILTER (WHERE a.cost_cny IS NOT NULL)::int AS priced_attempts,
-            COUNT(*) FILTER (WHERE a.usage_status = 'unavailable')::int AS unpriced_attempts,
+            COUNT(*) FILTER (WHERE a.cost_cny IS NULL)::int AS unpriced_attempts,
             SUM(a.duration_ms) AS total_duration_ms,
             SUM(a.cost_cny) AS known_cost_cny,
             string_agg(DISTINCT COALESCE(a.actual_model, a.configured_model, a.connection_id), ', ') AS source_summary,
@@ -1657,6 +1659,11 @@ class AIUsageDao(BaseDao):
         ``terminal_status`` / ``cost_status`` 为「按 ai_attempt 派生」的展示列
         （见 ``_REQUEST_PAGE_SELECT_SQL``）：invocation 表未存终态 / 费用状态列，
         故按尝试聚合派生而非臆造存储列。
+
+        ``cost_status`` 判据与 ``read_budget_summary`` 的完整性列一致：未计价
+        = ``cost_cny IS NULL``（含 usage_status='unavailable' 与计价失败），
+        枚举为 ``known`` / ``partial`` / ``unpriced``（不再产出 ``unknown``）；
+        ``unpriced`` 过滤据此覆盖全部成本未知尝试，不因原因不同漏计。
 
         ``origin``：``"test"`` → 测试请求（``test_operation_id IS NOT NULL``）；
         ``"business"`` → 业务请求；其它值 ``raise ValueError``（不静默放宽）。
