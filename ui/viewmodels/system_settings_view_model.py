@@ -33,8 +33,11 @@ logger = logging.getLogger(__name__)
 
 
 # --- Validation bounds (与原 system_tab 一致) ---
+# UIR-F22-002: 并发上限与配置层硬约束对齐 —— AppConfig.sync_max_concurrent_heavy
+# 为 Field(ge=1, le=8)，ConfigHandler setter 亦把越界值静默夹紧到 [1, 8]。UI 若允许
+# 9-32 会出现「显示 32、实际生效 8」的 R21 类伪装，故输入域取 1-8。
 _CONCURRENCY_MIN = 1
-_CONCURRENCY_MAX = 32
+_CONCURRENCY_MAX = 8
 _DB_POOL_MIN = 1
 _DB_POOL_MAX = 50
 _DB_OVERFLOW_MIN = 0
@@ -382,10 +385,14 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
             self._set_state(is_saving=False)
 
     async def save_concurrency(self, raw_val: str) -> bool:
-        """保存同步重任务并发数 (范围 1-32)。
+        """保存同步重任务并发数 (范围 1-8, 与 AppConfig.sync_max_concurrent_heavy 一致)。
+
+        UIR-F22-002: 写入成功后回读 ``get_sync_max_concurrent_heavy()`` 的生效值并回显，
+        使 UI 显示值 == 实际生效值。Getter 还会按 Tushare 积分档位再压低上限 (1/3/8)，
+        故回显的生效值可能低于请求值，由 View 据 state 差异给出明确提示。
 
         Returns:
-            True 写入成功; False 越界/格式错误或 set_typed 返回 False（不伪装成功）。
+            True 写入成功（state 已回显生效值）; False 越界/格式错误或落盘失败（不伪装成功）。
         """
         if self._state.is_saving:
             return False
@@ -396,12 +403,33 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
         if not (_CONCURRENCY_MIN <= val <= _CONCURRENCY_MAX):
             return False
         self._set_state(is_saving=True)
-        try:
-            success = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_sync_max_concurrent_heavy, val)
-            if not success:
+
+        def _save_and_read_back() -> int | None:
+            """写入并回读生效值；返回 None 表示落盘失败（R16: 阻塞 IO 在同一线程池调用内完成）。"""
+            if not ConfigHandler.set_sync_max_concurrent_heavy(val):
                 # UIR-F22-001: 落盘失败时不得伪装成功（否则 UI 提示已保存而配置未生效）。
                 logger.warning("[SystemSettingsVM] set_sync_max_concurrent_heavy returned False for value=%s", val)
+                return None
+            try:
+                return int(ConfigHandler.get_sync_max_concurrent_heavy())
+            except asyncio.CancelledError:
+                raise  # R2
+            except Exception as ex:
+                # 回读失败降级回显已写入值：val ∈ [1,8] 时 setter 不夹紧，落盘值即 val。
+                logger.warning(
+                    "[SystemSettingsVM] Concurrency | read-back failed: %s", DataSanitizer.sanitize_error(ex)
+                )
+                return val
+
+        try:
+            effective = await ThreadPoolManager().run_async(TaskType.IO, _save_and_read_back)
+            if effective is None:
                 return False
+            if effective != val:
+                logger.info(
+                    "[SystemSettingsVM] Concurrency | adjusted by point tier: requested=%s effective=%s", val, effective
+                )
+            self._set_state(concurrency_value=str(effective))
             return True
         except asyncio.CancelledError:
             raise  # R2

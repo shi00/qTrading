@@ -1146,6 +1146,28 @@ class TestDoSaveConcurrency:
         env["mock_config"].set_sync_max_concurrent_heavy.assert_not_called()
         env["show_snack"].assert_called_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
+    def test_above_config_cap_direct_call_fails(self, system_tab_env) -> None:
+        """UIR-F22-002: 32 超出配置层硬上限 8 → 拒绝写入并提示失败 (不静默夹紧)。"""
+        env = system_tab_env
+        handler, _, _ = self._trigger(env)
+        asyncio.run(handler("32"))
+
+        env["mock_config"].set_sync_max_concurrent_heavy.assert_not_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
+
+    def test_tier_clamped_effective_value_notifies_user(self, system_tab_env) -> None:
+        """UIR-F22-002: 回读生效值低于输入值 (积分档位限制) → 明确提示而非普通成功。"""
+        env = system_tab_env
+        _set_field_value(env, "settings_concurrency", "4")
+        env["mock_config"].get_sync_max_concurrent_heavy.return_value = 1
+        handler, args, _ = self._trigger(env)
+        asyncio.run(handler(*args))
+
+        env["show_snack"].assert_called_once_with(
+            "i18n[sys_snack_concurrency_limited]",
+            color=AppColors.WARNING,
+        )
+
     def test_value_error_path(self, system_tab_env) -> None:
         """raw_val 非数字 (绕过 View 校验) → ValueError → snack num_fmt。"""
         env = system_tab_env
@@ -1726,11 +1748,11 @@ class TestFieldOnBlurValidation:
         env = system_tab_env
         _set_field_value(env, "settings_concurrency", "8")
         _blur_field(env, "settings_concurrency")
-        _set_field_value(env, "settings_concurrency", "16")
+        _set_field_value(env, "settings_concurrency", "7")
 
         _, args, _ = _blur_field(env, "settings_concurrency")
 
-        assert args == ("16",)
+        assert args == ("7",)
 
 
 class TestThreadPoolSaveConfirm:
