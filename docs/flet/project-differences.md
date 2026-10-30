@@ -260,7 +260,9 @@ return ft.Column(
 
 **修复**：`backtest_btn` 移入独立右对齐行 + `table_card expand=2`（行高 6px → 37px）。
 
-**诊断要点**：7 次试错均使用了 DOM dump 但误读 `text=''` 为语义合并缺陷，实际是 0px 视口导致文本不渲染；应用日志"策略执行成功"是误导性证据（UI 渲染与业务逻辑独立）。该试错模式违反 [core-protocol.md §5](../bug-fix/core-protocol.md#5-反模式快速自查)「试错式补丁」反模式。同类边缘状态风险排查见 [known-technical-debt.md](../debt/known-technical-debt.md) `P3-PR373-Viewport-Collapse-Audit`。
+**诊断要点**：7 次试错均使用了 DOM dump 但误读 `text=''` 为语义合并缺陷，实际是 0px 视口导致文本不渲染；应用日志"策略执行成功"是误导性证据（UI 渲染与业务逻辑独立）。该试错模式违反 [core-protocol.md §5](../bug-fix/core-protocol.md#5-反模式快速自查)「试错式补丁」反模式。
+
+**同类风险闭环（2026-10-30 复核）**：main 视口 1400×900 下实测选股结果表滚动容器（`role=group`、`overflow-y: auto`）高 **391px**，首行 bbox `y=339 / h=32`，完整落在视口内（远离 6px 边缘状态）；最小视口（1280×672）由 `tests/e2e/test_screener_min_viewport_no_collapse.py` 断言首行完整可见，叠加 `ui/components/safe_wrap_row.py` 的 `Row(wrap=True)` 不含 `expand=True` 构造期护栏，`Row(wrap=True)` + `expand=True` 同类隐患已闭环（原技术债 `P3-PR373-Viewport-Collapse-Audit` 已删除）。
 
 ### 4.10 `Column.scroll_to` 对 Column 无效（PaginatedTable 用 key 重建重置滚动位置）
 

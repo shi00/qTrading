@@ -706,6 +706,52 @@ async def _teardown_page(fp: FletPage, request, *, failed: bool = False) -> None
         await context.close()
 
 
+async def _ensure_mut_locale_zh(fp: FletPage) -> None:
+    """mut pool 语言污染兜底：确保 flet_app_mut 内存中的 I18n locale 为 zh_CN。
+
+    语言还原的主路径是用例 finally 块（见 test_settings_language_switch）；UI 操作
+    超时失败时 app 内存 locale 会停在 en_US，连坐后续 mutates_config 用例。本函数
+    仅对 mutates_config 用例在 page 关闭前兜底，read-only 池不受影响。
+
+    设计要点：
+    - 快速检查 has_text(nav_settings_zh)：正常用例几乎无开销（中文存在则 early return）
+    - 导航与下拉均走 anchor（EIDS 稳定 id），不依赖当前 locale 的英文/中文文本
+    - 恢复失败只 warning 不抛出：避免掩盖原始测试失败
+    - R2: asyncio.CancelledError 必须 raise
+    """
+    nav_settings_zh = I18n.get("nav_settings", locale="zh_CN")
+    try:
+        if await fp.has_text(nav_settings_zh):
+            return
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001  # 兜底探测失败不应阻断 teardown
+        logger.debug("[e2e_page] mut pool locale 兜底探测失败: %s", e, exc_info=True)
+        return
+
+    logger.warning("[e2e_page] mut pool 检测到语言污染（找不到中文导航文本），尝试通过 UI 恢复 zh_CN")
+    try:
+        # 延迟导入：conftest 收集期不依赖 pages 模块，避免循环导入
+        from tests.e2e.pages import SettingsPage
+
+        I18n.set_locale("zh")  # 恢复后断言用中文文案
+        sp = SettingsPage(fp)
+        await sp.open(timeout_ms=15000)
+        # 直接点 tab anchor：不用 click_tab（其内部断言依赖当前 locale 的 tab 文案）
+        await sp.ap.click(EIDS.SETTINGS.tab("system"), timeout_ms=10000)
+        await sp.select_language(I18n.get("settings_lang_zh"), timeout_ms=10000)
+        for _ in range(25):
+            if await fp.has_text(nav_settings_zh):
+                logger.info("[e2e_page] mut pool locale 兜底成功恢复 zh_CN")
+                return
+            await fp.page.wait_for_timeout(200)
+        logger.warning("[e2e_page] mut pool locale 兜底未能确认中文恢复")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[e2e_page] mut pool locale 兜底恢复失败: %s", e, exc_info=True)
+
+
 def _parse_asyncpg_dsn(sqlalchemy_url: str) -> str:
     """将 SQLAlchemy asyncpg DSN 转换为 asyncpg 原生 DSN。
 
@@ -1633,6 +1679,10 @@ async def e2e_page(e2e_browser, _e2e_app_dep: AppServer, request):
     """
     async with _e2e_page_with_viewport(e2e_browser, _e2e_app_dep, request, viewport=(1400, 900)) as fp:
         yield fp
+        # 用例 finally 还原失败时兜底，避免 en_US 连坐 mut pool 后续用例
+        # （read-only 池由 pool 隔离，无需兜底）。
+        if request.node.get_closest_marker("mutates_config") is not None:
+            await _ensure_mut_locale_zh(fp)
 
 
 @pytest_asyncio.fixture(loop_scope="session")
