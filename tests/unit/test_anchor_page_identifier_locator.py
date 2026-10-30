@@ -181,9 +181,13 @@ def _stub_select_option(ap: AnchorPage, handle: _FakeHandle | _StubbornHandle) -
     """打桩 select_option 依赖的定位/状态方法（选项面板仍走文本匹配，见矩阵 #13-#14）。
 
     返回 `_find_option_element` 的 mock，供断言选项定位通道。
+
+    展开态固定返回 ``None``（= 不可读）：收合确认会轮询读取展开态，有限序列打桩会被
+    轮询耗尽并抛 ``StopIteration``；``None`` 使 ``_menu_closed`` 回退 ``is_visible``，
+    与本文件各用例既有的「句柄 click 后收合」语义一致。
     """
     find_mock = AsyncMock(return_value=handle)
-    ap._read_expanded_by_identifier = AsyncMock(side_effect=[None, None])  # type: ignore[method-assign]
+    ap._read_expanded_by_identifier = AsyncMock(return_value=None)  # type: ignore[method-assign]
     ap._find_option_element = find_mock  # type: ignore[method-assign]
     ap.scroll_into_view = AsyncMock()  # type: ignore[method-assign]
     ap._identifier_node_box = AsyncMock(  # type: ignore[method-assign]

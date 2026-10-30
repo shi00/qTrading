@@ -770,6 +770,80 @@ class TestCleanupUsesSubscriptionPage:
 
 
 # ============================================================================
+# SEC-03 / UIR-X01-001: egress listener 退订句柄须跨重渲染稳定
+# ============================================================================
+
+
+class TestEgressListenerLifecycle:
+    """EgressAudit 会话计数 listener 的订阅/退订生命周期守护 (UIR-X01-001).
+
+    缺陷机理: 退订句柄原存于普通局部 ``list`` (每次渲染新建). Flet ``use_effect``
+    在**每次渲染**重写 ``hook.cleanup`` 为最新闭包 (见 flet ``use_effect`` 源码),
+    ``dependencies=[]`` 只保证 setup 不在重渲染时重跑; 于是卸载时执行的是最后一次
+    渲染的 cleanup 闭包, 其捕获的 list 恒为空 → 挂载时注册的 listener 永不被退订
+    (监听泄漏 + 重复 mount 叠加同名回调)。修复后 holder 为 ``ft.use_ref(None)``
+    (MutableRef 实例跨渲染稳定), setup 写入与 cleanup 读取同一 ``.current``。
+    """
+
+    @pytest.fixture
+    def egress_env(self, mock_i18n_state, mock_app_colors_state, monkeypatch):
+        """挂载 AppLayout → 再渲染一轮 (重写 cleanup 闭包), 返回订阅/退订 mock。"""
+        from ui import app_layout as mod
+        from utils.egress_audit import EgressAudit
+
+        for view_name in [
+            "HomeView",
+            "ScreenerView",
+            "BacktestView",
+            "DataExplorerView",
+            "TaskCenterView",
+            "SettingsView",
+            "WatchlistView",
+        ]:
+            monkeypatch.setattr(mod, view_name, MagicMock(return_value=MagicMock(name=view_name)))
+        mock_i18n = MagicMock()
+        mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        monkeypatch.setattr(mod, "I18n", mock_i18n)
+        monkeypatch.setattr(mod, "UILogger", MagicMock())
+
+        unsub = MagicMock(name="egress_unsubscribe")
+        add_listener = MagicMock(return_value=unsub)
+        monkeypatch.setattr(EgressAudit, "add_listener", add_listener)
+
+        component = make_component(mod.AppLayout)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)  # render #1 + 挂载 effect (setup 注册 listener)
+        render_once(component)  # render #2: use_effect 重写 hook.cleanup 为最新闭包
+
+        return {"component": component, "add_listener": add_listener, "unsub": unsub}
+
+    def test_unsubscribe_called_once_after_rerender(self, egress_env) -> None:
+        """重渲染后卸载: 挂载时注册的退订句柄被调用, 且恰好一次 (无参调用)。"""
+        unsub = egress_env["unsub"]
+        unsub.assert_not_called()
+
+        run_unmount_effects(egress_env["component"])
+
+        unsub.assert_called_once_with()
+
+    def test_listener_registered_once_on_mount_only(self, egress_env) -> None:
+        """dependencies=[]: 重渲染不重复注册 listener (add_listener 恰好一次, 传 notify_egress_count)。"""
+        from ui.egress_status_state import notify_egress_count
+
+        egress_env["add_listener"].assert_called_once_with(notify_egress_count)
+
+    def test_double_unmount_does_not_repeat_unsubscribe(self, egress_env) -> None:
+        """重复卸载: 退订句柄仍只调用一次 (cleanup 读后即清空 holder, 不会二次调用)。"""
+        unsub = egress_env["unsub"]
+        component = egress_env["component"]
+
+        run_unmount_effects(component)
+        run_unmount_effects(component)
+
+        unsub.assert_called_once_with()
+
+
+# ============================================================================
 # UX-01: _parse_navigate_message 纯函数测试 (导航深链协议 "<tab>[:<subtab>]")
 # ============================================================================
 
