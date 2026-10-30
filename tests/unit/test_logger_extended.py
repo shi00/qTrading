@@ -799,6 +799,43 @@ class TestQueueCorrelationPropagation:
         assert handler.prepare(record2) is not record2
 
 
+class TestListenerRespectsHandlerLevel:
+    """X01-103：QueueListener 直调 handler.handle 会旁路级别门，error.log 曾收录 INFO。"""
+
+    def test_listener_respects_handler_level(self, tmp_path):
+        import utils.logger as _ul
+
+        log_dir = str(tmp_path / "test_logs")
+        with (
+            patch("utils.logger.LOG_DIR", log_dir),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
+        ):
+            setup_logging("listener_level_test")
+            logger = get_logger()
+            logger.info("info_should_not_reach_error_log_777")
+            logger.error("error_should_reach_error_log_777")
+        flush_logging()
+
+        assert _ul._LISTENER is not None
+        assert _ul._LISTENER.respect_handler_level is True
+
+        error_content = (tmp_path / "test_logs" / "error.log").read_text(encoding="utf-8")
+        app_content = (tmp_path / "test_logs" / "app.log").read_text(encoding="utf-8")
+        assert "info_should_not_reach_error_log_777" not in error_content
+        assert "error_should_reach_error_log_777" in error_content
+        # app.log 仍收全量（级别由 handler.setLevel 决定）
+        assert "info_should_not_reach_error_log_777" in app_content
+
+        from utils.logger import stop_logging
+
+        stop_logging()
+
+
 class TestLoggingListenerLifecycle:
     """OSS G1：listener 线程生命周期正确，多次 configure + stop 无线程泄漏（R7）。"""
 
