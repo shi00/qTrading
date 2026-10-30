@@ -3015,8 +3015,10 @@ class TestR02OpLockSerialization:
                 mgr.invoke_for_connection(_req("A", deadline), _conn(connection_id="conn-a"), deadline, _ctx("inv-a")),
                 mgr.invoke_for_connection(_req("B", deadline), _conn(connection_id="conn-b"), deadline, _ctx("inv-b")),
             )
-            assert resp_a.content == "out-0"
-            assert resp_b.content == "out-1"
+            # req_id 由锁内顺序分配，而获锁顺序取决于进入锁前 IO 线程池
+            # （_validate_model_file）的唤醒次序，不保证等于 gather 的提交次序；
+            # 故只断言两条请求各拿到互不重复、覆盖全部 req_id 的响应。
+            assert {resp_a.content, resp_b.content} == {"out-0", "out-1"}
             assert counters["max_active"] == 1, "并发调用在 dispatch 段交错——互吞响应回归"
 
     @pytest.mark.asyncio
