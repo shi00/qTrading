@@ -13,6 +13,24 @@
   * 默认阈值 1.5 → 1.7（保持等价筛选力度），`param_vol_ratio_threshold` 文案同步说明口径
   * 口径变更：量比语义与回测引擎 `_compute_avg_daily_volume` 一致，历史回测结果将变化
 
+## [0.11.3](https://github.com/shi00/qTrading/compare/v0.11.2...v0.11.3) (2026-10-30)
+
+
+### Bug Fixes
+
+* **ci:** draft Release 改按 tag_name 列表定位 id，发布改用 PATCH releases/{id} ([#1667](https://github.com/shi00/qTrading/issues/1667)) ([9d9d56d](https://github.com/shi00/qTrading/commit/9d9d56d8722f7f0480128c54dc9e670bc703e945))
+* **deps:** 对齐 requirements-dev.txt 的 starlette 1.6.0→1.10.0 ([#1661](https://github.com/shi00/qTrading/issues/1661)) ([707fab2](https://github.com/shi00/qTrading/commit/707fab2d60efa469d79c3b92a56757bbecadc8b4))
+
+
+### Miscellaneous
+
+* **deps:** bump the actions group with 7 updates ([#1663](https://github.com/shi00/qTrading/issues/1663)) ([78ead15](https://github.com/shi00/qTrading/commit/78ead15f18b410a02db00b524cd1be636a599373))
+
+
+### Documentation
+
+* **deps:** 补齐 polars 上界理由注释并登记供应链两条技术债 ([#1664](https://github.com/shi00/qTrading/issues/1664)) ([f744a85](https://github.com/shi00/qTrading/commit/f744a858f164b03b2b3e238340aedaa4c5c52eb6))
+
 ## [0.11.2](https://github.com/shi00/qTrading/compare/v0.11.1...v0.11.2) (2026-10-29)
 
 
