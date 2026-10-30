@@ -103,6 +103,7 @@ class TestGetQfqDf:
         assert result["close"].iloc[0] == pytest.approx(10.0, rel=1e-6)
 
     def test_zero_latest_factor(self):
+        """UIR-X01-105：基准因子为 0（未知）→ 价格显式缺失，不再把未复权价当复权价。"""
         rows = [
             (10.0, 11.0, 9.0, 10.0, 1.0, datetime.date(2024, 1, 2)),
             (11.0, 12.0, 10.0, 10.5, 0.0, datetime.date(2024, 1, 3)),
@@ -110,6 +111,7 @@ class TestGetQfqDf:
         df = _make_df(rows)
         result = TechnicalAnalysis._get_qfq_df(df)
         assert isinstance(result, pd.DataFrame)
+        assert result["close"].isna().all()
 
     def test_no_trade_date_column(self):
         rows = [
@@ -188,6 +190,7 @@ class TestGetQfqDf:
         assert not result["close"].isna().any(), "NULL adj_factor should be degraded, not produce NaN prices"
 
     def test_qfq_all_null_adj_factor(self):
+        """UIR-X01-105 / R21：复权因子全空 = 未知，价格显式缺失，不得伪装成未复权价。"""
         df = pd.DataFrame(
             [
                 {"trade_date": "20240101", "close": 10.0, "adj_factor": None},
@@ -196,7 +199,23 @@ class TestGetQfqDf:
             ]
         )
         result = TechnicalAnalysis._get_qfq_df(df)
-        assert not result["close"].isna().any()
+        assert result["close"].isna().all()
+
+    def test_qfq_unknown_factors_do_not_fabricate_identity(self):
+        """未知因子不得按 identity 1.0 复权（价格原样），OHLC 全部显式置缺。"""
+        df = pd.DataFrame(
+            {
+                "trade_date": ["20240101", "20240102"],
+                "open": [10.0, 11.0],
+                "high": [10.5, 11.5],
+                "low": [9.5, 10.5],
+                "close": [10.0, 11.0],
+                "adj_factor": [None, None],
+            }
+        )
+        result = TechnicalAnalysis._get_qfq_df(df)
+        for col in ("open", "high", "low", "close"):
+            assert result[col].isna().all(), f"{col} 应显式缺失而非原样（未复权价）"
 
     def test_qfq_adjusts_volume_consistently(self):
         df = pd.DataFrame(
@@ -283,6 +302,24 @@ class TestMACD:
         assert status == "UNKNOWN"
         assert macd_val == 0
         assert hist_val == 0
+
+    def test_macd_unknown_adj_factor_returns_unknown(self):
+        """UIR-X01-105：复权因子未知 → 指标显式 UNKNOWN，不用未复权价算出「看似正常」的 MACD。"""
+        n = 40
+        df = pd.DataFrame(
+            {
+                "trade_date": pd.date_range("2024-01-01", periods=n),
+                "close": [10.0 + i * 0.2 for i in range(n)],
+                "high": [10.5 + i * 0.2 for i in range(n)],
+                "low": [9.5 + i * 0.2 for i in range(n)],
+                "open": [10.0 + i * 0.2 for i in range(n)],
+                "adj_factor": [None] * n,
+            }
+        )
+        status, dif_val, macd_val = TechnicalAnalysis.get_macd(df)
+        assert status == "UNKNOWN"
+        assert dif_val is None
+        assert macd_val is None
 
 
 class TestKDJ:

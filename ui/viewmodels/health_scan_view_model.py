@@ -75,7 +75,8 @@ class HealthScanState:
         progress: 进度 0.0~1.0
         status_text: data 层 progress_callback 回调透传的 Message（key+params）
             (data/mixins/health_mixin.py 构造 Message 后传入；VM 不调 I18n.get)
-        result: 扫描结果 (D10: QualityScanResult frozen dataclass, scan_state="done" 时非 None)
+        result: 扫描结果 (D10: QualityScanResult frozen dataclass, scan_state="done" 时非 None；
+            "error" 态恒为 None，不得把失败伪装成默认 0 分结果, R21)
         error_key: 错误状态 i18n key（View 渲染时 I18n.get(error_key)），非错误时为 None
     """
 
@@ -133,7 +134,7 @@ class HealthScanViewModel(ObservableViewModelMixin[HealthScanState]):
             self._set_state(scan_state="error", error_key="db_err_format")
             return
 
-        self._set_state(scan_state="scanning")
+        self._set_state(scan_state="scanning", result=None, error_key=None)
 
         def on_progress(current: int, total: int, msg: Message) -> None:
             """工作线程回调：直接调 _set_state，由 Mixin 自动封送回主 loop。"""
@@ -144,12 +145,34 @@ class HealthScanViewModel(ObservableViewModelMixin[HealthScanState]):
                 sample_size=50,
                 progress_callback=on_progress,
             )
-            self._set_state(result=self._to_quality_scan_result(raw_result), scan_state="done")
+            if self._scan_failed(raw_result):
+                detail = raw_result.get("error") if isinstance(raw_result, dict) else raw_result
+                logger.warning(
+                    "[HealthScanVM] Quality scan failed: %s",
+                    DataSanitizer.sanitize_error(str(detail)),
+                )
+                self._set_state(scan_state="error", error_key="health_scan_failed", result=None)
+                return
+            self._set_state(result=self._to_quality_scan_result(raw_result), scan_state="done", error_key=None)
         except asyncio.CancelledError:
             raise  # R2: CancelledError 必须传播以配合优雅停机
         except Exception as ex:
             logger.error("[HealthScanVM] Scan failed: %s", DataSanitizer.sanitize_error(ex), exc_info=True)
             self._set_state(scan_state="error", error_key="db_err_format")
+
+    @staticmethod
+    def _scan_failed(raw: dict | None) -> bool:
+        """判定 data 层返回值是否代表扫描失败 (R21).
+
+        ``run_quality_scan`` 失败分支返回 ``{"score": 0, "tier": 0, "error": <sanitized>}``；
+        成功分支（含无数据早退 ``{"score": 0, "tier": 0, "details": {}}``，仅 score/tier）
+        不含 ``error`` 键。因此以「error 键存在」为唯一判据：空串/非字符串 error 仍属失败
+        分支，不得降级为成功结果（否则 0 分会被渲染为正常完成）。``None``（data 层契约外
+        返回值）同样视为失败，避免以默认 0 分伪装成功。
+        """
+        if raw is None:
+            return True
+        return "error" in raw
 
     @staticmethod
     def _to_quality_scan_result(raw: dict | None) -> QualityScanResult:
