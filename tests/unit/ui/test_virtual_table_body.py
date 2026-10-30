@@ -1193,6 +1193,66 @@ class TestColumnWidthPersistence:
         _, result = _render(component)
         assert _header_cell_of(result, 0).width == 120
 
+    def test_drag_one_column_preserves_other_persisted_widths(self, mock_i18n_state, mock_app_colors_state):
+        """UIR-X01-002: 已有两列持久化宽度后拖拽其中一列, 另一列宽度必须保留。
+
+        回归: drag-start 仅对当前列 setdefault, 拖拽镜像只有当前列; drag-update/end 用
+        「仅含当前列」的镜像整体覆盖 state.col_widths 并持久化, 会清空其他列已保存宽度。
+        """
+        persisted: dict = {}
+        component = _make_component(
+            col_widths_key="vt_key",
+            on_load_col_widths=lambda: {"ts_code": 250, "name": 180},
+            on_persist_col_widths=lambda w: persisted.update(w),
+        )
+        _, result = _render(component)
+        assert _header_cell_of(result, 0).width == 250
+        assert _header_cell_of(result, 1).width == 180
+
+        handle = _header_handle_of(result, 1)  # name 列 (180)
+        _trigger_callback(handle.on_horizontal_drag_start, MagicMock())
+        e = MagicMock()
+        e.primary_delta = 40
+        _trigger_callback(handle.on_horizontal_drag_update, e)
+        _trigger_callback(handle.on_horizontal_drag_end, MagicMock())
+
+        result2 = render_once(component)
+        assert _header_cell_of(result2, 0).width == 250  # 未拖拽列宽度未被清空
+        assert _header_cell_of(result2, 1).width == 220  # 拖拽列提交新宽度
+        assert persisted == {"ts_code": 250, "name": 220}
+
+    def test_consecutive_drags_accumulate_all_columns(self, mock_i18n_state, mock_app_colors_state):
+        """UIR-X01-002: 多列连续拖拽时每次持久化都包含全部列 (不互相覆盖)。"""
+        persisted: dict = {}
+        component = _make_component(
+            col_widths_key="vt_key",
+            on_load_col_widths=lambda: {"ts_code": 250},
+            on_persist_col_widths=lambda w: persisted.update(w),
+        )
+        _, result = _render(component)
+
+        handle_name = _header_handle_of(result, 1)  # name 默认 200
+        _trigger_callback(handle_name.on_horizontal_drag_start, MagicMock())
+        e = MagicMock()
+        e.primary_delta = 40
+        _trigger_callback(handle_name.on_horizontal_drag_update, e)
+        _trigger_callback(handle_name.on_horizontal_drag_end, MagicMock())
+        assert persisted == {"ts_code": 250, "name": 240}
+
+        result2 = render_once(component)
+        handle_price = _header_handle_of(result2, 3)  # price 默认 100
+        _trigger_callback(handle_price.on_horizontal_drag_start, MagicMock())
+        e2 = MagicMock()
+        e2.primary_delta = 20
+        _trigger_callback(handle_price.on_horizontal_drag_update, e2)
+        _trigger_callback(handle_price.on_horizontal_drag_end, MagicMock())
+        assert persisted == {"ts_code": 250, "name": 240, "price": 120}
+
+        result3 = render_once(component)
+        assert _header_cell_of(result3, 0).width == 250
+        assert _header_cell_of(result3, 1).width == 240
+        assert _header_cell_of(result3, 3).width == 120
+
     def test_persist_called_on_drag_end(self, mock_i18n_state, mock_app_colors_state):
         """拖拽结束时经 on_persist_col_widths 上抛最终列宽。"""
         persisted: dict = {}
