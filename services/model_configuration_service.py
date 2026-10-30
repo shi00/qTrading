@@ -881,11 +881,21 @@ class ModelConfigurationService:
         单次测试须存在未过期 draining 迁移屏障，防止绕过迁移流程继续产生云端费用；
         ``gguf_*``（本地，无云费用）与 active（新链接管）不受限。屏障判定在同一
         新鲜读取点完成，不加第二次读。
+
+        F17-002：测试上下文直连适配器、不经业务 :meth:`authorize_attempt`，凭据撤销
+        校验须在建立上下文时补齐——``credential_version`` 命中撤销列表即拒绝，
+        否则已撤销凭据仍可经合成测试外发（MM-02）。
         """
 
         def _begin() -> SyntheticTestContext:
             fresh = cfg.ConfigHandler.read_model_management_fresh()
             mm = fresh["model_management"]
+            # F17-002：合成测试路径无 authorize_attempt 把关，撤销校验在此补齐
+            if credential_version is not None and any(
+                r["credential_version"] == credential_version
+                for r in mm["security_state"]["revoked_credential_versions"]
+            ):
+                raise PermissionError(f"凭据版本已撤销，拒绝发起单次测试: {credential_version}")
             if draft_connection.get("adapter_kind") == "litellm_chat" and mm["migration_state"] == "pending":
                 transition = mm.get("migration_transition")
                 if (
