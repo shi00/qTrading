@@ -52,9 +52,7 @@
 | P3-M12-Views-Get-DataProcessor-Cross-Layer | #M12-025 MVVM 边界：data\_source\_tab.py View 经 VM 获取 data\_processor 传子组件（data\_view.py 已解决） | P3 | ① `ui/views` 或 `ui/components` 下再次出现 View 获取 data\_processor 传子组件的新实例时；② 或 ui 层 MVVM 迁移完成时 |
 | P3-M12-NewsFeed-Callback-Passes-ControlEvent | #M12-028 MVVM 边界：news\_feed.py:330/:361 on\_load\_more\_click 传递 ControlEvent 而非业务数据 | P3 | ① 该文件再次出现回调传递 ControlEvent 而非业务数据的新实例时；② 或 ui 层 MVVM 迁移完成时 |
 | P3-M12-StockDetailDialog-BuildContent-No-Cover | #M12-031 测试覆盖：stock\_detail\_dialog.py:505 \_build\_content pragma: no cover | P3 | ① 该文件再次出现 `_build_content` 无覆盖分支的新实例时；② 或 per-file 覆盖率门禁要求该文件达阈值时 |
-| P3-PR373-Viewport-Collapse-Audit | 增量变更触发边缘状态视口塌陷同类风险排查（PR #373 举一反三） | P3 | ① 上述视图新增控件触发 E2E 文本超时失败时；② 或布局重构时 |
 | P3-PR3-TextButton-Interactive-Unverified | PR-3 对抗性检视 M3：ft.TextButton + AnchorKind.INTERACTIVE 的 CanvasKit 行为未验证 | P3 | ① 新增使用 `click_skip` 的测试时；② 或 `ft.TextButton` 升级时 |
-| P3-PR3-MutPool-Locale-Restore-No-Fallback | PR-3 对抗性检视 M6：test\_settings\_language\_switch finally 块还原失败时 mut pool 内连坐污染 | P3 | ① CI 出现 mutates\_config 测试连坐失败时；② 或 mut pool 测试数量增长 ≥50% 时 |
 | P3-PR513-Script-SysPath-Inject | PR #513 检视：`scripts/verify_embedded_pg_connect.py` 顶部 `sys.path.insert` 注入仓库根后 import data 层（代码味道，已文档化） | P3 | ① `scripts/` 其他脚本出现同类 `sys.path` 注入需统一时；② 或脚本迁移为正式包入口时 |
 | P3-PR513-VersionCache-No-Prod-Invalidation | PR #513 检视：`_version_cache` 生产期不主动失效（合理设计，供未来评估） | P3 | ① 应用引入运行期 sidecar 升级/替换流程时；② 或 EmbeddedPostgresService 支持热切换时 |
 | P3-DataExplorer-SyncEngine-Unification | DataExplorer 同步引擎游离于统一连接管理（举一反三登记，本期不实施） | P3 | ① DataExplorer 再次出现连接错口/引擎缓存跨模式复用问题；② 或统一连接管理重构时 |
@@ -342,20 +340,6 @@ M12 ui 表现层模块检视发现：`ui/components/stock_detail_dialog.py:505` 
 
 补充 `_build_content` 测试覆盖。验收标准：① 移除 `# pragma: no cover`；② 现有 `test_stock_detail_dialog*.py` 全过。upgrade 触发条件：① 该文件再次出现 `_build_content` 无覆盖分支的新实例时；② 或 per-file 覆盖率门禁要求该文件达阈值时。
 
-#### P3-PR373-Viewport-Collapse-Audit：增量变更触发边缘状态视口塌陷同类风险排查（PR #373 举一反三）
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-PR373-Viewport-Collapse-Audit** | 增量变更触发边缘状态视口塌陷同类风险排查（PR #373 举一反三） | ① 上述视图新增控件触发 E2E 文本超时失败时；② 或布局重构时 |
-
-**产生背景与现状**
-
-PR #373 定位根因为"main 基线视口 6px 边缘状态 + 新增 backtest\_btn 增量压缩 → table\_card 视口 0px → Column 节点 text=''"（见 [docs/flet/project-differences.md §4.9](../flet/project-differences.md#49-增量变更触发边缘状态视口塌陷pr-373)）。按 CLAUDE.md §1.7「举一反三」需排查同类隐患：`Row(wrap=True)` + `expand=True` + 同级控件增长模式。**现状校准（2026-10-25 复核）**：① `ui/components/config_panels/failover_config_panel.py` 已随 #1403（2026-10-19）删除，风险面收窄；② 新增 `ui/components/safe_wrap_row.py`（UIX-13 C5）在构造期校验 wrap=True 下不得含 expand=True 子控件，`data_source_tab.py` 等已改用该护栏；③ `ui/views/screener_view.py` 仅存解释性注释，无裸 `ft.Row(wrap=True)` 实例。剩余：`screener_view.py` 的表体视口基线尚未实测记录。相关文件：`ui/views/screener_view.py`、`ui/views/settings_tabs/data_source_tab.py`、`ui/components/safe_wrap_row.py`。
-
-**期望的最终解法**
-
-排查剩余视图的 `Row(wrap=True)` + `expand=True` 组合是否存在边缘状态视口风险：① 用 Playwright DOM dump 测量各视图 main 基线表体视口高度；② 若存在边缘状态（接近 0px），评估新增控件触发塌陷的概率；③ 必要时调整布局（如 `expand=2` 或独立右对齐行）。验收标准：① 剩余视图 main 基线视口高度已测量并记录；② 边缘状态视图已修复或标记 NOTE(lazy)；③ 现有 E2E 测试全过。upgrade 触发条件：① 上述视图新增控件触发 E2E 文本超时失败时；② 或布局重构时。
-
 #### P3-PR3-TextButton-Interactive-Unverified：PR-3 对抗性检视 M3：ft.TextButton + AnchorKind.INTERACTIVE 的 CanvasKit 行为未验证
 
 | 级别 | 一句话 | upgrade 触发条件 |
@@ -364,25 +348,11 @@ PR #373 定位根因为"main 基线视口 6px 边缘状态 + 新增 backtest\_bt
 
 **产生背景与现状**
 
-`ui/views/onboarding_wizard.py` 的 SKIP\_BUTTON 用 `ft.TextButton` + `AnchorKind.INTERACTIVE`。PoC 只单独实测了 `ft.Button` 的 INTERACTIVE 行为（identifier 节点 bbox 与真实可点击节点一致），未单独实测 `ft.TextButton` 的 identifier 节点 bbox 是否同样与可点击面一致。identifier 路径取节点自身 bbox（不下潜 `flt-tappable`、无 `aria-label` 回退），若 `ft.TextButton` 节点 bbox 偏离真实可点击面，点击坐标会落空。当前 `click_skip` 仍未被任何测试使用。相关文件：`ui/views/onboarding_wizard.py`、`tests/e2e/helpers/anchor_page.py`、`ui/testing/e2e_ids.py`。
+`ui/views/onboarding_wizard.py` 的 SKIP\_BUTTON 用 `ft.TextButton` + `AnchorKind.INTERACTIVE`。PoC 只单独实测了 `ft.Button` 的 INTERACTIVE 行为（identifier 节点 bbox 与真实可点击节点一致），未单独实测 `ft.TextButton` 的 identifier 节点 bbox 是否同样与可点击面一致。identifier 路径取节点自身 bbox（不下潜 `flt-tappable`、无 `aria-label` 回退），若 `ft.TextButton` 节点 bbox 偏离真实可点击面，点击坐标会落空。当前 `click_skip` 仍未被任何测试使用。**现状校准（2026-10-30 复核）**：`show_skip=True` 仅出现在 `model_scenario` 步（`STEP_CONFIGS`），其前置 `token` 步 `required=True` 且需真实 Tushare 校验，E2E dummy token 无法到达该步，故仍无法新增 `click_skip` 用例；bbox 验证待该步可达后实施。相关文件：`ui/views/onboarding_wizard.py`、`tests/e2e/helpers/anchor_page.py`、`ui/testing/e2e_ids.py`。
 
 **期望的最终解法**
 
 ① 在 E2E smoke test 中验证 `ft.TextButton` 的 CanvasKit identifier 节点 bbox 是否与真实可点击面一致；② 若 bbox 偏离，将 `SKIP_BUTTON` 改为 `AnchorKind.COMPLEX` 或将 `ft.TextButton` 改为 `ft.Button`。验收标准：① `click_skip` E2E 测试通过；② bbox 点击坐标命中按钮。upgrade 触发条件：① 新增使用 `click_skip` 的测试时；② 或 `ft.TextButton` 升级时。
-
-#### P3-PR3-MutPool-Locale-Restore-No-Fallback：PR-3 对抗性检视 M6：test\_settings\_language\_switch finally 块还原失败时 mut pool 内连坐污染
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-PR3-MutPool-Locale-Restore-No-Fallback** | PR-3 对抗性检视 M6：test\_settings\_language\_switch finally 块还原失败时 mut pool 内连坐污染 | ① CI 出现 mutates\_config 测试连坐失败时；② 或 mut pool 测试数量增长 ≥50% 时 |
-
-**产生背景与现状**
-
-PR-3 删除 `_ensure_locale_zh` 后，`flet_app_mut` pool 的 locale 还原仅依赖 `test_settings_language_switch` finally 块。若 UI 操作失败（`sp.select_language(lang_zh)` 超时），`flet_app_mut` 内存 locale 停留 en\_US，影响后续 `mutates_config` 测试。**设计权衡**：Plans.md Task 3.4 明确要求删除 `_ensure_locale_zh`，read-only 池不受影响。测试进程 I18n 已由 `I18n.set_locale("zh")` 在 UI 操作前还原。相关文件：`tests/e2e/test_settings_flow.py:67-88`、`tests/e2e/conftest.py`。
-
-**期望的最终解法**
-
-在 `pristine_config` teardown 时为 mut pool 增加 locale 还原兜底（类似原 `_ensure_locale_zh` 但限定 mut pool）。验收标准：① finally 块失败后 mut pool 后续测试仍能正常运行；② read-only pool 不受影响。upgrade 触发条件：① CI 出现 mutates\_config 测试连坐失败时；② 或 mut pool 测试数量增长 ≥50% 时。
 
 #### P3-B12-Screener-Formatting-Logic-in-VM：#B12-2 review02 B12 第 2 步：格式化逻辑下沉 VM（`_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM）
 
@@ -628,7 +598,7 @@ M12 ui 表现层模块检视发现：`ui/components/news_feed.py:330/361` `on_lo
 
 **产生背景与现状**
 
-UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`scripts/probe/startup_perf.py` 可复现）：依赖库 import \~5.4s（本机 dev 基准，pandas 主导）+ 单例 \~0.46s + 7 View 渲染 \~0.16-1.03s ≈ 6.5-7s；litellm 已由 `ai_service._ensure_litellm_loaded` 双层惰性移除 18s+ 阻塞（实测 litellm 不在 import/构造链）。visited\_tabs 懒构造推广判定为收益/风险比不成立（可省 \~1-1.4s 仅 15-20%，主导成本 import 不可省；且转嫁首次切页冻结 + 契约测试改写）。**缺位**：端到端真实冷启动→NavigationRail 可交互测量（含 DB/embedded-PG 初始化、低性能机器）需 GUI/浏览器环境，无头无法执行，SLA（定义 8s 阈值）状态按 proxy 构成判定达标，未以真实启动实测佐证。相关文件：`scripts/probe/startup_perf.py`、`ui/app_layout.py`（\_build\_pages\_stack）、`app/bootstrap.py`（已删 E2E 无效预热）、`UX-06-方案设计.md`（worktree 内）。
+UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`scripts/probe/startup_perf.py` 可复现）：依赖库 import \~5.4s（本机 dev 基准，pandas 主导）+ 单例 \~0.46s + 7 View 渲染 \~0.16-1.03s ≈ 6.5-7s；litellm 已由 `ai_service._ensure_litellm_loaded` 双层惰性移除 18s+ 阻塞（实测 litellm 不在 import/构造链）。visited\_tabs 懒构造推广判定为收益/风险比不成立（可省 \~1-1.4s 仅 15-20%，主导成本 import 不可省；且转嫁首次切页冻结 + 契约测试改写）。**缺位**：端到端真实冷启动→NavigationRail 可交互测量（含 DB/embedded-PG 初始化、低性能机器）需 GUI/浏览器环境，无头无法执行，SLA（定义 8s 阈值）状态按 proxy 构成判定达标，未以真实启动实测佐证。**现状校准（2026-10-30 复核）**：E2E（浏览器模式）实测启动链路为 sidecar 就绪 + Chromium CanvasKit 加载（单用例 setup 约 44-65s），与桌面端 `python main.py` 冷启动口径不可比，仍不能替代 GUI 端到端测量；本条保持。相关文件：`scripts/probe/startup_perf.py`、`ui/app_layout.py`（\_build\_pages\_stack）、`app/bootstrap.py`（已删 E2E 无效预热）、`UX-06-方案设计.md`（worktree 内）。
 
 **期望的最终解法**
 
