@@ -2079,6 +2079,111 @@ class TestAIStrategyMixinAnalyzeSingle:
         assert result is not None
         assert result["score"] == 75
 
+    @staticmethod
+    def _history_df(rows: int) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "trade_date": [f"202403{str(i).zfill(2)}" for i in range(1, rows + 1)],
+                "open": [10.0 + i * 0.1 for i in range(rows)],
+                "high": [10.5 + i * 0.1 for i in range(rows)],
+                "low": [9.5 + i * 0.1 for i in range(rows)],
+                "close": [10.0 + i * 0.1 for i in range(rows)],
+                "vol": [1000000 + i * 10000 for i in range(rows)],
+                "pct_chg": [1.0] * rows,
+                "adj_factor": [1.0] * rows,
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_kdj_sentinel_not_injected_into_tech_context(self, mock_strategy, mock_dp, mock_ai_client):
+        """UIR-X01-104 / R21：get_kdj 数据不足走 ("UNKNOWN", 0, 0, 0) 哨兵，
+        0 不得作为 k/j 数值进入 prompt；kdj_signal 按技术面「数据不足」约定表达。"""
+        row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}
+        # 默认 mock dp.get_stock_history 返回空 DataFrame → len(df) < n 走哨兵分支
+        prefetched = PreFetchedContext()
+        await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched)
+
+        tech_context = mock_ai_client.analyze_stock.call_args.args[1]
+        assert "k" not in tech_context
+        assert "j" not in tech_context
+        assert tech_context["kdj_signal"] == I18n.get("ai_data_insufficient")
+        assert tech_context["ma_alignment"] == I18n.get("ai_data_insufficient")
+
+    @pytest.mark.asyncio
+    async def test_kdj_short_history_sentinel_not_injected(self, mock_strategy, mock_dp, mock_ai_client):
+        """次新股/极短历史（3 行）同样不得把哨兵 0 当作 KDJ 数值注入。"""
+        row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}
+        prefetched = PreFetchedContext()
+        await mock_strategy._mixin_analyze_single(
+            row, mock_dp, mock_ai_client, prefetched, history_df=self._history_df(3)
+        )
+
+        tech_context = mock_ai_client.analyze_stock.call_args.args[1]
+        assert "k" not in tech_context
+        assert "j" not in tech_context
+        assert tech_context["kdj_signal"] == I18n.get("ai_data_insufficient")
+
+    @pytest.mark.asyncio
+    async def test_kdj_flat_price_real_values_kept(self, mock_strategy, mock_dp, mock_ai_client):
+        """一字板/全横盘（整窗同价）→ RSV 取中性 50，属真实计算值，不得被当作缺失删除。"""
+        rows = 20
+        history_df = pd.DataFrame(
+            {
+                "trade_date": [f"202403{str(i).zfill(2)}" for i in range(1, rows + 1)],
+                "open": [10.0] * rows,
+                "high": [10.0] * rows,
+                "low": [10.0] * rows,
+                "close": [10.0] * rows,
+                "vol": [1000000] * rows,
+                "pct_chg": [0.0] * rows,
+                "adj_factor": [1.0] * rows,
+            }
+        )
+        row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}
+        prefetched = PreFetchedContext()
+        await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched, history_df=history_df)
+
+        tech_context = mock_ai_client.analyze_stock.call_args.args[1]
+        assert tech_context["kdj_signal"] == "NEUTRAL"
+        assert tech_context["k"] == 50.0
+        assert tech_context["j"] == 50.0
+
+    @pytest.mark.asyncio
+    async def test_kdj_real_zero_value_not_dropped(self, mock_strategy, mock_dp, mock_ai_client):
+        """真实 K/J=0（正常枚举 + 数值）不得被按数值判定为哨兵而误删。"""
+        row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}
+        prefetched = PreFetchedContext()
+        with patch(
+            "strategies.ai_mixin.TechnicalAnalysis.get_kdj",
+            return_value=("OVERSOLD", 0.0, 20.0, 0.0),
+        ):
+            await mock_strategy._mixin_analyze_single(
+                row, mock_dp, mock_ai_client, prefetched, history_df=self._history_df(30)
+            )
+
+        tech_context = mock_ai_client.analyze_stock.call_args.args[1]
+        assert tech_context["kdj_signal"] == "OVERSOLD"
+        assert tech_context["k"] == 0.0
+        assert tech_context["j"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_kdj_partial_none_does_not_write_half_pair(self, mock_strategy, mock_dp, mock_ai_client):
+        """J 缺失（如末窗缺价）时整体按「数据不足」处理，不写半套 k/j 数值。"""
+        row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}
+        prefetched = PreFetchedContext()
+        with patch(
+            "strategies.ai_mixin.TechnicalAnalysis.get_kdj",
+            return_value=("NEUTRAL", 12.3, 20.0, None),
+        ):
+            await mock_strategy._mixin_analyze_single(
+                row, mock_dp, mock_ai_client, prefetched, history_df=self._history_df(30)
+            )
+
+        tech_context = mock_ai_client.analyze_stock.call_args.args[1]
+        assert "k" not in tech_context
+        assert "j" not in tech_context
+        assert tech_context["kdj_signal"] == I18n.get("ai_data_insufficient")
+
     @pytest.mark.asyncio
     async def test_analyze_with_ai_error(self, mock_strategy, mock_dp, mock_ai_client):
         mock_ai_client.analyze_stock = AsyncMock(side_effect=Exception("AI Error"))
