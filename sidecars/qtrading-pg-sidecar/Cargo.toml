@@ -6,10 +6,10 @@ description = "qTrading embedded PostgreSQL sidecar (pg_plan Phase 1 MVP)"
 build = "build.rs"
 
 [dependencies]
-# crates.io 2026-07-20 核实: newest_version = 0.21.0
+# crates.io 2026-10-30 核实: newest_version = 0.22.0
 # https://crates.io/api/v1/crates/postgresql_embedded
 # default-features=false 去掉 tls-native-tls(避免 Windows OpenSSL 构建链), 用 rustls-ring
-postgresql_embedded = { version = "=0.21.0", default-features = false, features = [
+postgresql_embedded = { version = "=0.22.0", default-features = false, features = [
     "bundled",
     "theseus",
     "tokio",

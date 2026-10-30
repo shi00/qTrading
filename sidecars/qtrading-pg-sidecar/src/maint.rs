@@ -461,7 +461,7 @@ fn scan_residuals(data_dir: &Path) -> (Vec<String>, Vec<String>) {
 // ---- 临时实例管理（dump 离线 / restore / maintenance-shell 共用） ----
 
 struct TempInstance {
-    /// 必须保留 ownership：PostgreSQL::drop 会调用 pg_ctl stop（crate 0.21 行为），
+    /// 必须保留 ownership：PostgreSQL::drop 会调用 pg_ctl stop（crate 0.22 行为），
     /// 提前 drop 会立即停止 postgres，导致后续 psql 连接失败。
     ///
     /// run.rs 的常驻实例不使用 std::mem::forget 阻止 drop：依赖 graded_stop 先于

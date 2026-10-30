@@ -337,5 +337,5 @@ protocol_version = "v1"
 # bundled PostgreSQL 归档版本 (pg_plan §15.2，固定 16 系列)
 postgresql_version = "16.14.0"
 # postgresql_embedded crate 版本 (Cargo.toml dependencies)
-crate_version = "0.21.0"
+crate_version = "0.22.0"
 
