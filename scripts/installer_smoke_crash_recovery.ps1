@@ -160,22 +160,46 @@ try {
         Write-Ok "Main process killed (PID: $($proc.Id))"
     }
 
-    # STEP 6: 等待 Job Object 触发 sidecar+postgres 退出
-    Write-Step "6. Wait for Job Object to terminate sidecar (5s grace period)"
-    Start-Sleep -Seconds 5
-
-    # STEP 7: 验证 sidecar 无残留（核心断言 - Job Object 机制）
-    Write-Step "7. Verify no residual sidecar process (Job Object killed it)"
+    # STEP 6: 等待 sidecar 自行退出（父进程兜底机制：`--parent-pid` 每 500ms 轮询 + stdin EOF）
+    # 注意：sidecar 的父进程检测循环在 postgres ready（打印 ready JSON）之后才启动；
+    # 首次启动（initdb）期间父进程被杀时，sidecar 会先完成 initdb 再检测到父进程消失，
+    # 实测可耗时数十秒，因此上限取 180s（原先固定 5s 会必然失败，且代码中并无 Job Object）。
+    Write-Step "6. Wait for sidecar to exit after parent crash (up to 180s)"
+    $waitStarted = Get-Date
+    $deadline = $waitStarted.AddSeconds(180)
     $sidecarAfter = Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue
+    while ($sidecarAfter -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 5
+        $sidecarAfter = Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue
+    }
+    $waitedSecs = [int]((Get-Date) - $waitStarted).TotalSeconds
+    if ($sidecarAfter) {
+        Write-Host "  [DIAG] sidecar still alive after ${waitedSecs}s: PID(s) $($sidecarAfter.Id -join ',')"
+        Write-Diagnostics "sidecar still alive 180s after parent crash"
+    } else {
+        Write-Host "  sidecar exited after ~${waitedSecs}s"
+    }
+
+    # STEP 7: 验证 sidecar 无残留（核心断言：父进程崩溃后 sidecar 最终自行退出）
+    Write-Step "7. Verify no residual sidecar process (parent-loss watchdog exited it)"
     Assert-True ($null -eq $sidecarAfter) "No residual sidecar process after main crash"
 
-    # STEP 8: 验证 postgres 无残留
+    # STEP 8: 验证 postgres 无残留（sidecar 退出后由 graceful stop 关闭 postgres，留出停机余量）
     Write-Step "8. Verify no residual postgres process"
     $postgresAfter = Get-Process -Name "postgres" -ErrorAction SilentlyContinue
+    $pgDeadline = (Get-Date).AddSeconds(30)
+    while ($postgresAfter -and (Get-Date) -lt $pgDeadline) {
+        Start-Sleep -Seconds 3
+        $postgresAfter = Get-Process -Name "postgres" -ErrorAction SilentlyContinue
+    }
+    if ($postgresAfter) {
+        Write-Host "  [DIAG] postgres still alive: PID(s) $($postgresAfter.Id -join ',')"
+        Write-Diagnostics "postgres still alive 30s after sidecar exit"
+    }
     Assert-True ($null -eq $postgresAfter) "No residual postgres process after main crash"
 
     Write-Host "`n=== CRASH RECOVERY SMOKE TEST PASSED ===" -ForegroundColor Green
-    Write-Host "Job Object mechanism verified: parent crash → sidecar+postgres auto-exit" -ForegroundColor Green
+    Write-Host "Parent-crash recovery verified: parent crash -> sidecar exits (parent-loss watchdog), postgres shut down" -ForegroundColor Green
     exit 0
 }
 catch {
