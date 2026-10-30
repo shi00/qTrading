@@ -19,6 +19,8 @@ jobs:
     name: Docs Consistency Check
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      UV_CACHE_DIR: /tmp/uv-cache
 
     steps:
       - name: Checkout Code
@@ -37,9 +39,20 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
         with:
-          # 缓存预算治理：Linux 侧 `uv pip install` 仅数秒（wheel 主要走 setup-python 的 pip
-          # 缓存），而 setup-uv 自带缓存在每个 PR 引用各存一份 ~350 MB，挤占仓库 10 GB 上限。
+          # 禁用 setup-uv 自带缓存：其默认缓存键绑定 uv.lock（本仓库未跟踪该文件），且每个 PR
+          # 引用各存一份 ~350 MB，挤占仓库 10 GB 上限。改由下方 actions/cache 显式缓存
+          # UV_CACHE_DIR（键不含 ref，main 与 PR 共用同一条目）。
+          # 注：此前注释所称「Linux 侧 uv pip install 仅数秒」与实测不符——run 41037287334 的
+          # Install dependencies 耗时 2m06s（每次重下 pyarrow/polars-runtime 等 ~300 MB wheel）。
           enable-cache: false
+
+      - name: Cache uv build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: /tmp/uv-cache
+          key: uv-linux-py3.13-${{ hashFiles('requirements.txt', 'requirements-optional.txt', 'requirements-dev.txt') }}
+          restore-keys: |
+            uv-linux-py3.13-
 
       - name: Install dependencies
         run: |
