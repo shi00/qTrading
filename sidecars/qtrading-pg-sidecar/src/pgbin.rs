@@ -58,12 +58,15 @@ pub fn read_postmaster_pid(data_dir: &Path) -> Option<PostmasterInfo> {
 
 #[cfg(windows)]
 pub fn process_alive(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE,
+    };
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    // STILL_ACTIVE = 259（Windows SDK 约定）；windows_sys 0.59 未直接导出该常量，用字面量。
-    const STILL_ACTIVE: u32 = 259;
+    // windows_sys 0.61 在 Win32::Foundation 导出 STILL_ACTIVE（NTSTATUS/i32 = 259），
+    // GetExitCodeProcess 的退出码为 u32，故按业务语义做一次无符号转换。
+    const STILL_ACTIVE_U32: u32 = STILL_ACTIVE as u32;
     // SAFETY: OpenProcess 仅查询句柄；成功立即 CloseHandle。
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if handle.is_null() {
@@ -74,7 +77,7 @@ pub fn process_alive(pid: u32) -> bool {
     // 需进一步用 GetExitCodeProcess 检查退出码是否为 STILL_ACTIVE。
     let mut exit_code: u32 = 0;
     let alive =
-        unsafe { GetExitCodeProcess(handle, &mut exit_code) != 0 && exit_code == STILL_ACTIVE };
+        unsafe { GetExitCodeProcess(handle, &mut exit_code) != 0 && exit_code == STILL_ACTIVE_U32 };
     unsafe {
         let _ = CloseHandle(handle);
     }

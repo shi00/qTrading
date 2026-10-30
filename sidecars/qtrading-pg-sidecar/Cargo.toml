@@ -39,7 +39,9 @@ sha2 = "0.10"
 rand = "0.9"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
+# crates.io 2026-10-30 核实: max_stable_version = 0.61.2（0.59.0 为旧线；传递依赖已在用 0.61，
+# 升级后 lock 内去掉了 0.59.0 副本。0.61 在 Win32::Foundation 导出 STILL_ACTIVE，见 src/pgbin.rs）
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security_Cryptography",
     "Win32_System_Threading",
