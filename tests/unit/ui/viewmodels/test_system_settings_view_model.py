@@ -262,9 +262,51 @@ class TestSaveConcurrency:
         mock_config_handler.set_sync_max_concurrent_heavy.assert_called_once_with(8)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw", ["9", "32"])
+    async def test_save_concurrency_above_config_cap_returns_false(self, mock_config_handler, mock_thread_pool, raw):
+        """UIR-F22-002: 超出 AppConfig.sync_max_concurrent_heavy 硬上限 (le=8) 时拒绝写入。
+
+        不得依赖 ConfigHandler setter 的静默夹紧（否则 UI 显示 32、实际生效 8，R21 伪装）。
+        """
+        vm = _make_vm(mock_config_handler)
+        result = await vm.save_concurrency(raw)
+        assert result is False
+        mock_config_handler.set_sync_max_concurrent_heavy.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_save_concurrency_echoes_effective_value_from_getter(self, mock_config_handler, mock_thread_pool):
+        """UIR-F22-002: 保存成功后回读 getter 生效值并回显 (显示值 == 生效值)。"""
+        vm = _make_vm(mock_config_handler)  # 构造时 getter=4, state='4'
+        mock_config_handler.get_sync_max_concurrent_heavy.return_value = 8
+        result = await vm.save_concurrency("8")
+        assert result is True
+        assert vm.state.concurrency_value == "8"
+
+    @pytest.mark.asyncio
+    async def test_save_concurrency_clamped_by_point_tier_echoes_getter(self, mock_config_handler, mock_thread_pool):
+        """UIR-F22-002: 写入值被 Tushare 积分档位压低时，回显 getter 的生效值。"""
+        vm = _make_vm(mock_config_handler)  # 构造时 getter=4, state='4'
+        mock_config_handler.get_sync_max_concurrent_heavy.return_value = 3
+        result = await vm.save_concurrency("8")
+        assert result is True
+        mock_config_handler.set_sync_max_concurrent_heavy.assert_called_once_with(8)
+        assert vm.state.concurrency_value == "3"
+
+    @pytest.mark.asyncio
+    async def test_save_concurrency_readback_failure_falls_back_to_written_value(
+        self, mock_config_handler, mock_thread_pool
+    ):
+        """UIR-F22-002: 回读失败时降级回显已写入值 (setter 对 1-8 区间不夹紧，落盘值==val)。"""
+        vm = _make_vm(mock_config_handler)
+        mock_config_handler.get_sync_max_concurrent_heavy.side_effect = RuntimeError("read failed")
+        result = await vm.save_concurrency("5")
+        assert result is True
+        assert vm.state.concurrency_value == "5"
+
+    @pytest.mark.asyncio
     async def test_save_concurrency_invalid_range_returns_false(self, mock_config_handler, mock_thread_pool):
         vm = _make_vm(mock_config_handler)
-        # 0 < 1 超出 1-32 范围
+        # 0 < 1 超出 1-8 范围
         result = await vm.save_concurrency("0")
         assert result is False
         mock_config_handler.set_sync_max_concurrent_heavy.assert_not_called()
@@ -490,6 +532,13 @@ class TestPublicRangeConstants:
 
         assert m.CONCURRENCY_MIN == m._CONCURRENCY_MIN
         assert m.CONCURRENCY_MAX == m._CONCURRENCY_MAX
+
+    def test_concurrency_range_matches_config_cap(self):
+        """UIR-F22-002: UI 输入上限须与 AppConfig.sync_max_concurrent_heavy 的 le=8 一致。"""
+        from ui.viewmodels import system_settings_view_model as m
+
+        assert m.CONCURRENCY_MIN == 1
+        assert m.CONCURRENCY_MAX == 8
 
     def test_db_pool_constants_match(self):
         from ui.viewmodels import system_settings_view_model as m

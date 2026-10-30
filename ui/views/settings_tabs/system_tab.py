@@ -402,10 +402,20 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                     show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
                 return
             if show_snack_callback:
-                show_snack_callback(
-                    I18n.get("sys_sync_heavy") + " " + I18n.get("common_saved"),
-                    color=AppColors.SUCCESS,
-                )
+                effective = settings_vm.state.concurrency_value
+                # VM 已返回成功，raw_val 必为可解析整数；按数值比较以忽略 "08"/"+4" 等字面差异。
+                if effective != str(int(raw_val)):
+                    # UIR-F22-002: 生效值被 Tushare 积分档位压低（字段已回显生效值），
+                    # 明确告知用户，避免“输入 X 却生效 Y”的静默差异。
+                    show_snack_callback(
+                        I18n.get("sys_snack_concurrency_limited", value=effective),
+                        color=AppColors.WARNING,
+                    )
+                else:
+                    show_snack_callback(
+                        I18n.get("sys_sync_heavy") + " " + I18n.get("common_saved"),
+                        color=AppColors.SUCCESS,
+                    )
         except ValueError:
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
