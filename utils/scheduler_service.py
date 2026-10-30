@@ -777,6 +777,16 @@ class SchedulerService:
         `check_data_exists` / `SyncResult.is_complete` 判定其完整性并据此推进水位——完整则夜间预测
         链路接通（D7-3/REVIEW-06 TO-01 不破），不完整则水位留空（MINOR-01 不复现）。
         """
+        # UIR-F20-002: 自动更新关闭时不提交补跑、也不写补跑状态。判据与 `_run_daily_update` /
+        # `_catch_up_nightly_prediction` 同源（`is_auto_update_enabled`）：该值在未配置时取
+        # DEFAULT_CONFIG 的 False，因此「从未配置」与「显式关闭」同样跳过，避免新装用户被动发起同步。
+        # 守卫置于退避判定 / 自举查库 / 水位推进之前，关闭期间不产生任何进程内或持久化状态变更；
+        # 重新开启后 30 秒看门狗（`_watch_config_changes`）或下一次启动（`_load_db_state`）即恢复补跑。
+        # 已在途的补跑任务（提交时开关仍为开启）运行至结束、照常经 is_complete 推进水位——该水位
+        # 记录的是已实际落库的数据，不因开关切换而作废；开关只决定「是否发起新的补跑」。
+        if not ConfigHandler.is_auto_update_enabled():
+            logger.debug("[Scheduler] 自动更新已关闭，跳过补偿检查")
+            return
         # D7-1/MAJOR-01: 退避窗口内跳过重复提交，打断"失败→30s 后重试"的固定频率风暴。
         # 此处可提前返回，亦省去退避期间的交易日历查询。
         if not bypass_backoff and self._catchup_backoff_active():

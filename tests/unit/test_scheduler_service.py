@@ -1747,6 +1747,12 @@ class TestSafeShutdownSchedulerGenericError:
 class TestCatchUpMissedUpdates:
     """D6-1: 补偿机制 — 检查遗漏交易日并提交补偿任务。"""
 
+    @pytest.fixture(autouse=True)
+    def _auto_update_enabled(self):
+        """UIR-F20-002: 既有用例语义为「自动更新开启」；关闭态行为见 TestCatchUpAutoUpdateGuard。"""
+        with patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True):
+            yield
+
     @pytest.mark.asyncio
     async def test_empty_baseline_empty_db_warns_and_returns(self):
         """REVIEW-06 TO-01: 基准为空（None/空串）+ daily_quotes 无数据 → 告警跳过且不提交（需先全量初始化）。"""
@@ -2082,6 +2088,85 @@ class TestCatchUpMissedUpdates:
             mock_tpm_instance.run_async = AsyncMock(return_value=config)
             await svc._watch_config_changes()
         svc._catch_up_missed_updates.assert_awaited_once_with(include_today=False)
+
+
+class TestCatchUpAutoUpdateGuard:
+    """UIR-F20-002: 自动更新关闭时不提交补跑任务、不写补跑状态；重新开启后恢复补跑。"""
+
+    @staticmethod
+    def _svc_with_missed_days():
+        svc = _make_svc()
+        svc._last_update_date = "20240610"
+        mock_dp_instance = MagicMock()
+        mock_dp_instance.trade_calendar = MagicMock()
+        mock_dp_instance.trade_calendar.get_trade_dates = AsyncMock(
+            return_value=[date(2024, 6, 10), date(2024, 6, 11), date(2024, 6, 12), date(2024, 6, 13)]
+        )
+        return svc, mock_dp_instance
+
+    @pytest.mark.asyncio
+    async def test_no_submit_when_auto_update_disabled(self):
+        """关闭自动更新 → 即便存在遗漏交易日也不提交 daily_sync_catchup。"""
+        svc, mock_dp_instance = self._svc_with_missed_days()
+        mock_tm_instance = MagicMock()
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("utils.scheduler_service.get_now") as mock_now,
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+        ):
+            mock_ch.is_auto_update_enabled.return_value = False
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
+            await svc._catch_up_missed_updates()
+        mock_tm_instance.submit_task.assert_not_called()
+        # 守卫在入口即返回：连交易日历查询都不应发生
+        mock_dp_instance.trade_calendar.get_trade_dates.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_state_written_when_disabled_and_baseline_empty(self):
+        """关闭自动更新时水位为空也不自举（不查 daily_quotes、不缓存下界、不动退避状态）。"""
+        svc = _make_svc()
+        svc._last_update_date = None
+        mock_dp_instance = MagicMock()
+        mock_dao = MagicMock()
+        mock_dao.get_latest_trade_date = AsyncMock(return_value=date(2024, 6, 10))
+        mock_dp_instance.cache.quote_dao = mock_dao
+        mock_tm_instance = MagicMock()
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+        ):
+            mock_ch.is_auto_update_enabled.return_value = False
+            await svc._catch_up_missed_updates()
+        assert svc._last_update_date is None
+        assert svc._bootstrap_baseline_date is None
+        assert svc._catchup_consecutive_failures == 0
+        assert svc._catchup_next_retry_at is None
+        mock_dao.get_latest_trade_date.assert_not_awaited()
+        mock_tm_instance.submit_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resumes_after_auto_update_reenabled(self):
+        """关闭期间跳过；重新开启后同一实例的下一轮检查正常提交补跑。"""
+        svc, mock_dp_instance = self._svc_with_missed_days()
+        mock_tm_instance = MagicMock()
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("data.data_processor.DataProcessor", return_value=mock_dp_instance),
+            patch("utils.scheduler_service.get_now") as mock_now,
+            patch("services.task_manager.TaskManager", return_value=mock_tm_instance),
+        ):
+            mock_now.return_value.date.return_value = date(2024, 6, 15)
+            mock_ch.is_auto_update_enabled.return_value = False
+            await svc._catch_up_missed_updates()
+            mock_tm_instance.submit_task.assert_not_called()
+            # 用户重新开启 → 同一实例下一轮看门狗周期（30s）即恢复补跑
+            mock_ch.is_auto_update_enabled.return_value = True
+            await svc._catch_up_missed_updates()
+        kwargs = mock_tm_instance.submit_task.call_args.kwargs
+        assert kwargs["unique_key"] == "daily_sync_catchup"
+        assert kwargs["missed_dates"] == [date(2024, 6, 11), date(2024, 6, 12), date(2024, 6, 13)]
 
 
 class TestCatchupLogic:
@@ -2432,6 +2517,12 @@ class TestCatchupBackoff:
     防止 30 秒看门狗在持续性失败下无限固定频率重试（消耗配额 + 刷屏任务面板）。"""
 
     _FIXED_NOW = datetime(2024, 6, 15, 12, 0, 0)
+
+    @pytest.fixture(autouse=True)
+    def _auto_update_enabled(self):
+        """UIR-F20-002: 本类聚焦退避语义，默认自动更新开启。"""
+        with patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True):
+            yield
 
     async def _run_incomplete_catchup(self, svc):
         """驱动一次 _catchup_logic 并返回未完成结果（关键表失败）。"""
