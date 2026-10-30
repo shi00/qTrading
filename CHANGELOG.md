@@ -13,6 +13,13 @@
   * 默认阈值 1.5 → 1.7（保持等价筛选力度），`param_vol_ratio_threshold` 文案同步说明口径
   * 口径变更：量比语义与回测引擎 `_compute_avg_daily_volume` 一致，历史回测结果将变化
 
+## [0.11.3](https://github.com/shi00/qTrading/compare/v0.11.2...v0.11.3) (2026-10-30)
+
+
+### Miscellaneous
+
+* **deps:** Rust sidecar 依赖取证与升级（D8.4）([#1657](https://github.com/shi00/qTrading/issues/1657)) ([d5a164b](https://github.com/shi00/qTrading/commit/d5a164b062ea7ae94eba86dd4c6d33faa41ffce3))
+
 ## [0.11.2](https://github.com/shi00/qTrading/compare/v0.11.1...v0.11.2) (2026-10-29)
 
 
