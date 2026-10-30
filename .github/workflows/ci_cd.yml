@@ -721,6 +721,12 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    # uv 构建缓存重定向到 D:（Windows 上 146GB，避免占用 C:），由下方 actions/cache 显式
+    # 缓存（对齐全仓 e2e-tests-windows / ci-checks-windows 的已验证方案：命中后
+    # llama-cpp-python 等 cp314 源码构建产物直接复用，Install dependencies 由 5.5~9.0 分钟
+    # 降至 0.7 分钟，实测 run 41026737415 / 41024657959）。
+    env:
+      UV_CACHE_DIR: ${{ matrix.uv_cache_dir }}
     strategy:
       fail-fast: false
       matrix:
@@ -728,9 +734,11 @@ jobs:
           - os: linux
             runner: ubuntu-latest
             binary_name: qtrading-pg-sidecar
+            uv_cache_dir: /tmp/uv-cache
           - os: windows
             runner: windows-latest
             binary_name: qtrading-pg-sidecar.exe
+            uv_cache_dir: D:\tmp\uv-cache
 
     steps:
       - name: Checkout Code
@@ -748,6 +756,20 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        with:
+          # 禁用 setup-uv 自带缓存：其 cache 依赖 glob 默认绑定 uv.lock（本项目无该文件），
+          # 实测命中后 Install dependencies 仍需 5.5~9.0 分钟；改由下方 actions/cache
+          # 以 requirements 哈希为键显式缓存 UV_CACHE_DIR（对齐全仓已验证方案）。
+          enable-cache: false
+
+      - name: Cache uv build cache (Windows)
+        if: matrix.os == 'windows'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: D:\tmp\uv-cache
+          key: uv-windows-py314-${{ hashFiles('requirements.txt', 'requirements-optional.txt', 'requirements-dev.txt') }}
+          restore-keys: |
+            uv-windows-py314-
 
       - name: Install dependencies
         run: |
