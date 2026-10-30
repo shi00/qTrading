@@ -818,17 +818,17 @@ jobs:
         # PR #291 触发的 Windows 单测运行 911s（15 分 11 秒）同样触发 timeout。
         # 原 15 分钟余量仅 79s（~9%），Windows runner 性能波动 + 测试增量易突破。
         # 提升至 20 分钟留 ~6.5 分钟余量（~32%），长期优化见 P3-Windows-Unit-Test-Timeout-Tight。
+        #
+        # 覆盖率口径：不再追加 --cov*（实测 run 41117055568 该 job 的 Run Unit Tests 7m26 是
+        # 全流水线最长分支，而 Windows 上的 coverage 采集是纯重复开销）。覆盖率门禁（per-file
+        # ≥80% 强制 / 分层 advisory / diff coverage strict 80% / Codecov 上传）由 Linux
+        # ci-checks job 覆盖同一批 tests/unit/ 用例并强制执行，Windows 只负责「Windows 环境
+        # 下用例能否跑通」这一独有信号。
         timeout-minutes: 20
         shell: bash
         run: |
           mkdir -p D:/tmp
-          python -m pytest tests/unit/ -v --tb=short --cov --cov-report=term --cov-report=json --junitxml=junit-unit.xml
-
-      - name: Check Per-File Coverage >= 80%
-        run: python scripts/check_per_file_coverage.py
-
-      - name: Report Layered Coverage (review07-G14, advisory)
-        run: python scripts/check_per_file_coverage.py --report
+          python -m pytest tests/unit/ -v --tb=short --junitxml=junit-unit.xml
 
       - name: Validate installer smoke test scripts syntax (Phase 5)
         shell: pwsh
@@ -865,9 +865,8 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: test-reports-${{ runner.os }}
+          # Windows 侧不再生成 coverage.xml/json（覆盖率由 Linux ci-checks 产出），此处只传 junit。
           path: |
-            coverage.xml
-            coverage.json
             junit-*.xml
           retention-days: 14
 

@@ -7,7 +7,7 @@ per-file 门禁 80%。本文件在 unit 层复用 test_main.py 的 mock 策略
 （_DummyPage + 全依赖 monkeypatch），覆盖 run() 主体，使 unit 阶段覆盖达标。
 
 与 tests/integration/test_main.py 的差异：
-- 本文件位于 tests/unit/，由 Windows/Linux unit job 收集（coverage.json 计入）
+- 本文件位于 tests/unit/，由 Linux unit job 收集（coverage.json 计入；Windows unit job 已不产出覆盖率）
 - 仅覆盖 run() 主流程与关键分支，不重复窗口/对话框交互细节（由 integration 承担）
 """
 
