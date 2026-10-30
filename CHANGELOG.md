@@ -13,6 +13,13 @@
   * 默认阈值 1.5 → 1.7（保持等价筛选力度），`param_vol_ratio_threshold` 文案同步说明口径
   * 口径变更：量比语义与回测引擎 `_compute_avg_daily_volume` 一致，历史回测结果将变化
 
+## [0.11.3](https://github.com/shi00/qTrading/compare/v0.11.2...v0.11.3) (2026-10-30)
+
+
+### Bug Fixes
+
+* **deps:** 对齐 requirements-dev.txt 的 starlette 1.6.0→1.10.0 ([#1661](https://github.com/shi00/qTrading/issues/1661)) ([707fab2](https://github.com/shi00/qTrading/commit/707fab2d60efa469d79c3b92a56757bbecadc8b4))
+
 ## [0.11.2](https://github.com/shi00/qTrading/compare/v0.11.1...v0.11.2) (2026-10-29)
 
 
