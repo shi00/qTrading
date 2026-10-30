@@ -542,7 +542,7 @@ sqlparse==0.6.0
     # via astockscreener (pyproject.toml)
 sse-starlette==3.4.11
     # via mcp
-starlette==1.6.0
+starlette==1.10.0
     # via
     #   fastapi
     #   fastmcp-slim
