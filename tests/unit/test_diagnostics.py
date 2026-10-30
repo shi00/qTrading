@@ -536,3 +536,51 @@ async def test_diagnostics_export_env_masks_personal_keys_and_paths(tmp_path, mo
         finally:
             if os.path.exists(zip_path):
                 os.remove(zip_path)
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_export_masks_host_user_and_pwd_env_keys(tmp_path, monkeypatch):
+    """UIR-X01-102 残留：诊断包 env 导出须覆盖主机名、用户主目录与 PWD/PASS 类键。
+
+    三处残留（R9 泄露向量）：
+    ① `_PERSONAL_ENV_KEY_MARKERS` 未覆盖 COMPUTERNAME（主机名）/ HOME（无路径
+       特征的 `/root` 类用户目录，sanitize_paths 覆盖不到）；
+    ② `sanitize_dict` 默认敏感键不含 pwd/pass，MYSQL_PWD / DB_PASS 原样导出；
+    ③ URL 仅用户名（无冒号）的 userinfo（`http://token@host:8080`）未被清洗。
+    """
+    fake_computer = "diaghost-xyz"
+    fake_home = "/root"
+    fake_mysql_pwd = "mysqldiagsecret"
+    fake_db_pass = "dbdiagsecret"
+    fake_proxy_token = "diagproxytoken"
+    monkeypatch.setenv("COMPUTERNAME", fake_computer)
+    monkeypatch.setenv("HOME", fake_home)
+    monkeypatch.setenv("MYSQL_PWD", fake_mysql_pwd)
+    monkeypatch.setenv("DB_PASS", fake_db_pass)
+    # 无冒号 userinfo：token 直接置于用户名位置，host 不含点号（避免被 PII 邮箱规则先吞掉）
+    monkeypatch.setenv("HTTP_PROXY", f"http://{fake_proxy_token}@corpproxy:8080")
+
+    _make_log_files(tmp_path)
+    with _patch_diagnostics_env(tmp_path):
+        zip_path = await SystemDiagnosticsCollector.export()
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                summary = json.loads(zf.read("diagnostics_summary.json").decode("utf-8"))
+                env = summary["system"]["env_variables"]
+                # ① 主机名/用户主目录键整体遮蔽
+                assert env["COMPUTERNAME"] == "***"
+                assert env["HOME"] == "***"
+                # ② PWD/PASS 类键默认脱敏
+                assert env["MYSQL_PWD"] == "***"
+                assert env["DB_PASS"] == "***"
+                # ③ 无冒号 userinfo 遮蔽 token，host:port 保留
+                assert "***@corpproxy:8080" in env["HTTP_PROXY"]
+                raw = zf.read("diagnostics_summary.json").decode("utf-8")
+                assert fake_computer not in raw
+                assert fake_home not in raw
+                assert fake_mysql_pwd not in raw
+                assert fake_db_pass not in raw
+                assert fake_proxy_token not in raw
+        finally:
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
