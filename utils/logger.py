@@ -286,7 +286,10 @@ def setup_logging(name="astock_screener"):
             _FILE_QUEUE = queue.Queue(maxsize=_QUEUE_MAXSIZE)
             # handlers 以元组承载（CPython 3.13 QueueListener.handlers 不可变），
             # 首次启动即纳入全部文件 handler。
-            _LISTENER = QueueListener(_FILE_QUEUE, *file_handlers)
+            # respect_handler_level=True：QueueListener.handle 直接调用 handler.handle，
+            # 不经 Logger.callHandlers 的级别门——缺此参数时 error.log 会收录 INFO/DEBUG
+            # 记录（handler.setLevel 被旁路），错误日志不再只含 ERROR+（R21 诊断出口失真）。
+            _LISTENER = QueueListener(_FILE_QUEUE, *file_handlers, respect_handler_level=True)
             _LISTENER.start()
             queue_handler = _QueueHandler(_FILE_QUEUE)
             queue_handler.setLevel(logging_level)
