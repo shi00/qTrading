@@ -96,7 +96,9 @@ try {
     Stop-QtradingGraceful
     $uninstaller = Join-Path $AppInstallDir "unins000.exe"
     if (Test-Path $uninstaller) {
-        & $uninstaller /SILENT /NORESTART 2>$null | Out-Null
+        # Inno Setup 的卸载器是 GUI 程序，PowerShell `&` 调用不会等待其结束；
+        # 必须 -Wait，否则后续安装/启动会与卸载并行，读到半删除的安装目录。
+        Start-Process -FilePath $uninstaller -ArgumentList '/SILENT', '/NORESTART' -Wait | Out-Null
         Start-Sleep -Seconds 5
     }
     if (Test-Path $AppInstallDir) {
@@ -112,13 +114,23 @@ try {
 
     # STEP 2: 安装 embedded variant
     Write-Step "2. Install embedded variant"
-    & $InstallerPath /SILENT /NORESTART
-    Start-Sleep -Seconds 5
+    # Inno Setup 安装器是 GUI 程序，PowerShell `&` 调用立即返回、不等待解包完成；
+    # 5s 后仅凭 EXE 存在就启动，会在 _internal 尚未解包完时启动主程序
+    # （PyInstaller onedir 缺 python313.dll 等 → 进程无日志静默退出，
+    #  v0.11.1/v0.11.2 tag run 的 crash_recovery 失败即此原因）。必须 -Wait 并校验退出码。
+    $installerProc = Start-Process -FilePath $InstallerPath -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait
+    Assert-True ($installerProc.ExitCode -eq 0) "Installer finished (exit code: $($installerProc.ExitCode))"
     Assert-True (Test-Path $AppExePath) "App installed: $AppExePath"
 
     # STEP 3: 启动 qTrading，等待 sidecar ready
     Write-Step "3. Start qTrading & wait for sidecar ready"
     $proc = Start-Process -FilePath $AppExePath -PassThru
+    Start-Sleep -Seconds 3
+    if ($proc.HasExited) {
+        # 主进程启动即退出：通常是安装不完整或启动期异常，先 dump 诊断再断言，避免只看到超时
+        Write-Host "[DIAG] app process exited early with code $($proc.ExitCode)"
+        Write-Diagnostics "app process exited immediately after start (code $($proc.ExitCode))"
+    }
     $ready = Wait-SidecarReady -TimeoutSec 60
     if (-not $ready) {
         # 主进程存活但 sidecar 未出现：dump 安装的 sidecar 文件与主程序/sidecar 日志便于定位

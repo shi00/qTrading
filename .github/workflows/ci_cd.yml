@@ -1731,7 +1731,7 @@ jobs:
         # P1-12: installer smoke 脚本需真实安装应用到 %LOCALAPPDATA%,
         # 仅在 release tag 时执行避免常规 PR/push 污染 CI 环境.
         # installer.iss PrivilegesRequired=lowest → user-level 安装, 无需管理员权限.
-        if: matrix.embedded == 'true' && startsWith(github.ref, 'refs/tags/v')
+        if: matrix.embedded == 'true' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')  # TEMP-VERIFY: dispatch 临时启用，验证后移除
         shell: pwsh
         run: |
           $installerPath = "Output\AStockScreener-Setup-${{ matrix.variant }}.exe"
