@@ -1759,14 +1759,16 @@ jobs:
       - name: Generate SHA256SUMS
         shell: pwsh
         run: |
-          Get-FileHash -Algorithm SHA256 Output\AStockScreener-Setup-${{ matrix.variant }}.exe | Format-List > SHA256SUMS-${{ matrix.variant }}.txt
+          # 输出到 Output\ 而非仓库根：upload-artifact 对多路径以共同祖先为基准打包，
+          # 三个文件同在 Output\ 下时解包后才是平铺结构（release-windows 依赖平铺路径）。
+          Get-FileHash -Algorithm SHA256 Output\AStockScreener-Setup-${{ matrix.variant }}.exe | Format-List > Output\SHA256SUMS-${{ matrix.variant }}.txt
 
       - name: Generate SBOM
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
         with:
           path: .
           format: cyclonedx-json
-          output-file: sbom-${{ matrix.variant }}.cdx.json
+          output-file: Output/sbom-${{ matrix.variant }}.cdx.json
           # 同 ci-checks job：禁用 release asset 上传避免 contents: write 权限冲突。
           # 本 job 的 SBOM 已通过下方 "Upload Release Assets (tag only)" 步骤纳入
           # release-assets-${{ matrix.variant }} artifact，由 release-windows job 统一上传。
@@ -1790,10 +1792,12 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: release-assets-${{ matrix.variant }}
+          # 三者统一取自 Output\，保证 artifact 解包后与 release-windows 的
+          # release-assets/release-assets-<variant>/<file> 平铺路径一致。
           path: |
             Output/AStockScreener-Setup-${{ matrix.variant }}.exe
-            SHA256SUMS-${{ matrix.variant }}.txt
-            sbom-${{ matrix.variant }}.cdx.json
+            Output/SHA256SUMS-${{ matrix.variant }}.txt
+            Output/sbom-${{ matrix.variant }}.cdx.json
           retention-days: 3
 
   release-windows:
