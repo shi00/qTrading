@@ -8,8 +8,9 @@ name: CI Cache Prune
 # - `refs/heads/main` 的缓存永不删除 —— 保证主干与 PR（默认分支回退读取）的命中率；
 # - 其它引用（`refs/pull/*`、`refs/tags/*`）仅在 3 天内未被访问时删除；
 #   活跃 PR 每次推送都会访问自己的缓存，故不会被误删，已合并/关闭 PR 与历史 tag 自然过期。
-# 非 main 引用的保存侧治理见 ci_cd.yml 的 `save-if` 与 docs-ci / precommit-config-ci 的
-# `enable-cache: false`（避免写入本应在此处清理的副本）。
+# 非 main 引用的保存侧治理见 ci_cd.yml 的 `save-if`：Linux/Windows 的 uv 缓存与 docs-ci 均以
+# `actions/cache` 显式缓存 UV_CACHE_DIR（key 不含 ref，命中后不再写入副本），仅 requirements 变更
+# 的 PR 会额外存一份，正是本 workflow 要清理的对象。
 
 on:
   schedule:
