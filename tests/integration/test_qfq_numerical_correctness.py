@@ -71,7 +71,8 @@ class TestQfqNumericalCorrectness(unittest.TestCase):
         latest_factor = 1.2
         np.testing.assert_almost_equal(result["close"].iloc[1], 11.0 * 1.0 / latest_factor)
 
-    def test_qfq_zero_latest_factor_returns_original(self):
+    def test_qfq_zero_latest_factor_marks_unknown(self):
+        """UIR-X01-105：基准因子为 0 属未知（除零不可解），价格显式缺失而非原样返回。"""
         df = pd.DataFrame(
             {
                 "open": [10.0, 11.0],
@@ -82,8 +83,7 @@ class TestQfqNumericalCorrectness(unittest.TestCase):
             }
         )
         result = TechnicalAnalysis._get_qfq_df(df)
-        self.assertEqual(result["close"].iloc[0], 10.0)
-        self.assertEqual(result["close"].iloc[1], 11.0)
+        self.assertTrue(result["close"].isna().all())
 
     def test_qfq_all_same_factor_returns_original(self):
         df = pd.DataFrame(
