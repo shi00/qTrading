@@ -49,11 +49,13 @@ from core.model_management_types import PersistenceOutcome
 from services.ai_service.scenario_executor import (
     ScenarioExecutor,
     ScenarioOutput,
+    _CANCEL_CLEANUP_MARGIN_S,
+    _CANCEL_CLEANUP_TIMEOUT_S,
     _LOOP_STATE_KEY,
     _LoopState,
     _classify_adapter_failure,
 )
-from services.ai_service.usage_recorder import ReservationOutcome
+from services.ai_service.usage_recorder import _DEFAULT_SETTLE_TIMEOUT_S, ReservationOutcome, UsageRecorder
 from utils.loop_local import get_loop_local
 
 pytestmark = pytest.mark.unit
@@ -601,7 +603,7 @@ class TestGuards:
 
     @pytest.mark.asyncio
     async def test_cancel_cleanup_timeout_does_not_block_propagation(self):
-        """F19：清理提交超时（短超时受限清理）不阻断取消传播（R2）。"""
+        """F19：清理提交超时（受限清理预算耗尽）不阻断取消传播（R2）。"""
         adapter = MagicMock()
 
         async def _cancel(*args, **kwargs):
@@ -614,11 +616,22 @@ class TestGuards:
         recorder = _recorder_mock()
         recorder.submit_terminal = AsyncMock(side_effect=_slow_submit)
         executor = _executor(adapter, recorder, validate=_validator_ok)
-        with patch("services.ai_service.scenario_executor._CANCEL_CLEANUP_TIMEOUT_S", 0.05):
-            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2
+        # F19-003：清理预算由 recorder 落账超时推导，故显式注入极小预算模拟预算耗尽
+        with patch.object(executor, "_cancel_cleanup_timeout_s", 0.05):
+            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 断言目标即异常类型本身（取消必须裸传播）
                 await executor.execute(
                     _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
                 )
+
+    def test_cancel_cleanup_budget_covers_recorder_settle_timeout(self):
+        """F19-003：清理预算 ≥ 落账内部超时 + 余量（取消路径不得先掐断落账）。"""
+        executor = _executor(_adapter_ok(), UsageRecorder(dao_provider=lambda: None))
+        assert executor._cancel_cleanup_timeout_s == pytest.approx(_DEFAULT_SETTLE_TIMEOUT_S + _CANCEL_CLEANUP_MARGIN_S)
+
+    def test_cancel_cleanup_budget_falls_back_without_numeric_settle_timeout(self):
+        """recorder 未暴露数值超时（mock / 旧形态）→ 回落常量预算，不臆造数值（R21）。"""
+        executor = _executor(_adapter_ok(), _recorder_mock())
+        assert executor._cancel_cleanup_timeout_s == pytest.approx(_CANCEL_CLEANUP_TIMEOUT_S)
 
     @pytest.mark.asyncio
     async def test_cancel_after_concluded_terminal_skips_cleanup(self):

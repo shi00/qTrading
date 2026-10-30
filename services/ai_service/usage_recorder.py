@@ -210,6 +210,15 @@ class UsageRecorder:
     def pending_observation_count(self) -> int:
         return len(self._observations)
 
+    @property
+    def settle_timeout_s(self) -> float:
+        """单次落账限时（秒）：供上层取消边界清理预算推导（F19-003）。
+
+        清理预算必须 ≥ 本超时 + 余量，否则会在落账完成前取消它（记录既未
+        落账也未进入重放队列）。
+        """
+        return self._settle_timeout_s
+
     def observed_usage(self, attempt_id: str) -> dict[str, Any] | None:
         obs = self._observations.get(attempt_id)
         if obs is None:
@@ -405,8 +414,16 @@ class UsageRecorder:
         F20：落账失败（persisted=False）不丢弃观察——可恢复失败（账本不可用 /
         超时）进入有界重试队列待重放；不可恢复失败（METADATA_INCOMPLETE /
         OWNER_LEASE_LOST）确认丢弃并如实告警。返回值语义不变（R21 诚实）。
+
+        F19-003：落账被取消（上层取消边界清理预算耗尽 / 停机取消）同样不丢弃
+        终态事实——记录进入待重放队列（下一次成功落账时按 revision 水位幂等
+        重放），CancelledError 仍裸传播（R2）。
         """
-        outcome = await self._settle_record(record)
+        try:
+            outcome = await self._settle_record(record)
+        except asyncio.CancelledError:
+            self._retain(record)
+            raise
         if outcome.persisted:
             self._observations.pop(record.attempt_id, None)
             # F20：同 attempt 迟到重提交成功（如 F19 executor 幂等重提交）→

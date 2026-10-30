@@ -733,13 +733,60 @@ class TestRecoverAndClose:
     @pytest.mark.asyncio
     async def test_recover_expired_owners_returns_rowcount(self):
         """启动前恢复（D9/D4）：过期租约的 dispatched 预留转 held_unconfirmed。"""
-        conn = _CaptureConn(results=[7])
+        conn = _CaptureConn(results=[7, 3])
         dao = _dao(conn)
         n = await dao.recover_expired_owners(now=datetime.datetime(2026, 10, 16, 12, 0, 0))
-        assert n == 7
+        assert n == 7  # 返回值语义不变：处理的 invocation 数
         sql, params = conn.calls[0]
         assert "held_unconfirmed" in sql
         assert params["now"] == datetime.datetime(2026, 10, 16, 12, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_recover_expired_owners_converges_orphaned_dispatched_attempts(self):
+        """F19-003：崩溃 / owner 失权后仍停留 dispatched 的尝试收敛终态 unknown。
+
+        R21：结果未知（可能已被上游消费）不得伪装 failed / succeeded；费用未知
+        保持 NULL（SQL 不写 cost_cny，不填 0）。
+        """
+        conn = _CaptureConn(results=[1, 4])
+        dao = _dao(conn)
+        await dao.recover_expired_owners(now=datetime.datetime(2026, 10, 16, 12, 0, 0))
+        attempt_sql, attempt_params = conn.calls[1]
+        assert "UPDATE ai_attempt" in attempt_sql
+        assert "SET status = :status" in attempt_sql
+        assert "error_code = :error_code" in attempt_sql
+        # 只收敛仍为 dispatched 且 owner 租约已过期的行（重复恢复幂等）
+        assert "a.status = 'dispatched'" in attempt_sql or "status = 'dispatched'" in attempt_sql
+        assert "owner_lease_expires_at <= :now" in attempt_sql
+        assert attempt_params["status"] == "unknown"
+        assert attempt_params["error_code"] == "OWNER_LEASE_LOST"
+        assert attempt_params["now"] == datetime.datetime(2026, 10, 16, 12, 0, 0)
+        # R21：不得写入费用（未知不得填 0）
+        assert "cost_cny" not in attempt_sql
+
+    def test_request_page_orphaned_dispatched_not_derived_as_running(self):
+        """F19-003：owner 租约失效的 dispatched 尝试不得派生 running（UI 永久运行中）。
+
+        ``dispatched_attempts`` 只计租约有效的在途尝试；租约失效者单列
+        ``orphaned_dispatched_attempts``，派生终态为 unknown（非 running）。
+        """
+        from data.persistence.daos.ai_usage_dao import _REQUEST_PAGE_SELECT_SQL
+
+        assert "JOIN ai_invocation i2 ON i2.invocation_id = a.invocation_id" in _REQUEST_PAGE_SELECT_SQL
+        assert "orphaned_dispatched_attempts" in _REQUEST_PAGE_SELECT_SQL
+        # 在途计数带租约门控
+        assert "owner_lease_expires_at > (now() AT TIME ZONE 'UTC')" in _REQUEST_PAGE_SELECT_SQL
+        # 派生优先级：running 仅在存在租约有效的在途尝试时成立
+        assert "WHEN r.dispatched_attempts > 0 THEN 'running'" in _REQUEST_PAGE_SELECT_SQL
+        assert "WHEN r.orphaned_dispatched_attempts > 0 THEN 'unknown'" in _REQUEST_PAGE_SELECT_SQL
+
+    def test_attempts_detail_derives_orphaned_dispatched_as_unknown(self):
+        """F19-003：展开明细对失权 owner 的 dispatched 尝试同样派生 unknown。"""
+        from data.persistence.daos.ai_usage_dao import _REQUEST_ATTEMPTS_SQL
+
+        assert "LEFT JOIN ai_invocation i ON i.invocation_id = a.invocation_id" in _REQUEST_ATTEMPTS_SQL
+        assert "THEN 'unknown'" in _REQUEST_ATTEMPTS_SQL
+        assert "owner_lease_expires_at <= (now() AT TIME ZONE 'UTC')" in _REQUEST_ATTEMPTS_SQL
 
     @pytest.mark.asyncio
     async def test_close_usage_window_true_and_false(self):

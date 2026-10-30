@@ -31,6 +31,7 @@
 import asyncio
 import datetime
 import logging
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -641,6 +642,55 @@ class TestSubmitTerminalRetention:
         # F19 防双计兼容：重放 usage_revision 不变（水位幂等由 DAO 兜底）
         assert replay_kwargs["usage_revision"] == 1
         assert recorder.pending_observation_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_cancelled_settle_is_retained_and_replayed(self):
+        """F19-003：落账被取消（清理预算掐断）时终态记录仍保留待重放，取消裸传播（R2）。
+
+        修复前：取消在 ``_settle_record`` 处直穿 ``submit_terminal``，记录既不落账
+        也不进 ``_pending_settle`` → attempt 行永久停留 dispatched（UI 恒显示运行中）。
+        """
+        dao = _dao_mock()
+        started = asyncio.Event()
+        settle_calls: list[dict[str, Any]] = []
+
+        async def _settle(**kwargs):
+            settle_calls.append(kwargs)
+            if len(settle_calls) == 1:
+                started.set()
+                await asyncio.sleep(30)  # 首次落账挂起，模拟账本响应慢于清理预算
+            return True
+
+        dao.settle_attempt_usage = AsyncMock(side_effect=_settle)
+        now = 0.0
+        recorder = UsageRecorder(dao_provider=lambda: dao, clock=lambda: now)
+        recorder.observe_usage(_observation("att-1"))
+        cancelled_record = AttemptTerminalRecord(
+            attempt_id="att-1",
+            invocation_id="inv-1",
+            status="cancelled",
+            usage=None,
+            error_code="CANCELLED",
+            duration_ms=12.3,
+        )
+        task = asyncio.ensure_future(recorder.submit_terminal(cancelled_record))
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 断言目标即异常类型本身（取消必须裸传播）
+            await task
+        # 终态事实不因取消丢失：保留待重放队列（不得直穿丢弃）
+        assert recorder.pending_observation_count() == 1
+        assert "att-1" in recorder._pending_settle
+        # 账本恢复可达（下一次落账成功）→ 顺带重放；取消终态按原 revision 水位幂等落账
+        now = _RETRY_BACKOFF_BASE_S
+        recorder.observe_usage(_observation("att-2"))
+        assert (await recorder.submit_terminal(_terminal("att-2"))).persisted is True
+        assert [c["attempt_id"] for c in settle_calls] == ["att-1", "att-2", "att-1"]
+        assert settle_calls[2]["status"] == "cancelled"
+        assert settle_calls[2]["error_code"] == "CANCELLED"
+        # F19 防双计兼容：重放 usage_revision 水位不变（幂等由 DAO 兜底）
+        assert settle_calls[2]["usage_revision"] == 1
+        assert recorder._pending_settle == {}
 
     @pytest.mark.asyncio
     async def test_duplicate_late_success_clears_retained_entry(self):
