@@ -76,6 +76,8 @@
 | P2-REV06-Backup-Encryption | review06 F19：数据库备份文件未加密，UI 缺「勿放共享目录」提示与可选加密备份 | P2 | ① 用户报告备份文件外泄或被第三方读取时；② 或备份功能被重构/导出链路扩展（如云同步）时 |
 | P3-REV08-Akshare-Fallback | review08 C1：Tushare 积分不足直接 skip 功能，akshare 免费同类接口（涨跌停池/龙虎榜/两融/北向/个股资金流）闲置未用；报告已深化为「补足而非替换」，需 ADR 定夺 | P3 | ① 用户报告 Tushare 积分不足导致功能缺失时；② 或前置条件满足（P2-REV06-External-SchemaValidation 关闭 + 候选接口联网可用性验证 + D3 结论）时；③ 或数据源接入架构调整时 |
 | P3-Deps-PandasStubs-Lag | pandas 长期锁定 `<3.1`：pandas-stubs 最新 3.0.5.260914 未覆盖 pandas 3.1.0 类型面，升级会造成 stubs 与运行时版本错位 | P3 | ① pandas-stubs 发布 3.1.x（或覆盖 pandas 3.1 类型面的版本）时；② 或 pyright 在 pandas 3.1 上出现必须升级 stubs 才能消除的错误时 |
+| P3-Polars-Streaming-Order-Semantics | Polars 2.x 流式默认与严格化把错误从「显式异常」变为「结果不同」；行序仅在显式 `maintain_order` 处保证，当前靠各 lazy 管线末步显式 sort 兜底 | P3 | ① 新增 lazy 管线未在末步显式 sort，或新增依赖行序的断言/导出时；② 或 Polars 大版本升级再次调整流式/行序语义时；③ 或出现顺序相关的 Golden / 单测偶发不一致时 |
+| P3-Sidecar-macOS26-SDK-Constraint | theseus 的 PG 16.15.0 macOS 归档构建于 macOS 26.0 SDK、引用 `_strchrnul`，仅 macOS 26+ 可运行；sidecar release workflow 的 macOS job 依赖 `macos-26` runner | P3 | ① sidecar release workflow 触发且 macOS 构建/运行失败时；② 或需支持 macOS 26 以下版本时；③ 或 GitHub Actions `macos-26` 镜像变更时 |
 
 ## 技术债清单
 
@@ -295,6 +297,22 @@ PR #513 检视（第一轮）遗留观察级建议。`data/persistence/embedded_
 
 若应用运行期引入 sidecar 热替换/升级流程，在替换后自动调用 `clear_pg_version_cache()`。验收标准：① sidecar 替换后下次 `resolve_pg_major_version` 重新解析；② 现有 `test_version.py` 全过；③ 新增 sidecar 替换后缓存失效单测。upgrade 触发条件：① 应用引入运行期 sidecar 升级/替换流程时；② 或 EmbeddedPostgresService 支持热切换时。
 
+#### P3-Sidecar-macOS26-SDK-Constraint：theseus 的 macOS 归档依赖 macOS 26.0 SDK（sidecar release workflow 只能跑 `macos-26`）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-Sidecar-macOS26-SDK-Constraint** | PG 16.15.0 的 macOS 归档由 theseus 以 macOS 26.0 SDK 构建并引用 `_strchrnul`，仅 macOS 26+ 可运行；sidecar release workflow 的 macOS job 依赖 `macos-26` runner | ① sidecar release workflow 触发且 macOS 构建/运行失败时；② 或需支持 macOS 26 以下版本时；③ 或 GitHub Actions `macos-26` 镜像变更时 |
+
+**Owner**：架构维护者（复核触发器：sidecar release workflow 触发 / macOS runner 镜像变更 / 支持更旧 macOS 的诉求）
+
+**产生背景与现状**
+
+D8.3（内置 PG 16.14.0→16.15.0，2026-10）取证：GitHub API 核实 theseus 已发布 `16.15.0` 归档（含 `postgresql-16.15.0-x86_64-pc-windows-msvc.tar.gz`、aarch64 / x86_64-unknown-linux-gnu 等），故计划中「theseus 无 16.15 归档」的前提不成立；真实约束是 macOS 归档以 macOS 26.0 SDK 构建、二进制引用 `_strchrnul`，只能在 macOS 26 及以上运行。`.github/workflows/sidecar.yml` 的 macOS runner 已是 `macos-26` 并补注「升级后须复测」，但 16.15.0 归档的该约束尚未在 release workflow 上实测。
+
+**期望的最终解法**
+
+sidecar release workflow 下次触发时实测 macOS 构建与运行并记录 runner 镜像与归档 SDK 结论；若失败，或产品需要支持 macOS 26 以下版本时，退回 16.14.0 / 改用其他归档来源并在 workflow 记录决定。验收标准：① release workflow 的 macOS job 通过，或已记录明确的退回决定；② 本文、`sidecar.yml` 注释与 D8.3 结论一致。upgrade 触发条件：① sidecar release workflow 触发且 macOS 构建/运行失败时；② 或需支持 macOS 26 以下版本时；③ 或 GitHub Actions `macos-26` 镜像变更时。
+
 ### 其他 P3 债目
 
 #### P3-App-SyncFunctions-In-Async-Bootstrap：`initialize_services` 中同步函数（preload\_aliases/validate\_failover/validate\_strategy\_tier）阻塞事件循环（合理设计决策）
@@ -410,6 +428,22 @@ D3.1 依赖升级评估（2026-10-29）：pandas 3.1.0 已发布，但 pandas-st
 **期望的最终解法**
 
 pandas-stubs 发布覆盖 pandas 3.1 的版本后，同 PR 提升 `pandas` 与 `pandas-stubs`，并在 CI 确认 `pyright` 0 errors 与回测金标准一致。验收标准：① `pyproject.toml` 移除 `pandas<3.1` 上界且 `pandas-stubs` 声明同步；② `pyright` 0 errors；③ `python scripts/upgrade_golden_snapshot.py --check` 输出 `SAME`。upgrade 触发条件：① pandas-stubs 发布 3.1.x（或覆盖 pandas 3.1 类型面的版本）时；② 或 pyright 在 pandas 3.1 上出现必须升级 stubs 才能消除的错误时。
+
+#### P3-Polars-Streaming-Order-Semantics：Polars 2.x 流式与行序语义严格化（错误由「显式异常」变为「结果不同」）
+
+| 级别 | 一句话 | upgrade 触发条件 |
+|------|--------|------------------|
+| **P3-Polars-Streaming-Order-Semantics** | Polars 2.x 的流式默认与严格化把错误从「显式异常」变成「结果不同」；行序仅在显式 `maintain_order` 处保证，当前靠各 lazy 管线末步显式 sort 兜底 | ① 新增 lazy 管线未在末步显式 sort，或新增依赖行序的断言/导出时；② 或 Polars 大版本升级再次调整流式/行序语义时；③ 或出现顺序相关的 Golden / 单测偶发不一致时 |
+
+**Owner**：架构维护者（复核触发器：Polars 升级 / 策略或回测查询改造 / Golden 快照不一致）
+
+**产生背景与现状**
+
+D4.1/D4.2（Polars 1.44.2→2.1.0，2026-10）盘点结论：全仓 18 个生产文件零处使用 2.x 移除或语义变更的 API；所有 lazy 管线末步显式 sort，故引擎默认行序不影响结果；唯一一处位置对齐依赖改用 `maintain_order="left"`；D4.3 按计划 §0.2-A1 机械判据（成员一致、名次不变、`score` 绝对误差 ≤1e-9、NAV 相对误差 ≤1e-10）比对 Golden 快照，升级前后均 `SAME`。风险在于该保证是**约定性**的：`maintain_order=True` 未全局开启（避免流式执行退化为有序收集的性能损耗），只在顺序可观测处（展示 / 导出 / 测试断言）按需添加；新增管线若遗漏末步 sort 或引入行序敏感断言，表现将是结果差异而非报错，难以一眼定位。
+
+**期望的最终解法**
+
+把「lazy 管线末步显式 sort + 顺序可观测处按需 `maintain_order`」固化为可核对约定（记录于 [polars-vectorized-strategy.md](../patterns/polars-vectorized-strategy.md)），新增/改造管线时逐点核对；顺序可观测路径以有序序列断言覆盖。验收标准：① 所有 lazy 管线末步显式 sort（或显式 `maintain_order`）；② 导出/展示等顺序可观测路径有顺序敏感断言覆盖；③ `python scripts/upgrade_golden_snapshot.py --check` 保持 `SAME`。upgrade 触发条件：① 新增 lazy 管线未在末步显式 sort，或新增依赖行序的断言/导出时；② 或 Polars 大版本升级再次调整流式/行序语义时；③ 或出现顺序相关的 Golden / 单测偶发不一致时。
 
 ### 数据库迁移与循环依赖
 

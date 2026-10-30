@@ -92,7 +92,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Python 3.14
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
           cache: 'pip'
@@ -122,7 +122,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Python 3.13
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.13'
           cache: 'pip'
@@ -191,7 +191,7 @@ jobs:
           fi
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
@@ -201,7 +201,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
 
       - name: Install dependencies
         run: |
@@ -356,10 +356,50 @@ jobs:
     needs: [lint-fast, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
-    # E2E Tests embedded 模式实际运行时间：PR #291 改用 embedded 模式后，
-    # sidecar 构建 + PG 16 initdb + 44 个 E2E 测试总时长 > 45 分钟（run 30183636080 在 45 分钟 timeout 时被取消）。
-    # 外置 PostgreSQL 模式（main 分支）总时长 31 分钟（run 30151665758），embedded 模式更慢。
-    # 提升至 60 分钟留余量，长期优化见 P3-E2E-Windows-Embedded-Timeout-Tight。
+    # 依赖安装缓存：uv 构建缓存重定向到 D:（146GB），避免占用 C:；
+    # 由下方 actions/cache 显式缓存（setup-uv 自带缓存与磁盘清理步骤冲突）。
+    env:
+      UV_CACHE_DIR: D:\tmp\uv-cache
+    # 性能优化：拆成 4 个 matrix 组并行，按会话池分组，让每个 job 只懒实例化本组需要的
+    # session 池（ro / mut / wizard / embedded_real_* / fullmount / news_risk_*），
+    # 避免单 job 串行初始化全部 8 个 sidecar + PG 池。
+    # job 名保持不变：CI Gate 用 needs.e2e-tests-windows.result 聚合矩阵结果，
+    # 不需要改 ci-gate / build-windows 的 needs。
+    # 分组必须保持同一文件的用例顺序（settings_flow → settings_tabs 的配置副作用、
+    # r01_dialog_height 依赖 news_risk_success 种子池），因此以文件为最小粒度。
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: core
+            paths: >-
+              tests/e2e/test_backtest_flow.py
+              tests/e2e/test_data_explorer.py
+              tests/e2e/test_home_flow.py
+              tests/e2e/test_navigation.py
+              tests/e2e/test_screener_anchor_smoke.py
+              tests/e2e/test_screener_flow.py
+              tests/e2e/test_screener_to_backtest.py
+              tests/e2e/test_smoke.py
+              tests/e2e/test_task_center.py
+          - group: settings
+            paths: >-
+              tests/e2e/test_settings_flow.py
+              tests/e2e/test_settings_tabs.py
+          - group: onboarding
+            paths: >-
+              tests/e2e/test_onboarding_embedded.py
+              tests/e2e/test_onboarding_embedded_real.py
+              tests/e2e/test_onboarding_wizard.py
+          - group: scenarios
+            paths: >-
+              tests/e2e/test_news_risk.py
+              tests/e2e/test_production_mount.py
+              tests/e2e/test_r01_dialog_height.py
+              tests/e2e/test_sidecar_real_smoke.py
+    # 原单 job 串行耗时 >45 分钟（run 30183636080 在 45 分钟 timeout 被取消）；
+    # 分组后保留 60 分钟上限，避免初始化抖动造成误取消，后续按实测时长收紧。
+    # 长期优化见 P3-E2E-Windows-Embedded-Timeout-Tight。
     timeout-minutes: 60
     permissions:
       contents: read
@@ -369,7 +409,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
           cache: 'pip'
@@ -379,15 +419,22 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
         with:
-          # e2e-tests-windows 在 "Free disk space" 步骤主动调用 `uv cache clean`
-          # 释放 C 盘空间（run 29655213301/30058650851 触发）；若启用 uv 本地缓存，
-          # post-job 会执行 `uv cache prune --ci --force` 并因缓存目录已被删除而报错
-          # "Cache path D:\a\_temp\setup-uv-cache does not exist on disk"。
-          # 这些 job 对 uv 缓存是一次性消费，禁用即可消除 post-job 失败；
-          # pip 缓存仍由 actions/setup-python 提供。
+          # 禁用 setup-uv 自带缓存：其 post-job 会对 D:\a\_temp\setup-uv-cache 执行
+          # `uv cache prune --ci --force`，与下方 actions/cache 管理的 UV_CACHE_DIR 重复，
+          # 且缓存目录被清理时 post-job 会报 "Cache path ... does not exist on disk"。
+          # 改由下方 "Cache uv build cache" 显式缓存 UV_CACHE_DIR（D: 盘），
+          # 命中后 llama-cpp-python 等 cp314 源码构建产物直接复用，免去每次重新构建。
           enable-cache: false
+
+      - name: Cache uv build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: D:\tmp\uv-cache
+          key: uv-windows-py314-${{ hashFiles('requirements.txt', 'requirements-optional.txt', 'requirements-dev.txt') }}
+          restore-keys: |
+            uv-windows-py314-
 
       - name: Install dependencies
         run: |
@@ -403,24 +450,6 @@ jobs:
           # docs/flet/upgrade-checklist.md section 1.1.
           uv pip install --system flet-web==1.0.5 "fastapi<0.145"
           pip install playwright pytest-playwright
-
-      - name: Free disk space
-        shell: pwsh
-        run: |
-          # Clean caches to release space on C: drive (same fix as ci-checks-windows job).
-          # Run 30058650851: C: had 32GB free, filled up at 87% unit tests.
-          Write-Host "=== Disk space before cleanup ==="
-          Get-PSDrive -Name C, D -ErrorAction SilentlyContinue | Format-Table Name, @{L='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{L='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
-
-          uv cache clean
-          pip cache purge 2>$null
-          Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
-          Clear-RecycleBin -Force -ErrorAction SilentlyContinue
-
-          Write-Host "=== Disk space after cleanup ==="
-          Get-PSDrive -Name C, D -ErrorAction SilentlyContinue | Format-Table Name, @{L='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{L='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
 
       - name: Get Playwright Version
         shell: bash
@@ -501,11 +530,12 @@ jobs:
           # -p no:xdist -p no:randomly 完全禁用并行/随机插件，串行执行让 log_cli 实时输出。
           # log_cli=true --capture=no 实时输出测试日志，便于定位卡死位置。
           # pytest-timeout=600s 防止单测试卡死拖垮整个 job。
-          python -m pytest tests/e2e/ \
+          python -m pytest ${{ matrix.paths }} \
             -o addopts="" \
             -p no:xdist -p no:randomly \
             -v --tb=long --junitxml=junit-e2e.xml \
             --timeout=600 --timeout-method=thread \
+            --durations=30 --durations-min=1.0 \
             -o log_cli=true --log-cli-level=INFO --capture=no
 
       - name: Sanitize E2E artifacts
@@ -525,7 +555,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: test-reports-e2e-windows
+          name: test-reports-e2e-windows-${{ matrix.group }}
           path: |
             junit-e2e.xml
             e2e-artifacts/
@@ -537,6 +567,8 @@ jobs:
     needs: [lint-fast, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
+    env:
+      UV_CACHE_DIR: D:\tmp\uv-cache
     timeout-minutes: 45
     permissions:
       contents: read
@@ -546,7 +578,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
           cache: 'pip'
@@ -556,12 +588,20 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
         with:
-          # 同 e2e-tests-windows：ci-checks-windows 在 "Free disk space" 步骤
-          # 主动 `uv cache clean`（litellm/llama-cpp-python build artifacts 大），
-          # 禁用 uv 本地缓存以避免 post-job `uv cache prune --ci --force` 报错。
+          # 同 e2e-tests-windows：保留禁用 setup-uv 自带缓存（其 post-job prune 与磁盘清理
+          # 步骤冲突，曾报 "Cache path ... does not exist on disk"）；改用下方 actions/cache
+          # 显式缓存 UV_CACHE_DIR（D: 盘），复用 llama-cpp-python/litellm 构建产物。
           enable-cache: false
+
+      - name: Cache uv build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: D:\tmp\uv-cache
+          key: uv-windows-py314-${{ hashFiles('requirements.txt', 'requirements-optional.txt', 'requirements-dev.txt') }}
+          restore-keys: |
+            uv-windows-py314-
 
       - name: Install dependencies
         shell: bash
@@ -581,8 +621,8 @@ jobs:
           Write-Host "=== Disk space before cleanup ==="
           Get-PSDrive -Name C, D -ErrorAction SilentlyContinue | Format-Table Name, @{L='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{L='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
 
-          # 1. uv cache (litellm/llama-cpp-python build artifacts)
-          uv cache clean
+          # 1. uv 缓存已重定向到 D:\tmp\uv-cache 并由 actions/cache 复用，此处不再清理
+          #    （清理会使缓存失效，post-job 保存落空）。
 
           # 2. pip cache (downloaded wheels)
           pip cache purge 2>$null
@@ -697,7 +737,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
           cache: 'pip'
@@ -707,7 +747,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
 
       - name: Install dependencies
         run: |
@@ -902,7 +942,7 @@ jobs:
           fi
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
           cache: 'pip'
@@ -912,7 +952,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
         with:
           # 同 e2e-tests-windows：禁用 uv 本地缓存避免 post-job 报错
           enable-cache: false
@@ -1132,7 +1172,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
           cache: 'pip'
@@ -1142,7 +1182,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
         with:
           enable-cache: false
 
@@ -1294,12 +1334,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
 
       - name: Recompile requirements
         shell: bash
@@ -1339,13 +1379,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
           cache: 'pip'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
 
       - name: Recompile requirements
         shell: bash
@@ -1419,7 +1459,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
           cache: 'pip'
@@ -1429,7 +1469,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
 
       - name: Install CUDA Toolkit (CUDA variants only)
         if: matrix.backend == 'cuda'
@@ -1897,20 +1937,19 @@ jobs:
             echo "::error::remote tag ${TAG} not found; refusing to create a release from a different ref."
             exit 1
           fi
-          err_file=$(mktemp)
-          if state=$(gh api "repos/${GH_REPO}/releases/tags/${TAG}" --jq '.draft' 2>"$err_file"); then
-            if [ "$state" != "true" ]; then
+          # draft 无法用 /releases/tags/{tag} 查询（未发布的 draft 其 tag ref 尚未创建，
+          # 该端点固定返回 404），故按 tag_name 从 Releases 列表定位 id 后再按 id 判定状态。
+          release_id=$(gh api "repos/${GH_REPO}/releases?per_page=100" \
+            --jq "[.[] | select(.tag_name == \"${TAG}\")][0].id // empty")
+          if [ -n "$release_id" ]; then
+            if [ "$(gh api "repos/${GH_REPO}/releases/${release_id}" --jq '.draft')" != "true" ]; then
               echo "::error::release ${TAG} is already published; refusing to overwrite a published release."
               echo "::error::if replacement is truly intended, delete it manually first, then re-run."
               exit 1
             fi
-            echo "Existing draft release for ${TAG} found; it will be reused and its assets re-verified."
-          elif grep -q 'HTTP 404' "$err_file"; then
-            echo "No release exists for ${TAG}; a new draft will be created."
+            echo "Existing draft release for ${TAG} found (id=${release_id}); it will be reused and its assets re-verified."
           else
-            echo "::error::failed to query release state for ${TAG} (not a 404):"
-            cat "$err_file" >&2
-            exit 1
+            echo "No release exists for ${TAG}; a new draft will be created."
           fi
 
       - name: Create or reuse draft Release (assets uploaded, still unpublished)
@@ -1931,6 +1970,7 @@ jobs:
             release-assets/release-assets-embedded-cuda/*
 
       - name: Verify draft assets and SHA256 digests (gate before publish)
+        id: verify-draft
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1942,7 +1982,17 @@ jobs:
           # 少传/错传/被同名旧资产顶替），全部通过才允许 publish。`digest` 是服务端
           # 对落盘字节计算的 SHA256（格式 `sha256:<hex>`），与本地文件实测摘要一致才
           # 说明上传内容未被改变。
-          release_json=$(gh api "repos/${GH_REPO}/releases/tags/${TAG}")
+          # draft 不能用 /releases/tags/{tag} 查询（未发布的 draft 其 tag ref 尚未创建，
+          # 该端点固定返回 404；run 41013466172 即因此失败：12 个资产已正确上传，
+          # 却卡在按 tag 查询）。改为按 tag_name 从 Releases 列表定位 id，再按 id 读取。
+          release_id=$(gh api "repos/${GH_REPO}/releases?per_page=100" \
+            --jq "[.[] | select(.tag_name == \"${TAG}\")][0].id // empty")
+          if [ -z "$release_id" ]; then
+            echo "::error::no release found for ${TAG}; refusing to continue."
+            exit 1
+          fi
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
+          release_json=$(gh api "repos/${GH_REPO}/releases/${release_id}")
           if [ "$(jq -r '.draft' <<<"$release_json")" != "true" ]; then
             echo "::error::release ${TAG} is not a draft at verification time; refusing to continue."
             exit 1
@@ -1994,13 +2044,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
+          RELEASE_ID: ${{ steps.verify-draft.outputs.release_id }}
         run: |
           set -euo pipefail
           # 原子发布第 4 步：一次 PATCH 完成 draft=false + make_latest=true（draft 与
-          # prerelease 均不能标记 latest，故 latest 必须在发布动作内生效）。请求不含
-          # body，generate_release_notes 生成的正文不会被改写。命令失败时 Release 仍是
-          # draft，外部仍不会把它当作正式版本。
-          gh release edit "$TAG" --draft=false --latest
+          # prerelease 均不能标记 latest，故 latest 必须在发布动作内生效）。按 id 定位
+          # （draft 无法经 tags 端点查询），因此复用 verify 步骤解析出的 release_id。
+          # 请求不含 body，generate_release_notes 生成的正文不会被改写。命令失败时
+          # Release 仍是 draft，外部仍不会把它当作正式版本。
+          if [ -z "${RELEASE_ID:-}" ]; then
+            echo "::error::release id not available from verify step; cannot publish."
+            exit 1
+          fi
+          gh api -X PATCH "repos/${GH_REPO}/releases/${RELEASE_ID}" \
+            -f draft=false -f make_latest=true >/dev/null
 
   installer-smoke:
     # P3-CI-Installer-Smoke-Trigger + P3-CI-Installer-PowerShell-Syntax-Only 合并解决：
@@ -2124,7 +2181,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.14'
           cache: 'pip'
@@ -2134,7 +2191,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
 
       - name: Install dependencies
         run: |

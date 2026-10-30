@@ -1,6 +1,6 @@
 [project]
 name = "AStockScreener"
-version = "0.11.2"
+version = "0.11.3"
 description = "智能 A 股 AI 量化交易员"
 requires-python = ">=3.13"
 license = "MIT"
@@ -44,7 +44,7 @@ dependencies = [
     "urllib3>=2.8.0",
     "numpy>=2.5.4",
     "pandas>=3.0.6,<3.1",  # 长期上界：pandas-stubs 未覆盖 pandas 3.1 类型面（见技术债 P3-Deps-PandasStubs-Lag）
-    "polars>=2.1.0,<3",
+    "polars>=2.1.0,<3",  # 上界 <3：Polars 3.x 尚未发布；升 2.x 次版本或大版本前须按 D4.1 清单复核流式/行序语义（见技术债 P3-Polars-Streaming-Order-Semantics）
     "pyarrow>=26.0.0",
     "pandas_market_calendars>=5.5.0",
     "openpyxl>=3.1.5",  # Excel export engine for pandas.DataFrame.to_excel()
