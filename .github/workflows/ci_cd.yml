@@ -1897,20 +1897,19 @@ jobs:
             echo "::error::remote tag ${TAG} not found; refusing to create a release from a different ref."
             exit 1
           fi
-          err_file=$(mktemp)
-          if state=$(gh api "repos/${GH_REPO}/releases/tags/${TAG}" --jq '.draft' 2>"$err_file"); then
-            if [ "$state" != "true" ]; then
+          # draft 无法用 /releases/tags/{tag} 查询（未发布的 draft 其 tag ref 尚未创建，
+          # 该端点固定返回 404），故按 tag_name 从 Releases 列表定位 id 后再按 id 判定状态。
+          release_id=$(gh api "repos/${GH_REPO}/releases?per_page=100" \
+            --jq "[.[] | select(.tag_name == \"${TAG}\")][0].id // empty")
+          if [ -n "$release_id" ]; then
+            if [ "$(gh api "repos/${GH_REPO}/releases/${release_id}" --jq '.draft')" != "true" ]; then
               echo "::error::release ${TAG} is already published; refusing to overwrite a published release."
               echo "::error::if replacement is truly intended, delete it manually first, then re-run."
               exit 1
             fi
-            echo "Existing draft release for ${TAG} found; it will be reused and its assets re-verified."
-          elif grep -q 'HTTP 404' "$err_file"; then
-            echo "No release exists for ${TAG}; a new draft will be created."
+            echo "Existing draft release for ${TAG} found (id=${release_id}); it will be reused and its assets re-verified."
           else
-            echo "::error::failed to query release state for ${TAG} (not a 404):"
-            cat "$err_file" >&2
-            exit 1
+            echo "No release exists for ${TAG}; a new draft will be created."
           fi
 
       - name: Create or reuse draft Release (assets uploaded, still unpublished)
@@ -1931,6 +1930,7 @@ jobs:
             release-assets/release-assets-embedded-cuda/*
 
       - name: Verify draft assets and SHA256 digests (gate before publish)
+        id: verify-draft
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1942,7 +1942,17 @@ jobs:
           # 少传/错传/被同名旧资产顶替），全部通过才允许 publish。`digest` 是服务端
           # 对落盘字节计算的 SHA256（格式 `sha256:<hex>`），与本地文件实测摘要一致才
           # 说明上传内容未被改变。
-          release_json=$(gh api "repos/${GH_REPO}/releases/tags/${TAG}")
+          # draft 不能用 /releases/tags/{tag} 查询（未发布的 draft 其 tag ref 尚未创建，
+          # 该端点固定返回 404；run 41013466172 即因此失败：12 个资产已正确上传，
+          # 却卡在按 tag 查询）。改为按 tag_name 从 Releases 列表定位 id，再按 id 读取。
+          release_id=$(gh api "repos/${GH_REPO}/releases?per_page=100" \
+            --jq "[.[] | select(.tag_name == \"${TAG}\")][0].id // empty")
+          if [ -z "$release_id" ]; then
+            echo "::error::no release found for ${TAG}; refusing to continue."
+            exit 1
+          fi
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
+          release_json=$(gh api "repos/${GH_REPO}/releases/${release_id}")
           if [ "$(jq -r '.draft' <<<"$release_json")" != "true" ]; then
             echo "::error::release ${TAG} is not a draft at verification time; refusing to continue."
             exit 1
@@ -1994,13 +2004,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
+          RELEASE_ID: ${{ steps.verify-draft.outputs.release_id }}
         run: |
           set -euo pipefail
           # 原子发布第 4 步：一次 PATCH 完成 draft=false + make_latest=true（draft 与
-          # prerelease 均不能标记 latest，故 latest 必须在发布动作内生效）。请求不含
-          # body，generate_release_notes 生成的正文不会被改写。命令失败时 Release 仍是
-          # draft，外部仍不会把它当作正式版本。
-          gh release edit "$TAG" --draft=false --latest
+          # prerelease 均不能标记 latest，故 latest 必须在发布动作内生效）。按 id 定位
+          # （draft 无法经 tags 端点查询），因此复用 verify 步骤解析出的 release_id。
+          # 请求不含 body，generate_release_notes 生成的正文不会被改写。命令失败时
+          # Release 仍是 draft，外部仍不会把它当作正式版本。
+          if [ -z "${RELEASE_ID:-}" ]; then
+            echo "::error::release id not available from verify step; cannot publish."
+            exit 1
+          fi
+          gh api -X PATCH "repos/${GH_REPO}/releases/${RELEASE_ID}" \
+            -f draft=false -f make_latest=true >/dev/null
 
   installer-smoke:
     # P3-CI-Installer-Smoke-Trigger + P3-CI-Installer-PowerShell-Syntax-Only 合并解决：
