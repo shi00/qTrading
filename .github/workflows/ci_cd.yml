@@ -421,10 +421,10 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
-          # 保留禁用 setup-uv 自带缓存：其 post-job 会执行 `uv cache prune --ci --force`，
-          # 曾因缓存目录被 "Free disk space" 步骤删除而报错
-          # "Cache path D:\a\_temp\setup-uv-cache does not exist on disk"（run 29655213301/30058650851）。
-          # 改用下方 "Cache uv build cache" 通过 actions/cache 显式缓存 UV_CACHE_DIR（D: 盘），
+          # 禁用 setup-uv 自带缓存：其 post-job 会对 D:\a\_temp\setup-uv-cache 执行
+          # `uv cache prune --ci --force`，与下方 actions/cache 管理的 UV_CACHE_DIR 重复，
+          # 且缓存目录被清理时 post-job 会报 "Cache path ... does not exist on disk"。
+          # 改由下方 "Cache uv build cache" 显式缓存 UV_CACHE_DIR（D: 盘），
           # 命中后 llama-cpp-python 等 cp314 源码构建产物直接复用，免去每次重新构建。
           enable-cache: false
 
@@ -450,22 +450,6 @@ jobs:
           # docs/flet/upgrade-checklist.md section 1.1.
           uv pip install --system flet-web==1.0.5 "fastapi<0.145"
           pip install playwright pytest-playwright
-
-      - name: Free disk space
-        shell: pwsh
-        run: |
-          # Clean caches to release space on C: drive (same fix as ci-checks-windows job).
-          # Run 30058650851: C: had 32GB free, filled up at 87% unit tests.
-          # 不执行 `uv cache clean`：uv 缓存已重定向到 D:\tmp\uv-cache 并交给 actions/cache 复用，
-          # 清理会使缓存失效（post-job 保存落空）。
-          pip cache purge 2>$null
-          Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
-          Clear-RecycleBin -Force -ErrorAction SilentlyContinue
-
-          Write-Host "=== Disk space after cleanup ==="
-          Get-PSDrive -Name C, D -ErrorAction SilentlyContinue | Format-Table Name, @{L='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{L='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
 
       - name: Get Playwright Version
         shell: bash
