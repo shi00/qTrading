@@ -935,6 +935,30 @@ class TestEgress:
         assert ok is True
         svc.grant_egress.assert_awaited_once()
 
+    async def test_grant_egress_defaults_to_snapshot_scope_version(self):
+        """F23-001：缺省 scope_version 取当前快照世代，不硬编码 1。"""
+        svc = _make_service(_snapshot(connections=(_conn(),), security_scope_version=3))
+        vm = _make_vm(svc)
+        await vm.load()
+
+        ok = await vm.grant_egress("c1", "target-fp", "stock_analysis")
+
+        args = svc.grant_egress.await_args.args
+        assert ok is True
+        assert args[:5] == ("c1", "target-fp", "stock_analysis", 3, vm.state.config_revision)
+        assert isinstance(args[5], str) and args[5]  # operation_id 非空
+
+    async def test_grant_egress_explicit_scope_version_wins(self):
+        """显式传入 scope_version 时按其值签发（受控迁移 / 历史世代场景）。"""
+        svc = _make_service(_snapshot(connections=(_conn(),), security_scope_version=3))
+        vm = _make_vm(svc)
+        await vm.load()
+
+        ok = await vm.grant_egress("c1", "target-fp", "stock_analysis", scope_version=2)
+
+        assert ok is True
+        assert svc.grant_egress.await_args.args[3] == 2
+
     async def test_revoke_egress_forwards(self):
         svc = _make_service()
         vm = _make_vm(svc)

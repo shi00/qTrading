@@ -1247,8 +1247,16 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
         connection_id: str,
         target_fingerprint: str,
         purpose: str,
-        scope_version: int = 1,
+        scope_version: int | None = None,
     ) -> bool:
+        """目标级外发授权（§4.3）。
+
+        F23-001：``scope_version`` 缺省取当前快照的 ``security_scope_version``
+        （与 ``grants_for`` / ``authorize_attempt`` 同一世代口径），不再硬编码 1——
+        否则新世代（scope>1）下签发的 grant 既不在摘要中展示、也无法在逐次许可
+        匹配，合法授权形同未授予（R21）。
+        """
+        effective_scope_version = self._security_scope_version if scope_version is None else scope_version
         operation_id = str(uuid.uuid4())
         self._track_inflight_cancellable()  # F40：授权请求发起前可安全取消
         try:
@@ -1257,7 +1265,7 @@ class ModelConnectionsViewModel(ObservableViewModelMixin[ModelConnectionsState])
                 connection_id,
                 target_fingerprint,
                 purpose,
-                scope_version,
+                effective_scope_version,
                 self._state.config_revision,
                 operation_id,
             )
