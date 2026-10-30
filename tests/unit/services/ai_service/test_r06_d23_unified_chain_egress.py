@@ -21,7 +21,10 @@
 5. R2：``EgressAudit.record`` 抛 ``CancelledError`` 必须传播（不吞没）；
 6. F27：非流式响应的内容安全拒绝信号（``message.refusal`` /
    ``finish_reason == "content_filter"``）提炼为 ``AIContentRefusedError``
-   策略终态（Executor 据此终止候选遍历，禁止重试与换候选绕过）。
+   策略终态（Executor 据此终止候选遍历，禁止重试与换候选绕过）；
+7. UIR-F23-003 外发结果回写：单次尝试只落 **一条结果记录**（意图与结果合并，不双记），
+   ``status`` 真实反映 sent / failed / cancelled，``error_category`` 记录分类码，
+   ``destination_host`` 记录出口主机（host[:port]，不含凭据/路径）。
 """
 
 from __future__ import annotations
@@ -59,14 +62,14 @@ def _read_records(path) -> list[dict]:
     return [json.loads(line) for line in file.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _connection() -> ResolvedConnection:
+def _connection(api_base: str | None = "https://api.test.com", provider: str = "openai") -> ResolvedConnection:
     return ResolvedConnection(
         connection_id="conn-1",
         connection_revision=1,
         adapter_kind="litellm_chat",
-        provider="openai",
+        provider=provider,
         model="gpt-test",
-        api_base="https://api.test.com",
+        api_base=api_base,
         adapter_options={},
         context_window=None,
         concurrency_limit=1,
@@ -105,6 +108,25 @@ async def _invoke(request: InferenceRequest | None = None):
     ):
         response = await client.invoke_single_connection(request, _connection(), request.deadline, MagicMock())
     return response, acompletion
+
+
+async def _invoke_with(
+    acompletion: AsyncMock,
+    *,
+    request: InferenceRequest | None = None,
+    connection: ResolvedConnection | None = None,
+):
+    """按给定 acompletion 行为执行单连接调用（知情确认已通过，零真实网络）。"""
+    request = request or _request()
+    client = LiteLLMClient(MagicMock())
+    with (
+        patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True),
+        patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+        patch("services.ai_service.acompletion", acompletion),
+    ):
+        return await client.invoke_single_connection(
+            request, connection or _connection(), request.deadline, MagicMock()
+        )
 
 
 class TestSec01EgressGate:
@@ -155,6 +177,7 @@ class TestSec03EgressAudit:
         assert len(records) == 1
         rec = records[0]
         assert rec["destination"] == "llm:openai/gpt-test"
+        assert rec["destination_host"] == "api.test.com"
         assert rec["category"] == _CATEGORY
         assert rec["item_count"] == 2
         assert rec["payload_size_bytes"] > 0
@@ -188,6 +211,137 @@ class TestSec03EgressAudit:
                 await _invoke()
 
         assert excinfo.type is asyncio.CancelledError  # R2: 取消必须传播而非吞没
+
+
+class TestEgressOutcomeWriteback:
+    """UIR-F23-003：外发结果回写（单条结果记录，意图与结果合并，不双记）。
+
+    审计需回答「是否真的外发成功、发往哪」：`status` 由 dispatch 结果决定
+    （sent / failed / cancelled），`destination_host` 记录出口主机，`error_category`
+    记录分类码；失败/取消不伪装成 `sent`，未知主机记 None（R21 不伪装）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_success_single_outcome_record(self, _tmp_egress_path) -> None:
+        """成功 → 恰一条 sent 记录（无意图+结果双记），error_category 为空。"""
+        await _invoke_with(AsyncMock(return_value=_ok_response()))
+
+        records = _read_records(_tmp_egress_path)
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["status"] == "sent"
+        assert rec["error_category"] is None
+        assert rec["destination_host"] == "api.test.com"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_failure_records_failed_and_reraises(self, _tmp_egress_path) -> None:
+        """dispatch 抛超时 → 回写 failed/timeout（含主机）后原异常继续传播。"""
+        with pytest.raises(TimeoutError) as excinfo:
+            await _invoke_with(AsyncMock(side_effect=TimeoutError("Request timed out")))
+
+        assert excinfo.type is TimeoutError  # 原始异常未被审计路径改写
+        assert str(excinfo.value) == "Request timed out"
+        records = _read_records(_tmp_egress_path)
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["status"] == "failed"
+        assert rec["error_category"] == "timeout"
+        assert rec["destination_host"] == "api.test.com"
+        # 错误消息正文不入审计（只记分类码）
+        assert "timed out" not in json.dumps(rec, ensure_ascii=False)
+
+    @pytest.mark.asyncio
+    async def test_content_refusal_records_failed(self, _tmp_egress_path) -> None:
+        """内容安全拒绝 → 回写 failed/content_policy，仍抛 AIContentRefusedError。"""
+        refusal = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=None, refusal="该内容违反使用政策。"),
+                    finish_reason="stop",
+                )
+            ],
+            model="gpt-test",
+            usage=None,
+        )
+        with pytest.raises(AIContentRefusedError) as excinfo:
+            await _invoke_with(AsyncMock(return_value=refusal))
+
+        assert excinfo.type is AIContentRefusedError  # 策略终态信号未被改写
+        assert excinfo.value.message.key == "llm_err_content_policy"
+        records = _read_records(_tmp_egress_path)
+        assert len(records) == 1
+        assert records[0]["status"] == "failed"
+        assert records[0]["error_category"] == "content_policy"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_dispatch_records_cancelled_and_propagates(self, _tmp_egress_path) -> None:
+        """dispatch 被取消 → 回写 cancelled 后 CancelledError 继续传播（R2）。"""
+        with pytest.raises(asyncio.CancelledError) as excinfo:
+            await _invoke_with(AsyncMock(side_effect=asyncio.CancelledError()))
+
+        assert excinfo.type is asyncio.CancelledError  # R2: 取消必须传播而非吞没
+        records = _read_records(_tmp_egress_path)
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["status"] == "cancelled"
+        assert rec["error_category"] == "cancelled"
+        assert rec["destination_host"] == "api.test.com"
+
+    @pytest.mark.asyncio
+    async def test_audit_write_failure_does_not_mask_dispatch_error(self, _tmp_egress_path) -> None:
+        """失败路径上审计写失败仅降级：原始 dispatch 异常照常传播，无记录。"""
+        with patch("utils.egress_audit.EgressAudit.record", AsyncMock(side_effect=RuntimeError("audit boom"))):
+            with pytest.raises(TimeoutError) as excinfo:
+                await _invoke_with(AsyncMock(side_effect=TimeoutError("Request timed out")))
+
+        assert excinfo.type is TimeoutError  # 审计异常未掩盖原始 dispatch 异常
+        assert "audit boom" not in str(excinfo.value)
+        assert _read_records(_tmp_egress_path) == []
+
+    @pytest.mark.asyncio
+    async def test_retry_attempts_each_record_once(self, _tmp_egress_path) -> None:
+        """Executor 重试语义：每次尝试恰一条结果记录（先 failed 后 sent，无多余意图记录）。"""
+        request = _request()
+        client = LiteLLMClient(MagicMock())
+        acompletion = AsyncMock(side_effect=[TimeoutError("Request timed out"), _ok_response()])
+        with (
+            patch("services.ai_service.litellm_client.is_egress_acknowledged", return_value=True),
+            patch("services.ai_service._ensure_litellm_loaded", return_value=True),
+            patch("services.ai_service.acompletion", acompletion),
+        ):
+            with pytest.raises(TimeoutError) as excinfo:
+                await client.invoke_single_connection(request, _connection(), request.deadline, MagicMock())
+            assert excinfo.type is TimeoutError
+            await client.invoke_single_connection(request, _connection(), request.deadline, MagicMock())
+
+        assert acompletion.await_count == 2
+        records = _read_records(_tmp_egress_path)
+        assert [r["status"] for r in records] == ["failed", "sent"]
+
+    @pytest.mark.asyncio
+    async def test_host_strips_credentials_and_path(self, _tmp_egress_path) -> None:
+        """自定义 api_base 带凭据/端口/路径 → 只记 host[:port]，凭据与路径不入审计（R9）。"""
+        connection = _connection(api_base="https://user:secret@api.example.com:8443/v1/proxy")
+        await _invoke_with(AsyncMock(return_value=_ok_response()), connection=connection)
+
+        records = _read_records(_tmp_egress_path)
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["destination_host"] == "api.example.com:8443"
+        dumped = json.dumps(rec, ensure_ascii=False)
+        assert "secret" not in dumped
+        assert "/v1/proxy" not in dumped
+
+    @pytest.mark.asyncio
+    async def test_host_none_when_api_base_absent(self, _tmp_egress_path) -> None:
+        """连接未声明 api_base → destination_host 记 None（R21 不伪装具体主机）。"""
+        connection = _connection(api_base=None)
+        await _invoke_with(AsyncMock(return_value=_ok_response()), connection=connection)
+
+        records = _read_records(_tmp_egress_path)
+        assert len(records) == 1
+        assert records[0]["destination_host"] is None
+        assert records[0]["status"] == "sent"
 
 
 class TestNullContentJsonConvergence:

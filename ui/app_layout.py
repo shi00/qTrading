@@ -18,7 +18,6 @@
 
 import asyncio
 import logging
-from collections.abc import Callable
 from enum import IntEnum
 from typing import Any
 
@@ -594,18 +593,27 @@ def AppLayout() -> ft.Container:
 
     # --- SEC-03 状态栏指示器: 注册 EgressAudit 会话计数 listener (挂载即订阅, 卸载退订) ---
     # 与 _setup_navigate 的 pubsub 订阅不同, add_listener 返回非对称退订句柄,
-    # 须用方法级闭包 holder 在 setup/cleanup 间传递 (Flet use_effect cleanup 不接收
+    # 须用方法级 holder 在 setup/cleanup 间传递 (Flet use_effect cleanup 不接收
     # setup 返回值, 见 mcp_flet use_effect 签名)。
-    egress_unsub_holder: list[Callable[[], None]] = []
+    # UIR-X01-001: holder 必须跨渲染稳定 —— 锁定版本 use_effect 每次渲染把 hook.cleanup
+    # 重写为最新渲染的闭包 (dependencies=[] 只跳过 setup 重跑, 见 flet use_effect 源码),
+    # 若 holder 是普通局部变量 (如 list), 卸载时执行的新轮 cleanup 闭包捕获的是新一轮
+    # 渲染的新容器, 挂载时写入的退订句柄永远取不到 (listener 泄漏 + 重复 mount 叠加)。
+    # use_ref(None) 返回的 MutableRef 由组件 hook 跨渲染持有同一实例, setup 写入与
+    # cleanup 读取同一 .current。
+    egress_unsub_holder: Any = ft.use_ref(None)
 
     def _setup_egress_listener() -> None:
         from utils.egress_audit import EgressAudit
 
-        egress_unsub_holder.append(EgressAudit().add_listener(notify_egress_count))
+        egress_unsub_holder.current = EgressAudit().add_listener(notify_egress_count)
 
     def _cleanup_egress_listener() -> None:
-        if egress_unsub_holder:
-            unsub = egress_unsub_holder.pop()
+        # 读后即清空 holder: 同一 effect 的 cleanup 若被重复调度 (重复卸载 / 依赖变化前
+        # 清理), 也不会二次调用已失效的退订句柄
+        unsub = egress_unsub_holder.current
+        egress_unsub_holder.current = None
+        if unsub is not None:
             unsub()
 
     ft.use_effect(_setup_egress_listener, dependencies=[], cleanup=_cleanup_egress_listener)

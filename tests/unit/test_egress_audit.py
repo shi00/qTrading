@@ -18,7 +18,7 @@ import json
 
 import pytest
 
-from utils.egress_audit import EgressAudit, EgressRecord
+from utils.egress_audit import EgressAudit, EgressRecord, destination_host_from_url
 from utils.time_utils import get_now
 
 pytestmark = pytest.mark.unit
@@ -224,6 +224,40 @@ class TestListeners:
         assert audit.get_session_egress_count() == 1
         lines = (_tmp_egress_path / "egress_audit.jsonl").read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) == 1
+
+
+# ============================================================================
+# 出口主机提取（host[:port]，剔除凭据/路径，R9）
+# ============================================================================
+
+
+class TestDestinationHostFromUrl:
+    """``destination_host_from_url``：审计只记出口主机，不记凭据/路径（R9/R21）。"""
+
+    def test_plain_host(self) -> None:
+        assert destination_host_from_url("https://api.deepseek.com") == "api.deepseek.com"
+        # hostname 归一为小写（审计口径稳定）
+        assert destination_host_from_url("HTTPS://API.OpenAI.COM/v1") == "api.openai.com"
+
+    def test_host_with_port(self) -> None:
+        assert destination_host_from_url("https://api.example.com:8443/v1/proxy") == "api.example.com:8443"
+
+    def test_credentials_stripped(self) -> None:
+        assert destination_host_from_url("https://user:secret@api.example.com:8443/v1") == "api.example.com:8443"
+
+    def test_scheme_less_url(self) -> None:
+        # 容错：用户填写不带 scheme 的 base_url
+        assert destination_host_from_url("api.moonshot.cn/v1") == "api.moonshot.cn"
+
+    def test_ipv6_host(self) -> None:
+        assert destination_host_from_url("https://[::1]:8080/v1") == "[::1]:8080"
+
+    def test_unknown_or_invalid_returns_none(self) -> None:
+        # R21：无法确定主机时记 None，不伪装具体主机
+        assert destination_host_from_url(None) is None
+        assert destination_host_from_url("") is None
+        assert destination_host_from_url("   ") is None
+        assert destination_host_from_url("https://api.example.com:notaport/v1") is None
 
 
 # ============================================================================

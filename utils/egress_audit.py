@@ -1,8 +1,14 @@
 """LLM 云端外发元数据集中审计（SEC-03）。
 
 满足 UN-07「掌控」——「能否知道今天向外发送过什么」。本次聚焦 LLM 云端口
-（数据量最大的敏感出口），统一记录外发**元数据**（时间/目的地/类别/载荷字节/
-条目数/状态），**不记录 prompt 内容本身**，避免二次泄露（检视报告 §1.3 明确要求）。
+（数据量最大的敏感出口），统一记录外发**元数据**（时间/目的地/出口主机/类别/
+载荷字节/条目数/结果状态/失败分类码），**不记录 prompt 内容本身**，避免二次泄露
+（检视报告 §1.3 明确要求）。
+
+结果语义（UIR-F23-003）：每条记录描述**一次尝试的最终结果**——成功 ``sent``、
+失败/超时/内容拒绝 ``failed``（附 ``error_category``）、取消 ``cancelled``；
+``destination_host`` 为实际出口主机 ``host[:port]``（不含凭据/路径），
+``None`` 表示连接未声明 ``api_base``、无法确定（R21 不伪装）。
 
 架构约定（对抗检视固化，防止双重计数 / 内存膨胀 / 并发写交错）：
 - **JSONL 文件 = 今日/本月聚合的唯一事实源**。今日/本月聚合直接扫 JSONL 文件
@@ -38,6 +44,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 import config
 from utils.error_classifier import log_classified
@@ -62,7 +69,37 @@ class EgressRecord:
     category: str  # "analysis" / "news" / "verify"
     payload_size_bytes: int
     item_count: int
-    status: str = "sent"  # "sent" / "failed"
+    status: str = "sent"  # "sent"（应答成功）/ "failed"（失败/超时/内容拒绝）/ "cancelled"（取消）
+    # 出口主机 host[:port]（不含凭据/路径）；None = 连接未声明 api_base，无法确定（R21 不伪装）
+    destination_host: str | None = None
+    # 失败分类码（classify_error context="llm"，如 timeout/network/auth_failed/content_policy）；
+    # 成功或取消时为 None（取消单独由 status="cancelled" 表达）
+    error_category: str | None = None
+
+
+def destination_host_from_url(url: str | None) -> str | None:
+    """从 ``api_base`` URL 提取审计用出口主机 ``host[:port]``。
+
+    - 剔除 userinfo（``user:pass@``）与 path/query：审计只需回答「发往哪台主机」，
+      自定义代理 URL 内嵌的凭据不得落入审计日志（R9）。
+    - 空串 / 协议缺失可容错 / 非法端口等无法确定主机时返回 ``None``（R21：不伪装具体主机）。
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    if "://" not in raw:
+        raw = f"https://{raw}"  # 容错：用户填写的 base_url 可能不带 scheme
+    try:
+        parts = urlsplit(raw)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:  # 非法端口（如 ":notaport"）等
+        return None
+    if not host:
+        return None
+    if ":" in host:  # IPv6 字面量需加方括号
+        return f"[{host}]:{port}" if port else f"[{host}]"
+    return f"{host}:{port}" if port else host
 
 
 @register_singleton
@@ -138,10 +175,12 @@ class EgressAudit:
             {
                 "timestamp": rec.timestamp.isoformat(timespec="seconds"),
                 "destination": rec.destination,
+                "destination_host": rec.destination_host,
                 "category": rec.category,
                 "payload_size_bytes": rec.payload_size_bytes,
                 "item_count": rec.item_count,
                 "status": rec.status,
+                "error_category": rec.error_category,
             },
             ensure_ascii=False,
         )
@@ -164,6 +203,8 @@ class EgressAudit:
         item_count: int,
         payload_size_bytes: int,
         status: str = "sent",
+        destination_host: str | None = None,
+        error_category: str | None = None,
     ) -> None:
         """记录一次 LLM 云端外发元数据。审计失败不阻断 AI 主流程。"""
         rec = EgressRecord(
@@ -173,6 +214,8 @@ class EgressAudit:
             payload_size_bytes=int(payload_size_bytes),
             item_count=int(item_count),
             status=status,
+            destination_host=destination_host,
+            error_category=error_category,
         )
         # 会话计数 + recent 缓冲（内存操作）
         notified_count: int = 0

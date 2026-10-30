@@ -437,6 +437,62 @@ class TestUsageView:
         assert I18n.get("model_usage_unknown") in panel_module._month_row_text({"scenario_id": None})
         assert "-" in panel_module._month_row_text({"scenario_id": "s"})  # trigger 缺失
 
+    def test_all_unpriced_month_row_shows_unknown_not_zero(self):
+        """UIR-F19-002（R21）：全未计价月不得把未知渲染为「费用 0.00」。"""
+        row = {
+            "scenario_id": "stock_analysis",
+            "trigger": "manual",
+            "invocation_count": 2,
+            "attempt_count": 2,
+            "succeeded_count": 1,
+            "cost_cny": Decimal("0"),
+        }
+        summary = BudgetSummary(known_cny=Decimal("0"), unpriced_attempts=2, free_attempts=0)
+        text = panel_module._month_row_text(row, summary)
+        assert I18n.get("model_usage_cost_unknown") in text
+        assert "0.00" not in text
+
+    def test_partially_priced_month_row_shows_known_plus_unknown(self):
+        """UIR-F19-002：部分计价行显示已知金额并显式标注未计价，未知不并入已知。"""
+        row = {"scenario_id": "stock_analysis", "cost_cny": Decimal("0.50")}
+        summary = BudgetSummary(known_cny=Decimal("0.50"), unpriced_attempts=1, free_attempts=0)
+        text = panel_module._month_row_text(row, summary)
+        assert I18n.get("model_usage_month_cost_partial", known="0.50 CNY") in text
+        assert I18n.get("model_usage_cost_unknown") not in text
+
+    def test_fully_priced_free_month_row_shows_zero(self):
+        """UIR-F19-002：已计价且合计为零（免费模型）是事实零，可显示 0.00。"""
+        row = {"scenario_id": "stock_analysis", "cost_cny": Decimal("0")}
+        summary = BudgetSummary(known_cny=Decimal("0"), unpriced_attempts=0, free_attempts=2)
+        text = panel_module._month_row_text(row, summary)
+        assert "0.00 CNY" in text
+        assert I18n.get("model_usage_cost_unknown") not in text
+
+    def test_budget_summary_month_snapshot_all_unpriced_renders_unknown_chips(self):
+        """UIR-F19-002：月汇总预算摘要 chip 与场景行共用同一完整性快照。"""
+        summary = BudgetSummary(
+            known_cny=Decimal("0"),
+            unpriced_attempts=3,
+            free_attempts=0,
+            unpriced_input_tokens=50,
+            unpriced_output_tokens=10,
+        )
+        state = _usage_state(
+            summary_month="202601",
+            month_draft="202601",
+            summary_budget=summary,
+            monthly_summary_mode=True,
+            monthly_rows=({"scenario_id": "stock_analysis", "cost_cny": Decimal("0")},),
+        )
+        view = _build_usage_view(state, MagicMock(), [], None, MagicMock())
+        section = cast(ft.Column, view.controls[0])
+        chips = _chip_map(section)
+        assert chips[I18n.get("model_usage_budget_known")] == I18n.get("model_usage_cost_unknown")
+        assert chips[I18n.get("model_usage_budget_unpriced_attempts")] == "3"
+        assert chips[I18n.get("model_usage_budget_unpriced_tokens")] == "50 / 10"
+        assert "0.00" not in _texts(section)
+        assert I18n.get("model_usage_cost_unknown") in _texts(section)
+
     def test_scope_dropdown_rendered_and_bound(self):
         """F37：明细视图渲染导出范围下拉（当前页 / 全部筛选结果），选择经同步命令写入 VM。"""
         vm = MagicMock()
@@ -586,6 +642,19 @@ def _texts(control: Any) -> list[str]:
     for child in getattr(control, "controls", None) or []:
         out.extend(_texts(child))
     return out
+
+
+def _chip_map(control: Any) -> dict[str, str]:
+    """收集 ``label: value`` 形式的摘要 chip（label 去尾冒号 → value）。"""
+    chips: dict[str, str] = {}
+    for child in _walk_controls(control):
+        if not isinstance(child, ft.Row) or len(child.controls) != 2:
+            continue
+        label = getattr(child.controls[0], "value", None)
+        value = getattr(child.controls[1], "value", None)
+        if isinstance(label, str) and label.endswith(":") and isinstance(value, str):
+            chips[label[:-1]] = value
+    return chips
 
 
 class TestAttemptsDetail:

@@ -1080,6 +1080,25 @@ class TestReadRequestPage:
         assert "ai_invocation ti" in task_sql
         assert "p.candidate_decisions" not in task_sql
 
+    def test_unpriced_predicate_is_cost_null_single_source(self):
+        """UIR-F19-002：请求页与月完整性列统一以 ``cost_cny IS NULL`` 判未计价。
+
+        回归：请求页原以 ``usage_status='unavailable'`` 判未计价，月完整性列以
+        ``cost_cny IS NULL`` 判；有 usage 但计价失败的行落 ``unknown``，``unpriced``
+        过滤漏计。统一后不得再出现 usage_status 判据，也不得产出 ``unknown`` 费用状态。
+        """
+        from data.persistence.daos import ai_usage_dao as dao_module
+
+        page_sql = dao_module._REQUEST_PAGE_SELECT_SQL
+        month_sql = dao_module._MONTH_PRICING_INTEGRITY_SQL
+        predicate = "COUNT(*) FILTER (WHERE a.cost_cny IS NULL)::int AS unpriced_attempts"
+        assert predicate in page_sql
+        assert predicate in month_sql
+        assert "usage_status = 'unavailable'" not in page_sql
+        assert "WHEN r.unpriced_attempts = r.attempt_count THEN 'unpriced'" in page_sql
+        assert "WHEN r.unpriced_attempts = 0 THEN 'known'" in page_sql
+        assert "r.priced_attempts = 0 THEN 'unknown'" not in page_sql
+
     @pytest.mark.asyncio
     async def test_date_range_filters_bound(self):
         conn = _QueueConn([_StubResult(rows=[]), _StubResult(one=(0,))])
