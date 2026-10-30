@@ -51,7 +51,12 @@ from ui.viewmodels.model_connections_view_model import (
     UsageCostSummary,
 )
 from ui.viewmodels.model_routes_view_model import ModelRoutesViewModel
-from ui.viewmodels.model_usage_view_model import ModelUsageViewModel
+from ui.viewmodels.model_usage_view_model import (
+    PRICING_STATUS_ALL_UNPRICED,
+    BudgetSummary,
+    ModelUsageViewModel,
+    month_pricing_status,
+)
 from utils.config_models import DEFAULT_AI_PROMPT, DEFAULT_NEWS_PROMPT
 from utils.log_decorators import UILogger
 from utils.prompt_guard import MAX_PROMPT_LENGTH, validate_prompt
@@ -127,7 +132,12 @@ async def _release_unconfirmed_reservation(reservation_id: str) -> bool:
 
 
 async def _load_connections_usage_summary() -> UsageCostSummary:
-    """「模型连接」页头本月已知费用（其余未知 / 未统计字段保持 None，R21 不伪零）。"""
+    """「模型连接」页头本月费用摘要（F17/R21）：已计价金额 + 未计价尝试数。
+
+    判据与 DAO 同源（``cost_cny IS NULL`` 即未计价）。全月未计价时 ``known_cost_cny``
+    置 None（页头显式「未知」而非伪零），``unpriced_count`` 填入尝试数使未计价 chip
+    可渲染；无法读取 / DAO 不可用时整体 None（未知不伪装为 0）。
+    """
     dao = _ai_usage_dao_provider()
     if dao is None:
         return UsageCostSummary()
@@ -142,7 +152,16 @@ async def _load_connections_usage_summary() -> UsageCostSummary:
     except Exception:
         return UsageCostSummary()
     known = summary.get("known_cny")
-    return UsageCostSummary(known_cost_cny=str(known) if known is not None else None)
+    unpriced = summary.get("unpriced_attempts")
+    budget = BudgetSummary(
+        known_cny=known,
+        unpriced_attempts=unpriced,
+        free_attempts=summary.get("free_attempts"),
+    )
+    pricing_status = month_pricing_status(budget)
+    known_text = None if known is None or pricing_status == PRICING_STATUS_ALL_UNPRICED else str(known)
+    unpriced_count = int(unpriced) if unpriced is not None and unpriced > 0 else None
+    return UsageCostSummary(known_cost_cny=known_text, unpriced_count=unpriced_count)
 
 
 def _synthetic_adapters_provider():

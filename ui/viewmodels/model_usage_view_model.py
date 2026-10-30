@@ -83,15 +83,72 @@ class UsageFilters:
 
 @dataclass(frozen=True, slots=True)
 class BudgetSummary:
-    """月度预算摘要（§11.5 三独立字段；缺失用 None，禁伪零，R21）。
+    """月度预算摘要（§11.5 三独立字段 + F17 计价完整性；缺失用 None，禁伪零，R21）。
 
     ``known_cny`` 为已结算费用（未统计 → None）；``effective_reserved_cny`` 为有效
     预留（事实零为 ``Decimal("0")``）；``unconfirmed_reserved_cny`` 为未确认预留。
+
+    ``unpriced_attempts`` / ``free_attempts`` / ``unpriced_*_tokens`` 来自 DAO 的
+    ``read_budget_summary``（判据与 ``ai_usage_dao`` 统一为 ``cost_cny IS NULL``）；
+    整数字段缺失（旧调用方 / 摘要降级）用 None 表示「完整性未知」，不伪零（R21）。
     """
 
     known_cny: Decimal | None = None
     effective_reserved_cny: Decimal | None = None
     unconfirmed_reserved_cny: Decimal | None = None
+    unpriced_attempts: int | None = None
+    free_attempts: int | None = None
+    unpriced_input_tokens: int | None = None
+    unpriced_output_tokens: int | None = None
+
+
+# 月度计价完整性三态（DAO→VM→UI 单一判据，见 ``month_pricing_status``）：
+# known=全部已计价（含免费行混合）；free=全部已计价且合计为零（免费）；
+# partial=已计价与未计价并存；all_unpriced=全部未计价（未知，不得显示 0.00）；
+# empty=无已结算数据（未知）。
+PRICING_STATUS_EMPTY = "empty"
+PRICING_STATUS_KNOWN = "known"
+PRICING_STATUS_FREE = "free"
+PRICING_STATUS_PARTIAL = "partial"
+PRICING_STATUS_ALL_UNPRICED = "all_unpriced"
+
+
+def month_pricing_status(summary: BudgetSummary | None) -> str:
+    """月计价完整性状态（R21）：决定费用展示为数值 / 未知 / 已知+未计价。
+
+    判据与 DAO 同源（``cost_cny IS NULL`` 即未计价）。``summary=None`` 表示摘要
+    整体未就绪（调用方按行内金额原值展示）；摘要存在但 ``unpriced_attempts``
+    缺失（旧调用方）同样降级为按 ``known_cny`` 展示，不把「完整性未知」伪装成
+    「全部未计价」。
+    """
+    if summary is None:
+        return PRICING_STATUS_KNOWN
+    if summary.unpriced_attempts is None:
+        return PRICING_STATUS_EMPTY if summary.known_cny is None else PRICING_STATUS_KNOWN
+    unpriced = summary.unpriced_attempts
+    if unpriced > 0:
+        # 无已结算费用且无免费尝试 → 全部未计价；否则至少一行已计价（免费或真金额）
+        if summary.known_cny is None or (summary.known_cny == 0 and not summary.free_attempts):
+            return PRICING_STATUS_ALL_UNPRICED
+        return PRICING_STATUS_PARTIAL
+    if summary.known_cny is None:
+        return PRICING_STATUS_EMPTY
+    if summary.known_cny == 0 and summary.free_attempts:
+        return PRICING_STATUS_FREE
+    return PRICING_STATUS_KNOWN
+
+
+def _budget_summary_from_dao(summary: dict[str, Any]) -> BudgetSummary:
+    """DAO ``read_budget_summary`` → 不可变 ``BudgetSummary``（完整性字段不丢，R21）。"""
+    return BudgetSummary(
+        known_cny=summary.get("known_cny"),
+        effective_reserved_cny=summary.get("effective_reserved_cny"),
+        unconfirmed_reserved_cny=summary.get("unconfirmed_reserved_cny"),
+        unpriced_attempts=summary.get("unpriced_attempts"),
+        free_attempts=summary.get("free_attempts"),
+        unpriced_input_tokens=summary.get("unpriced_input_tokens"),
+        unpriced_output_tokens=summary.get("unpriced_output_tokens"),
+    )
 
 
 @dataclass(frozen=True)
@@ -181,18 +238,39 @@ def _build_detail_csv(rows: Iterable[dict[str, Any]]) -> str:
 def _build_monthly_summary_csv(month: str, summary: BudgetSummary | None) -> str:
     """月汇总 CSV（F37 对齐查看月）：month / 摘要均取查看月快照，不混当前月。
 
-    摘要未就绪（``None``）→ 全空单元格（未知不伪装为 0，R21）。
+    摘要未就绪（``None``）→ 全空单元格（未知不伪装为 0，R21）。全部未计价月
+    的 ``known_cny`` 写空（禁止把未知成本导出为 0），并以 ``pricing_status``
+    + 未计价列显式声明完整性，消费方可区分「免费 0」与「未计价未知」。
     """
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["month", "known_cny", "effective_reserved_cny", "unconfirmed_reserved_cny"])
+    writer.writerow(
+        [
+            "month",
+            "known_cny",
+            "effective_reserved_cny",
+            "unconfirmed_reserved_cny",
+            "pricing_status",
+            "unpriced_attempts",
+            "free_attempts",
+            "unpriced_input_tokens",
+            "unpriced_output_tokens",
+        ]
+    )
     s = summary if summary is not None else BudgetSummary()
+    status = month_pricing_status(s)
+    known_cell = "" if status == PRICING_STATUS_ALL_UNPRICED else _csv_cell(s.known_cny)
     writer.writerow(
         [
             _csv_cell(month),
-            _csv_cell(s.known_cny),
+            known_cell,
             _csv_cell(s.effective_reserved_cny),
             _csv_cell(s.unconfirmed_reserved_cny),
+            status,
+            _csv_cell(s.unpriced_attempts),
+            _csv_cell(s.free_attempts),
+            _csv_cell(s.unpriced_input_tokens),
+            _csv_cell(s.unpriced_output_tokens),
         ]
     )
     return buf.getvalue()
@@ -332,11 +410,7 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         self._set_state(
             requests=tuple(rows),
             total=int(total),
-            budget_summary=BudgetSummary(
-                known_cny=summary.get("known_cny"),
-                effective_reserved_cny=summary.get("effective_reserved_cny"),
-                unconfirmed_reserved_cny=summary.get("unconfirmed_reserved_cny"),
-            ),
+            budget_summary=_budget_summary_from_dao(summary),
             unconfirmed_reservations=tuple(unconfirmed),
             budget_draft=_format_limit_text(limit),
             monthly_limit_cny=limit,
@@ -627,11 +701,7 @@ class ModelUsageViewModel(ObservableViewModelMixin[ModelUsageState]):
         if generation != self._summary_generation:
             return  # 旧代次响应：拒绝写入
         self._set_state(
-            summary_budget=BudgetSummary(
-                known_cny=summary.get("known_cny"),
-                effective_reserved_cny=summary.get("effective_reserved_cny"),
-                unconfirmed_reserved_cny=summary.get("unconfirmed_reserved_cny"),
-            ),
+            summary_budget=_budget_summary_from_dao(summary),
             monthly_rows=tuple(rows),
             message=None,
         )
