@@ -1193,6 +1193,16 @@ class TestColumnWidthPersistence:
         _, result = _render(component)
         assert _header_cell_of(result, 0).width == 120
 
+    def test_load_invalid_widths_falls_back_to_defaults(self, mock_i18n_state, mock_app_colors_state):
+        """UIR-X01-002: 持久化列宽无法转为 int → 丢弃非法值, 回退列定义默认宽度。"""
+        component = _make_component(
+            col_widths_key="vt_key",
+            on_load_col_widths=lambda: {"ts_code": "wide"},
+        )
+        _, result = _render(component)
+        # int("wide") 抛 ValueError, 分支内重置拖拽镜像并回退默认宽度 120
+        assert _header_cell_of(result, 0).width == 120
+
     def test_drag_one_column_preserves_other_persisted_widths(self, mock_i18n_state, mock_app_colors_state):
         """UIR-X01-002: 已有两列持久化宽度后拖拽其中一列, 另一列宽度必须保留。
 
