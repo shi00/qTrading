@@ -17,6 +17,7 @@ by integration tests (flet_test_page fixture), not this unit test file.
 import asyncio
 import contextlib
 import datetime
+import inspect
 from unittest.mock import MagicMock, patch
 
 import flet as ft
@@ -1311,7 +1312,7 @@ class TestTaskCenterViewComponentBody:
         run_mount_effects(component, page=page)
         assert page.run_task.call_count == 1
         args, _kwargs = page.run_task.call_args
-        assert len(args) == 1 and asyncio.iscoroutinefunction(args[0])
+        assert len(args) == 1 and inspect.iscoroutinefunction(args[0])
         run_unmount_effects(component)
 
     def test_ticker_tick_advances_and_propagates_cancelled_error(self, monkeypatch):
