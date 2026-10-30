@@ -1,11 +1,13 @@
 //! PostgreSQL 二进制调用层（pg_plan §12.1：sidecar 从安装目录解析工具路径）。
 //!
 //! 统一经 `run_tool` 执行 bundled 工具（initdb/pg_ctl/psql/pg_dump/pg_restore/pg_controldata），
-//! 密码只走 `PGPASSWORD` 环境变量，禁止上命令行（R9）。
+//! 密码只走 `PGPASSWORD` 环境变量，禁止上命令行（R9）；含密码的 SQL 只经 `run_tool_impl` 的 stdin 通道。
 //! 分级停止（§7.3）：smart 25s → fast 5s → kill fallback，总预算 ≤ 32s。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use tokio::io::AsyncWriteExt;
 
 /// 关键工具清单：setup 完整性校验与 doctor 复用。
 pub const REQUIRED_TOOLS: &[&str] = &[
@@ -161,10 +163,26 @@ pub async fn run_tool(
     envs: &[(&str, &str)],
     timeout: Duration,
 ) -> Result<ToolOutput, ToolError> {
+    run_tool_impl(program, args, envs, None, timeout).await
+}
+
+/// 执行 bundled 工具；`stdin_data` 为 Some 时经 stdin 写入并由 stdin 关闭触发子进程 EOF。
+/// 敏感内容（如含密码的 SQL）只走 stdin，禁止经 argv 传递（R9）。
+async fn run_tool_impl(
+    program: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    stdin_data: Option<&str>,
+    timeout: Duration,
+) -> Result<ToolOutput, ToolError> {
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args)
         .envs(envs.iter().map(|(k, v)| (k, v)))
-        .stdin(std::process::Stdio::null())
+        .stdin(if stdin_data.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
@@ -173,9 +191,24 @@ pub async fn run_tool(
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let child = cmd.spawn().map_err(ToolError::Io)?;
-    let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(r) => r.map_err(ToolError::Io)?,
+    let mut child = cmd.spawn().map_err(ToolError::Io)?;
+    let run = async {
+        if let Some(data) = stdin_data {
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| ToolError::Io(std::io::Error::other("stdin pipe unavailable")))?;
+            stdin
+                .write_all(data.as_bytes())
+                .await
+                .map_err(ToolError::Io)?;
+            // stdin 句柄在此 drop：关闭管道写端，子进程读到 EOF 后退出。
+        }
+        child.wait_with_output().await.map_err(ToolError::Io)
+    };
+    let out = match tokio::time::timeout(timeout, run).await {
+        Ok(r) => r?,
+        // 超时返回时 future 被 drop，child 因 kill_on_drop(true) 被强杀
         Err(_) => return Err(ToolError::Timeout),
     };
     Ok(ToolOutput {
@@ -211,6 +244,38 @@ pub fn run_tool_blocking(
     })
 }
 
+/// psql 连接参数（不含 SQL 载体）：`-c` 通道与 stdin 通道复用同一组参数。
+/// 抽出为纯函数，便于单测断言 argv 中不含 SQL/密码（R9）。
+pub fn psql_connection_args(host: &str, port: u16, user: &str, database: &str) -> Vec<String> {
+    let port_s = port.to_string();
+    vec![
+        "-X".to_string(),
+        "-q".to_string(),
+        "-A".to_string(),
+        "-t".to_string(),
+        "-v".to_string(),
+        "ON_ERROR_STOP=1".to_string(),
+        "-h".to_string(),
+        host.to_string(),
+        "-p".to_string(),
+        port_s,
+        "-U".to_string(),
+        user.to_string(),
+        "-d".to_string(),
+        database.to_string(),
+    ]
+}
+
+/// psql 输出转结果：非 0 退出码把 stderr 作为 Io 错误返回（含敏感内容时由调用方脱敏）。
+fn psql_result(out: ToolOutput) -> Result<String, ToolError> {
+    if !out.success() {
+        return Err(ToolError::Io(std::io::Error::other(
+            out.stderr.trim().to_string(),
+        )));
+    }
+    Ok(out.stdout.trim().to_string())
+}
+
 /// psql 单条 SQL（`-X -q -A -t`，ON_ERROR_STOP）。密码经 env，永不上 argv。
 // 连接参数 6 个 + sql + timeout 均为必需；为单函数引入参数结构体属过度抽象
 #[allow(clippy::too_many_arguments)]
@@ -224,38 +289,45 @@ pub async fn psql(
     sql: &str,
     timeout: Duration,
 ) -> Result<String, ToolError> {
-    let port_s = port.to_string();
+    let mut args = psql_connection_args(host, port, user, database);
+    args.push("-c".to_string());
+    args.push(sql.to_string());
+    let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = run_tool(
         &tool_path(install_dir, "psql"),
-        &[
-            "-X",
-            "-q",
-            "-A",
-            "-t",
-            "-v",
-            "ON_ERROR_STOP=1",
-            "-h",
-            host,
-            "-p",
-            &port_s,
-            "-U",
-            user,
-            "-d",
-            database,
-            "-c",
-            sql,
-        ],
+        &args_ref,
         &[("PGPASSWORD", password), ("PGCONNECT_TIMEOUT", "5")],
         timeout,
     )
     .await?;
-    if !out.success() {
-        // stderr 可能含连接串形态信息，交给调用方前已过 logging::sanitize（落盘时）
-        return Err(ToolError::Io(std::io::Error::other(
-            out.stderr.trim().to_string(),
-        )));
-    }
-    Ok(out.stdout.trim().to_string())
+    psql_result(out)
+}
+
+/// psql 脚本执行：SQL 经 stdin 传入，argv 仅含连接参数。
+/// 含密码的语句（如 `ALTER USER ... PASSWORD ...`）必须走此通道，禁止经 `-c` 进入进程命令行（R9）。
+// 连接参数 6 个 + script + timeout 均为必需；与 `psql` 同构，不为单函数引入参数结构体
+#[allow(clippy::too_many_arguments)]
+pub async fn psql_script(
+    install_dir: &Path,
+    host: &str,
+    port: u16,
+    user: &str,
+    database: &str,
+    password: &str,
+    script: &str,
+    timeout: Duration,
+) -> Result<String, ToolError> {
+    let args = psql_connection_args(host, port, user, database);
+    let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run_tool_impl(
+        &tool_path(install_dir, "psql"),
+        &args_ref,
+        &[("PGPASSWORD", password), ("PGCONNECT_TIMEOUT", "5")],
+        Some(script),
+        timeout,
+    )
+    .await?;
+    psql_result(out)
 }
 
 // ---- 分级停止（§7.3 / §13.7.48） ----
@@ -814,6 +886,73 @@ Data page checksum version:           1\n\
         .await
         .expect_err("should fail");
         // psql 二进制不存在 → Io error；即使存在也会因连接拒绝返回 Io error
+        assert!(
+            matches!(err, ToolError::Io(_)),
+            "expected Io error, got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `psql_connection_args`（stdin 通道 argv）：只含连接参数，不含 `-c`/SQL 载体（R9）。
+    #[test]
+    fn psql_connection_args_have_no_sql_carrier() {
+        let args = psql_connection_args("127.0.0.1", 55432, "postgres", "postgres");
+        assert_eq!(args[0], "-X");
+        assert_eq!(args.iter().filter(|a| a.as_str() == "-v").count(), 1);
+        assert!(
+            args.windows(2).any(|w| w[0] == "-p" && w[1] == "55432"),
+            "port pair missing: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a.as_str() == "-c"),
+            "stdin 通道 argv 不得含 -c: {args:?}"
+        );
+    }
+
+    /// `run_tool_impl` stdin 通道：脚本经 stdin 写入 → 子进程读取后在 stdout 回显。
+    #[tokio::test]
+    async fn run_tool_impl_writes_stdin_and_reads_stdout() {
+        #[cfg(windows)]
+        let (prog, args): (PathBuf, Vec<&str>) = (
+            PathBuf::from("cmd.exe"),
+            vec!["/c", "findstr", "/C:stdin-cov"],
+        );
+        #[cfg(not(windows))]
+        let (prog, args): (PathBuf, Vec<&str>) = (PathBuf::from("/bin/cat"), vec![]);
+        let out = run_tool_impl(
+            &prog,
+            &args,
+            &[],
+            Some("stdin-cov-line\n"),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("stdin 应写入子进程");
+        assert!(out.success(), "code={:?} stderr={}", out.code, out.stderr);
+        assert!(
+            out.stdout.contains("stdin-cov-line"),
+            "stdout={}",
+            out.stdout
+        );
+    }
+
+    /// `psql_script` 失败路径：install_dir 不含 psql → Io 错误（stdin 通道不改变错误语义）。
+    #[tokio::test]
+    async fn psql_script_missing_binary_returns_error() {
+        let dir = unique_tmp("psql-script-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = psql_script(
+            &dir,
+            "127.0.0.1",
+            1,
+            "postgres",
+            "postgres",
+            "dummy",
+            "select 1;\n",
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("should fail");
         assert!(
             matches!(err, ToolError::Io(_)),
             "expected Io error, got {err}"
