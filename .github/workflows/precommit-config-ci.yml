@@ -50,6 +50,10 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        with:
+          # 缓存预算治理：Linux 侧 install 仅数秒，setup-uv 自带缓存会在该 PR 引用额外存一份
+          # ~350 MB，挤占仓库 10 GB 上限（超限后 LRU 会挤掉 main 的缓存条目）。
+          enable-cache: false
 
       # 依赖集合与 ci-checks 对齐（含 optional 的 playwright）：pyrightconfig.json 的
       # reportMissingImports=error，缺包会让 pyright-changed hook 全量扫描时误报而非真实缺陷。

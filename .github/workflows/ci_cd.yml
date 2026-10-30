@@ -485,6 +485,10 @@ jobs:
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: e2e-tests-windows-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
+          # 缓存预算治理：仅 main 保存 cargo 缓存。仓库缓存上限 10 GB，非 main 引用
+          # （PR/tag）各存一份 ~673 MB 的 target 目录副本，超限后按 LRU 挤掉 main 的条目，
+          # 导致下次运行冷构建。非 main 运行仍可经默认分支回退读取 main 的缓存。
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build sidecar binary from source
         shell: bash
@@ -798,6 +802,8 @@ jobs:
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: embedded-tests-${{ matrix.os }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
+          # 同 e2e-tests-windows：只允许 main 保存，避免 PR 引用各存一份 target 副本挤占 10 GB 预算
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build sidecar binary from source
         shell: bash
@@ -1036,6 +1042,8 @@ jobs:
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: windows-skip-revalidation-real-sidecar-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
+          # 同 e2e-tests-windows：只允许 main 保存（该 job 目前仅 workflow_dispatch 触发）
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build sidecar binary (real-sidecar group only)
         if: matrix.needs_rust == 'true'
@@ -1262,6 +1270,8 @@ jobs:
         with:
           workspaces: sidecars/qtrading-pg-sidecar
           key: e2e-sidecar-real-smoke-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
+          # 同 e2e-tests-windows：只允许 main 保存（该 job 仅发版 tag 触发，避免每次发版新增副本）
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build sidecar binary
         shell: bash
