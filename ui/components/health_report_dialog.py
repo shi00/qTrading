@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -141,19 +142,51 @@ def _build_metric_tile(
     )
 
 
+def _coerce_metric_value(raw: object) -> int | float | None:
+    """将报告指标原始值归一化为数值；无法视为数值时返回 None（R21 缺失语义）。"""
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return raw if math.isfinite(raw) else None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            try:
+                parsed = float(text)
+            except ValueError:
+                return None
+            return parsed if math.isfinite(parsed) else None
+    return None
+
+
+def _metric_display(raw: object, suffix: str = "") -> tuple[str, str]:
+    """返回指标 (显示文本, 颜色)。
+
+    R21：报告缺失这些指标（键不存在 / None / 非数值）时不得渲染成业务合法值 0
+    并配 SUCCESS 绿色；改为 i18n N/A 文案 + 中性色。仅真实的 0 才用 SUCCESS。
+    """
+    value = _coerce_metric_value(raw)
+    if value is None:
+        return I18n.get("health_not_available"), AppColors.TEXT_HINT
+    number = f"{value:g}" if isinstance(value, float) else str(value)
+    return f"{number}{suffix}", AppColors.ERROR if value > 0 else AppColors.SUCCESS
+
+
 def _build_key_metrics_grid(market: dict, fundamentals: dict) -> ft.Column:
     """构建关键指标网格（L2 视觉层级，纯函数）。
 
     由旧 ``KeyMetricsGrid(ft.Column)`` class 转换。
     """
-    lag_days = market.get("lag_days", 0)
-    gap_count = fundamentals.get("gap_count", 0)
-    sanity_errors = fundamentals.get("sanity_errors", 0)
+    lag_text, lag_color = _metric_display(market.get("lag_days"), f" {I18n.get('common_suffix_day')}")
+    gap_text, gap_color = _metric_display(fundamentals.get("gap_count"))
+    sanity_text, sanity_color = _metric_display(fundamentals.get("sanity_errors"))
     latest_date = market.get("latest_local", "N/A")
-
-    lag_color = AppColors.ERROR if lag_days > 0 else AppColors.SUCCESS
-    gap_color = AppColors.ERROR if gap_count > 0 else AppColors.SUCCESS
-    sanity_color = AppColors.ERROR if sanity_errors > 0 else AppColors.SUCCESS
 
     return ft.Column(
         spacing=10,
@@ -166,17 +199,9 @@ def _build_key_metrics_grid(market: dict, fundamentals: dict) -> ft.Column:
             ),
             ft.Row(
                 [
-                    _build_metric_tile(
-                        I18n.get("health_lag_days"),
-                        f"{lag_days} {I18n.get('common_suffix_day')}",
-                        lag_color,
-                    ),
-                    _build_metric_tile(I18n.get("health_gap_count"), str(gap_count), gap_color),
-                    _build_metric_tile(
-                        I18n.get("health_sanity_err"),
-                        str(sanity_errors),
-                        sanity_color,
-                    ),
+                    _build_metric_tile(I18n.get("health_lag_days"), lag_text, lag_color),
+                    _build_metric_tile(I18n.get("health_gap_count"), gap_text, gap_color),
+                    _build_metric_tile(I18n.get("health_sanity_err"), sanity_text, sanity_color),
                 ],
             ),
             ft.Row(
