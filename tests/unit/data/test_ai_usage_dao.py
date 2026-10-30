@@ -278,7 +278,7 @@ class TestOwnerConditionalWrites:
         )
         assert "pg_advisory_xact_lock" in conn.calls[1][0], "mark_dispatched 必须经归属月 advisory 锁"
         update_sql = conn.calls[2][0]
-        assert ":reservation_id IS NULL" in update_sql, "usage_only（rid=None）路径仅 owner 条件"
+        assert "CAST(:reservation_id AS text) IS NULL" in update_sql, "usage_only（rid=None）路径仅 owner 条件"
         assert "EXISTS" in update_sql
         assert "e->>'state' = 'reserved'" in update_sql, "错误预留 ID / 非 reserved 状态必须零派发"
 
@@ -323,7 +323,7 @@ class TestOwnerConditionalWrites:
         # F23：INSERT ... SELECT 门控（invocation 存在 + 租约有效 + owner 门）
         assert "FROM ai_invocation" in sql
         assert "owner_lease_expires_at > (now() AT TIME ZONE 'UTC')" in sql
-        assert ":owner_session_id IS NULL" in sql
+        assert "CAST(:owner_session_id AS text) IS NULL" in sql
         assert params["owner_session_id"] is None and params["owner_epoch"] is None
 
     @pytest.mark.asyncio
@@ -480,7 +480,7 @@ class TestSettleAttemptUsage:
         assert len(conn.calls) == 4  # noqa: weak-assertion 语句数即语义：拒绝路径 lock/SELECT/首结判定/门控 INSERT
         insert_sql = conn.calls[3][0]
         assert "INSERT INTO ai_attempt" in insert_sql
-        assert ":reservation_id IS NOT NULL" in insert_sql, "缺行补记必须要求活跃预留背书"
+        assert "CAST(:reservation_id AS text) IS NOT NULL" in insert_sql, "缺行补记必须要求活跃预留背书"
         assert "EXISTS" in insert_sql
         assert "jsonb_array_elements(i.reservations)" in insert_sql
         # 无月汇总推进（拒绝即不计费）
@@ -1600,10 +1600,18 @@ class TestStaleGarbageTolerance:
 
     @pytest.mark.asyncio
     async def test_active_reservations_negative_sum_clamped_to_zero(self):
-        """历史负金额预留（降低 SUM 占用）→ clamp 0（负占用无事实意义）。"""
+        """历史负金额预留（降低 SUM 占用）→ clamp 0（负占用无事实意义）。
+
+        回归（R21 同族）：过滤必须在 SUM 之前逐元素完成——结果级 clamp 会让负垃圾
+        变成「归还额度」（0.90 合法占用 + 负垃圾 → 合计 0 → 新预留超预算获准）。
+        """
         conn = _CaptureConn(results=[(Decimal("-5.00"),)])
-        got = await _dao(conn)._read_active_reservations_sum(conn, "202610")
+        dao = _dao(conn)
+        got = await dao._read_active_reservations_sum(conn, "202610")
         assert got == Decimal("0")
+        sql = conn.calls[0][0]
+        assert "END" in sql and ">= 0" in sql, "预算门 SUM 必须逐元素过滤负值"
+        assert "<= 1e15" in sql, "非有限 / 超上限垃圾同样按事实零计入"
 
     @pytest.mark.asyncio
     async def test_active_reservations_legal_sum_unchanged(self):

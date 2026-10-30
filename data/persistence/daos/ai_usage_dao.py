@@ -660,7 +660,14 @@ class AIUsageDao(BaseDao):
             await conn.execute(
                 sa.text(
                     """
-                    SELECT COALESCE(SUM((elem->>'amount_cny')::numeric), 0)
+                    SELECT COALESCE(SUM(
+                        CASE
+                            WHEN (elem->>'amount_cny')::numeric >= 0
+                                 AND (elem->>'amount_cny')::numeric <= 1e15
+                                THEN (elem->>'amount_cny')::numeric
+                            ELSE 0
+                        END
+                    ), 0)
                     FROM ai_invocation, jsonb_array_elements(reservations) AS elem
                     WHERE (
                             elem->>'state' = 'held_unconfirmed'
@@ -679,12 +686,12 @@ class AIUsageDao(BaseDao):
                 },
             )
         ).fetchone()
-        # NOTE(lazy): 存量垃圾容错在 SUM 结果级 clamp（非有限/负 → 0），未做 SQL 逐元素
-        # 过滤——单条 NaN 垃圾经 numeric SUM 传播会使全月占用读数失效（NaN → 0 放行，
-        # 预算门保守性损失）。ceiling: 仅影响 D1 validator 生效前写入的历史 jsonb 垃圾
-        # 预留（新写入已被 _checked_amount 拦截，垃圾只减不增）；垃圾预留经 settled /
-        # released 处置后自愈。upgrade: 观测到 warning 日志持续出现或垃圾引发实际超支时，
-        # 改为 SQL 侧逐元素合法性过滤后再 SUM。
+        # 逐元素过滤后再 SUM：负值 / 非有限（NaN、±Infinity）/ 超出 D1 上限的存量垃圾
+        # 一律按「事实零」计入，不得参与合计——结果级 clamp 会把负垃圾变成「归还额度」
+        # （负占用抵消合法预留 → 预算门放大），故过滤必须发生在 SUM 之前。
+        # 上限 1e15 与 ``validate_decimal_amount`` 的金额上界同源（超界视为垃圾）。
+        # 下方 Python 侧 ``_finite_non_negative_or_zero`` 保留为末级防线
+        # （覆盖非数值文本等 SQL 无法 SUM 的坏值）。
         raw_sum = Decimal(str(row[0])) if row is not None else Decimal("0")
         return _finite_non_negative_or_zero(raw_sum, context="active_reservations_sum")
 
@@ -746,7 +753,7 @@ class AIUsageDao(BaseDao):
                       AND owner_epoch = :owner_epoch
                       AND owner_lease_expires_at > (now() AT TIME ZONE 'UTC')
                       AND (
-                            :reservation_id IS NULL
+                            CAST(:reservation_id AS text) IS NULL
                             OR EXISTS (
                                 SELECT 1 FROM jsonb_array_elements(reservations) AS e
                                 WHERE e->>'reservation_id' = :reservation_id
@@ -809,10 +816,10 @@ class AIUsageDao(BaseDao):
                         :connection_id, :connection_revision, :adapter_kind, :configured_model,
                         :security_revision, :reservation_id, 'dispatched'
                     FROM ai_invocation i
-                    WHERE i.invocation_id = :invocation_id
+                    WHERE i.invocation_id = CAST(:invocation_id AS varchar)
                       AND i.owner_lease_expires_at > (now() AT TIME ZONE 'UTC')
                       AND (
-                            (:owner_session_id IS NULL AND :owner_epoch IS NULL)
+                            (CAST(:owner_session_id AS text) IS NULL AND CAST(:owner_epoch AS integer) IS NULL)
                             OR (i.owner_session_id = :owner_session_id AND i.owner_epoch = :owner_epoch)
                           )
                     ON CONFLICT (attempt_id) DO NOTHING
@@ -1386,8 +1393,8 @@ class AIUsageDao(BaseDao):
                     :usage_status, :usage_revision, :usage_revision,
                     :usage_fingerprint, :usage_window_expires_at, :cost_cny
                 FROM ai_invocation i
-                WHERE i.invocation_id = :invocation_id
-                  AND :reservation_id IS NOT NULL
+                WHERE i.invocation_id = CAST(:invocation_id AS varchar)
+                  AND CAST(:reservation_id AS text) IS NOT NULL
                   AND EXISTS (
                       SELECT 1 FROM jsonb_array_elements(i.reservations) AS e
                       WHERE e->>'reservation_id' = :reservation_id
