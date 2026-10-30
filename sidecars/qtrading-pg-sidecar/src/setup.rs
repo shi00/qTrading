@@ -51,7 +51,7 @@ const BLOCK_BEGIN: &str =
     "# >>> qtrading-pg-sidecar managed block (do not edit between markers) >>>";
 const BLOCK_END: &str = "# <<< qtrading-pg-sidecar managed block <<<";
 
-/// bundled PostgreSQL 主版本（build.rs 注入，如 "16.14.0" → 16）。
+/// bundled PostgreSQL 主版本（build.rs 注入，如 "16.15.0" → 16）。
 pub fn bundled_pg_major() -> Option<u32> {
     env!("SIDECAR_POSTGRES_VERSION")
         .split('.')
@@ -563,9 +563,9 @@ mod tests {
 
     #[test]
     fn bundled_major_parses() {
-        // build.rs 注入 "16.14.0"（.cargo/config.toml POSTGRESQL_VERSION="=16.14.0"）
+        // build.rs 注入 "16.15.0"（.cargo/config.toml POSTGRESQL_VERSION="=16.15.0"）
         assert_eq!(bundled_pg_major(), Some(16));
-        assert_eq!(bundled_pg_version(), "16.14.0");
+        assert_eq!(bundled_pg_version(), "16.15.0");
     }
 
     #[test]

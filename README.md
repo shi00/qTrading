@@ -179,8 +179,8 @@ pip install -r requirements.txt
 
 qTrading 提供两种模式：
 
-- **内置模式（默认，推荐新用户）**：内置版发行安装包自带 PostgreSQL 16.14.0 sidecar，首次启动自动准备本地数据库，零配置。源码运行时需先准备 sidecar 二进制（`cargo build --release` 后置于 `sidecars/qtrading-pg-sidecar[.exe]`，或配置 `embedded_pg_sidecar_path`，详见 [how-to](docs/guides/how-to.md) §10.2）。
-- **外置模式（高级）**：连接自建的 PostgreSQL 16.14.0+，需同时设置 `QTRADING_DATABASE_MODE=external` 与 `DATABASE_URL`（`.env` 或环境变量）：
+- **内置模式（默认，推荐新用户）**：内置版发行安装包自带 PostgreSQL 16.15.0 sidecar，首次启动自动准备本地数据库，零配置。源码运行时需先准备 sidecar 二进制（`cargo build --release` 后置于 `sidecars/qtrading-pg-sidecar[.exe]`，或配置 `embedded_pg_sidecar_path`，详见 [how-to](docs/guides/how-to.md) §10.2）。
+- **外置模式（高级）**：连接自建的 PostgreSQL 16.15.0+，需同时设置 `QTRADING_DATABASE_MODE=external` 与 `DATABASE_URL`（`.env` 或环境变量）：
 
 ```bash
 QTRADING_DATABASE_MODE=external

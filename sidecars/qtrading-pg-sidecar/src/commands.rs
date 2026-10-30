@@ -315,7 +315,7 @@ mod tests {
         let json = serde_json::to_value(&v).unwrap();
         assert_eq!(json["schema"], protocol::VERSION_SCHEMA);
         assert_eq!(json["protocol_version"], "v1");
-        assert_eq!(json["postgres_version"], "16.14.0");
+        assert_eq!(json["postgres_version"], "16.15.0");
         assert_eq!(json["license"], "PostgreSQL");
         assert_eq!(json["postgres_binary_source"], "theseus-bundled");
         assert!(json["build_time_unix"].as_u64().unwrap() > 0);

@@ -2,7 +2,7 @@
 
 > STATUS: Planning（第一阶段评估完成，未实施）
 >
-> 适用版本：PostgreSQL 16.14.0+（内置 sidecar 16.14.0，外置模式同版本下限，见 [CONTRIBUTING](../CONTRIBUTING.md)「项目完整技术栈」）。声明式分区自 10 起可用，`DETACH PARTITION ... CONCURRENTLY` 自 14 起可用
+> 适用版本：PostgreSQL 16.15.0+（内置 sidecar 16.15.0，外置模式同版本下限，见 [CONTRIBUTING](../CONTRIBUTING.md)「项目完整技术栈」）。声明式分区自 10 起可用，`DETACH PARTITION ... CONCURRENTLY` 自 14 起可用
 >
 > 读者：数据库/数据工程人员（DBA）；所有 schema 变更须以 Alembic 迁移交付，见「前置条件与风险」
 
