@@ -31,7 +31,6 @@
 | P3-ExcUtils-NoteLazy-Classify | utils/ 层 except Exception 已标记 NOTE(lazy)，待评估统一走 classify\_error | P3 | ① utils 层再次出现未分类 `except Exception` 的新实例时；② 或 utils 层异常处理被统一改造时 |
 | P3-RedlineAuto-Coverage-Partial | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R22/R23/R24 为报告/告警模式的部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | P3 | ① pre-commit / CI 检出红线违规新实例时；② 或事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）出现误报案例时 |
 | P3-Rust-Coverage-D38 | Rust sidecar unit 覆盖率 run.rs 15.68% 未达行覆盖率目标 85%（D38，maint.rs/pgbin.rs 已达标） | P3 | ① `cargo llvm-cov` 覆盖率回归（run.rs 覆盖率下降或门禁失败）时；② 或 run.rs supervisor 可测路径被独立重构时 |
-| P3-E2E-Windows-Embedded-Timeout-Tight | E2E Tests (Windows) embedded 模式 job `timeout-minutes` 余量不足（embedded 模式 > 45 分钟 / 原 45 分钟 = 100% 占用） | P3 | ① E2E Tests (Windows) embedded 模式实际运行时间 ≥ 55 分钟（92% 占用 60 分钟 timeout）；② 或连续 3 次 PR 触发 E2E Tests (Windows) 超时；③ 或 E2E 测试总数增长 ≥ 20%（如新增 9 个测试） |
 | P2-Fi25-Rust-Injection-Missing | 失败注入场景 #25（数据页 checksum 错误）缺 Rust 集成测试 | P2 | ① sidecar 引入运行期 postgres 日志监控需求时；② 或数据页损坏问题在生产环境报告时 |
 | P3-App-SyncFunctions-In-Async-Bootstrap | `initialize_services` 中同步函数（preload\_aliases/validate\_failover/validate\_strategy\_tier）阻塞事件循环（合理设计决策） | P3 | ① 这些函数引入网络/磁盘 IO；② 或启动期 UI 响应延迟被用户感知时 |
 | P3-M4-DbMigrator-OrphanHeal-SingleChain-Assumption | `_heal_orphaned_revision` 假设严格线性单链迁移（已文档化设计限制） | P3 | 引入 Alembic 多分支（Multiple Heads）时 |
@@ -212,20 +211,6 @@ Rust sidecar 工程要求 unit 行覆盖率目标 ≥85%。2026-07-28 已补测 
 **期望的最终解法**
 
 补测 `run.rs` supervisor 路径至 ≥85% 后：① 提升 `sidecar.yml` 门禁至 `--fail-under-lines 85`；② 更新本条目（D38）状态为已解决。验收标准：① `cargo llvm-cov --fail-under-lines 85` 通过；② run.rs supervisor 分支有单测覆盖（mock postgresql\_embedded 或重构可测路径）。upgrade 触发条件：① `cargo llvm-cov` 覆盖率回归（run.rs 覆盖率下降或门禁失败）时；② 或 run.rs supervisor 可测路径被独立重构时。
-
-#### P3-E2E-Windows-Embedded-Timeout-Tight：E2E Tests (Windows) embedded 模式 job `timeout-minutes` 余量不足（embedded 模式 > 45 分钟 / 原 45 分钟 = 100% 占用）
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-E2E-Windows-Embedded-Timeout-Tight** | E2E Tests (Windows) embedded 模式 job `timeout-minutes` 余量不足（embedded 模式 > 45 分钟 / 原 45 分钟 = 100% 占用） | ① E2E Tests (Windows) embedded 模式实际运行时间 ≥ 55 分钟（92% 占用 60 分钟 timeout）；② 或连续 3 次 PR 触发 E2E Tests (Windows) 超时；③ 或 E2E 测试总数增长 ≥ 20%（如新增 9 个测试） |
-
-**产生背景与现状**
-
-PR #291 方案 B 将 E2E Tests (Windows) 从外置 PostgreSQL 改为 embedded 模式（spec.md §3 不变量 1：embedded 为默认）。外置 PostgreSQL 模式（main 分支）总时长 31 分钟（run 30151665758，2026-07-25），原 job `timeout-minutes: 45` 余量 14 分钟（\~31%）。embedded 模式需要构建 sidecar binary + PG 16 initdb + 44 个 E2E 测试，总时长 > 45 分钟（run 30183636080 在 45 分钟 timeout 时被取消，未完成）。embedded 模式比外置 PostgreSQL 模式慢的原因：① sidecar 构建（Cargo build）约 3-5 分钟；② PG 16 initdb + sidecar 启动约 5-10 分钟；③ embedded 模式下 DB 操作可能比外置 PostgreSQL 慢。本次 PR #291 修复将 job `timeout-minutes` 从 45 提升至 60（余量 \~15 分钟 / \~25%，2026-10-25 复核确认 `e2e-tests-windows` 为 job 级 timeout），属短期止血；长期需优化 E2E Tests 性能或拆分 job。根因在 embedded 模式的资源密集特性（每个 Flet 子进程启动 sidecar + PG 16 initdb），与 Windows runner 性能波动叠加易突破 timeout。相关文件：`.github/workflows/ci_cd.yml` 的 `e2e-tests-windows` job、`tests/e2e/conftest.py`。
-
-**期望的最终解法**
-
-长期优化方案（任选其一或组合）：① 用 `pytest --durations=20` 识别 embedded 模式下最慢的 20 个 E2E 测试并优化（如减少 sidecar 启动等待时间、并行化独立测试）；② 将 `tests/e2e/` 拆分为 2-3 个并行 job（如按 `test_onboarding_*`、`test_screener_*`、`test_settings_*` 等模块拆分），缩短 wall clock；③ 优化 sidecar 启动流程（如复用 PGDATA 目录、跳过重复 initdb）；④ 评估是否部分 E2E 测试可回退到外置 PostgreSQL 模式（仅 embedded 特性测试用 embedded 模式）。验收标准：① E2E Tests (Windows) embedded 模式实际运行时间 ≤ 40 分钟（余量 ≥ 20 分钟 / \~33%）；② 拆分 job 后各 job wall clock ≤ 30 分钟；③ 现有测试全过且无新增 flaky。upgrade 触发条件：① E2E Tests (Windows) embedded 模式实际运行时间 ≥ 55 分钟（92% 占用 60 分钟 timeout）；② 或连续 3 次 PR 触发 E2E Tests (Windows) 超时；③ 或 E2E 测试总数增长 ≥ 20%（如新增 9 个测试）。
 
 #### P2-Fi25-Rust-Injection-Missing：失败注入场景 #25（数据页 checksum 错误）缺 Rust 集成测试
 

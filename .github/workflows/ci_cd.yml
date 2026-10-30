@@ -397,10 +397,10 @@ jobs:
               tests/e2e/test_production_mount.py
               tests/e2e/test_r01_dialog_height.py
               tests/e2e/test_sidecar_real_smoke.py
-    # 原单 job 串行耗时 >45 分钟（run 30183636080 在 45 分钟 timeout 被取消）；
-    # 分组后保留 60 分钟上限，避免初始化抖动造成误取消，后续按实测时长收紧。
-    # 长期优化见 P3-E2E-Windows-Embedded-Timeout-Tight。
-    timeout-minutes: 60
+    # 拆分前单 job 串行耗时 >45 分钟（run 30183636080 在 45 分钟 timeout 被取消）；
+    # 2026-10-30 run 41034661213 实测 4 组 wall clock 分别 4.6 / 10.6 / 5.2 / 6.9 分钟，
+    # 故上限收紧到 30 分钟（最慢组余量 ~19 分钟 / ~65%），避免异常挂起长期占用 runner。
+    timeout-minutes: 30
     permissions:
       contents: read
 

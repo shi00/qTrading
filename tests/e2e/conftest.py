@@ -1156,7 +1156,8 @@ async def _trigger_sidecar_startup_via_browser(
     6s 出现，但 main(page) 后续流程：CacheManager.init_db → alembic upgrade head →
     TaskManager.init_db → UI 渲染在 294s 内未完成）。alembic upgrade head 首次迁移
     需创建 15+ 张表，Windows CI runner 上磁盘 IO 慢导致超时。600s 与 pytest-timeout
-    一致，留余量。长期优化见 P3-E2E-Windows-Embedded-Timeout-Tight。
+    一致，留余量。E2E 已按 4 组矩阵拆分（见 ci_cd.yml 的 e2e-tests-windows），单组实测
+    wall clock ≤ 11 分钟。
     """
     logger.info("[E2E Seeding] triggering main(page) via temp browser page to start sidecar")
     context = await e2e_browser.new_context()
