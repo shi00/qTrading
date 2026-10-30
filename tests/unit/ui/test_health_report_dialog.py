@@ -341,6 +341,83 @@ class TestKeyMetricsGrid:
         value_text = lag_tile.content.controls[1]
         assert value_text.color == self.mock_ac.SUCCESS
 
+    # ---- R21 (F22-004): 缺失指标不得伪装成「零延迟/零缺口/零异常」 ----
+
+    def _tiles(self, market: dict, fundamentals: dict):
+        from ui.components.health_report_dialog import _build_key_metrics_grid
+
+        grid = _build_key_metrics_grid(market, fundamentals)
+        first_row = grid.controls[1]
+        return [tile.content.controls[1] for tile in first_row.controls]
+
+    def test_missing_keys_render_na_with_neutral_color(self):
+        """键缺失（真实报告不含 gap_count/sanity_errors）→ N/A + TEXT_HINT，不得绿色 0。"""
+        lag_text, gap_text, sanity_text = self._tiles({}, {})
+        assert lag_text.value == "health_not_available"
+        assert gap_text.value == "health_not_available"
+        assert sanity_text.value == "health_not_available"
+        assert lag_text.color == self.mock_ac.TEXT_HINT
+        assert gap_text.color == self.mock_ac.TEXT_HINT
+        assert sanity_text.color == self.mock_ac.TEXT_HINT
+
+    def test_none_values_render_na_with_neutral_color(self):
+        """键存在但值为 None → N/A + TEXT_HINT（缺失 ≠ 业务合法值 0）。"""
+        lag_text, gap_text, sanity_text = self._tiles(
+            {"lag_days": None},
+            {"gap_count": None, "sanity_errors": None},
+        )
+        for text in (lag_text, gap_text, sanity_text):
+            assert text.value == "health_not_available"
+            assert text.color == self.mock_ac.TEXT_HINT
+
+    def test_true_zero_renders_zero_with_success_color(self):
+        """显式 0（已计算且为 0）仍渲染 0 + SUCCESS，与缺失语义区分。"""
+        lag_text, gap_text, sanity_text = self._tiles(
+            {"lag_days": 0},
+            {"gap_count": 0, "sanity_errors": 0},
+        )
+        assert lag_text.value == f"0 {self.mock_i18n.get('common_suffix_day')}"
+        assert gap_text.value == "0"
+        assert sanity_text.value == "0"
+        for text in (lag_text, gap_text, sanity_text):
+            assert text.color == self.mock_ac.SUCCESS
+
+    def test_mixed_missing_and_present_values(self):
+        """混合缺失：逐指标独立判定，不得因某项存在而把其余项补 0。"""
+        lag_text, gap_text, sanity_text = self._tiles(
+            {"lag_days": 3},
+            {"gap_count": 0},
+        )
+        assert lag_text.value == f"3 {self.mock_i18n.get('common_suffix_day')}"
+        assert lag_text.color == self.mock_ac.ERROR
+        assert gap_text.value == "0"
+        assert gap_text.color == self.mock_ac.SUCCESS
+        assert sanity_text.value == "health_not_available"
+        assert sanity_text.color == self.mock_ac.TEXT_HINT
+
+    def test_numeric_string_rendered_as_number(self):
+        """旧缓存/序列化把数值写成字符串时仍按数值渲染（"2" → 2 + ERROR）。"""
+        lag_text, gap_text, sanity_text = self._tiles(
+            {"lag_days": "2"},
+            {"gap_count": "1", "sanity_errors": "0"},
+        )
+        assert lag_text.value == f"2 {self.mock_i18n.get('common_suffix_day')}"
+        assert lag_text.color == self.mock_ac.ERROR
+        assert gap_text.value == "1"
+        assert gap_text.color == self.mock_ac.ERROR
+        assert sanity_text.value == "0"
+        assert sanity_text.color == self.mock_ac.SUCCESS
+
+    def test_non_numeric_or_non_finite_values_render_na(self):
+        """非数值字符串 / NaN → N/A + TEXT_HINT，不得回落 0。"""
+        lag_text, gap_text, sanity_text = self._tiles(
+            {"lag_days": "unknown"},
+            {"gap_count": float("nan"), "sanity_errors": True},
+        )
+        for text in (lag_text, gap_text, sanity_text):
+            assert text.value == "health_not_available"
+            assert text.color == self.mock_ac.TEXT_HINT
+
 
 class TestCoverageDetailTable:
     """CoverageDetailTable 测试（Phase E.3 重写后由 _build_coverage_detail_table 纯函数替代）。
