@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-#define MyAppVersion "0.11.2" ; x-release-please-version
+#define MyAppVersion "0.11.3" ; x-release-please-version
 #endif
 
 #ifndef TargetVariant
