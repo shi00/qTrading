@@ -96,7 +96,9 @@ try {
     Stop-QtradingGraceful
     $uninstaller = Join-Path $AppInstallDir "unins000.exe"
     if (Test-Path $uninstaller) {
-        & $uninstaller /SILENT /NORESTART 2>$null | Out-Null
+        # Inno Setup 的卸载器是 GUI 程序，PowerShell `&` 调用不会等待其结束；
+        # 必须 -Wait，否则后续安装/启动会与卸载并行，读到半删除的安装目录。
+        Start-Process -FilePath $uninstaller -ArgumentList '/SILENT', '/NORESTART' -Wait | Out-Null
         Start-Sleep -Seconds 5
     }
     if (Test-Path $AppInstallDir) {
@@ -112,13 +114,23 @@ try {
 
     # STEP 2: 安装 embedded variant
     Write-Step "2. Install embedded variant"
-    & $InstallerPath /SILENT /NORESTART
-    Start-Sleep -Seconds 5
+    # Inno Setup 安装器是 GUI 程序，PowerShell `&` 调用立即返回、不等待解包完成；
+    # 5s 后仅凭 EXE 存在就启动，会在 _internal 尚未解包完时启动主程序
+    # （PyInstaller onedir 缺 python313.dll 等 → 进程无日志静默退出，
+    #  v0.11.1/v0.11.2 tag run 的 crash_recovery 失败即此原因）。必须 -Wait 并校验退出码。
+    $installerProc = Start-Process -FilePath $InstallerPath -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait
+    Assert-True ($installerProc.ExitCode -eq 0) "Installer finished (exit code: $($installerProc.ExitCode))"
     Assert-True (Test-Path $AppExePath) "App installed: $AppExePath"
 
     # STEP 3: 启动 qTrading，等待 sidecar ready
     Write-Step "3. Start qTrading & wait for sidecar ready"
     $proc = Start-Process -FilePath $AppExePath -PassThru
+    Start-Sleep -Seconds 3
+    if ($proc.HasExited) {
+        # 主进程启动即退出：通常是安装不完整或启动期异常，先 dump 诊断再断言，避免只看到超时
+        Write-Host "[DIAG] app process exited early with code $($proc.ExitCode)"
+        Write-Diagnostics "app process exited immediately after start (code $($proc.ExitCode))"
+    }
     $ready = Wait-SidecarReady -TimeoutSec 60
     if (-not $ready) {
         # 主进程存活但 sidecar 未出现：dump 安装的 sidecar 文件与主程序/sidecar 日志便于定位
@@ -148,22 +160,46 @@ try {
         Write-Ok "Main process killed (PID: $($proc.Id))"
     }
 
-    # STEP 6: 等待 Job Object 触发 sidecar+postgres 退出
-    Write-Step "6. Wait for Job Object to terminate sidecar (5s grace period)"
-    Start-Sleep -Seconds 5
-
-    # STEP 7: 验证 sidecar 无残留（核心断言 - Job Object 机制）
-    Write-Step "7. Verify no residual sidecar process (Job Object killed it)"
+    # STEP 6: 等待 sidecar 自行退出（父进程兜底机制：`--parent-pid` 每 500ms 轮询 + stdin EOF）
+    # 注意：sidecar 的父进程检测循环在 postgres ready（打印 ready JSON）之后才启动；
+    # 首次启动（initdb）期间父进程被杀时，sidecar 会先完成 initdb 再检测到父进程消失，
+    # 实测可耗时数十秒，因此上限取 180s（原先固定 5s 会必然失败，且代码中并无 Job Object）。
+    Write-Step "6. Wait for sidecar to exit after parent crash (up to 180s)"
+    $waitStarted = Get-Date
+    $deadline = $waitStarted.AddSeconds(180)
     $sidecarAfter = Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue
+    while ($sidecarAfter -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 5
+        $sidecarAfter = Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue
+    }
+    $waitedSecs = [int]((Get-Date) - $waitStarted).TotalSeconds
+    if ($sidecarAfter) {
+        Write-Host "  [DIAG] sidecar still alive after ${waitedSecs}s: PID(s) $($sidecarAfter.Id -join ',')"
+        Write-Diagnostics "sidecar still alive 180s after parent crash"
+    } else {
+        Write-Host "  sidecar exited after ~${waitedSecs}s"
+    }
+
+    # STEP 7: 验证 sidecar 无残留（核心断言：父进程崩溃后 sidecar 最终自行退出）
+    Write-Step "7. Verify no residual sidecar process (parent-loss watchdog exited it)"
     Assert-True ($null -eq $sidecarAfter) "No residual sidecar process after main crash"
 
-    # STEP 8: 验证 postgres 无残留
+    # STEP 8: 验证 postgres 无残留（sidecar 退出后由 graceful stop 关闭 postgres，留出停机余量）
     Write-Step "8. Verify no residual postgres process"
     $postgresAfter = Get-Process -Name "postgres" -ErrorAction SilentlyContinue
+    $pgDeadline = (Get-Date).AddSeconds(30)
+    while ($postgresAfter -and (Get-Date) -lt $pgDeadline) {
+        Start-Sleep -Seconds 3
+        $postgresAfter = Get-Process -Name "postgres" -ErrorAction SilentlyContinue
+    }
+    if ($postgresAfter) {
+        Write-Host "  [DIAG] postgres still alive: PID(s) $($postgresAfter.Id -join ',')"
+        Write-Diagnostics "postgres still alive 30s after sidecar exit"
+    }
     Assert-True ($null -eq $postgresAfter) "No residual postgres process after main crash"
 
     Write-Host "`n=== CRASH RECOVERY SMOKE TEST PASSED ===" -ForegroundColor Green
-    Write-Host "Job Object mechanism verified: parent crash → sidecar+postgres auto-exit" -ForegroundColor Green
+    Write-Host "Parent-crash recovery verified: parent crash -> sidecar exits (parent-loss watchdog), postgres shut down" -ForegroundColor Green
     exit 0
 }
 catch {

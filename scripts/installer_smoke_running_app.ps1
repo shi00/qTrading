@@ -60,7 +60,8 @@ try {
     Stop-QtradingGraceful
     $uninstaller = Join-Path $AppInstallDir "unins000.exe"
     if (Test-Path $uninstaller) {
-        & $uninstaller /SILENT /NORESTART 2>$null | Out-Null
+        # Inno Setup 卸载器是 GUI 程序，`&` 调用不等待其结束，必须 -Wait。
+        Start-Process -FilePath $uninstaller -ArgumentList '/SILENT', '/NORESTART' -Wait | Out-Null
         Start-Sleep -Seconds 5
     }
     if (Test-Path $AppInstallDir) {
@@ -70,9 +71,10 @@ try {
 
     # STEP 2: 先安装一次（确保有 EXE 可启动）
     Write-Step "2. Install application (initial install)"
-    & $InstallerPath /SILENT /NORESTART
-
-    Start-Sleep -Seconds 5
+    # Inno Setup 安装器是 GUI 程序，`&` 调用立即返回、不等待解包完成；
+    # 必须在 -Wait 下等待安装结束再启动 EXE，否则主程序会在 _internal 未就绪时静默退出。
+    $installerProc = Start-Process -FilePath $InstallerPath -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait
+    Assert-True ($installerProc.ExitCode -eq 0) "Installer finished (exit code: $($installerProc.ExitCode))"
     Assert-True (Test-Path $AppExePath) "App installed: $AppExePath"
 
     # STEP 3: 启动 qTrading（保持运行中）
@@ -83,8 +85,8 @@ try {
 
     # STEP 4: 在 qTrading 运行中尝试安装（应被拒绝）
     Write-Step "4. Attempt install while qTrading running (should be rejected)"
-    $installResult = & $InstallerPath /SILENT /NORESTART 2>&1
-    $installExitCode = $LASTEXITCODE
+    $reinstallProc = Start-Process -FilePath $InstallerPath -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait
+    $installExitCode = $reinstallProc.ExitCode
 
     Write-Host "  Installer exit code: $installExitCode"
 
@@ -117,8 +119,8 @@ try {
 
         # STEP 7: sidecar 运行中尝试安装（应被拒绝）
         Write-Step "7. Attempt install while sidecar running (should be rejected, P1-11)"
-        $installResult2 = & $InstallerPath /SILENT /NORESTART 2>&1
-        $installExitCode2 = $LASTEXITCODE
+        $reinstallProc2 = Start-Process -FilePath $InstallerPath -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait
+        $installExitCode2 = $reinstallProc2.ExitCode
 
         Write-Host "  Installer exit code: $installExitCode2"
         Assert-True ($installExitCode2 -ne 0) "Installer rejected (exit code non-zero: $installExitCode2)"

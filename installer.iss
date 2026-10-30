@@ -81,7 +81,10 @@ function InitializeSetup(): Boolean;
 begin
   if IsProcessRunning('AStockScreener.exe') then
   begin
-    MsgBox('AStockScreener 正在运行，请先关闭后再升级。', mbError, MB_OK);
+    // /SILENT 与 /VERYSILENT 下不得弹模态框：安装脚本（CI 冒烟）需能拿到退出码，
+    // 否则 MsgBox 会挂起等待点击，Start-Process -Wait 永不返回（run 40988072135 即此现象）
+    if not WizardSilent() then
+      MsgBox('AStockScreener 正在运行，请先关闭后再升级。', mbError, MB_OK);
     Result := False;
     Exit;
   end;
@@ -90,7 +93,9 @@ begin
   // 避免升级期间 sidecar 持有 PGDATA 文件锁导致 [UninstallRun] stop 失败
   if IsProcessRunning('qtrading-pg-sidecar.exe') then
   begin
-    MsgBox('qTrading 数据库服务正在运行，请先关闭 qTrading 后再升级。', mbError, MB_OK);
+    // 同上：静默模式不弹框，只返回拒绝（非零退出码）
+    if not WizardSilent() then
+      MsgBox('qTrading 数据库服务正在运行，请先关闭 qTrading 后再升级。', mbError, MB_OK);
     Result := False;
     Exit;
   end;
