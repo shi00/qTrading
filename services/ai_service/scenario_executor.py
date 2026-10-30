@@ -7,7 +7,8 @@
 关键契约（方案 §6.2 固定执行流程）：
 - **执行序**：父请求建立（F16，先于候选遍历——全候选被拒 / deadline 耗尽等
   零尝试请求同样在请求页可查）→ 冷却检查 → 连接并发许可（排队计入 deadline）→
-  逐实际尝试原子预算预留（F16，D3 月锁内 try_reserve）→ mark_dispatched 绑定
+  逐实际尝试原子预算预留（F16，D3 月锁内 try_reserve；F19：费用型金额按连接
+  计价冻结快照 + 请求 payload 估算，dispatch 不伪造 0 金额）→ mark_dispatched 绑定
   派发身份 → 逐次 authorize_attempt（每次尝试单独授权，不预发下一次重试的
   许可）→ begin_attempt 建立实际尝试记录 → 适配器执行；不在安全许可后再排队
   （§4.3）；F26 连接资格门控（禁用 / 已确认不支持任务，按冻结快照证据）先于
@@ -67,9 +68,11 @@ from core.model_management_types import (
 )
 from services.ai_service.connection_pricing import (
     ConnectionPricing,
+    compute_cost_cny,
     parse_connection_pricing,
     pricing_snapshot_metadata,
 )
+from services.ai_service.token_budget import OUTPUT_RESERVE_TOKENS, _estimate_tokens
 from utils.loop_local import get_loop_local
 from utils.error_classifier import classify_error
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -479,7 +482,16 @@ class ScenarioExecutor:
                 usages=(),
             )
 
-        budget_amount = cand.get("budget_amount_cny")
+        # F19：单次预留金额按连接计价快照 + 请求 payload 估算（dispatch 不持有
+        # payload，不伪造金额）；未配置月限额 → usage_only（金额 NULL 不占预算）；
+        # 限额已配置但计价 / 用量不可估算 → None（usage_only 语义，不把未知成本
+        # 当 0 占位，R21）。
+        budget_limit = cand.get("budget_limit_cny")
+        budget_amount = (
+            _estimate_reservation_amount(pricing, request.payload, model=connection.model)
+            if budget_limit is not None
+            else None
+        )
         last_reason = "exhausted"
         # F27：尝试预算可由路由冻结快照的瞬态重试策略（transient_retries）驱动
         # （execute 计算传入）；None 回退构造默认。
@@ -511,8 +523,9 @@ class ScenarioExecutor:
 
             try:
                 # F16 逐实际尝试原子预留（每次真实尝试独立预留，预留 ↔ attempt 生命
-                # 周期对齐：该次终态同事务结算该次预留）：费用型候选带预算身份
-                # （dispatch 冻结），usage_only 候选登记 NULL 金额预留（不占预算）。
+                # 周期对齐：该次终态同事务结算该次预留）：限额候选携带执行侧估算
+                # 金额（F19，dispatch 冻结限额 / 计价快照，金额按 payload 估算），
+                # usage_only 候选登记 NULL 金额预留（不占预算）。
                 # 前次失败尝试的预留已随其 failed 终态 settled 退出在途占用，预算
                 # 门逐尝试独立判定，无跨尝试双计。
                 reserve_outcome = await self._recorder.try_reserve(
@@ -526,7 +539,7 @@ class ScenarioExecutor:
                     candidate_index=int(cand.get("candidate_index", 0)),
                     retry_index=retry_index,
                     amount_cny=budget_amount,
-                    budget_limit_cny=cand.get("budget_limit_cny"),
+                    budget_limit_cny=budget_limit,
                     budget_policy_snapshot=cand.get("budget_policy_snapshot"),
                     owner_session_id=owner_session_id,
                     owner_epoch=owner_epoch,
@@ -1205,6 +1218,62 @@ def _terminal_record(
 def _elapsed_ms(clock: Callable[[], float], started_at: float) -> float:
     """尝试真实耗时（毫秒）：尝试起点 → 终态构造时点（F34，clock 单调非负）。"""
     return (clock() - started_at) * 1000.0
+
+
+def _estimate_reservation_amount(
+    pricing: ConnectionPricing | None,
+    payload: Mapping[str, Any],
+    *,
+    model: str,
+) -> str | None:
+    """按连接计价冻结快照 + 请求 payload 估算单次预留金额（F19，CNY 十进制串）。
+
+    dispatch 不持有请求 payload，单次金额只能在执行侧逐候选估算；估算口径与
+    结算同源（``compute_cost_cny``，不可计价一律 ``None``）：
+    - ``llm_tokens``：输入 = ``system_prompt`` + ``prompt`` 的 token 估算；输出
+      取 payload ``max_tokens``（未声明时按 ``OUTPUT_RESERVE_TOKENS`` 保守预留）；
+    - ``encoder_input_tokens``：payload ``texts`` 逐条 token 估算求和；
+    - 计价快照缺失 / ``mode`` 非 ``estimate_cost`` / 单价或用量不可得 → ``None``
+      （usage_only 语义：金额 NULL 不占预算；R21：未知成本不以 0 占位）。
+    """
+    if pricing is None or pricing.mode != "estimate_cost":
+        return None
+    if pricing.pricing_unit == "llm_tokens":
+        input_tokens = _estimate_tokens(payload.get("system_prompt"), model) + _estimate_tokens(
+            payload.get("prompt"), model
+        )
+        if input_tokens <= 0:
+            return None
+        raw_max_tokens = payload.get("max_tokens")
+        output_tokens = (
+            raw_max_tokens
+            if isinstance(raw_max_tokens, int) and not isinstance(raw_max_tokens, bool) and raw_max_tokens > 0
+            else OUTPUT_RESERVE_TOKENS
+        )
+        usage = NormalizedLLMUsage(
+            input_total_tokens=input_tokens,
+            uncached_input_tokens=input_tokens,
+            cache_read_tokens=None,
+            cache_write_tokens=None,
+            output_tokens=output_tokens,
+        )
+        return compute_cost_cny(pricing, usage)
+    if pricing.pricing_unit == "encoder_input_tokens":
+        texts = payload.get("texts")
+        if not isinstance(texts, (list, tuple)) or not texts:
+            return None
+        tokens = sum(_estimate_tokens(text, model) for text in texts)
+        if tokens <= 0:
+            return None
+        usage = NormalizedLLMUsage(
+            input_total_tokens=0,
+            uncached_input_tokens=0,
+            cache_read_tokens=None,
+            cache_write_tokens=None,
+            output_tokens=0,
+        )
+        return compute_cost_cny(pricing, usage, encoder_input_tokens=tokens)
+    return None
 
 
 def _budget_policy_snapshot(route: Mapping[str, Any] | None) -> dict[str, Any] | None:
