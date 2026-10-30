@@ -45,6 +45,7 @@ from services.local_model_manager import (
     LocalModelManager,
 )
 from utils.egress_ack import is_egress_acknowledged
+from utils.egress_audit import destination_host_from_url
 from utils.error_classifier import classify_error, classify_severity, log_classified
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -111,6 +112,42 @@ def _resolve_effective_model(llm_config: dict, model_override: str | None) -> st
     provider = llm_config.get("provider", "")
     model_id = llm_config.get("model", "")
     return f"{provider}/{model_id}" if provider else model_id
+
+
+async def _audit_egress_outcome(
+    *,
+    destination: str,
+    category: str,
+    item_count: int,
+    payload_size_bytes: int,
+    status: str,
+    destination_host: str | None,
+    error_category: str | None = None,
+) -> None:
+    """SEC-03（UIR-F23-003）：按一次尝试的**最终结果**落一条外发审计记录。
+
+    dispatch 前记录「意图」会把未成功的尝试也渲染为 ``sent``，审计因此无法回答
+    「是否真的外发成功、发往哪」。本函数在结果确定后调用：成功 ``sent``、失败/
+    超时/内容拒绝 ``failed`` + ``error_category``、取消 ``cancelled``；每条尝试
+    恰一条记录（不双记意图与结果）。审计写失败仅降级，绝不改变主流程结果；
+    ``CancelledError`` 仍传播（R2）。不记录 prompt / 响应正文（防二次泄露）。
+    """
+    try:
+        from utils.egress_audit import EgressAudit
+
+        await EgressAudit().record(
+            destination=destination,
+            category=category,
+            item_count=item_count,
+            payload_size_bytes=payload_size_bytes,
+            status=status,
+            destination_host=destination_host,
+            error_category=error_category,
+        )
+    except asyncio.CancelledError:
+        raise  # R2: 必须传播
+    except Exception:
+        pass  # 审计失败不阻断 AI 主流程
 
 
 def normalize_litellm_usage(usage: Any) -> NormalizedLLMUsage | None:
@@ -943,60 +980,75 @@ class LiteLLMClient:
         if payload.get("json_mode"):
             request_params["response_format"] = {"type": "json_object"}
 
-        # SEC-03（R06-D2）：统一链云出口接既有 EgressAudit（审计状态栏消费同一账本，
-        # 禁止平行账本）。dispatch 前按意图记录一次，destination 用真实发送的
-        # litellm_model（含 provider 前缀，语义同旧链 effective model 单点解析），
-        # category 用场景 id（stock_analysis / news_annotation / news_risk /
-        # synthetic_test，比旧链 analysis/news 二值更精确）；不记录 prompt 内容本身
-        # （防二次泄露）。审计失败不阻断 AI 主流程（R2：CancelledError 必须传播）。
-        try:
-            from utils.egress_audit import EgressAudit
-
-            await EgressAudit().record(
-                destination=f"llm:{litellm_model}",
-                category=request.scenario_id,
-                item_count=len(messages),
-                payload_size_bytes=sum(len(m.get("content") or "") for m in messages),
-            )
-        except asyncio.CancelledError:
-            raise  # R2: 必须传播
-        except Exception:
-            pass
+        # SEC-03（R06-D2 / UIR-F23-003）：统一链云出口接既有 EgressAudit（审计状态栏
+        # 消费同一账本，禁止平行账本）。每条记录 = 一次尝试的**最终结果**（意图与结果
+        # 合并为一条，避免「意图 sent + 结果 failed」双记导致审计误判）：成功 sent、
+        # 失败/超时 failed（附 classify_error 分类码）、取消 cancelled（R2 照常传播）。
+        # destination 用真实发送的 litellm_model（含 provider 前缀），category 用场景 id
+        # （stock_analysis / news_annotation / news_risk / synthetic_test，比旧链
+        # analysis/news 二值更精确）；destination_host 为连接 api_base 的 host[:port]
+        # （自定义出口代理可见，剔除凭据/路径，R9），api_base 缺失记 None（R21）。
+        # 不记录 prompt / 响应正文（防二次泄露）；审计失败不阻断 AI 主流程。
+        audit_kwargs: dict = {
+            "destination": f"llm:{litellm_model}",
+            "category": request.scenario_id,
+            "item_count": len(messages),
+            "payload_size_bytes": sum(len(m.get("content") or "") for m in messages),
+            "destination_host": destination_host_from_url(resolved_connection.api_base),
+        }
 
         from utils.proxy_manager import ProxyManager
 
-        with ProxyManager.litellm_env_context():
-            response = await _ai.acompletion(**request_params)
+        # 记录范围覆盖 dispatch + 响应解释全段：任一环节失败都回写 failed，避免
+        # 「已出站但无审计」或「失败被记成 sent」。异常解释与结果记录都在同一
+        # try/except 内完成，保证每次尝试恰一条记录（无意图+结果双记）。
+        try:
+            with ProxyManager.litellm_env_context():
+                response = await _ai.acompletion(**request_params)
 
-        # F27 内容安全拒绝提取（云响应 → 策略终态信号）：只读 content 会把 refusal /
-        # content_filter 伪装成「无输出」，Executor 将按输出非法类切换候选绕过安全
-        # 拒绝。此处将拒绝信号提炼为 AIContentRefusedError（策略终态，Executor 终止
-        # 整个候选遍历，禁止重试与换候选绕过）。
-        # 覆盖边界（R21 诚实声明）：识别 OpenAI 兼容 chat completions 响应模式的
-        # ``message.refusal`` 与 ``finish_reason == "content_filter"``（OpenAI / Azure
-        # 及 LiteLLM 归一化透传该模式的 provider；SDK 层内容策略异常
-        # ContentPolicyViolationError 由 Executor 异常分类承载）；Anthropic / Gemini
-        # 等原生拒绝块格式（如 Gemini promptFeedback.blockReason）未核验、不伪装
-        # 已覆盖。Retry-After 同理仅承诺数值形态（见 Executor _backoff）。
-        choice = response.choices[0]
-        message = choice.message  # type: ignore[union-attr]
-        content = message.content  # type: ignore[union-attr]
-        refusal = getattr(message, "refusal", None)
-        finish_reason = getattr(choice, "finish_reason", None)
-        if (isinstance(refusal, str) and refusal.strip()) or finish_reason == "content_filter":
-            logger.warning(
-                "[AIService] UnifiedChain | Content refused by provider policy "
-                "(refusal=%s, finish_reason=%s) — raising terminal refusal for scenario '%s'",
-                bool(refusal),
-                finish_reason,
-                request.scenario_id,
+            # F27 内容安全拒绝提取（云响应 → 策略终态信号）：只读 content 会把 refusal /
+            # content_filter 伪装成「无输出」，Executor 将按输出非法类切换候选绕过安全
+            # 拒绝。此处将拒绝信号提炼为 AIContentRefusedError（策略终态，Executor 终止
+            # 整个候选遍历，禁止重试与换候选绕过）。
+            # 覆盖边界（R21 诚实声明）：识别 OpenAI 兼容 chat completions 响应模式的
+            # ``message.refusal`` 与 ``finish_reason == "content_filter"``（OpenAI / Azure
+            # 及 LiteLLM 归一化透传该模式的 provider；SDK 层内容策略异常
+            # ContentPolicyViolationError 由 Executor 异常分类承载）；Anthropic / Gemini
+            # 等原生拒绝块格式（如 Gemini promptFeedback.blockReason）未核验、不伪装
+            # 已覆盖。Retry-After 同理仅承诺数值形态（见 Executor _backoff）。
+            choice = response.choices[0]
+            message = choice.message  # type: ignore[union-attr]
+            content = message.content  # type: ignore[union-attr]
+            refusal = getattr(message, "refusal", None)
+            finish_reason = getattr(choice, "finish_reason", None)
+            if (isinstance(refusal, str) and refusal.strip()) or finish_reason == "content_filter":
+                logger.warning(
+                    "[AIService] UnifiedChain | Content refused by provider policy "
+                    "(refusal=%s, finish_reason=%s) — raising terminal refusal for scenario '%s'",
+                    bool(refusal),
+                    finish_reason,
+                    request.scenario_id,
+                )
+                raise AIContentRefusedError(
+                    Message("llm_err_content_policy"),
+                    detail="Provider content policy refusal extracted from non-streaming response "
+                    "(message.refusal / finish_reason=content_filter).",
+                )
+            usage = normalize_litellm_usage(getattr(response, "usage", None))
+        except asyncio.CancelledError:
+            await _audit_egress_outcome(status="cancelled", error_category="cancelled", **audit_kwargs)
+            raise  # R2: 必须传播
+        except Exception as exc:
+            # 内容拒绝经 AppError.to_error_info 直接给出 content_policy 分类码；
+            # 其余按 llm 语境分类（timeout / network / auth_failed / server_error ...）。
+            await _audit_egress_outcome(
+                status="failed",
+                error_category=classify_error(exc, context="llm").get("code"),
+                **audit_kwargs,
             )
-            raise AIContentRefusedError(
-                Message("llm_err_content_policy"),
-                detail="Provider content policy refusal extracted from non-streaming response "
-                "(message.refusal / finish_reason=content_filter).",
-            )
-        usage = normalize_litellm_usage(getattr(response, "usage", None))
+            raise
+
+        await _audit_egress_outcome(status="sent", **audit_kwargs)
         return AdapterResponse(
             content=content,
             usage=usage,
