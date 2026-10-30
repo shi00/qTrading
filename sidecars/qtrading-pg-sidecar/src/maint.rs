@@ -1009,6 +1009,21 @@ async fn wait_for_enter() {
 
 // ---- reset-password ----
 
+/// 构造 `ALTER USER postgres PASSWORD '<pwd>'` 脚本（经 psql stdin 传入，argv 不含密码，R9）。
+///
+/// 转义规则：按 SQL 标准字面量处理，`'` 双写；脚本首行显式开启 `standard_conforming_strings`，
+/// 保证反斜杠按字面量解释，不依赖会话默认值。含 NUL/CR/LF 的密码无法安全承载于字面量，
+/// 直接拒绝（fail closed；`password::generate_password` 的 CHARSET 不含控制字符）。
+fn alter_user_password_sql(password: &str) -> Result<String, &'static str> {
+    if password.is_empty() || password.chars().any(|c| matches!(c, '\0' | '\r' | '\n')) {
+        return Err("password empty or contains control characters");
+    }
+    let escaped = password.replace('\'', "''");
+    Ok(format!(
+        "SET standard_conforming_strings = on;\nALTER USER postgres PASSWORD '{escaped}';\n"
+    ))
+}
+
 /// 通过临时 `pg_ctl` 启动的 postgres 实例 + 临时 trust pg_hba.conf 重置 postgres 用户密码（§13.7.8）。
 ///
 /// 历史方案 `postgres --single` 单用户模式在 Windows 上被 PostgreSQL 安全限制拒绝
@@ -1019,7 +1034,7 @@ async fn wait_for_enter() {
 /// 流程：acquire_lock → guard_data_dir（仅 Existing）→ ensure_binaries → stale pid 清理 →
 ///       临时改 pg_hba.conf 为 trust（仅 127.0.0.1，RAII guard 出错路径恢复）→
 ///       启动临时 postgres 实例（复用 dump 离线 TempInstance 路径）→
-///       psql 连接执行 `ALTER USER postgres PASSWORD '<new>'`（trust 模式无需密码）→
+///       psql 经 stdin 执行 `ALTER USER postgres PASSWORD '<new>'`（trust 模式无需密码；密码不进 argv）→
 ///       停止实例 → 重写 pg_hba.conf（scram-sha-256，新密码生效）→ 写入新 password file →
 ///       register_secret。
 ///
@@ -1065,6 +1080,9 @@ pub async fn reset_password(args: cli::DataDirArgs) -> Result<(), u8> {
     }
 
     let new_pwd = password::generate_password();
+    // R9：密码生成后立即注册脱敏，确保后续 psql stderr / 日志中的任何回显都替换为 `***`。
+    // 生成器 CHARSET 不含 `'`，SQL 字面量转义形式与明文一致，注册明文即可覆盖回显。
+    logging::register_secret(&new_pwd);
 
     // 临时改 pg_hba.conf 为 trust（仅 127.0.0.1）：绕过密码认证以执行 ALTER USER。
     // 出错路径由 HbaRestoreGuard RAII 恢复原 pg_hba.conf；成功路径在 write_security_baseline
@@ -1084,16 +1102,23 @@ pub async fn reset_password(args: cli::DataDirArgs) -> Result<(), u8> {
     let port = instance.port;
     let install_dir = instance.layout.install_dir.clone();
 
-    // psql 连接执行 ALTER USER（trust 模式忽略 PGPASSWORD）
-    let sql = format!("ALTER USER postgres PASSWORD $${new_pwd}$$;");
-    let alter_result = pgbin::psql(
+    // psql 经 stdin 执行 ALTER USER（trust 模式忽略 PGPASSWORD）：
+    // SQL 含新密码，禁止经 `-c` 进入进程命令行（argv 在 Windows 进程列表/审计日志中可见，R9）。
+    let alter_sql = match alter_user_password_sql(&new_pwd) {
+        Ok(sql) => sql,
+        Err(e) => {
+            eprintln!("[sidecar] 构造 ALTER USER 脚本失败: {e}");
+            return Err(exit_codes::PASSWORD_FAILED);
+        }
+    };
+    let alter_result = pgbin::psql_script(
         &install_dir,
         LISTEN_LOCAL,
         port,
         DEFAULT_USERNAME,
         "postgres",
         DUMMY_PWD,
-        &sql,
+        &alter_sql,
         Duration::from_secs(10),
     )
     .await;
@@ -1102,7 +1127,11 @@ pub async fn reset_password(args: cli::DataDirArgs) -> Result<(), u8> {
     instance.stop().await;
 
     if let Err(e) = alter_result {
-        eprintln!("[sidecar] ALTER USER postgres PASSWORD 失败: {e}");
+        // psql 失败时 stderr 可能回显含密码的语句：经 register_secret 脱敏后再输出
+        eprintln!(
+            "[sidecar] ALTER USER postgres PASSWORD 失败: {}",
+            logging::sanitize(&e.to_string())
+        );
         return Err(exit_codes::PASSWORD_FAILED);
     }
 
@@ -1122,9 +1151,7 @@ pub async fn reset_password(args: cli::DataDirArgs) -> Result<(), u8> {
         return Err(exit_codes::PASSWORD_FAILED);
     }
 
-    // 注册新密码为 secret（R9：防止后续日志/异常泄露）
-    logging::register_secret(&new_pwd);
-
+    // 新密码的 secret 注册已在生成后立即完成（见上方 register_secret）
     eprintln!("[sidecar] 密码已重置，请重启 qTrading");
     Ok(())
 }
@@ -1859,6 +1886,42 @@ mod tests {
         let args = cli::DataDirArgs { data_dir };
         assert_eq!(reset_password(args).await, Err(exit_codes::LOCK_CONFLICT));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R9：ALTER USER 脚本经 stdin 传递；密码按 SQL 字面量转义（`'` 双写，`$`/反斜杠保持字面量），
+    /// 且 psql argv（连接参数）中不得出现密码或 SQL 载体（`-c`）。
+    #[test]
+    fn alter_user_password_sql_escapes_and_stays_out_of_argv() {
+        let pwd = "p'wd$\\端";
+        let script = alter_user_password_sql(pwd).expect("valid password should build script");
+        assert!(
+            script.contains("PASSWORD 'p''wd$\\端';"),
+            "单引号应双写、$ 与反斜杠应保持字面量: {script}"
+        );
+        assert!(
+            script.contains("standard_conforming_strings = on"),
+            "需显式固定字符串字面量语义: {script}"
+        );
+        let argv = pgbin::psql_connection_args(LISTEN_LOCAL, 55432, DEFAULT_USERNAME, "postgres");
+        assert!(
+            !argv.iter().any(|a| a == "-c"),
+            "argv 不得携带 SQL（stdin 通道）: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a.contains(pwd)),
+            "argv 不得含密码: {argv:?}"
+        );
+    }
+
+    /// 含 NUL/CR/LF 的密码无法安全承载于 SQL 字面量 → 拒绝（fail closed，避免截断/注入）。
+    #[test]
+    fn alter_user_password_sql_rejects_control_characters() {
+        assert!(alter_user_password_sql("").is_err());
+        assert!(alter_user_password_sql("a\nb").is_err());
+        assert!(alter_user_password_sql("a\rb").is_err());
+        assert!(alter_user_password_sql("a\0b").is_err());
+        // 生成器 CHARSET（字母/数字/-_.~）全部可承载
+        assert!(alter_user_password_sql("A-Z_a.z~09").is_ok());
     }
 
     /// `maintenance_shell` 错误路径：未初始化目录 → DATA_DIR_ABNORMAL。
