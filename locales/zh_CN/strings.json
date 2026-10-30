@@ -1071,6 +1071,7 @@
     "health_score_desc": "数据可用性与一致性",
     "health_scan_title": "深度健康扫描",
     "health_scan_desc": "正在扫描 {current}/{total} 只股票...",
+    "health_scan_failed": "深度扫描失败，请稍后重试或查看日志",
     "health_btn_deep_scan": "深度扫描",
     "health_btn_sync_now": "立即同步",
     "scan_btn_init_data": "初始化数据",
