@@ -1,7 +1,7 @@
 import pytest
 import polars as pl
 import pandas as pd
-from utils.qfq import qfq_ratio_expr, qfq_ratio_series
+from utils.qfq import qfq_ratio_expr, qfq_ratio_series, qfq_series_status, qfq_unknown_expr
 
 pytestmark = pytest.mark.unit
 
@@ -64,16 +64,52 @@ class TestQFQ:
         assert ratios == pytest.approx([2.0, 1.0, 1.0, 1.0])
 
     def test_qfq_ratio_expr_all_null(self):
+        """UIR-X01-105 / R21：复权因子全空是「未知」，不得静默当作恒等 1.0。"""
         df = pl.DataFrame({"ts_code": ["000001.SZ", "000001.SZ"], "adj_factor": [None, None]})
         result = df.with_columns(qfq_ratio_expr())
         ratios = result["qfq_ratio"].to_list()
-        assert ratios == pytest.approx([1.0, 1.0])
+        assert ratios == [None, None]
 
     def test_qfq_ratio_expr_zero_latest(self):
+        """UIR-X01-105：基准为 0 属异常/未知（除零不可解），不得返回恒等 1.0。"""
         df = pl.DataFrame({"ts_code": ["000001.SZ", "000001.SZ"], "adj_factor": [2.0, 0.0]})
         result = df.with_columns(qfq_ratio_expr())
         ratios = result["qfq_ratio"].to_list()
-        assert ratios == pytest.approx([1.0, 1.0])
+        assert ratios == [None, None]
+
+    def test_qfq_ratio_expr_identity_is_valid_not_unknown(self):
+        """恒等（因子有效但全组相同）是合法的「未除权」，仍返回 1.0 且不标记未知。"""
+        df = pl.DataFrame({"ts_code": ["000001.SZ", "000001.SZ"], "adj_factor": [1.0, 1.0]})
+        result = df.with_columns([qfq_ratio_expr(), qfq_unknown_expr()])
+        assert result["qfq_ratio"].to_list() == pytest.approx([1.0, 1.0])
+        assert result["qfq_adjustment_unknown"].to_list() == [False, False]
+
+    def test_qfq_unknown_expr_all_null_group(self):
+        """全空因子 → 全组标记未知（供调用链产出结果级 warning）。"""
+        df = pl.DataFrame({"ts_code": ["000001.SZ", "000001.SZ"], "adj_factor": [None, None]})
+        result = df.with_columns(qfq_unknown_expr())
+        assert result["qfq_adjustment_unknown"].to_list() == [True, True]
+
+    def test_qfq_unknown_expr_zero_base_group(self):
+        df = pl.DataFrame({"ts_code": ["000001.SZ", "000001.SZ"], "adj_factor": [2.0, 0.0]})
+        result = df.with_columns(qfq_unknown_expr())
+        assert result["qfq_adjustment_unknown"].to_list() == [True, True]
+
+    def test_qfq_unknown_expr_multi_group_partial(self):
+        """多股票分组：仅未知组被标记，有效组不受影响（0 误报/漏报）。"""
+        df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000001.SZ", "000002.SZ"],
+                "adj_factor": [None, 2.0, None, 1.0],
+            }
+        )
+        result = df.with_columns(qfq_unknown_expr())
+        assert result["qfq_adjustment_unknown"].to_list() == [True, False, True, False]
+
+    def test_qfq_unknown_expr_false_for_valid_factors(self):
+        df = pl.DataFrame({"ts_code": ["000001.SZ"] * 3, "adj_factor": [1.0, 1.2, 1.5]})
+        result = df.with_columns(qfq_unknown_expr())
+        assert result["qfq_adjustment_unknown"].to_list() == [False, False, False]
 
     def test_qfq_ratio_expr_empty(self):
         df = pl.DataFrame(
@@ -140,3 +176,35 @@ class TestQFQ:
         series = pd.Series(dtype=float)
         result = qfq_ratio_series(series)
         assert result is None
+
+
+class TestQfqSeriesStatus:
+    """pandas 侧三态判定：unknown 与 identity 必须可区分（qfq_ratio_series 的 None 二者兼表）。"""
+
+    def test_unknown_when_all_null(self):
+        assert qfq_series_status(pd.Series([None, None])) == "unknown"
+        assert qfq_ratio_series(pd.Series([None, None])) is None
+
+    def test_unknown_when_base_zero(self):
+        assert qfq_series_status(pd.Series([2.0, 0.0])) == "unknown"
+        assert qfq_series_status(pd.Series([0.0, 2.0]), ref="first") == "unknown"
+
+    def test_unknown_for_empty_or_none(self):
+        assert qfq_series_status(None) == "unknown"
+        assert qfq_series_status(pd.Series(dtype=float)) == "unknown"
+
+    def test_identity_when_all_factors_equal(self):
+        assert qfq_series_status(pd.Series([1.5, 1.5, 1.5])) == "identity"
+        assert qfq_ratio_series(pd.Series([1.5, 1.5, 1.5])) is None
+
+    def test_adjusted_when_valid_factors_vary(self):
+        series = pd.Series([1.0, None, 2.0])
+        assert qfq_series_status(series) == "adjusted"
+        ratio = qfq_ratio_series(series)
+        assert ratio is not None
+        assert ratio.to_list() == pytest.approx([0.5, 0.5, 1.0])  # 前向填充后按末值 2.0 归一
+
+    def test_ref_first_status(self):
+        series = pd.Series([1.0, 2.0])
+        assert qfq_series_status(series, ref="first") == "adjusted"
+        assert qfq_series_status(series, ref="last") == "adjusted"

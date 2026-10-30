@@ -31,6 +31,15 @@ def _compute_technical_structure(history_df, vol_ratio_threshold: float = 1.7) -
         df = df_qfq.sort_values("trade_date", ascending=True).copy()  # type: ignore[union-attr]
         close = df["close"]
 
+        # UIR-X01-105 / R21：价格全缺（adj_factor 未知 → `_get_qfq_df` 显式置 NaN）时
+        # 全部结构字段降级为「数据不足」哨兵；不得让 NaN 流下分支产出 0.0%（业务上合法的
+        # 「持平」），也不得改用未复权价算出「看似正常」的均线/趋势。
+        if close.isna().all():
+            result["ma_alignment"] = I18n.get("ai_data_insufficient")
+            result["volume_trend"] = I18n.get("ai_data_insufficient")
+            result["price_trend_5d"] = I18n.get("ai_data_insufficient")
+            return result
+
         # MA Alignment
         ma5 = close.rolling(5).mean().iloc[-1] if len(close) >= 5 else None
         ma10 = close.rolling(10).mean().iloc[-1] if len(close) >= 10 else None

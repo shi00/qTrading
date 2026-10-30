@@ -17,15 +17,17 @@ D4 修复（本测试配套验证的目标契约）：
   ``df.select(qfq_ratio_expr(ref=ref))`` 逐元素等价。
 
 返回契约分叉（组 B 显式固化，非等价断言；数值等价但返回形态不同）：
-- B1 ``base == 0``（latest=0 或 first=0）：pandas 返 ``None``（调用方判据
-  "无需调整"） vs Polars 内联全 ``1.0``。
-- B2 filled 全 null：pandas 返 ``None`` vs Polars 内联全 ``1.0``。
-- B3 全部因子相同：pandas 优化短路返 ``None`` vs Polars 返全 ``1.0``。
+- B1 ``base == 0``（latest=0 或 first=0）：pandas 返 ``None`` vs Polars 内联 null
+  （UIR-X01-105 后两实现统一为「未知」：基准为 0 除零不可解，不是恒等 1.0）。
+- B2 filled 全 null：pandas 返 ``None`` vs Polars 内联 null（同上，未知 ≠ 恒等）。
+- B3 全部因子相同：pandas 优化短路返 ``None`` vs Polars 返全 ``1.0``
+  （合法的「未除权」恒等，与 B1/B2 的未知必须区分）。
 
 收敛指引：双实现 API 已对齐（语义一致），返回契约（None vs 1.0 内联）为
 pandas "无调整哨兵" 与 Polars "恒等比率" 的表达差异，消费方各自已能处理，
-本测试固化现状而非消除；如需统一可收敛 pandas 到 ``all`` Series(1.0) 或
-Polars 到 null，届时同步更新组 B 断言。
+本测试固化现状而非消除；UIR-X01-105 已把「未知」（全空 / 基准为 0）统一为
+null（Polars）与 ``None``（pandas），pandas 侧调用方须用 ``qfq_series_status``
+区分 None 的两种含义（unknown vs identity）。
 """
 
 import numpy as np
@@ -33,7 +35,7 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from utils.qfq import qfq_ratio_expr, qfq_ratio_series
+from utils.qfq import qfq_ratio_expr, qfq_ratio_series, qfq_series_status
 
 pytestmark = pytest.mark.unit
 
@@ -113,33 +115,36 @@ class TestQfqEquivalenceDomain:
 
 class TestQfqContractDivergenceSolidified:
     def test_b1_zero_latest_base(self):
-        """latest=0：pandas 返 None vs Polars 内联全 1.0。"""
+        """latest=0：pandas 返 None vs Polars 内联 null（未知，非恒等 1.0）。"""
         series = pd.Series([2.0, 0.0])
         assert qfq_ratio_series(series) is None
         assert qfq_ratio_series(series, ref="last") is None
+        assert qfq_series_status(series) == "unknown"
 
         pl_df = pl.DataFrame({"ts_code": ["000001.SZ", "000001.SZ"], "adj_factor": [2.0, 0.0]})
         ratio = pl_df.with_columns(qfq_ratio_expr("adj_factor", "ts_code", ref="last"))["qfq_ratio"]
-        assert ratio.to_list() == pytest.approx([1.0, 1.0])
+        assert ratio.to_list() == [None, None]
 
     def test_b1_prime_zero_first_base(self):
-        """ref="first" 且首值为 0：pandas 返 None vs Polars 内联全 1.0。"""
+        """ref="first" 且首值为 0：pandas 返 None vs Polars 内联 null。"""
         series = pd.Series([0.0, 2.0])
         assert qfq_ratio_series(series, ref="first") is None
+        assert qfq_series_status(series, ref="first") == "unknown"
 
         pl_df = pl.DataFrame({"ts_code": ["000001.SZ", "000001.SZ"], "adj_factor": [0.0, 2.0]})
         ratio = pl_df.with_columns(qfq_ratio_expr("adj_factor", "ts_code", ref="first"))["qfq_ratio"]
-        assert ratio.to_list() == pytest.approx([1.0, 1.0])
+        assert ratio.to_list() == [None, None]
 
     def test_b2_all_null(self):
-        """filled 全 null：pandas 返 None vs Polars 内联全 1.0。"""
+        """filled 全 null：pandas 返 None vs Polars 内联 null（未知 ≠ 恒等）。"""
         series = pd.Series([None, None])
         assert qfq_ratio_series(series) is None
         assert qfq_ratio_series(series, ref="first") is None
+        assert qfq_series_status(series) == "unknown"
 
         pl_df = pl.DataFrame({"ts_code": ["000001.SZ", "000001.SZ"], "adj_factor": [None, None]})
         ratio = pl_df.with_columns(qfq_ratio_expr("adj_factor", "ts_code", ref="last"))["qfq_ratio"]
-        assert ratio.to_list() == pytest.approx([1.0, 1.0])
+        assert ratio.to_list() == [None, None]
 
     @pytest.mark.parametrize("ref", ["last", "first"])
     def test_b3_all_identical(self, ref: str):
