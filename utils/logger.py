@@ -49,19 +49,50 @@ def _migrate_legacy_log_dir() -> None:
 
 
 class _SanitizingFormatter(logging.Formatter):
-    """对 exc_info 输出的 traceback 做文件路径脱敏的 logging.Formatter。
+    """对 exc_info / stack_info 输出文本统一脱敏（R9）的 logging.Formatter。
 
-    覆写 formatException 使 exc_info=True 输出的文本（含完整文件路径、
-    可能含系统用户名）中的路径被替换为 <PATH>。文本与 JSON 两种格式均复用。
+    - ``formatException``：traceback 全文（异常链类型、消息、帧路径）经
+      ``DataSanitizer.sanitize_error`` 清洗（路径 → ``<PATH>``、凭证 / PII → ``***``），
+      异常类型、帧顺序与行号保持不变，可诊断性不降级。
+    - ``formatStack``：``stack_info`` 为源码回显，仅做路径脱敏（``sanitize_paths``），
+      与既有 traceback 路径脱敏口径一致，不改写源码文本。
+    - ``format``：stdlib 在 record 上缓存 ``exc_text`` 供多 handler 复用；本类保证
+      缓存文本始终已脱敏（其他 Formatter 抢先写入未脱敏文本时先清洗），并打标记
+      避免重复清洗导致 ``***`` 叠加。清洗只在异常路径执行，普通日志热路径无正则开销。
+    - ``extra`` 字段：文本格式只输出 ``%(message)s``，``JSONFormatter`` 只输出白名单键，
+      extra 不进入日志，无需额外处理。
 
     __init__ 透传 logging.Formatter，无额外初始化参数。
     """
 
-    def formatException(self, ei):
-        res = super().formatException(ei)
+    # exc_text 脱敏标记（写入 record.__dict__），记录「当前缓存文本已由本类清洗」
+    _EXC_TEXT_SANITIZED_FLAG = "_exc_text_sanitized"
+
+    @staticmethod
+    def _sanitize_text(text: str) -> str:
         from utils.sanitizers import DataSanitizer
 
-        return DataSanitizer.sanitize_paths(res)
+        return DataSanitizer.sanitize_error(text)
+
+    def formatException(self, ei):
+        return self._sanitize_text(super().formatException(ei))
+
+    def formatStack(self, stack_info):
+        from utils.sanitizers import DataSanitizer
+
+        return DataSanitizer.sanitize_paths(super().formatStack(stack_info))
+
+    def format(self, record):
+        if record.exc_info and not record.exc_text:
+            # 预格式化并脱敏：父类命中 exc_text 缓存后不会再次调用 formatException
+            record.exc_text = self.formatException(record.exc_info)
+            record.__dict__[self._EXC_TEXT_SANITIZED_FLAG] = True
+        elif record.exc_text and not record.__dict__.get(self._EXC_TEXT_SANITIZED_FLAG):
+            # 其他 Formatter 可能已把未脱敏文本写入缓存（handler 执行顺序决定），
+            # 父类会直接追加缓存文本而绕过 formatException，故先清洗再交还
+            record.exc_text = self._sanitize_text(record.exc_text)
+            record.__dict__[self._EXC_TEXT_SANITIZED_FLAG] = True
+        return super().format(record)
 
 
 class _QueueHandler(QueueHandler):

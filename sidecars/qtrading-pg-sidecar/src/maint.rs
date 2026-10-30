@@ -7,9 +7,11 @@
 //!
 //! 恢复后 schema 停留于备份时点；Alembic 补平由 app 下次启动的既有迁移流程负责（Phase 2+，§12.2 step 7）。
 
+use crate::cli::{self, DEFAULT_DATABASE};
 use crate::commands::state_file_condition;
 use crate::exit_codes;
 use crate::lockfile::{AcquireError, MaintenanceLock};
+use crate::logging;
 use crate::password;
 use crate::paths::Layout;
 use crate::pgbin;
@@ -18,16 +20,34 @@ use crate::protocol;
 use crate::run;
 use crate::setup::{self, DataDirState};
 use crate::state;
-use crate::{cli, logging};
 use postgresql_embedded::PostgreSQL;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const DUMP_TIMEOUT: Duration = Duration::from_secs(3600);
-const DEFAULT_DATABASE: &str = "qtrading";
 const DEFAULT_USERNAME: &str = "postgres";
 const LISTEN_LOCAL: &str = "127.0.0.1";
+
+/// 业务库名白名单（UIR-F16-002）。
+///
+/// 库名会进入 psql `CREATE DATABASE "<name>"` 的 SQL 文本，必须限定为安全标识符：
+/// `[A-Za-z_][A-Za-z0-9_]*` 且长度 ≤ 63（PostgreSQL NAMEDATALEN-1）。
+/// Python 侧同样校验；此处独立校验防止直接调用 CLI 绕过。
+fn validate_database_name(name: &str) -> Result<(), u8> {
+    let mut chars = name.chars();
+    let first_ok = chars
+        .next()
+        .map(|c| c.is_ascii_alphabetic() || c == '_')
+        .unwrap_or(false);
+    let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if first_ok && rest_ok && name.len() <= 63 {
+        Ok(())
+    } else {
+        eprintln!("[sidecar] 数据库名非法（须为 [A-Za-z_][A-Za-z0-9_]*，长度 ≤ 63）: {name:?}");
+        Err(exit_codes::ARGUMENT_ERROR)
+    }
+}
 
 fn acquire_lock(layout: &Layout) -> Result<MaintenanceLock, u8> {
     match MaintenanceLock::try_acquire(&layout.lock_file) {
@@ -543,6 +563,7 @@ impl TempInstance {
 
 pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
     logging::init(None);
+    validate_database_name(&args.database)?;
     let layout = Layout::from_data_dir(&args.data_dir, None, None, None);
 
     if !layout.data_dir.join("PG_VERSION").exists() {
@@ -573,7 +594,14 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
     let result = match online_port {
         Some(port) => {
             tracing::info!("dump via running instance on port {port}");
-            run_pg_dump(&layout.install_dir, port, &password, &partial).await
+            run_pg_dump(
+                &layout.install_dir,
+                port,
+                &args.database,
+                &password,
+                &partial,
+            )
+            .await
         }
         None => {
             let _lock = acquire_lock(&layout)?;
@@ -584,7 +612,7 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
             let instance = TempInstance::start(layout.clone(), DEFAULT_USERNAME, &password).await?;
             let port = instance.port;
             let install_dir = instance.layout.install_dir.clone();
-            let r = run_pg_dump(&install_dir, port, &password, &partial).await;
+            let r = run_pg_dump(&install_dir, port, &args.database, &password, &partial).await;
             instance.stop().await;
             r
         }
@@ -610,6 +638,7 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
 async fn run_pg_dump(
     install_dir: &Path,
     port: u16,
+    database: &str,
     password: &str,
     output: &Path,
 ) -> Result<(), u8> {
@@ -629,7 +658,7 @@ async fn run_pg_dump(
             "-U",
             DEFAULT_USERNAME,
             "-d",
-            DEFAULT_DATABASE,
+            database,
         ],
         &[("PGPASSWORD", password), ("PGCONNECT_TIMEOUT", "10")],
         DUMP_TIMEOUT,
@@ -654,6 +683,7 @@ async fn run_pg_dump(
 
 pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
     logging::init(None);
+    validate_database_name(&args.database)?;
     let layout = Layout::from_data_dir(&args.data_dir, None, None, None);
 
     if !args.input.exists() {
@@ -696,7 +726,14 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
         }
     };
 
-    let outcome = restore_into(&layout, &restore_dir, &args.input, &password).await;
+    let outcome = restore_into(
+        &layout,
+        &restore_dir,
+        &args.input,
+        &args.database,
+        &password,
+    )
+    .await;
     if let Err(code) = outcome {
         let _ = std::fs::remove_dir_all(&restore_dir);
         return Err(code);
@@ -750,6 +787,7 @@ async fn restore_into(
     layout: &Layout,
     restore_dir: &Path,
     input: &Path,
+    database: &str,
     password: &str,
 ) -> Result<(), u8> {
     let restore_layout = Layout::from_data_dir(
@@ -771,7 +809,7 @@ async fn restore_into(
     }
 
     let instance = TempInstance::start(restore_layout, DEFAULT_USERNAME, password).await?;
-    let result = restore_via_instance(&instance, input, password).await;
+    let result = restore_via_instance(&instance, input, database, password).await;
     instance.stop().await;
     result
 }
@@ -779,12 +817,14 @@ async fn restore_into(
 async fn restore_via_instance(
     instance: &TempInstance,
     input: &Path,
+    database: &str,
     password: &str,
 ) -> Result<(), u8> {
     let port_s = instance.port.to_string();
     let install_dir = &instance.layout.install_dir;
 
     // AI-29：既有密码认证新 cluster（initdb --pwfile 已注入同一密码）
+    // 库名已由 validate_database_name 限定为安全标识符，双引号仅用于保留大小写。
     pgbin::psql(
         install_dir,
         LISTEN_LOCAL,
@@ -792,7 +832,7 @@ async fn restore_via_instance(
         DEFAULT_USERNAME,
         "postgres",
         password,
-        &format!("CREATE DATABASE {DEFAULT_DATABASE}"),
+        &format!("CREATE DATABASE \"{database}\""),
         Duration::from_secs(30),
     )
     .await
@@ -812,7 +852,7 @@ async fn restore_via_instance(
             "-U",
             DEFAULT_USERNAME,
             "-d",
-            DEFAULT_DATABASE,
+            database,
             "--no-owner",
             "--no-privileges",
             &in_s,
@@ -839,7 +879,7 @@ async fn restore_via_instance(
         LISTEN_LOCAL,
         instance.port,
         DEFAULT_USERNAME,
-        DEFAULT_DATABASE,
+        database,
         password,
         "select 1",
         Duration::from_secs(15),
@@ -1133,6 +1173,69 @@ mod tests {
         assert_eq!(runtime_port(Some(&zero_port), true), None);
     }
 
+    #[test]
+    fn validate_database_name_accepts_safe_identifiers() {
+        // UIR-F16-002：库名透传前的白名单校验
+        for name in ["qtrading", "stock_db", "StockDB2", "_internal", "a"] {
+            assert_eq!(validate_database_name(name), Ok(()), "{name} 应被接受");
+        }
+        let max_len = "a".repeat(63);
+        assert_eq!(validate_database_name(&max_len), Ok(()));
+    }
+
+    #[test]
+    fn validate_database_name_rejects_unsafe() {
+        // 空名 / 非 ASCII 首字符 / 非法字符 / 注入片段 / 超长
+        for name in [
+            "",
+            "1abc",
+            "-abc",
+            "a b",
+            "a-b",
+            "a;drop",
+            "a\"b",
+            "对外库",
+            "a'b",
+        ] {
+            assert_eq!(
+                validate_database_name(name),
+                Err(exit_codes::ARGUMENT_ERROR),
+                "{name:?} 应被拒绝"
+            );
+        }
+        assert_eq!(
+            validate_database_name(&"a".repeat(64)),
+            Err(exit_codes::ARGUMENT_ERROR)
+        );
+    }
+
+    #[tokio::test]
+    async fn dump_rejects_invalid_database_name() {
+        let dir = unique_tmp("dump-baddb");
+        let data_dir = dir.join("postgres/16/data");
+        let args = cli::DumpArgs {
+            data_dir,
+            output: dir.join("out.dump"),
+            database: "bad name".to_string(),
+        };
+        assert_eq!(dump(args).await, Err(exit_codes::ARGUMENT_ERROR));
+        assert!(!dir.join("out.dump").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_invalid_database_name() {
+        let dir = unique_tmp("restore-baddb");
+        let args = cli::RestoreArgs {
+            data_dir: dir.join("postgres/16/data"),
+            input: dir.join("nope.dump"),
+            target_data_dir: None,
+            database: "a;drop".to_string(),
+        };
+        assert_eq!(restore(args).await, Err(exit_codes::ARGUMENT_ERROR));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn dump_rejects_uninitialized_dir() {
         let dir = unique_tmp("dump-fresh");
@@ -1140,6 +1243,7 @@ mod tests {
         let args = cli::DumpArgs {
             data_dir,
             output: dir.join("out.dump"),
+            database: DEFAULT_DATABASE.to_string(),
         };
         assert_eq!(dump(args).await, Err(exit_codes::DUMP_RESTORE_FAILED));
         assert!(!dir.join("out.dump").exists());
@@ -1155,6 +1259,7 @@ mod tests {
         let args = cli::DumpArgs {
             data_dir,
             output: dir.join("out.dump"),
+            database: DEFAULT_DATABASE.to_string(),
         };
         assert_eq!(dump(args).await, Err(exit_codes::PASSWORD_FAILED));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1167,6 +1272,7 @@ mod tests {
             data_dir: dir.join("postgres/16/data"),
             input: dir.join("nope.dump"),
             target_data_dir: None,
+            database: DEFAULT_DATABASE.to_string(),
         };
         assert_eq!(restore(args).await, Err(exit_codes::DUMP_RESTORE_FAILED));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1189,6 +1295,7 @@ mod tests {
             data_dir,
             input,
             target_data_dir: Some(target),
+            database: DEFAULT_DATABASE.to_string(),
         };
         assert_eq!(restore(args).await, Err(exit_codes::DUMP_RESTORE_FAILED));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1207,6 +1314,7 @@ mod tests {
             data_dir,
             input,
             target_data_dir: None,
+            database: DEFAULT_DATABASE.to_string(),
         };
         assert_eq!(restore(args).await, Err(exit_codes::LOCK_CONFLICT));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1575,6 +1683,7 @@ mod tests {
         let args = cli::DumpArgs {
             data_dir,
             output: blocker.join("out.dump"),
+            database: DEFAULT_DATABASE.to_string(),
         };
         assert_eq!(dump(args).await, Err(exit_codes::DUMP_RESTORE_FAILED));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1593,6 +1702,7 @@ mod tests {
             data_dir,
             input,
             target_data_dir: None,
+            database: DEFAULT_DATABASE.to_string(),
         };
         assert_eq!(restore(args).await, Err(exit_codes::PASSWORD_FAILED));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1846,6 +1956,7 @@ mod tests {
         let args = cli::DumpArgs {
             data_dir: layout.data_dir.clone(),
             output: dump_path.clone(),
+            database: DEFAULT_DATABASE.to_string(),
         };
         let result = dump(args).await;
 
@@ -1892,6 +2003,7 @@ mod tests {
         let dump_args = cli::DumpArgs {
             data_dir: layout.data_dir.clone(),
             output: dump_path.clone(),
+            database: DEFAULT_DATABASE.to_string(),
         };
         let dump_result = dump(dump_args).await;
         instance.stop().await;
@@ -1904,6 +2016,7 @@ mod tests {
             data_dir: layout.data_dir.clone(),
             input: dump_path.clone(),
             target_data_dir: Some(target.clone()),
+            database: DEFAULT_DATABASE.to_string(),
         };
         let restore_result = restore(restore_args).await;
 

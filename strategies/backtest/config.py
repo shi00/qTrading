@@ -45,6 +45,10 @@ class DataWarning:
         # R24 当期近似：区间回放的退市整理期排除口径使用当前名称/delist_date 快照，
         # name-history 缺覆盖时可能存在前视（screener_dao._delisting_flag_expr）。
         "delisting_asof_approximation",
+        # UIR-X01-105 / R21：复权因子未知（adj_factor 全空或基准为 0）。
+        # 未知 ≠ 合法的恒等复权：这些标的的复权价不可信（撮合层拒绝成交、IC 排除），
+        # 结果必须标注，不得静默把未复权价当复权价使用。
+        "qfq_adjustment_unknown",
     ]
     start_date: str
     end_date: str
@@ -53,7 +57,8 @@ class DataWarning:
     # MAJOR-01: 告警类型化维度（决策①）。
     # - data_quality：enrich 失败 / 停牌·涨跌停数据缺失 / 基准缺失·部分缺失 /
     #   区间缺口 range_quality_gaps / 区间覆盖未核实 range_quality_coverage_unverified
-    #   （UIR-F11-005，未知按不可信处理） / 长期旧价估值 stale-estimate → unreliable。
+    #   （UIR-F11-005，未知按不可信处理） / 长期旧价估值 stale-estimate /
+    #   复权因子未知 qfq_adjustment_unknown（UIR-X01-105，未知 ≠ 恒等） → unreliable。
     # - termination：portfolio_wiped_out（爆仓）→ unreliable。
     # - performance_path：preload_range_too_wide / range_preload_failed /
     #   range_preload_error（慢路径）→ 仅提示，不升级级别。
@@ -123,6 +128,8 @@ class WarningCategory:
         "range_preload_error": "performance_path",
         "trade_dates_truncated": "data_quality",
         "delisting_asof_approximation": "asof_approximation",
+        # UIR-X01-105：复权因子未知 → data_quality（未知按不可信处理，R21 fail-closed）。
+        "qfq_adjustment_unknown": "data_quality",
     }
     # fail-closed 历史异常关键词白名单：无 [type] 前缀的真实异常一定能兜底归类，
     # 满足 R21 BT-03（不以「无前缀一律非 unreliable」为默认默认值）。

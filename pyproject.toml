@@ -91,6 +91,7 @@ dev = [
     "msgpack>=1.2.4",  # Security: GHSA-6v7p-g79w-8964 (Use After Free in Unpacker reuse) fixed in 1.2.1; GHSA-j586-36cw-2gc2 / CVE-2026-114613 (strict_map_key 校验失败路径内存泄漏 + Unpacker 悬垂引用 UAF) fixed in 1.2.3
     "pyjwt>=2.15.1",  # Security: CVE-2026-101918 (深层嵌套 JWT payload 触发未捕获 RecursionError -> 认证路径 DoS) fixed in 2.15.0; 传递依赖 flet-mcp -> fastmcp-slim -> mcp
     "authlib>=1.9.1",  # Security: GHSA-6v38-4h7w-rj9h / GHSA-fch4-3c6x-j4gc / GHSA-7vr2-2fgp-9w7p / GHSA-c5mf-xmp2-59rc / GHSA-x4rv-c3wx-4cr8 fixed in 1.9.0（JWS 空签名、JWT bearer audience 校验、HMAC 算法混淆、ID token nonce 自禁用、JAR request_uri SSRF）; GHSA-8m4g-j4wp-wgcg (空 HMAC key 伪造 JWS/JWT 签名) fixed in 1.9.1; 传递依赖 fastmcp-slim
+    "joserfc>=1.7.6",  # Security: CVE-2026-119284 (compact JWS 在校验长度前调用 bytes.split()，复制攻击者可控 payload 致内存放大/DoS) fixed in 1.7.6; 传递依赖 authlib / fastmcp-slim
     "dnspython>=2.9.0",  # Security: GHSA-45c3-73f7-pv4m / CVE-2026-114605 (dns.name.from_wire_parser() 过度 CPU 消耗) fixed in 2.9.0; 传递依赖 email-validator
     "import-linter>=2.15",  # Architecture guard: enforce R1 layered dependencies (CLAUDE.md §4.1)
     "fastmcp>=4.1.4",  # Security: GHSA-7xgj-8392-5q4r (transform 后组件授权绕过，直呼路径跳过 AuthCheck) / GHSA-vqqp-x5qm-5qp4 (OAuth client credentials 缺 issuer 绑定致 client secret 泄漏) fixed in 4.1.2; 传递依赖 flet-mcp -> fastmcp -> fastmcp-slim
