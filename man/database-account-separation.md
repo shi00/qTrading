@@ -6,7 +6,7 @@ This document describes how to separate database accounts for production deploym
 
 ## Prerequisites
 
-- PostgreSQL 16.14.0+ with an existing database `astock`, plus a superuser session for role/privilege setup.
+- PostgreSQL 16.15.0+ with an existing database `astock`, plus a superuser session for role/privilege setup.
 - Every application process must run with `QTRADING_DATABASE_MODE=external`. The default is `embedded`; in that mode the application uses its internal PostgreSQL and removes `DATABASE_URL` from the environment (`app/application.py`, `utils/config/db.py`), so the runtime account below would never be used.
 - Run `pg_dump` before changing roles or migrating. `GRANT` statements take brief locks on existing tables; schedule them for low traffic.
 

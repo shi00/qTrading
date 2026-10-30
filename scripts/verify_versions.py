@@ -324,7 +324,7 @@ def check_sidecar_version_consistency(sidecar_binary: Path | None = None) -> lis
     默认三方校验（不调用 binary）：
     - Cargo.toml [package].version == pyproject.toml [tool.qtrading.sidecar] version
     - protocol.rs PROTOCOL_VERSION == pyproject.toml [tool.qtrading.sidecar] protocol_version
-    - pyproject.toml [tool.qtrading.sidecar] postgresql_version == "16.14.0"（固定 16 系列）
+    - pyproject.toml [tool.qtrading.sidecar] postgresql_version 属于 16-19 系列（正则 `1[6-9]` 前缀匹配，pg_plan §15.2）
     - pyproject.toml [tool.qtrading.sidecar] crate_version == Cargo.toml [dependencies] postgresql_embedded version
 
     当 ``sidecar_binary`` 非空时启用四方校验，额外检查：
