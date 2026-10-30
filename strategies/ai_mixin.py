@@ -1748,14 +1748,18 @@ class AIStrategyMixin:
             trend_signal, _, _ = TechnicalAnalysis.get_macd(history_df)
             kdj_signal, k, _d, j = TechnicalAnalysis.get_kdj(history_df)  # D 指标未用于上下文
 
-            tech_context = {
-                "macd_signal": trend_signal,
-                "kdj_signal": kdj_signal,
-            }
-            if k is not None:
+            # get_kdj 对 df is None / len(df) < n 返回 ("UNKNOWN", 0, 0, 0)：0 是接口哨兵
+            # 而非业务数值（R21），只判 is not None 放行会让 "k/j: 0" 以极端超卖语义进入
+            # prompt。故以契约中的 "UNKNOWN" 判定整体可用性，不可用时按技术面既有
+            # 「数据不足」约定（同 _compute_technical_structure）表达，且不写任何数值；
+            # 真实 0（超卖）属正常枚举 + 数值，按值判哨兵会误删，故不按数值判定。
+            tech_context: dict[str, object] = {"macd_signal": trend_signal}
+            if kdj_signal != "UNKNOWN" and k is not None and j is not None:
+                tech_context["kdj_signal"] = kdj_signal
                 tech_context["k"] = round(k, 1)
-            if j is not None:
                 tech_context["j"] = round(j, 1)
+            else:
+                tech_context["kdj_signal"] = I18n.get("ai_data_insufficient")
 
             # 2b. Technical Structure (MA alignment + volume trend from history_df)
             tech_structure = _compute_technical_structure(history_df, vol_ratio_threshold=vol_ratio_threshold)
