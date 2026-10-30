@@ -6,13 +6,13 @@ Mock 策略：
   跳过真实 subprocess.run（单元测试不真实 Popen sidecar）
 - 真实 sidecar 端到端验证由 P3-17 ``fake_sidecar.py`` + integration test 负责
 
-测试分组（共 22 个）：
+测试分组（共 28 个）：
 - TestEmbeddedPgMaintenanceServiceDoctor: doctor 命令（7 个）
 - TestEmbeddedPgMaintenanceServiceDump: dump 命令（3 个）
 - TestEmbeddedPgMaintenanceServiceRestore: restore 命令（3 个）
 - TestEmbeddedPgMaintenanceServiceMaintenanceShell: maintenance_shell 命令（3 个）
 - TestEmbeddedPgMaintenanceServiceSingleton: 单例协议（2 个）
-- TestEmbeddedPgMaintenanceServiceArgv: argv 构造（4 个）
+- TestEmbeddedPgMaintenanceServiceArgv: argv 构造（10 个；UIR-F16-002 库名透传 4 例 + 拒绝 2 例，其中 1 例参数化 7 变体）
 """
 
 from __future__ import annotations
@@ -511,6 +511,88 @@ class TestEmbeddedPgMaintenanceServiceArgv:
         assert "--target-data-dir" in argv
         target_idx = argv.index("--target-data-dir") + 1
         assert argv[target_idx] == str(target)
+
+    # ---- UIR-F16-002：库名来自配置（不得硬编码 qtrading）----
+
+    def test_build_dump_argv_default_database_is_qtrading(self, maintenance_service, tmp_path: Path) -> None:
+        """默认配置（未显式设置 embedded_pg_database）仍透传 qtrading，兼容既有部署。"""
+        argv = maintenance_service._build_dump_argv(tmp_path / "backup.dump")
+        database_idx = argv.index("--database") + 1
+        assert argv[database_idx] == "qtrading"
+
+    def test_build_restore_argv_default_database_is_qtrading(self, maintenance_service, tmp_path: Path) -> None:
+        """默认配置下 restore 同样透传 qtrading。"""
+        argv = maintenance_service._build_restore_argv(tmp_path / "backup.dump", None)
+        database_idx = argv.index("--database") + 1
+        assert argv[database_idx] == "qtrading"
+
+    def test_build_dump_argv_passes_configured_database(
+        self, maintenance_service, mock_config_dict: dict[str, object], tmp_path: Path
+    ) -> None:
+        """自定义 embedded_pg_database 时 dump 透传该库名（备份作用域正确）。"""
+        config = {**mock_config_dict, "embedded_pg_database": "stock_db"}
+        with patch(
+            "services.embedded_pg_maintenance_service.ConfigHandler.load_config",
+            return_value=config,
+        ):
+            argv = maintenance_service._build_dump_argv(tmp_path / "backup.dump")
+        database_idx = argv.index("--database") + 1
+        assert argv[database_idx] == "stock_db"
+
+    def test_build_restore_argv_passes_configured_database(
+        self, maintenance_service, mock_config_dict: dict[str, object], tmp_path: Path
+    ) -> None:
+        """自定义库名时 restore 透传该库名（恢复目标库正确）。"""
+        config = {**mock_config_dict, "embedded_pg_database": "stock_db"}
+        target = tmp_path / "new_data"
+        with patch(
+            "services.embedded_pg_maintenance_service.ConfigHandler.load_config",
+            return_value=config,
+        ):
+            argv = maintenance_service._build_restore_argv(tmp_path / "backup.dump", target)
+        database_idx = argv.index("--database") + 1
+        assert argv[database_idx] == "stock_db"
+        assert "--target-data-dir" in argv
+
+    @pytest.mark.parametrize(
+        "bad_database",
+        ["", " bad", "bad name", "a;drop", "a-b", "1abc", "a" * 64],
+    )
+    def test_build_dump_argv_rejects_invalid_database(
+        self,
+        maintenance_service,
+        mock_config_dict: dict[str, object],
+        tmp_path: Path,
+        bad_database: str,
+    ) -> None:
+        """非法库名（空 / 特殊字符 / 注入片段 / 数字开头 / 超长）在 Python 侧即拒绝。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        config = {**mock_config_dict, "embedded_pg_database": bad_database}
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ConfigHandler.load_config",
+                return_value=config,
+            ),
+            pytest.raises(EmbeddedPgMaintenanceError, match="embedded_pg_database 非法"),
+        ):
+            maintenance_service._build_dump_argv(tmp_path / "backup.dump")
+
+    def test_build_restore_argv_rejects_invalid_database(
+        self, maintenance_service, mock_config_dict: dict[str, object], tmp_path: Path
+    ) -> None:
+        """restore 与 dump 共用同一校验：非法库名拒绝。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        config = {**mock_config_dict, "embedded_pg_database": "drop;--"}
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ConfigHandler.load_config",
+                return_value=config,
+            ),
+            pytest.raises(EmbeddedPgMaintenanceError, match="embedded_pg_database 非法"),
+        ):
+            maintenance_service._build_restore_argv(tmp_path / "backup.dump", None)
 
     def test_build_doctor_argv_frozen_resolves_meipass_sidecar(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
