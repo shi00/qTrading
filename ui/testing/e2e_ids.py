@@ -67,6 +67,11 @@ class _ScreenerIds:
     # F07 full-mount：选股→回测跳转按钮 anchor。文本「回测」与左导航 nav label 同名，
     # click_button 文本定位存在歧义/吞点风险，full-mount E2E 须 anchor 精确点击。
     RUN_BACKTEST_BUTTON: Eid = ("e2e.screener.run_backtest_button", AnchorKind.INTERACTIVE)
+    # F07 full-mount：股票代码过滤输入框 anchor。无 anchor 时 E2E 只能按 label 定位
+    # （fill_textbox → locator.click），而 CanvasKit 下该点击被 TextField 的
+    # flt-semantics 语义包裹节点拦截（intercepts pointer events），输入从不写入。
+    # 走 INPUT anchor 改由 AnchorPage.fill 物理点击，绕开 actionability 遮挡检查。
+    STOCK_FILTER_FIELD: Eid = ("e2e.screener.stock_filter", AnchorKind.INPUT)
 
     # 动态 anchor 前缀（静态方法生成，禁止调用方字符串拼接）
     _RESULT_ROW_PREFIX = "e2e.screener.result_row"
