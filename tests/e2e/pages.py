@@ -174,6 +174,19 @@ class ScreenerPage:
         name = strategy_label(strategy_key)
         await self.ap.select_option(EIDS.SCREENER.STRATEGY_DROPDOWN, name, timeout_ms=timeout_ms)
 
+    async def fill_stock_filter(self, value: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """填充股票代码过滤框（通过 INPUT anchor）。
+
+        CanvasKit 下 fill_textbox 的 locator.click 被 TextField 的 flt-semantics
+        语义包裹节点拦截；AnchorPage.fill 走 page.mouse.click 物理点击，绕开
+        Playwright actionability 遮挡检查。
+        """
+        await self.ap.fill(EIDS.SCREENER.STOCK_FILTER_FIELD, value, timeout_ms=timeout_ms)
+
+    async def expect_stock_filter_value(self, value: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """断言股票代码过滤框当前值包含 ``value``（聚焦后读取，验证受控 state 保持）。"""
+        await self.ap.expect_input_value(EIDS.SCREENER.STOCK_FILTER_FIELD, value, timeout_ms=timeout_ms)
+
     async def click_run_backtest(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         """点击「去回测」跳转按钮（F07 full-mount：anchor 精确点击 + 重试兜底）。
 

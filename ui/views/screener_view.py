@@ -1845,17 +1845,20 @@ def _build_screener_control_card(
         ),
     )
 
-    stock_filter_field = ft.TextField(
-        label=I18n.get("screener_filter_stock"),
-        value=state.stock_filter,
-        dense=True,
-        border={
-            ft.ControlState.DEFAULT: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.DIVIDER)),
-            ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.PRIMARY)),
-        },
-        text_size=AppStyles.FONT_SIZE_BODY,
-        width=AppStyles.CONTROL_WIDTH_SM,
-        on_change=safe_on_change(handlers["on_stock_filter_change"]),
+    stock_filter_field = anchored(
+        EIDS.SCREENER.STOCK_FILTER_FIELD,
+        ft.TextField(
+            label=I18n.get("screener_filter_stock"),
+            value=state.stock_filter,
+            dense=True,
+            border={
+                ft.ControlState.DEFAULT: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.DIVIDER)),
+                ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(color=AppColors.PRIMARY)),
+            },
+            text_size=AppStyles.FONT_SIZE_BODY,
+            width=AppStyles.CONTROL_WIDTH_SM,
+            on_change=safe_on_change(handlers["on_stock_filter_change"]),
+        ),
     )
     # DS-02: 风险警示股（ST/*ST）排除开关，经 on_exclude_st_change → vm.set_exclude_st 透传数据层行过滤
     exclude_st_switch = ft.Switch(

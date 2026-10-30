@@ -18,6 +18,7 @@ click 一律用 `page.mouse.click(bbox_center)`，因为 CanvasKit 不响应合�
 """
 
 import asyncio
+import logging
 import time
 from typing import Any
 from collections.abc import Awaitable, Callable, Mapping
@@ -27,6 +28,9 @@ from playwright.async_api import Locator, Page
 from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.timeouts import TIMEOUTS
 from ui.testing.e2e_ids import AnchorKind, Eid
+
+
+logger = logging.getLogger(__name__)
 
 
 def _as_box(box: Mapping[str, Any]) -> dict[str, float]:
@@ -312,6 +316,38 @@ class AnchorPage:
         await self.page.mouse.click(cx, cy)
         await self.page.keyboard.press("Control+A")
         await self.page.keyboard.type(value, delay=30)
+
+    async def expect_input_value(self, eid: Eid, value: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """断言 INPUT anchor 的当前值包含 ``value``（先物理聚焦再读取）。
+
+        CanvasKit 全局仅维护**一个**共享 ``<input>``，其 ``value`` 反映「当前聚焦」
+        的 TextField。full-mount 多视图常驻时，切页后共享 input 会绑定到其他
+        TextField（值随之清空），非聚焦目标无法经 ``input.value`` 读取；因此先
+        点击目标 input 的 bbox 中心使其获得焦点，再轮询共享 input 的 value。
+
+        受控值在组件重建后会回落为空 → 断言通过即证明 state 跨页保持。
+        """
+        eid_str, kind = eid
+        if kind != AnchorKind.INPUT:
+            raise RuntimeError(f"AnchorPage.expect_input_value: only supports INPUT, got {kind} for {eid_str!r}")
+        box = await self._identifier_input_box(eid_str, timeout_ms)
+        cx = box["x"] + box["width"] / 2
+        cy = box["y"] + box["height"] / 2
+        start = asyncio.get_running_loop().time()
+        last_value = ""
+        while (asyncio.get_running_loop().time() - start) * 1000 < timeout_ms:
+            await self.page.mouse.click(cx, cy)
+            try:
+                last_value = await self.page.locator("input").first.input_value()
+            except Exception as exc:  # noqa: BLE001  # 共享 input 尚未生成时留空，下一轮重试
+                last_value = ""
+                logger.debug("expect_input_value: read shared input failed for %r: %s", eid_str, exc, exc_info=True)
+            if value.lower() in last_value.lower():
+                return
+            await self.page.wait_for_timeout(200)
+        raise AssertionError(
+            f"expect_input_value: {eid_str!r} 在 {timeout_ms}ms 内值未包含 {value!r}（当前 {last_value!r}）"
+        )
 
     async def _find_option_element(self, option_text: str, eid_str: str) -> Any:
         """定位下拉选项。

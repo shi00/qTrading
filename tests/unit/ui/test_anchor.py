@@ -239,6 +239,12 @@ class TestEidsScreenerPr2:
         assert eid_str == "e2e.screener.detail_button.000001.SZ"
         assert kind == AnchorKind.INTERACTIVE
 
+    def test_stock_filter_field_eid_format(self):
+        """F07 新增 STOCK_FILTER_FIELD：INPUT 类（AnchorPage.fill 下潜后代 input）."""
+        eid_str, kind = EIDS.SCREENER.STOCK_FILTER_FIELD
+        assert eid_str == "e2e.screener.stock_filter"
+        assert kind == AnchorKind.INPUT
+
 
 class TestEidsDetailDialog:
     """PR-2 新增 EIDS.DETAIL_DIALOG 常量契约."""

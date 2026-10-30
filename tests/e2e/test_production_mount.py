@@ -37,6 +37,10 @@ use_state/VM 状态跨页保持、use_dialog overlay 跨页存活。本文件经
    切页经 ``page.run_task`` 送回事件循环，池线程不再触碰 ``ft.context.page``。
    skip 已解除并恢复行为级断言；若回归，先查 ``e2e-flet-app.log`` 是否再现
    ``RuntimeError: The context is not associated with any page``。
+6. 输入框值断言不能用 ``expect_text``：CanvasKit 全局仅维护一个共享 ``<input>``，
+   其 value 反映「当前聚焦」的 TextField。full-mount 多视图常驻时切页后共享
+   input 绑定到其他 TextField（value 清空），非聚焦目标读不到值；改为先物理
+   聚焦目标输入框再读 value（``AnchorPage.expect_input_value``）。
 """
 
 import logging
@@ -58,9 +62,9 @@ async def test_screener_state_survives_page_switch(full_mount_page):
     快速 smoke 模式下切走即销毁 ScreenerView（空 Container 占位），切回重建后
     策略下拉复位 None、过滤值丢失；full-mount 下两者保持即生产挂载模型直接证据。
 
-    断言策略（E2E 实测修正，见模块 docstring 边界 3）：
-    - 过滤输入值：expect_text 的 input value 轮询兜底（input value 为真实 DOM
-      属性，不受 anchored 语义吞名影响）；
+    断言策略（E2E 实测修正，见模块 docstring 边界 3/6）：
+    - 过滤输入值：切回后先物理聚焦 stock_filter，再读 CanvasKit 共享 input 的
+      value（全局仅一个 input，反映当前聚焦控件；重建会使受控值回落为空）；
     - 策略选中态：行为级证据——往返后点击「去回测」跳转成功。
       ``_handle_backtest_jump`` 对 selected_strategy 为空静默 return（不跳转、
       按钮不消失），组件重建必丢 use_state → 跳转不会发生 → click_run_backtest
@@ -73,16 +77,17 @@ async def test_screener_state_survives_page_switch(full_mount_page):
     await screener.open()
     await screener.select_strategy("volume_breakout")
 
-    # stock_filter 为无 anchor TextField（label 定位，透传 FletPage）
+    # stock_filter 走 INPUT anchor（AnchorPage.fill 物理点击）；CanvasKit 下
+    # fill_textbox 的 locator.click 会被 flt-semantics 语义层拦截，输入从不写入
     filter_value = "600519"
-    await full_mount_page.fill_textbox(I18n.get("screener_filter_stock"), filter_value)
+    await screener.fill_stock_filter(filter_value)
 
     # 切走（设置页）再切回（选股页）
     await nav.goto("nav_settings")
     await nav.goto("nav_screener")
 
-    # 输入值保持（input value 真实 DOM 属性）
-    await full_mount_page.expect_text(filter_value, timeout_ms=TIMEOUTS.TITLE)
+    # 输入值保持（聚焦后读取共享 input value：重建则受控值回落为空 → 断言失败）
+    await screener.expect_stock_filter_value(filter_value, timeout_ms=TIMEOUTS.TITLE)
     # 策略选中态保持的行为级证据：跳转成功（重建必丢 selected_strategy → 不跳转）
     await screener.click_run_backtest()
     await backtest.expect_title(timeout_ms=TIMEOUTS.TITLE)
