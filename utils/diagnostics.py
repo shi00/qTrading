@@ -24,10 +24,12 @@ from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
-# UTILS-B-06：个人类环境变量键标记（子串匹配，小写比较）。这些键的值是用户名/
-# 用户目录类纯标识——USERNAME 无路径特征、sanitize_paths 覆盖不到，USERPROFILE/
-# USERDOMAIN 系含空格路径会被路径正则截断残留，故按键名整体遮蔽。
-_PERSONAL_ENV_KEY_MARKERS = ("user", "logname", "appdata")
+# UTILS-B-06：个人/主机类环境变量键标记（子串匹配，小写比较）。这些键的值是
+# 用户名、用户目录或主机名标识——USERNAME 无路径特征、sanitize_paths 覆盖不到，
+# USERPROFILE/USERDOMAIN 系含空格路径会被路径正则截断残留；COMPUTERNAME/HOSTNAME
+# 是主机名，HOME=/root 这类单段路径亦不被路径正则命中（UIR-X01-102 残留），
+# 故统一按键名整体遮蔽。
+_PERSONAL_ENV_KEY_MARKERS = ("user", "logname", "appdata", "computername", "hostname", "home")
 
 
 class SystemDiagnosticsCollector:
@@ -50,13 +52,13 @@ class SystemDiagnosticsCollector:
             # UTILS-B-06：sanitize_dict 只按键名遮蔽敏感凭证、不做路径脱敏，
             # env 包会明文携带 Windows 用户名与用户目录路径，与同函数日志全量
             # 脱敏口径不一致（R9）。补两层：
-            # ① 个人类键（USER* 系/LOGNAME/APPDATA，见 _PERSONAL_ENV_KEY_MARKERS）
-            #    整体遮蔽；
+            # ① 个人/主机类键（USER* 系/LOGNAME/APPDATA/COMPUTERNAME/HOME 系，见
+            #    _PERSONAL_ENV_KEY_MARKERS）整体遮蔽；
             # ② 其余值经 sanitize_error 全量规则链脱敏（内含 Windows/Unix 路径
-            #    替换 <PATH>、URL 内嵌凭证 user:pass@ → user:***@、key=value、
-            #    Bearer、PII、裸 token 兜底）——仅用 sanitize_paths 会让
-            #    HTTP_PROXY 等含凭证的 env 值明文进入诊断包（R9 泄露向量）。
-            #    PATH 等合法环境值的路径明细同步损失，诊断场景可接受。
+            #    替换 <PATH>、URL 内嵌凭证 user:pass@ → user:***@、仅 user@ 的
+            #    userinfo → ***@、key=value、Bearer、PII、裸 token 兜底）——仅用
+            #    sanitize_paths 会让 HTTP_PROXY 等含凭证的 env 值明文进入诊断包
+            #    （R9 泄露向量）。PATH 等合法环境值的路径明细同步损失，诊断场景可接受。
             sanitized_env = {
                 k: "***"
                 if any(marker in k.lower() for marker in _PERSONAL_ENV_KEY_MARKERS)

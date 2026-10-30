@@ -303,6 +303,76 @@ class TestSanitizeError:
         assert "***" in result
 
 
+class TestUrlUserinfoOnlyCredentials:
+    """UIR-X01-102 残留：无冒号 userinfo（http://token@host）也须脱敏（R9）。
+
+    缺陷背景：`_PATTERN_URL_CREDENTIALS` 只匹配 `user:pass@`，代理/网关 URL 把
+    token 直接放在用户名位置（`http://token@proxy:8080`）时明文进入日志与诊断包。
+    同时必须不误伤路径/查询/片段中的 `@`（`http://host/path@x` 不是 userinfo）。
+    """
+
+    def test_userinfo_only_masked_and_host_port_kept(self):
+        """无冒号 userinfo 遮蔽 token，host:port 保留"""
+        err = ValueError("Proxy: http://tokenvalue123@proxy.corp:8080")
+        result = DataSanitizer.sanitize_error(err)
+        assert result == "Proxy: http://***@proxy.corp:8080"
+
+    def test_userinfo_only_uppercase_scheme_and_host(self):
+        """scheme/host 大小写不影响匹配（IGNORECASE）"""
+        err = ValueError("Proxy: HTTPS://TOKENVALUE456@HOST.COM:8443")
+        result = DataSanitizer.sanitize_error(err)
+        assert "TOKENVALUE456" not in result
+        assert "***@HOST.COM:8443" in result
+
+    def test_userinfo_only_ipv6_host_kept(self):
+        """IPv6 host（含方括号与端口）不被误伤"""
+        err = ValueError("Endpoint: http://abc123token@[::1]:8080/api")
+        result = DataSanitizer.sanitize_error(err)
+        assert result == "Endpoint: http://***@[::1]:8080/api"
+
+    def test_userinfo_only_percent_encoded_masked(self):
+        """百分号编码凭证同样遮蔽"""
+        err = ValueError("Proxy: http://p%40ssword@host:8080")
+        result = DataSanitizer.sanitize_error(err)
+        assert "p%40ssword" not in result
+        assert "***@host:8080" in result
+
+    def test_at_in_path_not_treated_as_userinfo(self):
+        """路径中的 @ 不是 userinfo：不得产出 `scheme://***@` 形态（路径正则另计）"""
+        text = "See http://example.com/docs@v2/readme"
+        result = DataSanitizer.sanitize_error(ValueError(text))
+        assert "***" not in result
+        assert "@v2/readme" in result
+
+    def test_at_in_query_not_treated_as_userinfo(self):
+        """查询串中的 @ 不是 userinfo，不得误伤"""
+        text = "Search https://example.com/list?q=name@x"
+        result = DataSanitizer.sanitize_error(ValueError(text))
+        assert "***" not in result
+        assert "?q=name@x" in result
+
+    def test_file_url_not_masked_as_userinfo(self):
+        """file:// 路径不含 userinfo，不得误伤（也不得引入 ***）"""
+        text = "Open file://localhost failed"
+        result = DataSanitizer.sanitize_error(ValueError(text))
+        assert "***" not in result
+        assert "file://localhost" in result
+
+    def test_colon_form_replacement_unchanged(self):
+        """保留既有 user:pass@ 输出形态（scheme 与 user 不丢）"""
+        err = ValueError("DB: postgres://user:mysecretpass@host:5432/db")
+        result = DataSanitizer.sanitize_error(err)
+        assert result == "DB: postgres://user:***@host:5432/db"
+
+    def test_userinfo_only_masked_in_traceback(self):
+        """traceback 分支与主流程口径一致"""
+        try:
+            raise RuntimeError("proxy http://tokenvalue789@proxy.corp:8080")
+        except RuntimeError as e:
+            result = DataSanitizer.sanitize_error(e, show_traceback=True)
+        assert "tokenvalue789" not in result
+
+
 class TestRegisterSecret:
     """SEC-007: register_secret + sanitize_error 精确替换"""
 
@@ -506,6 +576,49 @@ class TestSanitizeDict:
             assert result["normal"] == "value"
         finally:
             DataSanitizer._reset_known_secrets()
+
+
+class TestSanitizeDictPwdPassKeys:
+    """UIR-X01-102 残留：env 中的 PWD/PASS 类键须默认脱敏（R9）。
+
+    缺陷背景：默认 `sensitive_keys` 不含 `pwd`/`pass`，`MYSQL_PWD`、`DB_PASS`
+    等数据库密码环境变量原样导出到诊断包。为避免子串误伤（`COMPASS` 含 `pass`），
+    pwd/pass 只按「分隔出的词段」精确匹配，不做子串匹配。
+    """
+
+    def test_pwd_and_pass_env_keys_masked(self):
+        data = {"MYSQL_PWD": "mysqlsecret", "DB_PASS": "dbsecret", "SUDO_PASS": "sudosecret"}
+        result = DataSanitizer.sanitize_dict(data)
+        assert result["MYSQL_PWD"] == "***"
+        assert result["DB_PASS"] == "***"
+        assert result["SUDO_PASS"] == "***"
+
+    def test_pwd_and_pass_keys_case_insensitive(self):
+        data = {"mysql_pwd": "mysqlsecret", "db_pass": "dbsecret"}
+        result = DataSanitizer.sanitize_dict(data)
+        assert result["mysql_pwd"] == "***"
+        assert result["db_pass"] == "***"
+
+    def test_pwd_and_pass_camel_case_segment(self):
+        """camelCase 键（dbPass）按词段拆分后命中"""
+        data = {"dbPass": "dbsecret"}
+        result = DataSanitizer.sanitize_dict(data)
+        assert result["dbPass"] == "***"
+
+    def test_ambiguous_pass_substrings_not_masked(self):
+        """COMPASS/PASSPORT/BYPASS 等子串不应被误判为敏感键"""
+        data = {"COMPASS": "value123", "PASSPORT_NO": "value456", "BYPASS": "value789"}
+        result = DataSanitizer.sanitize_dict(data)
+        assert result["COMPASS"] == "value123"
+        assert result["PASSPORT_NO"] == "value456"
+        assert result["BYPASS"] == "value789"
+
+    def test_explicit_pwd_keyword_still_segment_scoped(self):
+        """调用方显式传入 pwd/pass 时同样按词段匹配，不放大误伤面"""
+        data = {"compass": "value123", "db_pwd": "dbsecret"}
+        result = DataSanitizer.sanitize_dict(data, sensitive_keys=["pwd"])
+        assert result["compass"] == "value123"
+        assert result["db_pwd"] == "***"
 
 
 class TestSanitizeArgs:

@@ -168,8 +168,12 @@ class DataSanitizer:
         re.IGNORECASE,
     )
 
+    # URL userinfo：`user:pass@` 遮蔽密码（保留 user），仅 `user@`（token 常置于
+    # 用户名位置，如 http://token@proxy:8080）遮蔽整个 userinfo，host:port/path 保留。
+    # userinfo 限定在 `scheme://` 与首个 `@` 之间且不含 `/ ? #` 与空白，故
+    # `http://host/path@x`、`http://host?q=a@b` 等路径/查询中的 @ 不会被误判。
     _PATTERN_URL_CREDENTIALS = re.compile(
-        r"([a-z][a-z0-9+.\-]*)://([^:@\s]*):([^@\s]+)@",
+        r"([a-z][a-z0-9+.\-]*)://([^:@/?#\s]*)(?::([^@/?#\s]*))?@",
         re.IGNORECASE,
     )
 
@@ -189,6 +193,12 @@ class DataSanitizer:
     _PATTERN_CREDIT_CODE = re.compile(
         r"(?<![0-9A-Za-z])[0-9A-HJ-NPQRTUWXY]{2}\d{6}[0-9A-HJ-NPQRTUWXY]{10}(?![0-9A-Za-z])"
     )
+
+    # 短且歧义的敏感键关键字：`pass` 作为子串会误伤 COMPASS / PASSPORT / BYPASS，
+    # `pwd` 亦不宜裸子串匹配；两者仅在「按分隔符/camelCase 拆出的词段整体相等」时
+    # 生效（MYSQL_PWD / DB_PASS / dbPass 命中，COMPASS 不命中）。
+    _AMBIGUOUS_SENSITIVE_KEYWORDS: ClassVar[frozenset[str]] = frozenset({"pwd", "pass"})
+    _KEY_SEGMENT_SPLIT = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z])(?=[A-Z])")
 
     @staticmethod
     def _sanitize_pii_text(text: str) -> str:
@@ -214,6 +224,18 @@ class DataSanitizer:
         if len(token) <= 8:
             return "***"
         return f"{token[:4]}***{token[-4:]}"
+
+    @staticmethod
+    def _mask_url_userinfo(match: re.Match[str]) -> str:
+        """URL userinfo 遮蔽回调：有冒号只遮蔽密码，无冒号遮蔽整个 userinfo。
+
+        无冒号形态（`http://token@host`）的 token 位于用户名位置，故整体替换为
+        `***`，保留 scheme 与 host:port/path 便于定位问题。
+        """
+        scheme = match.group(1)
+        if match.group(3) is None:
+            return f"{scheme}://***@"
+        return f"{scheme}://{match.group(2)}:***@"
 
     @staticmethod
     def sanitize_paths(text: str) -> str:
@@ -258,7 +280,7 @@ class DataSanitizer:
 
         msg = DataSanitizer._PATTERN_SPACE_KEY_VALUE.sub(r"\1 ***", msg)
 
-        msg = DataSanitizer._PATTERN_URL_CREDENTIALS.sub(r"\1://\2:***@", msg)
+        msg = DataSanitizer._PATTERN_URL_CREDENTIALS.sub(DataSanitizer._mask_url_userinfo, msg)
 
         msg = DataSanitizer._PATTERN_BEARER.sub("Bearer ***", msg)
 
@@ -295,7 +317,7 @@ class DataSanitizer:
                 line = DataSanitizer._PATTERN_COLON_KEY_VALUE.sub(r"\1: ***", line)
                 line = DataSanitizer._PATTERN_JSON_KEY_VALUE.sub(r'"\1": "***"', line)
                 line = DataSanitizer._PATTERN_SPACE_KEY_VALUE.sub(r"\1 ***", line)
-                line = DataSanitizer._PATTERN_URL_CREDENTIALS.sub(r"\1://\2:***@", line)
+                line = DataSanitizer._PATTERN_URL_CREDENTIALS.sub(DataSanitizer._mask_url_userinfo, line)
                 line = DataSanitizer._PATTERN_BEARER.sub("Bearer ***", line)
                 line = DataSanitizer._PATTERN_WIN_PATH.sub("<PATH>", line)
                 line = DataSanitizer._PATTERN_UNIX_PATH.sub("<PATH>", line)
@@ -311,6 +333,26 @@ class DataSanitizer:
             return "\n".join(tb_clean)
 
         return msg
+
+    @classmethod
+    def _is_sensitive_key(cls, key: str, sensitive_keys: list[str]) -> bool:
+        """判断字典键是否敏感：长关键字子串匹配，pwd/pass 仅按词段精确匹配。
+
+        Args:
+            key: 字典键名
+            sensitive_keys: 敏感键关键字列表
+
+        Returns:
+            True 表示该键的值需要脱敏
+        """
+        lowered = key.lower()
+        ambiguous = [keyword for keyword in sensitive_keys if keyword in cls._AMBIGUOUS_SENSITIVE_KEYWORDS]
+        if any(keyword in lowered for keyword in sensitive_keys if keyword not in cls._AMBIGUOUS_SENSITIVE_KEYWORDS):
+            return True
+        if not ambiguous:
+            return False
+        segments = {segment.lower() for segment in cls._KEY_SEGMENT_SPLIT.split(key) if segment}
+        return any(keyword in segments for keyword in ambiguous)
 
     @staticmethod
     def sanitize_dict(data: dict, sensitive_keys: list[str] | None = None) -> dict:
@@ -328,6 +370,8 @@ class DataSanitizer:
             sensitive_keys = [
                 "token",
                 "password",
+                "pwd",
+                "pass",
                 "api_key",
                 "secret",
                 "key",
@@ -344,7 +388,7 @@ class DataSanitizer:
         result = {}
         for k, v in data.items():
             # 检查key是否敏感
-            if any(sensitive in k.lower() for sensitive in sensitive_keys):
+            if DataSanitizer._is_sensitive_key(k, sensitive_keys):
                 if isinstance(v, str):
                     result[k] = DataSanitizer.sanitize_token(v)
                 else:
