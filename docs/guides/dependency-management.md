@@ -25,6 +25,7 @@
 - `flet_charts` 是 V1 新增的独立模块，遗漏会导致打包产物 `import flet_charts` 报 ImportError
 - `flet_core` / `flet_desktop` 在 V1 已合并入 `flet`，但保守保留 `flet_desktop` 以兼容桌面打包路径
 - 新增 flet 相关 import 时，同步检查 spec 文件的 `hiddenimports` 是否覆盖
+- 打包产物使用 Python `3.14` 运行时（CI `build-windows` job 以 3.14 构建）；`pyproject.toml` 的 `requires-python>=3.13` 是源码安装下界，不等于产物运行时版本
 
 ---
 

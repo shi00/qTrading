@@ -108,7 +108,7 @@ body:
     id: python-version
     attributes:
       label: Python 版本
-      placeholder: 3.13.x
+      placeholder: 3.14.x
     validations:
       required: true
 
