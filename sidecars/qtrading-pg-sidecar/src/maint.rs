@@ -681,6 +681,58 @@ async fn run_pg_dump(
 
 // ---- restore ----
 
+/// 原实例活性判定（restore 守卫，锁内探测）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OriginalInstance {
+    /// 无 postmaster.pid：原实例未运行
+    Absent,
+    /// postmaster.pid 的 pid 已不存活（陈旧残留）
+    Stale,
+    /// pid 对应进程仍存活
+    Alive { pid: u32 },
+    /// postmaster.pid 存在但不可解析（半写/损坏），无法证明原实例已停止
+    Unverifiable,
+}
+
+fn probe_original_instance(data_dir: &Path) -> OriginalInstance {
+    let Some(info) = pgbin::read_postmaster_pid(data_dir) else {
+        // 读取失败：文件已消失（实例刚清理）→ 无实例；仍存在但不可解析 → 无法验证
+        return if data_dir.join("postmaster.pid").exists() {
+            OriginalInstance::Unverifiable
+        } else {
+            OriginalInstance::Absent
+        };
+    };
+    if pgbin::process_alive(info.pid) {
+        OriginalInstance::Alive { pid: info.pid }
+    } else {
+        OriginalInstance::Stale
+    }
+}
+
+/// restore 守卫：原实例存活时拒绝继续，避免对运行中实例做目录替换（数据损坏）。
+/// 须在持维护锁后、任何 rename/删除前调用——持锁期间 sidecar `run` 无法启动新实例，
+/// 检查与目录切换之间不存在「被新实例抢先启动」的窗口。
+fn ensure_original_instance_stopped(data_dir: &Path) -> Result<(), u8> {
+    match probe_original_instance(data_dir) {
+        OriginalInstance::Absent | OriginalInstance::Stale => Ok(()),
+        OriginalInstance::Alive { pid } => {
+            eprintln!(
+                "[sidecar] 拒绝恢复：原 PostgreSQL 实例仍在运行（postmaster.pid pid={pid}）；\
+                 请完全退出 qTrading 并确认实例已停止后重试（doctor 的 postgres_alive 字段可确认）"
+            );
+            Err(exit_codes::LOCK_CONFLICT)
+        }
+        OriginalInstance::Unverifiable => {
+            eprintln!(
+                "[sidecar] 拒绝恢复：postmaster.pid 存在但不可解析，无法确认原实例已停止；\
+                 请完全退出 qTrading 并运行 doctor 诊断后再恢复"
+            );
+            Err(exit_codes::DATA_DIR_ABNORMAL)
+        }
+    }
+}
+
 pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
     logging::init(None);
     validate_database_name(&args.database)?;
@@ -691,6 +743,8 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
         return Err(exit_codes::DUMP_RESTORE_FAILED);
     }
     let _lock = acquire_lock(&layout)?;
+    // 最早安全点：锁内、任何 rename/删除之前确认原实例已停止（运行中做目录替换会损坏数据）
+    ensure_original_instance_stopped(&layout.data_dir)?;
     let password = load_password(&layout)?;
     setup::ensure_binaries(&layout, &|msg| tracing::info!("{msg}")).await?;
 
@@ -1317,6 +1371,84 @@ mod tests {
             database: DEFAULT_DATABASE.to_string(),
         };
         assert_eq!(restore(args).await, Err(exit_codes::LOCK_CONFLICT));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 三态判定：无 postmaster.pid / pid 陈旧 / pid 存活。
+    #[test]
+    fn probe_original_instance_distinguishes_absent_stale_alive() {
+        let dir = unique_tmp("liveness-probe");
+        let data_dir = dir.join("postgres/16/data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let pid_file = data_dir.join("postmaster.pid");
+
+        // 无 postmaster.pid：原实例必然未运行
+        assert_eq!(probe_original_instance(&data_dir), OriginalInstance::Absent);
+
+        // 陈旧：pid 超出各平台可用 pid 范围（Linux pid_max ≤ 4194304；Windows 无效 pid）
+        std::fs::write(&pid_file, "2000000000\n/d\n1700000000\n55432\n").unwrap();
+        assert_eq!(probe_original_instance(&data_dir), OriginalInstance::Stale);
+
+        // 存活：用当前测试进程 pid（必然存活）
+        let alive_pid = std::process::id();
+        std::fs::write(&pid_file, format!("{alive_pid}\n/d\n1700000000\n55432\n")).unwrap();
+        assert_eq!(
+            probe_original_instance(&data_dir),
+            OriginalInstance::Alive { pid: alive_pid }
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// postmaster.pid 存在但不可解析（半写/损坏）：无法证明原实例已停止 → 不可验证。
+    #[test]
+    fn probe_original_instance_unparseable_pid_is_unverifiable() {
+        let dir = unique_tmp("liveness-unparseable");
+        let data_dir = dir.join("postgres/16/data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("postmaster.pid"), "not-a-pid\n").unwrap();
+        assert_eq!(
+            probe_original_instance(&data_dir),
+            OriginalInstance::Unverifiable
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 原实例存活 → 拒绝恢复（exit 50），且不得改名/删除原数据目录。
+    #[tokio::test]
+    async fn restore_refuses_alive_instance_without_rename() {
+        let dir = unique_tmp("restore-alive");
+        let data_dir = dir.join("postgres/16/data");
+        make_fake_cluster(&data_dir);
+        let alive_pid = std::process::id();
+        std::fs::write(
+            data_dir.join("postmaster.pid"),
+            format!("{alive_pid}\n{}\n1700000000\n55432\n", data_dir.display()),
+        )
+        .unwrap();
+        let input = dir.join("in.dump");
+        std::fs::write(&input, b"dump").unwrap();
+
+        let args = cli::RestoreArgs {
+            data_dir: data_dir.clone(),
+            input,
+            target_data_dir: None,
+            database: DEFAULT_DATABASE.to_string(),
+        };
+        assert_eq!(restore(args).await, Err(exit_codes::LOCK_CONFLICT));
+
+        // 未发生原子切换：原目录内容完好，且没有产生 .bak-* 兄弟目录
+        assert_eq!(
+            std::fs::read_to_string(data_dir.join("PG_VERSION")).unwrap(),
+            "16\n"
+        );
+        let baks: Vec<_> = std::fs::read_dir(data_dir.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("data.bak-"))
+            .collect();
+        assert!(baks.is_empty(), "存活实例下不得产生 .bak-* 目录");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
