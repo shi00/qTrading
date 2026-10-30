@@ -3,7 +3,7 @@
 //! - 解压走 `<install-dir>.tmp-<pid>/`，关键工具校验通过后原子 rename，写 `.setup-complete`；
 //!   中断残留（tmp 目录 / 无 marker 的 install dir）下次启动清理重做，禁止半截继续。
 //! - initdb 由 sidecar 显式执行（`--data-checksums` + scram），不委托 crate 默认初始化
-//!   （postgresql_embedded 0.21 `initialize()` 不带 `--data-checksums`，§7.4 AI-18 不满足）。
+//!   （postgresql_embedded 0.22 `initialize()` 不带 `--data-checksums`，§7.4 AI-18 不满足）。
 //! - `pg_hba.conf` 整文件覆盖、`postgresql.conf` 受管块幂等写入（§13.7.33 漂移自修复）。
 
 use crate::exit_codes;
@@ -16,7 +16,7 @@ use std::time::Duration;
 
 pub const SETUP_COMPLETE_MARKER: &str = ".setup-complete";
 /// 解压期防 initdb 哨兵文件内容（crate `is_initialized()` 只看 postgresql.conf 存在性，
-/// 见 postgresql_embedded 0.21 postgresql.rs `fn is_initialized`）。
+/// 见 postgresql_embedded 0.22 postgresql.rs `fn is_initialized`）。
 const EXTRACTION_GUARD: &str = "# qtrading-pg-sidecar extraction guard\n";
 
 pub const PG_HBA_TEMPLATE: &str = "\
