@@ -794,12 +794,16 @@ class TestScreenerViewModelExport:
                     return_value="<sanitized>",
                 ) as mock_sanitize,
             ):
-                mock_tm.return_value.run_async = AsyncMock(side_effect=RuntimeError("boom boom"))
+                boom = RuntimeError("boom boom")
+                mock_tm.return_value.run_async = AsyncMock(side_effect=boom)
                 path, error = await vm.export_results_excel(filepath)
                 assert path is None
                 assert error == "<sanitized>"  # R9: 来自 sanitize_error 而非 str(e)
-                # logger.error + return 各调一次, 共 2 次
-                assert mock_sanitize.call_count == 2
+                # export_mixin 自身 logger.error + return 各调一次；logger 的 traceback
+                # 格式化还会在日志 handler 线程内再调一次（入参为 traceback 文本，
+                # 次数随日志级别/队列时序变化），故不断言精确次数。
+                assert mock_sanitize.call_count >= 2
+                assert any(call.args[0] is boom for call in mock_sanitize.call_args_list)
 
     @pytest.mark.asyncio
     async def test_export_results_bytes_no_data(self, vm):
@@ -871,12 +875,16 @@ class TestScreenerViewModelExport:
                 return_value="<sanitized>",
             ) as mock_sanitize,
         ):
-            mock_tm.return_value.run_async = AsyncMock(side_effect=RuntimeError("secret boom"))
+            boom = RuntimeError("secret boom")
+            mock_tm.return_value.run_async = AsyncMock(side_effect=boom)
             result, error = await vm.export_results_bytes("csv")
             assert result is None
             assert error == "<sanitized>"  # R9: 来自 sanitize_error 而非 str(e)
-            # logger.error + return 各调一次, 共 2 次
-            assert mock_sanitize.call_count == 2
+            # export_mixin 自身 logger.error + return 各调一次；logger 的 traceback
+            # 格式化还会在日志 handler 线程内再调一次（入参为 traceback 文本，
+            # 次数随日志级别/队列时序变化），故不断言精确次数。
+            assert mock_sanitize.call_count >= 2
+            assert any(call.args[0] is boom for call in mock_sanitize.call_args_list)
 
 
 class TestScreenerViewModelRunStrategy:
