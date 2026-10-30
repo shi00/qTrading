@@ -37,20 +37,20 @@ if /i "%CMD%"=="doctor" (
 )
 
 if /i "%CMD%"=="dump" (
-    if "%~2"=="" (
+    if "%~1"=="" (
         echo Usage: %0 dump ^<output-file^>
         exit /b 1
     )
-    "%SIDECAR_EXE%" dump --data-dir "%DEFAULT_DATA_DIR%" --output "%~2"
+    "%SIDECAR_EXE%" dump --data-dir "%DEFAULT_DATA_DIR%" --output "%~1"
     exit /b !errorlevel!
 )
 
 if /i "%CMD%"=="restore" (
-    if "%~2"=="" (
+    if "%~1"=="" (
         echo Usage: %0 restore ^<input-file^>
         exit /b 1
     )
-    "%SIDECAR_EXE%" restore --data-dir "%DEFAULT_DATA_DIR%" --input "%~2"
+    "%SIDECAR_EXE%" restore --data-dir "%DEFAULT_DATA_DIR%" --input "%~1"
     exit /b !errorlevel!
 )
 
