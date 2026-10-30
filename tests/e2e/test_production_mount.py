@@ -32,18 +32,11 @@ use_state/VM 状态跨页保持、use_dialog overlay 跨页存活。本文件经
    按钮文本与左导航 nav_backtest label 同名，click_button 文本定位在 full-mount
    首跑实测误点/吞点后 ``_handle_backtest_jump`` 因 selected_strategy 空值守卫
    静默 return，页面不跳转；anchor 精确点击消除该歧义。
-5. 场景①② skip（阻塞缺陷 F07-FULLMOUNT-1）：full-mount 首跑（run5）发现
-   「去回测」跳转链路真实缺陷——点击事件到达处理器（``UI_ACTION Click
-   btn_jump_backtest`` 日志 + select 策略成功），随后 pubsub 导航链抛
-   ``RuntimeError: The context is not associated with any page`` ×4
-   （exception_hooks AsyncioHandler 捕获，证据：run5
-   ``e2e-artifacts/test_backtest_prefill_auto_applied.tar.gz`` 内
-   e2e-flet-app.log.tail L35-48），跳转不发生。该链路在快速 smoke E2E 从未
-   被覆盖（smoke 用例经导航栏 goto，不走跳转按钮），属 full-mount E2E 的
-   首个价值发现；场景①行为级断言（跳转证明选中态保持）与场景②（透传
-   跳转）均被其阻塞，skip 待缺陷修复后恢复。注意：场景①截图同时证实
-   状态保持真实成立（切页往返后「放量突破」+「600519」均保持），缺陷仅
-   阻断自动化断言通道，不影响 F07 核心结论（场景③④已自动化证实）。
+5. 场景①②曾因阻塞缺陷 F07-FULLMOUNT-1 skip，缺陷已由 #1342（commit
+   591b25f）修复：PubSub 导航 handler 在池线程只做纯解析，hook setter 与
+   切页经 ``page.run_task`` 送回事件循环，池线程不再触碰 ``ft.context.page``。
+   skip 已解除并恢复行为级断言；若回归，先查 ``e2e-flet-app.log`` 是否再现
+   ``RuntimeError: The context is not associated with any page``。
 """
 
 import logging
@@ -59,10 +52,6 @@ pytestmark = [pytest.mark.timeout(180), pytest.mark.e2e, pytest.mark.timeout_e2e
 logger = logging.getLogger(__name__)
 
 
-@pytest.mark.skip(
-    reason="阻塞缺陷 F07-FULLMOUNT-1：btn_jump_backtest 链路 RuntimeError (context not associated "
-    "with any page)，跳转不发生（模块 docstring 边界 3/5）；行为级断言依赖该链路，修复后恢复"
-)
 async def test_screener_state_survives_page_switch(full_mount_page):
     """场景①：选股页控件状态在切页往返后保持（生产常驻挂载，未重建证据链）。
 
@@ -99,10 +88,6 @@ async def test_screener_state_survives_page_switch(full_mount_page):
     await backtest.expect_title(timeout_ms=TIMEOUTS.TITLE)
 
 
-@pytest.mark.skip(
-    reason="阻塞缺陷 F07-FULLMOUNT-1：btn_jump_backtest 链路 RuntimeError (context not associated "
-    "with any page)，跳转不发生（模块 docstring 边界 5）；修复后恢复"
-)
 async def test_backtest_prefill_auto_applied(full_mount_page):
     """场景②：F13 选股→回测自动透传（首次 + 换策略二次跳转，均不手工重选）。
 
