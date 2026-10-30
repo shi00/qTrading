@@ -191,3 +191,7 @@ docs/plans/archive/
 
 # 9. Static analysis reports (auto-generated, not source code)
 pyright_report.txt
+
+# 10. Local tool binaries & model weights (本地下载/构建产物，非源码、非交付物)
+/bin/
+/ai_models/
