@@ -22,12 +22,12 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 >
 > **main 分支合并策略（PR-only）**：main 由规则集 `main-required-checks` 保护——required checks 为 `CI Gate` 与 `Docs Consistency Check`，并启用 `pull_request` 规则（required approving review 数为 0，即必须经 PR 合并）；直推 main 被禁止，管理员通过 `bypass_mode: pull_request` 获得的是「PR 合并时可绕过 checks」的能力，不是直推许可。
 
-1. **Fast Ruff Check & Format** (`lint-fast` job，Python `3.13` 稳定基线) 与 **实验性 lint** (`lint-fast-experimental` job，Python `3.14`，`continue-on-error` 允许失败)：两者均仅跑 `ruff check` + `ruff format --check`，不安装项目依赖。稳定基线拆成独立 job 而非同一 matrix，是为了让聚合门禁依赖的 `needs.lint-fast.result` 语义确定（实验项失败不得污染稳定基线结论）
+1. **Fast Ruff Check & Format**：`lint-fast` job 跑 Python `3.14`（默认运行时，聚合门禁 `CI Gate` 校验其 `needs.lint-fast.result`），`lint-fast-313` job 跑 Python `3.13`（声明下界兼容性检查）。两者均仅跑 `ruff check` + `ruff format --check`，不安装项目依赖，且均已移除 `continue-on-error`（结果真实上报，不再是前瞻实验项）。拆成独立 job 而非同一 matrix，是为了让聚合门禁的判定语义确定，避免 matrix 合并状态带来的歧义
 2. **Pre-commit Hooks** (Ruff、格式化、裸 `type: ignore`、requirements 同步、版本一致性、文档一致性、红线自动化、import-linter 架构守护；hook 数量见 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml))
 3. **Security Audit** (`scripts/run_pip_audit.py`，扫描 `requirements.txt`、`requirements-optional.txt`、`requirements-dev.txt`，使用 `.security/audit-allowlist.yml`)
 4. **Pyright Type Check** (版本见 `ci_cd.yml`，`continue-on-error: false`)
 5. **Alembic Migration** (`upgrade head` → `alembic check` → `downgrade base` → `upgrade head`)
-6. **Unit & Integration Tests** (Linux/Windows unit，Linux integration；完整测试矩阵仅 Python `3.13`)
+6. **Unit & Integration Tests** (Linux/Windows unit，Linux integration；完整测试矩阵为 Python `3.14`)
 7. **Windows E2E Tests** (`tests/e2e/`，Chromium + PostgreSQL)
 8. **Per-File (≥ 80%) + Diff Coverage (≥ 80%)（CI 强制）**；分层单文件阈值 services/strategies/data ≥ 90%、ui ≥ 85%（advisory 报告模式，不阻断，见 [testing.md](./testing.md)）；**Overall ≥ 85% 同样在 CI 路径强制**（`pyproject.toml` `[tool.coverage.report]` `fail_under=85`：CI 的 `pytest --cov` 未显式传 `--cov-fail-under`，pytest-cov 继承 coverage 配置的 `fail_under`，整体覆盖率不足时该 job 失败）(覆盖率阈值见 [`pyproject.toml`](../../pyproject.toml))
 9. **requirements*.txt 漂移处理** (`requirements-drift` job 检测到 main 分支漂移时，由 `update-requirements` job 创建同步 PR)
@@ -37,7 +37,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 > **requirements 机器人协作规则（依赖升级期间）**：`requirements-drift` 检出漂移后由 `update-requirements` 创建 `chore/auto-requirements-sync` PR。依赖全量升级的各 Phase PR 在途期间，该 bot PR 只读不改：若其 diff 与本 Phase 目标版本一致，先合入 bot PR 再 rebase 本 PR；否则关闭该 bot PR，待 Phase 合并后由 bot 重新生成。任何 Phase PR 合并后须复跑 `requirements-drift`（上游当日发版会使 main 变红），变红时按同一规则处理，不得在业务 PR 中顺带升级无关包。
 
-> **Python 3.14 状态说明**：完整测试矩阵（Code Quality & Tests、Windows E2E、Windows Build 等）仅运行 Python `3.13`（稳定基线）。Python `3.14` 当前依赖已支持（`litellm>=1.101.0` 的 `Requires-Python` 为 `<3.15, >=3.10`），`lint-fast-experimental` job 以 `continue-on-error` 前瞻验证（仅跑 `ruff check` + `ruff format --check`，不安装项目依赖；相关技术债见 [已知架构技术债](../debt/known-technical-debt.md)）。
+> **Python 运行时矩阵**：完整测试矩阵（Code Quality & Tests、Windows Unit、Windows E2E、Windows Build 等）与发布产物统一使用 Python `3.14`；`pyproject.toml` 的 `requires-python` 仍为 `>=3.13`（源码安装下界），由 `lint-fast-313` job 守护。编译型依赖已取证：`psycopg2-binary` 有 cp314 Windows 轮子；`llama-cpp-python` PyPI 仅发源码包（上游已声明 Python 3.14 支持），CI 在 windows-latest / ubuntu-latest 以 MSVC / CMake 源码构建。不升 Python 3.15（`litellm` 声明 `Requires-Python <3.15`）。
 
 ### 版本发布流程与 Release 管理
 

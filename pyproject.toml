@@ -8,6 +8,7 @@ license-files = ["LICENSE"]
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
 ]
@@ -145,6 +146,9 @@ testpaths = ["tests"]
 filterwarnings = [
     "error::DeprecationWarning",
     "ignore::DeprecationWarning:pytest_asyncio.plugin",
+    # py-mini-racer（akshare 传递依赖，上游停止维护）在 Python 3.14 定义 ctypes.Structure 时触发
+    # `_pack_` 隐式内存布局 DeprecationWarning（导入即触发，与项目代码无关，3.19 才会变成错误）
+    "ignore:Due to '_pack_', the 'ArrayBufferByte' Structure will use memory layout compatible with MSVC:DeprecationWarning",
 ]
 addopts = "--durations=20 --durations-min=1.0 -n auto --dist=loadgroup --timeout=300 --strict-markers"
 markers = [

@@ -79,8 +79,38 @@ jobs:
           echo "$result" >> "$GITHUB_OUTPUT"
           echo "- 变更文件数 $count，分类结果 \`$result\`" >> "$GITHUB_STEP_SUMMARY"
 
-  # 稳定基线 lint（Python 3.13）：聚合门禁 CI Gate 只依赖本 job，结果语义确定。
+  # 稳定基线 lint（Python 3.14，默认运行时）：聚合门禁 CI Gate 只依赖本 job，结果语义确定。
   lint-fast:
+    name: Fast Lint Check (3.14)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Setup Python 3.14
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.14'
+          cache: 'pip'
+
+      - name: Install Ruff
+        run: pip install ruff==0.16.7
+
+      - name: Ruff Lint Check
+        run: ruff check .
+
+      - name: Ruff Format Check
+        run: ruff format --check .
+
+  # 兼容性 lint（Python 3.13，声明下界 requires-python>=3.13）：D8.1 起 3.14 为主矩阵，
+  # 3.13 仅保留本 job 守护最低支持版本（ruff 静态检查不依赖解释器版本，故一个 job 足够）。
+  # 独立成 job 而非 lint-fast 的 matrix 项：CI Gate 只依赖 needs.lint-fast.result，
+  # 两代解释器的 lint 结果各自独立上报，避免 matrix 合并状态带来的判定歧义。
+  lint-fast-313:
     name: Fast Lint Check (3.13)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -95,37 +125,6 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.13'
-          cache: 'pip'
-
-      - name: Install Ruff
-        run: pip install ruff==0.16.7
-
-      - name: Ruff Lint Check
-        run: ruff check .
-
-      - name: Ruff Format Check
-        run: ruff format --check .
-
-  # 实验性 lint（Python 3.14）：前瞻验证，允许失败。
-  # 独立成 job 而非 lint-fast 的 matrix 项：job 级 continue-on-error 会让 needs.lint-fast.result
-  # 的取值不确定（实验项失败是否污染聚合结果），而 CI Gate 依赖该聚合结果判定门禁，
-  # 故将其拆出，使 lint-fast 仅供稳定基线使用。
-  lint-fast-experimental:
-    name: Fast Lint Check (3.14)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    continue-on-error: true
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      - name: Setup Python 3.14
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: '3.14'
           cache: 'pip'
 
       - name: Install Ruff
@@ -156,7 +155,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.13']
+        python-version: ['3.14']
 
     services:
       postgres:
@@ -372,7 +371,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: '3.13'
+          python-version: '3.14'
           cache: 'pip'
           cache-dependency-path: |
             requirements.txt
@@ -549,7 +548,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: '3.13'
+          python-version: '3.14'
           cache: 'pip'
           cache-dependency-path: |
             requirements.txt
@@ -700,7 +699,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: '3.13'
+          python-version: '3.14'
           cache: 'pip'
           cache-dependency-path: |
             requirements.txt
@@ -905,7 +904,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: '3.13'
+          python-version: '3.14'
           cache: 'pip'
           cache-dependency-path: |
             requirements.txt
@@ -1135,7 +1134,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: '3.13'
+          python-version: '3.14'
           cache: 'pip'
           cache-dependency-path: |
             requirements.txt
@@ -1297,7 +1296,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: '3.13'
+          python-version: '3.14'
 
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
@@ -1342,7 +1341,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: '3.13'
+          python-version: '3.14'
           cache: 'pip'
 
       - name: Install uv
@@ -1396,7 +1395,7 @@ jobs:
       # 4 个发布变体：cpu / cuda 为独立安装包（外置 PostgreSQL 模式），embedded-cpu / embedded-cuda
       # 额外内置 sidecar PostgreSQL。llama-cpp-python 是编译型原生扩展，PyPI 0.3.x 仅发源码包，
       # 各后端在 CI 构建期通过 cmake args 编译（CMAKE_ARGS="-DGGML_CUDA=on" → CUDA，不设则 CPU）。
-      # abetlen 预编译 wheel 已无法匹配项目的 Python 3.13 + llama-cpp-python 0.3.35 组合
+      # abetlen 预编译 wheel 已无法匹配项目的 Python 3.14 + llama-cpp-python 0.3.36 组合
       # （abl wheel 最高支持 Python 3.12 + llama-cpp-python 0.3.4），故 v0.3.35 起切换到
       # 源码编译路径。因此每个 EXE 只能运行单一后端，需按后端拆分发行。
       # embedded 标记供 if: 条件区分内嵌。
@@ -1422,7 +1421,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: '3.13'
+          python-version: '3.14'
           cache: 'pip'
           cache-dependency-path: |
             requirements.txt
@@ -1480,7 +1479,7 @@ jobs:
           # B03: llama-cpp-python 0.3.x 在 PyPI 仅发源码包，本地 C++ 编译器已就绪（windows-latest
           # 自带 VS Build Tools），直接源码编译。CUDA 变体额外注入 CMAKE_ARGS="-DGGML_CUDA=on"
           # 使 nvcc 编译 CUDA 后端；CPU 变体不设 CMAKE_ARGS，cmake 自动只编 CPU。
-          # abetlen 预编译 wheel 已无法匹配 Python 3.13 + llama-cpp-python 0.3.35
+          # abetlen 预编译 wheel 已无法匹配 Python 3.14 + llama-cpp-python 0.3.36
           # （abl wheel 最高 cp312 + 0.3.4），故 v0.3.35 起切换到此源码编译路径。
           if ("${{ matrix.backend }}" -eq "cuda") {
             # CUDA 12.4 的 nvcc 官方白名单仍是 MSVC 193x，而 windows-2022 镜像只带 VS 2022 14.44（cl 19.44，
@@ -2123,7 +2122,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: '3.13'
+          python-version: '3.14'
           cache: 'pip'
           cache-dependency-path: |
             requirements.txt
@@ -2198,7 +2197,7 @@ jobs:
 
           # 分类与稳定基线 lint 对任何 PR 都必须真正执行成功。
           check_required "Changes" "$CHANGES" false
-          check_required "Fast Lint Check (3.13)" "$LINT" false
+          check_required "Fast Lint Check (3.14)" "$LINT" false
 
           if [ "$CODE" = "false" ]; then
             # 非代码类 PR：重型 job 按设计跳过，允许 skipped；出现 failure 仍判不通过。
