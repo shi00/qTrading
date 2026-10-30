@@ -65,7 +65,7 @@ Polars 引擎毫秒级全市场回测；内置夏普/回撤/Alpha-Beta/胜率等
 
 ## 🏗️ 项目架构
 
-采用清晰的分层架构（核心 → 引导 → 数据 → 服务 → 策略 → UI + 横切 utils），上层仅依赖下层：
+采用清晰的分层架构（自外向内：`app` → `ui` → `strategies` → `services` → `data` → `core`，`utils` 为横切关注点），上层仅依赖下层：
 
 ```
 qTrading/
