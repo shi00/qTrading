@@ -9,7 +9,7 @@
 设计要点：
 - ``@register_singleton`` 协议：``_reset_singleton``（无 atexit 资源需清理）
 - 路径从 AppConfig + ``ConfigHandler.load_config()`` 实时解析（不在构造期缓存，配合运行时配置切换）
-- argv 不含用户直接输入（R-A2 边界：所有路径来自 AppConfig）
+- argv 中的路径与业务库名均来自 AppConfig（R-A2 边界；库名经白名单校验后透传）
 - exit code 20 (PG 未运行) 在 doctor 命令中容忍为成功（sidecar doctor 是只读诊断）
 """
 
@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -37,6 +38,11 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 logger = logging.getLogger("qtrading.embedded_pg_maintenance")
 
 EXPECTED_DOCTOR_SCHEMA = "qtrading.embedded_postgres.doctor.v1"
+
+# UIR-F16-002: 业务库名白名单（与 sidecar maint.rs validate_database_name 对齐）。
+# 库名会进入 sidecar 的 `CREATE DATABASE "<name>"` SQL 文本，只允许安全标识符：
+# [A-Za-z_][A-Za-z0-9_]*，长度 ≤ 63（PostgreSQL NAMEDATALEN-1）。
+_DATABASE_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
 
 
 class EmbeddedPgMaintenanceError(RuntimeError):
@@ -127,7 +133,7 @@ class EmbeddedPgMaintenanceService:
     """sidecar CLI 离线维护命令包装单例（R-A2, 不扩展 EmbeddedPostgresService）。
 
     所有命令通过 subprocess 调用 sidecar binary，解析 JSON 输出。
-    argv 路径来自 AppConfig + ``ConfigHandler.load_config()``，不含用户直接输入。
+    argv 路径与业务库名来自 AppConfig + ``ConfigHandler.load_config()``（库名经白名单校验）。
     """
 
     _instance: EmbeddedPgMaintenanceService | None = None
@@ -296,6 +302,25 @@ class EmbeddedPgMaintenanceService:
         data_dir = data_root / "data"
         return sidecar_path, str(data_dir)
 
+    def _get_database_name(self) -> str:
+        """读取并校验配置中的业务库名（UIR-F16-002：dump/restore 不得硬编码 qtrading）。
+
+        库名来自 ``AppConfig.embedded_pg_database``（与运行时 ``EmbeddedPostgresService``
+        使用同一配置项），经白名单校验后透传给 sidecar ``--database``。
+
+        Raises:
+            EmbeddedPgMaintenanceError: 库名为空 / 含非法字符 / 超过 63 字符
+        """
+        config = AppConfig.model_validate(ConfigHandler.load_config())
+        database = config.embedded_pg_database
+        if not _DATABASE_NAME_PATTERN.fullmatch(database):
+            # R9: 非法值可能来自用户输入，经 sanitize_error 脱敏后再进入异常消息
+            sanitized = DataSanitizer.sanitize_error(database)
+            raise EmbeddedPgMaintenanceError(
+                f"embedded_pg_database 非法（须为 [A-Za-z_][A-Za-z0-9_]*，长度 ≤ 63）: {sanitized!r}"
+            )
+        return database
+
     def _build_doctor_argv(self) -> list[str]:
         sidecar_path, data_dir = self._get_sidecar_path_and_data_dir()
         return [sidecar_path, "doctor", "--data-dir", data_dir]
@@ -307,6 +332,8 @@ class EmbeddedPgMaintenanceService:
             "dump",
             "--data-dir",
             data_dir,
+            "--database",
+            self._get_database_name(),
             "--output",
             str(output_path),
         ]
@@ -320,6 +347,8 @@ class EmbeddedPgMaintenanceService:
             data_dir,
             "--input",
             str(input_path),
+            "--database",
+            self._get_database_name(),
         ]
         if target_data_dir:
             argv.extend(["--target-data-dir", str(target_data_dir)])

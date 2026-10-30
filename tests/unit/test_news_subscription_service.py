@@ -281,6 +281,27 @@ class TestSafeQueuePut:
         ):
             await svc._safe_queue_put({"new": True})
 
+    @pytest.mark.asyncio
+    async def test_put_timeout_drop_oldest_balances_unfinished_tasks(self, svc):
+        """UIR-F21-001：drop-oldest 出队的旧条目必须补 task_done，否则 join 永挂。"""
+        svc.processing_queue = asyncio.Queue(maxsize=1)
+        svc.processing_queue.put_nowait({"old": True})
+
+        async def fake_wait_for(coro, timeout):
+            if hasattr(coro, "close"):
+                coro.close()
+            raise TimeoutError()
+
+        with patch("services.news_subscription_service.asyncio.wait_for", side_effect=fake_wait_for):
+            await svc._safe_queue_put({"new": True})
+
+        queue = svc.processing_queue
+        assert queue.qsize() == 1
+        assert queue.get_nowait() == {"new": True}
+        queue.task_done()
+        # 若被丢弃的旧条目未 task_done，unfinished_tasks 会残留 1，join 超时失败。
+        await asyncio.wait_for(queue.join(), timeout=0.2)
+
 
 # ---------------------------------------------------------------------------
 # start / stop
@@ -347,6 +368,52 @@ class TestStartStop:
 
         svc._processing_task = asyncio.create_task(slow_loop())
         await svc.stop_async(drain_timeout=0.5)
+        assert svc._processing_task is None
+
+    @pytest.mark.asyncio
+    async def test_stop_async_drains_backlog_with_live_consumer(self, svc):
+        """UIR-F21-001：停止时 consumer 必须先排空积压再退出，join 不得悬挂。"""
+        svc._running = True
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        queue = svc.processing_queue
+        for i in range(3):
+            queue.put_nowait({"content": f"news-{i}", "time": "2024-01-01"})
+
+        async def slow_generate_tags(content, ai_result=None):
+            await asyncio.sleep(0.1)
+            return "tag"
+
+        with (
+            patch.object(svc, "_classify_news_safe", AsyncMock(return_value=None)),
+            patch.object(svc, "_generate_tags", slow_generate_tags),
+            patch("services.news_subscription_service.CacheManager.normalize_news_item", return_value={}),
+            patch.object(svc.cache.market_dao, "save_market_news", AsyncMock()),
+            patch.object(svc, "_notify_listeners", AsyncMock()),
+        ):
+            svc._processing_task = asyncio.create_task(svc._processing_loop())
+            # 让 consumer 进入处理中（或至少已启动）后再停止，确保停止时仍有积压。
+            await asyncio.sleep(0.03)
+            await asyncio.wait_for(svc.stop_async(drain_timeout=2.0), timeout=1.5)
+
+        assert queue.qsize() == 0
+        await asyncio.wait_for(queue.join(), timeout=0.2)
+        assert svc._processing_task is None
+
+    @pytest.mark.asyncio
+    async def test_stop_async_repeated_is_idempotent(self, svc):
+        """重复 stop_async 应幂等返回，不抛异常且状态保持已清理。"""
+        svc._running = True
+        svc.processing_queue = asyncio.Queue(maxsize=2)
+        queue = svc.processing_queue
+        queue.put_nowait({"content": ""})
+        svc._processing_task = asyncio.create_task(svc._processing_loop())
+        await asyncio.sleep(0.05)
+
+        await svc.stop_async(drain_timeout=1.0)
+        await svc.stop_async(drain_timeout=1.0)
+
+        assert queue.qsize() == 0
+        assert svc.processing_queue is None
         assert svc._processing_task is None
 
     @pytest.mark.asyncio
@@ -1049,6 +1116,62 @@ class TestProcessingLoop:
             except asyncio.CancelledError:
                 pass
         assert call_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_releases_item(self, svc):
+        """UIR-F21-001：EngineDisposed break 路径也必须 task_done，队列 join 可完成。"""
+        svc._running = True
+        svc.processing_queue = asyncio.Queue(maxsize=1)
+        queue = svc.processing_queue
+        queue.put_nowait({"content": "test"})
+
+        with (
+            patch.object(svc, "_classify_news_safe", AsyncMock(return_value=None)),
+            patch.object(svc, "_generate_tags", AsyncMock(side_effect=EngineDisposedError())),
+        ):
+            await asyncio.wait_for(svc._processing_loop(), timeout=1.0)
+
+        await asyncio.wait_for(queue.join(), timeout=0.2)
+
+    @pytest.mark.asyncio
+    async def test_general_exception_releases_item(self, svc):
+        """UIR-F21-001：可恢复异常路径也必须 task_done，队列 join 可完成。"""
+        svc._running = True
+        svc.processing_queue = asyncio.Queue(maxsize=1)
+        queue = svc.processing_queue
+        queue.put_nowait({"content": "test"})
+
+        with (
+            patch.object(svc, "_classify_news_safe", AsyncMock(return_value=None)),
+            patch.object(svc, "_generate_tags", AsyncMock(side_effect=RuntimeError("boom"))),
+        ):
+            task = asyncio.create_task(svc._processing_loop())
+            await asyncio.sleep(0.1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        await asyncio.wait_for(queue.join(), timeout=0.2)
+
+    @pytest.mark.asyncio
+    async def test_system_error_releases_item(self, svc):
+        """UIR-F21-001：system 级异常上抛前也必须 task_done（不得残留未完成计数）。"""
+        svc._running = True
+        svc.processing_queue = asyncio.Queue(maxsize=1)
+        queue = svc.processing_queue
+        queue.put_nowait({"content": "test"})
+
+        save_market_news = AsyncMock()
+        with (
+            patch.object(svc, "_classify_news_safe", AsyncMock(return_value=None)),
+            patch.object(svc, "_generate_tags", AsyncMock(side_effect=MemoryError("oom"))),
+            patch.object(svc.cache.market_dao, "save_market_news", save_market_news),
+        ):
+            with pytest.raises(MemoryError, match="oom"):
+                await asyncio.wait_for(svc._processing_loop(), timeout=1.0)
+
+        save_market_news.assert_not_called()
+        await asyncio.wait_for(queue.join(), timeout=0.2)
 
     @pytest.mark.asyncio
     async def test_cancelled_propagates(self, svc):

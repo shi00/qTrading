@@ -382,7 +382,11 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
             self._set_state(is_saving=False)
 
     async def save_concurrency(self, raw_val: str) -> bool:
-        """保存同步重任务并发数 (范围 1-32)。"""
+        """保存同步重任务并发数 (范围 1-32)。
+
+        Returns:
+            True 写入成功; False 越界/格式错误或 set_typed 返回 False（不伪装成功）。
+        """
         if self._state.is_saving:
             return False
         try:
@@ -393,7 +397,11 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
             return False
         self._set_state(is_saving=True)
         try:
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_sync_max_concurrent_heavy, val)
+            success = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_sync_max_concurrent_heavy, val)
+            if not success:
+                # UIR-F22-001: 落盘失败时不得伪装成功（否则 UI 提示已保存而配置未生效）。
+                logger.warning("[SystemSettingsVM] set_sync_max_concurrent_heavy returned False for value=%s", val)
+                return False
             return True
         except asyncio.CancelledError:
             raise  # R2
@@ -406,7 +414,11 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
             self._set_state(is_saving=False)
 
     async def save_db_pool(self, pool_size_str: str, max_overflow_str: str, timeout_str: str) -> bool:
-        """保存 DB 连接池配置 (pool_size 1-50, overflow 0-50, timeout 5-300)。"""
+        """保存 DB 连接池配置 (pool_size 1-50, overflow 0-50, timeout 5-300)。
+
+        Returns:
+            True 三项全部写入成功; False 越界/格式错误或任一 setter 返回 False。
+        """
         if self._state.is_saving:
             return False
         try:
@@ -423,14 +435,25 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
             return False
         self._set_state(is_saving=True)
 
-        def _save_db_pool_sync() -> None:
-            ConfigHandler.set_db_connection_pool_size(pool_size)
-            ConfigHandler.set_db_max_overflow(max_overflow)
-            ConfigHandler.set_db_pool_timeout(timeout)
+        # NOTE(lazy): 三项独立落盘、失败不回滚（无跨键原子性）. ceiling: 已成功项保留新值,
+        # 需用户重试整组保存才收敛. upgrade: 需要跨键原子保存时改走 ConfigHandler 批量保存接口.
+
+        def _save_db_pool_sync() -> bool:
+            """按序写入三项配置，任一失败即提前返回 False（无回滚，取舍见上方 NOTE(lazy)）。"""
+            if not ConfigHandler.set_db_connection_pool_size(pool_size):
+                logger.warning("[SystemSettingsVM] set_db_connection_pool_size returned False for value=%s", pool_size)
+                return False
+            if not ConfigHandler.set_db_max_overflow(max_overflow):
+                logger.warning("[SystemSettingsVM] set_db_max_overflow returned False for value=%s", max_overflow)
+                return False
+            if not ConfigHandler.set_db_pool_timeout(timeout):
+                logger.warning("[SystemSettingsVM] set_db_pool_timeout returned False for value=%s", timeout)
+                return False
+            return True
 
         try:
-            await ThreadPoolManager().run_async(TaskType.IO, _save_db_pool_sync)
-            return True
+            # UIR-F22-001: 任一 setter 落盘失败即返回 False（失败项已由闭包内 warning 记录）。
+            return await ThreadPoolManager().run_async(TaskType.IO, _save_db_pool_sync)
         except asyncio.CancelledError:
             raise  # R2
         except Exception as ex:
@@ -440,7 +463,11 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
             self._set_state(is_saving=False)
 
     async def save_thread_pool(self, io_str: str, cpu_str: str) -> bool:
-        """保存线程池配置 (io 4-512, cpu 1-64), 保存后 reload ThreadPoolManager。"""
+        """保存线程池配置 (io 4-512, cpu 1-64), 仅保存成功才 reload ThreadPoolManager。
+
+        Returns:
+            True 写入成功并已热重载; False 越界/格式错误或任一 setter 返回 False（不重载）。
+        """
         if self._state.is_saving:
             return False
         if not io_str or not cpu_str:
@@ -456,12 +483,21 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
             return False
         self._set_state(is_saving=True)
 
-        def _save_thread_pool_sync() -> None:
-            ConfigHandler.set_max_io_workers(io_val)
-            ConfigHandler.set_max_cpu_workers(cpu_val)
+        def _save_thread_pool_sync() -> bool:
+            """按序写入 io/cpu workers，任一失败即提前返回 False (UIR-F22-001: 失败不做回滚)。"""
+            if not ConfigHandler.set_max_io_workers(io_val):
+                logger.warning("[SystemSettingsVM] set_max_io_workers returned False for value=%s", io_val)
+                return False
+            if not ConfigHandler.set_max_cpu_workers(cpu_val):
+                logger.warning("[SystemSettingsVM] set_max_cpu_workers returned False for value=%s", cpu_val)
+                return False
+            return True
 
         try:
-            await ThreadPoolManager().run_async(TaskType.IO, _save_thread_pool_sync)
+            saved = await ThreadPoolManager().run_async(TaskType.IO, _save_thread_pool_sync)
+            if not saved:
+                # UIR-F22-001: 落盘失败不得重载 —— 重载会把旧配置的池按新值重建或与磁盘不一致。
+                return False
             await ThreadPoolManager().run_async(TaskType.IO, ThreadPoolManager().reload_config)
             logger.info("Updated ThreadPool: IO=%s, CPU=%s", io_val, cpu_val)
             return True
@@ -476,7 +512,11 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
             self._set_state(is_saving=False)
 
     async def save_no_proxy(self, raw_text: str) -> bool:
-        """保存 no-proxy 域名列表 (逗号分隔), 保存后 reapply proxy policy。"""
+        """保存 no-proxy 域名列表 (逗号分隔), 仅保存成功才 reapply proxy policy。
+
+        Returns:
+            True 写入成功并已重应用代理策略; False 落盘失败（不重应用）。
+        """
         if self._state.is_saving:
             return False
         if not raw_text:
@@ -485,7 +525,11 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
             domains = [d.strip() for d in raw_text.split(",") if d.strip()]
         self._set_state(is_saving=True)
         try:
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_no_proxy_domains, domains)
+            saved = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_no_proxy_domains, domains)
+            if not saved:
+                # UIR-F22-001: 落盘失败时不重应用代理策略（否则运行时策略与磁盘配置漂移）。
+                logger.warning("[SystemSettingsVM] set_no_proxy_domains returned False for domains=%s", domains)
+                return False
             from utils.proxy_manager import ProxyManager
 
             ThreadPoolManager().submit(TaskType.IO, ProxyManager.reapply_proxy_policy)

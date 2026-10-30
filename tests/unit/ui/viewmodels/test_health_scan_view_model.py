@@ -196,6 +196,125 @@ class TestStartScan:
         unsub()
 
 
+class TestScanErrorResult:
+    """F22-003: data 层返回 error dict 时不得渲染为「得分 0、正常完成」(R21)。
+
+    ``run_quality_scan`` 失败分支返回 ``{"score": 0, "tier": 0, "error": <sanitized>}``，
+    成功分支（含无数据早退 ``{"score": 0, "tier": 0, "details": {}}``）不含 error 键。
+    """
+
+    @pytest.mark.asyncio
+    async def test_error_dict_sets_error_state(self):
+        """error dict → scan_state=error + result=None，不展示伪造 0 分。"""
+        dp = _make_data_processor(
+            scan_side_effect=AsyncMock(return_value={"score": 0, "tier": 0, "error": "OperationalError: failed"})
+        )
+        vm = HealthScanViewModel(data_processor=dp)
+        received: list[HealthScanState] = []
+        vm.subscribe(lambda s: received.append(s))
+
+        await vm.start_scan()
+
+        assert vm.state.scan_state == "error"
+        assert vm.state.error_key == "health_scan_failed"
+        assert vm.state.result is None
+        assert [s.scan_state for s in received] == ["scanning", "error"]
+
+    @pytest.mark.asyncio
+    async def test_error_dict_with_metrics_still_error(self):
+        """error 与部分数值字段并存时仍判定为失败（error 键优先）。"""
+        dp = _make_data_processor(
+            scan_side_effect=AsyncMock(
+                return_value={
+                    "score": 0,
+                    "tier": 0,
+                    "avg_lag": 2,
+                    "avg_continuity": 0.9,
+                    "sample_size": 50,
+                    "error": "sanitized detail",
+                }
+            )
+        )
+        vm = HealthScanViewModel(data_processor=dp)
+
+        await vm.start_scan()
+
+        assert vm.state.scan_state == "error"
+        assert vm.state.result is None
+
+    @pytest.mark.asyncio
+    async def test_empty_error_string_still_error(self):
+        """error 为空串时仍属失败分支（键存在即失败，不得降级为成功）。"""
+        dp = _make_data_processor(scan_side_effect=AsyncMock(return_value={"score": 0, "tier": 0, "error": ""}))
+        vm = HealthScanViewModel(data_processor=dp)
+
+        await vm.start_scan()
+
+        assert vm.state.scan_state == "error"
+        assert vm.state.result is None
+
+    @pytest.mark.asyncio
+    async def test_non_string_error_still_error(self):
+        """error 为非字符串时仍判定失败且不抛异常。"""
+        dp = _make_data_processor(
+            scan_side_effect=AsyncMock(return_value={"score": 0, "tier": 0, "error": RuntimeError("boom")})
+        )
+        vm = HealthScanViewModel(data_processor=dp)
+
+        await vm.start_scan()
+
+        assert vm.state.scan_state == "error"
+        assert vm.state.result is None
+
+    @pytest.mark.asyncio
+    async def test_none_result_sets_error_state(self):
+        """raw=None（data 层契约外返回值）视为失败，不以默认 0 分伪装成功。"""
+        dp = _make_data_processor(scan_side_effect=AsyncMock(return_value=None))
+        vm = HealthScanViewModel(data_processor=dp)
+
+        await vm.start_scan()
+
+        assert vm.state.scan_state == "error"
+        assert vm.state.result is None
+
+    @pytest.mark.asyncio
+    async def test_early_return_without_error_key_is_done(self):
+        """正常早退（无数据，仅 score/tier/details）仍应 done，不算扫描失败。"""
+        dp = _make_data_processor(scan_side_effect=AsyncMock(return_value={"score": 0, "tier": 0, "details": {}}))
+        vm = HealthScanViewModel(data_processor=dp)
+
+        await vm.start_scan()
+
+        assert vm.state.scan_state == "done"
+        assert vm.state.result is not None
+        assert vm.state.result.score == 0
+        assert vm.state.result.tier == 0
+        assert vm.state.error_key is None
+
+    @pytest.mark.asyncio
+    async def test_retry_after_error_clears_error_key(self):
+        """失败后重试成功：error_key 清空，result 正常设置。"""
+        dp = MagicMock()
+        dp.run_quality_scan = AsyncMock(
+            side_effect=[
+                {"score": 0, "tier": 0, "error": "failed"},
+                {"score": 90, "tier": 3, "avg_lag": 1, "avg_continuity": 0.95},
+            ]
+        )
+        vm = HealthScanViewModel(data_processor=dp)
+
+        await vm.start_scan()
+        assert vm.state.scan_state == "error"
+        assert vm.state.result is None
+
+        await vm.start_scan()
+
+        assert vm.state.scan_state == "done"
+        assert vm.state.error_key is None
+        assert vm.state.result is not None
+        assert vm.state.result.score == 90
+
+
 # --- on_progress (Mixin 统一跨线程通知) ---
 
 

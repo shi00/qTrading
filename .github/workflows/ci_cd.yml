@@ -136,8 +136,191 @@ jobs:
       - name: Ruff Format Check
         run: ruff format --check .
 
+  # 静态门禁（自原 ci-checks 拆出）：pre-commit / 版本一致性 / pip-audit / pyright / 弱断言扫描。
+  # 这些步骤不依赖 PostgreSQL service，也与下方单测/集成测试无先后依赖，独立成 job 可并行，
+  # 把 Linux 侧关键路径从「静态 + DB + 测试串行」压到最长分支。
+  ci-checks-static:
+    name: Code Quality (Linux, Python ${{ matrix.python-version }})
+    needs: [lint-fast, changes]
+    # 跳过条件与下方 ci-checks 一致：dependabot / fork PR 无 secrets、非代码类 PR 跳过重型 job。
+    if: needs.changes.outputs.code == 'true' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.14']
+    env:
+      UV_CACHE_DIR: /tmp/uv-cache
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-optional.txt
+            requirements-dev.txt
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        with:
+          # 禁用 setup-uv 自带缓存（默认键绑定 uv.lock，本仓库以 requirements*.txt 为准且未跟踪
+          # uv.lock），改由下方 actions/cache 显式缓存 UV_CACHE_DIR（对齐 Windows 侧已验证方案）。
+          enable-cache: false
+
+      - name: Cache uv build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: /tmp/uv-cache
+          # 键不含 ref：requirements 未变时 main 与各 PR 共用同一条目（同键写入去重，不产生每 PR
+          # 副本）；变更 requirements 的 PR 会额外存一份，由 cache-prune.yml 按「非 main 且 3 天
+          # 未访问」清理，10 GB 预算口径见 docs/guides/ci-cd.md「缓存治理」。
+          key: uv-linux-py${{ matrix.python-version }}-${{ hashFiles('requirements.txt', 'requirements-optional.txt', 'requirements-dev.txt') }}
+          restore-keys: |
+            uv-linux-py${{ matrix.python-version }}-
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -r requirements.txt
+          uv pip install --system -r requirements-optional.txt
+          uv pip install --system -r requirements-dev.txt
+          pip install pyright==1.1.414
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Cache pre-commit
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Cache ruff
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .ruff_cache
+          key: ruff-${{ runner.os }}-${{ hashFiles('**/*.py') }}
+          restore-keys: ruff-${{ runner.os }}-
+
+      - name: Run pre-commit hooks
+        run: pre-commit run --all-files
+
+      - name: Verify Version Consistency
+        run: python scripts/verify_versions.py
+
+      - name: Security Audit (pip-audit)
+        run: |
+          python scripts/run_pip_audit.py \
+            --requirements requirements.txt requirements-optional.txt requirements-dev.txt \
+            --allowlist .security/audit-allowlist.yml \
+            --sources pypi
+
+      - name: Pyright Type Check
+        continue-on-error: false
+        run: pyright
+
+      - name: Scan weak assertions (incremental gate)
+        run: python scripts/scan_weak_assertions.py --path tests/ --base tests/weak_assertion_baseline.json
+
+  # DB 迁移门禁（自原 ci-checks 拆出）：只需要 PostgreSQL service，与静态检查、单测无依赖。
+  ci-checks-db:
+    name: DB Migration Checks (Linux)
+    needs: [lint-fast, changes]
+    if: needs.changes.outputs.code == 'true' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      UV_CACHE_DIR: /tmp/uv-cache
+
+    services:
+      postgres:
+        image: postgres:16.14
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ${{ env.CI_PG_PASSWORD }}
+          POSTGRES_DB: test_astock
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Verify CI_PG_PASSWORD secret
+        env:
+          CI_PG_PASSWORD: ${{ env.CI_PG_PASSWORD }}
+        run: |
+          if [ -z "$CI_PG_PASSWORD" ]; then
+            echo "::error::CI_PG_PASSWORD secret is not configured. Please add it in repository settings (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements.txt
+            requirements-optional.txt
+            requirements-dev.txt
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        with:
+          enable-cache: false
+
+      - name: Cache uv build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: /tmp/uv-cache
+          key: uv-linux-py3.14-${{ hashFiles('requirements.txt', 'requirements-optional.txt', 'requirements-dev.txt') }}
+          restore-keys: |
+            uv-linux-py3.14-
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system -r requirements.txt
+          uv pip install --system -r requirements-optional.txt
+          uv pip install --system -r requirements-dev.txt
+
+      - name: Verify Alembic Migrations
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
+        run: |
+          python -m alembic upgrade head
+          python -m alembic check
+          python -m alembic downgrade base
+          python -m alembic upgrade head
+
+      - name: Verify ORM-Migration Schema Consistency
+        env:
+          TEST_DB_HOST: localhost
+          TEST_DB_PORT: "5432"
+          TEST_DB_USER: postgres
+          TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
+        run: python -m pytest tests/integration/test_orm_migration_consistency.py -v --tb=long
+
+  # 测试门禁（原 ci-checks 剩余部分）：单测 + 集成测试 + 覆盖率/差异覆盖率 + SBOM。
+  # 静态检查与 DB 迁移校验已拆到 ci-checks-static / ci-checks-db 并行执行，
+  # Linux 侧关键路径由「静态 + DB + 测试串行」变为最长分支（见 docs/guides/ci-cd.md「CI Job 矩阵」）。
   ci-checks:
-    name: Code Quality & Tests (Linux, Python ${{ matrix.python-version }})
+    name: Unit & Integration Tests (Linux, Python ${{ matrix.python-version }})
     needs: [lint-fast, changes]
     # Dependabot 发起的 PR 与普通 fork PR 均不被注入仓库 secrets（GitHub Actions 平台安全限制，仅提供只读 GITHUB_TOKEN）。
     # 本 job 依赖 CI_PG_PASSWORD（postgres 服务容器 + integration 测试）与 CODECOV_TOKEN，
@@ -156,6 +339,8 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ['3.14']
+    env:
+      UV_CACHE_DIR: /tmp/uv-cache
 
     services:
       postgres:
@@ -202,22 +387,28 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        with:
+          # 禁用 setup-uv 自带缓存：其默认缓存键绑定 uv.lock，本仓库以 requirements*.txt 为准
+          # 且未跟踪 uv.lock（实测每次 Install dependencies 都在重新下载 ~300 MB wheel，耗时 2~3 分钟）；
+          # 改由下方 actions/cache 显式缓存 UV_CACHE_DIR（对齐全仓 Windows 侧已验证方案）。
+          enable-cache: false
+
+      - name: Cache uv build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: /tmp/uv-cache
+          # 键不含 ref：requirements 未变时 main 与各 PR 共用同一条目（actions/cache 对同键写入去重，
+          # 不产生每 PR 副本）；requirements 变更的 PR 会额外存一份，由 cache-prune.yml 按
+          # 「非 refs/heads/main 且 3 天未访问」清理，10 GB 预算口径见 docs/guides/ci-cd.md「缓存治理」。
+          key: uv-linux-py${{ matrix.python-version }}-${{ hashFiles('requirements.txt', 'requirements-optional.txt', 'requirements-dev.txt') }}
+          restore-keys: |
+            uv-linux-py${{ matrix.python-version }}-
 
       - name: Install dependencies
         run: |
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
-          pip install pyright==1.1.414
-
-      - name: Install pre-commit
-        run: pip install pre-commit
-
-      - name: Cache pre-commit
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.cache/pre-commit
-          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Cache pytest
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -225,50 +416,6 @@ jobs:
           path: .pytest_cache
           key: pytest-${{ runner.os }}-${{ hashFiles('tests/**/*.py') }}
           restore-keys: pytest-${{ runner.os }}-
-
-      - name: Cache ruff
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: .ruff_cache
-          key: ruff-${{ runner.os }}-${{ hashFiles('**/*.py') }}
-          restore-keys: ruff-${{ runner.os }}-
-
-      - name: Run pre-commit hooks
-        run: pre-commit run --all-files
-
-      - name: Verify Version Consistency
-        run: python scripts/verify_versions.py
-
-      - name: Security Audit (pip-audit)
-        run: |
-          python scripts/run_pip_audit.py \
-            --requirements requirements.txt requirements-optional.txt requirements-dev.txt \
-            --allowlist .security/audit-allowlist.yml \
-            --sources pypi
-
-      - name: Pyright Type Check
-        continue-on-error: false
-        run: pyright
-
-      - name: Scan weak assertions (incremental gate)
-        run: python scripts/scan_weak_assertions.py --path tests/ --base tests/weak_assertion_baseline.json
-
-      - name: Verify Alembic Migrations
-        env:
-          DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
-        run: |
-          python -m alembic upgrade head
-          python -m alembic check
-          python -m alembic downgrade base
-          python -m alembic upgrade head
-
-      - name: Verify ORM-Migration Schema Consistency
-        env:
-          TEST_DB_HOST: localhost
-          TEST_DB_PORT: "5432"
-          TEST_DB_USER: postgres
-          TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
-        run: python -m pytest tests/integration/test_orm_migration_consistency.py -v --tb=long
 
       - name: Run Unit Tests
         env:
@@ -360,28 +507,35 @@ jobs:
     # 由下方 actions/cache 显式缓存（setup-uv 自带缓存与磁盘清理步骤冲突）。
     env:
       UV_CACHE_DIR: D:\tmp\uv-cache
-    # 性能优化：拆成 4 个 matrix 组并行，按会话池分组，让每个 job 只懒实例化本组需要的
+    # 性能优化：拆成 5 个 matrix 组并行，按会话池分组，让每个 job 只懒实例化本组需要的
     # session 池（ro / mut / wizard / embedded_real_* / fullmount / news_risk_*），
     # 避免单 job 串行初始化全部 8 个 sidecar + PG 池。
     # job 名保持不变：CI Gate 用 needs.e2e-tests-windows.result 聚合矩阵结果，
     # 不需要改 ci-gate / build-windows 的 needs。
     # 分组必须保持同一文件的用例顺序（settings_flow → settings_tabs 的配置副作用、
     # r01_dialog_height 依赖 news_risk_success 种子池），因此以文件为最小粒度。
+    # core 组按实测单文件耗时对半拆为 core-a / core-b（run 41034285982 的 junit：
+    # screener_flow 182s、data_explorer 59s、backtest_flow 37s、screener_anchor_smoke 30s、
+    # screener_to_backtest 23s、navigation 18s、task_center 13s、smoke 8s、home_flow 8s，
+    # 总计 402s；原单腿 627s 是 PR 关键路径上的最长分支）。scenarios 组不可再拆：
+    # r01_dialog_height 依赖同组 test_news_risk 播下的 news_risk_success 种子池。
     strategy:
       fail-fast: false
       matrix:
         include:
-          - group: core
+          - group: core-a
+            paths: >-
+              tests/e2e/test_screener_flow.py
+              tests/e2e/test_screener_anchor_smoke.py
+              tests/e2e/test_task_center.py
+              tests/e2e/test_smoke.py
+          - group: core-b
             paths: >-
               tests/e2e/test_backtest_flow.py
               tests/e2e/test_data_explorer.py
               tests/e2e/test_home_flow.py
               tests/e2e/test_navigation.py
-              tests/e2e/test_screener_anchor_smoke.py
-              tests/e2e/test_screener_flow.py
               tests/e2e/test_screener_to_backtest.py
-              tests/e2e/test_smoke.py
-              tests/e2e/test_task_center.py
           - group: settings
             paths: >-
               tests/e2e/test_settings_flow.py
@@ -774,6 +928,18 @@ jobs:
           key: uv-windows-py314-${{ hashFiles('requirements.txt', 'requirements-optional.txt', 'requirements-dev.txt') }}
           restore-keys: |
             uv-windows-py314-
+
+      # Linux 侧同源缓存：此前仅 Windows 分支做了显式缓存，linux 腿每次重下 ~300 MB wheel
+      # （实测 run 41034285982 的 Install dependencies 3m23s）。键按 OS 区分，避免跨平台
+      # wheel 与构建产物互相污染。
+      - name: Cache uv build cache (Linux)
+        if: matrix.os == 'linux'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: /tmp/uv-cache
+          key: uv-linux-py314-${{ hashFiles('requirements.txt', 'requirements-optional.txt', 'requirements-dev.txt') }}
+          restore-keys: |
+            uv-linux-py314-
 
       - name: Install dependencies
         run: |
@@ -1447,7 +1613,7 @@ jobs:
 
   build-windows:
     name: Build Windows EXE (${{ matrix.variant }})
-    needs: [ci-checks, ci-checks-windows, e2e-tests-windows, embedded-tests]
+    needs: [ci-checks, ci-checks-static, ci-checks-db, ci-checks-windows, e2e-tests-windows, embedded-tests]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     # 锁定 windows-2022（VS 2022）：windows-latest 已滚动迁移到 VS 2026（GitHub 2026-05 公告），
     # 而 CUDA 12.4 nvcc 仅支持 MSVC 192x/193x（VS 2019/2022），在 VS 2026 上 CMake 报
@@ -2242,7 +2408,7 @@ jobs:
   # 本 job 用 needs.*.result 显式校验，只放行明确允许的跳过。
   ci-gate:
     name: CI Gate
-    needs: [changes, lint-fast, ci-checks, ci-checks-windows, e2e-tests-windows, embedded-tests, installer-smoke]
+    needs: [changes, lint-fast, ci-checks, ci-checks-static, ci-checks-db, ci-checks-windows, e2e-tests-windows, embedded-tests, installer-smoke]
     # merge_group 一并覆盖：工作流已声明 merge_group 触发，若只在本 job 限定 pull_request，
     # 启用 merge queue 后 merge group commit 上不会产生 CI Gate，required check 将永久 Pending。
     if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
@@ -2260,6 +2426,8 @@ jobs:
           CHANGES: ${{ needs.changes.result }}
           LINT: ${{ needs.lint-fast.result }}
           LINUX: ${{ needs.ci-checks.result }}
+          STATIC: ${{ needs.ci-checks-static.result }}
+          DB: ${{ needs.ci-checks-db.result }}
           WINDOWS: ${{ needs.ci-checks-windows.result }}
           E2E: ${{ needs.e2e-tests-windows.result }}
           EMBEDDED: ${{ needs.embedded-tests.result }}
@@ -2295,6 +2463,8 @@ jobs:
           if [ "$CODE" = "false" ]; then
             # 非代码类 PR：重型 job 按设计跳过，允许 skipped；出现 failure 仍判不通过。
             check_required "Code Quality & Tests (Linux)" "$LINUX" true
+            check_required "Code Quality (Linux, static)" "$STATIC" true
+            check_required "DB Migration Checks (Linux)" "$DB" true
             check_required "Code Quality & Unit Tests (Windows)" "$WINDOWS" true
             check_required "E2E Tests (Windows)" "$E2E" true
             check_required "Embedded PG Tests" "$EMBEDDED" true
@@ -2307,6 +2477,9 @@ jobs:
               linux_allow_skipped=true
             fi
             check_required "Code Quality & Tests (Linux)" "$LINUX" "$linux_allow_skipped"
+            # 静态/DB 各自独立上报：跳过条件与 ci-checks 一致，故同样按 dependabot/fork 放行。
+            check_required "Code Quality (Linux, static)" "$STATIC" "$linux_allow_skipped"
+            check_required "DB Migration Checks (Linux)" "$DB" "$linux_allow_skipped"
             check_required "Code Quality & Unit Tests (Windows)" "$WINDOWS" false
             check_required "E2E Tests (Windows)" "$E2E" false
             check_required "Embedded PG Tests" "$EMBEDDED" false

@@ -450,6 +450,117 @@ class TestApplyQfq:
         assert stock2_ratios[0] == pytest.approx(1.0)  # 回测起点基准=2.0, ratio=2.0/2.0=1.0
         assert stock2_ratios[1] == pytest.approx(0.5)  # 回测起点基准=2.0, ratio=1.0/2.0=0.5
 
+    def test_all_null_adj_factor_is_unknown_not_identity(self):
+        """UIR-X01-105 / R21：因子全空 = 未知。ratio 为 null（非恒等 1.0），并逐行打标记。"""
+        engine = self._make_engine()
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3)],
+                "open": [10.0, 10.5],
+                "high": [10.2, 10.7],
+                "low": [9.9, 10.4],
+                "close": [10.1, 10.6],
+                "adj_factor": [None, None],
+            }
+        )
+
+        result = engine._apply_qfq(quotes_df)
+
+        assert result["qfq_adjustment_unknown"].to_list() == [True, True]
+        # 未知不得被降低为「恒等 1.0」：ratio 显式缺失
+        assert result["qfq_ratio"].to_list() == [None, None]
+        # 价格列保留 raw 值（数值连续），未知语义由 ratio=null + 标记列承载
+        assert result["qfq_close"].to_list() == [10.1, 10.6]
+        assert result["raw_close"].to_list() == [10.1, 10.6]
+
+    def test_zero_base_adj_factor_is_unknown(self):
+        """基准因子为 0（区间首日，ref="first"）→ 除零不可解 → 未知。"""
+        engine = self._make_engine()
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3)],
+                "open": [10.0, 10.5],
+                "high": [10.2, 10.7],
+                "low": [9.9, 10.4],
+                "close": [10.1, 10.6],
+                "adj_factor": [0.0, 2.0],
+            }
+        )
+
+        result = engine._apply_qfq(quotes_df)
+
+        assert result["qfq_adjustment_unknown"].to_list() == [True, True]
+        assert result["qfq_ratio"].to_list() == [None, None]
+
+    def test_valid_adj_factor_not_flagged_unknown(self):
+        """合法恒等（因子有效但全组相同）不是未知。"""
+        engine = self._make_engine()
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3)],
+                "open": [10.0, 10.5],
+                "high": [10.2, 10.7],
+                "low": [9.9, 10.4],
+                "close": [10.1, 10.6],
+                "adj_factor": [1.0, 1.0],
+            }
+        )
+
+        result = engine._apply_qfq(quotes_df)
+
+        assert result["qfq_adjustment_unknown"].to_list() == [False, False]
+        assert result["qfq_ratio"].to_list() == pytest.approx([1.0, 1.0])
+
+    def test_qfq_unknown_warning_reports_affected_stocks(self):
+        """结果级 warning：仅在受影响的股票上产出，且归类为数据质量。"""
+        engine = self._make_engine()
+        quotes = engine._apply_qfq(
+            pl.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ", "000002.SZ", "000002.SZ"],
+                    "trade_date": [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 2), date(2024, 1, 3)],
+                    "open": [10.0, 10.5, 20.0, 20.5],
+                    "high": [10.2, 10.7, 20.2, 20.7],
+                    "low": [9.9, 10.4, 19.9, 20.4],
+                    "close": [10.1, 10.6, 20.1, 20.6],
+                    "adj_factor": [None, None, 2.0, 1.0],
+                }
+            )
+        )
+
+        warning = engine._qfq_unknown_warning(quotes, "2024-01-02", "2024-01-03")
+
+        assert warning is not None
+        assert warning.warning_type == "qfq_adjustment_unknown"
+        assert warning.category == WarningCategory.DATA_QUALITY
+        assert warning.affected_stock_count == 1
+        assert "000001.SZ" in warning.error_message
+
+    def test_qfq_unknown_warning_none_when_all_valid(self):
+        engine = self._make_engine()
+        quotes = engine._apply_qfq(
+            pl.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "trade_date": [date(2024, 1, 2), date(2024, 1, 3)],
+                    "open": [10.0, 10.5],
+                    "high": [10.2, 10.7],
+                    "low": [9.9, 10.4],
+                    "close": [10.1, 10.6],
+                    "adj_factor": [2.0, 1.0],
+                }
+            )
+        )
+
+        assert engine._qfq_unknown_warning(quotes, "2024-01-02", "2024-01-03") is None
+
+    def test_qfq_unknown_warning_none_when_column_absent(self):
+        engine = self._make_engine()
+        assert engine._qfq_unknown_warning(pl.DataFrame({"ts_code": ["000001.SZ"]}), "2024-01-02", "2024-01-03") is None
+
 
 class TestCalcBenchmarkReturns:
     def _make_engine(self):
@@ -1228,6 +1339,89 @@ class TestLoadQuotesSortBeforeAvgVolume:
             per_stock = result.filter(pl.col("ts_code") == code)
             expected = vol_by[code] * 100.0  # 手→股（BT-06）
             assert per_stock["avg_daily_volume"].to_list()[-1] == pytest.approx(expected, rel=1e-9)
+
+
+class TestLoadQuotesQfqUnknownWarning:
+    """UIR-X01-105：复权因子未知须在结果级 data_warnings 中可见，而非静默按恒等复权。"""
+
+    def _make_engine(self, quotes_pd):
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 1, 31))
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cache = MagicMock()
+        engine.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=quotes_pd)
+        engine._enrich_suspend_status = AsyncMock(side_effect=lambda df, s, e: (df, None))
+        engine._enrich_limit_status = AsyncMock(side_effect=lambda df, s, e: (df, None))
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_load_quotes_appends_qfq_unknown_warning(self):
+        import pandas as pd
+
+        nan = float("nan")
+        quotes_pd = pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20240102",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.0,
+                    "adj_factor": nan,
+                },
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20240103",
+                    "open": 10.5,
+                    "high": 11.5,
+                    "low": 9.5,
+                    "close": 10.6,
+                    "adj_factor": nan,
+                },
+            ]
+        )
+        engine = self._make_engine(quotes_pd)
+
+        _result, warnings = await engine._load_quotes([date(2024, 1, 2), date(2024, 1, 3)], ts_codes=["000001.SZ"])
+
+        assert warnings, "未知复权因子必须产出结果级 DataWarning"
+        matched = [w for w in warnings if w.warning_type == "qfq_adjustment_unknown"]
+        assert len(matched) == 1
+        assert matched[0].category == WarningCategory.DATA_QUALITY
+        assert matched[0].affected_stock_count == 1
+
+    @pytest.mark.asyncio
+    async def test_load_quotes_no_warning_when_adj_factor_valid(self):
+        import pandas as pd
+
+        quotes_pd = pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20240102",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.0,
+                    "close": 10.0,
+                    "adj_factor": 2.0,
+                },
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20240103",
+                    "open": 5.5,
+                    "high": 6.0,
+                    "low": 5.0,
+                    "close": 5.6,
+                    "adj_factor": 1.0,
+                },
+            ]
+        )
+        engine = self._make_engine(quotes_pd)
+
+        _result, warnings = await engine._load_quotes([date(2024, 1, 2), date(2024, 1, 3)], ts_codes=["000001.SZ"])
+
+        assert not [w for w in warnings if w.warning_type == "qfq_adjustment_unknown"]
 
 
 class TestGenerateSignals:

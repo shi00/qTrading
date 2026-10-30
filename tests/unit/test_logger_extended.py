@@ -2,8 +2,10 @@ import logging
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
 from logging.handlers import RotatingFileHandler
+from types import TracebackType
+from typing import NoReturn
+from unittest.mock import patch
 
 from utils.logger import flush_logging, get_logger, setup_logging, update_log_level
 import pytest
@@ -828,3 +830,179 @@ class TestLoggingListenerLifecycle:
             assert not thread.is_alive()  # 线程已 join，无悬挂监听线程
             assert _ul._LISTENER is None
             assert not any(isinstance(h, QueueHandler) for h in logging.getLogger().handlers)
+
+
+class TestExceptionTextSanitization:
+    """R9：formatter 对异常文本（含异常链消息）统一脱敏，不依赖调用方先脱敏。"""
+
+    def setup_method(self):
+        self.root_logger = logging.getLogger()
+        self.original_handlers = self.root_logger.handlers[:]
+        self.root_logger.handlers = []
+
+    def teardown_method(self):
+        from utils.logger import stop_logging
+
+        stop_logging()
+        self.root_logger.handlers = self.original_handlers
+
+    @staticmethod
+    def _raise_with_secrets() -> NoReturn:
+        raise ValueError("request failed: url=https://api.example.com/data?token=sk-abc123xyz789 password=hunter2")
+
+    def _exc_info_with_secrets(self) -> tuple[type[BaseException], BaseException, TracebackType | None]:
+        try:
+            self._raise_with_secrets()
+        except ValueError as exc:
+            return (type(exc), exc, exc.__traceback__)
+
+    def test_text_formatter_sanitizes_credentials_in_exception_message(self):
+        """异常消息中的 token / password 被脱敏，且 traceback 结构与行号保留。"""
+        from utils.logger import _get_formatter
+
+        formatter = _get_formatter(use_json=False)
+        record = logging.LogRecord("test", logging.ERROR, __file__, 1, "task failed", (), self._exc_info_with_secrets())
+        record.correlation_id = "test"
+
+        out = formatter.format(record)
+
+        assert "sk-abc123xyz789" not in out
+        assert "hunter2" not in out
+        assert "token=***" in out
+        assert "password=***" in out
+        # 可诊断性：异常类型 / 帧函数名 / 行号仍在（路径替换为 <PATH>）
+        assert "ValueError" in out
+        assert 'File "<PATH>", line ' in out
+        assert ", in _raise_with_secrets" in out
+        assert "Traceback (most recent call last)" in out
+
+    def test_json_formatter_sanitizes_credentials_in_exception_message(self):
+        """JSON 输出（exception 字段）同样脱敏异常链消息。"""
+        import json
+
+        from utils.logger import JSONFormatter
+
+        record = logging.LogRecord("test", logging.ERROR, __file__, 1, "task failed", (), self._exc_info_with_secrets())
+        record.threadName = "MainThread"
+
+        data = json.loads(JSONFormatter().format(record))
+        exception_text = data["exception"]
+
+        assert "sk-abc123xyz789" not in exception_text
+        assert "hunter2" not in exception_text
+        assert "token=***" in exception_text
+        assert "ValueError" in exception_text
+        assert ", line " in exception_text
+
+    def test_exception_chain_messages_sanitized(self):
+        """__cause__ 链上每个异常的 message 均脱敏，链结构保留。"""
+        from utils.logger import _get_formatter
+
+        def _inner() -> None:
+            raise RuntimeError("inner failed password=hunter2")
+
+        try:
+            try:
+                _inner()
+            except RuntimeError as exc:
+                raise ValueError("outer failed token=sk-abc123xyz789") from exc
+        except ValueError as exc:
+            ei = (type(exc), exc, exc.__traceback__)
+
+        out = _get_formatter(use_json=False).formatException(ei)
+
+        assert "hunter2" not in out
+        assert "sk-abc123xyz789" not in out
+        assert "RuntimeError" in out
+        assert "ValueError" in out
+        assert "The above exception was the direct cause" in out
+
+    def test_repeated_sanitization_is_idempotent(self):
+        """二次清洗不产生 *** 叠加（避免 formatter 被多次调用时破坏文本）。"""
+        from utils.logger import _SanitizingFormatter
+
+        formatter = _SanitizingFormatter()
+        ei = self._exc_info_with_secrets()
+
+        first = formatter.formatException(ei)
+        second = formatter.formatException(ei)
+
+        assert first == second
+        assert "token=***" in second
+        assert "password=***" in second
+        assert "****" not in second
+
+    def test_foreign_cached_exc_text_is_sanitized(self):
+        """stdlib 在 record 上缓存 exc_text；若由其他 Formatter 写入未脱敏文本，仍须清洗。"""
+        from utils.logger import _SanitizingFormatter
+
+        formatter = _SanitizingFormatter("%(message)s")
+        record = logging.LogRecord("test", logging.ERROR, __file__, 1, "task failed", (), self._exc_info_with_secrets())
+        # 模拟 handler 执行顺序导致的其他 Formatter 抢先写入未脱敏缓存
+        record.exc_text = "ValueError: upstream call failed token=sk-abc123xyz789"
+
+        out = formatter.format(record)
+
+        assert "sk-abc123xyz789" not in out
+        assert "token=***" in out
+        # 缓存本身也须被替换，避免后续 handler 复用未脱敏文本
+        assert record.exc_text is not None
+        assert "sk-abc123xyz789" not in record.exc_text
+
+    def test_own_formatted_cache_not_resanitized(self):
+        """本 formatter 生成的 exc_text 缓存已脱敏且不重复清洗。"""
+        from utils.logger import _SanitizingFormatter
+
+        formatter = _SanitizingFormatter("%(message)s")
+        ei = self._exc_info_with_secrets()
+        record = logging.LogRecord("test", logging.ERROR, __file__, 1, "task failed", (), ei)
+
+        formatter.format(record)
+
+        assert record.exc_text is not None
+        assert "sk-abc123xyz789" not in record.exc_text
+        assert "****" not in record.exc_text
+        # 缓存文本与单次清洗结果一致（未被二次清洗改写）
+        assert record.exc_text == formatter.formatException(ei)
+
+    def test_stack_info_paths_sanitized(self):
+        """stack_info（源码回显）中的绝对路径被替换为 <PATH>，行号保留。"""
+        from utils.logger import _get_formatter
+
+        formatter = _get_formatter(use_json=False)
+        record = logging.LogRecord("test", logging.ERROR, __file__, 1, "checkpoint", (), None)
+        record.correlation_id = "test"
+        record.stack_info = (
+            'Stack (most recent call last):\n  File "C:\\Users\\alice\\proj\\app.py", line 42, in main\n'
+        )
+
+        out = formatter.format(record)
+
+        assert "alice" not in out
+        assert "<PATH>" in out
+        assert "line 42" in out
+
+    def test_file_log_sanitizes_exception_message(self, tmp_path):
+        """端到端：文本格式写盘后异常消息中的凭证不落盘。"""
+        log_dir = str(tmp_path / "test_logs")
+        with (
+            patch("utils.logger.LOG_DIR", log_dir),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
+        ):
+            setup_logging("exc_text_sanitize_test")
+            try:
+                self._raise_with_secrets()
+            except ValueError:
+                get_logger().exception("task failed")
+        flush_logging()
+
+        content = (tmp_path / "test_logs" / "app.log").read_text(encoding="utf-8")
+        assert "sk-abc123xyz789" not in content
+        assert "hunter2" not in content
+        assert "ValueError" in content
+        assert "<PATH>" in content

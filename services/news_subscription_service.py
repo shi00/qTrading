@@ -284,6 +284,9 @@ class NewsSubscriptionService:
                 if self.processing_queue.full():
                     try:
                         self.processing_queue.get_nowait()
+                        # UIR-F21-001：被丢弃的条目已出队，必须配对 task_done，
+                        # 否则 unfinished_tasks 残留使 stop_async 的 join 永挂。
+                        self.processing_queue.task_done()
                         logger.warning("[NewsService] Queue full, dropped oldest item")
                     except asyncio.QueueEmpty:
                         pass
@@ -293,7 +296,15 @@ class NewsSubscriptionService:
                     logger.warning("[NewsService] Queue still full after drop, skipping item")
 
     async def stop_async(self, drain_timeout: float = _QUEUE_DRAIN_DEFAULT_S):
-        """Stop service gracefully and drain processing queue before cancellation."""
+        """Stop service gracefully: stop production, drain with live consumer, then stop consumer.
+
+        UIR-F21-001：顺序必须是「停止生产 → 由仍在运行的 consumer 排空积压 → 停止
+        consumer」。若先置 ``_running=False`` 而 consumer 的退出条件只看 ``_running``，
+        consumer 会在积压尚未处理时先退出，随后 ``join()`` 永远等不到 ``task_done``，
+        停机悬挂或只能等到超时。
+        """
+        # 1. 先停止生产：置 _running=False 使轮询循环不再创建新的 fetch 任务，
+        #    并取消/等待进行中的 fetch，确保不再有新条目入队。
         self._running = False
 
         if self._current_fetch_task and not self._current_fetch_task.done():
@@ -309,6 +320,9 @@ class NewsSubscriptionService:
                 pass
             self._current_fetch_task = None
 
+        # 2. _processing_loop 以「_running 或队列非空」为退出条件，故 consumer 会继续
+        #    消费已入队的剩余积压，直到排空才退出。
+        # 3. 积压排空（consumer 仍在运行）
         if self.processing_queue is not None:
             try:
                 await asyncio.wait_for(self.processing_queue.join(), timeout=drain_timeout)
@@ -638,91 +652,96 @@ class NewsSubscriptionService:
         """
         Background loop to process news items from queue.
         Consumes items one by one, applies AI tagging, and updates DB.
+
+        UIR-F21-001：退出条件为「服务运行中或队列仍有积压」，停止时 consumer 必须
+        先把积压消费完再退出，否则 stop_async 的 join() 等不到 task_done。每个成功
+        出队的条目在 finally 中恰好配对一次 task_done（含异常/取消路径）。
         """
         from utils.correlation import correlation_scope
 
+        queue = self.processing_queue
+        if queue is None:
+            return
+
         logger.info("[NewsService] Background processing queue started.")
-        while self._running:
+        while self._running or not queue.empty():
             try:
                 # Wait for item with timeout to allow checking self._running
                 try:
-                    item = await asyncio.wait_for(
-                        self.processing_queue.get(),  # type: ignore[union-attr]
-                        timeout=_QUEUE_GET_TIMEOUT_S,
-                    )
+                    item = await asyncio.wait_for(queue.get(), timeout=_QUEUE_GET_TIMEOUT_S)
                 except TimeoutError:
                     continue
 
-                # Process Item
-                content = item.get("content", "")
-                if not content:
-                    self.processing_queue.task_done()  # type: ignore[union-attr]
-                    continue
+                try:
+                    # Process Item
+                    content = item.get("content", "")
+                    if not content:
+                        continue
 
-                content_hash = item.get(
-                    "content_hash", hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()[:12]
-                )  # 内容去重，非安全用途
-                with correlation_scope(f"news-{content_hash}"):
-                    # N3-6：单次 classify_news，tags 与 sentiment 降级回退共用同一结果
-                    # （system 级异常经 _classify_news_safe raise → 循环既有 system 分支处理）。
-                    ai_result = await self._classify_news_safe(content)
-                    tags = await self._generate_tags(content, ai_result=ai_result)
-                    item["tags"] = tags
+                    content_hash = item.get(
+                        "content_hash", hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()[:12]
+                    )  # 内容去重，非安全用途
+                    with correlation_scope(f"news-{content_hash}"):
+                        # N3-6：单次 classify_news，tags 与 sentiment 降级回退共用同一结果
+                        # （system 级异常经 _classify_news_safe raise → 循环既有 system 分支处理）。
+                        ai_result = await self._classify_news_safe(content)
+                        tags = await self._generate_tags(content, ai_result=ai_result)
+                        item["tags"] = tags
 
-                    if _is_scenario_chain_result(ai_result):
-                        # S4 新链（§8.1 只调一次）：sentiment 直取统一结果（校验成功才非
-                        # None，R21），执行器之后不再打分（NewsSentimentScorer 直调移除，
-                        # GGUF 情绪走 dedicated 路由经 Executor 调度）；LLM 未校准置信度
-                        # 不填数值列（§2.4），成功组整组原子语义由 save_market_news 承载。
-                        # F24 断裂 4：GGUF dedicated 成功链 ai_result 携带编码器真实
-                        # 数值与产物身份（sentiment_score/conf/model），透传落库不再
-                        # 无条件清空；LLM/bundled/reuse 链无这些键 → 归 None（R21）。
-                        exec_meta = ai_result["execution_metadata"]
-                        normalized = CacheManager.normalize_news_item(
-                            {
-                                **item,
-                                "sentiment": ai_result.get("sentiment"),
-                                "sentiment_score": ai_result.get("sentiment_score"),
-                                "sentiment_conf": ai_result.get("sentiment_conf"),
-                                "sentiment_model": ai_result.get("sentiment_model"),
+                        if _is_scenario_chain_result(ai_result):
+                            # S4 新链（§8.1 只调一次）：sentiment 直取统一结果（校验成功才非
+                            # None，R21），执行器之后不再打分（NewsSentimentScorer 直调移除，
+                            # GGUF 情绪走 dedicated 路由经 Executor 调度）；LLM 未校准置信度
+                            # 不填数值列（§2.4），成功组整组原子语义由 save_market_news 承载。
+                            # F24 断裂 4：GGUF dedicated 成功链 ai_result 携带编码器真实
+                            # 数值与产物身份（sentiment_score/conf/model），透传落库不再
+                            # 无条件清空；LLM/bundled/reuse 链无这些键 → 归 None（R21）。
+                            exec_meta = ai_result["execution_metadata"]
+                            normalized = CacheManager.normalize_news_item(
+                                {
+                                    **item,
+                                    "sentiment": ai_result.get("sentiment"),
+                                    "sentiment_score": ai_result.get("sentiment_score"),
+                                    "sentiment_conf": ai_result.get("sentiment_conf"),
+                                    "sentiment_model": ai_result.get("sentiment_model"),
+                                },
+                                default_source="CLS",
+                            )
+                            # category 透传（s4_plan §2.3）：L2 空串归一化为缺失（COALESCE 不清空既有分类）。
+                            normalized["category_l1"] = ai_result.get("category_L1")
+                            normalized["category_l2"] = ai_result.get("category_L2") or None
+                            normalized["analysis_metadata"] = _build_analysis_metadata(content, ai_result, exec_meta)
+                        else:
+                            # 旧链（pending 生产语义逐字节保留）：打分 → 载荷 → normalize。
+                            # N3-5：情感打分接线（打分 → normalize 透传 → 落库 sentiment 列）。
+                            # N3-6：打分服务整体不可用时回退 LLM sentiment（白名单过滤，提案 §9.2）；
+                            # 服务可用但输出 NaN/未知 label 归 None 不回退（R21 缺失不伪装）。
+                            # N5-2：完整载荷（sentiment + 三打分列）随 normalize 透传落库。
+                            payload = await self._score_sentiment_result(
+                                content,
+                                llm_fallback=_coerce_llm_sentiment(ai_result),
+                            )
+                            item.update(payload)
+                            normalized = CacheManager.normalize_news_item(item, default_source="CLS")
+
+                        await self.cache.market_dao.save_market_news(normalized, wait=True)
+
+                        # UIR-F04-002：落库成功后事件携带稳定身份 + 本次落库的规范化情绪/标签。
+                        # 身份 = (content, publish_time)，与 market_news 唯一键 (content_hash,
+                        # publish_time) 等价（content_hash 为 content 的 sha256）；情绪缺失保持
+                        # None（R21），由 VM 保留 DB 已保留的旧成功值，不得据此清空。
+                        event_publish_time = normalized.get("publish_time")
+                        await self._notify_listeners(
+                            update_type=NewsUpdateType.TAG_UPDATE,
+                            data={
+                                "content": str(normalized.get("content") or content).strip(),
+                                "publish_time": str(event_publish_time) if event_publish_time else "",
+                                "tags": tags,
+                                "sentiment": normalized.get("sentiment"),
                             },
-                            default_source="CLS",
                         )
-                        # category 透传（s4_plan §2.3）：L2 空串归一化为缺失（COALESCE 不清空既有分类）。
-                        normalized["category_l1"] = ai_result.get("category_L1")
-                        normalized["category_l2"] = ai_result.get("category_L2") or None
-                        normalized["analysis_metadata"] = _build_analysis_metadata(content, ai_result, exec_meta)
-                    else:
-                        # 旧链（pending 生产语义逐字节保留）：打分 → 载荷 → normalize。
-                        # N3-5：情感打分接线（打分 → normalize 透传 → 落库 sentiment 列）。
-                        # N3-6：打分服务整体不可用时回退 LLM sentiment（白名单过滤，提案 §9.2）；
-                        # 服务可用但输出 NaN/未知 label 归 None 不回退（R21 缺失不伪装）。
-                        # N5-2：完整载荷（sentiment + 三打分列）随 normalize 透传落库。
-                        payload = await self._score_sentiment_result(
-                            content,
-                            llm_fallback=_coerce_llm_sentiment(ai_result),
-                        )
-                        item.update(payload)
-                        normalized = CacheManager.normalize_news_item(item, default_source="CLS")
-
-                    await self.cache.market_dao.save_market_news(normalized, wait=True)
-
-                    # UIR-F04-002：落库成功后事件携带稳定身份 + 本次落库的规范化情绪/标签。
-                    # 身份 = (content, publish_time)，与 market_news 唯一键 (content_hash,
-                    # publish_time) 等价（content_hash 为 content 的 sha256）；情绪缺失保持
-                    # None（R21），由 VM 保留 DB 已保留的旧成功值，不得据此清空。
-                    event_publish_time = normalized.get("publish_time")
-                    await self._notify_listeners(
-                        update_type=NewsUpdateType.TAG_UPDATE,
-                        data={
-                            "content": str(normalized.get("content") or content).strip(),
-                            "publish_time": str(event_publish_time) if event_publish_time else "",
-                            "tags": tags,
-                            "sentiment": normalized.get("sentiment"),
-                        },
-                    )
-
-                self.processing_queue.task_done()  # type: ignore[union-attr]
+                finally:
+                    queue.task_done()
 
                 # 4. Cooperative yield: let event loop handle pending UI
                 # events (Flet WebSocket dispatch) before next item.

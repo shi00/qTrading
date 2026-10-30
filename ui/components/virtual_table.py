@@ -31,6 +31,11 @@
   **动作列单元格与行 anchor 子树互为兄弟** (不嵌套在 ``anchored()`` 内): 嵌套交互控件
   会让 Flutter 语义合并节点由 ``role=button`` 退化为 ``role=group`` + ``aria-label``,
   使 COMPLEX 行 anchor 的 textContent 前缀契约失效 (CI E2E 实证)
+
+修复要点 (UIR-X01-002 列宽真源/镜像分离):
+- ``state.col_widths`` 为渲染与持久化的唯一真源; ``cache.widths`` 仅是拖拽过程镜像
+- 加载时二者同步; drag-start 以完整真源重建镜像; drag-update/end 写回完整映射,
+  避免「仅含当前列」的镜像整体覆盖真源时清空其他列已保存宽度
 """
 
 import logging
@@ -691,6 +696,10 @@ def PaginatedTable(
 
         对齐 ResizableSplitter._load_effect: 读取经父 VM (内存读, 非 IO); 缺失/异常时
         静默回退列定义默认宽度, 不阻断渲染。
+
+        UIR-X01-002: 加载结果同时写入 state.col_widths (渲染/持久化真源) 与拖拽镜像
+        cache.widths — 二者脱节时, drag-update/end 会用「仅含当前列」的镜像整体覆盖
+        state/持久化, 清空其他列已保存宽度。
         """
         if on_load_col_widths is None:
             return
@@ -698,13 +707,19 @@ def PaginatedTable(
             loaded = on_load_col_widths()
         except Exception as e:
             logger.debug("[PaginatedTable] on_load_col_widths failed, use column defaults: %s", e)
+            cache.widths = dict(col_widths)
             return
         if not loaded:
+            cache.widths = dict(col_widths)
             return
         try:
-            set_col_widths({str(k): int(v) for k, v in loaded.items()})
+            widths = {str(k): int(v) for k, v in loaded.items()}
         except (TypeError, ValueError) as e:
             logger.debug("[PaginatedTable] invalid persisted col widths ignored: %s", e)
+            cache.widths = dict(col_widths)
+            return
+        set_col_widths(widths)
+        cache.widths = dict(widths)
 
     ft.use_effect(_load_widths_effect, dependencies=[col_widths_key])
 
@@ -731,8 +746,12 @@ def PaginatedTable(
     # --- 列宽拖拽 handler 工厂 (R13 契约, §6.2) ---
     def _make_drag_start_handler(col_id: str, current_width: int) -> Callable[..., None]:
         def _on_drag_start(e) -> None:
-            cache.active_col = col_id
+            # UIR-X01-002: 镜像以 state.col_widths (真源) 为基底重建, 保证后续 update/end
+            # 写回的是包含全部列的完整映射; 镜像中已有的更新值 (上一轮拖拽刚结束、state
+            # 尚未来得及重渲染时) 优先保留, 避免宽度回退
+            cache.widths = {**col_widths, **cache.widths}
             cache.widths.setdefault(col_id, current_width)
+            cache.active_col = col_id
 
         return _on_drag_start
 

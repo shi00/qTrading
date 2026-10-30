@@ -276,6 +276,15 @@ class TestSaveConcurrency:
         assert result is False
         mock_config_handler.set_sync_max_concurrent_heavy.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_save_concurrency_setter_false_returns_false(self, mock_config_handler, mock_thread_pool):
+        """UIR-F22-001: set_sync_max_concurrent_heavy 返回 False 时命令返回 False 且复位 is_saving。"""
+        mock_config_handler.set_sync_max_concurrent_heavy.return_value = False
+        vm = _make_vm(mock_config_handler)
+        result = await vm.save_concurrency("8")
+        assert result is False
+        assert vm.state.is_saving is False
+
 
 # --- save_db_pool ---
 
@@ -303,6 +312,28 @@ class TestSaveDbPool:
         vm = _make_vm(mock_config_handler)
         result = await vm.save_db_pool("abc", "20", "60")
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_save_db_pool_first_setter_false_returns_false(self, mock_config_handler, mock_thread_pool):
+        """UIR-F22-001: pool_size 落盘失败时返回 False, 且不继续写入其余两项 (失败即提前返回)。"""
+        mock_config_handler.set_db_connection_pool_size.return_value = False
+        vm = _make_vm(mock_config_handler)
+        result = await vm.save_db_pool("10", "20", "60")
+        assert result is False
+        mock_config_handler.set_db_max_overflow.assert_not_called()
+        mock_config_handler.set_db_pool_timeout.assert_not_called()
+        assert vm.state.is_saving is False
+
+    @pytest.mark.asyncio
+    async def test_save_db_pool_mid_setter_false_returns_false(self, mock_config_handler, mock_thread_pool):
+        """UIR-F22-001: overflow 落盘失败时返回 False, 且跳过 timeout 写入并复位 is_saving。"""
+        mock_config_handler.set_db_max_overflow.return_value = False
+        vm = _make_vm(mock_config_handler)
+        result = await vm.save_db_pool("10", "20", "60")
+        assert result is False
+        mock_config_handler.set_db_connection_pool_size.assert_called_once_with(10)
+        mock_config_handler.set_db_pool_timeout.assert_not_called()
+        assert vm.state.is_saving is False
 
 
 # --- save_thread_pool ---
@@ -333,6 +364,28 @@ class TestSaveThreadPool:
         assert result is False
         mock_config_handler.set_max_io_workers.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_save_thread_pool_io_setter_false_skips_cpu_and_reload(self, mock_config_handler, mock_thread_pool):
+        """UIR-F22-001: io 落盘失败时返回 False, 不写 cpu, 不重载线程池, 且复位 is_saving。"""
+        mock_config_handler.set_max_io_workers.return_value = False
+        vm = _make_vm(mock_config_handler)
+        result = await vm.save_thread_pool("16", "8")
+        assert result is False
+        mock_config_handler.set_max_cpu_workers.assert_not_called()
+        mock_thread_pool[0].reload_config.assert_not_called()
+        assert vm.state.is_saving is False
+
+    @pytest.mark.asyncio
+    async def test_save_thread_pool_cpu_setter_false_skips_reload(self, mock_config_handler, mock_thread_pool):
+        """UIR-F22-001: cpu 落盘失败时返回 False 且不重载线程池 (旧运行态不被新配置掩盖)。"""
+        mock_config_handler.set_max_cpu_workers.return_value = False
+        vm = _make_vm(mock_config_handler)
+        result = await vm.save_thread_pool("16", "8")
+        assert result is False
+        mock_config_handler.set_max_io_workers.assert_called_once_with(16)
+        mock_thread_pool[0].reload_config.assert_not_called()
+        assert vm.state.is_saving is False
+
 
 # --- save_no_proxy ---
 
@@ -358,6 +411,18 @@ class TestSaveNoProxy:
         result = await vm.save_no_proxy("  a.com  ,  b.com  ")
         assert result is True
         mock_config_handler.set_no_proxy_domains.assert_called_once_with(["a.com", "b.com"])
+
+    @pytest.mark.asyncio
+    async def test_save_no_proxy_setter_false_returns_false_and_skips_reapply(
+        self, mock_config_handler, mock_thread_pool
+    ):
+        """UIR-F22-001: 落盘失败时返回 False, 不重应用代理策略, 且复位 is_saving。"""
+        mock_config_handler.set_no_proxy_domains.return_value = False
+        vm = _make_vm(mock_config_handler)
+        result = await vm.save_no_proxy("a.com,b.com")
+        assert result is False
+        mock_thread_pool[0].submit.assert_not_called()
+        assert vm.state.is_saving is False
 
 
 # --- 构造注入 ---

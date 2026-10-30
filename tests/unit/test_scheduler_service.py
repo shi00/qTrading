@@ -327,12 +327,15 @@ class TestSchedulerServiceCheckConfigSync:
         mock_ch.is_auto_update_enabled.return_value = True
         mock_ch.get_concept_schedule_time.return_value = "10:00"
         mock_ch.is_concept_schedule_enabled.return_value = False
+        mock_ch.get_nightly_prediction_time.return_value = "21:00"
         svc = SchedulerService()
         result = svc._check_config_sync()
         assert result["time"] == "09:30"
         assert result["enabled"] is True
         assert result["concept_time"] == "10:00"
         assert result["concept_enabled"] is False
+        # UIR-F20-001: 夜间预测时间必须在快照内，否则仅改该时间不会被看门狗感知
+        assert result["nightly_time"] == "21:00"
 
 
 class TestSchedulerServiceScheduleJobs:
@@ -482,6 +485,104 @@ class TestSchedulerServiceWatchConfigChanges:
         svc._schedule_jobs = MagicMock()
         await svc._watch_config_changes()
         svc._schedule_jobs.assert_not_called()
+
+
+class TestWatchNightlyPredictionTimeChange:
+    """UIR-F20-001: 仅修改夜间预测时间也必须触发重排。
+
+    快照只含 daily/concept 字段时，用户改 `nightly_prediction_time` 不会被感知，
+    nightly_prediction 仍按旧 cron 执行。下列用例以真实 `_schedule_jobs` 断言
+    「旧 job 被替换、新时间生效、无重复 job」，而非仅断言 `_schedule_jobs` 被调用。
+    """
+
+    @staticmethod
+    def _configure(mock_ch, nightly_time: str) -> None:
+        mock_ch.get_setting.return_value = None
+        mock_ch.get_auto_update_time.return_value = "16:30"
+        mock_ch.is_auto_update_enabled.return_value = True
+        mock_ch.get_concept_schedule_time.return_value = "18:00"
+        mock_ch.is_concept_schedule_enabled.return_value = True
+        mock_ch.get_nightly_prediction_time.return_value = nightly_time
+
+    @staticmethod
+    def _nightly_job_hm(svc) -> tuple[str, str]:
+        job = svc.scheduler.get_job("nightly_prediction")
+        assert job is not None
+        hour = next(f for f in job.trigger.fields if f.name == "hour")
+        minute = next(f for f in job.trigger.fields if f.name == "minute")
+        return str(hour), str(minute)
+
+    @pytest.mark.asyncio
+    @patch("utils.scheduler_service.ConfigHandler")
+    @patch("utils.scheduler_service.ThreadPoolManager")
+    async def test_nightly_time_change_reschedules_job(self, mock_tpm, mock_ch):
+        self._configure(mock_ch, "20:30")
+        svc = SchedulerService()
+        svc._schedule_jobs()
+        assert self._nightly_job_hm(svc) == ("20", "30")
+
+        # 看门狗首轮以真实快照建立基线（须含 nightly_time）
+        svc._last_known_config = svc._check_config_sync()
+        assert svc._last_known_config["nightly_time"] == "20:30"
+
+        # 用户仅修改夜间预测时间，其余调度配置不变
+        mock_ch.get_nightly_prediction_time.return_value = "21:15"
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        # 直接同步执行真实 _check_config_sync，等价于线程池内读取配置
+        mock_tpm_instance.run_async = AsyncMock(side_effect=lambda _task_type, fn: fn())
+        svc._catch_up_missed_updates = AsyncMock()
+        svc._catch_up_nightly_prediction = AsyncMock()
+
+        await svc._watch_config_changes()
+
+        assert self._nightly_job_hm(svc) == ("21", "15")
+        assert [j.id for j in svc.scheduler.get_jobs()].count("nightly_prediction") == 1
+        assert svc._nightly_hm == (21, 15)
+        assert svc._last_known_config["nightly_time"] == "21:15"
+
+    @pytest.mark.asyncio
+    @patch("utils.scheduler_service.ConfigHandler")
+    @patch("utils.scheduler_service.ThreadPoolManager")
+    async def test_unchanged_nightly_time_no_reload(self, mock_tpm, mock_ch):
+        """同值不变更（含 nightly_time 相同）不得触发重排，避免每 30 秒重注册 job。"""
+        self._configure(mock_ch, "21:15")
+        svc = SchedulerService()
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=lambda _task_type, fn: fn())
+        svc._catch_up_missed_updates = AsyncMock()
+        svc._catch_up_nightly_prediction = AsyncMock()
+        svc._last_known_config = svc._check_config_sync()
+        svc._schedule_jobs = MagicMock()
+
+        await svc._watch_config_changes()
+
+        svc._schedule_jobs.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("utils.scheduler_service.ConfigHandler")
+    @patch("utils.scheduler_service.ThreadPoolManager")
+    async def test_invalid_nightly_time_falls_back_without_crash(self, mock_tpm, mock_ch):
+        """非法夜间时间（手改配置）不得阻断重排：回落默认 20:30 且快照记录原始值。"""
+        self._configure(mock_ch, "20:30")
+        svc = SchedulerService()
+        svc._schedule_jobs()
+        svc._last_known_config = svc._check_config_sync()
+
+        mock_ch.get_nightly_prediction_time.return_value = "25:99"
+        mock_tpm_instance = MagicMock()
+        mock_tpm.return_value = mock_tpm_instance
+        mock_tpm_instance.run_async = AsyncMock(side_effect=lambda _task_type, fn: fn())
+        svc._catch_up_missed_updates = AsyncMock()
+        svc._catch_up_nightly_prediction = AsyncMock()
+
+        await svc._watch_config_changes()
+
+        assert self._nightly_job_hm(svc) == ("20", "30")
+        assert svc._nightly_hm == (20, 30)
+        # 快照记录配置原始值：下一轮同值不再重复重排
+        assert svc._last_known_config["nightly_time"] == "25:99"
 
 
 class TestSchedulerServiceGetStatus:

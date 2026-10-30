@@ -424,6 +424,9 @@ class SchedulerService:
             "enabled": ConfigHandler.is_auto_update_enabled(),
             "concept_time": ConfigHandler.get_concept_schedule_time(),
             "concept_enabled": ConfigHandler.is_concept_schedule_enabled(),
+            # UIR-F20-001: 夜间预测时间也是 cron 来源，缺此字段时仅改该时间不会被看门狗感知，
+            # 夜间预测会一直按旧 cron 执行。
+            "nightly_time": ConfigHandler.get_nightly_prediction_time(),
         }
 
     def _is_market_sync_busy(self) -> bool:
@@ -476,6 +479,7 @@ class SchedulerService:
         current_enabled = current_config["enabled"]
         current_concept_time = current_config["concept_time"]
         current_concept_enabled = current_config["concept_enabled"]
+        current_nightly_time = current_config.get("nightly_time")
 
         changed = False
         if current_time != self._last_known_config["time"]:
@@ -498,6 +502,16 @@ class SchedulerService:
             "concept_time",
         ) or current_concept_enabled != self._last_known_config.get("concept_enabled"):
             logger.info("[Scheduler] Detected concept sync schedule config change")
+            changed = True
+
+        # UIR-F20-001: 夜间预测时间变更同样触发重排（_schedule_jobs 会先移除旧 job 再按新 cron
+        # 注册，不会残留重复 job）。两侧均用 .get 以兼容缺字段的旧快照/测试替身。
+        if current_nightly_time != self._last_known_config.get("nightly_time"):
+            logger.info(
+                "[Scheduler] Detected nightly prediction time change: %s -> %s",
+                self._last_known_config.get("nightly_time"),
+                current_nightly_time,
+            )
             changed = True
 
         if changed:

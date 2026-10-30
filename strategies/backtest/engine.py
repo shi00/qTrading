@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import polars as pl
 
 from utils.log_decorators import PerfThreshold, log_async_operation
-from utils.qfq import qfq_ratio_expr
+from utils.qfq import QFQ_UNKNOWN_COL, qfq_ratio_expr, qfq_unknown_expr
 from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
 from core.i18n import Message
@@ -463,6 +463,12 @@ class VectorBacktestEngine:
 
         quotes_df = self._apply_qfq(quotes_df)
 
+        # UIR-X01-105：复权因子未知须成为**结果级**告警（data_quality → UI unreliable），
+        # 否则回测结论在未知复权因子的标的上静默失真（R21/R24）。
+        qfq_warning = self._qfq_unknown_warning(quotes_df, start_str, end_str)
+        if qfq_warning:
+            data_warnings.append(qfq_warning)
+
         return quotes_df, data_warnings
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -675,6 +681,15 @@ class VectorBacktestEngine:
         回测以**回测区间第一交易日**的 adj_factor 为基准（base="first"），
         使历史绝对价格只依赖该时点及之前可得信息，不依赖期末（未来）除权信息，结果可复现。
         活体/技术分析展示仍用 latest-base；两者收益率与归一化绩效口径一致，仅绝对量纲不同。
+
+        UIR-X01-105 / R21：因子**未知**（adj_factor 全空或基准为 0）时逐行输出
+        ``qfq_ratio = null`` 与标记列 ``qfq_adjustment_unknown = True``：
+        - 撮合层见 ratio 为 null 即拒绝成交（``portfolio._qfq_ratio`` →
+          ``missing_qfq_ratio``），不会把未复权价当复权价成交；
+        - ``_qfq_unknown_warning`` 在结果级产出 DataWarning（data_quality → UI unreliable）；
+        - ``_calc_ic_series`` 排除被标记标的，避免未复权收益污染 IC。
+        ``qfq_*`` 价格列在被标记行回退为 raw 值（保持价格序列数值连续，供净值/清算兜底），
+        未知语义由 ratio=null 与标记列承载，consumer 必须以此判据消费。
         """
         if "adj_factor" not in quotes_df.columns:
             return quotes_df.with_columns(
@@ -693,6 +708,18 @@ class VectorBacktestEngine:
         # Ensure sorted by ts_code and trade_date to guarantee stock contiguous rows and correctness of the first value in expression
         quotes_df = quotes_df.sort(["ts_code", "trade_date"])
         qfq_ratio = qfq_ratio_expr("adj_factor", "ts_code", ref="first")
+        qfq_unknown = qfq_unknown_expr("adj_factor", "ts_code", ref="first")
+
+        def _qfq_price(price_col: str) -> pl.Expr:
+            # 未知行回退 raw：ratio 为 null 时 ``price * ratio`` 已是 null，
+            # 直接置 null 会让净值/清算估值整列缺值；此处保留 raw 数值并由
+            # ``qfq_ratio=null`` + 标记列表达「不可信」，成交层据此拒绝撮合。
+            return (
+                pl.when(pl.col(QFQ_UNKNOWN_COL))
+                .then(pl.col(price_col))
+                .otherwise(pl.col(price_col) * pl.col("qfq_ratio"))
+                .alias(f"qfq_{price_col}")
+            )
 
         return quotes_df.with_columns(
             [
@@ -701,14 +728,50 @@ class VectorBacktestEngine:
                 pl.col("low").alias("raw_low"),
                 pl.col("close").alias("raw_close"),
                 qfq_ratio,
+                qfq_unknown,
             ]
         ).with_columns(
             [
-                (pl.col("open") * pl.col("qfq_ratio")).alias("qfq_open"),
-                (pl.col("high") * pl.col("qfq_ratio")).alias("qfq_high"),
-                (pl.col("low") * pl.col("qfq_ratio")).alias("qfq_low"),
-                (pl.col("close") * pl.col("qfq_ratio")).alias("qfq_close"),
+                _qfq_price("open"),
+                _qfq_price("high"),
+                _qfq_price("low"),
+                _qfq_price("close"),
             ]
+        )
+
+    def _qfq_unknown_warning(
+        self,
+        quotes_df: pl.DataFrame,
+        start_date: str,
+        end_date: str,
+    ) -> DataWarning | None:
+        """复权因子未知（全空 / 基准为 0）→ 结果级数据质量告警（UIR-X01-105）。
+
+        「复权因子不可得」与「合法的恒等复权」是两件事（R21）。此前未知被静默当作
+        恒等 1.0，回测把未复权价当复权价使用且无任何结果级提示；现在由
+        ``_apply_qfq`` 的标记列在此汇成 DataWarning（category=data_quality），
+        使 UI 可信度判定（unreliable）与用户可见的告警能够取得该事实。
+        """
+        if QFQ_UNKNOWN_COL not in quotes_df.columns:
+            return None
+
+        flagged = quotes_df.filter(pl.col(QFQ_UNKNOWN_COL).fill_null(False))
+        if flagged.is_empty():
+            return None
+
+        codes = sorted(flagged["ts_code"].unique().to_list())
+        sample = "、".join(codes[:5])
+        more = f" 等共 {len(codes)} 只" if len(codes) > 5 else ""
+        return DataWarning(
+            warning_type="qfq_adjustment_unknown",
+            start_date=start_date,
+            end_date=end_date,
+            affected_stock_count=len(codes),
+            error_message=(
+                f"复权因子（adj_factor）缺失或基准因子为 0：{sample}{more}。"
+                "这些标的的复权价不可信，撮合层已拒绝成交、IC 已排除其未复权收益；"
+                "回测结论不含这些标的，请补齐复权因子后重跑。"
+            ),
         )
 
     def _compute_avg_daily_volume(self, quotes_df: pl.DataFrame) -> pl.DataFrame:
@@ -924,6 +987,11 @@ class VectorBacktestEngine:
         """
         if signals.is_empty():
             return pl.Series([], dtype=pl.Float64), [], []
+
+        # UIR-X01-105：复权因子未知的标的其 qfq 价格是未复权口径，其「收益率」会污染
+        # IC 估计（未知 ≠ 恒等，R21），显式排除；结果级 DataWarning 已在 _load_quotes 产出。
+        if QFQ_UNKNOWN_COL in quotes_df.columns:
+            quotes_df = quotes_df.filter(~pl.col(QFQ_UNKNOWN_COL).fill_null(False))
 
         # PERF-C2: Pre-group by date via partition_by to avoid O(N*M) loop filters.
         # Unpack tuple keys (k[0]) to plain date values for direct .get(date) lookup.
