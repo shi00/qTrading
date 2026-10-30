@@ -100,11 +100,28 @@ _CST_OFFSET = timedelta(hours=8)
 # reserved 退出预算占用为正确的事实零释放，保守多占可接受）。
 _OWNER_LEASE_SECONDS: Final[float] = 900.0
 
-# F19：取消边界清理的终态提交短超时（秒）——受限清理不得拖延取消传播；超时
-# 放弃提交（外发已开始时预留经 F23 租约到期自愈 held_unconfirmed 兜底）。
-_CANCEL_CLEANUP_TIMEOUT_S: Final[float] = 2.0
+# F19：取消边界清理的终态提交超时（秒）——受限清理不得拖延取消传播。默认回落值；
+# 实际预算按 recorder 落账内部超时 + 余量推导（见 _cancel_cleanup_budget），
+# 确保取消路径不会先于落账超时掐断（F19-003：清理 2s < 落账 5s 时落账被取消，
+# 记录既不落账也不保留 → attempt 永久 dispatched）。
+_CANCEL_CLEANUP_TIMEOUT_S: Final[float] = 6.0
+# F19：清理预算相对落账内部超时的余量（秒）
+_CANCEL_CLEANUP_MARGIN_S: Final[float] = 1.0
 # F19：取消终态错误码（与超时 / 失败 / 仍运行可区分的账本事实）
 _CANCELLED_ERROR_CODE: Final[str] = "CANCELLED"
+
+
+def _cancel_cleanup_budget(recorder: Any) -> float:
+    """取消边界清理预算（秒，F19-003）：≥ recorder 落账内部超时 + 余量。
+
+    清理预算短于落账内部超时会在落账完成前取消它（此时记录既未落账也未进入
+    重放队列，attempt 永久停留 dispatched）。recorder 未暴露数值超时（测试替身 /
+    旧形态）时回落常量预算，不臆造数值（R21）。
+    """
+    settle_timeout = getattr(recorder, "settle_timeout_s", None)
+    if isinstance(settle_timeout, int | float) and not isinstance(settle_timeout, bool):
+        return float(settle_timeout) + _CANCEL_CLEANUP_MARGIN_S
+    return _CANCEL_CLEANUP_TIMEOUT_S
 
 
 def _default_local_only_mode_reader() -> bool:
@@ -152,6 +169,8 @@ class ScenarioExecutor:
             ensure_inference_adapter(kind, adapter)
             self._adapters[kind] = adapter
         self._clock = clock
+        # F19-003：清理预算按 recorder 落账内部超时推导（不得先于落账被掐断）
+        self._cancel_cleanup_timeout_s = _cancel_cleanup_budget(recorder)
         self._retry_attempts = max(0, min(retry_attempts, retry_max_attempts))
         self._cooldown_seconds = cooldown_seconds
         # R01-D1：local-only 政策读取器（DI，与 clock 同风格）；默认经 ConfigHandler
@@ -843,8 +862,12 @@ class ScenarioExecutor:
         """取消传播边界的受限清理（F19）：尽力收敛终态后由调用方 re-raise。
 
         R2：不吞取消——本方法不捕获 CancelledError（清理期间二次取消直接
-        传播，让位于取消语义）；非取消失败（短超时 / 账本不可用）仅记日志，
+        传播，让位于取消语义）；非取消失败（预算耗尽 / 账本不可用）仅记日志，
         不阻断取消传播。
+
+        F19-003：清理预算取 ``_cancel_cleanup_timeout_s``（≥ recorder 落账内部
+        超时 + 余量）——预算耗尽时 recorder 侧落账协程被取消，但终态记录经
+        ``UsageRecorder.submit_terminal`` 的取消分支保留待重放（不再直穿丢弃）。
 
         终态收敛语义（R21 收费未知不伪装确定终态）：
         - 该尝试终态已落账 → 无需收敛（revision 水位下重提交亦无推进）；
@@ -874,7 +897,9 @@ class ScenarioExecutor:
                 duration_ms=duration_ms,
             )
         try:
-            outcome = await asyncio.wait_for(self._recorder.submit_terminal(record), timeout=_CANCEL_CLEANUP_TIMEOUT_S)
+            outcome = await asyncio.wait_for(
+                self._recorder.submit_terminal(record), timeout=self._cancel_cleanup_timeout_s
+            )
             if not outcome.persisted:
                 logger.info("[ScenarioExecutor] cancel-cleanup terminal not persisted (%s)", outcome.error_code)
         except asyncio.CancelledError:

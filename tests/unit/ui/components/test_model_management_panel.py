@@ -673,6 +673,22 @@ class TestRequestRowEnumLocalization:
         assert I18n.get("model_usage_cost_unknown") in texts
         assert "bogus" not in texts
 
+    def test_converged_orphaned_request_shows_unknown_not_running(self):
+        """F19-003：取消落账超时 / 崩溃后收敛的 unknown 不得渲染为「运行中」。"""
+        state = _usage_state(
+            requests=(
+                {
+                    "invocation_id": "inv-1",
+                    "scenario_id": "news_risk",
+                    "terminal_status": "unknown",
+                    "cost_status": "unknown",
+                },
+            )
+        )
+        texts = _texts(_build_request_rows(state, MagicMock()))
+        assert I18n.get("model_usage_terminal_unknown") in texts
+        assert I18n.get("model_usage_terminal_running") not in texts
+
 
 class TestConnectionRowBillingLocalized:
     """连接行计量口径经 i18n 展示，不展示 ``usage_only`` / ``estimate_cost`` 裸枚举。"""

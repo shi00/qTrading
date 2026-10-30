@@ -57,6 +57,12 @@ _ACTIVE_RESERVATION_STATES: Final[tuple[str, ...]] = ("reserved", "dispatched", 
 # （与预算门 _read_active_reservations_sum 的保守全活跃口径相区分）。
 _LEASED_RESERVATION_STATES: Final[tuple[str, ...]] = ("reserved", "dispatched")
 
+# F19-003：owner 失权（取消落账未确认 / 进程崩溃 / 强杀）后仍停留 dispatched 的
+# 尝试收敛终态——``unknown`` = 结果未知（请求可能已被上游消费），不伪装
+# failed / succeeded（R21），费用列保持 NULL（不填 0）。
+_RECOVERED_ATTEMPT_STATUS: Final[str] = "unknown"
+_RECOVERED_ATTEMPT_ERROR_CODE: Final[str] = "OWNER_LEASE_LOST"
+
 # advisory 锁固定命名空间（"AIUS" ASCII 编码低 32 位，全局唯一语义，勿改）
 _ADVISORY_LOCK_NAMESPACE: Final[int] = 0x4149_5553
 
@@ -85,6 +91,10 @@ SCOPE_CONNECTION: Final[str] = "connection"
 
 # 请求页派生查询：invocation LEFT JOIN 尝试聚合（a）与候选决策聚合（d）。
 # 连接 / 子任务过滤经 EXISTS（一个请求一行，天然去重，§11.5）。
+# F19-003：在途尝试按 owner 租约分两档——租约有效者计 ``dispatched_attempts``
+# （派生 running）；租约失效者计 ``orphaned_dispatched_attempts``（派生 unknown，
+# 不冒充运行中）。否则崩溃 / 取消落账未确认的 dispatched 行会让请求永久显示
+# 「运行中」，无法收敛（R21）。
 _REQUEST_PAGE_SELECT_SQL: Final[str] = """
 SELECT
     r.invocation_id,
@@ -103,6 +113,7 @@ SELECT
         WHEN r.succeeded_attempts > 0 THEN 'succeeded'
         WHEN r.cancelled_attempts > 0 THEN 'cancelled'
         WHEN r.dispatched_attempts > 0 THEN 'running'
+        WHEN r.orphaned_dispatched_attempts > 0 THEN 'unknown'
         WHEN r.failed_attempts > 0 THEN 'failed'
         WHEN r.attempt_count = 0 AND r.skipped_decisions > 0 THEN 'skipped'
         ELSE 'unknown'
@@ -128,6 +139,7 @@ FROM (
         COALESCE(a.failed_attempts, 0) AS failed_attempts,
         COALESCE(a.cancelled_attempts, 0) AS cancelled_attempts,
         COALESCE(a.dispatched_attempts, 0) AS dispatched_attempts,
+        COALESCE(a.orphaned_dispatched_attempts, 0) AS orphaned_dispatched_attempts,
         COALESCE(a.priced_attempts, 0) AS priced_attempts,
         COALESCE(a.unpriced_attempts, 0) AS unpriced_attempts,
         a.total_duration_ms,
@@ -143,7 +155,14 @@ FROM (
             COUNT(*) FILTER (WHERE a.status = 'succeeded')::int AS succeeded_attempts,
             COUNT(*) FILTER (WHERE a.status = 'failed')::int AS failed_attempts,
             COUNT(*) FILTER (WHERE a.status = 'cancelled')::int AS cancelled_attempts,
-            COUNT(*) FILTER (WHERE a.status = 'dispatched')::int AS dispatched_attempts,
+            COUNT(*) FILTER (
+                WHERE a.status = 'dispatched'
+                  AND i2.owner_lease_expires_at > (now() AT TIME ZONE 'UTC')
+            )::int AS dispatched_attempts,
+            COUNT(*) FILTER (
+                WHERE a.status = 'dispatched'
+                  AND i2.owner_lease_expires_at <= (now() AT TIME ZONE 'UTC')
+            )::int AS orphaned_dispatched_attempts,
             COUNT(*) FILTER (WHERE a.cost_cny IS NOT NULL)::int AS priced_attempts,
             COUNT(*) FILTER (WHERE a.usage_status = 'unavailable')::int AS unpriced_attempts,
             SUM(a.duration_ms) AS total_duration_ms,
@@ -151,6 +170,7 @@ FROM (
             string_agg(DISTINCT COALESCE(a.actual_model, a.configured_model, a.connection_id), ', ') AS source_summary,
             string_agg(DISTINCT a.task_id, ', ') AS task_summary
         FROM ai_attempt a
+        JOIN ai_invocation i2 ON i2.invocation_id = a.invocation_id
         GROUP BY a.invocation_id
     ) a ON a.invocation_id = i.invocation_id
     LEFT JOIN (
@@ -165,6 +185,8 @@ FROM (
 """
 
 # 有序尝试明细（含候选序号 / retry_index / 状态 / 错误 / 价格快照 / 用量）。
+# F19-003：owner 租约已失效的 dispatched 尝试派生为 ``unknown``（结果未知），
+# 不把失权残留展示为「运行中」；其余状态原样返回。
 _REQUEST_ATTEMPTS_SQL: Final[str] = """
 SELECT
     a.attempt_id,
@@ -172,7 +194,12 @@ SELECT
     a.candidate_index,
     a.retry_index,
     a.connection_id,
-    a.status,
+    CASE
+        WHEN a.status = 'dispatched'
+             AND i.owner_lease_expires_at <= (now() AT TIME ZONE 'UTC')
+            THEN 'unknown'
+        ELSE a.status
+    END AS status,
     a.error_code,
     a.actual_model,
     a.configured_model,
@@ -182,6 +209,7 @@ SELECT
     a.input_total_tokens,
     a.output_tokens
 FROM ai_attempt a
+LEFT JOIN ai_invocation i ON i.invocation_id = a.invocation_id
 WHERE a.invocation_id = :invocation_id
 ORDER BY a.task_id, a.candidate_index, a.retry_index, a.created_at
 """
@@ -917,12 +945,23 @@ class AIUsageDao(BaseDao):
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def recover_expired_owners(self, *, now: datetime.datetime | None = None) -> int:
-        """启动前恢复（D9/D4）：过期租约的 dispatched 预留转 held_unconfirmed。
+        """启动前恢复（D9/D4）：过期租约的 dispatched 预留转 held_unconfirmed，
+        仍停留 dispatched 的尝试收敛终态 unknown。
 
-        返回处理的 invocation 数；新 owner 经 claim_invocation 认领后自行处置
-        held_unconfirmed（按原身份读确认不重发，D5）。
+        返回处理的 invocation 数（供启动日志；尝试收敛行数另行告警级别记录）；
+        新 owner 经 claim_invocation 认领后自行处置 held_unconfirmed（按原身份
+        读确认不重发，D5）。
+
+        F19-003：取消落账未确认（清理预算掐断 / 进程崩溃 / 强杀）后 attempt 行
+        仍为 dispatched，而旧实现只转预留状态、不触碰 attempt 行 → 该尝试在
+        请求页永久派生「运行中」。此处对 owner 租约已过期的 dispatched 尝试收敛
+        为 ``unknown``（R21：结果未知——请求可能已被上游消费，不伪装
+        failed / succeeded），费用列保持 NULL（未知不填 0）；仅更新仍为
+        dispatched 的行，重复恢复 / 与正常落账并发均幂等（迟到真实结算仍可经
+        usage_revision 水位覆盖为真实终态）。
         """
         self._check_engine(context="ai_usage.recover_expired_owners")
+        now_value = now or datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
         async with self._guarded_begin() as conn:
             result = await conn.execute(
                 sa.text(
@@ -946,8 +985,30 @@ class AIUsageDao(BaseDao):
                       )
                     """
                 ),
-                {"now": now or datetime.datetime.now(datetime.UTC).replace(tzinfo=None)},
+                {"now": now_value},
             )
+            attempt_result = await conn.execute(
+                sa.text(
+                    """
+                    UPDATE ai_attempt AS a
+                    SET status = :status,
+                        error_code = :error_code,
+                        updated_at = (now() AT TIME ZONE 'UTC')
+                    FROM ai_invocation i
+                    WHERE i.invocation_id = a.invocation_id
+                      AND a.status = 'dispatched'
+                      AND i.owner_lease_expires_at <= :now
+                    """
+                ),
+                {"status": _RECOVERED_ATTEMPT_STATUS, "error_code": _RECOVERED_ATTEMPT_ERROR_CODE, "now": now_value},
+            )
+            converged_attempts = int(attempt_result.rowcount or 0)
+            if converged_attempts:
+                logger.info(
+                    "[ai_usage_dao] converged %s orphaned dispatched attempt(s) to status=%s",
+                    converged_attempts,
+                    _RECOVERED_ATTEMPT_STATUS,
+                )
             return int(result.rowcount or 0)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
