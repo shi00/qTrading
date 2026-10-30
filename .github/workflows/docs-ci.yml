@@ -36,6 +36,10 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        with:
+          # 缓存预算治理：Linux 侧 `uv pip install` 仅数秒（wheel 主要走 setup-python 的 pip
+          # 缓存），而 setup-uv 自带缓存在每个 PR 引用各存一份 ~350 MB，挤占仓库 10 GB 上限。
+          enable-cache: false
 
       - name: Install dependencies
         run: |

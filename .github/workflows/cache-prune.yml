@@ -1,0 +1,60 @@
+name: CI Cache Prune
+
+# 缓存预算治理：GitHub Actions 每仓库缓存上限 10 GB，超出后按 LRU 淘汰任意条目（含 main 的）。
+# 实测仓库曾达 9.81 GB / 10 GB，导致 main 分支的 uv / cargo 缓存被闲置的 PR、tag 副本挤出，
+# Windows job 的 `Install dependencies` 由 0.7 分钟回退到 5.5~8.0 分钟。
+#
+# 清理策略（只删缓存对象，不影响任何 workflow 结论）：
+# - `refs/heads/main` 的缓存永不删除 —— 保证主干与 PR（默认分支回退读取）的命中率；
+# - 其它引用（`refs/pull/*`、`refs/tags/*`）仅在 3 天内未被访问时删除；
+#   活跃 PR 每次推送都会访问自己的缓存，故不会被误删，已合并/关闭 PR 与历史 tag 自然过期。
+# 非 main 引用的保存侧治理见 ci_cd.yml 的 `save-if` 与 docs-ci / precommit-config-ci 的
+# `enable-cache: false`（避免写入本应在此处清理的副本）。
+
+on:
+  schedule:
+    # 04:17 UTC（北京时间 12:17），错开 release-tag-guard 日检（01:00 UTC）、
+    # 主 CI flaky 检测（02:00 UTC）与 Flet 日检（03:00 UTC）
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: cache-prune-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Prune stale non-main caches
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Delete non-main caches idle for 3+ days
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          IDLE_DAYS: '3'
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d "-${IDLE_DAYS} days" +%Y-%m-%dT%H:%M:%SZ)
+          gh api --paginate "repos/${REPO}/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | [.id, .ref, .last_accessed_at, .size_in_bytes] | @tsv' \
+            > caches.tsv
+          scanned=0
+          deleted=0
+          freed_bytes=0
+          while IFS=$'\t' read -r id ref last_accessed size; do
+            scanned=$((scanned + 1))
+            if [ "${ref}" = "refs/heads/main" ]; then
+              continue
+            fi
+            if [[ "${last_accessed}" < "${cutoff}" ]]; then
+              gh api -X DELETE "repos/${REPO}/actions/caches/${id}" > /dev/null
+              deleted=$((deleted + 1))
+              freed_bytes=$((freed_bytes + size))
+            fi
+          done < caches.tsv
+          echo "scanned=${scanned} deleted=${deleted} freed_mb=$((freed_bytes / 1024 / 1024))"
