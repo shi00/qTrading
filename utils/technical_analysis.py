@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 
 from core.i18n import I18n
-from utils.qfq import qfq_ratio_series
+from utils.qfq import qfq_ratio_series, qfq_series_status
 
 
 class TechnicalAnalysis:
@@ -16,6 +16,11 @@ class TechnicalAnalysis:
         Calculate Forward Adjusted Prices (QFQ) if adj_factor is present.
         Adjusts open, high, low, close.
         Target: Normalize to the LATEST available date in the dataframe.
+
+        UIR-X01-105 / R21：复权因子**未知**（adj_factor 全空或基准为 0）时，
+        不再按恒等 1.0 原样返回（那会让上层把未复权价当复权价算指标）。
+        此时价格列显式置 NaN，使 ``get_macd`` / ``get_kdj`` / AI 结构摘要
+        走各自的「缺失 → UNKNOWN / 数据不足」分支，结果不伪装成正常值。
         """
         if df is None or df.empty or "adj_factor" not in df.columns:
             return df
@@ -25,6 +30,15 @@ class TechnicalAnalysis:
                 df_adj = df.sort_values("trade_date").copy()
             else:
                 df_adj = df.copy()
+
+            status = qfq_series_status(df_adj["adj_factor"])
+            if status == "unknown":
+                for price_col in ("open", "high", "low", "close"):
+                    if price_col in df_adj.columns:
+                        df_adj[price_col] = np.nan
+                return df_adj
+            if status == "identity":
+                return df
 
             ratio = qfq_ratio_series(df_adj["adj_factor"])
             if ratio is None:

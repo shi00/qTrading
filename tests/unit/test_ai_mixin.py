@@ -608,6 +608,22 @@ class TestComputeTechnicalStructure:
         result = _compute_technical_structure(df)
         assert result["ma_alignment"] == "数据不足"
 
+    def test_unknown_adj_factor_degrades_to_insufficient(self):
+        """UIR-X01-105 / R21：复权因子未知 → 结构字段显式「数据不足」，不伪造 0.0% 趋势。"""
+        n = 25
+        df = pd.DataFrame(
+            {
+                "trade_date": [f"202406{i:02d}" for i in range(1, n + 1)],
+                "close": [10.0 + i * 0.5 for i in range(n)],
+                "vol": [1000.0] * n,
+                "adj_factor": [None] * n,
+            }
+        )
+        result = _compute_technical_structure(df, 1.5)
+        assert result["ma_alignment"] == "数据不足"
+        assert result["volume_trend"] == "数据不足"
+        assert result["price_trend_5d"] == "数据不足"
+
     def test_sufficient_data(self):
         df = pd.DataFrame(
             {

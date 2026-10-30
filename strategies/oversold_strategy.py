@@ -62,6 +62,8 @@ def _compute_rsi_filter(
         end_date_value = end_date_obj.strftime("%Y%m%d")
 
     # Calculate QFQ Close (前复权收盘价)
+    # UIR-X01-105：复权因子未知（全空 / 基准为 0）时 qfq_ratio 为 null → qfq_close 为 null
+    # → RSI 无法计算 → 下方 R21 过滤显式排除该标的（不再用未复权价算出「看似正常」的 RSI）。
     if "adj_factor" in df.columns:
         qfq_ratio = qfq_ratio_expr("adj_factor", "ts_code")
         qfq_close_expr = (pl.col("close") * pl.col("qfq_ratio")).alias("qfq_close")

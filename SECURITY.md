@@ -110,3 +110,4 @@ See [`.security/audit-allowlist.yml`](.security/audit-allowlist.yml) for details
 | 2026-10-21 | Upgrade pillow to 13.0.0 (fixes 8 image-parsing CVEs), certifi to 2026.10.19 (PYSEC-2026-4320), and uv to 0.13.4 (PYSEC-2026-4321); restored the pip-audit gate |
 | 2026-10-23 | Upgrade opentelemetry-api to 1.45.1 (fixes CVE-2026-114603, regex backtracking DoS in `TraceState.from_header` tracestate parsing); restored the pip-audit gate |
 | 2026-10-23 | Upgrade brotlicffi to 1.2.1.0 (fixes PYSEC-2026-4323 / CVE-2026-111497, out-of-bounds write in the Brotli decoder, CVSS 9.2, RCE); restored the pip-audit gate |
+| 2026-10-30 | Upgrade joserfc to 1.7.7 (fixes CVE-2026-119284 / GHSA-9pg5-8c7x-5hfx, attacker-controlled payload copied before size validation in compact JWS deserialization, memory amplification DoS); restored the pip-audit gate |

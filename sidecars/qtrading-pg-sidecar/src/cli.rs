@@ -7,6 +7,11 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// 默认业务库名（与 ``AppConfig.embedded_pg_database`` 默认值一致）。
+///
+/// 未显式传 ``--database`` 的旧脚本/旧命令保持原语义（操作 qtrading 库）。
+pub const DEFAULT_DATABASE: &str = "qtrading";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "qtrading-pg-sidecar",
@@ -84,6 +89,9 @@ pub struct DumpArgs {
     /// 输出备份文件（PostgreSQL custom format；先写 <output>.partial 再原子改名）
     #[arg(long)]
     pub output: PathBuf,
+    /// 业务库名（缺省 qtrading，保持旧命令向后兼容）
+    #[arg(long, default_value_t = DEFAULT_DATABASE.to_string())]
+    pub database: String,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -96,6 +104,9 @@ pub struct RestoreArgs {
     /// 恢复到该目录（缺省：恢复到 --data-dir 的 §12.2 原子切换流程）
     #[arg(long)]
     pub target_data_dir: Option<PathBuf>,
+    /// 业务库名（缺省 qtrading，保持旧命令向后兼容）
+    #[arg(long, default_value_t = DEFAULT_DATABASE.to_string())]
+    pub database: String,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -210,6 +221,8 @@ mod tests {
             panic!("expect dump")
         };
         assert_eq!(args.output, PathBuf::from("/b/x.dump"));
+        // UIR-F16-002: 未传 --database 时缺省 qtrading（旧命令向后兼容）
+        assert_eq!(args.database, DEFAULT_DATABASE);
 
         let cli = parse(&[
             "qtrading-pg-sidecar",
@@ -227,6 +240,42 @@ mod tests {
         };
         assert_eq!(args.input, PathBuf::from("/b/x.dump"));
         assert_eq!(args.target_data_dir, Some(PathBuf::from("/d2")));
+        assert_eq!(args.database, DEFAULT_DATABASE);
+    }
+
+    #[test]
+    fn dump_restore_database_override() {
+        let cli = parse(&[
+            "qtrading-pg-sidecar",
+            "dump",
+            "--data-dir",
+            "/d",
+            "--output",
+            "/b/x.dump",
+            "--database",
+            "stock_db",
+        ])
+        .unwrap();
+        let Command::Dump(args) = cli.command else {
+            panic!("expect dump")
+        };
+        assert_eq!(args.database, "stock_db");
+
+        let cli = parse(&[
+            "qtrading-pg-sidecar",
+            "restore",
+            "--data-dir",
+            "/d",
+            "--input",
+            "/b/x.dump",
+            "--database",
+            "stock_db",
+        ])
+        .unwrap();
+        let Command::Restore(args) = cli.command else {
+            panic!("expect restore")
+        };
+        assert_eq!(args.database, "stock_db");
     }
 
     #[test]
