@@ -1177,6 +1177,7 @@
     "health_score_desc": "Data Availability & Consistency",
     "health_scan_title": "Deep Health Scan",
     "health_scan_desc": "Scanning {current}/{total} stocks...",
+    "health_scan_failed": "Deep scan failed. Please retry later or check logs.",
     "health_btn_deep_scan": "Deep Scan",
     "health_btn_sync_now": "Sync Now",
     "scan_btn_init_data": "Initialize Data",
