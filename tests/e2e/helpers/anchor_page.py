@@ -707,8 +707,32 @@ class AnchorPage:
         #    snackbar/状态断言全部超时。先空等 2s 正常收合；未收合则重定位选项
         #    重试点击（interact+confirm 模式，见 canvaskit-rendering-e2e-guide 坑点 6
         #    步骤级重试），耗尽仍不收合即抛明确错误，不静默吞。
+        #    收合判据以 Dropdown identifier 节点的 ``aria-expanded`` 为权威信号：选项
+        #    语义节点在收合动画/重渲染后仍可能短暂 visible（CI run 41044829654 实证
+        #    点击后 4ms ``is_visible`` 仍为 True，而 ``aria-expanded`` 已在 277ms 内翻转
+        #    false）。只看 ``is_visible`` 会把已成功落地的选择判为「未收合」，进而在
+        #    已收合菜单上重定位到下拉当前值残留节点（bbox 为 None）并滚轮空转整个页面，
+        #    误报 never within。读到 None（identifier 节点瞬时缺失）才回退 ``is_visible``；
+        #    读态抛错按 fail-closed 视为「未收合」继续轮询，避免评估失败被当成已收合静默返回。
+        async def _menu_closed() -> bool:
+            try:
+                expanded = await self._read_expanded_by_identifier(eid_str)
+            except Exception:  # noqa: BLE001  # 页面/上下文失效: fail-closed, 交由重试耗尽后显式抛错
+                return False
+            if expanded is not None:
+                return expanded != "true"
+            try:
+                return not await option_element.is_visible()
+            except Exception:  # noqa: BLE001  # 句柄随菜单卸载失效 → 视为已收合
+                return True
+
         async def _interact() -> None:
             nonlocal option_element
+            if await _menu_closed():
+                # 菜单已收合即选择已落地：此时重定位到的只会是下拉当前值等残留节点
+                # （bounding_box 为 None），再滚轮只会空转整个页面（CI run 41044829654
+                # 实证 37 次 wheel 空转 5.3s 后误报 never within）。
+                return
             fresh_elem = await self._find_option_element(option_text, eid_str)
             if fresh_elem:
                 option_element = fresh_elem
@@ -717,19 +741,17 @@ class AnchorPage:
             option_element = await self._scroll_menu_option_into_view(option_element, option_text, eid_str, timeout_ms)
             await option_element.click(force=True)
 
-        async def _menu_closed() -> bool:
-            try:
-                return not await option_element.is_visible()
-            except Exception:
-                return True
-
+        # do-while：期限只在「等待之后」判定。CI 高负载下单次 ``wait_for_timeout(100)``
+        # 实测耗时 2.17s（CI run 41044829654）；若按 while 条件先判期限，首轮检查落空
+        # 后直接跳 retry，已收合的菜单再无被确认的机会。
         settle_deadline = time.monotonic() + 2.0
-        while time.monotonic() < settle_deadline:
+        while True:
             if await _menu_closed():
+                return
+            if time.monotonic() >= settle_deadline:
                 break
             await self.page.wait_for_timeout(100)
-        else:
-            await retry_until_triggered(_interact, _menu_closed, attempts=3, interval_ms=400)
+        await retry_until_triggered(_interact, _menu_closed, attempts=3, interval_ms=400)
 
     # ----------------------------------------------------------------
     # 断言与探测: expect_visible/expect_hidden/count/is_checked

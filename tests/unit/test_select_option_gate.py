@@ -3,10 +3,12 @@
 验证核心逻辑：菜单关闭时预探测不得执行（避免全页面文本匹配误命中结果表表头
 「代码」→ 菜单从不打开 → 点击落空），必须走展开流程；菜单已展开时才允许预探测。
 
-覆盖三种分支：
+覆盖分支：
 1. 菜单关闭 → 走展开流程（`_identifier_node_box` 被调用），预探测不短路展开。
 2. 菜单已展开 → 预探测命中选项（`_identifier_node_box` 不被调用）。
 3. 展开流程先 `scroll_into_view` 再取 bbox（避免视口外坐标点击被静默丢弃）。
+4. 收合判据以 `aria-expanded` 为权威：选项节点仍 visible 也算已收合（不重试、不滚轮）。
+5. 进入 retry 时菜单已收合 → `_interact` 守卫直接返回（不重复点击、不滚轮空转）。
 
 identifier 是唯一定位通道：展开态读取与顶层节点定位均走 identifier
 （`_read_expanded_by_identifier` / `_identifier_node_box`），无 legacy 分支。
@@ -20,6 +22,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.e2e.helpers import anchor_page
 from tests.e2e.helpers.anchor_page import AnchorPage
 from ui.testing.e2e_ids import AnchorKind
 
@@ -27,17 +30,32 @@ _FILTER_COL_DROPDOWN: tuple[str, AnchorKind] = ("e2e.data.filter_col_dropdown", 
 
 
 class _FakeHandle:
-    """模拟 ElementHandle：click 后模拟 on_select 触发 → 菜单收合。"""
+    """模拟 ElementHandle：click 后模拟 on_select 触发 → 菜单收合。
 
-    def __init__(self, panel_box: dict[str, float] | None = None) -> None:
+    ``collapse_on_click=False`` 模拟真实 Flet 行为：选择已落地、``aria-expanded`` 已翻转
+    false，但选项语义节点在收合动画中仍短暂 visible（CI run 41044829654 实证）。
+    """
+
+    def __init__(
+        self,
+        panel_box: dict[str, float] | None = None,
+        *,
+        collapse_on_click: bool = True,
+    ) -> None:
         self._visible = True
         self.panel_box = panel_box
+        self.collapse_on_click = collapse_on_click
+        self.clicks = 0
+        self.visible_calls = 0
 
     async def click(self, force: bool = False) -> None:
         # 选择落地 → Material Dropdown 收合，选项节点不可见/移除
-        self._visible = False
+        self.clicks += 1
+        if self.collapse_on_click:
+            self._visible = False
 
     async def is_visible(self) -> bool:
+        self.visible_calls += 1
         return self._visible
 
     async def bounding_box(self) -> dict[str, float]:
@@ -53,9 +71,29 @@ class _FakeHandle:
 class _FakeMouse:
     def __init__(self) -> None:
         self.clicks: list[tuple[float, float]] = []
+        self.moves: list[tuple[float, float]] = []
+        self.wheels: list[tuple[float, float]] = []
 
     async def click(self, x: float, y: float) -> None:
         self.clicks.append((x, y))
+
+    async def move(self, x: float, y: float) -> None:
+        self.moves.append((x, y))
+
+    async def wheel(self, dx: float, dy: float) -> None:
+        self.wheels.append((dx, dy))
+
+
+class _FakeClock:
+    """单调时钟 stub：每次读取前进固定步长，确定性复现「慢 wait 吞掉空等期限」。"""
+
+    def __init__(self, step: float) -> None:
+        self._now = 0.0
+        self._step = step
+
+    def monotonic(self) -> float:
+        self._now += self._step
+        return self._now
 
 
 class _FakeKeyboard:
@@ -95,8 +133,17 @@ def ap() -> AnchorPage:
 
 
 def _stub_expanded(ap: AnchorPage, values: list[str | None]) -> None:
-    """展开态读取打桩（identifier 是唯一定位通道 → `_read_expanded_by_identifier`）。"""
-    ap._read_expanded_by_identifier = AsyncMock(side_effect=values)
+    """展开态读取打桩（identifier 是唯一定位通道 → `_read_expanded_by_identifier`）。
+
+    收合确认会轮询读取展开态，末值长期复用，避免序列耗尽后抛 ``StopIteration``。
+    """
+    remaining = iter(values)
+    tail = values[-1]
+
+    async def _read(_eid_str: str) -> str | None:
+        return next(remaining, tail)
+
+    ap._read_expanded_by_identifier = _read  # type: ignore[method-assign]
 
 
 def _expand_locator_mock(ap: AnchorPage) -> AsyncMock:
@@ -142,7 +189,7 @@ async def test_select_option_menu_closed_goes_expand_path(ap: AnchorPage) -> Non
 async def test_select_option_menu_already_open_uses_preselect(ap: AnchorPage) -> None:
     """菜单已展开（expanded 读取为 "true"）→ 预探测命中选项，不再重复展开。"""
     handle = _FakeHandle()
-    _stub_expanded(ap, ["true", "true"])
+    _stub_expanded(ap, ["true", "true", "false"])
     ap._find_option_element = AsyncMock(return_value=handle)
     ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
     await ap.select_option(_FILTER_COL_DROPDOWN, "代码", timeout_ms=1000)
@@ -186,3 +233,51 @@ async def test_select_option_scrolls_into_view_before_click(ap: AnchorPage) -> N
     assert events[:2] == ["scroll", "box"]
     assert ap.page.mouse.clicks, "滚入视口后必须发生展开点击"
     assert not handle._visible
+
+
+@pytest.mark.asyncio
+async def test_select_option_confirms_collapse_by_aria_expanded(ap: AnchorPage) -> None:
+    """收合判据以 ``aria-expanded`` 为权威：选项节点仍 visible 也必须判为已收合。
+
+    回归（CI run 41044829654）：点击选项后 4ms 选项语义节点仍 visible（收合动画未卸载），
+    旧判据 ``not is_visible()`` 判未收合 → 误入 retry → 在已收合菜单上重定位到下拉当前值
+    残留节点（bbox 为 None）→ 滚轮以视口中心为锚点空转整页 → 误报 never within。
+    """
+    handle = _FakeHandle(collapse_on_click=False)
+    # 展开前 None、展开后 None、收合确认读到 false（选项节点仍 visible）
+    _stub_expanded(ap, [None, None, "false"])
+    ap._find_option_element = AsyncMock(return_value=handle)
+    ap.scroll_into_view = AsyncMock()
+    ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
+
+    await ap.select_option(_FILTER_COL_DROPDOWN, "代码", timeout_ms=1000)
+
+    assert handle.clicks == 1, "选择只应点击一次"
+    assert handle.visible_calls == 0, "展开态可读时不得回退 is_visible 判据"
+    assert ap.page.mouse.wheels == [], "已收合菜单不得滚轮空转"
+
+
+@pytest.mark.asyncio
+async def test_select_option_retry_guard_skips_click_when_menu_collapsed(
+    ap: AnchorPage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """进入 retry 时菜单已收合 → ``_interact`` 守卫直接返回，不重定位、不点击、不滚轮。
+
+    回归（CI run 41044829654）：CI 单次 ``wait_for_timeout(100)`` 实测 2.17s 吞掉空等期限，
+    空等首查落空后进 retry；retry 的 ``_interact`` 在已收合菜单上重定位到下拉当前值残留
+    节点，随后 wheel 空转 37 次（5.3s）后误报 never within。
+    """
+    handle = _FakeHandle(collapse_on_click=False)
+    # 展开前/后 None；空等首查仍 true、慢 wait 后仍 true → 期限耗尽进 retry；retry 读到 false
+    _stub_expanded(ap, [None, None, "true", "true", "false", "false"])
+    ap._find_option_element = AsyncMock(return_value=handle)
+    ap.scroll_into_view = AsyncMock()
+    ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
+    # 单调时钟每次读取前进 1.5s：timeout 放大到 3000ms 使展开轮询窗口（2s）容得下步进，
+    # 空等窗口（2s）则在两轮内确定耗尽，测试不实等
+    monkeypatch.setattr(anchor_page, "time", _FakeClock(step=1.5))
+
+    await ap.select_option(_FILTER_COL_DROPDOWN, "代码", timeout_ms=3000)
+
+    assert handle.clicks == 1, "菜单已收合时 retry 守卫不得重复点击"
+    assert ap.page.mouse.wheels == [], "菜单已收合时不得进入 C8 滚轮"
