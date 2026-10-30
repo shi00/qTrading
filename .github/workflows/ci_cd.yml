@@ -356,6 +356,10 @@ jobs:
     needs: [lint-fast, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
+    # 依赖安装缓存：uv 构建缓存重定向到 D:（146GB），避免占用 C:；
+    # 由下方 actions/cache 显式缓存（setup-uv 自带缓存与磁盘清理步骤冲突）。
+    env:
+      UV_CACHE_DIR: D:\tmp\uv-cache
     # 性能优化：拆成 4 个 matrix 组并行，按会话池分组，让每个 job 只懒实例化本组需要的
     # session 池（ro / mut / wizard / embedded_real_* / fullmount / news_risk_*），
     # 避免单 job 串行初始化全部 8 个 sidecar + PG 池。
@@ -417,13 +421,20 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
-          # e2e-tests-windows 在 "Free disk space" 步骤主动调用 `uv cache clean`
-          # 释放 C 盘空间（run 29655213301/30058650851 触发）；若启用 uv 本地缓存，
-          # post-job 会执行 `uv cache prune --ci --force` 并因缓存目录已被删除而报错
-          # "Cache path D:\a\_temp\setup-uv-cache does not exist on disk"。
-          # 这些 job 对 uv 缓存是一次性消费，禁用即可消除 post-job 失败；
-          # pip 缓存仍由 actions/setup-python 提供。
+          # 保留禁用 setup-uv 自带缓存：其 post-job 会执行 `uv cache prune --ci --force`，
+          # 曾因缓存目录被 "Free disk space" 步骤删除而报错
+          # "Cache path D:\a\_temp\setup-uv-cache does not exist on disk"（run 29655213301/30058650851）。
+          # 改用下方 "Cache uv build cache" 通过 actions/cache 显式缓存 UV_CACHE_DIR（D: 盘），
+          # 命中后 llama-cpp-python 等 cp314 源码构建产物直接复用，免去每次重新构建。
           enable-cache: false
+
+      - name: Cache uv build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: D:\tmp\uv-cache
+          key: uv-windows-py314-${{ hashFiles('requirements.txt', 'requirements-optional.txt', 'requirements-dev.txt') }}
+          restore-keys: |
+            uv-windows-py314-
 
       - name: Install dependencies
         run: |
@@ -445,10 +456,8 @@ jobs:
         run: |
           # Clean caches to release space on C: drive (same fix as ci-checks-windows job).
           # Run 30058650851: C: had 32GB free, filled up at 87% unit tests.
-          Write-Host "=== Disk space before cleanup ==="
-          Get-PSDrive -Name C, D -ErrorAction SilentlyContinue | Format-Table Name, @{L='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{L='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
-
-          uv cache clean
+          # 不执行 `uv cache clean`：uv 缓存已重定向到 D:\tmp\uv-cache 并交给 actions/cache 复用，
+          # 清理会使缓存失效（post-job 保存落空）。
           pip cache purge 2>$null
           Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
@@ -574,6 +583,8 @@ jobs:
     needs: [lint-fast, changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
+    env:
+      UV_CACHE_DIR: D:\tmp\uv-cache
     timeout-minutes: 45
     permissions:
       contents: read
@@ -595,10 +606,18 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
-          # 同 e2e-tests-windows：ci-checks-windows 在 "Free disk space" 步骤
-          # 主动 `uv cache clean`（litellm/llama-cpp-python build artifacts 大），
-          # 禁用 uv 本地缓存以避免 post-job `uv cache prune --ci --force` 报错。
+          # 同 e2e-tests-windows：保留禁用 setup-uv 自带缓存（其 post-job prune 与磁盘清理
+          # 步骤冲突，曾报 "Cache path ... does not exist on disk"）；改用下方 actions/cache
+          # 显式缓存 UV_CACHE_DIR（D: 盘），复用 llama-cpp-python/litellm 构建产物。
           enable-cache: false
+
+      - name: Cache uv build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: D:\tmp\uv-cache
+          key: uv-windows-py314-${{ hashFiles('requirements.txt', 'requirements-optional.txt', 'requirements-dev.txt') }}
+          restore-keys: |
+            uv-windows-py314-
 
       - name: Install dependencies
         shell: bash
@@ -618,8 +637,8 @@ jobs:
           Write-Host "=== Disk space before cleanup ==="
           Get-PSDrive -Name C, D -ErrorAction SilentlyContinue | Format-Table Name, @{L='Used(GB)';E={[math]::Round($_.Used/1GB,2)}}, @{L='Free(GB)';E={[math]::Round($_.Free/1GB,2)}}
 
-          # 1. uv cache (litellm/llama-cpp-python build artifacts)
-          uv cache clean
+          # 1. uv 缓存已重定向到 D:\tmp\uv-cache 并由 actions/cache 复用，此处不再清理
+          #    （清理会使缓存失效，post-job 保存落空）。
 
           # 2. pip cache (downloaded wheels)
           pip cache purge 2>$null
