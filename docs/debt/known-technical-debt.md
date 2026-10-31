@@ -410,7 +410,7 @@ D4.1/D4.2（Polars 1.44.2→2.1.0，2026-10）盘点结论：全仓 18 个生产
 
 **产生背景与现状**
 
-M4 模块化检视发现：`data/persistence/db_migrator.py:156-160`（`_heal_orphaned_revision` 方法定义见 `:149-162`）的 docstring 明确「严格线性单链迁移策略」，「未来引入多分支需重新评估」。当前 41 个迁移（0001\~0041）均为单链（2026-10-25 核实：单 head 0041、单根、无多父），假设成立。未来若引入 Alembic 多分支（Multiple Heads），「直接拨回 head」逻辑可能导致 schema 漂移。属于已文档化的设计限制，本次 M4 仅补登记到债表以跨检视周期追溯。相关文件：`data/persistence/db_migrator.py:149-160`、`alembic/versions/0001~0041`。
+M4 模块化检视发现：`data/persistence/db_migrator.py:156-160`（`_heal_orphaned_revision` 方法定义见 `:149-162`）的 docstring 明确「严格线性单链迁移策略」，「未来引入多分支需重新评估」。当前 44 个迁移（0001\~0044）均为单链（2026-10-31 核实：单 head 0044、单根、无多父），假设成立。未来若引入 Alembic 多分支（Multiple Heads），「直接拨回 head」逻辑可能导致 schema 漂移。属于已文档化的设计限制，本次 M4 仅补登记到债表以跨检视周期追溯。相关文件：`data/persistence/db_migrator.py:149-160`、`alembic/versions/0001~0044`。
 
 **期望的最终解法**
 
