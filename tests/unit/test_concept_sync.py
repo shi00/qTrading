@@ -4,7 +4,7 @@ import contextlib
 
 import pandas as pd
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from data.external.akshare_concept_client import AkshareConceptClient
 from data.external.tushare_client import TushareAPIPermissionError
@@ -277,7 +277,9 @@ class TestAKShareConceptSync:
         client.get_concept_constituents = AsyncMock(side_effect=_flaky_constituents)
 
         strategy = AKShareConceptSyncStrategy(ctx)
-        result = await strategy.run()
+        # 重试退避（1s/2s）用真实 asyncio.sleep 会让单测白等约 3s；用 AsyncMock 跳过等待。
+        with patch("data.sync.concept_sync.asyncio.sleep", new_callable=AsyncMock):
+            result = await strategy.run()
 
         assert result.status in (SyncStatus.PARTIAL.value, SyncStatus.SUCCESS.value)
         assert len(result.errors) > 0 or result.warnings
