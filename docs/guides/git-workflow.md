@@ -94,7 +94,7 @@ gh pr create --title "feat(strategy): add MACD crossover" \
 cd ../..  # 回主仓库根
 git worktree remove .worktrees/feature-strategy-macd
 git worktree prune
-git branch -d feature/strategy-macd       # Squash Merge 后本地分支可删
+git branch -D feature/strategy-macd       # Squash Merge 后提交不在 main 祖先链，须用 -D 强制删除
 ```
 
 ### AI 助手创建 PR 标准流程（强制）
