@@ -332,6 +332,22 @@ class TestStartStop:
         assert svc._last_news_content is None
 
     @pytest.mark.asyncio
+    async def test_stop_async_stops_poll_task(self, svc):
+        """stop_async 必须取消轮询协程。
+
+        旧实现仅置 _running=False，_poll_loop 在 sleep 结束后才复查——若随后
+        start()，旧协程会看到 _running 重新为 True 而复活，与新会话形成双轮询。
+        """
+        await svc.start()
+        poll_task = svc._poll_task
+        assert poll_task is not None
+
+        await svc.stop_async(drain_timeout=0.5)
+
+        assert svc._poll_task is None
+        assert poll_task.done()
+
+    @pytest.mark.asyncio
     async def test_stop_async_drain_timeout(self, svc, caplog):
         """processing_queue.join 超时时应记录 warning 而非崩溃。"""
         import logging
@@ -482,6 +498,35 @@ class TestPollLoop:
         """_running=False 时 _poll_loop 应立即返回。"""
         svc._running = False
         await svc._poll_loop()
+
+    @pytest.mark.asyncio
+    async def test_poll_loop_skips_tick_while_fetch_in_flight(self, svc):
+        """上一次 fetch 未完成时不得并发创建新 fetch（防重复抓取/重复 AI 计费）。"""
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = {"n": 0}
+
+        async def slow_fetch():
+            calls["n"] += 1
+            started.set()
+            await release.wait()
+
+        svc._safe_fetch_task = slow_fetch
+        svc._running = True
+
+        with patch("services.news_subscription_service.ConfigHandler.get_config", return_value=0.02):
+            poll_task = asyncio.create_task(svc._poll_loop())
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            # 多个轮询周期后首个 fetch 仍阻塞，不应创建第二个 fetch 任务。
+            await asyncio.sleep(0.15)
+            assert calls["n"] == 1
+
+            release.set()
+            await asyncio.sleep(0.05)
+            svc._running = False
+            poll_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await poll_task
 
 
 class TestSafeFetchTask:
