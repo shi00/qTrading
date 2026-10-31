@@ -16,6 +16,7 @@ mock ``ModelConfigurationService``（非单例 DI），不触碰 ConfigHandler /
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -546,8 +547,11 @@ class TestRouteRoundtripFidelity:
         """草稿执行参数为只读映射：外部不得就地篡改 state 内可变容器（mvvm.md 契约）。"""
         draft = ScenarioRouteDraft("stock_analysis", execution_options={"temperature": 0.2})
         assert draft.execution_options == {"temperature": 0.2}  # 语义等价仍可比较
-        with pytest.raises(TypeError):
+        assert isinstance(draft.execution_options, MappingProxyType)  # 规范化后即只读视图
+        with pytest.raises(TypeError, match="does not support item assignment"):
             draft.execution_options["temperature"] = 0.9  # type: ignore[index]  # 只读映射写入应被拒绝
+        assert draft.execution_options["temperature"] == 0.2  # 被拒绝的写入未篡改原对象
+        assert dict(draft.execution_options) == {"temperature": 0.2}  # 整体内容未变化
 
 
 # --- risk binding / UI toggles ---
