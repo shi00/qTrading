@@ -7,7 +7,7 @@
 设计要点:
 - 复用 ``tests/unit/test_embedded_postgres_service.py::_MOCK_SIDECAR_PY`` 的跨平台包装器模式
   (Windows ``.bat`` / Unix ``.sh``，包装器调用 ``python -I`` 执行 Python 脚本)
-- 支持子命令分发: run/status/stop/doctor/dump/restore/maintenance-shell/version
+- 支持子命令分发: run/status/stop/doctor/dump/restore/maintenance-shell/reset-password/version
 - 环境变量控制失败注入: ``FAKE_SIDECAR_EXIT_CODE`` / ``FAKE_SIDECAR_READY_JSON``
   / ``FAKE_SIDECAR_TIMEZONE`` / ``FAKE_SIDECAR_RESTORE_FAIL``
 - ``run`` 子命令模拟 sidecar 长驻进程 (输出 ready JSON 后等 stdin EOF 退出)
@@ -166,6 +166,14 @@ def cmd_maintenance_shell(args):
     sys.exit(0)
 
 
+def cmd_reset_password(args):
+    # 真实 sidecar：reset-password 的 stdout 无机器协议输出（提示走 stderr），密码写入密码文件。
+    # fake 额外回显收到的 --username，仅用于断言 M23 的 --username 透传（真实 sidecar 无此输出）。
+    sys.stdout.write(json.dumps({"username": args.username}) + "\\n")
+    sys.stdout.flush()
+    sys.exit(0)
+
+
 _DISPATCH = {
     "run": cmd_run,
     "status": cmd_status,
@@ -175,6 +183,7 @@ _DISPATCH = {
     "dump": cmd_dump,
     "restore": cmd_restore,
     "maintenance-shell": cmd_maintenance_shell,
+    "reset-password": cmd_reset_password,
 }
 
 
