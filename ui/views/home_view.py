@@ -118,7 +118,11 @@ def HomeView(
         except RuntimeError:
             logger.debug("[HomeView] page not available for view_stock navigation")
 
-    async def _on_load_more_click(e: ft.ControlEvent) -> None:
+    async def _on_load_more_click() -> None:
+        """「加载更多」业务命令 (M12-028: 无参, 不接收 Flet ControlEvent).
+
+        Flet 按 handler 参数个数分发: 0 参 handler 不被注入事件 (锁定版本行为)。
+        """
         try:
             await vm.load_next_page()  # state 自动更新, 无需 View 持有快照
         except asyncio.CancelledError:
@@ -266,7 +270,7 @@ def HomeView(
                 NewsFeed(
                     news_rows=state.news_rows,
                     has_more=state.has_more_news,
-                    on_load_more_click=typing.cast("Callable[[ft.ControlEvent], None]", _on_load_more_click),
+                    on_load_more_click=_on_load_more_click,
                     on_view_stock=_on_view_stock,
                     valid_stock_codes=state.valid_stock_codes,
                     is_loading_more=state.is_loading_more,
