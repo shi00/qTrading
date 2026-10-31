@@ -4,6 +4,8 @@
 未同步时 Flet ``use_dialog`` 会在下一次重渲染时把对话框重新挂回 overlay。
 """
 
+from collections.abc import Callable
+from typing import cast
 from unittest.mock import MagicMock
 
 import flet as ft
@@ -17,6 +19,19 @@ from tests.unit.ui.component_renderer import (
 from ui.components.watchlist_add_dialog import WatchlistAddDialog
 
 pytestmark = pytest.mark.unit
+
+
+def _dismiss(dialog: ft.AlertDialog) -> None:
+    """按 Flet 真实 dismiss 事件（Esc / 关闭路径）触发 ``on_dismiss``。
+
+    ``AlertDialog.on_dismiss`` 的签名为 ``Callable[[], Any] |
+    Callable[[Event[DialogControl]], Any] | None``；pyright 对该可调用联合类型
+    按无参分支校验，故显式选取「带事件」分支并构造对话框自身发出的
+    ``Event[DialogControl]``，与运行时 Flet 的调用方式一致。
+    """
+    assert dialog.on_dismiss is not None
+    handler = cast(Callable[[ft.Event[ft.DialogControl]], None], dialog.on_dismiss)
+    handler(ft.Event[ft.DialogControl]("dismiss", dialog))
 
 
 def _mount(*, open_state: bool, is_submitting: bool = False, on_close=None):
@@ -38,8 +53,7 @@ class TestWatchlistAddDialogDismiss:
         component, page = _mount(open_state=True, on_close=on_close)
         dialog = page._dialogs.controls[-1]
         assert isinstance(dialog, ft.AlertDialog)
-        assert dialog.on_dismiss is not None
-        dialog.on_dismiss(None)
+        _dismiss(dialog)
         on_close.assert_called_once()
         run_unmount_effects(component)
 
@@ -48,7 +62,8 @@ class TestWatchlistAddDialogDismiss:
         on_close = MagicMock()
         component, page = _mount(open_state=True, is_submitting=True, on_close=on_close)
         dialog = page._dialogs.controls[-1]
-        dialog.on_dismiss(None)
+        assert isinstance(dialog, ft.AlertDialog)
+        _dismiss(dialog)
         on_close.assert_not_called()
         run_unmount_effects(component)
 
