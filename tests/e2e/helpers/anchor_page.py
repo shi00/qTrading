@@ -358,6 +358,14 @@ class AnchorPage:
         搜索：菜单角色 → 按钮(下拉选项) → 宽泛兜底；匹配优先级 精确 > 前缀别名 >
         ``(别名)`` 括号模式 > 裸子串。避免裸子串 ``"代码"`` 误命中页面导航/列头
         等无关文本（PR 585 E2E 失败根因，见 reviews/plans/2026-08-25-...）。
+
+        同文本解耦（CI run 41145284114）：选项文本可能与页面常驻元素完全相同（如
+        过滤列 ``ts_code (代码)`` 与结果表列头同名），仅按文本优先级仍会误命中文档序
+        更靠前的列头（bbox 与下拉触发器不在同一列），点击落空后菜单不收合。故候选
+        **优先**取与 Dropdown identifier 节点**左缘对齐**者：Material DropdownMenu 的
+        菜单面板与触发器左对齐，选项语义 rect 的 x 即面板 x（y 可能是列表内容坐标残留，
+        不能用作判据）；无对齐候选时退回纯文本优先（菜单为避让屏幕边缘水平偏移时，
+        真实选项并不与触发器左对齐，不能硬过滤成"找不到"）。
         """
         option_handle = await self.page.evaluate_handle(
             r"""(args) => {
@@ -372,20 +380,37 @@ class AnchorPage:
                     if (t.includes(normText)) return 4;
                     return 0;
                 };
+                // 同文本解耦：菜单面板与触发器左对齐（Material DropdownMenu 锚定规则），
+                // 页面其他同文本元素（结果表列头等）通常不在该列 → 优先选左缘对齐的
+                // 候选；无对齐候选时退回纯文本优先（兼容菜单为避让屏幕边缘的水平偏移）。
+                const anchor = dropdownEid
+                    ? document.querySelector('flt-semantics[flt-semantics-identifier="' + dropdownEid + '"]')
+                    : null;
+                const anchorRect = anchor ? anchor.getBoundingClientRect() : null;
+                const anchorTol = anchorRect ? Math.max(24, anchorRect.width * 0.25) : 0;
+                const nearAnchor = (e) => {
+                    if (!anchorRect || anchorRect.width <= 0) return true;
+                    const r = e.getBoundingClientRect();
+                    return Math.abs(r.left - anchorRect.left) <= anchorTol;
+                };
                 // 候选组按优先级：菜单角色 → 按钮(下拉选项) → 宽泛兜底
                 const groups = [
                     'flt-semantics[role="option"], flt-semantics[role="menuitem"]',
                     'flt-semantics[role="button"]:not([aria-expanded])',
                     'flt-semantics:not([aria-expanded])',
                 ];
-                for (const sel of groups) {
-                    const els = Array.from(document.querySelectorAll(sel)).filter(isVisible).filter(notSelf);
-                    for (let prio = 1; prio <= 4; prio++) {
-                        const hit = els.find(e => matchPrio((e.textContent||'').trim()) === prio);
-                        if (hit) return hit;
+                const candidates = groups.map((sel) =>
+                    Array.from(document.querySelectorAll(sel)).filter(isVisible).filter(notSelf));
+                const pick = (lists) => {
+                    for (const els of lists) {
+                        for (let prio = 1; prio <= 4; prio++) {
+                            const hit = els.find(e => matchPrio((e.textContent||'').trim()) === prio);
+                            if (hit) return hit;
+                        }
                     }
-                }
-                return null;
+                    return null;
+                };
+                return pick(candidates.map((els) => els.filter(nearAnchor))) || pick(candidates);
             }""",
             {"text": option_text, "dropdownEid": eid_str},
         )
@@ -564,6 +589,57 @@ class AnchorPage:
                 return True, True
         return False, True
 
+    async def _verified_option_box(self, option_element: Any) -> dict[str, float] | None:
+        """回落坐标点击前的 C8 复校验：返回可点击 bbox，不可点击返回 None。
+
+        回落路径会重新读取 bbox（而非复用滚动前已验证的坐标），若这几毫秒内菜单重渲染，
+        选项语义 rect 可能已变成列表内容坐标残留（落在面板外）。直接按该坐标点击会命中
+        渲染在该坐标的其他元素（C8 同型事故：误选相邻项/关菜单），故必须重新过
+        「可点区域 = 菜单面板 ∩ 视口」门。面板探针失败（句柄随重渲染失效）按 fail-closed
+        返回 None，不退回视口判据静默点击。
+        """
+        raw_box = await option_element.bounding_box()
+        if not raw_box or raw_box["width"] <= 0 or raw_box["height"] <= 0:
+            return None
+        box = _as_box(raw_box)
+        viewport = self.page.viewport_size
+        if not viewport:
+            return box
+        vw = float(viewport["width"])
+        vh = float(viewport["height"])
+        panel_box, probe_ok = await self._find_menu_panel_box(option_element, box["height"])
+        if not probe_ok:
+            return None
+        region = _clip_to_viewport(panel_box, vw, vh) if panel_box else {"x": 0.0, "y": 0.0, "width": vw, "height": vh}
+        if region["width"] <= 0 or region["height"] <= 0 or not _box_contains(region, box, margin=2.0):
+            return None
+        return box
+
+    async def _click_option(self, option_element: Any) -> None:
+        """点击下拉选项：``ElementHandle.click`` 主路径 + ``not visible`` 回落物理鼠标。
+
+        CanvasKit 语义节点的 ``ElementHandle.click(force=True)`` 仍可能抛
+        ``Element is not visible``（CI run 41145284114 实证：选项 bbox 有效、菜单面板
+        亦有效，但 Playwright 对该节点的可见性判定不可靠）。此时按 bbox 中心改投
+        ``page.mouse.click``（真实指针事件，CanvasKit 直接响应），与 ``AnchorPage.click``
+        的坐标点击一致。但回落前必须重新过 C8 可点区域门（见 ``_verified_option_box``）；
+        复校验失败即显式抛错（交由调用方重定位/重试），绝不静默点击面板外坐标。
+        其余异常原样抛出，不掩盖。
+        """
+        try:
+            await option_element.click(force=True)
+            return
+        except Exception as click_err:  # noqa: BLE001  # 仅识别 not visible 回落，其余原样抛出
+            if "not visible" not in str(click_err).lower():
+                raise
+        box = await self._verified_option_box(option_element)
+        if box is None:
+            raise RuntimeError(
+                "AnchorPage.select_option: option bbox not clickable after ElementHandle.click "
+                "failed with 'not visible' (C8 panel re-validation failed)"
+            )
+        await self.page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+
     async def select_option(
         self,
         dropdown_eid: Eid,
@@ -577,11 +653,19 @@ class AnchorPage:
         剩余风险: 同视图两个 Dropdown 出现同名选项 - EIDS 命名规范强制唯一.
 
         PR-478 修复 (4 个复合缺陷, 见 reviews/问题定位.md):
-        - C1: 主动 poll ``aria-expanded="true"``, 未展开立即抛错
-              ``dropdown did not expand``, 不再静默等待选项 20s.
-        - C2: 选项点击用 ``page.mouse.click(cx, cy)`` 坐标点击, 与
-              ``AnchorPage.click`` 一致, 绕开 CanvasKit ``flt-semantics`` 上
-              不稳定的 actionability 检查.
+        - C1: 展开路径搜索选项候选前必须确认菜单已展开（``aria-expanded="true"``；
+              瞬时不可读 ``None`` 视为待确认并继续轮询），明确读到 ``"false"`` 时
+              **不接受任何候选**。否则展开点击被 CanvasKit 吞掉（菜单仍关闭）时，
+              全页面文本匹配会误命中同文本的表头等常驻元素 → 点击表头 →
+              ``aria-expanded`` 保持 false → 收合确认判「已收合」→ **静默假成功**
+              （C5 门控盲区）。窗口耗尽仍无「确认展开」的候选即走后续策略，最终抛
+              ``option not found``，不再静默等待选项 20s。
+        - C2: 选项点击先试 ``ElementHandle.click(force=True)``；仅当其抛
+              ``Element is not visible`` 时回落到 ``page.mouse.click(bbox 中心)``
+              坐标点击（真实指针事件，与 ``AnchorPage.click`` 一致），绕开 CanvasKit
+              ``flt-semantics`` 节点上不可靠的可见性判定（CI run 41145284114 实证）。
+              回落前重新过 C8 可点区域门（``_verified_option_box``）：bbox 已漂到
+              面板外或面板探针失败即抛错，不静默点击面板外坐标。
         - C3: 选项定位用精确文本匹配 (等值 / 空格 / ``(`` / ``\\n`` 分隔) 取代
               ``filter(has_text=...)`` 子串匹配, 避免短文本 (如"代码") 误命中.
         - C4: 展开前若残留 ``aria-expanded="true"`` 按 ``Escape`` 先收合, 避免
@@ -592,6 +676,11 @@ class AnchorPage:
               先展开再搜索. 选项搜索用**候选组优先级** (菜单角色 → role=button
               下拉选项 → 宽泛兜底) + **匹配优先级** (精确 > 前缀别名 > "(别名)"
               括号模式 > 裸子串), 避免裸子串误命中页面无关文本.
+        - C5+ (CI run 41145284114 同文本解耦): 选项文本可能与页面常驻元素完全相同
+              (过滤列 ``ts_code (代码)`` 与结果表列头同名). 候选优先取与 Dropdown
+              identifier 节点**左缘对齐**者 (Material DropdownMenu 菜单面板与触发器
+              左对齐), 无对齐候选时退回纯文本优先; 菜单已展开但暂无对齐候选时短轮询
+              2s, 不进入展开路径 (二次点击会关闭已开菜单).
         - C6 (视口外点击静默丢弃): 展开前先 ``scroll_into_view`` 把 Dropdown 滚入
               视口再取 bbox 点击. MAJOR-08 将日志级别等技术参数收敛进默认折叠的
               「高级（开发者）」分组后, 展开分组会把 Dropdown 推到视口下方; Playwright
@@ -632,8 +721,32 @@ class AnchorPage:
         #    导致菜单从未打开、点击落空（PR 585 E2E 失败根因）。故关闭态一律走展开流程。
         menu_expanded = await self._read_expanded_by_identifier(eid_str)
         # Any: 后续闭包 (_interact/_menu_closed) 经 nonlocal 捕获，此处显式声明避免
-        # pyright 在捕获点对 `else None` 分支报 Optional 成员访问 (reportOptionalMemberAccess)
-        option_element: Any = await self._find_option_element(option_text, eid_str) if menu_expanded == "true" else None
+        # pyright 在捕获点对 Optional 成员访问报 reportOptionalMemberAccess
+        option_element: Any = None
+
+        async def _poll_option_while_open(window_s: float) -> Any:
+            """C1: 仅在菜单确认展开时才搜索选项候选（详见 docstring C1）。
+
+            ``aria-expanded`` 瞬时不可读（``None``，重渲染窗口）视为待确认，继续搜索；
+            明确读到 ``"false"`` 则**不接受任何候选**，只等展开窗口耗尽——否则关闭态
+            全页面文本匹配会误命中同文本表头并静默假成功。
+            """
+            deadline = time.monotonic() + window_s
+            while True:
+                expanded = await self._read_expanded_by_identifier(eid_str)
+                if expanded in (None, "true"):
+                    found = await self._find_option_element(option_text, eid_str)
+                    if found:
+                        return found
+                if time.monotonic() >= deadline:
+                    return None
+                await self.page.wait_for_timeout(100)
+
+        if menu_expanded == "true":
+            # 菜单已展开，但选项节点可能仍在生成/重渲染（同文本解耦过滤后可能短暂
+            # 无对齐候选）→ 短轮询最多 2s 再判定。若此时直接走展开路径，二次点击会把
+            # 已打开的菜单点关，整个选择必然失败。
+            option_element = await _poll_option_while_open(min(self._tm(timeout_ms) / 1000, 2.0))
         if not option_element:
             # 展开前先把 Dropdown 滚入视口，再取 bbox。
             # MAJOR-08 将日志级别等技术参数收敛进默认折叠的「高级（开发者）」分组后，
@@ -650,13 +763,8 @@ class AnchorPage:
             arrow_y = box["y"] + box["height"] / 2
             await self.page.mouse.click(arrow_x, arrow_y)
 
-            # 短轮询等待选项出现（最多等待 2s）
-            quick_deadline = time.monotonic() + min(self._tm(timeout_ms) / 1000, 2.0)
-            while time.monotonic() < quick_deadline:
-                option_element = await self._find_option_element(option_text, eid_str)
-                if option_element:
-                    break
-                await self.page.wait_for_timeout(100)
+            # C1: 展开点击后先确认菜单真的展开再搜索候选（否则可能误命中同文本表头）。
+            option_element = await _poll_option_while_open(min(self._tm(timeout_ms) / 1000, 2.0))
 
             # 策略 B: 若未出现，点击中心并按 ArrowDown 强制唤起下拉
             if not option_element:
@@ -665,12 +773,7 @@ class AnchorPage:
                 await self.page.mouse.click(cx, cy)
                 await self.page.keyboard.press("ArrowDown")
 
-                expand_deadline = time.monotonic() + self._tm(timeout_ms) / 1000
-                while time.monotonic() < expand_deadline:
-                    option_element = await self._find_option_element(option_text, eid_str)
-                    if option_element:
-                        break
-                    await self.page.wait_for_timeout(100)
+                option_element = await _poll_option_while_open(self._tm(timeout_ms) / 1000)
 
         if not option_element:
             raise RuntimeError(
@@ -684,10 +787,11 @@ class AnchorPage:
         #     以返回的最新句柄继续。
         option_element = await self._scroll_menu_option_into_view(option_element, option_text, eid_str, timeout_ms)
 
-        # 2. 用 force=True 强力点击选项，在 ElementHandle 被 DOM 卸载时重新获取
+        # 2. 点击选项（ElementHandle 主路径；not visible 回落物理鼠标坐标点击），
+        #    在 ElementHandle 被 DOM 卸载时重新获取
         for click_attempt in range(3):
             try:
-                await option_element.click(force=True)
+                await self._click_option(option_element)
                 break
             except Exception as click_err:
                 if click_attempt < 2 and "not attached" in str(click_err).lower():
@@ -739,7 +843,7 @@ class AnchorPage:
             # 重试面对的是重渲染后的菜单：残留 rect 必须重新过 C8 门再点击，否则
             # force 点击面板外坐标会命中渲染在该坐标的其他元素（误选相邻项）。
             option_element = await self._scroll_menu_option_into_view(option_element, option_text, eid_str, timeout_ms)
-            await option_element.click(force=True)
+            await self._click_option(option_element)
 
         # do-while：期限只在「等待之后」判定。CI 高负载下单次 ``wait_for_timeout(100)``
         # 实测耗时 2.17s（CI run 41044829654）；若按 while 条件先判期限，首轮检查落空
