@@ -7,7 +7,8 @@
 
 约束：仅 import data 层版本解析辅助（resolve_pg_major_version，动态解析 PG 主版本）；
 其余仅用 stdlib + DB 驱动 + alembic。
-用法：python scripts/verify_embedded_pg_connect.py --sidecar <sidecar.exe> --work-dir <tmp_dir>
+用法（推荐，须在仓库根执行）：python -m scripts.verify_embedded_pg_connect --sidecar <sidecar.exe> --work-dir <tmp_dir>
+兼容直跑：python scripts/verify_embedded_pg_connect.py --sidecar <sidecar.exe> --work-dir <tmp_dir>
 退出码：0 全部通过；1 任一步骤失败。
 """
 
@@ -23,11 +24,14 @@ import threading
 import time
 from pathlib import Path
 
-# 使仓库根可 import：脚本经 `python scripts/verify_embedded_pg_connect.py` 直接运行时
-# sys.path[0] 指向 scripts/，data 包不在可导入路径上
+# 使仓库根可 import：仅 `python scripts/verify_embedded_pg_connect.py` 直跑时 sys.path[0]
+# 指向 scripts/，data 包不在可导入路径上；`python -m scripts.verify_embedded_pg_connect`
+# 时 __package__ == "scripts"，cwd（仓库根）已在 sys.path，无需注入
+# （技术债 P3-PR513-Script-SysPath-Inject）。
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+if __package__ in (None, ""):
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
 
 from data.persistence.embedded_postgres.version import resolve_pg_major_version
 
@@ -147,7 +151,9 @@ def step_dump_restore(install_dir: Path, url: str, work_dir: Path) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    # 固定 prog：Python 3.14 起 argparse 对 `python -m` 调用默认展示
+    # `python -m scripts.verify_embedded_pg_connect`，显式指定使两路运行模式 usage 一致
+    parser = argparse.ArgumentParser(prog="verify_embedded_pg_connect.py")
     parser.add_argument("--sidecar", required=True, type=Path)
     parser.add_argument("--work-dir", required=True, type=Path)
     args = parser.parse_args()
