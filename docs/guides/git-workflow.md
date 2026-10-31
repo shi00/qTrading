@@ -156,9 +156,9 @@ git branch -D feature/strategy-macd       # Squash Merge 后提交不在 main �
    gh issue create --title "<简明标题>" --template "✨ 功能请求"
    ```
 
-   此命令会打开编辑器加载模板表单内容，AI 助手应在模板基础上填写各章节，保留模板结构。
+   该命令是否打开编辑器并加载 Issue Forms 表单取决于 gh CLI 版本（见下方版本核验标注）；模板成功加载后，AI 助手应在模板基础上填写各章节，保留模板结构。
 
-   > **版本核验标注**：`gh issue create --template` 对 Issue Forms（`.yml`）模板的加载行为依赖 gh CLI 版本（不同版本对 `.yml` 表单的支持与渲染方式存在差异），使用前应按当前安装的 gh CLI 版本实际核验（确认能否正确加载表单字段）；本文档不未经证据断言特定 CLI 版本的 API 行为。若当前环境无法可靠加载 Issue Forms，应改用 GitHub Web UI 创建（表单仅在 Web UI 完整渲染）。
+   > **版本核验标注**：`gh issue create --template` 对 Issue Forms（`.yml`）模板的加载行为依赖 gh CLI 版本（不同版本对 `.yml` 表单的支持与渲染方式存在差异），使用前应按当前安装的 gh CLI 版本实际核验（确认能否正确加载表单字段）；本文档不在未经证据的情况下断言特定 CLI 版本的 API 行为。若当前环境无法可靠加载 Issue Forms，应改用 GitHub Web UI 创建（表单仅在 Web UI 完整渲染）。
 
 2. **禁止手写简化 issue body**：不得用 `--body "简短描述"` 跳过模板，也不得创建空白 issue（`blank_issues_enabled: false`）。
 
