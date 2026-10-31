@@ -28,20 +28,20 @@ TABLE_NAMES = [t.name for t in reversed(Base.metadata.sorted_tables) if t.name n
 
 
 async def _truncate_all_tables(engine: AsyncEngine):
-    """Truncate all tables for test isolation (fast, no DDL)."""
-    tables_str = ", ".join(TABLE_NAMES)
+    """Delete all table rows for test isolation (ORM Table objects, no SQL string interpolation)."""
     try:
         async with engine.begin() as conn:
-            await conn.execute(text(f"TRUNCATE TABLE {tables_str} CASCADE"))
+            for table in TABLE_NAMES:
+                await conn.execute(Base.metadata.tables[table].delete())
         return
     except (OperationalError, ProgrammingError) as e:
-        logger.warning("[TestDB] TRUNCATE all tables failed, falling back to per-table: %s", e)
+        logger.warning("[TestDB] DELETE all tables failed, falling back to per-table: %s", e)
     for table in TABLE_NAMES:
         try:
             async with engine.begin() as conn:
-                await conn.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
+                await conn.execute(Base.metadata.tables[table].delete())
         except Exception as e:  # noqa: BLE001
-            logger.warning("[TestDB] TRUNCATE %s failed: %s", table, e)
+            logger.warning("[TestDB] DELETE %s failed: %s", table, e)
 
 
 def make_clean_db_fixture(tables: list[str] | None = None):
@@ -62,7 +62,7 @@ def make_clean_db_fixture(tables: list[str] | None = None):
         async with test_engine.begin() as conn:
             for table in table_list:
                 try:
-                    await conn.execute(text(f"DELETE FROM {table}"))
+                    await conn.execute(Base.metadata.tables[table].delete())
                 except Exception as e:  # noqa: BLE001
                     logger.warning("[TestDB] DELETE %s failed: %s", table, e, exc_info=True)
 
@@ -241,3 +241,31 @@ class TestDatabaseBase(_AssertionMixin):
 
         CacheManager._instance = None
         CacheManager._initialized = False
+
+
+@pytest.mark.asyncio
+async def test_test_engine_connects_with_utc_timezone(test_engine: AsyncEngine) -> None:
+    """集成基建冒烟：test_engine 可连接且会话时区强制为 UTC。
+
+    本文件此前只有基类/夹具定义，``pytest tests/integration/test_infra_base.py``
+    收集不到用例（exit 5），无法作为基建可用性的冒烟关卡。本用例直接复用
+    ``test_engine`` fixture，覆盖 DB 创建（test_astock_*）、连接凭据与 UTC 时区契约。
+    """
+    async with test_engine.connect() as conn:
+        assert await conn.scalar(text("SELECT 1")) == 1
+        timezone_name = await conn.scalar(text("SHOW TimeZone"))
+    assert timezone_name == "UTC"
+
+
+@pytest.mark.asyncio
+async def test_db_schema_ready_migrates_core_tables(test_engine: AsyncEngine) -> None:
+    """集成基建冒烟：db_schema_ready autouse fixture 已通过 alembic 建出核心表。"""
+    async with test_engine.connect() as conn:
+        result = await conn.execute(
+            text(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
+                "AND tablename IN ('alembic_version', 'daily_quotes', 'stock_basic', 'trade_cal')"
+            )
+        )
+        tables = {row[0] for row in result}
+    assert tables == {"alembic_version", "daily_quotes", "stock_basic", "trade_cal"}

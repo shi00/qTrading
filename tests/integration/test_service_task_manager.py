@@ -11,8 +11,9 @@ Tests for TaskManager service.
 
 import asyncio
 import datetime
+import inspect
 import threading
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -288,7 +289,17 @@ class TestTaskManagerClearFinished:
         task2 = AppTask(id="task2", name="Completed", status=TaskStatus.COMPLETED)
         task3 = AppTask(id="task3", name="Failed", status=TaskStatus.FAILED)
         manager._tasks = {"task1": task1, "task2": task2, "task3": task3}
-        manager._clear_finished_impl()
+        with (
+            patch.object(manager, "_schedule_coro") as mock_schedule,
+            patch.object(manager, "_clear_finished_db") as mock_clear_db,
+        ):
+            manager._clear_finished_impl()
+        # DELETE 经 _clear_finished_db 发起并由 _schedule_coro 调度：校验触达 ID 与调度接线
+        mock_clear_db.assert_called_once_with(["task2", "task3"])
+        assert mock_schedule.call_count == 1
+        coro = mock_schedule.call_args.args[0]
+        assert inspect.iscoroutine(coro)
+        coro.close()  # 测试中不真正调度，close 释放协程避免未 await 告警
         assert "task1" in manager._tasks
         assert "task2" not in manager._tasks
         assert "task3" not in manager._tasks

@@ -175,8 +175,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    workdir = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="detect_flaky_"))
-    workdir.mkdir(parents=True, exist_ok=True)
+    if args.workdir:
+        workdir = Path(args.workdir)
+        workdir.mkdir(parents=True, exist_ok=True)
+        temp_workdir = None
+    else:
+        # 自动创建的临时目录必须显式清理，避免每次运行残留 detect_flaky_* 目录
+        temp_workdir = tempfile.TemporaryDirectory(prefix="detect_flaky_")
+        workdir = Path(temp_workdir.name)
 
     runs_results: list[dict[str, str]] = []
 
@@ -192,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not report_path.exists():
             print(f"  ✗ 运行 {i + 1} 未生成 json-report", file=sys.stderr)
+            if temp_workdir is not None:
+                temp_workdir.cleanup()
             return 2
         runs_results.append(parse_json_report(report_path))
         summary_count = len(runs_results[-1])
@@ -218,6 +226,8 @@ def main(argv: list[str] | None = None) -> int:
     report = format_flaky_report(flaky, runs=args.runs, path=args.path)
     print(report)
 
+    if temp_workdir is not None:
+        temp_workdir.cleanup()
     return 1 if flaky else 0
 
 

@@ -165,12 +165,13 @@ class TestPreloadAliases:
 
 
 class TestPreloadAliasesCalledAtStartup:
-    """B-P1-9: Verify that main.py calls preload_aliases after init_db."""
+    """B-P1-9: Verify that bootstrap calls preload_aliases after init_db."""
 
     def test_main_source_contains_preload_aliases(self):
-        from data.persistence.metadata_manager import MetaDataManager
+        from pathlib import Path
 
-        assert hasattr(MetaDataManager, "preload_aliases"), (
-            "B-P1-9: MetaDataManager should have preload_aliases() method "
+        bootstrap_source = (Path(__file__).resolve().parents[2] / "app" / "bootstrap.py").read_text(encoding="utf-8")
+        assert "MetaDataManager.preload_aliases()" in bootstrap_source, (
+            "B-P1-9: bootstrap should call MetaDataManager.preload_aliases() "
             "to avoid blocking the event loop during UI rendering."
         )

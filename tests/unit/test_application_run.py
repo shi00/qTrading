@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import suppress
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -225,12 +226,19 @@ async def test_run_auto_probe_task_registered(monkeypatch):
     mock_controller.start = AsyncMock()
     monkeypatch.setattr(app_main, "StartupController", lambda **_: mock_controller)
 
-    page = _DummyPage()
-    await app_main.run(page)
+    try:
+        page = _DummyPage()
+        await app_main.run(page)
 
-    coordinator = _FakeCoordinator.last
-    assert coordinator is not None
-    assert probe_task in coordinator.register_task_calls
+        coordinator = _FakeCoordinator.last
+        assert coordinator is not None
+        assert probe_task in coordinator.register_task_calls
+    finally:
+        # 替身 coordinator 不执行真实清理，测试自身必须取消并回收 probe_task，
+        # 否则事件循环关闭时留下 pending task（资源泄漏/销毁告警）。
+        probe_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await probe_task
 
 
 @pytest.mark.asyncio

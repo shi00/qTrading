@@ -46,6 +46,7 @@ from sqlalchemy import text
 from data.cache.cache_manager import CacheManager
 from data.persistence.db_url_override import override_db_url
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
+from data.persistence.models import Base
 from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
@@ -120,7 +121,7 @@ async def clean_embedded_pg_tables(embedded_pg_with_schema: ConnectionInfo):
         assert cache.engine is not None, "CacheManager.engine 未初始化"
         async with cache.engine.begin() as conn:
             for table in tables:
-                await conn.execute(text(f"DELETE FROM {table}"))
+                await conn.execute(Base.metadata.tables[table].delete())
 
     await _cleanup()
     yield

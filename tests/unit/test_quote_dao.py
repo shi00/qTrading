@@ -1214,6 +1214,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 0})
         dao.get_bulk_table_counts_multi = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
+        dao._get_empty_days_map = AsyncMock(return_value={})
         with patch(
             "data.persistence.daos.quote_dao._get_effective_synced_tables",
             return_value=["daily_quotes"],
@@ -1229,6 +1230,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_table_counts_multi = AsyncMock(return_value={"daily_quotes": {datetime.date(2024, 6, 15): 4800}})
         dao.get_field_completeness = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
+        dao._get_empty_days_map = AsyncMock(return_value={})
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1253,6 +1255,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_table_counts_multi = AsyncMock(return_value={})
         dao.get_field_completeness = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
+        dao._get_empty_days_map = AsyncMock(return_value={})
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1409,6 +1412,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_table_counts_multi = AsyncMock(side_effect=_counts)
         dao.get_field_completeness = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
+        dao._get_empty_days_map = AsyncMock(return_value={})
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1445,6 +1449,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_table_counts_multi = AsyncMock(return_value={"daily_quotes": {datetime.date(2024, 6, 15): 4800}})
         dao.get_field_completeness = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 5, 1))
+        dao._get_empty_days_map = AsyncMock(return_value={})
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1483,6 +1488,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_table_counts_multi = AsyncMock(return_value={"daily_quotes": {datetime.date(2024, 6, 15): 4800}})
         dao.get_field_completeness = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=updated)
+        dao._get_empty_days_map = AsyncMock(return_value={})
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1512,6 +1518,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_table_counts_multi = AsyncMock(return_value={"daily_quotes": {datetime.date(2024, 6, 15): 4800}})
         dao.get_field_completeness = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
+        dao._get_empty_days_map = AsyncMock(return_value={})
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1536,6 +1543,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_table_counts_multi = AsyncMock(return_value={"daily_quotes": {datetime.date(2024, 6, 15): 4800}})
         dao.get_field_completeness = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 20))
+        dao._get_empty_days_map = AsyncMock(return_value={})
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1560,6 +1568,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_table_counts_multi = AsyncMock(return_value={"daily_quotes": {datetime.date(2024, 6, 15): 4800}})
         dao.get_field_completeness = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=None)
+        dao._get_empty_days_map = AsyncMock(return_value={})
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1584,6 +1593,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
         dao.get_bulk_table_counts_multi = AsyncMock(return_value={"daily_quotes": {datetime.date(2024, 6, 15): 5200}})
+        dao._get_empty_days_map = AsyncMock(return_value={})
         dao.get_field_completeness = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
@@ -1628,6 +1638,8 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): expected_base})
         dao.get_bulk_table_counts_multi = AsyncMock(side_effect=_counts)
         dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=None)
+        dao._get_empty_days_map = AsyncMock(return_value={})
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1672,6 +1684,8 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): expected_base})
         dao.get_bulk_table_counts_multi = AsyncMock(side_effect=_counts)
         dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=None)
+        dao._get_empty_days_map = AsyncMock(return_value={})
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1706,6 +1720,8 @@ class TestQuoteDaoGetBulkSyncQualityScores:
             return_value={"daily_indicators": {datetime.date(2024, 6, 15): 5400}}
         )
         dao.get_field_completeness = AsyncMock(return_value={})
+        dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=None)
+        dao._get_empty_days_map = AsyncMock(return_value={})
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1958,6 +1974,7 @@ class TestQuoteDaoCoverageGaps:
         )
         dao.get_field_completeness = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
+        dao._get_empty_days_map = AsyncMock(return_value={})
         with (
             patch(
                 "data.persistence.daos.quote_dao._get_effective_synced_tables",
@@ -1980,6 +1997,7 @@ class TestQuoteDaoCoverageGaps:
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
         dao.get_bulk_table_counts_multi = AsyncMock(return_value={"daily_quotes": {datetime.date(2024, 6, 15): 100}})
+        dao._get_empty_days_map = AsyncMock(return_value={})
         dao.get_field_completeness = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
@@ -2027,6 +2045,7 @@ class TestQuoteDaoCoverageGaps:
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 5000})
         dao.get_bulk_table_counts_multi = AsyncMock(return_value={"daily_quotes": {datetime.date(2024, 6, 15): 4800}})
         dao.get_field_completeness = AsyncMock(return_value={"roe": 0.8, "pe_ttm": 0.9})
+        dao._get_empty_days_map = AsyncMock(return_value={})
         dao.get_stock_basic_latest_updated_date = AsyncMock(return_value=datetime.date(2024, 6, 15))
         with (
             patch(
