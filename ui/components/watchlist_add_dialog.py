@@ -18,7 +18,13 @@ from collections.abc import Callable
 
 import flet as ft
 
-from ui.components.flet_type_helpers import get_control_value, safe_on_change, safe_on_click, safe_controls
+from ui.components.flet_type_helpers import (
+    get_control_value,
+    safe_on_change,
+    safe_on_click,
+    safe_on_dismiss,
+    safe_controls,
+)
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
@@ -216,6 +222,9 @@ def WatchlistAddDialog(
     dialog = (
         ft.AlertDialog(
             modal=True,
+            # 用户经 Esc / 关闭路径 dismiss 时按「取消」处理: 同步消费方 open_state
+            # (提交中沿 _on_cancel 的 F01 守卫保持不关闭)。
+            on_dismiss=safe_on_dismiss(_on_cancel),
             title=ft.Text(
                 I18n.get("watchlist_add_dialog_title"),
                 size=AppStyles.FONT_SIZE_TITLE,

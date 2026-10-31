@@ -1027,6 +1027,14 @@ class TestHealthReportDialogComponent:
         close_btn.on_click(None)
         env["on_close"].assert_called_once()
 
+    def test_dismiss_invokes_on_close(self, health_report_dialog_env):
+        """用户 dismiss（Esc / 关闭路径）关闭并通知消费方，避免重渲染后重新弹出。"""
+        env = health_report_dialog_env
+        dialog = env["page"]._dialogs.controls[-1]
+        assert dialog.on_dismiss is not None
+        dialog.on_dismiss(None)
+        env["on_close"].assert_called_once()
+
     def test_deep_scan_handler_invokes_on_deep_scan(self, health_report_dialog_env):
         """_deep_scan handler 调用 on_close + on_deep_scan。"""
         env = health_report_dialog_env
@@ -1242,6 +1250,15 @@ class TestHealthScanDialogComponent:
         dialog = page._dialogs.controls[-1]
         close_btn = dialog.actions[-1]
         close_btn.on_click(None)
+        on_close.assert_called_once()
+
+    def test_dismiss_invokes_on_close(self, health_scan_dialog_factory):
+        """用户 dismiss（Esc / 关闭路径）同步 open_state 并通知消费方。"""
+        on_close = MagicMock()
+        component, page, _ = health_scan_dialog_factory(data_processor=None, open_state=True, on_close=on_close)
+        dialog = page._dialogs.controls[-1]
+        assert dialog.on_dismiss is not None
+        dialog.on_dismiss(None)
         on_close.assert_called_once()
 
     def test_cleanup_cancels_pending_futures(self, health_scan_dialog_factory):

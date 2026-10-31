@@ -17,7 +17,7 @@ from collections.abc import Callable
 
 import flet as ft
 
-from ui.components.flet_type_helpers import safe_on_click
+from ui.components.flet_type_helpers import safe_on_click, safe_on_dismiss
 from ui.i18n import get_observable_state
 from ui.theme import AppColors, AppStyles
 
@@ -76,6 +76,9 @@ def ConfirmDialog(
     dialog = (
         ft.AlertDialog(
             modal=True,
+            # 用户经 Esc / 关闭路径 dismiss 时按「取消」处理: 同步消费方 open_state
+            # (否则 Flet use_dialog 在下一次重渲染时会把对话框重新挂回 overlay)。
+            on_dismiss=safe_on_dismiss(_on_cancel),
             # 正文超长时由 Flet 把 title/content 包进可滚动容器, 其可用高度上限由对话框
             # 视口约束 (inset_padding 内) 派生 —— 长正文 (如 AI 外发数据预览) 在对话框内
             # 滚动而非撑破对话框 (MINOR-05)。

@@ -31,7 +31,13 @@ import pytest
 from flet.components.component import Component
 
 from core.i18n import Message
-from tests.unit.ui.component_renderer import FakePage, make_component, render_once, run_mount_effects
+from tests.unit.ui.component_renderer import (
+    FakePage,
+    make_component,
+    render_once,
+    run_mount_effects,
+    run_render_effects,
+)
 from ui.components import model_management_panel as panel_module
 from ui.components.model_management_panel import (
     _build_attempts,
@@ -1076,6 +1082,28 @@ class TestModelManagementPanelRuntime:
         assert not any(isinstance(c, ft.TabBarView) for c in content.controls)
         assert isinstance(current_page, ft.Column)
         assert current_page.scroll == ft.ScrollMode.AUTO
+
+    def test_file_picker_effect_runs_on_mount_only(self, monkeypatch: pytest.MonkeyPatch):
+        """FilePicker 服务只在挂载注册一次：重渲染不得 cleanup+setup 抖动服务。"""
+        page = FakePage()
+        sync = MagicMock()
+        monkeypatch.setattr(panel_module, "_get_page", lambda: page)
+        monkeypatch.setattr(panel_module, "_sync_file_picker_service", sync)
+        component = make_component(
+            panel_module.ModelManagementPanel,
+            connections_vm=ModelConnectionsViewModel(MagicMock()),
+            routes_vm=ModelRoutesViewModel(MagicMock()),
+            usage_vm=ModelUsageViewModel(),
+            show_snack_callback=MagicMock(),
+            compact=False,
+        )
+        run_mount_effects(component, page=page)
+        # 仅挂载期 attach 一次
+        assert sync.call_count == 1
+        assert sync.call_args.args[2] is True
+        run_render_effects(component)
+        # dependencies=[] → 重渲染不再 cleanup(False)+setup(True)
+        assert sync.call_count == 1
 
     def test_tab_switch_rerenders_selected_page(self, monkeypatch: pytest.MonkeyPatch):
         """on_change 驱动 set_selected_tab 重渲染：单页条件切换、无 TabBarView。"""
