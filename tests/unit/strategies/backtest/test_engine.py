@@ -400,6 +400,10 @@ class TestApplyQfq:
 
         assert result["raw_open"].to_list() == [10.0, 10.5]
         assert result["qfq_open"].to_list() == [10.0, 10.5]
+        # R21：整列因子缺失 = 未知，不得静默按恒等使用
+        assert "qfq_ratio" in result.columns
+        assert result["qfq_ratio"].to_list() == [None, None]
+        assert result["qfq_adjustment_unknown"].to_list() == [True, True]
 
     def test_with_adj_factor_calculates_qfq(self):
         engine = self._make_engine()

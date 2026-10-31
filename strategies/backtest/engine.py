@@ -692,6 +692,9 @@ class VectorBacktestEngine:
         未知语义由 ratio=null 与标记列承载，consumer 必须以此判据消费。
         """
         if "adj_factor" not in quotes_df.columns:
+            # R21：整列因子缺失同为「未知」，不得静默按恒等使用。
+            # 与全空/基准为 0 分支保持同一消费契约：ratio=null 拒绝撮合，
+            # 标记列驱动结果级 DataWarning 与 IC 排除。
             return quotes_df.with_columns(
                 [
                     pl.col("open").alias("raw_open"),
@@ -702,6 +705,8 @@ class VectorBacktestEngine:
                     pl.col("high").alias("qfq_high"),
                     pl.col("low").alias("qfq_low"),
                     pl.col("close").alias("qfq_close"),
+                    pl.lit(None, dtype=pl.Float64).alias("qfq_ratio"),
+                    pl.lit(True).alias(QFQ_UNKNOWN_COL),
                 ]
             )
 
