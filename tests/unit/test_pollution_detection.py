@@ -23,6 +23,7 @@ function scope 已消除 loop-local 缓存跨测试泄漏的根因。
 - 本测试验证实际多测试场景下无其他类型的状态污染
 """
 
+import os
 import random
 import re
 import subprocess
@@ -108,11 +109,51 @@ def _parse_test_results(stdout: str) -> dict[str, str]:
     return results
 
 
+def _abort(message: str) -> None:
+    """CI 中解析/启动异常应 fail，避免守护测试静默变绿；本地开发仍 skip 以便快速迭代。"""
+    if os.environ.get("CI"):
+        pytest.fail(message, pytrace=False)
+    pytest.skip(message)
+
+
 def test_core_subset_files_exist():
     """快速检查：核心子集中的所有文件都存在（不标记 slow，快速验证）。"""
     for rel_path in CORE_SUBSET_FILES:
         full_path = PROJECT_ROOT / rel_path
         assert full_path.exists(), f"核心子集文件不存在: {rel_path}"
+
+
+def test_parse_test_results_parses_serial_output():
+    """守护：-n 0 串行输出必须可解析；回归到 xdist `[gwN]` 格式时会解析为空并 skip。"""
+    stdout = (
+        "tests/unit/test_a.py::test_pass PASSED   [ 50%]\n"
+        "tests/unit/test_b.py::TestX::test_fail FAILED   [100%]\n"
+        "[gw0] [ 50%] PASSED tests/unit/test_a.py::test_pass\n"
+    )
+    assert _parse_test_results(stdout) == {
+        "tests/unit/test_a.py::test_pass": "PASSED",
+        "tests/unit/test_b.py::TestX::test_fail": "FAILED",
+    }
+
+
+def test_run_command_forces_serial_mode(monkeypatch):
+    """守护：子进程命令必须含 -n 0，覆盖 addopts 的 -n auto（xdist 会掩盖跨测试污染）。"""
+    captured: dict[str, list[str]] = {}
+
+    class _Result:
+        stdout = ""
+        stderr = ""
+        returncode = 0
+
+    def _fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return _Result()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    _run_pytest_with_order(CORE_SUBSET_FILES)
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("-n") + 1] == "0"
 
 
 @pytest.mark.slow
@@ -133,14 +174,14 @@ def test_no_cross_test_pollution_in_core_subset():
         try:
             result = _run_pytest_with_order(shuffled_files)
         except subprocess.TimeoutExpired:
-            pytest.skip(f"第 {run_idx + 1} 次运行超时（>{PER_RUN_TIMEOUT}s），跳过污染探测")
+            _abort(f"第 {run_idx + 1} 次运行超时（>{PER_RUN_TIMEOUT}s）")
         except OSError as e:
-            pytest.skip(f"第 {run_idx + 1} 次运行无法启动 subprocess: {e}")
+            _abort(f"第 {run_idx + 1} 次运行无法启动 subprocess: {e}")
 
         test_results = _parse_test_results(result.stdout)
         if not test_results:
             # 解析失败或无输出，可能是收集错误
-            pytest.skip(
+            _abort(
                 f"第 {run_idx + 1} 次运行未解析到测试结果（可能收集错误）。\n"
                 f"stdout 片段: {result.stdout[:500]}\nstderr 片段: {result.stderr[:500]}"
             )

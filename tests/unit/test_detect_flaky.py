@@ -340,6 +340,40 @@ class TestMainIntegration:
         captured = capsys.readouterr()
         assert "未检测到 flaky 测试" in captured.out
 
+    def test_main_passes_deselect_to_pytest(self, tmp_path: Path) -> None:
+        """正例：--deselect 透传到每轮 pytest 子进程."""
+        report_json = json.dumps(
+            {"summary": {"total": 1, "passed": 1}, "tests": [{"nodeid": "t.py::a", "outcome": "passed"}]}
+        )
+        cmds: list[list[str]] = []
+
+        def fake_run(cmd, **_kwargs):
+            cmds.append(cmd)
+            Path(cmd[cmd.index("--json-report-file") + 1]).write_text(report_json, encoding="utf-8")
+            mock = MagicMock(spec=subprocess.CompletedProcess)
+            mock.returncode = 0
+            return mock
+
+        with patch("subprocess.run", side_effect=fake_run):
+            from scripts.detect_flaky import main
+
+            exit_code = main(
+                [
+                    "--path",
+                    "tests/unit/",
+                    "--runs",
+                    "1",
+                    "--workdir",
+                    str(tmp_path),
+                    "--deselect",
+                    "tests/unit/a.py::test_x",
+                ]
+            )
+
+        assert exit_code == 0
+        assert cmds[0].count("--deselect") == 1
+        assert "tests/unit/a.py::test_x" in cmds[0]
+
     def test_main_returns_one_when_flaky_detected(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """正例：注入 flaky（轮 2 fail），退出码 1 且输出定位 nodeid."""
         # 轮 1 pass, 轮 2 fail, 轮 3 pass

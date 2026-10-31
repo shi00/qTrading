@@ -8,6 +8,7 @@
     python scripts/detect_flaky.py --path tests/unit/ --runs 10
     python scripts/detect_flaky.py --parallel 4 --reruns 2
     python scripts/detect_flaky.py --lf  # 仅复跑上次失败用例
+    python scripts/detect_flaky.py --deselect tests/unit/slow_probe.py::test_x  # 排除不应每轮重复的慢测试
 
 退出码：
     0: 未检测到 flaky（所有运行结果一致）
