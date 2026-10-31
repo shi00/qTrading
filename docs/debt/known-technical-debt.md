@@ -29,7 +29,7 @@
 |----|--------|------|------------------|
 | P3-ExcStrategies-NoteLazy-Classify | strategies/ 层 except Exception 已标记 NOTE(lazy)（ceiling 动态化），待评估统一走 classify\_error | P3 | ① 策略层再次出现未分类 `except Exception` 的新实例时；② 或策略层异常处理被独立重构时 |
 | P3-ExcUtils-NoteLazy-Classify | utils/ 层 except Exception 已标记 NOTE(lazy)，待评估统一走 classify\_error | P3 | ① utils 层再次出现未分类 `except Exception` 的新实例时；② 或 utils 层异常处理被统一改造时 |
-| P3-RedlineAuto-Coverage-Partial | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R22/R23/R24 为报告/告警模式的部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | P3 | ① pre-commit / CI 检出红线违规新实例时；② 或事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）出现误报案例时 |
+| P3-RedlineAuto-Coverage-Partial | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R24 为报告模式（warning 不阻断），R22/R23 为阻断式检查，五者均为部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | P3 | ① pre-commit / CI 检出红线违规新实例时；② 或事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）出现误报案例时 |
 | P3-Rust-Coverage-D38 | Rust sidecar unit 覆盖率 run.rs 15.68% 未达行覆盖率目标 85%（D38，maint.rs/pgbin.rs 已达标） | P3 | ① `cargo llvm-cov` 覆盖率回归（run.rs 覆盖率下降或门禁失败）时；② 或 run.rs supervisor 可测路径被独立重构时 |
 | P2-Fi25-Rust-Injection-Missing | 失败注入场景 #25（数据页 checksum 错误）缺 Rust 集成测试 | P2 | ① sidecar 引入运行期 postgres 日志监控需求时；② 或数据页损坏问题在生产环境报告时 |
 | P3-App-SyncFunctions-In-Async-Bootstrap | `initialize_services` 中同步函数（preload\_aliases/validate\_failover/validate\_strategy\_tier）阻塞事件循环（合理设计决策） | P3 | ① 这些函数引入网络/磁盘 IO；② 或启动期 UI 响应延迟被用户感知时 |
@@ -166,15 +166,15 @@ M9 services 模块检视发现：`services/task_manager.py:741-742`（`cancel_al
 
 ### 红线自动化与类型压制
 
-#### P3-RedlineAuto-Coverage-Partial：红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R22/R23/R24 为报告/告警模式的部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓）
+#### P3-RedlineAuto-Coverage-Partial：红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R24 为报告模式（warning 不阻断），R22/R23 为阻断式检查，五者均为部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-RedlineAuto-Coverage-Partial** | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R22/R23/R24 为报告/告警模式的部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | ① 红线违规频发时；② 或事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）误报控制方案成熟时 |
+| **P3-RedlineAuto-Coverage-Partial** | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R24 为报告模式（warning 不阻断），R22/R23 为阻断式检查，五者均为部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | ① 红线违规频发时；② 或事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）误报控制方案成熟时 |
 
 **产生背景与现状**
 
-R1 由 import-linter 3 条契约（1 条 layers + 2 条 forbidden）守护；R4/R9（Tushare token 静态脱敏）/R12/R13/R14/R15 由 `scripts/check_redlines.py` 实现并接入 pre-commit `redline-check` hook（单元测试守护）；R20（报告模式，warning 不阻断）、R21、R22（水位线单调）、R23、R24 亦由 `scripts/check_redlines.py` 落地为报告/告警模式的部分自动化检查（2026-10-25 复核）。R16（UI 阻塞）部分落地：VM `__init__` 构造已注册单例检测已实现（review07-G20，捕获 B11 类问题）；事件处理器内同步 IO 维度因 AST 误报风险高暂缓，仍需人工评审（重点检查项见 `docs/reviews/ai-review.md`）。各红线 automation\_coverage 与 human\_review\_required 见 `docs/governance/redlines.yml`。
+R1 由 import-linter 3 条契约（1 条 layers + 2 条 forbidden）守护；R4/R9（Tushare token 静态脱敏）/R12/R13/R14/R15 由 `scripts/check_redlines.py` 实现并接入 pre-commit `redline-check` hook（单元测试守护）；R20（单位核对）、R21（缺失值伪装）、R24（时点正确性）为报告模式（warning 不阻断），R22（水位线单调）、R23（裸 UI token）为阻断式检查（检出即失败、退出码非 0），五者均为 `automation_coverage: partial` 的部分自动化检查，由 `scripts/check_redlines.py` 落地（2026-10-25 复核）。R16（UI 阻塞）部分落地：VM `__init__` 构造已注册单例检测已实现（review07-G20，捕获 B11 类问题）；事件处理器内同步 IO 维度因 AST 误报风险高暂缓，仍需人工评审（重点检查项见 `docs/reviews/ai-review.md`）。各红线 automation\_coverage 与 human\_review\_required 见 `docs/governance/redlines.yml`。
 
 **期望的最终解法**
 
