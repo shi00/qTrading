@@ -756,7 +756,7 @@ review06（安全与供应链，2026-08-24）发现：`utils/prompt_guard.py` �
 
 **产生背景与现状**
 
-review06（安全与供应链，2026-08-24）发现：LLM 输出会参与选股排序，但当前仅校验部分字段，缺完整输出 schema 校验，且 UI 对 AI 排序结果缺 AI 免责声明。**现状校准（2026-10-25 复核）**：AI 风险免责声明已随 UX-09 落地——`ui/components/risk_disclaimer.py` 由 `ui/views/screener_view.py:2053/2120/2173` 与 `ui/components/stock_detail_dialog.py:764` 挂载，引导页亦有确认步骤；**剩余缺口仅为完整输出 schema 校验**。当前职责边界见 [ai-service.md](../patterns/ai-service.md)「输出契约与校验边界」。
+review06（安全与供应链，2026-08-24）发现：LLM 输出会参与选股排序，但当前仅校验部分字段，缺完整输出 schema 校验，且 UI 对 AI 排序结果缺 AI 免责声明。**现状校准（2026-10-31 复核）**：AI 风险免责声明已随 UX-09 落地——`ui/components/risk_disclaimer.py` 由 `ui/views/screener_view.py:2066/2133/2186` 与 `ui/components/stock_detail_dialog.py:770` 挂载，引导页亦有确认步骤；**剩余缺口仅为完整输出 schema 校验**——`validate_ai_analysis_response` 仍为逐字段校验（score 范围 / confidence 归一化 / recommendation 与 conclusion_label 枚举 / 自由文本清洗），缺必填字段、字段类型与未知键的整体 schema 约束；`response_schema` 结构化输出能力已存在（`litellm_client.py` 支持 pydantic 契约下传），但仅新闻风险场景 `RiskOutput` 使用，个股分析输出未接入。当前职责边界见 [ai-service.md](../patterns/ai-service.md)「输出契约与校验边界」。
 
 **期望的最终解法**
 
