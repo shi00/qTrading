@@ -95,6 +95,12 @@ R2（`CancelledError` 重抛）/ R7 / R11（loop-local 原语）/ R15（单例�
 - **让情绪分进入选股 / 策略打分**：拒绝（超出本决策范围）。如需，须另立 ADR 并重新评估
   与 ADR-0008 的边界。
 
+## Errata
+
+> 2026-10-31 勘误
+
+Context 引用的设计稿 `reviews/新闻达标模型微调.md` 为本地未入库文档，未随仓库分发且当前工作区已不存在；该稿仅作方案来源记录，契约以本 ADR 的 Decision 与 [docs/patterns/ai-service.md](../patterns/ai-service.md) §6 为准。
+
 ---
 
 ## 完成判定（canonical 入口）
