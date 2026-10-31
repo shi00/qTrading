@@ -358,6 +358,13 @@ class AnchorPage:
         搜索：菜单角色 → 按钮(下拉选项) → 宽泛兜底；匹配优先级 精确 > 前缀别名 >
         ``(别名)`` 括号模式 > 裸子串。避免裸子串 ``"代码"`` 误命中页面导航/列头
         等无关文本（PR 585 E2E 失败根因，见 reviews/plans/2026-08-25-...）。
+
+        同文本解耦（CI run 41145284114）：选项文本可能与页面常驻元素完全相同（如
+        过滤列 ``ts_code (代码)`` 与结果表列头同名），仅按文本优先级仍会误命中文档序
+        更靠前的列头（bbox 与下拉触发器不在同一列），点击落空后菜单不收合。故候选
+        须与 Dropdown identifier 节点**左缘对齐**：Material DropdownMenu 的菜单面板
+        与触发器左对齐，选项语义 rect 的 x 即面板 x（y 可能是列表内容坐标残留，
+        不能用作判据）。
         """
         option_handle = await self.page.evaluate_handle(
             r"""(args) => {
@@ -372,20 +379,37 @@ class AnchorPage:
                     if (t.includes(normText)) return 4;
                     return 0;
                 };
+                // 同文本解耦：菜单面板与触发器左对齐（Material DropdownMenu 锚定规则），
+                // 页面其他同文本元素（结果表列头等）通常不在该列 → 优先选左缘对齐的
+                // 候选；无对齐候选时退回纯文本优先（兼容菜单为避让屏幕边缘的水平偏移）。
+                const anchor = dropdownEid
+                    ? document.querySelector('flt-semantics[flt-semantics-identifier="' + dropdownEid + '"]')
+                    : null;
+                const anchorRect = anchor ? anchor.getBoundingClientRect() : null;
+                const anchorTol = anchorRect ? Math.max(24, anchorRect.width * 0.25) : 0;
+                const nearAnchor = (e) => {
+                    if (!anchorRect || anchorRect.width <= 0) return true;
+                    const r = e.getBoundingClientRect();
+                    return Math.abs(r.left - anchorRect.left) <= anchorTol;
+                };
                 // 候选组按优先级：菜单角色 → 按钮(下拉选项) → 宽泛兜底
                 const groups = [
                     'flt-semantics[role="option"], flt-semantics[role="menuitem"]',
                     'flt-semantics[role="button"]:not([aria-expanded])',
                     'flt-semantics:not([aria-expanded])',
                 ];
-                for (const sel of groups) {
-                    const els = Array.from(document.querySelectorAll(sel)).filter(isVisible).filter(notSelf);
-                    for (let prio = 1; prio <= 4; prio++) {
-                        const hit = els.find(e => matchPrio((e.textContent||'').trim()) === prio);
-                        if (hit) return hit;
+                const candidates = groups.map((sel) =>
+                    Array.from(document.querySelectorAll(sel)).filter(isVisible).filter(notSelf));
+                const pick = (lists) => {
+                    for (const els of lists) {
+                        for (let prio = 1; prio <= 4; prio++) {
+                            const hit = els.find(e => matchPrio((e.textContent||'').trim()) === prio);
+                            if (hit) return hit;
+                        }
                     }
-                }
-                return null;
+                    return null;
+                };
+                return pick(candidates.map((els) => els.filter(nearAnchor))) || pick(candidates);
             }""",
             {"text": option_text, "dropdownEid": eid_str},
         )
@@ -564,6 +588,30 @@ class AnchorPage:
                 return True, True
         return False, True
 
+    async def _click_option(self, option_element: Any) -> None:
+        """点击下拉选项：``ElementHandle.click`` 主路径 + ``not visible`` 回落物理鼠标。
+
+        CanvasKit 语义节点的 ``ElementHandle.click(force=True)`` 仍可能抛
+        ``Element is not visible``（CI run 41145284114 实证：选项 bbox 有效、菜单面板
+        亦有效，但 Playwright 对该节点的可见性判定不可靠）。此时按已校验的 bbox 中心
+        改投 ``page.mouse.click``（真实指针事件，CanvasKit 直接响应），与
+        ``AnchorPage.click`` 的坐标点击一致。其余异常原样抛出，不掩盖。
+        """
+        try:
+            await option_element.click(force=True)
+            return
+        except Exception as click_err:  # noqa: BLE001  # 仅识别 not visible 回落，其余原样抛出
+            if "not visible" not in str(click_err).lower():
+                raise
+        raw_box = await option_element.bounding_box()
+        if not raw_box or raw_box["width"] <= 0 or raw_box["height"] <= 0:
+            raise RuntimeError(
+                "AnchorPage.select_option: option has no clickable bounding box "
+                f"(box={raw_box!r}); cannot fall back to coordinate click"
+            )
+        box = _as_box(raw_box)
+        await self.page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+
     async def select_option(
         self,
         dropdown_eid: Eid,
@@ -579,9 +627,10 @@ class AnchorPage:
         PR-478 修复 (4 个复合缺陷, 见 reviews/问题定位.md):
         - C1: 主动 poll ``aria-expanded="true"``, 未展开立即抛错
               ``dropdown did not expand``, 不再静默等待选项 20s.
-        - C2: 选项点击用 ``page.mouse.click(cx, cy)`` 坐标点击, 与
-              ``AnchorPage.click`` 一致, 绕开 CanvasKit ``flt-semantics`` 上
-              不稳定的 actionability 检查.
+        - C2: 选项点击先试 ``ElementHandle.click(force=True)``；仅当其抛
+              ``Element is not visible`` 时回落到 ``page.mouse.click(bbox 中心)``
+              坐标点击（真实指针事件，与 ``AnchorPage.click`` 一致），绕开 CanvasKit
+              ``flt-semantics`` 节点上不可靠的可见性判定（CI run 41145284114 实证）。
         - C3: 选项定位用精确文本匹配 (等值 / 空格 / ``(`` / ``\\n`` 分隔) 取代
               ``filter(has_text=...)`` 子串匹配, 避免短文本 (如"代码") 误命中.
         - C4: 展开前若残留 ``aria-expanded="true"`` 按 ``Escape`` 先收合, 避免
@@ -592,6 +641,11 @@ class AnchorPage:
               先展开再搜索. 选项搜索用**候选组优先级** (菜单角色 → role=button
               下拉选项 → 宽泛兜底) + **匹配优先级** (精确 > 前缀别名 > "(别名)"
               括号模式 > 裸子串), 避免裸子串误命中页面无关文本.
+        - C5+ (CI run 41145284114 同文本解耦): 选项文本可能与页面常驻元素完全相同
+              (过滤列 ``ts_code (代码)`` 与结果表列头同名). 候选优先取与 Dropdown
+              identifier 节点**左缘对齐**者 (Material DropdownMenu 菜单面板与触发器
+              左对齐), 无对齐候选时退回纯文本优先; 菜单已展开但暂无对齐候选时短轮询
+              2s, 不进入展开路径 (二次点击会关闭已开菜单).
         - C6 (视口外点击静默丢弃): 展开前先 ``scroll_into_view`` 把 Dropdown 滚入
               视口再取 bbox 点击. MAJOR-08 将日志级别等技术参数收敛进默认折叠的
               「高级（开发者）」分组后, 展开分组会把 Dropdown 推到视口下方; Playwright
@@ -633,7 +687,17 @@ class AnchorPage:
         menu_expanded = await self._read_expanded_by_identifier(eid_str)
         # Any: 后续闭包 (_interact/_menu_closed) 经 nonlocal 捕获，此处显式声明避免
         # pyright 在捕获点对 `else None` 分支报 Optional 成员访问 (reportOptionalMemberAccess)
-        option_element: Any = await self._find_option_element(option_text, eid_str) if menu_expanded == "true" else None
+        option_element: Any = None
+        if menu_expanded == "true":
+            # 菜单已展开，但选项节点可能仍在生成/重渲染（同文本解耦过滤后可能短暂
+            # 无对齐候选）→ 短轮询最多 2s 再判定。若此时直接走展开路径，二次点击会把
+            # 已打开的菜单点关，整个选择必然失败。
+            quick_deadline = time.monotonic() + min(self._tm(timeout_ms) / 1000, 2.0)
+            while True:
+                option_element = await self._find_option_element(option_text, eid_str)
+                if option_element or time.monotonic() >= quick_deadline:
+                    break
+                await self.page.wait_for_timeout(100)
         if not option_element:
             # 展开前先把 Dropdown 滚入视口，再取 bbox。
             # MAJOR-08 将日志级别等技术参数收敛进默认折叠的「高级（开发者）」分组后，
@@ -684,10 +748,11 @@ class AnchorPage:
         #     以返回的最新句柄继续。
         option_element = await self._scroll_menu_option_into_view(option_element, option_text, eid_str, timeout_ms)
 
-        # 2. 用 force=True 强力点击选项，在 ElementHandle 被 DOM 卸载时重新获取
+        # 2. 点击选项（ElementHandle 主路径；not visible 回落物理鼠标坐标点击），
+        #    在 ElementHandle 被 DOM 卸载时重新获取
         for click_attempt in range(3):
             try:
-                await option_element.click(force=True)
+                await self._click_option(option_element)
                 break
             except Exception as click_err:
                 if click_attempt < 2 and "not attached" in str(click_err).lower():
@@ -739,7 +804,7 @@ class AnchorPage:
             # 重试面对的是重渲染后的菜单：残留 rect 必须重新过 C8 门再点击，否则
             # force 点击面板外坐标会命中渲染在该坐标的其他元素（误选相邻项）。
             option_element = await self._scroll_menu_option_into_view(option_element, option_text, eid_str, timeout_ms)
-            await option_element.click(force=True)
+            await self._click_option(option_element)
 
         # do-while：期限只在「等待之后」判定。CI 高负载下单次 ``wait_for_timeout(100)``
         # 实测耗时 2.17s（CI run 41044829654）；若按 while 条件先判期限，首轮检查落空

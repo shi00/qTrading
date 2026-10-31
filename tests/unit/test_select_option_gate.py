@@ -281,3 +281,38 @@ async def test_select_option_retry_guard_skips_click_when_menu_collapsed(
 
     assert handle.clicks == 1, "菜单已收合时 retry 守卫不得重复点击"
     assert ap.page.mouse.wheels == [], "菜单已收合时不得进入 C8 滚轮"
+
+
+class _FakeInvisibleHandle(_FakeHandle):
+    """模拟 CanvasKit 语义节点：bbox 有效但 ``ElementHandle.click`` 抛 not visible。
+
+    CI run 41145284114 实证：选项 bbox（257×40）与菜单面板均有效，``click(force=True)``
+    仍抛 ``Element is not visible``（Playwright 对语义节点可见性判定不可靠）。
+    """
+
+    async def click(self, force: bool = False) -> None:
+        self.clicks += 1
+        raise RuntimeError(
+            "ElementHandle.click: Element is not visible\n"
+            "Call log:\n  - attempting click action\n    - scrolling into view if needed\n"
+        )
+
+
+@pytest.mark.asyncio
+async def test_select_option_falls_back_to_mouse_click_when_handle_not_visible(ap: AnchorPage) -> None:
+    """``ElementHandle.click`` 抛 not visible → 按 bbox 中心回落物理鼠标点击（C2）。
+
+    只回落 ``not visible`` 这一种错误：其余异常原样抛出（不掩盖真实故障）。
+    """
+    handle = _FakeInvisibleHandle()
+    # 展开前 None、展开后 None、收合确认读到 false（回落点击视为落地）
+    _stub_expanded(ap, [None, None, "false"])
+    ap._find_option_element = AsyncMock(return_value=handle)
+    ap.scroll_into_view = AsyncMock()
+    ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
+
+    await ap.select_option(_FILTER_COL_DROPDOWN, "代码", timeout_ms=1000)
+
+    assert handle.clicks == 1, "ElementHandle 主路径必须先尝试一次"
+    # 回落坐标 = bbox (500,400,200,36) 中心 (600,418)；首个 mouse 点击在展开箭角
+    assert ap.page.mouse.clicks[-1] == (600.0, 418.0)
