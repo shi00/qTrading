@@ -8,7 +8,6 @@ from contextlib import ExitStack
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -28,20 +27,20 @@ TABLE_NAMES = [t.name for t in reversed(Base.metadata.sorted_tables) if t.name n
 
 
 async def _truncate_all_tables(engine: AsyncEngine):
-    """Truncate all tables for test isolation (fast, no DDL)."""
-    tables_str = ", ".join(TABLE_NAMES)
+    """Delete all table rows for test isolation (ORM Table objects, no SQL string interpolation)."""
     try:
         async with engine.begin() as conn:
-            await conn.execute(text(f"TRUNCATE TABLE {tables_str} CASCADE"))
+            for table in TABLE_NAMES:
+                await conn.execute(Base.metadata.tables[table].delete())
         return
     except (OperationalError, ProgrammingError) as e:
-        logger.warning("[TestDB] TRUNCATE all tables failed, falling back to per-table: %s", e)
+        logger.warning("[TestDB] DELETE all tables failed, falling back to per-table: %s", e)
     for table in TABLE_NAMES:
         try:
             async with engine.begin() as conn:
-                await conn.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
+                await conn.execute(Base.metadata.tables[table].delete())
         except Exception as e:  # noqa: BLE001
-            logger.warning("[TestDB] TRUNCATE %s failed: %s", table, e)
+            logger.warning("[TestDB] DELETE %s failed: %s", table, e)
 
 
 def make_clean_db_fixture(tables: list[str] | None = None):
@@ -62,7 +61,7 @@ def make_clean_db_fixture(tables: list[str] | None = None):
         async with test_engine.begin() as conn:
             for table in table_list:
                 try:
-                    await conn.execute(text(f"DELETE FROM {table}"))
+                    await conn.execute(Base.metadata.tables[table].delete())
                 except Exception as e:  # noqa: BLE001
                     logger.warning("[TestDB] DELETE %s failed: %s", table, e, exc_info=True)
 

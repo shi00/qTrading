@@ -8,6 +8,10 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
+_INSERT_DAILY_QUOTES_SQL = text(
+    "INSERT INTO test_daily_quotes (ts_code, trade_date, close) VALUES (:ts_code, :trade_date, :close)"
+)
+
 
 class TestDataExplorerQueryClient(TestDatabaseBase):
     """Test data explorer query client using test_astock PostgreSQL database."""
@@ -33,7 +37,10 @@ class TestDataExplorerQueryClient(TestDatabaseBase):
             await conn.execute(text("DELETE FROM test_daily_quotes"))
             for i in range(100):
                 date = f"202301{i:02d}" if i < 31 else "20230201"
-                await conn.execute(text(f"INSERT INTO test_daily_quotes VALUES ('000001.SZ', '{date}', {10.0 + i})"))
+                await conn.execute(
+                    _INSERT_DAILY_QUOTES_SQL,
+                    {"ts_code": "000001.SZ", "trade_date": date, "close": 10.0 + i},
+                )
 
     async def asyncTearDown(self):
         async with self._ddl_engine.begin() as conn:
@@ -84,7 +91,10 @@ class TestDataExplorerQueryClient(TestDatabaseBase):
     async def test_execute_sql_memory_limit(self):
         async with self._ddl_engine.begin() as conn:
             for i in range(2500):
-                await conn.execute(text(f"INSERT INTO test_daily_quotes VALUES ('TMP', '2023{i}', {float(i)})"))
+                await conn.execute(
+                    _INSERT_DAILY_QUOTES_SQL,
+                    {"ts_code": "TMP", "trade_date": f"2023{i}", "close": float(i)},
+                )
 
         result = self.db_manager.execute_sql("SELECT * FROM test_daily_quotes")
         self.assertTrue(result["success"])
