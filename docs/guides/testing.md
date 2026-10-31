@@ -36,7 +36,7 @@
 | 文件 | 作用域 | 关键 fixture / hook |
 |---|---|---|
 | `tests/conftest.py` | session | `pytest_asyncio_loop_factories()`（Windows SelectorEventLoop）、`singleton_state` 上下文管理器、`mock_external_services` autouse（mock `NewsFetcher`/`ReviewManager`）、`isolate_config_file`、keyring/litellm 全局 mock、`pytest_configure` 早期拦截 |
-| `tests/unit/conftest.py` | unit | **`_reset_all_singletons` autouse**（R7 单例隔离）、`_isolate_egress_audit_disk` 等 8 个 autouse 状态重置 fixture |
+| `tests/unit/conftest.py` | unit | **`_reset_all_singletons` autouse**（R7 单例隔离）、`_isolate_egress_audit_disk` 等 10 个 autouse 状态重置 fixture |
 | `tests/unit/ui/conftest.py` | unit-ui | page stub（`Control.update()` 已挂载兼容，按 monkeypatch 隔离） |
 | `tests/integration/conftest.py` | integration | `_v1_page_compat`、`_isolate_tushare_token_file`、`function_engine` 等；session 级 DB 环境搭建 |
 | `tests/e2e/conftest.py` | e2e | session 级真 sidecar 启动 fixture（`real_sidecar_binary_e2e` / `flet_app` / `embedded_wizard_app` 等） |
