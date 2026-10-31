@@ -1420,6 +1420,32 @@ class TestDiffRebalance:
         sells = [t for t in sim.trades_list if t["action"] == "sell"]
         assert sells == []  # 无卖出交易
 
+    def test_sell_position_zero_price_skips_invalid_price(self) -> None:
+        """卖出名义价 <= 0（数据损坏）时记 invalid_price 跳过，不得以零价清仓。
+
+        若不跳过，持仓会按 0 元成交（净值被静默清零、现金还被费用扣成负数），
+        与买入侧 F3-06 的 invalid_price 护栏语义对齐。
+        """
+        sim, _config = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        q = self._quote(date(2024, 1, 8), price=0.0)
+        sim._sell_position(date(2024, 1, 8), "000001.SZ", sim.positions["000001.SZ"], q)
+        assert any(r["reason"] == "invalid_price" for r in sim.skipped_list)
+        assert "000001.SZ" in sim.positions
+        assert [t for t in sim.trades_list if t["action"] == "sell"] == []
+        # 常规撮合 skip 仅入明细，不写 data_warnings
+        assert not any(w for w in sim.warnings)
+
+    def test_sell_position_to_value_zero_price_skips_without_division_error(self) -> None:
+        """减持遇名义价 0 时先跳过 invalid_price，避免 ``sell_value / exit_price`` 的 0/0。"""
+        sim, _config = self._make_simulator()
+        self._add_pos(sim, "000001.SZ", 1000, 10.0)
+        q = self._quote(date(2024, 1, 8), price=0.0)
+        sim._sell_position_to_value(date(2024, 1, 8), "000001.SZ", q, target_value=5000.0)
+        assert any(r["reason"] == "invalid_price" for r in sim.skipped_list)
+        assert "000001.SZ" in sim.positions
+        assert [t for t in sim.trades_list if t["action"] == "sell"] == []
+
     def test_buy_to_target_scales_when_exceeds_budget(self) -> None:
         """买入总额超预算时按比例缩减（覆盖 386-390）。"""
         sim, _config = self._make_simulator()
