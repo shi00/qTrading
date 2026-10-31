@@ -31,6 +31,8 @@ from app.window_lifecycle import (
     setup_window_geometry,
 )
 
+pytestmark = pytest.mark.unit
+
 
 def _make_page() -> ft.Page:
     """Construct _DummyPage and cast to ft.Page for type-checking.

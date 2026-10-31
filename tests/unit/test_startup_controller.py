@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.startup_controller import StartupController, StartupState
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def state_recorder():
