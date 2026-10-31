@@ -584,7 +584,7 @@ M12 ui 表现层模块检视发现：`ui/components/news_feed.py:330/361` `on_lo
 
 **产生背景与现状**
 
-修复 DataExplorer embedded 连错端口(5432)的根因排查（2026-08-23，详见 `docs/superpowers/plans/2026-08-23-data-explorer-embedded-db-url-fix.md`「举一反三」）确认：全库运行时的 DB 建连接点中，唯一一套"第二套常驻连接"是 `data/persistence/data_explorer_query_client.py` 的 `_ensure_engine()` 自建 sync 引擎并缓存 `_shared_engine`，脱离 `CacheManager` 统一引擎管理、独立注册到 ShutdownCoordinator、在线程池线程建连。这使得 P0 ContextVar 在线程池线程失效时回退到残留 5432（P2）得以发生。本期采用最简症状层修复（`ConfigHandler` P1.5 模块级 embedded URL override + `DataExplorerViewModel.init_tables` 空表防护），P1.5 保证 URL 跨上下文恒定传导，不改动引擎形态，回归面最小。**归一化重构**（移除 `_shared_engine`、复用统一生命周期管理的引擎、处理 sync/async + 线程池语义）跨数据层引擎生命周期、触碰 ShutdownCoordinator/DAO 共享，按 CLAUDE.md §1.7「同类隐患跨多层/涉及公共契约，记录独立任务延后处理」登记。相关文件：`data/persistence/data_explorer_query_client.py`、`utils/config_handler.py`、`ui/viewmodels/data_explorer_view_model.py`。
+修复 DataExplorer embedded 连错端口(5432)的根因排查（2026-08-23「举一反三」，该排查记录为本地工作记录、未纳入本仓库）确认：全库运行时的 DB 建连接点中，唯一一套"第二套常驻连接"是 `data/persistence/data_explorer_query_client.py` 的 `_ensure_engine()` 自建 sync 引擎并缓存 `_shared_engine`，脱离 `CacheManager` 统一引擎管理、独立注册到 ShutdownCoordinator、在线程池线程建连。这使得 P0 ContextVar 在线程池线程失效时回退到残留 5432（P2）得以发生。本期采用最简症状层修复（`ConfigHandler` P1.5 模块级 embedded URL override + `DataExplorerViewModel.init_tables` 空表防护），P1.5 保证 URL 跨上下文恒定传导，不改动引擎形态，回归面最小。**归一化重构**（移除 `_shared_engine`、复用统一生命周期管理的引擎、处理 sync/async + 线程池语义）跨数据层引擎生命周期、触碰 ShutdownCoordinator/DAO 共享，按 CLAUDE.md §1.7「同类隐患跨多层/涉及公共契约，记录独立任务延后处理」登记。相关文件：`data/persistence/data_explorer_query_client.py`、`utils/config_handler.py`、`ui/viewmodels/data_explorer_view_model.py`。
 
 **期望的最终解法**
 
