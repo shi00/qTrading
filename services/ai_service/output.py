@@ -54,7 +54,9 @@ def _sanitize_free_text(value: str, max_len: int | None = None) -> str:
 
 def validate_ai_analysis_response(response: dict) -> dict:
     if not isinstance(response, dict):
-        return {"error": "Invalid response type", "score": 0}
+        # R21：非 dict 响应无任何可解析字段，score 必须为 None（未知），不得以 0
+        # 伪装成"明确否决"这一业务上合法的评分值。
+        return {"error": "Invalid response type", "score": None}
 
     score = response.get("score")
     if score is not None:
