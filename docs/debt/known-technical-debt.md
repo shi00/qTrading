@@ -554,7 +554,7 @@ M12 ui 表现层模块检视发现：VM 中重复调用 `TushareClient()` / `Tas
 
 **产生背景与现状**
 
-M12 ui 表现层模块检视发现：`ui/views/settings_tabs/data_source_tab.py:1338` View 经 `vm.get_data_processor()` 获取 `data_processor` 并传给子组件（2026-10-25 复核）。严格 MVVM 边界下，View 不应直接获取 data\_processor，应通过 VM 消费。**现状校准**：`ui/views/data_view.py` 已无 `data_processor` 引用（该项已解决）；仍存在同类形态的还有 `ui/views/watchlist_view.py:424`（传 `vm.detail_service`）与 `ui/views/screener_view.py:2717`（传 `vm.data_processor`）。M12 未修复原因：修复需引入子组件 VM，跨多文件协调。相关文件：`ui/views/settings_tabs/data_source_tab.py:1338`。
+M12 ui 表现层模块检视发现：`ui/views/settings_tabs/data_source_tab.py:1359` View 经 `vm.get_data_processor()` 获取 `data_processor` 并传给子组件（2026-10-31 复核）。严格 MVVM 边界下，View 不应直接获取 data\_processor，应通过 VM 消费。**现状校准**：`ui/views/data_view.py` 已无 `data_processor` 引用（该项已解决）；仍存在同类形态的还有 `ui/views/watchlist_view.py:447`（传 `vm.detail_service`）与 `ui/views/screener_view.py:2730`（传 `vm.data_processor`）。M12 未修复原因：修复需引入子组件 VM，跨多文件协调。相关文件：`ui/views/settings_tabs/data_source_tab.py:1359`。
 
 **期望的最终解法**
 
