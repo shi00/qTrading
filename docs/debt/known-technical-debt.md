@@ -53,7 +53,7 @@
 | P3-M12-NewsFeed-Callback-Passes-ControlEvent | #M12-028 MVVM 边界：news\_feed.py:328/:359 on\_load\_more\_click 传递 ControlEvent 而非业务数据 | P3 | ① 该文件再次出现回调传递 ControlEvent 而非业务数据的新实例时；② 或 ui 层 MVVM 迁移完成时 |
 | P3-M12-StockDetailDialog-BuildContent-No-Cover | #M12-031 测试覆盖：stock\_detail\_dialog.py:505 \_build\_content pragma: no cover | P3 | ① 该文件再次出现 `_build_content` 无覆盖分支的新实例时；② 或 per-file 覆盖率门禁要求该文件达阈值时 |
 | P3-PR3-TextButton-Interactive-Unverified | PR-3 对抗性检视 M3：ft.TextButton + AnchorKind.INTERACTIVE 的 CanvasKit 行为未验证 | P3 | ① 新增使用 `click_skip` 的测试时；② 或 `ft.TextButton` 升级时 |
-| P3-PR513-Script-SysPath-Inject | PR #513 检视：`scripts/verify_embedded_pg_connect.py` 顶部 `sys.path.insert` 注入仓库根后 import data 层（代码味道，已文档化） | P3 | ① `scripts/` 其他脚本出现同类 `sys.path` 注入需统一时；② 或脚本迁移为正式包入口时 |
+| P3-PR513-Script-SysPath-Inject | PR #513 检视：`scripts/` 下 15 个脚本（含 `verify_embedded_pg_connect.py`）顶部 `sys.path.insert` 注入仓库根后 import 仓库内包（scripts/ 层通行代码味道，已文档化） | P3 | ① `scripts/` 下新增脚本继续采用同类 `sys.path` 注入（同类脚本数 > 15）时；② 或脚本迁移为正式包入口（如 `[project.scripts]`）时 |
 | P3-PR513-VersionCache-No-Prod-Invalidation | PR #513 检视：`_version_cache` 生产期不主动失效（合理设计，供未来评估） | P3 | ① 应用引入运行期 sidecar 升级/替换流程时；② 或 EmbeddedPostgresService 支持热切换时 |
 | P3-DataExplorer-SyncEngine-Unification | DataExplorer 同步引擎游离于统一连接管理（举一反三登记，本期不实施） | P3 | ① DataExplorer 再次出现连接错口/引擎缓存跨模式复用问题；② 或统一连接管理重构时 |
 | P3-UX06-Startup-SLA-E2E-Gap | 冷启动到导航可交互的端到端 SLA 未实测（UX-06 以 proxy 构成基线替代，如实记录缺位） | P3 | ① 真实端到端测量 > 8s（SLA 超阈）时触发 visited\_tabs 顶层推广（`test_consumes_all_seven_subviews_in_stack` 改写 + #438 范式推广）；② 或启动流程重构时 |
@@ -252,19 +252,19 @@ review 02 检视发现 `_run_sidecar` 用 `subprocess.run(timeout=3600)` 不可�
 
 期望最终解法：① sidecar 为维护命令安装 SIGTERM/SIGINT 处理并传播到 `pg_dump` 子进程（`kill_on_drop` 仅覆盖优雅路径，需显式信号处理器）；② dump 中断时删除 `.partial` 或 doctor 提供清理动作；③ 评估 restore 可安全取消点；④ `run_async` 支持可中断变体。验收标准：① terminate 后 `pg_dump` 进程树被终止、无 `.partial` 继续增长；② sidecar dump 中断无 `.partial` 残留或 doctor 可清理；③ restore 取消有明确一致性边界；④ run\_async 中断语义有单测覆盖。upgrade 触发条件：① 用户报告停机后 `.partial` 残留或孤儿 pg\_dump 占用磁盘/连接；② restore 取消成为产品需求；③ ThreadPoolManager 重构时。
 
-#### P3-PR513-Script-SysPath-Inject：PR #513 检视：`scripts/verify_embedded_pg_connect.py` 顶部 `sys.path.insert` 注入仓库根后 import data 层（代码味道，已文档化）
+#### P3-PR513-Script-SysPath-Inject：PR #513 检视：`scripts/` 下 15 个脚本（含 `verify_embedded_pg_connect.py`）顶部 `sys.path.insert` 注入仓库根后 import 仓库内包（scripts/ 层通行代码味道，已文档化）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-PR513-Script-SysPath-Inject** | PR #513 检视：`scripts/verify_embedded_pg_connect.py` 顶部 `sys.path.insert` 注入仓库根后 import data 层（代码味道，已文档化） | ① `scripts/` 其他脚本出现同类 `sys.path` 注入需统一时；② 或脚本迁移为正式包入口时 |
+| **P3-PR513-Script-SysPath-Inject** | PR #513 检视：`scripts/` 下 15 个脚本（含 `verify_embedded_pg_connect.py`）顶部 `sys.path.insert` 注入仓库根后 import 仓库内包（scripts/ 层通行代码味道，已文档化） | ① `scripts/` 下新增脚本继续采用同类 `sys.path` 注入（同类脚本数 > 15）时；② 或脚本迁移为正式包入口（如 `[project.scripts]`）时 |
 
 **产生背景与现状**
 
-PR #513 检视（第一轮）遗留观察级建议。`scripts/verify_embedded_pg_connect.py:26-32` 因脚本经 `python scripts/verify_embedded_pg_connect.py` 直接运行时 `sys.path[0]` 指向 `scripts/`，data 包不在可导入路径上，故用 `sys.path.insert(0, str(_REPO_ROOT))` 将仓库根注入 `sys.path` 后 `import data.persistence.embedded_postgres.version`。注入后 `data/__init__.py`、`data/persistence/__init__.py` 均用惰性 `__getattr__`，不触发重依赖，且非红线 `data/cache` 路径，可接受。`sys.path` 注入为代码味道。相关文件：`scripts/verify_embedded_pg_connect.py:26-32`。
+PR #513 检视（第一轮）遗留观察级建议。`scripts/verify_embedded_pg_connect.py:26-32` 因脚本经 `python scripts/verify_embedded_pg_connect.py` 直接运行时 `sys.path[0]` 指向 `scripts/`，data 包不在可导入路径上，故用 `sys.path.insert(0, str(_REPO_ROOT))` 将仓库根注入 `sys.path` 后 `import data.persistence.embedded_postgres.version`。注入后 `data/__init__.py:22`、`data/persistence/__init__.py:16` 均用惰性 `__getattr__`，不触发重依赖，且非红线 `data/cache` 路径，可接受。**范围校准（2026-10-31 复核）**：同类注入并非孤例，`scripts/` 下共 15 个脚本采用同一形态（如 `check_theme_contrast.py:23`、`collect_cninfo.py:31`、`collect_corpus.py:34`、`collect_sina_7x24.py:32`、`corpus_manifest.py:76`），属 scripts/ 层通行约定而非单点代码味道；本条仍按单文件登记，统一治理需另行升级。相关文件：`scripts/verify_embedded_pg_connect.py:26-32`（及上述同类脚本）。
 
 **期望的最终解法**
 
-声明脚本为可安装入口（如 `pyproject.toml` 的 `[project.scripts]`）或以包内相对导入方式运行，消除 `sys.path` 注入。验收标准：① 移除 `sys.path.insert` 后 `python -m scripts.verify_embedded_pg_connect` 可运行；② 现有使用方式（`python scripts/verify_embedded_pg_connect.py`）不回退。upgrade 触发条件：① `scripts/` 其他脚本出现同类 `sys.path` 注入需统一时；② 或脚本迁移为正式包入口时。
+声明脚本为可安装入口（如 `pyproject.toml` 的 `[project.scripts]`）或以包内相对导入方式运行，消除 `sys.path` 注入。验收标准：① 移除 `sys.path.insert` 后 `python -m scripts.verify_embedded_pg_connect` 可运行（`scripts/` 无 `__init__.py`，依赖隐式命名空间包；2026-10-31 实测 `python -m scripts.verify_embedded_pg_connect --help` 通过）；② 现有使用方式（`python scripts/verify_embedded_pg_connect.py`）不回退。upgrade 触发条件：① `scripts/` 下新增脚本继续采用同类 `sys.path` 注入（同类脚本数 > 15）时；② 或脚本迁移为正式包入口（如 `[project.scripts]`）时。
 
 #### P3-PR513-VersionCache-No-Prod-Invalidation：PR #513 检视：`_version_cache` 生产期不主动失效（合理设计，供未来评估）
 
