@@ -43,7 +43,7 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 | 17 | 窗口图标 | `page.window_icon` | `page.window.icon` | AttributeError |
 | 18 | 控件 page 属性 | `self.page = page` 直接赋值 | 通过 `parent` 链访问；声明式组件内经 `ft.context.page` 或事件 `e.page` 获取（`PageRefMixin` 已删除，新代码禁用） | AttributeError |
 | 19 | 本地存储 | `page.client_storage.get(key)` / `page.client_storage.set(key, value)` | `prefs = ft.SharedPreferences(); page.services.append(prefs)` 后 `await prefs.get(key)` / `await prefs.set(key, value)` | AttributeError |
-| 20 | 控件 update | 未挂载时 `control.update()` 静默返回 | 未挂载抛 `RuntimeError`（测试代码由 `conftest._v1_page_compat` fixture 兼容） | RuntimeError |
+| 20 | 控件 update | 未挂载时 `control.update()` 静默返回 | 未挂载抛 `RuntimeError`（测试不得调用未挂载控件的 `update()`；声明式测试通过状态更新触发重渲染） | RuntimeError |
 | 21 | 窗口方法 | `page.window.destroy()`（同步） | `await page.window.destroy()`（V1 协程） | 运行期（RuntimeWarning: coroutine never awaited） |
 
 > **⚠️ 桌面关闭事件不可用 `page.on_close`**：`page.on_close` 在会话关闭/超时断开时触发，**非**用户点击窗口关闭按钮。桌面端关闭拦截必须用 `page.window.prevent_close = True` + `page.window.on_event`（监听 `ft.WindowEventType.CLOSE`），见 `app/application.py` 的窗口事件处理器。此为 V1 正确实现，非 V0 遗留。
@@ -66,7 +66,7 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 
 ## 兼容垫片使用规则
 
-V0→V1 兼容垫片（`PageRefMixin` / 旧 mock 全局桩 / `hasattr`/`getattr` 双路径取值回退）**新代码禁止使用**；上述垫片均已从生产代码删除，当前无残留。测试侧改用 `conftest._v1_page_compat` fixture 兼容未挂载控件的 `update()`/`page` 访问。例外清单见本文末。
+V0→V1 兼容垫片（`PageRefMixin` / 旧 mock 全局桩 / `hasattr`/`getattr` 双路径取值回退）**新代码禁止使用**；上述垫片均已从生产代码与测试代码删除，当前无残留。测试侧不得再引入 `Control.update()` 静默返回或可写 `control.page` 兼容桩；声明式测试的 page 访问统一经 `tests/unit/ui/component_renderer.py` 的 `attach_fake_page` 注入 `ft.context.page`（该注入不改变未挂载 `update()` 的 RuntimeError 语义）。例外清单见本文末。
 
 > **`refresh_dropdown_options()` 状态**：已在 Phase R.4.1 删除。声明式 UI 下 options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化，该函数不再需要。
 
