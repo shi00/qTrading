@@ -598,7 +598,7 @@ M12 ui 表现层模块检视发现：`ui/components/news_feed.py:328/359` `on_lo
 
 **产生背景与现状**
 
-UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`scripts/probe/startup_perf.py` 可复现）：依赖库 import \~5.4s（本机 dev 基准，pandas 主导）+ 单例 \~0.46s + 7 View 渲染 \~0.16-1.03s ≈ 6.5-7s；litellm 已由 `ai_service._ensure_litellm_loaded` 双层惰性移除 18s+ 阻塞（实测 litellm 不在 import/构造链）。visited\_tabs 懒构造推广判定为收益/风险比不成立（可省 \~1-1.4s 仅 15-20%，主导成本 import 不可省；且转嫁首次切页冻结 + 契约测试改写）。**缺位**：端到端真实冷启动→NavigationRail 可交互测量（含 DB/embedded-PG 初始化、低性能机器）需 GUI/浏览器环境，无头无法执行，SLA（定义 8s 阈值）状态按 proxy 构成判定达标，未以真实启动实测佐证。**现状校准（2026-10-30 复核）**：E2E（浏览器模式）实测启动链路为 sidecar 就绪 + Chromium CanvasKit 加载（单用例 setup 约 44-65s），与桌面端 `python main.py` 冷启动口径不可比，仍不能替代 GUI 端到端测量；本条保持。相关文件：`scripts/probe/startup_perf.py`、`ui/app_layout.py`（\_build\_pages\_stack）、`app/bootstrap.py`（已删 E2E 无效预热）、`UX-06-方案设计.md`（worktree 内）。
+UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`scripts/probe/startup_perf.py` 可复现）：依赖库 import \~5.4s（本机 dev 基准，pandas 主导）+ 单例 \~0.46s + 7 View 渲染 \~0.16-1.03s ≈ 6.5-7s；litellm 已由 `ai_service._ensure_litellm_loaded` 双层惰性移除 18s+ 阻塞（实测 litellm 不在 import/构造链）。visited\_tabs 懒构造推广判定为收益/风险比不成立（可省 \~1-1.4s 仅 15-20%，主导成本 import 不可省；且转嫁首次切页冻结 + 契约测试改写）。**缺位**：端到端真实冷启动→NavigationRail 可交互测量（含 DB/embedded-PG 初始化、低性能机器）需 GUI/浏览器环境，无头无法执行，SLA（定义 8s 阈值）状态按 proxy 构成判定达标，未以真实启动实测佐证。**现状校准（2026-10-30 复核）**：E2E（浏览器模式）实测启动链路为 sidecar 就绪 + Chromium CanvasKit 加载（单用例 setup 约 44-65s），与桌面端 `python main.py` 冷启动口径不可比，仍不能替代 GUI 端到端测量；本条保持。相关文件：`scripts/probe/startup_perf.py`、`ui/app_layout.py`（\_build\_pages\_stack）、`app/bootstrap.py`（已删 E2E 无效预热）、`UX-06-方案设计.md`（本地设计稿，未纳入本仓库）。
 
 **期望的最终解法**
 
