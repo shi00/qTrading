@@ -418,9 +418,14 @@ class CacheManager:
                 raise RuntimeError("Database engine not initialized")
             async with self.engine.begin() as conn:
                 try:
-                    # 优先使用 CASCADE 删除整个 public schema 并重建，确保无残留表
-                    await conn.execute(sa.text("DROP SCHEMA public CASCADE"))
-                    await conn.execute(sa.text("CREATE SCHEMA public"))
+                    # 优先使用 CASCADE 删除整个 public schema 并重建，确保无残留表。
+                    # 必须包在 SAVEPOINT 内：PostgreSQL 中任一语句失败会使当前事务进入
+                    # aborted 状态，之后的语句一律报 "current transaction is aborted"。
+                    # 若直接在事务内 catch 后执行降级路径，metadata.drop_all() 必然失败，
+                    # 降级分支实际不可用。回滚到 SAVEPOINT 后连接恢复可用，降级路径才能执行。
+                    async with conn.begin_nested():
+                        await conn.execute(sa.text("DROP SCHEMA public CASCADE"))
+                        await conn.execute(sa.text("CREATE SCHEMA public"))
                     logger.debug("[CacheManager] Wipe | Dropped and recreated public schema via CASCADE.")
                 except Exception as cascade_err:
                     # 权限不足时降级到 metadata.drop_all()
