@@ -271,7 +271,10 @@ def _build_header(
 ) -> list[ft.Control]:
     """构建表头单元格 (theme-dependent)。
 
-    on_sort 非空时用 Semantics(GestureDetector(on_tap)) 包裹（排序状态三态语义标注,
+    当前排序列的可见排序指示为 ``ft.Icon(ARROW_UPWARD/ARROW_DOWNWARD)``，替代原文本
+    ``" ↑"/" ↓"`` 字形（不依赖字体支持）；读屏语义仍挂 ``Text.semantics_label``
+    （文字三态文案，不含箭头）。
+    on_sort 非空时用 GestureDetector(on_tap) 包裹（排序状态三态语义标注,
     读屏可感知升/降/可排序；与行一致生成 flt-tappable 语义属性）。
     Container.on_click 生成 InkWell 语义合并会吸收子树 Text（PR #373 实证），
     导致列头文本从语义树消失 + anchor 不可定位。
@@ -287,9 +290,6 @@ def _build_header(
         col_id = str(col["id"])
         is_action = col.get("action") == _DETAIL_ACTION
         base_label = str(col.get("label", col_id))
-        label = base_label
-        if sort_col == col_id:
-            label += " ↑" if sort_asc else " ↓"
         if on_sort is not None and not is_action:
             # 排序表头读屏语义三态标注 — 升序 / 降序 / 可排序.
             if sort_col == col_id and sort_asc:
@@ -299,14 +299,29 @@ def _build_header(
             else:
                 state_desc = I18n.get("table_sort_action")
         text = ft.Text(
-            label,
+            base_label,
             weight=ft.FontWeight.BOLD,
             size=AppStyles.FONT_SIZE_BODY_SM,
             color=AppColors.TABLE_HEADER_TEXT,
             no_wrap=True,
         )
+        if sort_col == col_id:
+            # 排序指示用 ft.Icon 替代文本 " ↑"/" ↓": 不依赖字体字形, 屏幕阅读器
+            # 朗读结果确定; 读屏语义由 Text.semantics_label 的文字文案承载.
+            glyph = ft.Icons.ARROW_UPWARD if sort_asc else ft.Icons.ARROW_DOWNWARD
+            header_content: ft.Control = ft.Row(
+                [
+                    text,
+                    ft.Icon(glyph, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TABLE_HEADER_TEXT),
+                ],
+                spacing=2,
+                tight=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+        else:
+            header_content = text
         content = ft.Container(
-            content=text,
+            content=header_content,
             alignment=ft.Alignment.CENTER_LEFT,
             padding=ft.Padding.only(left=8, right=8),
         )
@@ -320,11 +335,11 @@ def _build_header(
             # 本次无行为变更. Text.semantics_label 只改 Text 节点的读屏标签, 不产生额外语义
             # 边界, 排序状态由该 label 朗读.
             # 分隔符随 locale (zh 全角 / en 半角), 避免英文下跨语言标点混排.
-            # label 含 ↑/↓ 箭头: E2E test_screener_sort_by_column 语义断言以
-            # "pct_chg (涨跌幅) ↑" 作为朗读锚点 (aria-label* 子串匹配); CanvasKit 无 DOM 文本,
-            # 语义节点 label 即读屏文本, 故语义串须保留箭头以兼容既有 E2E 锚点.
+            # 语义串只用文字 (列名 + 排序状态文案), 不含 ↑/↓ 箭头: CanvasKit 无 DOM 文本,
+            # 语义节点 label 即读屏文本; E2E 朗读锚点已迁移为 table_sort_asc /
+            # table_sort_desc 文案断言 (不再依赖箭头字形).
             sep = I18n.get("table_sort_sep")
-            text.semantics_label = f"{label}{sep}{state_desc}"
+            text.semantics_label = f"{base_label}{sep}{state_desc}"
             gesture = ft.GestureDetector(
                 content=content,
                 on_tap=_make_sort_handler(sort_col, sort_asc, col_id, on_sort),

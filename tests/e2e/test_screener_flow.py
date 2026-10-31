@@ -88,8 +88,10 @@ async def test_screener_pagination_info(e2e_page):
 async def test_screener_sort_by_column(e2e_page):
     """测试：点击列头后表格按对应列升序/降序排序。
 
-    点击 ``pct_chg`` 列头后，列头出现 ↑（升序）→ 再次点击出现 ↓（降序）。
-    通过列头箭头标记验证排序状态切换（virtual_table.PaginatedTable 渲染约定）。
+    点击 ``pct_chg`` 列头后切换为升序，再次点击切换为降序。
+    排序状态通过列头读屏语义文案验证（``table_sort_asc`` / ``table_sort_desc``）：
+    virtual_table 的可见排序指示已改为 ``ft.Icon`` 箭头，读屏语义由
+    ``Text.semantics_label``（列名 + 排序状态文案）承载，E2E 以语义文案作为朗读锚点。
     种子数据仅 1 行结果，无法验证排序前后行序变化，但可验证排序触发。
     """
     screener = ScreenerPage(e2e_page)
@@ -100,15 +102,16 @@ async def test_screener_sort_by_column(e2e_page):
 
     # 列头文本格式: "pct_chg (涨跌幅)"（MetaDataManager.get_column_alias 渲染约定）
     col_label = f"pct_chg ({I18n.get('col_pct_chg')})"
+    sep = I18n.get("table_sort_sep")
 
-    # PR-2: 列头点击改用 anchor（col_id="pct_chg"），文本验证保持 col_label
-    # 第一次点击 → 升序 (↑)，virtual_table.next_sort_state 新列默认升序
+    # PR-2: 列头点击改用 anchor（col_id="pct_chg"），语义断言保持 col_label + 状态文案
+    # 第一次点击 → 升序，virtual_table.next_sort_state 新列默认升序
     await screener.click_column_header("pct_chg", timeout_ms=TIMEOUTS.INTERACTION)
-    await screener.expect_text(f"{col_label} ↑", timeout_ms=TIMEOUTS.FAST)
+    await screener.expect_text(f"{col_label}{sep}{I18n.get('table_sort_asc')}", timeout_ms=TIMEOUTS.FAST)
 
-    # 第二次点击 → 降序 (↓)，next_sort_state 翻转方向
+    # 第二次点击 → 降序，next_sort_state 翻转方向
     await screener.click_column_header("pct_chg", timeout_ms=TIMEOUTS.INTERACTION)
-    await screener.expect_text(f"{col_label} ↓", timeout_ms=TIMEOUTS.FAST)
+    await screener.expect_text(f"{col_label}{sep}{I18n.get('table_sort_desc')}", timeout_ms=TIMEOUTS.FAST)
 
 
 async def test_detail_dialog_open_close(e2e_page):

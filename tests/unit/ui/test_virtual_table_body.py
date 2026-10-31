@@ -122,14 +122,27 @@ def _sort_header_text(headers, col_index):
     """可排序表头读屏语义挂 Text.semantics_label (不嵌套 Semantics).
 
     结构 (col_anchor=None): headers[i].content (GestureDetector) →
-    .content (Container) → .content (Text, 承载 semantics_label)。
+    .content (Container) → .content (Text 或 Row[Text, Icon])。
     返回该 Text，调用方断言 semantics_label。
     """
     gesture = headers[col_index].content
     assert isinstance(gesture, ft.GestureDetector)
-    text = gesture.content.content
+    content = gesture.content.content
+    text = content.controls[0] if isinstance(content, ft.Row) else content
     assert isinstance(text, ft.Text)
     return text
+
+
+def _sorted_header_icon(headers, col_index):
+    """取当前排序列的排序指示 Icon (无排序指示时返回 None)。"""
+    gesture = headers[col_index].content
+    assert isinstance(gesture, ft.GestureDetector)
+    content = gesture.content.content
+    if not isinstance(content, ft.Row):
+        return None
+    icon = content.controls[1]
+    assert isinstance(icon, ft.Icon)
+    return icon
 
 
 def _fake_drag_handlers():
@@ -203,17 +216,49 @@ class TestBuildHeader:
         text = inner.content
         assert text.value == "Name"
 
-    def test_sort_col_ascending_appends_up_arrow(self):
+    def test_sort_col_ascending_shows_up_icon_not_text_glyph(self):
+        """升序排序列: 可见指示为 ft.Icon(ARROW_UPWARD), Text.value 不再含 ↑。"""
         headers = _build_header(_make_columns(), "pct_chg", True, None)
-        inner = headers[2].content
-        text = inner.content
-        assert text.value == "Change ↑"
+        row = headers[2].content.content
+        assert isinstance(row, ft.Row)
+        text, icon = row.controls
+        assert isinstance(text, ft.Text)
+        assert text.value == "Change"
+        assert "↑" not in text.value
+        assert "↓" not in text.value
+        assert isinstance(icon, ft.Icon)
+        assert icon.icon == ft.Icons.ARROW_UPWARD
 
-    def test_sort_col_descending_appends_down_arrow(self):
+    def test_sort_col_descending_shows_down_icon_not_text_glyph(self):
+        """降序排序列: 可见指示为 ft.Icon(ARROW_DOWNWARD), Text.value 不再含 ↓。"""
         headers = _build_header(_make_columns(), "pct_chg", False, None)
-        inner = headers[2].content
-        text = inner.content
-        assert text.value == "Change ↓"
+        row = headers[2].content.content
+        assert isinstance(row, ft.Row)
+        text, icon = row.controls
+        assert isinstance(text, ft.Text)
+        assert text.value == "Change"
+        assert "↑" not in text.value
+        assert "↓" not in text.value
+        assert isinstance(icon, ft.Icon)
+        assert icon.icon == ft.Icons.ARROW_DOWNWARD
+
+    def test_sort_icon_uses_theme_tokens(self):
+        """R23: 排序图标尺寸/颜色取自 AppStyles / AppColors token (无裸数值/裸色)。"""
+        headers = _build_header(_make_columns(), "pct_chg", True, None)
+        row = headers[2].content.content
+        assert isinstance(row, ft.Row)
+        icon = row.controls[1]
+        assert isinstance(icon, ft.Icon)
+        assert icon.size == AppStyles.FONT_SIZE_BODY_SM
+        assert icon.color == AppColors.TABLE_HEADER_TEXT
+
+    def test_unsorted_sortable_column_has_no_icon(self, mock_i18n_state):
+        """非当前排序列不追加排序图标 (保持 Container(Text) 结构)。"""
+        headers = _build_header(_make_columns(), "pct_chg", True, MagicMock())
+        assert _sorted_header_icon(headers, 0) is None
+        icon = _sorted_header_icon(headers, 2)
+        assert isinstance(icon, ft.Icon)
+        assert icon.icon == ft.Icons.ARROW_UPWARD
 
     def test_label_falls_back_to_id_when_missing(self):
         """col 无 label 字段时用 id 作为 label。"""
@@ -289,6 +334,19 @@ class TestBuildHeaderSemantics:
         assert I18n.get("table_sort_desc") in text.semantics_label
         assert I18n.get("table_sort_asc") not in text.semantics_label
 
+    def test_semantics_label_uses_text_only_no_arrow_glyph(self, mock_i18n_state) -> None:
+        """读屏语义改由文字承载 (列名 + table_sort_asc), 不含 ↑/↓ 箭头字形。"""
+        from ui.i18n import I18n
+
+        headers = _build_header(_make_columns(), "pct_chg", True, MagicMock())
+        text = _sort_header_text(headers, 2)
+        assert text.semantics_label is not None
+        assert text.semantics_label.startswith("Change")
+        assert I18n.get("table_sort_sep") in text.semantics_label
+        assert I18n.get("table_sort_asc") in text.semantics_label
+        assert "↑" not in text.semantics_label
+        assert "↓" not in text.semantics_label
+
     def test_non_sorted_sortable_column_semantics_label(self, mock_i18n_state) -> None:
         """非当前可排序列 → Text.semantics_label 含 table_sort_action, 不含方向词。"""
         from ui.i18n import I18n
@@ -334,6 +392,20 @@ class TestBuildHeaderSemantics:
             assert len(row.controls) == 2
             handle = row.controls[1]
             assert isinstance(handle, ft.GestureDetector)
+
+    def test_sorted_header_keeps_drag_handle_and_icon(self):
+        """排序指示 (Icon) 不破坏拖拽把手布局: cell = Row[sort_area(Row[Text, Icon]), handle]。"""
+        headers = _build_header(_make_columns(), "pct_chg", True, None, drag_handlers=_fake_drag_handlers())
+        cell = headers[2]
+        row = cell.content
+        assert isinstance(row, ft.Row)
+        assert len(row.controls) == 2
+        sort_area = row.controls[0]
+        assert sort_area.expand is True
+        inner = sort_area.content.content
+        assert isinstance(inner, ft.Row)
+        assert isinstance(inner.controls[0], ft.Text)
+        assert isinstance(inner.controls[1], ft.Icon)
 
     def test_drag_handle_contract(self):
         """拖拽把手 GestureDetector 含 exclude_from_semantics + RESIZE_LEFT_RIGHT +

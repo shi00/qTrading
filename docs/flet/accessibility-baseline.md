@@ -69,7 +69,7 @@
 | 例外 | 对应条款 | 现状说明 | 修复方向 / 复查触发条件 |
 |------|---------|---------|------------------------|
 | 表格键盘遍历降级（`ui/components/virtual_table.py`） | §2.4 键盘路径 | Flet 无表格 focus/grid 键盘遍历（无 Focus 控件、DataTable 无 on_key、KeyboardListener 无 focus 遍历），键盘用户无方向键导航 | 复查触发：Flet 升级提供表格 focus/grid 能力，或 KeyboardListener 组合方案经 E2E 验证可行（与 `virtual_table.py` 的 `# NOTE(lazy:)` 语义一致） |
-| 排序指示语义（`ui/components/virtual_table.py` 排序指示） | §2.1 Label 关联 | 用 `↑`/`↓` 文本符号作排序指示，依赖字体支持，屏幕阅读器朗读结果不确定 | 修复方向：替换为 `ft.Icon(ft.Icons.ARROW_UPWARD)` / `ft.Icon(ft.Icons.ARROW_DOWNWARD)`，同步迁移 E2E `test_screener_sort_by_column` 的 `"pct_chg (涨跌幅) ↑"` 朗读锚点；升级触发：virtual_table 重构或可访问性 audit 时（债表 M12-020） |
+| 排序指示语义（`ui/components/virtual_table.py` 排序指示） | §2.1 Label 关联 | 已修复（债表 M12-020）：可见排序指示改用 `ft.Icon(ft.Icons.ARROW_UPWARD)` / `ft.Icon(ft.Icons.ARROW_DOWNWARD)`，不再依赖字体字形；读屏语义由 `Text.semantics_label` 的文字文案（`table_sort_asc` / `table_sort_desc`）承载，E2E 朗读锚点已迁移为语义文案断言 | 已落地/复核通过（由 `tests/unit/ui/test_virtual_table_body.py` 结构契约守护）；复查触发：排序指示再次变更或可访问性 audit 时 |
 
 > 已修复项（检视报告 F08，2026-10）：`slider_input.py` 数值 TextField / `watchlist_add_dialog.py` 搜索框 / `system_tab.py` no_proxy 输入框 / 已移除的 `llm_config_panel.py` 确认 Checkbox 曾在本表登记，现已分别补语义名称（`tooltip` / 持久 `label=` / `semantics_label=`）移出例外；`test_accessibility_contract.py` 的 TextField/Checkbox 扫描已常态化守护，无例外条目。真实读屏（Narrator/NVDA）实测尚未执行，控件名称语义以结构契约测试为准。
 
