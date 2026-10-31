@@ -158,7 +158,7 @@ M9 services 模块检视发现：`services/backtest_service.py:132-157`（`_pers
 
 **产生背景与现状**
 
-M9 services 模块检视发现：`services/task_manager.py:710` `cancel_all_running_async` 方法标注 `@log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)`，但该方法实际是批量取消+等待，可能更适合 `DB_BULK_IO`。阈值选择影响性能监控告警精度，不影响功能。M9 未修复原因：修改需评估历史告警基线。相关文件：`services/task_manager.py:710`。
+M9 services 模块检视发现：`services/task_manager.py:741-742`（`cancel_all_running_async`，装饰器 :741 / 方法定义 :742）标注 `@log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)`，但该方法实际是批量取消+等待，可能更适合 `DB_BULK_IO`。阈值选择影响性能监控告警精度，不影响功能。M9 未修复原因：修改需评估历史告警基线。相关文件：`services/task_manager.py:741-742`。
 
 **期望的最终解法**
 
