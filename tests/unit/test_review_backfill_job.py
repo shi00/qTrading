@@ -51,9 +51,17 @@ def _make_mock_rm(
 
 
 async def _submit_and_run(job, mock_tm_cls) -> str:
-    """执行 job（提交任务）并模拟任务中心执行 coroutine_factory，返回结果字符串。"""
+    """执行 job（提交任务）并模拟任务中心执行 coroutine_factory，返回结果字符串。
+
+    同时锁定提交契约（unique_key / 不可取消 / 任务类型），防止注册键漂移或误改为可取消
+    （回填进行中取消会留下半完成状态）。
+    """
     await job(_FakeSvc())
     submit_kwargs = mock_tm_cls.return_value.submit_task.call_args.kwargs
+    assert submit_kwargs["unique_key"] == "review_backfill"
+    assert submit_kwargs["cancellable"] is False
+    assert submit_kwargs["task_type"] == I18n.get("task_type_data_sync")
+    assert callable(submit_kwargs["coroutine_factory"])
     return await submit_kwargs["coroutine_factory"]("task-1")
 
 
