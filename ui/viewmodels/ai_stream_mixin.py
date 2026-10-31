@@ -20,6 +20,7 @@ import time
 import typing
 from collections.abc import Callable, Coroutine
 from dataclasses import replace
+from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -604,6 +605,15 @@ class AIStreamMixin:
 
     # --- Strategy execution orchestration (TaskManager) ---
 
+    @cached_property
+    def _task_manager(self) -> TaskManager:
+        """缓存注册单例引用（M12-022），避免每次调用重复进入 TaskManager.__new__。
+
+        单例为进程级资源、生命周期由 singleton registry 管理（VM dispose 不释放），
+        故每实例仅惰性获取一次即可（惰性而非 __init__ 构造，保持既有测试 patch 时点语义）。
+        """
+        return TaskManager()
+
     def _commit_realtime_results(
         self,
         result_df: pd.DataFrame,
@@ -707,7 +717,7 @@ class AIStreamMixin:
                 # 1. Prepare Context (may trigger massive data load)
                 # 首次筛选在此懒异步构造 DataProcessor（IO 线程池 offload，R16）
                 dp = await self._ensure_processor()
-                TaskManager().update_progress(
+                self._task_manager.update_progress(
                     task_id,
                     0.05,
                     Message("task_loading_data"),
@@ -716,7 +726,7 @@ class AIStreamMixin:
                 # 提交后编辑开关不得改变本次票池）；init_data 重试分支同样用冻结值。
                 context = await dp.get_strategy_data(exclude_st=_run_config["exclude_st"])
                 if not context:
-                    TaskManager().update_progress(
+                    self._task_manager.update_progress(
                         task_id,
                         0.1,
                         Message("task_cache_empty_init"),
@@ -762,7 +772,7 @@ class AIStreamMixin:
                 def _combined_ai_progress(current, total, msg):
                     self._on_ai_progress(current, total, msg)  # For local View UI
                     # D7: msg 为 Message, 直接透传 (不再拼 "[c/t] " 前缀, 防 dataclass repr)
-                    TaskManager().update_progress(
+                    self._task_manager.update_progress(
                         task_id,
                         current / total if total > 0 else 0,
                         msg,
@@ -790,7 +800,7 @@ class AIStreamMixin:
                 # We inject the task_id into context so deep AI tasks can check cancellation
                 context["_task_id"] = task_id
 
-                TaskManager().update_progress(
+                self._task_manager.update_progress(
                     task_id,
                     0.2,
                     Message("task_executing_strategy", {"name_key": strategy.name_key}),
@@ -809,7 +819,7 @@ class AIStreamMixin:
                         context,
                     )
 
-                TaskManager().update_progress(
+                self._task_manager.update_progress(
                     task_id,
                     0.95,
                     Message("task_aggregating_results"),
@@ -1066,7 +1076,7 @@ class AIStreamMixin:
         # task_type 也是 Message. _on_tasks_updated 通过 task_type.key 检测策略任务 (替代
         # 旧 TASK_NAME_PREFIX in t.name 字符串检测, 因 t.name 现为 Message 实例不支持 `in`).
         try:
-            task_id = TaskManager().submit_task(
+            task_id = self._task_manager.submit_task(
                 name=Message("screener_running_strategy", {"name_key": strategy.name_key}),
                 task_type=Message("task_type_ai_screening"),
                 coroutine_factory=_execute_screening,
@@ -1118,4 +1128,4 @@ class AIStreamMixin:
         可在 Flet 同步 handler 中直接调用 (R16 不适用: 无 IO/CPU 阻塞).
         """
         if self._active_task_id is not None:
-            TaskManager().cancel_task(self._active_task_id)
+            self._task_manager.cancel_task(self._active_task_id)

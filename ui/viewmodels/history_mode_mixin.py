@@ -19,6 +19,7 @@ import logging
 import math
 from collections.abc import Callable
 from dataclasses import replace
+from functools import cached_property
 
 import pandas as pd
 
@@ -114,6 +115,15 @@ class HistoryModeMixin:
     _history_request_seq: int
     _dataset_revision: int
     _disposed: bool
+
+    @cached_property
+    def _cache(self) -> CacheManager:
+        """缓存注册单例引用（M12-022），避免每次调用重复进入 CacheManager.__new__。
+
+        单例为进程级资源、生命周期由 singleton registry 管理（VM dispose 不释放），
+        故每实例仅惰性获取一次即可（惰性而非 ``__init__`` 构造，保持既有测试 patch 时点语义）。
+        """
+        return CacheManager()
 
     def switch_to_history(self):
         """Switch to HISTORY mode, snapshot current realtime state."""
@@ -212,7 +222,7 @@ class HistoryModeMixin:
         """
         lock = get_loop_local("screener_vm_history_tree_lock", asyncio.Lock)
         async with lock:
-            cache = CacheManager()
+            cache = self._cache
             offset = self._state.history_tree.offset if append else 0
             df = await cache.screener_dao.get_history_tree(offset=offset)
             if df is None or df.empty:
@@ -338,7 +348,7 @@ class HistoryModeMixin:
         revision_at_start = self._dataset_revision
         self._set_state(loading=True)
         try:
-            cache = CacheManager()
+            cache = self._cache
             # 2. DAO await 于锁外执行
             df = await cache.screener_dao.get_history_records(trade_date, strategy_name, run_id)
         except asyncio.CancelledError:
@@ -471,7 +481,7 @@ class HistoryModeMixin:
         不 raise。VM 仅持有 raw 统计（含 SampleGrade 枚举），不感知 locale；
         View 渲染时映射 i18n key (§3.2)。
         """
-        cache = CacheManager()
+        cache = self._cache
         df = await cache.screener_dao.get_strategy_review_stats()
         if df is None or df.empty or not _REVIEW_STATS_REQUIRED_COLUMNS.issubset(df.columns):
             self._set_state(strategy_stats=())
@@ -486,7 +496,7 @@ class HistoryModeMixin:
         空元组, 不 raise。VM 仅持有 raw 统计（含 SampleGrade 枚举），不感知 locale；
         View 渲染时映射 i18n key (§3.2)。
         """
-        cache = CacheManager()
+        cache = self._cache
         df = await cache.screener_dao.get_ai_attribution_stats()
         if df is None or df.empty or not _AI_ATTRIBUTION_REQUIRED_COLUMNS.issubset(df.columns):
             self._set_state(ai_attribution=())
