@@ -21,6 +21,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 
 def _make_config_dict(**overrides) -> dict:
     """构造完整 config dict（load_config 返回值）。
@@ -629,6 +631,8 @@ async def test_prepare_database_runtime_writes_url_file_when_env_set(monkeypatch
 
     atexit_calls: list = []
     monkeypatch.setattr("atexit.register", lambda func, *args: atexit_calls.append((func, args)))
+    # 模块级 flag 会被生产代码置位；用 monkeypatch 复位以保证本用例独立可重跑（R7 类隔离）。
+    monkeypatch.setattr("app.bootstrap._embedded_pg_url_file_atexit_registered", False)
 
     result = await prepare_database_runtime()
 

@@ -23,6 +23,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_first_attempt_success() -> None:
