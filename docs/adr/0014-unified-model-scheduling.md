@@ -115,3 +115,15 @@ Decision §4 类型清单所列 `ModelManagementDraft` 在 `core/model_managemen
 （`services/model_configuration_service.py`），以 JSON mapping payload 跨层传递，未进入 core
 纯类型契约。若需将草稿态收敛为 `core/model_management_types.py` 的跨层契约，须另立决策，
 本勘误仅澄清类型归属，不修改 Decision §4 原文（遵守 ADR 追加不可变原则）。
+
+> 2026-10-31 勘误（DOC-RV-040）
+
+Decision §1 声明同候选瞬态重试使用 Tenacity `AsyncRetrying`（直接依赖 `tenacity>=9,<10`），
+Consequences 与 Alternatives 亦以「Tenacity 声明式重试」表述；但当前实现并非如此：全仓无任何
+`tenacity` 导入 / 调用，`services/ai_service/scenario_executor.py` 以自管退避实现同一参数契约
+（构造默认 `retry_attempts=1` / `retry_max_attempts=2`，`_RETRY_BACKOFF_BASE_S=1.0` /
+`_RETRY_BACKOFF_MAX_S=2.0` 随 `retry_index` 指数递增，与服务端 Retry-After 取较大值后
+clamp 至剩余 deadline）。`pyproject.toml` 中 `tenacity>=9.2.1,<10` 仍作为直接依赖声明
+（注释称「S3 ScenarioExecutor 单连接重试策略消费」），但当前尚无消费点。若契约仍要求
+Tenacity，须补充实现；若接受自管退避，须另立决策修订 §1 / Consequences / Alternatives。
+本勘误仅记录文档与实现的差异，不修改决策正文（遵守 ADR 追加不可变原则）。
