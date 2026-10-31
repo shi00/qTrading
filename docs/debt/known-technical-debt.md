@@ -59,7 +59,7 @@
 | P3-UX06-Startup-SLA-E2E-Gap | 冷启动到导航可交互的端到端 SLA 未实测（UX-06 以 proxy 构成基线替代，如实记录缺位） | P3 | ① 真实端到端测量 > 8s（SLA 超阈）时触发 visited\_tabs 顶层推广（`test_consumes_all_seven_subviews_in_stack` 改写 + #438 范式推广）；② 或启动流程重构时 |
 | P3-B12-Screener-Formatting-Logic-in-VM | #B12-2 review02 B12 第 2 步：格式化逻辑下沉 VM（`_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM） | P3 | ① report04 D9（AI 流式更新重建机制重构）合并时；② 或 `screener_view` 再次因格式化逻辑内联出现缺陷时 |
 | P2-BT05-QualityGate-Bypass | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化；区间覆盖缺口评估已实现，按表等级质量评估待设计） | P2 | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或残余第二步实施（按表/等级质量评估接入回测路径）时 |
-| P3-TA-OSS05-DualImpl | 技术指标（RSI/MACD/KDJ）双实现分叉的 OSS-05 结论仅存于测试 docstring，未登记技术债（原著 reviews/ 已丢失） | P3 | ① 技术指标测试文件（`test_technical_analysis_equivalence.py`）被重构或拆分时；② 或双实现再次扩散（新增未经等价性断言覆盖的指标分支）时；③ 或指标语义变更时 |
+| P3-TA-OSS05-DualImpl | 技术指标 pandas 薄委托层与 Polars 表达式正本的 OSS-05 等价性结论（等价域与镜像分叉）仅由测试断言守护，测试重构后决策依据将失传（原著 reviews/ 已丢失） | P3 | ① 技术指标测试文件（`test_technical_analysis_equivalence.py`）被重构或拆分时；② 或双实现面再次扩散（pandas 入口出现独立算法、或新增未经等价性断言覆盖的指标分支）时；③ 或指标语义变更时 |
 | P3-N54-Model-File-Trust-Boundary | 情绪模型文件（GGUF/head.npz）加载期仅轻量校验（GGUF 4 字节魔数 / head 结构与数值），不构成对文件内容的信任，来源由用户自担 | P3 | ① App 引入模型下载/分发渠道（文件来源不再由用户自备）时；② 或 GGUF/head 解析器漏洞（如 llama.cpp/np.load CVE）公开披露时；③ 或安全审计要求文件内容级校验（哈希白名单/签名）时 |
 | P3-RedlineAuto-Grimp-Namespace-Blindspot | import-linter/grimp 不建模命名空间包（`data/sync/` 无 `__init__.py`），指向该子包的 R1 违规处于门禁盲区（UTILS-A-01 实证） | P3 | ① grimp/import-linter 升级或补 `data/sync/__init__.py` 等建模手段使契约开始实际拦截时；② 或再次出现指向 `data.sync.*` 的未登记跨层 lazy import 新实例时 |
 | P3-REV03-Dao-MaxRows | review03 C4：`_read_db`/`_read_db_select` 已提供 max_rows 安全阀，但多数全表扫描调用点未显式设置，数据增长后可能一次性载入全量 | P3 | ① `data/persistence/daos/` 再次新增未显式传 max_rows 的全表扫描调用点时；② 或出现因全量载入导致的内存/超时故障报告时；③ 或数据访问层重构时 |
@@ -626,22 +626,25 @@ UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`s
 
 ### 技术指标双实现（OSS-05）
 
-#### P3-TA-OSS05-DualImpl：技术指标（RSI/MACD/KDJ）双实现分叉的 OSS-05 结论仅存于测试 docstring，未登记技术债（原著 reviews/ 已丢失）
+#### P3-TA-OSS05-DualImpl：技术指标 pandas 薄委托层与 Polars 表达式正本的 OSS-05 等价性结论仅由测试断言守护（原著 reviews/ 已丢失）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-TA-OSS05-DualImpl** | 技术指标（RSI/MACD/KDJ）双实现分叉的 OSS-05 结论仅存于测试 docstring，未登记技术债（原著 reviews/ 已丢失） | ① 技术指标测试文件（`test_technical_analysis_equivalence.py`）被重构或拆分时；② 或双实现再次扩散（新增未经等价性断言覆盖的指标分支）时；③ 或指标语义变更时 |
+| **P3-TA-OSS05-DualImpl** | 技术指标 pandas 薄委托层与 Polars 表达式正本的 OSS-05 等价性结论（等价域与镜像分叉）仅由测试断言守护，测试重构后决策依据将失传（原著 reviews/ 已丢失） | ① 技术指标测试文件（`test_technical_analysis_equivalence.py`）被重构或拆分时；② 或双实现面再次扩散（pandas 入口出现独立算法、或新增未经等价性断言覆盖的指标分支）时；③ 或指标语义变更时 |
 
 **产生背景与现状**
 
-OSS-05 双实现等价性研究结论（pandas 入口 vs Polars 表达式工厂的等价域与分叉面）目前只固化在 `tests/unit/test_technical_analysis_equivalence.py` 的 docstring 与断言中，**未登记进本技术债表**。`reviews/` 目录经 `.gitignore` 忽略（本地产物），当时的原始报告《开源组件使用检视报告.md》已随检视周期删除，若上述测试文件将来被重构或拆分，全部决策依据将无迹可循。
+OSS-05 双实现等价性研究结论（pandas 入口 vs Polars 表达式工厂的等价域与分叉面）原仅固化在 `tests/unit/test_technical_analysis_equivalence.py` 的 docstring 与断言中，未登记进本技术债表；`reviews/` 目录经 `.gitignore` 忽略（本地产物），当时的原始报告《开源组件使用检视报告.md》已随检视周期删除，若上述测试文件将来被重构或拆分，全部决策依据将无迹可循。**本条目即该结论的登记载体，同时 `docs/patterns/polars-vectorized-strategy.md`「指标语义单一事实源」已承载「Polars 为唯一语义正本、pandas 入口必须是薄委托、禁止新增独立 pandas 实现」的规则约束。**
+
+**现状校准（2026-10-31 复核）**：① D1-D3 收敛已完成——`utils/technical_analysis.py` 的 `get_macd`/`get_kdj` 委托 `get_macd_expr`/`get_kdj_expr` 取末值，`calculate_rsi_pandas` 委托 `get_rsi_expr`，独立 pandas 算法实现与 `get_rsi`/`analyze_trend`/`_split_delta` 均已删除（D7）；② `utils/qfq.py` 仍并存 `qfq_ratio_expr`（:18）与 `qfq_ratio_series`（:112），其交叉等价性由 `tests/unit/test_qfq_equivalence.py` 承接（D4）；③ 测试侧在原 B1-B4 之外新增 B5（RSI 无定义/全平盘 → null 而非 `fillna(50)` 哨兵，`test_technical_analysis_equivalence.py:445-465`），组 A/B/C 结构不变。
 
 已固化的核心结论（现状截至 2026-09-23，D1-D3 收敛 + D7 死代码删除后）：
 - **收敛方向**：Polars 表达式为唯一语义正本，pandas 入口为薄委托层（`get_macd`/`get_kdj` 已委托 `get_macd_expr`/`get_kdj_expr`，`calculate_rsi_pandas` 委托 `get_rsi_expr`）；
 - **B1 RSI 预热期**（保留固化）：测试内 pandas 教科书公式 `fillna(50)` 全序列 vs pl `min_samples=period` 前 period 根 null（真实「未知」）。独立 pandas 末值实现 `get_rsi`（含 `_split_delta`）已随 D7 删除，生产 pandas 路径预热期语义与 pl 一致；
 - **B2 MACD hist 倍率**（已收敛）：pd 侧改 ×2 委托，与 pl 侧 `macd=(dif-dea)×2` 一致；断言从「固化 2 倍差」改为「断言一致」；
 - **B3 KDJ 全横盘**（已收敛）：pd 侧委托后经 `fill_nan(50)` 取中性 50，不再返回 NaN 注入 `"k: nan"` 至 AI prompt；
-- **B4 KDJ 连续一字板**（已收敛）：pd 头部 NaN 注入历史统一由 `fill_nan(50)` 承载，断言改为接口与 expr 末值一致。
+- **B4 KDJ 连续一字板**（已收敛）：pd 头部 NaN 注入历史统一由 `fill_nan(50)` 承载，断言改为接口与 expr 末值一致；
+- **B5 RSI 无定义**（保留固化）：测试内 pandas 教科书镜像仍 `fillna(50)`，pl 正本与生产薄委托入口对全平盘/一字板段返回真实缺失 null（R21），断言「生产入口不含 50 哨兵」。
 
 衍生任务状态：
 1. qfq 双实现（`qfq_ratio_series` vs `qfq_ratio_expr`）交叉等价性测试 → 由 `tests/unit/test_qfq_equivalence.py` 承接（D4）；
