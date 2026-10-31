@@ -659,11 +659,13 @@ class TestF29DeadlineRecheckAfterCredential:
         """凭据解析真实消耗预算后，httpx 总超时按解析后剩余重新裁剪。"""
         client = LiteLLMClient(MagicMock())
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + 0.6
+        # 预算放大到 2.5s：Windows CI runner 调度抖动曾使 0.6s 预算在出站派发前
+        # 就被耗尽（CI 偶发 TimeoutError），放大后仍保留"解析消耗预算→重裁剪"语义。
+        deadline = loop.time() + 2.5
         request = _request(deadline=deadline)
 
         async def _keyring_with_cost():
-            await asyncio.sleep(0.2)  # 解析真实消耗 0.2s 预算
+            await asyncio.sleep(0.5)  # 解析真实消耗 0.5s 预算
 
         with (
             patch("services.ai_service._ensure_litellm_loaded", return_value=True),
@@ -677,5 +679,5 @@ class TestF29DeadlineRecheckAfterCredential:
 
         timeout = mock_ac.await_args.kwargs["timeout"]
         assert isinstance(timeout, httpx.Timeout)
-        # 解析前 stale 预算 ≈ 0.6；解析消耗 0.2s 后重裁剪 → read ≤ 0.4
-        assert timeout.read is not None and timeout.read <= 0.4
+        # 解析前 stale 预算 ≈ 2.5；解析消耗 0.5s 后重裁剪 → read ≤ 2.0
+        assert timeout.read is not None and timeout.read <= 2.0
