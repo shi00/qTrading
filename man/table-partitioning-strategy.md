@@ -11,7 +11,7 @@
 本文为规划/设计文档，**不是可照抄执行的运维手册**。按本文实施前必须确认：
 
 1. **执行账号**：DDL 使用迁移账号 `astock_admin`，应用账号 `astock_app` 无 DDL 权限（见 [Database Account Separation](./database-account-separation.md)）。
-2. **迁移通道**：schema 由 Alembic 管理（`alembic/versions/`，当前 head 为 `0041`），`DbMigrator` 启动时执行 `upgrade head`。分区改造必须写成新的 Alembic revision；直接手工 DDL 会使数据库结构与迁移链分叉，后续 revision 可能在已分区的表上执行失败。
+2. **迁移通道**：schema 由 Alembic 管理（`alembic/versions/`，迁移 head 以该目录最新 revision 为准，当前为 `0044`），`DbMigrator` 启动时执行 `upgrade head`。分区改造必须写成新的 Alembic revision；直接手工 DDL 会使数据库结构与迁移链分叉，后续 revision 可能在已分区的表上执行失败。
 3. **前置备份**：涉及建表、改名切换、DETACH/DROP 的操作，必须先 `pg_dump -Fc` 备份目标表并记录 `COUNT(*)`，用于回滚与迁移后校验。
 4. **锁与窗口**：`CREATE TABLE ... PARTITION OF`、`ATTACH/DETACH PARTITION`、`ALTER TABLE ... RENAME` 默认在父表上取 `ACCESS EXCLUSIVE` 锁（`DETACH ... CONCURRENTLY` 除外），会阻塞该表读写；须安排在低峰或停机窗口，并评估长事务。
 5. **不可逆操作**：`DROP TABLE <分区>` 直接删除该分区数据，事务提交后无法用 SQL 撤销，只能从备份恢复。
