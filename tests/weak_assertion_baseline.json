@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "total": 760,
+  "total": 758,
   "entries": [
     {
       "file": "integration/test_config_panels.py",
@@ -323,20 +323,6 @@
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(TimeoutError):"
-    },
-    {
-      "file": "integration/test_task_manager_ai_service.py",
-      "line": 54,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "        with pytest.raises(asyncio.CancelledError):"
-    },
-    {
-      "file": "integration/test_task_manager_ai_service.py",
-      "line": 66,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "        with pytest.raises(ValueError):"
     },
     {
       "file": "unit/test_ai_mixin.py",
