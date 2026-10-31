@@ -716,6 +716,8 @@ review03（数据层与持久化，2026-09-02/03）发现：`data/data_dictionar
 
 review06（安全与供应链，2026-08-24）发现：外部数据入库路径未挂行级 schema 校验，上游接口返回脏数据时可静默入库并影响选股决策。该条是 review08 C1（akshare 补足方案）的前置依赖。
 
+**现状校准（2026-10-31 复核）**：核心陈述仍成立——入库路径无按行 schema 校验（非法行拒绝/隔离）。现有护栏仅为部分防呆与事后告警：① `_save_upsert` 对缺主键列中止写入、对非主键缺列补 `None` 并 WARNING（`data/persistence/daos/base_dao.py:724-741`）；② 行情关键列（quotes：`ts_code/trade_date/close/pct_chg/vol`，basic：`ts_code/trade_date/pe/pb`）缺列仅 WARNING 不阻断（`data/sync/historical.py:1144-1174`）；③ 日期列不可解析统一 coerce 为 NULL，ERROR 日志 + DAT-03 写质量门控降级（`data/persistence/daos/base_dao.py:74-110,802-811`、`data/persistence/write_quality.py`），属事后检测而非按行拒绝/隔离；④ 新闻域已有 SEC-006 结构校验（`data/external/news_fetcher.py:799-813`），但不覆盖 Tushare/Akshare 行情入库。数值/文本类脏值（非日期）仍可直接入库或置 NULL，故「脏数据可静默影响选股决策」的缺口定位成立。
+
 **期望的最终解法**
 
 外部数据入库路径挂行级 schema 校验（非法行拒绝/隔离并告警），无未校验直写路径。upgrade 触发条件：① 外部数据脏数据导致选股/回测结论异常的事故报告时；② 或新增外部数据源接入取数→入库链时（新链路必须配套校验）。
