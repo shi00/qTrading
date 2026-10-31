@@ -1031,9 +1031,12 @@ class TestHealthReportDialogComponent:
         """用户 dismiss（Esc / 关闭路径）关闭并通知消费方，避免重渲染后重新弹出。"""
         env = health_report_dialog_env
         dialog = env["page"]._dialogs.controls[-1]
-        assert dialog.on_dismiss is not None
-        dialog.on_dismiss(None)
-        env["on_close"].assert_called_once()
+        on_dismiss = dialog.on_dismiss
+        assert callable(on_dismiss)
+        on_dismiss(None)
+        # dismiss 关闭对话框（open_state=False）并以无参调用通知消费方
+        env["on_close"].assert_called_once_with()
+        assert env["component"]._state.hooks[1].value is False
 
     def test_deep_scan_handler_invokes_on_deep_scan(self, health_report_dialog_env):
         """_deep_scan handler 调用 on_close + on_deep_scan。"""
@@ -1257,9 +1260,12 @@ class TestHealthScanDialogComponent:
         on_close = MagicMock()
         component, page, _ = health_scan_dialog_factory(data_processor=None, open_state=True, on_close=on_close)
         dialog = page._dialogs.controls[-1]
-        assert dialog.on_dismiss is not None
-        dialog.on_dismiss(None)
-        on_close.assert_called_once()
+        on_dismiss = dialog.on_dismiss
+        assert callable(on_dismiss)
+        on_dismiss(None)
+        # dismiss 关闭对话框（open_state=False）并以无参调用通知消费方
+        on_close.assert_called_once_with()
+        assert component._state.hooks[1].value is False
 
     def test_cleanup_cancels_pending_futures(self, health_scan_dialog_factory):
         """_cleanup_scan: 卸载时取消 pending futures（R2 兼容不重新抛出）。

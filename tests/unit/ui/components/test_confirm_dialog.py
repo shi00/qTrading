@@ -262,8 +262,11 @@ class TestConfirmDialogCallbacks:
         )
         page = run_mount_effects(c)
         dialog = page._dialogs.controls[0]
-        assert dialog.on_dismiss is not None
-        dialog.on_dismiss(None)
+        on_dismiss = dialog.on_dismiss
+        # on_dismiss 必须可调用（None 表示未接线，dismiss 路径将静默丢失取消语义）
+        assert callable(on_dismiss)
+        on_dismiss(None)
+        # dismiss 等价于取消：只触发 on_cancel，不得触发 on_confirm
         assert called == ["cancel"]
         run_unmount_effects(c)
 

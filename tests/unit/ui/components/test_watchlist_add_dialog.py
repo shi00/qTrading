@@ -54,7 +54,8 @@ class TestWatchlistAddDialogDismiss:
         dialog = page._dialogs.controls[-1]
         assert isinstance(dialog, ft.AlertDialog)
         _dismiss(dialog)
-        on_close.assert_called_once()
+        # dismiss 按取消处理：on_close 收到且仅收到一次无参调用
+        on_close.assert_called_once_with()
         run_unmount_effects(component)
 
     def test_on_dismiss_ignored_while_submitting(self, mock_i18n_state, mock_app_colors_state):
