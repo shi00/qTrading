@@ -81,6 +81,14 @@ pub fn utc_now_iso8601() -> String {
 }
 
 pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
+    // --listen 写入 postgresql.conf 受管块的单引号字面量，非法值可注入额外配置行。
+    if !setup::listen_value_is_safe(&args.listen) {
+        eprintln!(
+            "[sidecar] --listen 非法（不得为空或含引号/反斜杠/控制字符，长度 ≤ 255）: {:?}",
+            args.listen
+        );
+        return Err(exit_codes::ARGUMENT_ERROR);
+    }
     let layout = Layout::from_data_dir(
         &args.data_dir,
         args.install_dir.as_deref(),

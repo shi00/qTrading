@@ -332,6 +332,7 @@ pub fn detect_fs_kind(path: &Path) -> FsKind {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
+#[allow(clippy::unnecessary_cast)] // Linux f_type 已是 i64；保留 as i64 以兼容其他 unix 目标
 pub fn detect_fs_kind(path: &Path) -> FsKind {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;

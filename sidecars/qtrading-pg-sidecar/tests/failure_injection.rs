@@ -190,8 +190,11 @@ fn test_inject_24_pg_version_missing() {
     let (_tmp, data_dir) = unique_data_dir("fi_24");
     let mut child = spawn_run(&data_dir);
     let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
-    let _ = stop_sidecar(&data_dir);
-    let _ = wait_for_exit(&mut child, STOP_TIMEOUT);
+    // 运行时外部 stop 命令会因维护锁返回 50（§13.3），必须走 stdin EOF 让 sidecar 自行
+    // 优雅停止，否则强杀 sidecar 会遗留孤儿 postgres 进程占用 PGDATA/临时目录。
+    graceful_stop(&mut child);
+    let exit = wait_for_exit(&mut child, STOP_TIMEOUT);
+    assert_eq!(exit, 0, "sidecar should stop gracefully before tampering");
 
     // 删除 PG_VERSION 但保留 base/
     let pg_version = data_dir.join("PG_VERSION");
