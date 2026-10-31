@@ -241,3 +241,31 @@ class TestDatabaseBase(_AssertionMixin):
 
         CacheManager._instance = None
         CacheManager._initialized = False
+
+
+@pytest.mark.asyncio
+async def test_test_engine_connects_with_utc_timezone(test_engine: AsyncEngine) -> None:
+    """集成基建冒烟：test_engine 可连接且会话时区强制为 UTC。
+
+    本文件此前只有基类/夹具定义，``pytest tests/integration/test_infra_base.py``
+    收集不到用例（exit 5），无法作为基建可用性的冒烟关卡。本用例直接复用
+    ``test_engine`` fixture，覆盖 DB 创建（test_astock_*）、连接凭据与 UTC 时区契约。
+    """
+    async with test_engine.connect() as conn:
+        assert await conn.scalar(text("SELECT 1")) == 1
+        timezone_name = await conn.scalar(text("SHOW TimeZone"))
+    assert timezone_name == "UTC"
+
+
+@pytest.mark.asyncio
+async def test_db_schema_ready_migrates_core_tables(test_engine: AsyncEngine) -> None:
+    """集成基建冒烟：db_schema_ready autouse fixture 已通过 alembic 建出核心表。"""
+    async with test_engine.connect() as conn:
+        result = await conn.execute(
+            text(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
+                "AND tablename IN ('alembic_version', 'daily_quotes', 'stock_basic', 'trade_cal')"
+            )
+        )
+        tables = {row[0] for row in result}
+    assert tables == {"alembic_version", "daily_quotes", "stock_basic", "trade_cal"}
