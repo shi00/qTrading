@@ -349,7 +349,7 @@ CI 通过 `.github/workflows/ci_cd.yml` 的 `embedded-tests` job 自动运行（
 - 设置 `SIDECAR_BINARY_PATH` + `SIDECAR_SHA256` + `QTRADING_DATABASE_MODE=embedded` 环境变量
 - 串行运行集成测试（`-n 1 -p no:randomly` 禁用并发与随机化，避免 session fixture 状态冲突）+ Linux E2E 测试
 - `build-windows` job 依赖 `embedded-tests` 通过后才构建 release installer
-- 作为 main 分支必需检查阻塞 merge（需手动配置 branch protection）
+- 其结果由聚合门禁 `CI Gate` 校验：main 分支的 required checks 为 `CI Gate` 与 `Docs Consistency Check`，`embedded-tests` 本身不是独立 required check，需在 branch protection 中手动配置（见 [ci-cd.md](./ci-cd.md)）
 
 > sidecar binary 的 stable release 由独立的 `.github/workflows/sidecar.yml` release job 发布（推送 `sidecar-v*` tag 触发），用于 `build-windows` job 的 release installer 打包。`embedded-tests` job 用源码编译确保测试最新代码，与 release 流程职责分离。
 
