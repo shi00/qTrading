@@ -14,7 +14,11 @@ from __future__ import annotations
 
 import pytest
 
-from tests.e2e.helpers.anchor_page import retry_until_triggered
+# playwright 属 optional 依赖（requirements-optional.txt），unit 层不应因缺失而收集失败；
+# CI 安装 optional 依赖后正常执行全部用例。
+pytest.importorskip("playwright.async_api", reason="E2E 可选依赖 playwright 未安装")
+
+from tests.e2e.helpers.anchor_page import retry_until_triggered  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
