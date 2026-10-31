@@ -20,6 +20,7 @@ import asyncio
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Any
 
 from core.i18n import Message
@@ -67,7 +68,13 @@ class ScenarioRouteDraft:
     sentiment_mode: str = "bundled"
     reuse_bundled_sentiment: bool = True
     sentiment_candidates: tuple[str, ...] = ()
-    execution_options: dict[str, Any] = field(default_factory=dict)
+    # 只读映射：state 快照不得暴露可就地修改的可变容器（mvvm.md 契约）。
+    execution_options: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """把构造时传入的可变映射规范化为只读视图（任意构造点均满足不可变契约）。"""
+        if not isinstance(self.execution_options, MappingProxyType):
+            object.__setattr__(self, "execution_options", MappingProxyType(dict(self.execution_options)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,9 +263,17 @@ def _semantic_equal(a: ScenarioRouteDraft, b: ScenarioRouteDraft) -> bool:
 
 
 def _semantic_route_for_save(route: ScenarioRouteDraft, committed: ScenarioRouteDraft | None) -> ScenarioRouteDraft:
-    """语义相对已提交基线变化才递增 route_revision（F14）；无变化保持原值不篡改。"""
-    if committed is None or _semantic_equal(route, committed):
+    """语义相对已提交基线变化才递增 route_revision（F14）；无变化对齐基线不重复递增。
+
+    无语义变化时 revision 取已提交基线值：草稿可能仍携带首次提交前的旧 revision
+    （保存成功只回写 committed_routes），若原样写回会把 revision 回退，破坏单调性。
+    """
+    if committed is None:
         return route
+    if _semantic_equal(route, committed):
+        if route.route_revision == committed.route_revision:
+            return route
+        return replace(route, route_revision=committed.route_revision)
     return replace(route, route_revision=committed.route_revision + 1)
 
 
@@ -658,12 +673,17 @@ class ModelRoutesViewModel(ObservableViewModelMixin[ModelRoutesState]):
 
         self._absorb_revision(outcome)
         if outcome.status == "committed":
-            # F14：回写含语义递增后的 route_revision，保证后续保存从新基线单调递增
-            committed = _replace_route(self._state.committed_routes, scenario_id, self._save_route_for(scenario_id))
+            # F14：回写含语义递增后的 route_revision —— 草稿与已提交基线同步回写，
+            # 保证后续「无语义变化的再次保存」不会把草稿里的旧 revision 写回磁盘
+            # （否则 revision 回退，后续递增与 CAS 语义失真）。
+            save_route = self._save_route_for(scenario_id)
+            committed = _replace_route(self._state.committed_routes, scenario_id, save_route)
+            routes = _replace_route(self._state.routes, scenario_id, save_route)
             self._undo = None
             self._set_state(
+                routes=routes,
                 committed_routes=committed,
-                dirty_counts=_compute_dirty_counts(self._state.routes, committed),
+                dirty_counts=_compute_dirty_counts(routes, committed),
                 undo_available=False,
                 save_state=_SAVE_COMMITTED,
                 message=Message("model_routes_save_committed"),
