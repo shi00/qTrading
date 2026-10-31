@@ -278,7 +278,7 @@ PR #513 检视（第一轮）遗留观察级建议。`data/persistence/embedded_
 
 **期望的最终解法**
 
-若应用运行期引入 sidecar 热替换/升级流程，在替换后自动调用 `clear_pg_version_cache()`。验收标准：① sidecar 替换后下次 `resolve_pg_major_version` 重新解析；② 现有 `test_version.py` 全过；③ 新增 sidecar 替换后缓存失效单测。upgrade 触发条件：① 应用引入运行期 sidecar 升级/替换流程时；② 或 EmbeddedPostgresService 支持热切换时。
+若应用运行期引入 sidecar 热替换/升级流程，在替换后自动调用 `clear_pg_version_cache()`。验收标准：① sidecar 替换后下次 `resolve_pg_major_version` 重新解析；② 现有 `tests/unit/test_embedded_postgres_version.py` 全过；③ 新增 sidecar 替换后缓存失效单测。upgrade 触发条件：① 应用引入运行期 sidecar 升级/替换流程时；② 或 EmbeddedPostgresService 支持热切换时。
 
 #### P3-Sidecar-macOS26-SDK-Constraint：theseus 的 macOS 归档依赖 macOS 26.0 SDK（sidecar release workflow 只能跑 `macos-26`）
 
