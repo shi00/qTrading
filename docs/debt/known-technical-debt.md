@@ -39,7 +39,7 @@
 | P3-Windows-Unit-Test-Timeout-Tight | Windows 单测 step `timeout-minutes` 余量不足（main 成功 run 13 分 41 秒 / 原 15 分钟 = 91% 占用） | P3 | ① Windows 单测实际运行时间 ≥ 18 分钟（90% 占用 20 分钟 timeout）；② 或连续 3 次 PR 触发 Windows 单测超时；③ 或单测总数增长 ≥ 20%（如新增 2000 个测试） |
 | P3-M9-NewsSubscription-EngineDisposed-Swallowed | #M9-010 R5: news\_subscription\_service.py L520/752/1059 EngineDisposedError 吞没（设计合理但严格按 R5 应传播） | P3 | ① R5 红线适用范围扩展至应用服务层轮询循环时；② 或该文件再次出现 EngineDisposedError 吞没的新实例时 |
 | P3-M9-Backtest-EngineDisposed-Warning-Return | #M9-011 R5: backtest\_service.py L132-158 EngineDisposedError 被捕获返回带警告结果（设计模式不一致） | P3 | ① R5 红线适用范围扩展至回测持久化路径时；② 或该文件再次出现 system 级异常不 raise 的新实例时 |
-| P3-M9-EmbeddedPg-TimeoutExpired-Propagation | #M9-013 错误处理缺口：embedded\_pg\_maintenance\_service.py subprocess TimeoutExpired 已包装为 EmbeddedPgMaintenanceError（classify\_error 为可选优化） | P3 | ① sidecar CLI 超时在实际运行中频繁触发时；② 或该文件再次出现未分类 `TimeoutExpired` 的新实例时 |
+| P3-M9-EmbeddedPg-TimeoutExpired-Propagation | #M9-013 错误处理缺口：embedded\_pg\_maintenance\_service.py subprocess TimeoutExpired 已包装为 EmbeddedPgMaintenanceError（超时已按 severity 分级，公开方法层结构化分类为可选优化） | P3 | ① sidecar CLI 超时在实际运行中频繁触发时；② 或该文件再次出现未分类 `TimeoutExpired` 的新实例时 |
 | P3-CON04-Subprocess-Cancel | review02 CON-04：subprocess 不可取消长任务停机交互——terminate 仅终止 sidecar 包装 / dump 中断残留不自动清理 / restore 拒绝取消 / run\_async 无可中断变体 | P3 | ① 用户报告停机后 `.partial` 残留或孤儿 pg\_dump 占用磁盘/连接；② restore 取消成为产品需求；③ ThreadPoolManager 重构时 |
 | P3-M9-TaskManager-LogAsyncOperation-Threshold | #M9-014 性能监控阈值：task\_manager.py cancel\_all\_running\_async 标注 DB\_SINGLE\_QUERY 但实际是批量操作 | P3 | ① 性能监控告警误报/漏报时；② 或该文件再次出现阈值与实际操作类型不符的新实例时 |
 | P3-M11-StartupViews-HomeViewModel-Static-Call | #M11-002 MVVM 边界：startup\_views.py View 直接调用 HomeViewModel 静态方法 | P3 | ① 启动流程或 news alert 监听机制被独立重构时；② 或 ui 层再次出现 View 直调 VM 静态方法的新实例时 |
@@ -224,19 +224,19 @@ Rust sidecar 工程要求 unit 行覆盖率目标 ≥85%。2026-07-28 已补测 
 
 ① sidecar `run.rs` supervise 循环新增 postgres 日志监听 task（持续读 postgres stderr/log file），匹配 `invalid page` / `checksum failure` 关键字后经 `protocol::print_json_line(&EventJson::warning("data_page_corruption", ...))` 上报 stdout；② Python `_stdout_reader_task` 解析 `event.warning` 事件并经 ViewModel state 通知 UI；③ UI 显示数据页损坏警告 + 引导备份恢复；④ `failure_injection.rs` 新增 `test_inject_25_data_page_checksum_error` 集成测试（篡改测试表数据页 → 查询 → 验证 sidecar stdout warning 事件）。验收标准：① sidecar 监听 postgres 日志并上报 `data_page_corruption` warning 事件；② Python + UI 正确显示警告；③ 集成测试覆盖 #25 场景；④ 不破坏现有 stdout 协议向后兼容。upgrade 触发条件：① sidecar 引入运行期 postgres 日志监控需求时；② 或数据页损坏问题在生产环境报告时。
 
-#### P3-M9-EmbeddedPg-TimeoutExpired-Propagation：#M9-013 错误处理缺口：embedded\_pg\_maintenance\_service.py subprocess TimeoutExpired 已包装为 EmbeddedPgMaintenanceError（classify\_error 为可选优化）
+#### P3-M9-EmbeddedPg-TimeoutExpired-Propagation：#M9-013 错误处理缺口：embedded\_pg\_maintenance\_service.py subprocess TimeoutExpired 已包装为 EmbeddedPgMaintenanceError（超时已按 severity 分级，公开方法层结构化分类为可选优化）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-M9-EmbeddedPg-TimeoutExpired-Propagation** | #M9-013 错误处理缺口：embedded\_pg\_maintenance\_service.py subprocess TimeoutExpired 已包装为 EmbeddedPgMaintenanceError（classify\_error 为可选优化） | ① sidecar CLI 超时在实际运行中频繁触发时；② 或该文件再次出现未分类 `TimeoutExpired` 的新实例时 |
+| **P3-M9-EmbeddedPg-TimeoutExpired-Propagation** | #M9-013 错误处理缺口：embedded\_pg\_maintenance\_service.py subprocess TimeoutExpired 已包装为 EmbeddedPgMaintenanceError（超时已按 severity 分级，公开方法层结构化分类为可选优化） | ① sidecar CLI 超时在实际运行中频繁触发时；② 或该文件再次出现未分类 `TimeoutExpired` 的新实例时 |
 
 **产生背景与现状**
 
-M9 services 模块检视发现：`services/embedded_pg_maintenance_service.py` `_run_sidecar` 的 `subprocess.run(...timeout=3600)` 的 `TimeoutExpired` 异常未在公开方法（doctor/dump/restore/maintenance\_shell）中分类处理，会直接传播到调用方。**现状校准（CON-04, 2026-09-03）**：① review03-C19 已在 `_run_sidecar` 内将 `TimeoutExpired` 包装为 `EmbeddedPgMaintenanceError`（用户看到可操作提示而非原始 subprocess 异常）；② CON-04 改用 `Popen` 后，超时路径先 `kill` 子进程再 `communicate` 回收输出，修复 `subprocess.run` 超时不杀进程的进程泄漏。剩余：超时经 `classify_error` 分类仍为可选优化。相关文件：`services/embedded_pg_maintenance_service.py`。
+M9 services 模块检视发现：`services/embedded_pg_maintenance_service.py` `_run_sidecar` 的 `proc.communicate(timeout=3600)`（`Popen` 路径）抛出 `TimeoutExpired`，公开方法（doctor/dump/restore/maintenance\_shell）不捕获该异常，调用方只收到包装后的业务异常。**现状校准（CON-04, 2026-09-03）**：① review03-C19 已在 `_run_sidecar` 内将 `TimeoutExpired` 包装为 `EmbeddedPgMaintenanceError`（用户看到可操作提示而非原始 subprocess 异常）；② CON-04 改用 `Popen` 后，超时路径先 `kill` 子进程再 `communicate` 回收输出，修复 `subprocess.run` 超时不杀进程的进程泄漏。**现状校准（2026-10-31 复核）**：③ 超时路径已调用 `classify_severity(exc, "general")`（内部经 `classify_error`）并按 severity 决定 WARNING/ERROR 日志级别，随后包装抛出（`embedded_pg_maintenance_service.py:397-415`）；剩余可选项仅为公开方法层透出结构化错误码（`classify_error` 的 code/severity 字段）。相关文件：`services/embedded_pg_maintenance_service.py`。
 
 **期望的最终解法**
 
-若 sidecar CLI 超时频繁触发，评估在公开方法中对 `TimeoutExpired` 走 `classify_error` 分类。验收标准：① `TimeoutExpired` 经 `classify_error` 分类；② 现有 `test_embedded_pg_maintenance*.py` 全过。upgrade 触发条件：① sidecar CLI 超时在实际运行中频繁触发时；② 或该文件再次出现未分类 `TimeoutExpired` 的新实例时。
+分类与分级日志已在 `_run_sidecar` 落地（`classify_severity` → `classify_error`，`embedded_pg_maintenance_service.py:397-415`）；若 sidecar CLI 超时频繁触发，再评估在公开方法层透出结构化错误码（code/severity）。验收标准：① 超时路径经 `classify_severity`/`classify_error` 分类（已达成）；② 现有 `test_embedded_pg_maintenance*.py` 全过。upgrade 触发条件：① sidecar CLI 超时在实际运行中频繁触发时；② 或该文件再次出现未分类 `TimeoutExpired` 的新实例时。
 
 #### P3-CON04-Subprocess-Cancel：review02 CON-04：subprocess 不可取消长任务停机交互——terminate 仅终止 sidecar 包装 / dump 中断残留不自动清理 / restore 拒绝取消 / run\_async 无可中断变体
 
