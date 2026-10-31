@@ -2,6 +2,10 @@ import subprocess
 import re
 import sys
 
+# `git branch` 在分支名前加标记：`*` 当前检出，`+` 被其他 worktree 检出（共享仓库时出现）。
+# 标记后跟一个空格，因此仅剥离「标记 + 空白」，不误伤以 `*`/`+` 开头的合法分支名。
+_BRANCH_MARKER_RE = re.compile(r"^[*+]\s+")
+
 
 def get_worktree_branches():
     """获取当前所有 Git 工作树占用的本地分支集合"""
@@ -31,8 +35,9 @@ def get_merged_local_branches(base_branch="main"):
 
     branches = []
     for line in output.splitlines():
-        # 去掉 * 前缀和空白
-        branch = line.replace("*", "").strip()
+        # 剥离 `*`（当前检出）/ `+`（其他 worktree 检出）标记；否则被 worktree
+        # 占用的分支名带 `+ ` 前缀，无法与 worktree_branches 匹配而被误列为可删。
+        branch = _BRANCH_MARKER_RE.sub("", line.strip())
         if branch:
             branches.append(branch)
     return branches
@@ -49,7 +54,9 @@ def get_merged_remote_branches(base_branch="origin/main"):
     branches = []
     for line in output.splitlines():
         branch = line.strip()
-        if branch:
+        # 跳过 `origin/HEAD -> origin/main` 这类符号引用行：它不是可删除的分支，
+        # 若混入待删清单会被 `git push --delete` 拒绝（误导性假阳性）。
+        if branch and " -> " not in branch:
             branches.append(branch)
     return branches
 

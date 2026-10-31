@@ -155,20 +155,23 @@ class TestBuildPyrightCmd:
         """项目根存在 .venv 时，命令应包含 --pythonpath 指向 venv 内 python。"""
         scripts_dir = tmp_path / "scripts"
         scripts_dir.mkdir()
-        venv_scripts = tmp_path / ".venv" / "Scripts"
-        venv_scripts.mkdir(parents=True)
-        python_exe = venv_scripts / "python.exe"
+        if sys.platform == "win32":
+            venv_dir = tmp_path / ".venv" / "Scripts"
+            python_exe = venv_dir / "python.exe"
+        else:
+            venv_dir = tmp_path / ".venv" / "bin"
+            python_exe = venv_dir / "python"
+        venv_dir.mkdir(parents=True)
         python_exe.write_text("")
 
         import run_pyright_changed
 
         monkeypatch.setattr(run_pyright_changed, "__file__", str(scripts_dir / "run_pyright_changed.py"))
-        if sys.platform == "win32":
-            cmd = run_pyright_changed._build_pyright_cmd(["foo.py"])
-            assert "--pythonpath" in cmd
-            idx = cmd.index("--pythonpath")
-            assert cmd[idx + 1] == str(python_exe)
-            assert "foo.py" in cmd
+        cmd = run_pyright_changed._build_pyright_cmd(["foo.py"])
+        assert "--pythonpath" in cmd
+        idx = cmd.index("--pythonpath")
+        assert cmd[idx + 1] == str(python_exe)
+        assert "foo.py" in cmd
 
     def test_venv_absent_no_pythonpath(self, monkeypatch, tmp_path):
         """项目根无 .venv 时，命令不含 --pythonpath。"""
