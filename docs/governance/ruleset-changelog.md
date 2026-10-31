@@ -1,8 +1,8 @@
 # 规则集版本变更日志 (Ruleset Changelog)
 
-> **目的**：`CLAUDE.md` / `AGENTS.md` 元数据块中 `ruleset_version` 与产品版本分离（P2-07 统一格式），但此版本号无配套变更记录，导致「版本号退化为一个数字」、无处可查每次递增改了什么（AI文档检视 P3-04）。本文件提供 ruleset_version 递增的最小还原日志。
+> **目的**：`CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` 元数据块中 `ruleset_version` 与产品版本分离（P2-07 统一格式），但此版本号无配套变更记录，导致「版本号退化为一个数字」、无处可查每次递增改了什么（AI文档检视 P3-04）。本文件提供 ruleset_version 递增的最小还原日志。
 >
-> **记录规则**：`ruleset_version` 在 `docs/governance` 治理正本（CLAUDE.md / AGENTS.md / 相关 docs）中每次递增时，在本文件变更记录表**顶部追加一行**，列格式为 `ruleset_version | 变更日期 | 变更摘要`。仅登记版本递增，不登记产品版本、不复制红线表全文。
+> **记录规则**：`ruleset_version` 在治理正本（仓库根 [CLAUDE.md](../../CLAUDE.md) / [AGENTS.md](../../AGENTS.md) / [CONTRIBUTING.md](../../CONTRIBUTING.md) 的元数据块，以及 `docs/governance/` 下相关治理文档）中每次递增时，在本文件变更记录表**顶部追加一行**，列格式为 `ruleset_version | 变更日期 | 变更摘要`。仅登记版本递增，不登记产品版本、不复制红线表全文。
 >
 > **维护约束**：顶行版本号由 `scripts/check_docs_consistency.py::check_ruleset_changelog_version()` 自动守护，必须与 `CLAUDE.md` 元数据块 `ruleset_version` 一致（不一致时 docs 一致性门禁 FAIL）。涉及红线变更的递增必须同时在 [redlines.yml](./redlines.yml) 与 [exceptions.yml](./exceptions.yml) 留痕。
 
