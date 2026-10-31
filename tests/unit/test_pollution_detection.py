@@ -60,7 +60,13 @@ _TEST_RESULT_PATTERN = re.compile(r"^(tests/\S+::\S+)\s+(PASSED|FAILED|ERROR|SKI
 def _run_pytest_with_order(test_files: list[str]) -> subprocess.CompletedProcess[str]:
     """以指定文件顺序运行 pytest，返回完整结果。
 
-    使用 -p no:randomly 显式禁用随机排序插件，确保测试按指定文件顺序执行。
+    - 使用 -p no:randomly 显式禁用随机排序插件，确保测试按指定文件顺序执行。
+    - 使用 -n 0 覆盖 pyproject addopts 中的 ``-n auto``，强制串行执行：
+      ① xdist 会把文件分发到独立 worker 进程，各进程互相隔离，反而掩盖
+      跨测试状态污染，与探测目标相悖；② xdist 的 ``-v`` 输出为
+      ``[gwN] PASSED <nodeid>``，与本模块解析的 ``<nodeid> PASSED`` 格式不符，
+      会导致解析为空并 skip。
+    - 使用 --color=no 避免 CI 环境变量注入 ANSI 转义符污染解析。
     """
     cmd = [
         sys.executable,
@@ -72,6 +78,9 @@ def _run_pytest_with_order(test_files: list[str]) -> subprocess.CompletedProcess
         "--tb=short",
         "-p",
         "no:randomly",
+        "-n",
+        "0",
+        "--color=no",
     ]
     return subprocess.run(
         cmd,
