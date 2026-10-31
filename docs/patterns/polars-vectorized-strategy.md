@@ -62,10 +62,33 @@ pandas 与 Polars 在项目中有明确的职责划分（对应 CLAUDE.md §4.1 
 
 > 数据始终从项目 DAO 层注入策略；计算内核只负责在已注入的 DataFrame 上计算，不自行打开数据库连接。如需读取需补充的行情/快照数据，走 data 层同步/DAO 流程，不得在策略内核内直连数据库。
 
+## 行序保证与流式语义（新增 lazy 管线强制约定）
+
+Polars 2.x 的流式默认与语义严格化，把一部分问题从**抛异常**变成**静默的结果差异**：行序只在显式声明处才被保证（如 `join(..., maintain_order="left")`、`group_by(..., maintain_order=True)`），其余算子不承诺输出顺序。`PolarsBaseStrategy` 拿到 `_filter_logic` 返回的 LazyFrame 后直接 `collect().to_pandas()` 交给服务/UI，位次漂移不会报错，只会让 `head(n)` 截断、展示与导出顺序整体错位。
+
+**强制要求（新增/改造 lazy 管线时逐点核对）**：
+
+1. **末步显式 sort**：`_filter_logic` 及其他 lazy 管线最后一步必须显式 `.sort(...)`，不得以 `filter` / `join` / `group_by().agg()` / `select` 收尾而依赖输入行序。
+2. **排序键可区分行**：sort 键须能唯一区分行（并列时追加唯一键，如 `["score", "ts_code"]`）；并列键之间的次序无保证，不得依赖。
+3. **顺序可观测处按需 `maintain_order`**：展示、导出、Golden / 单测断言等顺序可观测路径，在 `join` / `group_by` 处按需显式声明 `maintain_order`；不全局开启（会使流式执行退化为有序收集，有性能代价）。
+4. **不依赖输入行序**：`pl.from_pandas(df).lazy()` 的输入顺序不是契约；`head` / `slice` / `unique` 等结果取决于位置的算子必须置于明确 sort 之后。
+
+**反例（判为不合规）**：
+
+- 管线以 `lf.filter(...)` 收尾即返回：当前结果无异常，但上游一旦加入 `join` / `group_by`，返回顺序即静默漂移。
+- `lf.join(dim, on="ts_code", how="left").sort("score", descending=True)`：仅按 `score` 排序，并列分之间的行序不可复现，Golden 快照 / 单测会偶发不一致。
+- `lf.group_by("industry").agg(...).collect()` 直接用于导出，未声明 `maintain_order=True`。
+- 单测用 `assert_frame_equal(result, expected)` 比较未显式 sort 的管线输出（该断言默认比较行序）。
+
+**正例**：`strategies/fundamental.py` / `strategies/market.py` 的 `_filter_logic` 筛选管线以 `.sort("dv_ttm", descending=True)` / `.sort("pct_chg", descending=True)` 收尾，新增策略沿用该形态。
+
+> 背景与升级触发条件见技术债 [P3-Polars-Streaming-Order-Semantics](../debt/known-technical-debt.md)；Polars 大版本升级前须按该条复核流式与行序语义。
+
 ## 完成判定（canonical 入口）
 
 _最小验证命令：_ 按改动实际触及的层运行 CONTRIBUTING「变更类型 → 最小验证子集」；把模板落成临时 `.py` 文件跑 `ruff check` + `pyright`，确认可 import 且 `@register_strategy` 注册生效（R14）。
 
 - 模板含 `@register_strategy("...")` 装饰器与 `__init__` 调 `super().__init__(name_key, desc_key)`（可 import、不触发 R14）；
 - Polars 子类数据质量门控用类属性 `required_quality_tier` 覆盖默认等级（§3.2），不在方法上挂 `@require_quality`；
+- lazy 管线末步已显式 `.sort(...)`（排序键可区分行），顺序可观测路径已按需声明 `maintain_order`（见上文「行序保证与流式语义」）；
 - 门禁：`redline-check`（R14）、`ruff`、相关单测通过。
