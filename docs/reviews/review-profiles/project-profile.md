@@ -48,7 +48,7 @@
 3. 命中豁免项（单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离）在评审结论注明豁免；无法恢复版本控制（ZIP/只读挂载/IDE 映射目录）时声明「无版本控制兜底」，交付时逐文件列改动清单 —— 见 CLAUDE.md §3.1 R18 执行决策树。
 
 ### R20 单位未核对的量纲比较
-1. 调用链追溯：对策略/回测改动涉及金额/数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）的数值比较，确认调用链先经 `threshold_in_data_unit()`（`strategies/utils.py:41`）或 `get_column_unit()` / `get_column_unit_source()` 显式取单位（单位声明见 `data/constants.py` 的 `HSGT_COLUMN_UNITS` / `TOP_LIST_COLUMN_UNITS`）。
+1. 调用链追溯：对策略/回测改动涉及金额/数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）的数值比较，确认调用链先经 `threshold_in_data_unit()`（`strategies/utils.py:41`）或 `get_column_unit()` / `get_column_unit_source()` 显式取单位（单位声明见 `data/constants.py` 的 `HSGT_COLUMN_UNITS` / `TOP_LIST_COLUMN_UNITS` / `DAILY_QUOTES_COLUMN_UNITS` 及 `BLOCK_TRADE_AMOUNT_UNIT` 等单列常量，未登记常量表的列由调用点 `declared_unit` 实参声明）。
 2. 运行 AST 原型复核：`python scripts/prototype_business_redlines.py`（ROOT 缺省为仓库根）。`UnitCompareVisitor` 检测已知单位列进入大小比较且无换算调用，输出 `R20` 命中；`unit_compare`（`north_money`/`net_amount` 直判）须逐条核，`unit_compare_lowconf`（`amount`/`total_mv`/`circ_mv`/`vol`）误报高、仅作提示。
 3. 误报排除：`lowconf` 命中多为回测撮合中单位一致的合法比较（同列同单位），人工读上下文确认两端单位一致后放行；`HIGH` 列直判命中若无 `threshold_in_data_unit()` 不豁免。
 

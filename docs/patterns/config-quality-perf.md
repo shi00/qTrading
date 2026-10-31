@@ -57,9 +57,12 @@
 
 调整或新增涉及金额、数量列（`north_money` / `net_amount` / `amount` / `total_mv` / `circ_mv` / `vol`）的
 阈值、筛选或比较时，必须经 `threshold_in_data_unit()`（`strategies/utils.py`）统一单位换算后再比较；
-各列数据单位声明见 `data/constants.py` 的 `HSGT_COLUMN_UNITS` / `TOP_LIST_COLUMN_UNITS`，并按需用
+各列数据单位声明分散于 `data/constants.py`：`HSGT_COLUMN_UNITS`（`north_money` 百万）、
+`TOP_LIST_COLUMN_UNITS`（`net_amount` 元）、`DAILY_QUOTES_COLUMN_UNITS`（`vol` 手）三个字典，
+以及 `BLOCK_TRADE_AMOUNT_UNIT`（`amount` 万元）等单列常量；`total_mv` / `circ_mv` 未登记常量表，
+由调用点 `declared_unit` 实参声明（现为 `wan_cny`）。并按需用
 `get_column_unit()` / `get_column_unit_source()` 显式取单位。直接按字面数值比较会因单位差（如北向
-资金以万元计）产生量纲偏差，违反 R20（见 CLAUDE.md §3.1）。
+资金以百万元计、龙虎榜净买入额以元计）产生量纲偏差，违反 R20（见 CLAUDE.md §3.1）。
 
 > **操作指引**：修改配置项或调整性能相关阈值，入口见 [CLAUDE.md §1.8 决策树](../../CLAUDE.md#18-任务类型--必读文件-决策树)（「修改配置项 / 性能优化 / 阈值调整」均路由到本节）；完整新增策略/DAO 的落地流程见 [docs/guides/how-to.md](../guides/how-to.md)。
 
