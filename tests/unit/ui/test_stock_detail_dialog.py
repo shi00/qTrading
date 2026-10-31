@@ -843,6 +843,194 @@ class TestBuildContentFunction:
         texts = _collect_all_texts(container)
         assert "nan" not in [t.strip().lower() for t in texts]
 
+    # --- 债务 P3-M12：_build_content 分支回归（可选面板 / column_label_fn / 字段三态） ---
+
+    def _build_full(
+        self,
+        data: dict | None = None,
+        chart_content: ft.Control | None = None,
+        width: int = 900,
+        height: int = 700,
+        column_label_fn=None,
+        news_panel=None,
+        sentiment_strip=None,
+    ):
+        from ui.components.stock_detail_dialog import _build_content, _initial_chart_content
+
+        return _build_content(
+            data or {},
+            chart_content if chart_content is not None else _initial_chart_content(),
+            width,
+            height,
+            column_label_fn=column_label_fn,
+            news_panel=news_panel,
+            sentiment_strip=sentiment_strip,
+        )
+
+    def test_base_sections_without_optional_panels(self):
+        """无可选面板时：仅基础分区，chart_content 嵌入首段，AI 区不渲染。"""
+        chart = ft.Text("chart_sentinel")
+        container = self._build_full({"ts_code": "000001.SZ"}, chart_content=chart)
+        assert isinstance(container.content, ft.Column)
+        sections = container.content.controls
+        assert isinstance(sections[0], ft.Container)
+        assert sections[0].content is chart
+        texts = _collect_all_texts(container)
+        assert "chart_sentinel" in texts
+        assert "sentiment_sentinel" not in texts
+        assert "news_sentinel" not in texts
+        assert "detail_ai_analysis" not in texts
+
+    def test_optional_panels_order_chart_sentiment_then_news_last(self):
+        """可选面板：情绪条紧随 K 线之后，新闻面板追加在最后。"""
+        chart = ft.Text("chart_sentinel")
+        sentiment = ft.Text("sentiment_sentinel")
+        news = ft.Text("news_sentinel")
+        container = self._build_full({}, chart_content=chart, sentiment_strip=sentiment, news_panel=news)
+        assert isinstance(container.content, ft.Column)
+        sections = container.content.controls
+        assert isinstance(sections[0], ft.Container)
+        assert sections[0].content is chart
+        assert sections[1] is sentiment
+        assert sections[-1] is news
+        texts = _collect_all_texts(container)
+        assert {"chart_sentinel", "sentiment_sentinel", "news_sentinel"} <= set(texts)
+
+    def test_column_label_fn_applied_to_attribution(self):
+        """column_label_fn 有/无两态：归因条件列名分别取别名与裸列名。"""
+        raw = {
+            "conditions": [{"column": "pe", "operator": "gt", "threshold": 20.0, "actual": 25.0}],
+            "rank": None,
+        }
+        data = {"_filter_attribution": raw}
+        bare = self._build_full(data)
+        assert any("pe = 25.00" in t for t in _collect_all_texts(bare))
+
+        labeled = self._build_full(data, column_label_fn=lambda col: f"{col} (市盈率)")
+        assert any("市盈率 = 25.00" in t for t in _collect_all_texts(labeled))
+
+    def test_complete_fields_render_formatted_values(self):
+        """完整字段：各分区命中正确格式化值（无缺失占位）。"""
+        data = {
+            "ts_code": "000001.SZ",
+            "close": 10.5,
+            "pct_chg": 3.5,
+            "turnover_rate": 2.5,
+            "vol": 123456.0,
+            "amount": 654321.0,
+            "pe_ttm": 12.34,
+            "pb": 1.23,
+            "ps_ttm": 2.34,
+            "dv_ttm": 3.45,
+            "total_mv": 1_000_000.0,
+            "circ_mv": 800_000.0,
+            "roe": 12.3,
+            "grossprofit_margin": 45.6,
+            "debt_to_assets": 33.3,
+            "or_yoy": 8.8,
+            "netprofit_yoy": 9.9,
+            "industry": "银行",
+            "list_date": "19910403",
+        }
+        texts = _collect_all_texts(self._build_full(data))
+        for expected in ("10.50unit_yuan", "+3.50%", "2.50%", "12.30%", "45.60%", "19910403", "银行"):
+            assert expected in texts
+        assert "-" not in texts
+
+    def test_missing_fields_render_dash_not_zero(self):
+        """字段全缺失：各 chip 显示 "-"，不得伪装为 0（R21）。"""
+        texts = _collect_all_texts(self._build_full({}))
+        assert "-" in texts
+        assert "0.00" not in texts
+
+    def test_nan_none_decimal_fields_render_dash(self):
+        """NaN / Decimal("NaN") / None 字段均显示 "-"，不裸露 nan/None（R21）。"""
+        data = {
+            "close": float("nan"),
+            "pct_chg": Decimal("NaN"),
+            "turnover_rate": None,
+            "vol": float("nan"),
+            "amount": Decimal("NaN"),
+            "pe_ttm": float("nan"),
+            "pb": None,
+            "ps_ttm": Decimal("NaN"),
+            "dv_ttm": float("nan"),
+            "total_mv": Decimal("NaN"),
+            "circ_mv": None,
+            "roe": float("nan"),
+            "grossprofit_margin": Decimal("NaN"),
+            "debt_to_assets": None,
+            "or_yoy": float("nan"),
+            "netprofit_yoy": Decimal("NaN"),
+            "industry": float("nan"),
+            "list_date": float("nan"),
+        }
+        texts = _collect_all_texts(self._build_full(data))
+        assert "-" in texts
+        lowered = [t.strip().lower() for t in texts]
+        assert "nan" not in lowered
+        assert "none" not in lowered
+
+    def test_ai_score_threshold_color_tokens(self):
+        """ai_score 分段（≥80 / ≥60 / 其余）分别使用 SUCCESS / WARNING / ERROR token。"""
+        from ui.theme import AppColors as RealColors
+
+        for score, token in ((85, RealColors.SUCCESS), (65, RealColors.WARNING), (50, RealColors.ERROR)):
+            container = self._build_full({"ai_reason": "r", "ai_score": score})
+            badge = _find_container_by_text(container, "detail_ai_score_prefix")
+            assert isinstance(badge, ft.Container)
+            assert isinstance(badge.content, ft.Text)
+            assert badge.content.value == f"detail_ai_score_prefix{float(score)}"
+            assert badge.bgcolor == token
+
+    def test_industry_sw_l2_renders_two_chips(self):
+        """live 模式含 industry_sw_l2 → 申万二级 + Tushare 行业双芯片。"""
+        texts = _collect_all_texts(self._build_full({"industry_sw_l2": "银行", "industry_tushare": float("nan")}))
+        assert "detail_industry_sw_l2" in texts
+        assert "detail_industry_tushare" in texts
+        assert "-" in texts  # Tushare 行业缺失 → "-"
+
+    def test_review_section_rendered_when_review_data_present(self):
+        """有复盘数据时渲染复盘区（无数据时为空 Container 已由 TestBuildReviewSection 覆盖）。"""
+        texts = _collect_all_texts(self._build_full({"prediction_result": "WIN", "t1_pct": 1.5}))
+        assert "review_section_title" in texts
+
+    def test_long_text_arbitrary_chart_and_boundary_size_do_not_raise(self):
+        """超长文本 + 任意 chart 控件 + 宽高边界值均不抛异常，尺寸原样落入容器。"""
+        chart = ft.Row([ft.Text("x" * 20000)])
+        container = self._build_full(
+            {"name": "超长" * 5000, "ai_reason": "r" * 10000},
+            chart_content=chart,
+            width=1,
+            height=1,
+        )
+        assert container.width == 1
+        assert container.height == 1
+        assert any(control is chart for control in _iter_controls(container))
+
+
+def _iter_controls(control):
+    """递归遍历 content/controls 子控件（测试辅助）。"""
+    if control is None:
+        return
+    yield control
+    content = getattr(control, "content", None)
+    if content is not None:
+        yield from _iter_controls(content)
+    children = getattr(control, "controls", None)
+    if isinstance(children, list):
+        for child in children:
+            yield from _iter_controls(child)
+
+
+def _find_container_by_text(root, prefix):
+    """查找 content 文本以 prefix 开头的 Container（测试辅助）。"""
+    for control in _iter_controls(root):
+        if isinstance(control, ft.Container) and isinstance(control.content, ft.Text):
+            if (control.content.value or "").startswith(prefix):
+                return control
+    return None
+
 
 def _collect_markdown_controls(control, found):
     """Recursively collect ft.Markdown controls from the flet control tree."""

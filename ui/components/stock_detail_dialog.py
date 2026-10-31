@@ -502,7 +502,7 @@ def _build_content(
     column_label_fn: Callable[[str], str] | None = None,
     news_panel: ft.Control | None = None,
     sentiment_strip: ft.Control | None = None,
-) -> ft.Container:  # pragma: no cover
+) -> ft.Container:
     """构建详情内容（K线图 + AI分析 + 价格 + 估值 + 财务 + 基础信息）。"""
     # Chart container（content 由 chart_content state 驱动）
     chart_container = ft.Container(
