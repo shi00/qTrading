@@ -1,35 +1,7 @@
 {
   "version": 2,
-  "total": 764,
+  "total": 758,
   "entries": [
-    {
-      "file": "integration/test_api_tushare_client.py",
-      "line": 449,
-      "type": "weak_is_not_none_ratio",
-      "detail": "is not None 断言占比过高 (2/3 = 66.7%) > 40% in test_set_token_rebuilds_rate_limiter",
-      "source_line": "            assert old_limiter is not None"
-    },
-    {
-      "file": "integration/test_api_tushare_client.py",
-      "line": 274,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "            api_limiter.consume_async.assert_called_once()"
-    },
-    {
-      "file": "integration/test_api_tushare_client.py",
-      "line": 275,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "            general_limiter.consume_async.assert_called_once()"
-    },
-    {
-      "file": "integration/test_api_tushare_client.py",
-      "line": 330,
-      "type": "weak_mock",
-      "detail": "Mock 弱断言（不验证参数）",
-      "source_line": "            general_limiter.consume_async.assert_called_once()"
-    },
     {
       "file": "integration/test_config_panels.py",
       "line": 168,
@@ -351,20 +323,6 @@
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(TimeoutError):"
-    },
-    {
-      "file": "integration/test_task_manager_ai_service.py",
-      "line": 54,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "        with pytest.raises(asyncio.CancelledError):"
-    },
-    {
-      "file": "integration/test_task_manager_ai_service.py",
-      "line": 66,
-      "type": "weak_raises_only",
-      "detail": "pytest.raises 后无进一步断言",
-      "source_line": "        with pytest.raises(ValueError):"
     },
     {
       "file": "unit/test_ai_mixin.py",

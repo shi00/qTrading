@@ -8,6 +8,7 @@ from contextlib import ExitStack
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncEngine
 

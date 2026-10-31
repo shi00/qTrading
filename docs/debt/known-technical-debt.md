@@ -29,7 +29,7 @@
 |----|--------|------|------------------|
 | P3-ExcStrategies-NoteLazy-Classify | strategies/ 层 except Exception 已标记 NOTE(lazy)（ceiling 动态化），待评估统一走 classify\_error | P3 | ① 策略层再次出现未分类 `except Exception` 的新实例时；② 或策略层异常处理被独立重构时 |
 | P3-ExcUtils-NoteLazy-Classify | utils/ 层 except Exception 已标记 NOTE(lazy)，待评估统一走 classify\_error | P3 | ① utils 层再次出现未分类 `except Exception` 的新实例时；② 或 utils 层异常处理被统一改造时 |
-| P3-RedlineAuto-Coverage-Partial | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R22/R23/R24 为报告/告警模式的部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | P3 | ① pre-commit / CI 检出红线违规新实例时；② 或事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）出现误报案例时 |
+| P3-RedlineAuto-Coverage-Partial | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R24 为报告模式（warning 不阻断），R22/R23 为阻断式检查，五者均为部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | P3 | ① pre-commit / CI 检出红线违规新实例时；② 或事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）出现误报案例时 |
 | P3-Rust-Coverage-D38 | Rust sidecar unit 覆盖率 run.rs 15.68% 未达行覆盖率目标 85%（D38，maint.rs/pgbin.rs 已达标） | P3 | ① `cargo llvm-cov` 覆盖率回归（run.rs 覆盖率下降或门禁失败）时；② 或 run.rs supervisor 可测路径被独立重构时 |
 | P2-Fi25-Rust-Injection-Missing | 失败注入场景 #25（数据页 checksum 错误）缺 Rust 集成测试 | P2 | ① sidecar 引入运行期 postgres 日志监控需求时；② 或数据页损坏问题在生产环境报告时 |
 | P3-App-SyncFunctions-In-Async-Bootstrap | `initialize_services` 中同步函数（preload\_aliases/validate\_failover/validate\_strategy\_tier）阻塞事件循环（合理设计决策） | P3 | ① 这些函数引入网络/磁盘 IO；② 或启动期 UI 响应延迟被用户感知时 |
@@ -58,12 +58,12 @@
 | P3-DataExplorer-SyncEngine-Unification | DataExplorer 同步引擎游离于统一连接管理（举一反三登记，本期不实施） | P3 | ① DataExplorer 再次出现连接错口/引擎缓存跨模式复用问题；② 或统一连接管理重构时 |
 | P3-UX06-Startup-SLA-E2E-Gap | 冷启动到导航可交互的端到端 SLA 未实测（UX-06 以 proxy 构成基线替代，如实记录缺位） | P3 | ① 真实端到端测量 > 8s（SLA 超阈）时触发 visited\_tabs 顶层推广（`test_consumes_all_seven_subviews_in_stack` 改写 + #438 范式推广）；② 或启动流程重构时 |
 | P3-B12-Screener-Formatting-Logic-in-VM | #B12-2 review02 B12 第 2 步：格式化逻辑下沉 VM（`_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM） | P3 | ① report04 D9（AI 流式更新重建机制重构）合并时；② 或 `screener_view` 再次因格式化逻辑内联出现缺陷时 |
-| P2-BT05-QualityGate-Bypass | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化；区间覆盖缺口评估已实现，按表等级质量评估待设计） | P2 | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或残余第二步实施（按表/等级质量评估接入回测路径）时 |
-| P3-TA-OSS05-DualImpl | 技术指标（RSI/MACD/KDJ）双实现分叉的 OSS-05 结论仅存于测试 docstring，未登记技术债（原著 reviews/ 已丢失） | P3 | ① 技术指标测试文件（`test_technical_analysis_equivalence.py`）被重构或拆分时；② 或双实现再次扩散（新增未经等价性断言覆盖的指标分支）时；③ 或指标语义变更时 |
+| P2-BT05-QualityGate-Bypass | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化；区间覆盖缺口评估已实现，区间质量等级映射待设计） | P2 | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或残余第二步实施（区间缺口/异常值/未复权段映射为质量等级并与 `required_quality_tier` 比较接入回测路径）时 |
+| P3-TA-OSS05-DualImpl | 技术指标 pandas 薄委托层与 Polars 表达式正本的 OSS-05 等价性结论（等价域与镜像分叉）仅由测试断言守护，测试重构后决策依据将失传（原著 reviews/ 已丢失） | P3 | ① 技术指标测试文件（`test_technical_analysis_equivalence.py`）被重构或拆分时；② 或双实现面再次扩散（pandas 入口出现独立算法、或新增未经等价性断言覆盖的指标分支）时；③ 或指标语义变更时 |
 | P3-N54-Model-File-Trust-Boundary | 情绪模型文件（GGUF/head.npz）加载期仅轻量校验（GGUF 4 字节魔数 / head 结构与数值），不构成对文件内容的信任，来源由用户自担 | P3 | ① App 引入模型下载/分发渠道（文件来源不再由用户自备）时；② 或 GGUF/head 解析器漏洞（如 llama.cpp/np.load CVE）公开披露时；③ 或安全审计要求文件内容级校验（哈希白名单/签名）时 |
 | P3-RedlineAuto-Grimp-Namespace-Blindspot | import-linter/grimp 不建模命名空间包（`data/sync/` 无 `__init__.py`），指向该子包的 R1 违规处于门禁盲区（UTILS-A-01 实证） | P3 | ① grimp/import-linter 升级或补 `data/sync/__init__.py` 等建模手段使契约开始实际拦截时；② 或再次出现指向 `data.sync.*` 的未登记跨层 lazy import 新实例时 |
 | P3-REV03-Dao-MaxRows | review03 C4：`_read_db`/`_read_db_select` 已提供 max_rows 安全阀，但多数全表扫描调用点未显式设置，数据增长后可能一次性载入全量 | P3 | ① `data/persistence/daos/` 再次新增未显式传 max_rows 的全表扫描调用点时；② 或出现因全量载入导致的内存/超时故障报告时；③ 或数据访问层重构时 |
-| P3-REV03-ScreeningHistory-SQLCore | review03 C7：screener_dao 查询仍有 f-string 拼列名 / ORDER BY（screening_history），非注入风险，待迁移 SQLAlchemy Core | P3 | ① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时 |
+| P3-REV03-ScreeningHistory-SQLCore | review03 C7：screener_dao 的 screening_history 查询已消除 f-string 拼列名/ORDER BY（选股 SQL 静态模板化），但 `get_history_tree`/`get_pending_predictions` 等仍为 raw SQL，待迁移 SQLAlchemy Core | P3 | ① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时 |
 | P3-REV03-DataDictionary-Columns | review03 C9：数据字典半数表 columns 为空（已于 #1100（2026-09-21）解决：列级声明移除，columns 改由 ORM 派生 + `test_no_empty_columns_fields` 守护） | P3 | ① columns 为空条目导致实际列级校验漏检缺陷时；② 或数据字典被纳入新的门禁校验时 |
 | P2-REV06-External-SchemaValidation | review06 F9：外部数据（Tushare/Akshare）入库前缺行级 schema 校验，脏数据可静默影响选股决策 | P2 | ① 外部数据脏数据导致选股/回测结论异常的事故报告时；② 或新增外部数据源接入取数→入库链时（新链路必须配套校验） |
 | P3-REV06-Retry-CircuitBreaker | review06 F10：重试机制在外部服务故障时放大请求压力，建议加熔断/退避限流 | P3 | ① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时 |
@@ -88,7 +88,7 @@
 
 **产生背景与现状**
 
-strategies/ 层 except Exception 中 P0/P2 必修项已完成，剩余已合理日志的 except Exception 用 `# NOTE(lazy):` 标记保留。Phase 6.1 杠杆评估决策"不引入 `_handle_strategy_exception(e, context)` 统一入口"（YAGNI：`classify_error` 调用稀少；过度抽象：5 正交维度需 7 字段 context；多处差异化状态修改无法覆盖）。Phase 6.3 完成 ceiling 动态化（按方法分组描述，不再硬编码数值）。R9 合规修复已完成（`str(e)` → `DataSanitizer.sanitize_error(e)`）。
+strategies/ 层 except Exception 中 P0/P2 必修项已完成；现网 64 处 `except Exception` 中，36 处已附 `# NOTE(lazy):` 标记，22 处经 `log_classified` / `classify_error` / `classify_severity` 分类，另有 6 处未标记亦未分类（`strategies/ai_mixin.py` 5 处：stk_limit 预取、单卡失败兜底、名称区间查询 3 处经脱敏记录/回调，`_dataframe_sizeof` 与 prompt preview 2 处静默降级；`strategies/polars_base.py` 归因条件计数 1 处静默降级）。即除 36 处标记块外，22 处已分类但未标记、6 处未分类（含 3 处已合理日志、3 处静默降级），与「剩余已合理日志的 except Exception 用 NOTE(lazy) 标记保留」的原盘点口径不一致；若未分类块中含新增实例即触发升级条件 ①。Phase 6.1 杠杆评估决策"不引入 `_handle_strategy_exception(e, context)` 统一入口"（YAGNI：`classify_error` 调用稀少；过度抽象：5 正交维度需 7 字段 context；多处差异化状态修改无法覆盖）。Phase 6.3 完成 ceiling 动态化（按方法分组描述，不再硬编码数值）。R9 合规修复已完成（`str(e)` → `DataSanitizer.sanitize_error(e)`）。
 
 **期望的最终解法**
 
@@ -166,15 +166,15 @@ M9 services 模块检视发现：`services/task_manager.py:741-742`（`cancel_al
 
 ### 红线自动化与类型压制
 
-#### P3-RedlineAuto-Coverage-Partial：红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R22/R23/R24 为报告/告警模式的部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓）
+#### P3-RedlineAuto-Coverage-Partial：红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R24 为报告模式（warning 不阻断），R22/R23 为阻断式检查，五者均为部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-RedlineAuto-Coverage-Partial** | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R22/R23/R24 为报告/告警模式的部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | ① 红线违规频发时；② 或事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）误报控制方案成熟时 |
+| **P3-RedlineAuto-Coverage-Partial** | 红线自动化覆盖部分实现（R1/R4/R9/R12/R13/R14/R15 已落地；R20/R21/R24 为报告模式（warning 不阻断），R22/R23 为阻断式检查，五者均为部分自动化；R16 部分落地，事件处理器内同步 IO 暂缓） | ① 红线违规频发时；② 或事件处理器识别逻辑（use\_viewmodel 工厂体 + Flet 事件回调精确 AST 定位）误报控制方案成熟时 |
 
 **产生背景与现状**
 
-R1 由 import-linter 3 条契约（1 条 layers + 2 条 forbidden）守护；R4/R9（Tushare token 静态脱敏）/R12/R13/R14/R15 由 `scripts/check_redlines.py` 实现并接入 pre-commit `redline-check` hook（单元测试守护）；R20（报告模式，warning 不阻断）、R21、R22（水位线单调）、R23、R24 亦由 `scripts/check_redlines.py` 落地为报告/告警模式的部分自动化检查（2026-10-25 复核）。R16（UI 阻塞）部分落地：VM `__init__` 构造已注册单例检测已实现（review07-G20，捕获 B11 类问题）；事件处理器内同步 IO 维度因 AST 误报风险高暂缓，仍需人工评审（重点检查项见 `docs/reviews/ai-review.md`）。各红线 automation\_coverage 与 human\_review\_required 见 `docs/governance/redlines.yml`。
+R1 由 import-linter 3 条契约（1 条 layers + 2 条 forbidden）守护；R4/R9（Tushare token 静态脱敏）/R12/R13/R14/R15 由 `scripts/check_redlines.py` 实现并接入 pre-commit `redline-check` hook（单元测试守护）；R20（单位核对）、R21（缺失值伪装）、R24（时点正确性）为报告模式（warning 不阻断），R22（水位线单调）、R23（裸 UI token）为阻断式检查（检出即失败、退出码非 0），五者均为 `automation_coverage: partial` 的部分自动化检查，由 `scripts/check_redlines.py` 落地（2026-10-25 复核）。R16（UI 阻塞）部分落地：VM `__init__` 构造已注册单例检测已实现（review07-G20，捕获 B11 类问题）；事件处理器内同步 IO 维度因 AST 误报风险高暂缓，仍需人工评审（重点检查项见 `docs/reviews/ai-review.md`）。各红线 automation\_coverage 与 human\_review\_required 见 `docs/governance/redlines.yml`。
 
 **期望的最终解法**
 
@@ -608,40 +608,43 @@ UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`s
 
 ### 回测与数据质量
 
-#### P2-BT05-QualityGate-Bypass：回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化；区间覆盖缺口评估已实现，按表等级质量评估待设计）
+#### P2-BT05-QualityGate-Bypass：回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化；区间覆盖缺口评估已实现，区间质量等级映射待设计）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P2-BT05-QualityGate-Bypass** | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化；区间覆盖缺口评估已实现，按表等级质量评估待设计） | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或残余第二步实施（按表/等级质量评估接入回测路径）时 |
+| **P2-BT05-QualityGate-Bypass** | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化；区间覆盖缺口评估已实现，区间质量等级映射待设计） | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或残余第二步实施（区间缺口/异常值/未复权段映射为质量等级并与 `required_quality_tier` 比较接入回测路径）时 |
 
 **产生背景与现状**
 
 `strategies/backtest/data_provider.py::_BacktestQualityProxy` 为让回测历史任意时点数据通过质量门控，硬编码 `QualityTier.GOLD` 绕过 `@require_quality`/`_check_tier`（CLAUDE.md §3.2 强制要求）。结果：回测使用的历史数据（异常值/未复权段等）不反映数据质量问题，策略 `required_quality_tier` 声明形同虚设，与 UN-04「可信地验证」冲突。完成第一步（代码处 `# NOTE(lazy)` 三要素显式标记 + 本条目登记）后，权衡对维护者可见。
 
-**现状更新（2026-10-31）**：区间**交易日覆盖缺口**部分已落地——`BacktestDataProvider.evaluate_range_quality()`（BT-03 MAJOR-02）在成功预载 / 宽区间跳过 / 预载失败全部路径求「交易日全集 − 实际覆盖」差值，写入代理的 `_scan_missing_dates` 并产出 `[range_quality_gaps]` / `[range_quality_coverage_unverified]`（覆盖未知，R21 fail-closed）两类 `DataWarning`（`data_quality` → UI `unreliable`）；缺口日 `screening_data` 为空 → 该日无信号。残余缺口：`_quality_tier` 仍恒 GOLD，**按表/等级质量评估未接入回测路径**，异常值/未复权段等问题仍不经等级门控反映。
+**现状更新（2026-10-31）**：区间**交易日覆盖缺口**部分已落地——`BacktestDataProvider.evaluate_range_quality()`（BT-03 MAJOR-02）在成功预载 / 宽区间跳过 / 预载失败全部路径求「交易日全集 − 实际覆盖」差值，写入代理的 `_scan_missing_dates` 并产出 `[range_quality_gaps]`（含缺失数与占比）/ `[range_quality_coverage_unverified]`（覆盖未知，R21 fail-closed）两类 `DataWarning`，经 `range_preload_warnings` → `BacktestResult.data_warnings` → `quality_json` 在 UI 标记 `unreliable`；缺口日 `screening_data` 为空 → 该日无信号。声明 `require_continuous_window=True` 的策略在缺口存在时经 `_check_tier`（`data/persistence/quality_gate.py`）被实际拦截（D2-9）。`_quality_tier` 仍恒为 GOLD（D3-M2 决定：聚合降级会把区间缺口放大为「整段每天都拦截」，缺口改由告警 + 连续窗口契约承载）。残余缺口：`required_quality_tier` 维度仍恒被满足（GOLD），**按表/等级质量评估未接入回测路径**，异常值/未复权段未纳入区间评估、缺口比例亦未折算为质量等级。
 
 **期望的最终解法（残余部分）**
 
-按回测区间把**按表/等级质量评估**接入回测门控（而非仅覆盖缺口告警）：复用实盘逐表质量数据与 `DataProcessor._scan_missing_dates` 口径，对区间聚合出实际质量等级；低于策略声明时**不拒绝执行**，以 `DataWarning` 显式告知（覆盖缺口告警已由 `evaluate_range_quality()` 承载，无需重复实现）。相关文件：`strategies/backtest/data_provider.py`、`data/data_processor.py`。
+按回测区间把**按表/等级质量评估**接入回测门控（而非仅覆盖缺口告警）：复用实盘逐表质量数据与 `DataProcessor._scan_missing_dates` 口径，把区间缺失比例与异常值/未复权段纳入 BRONZE/SILVER/GOLD 映射，并与策略 `required_quality_tier` 比较；低于策略声明时**不拒绝执行**，以 `DataWarning` 显式告知（覆盖缺口告警已由 `evaluate_range_quality()` 承载，无需重复实现）。验收标准：① 区间缺失比例 + 异常值/未复权段可映射为等级并与 `required_quality_tier` 比较；② 现有 `tests/unit/strategies/backtest/test_data_provider.py` 全过；③ 结果 `data_warnings` 在回测 UI 横幅可见。相关文件：`strategies/backtest/data_provider.py`、`data/data_processor.py`、`data/persistence/quality_gate.py`。
 
 ### 技术指标双实现（OSS-05）
 
-#### P3-TA-OSS05-DualImpl：技术指标（RSI/MACD/KDJ）双实现分叉的 OSS-05 结论仅存于测试 docstring，未登记技术债（原著 reviews/ 已丢失）
+#### P3-TA-OSS05-DualImpl：技术指标 pandas 薄委托层与 Polars 表达式正本的 OSS-05 等价性结论仅由测试断言守护（原著 reviews/ 已丢失）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-TA-OSS05-DualImpl** | 技术指标（RSI/MACD/KDJ）双实现分叉的 OSS-05 结论仅存于测试 docstring，未登记技术债（原著 reviews/ 已丢失） | ① 技术指标测试文件（`test_technical_analysis_equivalence.py`）被重构或拆分时；② 或双实现再次扩散（新增未经等价性断言覆盖的指标分支）时；③ 或指标语义变更时 |
+| **P3-TA-OSS05-DualImpl** | 技术指标 pandas 薄委托层与 Polars 表达式正本的 OSS-05 等价性结论（等价域与镜像分叉）仅由测试断言守护，测试重构后决策依据将失传（原著 reviews/ 已丢失） | ① 技术指标测试文件（`test_technical_analysis_equivalence.py`）被重构或拆分时；② 或双实现面再次扩散（pandas 入口出现独立算法、或新增未经等价性断言覆盖的指标分支）时；③ 或指标语义变更时 |
 
 **产生背景与现状**
 
-OSS-05 双实现等价性研究结论（pandas 入口 vs Polars 表达式工厂的等价域与分叉面）目前只固化在 `tests/unit/test_technical_analysis_equivalence.py` 的 docstring 与断言中，**未登记进本技术债表**。`reviews/` 目录经 `.gitignore` 忽略（本地产物），当时的原始报告《开源组件使用检视报告.md》已随检视周期删除，若上述测试文件将来被重构或拆分，全部决策依据将无迹可循。
+OSS-05 双实现等价性研究结论（pandas 入口 vs Polars 表达式工厂的等价域与分叉面）原仅固化在 `tests/unit/test_technical_analysis_equivalence.py` 的 docstring 与断言中，未登记进本技术债表；`reviews/` 目录经 `.gitignore` 忽略（本地产物），当时的原始报告《开源组件使用检视报告.md》已随检视周期删除，若上述测试文件将来被重构或拆分，全部决策依据将无迹可循。**本条目即该结论的登记载体，同时 `docs/patterns/polars-vectorized-strategy.md`「指标语义单一事实源」已承载「Polars 为唯一语义正本、pandas 入口必须是薄委托、禁止新增独立 pandas 实现」的规则约束。**
+
+**现状校准（2026-10-31 复核）**：① D1-D3 收敛已完成——`utils/technical_analysis.py` 的 `get_macd`/`get_kdj` 委托 `get_macd_expr`/`get_kdj_expr` 取末值，`calculate_rsi_pandas` 委托 `get_rsi_expr`，独立 pandas 算法实现与 `get_rsi`/`analyze_trend`/`_split_delta` 均已删除（D7）；② `utils/qfq.py` 仍并存 `qfq_ratio_expr`（:18）与 `qfq_ratio_series`（:112），其交叉等价性由 `tests/unit/test_qfq_equivalence.py` 承接（D4）；③ 测试侧在原 B1-B4 之外新增 B5（RSI 无定义/全平盘 → null 而非 `fillna(50)` 哨兵，`test_technical_analysis_equivalence.py:445-465`），组 A/B/C 结构不变。
 
 已固化的核心结论（现状截至 2026-09-23，D1-D3 收敛 + D7 死代码删除后）：
 - **收敛方向**：Polars 表达式为唯一语义正本，pandas 入口为薄委托层（`get_macd`/`get_kdj` 已委托 `get_macd_expr`/`get_kdj_expr`，`calculate_rsi_pandas` 委托 `get_rsi_expr`）；
 - **B1 RSI 预热期**（保留固化）：测试内 pandas 教科书公式 `fillna(50)` 全序列 vs pl `min_samples=period` 前 period 根 null（真实「未知」）。独立 pandas 末值实现 `get_rsi`（含 `_split_delta`）已随 D7 删除，生产 pandas 路径预热期语义与 pl 一致；
 - **B2 MACD hist 倍率**（已收敛）：pd 侧改 ×2 委托，与 pl 侧 `macd=(dif-dea)×2` 一致；断言从「固化 2 倍差」改为「断言一致」；
 - **B3 KDJ 全横盘**（已收敛）：pd 侧委托后经 `fill_nan(50)` 取中性 50，不再返回 NaN 注入 `"k: nan"` 至 AI prompt；
-- **B4 KDJ 连续一字板**（已收敛）：pd 头部 NaN 注入历史统一由 `fill_nan(50)` 承载，断言改为接口与 expr 末值一致。
+- **B4 KDJ 连续一字板**（已收敛）：pd 头部 NaN 注入历史统一由 `fill_nan(50)` 承载，断言改为接口与 expr 末值一致；
+- **B5 RSI 无定义**（保留固化）：测试内 pandas 教科书镜像仍 `fillna(50)`，pl 正本与生产薄委托入口对全平盘/一字板段返回真实缺失 null（R21），断言「生产入口不含 50 哨兵」。
 
 衍生任务状态：
 1. qfq 双实现（`qfq_ratio_series` vs `qfq_ratio_expr`）交叉等价性测试 → 由 `tests/unit/test_qfq_equivalence.py` 承接（D4）；
@@ -673,19 +676,21 @@ review03（数据层与持久化，2026-09-02/03）发现：DAO 层读取方法�
 
 全部全表扫描调用点显式指定 `max_rows` 且无兜底无限制读取。upgrade 触发条件：① `data/persistence/daos/` 再次新增未显式传 max_rows 的全表扫描调用点时；② 或出现因全量载入导致的内存/超时故障报告时；③ 或数据访问层重构时。
 
-#### P3-REV03-ScreeningHistory-SQLCore：review03 C7：screener_dao 查询仍有 f-string 拼列名 / ORDER BY（screening_history），非注入风险，待迁移 SQLAlchemy Core
+#### P3-REV03-ScreeningHistory-SQLCore：review03 C7：screener_dao 的 screening_history 查询已消除 f-string 拼列名/ORDER BY（选股 SQL 静态模板化），但部分 raw SQL 待迁移 SQLAlchemy Core
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-REV03-ScreeningHistory-SQLCore** | review03 C7：screener_dao 查询仍有 f-string 拼列名 / ORDER BY（screening_history），非注入风险，待迁移 SQLAlchemy Core | ① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时 |
+| **P3-REV03-ScreeningHistory-SQLCore** | review03 C7：screener_dao 的 screening_history 查询已消除 f-string 拼列名/ORDER BY（选股 SQL 静态模板化），但 `get_history_tree`/`get_pending_predictions` 等仍为 raw SQL，待迁移 SQLAlchemy Core | ① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时 |
 
 **产生背景与现状**
 
 review03（数据层与持久化，2026-09-02/03）发现：`data/persistence/daos/screener_dao.py` 的 `screening_history` 相关查询使用 f-string 拼接列名与 `ORDER BY` 子句。经评审确认非注入风险（列名来源受控），但与 R4 参数化方向不一致，待迁移 SQLAlchemy Core 统一。
 
+**现状校准（2026-10-31 复核）**：选股/区间选股 SQL 已改为模块级静态模板（`_SCREENING_SQL_TEMPLATE` / `_SCREENING_SQL_RANGE_TEMPLATE`），可变点仅 `__CLOSE_COND__` / `__STOCK_ALIVE_CONDITION__` / `__DELISTING_FLAG__` 三个受控片段（代码内 review03-C7 注释回指）；`get_screening_history` / `get_history_records` / `get_learning_context*` 等已迁移 SQLAlchemy Core。剩余未迁移 Core 的 `screening_history` raw SQL 为：`get_history_tree`（`screener_dao.py:L359`，f-string 仅内嵌常量 `REVIEW_STATS_WINDOW_DAYS`，列名与 `ORDER BY` 均静态）、`get_pending_predictions`（`$1`~`$3` 参数化）、`_save_thinking` 的 `ids_sql`（`$1` 参数化）——均无 f-string 拼列名/ORDER BY，非注入风险。
+
 **期望的最终解法**
 
-`data/` 内 `screening_history` 相关查询迁移 SQLAlchemy Core，无 f-string 拼列名/`ORDER BY`。upgrade 触发条件：① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时。
+将上述剩余 `screening_history` raw SQL（`get_history_tree` / `get_pending_predictions` / `_save_thinking` 的 `ids_sql`）迁移 SQLAlchemy Core，或经 `text()` 常量承载，保持列名与 `ORDER BY` 静态。upgrade 触发条件：① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时。
 
 #### P3-REV03-DataDictionary-Columns：review03 C9：数据字典半数表 columns 为空（已于 #1100（2026-09-21）解决：列级声明移除，columns 改由 ORM 派生 + `test_no_empty_columns_fields` 守护）
 
@@ -727,6 +732,8 @@ review06（安全与供应链，2026-08-24）发现：外部数据入库路径�
 
 review06（安全与供应链，2026-08-24）发现：外部服务故障时重试机制会放大请求压力（重试风暴），建议引入熔断器或退避限流。
 
+**现状校准（2026-10-31 复核）**：Tushare 调用链已落地自适应退避限流——`TushareApiWrapper._handle_api_call`（`data/external/tushare/api_wrapper.py:136-322`）按 `max_retries` 重试，全局 `TokenBucket` 与 per-API limiter 两段消费；命中限流时两桶 `reduce_rate(0.5)` 降速并以 5-15s 抖动退避，成功后 `on_success()` 渐进恢复；网络错误按 `1*(i+1)` 抖动退避；token 认证失败置 `_token_invalid` 全局熔断（后续调用快速失败），权限类错误经 `mark_api_unavailable(runtime=True)` 短期负缓存。**残余缺口**：仍无「连续失败 N 次」跨调用熔断计数——每次调用独立重试至 `max_retries`，多调用方并发时压力仍可叠加；Akshare 侧仅经模块级共享限速器（`akshare_rate_limiter`）限速，无重试/熔断；现有 `CircuitBreaker`（`data/external/news_sources/circuit_breaker.py`）与 news_fetcher 的 Sina/CLS 熔断只覆盖新闻源，未覆盖 Tushare/Akshare 行情链路。本条保持。
+
 **期望的最终解法**
 
 外部服务调用链加熔断/退避限流，故障时不无限重试放大 QPS（含 `tushare_client._handle_api_call` 连续失败短路计数）。upgrade 触发条件：① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时。
@@ -753,7 +760,7 @@ review06（安全与供应链，2026-08-24）发现：`utils/prompt_guard.py` �
 
 **产生背景与现状**
 
-review06（安全与供应链，2026-08-24）发现：LLM 输出会参与选股排序，但当前仅校验部分字段，缺完整输出 schema 校验，且 UI 对 AI 排序结果缺 AI 免责声明。**现状校准（2026-10-25 复核）**：AI 风险免责声明已随 UX-09 落地——`ui/components/risk_disclaimer.py` 由 `ui/views/screener_view.py:2053/2120/2173` 与 `ui/components/stock_detail_dialog.py:764` 挂载，引导页亦有确认步骤；**剩余缺口仅为完整输出 schema 校验**。当前职责边界见 [ai-service.md](../patterns/ai-service.md)「输出契约与校验边界」。
+review06（安全与供应链，2026-08-24）发现：LLM 输出会参与选股排序，但当前仅校验部分字段，缺完整输出 schema 校验，且 UI 对 AI 排序结果缺 AI 免责声明。**现状校准（2026-10-31 复核）**：AI 风险免责声明已随 UX-09 落地——`ui/components/risk_disclaimer.py` 由 `ui/views/screener_view.py:2066/2133/2186` 与 `ui/components/stock_detail_dialog.py:770` 挂载，引导页亦有确认步骤；**剩余缺口仅为完整输出 schema 校验**——`validate_ai_analysis_response` 仍为逐字段校验（score 范围 / confidence 归一化 / recommendation 与 conclusion_label 枚举 / 自由文本清洗），缺必填字段、字段类型与未知键的整体 schema 约束；`response_schema` 结构化输出能力已存在（`litellm_client.py` 支持 pydantic 契约下传），但仅新闻风险场景 `RiskOutput` 使用，个股分析输出未接入。当前职责边界见 [ai-service.md](../patterns/ai-service.md)「输出契约与校验边界」。
 
 **期望的最终解法**
 

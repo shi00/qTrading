@@ -136,6 +136,11 @@ class TestProtocolVersionMismatch:
 
         sidecar_binary = tmp_path / "fake_sidecar.exe"
         sidecar_binary.write_text("placeholder", encoding="utf-8")
+        # R7: ``@register_singleton`` 使 ``__new__`` 返回已存在的 session 真实实例，
+        # 直接构造 fake service 会拿到运行中的真实 PG（start 走快速路径直接返回，不会校验 schema）。
+        # 保存/恢复 ``_instance`` 的方式构造独立实例，测试后还原，不破坏 ``real_embedded_pg`` fixture。
+        original_instance = EmbeddedPostgresService._instance
+        EmbeddedPostgresService._instance = None
         service = EmbeddedPostgresService(
             sidecar_binary=sidecar_binary,
             data_dir=tmp_path / "postgres" / "17" / "data",
@@ -168,4 +173,5 @@ class TestProtocolVersionMismatch:
             assert _FakePopen.instances[0]._wait_calls >= 1, "期望子进程被 wait 清理，实际 wait 未被调用"
         finally:
             await service.stop()
-            EmbeddedPostgresService._reset_singleton()
+            # 还原 session 真实单例（不调用 _reset_singleton：它会停掉真实 PG）
+            EmbeddedPostgresService._instance = original_instance

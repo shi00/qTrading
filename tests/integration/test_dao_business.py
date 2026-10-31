@@ -866,9 +866,9 @@ class TestScreenerDao:
         ]
         await screener_dao.save_screening_results(records)
 
-        cols_str = ", ".join(all_cols)
+        # R4：SQL 为固定字面量（列清单由 ORM 派生但不做运行时拼接），读全列后按列名精确断言
         result = await screener_dao._read_db(
-            f"SELECT {cols_str} FROM screening_history WHERE strategy_name=$1",
+            "SELECT * FROM screening_history WHERE strategy_name=$1",
             ["oversold"],
         )
         assert not result.empty

@@ -137,6 +137,13 @@ class _FakePopen:
 @pytest.fixture(autouse=True)
 def _reset_popen_instances() -> Iterator[None]:
     """每个测试前清空 FakePopen 实例记录 + 清理 logger handler + 清理 DataSanitizer 隔离。"""
+    # R7: ``@register_singleton`` 使构造返回已存在的 session 真实实例（若 real_embedded_pg
+    # 已启动），start() 会走快速路径直接返回，导致期望抛错的用例失效。保存/恢复 _instance，
+    # 保证每个用例拿到独立的 fake service，且测试后不破坏 real_embedded_pg fixture。
+    from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+    original_instance = EmbeddedPostgresService._instance
+    EmbeddedPostgresService._instance = None
     _FakePopen.instances.clear()
     _svc_logger = logging.getLogger("qtrading.embedded_postgres")
     for h in list(_svc_logger.handlers):
@@ -161,6 +168,8 @@ def _reset_popen_instances() -> Iterator[None]:
                 pass
     # 测试后再清理一次，避免泄漏到下一个测试
     DataSanitizer._reset_known_secrets()
+    # 还原 session 真实单例（用例 finally 的 _reset_singleton 会清空 _instance）
+    EmbeddedPostgresService._instance = original_instance
 
 
 def _make_service(tmp_path: Path) -> EmbeddedPostgresService:

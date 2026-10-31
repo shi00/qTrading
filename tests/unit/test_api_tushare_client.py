@@ -19,7 +19,8 @@ from data.constants import (
 )
 from data.external.tushare_client import TushareClient
 
-pytestmark = pytest.mark.integration
+# 分层归属：单组件（TushareClient）+ 外部 API 边界 mock，无真实 DB/网络依赖 → 单元层
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
@@ -270,9 +271,9 @@ class TestSlowApiLimiters:
 
             await client.get_top10_holders(ts_code="000001.SZ", period="20231231")
 
-            # Phase 2B 两段消费：general + api 限流器都被调用
-            api_limiter.consume_async.assert_called_once()
-            general_limiter.consume_async.assert_called_once()
+            # Phase 2B 两段消费：general + api 限流器都被调用（每次消费 1 token）
+            api_limiter.consume_async.assert_called_once_with(1)
+            general_limiter.consume_async.assert_called_once_with(1)
 
     @patch("asyncio.sleep", new_callable=AsyncMock)
     @patch("tushare.pro_api")
@@ -327,7 +328,7 @@ class TestSlowApiLimiters:
 
             await client.get_income(ts_code="000001.SZ", period="20231231")
 
-            general_limiter.consume_async.assert_called_once()
+            general_limiter.consume_async.assert_called_once_with(1)
 
     @patch("asyncio.sleep", new_callable=AsyncMock)
     @patch("tushare.pro_api")
@@ -446,7 +447,7 @@ class TestSetTokenRebuildsLimiters:
             client = TushareClient(token="old_token")
 
             old_limiter = client._rate_limiter
-            assert old_limiter is not None
+            assert old_limiter.rate == pytest.approx(120 / 60.0)
 
             with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
                 asyncio.run(client.set_token_async("new_token"))

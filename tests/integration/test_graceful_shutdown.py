@@ -242,7 +242,8 @@ def test_watchdog_uses_force_exit_callback():
     coordinator = ShutdownCoordinator(page=None, force_exit_callback=lambda code: exit_calls.append(code))
 
     with patch("threading.Thread") as mock_thread:
-        coordinator.start_watchdog(10)
+        # 缩短看门狗超时（0.01s）避免真实等待 10s；目标线程仍会超时并触发 force_exit。
+        coordinator.start_watchdog(0.01)
         call_args = mock_thread.call_args
         assert call_args is not None
         thread_target = call_args.kwargs.get("target") or (call_args.args[0] if call_args.args else None)
