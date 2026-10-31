@@ -690,7 +690,11 @@ class AppConfig(BaseModel):
     embedded_pg_stop_timeout_s: float = Field(default=60.0, ge=5.0, le=120.0, description="sidecar 停止等待超时")
     embedded_pg_listen: str = Field(default="127.0.0.1", description="PG 监听地址（仅本机）")
     embedded_pg_username: str = Field(
-        default="postgres", description="PG 超级用户名（与 postgresql_embedded crate BOOTSTRAP_SUPERUSER 对齐）"
+        default="postgres",
+        description=(
+            "PG 超级用户名。sidecar 的 initdb --username、运行期健康检查/建库连接均使用该值；"
+            "须与既有 PGDATA 的超级用户一致，变更后须重建 cluster（默认 postgres）"
+        ),
     )
     embedded_pg_database: str = Field(default="qtrading", description="默认业务库名")
 

@@ -123,6 +123,76 @@ fn test_create_database_idempotent() {
     cleanup_sidecar(&mut child2, &data_dir);
 }
 
+/// 5b. M22：自定义超级用户名启动 roundtrip（`run --username qtrading`）。
+///
+/// 回归护栏：crate `postgresql_embedded` 0.22 的 `get_pool()` 固定以 `postgres` 连接，
+/// 若继续用 crate 的 `database_exists/create_database`，自定义用户名 cluster 会在建库阶段
+/// 28P01 失败（无 ready JSON）。现在改由 sidecar 以 `--username` 直连 psql：
+/// ① 首次 run 建库成功 → ready；② 以 qtrading 直连验证 role/database 可认证；
+/// ③ 二次 run 走「库已存在」分支 → 仍 ready（幂等）。
+#[test]
+fn test_run_custom_username_roundtrip() {
+    let (_tmp, data_dir) = unique_data_dir("roundtrip_custom_user");
+
+    // ① 自定义超级用户名启动
+    let mut child = spawn_run_with(&data_dir, &["--username", "qtrading"]);
+    let ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    assert_eq!(ready["status"], "running");
+    assert_eq!(ready["username"], "qtrading");
+    assert_eq!(ready["database"], "qtrading");
+    let port = ready_port(&ready).expect("port in ready JSON");
+
+    // ② 直连验证：自定义超级用户可认证且业务库已创建
+    let base = data_dir.parent().unwrap();
+    let psql_name = if cfg!(windows) { "psql.exe" } else { "psql" };
+    let psql = base.join("install").join("bin").join(psql_name);
+    let password = std::fs::read_to_string(base.join("runtime").join("password"))
+        .expect("read password file")
+        .trim()
+        .to_string();
+    let out = std::process::Command::new(&psql)
+        .args([
+            "-X",
+            "-q",
+            "-A",
+            "-t",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port.to_string(),
+            "-U",
+            "qtrading",
+            "-d",
+            "qtrading",
+            "-c",
+            "select current_user || ':' || current_database()",
+        ])
+        .env("PGPASSWORD", &password)
+        .output()
+        .expect("run bundled psql");
+    assert!(
+        out.status.success(),
+        "psql as custom superuser failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "qtrading:qtrading",
+        "custom superuser/database should be usable"
+    );
+
+    // ③ 优雅停止后二次 run：库已存在分支同样以自定义用户名连接
+    graceful_stop(&mut child);
+    let exit = wait_for_exit(&mut child, STOP_TIMEOUT);
+    assert_eq!(exit, 0, "first run should exit 0");
+
+    let mut child2 = spawn_run_with(&data_dir, &["--username", "qtrading"]);
+    let ready2 = wait_for_ready(&mut child2, READY_TIMEOUT);
+    assert_eq!(ready2["status"], "running");
+
+    cleanup_sidecar(&mut child2, &data_dir);
+}
+
 /// 6. dump/restore roundtrip（§17.2 场景 6）。
 #[test]
 fn test_dump_restore_roundtrip() {
