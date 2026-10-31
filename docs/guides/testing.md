@@ -128,7 +128,7 @@ async def test_save_valid():
     dao._write_db.assert_called_once()
 ```
 
-要点：用 `MagicMock(spec=AsyncEngine)` 构造 DAO 隔离真实 DB；对 `_save_upsert` / `_read_db` / `_write_db` 打 `AsyncMock` 桩；busy 写入路径等若涉事务须覆盖 `_guarded_begin`（可 `@asynccontextmanager` mock）。对应 [how-to.md 第 2 条流程第 5 步](../../docs/guides/how-to.md#2-新增一个-dao)。
+要点：用 `MagicMock(spec=AsyncEngine)` 构造 DAO 隔离真实 DB；对 `_save_upsert` / `_read_db` / `_write_db` 打 `AsyncMock` 桩；busy 写入路径等若涉事务须覆盖 `_guarded_begin`（可 `@asynccontextmanager` mock）。对应 [how-to.md 第 2 条流程第 4 步](../../docs/guides/how-to.md#2-新增一个-dao)。
 
 #### 模板 2：ViewModel 单测（state 快照 + subscribe 通知）
 

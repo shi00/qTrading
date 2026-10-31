@@ -65,7 +65,10 @@ cd .worktrees/feature-strategy-macd
 # 2. 项目 setup（在 worktree 内独立 venv）
 uv venv
 .venv\Scripts\activate         # Windows；或 source .venv/bin/activate
-uv pip install -r requirements.txt -r requirements-dev.txt
+# 三份依赖文件按 CI 顺序逐份安装，合并为单次解析会因版本互斥失败（详见 docs/guides/how-to.md §6）
+uv pip install -r requirements.txt
+uv pip install -r requirements-optional.txt
+uv pip install -r requirements-dev.txt
 pre-commit install             # 安装 git hooks
 
 # 3. 基线测试验证（确保起点干净）

@@ -272,7 +272,10 @@ def ScreenerView():
   - `ui/components/virtual_table.py::_make_drag_update_handler`、`ui/components/resizable_splitter.py::_on_drag_update` — 拖拽增量回退 `local_delta.x`，已随 R13 拖拽增量收敛删除（`DragUpdateEvent.primary_delta` 为 `Optional[float]`，仅保留 `is not None else 0.0` 空值保护）。
   - `ui/components/_markdown_safe.py::_show_blocked_toast` — `page.show_toast` 动态挂载守卫，已随 `page.show_toast` → `ToastManager.show()` 迁移删除。
 - 原 6 处同型守卫：`hasattr(page, ...)` 4 处（`ui/views/settings_view.py::_show_snack_impl`、`ui/views/onboarding_wizard.py::_show_snack`、`ui/components/config_panels/backup_restore_panel.py::_pick_and_restore`、`ui/components/_markdown_safe.py::safe_open_url`）与 `getattr(page, "show_toast", None)` 2 处（`ui/views/watchlist_view.py`、`ui/views/screener_view.py` 的 `_safe_show_toast`，已改名为 `_show_toast`）均已删除。
-- 清除后对账：`grep -rn "hasattr(page" ui/` 与 `grep -rn 'getattr(page, "show_toast"' ui/` 生产代码 0 命中；`grep -rn "getattr(page" ui/` 仅剩 `ui/views/onboarding_wizard.py::_do_language_change` 的 `locale_configuration` 取值守卫（该属性 `ft.Page` 已声明，非动态挂载垫片）与 `ui/components/toast_manager.py` 的 docstring 引用（纯文档）。
+- 清除后对账（在 `ui/` 下复跑 `grep -rn` 可自证）：`grep -rn 'getattr(page, "show_toast"' ui/` 0 命中；`grep -rn "hasattr(page" ui/` 仅 1 处、`grep -rn "getattr(page" ui/` 仅 2 处，且这 3 处**均不属于**本节定义的 V0→V1 兼容垫片（非 `hasattr`/`getattr` 双路径取值回退，故不登记为例外）：
+  - `ui/views/task_center_view.py::_setup_ticker` — `hasattr(page, "run_task")`：单测 FakePage 缺少 `run_task` 时跳过 ticker 的测试上下文容错（`page.run_task` 是 `ft.Page` 正式方法，非动态挂载属性，故不属「动态挂载属性存在性守卫」）。
+  - `ui/views/onboarding_wizard.py::_do_language_change` — `getattr(page, "locale_configuration", None)`：`ft.Page` 已声明属性的取值守卫。
+  - `ui/views/task_center_view.py::_navigate_to_data_source` — `getattr(page, "pubsub", None)`：`_get_page()` 可能返回 `None` 时的空值容错，非双路径回退。
 
 若新增依赖或重构必须引入兼容垫片、命令式控件、V0 API 形态，需在此处登记：
 

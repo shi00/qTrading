@@ -34,10 +34,10 @@
 | P2-Fi25-Rust-Injection-Missing | 失败注入场景 #25（数据页 checksum 错误）缺 Rust 集成测试 | P2 | ① sidecar 引入运行期 postgres 日志监控需求时；② 或数据页损坏问题在生产环境报告时 |
 | P3-App-SyncFunctions-In-Async-Bootstrap | `initialize_services` 中同步函数（preload\_aliases/validate\_failover/validate\_strategy\_tier）阻塞事件循环（合理设计决策） | P3 | ① 这些函数引入网络/磁盘 IO；② 或启动期 UI 响应延迟被用户感知时 |
 | P3-M4-DbMigrator-OrphanHeal-SingleChain-Assumption | `_heal_orphaned_revision` 假设严格线性单链迁移（已文档化设计限制） | P3 | 引入 Alembic 多分支（Multiple Heads）时 |
-| P3-M4-AppStateService-BroadExcept | `app_state_service.py:20,37` broad except 未接入 classify\_error（合理降级，一致性建议） | P3 | ① app state 升级为关键路径时；② 或该文件再次出现未分类 broad except 的新实例时 |
+| P3-M4-AppStateService-BroadExcept | `app_state_service.py:21,38,63` broad except 未接入 classify\_error（合理降级，一致性建议） | P3 | ① app state 升级为关键路径时；② 或该文件再次出现未分类 broad except 的新实例时 |
 | P3-M6-NewsFetcher-Lazy-ProxyManager-Import | `news_fetcher.py:618/:785/:951` 三处函数内部 import ProxyManager（合理避免循环依赖，建议保留） | P3 | ① `proxy_manager.py` 循环依赖被解除时；② 或该文件再次出现函数内 import 的新实例时 |
 | P3-Windows-Unit-Test-Timeout-Tight | Windows 单测 step `timeout-minutes` 余量不足（main 成功 run 13 分 41 秒 / 原 15 分钟 = 91% 占用） | P3 | ① Windows 单测实际运行时间 ≥ 18 分钟（90% 占用 20 分钟 timeout）；② 或连续 3 次 PR 触发 Windows 单测超时；③ 或单测总数增长 ≥ 20%（如新增 2000 个测试） |
-| P3-M9-NewsSubscription-EngineDisposed-Swallowed | #M9-010 R5: news\_subscription\_service.py L425/642/919 EngineDisposedError 吞没（设计合理但严格按 R5 应传播） | P3 | ① R5 红线适用范围扩展至应用服务层轮询循环时；② 或该文件再次出现 EngineDisposedError 吞没的新实例时 |
+| P3-M9-NewsSubscription-EngineDisposed-Swallowed | #M9-010 R5: news\_subscription\_service.py L520/752/1059 EngineDisposedError 吞没（设计合理但严格按 R5 应传播） | P3 | ① R5 红线适用范围扩展至应用服务层轮询循环时；② 或该文件再次出现 EngineDisposedError 吞没的新实例时 |
 | P3-M9-Backtest-EngineDisposed-Warning-Return | #M9-011 R5: backtest\_service.py L132-157 EngineDisposedError 被捕获返回带警告结果（设计模式不一致） | P3 | ① R5 红线适用范围扩展至回测持久化路径时；② 或该文件再次出现 system 级异常不 raise 的新实例时 |
 | P3-M9-EmbeddedPg-TimeoutExpired-Propagation | #M9-013 错误处理缺口：embedded\_pg\_maintenance\_service.py subprocess TimeoutExpired 已包装为 EmbeddedPgMaintenanceError（classify\_error 为可选优化） | P3 | ① sidecar CLI 超时在实际运行中频繁触发时；② 或该文件再次出现未分类 `TimeoutExpired` 的新实例时 |
 | P3-CON04-Subprocess-Cancel | review02 CON-04：subprocess 不可取消长任务停机交互——terminate 仅终止 sidecar 包装 / dump 中断残留不自动清理 / restore 拒绝取消 / run\_async 无可中断变体 | P3 | ① 用户报告停机后 `.partial` 残留或孤儿 pg\_dump 占用磁盘/连接；② restore 取消成为产品需求；③ ThreadPoolManager 重构时 |
@@ -46,7 +46,7 @@
 | P3-M12-StockDetailDialog-View-Holds-Page-DataProcessor | #M12-014 MVVM 边界：stock\_detail\_dialog.py View 直接持有 page/data\_processor 引用 | P3 | ① 该文件再次出现 View 越界持有 page/data\_processor 的新实例时；② 或 ui 层 MVVM 迁移完成（`ui/views` 与 `ui/components` 下无 View 直接持有 page/data\_processor）时 |
 | P3-M12-BacktestConfigPanel-No-VM | #M12-015 MVVM 边界：backtest\_config\_panel.py 15 个 use\_state 未建 VM | P3 | ① 该文件再次出现 `use_state` 未建 VM 的新实例时；② 或 ui 层 MVVM 迁移完成时 |
 | P3-M12-Views-Import-Complexity-High | #M12-019 可维护性：screener\_view\.py (35 import) / data\_view\.py (24 import) 导入复杂度过高 | P3 | ① 任一 View 文件 import 数 > 40 时；② 或该文件因其他任务被修改且 import 数继续增长时 |
-| P3-M12-VirtualTable-ArrowSort-Indicator | #M12-020 可访问性：virtual\_table.py:287 ↑↓ 排序指示器 | P3 | ① 可访问性审计（[accessibility-baseline.md](../flet/accessibility-baseline.md) 复核）启动时；② 或 `virtual_table` 再次出现排序指示器相关可访问性缺陷报告时 |
+| P3-M12-VirtualTable-ArrowSort-Indicator | #M12-020 可访问性：virtual\_table.py:291-292 ↑↓ 排序指示器 | P3 | ① 可访问性审计（[accessibility-baseline.md](../flet/accessibility-baseline.md) 复核）启动时；② 或 `virtual_table` 再次出现排序指示器相关可访问性缺陷报告时 |
 | P3-M12-TushareConfigPanel-Referrer-Code-In-Url | #M12-021 隐私：tushare\_config\_panel_view\_model.py:37 URL 含 referrer code | P3 | ① 隐私审计（外发 URL / 追踪参数复核）启动时；② 或该 VM 再次出现 URL 携带跟踪/推荐码的新实例时 |
 | P3-M12-ViewModels-Repeated-Singleton-Calls | #M12-022 性能：VM 中重复调用 TushareClient()/TaskManager() 等单例 | P3 | ① 该 VM 文件再次出现重复构造单例的新实例时；② 或 VM 性能审计中单例调用开销被量化超阈值时 |
 | P3-M12-Views-Get-DataProcessor-Cross-Layer | #M12-025 MVVM 边界：data\_source\_tab.py View 经 VM 获取 data\_processor 传子组件（data\_view.py 已解决） | P3 | ① `ui/views` 或 `ui/components` 下再次出现 View 获取 data\_processor 传子组件的新实例时；② 或 ui 层 MVVM 迁移完成时 |
@@ -108,29 +108,29 @@ R3 场景遗漏检视发现：utils/ 层 except Exception（分布在 config\_ha
 
 后续 utils 层异常处理统一改造时重新评估是否引入 `classify_error`。upgrade 触发条件：① utils 层再次出现未分类 `except Exception` 的新实例时；② 或 utils 层异常处理被统一改造时。
 
-#### P3-M4-AppStateService-BroadExcept：`app_state_service.py:20,37` broad except 未接入 classify\_error（合理降级，一致性建议）
+#### P3-M4-AppStateService-BroadExcept：`app_state_service.py:21,38,63` broad except 未接入 classify\_error（合理降级，一致性建议）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-M4-AppStateService-BroadExcept** | `app_state_service.py:20,37` broad except 未接入 classify\_error（合理降级，一致性建议） | ① app state 升级为关键路径时；② 或该文件再次出现未分类 broad except 的新实例时 |
+| **P3-M4-AppStateService-BroadExcept** | `app_state_service.py:21,38,63` broad except 未接入 classify\_error（合理降级，一致性建议） | ① app state 升级为关键路径时；② 或该文件再次出现未分类 broad except 的新实例时 |
 
 **产生背景与现状**
 
-M4 模块化检视发现：`data/persistence/app_state_service.py:20,37` 共 2 处 `except Exception as e:` 吞没异常返回默认值。app state 是非关键路径（用户偏好/窗口位置等），吞没降级返回默认值是合理设计。但未接入 `classify_error`，与 #M4-002（review\_manager 已接入 classify\_error）一致性不符。本次 M4 未修复原因：① app state 非关键路径，容错优先；② 修复需引入 `classify_error` + `classify_severity` + system 级 raise 传播，改变现有降级语义，违反 §1.4「不做无益重构」。相关文件：`data/persistence/app_state_service.py:20,37`。
+M4 模块化检视发现：`data/persistence/app_state_service.py:21,38,63` 共 3 处 `except Exception as e:` 吞没异常并降级（读路径返回默认值、写路径不阻断调用方）。app state 是非关键路径（用户偏好/窗口位置等），吞没降级是合理设计。但未接入 `classify_error`，与 #M4-002（review\_manager 已接入 classify\_error）一致性不符。本次 M4 未修复原因：① app state 非关键路径，容错优先；② 修复需引入 `classify_error` + `classify_severity` + system 级 raise 传播，改变现有降级语义，违反 §1.4「不做无益重构」。相关文件：`data/persistence/app_state_service.py:21,38,63`。
 
 **期望的最终解法**
 
 与 #M4-002 一致性评估：① 若 app state 升级为关键路径，接入 `classify_error` + `classify_severity`，system 级 raise 传播；② 或维持现状（合理降级）。验收标准：① 若改造，现有 `test_app_state_service.py` 全过；② 新增 system 级异常 raise 传播单测。upgrade 触发条件：① app state 升级为关键路径时；② 或该文件再次出现未分类 broad except 的新实例时。
 
-#### P3-M9-NewsSubscription-EngineDisposed-Swallowed：#M9-010 R5: news\_subscription\_service.py L425/642/919 EngineDisposedError 吞没（设计合理但严格按 R5 应传播）
+#### P3-M9-NewsSubscription-EngineDisposed-Swallowed：#M9-010 R5: news\_subscription\_service.py L520/752/1059 EngineDisposedError 吞没（设计合理但严格按 R5 应传播）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-M9-NewsSubscription-EngineDisposed-Swallowed** | #M9-010 R5: news\_subscription\_service.py L425/642/919 EngineDisposedError 吞没（设计合理但严格按 R5 应传播） | ① R5 红线适用范围扩展至应用服务层轮询循环时；② 或该文件再次出现 EngineDisposedError 吞没的新实例时 |
+| **P3-M9-NewsSubscription-EngineDisposed-Swallowed** | #M9-010 R5: news\_subscription\_service.py L520/752/1059 EngineDisposedError 吞没（设计合理但严格按 R5 应传播） | ① R5 红线适用范围扩展至应用服务层轮询循环时；② 或该文件再次出现 EngineDisposedError 吞没的新实例时 |
 
 **产生背景与现状**
 
-M9 services 模块检视发现：`services/news_subscription_service.py:425`（`_safe_fetch_task`）/ `:642`（`_processing_loop`）/ `:919`（`_fetch_and_notify`）共 3 处 `except EngineDisposedError: ... self._running = False / break` - 吞没 EngineDisposedError 以停止轮询。R5 红线："DAO/维护流程必须检查引擎状态；已释放时抛出或传播 EngineDisposedError"。NewsSubscriptionService 不是 DAO/维护流程，是应用服务层的轮询循环，引擎释放后停止轮询是合理设计。但严格按 R5 应传播。M9 未修复原因：设计合理（轮询循环不应因 EngineDisposed 崩溃，而应优雅停止），R5 主要针对 DAO/维护流程；修复需评估是否在 system 级 raise，改变现有降级语义，违反 §1.4「不做无益重构」。相关文件：`services/news_subscription_service.py:425/642/919`。（R5 豁免已登记例外 **EX-0017**，见 docs/governance/exceptions.yml；P1-06 方案1）
+M9 services 模块检视发现：`services/news_subscription_service.py:520`（`_safe_fetch_task`）/ `:752`（`_processing_loop`）/ `:1059`（`_fetch_and_notify`）共 3 处 `except EngineDisposedError: ... self._running = False / break` - 吞没 EngineDisposedError 以停止轮询。R5 红线："DAO/维护流程必须检查引擎状态；已释放时抛出或传播 EngineDisposedError"。NewsSubscriptionService 不是 DAO/维护流程，是应用服务层的轮询循环，引擎释放后停止轮询是合理设计。但严格按 R5 应传播。M9 未修复原因：设计合理（轮询循环不应因 EngineDisposed 崩溃，而应优雅停止），R5 主要针对 DAO/维护流程；修复需评估是否在 system 级 raise，改变现有降级语义，违反 §1.4「不做无益重构」。相关文件：`services/news_subscription_service.py:520/752/1059`。（R5 豁免已登记例外 **EX-0017**，见 docs/governance/exceptions.yml；P1-06 方案1）
 
 **期望的最终解法**
 
@@ -158,7 +158,7 @@ M9 services 模块检视发现：`services/backtest_service.py:132-157`（`_pers
 
 **产生背景与现状**
 
-M9 services 模块检视发现：`services/task_manager.py:710` `cancel_all_running_async` 方法标注 `@log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)`，但该方法实际是批量取消+等待，可能更适合 `DB_BULK_IO`。阈值选择影响性能监控告警精度，不影响功能。M9 未修复原因：修改需评估历史告警基线。相关文件：`services/task_manager.py:710`。
+M9 services 模块检视发现：`services/task_manager.py:741-742`（`cancel_all_running_async`，装饰器 :741 / 方法定义 :742）标注 `@log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)`，但该方法实际是批量取消+等待，可能更适合 `DB_BULK_IO`。阈值选择影响性能监控告警精度，不影响功能。M9 未修复原因：修改需评估历史告警基线。相关文件：`services/task_manager.py:741-742`。
 
 **期望的最终解法**
 
@@ -278,7 +278,7 @@ PR #513 检视（第一轮）遗留观察级建议。`data/persistence/embedded_
 
 **期望的最终解法**
 
-若应用运行期引入 sidecar 热替换/升级流程，在替换后自动调用 `clear_pg_version_cache()`。验收标准：① sidecar 替换后下次 `resolve_pg_major_version` 重新解析；② 现有 `test_version.py` 全过；③ 新增 sidecar 替换后缓存失效单测。upgrade 触发条件：① 应用引入运行期 sidecar 升级/替换流程时；② 或 EmbeddedPostgresService 支持热切换时。
+若应用运行期引入 sidecar 热替换/升级流程，在替换后自动调用 `clear_pg_version_cache()`。验收标准：① sidecar 替换后下次 `resolve_pg_major_version` 重新解析；② 现有 `tests/unit/test_embedded_postgres_version.py` 全过；③ 新增 sidecar 替换后缓存失效单测。upgrade 触发条件：① 应用引入运行期 sidecar 升级/替换流程时；② 或 EmbeddedPostgresService 支持热切换时。
 
 #### P3-Sidecar-macOS26-SDK-Constraint：theseus 的 macOS 归档依赖 macOS 26.0 SDK（sidecar release workflow 只能跑 `macos-26`）
 
@@ -504,15 +504,15 @@ M12 ui 表现层模块检视发现：`ui/views/screener_view.py` 35 个 import�
 
 拆分 screener\_view\.py / data\_view\.py 职责到子组件或工具模块。验收标准：① 单文件 import 数 ≤ 15；② 现有测试全过。upgrade 触发条件：① 任一 View 文件 import 数 > 40 时；② 或该文件因其他任务被修改且 import 数继续增长时。
 
-#### P3-M12-VirtualTable-ArrowSort-Indicator：#M12-020 可访问性：virtual\_table.py:287 ↑↓ 排序指示器
+#### P3-M12-VirtualTable-ArrowSort-Indicator：#M12-020 可访问性：virtual\_table.py:291-292 ↑↓ 排序指示器
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-M12-VirtualTable-ArrowSort-Indicator** | #M12-020 可访问性：virtual\_table.py:287 ↑↓ 排序指示器 | ① 可访问性审计（[accessibility-baseline.md](../flet/accessibility-baseline.md) 复核）启动时；② 或 `virtual_table` 再次出现排序指示器相关可访问性缺陷报告时 |
+| **P3-M12-VirtualTable-ArrowSort-Indicator** | #M12-020 可访问性：virtual\_table.py:291-292 ↑↓ 排序指示器 | ① 可访问性审计（[accessibility-baseline.md](../flet/accessibility-baseline.md) 复核）启动时；② 或 `virtual_table` 再次出现排序指示器相关可访问性缺陷报告时 |
 
 **产生背景与现状**
 
-M12 ui 表现层模块检视发现：`ui/components/virtual_table.py:287` 使用 ↑↓ 文本符号作为排序指示器。属性技术符号非 emoji，但依赖字体支持。M12 未修复原因：修复需替换为 `ft.Icon`，但需评估布局影响。相关文件：`ui/components/virtual_table.py:287`。
+M12 ui 表现层模块检视发现：`ui/components/virtual_table.py:291-292` 使用 ↑↓ 文本符号作为排序指示器。属性技术符号非 emoji，但依赖字体支持。M12 未修复原因：修复需替换为 `ft.Icon`，但需评估布局影响。相关文件：`ui/components/virtual_table.py:291-292`。
 
 **期望的最终解法**
 
@@ -584,7 +584,7 @@ M12 ui 表现层模块检视发现：`ui/components/news_feed.py:330/361` `on_lo
 
 **产生背景与现状**
 
-修复 DataExplorer embedded 连错端口(5432)的根因排查（2026-08-23，详见 `docs/superpowers/plans/2026-08-23-data-explorer-embedded-db-url-fix.md`「举一反三」）确认：全库运行时的 DB 建连接点中，唯一一套"第二套常驻连接"是 `data/persistence/data_explorer_query_client.py` 的 `_ensure_engine()` 自建 sync 引擎并缓存 `_shared_engine`，脱离 `CacheManager` 统一引擎管理、独立注册到 ShutdownCoordinator、在线程池线程建连。这使得 P0 ContextVar 在线程池线程失效时回退到残留 5432（P2）得以发生。本期采用最简症状层修复（`ConfigHandler` P1.5 模块级 embedded URL override + `DataExplorerViewModel.init_tables` 空表防护），P1.5 保证 URL 跨上下文恒定传导，不改动引擎形态，回归面最小。**归一化重构**（移除 `_shared_engine`、复用统一生命周期管理的引擎、处理 sync/async + 线程池语义）跨数据层引擎生命周期、触碰 ShutdownCoordinator/DAO 共享，按 CLAUDE.md §1.7「同类隐患跨多层/涉及公共契约，记录独立任务延后处理」登记。相关文件：`data/persistence/data_explorer_query_client.py`、`utils/config_handler.py`、`ui/viewmodels/data_explorer_view_model.py`。
+修复 DataExplorer embedded 连错端口(5432)的根因排查（2026-08-23「举一反三」，该排查记录为本地工作记录、未纳入本仓库）确认：全库运行时的 DB 建连接点中，唯一一套"第二套常驻连接"是 `data/persistence/data_explorer_query_client.py` 的 `_ensure_engine()` 自建 sync 引擎并缓存 `_shared_engine`，脱离 `CacheManager` 统一引擎管理、独立注册到 ShutdownCoordinator、在线程池线程建连。这使得 P0 ContextVar 在线程池线程失效时回退到残留 5432（P2）得以发生。本期采用最简症状层修复（`ConfigHandler` P1.5 模块级 embedded URL override + `DataExplorerViewModel.init_tables` 空表防护），P1.5 保证 URL 跨上下文恒定传导，不改动引擎形态，回归面最小。**归一化重构**（移除 `_shared_engine`、复用统一生命周期管理的引擎、处理 sync/async + 线程池语义）跨数据层引擎生命周期、触碰 ShutdownCoordinator/DAO 共享，按 CLAUDE.md §1.7「同类隐患跨多层/涉及公共契约，记录独立任务延后处理」登记。相关文件：`data/persistence/data_explorer_query_client.py`、`utils/config_handler.py`、`ui/viewmodels/data_explorer_view_model.py`。
 
 **期望的最终解法**
 
@@ -827,7 +827,7 @@ review08（AKShare 开源组件复用专项，2026-09-23）发现：Tushare 积�
 
 **决策与缓解**
 
-v1.7.0 S4 / v1.9.0 M-4 期间 `sync_stock_basic` 将 `industry` 覆写为申万二级行业名，存量行已混入申万值。DAT-08③ 移除写时覆写后 `stock_basic.industry` 不再被污染，但**已入库存量**在下次全量同步前 `industry_tushare` 可能显示申万值。**决策**：不单独回刷（全量同步本身即自愈路径，Tushare 快照成本已计入同步配额；单独回刷需新增一次性 SQL/脚本，违背 YAGNI）。**缓解**：下次 `sync_stock_basic` 全量同步后 `industry_tushare` 自动恢复 Tushare 原始值；UI 详情页同时展示两列便于用户识别。相关文件：`data/sync/stock_basic.py`、`data/data_processor.py`。
+v1.7.0 S4 / v1.9.0 M-4 期间 `sync_stock_basic` 将 `industry` 覆写为申万二级行业名，存量行已混入申万值。DAT-08③ 移除写时覆写后 `stock_basic.industry` 不再被污染，但**已入库存量**在下次全量同步前 `industry_tushare` 可能显示申万值。**决策**：不单独回刷（全量同步本身即自愈路径，Tushare 快照成本已计入同步配额；单独回刷需新增一次性 SQL/脚本，违背 YAGNI）。**缓解**：下次 `sync_stock_basic` 全量同步后 `industry_tushare` 自动恢复 Tushare 原始值；UI 详情页同时展示两列便于用户识别。相关文件：`data/data_processor.py`（`sync_stock_basic`）、`data/persistence/daos/stock_dao.py`（`save_stock_basic`）。
 
 ## 引用关系
 

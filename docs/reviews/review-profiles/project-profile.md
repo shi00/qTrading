@@ -38,8 +38,8 @@
 3. 调用链追溯：`@ft.component` 的 `on_*` → VM command → 是否 `await run_async(...)`；同步段被事件回调直接顶层调用未排队即阻塞主循环。统一按执行线程（事件循环线程）、耗时阈值（>100ms）与同步阻塞判据核验（见 [CLAUDE.md §3.2](../../../CLAUDE.md#32--强制要求)）：释放 GIL 不会让同步调用所在的事件循环线程自行返回，长同步 C 扩展 / Polars / NumPy 计算在事件循环线程上执行仍须经 `ThreadPoolManager`（`TaskType.CPU`）提交线程池（且纯 Python 密集计算须先改为 Polars 向量化）；短小非阻塞计算可按耗时阈值（≤100ms）判断，async-native IO（`httpx.AsyncClient`、SQLAlchemy async、asyncpg 等）按原生 `await` 模型执行，不重复包装线程池。
 
 ### R17 保留字作字段
-1. 新增/修改 ORM 模型（`data/models.py` 的 `Table`/列定义）或数据字典（`data/data_dictionary.py:170` 的 `TABLE_DEFINITIONS`）时，检查表名/列名是否数字开头、含特殊字符（`.`/`-`/空格）、或 SQL 保留字（如 `order`/`group`/`select`/`desc`/`from`）。
-2. 搜索式：对新增列名做保留字碰撞 `grep -rnE "\b(order|group|select|desc|asc|from|where)\b" data/models.py`；命中保留字/特殊字须用 ORM `name=` 属性映射（Python 属性名 ≠ SQL 列名）。
+1. 新增/修改 ORM 模型（`data/persistence/models.py` 的 `Table`/列定义）或数据字典（`data/data_dictionary.py` 的 `TABLE_DEFINITIONS`）时，检查表名/列名是否数字开头、含特殊字符（`.`/`-`/空格）、或 SQL 保留字（如 `order`/`group`/`select`/`desc`/`from`）。
+2. 搜索式：对新增列名做保留字碰撞 `grep -rnE "\b(order|group|select|desc|asc|from|where)\b" data/persistence/models.py`；命中保留字/特殊字须用 ORM `name=` 属性映射（Python 属性名 ≠ SQL 列名）。
 3. 规避核查：`grep -rn "text(f" data/ services/`，确认没有对保留字列名的 f-string 拼接裸查询（该列名只能经 `name=` 映射，不得出现在裸 SQL 字面量）。
 
 ### R18 未隔离开发

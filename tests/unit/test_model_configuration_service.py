@@ -816,6 +816,42 @@ class TestSyntheticTestContext:
         assert _load_mm()["security_state"]["grants"] == grants_before
 
     @pytest.mark.asyncio
+    async def test_begin_synthetic_test_rejects_revoked_credential(self, service):
+        """F17-002：合成测试直连适配器、不经 authorize_attempt，撤销版本须在建上下文时拒绝。"""
+        revoke_outcome = await service.revoke_credential(
+            credential_version="cred-v1",
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-f17-002-revoke",
+        )
+        assert revoke_outcome.status == "committed"
+        draft_conn = _base_connection(CONN_B, "https://api.deepseek.com", adapter_kind="gguf_chat")
+
+        with pytest.raises(PermissionError, match="凭据版本已撤销"):
+            await service.begin_synthetic_test(
+                draft_connection=draft_conn,
+                task_id="news_annotation",
+                credential_version="cred-v1",
+            )
+
+    @pytest.mark.asyncio
+    async def test_begin_synthetic_test_allows_unrevoked_credential(self, service):
+        """F17-002 反向：撤销列表只拦截命中版本，未撤销版本仍可建立上下文。"""
+        await service.revoke_credential(
+            credential_version="cred-other",
+            expected_revision=_load_mm()["config_revision"],
+            operation_id="op-f17-002-revoke-other",
+        )
+        draft_conn = _base_connection(CONN_B, "https://api.deepseek.com", adapter_kind="gguf_chat")
+
+        ctx = await service.begin_synthetic_test(
+            draft_connection=draft_conn,
+            task_id="news_annotation",
+            credential_version="cred-v1",
+        )
+
+        assert ctx.credential_version == "cred-v1"
+
+    @pytest.mark.asyncio
     async def test_synthetic_consent_not_valid_for_business_entry(self, service):
         """测试许可仅受控测试入口接受；业务入口（stock_analysis 用途）不认。"""
         draft_conn = _base_connection(CONN_B, "http://127.0.0.1:8000/v1", adapter_kind="gguf_chat")

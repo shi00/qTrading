@@ -27,6 +27,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -46,6 +47,7 @@ from core.model_management_types import (
     ValidatedBusinessOutput,
 )
 from core.model_management_types import PersistenceOutcome
+from services.ai_service.connection_pricing import ConnectionPricing
 from services.ai_service.scenario_executor import (
     ScenarioExecutor,
     ScenarioOutput,
@@ -54,6 +56,7 @@ from services.ai_service.scenario_executor import (
     _LOOP_STATE_KEY,
     _LoopState,
     _classify_adapter_failure,
+    _estimate_reservation_amount,
 )
 from services.ai_service.usage_recorder import _DEFAULT_SETTLE_TIMEOUT_S, ReservationOutcome, UsageRecorder
 from utils.loop_local import get_loop_local
@@ -114,7 +117,8 @@ def _request(deadline: float = 1_000_000.0) -> InferenceRequest:
         scenario_id="news_sentiment",
         task_id="sentiment",
         invocation_id="inv-1",
-        payload={"text": "测试新闻"},
+        # litellm 请求 payload 契约键（system_prompt / prompt）：F19 预留金额估算取此
+        payload={"system_prompt": "系统提示", "prompt": "测试新闻"},
         deadline=deadline,
     )
 
@@ -187,13 +191,26 @@ def _recorder_mock(persisted: bool = True) -> MagicMock:
 
 
 def _fee_candidate(index: int, connection_id: str, task_id: str = "sentiment") -> dict:
-    """费用型候选（F16）：dispatch 冻结的预算身份（月限额 "50.00"，amount 暂 "0.00"）。"""
+    """费用型候选（F16）：dispatch 冻结的限额 / 政策快照（单次金额由执行侧估算，F19）。"""
     return dict(
         _candidate(index, connection_id, task_id),
-        budget_amount_cny="0.00",
         budget_limit_cny="50.00",
         budget_policy_snapshot={"monthly_cny_limit": "50.00"},
     )
+
+
+def _priced_conn(connection_id: str = "conn-remote", concurrency: int = 4) -> dict:
+    """带用户计价的远程连接快照（estimate_cost / llm_tokens，F19 预留金额估算）。"""
+    conn = dataclasses.asdict(_remote_conn(connection_id, concurrency))
+    conn["billing"] = {
+        "mode": "estimate_cost",
+        "pricing_unit": "llm_tokens",
+        "price_source": "user",
+        "input_price_per_m": "2.00",
+        "output_price_per_m": "8.00",
+        "fx_to_cny": "7.2",
+    }
+    return conn
 
 
 def _executor(adapter, recorder, *, validate=None, **overrides) -> ScenarioExecutor:
@@ -523,7 +540,7 @@ class TestGuards:
         executor = _executor(adapter, recorder, validate=_validator_ok)
         with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2
             await executor.execute(
-                _request(), _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+                _request(), _snapshot((_fee_candidate(0, "conn-remote"),), (_priced_conn(),)), _validator_ok
             )
         record = recorder.submit_terminal.await_args.args[0]
         assert record.status == "cancelled"
@@ -544,7 +561,7 @@ class TestGuards:
         executor._config_service.authorize_attempt = AsyncMock(side_effect=_cancel)
         with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2
             await executor.execute(
-                _request(), _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+                _request(), _snapshot((_fee_candidate(0, "conn-remote"),), (_priced_conn(),)), _validator_ok
             )
         recorder.submit_terminal.assert_awaited_once()
         record = recorder.submit_terminal.await_args.args[0]
@@ -718,7 +735,7 @@ class TestGuards:
         executor = _executor(adapter, recorder, validate=_validator_ok)
         result = await executor.execute(
             _request(),
-            _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_priced_conn(),)),
             _validator_ok,
         )
         adapter.invoke.assert_not_awaited()
@@ -998,7 +1015,7 @@ class TestInvocationAndReservation:
         executor = _executor(adapter, recorder, validate=_validator_ok)
         await executor.execute(
             _request(),
-            _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_priced_conn(),)),
             _validator_ok,
         )
         recorder.ensure_invocation.assert_awaited_once()
@@ -1037,14 +1054,16 @@ class TestInvocationAndReservation:
         executor = _executor(adapter, recorder, validate=_validator_ok)
         await executor.execute(
             _request(),
-            _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_priced_conn(),)),
             _validator_ok,
         )
         calls = [c[0] for c in recorder.mock_calls]
         assert calls.index("try_reserve") < calls.index("mark_dispatched")
         reserve_kwargs = recorder.try_reserve.await_args.kwargs
         assert reserve_kwargs["invocation_id"] == "inv-1"
-        assert reserve_kwargs["amount_cny"] == "0.00"
+        # F19：单次金额由执行侧按计价快照 + payload 估算（非 dispatch 伪造的 0）
+        assert reserve_kwargs["amount_cny"] is not None
+        assert Decimal(reserve_kwargs["amount_cny"]) > 0
         assert reserve_kwargs["budget_limit_cny"] == "50.00"
         assert reserve_kwargs["owner_session_id"]
         assert reserve_kwargs["owner_epoch"] >= 1
@@ -1065,7 +1084,7 @@ class TestInvocationAndReservation:
         result = await executor.execute(
             _request(),
             _snapshot(
-                (_fee_candidate(0, "conn-remote"), _candidate(1, "conn-b")), (_remote_conn(), _remote_conn("conn-b"))
+                (_fee_candidate(0, "conn-remote"), _candidate(1, "conn-b")), (_priced_conn(), _remote_conn("conn-b"))
             ),
             _validator_ok,
         )
@@ -1090,7 +1109,7 @@ class TestInvocationAndReservation:
         executor = _executor(adapter, recorder, validate=_validator_ok)
         result = await executor.execute(
             _request(),
-            _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_priced_conn(),)),
             _validator_ok,
         )
         adapter.invoke.assert_not_awaited()
@@ -1125,7 +1144,7 @@ class TestInvocationAndReservation:
         executor = _executor(adapter, recorder, validate=_validator_ok)
         result = await executor.execute(
             _request(),
-            _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_priced_conn(),)),
             _validator_ok,
         )
         assert result.status == "succeeded"
@@ -1181,7 +1200,7 @@ class TestInvocationAndReservation:
         executor._config_service.authorize_attempt = AsyncMock(side_effect=PermissionError("revoked"))
         result = await executor.execute(
             _request(),
-            _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _snapshot((_fee_candidate(0, "conn-remote"),), (_priced_conn(),)),
             _validator_ok,
         )
         assert result.status == "failed"
@@ -1454,7 +1473,7 @@ class TestPerAttemptIdentity:
         result = await executor.execute(
             _request(),
             _snapshot(
-                (_fee_candidate(0, "conn-remote"), _candidate(1, "conn-b")), (_remote_conn(), _remote_conn("conn-b"))
+                (_fee_candidate(0, "conn-remote"), _candidate(1, "conn-b")), (_priced_conn(), _remote_conn("conn-b"))
             ),
             _validator_ok,
         )
@@ -1483,7 +1502,7 @@ class TestPerAttemptIdentity:
         result = await executor.execute(
             _request(),
             _snapshot(
-                (_fee_candidate(0, "conn-remote"), _candidate(1, "conn-b")), (_remote_conn(), _remote_conn("conn-b"))
+                (_fee_candidate(0, "conn-remote"), _candidate(1, "conn-b")), (_priced_conn(), _remote_conn("conn-b"))
             ),
             _validator_ok,
         )
@@ -1534,7 +1553,7 @@ class TestPerAttemptIdentity:
             return_value=MagicMock(compatible=False, reason="unsupported param", resolved_options={})
         )
         result = await executor.execute(
-            _request(), _snapshot((_fee_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+            _request(), _snapshot((_fee_candidate(0, "conn-remote"),), (_priced_conn(),)), _validator_ok
         )
         assert result.status == "failed"
         adapter.invoke.assert_not_awaited()
@@ -2024,3 +2043,68 @@ class TestF29DeadlineEnforcement:
 
         assert result.status == "succeeded"
         assert permit.locked() is False
+
+
+class TestReservationAmountEstimation:
+    """F19：预留金额按连接计价快照 + 请求 payload 估算（未知不以 0 占位，R21）。"""
+
+    def _pricing(self, **overrides: Any) -> ConnectionPricing:
+        kwargs: dict[str, Any] = {
+            "mode": "estimate_cost",
+            "pricing_unit": "llm_tokens",
+            "price_source": "user",
+            "input_price_per_m": Decimal("2.00"),
+            "output_price_per_m": Decimal("8.00"),
+            "cache_read_price_per_m": None,
+            "cache_write_price_per_m": None,
+            "encoder_price_per_m": None,
+            "fx_to_cny": Decimal("7.2"),
+            "price_effective_at": None,
+        }
+        kwargs.update(overrides)
+        return ConnectionPricing(**kwargs)
+
+    def test_llm_tokens_uses_declared_max_tokens(self, monkeypatch):
+        """声明 max_tokens → 输出按声明值预留；金额 = Decimal 4 位半进（CNY）。"""
+        monkeypatch.setattr(
+            "services.ai_service.scenario_executor._estimate_tokens",
+            lambda text, model=None: {"系统提示": 200, "测试新闻": 800}.get(text, 0),
+        )
+        amount = _estimate_reservation_amount(
+            self._pricing(),
+            {"system_prompt": "系统提示", "prompt": "测试新闻", "max_tokens": 500},
+            model="glm-4-air",
+        )
+        assert amount == "0.0432"
+
+    def test_llm_tokens_reserves_output_constant_when_max_tokens_absent(self, monkeypatch):
+        """未声明 max_tokens → 输出按 OUTPUT_RESERVE_TOKENS 保守预留（不低估）。"""
+        monkeypatch.setattr(
+            "services.ai_service.scenario_executor._estimate_tokens",
+            lambda text, model=None: {"系统提示": 200, "测试新闻": 800}.get(text, 0),
+        )
+        amount = _estimate_reservation_amount(
+            self._pricing(), {"system_prompt": "系统提示", "prompt": "测试新闻"}, model="glm-4-air"
+        )
+        assert amount == "0.2448"
+
+    def test_encoder_pricing_estimates_from_texts(self, monkeypatch):
+        """encoder_input_tokens 计量：按 payload texts 逐条估算求和后计价。"""
+        monkeypatch.setattr(
+            "services.ai_service.scenario_executor._estimate_tokens",
+            lambda text, model=None: 300 if text in {"新闻一", "新闻二"} else 0,
+        )
+        pricing = self._pricing(pricing_unit="encoder_input_tokens", encoder_price_per_m=Decimal("1.00"))
+        amount = _estimate_reservation_amount(pricing, {"texts": ["新闻一", "新闻二"]}, model="local")
+        assert amount == "0.0043"
+
+    def test_unknown_pricing_or_policy_returns_none(self):
+        """计价缺失 / 非 estimate_cost → None（usage_only 语义，不伪装 0 成本）。"""
+        assert _estimate_reservation_amount(None, {"prompt": "x"}, model="m") is None
+        assert _estimate_reservation_amount(self._pricing(mode="usage_only"), {"prompt": "x"}, model="m") is None
+
+    def test_missing_usage_evidence_returns_none(self):
+        """payload 无可估算用量（空 payload / 无 texts）→ None（不臆造金额）。"""
+        assert _estimate_reservation_amount(self._pricing(), {}, model="m") is None
+        encoder = self._pricing(pricing_unit="encoder_input_tokens", encoder_price_per_m=Decimal("1.00"))
+        assert _estimate_reservation_amount(encoder, {"prompt": "x"}, model="m") is None

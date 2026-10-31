@@ -121,19 +121,18 @@ async def resolve_executor(scenario_id: str) -> ScenarioDispatch | None:
 
     # scenario_routes.candidates 为有序 connection_id 列表，转 Executor 契约形态。
     # F16 预算身份在此冻结（快照语义：普通保存只影响后续请求）：usage_policy
-    # 携带月度限额 → 费用型候选（amount 取 "0.00"——F17 接入预估计价前不伪装
-    # 单次成本（R21），预算门按已结算 + 在途 + 0 判定，超限零派发）；未配置
-    # 限额 → usage_only（三 None，不伪装政策存在）。owner / 派发身份由 Executor
-    # per-invocation 生成（F23 fencing），不再以伪值占位。
+    # 携带月度限额 → 候选携带限额与政策快照；单次预留金额由 Executor 按连接计价
+    # 快照 + 请求 payload 估算（F19：dispatch 不持有 payload，不在本层伪造金额；
+    # R21：未知成本不以 0 占位）。未配置限额 → usage_only（两 None，不伪装政策
+    # 存在）。owner / 派发身份由 Executor per-invocation 生成（F23 fencing），
+    # 不再以伪值占位。
     monthly_limit = (
         mm_snapshot.usage_policy.get("monthly_cny_limit") if isinstance(mm_snapshot.usage_policy, Mapping) else None
     )
     if monthly_limit is not None:
-        budget_amount_cny: str | None = "0.00"
         budget_limit_cny: str | None = str(monthly_limit)
         budget_policy_snapshot: dict[str, Any] | None = {"monthly_cny_limit": str(monthly_limit)}
     else:
-        budget_amount_cny = None
         budget_limit_cny = None
         budget_policy_snapshot = None
     candidates = tuple(
@@ -141,7 +140,6 @@ async def resolve_executor(scenario_id: str) -> ScenarioDispatch | None:
             "candidate_index": index,
             "task_id": scenario_id,
             "connection_id": conn_id,
-            "budget_amount_cny": budget_amount_cny,
             "budget_limit_cny": budget_limit_cny,
             "budget_policy_snapshot": budget_policy_snapshot,
             "target_fingerprint": connection_targets.get(str(conn_id)),

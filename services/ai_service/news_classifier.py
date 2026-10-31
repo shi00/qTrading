@@ -532,7 +532,6 @@ class NewsClassifier:
                             "candidate_index": index,
                             "task_id": "sentiment",
                             "connection_id": conn_id,
-                            "budget_amount_cny": base_budget.get("budget_amount_cny"),
                             "budget_limit_cny": base_budget.get("budget_limit_cny"),
                             "budget_policy_snapshot": base_budget.get("budget_policy_snapshot"),
                             "target_fingerprint": egress_targets.get(conn_id),

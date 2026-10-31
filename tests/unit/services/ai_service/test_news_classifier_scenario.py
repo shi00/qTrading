@@ -596,7 +596,7 @@ async def test_dedicated_sentiment_uses_subroute_candidates(monkeypatch):
     # F16：子快照候选继承主路由冻结的预算身份（同 dispatch 同政策）
     base_cand = topic_call.args[1].routes[0]["candidates"][0]
     sub_cand = route["candidates"][0]
-    assert sub_cand["budget_amount_cny"] == base_cand["budget_amount_cny"]
+    assert "budget_amount_cny" not in sub_cand
     assert sub_cand["budget_limit_cny"] == base_cand["budget_limit_cny"]
     assert sub_cand["budget_policy_snapshot"] == base_cand["budget_policy_snapshot"]
 
