@@ -972,7 +972,7 @@ class TestHomeViewExceptionPaths:
         # R9 守卫: mock DataSanitizer.sanitize_error 返回脱敏字符串
         with patch("ui.views.home_view.DataSanitizer") as mock_sanitizer:
             mock_sanitizer.sanitize_error.return_value = "sanitized error"
-            asyncio.run(on_load_more(MagicMock()))
+            asyncio.run(on_load_more())
 
             # 验证 sanitize_error 被调用, 参数为原始异常 (R9 守卫)
             mock_sanitizer.sanitize_error.assert_called_once()
@@ -1003,7 +1003,7 @@ class TestHomeViewExceptionPaths:
         on_load_more = self._get_on_load_more_click(result)
 
         with pytest.raises(asyncio.CancelledError):
-            asyncio.run(on_load_more(MagicMock()))
+            asyncio.run(on_load_more())
 
     def test_init_and_load_handles_init_exception(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
         """_init_and_load 中 vm.init 抛 Exception → 不传播 (logger.error).
