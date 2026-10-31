@@ -446,6 +446,35 @@ class TestLayer1Layer2NameSeparation:
             assert not missing, f"{theme} 主题 CUSTOM_COLOR_PRESETS 缺少 Layer 2 业务色: {missing}"
 
 
+class TestAppColorsTokenValidity:
+    """AppColors 颜色 token 必须可被 Flet 解析 (hex 或 ft.Colors 成员值)。
+
+    回归守护: BACKGROUND 曾为 V0 残留字符串 "background"——Flet 1.x 既无该颜色名,
+    ColorScheme 也无 background 字段 (M3 已并入 surface); 该值既非 hex 又非
+    ft.Colors 成员, 会被上方 Layer1/Layer2 分类逻辑静默忽略, 消费方
+    (app_layout / 详情对话框 / 向导等) 拿到无法解析的背景色。
+    """
+
+    def test_all_public_color_tokens_are_flet_resolvable(self):
+        """所有公开颜色 token 必须为合法 hex 或 ft.Colors 成员值。"""
+        valid_values = {member.value for member in ft.Colors}
+        invalid: dict[str, str] = {}
+        for name in vars(AppColors):
+            if name.startswith("_"):
+                continue
+            value = getattr(AppColors, name)
+            if callable(value) or not isinstance(value, str):
+                continue
+            if value.startswith("#") or value.lower() in valid_values:
+                continue
+            invalid[name] = value
+        assert not invalid, f"AppColors 存在 Flet 无法解析的颜色 token: {invalid}"
+
+    def test_background_maps_to_surface_token(self):
+        """BACKGROUND 必须映射到 M3 surface 语义 token (Flet 1.x 无 background)。"""
+        assert AppColors.BACKGROUND == ft.Colors.SURFACE
+
+
 # ============================================================================
 # WCAG 2.1 §1.4.3 对比度契约 (4 主题关键色对)
 # ============================================================================
