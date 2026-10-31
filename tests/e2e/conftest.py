@@ -1957,7 +1957,7 @@ def embedded_wizard_app(tmp_path_factory, mock_keyring):
             "AI_API_KEY": "e2e-dummy-key",
             "QTRADING_DATABASE_MODE": "embedded",
             "AUTO_MIGRATE": "true",
-            "PYTHONKEYRING_BACKEND": "keyring.backends.null.Keyring",
+            "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
     )
     app = AppServer(proc, url, cfg_file)
@@ -2029,7 +2029,7 @@ def embedded_real_wizard_app(tmp_path_factory, mock_keyring, real_sidecar_binary
             "AI_API_KEY": "e2e-dummy-key",
             "QTRADING_DATABASE_MODE": "embedded",
             "AUTO_MIGRATE": "true",
-            "PYTHONKEYRING_BACKEND": "keyring.backends.null.Keyring",
+            "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
         startup_timeout_s=300.0,
     )
@@ -2075,7 +2075,7 @@ def embedded_real_flet_app(tmp_path_factory, mock_keyring, real_sidecar_binary_e
             "TS_TOKEN": "e2e-dummy-token",
             "AI_API_KEY": "e2e-dummy-key",
             "QTRADING_DATABASE_MODE": "embedded",
-            "PYTHONKEYRING_BACKEND": "keyring.backends.null.Keyring",
+            "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
         startup_timeout_s=300.0,
     )

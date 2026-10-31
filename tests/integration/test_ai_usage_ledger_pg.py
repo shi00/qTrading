@@ -46,7 +46,12 @@ from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
 
-_LEDGER_TABLES = ("ai_invocation", "ai_attempt", "ai_usage_monthly")
+# R4：清理语句经 text() 常量承载（表名固定，不做 f-string 拼接 SQL）
+_LEDGER_TABLE_DELETES = (
+    text("DELETE FROM ai_invocation"),
+    text("DELETE FROM ai_attempt"),
+    text("DELETE FROM ai_usage_monthly"),
+)
 _LEDGER_LEGACY_KEY_PREFIX = "ai_cost:"
 
 
@@ -100,8 +105,8 @@ async def clean_ledger(ledger_pg_with_schema: ConnectionInfo):
 
     async def _cleanup() -> None:
         async with cache.engine.begin() as conn:
-            for table in _LEDGER_TABLES:
-                await conn.execute(text(f"DELETE FROM {table}"))  # noqa: S608 表名为模块内常量
+            for stmt in _LEDGER_TABLE_DELETES:
+                await conn.execute(stmt)
             await conn.execute(
                 text("DELETE FROM app_state WHERE config_key LIKE :prefix"),
                 {"prefix": f"{_LEDGER_LEGACY_KEY_PREFIX}%"},

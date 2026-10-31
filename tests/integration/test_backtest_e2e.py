@@ -112,9 +112,11 @@ def mock_cache() -> MagicMock:
     cache.stk_limit_dao.get_stk_limit_range = AsyncMock(return_value=pd.DataFrame())
     cache.quote_dao.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
-    # Range preloading mocks to support the optimized preload path in E2E tests
+    # Range preloading mocks to support the optimized preload path in E2E tests.
+    # DS-05: screening_data 由 fundamental_screening_data 派生，二者须提供同一份区间数据，
+    # 否则区间路径「成功但为空」不会回退逐日查询，导致无信号、无成交（断言全部空转）。
+    cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame(screening_data))
     cache.screener_dao.get_screening_data_range = AsyncMock(return_value=pd.DataFrame(screening_data))
-    cache.screener_dao.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
     cache.quote_dao.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
     cache.market_dao.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
     cache.quote_dao.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
@@ -352,11 +354,12 @@ class TestBacktestE2E:
 
         result = await engine.run(strategy)
 
-        if not result.trades.is_empty():
-            trades_df = result.trades
-            for trade in trades_df.iter_rows(named=True):
-                trade_date = trade["trade_date"]
-                assert trade_date >= backtest_config.start_date
+        # R24: 信号在信号日生成、次交易日执行。成交日必须落在执行日集合（1/3、1/4），
+        # 不得回落到信号日 1/2，以守卫前视偏差回归。
+        execution_dates = {date(2024, 1, 3), date(2024, 1, 4)}
+        assert not result.trades.is_empty(), "夹具应产生至少一笔成交"
+        trades_seen = set(result.trades["trade_date"].to_list())
+        assert trades_seen <= execution_dates
 
     @pytest.mark.asyncio
     async def test_backtest_progress_callback(

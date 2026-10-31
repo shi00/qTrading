@@ -129,6 +129,11 @@ class MockFletPage:
         1. 改为真实调度会绑定事件循环，破坏 session 级循环隔离策略
         2. 现有测试依赖"run_task 不真正执行协程"的行为来验证接线而非结果
         3. 若需验证协程执行，测试应直接 await，而非通过 run_task 间接调度
+
+        异常契约：仅当被调度对象是测试替身（MagicMock/AsyncMock）时，才容忍
+        调用期 ValueError/TypeError/AttributeError（替身无真实签名，参数契约
+        不匹配属测试桩固有噪音）并记录到 ``_swallowed_exception``；真实
+        callable 的异常必须向上传播，避免接线/契约缺陷被静默吞没。
         """
         mock_task = MagicMock()
         mock_task.cancel = MagicMock()
@@ -137,8 +142,10 @@ class MockFletPage:
             if inspect.iscoroutine(result):
                 mock_task._coro = result
                 result.close()
-        except (ValueError, TypeError, AttributeError):
-            pass
+        except (ValueError, TypeError, AttributeError) as exc:
+            if not isinstance(func, MagicMock):
+                raise
+            mock_task._swallowed_exception = exc
         self._tasks.append(mock_task)
         return mock_task
 

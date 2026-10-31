@@ -31,6 +31,7 @@ from core.model_management_types import (
     NormalizedLLMUsage,
 )
 from services.ai_service.litellm_client import normalize_litellm_usage, resolve_credential
+from tests.virtual_clock import VirtualClock
 from utils.egress_audit import EgressAudit
 
 
@@ -638,14 +639,16 @@ class TestF29DeadlineRecheckAfterCredential:
     async def test_credential_resolution_exhausts_deadline_zero_outbound(self):
         """慢凭据耗尽剩余预算 → TimeoutError，零出站（零审计，与 dispatch 前检查一致）。"""
         client = LiteLLMClient(MagicMock())
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + 0.05
+        # 虚拟时钟：deadline 与实际耗时解耦，避免 CI 抖动（GC/调度停顿）误触 dispatch 前快速失败
+        clock = VirtualClock(start=1000.0)
+        deadline = clock.now() + 0.05
         request = _request(deadline=deadline)
 
         async def _slow_keyring():
-            await asyncio.sleep(0.2)  # 解析耗时超过剩余预算（0.2 > 0.05）
+            clock.advance(0.2)  # 解析耗时超过剩余预算（0.2 > 0.05）
 
         with (
+            patch("time.monotonic", clock.now),
             patch("services.ai_service._ensure_litellm_loaded", return_value=True),
             patch("services.ai_service.litellm_client.ThreadPoolManager", new=self._mock_thread_pool(_slow_keyring)),
             patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_ac,
@@ -658,14 +661,16 @@ class TestF29DeadlineRecheckAfterCredential:
     async def test_credential_resolution_reclamps_http_timeout(self):
         """凭据解析真实消耗预算后，httpx 总超时按解析后剩余重新裁剪。"""
         client = LiteLLMClient(MagicMock())
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + 0.6
+        # 虚拟时钟：deadline 与实际耗时解耦，避免 CI 抖动（GC/调度停顿）使结果不稳定
+        clock = VirtualClock(start=1000.0)
+        deadline = clock.now() + 0.6
         request = _request(deadline=deadline)
 
         async def _keyring_with_cost():
-            await asyncio.sleep(0.2)  # 解析真实消耗 0.2s 预算
+            clock.advance(0.2)  # 解析消耗 0.2s 预算
 
         with (
+            patch("time.monotonic", clock.now),
             patch("services.ai_service._ensure_litellm_loaded", return_value=True),
             patch(
                 "services.ai_service.litellm_client.ThreadPoolManager", new=self._mock_thread_pool(_keyring_with_cost)
@@ -677,5 +682,5 @@ class TestF29DeadlineRecheckAfterCredential:
 
         timeout = mock_ac.await_args.kwargs["timeout"]
         assert isinstance(timeout, httpx.Timeout)
-        # 解析前 stale 预算 ≈ 0.6；解析消耗 0.2s 后重裁剪 → read ≤ 0.4
-        assert timeout.read is not None and timeout.read <= 0.4
+        # 解析前 stale 预算 = 0.6；解析消耗 0.2s 后重裁剪 → read == 0.4（确定值，非近似上限）
+        assert timeout.read is not None and timeout.read == pytest.approx(0.4)

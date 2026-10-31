@@ -15,6 +15,13 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _isolate_no_proxy_env(monkeypatch):
+    """隔离宿主 NO_PROXY/no_proxy，避免断言受运行环境（如容器/K8s）代理配置污染。"""
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+
+
 class TestProxyManagerNoEnvironWrite:
     def setup_method(self):
         ProxyManager._reset_singleton()

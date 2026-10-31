@@ -1412,17 +1412,20 @@ class TestNewsSubscriptionServiceProcessingLoopTimeout:
     @pytest.mark.asyncio
     @patch("services.news_subscription_service.AIService")
     @patch("services.news_subscription_service.CacheManager")
-    async def test_queue_get_timeout_continues_loop(self, mock_cache_cls, mock_ai_cls):
+    async def test_queue_get_timeout_continues_loop(self, mock_cache_cls, mock_ai_cls, monkeypatch):
+        """空队列轮询超时（TimeoutError）只 continue，不退出循环（N-1 回归）。"""
+        monkeypatch.setattr("services.news_subscription_service._QUEUE_GET_TIMEOUT_S", 0.01)
         svc = NewsSubscriptionService()
         svc._running = True
         svc.processing_queue = asyncio.Queue(maxsize=10)
-        # Empty queue - wait_for will timeout
         loop_task = asyncio.create_task(svc._processing_loop())
-        await asyncio.sleep(1.5)  # wait for at least one timeout cycle
+        # 至少经历一次 wait_for 超时周期后循环仍存活（未因 TimeoutError 退出）
+        await asyncio.sleep(0.05)
+        assert not loop_task.done(), "队列空超时不得使处理循环退出"
         svc._running = False
-        loop_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await loop_task
+        # 队列为空且 _running=False → 循环正常退出（无取消、无悬挂）
+        await asyncio.wait_for(loop_task, timeout=1.0)
+        assert loop_task.done()
 
 
 class TestNewsSubscriptionServiceInitAlreadyInitialized:

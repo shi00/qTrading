@@ -103,12 +103,13 @@ async def test_settings_language_switch(e2e_page):
         # [PITFALL FIX] 不用 expect_text，因为 Flet 0.86.3 CanvasKit 下 NavigationRail
         # 语义节点合并导致 "Screener" 同时出现在父 aria-label 和子 button text 中，
         # get_by_text strict mode 匹配多个节点立即报错。改用 has_text 轮询（非 strict）。
+        nav_screener_text = I18n.get("nav_screener")
         for _ in range(50):  # 50 * 200ms = 10s
-            if await e2e_page.has_text("Screener"):
+            if await e2e_page.has_text(nav_screener_text):
                 break
             await e2e_page.page.wait_for_timeout(200)
         else:
-            pytest.fail("导航栏 'Screener' 在 10000ms 内未出现（语言切换失败）")
+            pytest.fail(f"导航栏 {nav_screener_text!r} 在 10000ms 内未出现（语言切换失败）")
 
         # 强断言：验证设置页文案已切换为英文（而非仅导航栏变化）
         theme_label_en = I18n.get("settings_theme")

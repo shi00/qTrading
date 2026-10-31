@@ -696,10 +696,14 @@ async def real_embedded_pg(real_sidecar_binary: Path, tmp_path_factory):
 
     data_root = tmp_path_factory.mktemp("real_embedded_pg")
     log_dir = data_root / "logs"
+    # EMBEDDED_PG_INSTALL_DIR：复用已安装的 PG binaries（如系统 /usr/lib/postgresql/16），
+    # 避免测试内重复下载/解压；未设置时退回隔离的临时目录。
+    install_root = os.environ.get("EMBEDDED_PG_INSTALL_DIR")
+    install_dir = Path(install_root) if install_root else data_root / "install"
     service = EmbeddedPostgresService(
         sidecar_binary=real_sidecar_binary,
         data_dir=data_root / "data",
-        install_dir=data_root / "install",
+        install_dir=install_dir,
         log_dir=log_dir,
         start_timeout=300.0,  # 首次 initdb + PG binaries 下载可能较慢
     )

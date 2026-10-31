@@ -20,7 +20,6 @@ from data.external.news_fetcher import (
 )
 from utils.time_utils import CST_TZ, to_utc_for_db
 import httpx
-import requests
 
 
 def _wire_http_get(mock_client, mock_response):
@@ -568,10 +567,10 @@ class TestGetLatestGlobalNews:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("httpx.AsyncClient")
-    async def test_requests_exception_increments_circuit_breaker(self, mock_get, mock_tpm):
-        """requests 异常递增熔断计数。"""
+    async def test_httpx_connect_error_increments_circuit_breaker(self, mock_get, mock_tpm):
+        """httpx 网络异常递增熔断计数（B16 迁移后 requests 已不在契约内）。"""
         _wire_http_get(mock_get, MagicMock())
-        mock_get.return_value.get.side_effect = requests.ConnectionError("network down")
+        mock_get.return_value.get.side_effect = httpx.ConnectError("network down")
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -589,7 +588,11 @@ class TestGetLatestGlobalNews:
         mock_response = MagicMock()
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
-        mock_response.raise_for_status.side_effect = requests.HTTPError("403 Forbidden")
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "403 Forbidden",
+            request=httpx.Request("GET", "https://example.com"),
+            response=httpx.Response(403),
+        )
         _wire_http_get(mock_get, mock_response)
 
         mock_manager = MagicMock()
@@ -1701,9 +1704,13 @@ class TestGetUsMajorMovesDirectExecution:
             mock_tpm.return_value = mock_tpm_instance
             mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
 
-            with patch(
-                "data.external.news_fetcher.json.loads",
-                side_effect=Exception("parse error"),
+            # 解析异常触发重试退避（1s/2s），单测用 AsyncMock 跳过等待。
+            with (
+                patch(
+                    "data.external.news_fetcher.json.loads",
+                    side_effect=Exception("parse error"),
+                ),
+                patch("data.external.news_fetcher.asyncio.sleep", new_callable=AsyncMock),
             ):
                 result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
@@ -1807,7 +1814,7 @@ class TestCLSCircuitBreaker:
     async def test_circuit_opens_after_threshold(self, mock_get, mock_tpm, mock_s7_fallback):
         """连续 3 次失败后熔断器开启（7x24 回退已隔离，仅验证 CLS 计数）。"""
         _wire_http_get(mock_get, MagicMock())
-        mock_get.return_value.get.side_effect = requests.ConnectionError("network down")
+        mock_get.return_value.get.side_effect = httpx.ConnectError("network down")
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
         mock_tpm.return_value = mock_manager
@@ -1879,7 +1886,7 @@ class TestCLSCircuitBreaker:
         nf_mod._CLS_CIRCUIT_OPENED_AT = base_time.timestamp()
 
         _wire_http_get(mock_get, MagicMock())
-        mock_get.return_value.get.side_effect = requests.ConnectionError("still down")
+        mock_get.return_value.get.side_effect = httpx.ConnectError("still down")
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
@@ -1903,7 +1910,7 @@ class TestCLSCircuitBreaker:
         # 探活失败后 61s 应再次进入半开
         mock_get.reset_mock()
         _wire_http_get(mock_get, MagicMock())
-        mock_get.return_value.get.side_effect = requests.ConnectionError("still down")
+        mock_get.return_value.get.side_effect = httpx.ConnectError("still down")
         second_probe_time = probe_time + datetime.timedelta(seconds=61)
         with patch("data.external.news_fetcher.get_now", return_value=second_probe_time):
             res = await NewsFetcher.get_latest_global_news()
@@ -2279,7 +2286,7 @@ class TestClassifyErrorIntegration:
     async def test_cls_failure_logs_code_and_warning_level(self, mock_get, mock_tpm, caplog):
         """路径 10: get_latest_global_news except Exception (CLS) — 连接错误日志含 [code=]，recoverable→WARNING。"""
         _wire_http_get(mock_get, MagicMock())
-        mock_get.return_value.get.side_effect = requests.ConnectionError("network down")
+        mock_get.return_value.get.side_effect = httpx.ConnectError("network down")
 
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())

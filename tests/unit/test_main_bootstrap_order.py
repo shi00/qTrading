@@ -13,7 +13,11 @@ from __future__ import annotations
 import inspect
 import re
 
+import pytest
+
 from app.application import run as main_entry
+
+pytestmark = pytest.mark.unit
 
 
 def test_main_imports_prepare_database_runtime() -> None:

@@ -1202,6 +1202,20 @@ class TestTaskManagerInitDb:
             await mgr.init_db()
             assert mgr._db_ready is True
 
+        # 契约锁定（LIFE-01）：崩溃遗留的 RUNNING/QUEUED 必须回填为 INTERRUPTED。
+        backfill_sql, backfill_params = mock_cache.write_db.call_args_list[0].args
+        assert "status IN ('RUNNING', 'QUEUED')" in backfill_sql
+        assert "SET status = $1" in backfill_sql
+        assert backfill_params[0] == TaskStatus.INTERRUPTED.value
+        assert isinstance(backfill_params[1], str)
+        # 只加载最近 200 条历史（避免大表全量反序列化）。
+        assert mock_cache.read_db.call_args.args[0] == ("SELECT * FROM task_history ORDER BY created_at DESC LIMIT 200")
+        # 30 天过期清理：单参数、失败可容忍（suppress_errors=True）。
+        purge_call = mock_cache.write_db.call_args_list[1]
+        assert purge_call.args[0] == "DELETE FROM task_history WHERE completed_at < $1"
+        assert len(purge_call.args[1]) == 1
+        assert purge_call.kwargs == {"suppress_errors": True}
+
 
 class TestAppTaskInit:
     def test_default_status(self):

@@ -51,7 +51,8 @@ class TestDataQualityServiceCheckContinuity:
             }
         )
         result = DataQualityService.check_continuity(df, "date", trade_cal)
-        assert result["coverage_ratio"] >= 0.0
+        assert result["missing_count"] == 0
+        assert result["coverage_ratio"] == 1.0
 
     def test_no_expected_trading_dates(self):
         df = pd.DataFrame({"date": pd.date_range("2024-01-02", periods=3)})
@@ -309,5 +310,5 @@ class TestDataQualityServiceCheckContinuityExtended:
             }
         )
         result = DataQualityService.check_continuity(df, "date", trade_cal)
-        assert result["missing_count"] >= 0
-        assert result["coverage_ratio"] <= 1.0
+        assert result["missing_count"] == 0
+        assert result["coverage_ratio"] == 1.0

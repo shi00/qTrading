@@ -138,7 +138,6 @@ def extract_fields_from_api_method(method) -> set:
 
 # --- Integration test helpers for database migration tests ---
 
-import os
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -176,12 +175,25 @@ def get_pg_connection_params() -> dict:
     """Get PostgreSQL connection parameters from environment or defaults.
 
     Used by integration tests that need to create/drop isolated databases.
+
+    Password 复用 ``tests.integration._db_config`` 的解析结果（env 优先，缺失时按
+    ``astock_local_<user>`` 派生），与 ``test_engine`` 使用同一凭据。原实现缺失 env
+    时返回空密码，导致本地未设 ``TEST_DB_PASSWORD`` 时连接被拒
+    （InvalidPasswordError），隔离 DB fixture 全部无法启动。
     """
-    host = os.environ.get("TEST_DB_HOST", "localhost")
-    port = int(os.environ.get("TEST_DB_PORT", "5432"))
-    user = os.environ.get("TEST_DB_USER", "postgres")
-    password = os.environ.get("TEST_DB_PASSWORD") or os.environ.get("CI_PG_PASSWORD", "")
-    return {"host": host, "port": port, "user": user, "password": password}
+    from tests.integration._db_config import (
+        TEST_DB_HOST,
+        TEST_DB_PASSWORD,
+        TEST_DB_PORT,
+        TEST_DB_USER,
+    )
+
+    return {
+        "host": TEST_DB_HOST,
+        "port": TEST_DB_PORT,
+        "user": TEST_DB_USER,
+        "password": TEST_DB_PASSWORD,
+    }
 
 
 def make_alembic_cfg(db_url: str) -> Config:
