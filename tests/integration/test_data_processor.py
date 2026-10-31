@@ -372,6 +372,29 @@ class TestDataProcessor(unittest.TestCase):
     def test_get_trade_dates_fallback(self):
         asyncio.run(self.async_test_get_trade_dates_fallback())
 
+    async def async_test_get_prev_trade_date_across_long_holiday(self):
+        """2020 春节延长休市（前一交易日 1/23、后一交易日 2/3，相距 11 自然日）后，
+        get_prev_trade_date 仍须返回 1/23；搜索窗口小于 11 天会误返回 None。"""
+        self.mock_cache.stock_dao.get_trade_cal = AsyncMock(return_value=None)
+        self.mock_api.get_trade_cal = AsyncMock(return_value=None)
+
+        result = await self.processor.trade_calendar.get_prev_trade_date(datetime.date(2020, 2, 3))
+        self.assertEqual(result, datetime.date(2020, 1, 23))
+
+    def test_get_prev_trade_date_across_long_holiday(self):
+        asyncio.run(self.async_test_get_prev_trade_date_across_long_holiday())
+
+    async def async_test_get_next_trade_date_across_long_holiday(self):
+        """对称场景：长假前最后一个交易日（1/23）的下一交易日须为 2/3。"""
+        self.mock_cache.stock_dao.get_trade_cal = AsyncMock(return_value=None)
+        self.mock_api.get_trade_cal = AsyncMock(return_value=None)
+
+        result = await self.processor.trade_calendar.get_next_trade_date(datetime.date(2020, 1, 23))
+        self.assertEqual(result, datetime.date(2020, 2, 3))
+
+    def test_get_next_trade_date_across_long_holiday(self):
+        asyncio.run(self.async_test_get_next_trade_date_across_long_holiday())
+
     async def async_test_get_stock_history_prefers_latest_closed_trade_date(self):
         """盘中读取历史行情时，应以最近闭市日作为结束日。"""
         fixed_now = datetime.datetime(2026, 3, 9, 10, 0, 0)
