@@ -125,7 +125,7 @@ git branch -D feature/strategy-macd       # Squash Merge 后提交不在 main �
 
    `--template` 仅适合本地人工操作；AI / CI 创建 PR 一律走方式 B 的 `--body-file` 非交互路径。
 
-2. **禁止手写简化 PR body**：不得用 `--body "简短描述"` 跳过模板。CONTRIBUTING.md「PR 描述模板」中"无需手动复制该模板"的说明仅适用于 GitHub Web UI，不适用于 `gh pr create`。
+2. **禁止手写简化 PR body**：不得用 `--body "简短描述"` 跳过模板。[CONTRIBUTING.md「PR 描述模板」](../../CONTRIBUTING.md#pr-描述模板) 中「GitHub Web UI 自动加载模板，无需手动复制」的说明仅适用于 GitHub Web UI，不适用于 `gh pr create`。
 
 3. **必须如实勾选模板自检清单**：
    - 「修改类型」勾选对应项，删除无关项
