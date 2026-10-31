@@ -33,6 +33,17 @@ from data.external.tushare_client import TushareClient
 
 logger = logging.getLogger(__name__)
 
+# north_money 原始单位为百万元（数据契约见 data.constants.HSGT_NORTH_MONEY_UNIT）。
+_HSGT_MILLION_CNY = 1_000_000.0
+# 展示量级（元）随 locale 变化，与 locales 中 unit_yi/unit_wan 的文案语义一一对应：
+#   zh_CN: unit_yi「亿」=1e8 / unit_wan「万」=1e4
+#   en_US: unit_yi「B」=1e9 / unit_wan「M」=1e6（英文无「亿」，项目以十亿 B 表达）
+# 未知 locale 回退 zh_CN 口径。元组为 (大单位量级, 小单位量级)。
+_HSGT_DISPLAY_SCALES: dict[str, tuple[float, float]] = {
+    "zh_CN": (1e8, 1e4),
+    "en_US": (1e9, 1e6),
+}
+
 
 @register_singleton
 class MarketDataService:
@@ -479,12 +490,18 @@ class MarketDataService:
             if val is None:
                 # R21: north_money 缺失 → 空卡占位, 不伪装为 0 (更不会误附「流出」方向)
                 return MarketDataService._get_empty_hsgt_data_static()
-            # north_money unit: 百万元 (1 Million CNY). >100 (=1亿) -> 亿 display.
+            # north_money unit: 百万元 (1 Million CNY)：先归一到元，再按当前 locale 的
+            # 展示量级换算，避免写死「/100 亿」在 en_US 的 B(1e9)/M(1e6) 下量级错位。
+            base_yuan = val * _HSGT_MILLION_CNY
+            big_scale, small_scale = _HSGT_DISPLAY_SCALES.get(I18n.current_locale(), _HSGT_DISPLAY_SCALES["zh_CN"])
+            value = (
+                f"{base_yuan / big_scale:.2f}{I18n.get('unit_yi')}"
+                if abs(base_yuan) >= big_scale
+                else f"{base_yuan / small_scale:.0f}{I18n.get('unit_wan')}"
+            )
             return {
                 "name": I18n.get("home_northbound"),
-                "value": f"{val / 100:.2f}{I18n.get('unit_yi')}"
-                if abs(val) > 100
-                else f"{val * 100:.0f}{I18n.get('unit_wan')}",
+                "value": value,
                 # F03-001 残余: sub 与 color 对齐为三态 —— 零值 (持平) 不得落入「流出」分支。
                 "sub": (
                     I18n.get("home_inflow")
