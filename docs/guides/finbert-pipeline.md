@@ -41,7 +41,7 @@ job1 `train-export-gate`（全链路 `contents: read`）：
 | 输入校验 | — | dispatch inputs → `corpus_tag` | 非法 semver / tag 注入即失败（fail-fast） |
 | 指纹路由 | `compute_training_fingerprint.py` | 仓库 + 语料 sums → `stage_a_out/fingerprint.json` + job outputs（`model_version` / `release_tag`） | 见 §3.2 退出码 |
 | 依赖与工具链 | `patch_llama_cpp_pre_registry.py` | — | 依赖 pin / 工具链 / 补丁任一步失败即失败 |
-| 基座与语料 | `corpus_manifest.py verify` + `compute_training_fingerprint.py verify-corpus-anchor` | 语料 Release → `data/corpus` + 校验报告 | SHA256 / F2 锚 / manifest 三重校验任一失败即失败 |
+| 基座与语料 | `compute_training_fingerprint.py verify-corpus-anchor`（F2 锚断言，先）+ `corpus_manifest.py verify`（后） | 语料 Release → `data/corpus` + 校验报告 | SHA256 / F2 锚 / manifest 三重校验任一失败即失败 |
 | 训练 | `train_finbert.py` | 语料 + 基座 → `stage_b_out/best` | 超参固化在脚本内，seed 固定 |
 | 导出 | `export_finbert_gguf.py` | `best` → f16 GGUF + `head.npz` | — |
 | 一致性 Gate | `verify_finbert_gguf.py --head` | 产物 vs 训练参考 → `finbert2-news-f16.verify.json` | N0-3 任一判据 FAIL → 发布不执行 |
