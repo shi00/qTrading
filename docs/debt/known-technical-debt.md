@@ -827,7 +827,7 @@ review08（AKShare 开源组件复用专项，2026-09-23）发现：Tushare 积�
 
 **决策与缓解**
 
-v1.7.0 S4 / v1.9.0 M-4 期间 `sync_stock_basic` 将 `industry` 覆写为申万二级行业名，存量行已混入申万值。DAT-08③ 移除写时覆写后 `stock_basic.industry` 不再被污染，但**已入库存量**在下次全量同步前 `industry_tushare` 可能显示申万值。**决策**：不单独回刷（全量同步本身即自愈路径，Tushare 快照成本已计入同步配额；单独回刷需新增一次性 SQL/脚本，违背 YAGNI）。**缓解**：下次 `sync_stock_basic` 全量同步后 `industry_tushare` 自动恢复 Tushare 原始值；UI 详情页同时展示两列便于用户识别。相关文件：`data/sync/stock_basic.py`、`data/data_processor.py`。
+v1.7.0 S4 / v1.9.0 M-4 期间 `sync_stock_basic` 将 `industry` 覆写为申万二级行业名，存量行已混入申万值。DAT-08③ 移除写时覆写后 `stock_basic.industry` 不再被污染，但**已入库存量**在下次全量同步前 `industry_tushare` 可能显示申万值。**决策**：不单独回刷（全量同步本身即自愈路径，Tushare 快照成本已计入同步配额；单独回刷需新增一次性 SQL/脚本，违背 YAGNI）。**缓解**：下次 `sync_stock_basic` 全量同步后 `industry_tushare` 自动恢复 Tushare 原始值；UI 详情页同时展示两列便于用户识别。相关文件：`data/data_processor.py`（`sync_stock_basic`）、`data/persistence/daos/stock_dao.py`（`save_stock_basic`）。
 
 ## 引用关系
 
