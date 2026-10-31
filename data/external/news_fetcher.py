@@ -869,7 +869,9 @@ class NewsFetcher:
         if not data_list:
             error_msg = f"Global data unavailable after {MAX_RETRIES} retries"
             if last_error:
-                error_msg += f": {last_error}"
+                # R9：该消息经返回值进入 UI / AI 上下文，异常文本可能含代理凭证或 token，
+                # 必须先经 DataSanitizer 脱敏（与本模块其他日志路径一致）。
+                error_msg += f": {DataSanitizer.sanitize_error(last_error)}"
             return error_msg
 
         try:

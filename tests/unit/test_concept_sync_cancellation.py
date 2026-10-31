@@ -9,6 +9,9 @@
 DataProcessor.run_concept_sync 的取消由 test_data_processor_concept_sync.py 覆盖。
 """
 
+import gc
+import warnings
+
 import pandas as pd
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -80,10 +83,6 @@ class TestAKShareLoopCancellation:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
-    # filterwarnings: 循环内取消时，已创建的 sync_one_board coroutine
-    # 不会被 await（return 发生在循环内检查点），触发 RuntimeWarning。
-    # 这是验证循环内取消行为的必要副作用，非生产代码问题。
     async def test_loop_cancel_after_2s(self):
         """循环内 time.monotonic() 距上次检查 >= 2s，第 3 次 _check_cancelled 返回 True。
 
@@ -168,7 +167,6 @@ class TestAKShareLoopCancellation:
             assert mock_check.call_count == 3
 
     @pytest.mark.asyncio
-    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
     async def test_cancel_check_immune_to_ntp_rollback(self):
         """M7.5: time.monotonic() 不受 NTP 时钟回退影响。
 
@@ -221,6 +219,55 @@ class TestAKShareLoopCancellation:
             assert result.status == "cancelled"
             assert call_count == 3
             mock_gather.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_loop_cancel_closes_already_created_coroutines(self):
+        """循环内取消发生在已有待调度 coroutine 之后：这些 coroutine 必须被显式关闭。
+
+        前两次迭代未到 2s 检查点，已创建 2 个 sync_one_board coroutine 但尚未交给
+        gather；第 3 次迭代到检查点并命中取消。若不显式 close()，这些 coroutine
+        被 GC 回收时会产生 "coroutine ... was never awaited" RuntimeWarning
+        （既不调度也不关闭，属于资源泄漏）。
+        """
+        ctx = _make_ctx()
+        strategy = AKShareConceptSyncStrategy(ctx)
+        boards_df = _make_boards_df(4)
+
+        call_count = 0
+
+        def check_side_effect(result):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 3:
+                result.status = "cancelled"
+                return True
+            return False
+
+        t0 = 1000.0
+        # 调用序列：last_cancel_check 初始化(T0) → 迭代 0(T0) → 迭代 1(T0) → 迭代 2(T0+3s)
+        time_values = iter([t0, t0, t0, t0 + 3.0])
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with (
+                patch("data.sync.concept_sync.AkshareConceptClient") as MockClient,
+                patch.object(strategy, "_check_cancelled", side_effect=check_side_effect),
+                patch("data.sync.concept_sync.gather_return_exceptions_propagating_cancel") as mock_gather,
+                patch(
+                    "data.sync.concept_sync.time.monotonic",
+                    side_effect=lambda: next(time_values, t0 + 3.0),
+                ),
+            ):
+                MockClient.return_value.get_concept_list = AsyncMock(return_value=boards_df)
+
+                result = await strategy.run()
+
+                assert result.status == "cancelled"
+                assert call_count == 3
+                mock_gather.assert_not_called()
+            gc.collect()
+
+        assert not [w for w in caught if "sync_one_board" in str(w.message)]
 
 
 class TestLimitListStoppedCancellation:
