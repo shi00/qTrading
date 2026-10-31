@@ -41,14 +41,24 @@ cd "<安装目录>/resources/maintenance"
 |------|------|------|
 | `status` | 查询 embedded PostgreSQL 状态（state.json + postmaster.pid 活性 + 锁探测） | 无 |
 | `doctor` | 诊断数据目录/版本/锁/上次异常退出，输出 doctor JSON | 无 |
-| `dump <file>` | 备份数据库到文件（PostgreSQL custom format；运行中实例直连，离线时启动临时实例） | 输出文件路径 |
-| `restore <file>` | 从备份文件恢复；默认采用原子切换（成功后替换当前数据目录，原目录改名为 `.bak-<时间戳>` 保留），详见「安全注意事项」第 2 条 | 输入文件路径 |
+| `dump <file>` | 备份数据库到文件（PostgreSQL custom format；运行中实例直连，离线时启动临时实例）；stdout 无输出，完成提示（`备份完成：<输出路径>`）走 stderr | 输出文件路径 |
+| `restore <file>` | 从备份文件恢复；默认采用原子切换（成功后替换当前数据目录，原目录改名为 `.bak-<时间戳>` 保留），详见「安全注意事项」第 2 条；成功后向 stdout 输出一行目标数据目录路径 | 输入文件路径 |
 | `stop` | 停止运行中的 PostgreSQL（分级停止：smart 25s → fast 5s → kill） | 无 |
-| `maintenance-shell` | 启动临时维护实例，输出脱敏连接信息与 psql 路径（提示走 stderr，stdout 无输出） | 无 |
+| `maintenance-shell` | 启动临时维护实例，在 stdout 输出单行 JSON（`psql_path` 与 `connection_string_redacted`，密码段固定 `***`）；连接提示、按 Enter 结束等交互信息走 stderr | 无 |
 | `version` | 显示 sidecar 版本与构建元数据 | 无 |
 | `help` | 显示帮助 | 无 |
 
 > 维护脚本未路由 `reset-password`（重置 postgres 密码）命令。密码文件缺失/不可解密/密码不匹配时，在 qTrading 完全退出且数据目录已初始化（`PG_VERSION` 存在）的前提下，直接调用 sidecar binary：`"<安装目录>\_internal\sidecars\qtrading-pg-sidecar.exe" reset-password --data-dir "<数据目录>"`（Linux/macOS 用对应 `_internal/sidecars/qtrading-pg-sidecar`）。成功后重启 qTrading，并重新 `dump` 建立新备份；完整分流见 `docs/guides/how-to.md` §9.9（源码仓库路径，安装包内不含该文档）。
+
+## 输出契约（dump / restore / maintenance-shell）
+
+三个命令均为成功 exit 0，stdout 仅承载机器可解析的结果，进度与交互提示一律走 stderr（Windows 与 Linux/macOS 行为一致）：
+
+- **`dump`**：stdout 无输出；备份完成时 stderr 打印 `备份完成：<输出路径>`。
+- **`restore`**：成功后 stdout 输出一行目标数据目录（绝对路径，分隔符统一为 `/`，Windows 的 `\` 亦归一化）；默认原子切换时报告当前数据目录，显式 `--target-data-dir` 时报告该目标目录。失败时不输出该行。
+- **`maintenance-shell`**：临时实例就绪后 stdout 输出一行 JSON，字段为 `psql_path`（内置 psql 可执行文件路径）与 `connection_string_redacted`（形如 `postgresql://postgres:***@127.0.0.1:<随机端口>/qtrading`，密码段固定 `***`，不输出明文密码）；连接串、psql 命令行、密码文件位置及按 Enter 结束等提示均走 stderr。按 Enter 或 stdin 到达 EOF 后停止实例并退出。
+
+失败时按 sidecar 退出码语义返回：2 参数错误、10 binaries 安装失败、11 initdb 失败、12 临时实例启动失败、13 `maintenance-shell` JSON 输出失败、16 密码文件不可用、30 备份/恢复失败、40 数据目录异常、50 维护锁冲突（具体以各命令实际执行路径为准）。旧版本文档曾描述 `maintenance-shell` 的 stdout 无输出，依赖该旧行为的脚本需改为解析上述 JSON。
 
 ## 默认数据目录
 
