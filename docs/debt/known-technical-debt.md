@@ -63,7 +63,7 @@
 | P3-N54-Model-File-Trust-Boundary | 情绪模型文件（GGUF/head.npz）加载期仅轻量校验（GGUF 4 字节魔数 / head 结构与数值），不构成对文件内容的信任，来源由用户自担 | P3 | ① App 引入模型下载/分发渠道（文件来源不再由用户自备）时；② 或 GGUF/head 解析器漏洞（如 llama.cpp/np.load CVE）公开披露时；③ 或安全审计要求文件内容级校验（哈希白名单/签名）时 |
 | P3-RedlineAuto-Grimp-Namespace-Blindspot | import-linter/grimp 不建模命名空间包（`data/sync/` 无 `__init__.py`），指向该子包的 R1 违规处于门禁盲区（UTILS-A-01 实证） | P3 | ① grimp/import-linter 升级或补 `data/sync/__init__.py` 等建模手段使契约开始实际拦截时；② 或再次出现指向 `data.sync.*` 的未登记跨层 lazy import 新实例时 |
 | P3-REV03-Dao-MaxRows | review03 C4：`_read_db`/`_read_db_select` 已提供 max_rows 安全阀，但多数全表扫描调用点未显式设置，数据增长后可能一次性载入全量 | P3 | ① `data/persistence/daos/` 再次新增未显式传 max_rows 的全表扫描调用点时；② 或出现因全量载入导致的内存/超时故障报告时；③ 或数据访问层重构时 |
-| P3-REV03-ScreeningHistory-SQLCore | review03 C7：screener_dao 查询仍有 f-string 拼列名 / ORDER BY（screening_history），非注入风险，待迁移 SQLAlchemy Core | P3 | ① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时 |
+| P3-REV03-ScreeningHistory-SQLCore | review03 C7：screener_dao 的 screening_history 查询已消除 f-string 拼列名/ORDER BY（选股 SQL 静态模板化），但 `get_history_tree`/`get_pending_predictions` 等仍为 raw SQL，待迁移 SQLAlchemy Core | P3 | ① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时 |
 | P3-REV03-DataDictionary-Columns | review03 C9：数据字典半数表 columns 为空（已于 #1100（2026-09-21）解决：列级声明移除，columns 改由 ORM 派生 + `test_no_empty_columns_fields` 守护） | P3 | ① columns 为空条目导致实际列级校验漏检缺陷时；② 或数据字典被纳入新的门禁校验时 |
 | P2-REV06-External-SchemaValidation | review06 F9：外部数据（Tushare/Akshare）入库前缺行级 schema 校验，脏数据可静默影响选股决策 | P2 | ① 外部数据脏数据导致选股/回测结论异常的事故报告时；② 或新增外部数据源接入取数→入库链时（新链路必须配套校验） |
 | P3-REV06-Retry-CircuitBreaker | review06 F10：重试机制在外部服务故障时放大请求压力，建议加熔断/退避限流 | P3 | ① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时 |
@@ -673,19 +673,21 @@ review03（数据层与持久化，2026-09-02/03）发现：DAO 层读取方法�
 
 全部全表扫描调用点显式指定 `max_rows` 且无兜底无限制读取。upgrade 触发条件：① `data/persistence/daos/` 再次新增未显式传 max_rows 的全表扫描调用点时；② 或出现因全量载入导致的内存/超时故障报告时；③ 或数据访问层重构时。
 
-#### P3-REV03-ScreeningHistory-SQLCore：review03 C7：screener_dao 查询仍有 f-string 拼列名 / ORDER BY（screening_history），非注入风险，待迁移 SQLAlchemy Core
+#### P3-REV03-ScreeningHistory-SQLCore：review03 C7：screener_dao 的 screening_history 查询已消除 f-string 拼列名/ORDER BY（选股 SQL 静态模板化），但部分 raw SQL 待迁移 SQLAlchemy Core
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-REV03-ScreeningHistory-SQLCore** | review03 C7：screener_dao 查询仍有 f-string 拼列名 / ORDER BY（screening_history），非注入风险，待迁移 SQLAlchemy Core | ① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时 |
+| **P3-REV03-ScreeningHistory-SQLCore** | review03 C7：screener_dao 的 screening_history 查询已消除 f-string 拼列名/ORDER BY（选股 SQL 静态模板化），但 `get_history_tree`/`get_pending_predictions` 等仍为 raw SQL，待迁移 SQLAlchemy Core | ① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时 |
 
 **产生背景与现状**
 
 review03（数据层与持久化，2026-09-02/03）发现：`data/persistence/daos/screener_dao.py` 的 `screening_history` 相关查询使用 f-string 拼接列名与 `ORDER BY` 子句。经评审确认非注入风险（列名来源受控），但与 R4 参数化方向不一致，待迁移 SQLAlchemy Core 统一。
 
+**现状校准（2026-10-31 复核）**：选股/区间选股 SQL 已改为模块级静态模板（`_SCREENING_SQL_TEMPLATE` / `_SCREENING_SQL_RANGE_TEMPLATE`），可变点仅 `__CLOSE_COND__` / `__STOCK_ALIVE_CONDITION__` / `__DELISTING_FLAG__` 三个受控片段（代码内 review03-C7 注释回指）；`get_screening_history` / `get_history_records` / `get_learning_context*` 等已迁移 SQLAlchemy Core。剩余未迁移 Core 的 `screening_history` raw SQL 为：`get_history_tree`（`screener_dao.py:L359`，f-string 仅内嵌常量 `REVIEW_STATS_WINDOW_DAYS`，列名与 `ORDER BY` 均静态）、`get_pending_predictions`（`$1`~`$3` 参数化）、`load_history_records` 的 `ids_sql`（`$1` 参数化）——均无 f-string 拼列名/ORDER BY，非注入风险。
+
 **期望的最终解法**
 
-`data/` 内 `screening_history` 相关查询迁移 SQLAlchemy Core，无 f-string 拼列名/`ORDER BY`。upgrade 触发条件：① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时。
+将上述剩余 `screening_history` raw SQL（`get_history_tree` / `get_pending_predictions` / `load_history_records` 的 `ids_sql`）迁移 SQLAlchemy Core，或经 `text()` 常量承载，保持列名与 `ORDER BY` 静态。upgrade 触发条件：① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时。
 
 #### P3-REV03-DataDictionary-Columns：review03 C9：数据字典半数表 columns 为空（已于 #1100（2026-09-21）解决：列级声明移除，columns 改由 ORM 派生 + `test_no_empty_columns_fields` 守护）
 
