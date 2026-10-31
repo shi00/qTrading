@@ -101,6 +101,10 @@ R2（`CancelledError` 重抛）/ R7 / R11（loop-local 原语）/ R15（单例�
 
 Context 引用的设计稿 `reviews/新闻达标模型微调.md` 为本地未入库文档，未随仓库分发且当前工作区已不存在；该稿仅作方案来源记录，契约以本 ADR 的 Decision 与 [docs/patterns/ai-service.md](../patterns/ai-service.md) §6 为准。
 
+> 2026-10-31 勘误（DOC-RV-036）
+
+Context 描述的导出形态 `GGUF(Q8_0)` 属 M0 验证阶段形态，非当前发布形态：产线已改为 f16 导出（Q8_0 量化因一致性 Gate 概率差判据必 FAIL，已于 2026-10-14 移除，事实源为 [finbert-train.yml](../../.github/workflows/finbert-train.yml) 头部注释与 [finbert-pipeline.md](../guides/finbert-pipeline.md) §1）。本 ADR 的范式结论（CLS 池化 embedding + HF 外部分词 + numpy 分类头 + 独立常驻子进程 + 仅展示边界）不受影响。
+
 ---
 
 ## 完成判定（canonical 入口）
