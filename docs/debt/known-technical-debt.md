@@ -50,7 +50,7 @@
 | P3-M12-TushareConfigPanel-Referrer-Code-In-Url | #M12-021 隐私：tushare\_config\_panel_view\_model.py:37 URL 含 referrer code | P3 | ① 隐私审计（外发 URL / 追踪参数复核）启动时；② 或该 VM 再次出现 URL 携带跟踪/推荐码的新实例时 |
 | P3-M12-ViewModels-Repeated-Singleton-Calls | #M12-022 性能：VM 中重复调用 TushareClient()/TaskManager() 等单例 | P3 | ① 该 VM 文件再次出现重复构造单例的新实例时；② 或 VM 性能审计中单例调用开销被量化超阈值时 |
 | P3-M12-Views-Get-DataProcessor-Cross-Layer | #M12-025 MVVM 边界：data\_source\_tab.py View 经 VM 获取 data\_processor 传子组件（data\_view.py 已解决） | P3 | ① `ui/views` 或 `ui/components` 下再次出现 View 获取 data\_processor 传子组件的新实例时；② 或 ui 层 MVVM 迁移完成时 |
-| P3-M12-NewsFeed-Callback-Passes-ControlEvent | #M12-028 MVVM 边界：news\_feed.py:330/:361 on\_load\_more\_click 传递 ControlEvent 而非业务数据 | P3 | ① 该文件再次出现回调传递 ControlEvent 而非业务数据的新实例时；② 或 ui 层 MVVM 迁移完成时 |
+| P3-M12-NewsFeed-Callback-Passes-ControlEvent | #M12-028 MVVM 边界：news\_feed.py:328/:359 on\_load\_more\_click 传递 ControlEvent 而非业务数据 | P3 | ① 该文件再次出现回调传递 ControlEvent 而非业务数据的新实例时；② 或 ui 层 MVVM 迁移完成时 |
 | P3-M12-StockDetailDialog-BuildContent-No-Cover | #M12-031 测试覆盖：stock\_detail\_dialog.py:505 \_build\_content pragma: no cover | P3 | ① 该文件再次出现 `_build_content` 无覆盖分支的新实例时；② 或 per-file 覆盖率门禁要求该文件达阈值时 |
 | P3-PR3-TextButton-Interactive-Unverified | PR-3 对抗性检视 M3：ft.TextButton + AnchorKind.INTERACTIVE 的 CanvasKit 行为未验证 | P3 | ① 新增使用 `click_skip` 的测试时；② 或 `ft.TextButton` 升级时 |
 | P3-PR513-Script-SysPath-Inject | PR #513 检视：`scripts/verify_embedded_pg_connect.py` 顶部 `sys.path.insert` 注入仓库根后 import data 层（代码味道，已文档化） | P3 | ① `scripts/` 其他脚本出现同类 `sys.path` 注入需统一时；② 或脚本迁移为正式包入口时 |
@@ -560,15 +560,15 @@ M12 ui 表现层模块检视发现：`ui/views/settings_tabs/data_source_tab.py:
 
 引入子组件 VM，View 不直接获取 data\_processor。验收标准：① View 不直接获取 data\_processor；② 现有测试全过。upgrade 触发条件：① `ui/views` 或 `ui/components` 下再次出现 View 获取 data\_processor 传子组件的新实例时；② 或 ui 层 MVVM 迁移完成时。
 
-#### P3-M12-NewsFeed-Callback-Passes-ControlEvent：#M12-028 MVVM 边界：news\_feed.py:330/:361 on\_load\_more\_click 传递 ControlEvent 而非业务数据
+#### P3-M12-NewsFeed-Callback-Passes-ControlEvent：#M12-028 MVVM 边界：news\_feed.py:328/:359 on\_load\_more\_click 传递 ControlEvent 而非业务数据
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-M12-NewsFeed-Callback-Passes-ControlEvent** | #M12-028 MVVM 边界：news\_feed.py:330/:361 on\_load\_more\_click 传递 ControlEvent 而非业务数据 | ① 该文件再次出现回调传递 ControlEvent 而非业务数据的新实例时；② 或 ui 层 MVVM 迁移完成时 |
+| **P3-M12-NewsFeed-Callback-Passes-ControlEvent** | #M12-028 MVVM 边界：news\_feed.py:328/:359 on\_load\_more\_click 传递 ControlEvent 而非业务数据 | ① 该文件再次出现回调传递 ControlEvent 而非业务数据的新实例时；② 或 ui 层 MVVM 迁移完成时 |
 
 **产生背景与现状**
 
-M12 ui 表现层模块检视发现：`ui/components/news_feed.py:330/361` `on_load_more_click` 传递 `ControlEvent` 而非业务数据。严格 MVVM 边界下，回调应传递业务数据而非 Flet 控件事件。M12 未修复原因：修复需重构回调签名，跨多文件协调。相关文件：`ui/components/news_feed.py:330/361`。
+M12 ui 表现层模块检视发现：`ui/components/news_feed.py:328/359` `on_load_more_click` 传递 `ControlEvent` 而非业务数据（2026-10-31 复核：`_build_load_more_button` 形参 `:328`、`NewsFeed` 组件形参 `:359`）。严格 MVVM 边界下，回调应传递业务数据而非 Flet 控件事件。M12 未修复原因：修复需重构回调签名，跨多文件协调。相关文件：`ui/components/news_feed.py:328/359`。
 
 **期望的最终解法**
 
