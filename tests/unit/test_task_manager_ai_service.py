@@ -12,7 +12,8 @@ import pytest
 
 from tests.conftest import singleton_state
 
-pytestmark = pytest.mark.integration
+# 分层归属：单组件（TaskManager / AIService）+ 依赖 mock，无 DB 依赖 → 单元层
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
@@ -51,8 +52,9 @@ class TestTaskManagerSemaphoreReset:
         assert semaphore._value == 1
 
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
         await asyncio.sleep(0.05)
         assert semaphore._value == 2
@@ -63,7 +65,7 @@ class TestTaskManagerSemaphoreReset:
             async with semaphore:
                 raise ValueError("test error")
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="test error"):
             await failing_task()
 
         assert semaphore._value == 2

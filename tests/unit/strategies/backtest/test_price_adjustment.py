@@ -77,7 +77,11 @@ class TestPriceAdjustment:
         assert "raw_open" in result.columns
         assert "qfq_open" in result.columns
         assert result["raw_open"].to_list() == [10.0, 11.0]
+        # 价格列保留 raw 数值以保证序列连续
         assert result["qfq_open"].to_list() == [10.0, 11.0]
+        # R21：整列因子缺失 = 未知（ratio=null 拒绝撮合，标记列驱动 DataWarning）
+        assert result["qfq_ratio"].to_list() == [None, None]
+        assert result["qfq_adjustment_unknown"].to_list() == [True, True]
 
     def test_apply_qfq_multiple_stocks(self) -> None:
         quotes_df = pl.DataFrame(

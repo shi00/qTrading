@@ -99,6 +99,22 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.integration)
 
 
+_DDL_CREATE_DB = "CREATE DATABASE %I"
+_DDL_DROP_DB = "DROP DATABASE IF EXISTS %I WITH (FORCE)"
+
+
+async def _execute_quoted_ddl(conn: asyncpg.Connection, template: str) -> None:
+    """以服务端 ``format(%I, ...)`` 引用库名执行 DDL，消除源码级 SQL 拼接（R4）。
+
+    ``CREATE/DROP DATABASE`` 的目标是标识符，无法用 ``$1`` 参数绑定；此前用
+    f-string 拼库名属于 R4 禁止形态。改由常量模板 + ``format($1::text, $2::text)``
+    生成 DDL：模板为常量，库名经 PostgreSQL ``%I`` 转义（并受 ``_db_config`` 的
+    字符集白名单约束），源码中不再出现 f-string/拼接 SQL。
+    """
+    ddl = await conn.fetchval("SELECT format($1::text, $2::text)", template, TEST_DB_NAME)
+    await conn.execute(ddl)
+
+
 async def _drop_test_db():
     """清理测试 DB（由 ``pytest_sessionfinish`` 调用）。
 
@@ -115,8 +131,7 @@ async def _drop_test_db():
         timeout=5.0,
     )
     try:
-        db_name_sql = TEST_DB_NAME.replace('"', '""')
-        await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}" WITH (FORCE)')
+        await _execute_quoted_ddl(conn, _DDL_DROP_DB)
     finally:
         await conn.close()
 
@@ -173,17 +188,16 @@ async def _ensure_test_db():
         timeout=5.0,
     )
     try:
-        db_name_sql = TEST_DB_NAME.replace('"', '""')
         if not _test_db_clean_slate_done:
             # 首次调用：clean slate 防止上次 session 残留
-            await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}" WITH (FORCE)')
-            await conn.execute(f'CREATE DATABASE "{db_name_sql}"')
+            await _execute_quoted_ddl(conn, _DDL_DROP_DB)
+            await _execute_quoted_ddl(conn, _DDL_CREATE_DB)
             _test_db_clean_slate_done = True
         else:
             # 后续调用：自愈检查，DB 不存在则重建
             exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", TEST_DB_NAME)
             if not exists:
-                await conn.execute(f'CREATE DATABASE "{db_name_sql}"')
+                await _execute_quoted_ddl(conn, _DDL_CREATE_DB)
     finally:
         await conn.close()
 
@@ -696,10 +710,14 @@ async def real_embedded_pg(real_sidecar_binary: Path, tmp_path_factory):
 
     data_root = tmp_path_factory.mktemp("real_embedded_pg")
     log_dir = data_root / "logs"
+    # EMBEDDED_PG_INSTALL_DIR：复用已安装的 PG binaries（如系统 /usr/lib/postgresql/16），
+    # 避免测试内重复下载/解压；未设置时退回隔离的临时目录。
+    install_root = os.environ.get("EMBEDDED_PG_INSTALL_DIR")
+    install_dir = Path(install_root) if install_root else data_root / "install"
     service = EmbeddedPostgresService(
         sidecar_binary=real_sidecar_binary,
         data_dir=data_root / "data",
-        install_dir=data_root / "install",
+        install_dir=install_dir,
         log_dir=log_dir,
         start_timeout=300.0,  # 首次 initdb + PG binaries 下载可能较慢
     )

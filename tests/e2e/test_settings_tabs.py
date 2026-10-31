@@ -271,10 +271,6 @@ async def test_db_connection_test_and_save(e2e_page):
     host_label = I18n.get("db_host")
     await e2e_page.expect_text(host_label, timeout_ms=TIMEOUTS.INTERACTION)
 
-    # 直接点击测试连接 (fill_textbox 不生效, port 保持默认 5432)
-    test_btn_label = I18n.get("db_test_connection")
-    await e2e_page.click_button(test_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
-
     # P1-9: 精确断言 - 缩小 possible_results 到唯一确定的结果.
     # flet_app fixture config 无 db_host → ConfigHandler.get_db_config 返回 host="".
     # CanvasKit 限制导致 fill_textbox 不生效 (INPUT value 保持原值), host 始终为空.
@@ -283,6 +279,17 @@ async def test_db_connection_test_and_save(e2e_page):
     possible_results = [
         I18n.get("wizard_err_host_required"),
     ]
-    hit = await _wait_for_any_text(e2e_page, possible_results, timeout_ms=30000)
+    # 直接点击测试连接 (fill_textbox 不生效, port 保持默认 5432).
+    # 整套串行执行时偶发点击未生效（CanvasKit 控件刚挂载/被状态面板遮挡），
+    # 表现为 30s 内无状态文本。此处做有界重试（最多 2 次点击），
+    # 避免把点击竞态误判为功能缺失；两次均无结果才失败暴露真实缺陷。
+    test_btn_label = I18n.get("db_test_connection")
+    hit = ""
+    for attempt in range(2):
+        await e2e_page.click_button(test_btn_label, timeout_ms=TIMEOUTS.INTERACTION)
+        hit = await _wait_for_any_text(e2e_page, possible_results, timeout_ms=30000)
+        if hit:
+            break
+        logger.warning("DB 测试连接第 %d 次点击未产生状态文本，重试", attempt + 1)
     assert hit, f"DB 测试连接未显示结果, 期望: {possible_results}"
     logger.info("DB 测试连接路径验证通过: %s", hit)

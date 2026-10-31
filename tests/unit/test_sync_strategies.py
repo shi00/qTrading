@@ -12,7 +12,8 @@ import pytest
 
 from utils.rate_limiter import TokenBucket
 
-pytestmark = pytest.mark.integration
+# 分层归属：单组件（TokenBucket / TushareClient）+ 无 DB 依赖 → 单元层
+pytestmark = pytest.mark.unit
 
 
 class TestTokenBucketAdaptiveBackoff:
