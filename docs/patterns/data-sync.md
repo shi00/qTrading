@@ -39,8 +39,8 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 
 ### 质量门控（C15）
 
-- **`data/sync` 层豁免说明**：`data/sync/` 作为数据同步入口，职责是拉取外部数据并落库（写入 `quality_gate` 评分所需的源数据），自身不直接消费业务数据决策；下游策略层（`strategies/`）强制 `@require_quality` 门控，故 `data/sync` 层不声明 `required_quality_tier`、不挂 `@require_quality` 装饰器。质量评分由 `QuoteDAO.get_sync_quality_score()` 在 syncer 落库后异步评估，syncer 仅负责把数据写入 `*_quality_score` 表供后续策略消费。
-- 同步完成后由 `QuoteDAO.get_sync_quality_score()` 评估单日数据同步质量分数（基于相对基准法），低于阈值时标记该日为不完整，下次同步会自动补齐。
+- **`data/sync` 层豁免说明**：`data/sync/` 作为数据同步入口，职责是拉取外部数据并落库（写入 `quality_gate` 评分所需的源数据），自身不直接消费业务数据决策；下游策略层（`strategies/`）强制 `@require_quality` 门控，故 `data/sync` 层不声明 `required_quality_tier`、不挂 `@require_quality` 装饰器。**质量评分不落库**：`QuoteDAO.get_sync_quality_score()` 基于相对基准法**在查询时实时计算**（内部经 `get_bulk_sync_quality_scores()` 批量聚合各表当日行数与期望基准的比值），syncer 不写入任何质量分表，评分由下游策略经 `@require_quality` 门控或运维检查时即时取用。
+- 同步完成后可调用 `QuoteDAO.get_sync_quality_score()` 复核单日评分；低分日期**不会**被持久化为「不完整」标记，后续补齐由同步层自身完成——历史行情同步以「全部 DENSE 表均已存在该交易日数据」判定该日已完成并跳过（`data/sync/historical.py::_completed_dates`），故重跑相应同步窗口即可覆盖缺数据日期。
 - 跨源一致性校验（Tier 3 Gold）由 `data/persistence/data_quality.py` 与 `quality_gate.py` 负责，详情见 [config-quality-perf.md](./config-quality-perf.md)。
 
 ### 错误处理（C16）
@@ -86,7 +86,7 @@ Tushare API  →  TushareClient（限流 + 重试 + token 熔断）
 
 | 现象 | 可能原因 | 排查点 |
 |------|---------|--------|
-| 某日质量分低于阈值 | 源端当日数据缺失，或相对基准法判定数据不完整 | 用 `QuoteDAO.get_sync_quality_score()` 复核该日评分；`*_quality_score` 表标记为不完整的日期会在下次同步自动补齐（见「质量门控（C15）」） |
+| 某日质量分低于阈值 | 源端当日数据缺失，或相对基准法判定数据不完整 | 用 `QuoteDAO.get_sync_quality_score()` 复核该日评分（实时计算、不落库）；低分日期不做持久化标记，重跑同步窗口时由 `data/sync/historical.py::_completed_dates`（全部 DENSE 表已有该日数据才跳过）自动覆盖补数（见「质量门控（C15）」） |
 | 同步后某表仍缺数据 / 数据不完整 | 表未在 `TABLE_DEFINITIONS` 注册，或分块写入未覆盖全量 | 核对 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 注册项；确认 syncer 分块循环与 `_save_upsert()` 的覆盖范围 |
 | 续传 / 同步中途中断且不再恢复 | `cancel_event` 被置位未清理，或取消异常被吞没 | 确认 syncer 分块循环检查 `cancel_event.is_set()`，主动退出必须 `raise asyncio.CancelledError`（R2，见「取消传播（C18）」） |
 | 续传/同步中 DAO 操作抛 `EngineDisposedError`、`RuntimeError`（Engine not initialized）或连接异常 | ① 抛 `EngineDisposedError` 或 `RuntimeError`：引擎已被 `CacheManager.close()` 释放（如停机/重配期间，R5 守卫生效或 `engine` 已置 `None`），或飞行中连接被中途断开（`interrupted`）；② 抛连接异常/`DatabaseQueryError`：PG 服务进程暂不可达，连接池 `pool_pre_ping` 在服务恢复前无法自愈 | ① 若引擎已 `close()` 释放（`self.engine is None`），须待停机/重配流程结束后调用 `await CacheManager.init_db()` 创建新引擎（禁止在已释放旧引擎上绕过 R5 继续操作）；② 若属 PG 进程崩溃/重启，先确认 PG 服务恢复，重跑同步即可经 `pool_pre_ping=True` 恢复连接，或显式执行 `await CacheManager.close()` → `await CacheManager.init_db()` 彻底重建引擎（见「数据库连接生命周期（review03-C13 契约）」） |
