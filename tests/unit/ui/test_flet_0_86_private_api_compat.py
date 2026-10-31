@@ -97,15 +97,17 @@ def test_v1_control_page_is_read_only() -> None:
 def test_v1_control_update_raises_when_unmounted() -> None:
     """V1 原生未挂载 ``Control.update()`` 抛 RuntimeError，而非 V0 静默返回。"""
     ctrl = ft.Container()
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as excinfo:
         ctrl.update()
+    assert "must be added to the page" in str(excinfo.value)
 
 
 def test_v1_control_page_raises_when_unmounted() -> None:
     """V1 原生未挂载读取 ``Control.page`` 抛 RuntimeError，而非返回 None。"""
     ctrl = ft.Container()
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as excinfo:
         _ = ctrl.page
+    assert "must be added to the page" in str(excinfo.value)
 
 
 def test_pubsub_client_class_and_init_signature() -> None:
