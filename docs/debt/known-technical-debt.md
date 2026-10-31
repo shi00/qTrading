@@ -66,7 +66,7 @@
 | P3-REV03-ScreeningHistory-SQLCore | review03 C7：screener_dao 的 screening_history 查询已消除 f-string 拼列名/ORDER BY（选股 SQL 静态模板化），但 `get_history_tree`/`get_pending_predictions` 等仍为 raw SQL，待迁移 SQLAlchemy Core | P3 | ① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时 |
 | P3-REV03-DataDictionary-Columns | review03 C9：数据字典半数表 columns 为空（已于 #1100（2026-09-21）解决：列级声明移除，columns 改由 ORM 派生 + `test_no_empty_columns_fields` 守护） | P3 | ① columns 为空条目导致实际列级校验漏检缺陷时；② 或数据字典被纳入新的门禁校验时 |
 | P2-REV06-External-SchemaValidation | review06 F9：外部数据（Tushare/Akshare）入库前缺行级 schema 校验，脏数据可静默影响选股决策 | P2 | ① 外部数据脏数据导致选股/回测结论异常的事故报告时；② 或新增外部数据源接入取数→入库链时（新链路必须配套校验） |
-| P3-REV06-Retry-CircuitBreaker | review06 F10：重试机制在外部服务故障时放大请求压力，建议加熔断/退避限流 | P3 | ① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时 |
+| P3-REV06-Retry-CircuitBreaker | review06 F10：重试上限可配（默认 3）且已带退避/自适应降速，但缺跨调用连续失败短路计数，外部服务故障期仍可能多 API 独立重试放大压力 | P3 | ① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时 |
 | P2-REV06-PromptGuard-StructuredBoundary | review06 F12：prompt 注入防御为正则黑名单，对新闻正文植入指令有固有局限，需结构化边界 + 输出侧交叉校验（ADR-0008 执行权边界为现行补偿控制） | P2 | ① 出现注入成功绕过 prompt_guard 的实例时；② 或新增外部文本进入 LLM 上下文的链路时 |
 | P2-REV06-LLMOutput-SchemaValidation | review06 F13：LLM 输出影响选股排序，仅校验部分字段，缺完整输出 schema 校验（AI 免责声明已于 UX-09 落地） | P2 | ① LLM 坏输出未被校验拦截并流入排序/展示的事故时；② 或输出契约（core/prompt_base.py）字段扩展时；③ 或 AI 排序结果进入导出/分享链路时 |
 | P3-REV06-Restore-HeaderValidation | review06 F16：备份恢复路径仅做存在性检查，未校验 pg_dump magic header 与元信息展示 | P3 | ① 用户恢复损坏/伪造备份导致恢复失败或数据错乱的事故时；② 或备份恢复流程被重构时 |
@@ -721,15 +721,15 @@ review06（安全与供应链，2026-08-24）发现：外部数据入库路径�
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-REV06-Retry-CircuitBreaker** | review06 F10：重试机制在外部服务故障时放大请求压力，建议加熔断/退避限流 | ① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时 |
+| **P3-REV06-Retry-CircuitBreaker** | review06 F10：重试上限可配（默认 3）且已带退避/自适应降速，但缺跨调用连续失败短路计数，外部服务故障期仍可能多 API 独立重试放大压力 | ① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时 |
 
 **产生背景与现状**
 
-review06（安全与供应链，2026-08-24）发现：外部服务故障时重试机制会放大请求压力（重试风暴），建议引入熔断器或退避限流。
+review06（安全与供应链，2026-08-24）发现：外部服务故障时重试机制会放大请求压力（重试风暴），建议引入熔断器或退避限流。**现状校准（2026-10-31 复核）**：退避与自适应降速已落地于 `data/external/tushare/api_wrapper.py`（`TushareApiWrapper._handle_api_call`；`tushare_client._handle_api_call` 现仅为委托入口，见 `tushare_client.py:788-791`）：重试上限由 `request_max_retries` 控制（默认 3、范围 0-10，`config_models.py:592`）；限流错误按 `5 + 随机 0-5 + i*5` 秒退避，并对全局桶与单 API 桶 `reduce_rate(0.5)`（`api_wrapper.py:272-292`、`utils/rate_limiter.py:116-135`），成功经 `on_success()` 逐步恢复（`rate_limiter.py:137-161`）；网络错误按 `1*(i+1) + 抖动` 退避（`api_wrapper.py:294-307`）；token 认证失败触发全局熔断 `_token_invalid` 快速失败（`api_wrapper.py:118-126`、`:219-239`），权限错误经运行时负缓存跳过（`api_wrapper.py:214-218`）。Akshare 侧 `AkshareConceptClient` 单次调用不重试并共用 1 QPS TokenBucket（`data/external/akshare_rate_limiter.py:16-31`），新闻源另有独立按源熔断器（`data/external/news_sources/circuit_breaker.py`）。**剩余缺口**：通用外部服务故障（非 token/权限，如 5xx/连接异常）仅按单次调用内 `max_retries` 重试（其他错误固定 `sleep(1)`，`api_wrapper.py:319`），下一次调用重新计数，无跨调用「连续失败短路计数」，即期望解法中的该项仍未落地。
 
 **期望的最终解法**
 
-外部服务调用链加熔断/退避限流，故障时不无限重试放大 QPS（含 `tushare_client._handle_api_call` 连续失败短路计数）。upgrade 触发条件：① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时。
+外部服务调用链加熔断/退避限流，故障时不无限重试放大 QPS（含 `TushareApiWrapper._handle_api_call` 跨调用连续失败短路计数）。upgrade 触发条件：① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时。
 
 #### P2-REV06-PromptGuard-StructuredBoundary：review06 F12：prompt 注入防御为正则黑名单，对新闻正文植入指令有固有局限，需结构化边界 + 输出侧交叉校验（ADR-0008 执行权边界为现行补偿控制）
 
