@@ -1429,9 +1429,15 @@ class TestMarketDataServiceListenerDispatch:
 
         svc._listeners.add(stuck_listener)
 
+        async def _timeout_after_close(coro, timeout):
+            # 生产侧 wait_for 超时会取消并关闭 listener 协程；替身同样 close()，
+            # 避免未 await 的协程产生 RuntimeWarning（测试资源泄漏）。
+            coro.close()
+            raise TimeoutError()
+
         # 用 patch 加速超时（避免测试等待 10s）
         with (
-            patch("data.domain_services.market_data_service.asyncio.wait_for", side_effect=TimeoutError()),
+            patch("data.domain_services.market_data_service.asyncio.wait_for", new=_timeout_after_close),
             patch("data.domain_services.market_data_service.logger") as mock_logger,
         ):
             await svc._notify_listeners()

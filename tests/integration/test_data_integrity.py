@@ -58,3 +58,6 @@ class TestDataIntegrity(TestDatabaseBase):
                     text("DELETE FROM financial_reports WHERE ts_code = :ts_code"),
                     {"ts_code": "000002.SZ"},
                 )
+            # R7：集成测试无 autouse 单例重置，显式清理 DataProcessor，避免本用例的
+            # mock 依赖（AsyncMock api + 已关闭 cache）泄漏为后续用例的隐式顺序依赖。
+            DataProcessor._reset_singleton()
