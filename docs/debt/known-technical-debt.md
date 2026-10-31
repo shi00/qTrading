@@ -34,7 +34,7 @@
 | P2-Fi25-Rust-Injection-Missing | 失败注入场景 #25（数据页 checksum 错误）缺 Rust 集成测试 | P2 | ① sidecar 引入运行期 postgres 日志监控需求时；② 或数据页损坏问题在生产环境报告时 |
 | P3-App-SyncFunctions-In-Async-Bootstrap | `initialize_services` 中同步函数（preload\_aliases/validate\_failover/validate\_strategy\_tier）阻塞事件循环（合理设计决策） | P3 | ① 这些函数引入网络/磁盘 IO；② 或启动期 UI 响应延迟被用户感知时 |
 | P3-M4-DbMigrator-OrphanHeal-SingleChain-Assumption | `_heal_orphaned_revision` 假设严格线性单链迁移（已文档化设计限制） | P3 | 引入 Alembic 多分支（Multiple Heads）时 |
-| P3-M4-AppStateService-BroadExcept | `app_state_service.py:20,37` broad except 未接入 classify\_error（合理降级，一致性建议） | P3 | ① app state 升级为关键路径时；② 或该文件再次出现未分类 broad except 的新实例时 |
+| P3-M4-AppStateService-BroadExcept | `app_state_service.py:21,38,63` broad except 未接入 classify\_error（合理降级，一致性建议） | P3 | ① app state 升级为关键路径时；② 或该文件再次出现未分类 broad except 的新实例时 |
 | P3-M6-NewsFetcher-Lazy-ProxyManager-Import | `news_fetcher.py:618/:785/:951` 三处函数内部 import ProxyManager（合理避免循环依赖，建议保留） | P3 | ① `proxy_manager.py` 循环依赖被解除时；② 或该文件再次出现函数内 import 的新实例时 |
 | P3-Windows-Unit-Test-Timeout-Tight | Windows 单测 step `timeout-minutes` 余量不足（main 成功 run 13 分 41 秒 / 原 15 分钟 = 91% 占用） | P3 | ① Windows 单测实际运行时间 ≥ 18 分钟（90% 占用 20 分钟 timeout）；② 或连续 3 次 PR 触发 Windows 单测超时；③ 或单测总数增长 ≥ 20%（如新增 2000 个测试） |
 | P3-M9-NewsSubscription-EngineDisposed-Swallowed | #M9-010 R5: news\_subscription\_service.py L425/642/919 EngineDisposedError 吞没（设计合理但严格按 R5 应传播） | P3 | ① R5 红线适用范围扩展至应用服务层轮询循环时；② 或该文件再次出现 EngineDisposedError 吞没的新实例时 |
@@ -108,15 +108,15 @@ R3 场景遗漏检视发现：utils/ 层 except Exception（分布在 config\_ha
 
 后续 utils 层异常处理统一改造时重新评估是否引入 `classify_error`。upgrade 触发条件：① utils 层再次出现未分类 `except Exception` 的新实例时；② 或 utils 层异常处理被统一改造时。
 
-#### P3-M4-AppStateService-BroadExcept：`app_state_service.py:20,37` broad except 未接入 classify\_error（合理降级，一致性建议）
+#### P3-M4-AppStateService-BroadExcept：`app_state_service.py:21,38,63` broad except 未接入 classify\_error（合理降级，一致性建议）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-M4-AppStateService-BroadExcept** | `app_state_service.py:20,37` broad except 未接入 classify\_error（合理降级，一致性建议） | ① app state 升级为关键路径时；② 或该文件再次出现未分类 broad except 的新实例时 |
+| **P3-M4-AppStateService-BroadExcept** | `app_state_service.py:21,38,63` broad except 未接入 classify\_error（合理降级，一致性建议） | ① app state 升级为关键路径时；② 或该文件再次出现未分类 broad except 的新实例时 |
 
 **产生背景与现状**
 
-M4 模块化检视发现：`data/persistence/app_state_service.py:20,37` 共 2 处 `except Exception as e:` 吞没异常返回默认值。app state 是非关键路径（用户偏好/窗口位置等），吞没降级返回默认值是合理设计。但未接入 `classify_error`，与 #M4-002（review\_manager 已接入 classify\_error）一致性不符。本次 M4 未修复原因：① app state 非关键路径，容错优先；② 修复需引入 `classify_error` + `classify_severity` + system 级 raise 传播，改变现有降级语义，违反 §1.4「不做无益重构」。相关文件：`data/persistence/app_state_service.py:20,37`。
+M4 模块化检视发现：`data/persistence/app_state_service.py:21,38,63` 共 3 处 `except Exception as e:` 吞没异常并降级（读路径返回默认值、写路径不阻断调用方）。app state 是非关键路径（用户偏好/窗口位置等），吞没降级是合理设计。但未接入 `classify_error`，与 #M4-002（review\_manager 已接入 classify\_error）一致性不符。本次 M4 未修复原因：① app state 非关键路径，容错优先；② 修复需引入 `classify_error` + `classify_severity` + system 级 raise 传播，改变现有降级语义，违反 §1.4「不做无益重构」。相关文件：`data/persistence/app_state_service.py:21,38,63`。
 
 **期望的最终解法**
 
