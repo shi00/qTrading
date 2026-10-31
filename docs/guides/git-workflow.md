@@ -205,11 +205,11 @@ Feature 分支存活建议 ≤ 7 天。超期需评估：
 
 | 流程 | 文档位置 | 与本节关系 |
 |------|---------|-----------|
-| Conventional Commits | 「提交信息规范」 | 分支 type 与 commit type 对齐 |
-| PR 流程 | 「Pull Request 流程」 | worktree 完成后进入 PR 阶段 |
-| Merge Queue + Squash | 「合并策略」 | 本节规定的合并方式 |
-| CODEOWNERS | 「代码审查与合并」 | 关键路径强制审查 |
-| pre-commit | 「代码风格基础」 | 提交前质量门禁 |
+| Conventional Commits | [CONTRIBUTING.md「提交信息规范」](../../CONTRIBUTING.md#提交信息规范) | 分支 type 与 commit type 对齐 |
+| PR 流程 | [CONTRIBUTING.md「Pull Request 流程」](../../CONTRIBUTING.md#pull-request-流程) | worktree 完成后进入 PR 阶段 |
+| Merge Queue + Squash | [CONTRIBUTING.md「合并策略」](../../CONTRIBUTING.md#合并策略) | 本节规定的合并方式 |
+| CODEOWNERS | [CONTRIBUTING.md「代码审查与合并」](../../CONTRIBUTING.md#代码审查与合并) | 关键路径强制审查 |
+| pre-commit | [CONTRIBUTING.md「代码风格基础」](../../CONTRIBUTING.md#代码风格基础) | 提交前质量门禁 |
 
 ---
 
