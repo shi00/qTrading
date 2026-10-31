@@ -686,11 +686,11 @@ review03（数据层与持久化，2026-09-02/03）发现：DAO 层读取方法�
 
 review03（数据层与持久化，2026-09-02/03）发现：`data/persistence/daos/screener_dao.py` 的 `screening_history` 相关查询使用 f-string 拼接列名与 `ORDER BY` 子句。经评审确认非注入风险（列名来源受控），但与 R4 参数化方向不一致，待迁移 SQLAlchemy Core 统一。
 
-**现状校准（2026-10-31 复核）**：选股/区间选股 SQL 已改为模块级静态模板（`_SCREENING_SQL_TEMPLATE` / `_SCREENING_SQL_RANGE_TEMPLATE`），可变点仅 `__CLOSE_COND__` / `__STOCK_ALIVE_CONDITION__` / `__DELISTING_FLAG__` 三个受控片段（代码内 review03-C7 注释回指）；`get_screening_history` / `get_history_records` / `get_learning_context*` 等已迁移 SQLAlchemy Core。剩余未迁移 Core 的 `screening_history` raw SQL 为：`get_history_tree`（`screener_dao.py:L359`，f-string 仅内嵌常量 `REVIEW_STATS_WINDOW_DAYS`，列名与 `ORDER BY` 均静态）、`get_pending_predictions`（`$1`~`$3` 参数化）、`load_history_records` 的 `ids_sql`（`$1` 参数化）——均无 f-string 拼列名/ORDER BY，非注入风险。
+**现状校准（2026-10-31 复核）**：选股/区间选股 SQL 已改为模块级静态模板（`_SCREENING_SQL_TEMPLATE` / `_SCREENING_SQL_RANGE_TEMPLATE`），可变点仅 `__CLOSE_COND__` / `__STOCK_ALIVE_CONDITION__` / `__DELISTING_FLAG__` 三个受控片段（代码内 review03-C7 注释回指）；`get_screening_history` / `get_history_records` / `get_learning_context*` 等已迁移 SQLAlchemy Core。剩余未迁移 Core 的 `screening_history` raw SQL 为：`get_history_tree`（`screener_dao.py:L359`，f-string 仅内嵌常量 `REVIEW_STATS_WINDOW_DAYS`，列名与 `ORDER BY` 均静态）、`get_pending_predictions`（`$1`~`$3` 参数化）、`_save_thinking` 的 `ids_sql`（`$1` 参数化）——均无 f-string 拼列名/ORDER BY，非注入风险。
 
 **期望的最终解法**
 
-将上述剩余 `screening_history` raw SQL（`get_history_tree` / `get_pending_predictions` / `load_history_records` 的 `ids_sql`）迁移 SQLAlchemy Core，或经 `text()` 常量承载，保持列名与 `ORDER BY` 静态。upgrade 触发条件：① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时。
+将上述剩余 `screening_history` raw SQL（`get_history_tree` / `get_pending_predictions` / `_save_thinking` 的 `ids_sql`）迁移 SQLAlchemy Core，或经 `text()` 常量承载，保持列名与 `ORDER BY` 静态。upgrade 触发条件：① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时。
 
 #### P3-REV03-DataDictionary-Columns：review03 C9：数据字典半数表 columns 为空（已于 #1100（2026-09-21）解决：列级声明移除，columns 改由 ORM 派生 + `test_no_empty_columns_fields` 守护）
 
