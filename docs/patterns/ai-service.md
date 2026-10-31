@@ -69,8 +69,8 @@
   - **CI 产线产物**（`finbert-train.yml`，ADR-0013）发布于 GitHub Release `finbert-gguf-v<model_version>`：`finbert2-news-f16.gguf`（f16 编码器，发布产物；Q8_0 量化因概率差判据必 FAIL 已于 2026-10-14 移除，定因见 `scripts/export_finbert_gguf.py` docstring）+ `head.npz`（分类头：`mode`/`labels`/`cw`/`cb`[/`pw`/`pb`]，格式正本 `load_head_npz`）+ `SHA256SUMS.txt`（前两者自校验凭证）；获取步骤见 [how-to.md「13. 获取新闻情绪模型产物」](../guides/how-to.md)。
   - **`tokenizer.json` 不随 Release 分发**：从 HF 基座仓库 `valuesimplex-ai-lab/FinBERT2-base`（固定 revision，见 Release note lineage 段）获取——微调不改变词表，基座分词器即最终分词器（N0-4：必须用此外部分词器文件，禁用 GGUF 内部分词）。
   - 本地离线重训产物仍归档 `ai_models/`（已被 `.gitignore` 忽略）。
-- **校验门禁**：CI 产线发布前自动运行 `scripts/verify_finbert_gguf.py --head`（N0-3 四判据：分词一致 / CLS 余弦 / 概率差<0.02 / 标签一致率≥99%；Gate 不过不发布），验证报告进 workflow artifact（schema `finbert-gguf-verification.v1`）；线下重训发布前手动运行同一脚本，报告留存 `ai_models/*.verify.json`（工程脚本清单见 `docs/guides/ci-cd.md`）。App 侧保存路径时再做轻量校验（GGUF 魔数 + `head.npz` 结构 + 分词器存在性，`AIBrainSettingsViewModel.save_ai_settings`）。
-- **接入方式（首次使用由用户提供文件）**：设置页「AI 大脑」情绪卡片三路径支持手输或文件选择器（GGUF/`.npz`/`.json`），保存即生效（`NewsSentimentScorer` 每次打分重读配置，stat 签名变化自动重载）；产物不随 App 下载/打包。
+- **校验门禁**：CI 产线发布前自动运行 `scripts/verify_finbert_gguf.py --head`（N0-3 四判据：分词一致 / CLS 余弦 / 概率差<0.02 / 标签一致率≥99%；Gate 不过不发布），验证报告进 workflow artifact（schema `finbert-gguf-verification.v1`）；线下重训发布前手动运行同一脚本，报告留存 `ai_models/*.verify.json`（工程脚本清单见 `docs/guides/ci-cd.md`）。App 侧在首次加载/打分时做轻量校验（GGUF 魔数 + `head.npz` 结构 + 分词器存在性；`NewsSentimentScorer._validate_input_files` 与 `load_head_npz`，校验不过整体返回 `None`）；模型连接表单保存仅校验三路径非空（`ui/viewmodels/model_connections_view_model.py::_validate_draft`）。
+- **接入方式（首次使用由用户提供文件）**：设置页「AI 大脑 → 模型管理」新建/编辑连接时选择 `gguf_sentiment` 适配器，表单提供编码模型/分类头/分词器三路径（手输 + 文件选择器，`ui/components/config_panels/model_connection_form.py`），保存即生效（`NewsSentimentScorer` 每次打分重读配置，stat 签名变化自动重载）；产物不随 App 下载/打包。
 - **来源边界**：模型文件来源与合规由用户承担（`tokenizer.json` 直连 HF 基座；Release 产物已过 CI 一致性 Gate，App 侧仅做魔数/结构轻量校验即使用，不构成对文件内容的信任）（已登记 [known-technical-debt.md](../debt/known-technical-debt.md)）。
 
 ## 完成判定（canonical 入口）
