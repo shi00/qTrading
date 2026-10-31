@@ -21,6 +21,8 @@ import logging
 import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import cached_property
+from typing import TYPE_CHECKING
 
 from data.constants import TUSHARE_POINT_TIERS
 from ui.viewmodels import Message
@@ -31,6 +33,9 @@ from utils.error_classifier import classify_error, get_error_message_key
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
+
+if TYPE_CHECKING:
+    from data.external.tushare_client import TushareClient
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +89,17 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
         self._init_mixin_fields()
         # 同步初始化 state（从 ConfigHandler 加载配置）
         self._load_config_to_state()
+
+    @cached_property
+    def _tushare_client(self) -> "TushareClient":
+        """缓存注册单例引用（M12-022），避免档位变更/验证重复进入 TushareClient.__new__。
+
+        保持惰性构造：TushareClient 需在事件循环线程实例化（经 ``_capture_loop`` 捕获
+        事件循环引用），首个访问点均位于 async 命令内，故不提前到 ``__init__``（R16）。
+        """
+        from data.external.tushare_client import TushareClient
+
+        return TushareClient()
 
     # --- Config loading ---
 
@@ -153,9 +169,7 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
                 self._show_error(Message("sys_tier_save_failed"))
                 return False
 
-            from data.external.tushare_client import TushareClient
-
-            client = TushareClient()
+            client = self._tushare_client
             await ThreadPoolManager().run_async(TaskType.IO, client.reload_rate_limiters)
             client.clear_capability_cache()
 
@@ -203,7 +217,7 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
         try:
             import tushare as ts
 
-            from data.external.tushare_client import _ASYNC_TIMEOUT_MULTIPLIER, TushareClient
+            from data.external.tushare_client import _ASYNC_TIMEOUT_MULTIPLIER
 
             # 显式传 token，避免依赖 tushare SDK 全局状态（~/tk.csv 或环境变量）
             timeout_val = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_tushare_timeout)
@@ -249,7 +263,7 @@ class TushareConfigPanelViewModel(ConfigPanelViewModelBase[TushareConfigState]):
             # set_token 会抛 RuntimeError("set_token() requires a running event loop")。
             # set_token_async 内部仅重建 pro_api 引用与限流器（无网络 IO，不违反 R16），
             # 与 bootstrap 的 _warmup_tushare_capabilities 同模式。
-            client = TushareClient()
+            client = self._tushare_client
             needs_probe = await client.set_token_async(token)
 
             if needs_probe:

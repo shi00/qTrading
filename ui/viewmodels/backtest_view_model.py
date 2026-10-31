@@ -15,6 +15,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
+from functools import cached_property
 from typing import Any, Literal
 
 from data.constants import DEFAULT_BENCHMARK_INDEX
@@ -466,6 +467,15 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         self._background_tasks: set = set()
         self._init_mixin_fields()  # F3-08: 初始化 mixin 字段 (锁/loop/disposed flag)
 
+    @cached_property
+    def _task_manager(self) -> TaskManager:
+        """缓存注册单例引用（M12-022），避免每实例重复进入 TaskManager.__new__。
+
+        单例为进程级资源、生命周期由 singleton registry 管理（VM dispose 不释放），
+        故每实例仅惰性获取一次即可（惰性而非 ``__init__`` 构造，保持既有测试 patch 时点语义）。
+        """
+        return TaskManager()
+
     def dispose(self):
         """清理资源：先取消运行中任务（防孤儿），再调 super().dispose() 统一清理。"""
         self._disposed = True  # F3-07: 业务短路（对齐 ScreenerVM），防 cancel_backtest 回调写状态
@@ -658,10 +668,10 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
                         progress=progress,
                         progress_message=message,
                     )
-                    TaskManager().update_progress(task_id, progress, message)
+                    self._task_manager.update_progress(task_id, progress, message)
 
                 def _cancel_check() -> bool:
-                    return TaskManager().is_cancelled(task_id)
+                    return self._task_manager.is_cancelled(task_id)
 
                 result = await self.service.run_backtest(
                     strategy_key=strategy_key,
@@ -799,7 +809,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         # Task 3.1: VM 不调 I18n.get; task name 改为 Message, View 渲染时翻译.
         # name_key 是 i18n key (策略名), 用 *_key params 约定传给 View.
         # 若 strategy_obj 不存在或缺 name_key, 回退到 strategy_key 字面值 (无翻译).
-        task_id = TaskManager().submit_task(
+        task_id = self._task_manager.submit_task(
             name=Message(
                 "task_name_backtest",
                 {"name_key": name_key or strategy_key, "fallback": strategy_key},
@@ -820,7 +830,7 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
 
     def cancel_backtest(self) -> None:
         if self._task_id:
-            TaskManager().cancel_task(self._task_id)
+            self._task_manager.cancel_task(self._task_id)
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_historical_results(

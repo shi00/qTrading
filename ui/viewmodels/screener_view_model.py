@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import uuid
+from functools import cached_property
 from types import MappingProxyType
 
 import pandas as pd
@@ -319,13 +320,22 @@ class ScreenerViewModel(
 
     # --- TaskManager Subscription ---
 
+    @cached_property
+    def _tm(self) -> TaskManager:
+        """缓存注册单例引用（M12-022），避免订阅/退订重复进入 TaskManager.__new__。
+
+        单例为进程级资源、生命周期由 singleton registry 管理（VM dispose 不释放），
+        故每实例仅惰性获取一次即可（惰性而非 ``__init__`` 构造，保持既有测试 patch 时点语义）。
+        """
+        return TaskManager()
+
     def subscribe_task_manager(self):
         """Subscribe to TaskManager for strategy task monitoring."""
-        TaskManager().subscribe(self._on_tasks_updated)
+        self._tm.subscribe(self._on_tasks_updated)
 
     def unsubscribe_task_manager(self):
         """Unsubscribe from TaskManager."""
-        TaskManager().unsubscribe(self._on_tasks_updated)
+        self._tm.unsubscribe(self._on_tasks_updated)
 
     def _on_tasks_updated(self, tasks: list):
         """TaskManager subscriber: detect strategy task completion and notify View."""

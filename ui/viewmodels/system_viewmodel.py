@@ -16,11 +16,15 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from functools import cached_property
+from typing import TYPE_CHECKING, Any
 
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
 from utils.sanitizers import DataSanitizer
+
+if TYPE_CHECKING:
+    from data.external.tushare_client import TushareClient
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +87,17 @@ class SystemViewModel(ObservableViewModelMixin[SystemState]):
         self._state: SystemState = SystemState()
         self._init_mixin_fields()
 
+    @cached_property
+    def _tushare_client(self) -> TushareClient:
+        """缓存注册单例引用（M12-022），避免各 pass-through 方法重复进入 TushareClient.__new__。
+
+        保持函数内局部 import：TushareClient 构造较重（重建 rate limiter、捕获事件循环），
+        仅在首次访问时构造，不提前到 ``__init__``（R16）。
+        """
+        from data.external.tushare_client import TushareClient
+
+        return TushareClient()
+
     def dispose(self):
         """清理资源。"""
         super().dispose()
@@ -94,15 +109,11 @@ class SystemViewModel(ObservableViewModelMixin[SystemState]):
 
     def get_capability_cache(self) -> dict[str, bool | None]:
         """返回 capability cache 副本（供 TierApiPanel 挂载时拉取最新缓存）。"""
-        from data.external.tushare_client import TushareClient
-
-        return TushareClient().get_capability_cache()
+        return self._tushare_client.get_capability_cache()
 
     def get_last_probe_time(self) -> datetime | None:
         """返回上次 probe 完成时间（pass-through 到 TushareClient，避免 View 直接访问 service 层）。"""
-        from data.external.tushare_client import TushareClient
-
-        return TushareClient().get_last_probe_time()
+        return self._tushare_client.get_last_probe_time()
 
     def get_tier_options(self) -> tuple[str, ...]:
         """获取 Tushare 积分档位元组 (Task 5.1: 从 View 迁入, 内聚到 VM).
@@ -120,9 +131,7 @@ class SystemViewModel(ObservableViewModelMixin[SystemState]):
         View 通过本方法消费 ``TushareClient.is_independent_purchase``，不再直接 import
         ``data`` 业务对象 (CLAUDE.md §3.2 MVVM 契约)。
         """
-        from data.external.tushare_client import TushareClient
-
-        return TushareClient().is_independent_purchase(api_name)
+        return self._tushare_client.is_independent_purchase(api_name)
 
     def get_tier_apis(self, tier: str) -> list[str]:
         """获取档位下的 API 列表 (Task 5.1: 从 View 迁入, 内聚到 VM).
@@ -130,9 +139,7 @@ class SystemViewModel(ObservableViewModelMixin[SystemState]):
         View 通过本方法消费 ``TushareClient.get_tier_apis``，不再直接 import
         ``data`` 业务对象 (CLAUDE.md §3.2 MVVM 契约)。
         """
-        from data.external.tushare_client import TushareClient
-
-        return list(TushareClient().get_tier_apis(tier))
+        return list(self._tushare_client.get_tier_apis(tier))
 
     async def on_tier_changed(
         self,
@@ -156,7 +163,6 @@ class SystemViewModel(ObservableViewModelMixin[SystemState]):
         Returns:
             probe 结果 dict（供测试断言）；正常路径下通过 state.probe_result 推送给 View。
         """
-        from data.external.tushare_client import TushareClient
         from utils.thread_pool import TaskType, ThreadPoolManager
 
         self._set_state(probe_in_progress=True)
@@ -196,7 +202,7 @@ class SystemViewModel(ObservableViewModelMixin[SystemState]):
 
             # 2. 重建 limiter（reload_rate_limiters 内部持 threading.Lock 重建 TokenBucket，
             #    属短同步操作，但同样投递到 io_pool 避免在事件循环内持锁）
-            client = TushareClient()
+            client = self._tushare_client
             await ThreadPoolManager().run_async(TaskType.IO, client.reload_rate_limiters)
 
             # 3. 清除旧 probe 结果（避免旧 False 阻塞升级后的 API；纯内存操作，可直接调用）
@@ -231,11 +237,9 @@ class SystemViewModel(ObservableViewModelMixin[SystemState]):
 
         与 ``on_tier_changed`` 复用 ``_emit_probe_result`` 的结果分类逻辑。
         """
-        from data.external.tushare_client import TushareClient
-
         self._set_state(probe_in_progress=True)
         try:
-            client = TushareClient()
+            client = self._tushare_client
             results = await client.probe_api_capabilities(progress_callback=progress_callback)
             tier = ConfigHandler.get_tushare_point_tier()
             return self._emit_probe_result(tier, results)
