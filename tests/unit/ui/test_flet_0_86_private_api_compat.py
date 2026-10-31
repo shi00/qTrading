@@ -87,6 +87,27 @@ def test_control_page_fget_accessible() -> None:
     assert params[0].name == "self"
 
 
+def test_v1_control_page_is_read_only() -> None:
+    """V1 原生 ``ft.Control.page`` 只读；出现 setter 即兼容垫片回归。"""
+    page_attr = getattr(ft.Control, "page", None)
+    assert isinstance(page_attr, property), "ft.Control.page 不再是 property"
+    assert page_attr.fset is None, "ft.Control.page 被重新注入 setter（疑似兼容垫片回归）"
+
+
+def test_v1_control_update_raises_when_unmounted() -> None:
+    """V1 原生未挂载 ``Control.update()`` 抛 RuntimeError，而非 V0 静默返回。"""
+    ctrl = ft.Container()
+    with pytest.raises(RuntimeError):
+        ctrl.update()
+
+
+def test_v1_control_page_raises_when_unmounted() -> None:
+    """V1 原生未挂载读取 ``Control.page`` 抛 RuntimeError，而非返回 None。"""
+    ctrl = ft.Container()
+    with pytest.raises(RuntimeError):
+        _ = ctrl.page
+
+
 def test_pubsub_client_class_and_init_signature() -> None:
     """``flet.pubsub.pubsub_client.PubSubClient`` 类与 ``__init__`` 签名兼容。
 
