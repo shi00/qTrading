@@ -1469,6 +1469,23 @@ class TestGenerateSignals:
         assert signals.is_empty() or signals.height == 1
 
     @pytest.mark.asyncio
+    async def test_signal_executes_on_next_trade_date(self):
+        """R24: 信号在当日生成、下一交易日执行（T+1），禁止信号日即执行（前视偏差）。"""
+        engine = self._make_engine()
+        engine.data_provider.build_context = AsyncMock(return_value={})
+        engine.strategy_adapter.generate_signal = AsyncMock(return_value=pl.DataFrame())
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+
+        await engine._generate_signals(strategy=MagicMock(), params={}, trade_dates=trade_dates)
+
+        engine.data_provider.build_context.assert_awaited_once_with(date(2024, 1, 2), disable_ai=True)
+        generate_signal_mock = engine.strategy_adapter.generate_signal
+        assert generate_signal_mock.await_args is not None
+        kwargs = generate_signal_mock.await_args.kwargs
+        assert kwargs["signal_date"] == date(2024, 1, 2)
+        assert kwargs["execution_date"] == date(2024, 1, 3)
+
+    @pytest.mark.asyncio
     async def test_strategy_exception_with_fail_fast(self):
         config = BacktestConfig(
             start_date=date(2024, 1, 1),
@@ -2453,6 +2470,8 @@ class TestVectorizationEquivalence:
         buy_trades = trades.filter(pl.col("action") == "buy")
         assert buy_trades.height == 1
         assert buy_trades["trade_date"][0] == date(2024, 1, 3)
+        # R24: 撮合价必须取执行日（T+1）开盘价 10.5，而非信号日价格 10.0（前视偏差回归守卫）。
+        assert float(buy_trades["price"][0]) == pytest.approx(10.5)
 
     def test_calc_ic_series_multi_date_matches_expected(self):
         """_calc_ic_series with multiple signal dates produces valid IC values
