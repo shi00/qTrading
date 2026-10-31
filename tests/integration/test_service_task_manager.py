@@ -12,7 +12,7 @@ Tests for TaskManager service.
 import asyncio
 import datetime
 import threading
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -288,7 +288,10 @@ class TestTaskManagerClearFinished:
         task2 = AppTask(id="task2", name="Completed", status=TaskStatus.COMPLETED)
         task3 = AppTask(id="task3", name="Failed", status=TaskStatus.FAILED)
         manager._tasks = {"task1": task1, "task2": task2, "task3": task3}
-        manager._clear_finished_impl()
+        with patch.object(manager, "_schedule_coro", side_effect=lambda coro, **_: coro.close()) as mock_schedule:
+            manager._clear_finished_impl()
+        # DELETE 协程经 _schedule_coro 调度；此处替换为立即 close，避免未 await 协程泄漏告警。
+        mock_schedule.assert_called_once()
         assert "task1" in manager._tasks
         assert "task2" not in manager._tasks
         assert "task3" not in manager._tasks

@@ -548,10 +548,15 @@ class TestNightlyPredictionLogicClosure:
             )
 
     @pytest.mark.asyncio
-    async def test_prediction_calendar_fails_weekday(self):
+    async def test_prediction_calendar_fails_uses_offline_fallback(self):
+        """日历查询失败时退回离线日历三态判定（D7-4）：离线确认为交易日则提交任务。
+
+        patch OfflineCalendar 而非依赖真实离线日历数据/当前年份，避免环境数据依赖。
+        """
         svc = _FakeSvc()
         job, _ = _make_job(svc)
         mock_tm = MagicMock()
+        today = date(2024, 6, 12)
         # D7-3/MINOR-01: 前置条件为当日同步完整成功（与 mock_now 同源）。
         svc._last_update_date = "20240612"
         with (
@@ -559,15 +564,19 @@ class TestNightlyPredictionLogicClosure:
             patch("services.scheduled_jobs.nightly_prediction.DataProcessor") as mock_dp,
             patch("services.scheduled_jobs.nightly_prediction.get_now") as mock_now,
             patch("services.scheduled_jobs.nightly_prediction.TaskManager", return_value=mock_tm),
+            patch("services.scheduled_jobs.nightly_prediction.OfflineCalendar") as mock_offline,
         ):
             mock_ch.is_auto_update_enabled.return_value = True
             mock_dp_instance = MagicMock()
             mock_dp_instance.trade_calendar = MagicMock()
             mock_dp_instance.trade_calendar.is_trading_day = AsyncMock(side_effect=Exception("cal err"))
             mock_dp.return_value = mock_dp_instance
-            mock_now.return_value = datetime(2024, 6, 12, 20, 30)
+            mock_now.return_value.date.return_value = today
+            mock_offline.is_trading_day.return_value = True
             await job(svc)
-            # 强断言：交易日检查失败（工作日）仍提交任务
+            # 强断言：日历查询失败退回离线日历（True）后仍提交任务，且提交契约成立
+            mock_offline.is_trading_day.assert_called_once_with(today)
             submit_kwargs = mock_tm.submit_task.call_args.kwargs
             assert submit_kwargs.get("unique_key") == "nightly_prediction"
+            assert submit_kwargs.get("cancellable") is False
             assert callable(submit_kwargs.get("coroutine_factory"))
