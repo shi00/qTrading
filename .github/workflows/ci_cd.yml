@@ -211,6 +211,13 @@ jobs:
           restore-keys: ruff-${{ runner.os }}-
 
       - name: Run pre-commit hooks
+        # CI 的 --all-files 会把全仓 .py / test_*.py 传给 pass_filenames hook，
+        # 使 pyright-changed / weak-assertion-changed 退化为全量扫描：
+        # 前者实测 74.5s（run 41202057746），后者 7.6s，与下方独立的全量 pyright /
+        # weak assertions step 完全重复。此处跳过两个增量 hook，保留本地提交前的
+        # 秒级反馈语义；CI 的全量校验由后续 step 承担，门禁强度不降低。
+        env:
+          SKIP: pyright-changed,weak-assertion-changed
         run: pre-commit run --all-files
 
       - name: Verify Version Consistency
@@ -422,7 +429,11 @@ jobs:
           STRICT_SCHEMA_GATE: "1"
         run: |
           set -e
-          python -m pytest tests/unit/ -v --tb=short --cov --cov-report=term-missing --cov-report=xml --cov-report=json --junitxml=junit-unit.xml
+          # 污染探测（3 次串行排列，约 2 分钟）不随 PR 执行：改由 nightly flaky-detection 的专用 step 承担，
+          # 避免每次 PR 重复付出该成本（同时 xdist 多进程反而掩盖跨测试污染，见该测试模块文档）。
+          python -m pytest tests/unit/ -v --tb=short \
+            --deselect tests/unit/test_pollution_detection.py::test_no_cross_test_pollution_in_core_subset \
+            --cov --cov-report=term-missing --cov-report=xml --cov-report=json --junitxml=junit-unit.xml
 
       - name: Run Integration Tests
         timeout-minutes: 10
@@ -545,15 +556,16 @@ jobs:
               tests/e2e/test_onboarding_embedded.py
               tests/e2e/test_onboarding_embedded_real.py
               tests/e2e/test_onboarding_wizard.py
+              tests/e2e/test_production_mount.py
           - group: scenarios
             paths: >-
               tests/e2e/test_news_risk.py
-              tests/e2e/test_production_mount.py
               tests/e2e/test_r01_dialog_height.py
               tests/e2e/test_sidecar_real_smoke.py
     # 拆分前单 job 串行耗时 >45 分钟（run 30183636080 在 45 分钟 timeout 被取消）；
-    # 2026-10-30 run 41034661213 实测 4 组 wall clock 分别 4.6 / 10.6 / 5.2 / 6.9 分钟，
-    # 故上限收紧到 30 分钟（最慢组余量 ~19 分钟 / ~65%），避免异常挂起长期占用 runner。
+    # 2026-10-31 run 41202057746 实测 5 腿 pytest 用时 93~279s，已按此把
+    # test_production_mount.py 从 scenarios 移入 onboarding 以平衡尾部；
+    # 上限收紧到 30 分钟（最慢腿余量 >20 分钟），避免异常挂起长期占用 runner。
     timeout-minutes: 30
     permissions:
       contents: read
@@ -603,7 +615,10 @@ jobs:
           # FastAPI.__init__; fastapi 0.145.0+ crashes Flet Web startup. See
           # docs/flet/upgrade-checklist.md section 1.1.
           uv pip install --system flet-web==1.0.5 "fastapi<0.145"
-          pip install playwright pytest-playwright
+          # playwright 已随 requirements-optional.txt 由上面的 uv 安装；此处只需补 pytest-playwright，
+          # 走 uv 缓存，避免每腿再用裸 pip 重复解析/下载 playwright。固定版本保证 5 腿一致；
+          # 迁入 pyproject 会触发 requirements 全量重锁（索引漂移），单独 PR 处理。
+          uv pip install --system pytest-playwright==0.8.0
 
       - name: Get Playwright Version
         shell: bash
@@ -863,7 +878,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p D:/tmp
-          python -m pytest tests/unit/ -v --tb=short --junitxml=junit-unit.xml
+          python -m pytest tests/unit/ -v --tb=short \
+            --deselect tests/unit/test_pollution_detection.py::test_no_cross_test_pollution_in_core_subset \
+            --junitxml=junit-unit.xml
 
       - name: Validate installer smoke test scripts syntax (Phase 5)
         shell: pwsh
@@ -1195,7 +1212,7 @@ jobs:
           # FastAPI.__init__; fastapi 0.145.0+ crashes Flet Web startup. See
           # docs/flet/upgrade-checklist.md section 1.1.
           uv pip install --system flet-web==1.0.5 "fastapi<0.145"
-          pip install playwright pytest-playwright
+          uv pip install --system pytest-playwright==0.8.0
 
       - name: Free disk space
         shell: pwsh
@@ -1425,7 +1442,7 @@ jobs:
           # FastAPI.__init__; fastapi 0.145.0+ crashes Flet Web startup. See
           # docs/flet/upgrade-checklist.md section 1.1.
           uv pip install --system flet-web==1.0.5 "fastapi<0.145"
-          pip install playwright pytest-playwright
+          uv pip install --system pytest-playwright==0.8.0
 
       - name: Free disk space
         shell: pwsh
@@ -2431,8 +2448,22 @@ jobs:
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
 
+      # 污染探测：3 次不同文件顺序的串行重跑（3 次合计约 2 分钟），成本高且 xdist 会掩盖问题，
+      # 故只在此 nightly job 跑一次；PR 单测已通过 --deselect 排除。放在 flaky 检测之前，
+      # 避免 detect_flaky 以退出码 1（检出 flaky）时跳过本 step。
+      - name: Pollution probe (order shuffle)
+        timeout-minutes: 12
+        # pyproject addopts 带 --timeout=300（per-test 上限），而本 step 内含 3 次串行重跑，
+        # 合计可能超过 300s，故显式关闭 per-test timeout，由 step 级 timeout-minutes 兜底。
+        run: python -m pytest tests/unit/test_pollution_detection.py -v --tb=short --timeout=0
+
       - name: Detect flaky tests (advisory)
-        run: python scripts/detect_flaky.py
+        # job 级 continue-on-error 只改 job 结论、不改变 step 顺序；用 always()
+        # 确保污染探测失败时仍产出 flaky 信号。
+        if: always()
+        run: >-
+          python scripts/detect_flaky.py --deselect
+          tests/unit/test_pollution_detection.py::test_no_cross_test_pollution_in_core_subset
 
   # 聚合门禁：main 分支的 required status check（与 docs-ci.yml 的 Docs Consistency Check 并列）。
   # 独立的聚合 job 而非直接 required 各矩阵 job 的原因：

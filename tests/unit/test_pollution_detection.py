@@ -12,7 +12,8 @@
 3. 比较各次运行的 pass/fail 结果
 4. 若某测试在某次运行中通过、在另一次运行中失败，判定为污染
 
-标注 @pytest.mark.slow 因为多次跑耗时。
+标注 @pytest.mark.slow 因为多次跑耗时。CI 中仅在 nightly flaky-detection job 的专用 step
+执行一次；PR 单测与 10 轮 flaky 循环均以 --deselect 排除（详见 docs/guides/ci-cd.md）。
 
 技术债说明（§7.2）：
 function scope 已消除 loop-local 缓存跨测试泄漏的根因。
@@ -22,6 +23,7 @@ function scope 已消除 loop-local 缓存跨测试泄漏的根因。
 - 本测试验证实际多测试场景下无其他类型的状态污染
 """
 
+import os
 import random
 import re
 import subprocess
@@ -60,7 +62,13 @@ _TEST_RESULT_PATTERN = re.compile(r"^(tests/\S+::\S+)\s+(PASSED|FAILED|ERROR|SKI
 def _run_pytest_with_order(test_files: list[str]) -> subprocess.CompletedProcess[str]:
     """以指定文件顺序运行 pytest，返回完整结果。
 
-    使用 -p no:randomly 显式禁用随机排序插件，确保测试按指定文件顺序执行。
+    - 使用 -p no:randomly 显式禁用随机排序插件，确保测试按指定文件顺序执行。
+    - 使用 -n 0 覆盖 pyproject addopts 中的 ``-n auto``，强制串行执行：
+      ① xdist 会把文件分发到独立 worker 进程，各进程互相隔离，反而掩盖
+      跨测试状态污染，与探测目标相悖；② xdist 的 ``-v`` 输出为
+      ``[gwN] PASSED <nodeid>``，与本模块解析的 ``<nodeid> PASSED`` 格式不符，
+      会导致解析为空并 skip。
+    - 使用 --color=no 避免 CI 环境变量注入 ANSI 转义符污染解析。
     """
     cmd = [
         sys.executable,
@@ -72,6 +80,9 @@ def _run_pytest_with_order(test_files: list[str]) -> subprocess.CompletedProcess
         "--tb=short",
         "-p",
         "no:randomly",
+        "-n",
+        "0",
+        "--color=no",
     ]
     return subprocess.run(
         cmd,
@@ -98,11 +109,51 @@ def _parse_test_results(stdout: str) -> dict[str, str]:
     return results
 
 
+def _abort(message: str) -> None:
+    """CI 中解析/启动异常应 fail，避免守护测试静默变绿；本地开发仍 skip 以便快速迭代。"""
+    if os.environ.get("CI"):
+        pytest.fail(message, pytrace=False)
+    pytest.skip(message)
+
+
 def test_core_subset_files_exist():
     """快速检查：核心子集中的所有文件都存在（不标记 slow，快速验证）。"""
     for rel_path in CORE_SUBSET_FILES:
         full_path = PROJECT_ROOT / rel_path
         assert full_path.exists(), f"核心子集文件不存在: {rel_path}"
+
+
+def test_parse_test_results_parses_serial_output():
+    """守护：-n 0 串行输出必须可解析；回归到 xdist `[gwN]` 格式时会解析为空并 skip。"""
+    stdout = (
+        "tests/unit/test_a.py::test_pass PASSED   [ 50%]\n"
+        "tests/unit/test_b.py::TestX::test_fail FAILED   [100%]\n"
+        "[gw0] [ 50%] PASSED tests/unit/test_a.py::test_pass\n"
+    )
+    assert _parse_test_results(stdout) == {
+        "tests/unit/test_a.py::test_pass": "PASSED",
+        "tests/unit/test_b.py::TestX::test_fail": "FAILED",
+    }
+
+
+def test_run_command_forces_serial_mode(monkeypatch):
+    """守护：子进程命令必须含 -n 0，覆盖 addopts 的 -n auto（xdist 会掩盖跨测试污染）。"""
+    captured: dict[str, list[str]] = {}
+
+    class _Result:
+        stdout = ""
+        stderr = ""
+        returncode = 0
+
+    def _fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return _Result()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    _run_pytest_with_order(CORE_SUBSET_FILES)
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("-n") + 1] == "0"
 
 
 @pytest.mark.slow
@@ -123,14 +174,14 @@ def test_no_cross_test_pollution_in_core_subset():
         try:
             result = _run_pytest_with_order(shuffled_files)
         except subprocess.TimeoutExpired:
-            pytest.skip(f"第 {run_idx + 1} 次运行超时（>{PER_RUN_TIMEOUT}s），跳过污染探测")
+            _abort(f"第 {run_idx + 1} 次运行超时（>{PER_RUN_TIMEOUT}s）")
         except OSError as e:
-            pytest.skip(f"第 {run_idx + 1} 次运行无法启动 subprocess: {e}")
+            _abort(f"第 {run_idx + 1} 次运行无法启动 subprocess: {e}")
 
         test_results = _parse_test_results(result.stdout)
         if not test_results:
             # 解析失败或无输出，可能是收集错误
-            pytest.skip(
+            _abort(
                 f"第 {run_idx + 1} 次运行未解析到测试结果（可能收集错误）。\n"
                 f"stdout 片段: {result.stdout[:500]}\nstderr 片段: {result.stderr[:500]}"
             )
