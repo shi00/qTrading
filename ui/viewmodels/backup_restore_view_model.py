@@ -3,7 +3,8 @@
 提供数据库备份/恢复命令:
 - "手动备份" (start_backup): 调用 ``EmbeddedPgMaintenanceService.dump(output_path)``
 - "恢复向导" (start_restore_wizard → confirm_restore): 引导离线恢复流程
-  - Step 1 (start_restore_wizard): 设置 restore_path + confirm_state="pending"
+  - Step 1 (start_restore_wizard): 校验 pg_dump custom-format 头 (``PGDMP``),
+    通过后设置 restore_path + restore_archive_info + confirm_state="pending"
   - Step 2 (confirm_restore): confirm_state="offline_guidance" + 显示离线恢复指引消息
     (D36: UI 不直接执行 restore, 因为 §13.3 PGDATA 级操作必须持维护锁,
      qTrading 运行中调用 sidecar restore 会因锁冲突失败 exit 50.
@@ -38,6 +39,47 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# pg_dump custom-format 归档头: 5 字节 ASCII magic "PGDMP" +
+# vmaj/vmin/vrev 三字节版本号 (至少 8 字节, 不含后续 TOC 偏移等字段)
+_PGDMP_MAGIC = b"PGDMP"
+_PGDMP_HEADER_MIN_BYTES = 8
+
+
+class _InvalidBackupError(Exception):
+    """备份文件头校验失败 (携带 i18n key, 供 VM 转译为 Message)."""
+
+    def __init__(self, message_key: str) -> None:
+        super().__init__(message_key)
+        self.message_key = message_key
+
+
+@dataclass(frozen=True)
+class RestoreArchiveInfo:
+    """pg_dump custom-format 备份的只读元信息 (供恢复向导 pending 态展示)."""
+
+    file_size: int
+    archive_version: str
+
+
+def _read_archive_info(path: Path) -> RestoreArchiveInfo:
+    """读取 pg_dump custom-format 备份头, 返回文件大小 + 归档版本.
+
+    仅读取前 8 字节 (magic + 版本号), 不解析 TOC, 避免一次读入大备份文件.
+
+    Raises:
+        _InvalidBackupError: 空/截断文件或 magic 不匹配 (message_key 区分原因)
+        OSError: 文件读取失败 (权限/IO 等)
+    """
+    file_size = path.stat().st_size
+    with path.open("rb") as fh:
+        header = fh.read(_PGDMP_HEADER_MIN_BYTES)
+    if file_size == 0 or len(header) < _PGDMP_HEADER_MIN_BYTES:
+        raise _InvalidBackupError("restore_file_invalid")
+    if header[: len(_PGDMP_MAGIC)] != _PGDMP_MAGIC:
+        raise _InvalidBackupError("restore_invalid_format")
+    archive_version = f"{header[5]}.{header[6]}"
+    return RestoreArchiveInfo(file_size=file_size, archive_version=archive_version)
+
 
 @dataclass(frozen=True)
 class BackupRestoreState:
@@ -56,6 +98,7 @@ class BackupRestoreState:
     is_backing_up: bool = False
     backup_path: str | None = None
     restore_path: str | None = None
+    restore_archive_info: RestoreArchiveInfo | None = None
     progress_message: Message | None = None
     error_message: Message | None = None
     confirm_state: str = "idle"
@@ -144,24 +187,57 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
             )
 
     async def start_restore_wizard(self, input_path: Path) -> None:
-        """恢复向导 Step 1: 设置 restore_path + confirm_state="pending".
+        """恢复向导 Step 1: 校验备份文件头后设置 restore_path + confirm_state="pending".
 
-        - restore 文件存在性校验: 不存在时直接设 error_message, 不进入 pending
+        - 路径必须是普通文件 (不存在/目录/读取失败时设 error_message, 不进入 pending)
+        - 校验 pg_dump custom-format magic header ``PGDMP``:
+          空/截断文件与非法格式分别给出明确错误, 均不进入 pending
+        - 校验通过时记录文件大小 + archive 版本, 供 pending 态展示元信息
         - 清空之前的 error_message
         """
-        if not input_path.exists():  # noqa: ASYNC240  # restore 前一次性存在性校验（非交互热路径）
+        if not input_path.is_file():  # noqa: ASYNC240  # restore 前一次性类型探测（头读取前，非交互热路径）
             logger.warning(
-                "[BackupRestoreVM] restore file not found: %s",
+                "[BackupRestoreVM] restore path is not a file: %s",
                 DataSanitizer.sanitize_error(str(input_path)),  # R9: 路径可能含用户名等敏感信息
             )
             self._set_state(
                 error_message=Message("restore_failed"),
                 confirm_state="idle",
                 restore_path=None,
+                restore_archive_info=None,
+            )
+            return
+        try:
+            archive_info = _read_archive_info(input_path)
+        except _InvalidBackupError as exc:
+            logger.warning(
+                "[BackupRestoreVM] invalid backup file: %s (%s)",
+                DataSanitizer.sanitize_error(str(input_path)),  # R9: 路径可能含用户名等敏感信息
+                exc.message_key,
+            )
+            self._set_state(
+                error_message=Message(exc.message_key),
+                confirm_state="idle",
+                restore_path=None,
+                restore_archive_info=None,
+            )
+            return
+        except OSError as exc:
+            logger.warning(
+                "[BackupRestoreVM] backup file unreadable: %s (%s)",
+                DataSanitizer.sanitize_error(str(input_path)),  # R9: 路径可能含用户名等敏感信息
+                DataSanitizer.sanitize_error(exc),
+            )
+            self._set_state(
+                error_message=Message("restore_failed"),
+                confirm_state="idle",
+                restore_path=None,
+                restore_archive_info=None,
             )
             return
         self._set_state(
             restore_path=str(input_path),
+            restore_archive_info=archive_info,
             confirm_state="pending",
             error_message=None,
         )
@@ -212,6 +288,7 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
         self._set_state(
             confirm_state="idle",
             restore_path=None,
+            restore_archive_info=None,
             progress_message=None,
         )
 
@@ -229,5 +306,6 @@ class BackupRestoreViewModel(ObservableViewModelMixin[BackupRestoreState]):
         self._set_state(
             confirm_state="cancelled",
             restore_path=None,
+            restore_archive_info=None,
             progress_message=None,
         )

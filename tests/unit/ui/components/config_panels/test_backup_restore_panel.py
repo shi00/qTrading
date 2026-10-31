@@ -34,7 +34,7 @@ from tests.unit.ui.component_renderer import (
 )
 from ui.components.config_panels import backup_restore_panel as panel_module
 from ui.components.config_panels.backup_restore_panel import BackupRestorePanel
-from ui.viewmodels.backup_restore_view_model import BackupRestoreState
+from ui.viewmodels.backup_restore_view_model import BackupRestoreState, RestoreArchiveInfo
 
 pytestmark = pytest.mark.unit
 
@@ -261,6 +261,22 @@ class TestRenderMessage:
             result = panel_module._render_message(msg)
         assert result == "translated:backup_success"
         mock_i18n.get.assert_called_once_with("backup_success", path="/tmp/backup.dump")
+
+
+class TestFormatFileSize:
+    """_format_file_size 纯函数测试 (备份元信息展示)."""
+
+    def test_bytes(self) -> None:
+        assert panel_module._format_file_size(512) == "512 B"
+
+    def test_kilobytes(self) -> None:
+        assert panel_module._format_file_size(2048) == "2.0 KB"
+
+    def test_megabytes(self) -> None:
+        assert panel_module._format_file_size(5 * 1024 * 1024) == "5.0 MB"
+
+    def test_gigabytes(self) -> None:
+        assert panel_module._format_file_size(2 * 1024 * 1024 * 1024) == "2.0 GB"
 
 
 class TestGenerateDefaultBackupPath:
@@ -493,6 +509,7 @@ def _render_panel_with_state(
     state: BackupRestoreState,
     *,
     page: FakePage | None = None,
+    i18n_get: Any | None = None,
 ) -> tuple[Any, FakePage, Any, Any]:
     """用自定义 state 渲染 BackupRestorePanel (mock use_viewmodel 返回 state)."""
     if page is None:
@@ -502,7 +519,7 @@ def _render_panel_with_state(
 
     with contextlib.ExitStack() as stack:
         mock_i18n = stack.enter_context(patch.object(panel_module, "I18n"))
-        mock_i18n.get.side_effect = lambda key, **kw: key
+        mock_i18n.get.side_effect = i18n_get or (lambda key, **kw: key)
         stack.enter_context(patch.object(panel_module, "AppColors"))
         mock_styles = stack.enter_context(patch.object(panel_module, "AppStyles"))
         from ui.theme import AppStyles as _RealAppStyles
@@ -544,6 +561,39 @@ class TestBackupRestorePanelStateRendering:
         assert "restore_step2_confirm" in text_values
         assert "restore_confirm_title" in text_values
         assert "restore_confirm_message" in text_values
+
+    def test_renders_archive_metadata_when_pending(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """confirm_state=pending 且 restore_archive_info 存在时渲染备份元信息."""
+        state = BackupRestoreState(
+            confirm_state="pending",
+            restore_archive_info=RestoreArchiveInfo(file_size=1234567, archive_version="1.15"),
+        )
+        _, _, result, _ = _render_panel_with_state(state)
+        text_values = [getattr(c, "value", None) for c in _walk_controls(result) if isinstance(c, ft.Text)]
+        assert "restore_archive_info" in text_values
+
+    def test_archive_metadata_uses_size_and_version_params(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """元信息文案参数包含格式化文件大小 + archive 版本."""
+        captured: dict[str, str] = {}
+
+        def _capture(key: str, **kw: Any) -> str:
+            if key == "restore_archive_info":
+                captured.update(kw)
+            return key
+
+        state = BackupRestoreState(
+            confirm_state="pending",
+            restore_archive_info=RestoreArchiveInfo(file_size=5 * 1024 * 1024, archive_version="1.15"),
+        )
+        _render_panel_with_state(state, i18n_get=_capture)
+        assert captured == {"size": "5.0 MB", "version": "1.15"}
+
+    def test_no_archive_metadata_without_info(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """restore_archive_info=None 时不渲染元信息 (缺失不伪装)."""
+        state = BackupRestoreState(confirm_state="pending")
+        _, _, result, _ = _render_panel_with_state(state)
+        text_values = [getattr(c, "value", None) for c in _walk_controls(result) if isinstance(c, ft.Text)]
+        assert "restore_archive_info" not in text_values
 
     def test_renders_offline_guidance_when_confirm_offline_guidance(
         self, mock_i18n_state, mock_app_colors_state
