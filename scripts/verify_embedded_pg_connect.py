@@ -151,7 +151,9 @@ def step_dump_restore(install_dir: Path, url: str, work_dir: Path) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    # 固定 prog：Python 3.14 起 argparse 对 `python -m` 调用默认展示
+    # `python -m scripts.verify_embedded_pg_connect`，显式指定使两路运行模式 usage 一致
+    parser = argparse.ArgumentParser(prog="verify_embedded_pg_connect.py")
     parser.add_argument("--sidecar", required=True, type=Path)
     parser.add_argument("--work-dir", required=True, type=Path)
     args = parser.parse_args()

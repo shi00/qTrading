@@ -60,7 +60,9 @@ def test_module_mode_help_from_repo_root() -> None:
     """模块模式（仓库根 cwd）不依赖 sys.path 注入即可运行。"""
     proc = _run_help(["-m", "scripts.verify_embedded_pg_connect"], cwd=ROOT)
     assert proc.returncode == 0, proc.stderr
-    assert "usage: verify_embedded_pg_connect.py" in proc.stdout
+    # 仅校验脚本名：Python 3.14 起 `-m` 调用的默认 prog 为 `python -m <module>`，
+    # 不再以脚本文件名开头（脚本已显式 prog，此处避免断言绑定解释器版本行为）
+    assert "verify_embedded_pg_connect" in proc.stdout
 
 
 def test_script_mode_help_from_outside_repo_root(tmp_path: Path) -> None:
