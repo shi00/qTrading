@@ -7,7 +7,7 @@ import asyncio
 import datetime
 import threading
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 
@@ -794,13 +794,26 @@ class TestDataProcessor(unittest.TestCase):
             datetime.date(2023, 1, 4),
         }
         self.mock_cache.get_cached_dates_for_table = AsyncMock(return_value=cached_dates)
+        # 生产侧该协程返回 dict；AsyncMock 默认返回 AsyncMock 会使 .items()/.get() 生成未 await 协程（RuntimeWarning）。
+        # 已缓存日期返回达标质量分，保持"跳过断点续传已完成日期、仅补 3 天"的既有断言语义。
+        self.mock_cache.get_bulk_sync_quality_scores = AsyncMock(
+            return_value={
+                datetime.date(2023, 1, 5): {"score": 100},
+                datetime.date(2023, 1, 4): {"score": 100},
+            },
+        )
 
         historical_strategy = self.processor.strategies["historical"]
-        with patch.object(
-            historical_strategy,
-            "sync_daily_market_snapshot",
-            new_callable=AsyncMock,
-        ) as mock_sync:
+        # engine 为 MagicMock 时 get_app_state 的 async CM 会返回 AsyncMock，其 fetchone() 同步调用
+        # 会生成未 await 协程（RuntimeWarning）；水位读取与本用例断点续传语义无关，直接打桩。
+        with (
+            patch.object(
+                historical_strategy,
+                "sync_daily_market_snapshot",
+                new_callable=AsyncMock,
+            ) as mock_sync,
+            patch("data.sync.historical.get_app_state", new=AsyncMock(return_value=None)),
+        ):
             await self.processor.sync_historical_data(days=days)
 
             self.assertEqual(mock_sync.call_count, 3)
@@ -1050,7 +1063,8 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_cancel_propagation(self):
         """Test cancel propagation to strategies"""
         for strategy in self.processor.strategies.values():
-            strategy.cancel = AsyncMock()
+            # 生产侧 strategy.cancel() 为同步调用，用 AsyncMock 会生成未 await 协程（RuntimeWarning）
+            strategy.cancel = MagicMock()
 
         await self.processor.request_cancel()
 
@@ -1064,7 +1078,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_close_resources(self):
         """Test close gracefully stops and closes cache"""
         for strategy in self.processor.strategies.values():
-            strategy.cancel = AsyncMock()
+            strategy.cancel = MagicMock()
         self.mock_cache.close = AsyncMock()
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
