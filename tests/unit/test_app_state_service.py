@@ -82,12 +82,14 @@ class TestSetAppState:
         assert executed_stmt is not None
 
     @pytest.mark.asyncio
-    async def test_handles_exception_gracefully(self):
+    async def test_handles_exception_gracefully(self, caplog):
         mock_conn = MagicMock()
         mock_conn.execute = AsyncMock(side_effect=RuntimeError("write failed"))
         engine = _make_begin_engine(mock_conn)
 
         await set_app_state(engine, "key", "value")
+
+        assert any("Failed to write key='key'" in rec.getMessage() for rec in caplog.records)
 
 
 class TestSetAppStateMax:
@@ -115,9 +117,11 @@ class TestSetAppStateMax:
         assert "config_value <" in sql
 
     @pytest.mark.asyncio
-    async def test_handles_exception_gracefully(self):
+    async def test_handles_exception_gracefully(self, caplog):
         mock_conn = MagicMock()
         mock_conn.execute = AsyncMock(side_effect=RuntimeError("write failed"))
         engine = _make_begin_engine(mock_conn)
 
         await set_app_state_max(engine, "key", "value")
+
+        assert any("Failed to write max key='key'" in rec.getMessage() for rec in caplog.records)
