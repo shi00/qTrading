@@ -426,7 +426,7 @@ M4 模块化检视发现：`data/persistence/db_migrator.py:156-160`（`_heal_or
 
 **产生背景与现状**
 
-M6 模块化检视发现：`data/external/news_fetcher.py:618`（`_fetch_sh_news_concept`）、`:785`（`_fetch_hk_news_concept`）、`:951`（`_fetch_us_news_concept`）三处函数内部 `from utils.proxy_manager import ProxyManager`（2026-10-25 复核，原单处 :669 漂移为三处，覆盖三大概念新闻抓取路径）。一般而言函数内部 import 是反模式，但此处合理：`utils/proxy_manager.py` 可能间接依赖 `data/external/`（通过配置或单例注册链），顶部 import 会形成循环依赖。M6 未修复原因：修复需重构 `proxy_manager.py` 的依赖方向或提取 proxy 配置为独立模块，跨 `utils/` + `data/external/` 两层，违反 §1.4「微创修改」。相关文件：`data/external/news_fetcher.py:618/:785/:951`、`utils/proxy_manager.py`。
+M6 模块化检视发现：`data/external/news_fetcher.py` 三处函数内部 `from utils.proxy_manager import ProxyManager`——`:618`（`get_latest_global_news` 内嵌 `_fetch_cls`）、`:785`（`get_us_major_moves` 内嵌 `_fetch`）、`:951`（`get_hot_concepts` 内嵌 `_fetch`）（2026-10-31 复核，原单处 :669 漂移为三处，覆盖全球新闻、美股大盘与热点概念三条抓取路径）。一般而言函数内部 import 是反模式，但此处合理：`utils/proxy_manager.py` 可能间接依赖 `data/external/`（通过配置或单例注册链），顶部 import 会形成循环依赖。M6 未修复原因：修复需重构 `proxy_manager.py` 的依赖方向或提取 proxy 配置为独立模块，跨 `utils/` + `data/external/` 两层，违反 §1.4「微创修改」。相关文件：`data/external/news_fetcher.py:618/:785/:951`、`utils/proxy_manager.py`。
 
 **期望的最终解法**
 
