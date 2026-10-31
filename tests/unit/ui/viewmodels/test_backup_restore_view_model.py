@@ -67,6 +67,14 @@ def vm(mock_maintenance_service):
     yield BackupRestoreViewModel(maintenance_service=mock_maintenance_service)
 
 
+@pytest.fixture
+def valid_backup(tmp_path) -> Path:
+    """写入带合法 PGDMP 头的 pg_dump custom-format 备份 (archive 版本 1.15)."""
+    path = tmp_path / "backup.dump"
+    path.write_bytes(b"PGDMP" + bytes([1, 15, 0]))
+    return path
+
+
 # --- State immutability ---
 
 
@@ -203,23 +211,98 @@ class TestStartBackup:
 
 class TestStartRestoreWizard:
     @pytest.mark.asyncio
-    async def test_start_restore_wizard_sets_pending(self, vm):
-        input_path = Path("/tmp/backup.dump")
-        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
-            await vm.start_restore_wizard(input_path)
+    async def test_start_restore_wizard_sets_pending(self, vm, valid_backup):
+        await vm.start_restore_wizard(valid_backup)
         assert vm.state.confirm_state == "pending"
-        assert vm.state.restore_path == str(input_path)
+        assert vm.state.restore_path == str(valid_backup)
         assert vm.state.error_message is None
+        assert vm.state.restore_archive_info is not None
+        assert vm.state.restore_archive_info.file_size == valid_backup.stat().st_size
+        assert vm.state.restore_archive_info.archive_version == "1.15"
 
     @pytest.mark.asyncio
-    async def test_start_restore_wizard_file_not_found(self, vm):
+    async def test_start_restore_wizard_file_not_found(self, vm, tmp_path):
         """input_path 不存在时, confirm_state=idle + 设 error_message."""
-        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False):
-            await vm.start_restore_wizard(Path("/tmp/missing.dump"))
+        await vm.start_restore_wizard(tmp_path / "missing.dump")
+        assert vm.state.confirm_state == "idle"
+        assert vm.state.restore_path is None
+        assert vm.state.restore_archive_info is None
+        assert vm.state.error_message is not None
+        assert vm.state.error_message.key == "restore_failed"
+
+    @pytest.mark.asyncio
+    async def test_start_restore_wizard_rejects_empty_file(self, vm, tmp_path):
+        """空文件被拒绝进入 pending, 给出明确错误."""
+        empty = tmp_path / "empty.dump"
+        empty.write_bytes(b"")
+        await vm.start_restore_wizard(empty)
+        assert vm.state.confirm_state == "idle"
+        assert vm.state.restore_path is None
+        assert vm.state.restore_archive_info is None
+        assert vm.state.error_message is not None
+        assert vm.state.error_message.key == "restore_file_invalid"
+
+    @pytest.mark.asyncio
+    async def test_start_restore_wizard_rejects_truncated_header(self, vm, tmp_path):
+        """仅有 5 字节 PGDMP magic 的截断文件被拒绝 (版本号缺失)."""
+        truncated = tmp_path / "truncated.dump"
+        truncated.write_bytes(b"PGDMP")
+        await vm.start_restore_wizard(truncated)
+        assert vm.state.confirm_state == "idle"
+        assert vm.state.restore_path is None
+        assert vm.state.restore_archive_info is None
+        assert vm.state.error_message is not None
+        assert vm.state.error_message.key == "restore_file_invalid"
+
+    @pytest.mark.asyncio
+    async def test_start_restore_wizard_rejects_non_pgdmp(self, vm, tmp_path):
+        """非 pg_dump custom-format 文件 (无 PGDMP 头) 被拒绝."""
+        fake = tmp_path / "fake.dump"
+        fake.write_bytes(b"NOT-A-PG-DUMP-FILE")
+        await vm.start_restore_wizard(fake)
+        assert vm.state.confirm_state == "idle"
+        assert vm.state.restore_path is None
+        assert vm.state.restore_archive_info is None
+        assert vm.state.error_message is not None
+        assert vm.state.error_message.key == "restore_invalid_format"
+
+    @pytest.mark.asyncio
+    async def test_start_restore_wizard_rejects_directory(self, vm, tmp_path):
+        """目录路径被拒绝 (is_file 为 False), 不进入 pending."""
+        await vm.start_restore_wizard(tmp_path)
         assert vm.state.confirm_state == "idle"
         assert vm.state.restore_path is None
         assert vm.state.error_message is not None
         assert vm.state.error_message.key == "restore_failed"
+
+    @pytest.mark.asyncio
+    async def test_start_restore_wizard_rejects_unreadable_file(self, vm, valid_backup, monkeypatch):
+        """读取文件头抛 OSError (权限拒绝) 时, 不进入 pending."""
+
+        def _deny_open(self, *args, **kwargs):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(Path, "open", _deny_open)
+        await vm.start_restore_wizard(valid_backup)
+        assert vm.state.confirm_state == "idle"
+        assert vm.state.restore_path is None
+        assert vm.state.restore_archive_info is None
+        assert vm.state.error_message is not None
+        assert vm.state.error_message.key == "restore_failed"
+
+    @pytest.mark.asyncio
+    async def test_start_restore_wizard_invalid_after_pending_resets_state(self, vm, valid_backup, tmp_path):
+        """已进入 pending 后再次选择非法文件, 应回到 idle 并清空旧元信息."""
+        await vm.start_restore_wizard(valid_backup)
+        assert vm.state.confirm_state == "pending"
+        fake = tmp_path / "fake.dump"
+        fake.write_bytes(b"NOT-A-PG-DUMP-FILE")
+        await vm.start_restore_wizard(fake)
+        assert vm.state.confirm_state == "idle"
+        assert vm.state.restore_path is None
+        assert vm.state.restore_archive_info is None
+        assert vm.state.error_message is not None
+        assert vm.state.error_message.key == "restore_invalid_format"
 
 
 # --- confirm_restore ---
@@ -229,38 +312,32 @@ class TestConfirmRestore:
     """D36: confirm_restore 不调用 svc.restore, 改为设置 confirm_state=offline_guidance + 显示指引消息."""
 
     @pytest.mark.asyncio
-    async def test_confirm_restore_does_not_call_restore(self, vm, mock_maintenance_service):
+    async def test_confirm_restore_does_not_call_restore(self, vm, mock_maintenance_service, valid_backup):
         """confirm_restore 不调用 svc.restore (D36: 引导离线恢复, 不在 qTrading 运行中执行)."""
-        input_path = Path("/tmp/backup.dump")
-        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
-            await vm.start_restore_wizard(input_path)
+        await vm.start_restore_wizard(valid_backup)
         await vm.confirm_restore()
         mock_maintenance_service.restore.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_confirm_restore_sets_offline_guidance_state(self, vm):
+    async def test_confirm_restore_sets_offline_guidance_state(self, vm, valid_backup):
         """confirm_restore 后 confirm_state=offline_guidance + 显示指引消息.
 
         P1-4: progress_message 含 {backup_path} 参数.
         """
-        input_path = Path("/tmp/backup.dump")
-        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
-            await vm.start_restore_wizard(input_path)
+        await vm.start_restore_wizard(valid_backup)
         await vm.confirm_restore()
         assert vm.state.confirm_state == "offline_guidance"
         assert vm.state.progress_message is not None
         assert vm.state.progress_message.key == "restore_offline_guidance"
-        assert vm.state.progress_message.params == {"backup_path": str(input_path)}
+        assert vm.state.progress_message.params == {"backup_path": str(valid_backup)}
         assert vm.state.error_message is None
 
     @pytest.mark.asyncio
-    async def test_confirm_restore_preserves_restore_path(self, vm):
+    async def test_confirm_restore_preserves_restore_path(self, vm, valid_backup):
         """confirm_restore 保留 restore_path (供指引消息引用所选备份文件)."""
-        input_path = Path("/tmp/backup.dump")
-        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
-            await vm.start_restore_wizard(input_path)
+        await vm.start_restore_wizard(valid_backup)
         await vm.confirm_restore()
-        assert vm.state.restore_path == str(input_path)
+        assert vm.state.restore_path == str(valid_backup)
 
     @pytest.mark.asyncio
     async def test_confirm_restore_handles_missing_restore_path(self, mock_maintenance_service):
@@ -282,10 +359,9 @@ class TestConfirmRestore:
         assert vm.state.confirm_state == "idle"
 
     @pytest.mark.asyncio
-    async def test_confirm_restore_skip_after_cancel(self, vm, mock_maintenance_service):
+    async def test_confirm_restore_skip_after_cancel(self, vm, mock_maintenance_service, valid_backup):
         """取消后 confirm_state=cancelled, confirm_restore 不应执行."""
-        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
-            await vm.start_restore_wizard(Path("/tmp/backup.dump"))
+        await vm.start_restore_wizard(valid_backup)
         vm.cancel_restore()
         assert vm.state.confirm_state == "cancelled"
         await vm.confirm_restore()
@@ -300,16 +376,16 @@ class TestDismissOfflineGuidance:
     """D36: dismiss_offline_guidance 关闭指引, 重置 confirm_state=idle + 清空 restore_path."""
 
     @pytest.mark.asyncio
-    async def test_dismiss_offline_guidance_resets_state(self, vm):
+    async def test_dismiss_offline_guidance_resets_state(self, vm, valid_backup):
         """从 offline_guidance 调用 dismiss, confirm_state=idle + 清空 restore_path + progress_message."""
-        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
-            await vm.start_restore_wizard(Path("/tmp/backup.dump"))
+        await vm.start_restore_wizard(valid_backup)
         await vm.confirm_restore()
         assert vm.state.confirm_state == "offline_guidance"
         # 调用 dismiss
         vm.dismiss_offline_guidance()
         assert vm.state.confirm_state == "idle"
         assert vm.state.restore_path is None
+        assert vm.state.restore_archive_info is None
         assert vm.state.progress_message is None
 
     def test_dismiss_offline_guidance_skip_when_idle(self, mock_maintenance_service):
@@ -319,10 +395,9 @@ class TestDismissOfflineGuidance:
         assert vm.state.confirm_state == "idle"
 
     @pytest.mark.asyncio
-    async def test_dismiss_offline_guidance_skip_when_pending(self, vm):
+    async def test_dismiss_offline_guidance_skip_when_pending(self, vm, valid_backup):
         """confirm_state=pending 时, dismiss 不生效 (应使用 cancel_restore)."""
-        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
-            await vm.start_restore_wizard(Path("/tmp/backup.dump"))
+        await vm.start_restore_wizard(valid_backup)
         vm.dismiss_offline_guidance()
         assert vm.state.confirm_state == "pending"
 
@@ -332,12 +407,12 @@ class TestDismissOfflineGuidance:
 
 class TestCancelRestore:
     @pytest.mark.asyncio
-    async def test_cancel_restore_clears_state(self, vm):
-        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
-            await vm.start_restore_wizard(Path("/tmp/backup.dump"))
+    async def test_cancel_restore_clears_state(self, vm, valid_backup):
+        await vm.start_restore_wizard(valid_backup)
         vm.cancel_restore()
         assert vm.state.confirm_state == "cancelled"
         assert vm.state.restore_path is None
+        assert vm.state.restore_archive_info is None
         assert vm.state.progress_message is None
 
     def test_cancel_restore_skip_when_idle(self, mock_maintenance_service):
@@ -348,10 +423,9 @@ class TestCancelRestore:
         assert vm.state.confirm_state == "idle"
 
     @pytest.mark.asyncio
-    async def test_cancel_restore_skip_when_offline_guidance(self, vm):
+    async def test_cancel_restore_skip_when_offline_guidance(self, vm, valid_backup):
         """confirm_state=offline_guidance 时, cancel_restore 不应生效 (应使用 dismiss_offline_guidance)."""
-        with patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=True):
-            await vm.start_restore_wizard(Path("/tmp/backup.dump"))
+        await vm.start_restore_wizard(valid_backup)
         await vm.confirm_restore()
         assert vm.state.confirm_state == "offline_guidance"
         vm.cancel_restore()
@@ -433,10 +507,7 @@ class TestLogPathSanitization:
         import logging
 
         sensitive_path = Path("C:\\Users\\secret\\backup.dump")
-        with (
-            patch("ui.viewmodels.backup_restore_view_model.Path.exists", return_value=False),
-            caplog.at_level(logging.WARNING, logger="ui.viewmodels.backup_restore_view_model"),
-        ):
+        with caplog.at_level(logging.WARNING, logger="ui.viewmodels.backup_restore_view_model"):
             await vm.start_restore_wizard(sensitive_path)
 
         assert vm.state.confirm_state == "idle"

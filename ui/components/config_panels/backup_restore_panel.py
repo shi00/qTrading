@@ -65,6 +65,17 @@ def _render_message(msg: Message | None) -> str:
     return I18n.get(msg.key, **msg.params)
 
 
+def _format_file_size(size_bytes: int) -> str:
+    """将字节数格式化为易读大小 (B/KB/MB/GB, 保留 1 位小数)."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    if size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+
 def _on_backup_click_factory(vm: BackupRestoreViewModel) -> ft.ControlEventHandler | None:
     """Create on_click handler for backup button — submits vm.start_backup."""
 
@@ -294,6 +305,19 @@ def BackupRestorePanel() -> ft.Container:
                 color=AppColors.WARNING,
             )
         )
+        if state.restore_archive_info is not None:
+            archive_info = state.restore_archive_info
+            restore_section_controls.append(
+                ft.Text(
+                    I18n.get(
+                        "restore_archive_info",
+                        size=_format_file_size(archive_info.file_size),
+                        version=archive_info.archive_version,
+                    ),
+                    size=AppStyles.FONT_SIZE_BODY_SM,
+                    color=AppColors.TEXT_SECONDARY,
+                )
+            )
         confirm_restore_button = ft.Button(
             content=I18n.get("confirm_restore_button"),
             icon=ft.Icons.CHECK,
