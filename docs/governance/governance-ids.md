@@ -4,7 +4,7 @@
 >
 > **状态取值**：`使用中`（当前文档引用）/ `历史`（已废止或仅作溯源，不再被活文档作为约束引用）。
 >
-> **维护规则**：新增治理 ID 时必须在下方表格登记一行（由 `check_governance_id_glossary` 门禁守护受检治理文档中出现的 ID——`CHECKED_DOCS` 全集（排除 `CHANGELOG.md` 自动生成发布日志与 `Plans.md` 本地计划）加 `docs/governance/*.yml` 机器可读治理文件；`.py`（`scripts/` + `tests/`）扫描自 DS-02 起以 WARNING 渐进部署）。来源轮次不可考的标注「本地检视报告（gitignored）」，不臆造。
+> **维护规则**：新增治理 ID 时必须在下方表格登记一行（由 `check_governance_id_glossary` 门禁守护受检治理文档中出现的 ID——`CHECKED_DOCS` 全集（排除 `CHANGELOG.md` 自动生成发布日志与 `Plans.md` 本地计划）加 `docs/governance/*.yml` 机器可读治理文件。分级执行：入口文档 `CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` 中未登记即 **ERROR**（硬性失败）；其余受检文档、`docs/governance/*.yml` 与 `scripts/` + `tests/` 的 `.py` 扫描自 DS-02 起以 **WARNING** 渐进部署，存量清零后再翻转为 ERROR）。来源轮次不可考的标注「本地检视报告（gitignored）」，不臆造。
 >
 > **编号格式规范（DS-02）**：治理 ID 中的数字序号统一采用两位前导零形式（如 `P1-04` / `P2-09` / `UX-03`，不用 `P1-4` / `UX-3`）。存量代码中存在的单位数写法（如 `P1-4`、`UX-2`）视为同一发现的无前导零别名，在表格中以独立行登记并在「一句话含义」注明「即 P1-04 的无前导零别名」后即被门禁放行。`-99` 后缀（如 `DOC-99` / `P9-99` / `UIX-99`）为门禁测试夹具 ID，**不得登记**。新增使用治理 ID 时须用规范形，不引入新的三/多位数写法。`FR-` 复合前缀（如 `FR-UX-xxx`）为需求编号命名空间（正本 requirements/），属非治理 ID：门禁正则整体忽略该前缀形态（不采集、不登记、不需豁免），治理 ID 不得采用 `FR-` 复合前缀形态。
 
