@@ -510,6 +510,12 @@ class TestQualityScoreWeights:
                 new_callable=AsyncMock,
                 return_value=datetime.date(2024, 1, 1),
             ),
+            patch.object(
+                quote_dao,
+                "_get_empty_days_map",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
         ):
             scores = await quote_dao.get_bulk_sync_quality_scores(
                 "20240101",
