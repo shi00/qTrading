@@ -31,7 +31,8 @@ import httpx
 import pytest
 
 
-pytestmark = pytest.mark.integration
+# 分层归属：单组件（NewsFetcher）+ HTTP 边界 mock，无真实 DB/网络依赖 → 单元层
+pytestmark = pytest.mark.unit
 
 
 def _concept_jsonp(*rows: tuple[str, str]) -> str:
