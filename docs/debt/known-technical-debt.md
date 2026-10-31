@@ -797,17 +797,17 @@ review08（AKShare 开源组件复用专项，2026-09-23）发现：Tushare 积�
 
 ## 已接受的权衡（Accepted Tradeoffs）
 
-> 与技术债不同，此处记录**有意识地接受现状**的权衡决策：问题真实存在，但当前选择不修（成本/收益、YAGNI 或产品决策），通过 UI 标注、文档声明等方式显式告知用户。来源：review03 DAT-07① 与 DAT-08② 的「决策：不修」类结论（详见各条目）。本节条目属结论可信度边界、**不占「技术债索引」**；产品含义（哪些指标在什么条件下不可信）见 [backtest-correctness.md](../patterns/backtest-correctness.md)「已知限制」。
+> 与技术债不同，此处记录**有意识地接受现状**的权衡决策：问题真实存在，但当前选择不修（成本/收益、YAGNI 或产品决策），通过 UI 标注、文档声明等方式显式告知用户。来源：review03 DAT-07① 与 DAT-08② 的「决策：不修 / 不回溯回填」类结论（详见各条目）。本节条目属结论可信度边界、**不占「技术债索引」**；产品含义（哪些指标在什么条件下不可信）见 [backtest-correctness.md](../patterns/backtest-correctness.md)「已知限制」。
 
-#### P3-DAT07-Restatement：回测不可复现：财报无修订历史，UPSERT 覆盖使历史回测结果随时间漂移（review03 DAT-07①）
+#### P3-DAT07-Restatement：回测不可复现（残余）：DATA-05 前存量财报无修订版本，早期重述覆盖使该段历史回测结果随时间漂移（review03 DAT-07①）
 
 | 层级 | 问题描述 |
 |------|----------|
-| **P3-DAT07-Restatement** | 回测不可复现：财报无修订历史，UPSERT 覆盖使历史回测结果随时间漂移（review03 DAT-07①） |
+| **P3-DAT07-Restatement** | 回测不可复现（残余）：DATA-05 前存量财报无修订版本，早期重述覆盖使该段历史回测结果随时间漂移（review03 DAT-07①） |
 
 **决策与缓解**
 
-`financial_reports` 主键 `(ts_code, end_date)` 无修订历史，财报被重述时新数值直接覆盖旧值，库里只保留"今天所知的版本"。**决策**：不修（YAGNI——A 股重述实际发生率未量化，影子表方案显著增加存储与复杂度，review03「可复现回测」方案按需再评估）。**缓解**：回测报告 UI 摘要显式标注"基本面数据为最新修订版，历史重述可能导致回测结果随时间漂移"（`backtest_result_panel.py::_build_chart_summary` + i18n `backtest_chart_summary_data_note`）。**关联验证**：Tushare `income` 接口 `report_type` 默认="1"（合并报表），同步仅请求单一 report\_type，`(ts_code, end_date)` 上不发生多类型碰撞（DAT-07② 结案为"结构上允许碰撞"）。相关文件：`data/sync/financial.py`（`_dedup_financial_df`）、`ui/components/backtest/backtest_result_panel.py`。
+DATA-05（0022 迁移，2026-09-12）已将 `financial_reports` 主键从 `(ts_code, end_date)` 扩展为 `(ts_code, end_date, ann_date)`，同一报告期的多个公告版本（原始/更正/追溯调整）全部保留（`_dedup_financial_df` 按 `(end_date, ann_date)` 去重），基本面查询按 `ann_date <= as_of` PIT 后取该时点最新可见版本。**残余限制**：迁移前写入的存量行只有单版本，早期 UPSERT 覆盖已不可逆，该段区间无法还原更正前的公告值。**决策**：不回溯回填（YAGNI——A 股重述实际发生率未量化，存量语义不可恢复；全量重同步可补入上游仍可返回的历史版本）。**缓解**：回测报告 UI 摘要显式标注"基本面数据为最新修订版，历史重述可能导致回测结果随时间漂移"（`backtest_result_panel.py::_build_chart_summary` + i18n `backtest_chart_summary_data_note`）。**关联验证**：Tushare `income` 接口 `report_type` 默认="1"（合并报表），同步仅请求单一 report\_type，同一报告期不会因多报表类型产生同键行（DAT-07② 结案为"结构上允许碰撞"）。相关文件：`data/sync/financial.py`（`_dedup_financial_df`）、`data/persistence/daos/financial_dao.py`、`alembic/versions/0022_add_ann_date_to_financial_reports_pk.py`、`ui/components/backtest/backtest_result_panel.py`。
 
 #### P3-DAT08-SnapshotLookahead：回测前视：申万行业为当前快照，`sw_industry_member` 主键不含日期，跨分类调整期回测存在前视（review03 DAT-08②）
 
