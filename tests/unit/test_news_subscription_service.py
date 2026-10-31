@@ -484,14 +484,27 @@ class TestStartStop:
 class TestPollLoop:
     @pytest.mark.asyncio
     async def test_poll_loop_cancelled(self, svc):
-        """R2: _poll_loop 被取消时 CancelledError 必须传播。"""
-        with patch("services.news_subscription_service.ConfigHandler.get_config", return_value=0.01):
+        """R2: _poll_loop 被取消时 CancelledError 必须传播。
+
+        CI 稳定性根因修复：每轮轮询会 create_task(_safe_fetch_task()) →
+        _fetch_and_notify → NewsFetcher.get_latest_global_news 真实出网。旧用例仅
+        打桩轮询间隔，真实出网失败把 news_fetcher 模块级 _CLS_CONSECUTIVE_FAILURES
+        与 _S7X24_CONSECUTIVE_FAILURES 各留在 2，随机顺序/并行下命中熔断 OPEN，
+        污染其它 NewsFetcher 用例（0 != 2 / 3 != 0）。本用例只验证取消语义，
+        故把 _fetch_and_notify 替换为 AsyncMock：不触网、不遗留类级熔断状态。
+        """
+        fetch_mock = AsyncMock()
+        with (
+            patch("services.news_subscription_service.ConfigHandler.get_config", return_value=0.01),
+            patch.object(svc, "_fetch_and_notify", fetch_mock),
+        ):
             svc._running = True
             task = asyncio.create_task(svc._poll_loop())
             await asyncio.sleep(0.05)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
+        assert fetch_mock.await_count >= 1  # 确认轮询确实跑过 tick（而非空转退出）
 
     @pytest.mark.asyncio
     async def test_poll_loop_not_running_returns(self, svc):
