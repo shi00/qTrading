@@ -530,7 +530,7 @@ M12 ui 表现层模块检视发现：`ui/viewmodels/tushare_config_panel_view_mo
 
 **期望的最终解法**
 
-评估是否移除 referrer code。验收标准：① 若移除，URL 改为 `https://tushare.pro/register`；② 现有测试全过。upgrade 触发条件：① 隐私审计（外发 URL / 追踪参数复核）启动时；② 或该 VM 再次出现 URL 携带跟踪/推荐码的新实例时。
+评估是否移除 referrer code。验收标准：① 若移除，URL 改为 `https://tushare.pro/register`；并在同一次变更中同步更新 `tests/unit/ui/viewmodels/test_tushare_config_panel_view_model.py` 里硬编码该注册 URL 的断言（否则该用例必然失败）；② 现有测试全过。
 
 #### P3-M12-ViewModels-Repeated-Singleton-Calls：#M12-022 性能：VM 中重复调用 TushareClient()/TaskManager() 等单例
 
