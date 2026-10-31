@@ -39,7 +39,6 @@
 | P3-Windows-Unit-Test-Timeout-Tight | Windows 单测 step `timeout-minutes` 余量不足（main 成功 run 13 分 41 秒 / 原 15 分钟 = 91% 占用） | P3 | ① Windows 单测实际运行时间 ≥ 18 分钟（90% 占用 20 分钟 timeout）；② 或连续 3 次 PR 触发 Windows 单测超时；③ 或单测总数增长 ≥ 20%（如新增 2000 个测试） |
 | P3-M9-NewsSubscription-EngineDisposed-Swallowed | #M9-010 R5: news\_subscription\_service.py L520/752/1059 EngineDisposedError 吞没（设计合理但严格按 R5 应传播） | P3 | ① R5 红线适用范围扩展至应用服务层轮询循环时；② 或该文件再次出现 EngineDisposedError 吞没的新实例时 |
 | P3-M9-Backtest-EngineDisposed-Warning-Return | #M9-011 R5: backtest\_service.py L132-158 EngineDisposedError 被捕获返回带警告结果（设计模式不一致） | P3 | ① R5 红线适用范围扩展至回测持久化路径时；② 或该文件再次出现 system 级异常不 raise 的新实例时 |
-| P3-M9-EmbeddedPg-TimeoutExpired-Propagation | #M9-013 错误处理缺口：embedded\_pg\_maintenance\_service.py subprocess TimeoutExpired 已包装为 EmbeddedPgMaintenanceError（超时已按 severity 分级，公开方法层结构化分类为可选优化） | P3 | ① sidecar CLI 超时在实际运行中频繁触发时；② 或该文件再次出现未分类 `TimeoutExpired` 的新实例时 |
 | P3-CON04-Subprocess-Cancel | review02 CON-04：subprocess 不可取消长任务停机交互——terminate 仅终止 sidecar 包装 / dump 中断残留不自动清理 / restore 拒绝取消 / run\_async 无可中断变体 | P3 | ① 用户报告停机后 `.partial` 残留或孤儿 pg\_dump 占用磁盘/连接；② restore 取消成为产品需求；③ ThreadPoolManager 重构时 |
 | P3-M9-TaskManager-LogAsyncOperation-Threshold | #M9-014 性能监控阈值：task\_manager.py cancel\_all\_running\_async 标注 DB\_SINGLE\_QUERY 但实际是批量操作 | P3 | ① 性能监控告警误报/漏报时；② 或该文件再次出现阈值与实际操作类型不符的新实例时 |
 | P3-M11-StartupViews-HomeViewModel-Static-Call | #M11-002 MVVM 边界：startup\_views.py View 直接调用 HomeViewModel 静态方法 | P3 | ① 启动流程或 news alert 监听机制被独立重构时；② 或 ui 层再次出现 View 直调 VM 静态方法的新实例时 |
@@ -64,7 +63,6 @@
 | P3-RedlineAuto-Grimp-Namespace-Blindspot | import-linter/grimp 不建模命名空间包（`data/sync/` 无 `__init__.py`），指向该子包的 R1 违规处于门禁盲区（UTILS-A-01 实证） | P3 | ① grimp/import-linter 升级或补 `data/sync/__init__.py` 等建模手段使契约开始实际拦截时；② 或再次出现指向 `data.sync.*` 的未登记跨层 lazy import 新实例时 |
 | P3-REV03-Dao-MaxRows | review03 C4：`_read_db`/`_read_db_select` 已提供 max_rows 安全阀，但多数全表扫描调用点未显式设置，数据增长后可能一次性载入全量 | P3 | ① `data/persistence/daos/` 再次新增未显式传 max_rows 的全表扫描调用点时；② 或出现因全量载入导致的内存/超时故障报告时；③ 或数据访问层重构时 |
 | P3-REV03-ScreeningHistory-SQLCore | review03 C7：screener_dao 的 screening_history 查询已消除 f-string 拼列名/ORDER BY（选股 SQL 静态模板化），但 `get_history_tree`/`get_pending_predictions` 等仍为 raw SQL，待迁移 SQLAlchemy Core | P3 | ① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时 |
-| P3-REV03-DataDictionary-Columns | review03 C9：数据字典半数表 columns 为空（已于 #1100（2026-09-21）解决：列级声明移除，columns 改由 ORM 派生 + `test_no_empty_columns_fields` 守护） | P3 | ① columns 为空条目导致实际列级校验漏检缺陷时；② 或数据字典被纳入新的门禁校验时 |
 | P2-REV06-External-SchemaValidation | review06 F9：外部数据（Tushare/Akshare）入库前缺行级 schema 校验，脏数据可静默影响选股决策 | P2 | ① 外部数据脏数据导致选股/回测结论异常的事故报告时；② 或新增外部数据源接入取数→入库链时（新链路必须配套校验） |
 | P3-REV06-Retry-CircuitBreaker | review06 F10：重试上限可配（默认 3）且已带退避/自适应降速，但缺跨调用连续失败短路计数，外部服务故障期仍可能多 API 独立重试放大压力 | P3 | ① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时 |
 | P2-REV06-PromptGuard-StructuredBoundary | review06 F12：prompt 注入防御已落地结构化边界（不可信声明 + 平级容器隔离 + 尖括号中和，SEC-001/D5-2），剩余缺口为选股分析输出侧跨数据交叉校验（新闻风险场景已有引用子串校验；ADR-0008 执行权边界为兜底补偿控制） | P2 | ① 出现注入成功绕过 prompt_guard 的实例时；② 或新增外部文本进入 LLM 上下文的链路时 |
@@ -223,20 +221,6 @@ Rust sidecar 工程要求 unit 行覆盖率目标 ≥85%。2026-07-28 已补测 
 **期望的最终解法**
 
 ① sidecar `run.rs` supervise 循环新增 postgres 日志监听 task（持续读 postgres stderr/log file），匹配 `invalid page` / `checksum failure` 关键字后经 `protocol::print_json_line(&EventJson::warning("data_page_corruption", ...))` 上报 stdout；② Python `_stdout_reader_task` 解析 `event.warning` 事件并经 ViewModel state 通知 UI；③ UI 显示数据页损坏警告 + 引导备份恢复；④ `failure_injection.rs` 新增 `test_inject_25_data_page_checksum_error` 集成测试（篡改测试表数据页 → 查询 → 验证 sidecar stdout warning 事件）。验收标准：① sidecar 监听 postgres 日志并上报 `data_page_corruption` warning 事件；② Python + UI 正确显示警告；③ 集成测试覆盖 #25 场景；④ 不破坏现有 stdout 协议向后兼容。upgrade 触发条件：① sidecar 引入运行期 postgres 日志监控需求时；② 或数据页损坏问题在生产环境报告时。
-
-#### P3-M9-EmbeddedPg-TimeoutExpired-Propagation：#M9-013 错误处理缺口：embedded\_pg\_maintenance\_service.py subprocess TimeoutExpired 已包装为 EmbeddedPgMaintenanceError（超时已按 severity 分级，公开方法层结构化分类为可选优化）
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-M9-EmbeddedPg-TimeoutExpired-Propagation** | #M9-013 错误处理缺口：embedded\_pg\_maintenance\_service.py subprocess TimeoutExpired 已包装为 EmbeddedPgMaintenanceError（超时已按 severity 分级，公开方法层结构化分类为可选优化） | ① sidecar CLI 超时在实际运行中频繁触发时；② 或该文件再次出现未分类 `TimeoutExpired` 的新实例时 |
-
-**产生背景与现状**
-
-M9 services 模块检视发现：`services/embedded_pg_maintenance_service.py` `_run_sidecar` 的 `proc.communicate(timeout=3600)`（`Popen` 路径）抛出 `TimeoutExpired`，公开方法（doctor/dump/restore/maintenance\_shell）不捕获该异常，调用方只收到包装后的业务异常。**现状校准（CON-04, 2026-09-03）**：① review03-C19 已在 `_run_sidecar` 内将 `TimeoutExpired` 包装为 `EmbeddedPgMaintenanceError`（用户看到可操作提示而非原始 subprocess 异常）；② CON-04 改用 `Popen` 后，超时路径先 `kill` 子进程再 `communicate` 回收输出，修复 `subprocess.run` 超时不杀进程的进程泄漏。**现状校准（2026-10-31 复核）**：③ 超时路径已调用 `classify_severity(exc, "general")`（内部经 `classify_error`）并按 severity 决定 WARNING/ERROR 日志级别，随后包装抛出（`embedded_pg_maintenance_service.py:397-415`）；剩余可选项仅为公开方法层透出结构化错误码（`classify_error` 的 code/severity 字段）。相关文件：`services/embedded_pg_maintenance_service.py`。
-
-**期望的最终解法**
-
-分类与分级日志已在 `_run_sidecar` 落地（`classify_severity` → `classify_error`，`embedded_pg_maintenance_service.py:397-415`）；若 sidecar CLI 超时频繁触发，再评估在公开方法层透出结构化错误码（code/severity）。验收标准：① 超时路径经 `classify_severity`/`classify_error` 分类（已达成）；② 现有 `test_embedded_pg_maintenance*.py` 全过。upgrade 触发条件：① sidecar CLI 超时在实际运行中频繁触发时；② 或该文件再次出现未分类 `TimeoutExpired` 的新实例时。
 
 #### P3-CON04-Subprocess-Cancel：review02 CON-04：subprocess 不可取消长任务停机交互——terminate 仅终止 sidecar 包装 / dump 中断残留不自动清理 / restore 拒绝取消 / run\_async 无可中断变体
 
@@ -691,20 +675,6 @@ review03（数据层与持久化，2026-09-02/03）发现：`data/persistence/da
 **期望的最终解法**
 
 将上述剩余 `screening_history` raw SQL（`get_history_tree` / `get_pending_predictions` / `_save_thinking` 的 `ids_sql`）迁移 SQLAlchemy Core，或经 `text()` 常量承载，保持列名与 `ORDER BY` 静态。upgrade 触发条件：① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时。
-
-#### P3-REV03-DataDictionary-Columns：review03 C9：数据字典半数表 columns 为空（已于 #1100（2026-09-21）解决：列级声明移除，columns 改由 ORM 派生 + `test_no_empty_columns_fields` 守护）
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-REV03-DataDictionary-Columns** | review03 C9：数据字典半数表 columns 为空（已于 #1100（2026-09-21）解决：列级声明移除，columns 改由 ORM 派生 + `test_no_empty_columns_fields` 守护） | ① columns 为空条目导致实际列级校验漏检缺陷时；② 或数据字典被纳入新的门禁校验时 |
-
-**产生背景与现状**
-
-review03（数据层与持久化，2026-09-02/03）发现：`data/data_dictionary.py` 中半数表的 `columns` 字段为空，列级一致性当前仅由 ORM 模型兜底。**现状校准（2026-10-25 复核）**：该决策已随 OSS-01 / #1100（2026-09-21）落地——列级声明已从 `data_dictionary.py` 移除，`validate_schema_definitions` 的列集合改为从 `Base.metadata` 派生，`tests/unit/test_data_dictionary.py:130 test_no_empty_columns_fields` 守护空 columns 字段。本条目保留 ID 作为已解决记录。
-
-**期望的最终解法**
-
-已由 OSS-01 / #1100（2026-09-21）完成：列级声明从 `data_dictionary.py` 移除，columns 由 ORM `Base.metadata` 派生，空 columns 由 `test_no_empty_columns_fields` 守护。upgrade 触发条件：① columns 为空条目导致实际列级校验漏检缺陷时；② 或数据字典被纳入新的门禁校验时。
 
 #### P2-REV06-External-SchemaValidation：review06 F9：外部数据（Tushare/Akshare）入库前缺行级 schema 校验，脏数据可静默影响选股决策
 
