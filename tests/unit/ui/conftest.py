@@ -1,5 +1,4 @@
 from collections.abc import Iterator
-from typing import Any
 from unittest.mock import MagicMock, create_autospec
 
 import flet as ft
@@ -10,46 +9,6 @@ from tests.unit.ui.mock_flet import MockFletPage
 from ui.i18n import I18nState
 from ui.theme import AppColors, AppColorsState, AppStyles, ThemeName
 from utils.config_handler import ConfigHandler
-
-
-@pytest.fixture(autouse=True)
-def _v1_page_compat(monkeypatch):
-    """Per-test V1 page 兼容桩（替代旧 mock_flet 全局桩，方案 §3.3.1）。
-
-    V1 中 ``ft.Control.page`` 改为只读 property（通过 ``parent`` 链查找），
-    ``Control.update()`` 要求控件已挂载。本 fixture 用 monkeypatch 作用域隔离地
-    恢复 V0 兼容行为：page 可读写、未挂载 ``update()`` 静默返回。
-
-    测试代码用 ``control.page = mock_page`` 注入 page（替代已删除的 page 注入 helper）。
-    """
-    # Any: fget 在 V1 只读 property 类型存根中推断为 None，运行时必为可调用对象
-    original_page_get: Any = ft.Control.page.fget
-    original_update: Any = ft.Control.update
-
-    @property
-    def page(self) -> ft.Page | None:
-        mock_page = self.__dict__.get("_mock_page")
-        if mock_page is not None:
-            return mock_page
-        try:
-            return original_page_get(self)
-        except RuntimeError:
-            return None
-
-    @page.setter
-    def page(self, value: ft.Page | None) -> None:
-        self.__dict__["_mock_page"] = value
-
-    def update(self) -> None:
-        if self.__dict__.get("_mock_page") is None:
-            try:
-                original_page_get(self)
-            except RuntimeError:
-                return
-        original_update(self)
-
-    monkeypatch.setattr(ft.Control, "page", page)
-    monkeypatch.setattr(ft.Control, "update", update)
 
 
 @pytest.fixture(autouse=True)

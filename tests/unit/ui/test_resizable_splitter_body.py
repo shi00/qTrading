@@ -2,8 +2,8 @@
 
 补充 test_resizable_splitter.py 仅覆盖纯函数的不足，验证组件体 (lines 94-208) 的
 渲染结构 + 事件 handler 行为。配套 conftest.py 的 ``mock_app_colors_state`` /
-``mock_i18n_state`` 注入 Observable state，``_v1_page_compat`` 让 ``control.page``
-可注入。
+``mock_i18n_state`` 注入 Observable state；页面上下文由 ``component_renderer``
+的渲染上下文提供，不使用 ``Control`` 兼容桩。
 """
 
 # pyright: reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
