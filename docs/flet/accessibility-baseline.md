@@ -49,7 +49,7 @@
 - **响应式布局**：窄布局下不得通过 `visible=False` 隐藏操作入口（如「运行」「保存」按钮）。
 - **替代方案**：若空间不足，操作入口可折叠到菜单（`ft.PopupMenuItem`）或图标按钮（带 `tooltip`），但不得完全隐藏。
 - **响应式栅格**：视图栅格**推荐使用** [`ui/theme.py`](../../ui/theme.py) `AppStyles.COL_*` 预置配置（`COL_FULL`/`COL_HALF`/`COL_THIRD`/`COL_QUARTER`/`COL_TWO_THIRDS`），**新增布局优先使用 `COL_*`**；其断点键沿用 Flet `ResponsiveRow` 默认六档（xs/sm/md/lg/xl/xxl，最小宽度 0/576/768/992/1200/1400），但 `COL_*` 预置配置实际仅覆盖前四档（xs/sm/md/lg），xl/xxl 档需自行提供 `col` 值；桌面端窗口最小宽度 1024（`app/window_lifecycle.py`），布局设计以该宽度为下限。
-  - **现状**：`ResponsiveRow` 构造 15 处/10 文件，其中 4 处行内子控件 `col=` 使用 `AppStyles.COL_*` 预置配置（`backtest_result_panel.py` 经 `_COL_QUARTER` 别名 3 处、`market_dashboard.py` 1 处），其余 11 处未使用（统计基准：2026-09-19）；存量迁移跟踪见 UIX-13 结构性批次（响应式断点模型）。
+  - **现状**：`ResponsiveRow` 构造 15 处/9 文件；其中 5 个构造内行内子控件 `col=` 使用 `AppStyles.COL_*` 预置配置共 13 处（`backtest_result_panel.py` 3 个构造内经 `_COL_QUARTER` 别名 11 处、`market_dashboard.py` 2 个构造内 2 处），其余 10 个构造未使用（统计基准：2026-10-31）；存量迁移跟踪见 UIX-13 结构性批次（响应式断点模型）。
 
 ## 3. 审查清单（PR 评审用）
 
@@ -71,7 +71,7 @@
 | 表格键盘遍历降级（`ui/components/virtual_table.py`） | §2.4 键盘路径 | Flet 无表格 focus/grid 键盘遍历（无 Focus 控件、DataTable 无 on_key、KeyboardListener 无 focus 遍历），键盘用户无方向键导航 | 复查触发：Flet 升级提供表格 focus/grid 能力，或 KeyboardListener 组合方案经 E2E 验证可行（与 `virtual_table.py` 的 `# NOTE(lazy:)` 语义一致） |
 | 排序指示语义（`ui/components/virtual_table.py` 排序指示） | §2.1 Label 关联 | 用 `↑`/`↓` 文本符号作排序指示，依赖字体支持，屏幕阅读器朗读结果不确定 | 修复方向：替换为 `ft.Icon(ft.Icons.ARROW_UPWARD)` / `ft.Icon(ft.Icons.ARROW_DOWNWARD)`，同步迁移 E2E `test_screener_sort_by_column` 的 `"pct_chg (涨跌幅) ↑"` 朗读锚点；升级触发：virtual_table 重构或可访问性 audit 时（债表 M12-020） |
 
-> 已修复项（检视报告 F08，2026-10）：`slider_input.py` 数值 TextField / `watchlist_add_dialog.py` 搜索框 / `system_tab.py` no_proxy 输入框 / `llm_config_panel.py` 确认 Checkbox 曾在本表登记，现已分别补语义名称（`tooltip` / 持久 `label=` / `semantics_label=`）移出例外；`test_accessibility_contract.py` 的 TextField/Checkbox 扫描已常态化守护，无例外条目。真实读屏（Narrator/NVDA）实测尚未执行，控件名称语义以结构契约测试为准。
+> 已修复项（检视报告 F08，2026-10）：`slider_input.py` 数值 TextField / `watchlist_add_dialog.py` 搜索框 / `system_tab.py` no_proxy 输入框 / 已移除的 `llm_config_panel.py` 确认 Checkbox 曾在本表登记，现已分别补语义名称（`tooltip` / 持久 `label=` / `semantics_label=`）移出例外；`test_accessibility_contract.py` 的 TextField/Checkbox 扫描已常态化守护，无例外条目。真实读屏（Narrator/NVDA）实测尚未执行，控件名称语义以结构契约测试为准。
 
 ## 5. 引用关系
 
