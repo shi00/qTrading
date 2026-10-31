@@ -362,7 +362,7 @@ M12 ui 表现层模块检视发现：`ui/components/stock_detail_dialog.py:505` 
 
 **产生背景与现状**
 
-review02 B12 已实现第 1 步（data\_version memo 缓存，消除无谓重算，解决 90%）；第 2 步需将 `_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM，state 携带渲染就绪数据。跨 VM 边界且与 report04 D9（AI 流式更新重建机制重构）"避免 data\_version 未变时全量重建"目标耦合，故本批次只实现第 1 步，第 2 步登记为依赖 D9 的后续任务（修复方案 §B12 第 2 步）。相关文件：`ui/views/screener_view.py`。
+review02 B12 已实现第 1 步（memo 缓存，消除无谓重算，解决 90%）。**现状校准（2026-10-31 复核）**：早期实现称作 `data\_version`，该字段现已不存在；当前机制为 `_resolve_table_data`（`ui/views/screener_view.py:1606-1620`）以「行元组引用 + locale」为键的 `ft.Ref` memo，叠加 AI 三分区的 `ft.use_memo` 依赖缓存。第 2 步需将 `_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM，state 携带渲染就绪数据。跨 VM 边界且与 report04 D9（AI 流式更新重建机制重构）"避免行数据未变时全量重建"目标耦合，故本批次只实现第 1 步，第 2 步登记为依赖 D9 的后续任务（修复方案 §B12 第 2 步）。相关文件：`ui/views/screener_view.py`。
 
 **期望的最终解法**
 
