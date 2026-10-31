@@ -12,6 +12,12 @@ use std::path::PathBuf;
 /// 未显式传 ``--database`` 的旧脚本/旧命令保持原语义（操作 qtrading 库）。
 pub const DEFAULT_DATABASE: &str = "qtrading";
 
+/// 默认超级用户名（与 ``AppConfig.embedded_pg_username`` 默认值一致）。
+///
+/// 未显式传 ``--username`` 的旧脚本/旧命令保持原语义（以 postgres 角色连接）；
+/// Python 侧仅在配置为非默认用户名时才透传 ``--username``（旧 sidecar 无从识别该参数）。
+pub const DEFAULT_USERNAME: &str = "postgres";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "qtrading-pg-sidecar",
@@ -38,7 +44,7 @@ pub enum Command {
     /// 恢复到新目录，不覆盖原目录（§12.2，需维护锁）
     Restore(RestoreArgs),
     /// 临时维护实例：输出脱敏连接信息与 psql 路径，等待用户结束后关闭（需维护锁）
-    MaintenanceShell(DataDirArgs),
+    MaintenanceShell(MaintenanceShellArgs),
     /// 重置 postgres 用户密码（§13.7.8，需维护锁；通过 postgres --single 单用户模式）
     ResetPassword(DataDirArgs),
     /// 版本与构建元数据
@@ -92,6 +98,10 @@ pub struct DumpArgs {
     /// 业务库名（缺省 qtrading，保持旧命令向后兼容）
     #[arg(long, default_value_t = DEFAULT_DATABASE.to_string())]
     pub database: String,
+    /// 超级用户名（须与 `run --username` / `AppConfig.embedded_pg_username` 一致，
+    /// 否则在线/离线维护连接会以错误角色认证失败；缺省 postgres）
+    #[arg(long, default_value_t = DEFAULT_USERNAME.to_string())]
+    pub username: String,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -107,6 +117,20 @@ pub struct RestoreArgs {
     /// 业务库名（缺省 qtrading，保持旧命令向后兼容）
     #[arg(long, default_value_t = DEFAULT_DATABASE.to_string())]
     pub database: String,
+    /// 超级用户名（initdb 新 cluster 的超级用户，须与 `run --username` 一致；
+    /// 缺省 postgres）
+    #[arg(long, default_value_t = DEFAULT_USERNAME.to_string())]
+    pub username: String,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct MaintenanceShellArgs {
+    #[arg(long)]
+    pub data_dir: PathBuf,
+    /// 超级用户名（须与 `run --username` / `AppConfig.embedded_pg_username` 一致；
+    /// 缺省 postgres）
+    #[arg(long, default_value_t = DEFAULT_USERNAME.to_string())]
+    pub username: String,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -223,6 +247,8 @@ mod tests {
         assert_eq!(args.output, PathBuf::from("/b/x.dump"));
         // UIR-F16-002: 未传 --database 时缺省 qtrading（旧命令向后兼容）
         assert_eq!(args.database, DEFAULT_DATABASE);
+        // M21: 未传 --username 时缺省 postgres（旧命令向后兼容）
+        assert_eq!(args.username, DEFAULT_USERNAME);
 
         let cli = parse(&[
             "qtrading-pg-sidecar",
@@ -241,6 +267,71 @@ mod tests {
         assert_eq!(args.input, PathBuf::from("/b/x.dump"));
         assert_eq!(args.target_data_dir, Some(PathBuf::from("/d2")));
         assert_eq!(args.database, DEFAULT_DATABASE);
+        assert_eq!(args.username, DEFAULT_USERNAME);
+    }
+
+    #[test]
+    fn maintenance_shell_username_default_and_override() {
+        let cli = parse(&[
+            "qtrading-pg-sidecar",
+            "maintenance-shell",
+            "--data-dir",
+            "/d",
+        ])
+        .unwrap();
+        let Command::MaintenanceShell(args) = cli.command else {
+            panic!("expect maintenance-shell")
+        };
+        assert_eq!(args.username, DEFAULT_USERNAME);
+
+        let cli = parse(&[
+            "qtrading-pg-sidecar",
+            "maintenance-shell",
+            "--data-dir",
+            "/d",
+            "--username",
+            "qtrading",
+        ])
+        .unwrap();
+        let Command::MaintenanceShell(args) = cli.command else {
+            panic!("expect maintenance-shell")
+        };
+        assert_eq!(args.username, "qtrading");
+    }
+
+    #[test]
+    fn dump_restore_username_override() {
+        let cli = parse(&[
+            "qtrading-pg-sidecar",
+            "dump",
+            "--data-dir",
+            "/d",
+            "--output",
+            "/b/x.dump",
+            "--username",
+            "qtrading",
+        ])
+        .unwrap();
+        let Command::Dump(args) = cli.command else {
+            panic!("expect dump")
+        };
+        assert_eq!(args.username, "qtrading");
+
+        let cli = parse(&[
+            "qtrading-pg-sidecar",
+            "restore",
+            "--data-dir",
+            "/d",
+            "--input",
+            "/b/x.dump",
+            "--username",
+            "qtrading",
+        ])
+        .unwrap();
+        let Command::Restore(args) = cli.command else {
+            panic!("expect restore")
+        };
+        assert_eq!(args.username, "qtrading");
     }
 
     #[test]

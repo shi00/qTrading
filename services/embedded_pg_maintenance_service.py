@@ -9,7 +9,10 @@
 设计要点：
 - ``@register_singleton`` 协议：``_reset_singleton``（无 atexit 资源需清理）
 - 路径从 AppConfig + ``ConfigHandler.load_config()`` 实时解析（不在构造期缓存，配合运行时配置切换）
-- argv 中的路径与业务库名均来自 AppConfig（R-A2 边界；库名经白名单校验后透传）
+- argv 中的路径、业务库名、超级用户名均来自 AppConfig（R-A2 边界；库名/用户名经白名单校验后透传）
+- 超级用户名仅在配置为非 sidecar 默认 ``postgres`` 时透传 ``--username``（M21：自定义用户名
+  实例的 dump/restore/maintenance-shell 必须与 ``run --username`` 一致，否则角色认证失败；
+  默认配置不传该参数，兼容不支持 ``--username`` 的旧 sidecar）
 - exit code 20 (PG 未运行) 在 doctor 命令中容忍为成功（sidecar doctor 是只读诊断）
 """
 
@@ -43,6 +46,10 @@ EXPECTED_DOCTOR_SCHEMA = "qtrading.embedded_postgres.doctor.v1"
 # 库名会进入 sidecar 的 `CREATE DATABASE "<name>"` SQL 文本，只允许安全标识符：
 # [A-Za-z_][A-Za-z0-9_]*，长度 ≤ 63（PostgreSQL NAMEDATALEN-1）。
 _DATABASE_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
+
+# sidecar CLI 的默认超级用户名（cli.rs DEFAULT_USERNAME）。仅在配置非该值时才透传
+# ``--username``，保证默认配置下与不支持该参数的旧 sidecar 兼容。
+SIDECAR_DEFAULT_USERNAME = "postgres"
 
 
 class EmbeddedPgMaintenanceError(RuntimeError):
@@ -321,6 +328,32 @@ class EmbeddedPgMaintenanceService:
             )
         return database
 
+    def _get_username(self) -> str:
+        """读取并校验配置中的超级用户名（M21：dump/restore/maintenance-shell 须与实例用户名一致）。
+
+        用户名来自 ``AppConfig.embedded_pg_username``（与运行时 ``EmbeddedPostgresService``
+        ``run --username`` 使用同一配置项），经白名单校验后透传给 sidecar ``--username``。
+
+        Raises:
+            EmbeddedPgMaintenanceError: 用户名为空 / 含非法字符 / 超过 63 字符
+        """
+        config = AppConfig.model_validate(ConfigHandler.load_config())
+        username = config.embedded_pg_username
+        if not _DATABASE_NAME_PATTERN.fullmatch(username):
+            # R9: 非法值可能来自用户输入，经 sanitize_error 脱敏后再进入异常消息
+            sanitized = DataSanitizer.sanitize_error(username)
+            raise EmbeddedPgMaintenanceError(
+                f"embedded_pg_username 非法（须为 [A-Za-z_][A-Za-z0-9_]*，长度 ≤ 63）: {sanitized!r}"
+            )
+        return username
+
+    def _username_args(self) -> list[str]:
+        """返回 ``--username`` 参数（仅配置非 sidecar 默认值时），兼容旧 sidecar。"""
+        username = self._get_username()
+        if username == SIDECAR_DEFAULT_USERNAME:
+            return []
+        return ["--username", username]
+
     def _build_doctor_argv(self) -> list[str]:
         sidecar_path, data_dir = self._get_sidecar_path_and_data_dir()
         return [sidecar_path, "doctor", "--data-dir", data_dir]
@@ -336,6 +369,7 @@ class EmbeddedPgMaintenanceService:
             self._get_database_name(),
             "--output",
             str(output_path),
+            *self._username_args(),
         ]
 
     def _build_restore_argv(self, input_path: Path, target_data_dir: Path | None) -> list[str]:
@@ -349,6 +383,7 @@ class EmbeddedPgMaintenanceService:
             str(input_path),
             "--database",
             self._get_database_name(),
+            *self._username_args(),
         ]
         if target_data_dir:
             argv.extend(["--target-data-dir", str(target_data_dir)])
@@ -356,7 +391,7 @@ class EmbeddedPgMaintenanceService:
 
     def _build_maintenance_shell_argv(self) -> list[str]:
         sidecar_path, data_dir = self._get_sidecar_path_and_data_dir()
-        return [sidecar_path, "maintenance-shell", "--data-dir", data_dir]
+        return [sidecar_path, "maintenance-shell", "--data-dir", data_dir, *self._username_args()]
 
     # ---- subprocess 调用 ----
 
