@@ -37,7 +37,7 @@
 | P3-M4-AppStateService-BroadExcept | `app_state_service.py:20,37` broad except 未接入 classify\_error（合理降级，一致性建议） | P3 | ① app state 升级为关键路径时；② 或该文件再次出现未分类 broad except 的新实例时 |
 | P3-M6-NewsFetcher-Lazy-ProxyManager-Import | `news_fetcher.py:618/:785/:951` 三处函数内部 import ProxyManager（合理避免循环依赖，建议保留） | P3 | ① `proxy_manager.py` 循环依赖被解除时；② 或该文件再次出现函数内 import 的新实例时 |
 | P3-Windows-Unit-Test-Timeout-Tight | Windows 单测 step `timeout-minutes` 余量不足（main 成功 run 13 分 41 秒 / 原 15 分钟 = 91% 占用） | P3 | ① Windows 单测实际运行时间 ≥ 18 分钟（90% 占用 20 分钟 timeout）；② 或连续 3 次 PR 触发 Windows 单测超时；③ 或单测总数增长 ≥ 20%（如新增 2000 个测试） |
-| P3-M9-NewsSubscription-EngineDisposed-Swallowed | #M9-010 R5: news\_subscription\_service.py L425/642/919 EngineDisposedError 吞没（设计合理但严格按 R5 应传播） | P3 | ① R5 红线适用范围扩展至应用服务层轮询循环时；② 或该文件再次出现 EngineDisposedError 吞没的新实例时 |
+| P3-M9-NewsSubscription-EngineDisposed-Swallowed | #M9-010 R5: news\_subscription\_service.py L520/752/1059 EngineDisposedError 吞没（设计合理但严格按 R5 应传播） | P3 | ① R5 红线适用范围扩展至应用服务层轮询循环时；② 或该文件再次出现 EngineDisposedError 吞没的新实例时 |
 | P3-M9-Backtest-EngineDisposed-Warning-Return | #M9-011 R5: backtest\_service.py L132-157 EngineDisposedError 被捕获返回带警告结果（设计模式不一致） | P3 | ① R5 红线适用范围扩展至回测持久化路径时；② 或该文件再次出现 system 级异常不 raise 的新实例时 |
 | P3-M9-EmbeddedPg-TimeoutExpired-Propagation | #M9-013 错误处理缺口：embedded\_pg\_maintenance\_service.py subprocess TimeoutExpired 已包装为 EmbeddedPgMaintenanceError（classify\_error 为可选优化） | P3 | ① sidecar CLI 超时在实际运行中频繁触发时；② 或该文件再次出现未分类 `TimeoutExpired` 的新实例时 |
 | P3-CON04-Subprocess-Cancel | review02 CON-04：subprocess 不可取消长任务停机交互——terminate 仅终止 sidecar 包装 / dump 中断残留不自动清理 / restore 拒绝取消 / run\_async 无可中断变体 | P3 | ① 用户报告停机后 `.partial` 残留或孤儿 pg\_dump 占用磁盘/连接；② restore 取消成为产品需求；③ ThreadPoolManager 重构时 |
@@ -122,15 +122,15 @@ M4 模块化检视发现：`data/persistence/app_state_service.py:20,37` 共 2 �
 
 与 #M4-002 一致性评估：① 若 app state 升级为关键路径，接入 `classify_error` + `classify_severity`，system 级 raise 传播；② 或维持现状（合理降级）。验收标准：① 若改造，现有 `test_app_state_service.py` 全过；② 新增 system 级异常 raise 传播单测。upgrade 触发条件：① app state 升级为关键路径时；② 或该文件再次出现未分类 broad except 的新实例时。
 
-#### P3-M9-NewsSubscription-EngineDisposed-Swallowed：#M9-010 R5: news\_subscription\_service.py L425/642/919 EngineDisposedError 吞没（设计合理但严格按 R5 应传播）
+#### P3-M9-NewsSubscription-EngineDisposed-Swallowed：#M9-010 R5: news\_subscription\_service.py L520/752/1059 EngineDisposedError 吞没（设计合理但严格按 R5 应传播）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-M9-NewsSubscription-EngineDisposed-Swallowed** | #M9-010 R5: news\_subscription\_service.py L425/642/919 EngineDisposedError 吞没（设计合理但严格按 R5 应传播） | ① R5 红线适用范围扩展至应用服务层轮询循环时；② 或该文件再次出现 EngineDisposedError 吞没的新实例时 |
+| **P3-M9-NewsSubscription-EngineDisposed-Swallowed** | #M9-010 R5: news\_subscription\_service.py L520/752/1059 EngineDisposedError 吞没（设计合理但严格按 R5 应传播） | ① R5 红线适用范围扩展至应用服务层轮询循环时；② 或该文件再次出现 EngineDisposedError 吞没的新实例时 |
 
 **产生背景与现状**
 
-M9 services 模块检视发现：`services/news_subscription_service.py:425`（`_safe_fetch_task`）/ `:642`（`_processing_loop`）/ `:919`（`_fetch_and_notify`）共 3 处 `except EngineDisposedError: ... self._running = False / break` - 吞没 EngineDisposedError 以停止轮询。R5 红线："DAO/维护流程必须检查引擎状态；已释放时抛出或传播 EngineDisposedError"。NewsSubscriptionService 不是 DAO/维护流程，是应用服务层的轮询循环，引擎释放后停止轮询是合理设计。但严格按 R5 应传播。M9 未修复原因：设计合理（轮询循环不应因 EngineDisposed 崩溃，而应优雅停止），R5 主要针对 DAO/维护流程；修复需评估是否在 system 级 raise，改变现有降级语义，违反 §1.4「不做无益重构」。相关文件：`services/news_subscription_service.py:425/642/919`。（R5 豁免已登记例外 **EX-0017**，见 docs/governance/exceptions.yml；P1-06 方案1）
+M9 services 模块检视发现：`services/news_subscription_service.py:520`（`_safe_fetch_task`）/ `:752`（`_processing_loop`）/ `:1059`（`_fetch_and_notify`）共 3 处 `except EngineDisposedError: ... self._running = False / break` - 吞没 EngineDisposedError 以停止轮询。R5 红线："DAO/维护流程必须检查引擎状态；已释放时抛出或传播 EngineDisposedError"。NewsSubscriptionService 不是 DAO/维护流程，是应用服务层的轮询循环，引擎释放后停止轮询是合理设计。但严格按 R5 应传播。M9 未修复原因：设计合理（轮询循环不应因 EngineDisposed 崩溃，而应优雅停止），R5 主要针对 DAO/维护流程；修复需评估是否在 system 级 raise，改变现有降级语义，违反 §1.4「不做无益重构」。相关文件：`services/news_subscription_service.py:520/752/1059`。（R5 豁免已登记例外 **EX-0017**，见 docs/governance/exceptions.yml；P1-06 方案1）
 
 **期望的最终解法**
 
