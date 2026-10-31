@@ -730,6 +730,8 @@ review06（安全与供应链，2026-08-24）发现：外部数据入库路径�
 
 review06（安全与供应链，2026-08-24）发现：外部服务故障时重试机制会放大请求压力（重试风暴），建议引入熔断器或退避限流。
 
+**现状校准（2026-10-31 复核）**：Tushare 调用链已落地自适应退避限流——`TushareApiWrapper._handle_api_call`（`data/external/tushare/api_wrapper.py:136-322`）按 `max_retries` 重试，全局 `TokenBucket` 与 per-API limiter 两段消费；命中限流时两桶 `reduce_rate(0.5)` 降速并以 5-15s 抖动退避，成功后 `on_success()` 渐进恢复；网络错误按 `1*(i+1)` 抖动退避；token 认证失败置 `_token_invalid` 全局熔断（后续调用快速失败），权限类错误经 `mark_api_unavailable(runtime=True)` 短期负缓存。**残余缺口**：仍无「连续失败 N 次」跨调用熔断计数——每次调用独立重试至 `max_retries`，多调用方并发时压力仍可叠加；Akshare 侧仅经模块级共享限速器（`akshare_rate_limiter`）限速，无重试/熔断；现有 `CircuitBreaker`（`data/external/news_sources/circuit_breaker.py`）与 news_fetcher 的 Sina/CLS 熔断只覆盖新闻源，未覆盖 Tushare/Akshare 行情链路。本条保持。
+
 **期望的最终解法**
 
 外部服务调用链加熔断/退避限流，故障时不无限重试放大 QPS（含 `tushare_client._handle_api_call` 连续失败短路计数）。upgrade 触发条件：① 外部服务（Tushare/Akshare）故障期间出现限流/封禁或请求风暴告警日志时；② 或外部调用链新增高频重试点时。
