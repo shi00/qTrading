@@ -12,6 +12,7 @@ import pytest
 from tests.e2e.helpers.anchor_page import AnchorPage
 from tests.e2e.helpers.flet_page import FletPage
 from tests.e2e.pages import ScreenerPage
+from ui.i18n import I18n
 from ui.testing.e2e_ids import EIDS
 
 pytestmark = [pytest.mark.timeout(60), pytest.mark.e2e, pytest.mark.timeout_e2e_smoke]
@@ -101,4 +102,4 @@ async def test_screener_anchor_click_run_button_triggers_callback(e2e_page: Flet
 
     # on_click 触发后 state.loading=True，按钮文案变为"停止选股"
     # timeout_ms 传原始值，expect_text 内部 self._tm() 会乘以 multiplier
-    await e2e_page.expect_text("停止选股", timeout_ms=15000)
+    await e2e_page.expect_text(I18n.get("stop_screening"), timeout_ms=15000)

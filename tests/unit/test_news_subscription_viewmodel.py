@@ -107,12 +107,6 @@ class TestHistoryModeBuffer:
             assert {"chunk": "chunk3"} in vm._ai_buffer
             assert vm._discarded_buffer == []
 
-    def test_discarded_buffer_merge_logic(self):
-        discarded = ["chunk1", "chunk2"]
-        current = ["chunk3"]
-        merged = discarded + current
-        assert merged == ["chunk1", "chunk2", "chunk3"]
-
 
 class TestNewsSubscriptionCorrelationId:
     """Verify NewsSubscriptionService uses correlation_scope for log tracing."""
