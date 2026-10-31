@@ -88,7 +88,7 @@
 
 **产生背景与现状**
 
-strategies/ 层 except Exception 中 P0/P2 必修项已完成，剩余已合理日志的 except Exception 用 `# NOTE(lazy):` 标记保留。Phase 6.1 杠杆评估决策"不引入 `_handle_strategy_exception(e, context)` 统一入口"（YAGNI：`classify_error` 调用稀少；过度抽象：5 正交维度需 7 字段 context；多处差异化状态修改无法覆盖）。Phase 6.3 完成 ceiling 动态化（按方法分组描述，不再硬编码数值）。R9 合规修复已完成（`str(e)` → `DataSanitizer.sanitize_error(e)`）。
+strategies/ 层 except Exception 中 P0/P2 必修项已完成；现网 64 处 `except Exception` 中，36 处已附 `# NOTE(lazy):` 标记，22 处经 `log_classified` / `classify_error` / `classify_severity` 分类，另有 6 处未标记亦未分类（`strategies/ai_mixin.py` 5 处：stk_limit 预取、单卡失败兜底、名称区间查询 3 处经脱敏记录/回调，`_dataframe_sizeof` 与 prompt preview 2 处静默降级；`strategies/polars_base.py` 归因条件计数 1 处静默降级）。即除 36 处标记块外，22 处已分类但未标记、6 处未分类（含 3 处已合理日志、3 处静默降级），与「剩余已合理日志的 except Exception 用 NOTE(lazy) 标记保留」的原盘点口径不一致；若未分类块中含新增实例即触发升级条件 ①。Phase 6.1 杠杆评估决策"不引入 `_handle_strategy_exception(e, context)` 统一入口"（YAGNI：`classify_error` 调用稀少；过度抽象：5 正交维度需 7 字段 context；多处差异化状态修改无法覆盖）。Phase 6.3 完成 ceiling 动态化（按方法分组描述，不再硬编码数值）。R9 合规修复已完成（`str(e)` → `DataSanitizer.sanitize_error(e)`）。
 
 **期望的最终解法**
 
