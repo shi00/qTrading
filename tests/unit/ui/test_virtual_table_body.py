@@ -6,8 +6,8 @@
 - TableRow 独立组件行内 hover state (G5)
 - 列宽拖拽 handle 契约与拖拽行为 (G4, R13 契约)
 
-配套 conftest.py 的 ``mock_app_colors_state`` 注入 Observable state，
-``_v1_page_compat`` 让 ``control.page`` 可注入。
+配套 conftest.py 的 ``mock_app_colors_state`` 注入 Observable state；
+页面上下文由 ``component_renderer`` 的渲染上下文提供，不使用 ``Control`` 兼容桩。
 """
 
 # pyright: reportAttributeAccessIssue=false, reportOptionalMemberAccess=false

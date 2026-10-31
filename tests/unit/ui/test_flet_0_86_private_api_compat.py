@@ -6,13 +6,13 @@
 版本引入了破坏性变更，需记录到对应检视/升级报告并标记升级阻塞。
 
 依赖点（项目内使用位置）：
-- ``_context_page`` ContextVar: ``tests/unit/ui/conftest.py`` 的
+- ``_context_page`` ContextVar: ``tests/conftest.py`` 的
   ``_reset_context_page`` autouse fixture、``tests/unit/ui/component_renderer.py``
   的 ``attach_fake_page``、多个 contract 测试的 ``test_uses_ft_context_page``
 - ``Component, Renderer``: ``tests/unit/ui/component_renderer.py``、
   ``tests/unit/ui/test_system_tab_contract.py``
-- ``ft.Control.page.fget``: ``tests/unit/ui/conftest.py`` 与
-  ``tests/integration/conftest.py`` 的 V1 page 兼容桩（monkeypatch fget）
+- ``ft.Control.page.fget``: 本探针直接断言锁定版本的原生 property/fget 契约
+  （测试侧不再 monkeypatch ``ft.Control.page``）
 - ``Observable, ObservableList``: ``scripts/spike_ui_debt/spike_observable.py``
 
 验证手段：
@@ -35,17 +35,6 @@ from flet.controls.context import _context_page
 from tests.unit.ui.component_renderer import make_component, render_once
 
 pytestmark = pytest.mark.unit
-
-
-@pytest.fixture(autouse=True)
-def _v1_page_compat():
-    """禁用 conftest 的 V1 page 兼容桩。
-
-    本测试需要验证 ``ft.Control.page`` 的原始 property 与 fget 签名，
-    conftest 的 ``_v1_page_compat`` autouse fixture 会 monkeypatch
-    ``ft.Control.page``，必须在此禁用以访问原始属性。
-    """
-    yield
 
 
 def test_context_page_is_contextvar() -> None:
@@ -82,8 +71,8 @@ def test_component_and_renderer_are_classes() -> None:
 def test_control_page_fget_accessible() -> None:
     """``ft.Control.page`` 仍为 property 且 ``fget`` 可访问。
 
-    conftest 的 V1 page 兼容桩通过 ``ft.Control.page.fget`` 保存原始 getter
-    并 monkeypatch 为可读写 property；若 fget 不可访问将破坏全部 UI 测试。
+    本探针直接验证 V1 原生属性契约；测试侧不 monkeypatch ``ft.Control.page``，
+    若 fget 不可访问将破坏全部挂载控件前的类型/签名检查。
     """
     page_attr = getattr(ft.Control, "page", None)
     assert isinstance(page_attr, property), "ft.Control.page 不再是 property"
@@ -162,8 +151,7 @@ def test_observable_and_observable_list_are_classes() -> None:
 #
 # 私有框架调用（``Session`` / ``Component._state`` / ``EffectHook._setup_task``）
 # 集中在本测试边界内，不泄漏到生产 View/VM（报告 §10.10 步骤 7）。
-# 本模块 autouse 的 ``_v1_page_compat`` 覆盖禁用了 conftest 的 V1 page 兼容桩，
-# 真实调度测试不加载旧行为 shim。
+# 真实调度测试直接使用 V1 原生 ``ft.Control`` 语义，不加载任何兼容 shim。
 # ===========================================================================
 
 
