@@ -132,4 +132,8 @@ GGUF（`.gguf` + `head.npz`），GGUF 产线任务（脚本固化 / `finbert-tra
 
 Context 与 Decision §2 引用的两份 PoC 留档（`ai_models/finbert2-sentiment-onnx-poc.verify.json`、`ai_models/finbert2-sentiment-openvino-poc.verify.json`）为**本地未入库产物**（`ai_models/` 目录不入版本控制），当前工作区已不存在（该目录仅保留模型权重）。复评时若需以本文的度量口径与基线为对照，必须重新运行 PoC 生成报告，不得假定留档仍在；判据阈值（概率差 <0.02、单条 P95 ≤30ms、标签一致率 ≥99%、人工验证集不一致 ≤1 条）与同机 GGUF 基线 14.30ms 仍以本文文字为准。
 
+> 2026-10-31 勘误（DOC-RV-037）
+
+Context 复述 ADR-0012 范式时写作 `GGUF(Q8_0)`，属本文成文时（2026-10-13）的形态；产线已于 2026-10-14 因一致性 Gate 概率差判据必 FAIL 移除 Q8_0，当前发布产物为 f16（事实源为 [finbert-train.yml](../../.github/workflows/finbert-train.yml) 头部注释与 [finbert-pipeline.md](../guides/finbert-pipeline.md) §1）。本文出现的 `q8_0` 数值（14.30ms 基线、PoC 对照、`finbert2-news-q8_0.verify.json` 门禁名）为当时实测记录，保持原样不改；同一表述在 ADR-0012 已另案勘误（DOC-RV-036）。
+
 _最小验证命令：_ `python scripts/check_docs_consistency.py` + `python -m pytest tests/unit/test_docs_consistency.py`。
