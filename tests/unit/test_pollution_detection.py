@@ -12,7 +12,8 @@
 3. 比较各次运行的 pass/fail 结果
 4. 若某测试在某次运行中通过、在另一次运行中失败，判定为污染
 
-标注 @pytest.mark.slow 因为多次跑耗时。
+标注 @pytest.mark.slow 因为多次跑耗时。CI 中仅在 nightly flaky-detection job 的专用 step
+执行一次；PR 单测与 10 轮 flaky 循环均以 --deselect 排除（详见 docs/guides/ci-cd.md）。
 
 技术债说明（§7.2）：
 function scope 已消除 loop-local 缓存跨测试泄漏的根因。

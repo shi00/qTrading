@@ -290,6 +290,24 @@ class TestRunPytestWithJsonReport:
         cmd = mock_run.call_args[0][0]
         assert "--reruns" not in cmd
 
+    def test_deselect_passes_each_nodeid(self, tmp_path: Path) -> None:
+        """正例：deselect 列表逐个透传为 --deselect."""
+        report_path = tmp_path / "run_1.json"
+        mock_result = MagicMock(spec=subprocess.CompletedProcess)
+        mock_result.returncode = 0
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            run_pytest_with_json_report(
+                test_path="tests/unit/",
+                report_path=report_path,
+                deselect=["tests/unit/a.py::test_x", "tests/unit/b.py::test_y"],
+            )
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd.count("--deselect") == 2
+        assert "tests/unit/a.py::test_x" in cmd
+        assert "tests/unit/b.py::test_y" in cmd
+
 
 class TestMainIntegration:
     """main() 集成测试：用 mock subprocess 模拟 flaky 测试场景."""

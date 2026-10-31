@@ -118,6 +118,7 @@ def run_pytest_with_json_report(
     parallel: int = 1,
     reruns: int = 0,
     lf_mode: bool = False,
+    deselect: list[str] | None = None,
 ) -> tuple[int, Path]:
     """运行 pytest 并生成 json-report，返回 (returncode, report_path)。
 
@@ -127,6 +128,7 @@ def run_pytest_with_json_report(
         parallel: 并行 worker 数（1 时不传 -n）
         reruns: 失败重试次数（0 时不传 --reruns）
         lf_mode: 是否仅复跑上次失败用例
+        deselect: 需排除的 nodeid 列表（逐个透传为 --deselect）
 
     Returns:
         (returncode, report_path)
@@ -146,6 +148,8 @@ def run_pytest_with_json_report(
         cmd.extend(["-n", str(parallel)])
     if reruns > 0:
         cmd.extend(["--reruns", str(reruns)])
+    for node_id in deselect or []:
+        cmd.extend(["--deselect", node_id])
     if lf_mode:
         cmd.append("--lf")
 
@@ -173,6 +177,13 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="临时报告目录（默认系统临时目录）",
     )
+    parser.add_argument(
+        "--deselect",
+        action="append",
+        default=[],
+        metavar="NODEID",
+        help="排除指定 nodeid（可重复指定），用于跳过成本高且不应每轮重复的慢测试",
+    )
     args = parser.parse_args(argv)
 
     if args.workdir:
@@ -195,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
             parallel=args.parallel,
             reruns=args.reruns,
             lf_mode=args.lf,
+            deselect=args.deselect,
         )
         if not report_path.exists():
             print(f"  ✗ 运行 {i + 1} 未生成 json-report", file=sys.stderr)

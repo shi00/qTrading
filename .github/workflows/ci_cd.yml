@@ -429,7 +429,11 @@ jobs:
           STRICT_SCHEMA_GATE: "1"
         run: |
           set -e
-          python -m pytest tests/unit/ -v --tb=short --cov --cov-report=term-missing --cov-report=xml --cov-report=json --junitxml=junit-unit.xml
+          # 污染探测（3 次串行排列，约 2 分钟）不随 PR 执行：改由 nightly flaky-detection 的专用 step 承担，
+          # 避免每次 PR 重复付出该成本（同时 xdist 多进程反而掩盖跨测试污染，见该测试模块文档）。
+          python -m pytest tests/unit/ -v --tb=short \
+            --deselect tests/unit/test_pollution_detection.py::test_no_cross_test_pollution_in_core_subset \
+            --cov --cov-report=term-missing --cov-report=xml --cov-report=json --junitxml=junit-unit.xml
 
       - name: Run Integration Tests
         timeout-minutes: 10
@@ -552,10 +556,10 @@ jobs:
               tests/e2e/test_onboarding_embedded.py
               tests/e2e/test_onboarding_embedded_real.py
               tests/e2e/test_onboarding_wizard.py
+              tests/e2e/test_production_mount.py
           - group: scenarios
             paths: >-
               tests/e2e/test_news_risk.py
-              tests/e2e/test_production_mount.py
               tests/e2e/test_r01_dialog_height.py
               tests/e2e/test_sidecar_real_smoke.py
     # 拆分前单 job 串行耗时 >45 分钟（run 30183636080 在 45 分钟 timeout 被取消）；
@@ -610,7 +614,9 @@ jobs:
           # FastAPI.__init__; fastapi 0.145.0+ crashes Flet Web startup. See
           # docs/flet/upgrade-checklist.md section 1.1.
           uv pip install --system flet-web==1.0.5 "fastapi<0.145"
-          pip install playwright pytest-playwright
+          # playwright 已随 requirements-optional.txt 由上面的 uv 安装；此处只需补 pytest-playwright，
+          # 走 uv 缓存，避免每腿再用裸 pip 重复解析/下载 playwright。
+          uv pip install --system pytest-playwright
 
       - name: Get Playwright Version
         shell: bash
@@ -870,7 +876,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p D:/tmp
-          python -m pytest tests/unit/ -v --tb=short --junitxml=junit-unit.xml
+          python -m pytest tests/unit/ -v --tb=short \
+            --deselect tests/unit/test_pollution_detection.py::test_no_cross_test_pollution_in_core_subset \
+            --junitxml=junit-unit.xml
 
       - name: Validate installer smoke test scripts syntax (Phase 5)
         shell: pwsh
@@ -2438,8 +2446,17 @@ jobs:
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
 
+      # 污染探测：3 次不同文件顺序的串行重跑（约 2 分钟/次），成本高且 xdist 会掩盖问题，
+      # 故只在此 nightly job 跑一次；PR 单测已通过 --deselect 排除。放在 flaky 检测之前，
+      # 避免 detect_flaky 以退出码 1（检出 flaky）时跳过本 step。
+      - name: Pollution probe (order shuffle)
+        timeout-minutes: 12
+        run: python -m pytest tests/unit/test_pollution_detection.py -v --tb=short
+
       - name: Detect flaky tests (advisory)
-        run: python scripts/detect_flaky.py
+        run: >-
+          python scripts/detect_flaky.py --deselect
+          tests/unit/test_pollution_detection.py::test_no_cross_test_pollution_in_core_subset
 
   # 聚合门禁：main 分支的 required status check（与 docs-ci.yml 的 Docs Consistency Check 并列）。
   # 独立的聚合 job 而非直接 required 各矩阵 job 的原因：
