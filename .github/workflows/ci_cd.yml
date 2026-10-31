@@ -211,6 +211,13 @@ jobs:
           restore-keys: ruff-${{ runner.os }}-
 
       - name: Run pre-commit hooks
+        # CI 的 --all-files 会把全仓 .py / test_*.py 传给 pass_filenames hook，
+        # 使 pyright-changed / weak-assertion-changed 退化为全量扫描：
+        # 前者实测 74.5s（run 41202057746），后者 7.6s，与下方独立的全量 pyright /
+        # weak assertions step 完全重复。此处跳过两个增量 hook，保留本地提交前的
+        # 秒级反馈语义；CI 的全量校验由后续 step 承担，门禁强度不降低。
+        env:
+          SKIP: pyright-changed,weak-assertion-changed
         run: pre-commit run --all-files
 
       - name: Verify Version Consistency
