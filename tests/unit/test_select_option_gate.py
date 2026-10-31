@@ -9,6 +9,10 @@
 3. 展开流程先 `scroll_into_view` 再取 bbox（避免视口外坐标点击被静默丢弃）。
 4. 收合判据以 `aria-expanded` 为权威：选项节点仍 visible 也算已收合（不重试、不滚轮）。
 5. 进入 retry 时菜单已收合 → `_interact` 守卫直接返回（不重复点击、不滚轮空转）。
+6. C1 展开确认：菜单始终未展开（读到 false）→ 不搜索候选（避免误命中同文本表头后
+   静默假成功），最终抛 option not found。
+7. C2 回落复校验：`ElementHandle.click` 抛 not visible 且 bbox 已漂到面板外 → 抛错，
+   不按漂移坐标静默点击。
 
 identifier 是唯一定位通道：展开态读取与顶层节点定位均走 identifier
 （`_read_expanded_by_identifier` / `_identifier_node_box`），无 legacy 分支。
@@ -175,7 +179,7 @@ async def test_select_option_menu_closed_goes_expand_path(ap: AnchorPage) -> Non
     旧实现（PR 585 失败根因）：菜单关闭时全页面文本匹配可能误命中结果表表头
     「代码」→ 跳过展开 → 点击落空。修复后关闭态一律先展开。
     """
-    handle = await _run_select_option(ap, expanded_values=[None, None])
+    handle = await _run_select_option(ap, expanded_values=[None, None, "true", None])
 
     # 展开流程被触发（获取 bbox + 物理点击）
     _expand_locator_mock(ap).assert_awaited_once()
@@ -189,7 +193,7 @@ async def test_select_option_menu_closed_goes_expand_path(ap: AnchorPage) -> Non
 async def test_select_option_menu_already_open_uses_preselect(ap: AnchorPage) -> None:
     """菜单已展开（expanded 读取为 "true"）→ 预探测命中选项，不再重复展开。"""
     handle = _FakeHandle()
-    _stub_expanded(ap, ["true", "true", "false"])
+    _stub_expanded(ap, ["true", "true", "true", "false"])
     ap._find_option_element = AsyncMock(return_value=handle)
     ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
     await ap.select_option(_FILTER_COL_DROPDOWN, "代码", timeout_ms=1000)
@@ -221,7 +225,7 @@ async def test_select_option_scrolls_into_view_before_click(ap: AnchorPage) -> N
         return {"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0}
 
     handle = _FakeHandle()
-    _stub_expanded(ap, [None, None])
+    _stub_expanded(ap, [None, None, "true", None])
     ap.scroll_into_view = AsyncMock(side_effect=_scroll)
     ap._identifier_node_box = AsyncMock(side_effect=_box)
     ap._find_option_element = AsyncMock(return_value=handle)
@@ -244,8 +248,8 @@ async def test_select_option_confirms_collapse_by_aria_expanded(ap: AnchorPage) 
     残留节点（bbox 为 None）→ 滚轮以视口中心为锚点空转整页 → 误报 never within。
     """
     handle = _FakeHandle(collapse_on_click=False)
-    # 展开前 None、展开后 None、收合确认读到 false（选项节点仍 visible）
-    _stub_expanded(ap, [None, None, "false"])
+    # 展开前 None、展开后 None；C1 轮询读到 true 命中句柄；收合确认读到 false（选项节点仍 visible）
+    _stub_expanded(ap, [None, None, "true", "false"])
     ap._find_option_element = AsyncMock(return_value=handle)
     ap.scroll_into_view = AsyncMock()
     ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
@@ -268,8 +272,9 @@ async def test_select_option_retry_guard_skips_click_when_menu_collapsed(
     节点，随后 wheel 空转 37 次（5.3s）后误报 never within。
     """
     handle = _FakeHandle(collapse_on_click=False)
-    # 展开前/后 None；空等首查仍 true、慢 wait 后仍 true → 期限耗尽进 retry；retry 读到 false
-    _stub_expanded(ap, [None, None, "true", "true", "false", "false"])
+    # 展开前/后 None；C1 轮询读到 true 命中句柄；空等首查仍 true、慢 wait 后仍 true →
+    # 期限耗尽进 retry；retry 读到 false
+    _stub_expanded(ap, [None, None, "true", "true", "true", "false"])
     ap._find_option_element = AsyncMock(return_value=handle)
     ap.scroll_into_view = AsyncMock()
     ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
@@ -305,8 +310,8 @@ async def test_select_option_falls_back_to_mouse_click_when_handle_not_visible(a
     只回落 ``not visible`` 这一种错误：其余异常原样抛出（不掩盖真实故障）。
     """
     handle = _FakeInvisibleHandle()
-    # 展开前 None、展开后 None、收合确认读到 false（回落点击视为落地）
-    _stub_expanded(ap, [None, None, "false"])
+    # 展开前 None、展开后 None；C1 轮询读到 true 命中句柄；收合确认读到 false（回落点击视为落地）
+    _stub_expanded(ap, [None, None, "true", "false"])
     ap._find_option_element = AsyncMock(return_value=handle)
     ap.scroll_into_view = AsyncMock()
     ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
@@ -316,3 +321,72 @@ async def test_select_option_falls_back_to_mouse_click_when_handle_not_visible(a
     assert handle.clicks == 1, "ElementHandle 主路径必须先尝试一次"
     # 回落坐标 = bbox (500,400,200,36) 中心 (600,418)；首个 mouse 点击在展开箭角
     assert ap.page.mouse.clicks[-1] == (600.0, 418.0)
+
+
+class _DriftingBoxHandle(_FakeHandle):
+    """模拟点击失败后菜单重渲染：bbox 从面板内漂移到面板外的列表内容坐标残留。
+
+    C8 同型事故（CI run 39387686968）：滚出面板的选项语义 rect 残留，若按新 bbox
+    直接 ``page.mouse.click`` 会命中渲染在该坐标的其他元素（误选相邻项/关菜单）。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._boxes = [
+            {"x": 500.0, "y": 400.0, "width": 200.0, "height": 36.0},
+            {"x": 500.0, "y": 1200.0, "width": 200.0, "height": 36.0},
+        ]
+        self._box_idx = 0
+
+    async def click(self, force: bool = False) -> None:
+        self.clicks += 1
+        raise RuntimeError("ElementHandle.click: Element is not visible")
+
+    async def bounding_box(self) -> dict[str, float]:
+        box = self._boxes[min(self._box_idx, len(self._boxes) - 1)]
+        self._box_idx += 1
+        return box
+
+
+@pytest.mark.asyncio
+async def test_select_option_c1_gate_skips_candidate_search_when_menu_stays_closed(
+    ap: AnchorPage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C1: 菜单始终未展开（读到 false）→ 不搜索候选，最终抛 option not found。
+
+    回归场景：展开点击被 CanvasKit 吞掉 → 菜单仍关闭 → 全页面文本匹配误命中同文本
+    表头 → 点击表头 → ``aria-expanded`` 保持 false → 收合确认判「已收合」→ 静默假成功。
+    """
+    handle = _FakeHandle()
+    _stub_expanded(ap, [None, None, "false"])
+    ap._find_option_element = AsyncMock(return_value=handle)
+    ap.scroll_into_view = AsyncMock()
+    ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
+    # timeout 放大到 3000ms，配合 1.5s 步进时钟：两个展开窗口均在有限步数内耗尽
+    monkeypatch.setattr(anchor_page, "time", _FakeClock(step=1.5))
+
+    with pytest.raises(RuntimeError, match="option not found"):
+        await ap.select_option(_FILTER_COL_DROPDOWN, "代码", timeout_ms=3000)
+
+    assert ap._find_option_element.await_count == 0, "菜单未确认展开时不得搜索候选"
+    assert handle.clicks == 0, "不得点击任何候选（含误命中的同文本表头）"
+
+
+@pytest.mark.asyncio
+async def test_select_option_fallback_revalidates_panel_before_mouse_click(ap: AnchorPage) -> None:
+    """回落坐标点击前必须重新过 C8 可点区域门：bbox 已漂到面板外即抛错。
+
+    只回落 ``not visible`` 且 bbox 仍可点击的情况；漂移后的残留 rect 不得静默点击。
+    """
+    handle = _DriftingBoxHandle()
+    _stub_expanded(ap, [None, None, "true"])
+    ap._find_option_element = AsyncMock(return_value=handle)
+    ap.scroll_into_view = AsyncMock()
+    ap._identifier_node_box = AsyncMock(return_value={"x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0})
+
+    with pytest.raises(RuntimeError, match="not clickable"):
+        await ap.select_option(_FILTER_COL_DROPDOWN, "代码", timeout_ms=1000)
+
+    assert handle.clicks == 1, "ElementHandle 主路径只尝试一次"
+    # 首个 mouse 点击在展开箭角；回落坐标点击必须被 C8 复校验拒绝
+    assert len(ap.page.mouse.clicks) == 1
