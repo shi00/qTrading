@@ -352,7 +352,9 @@ class AppColors:
     # ====================================================================
     # Layer 1: Flet 语义 Token (自动更新 — 无需 update_theme)
     # ====================================================================
-    BACKGROUND = "background"  # Use string token to access scheme background
+    # M14: Flet 1.x 无 "background" 颜色名/ColorScheme.background 字段 (M3 已并入 surface),
+    # 页面背景统一取 surface 语义 token, 随 ColorScheme 自动切换.
+    BACKGROUND = ft.Colors.SURFACE
     SURFACE = ft.Colors.SURFACE
     SURFACE_VARIANT = ft.Colors.SURFACE_CONTAINER_HIGHEST  # ft.Colors.SURFACE_VARIANT doesn't exist
     PRIMARY = ft.Colors.PRIMARY
