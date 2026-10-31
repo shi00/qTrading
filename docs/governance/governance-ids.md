@@ -126,7 +126,7 @@
 | AI-01 | 缺失/失败被伪装成合法具体值：AI 调用失败/无结论不得伪装成「AI 否决」（`score=0`），不可计价调用不得伪装为「零成本」——催生 R21 | business-review-2026-09-11（业务检视） | [CLAUDE.md](../../CLAUDE.md) R21 / [strategies/ai_mixin.py](../../strategies/ai_mixin.py) | 使用中 |
 | AI-02 | 业务语义字段（`score` / `ai_score` / `confidence` 等）的缺失表示：必须用 `None`/哨兵，禁止填充业务上合法的具体值（检视报告 04 AI-02，缺陷根因见 R21） | 本地检视报告（gitignored） | [CONTRIBUTING.md](../../CONTRIBUTING.md)「业务语义字段的缺失表示」 | 使用中 |
 | E4 | OSS 检视：import-linter 6 条手工 forbidden 契约重构为 1 条 layers + 2 条 forbidden（AST 静态测试随之退役，例外注册表路径校验保留） | OSS 检视（E 系列） | [pyproject.toml](../../pyproject.toml) / [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
-| DAT-07 | 回测不可复现：财报无修订历史，UPSERT 覆盖使历史回测结果随时间漂移（属结论可信度边界，非代码欠债） | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
+| DAT-07 | 回测不可复现（残余）：DATA-05 已保留财报多版本 + PIT，迁移前存量行仅单版本，早期重述覆盖使该段历史回测结果随时间漂移（属结论可信度边界，非代码欠债） | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | DAT-08 | 回测前视：申万行业为当前快照，`sw_industry_member` 主键不含日期，跨分类调整期回测存在前视（含存量污染 `industry_tushare`） | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | BT-05 | 回测路径 `_BacktestQualityProxy` 硬编码 GOLD 绕过数据质量门控（第一步显式化，第二步待设计） | review03 业务语义与可信度 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | CON-04 | subprocess 不可取消长任务停机交互：terminate 仅终止 sidecar 包装 / dump 中断残留不自动清理 / restore 拒绝取消 | review02 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
