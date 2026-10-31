@@ -72,8 +72,8 @@ checkout 内由本脚本完成，不依赖外部状态）；③ **自举**（本
 
 指纹路由下载的语料 sums 与语料步骤实际下载的资产之间存在时间窗——corpus Release 的 tag
 不可变但**资产可编辑**，期间被替换会使指纹锚与训练输入错位。语料下载校验后以
-`verify-corpus-anchor` 比对本地 `SHA256SUMS.txt` 与指纹锚，错位即 fail-fast（先于
-corpus manifest 校验）。
+`compute_training_fingerprint.py verify-corpus-anchor` 子命令比对本地 `SHA256SUMS.txt`
+与指纹锚，错位即 fail-fast（先于 corpus manifest 校验）。
 
 ### 5. F3 复用与 gh 层 fail-safe
 
