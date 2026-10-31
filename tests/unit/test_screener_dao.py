@@ -1504,7 +1504,7 @@ class TestScreenerDaoGetPendingReviewsNone:
     @pytest.mark.asyncio
     async def test_none_result(self):
         dao = ScreenerDao(MagicMock())
-        dao._read_db = AsyncMock(return_value=None)
+        dao._read_db_select = AsyncMock(return_value=None)
         result = await dao.get_pending_reviews()
         assert result == []
 
