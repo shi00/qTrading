@@ -6,7 +6,7 @@
 
 ```text
 QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
-                 ↘ INTERRUPTED (应用异常退出)
+      ↘        ↘ INTERRUPTED (应用异常退出：残留 RUNNING / QUEUED 启动时回填)
 ```
 
 - 任务通过 `submit_task()` 提交，`name` 与 `task_type` 为必填位置参数，`coroutine_factory` 是接收 `task_id` 关键字参数（并可透传 `**kwargs`）的可调用对象（返回 coroutine），可选参数含 `cancellable` / `unique_key` / `factory_key` / `exclusive_group`。`unique_key` 承载任务去重语义：同一 key 重复提交会被同步拦截并返回 `None`，任务结束（无论成功/失败/取消）后 key 释放可重新提交。最小调用样例：
@@ -31,7 +31,7 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
   - 看门狗（`SchedulerService._watch_config_changes`）在同组任务运行/排队中或 `cache_clear` 运行期间跳过本轮补偿检查（下个周期重判）；misfire 路径不加此守卫。
 - 使用 `update_progress(progress)` 报告进度 (0.0-1.0)，内置节流避免 UI 风暴
 - 工作协程内部使用 `is_cancelled()` 检测取消信号 (用户主动取消 / 应用退出)
-- 任务持久化到本地，重启后 `RUNNING` 状态会被回填为 `INTERRUPTED`
+- 任务持久化到数据库（`task_history` 表，经 `services/task_manager.py::_persist_task` 异步写库）；应用重启时 `init_db()` 会把上次会话遗留的 `RUNNING` 与 `QUEUED` 任务统一回填为 `INTERRUPTED`，用户可经 `retry_task` 重新发起
 
 > **操作指引**：TaskManager 后台任务的完整触发与编排方式见 [docs/guides/how-to.md](../guides/how-to.md) 与 [data-sync.md](./data-sync.md) 的落地路径；新增异步任务须遵循 CLAUDE.md §3.1 R2（取消传播）。
 
@@ -39,7 +39,7 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
 
 _最小验证命令：_ 按改动实际触及的层运行 CONTRIBUTING「变更类型 → 最小验证子集」；TaskManager 逻辑改动后须 `redline-check`（R2/R11/R16）+ 相关单测。
 
-- 任务状态机（`QUEUED → RUNNING → COMPLETED/FAILED/CANCELLED`、重启 `RUNNING → INTERRUPTED` 回填）与 `submit_task()` 签名、`unique_key` 去重语义符合本文档；
+- 任务状态机（`QUEUED → RUNNING → COMPLETED/FAILED/CANCELLED`、重启时 `RUNNING`/`QUEUED` → `INTERRUPTED` 回填）与 `submit_task()` 签名、`unique_key` 去重语义符合本文档；
 - 协程内同步阻塞经 `ThreadPoolManager.run_async()` 提交（R16）；取消信号用 `threading.Event`（非 `asyncio.Event` 类属性，R11）；
 - 编排边界正确：`TaskManager`（任务）/ `ThreadPoolManager`（同步阻塞）/ `SchedulerService`（定时）各司其职；
 - 门禁：`redline-check`、`ruff`、相关单测通过。
