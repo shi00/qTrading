@@ -334,8 +334,13 @@ class TestDatabaseMigratorGetRevision:
     async def test_get_current_revision_no_alembic_table(self):
         mock_engine = MagicMock()
         mock_conn = AsyncMock()
+        sync_conn = MagicMock()
 
-        mock_conn.run_sync = AsyncMock(return_value=None)
+        def _run_sync(fn):
+            # 真实执行回调，确保 inspect 分支被覆盖（而非直接返回 None 的假通过）
+            return fn(sync_conn)
+
+        mock_conn.run_sync = AsyncMock(side_effect=_run_sync)
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_conn.__aexit__ = AsyncMock(return_value=False)
         mock_engine.connect = MagicMock(return_value=mock_conn)
@@ -347,6 +352,7 @@ class TestDatabaseMigratorGetRevision:
 
             result = await DatabaseMigrator._get_current_revision(mock_engine)
             assert result is None
+            mock_inspect.assert_called_once_with(sync_conn)
 
     @pytest.mark.asyncio
     async def test_get_current_revision_raises_on_connection_error(self):
