@@ -40,7 +40,6 @@
 | P3-M9-NewsSubscription-EngineDisposed-Swallowed | #M9-010 R5: news\_subscription\_service.py L520/752/1059 EngineDisposedError 吞没（设计合理但严格按 R5 应传播） | P3 | ① R5 红线适用范围扩展至应用服务层轮询循环时；② 或该文件再次出现 EngineDisposedError 吞没的新实例时 |
 | P3-M9-Backtest-EngineDisposed-Warning-Return | #M9-011 R5: backtest\_service.py L132-158 EngineDisposedError 被捕获返回带警告结果（设计模式不一致） | P3 | ① R5 红线适用范围扩展至回测持久化路径时；② 或该文件再次出现 system 级异常不 raise 的新实例时 |
 | P3-CON04-Subprocess-Cancel | review02 CON-04：subprocess 不可取消长任务停机交互——terminate 仅终止 sidecar 包装 / dump 中断残留不自动清理 / restore 拒绝取消 / run\_async 无可中断变体 | P3 | ① 用户报告停机后 `.partial` 残留或孤儿 pg\_dump 占用磁盘/连接；② restore 取消成为产品需求；③ ThreadPoolManager 重构时 |
-| P3-M9-TaskManager-LogAsyncOperation-Threshold | #M9-014 性能监控阈值：task\_manager.py cancel\_all\_running\_async 标注 DB\_SINGLE\_QUERY 但实际是批量操作 | P3 | ① 性能监控告警误报/漏报时；② 或该文件再次出现阈值与实际操作类型不符的新实例时 |
 | P3-M11-StartupViews-HomeViewModel-Static-Call | #M11-002 MVVM 边界：startup\_views.py View 直接调用 HomeViewModel 静态方法 | P3 | ① 启动流程或 news alert 监听机制被独立重构时；② 或 ui 层再次出现 View 直调 VM 静态方法的新实例时 |
 | P3-M12-StockDetailDialog-View-Holds-Page-DataProcessor | #M12-014 MVVM 边界：stock\_detail\_dialog.py View 直接持有 page/data\_processor 引用 | P3 | ① 该文件再次出现 View 越界持有 page/data\_processor 的新实例时；② 或 ui 层 MVVM 迁移完成（`ui/views` 与 `ui/components` 下无 View 直接持有 page/data\_processor）时 |
 | P3-M12-BacktestConfigPanel-No-VM | #M12-015 MVVM 边界：backtest\_config\_panel.py 13 个 use\_state 未建 VM | P3 | ① 该文件再次出现 `use_state` 未建 VM 的新实例时；② 或 ui 层 MVVM 迁移完成时 |
@@ -147,20 +146,6 @@ M9 services 模块检视发现：`services/backtest_service.py:132-158`（`_pers
 **期望的最终解法**
 
 保持现状（合理设计），或评估是否在 system 级 raise。验收标准：① 若改造，现有 `test_backtest_service*.py` 全过；② 新增 EngineDisposedError 触发 system 级 raise 的单测。upgrade 触发条件：① R5 红线适用范围扩展至回测持久化路径时；② 或该文件再次出现 system 级异常不 raise 的新实例时。
-
-#### P3-M9-TaskManager-LogAsyncOperation-Threshold：#M9-014 性能监控阈值：task\_manager.py cancel\_all\_running\_async 标注 DB\_SINGLE\_QUERY 但实际是批量操作
-
-| 级别 | 一句话 | upgrade 触发条件 |
-|------|--------|------------------|
-| **P3-M9-TaskManager-LogAsyncOperation-Threshold** | #M9-014 性能监控阈值：task\_manager.py cancel\_all\_running\_async 标注 DB\_SINGLE\_QUERY 但实际是批量操作 | ① 性能监控告警误报/漏报时；② 或该文件再次出现阈值与实际操作类型不符的新实例时 |
-
-**产生背景与现状**
-
-M9 services 模块检视发现：`services/task_manager.py:741-742`（`cancel_all_running_async`，装饰器 :741 / 方法定义 :742）标注 `@log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)`，但该方法实际是批量取消+等待，可能更适合 `DB_BULK_IO`。阈值选择影响性能监控告警精度，不影响功能。M9 未修复原因：修改需评估历史告警基线。相关文件：`services/task_manager.py:741-742`。
-
-**期望的最终解法**
-
-若性能监控告警基线评估后确认阈值不当，改为 `PerfThreshold.DB_BULK_IO`。验收标准：① 告警基线评估完成；② 现有 `test_task_manager*.py` 全过。upgrade 触发条件：① 性能监控告警误报/漏报时；② 或该文件再次出现阈值与实际操作类型不符的新实例时。
 
 ### 红线自动化与类型压制
 

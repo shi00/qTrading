@@ -738,7 +738,7 @@ class TaskManager:
             self._schedule_coro(self._clear_finished_db(delete_ids))
         self._notify_subscribers()
 
-    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def cancel_all_running_async(self, join_timeout: float = 2.5, persist_timeout: float = 1.0):
         """Async version: cancel all running tasks with guaranteed DB writes.
         Called from main.py cleanup to ensure persistence before loop closes.
