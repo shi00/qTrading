@@ -6,7 +6,11 @@ logger 注入等行为。
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.error_logging import log_exception_with_severity
+
+pytestmark = pytest.mark.unit
 
 
 @patch("app.error_logging.DataSanitizer.sanitize_error")

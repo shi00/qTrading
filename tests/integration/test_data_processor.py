@@ -169,6 +169,8 @@ class TestDataProcessor(unittest.TestCase):
         self.patcher_api.stop()
         self.patcher_config_mixin.stop()
         self.patcher_config.stop()
+        # R7：集成测试无 autouse 单例重置，显式清理，避免 mock 依赖泄漏到后续用例/顺序依赖。
+        DataProcessor._reset_singleton()
 
     # ==========================================================
     # Section 1: Singleton & Mixin Integration Tests

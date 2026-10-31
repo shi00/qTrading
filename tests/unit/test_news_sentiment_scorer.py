@@ -1055,6 +1055,8 @@ class TestScoreForConnection:
     """统一单连接入口判定用例（Plans.md S2 DoD：四场景回归）。"""
 
     @pytest.mark.asyncio
+    @patch("services.news_sentiment_scorer._HAS_LLAMA_CPP", True)
+    @patch("services.news_sentiment_scorer._HAS_TOKENIZERS", True)
     async def test_cancel_then_immediate_submit_late_response_discarded(self):
         """场景①同模型不同输入：A 取消后 B 立即提交，A 迟到响应（rid=0）被
         rid 配对丢弃——B 的结果与用量只含 B 自己的输入，不发生数据串扰。"""
@@ -1120,6 +1122,8 @@ class TestScoreForConnection:
         mgr._cancel_cleanup_task()
 
     @pytest.mark.asyncio
+    @patch("services.news_sentiment_scorer._HAS_LLAMA_CPP", True)
+    @patch("services.news_sentiment_scorer._HAS_TOKENIZERS", True)
     async def test_connection_switch_reloads_new_paths_and_head(self, tmp_path):
         """场景②跨连接三文件与 head 切换：conn1 取消后 conn2 提交，
         真实 _ensure_ready 按新三文件路径走完整重载链并换用新 head。"""
@@ -1181,6 +1185,8 @@ class TestScoreForConnection:
         mgr._cancel_cleanup_task()
 
     @pytest.mark.asyncio
+    @patch("services.news_sentiment_scorer._HAS_LLAMA_CPP", True)
+    @patch("services.news_sentiment_scorer._HAS_TOKENIZERS", True)
     async def test_startup_cancel_quarantines_and_propagates(self):
         """场景③启动取消：ready 等待阶段取消 → CancelledError 传播（R2），
         worker 隔离并 spawn 清理任务（隔离覆盖启动/ready 阶段）。"""

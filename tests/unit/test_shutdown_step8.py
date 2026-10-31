@@ -21,6 +21,8 @@ import pytest
 
 from utils.shutdown import ShutdownCoordinator, _CLEANUP_STEPS
 
+pytestmark = pytest.mark.unit
+
 
 def test_step8_in_cleanup_steps_at_index_9() -> None:
     """_CLEANUP_STEPS[9] 应为 Step 8 定义（N3-3 插入 Step 5b 后 Step 8 位于 index 9）。"""

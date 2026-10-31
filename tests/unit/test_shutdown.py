@@ -543,21 +543,27 @@ class TestShutdownCoordinatorCleanupSteps:
         mgr = NewsSentimentScorer()
         proc = multiprocessing.Process(target=time.sleep, args=(30,))
         proc.start()
-        mgr._worker_proc = proc
-        # _shutdown_worker_locked 以 _request_queue 非 None 作为清理块入口条件，
-        # 生产场景 queue 在 proc.start() 前创建（_ensure_worker_impl L599-600）；
-        # 测试须同步补齐，否则 kill 块整体跳过（首次跑已实测）。
-        mgr._request_queue = MagicMock(spec=queue.Queue)
-        mgr._worker_ready = False
-        mgr._model_path = "model.gguf"
-        coord = ShutdownCoordinator()
-        with patch("services.news_sentiment_scorer.NewsSentimentScorer") as mock_nss:
-            mock_nss._instance = mgr
-            start = time.perf_counter()
-            await coord._step5b_stop_sentiment_scorer()
-            elapsed = time.perf_counter() - start
-        assert elapsed < 2.0, f"Step 5b took {elapsed:.2f}s, exceeding the 2.0s budget"
-        assert proc.exitcode is not None  # 子进程已被 terminate 并退出
+        try:
+            mgr._worker_proc = proc
+            # _shutdown_worker_locked 以 _request_queue 非 None 作为清理块入口条件，
+            # 生产场景 queue 在 proc.start() 前创建（_ensure_worker_impl L599-600）；
+            # 测试须同步补齐，否则 kill 块整体跳过（首次跑已实测）。
+            mgr._request_queue = MagicMock(spec=queue.Queue)
+            mgr._worker_ready = False
+            mgr._model_path = "model.gguf"
+            coord = ShutdownCoordinator()
+            with patch("services.news_sentiment_scorer.NewsSentimentScorer") as mock_nss:
+                mock_nss._instance = mgr
+                start = time.perf_counter()
+                await coord._step5b_stop_sentiment_scorer()
+                elapsed = time.perf_counter() - start
+            assert elapsed < 2.0, f"Step 5b took {elapsed:.2f}s, exceeding the 2.0s budget"
+            assert proc.exitcode is not None  # 子进程已被 terminate 并退出
+        finally:
+            # 断言失败/异常时也须回收真实子进程，避免 30s 长眠进程泄漏到后续用例。
+            if proc.is_alive():
+                proc.terminate()
+            proc.join(timeout=5.0)
 
     @pytest.mark.asyncio
     async def test_step5b_cancelled_error_propagates(self):

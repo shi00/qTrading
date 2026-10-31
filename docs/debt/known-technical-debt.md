@@ -58,9 +58,9 @@
 | P3-DataExplorer-SyncEngine-Unification | DataExplorer 同步引擎游离于统一连接管理（举一反三登记，本期不实施） | P3 | ① DataExplorer 再次出现连接错口/引擎缓存跨模式复用问题；② 或统一连接管理重构时 |
 | P3-UX06-Startup-SLA-E2E-Gap | 冷启动到导航可交互的端到端 SLA 未实测（UX-06 以 proxy 构成基线替代，如实记录缺位） | P3 | ① 真实端到端测量 > 8s（SLA 超阈）时触发 visited\_tabs 顶层推广（`test_consumes_all_seven_subviews_in_stack` 改写 + #438 范式推广）；② 或启动流程重构时 |
 | P3-B12-Screener-Formatting-Logic-in-VM | #B12-2 review02 B12 第 2 步：格式化逻辑下沉 VM（`_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM） | P3 | ① report04 D9（AI 流式更新重建机制重构）合并时；② 或 `screener_view` 再次因格式化逻辑内联出现缺陷时 |
-| P2-BT05-QualityGate-Bypass | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计） | P2 | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或 review03 BT-05 第二步实施（实现 `evaluate_historical_window()` 区间质量评估）时 |
+| P2-BT05-QualityGate-Bypass | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化；区间覆盖缺口评估已实现，按表等级质量评估待设计） | P2 | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或残余第二步实施（按表/等级质量评估接入回测路径）时 |
 | P3-TA-OSS05-DualImpl | 技术指标 pandas 薄委托层与 Polars 表达式正本的 OSS-05 等价性结论（等价域与镜像分叉）仅由测试断言守护，测试重构后决策依据将失传（原著 reviews/ 已丢失） | P3 | ① 技术指标测试文件（`test_technical_analysis_equivalence.py`）被重构或拆分时；② 或双实现面再次扩散（pandas 入口出现独立算法、或新增未经等价性断言覆盖的指标分支）时；③ 或指标语义变更时 |
-| P3-N54-Model-File-Trust-Boundary | 情绪模型文件（GGUF/head.npz）保存期仅轻量校验（GGUF 4 字节魔数 / head 结构与数值），不构成对文件内容的信任，来源由用户自担 | P3 | ① App 引入模型下载/分发渠道（文件来源不再由用户自备）时；② 或 GGUF/head 解析器漏洞（如 llama.cpp/np.load CVE）公开披露时；③ 或安全审计要求文件内容级校验（哈希白名单/签名）时 |
+| P3-N54-Model-File-Trust-Boundary | 情绪模型文件（GGUF/head.npz）加载期仅轻量校验（GGUF 4 字节魔数 / head 结构与数值），不构成对文件内容的信任，来源由用户自担 | P3 | ① App 引入模型下载/分发渠道（文件来源不再由用户自备）时；② 或 GGUF/head 解析器漏洞（如 llama.cpp/np.load CVE）公开披露时；③ 或安全审计要求文件内容级校验（哈希白名单/签名）时 |
 | P3-RedlineAuto-Grimp-Namespace-Blindspot | import-linter/grimp 不建模命名空间包（`data/sync/` 无 `__init__.py`），指向该子包的 R1 违规处于门禁盲区（UTILS-A-01 实证） | P3 | ① grimp/import-linter 升级或补 `data/sync/__init__.py` 等建模手段使契约开始实际拦截时；② 或再次出现指向 `data.sync.*` 的未登记跨层 lazy import 新实例时 |
 | P3-REV03-Dao-MaxRows | review03 C4：`_read_db`/`_read_db_select` 已提供 max_rows 安全阀，但多数全表扫描调用点未显式设置，数据增长后可能一次性载入全量 | P3 | ① `data/persistence/daos/` 再次新增未显式传 max_rows 的全表扫描调用点时；② 或出现因全量载入导致的内存/超时故障报告时；③ 或数据访问层重构时 |
 | P3-REV03-ScreeningHistory-SQLCore | review03 C7：screener_dao 查询仍有 f-string 拼列名 / ORDER BY（screening_history），非注入风险，待迁移 SQLAlchemy Core | P3 | ① `data/persistence/daos/` 再次出现 f-string 拼列名/ORDER BY 的新实例时；② 或 screening_history 查询被改造/扩展时 |
@@ -312,19 +312,21 @@ M3 模块化检视发现：`app/bootstrap.py:299`（`MetaDataManager.preload_ali
 
 不主动修复。若未来 `preload_aliases` / `validate_failover_credentials` / `validate_strategy_tier_coverage` 引入网络 IO 或耗时 CPU 操作（如 >100ms），改用 `ThreadPoolManager().run_async(TaskType.IO, ...)` 提交。验收标准：① 改造后启动期 UI 无阻塞；② 现有 `test_bootstrap.py` 全过。upgrade 触发条件：① 这些函数引入网络/磁盘 IO；② 或启动期 UI 响应延迟被用户感知时。
 
-#### P3-N54-Model-File-Trust-Boundary：情绪模型文件（GGUF/head.npz）保存期仅轻量校验，不构成对文件内容的信任（来源由用户自担）
+#### P3-N54-Model-File-Trust-Boundary：情绪模型文件（GGUF/head.npz）加载期仅轻量校验，不构成对文件内容的信任（来源由用户自担）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P3-N54-Model-File-Trust-Boundary** | 情绪模型文件（GGUF/head.npz）保存期仅轻量校验（GGUF 4 字节魔数 / head 结构与数值），不构成对文件内容的信任，来源由用户自担 | ① App 引入模型下载/分发渠道（文件来源不再由用户自备）时；② 或 GGUF/head 解析器漏洞（如 llama.cpp/np.load CVE）公开披露时；③ 或安全审计要求文件内容级校验（哈希白名单/签名）时 |
+| **P3-N54-Model-File-Trust-Boundary** | 情绪模型文件（GGUF/head.npz）加载期仅轻量校验（GGUF 4 字节魔数 / head 结构与数值），不构成对文件内容的信任，来源由用户自担 | ① App 引入模型下载/分发渠道（文件来源不再由用户自备）时；② 或 GGUF/head 解析器漏洞（如 llama.cpp/np.load CVE）公开披露时；③ 或安全审计要求文件内容级校验（哈希白名单/签名）时 |
 
 **产生背景与现状**
 
-N5-4 模型分发裁定「首次使用由用户下载/选择文件」路线（不随安装包打包）：设置页三路径支持手输或文件选择器，保存时校验 = GGUF 4 字节魔数（`_validate_model_file`）+ `head.npz` 结构校验（`load_head_npz`：`allow_pickle=False` + mode/形状/标签序/有限性）+ 分词器存在性。边界：① 魔数/结构校验不防「结构合法但内容恶意构造」的文件（如精心构造触发解析器漏洞的 GGUF）；② 分词器仅校验存在，内容合法性依赖可选 `tokenizers` 栈在加载期暴露；③ 模型文件由用户自行获取（自训/第三方转换），来源与合规由用户承担——设置页 hint 已明示。实际攻击面评估：文件解析发生在常驻子进程（`_scoring_worker`，崩溃由父进程终止重启兜底）与父进程 `np.load`（`allow_pickle=False` 已封死 pickle 载体主攻击面），且打分输出仅用于展示边界（ADR-0008），不进入策略/回测决策。
+N5-4 模型分发裁定「首次使用由用户下载/选择文件」路线（不随安装包打包）：设置页「AI 大脑 → 模型管理」的连接表单（`gguf_sentiment` 适配器）提供编码模型/分类头/分词器三路径，支持手输或文件选择器；**保存期仅校验三路径非空**（`ui/viewmodels/model_connections_view_model.py::_validate_draft`），GGUF 4 字节魔数（`_validate_model_file`）+ `head.npz` 结构校验（`load_head_npz`：`allow_pickle=False` + mode/形状/标签序/有限性）+ 分词器存在性属**首次加载/打分期校验**（`services/news_sentiment_scorer.py::_validate_input_files`，不通过则整体返回 `None`）。边界：① 魔数/结构校验不防「结构合法但内容恶意构造」的文件（如精心构造触发解析器漏洞的 GGUF）；② 分词器仅校验存在，内容合法性依赖可选 `tokenizers` 栈在加载期暴露；③ 模型文件由用户自行获取（自训/第三方转换），来源与合规由用户承担——来源边界仅在 [ai-service.md](../patterns/ai-service.md)「6.1 模型产物分发与归档」明示，UI 表单未提供来源提示文案。实际攻击面评估：文件解析发生在常驻子进程（`_scoring_worker`，崩溃由父进程终止重启兜底）与父进程 `np.load`（`allow_pickle=False` 已封死 pickle 载体主攻击面），且打分输出仅用于展示边界（ADR-0008），不进入策略/回测决策。
+
+**现状校准（2026-10-31 复核）**：本节原写「保存时校验 = GGUF 魔数 + `head.npz` 结构 + 分词器存在性」且「设置页 hint 已明示」，与实现不符——连接表单保存只校验三路径非空，轻量校验在 `NewsSentimentScorer._validate_input_files`（`services/news_sentiment_scorer.py:530`）与 `load_head_npz`（`:131`）于首次加载/打分期执行；UI 字符串无来源合规提示（`locales/zh_CN/strings.json` 无对应条目）。威胁模型结论不变：轻量校验 + 子进程隔离 + 来源自担仍成立。
 
 **期望的最终解法**
 
-不主动修复（当前威胁模型下轻量校验 + 子进程隔离 + 来源自担为合理权衡）。若升级为内容级信任需求：① 分发渠道内置时改哈希白名单或签名校验；② 解析器 CVE 披露时升级依赖版本并在校验链加内容级约束。验收标准：校验链单测覆盖新增约束；`ai-service.md` §6.1 同步。upgrade 触发条件见上表。
+不主动修复（当前威胁模型下轻量校验 + 子进程隔离 + 来源自担为合理权衡）。若升级为内容级信任需求：① 分发渠道内置时改哈希白名单或签名校验；② 解析器 CVE 披露时升级依赖版本并在校验链加内容级约束。验收标准：校验链单测覆盖新增约束；[ai-service.md](../patterns/ai-service.md)「6.1 模型产物分发与归档」同步。upgrade 触发条件见上表。
 
 #### P3-M12-StockDetailDialog-BuildContent-No-Cover：#M12-031 测试覆盖：stock\_detail\_dialog.py:505 \_build\_content pragma: no cover
 
@@ -362,7 +364,7 @@ M12 ui 表现层模块检视发现：`ui/components/stock_detail_dialog.py:505` 
 
 **产生背景与现状**
 
-review02 B12 已实现第 1 步（data\_version memo 缓存，消除无谓重算，解决 90%）；第 2 步需将 `_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM，state 携带渲染就绪数据。跨 VM 边界且与 report04 D9（AI 流式更新重建机制重构）"避免 data\_version 未变时全量重建"目标耦合，故本批次只实现第 1 步，第 2 步登记为依赖 D9 的后续任务（修复方案 §B12 第 2 步）。相关文件：`ui/views/screener_view.py`。
+review02 B12 已实现第 1 步（memo 缓存，消除无谓重算，解决 90%）。**现状校准（2026-10-31 复核）**：早期实现称作 `data\_version`，该字段现已不存在；当前机制为 `_resolve_table_data`（`ui/views/screener_view.py:1606-1620`）以「行元组引用 + locale」为键的 `ft.Ref` memo，叠加 AI 三分区的 `ft.use_memo` 依赖缓存。第 2 步需将 `_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM，state 携带渲染就绪数据。跨 VM 边界且与 report04 D9（AI 流式更新重建机制重构）"避免行数据未变时全量重建"目标耦合，故本批次只实现第 1 步，第 2 步登记为依赖 D9 的后续任务（修复方案 §B12 第 2 步）。相关文件：`ui/views/screener_view.py`。
 
 **期望的最终解法**
 
@@ -598,7 +600,7 @@ M12 ui 表现层模块检视发现：`ui/components/news_feed.py:328/359` `on_lo
 
 **产生背景与现状**
 
-UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`scripts/probe/startup_perf.py` 可复现）：依赖库 import \~5.4s（本机 dev 基准，pandas 主导）+ 单例 \~0.46s + 7 View 渲染 \~0.16-1.03s ≈ 6.5-7s；litellm 已由 `ai_service._ensure_litellm_loaded` 双层惰性移除 18s+ 阻塞（实测 litellm 不在 import/构造链）。visited\_tabs 懒构造推广判定为收益/风险比不成立（可省 \~1-1.4s 仅 15-20%，主导成本 import 不可省；且转嫁首次切页冻结 + 契约测试改写）。**缺位**：端到端真实冷启动→NavigationRail 可交互测量（含 DB/embedded-PG 初始化、低性能机器）需 GUI/浏览器环境，无头无法执行，SLA（定义 8s 阈值）状态按 proxy 构成判定达标，未以真实启动实测佐证。**现状校准（2026-10-30 复核）**：E2E（浏览器模式）实测启动链路为 sidecar 就绪 + Chromium CanvasKit 加载（单用例 setup 约 44-65s），与桌面端 `python main.py` 冷启动口径不可比，仍不能替代 GUI 端到端测量；本条保持。相关文件：`scripts/probe/startup_perf.py`、`ui/app_layout.py`（\_build\_pages\_stack）、`app/bootstrap.py`（已删 E2E 无效预热）、`UX-06-方案设计.md`（worktree 内）。
+UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`scripts/probe/startup_perf.py` 可复现）：依赖库 import \~5.4s（本机 dev 基准，pandas 主导）+ 单例 \~0.46s + 7 View 渲染 \~0.16-1.03s ≈ 6.5-7s；litellm 已由 `ai_service._ensure_litellm_loaded` 双层惰性移除 18s+ 阻塞（实测 litellm 不在 import/构造链）。visited\_tabs 懒构造推广判定为收益/风险比不成立（可省 \~1-1.4s 仅 15-20%，主导成本 import 不可省；且转嫁首次切页冻结 + 契约测试改写）。**缺位**：端到端真实冷启动→NavigationRail 可交互测量（含 DB/embedded-PG 初始化、低性能机器）需 GUI/浏览器环境，无头无法执行，SLA（定义 8s 阈值）状态按 proxy 构成判定达标，未以真实启动实测佐证。**现状校准（2026-10-30 复核）**：E2E（浏览器模式）实测启动链路为 sidecar 就绪 + Chromium CanvasKit 加载（单用例 setup 约 44-65s），与桌面端 `python main.py` 冷启动口径不可比，仍不能替代 GUI 端到端测量；本条保持。相关文件：`scripts/probe/startup_perf.py`、`ui/app_layout.py`（\_build\_pages\_stack）、`app/bootstrap.py`（已删 E2E 无效预热）、`UX-06-方案设计.md`（本地设计稿，未纳入本仓库）。
 
 **期望的最终解法**
 
@@ -606,19 +608,21 @@ UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`s
 
 ### 回测与数据质量
 
-#### P2-BT05-QualityGate-Bypass：回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计）
+#### P2-BT05-QualityGate-Bypass：回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化；区间覆盖缺口评估已实现，按表等级质量评估待设计）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P2-BT05-QualityGate-Bypass** | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计） | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或 review03 BT-05 第二步实施（实现 `evaluate_historical_window()` 区间质量评估）时 |
+| **P2-BT05-QualityGate-Bypass** | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化；区间覆盖缺口评估已实现，按表等级质量评估待设计） | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或残余第二步实施（按表/等级质量评估接入回测路径）时 |
 
 **产生背景与现状**
 
-`strategies/backtest/data_provider.py::_BacktestQualityProxy` 为让回测历史任意时点数据通过质量门控，硬编码 `QualityTier.GOLD` 绕过 `@require_quality`/`_check_tier`（CLAUDE.md §3.2 强制要求）。结果：回测使用的历史数据（含缺失日/异常值/未复权段）不反映数据质量问题，策略 `required_quality_tier` 声明形同虚设，与 UN-04「可信地验证」冲突。完成第一步（代码处 `# NOTE(lazy)` 三要素显式标记 + 本条目登记）后，权衡对维护者可见。
+`strategies/backtest/data_provider.py::_BacktestQualityProxy` 为让回测历史任意时点数据通过质量门控，硬编码 `QualityTier.GOLD` 绕过 `@require_quality`/`_check_tier`（CLAUDE.md §3.2 强制要求）。结果：回测使用的历史数据（异常值/未复权段等）不反映数据质量问题，策略 `required_quality_tier` 声明形同虚设，与 UN-04「可信地验证」冲突。完成第一步（代码处 `# NOTE(lazy)` 三要素显式标记 + 本条目登记）后，权衡对维护者可见。
 
-**期望的最终解法**
+**现状更新（2026-10-31）**：区间**交易日覆盖缺口**部分已落地——`BacktestDataProvider.evaluate_range_quality()`（BT-03 MAJOR-02）在成功预载 / 宽区间跳过 / 预载失败全部路径求「交易日全集 − 实际覆盖」差值，写入代理的 `_scan_missing_dates` 并产出 `[range_quality_gaps]` / `[range_quality_coverage_unverified]`（覆盖未知，R21 fail-closed）两类 `DataWarning`（`data_quality` → UI `unreliable`）；缺口日 `screening_data` 为空 → 该日无信号。残余缺口：`_quality_tier` 仍恒 GOLD，**按表/等级质量评估未接入回测路径**，异常值/未复权段等问题仍不经等级门控反映。
 
-**实现区间质量评估 `evaluate_historical_window()`**：复用 `DataProcessor._scan_missing_dates`（`require_continuous_window` 在用）按回测区间 `[start, end]` 计算缺失交易日比例 → BRONZE/SILVER/GOLD；低于策略要求时**不拒绝执行**，改为回测结果产生 `DataWarning` 显式告知用户。相关文件：`strategies/backtest/data_provider.py`、`data/data_processor.py`。
+**期望的最终解法（残余部分）**
+
+按回测区间把**按表/等级质量评估**接入回测门控（而非仅覆盖缺口告警）：复用实盘逐表质量数据与 `DataProcessor._scan_missing_dates` 口径，对区间聚合出实际质量等级；低于策略声明时**不拒绝执行**，以 `DataWarning` 显式告知（覆盖缺口告警已由 `evaluate_range_quality()` 承载，无需重复实现）。相关文件：`strategies/backtest/data_provider.py`、`data/data_processor.py`。
 
 ### 技术指标双实现（OSS-05）
 
