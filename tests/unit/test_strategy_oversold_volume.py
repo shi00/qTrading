@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 from utils.technical_analysis import TechnicalAnalysis
 from strategies.oversold_strategy import OversoldStrategy
 
-pytestmark = pytest.mark.integration
+# 分层归属：单组件（OversoldStrategy）+ DataProcessor mock，无 DB 依赖 → 单元层
+pytestmark = pytest.mark.unit
 
 
 def _build_quotes_df(ts_code, dates, close_start, vol_base, vol_spike_at=None):

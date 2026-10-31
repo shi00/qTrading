@@ -12,7 +12,8 @@ from utils.technical_analysis import TechnicalAnalysis
 import pytest
 
 
-pytestmark = pytest.mark.integration
+# 分层归属：单组件（TechnicalAnalysis._get_qfq_df）纯逻辑，无 DB 依赖 → 单元层
+pytestmark = pytest.mark.unit
 
 
 class TestQfqNumericalCorrectness(unittest.TestCase):
