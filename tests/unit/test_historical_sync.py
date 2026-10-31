@@ -13,6 +13,12 @@ from data.sync.base import SyncResult, SyncStatus
 pytestmark = pytest.mark.unit
 
 
+def _timeout_without_wait(coro, *args, **kwargs):
+    """跳过真实退避：关闭待等待协程并立即抛 TimeoutError（等价于退避超时且不产生未 await 警告）。"""
+    coro.close()
+    raise TimeoutError
+
+
 def make_ctx():
     ctx = MagicMock()
     ctx.api = AsyncMock()
@@ -1397,9 +1403,14 @@ class TestHistoricalSyncRunDeepBranches:
         ctx.api.get_daily_basic = AsyncMock(side_effect=Exception("API fail"))
         strategy = HistoricalSyncStrategy(ctx)
         result = SyncResult()
-        with patch(
-            "utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy",
-            return_value=1,
+        # 批次退避（wait_for）与智能重试间隔（sleep 2s）在单测中跳过，避免白等约 4s。
+        with (
+            patch("data.sync.historical.asyncio.wait_for", side_effect=_timeout_without_wait),
+            patch("data.sync.historical.asyncio.sleep", new_callable=AsyncMock),
+            patch(
+                "utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy",
+                return_value=1,
+            ),
         ):
             await strategy._run_historical_sync(5, None, result)
         assert result.status in ("failed", "partial")
@@ -1500,6 +1511,8 @@ class TestHistoricalSyncRunDeepBranches:
             progress_values.append(done)
 
         with (
+            patch("data.sync.historical.asyncio.wait_for", side_effect=_timeout_without_wait),
+            patch("data.sync.historical.asyncio.sleep", new_callable=AsyncMock),
             patch(
                 "utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy",
                 return_value=1,
@@ -1528,6 +1541,8 @@ class TestHistoricalSyncRunDeepBranches:
         strategy = HistoricalSyncStrategy(ctx)
         result = SyncResult()
         with (
+            patch("data.sync.historical.asyncio.wait_for", side_effect=_timeout_without_wait),
+            patch("data.sync.historical.asyncio.sleep", new_callable=AsyncMock),
             patch(
                 "utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy",
                 return_value=1,
