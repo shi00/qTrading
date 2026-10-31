@@ -30,6 +30,12 @@ SMOKE_SCRIPTS = (
 # 调用运算符直接拉起 GUI 安装器/卸载器（`& $InstallerPath ...` / `& $oldInstaller ...`）
 _GUI_CALL_OPERATOR = re.compile(r"(?m)^\s*&\s*\$(?:InstallerPath|UninstallerPath|existingUninstaller|oldInstaller)\b")
 
+# 安装新版本的完整调用行：静默参数 + -PassThru（取进程对象）+ -Wait（等 GUI 结束）
+_INSTALLER_INVOCATION = re.compile(
+    r"(?m)^\s*\$(installerProc|upgradeInstallerProc) = Start-Process -FilePath \$InstallerPath "
+    r"-ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait\r?$"
+)
+
 
 def _read(name: str) -> str:
     return (SCRIPTS_DIR / name).read_text(encoding="utf-8")
@@ -44,15 +50,30 @@ def test_gui_installers_not_invoked_via_call_operator(script_name: str) -> None:
     )
 
 
-@pytest.mark.parametrize("script_name", ["installer_smoke_uninstall.ps1", "installer_smoke_upgrade.ps1"])
-def test_installer_invocation_waits_and_checks_exit_code(script_name: str) -> None:
-    """安装新版本必须以 ``Start-Process -FilePath $InstallerPath -PassThru -Wait`` 调用并校验退出码。"""
+@pytest.mark.parametrize(
+    ("script_name", "expected_proc"),
+    [
+        ("installer_smoke_uninstall.ps1", "installerProc"),
+        ("installer_smoke_upgrade.ps1", "upgradeInstallerProc"),
+    ],
+)
+def test_installer_invocation_waits_and_checks_exit_code(script_name: str, expected_proc: str) -> None:
+    """安装新版本必须以 ``Start-Process -FilePath $InstallerPath ... -PassThru -Wait`` 调用并校验退出码。
+
+    强断言三项：调用行完整形态（静默参数 + ``-PassThru`` 取进程对象 + ``-Wait`` 等待）、
+    调用次数恰为 1、退出码断言引用同一进程变量。
+    """
     text = _read(script_name)
-    invocation = re.search(r"Start-Process -FilePath \$InstallerPath[^\n]*-PassThru -Wait", text)
-    assert invocation is not None, f"{script_name} 未以 Start-Process -Wait 调用安装器"
-    assert "($installerProc.ExitCode -eq 0)" in text or "($upgradeInstallerProc.ExitCode -eq 0)" in text, (
-        f"{script_name} 未校验安装器退出码"
+    invocations = _INSTALLER_INVOCATION.findall(text)
+    assert invocations == [expected_proc], (
+        f"{script_name} 未按 `$<proc> = Start-Process -FilePath $InstallerPath "
+        "-ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait` 调用安装器"
+        "（GUI 程序不 -Wait 会读到半解包目录，不 -PassThru 无法校验退出码）"
     )
+    assert text.count("Start-Process -FilePath $InstallerPath") == 1, (
+        f"{script_name} 安装器调用次数应为 1，实际 {text.count('Start-Process -FilePath $InstallerPath')}"
+    )
+    assert f"Assert-True (${expected_proc}.ExitCode -eq 0)" in text, f"{script_name} 未校验 {expected_proc} 退出码"
 
 
 def test_uninstall_script_waits_for_uninstaller() -> None:

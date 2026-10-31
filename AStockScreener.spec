@@ -1,6 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
+import atexit
 import hashlib
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -76,9 +78,25 @@ binaries = collect_dynamic_libs("llama_cpp")
 # 一并收集到 ``_internal/sidecars/``；installer.iss 递归收集该目录并安装到
 # ``{app}\_internal\sidecars\``。binary 以原字节复制（strip=False / upx=False），
 # 故旁文件摘要即安装后 binary 的实际摘要。
+def _cleanup_stage_dirs() -> None:
+    """构建进程退出（atexit）时清理 sidecar 旁文件临时目录，不残留临时目录。
+
+    spec 在 PyInstaller 主构建进程内执行：延时到进程退出才删除，保证 Analysis/COLLECT
+    读取 ``datas`` 期间旁文件仍在（不破坏打包产物）；COLLECT 已把文件复制进 dist。
+    """
+    for stage_dir in _stage_dirs:
+        shutil.rmtree(stage_dir, ignore_errors=True)
+    _stage_dirs.clear()
+
+
+_stage_dirs: list[Path] = []
+atexit.register(_cleanup_stage_dirs)
+
+
 def _stage_sidecar_with_sha256(binary_path: Path) -> None:
     binaries.append((str(binary_path), "sidecars"))
     stage_dir = Path(tempfile.mkdtemp(prefix="qtrading-sidecar-sha-"))
+    _stage_dirs.append(stage_dir)  # 登记供 atexit 清理（构建结束不残留临时目录）
     side_file = stage_dir / f"{binary_path.name}.sha256"
     digest = hashlib.sha256(binary_path.read_bytes()).hexdigest()
     side_file.write_text(f"{digest}  {binary_path.name}\n", encoding="utf-8")
