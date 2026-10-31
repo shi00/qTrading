@@ -540,7 +540,7 @@ M12 ui 表现层模块检视发现：`ui/viewmodels/tushare_config_panel_view_mo
 
 **产生背景与现状**
 
-M12 ui 表现层模块检视发现：VM 中重复调用 `TushareClient()` / `TaskManager()` 等单例（每次调用走 `@register_singleton` 的 `__new__` 路径）。虽然单例模式保证只创建一个实例，但重复调用有轻微性能开销。M12 未修复原因：修复需在 VM `__init__` 中缓存单例引用，但需评估生命周期（VM dispose 时是否需要释放）。相关文件：`ui/viewmodels/` 下多个文件。
+M12 ui 表现层模块检视发现：VM 中重复调用 `TushareClient()` / `TaskManager()` 等单例（每次调用都会进入各单例类自身实现的 `__new__`；`@register_singleton` 只负责登记以便统一重置，并不提供 `__new__`）。虽然单例模式保证只创建一个实例，但重复调用有轻微性能开销。M12 未修复原因：修复需在 VM `__init__` 中缓存单例引用，但需评估生命周期（VM dispose 时是否需要释放）。相关文件：`ui/viewmodels/` 下多个文件。
 
 **期望的最终解法**
 
