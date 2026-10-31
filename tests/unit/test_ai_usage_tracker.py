@@ -1,4 +1,5 @@
 import datetime
+import logging
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -162,13 +163,17 @@ class TestAddCostCny:
         assert any("ai_cost:202609" in str(v) for v in _extract_params(stmt))
 
     @pytest.mark.asyncio
-    async def test_handles_exception_gracefully(self):
+    async def test_handles_exception_gracefully(self, caplog):
         mock_conn = MagicMock()
         mock_conn.execute = AsyncMock(side_effect=RuntimeError("write failed"))
         engine = _make_begin_engine(mock_conn)
         tracker = AIUsageTracker(engine=engine)
 
-        await tracker.add_cost_cents(100)
+        with caplog.at_level(logging.WARNING, logger="services.ai_service.usage_tracker"):
+            await tracker.add_cost_cents(100)
+
+        # 写库失败降级为告警而非抛出（不阻断 AI 主流程），且异常路径确实被执行
+        assert "Failed to accumulate cost" in caplog.text
 
 
 def _extract_params(stmt):
@@ -293,10 +298,14 @@ class TestAddUnpriced:
         assert any("ai_unpriced_tokens:202609" in str(v) for v in params)
 
     @pytest.mark.asyncio
-    async def test_handles_exception_gracefully(self):
+    async def test_handles_exception_gracefully(self, caplog):
         mock_conn = MagicMock()
         mock_conn.execute = AsyncMock(side_effect=RuntimeError("write failed"))
         engine = _make_begin_engine(mock_conn)
         tracker = AIUsageTracker(engine=engine)
 
-        await tracker.add_unpriced(3, 500)
+        with caplog.at_level(logging.WARNING, logger="services.ai_service.usage_tracker"):
+            await tracker.add_unpriced(3, 500)
+
+        # 写库失败降级为告警而非抛出（不阻断 AI 主流程），且异常路径确实被执行
+        assert "Failed to accumulate unpriced" in caplog.text
