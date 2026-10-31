@@ -58,7 +58,7 @@
 | P3-DataExplorer-SyncEngine-Unification | DataExplorer 同步引擎游离于统一连接管理（举一反三登记，本期不实施） | P3 | ① DataExplorer 再次出现连接错口/引擎缓存跨模式复用问题；② 或统一连接管理重构时 |
 | P3-UX06-Startup-SLA-E2E-Gap | 冷启动到导航可交互的端到端 SLA 未实测（UX-06 以 proxy 构成基线替代，如实记录缺位） | P3 | ① 真实端到端测量 > 8s（SLA 超阈）时触发 visited\_tabs 顶层推广（`test_consumes_all_seven_subviews_in_stack` 改写 + #438 范式推广）；② 或启动流程重构时 |
 | P3-B12-Screener-Formatting-Logic-in-VM | #B12-2 review02 B12 第 2 步：格式化逻辑下沉 VM（`_format_cell_value`/`_COLUMN_WIDTHS`/`_HIDDEN_COLS` 从 View 迁到 VM） | P3 | ① report04 D9（AI 流式更新重建机制重构）合并时；② 或 `screener_view` 再次因格式化逻辑内联出现缺陷时 |
-| P2-BT05-QualityGate-Bypass | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计） | P2 | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或 review03 BT-05 第二步实施（实现 `evaluate_historical_window()` 区间质量评估）时 |
+| P2-BT05-QualityGate-Bypass | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化；区间覆盖缺口评估已实现，按表等级质量评估待设计） | P2 | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或残余第二步实施（按表/等级质量评估接入回测路径）时 |
 | P3-TA-OSS05-DualImpl | 技术指标（RSI/MACD/KDJ）双实现分叉的 OSS-05 结论仅存于测试 docstring，未登记技术债（原著 reviews/ 已丢失） | P3 | ① 技术指标测试文件（`test_technical_analysis_equivalence.py`）被重构或拆分时；② 或双实现再次扩散（新增未经等价性断言覆盖的指标分支）时；③ 或指标语义变更时 |
 | P3-N54-Model-File-Trust-Boundary | 情绪模型文件（GGUF/head.npz）保存期仅轻量校验（GGUF 4 字节魔数 / head 结构与数值），不构成对文件内容的信任，来源由用户自担 | P3 | ① App 引入模型下载/分发渠道（文件来源不再由用户自备）时；② 或 GGUF/head 解析器漏洞（如 llama.cpp/np.load CVE）公开披露时；③ 或安全审计要求文件内容级校验（哈希白名单/签名）时 |
 | P3-RedlineAuto-Grimp-Namespace-Blindspot | import-linter/grimp 不建模命名空间包（`data/sync/` 无 `__init__.py`），指向该子包的 R1 违规处于门禁盲区（UTILS-A-01 实证） | P3 | ① grimp/import-linter 升级或补 `data/sync/__init__.py` 等建模手段使契约开始实际拦截时；② 或再次出现指向 `data.sync.*` 的未登记跨层 lazy import 新实例时 |
@@ -606,19 +606,21 @@ UX-06（P1-04 冷启动验证）实测生产模式全页构造 proxy 成本（`s
 
 ### 回测与数据质量
 
-#### P2-BT05-QualityGate-Bypass：回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计）
+#### P2-BT05-QualityGate-Bypass：回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化；区间覆盖缺口评估已实现，按表等级质量评估待设计）
 
 | 级别 | 一句话 | upgrade 触发条件 |
 |------|--------|------------------|
-| **P2-BT05-QualityGate-Bypass** | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化，第二步待设计） | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或 review03 BT-05 第二步实施（实现 `evaluate_historical_window()` 区间质量评估）时 |
+| **P2-BT05-QualityGate-Bypass** | 回测路径 _BacktestQualityProxy 硬编码 GOLD 绕过数据质量门控（review03 BT-05 第一步显式化；区间覆盖缺口评估已实现，按表等级质量评估待设计） | ① 回测结论被证伪且根因为数据质量未达策略声明等级时；② 或残余第二步实施（按表/等级质量评估接入回测路径）时 |
 
 **产生背景与现状**
 
-`strategies/backtest/data_provider.py::_BacktestQualityProxy` 为让回测历史任意时点数据通过质量门控，硬编码 `QualityTier.GOLD` 绕过 `@require_quality`/`_check_tier`（CLAUDE.md §3.2 强制要求）。结果：回测使用的历史数据（含缺失日/异常值/未复权段）不反映数据质量问题，策略 `required_quality_tier` 声明形同虚设，与 UN-04「可信地验证」冲突。完成第一步（代码处 `# NOTE(lazy)` 三要素显式标记 + 本条目登记）后，权衡对维护者可见。
+`strategies/backtest/data_provider.py::_BacktestQualityProxy` 为让回测历史任意时点数据通过质量门控，硬编码 `QualityTier.GOLD` 绕过 `@require_quality`/`_check_tier`（CLAUDE.md §3.2 强制要求）。结果：回测使用的历史数据（异常值/未复权段等）不反映数据质量问题，策略 `required_quality_tier` 声明形同虚设，与 UN-04「可信地验证」冲突。完成第一步（代码处 `# NOTE(lazy)` 三要素显式标记 + 本条目登记）后，权衡对维护者可见。
 
-**期望的最终解法**
+**现状更新（2026-10-31）**：区间**交易日覆盖缺口**部分已落地——`BacktestDataProvider.evaluate_range_quality()`（BT-03 MAJOR-02）在成功预载 / 宽区间跳过 / 预载失败全部路径求「交易日全集 − 实际覆盖」差值，写入代理的 `_scan_missing_dates` 并产出 `[range_quality_gaps]` / `[range_quality_coverage_unverified]`（覆盖未知，R21 fail-closed）两类 `DataWarning`（`data_quality` → UI `unreliable`）；缺口日 `screening_data` 为空 → 该日无信号。残余缺口：`_quality_tier` 仍恒 GOLD，**按表/等级质量评估未接入回测路径**，异常值/未复权段等问题仍不经等级门控反映。
 
-**实现区间质量评估 `evaluate_historical_window()`**：复用 `DataProcessor._scan_missing_dates`（`require_continuous_window` 在用）按回测区间 `[start, end]` 计算缺失交易日比例 → BRONZE/SILVER/GOLD；低于策略要求时**不拒绝执行**，改为回测结果产生 `DataWarning` 显式告知用户。相关文件：`strategies/backtest/data_provider.py`、`data/data_processor.py`。
+**期望的最终解法（残余部分）**
+
+按回测区间把**按表/等级质量评估**接入回测门控（而非仅覆盖缺口告警）：复用实盘逐表质量数据与 `DataProcessor._scan_missing_dates` 口径，对区间聚合出实际质量等级；低于策略声明时**不拒绝执行**，以 `DataWarning` 显式告知（覆盖缺口告警已由 `evaluate_range_quality()` 承载，无需重复实现）。相关文件：`strategies/backtest/data_provider.py`、`data/data_processor.py`。
 
 ### 技术指标双实现（OSS-05）
 
