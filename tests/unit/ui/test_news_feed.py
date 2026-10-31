@@ -10,6 +10,8 @@ View 层测试聚焦于契约守护（grep 检查禁止的命令式模式），
 # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
 # 测试行为由测试用例本身验证。
 
+import inspect
+import typing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -712,3 +714,29 @@ class TestBuildLoadMoreButton:
         source = _code_source()
         assert "is_loading_more: bool = False" in source
         assert "_build_load_more_button(is_loading_more, on_load_more_click)" in source
+
+    def test_zero_arg_callback_is_wired_directly(self):
+        """M12-028: 无参业务回调直接接线为 on_click, 不经事件适配器 (不接收 ControlEvent)。"""
+        from ui.components.news_feed import _build_load_more_button
+
+        calls: list[str] = []
+
+        def _on_load_more() -> None:
+            calls.append("clicked")
+
+        container = _build_load_more_button(False, _on_load_more)
+        btn = _collect_buttons(container)[0]
+
+        # 身份透传: 未包裹 event → callback 的适配器/闭包
+        assert btn.on_click is _on_load_more
+        # 零参契约: Flet 按参数个数分发 (0 参不注入事件), handler 签名不得含事件形参
+        handler = typing.cast("typing.Callable[[], None]", btn.on_click)
+        assert list(inspect.signature(handler).parameters) == []
+        handler()
+        assert calls == ["clicked"]
+
+    def test_callback_signature_excludes_control_event(self):
+        """M12-028 契约: `on_load_more_click` 两处声明均为无参回调, 不含 ControlEvent。"""
+        source = _code_source()
+        assert "Callable[[ft.ControlEvent], None]" not in source
+        assert source.count("on_load_more_click: Callable[[], None] | None") == 2

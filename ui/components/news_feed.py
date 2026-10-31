@@ -325,9 +325,13 @@ def _build_news_controls(
 
 def _build_load_more_button(
     is_loading_more: bool,
-    on_load_more_click: Callable[[ft.ControlEvent], None] | None,
+    on_load_more_click: Callable[[], None] | None,
 ) -> ft.Container:
     """构建「加载更多」按钮容器（纯函数）。
+
+    ``on_load_more_click`` 为**无参**业务回调（回调不得接收/依赖 Flet ControlEvent），
+    直接接线为 ``on_click``：Flet 按 handler 参数个数分发（0 参不传事件），故无参回调
+    不会被注入控件事件（M12-028）。
 
     ``is_loading_more=True`` 时按钮置灰禁用并切换为加载中文案, 为用户提供忙碌反馈
     (对齐 ScreenerView run_disabled 惯例); VM 侧 is_loading_more 早返守卫仍保留为兜底。
@@ -342,7 +346,7 @@ def _build_load_more_button(
                 bgcolor={ft.ControlState.DEFAULT: AppColors.PRIMARY},
                 shape=ft.RoundedRectangleBorder(radius=8),
             ),
-            on_click=safe_on_click(on_load_more_click),
+            on_click=on_load_more_click,
             disabled=is_loading_more,
             height=40,
             width=AppStyles.CONTROL_WIDTH_SM,
@@ -356,7 +360,7 @@ def _build_load_more_button(
 def NewsFeed(
     news_rows: tuple[NewsRow, ...] = (),
     has_more: bool = False,
-    on_load_more_click: Callable[[ft.ControlEvent], None] | None = None,
+    on_load_more_click: Callable[[], None] | None = None,
     on_view_stock: Callable[[str], None] | None = None,
     valid_stock_codes: frozenset[str] | None = None,
     is_loading_more: bool = False,
@@ -376,7 +380,8 @@ def NewsFeed(
         news_rows: 新闻行数据 tuple (NewsRow frozen dataclass),
                    空时显示空状态
         has_more: 是否显示"加载更多"按钮
-        on_load_more_click: "加载更多"按钮点击回调
+        on_load_more_click: "加载更多"按钮点击回调 — **无参**业务命令 (不接收
+                   Flet ControlEvent, 由消费方直接绑定 VM command, M12-028)
         on_view_stock: "查看个股"点击回调, 接收股票代码 (Task 8.1)
         valid_stock_codes: 有效股票代码集合 (stock_basic, 经 ViewModel 获取),
                    用于校验"查看个股"链接候选 (UX-09 MINOR-03); 为空时不生成链接
