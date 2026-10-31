@@ -456,7 +456,7 @@ PR #291 触发 Windows 单测 CI 超时调查发现：main 分支最近一次成
 
 **产生背景与现状**
 
-M11 ui 基础设施模块检视发现：`ui/startup_views.py:785` `_setup_news_alert` 中 `HomeViewModel.register_news_alert_listener(on_news_alert)`，`ui/startup_views.py:793` `_cleanup_news_alert` 中 `HomeViewModel.unregister_news_alert_listener(cb)`（2026-10-25 复核）。View 直接 import 并调用 `HomeViewModel` 静态方法注册/注销 news alert listener。严格 MVVM 边界下，View 应通过自身消费的 ViewModel 实例命令转发。已有注释说明（startup\_views.py:763-765）"CLAUDE.md §3.2 MVVM: View 不直调 NewsSubscriptionService, 经 HomeViewModel 命令转发（合规范例 home\_view\_model.py:184）"。cleanup 完整（unregister + ref 置 None），无内存泄漏。M11 未修复原因：修复需引入 StartupViewModel 抽象，属过度设计，违反 §1.3「极简设计」。相关文件：`ui/startup_views.py:763-794`、`ui/viewmodels/home_view_model.py:184`。
+M11 ui 基础设施模块检视发现：`ui/startup_views.py:769` `_setup_news_alert` 中（`:786`）调用 `HomeViewModel.register_news_alert_listener(on_news_alert)`，`ui/startup_views.py:788` `_cleanup_news_alert` 中（`:794`）调用 `HomeViewModel.unregister_news_alert_listener(cb)`（2026-10-31 复核）。View 直接 import 并调用 `HomeViewModel` 静态方法注册/注销 news alert listener。严格 MVVM 边界下，View 应通过自身消费的 ViewModel 实例命令转发。已有注释说明（startup\_views.py:764-766）"CLAUDE.md §3.2 MVVM: View 不直调 NewsSubscriptionService, 经 HomeViewModel 命令转发 (合规范例 home\_view\_model.py:111). View 仅保留需要 page 访问的 toast 回调."。cleanup 完整（unregister + ref 置 None），无内存泄漏。M11 未修复原因：修复需引入 StartupViewModel 抽象，属过度设计，违反 §1.3「极简设计」。相关文件：`ui/startup_views.py:764-797`、`ui/viewmodels/home_view_model.py:255-271`。
 
 **期望的最终解法**
 
