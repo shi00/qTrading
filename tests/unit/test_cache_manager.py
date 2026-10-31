@@ -38,6 +38,12 @@ pytestmark = pytest.mark.unit
 def _make_async_engine_ctx(mock_conn=None):
     if mock_conn is None:
         mock_conn = AsyncMock()
+    # clear_all_cache 在 conn.begin_nested() 的 SAVEPOINT 内执行 DROP/CREATE SCHEMA。
+    # AsyncMock 的默认子方法是协程，不能作为 async context manager（会被当作异常而
+    # 退化到降级路径）；此处给出真实的异步上下文管理器替身，使 CASCADE 主路径可被覆盖。
+    savepoint_ctx = AsyncMock()
+    savepoint_ctx.__aexit__ = AsyncMock(return_value=None)
+    mock_conn.begin_nested = MagicMock(return_value=savepoint_ctx)
     mock_engine_ctx = AsyncMock()
     mock_engine_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
     mock_engine_ctx.__aexit__ = AsyncMock(return_value=None)
@@ -487,6 +493,10 @@ class TestCacheManagerClearAllCache:
             mock_migrator.init_db = AsyncMock()
             await mgr.clear_all_cache()
 
+        # CASCADE 主路径：SAVEPOINT 内执行，且不进入 metadata.drop_all 降级分支
+        mock_conn.begin_nested.assert_called_once_with()
+        mock_conn.run_sync.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_clear_all_cache_sets_maintenance_event(self):
         mgr = _make_mgr()
@@ -539,6 +549,47 @@ class TestCacheManagerClearAllCache:
             mock_evt.return_value.set = MagicMock(side_effect=RuntimeError("event set failed"))
             mock_migrator.init_db = AsyncMock()
             await mgr.clear_all_cache()
+
+    @pytest.mark.asyncio
+    async def test_clear_all_cache_cascade_failure_uses_savepoint_before_fallback(self):
+        """CASCADE 失败降级必须经 SAVEPOINT 隔离（PostgreSQL aborted 事务语义）。
+
+        未加 SAVEPOINT 时，DROP SCHEMA 权限失败会让事务进入 aborted 状态，
+        紧随其后的 ``metadata.drop_all()`` 会在同一个已中止事务上执行而失败，
+        降级分支实际不可用。本测试以「begin_nested 被调用且降级路径仍执行」锁定该修复。
+        """
+        mgr = _make_mgr()
+        mock_conn = AsyncMock()
+        mock_engine_ctx = AsyncMock()
+        mock_engine_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_engine_ctx.__aexit__ = AsyncMock(return_value=None)
+        mgr.engine = MagicMock()
+        mgr.engine.begin = MagicMock(return_value=mock_engine_ctx)
+
+        savepoint_ctx = AsyncMock()
+        # __aexit__ 必须返回 falsy，否则 savepoint 会「吞掉」DROP SCHEMA 异常
+        savepoint_ctx.__aexit__ = AsyncMock(return_value=None)
+        mock_conn.begin_nested = MagicMock(return_value=savepoint_ctx)
+        # 第 1 条语句（DROP SCHEMA）失败触发降级；第 2 条为降级路径的 DROP TABLE alembic_version
+        mock_conn.execute = AsyncMock(side_effect=[RuntimeError("insufficient privilege"), None])
+
+        mock_event = MagicMock()
+        with (
+            patch.object(
+                CacheManager,
+                "_maintenance_event",
+                new_callable=PropertyMock,
+                return_value=mock_event,
+            ),
+            patch("data.persistence.daos.base_dao.BaseDao._get_maintenance_event") as mock_evt,
+            patch.object(mgr, "init_db", new_callable=AsyncMock),
+        ):
+            mock_evt.return_value = MagicMock()
+            await mgr.clear_all_cache()
+
+        mock_conn.begin_nested.assert_called_once_with()
+        mock_conn.run_sync.assert_awaited_once()
+        mock_event.set.assert_called_once_with()
 
 
 class TestCacheManagerWaitForMaintenance:

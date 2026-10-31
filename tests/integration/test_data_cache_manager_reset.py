@@ -106,3 +106,47 @@ class TestClearAllCacheReset:
             rows = result.fetchall()
 
         assert len(rows) >= 1, "alembic_version should still have a version after double clear_all_cache"
+
+    @pytest.mark.asyncio
+    async def test_clear_all_cache_fallback_after_server_side_cascade_failure(
+        self, cache_mgr: CacheManager, test_engine: AsyncEngine, monkeypatch, caplog
+    ):
+        """真实 PostgreSQL 下验证 SAVEPOINT 隔离使 CASCADE 失败的降级分支仍可用。
+
+        测试用户为 SUPERUSER 时 ``DROP SCHEMA public CASCADE`` 必然成功，无法自然触发
+        「权限不足」分支。这里将代码内的 ``DROP SCHEMA public CASCADE`` 替换为服务端
+        必然报错的 ``SELECT 1/0``，让 PostgreSQL 真实地把当前事务置为 aborted（而非在
+        客户端提前抛出）：未包 SAVEPOINT 时随后的 ``metadata.drop_all()`` 会报
+        ``current transaction is aborted``，``clear_all_cache()`` 整体失败；包了
+        SAVEPOINT 则回滚到保存点后连接恢复可用，降级路径完成并重建 schema。
+        """
+        import data.cache.cache_manager as cache_manager_module
+
+        original_text = cache_manager_module.sa.text
+
+        def _failing_text(statement: str):
+            if "DROP SCHEMA" in statement:
+                return original_text("SELECT 1/0")
+            return original_text(statement)
+
+        monkeypatch.setattr(cache_manager_module.sa, "text", _failing_text)
+        caplog.set_level(logging.WARNING)
+
+        await cache_mgr.clear_all_cache()
+
+        assert any("CASCADE drop failed" in record.getMessage() for record in caplog.records), (
+            "应进入 metadata.drop_all() 降级分支"
+        )
+
+        async with test_engine.connect() as conn:
+            result = await conn.execute(
+                text(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public' AND table_type = 'BASE TABLE' "
+                    "ORDER BY table_name"
+                )
+            )
+            tables = {row[0] for row in result.fetchall()}
+
+        expected_tables = {"stock_basic", "daily_quotes", "daily_indicators", "financial_reports"}
+        assert expected_tables.issubset(tables), f"降级后表未重建: {expected_tables - tables}"
