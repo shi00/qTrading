@@ -30,6 +30,15 @@ from tests.builders.stock_data import (
 
 pytestmark = pytest.mark.integration
 
+# R4：清理语句为模块级固定 text() 常量，表名不参与运行时拼接。
+_DELETE_SQL = {
+    "daily_quotes": text("DELETE FROM daily_quotes"),
+    "stock_basic": text("DELETE FROM stock_basic"),
+    "trade_cal": text("DELETE FROM trade_cal"),
+    "daily_indicators": text("DELETE FROM daily_indicators"),
+    "financial_reports": text("DELETE FROM financial_reports"),
+}
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def clean_db(test_engine: AsyncEngine):
@@ -38,19 +47,12 @@ async def clean_db(test_engine: AsyncEngine):
     双重清理（setup + teardown）：teardown 后清理确保末尾测试不残留 stock_basic 数据，
     避免 xdist 下后续 mvd_data fixture INSERT 时 UniqueViolationError。
     """
-    tables = [
-        "daily_quotes",
-        "stock_basic",
-        "trade_cal",
-        "daily_indicators",
-        "financial_reports",
-    ]
 
     async def _cleanup():
         async with test_engine.begin() as conn:
-            for table in tables:
+            for stmt in _DELETE_SQL.values():
                 with contextlib.suppress(Exception):
-                    await conn.execute(text(f"DELETE FROM {table}"))
+                    await conn.execute(stmt)
 
     await _cleanup()
     yield
