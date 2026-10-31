@@ -629,12 +629,28 @@ jobs:
       # 与生产代码默认值一致。构建真实 sidecar binary，让 Flet 子进程启动 sidecar +
       # 真实 PG 16，替代原有的外置 PostgreSQL service。
       # 参考 embedded-tests job 的 sidecar 构建步骤（行 675-705）。
+      # sidecar 产物缓存（按 sidecar 源码哈希取键）：源码未变时直接复用 main 已构建的二进制，
+      # 省掉每腿 ~1 分钟的 cargo 重建。注意 Swatinem/rust-cache 的 target 缓存无法省这一步——
+      # checkout 会重写源文件 mtime，cargo 指纹判定失效后仍全量重编译（实测 run 41140196653
+      # 的 Build sidecar binary 每腿 0.77~1.12 分钟，5 腿共约 5 分钟挂在 PR 关键路径上）。
+      # 只缓存二进制本体（数十 MB），不缓存 target 目录；仅 main 保存，避免 PR/tag 各存一份
+      # 挤占 10 GB 缓存预算（与上方 rust-cache 的 save-if 治理策略一致）。缓存命中的二进制内嵌
+      # build.rs 采集的 SIDECAR_BUILD_TIME / SIDECAR_GIT_SHA 仅为诊断信息，无测试断言其与 HEAD 一致。
+      - name: Restore sidecar binary (source-hash cache)
+        id: cache-sidecar
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: sidecars/qtrading-pg-sidecar/target/release/qtrading-pg-sidecar.exe
+          key: sidecar-bin-${{ runner.os }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/Cargo.toml', 'sidecars/qtrading-pg-sidecar/Cargo.lock', 'sidecars/qtrading-pg-sidecar/build.rs', 'sidecars/qtrading-pg-sidecar/src/**', 'sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}-rust1.97.1
+
       - name: Install Rust toolchain (1.97.1)
+        if: steps.cache-sidecar.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.1
 
       - name: Cache Cargo registry & target
+        if: steps.cache-sidecar.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
           workspaces: sidecars/qtrading-pg-sidecar
@@ -645,6 +661,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build sidecar binary from source
+        if: steps.cache-sidecar.outputs.cache-hit != 'true'
         shell: bash
         env:
           # postgresql_embedded build script 通过 GitHub API 下载 PostgreSQL binaries 清单，
@@ -658,12 +675,30 @@ jobs:
             echo "ERROR: sidecar binary not found at $BINARY_PATH after cargo build"
             exit 1
           fi
+
+      # 只落盘缓存、不改变后续步骤的执行路径；若其它腿已占用同一键则 actions/cache 仅告警不失败。
+      - name: Save sidecar binary (main only)
+        if: steps.cache-sidecar.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: sidecars/qtrading-pg-sidecar/target/release/qtrading-pg-sidecar.exe
+          key: ${{ steps.cache-sidecar.outputs.cache-primary-key }}
+
+      # 缓存命中与现场构建共用同一导出逻辑，避免两条路径的 env 计算漂移。
+      - name: Export sidecar path & sha256
+        shell: bash
+        run: |
+          BINARY_PATH="sidecars/qtrading-pg-sidecar/target/release/qtrading-pg-sidecar.exe"
+          if [ ! -f "$BINARY_PATH" ]; then
+            echo "ERROR: sidecar binary not found at $BINARY_PATH (cache restore and build both failed)"
+            exit 1
+          fi
           ABSOLUTE_PATH="$(pwd)/$BINARY_PATH"
           echo "SIDECAR_BINARY_PATH=$ABSOLUTE_PATH" >> $GITHUB_ENV
           # 计算 sha256 供 ensure_sidecar_sha256_file 写入 .sha256 文件（覆盖真实校验路径）
           HASH=$(sha256sum "$BINARY_PATH" | awk '{print $1}')
           echo "SIDECAR_SHA256=$HASH" >> $GITHUB_ENV
-          echo "Sidecar binary built: $ABSOLUTE_PATH (sha256: $HASH)"
+          echo "Sidecar binary ready: $ABSOLUTE_PATH (sha256: $HASH)"
 
       - name: Run E2E Tests
         env:

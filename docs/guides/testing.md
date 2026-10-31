@@ -22,7 +22,7 @@
 | `tests/unit/strategies/` | 策略类（`strategies/`） | `strategies/`、`backtest/` 等子目录 | 单测断言 `required_quality_tier` + `_filter_logic`（Polars 夹具） |
 | `tests/unit/data/` + `persistence/` + `daos/` + `data/domain_services/` + `data/persistence/daos/` | `data/` 层：DAO / 数据清洗 / 域服务 | `tests/unit/data/**`、`tests/unit/daos/**`、`tests/unit/persistence/**` | 用 mock engine / mock TushareClient 隔离真实 IO（sync/DAO 顶层单测如 `test_holder_sync.py` 亦在此域） |
 | `tests/unit/services/` + `ai_service/` | `services/` 层：应用服务 / AI 服务 / 编排 | `tests/unit/services/**`、`services/ai_service/` | 服务单测；涉及 is_refresh 生命周期 / 轮询编排 |
-| `tests/unit/ui/`（含 `viewmodels/` / `views/` / `components/`） | `ui/` 层：ViewModel / 视图 / 组件 | `tests/unit/ui/**` | ViewModel 状态快照 + subscribe 断言；依赖 `tests/unit/ui/conftest.py` 的 page stub |
+| `tests/unit/ui/`（含 `viewmodels/` / `views/` / `components/`） | `ui/` 层：ViewModel / 视图 / 组件 | `tests/unit/ui/**` | ViewModel 状态快照 + subscribe 断言；`MockFletPage` 页面替身与 `component_renderer` 渲染上下文按需使用 |
 | `tests/unit/utils/`、`tests/unit/scripts/` | `utils/` 横切 + `scripts/` 工程工具 | 按被测模块名 `tests/unit/utils/*` | utils / 工程脚本逻辑 |
 | `tests/builders/` | 测试数据构建器（`stock_data.py`） | `tests/builders/*.py` | 跨文件共享的最小真实数据集构造（stock_basic / trade_cal / daily_quotes） |
 | `tests/integration/`（约 70 个文件） | DAO / 服务 / 模型 / schema（真实 `test_astock` PostgreSQL） | `tests/integration/*.py`；`fixtures/mvd_data.py`；`tests/integration/_db_config.py` | 需真实 DB / schema 的行为验证（标记 `integration`） |
@@ -36,9 +36,9 @@
 | 文件 | 作用域 | 关键 fixture / hook |
 |---|---|---|
 | `tests/conftest.py` | session | `pytest_asyncio_loop_factories()`（Windows SelectorEventLoop）、`singleton_state` 上下文管理器、`mock_external_services` autouse（mock `NewsFetcher`/`ReviewManager`）、`isolate_config_file`、keyring/litellm 全局 mock、`pytest_configure` 早期拦截 |
-| `tests/unit/conftest.py` | unit | **`_reset_all_singletons` autouse**（R7 单例隔离）、`_isolate_egress_audit_disk` 等 8 个 autouse 状态重置 fixture |
-| `tests/unit/ui/conftest.py` | unit-ui | page stub（`Control.update()` 已挂载兼容，按 monkeypatch 隔离） |
-| `tests/integration/conftest.py` | integration | `_v1_page_compat`、`_isolate_tushare_token_file`、`function_engine` 等；session 级 DB 环境搭建 |
+| `tests/unit/conftest.py` | unit | **`_reset_all_singletons` autouse**（R7 单例隔离）、`_isolate_egress_audit_disk` 等 10 个 autouse 状态重置 fixture |
+| `tests/unit/ui/conftest.py` | unit-ui | 单例/状态隔离 fixture + `MockFletPage` 页面替身（无 `Control.page`/`update()` 兼容桩） |
+| `tests/integration/conftest.py` | integration | `_isolate_tushare_token_file`、`function_engine` 等；session 级 DB 环境搭建 |
 | `tests/e2e/conftest.py` | e2e | session 级真 sidecar 启动 fixture（`real_sidecar_binary_e2e` / `flet_app` / `embedded_wizard_app` 等） |
 
 #### marker → 运行命令
@@ -92,7 +92,7 @@
 > - **分层单文件覆盖率**：`services/`、`strategies/`、`data/` 单文件阈值 ≥ 90%，`ui/` ≥ 85%（`pyproject.toml` `per_file_minimum_by_path`，最长前缀匹配，未匹配目录仍按默认 ≥ 80%）；当前 `enforce_layered=false` 为 advisory 报告模式（`scripts/check_per_file_coverage.py --report` 输出，CI「Report Layered Coverage」step），不阻断；补齐分层覆盖率后翻转强制
 > - **覆盖率源**：`core`, `app`, `data`, `services`, `strategies`, `utils`, `ui`, `config`, `main`（排除 `tests/`, `scripts/`, `data/tiktoken_cache/`）
 > - **覆盖率排除行**：`pragma: no cover`、`if __name__ == "__main__"`、`if TYPE_CHECKING:`、`raise NotImplementedError`、`...`
-> - **覆盖率 omit 文件**：`pyproject.toml` `[tool.coverage.run].omit` 含 `main.py`（标注 `NOTE(lazy)`；升级触发条件：重构 `main.py` 拆出可测的 bootstrap 模块后移除 omit）
+> - **覆盖率 omit 文件**：`pyproject.toml` `[tool.coverage.run].omit` 含 `main.py`（标注 `NOTE(lazy)`；`main.py` 已瘦身为入口，可测的启动/关闭逻辑拆至 `app/application.py` 并由集成测试覆盖；移除 omit 的触发条件是补充入口 `ft.run` 分支单测后重新评估）
 
 ### 测试编写模板
 

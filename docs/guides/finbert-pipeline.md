@@ -41,10 +41,10 @@ job1 `train-export-gate`（全链路 `contents: read`）：
 | 输入校验 | — | dispatch inputs → `corpus_tag` | 非法 semver / tag 注入即失败（fail-fast） |
 | 指纹路由 | `compute_training_fingerprint.py` | 仓库 + 语料 sums → `stage_a_out/fingerprint.json` + job outputs（`model_version` / `release_tag`） | 见 §3.2 退出码 |
 | 依赖与工具链 | `patch_llama_cpp_pre_registry.py` | — | 依赖 pin / 工具链 / 补丁任一步失败即失败 |
-| 基座与语料 | `corpus_manifest.py verify` + `verify-corpus-anchor` 子命令 | 语料 Release → `data/corpus` + 校验报告 | SHA256 / F2 锚 / manifest 三重校验任一失败即失败 |
+| 基座与语料 | `compute_training_fingerprint.py verify-corpus-anchor`（F2 锚断言，先）+ `corpus_manifest.py verify`（后） | 语料 Release → `data/corpus` + 校验报告 | SHA256 / F2 锚 / manifest 三重校验任一失败即失败 |
 | 训练 | `train_finbert.py` | 语料 + 基座 → `stage_b_out/best` | 超参固化在脚本内，seed 固定 |
 | 导出 | `export_finbert_gguf.py` | `best` → f16 GGUF + `head.npz` | — |
-| 一致性 Gate | `verify_finbert_gguf.py --head` | 产物 vs 训练参考 → `verify.json` | N0-3 任一判据 FAIL → 发布不执行 |
+| 一致性 Gate | `verify_finbert_gguf.py --head` | 产物 vs 训练参考 → `finbert2-news-f16.verify.json` | N0-3 任一判据 FAIL → 发布不执行 |
 | 效果 Gate | `verify_finbert_effect_gate.py` | `train_summary.json` + 历史 Release note → `effect_gate.json` | 低于「锚点 − 0.03」FAIL；首版 NO_BASELINE 不阻断 |
 | 发布准备 | — | → 发布 artifact（gguf / head / SHA256SUMS / fingerprint.json / note） | lineage 文件缺失即 fail-fast，不发布 |
 
@@ -77,7 +77,7 @@ job2 `publish-release`（唯一 `contents: write`，不 checkout、不执行仓�
 
 gh 层 fail-safe：`gh release download --pattern` 零命中（非零退出 + no-match 文案）判**资产缺失**返回 None（存量旧 Release 无指纹资产 → 不可比放行，不死锁）；其余 gh 错误一律 fail-closed；tag 存在性查询仅「release not found」判 False。
 
-F2 语料锚断言：语料下载校验后 `verify-corpus-anchor` 比对**实际下载的** `SHA256SUMS.txt` 与指纹锚，错位 fail-fast（先于 manifest 校验）——防「路由下载」与「训练下载」之间资产被替换导致指纹与输入错位。
+F2 语料锚断言：语料下载校验后 `compute_training_fingerprint.py verify-corpus-anchor` 比对**实际下载的** `SHA256SUMS.txt` 与指纹锚，错位 fail-fast（先于 manifest 校验）——防「路由下载」与「训练下载」之间资产被替换导致指纹与输入错位。
 
 ### 3.3 什么动作会改变指纹
 
@@ -122,6 +122,6 @@ F2 语料锚断言：语料下载校验后 `verify-corpus-anchor` 比对**实际
 
 - **路由拒绝（exit 1）**：run 日志含 `::error` 输入无变化说明与分量快照 / diff——确认是否有意重训（是则 `force_retrain`）；
 - **exit 2**：指纹分量缺失 / 不可提取 / gh 基础设施故障——按日志定位缺分量；
-- **双 Gate 失败**：一致性 Gate 看 `verify.json`（分词一致 / CLS 余弦 / 概率差 <0.02 / 标签一致率 ≥99% 哪条判据挂）；效果 Gate 看 `effect_gate.json`（`reasons` + 锚点 tag；锚点不可解析为 fail-closed）；
-- **排障 artifact**（`if: always()`，无论 Gate 成败）：`train_summary.json` / `verify.json` / `effect_gate.json` / `corpus_manifest_report.json` / `stage_a_out/fingerprint.json`；发布 artifact 仅 Gate 通过后存在（五文件，与排障 artifact 命名互不混用）；
+- **双 Gate 失败**：一致性 Gate 看 `finbert2-news-f16.verify.json`（分词一致 / CLS 余弦 / 概率差 <0.02 / 标签一致率 ≥99% 哪条判据挂）；效果 Gate 看 `effect_gate.json`（`reasons` + 锚点 tag；锚点不可解析为 fail-closed）；
+- **排障 artifact**（`if: always()`，无论 Gate 成败）：`train_summary.json` / `finbert2-news-f16.verify.json` / `effect_gate.json` / `corpus_manifest_report.json` / `stage_a_out/fingerprint.json`；发布 artifact 仅 Gate 通过后存在（五文件，与排障 artifact 命名互不混用）；
 - **发布 job 失败**：sha256 复验（artifact 传输完整性）或同 tag 已存在（FT-05）——后者按错误信息指引处理。

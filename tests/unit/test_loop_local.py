@@ -60,10 +60,11 @@ class TestGetLoopLocal:
 class TestDelLoopLocal:
     @pytest.mark.asyncio
     async def test_delete_existing_key(self):
-        get_loop_local("del_key", list)
+        first = get_loop_local("del_key", list)
         del_loop_local("del_key")
         result = get_loop_local("del_key", list)
         assert isinstance(result, list)
+        assert result is not first, "del_loop_local 未清除当前循环缓存"
 
     @pytest.mark.asyncio
     async def test_delete_nonexistent_key_no_error(self):
@@ -76,11 +77,14 @@ class TestDelLoopLocal:
 class TestClearAllLoopLocals:
     @pytest.mark.asyncio
     async def test_clear_all(self):
-        get_loop_local("clear_a", list)
-        get_loop_local("clear_b", dict)
+        first_a = get_loop_local("clear_a", list)
+        first_b = get_loop_local("clear_b", dict)
         clear_all_loop_locals()
-        result = get_loop_local("clear_a", list)
-        assert isinstance(result, list)
+        result_a = get_loop_local("clear_a", list)
+        result_b = get_loop_local("clear_b", dict)
+        assert isinstance(result_a, list)
+        assert isinstance(result_b, dict)
+        assert result_a is not first_a and result_b is not first_b, "clear_all_loop_locals 未清空缓存"
 
 
 class TestGetLoopLocalStrict:

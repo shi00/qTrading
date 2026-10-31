@@ -384,6 +384,40 @@ async def test_dropdown_option_not_located_by_identifier() -> None:
     assert not handle._visible
 
 
+class _FakeHandleResult:
+    """evaluate_handle 返回值 stub：``as_element()`` 无命中时返回 None（与 Playwright 一致）。"""
+
+    def as_element(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_find_option_element_js_prefers_anchor_left_aligned_candidates() -> None:
+    """同文本解耦回归（CI run 41145284114）：候选优先取与 Dropdown identifier 节点
+    左缘对齐者。
+
+    选项文本可能与页面常驻元素完全相同（过滤列 ``ts_code (代码)`` 与结果表列头同名），
+    仅按文本优先级会误命中文档序更靠前的列头（与触发器不同列），点击落空后菜单不收合。
+    Material DropdownMenu 的菜单面板与触发器左对齐 → 左缘对齐的候选才是真实菜单项。
+    """
+    ap, page = _make_ap()
+
+    async def _evaluate_handle(script: str, arg: Any = None) -> Any:
+        page.evaluates.append((script, arg))
+        return _FakeHandleResult()
+
+    page.evaluate_handle = _evaluate_handle  # type: ignore[method-assign]
+
+    await ap._find_option_element("ts_code (代码)", "e2e.data.dropdown.filter_col")
+
+    script, arg = page.evaluates[-1]
+    assert arg == {"text": "ts_code (代码)", "dropdownEid": "e2e.data.dropdown.filter_col"}
+    assert "flt-semantics-identifier" in script, "候选须以 Dropdown identifier 节点作为对齐基准"
+    assert "Math.abs(r.left - anchorRect.left)" in script, "须按左缘（x）对齐，不得用可能残留的 y"
+    # 先按左缘对齐候选取最优文本优先级，全部无对齐候选时再退回纯文本优先（兼容性兜底）
+    assert "pick(candidates.map((els) => els.filter(nearAnchor))) || pick(candidates)" in script
+
+
 @pytest.mark.asyncio
 async def test_listview_row_complex_uses_node_self_bbox() -> None:
     """矩阵 #15-#17（ListView 行 / GestureDetector）：COMPLEX 取节点自身 bbox，

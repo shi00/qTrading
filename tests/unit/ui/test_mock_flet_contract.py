@@ -205,41 +205,6 @@ def test_v1_page_window_icon_field_exists():
     assert hasattr(window_obj, "icon"), "page.window.icon 字段缺失——flet 可能已升级，请检查 window.icon 配方"
 
 
-def test_v1_control_update_silent_when_unmounted():
-    """R18 契约：per-test ``_v1_page_compat`` fixture 使未挂载 ft.Control.update() 静默返回。
-
-    V1 原生 ``ft.Control.update()`` 在控件未挂载到 page 时抛 ``RuntimeError``；
-    ``_v1_page_compat`` autouse fixture（见 ``conftest.py``）monkey-patch 后应静默返回
-    （V0 兼容行为），替代已删除的旧全局桩。
-    """
-    # _v1_page_compat autouse fixture 已激活（见 tests/unit/ui/conftest.py）
-    # 未挂载控件调用 update() 应静默返回（不抛 RuntimeError）
-    ctrl = ft.Container()
-    assert ctrl.__dict__.get("_mock_page", None) is None
-    ctrl.update()  # 不应抛 RuntimeError
-
-
-def test_v1_control_page_property_writable_via_mock():
-    """R18 契约：per-test ``_v1_page_compat`` fixture 使 ft.Control.page 可读写（V1 原生为只读 property）。
-
-    测试代码通过 ``control.page = mock_page`` 注入 mock_page，getter 应返回该值。
-    用 ``setattr`` 而非直接赋值：V1 静态类型将 ``ft.Control.page`` 标为只读 property，
-    但 ``_v1_page_compat`` fixture 在运行时通过 monkeypatch 注入了 setter。
-    """
-    mock_page = MockFletPage()
-    ctrl = ft.Container()
-
-    # 注入 mock_page（fixture patched page setter 在运行时生效）
-    # setattr 绕过 pyright 静态只读 property 检查（运行时 monkeypatch 已注入 setter）
-    # noqa: B010 — ruff 建议直接赋值，但 pyright 报只读 property，setattr 是必要的折中
-    setattr(ctrl, "page", mock_page)  # noqa: B010
-    assert ctrl.page is mock_page
-
-    # 清除 mock_page 后，未挂载控件应返回 None（不抛 RuntimeError）
-    setattr(ctrl, "_mock_page", None)  # noqa: B010
-    assert ctrl.page is None
-
-
 def test_v1_pop_dialog_signature_no_args():
     """R3 契约：pop_dialog 应为无参签名（V1 spike 实测 (self) -> Optional[DialogControl]）。
 

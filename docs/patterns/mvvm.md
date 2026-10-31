@@ -141,7 +141,7 @@ UI 层实际并存四种状态机制，本表是"什么状态放哪里"的正本
 
 **新装约束**：各职责 mixin 作为 ScreenerViewModel 的内部切片，不得跨 mixin 随意篡改对方私有状态机（如重试生命周期内聚于 AIStreamMixin，外部经 `cancel_retry()` 统一协调）；分页切片唯一由 PaginationSortingMixin._update_pagination 产出；公共状态数据结构一律经 screener_types 定义；组合类保持为唯一 use_viewmodel 消费入口。
 
-> **「组合类保持为唯一 use_viewmodel 消费入口」的适用边界**：该约束仅限定打包为 **Mixin 组合**的单个 VM（如 `ScreenerViewModel` 的 5 个 mixin 切片只能经其组合类访问，不得各自独立挂 `use_viewmodel`）。它**不禁止**一个 View 同时消费多个**职责独立、生命周期独立**的 VM——例如 `ScreenerView` 通过两次 `use_viewmodel(factory=...)` 同时持有 `ScreenerViewModel` 与 `NewsInsightViewModel`（前者承载选股主流程，后者承载新闻风险解读，二者状态互不影响、各自 dispose）。判定"应拆为多 VM 而非并入一个组合类"：当两个职责在**状态、命令、生命周期**上彼此独立且无共享可变状态时，优先多 VM 并行消费（更小重渲染面、更易测试），不必强行并入单一组合类。
+> **「组合类保持为唯一 use_viewmodel 消费入口」的适用边界**：该约束仅限定打包为 **Mixin 组合**的单个 VM（如 `ScreenerViewModel` 的 5 个 mixin 切片只能经其组合类访问，不得各自独立挂 `use_viewmodel`）。它**不禁止**一个 View 同时消费多个**职责独立、生命周期独立**的 VM——例如 `ScreenerView` 通过多次 `use_viewmodel(factory=...)` 同时持有 `ScreenerViewModel`、`WatchlistViewModel` 与 `NewsInsightViewModel`（分别承载选股主流程、自选股与新闻风险解读，各自状态互不影响、各自 dispose）。判定"应拆为多 VM 而非并入一个组合类"：当两个职责在**状态、命令、生命周期**上彼此独立且无共享可变状态时，优先多 VM 并行消费（更小重渲染面、更易测试），不必强行并入单一组合类。
 
 ### 存量技术债
 

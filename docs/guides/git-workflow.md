@@ -94,7 +94,7 @@ gh pr create --title "feat(strategy): add MACD crossover" \
 cd ../..  # 回主仓库根
 git worktree remove .worktrees/feature-strategy-macd
 git worktree prune
-git branch -d feature/strategy-macd       # Squash Merge 后本地分支可删
+git branch -D feature/strategy-macd       # Squash Merge 后提交不在 main 祖先链，须用 -D 强制删除
 ```
 
 ### AI 助手创建 PR 标准流程（强制）
@@ -125,7 +125,7 @@ git branch -d feature/strategy-macd       # Squash Merge 后本地分支可删
 
    `--template` 仅适合本地人工操作；AI / CI 创建 PR 一律走方式 B 的 `--body-file` 非交互路径。
 
-2. **禁止手写简化 PR body**：不得用 `--body "简短描述"` 跳过模板。CONTRIBUTING.md「PR 描述模板」中"无需手动复制该模板"的说明仅适用于 GitHub Web UI，不适用于 `gh pr create`。
+2. **禁止手写简化 PR body**：不得用 `--body "简短描述"` 跳过模板。[CONTRIBUTING.md「PR 描述模板」](../../CONTRIBUTING.md#pr-描述模板) 中「GitHub Web UI 自动加载模板，无需手动复制」的说明仅适用于 GitHub Web UI，不适用于 `gh pr create`。
 
 3. **必须如实勾选模板自检清单**：
    - 「修改类型」勾选对应项，删除无关项
@@ -156,9 +156,9 @@ git branch -d feature/strategy-macd       # Squash Merge 后本地分支可删
    gh issue create --title "<简明标题>" --template "✨ 功能请求"
    ```
 
-   此命令会打开编辑器加载模板表单内容，AI 助手应在模板基础上填写各章节，保留模板结构。
+   该命令是否打开编辑器并加载 Issue Forms 表单取决于 gh CLI 版本（见下方版本核验标注）；模板成功加载后，AI 助手应在模板基础上填写各章节，保留模板结构。
 
-   > **版本核验标注**：`gh issue create --template` 对 Issue Forms（`.yml`）模板的加载行为依赖 gh CLI 版本（不同版本对 `.yml` 表单的支持与渲染方式存在差异），使用前应按当前安装的 gh CLI 版本实际核验（确认能否正确加载表单字段）；本文档不未经证据断言特定 CLI 版本的 API 行为。若当前环境无法可靠加载 Issue Forms，应改用 GitHub Web UI 创建（表单仅在 Web UI 完整渲染）。
+   > **版本核验标注**：`gh issue create --template` 对 Issue Forms（`.yml`）模板的加载行为依赖 gh CLI 版本（不同版本对 `.yml` 表单的支持与渲染方式存在差异），使用前应按当前安装的 gh CLI 版本实际核验（确认能否正确加载表单字段）；本文档不在未经证据的情况下断言特定 CLI 版本的 API 行为。若当前环境无法可靠加载 Issue Forms，应改用 GitHub Web UI 创建（表单仅在 Web UI 完整渲染）。
 
 2. **禁止手写简化 issue body**：不得用 `--body "简短描述"` 跳过模板，也不得创建空白 issue（`blank_issues_enabled: false`）。
 
@@ -205,11 +205,11 @@ Feature 分支存活建议 ≤ 7 天。超期需评估：
 
 | 流程 | 文档位置 | 与本节关系 |
 |------|---------|-----------|
-| Conventional Commits | 「提交信息规范」 | 分支 type 与 commit type 对齐 |
-| PR 流程 | 「Pull Request 流程」 | worktree 完成后进入 PR 阶段 |
-| Merge Queue + Squash | 「合并策略」 | 本节规定的合并方式 |
-| CODEOWNERS | 「代码审查与合并」 | 关键路径强制审查 |
-| pre-commit | 「代码风格基础」 | 提交前质量门禁 |
+| Conventional Commits | [CONTRIBUTING.md「提交信息规范」](../../CONTRIBUTING.md#提交信息规范) | 分支 type 与 commit type 对齐 |
+| PR 流程 | [CONTRIBUTING.md「Pull Request 流程」](../../CONTRIBUTING.md#pull-request-流程) | worktree 完成后进入 PR 阶段 |
+| Merge Queue + Squash | [CONTRIBUTING.md「合并策略」](../../CONTRIBUTING.md#合并策略) | 本节规定的合并方式 |
+| CODEOWNERS | [CONTRIBUTING.md「代码审查与合并」](../../CONTRIBUTING.md#代码审查与合并) | 关键路径强制审查 |
+| pre-commit | [CONTRIBUTING.md「代码风格基础」](../../CONTRIBUTING.md#代码风格基础) | 提交前质量门禁 |
 
 ---
 

@@ -10,7 +10,6 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import asyncpg
 import flet as ft
@@ -63,47 +62,6 @@ from tests.integration.fixtures.mvd_data import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-@pytest.fixture(autouse=True)
-def _v1_page_compat(monkeypatch):
-    """Per-test V1 page 兼容桩（替代旧 mock_flet 全局桩，方案 §3.3.1）。
-
-    V1 中 ``ft.Control.page`` 改为只读 property（通过 ``parent`` 链查找），
-    ``Control.update()`` 要求控件已挂载。本 fixture 用 monkeypatch 作用域隔离地
-    恢复 V0 兼容行为：page 可读写、未挂载 ``update()`` 静默返回。
-
-    集成测试（如 test_config_panels.py）用 ``panel.page = mock_page`` 注入 page。
-    与 tests/unit/ui/conftest.py 的同名 fixture 行为一致，避免重复维护两套桩。
-    """
-    # Any: fget 在 V1 只读 property 类型存根中推断为 None，运行时必为可调用对象
-    original_page_get: Any = ft.Control.page.fget
-    original_update: Any = ft.Control.update
-
-    @property
-    def page(self) -> ft.Page | None:
-        mock_page = self.__dict__.get("_mock_page")
-        if mock_page is not None:
-            return mock_page
-        try:
-            return original_page_get(self)
-        except RuntimeError:
-            return None
-
-    @page.setter
-    def page(self, value: ft.Page | None) -> None:
-        self.__dict__["_mock_page"] = value
-
-    def update(self) -> None:
-        if self.__dict__.get("_mock_page") is None:
-            try:
-                original_page_get(self)
-            except RuntimeError:
-                return
-        original_update(self)
-
-    monkeypatch.setattr(ft.Control, "page", page)
-    monkeypatch.setattr(ft.Control, "update", update)
 
 
 @pytest.fixture(scope="session", autouse=True)

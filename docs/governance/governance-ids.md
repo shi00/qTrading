@@ -4,7 +4,7 @@
 >
 > **状态取值**：`使用中`（当前文档引用）/ `历史`（已废止或仅作溯源，不再被活文档作为约束引用）。
 >
-> **维护规则**：新增治理 ID 时必须在下方表格登记一行（由 `check_governance_id_glossary` 门禁守护受检治理文档中出现的 ID——`CHECKED_DOCS` 全集（排除 `CHANGELOG.md` 自动生成发布日志与 `Plans.md` 本地计划）加 `docs/governance/*.yml` 机器可读治理文件；`.py`（`scripts/` + `tests/`）扫描自 DS-02 起以 WARNING 渐进部署）。来源轮次不可考的标注「本地检视报告（gitignored）」，不臆造。
+> **维护规则**：新增治理 ID 时必须在下方表格登记一行（由 `check_governance_id_glossary` 门禁守护受检治理文档中出现的 ID——`CHECKED_DOCS` 全集（排除 `CHANGELOG.md` 自动生成发布日志与 `Plans.md` 本地计划）加 `docs/governance/*.yml` 机器可读治理文件。分级执行：入口文档 `CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` 中未登记即 **ERROR**（硬性失败）；其余受检文档、`docs/governance/*.yml` 与 `scripts/` + `tests/` 的 `.py` 扫描自 DS-02 起以 **WARNING** 渐进部署，存量清零后再翻转为 ERROR）。来源轮次不可考的标注「本地检视报告（gitignored）」，不臆造。
 >
 > **编号格式规范（DS-02）**：治理 ID 中的数字序号统一采用两位前导零形式（如 `P1-04` / `P2-09` / `UX-03`，不用 `P1-4` / `UX-3`）。存量代码中存在的单位数写法（如 `P1-4`、`UX-2`）视为同一发现的无前导零别名，在表格中以独立行登记并在「一句话含义」注明「即 P1-04 的无前导零别名」后即被门禁放行。`-99` 后缀（如 `DOC-99` / `P9-99` / `UIX-99`）为门禁测试夹具 ID，**不得登记**。新增使用治理 ID 时须用规范形，不引入新的三/多位数写法。`FR-` 复合前缀（如 `FR-UX-xxx`）为需求编号命名空间（正本 requirements/），属非治理 ID：门禁正则整体忽略该前缀形态（不采集、不登记、不需豁免），治理 ID 不得采用 `FR-` 复合前缀形态。
 
@@ -126,7 +126,7 @@
 | AI-01 | 缺失/失败被伪装成合法具体值：AI 调用失败/无结论不得伪装成「AI 否决」（`score=0`），不可计价调用不得伪装为「零成本」——催生 R21 | business-review-2026-09-11（业务检视） | [CLAUDE.md](../../CLAUDE.md) R21 / [strategies/ai_mixin.py](../../strategies/ai_mixin.py) | 使用中 |
 | AI-02 | 业务语义字段（`score` / `ai_score` / `confidence` 等）的缺失表示：必须用 `None`/哨兵，禁止填充业务上合法的具体值（检视报告 04 AI-02，缺陷根因见 R21） | 本地检视报告（gitignored） | [CONTRIBUTING.md](../../CONTRIBUTING.md)「业务语义字段的缺失表示」 | 使用中 |
 | E4 | OSS 检视：import-linter 6 条手工 forbidden 契约重构为 1 条 layers + 2 条 forbidden（AST 静态测试随之退役，例外注册表路径校验保留） | OSS 检视（E 系列） | [pyproject.toml](../../pyproject.toml) / [CLAUDE.md](../../CLAUDE.md) §4.1 | 使用中 |
-| DAT-07 | 回测不可复现：财报无修订历史，UPSERT 覆盖使历史回测结果随时间漂移（属结论可信度边界，非代码欠债） | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
+| DAT-07 | 回测不可复现（残余）：DATA-05 已保留财报多版本 + PIT，迁移前存量行仅单版本，早期重述覆盖使该段历史回测结果随时间漂移（属结论可信度边界，非代码欠债） | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | DAT-08 | 回测前视：申万行业为当前快照，`sw_industry_member` 主键不含日期，跨分类调整期回测存在前视（含存量污染 `industry_tushare`） | review03 数据层与持久化 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | BT-05 | 回测路径 `_BacktestQualityProxy` 硬编码 GOLD 绕过数据质量门控（第一步显式化，第二步待设计） | review03 业务语义与可信度 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
 | CON-04 | subprocess 不可取消长任务停机交互：terminate 仅终止 sidecar 包装 / dump 中断残留不自动清理 / restore 拒绝取消 | review02 | [known-technical-debt.md](../debt/known-technical-debt.md) | 使用中 |
