@@ -102,3 +102,16 @@ worker 生命周期）随 S1~S3 落各技术正本，不在本 ADR 展开。
 2. **继续手写重试循环**：ADR-0011 已论证等价于重新实现 Router 子集、自研漂移风险高；
    本决策以 Tenacity 声明式重试承接同候选瞬态重试，跨候选切换由 Executor 显式编排，
    不回到手写全量循环，否决。
+
+## Errata / 勘误
+
+> 2026-10-31 勘误（DOC-RV-039）
+
+Decision §4 类型清单所列 `ModelManagementDraft` 在 `core/model_management_types.py` 中并不存在
+（全仓检索仅本 ADR 一处提及该名）：当前该文件定义的执行 / 发布类型与异常共 26 个，清单中其余
+类型均已落地，唯独缺 `ModelManagementDraft`。草稿态实际由 UI 层
+`ModelConnectionDraft`（`ui/viewmodels/model_connections_view_model.py`）承载，服务入口为
+`save_draft(payload: dict[str, Any], expected_revision: int, operation_id: str)`
+（`services/model_configuration_service.py`），以 JSON mapping payload 跨层传递，未进入 core
+纯类型契约。若需将草稿态收敛为 `core/model_management_types.py` 的跨层契约，须另立决策，
+本勘误仅澄清类型归属，不修改 Decision §4 原文（遵守 ADR 追加不可变原则）。
