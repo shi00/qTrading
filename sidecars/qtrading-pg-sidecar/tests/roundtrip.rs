@@ -5,6 +5,12 @@
 
 mod common;
 
+// 复用生产 password 模块的读取逻辑：Windows 上 password 文件是 DPAPI 加密的
+// （`PGPW2:<hex>`，见 src/password.rs），按明文读取会把密文当作密码。
+#[path = "../src/password.rs"]
+#[allow(dead_code)]
+mod password;
+
 use common::*;
 use std::path::Path;
 use std::process::Stdio;
@@ -146,10 +152,8 @@ fn test_run_custom_username_roundtrip() {
     let base = data_dir.parent().unwrap();
     let psql_name = if cfg!(windows) { "psql.exe" } else { "psql" };
     let psql = base.join("install").join("bin").join(psql_name);
-    let password = std::fs::read_to_string(base.join("runtime").join("password"))
-        .expect("read password file")
-        .trim()
-        .to_string();
+    let password = password::read_password_file(&base.join("runtime").join("password"))
+        .expect("read password file");
     let out = std::process::Command::new(&psql)
         .args([
             "-X",
