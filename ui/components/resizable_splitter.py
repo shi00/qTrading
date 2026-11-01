@@ -21,6 +21,7 @@ import flet as ft
 
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,7 @@ def ResizableSplitter(
         try:
             loaded = on_load_width()
         except Exception as e:
-            logger.debug("[ResizableSplitter] on_load_width failed, use default: %s", e)
+            logger.debug("[ResizableSplitter] on_load_width failed, use default: %s", DataSanitizer.sanitize_error(e))
             return
         if loaded is None:
             return
@@ -158,7 +159,7 @@ def ResizableSplitter(
         try:
             on_persist_width(width_to_persist)
         except Exception as e:
-            logger.debug("[ResizableSplitter] on_persist_width failed: %s", e)
+            logger.debug("[ResizableSplitter] on_persist_width failed: %s", DataSanitizer.sanitize_error(e))
 
     # --- Drag handlers ---
 
