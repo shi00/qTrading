@@ -26,9 +26,38 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 
+from data.external import news_fetcher as nf_mod
 from data.external.news_fetcher import NewsFetcher, _run_with_python_string_storage
 import httpx
 import pytest
+
+
+def _reset_news_fetcher_state() -> None:
+    """复位 news_fetcher 模块级缓存/熔断计数到闭合基线（R7 测试状态隔离）。"""
+    nf_mod._US_MOVES_CACHE.clear()
+    nf_mod._SINA_CONSECUTIVE_EMPTY["us_api"] = 0
+    nf_mod._SINA_CONSECUTIVE_EMPTY["concept"] = 0
+    nf_mod._SINA_CONSECUTIVE_FAILURES["concept"] = 0
+    nf_mod._CLS_CONSECUTIVE_FAILURES = 0
+    nf_mod._CLS_CIRCUIT_OPENED_AT = 0.0
+    nf_mod._S7X24_CONSECUTIVE_FAILURES = 0
+    nf_mod._S7X24_CIRCUIT_OPENED_AT = 0.0
+
+
+@pytest.fixture(autouse=True)
+def _reset_news_fetcher_module_state():
+    """R7: 每个用例前后复位 CLS / 新浪 7x24 / Sina 计数与缓存，阻隔跨测试类污染。
+
+    本文件自身不制造 CLS 熔断状态，但同 worker 内其他用例可能真实触发新闻抓取
+    （如 test_news_subscription_service.py::TestPollLoop 未打桩 _fetch_and_notify，
+    真实轮询失败会遗留 _CLS_CONSECUTIVE_FAILURES>=3 与 60s 冷却窗口）。随机顺序下
+    本文件用例会误命中熔断：CI 表现为 test_get_global_news_success（0 != 2）与
+    test_get_global_news_runtime_error（3 != 0）。此处复位保证每个用例从闭合基线开始，
+    并在用例结束后清理本文件自身产生的计数，避免反向污染其他测试。
+    """
+    _reset_news_fetcher_state()
+    yield
+    _reset_news_fetcher_state()
 
 
 # 分层归属：单组件（NewsFetcher）+ HTTP 边界 mock，无真实 DB/网络依赖 → 单元层
