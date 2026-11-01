@@ -303,6 +303,22 @@ class PortfolioSimulator:
                 )
                 return
 
+        # 数据损坏防护：卖出名义价 <= 0（或非有限值）时不得按此价格成交。
+        # 否则会把持仓以零价「变现」（净值被静默清零 + 现金被费用扣成负数），
+        # 与买入侧 invalid_price 护栏对齐（F3-06）。仅入 skipped 明细，不升级 data_warnings。
+        exit_price = self._exec_nominal_price(quote)
+        if exit_price <= 0 or not math.isfinite(exit_price):
+            self.skipped_list.append(
+                {
+                    "trade_date": exec_date,
+                    "ts_code": ts_code,
+                    "direction": "sell",
+                    "reason": "invalid_price",
+                    "intended_volume": self._reported_volume(pos, quote),
+                }
+            )
+            return
+
         # UIR-F11-002: 账面 volume 是复权单位，成交与参与率必须换算为名义股数，
         # 成交价用名义价（raw），二者乘积与复权口径金额一致。
         ratio = self._qfq_ratio(quote)
@@ -319,7 +335,6 @@ class PortfolioSimulator:
             )
             return
 
-        exit_price = self._exec_nominal_price(quote)
         volume = nominal_shares
 
         cost = self.cost_model.calculate(
@@ -415,6 +430,21 @@ class PortfolioSimulator:
                 )
                 return
 
+        # 数据损坏防护：名义卖出价 <= 0（或非有限值）时既不能成交，也不能继续做
+        # ``sell_value / exit_price``（0/0 会抛 ZeroDivisionError 中断整轮回测）。
+        exit_price = self._exec_nominal_price(quote)
+        if exit_price <= 0 or not math.isfinite(exit_price):
+            self.skipped_list.append(
+                {
+                    "trade_date": exec_date,
+                    "ts_code": ts_code,
+                    "direction": "sell",
+                    "reason": "invalid_price",
+                    "intended_volume": self._reported_volume(pos, quote),
+                }
+            )
+            return
+
         ratio = self._qfq_ratio(quote)
         nominal_total = self._nominal_shares(pos["volume"], ratio)
         if nominal_total is None:
@@ -429,7 +459,6 @@ class PortfolioSimulator:
             )
             return
 
-        exit_price = self._exec_nominal_price(quote)
         current_value = pos["volume"] * self._exec_price(quote)
         sell_value = max(current_value - target_value, 0.0)
 
