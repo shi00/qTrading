@@ -186,7 +186,9 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
     }
 
     // 8. 启动（端口冲突重试 ≤3；crash recovery → exit 40；其余 exit 12）
-    let (postgresql, port) = start_with_retry(&layout, &args, &password).await?;
+    let (_postgresql, port) = start_with_retry(&layout, &args, &password).await?;
+    // 实例句柄仅用于 start()；drop 会触发 crate 内部 stop（见 postgresql.rs `impl Drop`），
+    // 必须在分级停止之后才离开作用域，故保留绑定。
     let pg_pid = pgbin::read_postmaster_pid(&layout.data_dir).map(|i| i.pid);
 
     // 9. 健康检查（§7.5，exit 13；28P01 认证失败 → exit 16）。失败须清理已启动的 postgres。
@@ -216,7 +218,7 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
 
     // 10. create database（exit 14/16）
     tracing::info!("ensuring database '{}' exists", args.database);
-    if let Err(code) = ensure_database(&postgresql, &args.database).await {
+    if let Err(code) = ensure_database(&layout, &args, &password, port).await {
         stop_after_failed_start(&layout, pg_pid, "create database failed").await;
         return Err(code);
     }
@@ -561,8 +563,31 @@ async fn post_kill_fallback_check(
     Ok(())
 }
 
-async fn ensure_database(postgresql: &PostgreSQL, database: &str) -> Result<(), u8> {
-    let classify = |e: postgresql_embedded::Error| -> u8 {
+/// SQL 字符串字面量（`standard_conforming_strings=on` 下仅需把 `'` 双写）。
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// SQL 标识符（双引号包裹，内部 `"` 双写）。`CREATE DATABASE` 的目标是标识符，
+/// PostgreSQL 不接受绑定参数，只能按标识符规则转义。
+fn sql_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+/// 确保业务库存在（exit 14/16）。
+///
+/// 不走 `postgresql_embedded` 的 `database_exists/create_database`：crate 0.22 的
+/// `get_pool()` 固定以 `BOOTSTRAP_SUPERUSER="postgres"` 连接（crate `postgresql.rs`），
+/// 自定义 `--username` 的 cluster 上会因 role postgres 不存在而 28P01，导致启动失败。
+/// 这里改为以 `--username` 直连 psql（与 initdb / 健康检查使用同一超级用户），
+/// 默认 `postgres` 行为不变。
+async fn ensure_database(
+    layout: &Layout,
+    args: &cli::RunArgs,
+    password: &str,
+    port: u16,
+) -> Result<(), u8> {
+    let classify = |e: pgbin::ToolError| -> u8 {
         let msg = e.to_string();
         if msg.contains("28P01") || msg.contains("password authentication failed") {
             tracing::error!("ensure_database auth failed: {msg}");
@@ -574,11 +599,40 @@ async fn ensure_database(postgresql: &PostgreSQL, database: &str) -> Result<(), 
             exit_codes::CREATE_DATABASE_FAILED
         }
     };
-    match postgresql.database_exists(database).await {
-        Ok(true) => Ok(()),
-        Ok(false) => postgresql.create_database(database).await.map_err(classify),
-        Err(e) => Err(classify(e)),
+
+    let exists_sql = format!(
+        "select 1 from pg_database where datname = {}",
+        sql_string_literal(&args.database)
+    );
+    let exists = pgbin::psql(
+        &layout.install_dir,
+        &args.listen,
+        port,
+        &args.username,
+        "postgres",
+        password,
+        &exists_sql,
+        Duration::from_secs(10),
+    )
+    .await
+    .map_err(classify)?;
+    if !exists.is_empty() {
+        return Ok(());
     }
+    let create_sql = format!("create database {}", sql_identifier(&args.database));
+    pgbin::psql(
+        &layout.install_dir,
+        &args.listen,
+        port,
+        &args.username,
+        "postgres",
+        password,
+        &create_sql,
+        Duration::from_secs(30),
+    )
+    .await
+    .map_err(classify)?;
+    Ok(())
 }
 
 /// 启动后阶段失败（健康检查/建库/stdout 断裂）的清理：尽力停止，避免留下无主 postgres。
@@ -614,5 +668,21 @@ mod tests {
         assert!(port > 0);
         // 返回的端口刚刚释放，通常可立即绑定（TOCTOU 可接受，真实冲突由启动重试兜底）
         assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
+    }
+
+    /// `sql_string_literal`：普通库名加单引号包裹，内部单引号双写防止逃逸。
+    #[test]
+    fn sql_string_literal_escapes_quotes() {
+        assert_eq!(sql_string_literal("qtrading"), "'qtrading'");
+        assert_eq!(sql_string_literal("a'b"), "'a''b'");
+        assert_eq!(sql_string_literal("a''b"), "'a''''b'");
+    }
+
+    /// `sql_identifier`：双引号包裹，内部双引号双写（CREATE DATABASE 标识符规则）。
+    #[test]
+    fn sql_identifier_escapes_double_quotes() {
+        assert_eq!(sql_identifier("qtrading"), "\"qtrading\"");
+        assert_eq!(sql_identifier("a\"b"), "\"a\"\"b\"");
+        assert_eq!(sql_identifier("a;drop"), "\"a;drop\"");
     }
 }
