@@ -248,14 +248,15 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 ##### 9.9.1 重置密码（reset-password）
 
 ```bash
-sidecars/qtrading-pg-sidecar reset-password --data-dir <数据目录>
+sidecars/qtrading-pg-sidecar reset-password --data-dir <数据目录> [--username <角色>]
 ```
 
 > 维护脚本（`qtrading-db-maintenance.bat` / `.sh`）未路由该命令，须如上直接调用 sidecar binary 并显式传 `--data-dir`。
 
 行为与前提（与 sidecar 实现一致）：
 
-- **不需要旧密码**：临时将 `pg_hba.conf` 置为仅 `127.0.0.1` trust 启动临时实例执行 `ALTER USER postgres PASSWORD`，随后重写 `pg_hba.conf` 为 scram-sha-256；出错路径自动恢复原 `pg_hba.conf`。
+- **不需要旧密码**：临时将 `pg_hba.conf` 置为仅 `127.0.0.1` trust 启动临时实例执行 `ALTER USER <角色> PASSWORD`（`<角色>` 默认为 `postgres`），随后重写 `pg_hba.conf` 为 scram-sha-256；出错路径自动恢复原 `pg_hba.conf`。
+- **自定义用户名**：`--username <角色>` 为可选参数，默认 `postgres`；自定义超级用户名的实例须传入与既有 PGDATA 超级用户一致的角色名（与 run 的 `--username` 相同），否则临时实例认证失败。改用户名需重建 cluster，reset-password 不会重命名角色。
 - **不触碰业务数据**：只重置认证凭据；成功后生成新的随机密码写入密码文件（Windows DPAPI 加密 / Unix 0600，见 9.8），覆盖旧文件。完成后重启 qTrading 即可，随后可按 9.3 重新 `dump` 建立新恢复点。
 - **前提**：数据目录已初始化（`PG_VERSION` 存在，否则 exit 40）；应用完全退出且无活实例（exit 50；残留 stale pid 自动清理，活实例须先 `stop`）。
 - 其余退出码见 9.6：临时实例启动失败 / ALTER USER 失败 / 新密码文件写入失败 → exit 16；`pg_hba.conf` 重写失败 → exit 30。

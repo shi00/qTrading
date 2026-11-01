@@ -197,6 +197,85 @@ fn test_run_custom_username_roundtrip() {
     cleanup_sidecar(&mut child2, &data_dir);
 }
 
+/// 5c. M24：自定义超级用户名 run → reset-password → run 全链路 roundtrip。
+///
+/// 组合验证 M22/M23：自定义用户名 cluster 上 reset-password 必须透传 `--username`，
+/// 否则临时实例认证失败或 `ALTER USER` 作用于不存在的角色；重置后新密码须可直连认证。
+#[test]
+fn test_run_reset_password_run_custom_username() {
+    let (_tmp, data_dir) = unique_data_dir("roundtrip_custom_user_reset");
+
+    // ① run --username qtrading → ready
+    let mut child = spawn_run_with(&data_dir, &["--username", "qtrading"]);
+    let ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    assert_eq!(ready["status"], "running");
+    assert_eq!(ready["username"], "qtrading");
+    assert_eq!(ready["database"], "qtrading");
+
+    // ② graceful stop（释放维护锁）
+    graceful_stop(&mut child);
+    assert_eq!(
+        wait_for_exit(&mut child, STOP_TIMEOUT),
+        0,
+        "first run should exit 0"
+    );
+
+    // ③ reset-password --username qtrading → exit 0
+    let (reset_code, reset_stderr) = reset_password_sidecar(&data_dir, Some("qtrading"));
+    assert_eq!(
+        reset_code, 0,
+        "reset-password --username qtrading should succeed\n\
+         === SIDECAR STDERR ===\n{reset_stderr}\n=== END STDERR ==="
+    );
+
+    // ④ 重新 run --username qtrading → ready
+    let mut child2 = spawn_run_with(&data_dir, &["--username", "qtrading"]);
+    let ready2 = wait_for_ready(&mut child2, READY_TIMEOUT);
+    assert_eq!(ready2["status"], "running");
+    assert_eq!(ready2["username"], "qtrading");
+
+    // ⑤ 新密码直连 psql 验证 current_user=qtrading
+    let port = ready_port(&ready2).expect("port in ready JSON");
+    let base = data_dir.parent().unwrap();
+    let psql_name = if cfg!(windows) { "psql.exe" } else { "psql" };
+    let psql = base.join("install").join("bin").join(psql_name);
+    let password = password::read_password_file(&base.join("runtime").join("password"))
+        .expect("read password file");
+    let out = std::process::Command::new(&psql)
+        .args([
+            "-X",
+            "-q",
+            "-A",
+            "-t",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port.to_string(),
+            "-U",
+            "qtrading",
+            "-d",
+            "qtrading",
+            "-c",
+            "select current_user",
+        ])
+        .env("PGPASSWORD", &password)
+        .output()
+        .expect("run bundled psql");
+    assert!(
+        out.status.success(),
+        "psql as custom superuser failed after reset-password: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // R9：只比对角色名，不断言/输出密码
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "qtrading",
+        "reset-password 后新密码应可以 qtrading 认证"
+    );
+
+    cleanup_sidecar(&mut child2, &data_dir);
+}
+
 /// 6. dump/restore roundtrip（§17.2 场景 6）。
 #[test]
 fn test_dump_restore_roundtrip() {

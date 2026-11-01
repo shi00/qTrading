@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import queue
+import shlex
 import subprocess
 import sys
 import threading
@@ -640,10 +641,12 @@ class EmbeddedPostgresService:
                 f"Free up disk space and restart qTrading; data_dir={self._data_dir}"
             )
         if exit_code == 16:
-            return (
-                f"password error (exit=16); run 'qtrading-pg-sidecar reset-password "
-                f"--data-dir {self._data_dir}' to reset, then restart qTrading"
-            )
+            # M24：自定义超级用户名实例须按需追加 --username，否则用户照提示执行会失败；
+            # 用户名/路径均经 shlex.quote 生成可复制的命令字符串（不拼接 shell 注入面）。
+            reset_cmd = f"qtrading-pg-sidecar reset-password --data-dir {shlex.quote(str(self._data_dir))}"
+            if self._username != "postgres":
+                reset_cmd += f" --username {shlex.quote(self._username)}"
+            return f"password error (exit=16); run '{reset_cmd}' to reset, then restart qTrading"
         if exit_code == 50:
             return (
                 "qTrading already running (exit=50); another qTrading instance may be using "

@@ -48,7 +48,7 @@ cd "<安装目录>/resources/maintenance"
 | `version` | 显示 sidecar 版本与构建元数据 | 无 |
 | `help` | 显示帮助 | 无 |
 
-> 维护脚本未路由 `reset-password`（重置 postgres 密码）命令。密码文件缺失/不可解密/密码不匹配时，在 qTrading 完全退出且数据目录已初始化（`PG_VERSION` 存在）的前提下，直接调用 sidecar binary：`"<安装目录>\_internal\sidecars\qtrading-pg-sidecar.exe" reset-password --data-dir "<数据目录>"`（Linux/macOS 用对应 `_internal/sidecars/qtrading-pg-sidecar`）。成功后重启 qTrading，并重新 `dump` 建立新备份；完整分流见 `docs/guides/how-to.md` §9.9（源码仓库路径，安装包内不含该文档）。
+> 维护脚本未路由 `reset-password`（重置 postgres 密码）命令。密码文件缺失/不可解密/密码不匹配时，在 qTrading 完全退出且数据目录已初始化（`PG_VERSION` 存在）的前提下，直接调用 sidecar binary：`"<安装目录>\_internal\sidecars\qtrading-pg-sidecar.exe" reset-password --data-dir "<数据目录>" [--username "<角色>"]`（Linux/macOS 用对应 `_internal/sidecars/qtrading-pg-sidecar`）。`--username` 可选，默认 `postgres`；自定义超级用户名实例须与既有 PGDATA 超级用户一致。成功后重启 qTrading，并重新 `dump` 建立新备份；完整分流见 `docs/guides/how-to.md` §9.9（源码仓库路径，安装包内不含该文档）。
 
 ## 输出契约（dump / restore / maintenance-shell）
 

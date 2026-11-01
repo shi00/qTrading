@@ -160,7 +160,7 @@ def _reset_popen_instances() -> Iterator[None]:
     DataSanitizer._reset_known_secrets()
 
 
-def _make_service(tmp_path: Path) -> EmbeddedPostgresService:
+def _make_service(tmp_path: Path, *, username: str = "postgres") -> EmbeddedPostgresService:
     """构造 EmbeddedPostgresService 实例（用真实 Popen 但路径为 tmp_path 桩）。"""
     from data.persistence.embedded_postgres.service import EmbeddedPostgresService
 
@@ -173,6 +173,7 @@ def _make_service(tmp_path: Path) -> EmbeddedPostgresService:
         sidecar_binary=sidecar_binary,
         data_dir=data_dir,
         install_dir=install_dir,
+        username=username,
     )
 
 
@@ -867,6 +868,23 @@ class TestEmbeddedPostgresServiceCoverageGapFill:
 
         from data.persistence.embedded_postgres.service import EmbeddedPostgresService
 
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_format_sidecar_exit_error_username_flag_only_for_custom(self, tmp_path: Path) -> None:
+        """M24：exit 16 提示默认 postgres 不含 --username；自定义超级用户名须含 --username <name>。"""
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        service = _make_service(tmp_path)
+        default_msg = service._format_sidecar_exit_error(16)
+        assert "password error (exit=16)" in default_msg
+        assert "reset-password --data-dir" in default_msg
+        assert "--username" not in default_msg
+        EmbeddedPostgresService._reset_singleton()
+
+        service = _make_service(tmp_path, username="qtrading")
+        custom_msg = service._format_sidecar_exit_error(16)
+        assert "password error (exit=16)" in custom_msg
+        assert "--username qtrading" in custom_msg
         EmbeddedPostgresService._reset_singleton()
 
     def test_readline_with_timeout_returns_empty_on_queue_empty(self, tmp_path: Path) -> None:
