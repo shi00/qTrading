@@ -393,6 +393,16 @@ pub fn write_security_baseline(data_dir: &Path, listen: &str) -> std::io::Result
     )
 }
 
+/// `--listen` 会写入 postgresql.conf 的单引号字面量；含引号/反斜杠/控制字符即可逃逸
+/// 受管块并注入任意配置行，因此入口处拒绝（防配置注入，§7.4 基线不可绕过）。
+pub fn listen_value_is_safe(listen: &str) -> bool {
+    !listen.is_empty()
+        && listen.len() <= 255
+        && !listen
+            .chars()
+            .any(|c| c == '\'' || c == '"' || c == '\\' || c.is_control())
+}
+
 fn managed_block(listen: &str) -> String {
     let mut block = String::from(BLOCK_BEGIN);
     block.push('\n');
@@ -507,6 +517,26 @@ mod tests {
         assert_eq!(guard_data_dir(&dir).unwrap(), DataDirState::Fresh);
         assert!(!dir.join("postgresql.conf").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn listen_value_rejects_config_injection() {
+        for ok in ["127.0.0.1", "localhost", "::1", "127.0.0.1,::1"] {
+            assert!(listen_value_is_safe(ok), "{ok:?} 应被接受");
+        }
+        for bad in [
+            "",
+            "127.0.0.1'\nport = 6543",
+            "127.0.0.1\n",
+            "a\\b",
+            "\"x\"",
+            "a\tb",
+            "x\u{0}y",
+        ] {
+            assert!(!listen_value_is_safe(bad), "{bad:?} 应被拒绝");
+        }
+        assert!(!listen_value_is_safe(&"a".repeat(256)));
+        assert!(listen_value_is_safe(&"a".repeat(255)));
     }
 
     #[test]

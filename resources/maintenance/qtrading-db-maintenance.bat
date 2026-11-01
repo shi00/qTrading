@@ -21,6 +21,14 @@ REM 默认数据目录：platformdirs user_data_dir("qTrading")/postgres/16/data
 REM Windows: %LOCALAPPDATA%\qTrading\postgres\16\data
 set "DEFAULT_DATA_DIR=%LOCALAPPDATA%\qTrading\postgres\16\data"
 
+REM 超级用户名：与 sidecar --username 默认值一致（postgres）。
+REM 非 postgres 时向 dump / restore / maintenance-shell 显式透传 --username
+REM （应用配置自定义了 embedded_pg_username 时必须设置，否则 sidecar 按默认超级用户连接）。
+set "PG_USERNAME=%QTRADING_PG_USERNAME%"
+if not defined PG_USERNAME set "PG_USERNAME=postgres"
+set "USERNAME_ARG="
+if /i not "%PG_USERNAME%"=="postgres" set "USERNAME_ARG=--username %PG_USERNAME%"
+
 if "%~1"=="" goto :help
 
 set "CMD=%~1"
@@ -41,7 +49,7 @@ if /i "%CMD%"=="dump" (
         echo Usage: %0 dump ^<output-file^>
         exit /b 1
     )
-    "%SIDECAR_EXE%" dump --data-dir "%DEFAULT_DATA_DIR%" --output "%~1"
+    "%SIDECAR_EXE%" dump --data-dir "%DEFAULT_DATA_DIR%" --output "%~1" %USERNAME_ARG%
     exit /b !errorlevel!
 )
 
@@ -50,7 +58,7 @@ if /i "%CMD%"=="restore" (
         echo Usage: %0 restore ^<input-file^>
         exit /b 1
     )
-    "%SIDECAR_EXE%" restore --data-dir "%DEFAULT_DATA_DIR%" --input "%~1"
+    "%SIDECAR_EXE%" restore --data-dir "%DEFAULT_DATA_DIR%" --input "%~1" %USERNAME_ARG%
     exit /b !errorlevel!
 )
 
@@ -60,7 +68,7 @@ if /i "%CMD%"=="stop" (
 )
 
 if /i "%CMD%"=="maintenance-shell" (
-    "%SIDECAR_EXE%" maintenance-shell --data-dir "%DEFAULT_DATA_DIR%"
+    "%SIDECAR_EXE%" maintenance-shell --data-dir "%DEFAULT_DATA_DIR%" %USERNAME_ARG%
     exit /b !errorlevel!
 )
 
@@ -91,6 +99,9 @@ echo   stop                  Stop running PostgreSQL (graded: smart ^> fast ^> k
 echo   maintenance-shell     Start temporary maintenance instance
 echo   version               Show sidecar version
 echo   help                  Show this help
+echo.
+echo Environment:
+echo   QTRADING_PG_USERNAME  Superuser name passed as --username to dump/restore/maintenance-shell (default: postgres)
 echo.
 echo Default data dir: %DEFAULT_DATA_DIR%
 echo Sidecar binary:   %SIDECAR_EXE%

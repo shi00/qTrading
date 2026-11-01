@@ -533,6 +533,68 @@ class TestSubmitTerminalCostCalculation:
         assert dao.settle_attempt_usage.await_args.kwargs["cost_cny"] is None
 
     @pytest.mark.asyncio
+    async def test_encoder_pricing_uses_encoder_tokens_and_text_count(self):
+        """F17：分类费用型按 encoder_input_tokens 计价，text_count 同源透传账本列。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        metadata = {
+            "connection_id": "conn-sentiment",
+            "month": "202610",
+            "encoder_input_tokens": 100,
+            "text_count": 2,
+            "pricing": {
+                **self._PRICING_META,
+                "pricing_unit": "encoder_input_tokens",
+                "encoder_price_per_m": "1.00",
+                "input_price_per_m": None,
+                "output_price_per_m": None,
+                "cache_read_price_per_m": None,
+            },
+        }
+        recorder.observe_usage(
+            AttemptUsageObservation(
+                attempt_id="att-1",
+                invocation_id="inv-1",
+                usage=_usage(),
+                actual_model="local-model",
+                metadata=metadata,
+            )
+        )
+        await recorder.submit_terminal(_terminal())
+        kwargs = dao.settle_attempt_usage.await_args.kwargs
+        # 100 / 1e6 × 1.00 = 0.0001（4 位 HALF_UP）
+        assert kwargs["cost_cny"] == "0.0001"
+        assert kwargs["encoder_input_tokens"] == 100
+        assert kwargs["text_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_encoder_pricing_without_token_evidence_yields_none_cost(self):
+        """encoder 计价但无 encoder_input_tokens → None（未知不伪装为零成本，R21）。"""
+        dao = _dao_mock()
+        recorder = UsageRecorder(dao_provider=lambda: dao)
+        metadata = {
+            "connection_id": "conn-sentiment",
+            "month": "202610",
+            "text_count": 2,
+            "pricing": {
+                **self._PRICING_META,
+                "pricing_unit": "encoder_input_tokens",
+                "encoder_price_per_m": "1.00",
+            },
+        }
+        recorder.observe_usage(
+            AttemptUsageObservation(
+                attempt_id="att-1",
+                invocation_id="inv-1",
+                usage=_usage(),
+                actual_model="local-model",
+                metadata=metadata,
+            )
+        )
+        await recorder.submit_terminal(_terminal())
+        assert dao.settle_attempt_usage.await_args.kwargs["cost_cny"] is None
+
+    @pytest.mark.asyncio
     async def test_failed_terminal_without_usage_yields_none_cost(self):
         """失败终态（record 与观察均无用量）→ cost None + unavailable（R21）。"""
         dao = _dao_mock()

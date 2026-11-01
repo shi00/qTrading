@@ -402,6 +402,48 @@ class TestHappyPath:
         assert obs_arg.metadata["pricing"] is None
 
     @pytest.mark.asyncio
+    async def test_encoder_pricing_metadata_carries_usage_evidence(self, monkeypatch):
+        """F17：encoder 计价连接的 text_count / encoder_input_tokens 进入落账元数据。
+
+        修复前只冻结 pricing 快照而从不携带 encoder 用量 → Recorder 结算时
+        ``compute_cost_cny`` 因 token 缺失按不可计价返回 None（分类费用型实际成本
+        不入月汇总）。此处与预留估算同口径，payload texts 逐条估算求和。
+        """
+        monkeypatch.setattr(
+            "services.ai_service.scenario_executor._estimate_tokens",
+            lambda text, model=None: {"新闻一": 200, "新闻二": 300}.get(text, 0),
+        )
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok, adapters={"gguf_sentiment": adapter})
+        connection = replace(_remote_conn("conn-sentiment"), adapter_kind="gguf_sentiment")
+        raw_conn = dataclasses.asdict(connection)
+        raw_conn["billing"] = {
+            "mode": "estimate_cost",
+            "pricing_unit": "encoder_input_tokens",
+            "price_source": "user",
+            "encoder_price_per_m": "1.00",
+            "fx_to_cny": None,
+        }
+        request = replace(
+            _request(),
+            payload={"system_prompt": "系统提示", "prompt": "测试新闻", "texts": ["新闻一", "新闻二"]},
+        )
+        result = await executor.execute(
+            request,
+            _snapshot((_candidate(0, "conn-sentiment"),), (raw_conn,)),
+            _validator_ok,
+        )
+        assert result.status == "succeeded"
+        obs_arg = recorder.observe_usage.call_args.args[0]
+        assert obs_arg.metadata["text_count"] == 2
+        assert obs_arg.metadata["encoder_input_tokens"] == 500
+        # 终态落账记录同源携带（结算侧成本计算与账本列依赖）
+        terminal = recorder.submit_terminal.call_args.args[0]
+        assert terminal.metadata["text_count"] == 2
+        assert terminal.metadata["encoder_input_tokens"] == 500
+
+    @pytest.mark.asyncio
     async def test_authorize_failure_rejects_candidate(self):
         adapter = _adapter_ok()
         recorder = _recorder_mock()

@@ -17,6 +17,40 @@ if [ ! -x "$SIDECAR_BIN" ]; then
     exit 1
 fi
 
+# 超级用户名：与 sidecar --username 默认值一致（postgres）。
+# 来源优先级：前置参数 --username <user> > 环境变量 QTRADING_PG_USERNAME > postgres。
+# 非 postgres 时向 dump / restore / maintenance-shell 显式透传 --username
+# （应用配置自定义了 embedded_pg_username 时必须设置，否则 sidecar 按默认超级用户连接）。
+PG_USERNAME="${QTRADING_PG_USERNAME:-postgres}"
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --username)
+            if [ -z "$2" ]; then
+                echo "ERROR: --username requires a value" >&2
+                exit 1
+            fi
+            PG_USERNAME="$2"
+            shift 2
+            ;;
+        --username=*)
+            PG_USERNAME="${1#--username=}"
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+if [ -z "$PG_USERNAME" ]; then
+    echo "ERROR: username must not be empty" >&2
+    exit 1
+fi
+# 默认 postgres 时不传 --username，保持既有调用契约不变
+USERNAME_ARG=""
+if [ "$PG_USERNAME" != "postgres" ]; then
+    USERNAME_ARG="--username $PG_USERNAME"
+fi
+
 # 默认数据目录：platformdirs user_data_dir("qTrading")/postgres/16/data
 # Linux: ~/.local/share/qTrading/postgres/16/data
 # macOS: ~/Library/Application Support/qTrading/postgres/16/data
@@ -49,20 +83,21 @@ case "$CMD" in
             echo "Usage: $0 dump <output-file>" >&2
             exit 1
         fi
-        exec "$SIDECAR_BIN" dump --data-dir "$DEFAULT_DATA_DIR" --output "$1"
+        # $USERNAME_ARG 有意不加引号：默认空串（不传 --username），自定义时拆为两个参数
+        exec "$SIDECAR_BIN" dump --data-dir "$DEFAULT_DATA_DIR" --output "$1" $USERNAME_ARG
         ;;
     restore)
         if [ -z "$1" ]; then
             echo "Usage: $0 restore <input-file>" >&2
             exit 1
         fi
-        exec "$SIDECAR_BIN" restore --data-dir "$DEFAULT_DATA_DIR" --input "$1"
+        exec "$SIDECAR_BIN" restore --data-dir "$DEFAULT_DATA_DIR" --input "$1" $USERNAME_ARG
         ;;
     stop)
         exec "$SIDECAR_BIN" stop --data-dir "$DEFAULT_DATA_DIR" "$@"
         ;;
     maintenance-shell)
-        exec "$SIDECAR_BIN" maintenance-shell --data-dir "$DEFAULT_DATA_DIR" "$@"
+        exec "$SIDECAR_BIN" maintenance-shell --data-dir "$DEFAULT_DATA_DIR" $USERNAME_ARG "$@"
         ;;
     version)
         exec "$SIDECAR_BIN" version "$@"
@@ -71,7 +106,7 @@ case "$CMD" in
         cat <<EOF
 qTrading Database Maintenance (offline)
 
-Usage: $0 <command> [args]
+Usage: $0 [--username <user>] <command> [args]
 
 Commands:
   status                Show embedded PostgreSQL status
@@ -82,6 +117,10 @@ Commands:
   maintenance-shell     Start temporary maintenance instance
   version               Show sidecar version
   help                  Show this help
+
+Options:
+  --username <user>         Superuser name passed to dump/restore/maintenance-shell
+                            (or set env QTRADING_PG_USERNAME; default: postgres)
 
 Default data dir: $DEFAULT_DATA_DIR
 Sidecar binary:   $SIDECAR_BIN
