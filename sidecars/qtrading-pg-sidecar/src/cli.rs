@@ -45,7 +45,7 @@ pub enum Command {
     Restore(RestoreArgs),
     /// 临时维护实例：输出脱敏连接信息与 psql 路径，等待用户结束后关闭（需维护锁）
     MaintenanceShell(MaintenanceShellArgs),
-    /// 重置超级用户密码（§13.7.8，需维护锁；临时 trust 实例 + ALTER USER）
+    /// 重置超级用户密码（§13.7.8，需维护锁；临时 trust 实例 + ALTER USER，支持自定义超级用户名 M23）
     ResetPassword(ResetPasswordArgs),
     /// 版本与构建元数据
     Version(VersionArgs),

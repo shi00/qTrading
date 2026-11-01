@@ -10,9 +10,10 @@
 - ``@register_singleton`` 协议：``_reset_singleton``（无 atexit 资源需清理）
 - 路径从 AppConfig + ``ConfigHandler.load_config()`` 实时解析（不在构造期缓存，配合运行时配置切换）
 - argv 中的路径、业务库名、超级用户名均来自 AppConfig（R-A2 边界；库名/用户名经白名单校验后透传）
-- 超级用户名仅在配置为非 sidecar 默认 ``postgres`` 时透传 ``--username``（自定义用户名
-  实例的 dump/restore/maintenance-shell/reset-password 必须与 ``run --username`` 一致，
-  否则角色认证/改密作用于错误角色；默认配置不传该参数，兼容不支持 ``--username`` 的旧 sidecar）
+- 超级用户名仅在配置为非 sidecar 默认 ``postgres`` 时透传 ``--username``（自定义用户名实例的
+  维护命令必须与 ``run --username`` 一致，否则角色认证/改密作用于错误角色；默认配置不传该参数，
+  兼容不支持 ``--username`` 的旧 sidecar）。dump/restore/maintenance-shell 与 reset-password
+  均由同一实现透传（M21 / M23）
 - exit code 20 (PG 未运行) 在 doctor 命令中容忍为成功（sidecar doctor 是只读诊断）
 """
 
@@ -352,7 +353,7 @@ class EmbeddedPgMaintenanceService:
 
     def _get_username(self) -> str:
         """读取并校验配置中的超级用户名（dump/restore/maintenance-shell/reset-password
-        须与实例用户名一致）。
+        须与实例用户名一致，M21 / M23）。
 
         用户名来自 ``AppConfig.embedded_pg_username``（与运行时 ``EmbeddedPostgresService``
         ``run --username`` 使用同一配置项），经白名单校验后透传给 sidecar ``--username``。
