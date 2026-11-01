@@ -28,6 +28,7 @@ import pytest
 
 import app.application as app_main
 import utils.shutdown as shutdown_mod
+from core.startup_types import StartupState
 
 pytestmark = pytest.mark.unit
 
@@ -236,6 +237,51 @@ async def test_run_auto_probe_task_registered(monkeypatch):
     finally:
         # 替身 coordinator 不执行真实清理，测试自身必须取消并回收 probe_task，
         # 否则事件循环关闭时留下 pending task（资源泄漏/销毁告警）。
+        probe_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await probe_task
+
+
+@pytest.mark.asyncio
+async def test_state_transition_registers_late_auto_probe_task(monkeypatch):
+    """onboarding/retry 路径创建的 auto_probe_task 也必须注册到 ShutdownCoordinator。
+
+    初次 start() 若进入 onboarding 则不创建 task；用户完成 onboarding 后
+    initialize_services 才新建 auto probe task，仅靠 start() 后的单次登记会漏挂，
+    导致停机时不取消该 fire-and-forget 任务。_on_state_change 负责在后续状态转换时补登记，
+    且同一 task 只登记一次。
+    """
+    _prepare_run_mocks(monkeypatch)
+
+    captured: dict = {}
+    holder: dict = {}
+
+    def _factory(**kwargs):
+        captured.update(kwargs)
+        ctrl = MagicMock()
+        ctrl.auto_probe_task = None
+        ctrl.start = AsyncMock()
+        holder["controller"] = ctrl
+        return ctrl
+
+    monkeypatch.setattr(app_main, "StartupController", _factory)
+
+    probe_task = asyncio.create_task(asyncio.sleep(10))
+    try:
+        page = _DummyPage()
+        await app_main.run(page)
+
+        coordinator = _FakeCoordinator.last
+        assert coordinator is not None
+        # 模拟 onboarding 完成后 initialize_services 创建的迟登记 task
+        holder["controller"].auto_probe_task = probe_task
+        captured["on_state_change"](StartupState.READY, None)
+
+        assert probe_task in coordinator.register_task_calls
+        # 重复状态转换不重复登记同一 task
+        captured["on_state_change"](StartupState.READY, None)
+        assert coordinator.register_task_calls.count(probe_task) == 1
+    finally:
         probe_task.cancel()
         with suppress(asyncio.CancelledError):
             await probe_task
