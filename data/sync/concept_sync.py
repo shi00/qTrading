@@ -266,6 +266,10 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                 if now - last_cancel_check >= _AKSHARE_CANCEL_CHECK_INTERVAL:
                     last_cancel_check = now
                     if self._check_cancelled(result):
+                        # 已创建但尚未交给 gather 的 coroutine 必须显式关闭：既不调度也不关闭时
+                        # 它们只会被 GC 回收并触发 "coroutine was never awaited" RuntimeWarning。
+                        for pending in tasks:
+                            pending.close()
                         return result
                 tasks.append(sync_one_board(str(row["板块名称"]), str(row["板块代码"])))
             board_results = await gather_return_exceptions_propagating_cancel(*tasks)

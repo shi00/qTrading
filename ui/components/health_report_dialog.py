@@ -8,7 +8,7 @@ from typing import Any
 import flet as ft
 
 from core.i18n import Message
-from ui.components.flet_type_helpers import safe_controls
+from ui.components.flet_type_helpers import safe_controls, safe_on_dismiss
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -605,6 +605,9 @@ def HealthReportDialog(
         ft.AlertDialog(
             content_padding=0,
             modal=True,
+            # 用户经 Esc / 关闭路径 dismiss 时关闭并通知消费方（否则 use_dialog 会在
+            # 下一次重渲染时把对话框重新挂回 overlay）。
+            on_dismiss=safe_on_dismiss(_close),
             title=ft.Text(I18n.get("health_report_title"), size=AppStyles.FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD),
             title_padding=0,
             content=_build_health_content(report, width, height),
@@ -930,6 +933,9 @@ def HealthScanDialog(
     dialog = (
         ft.AlertDialog(
             modal=True,
+            # Esc / 关闭路径 dismiss 时同步 open_state 并通知消费方；随后的
+            # 重渲染会触发 _cleanup_scan 取消在途扫描 futures。
+            on_dismiss=safe_on_dismiss(_close),
             title=ft.Text(I18n.get("scan_title"), size=AppStyles.FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD),
             content=content,
             actions=[

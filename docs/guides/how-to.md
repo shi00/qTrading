@@ -181,12 +181,12 @@ sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --input <备份�
 sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 ```
 
-**交互式生命周期命令**（区别于 doctor/status 的 stdout 机器 JSON 协议，本命令 **stdout 无输出**）：持维护锁启动临时维护实例（主实例/sidecar 运行中会拒绝，exit 50；数据目录未初始化 exit 40；其余退出码见 9.6），实例存活期间可用 psql 反复连接、执行多条命令，结束后 sidecar 优雅停止实例并退出。启动到结束的时序如下（与 sidecar 实现一致）：
+**交互式生命周期命令**：持维护锁启动临时维护实例（主实例/sidecar 运行中会拒绝，exit 50；数据目录未初始化 exit 40；其余退出码见 9.6），实例存活期间可用 psql 反复连接、执行多条命令，结束后 sidecar 优雅停止实例并退出。临时实例就绪后 **stdout 输出一行 JSON**（与 doctor/status 同为机器可解析协议）：`psql_path` 为内置 psql 可执行文件路径，`connection_string_redacted` 为脱敏连接串（形如 `postgresql://postgres:***@127.0.0.1:<随机端口>/qtrading`，密码段固定 `***`，不输出明文密码）；连接提示、psql 命令行、密码文件位置与「按 Enter 结束」等交互信息一律走 stderr。**旧读者迁移**：本命令曾为「stdout 无输出」，依赖该旧行为的脚本须改为解析上述 JSON 字段。启动到结束的时序如下（与 sidecar 实现一致）：
 
-1. **就绪后才提示连接信息**：随机分配端口启动临时实例，内部先以 psql `select 1` 探测就绪（探测窗口约 30 秒，失败 exit 12），探测通过后才开始打印连接信息——**提示出现时实例已可连接**。
+1. **就绪后才输出连接信息**：随机分配端口启动临时实例，内部先以 psql `select 1` 探测就绪（探测窗口约 30 秒，失败 exit 12），探测通过后才向 stdout 输出上述单行 JSON，并向 stderr 打印提示——**输出出现时实例已可连接**；若 stdout 不可写（管道断裂等），sidecar 停止临时实例并以 exit 13 退出。
 2. **提示全部走 stderr**：包含脱敏连接串（`postgresql://postgres:***@127.0.0.1:<port>/qtrading`，端口为本次随机分配）、完整 psql 命令行、密码文件位置（密码不打印明文，密码文件保护方式见 9.8），以及「完成后按 Enter 结束」提示。
-3. **交互使用**：按提示中的 psql 命令行连接实例，存活期间可执行多条命令（可多次启动 psql 会话）。
-4. **结束（Enter / EOF）**：等待 stdin 出现换行（终端按 **Enter**）后结束；stdin 到达 **EOF**（管道写端关闭、重定向空输入等非交互场景）或读取错误时同样立即结束，避免永久挂起。随后临时实例被优雅停止——**sidecar 进程退出即实例已停止，退出后不可再连接**，不存在「进程退出后解析 stdout 拿连接串」的用法。
+3. **交互使用**：按提示中的 psql 命令行连接实例，或使用 stdout JSON 中的 `psql_path` 与 `connection_string_redacted`；存活期间可执行多条命令（可多次启动 psql 会话）。
+4. **结束（Enter / EOF）**：等待 stdin 出现换行（终端按 **Enter**）后结束；stdin 到达 **EOF**（管道写端关闭、重定向空输入等非交互场景）或读取错误时同样立即结束，避免永久挂起。随后临时实例被优雅停止——**sidecar 进程退出即实例已停止**；连接信息须在进程存活期间从 stdout 读取该行 JSON（进程退出后 stdout 已关闭，退出后再连接无效）。
 
 #### 9.6 错误分类
 
@@ -199,7 +199,7 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 | 10 | `SETUP_FAILED` | 内置 PostgreSQL binaries 解压/安装失败（install dir 不完整） | run / dump / restore / maintenance-shell / reset-password |
 | 11 | `INITDB_FAILED` | initdb 初始化数据目录失败 | run / restore |
 | 12 | `START_FAILED` | postgres 实例启动失败（端口分配失败、启动超时、临时实例启动失败） | run / dump / restore / maintenance-shell |
-| 13 | `HEALTH_CHECK_FAILED` | 启动后健康检查未通过 | run |
+| 13 | `HEALTH_CHECK_FAILED` | 启动后健康检查未通过；`maintenance-shell` 的 stdout JSON 输出失败（停止临时实例后失败退出） | run / maintenance-shell |
 | 14 | `CREATE_DATABASE_FAILED` | 业务库创建失败 | run |
 | 15 | `PREFLIGHT_FAILED` | 资源预检失败：磁盘空间不足 / 目录权限不足 / 文件系统不支持 / 网盘同步路径 / 密码文件权限过宽 | run |
 | 16 | `PASSWORD_FAILED` | 密码文件缺失/为空/不可解密（PGDATA 已存在）或认证不匹配（28P01） | run / dump / restore / maintenance-shell / reset-password |
@@ -213,9 +213,9 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 
 #### 9.7 Python 服务封装
 
-工程实现见 `services/embedded_pg_maintenance_service.py`（`EmbeddedPgMaintenanceService` 单例），4 个命令（`doctor` / `dump` / `restore` / `maintenance_shell`）通过 `ThreadPoolManager.run_async(TaskType.IO)` 提交同步 `subprocess.run` 避免阻塞事件循环（R16）。设置页「数据库」标签底部的「离线维护工具」说明区块指向本章节。Python 包装内部的退出码→错误类型映射仅用于日志分级与用户提示，退出码语义正本以 sidecar 源码 `exit_codes.rs` 与各命令实际返回路径为准（见 9.6）。
+工程实现见 `services/embedded_pg_maintenance_service.py`（`EmbeddedPgMaintenanceService` 单例），4 个命令（`doctor` / `dump` / `restore` / `maintenance_shell`）通过 `ThreadPoolManager.run_async(TaskType.IO)` 提交同步 subprocess（`Popen` + `communicate()`）避免阻塞事件循环（R16）。设置页「数据库」标签底部的「离线维护工具」说明区块指向本章节。Python 包装内部的退出码→错误类型映射仅用于日志分级与用户提示，退出码语义正本以 sidecar 源码 `exit_codes.rs` 与各命令实际返回路径为准（见 9.6）。
 
-注意：`maintenance_shell()` 包装当前**不能程序化获取存活维护实例的连接信息**——sidecar 对该命令 stdout 无输出（交互提示走 stderr，见 9.5），且进程退出时实例已停止，包装进程退出后解析 stdout 只会得到空连接信息。交互式维护请直接运行 sidecar CLI 或维护脚本（见 9.5）；机器入口如需此能力须单独设计。
+注意：`maintenance_shell()` 包装**可以解析 sidecar stdout 的单行 JSON**，返回 `MaintenanceShellInfo`（`psql_path` / `connection_string_redacted`，密码段固定 `***`，见 9.5）；但**不能据此程序化连接存活实例**——包装以 `subprocess.Popen(...).communicate()` 等待 sidecar 进程退出，而 sidecar 在 Enter / stdin EOF 后即停止临时实例，因此调用返回时实例已停止（stdin 非交互时尤其如此），返回的连接信息只对应已停止的实例。JSON 解析失败抛出 `EmbeddedPgMaintenanceError`，异常消息中的 stdout 经 `DataSanitizer` 脱敏（R9）。交互式维护请直接运行 sidecar CLI 或维护脚本（见 9.5）；机器入口若需「启动实例并保持存活、由调用方连接」，须单独设计。
 
 #### 9.8 密码文件与备份的安全要求
 

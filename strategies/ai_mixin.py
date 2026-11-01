@@ -646,17 +646,20 @@ class AIStrategyMixin:
                 )
 
         # --- Pre-fetch Concepts for all candidates (N+1 optimization) ---
+        # R24：stock_concepts 为当前快照（表无生效日期），回测历史决策不得注入——
+        # 否则 AI 会看到「后来才成立」的概念归属（前视）。实盘沿用当前快照属正常口径。
         concepts_map = {}
         all_ts_codes = candidates_df["ts_code"].tolist()
-        try:
-            concepts_map = await dp.cache.get_concepts(all_ts_codes)  # type: ignore[union-attr]
-        except Exception as e:
-            log_classified(
-                logger,
-                e,
-                "llm",
-                "[AIStrategyMixin] Failed to pre-fetch concepts: %s: %s",
-            )
+        if not context.get("is_backtest"):
+            try:
+                concepts_map = await dp.cache.get_concepts(all_ts_codes)  # type: ignore[union-attr]
+            except Exception as e:
+                log_classified(
+                    logger,
+                    e,
+                    "llm",
+                    "[AIStrategyMixin] Failed to pre-fetch concepts: %s: %s",
+                )
 
         # --- Ultimate Pipeline: Bulk History DB Query & Async News Task Pipelining (Fixing N+1) ---
         prefetched_history = {}
@@ -1782,12 +1785,15 @@ class AIStrategyMixin:
                 news = await NewsFetcher.get_stock_news(ts_code, limit=5, as_of=prefetched.news_as_of)
 
             # 4. Concepts (use pre-fetched map)
+            # R24：与 run_ai_analysis 预取同口径——回测不注入当前快照概念（表无生效日期），
+            # 避免历史决策看到未来概念归属；同时不触发逐股兜底查询。
             concepts = []
-            if prefetched.concepts_map and ts_code in prefetched.concepts_map:
-                concepts = prefetched.concepts_map[ts_code]
-            elif not prefetched.concepts_map:
-                cmap = await dp.cache.get_concepts([ts_code])
-                concepts = cmap.get(ts_code, [])
+            if not prefetched.is_backtest:
+                if prefetched.concepts_map and ts_code in prefetched.concepts_map:
+                    concepts = prefetched.concepts_map[ts_code]
+                elif not prefetched.concepts_map:
+                    cmap = await dp.cache.get_concepts([ts_code])
+                    concepts = cmap.get(ts_code, [])
 
             # 5. Strategy-specific context (The Hook!)
             strategy_ctx = self.get_ai_context(row)

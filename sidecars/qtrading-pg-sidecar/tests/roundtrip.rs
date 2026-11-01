@@ -146,13 +146,20 @@ fn test_dump_restore_roundtrip() {
     graceful_stop(&mut child);
     let _ = wait_for_exit(&mut child, STOP_TIMEOUT);
 
-    // restore → 原目录保留为 .bak-*
-    let (restore_code, restore_stderr) = restore_sidecar_with_stderr(&data_dir, &dump_path);
+    // restore → 原目录保留为 .bak-*，stdout 输出当前数据目录（§12.2 契约）
+    let (restore_code, restore_stdout, restore_stderr) =
+        restore_sidecar_with_output(&data_dir, &dump_path);
     if restore_code != 0 {
         panic!(
             "restore failed with code {restore_code}; stderr:\n=== BEGIN ===\n{restore_stderr}\n=== END ==="
         );
     }
+    let reported = restore_stdout.trim();
+    assert!(!reported.is_empty(), "restore 应向 stdout 输出目标目录");
+    assert!(
+        Path::new(reported).join("PG_VERSION").exists(),
+        "stdout 报告的目标目录应指向已恢复的数据目录: {reported}"
+    );
 
     // 验证 .bak-* 目录存在
     let parent = data_dir.parent().unwrap();
@@ -505,6 +512,64 @@ fn test_reset_password_lock_conflict() {
     );
 
     cleanup_sidecar(&mut child, &data_dir);
+}
+
+/// 14. maintenance-shell stdout JSON 契约（Python `EmbeddedPgMaintenanceService` 消费）。
+///
+/// 期望 stdout 输出 `{psql_path, connection_string_redacted}`，密码段固定 `***`；
+/// stdin 关闭（Stdio::null → EOF）时维护实例应立即优雅停止并 exit 0。
+#[test]
+fn test_maintenance_shell_outputs_json_contract() {
+    let (_tmp, data_dir) = unique_data_dir("roundtrip_14");
+
+    let mut child = spawn_run(&data_dir);
+    let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    graceful_stop(&mut child);
+    let exit = wait_for_exit(&mut child, STOP_TIMEOUT);
+    assert_eq!(
+        exit, 0,
+        "sidecar should stop gracefully before maintenance-shell"
+    );
+
+    let output = std::process::Command::new(sidecar_path())
+        .arg("maintenance-shell")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to run maintenance-shell");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "maintenance-shell should exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let info: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("maintenance-shell stdout should be JSON");
+    assert!(
+        info["psql_path"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("psql"),
+        "psql_path missing: {info}"
+    );
+    let conn = info["connection_string_redacted"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        conn.starts_with("postgresql://postgres:***@127.0.0.1:"),
+        "连接串应脱敏密码段: {conn}"
+    );
+    assert!(conn.ends_with("/qtrading"), "连接串库名不符: {conn}");
+    // R9：stdout 不得出现明文密码（Unix 明文文件可直接核对；Windows 为 DPAPI 密文）
+    #[cfg(unix)]
+    {
+        let pwd =
+            std::fs::read_to_string(data_dir.parent().unwrap().join("runtime").join("password"))
+                .expect("read password file");
+        assert!(!stdout.contains(pwd.trim()), "stdout 泄露明文密码");
+    }
 }
 
 // ---- 辅助函数 ----

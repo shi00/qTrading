@@ -1063,6 +1063,30 @@ class TestRunAiAnalysis:
             dp.cache.quote_dao.get_northbound.assert_awaited_once_with(trade_date="20240118")
 
     @pytest.mark.asyncio
+    async def test_backtest_skips_concepts_prefetch(self):
+        """R24：回测批次预取不得读取 stock_concepts 当前快照（表无生效日期）。"""
+        s = ConcreteStrategy()
+        dp = MagicMock()
+        dp.is_cancelled = MagicMock(return_value=False)
+        dp.cache = MagicMock()
+        dp.cache.get_concepts = AsyncMock(return_value={})
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.quote_dao.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        context = {"data_processor": dp, "trade_date": "20240118", "is_backtest": True}
+        candidates = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"], "close": [10.0]})
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai_instance = MagicMock()
+            mock_ai_instance.is_cloud_available.return_value = True
+            mock_ai_instance.analyze_stock = AsyncMock(
+                return_value={"score": 50, "summary": "test", "decision": "Hold"}
+            )
+            mock_ai.return_value = mock_ai_instance
+            await s.run_ai_analysis(candidates, context)
+            dp.cache.get_concepts.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_news_task_creation_failure_cancels_created_tasks(self):
         """M16-F3: news task 创建中途异常时，已创建的 task 被 cancel 而非成为孤儿。
 
@@ -2044,6 +2068,31 @@ class TestAIStrategyMixinAnalyzeSingle:
         prefetched = PreFetchedContext(concepts_map={})
         result = await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched)
         assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_live_injects_prefetched_concepts(self, mock_strategy, mock_dp, mock_ai_client):
+        """实盘口径：预取的概念归属注入 stock_info，交由 AIService 进入 prompt。"""
+        row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}
+        prefetched = PreFetchedContext(concepts_map={"000001.SZ": ["金融", "银行"]})
+        await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched)
+
+        stock_info = mock_ai_client.analyze_stock.call_args.args[0]
+        assert stock_info["concepts"] == ["金融", "银行"]
+
+    @pytest.mark.asyncio
+    async def test_backtest_omits_current_snapshot_concepts(self, mock_strategy, mock_dp, mock_ai_client):
+        """R24：回测不得注入 stock_concepts 当前快照（表无生效日期），避免历史决策前视。
+
+        即使预取上下文里带有概念映射（如复用批次对象），回测口径也必须置空，
+        且不得触发逐股兜底查询。
+        """
+        row = {"ts_code": "000001.SZ", "name": "平安银行", "close": 10.0}
+        prefetched = PreFetchedContext(concepts_map={"000001.SZ": ["金融"]}, is_backtest=True)
+        await mock_strategy._mixin_analyze_single(row, mock_dp, mock_ai_client, prefetched)
+
+        stock_info = mock_ai_client.analyze_stock.call_args.args[0]
+        assert stock_info["concepts"] == []
+        mock_dp.cache.get_concepts.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_analyze_with_missing_news(self, mock_strategy, mock_dp, mock_ai_client):

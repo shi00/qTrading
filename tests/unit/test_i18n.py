@@ -125,6 +125,14 @@ class TestLocaleResourceIntegrity:
             f"Found {len(inconsistent)} keys with inconsistent placeholders: {inconsistent[:5]}"
         )
 
+    def test_currency_unit_codes_are_iso_4217(self, zh_strings, en_strings):
+        """单位资源中的货币代码须为 ISO 4217 正确代码（曾出现 CYN 错拼）。"""
+        assert en_strings["unit_yuan"] == "CNY"
+        assert zh_strings["unit_yuan"] == "元"
+        for locale, strings in (("zh_CN", zh_strings), ("en_US", en_strings)):
+            typo_keys = [key for key, value in strings.items() if "CYN" in value]
+            assert typo_keys == [], f"{locale} 存在错误货币代码 CYN: {typo_keys}"
+
 
 class TestI18nAPICompatibility:
     """Test that the I18n API remains compatible with existing callers."""

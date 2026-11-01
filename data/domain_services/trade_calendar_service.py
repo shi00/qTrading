@@ -37,6 +37,11 @@ logger = logging.getLogger(__name__)
 # 最近交易日缓存的固定 key（TTLCache 单条目）
 _LATEST_TRADE_DATE_CACHE_KEY = "latest_trade_date"
 
+# 前后交易日搜索窗口（自然日）。A 股最长休市出现在 2020 年春节（延长至 2 月 2 日，
+# 前一交易日 1/23 与后一交易日 2/3 相距 11 个自然日）；10 天窗口会在长假边缘
+# 查不到相邻交易日而返回 None。30 天为安全余量，DB/离线日历按 30 天查询成本可忽略。
+_TRADE_DATE_SEARCH_WINDOW_DAYS = 30
+
 
 class TradeDateUnavailableError(RuntimeError):
     """无法从任何可用数据源确定有效交易日（review03-C14）。
@@ -666,7 +671,7 @@ class TradeCalendarService:
         if date_obj is None:
             return None
 
-        lookback_start = date_obj - datetime.timedelta(days=10)
+        lookback_start = date_obj - datetime.timedelta(days=_TRADE_DATE_SEARCH_WINDOW_DAYS)
         dates = await self.get_trade_dates(lookback_start, date_obj)
 
         if not dates:
@@ -705,7 +710,7 @@ class TradeCalendarService:
         if date_obj is None:
             return None
 
-        lookforward_end = date_obj + datetime.timedelta(days=10)
+        lookforward_end = date_obj + datetime.timedelta(days=_TRADE_DATE_SEARCH_WINDOW_DAYS)
         dates = await self.get_trade_dates(date_obj, lookforward_end)
 
         if not dates:

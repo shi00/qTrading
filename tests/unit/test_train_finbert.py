@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import random
@@ -420,6 +421,54 @@ def test_compute_class_weights_rejects_absent_class() -> None:
     """任一类别计数为 0 拒绝（训练语料须覆盖全部三类，除零无意义）。"""
     with pytest.raises(ValueError, match="类别计数为 0"):
         tf.compute_class_weights({"利空": 1, "中性": 0, "利好": 1})
+
+
+# --------------------------------------------------------------------------- #
+# 加权交叉熵的 device 对齐（M20 复核：GPU 训练 device mismatch）
+# --------------------------------------------------------------------------- #
+def test_compute_loss_moves_class_weights_to_logits_device() -> None:
+    """类别权重须按 logits 的 device/dtype 迁移后传入 cross_entropy。
+
+    单测环境无 torch（CI 不装），故对 ``_WeightedCETrainer.compute_loss`` 做源码级断言：
+    权重张量在 CPU 构造，若原样传入 GPU 上的 logits 会触发 device mismatch。
+    """
+    tree = ast.parse((ROOT / "scripts" / "train_finbert.py").read_text(encoding="utf-8"))
+    compute_loss = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "compute_loss"]
+    assert len(compute_loss) == 1, "compute_loss 定义数量异常"
+    fn = compute_loss[0]
+
+    cross_entropy_calls = [
+        node
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "cross_entropy"
+    ]
+    assert len(cross_entropy_calls) == 1
+    weight_kwargs = [kw for kw in cross_entropy_calls[0].keywords if kw.arg == "weight"]
+    assert weight_kwargs, "cross_entropy 未传 weight"
+    assert isinstance(weight_kwargs[0].value, ast.Name)
+    weight_name = weight_kwargs[0].value.id
+
+    assignments = [
+        node
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == weight_name for target in node.targets)
+    ]
+    assert assignments, f"未找到权重 {weight_name} 的迁移赋值"
+    transfer = assignments[0].value
+    assert isinstance(transfer, ast.Call) and isinstance(transfer.func, ast.Attribute) and transfer.func.attr == "to"
+
+    device_kwargs = [kw for kw in transfer.keywords if kw.arg == "device"]
+    assert device_kwargs, f"权重 {weight_name} 未显式迁移 device"
+    device_value = device_kwargs[0].value
+    assert (
+        isinstance(device_value, ast.Attribute)
+        and device_value.attr == "device"
+        and isinstance(device_value.value, ast.Name)
+        and device_value.value.id == "logits"
+    ), "权重 device 必须取自 logits.device（与 logits/model 同一设备）"
+    dtype_kwargs = [kw for kw in transfer.keywords if kw.arg == "dtype"]
+    assert dtype_kwargs, "权重未对齐 logits.dtype（nll_loss 要求 weight 与 input 同 dtype）"
 
 
 # --------------------------------------------------------------------------- #

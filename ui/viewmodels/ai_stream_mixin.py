@@ -333,7 +333,7 @@ class AIStreamMixin:
         except asyncio.CancelledError:
             raise  # R2 合规（占位卡终结由 select_strategy 取消路径处理）
         except Exception as e:
-            logger.error("[ScreenerVM] retry_single_stock failed: %s", e, exc_info=True)
+            logger.error("[ScreenerVM] retry_single_stock failed: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             # A-1: retry_single 抛异常时（含 try 块之前的异常）恢复卡片为 error 状态避免假死
             # _on_card_error 仅更新 is_analyzing=True 的卡片，成功路径不受影响
             self._on_card_error(name, DataSanitizer.sanitize_error(e))

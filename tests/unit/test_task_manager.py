@@ -1871,6 +1871,26 @@ class TestTaskManagerSubmitTaskRollback:
         assert "key2" in mgr._active_keys
         mgr._loop.call_soon_threadsafe.assert_called_once()
 
+    def test_loop_closed_before_scheduling_returns_none_and_releases_key(self, caplog):
+        """CON-06 同类：is_running() 为真但投递时 loop 已关闭，submit_task 契约返回 None。
+
+        回归防线：投递异常不得抛给调用方（契约 str | None），且本任务同步登记的 unique_key
+        占位必须释放，否则后续同键提交会被永久判为重复。
+        """
+        mgr = TaskManager()
+        mgr._loop = MagicMock()
+        mgr._loop.is_running.return_value = True
+        mgr._loop.call_soon_threadsafe.side_effect = RuntimeError("Event loop is closed")
+        with caplog.at_level("ERROR", logger="services.task_manager"):
+            result = mgr.submit_task("test", "System", lambda **kw: None, unique_key="key_closed")
+        assert result is None
+        assert "key_closed" not in mgr._active_keys  # dedup 占位已释放
+        assert mgr._tasks == {}  # 投递未执行，任务未注册
+        assert any("event loop closed before scheduling" in r.message for r in caplog.records)
+        # 占位释放后可重新提交（loop 恢复可用）
+        mgr._loop.call_soon_threadsafe.side_effect = None
+        assert mgr.submit_task("test", "System", lambda **kw: None, unique_key="key_closed") is not None
+
 
 class TestTaskManagerRegisterAndRunCancelled:
     """覆盖 _register_and_run 中 CANCELLED task 释放 dedup key。"""

@@ -30,8 +30,15 @@ import argparse
 import asyncio
 import os
 import sys
+from pathlib import Path
 
-import asyncpg
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import asyncpg  # noqa: E402 - sys.path 注入后导入
+
+from utils.sanitizers import DataSanitizer  # noqa: E402 - sys.path 注入后导入
 
 # Synced copy from ui/i18n.py:_STRATEGY_NAME_MAP (29 entries: 1 identifier + 14 zh + 14 en).
 # Do NOT import from ui/i18n.py — scripts/ must not pull in flet runtime side effects.
@@ -184,7 +191,8 @@ def main() -> None:
 
     mode = "DRY-RUN" if dry_run else "EXECUTE"
     print(f"=== migrate_strategy_name_to_i18n_key [{mode}] ===")
-    print(f"DB URL: {db_url}")
+    # R9：DSN 可能含明文密码（如 postgresql://user:pwd@host/db），打印前须经 DataSanitizer 脱敏
+    print(f"DB URL: {DataSanitizer.sanitize_error(db_url)}")
     print()
 
     stats = asyncio.run(migrate(dry_run=dry_run, db_url=db_url))

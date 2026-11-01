@@ -331,10 +331,23 @@ def _run_gh_raw(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
 
 
 def list_release_tags(repo: str) -> list[str]:
-    """列出仓库全部 Release tag（可能含语料等非模型 Release，由调用方过滤）。"""
+    """列出仓库全部 Release tag（可能含语料等非模型 Release，由调用方过滤）。
+
+    ``gh`` 输出无法解析 / 结构非法时抛 ``FingerprintError``（fail-closed，exit 2）——
+    不得让裸 ``JSONDecodeError`` 以 exit 1 逃逸，否则与「输入无变化」业务阻断码混淆。
+    """
     raw = _run_gh(["release", "list", "--repo", repo, "--limit", str(RELEASE_LIST_LIMIT), "--json", "tagName"])
-    data = json.loads(raw)
-    tags = [str(item["tagName"]) for item in data]
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise FingerprintError(f"gh release list 输出不是合法 JSON（fail-closed）: {exc}") from exc
+    if not isinstance(data, list):
+        raise FingerprintError(f"gh release list 输出结构非法（须为 JSON 数组，实际 {type(data).__name__}）")
+    tags: list[str] = []
+    for item in data:
+        if not isinstance(item, dict) or not isinstance(item.get("tagName"), str):
+            raise FingerprintError(f"gh release list 输出缺少 tagName 字段（fail-closed）: {item!r}")
+        tags.append(item["tagName"])
     if len(tags) >= RELEASE_LIST_LIMIT:
         raise FingerprintError(f"Release 列表达到查询上限 {RELEASE_LIST_LIMIT}，无法保证取到 semver 最新 → fail-closed")
     return tags

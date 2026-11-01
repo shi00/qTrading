@@ -1858,6 +1858,20 @@ class TestBuildAttributionConditionRow:
         assert "filter_op_g" in text  # mock_i18n 返回 key
         assert "2.00%" in text
 
+    def test_missing_actual_renders_dash_without_suffix(self):
+        """R21：缺失实际值渲染 '-'，不得形成 "-%" 之类伪值。"""
+        from strategies.attribution import FilterCondition
+        from ui.components.stock_detail_dialog import _build_attribution_condition_row
+
+        row = _build_attribution_condition_row(
+            FilterCondition(column="dv_ttm", operator="gt", threshold=2.0, actual=None),
+            None,
+        )
+        text = row.controls[0].value
+        assert " = - " in text
+        assert "-%" not in text
+        assert "2.00%" in text
+
     def test_between_compare(self):
         from strategies.attribution import FilterCondition
         from ui.components.stock_detail_dialog import _build_attribution_condition_row
