@@ -7,7 +7,7 @@
 //!
 //! 恢复后 schema 停留于备份时点；Alembic 补平由 app 下次启动的既有迁移流程负责（Phase 2+，§12.2 step 7）。
 
-use crate::cli::{self, DEFAULT_DATABASE};
+use crate::cli::{self, DEFAULT_DATABASE, DEFAULT_USERNAME};
 use crate::commands::state_file_condition;
 use crate::exit_codes;
 use crate::lockfile::{AcquireError, MaintenanceLock};
@@ -26,7 +26,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const DUMP_TIMEOUT: Duration = Duration::from_secs(3600);
-const DEFAULT_USERNAME: &str = "postgres";
 const LISTEN_LOCAL: &str = "127.0.0.1";
 
 /// 业务库名白名单（UIR-F16-002）。
@@ -598,6 +597,7 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
                 &layout.install_dir,
                 port,
                 &args.database,
+                &args.username,
                 &password,
                 &partial,
             )
@@ -609,10 +609,18 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
                 let _ = std::fs::remove_file(layout.data_dir.join("postmaster.pid"));
             }
             setup::ensure_binaries(&layout, &|msg| tracing::info!("{msg}")).await?;
-            let instance = TempInstance::start(layout.clone(), DEFAULT_USERNAME, &password).await?;
+            let instance = TempInstance::start(layout.clone(), &args.username, &password).await?;
             let port = instance.port;
             let install_dir = instance.layout.install_dir.clone();
-            let r = run_pg_dump(&install_dir, port, &args.database, &password, &partial).await;
+            let r = run_pg_dump(
+                &install_dir,
+                port,
+                &args.database,
+                &args.username,
+                &password,
+                &partial,
+            )
+            .await;
             instance.stop().await;
             r
         }
@@ -639,6 +647,7 @@ async fn run_pg_dump(
     install_dir: &Path,
     port: u16,
     database: &str,
+    username: &str,
     password: &str,
     output: &Path,
 ) -> Result<(), u8> {
@@ -656,7 +665,7 @@ async fn run_pg_dump(
             "-p",
             &port_s,
             "-U",
-            DEFAULT_USERNAME,
+            username,
             "-d",
             database,
         ],
@@ -742,6 +751,7 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
         &restore_dir,
         &args.input,
         &args.database,
+        &args.username,
         &password,
     )
     .await;
@@ -807,6 +817,7 @@ async fn restore_into(
     restore_dir: &Path,
     input: &Path,
     database: &str,
+    username: &str,
     password: &str,
 ) -> Result<(), u8> {
     let restore_layout = Layout::from_data_dir(
@@ -821,14 +832,14 @@ async fn restore_into(
         eprintln!("[sidecar] 恢复目录创建失败 {}: {e}", restore_dir.display());
         exit_codes::DUMP_RESTORE_FAILED
     })?;
-    setup::run_initdb(&restore_layout, DEFAULT_USERNAME, password).await?;
+    setup::run_initdb(&restore_layout, username, password).await?;
     if let Err(e) = setup::write_security_baseline(restore_dir, LISTEN_LOCAL) {
         eprintln!("[sidecar] 安全基线写入失败: {e}");
         return Err(exit_codes::DUMP_RESTORE_FAILED);
     }
 
-    let instance = TempInstance::start(restore_layout, DEFAULT_USERNAME, password).await?;
-    let result = restore_via_instance(&instance, input, database, password).await;
+    let instance = TempInstance::start(restore_layout, username, password).await?;
+    let result = restore_via_instance(&instance, input, database, username, password).await;
     instance.stop().await;
     result
 }
@@ -837,6 +848,7 @@ async fn restore_via_instance(
     instance: &TempInstance,
     input: &Path,
     database: &str,
+    username: &str,
     password: &str,
 ) -> Result<(), u8> {
     let port_s = instance.port.to_string();
@@ -848,7 +860,7 @@ async fn restore_via_instance(
         install_dir,
         LISTEN_LOCAL,
         instance.port,
-        DEFAULT_USERNAME,
+        username,
         "postgres",
         password,
         &format!("CREATE DATABASE \"{database}\""),
@@ -869,7 +881,7 @@ async fn restore_via_instance(
             "-p",
             &port_s,
             "-U",
-            DEFAULT_USERNAME,
+            username,
             "-d",
             database,
             "--no-owner",
@@ -897,7 +909,7 @@ async fn restore_via_instance(
         install_dir,
         LISTEN_LOCAL,
         instance.port,
-        DEFAULT_USERNAME,
+        username,
         database,
         password,
         "select 1",
@@ -921,18 +933,19 @@ struct MaintenanceShellJson {
     connection_string_redacted: String,
 }
 
-fn maintenance_shell_json(install_dir: &Path, port: u16) -> MaintenanceShellJson {
+fn maintenance_shell_json(install_dir: &Path, port: u16, username: &str) -> MaintenanceShellJson {
     MaintenanceShellJson {
         psql_path: pgbin::tool_path(install_dir, "psql")
             .to_string_lossy()
             .into_owned(),
+        // 用户名须与实际临时实例一致，否则自定义用户名部署下 stdout 连接串显示错误角色
         connection_string_redacted: format!(
-            "postgresql://{DEFAULT_USERNAME}:***@{LISTEN_LOCAL}:{port}/{DEFAULT_DATABASE}"
+            "postgresql://{username}:***@{LISTEN_LOCAL}:{port}/{DEFAULT_DATABASE}"
         ),
     }
 }
 
-pub async fn maintenance_shell(args: cli::DataDirArgs) -> Result<(), u8> {
+pub async fn maintenance_shell(args: cli::MaintenanceShellArgs) -> Result<(), u8> {
     logging::init(None);
     let layout = Layout::from_data_dir(&args.data_dir, None, None, None);
 
@@ -950,8 +963,9 @@ pub async fn maintenance_shell(args: cli::DataDirArgs) -> Result<(), u8> {
     let password = load_password(&layout)?;
     setup::ensure_binaries(&layout, &|msg| tracing::info!("{msg}")).await?;
 
-    let instance = TempInstance::start(layout.clone(), DEFAULT_USERNAME, &password).await?;
-    let info = maintenance_shell_json(&layout.install_dir, instance.port);
+    let username = args.username.as_str();
+    let instance = TempInstance::start(layout.clone(), username, &password).await?;
+    let info = maintenance_shell_json(&layout.install_dir, instance.port, username);
     if let Err(e) = protocol::print_json_line(&info) {
         // stdout 管道不可用：无法向调用方交付连接信息，停止临时实例后失败退出。
         eprintln!("[sidecar] maintenance-shell JSON 输出失败: {e}");
@@ -961,11 +975,11 @@ pub async fn maintenance_shell(args: cli::DataDirArgs) -> Result<(), u8> {
     let psql_path = pgbin::tool_path(&layout.install_dir, "psql");
     eprintln!("[sidecar] 维护实例已启动：");
     eprintln!(
-        "  连接（脱敏）: postgresql://{DEFAULT_USERNAME}:***@{LISTEN_LOCAL}:{}/{DEFAULT_DATABASE}",
+        "  连接（脱敏）: postgresql://{username}:***@{LISTEN_LOCAL}:{}/{DEFAULT_DATABASE}",
         instance.port
     );
     eprintln!(
-        "  psql: {} -h {LISTEN_LOCAL} -p {} -U {DEFAULT_USERNAME} -d {DEFAULT_DATABASE}",
+        "  psql: {} -h {LISTEN_LOCAL} -p {} -U {username} -d {DEFAULT_DATABASE}",
         psql_path.display(),
         instance.port
     );
@@ -1262,6 +1276,7 @@ mod tests {
             data_dir,
             output: dir.join("out.dump"),
             database: "bad name".to_string(),
+            username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(dump(args).await, Err(exit_codes::ARGUMENT_ERROR));
         assert!(!dir.join("out.dump").exists());
@@ -1276,6 +1291,7 @@ mod tests {
             input: dir.join("nope.dump"),
             target_data_dir: None,
             database: "a;drop".to_string(),
+            username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(restore(args).await, Err(exit_codes::ARGUMENT_ERROR));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1289,6 +1305,7 @@ mod tests {
             data_dir,
             output: dir.join("out.dump"),
             database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(dump(args).await, Err(exit_codes::DUMP_RESTORE_FAILED));
         assert!(!dir.join("out.dump").exists());
@@ -1305,6 +1322,7 @@ mod tests {
             data_dir,
             output: dir.join("out.dump"),
             database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(dump(args).await, Err(exit_codes::PASSWORD_FAILED));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1318,6 +1336,7 @@ mod tests {
             input: dir.join("nope.dump"),
             target_data_dir: None,
             database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(restore(args).await, Err(exit_codes::DUMP_RESTORE_FAILED));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1341,6 +1360,7 @@ mod tests {
             input,
             target_data_dir: Some(target),
             database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(restore(args).await, Err(exit_codes::DUMP_RESTORE_FAILED));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1360,6 +1380,7 @@ mod tests {
             input,
             target_data_dir: None,
             database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(restore(args).await, Err(exit_codes::LOCK_CONFLICT));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1521,7 +1542,7 @@ mod tests {
     /// maintenance-shell stdout 契约：psql 路径 + 脱敏连接串（密码段固定 `***`）。
     #[test]
     fn maintenance_shell_json_redacts_password() {
-        let info = maintenance_shell_json(Path::new("/x/install"), 55432);
+        let info = maintenance_shell_json(Path::new("/x/install"), 55432, DEFAULT_USERNAME);
         let v = serde_json::to_value(&info).unwrap();
         assert!(v["psql_path"].as_str().unwrap().contains("psql"));
         assert_eq!(
@@ -1532,6 +1553,13 @@ mod tests {
             .as_str()
             .unwrap()
             .contains(":***@"));
+        // 自定义用户名部署：stdout 连接串须与实际实例角色一致（M21 × M19 合并适配）
+        let info = maintenance_shell_json(Path::new("/x/install"), 55432, "qtrading");
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(
+            v["connection_string_redacted"],
+            "postgresql://qtrading:***@127.0.0.1:55432/qtrading"
+        );
     }
 
     /// restore stdout 契约：原子切换后报告当前数据目录，显式目标模式报告新目录。
@@ -1769,6 +1797,7 @@ mod tests {
             data_dir,
             output: blocker.join("out.dump"),
             database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(dump(args).await, Err(exit_codes::DUMP_RESTORE_FAILED));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1788,6 +1817,7 @@ mod tests {
             input,
             target_data_dir: None,
             database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(restore(args).await, Err(exit_codes::PASSWORD_FAILED));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1819,7 +1849,10 @@ mod tests {
     async fn maintenance_shell_rejects_uninitialized_dir() {
         let dir = unique_tmp("shell-fresh");
         let data_dir = dir.join("postgres/16/data");
-        let args = cli::DataDirArgs { data_dir };
+        let args = cli::MaintenanceShellArgs {
+            data_dir,
+            username: DEFAULT_USERNAME.to_string(),
+        };
         assert_eq!(
             maintenance_shell(args).await,
             Err(exit_codes::DATA_DIR_ABNORMAL)
@@ -1836,7 +1869,10 @@ mod tests {
         std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         let _lock = MaintenanceLock::try_acquire(&layout.lock_file).unwrap();
-        let args = cli::DataDirArgs { data_dir };
+        let args = cli::MaintenanceShellArgs {
+            data_dir,
+            username: DEFAULT_USERNAME.to_string(),
+        };
         assert_eq!(
             maintenance_shell(args).await,
             Err(exit_codes::LOCK_CONFLICT)
@@ -2042,6 +2078,7 @@ mod tests {
             data_dir: layout.data_dir.clone(),
             output: dump_path.clone(),
             database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
         };
         let result = dump(args).await;
 
@@ -2089,6 +2126,7 @@ mod tests {
             data_dir: layout.data_dir.clone(),
             output: dump_path.clone(),
             database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
         };
         let dump_result = dump(dump_args).await;
         instance.stop().await;
@@ -2102,6 +2140,7 @@ mod tests {
             input: dump_path.clone(),
             target_data_dir: Some(target.clone()),
             database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
         };
         let restore_result = restore(restore_args).await;
 

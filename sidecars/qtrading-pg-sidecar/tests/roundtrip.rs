@@ -179,6 +179,75 @@ fn test_dump_restore_roundtrip() {
     }
 }
 
+/// 6b. M21：自定义超级用户名 restore roundtrip（`--username` 与实例配置一致）。
+///
+/// 先用默认实例 dump；再以 `restore --username qtrading` 恢复到新目录。restore 内部
+/// `initdb` 创建新 cluster 的超级用户须为 qtrading，建库 / `pg_restore` / 恢复后健康
+/// 检查的 psql 也都必须用 qtrading 连接——任一环节仍硬编码 postgres 都会因
+/// 「role postgres 不存在」而失败（回归护栏）。
+#[test]
+fn test_restore_roundtrip_custom_username() {
+    let (_tmp, data_dir) = unique_data_dir("roundtrip_username");
+
+    // 1. 默认实例启动 → dump（默认用户名路径保持不变）
+    let mut child = spawn_run(&data_dir);
+    let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    let dump_path = data_dir.parent().unwrap().join("backup.dump");
+    let (dump_code, dump_stderr) = dump_sidecar_with_stderr(&data_dir, &dump_path);
+    if dump_code != 0 {
+        panic!("dump failed with code {dump_code}; stderr:\n{dump_stderr}");
+    }
+    graceful_stop(&mut child);
+    let _ = wait_for_exit(&mut child, STOP_TIMEOUT);
+
+    // 2. restore 到新目录，超级用户名 qtrading（与原实例默认用户名不同）
+    let target = data_dir.parent().unwrap().join("restored_custom_user");
+    let restore_output = std::process::Command::new(sidecar_path())
+        .arg("restore")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--input")
+        .arg(&dump_path)
+        .arg("--target-data-dir")
+        .arg(&target)
+        .arg("--username")
+        .arg("qtrading")
+        .output()
+        .expect("failed to run restore");
+    let restore_code = restore_output.status.code().unwrap_or(255);
+    assert_eq!(
+        restore_code,
+        0,
+        "restore with custom username failed; stderr:\n{}",
+        String::from_utf8_lossy(&restore_output.stderr)
+    );
+    assert!(
+        target.join("PG_VERSION").exists(),
+        "restored target should be initialized"
+    );
+
+    // 3. 离线 dump 该自定义用户名 cluster（重建的临时实例与 pg_dump -U 均须用 qtrading）
+    let second_dump = data_dir.parent().unwrap().join("backup-custom.dump");
+    let dump_output = std::process::Command::new(sidecar_path())
+        .arg("dump")
+        .arg("--data-dir")
+        .arg(&target)
+        .arg("--output")
+        .arg(&second_dump)
+        .arg("--username")
+        .arg("qtrading")
+        .output()
+        .expect("failed to run offline dump");
+    let dump_code = dump_output.status.code().unwrap_or(255);
+    assert_eq!(
+        dump_code,
+        0,
+        "offline dump with custom username failed; stderr:\n{}",
+        String::from_utf8_lossy(&dump_output.stderr)
+    );
+    assert!(second_dump.exists(), "second dump file should exist");
+}
+
 /// 7. parent_pid 消失后 sidecar 停止 PostgreSQL（§17.2 场景 7 / §17.6 #9）。
 #[test]
 fn test_parent_pid_disappear_triggers_stop() {
