@@ -76,6 +76,15 @@ cd "<安装目录>/resources/maintenance"
 
 > 若曾在应用配置中自定义 `embedded_pg_data_root`（数据目录）或 `embedded_pg_log_dir`（日志目录），脚本的上述默认路径不再适用：`status` 会指向空目录并显示 `not_initialized`，`doctor` 会报 `initialized: false`（`state_file: missing`），`restore` 也会作用在错误目录。此时一律直接调用 sidecar binary 并显式传 `--data-dir`。内置 PostgreSQL 主版本以安装包随附的 sidecar 为准（当前默认 `16`），升级主版本后路径中的版本号需相应调整。
 
+## 超级用户名
+
+`dump` / `restore` / `maintenance-shell` 默认以超级用户 `postgres` 连接，此时脚本不传 `--username`（行为与旧版脚本一致）。若应用配置自定义了 `embedded_pg_username`（非 `postgres`），必须显式指定用户名，否则 sidecar 会按默认超级用户连接而认证失败：
+
+- **Linux / macOS**：`./qtrading-db-maintenance.sh --username <user> dump <file>`，或设置环境变量 `QTRADING_PG_USERNAME=<user>`
+- **Windows**：`set QTRADING_PG_USERNAME=<user>` 后执行 `qtrading-db-maintenance.bat <command> [args]`
+
+前置参数 `--username` 优先于环境变量；两者均未设置时按 `postgres` 处理（不追加 `--username`）。
+
 ## 安全注意事项
 
 1. **dump 的在线/离线模式**：主程序运行时 `dump` 直连运行中的实例执行 `pg_dump`（其输出为事务级一致性快照）；若希望备份与当前应用状态严格对应，或应用已无法正常响应，建议先 `stop`，由 sidecar 启动离线临时实例再备份（离线模式需持有维护锁）

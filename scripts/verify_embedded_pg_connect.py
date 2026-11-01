@@ -5,8 +5,9 @@
 2. Alembic upgrade head 落在空 embedded cluster
 3. pg_dump/pg_restore roundtrip（sidecar 安装目录内 bundled 工具）
 
-约束：仅 import data 层版本解析辅助（resolve_pg_major_version，动态解析 PG 主版本）；
-其余仅用 stdlib + DB 驱动 + alembic。
+约束：仅 import data 层版本解析辅助（resolve_pg_major_version，动态解析 PG 主版本）
+与 utils.sanitizers.DataSanitizer（R9：打印前脱敏 DSN 密码，如 pg_dump 失败时
+CalledProcessError 的 argv 含 conninfo URL）；其余仅用 stdlib + DB 驱动 + alembic。
 用法（推荐，须在仓库根执行）：python -m scripts.verify_embedded_pg_connect --sidecar <sidecar.exe> --work-dir <tmp_dir>
 兼容直跑：python scripts/verify_embedded_pg_connect.py --sidecar <sidecar.exe> --work-dir <tmp_dir>
 退出码：0 全部通过；1 任一步骤失败。
@@ -34,6 +35,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_REPO_ROOT))
 
 from data.persistence.embedded_postgres.version import resolve_pg_major_version
+from utils.sanitizers import DataSanitizer
 
 READY_TIMEOUT_S = 180  # 首次 setup 需解压 bundled PostgreSQL 归档 + initdb，给足余量
 STOP_TIMEOUT_S = 60
@@ -56,6 +58,18 @@ def _readline_with_timeout(stream, timeout: float) -> str:
 def _to_sync_sqlalchemy_url(url: str) -> str:
     """SQLAlchemy 2.1 起光秃 postgresql:// 默认驱动为 psycopg 3，而本脚本同步路径只装 psycopg2-binary。"""
     return url.replace("postgresql://", "postgresql+psycopg2://", 1)
+
+
+def _format_result(name: str, ok: bool, detail: str, password: str | None = None) -> str:
+    """构造单行结果（R9：detail 可能含 conninfo URL / 密码，打印前必须脱敏）。
+
+    先对已知密码做精确替换（覆盖 ``@`` / ``/`` / ``#`` 等会让 URL 正则切分失败的
+    特殊字符），再经 ``DataSanitizer.sanitize_error`` 兜底其余凭证形态；保留错误语义
+    与 host:port/path 便于诊断，仅屏蔽密码。
+    """
+    if password:
+        detail = detail.replace(password, "***")
+    return f"[{'PASS' if ok else 'FAIL'}] {name}: {DataSanitizer.sanitize_error(detail)}"
 
 
 def step_select1_psycopg2(url: str) -> None:
@@ -170,6 +184,7 @@ def main() -> int:
 
     results: list[tuple[str, bool, str]] = []
     proc: subprocess.Popen[str] | None = None
+    password: str | None = None
     try:
         with stderr_log.open("wb") as stderr_f:
             proc = subprocess.Popen(
@@ -198,6 +213,10 @@ def main() -> int:
 
         port = int(ready["port"])
         password = password_file.read_text(encoding="utf-8").strip()
+        # R9：后续 detail 可能含嵌入密码的 DSN（如 pg_dump 失败时 CalledProcessError 的 argv），
+        # 注册实际密码做精确替换兜底（覆盖含 @ / : / # 等特殊字符、URL 正则难切分的形态）
+        if password:
+            DataSanitizer.register_secret(password)
         url = f"postgresql://postgres:{password}@127.0.0.1:{port}/qtrading"
         async_url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
@@ -243,7 +262,7 @@ def main() -> int:
     print("\n=== Phase 0 Spike Results ===")
     ok_all = True
     for name, ok, detail in results:
-        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
+        print(_format_result(name, ok, detail, password))
         ok_all = ok_all and ok
     print(f"stderr log: {stderr_log}")
     return 0 if ok_all else 1
