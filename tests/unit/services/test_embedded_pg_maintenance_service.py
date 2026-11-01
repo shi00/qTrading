@@ -13,7 +13,8 @@ Mock 策略：
 - TestEmbeddedPgMaintenanceServiceMaintenanceShell: maintenance_shell 命令（3 个）
 - TestEmbeddedPgMaintenanceServiceResetPassword: reset_password 命令与 --username 透传（M23）
 - TestEmbeddedPgMaintenanceServiceSingleton: 单例协议（2 个）
-- TestEmbeddedPgMaintenanceServiceArgv: argv 构造（UIR-F16-002 库名透传 4 例 + 拒绝 2 例，其中 1 例参数化 7 变体）
+- TestEmbeddedPgMaintenanceServiceArgv: argv 构造（UIR-F16-002 库名透传与拒绝、
+  M21 用户名透传与白名单校验、M23 reset-password argv 与错误码）
 """
 
 from __future__ import annotations
@@ -594,6 +595,63 @@ class TestEmbeddedPgMaintenanceServiceArgv:
             pytest.raises(EmbeddedPgMaintenanceError, match="embedded_pg_database 非法"),
         ):
             maintenance_service._build_restore_argv(tmp_path / "backup.dump", None)
+
+    # ---- M21：超级用户名来自配置（不得硬编码 postgres）----
+
+    @pytest.mark.parametrize("builder", ["dump", "restore", "maintenance-shell"])
+    def test_build_argv_default_username_omits_flag(
+        self, maintenance_service, mock_config_dict, tmp_path: Path, builder: str
+    ) -> None:
+        """默认 embedded_pg_username=postgres 时不透传 --username（兼容不支持该参数的旧 sidecar）。"""
+        argv = self._build(maintenance_service, builder, tmp_path)
+        assert "--username" not in argv
+
+    @pytest.mark.parametrize("builder", ["dump", "restore", "maintenance-shell"])
+    def test_build_argv_passes_configured_username(
+        self, maintenance_service, mock_config_dict: dict[str, object], tmp_path: Path, builder: str
+    ) -> None:
+        """自定义 embedded_pg_username 时透传 --username（与 run --username 一致，避免角色失配）。"""
+        config = {**mock_config_dict, "embedded_pg_username": "qtrading"}
+        with patch(
+            "services.embedded_pg_maintenance_service.ConfigHandler.load_config",
+            return_value=config,
+        ):
+            argv = self._build(maintenance_service, builder, tmp_path)
+        username_idx = argv.index("--username") + 1
+        assert argv[username_idx] == "qtrading"
+
+    @staticmethod
+    def _build(maintenance_service, builder: str, tmp_path: Path) -> list[str]:
+        input_path = tmp_path / "backup.dump"
+        if builder == "dump":
+            return maintenance_service._build_dump_argv(input_path)
+        if builder == "restore":
+            return maintenance_service._build_restore_argv(input_path, None)
+        return maintenance_service._build_maintenance_shell_argv()
+
+    @pytest.mark.parametrize(
+        "bad_username",
+        ["", " bad", "bad name", "a;drop", "a-b", "1abc", "a" * 64],
+    )
+    def test_build_dump_argv_rejects_invalid_username(
+        self,
+        maintenance_service,
+        mock_config_dict: dict[str, object],
+        tmp_path: Path,
+        bad_username: str,
+    ) -> None:
+        """非法用户名（空 / 特殊字符 / 注入片段 / 数字开头 / 超长）在 Python 侧即拒绝。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        config = {**mock_config_dict, "embedded_pg_username": bad_username}
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ConfigHandler.load_config",
+                return_value=config,
+            ),
+            pytest.raises(EmbeddedPgMaintenanceError, match="embedded_pg_username 非法"),
+        ):
+            maintenance_service._build_dump_argv(tmp_path / "backup.dump")
 
     def test_build_doctor_argv_frozen_resolves_meipass_sidecar(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
