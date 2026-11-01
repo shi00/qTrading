@@ -296,10 +296,11 @@ class TestValidRecommendations:
 
 
 class TestValidateAiAnalysisResponse:
-    def test_non_dict_returns_error(self):
+    def test_non_dict_returns_error_with_missing_score(self):
+        # R21：非 dict 响应无可解析分数 → score 为 None（未知），不得伪装为 0 分否决。
         result = validate_ai_analysis_response("not a dict")
         assert "error" in result
-        assert result["score"] == 0
+        assert result["score"] is None
 
 
 class TestJsonParsingNoRfindFallback:
