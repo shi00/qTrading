@@ -187,6 +187,24 @@ pub fn restore_sidecar(data_dir: &Path, input_path: &Path) -> u8 {
     output.status.code().unwrap_or(255) as u8
 }
 
+/// 执行 `restore` 命令，返回 (exit_code, stdout, stderr)，用于验证 §12.2 stdout 目标目录契约。
+#[allow(dead_code)]
+pub fn restore_sidecar_with_output(data_dir: &Path, input_path: &Path) -> (u8, String, String) {
+    let output = std::process::Command::new(sidecar_path())
+        .arg("restore")
+        .arg("--data-dir")
+        .arg(data_dir)
+        .arg("--input")
+        .arg(input_path)
+        .output()
+        .expect("failed to run restore");
+    (
+        output.status.code().unwrap_or(255) as u8,
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
 /// 执行 `restore` 命令，返回 (exit_code, stderr)，用于测试诊断。
 #[allow(dead_code)]
 pub fn restore_sidecar_with_stderr(data_dir: &Path, input_path: &Path) -> (u8, String) {

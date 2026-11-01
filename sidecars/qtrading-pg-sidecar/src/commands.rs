@@ -50,6 +50,26 @@ pub(crate) fn state_file_condition(layout: &Layout) -> (&'static str, Option<sta
     }
 }
 
+/// 对外状态判定：进程活性优先于 state.json（sidecar 崩溃后 state 可能仍为 running，
+/// 直接透传会把已停止的实例误报为 running）。
+fn derive_status(
+    postgres_alive: bool,
+    initialized: bool,
+    state: Option<&state::RuntimeState>,
+) -> String {
+    if postgres_alive {
+        return "running".to_string();
+    }
+    if !initialized {
+        return "not_initialized".to_string();
+    }
+    match state.map(|s| s.status.as_str()) {
+        Some("running") => "stopped".to_string(),
+        Some(other) => other.to_string(),
+        None => "stopped".to_string(),
+    }
+}
+
 pub fn status(data_dir: &Path) -> Result<(), u8> {
     let layout = Layout::from_data_dir(data_dir, None, None, None);
     let (state_cond, st) = state_file_condition(&layout);
@@ -57,13 +77,7 @@ pub fn status(data_dir: &Path) -> Result<(), u8> {
     let alive = pm.as_ref().is_some_and(|i| pgbin::process_alive(i.pid));
     let initialized = layout.data_dir.join("PG_VERSION").exists();
 
-    let status_str = if alive {
-        "running"
-    } else if !initialized {
-        "not_initialized"
-    } else {
-        st.as_ref().map_or("stopped", |s| s.status.as_str())
-    };
+    let status_str = derive_status(alive, initialized, st.as_ref());
 
     // 活实例以 postmaster.pid 为准（sidecar 崩溃后 state 可能滞后）；否则回退 state.json
     let (port, pid) = if alive {
@@ -80,7 +94,7 @@ pub fn status(data_dir: &Path) -> Result<(), u8> {
     let json = StatusJson {
         schema: protocol::STATUS_SCHEMA,
         data_dir: layout.data_dir.to_string_lossy().replace('\\', "/"),
-        status: status_str.to_string(),
+        status: status_str,
         postgres_version: st.as_ref().and_then(|s| s.postgres_version.clone()),
         port,
         postgres_pid: pid,
@@ -279,6 +293,29 @@ mod tests {
         assert_eq!(cond, "ok");
         assert_eq!(st.unwrap().status, "stopped");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn derive_status_does_not_trust_stale_running_state() {
+        let running = state::RuntimeState {
+            status: "running".into(),
+            ..Default::default()
+        };
+        // sidecar 崩溃残留：state=running 但 postgres 已死 → 不得再报 running
+        assert_eq!(derive_status(false, true, Some(&running)), "stopped");
+        assert_eq!(derive_status(true, true, Some(&running)), "running");
+        // 未初始化优先
+        assert_eq!(
+            derive_status(false, false, Some(&running)),
+            "not_initialized"
+        );
+        // 其他状态原样透传
+        let failed = state::RuntimeState {
+            status: "failed".into(),
+            ..Default::default()
+        };
+        assert_eq!(derive_status(false, true, Some(&failed)), "failed");
+        assert_eq!(derive_status(false, true, None), "stopped");
     }
 
     #[test]

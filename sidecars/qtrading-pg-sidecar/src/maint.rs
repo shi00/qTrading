@@ -681,6 +681,17 @@ async fn run_pg_dump(
 
 // ---- restore ----
 
+/// restore 成功后向 stdout 报告的目标目录（Python `EmbeddedPgMaintenanceService.restore`
+/// 在未显式传 `--target-data-dir` 时以 `stdout.strip()` 取此值）。
+fn restore_target_to_report(layout: &Layout, restore_dir: &Path, do_swap: bool) -> String {
+    let target = if do_swap {
+        &layout.data_dir
+    } else {
+        restore_dir
+    };
+    target.to_string_lossy().replace('\\', "/")
+}
+
 pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
     logging::init(None);
     validate_database_name(&args.database)?;
@@ -777,6 +788,14 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
             "[sidecar] 恢复完成：{}（原目录未改动）",
             restore_dir.display()
         );
+    }
+
+    let reported = restore_target_to_report(&layout, &restore_dir, do_swap);
+    use std::io::Write as _;
+    let mut stdout = std::io::stdout().lock();
+    if let Err(e) = writeln!(stdout, "{reported}") {
+        // 数据已成功恢复；stdout 断裂只影响调用方取目标路径，不改变恢复结果。
+        tracing::warn!("restore target stdout write failed: {e}");
     }
     Ok(())
 }
@@ -894,6 +913,25 @@ async fn restore_via_instance(
 
 // ---- maintenance-shell ----
 
+/// maintenance-shell stdout 契约：Python `EmbeddedPgMaintenanceService.maintenance_shell`
+/// 解析 `psql_path` / `connection_string_redacted`（连接串密码段固定 `***`，R9）。
+#[derive(Serialize, Debug)]
+struct MaintenanceShellJson {
+    psql_path: String,
+    connection_string_redacted: String,
+}
+
+fn maintenance_shell_json(install_dir: &Path, port: u16) -> MaintenanceShellJson {
+    MaintenanceShellJson {
+        psql_path: pgbin::tool_path(install_dir, "psql")
+            .to_string_lossy()
+            .into_owned(),
+        connection_string_redacted: format!(
+            "postgresql://{DEFAULT_USERNAME}:***@{LISTEN_LOCAL}:{port}/{DEFAULT_DATABASE}"
+        ),
+    }
+}
+
 pub async fn maintenance_shell(args: cli::DataDirArgs) -> Result<(), u8> {
     logging::init(None);
     let layout = Layout::from_data_dir(&args.data_dir, None, None, None);
@@ -913,6 +951,13 @@ pub async fn maintenance_shell(args: cli::DataDirArgs) -> Result<(), u8> {
     setup::ensure_binaries(&layout, &|msg| tracing::info!("{msg}")).await?;
 
     let instance = TempInstance::start(layout.clone(), DEFAULT_USERNAME, &password).await?;
+    let info = maintenance_shell_json(&layout.install_dir, instance.port);
+    if let Err(e) = protocol::print_json_line(&info) {
+        // stdout 管道不可用：无法向调用方交付连接信息，停止临时实例后失败退出。
+        eprintln!("[sidecar] maintenance-shell JSON 输出失败: {e}");
+        instance.stop().await;
+        return Err(exit_codes::HEALTH_CHECK_FAILED);
+    }
     let psql_path = pgbin::tool_path(&layout.install_dir, "psql");
     eprintln!("[sidecar] 维护实例已启动：");
     eprintln!(
@@ -1471,6 +1516,46 @@ mod tests {
         std::fs::write(&layout.password_file, "  \n").unwrap();
         assert_eq!(load_password(&layout), Err(exit_codes::PASSWORD_FAILED));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// maintenance-shell stdout 契约：psql 路径 + 脱敏连接串（密码段固定 `***`）。
+    #[test]
+    fn maintenance_shell_json_redacts_password() {
+        let info = maintenance_shell_json(Path::new("/x/install"), 55432);
+        let v = serde_json::to_value(&info).unwrap();
+        assert!(v["psql_path"].as_str().unwrap().contains("psql"));
+        assert_eq!(
+            v["connection_string_redacted"],
+            "postgresql://postgres:***@127.0.0.1:55432/qtrading"
+        );
+        assert!(v["connection_string_redacted"]
+            .as_str()
+            .unwrap()
+            .contains(":***@"));
+    }
+
+    /// restore stdout 契约：原子切换后报告当前数据目录，显式目标模式报告新目录。
+    #[test]
+    fn restore_target_to_report_selects_active_data_dir() {
+        let layout = Layout::from_data_dir(Path::new("/x/postgres/16/data"), None, None, None);
+        let restore_dir = Path::new("/x/postgres/16/data.restore-T");
+        assert_eq!(
+            restore_target_to_report(&layout, restore_dir, true),
+            "/x/postgres/16/data"
+        );
+        assert_eq!(
+            restore_target_to_report(&layout, restore_dir, false),
+            "/x/postgres/16/data.restore-T"
+        );
+        // 统一使用 '/'，Windows 路径亦不例外（调用方按字符串取路径）
+        assert_eq!(
+            restore_target_to_report(
+                &Layout::from_data_dir(Path::new(r"C:\x\data"), None, None, None),
+                Path::new(r"C:\x\new"),
+                false
+            ),
+            "C:/x/new"
+        );
     }
 
     /// `HbaRestoreGuard`：构造时备份原内容，drop 时恢复（未 disarm 路径）。
