@@ -482,6 +482,51 @@ fn test_inject_06_disk_full() {
     );
 }
 
+/// #32 reset-password 非法超级用户名 → exit 2（ARGUMENT_ERROR），且不改动密码文件。
+///
+/// M23：用户名会进入 `ALTER USER <name> PASSWORD ...` 的 SQL 文本，白名单外的值必须在
+/// 进入维护流程前被拒绝（R4 注入防护），且在获取维护锁前失败（不阻塞他人）。
+#[test]
+fn test_inject_32_reset_password_rejects_invalid_username() {
+    let (_tmp, data_dir) = unique_data_dir("fi_32");
+
+    // 建立最小"已初始化"骨架：确保失败原因是用户名非法而非目录问题
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
+
+    let password_file = data_dir.parent().unwrap().join("runtime").join("password");
+    assert!(
+        !password_file.exists(),
+        "precondition: no password file yet"
+    );
+
+    let output = std::process::Command::new(sidecar_path())
+        .arg("reset-password")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--username")
+        .arg("bad;drop")
+        .output()
+        .expect("failed to run reset-password");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "invalid username should exit 2 (ARGUMENT_ERROR); stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("用户名非法"),
+        "stderr should explain invalid username, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // 未进入改密流程：不创建密码文件，也不改动已有凭据
+    assert!(
+        !password_file.exists(),
+        "password file must not be created when username is rejected"
+    );
+}
+
 /// 从 child.stderr 读取全部内容为 String。wait_for_exit 后调用（child 已退出，pipe EOF）。
 fn read_stderr(child: &mut std::process::Child) -> String {
     use std::io::Read;

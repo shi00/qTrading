@@ -6,13 +6,15 @@ Mock 策略：
   跳过真实 subprocess.run（单元测试不真实 Popen sidecar）
 - 真实 sidecar 端到端验证由 P3-17 ``fake_sidecar.py`` + integration test 负责
 
-测试分组（共 28 个）：
+测试分组：
 - TestEmbeddedPgMaintenanceServiceDoctor: doctor 命令（7 个）
 - TestEmbeddedPgMaintenanceServiceDump: dump 命令（3 个）
 - TestEmbeddedPgMaintenanceServiceRestore: restore 命令（3 个）
 - TestEmbeddedPgMaintenanceServiceMaintenanceShell: maintenance_shell 命令（3 个）
+- TestEmbeddedPgMaintenanceServiceResetPassword: reset_password 命令与 --username 透传（M23）
 - TestEmbeddedPgMaintenanceServiceSingleton: 单例协议（2 个）
-- TestEmbeddedPgMaintenanceServiceArgv: argv 构造（UIR-F16-002 库名透传 + M21 用户名透传与校验）
+- TestEmbeddedPgMaintenanceServiceArgv: argv 构造（UIR-F16-002 库名透传与拒绝、
+  M21 用户名透传与白名单校验、M23 reset-password argv 与错误码）
 """
 
 from __future__ import annotations
@@ -1037,3 +1039,83 @@ class TestCommandCancelWiring:
             await maintenance_service.restore(input_path)
 
         assert calls == [False]
+
+
+# =============================================================================
+# TestEmbeddedPgMaintenanceServiceResetPassword: reset-password 用户名透传（M23）
+# =============================================================================
+class TestEmbeddedPgMaintenanceServiceResetPassword:
+    """M23：reset-password 须按 embedded_pg_username 透传 --username（默认 postgres 不传）。"""
+
+    def test_build_reset_password_argv_default_username_omits_flag(self, maintenance_service) -> None:
+        """默认配置（embedded_pg_username=postgres）不传 --username，兼容旧 sidecar。"""
+        argv = maintenance_service._build_reset_password_argv()
+        assert argv[0] == "/fake/sidecar"
+        assert argv[1] == "reset-password"
+        assert "--data-dir" in argv
+        assert "--username" not in argv
+        assert "postgres" not in argv
+
+    def test_build_reset_password_argv_passes_custom_username(
+        self, maintenance_service, mock_config_dict: dict[str, object]
+    ) -> None:
+        """自定义超级用户名实例：reset-password 透传 --username，ALTER USER 指向正确角色。"""
+        config = {**mock_config_dict, "embedded_pg_username": "qtrading"}
+        with patch(
+            "services.embedded_pg_maintenance_service.ConfigHandler.load_config",
+            return_value=config,
+        ):
+            argv = maintenance_service._build_reset_password_argv()
+        assert "--username" in argv
+        assert argv[argv.index("--username") + 1] == "qtrading"
+
+    @pytest.mark.parametrize(
+        "bad_username",
+        ["", " bad", "bad name", "a;drop", "a-b", "1abc", "a" * 64],
+    )
+    def test_build_reset_password_argv_rejects_invalid_username(
+        self,
+        maintenance_service,
+        mock_config_dict: dict[str, object],
+        bad_username: str,
+    ) -> None:
+        """非法用户名（空/特殊字符/注入片段/数字开头/超长）在 Python 侧即拒绝。
+
+        该值会进入 sidecar `ALTER USER <name>` 的 SQL 文本，白名单校验是注入防护（R4）。
+        """
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        config = {**mock_config_dict, "embedded_pg_username": bad_username}
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ConfigHandler.load_config",
+                return_value=config,
+            ),
+            pytest.raises(EmbeddedPgMaintenanceError, match="embedded_pg_username 非法"),
+        ):
+            maintenance_service._build_reset_password_argv()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_reset_password_success(self, maintenance_service) -> None:
+        """sidecar exit 0 → 不抛异常（新密码由 sidecar 写入密码文件，不返回给调用方）。"""
+        with _patch_run_async(0, "", ""):
+            result = await maintenance_service.reset_password()
+        assert result is None
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_reset_password_exit_2_raises_argument_error(self, maintenance_service) -> None:
+        """sidecar exit 2（用户名非法）映射为 sidecar_argument_error。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        with _patch_run_async(2, "", "用户名非法（须为 [A-Za-z_][A-Za-z0-9_]*，长度 ≤ 63）"):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="sidecar_argument_error"):
+                await maintenance_service.reset_password()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_reset_password_lock_conflict_raises(self, maintenance_service) -> None:
+        """sidecar exit 50（qTrading 运行中）映射为 lock_conflict。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        with _patch_run_async(50, "", "qTrading running"):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="lock_conflict"):
+                await maintenance_service.reset_password()

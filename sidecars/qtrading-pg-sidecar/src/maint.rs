@@ -7,7 +7,7 @@
 //!
 //! 恢复后 schema 停留于备份时点；Alembic 补平由 app 下次启动的既有迁移流程负责（Phase 2+，§12.2 step 7）。
 
-use crate::cli::{self, DEFAULT_DATABASE, DEFAULT_USERNAME};
+use crate::cli::{self, DEFAULT_DATABASE};
 use crate::commands::state_file_condition;
 use crate::exit_codes;
 use crate::lockfile::{AcquireError, MaintenanceLock};
@@ -28,24 +28,35 @@ use std::time::Duration;
 const DUMP_TIMEOUT: Duration = Duration::from_secs(3600);
 const LISTEN_LOCAL: &str = "127.0.0.1";
 
-/// 业务库名白名单（UIR-F16-002）。
+/// SQL 标识符白名单：`[A-Za-z_][A-Za-z0-9_]*` 且长度 ≤ 63（PostgreSQL NAMEDATALEN-1）。
 ///
-/// 库名会进入 psql `CREATE DATABASE "<name>"` 的 SQL 文本，必须限定为安全标识符：
-/// `[A-Za-z_][A-Za-z0-9_]*` 且长度 ≤ 63（PostgreSQL NAMEDATALEN-1）。
-/// Python 侧同样校验；此处独立校验防止直接调用 CLI 绕过。
-fn validate_database_name(name: &str) -> Result<(), u8> {
-    let mut chars = name.chars();
+/// 会进入 SQL 文本或 psql `-U` 的标识符（库名、超级用户名）必须先经此校验，
+/// Python 侧同样校验；此处独立校验防止直接调用 CLI 绕过（R4：SQL 注入）。
+fn validate_identifier(value: &str, what: &str) -> Result<(), u8> {
+    let mut chars = value.chars();
     let first_ok = chars
         .next()
         .map(|c| c.is_ascii_alphabetic() || c == '_')
         .unwrap_or(false);
     let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if first_ok && rest_ok && name.len() <= 63 {
+    if first_ok && rest_ok && value.len() <= 63 {
         Ok(())
     } else {
-        eprintln!("[sidecar] 数据库名非法（须为 [A-Za-z_][A-Za-z0-9_]*，长度 ≤ 63）: {name:?}");
+        eprintln!("[sidecar] {what}非法（须为 [A-Za-z_][A-Za-z0-9_]*，长度 ≤ 63）: {value:?}");
         Err(exit_codes::ARGUMENT_ERROR)
     }
+}
+
+/// 业务库名白名单（UIR-F16-002；库名会进入 `CREATE DATABASE "<name>"` 的 SQL 文本）。
+fn validate_database_name(name: &str) -> Result<(), u8> {
+    validate_identifier(name, "数据库名")
+}
+
+/// 超级用户名白名单校验（M23：reset-password 需按实例实际超级用户改密）。
+///
+/// 用户名会进入 `ALTER USER <name> PASSWORD ...` 的 SQL 文本，白名单校验是注入防护。
+fn validate_username(name: &str) -> Result<(), u8> {
+    validate_identifier(name, "用户名")
 }
 
 fn acquire_lock(layout: &Layout) -> Result<MaintenanceLock, u8> {
@@ -1014,27 +1025,33 @@ async fn wait_for_enter() {
 
 // ---- reset-password ----
 
-/// 通过临时 `pg_ctl` 启动的 postgres 实例 + 临时 trust pg_hba.conf 重置 postgres 用户密码（§13.7.8）。
+/// 通过临时 `pg_ctl` 启动的 postgres 实例 + 临时 trust pg_hba.conf 重置超级用户密码（§13.7.8）。
 ///
 /// 历史方案 `postgres --single` 单用户模式在 Windows 上被 PostgreSQL 安全限制拒绝
 /// （`check_root()` 检测到 admin 用户组成员身份即 exit 1；GitHub Actions Windows runner
 /// 默认以 `runneradmin`/Administrators 组运行触发此限制）。`pg_ctl` 内部
 /// `CreateRestrictedProcess` 降权后才能在 Windows admin 下启动 postgres 多用户模式。
 ///
-/// 流程：acquire_lock → guard_data_dir（仅 Existing）→ ensure_binaries → stale pid 清理 →
-///       临时改 pg_hba.conf 为 trust（仅 127.0.0.1，RAII guard 出错路径恢复）→
+/// 超级用户名取 `--username`（缺省 postgres，与 `run --username` /
+/// `AppConfig.embedded_pg_username` 对齐）：自定义用户名 cluster 上 postgres 角色不存在，
+/// 硬编码 postgres 会让 `ALTER USER` 作用在错误角色（M23）。
+///
+/// 流程：validate_username → acquire_lock → guard_data_dir（仅 Existing）→ ensure_binaries →
+///       stale pid 清理 → 临时改 pg_hba.conf 为 trust（仅 127.0.0.1，RAII guard 出错路径恢复）→
 ///       启动临时 postgres 实例（复用 dump 离线 TempInstance 路径）→
-///       psql 连接执行 `ALTER USER postgres PASSWORD '<new>'`（trust 模式无需密码）→
+///       psql 连接执行 `ALTER USER <username> PASSWORD '<new>'`（trust 模式无需密码）→
 ///       停止实例 → 重写 pg_hba.conf（scram-sha-256，新密码生效）→ 写入新 password file →
 ///       register_secret。
 ///
 /// exit code：
+/// - 2 ARGUMENT_ERROR：用户名非法（白名单外的标识符，防 SQL 注入）
 /// - 50 LOCK_CONFLICT：维护锁冲突（qTrading 运行中）/ PGDATA 已有活实例
 /// - 40 DATA_DIR_ABNORMAL：数据目录未初始化
 /// - 16 PASSWORD_FAILED：临时实例启动失败 / ALTER USER 失败 / password file 写入失败
 /// - 30 DUMP_RESTORE_FAILED：pg_hba.conf 重写失败
-pub async fn reset_password(args: cli::DataDirArgs) -> Result<(), u8> {
+pub async fn reset_password(args: cli::ResetPasswordArgs) -> Result<(), u8> {
     logging::init(None);
+    validate_username(&args.username)?;
     let layout = Layout::from_data_dir(&args.data_dir, None, None, None);
 
     let _lock = acquire_lock(&layout)?;
@@ -1085,17 +1102,29 @@ pub async fn reset_password(args: cli::DataDirArgs) -> Result<(), u8> {
     // 启动临时 postgres 实例（postgresql_embedded 内部 pg_ctl，Windows admin 也能启动）。
     // dummy 密码：trust 模式下 psql 健康检查不验证密码（PGPASSWORD 会被 postgres 忽略）。
     const DUMMY_PWD: &str = "reset-trust-bypass-not-verified";
-    let instance = TempInstance::start(layout.clone(), DEFAULT_USERNAME, DUMMY_PWD).await?;
+    let instance = match TempInstance::start(layout.clone(), &args.username, DUMMY_PWD).await {
+        Ok(instance) => instance,
+        Err(code) => {
+            // 自定义用户名未与实例超级用户一致时，健康检查以该角色连接会一直失败（约 30s 后超时）。
+            // 该错误码本身不区分原因，这里补一条与 --username 相关的可操作提示。
+            eprintln!(
+                "[sidecar] 临时实例未能就绪：请确认 --username {} 与该数据目录的超级用户一致",
+                args.username
+            );
+            return Err(code);
+        }
+    };
     let port = instance.port;
     let install_dir = instance.layout.install_dir.clone();
 
-    // psql 连接执行 ALTER USER（trust 模式忽略 PGPASSWORD）
-    let sql = format!("ALTER USER postgres PASSWORD $${new_pwd}$$;");
+    // psql 连接执行 ALTER USER（trust 模式忽略 PGPASSWORD）。
+    // args.username 已过 validate_username 白名单（[A-Za-z_][A-Za-z0-9_]*, ≤63），可安全拼接。
+    let sql = format!("ALTER USER {} PASSWORD $${new_pwd}$$;", args.username);
     let alter_result = pgbin::psql(
         &install_dir,
         LISTEN_LOCAL,
         port,
-        DEFAULT_USERNAME,
+        &args.username,
         "postgres",
         DUMMY_PWD,
         &sql,
@@ -1107,7 +1136,10 @@ pub async fn reset_password(args: cli::DataDirArgs) -> Result<(), u8> {
     instance.stop().await;
 
     if let Err(e) = alter_result {
-        eprintln!("[sidecar] ALTER USER postgres PASSWORD 失败: {e}");
+        eprintln!(
+            "[sidecar] ALTER USER {} PASSWORD 失败（请确认 --username 与实例超级用户一致）: {e}",
+            args.username
+        );
         return Err(exit_codes::PASSWORD_FAILED);
     }
 
@@ -1164,6 +1196,7 @@ impl Drop for HbaRestoreGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::DEFAULT_USERNAME;
 
     fn unique_tmp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("qts-maint-test-{}-{}", std::process::id(), name))
@@ -1176,6 +1209,14 @@ mod tests {
         std::fs::write(dir.join("PG_VERSION"), "16\n").unwrap();
         std::fs::write(dir.join("global/pg_control"), b"ctl").unwrap();
         std::fs::write(dir.join("postgresql.conf"), "# conf\n").unwrap();
+    }
+
+    /// reset-password 参数构造（默认用户名为 postgres，旧 CLI 语义）。
+    fn reset_password_args(data_dir: PathBuf) -> cli::ResetPasswordArgs {
+        cli::ResetPasswordArgs {
+            data_dir,
+            username: DEFAULT_USERNAME.to_string(),
+        }
     }
 
     #[test]
@@ -1390,7 +1431,7 @@ mod tests {
     async fn reset_password_rejects_uninitialized_dir() {
         let dir = unique_tmp("resetpw-fresh");
         let data_dir = dir.join("postgres/16/data");
-        let args = cli::DataDirArgs { data_dir };
+        let args = reset_password_args(data_dir);
         assert_eq!(
             reset_password(args).await,
             Err(exit_codes::DATA_DIR_ABNORMAL)
@@ -1406,8 +1447,66 @@ mod tests {
         std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         let _lock = MaintenanceLock::try_acquire(&layout.lock_file).unwrap();
-        let args = cli::DataDirArgs { data_dir };
+        let args = reset_password_args(data_dir.clone());
         assert_eq!(reset_password(args).await, Err(exit_codes::LOCK_CONFLICT));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `validate_username`：自定义超级用户名（合法标识符）通过，供 reset-password 透传。
+    #[test]
+    fn validate_username_accepts_safe_identifiers() {
+        for name in ["postgres", "qtrading", "stock_admin", "_svc", "a"] {
+            assert_eq!(validate_username(name), Ok(()), "{name} 应被接受");
+        }
+        assert_eq!(validate_username(&"a".repeat(63)), Ok(()));
+    }
+
+    /// `validate_username`：白名单外（空 / 注入片段 / 引号 / 非 ASCII / 超长）一律拒绝，
+    /// 防止 `ALTER USER <name>` 拼接 SQL 时被注入（R4）。
+    #[test]
+    fn validate_username_rejects_unsafe() {
+        for name in [
+            "",
+            "1abc",
+            "a-b",
+            "a b",
+            "a;drop",
+            "a\"b",
+            "a'b",
+            "对外用户",
+            "postgres $$",
+        ] {
+            assert_eq!(
+                validate_username(name),
+                Err(exit_codes::ARGUMENT_ERROR),
+                "{name:?} 应被拒绝"
+            );
+        }
+        assert_eq!(
+            validate_username(&"a".repeat(64)),
+            Err(exit_codes::ARGUMENT_ERROR)
+        );
+    }
+
+    /// `reset_password` 错误路径：非法用户名在获取维护锁前即被拒绝（exit 2），
+    /// 且不触碰 PGDATA / 密码文件。
+    #[tokio::test]
+    async fn reset_password_rejects_invalid_username() {
+        let dir = unique_tmp("resetpw-badname");
+        let data_dir = dir.join("postgres/16/data");
+        make_fake_cluster(&data_dir);
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
+        let original = std::fs::read_to_string(&layout.password_file).unwrap();
+
+        let args = cli::ResetPasswordArgs {
+            data_dir: data_dir.clone(),
+            username: "bad;drop".to_string(),
+        };
+        assert_eq!(reset_password(args).await, Err(exit_codes::ARGUMENT_ERROR));
+        // 密码文件未被改写（未进入临时实例 / ALTER USER 流程）
+        let after = std::fs::read_to_string(&layout.password_file).unwrap();
+        assert_eq!(after, original, "非法用户名不得改动密码文件");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1839,7 +1938,7 @@ mod tests {
             format!("{own_pid}\n/x/data\n1784505600\n55432\n/tmp\n127.0.0.1\n"),
         )
         .unwrap();
-        let args = cli::DataDirArgs { data_dir };
+        let args = reset_password_args(data_dir);
         assert_eq!(reset_password(args).await, Err(exit_codes::LOCK_CONFLICT));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2031,6 +2130,11 @@ mod tests {
     /// ensure_binaries + write_password_file + run_initdb + write_security_baseline。
     /// 返回 (layout, password, dir) — dir 用于测试后清理。
     async fn setup_pg_layout(test_name: &str) -> (Layout, String, PathBuf) {
+        setup_pg_layout_with(test_name, DEFAULT_USERNAME).await
+    }
+
+    /// 同 `setup_pg_layout`，但可指定 initdb 超级用户名（M23：自定义用户名 cluster）。
+    async fn setup_pg_layout_with(test_name: &str, username: &str) -> (Layout, String, PathBuf) {
         let dir = unique_tmp(test_name);
         let data_dir = dir.join("postgres/16/data");
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
@@ -2038,7 +2142,7 @@ mod tests {
 
         setup::ensure_binaries(&layout, &|_| {}).await.unwrap();
         password::write_password_file(&layout.password_file, &password).unwrap();
-        setup::run_initdb(&layout, DEFAULT_USERNAME, &password)
+        setup::run_initdb(&layout, username, &password)
             .await
             .unwrap();
         setup::write_security_baseline(&data_dir, LISTEN_LOCAL).unwrap();
@@ -2178,9 +2282,7 @@ mod tests {
         instance.stop().await;
 
         // 调用 reset_password
-        let args = cli::DataDirArgs {
-            data_dir: layout.data_dir.clone(),
-        };
+        let args = reset_password_args(layout.data_dir.clone());
         let result = reset_password(args).await;
 
         assert!(
@@ -2193,6 +2295,42 @@ mod tests {
         let new_pwd = password::read_password_file(&layout.password_file)
             .expect("new password should be readable");
         assert_ne!(new_pwd, old_pwd, "password should be rotated");
+        assert!(!new_pwd.is_empty(), "new password should not be empty");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `reset_password` 成功路径（自定义超级用户名，M23）：
+    /// initdb 以 `qtrading` 为超级用户建 cluster → `reset-password --username qtrading`
+    /// → 密码轮换。若仍硬编码 postgres（角色不存在），临时实例健康检查失败 exit 12。
+    /// `await_holding_lock`：PG_TEST_MUTEX 是测试串行化锁，非生产代码，持有锁 await 不会死锁。
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn reset_password_succeeds_with_custom_username() {
+        let _guard = PG_TEST_MUTEX.lock().unwrap();
+        const CUSTOM_USER: &str = "qtrading";
+        let (layout, _password, dir) = setup_pg_layout_with("resetpw-custom", CUSTOM_USER).await;
+
+        let old_pwd = password::read_password_file(&layout.password_file)
+            .expect("old password should be readable");
+
+        let args = cli::ResetPasswordArgs {
+            data_dir: layout.data_dir.clone(),
+            username: CUSTOM_USER.to_string(),
+        };
+        let result = reset_password(args).await;
+        assert!(
+            result.is_ok(),
+            "reset_password --username {CUSTOM_USER} should succeed: {:?}",
+            result.err()
+        );
+
+        let new_pwd = password::read_password_file(&layout.password_file)
+            .expect("new password should be readable");
+        assert_ne!(
+            new_pwd, old_pwd,
+            "password should be rotated for custom superuser"
+        );
         assert!(!new_pwd.is_empty(), "new password should not be empty");
 
         let _ = std::fs::remove_dir_all(&dir);

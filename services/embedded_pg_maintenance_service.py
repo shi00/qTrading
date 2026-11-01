@@ -1,7 +1,7 @@
 """EmbeddedPgMaintenanceService 单例：sidecar CLI 离线维护命令包装（Phase 3 §13.2, R-A2）。
 
 职责：
-- 调用 sidecar CLI 的 doctor/dump/restore/maintenance-shell 子命令
+- 调用 sidecar CLI 的 doctor/dump/restore/maintenance-shell/reset-password 子命令
 - 解析 JSON 输出，校验 schema 版本（R-A3: ``qtrading.embedded_postgres.doctor.v1``）
 - 通过 ThreadPoolManager 提交同步 subprocess（R16: 不阻塞事件循环）；dump 类命令暴露句柄可取消（CON-04）
 - 错误分类映射（exit code → 错误类型 + 日志级别 + 用户提示）
@@ -10,9 +10,10 @@
 - ``@register_singleton`` 协议：``_reset_singleton``（无 atexit 资源需清理）
 - 路径从 AppConfig + ``ConfigHandler.load_config()`` 实时解析（不在构造期缓存，配合运行时配置切换）
 - argv 中的路径、业务库名、超级用户名均来自 AppConfig（R-A2 边界；库名/用户名经白名单校验后透传）
-- 超级用户名仅在配置为非 sidecar 默认 ``postgres`` 时透传 ``--username``（M21：自定义用户名
-  实例的 dump/restore/maintenance-shell 必须与 ``run --username`` 一致，否则角色认证失败；
-  默认配置不传该参数，兼容不支持 ``--username`` 的旧 sidecar）
+- 超级用户名仅在配置为非 sidecar 默认 ``postgres`` 时透传 ``--username``（自定义用户名实例的
+  维护命令必须与 ``run --username`` 一致，否则角色认证/改密作用于错误角色；默认配置不传该参数，
+  兼容不支持 ``--username`` 的旧 sidecar）。dump/restore/maintenance-shell 与 reset-password
+  均由同一实现透传（M21 / M23）
 - exit code 20 (PG 未运行) 在 doctor 命令中容忍为成功（sidecar doctor 是只读诊断）
 """
 
@@ -125,6 +126,7 @@ class MaintenanceShellInfo:
 # exit code → (错误类型, 日志级别, 用户提示)
 # 对齐 sidecar exit_codes.rs 与 §13.2 错误分类映射表
 _EXIT_CODE_MAP: dict[int, tuple[str, int, str]] = {
+    2: ("sidecar_argument_error", logging.ERROR, "维护命令参数非法（检查用户名/库名）"),
     10: ("sidecar_arg_error", logging.ERROR, "维护命令参数错误"),
     11: ("initdb_failed", logging.ERROR, "数据库初始化失败"),
     12: ("pg_start_failed", logging.ERROR, "数据库启动失败"),
@@ -271,6 +273,27 @@ class EmbeddedPgMaintenanceService:
             exit_code=exit_code,
         )
 
+    @log_async_operation(
+        operation_name="embedded_pg_reset_password",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+    )
+    async def reset_password(self) -> None:
+        """运行 sidecar reset-password 命令，重置超级用户密码（§13.7.8）。
+
+        新密码由 sidecar 生成并写入密码文件（Windows DPAPI / Unix 0600），不经 stdout
+        返回，调用方重启应用后由 ``run`` 读取（R9：密码不落地到日志或返回值）。
+        用户名取 ``embedded_pg_username``（与 ``run --username`` 对齐，M23）。
+
+        Raises:
+            EmbeddedPgMaintenanceError: 用户名/库名非法、维护锁冲突、数据目录异常、
+                临时实例启动或 ALTER USER 失败（exit != 0）
+            asyncio.CancelledError: R2 透传
+        """
+        argv = await asyncio.to_thread(self._build_reset_password_argv)
+        exit_code, _stdout, stderr = await self._run_sidecar(argv)
+        if exit_code != 0:
+            self._raise_for_exit_code(exit_code, stderr, "reset-password")
+
     # ---- argv 构造 ----
 
     def _get_sidecar_path_and_data_dir(self) -> tuple[str, str]:
@@ -329,7 +352,8 @@ class EmbeddedPgMaintenanceService:
         return database
 
     def _get_username(self) -> str:
-        """读取并校验配置中的超级用户名（M21：dump/restore/maintenance-shell 须与实例用户名一致）。
+        """读取并校验配置中的超级用户名（dump/restore/maintenance-shell/reset-password
+        须与实例用户名一致，M21 / M23）。
 
         用户名来自 ``AppConfig.embedded_pg_username``（与运行时 ``EmbeddedPostgresService``
         ``run --username`` 使用同一配置项），经白名单校验后透传给 sidecar ``--username``。
@@ -392,6 +416,11 @@ class EmbeddedPgMaintenanceService:
     def _build_maintenance_shell_argv(self) -> list[str]:
         sidecar_path, data_dir = self._get_sidecar_path_and_data_dir()
         return [sidecar_path, "maintenance-shell", "--data-dir", data_dir, *self._username_args()]
+
+    def _build_reset_password_argv(self) -> list[str]:
+        """reset-password argv：自定义超级用户名必须透传，否则 ALTER USER 作用于不存在的角色。"""
+        sidecar_path, data_dir = self._get_sidecar_path_and_data_dir()
+        return [sidecar_path, "reset-password", "--data-dir", data_dir, *self._username_args()]
 
     # ---- subprocess 调用 ----
 

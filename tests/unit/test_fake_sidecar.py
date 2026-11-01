@@ -6,7 +6,7 @@
 - 用 ``json.loads`` 解析 stdout 验证 JSON 输出
 - ``run`` 子命令会等 stdin EOF 退出，测试需传 ``stdin=DEVNULL`` 让其立即 EOF
 
-测试用例 (12 个):
+测试用例:
 - test_create_fake_sidecar_returns_executable_path
 - test_run_command_outputs_ready_json
 - test_status_command_outputs_running_json
@@ -18,6 +18,8 @@
 - test_restore_command_outputs_target_data_dir_with_explicit
 - test_restore_command_fails_with_env
 - test_maintenance_shell_command_outputs_json
+- test_reset_password_command_accepts_custom_username
+- test_reset_password_command_exit_code_env_override
 - test_fake_sidecar_exit_code_env_override
 - test_fake_sidecar_timezone_env_override
 """
@@ -220,6 +222,38 @@ def test_maintenance_shell_command_outputs_json(tmp_path: Path) -> None:
     assert "connection_string_redacted" in info
     # R9: 验证 connection_string 不含明文密码
     assert "***" in info["connection_string_redacted"]
+
+
+def test_reset_password_command_accepts_custom_username(tmp_path: Path) -> None:
+    """reset-password 子命令: 接受 --username（M23 自定义超级用户名），exit 0。
+
+    fake 回显收到的 username，用于断言参数确实被 CLI 解析（真实 sidecar 无此回显）。
+    """
+    wrapper = create_fake_sidecar(tmp_path)
+    result = _run_sidecar(
+        wrapper,
+        "reset-password",
+        "--data-dir",
+        str(tmp_path / "data"),
+        "--username",
+        "qtrading",
+    )
+    assert result.returncode == 0, f"reset-password 失败: {result.stderr}"
+    echo = json.loads(result.stdout.strip())
+    assert echo["username"] == "qtrading"
+
+
+def test_reset_password_command_exit_code_env_override(tmp_path: Path) -> None:
+    """reset-password 子命令: FAKE_SIDECAR_EXIT_CODE 可注入失败（如 50 锁冲突）。"""
+    wrapper = create_fake_sidecar(tmp_path)
+    result = _run_sidecar(
+        wrapper,
+        "reset-password",
+        "--data-dir",
+        str(tmp_path / "data"),
+        env_overrides={"FAKE_SIDECAR_EXIT_CODE": "50"},
+    )
+    assert result.returncode == 50, f"应 exit 50, 实际: {result.returncode}"
 
 
 def test_fake_sidecar_exit_code_env_override(tmp_path: Path) -> None:

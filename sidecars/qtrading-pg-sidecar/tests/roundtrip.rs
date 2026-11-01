@@ -544,7 +544,7 @@ fn test_reset_password_succeeds() {
     let old_pwd = std::fs::read_to_string(&password_file).expect("read old password");
 
     // 3. 调 reset-password → exit 0（sidecar 已退出，锁可用）
-    let (reset_code, reset_stderr) = reset_password_sidecar(&data_dir);
+    let (reset_code, reset_stderr) = reset_password_sidecar(&data_dir, None);
     assert_eq!(
         reset_code, 0,
         "reset-password should succeed when sidecar is stopped\n\
@@ -553,7 +553,8 @@ fn test_reset_password_succeeds() {
 
     // 4. 读取新 password file 内容，验证已变更
     let new_pwd = std::fs::read_to_string(&password_file).expect("read new password");
-    assert_ne!(new_pwd, old_pwd, "password should be rotated");
+    // R9：assert! 而非 assert_ne!，避免断言失败时把明文密码写入测试输出
+    assert!(old_pwd != new_pwd, "password should be rotated");
     assert!(!new_pwd.is_empty(), "new password should not be empty");
 
     // 5. 再次 run → ready（验证新密码可连接，pg_hba.conf 已重写生效）
@@ -579,7 +580,7 @@ fn test_reset_password_lock_conflict() {
     let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
 
     // 调 reset-password → exit 50（LOCK_CONFLICT）
-    let (reset_code, _reset_stderr) = reset_password_sidecar(&data_dir);
+    let (reset_code, _reset_stderr) = reset_password_sidecar(&data_dir, None);
     assert_eq!(
         reset_code, 50,
         "reset-password must be rejected while sidecar is running"
@@ -588,13 +589,47 @@ fn test_reset_password_lock_conflict() {
     cleanup_sidecar(&mut child, &data_dir);
 }
 
-/// 14. maintenance-shell stdout JSON 契约（Python `EmbeddedPgMaintenanceService` 消费）。
+/// 14. reset-password 用户名与实例不匹配时安全失败（M23）。
+///
+/// 默认 cluster（超级用户 postgres）上执行 `reset-password --username qtrading`：
+/// 临时实例健康检查以 qtrading 连接（角色不存在）→ 启动失败 exit 12，且密码文件不被改写。
+/// 若 `--username` 被忽略（仍硬编码 postgres），本用例会 exit 0 并轮换密码，从而失败。
+#[test]
+fn test_reset_password_wrong_username_fails_without_rotating_password() {
+    let (_tmp, data_dir) = unique_data_dir("roundtrip_14");
+
+    // 1. 默认用户名（postgres）建立 cluster 并优雅停止
+    let mut child = spawn_run(&data_dir);
+    let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    graceful_stop(&mut child);
+    assert_eq!(wait_for_exit(&mut child, STOP_TIMEOUT), 0);
+
+    let password_file = data_dir.parent().unwrap().join("runtime").join("password");
+    let before = std::fs::read_to_string(&password_file).expect("read password file");
+
+    // 2. 传入不存在的超级用户名 → 临时实例健康检查失败 → exit 12
+    let (reset_code, reset_stderr) = reset_password_sidecar(&data_dir, Some("qtrading"));
+    assert_eq!(
+        reset_code, 12,
+        "reset-password with a non-existent superuser must fail (exit 12) instead of \
+         rotating the postgres password\n=== SIDECAR STDERR ===\n{reset_stderr}\n=== END STDERR ==="
+    );
+
+    // 3. 失败路径不得改写密码文件
+    assert_eq!(
+        std::fs::read_to_string(&password_file).expect("read password file"),
+        before,
+        "password file must not be rewritten when the reset-password flow fails"
+    );
+}
+
+/// 15. maintenance-shell stdout JSON 契约（Python `EmbeddedPgMaintenanceService` 消费）。
 ///
 /// 期望 stdout 输出 `{psql_path, connection_string_redacted}`，密码段固定 `***`；
 /// stdin 关闭（Stdio::null → EOF）时维护实例应立即优雅停止并 exit 0。
 #[test]
 fn test_maintenance_shell_outputs_json_contract() {
-    let (_tmp, data_dir) = unique_data_dir("roundtrip_14");
+    let (_tmp, data_dir) = unique_data_dir("roundtrip_15");
 
     let mut child = spawn_run(&data_dir);
     let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
@@ -649,15 +684,18 @@ fn test_maintenance_shell_outputs_json_contract() {
 // ---- 辅助函数 ----
 
 /// 执行 `reset-password` 命令，返回 (exit code, stderr)。
-/// 失败时调用方应将 stderr 纳入 assert 诊断信息，便于 CI 排查（Windows 上 postgres --single
+/// 失败时调用方应将 stderr 纳入 assert 诊断信息，便于 CI 排查（Windows 上临时实例
 /// 启动失败的具体原因只能从 stderr 获取）。
-fn reset_password_sidecar(data_dir: &Path) -> (u8, String) {
-    let output = std::process::Command::new(sidecar_path())
-        .arg("reset-password")
-        .arg("--data-dir")
-        .arg(data_dir)
-        .output()
-        .expect("failed to run reset-password");
+///
+/// ``username`` 为 ``None`` 时不传 ``--username``（验证旧 CLI 兼容：默认 postgres）；
+/// 自定义超级用户名的 cluster 必须显式透传（M23）。
+fn reset_password_sidecar(data_dir: &Path, username: Option<&str>) -> (u8, String) {
+    let mut cmd = std::process::Command::new(sidecar_path());
+    cmd.arg("reset-password").arg("--data-dir").arg(data_dir);
+    if let Some(name) = username {
+        cmd.arg("--username").arg(name);
+    }
+    let output = cmd.output().expect("failed to run reset-password");
     (
         output.status.code().unwrap_or(255) as u8,
         String::from_utf8_lossy(&output.stderr).into_owned(),

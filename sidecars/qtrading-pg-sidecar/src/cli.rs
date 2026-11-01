@@ -45,8 +45,8 @@ pub enum Command {
     Restore(RestoreArgs),
     /// 临时维护实例：输出脱敏连接信息与 psql 路径，等待用户结束后关闭（需维护锁）
     MaintenanceShell(MaintenanceShellArgs),
-    /// 重置 postgres 用户密码（§13.7.8，需维护锁；通过 postgres --single 单用户模式）
-    ResetPassword(DataDirArgs),
+    /// 重置超级用户密码（§13.7.8，需维护锁；临时 trust 实例 + ALTER USER，支持自定义超级用户名 M23）
+    ResetPassword(ResetPasswordArgs),
     /// 版本与构建元数据
     Version(VersionArgs),
 }
@@ -56,6 +56,16 @@ pub struct DataDirArgs {
     /// PGDATA 目录（<app data>/postgres/16/data）
     #[arg(long)]
     pub data_dir: PathBuf,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct ResetPasswordArgs {
+    #[arg(long)]
+    pub data_dir: PathBuf,
+    /// 超级用户名（须与 `run --username` / `AppConfig.embedded_pg_username` 一致，
+    /// 否则 ALTER USER 作用在不存在的角色上，改密无效；缺省 postgres）
+    #[arg(long, default_value = DEFAULT_USERNAME)]
+    pub username: String,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -228,6 +238,43 @@ mod tests {
                     | Command::ResetPassword(_)
             ));
         }
+    }
+
+    #[test]
+    fn reset_password_username_default_and_override() {
+        // 旧命令兼容：未传 --username 时仍以 postgres 角色改密
+        let cli = parse(&["qtrading-pg-sidecar", "reset-password", "--data-dir", "/d"]).unwrap();
+        let Command::ResetPassword(args) = cli.command else {
+            panic!("expect reset-password")
+        };
+        assert_eq!(args.username, DEFAULT_USERNAME);
+
+        // 自定义超级用户名实例（run --username qtrading）须显式透传
+        let cli = parse(&[
+            "qtrading-pg-sidecar",
+            "reset-password",
+            "--data-dir",
+            "/d",
+            "--username",
+            "qtrading",
+        ])
+        .unwrap();
+        let Command::ResetPassword(args) = cli.command else {
+            panic!("expect reset-password")
+        };
+        assert_eq!(args.username, "qtrading");
+    }
+
+    #[test]
+    fn reset_password_help_lists_username() {
+        let err = parse(&["qtrading-pg-sidecar", "reset-password", "--help"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let rendered = err.to_string();
+        assert!(rendered.contains("--username"), "help 须列出 --username");
+        assert!(
+            rendered.contains(DEFAULT_USERNAME),
+            "help 须列出默认值 {DEFAULT_USERNAME}"
+        );
     }
 
     #[test]
