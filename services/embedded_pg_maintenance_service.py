@@ -12,8 +12,8 @@
 - argv 中的路径、业务库名、超级用户名均来自 AppConfig（R-A2 边界；库名/用户名经白名单校验后透传）
 - 超级用户名仅在配置为非 sidecar 默认 ``postgres`` 时透传 ``--username``（自定义用户名实例的
   维护命令必须与 ``run --username`` 一致，否则角色认证/改密作用于错误角色；默认配置不传该参数，
-  兼容不支持 ``--username`` 的旧 sidecar）。reset-password 由本模块透传（M23），
-  dump/restore/maintenance-shell 由 M21 在同一实现上透传
+  兼容不支持 ``--username`` 的旧 sidecar）。dump/restore/maintenance-shell 与 reset-password
+  均由同一实现透传（M21 / M23）
 - exit code 20 (PG 未运行) 在 doctor 命令中容忍为成功（sidecar doctor 是只读诊断）
 """
 
@@ -353,7 +353,7 @@ class EmbeddedPgMaintenanceService:
 
     def _get_username(self) -> str:
         """读取并校验配置中的超级用户名（dump/restore/maintenance-shell/reset-password
-        须与实例用户名一致）。
+        须与实例用户名一致，M21 / M23）。
 
         用户名来自 ``AppConfig.embedded_pg_username``（与运行时 ``EmbeddedPostgresService``
         ``run --username`` 使用同一配置项），经白名单校验后透传给 sidecar ``--username``。
@@ -393,6 +393,7 @@ class EmbeddedPgMaintenanceService:
             self._get_database_name(),
             "--output",
             str(output_path),
+            *self._username_args(),
         ]
 
     def _build_restore_argv(self, input_path: Path, target_data_dir: Path | None) -> list[str]:
@@ -406,6 +407,7 @@ class EmbeddedPgMaintenanceService:
             str(input_path),
             "--database",
             self._get_database_name(),
+            *self._username_args(),
         ]
         if target_data_dir:
             argv.extend(["--target-data-dir", str(target_data_dir)])
@@ -413,7 +415,7 @@ class EmbeddedPgMaintenanceService:
 
     def _build_maintenance_shell_argv(self) -> list[str]:
         sidecar_path, data_dir = self._get_sidecar_path_and_data_dir()
-        return [sidecar_path, "maintenance-shell", "--data-dir", data_dir]
+        return [sidecar_path, "maintenance-shell", "--data-dir", data_dir, *self._username_args()]
 
     def _build_reset_password_argv(self) -> list[str]:
         """reset-password argv：自定义超级用户名必须透传，否则 ALTER USER 作用于不存在的角色。"""
