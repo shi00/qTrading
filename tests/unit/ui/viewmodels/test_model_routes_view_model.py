@@ -16,6 +16,7 @@ mock ``ModelConfigurationService``（非单例 DI），不触碰 ConfigHandler /
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -522,6 +523,35 @@ class TestRouteRoundtripFidelity:
         committed = {r.scenario_id: r for r in vm.state.committed_routes}
         assert committed["news_annotation"].route_revision == 2
         assert committed["news_annotation"].candidates == ("conn-a",)
+
+    @pytest.mark.asyncio
+    async def test_repeated_save_keeps_incremented_revision(self):
+        """语义递增后再次保存（无新编辑）不得把草稿里的旧 revision 写回（不回退）。"""
+        vm, service = _make_vm(_snapshot(config_revision=5))
+        await vm.load()
+        vm.add_candidate("conn-a")
+        await vm.save_current_scenario()
+        assert vm.state.save_state == "committed"
+
+        # 未做任何编辑，重复点击保存（View 按钮无 dirty 门禁，可重复触发）
+        await vm.save_current_scenario()
+
+        payload = service.save_draft.await_args.args[0]
+        rows = {r["scenario_id"]: r["route_revision"] for r in payload["scenario_routes"]}
+        assert rows["news_annotation"] == 2  # 不因草稿旧 revision 回退为 1
+        draft = next(r for r in vm.state.routes if r.scenario_id == "news_annotation")
+        committed = next(r for r in vm.state.committed_routes if r.scenario_id == "news_annotation")
+        assert draft.route_revision == committed.route_revision == 2
+
+    def test_execution_options_is_read_only_mapping(self):
+        """草稿执行参数为只读映射：外部不得就地篡改 state 内可变容器（mvvm.md 契约）。"""
+        draft = ScenarioRouteDraft("stock_analysis", execution_options={"temperature": 0.2})
+        assert draft.execution_options == {"temperature": 0.2}  # 语义等价仍可比较
+        assert isinstance(draft.execution_options, MappingProxyType)  # 规范化后即只读视图
+        with pytest.raises(TypeError, match="does not support item assignment"):
+            draft.execution_options["temperature"] = 0.9  # type: ignore[index]  # 只读映射写入应被拒绝
+        assert draft.execution_options["temperature"] == 0.2  # 被拒绝的写入未篡改原对象
+        assert dict(draft.execution_options) == {"temperature": 0.2}  # 整体内容未变化
 
 
 # --- risk binding / UI toggles ---
