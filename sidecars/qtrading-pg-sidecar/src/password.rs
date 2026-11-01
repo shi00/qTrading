@@ -107,7 +107,14 @@ pub fn write_password_file(path: &Path, password: &str) -> std::io::Result<()> {
     #[cfg(unix)]
     let bytes = password.as_bytes().to_vec();
     file.write_all(&bytes)?;
-    file.sync_all()
+    file.sync_all()?;
+    // OpenOptions::mode 只对新建文件生效：已存在的宽权限文件必须显式收紧，否则新密码仍可被他人读取。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 /// 校验既有 password file 权限（仅 Unix；Windows 跳过，exit 15 由调用方决定）。
@@ -334,6 +341,25 @@ mod tests {
         assert!(password_file_perms_ok(&path));
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(!password_file_perms_ok(&path));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 已存在的 0644 文件被重写时必须收紧为 0600（OpenOptions::mode 仅创建时生效）。
+    #[cfg(unix)]
+    #[test]
+    fn rewrite_tightens_existing_permissive_file_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_tmp("perms-tighten");
+        let path = dir.join("password");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "old-content").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!password_file_perms_ok(&path));
+
+        write_password_file(&path, "TestPwd-1_2.3~").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "重写后权限应收紧");
+        assert_eq!(read_password_file(&path).as_deref(), Some("TestPwd-1_2.3~"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

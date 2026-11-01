@@ -50,6 +50,7 @@ from ui.i18n import I18n
 from ui.testing.anchor import anchored
 from ui.testing.e2e_ids import Eid
 from ui.theme import AppColors, AppStyles
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -704,7 +705,7 @@ def PaginatedTable(
         try:
             on_persist_col_widths(dict(widths))
         except Exception as e:
-            logger.debug("[PaginatedTable] on_persist_col_widths failed: %s", e)
+            logger.debug("[PaginatedTable] on_persist_col_widths failed: %s", DataSanitizer.sanitize_error(e))
 
     def _load_widths_effect() -> None:
         """按 col_widths_key 加载持久化列宽 (item 3).
@@ -721,7 +722,10 @@ def PaginatedTable(
         try:
             loaded = on_load_col_widths()
         except Exception as e:
-            logger.debug("[PaginatedTable] on_load_col_widths failed, use column defaults: %s", e)
+            logger.debug(
+                "[PaginatedTable] on_load_col_widths failed, use column defaults: %s",
+                DataSanitizer.sanitize_error(e),
+            )
             cache.widths = dict(col_widths)
             return
         if not loaded:
@@ -730,7 +734,7 @@ def PaginatedTable(
         try:
             widths = {str(k): int(v) for k, v in loaded.items()}
         except (TypeError, ValueError) as e:
-            logger.debug("[PaginatedTable] invalid persisted col widths ignored: %s", e)
+            logger.debug("[PaginatedTable] invalid persisted col widths ignored: %s", DataSanitizer.sanitize_error(e))
             cache.widths = dict(col_widths)
             return
         set_col_widths(widths)

@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 import flet as ft
 
 from app.bootstrap import EmbeddedPgStartupScenario, mask_sensitive
+from core.startup_types import StartupContext, StartupState
 
 if TYPE_CHECKING:
     from utils.shutdown import ShutdownCoordinator
@@ -202,9 +203,21 @@ async def _run_session(
         toast_show(page, I18n.get(message_key), toast_type)
 
     bridge = _StartupBridge()
+    # 只在状态转换时登记当期 auto probe task：初次 start() 之外的 onboarding /
+    # retry 路径会在 initialize_services 内新建 task，main 无法在 start() 后补登记。
+    registered_auto_probe_task: asyncio.Task | None = None
+
+    def _on_state_change(state: StartupState, context: StartupContext) -> None:
+        nonlocal registered_auto_probe_task
+        bridge.notify(state, context)
+        task = controller.auto_probe_task
+        if task is not None and task is not registered_auto_probe_task and not task.done():
+            coordinator.register_task(task)
+            registered_auto_probe_task = task
+
     controller = StartupController(
         cache_manager=cache_manager,
-        on_state_change=bridge.notify,
+        on_state_change=_on_state_change,
         on_show_toast=_on_show_toast,
         on_exit=lambda: page.run_task(_perform_upgrade_exit),  # type: ignore[arg-type]  # [reason: page.run_task 返回 Task，on_exit 回调期望 None，返回值被忽略]
         embedded_pg_scenario=scenario,
@@ -271,10 +284,12 @@ async def _run_session(
     logger.info("[Main] After controller.start()")
 
     # Phase 2A.1 Task 2A.1.9：注册启动期 auto probe 任务到 ShutdownCoordinator
-    # （仅在 initialize_services 成功执行后非 None；onboarding 路径不创建 task）
+    # （仅在 initialize_services 成功执行后非 None；迟创建 task 已由 _on_state_change 登记，
+    # 此处用同一去重变量避免重复登记）
     auto_probe_task = controller.auto_probe_task
-    if auto_probe_task is not None and not auto_probe_task.done():
+    if auto_probe_task is not None and auto_probe_task is not registered_auto_probe_task and not auto_probe_task.done():
         coordinator.register_task(auto_probe_task)
+        registered_auto_probe_task = auto_probe_task
 
 
 async def _wait_for_user_action(retry_event: threading.Event, exit_event: threading.Event) -> str:

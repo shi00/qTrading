@@ -1050,6 +1050,13 @@ class TestMarketDataServiceFetchMarketDataIntegration:
 
 
 class TestMarketDataServiceGetHsgt:
+    @pytest.fixture(autouse=True)
+    def _restore_locale(self):
+        """locale 为类级全局状态，用例结束后归位，避免跨用例污染（R7 精神）。"""
+        original = I18n.current_locale()
+        yield
+        I18n.set_locale(original)
+
     @pytest.mark.asyncio
     @patch("data.domain_services.market_data_service.TushareClient")
     @patch("data.domain_services.market_data_service.CacheManager")
@@ -1204,6 +1211,62 @@ class TestMarketDataServiceGetHsgt:
         result = await svc._get_hsgt("20240614")
         assert result["color"] == "green"
         assert result["value"] != "-"
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_zh_cn_large_value_numeric_unit(self, mock_tc, mock_cache_cls, mock_api):
+        """M18 zh_CN: 500 百万元 = 5 亿元 → "5.00亿"（数值与「亿」量级一致）。"""
+        mock_cache = MagicMock()
+        mock_cache_cls.return_value = mock_cache
+        mock_cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame({"north_money": [500.0]}))
+        I18n.set_locale("zh_CN")
+        svc = MarketDataService()
+        result = await svc._get_hsgt("20240614")
+        assert result["value"] == f"5.00{I18n.get('unit_yi')}"
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_zh_cn_small_value_numeric_unit(self, mock_tc, mock_cache_cls, mock_api):
+        """M18 zh_CN: 50 百万元 = 5000 万元 → "5000万"（数值与「万」量级一致）。"""
+        mock_cache = MagicMock()
+        mock_cache_cls.return_value = mock_cache
+        mock_cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame({"north_money": [50.0]}))
+        I18n.set_locale("zh_CN")
+        svc = MarketDataService()
+        result = await svc._get_hsgt("20240614")
+        assert result["value"] == f"5000{I18n.get('unit_wan')}"
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_en_us_large_value_numeric_unit(self, mock_tc, mock_cache_cls, mock_api):
+        """M18 en_US: 1500 百万元 = 15 亿元 = 1.5 B → "1.50B"（B=1e9 量级）。"""
+        mock_cache = MagicMock()
+        mock_cache_cls.return_value = mock_cache
+        mock_cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame({"north_money": [1500.0]}))
+        I18n.set_locale("en_US")
+        svc = MarketDataService()
+        result = await svc._get_hsgt("20240614")
+        assert result["value"] == f"1.50{I18n.get('unit_yi')}"
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_en_us_small_value_numeric_unit(self, mock_tc, mock_cache_cls, mock_api):
+        """M18 en_US: 500 百万元 = 5 亿元 = 500 M → "500M"（M=1e6 量级，非旧版 5000M）。"""
+        mock_cache = MagicMock()
+        mock_cache_cls.return_value = mock_cache
+        mock_cache.market_dao.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame({"north_money": [500.0]}))
+        I18n.set_locale("en_US")
+        svc = MarketDataService()
+        result = await svc._get_hsgt("20240614")
+        assert result["value"] == f"500{I18n.get('unit_wan')}"
 
 
 class TestMarketDataServiceStartStop:

@@ -337,6 +337,12 @@ def _fmt_attr_num(val) -> str:
     return f"{float(val):.2f}"
 
 
+def _fmt_attr_value(val, suffix: str) -> str:
+    """格式化归因数值并追加单位后缀；缺失值返回 '-'（R21：不渲染 "-%" 等伪值）。"""
+    text = _fmt_attr_num(val)
+    return text if text == "-" else text + suffix
+
+
 def _attr_label(column: str | None, column_label_fn: Callable[[str], str] | None) -> str:
     """列名 → 简洁展示别名。
 
@@ -360,16 +366,16 @@ def _build_attribution_condition_row(cond: FilterCondition, column_label_fn: Cal
     """渲染单条筛选条件：'股息率(TTM) = 3.2% > 2.0%' + 通过标记。"""
     label = _attr_label(cond.column, column_label_fn)
     suffix = _ATTR_FIELD_SUFFIX.get(cond.column, "")
-    actual = _fmt_attr_num(cond.actual) + suffix
+    actual = _fmt_attr_value(cond.actual, suffix)
 
     if cond.operator == "between":
         lo, hi = typing.cast(tuple[typing.Any, typing.Any], cond.threshold)
         op_text = I18n.get("filter_op_between")
-        threshold_text = f"({_fmt_attr_num(lo)}, {_fmt_attr_num(hi)}){suffix}"
+        threshold_text = f"({_fmt_attr_value(lo, suffix)}, {_fmt_attr_value(hi, suffix)})"
     else:
         op_key = _ATTR_OP_I18N.get(cond.operator, cond.operator)
         op_text = I18n.get(op_key)
-        threshold_text = _fmt_attr_num(cond.threshold) + suffix
+        threshold_text = _fmt_attr_value(cond.threshold, suffix)
 
     return ft.Row(
         [

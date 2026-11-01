@@ -240,6 +240,36 @@ class TestConfirmDialogCallbacks:
         assert dialog.scrollable is True
         run_unmount_effects(c)
 
+    def test_dismiss_invokes_on_cancel(self, mock_i18n_state, mock_app_colors_state):
+        """用户 dismiss（Esc / 关闭路径）按取消处理，同步消费方 open_state。
+
+        否则 use_dialog 在下一次重渲染时会把对话框重新挂回 overlay。
+        """
+        from tests.unit.ui.component_renderer import (
+            make_component,
+            run_mount_effects,
+            run_unmount_effects,
+        )
+
+        called = []
+        c = make_component(
+            ConfirmDialog,
+            open_state=True,
+            on_confirm=lambda: called.append("confirm"),
+            on_cancel=lambda: called.append("cancel"),
+            confirm_text="OK",
+            cancel_text="Cancel",
+        )
+        page = run_mount_effects(c)
+        dialog = page._dialogs.controls[0]
+        on_dismiss = dialog.on_dismiss
+        # on_dismiss 必须可调用（None 表示未接线，dismiss 路径将静默丢失取消语义）
+        assert callable(on_dismiss)
+        on_dismiss(None)
+        # dismiss 等价于取消：只触发 on_cancel，不得触发 on_confirm
+        assert called == ["cancel"]
+        run_unmount_effects(c)
+
     def test_cancel_btn_uses_primary_color(self, mock_i18n_state, mock_app_colors_state):
         """cancel_btn 应使用 PRIMARY 色调 (非 danger)."""
         from ui.theme import AppColors

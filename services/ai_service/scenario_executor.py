@@ -1276,6 +1276,33 @@ def _estimate_reservation_amount(
     return None
 
 
+def _encoder_usage_metadata(
+    pricing: ConnectionPricing | None,
+    request: InferenceRequest,
+    model: str,
+) -> dict[str, Any]:
+    """encoder 计价连接的用量证据（F17，落账侧成本计算所需）。
+
+    ``encoder_input_tokens`` / ``text_count`` 是 Recorder 结算时
+    ``compute_cost_cny`` 与账本列的唯一数据来源：此前生产链路从未携带这两个
+    字段，分类费用型（``pricing_unit == "encoder_input_tokens"``）连接即使
+    预留阶段按 payload texts 估算了金额，结算阶段也因 token 缺失按不可计价
+    返回 ``None``（实际成本不入月汇总，R21 只保住「未知不填 0」而丢了已知
+    用量）。此处与预留估算同口径（payload ``texts`` 逐条估算求和），
+    token 不可估算时仅记条数、不填 0（缺失语义保留）。
+    """
+    if pricing is None or pricing.pricing_unit != "encoder_input_tokens":
+        return {}
+    texts = request.payload.get("texts")
+    if not isinstance(texts, (list, tuple)) or not texts:
+        return {}
+    metadata: dict[str, Any] = {"text_count": len(texts)}
+    tokens = sum(_estimate_tokens(text, model) for text in texts)
+    if tokens > 0:
+        metadata["encoder_input_tokens"] = tokens
+    return metadata
+
+
 def _budget_policy_snapshot(route: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """父请求携带的预算政策快照（F16）：取路由候选冻结的预算身份（dispatch 层
     统一冻结，整批同源一致）；路由缺失 / 候选为空 / 候选未携带 → ``None``
@@ -1335,4 +1362,7 @@ def _metadata(
         # 终态落账时点按真实 usage 经 connection_pricing.compute_cost_cny 计算
         # （cost 与 usage 同源）；快照缺失 → None（未知语义留证，R21 不伪装）。
         "pricing": pricing_snapshot_metadata(pricing),
+        # F17：encoder 计价连接的实际用量证据（text_count / encoder_input_tokens），
+        # 结算侧 compute_cost_cny 与账本列依赖；非 encoder 计价连接不引入该键。
+        **_encoder_usage_metadata(pricing, request, connection.model),
     }

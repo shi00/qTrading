@@ -612,11 +612,17 @@ class TestVerifyToken:
     async def test_verify_token_wait_for_timeout_resets_verifying_flag(self, mock_config_handler, mock_thread_pool):
         """回归：wait_for 超时（TimeoutError）后 is_verifying 必须复位为 False，避免 UI 无限转圈。"""
         mock_pro = _make_mock_pro_api()
+
+        def _timeout_and_close(coro, timeout=None):
+            """模拟 wait_for 超时：关闭内部协程再抛 TimeoutError（避免未 await 协程泄漏告警）。"""
+            coro.close()
+            raise TimeoutError("probe timed out")
+
         with (
             patch("tushare.pro_api", return_value=mock_pro),
             patch(
                 "ui.viewmodels.tushare_config_panel_view_model.asyncio.wait_for",
-                side_effect=TimeoutError("probe timed out"),
+                side_effect=_timeout_and_close,
             ),
         ):
             vm = _make_vm(mock_config_handler)

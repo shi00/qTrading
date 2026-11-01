@@ -705,6 +705,22 @@ class TestGetUsMajorMoves:
             assert "unavailable" in result or "error" in result.lower()
 
     @pytest.mark.asyncio
+    @patch("httpx.AsyncClient")
+    async def test_error_summary_sanitized(self, mock_get):
+        """R9：失败摘要经返回值进入 UI/AI 上下文，须脱敏异常文本中的凭证 / token。"""
+        _wire_http_get(mock_get, MagicMock())
+        mock_get.return_value.get.side_effect = Exception(
+            "proxy http://user:s3cr3t@127.0.0.1:7890 failed, token=abcd1234efgh"
+        )
+
+        with patch("data.external.news_fetcher.asyncio.sleep", new_callable=AsyncMock):
+            result = await NewsFetcher.get_us_major_moves()
+
+        assert "unavailable" in result
+        assert "s3cr3t" not in result
+        assert "abcd1234efgh" not in result
+
+    @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
     @patch("httpx.AsyncClient")
     async def test_jsonp_parse_failure(self, mock_get, mock_tpm):

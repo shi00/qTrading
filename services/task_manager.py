@@ -525,7 +525,20 @@ class TaskManager:
             self._tasks[task.id] = task
             self._register_and_run(task)
 
-        self._loop.call_soon_threadsafe(_enqueue)
+        try:
+            self._loop.call_soon_threadsafe(_enqueue)
+        except RuntimeError as e:
+            # CON-06 同类：is_running() 与投递之间 loop 被关闭（与 _schedule_coro 已覆盖的窗口相同）。
+            # submit_task 契约为返回 str | None（见 docs/patterns/task-manager.md），不得把
+            # 「loop 已关闭」的投递异常抛给调用方；同时释放本任务同步登记的 unique_key 占位，
+            # 避免后续同键提交被永久判为重复。此处尚未创建协程，无需额外回收。
+            self._release_active_key(unique_key, task.id)
+            logger.error(
+                "[TaskManager] Cannot submit task '%s': event loop closed before scheduling (%s).",
+                name,
+                DataSanitizer.sanitize_error(e),
+            )
+            return None
         return task.id
 
     def _register_and_run(self, task: AppTask):

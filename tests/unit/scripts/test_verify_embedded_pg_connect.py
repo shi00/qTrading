@@ -27,6 +27,10 @@ ROOT = Path(__file__).resolve().parent.parent.parent.parent
 SCRIPT = ROOT / "scripts" / "verify_embedded_pg_connect.py"
 ROOT_STR = str(ROOT)
 
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import verify_embedded_pg_connect as vp  # noqa: E402 - sys.path 注入后导入（与 tests/unit 同惯例）
+
 
 def _clean_env() -> dict[str, str]:
     env = dict(os.environ)
@@ -118,3 +122,63 @@ def test_sys_path_insert_is_guarded_by_package_check() -> None:
         assert any(insert in ast.walk(guard) for guard in guards), (
             "存在未被 `__package__` 守卫包裹的 sys.path.insert（无条件注入）"
         )
+
+
+# --------------------------------------------------------------------------- #
+# R9：结果行脱敏（DSN 明文密码不得出现在 stdout）
+# --------------------------------------------------------------------------- #
+_MISSING_DSN_DETAIL = (
+    "subprocess.CalledProcessError: Command '['/tmp/work/install/bin/pg_dump', '-Fc', '-f', "
+    "'/tmp/work/spike.dump', 'postgresql://postgres:{password}@127.0.0.1:5432/qtrading']' "
+    "returned non-zero exit status 1."
+)
+
+
+def test_format_result_masks_password_in_argv_conninfo() -> None:
+    """pg_dump 失败时 CalledProcessError 的 argv 含 conninfo URL：打印行不得含明文密码。"""
+    password = "spike-password-123"
+    line = vp._format_result(
+        "pg_dump/pg_restore roundtrip", False, _MISSING_DSN_DETAIL.format(password=password), password
+    )
+    assert password not in line
+    # 可诊断信息保留：错误语义 + host:port/db（路径已由 DataSanitizer 替换为 <PATH>）
+    assert "postgresql://postgres:***@127.0.0.1:5432/qtrading" in line
+    assert "returned non-zero exit status 1" in line
+
+
+def test_format_result_masks_password_with_special_chars() -> None:
+    """密码含 @ / : / / 等特殊字符（URL 正则难切分）时仍不得残留任何片段。"""
+    password = "p@ss:w/rd"
+    line = vp._format_result(
+        "pg_dump/pg_restore roundtrip", False, _MISSING_DSN_DETAIL.format(password=password), password
+    )
+    assert password not in line
+    assert "p@ss" not in line and "ss:w/rd" not in line
+    assert "127.0.0.1:5432/qtrading" in line
+
+
+def test_format_result_without_password_argument_still_sanitizes_dsn() -> None:
+    """未提供密码（如 sidecar 未就绪、DSN 尚未构造）时，DataSanitizer 仍遮蔽常规 DSN 密码。"""
+    line = vp._format_result(
+        "pg_dump/pg_restore roundtrip", False, _MISSING_DSN_DETAIL.format(password="common-password"), None
+    )
+    assert "common-password" not in line
+    assert "postgresql://postgres:***@" in line
+
+
+def test_main_registers_password_secret_for_sanitizer_fallback() -> None:
+    """main 读取密码后须向 DataSanitizer 注册（无括号 URL 形态的兜底精确替换）。"""
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "register_secret"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "DataSanitizer"
+    ]
+    assert calls, "main 未调用 DataSanitizer.register_secret(password)"
+    assert any(isinstance(arg, ast.Name) and arg.id == "password" for call in calls for arg in call.args), (
+        "register_secret 的参数应为实际读取的 password"
+    )

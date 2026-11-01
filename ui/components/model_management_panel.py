@@ -1242,8 +1242,11 @@ def ModelManagementPanel(
 
     # --- FilePicker（CSV 导出落盘；经 page.services 注册，沿 screener_view 模式） ---
     file_picker = ft.use_ref(lambda: ft.FilePicker()).current
+    # 仅挂载时注册 / 卸载时移除: 无 dependencies 会让每次重渲染都先 cleanup（移出
+    # page.services）再 setup（重新加入），在导出 FilePicker 打开期间造成服务抖动。
     ft.use_effect(
         lambda: _sync_file_picker_service(_get_page(), file_picker, True),
+        dependencies=[],
         cleanup=lambda: _sync_file_picker_service(_get_page(), file_picker, False),
     )
 

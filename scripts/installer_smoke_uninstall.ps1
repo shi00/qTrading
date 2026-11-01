@@ -68,7 +68,8 @@ try {
     if (Test-Path $AppInstallDir) {
         $existingUninstaller = Join-Path $AppInstallDir "unins000.exe"
         if (Test-Path $existingUninstaller) {
-            & $existingUninstaller /SILENT /NORESTART 2>$null | Out-Null
+            # Inno Setup 卸载器是 GUI 程序，`&` 调用不等待其结束；必须 -Wait。
+            Start-Process -FilePath $existingUninstaller -ArgumentList '/SILENT', '/NORESTART' -Wait | Out-Null
             Start-Sleep -Seconds 5
         }
         Remove-Item -Recurse -Force $AppInstallDir -ErrorAction SilentlyContinue
@@ -80,8 +81,10 @@ try {
 
     # STEP 2: 安装 embedded variant
     Write-Step "2. Install embedded variant"
-    & $InstallerPath /SILENT /NORESTART
-    Start-Sleep -Seconds 5
+    # Inno Setup 安装器是 GUI 程序，`&` 调用立即返回、不等待解包完成；必须 -Wait 并校验退出码，
+    # 否则后续断言会读到半解包的安装目录（同 crash_recovery / running_app 的既有做法）。
+    $installerProc = Start-Process -FilePath $InstallerPath -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait
+    Assert-True ($installerProc.ExitCode -eq 0) "Installer finished (exit code: $($installerProc.ExitCode))"
     Assert-True (Test-Path $AppExePath) "App installed: $AppExePath"
     Assert-True (Test-Path $UninstallerPath) "Uninstaller exists: $UninstallerPath"
 
@@ -105,7 +108,9 @@ try {
 
     # STEP 6: 卸载
     Write-Step "6. Uninstall qTrading"
-    & $UninstallerPath /SILENT /NORESTART
+    $uninstallerProc = Start-Process -FilePath $UninstallerPath -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait
+    Assert-True ($uninstallerProc.ExitCode -eq 0) "Uninstaller finished (exit code: $($uninstallerProc.ExitCode))"
+    # Inno 卸载器会先把自身复制到 %TEMP% 再执行，启动进程可能先退出：保留结算等待再断言删除结果
     Start-Sleep -Seconds 5
     Assert-True (-not (Test-Path $UninstallerPath)) "Uninstaller removed (uninstall completed)"
     Assert-True (-not (Test-Path $AppExePath)) "App EXE removed"

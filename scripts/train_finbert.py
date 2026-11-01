@@ -12,7 +12,8 @@
 ``max_length`` 64（标题）/ 验证集 macro-F1 早停 patience=1；CPU ``torch.set_num_threads(16)``。
 **类别权重（§5.2「损失=交叉熵+类别权重」；§4.5「中性常占 60%+：训练时使用类别权重」）**：
 按 train split 类别频率以 balanced 语义（``w_c = N / (C·n_c)``）计算，经自定义
-``Trainer.compute_loss`` 注入加权交叉熵（见 ``compute_class_weights``）。
+``Trainer.compute_loss`` 注入加权交叉熵（见 ``compute_class_weights``）；权重张量在
+``compute_loss`` 内按 logits 的 device/dtype 迁移，GPU 训练不出现 device mismatch。
 离线实物（``data/corpus/stage_b_out/best/config.json``）为 ``BertForSequenceClassification``
 （transformers 5.19.0），与本脚本流程一致。
 
@@ -419,7 +420,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             labels = inputs.pop("labels")
             outputs = model(**inputs)
             logits = outputs.logits
-            loss = torch.nn.functional.cross_entropy(logits, labels, weight=class_weights)
+            # GPU 训练时 Trainer 已把 model / logits / labels 搬到计算设备，类别权重须同步到
+            # logits 的 device（GPU 上 CPU 权重会 device mismatch）且 dtype 一致（nll_loss 要求
+            # weight 与 input 同 dtype，混合精度下 logits 可能为 fp16/bf16）
+            weight = class_weights.to(device=logits.device, dtype=logits.dtype)
+            loss = torch.nn.functional.cross_entropy(logits, labels, weight=weight)
             return (loss, outputs) if return_outputs else loss
 
     training_args = transformers.TrainingArguments(

@@ -1,7 +1,9 @@
 # installer_smoke_upgrade.ps1
 # Phase 5 DoD §17.5 升级验证（保留数据）smoke test 脚本
-# 用法: powershell -File scripts/installer_smoke_upgrade.ps1 -InstallerPath <path> [-OldVersion 0.9.0]
+# 用法: powershell -File scripts/installer_smoke_upgrade.ps1 -InstallerPath <path> [-OldVersion 0.9.0] [-OldVariant embedded-cpu]
 # 前置: 已发布 OldVersion 的 embedded variant GitHub Release，且本机已登录 gh CLI
+# OldVariant 对应 installer.iss 的 TargetVariant（现役 embedded-cpu / embedded-cuda；
+# 历史版本若为 embedded 则显式传 -OldVariant embedded）。
 
 [CmdletBinding()]
 param(
@@ -9,7 +11,10 @@ param(
     [string]$InstallerPath,
 
     [Parameter(Mandatory = $false)]
-    [string]$OldVersion = "0.9.0"
+    [string]$OldVersion = "0.9.0",
+
+    [Parameter(Mandatory = $false)]
+    [string]$OldVariant = "embedded-cpu"
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,6 +62,7 @@ function Stop-QtradingGraceful {
 Write-Host "=== Phase 5 Upgrade Smoke Test ===" -ForegroundColor Yellow
 Write-Host "InstallerPath: $InstallerPath"
 Write-Host "OldVersion:    $OldVersion"
+Write-Host "OldVariant:    $OldVariant"
 Write-Host "AppInstallDir: $AppInstallDir"
 Write-Host "PgDataDir:     $PgDataDir"
 
@@ -71,7 +77,8 @@ try {
     Stop-QtradingGraceful
     $uninstaller = Join-Path $AppInstallDir "unins000.exe"
     if (Test-Path $uninstaller) {
-        & $uninstaller /SILENT /NORESTART 2>&1 | Out-Null
+        # Inno Setup 卸载器是 GUI 程序，`&` 调用不等待其结束；必须 -Wait。
+        Start-Process -FilePath $uninstaller -ArgumentList '/SILENT', '/NORESTART' -Wait | Out-Null
         Start-Sleep -Seconds 5
     }
     if (Test-Path $AppInstallDir) {
@@ -85,16 +92,20 @@ try {
 
     # STEP 2: 下载并安装旧版本
     Write-Step "2. Download & install old version v$OldVersion"
-    $oldInstaller = "$env:TEMP\AStockScreener-Setup-embedded-$OldVersion.exe"
+    $oldInstaller = "$env:TEMP\AStockScreener-Setup-$OldVariant-$OldVersion.exe"
     Write-Host "  Downloading from GitHub Release v$OldVersion..."
+    # 资产名由 installer.iss 的 OutputBaseFilename=AStockScreener-Setup-{#TargetVariant} 决定；
+    # 单个 Release 同时含 embedded-cpu / embedded-cuda 资产，故须按变体精确匹配（glob 会命中多个，
+    # gh 的 --output 只接受唯一资产），历史命名（embedded）通过 -OldVariant 显式指定。
     gh release download "v$OldVersion" --repo $env:GITHUB_REPOSITORY `
-        --pattern "AStockScreener-Setup-embedded.exe" `
+        --pattern "AStockScreener-Setup-$OldVariant.exe" `
         --output $oldInstaller 2>&1 | Out-Null
     if (-not (Test-Path $oldInstaller)) {
         throw "Failed to download old version installer v$OldVersion"
     }
-    & $oldInstaller /SILENT /NORESTART
-    Start-Sleep -Seconds 5
+    # Inno Setup 安装器是 GUI 程序，`&` 调用立即返回、不等待解包完成；必须 -Wait 并校验退出码。
+    $oldInstallerProc = Start-Process -FilePath $oldInstaller -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait
+    Assert-True ($oldInstallerProc.ExitCode -eq 0) "Old version installer finished (exit code: $($oldInstallerProc.ExitCode))"
     Assert-True (Test-Path $AppExePath) "Old version installed: $AppExePath"
 
     # STEP 3: 启动旧版 qTrading，等待 sidecar ready
@@ -117,8 +128,9 @@ try {
 
     # STEP 6: 安装新版本（覆盖升级）
     Write-Step "6. Install new version (in-place upgrade)"
-    & $InstallerPath /SILENT /NORESTART
-    Start-Sleep -Seconds 5
+    # 同 STEP 2：GUI 安装器必须 -Wait + 校验退出码，否则会在解包完成前断言安装结果。
+    $upgradeInstallerProc = Start-Process -FilePath $InstallerPath -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait
+    Assert-True ($upgradeInstallerProc.ExitCode -eq 0) "New version installer finished (exit code: $($upgradeInstallerProc.ExitCode))"
     Assert-True (Test-Path $AppExePath) "New version installed (overwritten)"
 
     # STEP 7: 验证 PGDATA 目录保留且非空（核心断言）

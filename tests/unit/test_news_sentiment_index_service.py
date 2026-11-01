@@ -289,6 +289,17 @@ def service():
     return svc, cache.market_dao, calendar
 
 
+class TestNewsSentimentIndexServiceSingleton:
+    """R15/§4.3：@register_singleton 类必须真正返回同一实例（复用依赖句柄）。"""
+
+    def test_constructions_return_same_instance(self):
+        cache = MagicMock()
+        calendar = MagicMock()
+        s1 = NewsSentimentIndexService(cache=cache, trade_calendar=calendar)
+        s2 = NewsSentimentIndexService(cache=cache, trade_calendar=calendar)
+        assert s1 is s2
+
+
 class TestNewsSentimentIndexService:
     @pytest.mark.asyncio
     async def test_stock_index_direct_and_telegraph_merge(self, service):
