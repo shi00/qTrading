@@ -7,7 +7,7 @@
 //!
 //! 恢复后 schema 停留于备份时点；Alembic 补平由 app 下次启动的既有迁移流程负责（Phase 2+，§12.2 step 7）。
 
-use crate::cli::{self, DEFAULT_DATABASE, DEFAULT_USERNAME};
+use crate::cli::{self, DEFAULT_DATABASE};
 use crate::commands::state_file_condition;
 use crate::exit_codes;
 use crate::lockfile::{AcquireError, MaintenanceLock};
@@ -1196,6 +1196,7 @@ impl Drop for HbaRestoreGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::DEFAULT_USERNAME;
 
     fn unique_tmp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("qts-maint-test-{}-{}", std::process::id(), name))
