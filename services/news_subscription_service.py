@@ -304,8 +304,17 @@ class NewsSubscriptionService:
         停机悬挂或只能等到超时。
         """
         # 1. 先停止生产：置 _running=False 使轮询循环不再创建新的 fetch 任务，
-        #    并取消/等待进行中的 fetch，确保不再有新条目入队。
+        #    并取消/等待轮询协程与进行中的 fetch，确保不再有新条目入队。
+        #    轮询协程必须显式取消：它仅在 sleep 结束后才复查 _running，若 stop_async
+        #    后立即 start()，旧 _poll_loop 会看到 _running 重新为 True 而复活，
+        #    与新会话并发形成双轮询（重复抓取/重复入队/重复 AI 打分）。
         self._running = False
+
+        # getattr 兼容测试用 object.__new__ 绕过 __init__ 的裸实例（属性未初始化）。
+        poll_task = getattr(self, "_poll_task", None)
+        self._poll_task = None
+        if poll_task is not None:
+            await self._cancel_and_wait(poll_task, drain_timeout)
 
         if self._current_fetch_task and not self._current_fetch_task.done():
             self._current_fetch_task.cancel()
@@ -498,10 +507,16 @@ class NewsSubscriptionService:
             if base_interval <= 0:
                 base_interval = _NEWS_POLL_INTERVAL_DEFAULT_S
 
-            # Fire and forget but track for cleanup and GC prevention.
-            self._current_fetch_task = asyncio.create_task(self._safe_fetch_task())
-            self._background_tasks.add(self._current_fetch_task)
-            self._current_fetch_task.add_done_callback(self._background_tasks.discard)
+            # 上一次 fetch 未结束则跳过本轮：抓取耗时可能超过轮询间隔（间隔下限 10s，
+            # 而抓取含 CLS 5s 超时 + 新浪回退 + 逐条告警监听 3s 上限），并发重入
+            # _fetch_and_notify 会重复落库/重复入队/重复 AI 计费。
+            if self._current_fetch_task is None or self._current_fetch_task.done():
+                # Fire and forget but track for cleanup and GC prevention.
+                self._current_fetch_task = asyncio.create_task(self._safe_fetch_task())
+                self._background_tasks.add(self._current_fetch_task)
+                self._current_fetch_task.add_done_callback(self._background_tasks.discard)
+            else:
+                logger.debug("[NewsService] Previous fetch still running; skip this poll tick.")
 
             # Simple error handling for the loop itself (unlikely to fail here)
             try:
