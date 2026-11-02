@@ -25,6 +25,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -50,6 +51,15 @@ _READY_SCHEMA = "qtrading.embedded_postgres.run.ready.v1"
 # sidecar supervise 契约为 stdin EOF → graceful stop（连带优雅停止 postgres，§7.3），
 # 窗口须覆盖 PG checkpoint + 退出；超时才 kill 兜底。
 _CLEANUP_GRACEFUL_TIMEOUT_S = 5.0
+
+# D16-R02（检视 07）：start 取消与 to_thread 工作线程的完成清理握手。
+# 取消路径不得在事件循环线程上同步等待清理；readline 轮询该间隔以尽快响应取消。
+_START_CANCEL_POLL_INTERVAL_S = 0.1
+# 工作线程收尾上限：graceful 5s + kill 后 wait 5s，留足余量。
+_START_CANCEL_HANDSHAKE_TIMEOUT_S = 30.0
+# 工作项尚未进入 _start_sync 的宽限期：executor 已取消则永不执行；
+# 稍后才执行也会在入口检查取消令牌后立即退出，不会创建进程。
+_START_CANCEL_ABANDON_GRACE_S = 1.0
 
 # F5（检视 06）：Windows 内侧车以 DPAPI 加密 password 文件。该 ASCII 前缀标记加密格式。
 # 无前缀的文件按明文读（Unix，或 Windows 升级前的旧文件）。
@@ -130,6 +140,62 @@ def _setup_service_logger(log_dir: Path) -> logging.Logger:
         handler._embedded_pg_handler = True  # type: ignore[attr-defined]
         svc_logger.addHandler(handler)
     return svc_logger
+
+
+class _StartCancelled(Exception):
+    """内部取消信号：仅当本次 start 的取消令牌已置位时抛出。"""
+
+
+class _StartAttempt:
+    """单次 ``start()`` 的取消令牌与工作线程完成握手（D16-R02）。
+
+    取消可能落在三个窗口：
+    1. 工作线程已调度但尚未 Popen：入口检查 ``cancel_event``，不会创建进程；
+    2. 已 Popen 但未 ready：关闭 stdin 触发 sidecar graceful stop，readline 轮询取消后提前返回；
+    3. 已 ready（工作线程已结束）：由取消方接管回收本次尝试拥有的进程。
+
+    ``_owned_process`` 只记录本次尝试 Popen 的进程，避免取消时误杀此前已启动、
+    并非本次启动拥有的进程。
+    """
+
+    def __init__(self) -> None:
+        self.cancel_event = threading.Event()
+        self.started = threading.Event()
+        self.finished = threading.Event()
+        self._process_lock = threading.Lock()
+        self._owned_process: subprocess.Popen[str] | None = None
+
+    @property
+    def cancelled(self) -> bool:
+        return self.cancel_event.is_set()
+
+    def request_cancel(self) -> None:
+        self.cancel_event.set()
+
+    def mark_started(self) -> None:
+        self.started.set()
+
+    def mark_finished(self) -> None:
+        self.finished.set()
+
+    def publish_process(self, proc: subprocess.Popen[str]) -> None:
+        with self._process_lock:
+            self._owned_process = proc
+
+    @property
+    def owned_process(self) -> subprocess.Popen[str] | None:
+        with self._process_lock:
+            return self._owned_process
+
+    def close_stdin(self) -> None:
+        """关闭本次尝试拥有进程的 stdin（触发 sidecar graceful stop）。"""
+        proc = self.owned_process
+        if proc is None or proc.stdin is None:
+            return
+        try:
+            proc.stdin.close()
+        except Exception as e:  # stdin close fallback on start cancel
+            logger.debug("start cancel stdin close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
 
 @register_singleton
@@ -262,7 +328,8 @@ class EmbeddedPostgresService:
         """拉起 sidecar 子进程并解析 ready JSON。
 
         使用 ``asyncio.to_thread`` 包装同步 Popen + readline，避免阻塞事件循环（R16）。
-        失败时保证清理子进程（kill + wait）。CancelledError 路径触发 stop 兜底。
+        失败时保证清理子进程（kill + wait）。D16-R02：CancelledError 路径置位本次
+        尝试的取消令牌，并在线程池中等待工作线程结束与进程回收，不在事件循环上阻塞。
 
         H7: 挂 ``@log_async_operation`` 装饰器记录耗时与异常，threshold=GLOBAL_INIT（15s）
         匹配 sidecar 首次启动 initdb 可能较慢的场景；超过阈值记 WARNING 便于诊断。
@@ -271,39 +338,73 @@ class EmbeddedPostgresService:
         """
         import asyncio
 
+        attempt = _StartAttempt()
+        loop = asyncio.get_running_loop()
         try:
-            return await asyncio.to_thread(self._start_sync)
+            return await asyncio.to_thread(self._start_sync, attempt)
+        except asyncio.CancelledError:
+            # D16-R02：取消可能先于工作线程完成。此处只置取消令牌（非阻塞），
+            # 等待工作线程收尾与“本次尝试进程”回收整体交给线程池，
+            # 避免在事件循环线程上同步等待 graceful/kill 清理。
+            attempt.request_cancel()
+            await loop.run_in_executor(None, self._finalize_cancelled_start, attempt)
+            raise
+        except _StartCancelled:
+            # 内部取消信号只会在尚未创建进程、或已在各分支内完成清理后抛出；
+            # 不再触发实例级清理，避免误杀非本次 attempt 拥有的既有进程。
+            raise
         except BaseException:
-            # CancelledError 或其他异常：确保子进程不泄漏
-            self._cleanup_failed_start()
+            # 其他异常：工作线程已结束，清理可能阻塞（graceful + kill），交给线程池
+            await loop.run_in_executor(None, self._cleanup_failed_start)
             raise
 
-    def _start_sync(self) -> ConnectionInfo:
+    def _start_sync(self, attempt: _StartAttempt) -> ConnectionInfo:
         """同步启动 sidecar（供 asyncio.to_thread 包装）。
 
         review03-C18: 持 ``cls._lock``（RLock）串行化并发调用，避免双 Popen。
         快速路径无锁检查已启动状态，避免已启动场景的锁竞争；获取锁后双检锁再次检查。
 
+        D16-R02：每个启动尝试携带取消令牌；``finally`` 置位 ``finished``，
+        供事件循环侧的取消收尾握手（``_finalize_cancelled_start``）等待。
+
         并发契约：与 ``stop_sync`` 共享 ``cls._lock``，start/stop 互斥（详见类 docstring）。
         """
-        # 快速路径：已启动直接返回（无锁，避免已启动场景的锁竞争）
-        # M09-F1: 先取局部引用再 poll。原写法对 self._process 做两次独立属性读取，
-        # 与并发 stop 交错时第二次读取可能得到 None → None.poll() AttributeError。
-        proc = self._process
-        info = self._connection_info
-        if info is not None and proc is not None and proc.poll() is None:
-            return info
-        # review03-C18: 与 stop_sync 共用 cls._lock（RLock）串行化状态变迁
-        with self.__class__._lock:
-            # 双检锁：获取锁后再次检查（另一线程可能已启动完成）；同样用局部引用防 TOCTOU
+        attempt.mark_started()
+        try:
+            # 已调度未 Popen 窗口：尚未创建任何进程，直接退出即可
+            if attempt.cancelled:
+                raise _StartCancelled()
+            # 快速路径：已启动直接返回（无锁，避免已启动场景的锁竞争）
+            # M09-F1: 先取局部引用再 poll。原写法对 self._process 做两次独立属性读取，
+            # 与并发 stop 交错时第二次读取可能得到 None → None.poll() AttributeError。
             proc = self._process
             info = self._connection_info
             if info is not None and proc is not None and proc.poll() is None:
                 return info
-            return self._start_sync_impl()
+            # review03-C18: 与 stop_sync 共用 cls._lock（RLock）串行化状态变迁
+            with self.__class__._lock:
+                # 双检锁：获取锁后再次检查（另一线程可能已启动完成）；同样用局部引用防 TOCTOU
+                if attempt.cancelled:
+                    raise _StartCancelled()
+                proc = self._process
+                info = self._connection_info
+                if info is not None and proc is not None and proc.poll() is None:
+                    return info
+                info = self._start_sync_impl(attempt)
+                # 已 ready 窗口：本次尝试已拉起进程但调用方已取消，必须回收，
+                # 否则进程/reader 会残留到后续 stop/atexit，且 parent 仍存活不会触发 parent_gone。
+                if attempt.cancelled:
+                    self._cleanup_failed_start()
+                    raise _StartCancelled()
+                return info
+        finally:
+            attempt.mark_finished()
 
-    def _start_sync_impl(self) -> ConnectionInfo:
+    def _start_sync_impl(self, attempt: _StartAttempt) -> ConnectionInfo:
         """实际启动逻辑（由 _start_sync 在 cls._lock 内调用）。"""
+        # 取消可能落在 _start_sync 的双检锁之后、Popen 之前
+        if attempt.cancelled:
+            raise _StartCancelled()
         # M09-F2: 重启路径清理（sidecar 崩溃后 poll 非 None 再次 start）。
         # 此处 _process 必为已退出进程（活进程在双检锁处已被快速路径拦截），
         # kill/wait 为 no-op 或被捕获；关键是关闭上一次残留的 _stderr_file 句柄，
@@ -338,6 +439,9 @@ class EmbeddedPostgresService:
             str(os.getpid()),
         ]
 
+        # 取消可能在 verify/mkdir 期间到达；Popen 前再检查一次，避免无意义拉起进程
+        if attempt.cancelled:
+            raise _StartCancelled()
         self._svc_logger.info("starting sidecar: %s", self._sidecar_binary)
         # 文件句柄需保留到 stop_sync() 关闭，不能用 with；SIM115 不适用
         self._stderr_file = open(  # noqa: SIM115  句柄生命周期跨方法（stop_sync 关闭），不能用 with
@@ -345,7 +449,7 @@ class EmbeddedPostgresService:
         )
 
         try:
-            self._process = subprocess.Popen(
+            proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -357,6 +461,7 @@ class EmbeddedPostgresService:
                 errors="replace",
                 bufsize=1,
             )
+            self._process = proc
         except FileNotFoundError as exc:
             self._svc_logger.error("sidecar binary not found: %s", self._sidecar_binary)
             self._cleanup_failed_start()
@@ -366,14 +471,24 @@ class EmbeddedPostgresService:
             self._cleanup_failed_start()
             raise EmbeddedPostgresStartError(f"sidecar binary not executable: {self._sidecar_binary}") from exc
 
+        # D16-R02：发布本次尝试拥有的进程；取消侧据此关闭 stdin / 回收进程。
+        # 发布后立即复查取消，覆盖“已 Popen 未 ready”窗口。
+        attempt.publish_process(proc)
+        if attempt.cancelled:
+            self._cleanup_failed_start()
+            raise _StartCancelled()
+
         # D23: 立即启动 stderr reader，确保 sidecar 启动失败（exit=13 等）时
         # stderr 诊断信息也能被捕获到 sidecar.stderr.log（之前在 ready 后才启动，
         # 失败路径下 sidecar.stderr.log 为空，无法定位根因）
         self._start_stderr_reader_thread()
 
-        ready_line = self._readline_with_timeout(self._process.stdout, self._start_timeout)
+        ready_line = self._readline_with_timeout(proc.stdout, self._start_timeout, attempt=attempt)
         if not ready_line:
-            exit_code = self._process.poll()
+            if attempt.cancelled:
+                self._cleanup_failed_start()
+                raise _StartCancelled()
+            exit_code = proc.poll()
             self._svc_logger.error("sidecar exited before ready line (exit=%s)", exit_code)
             self._cleanup_failed_start()
             raise EmbeddedPostgresStartError(self._format_sidecar_exit_error(exit_code))
@@ -659,8 +774,13 @@ class EmbeddedPostgresService:
             )
         return f"sidecar exited before ready line (exit={exit_code})"
 
-    def _readline_with_timeout(self, stream: object, timeout: float) -> str:
-        """带超时的 readline，避免阻塞事件循环。"""
+    def _readline_with_timeout(self, stream: object, timeout: float, attempt: _StartAttempt | None = None) -> str:
+        """带超时的 readline，避免阻塞事件循环。
+
+        D16-R02：传入 ``attempt`` 时按轮询间隔检查取消令牌，使取消能在
+        ``start_timeout``（默认 300s）之前提前返回；reader 线程仍是 daemon，
+        进程终止/管道 EOF 后自行退出。
+        """
         q: queue.Queue[str] = queue.Queue(maxsize=1)
 
         def _reader() -> None:
@@ -673,10 +793,17 @@ class EmbeddedPostgresService:
 
         t = threading.Thread(target=_reader, daemon=True)
         t.start()
-        try:
-            return q.get(timeout=timeout)
-        except queue.Empty:
-            return ""
+        deadline = time.monotonic() + timeout
+        while True:
+            if attempt is not None and attempt.cancelled:
+                return ""
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return ""
+            try:
+                return q.get(timeout=min(remaining, _START_CANCEL_POLL_INTERVAL_S))
+            except queue.Empty:
+                continue
 
     def _cleanup_failed_start(self) -> None:
         """启动失败时清理子进程与文件句柄。
@@ -685,25 +812,65 @@ class EmbeddedPostgresService:
         stdin EOF graceful stop（连带优雅停止 postgres），短超时未退出再 kill 兜底
         ——kill 仅终止 sidecar 包装进程，postgres 会孤儿化占用 PGDATA，
         导致下次启动报 exit=50（already_running）。
+
+        D16-R02：与 ``stop_sync`` 共用 ``cls._lock``（RLock，同线程调用可重入），
+        使取消收尾线程与并发 stop 串行化状态变迁。
         """
-        if self._process is not None:
-            proc = self._process
-            if proc.stdin is not None:
+        with type(self)._lock:
+            if self._process is not None:
+                proc = self._process
+                if proc.stdin is not None:
+                    try:
+                        proc.stdin.close()
+                    except Exception as e:  # stdin close fallback on failed start
+                        logger.debug(
+                            "cleanup_failed_start stdin close fallback: %s",
+                            DataSanitizer.sanitize_error(e),
+                            exc_info=True,
+                        )
+                self._terminate_after_graceful(proc)
+                self._process = None
+            self._connection_info = None
+            if self._stderr_file is not None:
                 try:
-                    proc.stdin.close()
-                except Exception as e:  # stdin close fallback on failed start
+                    self._stderr_file.close()  # type: ignore[attr-defined]
+                except Exception as e:  # file close fallback on failed start
                     logger.debug(
-                        "cleanup_failed_start stdin close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True
+                        "cleanup_failed_start close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True
                     )
-            self._terminate_after_graceful(proc)
-            self._process = None
-        self._connection_info = None
-        if self._stderr_file is not None:
-            try:
-                self._stderr_file.close()  # type: ignore[attr-defined]
-            except Exception as e:  # file close fallback on failed start
-                logger.debug("cleanup_failed_start close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
-            self._stderr_file = None
+                self._stderr_file = None
+
+    def _finalize_cancelled_start(self, attempt: _StartAttempt) -> None:
+        """取消后的收尾（在线程池执行，禁止在事件循环线程调用）。
+
+        D16-R02 三窗口处理：
+        1. 已调度未 Popen：工作线程入口检查取消令牌后立即退出；若工作项已被
+           executor 取消则永不执行，此处仅给短宽限确认；
+        2. 已 Popen 未 ready：先关 stdin 触发 sidecar graceful stop，readline
+           轮询取消后提前返回并由工作线程自行清理；
+        3. 已 ready（工作线程已结束）：由本函数回收本次尝试拥有的进程。
+        """
+        if attempt.owned_process is not None:
+            attempt.close_stdin()
+        if not attempt.started.wait(_START_CANCEL_ABANDON_GRACE_S):
+            # 工作项尚未进入 _start_sync：executor 已取消则永不执行；
+            # 稍后执行也会在入口检查取消后退出，不会创建进程。
+            attempt.mark_finished()
+        elif not attempt.finished.wait(_START_CANCEL_HANDSHAKE_TIMEOUT_S):
+            self._svc_logger.warning(
+                "start cancel cleanup handshake timed out after %ss; forcing owned-process cleanup",
+                _START_CANCEL_HANDSHAKE_TIMEOUT_S,
+            )
+        proc = attempt.owned_process
+        if proc is None:
+            return
+        with type(self)._lock:
+            if self._process is proc:
+                # 工作线程已清理时 _process 为 None；仍指向本次进程说明落在“已 ready”窗口
+                self._cleanup_failed_start()
+            elif proc.poll() is None:
+                # 实例状态已被后续 start/stop 接管：只回收本次尝试拥有的进程，不碰实例字段
+                self._terminate_after_graceful(proc)
 
     def _terminate_after_graceful(self, proc: subprocess.Popen[str]) -> None:
         """等待 stdin EOF graceful 停止短超时后 kill 兜底，确保子进程终止。
