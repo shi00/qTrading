@@ -7,6 +7,8 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql import operators
 
 from data.persistence.data_explorer_query_client import DataExplorerQueryClient
 
@@ -21,6 +23,30 @@ def _make_dm():
     """
     DataExplorerQueryClient._shared_engine = MagicMock()
     return DataExplorerQueryClient()
+
+
+def _compile_sql(stmt: sa.Select) -> str:
+    """以固定 PostgreSQL 方言编译语句，避免 SQL 文本断言受默认方言影响。"""
+    return " ".join(str(stmt.compile(dialect=postgresql.dialect())).split())
+
+
+def _where_expressions(stmt: sa.Select) -> list:
+    """返回 WHERE 子句中的谓词列表；无 WHERE 时返回空列表。"""
+    whereclause = stmt.whereclause
+    if whereclause is None:
+        return []
+    clauses = getattr(whereclause, "clauses", None)
+    return list(clauses) if clauses is not None else [whereclause]
+
+
+def _assert_filter_predicate(predicate, column: str, operator, value) -> None:
+    """断言单个谓词的字段、操作符与参数化绑定值（不依赖数据库方言）。"""
+    assert isinstance(predicate, sa.sql.elements.BinaryExpression)
+    assert predicate.left.name == column
+    assert predicate.operator is operator
+    # 过滤值必须以绑定参数出现而非 SQL 字面量（R4：SQL 参数化）
+    assert isinstance(predicate.right, sa.sql.elements.BindParameter)
+    assert predicate.right.value == value
 
 
 class TestDataExplorerQueryClientInit:
@@ -192,7 +218,13 @@ class TestGetTableCount:
         mock_conn = MagicMock()
         mock_result = MagicMock()
         mock_result.scalar.return_value = 50
-        mock_conn.execute.return_value = mock_result
+        executed: list = []
+
+        def _record(stmt, *args, **kwargs):
+            executed.append(stmt)
+            return mock_result
+
+        mock_conn.execute.side_effect = _record
         dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
         with (
@@ -201,6 +233,10 @@ class TestGetTableCount:
         ):
             result = dm.get_table_count("stock_basic", filters=[("ts_code", "=", "000001.SZ")])
             assert result == 50
+            assert len(executed) == 1
+            [predicate] = _where_expressions(executed[0])
+            _assert_filter_predicate(predicate, "ts_code", operators.eq, "000001.SZ")
+            assert "WHERE ts_code = %(" in _compile_sql(executed[0])
 
     def test_exception(self):
         """UIR-F13-002: 执行失败必须传播，不得 return 0 冒充空表。"""
@@ -309,16 +345,43 @@ class TestApplyFilters:
         stmt = sa.select(sa.text("*"))
         result = DataExplorerQueryClient._apply_filters(stmt, [("ts_code", "=", "000001.SZ")])
         assert isinstance(result, sa.Select)
+        [predicate] = _where_expressions(result)
+        _assert_filter_predicate(predicate, "ts_code", operators.eq, "000001.SZ")
+        assert "WHERE ts_code = %(" in _compile_sql(result)
 
     def test_with_like_filter(self):
         stmt = sa.select(sa.text("*"))
         result = DataExplorerQueryClient._apply_filters(stmt, [("name", "LIKE", "银行")])
         assert isinstance(result, sa.Select)
+        [predicate] = _where_expressions(result)
+        # 无通配符的 LIKE 输入应自动包裹 %...%
+        _assert_filter_predicate(predicate, "name", operators.like_op, "%银行%")
+        assert "WHERE name LIKE %(" in _compile_sql(result)
 
     def test_with_like_already_has_wildcard(self):
         stmt = sa.select(sa.text("*"))
         result = DataExplorerQueryClient._apply_filters(stmt, [("name", "LIKE", "%银行%")])
         assert isinstance(result, sa.Select)
+        [predicate] = _where_expressions(result)
+        # 已含通配符的 LIKE 输入不得被二次包裹
+        _assert_filter_predicate(predicate, "name", operators.like_op, "%银行%")
+        assert "WHERE name LIKE %(" in _compile_sql(result)
+
+    def test_multiple_filters_are_all_applied(self):
+        stmt = sa.select(sa.text("*"))
+        result = DataExplorerQueryClient._apply_filters(
+            stmt,
+            [("ts_code", "=", "000001.SZ"), ("name", "LIKE", "银行")],
+            schema_cols={"ts_code", "name"},
+        )
+        assert isinstance(result, sa.Select)
+        predicates = _where_expressions(result)
+        assert len(predicates) == 2
+        _assert_filter_predicate(predicates[0], "ts_code", operators.eq, "000001.SZ")
+        _assert_filter_predicate(predicates[1], "name", operators.like_op, "%银行%")
+        compiled = _compile_sql(result)
+        assert "WHERE ts_code = %(" in compiled
+        assert "AND name LIKE %(" in compiled
 
     def test_unsupported_operator(self):
         stmt = sa.select(sa.text("*"))
@@ -330,11 +393,28 @@ class TestApplyFilters:
         result = DataExplorerQueryClient._apply_filters(stmt, [("invalid_col", "=", "val")], schema_cols={"ts_code"})
         assert result is stmt
 
+    def test_schema_col_allowed(self):
+        stmt = sa.select(sa.text("*"))
+        result = DataExplorerQueryClient._apply_filters(stmt, [("ts_code", "=", "000001.SZ")], schema_cols={"ts_code"})
+        assert isinstance(result, sa.Select)
+        [predicate] = _where_expressions(result)
+        _assert_filter_predicate(predicate, "ts_code", operators.eq, "000001.SZ")
+
     def test_all_operators(self):
-        for op in [">", "<", ">=", "<=", "!="]:
+        operator_map = {
+            ">": (operators.gt, ">"),
+            "<": (operators.lt, "<"),
+            ">=": (operators.ge, ">="),
+            "<=": (operators.le, "<="),
+            "!=": (operators.ne, "!="),
+        }
+        for op, (expected_operator, sql_operator) in operator_map.items():
             stmt = sa.select(sa.text("*"))
             result = DataExplorerQueryClient._apply_filters(stmt, [("col", op, "val")], schema_cols={"col"})
             assert isinstance(result, sa.Select)
+            [predicate] = _where_expressions(result)
+            _assert_filter_predicate(predicate, "col", expected_operator, "val")
+            assert f"WHERE col {sql_operator} %(" in _compile_sql(result)
 
 
 class TestQueryTable:
@@ -444,7 +524,13 @@ class TestQueryTable:
         mock_result = MagicMock()
         mock_result.fetchall.return_value = [("000001.SZ",)]
         mock_result.keys.return_value = ["ts_code"]
-        mock_conn.execute.return_value = mock_result
+        executed: list = []
+
+        def _record(stmt, *args, **kwargs):
+            executed.append(stmt)
+            return mock_result
+
+        mock_conn.execute.side_effect = _record
         dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
         with (
@@ -453,6 +539,10 @@ class TestQueryTable:
         ):
             result = dm.query_table("stock_basic", filters=[("ts_code", "=", "000001.SZ")])
             assert isinstance(result, pd.DataFrame)
+            assert len(executed) == 1
+            [predicate] = _where_expressions(executed[0])
+            _assert_filter_predicate(predicate, "ts_code", operators.eq, "000001.SZ")
+            assert "WHERE ts_code = %(" in _compile_sql(executed[0])
 
     def test_exception(self):
         """UIR-F13-002: 执行失败必须传播，不得返回空 DataFrame 冒充无数据。"""
