@@ -954,12 +954,16 @@ fn test_maintenance_shell_outputs_json_contract() {
 
 /// 用 bundled psql 在运行中的实例上执行常量 SQL，返回 `-A -t` 逐行输出。
 /// 密码只经 `PGPASSWORD` 环境变量传递，失败诊断不输出密码（R9/R10）。
+///
+/// SQL 经 stdin 传递而非 `-c`：Windows 上 psql 的 argv 会按本地代码页转换，
+/// 含 Unicode 的验证 SQL（如 `üñïçødé`）会被破坏成非法 UTF-8（`0xfc`）导致失败；
+/// 同时显式 `PGCLIENTENCODING=UTF8`，保证输入/输出均按 UTF-8 解释。
 fn psql_query(base: &Path, port: u16, sql: &str) -> String {
     let psql_name = if cfg!(windows) { "psql.exe" } else { "psql" };
     let psql = base.join("install").join("bin").join(psql_name);
     let password = password::read_password_file(&base.join("runtime").join("password"))
         .expect("read password file");
-    let out = std::process::Command::new(&psql)
+    let mut child = std::process::Command::new(&psql)
         .args([
             "-X",
             "-q",
@@ -975,12 +979,22 @@ fn psql_query(base: &Path, port: u16, sql: &str) -> String {
             "postgres",
             "-d",
             "qtrading",
-            "-c",
-            sql,
         ])
         .env("PGPASSWORD", &password)
-        .output()
+        .env("PGCLIENTENCODING", "UTF8")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("run bundled psql");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("psql stdin");
+        stdin
+            .write_all(sql.as_bytes())
+            .expect("write verification SQL to psql stdin");
+    }
+    let out = child.wait_with_output().expect("wait bundled psql");
     assert!(
         out.status.success(),
         "psql failed (port {port}): {}",
