@@ -1,4 +1,6 @@
 import base64
+import os
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -527,41 +529,121 @@ class TestHasLegacyKeyFiles:
 
 
 class TestPurgeLegacyKeyFiles:
-    """F3（检视 06）：legacy 明文密钥文件删除"""
+    """F3（检视 06）：legacy 明文密钥文件删除（效果断言）。
+
+    所有测试把 KEY_FILE / KEY_FILE_BAK / 模块级 _LEGACY_MARKER 重定向到
+    tmp_path 合成目录，绝不允许落到真实用户数据目录；_key 缓存用 monkeypatch
+    注入非空哨兵并在用例结束后自动恢复（R7）。
+    """
 
     def setup_method(self):
         SecurityManager._key = None
 
-    def test_purge_removes_key_and_backup(self, tmp_path):
-        key = tmp_path / ".secret.key"
-        bak = tmp_path / ".secret.key.bak"
-        key.write_bytes(b"k" * 32)
-        bak.write_bytes(b"k" * 32)
-        with (
-            patch.object(SecurityManager, "KEY_FILE", str(key)),
-            patch.object(SecurityManager, "KEY_FILE_BAK", str(bak)),
-            patch("utils.security_utils.os.remove"),
-        ):
-            removed = SecurityManager.purge_legacy_key_files()
-            assert removed is True
-            assert SecurityManager._key is None
+    @staticmethod
+    def _redirect_legacy_paths(monkeypatch, tmp_path, *, key=False, bak=False, marker=False):
+        paths = {
+            "key": tmp_path / ".secret.key",
+            "bak": tmp_path / ".secret.key.bak",
+            "marker": tmp_path / ".secret.legacy",
+        }
+        for name, present in (("key", key), ("bak", bak), ("marker", marker)):
+            if present:
+                paths[name].write_bytes(b"placeholder")
+        monkeypatch.setattr(SecurityManager, "KEY_FILE", str(paths["key"]))
+        monkeypatch.setattr(SecurityManager, "KEY_FILE_BAK", str(paths["bak"]))
+        monkeypatch.setattr("utils.security_utils._LEGACY_MARKER", str(paths["marker"]))
+        return paths
 
-    @patch("utils.security_utils.os.path.exists", return_value=False)
-    def test_purge_no_files_returns_false(self, mock_exists):
+    def test_purge_removes_all_files_and_clears_cache(self, tmp_path, monkeypatch):
+        """三项均存在 → 三项都被删除、返回 True、内存缓存清空。"""
+        paths = self._redirect_legacy_paths(monkeypatch, tmp_path, key=True, bak=True, marker=True)
+        monkeypatch.setattr(SecurityManager, "_key", b"synthetic-in-memory-key")
+
         removed = SecurityManager.purge_legacy_key_files()
-        assert removed is False
+
+        assert removed is True
+        assert not paths["key"].exists()
+        assert not paths["bak"].exists()
+        assert not paths["marker"].exists()
         assert SecurityManager._key is None
 
-    @patch("utils.security_utils.os.path.exists", return_value=True)
-    def test_purge_removal_error_logs_no_raise(self, mock_exists):
-        with (
-            patch("utils.security_utils.os.remove", side_effect=OSError("permission denied")),
-            patch("utils.security_utils.logger") as mock_logger,
-        ):
-            removed = SecurityManager.purge_legacy_key_files()
-            assert removed is False
-            assert SecurityManager._key is None
-            assert mock_logger.error.call_count >= 1
+    def test_purge_only_backup_removes_backup_and_returns_true(self, tmp_path, monkeypatch):
+        """仅备份存在 → 删除备份并返回 True。"""
+        paths = self._redirect_legacy_paths(monkeypatch, tmp_path, bak=True)
+        monkeypatch.setattr(SecurityManager, "_key", b"synthetic-in-memory-key")
+
+        removed = SecurityManager.purge_legacy_key_files()
+
+        assert removed is True
+        assert not paths["bak"].exists()
+        assert not paths["key"].exists()
+        assert not paths["marker"].exists()
+        assert SecurityManager._key is None
+
+    def test_purge_only_marker_removes_marker_and_returns_true(self, tmp_path, monkeypatch):
+        """仅 legacy marker 存在 → 删除 marker 并返回 True。"""
+        paths = self._redirect_legacy_paths(monkeypatch, tmp_path, marker=True)
+        monkeypatch.setattr(SecurityManager, "_key", b"synthetic-in-memory-key")
+
+        removed = SecurityManager.purge_legacy_key_files()
+
+        assert removed is True
+        assert not paths["marker"].exists()
+        assert not paths["key"].exists()
+        assert not paths["bak"].exists()
+        assert SecurityManager._key is None
+
+    def test_purge_primary_permission_error_removes_rest_and_returns_true(self, tmp_path, monkeypatch):
+        """主 key 删除被拒 → 保留主 key，备份/marker 仍被删除，返回 True。"""
+        paths = self._redirect_legacy_paths(monkeypatch, tmp_path, key=True, bak=True, marker=True)
+        monkeypatch.setattr(SecurityManager, "_key", b"synthetic-in-memory-key")
+        real_remove = os.remove
+
+        def _selective_remove(path):
+            if path == str(paths["key"]):
+                raise PermissionError("synthetic permission denied")
+            real_remove(path)
+
+        monkeypatch.setattr("utils.security_utils.os.remove", _selective_remove)
+
+        removed = SecurityManager.purge_legacy_key_files()
+
+        assert removed is True
+        assert paths["key"].exists()
+        assert not paths["bak"].exists()
+        assert not paths["marker"].exists()
+        assert SecurityManager._key is None
+
+    def test_purge_all_removals_denied_returns_false(self, tmp_path, monkeypatch):
+        """三项删除全部被拒 → 文件全部保留、返回 False、缓存仍清空。"""
+        paths = self._redirect_legacy_paths(monkeypatch, tmp_path, key=True, bak=True, marker=True)
+        monkeypatch.setattr(SecurityManager, "_key", b"synthetic-in-memory-key")
+
+        def _denied_remove(_path):
+            raise PermissionError("synthetic permission denied")
+
+        monkeypatch.setattr("utils.security_utils.os.remove", _denied_remove)
+
+        removed = SecurityManager.purge_legacy_key_files()
+
+        assert removed is False
+        assert paths["key"].exists()
+        assert paths["bak"].exists()
+        assert paths["marker"].exists()
+        assert SecurityManager._key is None
+
+    def test_purge_no_files_returns_false(self, tmp_path, monkeypatch):
+        """三项均不存在 → 返回 False、缓存清空。"""
+        paths = self._redirect_legacy_paths(monkeypatch, tmp_path)
+        monkeypatch.setattr(SecurityManager, "_key", b"synthetic-in-memory-key")
+
+        removed = SecurityManager.purge_legacy_key_files()
+
+        assert removed is False
+        assert not paths["key"].exists()
+        assert not paths["bak"].exists()
+        assert not paths["marker"].exists()
+        assert SecurityManager._key is None
 
 
 # ============================================================================
