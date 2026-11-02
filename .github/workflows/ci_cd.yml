@@ -79,7 +79,8 @@ jobs:
           echo "$result" >> "$GITHUB_OUTPUT"
           echo "- 变更文件数 $count，分类结果 \`$result\`" >> "$GITHUB_STEP_SUMMARY"
 
-  # 稳定基线 lint（Python 3.14，默认运行时）：聚合门禁 CI Gate 只依赖本 job，结果语义确定。
+  # 稳定基线 lint（Python 3.14，默认运行时）：与下方 3.13 job 各自独立上报，
+  # 聚合门禁 CI Gate 分别校验两 job 的结果，避免 matrix 合并状态带来的判定歧义。
   lint-fast:
     name: Fast Lint Check (3.14)
     runs-on: ubuntu-latest
@@ -107,9 +108,10 @@ jobs:
         run: ruff format --check .
 
   # 兼容性 lint（Python 3.13，声明下界 requires-python>=3.13）：D8.1 起 3.14 为主矩阵，
-  # 3.13 仅保留本 job 守护最低支持版本（ruff 静态检查不依赖解释器版本，故一个 job 足够）。
-  # 独立成 job 而非 lint-fast 的 matrix 项：CI Gate 只依赖 needs.lint-fast.result，
-  # 两代解释器的 lint 结果各自独立上报，避免 matrix 合并状态带来的判定歧义。
+  # 3.13 仅保留本 job 守护最低支持版本的静态解析兼容（ruff，target-version=py313），
+  # 不覆盖 3.13 运行时业务兼容（运行时测试矩阵与发布产物仍为 3.14）。
+  # 独立成 job 而非 lint-fast 的 matrix 项：CI Gate 分别校验 needs.lint-fast.result
+  # 与 needs.lint-fast-313.result，两代解释器的 lint 结果各自独立上报。
   lint-fast-313:
     name: Fast Lint Check (3.13)
     runs-on: ubuntu-latest
@@ -2582,7 +2584,7 @@ jobs:
   # 本 job 用 needs.*.result 显式校验，只放行明确允许的跳过。
   ci-gate:
     name: CI Gate
-    needs: [changes, lint-fast, ci-checks, ci-checks-static, ci-checks-db, ci-checks-windows, e2e-tests-windows, embedded-tests, installer-smoke]
+    needs: [changes, lint-fast, lint-fast-313, ci-checks, ci-checks-static, ci-checks-db, ci-checks-windows, e2e-tests-windows, embedded-tests, installer-smoke]
     # merge_group 一并覆盖：工作流已声明 merge_group 触发，若只在本 job 限定 pull_request，
     # 启用 merge queue 后 merge group commit 上不会产生 CI Gate，required check 将永久 Pending。
     if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
@@ -2599,6 +2601,7 @@ jobs:
           CODE: ${{ needs.changes.outputs.code }}
           CHANGES: ${{ needs.changes.result }}
           LINT: ${{ needs.lint-fast.result }}
+          LINT_313: ${{ needs.lint-fast-313.result }}
           LINUX: ${{ needs.ci-checks.result }}
           STATIC: ${{ needs.ci-checks-static.result }}
           DB: ${{ needs.ci-checks-db.result }}
@@ -2630,9 +2633,10 @@ jobs:
             fi
           }
 
-          # 分类与稳定基线 lint 对任何 PR 都必须真正执行成功。
+          # 分类与两代解释器的静态 lint（3.14 基线 / 3.13 声明下界）对任何 PR 都必须真正执行成功。
           check_required "Changes" "$CHANGES" false
           check_required "Fast Lint Check (3.14)" "$LINT" false
+          check_required "Fast Lint Check (3.13)" "$LINT_313" false
 
           if [ "$CODE" = "false" ]; then
             # 非代码类 PR：重型 job 按设计跳过，允许 skipped；出现 failure 仍判不通过。
