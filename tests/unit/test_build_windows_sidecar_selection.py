@@ -185,3 +185,43 @@ def test_two_embedded_legs_share_one_selection(build_job: dict[str, Any], resolv
     assert resolve_script.count("gh api --paginate") == 1, "resolve job 应只查询一次"
     download_script = _step(build_job, DOWNLOAD_STEP)["run"]
     assert "gh api --paginate" not in download_script, "下载步骤仍在各自查询 Release"
+
+
+def test_download_step_env_carries_build_identity(build_job: dict[str, Any]) -> None:
+    """下载步骤显式携带本次构建的 ref/commit/事件，供 R04 绑定校验。"""
+    env = _step(build_job, DOWNLOAD_STEP)["env"]
+
+    assert env["SIDECAR_BUILD_COMMIT"] == "${{ github.sha }}", "未携带本次构建 commit"
+    assert env["SIDECAR_BUILD_REF"] == "${{ github.ref }}", "未携带本次构建 ref"
+    assert env["SIDECAR_BUILD_REF_NAME"] == "${{ github.ref_name }}", "未携带本次构建 ref 名"
+    assert env["SIDECAR_EVENT_NAME"] == "${{ github.event_name }}", "未携带触发事件名"
+
+
+def test_tag_build_requires_exact_sidecar_target_commit(build_job: dict[str, Any]) -> None:
+    """tag 构建必须精确绑定 sidecar target_commit，失败 fail-fast 且错误含两个 SHA。"""
+    script = _step(build_job, DOWNLOAD_STEP)["run"]
+
+    assert "if (-not $env:SIDECAR_TARGET_COMMIT)" in script, "缺少 target commit 空值 fail-closed"
+    assert '-like "refs/tags/v*"' in script, "未按 tag ref 判定精确绑定"
+    assert "commits/$($env:SIDECAR_BUILD_REF_NAME)" in script, (
+        "tag 构建未按 tag 名解析 commit（annotated tag 的 github.sha 语义不可靠）"
+    )
+    assert "if ($buildCommit -ne $env:SIDECAR_TARGET_COMMIT)" in script, "未校验 target commit 与构建 commit 相等"
+    assert "target commit $($env:SIDECAR_TARGET_COMMIT) != build commit $buildCommit" in script, (
+        "错误信息未同时包含 sidecar 与构建两个 SHA"
+    )
+    assert "exit 1" in script, "绑定失败未 fail-fast"
+
+
+def test_dispatch_build_documents_divergence_and_never_silent(build_job: dict[str, Any]) -> None:
+    """workflow_dispatch 分支允许差异，但必须以 warning + Step Summary 显式标注。"""
+    script = _step(build_job, DOWNLOAD_STEP)["run"]
+
+    assert "} else {" in script, "缺少 workflow_dispatch 分支"
+    assert "::warning::D18-R04" in script, "dispatch 差异未显式告警（静默忽略）"
+    assert "diverged (workflow_dispatch" in script, "dispatch 差异未写入步骤摘要"
+    assert "GITHUB_STEP_SUMMARY" in script, "未输出步骤摘要"
+
+    # 摘要必须同时记录 sidecar 与构建两侧 commit，便于事后核对。
+    assert "sidecar target commit | $($env:SIDECAR_TARGET_COMMIT)" in script
+    assert "build commit | $buildCommit" in script

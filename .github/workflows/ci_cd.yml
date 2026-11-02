@@ -1938,6 +1938,11 @@ jobs:
           SIDECAR_TARGET_COMMIT: ${{ needs.resolve-sidecar-release.outputs.target_commit }}
           SIDECAR_BINARY_ASSET: ${{ needs.resolve-sidecar-release.outputs.binary_asset_name }}
           SIDECAR_SHA256SUMS_ASSET: ${{ needs.resolve-sidecar-release.outputs.sha256sums_asset_name }}
+          # D18-R04: 本次构建的 ref/commit/事件，供下载步骤校验 sidecar 发行版来源 commit。
+          SIDECAR_BUILD_COMMIT: ${{ github.sha }}
+          SIDECAR_BUILD_REF: ${{ github.ref }}
+          SIDECAR_BUILD_REF_NAME: ${{ github.ref_name }}
+          SIDECAR_EVENT_NAME: ${{ github.event_name }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -1949,7 +1954,52 @@ jobs:
             Write-Error "D18-A01: sidecar asset names missing from resolve-sidecar-release outputs; refusing to download."
             exit 1
           }
-          Write-Host "Downloading sidecar binary from selected stable release: $env:SIDECAR_RELEASE_TAG (release id: $env:SIDECAR_RELEASE_ID, target commit: $env:SIDECAR_TARGET_COMMIT)"
+          if (-not $env:SIDECAR_TARGET_COMMIT) {
+            Write-Error "D18-R04: sidecar target commit missing from resolve-sidecar-release outputs; refusing to download."
+            exit 1
+          }
+          if (-not $env:SIDECAR_BUILD_COMMIT -or -not $env:SIDECAR_BUILD_REF -or -not $env:SIDECAR_BUILD_REF_NAME) {
+            Write-Error "D18-R04: build commit/ref context missing; cannot bind the sidecar release to this build."
+            exit 1
+          }
+          # D18-R04: sidecar 发行版必须绑定到本次构建的源码 commit，避免测试构建当前 commit、
+          # 发布产物却打包另一 commit 的 sidecar。
+          # - tag 构建（refs/tags/v*，含 dispatch 到 tag）：要求精确相等，否则 fail-fast；
+          # - workflow_dispatch 到分支（手动复验，release-windows 仅 tag 触发、不会发布）：
+          #   允许差异，但必须经 warning 与 Step Summary 显式标注，不得静默忽略。
+          if ($env:SIDECAR_BUILD_REF -like "refs/tags/v*") {
+            # annotated tag 的 github.sha 语义依事件而定；统一用 tag 名解析 commit
+            # （即 github.sha 指向的提交，且与 resolve-sidecar-release 的 commits/<ref> 语义一致）。
+            $buildCommit = gh api "repos/$($env:GITHUB_REPOSITORY)/commits/$($env:SIDECAR_BUILD_REF_NAME)" --jq '.sha'
+            if ($LASTEXITCODE -ne 0 -or -not $buildCommit) {
+              Write-Error "D18-R04: failed to resolve commit for build ref $env:SIDECAR_BUILD_REF; refusing to download."
+              exit 1
+            }
+            if ($buildCommit -ne $env:SIDECAR_TARGET_COMMIT) {
+              Write-Error "D18-R04: sidecar release $env:SIDECAR_RELEASE_TAG target commit $($env:SIDECAR_TARGET_COMMIT) != build commit $buildCommit; refusing to package a sidecar from another source commit."
+              exit 1
+            }
+            $bindingState = "exact"
+          } else {
+            $buildCommit = $env:SIDECAR_BUILD_COMMIT
+            if ($buildCommit -eq $env:SIDECAR_TARGET_COMMIT) {
+              $bindingState = "exact"
+            } else {
+              $bindingState = "diverged (workflow_dispatch; artifacts are not published)"
+              Write-Host "::warning::D18-R04: sidecar release $env:SIDECAR_RELEASE_TAG target commit $($env:SIDECAR_TARGET_COMMIT) != dispatch build commit $buildCommit; manual verification build may differ but MUST NOT be published."
+            }
+          }
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### Sidecar SHA binding (D18-R04)"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ""
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| field | value |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| --- | --- |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| sidecar tag | $env:SIDECAR_RELEASE_TAG |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| event | $env:SIDECAR_EVENT_NAME |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| sidecar target commit | $($env:SIDECAR_TARGET_COMMIT) |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| build ref | $env:SIDECAR_BUILD_REF |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| build commit | $buildCommit |"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "| binding | $bindingState |"
+          Write-Host "Downloading sidecar binary from selected stable release: $env:SIDECAR_RELEASE_TAG (release id: $env:SIDECAR_RELEASE_ID, target commit: $env:SIDECAR_TARGET_COMMIT, binding: $bindingState)"
           $tagName = $env:SIDECAR_RELEASE_TAG
           # AStockScreener.spec 期望 sidecar binary 位于 sidecars\qtrading-pg-sidecar\target\release\
           $targetDir = "sidecars\qtrading-pg-sidecar\target\release"
