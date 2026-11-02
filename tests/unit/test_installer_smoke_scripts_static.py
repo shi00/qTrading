@@ -196,7 +196,7 @@ def test_windows_consumers_use_two_layer_pgdata(relative_path: str, expected_sni
 )
 def test_old_single_layer_windows_path_regex_is_effective(old_path: str) -> None:
     """正则必须能识别旧单层路径、且不误伤两层路径，否则负向断言会恒真。"""
-    assert OLD_SINGLE_LAYER_WINDOWS_PGDATA.search(old_path) is not None
+    assert OLD_SINGLE_LAYER_WINDOWS_PGDATA.findall(old_path) == [old_path.strip('"')]
     two_layer_path = old_path.replace(r"qTrading\postgres", r"qTrading\qTrading\postgres")
     assert OLD_SINGLE_LAYER_WINDOWS_PGDATA.search(two_layer_path) is None
 
@@ -241,8 +241,8 @@ def test_sidecar_guards_detect_legacy_bug() -> None:
         '"--data-dir", "$env:LOCALAPPDATA\\qTrading\\qTrading\\postgres\\16\\data", '
         '"--password-file", "$env:TEMP\\fake_sidecar_pwd" -PassThru'
     )
-    assert _FAKE_SIDECAR_PASSWORD.search(legacy_line) is not None
-    assert _SIDECAR_PASSWORD_ARG.search(legacy_line) is not None
+    assert _FAKE_SIDECAR_PASSWORD.findall(legacy_line) == ["fake_sidecar_pwd"]
+    assert _SIDECAR_PASSWORD_ARG.findall(legacy_line) == ['"--password-file"']
     assert "Start-Process -FilePath $sidecarExe" in legacy_line
 
 
@@ -506,7 +506,7 @@ def test_nonempty_only_pattern_is_effective() -> None:
     legacy = """$fileCountAfter = (Get-ChildItem -Path $PgDataDir -Recurse | Measure-Object).Count
 Assert-True ($fileCountAfter -gt 0) "PGDATA dir still non-empty"
 """
-    assert _NONEMPTY_ONLY_ASSERTION.search(legacy) is not None
+    assert _NONEMPTY_ONLY_ASSERTION.findall(legacy) == ["$fileCountAfter -gt 0"]
 
 
 @pytest.mark.parametrize("script_name", CONTINUITY_SCRIPTS)
