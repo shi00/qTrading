@@ -15,7 +15,8 @@ pub const STOP_FAILED: u8 = 20;
 pub const DUMP_RESTORE_FAILED: u8 = 30;
 /// 数据目录状态异常（非空无 PG_VERSION / 版本不匹配 / pg_control·WAL 损坏 / 关键文件缺失）
 pub const DATA_DIR_ABNORMAL: u8 = 40;
-/// 维护锁冲突：qTrading 或另一个维护进程正在使用该 PGDATA
+/// 维护锁冲突：qTrading/另一维护进程正在使用该 PGDATA，或该 PGDATA 存在活实例
+/// （含 sidecar 崩溃后残留的孤儿 postgres；restore 前置校验复用此码）
 pub const LOCK_CONFLICT: u8 = 50;
 /// 监督期间 PostgreSQL 意外退出（sidecar 不自动重启）
 pub const POSTGRES_DIED: u8 = 60;

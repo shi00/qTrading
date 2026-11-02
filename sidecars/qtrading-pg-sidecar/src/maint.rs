@@ -80,6 +80,68 @@ fn acquire_lock(layout: &Layout) -> Result<MaintenanceLock, u8> {
     }
 }
 
+/// D16-F03：restore 前确认源 PGDATA 没有仍在运行的实例。
+///
+/// 维护锁只排除协作进程（qTrading / 其他 sidecar）。sidecar 崩溃或被 kill 后锁由
+/// OS 释放，但 postgres 可能仍在运行；锁可获取 ≠ 源集群已停止。因此必须在任何
+/// setup/initdb/目录切换前读取源 `postmaster.pid` 并复用 F02 的归属校验：
+///
+/// - 无 pid 文件 / PID 已不存在（含僵尸）→ 视为已停止，允许继续（原目录损坏也可恢复）；
+/// - PID 仍存活且可证明属于本源 PGDATA → `LOCK_CONFLICT`，提示先 stop，不自动杀；
+/// - PID 仍存活但无法证明归属 → fail closed，同样 `LOCK_CONFLICT`（绝不发送信号）。
+///
+/// 损坏目录中不可解析的 pid 文件按「无活实例」处理：无法证明存在活进程时不应
+/// 阻止恢复；只有「PID 存活」这一事实与身份证据冲突时才拒绝。
+fn ensure_source_cluster_idle(layout: &Layout, phase: &str) -> Result<(), u8> {
+    let Some(info) = pgbin::read_postmaster_pid(&layout.data_dir) else {
+        return Ok(());
+    };
+    if !pgbin::process_alive(info.pid) {
+        tracing::warn!(
+            "stale postmaster.pid (pid {}) ignored before restore ({phase})",
+            info.pid
+        );
+        return Ok(());
+    }
+
+    let stop_hint = format!(
+        "请先执行 `qtrading-pg-sidecar stop --data-dir {}`，确认实例已停止后重试",
+        layout.data_dir.display()
+    );
+    match process_identity::capture_cluster_identity_from_info(
+        &layout.data_dir,
+        &layout.install_dir,
+        &info,
+    ) {
+        Ok(identity) => {
+            eprintln!(
+                "[sidecar] {phase}：源 PGDATA 仍有 PostgreSQL 实例在运行（pid {}，启动于 {}）。\
+                 restore 不会自动停止或切换正在使用的数据目录；{stop_hint}。",
+                identity.pid, identity.postmaster_started_at
+            );
+            Err(exit_codes::LOCK_CONFLICT)
+        }
+        // 存活探测与身份读取之间进程已退出（含僵尸）：按已停止处理，绝不发送信号。
+        Err(e) if e.is_not_running() => {
+            tracing::warn!(
+                "postgres pid {} exited during restore guard ({phase}): {e}",
+                info.pid
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!(
+                "[sidecar] {phase}：PID {} 在运行但无法证明其属于源 PGDATA {}（{e}）。\
+                 restore 按 fail closed 拒绝切换，不会向该 PID 发送信号；{stop_hint}，\
+                 或人工确认该进程归属后重试。",
+                info.pid,
+                layout.data_dir.display()
+            );
+            Err(exit_codes::LOCK_CONFLICT)
+        }
+    }
+}
+
 fn load_password(layout: &Layout) -> Result<String, u8> {
     match password::read_password_file(&layout.password_file) {
         Some(p) => {
@@ -750,6 +812,9 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
         return Err(exit_codes::DUMP_RESTORE_FAILED);
     }
     let _lock = acquire_lock(&layout)?;
+    // D16-F03：锁可获取只证明没有协作进程持锁（sidecar 崩溃会由 OS 释放），
+    // 不代表源 PGDATA 的孤儿 postgres 已停止；任何 setup/initdb/切换前必须先校验。
+    ensure_source_cluster_idle(&layout, "restore 开始前")?;
     let password = load_password(&layout)?;
     setup::ensure_binaries(&layout, &|msg| tracing::info!("{msg}")).await?;
 
@@ -800,6 +865,16 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
     }
 
     if do_swap {
+        // D16-F03：恢复耗时窗口内可能有外部 postgres 开始使用源 PGDATA（锁只约束
+        // 协作进程）；切换前再次校验，失败时不改名、不创建 .bak，保留已完成的恢复目录。
+        if let Err(code) = ensure_source_cluster_idle(&layout, "恢复目录切换前") {
+            eprintln!(
+                "[sidecar] 未切换目录：已完成的恢复目录保留于 {}，源 PGDATA 未改动；\
+                 可人工处理或清理后重试",
+                restore_dir.display()
+            );
+            return Err(code);
+        }
         let name = layout
             .data_dir
             .file_name()
@@ -1239,6 +1314,19 @@ mod tests {
         std::fs::write(dir.join("postgresql.conf"), "# conf\n").unwrap();
     }
 
+    /// 写真实格式的 postmaster.pid（PID / PGDATA / 启动时刻 / port / socket / listen）。
+    fn write_postmaster_pid(data_dir: &Path, pid: u32, started_at: i64) {
+        std::fs::create_dir_all(data_dir).unwrap();
+        std::fs::write(
+            data_dir.join("postmaster.pid"),
+            format!(
+                "{pid}\n{}\n{started_at}\n55432\n/tmp\n127.0.0.1\n",
+                data_dir.display()
+            ),
+        )
+        .unwrap();
+    }
+
     /// reset-password 参数构造（默认用户名为 postgres，旧 CLI 语义）。
     fn reset_password_args(data_dir: PathBuf) -> cli::ResetPasswordArgs {
         cli::ResetPasswordArgs {
@@ -1458,6 +1546,116 @@ mod tests {
             username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(restore(args).await, Err(exit_codes::LOCK_CONFLICT));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-F03：无 pid 文件 / PID 已死的 stale 文件不阻止恢复（原目录损坏仍可恢复）。
+    #[test]
+    fn source_guard_allows_absent_or_stale_pidfile() {
+        let dir = unique_tmp("source-guard-stale");
+        let data_dir = dir.join("postgres/16/data");
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        // 无 postmaster.pid
+        assert_eq!(ensure_source_cluster_idle(&layout, "test"), Ok(()));
+
+        // stale postmaster.pid（PID 不存在）
+        write_postmaster_pid(&data_dir, 4_000_000, 1_234_567_890);
+        assert_eq!(ensure_source_cluster_idle(&layout, "test"), Ok(()));
+        assert!(
+            data_dir.join("postmaster.pid").exists(),
+            "守卫不得删除/改写源 postmaster.pid"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-F03：PID 存活但无法证明属于本源 PGDATA → fail closed（exit 50）。
+    #[test]
+    fn source_guard_rejects_unverifiable_live_pid() {
+        let dir = unique_tmp("source-guard-unverifiable");
+        let data_dir = dir.join("postgres/16/data");
+        write_postmaster_pid(&data_dir, std::process::id(), 1_784_505_600);
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        assert_eq!(
+            ensure_source_cluster_idle(&layout, "test"),
+            Err(exit_codes::LOCK_CONFLICT)
+        );
+        assert!(data_dir.join("postmaster.pid").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-F03：pid 文件 PID 存活且可证明归属（install/bin/postgres 指向本测试进程
+    /// 可执行文件）→ 仍拒绝，且不发送任何信号。
+    #[cfg(unix)]
+    #[test]
+    fn source_guard_rejects_verified_live_instance() {
+        use std::os::unix::fs::symlink;
+
+        let dir = unique_tmp("source-guard-live");
+        let data_dir = dir.join("postgres/16/data");
+        write_postmaster_pid(&data_dir, std::process::id(), 1_784_505_600);
+        let bin = dir.join("postgres/16/install/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        symlink(std::env::current_exe().unwrap(), bin.join("postgres")).unwrap();
+
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        assert_eq!(
+            ensure_source_cluster_idle(&layout, "test"),
+            Err(exit_codes::LOCK_CONFLICT)
+        );
+        assert!(data_dir.join("postmaster.pid").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-F03：restore 在密码检查/解包/initdb 前就拒绝活实例，且不创建任何
+    /// `.restore-*` / `.bak-*` 目录、不改动源 pid 文件。
+    #[tokio::test]
+    async fn restore_rejects_live_source_before_any_side_effect() {
+        let dir = unique_tmp("restore-live-source");
+        let input = dir.join("in.dump");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&input, b"dump").unwrap();
+        let data_dir = dir.join("postgres/16/data");
+        write_postmaster_pid(&data_dir, std::process::id(), 1_784_505_600);
+        // 故意不写 password file：须先命中活实例守卫（exit 50），而非密码错误（exit 16）。
+        let args = cli::RestoreArgs {
+            data_dir: data_dir.clone(),
+            input,
+            target_data_dir: None,
+            database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
+        };
+        assert_eq!(restore(args).await, Err(exit_codes::LOCK_CONFLICT));
+
+        let parent = data_dir.parent().unwrap();
+        let stray: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("data.restore-") || n.starts_with("data.bak-"))
+            .collect();
+        assert!(stray.is_empty(), "拒绝路径不得创建恢复目录: {stray:?}");
+        assert!(data_dir.join("postmaster.pid").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-F03：stale（PID 已死）pgdata 不触发活实例拒绝，继续走既有密码前置检查。
+    #[tokio::test]
+    async fn restore_allows_stale_dead_pid_then_checks_password() {
+        let dir = unique_tmp("restore-stale-pid");
+        let input = dir.join("in.dump");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&input, b"dump").unwrap();
+        let data_dir = dir.join("postgres/16/data");
+        write_postmaster_pid(&data_dir, 4_000_000, 1_234_567_890);
+        let args = cli::RestoreArgs {
+            data_dir: data_dir.clone(),
+            input,
+            target_data_dir: None,
+            database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
+        };
+        assert_eq!(restore(args).await, Err(exit_codes::PASSWORD_FAILED));
+        assert!(data_dir.join("postmaster.pid").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
