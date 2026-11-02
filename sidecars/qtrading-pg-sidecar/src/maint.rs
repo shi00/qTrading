@@ -31,6 +31,28 @@ use std::time::Duration;
 const DUMP_TIMEOUT: Duration = Duration::from_secs(3600);
 const LISTEN_LOCAL: &str = "127.0.0.1";
 
+/// 测试专用同步点（默认不激活，语义同 `QTRADING_PG_SIDECAR_INJECT_INITDB_FAIL`）：
+/// `QTRADING_PG_SIDECAR_INJECT_PAUSE_AT=<phase>` 命中时写 marker 文件并等待外部强杀，
+/// 用于覆盖 dump/restore 在 initdb、pg_restore、健康检查、两次 rename 之间的真实中断。
+/// 若未被外部终止，120s 后继续，避免注入钩子误激活时命令永久挂起。
+async fn inject_pause(phase: &str) {
+    if std::env::var("QTRADING_PG_SIDECAR_INJECT_PAUSE_AT")
+        .ok()
+        .as_deref()
+        != Some(phase)
+    {
+        return;
+    }
+    if let Ok(marker) = std::env::var("QTRADING_PG_SIDECAR_INJECT_PAUSE_MARKER") {
+        let _ = std::fs::write(&marker, phase);
+    }
+    eprintln!("[sidecar] 测试注入：同步点 {phase} 已暂停，等待外部中断");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// SQL 标识符白名单：`[A-Za-z_][A-Za-z0-9_]*` 且长度 ≤ 63（PostgreSQL NAMEDATALEN-1）。
 ///
 /// 会进入 SQL 文本或 psql `-U` 的标识符（库名、超级用户名）必须先经此校验，
@@ -822,6 +844,7 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
     // 输出先写唯一 .partial 再原子改名，避免半截备份被当作可用（§13.7.44 同源策略）。
     // 唯一 create_new 路径保证并发任务不会共用同一临时文件；清理只删除本任务文件。
     let mut partial = PartialGuard::new(claim_unique_partial(output)?);
+    inject_pause("dump_after_partial").await;
 
     // 运行中实例：SQL 级直连，不占维护锁（§13.3 AI-28）；离线：持锁起临时实例
     let pm = pgbin::read_postmaster_pid(&layout.data_dir);
@@ -871,6 +894,7 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
             // 锁内再次确认最终文件未被外部（不配合输出锁的）写入者创建；
             // 若已存在则保留对方文件，只清理本任务临时文件（由 PartialGuard 完成）。
             ensure_output_absent(output)?;
+            inject_pause("dump_before_rename").await;
             std::fs::rename(partial.path(), output).map_err(|e| {
                 eprintln!("[sidecar] 备份原子改名失败 {}: {e}", output.display());
                 exit_codes::DUMP_RESTORE_FAILED
@@ -1295,6 +1319,8 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
         return Err(code);
     }
 
+    inject_pause("restore_before_swap").await;
+
     if do_swap {
         // D16-F03：恢复耗时窗口内可能有外部 postgres 开始使用源 PGDATA（锁只约束
         // 协作进程）；切换前再次校验，失败时不改名、不创建 .bak，保留已完成的恢复目录。
@@ -1322,6 +1348,7 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
                 exit_codes::DUMP_RESTORE_FAILED
             })?;
         }
+        inject_pause("restore_between_renames").await;
         if let Err(e) = std::fs::rename(&restore_dir, &layout.data_dir) {
             // 回滚：尽量把原目录改回去
             if bak.exists() {
@@ -1385,6 +1412,7 @@ async fn restore_into(
         eprintln!("[sidecar] 安全基线写入失败: {e}");
         return Err(exit_codes::DUMP_RESTORE_FAILED);
     }
+    inject_pause("restore_after_initdb").await;
 
     let instance = TempInstance::start(restore_layout, username, password).await?;
     let result = restore_via_instance(&instance, input, database, username, password).await;
@@ -1468,6 +1496,8 @@ async fn restore_via_instance(
         eprintln!("[sidecar] 恢复后健康检查失败: {e}");
         exit_codes::DUMP_RESTORE_FAILED
     })?;
+
+    inject_pause("restore_after_health_check").await;
     Ok(())
 }
 
