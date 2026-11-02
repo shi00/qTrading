@@ -277,6 +277,18 @@ restore（9.4）依赖两个输入：**可读的密码文件**（初始化新目
 
 > 数据完好而仅凭证丢失时（前三类场景），无需先恢复数据：reset-password 不动业务数据，重置成功后即可正常使用并重新备份。
 
+#### 9.10 端到端连通性验证脚本
+
+`scripts/verify_embedded_pg_connect.py` 为 Phase 0 一次性 spike，在临时工作目录验证四客户端（asyncpg / psycopg2 / SQLAlchemy sync / SQLAlchemy async）、Alembic `upgrade head` 与 bundled `pg_dump`/`pg_restore` roundtrip：
+
+```bash
+python -m scripts.verify_embedded_pg_connect --sidecar <sidecar> --work-dir <临时目录>
+```
+
+- 密码文件按 Windows DPAPI（`PGPW2:`）/ Unix 明文格式解析后再构造连接 URL（复用运行时 `read_embedded_password`），密文不会被当作明文密码；
+- 非 Windows 平台若工作目录内已有 DPAPI 密文，脚本在启动 sidecar 前以格式/环境错误失败，且不修改该密码文件（避免 sidecar 按 Fresh data dir 覆盖凭据）；
+- sidecar stdout（ready JSON 机器协议）显式按 UTF-8 解码，出现 U+FFFD 时明确失败；结果行中的密码经 `DataSanitizer` 脱敏。
+
 ### 10. 运行 embedded 模式真实 sidecar 测试
 
 > 适用场景：验证内置 PostgreSQL（子进程启动）真实场景的端到端覆盖，包含真实 Rust sidecar binary + 真实 PostgreSQL 16。

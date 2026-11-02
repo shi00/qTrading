@@ -5,9 +5,18 @@
 2. Alembic upgrade head 落在空 embedded cluster
 3. pg_dump/pg_restore roundtrip（sidecar 安装目录内 bundled 工具）
 
-约束：仅 import data 层版本解析辅助（resolve_pg_major_version，动态解析 PG 主版本）
-与 utils.sanitizers.DataSanitizer（R9：打印前脱敏 DSN 密码，如 pg_dump 失败时
-CalledProcessError 的 argv 含 conninfo URL）；其余仅用 stdlib + DB 驱动 + alembic。
+约束：import data 层版本解析辅助（resolve_pg_major_version，动态解析 PG 主版本）、
+密码文件解码（read_embedded_password，与运行时服务共用同一套 DPAPI/明文实现，避免
+复制第二套解码逻辑）与 utils.sanitizers.DataSanitizer（R9：打印前脱敏 DSN 密码，如
+pg_dump 失败时 CalledProcessError 的 argv 含 conninfo URL）；其余仅用 stdlib + DB 驱动
++ alembic。
+
+D16-F09：Windows sidecar 将密码文件写成 ``PGPW2:<hex DPAPI blob>``，必须经
+``read_embedded_password`` 解密后再注册 secret / 构造 URL；不得把密文直接当密码。
+非 Windows 平台遇到密文时在启动 sidecar 前明确失败，避免 sidecar 把不可解密文件当作
+缺失并覆盖成新明文密码。sidecar stdout（机器协议）显式按 UTF-8 + ``errors="replace"``
+解码，出现 U+FFFD 即判定协议字节损坏并失败（对齐 D16-F08 维护客户端策略）。
+
 用法（推荐，须在仓库根执行）：python -m scripts.verify_embedded_pg_connect --sidecar <sidecar.exe> --work-dir <tmp_dir>
 兼容直跑：python scripts/verify_embedded_pg_connect.py --sidecar <sidecar.exe> --work-dir <tmp_dir>
 退出码：0 全部通过；1 任一步骤失败。
@@ -18,6 +27,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import queue
 import subprocess
 import sys
@@ -34,11 +44,18 @@ if __package__ in (None, ""):
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
 
+from data.persistence.embedded_postgres.service import read_embedded_password
 from data.persistence.embedded_postgres.version import resolve_pg_major_version
 from utils.sanitizers import DataSanitizer
 
+logger = logging.getLogger(__name__)
+
 READY_TIMEOUT_S = 180  # 首次 setup 需解压 bundled PostgreSQL 归档 + initdb，给足余量
 STOP_TIMEOUT_S = 60
+
+# D16-F09：Popen 以 ``errors="replace"`` 解码 sidecar stdout，非法 UTF-8 字节会变成 U+FFFD。
+# ready 行是机器协议（含 port/url），出现该字符即原始字节已损坏，必须显式拒绝。
+_INVALID_UTF8_REPLACEMENT = "\ufffd"
 
 
 def _readline_with_timeout(stream, timeout: float) -> str:
@@ -164,6 +181,17 @@ def step_dump_restore(install_dir: Path, url: str, work_dir: Path) -> None:
     assert table_count and table_count > 10, f"restore verification failed: only {table_count} tables"
 
 
+def _preflight_password_file(password_file: Path) -> None:
+    """D16-F09：拉起 sidecar 前校验既有密码文件格式。
+
+    非 Windows 平台若已存在 ``PGPW2:``（DPAPI 密文）文件，sidecar 会将其视为不可读；
+    在 Fresh data dir 上会生成新密码并覆盖原文件，破坏 Windows 侧凭据。此处提前复用
+    data 层解码逻辑，以格式/环境错误失败，只读校验、不修改密码文件。
+    """
+    if password_file.exists() and not sys.platform.startswith("win"):
+        read_embedded_password(password_file, logger)
+
+
 def main() -> int:
     # 固定 prog：Python 3.14 起 argparse 对 `python -m` 调用默认展示
     # `python -m scripts.verify_embedded_pg_connect`，显式指定使两路运行模式 usage 一致
@@ -186,6 +214,7 @@ def main() -> int:
     proc: subprocess.Popen[str] | None = None
     password: str | None = None
     try:
+        _preflight_password_file(password_file)
         with stderr_log.open("wb") as stderr_f:
             proc = subprocess.Popen(
                 [
@@ -202,21 +231,33 @@ def main() -> int:
                 stdout=subprocess.PIPE,
                 stderr=stderr_f,
                 text=True,
+                # D16-F08/F09：sidecar 固定输出 UTF-8；显式编码避免按系统 locale
+                # （cp1252/cp936）误解码中文路径。stderr 是诊断输出，replace 容错；
+                # stdout 为机器协议，U+FFFD 由下方显式拒绝。
+                encoding="utf-8",
+                errors="replace",
             )
             assert proc.stdout is not None
             t0 = time.monotonic()
             line = _readline_with_timeout(proc.stdout, READY_TIMEOUT_S)
             elapsed = time.monotonic() - t0
             assert line, "sidecar exited before ready line"
+            if _INVALID_UTF8_REPLACEMENT in line:
+                raise RuntimeError(
+                    "sidecar ready line contains invalid UTF-8 bytes; refusing corrupted protocol output"
+                )
             ready = json.loads(line)
-            results.append((f"sidecar ready ({elapsed:.1f}s)", True, ready["url"]))
 
         port = int(ready["port"])
-        password = password_file.read_text(encoding="utf-8").strip()
+        # D16-F09：复用 data 层解码（Windows DPAPI / Unix 明文），不能直接消费密文；
+        # 解密后再注册 secret 并构造 URL。
+        password = read_embedded_password(password_file, logger)
         # R9：后续 detail 可能含嵌入密码的 DSN（如 pg_dump 失败时 CalledProcessError 的 argv），
         # 注册实际密码做精确替换兜底（覆盖含 @ / : / # 等特殊字符、URL 正则难切分的形态）
         if password:
             DataSanitizer.register_secret(password)
+        # 密码注册后再记录 ready URL（含明文密码），避免读取失败时 URL 未经精确脱敏即进入结果行
+        results.append((f"sidecar ready ({elapsed:.1f}s)", True, ready["url"]))
         url = f"postgresql://postgres:{password}@127.0.0.1:{port}/qtrading"
         async_url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
