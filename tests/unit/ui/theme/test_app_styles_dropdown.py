@@ -68,9 +68,19 @@ def test_calc_dropdown_width_custom_bounds() -> None:
 
 def test_calc_dropdown_width_inverted_bounds() -> None:
     """Test min_width > max_width is defensively normalized (lo/hi swap)."""
-    # 原始实现 max(min_width, min(calc, max_width)) 在 min>max 时返回非法 min_width.
-    # 归一化后 lo=200, hi=400, 返回值必须落在 [200, 400] 内.
-    long_opts = ["A" * 100]  # 超长文本, 原始实现会返回 min_width=400 (> max_width)
-    width = AppStyles.calc_dropdown_width(options=long_opts, min_width=400.0, max_width=200.0)
-    assert width == 400.0  # 归一化后上限 400 生效 (而非原始非法返回 400 但越界语义已消除)
-    assert 200.0 <= width <= 400.0
+    # 归一化后 lo=200, hi=400. 三个样例分别覆盖 上限截断 / 下限截断 / 区间内原值,
+    # 旧公式 max(min_width, min(calculated, max_width)) 会把后两个样例都强制抬到 400.
+    long_width = AppStyles.calc_dropdown_width(options=["A" * 100], min_width=400.0, max_width=200.0)
+    assert long_width == 400.0  # 长文本触达归一化上限, 新旧公式均为 400, 保留为边界样例
+
+    short_width = AppStyles.calc_dropdown_width(options=["A"], min_width=400.0, max_width=200.0)
+    assert short_width == 200.0  # calculated=84.5 < lo=200, 旧公式会错误返回 400
+
+    mid_width = AppStyles.calc_dropdown_width(
+        options=["A" * 30],
+        min_width=400.0,
+        max_width=200.0,
+        char_width=10.0,
+        padding=0.0,
+    )
+    assert mid_width == 300.0  # 固定参数使 calculated 恰为 300, 旧公式会错误抬到 400
