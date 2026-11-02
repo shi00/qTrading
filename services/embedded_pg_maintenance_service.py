@@ -132,6 +132,11 @@ _EXIT_CODE_MAP: dict[int, tuple[str, int, str]] = {
     12: ("pg_start_failed", logging.ERROR, "数据库启动失败"),
     15: ("disk_full", logging.WARNING, "磁盘空间不足，请清理后重试"),
     20: ("pg_not_running", logging.INFO, ""),  # 幂等，doctor 容忍
+    30: (
+        "dump_restore_failed",
+        logging.ERROR,
+        "备份/恢复执行失败：dump 输出已存在或另一任务占用同一输出，或 restore/备份数据异常；请查看 sidecar stderr",
+    ),
     40: ("pgdata_corrupt", logging.ERROR, "数据目录损坏，请使用恢复向导"),
     50: ("lock_conflict", logging.WARNING, "请先关闭 qTrading 再执行维护操作"),
 }
@@ -163,6 +168,9 @@ class EmbeddedPgMaintenanceService:
             # CON-04: 在途可取消命令句柄（仅 dump 类注册）。__init__ 内初始化，保证
             # "开过备份面板但未执行备份就关机"时 request_cancel() 可安全读取。
             self._active_proc: subprocess.Popen | None = None
+            # D16-F06: 单任务预留位。必须在 Popen 之前置位，确保并发第二个 dump
+            # 在启动子进程前即被拒绝（旧实现先 Popen 后检查，被拒子进程已可能触碰输出文件）。
+            self._dump_task_reserved = False
             self._initialized = True
 
     @classmethod
@@ -435,26 +443,28 @@ class EmbeddedPgMaintenanceService:
           dump_partials 检测（不自动清理，见技术债 P3-CON04）。
         - TimeoutExpired 时 kill 子进程（subprocess.run 超时不杀进程会泄漏）。
         - ``cancel_allowed=True`` 仅 dump 类可安全中断操作（restore 拒绝取消，数据一致性优先）。
+        - ``cancel_allowed=True`` 时先在锁内预留单任务状态，再启动子进程；第二个并发调用
+          在 Popen 之前即被拒绝，任何情况下（含 Popen 抛错）都会在 ``finally`` 释放预留位。
         """
 
         def _run() -> tuple[int, str, str]:
-            proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             registered = False
+            reserved = False
             if cancel_allowed:
+                # D16-F06: 先在锁内预留单任务状态，再 Popen。并发第二个 dump 在此处即被拒绝，
+                # 不会启动任何子进程（旧实现先 Popen 后检查，被拒子进程已可能触碰输出文件）。
                 with self._lock:
-                    if self._active_proc is not None:  # 并发 dump guard（UI is_backing_up 异步传播可能被双击击穿）
-                        # 拒绝并发 dump：终止并回收刚启动的进程，避免僵尸/管道泄漏。
-                        # kill/communicate 合并容错：进程恰在竞态窗口自然退出时 kill 抛
-                        # ProcessLookupError(OSError)，忽略清理异常、保留并发拒绝业务异常。
-                        try:
-                            proc.kill()
-                            proc.communicate()
-                        except OSError:
-                            pass  # 进程已被回收
+                    if self._active_proc is not None or self._dump_task_reserved:
                         raise EmbeddedPgMaintenanceError("已有备份任务在进行中，请先完成后再试")
-                    self._active_proc = proc
-                    registered = True
+                    self._dump_task_reserved = True
+                    reserved = True
             try:
+                proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if reserved:
+                    with self._lock:
+                        # 预留位保证此处无第二个任务；登记句柄供 request_cancel() 终止。
+                        self._active_proc = proc
+                        registered = True
                 try:
                     stdout, stderr = proc.communicate(timeout=3600)
                     return proc.returncode, stdout, stderr
@@ -478,9 +488,12 @@ class EmbeddedPgMaintenanceService:
                         f"sidecar 命令超时（3600s）: {argv[0] if argv else 'sidecar'}"
                     ) from exc
             finally:
-                if registered:
-                    with self._lock:
+                with self._lock:
+                    if registered:
                         self._active_proc = None
+                    if reserved:
+                        # Popen 失败时也在此释放预留位（失败不得留下永久占用状态）。
+                        self._dump_task_reserved = False
 
         return await ThreadPoolManager().run_async(TaskType.IO, _run)
 
@@ -489,6 +502,8 @@ class EmbeddedPgMaintenanceService:
 
         同步、非阻塞方法（非协程，禁止 await；terminate 为瞬时 syscall，可在事件循环线程调用）。
         无活动命令或 restore/doctor/shell 命令返回 False。
+        注：``_run_sidecar`` 的 Popen 前预留期尚无进程句柄可终止，此时返回 False；
+        子进程启动后可再次调用以终止（预留期极短，见 ``_run_sidecar`` 实现）。
         注：terminate 仅终止 sidecar 包装进程——在线路径下孤儿 pg_dump 可能继续写 .partial，
         由进程退出 / Step 8 停止 PG / OS 进程树清理兜底（见技术债 P3-CON04）。
         terminate 在锁内调用（与非阻塞 syscall 串行化，消除 stale-PID 竞态窗口）；
@@ -521,7 +536,9 @@ class EmbeddedPgMaintenanceService:
         if instance is None:
             return False
         with cls._lock:
-            return instance._active_proc is not None  # type: ignore[attr-defined]  # [reason: 单例 __init__ 已声明 _active_proc，但未作为类级注解]
+            # D16-F06: Popen 前的预留期同样视为「有在途备份」，避免切换数据库模式与
+            # 即将启动（或正在启动）的 dump 子进程交叉。
+            return instance._active_proc is not None or instance._dump_task_reserved  # type: ignore[attr-defined]  # [reason: 单例 __init__ 已声明 _active_proc/_dump_task_reserved，但未作为类级注解]
 
     # ---- 错误分类 ----
 

@@ -320,6 +320,17 @@ class TestEmbeddedPgMaintenanceServiceDump:
             with pytest.raises(EmbeddedPgMaintenanceError, match="lock_conflict"):
                 await maintenance_service.dump(tmp_path / "backup.dump")
 
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_dump_sidecar_exit_30_output_conflict(self, maintenance_service, tmp_path: Path) -> None:
+        """D16-F06: 输出已存在/另一任务占用同一输出（exit 30）→ dump_restore_failed。"""
+        from services.embedded_pg_maintenance_service import (
+            EmbeddedPgMaintenanceError,
+        )
+
+        with _patch_run_async(30, "", "output exists or locked"):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="dump_restore_failed"):
+                await maintenance_service.dump(tmp_path / "backup.dump")
+
 
 # =============================================================================
 # TestEmbeddedPgMaintenanceServiceRestore: restore 命令（3 个）
@@ -895,15 +906,16 @@ class TestRunSidecarCancelAllowed:
         assert (exit_code, stdout, stderr) == (0, "dump ok", "")
         assert captured["active_during_run"] is proc_mock
         assert maintenance_service._active_proc is None
+        assert maintenance_service._dump_task_reserved is False
 
     @pytest.mark.asyncio(loop_scope="function")
-    async def test_concurrent_dump_guard_rejects_and_preserves_active_proc(self, maintenance_service) -> None:
-        """已有 dump 在途时，第二次 dump 被拒（kill 新进程）且不误清在途句柄。"""
+    async def test_concurrent_dump_rejected_before_popen(self, maintenance_service) -> None:
+        """D16-F06: 已有 dump 在途时，第二次调用在 Popen 之前即被拒绝（不得启动子进程）。"""
         from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
 
         first_proc = MagicMock()  # 已在途 dump 句柄
-        second_proc = MagicMock()
         maintenance_service._active_proc = first_proc
+        popen_mock = MagicMock()
 
         with (
             patch(
@@ -912,26 +924,29 @@ class TestRunSidecarCancelAllowed:
             ),
             patch(
                 "services.embedded_pg_maintenance_service.subprocess.Popen",
-                return_value=second_proc,
+                popen_mock,
             ),
         ):
             with pytest.raises(EmbeddedPgMaintenanceError, match="已有备份任务在进行中"):
                 await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
 
-        second_proc.kill.assert_called_once_with()
-        second_proc.communicate.assert_called_once_with()  # 被拒进程被回收，避免僵尸/管道泄漏
-        # 回归：guard 拒绝路径的 finally 不得误清在途 dump 句柄
+        popen_mock.assert_not_called()
+        # 拒绝路径不得误清在途句柄，也不得遗留预留位
         assert maintenance_service._active_proc is first_proc
+        assert maintenance_service._dump_task_reserved is False
 
     @pytest.mark.asyncio(loop_scope="function")
-    async def test_concurrent_dump_guard_kill_oserror_still_raises(self, maintenance_service) -> None:
-        """对抗性检视：被拒进程恰在竞态窗口自然退出时 kill 抛 OSError，仍抛并发拒绝业务异常。"""
-        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+    async def test_reservation_set_before_popen(self, maintenance_service) -> None:
+        """D16-F06: 预留位必须在 Popen 调用时已置位（并发探测据此拒绝）。"""
+        proc_mock = MagicMock()
+        proc_mock.returncode = 0
+        proc_mock.communicate = MagicMock(return_value=("", ""))
+        captured: dict[str, object] = {}
 
-        first_proc = MagicMock()  # 已在途 dump 句柄
-        second_proc = MagicMock()
-        second_proc.kill = MagicMock(side_effect=OSError("no such process"))
-        maintenance_service._active_proc = first_proc
+        def _popen(*args, **kwargs):
+            captured["reserved"] = maintenance_service._dump_task_reserved
+            captured["active"] = maintenance_service.has_active_operation()
+            return proc_mock
 
         with (
             patch(
@@ -940,14 +955,62 @@ class TestRunSidecarCancelAllowed:
             ),
             patch(
                 "services.embedded_pg_maintenance_service.subprocess.Popen",
-                return_value=second_proc,
+                side_effect=_popen,
             ),
         ):
-            with pytest.raises(EmbeddedPgMaintenanceError, match="已有备份任务在进行中"):
+            await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
+
+        assert captured == {"reserved": True, "active": True}
+        assert maintenance_service._dump_task_reserved is False
+        assert maintenance_service._active_proc is None
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_popen_failure_releases_reservation(self, maintenance_service) -> None:
+        """D16-F06: Popen 抛错时预留位在 finally 释放，后续调用可正常执行。"""
+        proc_mock = MagicMock()
+        proc_mock.returncode = 0
+        proc_mock.communicate = MagicMock(return_value=("", ""))
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                side_effect=OSError("spawn failed"),
+            ),
+        ):
+            with pytest.raises(OSError, match="spawn failed"):
                 await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
 
-        second_proc.kill.assert_called_once_with()
-        assert maintenance_service._active_proc is first_proc
+        assert maintenance_service._dump_task_reserved is False
+        assert maintenance_service._active_proc is None
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=proc_mock,
+            ),
+        ):
+            exit_code, _stdout, _stderr = await maintenance_service._run_sidecar(
+                ["sidecar", "dump"], cancel_allowed=True
+            )
+
+        assert exit_code == 0
+        assert maintenance_service._dump_task_reserved is False
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_reservation_without_proc_blocks_has_active_operation(self, maintenance_service) -> None:
+        """D16-F06: 仅预留（Popen 前）也应视为有在途备份，禁止切换数据库模式。"""
+        assert maintenance_service.has_active_operation() is False
+        maintenance_service._dump_task_reserved = True
+        assert maintenance_service.has_active_operation() is True
+        maintenance_service._dump_task_reserved = False
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_cancel_allowed_false_not_registered(self, maintenance_service) -> None:
@@ -1001,6 +1064,7 @@ class TestRunSidecarCancelAllowed:
         proc_mock.kill.assert_called_once_with()
         # 注册路径的 finally 在超时异常后仍清空句柄（吸收对抗性检视 P2-4 测试缺口）
         assert maintenance_service._active_proc is None
+        assert maintenance_service._dump_task_reserved is False
 
 
 # =============================================================================
