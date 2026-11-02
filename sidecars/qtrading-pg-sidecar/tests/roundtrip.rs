@@ -620,7 +620,14 @@ fn test_reset_password_succeeds() {
         password_file.exists(),
         "password file should exist after run"
     );
-    let old_pwd = std::fs::read_to_string(&password_file).expect("read old password");
+    // F5：Windows 密码文件为 DPAPI 密文，须经生产解密逻辑读取明文
+    let old_pwd = password::read_password_file(&password_file).expect("read old password");
+
+    let install_dir = data_dir.parent().unwrap().join("install");
+
+    // D16-F07：Unix 上用记录脚本包装 bundled psql，捕获实际子进程 argv/env/stdin。
+    #[cfg(unix)]
+    let capture = wrap_psql_for_capture(&install_dir, data_dir.parent().unwrap());
 
     // 3. 调 reset-password → exit 0（sidecar 已退出，锁可用）
     let (reset_code, reset_stderr) = reset_password_sidecar(&data_dir, None);
@@ -631,10 +638,29 @@ fn test_reset_password_succeeds() {
     );
 
     // 4. 读取新 password file 内容，验证已变更
-    let new_pwd = std::fs::read_to_string(&password_file).expect("read new password");
+    let new_pwd = password::read_password_file(&password_file).expect("read new password");
     // R9：assert! 而非 assert_ne!，避免断言失败时把明文密码写入测试输出
     assert!(old_pwd != new_pwd, "password should be rotated");
     assert!(!new_pwd.is_empty(), "new password should not be empty");
+
+    // 4b. 公开 stderr 不得出现新密码（reset-password 默认不打印新值）
+    assert!(!reset_stderr.contains(&new_pwd), "公开 stderr 泄露新密码");
+
+    // 4c. 实际 psql 子进程：argv/env 无新密码，ALTER USER SQL 仅经 stdin 承载。
+    #[cfg(unix)]
+    {
+        let (real_psql, argv_log, env_log, stdin_log, marker_content) = capture;
+        unwrap_psql(&install_dir, &real_psql, &marker_content);
+        let argv = std::fs::read_to_string(&argv_log).unwrap_or_default();
+        let env = std::fs::read_to_string(&env_log).unwrap_or_default();
+        let stdin = std::fs::read_to_string(&stdin_log).unwrap_or_default();
+        assert!(!argv.contains(&new_pwd), "psql argv 泄露新密码");
+        assert!(!env.contains(&new_pwd), "psql env 泄露新密码");
+        assert!(
+            stdin.contains(&new_pwd),
+            "ALTER USER 新密码必须经受控 stdin 传递"
+        );
+    }
 
     // 5. 再次 run → ready（验证新密码可连接，pg_hba.conf 已重写生效）
     let mut child2 = spawn_run(&data_dir);
@@ -642,6 +668,17 @@ fn test_reset_password_succeeds() {
     assert_eq!(
         ready2["status"], "running",
         "sidecar should ready with new password"
+    );
+
+    // 5b. 直接以新旧密码连接：旧密码必须失效，新密码必须可用。
+    let port = ready2["port"].as_u64().expect("ready port") as u16;
+    assert!(
+        !psql_connect_succeeds(&install_dir, port, &old_pwd),
+        "重置后旧密码仍可连接"
+    );
+    assert!(
+        psql_connect_succeeds(&install_dir, port, &new_pwd),
+        "重置后新密码无法连接"
     );
 
     cleanup_sidecar(&mut child2, &data_dir);
@@ -685,6 +722,8 @@ fn test_reset_password_wrong_username_fails_without_rotating_password() {
 
     let password_file = data_dir.parent().unwrap().join("runtime").join("password");
     let before = std::fs::read_to_string(&password_file).expect("read password file");
+    let hba_file = data_dir.join("pg_hba.conf");
+    let hba_before = std::fs::read_to_string(&hba_file).expect("read pg_hba.conf");
 
     // 2. 传入不存在的超级用户名 → 临时实例健康检查失败 → exit 12
     let (reset_code, reset_stderr) = reset_password_sidecar(&data_dir, Some("qtrading"));
@@ -699,6 +738,13 @@ fn test_reset_password_wrong_username_fails_without_rotating_password() {
         std::fs::read_to_string(&password_file).expect("read password file"),
         before,
         "password file must not be rewritten when the reset-password flow fails"
+    );
+
+    // 4. 失败路径必须恢复原 pg_hba.conf（HbaRestoreGuard）
+    assert_eq!(
+        std::fs::read_to_string(&hba_file).expect("read pg_hba.conf"),
+        hba_before,
+        "失败路径必须恢复原 pg_hba.conf"
     );
 }
 
@@ -779,6 +825,119 @@ fn reset_password_sidecar(data_dir: &Path, username: Option<&str>) -> (u8, Strin
         output.status.code().unwrap_or(255) as u8,
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+/// D16-F07：以记录脚本包装 bundled psql（Unix），捕获 reset-password 实际子进程的
+/// argv/env/stdin。返回 (真实 psql 路径, argv 日志, env 日志, stdin 日志, 原始 marker)。
+///
+/// `.setup-complete` 记录 7 个工具的 sha256；包装后 psql 哈希变化会使 marker 失效，
+/// reset-password 会整体重做 install dir 并删掉包装。故同步更新 marker 中 psql 的哈希，
+/// 保持 setup 幂等路径；`unwrap_psql` 负责恢复原始 marker。
+#[cfg(unix)]
+#[allow(clippy::type_complexity)]
+fn wrap_psql_for_capture(
+    install_dir: &Path,
+    dir: &Path,
+) -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    String,
+) {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = install_dir.join("bin");
+    let psql = bin.join("psql");
+    let real = bin.join("psql.real");
+    std::fs::rename(&psql, &real).expect("rename bundled psql");
+
+    let argv_log = dir.join("psql-argv.log");
+    let env_log = dir.join("psql-env.log");
+    let stdin_log = dir.join("psql-stdin.log");
+    let script = format!(
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$@\" >> '{argv}'\n\
+         env >> '{env}'\n\
+         tmp=\"$(mktemp '{dir}/psql-stdin.XXXXXX')\"\n\
+         cat > \"$tmp\"\n\
+         cat \"$tmp\" >> '{stdin}'\n\
+         exec '{real}' \"$@\" < \"$tmp\"\n",
+        argv = argv_log.display(),
+        env = env_log.display(),
+        stdin = stdin_log.display(),
+        dir = dir.display(),
+        real = real.display(),
+    );
+    std::fs::write(&psql, script).expect("write psql wrapper");
+    let mut perms = std::fs::metadata(&psql)
+        .expect("stat psql wrapper")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&psql, perms).expect("chmod psql wrapper");
+
+    // 同步 marker 中 psql 的 sha256，避免 setup 因完整性校验失败而重做 install dir。
+    let marker = install_dir.join(".setup-complete");
+    let marker_content = std::fs::read_to_string(&marker).expect("read setup marker");
+    let wrapper_sha = format!("{:x}", Sha256::digest(std::fs::read(&psql).unwrap()));
+    let mut json: serde_json::Value =
+        serde_json::from_str(&marker_content).expect("parse setup marker");
+    let entries = json
+        .get_mut("tools_sha256")
+        .and_then(|v| v.as_array_mut())
+        .expect("tools_sha256 in setup marker");
+    for entry in entries.iter_mut() {
+        if entry.get("name").and_then(|n| n.as_str()) == Some("psql") {
+            entry["sha256"] = serde_json::Value::String(wrapper_sha.clone());
+        }
+    }
+    std::fs::write(&marker, serde_json::to_string(&json).unwrap()).expect("write setup marker");
+
+    (real, argv_log, env_log, stdin_log, marker_content)
+}
+
+/// D16-F07：恢复被包装的 bundled psql 与原始 setup marker（Unix）。
+#[cfg(unix)]
+fn unwrap_psql(install_dir: &Path, real: &Path, marker_content: &str) {
+    let psql = install_dir.join("bin").join("psql");
+    let _ = std::fs::remove_file(&psql);
+    std::fs::rename(real, &psql).expect("restore bundled psql");
+    std::fs::write(install_dir.join(".setup-complete"), marker_content)
+        .expect("restore setup marker");
+}
+
+/// 以指定密码直接连接运行中的实例，返回是否认证/查询成功（不输出密码）。
+fn psql_connect_succeeds(install_dir: &Path, port: u16, password: &str) -> bool {
+    let psql = install_dir
+        .join("bin")
+        .join(if cfg!(windows) { "psql.exe" } else { "psql" });
+    let port_s = port.to_string();
+    std::process::Command::new(psql)
+        .args([
+            "-X",
+            "-q",
+            "-A",
+            "-t",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port_s,
+            "-U",
+            "postgres",
+            "-d",
+            "postgres",
+            "-c",
+            "select 1",
+        ])
+        .env("PGPASSWORD", password)
+        .env("PGCONNECT_TIMEOUT", "5")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// 启动一个短命辅助进程（用于 parent_pid 测试）。

@@ -892,6 +892,7 @@
     "db_err_sidecar_sha256_mismatch": "Sidecar checksum verification failed (SHA256 mismatch)",
     "db_err_embedded_start_failed": "Embedded database failed to start, check the log for details",
     "db_err_embedded_initdb_failed": "Database initialization failed (initdb failed, check disk space & permissions)",
+    "db_err_embedded_preflight_failed": "Embedded database resource preflight failed (disk space, directory permissions, filesystem, cloud-sync path, or password file permissions); check the log and retry after fixing",
     "db_err_embedded_already_running": "Another instance is already running using the same data directory",
     "db_err_embedded_password_error": "Embedded database password error",
     "db_err_embedded_crashed": "Sidecar process crashed, please check sidecar.log",

@@ -32,6 +32,39 @@ from generate_sidecar_manifest import (  # noqa: E402
     query_sidecar_version,
 )
 
+VERSION_SCHEMA = "qtrading.embedded_postgres.version.v1"
+
+
+def _valid_version_json(target: str, **overrides: object) -> dict[str, object]:
+    """构造合法 sidecar version JSON；overrides 用于覆盖特定字段。"""
+    data: dict[str, object] = {
+        "schema": VERSION_SCHEMA,
+        "sidecar_version": "0.1.0",
+        "protocol_version": "v1",
+        "postgres_version": "16.14.0",
+        "target": target,
+        "self_sha256": None,
+    }
+    data.update(overrides)
+    return data
+
+
+def _invoke_main(
+    tmp_path: Path,
+    version_json: object,
+    target: str = "t",
+    output: Path | None = None,
+) -> int:
+    """以固定 sidecar 内容调用 main()，返回退出码。"""
+    sidecar = tmp_path / "sidecar.exe"
+    sidecar.write_bytes(b"binary content")
+    argv = ["prog", "--sidecar", str(sidecar), "--target", target]
+    if output is not None:
+        argv.extend(["--output", str(output)])
+    with patch("sys.argv", argv):
+        with patch("generate_sidecar_manifest.query_sidecar_version", return_value=version_json):
+            return main()
+
 
 class TestComputeSha256:
     """compute_sha256 正确性。"""
@@ -215,6 +248,7 @@ class TestMainArgparse:
         sidecar = tmp_path / "sidecar.exe"
         sidecar.write_bytes(b"binary content")
         version_json = {
+            "schema": VERSION_SCHEMA,
             "sidecar_version": "0.1.0",
             "protocol_version": "v1",
             "postgres_version": "16.14.0",
@@ -224,6 +258,7 @@ class TestMainArgparse:
             "git_sha": "abc123",
             "build_time_utc": "2026-07-20T00:00:00Z",
             "build_time_unix": 1784505600,
+            "target": "t",
             "self_sha256": None,
         }
         with patch("sys.argv", ["prog", "--sidecar", str(sidecar), "--target", "t"]):
@@ -242,7 +277,7 @@ class TestMainArgparse:
         sidecar = tmp_path / "sidecar.exe"
         sidecar.write_bytes(b"binary")
         output = tmp_path / "manifest.json"
-        version_json = {"sidecar_version": "0.1.0"}
+        version_json = {"schema": VERSION_SCHEMA, "sidecar_version": "0.1.0", "target": "t"}
         with patch(
             "sys.argv",
             ["prog", "--sidecar", str(sidecar), "--target", "t", "--output", str(output)],
@@ -254,3 +289,83 @@ class TestMainArgparse:
         manifest = json.loads(output.read_text(encoding="utf-8"))
         assert manifest["schema"] == MANIFEST_SCHEMA
         assert manifest["sidecar_version"] == "0.1.0"
+
+
+class TestMainReleaseValidation:
+    """发布入口校验：非 dict / schema / target / self_sha256。"""
+
+    def test_rejects_non_dict_version_json(self, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+        output = tmp_path / "manifest.json"
+        code = _invoke_main(tmp_path, [], output=output)
+        captured = capsys.readouterr()
+        assert code == 2
+        assert "must be an object/dict" in captured.err
+        assert captured.out == ""
+        assert not output.exists()
+
+    def test_rejects_wrong_schema(self, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+        output = tmp_path / "manifest.json"
+        version_json = _valid_version_json("t", schema="qtrading.embedded_postgres.version.v2")
+        code = _invoke_main(tmp_path, version_json, output=output)
+        captured = capsys.readouterr()
+        assert code == 2
+        assert "schema mismatch" in captured.err
+        assert captured.out == ""
+        assert not output.exists()
+
+    def test_rejects_missing_schema(self, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+        version_json = _valid_version_json("t")
+        del version_json["schema"]
+        code = _invoke_main(tmp_path, version_json)
+        captured = capsys.readouterr()
+        assert code == 2
+        assert "schema mismatch" in captured.err
+        assert captured.out == ""
+
+    def test_rejects_missing_target(self, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+        output = tmp_path / "manifest.json"
+        version_json = _valid_version_json("t")
+        del version_json["target"]
+        code = _invoke_main(tmp_path, version_json, output=output)
+        captured = capsys.readouterr()
+        assert code == 2
+        assert "missing required 'target'" in captured.err
+        assert not output.exists()
+
+    def test_rejects_target_mismatch(self, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+        version_json = _valid_version_json("x86_64-unknown-linux-gnu")
+        code = _invoke_main(tmp_path, version_json, target="aarch64-apple-darwin")
+        captured = capsys.readouterr()
+        assert code == 2
+        assert "target mismatch" in captured.err
+        assert captured.out == ""
+
+    def test_rejects_self_sha256_mismatch(self, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+        output = tmp_path / "manifest.json"
+        version_json = _valid_version_json("t", self_sha256="0" * 64)
+        code = _invoke_main(tmp_path, version_json, output=output)
+        captured = capsys.readouterr()
+        assert code == 2
+        assert "self_sha256 mismatch" in captured.err
+        assert not output.exists()
+
+    def test_accepts_matching_self_sha256(self, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+        actual = hashlib.sha256(b"binary content").hexdigest()
+        version_json = _valid_version_json("t", self_sha256=actual)
+        code = _invoke_main(tmp_path, version_json)
+        captured = capsys.readouterr()
+        assert code == 0
+        manifest = json.loads(captured.out)
+        assert manifest["sidecar_self_sha256"] == actual
+
+    def test_failure_does_not_overwrite_existing_output(
+        self, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
+        output = tmp_path / "manifest.json"
+        output.write_text("SENTINEL", encoding="utf-8")
+        version_json = _valid_version_json("other")
+        code = _invoke_main(tmp_path, version_json, output=output)
+        captured = capsys.readouterr()
+        assert code == 2
+        assert "target mismatch" in captured.err
+        assert output.read_text(encoding="utf-8") == "SENTINEL"

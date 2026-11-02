@@ -280,6 +280,32 @@ fn test_inject_27_fat32_filesystem_rejected() {
     );
 }
 
+/// D16-R03：无法识别的文件系统仍放行（避免误拒绝），但 doctor 必须给出可见 warning。
+#[test]
+fn test_unknown_filesystem_reported_by_doctor() {
+    let (_tmp, data_dir) = unique_data_dir("fi_unknown_fs");
+
+    let output = std::process::Command::new(sidecar_path())
+        .arg("doctor")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .env("QTRADING_PG_SIDECAR_FORCE_FS_KIND", "custom-unknown")
+        .output()
+        .expect("run doctor");
+    let doc: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).expect("doctor json");
+
+    assert_eq!(doc["fs_supported"], true, "Unknown 不应被拒绝: {doc}");
+    assert_eq!(doc["fs_kind"], "unknown(custom-unknown)");
+    let issues = doc["issues"].as_array().expect("issues array");
+    assert!(
+        issues
+            .iter()
+            .any(|i| i["code"] == "fs_unverified" && i["severity"] == "warning"),
+        "doctor should report fs_unverified warning: {doc}"
+    );
+}
+
 /// #28 restore 中断残留 → doctor 列出 `data.restore-*` 残留目录（§17.6 #28 / §13.7.44 / §7.5）。
 ///
 /// 模拟方式：手动创建 `data.restore-<ts>` 兄弟目录（与 sidecar `restore()` 失败路径生成的
@@ -387,18 +413,23 @@ fn test_inject_28b_dump_partial_residual() {
 fn test_inject_31_setup_extraction_interruption() {
     let (_tmp, data_dir) = unique_data_dir("fi_31");
 
-    // 模拟 setup 中断残留：创建无 marker 的 install dir + tmp 目录
+    // 模拟 setup 中断残留：创建带所有权标记的半安装 install dir + tmp 目录
     // data_dir = <tmp>/data, base17 = <tmp>, install_dir = <tmp>/install
+    // D16-F01：无所有权标记的非空目录现在会被拒绝清理，因此必须模拟本程序
+    // 上次中断留下的 `.setup-owned` 标记（比旧测试更贴近真实崩溃现场）。
     let install_dir = data_dir.parent().unwrap().join("install");
     std::fs::create_dir_all(install_dir.join("bin")).unwrap();
+    std::fs::write(install_dir.join(".setup-owned"), b"owned\n").unwrap();
     // 写入部分假 binary（无 .setup-complete marker，半截状态）
     std::fs::write(install_dir.join("bin").join("initdb.exe"), b"partial").ok();
-    // 创建 tmp 残留目录（其他 pid 的解压残留）
+    // 创建 tmp 残留目录（其他 pid 的解压残留，crate 解压到 <tmp>/<version>/）
     let tmp_residual = data_dir
         .parent()
         .unwrap()
         .join(format!("install.tmp-{}", 999999));
-    std::fs::create_dir_all(&tmp_residual).unwrap();
+    let tmp_version = tmp_residual.join("16.15.0");
+    std::fs::create_dir_all(&tmp_version).unwrap();
+    std::fs::write(tmp_version.join(".setup-owned"), b"owned\n").unwrap();
     std::fs::write(tmp_residual.join("junk"), b"x").unwrap();
 
     // run → 应清理 tmp 残留 + 删除半截 install dir + 重做 setup → ready
