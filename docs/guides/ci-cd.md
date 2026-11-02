@@ -62,7 +62,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 - **历史空 Release 不自动补救**：`v0.10.0` / `v0.10.1` 等既有空 Release 保持原样，如需补资产另行人工评估。
 
 **其他 workflow**（`.github/workflows/` 下除 `ci_cd.yml` 主矩阵外的兜底流水线，由 `check_workflow_enum()` 门禁守护无遗漏）:
-- 前端流水线：文档 CI (`docs-ci.yml`，对所有 PR 运行、不设 paths 过滤，其 `Docs Consistency Check` 是 main 的 required check；否则未命中 paths 时 check 会停在 Pending)、Flet 前瞻验证 (`flet-nightly.yml`)、PostgreSQL sidecar Release (`sidecar.yml`)
+- 前端流水线：文档 CI (`docs-ci.yml`，对 PR 与 `merge_group` 事件运行、不设 paths 过滤，其 `Docs Consistency Check` 是 main 的 required check；缺少 `merge_group` 触发时，启用 merge queue 后队列永远拿不到该 check，而未命中 paths 时 PR 上的 check 会停在 Pending)、Flet 前瞻验证 (`flet-nightly.yml`)、PostgreSQL sidecar Release (`sidecar.yml`)
 - 配置流水线：pre-commit 配置 PR 冒烟 (`precommit-config-ci.yml`)，仅 PR 修改 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml)（或该 workflow 自身）时执行 `pre-commit validate-config` + `pre-commit run --all-files`，不引入 PG service / 迁移 / 测试
 - 安全流水线：CodeQL 静态安全分析 (`codeql.yml`)、密钥泄露扫描 (`gitleaks.yml`)、OpenSSF Scorecard 安全评分 (`scorecard.yml`)
 - 缓存治理：缓存预算日清理 (`cache-prune.yml`)，每日 04:17 UTC（北京时间 12:17，错开上述日检）+ 手动触发；只删除「非 `refs/heads/main` 且 3 天内未被访问」的缓存条目（活跃 PR 每次推送都会访问自身缓存故不误删，`refs/heads/main` 永不删除），守护 GitHub Actions 每仓库 10 GB 缓存上限——超限后 LRU 会挤掉 main 的 uv / cargo 条目，实测曾使 Windows job 的 `Install dependencies` 由 0.7 分钟回退到 5.5~8.0 分钟；写入侧由 `ci_cd.yml` 的 `save-if`（cargo 缓存仅 main 保存）与各 job 的 `actions/cache` 显式 `UV_CACHE_DIR` 缓存（key 不含 ref，命中即不再写入副本；`setup-uv` 自带缓存一律 `enable-cache: false`）配合
