@@ -156,6 +156,131 @@ def test_filter_branches_safety():
     assert preserved_remote["origin/fix/e2e-headless-db-ensure"] == "当前工作树(Worktree)占用"
 
 
+def test_filter_branches_protects_main_and_master_on_all_remotes():
+    """D18-F05：main/master 保护必须对任意远端生效，而非仅 origin。"""
+    remote_branches = ["origin/main", "origin/master", "upstream/main", "upstream/master", "fork/master"]
+
+    to_delete_local, to_delete_remote, _, preserved_remote = filter_branches([], remote_branches, set())
+
+    assert to_delete_local == []
+    assert to_delete_remote == []
+    assert preserved_remote == {
+        "origin/main": "主分支保护",
+        "origin/master": "主分支保护",
+        "upstream/main": "主分支保护",
+        "upstream/master": "主分支保护",
+        "fork/master": "主分支保护",
+    }
+
+
+def test_filter_branches_protects_worktree_branch_on_all_remotes():
+    """D18-F05：worktree 占用保护必须对任意远端生效，而非仅 origin。"""
+    remote_branches = [
+        "origin/fix/occupied",
+        "upstream/fix/occupied",
+        "origin/fix/free",
+        "upstream/fix/free",
+    ]
+    worktree_branches = {"fix/occupied"}
+
+    to_delete_local, to_delete_remote, _, preserved_remote = filter_branches([], remote_branches, worktree_branches)
+
+    assert to_delete_local == []
+    assert preserved_remote["origin/fix/occupied"] == "当前工作树(Worktree)占用"
+    assert preserved_remote["upstream/fix/occupied"] == "当前工作树(Worktree)占用"
+    assert to_delete_remote == ["origin/fix/free", "upstream/fix/free"]
+
+
+def test_filter_branches_preserves_nested_branch_path_after_remote_prefix():
+    """D18-F05：只剥离首个远端名，含 `/` 的分支名必须完整保留用于保护匹配。"""
+    remote_branches = [
+        "upstream/fix/deep/topic",
+        "origin/fix/deep/topic",
+        "upstream/feature/a/b",
+    ]
+    worktree_branches = {"fix/deep/topic"}
+
+    _, to_delete_remote, _, preserved_remote = filter_branches([], remote_branches, worktree_branches)
+
+    assert preserved_remote["upstream/fix/deep/topic"] == "当前工作树(Worktree)占用"
+    assert preserved_remote["origin/fix/deep/topic"] == "当前工作树(Worktree)占用"
+    assert to_delete_remote == ["upstream/feature/a/b"]
+
+
+def test_filter_branches_does_not_protect_branch_whose_name_ends_with_main():
+    """D18-F05：列保护按完整短名匹配，分支名里出现 main/master 不得被误保护。"""
+    remote_branches = ["origin/upstream/main", "upstream/fix/main", "origin/fix/master"]
+
+    _, to_delete_remote, _, preserved_remote = filter_branches([], remote_branches, set())
+
+    assert preserved_remote == {}
+    assert to_delete_remote == ["origin/upstream/main", "upstream/fix/main", "origin/fix/master"]
+
+
+def test_filter_branches_accepts_refs_remotes_and_legacy_prefixes():
+    """D18-F05：`refs/remotes/<remote>/<branch>` 与旧 `remotes/` 前缀均须正确归一化。"""
+    remote_branches = [
+        "refs/remotes/upstream/main",
+        "remotes/upstream/master",
+        "refs/remotes/upstream/fix/topic",
+    ]
+
+    _, to_delete_remote, _, preserved_remote = filter_branches([], remote_branches, set())
+
+    assert preserved_remote == {
+        "upstream/main": "主分支保护",
+        "upstream/master": "主分支保护",
+    }
+    assert to_delete_remote == ["upstream/fix/topic"]
+
+
+def test_merged_remote_candidates_parse_non_origin_remote(monkeypatch):
+    """D18-F05：非 origin 远端的 ref 须解析出正确的 remote/含斜杠分支名。"""
+    output = f"refs/remotes/upstream/main\t{_OID_A}\nrefs/remotes/upstream/fix/deep/topic\t{_OID_B}\n"
+
+    def fake_check_output(*args, **kwargs):
+        return output
+
+    monkeypatch.setattr(subprocess, "check_output", fake_check_output)
+
+    candidates = get_merged_remote_candidates("origin/main")
+    assert candidates == [
+        RemoteBranchCandidate(remote="upstream", branch="main", oid=_OID_A),
+        RemoteBranchCandidate(remote="upstream", branch="fix/deep/topic", oid=_OID_B),
+    ]
+
+
+def test_main_never_deletes_non_origin_protected_branches(monkeypatch):
+    """D18-F05：端到端确认 upstream 的 main 与 worktree 分支不被删除。"""
+    fake = FakeGit(
+        worktree_outputs=["/work/main [main]\n", "/work/main [main]\n/work/occupied [fix/occupied]\n"],
+        merged_remote_refs=[
+            ("upstream/main", _OID_A),
+            ("upstream/fix/occupied", _OID_A),
+            ("upstream/fix/topic", _OID_B),
+        ],
+        tips={("upstream", "fix/topic"): _OID_B},
+    )
+    _install_fake(monkeypatch, fake)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "yes")
+
+    assert main() == 0
+    assert fake.push_calls == [
+        [
+            "git",
+            "push",
+            f"--force-with-lease=refs/heads/fix/topic:{_OID_B}",
+            "upstream",
+            ":refs/heads/fix/topic",
+        ]
+    ]
+    assert not [
+        cmd
+        for cmd in fake.query_calls
+        if cmd[1] == "ls-remote" and cmd[3] == "upstream" and cmd[4] == "refs/heads/main"
+    ]
+
+
 def test_merged_local_branches_strip_worktree_marker(monkeypatch):
     """`git branch --merged` 给其他 worktree 检出的分支加 `+ ` 前缀，解析须剥离。
 
