@@ -301,6 +301,16 @@ def test_sanitize_file_skips_binary_without_reading_or_rewriting(tmp_path: Path)
     assert artifact.read_bytes() == png_bytes
 
 
+@pytest.mark.parametrize("suffix", [".ndjson", ".trace", ".tsv"])
+def test_new_text_artifact_suffixes_are_sanitized(tmp_path: Path, suffix: str) -> None:
+    artifact = tmp_path / f"artifact{suffix}"
+    artifact.write_text("postgresql://user:new_secret@host:5432/db\n", encoding="utf-8")
+
+    assert sanitize_file(artifact) is True, f"{suffix} 应纳入文本脱敏白名单"
+
+    assert artifact.read_text(encoding="utf-8") == "postgresql://user:***@host:5432/db\n"
+
+
 def test_sanitize_file_skips_non_whitelisted_text_extension(tmp_path: Path) -> None:
     artifact = tmp_path / "config.cfg"
     original = "postgresql://user:cfg_secret@host:5432/db\n"

@@ -27,7 +27,23 @@ if str(_REPO_ROOT) not in sys.path:
 
 from utils.sanitizers import DataSanitizer  # noqa: E402 - sys.path 注入后导入
 
-TEXT_ARTIFACT_SUFFIXES = frozenset({".log", ".txt", ".xml", ".json", ".html", ".csv", ".yml", ".yaml", ".md", ".out"})
+TEXT_ARTIFACT_SUFFIXES = frozenset(
+    {
+        ".log",
+        ".txt",
+        ".xml",
+        ".json",
+        ".html",
+        ".csv",
+        ".yml",
+        ".yaml",
+        ".md",
+        ".out",
+        ".ndjson",
+        ".trace",
+        ".tsv",
+    }
+)
 
 
 def _is_text_artifact(path: Path) -> bool:
