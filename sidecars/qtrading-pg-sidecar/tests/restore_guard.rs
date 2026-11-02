@@ -11,6 +11,12 @@
 
 mod common;
 
+// 复用生产 password 模块读取逻辑：Windows 上密码文件是 DPAPI 加密的，
+// 直接比较字节会把「同一密码」误判为不同（DPAPI blob 每次加密随机）。
+#[path = "../src/password.rs"]
+#[allow(dead_code)]
+mod password;
+
 use common::*;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -327,4 +333,124 @@ fn test_restore_recovers_when_sidecar_and_postgres_are_both_dead() {
         !baks.is_empty(),
         "original damaged/dead dir should be kept as .bak"
     );
+}
+
+/// D16-F05：显式恢复到独立应用布局后，目标布局必须自包含（含 runtime 密码），
+/// 不依赖源 runtime 即可启动并通过 SELECT 1；源密码文件保持不变。
+#[test]
+fn test_restore_explicit_target_layout_is_self_contained() {
+    let (_tmp, data_dir) = unique_data_dir("rg_f05_self_contained");
+    // 独立应用布局根：与源 data_dir 不同父目录 → runtime 独立（name 必须为 `data`）
+    let target_root = tempfile::Builder::new()
+        .prefix("qts-it-rg_f05_target-")
+        .tempdir()
+        .expect("create target tempdir");
+    let target_data_dir = target_root.path().join("data");
+    let dump_path = data_dir.parent().unwrap().join("backup.dump");
+
+    // 源运行 → dump → 优雅停止（释放维护锁）
+    let mut source_child = spawn_run(&data_dir);
+    let _ready = wait_for_ready(&mut source_child, READY_TIMEOUT);
+    let (dump_code, dump_stderr) = dump_sidecar_with_stderr(&data_dir, &dump_path);
+    assert_eq!(
+        dump_code, 0,
+        "dump should succeed while source is running; stderr:\n{dump_stderr}"
+    );
+    graceful_stop(&mut source_child);
+    assert_eq!(
+        wait_for_exit(&mut source_child, STOP_TIMEOUT),
+        0,
+        "source run should stop cleanly"
+    );
+
+    let source_password_path = data_dir.parent().unwrap().join("runtime").join("password");
+    let source_password_bytes = std::fs::read(&source_password_path).expect("read source password");
+    let source_password_plain =
+        password::read_password_file(&source_password_path).expect("decode source password");
+
+    // 显式恢复到独立布局：sidecar 必须为目标 runtime 写入同一密码
+    let output = Command::new(sidecar_path())
+        .arg("restore")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--input")
+        .arg(&dump_path)
+        .arg("--target-data-dir")
+        .arg(&target_data_dir)
+        .output()
+        .expect("run restore to explicit target");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "restore to independent layout should succeed; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let restore_stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(
+        restore_stdout,
+        target_data_dir.to_string_lossy().replace('\\', "/"),
+        "restore stdout must report the explicit target data dir"
+    );
+
+    let target_password_path = target_root.path().join("runtime").join("password");
+    assert!(
+        target_password_path.exists(),
+        "target runtime password file must be written: {}",
+        target_password_path.display()
+    );
+    assert_eq!(
+        password::read_password_file(&target_password_path).as_deref(),
+        Some(source_password_plain.as_str()),
+        "target runtime must carry the same password"
+    );
+    assert_eq!(
+        std::fs::read(&source_password_path).expect("re-read source password"),
+        source_password_bytes,
+        "source password file must stay unchanged"
+    );
+
+    // 用目标布局启动（不传任何源密码/源目录参数）：ready 后 SELECT 1
+    let mut target_child = spawn_run(&target_data_dir);
+    let target_ready = wait_for_ready(&mut target_child, READY_TIMEOUT);
+    assert_eq!(target_ready["status"], "running");
+    let port = ready_port(&target_ready).expect("port in target ready JSON");
+
+    let psql_name = if cfg!(windows) { "psql.exe" } else { "psql" };
+    let psql = target_root
+        .path()
+        .join("install")
+        .join("bin")
+        .join(psql_name);
+    let out = Command::new(&psql)
+        .args([
+            "-X",
+            "-q",
+            "-A",
+            "-t",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port.to_string(),
+            "-U",
+            "postgres",
+            "-d",
+            "qtrading",
+            "-c",
+            "select 1",
+        ])
+        .env("PGPASSWORD", &source_password_plain)
+        .output()
+        .expect("run bundled psql against restored target");
+    assert!(
+        out.status.success(),
+        "restored target must accept login with target runtime password; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "1",
+        "SELECT 1 must succeed on the restored target"
+    );
+
+    cleanup_sidecar(&mut target_child, &target_data_dir);
 }
