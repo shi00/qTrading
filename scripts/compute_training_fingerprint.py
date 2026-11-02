@@ -354,15 +354,21 @@ def list_release_tags(repo: str) -> list[str]:
 
 
 def tag_exists(repo: str, tag: str) -> bool:
-    """tag 存在性：仅 ``release not found`` 判 False，其余错误 fail-closed（防误判）。"""
-    proc = _run_gh_raw(["release", "view", tag, "--repo", repo])
+    """tag 存在性：查 git ref（不是 Release），404 判 False，其余错误 fail-closed。
+
+    ``gh release view`` 只认已有 Release——纯 git tag（尚未发布 Release）会被误判
+    为不存在，使版本不可变判断失真。GitHub API 对不存在的 ref 返回 HTTP 404；
+    其余非零退出（网络/鉴权/5xx）无法确认存在性，必须 fail-closed 防误判。
+    """
+    proc = _run_gh_raw(["api", f"repos/{repo}/git/ref/tags/{tag}"])
     if proc.returncode == 0:
         return True
     stderr = proc.stderr or ""
-    if "not found" in stderr.lower():
+    if "HTTP 404" in stderr:
         return False
     raise FingerprintError(
-        f"gh release view {tag} 失败（exit {proc.returncode}）: {stderr.strip()}——无法确认 tag 存在性，fail-closed"
+        f"gh api repos/{repo}/git/ref/tags/{tag} 失败（exit {proc.returncode}）: {stderr.strip()}"
+        "——无法确认 tag 存在性，fail-closed"
     )
 
 
