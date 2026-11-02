@@ -425,22 +425,60 @@ class TestQuoteDaoPerformance:
     @pytest.mark.asyncio
     async def test_bulk_vs_individual_query_count(self, quote_dao):
         """
-        性能测试：验证批量查询减少 DB 调用次数
+        性能测试：验证批量查询不会随天数/表数增长（禁止 N 天 × M 表的逐日逐表查询）。
 
-        原方案：N 天 × M 表 = N×M 次查询
-        优化后：M 次查询
+        场景：2021-01-01 至 2023-12-31 共约 780 个工作日 × 3 张表。
+        原方案：N 天 × M 表 = N×M 次查询；
+        优化后：多表记录数合并为单次 UNION ALL 批量查询，DB 调用总数与 N、M 均无关。
         """
-        call_count = 0
+        tables = ["daily_quotes", "daily_indicators", "moneyflow_daily"]
+        dates = [ts.date() for ts in pd.date_range("2021-01-01", "2023-12-31", freq="B")]
+        expected_base = 100
+        db_calls: list[tuple[str, str]] = []
 
-        async def count_calls(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            return {"daily_quotes": {}}
+        async def fake_read_db(sql, params=None, **kwargs):
+            """按真实 DAO 契约返回 DataFrame（dict 分母替身会让目标路径早退）。"""
+            db_calls.append(("read_db", sql))
+            if "expected_count" in sql:
+                return pd.DataFrame({"trade_date": dates, "expected_count": [expected_base] * len(dates)})
+            if "MAX(updated_at)" in sql:
+                return pd.DataFrame({"latest_updated": [dates[-1]]})
+            if "indicators_available" in sql:
+                return pd.DataFrame()
+            return pd.DataFrame()
 
-        with patch.object(quote_dao, "_read_db", new_callable=AsyncMock, side_effect=count_calls):
-            await quote_dao.get_bulk_sync_quality_scores("20210101", "20231231")
+        async def fake_read_db_select(stmt, **kwargs):
+            """多表记录数返回真实列形状；空日登记返回空表。"""
+            rendered = str(stmt)
+            db_calls.append(("read_db_select", rendered))
+            if "sync_empty_days" in rendered:
+                return pd.DataFrame({"table_name": [], "trade_date": []})
+            rows = [(table, trade_date, expected_base) for table in tables for trade_date in dates]
+            return pd.DataFrame(rows, columns=["tbl", "trade_date", "cnt"])
 
-            assert call_count <= 20, f"Expected <= 20 DB calls, got {call_count}"
+        with (
+            patch.object(quote_dao, "_read_db", new_callable=AsyncMock, side_effect=fake_read_db),
+            patch.object(quote_dao, "_read_db_select", new_callable=AsyncMock, side_effect=fake_read_db_select),
+        ):
+            scores = await quote_dao.get_bulk_sync_quality_scores("20210101", "20231231", tables=tables)
+
+        # 目标路径真实执行：每个交易日均完成评分（而非因分母空/替身类型错误早退为空 dict）
+        assert set(scores) == set(dates), f"应覆盖全部 {len(dates)} 个交易日，实际 {len(scores)} 个"
+        for trade_date in dates:
+            info = scores[trade_date]
+            assert info["expected_base"] == expected_base
+            assert info["score"] == 100, f"{trade_date} 数据完整时 score 应为 100，实际 {info['score']}"
+            for table in tables:
+                assert info["tables"][table]["count"] == expected_base
+                assert info["tables"][table]["passed"] is True
+
+        # 查询次数与 N 天 × M 表规模无关；保留原上限并补充逐日/逐表放大检测
+        assert len(db_calls) <= 20, f"Expected <= 20 DB calls, got {len(db_calls)}"
+        assert len(db_calls) < len(dates), f"DB 调用次数不应随天数增长：{len(db_calls)} >= {len(dates)}"
+        bulk_count_queries = [
+            sql for kind, sql in db_calls if kind == "read_db_select" and "sync_empty_days" not in sql
+        ]
+        assert len(bulk_count_queries) == 1, f"多表记录数应单次批量查询，实际 {len(bulk_count_queries)} 次"
 
 
 class TestQualityScoreWeights:
