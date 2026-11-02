@@ -203,6 +203,23 @@ async def _fetch_reservations(dao: AIUsageDao, invocation_id: str) -> list[dict]
     return list(row[0])
 
 
+async def _fetch_monthly_cost(dao: AIUsageDao, *, month: str, scope: str, grouping_key: str) -> Decimal:
+    """读取指定月 / scope / grouping_key 的已结算成本（numeric 列读回为 Decimal）。"""
+    assert dao.engine is not None
+    async with dao.engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT cost_cny FROM ai_usage_monthly "
+                    "WHERE month = :m AND aggregation_scope = :s AND grouping_key = :g"
+                ),
+                {"m": month, "s": scope, "g": grouping_key},
+            )
+        ).fetchone()
+    assert row is not None, f"月汇总行不存在: {month}/{scope}/{grouping_key}"
+    return Decimal(str(row[0]))
+
+
 async def _seed_backing_reservation(dao: AIUsageDao, attempt_id: str) -> str:
     """为缺行结算登记活跃预留背书（F23 fencing）。
 
@@ -924,7 +941,8 @@ class TestAmountGuardContract:
     单测以 mock 断言 SQL 语义；本类在真实 PG 上验证：
     - 垃圾金额（负数 / NaN / 非法字符）入口契约化 ValueError，零落库；
     - 历史 jsonb 垃圾预留（validator 生效前写入）不再毒化预算门（crash → 容错降级）；
-    - float cost 归一化落库无二进制噪音（相邻移交）。
+    - float cost 归一化落库无二进制噪音（非二进制精确值 0.1 / 0.1+0.2+0.07 累加 /
+      超列精度 0.123456795 的 numeric(24,8) 舍入语义）。
     """
 
     @pytest.mark.asyncio(loop_scope="session")
@@ -1061,13 +1079,17 @@ class TestAmountGuardContract:
 
     @pytest.mark.asyncio(loop_scope="session")
     async def test_settle_float_cost_persists_without_binary_noise(self, ledger_dao: AIUsageDao):
-        """相邻移交：float cost 归一为最短往返串落库（修复前 Decimal(float) 全长展开
-        入 numeric 列——PG 无精度 numeric 原样存储 55 位二进制噪音，读回 ≠ 0.50）。"""
+        """float cost 归一为最短往返串后精确落库（0.1 二进制不可精确表示）。
+
+        ``0.5`` 在二进制中可精确表示，无法暴露 ``Decimal(float)`` 全长展开缺陷；
+        本用例改用 ``0.1``，断言 attempt 行与 scenario / connection 两 scope 月汇总
+        读回的均恰为 ``0.1``。
+        """
+        month = _current_month()
         rid = await _seed_backing_reservation(ledger_dao, "att-d3-float")
-        settled = await ledger_dao.settle_attempt_usage(
-            **{**_make_settle_kwargs("att-d3-float", month=_current_month(), cost_cny=0.5), "reservation_id": rid}
+        assert await ledger_dao.settle_attempt_usage(
+            **{**_make_settle_kwargs("att-d3-float", month=month, cost_cny=0.1), "reservation_id": rid}
         )
-        assert settled is True
         assert ledger_dao.engine is not None
         async with ledger_dao.engine.begin() as conn:
             row = (
@@ -1077,4 +1099,82 @@ class TestAmountGuardContract:
                 )
             ).fetchone()
         assert row is not None
-        assert Decimal(str(row[0])) == Decimal("0.50"), "费用落库必须为规范十进制值"
+        assert Decimal(str(row[0])) == Decimal("0.1"), "0.1 归一化后费用落库必须精确"
+        assert await _fetch_monthly_cost(
+            ledger_dao, month=month, scope=SCOPE_SCENARIO, grouping_key="scn-itest"
+        ) == Decimal("0.1"), "scenario 月汇总须精确累加 0.1"
+        assert await _fetch_monthly_cost(
+            ledger_dao, month=month, scope=SCOPE_CONNECTION, grouping_key="conn-itest"
+        ) == Decimal("0.1"), "connection 月汇总须精确累加 0.1"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_non_binary_float_costs_accumulate_exactly(self, ledger_dao: AIUsageDao):
+        """0.1 + 0.2 + 0.07（均二进制不可精确表示）逐笔结算后精确累加为 0.37。
+
+        Python float 直接相加得 ``0.37000000000000005``；本用例以 numeric 列的
+        十进制精确和作为 oracle，覆盖「存储 → 读取 → 累加」全链路精度语义。
+        """
+        month = _current_month()
+        costs = (0.1, 0.2, 0.07)
+        for i, cost in enumerate(costs):
+            rid = await _seed_backing_reservation(ledger_dao, f"att-accum-{i}")
+            assert await ledger_dao.settle_attempt_usage(
+                **{
+                    **_make_settle_kwargs(
+                        f"att-accum-{i}", month=month, cost_cny=cost, connection_id=f"conn-accum-{i}"
+                    ),
+                    "reservation_id": rid,
+                }
+            ), f"第 {i} 笔非二进制浮点费用结算失败"
+
+        assert ledger_dao.engine is not None
+        async with ledger_dao.engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT attempt_count, cost_cny FROM ai_usage_monthly "
+                        "WHERE month = :m AND aggregation_scope = :s AND grouping_key = :g"
+                    ),
+                    {"m": month, "s": SCOPE_SCENARIO, "g": "scn-itest"},
+                )
+            ).fetchone()
+        assert row is not None
+        assert int(row[0]) == len(costs), "三笔结算应全部计入 scenario 汇总"
+        assert Decimal(str(row[1])) == Decimal("0.37"), "0.1 + 0.2 + 0.07 必须精确累加为 0.37，而非浮点漂移值"
+
+        for i, cost in enumerate(costs):
+            conn_cost = await _fetch_monthly_cost(
+                ledger_dao, month=month, scope=SCOPE_CONNECTION, grouping_key=f"conn-accum-{i}"
+            )
+            assert conn_cost == Decimal(str(cost)), f"connection 行 conn-accum-{i} 须保留各自精确费用"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_float_cost_over_column_scale_rounds_half_away_from_zero(self, ledger_dao: AIUsageDao):
+        """0.123456795（9 位小数、二进制不可精确表示）按 numeric(24,8) 半离零舍入。
+
+        ``str(float)`` 最短往返串 ``"0.123456795"`` 精确入 numeric 后舍入为
+        ``0.12345680``；若未归一化直接绑 float，asyncpg 以 ``Decimal(float)`` 全长
+        展开（二进制值略小于十进制字面量），读回 ``0.12345679``——本用例据此区分
+        两种路径，并断言 attempt 与月汇总采用同一舍入语义。
+        """
+        month = _current_month()
+        rid = await _seed_backing_reservation(ledger_dao, "att-d3-round")
+        assert await ledger_dao.settle_attempt_usage(
+            **{
+                **_make_settle_kwargs("att-d3-round", month=month, cost_cny=0.123456795),
+                "reservation_id": rid,
+            }
+        )
+        assert ledger_dao.engine is not None
+        async with ledger_dao.engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT cost_cny FROM ai_attempt WHERE attempt_id = :aid"),
+                    {"aid": "att-d3-round"},
+                )
+            ).fetchone()
+        assert row is not None
+        assert Decimal(str(row[0])) == Decimal("0.12345680"), "超列精度金额须按 numeric(24,8) 半离零舍入"
+        assert await _fetch_monthly_cost(
+            ledger_dao, month=month, scope=SCOPE_SCENARIO, grouping_key="scn-itest"
+        ) == Decimal("0.12345680"), "月汇总累加须与 attempt 采用同一舍入语义"
