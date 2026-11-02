@@ -206,7 +206,7 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 | 14 | `CREATE_DATABASE_FAILED` | 业务库创建失败 | run |
 | 15 | `PREFLIGHT_FAILED` | 资源预检失败：磁盘空间不足 / 目录权限不足 / 文件系统不支持 / 网盘同步路径 / 密码文件权限过宽 | run |
 | 16 | `PASSWORD_FAILED` | 密码文件缺失/为空/不可解密（PGDATA 已存在）或认证不匹配（28P01） | run / dump / restore / maintenance-shell / reset-password |
-| 20 | `STOP_FAILED` | 停止 postgres 失败（分级停止后进程仍存活）；PG 未运行时 stop 幂等成功返回 0 | stop / run |
+| 20 | `STOP_FAILED` | 停止 postgres 失败（分级停止后进程仍存活）；或无法证明 `postmaster.pid` 中的 PID 属于本 PGDATA（拒绝发送信号并保留 PID 文件与诊断）；PG 未运行时 stop 幂等成功返回 0 | stop / run |
 | 30 | `DUMP_RESTORE_FAILED` | 备份/恢复执行失败：备份文件不存在或损坏、版本不兼容、pg_dump/pg_restore 执行失败、恢复目录切换失败、dump 输出已存在或另一任务占用同一输出等 | dump / restore / reset-password |
 | 40 | `DATA_DIR_ABNORMAL` | 数据目录状态异常：非空但无 PG_VERSION、主版本不匹配、pg_control/WAL 损坏嫌疑、关键文件缺失 | run / maintenance-shell / reset-password |
 | 50 | `LOCK_CONFLICT` | 维护锁冲突：qTrading 或另一个维护进程正在使用该 PGDATA | run / stop / dump / restore / maintenance-shell / reset-password |

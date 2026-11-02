@@ -583,31 +583,32 @@ class TestEmbeddedPostgresServiceStart:
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_start_propagates_cancelled_error(self, fake_paths, monkeypatch) -> None:
-        """asyncio.to_thread raise CancelledError → start 重新 raise + 触发清理。"""
+        """取消先于工作线程执行：CancelledError 透传（R2），不泄漏进程。
+
+        D16-R02：to_thread 立即抛 CancelledError 时工作项可能从未执行；
+        取消路径通过取消令牌 + 完成握手收尾，此窗口不会创建进程，
+        也不应在实例上做阻塞式清理（清理在事件循环外完成）。
+        """
         import asyncio
 
         from data.persistence.embedded_postgres import service as svc_module
 
         service = svc_module.EmbeddedPostgresService(**fake_paths)
-        cleanup_called = {"v": False}
-        original_cleanup = service._cleanup_failed_start
-        service._cleanup_failed_start = lambda: cleanup_called.__setitem__("v", True)  # type: ignore[assignment]  # [reason: 测试 monkeypatch 替换实例方法为 lambda]
 
-        async def raise_cancelled(func):
+        async def raise_cancelled(func, *args, **kwargs):
             raise asyncio.CancelledError()
 
         try:
             monkeypatch.setattr(asyncio, "to_thread", raise_cancelled)
-            # CancelledError 无消息可 match；用 as exc_info 捕获后断言类型，
-            # 后续 assert cleanup_called 验证 _cleanup_failed_start 副作用
+            # CancelledError 无消息可 match；用 as exc_info 捕获后断言类型（R2 红线验证）
             with pytest.raises(asyncio.CancelledError) as exc_info:
                 await service.start()
             assert isinstance(exc_info.value, asyncio.CancelledError)
-            assert cleanup_called["v"] is True
+            assert service._process is None
+            assert service._connection_info is None
         finally:
             # 先恢复 asyncio.to_thread，再调 stop 避免被 mock 影响
             monkeypatch.undo()
-            service._cleanup_failed_start = original_cleanup  # type: ignore[assignment]  # [reason: 测试 monkeypatch 恢复实例方法]
             await service.stop()
 
     @pytest.mark.asyncio(loop_scope="function")
