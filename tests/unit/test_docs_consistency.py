@@ -34,6 +34,7 @@ INSTALLER_PATH = ROOT / "installer.iss"
 PACKAGE_JSON_PATH = ROOT / "package.json"
 RELEASE_MANIFEST_PATH = ROOT / ".release-please-manifest.json"
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci_cd.yml"
+DOCS_CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "docs-ci.yml"
 
 
 def _get_pyproject_version() -> str:
@@ -6981,3 +6982,60 @@ class TestPrecommitHookAndWorkflowEnum:
         assert any("sidecar.yml" in e and "未在 ci-cd.md 登记" in e for e in errors), (
             f"长名不应视为已登记 sidecar.yml, got: {errors}"
         )
+
+
+class TestDocsWorkflowMergeQueueContract:
+    """D18-Q01：docs-ci 的 merge queue 契约。
+
+    `Docs Consistency Check` 是 main 的 required check。仓库启用 merge queue 后，
+    merge_group 事件只运行显式声明该触发的 workflow；缺该触发会使队列永远缺 check。
+    """
+
+    @staticmethod
+    def _load_workflow() -> dict[str, object]:
+        """用 BaseLoader 解析：YAML 1.1 会把裸 `on` 键解析成布尔 True，BaseLoader 保持字符串键。"""
+        import yaml
+
+        return yaml.load(DOCS_CI_WORKFLOW_PATH.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+
+    def test_merge_group_trigger_declared_for_main(self):
+        data = self._load_workflow()
+        triggers = data["on"]
+        assert isinstance(triggers, dict), f"on 触发块应为 mapping, got: {type(triggers)}"
+        assert "merge_group" in triggers, f"docs-ci.yml 缺少 merge_group 触发: {triggers}"
+        merge_group = triggers["merge_group"]
+        assert isinstance(merge_group, dict), f"merge_group 应声明 branches: main, got: {merge_group}"
+        assert merge_group.get("branches") == ["main"], f"merge_group 应只针对 main, got: {merge_group}"
+
+    def test_pull_request_trigger_has_no_paths_filter(self):
+        data = self._load_workflow()
+        triggers = data["on"]
+        assert isinstance(triggers, dict), f"on 触发块应为 mapping, got: {type(triggers)}"
+        pull_request = triggers["pull_request"]
+        assert isinstance(pull_request, dict), f"pull_request 触发块应为 mapping, got: {pull_request}"
+        assert "paths" not in pull_request, "paths 未命中时 required check 会永久停在 Pending"
+
+    def test_required_check_job_name_is_stable(self):
+        data = self._load_workflow()
+        jobs = data["jobs"]
+        assert isinstance(jobs, dict), f"jobs 应为 mapping, got: {type(jobs)}"
+        names = [job.get("name") for job in jobs.values() if isinstance(job, dict)]
+        assert names.count("Docs Consistency Check") == 1, (
+            f"required check job name 必须精确为 Docs Consistency Check, got: {names}"
+        )
+
+    def test_concurrency_group_has_ref_fallback(self):
+        data = self._load_workflow()
+        concurrency = data["concurrency"]
+        assert isinstance(concurrency, dict), f"concurrency 应为 mapping, got: {type(concurrency)}"
+        group = concurrency["group"]
+        assert isinstance(group, str), f"concurrency group 应为字符串, got: {group}"
+        assert "github.head_ref" in group and "github.ref" in group and "||" in group, (
+            f"merge_group 下 github.head_ref 为空，group 必须回落到 github.ref: {group}"
+        )
+
+    def test_permissions_are_read_only(self):
+        data = self._load_workflow()
+        permissions = data["permissions"]
+        assert isinstance(permissions, dict), f"permissions 应为 mapping, got: {type(permissions)}"
+        assert permissions == {"contents": "read"}, f"permissions 应最小化为 contents: read, got: {permissions}"

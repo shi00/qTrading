@@ -5,12 +5,17 @@ on:
     branches: [ "main" ]
     # 不使用 paths 过滤：Docs Consistency Check 是 main 的 required status check，
     # 若 paths 未命中则本 workflow 不触发，该 check 永久停在 Pending 并阻塞合并。
+  # merge queue 启用后，merge_group 事件只运行显式声明该触发的 workflow；
+  # 缺少本触发时，队列生成的合并提交永远拿不到 Docs Consistency Check。
+  merge_group:
+    branches: [ "main" ]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
+  # merge_group 事件下 github.head_ref 为空，回落到 github.ref；队列 ref 含 PR 号与 SHA，天然唯一。
   group: ci-docs-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
