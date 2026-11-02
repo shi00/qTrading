@@ -2,7 +2,8 @@
 //!
 //! - doctor：只读诊断（§13.5 诊断包数据源），输出 doctor JSON + issues 汇总，永不修改 PGDATA。
 //! - dump：运行中实例直连 `pg_dump`（SQL 级，不占锁，§13.3 AI-28）；离线则持锁起临时实例。
-//! - restore：恢复到新目录不覆盖原目录（§12.2），复用既有密码（AI-29），临时实例 + pg_restore。
+//! - restore：恢复到新目录不覆盖原目录（§12.2），复用既有密码（AI-29），临时实例 + pg_restore；
+//!   显式目标使用独立 runtime 时写入同一密码，保证目标布局可独立启动（D16-F05）。
 //! - maintenance-shell：持锁起临时维护实例，输出脱敏连接信息，等用户结束后优雅停止。
 //!
 //! 恢复后 schema 停留于备份时点；Alembic 补平由 app 下次启动的既有迁移流程负责（Phase 2+，§12.2 step 7）。
@@ -23,7 +24,8 @@ use crate::setup::{self, DataDirState};
 use crate::state;
 use postgresql_embedded::PostgreSQL;
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::ffi::{OsStr, OsString};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 const DUMP_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -948,6 +950,286 @@ fn restore_target_to_report(layout: &Layout, restore_dir: &Path, do_swap: bool) 
     target.to_string_lossy().replace('\\', "/")
 }
 
+// ---- 显式恢复目标的凭据供给（D16-F05） ----
+
+/// 显式目标使用独立 runtime 时，恢复成功后必须把同一密码写入目标 runtime。
+/// 结构持有目标维护锁直至 restore 结束，防止并发维护进程同时使用目标布局。
+struct TargetCredentials {
+    layout: Layout,
+    _lock: MaintenanceLock,
+}
+
+/// 词法绝对化 + `.`/`..` 归一（不解析符号链接；供尚未创建的路径比较使用）。
+fn normalize_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
+    };
+    let mut out = PathBuf::new();
+    for comp in absolute.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                match out.components().next_back() {
+                    Some(Component::RootDir) | Some(Component::Prefix(_)) => continue,
+                    _ => {}
+                }
+                if !out.pop() {
+                    out.push(comp.as_os_str());
+                }
+            }
+            _ => out.push(comp.as_os_str()),
+        }
+    }
+    out
+}
+
+/// 解析到最近的已存在祖先后再拼回剩余组件：目标目录可能尚未创建，但父目录符号链接
+/// 已存在的场景必须按真实位置比较，避免把凭据写进源 runtime 或源 PGDATA。
+fn canonical_for_compare(path: &Path) -> PathBuf {
+    let absolute = normalize_path(path);
+    let mut suffix: Vec<OsString> = Vec::new();
+    let mut probe = absolute.as_path();
+    loop {
+        if let Ok(mut resolved) = std::fs::canonicalize(probe) {
+            for part in suffix.iter().rev() {
+                resolved.push(part);
+            }
+            return resolved;
+        }
+        let Some(name) = probe.file_name() else {
+            return absolute;
+        };
+        let Some(parent) = probe.parent() else {
+            return absolute;
+        };
+        suffix.push(name.to_os_string());
+        probe = parent;
+    }
+}
+
+#[cfg(windows)]
+fn os_component_eq(a: &OsStr, b: &OsStr) -> bool {
+    // Windows 文件系统大小写不敏感；符号链接归一后仍须按平台语义比较。
+    a.to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn os_component_eq(a: &OsStr, b: &OsStr) -> bool {
+    a == b
+}
+
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    let (ca, cb) = (canonical_for_compare(a), canonical_for_compare(b));
+    let mut ac = ca.components();
+    let mut bc = cb.components();
+    loop {
+        match (ac.next(), bc.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) if os_component_eq(x.as_os_str(), y.as_os_str()) => {}
+            _ => return false,
+        }
+    }
+}
+
+fn is_within(child: &Path, ancestor: &Path) -> bool {
+    let (cc, ca) = (
+        canonical_for_compare(child),
+        canonical_for_compare(ancestor),
+    );
+    let mut ac = ca.components();
+    let mut cc = cc.components();
+    loop {
+        match ac.next() {
+            None => return true,
+            Some(ap) => match cc.next() {
+                Some(cp) if os_component_eq(ap.as_os_str(), cp.as_os_str()) => {}
+                _ => return false,
+            },
+        }
+    }
+}
+
+fn is_data_dir_name(path: &Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        name.to_string_lossy().eq_ignore_ascii_case("data")
+    }
+    #[cfg(not(windows))]
+    {
+        name == OsStr::new("data")
+    }
+}
+
+/// 判定显式目标的凭据归属：
+/// - 与源布局共享 runtime（同级目录/符号链接归一后同一文件）→ `Ok(None)`，沿用源凭据；
+/// - 独立 runtime → 只接受应用布局 `<data root>/data`，返回目标布局供后续加锁与写入；
+/// - 目标位于源 PGDATA 内或命名不是 `data` → 明确拒绝并给出受支持路径（exit 2）。
+fn plan_explicit_target(layout: &Layout, target: &Path) -> Result<Option<Layout>, u8> {
+    let target_layout = Layout::from_data_dir(target, None, None, None);
+    if paths_equal(&layout.password_file, &target_layout.password_file) {
+        return Ok(None);
+    }
+    if is_within(&target_layout.data_dir, &layout.data_dir) {
+        eprintln!(
+            "[sidecar] 目标目录位于源 PGDATA 内，拒绝把恢复数据或凭据写入源数据目录：{}",
+            target.display()
+        );
+        return Err(exit_codes::ARGUMENT_ERROR);
+    }
+    if !is_data_dir_name(&target_layout.data_dir) {
+        let supported = target
+            .parent()
+            .map_or_else(|| PathBuf::from("<data root>/data"), |p| p.join("data"));
+        eprintln!(
+            "[sidecar] 显式目标布局不受支持：{}。独立 runtime 的恢复目标必须为 `<data root>/data`\
+             （应用布局 `<app data>/postgres/<major>/data`，例如 {}）；\
+             与源数据目录同级的目录可直接使用（共享 runtime）。",
+            target.display(),
+            supported.display()
+        );
+        return Err(exit_codes::ARGUMENT_ERROR);
+    }
+    Ok(Some(target_layout))
+}
+
+fn acquire_target_lock(target_layout: &Layout) -> Result<MaintenanceLock, u8> {
+    match MaintenanceLock::try_acquire(&target_layout.lock_file) {
+        Ok(lock) => Ok(lock),
+        Err(AcquireError::Conflict) => {
+            eprintln!(
+                "[sidecar] 目标维护锁冲突：另一进程正在使用目标布局 {}；\
+                 请先停止使用该目录的 qTrading/维护进程后重试",
+                target_layout.data_dir.display()
+            );
+            Err(exit_codes::LOCK_CONFLICT)
+        }
+        Err(AcquireError::Io(e)) => {
+            eprintln!(
+                "[sidecar] 目标维护锁获取失败 {}: {e}",
+                target_layout.lock_file.display()
+            );
+            Err(exit_codes::LOCK_CONFLICT)
+        }
+    }
+}
+
+/// 写入前校验目标 runtime 归属：拒绝符号链接 runtime/密码文件与任何已存在但
+/// 不属于本次的凭据；同一密码允许重写（用于收紧权限/统一平台格式）。
+fn verify_target_credentials(target_layout: &Layout, password: &str) -> Result<(), u8> {
+    let runtime_dir = target_layout
+        .password_file
+        .parent()
+        .unwrap_or(target_layout.data_dir.as_path());
+    match std::fs::symlink_metadata(runtime_dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            eprintln!(
+                "[sidecar] 目标 runtime 是符号链接，拒绝写入凭据：{}",
+                runtime_dir.display()
+            );
+            return Err(exit_codes::PASSWORD_FAILED);
+        }
+        Ok(meta) if !meta.is_dir() => {
+            eprintln!(
+                "[sidecar] 目标 runtime 不是目录，拒绝写入凭据：{}",
+                runtime_dir.display()
+            );
+            return Err(exit_codes::PASSWORD_FAILED);
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!(
+                "[sidecar] 目标 runtime 状态读取失败 {}: {e}",
+                runtime_dir.display()
+            );
+            return Err(exit_codes::PASSWORD_FAILED);
+        }
+    }
+
+    match std::fs::symlink_metadata(&target_layout.password_file) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                eprintln!(
+                    "[sidecar] 目标密码文件是符号链接，拒绝覆盖：{}",
+                    target_layout.password_file.display()
+                );
+                return Err(exit_codes::PASSWORD_FAILED);
+            }
+            match password::read_password_file(&target_layout.password_file) {
+                Some(existing) if existing == password => Ok(()),
+                Some(_) => {
+                    eprintln!(
+                        "[sidecar] 目标 runtime 已有不属于本次恢复的凭据，拒绝覆盖：{}。\
+                         如需复用该目标，请先确认其来源或改用新的应用布局目录。",
+                        target_layout.password_file.display()
+                    );
+                    Err(exit_codes::PASSWORD_FAILED)
+                }
+                None => {
+                    eprintln!(
+                        "[sidecar] 目标密码文件存在但不可用（空/损坏/不可解密），拒绝覆盖：{}",
+                        target_layout.password_file.display()
+                    );
+                    Err(exit_codes::PASSWORD_FAILED)
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => {
+            eprintln!(
+                "[sidecar] 目标密码文件状态读取失败 {}: {e}",
+                target_layout.password_file.display()
+            );
+            Err(exit_codes::PASSWORD_FAILED)
+        }
+    }
+}
+
+fn cleanup_restored_target(restore_dir: &Path) {
+    if let Err(e) = std::fs::remove_dir_all(restore_dir) {
+        eprintln!(
+            "[sidecar] 目标数据目录清理失败，请手动删除 {}: {e}",
+            restore_dir.display()
+        );
+    }
+}
+
+/// 恢复成功后再写凭据（避免失败恢复留下孤立凭据）；写入失败时清理本次恢复目录，
+/// 不让目标停留在「有数据但无凭据」的不可用状态。重复校验缩小并发覆盖窗口。
+fn finalize_target_credentials(
+    credentials: &TargetCredentials,
+    password: &str,
+    restore_dir: &Path,
+) -> Result<(), u8> {
+    if let Err(code) = verify_target_credentials(&credentials.layout, password) {
+        cleanup_restored_target(restore_dir);
+        return Err(code);
+    }
+    match password::write_password_file(&credentials.layout.password_file, password) {
+        Ok(()) => {
+            eprintln!(
+                "[sidecar] 目标 runtime 已写入同一密码（未输出明文）：{}",
+                credentials.layout.password_file.display()
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!(
+                "[sidecar] 目标 runtime 密码文件写入失败 {}: {e}",
+                credentials.layout.password_file.display()
+            );
+            cleanup_restored_target(restore_dir);
+            Err(exit_codes::PASSWORD_FAILED)
+        }
+    }
+}
+
 pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
     logging::init(None);
     validate_database_name(&args.database)?;
@@ -966,8 +1248,20 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
 
     // §12.2：恢复到新目录。显式 --target-data-dir 时原目录完全不动；缺省时走原子切换。
     let ts = ts_compact();
+    let mut target_credentials: Option<TargetCredentials> = None;
     let (restore_dir, do_swap) = match &args.target_data_dir {
         Some(target) => {
+            // D16-F05：独立 runtime 的目标必须由本次恢复建立凭据，否则用户切到该布局后
+            // run 只会读目标 runtime/password（缺失 → exit 16）。先校验布局归属并加锁，
+            // 再动任何恢复目录。
+            if let Some(target_layout) = plan_explicit_target(&layout, target)? {
+                let lock = acquire_target_lock(&target_layout)?;
+                verify_target_credentials(&target_layout, &password)?;
+                target_credentials = Some(TargetCredentials {
+                    layout: target_layout,
+                    _lock: lock,
+                });
+            }
             let nonempty = target.exists()
                 && std::fs::read_dir(target)
                     .map(|mut r| r.next().is_some())
@@ -1054,6 +1348,9 @@ pub async fn restore(args: cli::RestoreArgs) -> Result<(), u8> {
         let _ = state::write(&layout.state_file, &st);
         eprintln!("[sidecar] 恢复完成，原目录保留于 {}", bak.display());
     } else {
+        if let Some(credentials) = &target_credentials {
+            finalize_target_credentials(credentials, &password, &restore_dir)?;
+        }
         eprintln!(
             "[sidecar] 恢复完成：{}（原目录未改动）",
             restore_dir.display()
@@ -1811,7 +2108,8 @@ mod tests {
         let input = dir.join("in.dump");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&input, b"dump").unwrap();
-        let target = dir.join("target");
+        // 与源数据目录同级的目录共享 runtime（D16-F05 兼容路径），此处只验证非空拒绝
+        let target = dir.join("postgres/16/restored");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("x"), "y").unwrap();
         // 密码文件需存在以越过 load_password
@@ -1826,6 +2124,177 @@ mod tests {
             username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(restore(args).await, Err(exit_codes::DUMP_RESTORE_FAILED));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- D16-F05 显式目标布局与凭据归属（纯文件系统，不启动 PG） ----
+
+    #[test]
+    fn plan_explicit_target_shares_runtime_for_sibling_and_accepts_app_layout() {
+        let dir = unique_tmp("f05-plan");
+        let source = Layout::from_data_dir(&dir.join("postgres/16/data"), None, None, None);
+
+        // 同级目录共享 runtime：沿用源凭据，不产生额外写入
+        let sibling = dir.join("postgres/16/restored");
+        assert!(plan_explicit_target(&source, &sibling).unwrap().is_none());
+
+        // 独立应用布局 `<data root>/data`：需要为本次恢复建立凭据
+        let target = dir.join("second/postgres/16/data");
+        let planned = plan_explicit_target(&source, &target).unwrap().unwrap();
+        assert_eq!(planned.data_dir, target);
+        assert_eq!(
+            planned.password_file,
+            dir.join("second/postgres/16/runtime/password")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_explicit_target_rejects_unsupported_layout_and_source_pgdata() {
+        let dir = unique_tmp("f05-plan-reject");
+        let source = Layout::from_data_dir(&dir.join("postgres/16/data"), None, None, None);
+
+        // 任意布局（命名不是 `data`，且 runtime 与源无关）→ 明确拒绝
+        let arbitrary = dir.join("restored");
+        assert_eq!(
+            plan_explicit_target(&source, &arbitrary).err(),
+            Some(exit_codes::ARGUMENT_ERROR)
+        );
+
+        // 目标位于源 PGDATA 内 → 拒绝把数据/凭据写进源数据目录
+        let inside = source.data_dir.join("nested/data");
+        assert_eq!(
+            plan_explicit_target(&source, &inside).err(),
+            Some(exit_codes::ARGUMENT_ERROR)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_target_credentials_rejects_foreign_credentials_without_overwrite() {
+        let dir = unique_tmp("f05-verify");
+        let target = Layout::from_data_dir(&dir.join("second/postgres/16/data"), None, None, None);
+        password::write_password_file(&target.password_file, "OtherPwd-1_2.3~").unwrap();
+        let before = std::fs::read(&target.password_file).unwrap();
+
+        assert_eq!(
+            verify_target_credentials(&target, "SourcePwd-1_2.3~"),
+            Err(exit_codes::PASSWORD_FAILED)
+        );
+        assert_eq!(
+            std::fs::read(&target.password_file).unwrap(),
+            before,
+            "无关凭据不得被覆盖"
+        );
+
+        // 同一密码允许重写（用于统一平台格式/收紧权限）
+        assert_eq!(
+            verify_target_credentials(&target, "OtherPwd-1_2.3~"),
+            Ok(())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_target_credentials_rejects_unusable_or_symlinked_files() {
+        let dir = unique_tmp("f05-verify-bad");
+        let target = Layout::from_data_dir(&dir.join("second/postgres/16/data"), None, None, None);
+        std::fs::create_dir_all(target.password_file.parent().unwrap()).unwrap();
+
+        // 空/损坏的密码文件不可覆盖（可能是别的实例残留）
+        std::fs::write(&target.password_file, "  \n").unwrap();
+        assert_eq!(
+            verify_target_credentials(&target, "SourcePwd-1_2.3~"),
+            Err(exit_codes::PASSWORD_FAILED)
+        );
+        std::fs::remove_file(&target.password_file).unwrap();
+
+        // Windows 无法在非特权测试中创建符号链接，仅 Unix 覆盖符号链接拒绝路径
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let real = dir.join("real-password");
+            std::fs::write(&real, "RealPwd-1_2.3~").unwrap();
+            symlink(&real, &target.password_file).unwrap();
+            assert_eq!(
+                verify_target_credentials(&target, "SourcePwd-1_2.3~"),
+                Err(exit_codes::PASSWORD_FAILED),
+                "符号链接密码文件不得被覆盖"
+            );
+            std::fs::remove_file(&target.password_file).unwrap();
+
+            let runtime = target.password_file.parent().unwrap();
+            std::fs::remove_dir(runtime).unwrap();
+            let real_runtime = dir.join("real-runtime");
+            std::fs::create_dir_all(&real_runtime).unwrap();
+            symlink(&real_runtime, runtime).unwrap();
+            assert_eq!(
+                verify_target_credentials(&target, "SourcePwd-1_2.3~"),
+                Err(exit_codes::PASSWORD_FAILED),
+                "符号链接 runtime 不得被写入"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_target_with_existing_credentials() {
+        let dir = unique_tmp("f05-restore-conflict");
+        let input = dir.join("in.dump");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&input, b"dump").unwrap();
+        let data_dir = dir.join("postgres/16/data");
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        password::write_password_file(&layout.password_file, "SourcePwd-1_2.3~").unwrap();
+
+        let target = dir.join("second/postgres/16/data");
+        let target_layout = Layout::from_data_dir(&target, None, None, None);
+        password::write_password_file(&target_layout.password_file, "OtherPwd-1_2.3~").unwrap();
+        let before = std::fs::read(&target_layout.password_file).unwrap();
+
+        let args = cli::RestoreArgs {
+            data_dir,
+            input,
+            target_data_dir: Some(target),
+            database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
+        };
+        assert_eq!(restore(args).await, Err(exit_codes::PASSWORD_FAILED));
+        assert_eq!(
+            std::fs::read(&target_layout.password_file).unwrap(),
+            before,
+            "目标已有无关凭据时必须拒绝且不覆盖"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_unsupported_target_layout_before_side_effects() {
+        let dir = unique_tmp("f05-restore-layout");
+        let input = dir.join("in.dump");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&input, b"dump").unwrap();
+        let data_dir = dir.join("postgres/16/data");
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+        password::write_password_file(&layout.password_file, "SourcePwd-1_2.3~").unwrap();
+
+        let target = dir.join("restored");
+        let args = cli::RestoreArgs {
+            data_dir,
+            input,
+            target_data_dir: Some(target.clone()),
+            database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
+        };
+        assert_eq!(restore(args).await, Err(exit_codes::ARGUMENT_ERROR));
+        assert!(!target.exists(), "拒绝时不得创建目标目录");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2868,14 +3337,16 @@ mod tests {
     }
 
     /// `restore` 成功路径（target_data_dir 模式，不交换目录）：
-    /// 启动 PG → dump → 停止 → restore 到 target_data_dir → 验证 target 含 PG_VERSION。
-    /// 覆盖 restore target_data_dir 分支、restore_into、restore_via_instance。
+    /// 启动 PG → dump → 停止 → restore 到独立应用布局 `<root>/postgres/16/data`
+    /// → 验证 target 含 PG_VERSION、目标 runtime 已写入同一密码、源凭据未被改动。
+    /// 覆盖 D16-F05 的目标布局规划/加锁/凭据写入与 restore_via_instance。
     /// `await_holding_lock`：PG_TEST_MUTEX 是测试串行化锁，非生产代码，持有锁 await 不会死锁。
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn restore_succeeds_with_target_data_dir() {
         let _guard = PG_TEST_MUTEX.lock().unwrap();
         let (layout, password, dir) = setup_pg_layout("restore-target").await;
+        let source_password_before = std::fs::read(&layout.password_file).unwrap();
 
         // 1. 启动 PG 并 dump（在线路径，不占锁）
         let instance = TempInstance::start(layout.clone(), DEFAULT_USERNAME, &password)
@@ -2907,8 +3378,8 @@ mod tests {
         assert!(dump_result.is_ok(), "dump should succeed first");
         assert!(dump_path.exists(), "dump file should exist");
 
-        // 2. restore 到 target_data_dir（do_swap=false，不交换目录）
-        let target = dir.join("restored");
+        // 2. restore 到独立应用布局（do_swap=false，不交换目录；runtime 与源不同）
+        let target = dir.join("second/postgres/16/data");
         let restore_args = cli::RestoreArgs {
             data_dir: layout.data_dir.clone(),
             input: dump_path.clone(),
@@ -2926,6 +3397,31 @@ mod tests {
         assert!(
             target.join("PG_VERSION").exists(),
             "target should be initialized"
+        );
+
+        // 3. D16-F05：目标布局必须能独立启动 —— runtime/password 存在且为同一密码
+        let target_layout = Layout::from_data_dir(&target, None, None, None);
+        assert_eq!(
+            password::read_password_file(&target_layout.password_file).as_deref(),
+            Some(password.as_str()),
+            "目标 runtime 必须写入同一密码"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&target_layout.password_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "目标密码文件权限必须为 0600");
+        }
+
+        // 4. 源凭据保持原样（不得被改写/重新加密）
+        assert_eq!(
+            std::fs::read(&layout.password_file).unwrap(),
+            source_password_before,
+            "源密码文件不得被修改"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -121,7 +121,10 @@ pub struct RestoreArgs {
     /// 输入备份文件
     #[arg(long)]
     pub input: PathBuf,
-    /// 恢复到该目录（缺省：恢复到 --data-dir 的 §12.2 原子切换流程）
+    /// 恢复到该目录（缺省：恢复到 --data-dir 的 §12.2 原子切换流程）。
+    ///
+    /// 独立布局须为 `<data root>/data`（如 `<app data>/postgres/16/data`），恢复成功后
+    /// sidecar 会为该布局写入同一密码；与源数据目录同级的目录共享 runtime，沿用源凭据。
     #[arg(long)]
     pub target_data_dir: Option<PathBuf>,
     /// 业务库名（缺省 qtrading，保持旧命令向后兼容）
