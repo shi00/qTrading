@@ -9,7 +9,8 @@
         --target x86_64-pc-windows-msvc \
         [--output manifest.json]
 
-退出码: 0 成功; 1 参数/文件错误; 2 sidecar version --json 调用失败。
+退出码: 0 成功; 1 参数/文件错误; 2 sidecar version --json 调用失败，或发布校验失败
+（返回非 dict / schema 不符 / target 缺失或不匹配 / self_sha256 与实际摘要不一致）。
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import sys
 from pathlib import Path
 
 MANIFEST_SCHEMA = "qtrading.sidecar.manifest.v1"
+VERSION_SCHEMA = "qtrading.embedded_postgres.version.v1"
 VERSION_TIMEOUT_S = 10
 
 
@@ -61,6 +63,33 @@ def query_sidecar_version(sidecar: Path) -> dict[str, object]:
         raise RuntimeError(f"sidecar version --json produced non-JSON stdout: {proc.stdout!r}") from exc
 
 
+def _validate_release_version(version_json: object, target: str, sha256: str) -> dict[str, object]:
+    """发布入口校验 sidecar version JSON，返回类型收窄后的 dict。
+
+    仅由 main() 调用，不改变 build_manifest 的容错 helper 契约。
+    校验失败抛 ValueError，由 main() 转为退出码 2。
+    """
+    if not isinstance(version_json, dict):
+        raise ValueError(f"sidecar version JSON must be an object/dict, got {type(version_json).__name__}")
+    schema = version_json.get("schema")
+    if schema != VERSION_SCHEMA:
+        raise ValueError(f"sidecar version JSON schema mismatch: expected {VERSION_SCHEMA!r}, got {schema!r}")
+    version_target = version_json.get("target")
+    if not isinstance(version_target, str) or not version_target:
+        raise ValueError("sidecar version JSON missing required 'target' field")
+    if version_target != target:
+        raise ValueError(
+            f"sidecar version target mismatch: --target={target!r}, version JSON target={version_target!r}"
+        )
+    self_sha = version_json.get("self_sha256")
+    if self_sha is not None:
+        if not isinstance(self_sha, str) or self_sha.lower() != sha256.lower():
+            raise ValueError(
+                f"sidecar self_sha256 mismatch: version JSON self_sha256={self_sha!r}, actual sha256={sha256!r}"
+            )
+    return version_json
+
+
 def build_manifest(
     sidecar: Path,
     target: str,
@@ -70,7 +99,7 @@ def build_manifest(
 ) -> dict[str, object]:
     """组装 manifest dict。
 
-    version_json 来自 sidecar version --json（已校验 schema）。
+    version_json 来自 sidecar version --json；schema/target 校验由发布入口 main() 负责。
     generated_at 默认 UTC now，可注入便于测试。
     """
     if generated_at is None:
@@ -114,6 +143,12 @@ def main() -> int:
         return 2
 
     sha256 = compute_sha256(sidecar)
+    try:
+        version_json = _validate_release_version(version_json, args.target, sha256)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
     manifest = build_manifest(sidecar, args.target, version_json, sha256)
     manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
 
