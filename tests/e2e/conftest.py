@@ -683,10 +683,27 @@ async def _teardown_page(fp: FletPage, request, *, failed: bool = False) -> None
     _, _, context, page, _request = pw_context
     try:
         if failed:
-            ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
             name = request.node.name
-            await page.screenshot(path=str(ARTIFACT_DIR / f"{name}.png"))
-            await context.tracing.stop(path=str(ARTIFACT_DIR / f"{name}-trace.zip"))
+            try:
+                ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[e2e_teardown] artifact dir creation failed: %s", e)
+            # D15-F04: 截图与 trace 归档独立尝试，任一失败不得阻断另一个；
+            # trace 是排障最关键的工件，不能被 screenshot 失败连坐丢弃。
+            try:
+                await page.screenshot(path=str(ARTIFACT_DIR / f"{name}.png"))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[e2e_teardown] screenshot failed: %s", e)
+            try:
+                await context.tracing.stop(path=str(ARTIFACT_DIR / f"{name}-trace.zip"))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[e2e_teardown] tracing stop failed: %s", e)
             # Phase 9.1: 失败时防御性清理残留 AlertDialog
             # 按 Escape 关闭可能残留的对话框，防止 Flet 子进程 session 级
             # dialog overlay state 跨用例污染（BrowserContext 隔离 DOM，
@@ -694,14 +711,17 @@ async def _teardown_page(fp: FletPage, request, *, failed: bool = False) -> None
             try:
                 await page.keyboard.press("Escape")
                 await page.wait_for_timeout(200)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:  # noqa: BLE001
                 logger.debug("[e2e_teardown] Escape cleanup failed: %s", e)
         else:
-            await context.tracing.stop()
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:  # noqa: BLE001
-        logger.debug("[e2e_teardown] tracing stop failed: %s", e)
+            try:
+                await context.tracing.stop()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[e2e_teardown] tracing stop failed: %s", e)
     finally:
         await context.close()
 
