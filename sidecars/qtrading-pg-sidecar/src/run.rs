@@ -95,6 +95,12 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
         args.password_file.as_deref(),
         args.log_file.as_deref(),
     );
+    // D16-F01：进入锁/日志/preflight/清理前校验路径关系，禁止 install dir 与
+    // PGDATA/runtime/password/log 重叠（含符号链接/junction/大小写别名）。
+    if let Err(conflict) = layout.validate() {
+        eprintln!("[sidecar] 路径配置冲突：{conflict}");
+        return Err(exit_codes::ARGUMENT_ERROR);
+    }
     logging::init(Some(&layout.sidecar_log));
     tracing::info!(
         "sidecar run starting, data_dir={}",
