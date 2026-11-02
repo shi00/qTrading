@@ -170,7 +170,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           # 禁用 setup-uv 自带缓存（默认键绑定 uv.lock，本仓库以 requirements*.txt 为准且未跟踪
           # uv.lock），改由下方 actions/cache 显式缓存 UV_CACHE_DIR（对齐 Windows 侧已验证方案）。
@@ -288,7 +288,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           enable-cache: false
 
@@ -393,7 +393,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           # 禁用 setup-uv 自带缓存：其默认缓存键绑定 uv.lock，本仓库以 requirements*.txt 为准
           # 且未跟踪 uv.lock（实测每次 Install dependencies 都在重新下载 ~300 MB wheel，耗时 2~3 分钟）；
@@ -585,7 +585,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           # 禁用 setup-uv 自带缓存：其 post-job 会对 D:\a\_temp\setup-uv-cache 执行
           # `uv cache prune --ci --force`，与下方 actions/cache 管理的 UV_CACHE_DIR 重复，
@@ -796,7 +796,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           # 同 e2e-tests-windows：保留禁用 setup-uv 自带缓存（其 post-job prune 与磁盘清理
           # 步骤冲突，曾报 "Cache path ... does not exist on disk"）；改用下方 actions/cache
@@ -964,7 +964,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           # 禁用 setup-uv 自带缓存：其 cache 依赖 glob 默认绑定 uv.lock（本项目无该文件），
           # 实测命中后 Install dependencies 仍需 5.5~9.0 分钟；改由下方 actions/cache
@@ -1197,7 +1197,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           # 同 e2e-tests-windows：禁用 uv 本地缓存避免 post-job 报错
           enable-cache: false
@@ -1429,7 +1429,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           enable-cache: false
 
@@ -1588,7 +1588,7 @@ jobs:
           python-version: '3.14'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
 
       - name: Recompile requirements
         shell: bash
@@ -1634,7 +1634,7 @@ jobs:
           cache: 'pip'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
 
       - name: Recompile requirements
         shell: bash
@@ -1821,7 +1821,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
 
       - name: Install CUDA Toolkit (CUDA variants only)
         if: matrix.backend == 'cuda'
@@ -2549,7 +2549,7 @@ jobs:
             requirements-dev.txt
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
 
       - name: Install dependencies
         run: |
