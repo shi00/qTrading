@@ -14,15 +14,23 @@
   不会捕获 `CancelledError`，故 `except Exception` 的 logger 反模式不报警
 - `except BaseException` 实际捕获 `CancelledError`，故其 logger 反模式报警
 - `except Exception: pass` 仍报警（静默吞没是通用代码质量问题，DoD #1 要求）
-- **同 try 兄弟守卫豁免**：若同一 `try` 语句存在 `except asyncio.CancelledError: raise`
-  兄弟 handler，则 broad except 不报警（CancelledError 已被兄弟 handler 处理）
+- **同 try 兄弟守卫豁免（按 handler 顺序/可达性判定）**：仅当首个实际捕获
+  `CancelledError` 的 handler 是 `except asyncio.CancelledError: ... raise`（含元组形式
+  `except (CancelledError, X): ... raise`）时，broad except 才豁免；若其前面存在
+  `except BaseException`、裸 `except:` 或 `except (BaseException, X)` 等同样捕获
+  `CancelledError` 的 handler，则守卫不可达，不再豁免（前置 handler 会先吞没取消）。
+  注意：Python 3.8+ 中 `except Exception` 不捕获 `CancelledError`，因此位于守卫前的
+  `except Exception` 不构成遮蔽，仍按兄弟守卫豁免。
+- 元组形式：`except (Exception, X)` / `except (BaseException, X)` /
+  `except (CancelledError, X)` 按元素扁平识别；`from asyncio import CancelledError as X`
+  的别名导入按模块级导入解析
 - 间接调用（如 `_log = logger.error; _log(..., exc_info=True)`）不报警，因不能
   静态证明其指向 logger.error
 - 白名单：行内或上一行 `# R2_ALLOWED: <reason>` 注释可豁免（如顶层 main.py 入口）
 
 技术背景：Python 3.8+ 中 `asyncio.CancelledError` 继承 `BaseException`，
 `except Exception` 不会捕获 `CancelledError`，但 `except BaseException` 会。
-本扫描作为防御性编程守护，覆盖两种 broad except 形式。
+本扫描作为防御性编程守护，覆盖 broad except 的单类型与元组形式。
 """
 
 from __future__ import annotations
@@ -49,60 +57,101 @@ _BROAD_EXCEPTION_NAMES = frozenset({"Exception", "BaseException"})
 # 实际捕获 asyncio.CancelledError 的类型名（Python 3.8+ 中 CancelledError 继承 BaseException）
 _CATCHES_CANCELLED_ERROR_NAMES = frozenset({"BaseException"})
 
+# 默认的 CancelledError 类型名（asyncio.CancelledError 的 Attribute.attr 或直接导入的 Name.id）
+_CANCELLED_ERROR_NAMES = frozenset({"CancelledError"})
+
 
 # ============================================================================
 # 检测纯函数
 # ============================================================================
 
 
-def _except_type_name(handler: ast.ExceptHandler) -> str | None:
-    """提取 except handler 的类型名（Name.id 或 Attribute.attr），无类型返回 None。"""
+def _except_type_names(handler: ast.ExceptHandler) -> tuple[str | None, ...]:
+    """提取 except handler 的全部类型名（元组扁平化）；裸 except 返回 (None,)。"""
     if handler.type is None:
-        return None
-    if isinstance(handler.type, ast.Name):
-        return handler.type.id
-    if isinstance(handler.type, ast.Attribute):
-        return handler.type.attr
-    return None
+        return (None,)
+    collected: list[str] = []
+    _collect_except_type_names(handler.type, collected)
+    return tuple(collected)
+
+
+def _collect_except_type_names(node: ast.expr, collected: list[str]) -> None:
+    """递归收集 Name / Attribute / Tuple 中的类型名。"""
+    if isinstance(node, ast.Name):
+        collected.append(node.id)
+    elif isinstance(node, ast.Attribute):
+        collected.append(node.attr)
+    elif isinstance(node, ast.Tuple):
+        for element in node.elts:
+            _collect_except_type_names(element, collected)
 
 
 def _is_broad_except(handler: ast.ExceptHandler) -> bool:
-    """判断 except handler 是否捕获 Exception 或 BaseException。
+    """判断 except handler 是否捕获 Exception 或 BaseException（含元组元素）。
 
-    覆盖两种语法形式：
+    覆盖语法形式：
     - `except Exception:` → ast.Name(id="Exception")
     - `except builtins.Exception:` → ast.Attribute(attr="Exception")
+    - `except (Exception, ValueError):` → ast.Tuple 元素含 broad 类型
     """
-    type_name = _except_type_name(handler)
-    return type_name in _BROAD_EXCEPTION_NAMES if type_name is not None else False
+    return any(name in _BROAD_EXCEPTION_NAMES for name in _except_type_names(handler))
 
 
 def _catches_cancelled_error(handler: ast.ExceptHandler) -> bool:
-    """判断 except handler 是否实际捕获 asyncio.CancelledError。
+    """判断 except handler 是否实际捕获 asyncio.CancelledError（含元组元素）。
 
     Python 3.8+ 中 `asyncio.CancelledError` 继承 `BaseException`：
     - `except Exception` 不捕获 CancelledError
-    - `except BaseException` 捕获 CancelledError
+    - `except BaseException` / `except (BaseException, X)` 捕获 CancelledError
     """
-    type_name = _except_type_name(handler)
-    return type_name in _CATCHES_CANCELLED_ERROR_NAMES if type_name is not None else False
+    return any(name in _CATCHES_CANCELLED_ERROR_NAMES for name in _except_type_names(handler))
 
 
-def _is_cancelled_error_handler(handler: ast.ExceptHandler) -> bool:
-    """判断 except handler 是否捕获 asyncio.CancelledError（或直接导入的 CancelledError）。"""
-    if handler.type is None:
-        return False
-    # asyncio.CancelledError — ast.Attribute(attr="CancelledError")
-    if isinstance(handler.type, ast.Attribute):
-        return handler.type.attr == "CancelledError"
-    # CancelledError (from asyncio import CancelledError) — ast.Name(id="CancelledError")
-    if isinstance(handler.type, ast.Name):
-        return handler.type.id == "CancelledError"
-    return False
+def _is_cancelled_error_handler(
+    handler: ast.ExceptHandler,
+    cancelled_names: frozenset[str] = _CANCELLED_ERROR_NAMES,
+) -> bool:
+    """判断 except handler 是否捕获 asyncio.CancelledError（含元组与导入别名）。"""
+    return any(name in cancelled_names for name in _except_type_names(handler))
 
 
-def _try_has_cancelled_error_guard(try_node: ast.Try) -> bool:
-    """判断 try 语句是否存在 `except asyncio.CancelledError: ... raise` 兄弟 handler。
+def _collect_cancelled_error_aliases(tree: ast.Module) -> frozenset[str]:
+    """收集模块级 CancelledError 名称，含 `from asyncio import CancelledError as X` 别名。"""
+    names = set(_CANCELLED_ERROR_NAMES)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.module is None:
+            continue
+        if node.module != "asyncio" and not node.module.startswith("asyncio."):
+            continue
+        for alias in node.names:
+            if alias.name == "CancelledError":
+                names.add(alias.asname or alias.name)
+    return frozenset(names)
+
+
+def _handler_shadows_cancelled_error(
+    handler: ast.ExceptHandler,
+    cancelled_names: frozenset[str] = _CANCELLED_ERROR_NAMES,
+) -> bool:
+    """判断该 handler 是否会先于后续 handler 捕获 CancelledError。
+
+    - 裸 `except:` 捕获所有异常；
+    - `except BaseException`（含元组元素）捕获 CancelledError；
+    - `except CancelledError`（含别名/元组元素）先捕获，使其后守卫不可达。
+
+    Python 3.8+ 中 `except Exception` 不捕获 CancelledError，故不构成遮蔽。
+    """
+    type_names = _except_type_names(handler)
+    if type_names == (None,):
+        return True
+    return any(name in _CATCHES_CANCELLED_ERROR_NAMES or name in cancelled_names for name in type_names)
+
+
+def _try_has_cancelled_error_guard(
+    try_node: ast.Try,
+    cancelled_names: frozenset[str] = _CANCELLED_ERROR_NAMES,
+) -> bool:
+    """判断 try 语句的 CancelledError 守卫是否可达且配 raise。
 
     R2 标准合规模式：
         try:
@@ -112,13 +161,18 @@ def _try_has_cancelled_error_guard(try_node: ast.Try) -> bool:
         except Exception as e:
             logger.error(..., exc_info=True)  # 无 raise 也合规
 
-    存在兄弟守卫时，broad except 不会吞没 CancelledError（已被前者捕获并 raise）。
+    顺序/可达性规则：按源码顺序遍历 handler，首个实际捕获 CancelledError 的 handler
+    决定结果，其后 handler 均不可达：
+
+    - 首个捕获者是 `except CancelledError: ... raise`（含元组/别名）→ True
+    - 首个捕获者是 `except BaseException`、裸 `except:` 或
+      `except CancelledError`（无 raise）→ False
     """
     for handler in try_node.handlers:
-        if not _is_cancelled_error_handler(handler):
-            continue
-        if _has_raise(handler.body):
-            return True
+        if _is_cancelled_error_handler(handler, cancelled_names):
+            return _has_raise(handler.body)
+        if _handler_shadows_cancelled_error(handler, cancelled_names):
+            return False
     return False
 
 
@@ -186,7 +240,7 @@ def _find_violations(tree: ast.Module, source_lines: list[str], rel_path: Path) 
     """扫描 AST 中的违规 except 块，返回错误消息列表。
 
     遍历 `ast.Try` 节点（而非 `ast.ExceptHandler`），以便访问同一 try 的兄弟 handlers，
-    检测是否存在 `except asyncio.CancelledError: raise` 兄弟守卫。
+    检测是否存在可达的 `except asyncio.CancelledError: raise` 兄弟守卫。
 
     检测规则（基于 Python 3.8+ 语义）：
     - `except Exception: pass`（pass-only，无 raise）→ 报警（静默吞没，DoD #1）
@@ -194,12 +248,16 @@ def _find_violations(tree: ast.Module, source_lines: list[str], rel_path: Path) 
     - `except BaseException: logger.exception()/logger.error(exc_info=True)`（无 raise）→ 报警
     - `except Exception: logger.exception()/logger.error(exc_info=True)`（无 raise）→ 不报警
       （Python 3.8+ 中 except Exception 不捕获 CancelledError）
+    - 兄弟守卫仅在**可达**时豁免：若 `except BaseException`、裸 `except:` 或
+      `except CancelledError`（无 raise）位于守卫之前，守卫不可达，前述 broad handler
+      按原规则报警
     """
     errors: list[str] = []
+    cancelled_names = _collect_cancelled_error_aliases(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Try):
             continue
-        has_cancel_guard = _try_has_cancelled_error_guard(node)
+        has_cancel_guard = _try_has_cancelled_error_guard(node, cancelled_names)
         for handler in node.handlers:
             if not _is_broad_except(handler):
                 continue
@@ -288,6 +346,15 @@ class TestIsBroadExcept:
         h = _first_handler("try:\n    pass\nexcept asyncio.CancelledError:\n    raise\n")
         assert _is_broad_except(h) is False
 
+    def test_detects_tuple_with_broad_element(self):
+        """元组形式 except (Exception, ValueError) 含 broad 元素，算 broad。"""
+        h = _first_handler("try:\n    pass\nexcept (Exception, ValueError):\n    pass\n")
+        assert _is_broad_except(h) is True
+
+    def test_detects_tuple_with_base_exception(self):
+        h = _first_handler("try:\n    pass\nexcept (ValueError, BaseException):\n    pass\n")
+        assert _is_broad_except(h) is True
+
     def test_ignores_tuple_with_specific_only(self):
         """元组形式 except (ValueError, KeyError) 不算 broad。"""
         h = _first_handler("try:\n    pass\nexcept (ValueError, KeyError):\n    pass\n")
@@ -309,6 +376,11 @@ class TestIsCancelledErrorHandler:
     def test_detects_direct_import_cancelled_error(self):
         """from asyncio import CancelledError 后 except CancelledError 也识别。"""
         h = _first_handler("try:\n    pass\nexcept CancelledError:\n    raise\n")
+        assert _is_cancelled_error_handler(h) is True
+
+    def test_detects_tuple_with_cancelled_error(self):
+        """元组形式 except (asyncio.CancelledError, ValueError) 也识别。"""
+        h = _first_handler("try:\n    pass\nexcept (asyncio.CancelledError, ValueError):\n    raise\n")
         assert _is_cancelled_error_handler(h) is True
 
     def test_ignores_exception(self):
@@ -351,6 +423,40 @@ class TestTryHasCancelledErrorGuard:
         """`except asyncio.CancelledError: pass`（无 raise）不算守卫。"""
         code = "try:\n    foo()\nexcept asyncio.CancelledError:\n    pass\nexcept Exception:\n    pass\n"
         assert _try_has_cancelled_error_guard(self._try_node(code)) is False
+
+    def test_preceding_base_exception_shadows_guard(self):
+        """`except BaseException` 位于取消守卫之前 → 守卫不可达。"""
+        code = "try:\n    foo()\nexcept BaseException:\n    pass\nexcept asyncio.CancelledError:\n    raise\n"
+        assert _try_has_cancelled_error_guard(self._try_node(code)) is False
+
+    def test_preceding_bare_except_shadows_guard(self):
+        """裸 except 捕获所有异常（含 CancelledError），后续守卫不可达。"""
+        code = "try:\n    foo()\nexcept:\n    pass\nexcept asyncio.CancelledError:\n    raise\n"
+        assert _try_has_cancelled_error_guard(self._try_node(code)) is False
+
+    def test_preceding_cancelled_error_without_raise_shadows_guard(self):
+        """前一个 `except CancelledError: pass` 先捕获，后续守卫不可达。"""
+        code = "try:\n    foo()\nexcept asyncio.CancelledError:\n    pass\nexcept asyncio.CancelledError:\n    raise\n"
+        assert _try_has_cancelled_error_guard(self._try_node(code)) is False
+
+    def test_preceding_tuple_with_base_exception_shadows_guard(self):
+        """元组含 BaseException 同样遮蔽后续守卫。"""
+        code = (
+            "try:\n    foo()\n"
+            "except (ValueError, BaseException):\n    pass\n"
+            "except asyncio.CancelledError:\n    raise\n"
+        )
+        assert _try_has_cancelled_error_guard(self._try_node(code)) is False
+
+    def test_preceding_specific_exception_keeps_guard_reachable(self):
+        """`except ValueError` 不捕获 CancelledError，守卫仍可达。"""
+        code = "try:\n    foo()\nexcept ValueError:\n    pass\nexcept asyncio.CancelledError:\n    raise\n"
+        assert _try_has_cancelled_error_guard(self._try_node(code)) is True
+
+    def test_tuple_cancelled_error_guard_recognized(self):
+        """元组形式的 CancelledError 守卫也识别为有效守卫。"""
+        code = "try:\n    foo()\nexcept (asyncio.CancelledError, ValueError):\n    raise\n"
+        assert _try_has_cancelled_error_guard(self._try_node(code)) is True
 
     def test_no_handlers(self):
         """try 无 except handler 不算守卫（极端边界）。"""
@@ -616,6 +722,53 @@ class TestFindViolations:
         )
         errors = self._scan_code(code)
         assert len(errors) == 1
+
+    def test_flags_guard_shadowed_by_preceding_base_exception_pass(self):
+        """`except BaseException: pass` 位于守卫之前 → 守卫不可达，按 pass-only 报警。"""
+        code = "try:\n    foo()\nexcept BaseException:\n    pass\nexcept asyncio.CancelledError:\n    raise\n"
+        errors = self._scan_code(code)
+        assert len(errors) == 1
+        assert "pass" in errors[0]
+
+    def test_flags_guard_shadowed_by_preceding_base_exception_logger(self):
+        """`except BaseException: logger.exception()` 位于守卫之前 → 按 logger 反模式报警。"""
+        code = (
+            "try:\n    foo()\n"
+            "except BaseException:\n    logger.exception('foo')\n"
+            "except asyncio.CancelledError:\n    raise\n"
+        )
+        errors = self._scan_code(code)
+        assert len(errors) == 1
+        assert "logger.exception" in errors[0]
+
+    def test_flags_tuple_broad_except_without_guard(self):
+        """元组含 broad 类型同样按 broad except 处理。"""
+        code = "try:\n    foo()\nexcept (Exception, ValueError):\n    pass\n"
+        errors = self._scan_code(code)
+        assert len(errors) == 1
+
+    def test_tuple_cancelled_error_guard_exempts_later_broad_handler(self):
+        """元组形式的取消守卫位于 broad handler 之前，后续 broad 豁免。"""
+        code = "try:\n    foo()\nexcept (asyncio.CancelledError, ValueError):\n    raise\nexcept Exception:\n    pass\n"
+        errors = self._scan_code(code)
+        assert errors == []
+
+    def test_aliased_cancelled_error_guard_exempts_later_broad_handler(self):
+        """`from asyncio import CancelledError as CE` 别名守卫也豁免后续 broad。"""
+        code = (
+            "from asyncio import CancelledError as CE\n"
+            "try:\n    foo()\n"
+            "except CE:\n    raise\n"
+            "except Exception:\n    pass\n"
+        )
+        errors = self._scan_code(code)
+        assert errors == []
+
+    def test_does_not_flag_exception_before_cancelled_error_guard(self):
+        """Python 3.8+ 中 except Exception 不捕获 CancelledError，守卫仍可达。"""
+        code = "try:\n    foo()\nexcept Exception:\n    pass\nexcept asyncio.CancelledError:\n    raise\n"
+        errors = self._scan_code(code)
+        assert errors == []
 
     def test_whitelist_inline_suppresses(self):
         code = "try:\n    foo()\nexcept Exception:  # R2_ALLOWED: top-level guard\n    pass\n"
