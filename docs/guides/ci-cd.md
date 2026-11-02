@@ -114,7 +114,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 | `scripts/generate_sidecar_manifest.py` | qtrading-pg-sidecar Release manifest 生成 | CI `sidecar.yml` | 阻断（release 时） |
 | `scripts/prototype_business_redlines.py` | R20/R21/R22 AST 可行性原型（人工评审辅助） | 手动 | 不阻断 |
 | `scripts/verify_embedded_pg_connect.py` | embedded PG sidecar 连通性验证（一次性 spike） | 手动/维护 | 不阻断 |
-| `scripts/check_doctor_schema.py` | Doctor JSON schema 与 Rust sidecar/Python 服务一致性 | 手动/维护 | 不阻断 |
+| `scripts/check_doctor_schema.py` | Doctor JSON 字段契约（显式必需字段 + 允许忽略表；未登记的新 Rust 字段/缺失必需字段失败）；另有 `tests/unit/test_verify_versions.py` 对真实源断言 | 手动/维护 | 不阻断 |
 | `scripts/check_failure_injection_coverage.py` | 故障注入覆盖率交叉校验 | 手动/报告 | 不阻断 |
 | `scripts/sync_e2e_fonts.py` | E2E 缓存字体同步（资产准备） | 手动 | 不阻断 |
 | `scripts/safe_cleanup_branches.py` | 分支安全清理 | 手动 | 不阻断 |

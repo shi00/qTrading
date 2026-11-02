@@ -70,9 +70,13 @@ def _coerce_runtime_port(value: object) -> int | None:
 
 @dataclass(frozen=True, slots=True)
 class DoctorResult:
-    """sidecar doctor 命令解析结果（对齐 sidecar maint.rs DoctorJson struct）。
+    """sidecar doctor 命令解析结果（消费投影，非 wire 全量镜像）。
 
     R-A3: schema 字段必须等于 ``qtrading.embedded_postgres.doctor.v1``。
+
+    D16-Q01: 本 DTO 有意只镜像 UI/维护包装实际消费的字段；Rust ``DoctorJson`` 中其余
+    诊断字段保留在 CLI JSON。字段契约由 ``scripts/check_doctor_schema.py`` 守护
+    （显式必需字段 + 允许忽略表），``issues`` 为必需镜像的故障渠道，不得移除或静默忽略。
     """
 
     schema: str
