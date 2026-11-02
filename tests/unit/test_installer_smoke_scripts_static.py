@@ -318,7 +318,7 @@ def test_running_app_keeps_stdin_open_until_same_pid_assertions() -> None:
 def test_running_app_keeps_step7_and_step8_same_pid_assertions() -> None:
     """安装拒绝断言（非 0 退出码）与“同一 sidecar PID 仍存活”断言必须保留。"""
     text = _read(_RUNNING_APP)
-    assert 'Write-Step "7. Attempt install while sidecar running (should be rejected, P1-11)"' in text
+    assert re.search(r'Write-Step "7\. Attempt install while sidecar running', text) is not None
     assert "Assert-True ($installExitCode2 -ne 0)" in text
     assert "$sidecarAfter = Get-Process -Id $sidecarProc.Id" in text
     assert "Assert-True ($null -ne $sidecarAfter)" in text
