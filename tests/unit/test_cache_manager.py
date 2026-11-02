@@ -2,7 +2,7 @@ import asyncio
 import datetime
 import inspect
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
+from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock, call
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -2003,13 +2003,22 @@ class TestConcurrentInitDbForce:
     @pytest.mark.asyncio
     async def test_concurrent_init_db_with_force_is_serialized(self):
         mgr = _make_mgr()
+        # 已初始化状态：若 force 被忽略，迁移调用次数断言会直接失败
         mgr._schema_initialized = True
 
         real_lock = asyncio.Lock()
-        call_order: list[int] = []
+        active = 0
+        max_active = 0
 
         async def tracked_init_db(engine, auto_migrate=None):
-            call_order.append(len(call_order) + 1)
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            try:
+                # 让出事件循环：若锁未生效，后续 gather 任务会在此处重叠进入迁移
+                await asyncio.sleep(0)
+            finally:
+                active -= 1
 
         with (
             patch.object(
@@ -2023,17 +2032,55 @@ class TestConcurrentInitDbForce:
             mock_migrator.init_db = AsyncMock(side_effect=tracked_init_db)
 
             results = await asyncio.gather(
-                *[mgr.init_db(force=True) for _ in range(5)],
+                *[mgr.init_db(force=True, auto_migrate=True) for _ in range(5)],
                 return_exceptions=True,
             )
 
             for r in results:
                 assert not isinstance(r, Exception), f"Unexpected exception: {r}"
 
-            # force=True means each call runs the migrator
-            assert mock_migrator.init_db.call_count == 5
-            # But they ran serially (lock-protected), not concurrently
-            assert len(call_order) == 5
+            # force=True 必须实际触发迁移，并原样转发 engine 与 auto_migrate
+            assert mock_migrator.init_db.await_args_list == [call(mgr.engine, auto_migrate=True)] * 5
+            # 迁移执行期间不存在重叠：锁把 5 次调用串行化
+            assert max_active == 1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_init_db_with_force_propagates_migration_failure(self):
+        mgr = _make_mgr()
+        mgr._schema_initialized = False
+
+        real_lock = asyncio.Lock()
+        attempts: list[tuple[object, bool | None]] = []
+
+        async def failing_init_db(engine, auto_migrate=None):
+            attempts.append((engine, auto_migrate))
+            await asyncio.sleep(0)
+            raise RuntimeError("migration failed")
+
+        with (
+            patch.object(
+                CacheManager,
+                "_init_lock",
+                new_callable=PropertyMock,
+                return_value=real_lock,
+            ),
+            patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
+        ):
+            mock_migrator.init_db = AsyncMock(side_effect=failing_init_db)
+
+            results = await asyncio.gather(
+                *[mgr.init_db(force=True) for _ in range(5)],
+                return_exceptions=True,
+            )
+
+            # 每次并发调用都实际尝试了迁移（既未去重，也未吞没）
+            assert attempts == [(mgr.engine, None)] * 5
+            assert mock_migrator.init_db.await_args_list == [call(mgr.engine, auto_migrate=None)] * 5
+            # 迁移失败必须传播到每个调用方，而不是静默成功
+            assert all(isinstance(r, RuntimeError) for r in results)
+            assert [str(r) for r in results] == ["migration failed"] * 5
+            # 失败不得把初始化标记为成功，后续调用仍可重试
+            assert mgr._schema_initialized is False
 
     @pytest.mark.asyncio
     async def test_concurrent_init_db_first_wins_second_skips(self):
