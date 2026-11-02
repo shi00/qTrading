@@ -13,6 +13,7 @@ mod password;
 mod paths;
 mod pgbin;
 mod preflight;
+mod process_identity;
 mod protocol;
 mod run;
 mod setup;

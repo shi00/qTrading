@@ -16,6 +16,7 @@ use crate::password;
 use crate::paths::Layout;
 use crate::pgbin;
 use crate::preflight;
+use crate::process_identity;
 use crate::protocol;
 use crate::run;
 use crate::setup::{self, DataDirState};
@@ -503,7 +504,8 @@ struct TempInstance {
     pg: PostgreSQL,
     layout: Layout,
     port: u16,
-    pid: Option<u32>,
+    /// 启动后捕获的可验证身份；为 None 时 graded_stop 会 fail closed（不发送 PID 信号）。
+    identity: Option<process_identity::ClusterIdentity>,
 }
 
 impl TempInstance {
@@ -540,32 +542,58 @@ impl TempInstance {
                 }
                 Err(e) => {
                     eprintln!("[sidecar] 临时实例健康检查超时: {e}");
-                    let pid = pgbin::read_postmaster_pid(&layout.data_dir).map(|i| i.pid);
-                    let _ = pgbin::graded_stop(&layout.install_dir, &layout.data_dir, pid).await;
+                    let identity = capture_temp_identity(&layout);
+                    let _ = pgbin::graded_stop(
+                        &layout.install_dir,
+                        &layout.data_dir,
+                        identity.as_ref(),
+                    )
+                    .await;
                     return Err(exit_codes::START_FAILED);
                 }
             }
         }
 
-        let pid = pgbin::read_postmaster_pid(&layout.data_dir).map(|i| i.pid);
+        let identity = capture_temp_identity(&layout);
         Ok(Self {
             pg,
             layout,
             port,
-            pid,
+            identity,
         })
     }
 
     async fn stop(self) {
-        let outcome =
-            pgbin::graded_stop(&self.layout.install_dir, &self.layout.data_dir, self.pid).await;
+        let outcome = pgbin::graded_stop(
+            &self.layout.install_dir,
+            &self.layout.data_dir,
+            self.identity.as_ref(),
+        )
+        .await;
         if !outcome.stopped {
-            eprintln!(
-                "[sidecar] 警告：临时实例未能干净停止 (mode={})",
-                outcome.mode.as_str()
-            );
+            let reason = outcome
+                .failure
+                .as_ref()
+                .map_or_else(|| "unknown".to_string(), std::string::ToString::to_string);
+            eprintln!("[sidecar] 警告：临时实例未能干净停止（{reason}）");
         }
         // self.pg 在函数结束 drop；graded_stop 已停 postgres，crate status() 检测到非 Started，drop 不会再 stop
+    }
+}
+
+/// 捕获临时实例的可验证身份；失败时返回 None，graded_stop 将拒绝发送 PID 信号。
+fn capture_temp_identity(layout: &Layout) -> Option<process_identity::ClusterIdentity> {
+    let info = pgbin::read_postmaster_pid(&layout.data_dir)?;
+    match process_identity::capture_cluster_identity_from_info(
+        &layout.data_dir,
+        &layout.install_dir,
+        &info,
+    ) {
+        Ok(identity) => Some(identity),
+        Err(e) => {
+            eprintln!("[sidecar] 临时实例身份捕获失败 (pid {}): {e}", info.pid);
+            None
+        }
     }
 }
 
@@ -1251,6 +1279,8 @@ mod tests {
     fn runtime_port_requires_alive_process_and_valid_port() {
         let info = pgbin::PostmasterInfo {
             pid: 1234,
+            data_dir: Some(PathBuf::from("/x/data")),
+            started_at: Some(1234567890),
             port: Some(55432),
         };
         // 进程存活 → 取 postmaster.pid 端口
@@ -1262,12 +1292,16 @@ mod tests {
         // 端口缺失 → 未知
         let no_port = pgbin::PostmasterInfo {
             pid: 1234,
+            data_dir: Some(PathBuf::from("/x/data")),
+            started_at: Some(1234567890),
             port: None,
         };
         assert_eq!(runtime_port(Some(&no_port), true), None);
         // 端口 0（非法）→ 未知，不当作有效端口
         let zero_port = pgbin::PostmasterInfo {
             pid: 1234,
+            data_dir: Some(PathBuf::from("/x/data")),
+            started_at: Some(1234567890),
             port: Some(0),
         };
         assert_eq!(runtime_port(Some(&zero_port), true), None);
