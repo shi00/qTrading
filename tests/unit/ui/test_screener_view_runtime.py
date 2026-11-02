@@ -215,6 +215,38 @@ def _get_buttons(env: dict) -> list:
     return buttons
 
 
+def _get_prompt_action_button(env: dict, icon: Any, expected_content: str) -> ft.TextButton:
+    """按稳定图标定位 ai_system_prompt 的保存/恢复入口, 断言唯一且内容匹配.
+
+    两个入口的 icon (SAVE / RESTORE) 在 screener_view 渲染树中唯一, 同树的
+    go_sync (SYNC) 等其他 TextButton 不会混入。入口缺失直接断言失败 (不转 skip),
+    使固定适用 fixture 下的必需交互缺失可被回归测试拒绝。
+    """
+    btns = [b for b in _get_buttons(env) if isinstance(b, ft.TextButton) and b.icon == icon]
+    assert len(btns) == 1, f"icon={icon} 的 prompt 入口应恰好 1 个, 实际 {len(btns)}"
+    assert btns[0].content == expected_content, f"prompt 入口内容应为 {expected_content!r}, 实际 {btns[0].content!r}"
+    return btns[0]
+
+
+def _get_save_prompt_button(env: dict) -> ft.TextButton:
+    """定位 ai_system_prompt 的保存按钮 (icon=SAVE, screener_view 内唯一)."""
+    return _get_prompt_action_button(env, ft.Icons.SAVE, "i18n[ai_save_prompt]")
+
+
+def _get_restore_prompt_button(env: dict) -> ft.TextButton:
+    """定位 ai_system_prompt 的恢复默认按钮 (icon=RESTORE, screener_view 内唯一)."""
+    return _get_prompt_action_button(env, ft.Icons.RESTORE, "i18n[ai_reset_default]")
+
+
+def _get_ai_prompt_field(env: dict) -> ft.TextField:
+    """定位 ai_system_prompt 文本域 (multiline 且无 label, 与普通 textarea 参数区分)."""
+    fields = [
+        c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.TextField) and c.multiline and c.label is None
+    ]
+    assert len(fields) == 1, f"ai_system_prompt 文本域应恰好 1 个, 实际 {len(fields)}"
+    return fields[0]
+
+
 def _get_sliders(env: dict) -> list[ft.Slider]:
     """返回渲染树中所有 Slider."""
     sliders: list[ft.Slider] = []
@@ -258,6 +290,17 @@ def _get_progress_rings(env: dict) -> list[ft.ProgressRing]:
         if isinstance(ctrl, ft.ProgressRing) and ctrl not in rings:
             rings.append(ctrl)
     return rings
+
+
+def _get_status_progress_ring(env: dict) -> ft.ProgressRing:
+    """返回状态栏进度环 (screener_view 中唯一 20x20 的 ProgressRing).
+
+    stream card 的 AI 分析中进度环为 14x14, 故以尺寸唯一定位状态栏环,
+    避免 ``_get_progress_rings`` 混入流式卡片后可见性断言失去判别力。
+    """
+    rings = [r for r in _get_progress_rings(env) if r.width == 20 and r.height == 20]
+    assert len(rings) == 1, f"状态栏进度环应唯一 (width=height=20), 实际 {len(rings)}"
+    return rings[0]
 
 
 def _get_texts(env: dict) -> list[ft.Text]:
@@ -987,15 +1030,19 @@ class TestOnStrategyChange:
         assert "update_strategy_desc:None" in fake_vm.method_calls
 
     def test_inits_params_defaults(self, screener_view_env) -> None:
-        """选策略 → vm.get_strategy_params → 初始化参数默认值."""
+        """选策略 → vm.init_strategy_params 精确调用一次并以默认值初始化参数."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
         fake_vm._strategy_params = [{"name": "num_param", "type": "number", "default": 42}]
         dropdowns = _get_dropdowns(env)
+        fake_vm.method_calls.clear()
         _invoke(dropdowns[0].on_select, _make_event("value"))
 
-        # get_strategy_params 被调用
-        assert any("get_strategy_params" in c for c in fake_vm.method_calls) or True
+        # init 精确调用一次, 且传入当前选中策略 key (FakeVM 记录 "init_strategy_params:<key>")
+        init_calls = [c for c in fake_vm.method_calls if c.startswith("init_strategy_params:")]
+        assert init_calls == ["init_strategy_params:value"], f"init 调用应唯一且传入选中策略, 实际 {init_calls}"
+        # 默认值必须真正落到 state (num_param=42), 而非仅"被调用过"
+        assert dict(fake_vm.state.strategy_params) == {"num_param": 42}
 
 
 # ============================================================================
@@ -1013,7 +1060,9 @@ class TestOnRunClick:
         page = env["page"]
         page.run_task.reset_mock()
 
-        # state.selected_strategy 默认 None
+        # state.selected_strategy 默认 None; 清空记录后触发, 任何 run_strategy 调用都应被拒绝
+        fake_vm.method_calls.clear()
+        fake_vm.run_strategy_mock.reset_mock()
         run_btn = _get_run_button(env)
         _invoke(run_btn.on_click, _make_event())
 
@@ -1022,7 +1071,10 @@ class TestOnRunClick:
         handler, args, _ = _await_run_task_handler(page)
         # 运行 async handler, 应早返回不调 run_strategy
         asyncio.run(handler(*args))
-        assert "run_strategy" not in fake_vm.method_calls
+        fake_vm.run_strategy_mock.assert_not_called()
+        assert not any(c.startswith("run_strategy:") for c in fake_vm.method_calls), (
+            f"无策略时不得调用 run_strategy, 实际 {fake_vm.method_calls}"
+        )
 
     def test_run_strategy_success(self, screener_view_env) -> None:
         """state.selected_strategy=value → vm.run_strategy 被调用."""
@@ -1373,22 +1425,28 @@ class TestOnPaginationChange:
         assert "change_page_size:20" in fake_vm.method_calls
 
     def test_page_size_change_value_error_swallowed(self, screener_view_env) -> None:
-        """dropdown 选非数字 → ValueError 容错, 不抛异常."""
+        """dropdown 选非数字 → ValueError 容错, 不调 change_page_size."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
         dropdowns = _get_dropdowns(env)
         page_size_dd = dropdowns[-1]
+        fake_vm.method_calls.clear()
         _invoke(page_size_dd.on_select, _make_event("not_a_number"))
-        assert "change_page_size" not in fake_vm.method_calls
+        assert not any(c.startswith("change_page_size:") for c in fake_vm.method_calls), (
+            f"非法页大小不得提交, 实际 {fake_vm.method_calls}"
+        )
 
     def test_page_size_change_type_error_swallowed(self, screener_view_env) -> None:
-        """dropdown value=None → TypeError 容错, 不抛异常."""
+        """dropdown value=None → TypeError 容错, 不调 change_page_size."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
         dropdowns = _get_dropdowns(env)
         page_size_dd = dropdowns[-1]
+        fake_vm.method_calls.clear()
         _invoke(page_size_dd.on_select, _make_event(None))
-        assert "change_page_size" not in fake_vm.method_calls
+        assert not any(c.startswith("change_page_size:") for c in fake_vm.method_calls), (
+            f"None 页大小不得提交, 实际 {fake_vm.method_calls}"
+        )
 
     def test_prev_page(self, screener_view_env) -> None:
         """点击上一页 → vm.change_page(-1)."""
@@ -1519,6 +1577,7 @@ class TestOnExportClick:
 
         page.run_task.reset_mock()
         page.toast.show.reset_mock()
+        fake_vm.method_calls.clear()
         buttons = _get_buttons(env)
         export_btn = next(b for b in buttons if isinstance(b, ft.Button) and "export" in str(b.content))
         _invoke(export_btn.on_click, _make_event())
@@ -1526,7 +1585,10 @@ class TestOnExportClick:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        assert "export_results" not in fake_vm.method_calls
+        # 保存路径为空 → 取消导出, 任何导出命令都不得提交
+        assert not any(c.startswith("export_results") for c in fake_vm.method_calls), (
+            f"空路径不得导出, 实际 {fake_vm.method_calls}"
+        )
 
     def test_export_success_shows_toast(self, screener_view_env) -> None:
         """成功导出 → show_toast("data_export_success", "success")."""
@@ -2156,16 +2218,9 @@ class TestDoRestoreDefaultAsync:
         page = env["page"]
         fake_vm = env["fake_vm"]
 
-        # 找到 restore 按钮 (TextButton with "ai_reset_default" content)
-        buttons = _get_buttons(env)
-        restore_btn = None
-        for b in buttons:
-            if isinstance(b, ft.TextButton) and "ai_reset_default" in str(getattr(b, "content", "")):
-                restore_btn = b
-                break
-
-        if restore_btn is None:
-            pytest.skip("restore button not found (ai_system_prompt textarea not rendered)")
+        # 恢复入口为固定适用 fixture 的必需交互: 缺失直接失败, 不转 skip.
+        restore_btn = _get_restore_prompt_button(env)
+        assert callable(restore_btn.on_click)
 
         # Phase 3.3: patch fake_vm.reset_strategy_prompt 返回 base_prompt 字符串
         with patch.object(fake_vm, "reset_strategy_prompt", new_callable=AsyncMock) as mock_reset:
@@ -2177,7 +2232,11 @@ class TestDoRestoreDefaultAsync:
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
-            mock_reset.assert_awaited_once()
+            mock_reset.assert_awaited_once_with("value")
+            # 恢复后默认草稿回填到 ai_system_prompt 文本域
+            _rerender(env)
+            assert _get_ai_prompt_field(env).value == "default_prompt"
+            assert fake_vm.state.strategy_params["ai_system_prompt"] == "default_prompt"
             page.toast.show.assert_called_once_with(
                 "i18n[ai_settings_restored]", "info", action_text=None, on_action=None
             )
@@ -2188,15 +2247,8 @@ class TestDoRestoreDefaultAsync:
         page = env["page"]
         fake_vm = env["fake_vm"]
 
-        buttons = _get_buttons(env)
-        restore_btn = None
-        for b in buttons:
-            if isinstance(b, ft.TextButton) and "ai_reset_default" in str(getattr(b, "content", "")):
-                restore_btn = b
-                break
-
-        if restore_btn is None:
-            pytest.skip("restore button not found")
+        restore_btn = _get_restore_prompt_button(env)
+        assert callable(restore_btn.on_click)
 
         # Phase 3.3: patch fake_vm.reset_strategy_prompt 抛 RuntimeError
         with patch.object(fake_vm, "reset_strategy_prompt", new_callable=AsyncMock) as mock_reset:
@@ -2208,6 +2260,7 @@ class TestDoRestoreDefaultAsync:
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
+            mock_reset.assert_awaited_once_with("value")
             page.toast.show.assert_called_once_with(
                 "i18n[sys_snack_save_err]", "error", action_text=None, on_action=None
             )
@@ -2230,15 +2283,10 @@ class TestDoSavePromptAsync:
         page = env["page"]
         fake_vm = env["fake_vm"]
 
-        buttons = _get_buttons(env)
-        save_btn = None
-        for b in buttons:
-            if isinstance(b, ft.TextButton) and "ai_save_prompt" in str(getattr(b, "content", "")):
-                save_btn = b
-                break
-
-        if save_btn is None:
-            pytest.skip("save button not found")
+        save_btn = _get_save_prompt_button(env)
+        assert callable(save_btn.on_click)
+        # 模拟用户已在 ai_system_prompt 输入的草稿
+        fake_vm.set_strategy_param("ai_system_prompt", "draft prompt")
 
         # Phase 3.3: patch fake_vm.save_strategy_prompt 返回 (False, "prompt_err_length")
         # 模拟 validate_prompt 失败路径 (VM 内部不应调用 ConfigHandler.set_strategy_prompt)
@@ -2251,18 +2299,15 @@ class TestDoSavePromptAsync:
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
-            mock_save.assert_awaited_once()
+            mock_save.assert_awaited_once_with("value", "draft prompt")
             # D19: 校验失败 → inline 错误 (代替 warning toast), Warning SnackBar 不应再出现
             page.toast.show.assert_not_called()
 
             # 重渲染后, ai_system_prompt 文本域 error 应显示翻译后的错误消息
             _rerender(env)
-            inline_errors = [
-                c
-                for c in _walk_all_controls(env["result"])
-                if isinstance(c, ft.TextField) and getattr(c, "multiline", False) and getattr(c, "error", None)
-            ]
-            assert any(c.error == "i18n[prompt_err_length]" for c in inline_errors), (
+            prompt_field = _get_ai_prompt_field(env)
+            assert prompt_field.value == "draft prompt"
+            assert prompt_field.error == "i18n[prompt_err_length]", (
                 "校验失败应在 ai_system_prompt 字段上显示 inline 错误"
             )
 
@@ -2272,15 +2317,9 @@ class TestDoSavePromptAsync:
         page = env["page"]
         fake_vm = env["fake_vm"]
 
-        buttons = _get_buttons(env)
-        save_btn = None
-        for b in buttons:
-            if isinstance(b, ft.TextButton) and "ai_save_prompt" in str(getattr(b, "content", "")):
-                save_btn = b
-                break
-
-        if save_btn is None:
-            pytest.skip("save button not found")
+        save_btn = _get_save_prompt_button(env)
+        assert callable(save_btn.on_click)
+        fake_vm.set_strategy_param("ai_system_prompt", "draft prompt")
 
         # Phase 3.3: patch fake_vm.save_strategy_prompt 返回 (True, None) 表示保存成功
         with patch.object(fake_vm, "save_strategy_prompt", new_callable=AsyncMock) as mock_save:
@@ -2292,7 +2331,7 @@ class TestDoSavePromptAsync:
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
-            mock_save.assert_awaited_once()
+            mock_save.assert_awaited_once_with("value", "draft prompt")
             page.toast.show.assert_called_once_with(
                 "i18n[ai_settings_saved]", "success", action_text=None, on_action=None
             )
@@ -2303,15 +2342,9 @@ class TestDoSavePromptAsync:
         page = env["page"]
         fake_vm = env["fake_vm"]
 
-        buttons = _get_buttons(env)
-        save_btn = None
-        for b in buttons:
-            if isinstance(b, ft.TextButton) and "ai_save_prompt" in str(getattr(b, "content", "")):
-                save_btn = b
-                break
-
-        if save_btn is None:
-            pytest.skip("save button not found")
+        save_btn = _get_save_prompt_button(env)
+        assert callable(save_btn.on_click)
+        fake_vm.set_strategy_param("ai_system_prompt", "draft prompt")
 
         # Phase 3.3: patch fake_vm.save_strategy_prompt 抛 RuntimeError
         with patch.object(fake_vm, "save_strategy_prompt", new_callable=AsyncMock) as mock_save:
@@ -2323,6 +2356,7 @@ class TestDoSavePromptAsync:
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
+            mock_save.assert_awaited_once_with("value", "draft prompt")
             page.toast.show.assert_called_once_with(
                 "i18n[sys_snack_save_err]", "error", action_text=None, on_action=None
             )
@@ -2368,12 +2402,16 @@ class TestBuildParamControl:
         assert len(multiline_fields) >= 1
 
     def test_ai_system_prompt_has_save_restore_buttons(self, screener_view_with_params_env) -> None:
-        """ai_system_prompt textarea → 含保存/恢复 TextButton."""
+        """ai_system_prompt textarea → 各含唯一保存/恢复 TextButton.
+
+        按稳定图标 (SAVE / RESTORE) 唯一识别两个入口, 并断言回调可调用;
+        同树的 go_sync (SYNC) 等 TextButton 不参与计数。
+        """
         env = screener_view_with_params_env
-        buttons = _get_buttons(env)
-        text_btns = [b for b in buttons if isinstance(b, ft.TextButton)]
-        # 至少有 save + restore 两个 TextButton
-        assert len(text_btns) >= 2
+        save_btn = _get_save_prompt_button(env)
+        restore_btn = _get_restore_prompt_button(env)
+        assert callable(save_btn.on_click)
+        assert callable(restore_btn.on_click)
 
 
 class TestBuildParamsPanel:
@@ -2908,8 +2946,10 @@ class TestExecutePendingStrategy:
         env = screener_view_env
         fake_vm = env["fake_vm"]
         # 默认 initial_strategy=None, mount 后 strategies_loaded=True
-        # 但 pending_strategy=None → 早返回
-        assert "select_strategy" not in fake_vm.method_calls
+        # 但 pending_strategy=None → 早返回, 不得有任何 select_strategy 调用
+        assert not any(c.startswith("select_strategy:") for c in fake_vm.method_calls), (
+            f"无挂起策略时不得 select_strategy, 实际 {fake_vm.method_calls}"
+        )
 
     def test_strategy_not_found_logs_warning(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
         """initial_strategy 不在 strategies_with_dep 中 → logger.warning, 不执行."""
@@ -3835,31 +3875,26 @@ class TestDerivedStateFromVM:
     """
 
     def test_progress_visible_when_loading(self, screener_view_env) -> None:
-        """state.loading=True → ProgressRing visible=True."""
+        """state.loading=True → 状态栏 ProgressRing visible=True."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
         fake_vm._set_state(loading=True, strategies_loaded=True)
         _rerender(env)
 
-        rings = _get_progress_rings(env)
-        # status_row 的 ProgressRing (visible=progress_visible=state.loading=True)
-        visible_rings = [r for r in rings if r.visible is True]
-        assert len(visible_rings) >= 1, "loading=True 时 ProgressRing 应可见"
+        ring = _get_status_progress_ring(env)
+        assert ring.visible is True, "loading=True 时状态栏 ProgressRing 应可见"
 
     def test_progress_hidden_when_not_loading(self, screener_view_env) -> None:
-        """state.loading=False → ProgressRing visible=False."""
+        """state.loading=False → 状态栏 ProgressRing visible=False."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
         fake_vm._set_state(loading=False, strategies_loaded=True)
         _rerender(env)
 
-        rings = _get_progress_rings(env)
-        # status_row 的 ProgressRing visible=False (可能仍有 stream_card 的 ProgressRing, 需区分)
-        status_rings = [r for r in rings if r.visible is False or r.visible is True]
-        # 至少存在 ProgressRing 控件, visible 由 state.loading 派生
-        assert len(status_rings) >= 0  # 无 stream_cards 时可能无 ring
+        ring = _get_status_progress_ring(env)
+        assert ring.visible is False, "loading=False 时状态栏 ProgressRing 应不可见"
 
     def test_run_button_becomes_stop_when_loading(self, screener_view_env) -> None:
         """Task 3.2: state.loading=True → 按钮切换为 STOP icon + disabled=False (可点击取消)."""
