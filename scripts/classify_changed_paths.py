@@ -19,7 +19,11 @@ import fnmatch
 import sys
 from collections.abc import Iterable
 
-# 与变更前 ci_cd.yml 的 pull_request.paths 白名单保持一致，避免分类语义漂移。
+# 基线为变更前 ci_cd.yml 的 pull_request.paths 白名单，避免分类语义漂移。
+# 另加 finbert-train.yml 精确路径（D18-S01）：该 workflow 仅 workflow_dispatch，
+# PR 不触发自身；其契约测试 test_workflow_finbert_train_split.py 须随 unit 重型
+# job 在合并前执行。仅精确路径，不泛化 .github/workflows/**——sidecar /
+# precommit-config 已有独立 PR 补偿，避免把它们重新拉入重型 job。
 CODE_PATTERNS: tuple[str, ...] = (
     "*.py",
     "requirements*.txt",
@@ -37,6 +41,7 @@ CODE_PATTERNS: tuple[str, ...] = (
     "tests/**",
     "scripts/**",
     ".github/workflows/ci_cd.yml",
+    ".github/workflows/finbert-train.yml",
 )
 
 
