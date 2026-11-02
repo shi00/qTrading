@@ -165,7 +165,14 @@ sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --input <备份�
 | 模式 | 行为 | 原数据目录去向 |
 |------|------|---------------|
 | **默认**（不指定 `--target-data-dir`） | 先恢复到数据目录同级的临时目录 `<数据目录名>.restore-<时间戳>`（initdb → 临时实例 → pg_restore → 健康检查），**全部成功后自动切换为当前数据目录**，并重置 state.json（status=stopped、清空 pid/port，避免残留旧实例状态误导 `status`）。**无需手动切换，完成后直接启动应用即可** | 改名为 `<数据目录名>.bak-<时间戳>`，**保留为备份（原数据不被销毁）**，确认恢复无误后可自行清理 |
-| **指定 `--target-data-dir <新目录>`** | 恢复到指定目录（目标目录已存在且非空时拒绝执行，不覆盖原则），**不切换当前数据目录**，state.json 不变。恢复成功后需自行让应用指向该目录（如调整 `AppConfig.embedded_pg_data_root`） | 完全不动 |
+| **指定 `--target-data-dir <新目录>`** | 恢复到指定目录（目标目录已存在且非空时拒绝执行，不覆盖原则），**不切换当前数据目录**，state.json 不变。恢复成功后需自行让应用指向该目录（如调整 `AppConfig.embedded_pg_data_root`）；目标使用独立 `runtime/` 时 sidecar 会一并写入目标密码文件（见下方「目标布局与凭据」） | 完全不动 |
+
+**目标布局与凭据（D16-F05）**：`--target-data-dir` 必须是应用可识别的布局，sidecar 按目标 runtime 归属处理凭据：
+
+- **与源数据目录同级**（如 `<数据目录名>.restored`，与源共享同一 `runtime/`）→ 沿用源凭据，不额外写密码文件（兼容原有用法）。
+- **独立应用布局** `<data root>/data`（应用布局 `<app data>/postgres/<major>/data`，例如 `.../postgres/16/data`）→ 恢复成功后由 sidecar 向该布局的 `runtime/password` **原子写入同一密码**（Unix 0600、Windows DPAPI，写入成功后才报告恢复完成；stdout 目标目录契约不变）。源密码文件不改动；写入失败返回 exit 16 并清理本次恢复目录，避免目标停留在「有数据但无凭据」的不可用状态。
+- **其他布局**（目标目录名不是 `data`）、**目标位于源 PGDATA 内** → 入口拒绝并给出受支持路径（exit 2），不会创建任何目录。
+- **目标已有无关凭据**（`runtime/password` 已存在且与本次密码不同或不可解密）→ exit 16 且**不覆盖**；目标 `runtime/` 或密码文件为符号链接同样拒绝（exit 16）；目标布局维护锁被其他进程占用 → exit 50，先停止使用该目录的进程后重试。
 
 **活实例守卫（D16-F03）**：restore 获取维护锁后、任何 initdb/切换前会校验源 PGDATA 不存在仍在运行的实例（复用进程归属校验，含规范化路径、启动时刻与 OS 进程证据）。sidecar 崩溃/被 kill 后维护锁会被 OS 释放，但 postgres 可能仍活；此时 restore 返回 exit 50 并提示先执行 `stop --data-dir <数据目录>`，**不会自动杀进程、不会创建恢复目录或改动源目录**。默认模式切换前会再次校验，失败时已完成的 `.restore-*` 目录保留供人工处理。显式 `--target-data-dir` 模式同样要求源 PGDATA 无活实例。
 
@@ -175,7 +182,7 @@ sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --input <备份�
 - 默认模式切换阶段：旧目录改名 `.bak-*` 失败 → 报错退出，原目录与临时恢复目录均原地保留，需手动处理；新目录切换为当前目录失败 → 自动回滚改名（若回滚失败，原数据仍保留于 `.bak-*` 目录，需手动处理）；
 - 恢复期间新旧数据并存（默认模式成功后 `.bak-*` 备份也会继续保留），请确保磁盘空间充足。
 
-**凭证依赖**：restore 使用当前密码文件初始化新目录（保持凭据一致，见 9.8）——密码文件缺失或不可解密时 restore 无法进行（exit 16），请先按 9.9 凭证分流处理再恢复。
+**凭证依赖**：restore 使用当前密码文件初始化新目录（保持凭据一致，见 9.8）——密码文件缺失或不可解密时 restore 无法进行（exit 16），请先按 9.9 凭证分流处理再恢复。显式目标的独立 runtime 凭据写入规则见上方「目标布局与凭据」。
 
 #### 9.5 维护实例（maintenance-shell）
 
@@ -197,18 +204,18 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 | exit code | 常量 | 语义 | 典型触发命令 |
 |-----------|------|------|-------------|
 | 0 | `SUCCESS` | 进程执行成功；doctor 的诊断结论须看 JSON `issues` 字段，不等同数据库健康 | 全部命令 |
-| 2 | `ARGUMENT_ERROR` | 命令行参数解析失败，或 stdout JSON 输出失败 | 全部命令 |
+| 2 | `ARGUMENT_ERROR` | 命令行参数解析失败，或 stdout JSON 输出失败；显式恢复目标布局不受支持（目标名不是 `data`、目标位于源 PGDATA 内）也返回此码 | 全部命令 / restore |
 | 10 | `SETUP_FAILED` | 内置 PostgreSQL binaries 解压/安装失败（install dir 不完整） | run / dump / restore / maintenance-shell / reset-password |
 | 11 | `INITDB_FAILED` | initdb 初始化数据目录失败 | run / restore |
 | 12 | `START_FAILED` | postgres 实例启动失败（端口分配失败、启动超时、临时实例启动失败） | run / dump / restore / maintenance-shell |
 | 13 | `HEALTH_CHECK_FAILED` | 启动后健康检查未通过；`maintenance-shell` 的 stdout JSON 输出失败（停止临时实例后失败退出） | run / maintenance-shell |
 | 14 | `CREATE_DATABASE_FAILED` | 业务库创建失败 | run |
 | 15 | `PREFLIGHT_FAILED` | 资源预检失败：磁盘空间不足 / 目录权限不足 / 文件系统不支持 / 网盘同步路径 / 密码文件权限过宽 | run |
-| 16 | `PASSWORD_FAILED` | 密码文件缺失/为空/不可解密（PGDATA 已存在）或认证不匹配（28P01） | run / dump / restore / maintenance-shell / reset-password |
+| 16 | `PASSWORD_FAILED` | 密码文件缺失/为空/不可解密（PGDATA 已存在）或认证不匹配（28P01）；显式恢复目标已有无关凭据、目标 runtime/密码文件不可用或写入失败亦返回此码 | run / dump / restore / maintenance-shell / reset-password |
 | 20 | `STOP_FAILED` | 停止 postgres 失败（分级停止后进程仍存活）；或无法证明 `postmaster.pid` 中的 PID 属于本 PGDATA（拒绝发送信号并保留 PID 文件与诊断）；PG 未运行时 stop 幂等成功返回 0 | stop / run |
 | 30 | `DUMP_RESTORE_FAILED` | 备份/恢复执行失败：备份文件不存在或损坏、版本不兼容、pg_dump/pg_restore 执行失败、恢复目录切换失败等 | dump / restore / reset-password |
 | 40 | `DATA_DIR_ABNORMAL` | 数据目录状态异常：非空但无 PG_VERSION、主版本不匹配、pg_control/WAL 损坏嫌疑、关键文件缺失 | run / maintenance-shell / reset-password |
-| 50 | `LOCK_CONFLICT` | 维护锁冲突（qTrading 或另一个维护进程正在使用该 PGDATA），或该 PGDATA 存在活实例（含 sidecar 崩溃后残留的孤儿 postgres，restore 前置校验复用此码） | run / stop / dump / restore / maintenance-shell / reset-password |
+| 50 | `LOCK_CONFLICT` | 维护锁冲突（qTrading 或另一个维护进程正在使用该 PGDATA），或该 PGDATA 存在活实例（含 sidecar 崩溃后残留的孤儿 postgres，restore 前置校验复用此码）；显式恢复的目标布局维护锁被占用同样返回此码 | run / stop / dump / restore / maintenance-shell / reset-password |
 | 60 | `POSTGRES_DIED` | 监督期间 postgres 意外退出（sidecar 不自动重启） | run |
 
 > doctor 只返回 0/2 两种退出码（见 9.2），上表其余退出码不会由 doctor 返回。
