@@ -100,13 +100,31 @@ def _make_service(paths: dict[str, Path], mode: str) -> EmbeddedPostgresService:
     )
 
 
-async def _wait_until(predicate, timeout: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        await asyncio.sleep(0.005)
-    raise AssertionError("condition not met before timeout")
+async def _wait_thread_event(event: threading.Event, *, description: str, timeout: float = 10.0) -> None:
+    """等待工作线程显式 signal（事件驱动，不轮询共享状态）。
+
+    工作线程在被观测点置位 ``threading.Event``，本协程在事件到达时立即返回；
+    ``timeout`` 仅是防止实现回归导致永久挂起的兜底，不是靠墙钟等待“撞上”状态。
+    """
+    loop = asyncio.get_running_loop()
+    signaled = loop.create_future()
+
+    def _mark_signaled() -> None:
+        if not signaled.done():
+            signaled.set_result(None)
+
+    def _watch() -> None:
+        if event.wait(timeout):
+            try:
+                loop.call_soon_threadsafe(_mark_signaled)
+            except RuntimeError:
+                pass  # 事件循环已关闭（超时边界），无需再通知
+
+    threading.Thread(target=_watch, name="test-signal-watch", daemon=True).start()
+    try:
+        await asyncio.wait_for(signaled, timeout)
+    except TimeoutError as exc:
+        raise AssertionError(f"worker thread did not signal {description} within {timeout}s") from exc
 
 
 async def _assert_no_reader_threads(timeout: float = 5.0) -> None:
@@ -120,12 +138,23 @@ async def _assert_no_reader_threads(timeout: float = 5.0) -> None:
 
 
 class _RecordingPopen:
+    """记录 Popen 并在工作线程完成 spawn 后显式 signal。
+
+    R02-CI 回归：``svc_module.subprocess`` 是标准库模块对象，monkeypatch 会替换
+    模块上的 ``Popen`` 本身；包装器若在 ``__call__`` 内再次读取
+    ``svc_module.subprocess.Popen`` 会递归调用自身（RecursionError），必须提前
+    捕获真实构造器。
+    """
+
     def __init__(self) -> None:
         self.processes = []
+        self.spawned = threading.Event()
+        self._real_popen = svc_module.subprocess.Popen
 
     def __call__(self, *args, **kwargs):
-        proc = svc_module.subprocess.Popen(*args, **kwargs)
+        proc = self._real_popen(*args, **kwargs)
         self.processes.append(proc)
+        self.spawned.set()
         return proc
 
 
@@ -146,11 +175,13 @@ async def test_cancel_before_popen_does_not_spawn(race_paths, monkeypatch) -> No
     monkeypatch.setattr(service, "_verify_sidecar_sha256", blocked_verify)
     try:
         task = asyncio.create_task(service.start())
-        await _wait_until(entered.is_set)
+        await _wait_thread_event(entered, description="verify hook entered")
         task.cancel()
         release.set()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled()
         assert recording.processes == []
         assert service._process is None
         assert service._connection_info is None
@@ -167,10 +198,12 @@ async def test_cancel_after_popen_before_ready_terminates_child(race_paths, monk
     monkeypatch.setattr(svc_module.subprocess, "Popen", recording)
     try:
         task = asyncio.create_task(service.start())
-        await _wait_until(lambda: service._process is not None)
+        await _wait_thread_event(recording.spawned, description="sidecar spawned")
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled()
         assert recording.processes and recording.processes[0].poll() is not None
         assert service._process is None
         assert service._connection_info is None
@@ -199,11 +232,13 @@ async def test_cancel_after_ready_terminates_child(race_paths, monkeypatch) -> N
     monkeypatch.setattr(service, "_start_stdout_reader_thread", blocked_stdout_reader)
     try:
         task = asyncio.create_task(service.start())
-        await _wait_until(ready_entered.is_set)
+        await _wait_thread_event(ready_entered, description="stdout reader started")
         task.cancel()
         release.set()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await task
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled()
         assert recording.processes and recording.processes[0].poll() is not None
         assert service._process is None
         assert service._connection_info is None
@@ -253,14 +288,15 @@ async def test_cancel_second_start_keeps_existing_process(race_paths, monkeypatc
 
         monkeypatch.setattr(service, "_start_sync", delayed_start_sync)
         task = asyncio.create_task(service.start())
-        await _wait_until(entered.is_set)
+        await _wait_thread_event(entered, description="second start worker entered")
         task.cancel()
         # 必须先释放工作线程：取消收尾在等待 finished 握手，若延后释放会等到
         # blocked_start_sync 的 wait 超时（测试变成 10s 空转并依赖断言失败）
         release.set()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await task
-
+        assert isinstance(exc_info.value, asyncio.CancelledError)
+        assert task.cancelled()
         assert service._process is not None and service._process.poll() is None
         assert service._connection_info is not None
     finally:
