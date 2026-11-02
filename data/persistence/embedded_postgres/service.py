@@ -93,11 +93,13 @@ def _unprotect_win32_blob(blob: bytes) -> bytes:  # pragma: no cover -- win-only
         ctypes.windll.kernel32.LocalFree(out_blob.pbData)  # type: ignore[reportAttributeAccessIssue]  # Windows-only：ctypes.windll 在 Linux 平台不存在
 
 
-def _read_embedded_password(password_file: Path, svc_logger: logging.Logger) -> str:
+def read_embedded_password(password_file: Path, svc_logger: logging.Logger) -> str:
     """F5（检视 06）：读取内置 PG 密码文件。
 
     - ``PGPW2:`` 前缀：Windows DPAPI 加密，hex(blob) → 解密；
     - 无前缀：明文（Unix，或 Windows 升级前的旧格式）。
+
+    D16-F09：公开给 CLI 验证脚本复用，确保 tools/scripts 不复制第二套 DPAPI 解码实现。
     """
     raw = password_file.read_text(encoding="utf-8").strip()
     if not raw.startswith(_EMBEDDED_PW_DPAPI_PREFIX):
@@ -418,7 +420,7 @@ class EmbeddedPostgresService:
 
         try:
             # F5（检视 06）：Windows 下自动解密 DPAPI 加密的 password 文件；否则明文
-            password = _read_embedded_password(password_file, self._svc_logger)
+            password = read_embedded_password(password_file, self._svc_logger)
         except FileNotFoundError as exc:
             self._svc_logger.error("password_file not found: %s", password_file)
             self._cleanup_failed_start()
