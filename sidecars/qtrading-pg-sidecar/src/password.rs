@@ -88,6 +88,33 @@ pub fn read_password_file(path: &Path) -> Option<String> {
     }
 }
 
+/// D16-T03：仅测试构建启用的故障注入（不进入发布二进制）。
+///
+/// 用于覆盖 root 无法模拟的 chmod/write 失败路径；线程本地状态避免并行测试串扰。
+#[cfg(all(test, unix))]
+mod fault_injection {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Mode {
+        None,
+        Write,
+        Chmod,
+    }
+
+    thread_local! {
+        static MODE: Cell<Mode> = const { Cell::new(Mode::None) };
+    }
+
+    pub fn set(mode: Mode) {
+        MODE.with(|m| m.set(mode));
+    }
+
+    pub fn current() -> Mode {
+        MODE.with(Cell::get)
+    }
+}
+
 /// 写入 password file；Unix 强制 0600（§7.4），Windows 用 DPAPI 加密（F5，检视 06）。
 ///
 /// D16-F05：同目录临时文件写满并 fsync 后原子 rename，避免写入中断留下半截密码
@@ -123,6 +150,13 @@ pub fn write_password_file(path: &Path, password: &str) -> std::io::Result<()> {
     let write_result = (|| -> std::io::Result<()> {
         use std::io::Write;
         let mut file = options.open(&tmp)?;
+        #[cfg(all(test, unix))]
+        if fault_injection::current() == fault_injection::Mode::Write {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "injected password write failure (test-only)",
+            ));
+        }
         file.write_all(&bytes)?;
         file.sync_all()?;
         Ok(())
@@ -140,6 +174,13 @@ pub fn write_password_file(path: &Path, password: &str) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        #[cfg(all(test, unix))]
+        if fault_injection::current() == fault_injection::Mode::Chmod {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected password chmod failure (test-only)",
+            ));
+        }
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
@@ -392,6 +433,197 @@ mod tests {
             read_password_file(&path).as_deref(),
             Some("SecondPwd-1_2.3~")
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-T03：测试构建注入故障；Drop 时复位，避免同线程后续用例串扰。
+    #[cfg(unix)]
+    struct FaultGuard;
+
+    #[cfg(unix)]
+    impl FaultGuard {
+        fn set(mode: fault_injection::Mode) -> Self {
+            fault_injection::set(mode);
+            Self
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FaultGuard {
+        fn drop(&mut self) {
+            fault_injection::set(fault_injection::Mode::None);
+        }
+    }
+
+    /// D16-T03：写失败（open/write 阶段）时原凭据必须保持不变，且不残留临时文件。
+    #[cfg(unix)]
+    #[test]
+    fn injected_write_failure_preserves_existing_credential() {
+        let dir = unique_tmp("inject-write");
+        let path = dir.join("password");
+        let first = generate_password();
+        write_password_file(&path, &first).unwrap();
+
+        let _guard = FaultGuard::set(fault_injection::Mode::Write);
+        let err = write_password_file(&path, &generate_password()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
+        assert!(
+            read_password_file(&path).as_deref() == Some(first.as_str()),
+            "写失败后原凭据必须保持不变"
+        );
+        assert!(
+            std::fs::read_dir(&dir).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".password.tmp-")),
+            "写失败后不得残留临时文件"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-T03：rename 失败（目标不可替换）时临时文件被清理，既有目标不被破坏。
+    #[test]
+    fn rename_failure_cleans_tmp_and_leaves_target_untouched() {
+        let dir = unique_tmp("rename-fail");
+        let target = dir.join("password");
+        std::fs::create_dir_all(target.join("blocker")).unwrap();
+        std::fs::write(target.join("blocker").join("marker"), b"keep").unwrap();
+
+        write_password_file(&target, &generate_password()).unwrap_err();
+
+        assert_eq!(
+            std::fs::read(target.join("blocker").join("marker")).unwrap(),
+            b"keep",
+            "rename 失败不得改动既有目标"
+        );
+        assert!(
+            std::fs::read_dir(&dir).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".password.tmp-")),
+            "rename 失败后临时文件必须被清理"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-T03：父目录无法创建（父路径是普通文件）时返回错误且不产生任何残留。
+    #[test]
+    fn parent_create_failure_returns_error_without_residue() {
+        let dir = unique_tmp("parent-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        let blocker = dir.join("not-a-directory");
+        std::fs::write(&blocker, b"keep").unwrap();
+
+        let err = write_password_file(&blocker.join("password"), &generate_password()).unwrap_err();
+        assert!(!err.to_string().is_empty());
+        assert_eq!(std::fs::read(&blocker).unwrap(), b"keep");
+        assert!(
+            std::fs::read_dir(&dir).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".password.tmp-")),
+            "父目录创建失败不得产生临时文件"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-T03：chmod 失败路径已被显式返回。rename 已完成，新凭据仍因临时文件
+    /// 以 0600 创建而保持 owner-only（不因 chmod 报错退化为可读凭据）。
+    #[cfg(unix)]
+    #[test]
+    fn injected_chmod_failure_keeps_new_credential_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_tmp("inject-chmod");
+        let path = dir.join("password");
+        write_password_file(&path, &generate_password()).unwrap();
+
+        let second = generate_password();
+        let _guard = FaultGuard::set(fault_injection::Mode::Chmod);
+        let err = write_password_file(&path, &second).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            read_password_file(&path).as_deref() == Some(second.as_str()),
+            "rename 已完成后 chmod 报错不应丢失新凭据"
+        );
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "chmod 失败时仍须保持 0600");
+        assert!(
+            std::fs::read_dir(&dir).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".password.tmp-")),
+            "chmod 失败后不得残留临时文件"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-T03：非 root 下 runtime 目录不可写时 write 失败且旧凭据保持。
+    /// root 会绕过目录权限位（本测试在 root 下跳过；CI/非 root 本地用户覆盖）。
+    #[cfg(unix)]
+    #[test]
+    fn unwritable_runtime_dir_preserves_existing_credential() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct DirModeGuard(std::path::PathBuf);
+        impl Drop for DirModeGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+
+        // SAFETY: geteuid 仅读取当前进程凭证，无副作用。
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("[skip] root 会绕过 0500 权限位，权限矩阵由非 root/CI 覆盖");
+            return;
+        }
+
+        let dir = unique_tmp("unwritable-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.join("password");
+        let first = generate_password();
+        write_password_file(&path, &first).unwrap();
+
+        let _mode_guard = DirModeGuard(dir.clone());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let err = write_password_file(&path, &generate_password()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            read_password_file(&path).as_deref() == Some(first.as_str()),
+            "目录不可写时旧凭据必须保持不变"
+        );
+
+        drop(_mode_guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-T03：非 Windows 平台拒绝 `PGPW2:` DPAPI 前缀，绝不把密文当明文返回。
+    #[cfg(not(windows))]
+    #[test]
+    fn dpapi_prefixed_file_is_rejected_off_windows() {
+        let dir = unique_tmp("dpapi-off-win");
+        let path = dir.join("password");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, format!("{DPAPI_PREFIX}00ff")).unwrap();
+        assert_eq!(read_password_file(&path), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Unix 写入保持明文格式（无 DPAPI 前缀），供 bundled psql 直接读取。
+    #[cfg(unix)]
+    #[test]
+    fn unix_write_has_no_dpapi_prefix() {
+        let dir = unique_tmp("unix-plain");
+        let path = dir.join("password");
+        let pwd = generate_password();
+        write_password_file(&path, &pwd).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.starts_with(DPAPI_PREFIX));
+        assert!(raw.trim() == pwd, "Unix password 文件应为明文");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
