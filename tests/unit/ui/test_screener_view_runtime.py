@@ -215,6 +215,38 @@ def _get_buttons(env: dict) -> list:
     return buttons
 
 
+def _get_prompt_action_button(env: dict, icon: Any, expected_content: str) -> ft.TextButton:
+    """按稳定图标定位 ai_system_prompt 的保存/恢复入口, 断言唯一且内容匹配.
+
+    两个入口的 icon (SAVE / RESTORE) 在 screener_view 渲染树中唯一, 同树的
+    go_sync (SYNC) 等其他 TextButton 不会混入。入口缺失直接断言失败 (不转 skip),
+    使固定适用 fixture 下的必需交互缺失可被回归测试拒绝。
+    """
+    btns = [b for b in _get_buttons(env) if isinstance(b, ft.TextButton) and b.icon == icon]
+    assert len(btns) == 1, f"icon={icon} 的 prompt 入口应恰好 1 个, 实际 {len(btns)}"
+    assert btns[0].content == expected_content, f"prompt 入口内容应为 {expected_content!r}, 实际 {btns[0].content!r}"
+    return btns[0]
+
+
+def _get_save_prompt_button(env: dict) -> ft.TextButton:
+    """定位 ai_system_prompt 的保存按钮 (icon=SAVE, screener_view 内唯一)."""
+    return _get_prompt_action_button(env, ft.Icons.SAVE, "i18n[ai_save_prompt]")
+
+
+def _get_restore_prompt_button(env: dict) -> ft.TextButton:
+    """定位 ai_system_prompt 的恢复默认按钮 (icon=RESTORE, screener_view 内唯一)."""
+    return _get_prompt_action_button(env, ft.Icons.RESTORE, "i18n[ai_reset_default]")
+
+
+def _get_ai_prompt_field(env: dict) -> ft.TextField:
+    """定位 ai_system_prompt 文本域 (multiline 且无 label, 与普通 textarea 参数区分)."""
+    fields = [
+        c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.TextField) and c.multiline and c.label is None
+    ]
+    assert len(fields) == 1, f"ai_system_prompt 文本域应恰好 1 个, 实际 {len(fields)}"
+    return fields[0]
+
+
 def _get_sliders(env: dict) -> list[ft.Slider]:
     """返回渲染树中所有 Slider."""
     sliders: list[ft.Slider] = []
@@ -2186,16 +2218,9 @@ class TestDoRestoreDefaultAsync:
         page = env["page"]
         fake_vm = env["fake_vm"]
 
-        # 找到 restore 按钮 (TextButton with "ai_reset_default" content)
-        buttons = _get_buttons(env)
-        restore_btn = None
-        for b in buttons:
-            if isinstance(b, ft.TextButton) and "ai_reset_default" in str(getattr(b, "content", "")):
-                restore_btn = b
-                break
-
-        if restore_btn is None:
-            pytest.skip("restore button not found (ai_system_prompt textarea not rendered)")
+        # 恢复入口为固定适用 fixture 的必需交互: 缺失直接失败, 不转 skip.
+        restore_btn = _get_restore_prompt_button(env)
+        assert callable(restore_btn.on_click)
 
         # Phase 3.3: patch fake_vm.reset_strategy_prompt 返回 base_prompt 字符串
         with patch.object(fake_vm, "reset_strategy_prompt", new_callable=AsyncMock) as mock_reset:
@@ -2207,7 +2232,11 @@ class TestDoRestoreDefaultAsync:
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
-            mock_reset.assert_awaited_once()
+            mock_reset.assert_awaited_once_with("value")
+            # 恢复后默认草稿回填到 ai_system_prompt 文本域
+            _rerender(env)
+            assert _get_ai_prompt_field(env).value == "default_prompt"
+            assert fake_vm.state.strategy_params["ai_system_prompt"] == "default_prompt"
             page.toast.show.assert_called_once_with(
                 "i18n[ai_settings_restored]", "info", action_text=None, on_action=None
             )
@@ -2218,15 +2247,8 @@ class TestDoRestoreDefaultAsync:
         page = env["page"]
         fake_vm = env["fake_vm"]
 
-        buttons = _get_buttons(env)
-        restore_btn = None
-        for b in buttons:
-            if isinstance(b, ft.TextButton) and "ai_reset_default" in str(getattr(b, "content", "")):
-                restore_btn = b
-                break
-
-        if restore_btn is None:
-            pytest.skip("restore button not found")
+        restore_btn = _get_restore_prompt_button(env)
+        assert callable(restore_btn.on_click)
 
         # Phase 3.3: patch fake_vm.reset_strategy_prompt 抛 RuntimeError
         with patch.object(fake_vm, "reset_strategy_prompt", new_callable=AsyncMock) as mock_reset:
@@ -2238,6 +2260,7 @@ class TestDoRestoreDefaultAsync:
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
+            mock_reset.assert_awaited_once_with("value")
             page.toast.show.assert_called_once_with(
                 "i18n[sys_snack_save_err]", "error", action_text=None, on_action=None
             )
@@ -2260,15 +2283,10 @@ class TestDoSavePromptAsync:
         page = env["page"]
         fake_vm = env["fake_vm"]
 
-        buttons = _get_buttons(env)
-        save_btn = None
-        for b in buttons:
-            if isinstance(b, ft.TextButton) and "ai_save_prompt" in str(getattr(b, "content", "")):
-                save_btn = b
-                break
-
-        if save_btn is None:
-            pytest.skip("save button not found")
+        save_btn = _get_save_prompt_button(env)
+        assert callable(save_btn.on_click)
+        # 模拟用户已在 ai_system_prompt 输入的草稿
+        fake_vm.set_strategy_param("ai_system_prompt", "draft prompt")
 
         # Phase 3.3: patch fake_vm.save_strategy_prompt 返回 (False, "prompt_err_length")
         # 模拟 validate_prompt 失败路径 (VM 内部不应调用 ConfigHandler.set_strategy_prompt)
@@ -2281,18 +2299,15 @@ class TestDoSavePromptAsync:
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
-            mock_save.assert_awaited_once()
+            mock_save.assert_awaited_once_with("value", "draft prompt")
             # D19: 校验失败 → inline 错误 (代替 warning toast), Warning SnackBar 不应再出现
             page.toast.show.assert_not_called()
 
             # 重渲染后, ai_system_prompt 文本域 error 应显示翻译后的错误消息
             _rerender(env)
-            inline_errors = [
-                c
-                for c in _walk_all_controls(env["result"])
-                if isinstance(c, ft.TextField) and getattr(c, "multiline", False) and getattr(c, "error", None)
-            ]
-            assert any(c.error == "i18n[prompt_err_length]" for c in inline_errors), (
+            prompt_field = _get_ai_prompt_field(env)
+            assert prompt_field.value == "draft prompt"
+            assert prompt_field.error == "i18n[prompt_err_length]", (
                 "校验失败应在 ai_system_prompt 字段上显示 inline 错误"
             )
 
@@ -2302,15 +2317,9 @@ class TestDoSavePromptAsync:
         page = env["page"]
         fake_vm = env["fake_vm"]
 
-        buttons = _get_buttons(env)
-        save_btn = None
-        for b in buttons:
-            if isinstance(b, ft.TextButton) and "ai_save_prompt" in str(getattr(b, "content", "")):
-                save_btn = b
-                break
-
-        if save_btn is None:
-            pytest.skip("save button not found")
+        save_btn = _get_save_prompt_button(env)
+        assert callable(save_btn.on_click)
+        fake_vm.set_strategy_param("ai_system_prompt", "draft prompt")
 
         # Phase 3.3: patch fake_vm.save_strategy_prompt 返回 (True, None) 表示保存成功
         with patch.object(fake_vm, "save_strategy_prompt", new_callable=AsyncMock) as mock_save:
@@ -2322,7 +2331,7 @@ class TestDoSavePromptAsync:
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
-            mock_save.assert_awaited_once()
+            mock_save.assert_awaited_once_with("value", "draft prompt")
             page.toast.show.assert_called_once_with(
                 "i18n[ai_settings_saved]", "success", action_text=None, on_action=None
             )
@@ -2333,15 +2342,9 @@ class TestDoSavePromptAsync:
         page = env["page"]
         fake_vm = env["fake_vm"]
 
-        buttons = _get_buttons(env)
-        save_btn = None
-        for b in buttons:
-            if isinstance(b, ft.TextButton) and "ai_save_prompt" in str(getattr(b, "content", "")):
-                save_btn = b
-                break
-
-        if save_btn is None:
-            pytest.skip("save button not found")
+        save_btn = _get_save_prompt_button(env)
+        assert callable(save_btn.on_click)
+        fake_vm.set_strategy_param("ai_system_prompt", "draft prompt")
 
         # Phase 3.3: patch fake_vm.save_strategy_prompt 抛 RuntimeError
         with patch.object(fake_vm, "save_strategy_prompt", new_callable=AsyncMock) as mock_save:
@@ -2353,6 +2356,7 @@ class TestDoSavePromptAsync:
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
+            mock_save.assert_awaited_once_with("value", "draft prompt")
             page.toast.show.assert_called_once_with(
                 "i18n[sys_snack_save_err]", "error", action_text=None, on_action=None
             )
@@ -2398,12 +2402,16 @@ class TestBuildParamControl:
         assert len(multiline_fields) >= 1
 
     def test_ai_system_prompt_has_save_restore_buttons(self, screener_view_with_params_env) -> None:
-        """ai_system_prompt textarea → 含保存/恢复 TextButton."""
+        """ai_system_prompt textarea → 各含唯一保存/恢复 TextButton.
+
+        按稳定图标 (SAVE / RESTORE) 唯一识别两个入口, 并断言回调可调用;
+        同树的 go_sync (SYNC) 等 TextButton 不参与计数。
+        """
         env = screener_view_with_params_env
-        buttons = _get_buttons(env)
-        text_btns = [b for b in buttons if isinstance(b, ft.TextButton)]
-        # 至少有 save + restore 两个 TextButton
-        assert len(text_btns) >= 2
+        save_btn = _get_save_prompt_button(env)
+        restore_btn = _get_restore_prompt_button(env)
+        assert callable(save_btn.on_click)
+        assert callable(restore_btn.on_click)
 
 
 class TestBuildParamsPanel:
