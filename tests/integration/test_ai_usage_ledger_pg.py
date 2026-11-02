@@ -41,7 +41,7 @@ from data.cache.cache_manager import CacheManager
 from data.persistence.daos.ai_usage_dao import AIUsageDao, SCOPE_CONNECTION, SCOPE_SCENARIO
 from data.persistence.db_url_override import override_db_url
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
-from core.model_management_types import NormalizedLLMUsage
+from core.model_management_types import BudgetReservation, NormalizedLLMUsage
 from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
@@ -53,6 +53,9 @@ _LEDGER_TABLE_DELETES = (
     text("DELETE FROM ai_usage_monthly"),
 )
 _LEDGER_LEGACY_KEY_PREFIX = "ai_cost:"
+
+# 场景 5 并发 worker 数：预留与结算各 N 个，每个结算 worker 对应独立 connection id。
+_MIXED_WORKERS = 4
 
 
 def _utcnow_naive() -> datetime.datetime:
@@ -566,10 +569,11 @@ class TestConcurrentMixedOpsNoDeadlock:
         month = _current_month()
 
         # F23：缺行结算需活跃预留背书（先串行登记 0.00 预留，再进入并发阶段）
-        rids = [await _seed_backing_reservation(ledger_dao, f"att-mixed-{i}") for i in range(4)]
+        rids = [await _seed_backing_reservation(ledger_dao, f"att-mixed-{i}") for i in range(_MIXED_WORKERS)]
 
         reserve_tasks = [
-            ledger_dao.try_reserve(**_make_reserve_kwargs(f"inv-mixed-{i}", amount="0.10")) for i in range(4)
+            ledger_dao.try_reserve(**_make_reserve_kwargs(f"inv-mixed-{i}", amount="0.10"))
+            for i in range(_MIXED_WORKERS)
         ]
         settle_tasks = [
             ledger_dao.settle_attempt_usage(
@@ -580,26 +584,79 @@ class TestConcurrentMixedOpsNoDeadlock:
                     "reservation_id": rids[i],
                 }
             )
-            for i in range(4)
+            for i in range(_MIXED_WORKERS)
         ]
 
         results = await asyncio.wait_for(asyncio.gather(*reserve_tasks, *settle_tasks), timeout=60.0)
-        assert all(r is not None for r in results), "预算 1.00 内 4 笔 0.10 预留与 4 笔结算应全部成功"
+        reserve_results = results[:_MIXED_WORKERS]
+        settle_results = results[_MIXED_WORKERS:]
+
+        # 每个 worker 的结果必须为真：预留返回 BudgetReservation（None=余额不足/失权），
+        # 结算返回 True（False=未推进：旧修订/无背书/回滚）。不得用 ``is not None``
+        # 把 False 也算作成功（False is not None 为 True，会放过未推进的结算）。
+        for i, reservation in enumerate(reserve_results):
+            assert isinstance(reservation, BudgetReservation), (
+                f"预留 worker {i} 未获准（None=余额不足或 owner 失权），实际 {reservation!r}"
+            )
+            assert reservation.reservation_id == f"res-inv-mixed-{i}", (
+                f"预留 worker {i} 返回意外预留: {reservation.reservation_id}"
+            )
+        for i, settled in enumerate(settle_results):
+            assert settled is True, f"结算 worker {i}（conn-mixed-{i}）未推进（False=回滚/旧修订/无背书）"
+
+        # 逐 worker 核验持久化：月汇总 connection 行与 attempt 行均须存在且字段正确，
+        # 不能只抽查 conn-mixed-0（否则其他 worker 写入失败可被掩盖）。
+        expected_connections = {f"conn-mixed-{i}" for i in range(_MIXED_WORKERS)}
+        expected_attempts = [f"att-mixed-{i}" for i in range(_MIXED_WORKERS)]
 
         assert clean_ledger.engine is not None
         async with clean_ledger.engine.begin() as conn:
-            row = (
+            connection_rows = (
                 await conn.execute(
                     text(
-                        "SELECT attempt_count, cost_cny FROM ai_usage_monthly "
-                        "WHERE month = :m AND aggregation_scope = :s AND grouping_key = :g"
+                        "SELECT grouping_key, attempt_count, succeeded_count, cost_cny FROM ai_usage_monthly "
+                        "WHERE month = :m AND aggregation_scope = :s ORDER BY grouping_key"
                     ),
-                    {"m": month, "s": SCOPE_CONNECTION, "g": "conn-mixed-0"},
+                    {"m": month, "s": SCOPE_CONNECTION},
                 )
-            ).fetchone()
-        assert row is not None
-        assert int(row[0]) == 1
-        assert Decimal(str(row[1])) == Decimal("0.10")
+            ).fetchall()
+            attempt_rows = (
+                await conn.execute(
+                    text(
+                        "SELECT attempt_id, connection_id, accounted_usage_revision, cost_cny FROM ai_attempt "
+                        "ORDER BY attempt_id"
+                    )
+                )
+            ).fetchall()
+
+        assert {row[0] for row in connection_rows} == expected_connections, (
+            f"connection scope 应恰有每个 worker 的独立行，实际 {[row[0] for row in connection_rows]}"
+        )
+        assert len(connection_rows) == _MIXED_WORKERS, (
+            f"connection scope 行数应为 {_MIXED_WORKERS}，实际 {len(connection_rows)}"
+        )
+        for row in connection_rows:
+            assert int(row[1]) == 1, f"{row[0]} attempt_count 应为 1，实际 {row[1]}"
+            assert int(row[2]) == 1, f"{row[0]} succeeded_count 应为 1，实际 {row[2]}"
+            assert Decimal(str(row[3])) == Decimal("0.10"), f"{row[0]} cost_cny 应为 0.10，实际 {row[3]}"
+
+        assert [row[0] for row in attempt_rows] == expected_attempts, (
+            f"每个 worker 的 attempt 行均应落库，实际 {[row[0] for row in attempt_rows]}"
+        )
+        for i, row in enumerate(attempt_rows):
+            assert row[1] == f"conn-mixed-{i}", f"attempt {row[0]} 的 connection_id 应为 conn-mixed-{i}，实际 {row[1]}"
+            assert int(row[2]) == 1, f"attempt {row[0]} accounted_usage_revision 应为 1，实际 {row[2]}"
+            assert Decimal(str(row[3])) == Decimal("0.10"), f"attempt {row[0]} cost_cny 应为 0.10，实际 {row[3]}"
+
+        # 预留写入同样逐 worker 核验：invocation 行内预留已持久化且金额正确。
+        for i in range(_MIXED_WORKERS):
+            reservations = await _fetch_reservations(ledger_dao, f"inv-mixed-{i}")
+            assert [r["state"] for r in reservations] == ["reserved"], (
+                f"inv-mixed-{i} 预留状态应为 reserved，实际 {[r['state'] for r in reservations]}"
+            )
+            assert Decimal(str(reservations[0]["amount_cny"])) == Decimal("0.10"), (
+                f"inv-mixed-{i} 预留金额应为 0.10，实际 {reservations[0]['amount_cny']}"
+            )
 
 
 class TestF22ReservationLifecycle:
