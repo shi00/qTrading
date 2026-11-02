@@ -9,6 +9,7 @@ use crate::lockfile::{AcquireError, MaintenanceLock};
 use crate::logging;
 use crate::paths::Layout;
 use crate::pgbin::{self, StopMode};
+use crate::process_identity;
 use crate::protocol;
 use crate::state;
 use serde::Serialize;
@@ -116,6 +117,23 @@ pub fn status(data_dir: &Path) -> Result<(), u8> {
 
 // ---- stop ----
 
+/// 未运行/真 stale：清理 postmaster.pid 与崩溃残留的 running state。
+fn cleanup_stale(layout: &Layout, pid: Option<u32>) -> Result<(), u8> {
+    if let Some(pid) = pid {
+        tracing::warn!("stale postmaster.pid removed (pid {pid})");
+        let _ = std::fs::remove_file(layout.data_dir.join("postmaster.pid"));
+    }
+    if let Some(mut st) = state::read(&layout.state_file) {
+        if st.status == "running" {
+            st.status = "stopped".to_string();
+            st.postgres_pid = None;
+            let _ = state::write(&layout.state_file, &st);
+        }
+    }
+    eprintln!("[sidecar] PostgreSQL 未在运行");
+    Ok(())
+}
+
 pub async fn stop(data_dir: &Path) -> Result<(), u8> {
     let layout = Layout::from_data_dir(data_dir, None, None, None);
     logging::init(Some(&layout.sidecar_log));
@@ -142,14 +160,39 @@ pub async fn stop(data_dir: &Path) -> Result<(), u8> {
     let pm = pgbin::read_postmaster_pid(&layout.data_dir);
     match pm {
         Some(info) if pgbin::process_alive(info.pid) => {
+            // PID 存在不等于归属：先构造可验证身份（PGDATA + 启动时刻 + OS 创建时刻/可执行路径）。
+            let identity = match process_identity::capture_cluster_identity_from_info(
+                &layout.data_dir,
+                &layout.install_dir,
+                &info,
+            ) {
+                Ok(id) => id,
+                // 存活探测与身份读取之间进程已退出（含僵尸）→ 真 stale，走幂等清理。
+                Err(e) if e.is_not_running() => return cleanup_stale(&layout, Some(info.pid)),
+                Err(e) => {
+                    eprintln!(
+                        "[sidecar] 拒绝停止：无法证明 PID {} 属于 {}（{e}）。",
+                        info.pid,
+                        layout.data_dir.display()
+                    );
+                    eprintln!(
+                        "[sidecar] 不会向该 PID 发送任何信号；已保留 postmaster.pid 供诊断。\
+                         请确认该进程归属后再人工处理。"
+                    );
+                    return Err(exit_codes::STOP_FAILED);
+                }
+            };
+
             let outcome =
-                pgbin::graded_stop(&layout.install_dir, &layout.data_dir, Some(info.pid)).await;
+                pgbin::graded_stop(&layout.install_dir, &layout.data_dir, Some(&identity)).await;
             let mut st = state::read(&layout.state_file).unwrap_or_default();
-            st.last_stop_mode = Some(outcome.mode.as_str().to_string());
-            if outcome.mode == StopMode::KillFallback {
-                st.kill_fallback_count += 1;
-            } else if outcome.stopped {
-                st.kill_fallback_count = 0;
+            if let Some(mode) = outcome.mode {
+                st.last_stop_mode = Some(mode.as_str().to_string());
+                if mode == StopMode::KillFallback {
+                    st.kill_fallback_count += 1;
+                } else if outcome.stopped {
+                    st.kill_fallback_count = 0;
+                }
             }
             if outcome.stopped {
                 st.status = "stopped".to_string();
@@ -157,42 +200,33 @@ pub async fn stop(data_dir: &Path) -> Result<(), u8> {
                 if let Err(e) = state::write(&layout.state_file, &st) {
                     tracing::warn!("runtime state write failed: {e}");
                 }
-                eprintln!(
-                    "[sidecar] PostgreSQL 已停止 (mode={}, pid={})",
-                    outcome.mode.as_str(),
-                    info.pid
-                );
+                match outcome.mode_str() {
+                    Some(mode) => eprintln!(
+                        "[sidecar] PostgreSQL 已停止 (mode={mode}, pid={})",
+                        info.pid
+                    ),
+                    None => eprintln!("[sidecar] PostgreSQL 未在运行"),
+                }
                 Ok(())
             } else {
                 st.status = "failed".to_string();
                 let _ = state::write(&layout.state_file, &st);
-                eprintln!(
-                    "[sidecar] stop 失败：kill fallback 未能终止 postgres (pid {})",
-                    info.pid
-                );
+                if let Some(failure) = &outcome.failure {
+                    eprintln!(
+                        "[sidecar] stop 失败：{failure} (pid {})；已保留 postmaster.pid 供诊断",
+                        info.pid
+                    );
+                } else {
+                    eprintln!(
+                        "[sidecar] stop 失败：kill fallback 未能终止 postgres (pid {})",
+                        info.pid
+                    );
+                }
                 Err(exit_codes::STOP_FAILED)
             }
         }
-        _ => {
-            // 未运行：清理 stale postmaster.pid（sidecar 崩溃残留），保证下次可启动
-            if pm.is_some() {
-                tracing::warn!(
-                    "stale postmaster.pid removed (pid {})",
-                    pm.as_ref().map_or(0, |i| i.pid)
-                );
-                let _ = std::fs::remove_file(layout.data_dir.join("postmaster.pid"));
-            }
-            // state 停留在 running 是崩溃残留，修正为 stopped
-            if let Some(mut st) = state::read(&layout.state_file) {
-                if st.status == "running" {
-                    st.status = "stopped".to_string();
-                    st.postgres_pid = None;
-                    let _ = state::write(&layout.state_file, &st);
-                }
-            }
-            eprintln!("[sidecar] PostgreSQL 未在运行");
-            Ok(())
-        }
+        // 未运行：清理 stale postmaster.pid（sidecar 崩溃残留），保证下次可启动
+        other => cleanup_stale(&layout, other.as_ref().map(|i| i.pid)),
     }
 }
 

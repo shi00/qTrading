@@ -5,6 +5,7 @@
 //! （`psql_stdin`，`-f -`），同样不进 argv。
 //! 分级停止（§7.3）：smart 25s → fast 5s → kill fallback，总预算 ≤ 32s。
 
+use crate::process_identity::{self, ClusterIdentity, IdentityError};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -40,10 +41,14 @@ pub fn missing_tools(install_dir: &Path) -> Vec<&'static str> {
         .collect()
 }
 
-/// postmaster.pid 解析结果（行 1 = PID，行 4 = port）。
+/// postmaster.pid 解析结果（行 1 = PID，行 2 = PGDATA，行 3 = 启动时刻，行 4 = port）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostmasterInfo {
     pub pid: u32,
+    /// 行 2 记录的 PGDATA（用于归属校验；旧版/截断文件可能缺失）。
+    pub data_dir: Option<PathBuf>,
+    /// 行 3 记录的 postmaster 启动时刻（epoch 秒；用于归属校验）。
+    pub started_at: Option<i64>,
     pub port: Option<u16>,
 }
 
@@ -51,8 +56,18 @@ pub fn read_postmaster_pid(data_dir: &Path) -> Option<PostmasterInfo> {
     let content = std::fs::read_to_string(data_dir.join("postmaster.pid")).ok()?;
     let mut lines = content.lines();
     let pid: u32 = lines.next()?.trim().parse().ok()?;
-    let port = lines.nth(2).and_then(|l| l.trim().parse().ok());
-    Some(PostmasterInfo { pid, port })
+    let pidfile_data_dir = lines
+        .next()
+        .map(|l| PathBuf::from(l.trim()))
+        .filter(|p| !p.as_os_str().is_empty());
+    let started_at = lines.next().and_then(|l| l.trim().parse::<i64>().ok());
+    let port = lines.next().and_then(|l| l.trim().parse().ok());
+    Some(PostmasterInfo {
+        pid,
+        data_dir: pidfile_data_dir,
+        started_at,
+        port,
+    })
 }
 
 // ---- 进程存活/终止（跨平台） ----
@@ -93,28 +108,6 @@ pub fn process_alive(pid: u32) -> bool {
         return true;
     }
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(windows)]
-fn force_terminate(pid: u32) {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
-    // SAFETY: 句柄非空才 TerminateProcess，之后总是 CloseHandle。
-    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
-    if !handle.is_null() {
-        unsafe {
-            let _ = TerminateProcess(handle, 1);
-            let _ = CloseHandle(handle);
-        }
-    }
-}
-
-#[cfg(unix)]
-fn force_terminate(pid: u32) {
-    // SAFETY: SIGKILL 兜底；目标不存在时错误忽略。
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGKILL);
-    }
 }
 
 #[cfg(unix)]
@@ -388,10 +381,63 @@ impl StopMode {
     }
 }
 
-#[derive(Debug)]
+/// 停止失败原因（区分「进程仍活」与「无法证明归属」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopFailure {
+    /// 调用方未提供已校验的集群身份 → 拒绝任何 PID 信号。
+    NoIdentity,
+    /// 身份校验失败 → 拒绝任何 PID 信号（fail closed）。
+    Identity(IdentityError),
+    /// 已校验并发送信号，但进程仍存活。
+    StillRunning,
+}
+
+impl std::fmt::Display for StopFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoIdentity => write!(f, "缺少可验证的集群身份，拒绝向 PID 发送信号"),
+            Self::Identity(e) => write!(f, "无法证明 PID 属于本 PGDATA：{e}"),
+            Self::StillRunning => write!(f, "分级停止后 postgres 进程仍存活"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StopOutcome {
-    pub mode: StopMode,
+    /// 实际生效的停止模式；未发送任何信号（已停止/拒绝）时为 None。
+    pub mode: Option<StopMode>,
     pub stopped: bool,
+    pub failure: Option<StopFailure>,
+}
+
+impl StopOutcome {
+    fn stopped_by(mode: StopMode) -> Self {
+        Self {
+            mode: Some(mode),
+            stopped: true,
+            failure: None,
+        }
+    }
+
+    fn already_stopped() -> Self {
+        Self {
+            mode: None,
+            stopped: true,
+            failure: None,
+        }
+    }
+
+    fn refused(failure: StopFailure) -> Self {
+        Self {
+            mode: None,
+            stopped: false,
+            failure: Some(failure),
+        }
+    }
+
+    pub fn mode_str(&self) -> Option<&'static str> {
+        self.mode.map(|m| m.as_str())
+    }
 }
 
 async fn pg_ctl_stop(install_dir: &Path, data_dir: &Path, mode: &str, wait_secs: u64) -> bool {
@@ -421,53 +467,112 @@ async fn wait_process_exit(pid: u32, timeout: Duration) -> bool {
     !process_alive(pid)
 }
 
-/// 分级停止：smart(25s) → fast(5s) → SIGQUIT/TerminateProcess 兜底。
-/// `pid` 用于兜底与存活确认；None 时仅凭 pg_ctl 结果判断。
-pub async fn graded_stop(install_dir: &Path, data_dir: &Path, pid: Option<u32>) -> StopOutcome {
+/// 每次 `pg_ctl stop` / 信号升级前的复核；返回 `true` 表示目标已停止（幂等）。
+///
+/// 校验失败但 PID 已不存在时按「已停止」处理（绝不发送信号）；PID 仍存活却
+/// 无法证明归属时返回错误 → 调用方 fail closed。
+fn revalidate(identity: &ClusterIdentity) -> Result<bool, IdentityError> {
+    match process_identity::verify_cluster_identity(identity) {
+        Ok(()) => Ok(false),
+        // OS 层已判定进程不存在（含僵尸进程）→ 幂等按已停止处理，绝不发送信号。
+        Err(e) if e.is_not_running() => Ok(true),
+        Err(e) => {
+            if !process_alive(identity.pid) {
+                Ok(true)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// 分级停止：smart(25s) → fast(5s) → immediate quit → SIGKILL/TerminateProcess 兜底。
+///
+/// `identity` 必须由 [`process_identity::capture_cluster_identity`] 生成。每次
+/// `pg_ctl stop`、SIGQUIT、强杀前都会重新校验 PGDATA / postmaster 启动时刻 /
+/// OS 创建时刻 / 可执行文件路径；任何一步无法证明归属即立即停止升级并返回
+/// [`StopFailure::Identity`]——不会对原始 PID 强杀。
+pub async fn graded_stop(
+    install_dir: &Path,
+    data_dir: &Path,
+    identity: Option<&ClusterIdentity>,
+) -> StopOutcome {
+    let Some(identity) = identity else {
+        tracing::error!(
+            "graded_stop refused: no verified cluster identity; raw PID signals disabled"
+        );
+        return StopOutcome::refused(StopFailure::NoIdentity);
+    };
+
+    // 任何信号/工具调用前先复核；PID 已被复用时此处即拒绝。
+    match revalidate(identity) {
+        Ok(true) => return StopOutcome::already_stopped(),
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!("graded_stop refused before smart stop: {e}");
+            return StopOutcome::refused(StopFailure::Identity(e));
+        }
+    }
     if pg_ctl_stop(install_dir, data_dir, "smart", SMART_STOP_SECS).await {
-        return StopOutcome {
-            mode: StopMode::Smart,
-            stopped: true,
-        };
+        return StopOutcome::stopped_by(StopMode::Smart);
     }
     tracing::warn!("smart stop failed/timeout, escalating to fast stop");
+    match revalidate(identity) {
+        Ok(true) => return StopOutcome::already_stopped(),
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!("graded_stop refused before fast stop: {e}");
+            return StopOutcome::refused(StopFailure::Identity(e));
+        }
+    }
     if pg_ctl_stop(install_dir, data_dir, "fast", FAST_STOP_SECS).await {
-        return StopOutcome {
-            mode: StopMode::Fast,
-            stopped: true,
-        };
+        return StopOutcome::stopped_by(StopMode::Fast);
     }
     tracing::warn!("fast stop failed/timeout, kill fallback engaged");
-    if let Some(pid) = pid {
-        #[cfg(unix)]
-        sigquit(pid);
-        #[cfg(windows)]
-        {
-            let pid_s = pid.to_string();
-            let _ = run_tool(
-                &tool_path(install_dir, "pg_ctl"),
-                &["kill", "QUIT", &pid_s],
-                &[],
-                Duration::from_secs(5),
-            )
-            .await;
+
+    match revalidate(identity) {
+        Ok(true) => return StopOutcome::already_stopped(),
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!("graded_stop refused before immediate quit: {e}");
+            return StopOutcome::refused(StopFailure::Identity(e));
         }
-        if wait_process_exit(pid, Duration::from_secs(KILL_GRACE_SECS)).await {
-            return StopOutcome {
-                mode: StopMode::KillFallback,
-                stopped: true,
-            };
-        }
-        force_terminate(pid);
-        let stopped = wait_process_exit(pid, Duration::from_secs(KILL_GRACE_SECS)).await;
-        return StopOutcome {
-            mode: StopMode::KillFallback,
-            stopped,
-        };
     }
-    StopOutcome {
-        mode: StopMode::KillFallback,
-        stopped: false,
+    #[cfg(unix)]
+    sigquit(identity.pid);
+    #[cfg(windows)]
+    {
+        let pid_s = identity.pid.to_string();
+        let _ = run_tool(
+            &tool_path(install_dir, "pg_ctl"),
+            &["kill", "QUIT", &pid_s],
+            &[],
+            Duration::from_secs(5),
+        )
+        .await;
+    }
+    if wait_process_exit(identity.pid, Duration::from_secs(KILL_GRACE_SECS)).await {
+        return StopOutcome::stopped_by(StopMode::KillFallback);
+    }
+
+    // Windows 在同一进程句柄上复核创建时刻后 TerminateProcess；Unix 复核后 SIGKILL。
+    match process_identity::terminate_verified(identity) {
+        Ok(()) => {}
+        Err(e) if e.is_not_running() => return StopOutcome::already_stopped(),
+        Err(e) => {
+            tracing::error!("graded_stop refused before force terminate: {e}");
+            return StopOutcome::refused(StopFailure::Identity(e));
+        }
+    }
+    let stopped = wait_process_exit(identity.pid, Duration::from_secs(KILL_GRACE_SECS)).await;
+    if stopped {
+        StopOutcome::stopped_by(StopMode::KillFallback)
+    } else {
+        StopOutcome {
+            mode: Some(StopMode::KillFallback),
+            stopped: false,
+            failure: Some(StopFailure::StillRunning),
+        }
     }
 }
 
@@ -603,6 +708,8 @@ mod tests {
         .unwrap();
         let info = read_postmaster_pid(&dir).unwrap();
         assert_eq!(info.pid, 12345);
+        assert_eq!(info.data_dir.as_deref(), Some(Path::new("/x/data")));
+        assert_eq!(info.started_at, Some(1784505600));
         assert_eq!(info.port, Some(55432));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -614,6 +721,12 @@ mod tests {
         assert!(read_postmaster_pid(&dir).is_none());
         std::fs::write(dir.join("postmaster.pid"), "not-a-pid\n").unwrap();
         assert!(read_postmaster_pid(&dir).is_none());
+        // 只有 PID 行的截断文件仍可解析 PID，但身份字段缺失（由 process_identity 拒绝）
+        std::fs::write(dir.join("postmaster.pid"), "12345\n").unwrap();
+        let info = read_postmaster_pid(&dir).unwrap();
+        assert_eq!(info.pid, 12345);
+        assert!(info.data_dir.is_none());
+        assert!(info.started_at.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -971,27 +1084,89 @@ Data page checksum version:           1\n\
         );
     }
 
-    /// `graded_stop`：install_dir 不含 pg_ctl → smart/fast 均失败 →
-    /// pid=Some(dead) 时 kill fallback 路径 → stopped=true（进程已死）。
+    /// `graded_stop`：未提供已验证身份 → 拒绝发送任何信号（fail closed）。
     #[tokio::test]
-    async fn graded_stop_nonexistent_pg_ctl_with_dead_pid() {
-        let dir = unique_tmp("graded-stop-dead");
+    async fn graded_stop_without_identity_refuses() {
+        let dir = unique_tmp("graded-stop-noid");
         std::fs::create_dir_all(&dir).unwrap();
-        let dead_pid = 4_000_000u32;
-        let outcome = graded_stop(&dir, &dir, Some(dead_pid)).await;
-        assert_eq!(outcome.mode, StopMode::KillFallback);
-        assert!(outcome.stopped, "dead pid should be detected as stopped");
+        let outcome = graded_stop(&dir, &dir, None).await;
+        assert_eq!(outcome.mode, None);
+        assert!(!outcome.stopped);
+        assert_eq!(outcome.failure, Some(StopFailure::NoIdentity));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `graded_stop`：pid=None 且 pg_ctl 不可用 → KillFallback + stopped=false。
+    /// `graded_stop`：身份指向已消失的 PID → 幂等返回已停止，且不发送信号。
     #[tokio::test]
-    async fn graded_stop_no_pid_returns_not_stopped() {
-        let dir = unique_tmp("graded-stop-nopid");
+    async fn graded_stop_dead_identity_is_idempotent() {
+        let dir = unique_tmp("graded-stop-dead-id");
         std::fs::create_dir_all(&dir).unwrap();
-        let outcome = graded_stop(&dir, &dir, None).await;
-        assert_eq!(outcome.mode, StopMode::KillFallback);
-        assert!(!outcome.stopped, "no pid + no pg_ctl → not stopped");
+        let dead_pid = 4_000_000u32;
+        let identity = ClusterIdentity {
+            pid: dead_pid,
+            data_dir: dir.clone(),
+            postmaster_started_at: 123,
+            process: process_identity::ProcessIdentity {
+                pid: dead_pid,
+                created: "dead".to_string(),
+                executable: PathBuf::from("/nonexistent/postgres"),
+            },
+        };
+        let outcome = graded_stop(&dir, &dir, Some(&identity)).await;
+        assert_eq!(outcome.mode, None);
+        assert!(outcome.stopped, "dead pid should be treated as stopped");
+        assert_eq!(outcome.failure, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `graded_stop`：PID 复用（OS 创建时刻变化）时在发送任何信号前拒绝，
+    /// 受控辅助进程必须仍存活（D16-F02 核心回归）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn graded_stop_refuses_pid_reuse_before_any_signal() {
+        let dir = unique_tmp("graded-stop-reuse");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut helper = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep helper");
+        let helper_pid = helper.id();
+        std::fs::write(
+            dir.join("postmaster.pid"),
+            format!(
+                "{helper_pid}\n{}\n123\n55432\n/tmp\n127.0.0.1\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
+
+        let mut identity = process_identity::capture_with_expected_exe(
+            &dir,
+            std::path::Path::new("/bin/sleep"),
+            &read_postmaster_pid(&dir).unwrap(),
+        )
+        .expect("capture helper identity");
+        // 模拟 PID 复用：同一 PID 的创建时刻已不同。
+        identity.process.created = "foreign-boot:foreign-starttime".to_string();
+
+        let outcome = graded_stop(&dir, &dir, Some(&identity)).await;
+        assert_eq!(outcome.mode, None, "must not escalate any signal");
+        assert!(!outcome.stopped);
+        assert!(
+            matches!(
+                outcome.failure,
+                Some(StopFailure::Identity(IdentityError::ProcessMismatch { .. }))
+            ),
+            "unexpected failure: {:?}",
+            outcome.failure
+        );
+        assert!(
+            process_alive(helper_pid),
+            "helper process must survive rejected stop"
+        );
+
+        let _ = helper.kill();
+        let _ = helper.wait();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

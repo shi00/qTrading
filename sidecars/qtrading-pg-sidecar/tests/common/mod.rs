@@ -3,6 +3,9 @@
 //! 提供 sidecar binary 路径解析、临时 data_dir 管理、ready JSON 解析、
 //! 子进程生命周期清理等通用功能。
 
+// 多个集成测试 target 各自编译本模块，未使用的辅助函数不应阻断 -D warnings。
+#![allow(dead_code)]
+
 use assert_cmd::cargo::cargo_bin;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};

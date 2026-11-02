@@ -1,4 +1,4 @@
-﻿//! `run` supervisor（pg_plan §7.2/§7.3）：常驻进程，stdout 第 1 行 ready JSON（§6.2）。
+//! `run` supervisor（pg_plan §7.2/§7.3）：常驻进程，stdout 第 1 行 ready JSON（§6.2）。
 //!
 //! 流程：维护锁 → preflight → binaries setup → initdb 守卫 → 密码 → initdb(Fresh) →
 //! 安全基线 → stale pid 清理 → 启动（端口重试 ≤3）→ 健康检查 → create database →
@@ -12,6 +12,7 @@ use crate::password;
 use crate::paths::Layout;
 use crate::pgbin::{self, StopMode};
 use crate::preflight;
+use crate::process_identity;
 use crate::protocol::{self, EventJson, ReadyJson};
 use crate::setup::{self, DataDirState};
 use crate::state::{self};
@@ -195,12 +196,16 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
     let (_postgresql, port) = start_with_retry(&layout, &args, &password).await?;
     // 实例句柄仅用于 start()；drop 会触发 crate 内部 stop（见 postgresql.rs `impl Drop`），
     // 必须在分级停止之后才离开作用域，故保留绑定。
-    let pg_pid = pgbin::read_postmaster_pid(&layout.data_dir).map(|i| i.pid);
+    // 同时捕获可验证集群身份：后续所有信号调用前都会复核 PID 归属。
+    let (pg_pid, pg_identity) = match pgbin::read_postmaster_pid(&layout.data_dir) {
+        Some(info) => (Some(info.pid), capture_pg_identity(&layout, &info)),
+        None => (None, None),
+    };
 
     // 9. 健康检查（§7.5，exit 13；28P01 认证失败 → exit 16）。失败须清理已启动的 postgres。
     tracing::info!("running health check on {}:{}", args.listen, port);
     if let Err(code) = health_check(&layout, &args, &password, port).await {
-        stop_after_failed_start(&layout, pg_pid, "health check failed").await;
+        stop_after_failed_start(&layout, "health check failed").await;
         return Err(code);
     }
     tracing::info!("health check passed");
@@ -215,7 +220,7 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
         if prev_stop_mode == "kill_fallback" {
             tracing::warn!("上次停止模式为 kill_fallback，执行系统目录完整性检查（§7.3 / MAJ-1）");
             if let Err(code) = post_kill_fallback_check(&layout, &args, &password, port).await {
-                stop_after_failed_start(&layout, pg_pid, "post kill_fallback check failed").await;
+                stop_after_failed_start(&layout, "post kill_fallback check failed").await;
                 return Err(code);
             }
             tracing::info!("系统目录完整性检查通过");
@@ -225,7 +230,7 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
     // 10. create database（exit 14/16）
     tracing::info!("ensuring database '{}' exists", args.database);
     if let Err(code) = ensure_database(&layout, &args, &password, port).await {
-        stop_after_failed_start(&layout, pg_pid, "create database failed").await;
+        stop_after_failed_start(&layout, "create database failed").await;
         return Err(code);
     }
     tracing::info!("database '{}' ready", args.database);
@@ -259,7 +264,7 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
     );
     if protocol::print_json_line(&ready).is_err() {
         // stdout 管道已坏（父进程死亡）→ 无监督对象，停止 postgres 后退出
-        stop_after_failed_start(&layout, pg_pid, "stdout pipe broken before ready").await;
+        stop_after_failed_start(&layout, "stdout pipe broken before ready").await;
         return Err(exit_codes::HEALTH_CHECK_FAILED);
     }
     tracing::info!(
@@ -273,7 +278,8 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
     let end = supervise(&layout, &args, pg_pid).await;
 
     // 14. 分级停止（§7.3）+ state 收尾 + exit 事件
-    let stop_outcome = pgbin::graded_stop(&layout.install_dir, &layout.data_dir, pg_pid).await;
+    let stop_outcome =
+        pgbin::graded_stop(&layout.install_dir, &layout.data_dir, pg_identity.as_ref()).await;
     {
         let mut st = state::read(&layout.state_file).unwrap_or_default();
         st.status = match &end {
@@ -289,11 +295,13 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
             st.last_start_error =
                 Some("postgres process died unexpectedly during supervision".to_string());
         }
-        st.last_stop_mode = Some(stop_outcome.mode.as_str().to_string());
-        if stop_outcome.mode == StopMode::KillFallback {
-            st.kill_fallback_count += 1; // §13.7.48 异常终止累计
-        } else if stop_outcome.stopped {
-            st.kill_fallback_count = 0;
+        if let Some(mode) = stop_outcome.mode {
+            st.last_stop_mode = Some(mode.as_str().to_string());
+            if mode == StopMode::KillFallback {
+                st.kill_fallback_count += 1; // §13.7.48 异常终止累计
+            } else if stop_outcome.stopped {
+                st.kill_fallback_count = 0;
+            }
         }
         st.postgres_pid = None;
         if let Err(e) = state::write(&layout.state_file, &st) {
@@ -643,9 +651,36 @@ async fn ensure_database(
 
 /// 启动后阶段失败（健康检查/建库/stdout 断裂）的清理：尽力停止，避免留下无主 postgres。
 /// 同时记录 start failure 到 state.json，供 doctor/用户排查（OBS-1）。
-async fn stop_after_failed_start(layout: &Layout, pg_pid: Option<u32>, err: &str) {
-    let _ = pgbin::graded_stop(&layout.install_dir, &layout.data_dir, pg_pid).await;
+async fn stop_after_failed_start(layout: &Layout, err: &str) {
+    let identity =
+        match process_identity::capture_cluster_identity(&layout.data_dir, &layout.install_dir) {
+            Ok(identity) => Some(identity),
+            Err(e) => {
+                // 无 pid 文件或进程已退出 → 无需发送信号；其余原因由 graded_stop fail closed 兜底。
+                tracing::warn!("postgres identity capture failed before stop: {e}");
+                None
+            }
+        };
+    let _ = pgbin::graded_stop(&layout.install_dir, &layout.data_dir, identity.as_ref()).await;
     record_start_failure(layout, err);
+}
+
+/// 捕获启动后 postmaster 的可验证身份；失败时仅告警，后续 graded_stop 会 fail closed。
+fn capture_pg_identity(
+    layout: &Layout,
+    info: &pgbin::PostmasterInfo,
+) -> Option<process_identity::ClusterIdentity> {
+    match process_identity::capture_cluster_identity_from_info(
+        &layout.data_dir,
+        &layout.install_dir,
+        info,
+    ) {
+        Ok(identity) => Some(identity),
+        Err(e) => {
+            tracing::warn!("postgres identity capture failed (pid {}): {e}", info.pid);
+            None
+        }
+    }
 }
 
 fn record_start_failure(layout: &Layout, err: &str) {
