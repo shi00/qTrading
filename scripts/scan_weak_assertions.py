@@ -37,6 +37,8 @@ import json
 import re
 import subprocess
 import sys
+from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -56,6 +58,9 @@ WEAK_MOCK_METHODS = frozenset(
         "assert_called_once",
     }
 )
+
+# 测试函数既可能是同步 def，也可能是 async def（pytest 支持 async 测试）
+TestFunction = ast.FunctionDef | ast.AsyncFunctionDef
 
 WHITELIST_RE = re.compile(
     r"#\s*noqa:\s*weak-assertion\s+\S+.+?$",
@@ -154,7 +159,7 @@ def _is_weak_called_flag(node: ast.AST) -> bool:
     return isinstance(test, ast.Attribute) and test.attr == "called"
 
 
-def _is_weak_call_count(node: ast.AST, parent_func: ast.FunctionDef | None) -> bool:
+def _is_weak_call_count(node: ast.AST, parent_func: TestFunction | None) -> bool:
     """判断是否为仅验证调用次数的弱断言。
 
     匹配模式：
@@ -184,7 +189,7 @@ def _is_weak_call_count(node: ast.AST, parent_func: ast.FunctionDef | None) -> b
         return False
     # 检查同函数体内是否有其他针对 call_args_list/call_args/calls 的强断言
     if parent_func is not None:
-        for child in ast.walk(parent_func):
+        for child in _iter_own_func_nodes(parent_func):
             if child is node or not isinstance(child, ast.Assert):
                 continue
             if _has_call_args_assertion(child):
@@ -246,7 +251,7 @@ def _is_weak_raises_only(node: ast.AST, all_nodes: list[ast.AST]) -> bool:
     return False
 
 
-def _is_weak_print(node: ast.AST, parent_func: ast.FunctionDef | None) -> bool:
+def _is_weak_print(node: ast.AST, parent_func: TestFunction | None) -> bool:
     """判断 print() 是否替代断言（仅在 test_ 函数内且无后续 assert 时报。
 
     匹配模式（弱断言）：
@@ -268,8 +273,8 @@ def _is_weak_print(node: ast.AST, parent_func: ast.FunctionDef | None) -> bool:
         return False
     if parent_func is None or not parent_func.name.startswith("test_"):
         return False
-    # 检查函数体内是否有其他 assert 语句
-    return all(not (isinstance(child, ast.Assert) and child is not node) for child in ast.walk(parent_func))
+    # 检查函数体内是否有其他 assert 语句（排除嵌套函数作用域）
+    return all(not (isinstance(child, ast.Assert) and child is not node) for child in _iter_own_func_nodes(parent_func))
 
 
 def _is_is_not_none_assert(node: ast.AST) -> bool:
@@ -285,7 +290,7 @@ def _is_is_not_none_assert(node: ast.AST) -> bool:
     return isinstance(right, ast.Constant) and right.value is None
 
 
-def _is_weak_is_not_none_terminal(node: ast.AST, parent_func: ast.FunctionDef | None) -> bool:
+def _is_weak_is_not_none_terminal(node: ast.AST, parent_func: TestFunction | None) -> bool:
     """判断 `assert X is not None` 是否作为函数内唯一终态断言（弱断言）。
 
     匹配模式（弱断言）：
@@ -303,7 +308,7 @@ def _is_weak_is_not_none_terminal(node: ast.AST, parent_func: ast.FunctionDef | 
         return False
     if parent_func is None or not parent_func.name.startswith("test_"):
         return False
-    for child in ast.walk(parent_func):
+    for child in _iter_own_func_nodes(parent_func):
         if child is node or not isinstance(child, ast.Assert):
             continue
         if not _is_is_not_none_assert(child):
@@ -312,7 +317,7 @@ def _is_weak_is_not_none_terminal(node: ast.AST, parent_func: ast.FunctionDef | 
 
 
 def _check_function_is_not_none_ratio(
-    func: ast.FunctionDef, threshold: float = 0.40
+    func: TestFunction, threshold: float = 0.40
 ) -> tuple[bool, int, int, float, ast.Assert | None]:
     """检查测试函数内部 `assert X is not None` 的比例是否超过 threshold (>40%)。
 
@@ -321,7 +326,7 @@ def _check_function_is_not_none_ratio(
     total_asserts = 0
     inn_count = 0
     first_node: ast.Assert | None = None
-    for child in ast.walk(func):
+    for child in _iter_own_func_nodes(func):
         if isinstance(child, ast.Assert):
             total_asserts += 1
             if _is_is_not_none_assert(child):
@@ -334,15 +339,50 @@ def _check_function_is_not_none_ratio(
     return ratio > threshold, inn_count, total_asserts, ratio, first_node
 
 
-def _find_parent_func(node: ast.AST, test_funcs: list[ast.FunctionDef]) -> ast.FunctionDef | None:
-    """查找包含 node 的 test_ 函数（按 lineno 范围匹配）。"""
-    lineno = getattr(node, "lineno", None)
-    if lineno is None:
-        return None
-    for tf in test_funcs:
-        if lineno >= tf.lineno and (tf.end_lineno is None or lineno <= tf.end_lineno):
-            return tf
-    return None
+def _iter_own_func_nodes(func: TestFunction) -> Iterator[ast.AST]:
+    """遍历函数自身作用域的节点，不进入嵌套函数 / lambda / 类定义。
+
+    用 BFS（与 ``ast.walk`` 顺序一致）保证同一函数内断言的遍历顺序稳定。
+    裁剪嵌套作用域可避免 helper 内的断言影响外层测试函数的
+    ``is not None`` / print / call-count 判定（断言应归属其所属函数）。
+    """
+    queue: deque[ast.AST] = deque([func])
+    while queue:
+        node = queue.popleft()
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                continue
+            queue.append(child)
+
+
+def _build_parent_func_map(tree: ast.AST) -> dict[int, TestFunction | None]:
+    """构建 AST 节点 → 最近封闭函数定义的映射（键为 ``id(node)``）。
+
+    相比按 ``lineno`` 区间匹配，映射能区分嵌套函数：helper 内的节点归属于
+    helper，而不是外层 ``test_`` 函数，避免断言/print 被错误归属。
+    同步 def、async def 与 class 均作为作用域边界（类体语句不归属外层函数）。
+    """
+    parent_map: dict[int, TestFunction | None] = {}
+    stack: list[tuple[ast.AST, TestFunction | None]] = [(tree, None)]
+    while stack:
+        node, current = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            parent_map[id(node)] = current
+            current = node
+        elif isinstance(node, ast.ClassDef):
+            parent_map[id(node)] = current
+            current = None
+        else:
+            parent_map[id(node)] = current
+        for child in ast.iter_child_nodes(node):
+            stack.append((child, current))
+    return parent_map
+
+
+def _find_parent_func(node: ast.AST, parent_map: dict[int, TestFunction | None]) -> TestFunction | None:
+    """查找 node 的所属函数（最近封闭 def/async def，按 AST 父子关系精确匹配）。"""
+    return parent_map.get(id(node))
 
 
 def scan_file(filepath: Path, rel_path: str | None = None) -> list[WeakAssertion]:
@@ -360,11 +400,12 @@ def scan_file(filepath: Path, rel_path: str | None = None) -> list[WeakAssertion
     except (SyntaxError, UnicodeDecodeError):
         return issues
 
-    # 先收集所有 test_ 函数节点，用于 _is_weak_print 的 parent_func 查找
-    test_funcs: list[ast.FunctionDef] = []
+    # 先收集所有 test_ 函数节点（同步 def 与 async def），用于函数级规则
+    test_funcs: list[TestFunction] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
             test_funcs.append(node)
+    parent_map = _build_parent_func_map(tree)
 
     # 1. 检查测试函数级别的 is not None 占比是否 > 40%
     for tf in test_funcs:
@@ -392,13 +433,13 @@ def scan_file(filepath: Path, rel_path: str | None = None) -> list[WeakAssertion
         line_no: int | None = None
         issue_type: str | None = None
         detail: str | None = None
-        parent_func: ast.FunctionDef | None = None
+        parent_func: TestFunction | None = _find_parent_func(node, parent_map)
 
         if _is_weak_assert(node):
             line_no = node_lineno
             issue_type = "weak_assert"
             detail = "assert True / assert 1"
-        elif isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
             if _is_empty_test(node.body):
                 line_no = node_lineno
                 issue_type = "empty_test"
@@ -411,7 +452,7 @@ def scan_file(filepath: Path, rel_path: str | None = None) -> list[WeakAssertion
             line_no = node_lineno
             issue_type = "weak_called_flag"
             detail = "assert m.called 裸布尔标志（不验证调用参数）"
-        elif _is_weak_call_count(node, _find_parent_func(node, test_funcs)):
+        elif _is_weak_call_count(node, parent_func):
             line_no = node_lineno
             issue_type = "weak_call_count"
             detail = "assert len(mock.calls) >= N 仅验证次数"
@@ -419,12 +460,11 @@ def scan_file(filepath: Path, rel_path: str | None = None) -> list[WeakAssertion
             line_no = node_lineno
             issue_type = "weak_raises_only"
             detail = "pytest.raises 后无进一步断言"
-        elif _is_weak_is_not_none_terminal(node, _find_parent_func(node, test_funcs)):
+        elif _is_weak_is_not_none_terminal(node, parent_func):
             line_no = node_lineno
             issue_type = "weak_is_not_none"
             detail = "assert X is not None 作为函数唯一终态（链式非终态除外）"
         elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
-            parent_func = _find_parent_func(node, test_funcs)
             if _is_weak_print(node, parent_func):
                 line_no = node_lineno
                 issue_type = "weak_print"
