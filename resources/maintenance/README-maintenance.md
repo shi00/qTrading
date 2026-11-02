@@ -58,7 +58,7 @@ cd "<安装目录>/resources/maintenance"
 - **`restore`**：成功后 stdout 输出一行目标数据目录（绝对路径，分隔符统一为 `/`，Windows 的 `\` 亦归一化）；默认原子切换时报告当前数据目录，显式 `--target-data-dir` 时报告该目标目录。失败时不输出该行。
 - **`maintenance-shell`**：临时实例就绪后 stdout 输出一行 JSON，字段为 `psql_path`（内置 psql 可执行文件路径）与 `connection_string_redacted`（形如 `postgresql://postgres:***@127.0.0.1:<随机端口>/qtrading`，密码段固定 `***`，不输出明文密码）；连接串、psql 命令行、密码文件位置及按 Enter 结束等提示均走 stderr。按 Enter 或 stdin 到达 EOF 后停止实例并退出。
 
-失败时按 sidecar 退出码语义返回：2 参数错误、10 binaries 安装失败、11 initdb 失败、12 临时实例启动失败、13 `maintenance-shell` JSON 输出失败、16 密码文件不可用、30 备份/恢复失败、40 数据目录异常、50 维护锁冲突（具体以各命令实际执行路径为准）。旧版本文档曾描述 `maintenance-shell` 的 stdout 无输出，依赖该旧行为的脚本需改为解析上述 JSON。
+失败时按 sidecar 退出码语义返回：2 参数错误、10 binaries 安装失败、11 initdb 失败、12 临时实例启动失败、13 `maintenance-shell` JSON 输出失败、16 密码文件不可用、30 备份/恢复失败、40 数据目录异常、50 维护锁冲突或该 PGDATA 存在活实例（具体以各命令实际执行路径为准）。旧版本文档曾描述 `maintenance-shell` 的 stdout 无输出，依赖该旧行为的脚本需改为解析上述 JSON。
 
 ## 默认数据目录
 
@@ -103,7 +103,7 @@ cd "<安装目录>/resources/maintenance"
 | `sidecar binary not found` | 使用了 standard variant 安装包 | 改用 embedded variant 安装包，或联系分发方 |
 | `status` 显示 `not_initialized` | 数据目录未初始化（首次启动前），或脚本默认路径与实际配置的数据目录不一致 | 首次启动前属正常现象，启动 qTrading 会自动 initdb；若应用此前可正常使用，按「默认数据目录」核对自定义 `embedded_pg_data_root` 并显式传 `--data-dir` |
 | `doctor` 报告 `state_file: corrupted` | state.json 损坏（异常退出/磁盘错误） | 按 doctor 输出指引修复，必要时从备份恢复 |
-| `stop` / `restore` / `maintenance-shell` / `reset-password` 返回 exit 50 | 维护锁被持有：qTrading 或另一维护进程正在使用该 PGDATA | 先正常关闭 qTrading（必要时先 `stop`）再试；若为残留的维护进程/维护实例，结束该进程后重试 |
+| `stop` / `restore` / `maintenance-shell` / `reset-password` 返回 exit 50 | 维护锁被持有（qTrading 或另一维护进程正在使用该 PGDATA），或该 PGDATA 仍有活实例（如 sidecar 崩溃/被 kill 后残留的孤儿 postgres） | 先正常关闭 qTrading（必要时先 `stop`）再试；若应用已关闭仍返回 50，按 sidecar 提示执行 `stop --data-dir <数据目录>` 确认实例已停止后重试；若为残留的维护进程/维护实例，结束该进程后重试 |
 | `dump`/`restore` 等返回 exit 16，报「密码文件缺失…走 reset-password 流程」 | `runtime/password` 缺失、为空或不可解密（跨机器/账号复制后 DPAPI 无法解密）；数据目录本身未必损坏 | 先 `doctor` 确认 `issues` 无数据损坏项，再按 `docs/guides/how-to.md` §9.9 走 reset-password 分流（注意：此时 `dump` 补做备份也不可用，恢复只能依赖既有备份文件） |
 | `dump` / `restore` 返回 exit 30 | 备份/恢复执行失败：备份文件不存在或损坏、版本不兼容、数据目录未初始化（`dump` 无可备份数据）、`--target-data-dir` 目标非空、`pg_dump`/`pg_restore` 失败、恢复目录切换失败 | 核对输入文件路径与完整性；除切换阶段外，失败时 `.partial` 与恢复临时目录会自动清理；切换阶段失败的保留物处理见「安全注意事项」第 2 条 |
 | 应用启动时 sidecar `run` 返回 exit 40 / `doctor` `issues` 报 pg_control/WAL 损坏、关键文件缺失 | 数据目录损坏 | 按 `docs/guides/how-to.md` §9.9.2 恢复路径处理：先确认备份文件与 `.bak-*`/`.restore-*` 目录等恢复点，再执行 restore；若密码文件同时不可用且无法 reset-password，则无自动恢复路径——移走损坏目录后由应用全新初始化，库内数据不可恢复 |

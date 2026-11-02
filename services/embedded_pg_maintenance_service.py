@@ -161,7 +161,7 @@ _EXIT_CODE_MAP: dict[int, tuple[str, int, str]] = {
         logging.ERROR,
         "数据目录状态异常（非空但未初始化、版本不匹配、文件损坏或缺失），请先运行 doctor 并按恢复文档处理",
     ),
-    50: ("lock_conflict", logging.WARNING, "请先关闭 qTrading 再执行维护操作"),
+    50: ("lock_conflict", logging.WARNING, "请先关闭 qTrading，并确认数据库实例已停止（可执行 stop 命令）后重试"),
     60: ("postgres_died", logging.ERROR, "PostgreSQL 进程意外退出（sidecar 不自动重启），请重启 qTrading"),
 }
 
