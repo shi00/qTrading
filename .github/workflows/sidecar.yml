@@ -34,11 +34,14 @@ env:
 jobs:
   lint-test:
     name: Lint & Test (${{ matrix.os }}/${{ matrix.target }})
+    # tag 发布需要复用 build-artifacts 的四平台产物，故质量门禁必须在 tag 事件执行
+    # （build-artifacts 以 needs 依赖本 job；任一平台失败/取消都会阻断后续发布）。
     if: >-
       github.event_name == 'pull_request' ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      (github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/sidecar-v')))
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -121,10 +124,12 @@ jobs:
 
   build-artifacts:
     name: Build release artifact (${{ matrix.os }}/${{ matrix.target }})
+    # tag 事件复用四平台只读构建产物；发布写操作统一收敛到 publish-release。
     if: >-
       github.event_name == 'pull_request' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      (github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/sidecar-v')))
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     needs: lint-test
@@ -192,14 +197,25 @@ jobs:
             --target ${{ matrix.target }} \
             --output sidecar-manifest-${{ matrix.os }}.json
 
+      - name: Generate SHA256 checksums
+        # 每平台生成独立 sha256sums-<target>.txt，并在上传前把 binary 复制为唯一
+        # artifact_name（4 个非 Windows 平台 basename 相同，避免发布资产名冲突）。
+        shell: bash
+        run: |
+          cp "${{ matrix.binary_path }}" "${{ matrix.artifact_name }}"
+          HASH=$(sha256sum "${{ matrix.artifact_name }}" | awk '{print $1}')
+          echo "$HASH  ${{ matrix.artifact_name }}" > "sha256sums-${{ matrix.target }}.txt"
+          cat "sha256sums-${{ matrix.target }}.txt"
+
       - name: Upload release artifact (含 manifest)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ${{ matrix.artifact_name }}
           # upload-artifact path 相对于 GITHUB_WORKSPACE，需补 working-directory 前缀
           path: |
-            sidecars/qtrading-pg-sidecar/${{ matrix.binary_path }}
+            sidecars/qtrading-pg-sidecar/${{ matrix.artifact_name }}
             sidecars/qtrading-pg-sidecar/sidecar-manifest-${{ matrix.os }}.json
+            sidecars/qtrading-pg-sidecar/sha256sums-${{ matrix.target }}.txt
           if-no-files-found: error
           retention-days: 14
 
@@ -230,106 +246,306 @@ jobs:
         # 与平台无关，仅在 Linux 上跑即可
         run: cargo audit --deny warnings
 
-  release:
-    name: Release sidecar binary & manifest (${{ matrix.os }}/${{ matrix.target }})
+  publish-release:
+    name: Publish sidecar tag Release (draft -> verify -> publish)
+    # 单一写发布者：四平台构建产物与 audit 全部成功才进入 Release 写操作。
+    # needs 失败/取消/跳过时本 job 默认跳过（不使用 always() 绕过失败语义）。
     if: >-
       github.event_name == 'push' &&
       startsWith(github.ref, 'refs/tags/sidecar-v')
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    needs: [build-artifacts, audit]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
-      contents: write  # gh release upload 需要
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # 对齐 build-artifacts job 的 4 平台 target 矩阵（macos-13 Intel runner 已退役）
-          - os: windows
-            runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            binary_path: target/x86_64-pc-windows-msvc/release/qtrading-pg-sidecar.exe
-            artifact_name: qtrading-pg-sidecar-windows-x86_64.exe
-          - os: linux
-            runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            binary_path: target/x86_64-unknown-linux-gnu/release/qtrading-pg-sidecar
-            artifact_name: qtrading-pg-sidecar-linux-x86_64
-          - os: linux-arm
-            runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            binary_path: target/aarch64-unknown-linux-gnu/release/qtrading-pg-sidecar
-            artifact_name: qtrading-pg-sidecar-linux-aarch64
-          - os: macos
-            runner: macos-26
-            target: aarch64-apple-darwin
-            binary_path: target/aarch64-apple-darwin/release/qtrading-pg-sidecar
-            artifact_name: qtrading-pg-sidecar-macos-aarch64
-    defaults:
-      run:
-        working-directory: sidecars/qtrading-pg-sidecar
+      contents: write  # 仅本 job 创建 draft / 上传资产 / 发布
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-
-      - name: Install Rust toolchain (1.97.1)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Download all sidecar release artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
-          toolchain: 1.97.1
-          targets: ${{ matrix.target }}
+          pattern: qtrading-pg-sidecar-*
+          merge-multiple: false
+          path: release-assets
 
-      - name: Cache Cargo registry & target
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
-        with:
-          workspaces: sidecars/qtrading-pg-sidecar
-          key: release-${{ matrix.target }}-${{ hashFiles('sidecars/qtrading-pg-sidecar/.cargo/config.toml') }}
+      - name: Verify downloaded artifacts and tag commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 原子发布第 1 步：任何 Release 对象创建之前先校验 4 个 artifact 的 12 个文件。
+          # tag 名限定字符集，避免进入后续 shell/jq 表达式时产生注入面。
+          if [[ ! "$TAG" =~ ^sidecar-v[0-9A-Za-z._-]+$ ]]; then
+            echo "::error::unexpected sidecar tag name: ${TAG}"
+            exit 1
+          fi
+          # 远端 tag 必须存在，并解析出被标记的 commit（annotated tag 需再取 tag
+          # 对象指向的 commit），避免 Release 绑定到别的 ref。
+          ref_json=$(gh api "repos/${GH_REPO}/git/ref/tags/${TAG}")
+          object_type=$(jq -r '.object.type // ""' <<< "$ref_json")
+          object_sha=$(jq -r '.object.sha // ""' <<< "$ref_json")
+          if [ "$object_type" = "tag" ]; then
+            tag_commit_sha=$(gh api "repos/${GH_REPO}/git/tags/${object_sha}" --jq '.object.sha')
+          else
+            tag_commit_sha="$object_sha"
+          fi
+          if [ -z "$tag_commit_sha" ]; then
+            echo "::error::remote tag ${TAG} is not resolvable to a commit; refusing to publish."
+            exit 1
+          fi
+          # annotated tag 下 GITHUB_SHA 可能指向 tag 对象而非其 commit，两种形态都接受，
+          # 但必须与本次触发的 tag 锚定；产物提交另行以 manifest git_sha 核对。
+          if [ "$tag_commit_sha" != "$GITHUB_SHA" ] && [ "$object_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::remote tag ${TAG} does not match trigger commit ${GITHUB_SHA}."
+            exit 1
+          fi
+          # 平台清单供后续上传/复核复用（os|target|artifact_name），文件名即发布资产名。
+          cat > release-assets/platforms.tsv <<'EOF'
+          windows|x86_64-pc-windows-msvc|qtrading-pg-sidecar-windows-x86_64.exe
+          linux|x86_64-unknown-linux-gnu|qtrading-pg-sidecar-linux-x86_64
+          linux-arm|aarch64-unknown-linux-gnu|qtrading-pg-sidecar-linux-aarch64
+          macos|aarch64-apple-darwin|qtrading-pg-sidecar-macos-aarch64
+          EOF
+          dir_count=$(find release-assets -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+          if [ "$dir_count" -ne 4 ]; then
+            echo "::error::expected exactly 4 platform artifact directories, found ${dir_count}."
+            exit 1
+          fi
+          expected_count=0
+          while IFS='|' read -r os target artifact; do
+            dir="release-assets/${artifact}"
+            manifest="sidecar-manifest-${os}.json"
+            sums="sha256sums-${target}.txt"
+            if [ ! -d "$dir" ]; then
+              echo "::error::missing artifact directory: ${dir}"
+              exit 1
+            fi
+            # 每个平台目录必须恰好 binary + manifest + sums 三个文件，多一个少一个都失败。
+            expected=$(printf '%s\n' "$artifact" "$manifest" "$sums" | sort)
+            actual=$(find "$dir" -maxdepth 1 -type f -printf '%f\n' | sort)
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::unexpected asset set in ${dir}"
+              diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual")
+              exit 1
+            fi
+            for file in "$artifact" "$manifest" "$sums"; do
+              if [ ! -s "${dir}/${file}" ]; then
+                echo "::error::missing or empty artifact file: ${dir}/${file}"
+                exit 1
+              fi
+            done
+            # checksum 只能有一行，且必须指向本平台的唯一 binary 名。
+            line_count=$(wc -l < "${dir}/${sums}" | tr -d ' ')
+            if [ "$line_count" -ne 1 ]; then
+              echo "::error::${sums} must contain exactly one checksum line (found ${line_count})"
+              exit 1
+            fi
+            recorded=$(awk '{print $1}' "${dir}/${sums}")
+            listed=$(awk '{print $2}' "${dir}/${sums}")
+            if [ "$listed" != "$artifact" ]; then
+              echo "::error::${sums} references ${listed}, expected ${artifact}"
+              exit 1
+            fi
+            if [[ ! "$recorded" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::${sums} does not contain a valid SHA256 digest"
+              exit 1
+            fi
+            computed=$(sha256sum "${dir}/${artifact}" | awk '{print $1}')
+            if [ "$computed" != "$recorded" ]; then
+              echo "::error::SHA256 mismatch for ${artifact}: recorded=${recorded} computed=${computed}"
+              exit 1
+            fi
+            # manifest 的摘要 / target / schema / 构建提交必须与本次产物一致；
+            # git_sha 为构建期 short SHA，按前缀匹配被标记 commit（兼容 12+ 位短哈希）。
+            manifest_sha=$(jq -r '.sha256 // ""' "${dir}/${manifest}")
+            manifest_target=$(jq -r '.target // ""' "${dir}/${manifest}")
+            manifest_schema=$(jq -r '.schema // ""' "${dir}/${manifest}")
+            manifest_git=$(jq -r '.git_sha // ""' "${dir}/${manifest}")
+            if [ "$manifest_sha" != "$computed" ]; then
+              echo "::error::${manifest} sha256 does not match ${artifact}"
+              exit 1
+            fi
+            if [ "$manifest_target" != "$target" ]; then
+              echo "::error::${manifest} target ${manifest_target} does not match ${target}"
+              exit 1
+            fi
+            if [ "$manifest_schema" != "qtrading.sidecar.manifest.v1" ]; then
+              echo "::error::${manifest} schema ${manifest_schema} is not the expected manifest schema"
+              exit 1
+            fi
+            if [[ ! "$tag_commit_sha" == "$manifest_git"* ]]; then
+              echo "::error::${manifest} git_sha ${manifest_git} does not match tag commit ${tag_commit_sha}"
+              exit 1
+            fi
+            expected_count=$((expected_count + 3))
+          done < release-assets/platforms.tsv
+          if [ "$expected_count" -ne 12 ]; then
+            echo "::error::expected 12 release assets for 4 platforms, verified ${expected_count}."
+            exit 1
+          fi
+          echo "All 4 platforms verified: 12 assets, checksums and manifests match the tag commit."
 
-      - name: Setup Python (for generate_sidecar_manifest.py)
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
-        with:
-          python-version: '3.13'
+      - name: Check release state (refuse published; reuse draft)
+        id: release-state
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 原子发布第 2 步（幂等）：正式 Release 已存在即失败拒绝覆盖；仅允许复用
+          # 失败 run 留下的 draft。draft 无法用 /releases/tags/{tag} 查询，故按列表定位。
+          gh api --paginate "repos/${GH_REPO}/releases?per_page=100" \
+            --jq '.[] | [.tag_name, .id, .draft] | @tsv' > release-assets/releases.tsv
+          release_id=$(awk -v tag="$TAG" '$1 == tag { print $2; exit }' release-assets/releases.tsv)
+          if [ -n "$release_id" ]; then
+            if [ "$(gh api "repos/${GH_REPO}/releases/${release_id}" --jq '.draft')" != "true" ]; then
+              echo "::error::release ${TAG} is already published; refusing to overwrite a published release."
+              echo "::error::sidecar tag 发布不可变；请发布新版本 tag，或人工评审后显式删除正式 Release 再重跑。"
+              exit 1
+            fi
+            # 复用 draft：仅删除其旧资产，保证后续上传不覆盖既有字节且最终集合精确。
+            asset_ids=$(gh api --paginate "repos/${GH_REPO}/releases/${release_id}/assets?per_page=100" --jq '.[].id')
+            if [ -n "$asset_ids" ]; then
+              while IFS= read -r asset_id; do
+                if [ -z "$asset_id" ]; then
+                  continue
+                fi
+                gh api --method DELETE "repos/${GH_REPO}/releases/assets/${asset_id}" >/dev/null
+              done <<< "$asset_ids"
+            fi
+            echo "Existing draft release for ${TAG} found (id=${release_id}); stale draft assets removed."
+          else
+            echo "No release exists for ${TAG}; a new draft will be created."
+          fi
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
 
-      - name: cargo build --release
+      - name: Create or reuse draft Release and upload 12 assets
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: cargo build --target ${{ matrix.target }} --release
+          RELEASE_ID: ${{ steps.release-state.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          # 原子发布第 3 步：只创建 draft（对外不可见、不能标记 latest）；失败最多留下
+          # draft。上传走 Release assets API，不使用任何覆盖开关改写既有资产。
+          if [ -z "${RELEASE_ID:-}" ]; then
+            gh api --method POST "repos/${GH_REPO}/releases" \
+              -f "tag_name=${TAG}" \
+              -f "name=${TAG}" \
+              -F draft=true \
+              -F prerelease=false \
+              -F generate_release_notes=true > release-assets/draft.json
+            RELEASE_ID=$(jq -r '.id // ""' release-assets/draft.json)
+            if [ -z "$RELEASE_ID" ]; then
+              echo "::error::failed to create draft release for ${TAG}"
+              exit 1
+            fi
+            if [ "$(jq -r '.draft' release-assets/draft.json)" != "true" ]; then
+              echo "::error::created release ${TAG} is not a draft; refusing to upload."
+              exit 1
+            fi
+          else
+            echo "Reusing existing draft release id=${RELEASE_ID}."
+          fi
+          while IFS='|' read -r os target artifact; do
+            dir="release-assets/${artifact}"
+            if [ ! -d "$dir" ]; then
+              echo "::error::missing artifact directory before upload: ${dir}"
+              exit 1
+            fi
+            for file in "$artifact" "sidecar-manifest-${os}.json" "sha256sums-${target}.txt"; do
+              gh api --method POST \
+                -H "Content-Type: application/octet-stream" \
+                --input "${dir}/${file}" \
+                -f "name=${file}" \
+                "repos/${GH_REPO}/releases/${RELEASE_ID}/assets" >/dev/null
+            done
+          done < release-assets/platforms.tsv
+          echo "Draft release ${TAG} (id=${RELEASE_ID}) uploaded with 12 assets; still unpublished."
 
-      - name: Generate sidecar manifest
-        # Windows 默认 PowerShell 不识别 `\` 续行符，显式指定 bash 保证 4 平台一致
+      - name: Verify draft assets and SHA256 digests (gate before publish)
+        id: verify-draft
         shell: bash
         run: |
-          python ../../scripts/generate_sidecar_manifest.py \
-            --sidecar ${{ matrix.binary_path }} \
-            --target ${{ matrix.target }} \
-            --output sidecar-manifest-${{ matrix.os }}.json
+          set -euo pipefail
+          # 原子发布第 4 步：以 GitHub API 返回的 draft 为准复核（防上传少件/错件/
+          # 同名旧资产顶替）。服务端 digest 为 `sha256:<hex>`，须与本地实测一致。
+          gh api --paginate "repos/${GH_REPO}/releases?per_page=100" \
+            --jq '.[] | [.tag_name, .id] | @tsv' > release-assets/releases-verify.tsv
+          release_id=$(awk -v tag="$TAG" '$1 == tag { print $2; exit }' release-assets/releases-verify.tsv)
+          if [ -z "$release_id" ]; then
+            echo "::error::no release found for ${TAG}; refusing to publish."
+            exit 1
+          fi
+          if [ "$(gh api "repos/${GH_REPO}/releases/${release_id}" --jq '.draft')" != "true" ]; then
+            echo "::error::release ${TAG} is not a draft at verification time; refusing to continue."
+            exit 1
+          fi
+          release_tag=$(gh api "repos/${GH_REPO}/releases/${release_id}" --jq '.tag_name')
+          if [ "$release_tag" != "$TAG" ]; then
+            echo "::error::release tag ${release_tag} does not match ${TAG}."
+            exit 1
+          fi
+          gh api "repos/${GH_REPO}/releases/${release_id}" \
+            --jq '.assets[] | [.name, (.digest // "")] | @tsv' > release-assets/remote-assets.tsv
+          cat > release-assets/expected-assets.txt <<'EOF'
+          qtrading-pg-sidecar-windows-x86_64.exe
+          sidecar-manifest-windows.json
+          sha256sums-x86_64-pc-windows-msvc.txt
+          qtrading-pg-sidecar-linux-x86_64
+          sidecar-manifest-linux.json
+          sha256sums-x86_64-unknown-linux-gnu.txt
+          qtrading-pg-sidecar-linux-aarch64
+          sidecar-manifest-linux-arm.json
+          sha256sums-aarch64-unknown-linux-gnu.txt
+          qtrading-pg-sidecar-macos-aarch64
+          sidecar-manifest-macos.json
+          sha256sums-aarch64-apple-darwin.txt
+          EOF
+          actual=$(cut -f1 release-assets/remote-assets.tsv | sort)
+          expected=$(sort release-assets/expected-assets.txt)
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::draft asset set mismatch (expected exactly 12 assets for 4 platforms)"
+            diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual")
+            exit 1
+          fi
+          actual_count=$(printf '%s\n' "$actual" | wc -l | tr -d ' ')
+          if [ "$actual_count" -ne 12 ]; then
+            echo "::error::expected 12 draft assets, found ${actual_count}."
+            exit 1
+          fi
+          while IFS='|' read -r os target artifact; do
+            for file in "$artifact" "sidecar-manifest-${os}.json" "sha256sums-${target}.txt"; do
+              remote_digest=$(awk -v name="$file" '$1 == name { print $2; exit }' release-assets/remote-assets.tsv)
+              if [ -z "$remote_digest" ]; then
+                echo "::error::asset ${file} has no server-side digest; cannot verify integrity."
+                exit 1
+              fi
+              local_digest="sha256:$(sha256sum "release-assets/${artifact}/${file}" | awk '{print $1}')"
+              if [ "$remote_digest" != "$local_digest" ]; then
+                echo "::error::digest mismatch for ${file}: remote=${remote_digest} local=${local_digest}"
+                exit 1
+              fi
+            done
+          done < release-assets/platforms.tsv
+          echo "Draft ${TAG} verified: 12 assets, tag matches, every digest matches the local bytes."
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
 
-      - name: Generate SHA256 checksums
-        # 每平台生成独立 sha256sums-<target>.txt，避免并发写冲突
-        # 上传前 cp binary 为 artifact_name（每平台唯一），避免 4 个非 Windows 平台 basename
-        # 相同（qtrading-pg-sidecar）被 --clobber 互相覆盖（P1: release asset 名冲突）
+      - name: Publish draft Release as latest (verification passed)
         shell: bash
-        run: |
-          BINARY_PATH="${{ matrix.binary_path }}"
-          ARTIFACT_NAME="${{ matrix.artifact_name }}"
-          cp "$BINARY_PATH" "$ARTIFACT_NAME"
-          HASH=$(sha256sum "$ARTIFACT_NAME" | awk '{print $1}')
-          echo "$HASH  $ARTIFACT_NAME" > "sha256sums-${{ matrix.target }}.txt"
-          echo "SHA256: $HASH  $ARTIFACT_NAME"
-          cat "sha256sums-${{ matrix.target }}.txt"
-
-      - name: Create release and upload assets
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
+          RELEASE_ID: ${{ steps.verify-draft.outputs.release_id }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          echo "Creating release for tag: $TAG"
-          # gh release create 幂等：release 已存在时静默失败
-          gh release create "$TAG" --generate-notes --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
-          # 上传 artifact_name（每平台唯一）+ manifest + sha256sums（--clobber 覆盖已存在的 assets）
-          gh release upload "$TAG" \
-            "${{ matrix.artifact_name }}" \
-            "sidecar-manifest-${{ matrix.os }}.json" \
-            "sha256sums-${{ matrix.target }}.txt" \
-            --clobber
-          echo "Release $TAG assets uploaded successfully"
+          set -euo pipefail
+          # 原子发布第 5 步：一次 PATCH 完成 draft=false + make_latest=true。命令失败时
+          # Release 仍是 draft，外部不会看到半成品；成功后才是唯一一次正式发布。
+          if [ -z "${RELEASE_ID:-}" ]; then
+            echo "::error::release id not available from verify step; cannot publish."
+            exit 1
+          fi
+          if [ "$(gh api "repos/${GH_REPO}/releases/${RELEASE_ID}" --jq '.draft')" != "true" ]; then
+            echo "::error::release ${TAG} is not a draft right before publish; refusing to continue."
+            exit 1
+          fi
+          gh api --method PATCH "repos/${GH_REPO}/releases/${RELEASE_ID}" \
+            -F draft=false -F make_latest=true >/dev/null
+          echo "Release ${TAG} published with 12 verified assets."
