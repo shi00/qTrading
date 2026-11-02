@@ -440,7 +440,28 @@ impl StopOutcome {
     }
 }
 
+/// 测试故障注入：`QTRADING_PG_SIDECAR_INJECT_STOP_FAIL` 指定 `smart` / `fast` /
+/// `kill`（可逗号分隔，`all` 表示全部）时，对应停止阶段直接失败。仅集成测试使用，
+/// 生产环境不得设置；用于验证分级停止失败必须传播为硬失败而非 warning。
+fn stop_fail_spec_matches(spec: &str, phase: &str) -> bool {
+    let spec = spec.trim();
+    spec.eq_ignore_ascii_case("all")
+        || spec
+            .split(',')
+            .any(|p| p.trim().eq_ignore_ascii_case(phase))
+}
+
+fn stop_failure_injected(phase: &str) -> bool {
+    std::env::var("QTRADING_PG_SIDECAR_INJECT_STOP_FAIL")
+        .ok()
+        .is_some_and(|spec| stop_fail_spec_matches(&spec, phase))
+}
+
 async fn pg_ctl_stop(install_dir: &Path, data_dir: &Path, mode: &str, wait_secs: u64) -> bool {
+    if stop_failure_injected(mode) {
+        tracing::warn!("injected {mode} stop failure (test hook)");
+        return false;
+    }
     let data = data_dir.to_string_lossy().into_owned();
     let t = wait_secs.to_string();
     let out = run_tool(
@@ -537,6 +558,16 @@ pub async fn graded_stop(
             tracing::error!("graded_stop refused before immediate quit: {e}");
             return StopOutcome::refused(StopFailure::Identity(e));
         }
+    }
+    if stop_failure_injected("kill") {
+        // 测试钩子：不发送任何信号，直接报告「进程仍存活」，模拟最坏情形（含 Drop 补偿
+        // 也无法停止）。调用方必须据此硬失败，不得以 warning 掩盖或继续切换。
+        tracing::warn!("injected immediate quit/kill failure (test hook)");
+        return StopOutcome {
+            mode: Some(StopMode::KillFallback),
+            stopped: false,
+            failure: Some(StopFailure::StillRunning),
+        };
     }
     #[cfg(unix)]
     sigquit(identity.pid);
@@ -1168,6 +1199,28 @@ Data page checksum version:           1\n\
         let _ = helper.kill();
         let _ = helper.wait();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 故障注入解析：显式阶段名 / `all` / 逗号列表 / 大小写 / 无关值。
+    #[test]
+    fn stop_fail_spec_matches_named_phases() {
+        assert!(stop_fail_spec_matches("smart", "smart"));
+        assert!(stop_fail_spec_matches("FAST", "fast"));
+        assert!(stop_fail_spec_matches("kill", "kill"));
+        assert!(!stop_fail_spec_matches("smart", "fast"));
+        assert!(!stop_fail_spec_matches("kill", "smart"));
+        assert!(!stop_fail_spec_matches("", "smart"));
+        assert!(!stop_fail_spec_matches("unknown", "kill"));
+    }
+
+    /// 故障注入解析：`all` 与逗号分隔列表（空白容忍）。
+    #[test]
+    fn stop_fail_spec_matches_all_and_lists() {
+        assert!(stop_fail_spec_matches("all", "smart"));
+        assert!(stop_fail_spec_matches("ALL", "kill"));
+        assert!(stop_fail_spec_matches("smart,fast,kill", "fast"));
+        assert!(stop_fail_spec_matches(" smart , kill ", "kill"));
+        assert!(!stop_fail_spec_matches("smart,fast", "kill"));
     }
 
     /// `start_log_tail`：日志文件不存在 → 返回空字符串。
