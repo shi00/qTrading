@@ -142,6 +142,134 @@ fn ensure_source_cluster_idle(layout: &Layout, phase: &str) -> Result<(), u8> {
     }
 }
 
+// ---- dump 输出所有权（D16-F06） ----
+//
+// 同一输出路径的并发 dump 必须互斥：即使在线 dump 不占 PGDATA 维护锁，也不能让两个
+// 进程共用同一临时文件。使用输出旁路的独立锁文件（进程死亡自动释放），并为本次任务
+// 申请唯一 `create_new` 临时路径；清理时只删除本任务临时文件。
+
+const DUMP_OUTPUT_LOCK_SUFFIX: &str = ".lock";
+const DUMP_PARTIAL_ATTEMPTS: u8 = 8;
+
+/// 追加后缀到完整路径（保留非 UTF-8 路径，不做 display/format 有损转换）。
+fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn output_lock_path(output: &Path) -> PathBuf {
+    sibling_with_suffix(output, DUMP_OUTPUT_LOCK_SUFFIX)
+}
+
+/// 获取输出级排他锁（不占 PGDATA 维护锁）。
+///
+/// 冲突返回 `DUMP_RESTORE_FAILED` 而非维护锁 exit 50：调用方需要区分「qTrading 占用
+/// PGDATA」与「另一个 dump 正在写同一输出文件」，且 Python 对 50 的提示是关闭应用。
+fn acquire_output_lock(output: &Path) -> Result<MaintenanceLock, u8> {
+    let lock_path = output_lock_path(output);
+    match MaintenanceLock::try_acquire(&lock_path) {
+        Ok(l) => Ok(l),
+        Err(AcquireError::Conflict) => {
+            eprintln!(
+                "[sidecar] 输出锁冲突：另一个 dump 任务正在写同一备份文件 {}；请等待其完成或改用其他输出路径",
+                output.display()
+            );
+            Err(exit_codes::DUMP_RESTORE_FAILED)
+        }
+        Err(AcquireError::Io(e)) => {
+            eprintln!("[sidecar] 输出锁创建/获取失败 {}: {e}", lock_path.display());
+            Err(exit_codes::DUMP_RESTORE_FAILED)
+        }
+    }
+}
+
+/// 最终备份已存在时拒绝（含目录与悬空符号链接），不无提示覆盖。
+fn ensure_output_absent(output: &Path) -> Result<(), u8> {
+    match std::fs::symlink_metadata(output) {
+        Ok(_) => {
+            eprintln!(
+                "[sidecar] 备份输出已存在，拒绝覆盖（请改用新的输出路径或先自行移走旧备份）：{}",
+                output.display()
+            );
+            Err(exit_codes::DUMP_RESTORE_FAILED)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => {
+            eprintln!("[sidecar] 无法检查备份输出路径 {}: {e}", output.display());
+            Err(exit_codes::DUMP_RESTORE_FAILED)
+        }
+    }
+}
+
+/// 为本次 dump 独占一个唯一临时路径（同目录，保证 rename 不跨文件系统）。
+///
+/// 用 `create_new` 原子占名，拒绝复用 `<output>.partial` 这种共享固定名；名称以
+/// `.partial` 结尾，崩溃残留仍可被 doctor 的 `dump_partials` 扫描识别。
+fn claim_unique_partial(output: &Path) -> Result<PathBuf, u8> {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    for attempt in 0..DUMP_PARTIAL_ATTEMPTS {
+        let suffix = format!(".{pid}-{nanos}-{attempt}.partial");
+        let path = sibling_with_suffix(output, &suffix);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => {
+                // 立即关闭句柄：pg_dump 会以自己的写句柄截断写入该文件。
+                drop(file);
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                eprintln!("[sidecar] dump 临时文件创建失败 {}: {e}", path.display());
+                return Err(exit_codes::DUMP_RESTORE_FAILED);
+            }
+        }
+    }
+    eprintln!(
+        "[sidecar] 无法为备份生成唯一临时路径（同名冲突过多）：{}",
+        output.display()
+    );
+    Err(exit_codes::DUMP_RESTORE_FAILED)
+}
+
+/// 本次 dump 的临时文件守卫：除成功改名外，任何提前返回/失败都删除本任务临时文件。
+///
+/// 只持有本任务经 `create_new` 独占的路径，绝不删除 `<output>.partial` 这类共享名。
+struct PartialGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl PartialGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// 临时文件已 rename 成最终文件，无需再清理。
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PartialGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 fn load_password(layout: &Layout) -> Result<String, u8> {
     match password::read_password_file(&layout.password_file) {
         Some(p) => {
@@ -766,16 +894,25 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
         );
         return Err(exit_codes::DUMP_RESTORE_FAILED);
     }
-    let password = load_password(&layout)?;
 
-    // 输出先写 .partial 再原子改名，避免半截备份被当作可用（§13.7.44 同源策略）
-    let partial = PathBuf::from(format!("{}.partial", args.output.display()));
-    if let Some(parent) = args.output.parent() {
+    let output = &args.output;
+    if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             eprintln!("[sidecar] 备份输出目录创建失败 {}: {e}", parent.display());
             exit_codes::DUMP_RESTORE_FAILED
         })?;
     }
+
+    // D16-F06: 先取输出级排他锁，再检查最终文件是否存在；锁覆盖整个 dump + rename 期间。
+    // 该锁与 PGDATA 维护锁独立，在线 dump 仍不占维护锁（§13.3 AI-28）。
+    let _output_lock = acquire_output_lock(output)?;
+    ensure_output_absent(output)?;
+
+    let password = load_password(&layout)?;
+
+    // 输出先写唯一 .partial 再原子改名，避免半截备份被当作可用（§13.7.44 同源策略）。
+    // 唯一 create_new 路径保证并发任务不会共用同一临时文件；清理只删除本任务文件。
+    let mut partial = PartialGuard::new(claim_unique_partial(output)?);
 
     // 运行中实例：SQL 级直连，不占维护锁（§13.3 AI-28）；离线：持锁起临时实例
     let pm = pgbin::read_postmaster_pid(&layout.data_dir);
@@ -793,7 +930,7 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
                 &args.database,
                 &args.username,
                 &password,
-                &partial,
+                partial.path(),
             )
             .await
         }
@@ -814,7 +951,7 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
                 &args.database,
                 &args.username,
                 &password,
-                &partial,
+                partial.path(),
             )
             .await;
             match (r, instance.stop().await) {
@@ -827,8 +964,10 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
                          保留备份成果并改名为 {}，命令按停止失败返回",
                         args.output.display()
                     );
-                    if let Err(e) = std::fs::rename(&partial, &args.output) {
+                    if let Err(e) = std::fs::rename(partial.path(), &args.output) {
                         eprintln!("[sidecar] 备份原子改名失败 {}: {e}", args.output.display());
+                    } else {
+                        partial.disarm();
                     }
                     Err(exit_codes::STOP_FAILED)
                 }
@@ -846,22 +985,24 @@ pub async fn dump(args: cli::DumpArgs) -> Result<(), u8> {
 
     match result {
         Ok(()) => {
-            std::fs::rename(&partial, &args.output).map_err(|e| {
-                eprintln!("[sidecar] 备份原子改名失败 {}: {e}", args.output.display());
-                let _ = std::fs::remove_file(&partial);
+            // 锁内再次确认最终文件未被外部（不配合输出锁的）写入者创建；
+            // 若已存在则保留对方文件，只清理本任务临时文件（由 PartialGuard 完成）。
+            ensure_output_absent(output)?;
+            std::fs::rename(partial.path(), output).map_err(|e| {
+                eprintln!("[sidecar] 备份原子改名失败 {}: {e}", output.display());
                 exit_codes::DUMP_RESTORE_FAILED
             })?;
-            eprintln!("[sidecar] 备份完成：{}", args.output.display());
+            partial.disarm();
+            eprintln!("[sidecar] 备份完成：{}", output.display());
             Ok(())
         }
         Err(code) => {
             if code == exit_codes::STOP_FAILED {
                 // 停止失败时备份可能已完成（改名失败等）：不得删除唯一备份成果。
-                if partial.exists() {
-                    eprintln!("[sidecar] 备份保留于 {}", partial.display());
+                if partial.path().exists() {
+                    partial.disarm();
+                    eprintln!("[sidecar] 备份保留于 {}", partial.path().display());
                 }
-            } else {
-                let _ = std::fs::remove_file(&partial);
             }
             Err(code)
         }
@@ -1536,6 +1677,12 @@ mod tests {
         .unwrap();
     }
 
+    fn sha256_file(path: &Path) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let bytes = std::fs::read(path).unwrap();
+        Sha256::digest(bytes).to_vec()
+    }
+
     /// reset-password 参数构造（默认用户名为 postgres，旧 CLI 语义）。
     fn reset_password_args(data_dir: PathBuf) -> cli::ResetPasswordArgs {
         cli::ResetPasswordArgs {
@@ -1697,6 +1844,146 @@ mod tests {
             username: DEFAULT_USERNAME.to_string(),
         };
         assert_eq!(dump(args).await, Err(exit_codes::PASSWORD_FAILED));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-F06: 最终备份已存在 → 明确拒绝，旧文件内容不变，且不产生 .partial 残留。
+    #[tokio::test]
+    async fn dump_rejects_existing_output_without_overwriting() {
+        let dir = unique_tmp("dump-existing-output");
+        let data_dir = dir.join("postgres/16/data");
+        make_fake_cluster(&data_dir);
+        let output = dir.join("existing.dump");
+        std::fs::write(&output, b"old backup").unwrap();
+        let args = cli::DumpArgs {
+            data_dir,
+            output: output.clone(),
+            database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
+        };
+        assert_eq!(dump(args).await, Err(exit_codes::DUMP_RESTORE_FAILED));
+        assert_eq!(std::fs::read(&output).unwrap(), b"old backup");
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().ends_with(".partial")),
+            "拒绝覆盖时不得残留 .partial"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-F06: 失败路径只清理本任务临时文件，不删除历史共享 `<output>.partial`。
+    #[tokio::test]
+    async fn dump_failure_preserves_foreign_partial() {
+        let dir = unique_tmp("dump-foreign-partial");
+        let data_dir = dir.join("postgres/16/data");
+        make_fake_cluster(&data_dir);
+        let output = dir.join("out.dump");
+        let foreign_partial = sibling_with_suffix(&output, ".partial");
+        std::fs::write(&foreign_partial, b"foreign partial").unwrap();
+        let args = cli::DumpArgs {
+            data_dir,
+            output: output.clone(),
+            database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
+        };
+        // 密码缺失 → 失败返回，且不得删掉非本次任务的 `.partial`
+        assert_eq!(dump(args).await, Err(exit_codes::PASSWORD_FAILED));
+        assert_eq!(
+            std::fs::read(&foreign_partial).unwrap(),
+            b"foreign partial",
+            "其他任务的 partial 不得被删除"
+        );
+        assert!(!output.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn output_lock_path_is_sibling_and_preserves_path() {
+        let output = PathBuf::from("/tmp/备份.dump");
+        let lock = output_lock_path(&output);
+        assert_eq!(lock, PathBuf::from("/tmp/备份.dump.lock"));
+        assert_ne!(lock, output);
+    }
+
+    /// 唯一临时路径必须每次 create_new 成功，且都以 `.partial` 结尾供 doctor 扫描。
+    #[test]
+    fn claim_unique_partial_creates_distinct_files() {
+        let dir = unique_tmp("dump-unique-partial");
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = dir.join("backup.dump");
+        let first = claim_unique_partial(&output).unwrap();
+        let second = claim_unique_partial(&output).unwrap();
+        assert_ne!(first, second);
+        assert!(first.exists() && second.exists());
+        for path in [&first, &second] {
+            assert_ne!(path, &output);
+            assert!(path.to_string_lossy().ends_with(".partial"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 守卫只删除自己 create_new 的文件，不碰同目录其他 partial。
+    #[test]
+    fn partial_guard_removes_only_own_file() {
+        let dir = unique_tmp("dump-partial-guard");
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = dir.join("backup.dump");
+        let own = claim_unique_partial(&output).unwrap();
+        let foreign = dir.join("other.dump.partial");
+        std::fs::write(&foreign, b"foreign").unwrap();
+        {
+            let _guard = PartialGuard::new(own.clone());
+        }
+        assert!(!own.exists(), "本任务临时文件应被清理");
+        assert!(foreign.exists(), "他人 partial 不得被清理");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 输出锁为跨进程排他（Windows 为句柄级语义，同进程第二句柄不作为证据）。
+    #[test]
+    fn output_lock_conflict_cross_process() {
+        if let Ok(p) = std::env::var("QTS_DUMP_OUTPUT_LOCK_CHILD") {
+            let output = PathBuf::from(p);
+            assert_eq!(
+                acquire_output_lock(&output).err(),
+                Some(exit_codes::DUMP_RESTORE_FAILED),
+                "子进程应观察到输出锁冲突"
+            );
+            return;
+        }
+        let dir = unique_tmp("dump-output-lock-cross");
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = dir.join("shared.dump");
+        let _held = acquire_output_lock(&output).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(exe)
+            .args([
+                "maint::tests::output_lock_conflict_cross_process",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("QTS_DUMP_OUTPUT_LOCK_CHILD", &output)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "子进程输出锁冲突探测失败 (code {:?}):\nstdout: {}\nstderr: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 不同输出路径使用不同锁文件，可并行。
+    #[test]
+    fn different_outputs_have_independent_locks() {
+        let dir = unique_tmp("dump-lock-independent");
+        std::fs::create_dir_all(&dir).unwrap();
+        let _first = acquire_output_lock(&dir.join("a.dump")).unwrap();
+        let _second = acquire_output_lock(&dir.join("b.dump")).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2643,6 +2930,80 @@ mod tests {
             username: DEFAULT_USERNAME.to_string(),
         };
         let result = dump(args).await;
+        let hash_after_first = if dump_path.exists() {
+            Some(sha256_file(&dump_path))
+        } else {
+            None
+        };
+
+        // D16-F06: 同一输出再次 dump → 明确拒绝，已成功备份的 hash 保持不变
+        let second_args = cli::DumpArgs {
+            data_dir: layout.data_dir.clone(),
+            output: dump_path.clone(),
+            database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
+        };
+        let second = dump(second_args).await;
+
+        // D16-F06: 两个在线 dump 并发写同一新输出 → 输出级锁使一方明确拒绝
+        let concurrent_path = layout.data_dir.parent().unwrap().join("concurrent.dump");
+        let concurrent_a = cli::DumpArgs {
+            data_dir: layout.data_dir.clone(),
+            output: concurrent_path.clone(),
+            database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
+        };
+        let concurrent_b = cli::DumpArgs {
+            data_dir: layout.data_dir.clone(),
+            output: concurrent_path.clone(),
+            database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
+        };
+        let (concurrent_first, concurrent_second) =
+            tokio::join!(dump(concurrent_a), dump(concurrent_b));
+        let results = [concurrent_first, concurrent_second];
+        let ok_count = results.iter().filter(|r| r.is_ok()).count();
+        let rejected_count = results
+            .iter()
+            .filter(|r| r.as_ref().err() == Some(&exit_codes::DUMP_RESTORE_FAILED))
+            .count();
+        let concurrent_hash = if concurrent_path.exists() {
+            Some(sha256_file(&concurrent_path))
+        } else {
+            None
+        };
+
+        // D16-F06: 不同输出路径使用独立输出锁，两个在线 dump 可真正并行成功
+        let parallel_a_path = layout.data_dir.parent().unwrap().join("parallel-a.dump");
+        let parallel_b_path = layout.data_dir.parent().unwrap().join("parallel-b.dump");
+        let parallel_a = cli::DumpArgs {
+            data_dir: layout.data_dir.clone(),
+            output: parallel_a_path.clone(),
+            database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
+        };
+        let parallel_b = cli::DumpArgs {
+            data_dir: layout.data_dir.clone(),
+            output: parallel_b_path.clone(),
+            database: DEFAULT_DATABASE.to_string(),
+            username: DEFAULT_USERNAME.to_string(),
+        };
+        let (parallel_a_result, parallel_b_result) =
+            tokio::join!(dump(parallel_a), dump(parallel_b));
+
+        // D16-F06: 失败的任务只清理自己的唯一临时文件，不删除其他任务的 partial
+        let failure_dir = dir.join("failure-case");
+        std::fs::create_dir_all(&failure_dir).unwrap();
+        let failure_output = failure_dir.join("fail.dump");
+        let foreign_partial = sibling_with_suffix(&failure_output, ".partial");
+        std::fs::write(&foreign_partial, b"foreign partial").unwrap();
+        let failure_args = cli::DumpArgs {
+            data_dir: layout.data_dir.clone(),
+            output: failure_output.clone(),
+            database: "no_such_database".to_string(),
+            username: DEFAULT_USERNAME.to_string(),
+        };
+        let failure_result = dump(failure_args).await;
 
         instance
             .stop()
@@ -2653,6 +3014,53 @@ mod tests {
         assert!(
             dump_path.exists(),
             "dump file should exist at {dump_path:?}"
+        );
+        assert_eq!(second, Err(exit_codes::DUMP_RESTORE_FAILED));
+        assert_eq!(
+            hash_after_first.as_ref().map(|_| sha256_file(&dump_path)),
+            hash_after_first,
+            "成功备份在返回后不得被并发任务改写"
+        );
+        assert_eq!(ok_count, 1, "并发同目标 dump 应恰好一方成功: {results:?}");
+        assert_eq!(rejected_count, 1, "另一方应明确拒绝（exit 30）");
+        assert!(concurrent_path.exists(), "成功方的最终备份应存在");
+        assert_eq!(
+            concurrent_hash
+                .as_ref()
+                .map(|_| sha256_file(&concurrent_path)),
+            concurrent_hash,
+            "并发完成后成功文件 hash 不得变化"
+        );
+        assert!(parallel_a_result.is_ok(), "不同输出的 dump A 应并行成功");
+        assert!(parallel_b_result.is_ok(), "不同输出的 dump B 应并行成功");
+        assert!(parallel_a_path.exists() && parallel_b_path.exists());
+        assert_eq!(
+            failure_result,
+            Err(exit_codes::DUMP_RESTORE_FAILED),
+            "连接不存在的库应失败"
+        );
+        assert_eq!(
+            std::fs::read(&foreign_partial).unwrap(),
+            b"foreign partial",
+            "失败任务不得删除其他任务的 partial"
+        );
+        let remaining_partials: Vec<_> = std::fs::read_dir(&failure_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".partial"))
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(
+            remaining_partials,
+            vec![foreign_partial.file_name().unwrap().to_os_string()],
+            "失败任务应只清理自己的唯一临时文件"
+        );
+        assert!(
+            std::fs::read_dir(layout.data_dir.parent().unwrap())
+                .unwrap()
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().ends_with(".partial")),
+            "成功/拒绝路径均不得残留 .partial"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

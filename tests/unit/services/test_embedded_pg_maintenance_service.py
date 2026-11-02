@@ -15,6 +15,7 @@ Mock 策略：
 - TestEmbeddedPgMaintenanceServiceSingleton: 单例协议（2 个）
 - TestEmbeddedPgMaintenanceServiceArgv: argv 构造（UIR-F16-002 库名透传与拒绝、
   M21 用户名透传与白名单校验、M23 reset-password argv 与错误码）
+- TestSidecarUtf8Decoding: D16-F08 显式 UTF-8 解码与非 UTF-8 locale 回归
 """
 
 from __future__ import annotations
@@ -440,6 +441,17 @@ class TestEmbeddedPgMaintenanceServiceDump:
 
         with _patch_run_async(50, "", "qTrading running"):
             with pytest.raises(EmbeddedPgMaintenanceError, match="lock_conflict"):
+                await maintenance_service.dump(tmp_path / "backup.dump")
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_dump_sidecar_exit_30_output_conflict(self, maintenance_service, tmp_path: Path) -> None:
+        """D16-F06: 输出已存在/另一任务占用同一输出（exit 30）→ dump_restore_failed。"""
+        from services.embedded_pg_maintenance_service import (
+            EmbeddedPgMaintenanceError,
+        )
+
+        with _patch_run_async(30, "", "output exists or locked"):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="dump_restore_failed"):
                 await maintenance_service.dump(tmp_path / "backup.dump")
 
 
@@ -1018,15 +1030,16 @@ class TestRunSidecarCancelAllowed:
         assert (exit_code, stdout, stderr) == (0, "dump ok", "")
         assert captured["active_during_run"] is proc_mock
         assert maintenance_service._active_proc is None
+        assert maintenance_service._dump_task_reserved is False
 
     @pytest.mark.asyncio(loop_scope="function")
-    async def test_concurrent_dump_guard_rejects_and_preserves_active_proc(self, maintenance_service) -> None:
-        """已有 dump 在途时，第二次 dump 被拒（kill 新进程）且不误清在途句柄。"""
+    async def test_concurrent_dump_rejected_before_popen(self, maintenance_service) -> None:
+        """D16-F06: 已有 dump 在途时，第二次调用在 Popen 之前即被拒绝（不得启动子进程）。"""
         from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
 
         first_proc = MagicMock()  # 已在途 dump 句柄
-        second_proc = MagicMock()
         maintenance_service._active_proc = first_proc
+        popen_mock = MagicMock()
 
         with (
             patch(
@@ -1035,26 +1048,29 @@ class TestRunSidecarCancelAllowed:
             ),
             patch(
                 "services.embedded_pg_maintenance_service.subprocess.Popen",
-                return_value=second_proc,
+                popen_mock,
             ),
         ):
             with pytest.raises(EmbeddedPgMaintenanceError, match="已有备份任务在进行中"):
                 await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
 
-        second_proc.kill.assert_called_once_with()
-        second_proc.communicate.assert_called_once_with()  # 被拒进程被回收，避免僵尸/管道泄漏
-        # 回归：guard 拒绝路径的 finally 不得误清在途 dump 句柄
+        popen_mock.assert_not_called()
+        # 拒绝路径不得误清在途句柄，也不得遗留预留位
         assert maintenance_service._active_proc is first_proc
+        assert maintenance_service._dump_task_reserved is False
 
     @pytest.mark.asyncio(loop_scope="function")
-    async def test_concurrent_dump_guard_kill_oserror_still_raises(self, maintenance_service) -> None:
-        """对抗性检视：被拒进程恰在竞态窗口自然退出时 kill 抛 OSError，仍抛并发拒绝业务异常。"""
-        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+    async def test_reservation_set_before_popen(self, maintenance_service) -> None:
+        """D16-F06: 预留位必须在 Popen 调用时已置位（并发探测据此拒绝）。"""
+        proc_mock = MagicMock()
+        proc_mock.returncode = 0
+        proc_mock.communicate = MagicMock(return_value=("", ""))
+        captured: dict[str, object] = {}
 
-        first_proc = MagicMock()  # 已在途 dump 句柄
-        second_proc = MagicMock()
-        second_proc.kill = MagicMock(side_effect=OSError("no such process"))
-        maintenance_service._active_proc = first_proc
+        def _popen(*args, **kwargs):
+            captured["reserved"] = maintenance_service._dump_task_reserved
+            captured["active"] = maintenance_service.has_active_operation()
+            return proc_mock
 
         with (
             patch(
@@ -1063,14 +1079,62 @@ class TestRunSidecarCancelAllowed:
             ),
             patch(
                 "services.embedded_pg_maintenance_service.subprocess.Popen",
-                return_value=second_proc,
+                side_effect=_popen,
             ),
         ):
-            with pytest.raises(EmbeddedPgMaintenanceError, match="已有备份任务在进行中"):
+            await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
+
+        assert captured == {"reserved": True, "active": True}
+        assert maintenance_service._dump_task_reserved is False
+        assert maintenance_service._active_proc is None
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_popen_failure_releases_reservation(self, maintenance_service) -> None:
+        """D16-F06: Popen 抛错时预留位在 finally 释放，后续调用可正常执行。"""
+        proc_mock = MagicMock()
+        proc_mock.returncode = 0
+        proc_mock.communicate = MagicMock(return_value=("", ""))
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                side_effect=OSError("spawn failed"),
+            ),
+        ):
+            with pytest.raises(OSError, match="spawn failed"):
                 await maintenance_service._run_sidecar(["sidecar", "dump"], cancel_allowed=True)
 
-        second_proc.kill.assert_called_once_with()
-        assert maintenance_service._active_proc is first_proc
+        assert maintenance_service._dump_task_reserved is False
+        assert maintenance_service._active_proc is None
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                return_value=proc_mock,
+            ),
+        ):
+            exit_code, _stdout, _stderr = await maintenance_service._run_sidecar(
+                ["sidecar", "dump"], cancel_allowed=True
+            )
+
+        assert exit_code == 0
+        assert maintenance_service._dump_task_reserved is False
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_reservation_without_proc_blocks_has_active_operation(self, maintenance_service) -> None:
+        """D16-F06: 仅预留（Popen 前）也应视为有在途备份，禁止切换数据库模式。"""
+        assert maintenance_service.has_active_operation() is False
+        maintenance_service._dump_task_reserved = True
+        assert maintenance_service.has_active_operation() is True
+        maintenance_service._dump_task_reserved = False
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_cancel_allowed_false_not_registered(self, maintenance_service) -> None:
@@ -1124,6 +1188,157 @@ class TestRunSidecarCancelAllowed:
         proc_mock.kill.assert_called_once_with()
         # 注册路径的 finally 在超时异常后仍清空句柄（吸收对抗性检视 P2-4 测试缺口）
         assert maintenance_service._active_proc is None
+        assert maintenance_service._dump_task_reserved is False
+
+
+# =============================================================================
+# TestSidecarUtf8Decoding: D16-F08 维护客户端按 UTF-8 显式解码
+# =============================================================================
+class TestSidecarUtf8Decoding:
+    """D16-F08: sidecar 输出固定 UTF-8，维护客户端不得按系统 locale 解码。
+
+    - Popen 必须显式 ``encoding="utf-8", errors="replace"``
+    - 非 UTF-8 locale（cp1252/cp936）下中文路径与诊断信息逐字一致
+    - 机器协议 stdout 的损坏字节（U+FFFD）显式拒绝，诊断 stderr 容错
+    """
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_popen_passes_explicit_utf8_replace(self, maintenance_service) -> None:
+        """Popen 显式指定 UTF-8 + replace，不依赖系统 locale。"""
+        proc_mock = MagicMock()
+        proc_mock.returncode = 0
+        proc_mock.communicate = MagicMock(return_value=("", ""))
+        popen_mock = MagicMock(return_value=proc_mock)
+
+        with (
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+            patch(
+                "services.embedded_pg_maintenance_service.subprocess.Popen",
+                popen_mock,
+            ),
+        ):
+            await maintenance_service._run_sidecar(["sidecar", "doctor"])
+
+        _args, kwargs = popen_mock.call_args
+        assert kwargs["text"] is True
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+
+    @pytest.mark.parametrize("locale_encoding", ["cp1252", "cp936"])
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_chinese_output_decoded_verbatim_under_non_utf8_locale(
+        self, maintenance_service, monkeypatch, locale_encoding: str
+    ) -> None:
+        """cp1252/cp936 系统 locale 下，UTF-8 中文路径与 stderr 不被误解码。
+
+        模拟方式：把 Popen 默认文本编码来源（``subprocess._text_encoding``）改为非 UTF-8；
+        真实子进程直接写 UTF-8 字节（不受子进程自身 locale 影响）。
+        """
+        import sys
+
+        stdout_text = "备份完成: D:/数据/备份.dump"
+        stderr_text = "备份完成"
+        script = (
+            "import sys;"
+            f"sys.stdout.buffer.write({stdout_text.encode('utf-8')!r});"
+            f"sys.stderr.buffer.write({stderr_text.encode('utf-8')!r})"
+        )
+
+        with (
+            patch("subprocess._text_encoding", return_value=locale_encoding),
+            patch(
+                "services.embedded_pg_maintenance_service.ThreadPoolManager",
+                return_value=_DirectTP(),
+            ),
+        ):
+            exit_code, stdout, stderr = await maintenance_service._run_sidecar([sys.executable, "-c", script])
+
+        assert exit_code == 0
+        assert stdout == stdout_text
+        assert stderr == stderr_text
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_doctor_rejects_corrupted_stdout(self, maintenance_service) -> None:
+        """doctor JSON 字符串字段含 U+FFFD（非法 UTF-8）时显式拒绝，不当作有效诊断。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        corrupted = dict(MOCK_DOCTOR_JSON)
+        corrupted["data_dir"] = "D:/\ufffd/data"
+        # ensure_ascii=False：默认 ensure_ascii=True 会把 U+FFFD 转义成 ASCII 序列
+        # ``\ufffd``，stdout 里就不存在真实替换字符，无法模拟 Popen(errors="replace")
+        # 解码损坏字节后的现场。
+        with _patch_run_async(0, json.dumps(corrupted, ensure_ascii=False)):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="invalid UTF-8"):
+                await maintenance_service.doctor()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_maintenance_shell_rejects_corrupted_stdout(self, maintenance_service) -> None:
+        """maintenance-shell JSON 含 U+FFFD 时显式拒绝，避免返回乱码 psql 路径。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        shell_json = {
+            "psql_path": "D:/\ufffd/psql.exe",
+            "connection_string_redacted": "postgresql://postgres:***@127.0.0.1:55433/qtrading",
+        }
+        # 同上：ensure_ascii=False 保留真实 U+FFFD，匹配 Popen 解码损坏字节后的 stdout。
+        with _patch_run_async(0, json.dumps(shell_json, ensure_ascii=False)):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="invalid UTF-8"):
+                await maintenance_service.maintenance_shell()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_restore_rejects_corrupted_stdout_target_path(self, maintenance_service, tmp_path: Path) -> None:
+        """restore 从 stdout 取目标路径时，损坏的 UTF-8 不得作为成功目录返回。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        input_path = tmp_path / "backup.dump"
+        input_path.write_bytes(b"fake")
+
+        with _patch_run_async(0, "D:/\ufffd/restored"):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="invalid UTF-8"):
+                await maintenance_service.restore(input_path)
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_restore_explicit_target_ignores_corrupted_stdout(self, maintenance_service, tmp_path: Path) -> None:
+        """restore 显式指定 target_data_dir 时不消费 stdout，损坏字节不影响成功结果。"""
+        from services.embedded_pg_maintenance_service import RestoreResult
+
+        input_path = tmp_path / "backup.dump"
+        input_path.write_bytes(b"fake")
+        target = tmp_path / "new_data"
+
+        with _patch_run_async(0, "D:/\ufffd/ignored"):
+            result = await maintenance_service.restore(input_path, target)
+
+        assert isinstance(result, RestoreResult)
+        assert result.target_data_dir == str(target)
+        assert result.exit_code == 0
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_dump_ignores_corrupted_stdout(self, maintenance_service, tmp_path: Path) -> None:
+        """dump 不消费 stdout，诊断噪声中的替换字符不得把成功备份误判为失败。"""
+        from services.embedded_pg_maintenance_service import DumpResult
+
+        output_path = tmp_path / "backup.dump"
+        output_path.write_bytes(b"fake dump content")
+
+        with _patch_run_async(0, "D:/\ufffd/noise"):
+            result = await maintenance_service.dump(output_path)
+
+        assert isinstance(result, DumpResult)
+        assert result.exit_code == 0
+        assert result.file_size == len(b"fake dump content")
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_stderr_replacement_still_classified_by_exit_code(self, maintenance_service, tmp_path: Path) -> None:
+        """诊断 stderr 使用 replace：损坏字节不阻断退出码分类（exit 30 仍映射 dump_restore_failed）。"""
+        from services.embedded_pg_maintenance_service import EmbeddedPgMaintenanceError
+
+        with _patch_run_async(30, "", "dump failed: \ufffd"):
+            with pytest.raises(EmbeddedPgMaintenanceError, match="dump_restore_failed"):
+                await maintenance_service.dump(tmp_path / "backup.dump")
 
 
 # =============================================================================
