@@ -662,7 +662,7 @@ jobs:
 
       - name: Install Rust toolchain (1.97.1)
         if: steps.cache-sidecar.outputs.cache-hit != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
         with:
           toolchain: 1.97.1
 
@@ -1012,7 +1012,7 @@ jobs:
           uv pip install --system flet-web==1.0.5 "fastapi<0.145"
 
       - name: Install Rust toolchain (1.97.1)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
         with:
           toolchain: 1.97.1
 
@@ -1251,7 +1251,7 @@ jobs:
 
       - name: Install Rust toolchain (1.97.1, real-sidecar group only)
         if: matrix.needs_rust == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
         with:
           toolchain: 1.97.1
 
@@ -1480,7 +1480,7 @@ jobs:
         run: playwright install chromium
 
       - name: Install Rust toolchain (1.97.1)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec  # stable
         with:
           toolchain: 1.97.1
 
