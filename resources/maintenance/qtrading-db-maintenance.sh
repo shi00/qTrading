@@ -45,11 +45,29 @@ if [ -z "$PG_USERNAME" ]; then
     echo "ERROR: username must not be empty" >&2
     exit 1
 fi
-# 默认 postgres 时不传 --username，保持既有调用契约不变
-USERNAME_ARG=""
-if [ "$PG_USERNAME" != "postgres" ]; then
-    USERNAME_ARG="--username $PG_USERNAME"
+# 用户名白名单（与 sidecar maint.rs validate_username / Python _DATABASE_NAME_PATTERN 对齐）：
+# [A-Za-z_][A-Za-z0-9_]*，长度 ≤ 63。只接受安全标识符，避免环境变量中的空格/通配符/引号
+# 被 shell 拆成额外 argv（word-splitting / glob 展开）。
+# 注意 shell case 的 `*` 是任意字符通配（非正则重复），此处用「禁用字符」反向判定。
+case "$PG_USERNAME" in
+    '' | *[!A-Za-z0-9_]* | [!A-Za-z_]*)
+        echo "ERROR: invalid username (expected [A-Za-z_][A-Za-z0-9_]*, length <= 63): $PG_USERNAME" >&2
+        exit 1
+        ;;
+esac
+if [ "${#PG_USERNAME}" -gt 63 ]; then
+    echo "ERROR: invalid username (expected [A-Za-z_][A-Za-z0-9_]*, length <= 63): $PG_USERNAME" >&2
+    exit 1
 fi
+
+# 默认 postgres 时不传 --username，保持既有调用契约不变；自定义用户名始终作为独立、
+# 加引号的 argv 追加，禁止经未加引号的字符串变量展开（word-splitting / glob）。
+run_sidecar() {
+    if [ "$PG_USERNAME" != "postgres" ]; then
+        exec "$SIDECAR_BIN" "$@" --username "$PG_USERNAME"
+    fi
+    exec "$SIDECAR_BIN" "$@"
+}
 
 # 默认数据目录：platformdirs user_data_dir("qTrading")/postgres/16/data
 # Linux: ~/.local/share/qTrading/postgres/16/data
@@ -83,21 +101,20 @@ case "$CMD" in
             echo "Usage: $0 dump <output-file>" >&2
             exit 1
         fi
-        # $USERNAME_ARG 有意不加引号：默认空串（不传 --username），自定义时拆为两个参数
-        exec "$SIDECAR_BIN" dump --data-dir "$DEFAULT_DATA_DIR" --output "$1" $USERNAME_ARG
+        run_sidecar dump --data-dir "$DEFAULT_DATA_DIR" --output "$1"
         ;;
     restore)
         if [ -z "$1" ]; then
             echo "Usage: $0 restore <input-file>" >&2
             exit 1
         fi
-        exec "$SIDECAR_BIN" restore --data-dir "$DEFAULT_DATA_DIR" --input "$1" $USERNAME_ARG
+        run_sidecar restore --data-dir "$DEFAULT_DATA_DIR" --input "$1"
         ;;
     stop)
         exec "$SIDECAR_BIN" stop --data-dir "$DEFAULT_DATA_DIR" "$@"
         ;;
     maintenance-shell)
-        exec "$SIDECAR_BIN" maintenance-shell --data-dir "$DEFAULT_DATA_DIR" $USERNAME_ARG "$@"
+        run_sidecar maintenance-shell --data-dir "$DEFAULT_DATA_DIR" "$@"
         ;;
     version)
         exec "$SIDECAR_BIN" version "$@"

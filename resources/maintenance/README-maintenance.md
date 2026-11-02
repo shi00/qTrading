@@ -83,7 +83,7 @@ cd "<安装目录>/resources/maintenance"
 - **Linux / macOS**：`./qtrading-db-maintenance.sh --username <user> dump <file>`，或设置环境变量 `QTRADING_PG_USERNAME=<user>`
 - **Windows**：`set QTRADING_PG_USERNAME=<user>` 后执行 `qtrading-db-maintenance.bat <command> [args]`
 
-前置参数 `--username` 优先于环境变量；两者均未设置时按 `postgres` 处理（不追加 `--username`）。
+前置参数 `--username` 优先于环境变量；两者均未设置时按 `postgres` 处理（不追加 `--username`）。用户名须为安全标识符（`[A-Za-z_][A-Za-z0-9_]*`，长度 ≤ 63，与 sidecar / Python 侧校验一致）；脚本在调用 sidecar 前即拒绝其他取值，避免空格、通配符或命令元字符被解析为额外参数。
 
 ## 安全注意事项
 
