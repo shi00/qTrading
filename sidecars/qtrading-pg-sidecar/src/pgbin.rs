@@ -1,7 +1,8 @@
 //! PostgreSQL 二进制调用层（pg_plan §12.1：sidecar 从安装目录解析工具路径）。
 //!
 //! 统一经 `run_tool` 执行 bundled 工具（initdb/pg_ctl/psql/pg_dump/pg_restore/pg_controldata），
-//! 密码只走 `PGPASSWORD` 环境变量，禁止上命令行（R9）。
+//! 密码只走 `PGPASSWORD` 环境变量，禁止上命令行（R9）；含凭据的 SQL 经 stdin 传递
+//! （`psql_stdin`，`-f -`），同样不进 argv。
 //! 分级停止（§7.3）：smart 25s → fast 5s → kill fallback，总预算 ≤ 32s。
 
 use crate::process_identity::{self, ClusterIdentity, IdentityError};
@@ -178,6 +179,63 @@ pub async fn run_tool(
     })
 }
 
+/// 执行 bundled 工具并通过 stdin 传递输入：stdin 内容不进 argv（R9）。
+///
+/// 用于含凭据的 SQL（如 `ALTER USER ... PASSWORD`）：psql 以 `-f -` 从 stdin 读脚本。
+/// 与 `run_tool` 同样保留超时强杀与 `kill_on_drop`；异步 future 被取消时子进程随之终止。
+pub async fn run_tool_with_stdin(
+    program: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    stdin_data: &str,
+    timeout: Duration,
+) -> Result<ToolOutput, ToolError> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args)
+        .envs(envs.iter().map(|(k, v)| (k, v)))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().map_err(ToolError::Io)?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| ToolError::Io(std::io::Error::other("stdin pipe unavailable")))?;
+
+    let (write_result, wait_result) = match tokio::time::timeout(timeout, async move {
+        let write_result = stdin.write_all(stdin_data.as_bytes()).await;
+        // 必须显式关闭 stdin（EOF），否则读取脚本的工具会一直等待输入。
+        drop(stdin);
+        (write_result, child.wait_with_output().await)
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => return Err(ToolError::Timeout),
+    };
+
+    let out = wait_result.map_err(ToolError::Io)?;
+    // 子进程可能提前退出并关闭 stdin；非零退出时优先保留其 stderr 供调用方诊断。
+    if let Err(e) = write_result {
+        if out.status.success() {
+            return Err(ToolError::Io(e));
+        }
+    }
+    Ok(ToolOutput {
+        code: out.status.code(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
+}
+
 /// 同步版（doctor/status 等短命令；仍在 tokio 上下文时经 spawn_blocking 调用）。
 pub fn run_tool_blocking(
     program: &Path,
@@ -244,6 +302,55 @@ pub async fn psql(
     .await?;
     if !out.success() {
         // stderr 可能含连接串形态信息，交给调用方前已过 logging::sanitize（落盘时）
+        return Err(ToolError::Io(std::io::Error::other(
+            out.stderr.trim().to_string(),
+        )));
+    }
+    Ok(out.stdout.trim().to_string())
+}
+
+/// psql 经 stdin 执行 SQL（`-f -`）：与 `psql` 相同的连接参数/ON_ERROR_STOP/超时，
+/// 但 SQL 不进 argv，避免含凭据语句出现在子进程命令行（R9）。
+// 连接参数 6 个 + sql + timeout 均为必需；为单函数引入参数结构体属过度抽象
+#[allow(clippy::too_many_arguments)]
+pub async fn psql_stdin(
+    install_dir: &Path,
+    host: &str,
+    port: u16,
+    user: &str,
+    database: &str,
+    password: &str,
+    sql: &str,
+    timeout: Duration,
+) -> Result<String, ToolError> {
+    let port_s = port.to_string();
+    let out = run_tool_with_stdin(
+        &tool_path(install_dir, "psql"),
+        &[
+            "-X",
+            "-q",
+            "-A",
+            "-t",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-h",
+            host,
+            "-p",
+            &port_s,
+            "-U",
+            user,
+            "-d",
+            database,
+            "-f",
+            "-",
+        ],
+        &[("PGPASSWORD", password), ("PGCONNECT_TIMEOUT", "5")],
+        sql,
+        timeout,
+    )
+    .await?;
+    if !out.success() {
+        // stderr 可能含连接串形态信息；调用方负责在输出前经 logging::sanitize 脱敏。
         return Err(ToolError::Io(std::io::Error::other(
             out.stderr.trim().to_string(),
         )));
@@ -1136,6 +1243,101 @@ Data page checksum version:           1\n\
         std::fs::write(dir.join("start.log"), "short log line\n").unwrap();
         let tail = start_log_tail(&dir);
         assert_eq!(tail, "short log line\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- D16-F07: psql_stdin 不把含凭据 SQL 放入 argv ----
+
+    #[cfg(unix)]
+    fn write_fake_executable(path: &Path, content: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    /// 合成哨兵密码：捕获实际子进程 argv/env/stdin/stdout/stderr，
+    /// argv 与公开输出均不含哨兵，SQL 仅经受控 stdin 承载。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn psql_stdin_keeps_sql_out_of_argv_and_feeds_it_via_stdin() {
+        let dir = unique_tmp("psql-stdin-capture");
+        let bin = dir.join("bin");
+        let argv_path = dir.join("argv.txt");
+        let env_path = dir.join("env.txt");
+        let stdin_path = dir.join("stdin.txt");
+        let script = format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' \"$@\" > '{argv}'\n\
+             env > '{env}'\n\
+             cat > '{stdin}'\n\
+             printf 'fake-stderr\\n' >&2\n\
+             printf 'fake-ok\\n'\n",
+            argv = argv_path.display(),
+            env = env_path.display(),
+            stdin = stdin_path.display(),
+        );
+        write_fake_executable(&bin.join("psql"), &script);
+
+        const SENTINEL: &str = "SynthSentinel-Pwd-0_1.~Za";
+        let sql = format!("ALTER USER postgres PASSWORD $${SENTINEL}$$;");
+        let out = psql_stdin(
+            &dir,
+            "127.0.0.1",
+            5432,
+            "postgres",
+            "postgres",
+            "trust-dummy",
+            &sql,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("fake psql should succeed");
+
+        assert_eq!(out, "fake-ok");
+        assert!(!out.contains(SENTINEL), "stdout 泄露哨兵");
+
+        let argv = std::fs::read_to_string(&argv_path).unwrap();
+        let env = std::fs::read_to_string(&env_path).unwrap();
+        let stdin = std::fs::read_to_string(&stdin_path).unwrap();
+        assert!(!argv.contains(SENTINEL), "argv 泄露哨兵密码");
+        assert!(
+            argv.lines().any(|l| l == "-f"),
+            "psql 须用 -f 从 stdin 读取"
+        );
+        assert!(argv.lines().any(|l| l == "-"), "psql 须以 -f - 读取 stdin");
+        assert!(!env.contains(SENTINEL), "env 泄露哨兵密码");
+        assert!(env.contains("PGPASSWORD=trust-dummy"), "连接密码须仍经 env");
+        assert_eq!(stdin, sql, "ALTER USER SQL 必须完整经受控 stdin 传递");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// psql_stdin 超时：子进程未在时限内结束 → ToolError::Timeout（kill_on_drop 终止子进程）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn psql_stdin_timeout_returns_timeout_error() {
+        let dir = unique_tmp("psql-stdin-timeout");
+        write_fake_executable(&dir.join("bin").join("psql"), "#!/bin/sh\nsleep 10\n");
+        let err = psql_stdin(
+            &dir,
+            "127.0.0.1",
+            5432,
+            "postgres",
+            "postgres",
+            "trust-dummy",
+            "select 1",
+            Duration::from_millis(100),
+        )
+        .await
+        .expect_err("should timeout");
+        assert!(
+            matches!(err, ToolError::Timeout),
+            "expected Timeout, got {err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

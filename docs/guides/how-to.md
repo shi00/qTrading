@@ -220,6 +220,8 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 
 工程实现见 `services/embedded_pg_maintenance_service.py`（`EmbeddedPgMaintenanceService` 单例），4 个命令（`doctor` / `dump` / `restore` / `maintenance_shell`）通过 `ThreadPoolManager.run_async(TaskType.IO)` 提交同步 subprocess（`Popen` + `communicate()`）避免阻塞事件循环（R16）。设置页「数据库」标签底部的「离线维护工具」说明区块指向本章节。Python 包装内部的退出码→错误类型映射仅用于日志分级与用户提示，退出码语义正本以 sidecar 源码 `exit_codes.rs` 与各命令实际返回路径为准（见 9.6）。
 
+doctor 的 Python 投影 `DoctorResult` 有意只镜像 UI/维护包装消费的字段（如 `data_dir` / `pg_version` / `postgres_alive` / `port` / `state_file` / `issues`），不是 sidecar `DoctorJson` 的全量镜像；完整诊断字段仍以 9.2 的 CLI JSON 为准。两者字段契约由 `scripts/check_doctor_schema.py` 守护（显式必需字段 + 允许忽略表，新增 Rust 字段须显式登记，`issues` 为必需故障渠道）。
+
 注意：`maintenance_shell()` 包装**可以解析 sidecar stdout 的单行 JSON**，返回 `MaintenanceShellInfo`（`psql_path` / `connection_string_redacted`，密码段固定 `***`，见 9.5）；但**不能据此程序化连接存活实例**——包装以 `subprocess.Popen(...).communicate()` 等待 sidecar 进程退出，而 sidecar 在 Enter / stdin EOF 后即停止临时实例，因此调用返回时实例已停止（stdin 非交互时尤其如此），返回的连接信息只对应已停止的实例。JSON 解析失败抛出 `EmbeddedPgMaintenanceError`，异常消息中的 stdout 经 `DataSanitizer` 脱敏（R9）。交互式维护请直接运行 sidecar CLI 或维护脚本（见 9.5）；机器入口若需「启动实例并保持存活、由调用方连接」，须单独设计。
 
 #### 9.8 密码文件与备份的安全要求

@@ -5,9 +5,9 @@
 - fi_01_sidecar_exit_11_initdb_failed (#1): sidecar exit code 11 → initdb_failed 映射
 - fi_02_migration_failure (#2): sidecar 启动成功后 migration 失败 → RuntimeError 传播
 - fi_05_pgdata_lock_exit_50 (#5): sidecar exit code 50 → "qTrading already running" 映射
-- fi_06_disk_full_exit_15 (#6): sidecar exit code 15 → "disk full" 映射
+- fi_06_preflight_exit_15 (#6): sidecar exit code 15 → 资源预检失败通用映射
 - fi_07_sha256_mismatch (#7): .sha256 文件与实际 binary 不符 → Popen 前拒绝启动
-- fi_10_cancelled_error_cleanup (#10): asyncio.cancel() → _cleanup_failed_start 清理子进程
+- fi_10_cancelled_error_cleanup (#10): asyncio.cancel() → 取消令牌握手，不泄漏子进程
 - fi_11_timezone_mismatch (#11): Python tzname=UTC + sidecar JSON timezone=Asia/Shanghai → doctor() 仍成功
 - fi_12_restore_failure (#12): sidecar restore exit code 11 → EmbeddedPgMaintenanceError
 
@@ -15,7 +15,7 @@ Mock 策略：
 - #1/#5/#6: _FakePopen 模拟 stdout readline 返回空 + poll() 返回指定 exit code
 - #2: _FakePopen 模拟 stdout readline 返回 ready JSON + mock DatabaseMigrator.init_db 抛 RuntimeError
 - #7: 创建真实 sidecar binary 文件 + 错误 .sha256 文件，验证 Popen 前拒绝
-- #10: patch asyncio.to_thread 抛 CancelledError，验证 _cleanup_failed_start 被调用
+- #10: patch asyncio.to_thread 抛 CancelledError，验证取消收尾不创建进程（工作项未执行）
 - #11: mock _run_sidecar 返回含 timezone 字段的 doctor JSON，验证 Python 侧只解析不检测时区
 - #12: mock _run_sidecar 返回 exit=11，验证 restore() 错误分类
 
@@ -249,12 +249,12 @@ class TestFi05PgdataLockExit50:
 
 
 # =============================================================================
-# fi_06: sidecar exit code 15 → disk full（§17.6 #6）
+# fi_06: sidecar exit code 15 → resource preflight failed（§17.6 #6）
 # =============================================================================
-class TestFi06DiskFullExit15:
+class TestFi06PreflightExit15:
     @pytest.mark.asyncio(loop_scope="function")
-    async def test_fi_06_disk_full_exit_15(self, tmp_path: Path) -> None:
-        """§17.6 #6: sidecar 返回 exit code 15 → 错误信息含 'disk full'。"""
+    async def test_fi_06_preflight_exit_15(self, tmp_path: Path) -> None:
+        """§17.6 #6: sidecar 返回 exit code 15 → 通用资源预检失败提示（不声称磁盘满）。"""
         from data.persistence.embedded_postgres import service as svc_module
         from data.persistence.embedded_postgres.service import (
             EmbeddedPostgresService,
@@ -268,7 +268,7 @@ class TestFi06DiskFullExit15:
                 return _FakePopen(*args, exit_code=15, stdout_line="", **kwargs)
 
             with patch.object(svc_module.subprocess, "Popen", popen_factory):
-                with pytest.raises(EmbeddedPostgresStartError, match="disk full"):
+                with pytest.raises(EmbeddedPostgresStartError, match="resource preflight failed"):
                     await service.start()
 
             assert len(_FakePopen.instances) == 1
@@ -339,28 +339,20 @@ class TestFi07Sha256Mismatch:
 class TestFi10CancelledErrorCleanup:
     @pytest.mark.asyncio(loop_scope="function")
     async def test_fi_10_cancelled_error_cleanup(self, tmp_path: Path) -> None:
-        """§17.6 #10: asyncio.cancel() 启动协程 → _cleanup_failed_start 清理 sidecar。
+        """§17.6 #10 + D16-R02: cancel 传播 → 取消令牌握手，不泄漏 sidecar。
 
         验证：
         1. CancelledError 被 start() 重新 raise（R2 合规）
-        2. _cleanup_failed_start 被调用（子进程不泄漏）
-        3. 无遗留进程（_process 在 cancel 后应被清理或为 None）
+        2. 取消先于工作线程执行时不创建进程（_process 保持 None）
+        3. 收尾在事件循环外完成（不在此处断言同步清理调用）
         """
         import asyncio
 
         from data.persistence.embedded_postgres.service import EmbeddedPostgresService
 
         service = _make_service(tmp_path)
-        cleanup_called = {"v": False}
-        original_cleanup = service._cleanup_failed_start
 
-        def tracking_cleanup():
-            cleanup_called["v"] = True
-            original_cleanup()
-
-        service._cleanup_failed_start = tracking_cleanup  # type: ignore[assignment]  # [reason: 测试 monkeypatch 替换实例方法]
-
-        # mock asyncio.to_thread 抛 CancelledError（模拟取消传播）
+        # mock asyncio.to_thread 抛 CancelledError（模拟取消先于工作线程执行）
         async def raise_cancelled(func, *args, **kwargs):
             raise asyncio.CancelledError()
 
@@ -371,14 +363,10 @@ class TestFi10CancelledErrorCleanup:
                     await service.start()
                 assert isinstance(exc_info.value, asyncio.CancelledError)
 
-            # 验证 _cleanup_failed_start 被调用
-            assert cleanup_called["v"] is True, "_cleanup_failed_start 未被调用，子进程可能泄漏"
-            # 验证无遗留进程（cancel 后 _process 应为 None，因 _cleanup_failed_start 清空）
-            # 注：由于 mock to_thread 抛 CancelledError，_start_sync 从未执行，
-            # _process 仍为 None（构造时初值）；但 _cleanup_failed_start 仍应被调用确保安全
+            # 工作项未执行 → 不会创建进程；取消收尾不得在实例上留下进程/连接信息
             assert service._process is None, f"cancel 后 _process 应为 None，实际：{service._process}"
+            assert service._connection_info is None
         finally:
-            service._cleanup_failed_start = original_cleanup  # type: ignore[assignment]  # [reason: 测试 monkeypatch 恢复实例方法]
             await service.stop()
             EmbeddedPostgresService._reset_singleton()
 

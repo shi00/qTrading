@@ -25,6 +25,10 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
+from collections import deque
+from dataclasses import dataclass
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -45,11 +49,34 @@ class EmbeddedPostgresStartError(RuntimeError):
 
 
 _READY_SCHEMA = "qtrading.embedded_postgres.run.ready.v1"
+_EVENT_WARNING_SCHEMA = "qtrading.embedded_postgres.event.warning.v1"
+_EVENT_EXIT_SCHEMA = "qtrading.embedded_postgres.event.exit.v1"
+
+# D16-S01：运行期诊断通道容量上限。事件只保留最近 N 条供消费，超出后丢弃最旧
+# 事件但继续读 stdout（reader 永不因消费端缺失而阻塞 sidecar）。
+_EVENT_BUFFER_MAX = 64
+_EVENT_TEXT_MAX = 256
+_RAW_LOG_LINE_MAX = 8192
+_UNKNOWN_SCHEMA_DIAG_MAX = 8
+
+# D16-S01：Python 侧三份诊断日志（stdout/stderr/service）的容量与轮转策略。
+# 与 Rust sidecar.log（10MB×5）保持同量级但独立实现，避免重复造 Rust 轮转。
+_PY_LOG_MAX_BYTES = 10 * 1024 * 1024
+_PY_LOG_BACKUP_COUNT = 3
 
 # MD13-01（检视 07）：启动失败清理时 stdin EOF graceful 窗口（秒）。
 # sidecar supervise 契约为 stdin EOF → graceful stop（连带优雅停止 postgres，§7.3），
 # 窗口须覆盖 PG checkpoint + 退出；超时才 kill 兜底。
 _CLEANUP_GRACEFUL_TIMEOUT_S = 5.0
+
+# D16-R02（检视 07）：start 取消与 to_thread 工作线程的完成清理握手。
+# 取消路径不得在事件循环线程上同步等待清理；readline 轮询该间隔以尽快响应取消。
+_START_CANCEL_POLL_INTERVAL_S = 0.1
+# 工作线程收尾上限：graceful 5s + kill 后 wait 5s，留足余量。
+_START_CANCEL_HANDSHAKE_TIMEOUT_S = 30.0
+# 工作项尚未进入 _start_sync 的宽限期：executor 已取消则永不执行；
+# 稍后才执行也会在入口检查取消令牌后立即退出，不会创建进程。
+_START_CANCEL_ABANDON_GRACE_S = 1.0
 
 # F5（检视 06）：Windows 内侧车以 DPAPI 加密 password 文件。该 ASCII 前缀标记加密格式。
 # 无前缀的文件按明文读（Unix，或 Windows 升级前的旧文件）。
@@ -63,6 +90,123 @@ _SHA256_HEX_CHARS = frozenset("0123456789abcdef")
 def _is_sha256_hex(value: str) -> bool:
     """判断字符串是否为完整 sha256 十六进制摘要（64 位小写 hex）。"""
     return len(value) == 64 and all(ch in _SHA256_HEX_CHARS for ch in value)
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddedPgEvent:
+    """sidecar stdout 中已解码的 JSON-lines 事件（D16-S01）。
+
+    只承载已识别的 ``event.warning.v1`` / ``event.exit.v1``，字段长度有界且
+    ``message`` 已经 :class:`DataSanitizer` 脱敏。该对象是线程安全的只读快照，
+    供调用方经 ``drain_events()`` / ``recent_events()`` 消费；**不代表 UI 已告警**。
+    """
+
+    schema: str
+    event: str
+    message: str
+    code: str | None = None
+    phase: str | None = None
+
+
+class _RotatingTextSink:
+    """按行追加、超限轮转的文本 sink（D16-S01）。
+
+    用于 ``sidecar.stdout.log`` / ``sidecar.stderr.log``：与 Rust sidecar.log 的
+    轮转互不依赖。写/关闭经同一把锁串行，``stop_sync`` 与 reader 线程并发关闭时
+    ``write_line`` 返回 ``False``（正常停机语义），不抛异常刷屏。
+    """
+
+    def __init__(
+        self, path: Path, *, max_bytes: int = _PY_LOG_MAX_BYTES, backup_count: int = _PY_LOG_BACKUP_COUNT
+    ) -> None:
+        self._path = path
+        self._max_bytes = max(1, int(max_bytes))
+        self._backup_count = max(1, int(backup_count))
+        self._lock = threading.Lock()
+        self._closed = False
+        self._rotation_disabled = False
+        self._file = self._open()
+        try:
+            self._size = path.stat().st_size
+        except OSError:
+            self._size = 0
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def _open(self):
+        return open(self._path, "a", encoding="utf-8", errors="replace")
+
+    def _rotated_path(self, index: int) -> Path:
+        return self._path.with_name(f"{self._path.name}.{index}")
+
+    def _rotate_locked(self) -> None:
+        """关闭当前文件 → 顺移 .1..N → 重开；失败时禁用轮转并继续追加。"""
+        try:
+            self._file.close()
+        except OSError:
+            pass
+        try:
+            for index in range(self._backup_count, 0, -1):
+                src = self._path if index == 1 else self._rotated_path(index - 1)
+                dst = self._rotated_path(index)
+                if index == self._backup_count and dst.exists():
+                    dst.unlink()
+                if src.exists():
+                    os.replace(src, dst)
+            self._file = self._open()
+            self._size = 0
+        except OSError as exc:
+            # 轮转失败不能中断诊断：禁用后续轮转，重新打开原文件继续追加。
+            self._rotation_disabled = True
+            logger.warning("embedded PG log rotation failed for %s: %s", self._path, DataSanitizer.sanitize_error(exc))
+            try:
+                self._file = self._open()
+            except OSError:
+                self._closed = True
+                raise
+            try:
+                self._size = self._path.stat().st_size
+            except OSError:
+                self._size = 0
+
+    def write_line(self, text: str) -> bool:
+        """追加一行；已关闭返回 False，OSError 由调用方降级到替代诊断通道。"""
+        with self._lock:
+            if self._closed:
+                return False
+            line_bytes = len(text.encode("utf-8"))
+            if not self._rotation_disabled and self._size > 0 and self._size + line_bytes > self._max_bytes:
+                self._rotate_locked()
+            self._file.write(text)
+            self._file.flush()
+            self._size += line_bytes
+            return True
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self._file.close()
+            except OSError:
+                pass
+
+
+def _open_rotating_sink(path: Path, *, label: str, svc_logger: logging.Logger) -> _RotatingTextSink | None:
+    """打开轮转日志 sink；失败时返回 None 并落一条可见告警（不阻断启动/reader）。"""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return _RotatingTextSink(path)
+    except OSError as exc:
+        svc_logger.warning(
+            "%s log unavailable (%s); diagnostics fall back to embedded-pg-service.log",
+            label,
+            DataSanitizer.sanitize_error(exc),
+        )
+        return None
 
 
 def _unprotect_win32_blob(blob: bytes) -> bytes:  # pragma: no cover -- win-only
@@ -116,20 +260,86 @@ def _read_embedded_password(password_file: Path, svc_logger: logging.Logger) -> 
 
 
 def _setup_service_logger(log_dir: Path) -> logging.Logger:
-    """为 EmbeddedPostgresService 配置独立 FileHandler，写入 embedded-pg-service.log。
+    """为 EmbeddedPostgresService 配置独立轮转 FileHandler，写入 embedded-pg-service.log。
 
     独立 logger 避免应用主日志被 sidecar 噪声淹没，便于问题定位（§3.7）。
-    重复构造时不重复挂 handler。
+    D16-S01：service 日志同样受容量/轮转约束，避免长期运行无限增长。
+    重复构造时不重复挂 handler；日志文件不可写时降级为无文件 handler（保留可见告警）。
     """
     log_dir.mkdir(parents=True, exist_ok=True)
     svc_logger = logging.getLogger("qtrading.embedded_postgres")
     svc_logger.setLevel(logging.DEBUG)
     if not any(getattr(h, "_embedded_pg_handler", False) for h in svc_logger.handlers):
-        handler = logging.FileHandler(log_dir / "embedded-pg-service.log", encoding="utf-8")
+        try:
+            handler = RotatingFileHandler(
+                log_dir / "embedded-pg-service.log",
+                maxBytes=_PY_LOG_MAX_BYTES,
+                backupCount=_PY_LOG_BACKUP_COUNT,
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning("embedded-pg-service.log unavailable: %s", DataSanitizer.sanitize_error(exc))
+            return svc_logger
         handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] [%(threadName)s] %(message)s"))
         handler._embedded_pg_handler = True  # type: ignore[attr-defined]
         svc_logger.addHandler(handler)
     return svc_logger
+
+
+class _StartCancelled(Exception):
+    """内部取消信号：仅当本次 start 的取消令牌已置位时抛出。"""
+
+
+class _StartAttempt:
+    """单次 ``start()`` 的取消令牌与工作线程完成握手（D16-R02）。
+
+    取消可能落在三个窗口：
+    1. 工作线程已调度但尚未 Popen：入口检查 ``cancel_event``，不会创建进程；
+    2. 已 Popen 但未 ready：关闭 stdin 触发 sidecar graceful stop，readline 轮询取消后提前返回；
+    3. 已 ready（工作线程已结束）：由取消方接管回收本次尝试拥有的进程。
+
+    ``_owned_process`` 只记录本次尝试 Popen 的进程，避免取消时误杀此前已启动、
+    并非本次启动拥有的进程。
+    """
+
+    def __init__(self) -> None:
+        self.cancel_event = threading.Event()
+        self.started = threading.Event()
+        self.finished = threading.Event()
+        self._process_lock = threading.Lock()
+        self._owned_process: subprocess.Popen[str] | None = None
+
+    @property
+    def cancelled(self) -> bool:
+        return self.cancel_event.is_set()
+
+    def request_cancel(self) -> None:
+        self.cancel_event.set()
+
+    def mark_started(self) -> None:
+        self.started.set()
+
+    def mark_finished(self) -> None:
+        self.finished.set()
+
+    def publish_process(self, proc: subprocess.Popen[str]) -> None:
+        with self._process_lock:
+            self._owned_process = proc
+
+    @property
+    def owned_process(self) -> subprocess.Popen[str] | None:
+        with self._process_lock:
+            return self._owned_process
+
+    def close_stdin(self) -> None:
+        """关闭本次尝试拥有进程的 stdin（触发 sidecar graceful stop）。"""
+        proc = self.owned_process
+        if proc is None or proc.stdin is None:
+            return
+        try:
+            proc.stdin.close()
+        except Exception as e:  # stdin close fallback on start cancel
+            logger.debug("start cancel stdin close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
 
 @register_singleton
@@ -192,6 +402,11 @@ class EmbeddedPostgresService:
             self._process: subprocess.Popen[str] | None = None
             self._connection_info: ConnectionInfo | None = None
             self._stderr_file: object | None = None
+            # D16-S01：有界事件缓冲与未知 schema 诊断状态（reader 线程写、调用方读）。
+            self._events: deque[EmbeddedPgEvent] = deque(maxlen=_EVENT_BUFFER_MAX)
+            self._events_lock = threading.Lock()
+            self._dropped_events = 0
+            self._unknown_schemas: set[str] = set()
             # review03-C18: start 与 stop 的状态变迁统一由 cls._lock（RLock）串行化；
             # 不再使用独立的 _start_lock（原"_start_lock 与 cls._lock 不互锁"的并发缺口）。
             self._svc_logger = _setup_service_logger(self._log_dir)
@@ -262,7 +477,8 @@ class EmbeddedPostgresService:
         """拉起 sidecar 子进程并解析 ready JSON。
 
         使用 ``asyncio.to_thread`` 包装同步 Popen + readline，避免阻塞事件循环（R16）。
-        失败时保证清理子进程（kill + wait）。CancelledError 路径触发 stop 兜底。
+        失败时保证清理子进程（kill + wait）。D16-R02：CancelledError 路径置位本次
+        尝试的取消令牌，并在线程池中等待工作线程结束与进程回收，不在事件循环上阻塞。
 
         H7: 挂 ``@log_async_operation`` 装饰器记录耗时与异常，threshold=GLOBAL_INIT（15s）
         匹配 sidecar 首次启动 initdb 可能较慢的场景；超过阈值记 WARNING 便于诊断。
@@ -271,39 +487,73 @@ class EmbeddedPostgresService:
         """
         import asyncio
 
+        attempt = _StartAttempt()
+        loop = asyncio.get_running_loop()
         try:
-            return await asyncio.to_thread(self._start_sync)
+            return await asyncio.to_thread(self._start_sync, attempt)
+        except asyncio.CancelledError:
+            # D16-R02：取消可能先于工作线程完成。此处只置取消令牌（非阻塞），
+            # 等待工作线程收尾与“本次尝试进程”回收整体交给线程池，
+            # 避免在事件循环线程上同步等待 graceful/kill 清理。
+            attempt.request_cancel()
+            await loop.run_in_executor(None, self._finalize_cancelled_start, attempt)
+            raise
+        except _StartCancelled:
+            # 内部取消信号只会在尚未创建进程、或已在各分支内完成清理后抛出；
+            # 不再触发实例级清理，避免误杀非本次 attempt 拥有的既有进程。
+            raise
         except BaseException:
-            # CancelledError 或其他异常：确保子进程不泄漏
-            self._cleanup_failed_start()
+            # 其他异常：工作线程已结束，清理可能阻塞（graceful + kill），交给线程池
+            await loop.run_in_executor(None, self._cleanup_failed_start)
             raise
 
-    def _start_sync(self) -> ConnectionInfo:
+    def _start_sync(self, attempt: _StartAttempt) -> ConnectionInfo:
         """同步启动 sidecar（供 asyncio.to_thread 包装）。
 
         review03-C18: 持 ``cls._lock``（RLock）串行化并发调用，避免双 Popen。
         快速路径无锁检查已启动状态，避免已启动场景的锁竞争；获取锁后双检锁再次检查。
 
+        D16-R02：每个启动尝试携带取消令牌；``finally`` 置位 ``finished``，
+        供事件循环侧的取消收尾握手（``_finalize_cancelled_start``）等待。
+
         并发契约：与 ``stop_sync`` 共享 ``cls._lock``，start/stop 互斥（详见类 docstring）。
         """
-        # 快速路径：已启动直接返回（无锁，避免已启动场景的锁竞争）
-        # M09-F1: 先取局部引用再 poll。原写法对 self._process 做两次独立属性读取，
-        # 与并发 stop 交错时第二次读取可能得到 None → None.poll() AttributeError。
-        proc = self._process
-        info = self._connection_info
-        if info is not None and proc is not None and proc.poll() is None:
-            return info
-        # review03-C18: 与 stop_sync 共用 cls._lock（RLock）串行化状态变迁
-        with self.__class__._lock:
-            # 双检锁：获取锁后再次检查（另一线程可能已启动完成）；同样用局部引用防 TOCTOU
+        attempt.mark_started()
+        try:
+            # 已调度未 Popen 窗口：尚未创建任何进程，直接退出即可
+            if attempt.cancelled:
+                raise _StartCancelled()
+            # 快速路径：已启动直接返回（无锁，避免已启动场景的锁竞争）
+            # M09-F1: 先取局部引用再 poll。原写法对 self._process 做两次独立属性读取，
+            # 与并发 stop 交错时第二次读取可能得到 None → None.poll() AttributeError。
             proc = self._process
             info = self._connection_info
             if info is not None and proc is not None and proc.poll() is None:
                 return info
-            return self._start_sync_impl()
+            # review03-C18: 与 stop_sync 共用 cls._lock（RLock）串行化状态变迁
+            with self.__class__._lock:
+                # 双检锁：获取锁后再次检查（另一线程可能已启动完成）；同样用局部引用防 TOCTOU
+                if attempt.cancelled:
+                    raise _StartCancelled()
+                proc = self._process
+                info = self._connection_info
+                if info is not None and proc is not None and proc.poll() is None:
+                    return info
+                info = self._start_sync_impl(attempt)
+                # 已 ready 窗口：本次尝试已拉起进程但调用方已取消，必须回收，
+                # 否则进程/reader 会残留到后续 stop/atexit，且 parent 仍存活不会触发 parent_gone。
+                if attempt.cancelled:
+                    self._cleanup_failed_start()
+                    raise _StartCancelled()
+                return info
+        finally:
+            attempt.mark_finished()
 
-    def _start_sync_impl(self) -> ConnectionInfo:
+    def _start_sync_impl(self, attempt: _StartAttempt) -> ConnectionInfo:
         """实际启动逻辑（由 _start_sync 在 cls._lock 内调用）。"""
+        # 取消可能落在 _start_sync 的双检锁之后、Popen 之前
+        if attempt.cancelled:
+            raise _StartCancelled()
         # M09-F2: 重启路径清理（sidecar 崩溃后 poll 非 None 再次 start）。
         # 此处 _process 必为已退出进程（活进程在双检锁处已被快速路径拦截），
         # kill/wait 为 no-op 或被捕获；关键是关闭上一次残留的 _stderr_file 句柄，
@@ -338,14 +588,20 @@ class EmbeddedPostgresService:
             str(os.getpid()),
         ]
 
+        # 取消可能在 verify/mkdir 期间到达；Popen 前再检查一次，避免无意义拉起进程
+        if attempt.cancelled:
+            raise _StartCancelled()
         self._svc_logger.info("starting sidecar: %s", self._sidecar_binary)
-        # 文件句柄需保留到 stop_sync() 关闭，不能用 with；SIM115 不适用
-        self._stderr_file = open(  # noqa: SIM115  句柄生命周期跨方法（stop_sync 关闭），不能用 with
-            self._log_dir / "sidecar.stderr.log", "a", encoding="utf-8"
+        # D16-S01：stderr 归档改为容量/轮转 sink；打开失败时降级到 service 日志，
+        # 仍继续读取管道（避免 sidecar 因 stderr 管道无人消费而阻塞）。
+        self._stderr_file = _open_rotating_sink(
+            self._log_dir / "sidecar.stderr.log",
+            label="sidecar.stderr.log",
+            svc_logger=self._svc_logger,
         )
 
         try:
-            self._process = subprocess.Popen(
+            proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -357,6 +613,7 @@ class EmbeddedPostgresService:
                 errors="replace",
                 bufsize=1,
             )
+            self._process = proc
         except FileNotFoundError as exc:
             self._svc_logger.error("sidecar binary not found: %s", self._sidecar_binary)
             self._cleanup_failed_start()
@@ -366,14 +623,24 @@ class EmbeddedPostgresService:
             self._cleanup_failed_start()
             raise EmbeddedPostgresStartError(f"sidecar binary not executable: {self._sidecar_binary}") from exc
 
+        # D16-R02：发布本次尝试拥有的进程；取消侧据此关闭 stdin / 回收进程。
+        # 发布后立即复查取消，覆盖“已 Popen 未 ready”窗口。
+        attempt.publish_process(proc)
+        if attempt.cancelled:
+            self._cleanup_failed_start()
+            raise _StartCancelled()
+
         # D23: 立即启动 stderr reader，确保 sidecar 启动失败（exit=13 等）时
         # stderr 诊断信息也能被捕获到 sidecar.stderr.log（之前在 ready 后才启动，
         # 失败路径下 sidecar.stderr.log 为空，无法定位根因）
         self._start_stderr_reader_thread()
 
-        ready_line = self._readline_with_timeout(self._process.stdout, self._start_timeout)
+        ready_line = self._readline_with_timeout(proc.stdout, self._start_timeout, attempt=attempt)
         if not ready_line:
-            exit_code = self._process.poll()
+            if attempt.cancelled:
+                self._cleanup_failed_start()
+                raise _StartCancelled()
+            exit_code = proc.poll()
             self._svc_logger.error("sidecar exited before ready line (exit=%s)", exit_code)
             self._cleanup_failed_start()
             raise EmbeddedPostgresStartError(self._format_sidecar_exit_error(exit_code))
@@ -466,31 +733,60 @@ class EmbeddedPostgresService:
         return self._connection_info
 
     def _start_stdout_reader_thread(self) -> None:
-        """M9: 创建 daemon 线程持续读 sidecar stdout 写入 sidecar.stdout.log。
+        """D16-S01: 持续读 sidecar stdout → 有界事件 + 容量轮转归档。
 
         - 线程为 daemon，随进程退出自动终止
         - readline 阻塞直到 EOF（stop_sync 关闭 stdin → sidecar 退出 → stdout 关闭）
-        - 每行写入 ``<log_dir>/sidecar.stdout.log``，便于诊断 sidecar 运行期输出
-        - 线程异常不影响主流程，仅记 debug 日志
+        - 已识别的 ``event.warning.v1`` / ``event.exit.v1`` 解码为 ``EmbeddedPgEvent``，
+          进入有界缓冲供 ``drain_events()`` / ``recent_events()`` 消费；
+          事件顺序与 stdout 行序一致
+        - 每行仍脱敏后写入 ``<log_dir>/sidecar.stdout.log``（保留原文诊断）；
+          未知 schema / 非 JSON 行只做有界诊断，不进入事件缓冲
+        - 文件不可写时不中断读取（避免管道背压阻塞 sidecar），降级写 service 日志
+        - 线程异常不影响主流程，仅记 WARNING 便于发现诊断通道失效
         """
         if self._process is None or self._process.stdout is None:
             return
 
         stdout = self._process.stdout
-        stdout_log_path = self._log_dir / "sidecar.stdout.log"
+        self._reset_event_diagnostics()
+        svc_logger = self._svc_logger
 
         def _reader() -> None:
+            sink = _open_rotating_sink(
+                self._log_dir / "sidecar.stdout.log", label="sidecar.stdout.log", svc_logger=svc_logger
+            )
             try:
-                # 文件句柄需保留到线程结束，不能用 with；SIM115 不适用
-                with open(stdout_log_path, "a", encoding="utf-8") as log_file:
-                    while True:
-                        line = stdout.readline()
-                        if not line:
-                            break  # EOF
-                        log_file.write(line)
-                        log_file.flush()
+                while True:
+                    line = stdout.readline()
+                    if not line:
+                        break  # EOF
+                    full_line = line.rstrip("\r\n")
+                    raw = full_line[:_RAW_LOG_LINE_MAX]
+                    sanitized = DataSanitizer.sanitize_error(raw)
+                    if sink is not None:
+                        try:
+                            if not sink.write_line(sanitized + "\n"):
+                                # 归档已关闭（如停机）：继续消费管道防背压，转 service 日志。
+                                sink.close()
+                                sink = None
+                        except OSError as exc:
+                            sink.close()
+                            sink = None
+                            svc_logger.warning(
+                                "sidecar.stdout.log write failed (%s); falling back to service log",
+                                DataSanitizer.sanitize_error(exc),
+                            )
+                    if sink is None:
+                        # 替代诊断：文件不可写时仍把脱敏行写入独立 service 日志。
+                        svc_logger.info("sidecar stdout: %s", sanitized)
+                    # 事件解码使用完整行：归档截断不得导致合法事件被误判为不可解析。
+                    self._handle_stdout_diagnostics(full_line, sanitized)
             except Exception as e:  # pragma: no cover  reader thread stdout fallback
-                logger.debug("stdout reader thread fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+                logger.warning("stdout reader thread fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+            finally:
+                if sink is not None:
+                    sink.close()
 
         t = threading.Thread(
             target=_reader,
@@ -500,37 +796,47 @@ class EmbeddedPostgresService:
         t.start()
 
     def _start_stderr_reader_thread(self) -> None:
-        """D23: 创建 daemon 线程逐行读 sidecar stderr → DataSanitizer 脱敏 → 写入文件。
+        """D23/D16-S01: daemon 线程逐行读 sidecar stderr → 脱敏 → 容量轮转归档。
 
         - 线程为 daemon，随进程退出自动终止
         - readline 阻塞直到 EOF（stop_sync 关闭 stdin → sidecar 退出 → stderr 关闭）
         - 每行经 ``DataSanitizer.sanitize_error`` 脱敏后写入 ``_stderr_file``，
           避免 sidecar panic 输出中含密码/连接串被直接落盘（R9）
-        - 线程异常不影响主流程，仅记 debug 日志
+        - 归档不可写时降级写 service 日志并继续读取，避免 stderr 管道背压
         """
         if self._process is None or self._process.stderr is None:
             return
 
         stderr = self._process.stderr
-        stderr_file = self._stderr_file
+        stderr_sink = self._stderr_file if isinstance(self._stderr_file, _RotatingTextSink) else None
+        svc_logger = self._svc_logger
 
         def _reader() -> None:
+            nonlocal stderr_sink
             try:
                 while True:
                     line = stderr.readline()
                     if not line:
                         break  # EOF
-                    sanitized = DataSanitizer.sanitize_error(line.rstrip("\n"))
-                    if stderr_file is not None:
+                    raw = line.rstrip("\r\n")[:_RAW_LOG_LINE_MAX]
+                    sanitized = DataSanitizer.sanitize_error(raw)
+                    # stderr 只归档，不解析；超长行按 _RAW_LOG_LINE_MAX 截断。
+                    if stderr_sink is not None:
                         try:
-                            stderr_file.write(sanitized + "\n")  # type: ignore[attr-defined]
-                            stderr_file.flush()  # type: ignore[attr-defined]
-                        except Exception as e:  # file write fallback
-                            logger.debug(
-                                "stderr reader write fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True
+                            if not stderr_sink.write_line(sanitized + "\n"):
+                                # stop 关闭归档后继续消费 stderr 管道，避免 kill 兜底前背压。
+                                stderr_sink = None
+                        except OSError as exc:
+                            stderr_sink.close()
+                            stderr_sink = None
+                            svc_logger.warning(
+                                "sidecar.stderr.log write failed (%s); falling back to service log",
+                                DataSanitizer.sanitize_error(exc),
                             )
+                    if stderr_sink is None:
+                        svc_logger.warning("sidecar stderr: %s", sanitized)
             except Exception as e:  # pragma: no cover  reader thread stderr fallback
-                logger.debug("stderr reader thread fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
+                logger.warning("stderr reader thread fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
         t = threading.Thread(
             target=_reader,
@@ -538,6 +844,124 @@ class EmbeddedPostgresService:
             daemon=True,
         )
         t.start()
+
+    def _reset_event_diagnostics(self) -> None:
+        """清空上一轮运行残留的有界事件与未知 schema 诊断状态。"""
+        with self._events_lock:
+            self._events.clear()
+            self._dropped_events = 0
+            self._unknown_schemas.clear()
+
+    def _record_event(self, event: EmbeddedPgEvent) -> None:
+        """记录已解码事件并输出可见告警；缓冲满时丢弃最旧事件并计数。"""
+        buffer_full = False
+        with self._events_lock:
+            if len(self._events) == _EVENT_BUFFER_MAX:
+                self._dropped_events += 1
+                buffer_full = self._dropped_events == 1
+            self._events.append(event)
+        if buffer_full:
+            self._svc_logger.warning(
+                "sidecar event buffer full (%d); dropping oldest events",
+                _EVENT_BUFFER_MAX,
+            )
+        if event.event == "exit":
+            # code=0 且 parent_gone/signal 属正常关停，避免把正常退出记为 ERROR。
+            normal = event.code == "0" and event.message in ("parent_gone", "signal")
+            self._svc_logger.log(
+                logging.INFO if normal else logging.ERROR,
+                "sidecar exit event: code=%s reason=%s",
+                event.code,
+                event.message,
+            )
+        else:
+            self._svc_logger.warning("sidecar warning event: code=%s message=%s", event.code, event.message)
+
+    def _decode_event_line(self, raw: str) -> EmbeddedPgEvent | None:
+        """把 stdout JSON-lines 解码为有界事件；未知 schema/非 JSON 返回 None。
+
+        ``event.exit.v1`` 是退出原因的关键通道：即使 schema 未知，只要行内
+        ``event`` 字段为 ``exit`` 也解码，避免静默丢关键退出原因。
+        """
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        schema_value = payload.get("schema")
+        raw_schema = schema_value if isinstance(schema_value, str) else ""
+        event_value = payload.get("event")
+        event_name = event_value if isinstance(event_value, str) else ""
+        if raw_schema == _EVENT_WARNING_SCHEMA:
+            event_name = "warning"
+        elif raw_schema == _EVENT_EXIT_SCHEMA:
+            event_name = "exit"
+        elif event_name != "exit":
+            return None
+        # R9：schema 也来自 sidecar 输出，落库/入事件前同样脱敏并限长。
+        schema = DataSanitizer.sanitize_error(raw_schema)[:64] if raw_schema else ""
+
+        code_value = payload.get("code")
+        code = None if code_value is None else DataSanitizer.sanitize_error(str(code_value))[:64]
+        message_value = payload.get("message")
+        message = DataSanitizer.sanitize_error(message_value if isinstance(message_value, str) else "")[
+            :_EVENT_TEXT_MAX
+        ]
+        phase_value = payload.get("phase")
+        phase = DataSanitizer.sanitize_error(phase_value)[:64] if isinstance(phase_value, str) else None
+        return EmbeddedPgEvent(schema=schema, event=event_name, message=message, code=code, phase=phase)
+
+    def _handle_stdout_diagnostics(self, raw: str, sanitized: str) -> None:
+        """解码事件；未知 JSON schema/不可解析行保留原文归档并做有界可见诊断。"""
+        event = self._decode_event_line(raw)
+        if event is not None:
+            self._record_event(event)
+            return
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            payload = None
+        if not isinstance(payload, dict):
+            if "exit" in raw.lower():
+                # 不可解析但含 exit 标记：关键退出原因不能静默，落可见告警并已归档原文。
+                self._svc_logger.warning(
+                    "unparseable sidecar stdout line containing exit marker archived: %s",
+                    sanitized[:512],
+                )
+            return
+
+        schema_value = payload.get("schema")
+        schema = schema_value if isinstance(schema_value, str) else "<missing>"
+        with self._events_lock:
+            first_for_schema = (
+                schema not in self._unknown_schemas and len(self._unknown_schemas) < _UNKNOWN_SCHEMA_DIAG_MAX
+            )
+            if first_for_schema:
+                self._unknown_schemas.add(schema)
+        if first_for_schema:
+            # R9：未知 schema 同样可能是 sidecar 输出中的敏感片段，日志前脱敏并限长。
+            self._svc_logger.warning(
+                "unknown sidecar stdout schema %r archived to sidecar.stdout.log: %s",
+                DataSanitizer.sanitize_error(schema)[:64],
+                sanitized[:512],
+            )
+
+    def recent_events(self, limit: int | None = None) -> tuple[EmbeddedPgEvent, ...]:
+        """返回最近事件快照（最多 ``_EVENT_BUFFER_MAX`` 条，按 stdout 行序）。"""
+        with self._events_lock:
+            events = list(self._events)
+        if limit is not None:
+            events = events[-max(0, limit) :] if limit > 0 else []
+        return tuple(events)
+
+    def drain_events(self) -> list[EmbeddedPgEvent]:
+        """取出并清空当前有界事件缓冲（供后续消费方接入，不表示 UI 已告警）。"""
+        with self._events_lock:
+            events = list(self._events)
+            self._events.clear()
+        return events
 
     def _verify_sidecar_sha256(self) -> None:
         """§17.6 #7: Popen 前校验 sidecar binary SHA256，防止版本混搭/损坏。
@@ -621,24 +1045,60 @@ class EmbeddedPostgresService:
     def _format_sidecar_exit_error(self, exit_code: int | None) -> str:
         """§17.6: 将 sidecar exit code 映射到用户可理解的错误信息。
 
-        映射表（与 Rust sidecar main.rs ExitCode 常量对齐）：
+        映射表与 ``sidecars/qtrading-pg-sidecar/src/exit_codes.rs`` / how-to §9.6 对齐：
+        - 2 → argument_error
+        - 10 → setup_failed
         - 11 → initdb_failed
-        - 15 → disk_full
+        - 12 → start_failed
+        - 13 → health_check_failed
+        - 14 → create_database_failed
+        - 15 → preflight_failed（磁盘空间/目录权限/文件系统/网盘同步路径/密码文件权限）
         - 16 → password_error
+        - 20 → stop_failed（进程在分级停止后仍存活；PG 未运行时 stop 返回 0）
+        - 30 → dump_restore_failed
+        - 40 → data_dir_abnormal
         - 50 → already_running
         - 60 → sidecar_crashed
         """
         if exit_code is None:
             return "sidecar exited before ready line (exit=None; process still running but no output)"
+        if exit_code == 2:
+            return (
+                f"argument error (exit=2); sidecar command line invalid. "
+                f"Check the configured data directory/username and retry; data_dir={self._data_dir}"
+            )
+        if exit_code == 10:
+            return (
+                f"setup failed (exit=10); bundled PostgreSQL binaries are missing or incomplete. "
+                f"Reinstall qTrading and retry; data_dir={self._data_dir}"
+            )
         if exit_code == 11:
             return (
                 f"initdb failed (exit=11); PostgreSQL data directory initialization failed. "
                 f"Check disk space and permissions; data_dir={self._data_dir}"
             )
-        if exit_code == 15:
+        if exit_code == 12:
             return (
-                f"disk full (exit=15); PostgreSQL data directory disk space < 500MB. "
-                f"Free up disk space and restart qTrading; data_dir={self._data_dir}"
+                f"postgres start failed (exit=12); PostgreSQL instance could not start. "
+                f"Check the sidecar log and retry; data_dir={self._data_dir}"
+            )
+        if exit_code == 13:
+            return (
+                f"health check failed (exit=13); PostgreSQL did not become healthy after start. "
+                f"Check the sidecar log and retry; data_dir={self._data_dir}"
+            )
+        if exit_code == 14:
+            return (
+                f"create database failed (exit=14); the application database could not be created. "
+                f"Check the sidecar log and retry; data_dir={self._data_dir}"
+            )
+        if exit_code == 15:
+            # 15 是资源预检失败的通用码，原因可能是磁盘空间/目录权限/文件系统/网盘同步路径/
+            # 密码文件权限；不得固化为「磁盘空间不足」，也不编造剩余空间数值。
+            return (
+                f"resource preflight failed (exit=15); disk space, directory permissions, filesystem "
+                f"support, cloud-sync path, or password file permissions may be the cause. "
+                f"Check the sidecar log for the sanitized reason and retry; data_dir={self._data_dir}"
             )
         if exit_code == 16:
             # M24：自定义超级用户名实例须按需追加 --username，否则用户照提示执行会失败；
@@ -647,6 +1107,22 @@ class EmbeddedPostgresService:
             if self._username != "postgres":
                 reset_cmd += f" --username {shlex.quote(self._username)}"
             return f"password error (exit=16); run '{reset_cmd}' to reset, then restart qTrading"
+        if exit_code == 20:
+            return (
+                "stop failed (exit=20); PostgreSQL is still alive after graded stop. "
+                f"Check the sidecar log and stop the existing instance; data_dir={self._data_dir}"
+            )
+        if exit_code == 30:
+            return (
+                "dump/restore failed (exit=30); backup or restore could not complete. "
+                f"Check the backup file and sidecar log; data_dir={self._data_dir}"
+            )
+        if exit_code == 40:
+            return (
+                "data directory abnormal (exit=40); non-empty without PG_VERSION, version mismatch, "
+                "or corrupt/missing critical files. Run doctor and follow the recovery guide; "
+                f"data_dir={self._data_dir}"
+            )
         if exit_code == 50:
             return (
                 "qTrading already running (exit=50); another qTrading instance may be using "
@@ -659,8 +1135,13 @@ class EmbeddedPostgresService:
             )
         return f"sidecar exited before ready line (exit={exit_code})"
 
-    def _readline_with_timeout(self, stream: object, timeout: float) -> str:
-        """带超时的 readline，避免阻塞事件循环。"""
+    def _readline_with_timeout(self, stream: object, timeout: float, attempt: _StartAttempt | None = None) -> str:
+        """带超时的 readline，避免阻塞事件循环。
+
+        D16-R02：传入 ``attempt`` 时按轮询间隔检查取消令牌，使取消能在
+        ``start_timeout``（默认 300s）之前提前返回；reader 线程仍是 daemon，
+        进程终止/管道 EOF 后自行退出。
+        """
         q: queue.Queue[str] = queue.Queue(maxsize=1)
 
         def _reader() -> None:
@@ -673,10 +1154,17 @@ class EmbeddedPostgresService:
 
         t = threading.Thread(target=_reader, daemon=True)
         t.start()
-        try:
-            return q.get(timeout=timeout)
-        except queue.Empty:
-            return ""
+        deadline = time.monotonic() + timeout
+        while True:
+            if attempt is not None and attempt.cancelled:
+                return ""
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return ""
+            try:
+                return q.get(timeout=min(remaining, _START_CANCEL_POLL_INTERVAL_S))
+            except queue.Empty:
+                continue
 
     def _cleanup_failed_start(self) -> None:
         """启动失败时清理子进程与文件句柄。
@@ -685,25 +1173,65 @@ class EmbeddedPostgresService:
         stdin EOF graceful stop（连带优雅停止 postgres），短超时未退出再 kill 兜底
         ——kill 仅终止 sidecar 包装进程，postgres 会孤儿化占用 PGDATA，
         导致下次启动报 exit=50（already_running）。
+
+        D16-R02：与 ``stop_sync`` 共用 ``cls._lock``（RLock，同线程调用可重入），
+        使取消收尾线程与并发 stop 串行化状态变迁。
         """
-        if self._process is not None:
-            proc = self._process
-            if proc.stdin is not None:
+        with type(self)._lock:
+            if self._process is not None:
+                proc = self._process
+                if proc.stdin is not None:
+                    try:
+                        proc.stdin.close()
+                    except Exception as e:  # stdin close fallback on failed start
+                        logger.debug(
+                            "cleanup_failed_start stdin close fallback: %s",
+                            DataSanitizer.sanitize_error(e),
+                            exc_info=True,
+                        )
+                self._terminate_after_graceful(proc)
+                self._process = None
+            self._connection_info = None
+            if self._stderr_file is not None:
                 try:
-                    proc.stdin.close()
-                except Exception as e:  # stdin close fallback on failed start
+                    self._stderr_file.close()  # type: ignore[attr-defined]
+                except Exception as e:  # file close fallback on failed start
                     logger.debug(
-                        "cleanup_failed_start stdin close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True
+                        "cleanup_failed_start close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True
                     )
-            self._terminate_after_graceful(proc)
-            self._process = None
-        self._connection_info = None
-        if self._stderr_file is not None:
-            try:
-                self._stderr_file.close()  # type: ignore[attr-defined]
-            except Exception as e:  # file close fallback on failed start
-                logger.debug("cleanup_failed_start close fallback: %s", DataSanitizer.sanitize_error(e), exc_info=True)
-            self._stderr_file = None
+                self._stderr_file = None
+
+    def _finalize_cancelled_start(self, attempt: _StartAttempt) -> None:
+        """取消后的收尾（在线程池执行，禁止在事件循环线程调用）。
+
+        D16-R02 三窗口处理：
+        1. 已调度未 Popen：工作线程入口检查取消令牌后立即退出；若工作项已被
+           executor 取消则永不执行，此处仅给短宽限确认；
+        2. 已 Popen 未 ready：先关 stdin 触发 sidecar graceful stop，readline
+           轮询取消后提前返回并由工作线程自行清理；
+        3. 已 ready（工作线程已结束）：由本函数回收本次尝试拥有的进程。
+        """
+        if attempt.owned_process is not None:
+            attempt.close_stdin()
+        if not attempt.started.wait(_START_CANCEL_ABANDON_GRACE_S):
+            # 工作项尚未进入 _start_sync：executor 已取消则永不执行；
+            # 稍后执行也会在入口检查取消后退出，不会创建进程。
+            attempt.mark_finished()
+        elif not attempt.finished.wait(_START_CANCEL_HANDSHAKE_TIMEOUT_S):
+            self._svc_logger.warning(
+                "start cancel cleanup handshake timed out after %ss; forcing owned-process cleanup",
+                _START_CANCEL_HANDSHAKE_TIMEOUT_S,
+            )
+        proc = attempt.owned_process
+        if proc is None:
+            return
+        with type(self)._lock:
+            if self._process is proc:
+                # 工作线程已清理时 _process 为 None；仍指向本次进程说明落在“已 ready”窗口
+                self._cleanup_failed_start()
+            elif proc.poll() is None:
+                # 实例状态已被后续 start/stop 接管：只回收本次尝试拥有的进程，不碰实例字段
+                self._terminate_after_graceful(proc)
 
     def _terminate_after_graceful(self, proc: subprocess.Popen[str]) -> None:
         """等待 stdin EOF graceful 停止短超时后 kill 兜底，确保子进程终止。

@@ -690,7 +690,7 @@ def test_main_manifest_fix_failure(tmp_path):
 # DoctorJson schema cross-check tests (P3-VerifyVersions-DoctorSchema)
 # ============================================================================
 
-# 正例 mock: Rust struct 与 Python dataclass 字段完全一致
+# 正例 mock: 必需镜像字段在两个集合中一致（允许忽略表之外的 Rust 字段不出现）
 _MOCK_RUST_CONSISTENT = """\
 struct Issue {
     code: &'static str,
@@ -702,7 +702,20 @@ struct DoctorJson {
     data_dir: String,
     initialized: bool,
     pg_version: Option<u32>,
+    bundled_pg_major: Option<u32>,
+    version_match: bool,
+    critical_files_missing: Vec<String>,
+    install_dir_complete: bool,
+    missing_tools: Vec<String>,
+    lock_held: bool,
+    postgres_alive: bool,
+    port: Option<u16>,
+    state_file: &'static str,
+    runtime_status: Option<String>,
+    last_start_error: Option<String>,
     issues: Vec<Issue>,
+    restore_residuals: Vec<String>,
+    dump_partials: Vec<String>,
 }
 """
 
@@ -715,38 +728,50 @@ class DoctorResult:
     data_dir: str
     initialized: bool
     pg_version: int | None = None
+    bundled_pg_major: int | None = None
+    version_match: bool = False
+    critical_files_missing: list[str] = field(default_factory=list)
+    install_dir_complete: bool = False
+    missing_tools: list[str] = field(default_factory=list)
+    lock_held: bool = False
+    postgres_alive: bool = False
+    port: int | None = None
+    state_file: str = "unknown"
+    runtime_status: str | None = None
+    last_start_error: str | None = None
     issues: list[dict[str, str]] = field(default_factory=list)
+    restore_residuals: list[str] = field(default_factory=list)
+    dump_partials: list[str] = field(default_factory=list)
 """
 
-# 反例 mock 1: Rust 多一个字段(new_rust_only_field)Python 未同步
-_MOCK_RUST_EXTRA = """\
-struct DoctorJson {
-    schema: &'static str,
-    data_dir: String,
-    initialized: bool,
-    pg_version: Option<u32>,
-    issues: Vec<Issue>,
-    new_rust_only_field: String,
-}
-"""
+# 反例 mock 1: Rust 多一个未登记字段(new_rust_only_field)，Python 未同步
+_MOCK_RUST_EXTRA = _MOCK_RUST_CONSISTENT.replace(
+    "    issues: Vec<Issue>,\n",
+    "    issues: Vec<Issue>,\n    new_rust_only_field: String,\n",
+)
 
-# 反例 mock 2: Python 多一个字段(new_python_only_field)Rust 未同步
-_MOCK_PYTHON_EXTRA = """\
-from dataclasses import dataclass, field
+# 反例 mock 2: Python 多一个字段(new_python_only_field)，Rust 未同步
+_MOCK_PYTHON_EXTRA = _MOCK_PYTHON_CONSISTENT.replace(
+    "    dump_partials: list[str] = field(default_factory=list)\n",
+    '    dump_partials: list[str] = field(default_factory=list)\n    new_python_only_field: str = ""\n',
+)
 
-@dataclass(frozen=True, slots=True)
-class DoctorResult:
-    schema: str
-    data_dir: str
-    initialized: bool
-    pg_version: int | None = None
-    issues: list[dict[str, str]] = field(default_factory=list)
-    new_python_only_field: str = ""
-"""
+# 正例 mock 3: Rust-only 字段已在允许忽略表中登记（postmaster_pid 为纯信息性字段）
+_MOCK_RUST_ALLOWED_ONLY = _MOCK_RUST_CONSISTENT.replace(
+    "    issues: Vec<Issue>,\n",
+    "    issues: Vec<Issue>,\n    postmaster_pid: Option<u32>,\n",
+)
+
+# 反例 mock 4/5: 必需镜像字段 issues 在任一集合中缺失
+_MOCK_RUST_MISSING_ISSUES = _MOCK_RUST_CONSISTENT.replace("    issues: Vec<Issue>,\n", "")
+_MOCK_PYTHON_MISSING_ISSUES = _MOCK_PYTHON_CONSISTENT.replace(
+    "    issues: list[dict[str, str]] = field(default_factory=list)\n",
+    "",
+)
 
 
 def test_doctor_schema_consistent(tmp_path):
-    """DoD ②: Rust/Python DoctorJson 字段一致时脚本通过(exit 0)."""
+    """DoD ②: 必需镜像字段一致 + 无未登记 Rust 字段时脚本通过(exit 0)."""
     import check_doctor_schema  # type: ignore[import-not-found]  # scripts/ via sys.path
 
     rust_file = tmp_path / "maint.rs"
@@ -766,7 +791,7 @@ def test_doctor_schema_consistent(tmp_path):
 
 
 def test_doctor_schema_rust_extra(tmp_path):
-    """DoD ③: Rust 新增字段 Python 未同步时 fail(exit 非 0)并报告缺失字段."""
+    """DoD ③: Rust 新增未登记字段时 fail(exit 非 0)，不得静默忽略新增诊断字段."""
     import check_doctor_schema  # type: ignore[import-not-found]  # scripts/ via sys.path
 
     rust_file = tmp_path / "maint.rs"
@@ -778,6 +803,7 @@ def test_doctor_schema_rust_extra(tmp_path):
     assert len(errors) > 0
     joined = "\n".join(errors)
     assert "new_rust_only_field" in joined
+    assert "unregistered" in joined
 
     with (
         patch("check_doctor_schema.RUST_MAINT_PATH", rust_file),
@@ -809,3 +835,75 @@ def test_doctor_schema_python_extra(tmp_path):
         with pytest.raises(SystemExit) as exc_info:
             check_doctor_schema.main()
         assert exc_info.value.code != 0
+
+
+def test_doctor_schema_allowlisted_rust_only_passes(tmp_path):
+    """D16-Q01: 已显式登记（允许忽略表）的 Rust-only 字段不阻断。"""
+    import check_doctor_schema  # type: ignore[import-not-found]  # scripts/ via sys.path
+
+    rust_file = tmp_path / "maint.rs"
+    rust_file.write_text(_MOCK_RUST_ALLOWED_ONLY, encoding="utf-8")
+    python_file = tmp_path / "service.py"
+    python_file.write_text(_MOCK_PYTHON_CONSISTENT, encoding="utf-8")
+
+    errors = check_doctor_schema.check_doctor_schema_consistency(rust_path=rust_file, python_path=python_file)
+    assert errors == []
+
+
+def test_doctor_schema_missing_required_in_python(tmp_path):
+    """D16-Q01: Python DTO 缺少必需镜像字段（issues 故障渠道）时失败。"""
+    import check_doctor_schema  # type: ignore[import-not-found]  # scripts/ via sys.path
+
+    rust_file = tmp_path / "maint.rs"
+    rust_file.write_text(_MOCK_RUST_CONSISTENT, encoding="utf-8")
+    python_file = tmp_path / "service.py"
+    python_file.write_text(_MOCK_PYTHON_MISSING_ISSUES, encoding="utf-8")
+
+    errors = check_doctor_schema.check_doctor_schema_consistency(rust_path=rust_file, python_path=python_file)
+    joined = "\n".join(errors)
+    assert "missing in Python DoctorResult" in joined
+    assert "issues" in joined
+
+
+def test_doctor_schema_missing_required_in_rust(tmp_path):
+    """D16-Q01: Rust 缺少必需镜像字段（issues 故障渠道）时失败。"""
+    import check_doctor_schema  # type: ignore[import-not-found]  # scripts/ via sys.path
+
+    rust_file = tmp_path / "maint.rs"
+    rust_file.write_text(_MOCK_RUST_MISSING_ISSUES, encoding="utf-8")
+    python_file = tmp_path / "service.py"
+    python_file.write_text(_MOCK_PYTHON_CONSISTENT, encoding="utf-8")
+
+    errors = check_doctor_schema.check_doctor_schema_consistency(rust_path=rust_file, python_path=python_file)
+    joined = "\n".join(errors)
+    assert "missing in Rust" in joined
+    assert "issues" in joined
+
+
+def test_doctor_schema_ignored_field_issue_code_must_still_emit(tmp_path):
+    """D16-Q01: 允许忽略字段声明的 issue code 从 Rust 源码消失时失败（不弱化故障诊断）。"""
+    import check_doctor_schema  # type: ignore[import-not-found]  # scripts/ via sys.path
+
+    rust_file = tmp_path / "maint.rs"
+    rust_file.write_text(_MOCK_RUST_ALLOWED_ONLY, encoding="utf-8")
+    python_file = tmp_path / "service.py"
+    python_file.write_text(_MOCK_PYTHON_CONSISTENT, encoding="utf-8")
+
+    spec = check_doctor_schema.IgnoredRustField("test only", ("removed_issue_code",))
+    with patch.dict(check_doctor_schema.ALLOWED_RUST_ONLY_FIELDS, {"postmaster_pid": spec}, clear=True):
+        errors = check_doctor_schema.check_doctor_schema_consistency(
+            rust_path=rust_file,
+            python_path=python_file,
+        )
+
+    joined = "\n".join(errors)
+    assert "removed_issue_code" in joined
+    assert "not emitted" in joined
+
+
+def test_doctor_schema_real_sources_consistent():
+    """D16-Q01: 仓库真实 Rust/Python 源必须通过字段契约（防止脚本与实源漂移）。"""
+    import check_doctor_schema  # type: ignore[import-not-found]  # scripts/ via sys.path
+
+    errors = check_doctor_schema.check_doctor_schema_consistency()
+    assert errors == []

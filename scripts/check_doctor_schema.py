@@ -1,10 +1,15 @@
-"""Check DoctorJson schema consistency between Rust sidecar and Python service.
+"""Check the doctor JSON field contract between Rust sidecar and Python service.
 
-Compares field name set of:
-- Rust: ``struct DoctorJson { ... }`` in ``sidecars/qtrading-pg-sidecar/src/maint.rs``
-- Python: ``@dataclass class DoctorResult`` in ``services/embedded_pg_maintenance_service.py``
+契约裁决（D16-Q01）：
+- Rust ``struct DoctorJson`` 是 doctor stdout 的 wire schema（``doctor.v1``）。
+- Python ``@dataclass class DoctorResult`` 是**消费投影**，不是 wire 镜像：只镜像 UI/维护
+  包装实际消费的字段；其余诊断细节保留在 CLI JSON，故障结论由 ``issues`` 承载。
+- ``REQUIRED_MIRRORED_FIELDS``：必须同时出现在 Rust 与 Python 的字段（含 ``issues`` 故障渠道）。
+- ``ALLOWED_RUST_ONLY_FIELDS``：经裁决只存在于 Rust、Python 不消费的字段；必须显式登记
+  理由与承载故障的 ``issues`` code（纯信息性字段的 ``issue_codes`` 为空）。
+- 任何新增 Rust 字段未登记到上述两张表 → 失败；Python-only 字段 → 失败；声明的 issue code
+  必须仍出现在 Rust 源码中，防止「字段还在、故障不再上报」的静默退化。
 
-Reports field set differences (Rust-only / Python-only) and exits non-zero on mismatch.
 Closes P3-VerifyVersions-DoctorSchema (pg_plan §15.5 AI-12 schema drift 守护).
 
 Usage: python scripts/check_doctor_schema.py
@@ -15,11 +20,104 @@ from __future__ import annotations
 import ast
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 RUST_MAINT_PATH = ROOT / "sidecars" / "qtrading-pg-sidecar" / "src" / "maint.rs"
 PYTHON_SERVICE_PATH = ROOT / "services" / "embedded_pg_maintenance_service.py"
+
+# 必须同时镜像到 Python DoctorResult 的字段。新增/删除这些字段必须同步更新本表。
+REQUIRED_MIRRORED_FIELDS: frozenset[str] = frozenset(
+    {
+        "schema",
+        "data_dir",
+        "initialized",
+        "pg_version",
+        "bundled_pg_major",
+        "version_match",
+        "critical_files_missing",
+        "install_dir_complete",
+        "missing_tools",
+        "lock_held",
+        "postgres_alive",
+        "port",
+        "state_file",
+        "runtime_status",
+        "last_start_error",
+        "issues",
+        "restore_residuals",
+        "dump_partials",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class IgnoredRustField:
+    """经裁决不进入 Python DTO 的 Rust 字段。
+
+    reason: 为什么 Python 侧不消费该字段（必填，供审计）。
+    issue_codes: 该字段对应的故障在 ``issues`` 中使用的 code；纯信息性字段为空。
+    """
+
+    reason: str
+    issue_codes: tuple[str, ...] = ()
+
+
+# Rust-only 字段白名单：新增 Rust 字段必须在此显式登记，否则脚本失败（防止静默忽略）。
+ALLOWED_RUST_ONLY_FIELDS: dict[str, IgnoredRustField] = {
+    "cloud_sync_feature": IgnoredRustField(
+        "网盘同步检测结果仅用于诊断细节；故障由 issues cloud_sync_path 承载",
+        ("cloud_sync_path",),
+    ),
+    "cluster_state": IgnoredRustField(
+        "cluster 状态仅用于诊断细节；异常由 issues cluster_state_abnormal 承载",
+        ("cluster_state_abnormal",),
+    ),
+    "control_data_readable": IgnoredRustField(
+        "pg_control 可读性仅用于诊断细节；故障由 issues pg_control_unreadable 承载",
+        ("pg_control_unreadable",),
+    ),
+    "data_checksums": IgnoredRustField("纯信息性字段（cluster checksum 开关），不承载故障"),
+    "free_bytes": IgnoredRustField(
+        "剩余空间仅用于诊断细节；不足由 issues disk_low 承载",
+        ("disk_low",),
+    ),
+    "fs_kind": IgnoredRustField(
+        "文件系统类型仅用于诊断细节；不支持由 issues fs_unsupported 承载",
+        ("fs_unsupported",),
+    ),
+    "fs_supported": IgnoredRustField(
+        "文件系统支持判定仅用于诊断细节；不支持由 issues fs_unsupported 承载",
+        ("fs_unsupported",),
+    ),
+    "hba_matches_template": IgnoredRustField(
+        "pg_hba.conf 漂移仅用于诊断细节；故障由 issues hba_drift 承载",
+        ("hba_drift",),
+    ),
+    "kill_fallback_count": IgnoredRustField(
+        "kill fallback 次数仅用于诊断细节；历史故障由 issues kill_fallback_history 承载",
+        ("kill_fallback_history",),
+    ),
+    "last_stop_mode": IgnoredRustField("纯信息性字段（上次停止方式），不承载故障"),
+    "managed_block_drift": IgnoredRustField(
+        "受管配置漂移仅用于诊断细节；故障由 issues managed_block_drift 承载",
+        ("managed_block_drift",),
+    ),
+    "password_file_perms_ok": IgnoredRustField(
+        "密码文件权限仅用于诊断细节；故障由 issues password_file_perms 承载",
+        ("password_file_perms",),
+    ),
+    "password_file_present": IgnoredRustField(
+        "密码文件存在性仅用于诊断细节；故障由 issues password_file_missing 承载",
+        ("password_file_missing",),
+    ),
+    "postmaster_pid": IgnoredRustField("运行态 pid 仅用于展示；进程活性由 postgres_alive/port 表达"),
+    "stale_postmaster_pid": IgnoredRustField(
+        "pid 残留仅用于诊断细节；故障由 issues stale_postmaster_pid 承载",
+        ("stale_postmaster_pid",),
+    ),
+}
 
 # 匹配 `struct DoctorJson { ... }` body(到第一个 `}` 为止,DoctorJson 字段类型均无嵌套 `{}`)。
 _STRUCT_DOCTOR_JSON_RE = re.compile(r"struct\s+DoctorJson\s*\{(?P<body>[^}]*)\}", re.MULTILINE)
@@ -89,16 +187,35 @@ def _extract_annotated_fields(class_node: ast.ClassDef) -> set[str]:
     return fields
 
 
+def _validate_contract_tables() -> list[str]:
+    """校验契约表自身的一致性（配置错误应显式失败，不能静默）。"""
+    errors: list[str] = []
+    overlap = REQUIRED_MIRRORED_FIELDS & ALLOWED_RUST_ONLY_FIELDS.keys()
+    if overlap:
+        errors.append(f"contract config error: fields both required and ignored: {sorted(overlap)}")
+    for name, spec in sorted(ALLOWED_RUST_ONLY_FIELDS.items()):
+        if not spec.reason.strip():
+            errors.append(f"contract config error: ignored Rust field {name!r} has empty reason")
+    return errors
+
+
+def _rust_issue_code_present(source: str, code: str) -> bool:
+    """判断 issue code 是否仍以字符串字面量出现在 Rust 源码中。"""
+    return re.search(rf'"{re.escape(code)}"', source) is not None
+
+
 def check_doctor_schema_consistency(
     rust_path: Path = RUST_MAINT_PATH,
     python_path: Path = PYTHON_SERVICE_PATH,
 ) -> list[str]:
-    """比较 Rust ``DoctorJson`` 与 Python ``DoctorResult`` 的字段集合。
+    """校验 Rust ``DoctorJson`` 与 Python ``DoctorResult`` 的字段契约。
 
-    返回错误消息列表(空列表表示一致)。IO 失败时使用 ``classify_error`` 分类,
-    其他情况返回差异描述。
+    返回错误消息列表（空列表表示通过）。IO 失败时使用 ``classify_error`` 分类，
+    其余情况返回差异描述。
     """
-    errors: list[str] = []
+    errors: list[str] = _validate_contract_tables()
+    if errors:
+        return errors
 
     rust_source = _read_source(rust_path, errors, "Rust")
     python_source = _read_source(python_path, errors, "Python")
@@ -115,13 +232,39 @@ def check_doctor_schema_consistency(
     if errors:
         return errors
 
+    missing_in_rust = REQUIRED_MIRRORED_FIELDS - rust_fields
+    missing_in_python = REQUIRED_MIRRORED_FIELDS - python_fields
     rust_only = rust_fields - python_fields
     python_only = python_fields - rust_fields
+    unregistered_rust_only = rust_only - ALLOWED_RUST_ONLY_FIELDS.keys()
+    ignored_but_mirrored = ALLOWED_RUST_ONLY_FIELDS.keys() & python_fields
 
-    if rust_only:
-        errors.append(f"Rust DoctorJson has fields not in Python DoctorResult: {sorted(rust_only)}")
+    if missing_in_rust:
+        errors.append(f"required DoctorJson fields missing in Rust: {sorted(missing_in_rust)}")
+    if missing_in_python:
+        errors.append(f"required DoctorJson fields missing in Python DoctorResult: {sorted(missing_in_python)}")
+    if unregistered_rust_only:
+        errors.append(
+            "Rust DoctorJson has unregistered Rust-only fields "
+            f"{sorted(unregistered_rust_only)}; mirror them into DoctorResult or register them in "
+            "ALLOWED_RUST_ONLY_FIELDS with a reason (do not silently ignore new diagnostics)"
+        )
     if python_only:
         errors.append(f"Python DoctorResult has fields not in Rust DoctorJson: {sorted(python_only)}")
+    if ignored_but_mirrored:
+        errors.append(
+            "fields registered in ALLOWED_RUST_ONLY_FIELDS are also present in Python DoctorResult "
+            f"(move them to REQUIRED_MIRRORED_FIELDS): {sorted(ignored_but_mirrored)}"
+        )
+
+    # 只检查实际出现在 Rust 中的白名单字段，避免用局部 mock 源时误报。
+    for name in sorted(ALLOWED_RUST_ONLY_FIELDS.keys() & rust_fields):
+        for code in ALLOWED_RUST_ONLY_FIELDS[name].issue_codes:
+            if not _rust_issue_code_present(rust_source, code):
+                errors.append(
+                    f"ignored Rust field {name!r} declares issue code {code!r}, "
+                    f"but {code!r} is not emitted in {rust_path}"
+                )
 
     return errors
 
@@ -151,7 +294,7 @@ def main() -> None:
         for e in errors:
             print(f"  - {e}", file=sys.stderr)
         sys.exit(1)
-    print("DoctorJson schema check passed: Rust struct fields match Python dataclass fields.")
+    print("DoctorJson schema check passed: required fields mirrored; Rust-only fields are explicitly allowlisted.")
 
 
 if __name__ == "__main__":
