@@ -4,6 +4,8 @@
 # 前置: 已发布 OldVersion 的 embedded variant GitHub Release，且本机已登录 gh CLI
 # OldVariant 对应 installer.iss 的 TargetVariant（现役 embedded-cpu / embedded-cuda；
 # 历史版本若为 embedded 则显式传 -OldVariant embedded）。
+# 判据: 旧版运行期经真实认证路径写入已提交业务哨兵，升级后读回完全一致，且 PG 根
+#       （PG_VERSION / runtime\password / install）完整保留（不再以「目录非空」代表数据保留）。
 
 [CmdletBinding()]
 param(
@@ -25,6 +27,16 @@ $AppInstallDir = Join-Path $env:LOCALAPPDATA "Programs\AStockScreener"
 $AppExePath = Join-Path $AppInstallDir "AStockScreener.exe"
 # PGDATA 路径以 resources/maintenance/README-maintenance.md 为准（platformdirs 默认；Windows 追加 author=appname，故为两层）
 $PgDataDir = Join-Path $env:LOCALAPPDATA "qTrading\qTrading\postgres\16\data"
+# 嵌入 PG 根布局 <用户数据>\postgres\16\{data,install,runtime}（sidecars/qtrading-pg-sidecar/src/paths.rs）
+$PgInstallDir = Join-Path (Split-Path -Parent $PgDataDir) "install"
+$PgRuntimeDir = Join-Path (Split-Path -Parent $PgDataDir) "runtime"
+$PgPasswordFile = Join-Path $PgRuntimeDir "password"
+$PgVersionFile = Join-Path $PgDataDir "PG_VERSION"
+$PsqlExePath = Join-Path $PgInstallDir "bin\psql.exe"
+# 与 sidecars/qtrading-pg-sidecar/src/cli.rs 的 DEFAULT_USERNAME / DEFAULT_DATABASE 一致
+$PgUsername = "postgres"
+$PgDatabase = "qtrading"
+$SentinelTable = "smoke_upgrade_sentinel"
 # sidecar CLI 位于安装目录 _internal\sidecars（resources/maintenance/README-maintenance.md）
 $SidecarExePath = Join-Path $AppInstallDir "_internal\sidecars\qtrading-pg-sidecar.exe"
 
@@ -65,6 +77,63 @@ function Wait-SidecarReady([int]$TimeoutSec = 60) {
         Write-Fail "qtrading-pg-sidecar process never appeared within ${TimeoutSec}s"
     }
     return $false
+}
+
+# Windows DPAPI 密码文件（sidecar password.rs：`PGPW2:<hex>`，CurrentUser 作用域）；
+# 无前缀按明文读（Unix 或升级前旧格式）。严禁伪造密码文件或绕过认证。
+function Read-PgPassword([string]$PasswordFile) {
+    if (-not (Test-Path $PasswordFile)) { throw "password file missing: $PasswordFile" }
+    $rawText = Get-Content -Path $PasswordFile -Raw
+    if ([string]::IsNullOrEmpty($rawText)) { throw "password file empty: $PasswordFile" }
+    $raw = $rawText.Trim()
+    if ([string]::IsNullOrEmpty($raw)) { throw "password file blank: $PasswordFile" }
+    if (-not $raw.StartsWith("PGPW2:")) { return $raw }
+    $hex = $raw.Substring(6)
+    if ($hex.Length -eq 0 -or ($hex.Length % 2) -ne 0) { throw "DPAPI password blob hex length invalid" }
+    Add-Type -AssemblyName System.Security
+    $blob = New-Object byte[] ([int]($hex.Length / 2))
+    for ($i = 0; $i -lt $blob.Length; $i++) {
+        $blob[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16)
+    }
+    $plainBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+        $blob, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+    $plain = [System.Text.Encoding]::UTF8.GetString($plainBytes)
+    if ([string]::IsNullOrEmpty($plain)) { throw "DPAPI password decrypt returned empty value" }
+    return $plain
+}
+
+# 端口取自 postmaster.pid 第 4 行（sidecar 每次启动随机分配端口，重启后必须重读）。
+function Get-PostgresPort([string]$DataDir) {
+    $pidFile = Join-Path $DataDir "postmaster.pid"
+    if (-not (Test-Path $pidFile)) { throw "postmaster.pid missing: $pidFile" }
+    $lines = @(Get-Content -Path $pidFile)
+    if ($lines.Count -lt 4) { throw "postmaster.pid has fewer than 4 lines (port required)" }
+    $portText = ([string]$lines[3]).Trim()
+    $parsed = 0
+    if (-not [int]::TryParse($portText, [ref]$parsed) -or $parsed -lt 1 -or $parsed -gt 65535) {
+        throw "postmaster.pid port invalid: $portText"
+    }
+    return $parsed
+}
+
+# 真实认证路径执行 SQL：密码经 PGPASSWORD 进程环境传递（不进入命令行/日志），调用后清理。
+function Invoke-Psql([string]$Password, [int]$Port, [string]$Sql) {
+    if (-not (Test-Path $PsqlExePath)) { throw "psql not found: $PsqlExePath" }
+    $previousPassword = $env:PGPASSWORD
+    $env:PGPASSWORD = $Password
+    try {
+        $output = @(& $PsqlExePath -h 127.0.0.1 -p $Port -U $PgUsername -d $PgDatabase -v ON_ERROR_STOP=1 -t -A -c $Sql 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "psql failed (exit $LASTEXITCODE): $($output -join ' ')"
+        }
+        return (($output -join "`n").Trim())
+    } finally {
+        if ($null -ne $previousPassword) {
+            $env:PGPASSWORD = $previousPassword
+        } else {
+            Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Stop-QtradingGraceful {
@@ -136,17 +205,35 @@ try {
     $ready = Wait-SidecarReady -TimeoutSec 60
     Assert-True $ready "Sidecar ready (old version, status JSON: running + postgres_alive)"
 
-    # STEP 4: 模拟用户关闭
-    Write-Step "4. Stop qTrading (simulate user close)"
+    # STEP 4: 旧版运行期写入已提交的合成业务哨兵，并记录升级前 PG 根证据
+    # （真实认证路径：runtime\password（DPAPI）+ postmaster.pid 端口 + install\bin\psql.exe）
+    Write-Step "4. Write committed sentinel & record PG root evidence (old version)"
+    $sentinel = "d17-t02-" + [Guid]::NewGuid().ToString("N")
+    if (-not ($sentinel -match '^d17-t02-[0-9a-f]{32}$')) {
+        throw "sentinel marker format invalid"
+    }
+    $pgPassword = Read-PgPassword -PasswordFile $PgPasswordFile
+    $portBefore = Get-PostgresPort -DataDir $PgDataDir
+    $sentinelCreateSql = "create table if not exists $SentinelTable (id integer primary key, marker text not null)"
+    $sentinelInsertSql = "insert into $SentinelTable (id, marker) values (1, '$sentinel') on conflict (id) do update set marker = excluded.marker"
+    Invoke-Psql -Password $pgPassword -Port $portBefore -Sql $sentinelCreateSql | Out-Null
+    Invoke-Psql -Password $pgPassword -Port $portBefore -Sql $sentinelInsertSql | Out-Null
+    $sentinelReadBefore = Invoke-Psql -Password $pgPassword -Port $portBefore -Sql "select marker from $SentinelTable where id = 1"
+    Assert-True ($sentinelReadBefore -eq $sentinel) "Synthetic sentinel committed & read back before upgrade"
+
+    Assert-True (Test-Path $PgDataDir) "PGDATA dir exists before upgrade: $PgDataDir"
+    Assert-True (Test-Path $PgVersionFile) "PG_VERSION exists before upgrade: $PgVersionFile"
+    $pgVersionBefore = (Get-Content -Path $PgVersionFile -Raw).Trim()
+    Assert-True ($pgVersionBefore.Length -gt 0) "PG_VERSION is non-empty before upgrade ($pgVersionBefore)"
+    Assert-True (Test-Path $PgPasswordFile) "runtime password file exists before upgrade"
+    Assert-True (Test-Path $PsqlExePath) "install psql exists before upgrade"
+
+    # STEP 5: 模拟用户关闭（升级前必须完全退出，否则安装器会拒绝 / 产生文件锁竞争）
+    Write-Step "5. Stop qTrading before upgrade"
     Stop-QtradingGraceful
     Start-Sleep -Seconds 3
-    Write-Ok "qTrading stopped"
-
-    # STEP 5: 验证 PGDATA 目录已建立且非空
-    Write-Step "5. Verify PGDATA directory exists after old version run"
-    Assert-True (Test-Path $PgDataDir) "PGDATA dir exists: $PgDataDir"
-    $fileCount = (Get-ChildItem -Path $PgDataDir -Recurse -ErrorAction SilentlyContinue | Measure-Object).Count
-    Assert-True ($fileCount -gt 0) "PGDATA dir non-empty (file count: $fileCount)"
+    Assert-True ($null -eq (Get-Process -Name "AStockScreener" -ErrorAction SilentlyContinue)) "App process exited before upgrade"
+    Assert-True ($null -eq (Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue)) "Sidecar process exited before upgrade"
 
     # STEP 6: 安装新版本（覆盖升级）
     Write-Step "6. Install new version (in-place upgrade)"
@@ -155,19 +242,31 @@ try {
     Assert-True ($upgradeInstallerProc.ExitCode -eq 0) "New version installer finished (exit code: $($upgradeInstallerProc.ExitCode))"
     Assert-True (Test-Path $AppExePath) "New version installed (overwritten)"
 
-    # STEP 7: 验证 PGDATA 目录保留且非空（核心断言）
-    Write-Step "7. Verify PGDATA preserved after upgrade"
-    Assert-True (Test-Path $PgDataDir) "PGDATA dir still exists: $PgDataDir"
-    $fileCountAfter = (Get-ChildItem -Path $PgDataDir -Recurse -ErrorAction SilentlyContinue | Measure-Object).Count
-    Assert-True ($fileCountAfter -gt 0) "PGDATA dir still non-empty (file count: $fileCountAfter)"
-    Write-Host "  File count before upgrade: $fileCount"
-    Write-Host "  File count after upgrade:  $fileCountAfter"
+    # STEP 7: 验证 PG 根完整保留且仍指向原库（PG_VERSION 内容未变，password/install 仍在）
+    Write-Step "7. Verify PG root preserved after upgrade"
+    Assert-True (Test-Path $PgDataDir) "PGDATA dir preserved: $PgDataDir"
+    Assert-True (Test-Path $PgVersionFile) "PG_VERSION preserved: $PgVersionFile"
+    $pgVersionAfter = (Get-Content -Path $PgVersionFile -Raw).Trim()
+    Assert-True ($pgVersionAfter -eq $pgVersionBefore) "PG_VERSION unchanged after upgrade ($pgVersionAfter)"
+    Assert-True (Test-Path $PgInstallDir) "install dir preserved: $PgInstallDir"
+    Assert-True (Test-Path $PsqlExePath) "install psql preserved: $PsqlExePath"
+    Assert-True (Test-Path $PgRuntimeDir) "runtime dir preserved: $PgRuntimeDir"
+    Assert-True (Test-Path $PgPasswordFile) "runtime password file preserved: $PgPasswordFile"
 
-    # STEP 8: 启动新版本验证 sidecar 可正常启动（数据可加载）
-    Write-Step "8. Start new version & verify sidecar starts (data loads)"
+    # STEP 8: 启动新版本，等待真实 ready（status JSON: running + postgres_alive）
+    Write-Step "8. Start new version & wait for real sidecar ready"
     $proc2 = Start-Process -FilePath $AppExePath -PassThru
     $ready2 = Wait-SidecarReady -TimeoutSec 60
     Assert-True $ready2 "Sidecar ready (new version, existing data, status JSON: running + postgres_alive)"
+
+    # STEP 9: 读回哨兵并断言与升级前完全一致（已提交事务在原库中仍可见）
+    Write-Step "9. Read back sentinel after upgrade & assert exact match"
+    $pgPasswordAfter = Read-PgPassword -PasswordFile $PgPasswordFile
+    Assert-True (-not ([string]::IsNullOrEmpty($pgPasswordAfter))) "Preserved password file decrypts after upgrade"
+    $portAfterUpgrade = Get-PostgresPort -DataDir $PgDataDir
+    $sentinelAfterUpgrade = Invoke-Psql -Password $pgPasswordAfter -Port $portAfterUpgrade -Sql "select marker from $SentinelTable where id = 1"
+    Assert-True ($sentinelAfterUpgrade -eq $sentinel) "Synthetic sentinel survived in-place upgrade unchanged"
+
     Stop-QtradingGraceful
 
     Write-Host "`n=== UPGRADE SMOKE TEST PASSED ===" -ForegroundColor Green

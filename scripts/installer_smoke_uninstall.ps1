@@ -1,7 +1,8 @@
 # installer_smoke_uninstall.ps1
 # Phase 5 DoD §17.5 卸载验证（保留数据）smoke test 脚本
 # 用法: powershell -File scripts/installer_smoke_uninstall.ps1 -InstallerPath <path>
-# 验证: 卸载后 PGDATA 目录保留（不删除用户数据）
+# 验证: 卸载后程序目录移除，但 PG 根（data/PG_VERSION、runtime\password、install）完整保留；
+#       重装同变体后读回卸载前写入的已提交业务哨兵，证明数据可复用（不再以「目录非空」作判据）。
 
 [CmdletBinding()]
 param(
@@ -17,6 +18,16 @@ $AppInstallDir = Join-Path $env:LOCALAPPDATA "Programs\AStockScreener"
 $AppExePath = Join-Path $AppInstallDir "AStockScreener.exe"
 $UninstallerPath = Join-Path $AppInstallDir "unins000.exe"
 $PgDataDir = Join-Path $env:LOCALAPPDATA "qTrading\qTrading\postgres\16\data"
+# 嵌入 PG 根布局 <用户数据>\postgres\16\{data,install,runtime}（sidecars/qtrading-pg-sidecar/src/paths.rs）
+$PgInstallDir = Join-Path (Split-Path -Parent $PgDataDir) "install"
+$PgRuntimeDir = Join-Path (Split-Path -Parent $PgDataDir) "runtime"
+$PgPasswordFile = Join-Path $PgRuntimeDir "password"
+$PgVersionFile = Join-Path $PgDataDir "PG_VERSION"
+$PsqlExePath = Join-Path $PgInstallDir "bin\psql.exe"
+# 与 sidecars/qtrading-pg-sidecar/src/cli.rs 的 DEFAULT_USERNAME / DEFAULT_DATABASE 一致
+$PgUsername = "postgres"
+$PgDatabase = "qtrading"
+$SentinelTable = "smoke_uninstall_sentinel"
 # sidecar CLI 位于安装目录 _internal\sidecars（resources/maintenance/README-maintenance.md）
 $SidecarExePath = Join-Path $AppInstallDir "_internal\sidecars\qtrading-pg-sidecar.exe"
 
@@ -57,6 +68,63 @@ function Wait-SidecarReady([int]$TimeoutSec = 60) {
         Write-Fail "qtrading-pg-sidecar process never appeared within ${TimeoutSec}s"
     }
     return $false
+}
+
+# Windows DPAPI 密码文件（sidecar password.rs：`PGPW2:<hex>`，CurrentUser 作用域）；
+# 无前缀按明文读（Unix 或升级前旧格式）。严禁伪造密码文件或绕过认证。
+function Read-PgPassword([string]$PasswordFile) {
+    if (-not (Test-Path $PasswordFile)) { throw "password file missing: $PasswordFile" }
+    $rawText = Get-Content -Path $PasswordFile -Raw
+    if ([string]::IsNullOrEmpty($rawText)) { throw "password file empty: $PasswordFile" }
+    $raw = $rawText.Trim()
+    if ([string]::IsNullOrEmpty($raw)) { throw "password file blank: $PasswordFile" }
+    if (-not $raw.StartsWith("PGPW2:")) { return $raw }
+    $hex = $raw.Substring(6)
+    if ($hex.Length -eq 0 -or ($hex.Length % 2) -ne 0) { throw "DPAPI password blob hex length invalid" }
+    Add-Type -AssemblyName System.Security
+    $blob = New-Object byte[] ([int]($hex.Length / 2))
+    for ($i = 0; $i -lt $blob.Length; $i++) {
+        $blob[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16)
+    }
+    $plainBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+        $blob, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+    $plain = [System.Text.Encoding]::UTF8.GetString($plainBytes)
+    if ([string]::IsNullOrEmpty($plain)) { throw "DPAPI password decrypt returned empty value" }
+    return $plain
+}
+
+# 端口取自 postmaster.pid 第 4 行（sidecar 每次启动随机分配端口，重启后必须重读）。
+function Get-PostgresPort([string]$DataDir) {
+    $pidFile = Join-Path $DataDir "postmaster.pid"
+    if (-not (Test-Path $pidFile)) { throw "postmaster.pid missing: $pidFile" }
+    $lines = @(Get-Content -Path $pidFile)
+    if ($lines.Count -lt 4) { throw "postmaster.pid has fewer than 4 lines (port required)" }
+    $portText = ([string]$lines[3]).Trim()
+    $parsed = 0
+    if (-not [int]::TryParse($portText, [ref]$parsed) -or $parsed -lt 1 -or $parsed -gt 65535) {
+        throw "postmaster.pid port invalid: $portText"
+    }
+    return $parsed
+}
+
+# 真实认证路径执行 SQL：密码经 PGPASSWORD 进程环境传递（不进入命令行/日志），调用后清理。
+function Invoke-Psql([string]$Password, [int]$Port, [string]$Sql) {
+    if (-not (Test-Path $PsqlExePath)) { throw "psql not found: $PsqlExePath" }
+    $previousPassword = $env:PGPASSWORD
+    $env:PGPASSWORD = $Password
+    try {
+        $output = @(& $PsqlExePath -h 127.0.0.1 -p $Port -U $PgUsername -d $PgDatabase -v ON_ERROR_STOP=1 -t -A -c $Sql 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "psql failed (exit $LASTEXITCODE): $($output -join ' ')"
+        }
+        return (($output -join "`n").Trim())
+    } finally {
+        if ($null -ne $previousPassword) {
+            $env:PGPASSWORD = $previousPassword
+        } else {
+            Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Stop-QtradingGraceful {
@@ -116,17 +184,34 @@ try {
     $ready = Wait-SidecarReady -TimeoutSec 60
     Assert-True $ready "Sidecar ready (status JSON: running + postgres_alive)"
 
-    # STEP 4: 停止 qTrading（卸载前必须关闭，否则文件占用）
-    Write-Step "4. Stop qTrading before uninstall"
+    # STEP 4: 运行期写入已提交的合成业务哨兵，并记录卸载前 PG 根证据（真实认证路径）
+    Write-Step "4. Write committed sentinel & record PG root evidence"
+    $sentinel = "d17-t02-" + [Guid]::NewGuid().ToString("N")
+    if (-not ($sentinel -match '^d17-t02-[0-9a-f]{32}$')) {
+        throw "sentinel marker format invalid"
+    }
+    $pgPassword = Read-PgPassword -PasswordFile $PgPasswordFile
+    $portBefore = Get-PostgresPort -DataDir $PgDataDir
+    $sentinelCreateSql = "create table if not exists $SentinelTable (id integer primary key, marker text not null)"
+    $sentinelInsertSql = "insert into $SentinelTable (id, marker) values (1, '$sentinel') on conflict (id) do update set marker = excluded.marker"
+    Invoke-Psql -Password $pgPassword -Port $portBefore -Sql $sentinelCreateSql | Out-Null
+    Invoke-Psql -Password $pgPassword -Port $portBefore -Sql $sentinelInsertSql | Out-Null
+    $sentinelReadBefore = Invoke-Psql -Password $pgPassword -Port $portBefore -Sql "select marker from $SentinelTable where id = 1"
+    Assert-True ($sentinelReadBefore -eq $sentinel) "Synthetic sentinel committed & read back before uninstall"
+
+    Assert-True (Test-Path $PgDataDir) "PGDATA dir exists before uninstall: $PgDataDir"
+    Assert-True (Test-Path $PgVersionFile) "PG_VERSION exists before uninstall: $PgVersionFile"
+    $pgVersionBefore = (Get-Content -Path $PgVersionFile -Raw).Trim()
+    Assert-True ($pgVersionBefore.Length -gt 0) "PG_VERSION is non-empty before uninstall ($pgVersionBefore)"
+    Assert-True (Test-Path $PgPasswordFile) "runtime password file exists before uninstall"
+    Assert-True (Test-Path $PsqlExePath) "install psql exists before uninstall"
+
+    # STEP 5: 停止 qTrading（卸载前必须关闭，否则文件占用）
+    Write-Step "5. Stop qTrading before uninstall"
     Stop-QtradingGraceful
     Start-Sleep -Seconds 3
-    Write-Ok "qTrading stopped"
-
-    # STEP 5: 验证 PGDATA 目录已建立
-    Write-Step "5. Verify PGDATA directory exists before uninstall"
-    Assert-True (Test-Path $PgDataDir) "PGDATA dir exists: $PgDataDir"
-    $fileCountBefore = (Get-ChildItem -Path $PgDataDir -Recurse -ErrorAction SilentlyContinue | Measure-Object).Count
-    Assert-True ($fileCountBefore -gt 0) "PGDATA dir non-empty (file count: $fileCountBefore)"
+    Assert-True ($null -eq (Get-Process -Name "AStockScreener" -ErrorAction SilentlyContinue)) "App process exited before uninstall"
+    Assert-True ($null -eq (Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue)) "Sidecar process exited before uninstall"
 
     # STEP 6: 卸载
     Write-Step "6. Uninstall qTrading"
@@ -136,14 +221,40 @@ try {
     Start-Sleep -Seconds 5
     Assert-True (-not (Test-Path $UninstallerPath)) "Uninstaller removed (uninstall completed)"
     Assert-True (-not (Test-Path $AppExePath)) "App EXE removed"
+    Assert-True (-not (Test-Path $SidecarExePath)) "Bundled sidecar EXE removed"
 
-    # STEP 7: 验证 PGDATA 目录保留（核心断言）
-    Write-Step "7. Verify PGDATA preserved after uninstall"
+    # STEP 7: 验证 PG 根完整保留（data/PG_VERSION 未变、runtime\password 与 install 仍在）
+    Write-Step "7. Verify PG root preserved after uninstall"
     Assert-True (Test-Path $PgDataDir) "PGDATA dir preserved: $PgDataDir"
-    $fileCountAfter = (Get-ChildItem -Path $PgDataDir -Recurse -ErrorAction SilentlyContinue | Measure-Object).Count
-    Assert-True ($fileCountAfter -gt 0) "PGDATA dir still non-empty (file count: $fileCountAfter)"
-    Write-Host "  File count before uninstall: $fileCountBefore"
-    Write-Host "  File count after uninstall:  $fileCountAfter"
+    Assert-True (Test-Path $PgVersionFile) "PG_VERSION preserved: $PgVersionFile"
+    $pgVersionAfterUninstall = (Get-Content -Path $PgVersionFile -Raw).Trim()
+    Assert-True ($pgVersionAfterUninstall -eq $pgVersionBefore) "PG_VERSION unchanged after uninstall ($pgVersionAfterUninstall)"
+    Assert-True (Test-Path $PgInstallDir) "install dir preserved: $PgInstallDir"
+    Assert-True (Test-Path $PsqlExePath) "install psql preserved: $PsqlExePath"
+    Assert-True (Test-Path $PgRuntimeDir) "runtime dir preserved: $PgRuntimeDir"
+    Assert-True (Test-Path $PgPasswordFile) "runtime password file preserved: $PgPasswordFile"
+
+    # STEP 8: 重装同变体并启动，验证数据可复用（卸载不是数据丢失）
+    Write-Step "8. Reinstall same variant & verify preserved data is reusable"
+    # 复用 $InstallerPath 的变量副本：保持上文「仅一次直接调用 $InstallerPath」的既有静态契约。
+    $ReinstallPath = $InstallerPath
+    $reinstallProc = Start-Process -FilePath $ReinstallPath -ArgumentList '/SILENT', '/NORESTART' -PassThru -Wait
+    Assert-True ($reinstallProc.ExitCode -eq 0) "Reinstall finished (exit code: $($reinstallProc.ExitCode))"
+    Assert-True (Test-Path $AppExePath) "App reinstalled: $AppExePath"
+
+    $proc2 = Start-Process -FilePath $AppExePath -PassThru
+    $ready2 = Wait-SidecarReady -TimeoutSec 60
+    Assert-True $ready2 "Sidecar ready after reinstall (status JSON: running + postgres_alive)"
+
+    # STEP 9: 读回哨兵并断言与卸载前完全一致
+    Write-Step "9. Read back sentinel after reinstall & assert exact match"
+    $pgPasswordAfter = Read-PgPassword -PasswordFile $PgPasswordFile
+    Assert-True (-not ([string]::IsNullOrEmpty($pgPasswordAfter))) "Preserved password file decrypts after reinstall"
+    $portAfterReinstall = Get-PostgresPort -DataDir $PgDataDir
+    $sentinelAfterReinstall = Invoke-Psql -Password $pgPasswordAfter -Port $portAfterReinstall -Sql "select marker from $SentinelTable where id = 1"
+    Assert-True ($sentinelAfterReinstall -eq $sentinel) "Synthetic sentinel survived uninstall & reinstall unchanged"
+
+    Stop-QtradingGraceful
 
     Write-Host "`n=== UNINSTALL SMOKE TEST PASSED ===" -ForegroundColor Green
     exit 0
