@@ -1,5 +1,6 @@
 import datetime
 
+import pandas as pd
 import polars as pl
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -28,6 +29,34 @@ def _build_quotes_df(ts_code, dates, close_start, vol_base, vol_spike_at=None):
             },
         )
     return pl.DataFrame(rows)
+
+
+# CP13-T01: rsi_period=2 → 最小样本门 period*5=10；15 根同时覆盖 5 日量比窗口与 RSI 预热。
+_SPLIT_SAMPLE_ROWS = 15
+_SPLIT_DATES = [datetime.date(2026, 4, 1) + datetime.timedelta(days=i) for i in range(_SPLIT_SAMPLE_ROWS)]
+
+
+def _build_split_history(*, with_adj_factor: bool) -> pd.DataFrame:
+    """构造 2 拆 1 拆股序列：拆股日原始价减半、原始量翻倍、复权因子翻倍。"""
+    split_ratio = 2.0
+    raw_closes = [10.0 - i * 0.1 for i in range(_SPLIT_SAMPLE_ROWS - 1)]
+    raw_closes.append(raw_closes[-1] / split_ratio)
+    rows = [
+        {
+            "ts_code": "000001.SZ",
+            "trade_date": d,
+            "open": c,
+            "high": c + 0.5,
+            "low": c - 0.5,
+            "close": c,
+            "vol": 200.0 if i == _SPLIT_SAMPLE_ROWS - 1 else 100.0,
+        }
+        for i, (d, c) in enumerate(zip(_SPLIT_DATES, raw_closes, strict=True))
+    ]
+    if with_adj_factor:
+        for i, row in enumerate(rows):
+            row["adj_factor"] = split_ratio if i == _SPLIT_SAMPLE_ROWS - 1 else 1.0
+    return pd.DataFrame(rows)
 
 
 class TestOversoldVolumeThreshold:
@@ -142,41 +171,54 @@ class TestOversoldVolumeThreshold:
         N-7:
         A split can double raw volume on the event day; strategy should use adjusted
         volume basis so this synthetic spike does not pass vol_ratio threshold.
-        """
-        trade_dates = [datetime.date(2026, 4, 1) + datetime.timedelta(days=i) for i in range(6)]
-        history_pdf = {
-            "ts_code": ["000001.SZ"] * 6,
-            "trade_date": trade_dates,
-            "open": [10.0] * 6,
-            "high": [10.2] * 6,
-            "low": [9.8] * 6,
-            "close": [10.0] * 6,
-            # Raw volume doubles on split day.
-            "vol": [100.0, 100.0, 100.0, 100.0, 100.0, 200.0],
-            # Latest factor=2.0 means earlier days ratio=0.5.
-            "adj_factor": [1.0, 1.0, 1.0, 1.0, 1.0, 2.0],
-        }
 
+        CP13-T01: 原用例仅 6 根样本，低于 day_count >= rsi_period*5=10 的门槛，前置门
+        直接短路，复权/成交量逻辑从未执行。现使用 15 根样本（满足门槛，并覆盖 5 日量比
+        窗口与 RSI 预热），同时保留「未复权原始放量能通过阈值」的对照组，确保用例不再空转。
+        """
         strategy = OversoldStrategy()
         dp = MagicMock()
         dp.cache = MagicMock()
-        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=__import__("pandas").DataFrame(history_pdf))
         dp.trade_calendar = MagicMock()
-        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=trade_dates[-1])
-        dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=trade_dates[0])
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=_SPLIT_DATES[-1])
+        dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=_SPLIT_DATES[0])
 
-        snapshot = __import__("pandas").DataFrame([{"ts_code": "000001.SZ", "name": "demo"}])
+        snapshot = pd.DataFrame([{"ts_code": "000001.SZ", "name": "demo"}])
         context = {
             "screening_data": snapshot,
             "data_processor": dp,
-            "trade_date": trade_dates[-1],
+            "trade_date": _SPLIT_DATES[-1],
         }
+
+        # 复权口径：拆股日原始量翻倍被 2.0 倍复权因子还原，量比 = 1.0。
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_build_split_history(with_adj_factor=True))
+        adjusted_hit = await strategy._math_filter(
+            context=context,
+            rsi_period=2,
+            rsi_threshold=30,
+            vol_ratio_threshold=0.9,
+        )
+        assert len(adjusted_hit) == 1, "足量样本应通过 day_count/RSI 前置门并进入成交量筛"
+        assert adjusted_hit["ts_code"].tolist() == ["000001.SZ"]
+        assert adjusted_hit["vol_ratio_5d"].iloc[0] == pytest.approx(1.0)
+        assert adjusted_hit["rsi_2"].iloc[0] < 30
 
         out = await strategy._math_filter(
             context=context,
             rsi_period=2,
-            rsi_threshold=101,
+            rsi_threshold=30,
             vol_ratio_threshold=1.5,
         )
-
         assert out.empty, "Split-only raw volume spike should be neutralized by adjusted volume basis"
+
+        # 对照组：同一行情的 split 日不提供 adj_factor 时，原始量比 2.0 应通过 1.5 阈值，
+        # 证明空集由复权口径而非样本不足造成。
+        dp.cache.quote_dao.get_daily_quotes = AsyncMock(return_value=_build_split_history(with_adj_factor=False))
+        raw_unadjusted = await strategy._math_filter(
+            context=context,
+            rsi_period=2,
+            rsi_threshold=30,
+            vol_ratio_threshold=1.5,
+        )
+        assert len(raw_unadjusted) == 1, "未复权原始放量应命中，证明样本门已通过且复权口径是唯一差异"
+        assert raw_unadjusted["vol_ratio_5d"].iloc[0] == pytest.approx(2.0)
