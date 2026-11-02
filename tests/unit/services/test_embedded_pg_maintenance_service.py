@@ -1267,7 +1267,10 @@ class TestSidecarUtf8Decoding:
 
         corrupted = dict(MOCK_DOCTOR_JSON)
         corrupted["data_dir"] = "D:/\ufffd/data"
-        with _patch_run_async(0, json.dumps(corrupted)):
+        # ensure_ascii=False：默认 ensure_ascii=True 会把 U+FFFD 转义成 ASCII 序列
+        # ``\ufffd``，stdout 里就不存在真实替换字符，无法模拟 Popen(errors="replace")
+        # 解码损坏字节后的现场。
+        with _patch_run_async(0, json.dumps(corrupted, ensure_ascii=False)):
             with pytest.raises(EmbeddedPgMaintenanceError, match="invalid UTF-8"):
                 await maintenance_service.doctor()
 
@@ -1280,7 +1283,8 @@ class TestSidecarUtf8Decoding:
             "psql_path": "D:/\ufffd/psql.exe",
             "connection_string_redacted": "postgresql://postgres:***@127.0.0.1:55433/qtrading",
         }
-        with _patch_run_async(0, json.dumps(shell_json)):
+        # 同上：ensure_ascii=False 保留真实 U+FFFD，匹配 Popen 解码损坏字节后的 stdout。
+        with _patch_run_async(0, json.dumps(shell_json, ensure_ascii=False)):
             with pytest.raises(EmbeddedPgMaintenanceError, match="invalid UTF-8"):
                 await maintenance_service.maintenance_shell()
 
