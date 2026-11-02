@@ -32,6 +32,7 @@ fn write_pidfile(data_dir: &Path, pid: u32, started_at: i64, port: u16) {
     .expect("write postmaster.pid");
 }
 
+#[cfg(unix)]
 fn install_dir_for(data_dir: &Path) -> PathBuf {
     data_dir
         .parent()
