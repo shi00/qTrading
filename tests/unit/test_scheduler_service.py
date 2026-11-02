@@ -620,13 +620,18 @@ class TestSchedulerServiceSingleton:
         with patch("utils.scheduler_service.ConfigHandler") as mock_ch:
             mock_ch.get_setting.return_value = None
             svc = SchedulerService()
-            type(svc.scheduler).running = PropertyMock(return_value=True)
             svc.scheduler.shutdown = MagicMock()
             mock_loop = MagicMock()
             mock_loop.is_closed.return_value = False
-            with patch("utils.scheduler_service.asyncio.get_running_loop", return_value=mock_loop):
+            # R7: running 是类级 property（只读），不得裸赋值到类属性；用 patch.object
+            # 在用例结束后自动恢复，避免 PropertyMock 残留污染后续用例的真实调度行为。
+            with (
+                patch.object(type(svc.scheduler), "running", new_callable=PropertyMock, return_value=True),
+                patch("utils.scheduler_service.asyncio.get_running_loop", return_value=mock_loop),
+            ):
                 SchedulerService._reset_singleton()
             svc.scheduler.shutdown.assert_called_once_with(wait=False)
+            assert isinstance(type(svc.scheduler).running, property)
 
     def test_reset_singleton_sets_instance_to_none(self):
         with patch("utils.scheduler_service.ConfigHandler") as mock_ch:
