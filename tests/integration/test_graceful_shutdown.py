@@ -74,8 +74,9 @@ async def test_safe_skip_empty_singletons():
     orig_mds = MarketDataService._instance
     orig_llm = LocalModelManager._instance
     orig_tp = ThreadPoolManager._instance
+    orig_svc_instance = SchedulerService._instance
     svc = SchedulerService()
-    orig_scheduler_running = getattr(svc.scheduler, "running", None) if hasattr(svc, "scheduler") else None
+    orig_scheduler = svc.scheduler
 
     TaskManager._instance = None
     NewsSubscriptionService._instance = None
@@ -101,8 +102,10 @@ async def test_safe_skip_empty_singletons():
         MarketDataService._instance = orig_mds
         LocalModelManager._instance = orig_llm
         ThreadPoolManager._instance = orig_tp
-        if orig_scheduler_running is not None:
-            svc.scheduler.running = orig_scheduler_running
+        # 完整恢复被替换的 scheduler 对象：仅恢复 .running 会让 MagicMock 留在单例上（R7）。
+        svc.scheduler = orig_scheduler
+        if orig_svc_instance is None:
+            SchedulerService._reset_singleton()
 
 
 @pytest.mark.asyncio

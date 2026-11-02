@@ -81,6 +81,8 @@ def mock_singletons():
     """Mock all Singletons to prevent real execution by setting their _instances.
 
     合并自 test_graceful_shutdown.py 与 test_shutdown_step_failure_recovery.py（INT-P2-2）。
+    teardown 完整恢复被替换的 scheduler 对象与 stop 属性（R7），
+    避免 mock 泄漏到后续测试。
     """
     from unittest.mock import AsyncMock, MagicMock
 
@@ -100,9 +102,11 @@ def mock_singletons():
     orig_mds = MarketDataService._instance
     orig_llm = LocalModelManager._instance
     orig_tp = ThreadPoolManager._instance
+    orig_svc_instance = SchedulerService._instance
     svc = SchedulerService()
-    orig_scheduler_running = getattr(svc.scheduler, "running", None) if hasattr(svc, "scheduler") else None
-    orig_scheduler_stop = getattr(svc, "stop", None)
+    orig_scheduler = svc.scheduler
+    had_stop_attr = "stop" in svc.__dict__
+    orig_stop = svc.__dict__.get("stop")
 
     try:
         TaskManager._instance = AsyncMock()
@@ -137,10 +141,15 @@ def mock_singletons():
         MarketDataService._instance = orig_mds
         LocalModelManager._instance = orig_llm
         ThreadPoolManager._instance = orig_tp
-        if orig_scheduler_running is not None:
-            svc.scheduler.running = orig_scheduler_running
-        if orig_scheduler_stop is not None:
-            svc.stop = orig_scheduler_stop
+        # 完整恢复被替换的对象/属性：仅恢复 .running 会让 MagicMock 继续挂在单例上（R7）。
+        svc.scheduler = orig_scheduler
+        if had_stop_attr:
+            svc.stop = orig_stop
+        else:
+            svc.__dict__.pop("stop", None)
+        # fixture 首次创建的单例实例归位，避免实例级跨测试污染。
+        if orig_svc_instance is None:
+            SchedulerService._reset_singleton()
 
 
 class _AssertionMixin:
