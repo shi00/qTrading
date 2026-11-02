@@ -38,6 +38,7 @@ class TestIsCodePath:
             "package.json",
             "package-lock.json",
             ".github/workflows/ci_cd.yml",
+            ".github/workflows/finbert-train.yml",
         ],
     )
     def test_code_paths(self, path: str) -> None:
@@ -52,6 +53,7 @@ class TestIsCodePath:
             "LICENSE",
             ".github/PULL_REQUEST_TEMPLATE.md",
             ".github/workflows/docs-ci.yml",
+            ".github/workflows/sidecar.yml",
             "CHANGELOG.md",
         ],
     )
@@ -87,6 +89,18 @@ class TestClassify:
         """单个代码文件即判为代码类。"""
         assert classify(["scripts/classify_changed_paths.py"]) is True
 
+    def test_finbert_workflow_only_collection_is_code(self) -> None:
+        """D18-S01：仅改 finbert-train.yml 时须判为代码类。
+
+        该 workflow 仅 workflow_dispatch，PR 不触发自身；其契约测试
+        test_workflow_finbert_train_split.py 须随 unit 重型 job 在合并前执行。
+        """
+        assert classify([".github/workflows/finbert-train.yml"]) is True
+
+    def test_sidecar_workflow_only_collection_is_not_code(self) -> None:
+        """sidecar.yml 有独立 PR 补偿（sidecar.yml 自身工作流），不重复拉入重型 job。"""
+        assert classify([".github/workflows/sidecar.yml"]) is False
+
 
 class TestMain:
     """main: 从 stdin 读取路径并输出 GITHUB_OUTPUT 可用的单行结果。"""
@@ -114,3 +128,16 @@ def test_code_patterns_is_non_empty_tuple() -> None:
     """白名单本身不可为空，且为不可变序列（防止运行时被误改）。"""
     assert isinstance(CODE_PATTERNS, tuple)
     assert len(CODE_PATTERNS) > 0
+
+
+def test_finbert_workflow_pattern_is_exact_not_broad() -> None:
+    """D18-S01：仅登记精确路径，不用 ``.github/workflows/**`` 扩大分类面。
+
+    泛匹配会把已有独立补偿的 sidecar / precommit 路径重新拉入重型 job；
+    精确路径只为让 finbert-train 现有契约测试在合并前随 unit job 执行。
+    """
+    assert ".github/workflows/finbert-train.yml" in CODE_PATTERNS
+    assert ".github/workflows/**" not in CODE_PATTERNS
+    assert ".github/workflows/*.yml" not in CODE_PATTERNS
+    assert is_code_path(".github/workflows/sidecar.yml") is False
+    assert is_code_path(".github/workflows/precommit-config-ci.yml") is False
