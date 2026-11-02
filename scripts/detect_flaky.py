@@ -11,9 +11,10 @@
     python scripts/detect_flaky.py --deselect tests/unit/slow_probe.py::test_x  # 排除不应每轮重复的慢测试
 
 退出码：
-    0: 未检测到 flaky（所有运行结果一致）
+    0: 未检测到 flaky（所有运行结果一致且无失败用例）
     1: 检测到 flaky（运行结果不一致）
-    2: 路径不存在或运行出错
+    2: 无法判定（路径不存在、运行出错，或本轮无有效运行：
+       报告缺失/为空/不可解析、收集失败、全部轮次一致失败）
 """
 
 import argparse
@@ -23,6 +24,11 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+# pytest 仅在这两个退出码下仍产出可判定的完整测试结果：
+# 0=全部通过，1=存在失败/错误；2=被中断/收集失败，3=内部错误，4=用法错误，5=未收集到测试。
+_VALID_PYTEST_RETURNCODES = frozenset({0, 1})
+_FAILED_OUTCOMES = frozenset({"failed", "error"})
 
 
 @dataclass
@@ -41,8 +47,35 @@ def parse_json_report(report_path: Path) -> dict[str, str]:
     缺失 tests 字段时返回空字典（collection 失败或空运行）。
     """
     data = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("pytest json-report 顶层不是 JSON 对象")
     tests = data.get("tests", [])
     return {t["nodeid"]: t["outcome"] for t in tests}
+
+
+def validate_run_result(returncode: int, outcomes: dict[str, str]) -> str | None:
+    """校验单轮运行结果是否可用于 flaky 判定。
+
+    只有 pytest 正常完成（退出码 0/1）且报告含与退出码一致的用例结果时才算有效。
+    无效运行不能参与 flaky 判定，否则空报告/收集失败会被误判为「无 flaky」。
+
+    Args:
+        returncode: pytest 子进程退出码
+        outcomes: 该轮 {nodeid: outcome} 映射
+
+    Returns:
+        None 表示有效；否则返回无效原因（供 stderr 提示）
+    """
+    if not outcomes:
+        return "未收集到任何测试（收集失败或空运行）"
+    if returncode not in _VALID_PYTEST_RETURNCODES:
+        return f"pytest 退出码 {returncode}（收集失败、被中断或运行错误）"
+    has_failure = any(outcome in _FAILED_OUTCOMES for outcome in outcomes.values())
+    if returncode == 1 and not has_failure:
+        return "pytest 退出码 1 但 json-report 中无 failed/error 用例"
+    if returncode == 0 and has_failure:
+        return "pytest 退出码 0 但 json-report 含 failed/error 用例"
+    return None
 
 
 def identify_flaky_tests(runs: list[dict[str, str]]) -> list[FlakyResult]:
@@ -165,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         argv: 命令行参数（None 时用 sys.argv）
 
     Returns:
-        退出码（0=无 flaky, 1=有 flaky, 2=运行错误）
+        退出码（0=无 flaky, 1=有 flaky, 2=无法判定：运行错误/无有效运行/一致失败）
     """
     parser = argparse.ArgumentParser(description="精确定位 flaky 测试")
     parser.add_argument("--path", default="tests/unit/", help="测试路径（默认 tests/unit/）")
@@ -214,11 +247,46 @@ def main(argv: list[str] | None = None) -> int:
             if temp_workdir is not None:
                 temp_workdir.cleanup()
             return 2
-        runs_results.append(parse_json_report(report_path))
-        summary_count = len(runs_results[-1])
-        print(f"  returncode={returncode}, collected={summary_count}", flush=True)
+        try:
+            outcomes = parse_json_report(report_path)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            invalid_reason = f"json-report 不可解析（{type(exc).__name__}: {exc}）"
+        else:
+            invalid_reason = validate_run_result(returncode, outcomes)
+        if invalid_reason is not None:
+            # 无效轮次不能参与 flaky 判定，否则空报告/收集失败会以退出码 0 冒充「无 flaky」
+            print(f"  ✗ 运行 {i + 1} 无效：{invalid_reason}", file=sys.stderr)
+            if temp_workdir is not None:
+                temp_workdir.cleanup()
+            return 2
+        runs_results.append(outcomes)
+        print(f"  returncode={returncode}, collected={len(outcomes)}", flush=True)
+
+    if not runs_results:
+        print("✗ 无有效运行（--runs 必须大于 0）", file=sys.stderr)
+        if temp_workdir is not None:
+            temp_workdir.cleanup()
+        return 2
 
     flaky = identify_flaky_tests(runs_results)
+
+    if not flaky:
+        # 结果一致但存在失败用例 → 一致失败，不是「无 flaky」，必须 fail-closed
+        consistent_failures = sorted(
+            {nodeid for run in runs_results for nodeid, outcome in run.items() if outcome in _FAILED_OUTCOMES}
+        )
+        if consistent_failures:
+            print(
+                f"✗ {args.runs} 轮结果一致，但存在 {len(consistent_failures)} 个一致失败用例，无法判定为无 flaky",
+                file=sys.stderr,
+            )
+            for nodeid in consistent_failures[:10]:
+                print(f"    {nodeid}", file=sys.stderr)
+            if len(consistent_failures) > 10:
+                print(f"    ...（其余 {len(consistent_failures) - 10} 个省略）", file=sys.stderr)
+            if temp_workdir is not None:
+                temp_workdir.cleanup()
+            return 2
 
     # 补充 stdout 摘要（从失败轮的 report 提取 longrepr）
     for result in flaky:
