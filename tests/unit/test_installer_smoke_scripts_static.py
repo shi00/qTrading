@@ -217,3 +217,105 @@ def test_posix_default_paths_stay_single_layer() -> None:
     assert "- **Linux**: `~/.local/share/qTrading/postgres/16/data`" in readme
     assert "- **macOS**: `~/Library/Application Support/qTrading/postgres/16/data`" in readme
     assert "qTrading/qTrading/postgres" not in readme
+
+
+# ---- D17-F01：sidecar 独立启动的凭据 / ready 协议 / 进程生命周期契约 ----
+
+# 伪造密码文件标记（缺陷现场：文件从未创建，Existing PGDATA 必然 exit 16）
+_FAKE_SIDECAR_PASSWORD = re.compile(r"fake_sidecar_pwd")
+
+# 显式传入 --password-file 参数（省略时 Rust paths.rs 从 data_dir 派生 runtime/password）
+_SIDECAR_PASSWORD_ARG = re.compile(r'"--password-file"')
+
+_RUNNING_APP = "installer_smoke_running_app.ps1"
+
+
+def test_sidecar_guards_detect_legacy_bug() -> None:
+    """负向断言使用的正则必须能命中旧缺陷行，否则“已修复”断言可能恒真。"""
+    legacy_line = (
+        '$sidecarProc = Start-Process -FilePath $sidecarExe -ArgumentList "run", '
+        '"--data-dir", "$env:LOCALAPPDATA\\qTrading\\qTrading\\postgres\\16\\data", '
+        '"--password-file", "$env:TEMP\\fake_sidecar_pwd" -PassThru'
+    )
+    assert _FAKE_SIDECAR_PASSWORD.search(legacy_line) is not None
+    assert _SIDECAR_PASSWORD_ARG.search(legacy_line) is not None
+    assert "Start-Process -FilePath $sidecarExe" in legacy_line
+
+
+def test_running_app_uses_derived_password_not_fake_file() -> None:
+    """sidecar 凭据必须由 data-dir 派生（真实 runtime\\password），禁止伪造临时密码文件。"""
+    text = _read(_RUNNING_APP)
+    assert _FAKE_SIDECAR_PASSWORD.search(text) is None
+    # 省略 --password-file 参数，让 Rust paths.rs 派生 <base>\runtime\password
+    assert _SIDECAR_PASSWORD_ARG.search(text) is None
+    assert '$pgRuntimeDir = Join-Path (Split-Path -Parent $pgDataDir) "runtime"' in text
+    assert '$derivedPasswordFile = Join-Path $pgRuntimeDir "password"' in text
+    assert "(Test-Path $derivedPasswordFile)" in text
+
+
+def test_running_app_sidecar_start_uses_redirected_process_start_info() -> None:
+    """必须用 ProcessStartInfo 重定向 stdin/stdout/stderr，以便保留 stdin 并解析 ready。"""
+    text = _read(_RUNNING_APP)
+    assert "System.Diagnostics.ProcessStartInfo" in text
+    assert "$sidecarPsi.RedirectStandardInput = $true" in text
+    assert "$sidecarPsi.RedirectStandardOutput = $true" in text
+    assert "$sidecarPsi.RedirectStandardError = $true" in text
+    assert "Start-Process -FilePath $sidecarExe" not in text
+
+
+def test_running_app_ready_wait_is_bounded_and_timeout_fails() -> None:
+    """ready 读取必须有界（120s 量级），超时即失败退出，不得无限等待。"""
+    text = _read(_RUNNING_APP)
+    assert "$SidecarReadyTimeoutSec = 120" in text
+    assert "$readyTask = $sidecarProc.StandardOutput.ReadLineAsync()" in text
+    assert "if (-not $readyTask.Wait($SidecarReadyTimeoutSec * 1000))" in text
+    timeout_branch = re.search(
+        r"if \(-not \$readyTask\.Wait\(\$SidecarReadyTimeoutSec \* 1000\)\) \{[\s\S]{0,300}throw ",
+        text,
+    )
+    assert timeout_branch is not None, "ready 超时分支必须失败退出"
+
+
+def test_running_app_validates_ready_schema_before_installer_assertion() -> None:
+    """必须先拿到 schema=...ready.v1 的 ready JSON，才允许进入 installer 拒绝断言。"""
+    text = _read(_RUNNING_APP)
+    assert '$SidecarReadySchema = "qtrading.embedded_postgres.run.ready.v1"' in text
+    convert_index = text.index("$ready = $readyLine | ConvertFrom-Json")
+    schema_index = text.index("$ready.schema -eq $SidecarReadySchema")
+    step7_index = text.index('Write-Step "7. Attempt install while sidecar running')
+    installation_index = text.index("$reinstallProc2 = Start-Process")
+    assert convert_index < step7_index
+    assert schema_index < installation_index
+
+
+def test_running_app_reports_existing_password_failure_not_rejection() -> None:
+    """sidecar 以 16 退出 = 前置失败（Existing 缺可读密码），不得计为 installer 拒绝通过。"""
+    text = _read(_RUNNING_APP)
+    assert "$sidecarExitCode -eq 16" in text
+    assert "前置失败（Existing 缺可读密码）" in text
+    exit16_branch = re.search(
+        r"if \(\$sidecarExitCode -eq 16\) \{[\s\S]{0,500}throw ",
+        text,
+    )
+    assert exit16_branch is not None, "exit 16 分支必须以失败退出"
+    assert "不计为 installer 拒绝通过" in text
+
+
+def test_running_app_keeps_stdin_open_until_same_pid_assertions() -> None:
+    """stdin 必须保持到 Step7/8 之后，再关闭并等待退出，避免 ready 前进程被回收或孤儿化。"""
+    text = _read(_RUNNING_APP)
+    step7_index = text.index('Write-Step "7. Attempt install while sidecar running')
+    same_pid_index = text.index("Assert-True ($null -ne $sidecarAfter)")
+    close_index = text.index("$sidecarProc.StandardInput.Close()", same_pid_index)
+    assert close_index > same_pid_index > step7_index
+    assert "$sidecarProc.WaitForExit($SidecarShutdownTimeoutSec * 1000)" in text
+
+
+def test_running_app_keeps_step7_and_step8_same_pid_assertions() -> None:
+    """安装拒绝断言（非 0 退出码）与“同一 sidecar PID 仍存活”断言必须保留。"""
+    text = _read(_RUNNING_APP)
+    assert 'Write-Step "7. Attempt install while sidecar running (should be rejected, P1-11)"' in text
+    assert "Assert-True ($installExitCode2 -ne 0)" in text
+    assert "$sidecarAfter = Get-Process -Id $sidecarProc.Id" in text
+    assert "Assert-True ($null -ne $sidecarAfter)" in text
+    assert "Assert-True (-not $sidecarAfter.HasExited)" in text
