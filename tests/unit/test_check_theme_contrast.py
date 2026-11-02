@@ -212,6 +212,70 @@ class TestCheckContrastUnroundedComparison:
         assert errors, "低于阈值的色对必须被判为不达标 (未舍入比较)"
 
 
+class TestContrastThresholdBoundary:
+    """WCAG 4.5 阈值边界: 必须压到阈值附近并验证 >= 比较语义。
+
+    探针色对以白底 (#FFFFFF) 为背景:
+    - #9A6C5A 对比度 4.499999851006519 (低于 4.5, 两位小数显示 4.50)
+    - #7C7290 对比度 4.500000635232021 (高于 4.5, 两位小数同样显示 4.50)
+
+    两者距阈值均 < 2e-7, 可区分 >= 与 >、容差及四舍五入实现。
+    """
+
+    _WHITE = "#FFFFFF"
+    _JUST_BELOW = "#9A6C5A"
+    _JUST_ABOVE = "#7C7290"
+
+    @staticmethod
+    def _run_single_pair(monkeypatch, fg: str, bg: str, threshold: float) -> list[str]:
+        import check_theme_contrast as ctc
+
+        pair = ctc.ContrastPair("PROBE_FG", "PROBE_BG", threshold, "text")
+        monkeypatch.setattr(ctc, "_CONTRAST_PAIRS", [pair])
+        monkeypatch.setattr(ctc, "_resolve_color", lambda name, theme: fg if name == "PROBE_FG" else bg)
+        return ctc.check_contrast()
+
+    def test_ratio_just_below_4_5_is_rejected(self, monkeypatch):
+        """比值 4.49999985 紧贴阈值: 即使显示为 4.50 也必须判不达标。"""
+        ratio = contrast_ratio(self._JUST_BELOW, self._WHITE)
+        assert abs(ratio - _THRESHOLD_TEXT) < 1e-6, f"探针色应紧贴阈值, 实际 {ratio!r}"
+        assert ratio < _THRESHOLD_TEXT
+        assert f"{ratio:.2f}" == "4.50", "探针色显示值应四舍五入到阈值 4.50"
+        errors = self._run_single_pair(monkeypatch, self._JUST_BELOW, self._WHITE, _THRESHOLD_TEXT)
+        assert len(errors) == 4, f"未舍入比值低于阈值必须判 4 主题均不达标, 实际: {errors}"
+        assert all("PROBE_FG/PROBE_BG" in err for err in errors)
+
+    def test_ratio_just_above_4_5_is_accepted(self, monkeypatch):
+        """比值 4.50000064 紧贴阈值: 未舍入比值达标, 必须通过。"""
+        ratio = contrast_ratio(self._JUST_ABOVE, self._WHITE)
+        assert abs(ratio - _THRESHOLD_TEXT) < 1e-6, f"探针色应紧贴阈值, 实际 {ratio!r}"
+        assert ratio > _THRESHOLD_TEXT
+        assert f"{ratio:.2f}" == "4.50", "探针色显示值应与低于阈值用例同为 4.50"
+        errors = self._run_single_pair(monkeypatch, self._JUST_ABOVE, self._WHITE, _THRESHOLD_TEXT)
+        assert errors == []
+
+    def test_ratio_exactly_equal_to_threshold_is_accepted(self, monkeypatch):
+        """>= 语义: 比值恰等于阈值时必须通过 (排除 > 与 >= 混用)。"""
+        ratio = contrast_ratio(self._JUST_ABOVE, self._WHITE)
+        errors = self._run_single_pair(monkeypatch, self._JUST_ABOVE, self._WHITE, ratio)
+        assert errors == []
+
+    @pytest.mark.parametrize(("ratio", "should_pass"), [(4.499, False), (4.5, True), (4.501, True)])
+    def test_literal_boundary_values_compare_unrounded(self, monkeypatch, ratio: float, should_pass: bool):
+        """契约值 4.499/4.500/4.501: 判定必须基于未舍入比值与 >= 语义。"""
+        import check_theme_contrast as ctc
+
+        pair = ctc.ContrastPair("PROBE_FG", "PROBE_BG", _THRESHOLD_TEXT, "text")
+        monkeypatch.setattr(ctc, "_CONTRAST_PAIRS", [pair])
+        monkeypatch.setattr(ctc, "_resolve_color", lambda name, theme: "#000000")
+        monkeypatch.setattr(ctc, "contrast_ratio", lambda fg, bg: ratio)
+        errors = ctc.check_contrast()
+        if should_pass:
+            assert errors == []
+        else:
+            assert len(errors) == 4, f"4.499 必须被判 4 主题均不达标, 实际: {errors}"
+
+
 class TestLayer1FieldMap:
     """_LAYER1_FIELD_MAP: Layer 1 字段映射配置。"""
 
