@@ -174,15 +174,22 @@ def _mock_panel_deps(mock_i18n_state, mock_app_colors_state, monkeypatch):
     monkeypatch.setattr(panel_module, "AppColors", MagicMock())
 
 
+_UNSET = object()
+
+
 def _render_panel(
-    on_run_backtest: Any = None,
+    on_run_backtest: Any = _UNSET,
     is_running: bool = False,
 ) -> tuple[Any, FakePage, Any, Any]:
     """渲染 BacktestConfigPanel, 返回 (on_run_backtest, page, result, component)。
 
+    ``on_run_backtest`` 省略时使用 MagicMock（默认 spy 语义）；显式传 ``None``
+    时原样传入组件，用于覆盖 "可选消费者为空" 分支。用模块级 sentinel
+    区分两种调用，避免显式 None 被 helper 静默替换为 MagicMock。
+
     依赖 _mock_panel_deps autouse fixture 已 setup 的 mock。
     """
-    if on_run_backtest is None:
+    if on_run_backtest is _UNSET:
         on_run_backtest = MagicMock()
     page = FakePage()
     component = make_component(BacktestConfigPanel, on_run_backtest=on_run_backtest, is_running=is_running)
@@ -479,10 +486,17 @@ class TestOnRunClick:
         assert config["slippage_bps"] == 5.0
 
     def test_run_click_none_callback_no_error(self) -> None:
-        """on_run_backtest=None 时 _on_run_click 不抛异常 (早返回)。"""
-        _, _, result, _ = _render_panel(on_run_backtest=None)
+        """on_run_backtest=None 时 _on_run_click 不抛异常 (早返回)。
+
+        显式 None 必须原样传入组件（不得被 helper 替换为 MagicMock），
+        且默认配置合法（按钮可用）以确保 handler 真正走到 None 守卫分支，
+        而非被 validation 早退绕过。
+        """
+        on_run, _, result, _ = _render_panel(on_run_backtest=None)
+        assert on_run is None, "helper 应把显式 None 原样传入组件"
         run_btn = _find_run_button(result)
-        # 不应抛异常
+        assert run_btn.disabled is False, "默认合法配置下运行按钮应可用 (确保不受 validation 早退影响)"
+        # None 回调下不应抛异常
         _invoke(run_btn.on_click, _make_event())
 
     def test_run_click_reflects_updated_state(self) -> None:
