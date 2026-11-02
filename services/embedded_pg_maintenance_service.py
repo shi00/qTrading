@@ -133,7 +133,7 @@ _EXIT_CODE_MAP: dict[int, tuple[str, int, str]] = {
     15: ("disk_full", logging.WARNING, "磁盘空间不足，请清理后重试"),
     20: ("pg_not_running", logging.INFO, ""),  # 幂等，doctor 容忍
     40: ("pgdata_corrupt", logging.ERROR, "数据目录损坏，请使用恢复向导"),
-    50: ("lock_conflict", logging.WARNING, "请先关闭 qTrading 再执行维护操作"),
+    50: ("lock_conflict", logging.WARNING, "请先关闭 qTrading，并确认数据库实例已停止（可执行 stop 命令）后重试"),
 }
 
 

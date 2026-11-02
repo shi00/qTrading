@@ -167,6 +167,8 @@ sidecars/qtrading-pg-sidecar restore --data-dir <数据目录> --input <备份�
 | **默认**（不指定 `--target-data-dir`） | 先恢复到数据目录同级的临时目录 `<数据目录名>.restore-<时间戳>`（initdb → 临时实例 → pg_restore → 健康检查），**全部成功后自动切换为当前数据目录**，并重置 state.json（status=stopped、清空 pid/port，避免残留旧实例状态误导 `status`）。**无需手动切换，完成后直接启动应用即可** | 改名为 `<数据目录名>.bak-<时间戳>`，**保留为备份（原数据不被销毁）**，确认恢复无误后可自行清理 |
 | **指定 `--target-data-dir <新目录>`** | 恢复到指定目录（目标目录已存在且非空时拒绝执行，不覆盖原则），**不切换当前数据目录**，state.json 不变。恢复成功后需自行让应用指向该目录（如调整 `AppConfig.embedded_pg_data_root`） | 完全不动 |
 
+**活实例守卫（D16-F03）**：restore 获取维护锁后、任何 initdb/切换前会校验源 PGDATA 不存在仍在运行的实例（复用进程归属校验，含规范化路径、启动时刻与 OS 进程证据）。sidecar 崩溃/被 kill 后维护锁会被 OS 释放，但 postgres 可能仍活；此时 restore 返回 exit 50 并提示先执行 `stop --data-dir <数据目录>`，**不会自动杀进程、不会创建恢复目录或改动源目录**。默认模式切换前会再次校验，失败时已完成的 `.restore-*` 目录保留供人工处理。显式 `--target-data-dir` 模式同样要求源 PGDATA 无活实例。
+
 **失败边界**（恢复执行失败统一返回 exit 30；维护锁冲突 exit 50、密码不可用 exit 16 等前置失败除外，见 9.6 错误分类）：
 
 - initdb / pg_restore / **健康检查**任一步失败：恢复用的临时目录（默认模式为 `.restore-*`，指定目标模式为 `<新目录>`）自动清理，原数据目录不受影响；
@@ -206,7 +208,7 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 | 20 | `STOP_FAILED` | 停止 postgres 失败（分级停止后进程仍存活）；或无法证明 `postmaster.pid` 中的 PID 属于本 PGDATA（拒绝发送信号并保留 PID 文件与诊断）；PG 未运行时 stop 幂等成功返回 0 | stop / run |
 | 30 | `DUMP_RESTORE_FAILED` | 备份/恢复执行失败：备份文件不存在或损坏、版本不兼容、pg_dump/pg_restore 执行失败、恢复目录切换失败等 | dump / restore / reset-password |
 | 40 | `DATA_DIR_ABNORMAL` | 数据目录状态异常：非空但无 PG_VERSION、主版本不匹配、pg_control/WAL 损坏嫌疑、关键文件缺失 | run / maintenance-shell / reset-password |
-| 50 | `LOCK_CONFLICT` | 维护锁冲突：qTrading 或另一个维护进程正在使用该 PGDATA | run / stop / dump / restore / maintenance-shell / reset-password |
+| 50 | `LOCK_CONFLICT` | 维护锁冲突（qTrading 或另一个维护进程正在使用该 PGDATA），或该 PGDATA 存在活实例（含 sidecar 崩溃后残留的孤儿 postgres，restore 前置校验复用此码） | run / stop / dump / restore / maintenance-shell / reset-password |
 | 60 | `POSTGRES_DIED` | 监督期间 postgres 意外退出（sidecar 不自动重启） | run |
 
 > doctor 只返回 0/2 两种退出码（见 9.2），上表其余退出码不会由 doctor 返回。
