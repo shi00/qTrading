@@ -134,6 +134,23 @@ def test_publisher_needs_all_build_legs_and_audit(workflow: dict[str, Any]) -> N
     assert "github.event_name == 'push'" in publisher["if"]
 
 
+def test_publisher_needs_blocks_after_any_failed_or_cancelled_matrix_leg(workflow: dict[str, Any]) -> None:
+    """fail-fast=false 只让矩阵腿继续跑，聚合结果仍要求全部 success 才放行 publisher。"""
+    build = _job(workflow, BUILD_JOB)
+    assert build["strategy"]["fail-fast"] is False, "矩阵腿需各自跑完，便于收集全部平台证据"
+    assert len(build["strategy"]["matrix"]["include"]) == 4
+    # 构建矩阵整体依赖质量门禁，任一平台失败/取消会使 build-artifacts 聚合结果非 success
+    assert build["needs"] in (LINT_JOB, [LINT_JOB])
+
+    publisher = _job(workflow, PUBLISH_JOB)
+    assert publisher["needs"] == [BUILD_JOB, AUDIT_JOB]
+    dumped = _dump(publisher)
+    # 未显式写 status check 函数时 GitHub 默认 AND success()；任何 always/failure/cancelled
+    # 覆盖都会让失败矩阵腿仍进入发布，故禁止出现。
+    for status_function in ("always()", "failure()", "cancelled()", "success()"):
+        assert status_function not in dumped, f"publisher 不得用 {status_function} 绕过 needs 聚合"
+
+
 def test_publisher_is_tag_only_and_cannot_bypass_failures(workflow: dict[str, Any]) -> None:
     publisher = _job(workflow, PUBLISH_JOB)
     dumped = _dump(publisher)
