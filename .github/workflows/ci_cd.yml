@@ -98,7 +98,7 @@ jobs:
           cache: 'pip'
 
       - name: Install Ruff
-        run: pip install ruff==0.16.7
+        run: pip install ruff==0.17.3
 
       - name: Ruff Lint Check
         run: ruff check .
@@ -128,7 +128,7 @@ jobs:
           cache: 'pip'
 
       - name: Install Ruff
-        run: pip install ruff==0.16.7
+        run: pip install ruff==0.17.3
 
       - name: Ruff Lint Check
         run: ruff check .
