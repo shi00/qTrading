@@ -166,8 +166,19 @@ fn runtime_port(pm: Option<&pgbin::PostmasterInfo>, postgres_alive: bool) -> Opt
     pm.and_then(|i| i.port).filter(|p| *p > 0)
 }
 
-pub fn doctor(data_dir: &Path) -> Result<(), u8> {
-    logging::init(None);
+/// 组装 doctor 诊断 JSON（不写 stdout），供 CLI 输出与单测断言复用。
+fn build_doctor_json(data_dir: &Path) -> DoctorJson {
+    build_doctor_json_with_fs(data_dir, preflight::FsKind::from_env_override())
+}
+
+/// 同 [`build_doctor_json`]，但文件系统类型可由调用方注入（`None` = 实际探测）。
+///
+/// 生产路径经 `QTRADING_PG_SIDECAR_FORCE_FS_KIND` 覆盖；该 env 是进程全局状态，
+/// 单测注入可避免并行测试串扰（见 preflight 的 env 覆盖测试）。
+fn build_doctor_json_with_fs(
+    data_dir: &Path,
+    fs_override: Option<preflight::FsKind>,
+) -> DoctorJson {
     let layout = Layout::from_data_dir(data_dir, None, None, None);
     let mut issues: Vec<Issue> = Vec::new();
     let error = |code: &'static str, message: String| Issue {
@@ -322,8 +333,7 @@ pub fn doctor(data_dir: &Path) -> Result<(), u8> {
     }
 
     // -- 环境 --
-    let fs_kind = preflight::FsKind::from_env_override()
-        .unwrap_or_else(|| preflight::detect_fs_kind(&layout.data_dir));
+    let fs_kind = fs_override.unwrap_or_else(|| preflight::detect_fs_kind(&layout.data_dir));
     if !fs_kind.is_supported() {
         issues.push(error(
             "fs_unsupported",
@@ -402,7 +412,7 @@ pub fn doctor(data_dir: &Path) -> Result<(), u8> {
         ));
     }
 
-    let json = DoctorJson {
+    DoctorJson {
         schema: protocol::DOCTOR_SCHEMA,
         data_dir: layout.data_dir.to_string_lossy().replace('\\', "/"),
         initialized,
@@ -436,7 +446,12 @@ pub fn doctor(data_dir: &Path) -> Result<(), u8> {
         restore_residuals,
         dump_partials,
         issues,
-    };
+    }
+}
+
+pub fn doctor(data_dir: &Path) -> Result<(), u8> {
+    logging::init(None);
+    let json = build_doctor_json(data_dir);
     protocol::print_json_line(&json).map_err(|e| {
         eprintln!("[sidecar] doctor JSON 输出失败: {e}");
         exit_codes::ARGUMENT_ERROR
@@ -1007,11 +1022,17 @@ pub async fn maintenance_shell(args: cli::MaintenanceShellArgs) -> Result<(), u8
 }
 
 async fn wait_for_enter() {
-    use tokio::io::AsyncReadExt;
     let mut stdin = tokio::io::stdin();
+    wait_for_enter_reader(&mut stdin).await;
+}
+
+/// 读取 stdin 直到出现换行或 EOF/读取错误。抽成泛型以便测试用独立管道显式触发 EOF，
+/// 不依赖进程全局 stdin 状态。
+async fn wait_for_enter_reader<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) {
+    use tokio::io::AsyncReadExt;
     let mut buf = [0u8; 64];
     loop {
-        match stdin.read(&mut buf).await {
+        match reader.read(&mut buf).await {
             Ok(0) => break, // EOF（管道/重定向场景）：直接结束，避免永久挂起
             Ok(n) => {
                 if buf[..n].contains(&b'\n') {
@@ -1204,9 +1225,10 @@ mod tests {
 
     /// 构造"已初始化"假 cluster 目录（仅文件骨架，不含真实 PG 数据）。
     fn make_fake_cluster(dir: &Path) {
+        let pg_major = setup::bundled_pg_major().unwrap_or(16);
         std::fs::create_dir_all(dir.join("global")).unwrap();
         std::fs::create_dir_all(dir.join("base")).unwrap();
-        std::fs::write(dir.join("PG_VERSION"), "16\n").unwrap();
+        std::fs::write(dir.join("PG_VERSION"), format!("{pg_major}\n")).unwrap();
         std::fs::write(dir.join("global/pg_control"), b"ctl").unwrap();
         std::fs::write(dir.join("postgresql.conf"), "# conf\n").unwrap();
     }
@@ -1219,11 +1241,61 @@ mod tests {
         }
     }
 
+    /// 查找指定 issue code（不依赖 issues 数组顺序）。
+    fn find_issue<'a>(doc: &'a DoctorJson, code: &str) -> Option<&'a Issue> {
+        doc.issues.iter().find(|i| i.code == code)
+    }
+
+    /// 断言指定 issue 存在，且 severity 与诊断预期一致；message 不得为空。
+    fn assert_issue<'a>(doc: &'a DoctorJson, code: &str, severity: &str) -> &'a Issue {
+        let issue = find_issue(doc, code).unwrap_or_else(|| {
+            panic!(
+                "expected issue {code:?} with severity {severity:?}, got {:?}",
+                doc.issues
+            )
+        });
+        assert_eq!(issue.severity, severity, "issue {code:?} severity mismatch");
+        assert!(!issue.message.is_empty(), "issue {code:?} message is empty");
+        issue
+    }
+
+    /// 未初始化/无损坏场景的“健康结论”：不得出现任何 error 级诊断。
+    ///
+    /// `disk_low` 取决于运行测试的机器所在卷的剩余空间，无法在单测中固定，已有独立
+    /// `fs_unsupported` / `disk_low` 用例覆盖；此处排除该环境相关 code，避免假失败。
+    fn assert_no_error_issues(doc: &DoctorJson) {
+        const ENV_DEPENDENT_CODES: [&str; 1] = ["disk_low"];
+        let errors: Vec<_> = doc
+            .issues
+            .iter()
+            .filter(|i| i.severity == "error" && !ENV_DEPENDENT_CODES.contains(&i.code))
+            .map(|i| i.code)
+            .collect();
+        assert!(errors.is_empty(), "unexpected error issues: {errors:?}");
+    }
+
     #[test]
     fn doctor_on_fresh_dir_reports_not_initialized() {
         let dir = unique_tmp("doctor-fresh");
         let data_dir = dir.join("postgres/16/data");
-        assert!(doctor(&data_dir).is_ok());
+        // 注入 None：忽略并行测试可能设置的全局 FS 覆盖 env，验证实际探测路径。
+        let doc = build_doctor_json_with_fs(&data_dir, None);
+
+        assert_eq!(doc.schema, protocol::DOCTOR_SCHEMA);
+        assert!(!doc.initialized);
+        assert_eq!(doc.pg_version, None);
+        assert!(doc.version_match, "未初始化不应判定版本不匹配");
+        assert!(doc.critical_files_missing.is_empty());
+        assert_eq!(doc.state_file, "missing");
+        assert_eq!(doc.runtime_status, None);
+        assert_eq!(doc.port, None, "无 postmaster.pid 时端口应未知");
+        assert_eq!(doc.postmaster_pid, None);
+        assert!(!doc.postgres_alive);
+        assert!(doc.restore_residuals.is_empty());
+        assert!(doc.dump_partials.is_empty());
+
+        assert_issue(&doc, "install_incomplete", "warning");
+        assert_no_error_issues(&doc);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1232,7 +1304,19 @@ mod tests {
         let dir = unique_tmp("doctor-cluster");
         let data_dir = dir.join("postgres/16/data");
         make_fake_cluster(&data_dir);
-        assert!(doctor(&data_dir).is_ok());
+        let doc = build_doctor_json(&data_dir);
+
+        assert!(doc.initialized);
+        assert_eq!(doc.pg_version, setup::bundled_pg_major());
+        assert_eq!(doc.bundled_pg_major, setup::bundled_pg_major());
+        assert!(doc.version_match);
+        assert!(doc.critical_files_missing.is_empty());
+
+        // 假 cluster 无真实 pg_controldata 且缺密码文件：两类 error 必须经 issues 上报，
+        // 而不是只靠 doctor() 返回 Ok 掩盖。
+        assert_issue(&doc, "pg_control_unreadable", "error");
+        assert_issue(&doc, "password_file_missing", "error");
+        assert_issue(&doc, "install_incomplete", "warning");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1243,7 +1327,13 @@ mod tests {
         let data_dir = dir.join("postgres/16/data");
         std::fs::create_dir_all(&data_dir).unwrap();
         std::fs::write(data_dir.join("random.txt"), "x").unwrap();
-        assert!(doctor(&data_dir).is_ok());
+        let doc = build_doctor_json(&data_dir);
+
+        assert!(!doc.initialized);
+        assert_eq!(doc.pg_version, None);
+        assert!(doc.critical_files_missing.is_empty());
+        assert_issue(&doc, "nonempty_no_pg_version", "error");
+        assert_issue(&doc, "install_incomplete", "warning");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1746,7 +1836,7 @@ mod tests {
     }
 
     /// doctor：已初始化但关键文件缺失（global/pg_control 缺失）→ 触发 critical_files_missing error。
-    /// doctor 永远返回 Ok(())，issues 经 JSON 输出，此处只验证不 panic。
+    /// doctor 永远返回 Ok(())，但诊断结论必须经 DoctorJson.issues 验证，不能只验证不 panic。
     #[test]
     fn doctor_on_init_dir_with_missing_critical_files_ok() {
         let dir = unique_tmp("doctor-missing-critical");
@@ -1757,24 +1847,35 @@ mod tests {
         std::fs::create_dir_all(data_dir.join("base")).unwrap();
         std::fs::write(data_dir.join("postgresql.conf"), "# conf\n").unwrap();
         // 故意不创建 global/pg_control
-        assert!(doctor(&data_dir).is_ok());
+        let doc = build_doctor_json(&data_dir);
+        assert!(doc.initialized);
+        assert_eq!(doc.critical_files_missing, vec!["global/pg_control"]);
+        assert_issue(&doc, "critical_files_missing", "error");
+        assert_issue(&doc, "pg_control_unreadable", "error");
+        assert_issue(&doc, "password_file_missing", "error");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// doctor：postmaster.pid 残留但进程已死（stale_postmaster_pid warning 分支）。
+    /// doctor：postmaster.pid 残留但进程已死（stale_postmaster_pid warning 分支），
+    /// 且残留端口不得作为运行态端口（unknown）。
     #[test]
     fn doctor_detects_stale_postmaster_pid() {
         let dir = unique_tmp("doctor-stale-pid");
         let data_dir = dir.join("postgres/16/data");
         make_fake_cluster(&data_dir);
-        // 写入一个几乎不可能存活的 PID（与 pgbin.rs 测试同款）
+        // 写入一个几乎不可能存活的 PID（与 pgbin.rs 测试同款），并附旧端口 55432
         std::fs::write(
             data_dir.join("postmaster.pid"),
             "4000000\n/x/data\n1784505600\n55432\n/tmp\n127.0.0.1\n",
         )
         .unwrap();
-        // doctor 应识别 stale pid 但不失败
-        assert!(doctor(&data_dir).is_ok());
+        let doc = build_doctor_json(&data_dir);
+
+        assert_eq!(doc.postmaster_pid, Some(4000000));
+        assert!(!doc.postgres_alive);
+        assert!(doc.stale_postmaster_pid);
+        assert_eq!(doc.port, None, "进程已死时不得沿用 postmaster.pid 旧端口");
+        assert_issue(&doc, "stale_postmaster_pid", "warning");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1788,7 +1889,11 @@ mod tests {
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         std::fs::create_dir_all(layout.state_file.parent().unwrap()).unwrap();
         std::fs::write(&layout.state_file, "{not valid json").unwrap();
-        assert!(doctor(&data_dir).is_ok());
+        let doc = build_doctor_json(&data_dir);
+
+        assert_eq!(doc.state_file, "corrupted");
+        assert_eq!(doc.runtime_status, None, "损坏 state 的运行态应未知");
+        assert_issue(&doc, "state_corrupted", "warning");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1805,26 +1910,40 @@ mod tests {
             ..Default::default()
         };
         state::write(&layout.state_file, &st).unwrap();
-        assert!(doctor(&data_dir).is_ok());
+        let doc = build_doctor_json(&data_dir);
+
+        assert_eq!(doc.state_file, "ok");
+        assert_eq!(doc.runtime_status, Some("stopped".to_string()));
+        assert_eq!(doc.kill_fallback_count, 2);
+        assert_eq!(doc.last_start_error, Some("test start error".to_string()));
+        assert_issue(&doc, "kill_fallback_history", "warning");
+        assert_issue(&doc, "last_start_error", "warning");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// doctor：PG_VERSION 与 bundled 主版本不匹配 → version_mismatch error 分支。
+    /// 必须构造与 bundled 实际主版本不同的值（旧测试写死 16 恰与 bundled 相同，未命中分支）。
     #[test]
     fn doctor_detects_pg_version_mismatch() {
         let dir = unique_tmp("doctor-version-mismatch");
         let data_dir = dir.join("postgres/16/data");
         std::fs::create_dir_all(data_dir.join("global")).unwrap();
         std::fs::create_dir_all(data_dir.join("base")).unwrap();
-        // 写入一个与 bundled (17) 不匹配的主版本（16）
-        std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
+        let bundled = setup::bundled_pg_major().expect("bundled PostgreSQL major version");
+        let mismatched = if bundled == 16 { 15 } else { 16 };
+        std::fs::write(data_dir.join("PG_VERSION"), format!("{mismatched}\n")).unwrap();
         std::fs::write(data_dir.join("global/pg_control"), b"ctl").unwrap();
         std::fs::write(data_dir.join("postgresql.conf"), "# conf\n").unwrap();
-        assert!(doctor(&data_dir).is_ok());
+        let doc = build_doctor_json(&data_dir);
+
+        assert_eq!(doc.pg_version, Some(mismatched));
+        assert_eq!(doc.bundled_pg_major, Some(bundled));
+        assert!(!doc.version_match);
+        assert_issue(&doc, "version_mismatch", "error");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// doctor：已初始化但 password file 存在 → password_file_perms_ok 校验路径覆盖。
+    /// doctor：已初始化但 password file 存在 → password_file_present/perms 校验路径覆盖。
     #[test]
     fn doctor_with_password_file_present() {
         let dir = unique_tmp("doctor-with-pw");
@@ -1832,7 +1951,12 @@ mod tests {
         make_fake_cluster(&data_dir);
         let layout = Layout::from_data_dir(&data_dir, None, None, None);
         password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
-        assert!(doctor(&data_dir).is_ok());
+        let doc = build_doctor_json(&data_dir);
+
+        assert!(doc.password_file_present);
+        assert!(doc.password_file_perms_ok);
+        assert!(find_issue(&doc, "password_file_missing").is_none());
+        assert!(find_issue(&doc, "password_file_perms").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1995,8 +2119,19 @@ mod tests {
         std::fs::create_dir_all(&restore_residual).unwrap();
         let partial_file = parent.join("backup.dump.partial");
         std::fs::write(&partial_file, b"half dump").unwrap();
-        // doctor 永远返回 Ok(())，issues 经 JSON 输出
-        assert!(doctor(&data_dir).is_ok());
+        let doc = build_doctor_json(&data_dir);
+
+        // 残留物必须出现在 JSON 中，且以 warning 上报（doctor 只读列出，不自动清理）。
+        assert_eq!(
+            doc.restore_residuals,
+            vec![restore_residual.to_string_lossy().replace('\\', "/")]
+        );
+        assert_eq!(
+            doc.dump_partials,
+            vec![partial_file.to_string_lossy().replace('\\', "/")]
+        );
+        assert_issue(&doc, "restore_residual", "warning");
+        assert_issue(&doc, "dump_partial", "warning");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2017,7 +2152,16 @@ mod tests {
             std::fs::Permissions::from_mode(0o644),
         )
         .unwrap();
-        assert!(doctor(&data_dir).is_ok());
+        let doc = build_doctor_json(&data_dir);
+
+        // 文件存在但权限过宽：present=true、perms_ok=false，且只报 perms warning。
+        assert!(doc.password_file_present);
+        assert!(!doc.password_file_perms_ok);
+        assert_issue(&doc, "password_file_perms", "warning");
+        assert!(
+            find_issue(&doc, "password_file_missing").is_none(),
+            "文件存在时不得误报缺失"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2036,17 +2180,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `wait_for_enter`：stdin EOF（管道关闭/重定向）→ 立即返回不阻塞。
-    /// cargo test 默认非 TTY 环境下 stdin 可能已 EOF；此测试验证不 panic 不死锁。
+    /// `wait_for_enter_reader`：独立 stdin 管道显式关闭写端（EOF）→ 必须在时限内返回，
+    /// 而不是永久挂起。使用 `tokio::io::duplex` 构造独立管道，不依赖进程全局 stdin/TTY。
     #[tokio::test]
-    async fn wait_for_enter_handles_eof_gracefully() {
-        // 在 CI/非交互环境，stdin 通常为 EOF 或管道。
-        // 设置 1 秒 timeout 防止测试挂起（若 stdin 为 TTY 会超时失败，提示环境问题）。
-        let result = tokio::time::timeout(Duration::from_secs(1), wait_for_enter()).await;
-        // Ok(()) = 正常返回（EOF/Err 均会 break）；Err(Elapsed) = 超时（stdin 阻塞）
-        // 在非 TTY 环境（CI）应 Ok，本地 TTY 可能 Elapsed，两者都接受为通过
-        // — 此测试主要确保代码路径被覆盖（line 881-896）
-        let _ = result;
+    async fn wait_for_enter_reader_returns_on_eof() {
+        let (mut reader, writer) = tokio::io::duplex(64);
+        drop(writer); // 显式关闭写端 → 读端后续 read 返回 Ok(0)
+        let result =
+            tokio::time::timeout(Duration::from_secs(1), wait_for_enter_reader(&mut reader)).await;
+        assert!(
+            result.is_ok(),
+            "stdin EOF 后 wait_for_enter_reader 应在时限内返回，实际超时"
+        );
+    }
+
+    /// `wait_for_enter_reader`：读到换行即返回，不依赖 EOF（写端保持打开）。
+    #[tokio::test]
+    async fn wait_for_enter_reader_returns_on_newline() {
+        use tokio::io::AsyncWriteExt;
+        let (mut reader, mut writer) = tokio::io::duplex(64);
+        writer.write_all(b"\n").await.unwrap();
+        let result =
+            tokio::time::timeout(Duration::from_secs(1), wait_for_enter_reader(&mut reader)).await;
+        assert!(
+            result.is_ok(),
+            "读到换行后 wait_for_enter_reader 应在时限内返回，实际超时"
+        );
+        drop(writer);
+    }
+
+    /// `wait_for_enter_reader`：既无换行也未 EOF 时不得提前返回（反证上两个用例非空断言）。
+    #[tokio::test]
+    async fn wait_for_enter_reader_blocks_without_newline_or_eof() {
+        use tokio::io::AsyncWriteExt;
+        let (mut reader, mut writer) = tokio::io::duplex(64);
+        writer.write_all(b"abc").await.unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            wait_for_enter_reader(&mut reader),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "未出现换行/EOF 时 wait_for_enter_reader 不应返回"
+        );
+        drop(writer);
     }
 
     /// doctor：数据目录非空 + PG_VERSION 存在但 global/pg_control 缺失 →
@@ -2060,7 +2238,10 @@ mod tests {
         std::fs::create_dir_all(data_dir.join("base")).unwrap();
         std::fs::write(data_dir.join("postgresql.conf"), "# conf\n").unwrap();
         // 故意不创建 global/pg_control
-        assert!(doctor(&data_dir).is_ok());
+        let doc = build_doctor_json(&data_dir);
+        assert_eq!(doc.critical_files_missing, vec!["global/pg_control"]);
+        assert_issue(&doc, "critical_files_missing", "error");
+        assert_issue(&doc, "pg_control_unreadable", "error");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2075,7 +2256,9 @@ mod tests {
         std::fs::write(data_dir.join("global/pg_control"), b"ctl").unwrap();
         std::fs::write(data_dir.join("postgresql.conf"), "# conf\n").unwrap();
         // 故意不创建 base 目录
-        assert!(doctor(&data_dir).is_ok());
+        let doc = build_doctor_json(&data_dir);
+        assert_eq!(doc.critical_files_missing, vec!["base"]);
+        assert_issue(&doc, "critical_files_missing", "error");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2090,23 +2273,26 @@ mod tests {
         std::fs::write(data_dir.join("PG_VERSION"), "16\n").unwrap();
         std::fs::write(data_dir.join("global/pg_control"), b"ctl").unwrap();
         // 故意不创建 postgresql.conf
-        assert!(doctor(&data_dir).is_ok());
+        let doc = build_doctor_json(&data_dir);
+        assert_eq!(doc.critical_files_missing, vec!["postgresql.conf"]);
+        assert_issue(&doc, "critical_files_missing", "error");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- P3-Rust-Coverage-D38: doctor env override + cloud sync 分支 ----
 
-    /// doctor：通过 `QTRADING_PG_SIDECAR_FORCE_FS_KIND=fat32` 强制 FAT32 →
-    /// fs_unsupported error 分支（lines 281-287）。
-    /// env var 为进程全局，set 后立即 remove 避免串扰其他并行测试。
+    /// doctor：文件系统不受支持（FAT32）→ fs_supported=false + fs_unsupported error。
+    /// 生产路径经 `FsKind::from_env_override()`（由 preflight 单测覆盖解析）；此处注入
+    /// 判定结果，避免进程全局 env 与并行测试串扰（R7 测试隔离）。
     #[test]
-    fn doctor_with_fs_unsupported_env_override() {
-        std::env::set_var("QTRADING_PG_SIDECAR_FORCE_FS_KIND", "fat32");
+    fn doctor_reports_unsupported_filesystem_as_error() {
         let dir = unique_tmp("doctor-fat32");
         let data_dir = dir.join("postgres/16/data");
         make_fake_cluster(&data_dir);
-        assert!(doctor(&data_dir).is_ok());
-        std::env::remove_var("QTRADING_PG_SIDECAR_FORCE_FS_KIND");
+        let doc = build_doctor_json_with_fs(&data_dir, Some(preflight::FsKind::Fat32));
+        assert!(!doc.fs_supported);
+        assert_eq!(doc.fs_kind, "FAT32/vFAT");
+        assert_issue(&doc, "fs_unsupported", "error");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2117,7 +2303,159 @@ mod tests {
         // 路径含 "onedrive" 触发 detect_cloud_sync
         let data_dir = dir.join("onedrive/postgres/16/data");
         make_fake_cluster(&data_dir);
-        assert!(doctor(&data_dir).is_ok());
+        let doc = build_doctor_json(&data_dir);
+        assert_eq!(doc.cloud_sync_feature.as_deref(), Some("onedrive"));
+        assert_issue(&doc, "cloud_sync_path", "error");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D16-Q01 契约回归：`DoctorJson` 实际序列化字段集合必须等于
+    /// `REQUIRED_MIRRORED_FIELDS`（18）+ `ALLOWED_RUST_ONLY_FIELDS`（15），共 33 个。
+    ///
+    /// Python 侧契约脚本只解析源码文本（`check_doctor_schema.py`），本测试从 serde
+    /// 序列化结果取真实 wire 字段，防止结构体字段名/数量漂移未被脚本捕获。
+    #[test]
+    fn doctor_wire_fields_match_q01_dto_contract() {
+        use std::collections::BTreeSet;
+
+        // 与 scripts/check_doctor_schema.py 的 REQUIRED_MIRRORED_FIELDS 保持一致。
+        const REQUIRED_MIRRORED: [&str; 18] = [
+            "schema",
+            "data_dir",
+            "initialized",
+            "pg_version",
+            "bundled_pg_major",
+            "version_match",
+            "critical_files_missing",
+            "install_dir_complete",
+            "missing_tools",
+            "lock_held",
+            "postgres_alive",
+            "port",
+            "state_file",
+            "runtime_status",
+            "last_start_error",
+            "issues",
+            "restore_residuals",
+            "dump_partials",
+        ];
+        // 与 scripts/check_doctor_schema.py 的 ALLOWED_RUST_ONLY_FIELDS 键集合保持一致。
+        const RUST_ONLY: [&str; 15] = [
+            "cloud_sync_feature",
+            "cluster_state",
+            "control_data_readable",
+            "data_checksums",
+            "free_bytes",
+            "fs_kind",
+            "fs_supported",
+            "hba_matches_template",
+            "kill_fallback_count",
+            "last_stop_mode",
+            "managed_block_drift",
+            "password_file_perms_ok",
+            "password_file_present",
+            "postmaster_pid",
+            "stale_postmaster_pid",
+        ];
+
+        let required: BTreeSet<&str> = REQUIRED_MIRRORED.into_iter().collect();
+        let rust_only: BTreeSet<&str> = RUST_ONLY.into_iter().collect();
+        assert_eq!(
+            required.len(),
+            REQUIRED_MIRRORED.len(),
+            "REQUIRED 存在重复字段"
+        );
+        assert_eq!(rust_only.len(), RUST_ONLY.len(), "RUST_ONLY 存在重复字段");
+        assert!(required.is_disjoint(&rust_only), "两张契约表字段不得重叠");
+
+        let dir = unique_tmp("doctor-wire-fields");
+        let data_dir = dir.join("postgres/16/data");
+        let doc = build_doctor_json(&data_dir);
+        let value = serde_json::to_value(&doc).expect("DoctorJson 必须可序列化");
+        let actual: BTreeSet<String> = value
+            .as_object()
+            .expect("doctor JSON 必须是对象")
+            .keys()
+            .cloned()
+            .collect();
+        let expected: BTreeSet<String> = required
+            .iter()
+            .chain(rust_only.iter())
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(actual, expected, "DoctorJson wire 字段集合偏离 Q01 契约");
+        assert_eq!(actual.len(), 33, "DoctorJson 应为 18 + 15 = 33 个字段");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 健康 cluster（完整 install + 安全基线 + 0600 密码 + 干净停止态）：
+    /// doctor 的最终结论必须是「无任何诊断」，不能只验证 `doctor()` 返回 Ok。
+    ///
+    /// 仅 Unix：用 shell 脚本模拟 `pg_controldata` 输出（Windows 无 shebang 脚本执行语义）。
+    #[cfg(unix)]
+    #[test]
+    fn doctor_reports_healthy_cluster_without_issues() {
+        use std::collections::BTreeSet;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_tmp("doctor-healthy");
+        let _ = std::fs::remove_dir_all(&dir);
+        let data_dir = dir.join("postgres/16/data");
+        make_fake_cluster(&data_dir);
+        let layout = Layout::from_data_dir(&data_dir, None, None, None);
+
+        // install dir 完整（marker + 全部必需工具），pg_controldata 返回干净关闭状态。
+        std::fs::create_dir_all(layout.install_dir.join("bin")).unwrap();
+        std::fs::write(
+            layout.install_dir.join(setup::SETUP_COMPLETE_MARKER),
+            b"{\"postgres_version\":\"test\"}",
+        )
+        .unwrap();
+        let ctl_script = "#!/bin/sh\necho 'Database cluster state: shut down'\n\
+                          echo 'Data page checksum version: 0'\n";
+        for name in pgbin::REQUIRED_TOOLS {
+            let path = pgbin::tool_path(&layout.install_dir, name);
+            if *name == "pg_controldata" {
+                std::fs::write(&path, ctl_script).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            } else {
+                std::fs::write(&path, b"fake tool").unwrap();
+            }
+        }
+
+        // 与 run 相同的安全基线 + 0600 密码文件 → 无 hba/managed/password 告警。
+        setup::write_security_baseline(&data_dir, "127.0.0.1").unwrap();
+        password::write_password_file(&layout.password_file, "TestPwd-1_2.3~xxxx").unwrap();
+        state::write(&layout.state_file, &state::RuntimeState::default()).unwrap();
+
+        let doc = build_doctor_json_with_fs(&data_dir, None);
+        assert!(doc.initialized);
+        assert!(doc.install_dir_complete);
+        assert!(doc.control_data_readable);
+        assert_eq!(doc.cluster_state.as_deref(), Some("shut down"));
+        assert_eq!(doc.data_checksums, Some(false));
+        assert_eq!(doc.hba_matches_template, Some(true));
+        assert!(doc.managed_block_drift.is_empty());
+        assert!(doc.password_file_present);
+        assert!(doc.password_file_perms_ok);
+        assert!(!doc.postgres_alive);
+        assert!(!doc.stale_postmaster_pid);
+        assert_eq!(doc.state_file, "ok");
+        assert_eq!(doc.runtime_status.as_deref(), Some("stopped"));
+
+        // 健康结论：除机器相关的 disk_low（卷剩余空间）外，不得有任何 issue。
+        const ENV_DEPENDENT_CODES: [&str; 1] = ["disk_low"];
+        let env_dependent: BTreeSet<&str> = ENV_DEPENDENT_CODES.into_iter().collect();
+        let unexpected: Vec<&str> = doc
+            .issues
+            .iter()
+            .filter(|i| !env_dependent.contains(i.code))
+            .map(|i| i.code)
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "健康 cluster 不应产生诊断 issues，实际: {unexpected:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
