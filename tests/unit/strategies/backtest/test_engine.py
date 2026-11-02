@@ -1292,6 +1292,13 @@ class TestLoadQuotesSortBeforeAvgVolume:
     专门验证 _load_quotes 顶部的显式排序即为 avg_daily_volume 正确性的唯一保证。
     """
 
+    _DATES = ("20240102", "20240103", "20240104", "20240105", "20240108", "20240109")
+    # 两只股票各六个交易日；前五日常量，第六日放量尖峰用于验证 shift(1) 排除当日
+    _VOL_BY_CODE = {
+        "000001.SZ": (10.0, 20.0, 30.0, 40.0, 50.0, 999.0),
+        "000002.SZ": (100.0, 200.0, 300.0, 400.0, 500.0, 9999.0),
+    }
+
     def _make_engine(self, quotes_pd):
         config = BacktestConfig(
             start_date=date(2024, 1, 1),
@@ -1306,43 +1313,79 @@ class TestLoadQuotesSortBeforeAvgVolume:
         engine._enrich_limit_status = AsyncMock(side_effect=lambda df, s, e: (df, None))
         return engine
 
+    def _row(self, code: str, i: int) -> dict[str, object]:
+        return {
+            "ts_code": code,
+            "trade_date": self._DATES[i],
+            "open": 10.0,
+            "high": 11.0,
+            "low": 9.0,
+            "close": 10.0,
+            "vol": self._VOL_BY_CODE[code][i],
+        }
+
+    async def _load_avg(self, quotes_pd) -> pl.DataFrame:
+        engine = self._make_engine(quotes_pd)
+        trade_dates = [datetime.strptime(d, "%Y%m%d").date() for d in self._DATES]
+        result, _ = await engine._load_quotes(trade_dates, ts_codes=list(self._VOL_BY_CODE))
+        return result
+
+    @staticmethod
+    def _avg_by_key(result: pl.DataFrame) -> dict[tuple[str, str], float | None]:
+        aligned = result.sort(["ts_code", "trade_date"])
+        keys = list(zip(aligned["ts_code"].to_list(), aligned["trade_date"].to_list(), strict=True))
+        values = aligned["avg_daily_volume"].to_list()
+        assert len(keys) == len(values)
+        return {key: value for key, value in zip(keys, values, strict=True)}
+
     @pytest.mark.asyncio
     async def test_avg_daily_volume_row_order_invariant(self):
-        """同一逻辑数据的乱序输入与有序输入，经 _load_quotes 后 avg_daily_volume 一致。
+        """同一逻辑数据的乱序输入与有序输入，经 _load_quotes 后 avg_daily_volume 逐键一致。
 
-        若排序未在计算前执行，rollOver ts_code 的 rolling_mean 会对相邻异股行串窗，
-        导致乱序输入下 avg_daily_volume 偏小（混入对侧低 vol），本用例即会失败。
+        乱序是真的「每股内部日期置换」（而非仅交错股票）：over(ts_code) 已按股票分组，
+        组间交错不影响窗口，只有组内行序会让 rolling_mean 串窗。若排序未在计算前执行，
+        乱序输入会按置换后的相邻行算窗（第六日峰值也会被当成「前一日」进入窗口），
+        逐键比较即失败。同时用有序加载的解析解校验窗口口径：shift(1) 排除当日、
+        min_samples=5 使前五日为缺失、vol 手→股 ×100。
         """
         import pandas as pd
 
-        n = 25
-        codes = ["000001.SZ", "000002.SZ"]
-        vol_by = {"000001.SZ": 100.0, "000002.SZ": 200.0}
-        # 构造「interleave 不同 ts_code」的乱序输入
-        unsorted_rows = []
-        for i in range(n):
-            for code in codes:
-                unsorted_rows.append(
-                    {
-                        "ts_code": code,
-                        "trade_date": f"202401{1 + i:02d}",
-                        "open": 10.0,
-                        "high": 11.0,
-                        "low": 9.0,
-                        "close": 10.0,
-                        "vol": vol_by[code],
-                    }
-                )
-        engine = self._make_engine(pd.DataFrame(unsorted_rows))
+        codes = list(self._VOL_BY_CODE)
+        n_dates = len(self._DATES)
+        ordered_rows = [self._row(code, i) for code in codes for i in range(n_dates)]
+        # 真实置换：每只股票内部六个交易日不再递增，且与另一只股票交错
+        shuffled_indices = (3, 0, 5, 1, 4, 2)
+        shuffled_rows = [self._row(code, i) for i in shuffled_indices for code in codes]
 
-        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
-        result, _ = await engine._load_quotes(trade_dates, ts_codes=codes)
+        ordered = self._avg_by_key(await self._load_avg(pd.DataFrame(ordered_rows)))
+        shuffled = self._avg_by_key(await self._load_avg(pd.DataFrame(shuffled_rows)))
 
-        # 结果已按 ts_code/trade_date 排序；逐股取最新 avg_daily_volume
-        for code in codes:
-            per_stock = result.filter(pl.col("ts_code") == code)
-            expected = vol_by[code] * 100.0  # 手→股（BT-06）
-            assert per_stock["avg_daily_volume"].to_list()[-1] == pytest.approx(expected, rel=1e-9)
+        # 解析解：每只股票仅第六日可见前五日均量（手→股 ×100）；
+        # 前五日因 shift(1)+min_samples=5 均为缺失，第六日尖峰不进入均量。
+        expected: dict[tuple[str, str], float | None] = {}
+        for code, vols in self._VOL_BY_CODE.items():
+            for trade_date in self._DATES[:5]:
+                expected[(code, trade_date)] = None
+            expected[(code, self._DATES[-1])] = sum(vols[:5]) / 5.0 * 100.0
+
+        assert set(ordered) == set(expected)
+        assert set(shuffled) == set(expected)
+        for key, expected_value in expected.items():
+            ordered_value, shuffled_value = ordered[key], shuffled[key]
+            if expected_value is None:
+                assert ordered_value is None
+                assert shuffled_value is None
+            else:
+                assert ordered_value == pytest.approx(expected_value, rel=1e-9)
+                assert shuffled_value == pytest.approx(expected_value, rel=1e-9)
+
+        # 有序版 vs 乱序版逐键全量比较（不只取末行）：所有交易日结果一致
+        for key in expected:
+            left, right = ordered[key], shuffled[key]
+            if left is None or right is None:
+                assert left is None and right is None
+            else:
+                assert left == pytest.approx(right, rel=1e-9)
 
 
 class TestLoadQuotesQfqUnknownWarning:
