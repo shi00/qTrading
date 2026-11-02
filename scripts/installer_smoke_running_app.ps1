@@ -18,6 +18,14 @@ Set-StrictMode -Version Latest
 $AppInstallDir = Join-Path $env:LOCALAPPDATA "Programs\AStockScreener"
 $AppExePath = Join-Path $AppInstallDir "AStockScreener.exe"
 
+# ---- sidecar 协议/超时常量 ----
+# 与 Rust sidecars/qtrading-pg-sidecar/src/protocol.rs 的 READY_SCHEMA 一致
+$SidecarReadySchema = "qtrading.embedded_postgres.run.ready.v1"
+# 从启动到 ready 的有界等待（秒）；禁止无限等待
+$SidecarReadyTimeoutSec = 120
+# 关闭 stdin 后优雅停止的有界等待（秒）
+$SidecarShutdownTimeoutSec = 60
+
 # ---- 工具函数 ----
 function Write-Step([string]$msg) { Write-Host "`n[STEP] $msg" -ForegroundColor Cyan }
 function Write-Ok([string]$msg)   { Write-Host "  [PASS] $msg" -ForegroundColor Green }
@@ -39,6 +47,21 @@ function Stop-QtradingGraceful {
     }
 }
 
+# 关闭 stdin 触发 Rust 监督循环的 EOF → 分级停止；有界等待后仍未退出才强杀，避免孤儿进程。
+function Stop-SidecarGraceful([System.Diagnostics.Process]$proc) {
+    if ($null -eq $proc -or $proc.HasExited) { return }
+    try { $proc.StandardInput.Close() } catch { }
+    if (-not $proc.WaitForExit($SidecarShutdownTimeoutSec * 1000)) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ready 之前监督循环尚未运行，stdin EOF 不生效；直接强杀，避免无意义等待 60s。
+function Stop-SidecarForced([System.Diagnostics.Process]$proc) {
+    if ($null -eq $proc -or $proc.HasExited) { return }
+    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+}
+
 # ---- 主流程 ----
 Write-Host "=== Phase 5 Running App Rejection Smoke Test (Failure Injection #32) ===" -ForegroundColor Yellow
 Write-Host "InstallerPath: $InstallerPath"
@@ -53,6 +76,8 @@ if (-not (Test-Path $InstallerPath)) {
 # Step 6~8 的 sidecar 进程拦截仅在存在 _internal\sidecars\qtrading-pg-sidecar.exe（embedded 变体）时执行。
 Write-Host "Variant check: testing InitializeSetup running-app rejection (sidecar check auto-runs if bundled)"
 
+# 供 catch 清理使用；赋值发生在 Step 6（未进入该分支时为 $null）
+$sidecarProc = $null
 
 try {
     # STEP 1: 清理环境
@@ -112,10 +137,65 @@ try {
         Write-Host "  sidecar binary not found at $sidecarExe" -ForegroundColor Yellow
         Write-Host "  Skipping P1-11 sidecar rejection scenario (dev build without sidecar)" -ForegroundColor Yellow
     } else {
-        # sidecar run 会驻留（等 stdin EOF 退出），用 Start-Process 启动后不等待
-        $sidecarProc = Start-Process -FilePath $sidecarExe -ArgumentList "run", "--data-dir", "$env:LOCALAPPDATA\qTrading\qTrading\postgres\16\data", "--password-file", "$env:TEMP\fake_sidecar_pwd" -PassThru
-        Start-Sleep -Seconds 3
-        Assert-True (-not $sidecarProc.HasExited) "sidecar running (PID: $($sidecarProc.Id))"
+        $pgDataDir = "$env:LOCALAPPDATA\qTrading\qTrading\postgres\16\data"
+        # Rust paths.rs：省略 --password-file 时由 data_dir 派生 <base>\runtime\password；
+        # 禁止伪造临时密码文件（D17-F01：Existing PGDATA 会因此 exit 16）。
+        $pgRuntimeDir = Join-Path (Split-Path -Parent $pgDataDir) "runtime"
+        $derivedPasswordFile = Join-Path $pgRuntimeDir "password"
+
+        # Existing 前置：数据目录已初始化且派生密码文件存在可读；否则失败退出，不得计为 installer 拒绝。
+        if (-not (Test-Path (Join-Path $pgDataDir "PG_VERSION"))) {
+            Write-Fail "前置失败（PGDATA 未初始化，缺少 PG_VERSION）：$pgDataDir"
+            throw "PRECONDITION FAILED: PGDATA is not an initialized cluster: $pgDataDir"
+        }
+        if (-not (Test-Path $derivedPasswordFile) -or (Get-Item $derivedPasswordFile).Length -le 0) {
+            Write-Fail "前置失败（Existing 缺可读密码）：$derivedPasswordFile"
+            throw "PRECONDITION FAILED: missing readable password file: $derivedPasswordFile"
+        }
+
+        # ProcessStartInfo 拉起 sidecar：保留 stdin（监督 stdin EOF），重定向 stdout（ready JSON）/stderr（诊断）。
+        $sidecarPsi = New-Object System.Diagnostics.ProcessStartInfo
+        $sidecarPsi.FileName = $sidecarExe
+        $sidecarPsi.Arguments = 'run --data-dir "' + $pgDataDir + '"'
+        $sidecarPsi.UseShellExecute = $false
+        $sidecarPsi.CreateNoWindow = $true
+        $sidecarPsi.RedirectStandardInput = $true
+        $sidecarPsi.RedirectStandardOutput = $true
+        $sidecarPsi.RedirectStandardError = $true
+        $sidecarPsi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+        $sidecarPsi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+        $sidecarProc = [System.Diagnostics.Process]::Start($sidecarPsi)
+        $stderrTask = $sidecarProc.StandardError.ReadToEndAsync()
+
+        # 有界等待 stdout 第一行 ready JSON；超时即失败并回收进程，禁止无限等待。
+        $readyTask = $sidecarProc.StandardOutput.ReadLineAsync()
+        if (-not $readyTask.Wait($SidecarReadyTimeoutSec * 1000)) {
+            Stop-SidecarForced $sidecarProc
+            Write-Fail "sidecar 未在 $SidecarReadyTimeoutSec s 内输出 ready JSON（timeout）"
+            throw "PRECONDITION FAILED: sidecar ready timeout after $SidecarReadyTimeoutSec s"
+        }
+        $readyLine = $readyTask.Result
+        if ($null -eq $readyLine -or $readyLine.Trim() -eq "") {
+            if (-not $sidecarProc.WaitForExit(5000)) {
+                Stop-SidecarForced $sidecarProc
+                Write-Fail "sidecar 在 ready 前退出且无法回收退出码"
+                throw "PRECONDITION FAILED: sidecar exited before ready without exit code"
+            }
+            $sidecarExitCode = $sidecarProc.ExitCode
+            if ($sidecarExitCode -eq 16) {
+                Write-Fail "前置失败（Existing 缺可读密码）：sidecar exit 16（PASSWORD_FAILED）；不计为 installer 拒绝通过"
+                throw "PRECONDITION FAILED: sidecar exit 16 (PASSWORD_FAILED) on Existing PGDATA"
+            }
+            Write-Fail "sidecar 在 ready 前退出（exit=$sidecarExitCode）；不计为 installer 拒绝通过"
+            throw "PRECONDITION FAILED: sidecar exited before ready (exit=$sidecarExitCode)"
+        }
+
+        # ready JSON schema 必须与 Rust protocol.rs 一致；未通过前不得进入 installer 拒绝断言。
+        $ready = $readyLine | ConvertFrom-Json
+        Assert-True ($ready.schema -eq $SidecarReadySchema) "sidecar ready JSON schema: $($ready.schema)"
+        Assert-True ($ready.status -eq "running") "sidecar ready status: running"
+        # 继续异步消费 stdout 余量（运行期 warning/exit JSON-lines），避免关闭阶段管道阻塞。
+        $stdoutRestTask = $sidecarProc.StandardOutput.ReadToEndAsync()
 
         # STEP 7: sidecar 运行中尝试安装（应被拒绝）
         Write-Step "7. Attempt install while sidecar running (should be rejected, P1-11)"
@@ -131,6 +211,17 @@ try {
         $sidecarAfter = Get-Process -Id $sidecarProc.Id -ErrorAction SilentlyContinue
         Assert-True ($null -ne $sidecarAfter) "sidecar still running (PID: $($sidecarProc.Id))"
         Assert-True (-not $sidecarAfter.HasExited) "sidecar not exited"
+
+        # stdin 保持到安装拒绝断言之后：关闭 stdin 触发优雅停止，有界等待并清理，避免孤儿。
+        try { $sidecarProc.StandardInput.Close() } catch { }
+        if (-not $sidecarProc.WaitForExit($SidecarShutdownTimeoutSec * 1000)) {
+            Stop-Process -Id $sidecarProc.Id -Force -ErrorAction SilentlyContinue
+            Write-Fail "sidecar 未在 $SidecarShutdownTimeoutSec s 内优雅退出"
+            throw "ASSERTION FAILED: sidecar shutdown timeout"
+        }
+        $stdoutRestTask.Wait(5000) | Out-Null
+        $stderrTask.Wait(5000) | Out-Null
+        Assert-True ($sidecarProc.ExitCode -eq 0) "sidecar exited cleanly after stdin EOF (exit code: $($sidecarProc.ExitCode))"
     }
 
     Write-Host "`n=== RUNNING APP REJECTION SMOKE TEST PASSED ===" -ForegroundColor Green
@@ -144,6 +235,8 @@ catch {
     Write-Host "`n=== RUNNING APP REJECTION SMOKE TEST FAILED ===" -ForegroundColor Red
     Write-Host "Error: $_" -ForegroundColor Red
     Write-Host "Stack: $($_.ScriptStackTrace)" -ForegroundColor Red
+    # 失败路径同样回收 sidecar（关闭 stdin → 有界等待 → 强杀），避免孤儿。
+    if ($null -ne $sidecarProc) { Stop-SidecarGraceful $sidecarProc }
     Stop-QtradingGraceful
     exit 1
 }
