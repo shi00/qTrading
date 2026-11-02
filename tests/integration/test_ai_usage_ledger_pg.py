@@ -41,7 +41,7 @@ from data.cache.cache_manager import CacheManager
 from data.persistence.daos.ai_usage_dao import AIUsageDao, SCOPE_CONNECTION, SCOPE_SCENARIO
 from data.persistence.db_url_override import override_db_url
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
-from core.model_management_types import NormalizedLLMUsage
+from core.model_management_types import BudgetReservation, NormalizedLLMUsage
 from tests._helpers import create_test_engine, make_alembic_cfg
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedded_real]
@@ -53,6 +53,9 @@ _LEDGER_TABLE_DELETES = (
     text("DELETE FROM ai_usage_monthly"),
 )
 _LEDGER_LEGACY_KEY_PREFIX = "ai_cost:"
+
+# 场景 5 并发 worker 数：预留与结算各 N 个，每个结算 worker 对应独立 connection id。
+_MIXED_WORKERS = 4
 
 
 def _utcnow_naive() -> datetime.datetime:
@@ -198,6 +201,23 @@ async def _fetch_reservations(dao: AIUsageDao, invocation_id: str) -> list[dict]
         ).fetchone()
     assert row is not None
     return list(row[0])
+
+
+async def _fetch_monthly_cost(dao: AIUsageDao, *, month: str, scope: str, grouping_key: str) -> Decimal:
+    """读取指定月 / scope / grouping_key 的已结算成本（numeric 列读回为 Decimal）。"""
+    assert dao.engine is not None
+    async with dao.engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT cost_cny FROM ai_usage_monthly "
+                    "WHERE month = :m AND aggregation_scope = :s AND grouping_key = :g"
+                ),
+                {"m": month, "s": scope, "g": grouping_key},
+            )
+        ).fetchone()
+    assert row is not None, f"月汇总行不存在: {month}/{scope}/{grouping_key}"
+    return Decimal(str(row[0]))
 
 
 async def _seed_backing_reservation(dao: AIUsageDao, attempt_id: str) -> str:
@@ -566,10 +586,11 @@ class TestConcurrentMixedOpsNoDeadlock:
         month = _current_month()
 
         # F23：缺行结算需活跃预留背书（先串行登记 0.00 预留，再进入并发阶段）
-        rids = [await _seed_backing_reservation(ledger_dao, f"att-mixed-{i}") for i in range(4)]
+        rids = [await _seed_backing_reservation(ledger_dao, f"att-mixed-{i}") for i in range(_MIXED_WORKERS)]
 
         reserve_tasks = [
-            ledger_dao.try_reserve(**_make_reserve_kwargs(f"inv-mixed-{i}", amount="0.10")) for i in range(4)
+            ledger_dao.try_reserve(**_make_reserve_kwargs(f"inv-mixed-{i}", amount="0.10"))
+            for i in range(_MIXED_WORKERS)
         ]
         settle_tasks = [
             ledger_dao.settle_attempt_usage(
@@ -580,26 +601,79 @@ class TestConcurrentMixedOpsNoDeadlock:
                     "reservation_id": rids[i],
                 }
             )
-            for i in range(4)
+            for i in range(_MIXED_WORKERS)
         ]
 
         results = await asyncio.wait_for(asyncio.gather(*reserve_tasks, *settle_tasks), timeout=60.0)
-        assert all(r is not None for r in results), "预算 1.00 内 4 笔 0.10 预留与 4 笔结算应全部成功"
+        reserve_results = results[:_MIXED_WORKERS]
+        settle_results = results[_MIXED_WORKERS:]
+
+        # 每个 worker 的结果必须为真：预留返回 BudgetReservation（None=余额不足/失权），
+        # 结算返回 True（False=未推进：旧修订/无背书/回滚）。不得用 ``is not None``
+        # 把 False 也算作成功（False is not None 为 True，会放过未推进的结算）。
+        for i, reservation in enumerate(reserve_results):
+            assert isinstance(reservation, BudgetReservation), (
+                f"预留 worker {i} 未获准（None=余额不足或 owner 失权），实际 {reservation!r}"
+            )
+            assert reservation.reservation_id == f"res-inv-mixed-{i}", (
+                f"预留 worker {i} 返回意外预留: {reservation.reservation_id}"
+            )
+        for i, settled in enumerate(settle_results):
+            assert settled is True, f"结算 worker {i}（conn-mixed-{i}）未推进（False=回滚/旧修订/无背书）"
+
+        # 逐 worker 核验持久化：月汇总 connection 行与 attempt 行均须存在且字段正确，
+        # 不能只抽查 conn-mixed-0（否则其他 worker 写入失败可被掩盖）。
+        expected_connections = {f"conn-mixed-{i}" for i in range(_MIXED_WORKERS)}
+        expected_attempts = [f"att-mixed-{i}" for i in range(_MIXED_WORKERS)]
 
         assert clean_ledger.engine is not None
         async with clean_ledger.engine.begin() as conn:
-            row = (
+            connection_rows = (
                 await conn.execute(
                     text(
-                        "SELECT attempt_count, cost_cny FROM ai_usage_monthly "
-                        "WHERE month = :m AND aggregation_scope = :s AND grouping_key = :g"
+                        "SELECT grouping_key, attempt_count, succeeded_count, cost_cny FROM ai_usage_monthly "
+                        "WHERE month = :m AND aggregation_scope = :s ORDER BY grouping_key"
                     ),
-                    {"m": month, "s": SCOPE_CONNECTION, "g": "conn-mixed-0"},
+                    {"m": month, "s": SCOPE_CONNECTION},
                 )
-            ).fetchone()
-        assert row is not None
-        assert int(row[0]) == 1
-        assert Decimal(str(row[1])) == Decimal("0.10")
+            ).fetchall()
+            attempt_rows = (
+                await conn.execute(
+                    text(
+                        "SELECT attempt_id, connection_id, accounted_usage_revision, cost_cny FROM ai_attempt "
+                        "ORDER BY attempt_id"
+                    )
+                )
+            ).fetchall()
+
+        assert {row[0] for row in connection_rows} == expected_connections, (
+            f"connection scope 应恰有每个 worker 的独立行，实际 {[row[0] for row in connection_rows]}"
+        )
+        assert len(connection_rows) == _MIXED_WORKERS, (
+            f"connection scope 行数应为 {_MIXED_WORKERS}，实际 {len(connection_rows)}"
+        )
+        for row in connection_rows:
+            assert int(row[1]) == 1, f"{row[0]} attempt_count 应为 1，实际 {row[1]}"
+            assert int(row[2]) == 1, f"{row[0]} succeeded_count 应为 1，实际 {row[2]}"
+            assert Decimal(str(row[3])) == Decimal("0.10"), f"{row[0]} cost_cny 应为 0.10，实际 {row[3]}"
+
+        assert [row[0] for row in attempt_rows] == expected_attempts, (
+            f"每个 worker 的 attempt 行均应落库，实际 {[row[0] for row in attempt_rows]}"
+        )
+        for i, row in enumerate(attempt_rows):
+            assert row[1] == f"conn-mixed-{i}", f"attempt {row[0]} 的 connection_id 应为 conn-mixed-{i}，实际 {row[1]}"
+            assert int(row[2]) == 1, f"attempt {row[0]} accounted_usage_revision 应为 1，实际 {row[2]}"
+            assert Decimal(str(row[3])) == Decimal("0.10"), f"attempt {row[0]} cost_cny 应为 0.10，实际 {row[3]}"
+
+        # 预留写入同样逐 worker 核验：invocation 行内预留已持久化且金额正确。
+        for i in range(_MIXED_WORKERS):
+            reservations = await _fetch_reservations(ledger_dao, f"inv-mixed-{i}")
+            assert [r["state"] for r in reservations] == ["reserved"], (
+                f"inv-mixed-{i} 预留状态应为 reserved，实际 {[r['state'] for r in reservations]}"
+            )
+            assert Decimal(str(reservations[0]["amount_cny"])) == Decimal("0.10"), (
+                f"inv-mixed-{i} 预留金额应为 0.10，实际 {reservations[0]['amount_cny']}"
+            )
 
 
 class TestF22ReservationLifecycle:
@@ -867,7 +941,8 @@ class TestAmountGuardContract:
     单测以 mock 断言 SQL 语义；本类在真实 PG 上验证：
     - 垃圾金额（负数 / NaN / 非法字符）入口契约化 ValueError，零落库；
     - 历史 jsonb 垃圾预留（validator 生效前写入）不再毒化预算门（crash → 容错降级）；
-    - float cost 归一化落库无二进制噪音（相邻移交）。
+    - float cost 归一化落库无二进制噪音（非二进制精确值 0.1 / 0.1+0.2+0.07 累加 /
+      超列精度 0.123456795 的 numeric(24,8) 舍入语义）。
     """
 
     @pytest.mark.asyncio(loop_scope="session")
@@ -1004,13 +1079,17 @@ class TestAmountGuardContract:
 
     @pytest.mark.asyncio(loop_scope="session")
     async def test_settle_float_cost_persists_without_binary_noise(self, ledger_dao: AIUsageDao):
-        """相邻移交：float cost 归一为最短往返串落库（修复前 Decimal(float) 全长展开
-        入 numeric 列——PG 无精度 numeric 原样存储 55 位二进制噪音，读回 ≠ 0.50）。"""
+        """float cost 归一为最短往返串后精确落库（0.1 二进制不可精确表示）。
+
+        ``0.5`` 在二进制中可精确表示，无法暴露 ``Decimal(float)`` 全长展开缺陷；
+        本用例改用 ``0.1``，断言 attempt 行与 scenario / connection 两 scope 月汇总
+        读回的均恰为 ``0.1``。
+        """
+        month = _current_month()
         rid = await _seed_backing_reservation(ledger_dao, "att-d3-float")
-        settled = await ledger_dao.settle_attempt_usage(
-            **{**_make_settle_kwargs("att-d3-float", month=_current_month(), cost_cny=0.5), "reservation_id": rid}
+        assert await ledger_dao.settle_attempt_usage(
+            **{**_make_settle_kwargs("att-d3-float", month=month, cost_cny=0.1), "reservation_id": rid}
         )
-        assert settled is True
         assert ledger_dao.engine is not None
         async with ledger_dao.engine.begin() as conn:
             row = (
@@ -1020,4 +1099,82 @@ class TestAmountGuardContract:
                 )
             ).fetchone()
         assert row is not None
-        assert Decimal(str(row[0])) == Decimal("0.50"), "费用落库必须为规范十进制值"
+        assert Decimal(str(row[0])) == Decimal("0.1"), "0.1 归一化后费用落库必须精确"
+        assert await _fetch_monthly_cost(
+            ledger_dao, month=month, scope=SCOPE_SCENARIO, grouping_key="scn-itest"
+        ) == Decimal("0.1"), "scenario 月汇总须精确累加 0.1"
+        assert await _fetch_monthly_cost(
+            ledger_dao, month=month, scope=SCOPE_CONNECTION, grouping_key="conn-itest"
+        ) == Decimal("0.1"), "connection 月汇总须精确累加 0.1"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_non_binary_float_costs_accumulate_exactly(self, ledger_dao: AIUsageDao):
+        """0.1 + 0.2 + 0.07（均二进制不可精确表示）逐笔结算后精确累加为 0.37。
+
+        Python float 直接相加得 ``0.37000000000000005``；本用例以 numeric 列的
+        十进制精确和作为 oracle，覆盖「存储 → 读取 → 累加」全链路精度语义。
+        """
+        month = _current_month()
+        costs = (0.1, 0.2, 0.07)
+        for i, cost in enumerate(costs):
+            rid = await _seed_backing_reservation(ledger_dao, f"att-accum-{i}")
+            assert await ledger_dao.settle_attempt_usage(
+                **{
+                    **_make_settle_kwargs(
+                        f"att-accum-{i}", month=month, cost_cny=cost, connection_id=f"conn-accum-{i}"
+                    ),
+                    "reservation_id": rid,
+                }
+            ), f"第 {i} 笔非二进制浮点费用结算失败"
+
+        assert ledger_dao.engine is not None
+        async with ledger_dao.engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT attempt_count, cost_cny FROM ai_usage_monthly "
+                        "WHERE month = :m AND aggregation_scope = :s AND grouping_key = :g"
+                    ),
+                    {"m": month, "s": SCOPE_SCENARIO, "g": "scn-itest"},
+                )
+            ).fetchone()
+        assert row is not None
+        assert int(row[0]) == len(costs), "三笔结算应全部计入 scenario 汇总"
+        assert Decimal(str(row[1])) == Decimal("0.37"), "0.1 + 0.2 + 0.07 必须精确累加为 0.37，而非浮点漂移值"
+
+        for i, cost in enumerate(costs):
+            conn_cost = await _fetch_monthly_cost(
+                ledger_dao, month=month, scope=SCOPE_CONNECTION, grouping_key=f"conn-accum-{i}"
+            )
+            assert conn_cost == Decimal(str(cost)), f"connection 行 conn-accum-{i} 须保留各自精确费用"
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_float_cost_over_column_scale_rounds_half_away_from_zero(self, ledger_dao: AIUsageDao):
+        """0.123456795（9 位小数、二进制不可精确表示）按 numeric(24,8) 半离零舍入。
+
+        ``str(float)`` 最短往返串 ``"0.123456795"`` 精确入 numeric 后舍入为
+        ``0.12345680``；若未归一化直接绑 float，asyncpg 以 ``Decimal(float)`` 全长
+        展开（二进制值略小于十进制字面量），读回 ``0.12345679``——本用例据此区分
+        两种路径，并断言 attempt 与月汇总采用同一舍入语义。
+        """
+        month = _current_month()
+        rid = await _seed_backing_reservation(ledger_dao, "att-d3-round")
+        assert await ledger_dao.settle_attempt_usage(
+            **{
+                **_make_settle_kwargs("att-d3-round", month=month, cost_cny=0.123456795),
+                "reservation_id": rid,
+            }
+        )
+        assert ledger_dao.engine is not None
+        async with ledger_dao.engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT cost_cny FROM ai_attempt WHERE attempt_id = :aid"),
+                    {"aid": "att-d3-round"},
+                )
+            ).fetchone()
+        assert row is not None
+        assert Decimal(str(row[0])) == Decimal("0.12345680"), "超列精度金额须按 numeric(24,8) 半离零舍入"
+        assert await _fetch_monthly_cost(
+            ledger_dao, month=month, scope=SCOPE_SCENARIO, grouping_key="scn-itest"
+        ) == Decimal("0.12345680"), "月汇总累加须与 attempt 采用同一舍入语义"
