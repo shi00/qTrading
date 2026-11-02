@@ -462,6 +462,9 @@ mod pwfile_fault {
     pub enum Mode {
         None,
         Write,
+        // 仅 Unix 的 prepare_pwfile 0600 分支会构造 Chmod；Windows 无权限位，
+        // 若不加平台限定会在 `-D warnings` 下触发 dead_code。
+        #[cfg(unix)]
         Chmod,
     }
 
