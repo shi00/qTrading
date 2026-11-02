@@ -56,36 +56,40 @@ class TestSchemaPathEquivalence:
         params = pg_params
         db_name = f"schema_initdb_{uuid.uuid4().hex[:8]}"
 
-        conn = await asyncpg.connect(
-            host=params["host"],
-            port=params["port"],
-            user=params["user"],
-            password=params["password"],
-            database="postgres",
-        )
-        await conn.execute(f'CREATE DATABASE "{db_name}"')
-        await conn.close()
+        engine = None
+        try:
+            conn = await asyncpg.connect(
+                host=params["host"],
+                port=params["port"],
+                user=params["user"],
+                password=params["password"],
+                database="postgres",
+            )
+            await conn.execute(f'CREATE DATABASE "{db_name}"')
+            await conn.close()
 
-        sync_db_url, async_db_url = build_db_urls(params, db_name)
+            sync_db_url, async_db_url = build_db_urls(params, db_name)
 
-        engine = create_test_engine(async_db_url)
+            engine = create_test_engine(async_db_url)
 
-        # 路径 A: 使用 init_db (内部走 metadata.create_all)
-        with override_db_url(sync_db_url):
-            await DatabaseMigrator.init_db(engine, auto_migrate=True)
+            # 路径 A: 使用 init_db (内部走 metadata.create_all)
+            with override_db_url(sync_db_url):
+                await DatabaseMigrator.init_db(engine, auto_migrate=True)
 
-        yield sync_db_url
-
-        await engine.dispose()
-        conn = await asyncpg.connect(
-            host=params["host"],
-            port=params["port"],
-            user=params["user"],
-            password=params["password"],
-            database="postgres",
-        )
-        await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
-        await conn.close()
+            yield sync_db_url
+        finally:
+            # 清理必须在 setup 失败时也执行（R7）：DROP 置于 finally。
+            if engine is not None:
+                await engine.dispose()
+            conn = await asyncpg.connect(
+                host=params["host"],
+                port=params["port"],
+                user=params["user"],
+                password=params["password"],
+                database="postgres",
+            )
+            await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+            await conn.close()
 
     @pytest_asyncio.fixture
     async def db_via_alembic(self, pg_params):
@@ -93,34 +97,36 @@ class TestSchemaPathEquivalence:
         params = pg_params
         db_name = f"schema_alembic_{uuid.uuid4().hex[:8]}"
 
-        conn = await asyncpg.connect(
-            host=params["host"],
-            port=params["port"],
-            user=params["user"],
-            password=params["password"],
-            database="postgres",
-        )
-        await conn.execute(f'CREATE DATABASE "{db_name}"')
-        await conn.close()
+        try:
+            conn = await asyncpg.connect(
+                host=params["host"],
+                port=params["port"],
+                user=params["user"],
+                password=params["password"],
+                database="postgres",
+            )
+            await conn.execute(f'CREATE DATABASE "{db_name}"')
+            await conn.close()
 
-        sync_db_url, _ = build_db_urls(params, db_name)
+            sync_db_url, _ = build_db_urls(params, db_name)
 
-        # 路径 B: 直接使用 Alembic upgrade
-        with override_db_url(sync_db_url):
-            cfg = make_alembic_cfg(sync_db_url)
-            await asyncio.to_thread(command.upgrade, cfg, "head")
+            # 路径 B: 直接使用 Alembic upgrade
+            with override_db_url(sync_db_url):
+                cfg = make_alembic_cfg(sync_db_url)
+                await asyncio.to_thread(command.upgrade, cfg, "head")
 
-        yield sync_db_url
-
-        conn = await asyncpg.connect(
-            host=params["host"],
-            port=params["port"],
-            user=params["user"],
-            password=params["password"],
-            database="postgres",
-        )
-        await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
-        await conn.close()
+            yield sync_db_url
+        finally:
+            # 清理必须在 setup 失败时也执行（R7）：DROP 置于 finally。
+            conn = await asyncpg.connect(
+                host=params["host"],
+                port=params["port"],
+                user=params["user"],
+                password=params["password"],
+                database="postgres",
+            )
+            await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+            await conn.close()
 
     @pytest.mark.integration
     @pytest.mark.asyncio
