@@ -950,27 +950,59 @@ class TestRuntimeUnavailableCacheTTL:
 
     @pytest.mark.asyncio
     async def test_probe_rollback_restores_runtime_marks(self, tushare_client_mocks):
-        """probe 异常回滚同时还原运行时标记字典，避免残留时间戳让权威负缓存被误判过期。"""
+        """probe 异常回滚同时还原运行时标记字典：旧时间戳恢复、probe 期间新标记消失。
+
+        TP14-T01：入口必须已有运行时时间戳，且 probe 期间必须刷新为与旧值不同的新时间戳，
+        否则回滚前后状态完全相同，测试无法区分「回滚成功恢复旧值」与「根本没有改动 /
+        回滚未执行」。同时让其余 API 探测成功（写入 True），以证明回滚确实执行。
+        """
         client, _, _ = tushare_client_mocks
-        # 入口：top_list 为权威负缓存（无时间戳）
-        client.mark_api_unavailable("top_list")
-        assert "top_list" not in client._capability_runtime_marks
+        # 与生产 get_now() 一致使用 CST(+8) aware datetime，避免混合 naive/aware 掩盖真实缺陷
+        cst_tz = datetime.timezone(datetime.timedelta(hours=8))
+        old_ts = datetime.datetime(2025, 1, 1, 9, 0, 0, tzinfo=cst_tz)
+        new_ts = old_ts + _RUNTIME_UNAVAILABLE_TTL / 2
+        clock: list[datetime.datetime] = [old_ts]
+
+        def fake_now():
+            return clock[0]
+
+        observed_probe_ts: list[datetime.datetime] = []
 
         async def fake_probe_call(api_name, func, **params):
             if api_name == "top_list":
-                # 模拟 probe 期间并发真实调用给 top_list 打上运行时标记
+                # 模拟 probe 期间并发真实调用：刷新 top_list 运行时时间戳，
+                # 并给另一个 API 打上新的运行时标记（回滚后两者都必须消失/还原）。
+                clock[0] = new_ts
                 client.mark_api_unavailable("top_list", runtime=True)
-                # 该 API 探测结果为 None（网络错误）→ probe 主流程对该 API 不写入，
-                # 运行时标记得以保留到回滚路径，从而验证回滚是否还原时间戳字典
+                observed_probe_ts.append(client._capability_runtime_marks["top_list"])
+                client.mark_api_unavailable("moneyflow_hsgt", runtime=True)
+                # 该 API 探测结果为 None（网络错误）→ 主流程不对它写入
                 raise ConnectionError("network error")
-            return None
+            # 其余 API 探测成功 → 主流程写入 True，回滚后必须消失
+            return MagicMock()
 
         client._handle_probe_call = fake_probe_call
-        client.persist_capabilities_to_app_state = AsyncMock(side_effect=RuntimeError("persist failed"))
+        persist_mock = AsyncMock(side_effect=RuntimeError("persist failed"))
+        client.persist_capabilities_to_app_state = persist_mock
 
-        await client.probe_api_capabilities()
+        with patch("data.external.tushare.capability_probe.get_now", side_effect=fake_now):
+            # 入口：top_list 已有运行时负缓存（旧时间戳）
+            client.mark_api_unavailable("top_list", runtime=True)
+            assert client._capability_runtime_marks == {"top_list": old_ts}
 
-        # 回滚后：权威负缓存保留且无运行时时间戳（若仅回滚 cache 会残留时间戳，
-        # 后续 TTL 到期会把权威负缓存误判为可过期）
-        assert client.is_api_available("top_list") is False
-        assert "top_list" not in client._capability_runtime_marks
+            await client.probe_api_capabilities()
+
+            # 证明 persist 确实被调用并失败 → 回滚路径确实执行（而非提前返回）
+            assert persist_mock.await_count == 1
+
+            # 前置条件自检：probe 期间确实制造了与旧值不同的新时间戳
+            assert observed_probe_ts == [new_ts]
+            assert observed_probe_ts[0] != old_ts
+
+            # 回滚后运行时标记字典精确还原为入口快照，旧值恢复且新值全部消失
+            assert client._capability_runtime_marks == {"top_list": old_ts}
+            assert client._capability_cache == {"top_list": False}
+
+            # 运行内（TTL 未到期）top_list 仍为 False；probe 期间写入的 daily=True 已被清除
+            assert client.is_api_available("top_list") is False
+            assert client.is_api_available("daily") is None
