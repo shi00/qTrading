@@ -9,8 +9,9 @@
 mod common;
 
 use common::*;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// #3 sidecar 崩溃后重启：doctor 检测 stale pid → 再次 run 成功（§17.6 #3）。
 #[test]
@@ -308,103 +309,282 @@ fn test_unknown_filesystem_reported_by_doctor() {
 
 /// #28 restore 中断残留 → doctor 列出 `data.restore-*` 残留目录（§17.6 #28 / §13.7.44 / §7.5）。
 ///
-/// 模拟方式：手动创建 `data.restore-<ts>` 兄弟目录（与 sidecar `restore()` 失败路径生成的
-/// 残留目录同构）。真实 kill-mid-restore 测试因 pg_restore 时序不可控而不可靠，故用
-/// 手动创建残留目录的方式验证 doctor 扫描逻辑（与 #31 手动创建 tmp 残留同款策略）。
-///
-/// 清理策略：用 RAII guard（RemoveDirOnDrop）确保残留目录在 panic 时也被清理，
-/// 避免测试失败导致 CI 临时目录累积残留（P1-1）。
+/// D16-T01：不再手工创建残留目录，而是通过 `QTRADING_PG_SIDECAR_INJECT_PAUSE_AT` 同步点
+/// 在恢复后健康检查完成、临时实例仍存活时强杀 sidecar，制造真实 kill-mid-restore。
+/// 断言：源 PGDATA 未被改名/未创建 .bak、残留目录含完整 PGDATA、doctor 报告残留；
+/// 残留目录里的孤儿 postgres 尚未停止，但源目录仍可独立启动（维护安全）。
 #[test]
 fn test_inject_28_restore_interruption_residual() {
     let (_tmp, data_dir) = unique_data_dir("fi_28");
+    let base = data_dir.parent().unwrap().to_path_buf();
+
     let mut child = spawn_run(&data_dir);
     let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    let dump_path = base.join("backup.dump");
+    let (dump_code, dump_stderr) = dump_sidecar_with_stderr(&data_dir, &dump_path);
+    assert_eq!(dump_code, 0, "dump failed: {dump_stderr}");
     graceful_stop(&mut child);
-    let _ = wait_for_exit(&mut child, STOP_TIMEOUT);
+    assert_eq!(wait_for_exit(&mut child, STOP_TIMEOUT), 0);
 
-    // 模拟 restore 中断残留：创建 data.restore-<ts> 兄弟目录
-    let residual_dir = data_dir
-        .parent()
-        .unwrap()
-        .join("data.restore-20260723T120000Z");
-    std::fs::create_dir_all(&residual_dir).unwrap();
-    // 写入半截状态文件模拟中断
-    std::fs::write(residual_dir.join("PG_VERSION"), b"16\n").unwrap();
-    // RAII guard: panic 安全清理残留目录（P1-1）
-    let _guard = RemovePathOnDrop(residual_dir.clone());
+    // 恢复完成健康检查后暂停：临时 postgres 仍在运行，强杀后即留下孤儿实例 + 残留目录。
+    let marker = base.join("restore-health-check.marker");
+    let mut restore = std::process::Command::new(sidecar_path())
+        .arg("restore")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--input")
+        .arg(&dump_path)
+        .env(
+            "QTRADING_PG_SIDECAR_INJECT_PAUSE_AT",
+            "restore_after_health_check",
+        )
+        .env("QTRADING_PG_SIDECAR_INJECT_PAUSE_MARKER", &marker)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn restore with pause injection");
+    wait_for_pause_marker(
+        &marker,
+        Duration::from_secs(60),
+        "restore_after_health_check",
+    );
 
-    // doctor 应列出残留目录
+    let residual = sibling_dirs(&base, "data.restore-")
+        .into_iter()
+        .next()
+        .expect("restore 中间目录应存在");
+    assert!(residual.join("PG_VERSION").exists());
+    let orphan_pid = postmaster_pid(&residual);
+    assert!(
+        orphan_pid.is_some(),
+        "健康检查同步点临时 postgres 应仍在运行"
+    );
+    assert!(
+        orphan_pid.is_some_and(process_alive),
+        "postmaster.pid 记录的实际进程应存活（而非 stale pid）"
+    );
+
+    let _ = restore.kill();
+    let exit = wait_for_exit(&mut restore, Duration::from_secs(30));
+    assert_ne!(exit, 0, "被强杀的 restore 不应报告成功退出");
+
+    // 源 PGDATA 未改动，且没有创建 .bak（尚未进入原子切换）。
+    assert!(
+        data_dir.join("PG_VERSION").exists(),
+        "中断恢复不得改动源 PGDATA"
+    );
+    assert!(
+        sibling_dirs(&base, "data.bak-").is_empty(),
+        "中断恢复不得创建 .bak"
+    );
+
+    // doctor 应列出残留目录与 warning。
     let doc = doctor_json(&data_dir);
     let residuals = doc["restore_residuals"]
         .as_array()
         .expect("restore_residuals array");
     assert!(
-        !residuals.is_empty(),
-        "doctor should list restore residual: {doc}"
+        residuals
+            .iter()
+            .any(|r| r.as_str().unwrap_or_default().contains("data.restore-")),
+        "doctor 应列出 restore 残留: {doc}"
     );
-    assert!(
-        residuals.iter().any(|r| r
-            .as_str()
-            .unwrap_or_default()
-            .contains("data.restore-20260723T120000Z")),
-        "residual path should match: {residuals:?}"
-    );
-    // issues 应含 restore_residual 警告
     let issues = doc["issues"].as_array().expect("issues array");
     assert!(
         issues
             .iter()
             .any(|i| i["code"] == "restore_residual" && i["severity"] == "warning"),
-        "doctor should emit restore_residual warning issue: {doc}"
+        "doctor 应报告 restore_residual warning: {doc}"
     );
+
+    // 清理孤儿 postgres（属于残留目录，不属于源 PGDATA）后再删除残留目录。
+    let _guard = RemovePathOnDrop(residual.clone());
+    if let Some(pid) = orphan_pid {
+        force_kill_process(pid);
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(10) {
+            if !process_alive(pid) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert!(!process_alive(pid), "孤儿 postgres 应被清理");
+    }
+
+    // 源目录仍可维护启动（孤儿实例仅占用残留目录，不阻塞源 PGDATA）。
+    let mut child2 = spawn_run(&data_dir);
+    let ready2 = wait_for_ready(&mut child2, READY_TIMEOUT);
+    assert_eq!(ready2["status"], "running");
+    cleanup_sidecar(&mut child2, &data_dir);
 }
 
-/// #28b dump 中断残留 → doctor 列出 `*.partial` 残留文件（§17.6 #28 对称 / §13.7.44 / §7.5）。
+/// #28b dump 中断残留 → doctor 列出唯一 `*.partial` 残留文件（§17.6 #28 对称 / §13.7.44 / §7.5）。
 ///
-/// 与 #28 对称：#28 验证 `data.restore-*` 目录残留扫描，本测试验证 `*.partial` 文件残留扫描。
-/// 模拟方式：手动创建 `backup.dump.partial` 兄弟文件（与 sidecar `dump()` 失败路径生成的
-/// 半截备份文件同构）。真实 kill-mid-dump 测试因 pg_dump 时序不可控而不可靠，故用
-/// 手动创建残留文件的方式验证 doctor 扫描逻辑。
+/// D16-T01：不再手工创建残留文件，而是在 pg_dump 完成、原子 rename 之前的同步点强杀
+/// sidecar，制造真实 kill-mid-dump。断言：最终输出不存在、唯一临时文件保留且非空、
+/// 输出级 `.lock` 已释放（重试同一路径成功）、doctor 报告 `dump_partial` warning。
 #[test]
 fn test_inject_28b_dump_partial_residual() {
     let (_tmp, data_dir) = unique_data_dir("fi_28b");
+    let base = data_dir.parent().unwrap().to_path_buf();
+
     let mut child = spawn_run(&data_dir);
     let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
-    graceful_stop(&mut child);
-    let _ = wait_for_exit(&mut child, STOP_TIMEOUT);
 
-    // 模拟 dump 中断残留：创建 backup.dump.partial 兄弟文件
-    let partial_file = data_dir
-        .parent()
-        .unwrap()
-        .join("backup-20260723T130000Z.dump.partial");
-    std::fs::write(&partial_file, b"partial dump content").unwrap();
-    // RAII guard: panic 安全清理残留文件（P1-2）
-    let _guard = RemovePathOnDrop(partial_file.clone());
+    let output = base.join("backup.dump");
+    let marker = base.join("dump-before-rename.marker");
+    let mut dump = std::process::Command::new(sidecar_path())
+        .arg("dump")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--output")
+        .arg(&output)
+        .env("QTRADING_PG_SIDECAR_INJECT_PAUSE_AT", "dump_before_rename")
+        .env("QTRADING_PG_SIDECAR_INJECT_PAUSE_MARKER", &marker)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn dump with pause injection");
+    wait_for_pause_marker(&marker, Duration::from_secs(60), "dump_before_rename");
 
-    // doctor 应列出残留文件
+    // 中断点：最终文件尚未出现，唯一 .partial 已写出内容。
+    assert!(
+        !output.exists(),
+        "中断时最终备份文件不得存在（否则半截备份会被当作可用）"
+    );
+    let partials = dump_partials(&base, "backup.dump.");
+    assert_eq!(partials.len(), 1, "应存在且仅存在一个唯一 .partial");
+    assert!(
+        std::fs::metadata(&partials[0]).expect("stat partial").len() > 0,
+        "中断前 pg_dump 应已写出内容"
+    );
+    // F06 输出级锁（不占 PGDATA 维护锁）：进程存活时存在，强杀后 OS 释放锁。
+    let lock_path = PathBuf::from(format!("{}.lock", output.display()));
+    assert!(lock_path.exists(), "F06 输出级 .lock 应已创建");
+
+    let _ = dump.kill();
+    let exit = wait_for_exit(&mut dump, Duration::from_secs(30));
+    assert_ne!(exit, 0, "被强杀的 dump 不应报告成功退出");
+    assert!(!output.exists(), "强杀后最终备份仍不得出现");
+
     let doc = doctor_json(&data_dir);
-    let partials = doc["dump_partials"]
+    let listed = doc["dump_partials"]
         .as_array()
         .expect("dump_partials array");
     assert!(
-        !partials.is_empty(),
-        "doctor should list dump partial: {doc}"
+        listed
+            .iter()
+            .any(|p| p.as_str().unwrap_or_default().contains("backup.dump.")),
+        "doctor 应列出 dump 残留: {doc}"
     );
-    assert!(
-        partials.iter().any(|p| p
-            .as_str()
-            .unwrap_or_default()
-            .contains("backup-20260723T130000Z.dump.partial")),
-        "partial path should match: {partials:?}"
-    );
-    // issues 应含 dump_partial 警告
     let issues = doc["issues"].as_array().expect("issues array");
     assert!(
         issues
             .iter()
             .any(|i| i["code"] == "dump_partial" && i["severity"] == "warning"),
-        "doctor should emit dump_partial warning issue: {doc}"
+        "doctor 应报告 dump_partial warning: {doc}"
+    );
+
+    // 输出锁随进程死亡释放：同一路径重试应成功（且使用新的唯一临时文件）。
+    let _partial_guard = RemovePathOnDrop(partials[0].clone());
+    let (retry_code, retry_stderr) = dump_sidecar_with_stderr(&data_dir, &output);
+    assert_eq!(
+        retry_code, 0,
+        "重试 dump 应成功（输出锁已释放）: {retry_stderr}"
+    );
+    assert!(output.exists(), "重试后最终备份应存在");
+    let _output_guard = RemovePathOnDrop(output.clone());
+
+    cleanup_sidecar(&mut child, &data_dir);
+}
+
+/// #28c restore 在 initdb 阶段失败（复用现有 INJECT_INITDB_FAIL）→ exit 11，源目录不变。
+///
+/// 断言：准确退出码 11、源 PGDATA 完好、无 .bak、无 restore 残留；失败清理后源库仍可启动。
+#[test]
+fn test_inject_28c_restore_initdb_failure_keeps_source() {
+    let (_tmp, data_dir) = unique_data_dir("fi_28c");
+    let base = data_dir.parent().unwrap().to_path_buf();
+
+    let mut child = spawn_run(&data_dir);
+    let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    let dump_path = base.join("backup.dump");
+    let (dump_code, dump_stderr) = dump_sidecar_with_stderr(&data_dir, &dump_path);
+    assert_eq!(dump_code, 0, "dump failed: {dump_stderr}");
+    graceful_stop(&mut child);
+    assert_eq!(wait_for_exit(&mut child, STOP_TIMEOUT), 0);
+
+    let restore = std::process::Command::new(sidecar_path())
+        .arg("restore")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--input")
+        .arg(&dump_path)
+        .env("QTRADING_PG_SIDECAR_INJECT_INITDB_FAIL", "1")
+        .output()
+        .expect("run restore with initdb failure injection");
+    assert_eq!(
+        restore.status.code(),
+        Some(11),
+        "initdb 失败应映射 exit 11; stderr: {}",
+        String::from_utf8_lossy(&restore.stderr)
+    );
+
+    assert!(data_dir.join("PG_VERSION").exists(), "源 PGDATA 应保持不变");
+    assert!(
+        sibling_dirs(&base, "data.bak-").is_empty(),
+        "失败不得创建 .bak"
+    );
+    assert!(
+        sibling_dirs(&base, "data.restore-").is_empty(),
+        "失败路径应清理 restore 中间目录"
+    );
+
+    let mut child2 = spawn_run(&data_dir);
+    let ready2 = wait_for_ready(&mut child2, READY_TIMEOUT);
+    assert_eq!(ready2["status"], "running");
+    cleanup_sidecar(&mut child2, &data_dir);
+}
+
+/// #28d restore 在 pg_restore 阶段失败（损坏备份）→ exit 30，源目录不变且无残留。
+///
+/// 断言：准确退出码 30、源 PG_VERSION 完好、无 .bak、restore 中间目录已清理。
+#[test]
+fn test_inject_28d_restore_pg_restore_failure_keeps_source() {
+    let (_tmp, data_dir) = unique_data_dir("fi_28d");
+    let base = data_dir.parent().unwrap().to_path_buf();
+
+    let mut child = spawn_run(&data_dir);
+    let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    graceful_stop(&mut child);
+    assert_eq!(wait_for_exit(&mut child, STOP_TIMEOUT), 0);
+
+    let corrupt = base.join("corrupt.dump");
+    std::fs::write(&corrupt, b"not a postgres custom-format dump").expect("write corrupt dump");
+
+    let restore = std::process::Command::new(sidecar_path())
+        .arg("restore")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--input")
+        .arg(&corrupt)
+        .output()
+        .expect("run restore with corrupt dump");
+    assert_eq!(
+        restore.status.code(),
+        Some(30),
+        "pg_restore 失败应映射 exit 30; stderr: {}",
+        String::from_utf8_lossy(&restore.stderr)
+    );
+
+    assert!(data_dir.join("PG_VERSION").exists(), "源 PGDATA 应保持不变");
+    assert!(
+        sibling_dirs(&base, "data.bak-").is_empty(),
+        "失败不得创建 .bak"
+    );
+    assert!(
+        sibling_dirs(&base, "data.restore-").is_empty(),
+        "失败路径应清理 restore 中间目录"
     );
 }
 
@@ -569,6 +749,64 @@ fn read_stderr(child: &mut std::process::Child) -> String {
 }
 
 // ---- 辅助函数（与 roundtrip.rs 同款，YAGNI 不抽到 common） ----
+
+/// 列出兄弟目录中名称以 `prefix` 开头的目录（.bak-* / data.restore-*）。
+fn sibling_dirs(base: &Path, prefix: &str) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(base)
+        .unwrap_or_else(|e| panic!("read_dir {}: {e}", base.display()))
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with(prefix) && e.path().is_dir())
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// 列出兄弟文件中以 `prefix` 开头且以 `.partial` 结尾的 dump 临时文件。
+fn dump_partials(base: &Path, prefix: &str) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(base)
+        .unwrap_or_else(|e| panic!("read_dir {}: {e}", base.display()))
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with(prefix) && name.ends_with(".partial") && e.path().is_file()
+        })
+        .map(|e| e.path())
+        .collect();
+    files.sort();
+    files
+}
+
+/// 从 PGDATA/postmaster.pid 读取 postmaster PID（首行）。
+fn postmaster_pid(data_dir: &Path) -> Option<u32> {
+    std::fs::read_to_string(data_dir.join("postmaster.pid"))
+        .ok()?
+        .lines()
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// 等待注入同步点写出的 marker 文件；超时 panic 并指出阶段，避免静默挂起。
+fn wait_for_pause_marker(path: &Path, timeout: Duration, phase: &str) {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            assert_eq!(
+                content.trim(),
+                phase,
+                "marker should record the injected phase"
+            );
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "injection marker not observed within {timeout:?}: {} (phase {phase})",
+        path.display()
+    );
+}
 
 /// RAII guard: 作用域退出时（含 panic）删除目标路径（目录或文件）。
 /// 用于 #28/#28b 测试确保残留物被清理，避免 CI 临时目录累积（P1-1/P1-2）。
