@@ -92,6 +92,14 @@ def make_signature(rel_path: str, issue_type: str, source_line: str) -> tuple[st
 
     归一化：strip + lower，容忍缩进/大小写差异。行号不参与签名，
     因此代码编辑导致的行号漂移不会误报新增。
+
+    契约（有意设计，非缺陷）：按签名种类计数，不含 occurrence 与行号。
+    同一签名在 current 中出现 N 次（N >= 1）与在 baseline 中出现 1 次等价，
+    因此 baseline×1 / current×2（同文件不同测试新增同文本断言）不产生新增。
+    理由：① 容忍行号漂移——编辑文件上方代码不应误报新增；② occurrence 配额属
+    治理改善（更严格的重复实例审查），不是本门禁的缺陷。若未来需要「同签名新增
+    重复实例也阻断」，必须作为治理变更显式改为 Counter/配额语义并配套 baseline
+    迁移，不得静默修改本函数语义。
     """
     return (rel_path, issue_type, source_line.strip().lower())
 
@@ -572,7 +580,14 @@ def save_baseline(
 def compute_new_issues(current: list[WeakAssertion], baseline: list[WeakAssertion]) -> list[WeakAssertion]:
     """对比当前扫描结果与 baseline，返回新增弱断言列表。
 
-    新增 = current 中签名不在 baseline 中的条目（白名单已在 scan_file 阶段过滤）。
+    增量判定为签名集合差：新增 = current 中签名不在 baseline 签名集合中的条目
+    （白名单已在 scan_file 阶段过滤）。按签名种类计数，不含 occurrence 与行号：
+    同一签名新增重复实例不阻断（有意设计，occurrence 配额属治理改善而非缺陷）。
+    因此 baseline×1 / current×2（同文件不同测试新增同文本断言）→ 0 条新增；
+    仅行号漂移 → 0 条新增；rel_path 参与签名，不同文件的同文本仍分别匹配。
+
+    该契约由 tests/unit/test_scan_weak_assertions.py 的 TestDiffMode 固化。
+    本函数只做纯比较：不读取、不写回 baseline 文件（不以扩张 baseline 掩盖新增）。
     """
     baseline_sigs = {make_signature(e.rel_path, e.issue_type, e.source_line) for e in baseline}
     return [e for e in current if make_signature(e.rel_path, e.issue_type, e.source_line) not in baseline_sigs]
