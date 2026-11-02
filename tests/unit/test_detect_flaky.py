@@ -593,3 +593,34 @@ class TestMainFailClosed:
         assert exit_code == 2
         captured = capsys.readouterr()
         assert "无有效运行" in captured.err
+
+    def test_stale_report_in_workdir_is_not_used_as_current_run(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """契约：--workdir 中遗留的 run_1.json 不得冒充本轮报告（本轮未生成时必须返回 2）."""
+        stale_report = tmp_path / "run_1.json"
+        stale_report.write_text(
+            json.dumps(
+                {"summary": {"total": 1, "passed": 1}, "tests": [{"nodeid": "t.py::stale", "outcome": "passed"}]}
+            ),
+            encoding="utf-8",
+        )
+        user_file = tmp_path / "notes.txt"
+        user_file.write_text("keep me", encoding="utf-8")
+
+        def fake_run(*_args, **_kwargs) -> tuple[int, Path]:
+            # 模拟本轮 pytest 未写出报告（如子进程被杀、报告写入失败）
+            return 0, stale_report
+
+        with patch("scripts.detect_flaky.run_pytest_with_json_report", side_effect=fake_run):
+            from scripts.detect_flaky import main
+
+            exit_code = main(["--path", "tests/unit/", "--runs", "1", "--workdir", str(tmp_path)])
+
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        assert "运行 1 未生成 json-report" in captured.err
+        assert "未检测到 flaky 测试" not in captured.out
+        # 旧的同名报告必须被清理（存在等价于本轮刚生成），且不得误删 workdir 下其他文件
+        assert not stale_report.exists()
+        assert user_file.exists()
