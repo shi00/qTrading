@@ -12,17 +12,17 @@
 |------|---------|----------|
 | **本地最小门禁** | 每次小改动后自检 | `ruff check .` + `ruff format --check .` + 变更相关测试 |
 | **变更相关门禁** | 提交前按变更范围自检 | 按 [变更类型 → 最小验证子集](../../CONTRIBUTING.md#变更类型--最小验证子集) 选择 |
-| **CI 全量门禁** | 推送 / PR / 跨层修改 | `ruff`（前置 `lint-fast` job）→ `pre-commit` → 版本一致 → 安全扫描（pip-audit）→ `pyright` → weak assertions → 迁移一致性（`upgrade head`/`check`/`downgrade base`/`upgrade head`）→ ORM 一致性 → 单测 → 集成 → per-file 覆盖率（≥80% 强制 + 分层 advisory）→ diff coverage（strict ≥80%）→ Windows e2e |
+| **CI 全量门禁** | 推送 / PR / 跨层修改 | `ruff`（前置 `lint-fast` / `lint-fast-313` job）→ `pre-commit` → 版本一致 → 安全扫描（pip-audit）→ `pyright` → weak assertions → 迁移一致性（`upgrade head`/`check`/`downgrade base`/`upgrade head`）→ ORM 一致性 → 单测 → 集成 → per-file 覆盖率（≥80% 强制 + 分层 advisory）→ diff coverage（strict ≥80%）→ Windows e2e |
 
 ### CI Job 矩阵
 
 GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量门禁包括：
 
-> **PR 触发范围与 required 门禁**：`ci_cd.yml` 的 `pull_request` 不再设置 `paths` 白名单。main 分支的 required status check 是聚合 job `CI Gate`（另有 `docs-ci.yml` 的 `Docs Consistency Check`），而 workflow 未触发时该 check 会永久停在 Pending 并阻塞合并。变更是否属于代码类改由 `Changes` job 在运行时判定（`scripts/classify_changed_paths.py`，规则与迁移前的 `pull_request.paths` 白名单一致）：非代码类 PR 只跑 `Changes` 与 `lint-fast`，重型 job 依 `needs.changes.outputs.code` 跳过。`CI Gate` 在 `if: always()` 下用 `needs.*.result` 显式校验（`pull_request` 与 `merge_group` 事件均运行，后者为 merge queue 预留），只放行明确允许的跳过（非代码类 PR 的重型 job、dependabot/fork PR 的 Linux 三分体 `ci-checks` / `ci-checks-static` / `ci-checks-db`、代码类 PR 的 `installer-smoke`——其 job 内以变更检测 fail-closed 兜底），上游失败导致的 skipped 一律判不通过，避免「上游失败 → 下游跳过 → 门禁绿灯」。分类所用 GitHub API 失败、fork PR 或变更文件触达 3000 上限时一律按代码类处理（fail-closed）。
+> **PR 触发范围与 required 门禁**：`ci_cd.yml` 的 `pull_request` 不再设置 `paths` 白名单。main 分支的 required status check 是聚合 job `CI Gate`（另有 `docs-ci.yml` 的 `Docs Consistency Check`），而 workflow 未触发时该 check 会永久停在 Pending 并阻塞合并。变更是否属于代码类改由 `Changes` job 在运行时判定（`scripts/classify_changed_paths.py`，规则与迁移前的 `pull_request.paths` 白名单一致）：非代码类 PR 只跑 `Changes`、`lint-fast` 与 `lint-fast-313`，重型 job 依 `needs.changes.outputs.code` 跳过。`CI Gate` 在 `if: always()` 下用 `needs.*.result` 显式校验（`pull_request` 与 `merge_group` 事件均运行，后者为 merge queue 预留），只放行明确允许的跳过（非代码类 PR 的重型 job、dependabot/fork PR 的 Linux 三分体 `ci-checks` / `ci-checks-static` / `ci-checks-db`、代码类 PR 的 `installer-smoke`——其 job 内以变更检测 fail-closed 兜底），上游失败导致的 skipped 一律判不通过，避免「上游失败 → 下游跳过 → 门禁绿灯」。分类所用 GitHub API 失败、fork PR 或变更文件触达 3000 上限时一律按代码类处理（fail-closed）。
 >
 > **main 分支合并策略（PR-only）**：main 由规则集 `main-required-checks` 保护——required checks 为 `CI Gate` 与 `Docs Consistency Check`，并启用 `pull_request` 规则（required approving review 数为 0，即必须经 PR 合并）；直推 main 被禁止，管理员通过 `bypass_mode: pull_request` 获得的是「PR 合并时可绕过 checks」的能力，不是直推许可。
 
-1. **Fast Ruff Check & Format**：`lint-fast` job 跑 Python `3.14`（默认运行时，聚合门禁 `CI Gate` 校验其 `needs.lint-fast.result`），`lint-fast-313` job 跑 Python `3.13`（声明下界兼容性检查）。两者均仅跑 `ruff check` + `ruff format --check`，不安装项目依赖，且均已移除 `continue-on-error`（结果真实上报，不再是前瞻实验项）。拆成独立 job 而非同一 matrix，是为了让聚合门禁的判定语义确定，避免 matrix 合并状态带来的歧义
+1. **Fast Ruff Check & Format**：`lint-fast` job 跑 Python `3.14`（默认运行时），`lint-fast-313` job 跑 Python `3.13`（`requires-python>=3.13` 声明下界的静态解析守卫）。两者均仅跑 `ruff check` + `ruff format --check`，不安装项目依赖，且均已移除 `continue-on-error`（结果真实上报）。聚合门禁 `CI Gate` 分别校验 `needs.lint-fast.result` 与 `needs.lint-fast-313.result`，两者均不允许 skipped。3.13 job 只证明源码在 ruff（`target-version=py313`）规则/语法层面兼容，**不覆盖 3.13 运行时业务兼容**（运行时测试矩阵与发布产物仍为 3.14）。拆成独立 job 而非同一 matrix，是为了让聚合门禁逐项判定，避免 matrix 合并状态带来的歧义
 2. **Pre-commit Hooks** (`ci-checks-static` job：Ruff、格式化、裸 `type: ignore`、requirements 同步、版本一致性、文档一致性、红线自动化、import-linter 架构守护；hook 数量见 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml))
 3. **Security Audit** (`ci-checks-static` job，`scripts/run_pip_audit.py`，扫描 `requirements.txt`、`requirements-optional.txt`、`requirements-dev.txt`，使用 `.security/audit-allowlist.yml`)
 4. **Pyright Type Check** (`ci-checks-static` job，版本见 `ci_cd.yml`，`continue-on-error: false`)。CI 的 `pre-commit run --all-files` 以 `SKIP=pyright-changed,weak-assertion-changed` 跳过两个增量 hook：`--all-files` 会把全仓文件传给 `pass_filenames` hook，使其退化为全量扫描，与本项独立 `pyright` step 及 weak assertions step 完全重复（实测分别约 74.5s / 7.6s）；本地 `pre-commit` 仍保留增量秒级阻断，CI 门禁强度不变
@@ -37,7 +37,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 > **requirements 机器人协作规则（依赖升级期间）**：`requirements-drift` 检出漂移后由 `update-requirements` 创建 `chore/auto-requirements-sync` PR。依赖全量升级的各 Phase PR 在途期间，该 bot PR 只读不改：若其 diff 与本 Phase 目标版本一致，先合入 bot PR 再 rebase 本 PR；否则关闭该 bot PR，待 Phase 合并后由 bot 重新生成。任何 Phase PR 合并后须复跑 `requirements-drift`（上游当日发版会使 main 变红），变红时按同一规则处理，不得在业务 PR 中顺带升级无关包。
 
-> **Python 运行时矩阵**：完整测试矩阵（Code Quality & Tests、Windows Unit、Windows E2E、Windows Build 等）与发布产物统一使用 Python `3.14`；`pyproject.toml` 的 `requires-python` 仍为 `>=3.13`（源码安装下界），由 `lint-fast-313` job 守护。编译型依赖已取证：`psycopg2-binary` 有 cp314 Windows 轮子；`llama-cpp-python` PyPI 仅发源码包（上游已声明 Python 3.14 支持），CI 在 windows-latest / ubuntu-latest 以 MSVC / CMake 源码构建。不升 Python 3.15（`litellm` 声明 `Requires-Python <3.15`）。
+> **Python 运行时矩阵**：完整测试矩阵（Code Quality & Tests、Windows Unit、Windows E2E、Windows Build 等）与发布产物统一使用 Python `3.14`；`pyproject.toml` 的 `requires-python` 仍为 `>=3.13`（源码安装下界），由 `lint-fast-313` job 守护（`CI Gate` 校验其 `needs.lint-fast-313.result`，不允许 skipped）；该 job 仅做 ruff 静态解析检查，不代表 3.13 运行时业务支持。编译型依赖已取证：`psycopg2-binary` 有 cp314 Windows 轮子；`llama-cpp-python` PyPI 仅发源码包（上游已声明 Python 3.14 支持），CI 在 windows-latest / ubuntu-latest 以 MSVC / CMake 源码构建。不升 Python 3.15（`litellm` 声明 `Requires-Python <3.15`）。
 
 ### 版本发布流程与 Release 管理
 
