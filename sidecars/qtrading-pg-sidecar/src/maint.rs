@@ -333,6 +333,15 @@ pub fn doctor(data_dir: &Path) -> Result<(), u8> {
             ),
         ));
     }
+    // D16-R03：无法确认卷类型时 preflight 仍放行（避免误拒绝），但必须在 doctor 中可见。
+    if let preflight::FsKind::Unknown(raw) = &fs_kind {
+        issues.push(warning(
+            "fs_unverified",
+            format!(
+                "无法确认数据目录的文件系统类型（{raw}）；preflight 将放行但无法保证本地日志式 fsync 语义，请核对数据目录是否位于本地磁盘"
+            ),
+        ));
+    }
     let abs = layout
         .data_dir
         .canonicalize()
