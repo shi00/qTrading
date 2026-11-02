@@ -154,6 +154,9 @@ sidecars/qtrading-pg-sidecar dump --data-dir <数据目录> --output <备份文�
 
 输出 PostgreSQL custom format 备份文件，可用 `pg_restore` 工具恢复。
 
+- **不覆盖旧备份**：最终输出文件已存在时 dump 拒绝执行（exit 30），请改用新的输出路径或自行移走旧文件。
+- **并发与临时文件**：同一输出路径的并发 dump 由输出级排他锁互斥（冲突方 exit 30；不同输出可并行）；在线 dump 不占 PGDATA 维护锁。临时文件使用本次任务唯一的 `<output>.<pid>-<时间戳>.partial`，成功后原子改名为最终文件；失败/中断只清理或遗留本任务临时文件，不会删除其他任务的临时文件。
+
 #### 9.4 恢复（restore）
 
 ```bash
@@ -213,7 +216,7 @@ sidecars/qtrading-pg-sidecar maintenance-shell --data-dir <数据目录>
 | 15 | `PREFLIGHT_FAILED` | 资源预检失败：磁盘空间不足 / 目录权限不足 / 文件系统不支持 / 网盘同步路径 / 密码文件权限过宽 | run |
 | 16 | `PASSWORD_FAILED` | 密码文件缺失/为空/不可解密（PGDATA 已存在）或认证不匹配（28P01）；显式恢复目标已有无关凭据、目标 runtime/密码文件不可用或写入失败亦返回此码 | run / dump / restore / maintenance-shell / reset-password |
 | 20 | `STOP_FAILED` | 停止 postgres 失败（分级停止后进程仍存活）；或无法证明 `postmaster.pid` 中的 PID 属于本 PGDATA（拒绝发送信号并保留 PID 文件与诊断）；PG 未运行时 stop 幂等成功返回 0 | stop / run |
-| 30 | `DUMP_RESTORE_FAILED` | 备份/恢复执行失败：备份文件不存在或损坏、版本不兼容、pg_dump/pg_restore 执行失败、恢复目录切换失败等 | dump / restore / reset-password |
+| 30 | `DUMP_RESTORE_FAILED` | 备份/恢复执行失败：备份文件不存在或损坏、版本不兼容、pg_dump/pg_restore 执行失败、恢复目录切换失败、dump 输出已存在或另一任务占用同一输出等 | dump / restore / reset-password |
 | 40 | `DATA_DIR_ABNORMAL` | 数据目录状态异常：非空但无 PG_VERSION、主版本不匹配、pg_control/WAL 损坏嫌疑、关键文件缺失 | run / maintenance-shell / reset-password |
 | 50 | `LOCK_CONFLICT` | 维护锁冲突（qTrading 或另一个维护进程正在使用该 PGDATA），或该 PGDATA 存在活实例（含 sidecar 崩溃后残留的孤儿 postgres，restore 前置校验复用此码）；显式恢复的目标布局维护锁被占用同样返回此码 | run / stop / dump / restore / maintenance-shell / reset-password |
 | 60 | `POSTGRES_DIED` | 监督期间 postgres 意外退出（sidecar 不自动重启） | run |
