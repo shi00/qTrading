@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 # 将项目根目录添加到系统路径以导入 scripts 下的模块
-sys.path.append(str(Path(__file__).parent.parent))
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from scripts.safe_cleanup_branches import (  # noqa: E402 - sys.path 注入后导入
     RemoteBranchCandidate,
