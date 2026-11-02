@@ -1312,6 +1312,7 @@ class TestCacheManagerPrefetchAuxiliaryData:
 
         result = await mgr.prefetch_auxiliary_data(["000001.SZ"])
 
+        assert active == 0, f"全部请求结束后在飞计数应归零，实际仍为 {active} 路（请求未释放/计数泄漏）"
         assert max_active == 7, f"应 7 路并发（gather），实际最大在飞 {max_active} 路"
         assert "000001.SZ" in result
         assert "audit" in result["000001.SZ"], "慢查询结果应被消费（mock 未被调用即签名漂移）"
@@ -2043,6 +2044,8 @@ class TestConcurrentInitDbForce:
             assert mock_migrator.init_db.await_args_list == [call(mgr.engine, auto_migrate=True)] * 5
             # 迁移执行期间不存在重叠：锁把 5 次调用串行化
             assert max_active == 1
+            # 全部调用结束后在飞计数必须归零，否则说明有调用未释放/计数泄漏
+            assert active == 0, f"全部调用结束后在飞计数应归零，实际仍为 {active} 次"
 
     @pytest.mark.asyncio
     async def test_concurrent_init_db_with_force_propagates_migration_failure(self):
