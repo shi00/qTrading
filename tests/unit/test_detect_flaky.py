@@ -20,9 +20,26 @@ from scripts.detect_flaky import (
     identify_flaky_tests,
     parse_json_report,
     run_pytest_with_json_report,
+    validate_run_result,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.meta]
+
+
+def _make_fake_run(runs: list[tuple[str, int]]):
+    """按序写入 json-report，并返回对应 returncode 的 subprocess.run 替身。"""
+    call_count = [0]
+
+    def fake_run(cmd, **_kwargs):
+        idx = call_count[0]
+        call_count[0] += 1
+        report_json, returncode = runs[idx]
+        Path(cmd[cmd.index("--json-report-file") + 1]).write_text(report_json, encoding="utf-8")
+        mock = MagicMock(spec=subprocess.CompletedProcess)
+        mock.returncode = returncode
+        return mock
+
+    return fake_run
 
 
 class TestParseJsonReport:
@@ -79,6 +96,42 @@ class TestParseJsonReport:
             "test_x.py::test_xfail": "xfailed",
             "test_x.py::test_xpass": "xpassed",
         }
+
+
+class TestValidateRunResult:
+    """validate_run_result: 判定单轮结果能否参与 flaky 判定."""
+
+    def test_valid_when_all_passed(self) -> None:
+        """正例：退出码 0 且全部通过，结果有效."""
+        assert validate_run_result(0, {"test_a.py::test_1": "passed"}) is None
+
+    def test_valid_when_returncode_one_and_has_failure(self) -> None:
+        """正例：退出码 1 且报告含 failed，结果有效（可用于 flaky 对比）."""
+        assert validate_run_result(1, {"test_a.py::test_1": "failed"}) is None
+
+    def test_invalid_when_no_tests_collected(self) -> None:
+        """边界：空报告（收集失败/空运行）无效."""
+        assert validate_run_result(0, {}) == "未收集到任何测试（收集失败或空运行）"
+
+    def test_invalid_when_collection_failure_returncode(self) -> None:
+        """边界：pytest 退出码 2（收集中断）无效，即使报告含用例."""
+        assert (
+            validate_run_result(2, {"test_a.py::test_1": "passed"}) == "pytest 退出码 2（收集失败、被中断或运行错误）"
+        )
+
+    def test_invalid_when_returncode_one_but_all_passed(self) -> None:
+        """边界：退出码 1 但报告无失败用例，报告与退出码矛盾，无效."""
+        assert (
+            validate_run_result(1, {"test_a.py::test_1": "passed"})
+            == "pytest 退出码 1 但 json-report 中无 failed/error 用例"
+        )
+
+    def test_invalid_when_returncode_zero_but_has_failure(self) -> None:
+        """边界：退出码 0 但报告含失败用例，报告与退出码矛盾，无效."""
+        assert (
+            validate_run_result(0, {"test_a.py::test_1": "failed"})
+            == "pytest 退出码 0 但 json-report 含 failed/error 用例"
+        )
 
 
 class TestIdentifyFlakyTests:
@@ -224,8 +277,8 @@ class TestRunPytestWithJsonReport:
 
         assert returncode == 0
         assert returned_path == report_path
-        # 验证 subprocess.run 被调用
-        mock_run.assert_called_once()
+        # 验证 subprocess.run 恰好被调用一次
+        assert mock_run.call_count == 1
         cmd = mock_run.call_args[0][0]
         assert "--json-report" in cmd
         assert "--json-report-file" in cmd
@@ -420,3 +473,123 @@ class TestMainIntegration:
         assert "test_x.py::test_flaky" in captured.out
         assert "[2]" in captured.out
         assert "检测到 1 个 flaky 测试" in captured.out
+
+
+class TestMainFailClosed:
+    """main() fail-closed：无有效运行/一致失败必须返回非零，不得冒充「无 flaky」."""
+
+    def test_returns_two_when_collection_fails(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """边界：收集失败（退出码 2、空报告），不得以 0 退出."""
+        empty_report = json.dumps({"summary": {"total": 0, "collected": 0}, "tests": []})
+
+        with patch("subprocess.run", side_effect=_make_fake_run([(empty_report, 2)] * 3)):
+            from scripts.detect_flaky import main
+
+            exit_code = main(["--path", "tests/unit/", "--runs", "3", "--workdir", str(tmp_path)])
+
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        assert "运行 1 无效" in captured.err
+        assert "未收集到任何测试" in captured.err
+        assert "未检测到 flaky 测试" not in captured.out
+
+    def test_returns_two_when_all_rounds_fail_consistently(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """契约：全部轮次一致失败不是「无 flaky」，必须 fail-closed."""
+        failed_report = json.dumps(
+            {
+                "summary": {"total": 1, "failed": 1},
+                "tests": [
+                    {
+                        "nodeid": "test_x.py::test_always_fails",
+                        "outcome": "failed",
+                        "call": {"longrepr": "AssertionError: always"},
+                    }
+                ],
+            }
+        )
+
+        with patch("subprocess.run", side_effect=_make_fake_run([(failed_report, 1)] * 3)):
+            from scripts.detect_flaky import main
+
+            exit_code = main(["--path", "tests/unit/", "--runs", "3", "--workdir", str(tmp_path)])
+
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        assert "一致失败用例" in captured.err
+        assert "test_x.py::test_always_fails" in captured.err
+        assert "未检测到 flaky 测试" not in captured.out
+
+    def test_returns_two_when_unparsable_report(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """边界：json-report 不可解析，不得以 0 退出."""
+        with patch("subprocess.run", side_effect=_make_fake_run([("{not-json", 0)] * 2)):
+            from scripts.detect_flaky import main
+
+            exit_code = main(["--path", "tests/unit/", "--runs", "2", "--workdir", str(tmp_path)])
+
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        assert "json-report 不可解析" in captured.err
+        assert "未检测到 flaky 测试" not in captured.out
+
+    def test_returns_two_when_some_round_invalid(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """边界：部分轮次成功但有一轮收集失败，整体无法判定."""
+        passed_report = json.dumps(
+            {"summary": {"total": 1, "passed": 1}, "tests": [{"nodeid": "t.py::a", "outcome": "passed"}]}
+        )
+        empty_report = json.dumps({"summary": {"total": 0, "collected": 0}, "tests": []})
+
+        with patch(
+            "subprocess.run",
+            side_effect=_make_fake_run([(passed_report, 0), (empty_report, 2), (passed_report, 0)]),
+        ):
+            from scripts.detect_flaky import main
+
+            exit_code = main(["--path", "tests/unit/", "--runs", "3", "--workdir", str(tmp_path)])
+
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        assert "运行 2 无效" in captured.err
+
+    def test_returns_two_when_single_run_fails(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """边界：单轮运行即失败，不得因「不足两轮」而返回 0."""
+        failed_report = json.dumps(
+            {"summary": {"total": 1, "failed": 1}, "tests": [{"nodeid": "t.py::fail", "outcome": "failed"}]}
+        )
+
+        with patch("subprocess.run", side_effect=_make_fake_run([(failed_report, 1)])):
+            from scripts.detect_flaky import main
+
+            exit_code = main(["--path", "tests/unit/", "--runs", "1", "--workdir", str(tmp_path)])
+
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        assert "一致失败用例" in captured.err
+
+    def test_returns_two_when_returncode_one_but_report_all_passed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """边界：退出码与报告矛盾（rc=1 但无失败用例），按无效运行失败关闭."""
+        passed_report = json.dumps(
+            {"summary": {"total": 1, "passed": 1}, "tests": [{"nodeid": "t.py::a", "outcome": "passed"}]}
+        )
+
+        with patch("subprocess.run", side_effect=_make_fake_run([(passed_report, 1)] * 2)):
+            from scripts.detect_flaky import main
+
+            exit_code = main(["--path", "tests/unit/", "--runs", "2", "--workdir", str(tmp_path)])
+
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        assert "退出码 1 但 json-report 中无 failed/error 用例" in captured.err
+
+    def test_returns_two_when_runs_is_zero(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        """边界：--runs 0 没有任何有效运行，不得以 0 退出."""
+        from scripts.detect_flaky import main
+
+        exit_code = main(["--path", "tests/unit/", "--runs", "0", "--workdir", str(tmp_path)])
+
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        assert "无有效运行" in captured.err
