@@ -112,7 +112,15 @@ def _snapshot(candidates: tuple[dict, ...], connections: tuple[ResolvedConnectio
     )
 
 
-def _request(deadline: float = 1_000_000.0) -> InferenceRequest:
+# TP16-F01：默认截止必须相对当前事件循环单调时钟构造（不得硬编码绝对秒数）——
+# 宿主单调时钟原点 ≥ 硬编码值（如 uptime 超过约 11.6 天）时，正常成功 / 取消
+# 用例会在 adapter.invoke 前被判 deadline exhausted。30s 预算覆盖重试与取消清理。
+_REQUEST_DEADLINE_BUDGET_S = 30.0
+
+
+def _request(deadline: float | None = None) -> InferenceRequest:
+    if deadline is None:
+        deadline = asyncio.get_running_loop().time() + _REQUEST_DEADLINE_BUDGET_S
     return InferenceRequest(
         scenario_id="news_sentiment",
         task_id="sentiment",
@@ -2085,6 +2093,120 @@ class TestF29DeadlineEnforcement:
 
         assert result.status == "succeeded"
         assert permit.locked() is False
+
+
+class TestF01DeadlineClockOriginIndependence:
+    """TP16-F01：请求截止必须相对当前单调时钟构造，不得依赖宿主时钟原点。
+
+    helper ``_request`` 默认截止取 ``asyncio.get_running_loop().time() + 预算``；
+    ScenarioExecutor.execute 默认同样取 ``loop.time``。若 helper 硬编码绝对秒数，
+    宿主单调时钟原点 ≥ 该值（uptime 超过约 11.6 天）时，成功 / 取消用例会在
+    adapter.invoke 前被判 deadline exhausted（假失败 / 绕过取消注入点）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_default_request_deadline_tracks_loop_origin(self, monkeypatch):
+        """helper 默认截止随循环时钟原点平移（大原点下不得沿用硬编码绝对值）。"""
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        origin = 2_000_000.0
+        monkeypatch.setattr(loop, "time", lambda: real_time() + origin)
+
+        now = loop.time()
+        request = _request()
+
+        assert now > 1_000_000.0  # 大原点下旧硬编码 deadline 必然已过期
+        assert request.deadline == pytest.approx(now + _REQUEST_DEADLINE_BUDGET_S, abs=0.5)
+
+    @pytest.mark.asyncio
+    async def test_default_request_succeeds_at_large_loop_origin(self, monkeypatch):
+        """端到端：helper 默认截止与未注入 clock 的 executor 共用同一循环时钟。"""
+        loop = asyncio.get_running_loop()
+        real_time = loop.time
+        origin = 2_000_000.0
+        monkeypatch.setattr(loop, "time", lambda: real_time() + origin)
+
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok)
+        result = await executor.execute(
+            _request(), _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)), _validator_ok
+        )
+
+        assert result.status == "succeeded"
+        adapter.invoke.assert_awaited_once()
+        terminal = recorder.submit_terminal.await_args.args[0]
+        assert terminal.status == "succeeded"
+
+    @pytest.mark.asyncio
+    async def test_success_identical_at_zero_and_large_fake_clock_origin(self):
+        """假时钟原点平移：now=0 与 now=200 万下 now+30 的成功结果一致且各调用一次。"""
+        outcomes: list[tuple[str, dict[str, Any]]] = []
+        for origin in (0.0, 2_000_000.0):
+            adapter = _adapter_ok()
+            recorder = _recorder_mock()
+            executor = _executor(adapter, recorder, validate=_validator_ok, clock=lambda origin=origin: origin)
+            result = await executor.execute(
+                _request(deadline=origin + 30.0),
+                _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+                _validator_ok,
+            )
+            assert result.status == "succeeded"
+            adapter.invoke.assert_awaited_once()
+            output = result.outputs[0]
+            assert isinstance(output, ScenarioOutput)
+            outcomes.append((result.status, dict(output.output)))
+
+        assert outcomes[0] == outcomes[1]
+        assert outcomes[0] == ("succeeded", {"label": "中性"})
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates_at_large_fake_clock_origin(self):
+        """大原点下适配器 await 后抛 CancelledError：原样传播 + 终态 cancelled。"""
+        origin = 2_000_000.0
+        adapter = MagicMock()
+
+        async def _cancel(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        adapter.invoke = AsyncMock(side_effect=_cancel)
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok, clock=lambda: origin)
+
+        with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 断言目标即异常类型本身（取消必须裸传播不被包装为失败）
+            await executor.execute(
+                _request(deadline=origin + 30.0),
+                _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+                _validator_ok,
+            )
+
+        adapter.invoke.assert_awaited_once()
+        recorder.submit_terminal.assert_awaited_once()
+        record = recorder.submit_terminal.await_args.args[0]
+        assert record.status == "cancelled"
+        assert record.error_code == "CANCELLED"
+
+    @pytest.mark.asyncio
+    async def test_explicit_past_deadline_still_exhausts_at_large_origin(self):
+        """大原点下显式 now-1 仍按 deadline exhausted 跳过，零预留零适配器调用。"""
+        origin = 2_000_000.0
+        adapter = _adapter_ok()
+        recorder = _recorder_mock()
+        executor = _executor(adapter, recorder, validate=_validator_ok, clock=lambda: origin)
+
+        result = await executor.execute(
+            _request(deadline=origin - 1.0),
+            _snapshot((_candidate(0, "conn-remote"),), (_remote_conn(),)),
+            _validator_ok,
+        )
+
+        assert result.status == "failed"
+        assert len(result.candidate_decisions) == 1
+        decision = result.candidate_decisions[0]
+        assert decision.decision == "skipped"
+        assert decision.reason == "deadline exhausted"
+        adapter.invoke.assert_not_awaited()
+        recorder.try_reserve.assert_not_awaited()
 
 
 class TestReservationAmountEstimation:
