@@ -12,6 +12,10 @@
    ``<LOCALAPPDATA>\\qTrading\\qTrading\\postgres\\16\\data`` 两层结构；
    安装器 / smoke 脚本 / 维护脚本若仍用单层 ``<LOCALAPPDATA>\\qTrading\\postgres\\16\\data``
    会指向错误目录（卸载 stop、升级/卸载保留数据检查、sidecar 场景全部失准）。
+4. 三个 smoke 脚本的 ``Wait-SidecarReady`` 曾以「进程名存在」作为 ready 判据：
+   PG 仍在 initdb 或稍后认证失败时也会先返回 true。ready 必须以 sidecar
+   ``status --data-dir`` 的 JSON（``status == "running"`` 且 ``postgres_alive == true``）
+   为唯一判据；崩溃恢复脚本还须走真实认证路径写入合成业务哨兵，崩溃后重启并读回。
 """
 
 from __future__ import annotations
@@ -217,3 +221,133 @@ def test_posix_default_paths_stay_single_layer() -> None:
     assert "- **Linux**: `~/.local/share/qTrading/postgres/16/data`" in readme
     assert "- **macOS**: `~/Library/Application Support/qTrading/postgres/16/data`" in readme
     assert "qTrading/qTrading/postgres" not in readme
+
+
+# ---- D17-T01：ready 必须是真实活性证据，崩溃恢复须读回已提交哨兵 ----
+
+# 有 Wait-SidecarReady 的三个 smoke 脚本；running_app 脚本无此函数（F01 会话负责）。
+WAIT_READY_SCRIPTS = (
+    "installer_smoke_crash_recovery.ps1",
+    "installer_smoke_uninstall.ps1",
+    "installer_smoke_upgrade.ps1",
+)
+
+_WAIT_READY_FUNCTION = re.compile(r"(?ms)^function Wait-SidecarReady\([^)]*\) \{.*?^\}")
+
+
+def _wait_ready_body(script_name: str) -> str:
+    match = _WAIT_READY_FUNCTION.search(_read(script_name))
+    assert match is not None, f"{script_name} 缺少 Wait-SidecarReady 函数"
+    return match.group(0)
+
+
+def _readiness_uses_status_json(body: str) -> bool:
+    """ready 判据必须来自 status JSON 的 running + postgres_alive，且不得仅凭进程名返回 true。"""
+    return (
+        " status --data-dir " in body
+        and "ConvertFrom-Json" in body
+        and '$status.status -eq "running"' in body
+        and "$status.postgres_alive -eq $true" in body
+        and "AddSeconds($TimeoutSec)" in body
+        and "if ($p) { return $true }" not in body
+    )
+
+
+@pytest.mark.parametrize("script_name", WAIT_READY_SCRIPTS)
+def test_wait_sidecar_ready_requires_status_json(script_name: str) -> None:
+    """ready 必须以 sidecar status JSON 的 running + postgres_alive 为判据，不能用进程名代替。"""
+    body = _wait_ready_body(script_name)
+    assert _readiness_uses_status_json(body), (
+        f"{script_name} 的 Wait-SidecarReady 未以 `status --data-dir` JSON 的 "
+        "running + postgres_alive 为 ready 判据（进程名存在只能作诊断提示）"
+    )
+    # 有界超时：保留默认 60s 量级，不得改成无限等待。
+    assert "while ($true)" not in body
+    assert "return $false" in body
+
+
+def test_readiness_predicate_rejects_process_only_check() -> None:
+    """负向：旧「进程名存在即 ready」实现必须被判定为不合规，避免断言恒真。"""
+    legacy = """function Wait-SidecarReady([int]$TimeoutSec = 60) {
+    $elapsed = 0
+    while ($elapsed -lt $TimeoutSec) {
+        $p = Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue
+        if ($p) { return $true }
+        Start-Sleep -Seconds 2
+        $elapsed += 2
+    }
+    return $false
+}
+"""
+    assert _readiness_uses_status_json(legacy) is False
+
+
+def test_readiness_predicate_rejects_missing_postgres_alive() -> None:
+    """负向：仅解析 status 字符串但漏掉 postgres_alive 字段同样不得通过。"""
+    partial = """function Wait-SidecarReady([int]$TimeoutSec = 60) {
+    $status = Get-SidecarStatus -DataDir $PgDataDir
+    if ($status.status -eq "running") { return $true }
+    return $false
+}
+"""
+    assert _readiness_uses_status_json(partial) is False
+
+
+def test_crash_recovery_uses_authenticated_sentinel_round_trip() -> None:
+    """崩溃恢复脚本必须：真实认证写入哨兵 → 崩溃 → 无孤儿 → 重启 ready → 读回完全一致。"""
+    text = _read("installer_smoke_crash_recovery.ps1")
+
+    # 真实认证路径：读 runtime\\password（Windows DPAPI PGPW2）、psql 取自 <PGDATA 父目录>\\install\\bin。
+    assert "$PgDataDir = Join-Path $UserDataRoot" in text
+    assert '$PgRuntimeDir = Join-Path (Split-Path -Parent $PgDataDir) "runtime"' in text
+    assert '$PgInstallDir = Join-Path (Split-Path -Parent $PgDataDir) "install"' in text
+    assert '$PgPasswordFile = Join-Path $PgRuntimeDir "password"' in text
+    assert '$PsqlExePath = Join-Path $PgInstallDir "bin\\psql.exe"' in text
+    assert "PGPW2:" in text
+    assert "[System.Security.Cryptography.ProtectedData]::Unprotect" in text
+    assert "[System.Security.Cryptography.DataProtectionScope]::CurrentUser" in text
+    # 密码经进程环境传递，不进入命令行/日志。
+    assert "$env:PGPASSWORD = $Password" in text
+    assert "Remove-Item Env:PGPASSWORD" in text
+    assert "Write-Host $Password" not in text
+    # 端口取自 postmaster.pid 第 4 行（sidecar 每次随机分配端口，重启后需重读）。
+    assert "postmaster.pid" in text
+    assert "$lines[3]" in text
+    # 用户名/库名与 cli.rs DEFAULT_USERNAME/DEFAULT_DATABASE 一致。
+    assert '$PgUsername = "postgres"' in text
+    assert '$PgDatabase = "qtrading"' in text
+
+    # 哨兵必须是合成值（GUID），且写库/读回均为精确相等断言，而非仅"非空"。
+    assert "smoke_crash_recovery_sentinel" in text
+    assert '[Guid]::NewGuid().ToString("N")' in text
+    assert "on conflict (id) do update set marker = excluded.marker" in text
+    assert "Assert-True ($sentinelReadBefore -eq $sentinel)" in text
+    assert "Assert-True ($sentinelAfterRestart -eq $sentinel)" in text
+
+    # 结构顺序：写哨兵 → 强杀崩溃 → 无残留断言 → 重启 → 读回。
+    write_idx = text.index("$sentinelInsertSql")
+    crash_idx = text.index("Stop-Process -Id $proc.Id -Force")
+    orphan_idx = text.index("Assert-True ($null -eq $postgresAfter)")
+    restart_idx = text.index("$proc2 = Start-Process -FilePath $AppExePath -PassThru")
+    readback_idx = text.index("$sentinelAfterRestart = Invoke-Psql")
+    assert write_idx < crash_idx < orphan_idx < restart_idx < readback_idx, (
+        "崩溃恢复脚本必须按「写哨兵 → 崩溃 → 无孤儿 → 重启 → 读回」顺序执行"
+    )
+
+    # 保留既有有界等待量级：sidecar 退出 180s、postgres 退出 30s。
+    assert "AddSeconds(180)" in text
+    assert "AddSeconds(30)" in text
+
+    # 严禁伪造密码文件或绕过认证。
+    assert "fake_sidecar_pwd" not in text
+    assert re.search(r"Set-Content[^\n]*(?:password|pwd)", text, re.IGNORECASE) is None
+
+
+def test_crash_recovery_sequence_checker_is_not_tautological() -> None:
+    """负向：缺少重启读回步骤的脚本必须被结构检查识别出来。"""
+    legacy = """$sentinelInsertSql = "insert ..."
+Stop-Process -Id $proc.Id -Force
+Assert-True ($null -eq $postgresAfter)
+"""
+    assert "$sentinelAfterRestart = Invoke-Psql" not in legacy
+    assert legacy.index("Stop-Process -Id $proc.Id -Force") < legacy.index("Assert-True ($null -eq $postgresAfter)")

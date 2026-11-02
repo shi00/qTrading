@@ -17,6 +17,8 @@ $AppInstallDir = Join-Path $env:LOCALAPPDATA "Programs\AStockScreener"
 $AppExePath = Join-Path $AppInstallDir "AStockScreener.exe"
 $UninstallerPath = Join-Path $AppInstallDir "unins000.exe"
 $PgDataDir = Join-Path $env:LOCALAPPDATA "qTrading\qTrading\postgres\16\data"
+# sidecar CLI 位于安装目录 _internal\sidecars（resources/maintenance/README-maintenance.md）
+$SidecarExePath = Join-Path $AppInstallDir "_internal\sidecars\qtrading-pg-sidecar.exe"
 
 # ---- 工具函数 ----
 function Write-Step([string]$msg) { Write-Host "`n[STEP] $msg" -ForegroundColor Cyan }
@@ -26,13 +28,33 @@ function Assert-True([bool]$cond, [string]$msg) {
     if ($cond) { Write-Ok $msg } else { Write-Fail $msg; throw "ASSERTION FAILED: $msg" }
 }
 
+# ready 判据 = sidecar status JSON 的 status == running 且 postgres_alive == true
+# （与 run.rs 一致：ready 表示 PG 已启动；进程名存在只能作诊断提示，不能单独判定 ready）。
 function Wait-SidecarReady([int]$TimeoutSec = 60) {
-    $elapsed = 0
-    while ($elapsed -lt $TimeoutSec) {
-        $p = Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue
-        if ($p) { return $true }
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $sidecarProcessSeen = $false
+    while ((Get-Date) -lt $deadline) {
+        if (Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue) { $sidecarProcessSeen = $true }
+        $status = $null
+        if (Test-Path $SidecarExePath) {
+            try {
+                $raw = @(& $SidecarExePath status --data-dir $PgDataDir 2>$null)
+                if ($LASTEXITCODE -eq 0 -and $raw.Count -gt 0) {
+                    $status = (($raw -join "`n") | ConvertFrom-Json)
+                }
+            } catch {
+                $status = $null
+            }
+        }
+        if ($null -ne $status -and $status.status -eq "running" -and $status.postgres_alive -eq $true) {
+            return $true
+        }
         Start-Sleep -Seconds 2
-        $elapsed += 2
+    }
+    if ($sidecarProcessSeen) {
+        Write-Fail "sidecar process present but status JSON never reported running/postgres_alive within ${TimeoutSec}s"
+    } else {
+        Write-Fail "qtrading-pg-sidecar process never appeared within ${TimeoutSec}s"
     }
     return $false
 }
@@ -92,7 +114,7 @@ try {
     Write-Step "3. Start qTrading & wait for sidecar ready"
     $proc = Start-Process -FilePath $AppExePath -PassThru
     $ready = Wait-SidecarReady -TimeoutSec 60
-    Assert-True $ready "Sidecar process started"
+    Assert-True $ready "Sidecar ready (status JSON: running + postgres_alive)"
 
     # STEP 4: 停止 qTrading（卸载前必须关闭，否则文件占用）
     Write-Step "4. Stop qTrading before uninstall"

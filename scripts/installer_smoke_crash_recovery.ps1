@@ -20,6 +20,18 @@ $AppExePath = Join-Path $AppInstallDir "AStockScreener.exe"
 $UserDataRoot = Join-Path $env:LOCALAPPDATA "qTrading\qTrading"
 # 主程序日志目录（utils/logger.py 的 LOG_DIR）
 $AppLogDir = Join-Path $env:LOCALAPPDATA "AStockScreener\logs"
+# 嵌入 PG 数据目录（<PGDATA 父目录> 下为 install 与 runtime，见 sidecar paths.rs Layout）
+$PgDataDir = Join-Path $UserDataRoot "postgres\16\data"
+$PgInstallDir = Join-Path (Split-Path -Parent $PgDataDir) "install"
+$PgRuntimeDir = Join-Path (Split-Path -Parent $PgDataDir) "runtime"
+$PgPasswordFile = Join-Path $PgRuntimeDir "password"
+$PsqlExePath = Join-Path $PgInstallDir "bin\psql.exe"
+# 与 sidecars/qtrading-pg-sidecar/src/cli.rs 的 DEFAULT_USERNAME / DEFAULT_DATABASE 一致
+$PgUsername = "postgres"
+$PgDatabase = "qtrading"
+$SentinelTable = "smoke_crash_recovery_sentinel"
+# sidecar CLI 位于安装目录 _internal\sidecars（resources/maintenance/README-maintenance.md）
+$SidecarExePath = Join-Path $AppInstallDir "_internal\sidecars\qtrading-pg-sidecar.exe"
 
 # ---- 工具函数 ----
 function Write-Step([string]$msg) { Write-Host "`n[STEP] $msg" -ForegroundColor Cyan }
@@ -29,15 +41,92 @@ function Assert-True([bool]$cond, [string]$msg) {
     if ($cond) { Write-Ok $msg } else { Write-Fail $msg; throw "ASSERTION FAILED: $msg" }
 }
 
+# ready 判据 = sidecar status JSON 的 status == running 且 postgres_alive == true
+# （与 run.rs 一致：ready 表示 PG 已启动；进程名存在只能作诊断提示，不能单独判定 ready）。
 function Wait-SidecarReady([int]$TimeoutSec = 60) {
-    $elapsed = 0
-    while ($elapsed -lt $TimeoutSec) {
-        $p = Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue
-        if ($p) { return $true }
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $sidecarProcessSeen = $false
+    while ((Get-Date) -lt $deadline) {
+        if (Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue) { $sidecarProcessSeen = $true }
+        $status = $null
+        if (Test-Path $SidecarExePath) {
+            try {
+                $raw = @(& $SidecarExePath status --data-dir $PgDataDir 2>$null)
+                if ($LASTEXITCODE -eq 0 -and $raw.Count -gt 0) {
+                    $status = (($raw -join "`n") | ConvertFrom-Json)
+                }
+            } catch {
+                $status = $null
+            }
+        }
+        if ($null -ne $status -and $status.status -eq "running" -and $status.postgres_alive -eq $true) {
+            return $true
+        }
         Start-Sleep -Seconds 2
-        $elapsed += 2
+    }
+    if ($sidecarProcessSeen) {
+        Write-Fail "sidecar process present but status JSON never reported running/postgres_alive within ${TimeoutSec}s"
+    } else {
+        Write-Fail "qtrading-pg-sidecar process never appeared within ${TimeoutSec}s"
     }
     return $false
+}
+
+# Windows DPAPI 密码文件（sidecar password.rs：`PGPW2:<hex>`，CurrentUser 作用域）；
+# 无前缀按明文读（Unix 或升级前旧格式）。严禁伪造密码文件或绕过认证。
+function Read-PgPassword([string]$PasswordFile) {
+    if (-not (Test-Path $PasswordFile)) { throw "password file missing: $PasswordFile" }
+    $rawText = Get-Content -Path $PasswordFile -Raw
+    if ([string]::IsNullOrEmpty($rawText)) { throw "password file empty: $PasswordFile" }
+    $raw = $rawText.Trim()
+    if ([string]::IsNullOrEmpty($raw)) { throw "password file blank: $PasswordFile" }
+    if (-not $raw.StartsWith("PGPW2:")) { return $raw }
+    $hex = $raw.Substring(6)
+    if ($hex.Length -eq 0 -or ($hex.Length % 2) -ne 0) { throw "DPAPI password blob hex length invalid" }
+    Add-Type -AssemblyName System.Security
+    $blob = New-Object byte[] ([int]($hex.Length / 2))
+    for ($i = 0; $i -lt $blob.Length; $i++) {
+        $blob[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16)
+    }
+    $plainBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+        $blob, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+    $plain = [System.Text.Encoding]::UTF8.GetString($plainBytes)
+    if ([string]::IsNullOrEmpty($plain)) { throw "DPAPI password decrypt returned empty value" }
+    return $plain
+}
+
+# 端口取自 postmaster.pid 第 4 行（sidecar 每次启动随机分配端口，重启后必须重读）。
+function Get-PostgresPort([string]$DataDir) {
+    $pidFile = Join-Path $DataDir "postmaster.pid"
+    if (-not (Test-Path $pidFile)) { throw "postmaster.pid missing: $pidFile" }
+    $lines = @(Get-Content -Path $pidFile)
+    if ($lines.Count -lt 4) { throw "postmaster.pid has fewer than 4 lines (port required)" }
+    $portText = ([string]$lines[3]).Trim()
+    $parsed = 0
+    if (-not [int]::TryParse($portText, [ref]$parsed) -or $parsed -lt 1 -or $parsed -gt 65535) {
+        throw "postmaster.pid port invalid: $portText"
+    }
+    return $parsed
+}
+
+# 真实认证路径执行 SQL：密码经 PGPASSWORD 进程环境传递（不进入命令行/日志），调用后清理。
+function Invoke-Psql([string]$Password, [int]$Port, [string]$Sql) {
+    if (-not (Test-Path $PsqlExePath)) { throw "psql not found: $PsqlExePath" }
+    $previousPassword = $env:PGPASSWORD
+    $env:PGPASSWORD = $Password
+    try {
+        $output = @(& $PsqlExePath -h 127.0.0.1 -p $Port -U $PgUsername -d $PgDatabase -v ON_ERROR_STOP=1 -t -A -c $Sql 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "psql failed (exit $LASTEXITCODE): $($output -join ' ')"
+        }
+        return (($output -join "`n").Trim())
+    } finally {
+        if ($null -ne $previousPassword) {
+            $env:PGPASSWORD = $previousPassword
+        } else {
+            Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Write-Diagnostics([string]$reason) {
@@ -138,10 +227,22 @@ try {
         # （主程序若在启动阶段抛 EmbeddedPostgresStartError 会停在 PreInitErrorView，不写 stdout）
         Write-Diagnostics "sidecar not ready within 60s after app start"
     }
-    Assert-True $ready "Sidecar process started"
+    Assert-True $ready "Sidecar ready (status JSON: running + postgres_alive)"
 
-    # STEP 4: 记录 sidecar 与 postgres 进程
-    Write-Step "4. Record sidecar & postgres processes"
+    # STEP 4: 崩溃前写入「已提交的合成业务哨兵」（真实认证路径，非敏感数据；禁止伪造密码/绕过认证）
+    Write-Step "4. Write committed synthetic business sentinel (authenticated psql)"
+    $sentinel = "d17-t01-" + [Guid]::NewGuid().ToString("N")
+    $pgPassword = Read-PgPassword -PasswordFile $PgPasswordFile
+    $portBefore = Get-PostgresPort -DataDir $PgDataDir
+    $sentinelCreateSql = "create table if not exists $SentinelTable (id integer primary key, marker text not null)"
+    $sentinelInsertSql = "insert into $SentinelTable (id, marker) values (1, '$sentinel') on conflict (id) do update set marker = excluded.marker"
+    Invoke-Psql -Password $pgPassword -Port $portBefore -Sql $sentinelCreateSql | Out-Null
+    Invoke-Psql -Password $pgPassword -Port $portBefore -Sql $sentinelInsertSql | Out-Null
+    $sentinelReadBefore = Invoke-Psql -Password $pgPassword -Port $portBefore -Sql "select marker from $SentinelTable where id = 1"
+    Assert-True ($sentinelReadBefore -eq $sentinel) "Synthetic sentinel committed & read back before crash"
+
+    # STEP 5: 记录 sidecar 与 postgres 进程
+    Write-Step "5. Record sidecar & postgres processes"
     $sidecarBefore = Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue
     Assert-True ($null -ne $sidecarBefore) "Sidecar process exists before crash"
     Write-Host "  Sidecar PID(s) before crash: $($sidecarBefore.Id -join ',')"
@@ -153,19 +254,19 @@ try {
         Write-Host "  Postgres: (no postgres.exe process detected, may be embedded in sidecar)"
     }
 
-    # STEP 5: 失败注入 - 强制 kill 主进程（不触发优雅停机）
-    Write-Step "5. FAILURE INJECTION: Force kill main qTrading process (simulate crash)"
+    # STEP 6: 失败注入 - 强制 kill 主进程（不触发优雅停机）
+    Write-Step "6. FAILURE INJECTION: Force kill main qTrading process (simulate crash)"
     if ($proc -and -not $proc.HasExited) {
         # 使用 Stop-Process -Force 模拟进程崩溃，不经过 qTrading 的 shutdown handler
         Stop-Process -Id $proc.Id -Force
         Write-Ok "Main process killed (PID: $($proc.Id))"
     }
 
-    # STEP 6: 等待 sidecar 自行退出（父进程兜底机制：`--parent-pid` 每 500ms 轮询 + stdin EOF）
+    # STEP 7: 等待 sidecar 自行退出（父进程兜底机制：`--parent-pid` 每 500ms 轮询 + stdin EOF）
     # 注意：sidecar 的父进程检测循环在 postgres ready（打印 ready JSON）之后才启动；
     # 首次启动（initdb）期间父进程被杀时，sidecar 会先完成 initdb 再检测到父进程消失，
     # 实测可耗时数十秒，因此上限取 180s（原先固定 5s 会必然失败，且代码中并无 Job Object）。
-    Write-Step "6. Wait for sidecar to exit after parent crash (up to 180s)"
+    Write-Step "7. Wait for sidecar to exit after parent crash (up to 180s)"
     $waitStarted = Get-Date
     $deadline = $waitStarted.AddSeconds(180)
     $sidecarAfter = Get-Process -Name "qtrading-pg-sidecar" -ErrorAction SilentlyContinue
@@ -181,12 +282,12 @@ try {
         Write-Host "  sidecar exited after ~${waitedSecs}s"
     }
 
-    # STEP 7: 验证 sidecar 无残留（核心断言：父进程崩溃后 sidecar 最终自行退出）
-    Write-Step "7. Verify no residual sidecar process (parent-loss watchdog exited it)"
+    # STEP 8: 验证 sidecar 无残留（核心断言：父进程崩溃后 sidecar 最终自行退出）
+    Write-Step "8. Verify no residual sidecar process (parent-loss watchdog exited it)"
     Assert-True ($null -eq $sidecarAfter) "No residual sidecar process after main crash"
 
-    # STEP 8: 验证 postgres 无残留（sidecar 退出后由 graceful stop 关闭 postgres，留出停机余量）
-    Write-Step "8. Verify no residual postgres process"
+    # STEP 9: 验证 postgres 无残留（sidecar 退出后由 graceful stop 关闭 postgres，留出停机余量）
+    Write-Step "9. Verify no residual postgres process"
     $postgresAfter = Get-Process -Name "postgres" -ErrorAction SilentlyContinue
     $pgDeadline = (Get-Date).AddSeconds(30)
     while ($postgresAfter -and (Get-Date) -lt $pgDeadline) {
@@ -199,8 +300,24 @@ try {
     }
     Assert-True ($null -eq $postgresAfter) "No residual postgres process after main crash"
 
+    # STEP 10: 崩溃/退出后重启应用，等待真实 ready（status JSON: running + postgres_alive）
+    Write-Step "10. Restart qTrading & wait for real sidecar ready"
+    $proc2 = Start-Process -FilePath $AppExePath -PassThru
+    $ready2 = Wait-SidecarReady -TimeoutSec 60
+    if (-not $ready2) {
+        Write-Diagnostics "sidecar not ready within 60s after restart"
+    }
+    Assert-True $ready2 "Sidecar ready after restart (status JSON: running + postgres_alive)"
+
+    # STEP 11: 读回哨兵并断言与崩溃前完全一致（已提交事务在崩溃恢复后仍可见）
+    Write-Step "11. Read back sentinel after restart & assert exact match"
+    $portAfterRestart = Get-PostgresPort -DataDir $PgDataDir
+    $sentinelAfterRestart = Invoke-Psql -Password $pgPassword -Port $portAfterRestart -Sql "select marker from $SentinelTable where id = 1"
+    Assert-True ($sentinelAfterRestart -eq $sentinel) "Synthetic sentinel survived crash & restart unchanged"
+
+    Stop-QtradingGraceful
     Write-Host "`n=== CRASH RECOVERY SMOKE TEST PASSED ===" -ForegroundColor Green
-    Write-Host "Parent-crash recovery verified: parent crash -> sidecar exits (parent-loss watchdog), postgres shut down" -ForegroundColor Green
+    Write-Host "Verified: committed sentinel survives crash+restart; parent crash -> sidecar exits (parent-loss watchdog), postgres shut down" -ForegroundColor Green
     exit 0
 }
 catch {
