@@ -10,6 +10,7 @@ Each test creates isolated databases to compare the two approaches.
 """
 
 import asyncio
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -26,6 +27,8 @@ from data.persistence.models import Base
 pytestmark = pytest.mark.integration
 
 EXCLUDED_COLS = set()
+
+logger = logging.getLogger(__name__)
 
 
 def _get_pg_connection_params() -> dict:
@@ -82,8 +85,10 @@ def metadata_db_engine(pg_params):
     """Create an isolated database and initialize with metadata.create_all()."""
     db_name = f"meta_test_{uuid.uuid4().hex[:8]}"
     params = pg_params
+    created = False
 
     async def _create_db():
+        nonlocal created
         conn = await asyncpg.connect(
             host=params["host"],
             port=params["port"],
@@ -91,8 +96,13 @@ def metadata_db_engine(pg_params):
             password=params["password"],
             database="postgres",
         )
-        await conn.execute(f'CREATE DATABASE "{db_name}"')
-        await conn.close()
+        try:
+            await conn.execute(f'CREATE DATABASE "{db_name}"')
+            # CREATE 执行成功即视为本测试拥有该库：即使随后 close 失败，
+            # 清理阶段也应尝试 DROP，避免残留库。
+            created = True
+        finally:
+            await conn.close()
 
     async def _drop_db():
         conn = await asyncpg.connect(
@@ -102,8 +112,10 @@ def metadata_db_engine(pg_params):
             password=params["password"],
             database="postgres",
         )
-        await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
-        await conn.close()
+        try:
+            await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+        finally:
+            await conn.close()
 
     engine = None
     try:
@@ -119,10 +131,18 @@ def metadata_db_engine(pg_params):
 
         yield engine, db_name
     finally:
-        # Cleanup must also run if setup fails before yield (R7).
+        # 清理项逐项捕获并告警：清理失败不得覆盖 setup/test 的原始异常（R7）。
+        # DROP 仅在 CREATE 确实成功（created=True）时执行，避免误删非本测试拥有的库。
         if engine is not None:
-            engine.dispose()
-        asyncio.run(_drop_db())
+            try:
+                engine.dispose()
+            except Exception as e:
+                logger.warning("[metadata_db_engine] engine.dispose() failed during teardown: %s", e)
+        if created:
+            try:
+                asyncio.run(_drop_db())
+            except Exception as e:
+                logger.warning("[metadata_db_engine] DROP DATABASE failed during teardown: %s", e)
 
 
 @pytest.fixture(scope="module")
@@ -130,8 +150,10 @@ def alembic_db_engine(pg_params):
     """Create an isolated database and initialize with Alembic migrations."""
     db_name = f"alembic_test_{uuid.uuid4().hex[:8]}"
     params = pg_params
+    created = False
 
     async def _create_db():
+        nonlocal created
         conn = await asyncpg.connect(
             host=params["host"],
             port=params["port"],
@@ -139,8 +161,13 @@ def alembic_db_engine(pg_params):
             password=params["password"],
             database="postgres",
         )
-        await conn.execute(f'CREATE DATABASE "{db_name}"')
-        await conn.close()
+        try:
+            await conn.execute(f'CREATE DATABASE "{db_name}"')
+            # CREATE 执行成功即视为本测试拥有该库：即使随后 close 失败，
+            # 清理阶段也应尝试 DROP，避免残留库。
+            created = True
+        finally:
+            await conn.close()
 
     async def _drop_db():
         conn = await asyncpg.connect(
@@ -150,8 +177,10 @@ def alembic_db_engine(pg_params):
             password=params["password"],
             database="postgres",
         )
-        await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
-        await conn.close()
+        try:
+            await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+        finally:
+            await conn.close()
 
     engine = None
     try:
@@ -172,10 +201,18 @@ def alembic_db_engine(pg_params):
             command.upgrade(cfg, "head")
             yield engine, db_name
     finally:
-        # Cleanup must also run if setup fails before yield (R7).
+        # 清理项逐项捕获并告警：清理失败不得覆盖 setup/test 的原始异常（R7）。
+        # DROP 仅在 CREATE 确实成功（created=True）时执行，避免误删非本测试拥有的库。
         if engine is not None:
-            engine.dispose()
-        asyncio.run(_drop_db())
+            try:
+                engine.dispose()
+            except Exception as e:
+                logger.warning("[alembic_db_engine] engine.dispose() failed during teardown: %s", e)
+        if created:
+            try:
+                asyncio.run(_drop_db())
+            except Exception as e:
+                logger.warning("[alembic_db_engine] DROP DATABASE failed during teardown: %s", e)
 
 
 class TestMetadataVsAlembicConsistency:
@@ -276,6 +313,7 @@ class TestFreshDatabaseInitialization:
         db_name = f"fresh_init_{uuid.uuid4().hex[:8]}"
 
         # Create database
+        created = False
         conn = await asyncpg.connect(
             host=params["host"],
             port=params["port"],
@@ -283,8 +321,14 @@ class TestFreshDatabaseInitialization:
             password=params["password"],
             database="postgres",
         )
-        await conn.execute(f'CREATE DATABASE "{db_name}"')
-        await conn.close()
+        try:
+            await conn.execute(f'CREATE DATABASE "{db_name}"')
+            created = True
+        finally:
+            try:
+                await conn.close()
+            except Exception as e:
+                logger.warning("[test_init_fresh_database_with_real_engine] close after CREATE failed: %s", e)
 
         try:
             # Create async engine for the new database
@@ -322,13 +366,21 @@ class TestFreshDatabaseInitialization:
             await schema_engine.dispose()
 
         finally:
-            # Cleanup: drop database
-            conn = await asyncpg.connect(
-                host=params["host"],
-                port=params["port"],
-                user=params["user"],
-                password=params["password"],
-                database="postgres",
-            )
-            await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
-            await conn.close()
+            # 清理失败不得覆盖测试断言/业务异常；仅对 CREATE 成功的库执行 DROP。
+            if created:
+                try:
+                    conn = await asyncpg.connect(
+                        host=params["host"],
+                        port=params["port"],
+                        user=params["user"],
+                        password=params["password"],
+                        database="postgres",
+                    )
+                    try:
+                        await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+                    finally:
+                        await conn.close()
+                except Exception as e:
+                    logger.warning(
+                        "[test_init_fresh_database_with_real_engine] DROP DATABASE failed during teardown: %s", e
+                    )
