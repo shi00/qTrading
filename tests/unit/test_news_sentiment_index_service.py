@@ -209,12 +209,49 @@ class TestAggregateDailyDecay:
         assert target.index == pytest.approx(0.0)
 
     def test_future_publish_dropped(self):
-        """Δt<0（发布时刻晚于 as_of，时钟偏移）→ 剔除。"""
-        rows = [_row(_cst(2026, 10, 12, 15, 30), 1.0, 1.0, "news")]
+        """Δt<0（发布时刻晚于 as_of，时钟偏移）→ 剔除，且不进入任何窗口桶。"""
+        rows = [_row(_cst(2026, 10, 12, 15, 30), 1.0, 1.0, "news")]  # 归属次一交易日 10-13
         points = aggregate_daily(rows, TRADE_DAYS, as_of=_cst(2026, 10, 12, 10, 0), days=7)
         target = next(p for p in points if p.trade_date == datetime.date(2026, 10, 12))
         assert target.sample_count == 0
         assert target.index is None
+        # 该行归属 10-13：只断言 10-12 桶无法区分「仅过滤当日桶」的实现，
+        # 必须同时断言未来桶未出现在输出（TP10-T01）。
+        assert [p.trade_date for p in points] == [datetime.date(2026, 10, 9), datetime.date(2026, 10, 12)]
+
+    @pytest.mark.parametrize("days", [1, 2, 7])
+    def test_future_publish_dropped_from_all_buckets(self, days):
+        """Δt<0 的新闻必须从全部时间窗口/桶剔除，而非仅当日桶（TP10-T01）。
+
+        固定时钟 as_of=10-13 10:00 CST，同时包含过去（10-12）、今天（10-13 盘前）
+        与未来行（同交易日发布晚 30 分钟 / 收盘后归次一日 / 次两日 / 日历外）。
+        未来行统一 -1.0 分 + 巨潮公告权重 1.5，与允许行可区分：任一未来行混入都会
+        改变对应桶的得分或计数，或让未来尾部桶出现在输出。
+        """
+        day09, day12, day13 = datetime.date(2026, 10, 9), datetime.date(2026, 10, 12), datetime.date(2026, 10, 13)
+        rows = [
+            _row(_cst(2026, 10, 12, 9, 0), 1.0, 1.0, "news"),
+            _row(_cst(2026, 10, 12, 14, 0), -1.0, 1.0, "news"),
+            _row(_cst(2026, 10, 13, 9, 0), 0.5, 1.0, "news"),
+            _row(_cst(2026, 10, 13, 10, 30), -1.0, 1.0, "announcement"),  # 同交易日、发布晚于 as_of
+            _row(_cst(2026, 10, 13, 15, 30), -1.0, 1.0, "announcement"),  # 收盘后归 10-14
+            _row(_cst(2026, 10, 14, 9, 0), -1.0, 1.0, "announcement"),
+            _row(_cst(2026, 10, 15, 9, 0), -1.0, 1.0, "announcement"),
+            _row(_cst(2026, 10, 16, 9, 0), -1.0, 1.0, "announcement"),  # 日历外
+        ]
+        points = aggregate_daily(rows, TRADE_DAYS, as_of=_cst(2026, 10, 13, 10, 0), days=days)
+
+        expected_counts = {day09: 0, day12: 2, day13: 1}
+        expected_dates = [d for d in TRADE_DAYS if d <= day13][-days:]
+        assert [p.trade_date for p in points] == expected_dates
+        assert [p.sample_count for p in points] == [expected_counts[d] for d in expected_dates]
+        assert sum(p.sample_count for p in points) == sum(expected_counts[d] for d in expected_dates)
+
+        by_date = {p.trade_date: p for p in points}
+        if day12 in by_date:
+            assert by_date[day12].index == pytest.approx(0.0)
+        assert by_date[day13].sample_count == 1
+        assert by_date[day13].index == pytest.approx(0.5)
 
     def test_historical_bucket_no_decay(self):
         """历史桶不衰减：as_of=10-13，10-12 桶内等权反向两行 → 0（不随查询时刻漂移）。"""
