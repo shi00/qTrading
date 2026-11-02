@@ -509,19 +509,19 @@ class TestBuildSupportContext(unittest.TestCase):
         self.assertIn("VWAC", result_text)
         import re
 
-        vwac_match = re.search(r"VWAC:\s*(\d+\.\d+)", result_text)
-        if vwac_match:
-            vwac_value = float(vwac_match.group(1))
-            expected_qfq_close_1 = 20.0 * 2.0
-            expected_qfq_close_2 = 10.0 * 1.0
-            expected_qfq_vol_1 = 1000 / 2.0
-            expected_qfq_vol_2 = 1000 / 1.0
-            total_qfq_vol = expected_qfq_vol_1 * 31 + expected_qfq_vol_2 * 28
-            total_qfq_amount = (
-                expected_qfq_close_1 * expected_qfq_vol_1 * 31 + expected_qfq_close_2 * expected_qfq_vol_2 * 28
-            )
-            expected_vwac = total_qfq_amount / total_qfq_vol
-            self.assertAlmostEqual(vwac_value, expected_vwac, places=1)
+        vwac_values = re.findall(r"\(VWAC\):\s*(\d+\.\d+)", result_text)
+        self.assertEqual(len(vwac_values), 1, f"支撑位上下文应且仅应包含一个 (VWAC): 数值，实际文本: {result_text}")
+        vwac_value = float(vwac_values[0])
+        expected_qfq_close_1 = 20.0 * 2.0
+        expected_qfq_close_2 = 10.0 * 1.0
+        expected_qfq_vol_1 = 1000 / 2.0
+        expected_qfq_vol_2 = 1000 / 1.0
+        total_qfq_vol = expected_qfq_vol_1 * 31 + expected_qfq_vol_2 * 28
+        total_qfq_amount = (
+            expected_qfq_close_1 * expected_qfq_vol_1 * 31 + expected_qfq_close_2 * expected_qfq_vol_2 * 28
+        )
+        expected_vwac = total_qfq_amount / total_qfq_vol
+        self.assertAlmostEqual(vwac_value, expected_vwac, places=1)
 
     def test_build_support_levels_adj_factor_zero_handling(self):
         """P1-18: 测试 adj_factor 为 0 时的处理"""
