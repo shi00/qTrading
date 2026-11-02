@@ -799,6 +799,35 @@ class TestRuntimeUnavailableCacheTTL:
         assert "top_list" not in client._capability_cache
         assert "top_list" not in client._capability_runtime_marks
 
+    def test_runtime_mark_expires_to_none_with_fixed_clock_after_ttl(self, tushare_client_mocks):
+        """固定时钟 TTL+1：过期后读取必须返回 None（未知），而非 False / 空字符串等伪装值。
+
+        与 test_runtime_mark_expires_to_none_after_ttl（回拨标记时间戳、以真实时钟读取）不同，
+        本用例把「标记时刻」与「读取时刻」都固定在注入时钟上：
+        - TTL 内先断言仍为 False，防止实现「一律返回 None」也能让过期断言恒真；
+        - 时钟推进到 TTL+1 后再断言 None（R21：未知必须用 None，不得退化为业务合法的 False）。
+        同时锁定生产实现读取的是注入的 ``get_now``（capability_probe 模块级绑定）而非墙钟。
+        """
+        client, _, _ = tushare_client_mocks
+        cst_tz = datetime.timezone(datetime.timedelta(hours=8))
+        marked_at = datetime.datetime(2025, 1, 1, 9, 0, 0, tzinfo=cst_tz)
+        clock: list[datetime.datetime] = [marked_at]
+
+        with patch("data.external.tushare.capability_probe.get_now", side_effect=lambda: clock[0]):
+            client.mark_api_unavailable("top_list", runtime=True)
+            assert client._capability_runtime_marks == {"top_list": marked_at}
+
+            # TTL 边界内 → 仍为权威的「不可用」，不是 None
+            assert client.is_api_available("top_list") is False
+
+            clock[0] = marked_at + _RUNTIME_UNAVAILABLE_TTL + datetime.timedelta(seconds=1)
+            expired = client.is_api_available("top_list")
+
+        assert expired is None
+        assert not isinstance(expired, str)
+        assert "top_list" not in client._capability_cache
+        assert "top_list" not in client._capability_runtime_marks
+
     def test_runtime_mark_stays_false_before_ttl(self, tushare_client_mocks):
         client, _, _ = tushare_client_mocks
         client.mark_api_unavailable("top_list", runtime=True)
@@ -982,7 +1011,23 @@ class TestRuntimeUnavailableCacheTTL:
             return MagicMock()
 
         client._handle_probe_call = fake_probe_call
-        persist_mock = AsyncMock(side_effect=RuntimeError("persist failed"))
+
+        # 持久化替身：抛错前先断言「写入已发生」——probe 必须先完成 cache 写入与
+        # last_probe_time 更新，才可能进入持久化；否则「从未写入」也会因回滚到同一
+        # 入口快照而通过（TP14-T01）。断言若被 probe 的 except 兜底吞掉，
+        # precheck_passed 不会置位，事后断言即可暴露。
+        persist_precheck_passed: list[bool] = []
+
+        async def persist_then_fail():
+            assert client.is_api_available("daily") is True
+            # moneyflow_hsgt 自身探测成功 → 其运行时标记已被 mark_api_available 清除，
+            # 此处仅剩 top_list 的刷新后时间戳（回滚后需还原为 old_ts）
+            assert client._capability_runtime_marks == {"top_list": new_ts}
+            assert client._last_probe_time == new_ts
+            persist_precheck_passed.append(True)
+            raise RuntimeError("persist failed")
+
+        persist_mock = AsyncMock(side_effect=persist_then_fail)
         client.persist_capabilities_to_app_state = persist_mock
 
         with patch("data.external.tushare.capability_probe.get_now", side_effect=fake_now):
@@ -994,6 +1039,9 @@ class TestRuntimeUnavailableCacheTTL:
 
             # 证明 persist 确实被调用并失败 → 回滚路径确实执行（而非提前返回）
             assert persist_mock.await_count == 1
+
+            # 证明异常发生在写入之后：替身被调用时已完成 cache 写入与 last_probe_time 更新
+            assert persist_precheck_passed == [True]
 
             # 前置条件自检：probe 期间确实制造了与旧值不同的新时间戳
             assert observed_probe_ts == [new_ts]
